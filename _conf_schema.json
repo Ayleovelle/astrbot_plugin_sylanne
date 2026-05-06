@@ -1,0 +1,224 @@
+{
+  "enabled": {
+    "description": "启用多维情绪状态插件",
+    "type": "bool",
+    "default": true
+  },
+  "use_llm_assessor": {
+    "description": "使用 LLM 判断情绪观测值；关闭后只使用轻量启发式回退",
+    "type": "bool",
+    "default": true
+  },
+  "emotion_provider_id": {
+    "description": "情绪估计使用的 LLM Provider；留空则使用当前会话模型",
+    "type": "string",
+    "default": "",
+    "_special": "select_provider",
+    "hint": "建议选择便宜、稳定、支持 JSON 指令的小模型。"
+  },
+  "low_reasoning_friendly_mode": {
+    "description": "低推理模型友好模式",
+    "type": "bool",
+    "default": false,
+    "hint": "默认关闭。开启后情绪估计提示词会改为短版简单公式推导，减少 token 消耗并降低小模型理解压力；输出字段仍保持兼容，但理论细分依据会更少。"
+  },
+  "low_reasoning_max_context_chars": {
+    "description": "低推理模型友好模式下最多读取的上下文字数",
+    "type": "int",
+    "default": 1200,
+    "hint": "仅在 low_reasoning_friendly_mode 开启时生效，会与 max_context_chars 取较小值。"
+  },
+  "assessment_timing": {
+    "description": "情绪估计时机",
+    "type": "string",
+    "default": "both",
+    "options": [
+      "pre",
+      "post",
+      "both"
+    ],
+    "hint": "pre 会在回复前影响本轮语气；post 会根据 bot 实际回复修正状态；both 效果最好但消耗更多。"
+  },
+  "inject_state": {
+    "description": "把当前情绪状态作为临时上下文注入 LLM 请求",
+    "type": "bool",
+    "default": true
+  },
+  "enable_safety_boundary": {
+    "description": "启用情绪后果安全边界",
+    "type": "bool",
+    "default": true,
+    "hint": "默认开启。开启时会把冷处理限制为轻微降频、短句、边界感，并禁止羞辱、威胁、操控或拒绝必要帮助；关闭后只按情绪后果调制语气和互动策略。"
+  },
+  "persona_modeling": {
+    "description": "根据当前会话人格建立不同的情绪基线和反应参数",
+    "type": "bool",
+    "default": true,
+    "hint": "启用后，不同 AstrBot persona 会有不同的情绪初始状态、惯性和反应强度。"
+  },
+  "persona_influence": {
+    "description": "人格对情绪模型的影响强度",
+    "type": "float",
+    "default": 1.0,
+    "hint": "0 表示几乎不使用人格偏置，1 为默认，2 为强人格化。"
+  },
+  "reset_on_persona_change": {
+    "description": "检测到当前会话切换人格时重置情绪状态",
+    "type": "bool",
+    "default": true,
+    "hint": "关闭后会把旧状态迁移到新人格基线附近，而不是完全重置。"
+  },
+  "max_context_chars": {
+    "description": "情绪估计时最多读取的上下文字数",
+    "type": "int",
+    "default": 2600
+  },
+  "assessor_temperature": {
+    "description": "情绪估计 LLM 的 temperature",
+    "type": "float",
+    "default": 0.1
+  },
+  "alpha_base": {
+    "description": "基础更新步长 alpha_base",
+    "type": "float",
+    "default": 0.42,
+    "hint": "越大越容易被当前对话影响。"
+  },
+  "alpha_min": {
+    "description": "最小更新步长",
+    "type": "float",
+    "default": 0.06
+  },
+  "alpha_max": {
+    "description": "最大更新步长",
+    "type": "float",
+    "default": 0.72
+  },
+  "baseline_decay": {
+    "description": "兼容项：旧版基线回归系数 gamma",
+    "type": "float",
+    "default": 0.035,
+    "hint": "新版默认不再按轮次衰减，真实恢复速度请使用 baseline_half_life_seconds。"
+  },
+  "baseline_half_life_seconds": {
+    "description": "情绪向人格基线自然恢复的半衰期（秒）",
+    "type": "float",
+    "default": 21600,
+    "hint": "默认 6 小时。真实时间每过一个半衰期，偏离人格基线的部分约减少一半；不会因为刷屏而加速恢复。"
+  },
+  "reactivity": {
+    "description": "惊讶度反应系数 r",
+    "type": "float",
+    "default": 0.55,
+    "hint": "越大，突然事件造成的情绪变化越强。"
+  },
+  "confidence_midpoint": {
+    "description": "置信门控中点 c0",
+    "type": "float",
+    "default": 0.5
+  },
+  "confidence_slope": {
+    "description": "置信门控斜率 k",
+    "type": "float",
+    "default": 7.0
+  },
+  "min_update_interval_seconds": {
+    "description": "反刷屏最小有效更新时间间隔（秒）",
+    "type": "float",
+    "default": 8,
+    "hint": "短时间内连续提交大量文本时，本轮情绪更新会被削弱，避免用海量文本强行刷掉情绪。"
+  },
+  "rapid_update_half_life_seconds": {
+    "description": "快速连续更新的门控半衰期（秒）",
+    "type": "float",
+    "default": 20,
+    "hint": "越大，短时间连刷对情绪的影响越弱；设为 0 可基本关闭该门控。"
+  },
+  "arousal_from_surprise": {
+    "description": "惊讶度对唤醒度的耦合强度",
+    "type": "float",
+    "default": 0.18
+  },
+  "dominance_control_coupling": {
+    "description": "支配感与可控性的耦合强度",
+    "type": "float",
+    "default": 0.12
+  },
+  "consequence_decay": {
+    "description": "兼容项：旧版情绪后果每轮衰减系数",
+    "type": "float",
+    "default": 0.68,
+    "hint": "新版默认不再按轮次衰减，真实后果持续请使用 consequence_half_life_seconds。"
+  },
+  "consequence_half_life_seconds": {
+    "description": "情绪后果强度自然衰减半衰期（秒）",
+    "type": "float",
+    "default": 10800,
+    "hint": "默认 3 小时。行动倾向只随真实时间衰减，不会被大量消息快速刷掉。"
+  },
+  "consequence_threshold": {
+    "description": "触发情绪后果的阈值",
+    "type": "float",
+    "default": 0.48,
+    "hint": "越低越容易触发冷战、回避、修复等后果。"
+  },
+  "consequence_strength": {
+    "description": "情绪后果强度倍率",
+    "type": "float",
+    "default": 1.0,
+    "hint": "0 表示几乎不产生持续后果，1 为默认，2 为更强烈。"
+  },
+  "cold_war_turns": {
+    "description": "兼容项：旧版冷处理持续轮数",
+    "type": "int",
+    "default": 3,
+    "hint": "新版请使用 cold_war_duration_seconds。"
+  },
+  "cold_war_duration_seconds": {
+    "description": "冷处理触发后的真实持续时间（秒）",
+    "type": "float",
+    "default": 1800,
+    "hint": "默认 30 分钟。期间不会因为聊天轮数增加而自动缩短。"
+  },
+  "short_effect_duration_seconds": {
+    "description": "普通短期情绪后果持续时间（秒）",
+    "type": "float",
+    "default": 900,
+    "hint": "用于直接设边界、谨慎核对、主动修复等非冷处理效果，默认 15 分钟。"
+  },
+  "allow_emotion_reset_backdoor": {
+    "description": "允许手动/公共 API 重置情绪状态后门",
+    "type": "bool",
+    "default": true,
+    "hint": "默认开启，用于严重后果或异常状态时紧急清空当前会话情绪记忆。关闭后 /emotion_reset 与公共 reset_emotion_state 会拒绝执行。"
+  },
+  "enable_psychological_screening": {
+    "description": "启用非诊断心理状态筛查备用模块",
+    "type": "bool",
+    "default": false,
+    "hint": "默认关闭。开启后可通过公共 API 或 /psych_state 记录与查看心理状态筛查。该模块仅用于状态记录和风险提示，不提供疾病诊断或医疗建议。"
+  },
+  "psychological_alpha_base": {
+    "description": "心理筛查状态基础更新步长",
+    "type": "float",
+    "default": 0.32,
+    "hint": "越大越容易被当前文本影响；建议保持保守。"
+  },
+  "psychological_state_half_life_seconds": {
+    "description": "心理筛查长期状态自然回落半衰期（秒）",
+    "type": "float",
+    "default": 604800,
+    "hint": "默认 7 天。用于长期状态趋势，而不是单次诊断。"
+  },
+  "psychological_crisis_half_life_seconds": {
+    "description": "心理红旗风险信号保留半衰期（秒）",
+    "type": "float",
+    "default": 2592000,
+    "hint": "默认 30 天。红旗信号用于人工复核和安全分流，不用于疾病标签。"
+  },
+  "psychological_trajectory_limit": {
+    "description": "心理筛查轨迹最多保留点数",
+    "type": "int",
+    "default": 40
+  }
+}

@@ -1,0 +1,46 @@
+# 非诊断心理状态筛查模块
+
+本模块是备用的心理状态筛查与长期趋势建模工具，不是心理诊断、医疗建议或治疗方案。它只处理对话文本中显性的状态线索，并把结果暴露给其他插件调用。
+
+## 边界
+
+- 可以：状态记录、趋势观察、量表启发式维度、风险提示、人工复核提醒。
+- 不可以：疾病诊断、病因解释、治疗/用药建议、危机风险保证、替代临床判断。
+- 红旗风险：自伤/自杀、伤害他人、严重功能受损、极端绝望、无法保持安全等信号只用于安全升级和人工复核。
+
+## 状态维度
+
+| 维度 | 含义 |
+| --- | --- |
+| `distress` | 总体痛苦 |
+| `anxiety_tension` | 焦虑/紧张 |
+| `depressive_tone` | 抑郁语气 |
+| `stress_load` | 压力负荷 |
+| `sleep_disruption` | 睡眠受扰 |
+| `social_withdrawal` | 社交退缩 |
+| `anger_irritability` | 愤怒/易激惹 |
+| `self_harm_risk` | 自伤风险信号 |
+| `function_impairment` | 功能受损 |
+| `wellbeing` | 主观幸福感 |
+
+## 量表启发
+
+`scale_scores` 使用 PHQ-9-like、GAD-7-like、PSS-like、WHO-5-like、ISI-like 的启发式映射。这里的 `like` 很重要：插件没有施测原量表，也没有资格解释临床 cut-off，只能把它们作为结构化状态维度的参考。
+
+## 文献知识库
+
+心理筛查证据库位于 `psychological_literature_kb/`：
+
+- `works.jsonl`: 4401 篇 OpenAlex 去重记录。
+- `top_journal_candidates.jsonl`: 260 篇 top/high-impact 候选。
+- `curated/top_200.jsonl`: 精选 200 篇候选。
+- `evidence-map.md`: 非诊断筛查、临床量表、长期状态、数字心理健康、LLM/聊天机器人安全的证据地图。
+- `validation-report.md`: 数量和边界验证报告。
+
+重建命令：
+
+```powershell
+py -3.13 scripts\build_psychological_literature_kb.py --out psychological_literature_kb --per-query 150 --top-count 260
+```
+
+知识库只基于题名、摘要级元数据、DOI 元数据、期刊和检索主题生成。强临床断言必须继续阅读全文或权威指南后才能使用。
