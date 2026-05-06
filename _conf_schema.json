@@ -286,6 +286,18 @@
     "default": 0.32,
     "hint": "越大越容易被当前文本影响；建议保持保守。"
   },
+  "psychological_alpha_min": {
+    "description": "心理筛查状态最小更新步长",
+    "type": "float",
+    "default": 0.04,
+    "hint": "低置信或短间隔输入时仍保留的最小更新幅度，建议保持较低。"
+  },
+  "psychological_alpha_max": {
+    "description": "心理筛查状态最大更新步长",
+    "type": "float",
+    "default": 0.55,
+    "hint": "限制单次文本对长期心理筛查状态的最大影响，避免单轮文本过度改写趋势。"
+  },
   "psychological_state_half_life_seconds": {
     "description": "心理筛查长期状态自然回落半衰期（秒）",
     "type": "float",

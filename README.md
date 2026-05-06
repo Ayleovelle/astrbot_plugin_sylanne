@@ -1077,6 +1077,8 @@ enable_psychological_screening = false
 | --- | --- | --- | --- |
 | `enable_psychological_screening` | bool | `false` | 启用非诊断心理状态筛查。 |
 | `psychological_alpha_base` | float | `0.32` | 基础更新步长。 |
+| `psychological_alpha_min` | float | `0.04` | 最小更新步长。 |
+| `psychological_alpha_max` | float | `0.55` | 最大更新步长，限制单次文本过度改写长期趋势。 |
 | `psychological_state_half_life_seconds` | float | `604800` | 长期状态自然回落半衰期，默认 7 天。 |
 | `psychological_crisis_half_life_seconds` | float | `2592000` | 红旗风险保留半衰期，默认 30 天。 |
 | `psychological_trajectory_limit` | int | `40` | 轨迹最多保留点数。 |

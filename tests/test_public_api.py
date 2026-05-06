@@ -50,6 +50,9 @@ class FakeEmotionService:
     async def build_emotion_memory_payload(self, *args, **kwargs):
         return {}
 
+    async def inject_emotion_context(self, *args, **kwargs):
+        return None
+
     async def observe_emotion_text(self, *args, **kwargs):
         return {}
 
@@ -130,6 +133,15 @@ class PublicApiTests(unittest.TestCase):
     def test_get_emotion_service_rejects_plugin_without_memory_payload_api(self):
         class OldEmotionService(FakeEmotionService):
             build_emotion_memory_payload = None
+
+        context = FakeContext(
+            SimpleNamespace(activated=True, star_cls=OldEmotionService()),
+        )
+        self.assertIsNone(get_emotion_service(context))
+
+    def test_get_emotion_service_rejects_plugin_without_injection_api(self):
+        class OldEmotionService(FakeEmotionService):
+            inject_emotion_context = None
 
         context = FakeContext(
             SimpleNamespace(activated=True, star_cls=OldEmotionService()),
@@ -220,6 +232,25 @@ class MemoryPayloadPublicApiTests(unittest.TestCase):
         sys.modules.setdefault("astrbot.core.agent", agent)
         sys.modules.setdefault("astrbot.core.agent.message", message)
 
+    def _new_plugin(self, config=None):
+        from emotion_engine import EmotionEngine, EmotionParameters
+        from humanlike_engine import HumanlikeEngine
+        from main import EmotionalStatePlugin
+        from psychological_screening import PsychologicalScreeningEngine
+
+        plugin = EmotionalStatePlugin.__new__(EmotionalStatePlugin)
+        plugin.config = dict(config or {})
+        plugin.base_parameters = EmotionParameters()
+        plugin.engine = EmotionEngine(plugin.base_parameters)
+        plugin.psychological_engine = PsychologicalScreeningEngine()
+        plugin.humanlike_engine = HumanlikeEngine()
+        plugin._memory_cache = {}
+        plugin._psychological_memory_cache = {}
+        plugin._humanlike_memory_cache = {}
+        plugin._last_request_text = {}
+        plugin.context = SimpleNamespace()
+        return plugin
+
     def test_plugin_method_uses_explicit_session_key_without_writing_state(self):
         self._install_astrbot_stubs()
         from emotion_engine import EmotionState
@@ -243,8 +274,7 @@ class MemoryPayloadPublicApiTests(unittest.TestCase):
             )
         )
         try:
-            plugin = EmotionalStatePlugin.__new__(EmotionalStatePlugin)
-            plugin.config = {}
+            plugin = self._new_plugin()
             payload = asyncio.run(
                 plugin.build_emotion_memory_payload(
                     session_key="livingmemory:user-1",
@@ -262,6 +292,188 @@ class MemoryPayloadPublicApiTests(unittest.TestCase):
         self.assertEqual(payload["emotion_at_write"]["label"], "calm")
         self.assertEqual(payload["emotion_at_write"]["written_at"], 20.0)
         self.assertEqual(payload["memory"]["text"], "memory")
+
+    def test_on_llm_request_does_not_update_or_inject_humanlike_by_default(self):
+        self._install_astrbot_stubs()
+        from emotion_engine import EmotionState
+        from humanlike_engine import HumanlikeState
+        from main import EmotionalStatePlugin
+
+        saves = []
+
+        async def fake_persona(self, event, request):
+            return None
+
+        async def fake_load_state(self, session_key, persona_profile=None):
+            return EmotionState.initial()
+
+        async def fake_save_state(self, session_key, state):
+            pass
+
+        async def fake_load_humanlike(self, session_key):
+            return HumanlikeState.initial()
+
+        async def fake_save_humanlike(self, session_key, state):
+            saves.append((session_key, state))
+
+        original_persona = EmotionalStatePlugin._persona_profile
+        original_load_state = EmotionalStatePlugin._load_state
+        original_save_state = EmotionalStatePlugin._save_state
+        original_load_humanlike = EmotionalStatePlugin._load_humanlike_state
+        original_save_humanlike = EmotionalStatePlugin._save_humanlike_state
+        EmotionalStatePlugin._persona_profile = fake_persona
+        EmotionalStatePlugin._load_state = fake_load_state
+        EmotionalStatePlugin._save_state = fake_save_state
+        EmotionalStatePlugin._load_humanlike_state = fake_load_humanlike
+        EmotionalStatePlugin._save_humanlike_state = fake_save_humanlike
+        try:
+            plugin = self._new_plugin(
+                {"use_llm_assessor": False, "assessment_timing": "pre"},
+            )
+            event = SimpleNamespace(unified_msg_origin="s1", message_str="你好")
+            request = SimpleNamespace(
+                system_prompt="",
+                contexts=[],
+                prompt="你好",
+                extra_user_content_parts=[],
+                session_id="s1",
+            )
+            asyncio.run(plugin.on_llm_request(event, request))
+        finally:
+            EmotionalStatePlugin._persona_profile = original_persona
+            EmotionalStatePlugin._load_state = original_load_state
+            EmotionalStatePlugin._save_state = original_save_state
+            EmotionalStatePlugin._load_humanlike_state = original_load_humanlike
+            EmotionalStatePlugin._save_humanlike_state = original_save_humanlike
+
+        self.assertEqual(saves, [])
+        self.assertEqual(len(request.extra_user_content_parts), 1)
+        self.assertIn("bot_emotion_state", request.extra_user_content_parts[0].text)
+        self.assertNotIn("simulated humanlike-state", request.extra_user_content_parts[0].text)
+
+    def test_on_llm_request_injects_humanlike_only_when_enabled_and_strength_positive(self):
+        self._install_astrbot_stubs()
+        from emotion_engine import EmotionState
+        from humanlike_engine import HumanlikeState
+        from main import EmotionalStatePlugin
+
+        async def fake_persona(self, event, request):
+            return None
+
+        async def fake_load_state(self, session_key, persona_profile=None):
+            return EmotionState.initial()
+
+        async def fake_save_state(self, session_key, state):
+            pass
+
+        async def fake_load_humanlike(self, session_key):
+            return HumanlikeState.initial()
+
+        async def fake_save_humanlike(self, session_key, state):
+            pass
+
+        original_persona = EmotionalStatePlugin._persona_profile
+        original_load_state = EmotionalStatePlugin._load_state
+        original_save_state = EmotionalStatePlugin._save_state
+        original_load_humanlike = EmotionalStatePlugin._load_humanlike_state
+        original_save_humanlike = EmotionalStatePlugin._save_humanlike_state
+        EmotionalStatePlugin._persona_profile = fake_persona
+        EmotionalStatePlugin._load_state = fake_load_state
+        EmotionalStatePlugin._save_state = fake_save_state
+        EmotionalStatePlugin._load_humanlike_state = fake_load_humanlike
+        EmotionalStatePlugin._save_humanlike_state = fake_save_humanlike
+        try:
+            plugin = self._new_plugin(
+                {
+                    "use_llm_assessor": False,
+                    "assessment_timing": "pre",
+                    "enable_humanlike_state": True,
+                    "humanlike_injection_strength": 0.35,
+                },
+            )
+            event = SimpleNamespace(unified_msg_origin="s1", message_str="你必须只能陪我")
+            request = SimpleNamespace(
+                system_prompt="",
+                contexts=[],
+                prompt="你必须只能陪我",
+                extra_user_content_parts=[],
+                session_id="s1",
+            )
+            asyncio.run(plugin.on_llm_request(event, request))
+        finally:
+            EmotionalStatePlugin._persona_profile = original_persona
+            EmotionalStatePlugin._load_state = original_load_state
+            EmotionalStatePlugin._save_state = original_save_state
+            EmotionalStatePlugin._load_humanlike_state = original_load_humanlike
+            EmotionalStatePlugin._save_humanlike_state = original_save_humanlike
+
+        texts = [part.text for part in request.extra_user_content_parts]
+        self.assertEqual(len(texts), 2)
+        self.assertIn("bot_emotion_state", texts[0])
+        self.assertIn("simulated humanlike-state", texts[1])
+
+    def test_on_llm_request_does_not_inject_humanlike_when_inject_state_false_or_strength_zero(self):
+        self._install_astrbot_stubs()
+        from emotion_engine import EmotionState
+        from humanlike_engine import HumanlikeState
+        from main import EmotionalStatePlugin
+
+        async def fake_persona(self, event, request):
+            return None
+
+        async def fake_load_state(self, session_key, persona_profile=None):
+            return EmotionState.initial()
+
+        async def fake_save_state(self, session_key, state):
+            pass
+
+        async def fake_load_humanlike(self, session_key):
+            return HumanlikeState.initial()
+
+        async def fake_save_humanlike(self, session_key, state):
+            pass
+
+        original_persona = EmotionalStatePlugin._persona_profile
+        original_load_state = EmotionalStatePlugin._load_state
+        original_save_state = EmotionalStatePlugin._save_state
+        original_load_humanlike = EmotionalStatePlugin._load_humanlike_state
+        original_save_humanlike = EmotionalStatePlugin._save_humanlike_state
+        EmotionalStatePlugin._persona_profile = fake_persona
+        EmotionalStatePlugin._load_state = fake_load_state
+        EmotionalStatePlugin._save_state = fake_save_state
+        EmotionalStatePlugin._load_humanlike_state = fake_load_humanlike
+        EmotionalStatePlugin._save_humanlike_state = fake_save_humanlike
+        try:
+            cases = (
+                {"enable_humanlike_state": True, "inject_state": False},
+                {"enable_humanlike_state": True, "humanlike_injection_strength": 0.0},
+            )
+            lengths = []
+            for case in cases:
+                config = {
+                    "use_llm_assessor": False,
+                    "assessment_timing": "pre",
+                    **case,
+                }
+                plugin = self._new_plugin(config)
+                event = SimpleNamespace(unified_msg_origin="s1", message_str="你好")
+                request = SimpleNamespace(
+                    system_prompt="",
+                    contexts=[],
+                    prompt="你好",
+                    extra_user_content_parts=[],
+                    session_id="s1",
+                )
+                asyncio.run(plugin.on_llm_request(event, request))
+                lengths.append(len(request.extra_user_content_parts))
+        finally:
+            EmotionalStatePlugin._persona_profile = original_persona
+            EmotionalStatePlugin._load_state = original_load_state
+            EmotionalStatePlugin._save_state = original_save_state
+            EmotionalStatePlugin._load_humanlike_state = original_load_humanlike
+            EmotionalStatePlugin._save_humanlike_state = original_save_humanlike
+
+        self.assertEqual(lengths, [0, 1])
 
     def test_low_reasoning_mode_uses_short_prompt_and_context_limit(self):
         self._install_astrbot_stubs()
@@ -564,6 +776,103 @@ class MemoryPayloadPublicApiTests(unittest.TestCase):
         )
         self.assertEqual(payload["humanlike_state_at_write"]["source"], "livingmemory")
         self.assertEqual(payload["humanlike_state_at_write"]["written_at"], 20.0)
+
+    def test_memory_payload_includes_disabled_humanlike_annotation_by_default(self):
+        self._install_astrbot_stubs()
+        from emotion_engine import EmotionState
+        from main import EmotionalStatePlugin
+
+        async def fake_load_state(self, session_key, persona_profile=None):
+            state = EmotionState.initial()
+            state.label = "calm"
+            state.updated_at = 10.0
+            return state
+
+        original_load_state = EmotionalStatePlugin._load_state
+        EmotionalStatePlugin._load_state = fake_load_state
+        try:
+            plugin = self._new_plugin()
+            payload = asyncio.run(
+                plugin.build_emotion_memory_payload(
+                    session_key="livingmemory:user-1",
+                    memory={"text": "memory"},
+                    source="livingmemory",
+                    written_at=20.0,
+                ),
+            )
+        finally:
+            EmotionalStatePlugin._load_state = original_load_state
+
+        annotation = payload["humanlike_state_at_write"]
+        snapshot = payload["humanlike_snapshot"]
+        self.assertFalse(annotation["enabled"])
+        self.assertFalse(snapshot["enabled"])
+        self.assertEqual(snapshot["reason"], "enable_humanlike_state is false")
+        self.assertEqual(annotation["kind"], "humanlike_state_at_write")
+        self.assertNotIn("prompt_fragment", annotation)
+
+    def test_reset_public_methods_respect_backdoor_config(self):
+        self._install_astrbot_stubs()
+        from main import EmotionalStatePlugin
+
+        deleted = []
+
+        async def fake_delete_state(self, session_key):
+            deleted.append(("emotion", session_key))
+
+        async def fake_delete_psychological(self, session_key):
+            deleted.append(("psychological", session_key))
+
+        async def fake_delete_humanlike(self, session_key):
+            deleted.append(("humanlike", session_key))
+
+        original_delete_state = EmotionalStatePlugin._delete_state
+        original_delete_psychological = EmotionalStatePlugin._delete_psychological_state
+        original_delete_humanlike = EmotionalStatePlugin._delete_humanlike_state
+        EmotionalStatePlugin._delete_state = fake_delete_state
+        EmotionalStatePlugin._delete_psychological_state = fake_delete_psychological
+        EmotionalStatePlugin._delete_humanlike_state = fake_delete_humanlike
+        try:
+            locked = self._new_plugin(
+                {
+                    "allow_emotion_reset_backdoor": False,
+                    "allow_humanlike_reset_backdoor": False,
+                },
+            )
+            self.assertFalse(
+                asyncio.run(locked.reset_emotion_state(session_key="s1")),
+            )
+            self.assertFalse(
+                asyncio.run(locked.reset_psychological_screening_state(session_key="s1")),
+            )
+            self.assertFalse(
+                asyncio.run(locked.reset_humanlike_state(session_key="s1")),
+            )
+            self.assertEqual(deleted, [])
+
+            allowed = self._new_plugin()
+            self.assertTrue(
+                asyncio.run(allowed.reset_emotion_state(session_key="s1")),
+            )
+            self.assertTrue(
+                asyncio.run(allowed.reset_psychological_screening_state(session_key="s1")),
+            )
+            self.assertTrue(
+                asyncio.run(allowed.reset_humanlike_state(session_key="s1")),
+            )
+        finally:
+            EmotionalStatePlugin._delete_state = original_delete_state
+            EmotionalStatePlugin._delete_psychological_state = original_delete_psychological
+            EmotionalStatePlugin._delete_humanlike_state = original_delete_humanlike
+
+        self.assertEqual(
+            deleted,
+            [
+                ("emotion", "s1"),
+                ("psychological", "s1"),
+                ("humanlike", "s1"),
+            ],
+        )
 
     def test_memory_payload_can_disable_humanlike_annotation(self):
         self._install_astrbot_stubs()

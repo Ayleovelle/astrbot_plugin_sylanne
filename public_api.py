@@ -35,7 +35,7 @@ class EmotionServiceProtocol(Protocol):
         request: Any = None,
         session_key: str | None = None,
         as_dict: bool = True,
-    ) -> dict[str, Any]:
+    ) -> dict[str, Any] | Any:
         ...
 
     async def get_emotion_values(
@@ -87,6 +87,9 @@ class EmotionServiceProtocol(Protocol):
         include_raw_snapshot: bool = True,
         written_at: float | None = None,
     ) -> dict[str, Any]:
+        ...
+
+    async def inject_emotion_context(self, event: Any, request: Any) -> None:
         ...
 
     async def observe_emotion_text(
@@ -271,6 +274,7 @@ def get_emotion_service(context: Any) -> EmotionServiceProtocol | None:
         "get_emotion_relationship",
         "get_emotion_prompt_fragment",
         "build_emotion_memory_payload",
+        "inject_emotion_context",
         "observe_emotion_text",
         "get_psychological_screening_snapshot",
         "get_psychological_screening_values",
