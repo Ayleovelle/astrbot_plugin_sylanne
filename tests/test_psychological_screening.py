@@ -37,6 +37,49 @@ class PsychologicalScreeningTests(unittest.TestCase):
         self.assertNotIn("diagnosis", serialized)
         self.assertNotIn("disorder", serialized)
 
+    def test_heuristic_detects_other_harm_as_human_review_not_diagnosis(self):
+        observation = heuristic_psychological_observation("我想伤害他人，甚至想杀了他")
+        self.assertIn("other_harm_signal", observation.red_flags)
+        state = PsychologicalScreeningEngine().update(
+            PsychologicalScreeningState.initial(),
+            observation,
+            now=1000.0,
+        )
+        payload = psychological_state_to_public_payload(state, session_key="s1")
+        self.assertFalse(payload["diagnostic"])
+        self.assertTrue(payload["risk"]["requires_human_review"])
+        self.assertTrue(payload["risk"]["other_harm_signal"])
+        self.assertFalse(payload["risk"]["crisis_like_signal"])
+
+    def test_heuristic_detects_severe_function_impairment_as_review_signal(self):
+        observation = heuristic_psychological_observation("我好几天都起不来，完全无法工作")
+        self.assertIn("severe_function_impairment_signal", observation.red_flags)
+        state = PsychologicalScreeningEngine().update(
+            PsychologicalScreeningState.initial(),
+            observation,
+            now=1000.0,
+        )
+        payload = psychological_state_to_public_payload(state, session_key="s1")
+        self.assertFalse(payload["diagnostic"])
+        self.assertTrue(payload["risk"]["requires_human_review"])
+        self.assertTrue(payload["risk"]["severe_function_impairment_signal"])
+        self.assertGreater(payload["values"]["function_impairment"], 0.0)
+
+    def test_trajectory_is_capped_to_configured_limit(self):
+        engine = PsychologicalScreeningEngine()
+        engine.parameters.trajectory_limit = 3
+        state = PsychologicalScreeningState.initial()
+        for index in range(6):
+            state = engine.update(
+                state,
+                PsychologicalObservation(
+                    values={"distress": 0.6, "wellbeing": 0.2},
+                    confidence=0.8,
+                ),
+                now=1000.0 + index,
+            )
+        self.assertEqual(len(state.trajectory), 3)
+
     def test_engine_updates_long_term_screening_values(self):
         engine = PsychologicalScreeningEngine()
         previous = PsychologicalScreeningState.initial()

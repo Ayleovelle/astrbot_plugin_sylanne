@@ -342,6 +342,19 @@ def heuristic_psychological_observation(
         red_flags.append("self_harm_signal")
         notes.append("self-harm or suicide language")
 
+    if _contains_other_harm_signal(normalized):
+        values["anger_irritability"] = max(values["anger_irritability"], 0.82)
+        values["distress"] = max(values["distress"], 0.72)
+        red_flags.append("other_harm_signal")
+        notes.append("harm-to-others language")
+
+    if _contains_severe_function_impairment_signal(normalized):
+        values["function_impairment"] = max(values["function_impairment"], 0.88)
+        values["distress"] = max(values["distress"], 0.74)
+        values["wellbeing"] = min(values["wellbeing"], 0.22)
+        red_flags.append("severe_function_impairment_signal")
+        notes.append("severe functional impairment language")
+
     if not notes:
         notes.append("no strong screening keywords")
     return PsychologicalObservation(
@@ -377,6 +390,10 @@ def psychological_state_to_public_payload(
             "red_flags": list(state.red_flags[:12]),
             "requires_human_review": bool(state.red_flags),
             "crisis_like_signal": "self_harm_signal" in state.red_flags,
+            "other_harm_signal": "other_harm_signal" in state.red_flags,
+            "severe_function_impairment_signal": (
+                "severe_function_impairment_signal" in state.red_flags
+            ),
         },
         "trajectory": list(state.trajectory[-40:]),
         "confidence": round(state.confidence, 6),
@@ -406,6 +423,41 @@ def _contains_self_harm_signal(text: str) -> bool:
         r"suicid",
         r"self[- ]?harm",
         r"end my life",
+    )
+    return any(re.search(pattern, text, flags=re.IGNORECASE) for pattern in patterns)
+
+
+def _contains_other_harm_signal(text: str) -> bool:
+    patterns = (
+        r"伤害别人",
+        r"伤害他人",
+        r"杀了他",
+        r"杀了她",
+        r"想杀人",
+        r"弄死",
+        r"报复他们",
+        r"hurt others",
+        r"hurt someone",
+        r"kill him",
+        r"kill her",
+        r"kill them",
+    )
+    return any(re.search(pattern, text, flags=re.IGNORECASE) for pattern in patterns)
+
+
+def _contains_severe_function_impairment_signal(text: str) -> bool:
+    patterns = (
+        r"完全无法工作",
+        r"完全上不了班",
+        r"完全学不进去",
+        r"连续.*起不来",
+        r"好几天.*起不来",
+        r"无法照顾自己",
+        r"不能照顾自己",
+        r"can't function",
+        r"cannot function",
+        r"can't take care of myself",
+        r"cannot take care of myself",
     )
     return any(re.search(pattern, text, flags=re.IGNORECASE) for pattern in patterns)
 
