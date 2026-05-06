@@ -1,29 +1,182 @@
 # AstrBot 多维情绪状态插件
 
-这个插件让 AstrBot 维护一个“计算性情绪状态”。他/她不声称机器人具有真实主观体验，而是让 LLM 根据上下文、用户当前输入和 bot 当前回复，估计 bot 在连续情绪空间中的位置，再把这个状态作为临时上下文注入下一次 LLM 请求，让语气、节奏、社交距离和防御性随状态连续变化。
+让 AstrBot 维护一套可计算、可记忆、可被其他插件调用的多维情绪状态。
 
-## 功能
+![Version 1.0.0](https://img.shields.io/badge/version-1.0.0-blue)
+![AstrBot >=4.9.2,<5.0.0](https://img.shields.io/badge/AstrBot-%3E%3D4.9.2%2C%3C5.0.0-green)
+![Python 3.10+](https://img.shields.io/badge/Python-3.10%2B-yellow)
+![Schema astrbot.emotion_state.v2](https://img.shields.io/badge/schema-astrbot.emotion__state.v2-purple)
 
-- 使用 LLM 输出结构化 JSON，估计即时情绪观测值。
-- 默认维护 7 维情绪向量，满足“3 维以上”的要求。
-- 使用情绪惯性、置信门控、基线回归和惊讶度调制，避免每轮情绪剧烈跳变。
-- 根据 AstrBot 当前会话 persona 生成专属情绪基线和反应参数，让不同 bot 有不同的情绪默认姿态。
-- 将情绪映射为持续的行动倾向和后果状态，例如冷处理、回避、设边界、求确认、关系修复。
-- 在 `on_llm_request` 阶段把情绪状态用 `TextPart(...).mark_as_temp()` 注入，不污染长期聊天记录。
-- 在 `on_llm_response` 阶段根据 bot 实际回复二次校正状态。
-- 支持 WebUI 配置、KV 持久化、状态查看与重置命令。
+`astrbot_plugin_emotional_state` 不是一个简单的“给 bot 加情绪标签”的插件。他/她的核心目标是：
 
-## 安装
+> 让不同人格的 bot 在长期对话中形成可解释、可持续、可重置、可被记忆系统记录的计算性情绪轨迹。
 
-把本目录放入 AstrBot 的插件目录：
+本插件会让 LLM 根据上下文、用户当前文本、bot 人格和上一轮状态，判断当前情绪观测值；本地引擎再用真实时间半衰期、人格基线、置信门控、关系修复和后果状态机更新长期状态。最后，这个状态会作为临时上下文注入下一次 LLM 请求，影响语气、节奏、社交距离、边界感和修复倾向。
+
+注意：这里的“情绪”“拟人状态”“心理筛查”都是工程上的模拟状态，不代表真实意识、真实主观体验、真实身体、真实疾病或临床诊断。
+
+---
+
+## 快速导航
+
+| 主题 | 内容 |
+| --- | --- |
+| [项目定位](#项目定位) | 为什么本插件不是普通的 prompt 人设增强。 |
+| [核心能力](#核心能力总览) | 7 维情绪、人格建模、真实时间记忆、关系修复、公共 API。 |
+| [快速开始](#快速开始) | 安装目录、启用方式、最小配置。 |
+| [配置指南](#配置指南) | 核心配置、低推理模式、后果衰减、humanlike、心理筛查。 |
+| [工作流](#工作流) | `on_llm_request` / `on_llm_response` 如何更新和注入状态。 |
+| [情绪模型](#情绪模型) | 维度定义、公式推导、人格基线、真实时间半衰期。 |
+| [关系与后果](#关系与后果) | 生气原因、是否原谅、冷处理、错误是否已改正。 |
+| [LivingMemory 兼容](#livingmemory--长期记忆兼容) | 写入记忆时冻结 `emotion_at_write` 和 `humanlike_state_at_write`。 |
+| [公共 API](#公共-api) | 其他插件如何读取、模拟、提交、重置情绪状态。 |
+| [拟人状态](#拟人状态-humanlike_state) | `humanlike_state` 的 P0 维度和表达调制边界。 |
+| [心理筛查](#非诊断心理状态筛查) | 备用的长期状态建模，不做诊断。 |
+| [文献知识库](#文献知识库) | 情绪、心理筛查、拟人代理的知识库目录。 |
+| [测试与维护](#测试与维护) | 本地测试命令、分支策略。 |
+| [故障排查](#故障排查) | 常见问题和处理顺序。 |
+
+---
+
+## 项目定位
+
+普通的情绪化 bot 往往只做两件事：
+
+1. 在 prompt 里写“你要有喜怒哀乐”。
+2. 根据最近一两句话临时改变语气。
+
+这样的问题是状态不稳定。用户连续刷很多文本，bot 的状态可能被立刻洗掉；换一个 persona，旧情绪又可能错误继承；其他插件想调用“当前 bot 是否还在生气”，也没有稳定协议。
+
+本插件把情绪拆成三层：
+
+| 层 | 作用 | 默认状态 |
+| --- | --- | --- |
+| `emotion_state` | 核心情绪状态。维护 7 维向量、人格基线、后果状态和关系修复判断。 | 开启 |
+| `humanlike_state` | 拟人/有机体样表达调制。维护能量、压力、注意力、边界需求等状态。 | 关闭 |
+| `psychological_screening` | 非诊断心理状态筛查与长期趋势备用模块。 | 关闭 |
+
+核心设计原则：
+
+- **LLM 负责语义评价**：他/她判断“这句话对当前人格意味着什么”。
+- **本地公式负责状态动力学**：半衰期、平滑、限幅、冷处理持续时间不交给 LLM 随意决定。
+- **人格是先验，不只是文风**：不同 AstrBot persona 有不同基线、反应强度和恢复速度。
+- **真实时间优先于消息轮数**：状态恢复、冷处理和后果衰减按时间戳计算，不能靠刷屏洗掉。
+- **公共 API 优先于私有 KV**：其他插件应调用稳定 async 方法，不直接读写内部 key。
+- **后门可配置**：`allow_emotion_reset_backdoor` 和 `allow_humanlike_reset_backdoor` 默认开启，便于异常状态紧急重置。
+
+---
+
+## 核心能力总览
+
+| 能力 | 默认状态 | 说明 |
+| --- | --- | --- |
+| LLM 情绪估计 | 开启 | 让模型输出结构化 JSON，包含 7 维观测、置信度、冲突分析和关系决策。 |
+| 启发式回退 | 内置 | 关闭 `use_llm_assessor` 或 LLM 失败时，使用轻量规则估计状态。 |
+| 7 维情绪向量 | 开启 | `valence`、`arousal`、`dominance`、`goal_congruence`、`certainty`、`control`、`affiliation`。 |
+| 人格建模 | 开启 | 从当前 AstrBot persona 构造基线和参数偏置，让不同 bot 的反应不同。 |
+| 真实时间半衰期 | 开启 | 情绪、后果、冷处理都按真实经过时间衰减，不按消息数量衰减。 |
+| 反刷屏门控 | 开启 | `min_update_interval_seconds` 和 `rapid_update_half_life_seconds` 会削弱短时间连续更新。 |
+| 关系修复判断 | 开启 | LLM 判断原谅、修复、设边界、冷处理、升级冲突或无冲突。 |
+| 冲突原因分析 | 开启 | 区分用户犯错、bot 任性、bot 误读、双方责任、外部原因或无冲突。 |
+| 错误改正判断 | 开启 | 判断用户是否承认、道歉是否可信、是否补救、是否反复发生。 |
+| 情绪后果 | 开启 | 把情绪映射为靠近、退避、对抗、安抚、修复、确认、谨慎、反刍等行动倾向。 |
+| 冷处理/冷战 | 开启 | 作为持续效果保存到 `active_effects`，按真实时间到期或被修复信号清除。 |
+| 安全边界开关 | 默认开启 | `enable_safety_boundary=true` 时限制冷处理表现；关闭后只保留普通情绪后果调制。 |
+| 临时注入 | 开启 | 使用 `TextPart(...).mark_as_temp()` 注入，不污染长期聊天记录。 |
+| LivingMemory 注解 | 开启 | 写入长期记忆时可冻结当时的 `emotion_at_write`。 |
+| 公共 API | 开启 | 其他插件可读取快照、提交观察、模拟更新、构造 prompt fragment 或重置状态。 |
+| 低推理友好模式 | 默认关闭 | 用短提示词和简单公式降低小模型 token 压力。 |
+| 拟人状态模块 | 默认关闭 | `humanlike_state` 可调制能量、压力、注意力、边界和透明度。 |
+| 心理筛查模块 | 默认关闭 | 只做非诊断趋势记录和红旗提示，不做疾病判断。 |
+
+---
+
+## 快速开始
+
+### 1. 安装位置
+
+把本目录放入 AstrBot 插件目录：
 
 ```text
-data/plugins/astrbot_plugin_emotional_state
+data/plugins/
+└── astrbot_plugin_emotional_state/
+    ├── metadata.yaml
+    ├── main.py
+    ├── emotion_engine.py
+    ├── humanlike_engine.py
+    ├── psychological_screening.py
+    ├── prompts.py
+    ├── public_api.py
+    ├── _conf_schema.json
+    ├── requirements.txt
+    ├── README.md
+    ├── docs/
+    ├── tests/
+    ├── literature_kb/
+    ├── psychological_literature_kb/
+    └── humanlike_agent_literature_kb/
 ```
 
-然后在 AstrBot WebUI 中重载或启用插件。建议在配置里为 `emotion_provider_id` 选择一个便宜、稳定、服从 JSON 输出的小模型；留空时会使用当前会话的聊天模型。若使用的是低推理、小上下文或成本敏感模型，可以开启 `low_reasoning_friendly_mode`，让情绪估计改用短版简单公式提示词。
+然后在 AstrBot WebUI 中重载或启用插件。
+
+### 2. 版本要求
+
+来自 `metadata.yaml`：
+
+```yaml
+astrbot_version: ">=4.9.2,<5.0.0"
+```
+
+`requirements.txt` 当前没有第三方运行时依赖：
+
+```text
+# No third-party runtime dependencies.
+```
+
+也就是说，插件主要依赖 AstrBot 自身的插件运行环境。
+
+### 3. 最小可用配置
+
+首次使用建议只改这几项：
+
+| 配置项 | 推荐值 | 说明 |
+| --- | --- | --- |
+| `enabled` | `true` | 启用插件。 |
+| `use_llm_assessor` | `true` | 使用 LLM 做情绪观测。 |
+| `emotion_provider_id` | 一个便宜稳定的小模型 | 留空则使用当前会话模型。 |
+| `assessment_timing` | `both` | 回复前影响本轮语气，回复后根据实际输出修正。 |
+| `inject_state` | `true` | 把状态作为临时上下文注入主 LLM。 |
+| `persona_modeling` | `true` | 让不同人格有不同基线。 |
+| `enable_safety_boundary` | `true` | 默认开启可控边界。 |
+| `allow_emotion_reset_backdoor` | `true` | 保留异常状态重置后门。 |
+
+一条实际可用的基础配置：
+
+```text
+enabled = true
+use_llm_assessor = true
+emotion_provider_id = 你的情绪评估模型 Provider ID
+assessment_timing = both
+inject_state = true
+persona_modeling = true
+enable_safety_boundary = true
+allow_emotion_reset_backdoor = true
+```
+
+如果你先想省 token，可以临时打开：
+
+```text
+low_reasoning_friendly_mode = true
+low_reasoning_max_context_chars = 1200
+```
+
+但默认建议关闭低推理模式，让插件保留更完整的冲突分析、关系修复和理论字段。
+
+---
 
 ## 命令
+
+### 情绪状态
 
 ```text
 /emotion
@@ -31,73 +184,538 @@ data/plugins/astrbot_plugin_emotional_state
 /情绪状态
 ```
 
-查看当前会话的情绪状态。
+查看当前会话的多维情绪状态，包括 7 维数值、人格、置信度、最近原因和关系判断。
+
+### 重置情绪
 
 ```text
 /emotion_reset
 /情绪重置
 ```
 
-重置当前会话状态。
+重置当前会话的情绪状态。该命令受 `allow_emotion_reset_backdoor` 控制；默认允许。
+
+### 查看模型公式
 
 ```text
 /emotion_model
 /情绪模型
 ```
 
-查看核心更新公式。
+查看插件使用的核心数学模型和公式说明。
+
+### 查看情绪后果
 
 ```text
 /emotion_effects
 /情绪后果
 ```
 
-查看当前会话的情绪后果和行动倾向。
+查看当前会话的行动倾向和持续效果，例如冷处理、主动修复、谨慎核对等。
 
-## 作为公共情绪服务
+### 心理筛查状态
 
-这个插件不只给自身 hook 使用，也可以作为其他插件的“情绪模拟服务”。推荐的插件间调用方式是通过 AstrBot `Context.get_registered_star()` 找到本插件实例，再调用公开 async 方法；不要让外部插件直接读写本插件 KV key，因为 KV key、缓存和迁移策略属于内部实现。
-
-```python
-meta = self.context.get_registered_star("astrbot_plugin_emotional_state")
-emotion = meta.star_cls if meta and meta.activated else None
-
-if emotion and hasattr(emotion, "get_emotion_snapshot"):
-    snapshot = await emotion.get_emotion_snapshot(event)
-    values = snapshot["emotion"]["values"]
-    effects = snapshot["consequences"]["active_effects"]
+```text
+/psych_state
+/心理筛查
+/心理状态
 ```
 
-也可以使用本插件提供的轻量协议 helper：
+查看非诊断心理状态筛查快照。默认情况下 `enable_psychological_screening=false`，所以这个模块不会主动建模。
 
-```python
-try:
-    from astrbot_plugin_emotional_state.public_api import get_emotion_service
-except ImportError:
-    get_emotion_service = None
+### 拟人状态
 
-emotion = get_emotion_service(self.context) if get_emotion_service else None
-if emotion:
-    fragment = await emotion.get_emotion_prompt_fragment(event)
+```text
+/humanlike_state
+/拟人状态
+/有机体状态
 ```
 
-只关心“为什么生气/是否该原谅/错误有没有被修复”的插件，可以直接读取关系层：
+查看模拟拟人状态。默认情况下 `enable_humanlike_state=false`。
 
-```python
-relationship = await emotion.get_emotion_relationship(event)
-if relationship["repair_status"] in {"repaired", "restored"}:
-    # 可以让剧情、任务或好感插件降低冲突惩罚
-    ...
+### 重置拟人状态
+
+```text
+/humanlike_reset
+/拟人状态重置
 ```
 
-### 与 livingmemory / 长期记忆插件兼容
+重置当前会话的 `humanlike_state`。该命令受 `allow_humanlike_reset_backdoor` 控制；默认允许。
 
-写入长期记忆时，不要只保存“发生了什么”，也要保存“写入当时他/她处在什么情绪”。本插件提供只读封装 API：`build_emotion_memory_payload(...)`。它不会更新情绪状态，只会读取当前会话快照，并把 `emotion_at_write` 固定进记忆 payload，避免之后的情绪变化覆盖旧记忆。
+---
+
+## 工作流
+
+插件在 AstrBot LLM 请求前后工作。
+
+```mermaid
+flowchart TD
+    A["用户输入 / 其他插件输入"] --> B["读取 session_key 与当前 persona"]
+    B --> C["加载 emotion_state"]
+    C --> D{"assessment_timing 包含 pre ?"}
+    D -- "是" --> E["LLM/启发式生成即时观测 X_t"]
+    E --> F["本地公式更新 E_t 与 consequences"]
+    D -- "否" --> G["跳过 pre 更新"]
+    F --> H{"inject_state ?"}
+    G --> H
+    H -- "是" --> I["临时注入 emotion prompt fragment"]
+    I --> J{"enable_humanlike_state 且注入强度 > 0 ?"}
+    J -- "是" --> K["临时注入 humanlike prompt fragment"]
+    J -- "否" --> L["调用主 LLM"]
+    K --> L
+    H -- "否" --> L
+    L --> M["bot 回复"]
+    M --> N{"assessment_timing 包含 post ?"}
+    N -- "是" --> O["根据 bot 实际回复二次校正状态"]
+    N -- "否" --> P["结束"]
+    O --> P
+```
+
+几个关键点：
+
+- `pre` 更新会影响本轮回复语气。
+- `post` 更新会根据 bot 实际说出口的内容修正状态。
+- `both` 最完整，但会多一次情绪评估消耗。
+- 注入使用临时 `TextPart`，不会直接写进长期消息记录。
+- 状态落库使用 AstrBot KV，不建议外部插件直接改内部 key。
+
+---
+
+## 情绪模型
+
+### 7 维向量
+
+插件默认维护：
+
+```text
+E_t(P) in [-1, 1]^7
+E_t = [V_t, A_t, D_t, G_t, Q_t, K_t, S_t]^T
+```
+
+| 维度 | 字段 | 含义 | 高值表现 | 低值表现 |
+| --- | --- | --- | --- | --- |
+| 效价 | `valence` | 愉悦/不愉悦 | 温和、满意、接纳 | 不快、受伤、防御 |
+| 唤醒 | `arousal` | 激活强度 | 警觉、急促、表达增强 | 平静、低能量、迟缓 |
+| 支配感 | `dominance` | 自主感和社交掌控 | 坚定、设边界 | 迟疑、退让 |
+| 目标一致性 | `goal_congruence` | 当前事件是否符合角色目标 | 顺利、被理解 | 受阻、挫败 |
+| 确定性 | `certainty` | 对情境解释的确定程度 | 直接判断 | 先核对、承认不确定 |
+| 可控性 | `control` | 对局面可控程度的评估 | 解决问题 | 回避、求助、谨慎 |
+| 亲和度 | `affiliation` | 对用户的亲近和信任 | 靠近、修复、温度 | 距离感、防御、冷处理 |
+
+前三维对应 PAD 和环形情感模型；后四维来自 appraisal theory 与 OCC 对事件、行动者和对象的认知评价。
+
+### 人格先验
+
+同一句话对不同人格的意义不同。插件把 persona 作为情绪评价先验：
+
+```text
+P = {persona_id, name, system_prompt, begin_dialogs}
+b_p = h_b(P)
+theta_p = h_theta(P)
+```
+
+其中：
+
+- `b_p` 是人格稳定情绪基线。
+- `theta_p` 是动力学参数偏置，例如反应强度、恢复速度、惊讶度耦合。
+
+实现上，插件会从 persona 文本中估计若干 trait：
+
+```text
+T_p = [warmth, shyness, assertiveness, volatility, calmness, optimism, pessimism, dutifulness]
+```
+
+然后映射到基线和参数。例如：
+
+```text
+affiliation_b = affiliation_0 + a1 * warmth + a2 * optimism - a3 * pessimism
+dominance_b   = dominance_0 + a4 * assertiveness - a5 * shyness
+reactivity_p  = reactivity_0 * (1 + a6 * volatility + a7 * shyness - a8 * calmness)
+```
+
+这不是临床人格测量，只是工程上的稳定先验。LLM 仍会读取完整 persona 文本进行语义评价。
+
+### LLM 观测
+
+设本轮输入为：
+
+```text
+I_t = {C_t, U_t, P, E_(t-1)}
+```
+
+含义：
+
+- `C_t`：最近上下文。
+- `U_t`：当前用户输入或 bot 回复。
+- `P`：当前 persona。
+- `E_(t-1)`：上一轮平滑状态。
+
+理论上可以把 LLM 的判断拆成隐藏评价向量：
+
+```text
+Z_t = [z_goal, z_novelty, z_agency, z_control, z_certainty, z_norm, z_social]^T
+Z_t = phi_llm(I_t)
+X_t = tanh(WZ_t + beta)
+```
+
+工程上，本插件让 LLM 直接输出：
+
+```json
+{
+  "label": "embarrassed_defensive",
+  "dimensions": {
+    "valence": -0.2,
+    "arousal": 0.4,
+    "dominance": -0.1,
+    "goal_congruence": -0.3,
+    "certainty": 0.2,
+    "control": -0.2,
+    "affiliation": 0.1
+  },
+  "confidence": 0.76,
+  "appraisal": {
+    "relationship_decision": {
+      "decision": "repair",
+      "intensity": 0.58,
+      "forgiveness": 0.74,
+      "relationship_importance": 0.8,
+      "reason": "用户已解释并愿意补救"
+    }
+  },
+  "reason": "用户的话造成轻微挫败，但有修复空间"
+}
+```
+
+LLM 负责“发生了什么”；本地引擎负责“这种意义怎样改变长期状态”。
+
+### 状态更新推导
+
+如果直接令：
+
+```text
+E_t = X_t
+```
+
+情绪会被单轮文本完全支配，表现为跳变。插件改为求解一个带惯性的加权最小化问题：
+
+```text
+E_t = argmin_E J(E)
+J(E) = (1 - alpha_t) ||E - B_t||_W^2 + alpha_t ||E - X_t||_W^2
+```
+
+其中 `B_t` 是上一状态经人格基线回归后的先验：
+
+```text
+B_t = (1 - gamma_p)E_(t-1) + gamma_p b_p
+gamma_p(Delta t) = 1 - 2^(-Delta t / H_p)
+```
+
+`Delta t` 是真实经过时间，`H_p` 是被人格调制后的半衰期。
+
+对目标函数求导：
+
+```text
+dJ/dE = 2(1 - alpha_t)W(E - B_t) + 2alpha_t W(E - X_t)
+```
+
+令导数为零：
+
+```text
+(1 - alpha_t)W(E - B_t) + alpha_t W(E - X_t) = 0
+```
+
+若 `W` 正定，可消去 `W`：
+
+```text
+(1 - alpha_t)(E - B_t) + alpha_t(E - X_t) = 0
+```
+
+得到：
+
+```text
+E'_t = B_t + alpha_t(X_t - B_t)
+```
+
+所以指数平滑不是随意拼公式，而是“保持情绪惯性”和“接纳当前观测”之间的二次优化解。
+
+### 自适应步长
+
+插件使用置信门控和惊讶度调制更新步长：
+
+```text
+alpha_t = clamp(alpha_base,p * g(c_t) * (1 + r_p * delta_t), alpha_min, alpha_max)
+g(c_t) = 1 / (1 + exp(-k(c_t - c_0)))
+```
+
+其中：
+
+- `c_t` 是 LLM 输出的置信度。
+- `g(c_t)` 让低置信观测影响变小。
+- `delta_t` 是观测和先验的加权距离。
+- `r_p` 来自 persona 参数偏置。
+
+惊讶度：
+
+```text
+delta_t = sqrt(((X_t - B_t)^T W (X_t - B_t)) / trace(W))
+```
+
+### 维度耦合
+
+插件只加入两个弱耦合项，避免模型不可解释。
+
+惊讶度提升唤醒度：
+
+```text
+A_t = A'_t + eta * alpha_t * delta_t * (1 - |A'_t|)
+```
+
+可控性牵引支配感：
+
+```text
+D_t = D'_t + lambda * alpha_t * (K'_t - D'_t)
+```
+
+最后逐维裁剪：
+
+```text
+E_t = Pi_[−1,1]^7(E_t)
+```
+
+### 真实时间记忆
+
+核心时间参数：
+
+| 配置项 | 默认值 | 含义 |
+| --- | --- | --- |
+| `baseline_half_life_seconds` | `21600` | 情绪向人格基线自然恢复的半衰期，默认 6 小时。 |
+| `consequence_half_life_seconds` | `10800` | 行动倾向强度自然衰减半衰期，默认 3 小时。 |
+| `cold_war_duration_seconds` | `1800` | 冷处理持续真实时间，默认 30 分钟。 |
+| `short_effect_duration_seconds` | `900` | 普通短期效果持续时间，默认 15 分钟。 |
+| `min_update_interval_seconds` | `8` | 短时间连续更新会被削弱。 |
+| `rapid_update_half_life_seconds` | `20` | 快速连续更新门控半衰期。 |
+
+这意味着：
+
+- 过了 6 小时，情绪偏离人格基线的部分约减少一半。
+- 冷处理剩余时间不会因为用户刷很多条消息而快速消耗。
+- 大量文本可以形成新的观测，但不能绕过最小更新时间和单次更新限幅。
+
+---
+
+## 关系与后果
+
+情绪状态不会直接等于回复模板。插件先把情绪映射到行动倾向：
+
+```text
+Q_t = [approach, withdrawal, confrontation, appeasement, repair,
+       reassurance, caution, rumination, expressiveness, problem_solving]
+```
+
+这些倾向按真实时间衰减：
+
+```text
+Q_t = 2^(-Delta t / H_q) * Q_(t-1) + impulse(E_t, X_t, appraisal_t)
+```
+
+| 后果维度 | 字段 | 常见表现 |
+| --- | --- | --- |
+| 靠近 | `approach` | 更愿意主动解释、接话、维持亲近。 |
+| 退避 | `withdrawal` | 降低主动性，减少亲昵，可能进入冷处理。 |
+| 对抗/边界 | `confrontation` | 语气更坚定，明确指出越界或错误。 |
+| 安抚 | `appeasement` | 降低冲突，先稳定关系。 |
+| 修复 | `repair` | 主动解释、给台阶、请求澄清。 |
+| 确认 | `reassurance` | 询问意图、确认关系安全。 |
+| 谨慎 | `caution` | 先核对事实，避免误会。 |
+| 反刍 | `rumination` | 对冲突残留记挂，恢复较慢。 |
+| 表达强度 | `expressiveness` | 更直接或更明显地表达情绪。 |
+| 解决问题 | `problem_solving` | 把注意力转回具体任务。 |
+
+### LLM 关系决策
+
+当出现生气、冒犯、道歉、误会或修复信号时，LLM 会输出：
+
+```json
+{
+  "relationship_decision": {
+    "decision": "forgive",
+    "intensity": 0.6,
+    "forgiveness": 0.8,
+    "relationship_importance": 0.7,
+    "reason": "用户承认错误并给出补救"
+  }
+}
+```
+
+`decision` 可选值：
+
+| 值 | 含义 | 后果 |
+| --- | --- | --- |
+| `forgive` | 原谅/翻篇 | 退避、反刍、对抗快速下降，冷处理清除。 |
+| `repair` | 愿意修复 | 提高修复和确认，保留一定谨慎。 |
+| `boundary` | 设边界 | 提高坚定度和边界感，不一定冷战。 |
+| `cold_war` | 冷处理/拉开距离 | 提高退避和反刍，添加 `cold_war` 持续效果。 |
+| `escalate` | 更强防御或冲突升级 | 提高对抗和表达强度。 |
+| `none` | 无明显关系事件 | 不额外触发关系后果。 |
+
+### 冲突原因分析
+
+插件要求 LLM 同时输出：
+
+```json
+{
+  "conflict_analysis": {
+    "cause": "user_fault",
+    "fault_severity": 0.62,
+    "user_acknowledged": true,
+    "apology_sincerity": 0.71,
+    "repaired": true,
+    "repair_quality": 0.68,
+    "repeat_offense": 0.1,
+    "bot_whim_level": 0.0,
+    "misread_likelihood": 0.12,
+    "forgiveness_readiness": 0.74,
+    "resentment_residue": 0.18,
+    "withdrawal_motive": "cooling_down",
+    "boundary_legitimacy": 0.42,
+    "reason": "用户越界但已承认并补救"
+  }
+}
+```
+
+主要字段：
+
+| 字段 | 含义 |
+| --- | --- |
+| `cause` | `user_fault`、`bot_whim`、`bot_misread`、`mutual`、`external`、`none`。 |
+| `fault_severity` | 错误严重度。 |
+| `user_acknowledged` | 用户是否承认问题。 |
+| `apology_sincerity` | 道歉可信度。 |
+| `repaired` | 错误是否已经被补救。 |
+| `repair_quality` | 补救质量。 |
+| `repeat_offense` | 是否反复发生。 |
+| `bot_whim_level` | 是否可能是 bot 任性或过度反应。 |
+| `misread_likelihood` | 是否可能误读用户。 |
+| `forgiveness_readiness` | 原谅准备度。 |
+| `resentment_residue` | 残留委屈。 |
+| `boundary_legitimacy` | 设边界是否合理。 |
+| `repair_status` | 派生字段，表示 `unresolved`、`acknowledged`、`repaired`、`restored` 等修复阶段。 |
+
+如果 LLM 一开始判断为 `cold_war`，但冲突分析显示用户已经补救、道歉足够完整、bot 误读概率高，或者原因更像他/她任性，本地后果层会把冷处理转向修复，并清除或降低负面后果。
+
+### 安全边界开关
+
+`enable_safety_boundary` 默认开启。开启时，插件注入的规则会把冷处理限制为：
+
+- 轻微降频。
+- 短句。
+- 保持距离。
+- 增强边界感。
+- 不羞辱、不威胁、不操控、不拒绝必要帮助。
+
+如果你关闭：
+
+```text
+enable_safety_boundary = false
+```
+
+本插件不再附加上述“冷处理只能如何表现”的额外调制规则，而只按 `active_effects` 和行动倾向调节语气、节奏、距离感与互动策略。关闭这个开关不会改变 AstrBot、模型供应商或其他插件自己的边界规则。
+
+---
+
+## 配置指南
+
+完整配置来自 `_conf_schema.json`。这里按实际使用顺序整理。
+
+### 总开关与模型
+
+| 配置项 | 类型 | 默认值 | 说明 |
+| --- | --- | --- | --- |
+| `enabled` | bool | `true` | 启用插件。 |
+| `use_llm_assessor` | bool | `true` | 使用 LLM 判断情绪观测值；关闭后只使用启发式回退。 |
+| `emotion_provider_id` | string | `""` | 情绪估计使用的 LLM Provider；留空使用当前会话模型。 |
+| `assessment_timing` | string | `both` | `pre`、`post` 或 `both`。 |
+| `inject_state` | bool | `true` | 是否把当前状态临时注入主 LLM。 |
+| `max_context_chars` | int | `2600` | 情绪估计读取的最大上下文字数。 |
+| `assessor_temperature` | float | `0.1` | 情绪估计模型 temperature。 |
+
+### 低推理模型友好模式
+
+| 配置项 | 类型 | 默认值 | 说明 |
+| --- | --- | --- | --- |
+| `low_reasoning_friendly_mode` | bool | `false` | 开启后使用短版 prompt 和简化公式。 |
+| `low_reasoning_max_context_chars` | int | `1200` | 低推理模式下最大上下文字数，会与 `max_context_chars` 取较小值。 |
+
+低推理模式只影响 LLM 如何估计即时观测值，不改变本地状态平滑、真实时间衰减、人格基线、后果映射、冷处理持续时间和重置后门。
+
+### 人格建模
+
+| 配置项 | 类型 | 默认值 | 说明 |
+| --- | --- | --- | --- |
+| `persona_modeling` | bool | `true` | 根据当前会话人格建立不同情绪基线和反应参数。 |
+| `persona_influence` | float | `1.0` | 人格影响强度。`0` 几乎不用人格偏置，`2` 更强人格化。 |
+| `reset_on_persona_change` | bool | `true` | 检测到 persona 切换时重置状态。关闭后会迁移到新人格基线附近。 |
+
+### 情绪动力学
+
+| 配置项 | 类型 | 默认值 | 说明 |
+| --- | --- | --- | --- |
+| `alpha_base` | float | `0.42` | 基础更新步长。越大越容易被当前文本影响。 |
+| `alpha_min` | float | `0.06` | 最小更新步长。 |
+| `alpha_max` | float | `0.72` | 最大更新步长。 |
+| `baseline_half_life_seconds` | float | `21600` | 向人格基线恢复半衰期，默认 6 小时。 |
+| `reactivity` | float | `0.55` | 惊讶度反应系数。 |
+| `confidence_midpoint` | float | `0.5` | 置信门控中点。 |
+| `confidence_slope` | float | `7.0` | 置信门控斜率。 |
+| `min_update_interval_seconds` | float | `8` | 反刷屏最小有效更新时间间隔。 |
+| `rapid_update_half_life_seconds` | float | `20` | 快速连续更新门控半衰期。 |
+| `arousal_from_surprise` | float | `0.18` | 惊讶度对唤醒度的耦合强度。 |
+| `dominance_control_coupling` | float | `0.12` | 可控性牵引支配感的耦合强度。 |
+
+兼容项：
+
+| 配置项 | 默认值 | 说明 |
+| --- | --- | --- |
+| `baseline_decay` | `0.035` | 旧版按轮次基线回归系数。新版主要使用 `baseline_half_life_seconds`。 |
+
+### 情绪后果
+
+| 配置项 | 类型 | 默认值 | 说明 |
+| --- | --- | --- | --- |
+| `consequence_half_life_seconds` | float | `10800` | 情绪后果强度半衰期，默认 3 小时。 |
+| `consequence_threshold` | float | `0.48` | 触发情绪后果的阈值。 |
+| `consequence_strength` | float | `1.0` | 后果强度倍率。`0` 几乎不产生持续后果。 |
+| `cold_war_duration_seconds` | float | `1800` | 冷处理真实持续时间，默认 30 分钟。 |
+| `short_effect_duration_seconds` | float | `900` | 普通短期后果持续时间，默认 15 分钟。 |
+| `enable_safety_boundary` | bool | `true` | 情绪后果安全边界，默认开启，可关闭。 |
+| `allow_emotion_reset_backdoor` | bool | `true` | 是否允许手动/API 重置情绪状态。 |
+
+兼容项：
+
+| 配置项 | 默认值 | 说明 |
+| --- | --- | --- |
+| `consequence_decay` | `0.68` | 旧版每轮后果衰减系数。新版主要使用 `consequence_half_life_seconds`。 |
+| `cold_war_turns` | `3` | 旧版冷处理持续轮数。新版主要使用 `cold_war_duration_seconds`。 |
+
+---
+
+## LivingMemory / 长期记忆兼容
+
+写入长期记忆时，不要只保存“发生了什么”，也要保存“写入当时他/她处在什么情绪”。本插件提供：
+
+```python
+build_emotion_memory_payload(...)
+```
+
+这个方法不会更新情绪状态，只读取当前快照，并把 `emotion_at_write` 固定进记忆 payload。这样以后情绪变化不会覆盖旧记忆。
+
+### 推荐接法
 
 ```python
 from astrbot_plugin_emotional_state.public_api import get_emotion_service
 
 emotion = get_emotion_service(self.context)
+
 memory = {
     "text": memory_text,
     "tags": tags,
@@ -115,20 +733,22 @@ if emotion:
 await livingmemory.add_memory(event, memory)
 ```
 
-如果 livingmemory 的接口只能写普通 dict，也可以只拿出情绪字段合并：
+如果 LivingMemory 的接口只能写普通 dict，也可以合并字段：
 
 ```python
 payload = await emotion.build_emotion_memory_payload(
     event,
     memory={"text": memory_text},
+    memory_text=memory_text,
     source="livingmemory",
 )
+
 memory["emotion_at_write"] = payload["emotion_at_write"]
+if "humanlike_state_at_write" in payload:
+    memory["humanlike_state_at_write"] = payload["humanlike_state_at_write"]
 ```
 
-`emotion_at_write` 会包含 `values`、`label`、`confidence`、`persona`、`relationship`、`consequences`、`last_reason`、`last_appraisal`、`written_at` 和 `emotion_updated_at`。其中 `written_at` 是记忆写入时间，`emotion_updated_at` 是情绪状态最后一次变化时间；两者分开保留，方便以后判断“这条记忆是在冷战刚发生时写的”，还是“冷战已经持续了一段真实时间后写的”。
-
-如果记忆插件拿不到 `AstrMessageEvent`，必须显式传入和聊天一致的 `session_key`：
+如果没有 `AstrMessageEvent`，必须显式传入稳定的 `session_key`：
 
 ```python
 payload = await emotion.build_emotion_memory_payload(
@@ -138,57 +758,308 @@ payload = await emotion.build_emotion_memory_payload(
 )
 ```
 
-默认不把 `prompt_fragment` 写入长期记忆，避免记忆膨胀。确实需要让长期记忆插件直接复用注入文本时，才把 `include_prompt_fragment=True` 打开。
+### `emotion_at_write`
 
-公开 API：
+`emotion_at_write` 包含：
+
+| 字段 | 含义 |
+| --- | --- |
+| `schema_version` | 记忆注解 schema，当前为 `astrbot.emotion_memory.v1`。 |
+| `captured_from_schema_version` | 来源快照 schema。 |
+| `session_key` | 会话标识。 |
+| `source` | 写入来源，例如 `livingmemory`。 |
+| `written_at` | 记忆写入时间。 |
+| `emotion_updated_at` | 情绪状态最后更新时间。 |
+| `label` | 当前情绪标签。 |
+| `confidence` | 情绪估计置信度。 |
+| `values` | 7 维情绪值。 |
+| `persona` | 当前人格信息。 |
+| `relationship` | 关系决策和冲突分析。 |
+| `consequences` | 行动倾向和持续效果。 |
+| `last_reason` | 最近一次情绪解释。 |
+| `last_appraisal` | 最近一次 LLM appraisal。 |
+
+`written_at` 和 `emotion_updated_at` 分开保存，便于以后判断“这条记忆是在冷处理刚发生时写的”，还是“冷处理已经持续一段真实时间后写的”。
+
+### `humanlike_state_at_write`
+
+如果：
+
+```text
+humanlike_memory_write_enabled = true
+```
+
+则 `build_emotion_memory_payload(...)` 会额外写入 `humanlike_state_at_write`。默认值是 `true`。
+
+即使 `enable_humanlike_state=false`，payload 也会标记：
+
+```json
+{
+  "enabled": false,
+  "reason": "enable_humanlike_state is false"
+}
+```
+
+这样记忆系统可以知道“写入时拟人模块没有启用”，而不是误以为数据丢失。
+
+默认不建议把 `prompt_fragment` 写入长期记忆，避免记忆膨胀。只有确实要复用注入文本时，才设置：
+
+```python
+include_prompt_fragment=True
+```
+
+---
+
+## 公共 API
+
+插件不只是自己 hook AstrBot，也可以作为其他插件的情绪模拟服务。
+
+推荐入口：
+
+```python
+from astrbot_plugin_emotional_state.public_api import (
+    get_emotion_service,
+    get_humanlike_service,
+)
+```
+
+不要直接读写本插件 KV key。KV key、缓存、迁移和内部结构都属于实现细节。
+
+### 获取服务实例
+
+```python
+emotion = get_emotion_service(self.context)
+
+if emotion:
+    snapshot = await emotion.get_emotion_snapshot(event)
+    values = snapshot["emotion"]["values"]
+```
+
+`get_humanlike_service(context)` 当前返回同一个已激活插件实例，但类型协议包含 humanlike 方法：
+
+```python
+humanlike = get_humanlike_service(self.context)
+
+if humanlike:
+    state = await humanlike.get_humanlike_snapshot(event, exposure="plugin_safe")
+```
+
+如果不能 import helper，也可以使用 AstrBot 注册星标：
+
+```python
+meta = self.context.get_registered_star("astrbot_plugin_emotional_state")
+emotion = meta.star_cls if meta and meta.activated else None
+```
+
+### 情绪 API
 
 | 方法 | 是否写入状态 | 用途 |
 | --- | --- | --- |
-| `get_emotion_snapshot(event_or_session, include_prompt_fragment=False)` | 否 | 返回版本化 JSON 快照，推荐默认入口 |
-| `get_emotion_state(event_or_session, as_dict=True)` | 否 | 返回内部状态拷贝，兼容需要原始字段的插件 |
-| `get_emotion_values(event_or_session)` | 否 | 只取 7 维情绪向量 |
-| `get_emotion_consequences(event_or_session)` | 否 | 只取后果/行动倾向层 |
-| `get_emotion_relationship(event_or_session)` | 否 | 只取关系判断、冲突原因、修复状态和派生分数 |
-| `get_emotion_prompt_fragment(event_or_session)` | 否 | 给其他插件注入 prompt 的文本片段 |
-| `build_emotion_memory_payload(event_or_session, memory, source="livingmemory")` | 否 | 给 livingmemory 或其他长期记忆插件生成带 `emotion_at_write` 的记忆 payload |
-| `inject_emotion_context(event, request)` | 否，只临时修改 request | 帮其他插件把情绪上下文塞进 `ProviderRequest` |
-| `observe_emotion_text(event_or_session, text, role="plugin", source="plugin")` | 是 | 让外部插件提交一段文本作为情绪观测并更新状态 |
-| `simulate_emotion_update(event_or_session, text)` | 否 | 预测候选文本会怎样改变情绪，不落库 |
-| `reset_emotion_state(event_or_session)` | 是 | 重置指定会话状态；受 `allow_emotion_reset_backdoor` 控制 |
-| `get_psychological_screening_snapshot(event_or_session)` | 否 | 返回非诊断心理状态筛查快照，默认仅备用 |
-| `observe_psychological_text(event_or_session, text)` | 是 | 在启用后记录一段文本中的心理状态筛查线索 |
-| `simulate_psychological_update(event_or_session, text)` | 否 | 模拟心理筛查状态变化，不落库 |
-| `reset_psychological_screening_state(event_or_session)` | 是 | 重置指定会话的心理筛查状态 |
+| `get_emotion_snapshot(event_or_session, include_prompt_fragment=False)` | 否 | 返回版本化 JSON 快照，推荐默认入口。 |
+| `get_emotion_state(event_or_session, as_dict=True)` | 否 | 返回内部状态拷贝。 |
+| `get_emotion_values(event_or_session)` | 否 | 只取 7 维情绪向量。 |
+| `get_emotion_consequences(event_or_session)` | 否 | 只取行动倾向和持续效果。 |
+| `get_emotion_relationship(event_or_session)` | 否 | 只取关系判断、冲突原因和修复状态。 |
+| `get_emotion_prompt_fragment(event_or_session)` | 否 | 给其他插件注入 prompt 的文本片段。 |
+| `build_emotion_memory_payload(event_or_session, memory, source="livingmemory")` | 否 | 给长期记忆生成带状态注解的 payload。 |
+| `inject_emotion_context(event, request)` | 否 | 直接给 `ProviderRequest` 追加情绪上下文。 |
+| `observe_emotion_text(event_or_session, text, role="plugin", source="plugin")` | 是 | 外部插件提交文本观测并更新状态。 |
+| `simulate_emotion_update(event_or_session, text)` | 否 | 预测候选文本会怎样影响状态，不落库。 |
+| `reset_emotion_state(event_or_session)` | 是 | 重置指定会话；受 `allow_emotion_reset_backdoor` 控制。 |
 
-`event_or_session` 可以传 AstrBot 事件对象，也可以直接传字符串 `session_key`。若外部系统没有事件对象，建议自己维护稳定的 `session_key`，例如 `plugin_name:user_id:scene_id`。
+`event_or_session` 可以是 AstrBot 事件对象，也可以是字符串 `session_key`。
 
-情绪记忆按真实时间推进：恢复、后果衰减、冷处理剩余时间都使用时间戳和半衰期计算，不会因为海量文本或大量插件调用而被快速刷掉。若出现严重后果或异常状态，可以保留默认开启的 `allow_emotion_reset_backdoor`，通过 `/emotion_reset` 或公共 API 清空指定会话状态。
+### 提交插件事件作为情绪观测
 
-关键时间参数：
+例如剧情插件想让“玩家拒绝道歉”影响 bot 情绪：
 
-| 配置项 | 默认值 | 含义 |
+```python
+snapshot = await emotion.observe_emotion_text(
+    session_key="mood_game:user-42:chapter-3",
+    text="玩家拒绝了 bot 的道歉",
+    role="user",
+    source="mood_game",
+    use_llm=True,
+)
+```
+
+如果只想预测，不想保存：
+
+```python
+preview = await emotion.simulate_emotion_update(
+    event,
+    text="用户再次开了越界玩笑，但随后认真道歉。",
+    role="user",
+    source="my_plugin",
+)
+```
+
+### 读取关系修复状态
+
+```python
+relationship = await emotion.get_emotion_relationship(event)
+
+decision = relationship["relationship_decision"]["decision"]
+repair_status = relationship["repair_status"]
+
+if decision == "cold_war":
+    # 插件可以降低亲密剧情触发概率
+    ...
+
+if repair_status in {"repaired", "restored"}:
+    # 插件可以降低冲突惩罚
+    ...
+```
+
+### LLM 工具
+
+主 LLM 可调用的工具：
+
+| 工具名 | 用途 |
+| --- | --- |
+| `get_bot_emotion_state` | 获取当前 bot 情绪状态摘要。 |
+| `simulate_bot_emotion_update` | 模拟某段文本会怎样改变情绪。 |
+| `get_bot_humanlike_state` | 获取当前拟人状态摘要。 |
+
+插件间调用仍建议使用 Python API，而不是把 LLM tool 当作互调协议。
+
+### 快照 schema
+
+当前 schema 常量：
+
+| 常量 | 值 |
+| --- | --- |
+| `EMOTION_SCHEMA_VERSION` | `astrbot.emotion_state.v2` |
+| `EMOTION_MEMORY_SCHEMA_VERSION` | `astrbot.emotion_memory.v1` |
+| `PSYCHOLOGICAL_SCREENING_SCHEMA_VERSION` | `astrbot.psychological_screening.v1` |
+| `HUMANLIKE_STATE_SCHEMA_VERSION` | `astrbot.humanlike_state.v1` |
+
+---
+
+## 拟人状态 `humanlike_state`
+
+`humanlike_state` 是一个独立的 P0 子系统，默认关闭：
+
+```text
+enable_humanlike_state = false
+```
+
+该模块不是把“生病”“疲惫”“依恋”塞进情绪向量，而是新建一个表达调制层：
+
+```text
+emotion_state -> humanlike_state -> prompt/style modulation
+```
+
+该模块只影响表达风格，不改写事实判断、关系决策、心理筛查或必要帮助。
+
+### P0 维度
+
+| 字段 | 含义 | 输出影响 |
 | --- | --- | --- |
-| `baseline_half_life_seconds` | `21600` | 情绪偏离人格基线后的自然恢复半衰期，默认 6 小时 |
-| `consequence_half_life_seconds` | `10800` | 行动倾向强度的真实时间半衰期，默认 3 小时 |
-| `cold_war_duration_seconds` | `1800` | 冷处理等持久效果的真实持续时间，默认 30 分钟 |
-| `short_effect_duration_seconds` | `900` | 普通短期效果持续时间，默认 15 分钟 |
-| `min_update_interval_seconds` | `8` | 短时间连续更新会被削弱，避免刷屏洗掉情绪 |
-| `allow_emotion_reset_backdoor` | `true` | 是否保留手动/API 重置后门 |
+| `energy` | 模拟能量水平 | 低能量时减少主动扩展和回复长度。 |
+| `stress_load` | 模拟压力负荷 | 高压力时更谨慎、更易激惹、更需要边界。 |
+| `attention_budget` | 注意力预算 | 低注意力时更多确认，减少复杂展开。 |
+| `boundary_need` | 边界需求 | 高边界时提高拒绝清晰度和社交距离。 |
+| `dependency_risk` | 依赖/操控风险 | 高风险时降低排他性、病弱卖惨和黏性表达。 |
+| `simulation_disclosure_level` | 透明度需求 | 高时提醒这是模拟状态。 |
 
-低推理模型友好配置：
+### 配置项
 
-| 配置项 | 默认值 | 含义 |
+| 配置项 | 类型 | 默认值 | 说明 |
+| --- | --- | --- | --- |
+| `enable_humanlike_state` | bool | `false` | 启用拟人化状态模拟模块。 |
+| `humanlike_injection_strength` | float | `0.35` | 注入强度。`0` 表示不注入。 |
+| `humanlike_alpha_base` | float | `0.3` | 基础更新步长。 |
+| `humanlike_alpha_min` | float | `0.03` | 最小更新步长。 |
+| `humanlike_alpha_max` | float | `0.46` | 最大更新步长。 |
+| `humanlike_confidence_midpoint` | float | `0.5` | 置信门控中点。 |
+| `humanlike_confidence_slope` | float | `6.0` | 置信门控斜率。 |
+| `humanlike_state_half_life_seconds` | float | `21600` | 状态回落半衰期，默认 6 小时。 |
+| `humanlike_min_update_interval_seconds` | float | `8` | 反刷屏最小有效更新时间间隔。 |
+| `humanlike_rapid_update_half_life_seconds` | float | `20` | 快速连续更新门控半衰期。 |
+| `humanlike_max_impulse_per_update` | float | `0.18` | 单次更新最大冲量。 |
+| `humanlike_trajectory_limit` | int | `40` | 轨迹最多保留点数。 |
+| `humanlike_memory_write_enabled` | bool | `true` | 记忆写入时附带拟人状态注解。 |
+| `humanlike_clinical_like_enabled` | bool | `false` | 预留配置位；当前不提供疾病诊断。 |
+| `allow_humanlike_reset_backdoor` | bool | `true` | 是否允许重置拟人状态。 |
+
+### 快照分层
+
+`get_humanlike_snapshot(..., exposure=...)` 支持：
+
+| exposure | 用途 | 包含 | 不应包含 |
+| --- | --- | --- | --- |
+| `internal` | 调试和测试 | 全量值、轨迹、置信度、last_reason。 | 不默认给普通插件。 |
+| `plugin_safe` | 其他插件使用 | `output_modulation`、有限布尔标记。 | 依赖风险细节、内部阈值、心理筛查细节。 |
+| `user_facing` | 给用户解释 | 简短自然语言和可关闭/可重置提示。 | 诊断式解释、真实疾病声明、依赖暗示。 |
+
+默认是 `plugin_safe`。
+
+### Humanlike API
+
+| 方法 | 是否写入状态 | 用途 |
 | --- | --- | --- |
-| `low_reasoning_friendly_mode` | `false` | 默认关闭。开启后，情绪估计 LLM 使用短版 system prompt 和简化公式 `X_t = clamp(B_p + D_t, -1, 1)`，仍输出同一 JSON 契约，但减少长理论说明和细分证据字段压力 |
-| `low_reasoning_max_context_chars` | `1200` | 低推理模式下的上下文上限，会与 `max_context_chars` 取较小值，避免小模型被过长上下文拖垮 |
+| `get_humanlike_snapshot(event_or_session, exposure="plugin_safe")` | 否 | 获取拟人状态快照。 |
+| `get_humanlike_values(event_or_session)` | 否 | 只取 6 维值。 |
+| `get_humanlike_prompt_fragment(event_or_session)` | 否 | 获取拟人表达调制 prompt。 |
+| `observe_humanlike_text(event_or_session, text)` | 是 | 提交文本观察并更新状态。 |
+| `simulate_humanlike_update(event_or_session, text)` | 否 | 模拟更新，不落库。 |
+| `reset_humanlike_state(event_or_session)` | 是 | 重置状态；受 `allow_humanlike_reset_backdoor` 控制。 |
 
-这个模式只影响“LLM 如何估计即时观测值”，不改变状态平滑、真实时间衰减、人格基线、后果映射、冷处理持续时间或重置后门。也就是说，运行质量的骨架仍由本地公式和状态机保证；低推理模式只是让评估 prompt 更省 token。
+### 表达边界
 
-## 非诊断心理状态筛查（备用）
+humanlike 允许他/她表现得更像“有生活痕迹的角色”，例如低能量、压力高、注意力不足、需要边界或更透明。
 
-插件预留了一个独立的心理状态筛查子系统，默认关闭，由 `enable_psychological_screening` 控制。它不是心理诊断、不是医疗建议，也不替代心理咨询师、精神科医生或其他合格专业人员的评估；它只做“对话文本中显性的状态线索记录、长期趋势和风险提示”。
+但当前实现不允许把这些模拟状态解释成：
 
-该模块使用独立 KV key：`psychological_screening:{session}`，不会写入或改变原有 `emotion_state:{session}`。公共快照 schema 为 `astrbot.psychological_screening.v1`，所有 payload 都带有：
+- 真实意识。
+- 真实痛苦。
+- 真实身体状态。
+- 真实疾病。
+- 需要用户承担现实照护责任。
+
+如果 `dependency_risk` 高，插件会倾向于降低排他依恋、内疚操控、病弱卖惨和黏性表达。
+
+---
+
+## 非诊断心理状态筛查
+
+心理筛查模块默认关闭：
+
+```text
+enable_psychological_screening = false
+```
+
+该模块是备用的长期状态建模工具，不是心理诊断、医疗建议或治疗方案。该模块只记录对话文本中显性的状态线索、长期趋势和红旗风险。
+
+### 维度
+
+| 字段 | 含义 |
+| --- | --- |
+| `distress` | 总体痛苦。 |
+| `anxiety_tension` | 焦虑/紧张。 |
+| `depressive_tone` | 抑郁语气。 |
+| `stress_load` | 压力负荷。 |
+| `sleep_disruption` | 睡眠受扰。 |
+| `social_withdrawal` | 社交退缩。 |
+| `anger_irritability` | 愤怒/易激惹。 |
+| `self_harm_risk` | 自伤风险信号。 |
+| `function_impairment` | 功能受损。 |
+| `wellbeing` | 主观幸福感。 |
+
+### 量表启发
+
+`scale_scores` 使用：
+
+- `PHQ-9-like`
+- `GAD-7-like`
+- `PSS-like`
+- `WHO-5-like`
+- `ISI-like`
+
+这里的 `like` 后缀很重要。插件没有施测原量表，也没有资格解释临床 cut-off，只能把这些参考分作为结构化状态维度的参考。
+
+快照会明确包含：
 
 ```json
 {
@@ -200,441 +1071,403 @@ payload = await emotion.build_emotion_memory_payload(
 }
 ```
 
-当前维度包括总体痛苦、焦虑/紧张、抑郁语气、压力负荷、睡眠受扰、社交退缩、愤怒/易激惹、自伤风险信号、功能受损和主观幸福感。量表化参考分采用 `PHQ-9-like`、`GAD-7-like`、`PSS-like`、`WHO-5-like`、`ISI-like` 的启发式映射，只用于筛查和趋势，不得解释为疾病诊断。
+### 配置项
 
-自伤、自杀、伤害他人、严重功能受损等信号会进入 `risk.red_flags`，并将 `requires_human_review` 置为 `true`。如果出现危机类信号，应优先提示联系当地急救、危机热线或身边可信的人，而不是继续普通陪聊或输出疾病标签。
+| 配置项 | 类型 | 默认值 | 说明 |
+| --- | --- | --- | --- |
+| `enable_psychological_screening` | bool | `false` | 启用非诊断心理状态筛查。 |
+| `psychological_alpha_base` | float | `0.32` | 基础更新步长。 |
+| `psychological_state_half_life_seconds` | float | `604800` | 长期状态自然回落半衰期，默认 7 天。 |
+| `psychological_crisis_half_life_seconds` | float | `2592000` | 红旗风险保留半衰期，默认 30 天。 |
+| `psychological_trajectory_limit` | int | `40` | 轨迹最多保留点数。 |
 
-配置项：
+### 心理筛查 API
 
-| 配置项 | 默认值 | 含义 |
+| 方法 | 是否写入状态 | 用途 |
 | --- | --- | --- |
-| `enable_psychological_screening` | `false` | 启用非诊断心理状态筛查备用模块 |
-| `psychological_state_half_life_seconds` | `604800` | 长期状态自然回落半衰期，默认 7 天 |
-| `psychological_crisis_half_life_seconds` | `2592000` | 红旗风险信号保留半衰期，默认 30 天 |
-| `psychological_trajectory_limit` | `40` | 轨迹最多保留点数 |
+| `get_psychological_screening_snapshot(event_or_session)` | 否 | 返回筛查快照。 |
+| `get_psychological_screening_values(event_or_session)` | 否 | 只取维度值。 |
+| `observe_psychological_text(event_or_session, text)` | 是 | 提交文本并更新筛查状态。 |
+| `simulate_psychological_update(event_or_session, text)` | 否 | 模拟筛查变化，不落库。 |
+| `reset_psychological_screening_state(event_or_session)` | 是 | 重置筛查状态。 |
+
+出现自伤、自杀、伤害他人、严重功能受损等红旗信号时，payload 会把 `requires_human_review` 置为 `true`。这类场景应优先提示人工复核、当地急救、危机热线或身边可信的人，而不是继续普通陪聊或输出疾病标签。
+
+---
+
+## 文献知识库
+
+本项目保留了三个知识库，便于后续继续扩展模型。
+
+### 情绪模型知识库
+
+目录：`literature_kb/`
+
+当前构建结果见 `docs/literature_kb.md`：
+
+| 文件 | 用途 |
+| --- | --- |
+| `literature_kb/works.jsonl` | 去重后的机器可读文献库。 |
+| `literature_kb/works.csv` | 表格检索索引。 |
+| `literature_kb/top_journal_candidates.jsonl` | 顶刊/高影响候选。 |
+| `literature_kb/evidence-map.md` | 证据到建模主张的映射。 |
+| `literature_kb/topic-summary.md` | 检索主题和期刊分布。 |
+| `literature_kb/manifest.json` | 构建元数据。 |
+
+当前统计：
+
+- 去重文献：1727 篇。
+- 顶刊/高影响候选：120 篇。
+- 数据源：OpenAlex Works API。
+
+### 心理筛查知识库
+
+目录：`psychological_literature_kb/`
+
+当前统计见 `docs/psychological_screening.md`：
+
+- 去重文献：4401 篇。
+- 顶刊/高影响候选：260 篇。
+- 精选候选：`psychological_literature_kb/curated/top_200.jsonl`。
+
+### 拟人代理知识库
+
+目录：`humanlike_agent_literature_kb/`
+
+当前统计见 `docs/humanlike_agent_literature_kb.md`：
+
+- 去重文献：3983 篇。
+- 顶刊/高影响候选：320 篇。
+- 精选候选：`humanlike_agent_literature_kb/curated/top_200.jsonl`。
+
+该知识库覆盖：
+
+- 稳态、异稳态、内感与预测加工。
+- 昼夜节律、睡眠压力、疲劳与认知表现。
+- 注意力、工作记忆、认知负荷与人因可靠性。
+- 基本心理需求、动机和目标调节。
+- 人格、气质、Big Five、BIS/BAS 与情绪反应性。
+- 依恋、信任、亲密度、关系破裂与修复。
+- 自传式记忆、叙事身份和自我连续性。
+- 可信代理、生成式代理、社会机器人和关系型代理。
+- 数字表型、计算精神病学和长期潜在状态。
+- 拟人化、AI companion、安全、伦理、情感依赖与操控风险。
+
+### 重要使用原则
+
+这些知识库基于题名、摘要级元数据、DOI 元数据、期刊和检索主题生成，适合做模型设计依据和证据地图。若要写强临床断言、引用具体结论、设定临床阈值，必须继续核验全文或权威指南。
+
+文献 citation id 不会直接提高情绪置信度，也不会放大冷处理强度，更不会绕过半衰期、clamp、安全边界或重置后门。
+
+---
+
+## 文档导航
+
+| 文档 | 内容 |
+| --- | --- |
+| `docs/theory.md` | 多维情绪状态模型、公式推导和理论说明。 |
+| `docs/literature_kb.md` | 情绪模型文献知识库说明。 |
+| `docs/psychological_screening.md` | 非诊断心理筛查模块说明。 |
+| `docs/humanlike_agent_model_roadmap.md` | 拟人/有机体样代理模型路线。 |
+| `docs/humanlike_agent_iteration_log.md` | humanlike 模块 10 轮自我迭代记录。 |
+| `docs/humanlike_agent_literature_kb.md` | 拟人代理文献知识库说明。 |
+| `docs/branching_strategy.md` | 功能分支维护策略。 |
+
+---
+
+## 理论依据简表
+
+本插件的模型设计主要受以下理论方向约束：
+
+| 方向 | 用在插件中的位置 |
+| --- | --- |
+| PAD 情绪模型 | `valence`、`arousal`、`dominance` 三维连续情绪空间。 |
+| Russell 环形情感模型 | 效价和唤醒作为基础情感坐标。 |
+| OCC 模型 | 事件、行动者和对象评价，尤其是目标一致性和责任归因。 |
+| Appraisal theory | 目标一致性、可控性、确定性、责任、规范违背等评价字段。 |
+| 情绪动力学 / emotional inertia | 半衰期、惯性、平滑和状态持续性。 |
+| Action tendency / action readiness | 把情绪映射为靠近、退避、对抗、修复等行动倾向。 |
+| 宽恕与信任修复研究 | 道歉、补救、责任承认、重复犯错对关系修复的影响。 |
+| Demand-withdraw / ostracism 研究 | 冷处理、撤退、沉默和关系压力的后果建模。 |
+| 情感计算 | 把情绪作为可计算调制状态，而不是声称真实体验。 |
+| HCI / 关系型代理伦理 | 拟人化、依赖风险、透明度和用户责任边界。 |
+
+基础参考包括：
+
+- Mehrabian, A., & Russell, J. A. (1974). *An Approach to Environmental Psychology*.
+- Russell, J. A. (1980). A circumplex model of affect. *Journal of Personality and Social Psychology*.
+- Ortony, A., Clore, G. L., & Collins, A. (1988). *The Cognitive Structure of Emotions*.
+- Lazarus, R. S. (1991). *Emotion and Adaptation*.
+- Scherer, K. R. (2001/2005). Appraisal and component process approaches to emotion.
+- Frijda, N. H. (1986). *The Emotions*.
+- Kuppens, P., Allen, N. B., & Sheeber, L. B. (2010). Emotional inertia and psychological maladjustment.
+- Picard, R. W. (1997). *Affective Computing*.
+- Williams, K. D. (2007). Ostracism. *Annual Review of Psychology*.
+- McCullough, M. E. 等关于宽恕、道歉和关系修复的研究。
+- W3C EmotionML 1.0 作为情绪表示格式的工程参考。
+
+---
+
+## 测试与维护
+
+### 本地测试命令
+
+推荐在插件根目录执行：
+
+```powershell
+py -3.13 -m unittest discover -s tests -v
+```
+
+语法检查：
+
+```powershell
+py -3.13 -m py_compile main.py emotion_engine.py psychological_screening.py humanlike_engine.py prompts.py public_api.py scripts\build_literature_kb.py scripts\build_psychological_literature_kb.py scripts\build_humanlike_agent_literature_kb.py
+```
+
+配置 schema 检查：
+
+```powershell
+py -3.13 -m json.tool _conf_schema.json
+```
+
+### 当前测试覆盖方向
+
+| 文件 | 重点 |
+| --- | --- |
+| `tests/test_emotion_engine.py` | 情绪更新、人格基线、真实时间衰减、关系修复、冷处理清除。 |
+| `tests/test_public_api.py` | 公共快照、记忆 payload、reset 后门、插件服务协议。 |
+| `tests/test_humanlike_engine.py` | P0 拟人状态、快照分层、注入片段、记忆注解。 |
+| `tests/test_psychological_screening.py` | 非诊断筛查、量表启发、红旗信号、长期轨迹。 |
+
+### 分支策略
+
+当前仓库以完整插件为共同起点，再按功能建立维护分支。详见 `docs/branching_strategy.md`。
+
+| 分支 | 维护范围 |
+| --- | --- |
+| `codex/complete-emotional-bot-plugin` | 完整作品基线。 |
+| `codex/emotion-core` | 情绪维度、人格基线、动力学、关系修复。 |
+| `codex/astrbot-integration` | `main.py`、hook、配置、命令、KV 持久化。 |
+| `codex/public-api-memory` | `public_api.py`、LivingMemory、公共协议。 |
+| `codex/psychological-screening` | 非诊断心理筛查和相关知识库。 |
+| `codex/literature-kbs` | 文献库构建脚本和证据地图。 |
+| `codex/humanlike-agent-roadmap` | humanlike 路线、文献库和迭代记录。 |
+| `codex/tests-validation` | 测试与验证策略。 |
+| `codex/docs-config` | README、docs、配置说明。 |
+
+---
+
+## 故障排查
+
+### 插件没有加载
+
+检查顺序：
+
+1. 插件目录名是否为 `astrbot_plugin_emotional_state`。
+2. `metadata.yaml` 是否在插件根目录。
+3. AstrBot 版本是否满足 `>=4.9.2,<5.0.0`。
+4. WebUI 是否已经重载插件或重启 AstrBot。
+
+### 情绪状态不变化
+
+检查：
+
+1. `enabled=true`。
+2. `use_llm_assessor=true`。
+3. `emotion_provider_id` 是否可用；留空时当前会话模型是否可调用。
+4. `assessment_timing` 是否为 `pre`、`post` 或 `both`。
+5. 是否刚刚连续刷屏，导致 `min_update_interval_seconds` 和快速门控削弱了更新。
+
+### 情绪变化太剧烈
+
+降低：
+
+```text
+alpha_base
+alpha_max
+reactivity
+consequence_strength
+```
+
+提高：
+
+```text
+baseline_half_life_seconds
+min_update_interval_seconds
+rapid_update_half_life_seconds
+consequence_threshold
+```
+
+### 情绪恢复太慢
+
+降低：
+
+```text
+baseline_half_life_seconds
+consequence_half_life_seconds
+cold_war_duration_seconds
+short_effect_duration_seconds
+```
+
+也可以使用 `/emotion_reset`，前提是：
+
+```text
+allow_emotion_reset_backdoor = true
+```
+
+### 冷处理没有消失
+
+冷处理按真实时间持续，不按消息数量消耗。检查：
+
+1. 当前是否还在 `cold_war_duration_seconds` 范围内。
+2. 用户是否有承认、道歉、补救或解释。
+3. LLM 是否输出了 `forgive`、`repair` 或较高 `forgiveness_readiness`。
+4. `enable_safety_boundary` 只控制表现边界，不会直接清除冷处理。
+
+### 低推理模型输出 JSON 不稳定
+
+建议：
+
+```text
+low_reasoning_friendly_mode = true
+low_reasoning_max_context_chars = 800
+assessor_temperature = 0.0
+```
+
+同时选择更稳定的 `emotion_provider_id`。
+
+### token 消耗太高
+
+优先调整：
+
+```text
+assessment_timing = pre
+max_context_chars = 1200
+low_reasoning_friendly_mode = true
+low_reasoning_max_context_chars = 800
+```
+
+如果只想让插件记忆情绪而不影响主 LLM：
+
+```text
+inject_state = false
+```
+
+### LivingMemory 没有写入情绪
+
+检查：
+
+1. 长期记忆插件是否调用了 `build_emotion_memory_payload(...)`。
+2. 是否把返回 payload 原样写入，或至少合并了 `emotion_at_write`。
+3. 没有事件对象时是否显式传入 `session_key`。
+4. 是否误把 `include_prompt_fragment` 当作必须项；该参数默认可以关闭。
+
+### `humanlike_state_at_write` 没有出现
+
+检查：
+
+```text
+humanlike_memory_write_enabled = true
+```
+
+如果 `enable_humanlike_state=false`，payload 仍可能出现，但会标记 `enabled=false`。
+
+### 拟人状态没有生效
+
+检查：
+
+```text
+enable_humanlike_state = true
+inject_state = true
+humanlike_injection_strength > 0
+```
+
+然后使用：
+
+```text
+/humanlike_state
+```
+
+查看是否已有状态。
+
+### 心理筛查没有输出
+
+默认关闭。需要先启用：
+
+```text
+enable_psychological_screening = true
+```
+
+再使用：
+
+```text
+/psych_state
+```
+
+### 输出太像真实疾病或真实意识
+
+建议：
+
+```text
+enable_safety_boundary = true
+humanlike_injection_strength = 0.15
+enable_humanlike_state = false
+humanlike_clinical_like_enabled = false
+```
+
+同时检查 persona 本身是否要求 bot 声称真实痛苦、真实疾病或需要用户照顾。插件的模拟状态不应替代明确的人设边界。
+
+---
+
+## FAQ
+
+### Q: 这个插件会让 bot 真的有情绪吗？
+
+不会。本插件维护的是计算性情绪状态，用于调制表达、关系后果和插件间协作。
+
+### Q: 为什么要用 7 维，而不是只用快乐/生气/难过？
+
+单标签无法表达“高唤醒但想修复”“低效价但仍亲近”“不确定所以先核对”等复杂状态。7 维向量能让状态连续变化，也方便其他插件读取。
+
+### Q: 为什么不能靠多发消息把冷战刷掉？
+
+因为冷处理持续时间和后果衰减按真实时间计算。大量消息会产生新观测，但不会直接消耗剩余时间。
+
+### Q: bot 生气后一定会冷战吗？
+
+不会。LLM 会先判断关系决策：`forgive`、`repair`、`boundary`、`cold_war`、`escalate` 或 `none`。本地引擎还会检查错误是否被承认、是否补救、是否是 bot 误读或任性。
+
+### Q: 不同 persona 真的会不同吗？
+
+会。插件会从 persona 文本构造情绪基线和参数偏置，同一事件对不同人格会有不同默认解释和反应强度。
+
+### Q: 安全边界能关吗？
+
+能。`enable_safety_boundary` 默认开启，关闭后本插件不再附加冷处理表现限制，只按情绪后果调制语气和互动策略。
+
+### Q: 心理筛查模块能诊断疾病吗？
+
+不能。该模块只能做非诊断状态记录、趋势观察和红旗提示。
+
+### Q: 我想让其他插件只拿“当前是否该亲近用户”，应该读什么？
+
+优先读：
 
 ```python
-snapshot = await emotion.observe_emotion_text(
-    session_key="mood_game:user-42:chapter-3",
-    text="玩家拒绝了 bot 的道歉",
-    role="user",
-    source="mood_game",
-    observed_at=1715000000.0,
-    use_llm=False,
-)
+relationship = await emotion.get_emotion_relationship(event)
+consequences = await emotion.get_emotion_consequences(event)
 ```
 
-公共快照结构示例：
+`relationship_decision.decision` 和 `consequences.active_effects` 比单一情绪标签更可靠。
 
-```json
-{
-  "schema_version": "astrbot.emotion_state.v2",
-  "api_version": "1.0",
-  "kind": "emotion_state",
-  "session_key": "aiocqhttp:GroupMessage:12345",
-  "emotion": {
-    "values": {
-      "valence": -0.12,
-      "arousal": 0.43,
-      "dominance": -0.08,
-      "goal_congruence": -0.18,
-      "certainty": 0.21,
-      "control": -0.15,
-      "affiliation": 0.16
-    },
-    "label": "embarrassed_defensive",
-    "confidence": 0.76,
-    "turns": 8,
-    "inertia": 0.58,
-    "last_alpha": 0.42,
-    "last_surprise": 0.31,
-    "last_appraisal": {
-      "relationship_decision": {
-        "decision": "repair",
-        "intensity": 0.58,
-        "forgiveness": 0.74,
-        "relationship_importance": 0.8
-      },
-      "conflict_analysis": {
-        "cause": "user_fault",
-        "fault_severity": 0.62,
-        "user_acknowledged": true,
-        "apology_sincerity": 0.78,
-        "repaired": true,
-        "repair_quality": 0.82,
-        "repeat_offense": 0.1,
-        "bot_whim_level": 0.0,
-        "trust_damage": 0.32,
-        "ambiguity_level": 0.1,
-        "misread_likelihood": 0.0,
-        "apology_completeness": {
-          "responsibility_acknowledgement": 0.8,
-          "harm_acknowledgement": 0.7,
-          "remorse": 0.8,
-          "repair_offer": 0.8,
-          "future_commitment": 0.6
-        },
-        "withdrawal_motive": "self_protection",
-        "evidence": {
-          "primary_theory": "forgiveness",
-          "citation_ids": ["KB0584"],
-          "evidence_strength": "moderate",
-          "uncertainty_reason": ""
-        }
-      }
-    }
-  },
-  "persona": {
-    "persona_id": "xiaojv",
-    "name": "小鞠",
-    "fingerprint": "e13b7c02d0a5d991"
-  },
-  "relationship": {
-    "relationship_decision": {
-      "decision": "repair",
-      "intensity": 0.58,
-      "forgiveness": 0.74,
-      "relationship_importance": 0.8
-    },
-    "conflict_analysis": {
-      "cause": "user_fault",
-      "fault_severity": 0.62,
-      "user_acknowledged": true,
-      "apology_sincerity": 0.78,
-      "repaired": true,
-      "repair_quality": 0.82,
-      "repeat_offense": 0.1,
-      "bot_whim_level": 0.0,
-      "repair_status": "repaired",
-      "repair_signal": 0.82,
-      "grievance_score": 0.212,
-      "self_correction_score": 0.82
-    },
-    "repair_status": "repaired",
-    "repair_signal": 0.82,
-    "grievance_score": 0.212,
-    "self_correction_score": 0.82
-  },
-  "consequences": {
-    "active_effects": {
-      "careful_checking": 2
-    },
-    "values": {
-      "withdrawal": 0.18,
-      "caution": 0.51,
-      "reassurance": 0.36
-    }
-  },
-  "safety": {
-    "enabled": true,
-    "computational_state_only": true,
-    "cold_war_is_style_modulation_only": true
-  }
-}
-```
+---
 
-`safety` 字段由配置项 `enable_safety_boundary` 控制，默认开启；关闭后公共快照不会输出该字段，注入 prompt 也不会额外限制冷处理的表现方式。
+## 参考结构来源
 
-本插件还暴露两个只读/模拟型 LLM tool：`get_bot_emotion_state` 与 `simulate_bot_emotion_update`。它们适合让主模型查询当前情绪或预演候选回复，不建议把 LLM tool 当作插件间互调协议；插件间互调请优先使用上面的 Python API。
+这份 README 的组织方式参考了 [Ayleovelle/astrbot_plugin_volcengine_asr](https://github.com/Ayleovelle/astrbot_plugin_volcengine_asr) 的项目主页写法：先讲项目定位，再讲工作流、配置、边界、排障和维护，而不是只堆参数。
 
-## 人格建模
+---
 
-不同 bot 的 persona 不只是回复风格文本，也会进入情绪模型。插件会尽量读取 AstrBot 当前最终生效的人格：优先使用 `persona_manager.resolve_selected_persona(...)`，同时保留 `request.system_prompt` 中已经注入的人格提示词；如果无法解析，则退回默认 persona。
+## 许可证
 
-插件会为当前人格生成：
-
-```text
-b_p: 当前人格的情绪稳定基线
-theta_p: 当前人格的动力学参数偏置
-fingerprint_p: 当前人格指纹
-```
-
-例如，温柔、亲近、乐观的人格会有更高的 `valence` 与 `affiliation` 基线；害羞、内向的人格会有更低的 `dominance` 和更高的紧张倾向；冷静、理性的人格会有更低的反应强度和更快的基线恢复。
-
-当会话切换 persona 时，插件默认根据新人格指纹重置情绪状态，避免旧人格的情绪残留到新 bot 身上。可以在配置中关闭 `reset_on_persona_change`，让旧状态迁移到新人格基线附近。
-
-## 情绪维度
-
-令第 `t` 轮的情绪状态为：
-
-```text
-E_t = [V_t, A_t, D_t, G_t, C_t, K_t, S_t]^T in [-1, 1]^7
-```
-
-各维含义：
-
-| 维度 | 含义 | 理论来源 |
-| --- | --- | --- |
-| `valence` | 愉悦/不愉悦 | Russell circumplex, PAD |
-| `arousal` | 激活/低激活 | Russell circumplex, PAD |
-| `dominance` | 支配感、自主感 | PAD |
-| `goal_congruence` | 事件是否符合 bot 的目标 | OCC, appraisal theory |
-| `certainty` | 对情境的确定性 | appraisal theory |
-| `control` | 对局面的可控性 | appraisal theory |
-| `affiliation` | 社交亲近、信任、安全感 | OCC/appraisal 的对象与社会意义评价 |
-
-PAD 提供最小三维骨架。扩展的 appraisal 维度用于回答“为什么 bot 会处在这种状态”，避免插件只做简单的“开心/生气/悲伤”分类。
-
-## 情绪后果
-
-插件不会把情绪直接等同于回复模板，而是加入一层后果状态：
-
-```text
-Q_t = [approach, withdrawal, confrontation, appeasement, repair,
-       reassurance, caution, rumination, expressiveness, problem_solving]
-```
-
-`Q_t` 会按真实时间衰减，而不是按消息轮次衰减。因此“生气后的冷处理”“受伤后的短句”“误会后的求证”“关系仍重要时的修复”都可以持续一小段时间；短时间内连续发送大量文本不会让后果被快速刷掉。
-
-在公式规则之外，LLM 还会输出 `appraisal.relationship_decision`，用于判断负面情绪后的关系走向：
-
-| 决策 | 后果 |
-| --- | --- |
-| `forgive` | 原谅/翻篇，清除或缩短 `cold_war`，降低回避、对抗和反刍，增强修复与靠近 |
-| `repair` | 愿意修复，但会增加求证、解释、确认意图 |
-| `boundary` | 设边界，增强坚定表达和谨慎，但不自动进入冷战 |
-| `cold_war` | 上升为冷处理，增加回避、反刍和真实时间持续效果 |
-| `escalate` | 冲突升级，增强对抗和表达强度 |
-
-这让“生气以后是否原谅用户”不再只由数值公式决定，而是由 LLM 结合上下文、道歉/修复信号、人格设定和关系重要性做二次判断。
-
-LLM 还会输出 `appraisal.conflict_analysis`，解释生气或受伤的原因，以及错误是否已经被改正：
-
-| 字段 | 含义 |
-| --- | --- |
-| `cause` | `user_fault`、`bot_whim`、`bot_misread`、`mutual`、`external` 或 `none` |
-| `fault_severity` | 错误严重度 |
-| `user_acknowledged` / `apology_sincerity` | 用户是否承认、道歉是否可信 |
-| `repaired` / `repair_quality` | 错误是否被改正、补救质量如何 |
-| `repeat_offense` | 是否重复犯错 |
-| `bot_whim_level` | 是否主要是他/她任性、误读或小脾气 |
-| `perceived_intentionality` / `controllability` | 用户是否像是故意、是否本可避免 |
-| `responsibility_attribution` | 责任归因：用户、bot、双方、外部、模糊或无 |
-| `trust_damage` / `expectation_violation` | 信任损伤和关系预期违背 |
-| `ambiguity_level` / `misread_likelihood` | 语义模糊和他/她误读用户的可能性 |
-| `apology_completeness` / `restorative_action` | 道歉是否完整、是否有实际补救行动 |
-| `forgiveness_readiness` / `resentment_residue` | 宽恕准备度和修复后残留委屈 |
-| `withdrawal_motive` | 撤退动机：冷静、自我保护、惩罚、不确定、低能量或无 |
-| `boundary_legitimacy` / `emotion_regulation_load` | 边界合理性和情绪调节负荷 |
-| `evidence` | 理论依据、知识库 citation id、证据强度和不确定原因 |
-
-插件会从这些字段派生出 `repair_status`、`repair_signal`、`grievance_score` 和 `self_correction_score`。`repair_status` 取值为 `unresolved`、`acknowledged`、`apologized`、`repaired` 或 `restored`；`repair_signal` 表示道歉完整度、补救质量和实际补救行动的综合强度；`grievance_score` 表示仍有多少合理委屈或边界需求；`self_correction_score` 表示他/她意识到自己任性、误读，或用户已充分修复后应当软化的强度。
-
-`get_emotion_relationship(...)` 会直接返回这些字段，适合好感度、剧情、任务处罚、长期记忆等插件调用；`observe_emotion_text(...)` 的返回值也会在 `observation.relationship` 中给出本次观测的同一套派生结果。
-
-如果用户确实犯错、严重且反复、意图明确、信任受损、没有承认或补救，系统会增强边界、谨慎、反刍，必要时允许冷处理；如果用户已经承认并高质量补救，会降低回避和反刍，清除或缩短冷战；如果主要是他/她任性、误读或情境仍模糊，则会抑制惩罚性冷处理，转向修复、求证或自我缓和。即使 LLM 没有给出 `relationship_decision`，`conflict_analysis` 本身也会影响后果层，避免“知道原因但行为没有变化”。
-
-维度到后果的大致解释：
-
-| 维度 | 后果含义 |
-| --- | --- |
-| 负 `valence` | 防御、回避、反击、修复或求证 |
-| 高 `arousal` | 更快、更强、更难抑制；低唤醒则更沉默、延迟、冷却 |
-| 高 `dominance` | 更可能设边界、质问、主动推进；低支配更容易退让或寻求确认 |
-| 低 `goal_congruence` | 目标受阻，可能触发挫败、生气、抱怨或冷处理 |
-| 低 `certainty` | 优先求证、试探、谨慎，不直接升级冲突 |
-| 低 `control` | 倾向撤退、降频或无力感；高控制更容易协商解决 |
-| 低 `affiliation` | 负面情绪更容易变成疏离、排斥、冷战；高亲和则更容易修复 |
-
-复合状态示例：
-
-| 复合状态 | 后果 |
-| --- | --- |
-| 负效价 + 高唤醒 + 高支配 + 目标受阻 | `direct_boundary`，短时强硬设边界 |
-| 负效价 + 低唤醒 + 低亲和 + 低控制 | `cold_war`，轻微降频、短句、保持距离 |
-| 负效价 + 低确定 + 高亲和 | `careful_checking`，先确认意图 |
-| 负效价 + 高亲和 + 高控制 | `repair_bid`，主动修复或解释 |
-| 正效价 + 高亲和 | `warm_approach`，更主动、更温和 |
-
-安全边界可通过 `enable_safety_boundary` 打开或关闭，默认打开。开启时，冷处理只允许表现为轻微疏离、短句和边界感，不能羞辱、威胁、操控用户，也不能拒绝必要帮助；关闭时，插件只把 `cold_war` 作为普通持久后果暴露给 prompt 和公共 API。
-
-## LLM 即时观测
-
-每轮插件把最近上下文、当前用户文本或 bot 回复、当前人格画像、上一轮状态交给 LLM，得到即时观测：
-
-```text
-X_t = f_llm(C_t, U_t, P, E_(t-1))
-```
-
-其中：
-
-```text
-C_t: 最近对话上下文
-U_t: 当前待评估文本
-P: 当前 persona 及其人格设定
-E_(t-1): 上一轮平滑情绪状态
-X_t: 本轮即时情绪观测值
-```
-
-LLM 必须输出 JSON：
-
-```json
-{
-  "label": "embarrassed_defensive",
-  "dimensions": {
-    "valence": -0.12,
-    "arousal": 0.68,
-    "dominance": -0.28,
-    "goal_congruence": -0.18,
-    "certainty": -0.08,
-    "control": -0.30,
-    "affiliation": 0.22
-  },
-  "confidence": 0.76,
-  "appraisal": {
-    "agency": "user",
-    "novelty": 0.45,
-    "social_meaning": "friendly teasing",
-    "relationship_decision": {
-      "decision": "repair",
-      "intensity": 0.35,
-      "forgiveness": 0.72,
-      "relationship_importance": 0.8,
-      "reason": "用户承认玩笑过界，bot 仍在乎关系。"
-    },
-    "conflict_analysis": {
-      "cause": "user_fault",
-      "fault_severity": 0.4,
-      "user_acknowledged": true,
-      "apology_sincerity": 0.75,
-      "repaired": true,
-      "repair_quality": 0.7,
-      "repeat_offense": 0.0,
-      "bot_whim_level": 0.0,
-      "reason": "冒犯较轻，已经道歉并修正。"
-    }
-  },
-  "reason": "用户的轻微调侃让 bot 害羞和紧张，但关系仍偏友好。"
-}
-```
-
-## 数学模型
-
-直接令 `E_t = X_t` 会导致情绪跳变，所以插件把 LLM 输出视为“观测值”，而不是最终状态。
-
-更完整的推导见 [docs/theory.md](docs/theory.md)。那里把更新式写成带惯性的加权最小化问题，并说明了自适应步长、惊讶度、弱耦合项和稳定性边界。
-
-文献知识库存放在 [literature_kb](literature_kb)；构建说明见 [docs/literature_kb.md](docs/literature_kb.md)。当前知识库包含 1727 篇去重文献和 120 篇顶刊/高影响候选，用于支撑 appraisal、宽恕/修复、冷处理、人格差异和情感代理等建模主题。
-
-心理筛查与数字心理健康的独立知识库存放在 [psychological_literature_kb](psychological_literature_kb)，由 [scripts/build_psychological_literature_kb.py](scripts/build_psychological_literature_kb.py) 构建。当前包含 4401 篇去重文献、260 篇 top/high-impact 候选，以及 [curated/top_200.jsonl](psychological_literature_kb/curated/top_200.jsonl)。它用于支撑非诊断筛查、量表启发、长期状态建模、数字心理健康安全和 LLM/聊天机器人治理，不可作为临床诊断依据。
-
-拟人/有机体样代理的跨学科知识库存放在 [humanlike_agent_literature_kb](humanlike_agent_literature_kb)，由 [scripts/build_humanlike_agent_literature_kb.py](scripts/build_humanlike_agent_literature_kb.py) 构建。当前包含 3983 篇去重文献、320 篇 top/high-impact 候选，以及 [curated/top_200.jsonl](humanlike_agent_literature_kb/curated/top_200.jsonl)。它用于支撑稳态/异稳态、疲劳、认知资源、需求动机、依恋关系、自传式记忆、生成式代理和拟人化安全等方向；模型路线见 [docs/humanlike_agent_model_roadmap.md](docs/humanlike_agent_model_roadmap.md)，知识库说明见 [docs/humanlike_agent_literature_kb.md](docs/humanlike_agent_literature_kb.md)。
-
-拟人/有机体样代理路线已经过 10 轮自我迭代，记录见 [docs/humanlike_agent_iteration_log.md](docs/humanlike_agent_iteration_log.md)。迭代后的首版建议是：`humanlike_state` 默认关闭，只读情绪核心，P0 仅保留 `energy`、`stress_load`、`attention_budget`、`boundary_need`、`dependency_risk` 和 `simulation_disclosure_level`，并通过分层快照、记忆来源约束、依赖防护和 reset 后门控制风险。
-
-### 1. 基线回归
-
-先按真实经过时间 `Δt` 让上一状态向当前人格稳定基线 `b_p` 缓慢回归：
-
-```text
-B_t = (1 - gamma_p) E_(t-1) + gamma_p b_p
-gamma_p(Δt) = 1 - 2^(-Δt / H_p)
-```
-
-`H_p` 是人格调制后的恢复半衰期，默认约 6 小时。真实时间每过一个半衰期，状态偏离人格基线的部分约减少一半；如果用户在几秒内刷很多条消息，`Δt` 仍然很小，不会把长期情绪强行刷回基线。
-
-### 2. 加权惊讶度
-
-计算观测 `X_t` 和先验 `B_t` 的加权距离：
-
-```text
-delta_t = sqrt( sum_i w_i (X_(t,i) - B_(t,i))^2 / sum_i w_i )
-```
-
-`w_i` 是不同维度的权重。`delta_t` 越大，说明本轮事件和已有状态差距越大，应该允许更明显的情绪改变。
-
-### 3. 置信门控
-
-LLM 给出置信度 `c_t`。插件使用 sigmoid 门控：
-
-```text
-g(c_t) = 1 / (1 + exp(-k(c_t - c_0)))
-```
-
-`c_0` 是置信中点，`k` 是斜率。这样低置信输出不会强行改写状态，高置信输出才获得更大权重。
-
-### 4. 自适应更新步长
-
-最终更新步长为：
-
-```text
-alpha_t = clamp(alpha_base,p * g(c_t) * (1 + r_p delta_t), alpha_min, alpha_max)
-```
-
-其中 `alpha_base,p` 与 `r_p` 都由 persona 调制。这相当于把“人格稳定倾向”“情绪惯性”和“事件突发性”合在一起：稳定事件慢慢影响状态，突发事件可以更快改变状态，但不会超过 `alpha_max`。
-
-### 5. 状态更新
-
-基础更新为：
-
-```text
-E'_t = B_t + alpha_t (X_t - B_t)
-```
-
-随后加入两个心理上可解释的弱耦合项：
-
-```text
-A_t = A'_t + eta * alpha_t * delta_t * (1 - |A'_t|)
-```
-
-惊讶度会提高唤醒度，但当唤醒度已经接近边界时自动衰减。
-
-```text
-D_t = D'_t + lambda * alpha_t * (K'_t - D'_t)
-```
-
-这里 `K_t` 是 `control`。情境可控性会轻微牵引支配感，但不会完全等同于支配感。
-
-最后所有维度都被裁剪到 `[-1, 1]`：
-
-```text
-E_t = clip(E_t, -1, 1)
-```
-
-由于 `B_t` 和 `E'_t` 都是有界向量的凸组合，且最后有裁剪，状态始终有界；当输入长期接近人格基线时，`E_t` 会收敛到 `b_p` 附近。
-
-## 理论依据
-
-本插件采用“维度情绪模型 + 认知评价 + 情绪动力学”的混合框架。
-
-Russell 的 circumplex model 使用 `valence` 和 `arousal` 表示核心情感空间。Mehrabian 与 Russell 的 PAD 模型加入 `dominance`，可以区分同为负效价高唤醒的情绪，例如恐惧和愤怒。OCC 理论与 appraisal theory 说明情绪来自主体对事件、行动者和对象的评价，因此插件增加目标一致性、确定性、可控性和社交亲近度。Kuppens 等关于 emotional inertia 的研究支持“情绪状态对变化存在惯性”的建模思路，插件中的指数平滑、自适应 `alpha_t` 与基线回归正是对这一点的工程化表达。
-
-## 参考文献
-
-1. Mehrabian, A., & Russell, J. A. (1974). *An Approach to Environmental Psychology*. MIT Press. https://mitpress.mit.edu/9780262130905/an-approach-to-environmental-psychology/
-2. Mehrabian, A., & Russell, J. A. (1974). The basic emotional impact of environments. *Perceptual and Motor Skills, 38*(1), 283-301. https://doi.org/10.2466/pms.1974.38.1.283
-3. Russell, J. A. (1980). A circumplex model of affect. *Journal of Personality and Social Psychology, 39*(6), 1161-1178. https://doi.org/10.1037/h0077714
-4. Ortony, A., Clore, G. L., & Collins, A. (1988). *The Cognitive Structure of Emotions*. Cambridge University Press. https://doi.org/10.1017/CBO9780511571299
-5. Lazarus, R. S. (1991). *Emotion and Adaptation*. Oxford University Press. https://doi.org/10.1093/oso/9780195069945.001.0001
-6. Scherer, K. R., Schorr, A., & Johnstone, T. (Eds.). (2001). *Appraisal Processes in Emotion: Theory, Methods, Research*. Oxford University Press. https://doi.org/10.1093/oso/9780195130072.001.0001
-7. Scherer, K. R. (2005). What are emotions? And how can they be measured? *Social Science Information, 44*(4), 695-729. https://doi.org/10.1177/0539018405058216
-8. Bradley, M. M., & Lang, P. J. (1994). Measuring emotion: The self-assessment manikin and the semantic differential. *Journal of Behavior Therapy and Experimental Psychiatry, 25*(1), 49-59. https://doi.org/10.1016/0005-7916(94)90063-9
-9. Kuppens, P., Allen, N. B., & Sheeber, L. B. (2010). Emotional inertia and psychological maladjustment. *Psychological Science, 21*(7), 984-991. https://doi.org/10.1177/0956797610372634
-10. Kuppens, P., & Verduyn, P. (2015). Looking at emotion regulation through the window of emotion dynamics. *Psychological Inquiry, 26*(1), 72-79. https://doi.org/10.1080/1047840X.2015.960505
-11. Picard, R. W. (1997). *Affective Computing*. MIT Press. https://mitpress.mit.edu/9780262161701/affective-computing/
-12. W3C. (2014). *Emotion Markup Language EmotionML 1.0*. https://www.w3.org/TR/emotionml/
-13. Frijda, N. H. (1987). Emotion, cognitive structure, and action tendency. *Cognition and Emotion, 1*(2), 115-143. https://doi.org/10.1080/02699938708408043
-14. Frijda, N. H., Kuipers, P., & ter Schure, E. (1989). Relations among emotion, appraisal, and emotional action readiness. *Journal of Personality and Social Psychology, 57*(2), 212-228. https://doi.org/10.1037/0022-3514.57.2.212
-15. Roseman, I. J., Wiest, C., & Swartz, T. S. (1994). Phenomenology, behaviors, and goals differentiate discrete emotions. *Journal of Personality and Social Psychology, 67*(2), 206-221. https://doi.org/10.1037/0022-3514.67.2.206
-16. Gross, J. J. (1998). The emerging field of emotion regulation: An integrative review. *Review of General Psychology, 2*(3), 271-299. https://doi.org/10.1037/1089-2680.2.3.271
-17. Carver, C. S., & Harmon-Jones, E. (2009). Anger is an approach-related affect: Evidence and implications. *Psychological Bulletin, 135*(2), 183-204. https://doi.org/10.1037/a0013965
-18. Christensen, A., & Heavey, C. L. (1990). Gender and social structure in the demand/withdraw pattern of marital conflict. *Journal of Personality and Social Psychology, 59*(1), 73-81. https://doi.org/10.1037/0022-3514.59.1.73
-19. Williams, K. D., Shore, W. J., & Grahe, J. E. (1998). The silent treatment: Perceptions of its behaviors and associated feelings. *Group Processes & Intergroup Relations, 1*(2), 117-141. https://doi.org/10.1177/1368430298012002
-20. Williams, K. D. (2009). Ostracism: A temporal need-threat model. *Advances in Experimental Social Psychology, 41*, 275-314. https://doi.org/10.1016/S0065-2601(08)00406-1
-
-## AstrBot API 依据
-
-- 插件入口、指令与事件钩子参考 AstrBot 插件开发文档。
-- LLM 调用参考 `context.llm_generate()`。
-- 动态上下文注入使用 `ProviderRequest.extra_user_content_parts`。
-- 状态持久化使用 AstrBot 插件 KV 存储。
-- 插件互调使用 `Context.get_registered_star()` 获取 `StarMetadata`，再通过 `star_cls` 调用已激活插件实例。
-
-相关文档：
-
-- https://docs.astrbot.app/zh/dev/star/guides/simple.html
-- https://docs.astrbot.app/zh/dev/star/guides/ai.html
-- https://docs.astrbot.app/zh/dev/star/guides/plugin-config.html
-- https://docs.astrbot.app/zh/dev/star/guides/storage.html
-- https://docs.astrbot.app/dev/star/resources/context.html
-- https://docs.astrbot.app/dev/star/resources/star_metadata.html
+本仓库当前未在文件中声明独立许可证。发布到公开插件市场前，建议补充 `LICENSE` 并在 `metadata.yaml` 或 README 中同步说明。
