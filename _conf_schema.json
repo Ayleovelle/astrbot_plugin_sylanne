@@ -198,6 +198,88 @@
     "default": false,
     "hint": "默认关闭。开启后可通过公共 API 或 /psych_state 记录与查看心理状态筛查。该模块仅用于状态记录和风险提示，不提供疾病诊断或医疗建议。"
   },
+  "enable_humanlike_state": {
+    "description": "启用拟人化状态模拟模块",
+    "type": "bool",
+    "default": false,
+    "hint": "默认关闭。开启后维护独立 humanlike_state，用于资源、边界、透明度和依赖风险调制。"
+  },
+  "humanlike_injection_strength": {
+    "description": "拟人化状态注入强度",
+    "type": "float",
+    "default": 0.35,
+    "hint": "0 表示不注入拟人化调制片段；大于 0 时仅在 inject_state 和 enable_humanlike_state 同时开启后生效。"
+  },
+  "humanlike_alpha_base": {
+    "description": "拟人化状态基础更新步长",
+    "type": "float",
+    "default": 0.3
+  },
+  "humanlike_alpha_min": {
+    "description": "拟人化状态最小更新步长",
+    "type": "float",
+    "default": 0.03
+  },
+  "humanlike_alpha_max": {
+    "description": "拟人化状态最大更新步长",
+    "type": "float",
+    "default": 0.46
+  },
+  "humanlike_confidence_midpoint": {
+    "description": "拟人化状态置信门控中点",
+    "type": "float",
+    "default": 0.5
+  },
+  "humanlike_confidence_slope": {
+    "description": "拟人化状态置信门控斜率",
+    "type": "float",
+    "default": 6.0
+  },
+  "humanlike_state_half_life_seconds": {
+    "description": "拟人化状态按真实时间回落的半衰期（秒）",
+    "type": "float",
+    "default": 21600,
+    "hint": "默认 6 小时。状态按真实经过时间衰减，不能靠短时间大量文本强行刷掉长期状态。"
+  },
+  "humanlike_min_update_interval_seconds": {
+    "description": "拟人化状态反刷屏最小有效更新时间间隔（秒）",
+    "type": "float",
+    "default": 8
+  },
+  "humanlike_rapid_update_half_life_seconds": {
+    "description": "拟人化状态快速连续更新门控半衰期（秒）",
+    "type": "float",
+    "default": 20
+  },
+  "humanlike_max_impulse_per_update": {
+    "description": "拟人化状态单次更新最大冲量",
+    "type": "float",
+    "default": 0.18,
+    "hint": "限制单次文本观察的最大影响，避免超长文本覆盖长期状态。"
+  },
+  "humanlike_trajectory_limit": {
+    "description": "拟人化状态轨迹最多保留点数",
+    "type": "int",
+    "default": 40
+  },
+  "humanlike_memory_write_enabled": {
+    "description": "为记忆写入附带拟人化状态标注",
+    "type": "bool",
+    "default": true,
+    "hint": "build_emotion_memory_payload 会附带 humanlike_state_at_write，供 livingmemory 等插件记录当时状态。"
+  },
+  "humanlike_clinical_like_enabled": {
+    "description": "启用类临床长期状态备用模块",
+    "type": "bool",
+    "default": false,
+    "hint": "第一轮仅保留配置位，不提供疾病诊断。"
+  },
+  "allow_humanlike_reset_backdoor": {
+    "description": "允许手动/API 重置拟人化状态后门",
+    "type": "bool",
+    "default": true,
+    "hint": "默认开启，用于异常状态、严重后果或调试。"
+  },
   "psychological_alpha_base": {
     "description": "心理筛查状态基础更新步长",
     "type": "float",

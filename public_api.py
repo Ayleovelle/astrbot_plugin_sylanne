@@ -8,6 +8,7 @@ EMOTION_API_VERSION = "1.0"
 EMOTION_SCHEMA_VERSION = "astrbot.emotion_state.v2"
 EMOTION_MEMORY_SCHEMA_VERSION = "astrbot.emotion_memory.v1"
 PSYCHOLOGICAL_SCREENING_SCHEMA_VERSION = "astrbot.psychological_screening.v1"
+HUMANLIKE_STATE_SCHEMA_VERSION = "astrbot.humanlike_state.v1"
 
 
 @runtime_checkable
@@ -185,6 +186,74 @@ class EmotionServiceProtocol(Protocol):
         ...
 
 
+@runtime_checkable
+class HumanlikeStateServiceProtocol(EmotionServiceProtocol, Protocol):
+    humanlike_state_schema_version: str
+
+    async def get_humanlike_snapshot(
+        self,
+        event_or_session: Any = None,
+        *,
+        request: Any = None,
+        session_key: str | None = None,
+        exposure: str = "plugin_safe",
+        include_prompt_fragment: bool = False,
+    ) -> dict[str, Any]:
+        ...
+
+    async def get_humanlike_values(
+        self,
+        event_or_session: Any = None,
+        *,
+        request: Any = None,
+        session_key: str | None = None,
+    ) -> dict[str, float]:
+        ...
+
+    async def get_humanlike_prompt_fragment(
+        self,
+        event_or_session: Any = None,
+        *,
+        request: Any = None,
+        session_key: str | None = None,
+    ) -> str:
+        ...
+
+    async def observe_humanlike_text(
+        self,
+        event_or_session: Any = None,
+        text: str = "",
+        *,
+        request: Any = None,
+        session_key: str | None = None,
+        source: str = "plugin",
+        commit: bool = True,
+        observed_at: float | None = None,
+    ) -> dict[str, Any]:
+        ...
+
+    async def simulate_humanlike_update(
+        self,
+        event_or_session: Any = None,
+        text: str = "",
+        *,
+        request: Any = None,
+        session_key: str | None = None,
+        source: str = "plugin",
+        observed_at: float | None = None,
+    ) -> dict[str, Any]:
+        ...
+
+    async def reset_humanlike_state(
+        self,
+        event_or_session: Any = None,
+        *,
+        request: Any = None,
+        session_key: str | None = None,
+    ) -> bool:
+        ...
+
+
 def get_emotion_service(context: Any) -> EmotionServiceProtocol | None:
     """Return the activated emotion service plugin from an AstrBot Context."""
     getter = getattr(context, "get_registered_star", None)
@@ -210,6 +279,22 @@ def get_emotion_service(context: Any) -> EmotionServiceProtocol | None:
         "reset_psychological_screening_state",
         "simulate_emotion_update",
         "reset_emotion_state",
+    )
+    if plugin and all(callable(getattr(plugin, name, None)) for name in required):
+        return plugin
+    return None
+
+
+def get_humanlike_service(context: Any) -> HumanlikeStateServiceProtocol | None:
+    """Return the activated optional humanlike-state service if available."""
+    plugin = get_emotion_service(context)
+    required = (
+        "get_humanlike_snapshot",
+        "get_humanlike_values",
+        "get_humanlike_prompt_fragment",
+        "observe_humanlike_text",
+        "simulate_humanlike_update",
+        "reset_humanlike_state",
     )
     if plugin and all(callable(getattr(plugin, name, None)) for name in required):
         return plugin

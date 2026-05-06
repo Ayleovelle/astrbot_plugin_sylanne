@@ -39,6 +39,17 @@ try:
         heuristic_psychological_observation,
         psychological_state_to_public_payload,
     )
+    from .humanlike_engine import (
+        PUBLIC_HUMANLIKE_SCHEMA_VERSION,
+        HumanlikeEngine,
+        HumanlikeParameters,
+        HumanlikeState,
+        build_humanlike_memory_annotation,
+        build_humanlike_prompt_fragment,
+        format_humanlike_state_for_user,
+        heuristic_humanlike_observation,
+        humanlike_state_to_public_payload,
+    )
     from .prompts import (
         ASSESSOR_SYSTEM_PROMPT,
         LOW_REASONING_ASSESSOR_SYSTEM_PROMPT,
@@ -73,6 +84,17 @@ except ImportError:
         format_psychological_state_for_user,
         heuristic_psychological_observation,
         psychological_state_to_public_payload,
+    )
+    from humanlike_engine import (
+        PUBLIC_HUMANLIKE_SCHEMA_VERSION,
+        HumanlikeEngine,
+        HumanlikeParameters,
+        HumanlikeState,
+        build_humanlike_memory_annotation,
+        build_humanlike_prompt_fragment,
+        format_humanlike_state_for_user,
+        heuristic_humanlike_observation,
+        humanlike_state_to_public_payload,
     )
     from prompts import (
         ASSESSOR_SYSTEM_PROMPT,
@@ -115,6 +137,7 @@ class EmotionalStatePlugin(Star):
     emotion_schema_version = PUBLIC_SCHEMA_VERSION
     emotion_memory_schema_version = PUBLIC_MEMORY_SCHEMA_VERSION
     psychological_screening_schema_version = PUBLIC_SCREENING_SCHEMA_VERSION
+    humanlike_state_schema_version = PUBLIC_HUMANLIKE_SCHEMA_VERSION
 
     def __init__(self, context: Context, config: AstrBotConfig | None = None):
         super().__init__(context)
@@ -124,13 +147,16 @@ class EmotionalStatePlugin(Star):
         self.psychological_engine = PsychologicalScreeningEngine(
             self._build_psychological_parameters(),
         )
+        self.humanlike_engine = HumanlikeEngine(self._build_humanlike_parameters())
         self._memory_cache: dict[str, EmotionState] = {}
         self._psychological_memory_cache: dict[str, PsychologicalScreeningState] = {}
+        self._humanlike_memory_cache: dict[str, HumanlikeState] = {}
         self._last_request_text: dict[str, str] = {}
 
     async def terminate(self):
         self._memory_cache.clear()
         self._psychological_memory_cache.clear()
+        self._humanlike_memory_cache.clear()
         self._last_request_text.clear()
 
     @filter.on_llm_request()
@@ -149,6 +175,7 @@ class EmotionalStatePlugin(Star):
         context_text = self._request_to_text(request)
         current_text = self._event_text(event) or request.prompt or ""
         self._last_request_text[session_key] = context_text
+        humanlike_state: HumanlikeState | None = None
 
         if self._assessment_timing() in {"pre", "both"}:
             observation = await self._assess_emotion(
@@ -162,10 +189,34 @@ class EmotionalStatePlugin(Star):
             state = engine.update(state, observation, profile=persona_profile)
             await self._save_state(session_key, state)
 
+        if self._humanlike_modeling_enabled():
+            previous_humanlike_state = await self._load_humanlike_state(session_key)
+            observation = heuristic_humanlike_observation(
+                "\n\n".join(part for part in (context_text, current_text) if part),
+                source="llm_request",
+            )
+            humanlike_state = self.humanlike_engine.update(
+                previous_humanlike_state,
+                observation,
+            )
+            await self._save_humanlike_state(session_key, humanlike_state)
+
         if self._cfg_bool("inject_state", True):
             request.extra_user_content_parts.append(
                 TextPart(text=self._build_state_injection(state)).mark_as_temp(),
             )
+            if self._humanlike_modeling_enabled() and self._humanlike_injection_enabled():
+                humanlike_state = humanlike_state or await self._load_humanlike_state(
+                    session_key,
+                )
+                request.extra_user_content_parts.append(
+                    TextPart(
+                        text=build_humanlike_prompt_fragment(
+                            humanlike_state,
+                            safety_boundary=self._safety_boundary_enabled(),
+                        ),
+                    ).mark_as_temp(),
+                )
 
     @filter.on_llm_response()
     async def on_llm_response(
@@ -331,13 +382,18 @@ class EmotionalStatePlugin(Star):
         written_at: float | None = None,
     ) -> dict[str, Any]:
         """Public API: wrap a memory entry with the emotion snapshot at write time."""
-        snapshot = await self.get_emotion_snapshot(
+        resolved_session_key = self._resolve_public_session_key(
             event_or_session,
             request=request,
             session_key=session_key,
+        )
+        snapshot = await self.get_emotion_snapshot(
+            event_or_session,
+            request=request,
+            session_key=resolved_session_key,
             include_prompt_fragment=include_prompt_fragment,
         )
-        return build_memory_payload(
+        payload = build_memory_payload(
             memory=memory,
             memory_text=memory_text,
             source=source,
@@ -346,6 +402,23 @@ class EmotionalStatePlugin(Star):
             include_raw_snapshot=include_raw_snapshot,
             written_at=written_at,
         )
+        if self._cfg_bool("humanlike_memory_write_enabled", True):
+            humanlike_snapshot = await self.get_humanlike_snapshot(
+                event_or_session,
+                request=request,
+                session_key=resolved_session_key,
+                exposure="plugin_safe",
+                include_prompt_fragment=include_prompt_fragment,
+            )
+            annotation = build_humanlike_memory_annotation(
+                humanlike_snapshot,
+                source=source,
+                written_at=written_at,
+            )
+            payload["humanlike_state_at_write"] = annotation
+            if include_raw_snapshot:
+                payload["humanlike_snapshot"] = humanlike_snapshot
+        return payload
 
     async def inject_emotion_context(
         self,
@@ -372,6 +445,158 @@ class EmotionalStatePlugin(Star):
         if not self._manual_reset_allowed():
             return False
         await self._delete_state(session_key)
+        return True
+
+    async def get_humanlike_snapshot(
+        self,
+        event_or_session: AstrMessageEvent | str | None = None,
+        *,
+        request: ProviderRequest | None = None,
+        session_key: str | None = None,
+        exposure: str = "plugin_safe",
+        include_prompt_fragment: bool = False,
+    ) -> dict[str, Any]:
+        """Public API: return a layered simulated humanlike-state snapshot."""
+        session_key = self._resolve_public_session_key(
+            event_or_session,
+            request=request,
+            session_key=session_key,
+        )
+        if not self._humanlike_modeling_enabled():
+            return self._humanlike_disabled_payload(
+                session_key,
+                exposure=exposure,
+                include_prompt_fragment=include_prompt_fragment,
+            )
+        state = await self._load_humanlike_state(session_key)
+        payload = state.to_public_dict(
+            session_key=session_key,
+            exposure=exposure,
+            safety_boundary=self._safety_boundary_enabled(),
+        )
+        if include_prompt_fragment:
+            payload["prompt_fragment"] = build_humanlike_prompt_fragment(
+                state,
+                safety_boundary=self._safety_boundary_enabled(),
+            )
+        return payload
+
+    async def get_humanlike_values(
+        self,
+        event_or_session: AstrMessageEvent | str | None = None,
+        *,
+        request: ProviderRequest | None = None,
+        session_key: str | None = None,
+    ) -> dict[str, float]:
+        """Public API: return internal humanlike dimensions for trusted plugins."""
+        snapshot = await self.get_humanlike_snapshot(
+            event_or_session,
+            request=request,
+            session_key=session_key,
+            exposure="internal",
+        )
+        return dict(snapshot.get("values") or {})
+
+    async def get_humanlike_prompt_fragment(
+        self,
+        event_or_session: AstrMessageEvent | str | None = None,
+        *,
+        request: ProviderRequest | None = None,
+        session_key: str | None = None,
+    ) -> str:
+        """Public API: return a prompt fragment other plugins may inject."""
+        session_key = self._resolve_public_session_key(
+            event_or_session,
+            request=request,
+            session_key=session_key,
+        )
+        if not self._humanlike_modeling_enabled():
+            return ""
+        state = await self._load_humanlike_state(session_key)
+        return build_humanlike_prompt_fragment(
+            state,
+            safety_boundary=self._safety_boundary_enabled(),
+        )
+
+    async def observe_humanlike_text(
+        self,
+        event_or_session: AstrMessageEvent | str | None = None,
+        text: str = "",
+        *,
+        request: ProviderRequest | None = None,
+        session_key: str | None = None,
+        source: str = "plugin",
+        commit: bool = True,
+        observed_at: float | None = None,
+    ) -> dict[str, Any]:
+        """Public API: update or simulate humanlike state from plugin text."""
+        session_key = self._resolve_public_session_key(
+            event_or_session,
+            request=request,
+            session_key=session_key,
+        )
+        if commit and not self._humanlike_modeling_enabled():
+            return self._humanlike_disabled_payload(session_key)
+        previous_state = await self._load_humanlike_state(session_key)
+        observation = heuristic_humanlike_observation(text, source=source)
+        state = self.humanlike_engine.update(
+            previous_state,
+            observation,
+            now=observed_at,
+        )
+        if commit:
+            await self._save_humanlike_state(session_key, state)
+        payload = state.to_public_dict(
+            session_key=session_key,
+            exposure="internal",
+            safety_boundary=self._safety_boundary_enabled(),
+        )
+        payload["observation"] = {
+            "source": observation.source,
+            "confidence": observation.confidence,
+            "reason": observation.reason,
+            "flags": list(observation.flags),
+            "committed": commit,
+        }
+        return payload
+
+    async def simulate_humanlike_update(
+        self,
+        event_or_session: AstrMessageEvent | str | None = None,
+        text: str = "",
+        *,
+        request: ProviderRequest | None = None,
+        session_key: str | None = None,
+        source: str = "plugin",
+        observed_at: float | None = None,
+    ) -> dict[str, Any]:
+        """Public API: simulate a humanlike-state update without writing state."""
+        return await self.observe_humanlike_text(
+            event_or_session,
+            text,
+            request=request,
+            session_key=session_key,
+            source=source,
+            commit=False,
+            observed_at=observed_at,
+        )
+
+    async def reset_humanlike_state(
+        self,
+        event_or_session: AstrMessageEvent | str | None = None,
+        *,
+        request: ProviderRequest | None = None,
+        session_key: str | None = None,
+    ) -> bool:
+        """Public API: reset one session's simulated humanlike state."""
+        session_key = self._resolve_public_session_key(
+            event_or_session,
+            request=request,
+            session_key=session_key,
+        )
+        if not self._humanlike_reset_allowed():
+            return False
+        await self._delete_humanlike_state(session_key)
         return True
 
     async def observe_emotion_text(
@@ -635,6 +860,21 @@ class EmotionalStatePlugin(Star):
         )
         yield event.plain_result(json.dumps(snapshot, ensure_ascii=False))
 
+    @filter.llm_tool(name="get_bot_humanlike_state")
+    async def get_bot_humanlike_state_tool(
+        self,
+        event: AstrMessageEvent,
+        detail: str = "summary",
+    ):
+        """Get the bot's simulated humanlike state, read-only."""
+        full = str(detail or "").strip().lower() == "full"
+        snapshot = await self.get_humanlike_snapshot(
+            event,
+            exposure="internal" if full else "plugin_safe",
+            include_prompt_fragment=full,
+        )
+        yield event.plain_result(json.dumps(snapshot, ensure_ascii=False))
+
     @filter.command("emotion", alias={"emotion_state", "情绪状态"})
     async def emotion_status(self, event: AstrMessageEvent):
         """查看当前会话的多维情绪状态。"""
@@ -678,6 +918,24 @@ class EmotionalStatePlugin(Star):
             return
         state = await self._load_psychological_state(self._session_key(event))
         yield event.plain_result(format_psychological_state_for_user(state))
+
+    @filter.command("humanlike_state", alias={"拟人状态", "有机体状态"})
+    async def humanlike_status(self, event: AstrMessageEvent):
+        """View the current session's simulated humanlike state."""
+        if not self._humanlike_modeling_enabled():
+            yield event.plain_result("拟人化状态模拟未启用。")
+            return
+        state = await self._load_humanlike_state(self._session_key(event))
+        yield event.plain_result(format_humanlike_state_for_user(state))
+
+    @filter.command("humanlike_reset", alias={"拟人状态重置"})
+    async def humanlike_reset(self, event: AstrMessageEvent):
+        """Reset the current session's simulated humanlike state."""
+        if not self._humanlike_reset_allowed():
+            yield event.plain_result("配置已关闭手动拟人状态重置。")
+            return
+        await self._delete_humanlike_state(self._session_key(event))
+        yield event.plain_result("已重置当前会话的拟人状态。")
 
     async def _observe_public_text(
         self,
@@ -918,6 +1176,46 @@ class EmotionalStatePlugin(Star):
         except Exception as exc:
             logger.debug(f"{PLUGIN_NAME}: 心理筛查 KV 删除失败: {exc}")
 
+    async def _load_humanlike_state(self, session_key: str) -> HumanlikeState:
+        if session_key in self._humanlike_memory_cache:
+            state = self._humanlike_memory_cache[session_key]
+            decayed_state = self.humanlike_engine.passive_update(state)
+            if decayed_state.to_dict() != state.to_dict():
+                state = decayed_state
+                await self._save_humanlike_state(session_key, state)
+            self._humanlike_memory_cache[session_key] = state
+            return state
+        try:
+            data = await self.get_kv_data(self._humanlike_kv_key(session_key), None)
+        except Exception as exc:
+            logger.debug(f"{PLUGIN_NAME}: humanlike KV read failed, using empty state: {exc}")
+            data = None
+        state = HumanlikeState.from_dict(data)
+        decayed_state = self.humanlike_engine.passive_update(state)
+        if decayed_state.to_dict() != state.to_dict():
+            state = decayed_state
+            await self._save_humanlike_state(session_key, state)
+        self._humanlike_memory_cache[session_key] = state
+        return state
+
+    async def _save_humanlike_state(
+        self,
+        session_key: str,
+        state: HumanlikeState,
+    ) -> None:
+        self._humanlike_memory_cache[session_key] = state
+        try:
+            await self.put_kv_data(self._humanlike_kv_key(session_key), state.to_dict())
+        except Exception as exc:
+            logger.debug(f"{PLUGIN_NAME}: humanlike KV write failed, keeping memory only: {exc}")
+
+    async def _delete_humanlike_state(self, session_key: str) -> None:
+        self._humanlike_memory_cache.pop(session_key, None)
+        try:
+            await self.delete_kv_data(self._humanlike_kv_key(session_key))
+        except Exception as exc:
+            logger.debug(f"{PLUGIN_NAME}: humanlike KV delete failed: {exc}")
+
     def _build_parameters(self) -> EmotionParameters:
         return EmotionParameters(
             alpha_base=self._cfg_float("alpha_base", 0.42),
@@ -978,6 +1276,35 @@ class EmotionalStatePlugin(Star):
             trajectory_limit=self._cfg_int("psychological_trajectory_limit", 40),
         )
 
+    def _build_humanlike_parameters(self) -> HumanlikeParameters:
+        return HumanlikeParameters(
+            alpha_base=self._cfg_float("humanlike_alpha_base", 0.30),
+            alpha_min=self._cfg_float("humanlike_alpha_min", 0.03),
+            alpha_max=self._cfg_float("humanlike_alpha_max", 0.46),
+            confidence_midpoint=self._cfg_float(
+                "humanlike_confidence_midpoint",
+                0.5,
+            ),
+            confidence_slope=self._cfg_float("humanlike_confidence_slope", 6.0),
+            state_half_life_seconds=self._cfg_float(
+                "humanlike_state_half_life_seconds",
+                21600.0,
+            ),
+            rapid_update_half_life_seconds=self._cfg_float(
+                "humanlike_rapid_update_half_life_seconds",
+                20.0,
+            ),
+            min_update_interval_seconds=self._cfg_float(
+                "humanlike_min_update_interval_seconds",
+                8.0,
+            ),
+            max_impulse_per_update=self._cfg_float(
+                "humanlike_max_impulse_per_update",
+                0.18,
+            ),
+            trajectory_limit=self._cfg_int("humanlike_trajectory_limit", 40),
+        )
+
     def _engine_for_persona(self, profile: PersonaProfile | None) -> EmotionEngine:
         if profile is None or not self._cfg_bool("persona_modeling", True):
             return self.engine
@@ -998,6 +1325,35 @@ class EmotionalStatePlugin(Star):
         payload = psychological_state_to_public_payload(state, session_key=session_key)
         payload["enabled"] = False
         payload["reason"] = "enable_psychological_screening is false"
+        return payload
+
+    def _humanlike_modeling_enabled(self) -> bool:
+        return self._cfg_bool("enable_humanlike_state", False)
+
+    def _humanlike_injection_enabled(self) -> bool:
+        return self._cfg_float("humanlike_injection_strength", 0.35) > 0.0
+
+    def _humanlike_reset_allowed(self) -> bool:
+        return self._cfg_bool("allow_humanlike_reset_backdoor", True)
+
+    def _humanlike_disabled_payload(
+        self,
+        session_key: str,
+        *,
+        exposure: str = "plugin_safe",
+        include_prompt_fragment: bool = False,
+    ) -> dict[str, Any]:
+        state = HumanlikeState.initial()
+        payload = humanlike_state_to_public_payload(
+            state,
+            session_key=session_key,
+            exposure=exposure,
+            safety_boundary=self._safety_boundary_enabled(),
+        )
+        payload["enabled"] = False
+        payload["reason"] = "enable_humanlike_state is false"
+        if include_prompt_fragment:
+            payload["prompt_fragment"] = ""
         return payload
 
     def _build_state_injection(self, state: EmotionState) -> str:
@@ -1275,6 +1631,9 @@ class EmotionalStatePlugin(Star):
 
     def _psychological_kv_key(self, session_key: str) -> str:
         return "psychological_screening:" + session_key.replace("/", "_").replace("\\", "_")
+
+    def _humanlike_kv_key(self, session_key: str) -> str:
+        return "humanlike_state:" + session_key.replace("/", "_").replace("\\", "_")
 
     def _cfg(self, key: str, default: Any) -> Any:
         if not hasattr(self.config, "get"):
