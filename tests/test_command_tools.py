@@ -182,6 +182,7 @@ class CommandAndToolSmokeTests(unittest.TestCase):
                 "simulate_bot_emotion_update",
                 "get_bot_humanlike_state",
                 "get_bot_moral_repair_state",
+                "get_bot_integrated_self_state",
             },
         )
         for tool in sorted(tools):

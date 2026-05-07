@@ -28,7 +28,7 @@
 | [工作流](#工作流) | `on_llm_request` / `on_llm_response` 如何更新和注入状态。 |
 | [情绪模型](#情绪模型) | 维度定义、公式推导、人格基线、真实时间半衰期。 |
 | [关系与后果](#关系与后果) | 生气原因、是否原谅、冷处理、错误是否已改正。 |
-| [LivingMemory 兼容](#livingmemory--长期记忆兼容) | 写入记忆时冻结 `emotion_at_write`、`humanlike_state_at_write` 和 `moral_repair_state_at_write`。 |
+| [LivingMemory 兼容](#livingmemory--长期记忆兼容) | 写入记忆时冻结 `emotion_at_write`、`humanlike_state_at_write`、`moral_repair_state_at_write` 和 `integrated_self_state_at_write`。 |
 | [公共 API](#公共-api) | 其他插件如何读取、模拟、提交、重置情绪状态。 |
 | [拟人状态](#拟人状态-humanlike_state) | `humanlike_state` 的 P0 维度和表达调制边界。 |
 | [心理筛查](#非诊断心理状态筛查) | 备用的长期状态建模，不做诊断。 |
@@ -105,6 +105,7 @@ data/plugins/
     ├── main.py
     ├── emotion_engine.py
     ├── humanlike_engine.py
+    ├── integrated_self.py
     ├── moral_repair_engine.py
     ├── psychological_screening.py
     ├── prompts.py
@@ -265,6 +266,16 @@ low_reasoning_max_context_chars = 1200
 ```
 
 重置当前会话的 `moral_repair_state`。该命令受 `allow_moral_repair_reset_backdoor` 控制；默认允许。
+
+### 综合自我状态
+
+```text
+/integrated_self
+/综合自我状态
+/自我状态
+```
+
+查看只读的综合自我状态仲裁结果。该总线会融合情绪、拟人状态、道德修复和非诊断心理筛查快照，但不会直接写入 KV。
 
 ---
 
@@ -774,6 +785,8 @@ if emotion:
         memory["humanlike_state_at_write"] = payload["humanlike_state_at_write"]
     if "moral_repair_state_at_write" in payload:
         memory["moral_repair_state_at_write"] = payload["moral_repair_state_at_write"]
+    if "integrated_self_state_at_write" in payload:
+        memory["integrated_self_state_at_write"] = payload["integrated_self_state_at_write"]
 ```
 
 如果没有 `AstrMessageEvent`，必须显式传入稳定的 `session_key`：
@@ -851,6 +864,18 @@ moral_repair_memory_write_enabled = true
 
 这样记忆系统可以知道“写入时拟人模块没有启用”，而不是误以为数据丢失。
 
+### `integrated_self_state_at_write`
+
+如果：
+
+```text
+integrated_self_memory_write_enabled = true
+```
+
+则 `build_emotion_memory_payload(...)` 会额外写入 `integrated_self_state_at_write`。默认值是 `true`。
+
+该字段冻结写入时的综合 `response_posture`、跨模块风险优先级、允许动作和状态指数。它只记录仲裁结果，不保存 raw snapshots，除非调用方显式设置 `include_raw_snapshot=True`。
+
 默认不建议把 `prompt_fragment` 写入长期记忆，避免记忆膨胀。只有确实要复用注入文本时，才设置：
 
 ```python
@@ -927,6 +952,13 @@ emotion = meta.star_cls if meta and meta.activated else None
 | `observe_emotion_text(event_or_session, text, role="plugin", source="plugin")` | 是 | 外部插件提交文本观测并更新状态。 |
 | `simulate_emotion_update(event_or_session, text)` | 否 | 预测候选文本会怎样影响状态，不落库。 |
 | `reset_emotion_state(event_or_session)` | 是 | 重置指定会话；受 `allow_emotion_reset_backdoor` 控制。 |
+| `get_integrated_self_snapshot(event_or_session, include_raw_snapshots=False)` | 否 | 获取跨模块综合自我状态总线。 |
+| `get_integrated_self_prompt_fragment(event_or_session)` | 否 | 获取综合仲裁 prompt 片段。 |
+| `get_integrated_self_policy_plan(event_or_session)` | 否 | 获取由综合状态推导出的响应调制和修复动作计划。 |
+| `build_integrated_self_replay_bundle(event_or_session, scenario_name="current")` | 否 | 构建不含 raw snapshots 的确定性回放包。 |
+| `replay_integrated_self_bundle(bundle)` | 否 | 离线回放综合自我状态核心摘要，不读取 KV。 |
+| `probe_integrated_self_compatibility(payload=None, event_or_session=None)` | 否 | 检查 payload 是否满足当前综合自我 schema。 |
+| `export_integrated_self_diagnostics(event_or_session)` | 否 | 导出脱敏维护诊断摘要。 |
 
 `event_or_session` 可以是 AstrBot 事件对象，也可以是字符串 `session_key`。
 
@@ -982,6 +1014,7 @@ if repair_status in {"repaired", "restored"}:
 | `simulate_bot_emotion_update` | 模拟某段文本会怎样改变情绪。 |
 | `get_bot_humanlike_state` | 获取当前拟人状态摘要。 |
 | `get_bot_moral_repair_state` | 获取当前道德修复/信任修复状态摘要。 |
+| `get_bot_integrated_self_state` | 获取当前综合自我状态和跨模块仲裁摘要。 |
 
 插件间调用仍建议使用 Python API，而不是把 LLM tool 当作互调协议。
 
@@ -996,6 +1029,21 @@ if repair_status in {"repaired", "restored"}:
 | `PSYCHOLOGICAL_SCREENING_SCHEMA_VERSION` | `astrbot.psychological_screening.v1` |
 | `HUMANLIKE_STATE_SCHEMA_VERSION` | `astrbot.humanlike_state.v1` |
 | `MORAL_REPAIR_STATE_SCHEMA_VERSION` | `astrbot.moral_repair_state.v1` |
+| `INTEGRATED_SELF_SCHEMA_VERSION` | `astrbot.integrated_self_state.v1` |
+
+### Integrated Self API
+
+| 方法 | 是否写入状态 | 用途 |
+| --- | --- | --- |
+| `get_integrated_self_snapshot(event_or_session, include_raw_snapshots=False)` | 否 | 融合 emotion、humanlike、moral repair 和 psychological screening，返回只读仲裁结果。 |
+| `get_integrated_self_prompt_fragment(event_or_session)` | 否 | 返回可注入 prompt 的综合仲裁片段。 |
+| `get_integrated_self_policy_plan(event_or_session)` | 否 | 返回 `allowed_actions`、`blocked_actions`、表达调制、修复动作和 prompt budget。 |
+| `build_integrated_self_replay_bundle(event_or_session, scenario_name="current")` | 否 | 返回确定性回放包，便于测试状态演化，不读写 KV。 |
+| `replay_integrated_self_bundle(bundle)` | 否 | 校验回放包 checksum 并返回核心 posture/risk/index。 |
+| `probe_integrated_self_compatibility(payload=None, event_or_session=None)` | 否 | 返回兼容性探针，报告 schema 和必要字段缺失。 |
+| `export_integrated_self_diagnostics(event_or_session)` | 否 | 返回脱敏诊断包，只含模块状态、风险布尔和 trace 摘要。 |
+
+该总线的优先级顺序为：非诊断心理安全 > 道德修复透明性 > 关系边界 > 拟人资源调制 > 情绪风格。它还会输出 `causal_trace`、`policy_plan` 和 `compatibility`，用于解释每次状态仲裁为什么发生、低成本部署时保留哪些信号、以及第三方插件是否拿到了当前 schema。它不会生成诊断结论，也不会生成欺骗、隐瞒、操控或规避责任策略。
 
 ---
 
@@ -1148,6 +1196,9 @@ risk signal -> guilt/responsibility -> apology/compensation -> trust repair
 | `moral_repair_trajectory_limit` | int | `40` | 轨迹最多保留点数。 |
 | `moral_repair_memory_write_enabled` | bool | `true` | 记忆写入时附带道德修复状态注解。 |
 | `allow_moral_repair_reset_backdoor` | bool | `true` | 是否允许重置道德修复状态。 |
+| `enable_integrated_self_state` | bool | `true` | 启用只读综合自我状态总线。 |
+| `integrated_self_memory_write_enabled` | bool | `true` | 记忆写入时附带综合自我状态注解。 |
+| `integrated_self_degradation_profile` | string | `balanced` | 综合自我状态成本档位：`full`、`balanced` 或 `minimal`。`minimal` 会减少 trace 和 prompt 预算，但保留 schema、安全优先级、阻断动作和 LivingMemory 注解。 |
 
 ### 安全替代边界
 
@@ -1382,7 +1433,7 @@ py -3.13 -m unittest discover -s tests -v
 语法检查：
 
 ```powershell
-py -3.13 -m py_compile main.py emotion_engine.py psychological_screening.py humanlike_engine.py moral_repair_engine.py prompts.py public_api.py scripts\build_literature_kb.py scripts\build_psychological_literature_kb.py scripts\build_humanlike_agent_literature_kb.py scripts\package_plugin.py
+py -3.13 -m py_compile main.py emotion_engine.py psychological_screening.py humanlike_engine.py integrated_self.py moral_repair_engine.py prompts.py public_api.py scripts\build_literature_kb.py scripts\build_psychological_literature_kb.py scripts\build_humanlike_agent_literature_kb.py scripts\package_plugin.py
 ```
 
 配置 schema 检查：
@@ -1401,7 +1452,7 @@ py -3.13 scripts\package_plugin.py --output dist\astrbot_plugin_emotional_state.
 
 发布 zip 的第一项会显式写入 `astrbot_plugin_emotional_state/` 目录项，以兼容 AstrBot WebUI 的 `install-upload` 解压逻辑。不要手工重新压缩成“缺少顶层目录项”的 zip，否则部分 AstrBot 版本会把第一个文件路径误判成目录。
 
-发布包还会保留插件根目录下的 `__init__.py`、`public_api.py`、`main.py`、`emotion_engine.py`、`humanlike_engine.py`、`moral_repair_engine.py`、`psychological_screening.py` 和 `prompts.py`。这保证其他插件在安装后可以通过 `from astrbot_plugin_emotional_state.public_api import ...` 按包名导入公共 API。
+发布包还会保留插件根目录下的 `__init__.py`、`public_api.py`、`main.py`、`emotion_engine.py`、`humanlike_engine.py`、`integrated_self.py`、`moral_repair_engine.py`、`psychological_screening.py` 和 `prompts.py`。这保证其他插件在安装后可以通过 `from astrbot_plugin_emotional_state.public_api import ...` 按包名导入公共 API。
 
 远程只读烟测：
 
@@ -1454,7 +1505,7 @@ $env:ASTRBOT_REMOTE_INSTALL_CONFIRM = "1"
 
 上传脚本只允许调用 AstrBot WebUI 的 `install-upload` 安装端点；若 WebUI 留下 `plugin_upload_<插件名>` 失败安装残留，脚本只会调用 `uninstall-failed` 清理这个失败上传目录，并固定 `delete_config=false`、`delete_data=false`。它不会删除正式插件、更新插件、重启 AstrBot、保存配置或写入本地 cookie/session。上传成功后，再运行上面的 `ASTRBOT_EXPECT_PLUGIN` 只读烟测作为最终验证。
 
-上传脚本在真正发起安装请求之前会完整读取 zip central directory 做本地预检：所有条目必须位于 `astrbot_plugin_emotional_state/` 下，路径必须是相对 POSIX 路径，且不能包含 `.` / `..` 不安全路径段；必须包含 `__init__.py`、`metadata.yaml`、`main.py`、`emotion_engine.py`、`humanlike_engine.py`、`moral_repair_engine.py`、`psychological_screening.py`、`prompts.py`、`public_api.py`、`README.md`、`LICENSE`、`requirements.txt`、`_conf_schema.json`，并拒绝 `tests/`、`scripts/`、`output/`、`dist/`、`raw/`、`__pycache__/`、`.git/` 等本地或研究缓存目录。预检还会读取 zip 内的 `metadata.yaml`，确认其中 `name:` 精确等于 CLI 参数或 `ASTRBOT_EXPECT_PLUGIN` 传入的插件目录名。
+上传脚本在真正发起安装请求之前会完整读取 zip central directory 做本地预检：所有条目必须位于 `astrbot_plugin_emotional_state/` 下，路径必须是相对 POSIX 路径，且不能包含 `.` / `..` 不安全路径段；必须包含 `__init__.py`、`metadata.yaml`、`main.py`、`emotion_engine.py`、`humanlike_engine.py`、`integrated_self.py`、`moral_repair_engine.py`、`psychological_screening.py`、`prompts.py`、`public_api.py`、`README.md`、`LICENSE`、`requirements.txt`、`_conf_schema.json`，并拒绝 `tests/`、`scripts/`、`output/`、`dist/`、`raw/`、`__pycache__/`、`.git/` 等本地或研究缓存目录。预检还会读取 zip 内的 `metadata.yaml`，确认其中 `name:` 精确等于 CLI 参数或 `ASTRBOT_EXPECT_PLUGIN` 传入的插件目录名。
 
 也可以单独运行预检，不连接远程服务器：
 
@@ -1481,6 +1532,7 @@ $env:ASTRBOT_REMOTE_INSTALL_CONFIRM = "1"
 | `tests/test_command_tools.py` | AstrBot 命令层和 LLM tool 冒烟测试，覆盖 reset 后门、disabled 状态、summary/full 暴露层，并从 `main.py` 自动解析命令/alias 与 LLM tool 注册名，锁定 README 文档契约。 |
 | `tests/test_config_schema_contract.py` | `main.py` 运行时配置、`_conf_schema.json`、README 默认值、schema-only 预留项、`assessment_timing` 选项和 typed config table 全量类型契约。 |
 | `tests/test_public_api.py` | 公共快照、记忆 payload、simulate 不落库、reset 后门、插件服务协议、心理筛查/moral repair public API，并锁定 Protocol 方法面、required tuple、插件实现和 schema-version 契约。 |
+| `tests/test_integrated_self.py` | 综合自我状态总线、因果 trace、policy plan、deterministic replay、schema compatibility、脱敏 diagnostics 和 LivingMemory envelope。 |
 | `tests/test_humanlike_engine.py` | P0 拟人状态、快照分层、注入片段、记忆注解。 |
 | `tests/test_moral_repair_engine.py` | 道德修复状态、欺骗风险识别、内疚/责任/补偿/信任修复、策略禁止边界和记忆注解。 |
 | `tests/test_literature_kb_scripts.py` | 三个文献 KB 构建脚本的去重、分类、输出结构和坏缓存容错。 |

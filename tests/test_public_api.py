@@ -13,6 +13,7 @@ from public_api import (
     EMOTION_MEMORY_SCHEMA_VERSION,
     EMOTION_SCHEMA_VERSION,
     HUMANLIKE_STATE_SCHEMA_VERSION,
+    INTEGRATED_SELF_SCHEMA_VERSION,
     MORAL_REPAIR_STATE_SCHEMA_VERSION,
     PSYCHOLOGICAL_RISK_BOOLEAN_FIELDS,
     PSYCHOLOGICAL_SCREENING_SCHEMA_VERSION,
@@ -124,6 +125,7 @@ class FakeEmotionService:
     emotion_schema_version = "astrbot.emotion_state.v2"
     emotion_memory_schema_version = "astrbot.emotion_memory.v1"
     psychological_screening_schema_version = "astrbot.psychological_screening.v1"
+    integrated_self_schema_version = "astrbot.integrated_self_state.v1"
 
     async def get_emotion_snapshot(self, *args, **kwargs):
         return {}
@@ -172,6 +174,27 @@ class FakeEmotionService:
 
     async def reset_emotion_state(self, *args, **kwargs):
         return True
+
+    async def get_integrated_self_snapshot(self, *args, **kwargs):
+        return {}
+
+    async def get_integrated_self_prompt_fragment(self, *args, **kwargs):
+        return ""
+
+    async def get_integrated_self_policy_plan(self, *args, **kwargs):
+        return {}
+
+    async def build_integrated_self_replay_bundle(self, *args, **kwargs):
+        return {}
+
+    async def replay_integrated_self_bundle(self, *args, **kwargs):
+        return {}
+
+    async def probe_integrated_self_compatibility(self, *args, **kwargs):
+        return {}
+
+    async def export_integrated_self_diagnostics(self, *args, **kwargs):
+        return {}
 
 
 class FakeHumanlikeService(FakeEmotionService):
@@ -316,6 +339,12 @@ class PublicApiTests(unittest.TestCase):
             "astrbot.moral_repair_state.v1",
         )
 
+    def test_integrated_self_schema_constant_is_exported(self):
+        self.assertEqual(
+            INTEGRATED_SELF_SCHEMA_VERSION,
+            "astrbot.integrated_self_state.v1",
+        )
+
     def test_get_emotion_service_rejects_plugin_without_memory_payload_api(self):
         class OldEmotionService(FakeEmotionService):
             build_emotion_memory_payload = None
@@ -349,6 +378,7 @@ class PublicApiTests(unittest.TestCase):
             "emotion_schema_version",
             "emotion_memory_schema_version",
             "psychological_screening_schema_version",
+            "integrated_self_schema_version",
         )
         for field in version_fields:
             with self.subTest(field=field):
@@ -635,6 +665,149 @@ class MemoryPayloadPublicApiTests(unittest.TestCase):
         plugin._last_request_text = {}
         plugin.context = SimpleNamespace()
         return plugin
+
+    def test_integrated_self_snapshot_fuses_disabled_optional_modules(self):
+        self._install_astrbot_stubs()
+        plugin = self._new_plugin()
+
+        snapshot = asyncio.run(
+            plugin.get_integrated_self_snapshot(session_key="s-integrated"),
+        )
+
+        self.assertEqual(snapshot["schema_version"], "astrbot.integrated_self_state.v1")
+        self.assertTrue(snapshot["enabled"])
+        self.assertEqual(snapshot["session_key"], "s-integrated")
+        self.assertEqual(snapshot["modules"]["emotion"]["enabled"], True)
+        self.assertEqual(snapshot["modules"]["humanlike"]["enabled"], False)
+        self.assertEqual(snapshot["modules"]["moral_repair"]["enabled"], False)
+        self.assertIn("response_posture", snapshot)
+        self.assertIn("connection_readiness", snapshot["state_index"])
+        self.assertIn("causal_trace", snapshot)
+        self.assertIn("policy_plan", snapshot)
+        self.assertIn("compatibility", snapshot)
+
+    def test_integrated_self_can_be_disabled_without_loading_snapshots(self):
+        self._install_astrbot_stubs()
+        from main import EmotionalStatePlugin
+
+        async def forbidden_load_state(self, session_key, persona_profile=None):
+            raise AssertionError("disabled integrated self must not load emotion state")
+
+        original_load_state = EmotionalStatePlugin._load_state
+        EmotionalStatePlugin._load_state = forbidden_load_state
+        try:
+            plugin = self._new_plugin({"enable_integrated_self_state": False})
+            snapshot = asyncio.run(
+                plugin.get_integrated_self_snapshot(session_key="s-disabled"),
+            )
+        finally:
+            EmotionalStatePlugin._load_state = original_load_state
+
+        self.assertFalse(snapshot["enabled"])
+        self.assertEqual(snapshot["reason"], "enable_integrated_self_state is false")
+
+    def test_integrated_self_memory_annotation_is_included_by_default(self):
+        self._install_astrbot_stubs()
+        plugin = self._new_plugin({"humanlike_memory_write_enabled": False})
+
+        payload = asyncio.run(
+            plugin.build_emotion_memory_payload(
+                session_key="livingmemory:integrated",
+                memory={"text": "memory"},
+                source="livingmemory",
+                written_at=88.0,
+                include_raw_snapshot=False,
+            ),
+        )
+
+        self.assertIn("integrated_self_state_at_write", payload)
+        self.assertIn("state_annotations_at_write", payload)
+        annotation = payload["integrated_self_state_at_write"]
+        self.assertEqual(annotation["schema_version"], "astrbot.integrated_self_state.v1")
+        self.assertEqual(annotation["source"], "livingmemory")
+        self.assertEqual(annotation["written_at"], 88.0)
+        self.assertIn("response_posture", annotation)
+        self.assertIn("causal_trace_summary", annotation)
+        self.assertNotIn("integrated_self_snapshot", payload)
+        envelope = payload["state_annotations_at_write"]
+        self.assertIn("emotion_at_write", envelope["annotation_keys"])
+        self.assertIn("integrated_self_state_at_write", envelope["annotation_keys"])
+        self.assertNotIn("integrated_self_snapshot", envelope["annotations"])
+
+    def test_integrated_self_public_policy_replay_compat_and_diagnostics(self):
+        self._install_astrbot_stubs()
+        from emotion_engine import EmotionState
+        from main import EmotionalStatePlugin
+
+        async def fake_load_state(self, session_key, persona_profile=None):
+            state = EmotionState.initial()
+            state.label = "protective"
+            state.updated_at = 10.0
+            state.values["valence"] = -0.3
+            state.consequences.active_effects["cold_war"] = 600
+            state.consequences.effect_expires_at["cold_war"] = 700.0
+            state.consequences.updated_at = 12.0
+            return state
+
+        original_load_state = EmotionalStatePlugin._load_state
+        EmotionalStatePlugin._load_state = fake_load_state
+        try:
+            plugin = self._new_plugin(
+                {
+                    "integrated_self_degradation_profile": "minimal",
+                    "humanlike_memory_write_enabled": False,
+                    "moral_repair_memory_write_enabled": False,
+                },
+            )
+            plan = asyncio.run(plugin.get_integrated_self_policy_plan(session_key="s1"))
+            bundle = asyncio.run(
+                plugin.build_integrated_self_replay_bundle(
+                    session_key="s1",
+                    scenario_name="unit",
+                ),
+            )
+            replay = asyncio.run(plugin.replay_integrated_self_bundle(bundle))
+            compat = asyncio.run(plugin.probe_integrated_self_compatibility(bundle["core"]))
+            diagnostics = asyncio.run(plugin.export_integrated_self_diagnostics(session_key="s1"))
+        finally:
+            EmotionalStatePlugin._load_state = original_load_state
+
+        self.assertEqual(plan["degradation_profile"], "minimal")
+        self.assertIn("relationship_boundary_active", plan["must_preserve_signals"])
+        self.assertTrue(bundle["deterministic"])
+        self.assertTrue(replay["matches_bundle_checksum"])
+        self.assertFalse(compat["compatible"])
+        self.assertTrue(diagnostics["sanitized"])
+        self.assertNotIn("snapshots", diagnostics)
+
+    def test_state_annotations_envelope_can_be_disabled(self):
+        self._install_astrbot_stubs()
+        from emotion_engine import EmotionState
+        from main import EmotionalStatePlugin
+
+        async def fake_load_state(self, session_key, persona_profile=None):
+            return EmotionState.initial()
+
+        original_load_state = EmotionalStatePlugin._load_state
+        EmotionalStatePlugin._load_state = fake_load_state
+        try:
+            payload = asyncio.run(
+                self._new_plugin(
+                    {
+                        "humanlike_memory_write_enabled": False,
+                        "moral_repair_memory_write_enabled": False,
+                        "integrated_self_memory_write_enabled": False,
+                    },
+                ).build_emotion_memory_payload(
+                    session_key="s-envelope-off",
+                    memory="memory",
+                    include_state_annotations_envelope=False,
+                ),
+            )
+        finally:
+            EmotionalStatePlugin._load_state = original_load_state
+
+        self.assertNotIn("state_annotations_at_write", payload)
 
     def test_plugin_method_uses_explicit_session_key_without_writing_state(self):
         self._install_astrbot_stubs()

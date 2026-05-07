@@ -15,6 +15,7 @@ EMOTION_MEMORY_SCHEMA_VERSION = "astrbot.emotion_memory.v1"
 PSYCHOLOGICAL_SCREENING_SCHEMA_VERSION = "astrbot.psychological_screening.v1"
 HUMANLIKE_STATE_SCHEMA_VERSION = "astrbot.humanlike_state.v1"
 MORAL_REPAIR_STATE_SCHEMA_VERSION = "astrbot.moral_repair_state.v1"
+INTEGRATED_SELF_SCHEMA_VERSION = "astrbot.integrated_self_state.v1"
 PSYCHOLOGICAL_RISK_BOOLEAN_FIELDS = PUBLIC_RISK_BOOLEAN_FIELDS
 
 
@@ -28,6 +29,7 @@ class EmotionServiceProtocol(Protocol):
     emotion_schema_version: str
     emotion_memory_schema_version: str
     psychological_screening_schema_version: str
+    integrated_self_schema_version: str
 
     async def get_emotion_snapshot(
         self,
@@ -199,6 +201,70 @@ class EmotionServiceProtocol(Protocol):
     ) -> bool:
         ...
 
+    async def get_integrated_self_snapshot(
+        self,
+        event_or_session: Any = None,
+        *,
+        request: Any = None,
+        session_key: str | None = None,
+        include_raw_snapshots: bool = False,
+        degradation_profile: str | None = None,
+    ) -> dict[str, Any]:
+        ...
+
+    async def get_integrated_self_prompt_fragment(
+        self,
+        event_or_session: Any = None,
+        *,
+        request: Any = None,
+        session_key: str | None = None,
+    ) -> str:
+        ...
+
+    async def get_integrated_self_policy_plan(
+        self,
+        event_or_session: Any = None,
+        *,
+        request: Any = None,
+        session_key: str | None = None,
+    ) -> dict[str, Any]:
+        ...
+
+    async def build_integrated_self_replay_bundle(
+        self,
+        event_or_session: Any = None,
+        *,
+        request: Any = None,
+        session_key: str | None = None,
+        scenario_name: str = "current",
+    ) -> dict[str, Any]:
+        ...
+
+    async def replay_integrated_self_bundle(
+        self,
+        bundle: dict[str, Any],
+    ) -> dict[str, Any]:
+        ...
+
+    async def probe_integrated_self_compatibility(
+        self,
+        payload: dict[str, Any] | None = None,
+        event_or_session: Any = None,
+        *,
+        request: Any = None,
+        session_key: str | None = None,
+    ) -> dict[str, Any]:
+        ...
+
+    async def export_integrated_self_diagnostics(
+        self,
+        event_or_session: Any = None,
+        *,
+        request: Any = None,
+        session_key: str | None = None,
+    ) -> dict[str, Any]:
+        ...
+
 
 @runtime_checkable
 class HumanlikeStateServiceProtocol(EmotionServiceProtocol, Protocol):
@@ -362,12 +428,20 @@ def get_emotion_service(context: Any) -> EmotionServiceProtocol | None:
         "reset_psychological_screening_state",
         "simulate_emotion_update",
         "reset_emotion_state",
+        "get_integrated_self_snapshot",
+        "get_integrated_self_prompt_fragment",
+        "get_integrated_self_policy_plan",
+        "build_integrated_self_replay_bundle",
+        "replay_integrated_self_bundle",
+        "probe_integrated_self_compatibility",
+        "export_integrated_self_diagnostics",
     )
     expected_versions = {
         "emotion_api_version": EMOTION_API_VERSION,
         "emotion_schema_version": EMOTION_SCHEMA_VERSION,
         "emotion_memory_schema_version": EMOTION_MEMORY_SCHEMA_VERSION,
         "psychological_screening_schema_version": PSYCHOLOGICAL_SCREENING_SCHEMA_VERSION,
+        "integrated_self_schema_version": INTEGRATED_SELF_SCHEMA_VERSION,
     }
     if (
         plugin

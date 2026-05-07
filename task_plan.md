@@ -72,6 +72,16 @@ Build and maintain `astrbot_plugin_emotional_state`: an AstrBot plugin with mult
 | 58 | complete | Lock README py_compile command and failed-upload cleanup docs to current package contract | 172 unit tests, py_compile, package build, package preflight, Node syntax check, git diff check, leak scan, remote smoke |
 | 59 | complete | Add moral repair state module as a safe alternative to deception/wrongdoing simulation | 193 unit tests, py_compile, json.tool, package build, package preflight, Node syntax check, git diff check, leak scan, remote smoke |
 | 60 | complete | Declare GPL-3.0-or-later licensing and include LICENSE in release package contracts | 194 unit tests, py_compile, json.tool, package build, package preflight, Node syntax check, git diff check, leak scan, remote smoke |
+| 61 | complete | Build an integrated self-state bus that fuses emotion, humanlike, moral repair, and psychological snapshots into one public contract | 116 targeted tests, py_compile, json.tool |
+| 62 | complete | Add evidence-weighted causal trace summaries so state changes are explainable across modules | `tests/test_integrated_self.py`, `tests/test_public_api.py` |
+| 63 | complete | Add deterministic replay/simulation bundles for testing state evolution without touching KV storage | deterministic replay bundle checksum tests |
+| 64 | complete | Add policy planning layer that turns integrated state into allowed response modulation and repair actions | policy plan tests preserve blocked actions and repair actions |
+| 65 | complete | Add schema migration and compatibility probes for future public contracts | compatibility probe tests and public API contract tests |
+| 66 | complete | Add export/import diagnostics for maintainers without leaking raw persona or unsafe strategy content | sanitized diagnostics tests |
+| 67 | complete | Add degradation modes and token-budget profiles for low-cost deployments | `integrated_self_degradation_profile` schema/docs/tests |
+| 68 | complete | Expand LivingMemory integration contract with integrated self-state annotations | `state_annotations_at_write` envelope tests |
+| 69 | complete | Harden release, README, and remote smoke contracts around the integrated self-state surface | 208 full tests, 33 package/remote contract tests, py_compile, json.tool, Node syntax, package preflight, leak scan |
+| 70 | in_progress | Run full validation, remote smoke, branch sync, and write a complete revolutionary-iteration handoff | Remote smoke passed; commit/branch sync pending |
 
 ## Recovery Checklist
 

@@ -61,6 +61,18 @@ try:
         heuristic_moral_repair_observation,
         moral_repair_state_to_public_payload,
     )
+    from .integrated_self import (
+        PUBLIC_INTEGRATED_SELF_SCHEMA_VERSION,
+        build_integrated_self_diagnostics,
+        build_integrated_self_memory_annotation,
+        build_integrated_self_prompt_fragment,
+        build_integrated_self_replay_bundle,
+        build_integrated_self_snapshot,
+        build_state_annotations_memory_envelope,
+        format_integrated_self_state_for_user,
+        probe_integrated_self_compatibility,
+        replay_integrated_self_bundle,
+    )
     from .prompts import (
         ASSESSOR_SYSTEM_PROMPT,
         LOW_REASONING_ASSESSOR_SYSTEM_PROMPT,
@@ -118,6 +130,18 @@ except ImportError:
         heuristic_moral_repair_observation,
         moral_repair_state_to_public_payload,
     )
+    from integrated_self import (
+        PUBLIC_INTEGRATED_SELF_SCHEMA_VERSION,
+        build_integrated_self_diagnostics,
+        build_integrated_self_memory_annotation,
+        build_integrated_self_prompt_fragment,
+        build_integrated_self_replay_bundle,
+        build_integrated_self_snapshot,
+        build_state_annotations_memory_envelope,
+        format_integrated_self_state_for_user,
+        probe_integrated_self_compatibility,
+        replay_integrated_self_bundle,
+    )
     from prompts import (
         ASSESSOR_SYSTEM_PROMPT,
         LOW_REASONING_ASSESSOR_SYSTEM_PROMPT,
@@ -149,6 +173,13 @@ _REQUIRED_EMOTION_SERVICE_METHODS: tuple[str, ...] = (
     "reset_psychological_screening_state",
     "simulate_emotion_update",
     "reset_emotion_state",
+    "get_integrated_self_snapshot",
+    "get_integrated_self_prompt_fragment",
+    "get_integrated_self_policy_plan",
+    "build_integrated_self_replay_bundle",
+    "replay_integrated_self_bundle",
+    "probe_integrated_self_compatibility",
+    "export_integrated_self_diagnostics",
 )
 
 _REQUIRED_EMOTION_SERVICE_VERSIONS: dict[str, str] = {
@@ -156,6 +187,7 @@ _REQUIRED_EMOTION_SERVICE_VERSIONS: dict[str, str] = {
     "emotion_schema_version": PUBLIC_SCHEMA_VERSION,
     "emotion_memory_schema_version": PUBLIC_MEMORY_SCHEMA_VERSION,
     "psychological_screening_schema_version": PUBLIC_SCREENING_SCHEMA_VERSION,
+    "integrated_self_schema_version": PUBLIC_INTEGRATED_SELF_SCHEMA_VERSION,
 }
 
 
@@ -201,6 +233,7 @@ class EmotionalStatePlugin(Star):
     psychological_screening_schema_version = PUBLIC_SCREENING_SCHEMA_VERSION
     humanlike_state_schema_version = PUBLIC_HUMANLIKE_SCHEMA_VERSION
     moral_repair_state_schema_version = PUBLIC_MORAL_REPAIR_SCHEMA_VERSION
+    integrated_self_schema_version = PUBLIC_INTEGRATED_SELF_SCHEMA_VERSION
 
     def __init__(self, context: Context, config: AstrBotConfig | None = None):
         super().__init__(context)
@@ -492,6 +525,7 @@ class EmotionalStatePlugin(Star):
         include_prompt_fragment: bool = False,
         include_raw_snapshot: bool = True,
         written_at: float | None = None,
+        include_state_annotations_envelope: bool = True,
     ) -> dict[str, Any]:
         """Public API: wrap a memory entry with the emotion snapshot at write time."""
         resolved_session_key = self._resolve_public_session_key(
@@ -514,6 +548,8 @@ class EmotionalStatePlugin(Star):
             include_raw_snapshot=include_raw_snapshot,
             written_at=written_at,
         )
+        humanlike_snapshot: dict[str, Any] | None = None
+        moral_repair_snapshot: dict[str, Any] | None = None
         if self._cfg_bool("humanlike_memory_write_enabled", True):
             humanlike_snapshot = await self.get_humanlike_snapshot(
                 event_or_session,
@@ -546,6 +582,36 @@ class EmotionalStatePlugin(Star):
             payload["moral_repair_state_at_write"] = annotation
             if include_raw_snapshot:
                 payload["moral_repair_snapshot"] = moral_repair_snapshot
+        if self._cfg_bool("integrated_self_memory_write_enabled", True):
+            integrated_snapshot = await self.get_integrated_self_snapshot(
+                event_or_session,
+                request=request,
+                session_key=resolved_session_key,
+                include_raw_snapshots=include_raw_snapshot,
+                emotion_snapshot=snapshot,
+                humanlike_snapshot=humanlike_snapshot,
+                moral_repair_snapshot=moral_repair_snapshot,
+                include_humanlike=humanlike_snapshot is not None,
+                include_moral_repair=moral_repair_snapshot is not None,
+                include_psychological=False,
+            )
+            payload["integrated_self_state_at_write"] = (
+                build_integrated_self_memory_annotation(
+                    integrated_snapshot,
+                    source=source,
+                    written_at=written_at,
+                )
+            )
+            if include_raw_snapshot:
+                payload["integrated_self_snapshot"] = integrated_snapshot
+        if include_state_annotations_envelope:
+            payload["state_annotations_at_write"] = (
+                build_state_annotations_memory_envelope(
+                    payload,
+                    source=source,
+                    written_at=written_at,
+                )
+            )
         return payload
 
     async def inject_emotion_context(
@@ -574,6 +640,172 @@ class EmotionalStatePlugin(Star):
             return False
         await self._delete_state(session_key)
         return True
+
+    async def get_integrated_self_snapshot(
+        self,
+        event_or_session: AstrMessageEvent | str | None = None,
+        *,
+        request: ProviderRequest | None = None,
+        session_key: str | None = None,
+        include_raw_snapshots: bool = False,
+        emotion_snapshot: dict[str, Any] | None = None,
+        humanlike_snapshot: dict[str, Any] | None = None,
+        moral_repair_snapshot: dict[str, Any] | None = None,
+        psychological_snapshot: dict[str, Any] | None = None,
+        include_humanlike: bool = True,
+        include_moral_repair: bool = True,
+        include_psychological: bool = True,
+        degradation_profile: str | None = None,
+    ) -> dict[str, Any]:
+        """Public API: return the read-only integrated self-state bus."""
+        resolved_session_key = self._resolve_public_session_key(
+            event_or_session,
+            request=request,
+            session_key=session_key,
+        )
+        if not self._cfg_bool("enable_integrated_self_state", True):
+            return {
+                "schema_version": PUBLIC_INTEGRATED_SELF_SCHEMA_VERSION,
+                "kind": "integrated_self_state",
+                "enabled": False,
+                "session_key": resolved_session_key,
+                "reason": "enable_integrated_self_state is false",
+            }
+        if emotion_snapshot is None:
+            emotion_snapshot = await self.get_emotion_snapshot(
+                event_or_session,
+                request=request,
+                session_key=resolved_session_key,
+                include_prompt_fragment=False,
+            )
+        if include_humanlike and humanlike_snapshot is None:
+            humanlike_snapshot = await self.get_humanlike_snapshot(
+                event_or_session,
+                request=request,
+                session_key=resolved_session_key,
+                exposure="plugin_safe",
+                include_prompt_fragment=False,
+            )
+        if include_moral_repair and moral_repair_snapshot is None:
+            moral_repair_snapshot = await self.get_moral_repair_snapshot(
+                event_or_session,
+                request=request,
+                session_key=resolved_session_key,
+                exposure="plugin_safe",
+                include_prompt_fragment=False,
+            )
+        if include_psychological and psychological_snapshot is None:
+            psychological_snapshot = await self.get_psychological_screening_snapshot(
+                event_or_session,
+                request=request,
+                session_key=resolved_session_key,
+            )
+        return build_integrated_self_snapshot(
+            session_key=resolved_session_key,
+            emotion_snapshot=emotion_snapshot,
+            humanlike_snapshot=humanlike_snapshot,
+            moral_repair_snapshot=moral_repair_snapshot,
+            psychological_snapshot=psychological_snapshot,
+            include_raw_snapshots=include_raw_snapshots,
+            degradation_profile=(
+                degradation_profile or self._integrated_self_degradation_profile()
+            ),
+        )
+
+    async def get_integrated_self_prompt_fragment(
+        self,
+        event_or_session: AstrMessageEvent | str | None = None,
+        *,
+        request: ProviderRequest | None = None,
+        session_key: str | None = None,
+    ) -> str:
+        """Public API: return integrated arbitration guidance for prompt use."""
+        if not self._cfg_bool("enable_integrated_self_state", True):
+            return ""
+        snapshot = await self.get_integrated_self_snapshot(
+            event_or_session,
+            request=request,
+            session_key=session_key,
+            include_raw_snapshots=False,
+        )
+        return build_integrated_self_prompt_fragment(snapshot)
+
+    async def get_integrated_self_policy_plan(
+        self,
+        event_or_session: AstrMessageEvent | str | None = None,
+        *,
+        request: ProviderRequest | None = None,
+        session_key: str | None = None,
+    ) -> dict[str, Any]:
+        """Public API: return the response-modulation plan from the integrated bus."""
+        snapshot = await self.get_integrated_self_snapshot(
+            event_or_session,
+            request=request,
+            session_key=session_key,
+            include_raw_snapshots=False,
+        )
+        return dict(snapshot.get("policy_plan") or {})
+
+    async def build_integrated_self_replay_bundle(
+        self,
+        event_or_session: AstrMessageEvent | str | None = None,
+        *,
+        request: ProviderRequest | None = None,
+        session_key: str | None = None,
+        scenario_name: str = "current",
+    ) -> dict[str, Any]:
+        """Public API: build a deterministic, sanitized replay bundle."""
+        snapshot = await self.get_integrated_self_snapshot(
+            event_or_session,
+            request=request,
+            session_key=session_key,
+            include_raw_snapshots=False,
+        )
+        return build_integrated_self_replay_bundle(
+            snapshot,
+            scenario_name=scenario_name,
+        )
+
+    async def replay_integrated_self_bundle(
+        self,
+        bundle: dict[str, Any],
+    ) -> dict[str, Any]:
+        """Public API: replay a deterministic integrated-self bundle without KV reads."""
+        return replay_integrated_self_bundle(bundle)
+
+    async def probe_integrated_self_compatibility(
+        self,
+        payload: dict[str, Any] | None = None,
+        event_or_session: AstrMessageEvent | str | None = None,
+        *,
+        request: ProviderRequest | None = None,
+        session_key: str | None = None,
+    ) -> dict[str, Any]:
+        """Public API: check whether a payload satisfies the current integrated schema."""
+        if payload is None:
+            payload = await self.get_integrated_self_snapshot(
+                event_or_session,
+                request=request,
+                session_key=session_key,
+                include_raw_snapshots=False,
+            )
+        return probe_integrated_self_compatibility(payload)
+
+    async def export_integrated_self_diagnostics(
+        self,
+        event_or_session: AstrMessageEvent | str | None = None,
+        *,
+        request: ProviderRequest | None = None,
+        session_key: str | None = None,
+    ) -> dict[str, Any]:
+        """Public API: export sanitized diagnostics for maintainers."""
+        snapshot = await self.get_integrated_self_snapshot(
+            event_or_session,
+            request=request,
+            session_key=session_key,
+            include_raw_snapshots=False,
+        )
+        return build_integrated_self_diagnostics(snapshot)
 
     async def get_humanlike_snapshot(
         self,
@@ -1170,6 +1402,20 @@ class EmotionalStatePlugin(Star):
         )
         yield event.plain_result(json.dumps(snapshot, ensure_ascii=False))
 
+    @filter.llm_tool(name="get_bot_integrated_self_state")
+    async def get_bot_integrated_self_state_tool(
+        self,
+        event: AstrMessageEvent,
+        detail: str = "summary",
+    ):
+        """Get the bot's integrated self-state arbitration snapshot, read-only."""
+        full = str(detail or "").strip().lower() == "full"
+        snapshot = await self.get_integrated_self_snapshot(
+            event,
+            include_raw_snapshots=full,
+        )
+        yield event.plain_result(json.dumps(snapshot, ensure_ascii=False))
+
     @filter.command("emotion", alias={"emotion_state", "情绪状态"})
     async def emotion_status(self, event: AstrMessageEvent):
         """查看当前会话的多维情绪状态。"""
@@ -1249,6 +1495,12 @@ class EmotionalStatePlugin(Star):
             return
         await self._delete_moral_repair_state(self._session_key(event))
         yield event.plain_result("已重置当前会话的道德修复状态。")
+
+    @filter.command("integrated_self", alias={"综合自我状态", "自我状态"})
+    async def integrated_self_status(self, event: AstrMessageEvent):
+        """View the current session's integrated self-state arbitration."""
+        snapshot = await self.get_integrated_self_snapshot(event)
+        yield event.plain_result(format_integrated_self_state_for_user(snapshot))
 
     async def _observe_public_text(
         self,
@@ -1726,6 +1978,14 @@ class EmotionalStatePlugin(Star):
 
     def _moral_repair_reset_allowed(self) -> bool:
         return self._cfg_bool("allow_moral_repair_reset_backdoor", True)
+
+    def _integrated_self_degradation_profile(self) -> str:
+        profile = str(
+            self._cfg("integrated_self_degradation_profile", "balanced") or "balanced",
+        ).strip().lower()
+        if profile in {"full", "balanced", "minimal"}:
+            return profile
+        return "balanced"
 
     def _moral_repair_disabled_payload(
         self,

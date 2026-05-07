@@ -179,6 +179,8 @@ class ConfigSchemaContractTests(unittest.TestCase):
             "humanlike_memory_write_enabled": ("bool", True),
             "allow_humanlike_reset_backdoor": ("bool", True),
             "enable_psychological_screening": ("bool", False),
+            "enable_integrated_self_state": ("bool", True),
+            "integrated_self_memory_write_enabled": ("bool", True),
             "baseline_half_life_seconds": ("float", 21600),
             "consequence_half_life_seconds": ("float", 10800),
             "cold_war_duration_seconds": ("float", 1800),

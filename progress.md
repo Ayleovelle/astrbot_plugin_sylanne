@@ -1454,3 +1454,91 @@ Validation complete:
 - Leak scan for remote address/password in the repository excluding generated/runtime directories: passed.
 - Remote read-only smoke with expected plugin version/display-name assertions: passed.
 
+## 2026-05-07 Revolutionary Iterations 61-70
+
+Status: planned.
+
+- Added the 10-step revolutionary iteration queue to `task_plan.md` before implementation so automatic context compaction can recover the intended sequence.
+- Current focus:
+  - Iteration 61: integrated self-state bus and public contract.
+  - Iterations 62-70: causal traces, replay bundles, policy planning, migrations, export/import diagnostics, degradation modes, LivingMemory expansion, release contracts, and final validation/branch sync.
+- Subagents started for read-only review:
+  - code/model direction review,
+  - test/package/remote contract review.
+
+## 2026-05-07 Iterations 61-68
+
+Status: complete.
+
+- Iteration 61 added the read-only integrated self-state bus:
+  - `integrated_self.py` fuses emotion, humanlike, moral repair, and non-diagnostic psychological screening snapshots.
+  - `main.py` exposes `get_integrated_self_snapshot`, `get_integrated_self_prompt_fragment`, `/integrated_self`, and `get_bot_integrated_self_state`.
+  - Memory writes can include `integrated_self_state_at_write`; optional module write switches are respected so disabled annotations do not trigger unwanted state loads.
+- Iteration 62 added evidence-weighted causal trace summaries:
+  - trace items include module, signal, evidence weight, captured timestamp, real-time lag, summary, and flags.
+  - persona fingerprint, relationship decisions, active effects, moral repair pressure, humanlike boundary signals, and psychological red flags are explainable.
+- Iteration 63 added deterministic replay bundles:
+  - `build_integrated_self_replay_bundle` and `replay_integrated_self_bundle` produce checksum-verified sanitized bundles without KV access.
+- Iteration 64 added policy planning:
+  - `policy_plan` maps integrated state to allowed actions, blocked actions, response modulation, repair actions, and prompt budget.
+- Iteration 65 added compatibility probes:
+  - `probe_integrated_self_compatibility` reports schema mismatch and missing required fields instead of silently accepting partial contracts.
+- Iteration 66 added sanitized diagnostics:
+  - `export_integrated_self_diagnostics` exposes module status, risk booleans, state index, and trace summary while excluding raw snapshots, prompt fragments, persona text, message text, and unsafe strategy content.
+- Iteration 67 added degradation modes:
+  - new config `integrated_self_degradation_profile` accepts `full`, `balanced`, and `minimal`.
+  - `minimal` reduces trace/prompt budget but preserves schema, safety priority, blocked actions, crisis signals, moral repair transparency, and relationship boundary signals.
+- Iteration 68 expanded LivingMemory integration:
+  - memory payloads now include a sanitized `state_annotations_at_write` envelope by default.
+  - the envelope includes only state annotations such as `emotion_at_write`, `humanlike_state_at_write`, `moral_repair_state_at_write`, and `integrated_self_state_at_write`; it excludes raw snapshots.
+
+Validation so far:
+
+- `py -3.13 -m unittest tests.test_integrated_self tests.test_public_api tests.test_config_schema_contract tests.test_command_tools tests.test_remote_smoke_contract -v`: 116 tests passed.
+- `py -3.13 -m py_compile main.py integrated_self.py public_api.py`: passed.
+- `py -3.13 -m json.tool _conf_schema.json`: passed.
+
+## 2026-05-07 Iteration 69
+
+Status: complete.
+
+- Hardened release/docs/API contracts around the integrated self-state surface:
+  - README now documents new integrated self public API methods: policy plan, deterministic replay bundle, replay result, compatibility probe, and sanitized diagnostics.
+  - README documents `integrated_self_degradation_profile` with `full`, `balanced`, and `minimal`.
+  - README test matrix now includes `tests/test_integrated_self.py`.
+  - Public API Protocol/service discovery now requires the new integrated self methods, keeping third-party plugin discovery versioned and complete.
+- Packaging and remote-smoke contracts remain aligned with `integrated_self.py`, GPL metadata, runtime root files, and upload preflight required entries.
+
+Validation complete:
+
+- `py -3.13 -m unittest discover -s tests -v`: 208 tests passed.
+- `py -3.13 -m unittest tests.test_package_plugin tests.test_remote_smoke_contract -v`: 33 tests passed when run sequentially. A prior parallel run against full discovery caused a Windows temp zip race on `docs\astrbot_plugin_emotional_state.zip`; rerun passed.
+- `py -3.13 -m py_compile main.py emotion_engine.py psychological_screening.py humanlike_engine.py integrated_self.py moral_repair_engine.py prompts.py public_api.py scripts\build_literature_kb.py scripts\build_psychological_literature_kb.py scripts\build_humanlike_agent_literature_kb.py scripts\package_plugin.py`: passed.
+- `py -3.13 -m json.tool _conf_schema.json`: passed.
+- Bundled Node `--check` for `scripts\plugin_zip_preflight.js`, `scripts\remote_smoke_playwright.js`, and `scripts\remote_install_upload_playwright.js`: passed.
+- `py -3.13 scripts\package_plugin.py --output dist\astrbot_plugin_emotional_state.zip`: passed.
+- Bundled Node `scripts\plugin_zip_preflight.js dist\astrbot_plugin_emotional_state.zip astrbot_plugin_emotional_state`: passed, 52 entries.
+- `git diff --check`: passed, with CRLF conversion warnings only.
+- Leak scan for the remote host/password in repository files excluding generated/runtime directories: passed.
+
+## 2026-05-07 Iteration 70
+
+Status: in progress.
+
+- Remote read-only smoke passed:
+  - browser login succeeded,
+  - AstrBot version `4.24.2`,
+  - `/api/stat/version`, `/api/plugin/get`, and `/api/plugin/source/get-failed-plugins` returned HTTP 200,
+  - remote plugin count was 30,
+  - `astrbot_plugin_emotional_state` was installed, activated, version `1.0.0`, display name `多维情绪状态`,
+  - failed plugin summary was empty,
+  - WebUI plugin list showed the target plugin by display name,
+  - remote `astrbot_plugin_livingmemory` was present.
+
+Remaining for Iteration 70:
+
+- commit validated baseline,
+- sync documented maintenance branches,
+- run a final lightweight status check,
+- mark task plan complete.
+

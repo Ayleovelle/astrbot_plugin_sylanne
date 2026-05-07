@@ -356,6 +356,29 @@
     "default": true,
     "hint": "Default on for abnormal states, severe consequences, and debugging."
   },
+  "enable_integrated_self_state": {
+    "description": "Enable integrated self-state bus",
+    "type": "bool",
+    "default": true,
+    "hint": "Read-only arbitration layer that fuses emotion, humanlike, moral repair, and psychological snapshots. It does not write KV state by itself."
+  },
+  "integrated_self_memory_write_enabled": {
+    "description": "Attach integrated self-state annotations to memory writes",
+    "type": "bool",
+    "default": true,
+    "hint": "build_emotion_memory_payload adds integrated_self_state_at_write so LivingMemory-like plugins can record the fused response posture and risk boundary."
+  },
+  "integrated_self_degradation_profile": {
+    "description": "Integrated self-state cost profile",
+    "type": "string",
+    "default": "balanced",
+    "options": [
+      "full",
+      "balanced",
+      "minimal"
+    ],
+    "hint": "Controls trace and prompt-budget detail. minimal keeps schema, safety priority, blocked actions, and LivingMemory annotations while reducing optional detail."
+  },
   "psychological_alpha_base": {
     "description": "心理筛查状态基础更新步长",
     "type": "float",
