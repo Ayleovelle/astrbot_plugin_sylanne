@@ -262,6 +262,24 @@ async function main() {
       failedPluginData,
       expectedPlugin,
     );
+    const expectedPluginChecks = expectedPlugin ? {
+      ok: Boolean(
+        containsExpectedPlugin
+        && !expectedFailedPlugin
+        && (!expectedPluginRuntime || expectedPluginRuntime.activated !== false)
+        && (expectedPluginVersion ? Boolean(expectedPluginVersionMatches) : true)
+        && (expectedPluginDisplayName ? Boolean(expectedPluginDisplayNameMatches) : true)
+      ),
+      found: containsExpectedPlugin,
+      notFailed: !expectedFailedPlugin,
+      activated: expectedPluginRuntime
+        ? expectedPluginRuntime.activated !== false
+        : null,
+      versionMatches: expectedPluginVersion ? Boolean(expectedPluginVersionMatches) : null,
+      displayNameMatches: expectedPluginDisplayName
+        ? Boolean(expectedPluginDisplayNameMatches)
+        : null,
+    } : null;
 
     await page.evaluate(() => {
       location.hash = "#/extension#installed";
@@ -360,6 +378,7 @@ async function main() {
       apiHealth,
       pluginSummary,
       expectedPlugin: expectedPlugin || null,
+      expectedPluginChecks,
       containsExpectedPlugin,
       expectedPluginRuntime,
       expectedPluginVersion: expectedPluginVersion || null,

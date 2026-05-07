@@ -936,6 +936,40 @@ Validation complete:
   - `failedPluginSummary.hasExpectedPluginFailure=false`.
   - `failedPluginSummary.unrelatedCount=0`.
 
+## 2026-05-07 Iteration 53
+
+Status: complete.
+
+- Added `expectedPluginChecks` to `scripts\remote_smoke_playwright.js`.
+- `expectedPluginChecks.ok` now summarizes the target plugin's API-level pass state across:
+  - found in `/api/plugin/get`,
+  - absent from expected failed-plugin records,
+  - not deactivated,
+  - version match when `ASTRBOT_EXPECT_PLUGIN_VERSION` is set,
+  - display-name match when `ASTRBOT_EXPECT_PLUGIN_DISPLAY_NAME` is set.
+- Kept detailed fields (`containsExpectedPlugin`, `expectedPluginRuntime`, `expectedFailedPlugin`, version/display-name matches, `failedPluginSummary`) for diagnostics.
+- Updated README and `docs\release_branch_sync_checklist.md` so humans and automation can prefer `expectedPluginChecks.ok` while still reading detailed diagnostics.
+- Strengthened remote smoke contract tests for the new summary fields.
+
+Validation complete:
+
+- `py -3.13 -m unittest tests.test_remote_smoke_contract -v`: 16 tests passed.
+- `py -3.13 -m unittest discover -s tests -v`: 170 tests passed.
+- `py -3.13 -m py_compile main.py emotion_engine.py humanlike_engine.py psychological_screening.py public_api.py prompts.py scripts\build_literature_kb.py scripts\build_humanlike_agent_literature_kb.py scripts\build_psychological_literature_kb.py scripts\package_plugin.py`: passed.
+- Bundled Node `--check` for `scripts\remote_smoke_playwright.js`, `scripts\remote_install_upload_playwright.js`, and `scripts\plugin_zip_preflight.js`: passed.
+- `py -3.13 scripts\package_plugin.py --output dist\astrbot_plugin_emotional_state.zip`: passed.
+- Bundled Node `scripts\plugin_zip_preflight.js dist\astrbot_plugin_emotional_state.zip astrbot_plugin_emotional_state`: passed, 49 entries.
+- Remote smoke with metadata-matched plugin name/version/display-name assertions: passed.
+  - AstrBot version `4.24.2`.
+  - Plugin API returned 30 plugins.
+  - `expectedPluginChecks.ok=true`.
+  - `expectedPluginChecks.found=true`.
+  - `expectedPluginChecks.notFailed=true`.
+  - `expectedPluginChecks.activated=true`.
+  - `expectedPluginChecks.versionMatches=true`.
+  - `expectedPluginChecks.displayNameMatches=true`.
+  - `failedPluginSummary.count=0`.
+
 ## 2026-05-07 Iteration 50
 
 Status: complete.
