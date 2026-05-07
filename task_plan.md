@@ -47,6 +47,7 @@ Build and maintain `astrbot_plugin_emotional_state`: an AstrBot plugin with mult
 | 33 | complete | Refresh README test matrix for expanded remote smoke contract coverage | 143 unit tests, py_compile, package preflight, Node syntax check, git diff check, remote smoke |
 | 34 | complete | Lock documented remote smoke version and display-name assertions to metadata.yaml | 144 unit tests, py_compile, package preflight, Node syntax check, git diff check, remote smoke |
 | 35 | complete | Lock README badges and AstrBot compatibility badge encoding to metadata.yaml | 145 unit tests, py_compile, package preflight, Node syntax check, git diff check, remote smoke |
+| 36 | complete | Require release zip metadata identity to match the expected plugin directory | 147 unit tests, py_compile, package preflight, Node syntax check, git diff check, remote smoke |
 
 ## Recovery Checklist
 

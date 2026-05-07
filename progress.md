@@ -554,6 +554,36 @@ Validation complete:
   - Version `1.0.0` matched.
   - Display name `多维情绪状态` matched.
   - Failed plugin data was `{}`.
+
+## 2026-05-07 Iteration 36
+
+Status: complete.
+
+- Strengthened `scripts\plugin_zip_preflight.js` so uploadable zips must pass a metadata identity check:
+  - filename still must end with `<expectedPlugin>.zip`,
+  - first zip entry still must be the explicit `<expectedPlugin>/` directory,
+  - all entries still must stay under that directory,
+  - zip-internal `<expectedPlugin>/metadata.yaml` must contain `name: <expectedPlugin>`.
+- Added zip-entry content reading for stored and deflated entries so the preflight can inspect `metadata.yaml` before any remote upload mutation.
+- Added package preflight tests for metadata `name` mismatch and missing `name:`.
+- Updated README, release checklist, and remote contract tests to document and lock the metadata identity check.
+
+Validation complete:
+
+- `py -3.13 -m unittest tests.test_package_plugin tests.test_remote_smoke_contract -v`: 23 tests passed.
+- Bundled Node `--check scripts\plugin_zip_preflight.js`: passed.
+- Bundled Node `scripts\plugin_zip_preflight.js dist\astrbot_plugin_emotional_state.zip astrbot_plugin_emotional_state`: passed, 49 entries.
+- `py -3.13 -m unittest discover -s tests -v`: 147 tests passed.
+- `py -3.13 -m py_compile main.py emotion_engine.py humanlike_engine.py psychological_screening.py public_api.py prompts.py scripts\build_literature_kb.py scripts\build_humanlike_agent_literature_kb.py scripts\build_psychological_literature_kb.py scripts\package_plugin.py`: passed.
+- Bundled Node `--check` for `scripts\remote_smoke_playwright.js`, `scripts\remote_install_upload_playwright.js`, and `scripts\plugin_zip_preflight.js`: passed.
+- `git diff --check`: passed, with CRLF conversion warnings only.
+- Remote smoke with metadata-matched version/display-name assertions: passed.
+  - AstrBot version `4.24.2`.
+  - Plugin API returned 30 plugins.
+  - `astrbot_plugin_emotional_state` was present and activated.
+  - Version `1.0.0` matched.
+  - Display name `多维情绪状态` matched.
+  - Failed plugin data was `{}`.
   - `pageData.uiProbeStatus="ready"`.
   - `pageData.selectorCounts.extensionTitleRows=30`.
   - `pageData.hasExpectedPluginDisplayName=true`.

@@ -53,6 +53,7 @@ This file stores durable discoveries from implementation, review, and remote tes
 - README's test coverage matrix now reflects the expanded remote smoke contract: credentials by environment, read-only behavior, ignored screenshots, API health summary, UI best-effort diagnostics, upload-script boundaries, and bundled Node documentation.
 - Remote smoke documentation now has contract coverage tying `ASTRBOT_EXPECT_PLUGIN_VERSION` and `ASTRBOT_EXPECT_PLUGIN_DISPLAY_NAME` examples to `metadata.yaml` `version` and `display_name`, preventing release docs from drifting when metadata changes.
 - README badge documentation now has contract coverage tying the visible plugin version badge and `astrbot_version` compatibility badge to `metadata.yaml`. Shields badge URLs must encode `>`, `=`, `<`, and `,` as `%3E`, `%3D`, `%3C`, and `%2C`.
+- Upload zip preflight should validate identity at three levels: filename, explicit root directory, and zip-internal `metadata.yaml` `name:`. A package whose `metadata.yaml` names a different plugin must fail locally before `remote_install_upload_playwright.js` can call AstrBot's install-upload endpoint.
 
 ## 2026-05-07 Branch Maintenance
 

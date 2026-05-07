@@ -1,30 +1,105 @@
 const fs = require("fs");
+const zlib = require("zlib");
 
-function readCentralDirectoryNames(zipPath) {
-  const bytes = fs.readFileSync(zipPath);
-  const names = [];
+function readCentralDirectoryEntriesFromBytes(bytes) {
+  const entries = [];
   let offset = 0;
   while (offset <= bytes.length - 4) {
     const signature = bytes.readUInt32LE(offset);
     if (signature === 0x02014b50) {
+      const compressionMethod = bytes.readUInt16LE(offset + 10);
+      const compressedSize = bytes.readUInt32LE(offset + 20);
+      const uncompressedSize = bytes.readUInt32LE(offset + 24);
       const fileNameLength = bytes.readUInt16LE(offset + 28);
       const extraLength = bytes.readUInt16LE(offset + 30);
       const commentLength = bytes.readUInt16LE(offset + 32);
+      const localHeaderOffset = bytes.readUInt32LE(offset + 42);
       const nameStart = offset + 46;
       const nameEnd = nameStart + fileNameLength;
       if (nameEnd > bytes.length) {
         throw new Error("Zip central directory entry is truncated.");
       }
-      names.push(bytes.subarray(nameStart, nameEnd).toString("utf8"));
+      entries.push({
+        name: bytes.subarray(nameStart, nameEnd).toString("utf8"),
+        compressionMethod,
+        compressedSize,
+        uncompressedSize,
+        localHeaderOffset,
+      });
       offset = nameEnd + extraLength + commentLength;
       continue;
     }
     offset += 1;
   }
-  if (names.length === 0) {
+  if (entries.length === 0) {
     throw new Error("Zip central directory contains no entries.");
   }
-  return names;
+  return entries;
+}
+
+function readCentralDirectoryNames(zipPath) {
+  return readCentralDirectoryEntriesFromBytes(fs.readFileSync(zipPath))
+    .map((entry) => entry.name);
+}
+
+function readZipEntryText(zipPath, entryName) {
+  const bytes = fs.readFileSync(zipPath);
+  const entry = readCentralDirectoryEntriesFromBytes(bytes)
+    .find((candidate) => candidate.name === entryName);
+  if (!entry) {
+    throw new Error(`Zip is missing required plugin entry: ${entryName}`);
+  }
+  if (
+    entry.compressedSize === 0xffffffff
+    || entry.uncompressedSize === 0xffffffff
+    || entry.localHeaderOffset === 0xffffffff
+  ) {
+    throw new Error(`Zip64 entry is not supported by preflight: ${entryName}`);
+  }
+  const localOffset = entry.localHeaderOffset;
+  if (localOffset + 30 > bytes.length || bytes.readUInt32LE(localOffset) !== 0x04034b50) {
+    throw new Error(`Zip local file header is missing for ${entryName}`);
+  }
+  const fileNameLength = bytes.readUInt16LE(localOffset + 26);
+  const extraLength = bytes.readUInt16LE(localOffset + 28);
+  const dataStart = localOffset + 30 + fileNameLength + extraLength;
+  const dataEnd = dataStart + entry.compressedSize;
+  if (dataEnd > bytes.length) {
+    throw new Error(`Zip entry data is truncated: ${entryName}`);
+  }
+  const compressed = bytes.subarray(dataStart, dataEnd);
+  let content;
+  if (entry.compressionMethod === 0) {
+    content = compressed;
+  } else if (entry.compressionMethod === 8) {
+    content = zlib.inflateRawSync(compressed);
+  } else {
+    throw new Error(`Zip entry uses unsupported compression method ${entry.compressionMethod}: ${entryName}`);
+  }
+  if (content.length !== entry.uncompressedSize) {
+    throw new Error(`Zip entry size mismatch after decompression: ${entryName}`);
+  }
+  return content.toString("utf8");
+}
+
+function readMetadataName(metadataText) {
+  for (const line of metadataText.split(/\r?\n/)) {
+    const match = line.match(/^\s*name\s*:\s*(.*?)\s*$/);
+    if (!match) {
+      continue;
+    }
+    let value = match[1].trim();
+    if (
+      (value.startsWith("\"") && value.endsWith("\""))
+      || (value.startsWith("'") && value.endsWith("'"))
+    ) {
+      value = value.slice(1, -1);
+    } else {
+      value = value.replace(/\s+#.*$/, "").trim();
+    }
+    return value;
+  }
+  return "";
 }
 
 function assertZipLooksUploadable(zipPath, expectedPlugin, options = {}) {
@@ -50,12 +125,13 @@ function assertZipLooksUploadable(zipPath, expectedPlugin, options = {}) {
   const firstNameLength = header.readUInt16LE(26);
   const firstName = header.subarray(30, 30 + firstNameLength).toString("utf8");
   const expectedDirectory = `${expectedPlugin}/`;
+  const metadataEntry = `${expectedPlugin}/metadata.yaml`;
   if (firstName !== expectedDirectory) {
     throw new Error(`Zip must start with explicit plugin directory entry ${expectedDirectory}`);
   }
   const names = readCentralDirectoryNames(zipPath);
   const requiredEntries = [
-    `${expectedPlugin}/metadata.yaml`,
+    metadataEntry,
     `${expectedPlugin}/main.py`,
     `${expectedPlugin}/README.md`,
     `${expectedPlugin}/_conf_schema.json`,
@@ -90,12 +166,17 @@ function assertZipLooksUploadable(zipPath, expectedPlugin, options = {}) {
       throw new Error(`Zip is missing required plugin entry: ${requiredEntry}`);
     }
   }
+  const metadataName = readMetadataName(readZipEntryText(zipPath, metadataEntry));
+  if (metadataName !== expectedPlugin) {
+    throw new Error(`metadata.yaml name must be ${expectedPlugin}, got ${metadataName || "<missing>"}`);
+  }
   return { size, names };
 }
 
 module.exports = {
   assertZipLooksUploadable,
   readCentralDirectoryNames,
+  readZipEntryText,
 };
 
 if (require.main === module) {

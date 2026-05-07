@@ -192,6 +192,34 @@ class PluginZipPreflightTests(unittest.TestCase):
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("parent traversal", result.stderr)
 
+    def test_zip_preflight_rejects_metadata_name_mismatch(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            output = Path(temp_dir) / f"{PLUGIN_NAME}.zip"
+            entries = [
+                (name, "name: wrong_plugin\n" if name.endswith("metadata.yaml") else content)
+                for name, content in self._valid_entries()
+            ]
+            self._write_zip(output, entries)
+
+            result = self._preflight(output)
+
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("metadata.yaml name must be", result.stderr)
+
+    def test_zip_preflight_rejects_metadata_without_name(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            output = Path(temp_dir) / f"{PLUGIN_NAME}.zip"
+            entries = [
+                (name, "display_name: Broken\n" if name.endswith("metadata.yaml") else content)
+                for name, content in self._valid_entries()
+            ]
+            self._write_zip(output, entries)
+
+            result = self._preflight(output)
+
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("metadata.yaml name must be", result.stderr)
+
 
 if __name__ == "__main__":
     unittest.main()
