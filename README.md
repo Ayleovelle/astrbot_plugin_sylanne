@@ -2,7 +2,7 @@
 
 > 让 AstrBot 维护一套可计算、可记忆、可解释、可被其他插件调用的多维情绪状态。
 
-![Version 1.0.0](https://img.shields.io/badge/version-1.0.0-blue)
+![Version 0.0.1-beta](https://img.shields.io/badge/version-0.0.1-beta-blue)
 ![AstrBot >=4.9.2,<5.0.0](https://img.shields.io/badge/AstrBot-%3E%3D4.9.2%2C%3C5.0.0-green)
 ![Python 3.10+](https://img.shields.io/badge/Python-3.10%2B-yellow)
 ![Schema astrbot.emotion_state.v2](https://img.shields.io/badge/schema-astrbot.emotion__state.v2-purple)
@@ -51,13 +51,13 @@
 | --- | --- |
 | 插件目录名 | `astrbot_plugin_emotional_state` |
 | 显示名 | `多维情绪状态` |
-| 当前版本 | `1.0.0` |
+| 当前版本 | `0.0.1-beta` |
 | AstrBot 版本 | `>=4.9.2,<5.0.0` |
 | Python | `3.10+` |
 | 许可证 | `GPL-3.0-or-later` |
 | 运行时第三方依赖 | 当前无额外依赖，见 `requirements.txt` |
 
-当前版本的重点是把“情绪化 bot”从单次 prompt 风格控制推进到可持久化的状态服务：核心情绪默认启用，`humanlike_state`、`moral_repair_state`、`psychological_screening` 等长期模块默认关闭，由配置显式打开。发布包会包含运行代码、README、LICENSE、配置 schema、docs 和精选文献知识库；不会包含 `tests/`、`scripts/`、`raw/`、`output/`、`dist/` 等开发与缓存目录。
+`0.0.1-beta` 是预发布版本，用于首轮公开安装、文档验收、AstrBot WebUI 上传验证和第三方插件 API 适配试跑。当前版本的重点是把“情绪化 bot”从单次 prompt 风格控制推进到可持久化的状态服务：核心情绪默认启用，`humanlike_state`、`moral_repair_state`、`psychological_screening` 等长期模块默认关闭，由配置显式打开。发布包会包含运行代码、README、LICENSE、配置 schema、docs 和精选文献知识库；不会包含 `tests/`、`scripts/`、`raw/`、`output/`、`dist/` 等开发与缓存目录。
 
 ---
 
@@ -1688,7 +1688,7 @@ $env:ASTRBOT_EXPECT_PLUGIN = "astrbot_plugin_emotional_state"
 脚本会在输出 JSON 里写出 `expectedPluginRuntime`，包含插件列表 API 中返回的 `version`、`displayName`、`activated`、`author`、`astrbotVersion` 等只读字段。若目标插件存在但 `activated=false`，脚本会失败退出。需要把版本和显示名也作为硬断言时，可以额外设置：
 
 ```powershell
-$env:ASTRBOT_EXPECT_PLUGIN_VERSION = "1.0.0"
+$env:ASTRBOT_EXPECT_PLUGIN_VERSION = "0.0.1-beta"
 $env:ASTRBOT_EXPECT_PLUGIN_DISPLAY_NAME = "多维情绪状态"
 & $node scripts\remote_smoke_playwright.js
 ```

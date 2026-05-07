@@ -1610,4 +1610,7 @@ Status: in progress.
   - `git diff --check`: passed with CRLF conversion warnings only.
   - `py -3.13 scripts\package_plugin.py --output dist\astrbot_plugin_emotional_state.zip`: passed.
   - bundled Node `scripts\plugin_zip_preflight.js dist\astrbot_plugin_emotional_state.zip astrbot_plugin_emotional_state`: passed with 52 entries.
+- User clarified the initial repository release version should be `0.0.1-beta`, a prerelease version.
+- Updated `metadata.yaml`, README badge/current-version text, README remote smoke example, and `docs/release_branch_sync_checklist.md` to `0.0.1-beta`.
+- Re-ran version contract validation and rebuilt `dist\astrbot_plugin_emotional_state.zip`; zip preflight passed with 52 entries.
 
