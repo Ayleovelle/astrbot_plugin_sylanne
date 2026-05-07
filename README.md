@@ -575,7 +575,7 @@ E_t = X_t
 情绪会被单轮文本完全支配，表现为跳变。插件改为求解一个带惯性的加权最小化问题：
 
 ```math
-E_t = \arg\min_E  J(E)
+E_t = \arg\min_{E} J(E)
 ```
 
 ```math
@@ -1588,6 +1588,24 @@ enable_psychological_screening = false
 | `docs/branching_strategy.md` | 功能分支维护策略。 |
 | `docs/release_branch_sync_checklist.md` | 当前基线提交、发布包预检和维护分支同步清单。 |
 
+### GitHub 公式渲染约定
+
+README 和 `docs/theory.md` 中的独立公式使用 GitHub 官方支持的 fenced math block：
+
+````markdown
+```math
+E_t(P) \in [-1,1]^7
+```
+````
+
+为了兼容 GitHub 当前的数学渲染限制，公式仍然采用 LaTeX 写法，但只使用仓库测试白名单里的保守宏。尤其不要使用 `\operatorname`、`\underset`、`\overset`、`\newcommand`、`\require`、`\html`、`\href`、`\bbox`、`\lVert`、`\rVert`、`\lvert`、`\rvert` 等容易被 GitHub 禁用或在 README 中渲染失败的宏。函数名统一用 `\mathrm{...}`，范数统一写作 `\|...\|`，`arg min` 写作 `\arg\min_{E}`。
+
+这条契约由 `tests/test_document_math_contract.py` 检查。修改 README 或 theory 文档里的公式后，至少运行：
+
+```powershell
+py -3.13 -m unittest tests.test_document_math_contract -v
+```
+
 ---
 
 ## 理论依据简表
@@ -1794,6 +1812,7 @@ $env:ASTRBOT_REMOTE_INSTALL_CONFIRM = "1"
 | `tests/test_humanlike_engine.py` | P0 拟人状态、快照分层、注入片段、记忆注解。 |
 | `tests/test_moral_repair_engine.py` | 道德修复状态、欺骗风险识别、内疚/责任/补偿/信任修复、策略禁止边界和记忆注解。 |
 | `tests/test_literature_kb_scripts.py` | 三个文献 KB 构建脚本的去重、分类、输出结构和坏缓存容错。 |
+| `tests/test_document_math_contract.py` | README 和 `docs/theory.md` 的 GitHub fenced math、LaTeX 宏白名单、禁用宏和脆弱写法检查。 |
 | `tests/test_package_plugin.py` | 发布 zip 的目录根、成品 KB 纳入、raw/cache/tests/scripts/output 排除、包体积上限、metadata 身份校验和上传前 zip 预检失败路径。 |
 | `tests/test_psychological_screening.py` | 非诊断筛查、量表启发、红旗信号、长期轨迹。 |
 | `tests/test_remote_smoke_contract.py` | 远程烟测脚本必须使用环境变量读取凭据、保持只读、忽略截图产物，并锁定 API 健康摘要、UI best-effort 字段、上传脚本边界、bundled Node 文档契约、metadata 驱动的插件身份、zip/env 示例、slug/badge/version/display_name 契约。 |

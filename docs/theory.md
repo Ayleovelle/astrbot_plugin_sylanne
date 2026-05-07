@@ -108,7 +108,7 @@ E_t = X_t
 状态会被单轮文本完全支配，表现为情绪跳变。插件改为求解一个带惯性的加权最小化问题：
 
 ```math
-E_t = \arg\min_E J(E)
+E_t = \arg\min_{E} J(E)
 ```
 
 其中：
@@ -299,8 +299,8 @@ C_t.\mathrm{cause}
 ```math
 \mathrm{repair\_signal}_t =
 \max\left(
-\mathrm{apology\_sincerity}_t\mathrm{I}[\mathrm{user\_acknowledged}_t],
-\mathrm{repair\_quality}_t\mathrm{I}[\mathrm{repaired}_t]
+\mathrm{apology\_sincerity}_t\mathrm{1}_{\mathrm{user\_acknowledged}_t},
+\mathrm{repair\_quality}_t\mathrm{1}_{\mathrm{repaired}_t}
 \right)
 ```
 
@@ -315,8 +315,8 @@ C_t.\mathrm{cause}
 ```math
 \mathrm{self\_correction}_t =
 \max\left(
-\mathrm{bot\_whim\_level}_t\mathrm{I}[\mathrm{cause}\in\{\mathrm{bot\_whim},\mathrm{bot\_misread}\}],
-\mathrm{repair\_signal}_t\mathrm{I}[\mathrm{cause}\in\{\mathrm{user\_fault},\mathrm{mutual}\}]
+\mathrm{bot\_whim\_level}_t\mathrm{1}_{\mathrm{cause}\in\{\mathrm{bot\_whim},\mathrm{bot\_misread}\}},
+\mathrm{repair\_signal}_t\mathrm{1}_{\mathrm{cause}\in\{\mathrm{user\_fault},\mathrm{mutual}\}}
 \right)
 ```
 
