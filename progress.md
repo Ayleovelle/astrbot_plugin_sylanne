@@ -1551,3 +1551,39 @@ Status: complete.
 
 Revolutionary Iterations 61-70 are complete.
 
+## 2026-05-07 README Release Preparation
+
+Status: complete.
+
+- User requested a detailed release-ready README on `main`, using `Ayleovelle/astrbot_plugin_volcengine_asr` as the structural reference.
+- Read the reference README from GitHub and compared it with the current local README.
+- Subagent review concluded the local README already has the technical depth, but should behave more like a plugin release page: installation, minimal configuration, command table, public API, package/upload, remote verification, and release checklist should appear before the long theory sections.
+- Checked repository publication prerequisites:
+  - current branch is `main`,
+  - no `origin` remote is configured,
+  - `gh` CLI is not installed,
+  - `GITHUB_TOKEN` and `GH_TOKEN` are not present.
+- Planned change: keep the contract-tested API/config/remote-smoke strings, but reorganize and extend README for first-time installers and future repository release.
+- Reworked `README.md` into a more release-oriented landing page:
+  - added current version/compatibility/license summary,
+  - changed quick start to Release zip, GitHub repository install, and manual-copy paths,
+  - added command quick-reference table,
+  - added a 30-second public API integration section for other plugins,
+  - added package/upload/new GitHub repository publication checklist,
+  - preserved the existing remote smoke, config, command, public API, and package contract text.
+- Targeted README/config/command contract validation passed:
+  - `py -3.13 -m unittest tests.test_remote_smoke_contract tests.test_config_schema_contract tests.test_command_tools -v`.
+- Full local validation passed:
+  - `py -3.13 -m unittest discover -s tests -v`: 208 tests passed.
+  - `py -3.13 -m py_compile main.py emotion_engine.py psychological_screening.py humanlike_engine.py integrated_self.py moral_repair_engine.py prompts.py public_api.py scripts\build_literature_kb.py scripts\build_psychological_literature_kb.py scripts\build_humanlike_agent_literature_kb.py scripts\package_plugin.py`: passed.
+  - `py -3.13 -m json.tool _conf_schema.json`: passed.
+  - bundled Node `--check` for `scripts\plugin_zip_preflight.js`, `scripts\remote_smoke_playwright.js`, and `scripts\remote_install_upload_playwright.js`: passed.
+  - `py -3.13 scripts\package_plugin.py --output dist\astrbot_plugin_emotional_state.zip`: passed.
+  - bundled Node `scripts\plugin_zip_preflight.js dist\astrbot_plugin_emotional_state.zip astrbot_plugin_emotional_state`: passed with 52 entries.
+  - `git diff --check`: passed with CRLF conversion warnings only.
+- GitHub repository creation status:
+  - no `origin` remote is configured,
+  - `gh` CLI is not installed,
+  - `GITHUB_TOKEN` and `GH_TOKEN` are not present,
+  - therefore remote repository creation is blocked until GitHub authentication is provided or an empty repository is created manually.
+

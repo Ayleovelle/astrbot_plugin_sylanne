@@ -1,11 +1,14 @@
 # AstrBot 多维情绪状态插件
 
-让 AstrBot 维护一套可计算、可记忆、可被其他插件调用的多维情绪状态。
+> 让 AstrBot 维护一套可计算、可记忆、可解释、可被其他插件调用的多维情绪状态。
 
 ![Version 1.0.0](https://img.shields.io/badge/version-1.0.0-blue)
 ![AstrBot >=4.9.2,<5.0.0](https://img.shields.io/badge/AstrBot-%3E%3D4.9.2%2C%3C5.0.0-green)
 ![Python 3.10+](https://img.shields.io/badge/Python-3.10%2B-yellow)
 ![Schema astrbot.emotion_state.v2](https://img.shields.io/badge/schema-astrbot.emotion__state.v2-purple)
+![License GPL-3.0-or-later](https://img.shields.io/badge/license-GPL--3.0--or--later-red)
+
+`astrbot_plugin_emotional_state` 是一个面向 AstrBot 的“情绪状态层”和“插件公共状态服务”。它不是只在 prompt 里写几句“你要有喜怒哀乐”，而是把 bot 的情绪、关系后果、人格差异、长期记忆注解、拟人状态、道德修复状态和非诊断心理筛查拆成可测试、可持久化、可调用的工程模块。
 
 `astrbot_plugin_emotional_state` 不是一个简单的“给 bot 加情绪标签”的插件。他/她的核心目标是：
 
@@ -13,7 +16,8 @@
 
 本插件会让 LLM 根据上下文、用户当前文本、bot 人格和上一轮状态，判断当前情绪观测值；本地引擎再用真实时间半衰期、人格基线、置信门控、关系修复和后果状态机更新长期状态。最后，这个状态会作为临时上下文注入下一次 LLM 请求，影响语气、节奏、社交距离、边界感和修复倾向。
 
-注意：这里的“情绪”“拟人状态”“心理筛查”都是工程上的模拟状态，不代表真实意识、真实主观体验、真实身体、真实疾病或临床诊断。
+> [!IMPORTANT]
+> 这里的“情绪”“拟人状态”“道德修复”“心理筛查”都是工程上的模拟状态，不代表真实意识、真实主观体验、真实身体、真实疾病或临床诊断。心理相关模块只输出非诊断趋势和风险提示，不替代任何医学、心理咨询或危机干预流程。
 
 ---
 
@@ -21,20 +25,39 @@
 
 | 主题 | 内容 |
 | --- | --- |
+| [当前版本与兼容范围](#当前版本与兼容范围) | 插件版本、AstrBot 版本、Python 要求、许可证和发布状态。 |
 | [项目定位](#项目定位) | 为什么本插件不是普通的 prompt 人设增强。 |
 | [核心能力](#核心能力总览) | 7 维情绪、人格建模、真实时间记忆、关系修复、公共 API。 |
-| [快速开始](#快速开始) | 安装目录、启用方式、最小配置。 |
+| [快速开始](#快速开始) | Release zip、仓库安装、手动复制、最小配置和检查命令。 |
+| [命令速查](#命令) | 用户可直接在会话里调用的状态、重置和诊断命令。 |
 | [配置指南](#配置指南) | 核心配置、低推理模式、后果衰减、humanlike、心理筛查。 |
 | [工作流](#工作流) | `on_llm_request` / `on_llm_response` 如何更新和注入状态。 |
-| [情绪模型](#情绪模型) | 维度定义、公式推导、人格基线、真实时间半衰期。 |
-| [关系与后果](#关系与后果) | 生气原因、是否原谅、冷处理、错误是否已改正。 |
 | [LivingMemory 兼容](#livingmemory--长期记忆兼容) | 写入记忆时冻结 `emotion_at_write`、`humanlike_state_at_write`、`moral_repair_state_at_write` 和 `integrated_self_state_at_write`。 |
 | [公共 API](#公共-api) | 其他插件如何读取、模拟、提交、重置情绪状态。 |
+| [打包、上传与新仓库发布](#打包上传与新仓库发布) | 构建 zip、预检、WebUI 上传、GitHub 新仓库发布清单。 |
+| [情绪模型](#情绪模型) | 维度定义、公式推导、人格基线、真实时间半衰期。 |
+| [关系与后果](#关系与后果) | 生气原因、是否原谅、冷处理、错误是否已改正。 |
 | [拟人状态](#拟人状态-humanlike_state) | `humanlike_state` 的 P0 维度和表达调制边界。 |
 | [心理筛查](#非诊断心理状态筛查) | 备用的长期状态建模，不做诊断。 |
 | [文献知识库](#文献知识库) | 情绪、心理筛查、拟人代理的知识库目录。 |
 | [测试与维护](#测试与维护) | 本地测试命令、分支策略。 |
 | [故障排查](#故障排查) | 常见问题和处理顺序。 |
+
+---
+
+## 当前版本与兼容范围
+
+| 项目 | 当前值 |
+| --- | --- |
+| 插件目录名 | `astrbot_plugin_emotional_state` |
+| 显示名 | `多维情绪状态` |
+| 当前版本 | `1.0.0` |
+| AstrBot 版本 | `>=4.9.2,<5.0.0` |
+| Python | `3.10+` |
+| 许可证 | `GPL-3.0-or-later` |
+| 运行时第三方依赖 | 当前无额外依赖，见 `requirements.txt` |
+
+当前版本的重点是把“情绪化 bot”从单次 prompt 风格控制推进到可持久化的状态服务：核心情绪默认启用，`humanlike_state`、`moral_repair_state`、`psychological_screening` 等长期模块默认关闭，由配置显式打开。发布包会包含运行代码、README、LICENSE、配置 schema、docs 和精选文献知识库；不会包含 `tests/`、`scripts/`、`raw/`、`output/`、`dist/` 等开发与缓存目录。
 
 ---
 
@@ -93,9 +116,68 @@
 
 ## 快速开始
 
-### 1. 安装位置
+### 方式一：上传 Release zip
 
-把本目录放入 AstrBot 插件目录：
+这是准备发布到新仓库后最推荐的安装方式，适合普通部署和远程测试服。
+
+1. 在本仓库根目录构建发布包：
+
+```powershell
+py -3.13 scripts\package_plugin.py --output dist\astrbot_plugin_emotional_state.zip
+```
+
+2. 打开 AstrBot WebUI 的插件页面。
+3. 选择从文件安装或上传插件。
+4. 上传 `dist\astrbot_plugin_emotional_state.zip`。
+5. 重载插件或重启 AstrBot。
+6. 在会话里执行 `/emotion`、`/emotion_model`、`/integrated_self` 做基础检查。
+
+> [!WARNING]
+> 不要直接上传 GitHub 绿色 Code 按钮下载的 Source code zip，除非它经过 `scripts\package_plugin.py` 或等价流程重新打包。AstrBot WebUI 上传安装期望 zip 内有明确顶层目录 `astrbot_plugin_emotional_state/`，并且运行文件位于该目录下。
+
+Release zip 的运行根目录应类似：
+
+```text
+astrbot_plugin_emotional_state/
+├── __init__.py
+├── metadata.yaml
+├── main.py
+├── emotion_engine.py
+├── humanlike_engine.py
+├── integrated_self.py
+├── moral_repair_engine.py
+├── psychological_screening.py
+├── prompts.py
+├── public_api.py
+├── _conf_schema.json
+├── requirements.txt
+├── LICENSE
+├── README.md
+├── docs/
+├── literature_kb/
+├── psychological_literature_kb/
+└── humanlike_agent_literature_kb/
+```
+
+### 方式二：从 GitHub 仓库安装
+
+新仓库创建并推送后，在 AstrBot WebUI 的仓库安装入口填写：
+
+```text
+https://github.com/<your-github-user-or-org>/astrbot_plugin_emotional_state
+```
+
+如果 WebUI 要求 `.git` 后缀：
+
+```text
+https://github.com/<your-github-user-or-org>/astrbot_plugin_emotional_state.git
+```
+
+发布到新仓库前，需要同步修改 `metadata.yaml` 里的 `repo:` 字段，并确认 README、Release 附件名、插件目录名和 `metadata.yaml name:` 都保持 `astrbot_plugin_emotional_state`。
+
+### 方式三：手动复制到插件目录
+
+开发或本地调试时，可以把本目录放入 AstrBot 插件目录：
 
 ```text
 data/plugins/
@@ -124,7 +206,7 @@ data/plugins/
 
 然后在 AstrBot WebUI 中重载或启用插件。
 
-### 2. 版本要求
+### 版本要求
 
 来自 `metadata.yaml`：
 
@@ -140,7 +222,7 @@ astrbot_version: ">=4.9.2,<5.0.0"
 
 也就是说，插件主要依赖 AstrBot 自身的插件运行环境。
 
-### 3. 最小可用配置
+### 最小可用配置
 
 首次使用建议只改这几项：
 
@@ -152,7 +234,7 @@ astrbot_version: ">=4.9.2,<5.0.0"
 | `assessment_timing` | `both` | 回复前影响本轮语气，回复后根据实际输出修正。 |
 | `inject_state` | `true` | 把状态作为临时上下文注入主 LLM。 |
 | `persona_modeling` | `true` | 让不同人格有不同基线。 |
-| `enable_safety_boundary` | `true` | 默认开启可控边界。 |
+| `enable_safety_boundary` | `true` | 默认开启可控边界，可按需求关闭。 |
 | `allow_emotion_reset_backdoor` | `true` | 保留异常状态重置后门。 |
 
 一条实际可用的基础配置：
@@ -177,9 +259,43 @@ low_reasoning_max_context_chars = 1200
 
 但默认建议关闭低推理模式，让插件保留更完整的冲突分析、关系修复和理论字段。
 
+### 安装后检查
+
+安装完成后，建议按顺序检查：
+
+```text
+/emotion
+/emotion_model
+/emotion_effects
+/integrated_self
+```
+
+如果打开了可选模块，再检查：
+
+```text
+/humanlike_state
+/moral_repair_state
+/psych_state
+```
+
+`/emotion_reset`、`/humanlike_reset` 和 `/moral_repair_reset` 是异常状态恢复命令，分别受 `allow_emotion_reset_backdoor`、`allow_humanlike_reset_backdoor`、`allow_moral_repair_reset_backdoor` 控制。
+
 ---
 
 ## 命令
+
+| 命令 | 别名 | 用途 |
+| --- | --- | --- |
+| `/emotion` | `/emotion_state`、`/情绪状态` | 查看当前会话的核心 7 维情绪状态。 |
+| `/emotion_reset` | `/情绪重置` | 重置当前会话的情绪状态，受 `allow_emotion_reset_backdoor` 控制。 |
+| `/emotion_model` | `/情绪模型` | 查看模型公式、真实时间衰减和人格基线说明。 |
+| `/emotion_effects` | `/情绪后果` | 查看当前行动倾向、冷处理、修复、谨慎核对等后果。 |
+| `/psych_state` | `/心理筛查`、`/心理状态` | 查看非诊断心理状态筛查快照。 |
+| `/humanlike_state` | `/拟人状态`、`/有机体状态` | 查看拟人状态。 |
+| `/humanlike_reset` | `/拟人状态重置` | 重置拟人状态，受 `allow_humanlike_reset_backdoor` 控制。 |
+| `/moral_repair_state` | `/道德修复状态`、`/信任修复状态` | 查看道德修复/信任修复状态。 |
+| `/moral_repair_reset` | `/道德修复重置`、`/信任修复重置` | 重置道德修复状态，受 `allow_moral_repair_reset_backdoor` 控制。 |
+| `/integrated_self` | `/综合自我状态`、`/自我状态` | 查看跨模块综合自我状态仲裁。 |
 
 ### 情绪状态
 
@@ -900,6 +1016,42 @@ from astrbot_plugin_emotional_state.public_api import (
 
 不要直接读写本插件 KV key。KV key、缓存、迁移和内部结构都属于实现细节。
 
+给其他插件作者的 30 秒接入方式：
+
+```python
+emotion = get_emotion_service(self.context)
+if emotion:
+    snapshot = await emotion.get_emotion_snapshot(event, include_prompt_fragment=False)
+    values = await emotion.get_emotion_values(event)
+    consequences = await emotion.get_emotion_consequences(event)
+```
+
+如果要把其他插件事件写入情绪系统：
+
+```python
+if emotion:
+    await emotion.observe_emotion_text(
+        event,
+        text="用户在剧情插件中认真道歉，并解释了之前的误会。",
+        role="user",
+        source="my_plugin",
+    )
+```
+
+如果只是想预览某句话会造成什么影响，不想落库：
+
+```python
+if emotion:
+    preview = await emotion.simulate_emotion_update(
+        event,
+        text="用户再次重复同一个越界玩笑。",
+        role="user",
+        source="my_plugin",
+    )
+```
+
+如果 LivingMemory 或其他记忆插件要写入当时状态，优先使用 `build_emotion_memory_payload` 或综合自我 envelope，不要自己拼内部字段。若 `get_emotion_service(self.context)` 返回 `None`，说明插件未安装、未启用或版本不匹配；调用方应静默降级，而不是中断主流程。
+
 ### 获取服务实例
 
 ```python
@@ -1417,6 +1569,61 @@ enable_psychological_screening = false
 - Williams, K. D. (2007). Ostracism. *Annual Review of Psychology*.
 - McCullough, M. E. 等关于宽恕、道歉和关系修复的研究。
 - W3C EmotionML 1.0 作为情绪表示格式的工程参考。
+
+---
+
+## 打包、上传与新仓库发布
+
+### 本地构建发布包
+
+在仓库根目录执行：
+
+```powershell
+py -3.13 scripts\package_plugin.py --output dist\astrbot_plugin_emotional_state.zip
+```
+
+然后做 zip 结构预检：
+
+具体命令见下方“测试与维护”的 `& $node scripts\plugin_zip_preflight.js dist\astrbot_plugin_emotional_state.zip astrbot_plugin_emotional_state` 模板。如果当前 shell 还没有 `$node`，先执行同一章节里的 bundled Node 初始化片段。
+
+预检会确认：
+
+| 检查项 | 要求 |
+| --- | --- |
+| 顶层目录 | 所有文件都必须在 `astrbot_plugin_emotional_state/` 下。 |
+| 必要文件 | 包含 `__init__.py`、`metadata.yaml`、`main.py`、`emotion_engine.py`、`humanlike_engine.py`、`integrated_self.py`、`moral_repair_engine.py`、`psychological_screening.py`、`prompts.py`、`public_api.py`、`README.md`、`LICENSE`、`requirements.txt`、`_conf_schema.json`。 |
+| 插件身份 | zip 内 `metadata.yaml name:` 必须等于 `astrbot_plugin_emotional_state`。 |
+| 排除目录 | 不应包含 `tests/`、`scripts/`、`output/`、`dist/`、`raw/`、`__pycache__/`、`.git/`。 |
+| 许可证 | 发布包必须包含 `LICENSE`，协议为 `GPL-3.0-or-later`。 |
+
+### AstrBot WebUI 上传验证
+
+只读 smoke 不会安装、删除、重载、重启或修改配置。凭据只通过环境变量传入，不要写进 README、脚本、提交记录或 issue：
+
+实际命令见下方“测试与维护”的远程只读烟测模板。需要设置 `ASTRBOT_REMOTE_URL`、`ASTRBOT_REMOTE_USERNAME`、`ASTRBOT_REMOTE_PASSWORD`、`ASTRBOT_EXPECT_PLUGIN`、`ASTRBOT_EXPECT_PLUGIN_VERSION` 和 `ASTRBOT_EXPECT_PLUGIN_DISPLAY_NAME`；不要把真实主机、账号、密码或 cookie 写入仓库。
+
+如果要通过 WebUI 上传 zip，必须显式确认：
+
+实际命令见下方“测试与维护”的远程上传安装模板。上传前必须设置 `ASTRBOT_REMOTE_INSTALL_CONFIRM=1` 和 `ASTRBOT_REMOTE_INSTALL_ZIP`，并先完成本地 zip 预检。
+
+上传脚本只调用 `install-upload`；若存在失败上传残留，只会清理 `plugin_upload_<插件名>` 失败目录，并固定 `delete_config=false`、`delete_data=false`。上传后再运行只读 smoke，确认 `expectedPluginChecks.ok=true`、`containsExpectedPlugin=true`、`expectedPluginRuntime.activated !== false`、`expectedFailedPlugin=null`。
+
+### 新 GitHub 仓库发布清单
+
+准备发到新仓库时，按这个顺序做：
+
+| 步骤 | 检查点 |
+| --- | --- |
+| 1 | 创建 GitHub 仓库，建议名为 `astrbot_plugin_emotional_state`。 |
+| 2 | 设置远程：`git remote add origin <new-repo-url>`。 |
+| 3 | 将 `metadata.yaml` 的 `repo:` 改为新仓库地址。 |
+| 4 | 确认 README 里的仓库安装地址、Release 附件名和插件目录名一致。 |
+| 5 | 跑完整本地测试、py_compile、json.tool、Node 语法检查、package build 和 zip preflight。 |
+| 6 | 推送 `main`，再按需推送维护分支。 |
+| 7 | 创建 tag 和 GitHub Release，上传 `dist\astrbot_plugin_emotional_state.zip`。 |
+| 8 | 用 AstrBot WebUI 分别验证“Release zip 上传”和“仓库安装”两条路径。 |
+
+当前本地环境没有配置 `origin`，也没有可用的 `gh` CLI 或 `GITHUB_TOKEN` / `GH_TOKEN`。因此仓库创建必须依赖后续提供 GitHub 授权，或由维护者先在 GitHub 页面创建空仓库后再让本地推送。
 
 ---
 

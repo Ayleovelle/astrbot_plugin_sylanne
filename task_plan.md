@@ -82,6 +82,7 @@ Build and maintain `astrbot_plugin_emotional_state`: an AstrBot plugin with mult
 | 68 | complete | Expand LivingMemory integration contract with integrated self-state annotations | `state_annotations_at_write` envelope tests |
 | 69 | complete | Harden release, README, and remote smoke contracts around the integrated self-state surface | 208 full tests, 33 package/remote contract tests, py_compile, json.tool, Node syntax, package preflight, leak scan |
 | 70 | complete | Run full validation, remote smoke, branch sync, and write a complete revolutionary-iteration handoff | Implementation commit `e86735b`; final status recorded; remote smoke passed; maintenance branches synced to latest HEAD |
+| 71 | complete | Rewrite README as a release-ready plugin landing page using the ASR reference structure, then rebuild package and prepare new-repository publication | 208 unit tests, py_compile, json.tool, Node syntax checks, package build, package preflight, GitHub auth blocked |
 
 ## Recovery Checklist
 
