@@ -245,6 +245,13 @@ async function main() {
       zipSize,
       upload,
       alreadyInstalled,
+      installOutcome: alreadyInstalled
+        ? "already_installed_no_overwrite"
+        : uploadOk
+          ? "uploaded"
+          : "failed",
+      overwriteAttempted: false,
+      formalPluginDirectoryPreserved: alreadyInstalled ? true : null,
       cleanup,
       beforeSummary,
       afterSummary,

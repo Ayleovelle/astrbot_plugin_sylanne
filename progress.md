@@ -1792,3 +1792,38 @@ Remote smoke after publication:
   - LivingMemory detected,
   - unrelated failed plugins remained `astrbot_plugin_status`, `astrbot_plugin_sleep_tracker`, and `astrbot_plugin_live_dashboard`.
 
+## 2026-05-07 Remote Drift Diagnostics
+
+Status: complete locally; commit/push/release refresh pending.
+
+- User asked to continue after remote testing exposed that the server has an older formal install.
+- Added explicit strict-smoke drift diagnostics in `scripts\remote_smoke_playwright.js`:
+  - `expectedPluginDrift.hasDrift`,
+  - `expectedPluginDrift.version.expected/actual/matches`,
+  - `expectedPluginDrift.displayName.expected/actual/matches`,
+  - reason text explaining that upload-install does not overwrite existing formal plugin directories.
+- Added explicit upload-install outcome fields in `scripts\remote_install_upload_playwright.js`:
+  - `installOutcome`,
+  - `already_installed_no_overwrite`,
+  - `overwriteAttempted=false`,
+  - `formalPluginDirectoryPreserved`.
+- Updated README and `docs/release_branch_sync_checklist.md` so maintainers can distinguish:
+  - target plugin missing/failed,
+  - target plugin installed but inactive,
+  - strict version/display-name drift,
+  - upload endpoint refusing to overwrite an existing formal plugin directory.
+- Updated `tests/test_remote_smoke_contract.py` to lock these script and documentation contracts.
+
+Validation complete:
+
+- `py -3.13 -m unittest tests.test_remote_smoke_contract -v`: 16 tests passed.
+- `py -3.13 -m unittest discover -s tests -v`: 213 tests passed.
+- `py -3.13 -m py_compile main.py emotion_engine.py psychological_screening.py humanlike_engine.py integrated_self.py moral_repair_engine.py prompts.py public_api.py scripts\package_plugin.py`: passed.
+- `py -3.13 -m json.tool _conf_schema.json`: passed.
+- Bundled Node `--check` for `scripts\remote_smoke_playwright.js` and `scripts\remote_install_upload_playwright.js`: passed.
+- `py -3.13 scripts\package_plugin.py --output dist\astrbot_plugin_emotional_state.zip`: passed.
+- Bundled Node `scripts\plugin_zip_preflight.js dist\astrbot_plugin_emotional_state.zip astrbot_plugin_emotional_state`: passed with 52 entries.
+- Rebuilt zip SHA256: `7ec427d2215a0a0a906c80024c620551c5c913b76fdb146e1ce06a37b953857c`.
+- Strict remote smoke with `ASTRBOT_EXPECT_PLUGIN_VERSION=0.0.1-beta` exited non-zero as expected because remote runtime is still `1.0.0`; output included `expectedPluginDrift.hasDrift=true`, expected `0.0.1-beta`, actual `1.0.0`, display name matched.
+- Non-strict remote smoke passed: target plugin found, activated, and absent from failed-plugin records.
+

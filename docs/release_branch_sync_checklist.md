@@ -37,7 +37,7 @@ $env:ASTRBOT_EXPECT_PLUGIN_DISPLAY_NAME = "多维情绪状态"
 & $node scripts\remote_smoke_playwright.js
 ```
 
-Read `expectedPluginChecks.ok`, `expectedFailedPlugin`, `failedPluginSummary.hasExpectedPluginFailure`, `containsExpectedPlugin`, `expectedPluginRuntime`, `expectedPluginVersionMatches`, and `expectedPluginDisplayNameMatches` together. Remote `failedPlugins` may contain unrelated plugin failures; only the expected plugin in failed records is a target-plugin failure and exit code `5`.
+Read `expectedPluginChecks.ok`, `expectedFailedPlugin`, `failedPluginSummary.hasExpectedPluginFailure`, `containsExpectedPlugin`, `expectedPluginRuntime`, `expectedPluginVersionMatches`, `expectedPluginDisplayNameMatches`, and `expectedPluginDrift` together. Remote `failedPlugins` may contain unrelated plugin failures; only the expected plugin in failed records is a target-plugin failure and exit code `5`. Exit code `7` means the expected plugin exists but its runtime version differs from `ASTRBOT_EXPECT_PLUGIN_VERSION`; exit code `8` means the runtime display name differs from `ASTRBOT_EXPECT_PLUGIN_DISPLAY_NAME`.
 
 Do not put real credentials or server addresses in committed files.
 
@@ -83,6 +83,7 @@ Only run `scripts\remote_install_upload_playwright.js` after:
 - the preflight confirms zip `metadata.yaml` `name:` matches `ASTRBOT_EXPECT_PLUGIN`,
 - the zip uses relative POSIX paths and contains no unsafe `.` / `..` path segments,
 - any `uninstall-failed` call is only for the temporary `plugin_upload_<plugin>` failed-upload directory, with `delete_config=false` and `delete_data=false`,
+- `installOutcome="already_installed_no_overwrite"` with `overwriteAttempted=false` is treated as diagnostic success only: it means the formal plugin directory already existed and was not overwritten, so strict version smoke may still report drift,
 - `ASTRBOT_REMOTE_INSTALL_CONFIRM=1` is explicitly set,
 - the target server is intended to receive a new upload.
 

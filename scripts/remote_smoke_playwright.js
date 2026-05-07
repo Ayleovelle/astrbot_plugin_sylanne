@@ -280,6 +280,30 @@ async function main() {
         ? Boolean(expectedPluginDisplayNameMatches)
         : null,
     } : null;
+    const expectedPluginHasDrift = Boolean(
+      (expectedPluginVersion && expectedPluginRuntime && !expectedPluginVersionMatches)
+      || (
+        expectedPluginDisplayName
+        && expectedPluginRuntime
+        && !expectedPluginDisplayNameMatches
+      ),
+    );
+    const expectedPluginDrift = expectedPlugin ? {
+      hasDrift: expectedPluginHasDrift,
+      version: expectedPluginVersion ? {
+        expected: expectedPluginVersion,
+        actual: expectedPluginRuntime ? expectedPluginRuntime.version : null,
+        matches: Boolean(expectedPluginVersionMatches),
+      } : null,
+      displayName: expectedPluginDisplayName ? {
+        expected: expectedPluginDisplayName,
+        actual: expectedPluginRuntime ? expectedPluginRuntime.displayName : null,
+        matches: Boolean(expectedPluginDisplayNameMatches),
+      } : null,
+      reason: expectedPluginHasDrift
+        ? "installed runtime metadata differs from pinned expectations; upload-install does not overwrite an existing formal plugin directory"
+        : null,
+    } : null;
 
     await page.evaluate(() => {
       location.hash = "#/extension#installed";
@@ -379,6 +403,7 @@ async function main() {
       pluginSummary,
       expectedPlugin: expectedPlugin || null,
       expectedPluginChecks,
+      expectedPluginDrift,
       containsExpectedPlugin,
       expectedPluginRuntime,
       expectedPluginVersion: expectedPluginVersion || null,

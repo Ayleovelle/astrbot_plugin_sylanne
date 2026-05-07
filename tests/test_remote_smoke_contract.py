@@ -272,6 +272,9 @@ class RemoteSmokeContractTests(unittest.TestCase):
         self.assertIn("pluginGet", script)
         self.assertIn("expectedFailedPlugin", script)
         self.assertIn("expectedPluginChecks", script)
+        self.assertIn("expectedPluginDrift", script)
+        self.assertIn("hasDrift", script)
+        self.assertIn("does not overwrite an existing formal plugin directory", script)
         self.assertIn("versionMatches", script)
         self.assertIn("displayNameMatches", script)
         self.assertIn("failedPluginSummary", script)
@@ -355,6 +358,9 @@ class RemoteSmokeContractTests(unittest.TestCase):
         self.assertIn("metadata.yaml name must be", preflight)
         self.assertIn("alreadyInstalled", script)
         self.assertIn("目录 ${expectedPlugin} 已存在", script)
+        self.assertIn("already_installed_no_overwrite", script)
+        self.assertIn("overwriteAttempted: false", script)
+        self.assertIn("formalPluginDirectoryPreserved", script)
         self.assertIn("cleanupAlreadyInstalledFailure", script)
         self.assertIn("/api/plugin/uninstall-failed", script)
         self.assertIn("plugin_upload_${expectedPlugin}", script)
@@ -365,6 +371,8 @@ class RemoteSmokeContractTests(unittest.TestCase):
                 self.assertIn("uninstall-failed", document)
                 self.assertIn("delete_config=false", document)
                 self.assertIn("delete_data=false", document)
+                self.assertIn("already_installed_no_overwrite", document)
+                self.assertIn("overwriteAttempted=false", document)
         self.assertIn("ASTRBOT_REMOTE_USERNAME", script)
         self.assertIn("ASTRBOT_REMOTE_PASSWORD", script)
         remote_password_sentinel = "1234" + "1234"
@@ -395,6 +403,7 @@ class RemoteSmokeContractTests(unittest.TestCase):
         self.assertIn("/api/plugin/install-upload", lowered)
         self.assertIn("/api/plugin/uninstall-failed", lowered)
         self.assertIn("method: \"post\"", lowered)
+        self.assertIn("overwriteattempted: false", lowered)
         for fragment in forbidden_fragments:
             with self.subTest(fragment=fragment):
                 self.assertNotIn(fragment, lowered)
