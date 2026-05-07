@@ -1778,3 +1778,17 @@ Notes:
 
 - Bare `git ls-remote` failed once with direct network timeout and once through proxy with `bad record mac`; the GitHub branch API succeeded and confirmed the pushed commit.
 
+Remote smoke after publication:
+
+- Strict smoke with `ASTRBOT_EXPECT_PLUGIN_VERSION=0.0.1-beta` failed because the test server already has `astrbot_plugin_emotional_state` installed from an older formal directory with runtime version `1.0.0` and display name `多维情绪状态`.
+- Tried WebUI upload through `scripts\remote_install_upload_playwright.js`; local preflight passed, but AstrBot returned `安装失败：目录 astrbot_plugin_emotional_state 已存在。`
+- Upload script treated this as `alreadyInstalled=true` and only cleaned the temporary failed-upload directory `plugin_upload_astrbot_plugin_emotional_state` with `delete_config=false` and `delete_data=false`; it did not overwrite or delete the formal plugin directory.
+- Final read-only remote smoke passed without strict version pin:
+  - login succeeded,
+  - AstrBot version `4.24.2`,
+  - `/api/stat/version`, `/api/plugin/get`, and `/api/plugin/source/get-failed-plugins` all HTTP 200,
+  - target plugin found and activated,
+  - `expectedFailedPlugin=null`,
+  - LivingMemory detected,
+  - unrelated failed plugins remained `astrbot_plugin_status`, `astrbot_plugin_sleep_tracker`, and `astrbot_plugin_live_dashboard`.
+
