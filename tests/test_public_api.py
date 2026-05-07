@@ -5,7 +5,9 @@ import unittest
 from types import SimpleNamespace
 
 from public_api import (
+    EMOTION_API_VERSION,
     EMOTION_MEMORY_SCHEMA_VERSION,
+    EMOTION_SCHEMA_VERSION,
     HUMANLIKE_STATE_SCHEMA_VERSION,
     PSYCHOLOGICAL_SCREENING_SCHEMA_VERSION,
     get_emotion_service,
@@ -118,6 +120,10 @@ class PublicApiTests(unittest.TestCase):
     def test_memory_schema_constant_is_exported(self):
         self.assertEqual(EMOTION_MEMORY_SCHEMA_VERSION, "astrbot.emotion_memory.v1")
 
+    def test_emotion_api_constants_are_exported(self):
+        self.assertEqual(EMOTION_API_VERSION, "1.0")
+        self.assertEqual(EMOTION_SCHEMA_VERSION, "astrbot.emotion_state.v2")
+
     def test_psychological_screening_schema_constant_is_exported(self):
         self.assertEqual(
             PSYCHOLOGICAL_SCREENING_SCHEMA_VERSION,
@@ -157,6 +163,21 @@ class PublicApiTests(unittest.TestCase):
         )
         self.assertIsNone(get_emotion_service(context))
 
+    def test_get_emotion_service_rejects_wrong_public_versions(self):
+        version_fields = (
+            "emotion_api_version",
+            "emotion_schema_version",
+            "emotion_memory_schema_version",
+            "psychological_screening_schema_version",
+        )
+        for field in version_fields:
+            with self.subTest(field=field):
+                plugin = FakeEmotionService()
+                setattr(plugin, field, "old")
+                context = FakeContext(SimpleNamespace(activated=True, star_cls=plugin))
+
+                self.assertIsNone(get_emotion_service(context))
+
     def test_get_emotion_service_keeps_accepting_service_without_humanlike_api(self):
         plugin = FakeEmotionService()
         context = FakeContext(SimpleNamespace(activated=True, star_cls=plugin))
@@ -171,6 +192,13 @@ class PublicApiTests(unittest.TestCase):
         context = FakeContext(
             SimpleNamespace(activated=True, star_cls=FakeEmotionService()),
         )
+        self.assertIsNone(get_humanlike_service(context))
+
+    def test_get_humanlike_service_rejects_wrong_schema_version(self):
+        plugin = FakeHumanlikeService()
+        plugin.humanlike_state_schema_version = "astrbot.humanlike_state.v0"
+        context = FakeContext(SimpleNamespace(activated=True, star_cls=plugin))
+
         self.assertIsNone(get_humanlike_service(context))
 
     def test_main_helper_uses_full_emotion_service_contract(self):
@@ -233,17 +261,29 @@ class PublicApiTests(unittest.TestCase):
         from main import get_emotional_state_plugin
 
         class SnapshotOnly:
+            emotion_api_version = "1.0"
+            emotion_schema_version = "astrbot.emotion_state.v2"
+            emotion_memory_schema_version = "astrbot.emotion_memory.v1"
+            psychological_screening_schema_version = "astrbot.psychological_screening.v1"
+
             async def get_emotion_snapshot(self):
                 return {}
 
+        class WrongVersion(FakeEmotionService):
+            emotion_schema_version = "astrbot.emotion_state.v1"
+
         incomplete = FakeContext(
             SimpleNamespace(activated=True, star_cls=SnapshotOnly()),
+        )
+        wrong_version = FakeContext(
+            SimpleNamespace(activated=True, star_cls=WrongVersion()),
         )
         complete = FakeContext(
             SimpleNamespace(activated=True, star_cls=FakeEmotionService()),
         )
 
         self.assertIsNone(get_emotional_state_plugin(incomplete))
+        self.assertIsNone(get_emotional_state_plugin(wrong_version))
         self.assertIs(get_emotional_state_plugin(complete), complete.metadata.star_cls)
 
 

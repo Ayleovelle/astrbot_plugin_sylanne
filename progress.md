@@ -555,6 +555,38 @@ Validation complete:
   - Display name `多维情绪状态` matched.
   - Failed plugin data was `{}`.
 
+## 2026-05-07 Iteration 37
+
+Status: complete.
+
+- Strengthened `public_api.get_emotion_service(...)` so service discovery requires:
+  - complete core async method surface,
+  - `emotion_api_version == "1.0"`,
+  - `emotion_schema_version == "astrbot.emotion_state.v2"`,
+  - `emotion_memory_schema_version == "astrbot.emotion_memory.v1"`,
+  - `psychological_screening_schema_version == "astrbot.psychological_screening.v1"`.
+- Strengthened `public_api.get_humanlike_service(...)` so humanlike discovery also requires `humanlike_state_schema_version == "astrbot.humanlike_state.v1"`.
+- Applied the same emotion version/schema check to `main.get_emotional_state_plugin(...)`.
+- Added public API tests for wrong public versions and wrong humanlike schema versions.
+- Updated README and contract tests so integration docs say helpers check both method completeness and versioned schema compatibility.
+
+Validation complete:
+
+- `py -3.13 -m unittest tests.test_public_api tests.test_remote_smoke_contract -v`: 57 tests passed.
+- `py -3.13 -m py_compile main.py public_api.py`: passed.
+- `py -3.13 -m unittest discover -s tests -v`: 150 tests passed.
+- `py -3.13 -m py_compile main.py emotion_engine.py humanlike_engine.py psychological_screening.py public_api.py prompts.py scripts\build_literature_kb.py scripts\build_humanlike_agent_literature_kb.py scripts\build_psychological_literature_kb.py scripts\package_plugin.py`: passed.
+- Bundled Node `--check` for `scripts\remote_smoke_playwright.js`, `scripts\remote_install_upload_playwright.js`, and `scripts\plugin_zip_preflight.js`: passed.
+- Bundled Node `scripts\plugin_zip_preflight.js dist\astrbot_plugin_emotional_state.zip astrbot_plugin_emotional_state`: passed, 49 entries.
+- `git diff --check`: passed, with CRLF conversion warnings only.
+- Remote smoke with metadata-matched version/display-name assertions: passed.
+  - AstrBot version `4.24.2`.
+  - Plugin API returned 30 plugins.
+  - `astrbot_plugin_emotional_state` was present and activated.
+  - Version `1.0.0` matched.
+  - Display name `多维情绪状态` matched.
+  - Failed plugin data was `{}`.
+
 ## 2026-05-07 Iteration 36
 
 Status: complete.

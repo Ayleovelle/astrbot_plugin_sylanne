@@ -313,6 +313,7 @@ class RemoteSmokeContractTests(unittest.TestCase):
         self.assertIn("get_emotion_service", readme)
         self.assertIn("get_humanlike_service", readme)
         self.assertIn("校验核心方法是否完整", readme)
+        self.assertIn("校验公开版本/schema 是否匹配", readme)
 
 
 if __name__ == "__main__":

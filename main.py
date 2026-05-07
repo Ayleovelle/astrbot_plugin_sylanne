@@ -129,6 +129,20 @@ _REQUIRED_EMOTION_SERVICE_METHODS: tuple[str, ...] = (
     "reset_emotion_state",
 )
 
+_REQUIRED_EMOTION_SERVICE_VERSIONS: dict[str, str] = {
+    "emotion_api_version": PUBLIC_API_VERSION,
+    "emotion_schema_version": PUBLIC_SCHEMA_VERSION,
+    "emotion_memory_schema_version": PUBLIC_MEMORY_SCHEMA_VERSION,
+    "psychological_screening_schema_version": PUBLIC_SCREENING_SCHEMA_VERSION,
+}
+
+
+def _has_expected_public_versions(plugin: Any) -> bool:
+    return all(
+        getattr(plugin, name, None) == expected
+        for name, expected in _REQUIRED_EMOTION_SERVICE_VERSIONS.items()
+    )
+
 
 def get_emotional_state_plugin(context: Context) -> Any | None:
     """Return the activated emotional state plugin instance for other plugins."""
@@ -139,9 +153,13 @@ def get_emotional_state_plugin(context: Context) -> Any | None:
     if not metadata or not getattr(metadata, "activated", True):
         return None
     plugin = getattr(metadata, "star_cls", None)
-    if plugin is None or not all(
-        callable(getattr(plugin, name, None))
-        for name in _REQUIRED_EMOTION_SERVICE_METHODS
+    if (
+        plugin is None
+        or not _has_expected_public_versions(plugin)
+        or not all(
+            callable(getattr(plugin, name, None))
+            for name in _REQUIRED_EMOTION_SERVICE_METHODS
+        )
     ):
         return None
     return plugin

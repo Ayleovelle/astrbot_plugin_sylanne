@@ -851,7 +851,7 @@ meta = self.context.get_registered_star("astrbot_plugin_emotional_state")
 emotion = meta.star_cls if meta and meta.activated else None
 ```
 
-不过长期维护时更推荐 `public_api.get_emotion_service(...)` 和 `public_api.get_humanlike_service(...)`。这两个 helper 会校验核心方法是否完整，能避免其他插件拿到只有部分旧接口的实例。
+不过长期维护时更推荐 `public_api.get_emotion_service(...)` 和 `public_api.get_humanlike_service(...)`。这两个 helper 会校验核心方法是否完整，并校验公开版本/schema 是否匹配，能避免其他插件拿到只有部分旧接口或旧数据契约的实例。
 
 ### 情绪 API
 

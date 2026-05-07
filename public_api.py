@@ -11,6 +11,10 @@ PSYCHOLOGICAL_SCREENING_SCHEMA_VERSION = "astrbot.psychological_screening.v1"
 HUMANLIKE_STATE_SCHEMA_VERSION = "astrbot.humanlike_state.v1"
 
 
+def _has_expected_public_versions(plugin: Any, expected: dict[str, str]) -> bool:
+    return all(getattr(plugin, name, None) == value for name, value in expected.items())
+
+
 @runtime_checkable
 class EmotionServiceProtocol(Protocol):
     emotion_api_version: str
@@ -284,7 +288,17 @@ def get_emotion_service(context: Any) -> EmotionServiceProtocol | None:
         "simulate_emotion_update",
         "reset_emotion_state",
     )
-    if plugin and all(callable(getattr(plugin, name, None)) for name in required):
+    expected_versions = {
+        "emotion_api_version": EMOTION_API_VERSION,
+        "emotion_schema_version": EMOTION_SCHEMA_VERSION,
+        "emotion_memory_schema_version": EMOTION_MEMORY_SCHEMA_VERSION,
+        "psychological_screening_schema_version": PSYCHOLOGICAL_SCREENING_SCHEMA_VERSION,
+    }
+    if (
+        plugin
+        and _has_expected_public_versions(plugin, expected_versions)
+        and all(callable(getattr(plugin, name, None)) for name in required)
+    ):
         return plugin
     return None
 
@@ -300,6 +314,10 @@ def get_humanlike_service(context: Any) -> HumanlikeStateServiceProtocol | None:
         "simulate_humanlike_update",
         "reset_humanlike_state",
     )
-    if plugin and all(callable(getattr(plugin, name, None)) for name in required):
+    if (
+        plugin
+        and getattr(plugin, "humanlike_state_schema_version", None) == HUMANLIKE_STATE_SCHEMA_VERSION
+        and all(callable(getattr(plugin, name, None)) for name in required)
+    ):
         return plugin
     return None
