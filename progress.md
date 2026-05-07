@@ -1670,3 +1670,51 @@ Status: in progress.
   - SHA256: `6e589f2ce7b7e69547e84c35bfd08d6a1a7fe2bbf81794dcdf710ca0508bb5db`.
 - Deleted the incomplete GitHub Release `starter` asset left by the timed-out upload attempt.
 
+## 2026-05-07 Formula Rendering Contract Closeout
+
+Status: complete.
+
+- User clarified that similar GitHub math-rendering errors should be made compatible while formulas remain LaTeX.
+- Kept formulas in GitHub fenced `math` blocks.
+- Added `tests/test_document_math_contract.py` to lock:
+  - README and `docs/theory.md` formula fences,
+  - GitHub-sensitive macro blacklist,
+  - conservative LaTeX macro whitelist,
+  - fragile math-block content checks,
+  - braced `\arg\min_{E}` notation,
+  - no bracketed `\mathrm{I}[...]` indicator notation.
+- Further normalized formula notation:
+  - `\arg\min_E` -> `\arg\min_{E}`,
+  - `\mathrm{I}[condition]` -> `\mathrm{1}_{condition}`.
+- Documented the GitHub formula rendering convention in README:
+  - use fenced `math` blocks for standalone formulas,
+  - keep LaTeX syntax,
+  - avoid GitHub-sensitive macros such as `\operatorname`, `\underset`, `\overset`, `\newcommand`, `\require`, `\html`, `\href`, `\bbox`, `\lVert`, `\rVert`, `\lvert`, and `\rvert`.
+- Added the new math contract test to the README test coverage table.
+
+Validation complete:
+
+- `py -3.13 -m unittest tests.test_document_math_contract -v`: 4 tests passed.
+- `py -3.13 -m unittest tests.test_document_math_contract tests.test_remote_smoke_contract tests.test_config_schema_contract tests.test_package_plugin -v`: 48 tests passed.
+- `py -3.13 -m unittest discover -s tests -v`: 212 tests passed.
+- `py -3.13 -m py_compile main.py emotion_engine.py psychological_screening.py humanlike_engine.py integrated_self.py moral_repair_engine.py prompts.py public_api.py scripts\package_plugin.py`: passed.
+- `py -3.13 -m json.tool _conf_schema.json`: passed.
+- Bundled Node `--check` for `scripts\plugin_zip_preflight.js`, `scripts\remote_smoke_playwright.js`, and `scripts\remote_install_upload_playwright.js`: passed.
+- `py -3.13 scripts\package_plugin.py --output dist\astrbot_plugin_emotional_state.zip`: passed.
+- Bundled Node `scripts\plugin_zip_preflight.js dist\astrbot_plugin_emotional_state.zip astrbot_plugin_emotional_state`: passed with 52 entries.
+- `git diff --check`: passed with CRLF conversion warnings only.
+
+Publication complete:
+
+- Commit pushed to `origin/main`: `b6472ca Harden GitHub math rendering contract`.
+- Refreshed `v0.0.1-beta` release asset:
+  - asset id: `414378225`,
+  - state: `uploaded`,
+  - size: `10171928`,
+  - digest: `sha256:f2e8297c77aebab6d6059ab8ec3bea2bd8a738f14325d0c111cae246a6b89cd3`,
+  - download URL: `https://github.com/Ayleovelle/astrbot_plugin_emotional_state/releases/download/v0.0.1-beta/astrbot_plugin_emotional_state.zip`.
+
+Notes:
+
+- Two proxy upload attempts left `starter` assets or reset mid-transfer. Both were cleaned before the final direct upload succeeded.
+
