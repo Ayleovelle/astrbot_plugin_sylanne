@@ -1237,8 +1237,12 @@ py -3.13 -m json.tool _conf_schema.json
 | 文件 | 重点 |
 | --- | --- |
 | `tests/test_emotion_engine.py` | 情绪更新、人格基线、真实时间衰减、关系修复、冷处理清除。 |
-| `tests/test_public_api.py` | 公共快照、记忆 payload、reset 后门、插件服务协议。 |
+| `tests/test_astrbot_lifecycle.py` | `on_llm_request` / `on_llm_response` 生命周期、注入开关、内部 LLM 防递归、空响应、humanlike 注入强度。 |
+| `tests/test_command_tools.py` | AstrBot 命令层和 LLM tool 冒烟测试，覆盖 reset 后门、disabled 状态、summary/full 暴露层。 |
+| `tests/test_config_schema_contract.py` | `main.py` 运行时配置、`_conf_schema.json`、README 默认值和 schema-only 预留项契约。 |
+| `tests/test_public_api.py` | 公共快照、记忆 payload、simulate 不落库、reset 后门、插件服务协议、心理筛查 public API。 |
 | `tests/test_humanlike_engine.py` | P0 拟人状态、快照分层、注入片段、记忆注解。 |
+| `tests/test_literature_kb_scripts.py` | 三个文献 KB 构建脚本的去重、分类、输出结构和坏缓存容错。 |
 | `tests/test_psychological_screening.py` | 非诊断筛查、量表启发、红旗信号、长期轨迹。 |
 
 ### 分支策略
