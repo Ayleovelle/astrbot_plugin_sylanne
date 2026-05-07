@@ -287,6 +287,9 @@ async function main() {
     if (version.status !== 200 || pluginPayload.status !== 200) {
       process.exitCode = 1;
     }
+    if (failedPlugins.status !== 200) {
+      process.exitCode = 9;
+    }
     if (expectedPlugin && !containsExpectedPlugin) {
       process.exitCode = 2;
     }

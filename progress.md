@@ -487,3 +487,32 @@ Validation complete:
   - `pageData.hasExpectedPluginInUi=true`,
   - API-level plugin detection and failed-plugin checks still passed.
 
+## 2026-05-07 Iteration 27
+
+Status: complete.
+
+- Hardened `scripts\remote_smoke_playwright.js` so `/api/plugin/source/get-failed-plugins` must return HTTP 200.
+- Added exit code `9` for failed-plugin health endpoint failure.
+- Updated README to document the required failed-plugin endpoint and exit code `9`.
+- Updated `tests/test_remote_smoke_contract.py` to lock:
+  - `failedPlugins.status !== 200`,
+  - `process.exitCode = 9`,
+  - README documentation for `/api/plugin/source/get-failed-plugins` and exit code `9`.
+- Updated `task_plan.md` remote smoke contract with the three required health endpoints.
+
+Validation complete:
+
+- `py -3.13 -m unittest tests.test_remote_smoke_contract -v`: 8 tests passed.
+- Bundled Node `--check scripts\remote_smoke_playwright.js`: passed.
+- `py -3.13 -m unittest discover -s tests -v`: 141 tests passed.
+- `py -3.13 -m py_compile main.py emotion_engine.py humanlike_engine.py psychological_screening.py public_api.py prompts.py scripts\build_literature_kb.py scripts\build_humanlike_agent_literature_kb.py scripts\build_psychological_literature_kb.py scripts\package_plugin.py`: passed.
+- Bundled Node `--check scripts\remote_install_upload_playwright.js`: passed.
+- Bundled Node `--check scripts\plugin_zip_preflight.js`: passed.
+- Bundled Node `scripts\plugin_zip_preflight.js dist\astrbot_plugin_emotional_state.zip astrbot_plugin_emotional_state`: passed, 48 entries.
+- `git diff --check`: passed, with CRLF conversion warnings only.
+- Remote smoke with version/display-name assertions: passed; failed-plugin endpoint was healthy and `failedPlugins={}`.
+
+Note for next iteration:
+
+- The latest remote smoke passed API-level checks, but the UI page snapshot returned empty `pluginTitles` and `hasExpectedPluginInUi=false`. Next iteration should make extension-page loading/waiting more deterministic or clearly mark UI fields as best-effort.
+

@@ -1271,6 +1271,8 @@ node scripts\remote_smoke_playwright.js
 
 WebUI 插件卡片可能显示 `displayName` 而不是插件目录名，所以 smoke 输出里的 `pageData` 会同时给出 `hasExpectedPluginId`、`hasExpectedPluginDisplayName` 和综合字段 `hasExpectedPluginInUi`。判断插件是否安装和启用时，以 API 层的 `containsExpectedPlugin`、`expectedPluginRuntime` 和 `expectedFailedPlugin` 为准；UI 字段只用于排查页面展示。
 
+只读 smoke 会把 `/api/stat/version`、`/api/plugin/get` 和 `/api/plugin/source/get-failed-plugins` 都作为基础健康检查。失败插件接口不是 `200` 时会以退出码 `9` 失败；否则即使目标插件没有 failed record，也可能漏掉远程失败插件状态。
+
 远程上传安装是独立脚本，默认不会执行。需要先构建发布包，再显式确认上传：
 
 ```powershell

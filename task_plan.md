@@ -38,6 +38,7 @@ Build and maintain `astrbot_plugin_emotional_state`: an AstrBot plugin with mult
 | 24 | complete | Commit the validated main baseline and then sync integration/maintenance branches from the clean baseline | Commit 976ee99, clean worktree before branch sync, all documented maintenance branches synced to 976ee99 |
 | 25 | complete | Final verification after branch sync and closeout summary | 141 unit tests, py_compile, package preflight, Node syntax check, git diff check, remote smoke |
 | 26 | complete | Fix remote smoke UI detection so display-name-only plugin cards do not look like missing expected plugins | 141 unit tests, py_compile, package preflight, Node syntax check, git diff check, remote smoke |
+| 27 | complete | Make remote smoke fail when the failed-plugins API is not healthy | 141 unit tests, py_compile, package preflight, Node syntax check, git diff check, remote smoke |
 
 ## Recovery Checklist
 
@@ -58,6 +59,7 @@ When context is compacted or a new session starts:
   - `ASTRBOT_REMOTE_PASSWORD`
   - optional `ASTRBOT_EXPECT_PLUGIN`
 - Script must stay read-only: no install, delete, reload, restart, or config mutation.
+- `/api/stat/version`, `/api/plugin/get`, and `/api/plugin/source/get-failed-plugins` must all return HTTP 200 for a valid smoke pass.
 - Screenshots belong in `output/playwright/` and are ignored by git.
 
 ## Known Issues

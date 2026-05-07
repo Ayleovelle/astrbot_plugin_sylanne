@@ -42,6 +42,7 @@ This file stores durable discoveries from implementation, review, and remote tes
   - `tests/`, `scripts/`, `output/`, `dist/`, `raw/`, `__pycache__/`, and `.git/` are rejected.
 - Zip preflight logic lives in `scripts/plugin_zip_preflight.js` and is exercised locally by `tests/test_package_plugin.py` with valid and invalid temporary zip archives. This gives failure-path coverage without mutating the remote server.
 - Remote WebUI may display a plugin's `display_name` instead of its package directory name. `scripts/remote_smoke_playwright.js` now reports `pageData.hasExpectedPluginId`, `pageData.hasExpectedPluginDisplayName`, and `pageData.hasExpectedPluginInUi` so UI card checks do not contradict the API-level plugin detection.
+- `scripts/remote_smoke_playwright.js` now treats `/api/plugin/source/get-failed-plugins` as a required health endpoint. Non-200 responses set exit code `9`, because otherwise `expectedFailedPlugin=null` could falsely imply there are no failed plugin records.
 
 ## 2026-05-07 Branch Maintenance
 
