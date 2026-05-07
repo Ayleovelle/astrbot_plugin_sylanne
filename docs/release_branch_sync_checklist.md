@@ -37,6 +37,8 @@ $env:ASTRBOT_EXPECT_PLUGIN_DISPLAY_NAME = "多维情绪状态"
 & $node scripts\remote_smoke_playwright.js
 ```
 
+Read `expectedFailedPlugin`, `failedPluginSummary.hasExpectedPluginFailure`, `containsExpectedPlugin`, `expectedPluginRuntime`, `expectedPluginVersionMatches`, and `expectedPluginDisplayNameMatches` together. Remote `failedPlugins` may contain unrelated plugin failures; only the expected plugin in failed records is a target-plugin failure and exit code `5`.
+
 Do not put real credentials or server addresses in committed files.
 
 ## Commit Order

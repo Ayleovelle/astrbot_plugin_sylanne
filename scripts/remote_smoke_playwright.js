@@ -84,6 +84,34 @@ function findFailedPlugin(failedPlugins, expectedPlugin) {
   )) || null;
 }
 
+function failedPluginName(key, value) {
+  return (value && (
+    value.name
+    || value.plugin_name
+    || value.display_name
+    || value.repo
+  )) || key;
+}
+
+function summarizeFailedPlugins(failedPlugins, expectedPlugin) {
+  const entries = failedPlugins && typeof failedPlugins === "object"
+    ? Object.entries(failedPlugins)
+    : [];
+  const expectedEntry = findFailedPlugin(failedPlugins, expectedPlugin);
+  const expectedKey = expectedEntry ? expectedEntry[0] : null;
+  const names = entries
+    .map(([key, value]) => failedPluginName(key, value))
+    .filter(Boolean);
+  return {
+    count: entries.length,
+    names,
+    hasAny: entries.length > 0,
+    hasExpectedPluginFailure: Boolean(expectedEntry),
+    expectedPluginFailureKey: expectedKey,
+    unrelatedCount: entries.filter(([key]) => key !== expectedKey).length,
+  };
+}
+
 function findPluginByName(payload, expectedPlugin) {
   if (!expectedPlugin) {
     return null;
@@ -230,6 +258,10 @@ async function main() {
       : null;
     const failedPluginData = failedPlugins.json && failedPlugins.json.data;
     const expectedFailedPlugin = findFailedPlugin(failedPluginData, expectedPlugin);
+    const failedPluginSummary = summarizeFailedPlugins(
+      failedPluginData,
+      expectedPlugin,
+    );
 
     await page.evaluate(() => {
       location.hash = "#/extension#installed";
@@ -335,6 +367,7 @@ async function main() {
       expectedPluginDisplayName: expectedPluginDisplayName || null,
       expectedPluginDisplayNameMatches,
       expectedFailedPlugin,
+      failedPluginSummary,
       failedPlugins: failedPluginData,
       pageData,
       failedRequests,
