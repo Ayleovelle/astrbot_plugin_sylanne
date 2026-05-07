@@ -27,6 +27,81 @@ def metadata_value(name: str) -> str:
     raise AssertionError(f"metadata.yaml missing {name}")
 
 
+def module_tree(name: str) -> ast.Module:
+    return ast.parse((ROOT / name).read_text(encoding="utf-8"))
+
+
+def class_async_methods(tree: ast.Module, class_name: str) -> set[str]:
+    for node in tree.body:
+        if isinstance(node, ast.ClassDef) and node.name == class_name:
+            return {
+                item.name
+                for item in node.body
+                if isinstance(item, ast.AsyncFunctionDef)
+            }
+    raise AssertionError(f"{class_name} not found")
+
+
+def class_constant_names(tree: ast.Module, class_name: str) -> set[str]:
+    for node in tree.body:
+        if isinstance(node, ast.ClassDef) and node.name == class_name:
+            return {
+                target.id
+                for item in node.body
+                if isinstance(item, ast.Assign)
+                for target in item.targets
+                if isinstance(target, ast.Name)
+            }
+    raise AssertionError(f"{class_name} not found")
+
+
+def assigned_string_tuple(tree: ast.Module, name: str) -> tuple[str, ...]:
+    for node in tree.body:
+        if isinstance(node, ast.Assign):
+            matches_name = any(
+                isinstance(target, ast.Name) and target.id == name
+                for target in node.targets
+            )
+            value = node.value
+        elif isinstance(node, ast.AnnAssign):
+            matches_name = isinstance(node.target, ast.Name) and node.target.id == name
+            value = node.value
+        else:
+            continue
+        if not matches_name:
+            continue
+        if not isinstance(value, ast.Tuple):
+            continue
+        return tuple(
+            element.value
+            for element in value.elts
+            if isinstance(element, ast.Constant) and isinstance(element.value, str)
+        )
+    raise AssertionError(f"{name} tuple assignment not found")
+
+
+def function_required_tuple(tree: ast.Module, function_name: str) -> tuple[str, ...]:
+    for node in tree.body:
+        if not isinstance(node, ast.FunctionDef) or node.name != function_name:
+            continue
+        for child in ast.walk(node):
+            if not isinstance(child, ast.Assign):
+                continue
+            if not any(
+                isinstance(target, ast.Name) and target.id == "required"
+                for target in child.targets
+            ):
+                continue
+            if not isinstance(child.value, ast.Tuple):
+                continue
+            return tuple(
+                element.value
+                for element in child.value.elts
+                if isinstance(element, ast.Constant) and isinstance(element.value, str)
+            )
+    raise AssertionError(f"{function_name} required tuple not found")
+
+
 class FakeContext:
     def __init__(self, metadata):
         self.metadata = metadata
@@ -221,6 +296,28 @@ class PublicApiTests(unittest.TestCase):
 
         self.assertIsNone(get_humanlike_service(context))
 
+    def test_public_service_contract_matches_plugin_implementation(self):
+        public_tree = module_tree("public_api.py")
+        main_tree = module_tree("main.py")
+        emotion_protocol = class_async_methods(public_tree, "EmotionServiceProtocol")
+        humanlike_protocol = class_async_methods(public_tree, "HumanlikeStateServiceProtocol")
+        plugin_methods = class_async_methods(main_tree, "EmotionalStatePlugin")
+        main_required = set(
+            assigned_string_tuple(main_tree, "_REQUIRED_EMOTION_SERVICE_METHODS"),
+        )
+        public_required = set(
+            function_required_tuple(public_tree, "get_emotion_service"),
+        )
+        public_humanlike_required = set(
+            function_required_tuple(public_tree, "get_humanlike_service"),
+        )
+
+        self.assertEqual(emotion_protocol, main_required)
+        self.assertEqual(emotion_protocol, public_required)
+        self.assertEqual(set(), emotion_protocol - plugin_methods)
+        self.assertEqual(humanlike_protocol, public_humanlike_required)
+        self.assertEqual(set(), public_humanlike_required - plugin_methods)
+
     def test_main_register_decorator_uses_plugin_name_constant(self):
         tree = ast.parse((ROOT / "main.py").read_text(encoding="utf-8"))
         class_node = next(
@@ -238,6 +335,25 @@ class PublicApiTests(unittest.TestCase):
 
         self.assertIsInstance(register_call.args[0], ast.Name)
         self.assertEqual("PLUGIN_NAME", register_call.args[0].id)
+
+    def test_public_service_versions_match_plugin_class_versions(self):
+        public_tree = module_tree("public_api.py")
+        main_tree = module_tree("main.py")
+        emotion_protocol_constants = {
+            "emotion_api_version",
+            "emotion_schema_version",
+            "emotion_memory_schema_version",
+            "psychological_screening_schema_version",
+        }
+        humanlike_protocol_constants = emotion_protocol_constants | {
+            "humanlike_state_schema_version",
+        }
+        plugin_constants = class_constant_names(main_tree, "EmotionalStatePlugin")
+
+        self.assertLessEqual(emotion_protocol_constants, plugin_constants)
+        self.assertLessEqual(humanlike_protocol_constants, plugin_constants)
+        self.assertIn("EMOTION_API_VERSION", {node.id for node in ast.walk(public_tree) if isinstance(node, ast.Name)})
+        self.assertIn("PUBLIC_API_VERSION", {node.id for node in ast.walk(main_tree) if isinstance(node, ast.Name)})
 
     def test_main_helper_uses_full_emotion_service_contract(self):
         def passthrough_decorator(*args, **kwargs):

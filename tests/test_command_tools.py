@@ -1,10 +1,15 @@
 import asyncio
+import ast
 import copy
 import json
 import sys
 import types
 import unittest
+from pathlib import Path
 from types import SimpleNamespace
+
+
+ROOT = Path(__file__).resolve().parents[1]
 
 
 def install_astrbot_stubs():
@@ -89,6 +94,30 @@ def bind_async(instance, name, func):
     setattr(instance, name, types.MethodType(func, instance))
 
 
+def documented_commands_from_main():
+    tree = ast.parse((ROOT / "main.py").read_text(encoding="utf-8"))
+    commands = set()
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.AsyncFunctionDef):
+            continue
+        for decorator in node.decorator_list:
+            if not (
+                isinstance(decorator, ast.Call)
+                and isinstance(decorator.func, ast.Attribute)
+                and decorator.func.attr == "command"
+            ):
+                continue
+            if decorator.args and isinstance(decorator.args[0], ast.Constant):
+                commands.add(str(decorator.args[0].value))
+            for keyword in decorator.keywords:
+                if keyword.arg != "alias" or not isinstance(keyword.value, ast.Set):
+                    continue
+                for element in keyword.value.elts:
+                    if isinstance(element, ast.Constant) and isinstance(element.value, str):
+                        commands.add(element.value)
+    return commands
+
+
 async def collect_async_generator(generator):
     items = []
     async for item in generator:
@@ -108,6 +137,13 @@ class FakeEvent:
 class CommandAndToolSmokeTests(unittest.TestCase):
     def setUp(self):
         install_astrbot_stubs()
+
+    def test_readme_documents_registered_commands_and_aliases(self):
+        readme = (ROOT / "README.md").read_text(encoding="utf-8")
+
+        for command in sorted(documented_commands_from_main()):
+            with self.subTest(command=command):
+                self.assertIn(f"/{command}", readme)
 
     def test_emotion_reset_command_denies_delete_when_backdoor_disabled(self):
         plugin = new_plugin({"allow_emotion_reset_backdoor": False})

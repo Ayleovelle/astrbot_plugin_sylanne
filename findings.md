@@ -60,6 +60,8 @@ This file stores durable discoveries from implementation, review, and remote tes
 - Plugin identity has multiple externally visible surfaces: `metadata.yaml name`, `main.PLUGIN_NAME`, `public_api.PLUGIN_NAME`, `scripts/package_plugin.py` `PLUGIN_NAME`, release zip root, README install/smoke commands, and release checklist commands. These should be tested together so future renames cannot split package identity from remote validation commands.
 - `assessment_timing` is a three-surface contract: runtime accepted values in `main.py`, schema `options`, and README configuration text must stay aligned. Otherwise a documented value can silently fall back to `both`.
 - README typed configuration tables are the maintainers' practical source of truth for new config keys. Schema keys should appear there with the same type unless they are explicitly legacy compatibility fields.
+- Public API compatibility has three synchronized surfaces: `public_api.py` Protocol methods, service discovery required-method tuples, and `EmotionalStatePlugin` async methods. A method added to only one surface should fail tests before release.
+- AstrBot command names and aliases are public user-facing entry points. README command snippets should be generated from, or at least contract-tested against, `@filter.command(...)` decorators.
 
 ## 2026-05-07 Branch Maintenance
 
