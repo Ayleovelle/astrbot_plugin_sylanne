@@ -119,6 +119,25 @@ function summarizePluginRuntime(plugin) {
   };
 }
 
+async function waitForExtensionUi(page, expected, expectedDisplayName) {
+  const terms = [expected, expectedDisplayName].filter(Boolean);
+  return await page.waitForFunction(({ expectedTerms }) => {
+    const normalize = (value) => (value || "").replace(/\s+/g, " ").trim();
+    const bodyText = normalize(document.body.innerText);
+    const titleRows = document.querySelectorAll(".extension-title-row").length;
+    const extensionLikeNodes = document.querySelectorAll("[class*='extension']").length;
+    const pluginLikeNodes = document.querySelectorAll("[class*='plugin']").length;
+    return (
+      expectedTerms.some((term) => bodyText.includes(term))
+      || titleRows > 0
+      || extensionLikeNodes > 0
+      || pluginLikeNodes > 0
+    );
+  }, { expectedTerms: terms }, { timeout: 10000 })
+    .then(() => "ready")
+    .catch(() => "best_effort_timeout");
+}
+
 async function main() {
   const remoteUrl = env("ASTRBOT_REMOTE_URL");
   const username = env("ASTRBOT_REMOTE_USERNAME");
@@ -218,17 +237,37 @@ async function main() {
         await page.waitForLoadState("networkidle", { timeout: 30000 }).catch(() => {});
       }
     }
+    const expectedUiDisplayName = expectedPluginDisplayName
+      || (expectedPluginRuntime && expectedPluginRuntime.displayName)
+      || "";
+    const uiProbeWaitStatus = await waitForExtensionUi(
+      page,
+      expectedPlugin,
+      expectedUiDisplayName,
+    );
     await page.screenshot({
       path: path.join(artifactDir, "remote-extension-installed.png"),
       fullPage: true,
     });
 
-    const pageData = await page.evaluate(({ expected, expectedDisplayName }) => {
+    const pageData = await page.evaluate(({
+      expected,
+      expectedDisplayName,
+      waitStatus,
+    }) => {
       const normalize = (value) => (value || "").replace(/\s+/g, " ").trim();
       const bodyText = normalize(document.body.innerText);
       const pluginTitles = [...document.querySelectorAll(".extension-title-row")]
         .map((element) => normalize(element.innerText))
         .filter(Boolean);
+      const selectorCounts = {
+        extensionTitleRows: document.querySelectorAll(".extension-title-row").length,
+        extensionLikeNodes: document.querySelectorAll("[class*='extension']").length,
+        pluginLikeNodes: document.querySelectorAll("[class*='plugin']").length,
+        cardLikeNodes: document.querySelectorAll(
+          ".ant-card, .semi-card, [class*='card']",
+        ).length,
+      };
       const hasExpectedPluginId = expected ? bodyText.includes(expected) : null;
       const hasExpectedPluginDisplayName = expectedDisplayName
         ? bodyText.includes(expectedDisplayName)
@@ -248,14 +287,18 @@ async function main() {
         hasExpectedPluginInUi: expected || expectedDisplayName
           ? Boolean(hasExpectedPluginId || hasExpectedPluginDisplayName || titleHasExpectedPlugin)
           : null,
+        uiProbeStatus: pluginTitles.length > 0 || hasExpectedPluginId || hasExpectedPluginDisplayName
+          ? "ready"
+          : waitStatus,
+        selectorCounts,
+        bodyTextPreview: bodyText.slice(0, 500),
         hasLivingMemory: bodyText.includes("astrbot_plugin_livingmemory"),
         pluginTitles,
       };
     }, {
       expected: expectedPlugin,
-      expectedDisplayName: expectedPluginDisplayName
-        || (expectedPluginRuntime && expectedPluginRuntime.displayName)
-        || "",
+      expectedDisplayName: expectedUiDisplayName,
+      waitStatus: uiProbeWaitStatus,
     });
 
     const summary = {

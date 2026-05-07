@@ -516,3 +516,46 @@ Note for next iteration:
 
 - The latest remote smoke passed API-level checks, but the UI page snapshot returned empty `pluginTitles` and `hasExpectedPluginInUi=false`. Next iteration should make extension-page loading/waiting more deterministic or clearly mark UI fields as best-effort.
 
+## 2026-05-07 Iteration 28
+
+Status: complete.
+
+- Made the remote smoke WebUI probe more deterministic:
+  - added `waitForExtensionUi(...)`,
+  - waited for expected plugin id/displayName text or extension/plugin-like DOM nodes,
+  - reported `pageData.uiProbeStatus` as `ready` or `best_effort_timeout`.
+- Added diagnostic UI fields:
+  - `pageData.selectorCounts`,
+  - `pageData.bodyTextPreview`.
+- Kept API-level checks authoritative:
+  - `/api/stat/version`,
+  - `/api/plugin/get`,
+  - `/api/plugin/source/get-failed-plugins`,
+  - `containsExpectedPlugin`,
+  - `expectedPluginRuntime`,
+  - `expectedFailedPlugin`.
+- Updated README to state that UI fields are best-effort diagnostics only.
+- Updated `tests\test_remote_smoke_contract.py` to lock the new UI probe contract.
+
+Validation complete:
+
+- `py -3.13 -m unittest tests.test_remote_smoke_contract -v`: 8 tests passed.
+- Bundled Node `--check scripts\remote_smoke_playwright.js`: passed.
+- `py -3.13 -m unittest discover -s tests -v`: 141 tests passed.
+- `py -3.13 -m py_compile main.py emotion_engine.py humanlike_engine.py psychological_screening.py public_api.py prompts.py scripts\build_literature_kb.py scripts\build_humanlike_agent_literature_kb.py scripts\build_psychological_literature_kb.py scripts\package_plugin.py`: passed.
+- Bundled Node `--check scripts\remote_install_upload_playwright.js`: passed.
+- Bundled Node `--check scripts\plugin_zip_preflight.js`: passed.
+- Bundled Node `scripts\plugin_zip_preflight.js dist\astrbot_plugin_emotional_state.zip astrbot_plugin_emotional_state`: passed, 48 entries.
+- `git diff --check`: passed, with CRLF conversion warnings only.
+- Remote smoke with version/display-name assertions: passed.
+  - AstrBot version `4.24.2`.
+  - Plugin API returned 30 plugins.
+  - `astrbot_plugin_emotional_state` was present and activated.
+  - Version `1.0.0` matched.
+  - Display name `多维情绪状态` matched.
+  - Failed plugin data was `{}`.
+  - `pageData.uiProbeStatus="ready"`.
+  - `pageData.selectorCounts.extensionTitleRows=30`.
+  - `pageData.hasExpectedPluginDisplayName=true`.
+  - `pageData.hasExpectedPluginInUi=true`.
+

@@ -43,6 +43,9 @@ This file stores durable discoveries from implementation, review, and remote tes
 - Zip preflight logic lives in `scripts/plugin_zip_preflight.js` and is exercised locally by `tests/test_package_plugin.py` with valid and invalid temporary zip archives. This gives failure-path coverage without mutating the remote server.
 - Remote WebUI may display a plugin's `display_name` instead of its package directory name. `scripts/remote_smoke_playwright.js` now reports `pageData.hasExpectedPluginId`, `pageData.hasExpectedPluginDisplayName`, and `pageData.hasExpectedPluginInUi` so UI card checks do not contradict the API-level plugin detection.
 - `scripts/remote_smoke_playwright.js` now treats `/api/plugin/source/get-failed-plugins` as a required health endpoint. Non-200 responses set exit code `9`, because otherwise `expectedFailedPlugin=null` could falsely imply there are no failed plugin records.
+- The WebUI plugin list is an asynchronous, best-effort diagnostic layer in remote smoke. The authoritative checks remain `/api/stat/version`, `/api/plugin/get`, `/api/plugin/source/get-failed-plugins`, `containsExpectedPlugin`, `expectedPluginRuntime`, and `expectedFailedPlugin`.
+- `scripts/remote_smoke_playwright.js` now waits for extension-page readiness by looking for expected plugin id/displayName text, `.extension-title-row`, extension-like nodes, or plugin-like nodes. If this probe times out, it records `pageData.uiProbeStatus="best_effort_timeout"` without weakening API-level hard assertions.
+- Latest remote smoke after the UI probe change returned `pageData.uiProbeStatus="ready"`, `selectorCounts.extensionTitleRows=30`, `hasExpectedPluginDisplayName=true`, and `hasExpectedPluginInUi=true`; this confirms the plugin is visible in the rendered WebUI under its display name while API checks remain the source of truth.
 
 ## 2026-05-07 Branch Maintenance
 
