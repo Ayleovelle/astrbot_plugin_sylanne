@@ -453,3 +453,37 @@ Closeout status:
 - Latest validated baseline commit before this final status entry: `b2bddf3`.
 - All documented maintenance branches were synced to `b2bddf3`; after committing this final status entry, sync branches again to the new HEAD.
 
+## 2026-05-07 Iteration 26
+
+Status: complete.
+
+- Fixed a misleading remote smoke UI field:
+  - WebUI plugin cards display `displayName` such as `多维情绪状态`, not necessarily the plugin package id `astrbot_plugin_emotional_state`.
+  - `pageData.hasExpectedPlugin` previously remained `false` even when the target plugin was shown in the UI by display name.
+- Updated `scripts\remote_smoke_playwright.js` to report:
+  - `pageData.hasExpectedPluginId`,
+  - `pageData.hasExpectedPluginDisplayName`,
+  - `pageData.hasExpectedPluginInUi`.
+- Kept API-level assertions as the authoritative install/load checks:
+  - `containsExpectedPlugin`,
+  - `expectedPluginRuntime`,
+  - `expectedFailedPlugin`.
+- Updated README to explain the distinction between API detection and UI display-name checks.
+- Updated remote smoke contract tests to lock the new UI fields.
+
+Validation complete:
+
+- `py -3.13 -m unittest tests.test_remote_smoke_contract -v`: 8 tests passed.
+- Bundled Node `--check scripts\remote_smoke_playwright.js`: passed.
+- `py -3.13 -m unittest discover -s tests -v`: 141 tests passed.
+- `py -3.13 -m py_compile main.py emotion_engine.py humanlike_engine.py psychological_screening.py public_api.py prompts.py scripts\build_literature_kb.py scripts\build_humanlike_agent_literature_kb.py scripts\build_psychological_literature_kb.py scripts\package_plugin.py`: passed.
+- Bundled Node `--check scripts\remote_install_upload_playwright.js`: passed.
+- Bundled Node `--check scripts\plugin_zip_preflight.js`: passed.
+- Bundled Node `scripts\plugin_zip_preflight.js dist\astrbot_plugin_emotional_state.zip astrbot_plugin_emotional_state`: passed, 48 entries.
+- `git diff --check`: passed, with CRLF conversion warnings only.
+- Remote smoke with version/display-name assertions: passed.
+  - `pageData.hasExpectedPluginId=false`,
+  - `pageData.hasExpectedPluginDisplayName=true`,
+  - `pageData.hasExpectedPluginInUi=true`,
+  - API-level plugin detection and failed-plugin checks still passed.
+

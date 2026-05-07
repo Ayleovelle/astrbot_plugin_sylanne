@@ -223,19 +223,40 @@ async function main() {
       fullPage: true,
     });
 
-    const pageData = await page.evaluate((expected) => {
+    const pageData = await page.evaluate(({ expected, expectedDisplayName }) => {
       const normalize = (value) => (value || "").replace(/\s+/g, " ").trim();
       const bodyText = normalize(document.body.innerText);
+      const pluginTitles = [...document.querySelectorAll(".extension-title-row")]
+        .map((element) => normalize(element.innerText))
+        .filter(Boolean);
+      const hasExpectedPluginId = expected ? bodyText.includes(expected) : null;
+      const hasExpectedPluginDisplayName = expectedDisplayName
+        ? bodyText.includes(expectedDisplayName)
+        : null;
+      const titleHasExpectedPlugin = expected || expectedDisplayName
+        ? pluginTitles.some((title) => (
+          (expected && title.includes(expected))
+          || (expectedDisplayName && title.includes(expectedDisplayName))
+        ))
+        : null;
       return {
         title: document.title,
         url: location.href,
-        hasExpectedPlugin: expected ? bodyText.includes(expected) : null,
+        hasExpectedPlugin: hasExpectedPluginId,
+        hasExpectedPluginId,
+        hasExpectedPluginDisplayName,
+        hasExpectedPluginInUi: expected || expectedDisplayName
+          ? Boolean(hasExpectedPluginId || hasExpectedPluginDisplayName || titleHasExpectedPlugin)
+          : null,
         hasLivingMemory: bodyText.includes("astrbot_plugin_livingmemory"),
-        pluginTitles: [...document.querySelectorAll(".extension-title-row")]
-          .map((element) => normalize(element.innerText))
-          .filter(Boolean),
+        pluginTitles,
       };
-    }, expectedPlugin);
+    }, {
+      expected: expectedPlugin,
+      expectedDisplayName: expectedPluginDisplayName
+        || (expectedPluginRuntime && expectedPluginRuntime.displayName)
+        || "",
+    });
 
     const summary = {
       ok: true,

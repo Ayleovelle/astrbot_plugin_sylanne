@@ -1269,6 +1269,8 @@ $env:ASTRBOT_EXPECT_PLUGIN_DISPLAY_NAME = "多维情绪状态"
 node scripts\remote_smoke_playwright.js
 ```
 
+WebUI 插件卡片可能显示 `displayName` 而不是插件目录名，所以 smoke 输出里的 `pageData` 会同时给出 `hasExpectedPluginId`、`hasExpectedPluginDisplayName` 和综合字段 `hasExpectedPluginInUi`。判断插件是否安装和启用时，以 API 层的 `containsExpectedPlugin`、`expectedPluginRuntime` 和 `expectedFailedPlugin` 为准；UI 字段只用于排查页面展示。
+
 远程上传安装是独立脚本，默认不会执行。需要先构建发布包，再显式确认上传：
 
 ```powershell

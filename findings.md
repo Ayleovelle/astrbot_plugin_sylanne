@@ -41,6 +41,7 @@ This file stores durable discoveries from implementation, review, and remote tes
   - required runtime files must be present,
   - `tests/`, `scripts/`, `output/`, `dist/`, `raw/`, `__pycache__/`, and `.git/` are rejected.
 - Zip preflight logic lives in `scripts/plugin_zip_preflight.js` and is exercised locally by `tests/test_package_plugin.py` with valid and invalid temporary zip archives. This gives failure-path coverage without mutating the remote server.
+- Remote WebUI may display a plugin's `display_name` instead of its package directory name. `scripts/remote_smoke_playwright.js` now reports `pageData.hasExpectedPluginId`, `pageData.hasExpectedPluginDisplayName`, and `pageData.hasExpectedPluginInUi` so UI card checks do not contradict the API-level plugin detection.
 
 ## 2026-05-07 Branch Maintenance
 
