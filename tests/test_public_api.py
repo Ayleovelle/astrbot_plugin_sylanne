@@ -1084,6 +1084,11 @@ class MemoryPayloadPublicApiTests(unittest.TestCase):
         )
         self.assertEqual(payload["humanlike_state_at_write"]["source"], "livingmemory")
         self.assertEqual(payload["humanlike_state_at_write"]["written_at"], 20.0)
+        self.assertEqual(
+            payload["humanlike_state_at_write"]["humanlike_updated_at"],
+            11.0,
+        )
+        self.assertNotIn("updated_at", payload["humanlike_state_at_write"])
 
     def test_memory_payload_includes_disabled_humanlike_annotation_by_default(self):
         self._install_astrbot_stubs()
@@ -1541,6 +1546,10 @@ class MemoryPayloadPublicApiTests(unittest.TestCase):
         self.assertIn("humanlike_state_at_write", payload)
         self.assertEqual(payload["humanlike_state_at_write"]["source"], "livingmemory")
         self.assertEqual(payload["humanlike_state_at_write"]["written_at"], 20.0)
+        self.assertEqual(
+            payload["humanlike_state_at_write"]["humanlike_updated_at"],
+            11.0,
+        )
 
     def test_memory_text_override_takes_precedence_over_dict_text(self):
         self._install_astrbot_stubs()

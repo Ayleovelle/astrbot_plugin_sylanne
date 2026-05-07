@@ -50,6 +50,7 @@ Build and maintain `astrbot_plugin_emotional_state`: an AstrBot plugin with mult
 | 36 | complete | Require release zip metadata identity to match the expected plugin directory | 147 unit tests, py_compile, package preflight, Node syntax check, git diff check, remote smoke |
 | 37 | complete | Require public API service discovery to match versioned schema contracts | 150 unit tests, py_compile, package preflight, Node syntax check, git diff check, remote smoke |
 | 38 | complete | Align humanlike roadmap docs with current memory payload and config schema names | 151 unit tests, py_compile, package preflight, Node syntax check, git diff check, remote smoke |
+| 39 | complete | Close remaining humanlike roadmap drift around flags and annotation timestamps | 151 unit tests, py_compile, package preflight, Node syntax check, git diff check, remote smoke |
 
 ## Recovery Checklist
 

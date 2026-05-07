@@ -26,7 +26,7 @@
 ## 迭代 4：真实时间与刷屏限幅
 
 - 问题：半衰期公式已有，但多个观察值短时间连续写入时缺少合并规则。
-- 决策：引入 `min_update_interval_seconds`、`rapid_update_half_life_seconds`、`daily_recovery_window`、`max_impulse_per_hour` 和异常时间跳跃保护。
+- 决策：引入 `humanlike_min_update_interval_seconds`、`humanlike_rapid_update_half_life_seconds`、`humanlike_max_impulse_per_update` 和异常时间跳跃保护。
 - 落地：短时间多次输入只能叠加局部观察，不能快速清空疲劳、委屈、依赖风险或恢复期。
 - 残余风险：高并发场景仍需 KV 原子写或乐观锁。
 
@@ -41,7 +41,7 @@
 
 - 问题：`attachment_signal`、`gratitude`、`resentment`、`relationship_story` 容易增强用户依赖。
 - 决策：依恋相关字段只进入 plugin-safe snapshot，不直接进入 user-facing explanation；高依赖风险时降低排他性、分离焦虑、占有欲和“需要你”的表达。
-- 落地：当前 P0 没有独立配置 `dependency_guard_level`；依赖风险通过 `dependency_risk`、`simulation_flags`、`output_modulation` 与 prompt fragment 约束表达，后续如新增配置必须同步 `_conf_schema.json`、README 和测试。
+- 落地：当前 P0 没有独立配置 `dependency_guard_level`；依赖风险通过 `dependency_risk`、`flags`、`output_modulation` 与 prompt fragment 约束表达，后续如新增配置必须同步 `_conf_schema.json`、README 和测试。
 - 残余风险：剧情类插件可能主动读取关系字段强化黏性，需要 API 文档约束。
 
 ## 迭代 7：叙事记忆来源约束

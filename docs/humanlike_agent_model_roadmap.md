@@ -168,7 +168,7 @@ humanlike_state
 | 层 | 用途 | 可包含 | 不应包含 |
 | --- | --- | --- | --- |
 | `internal` | 本插件内部调试、迁移和测试 | 全量状态、阈值、轨迹、来源 id | 不直接给普通外部插件默认读取 |
-| `plugin_safe` | 其他插件调制剧情、记忆或 UI | `output_modulation`、`simulation_flags`、有限风险标记 | 依赖风险细节、心理筛查细节、内部阈值 |
+| `plugin_safe` | 其他插件调制剧情、记忆或 UI | `output_modulation`、`flags`、有限风险标记 | 依赖风险细节、心理筛查细节、内部阈值 |
 | `user_facing` | 给用户解释当前状态 | 简短自然语言、可关闭/重置提示 | 诊断式解释、真实疾病/痛苦声明、依赖暗示 |
 
 默认 API 返回 `plugin_safe`。只有显式请求并具备调试权限时，才返回 `internal`。
@@ -210,7 +210,7 @@ humanlike_state
 - 半衰期和刷屏限幅按真实时间工作。
 - 同一输入在高/低 `energy` 下只改变表达长度和主动性，不改变事实结论。
 - 危机、自伤、医疗咨询、法律/金融高风险场景绕过拟人调制。
-- `humanlike_state_at_write` 冻结写入时状态，并保留 `written_at` 与状态 `updated_at`。
+- `humanlike_state_at_write` 冻结写入时状态，并保留 `written_at` 与状态来源时间 `humanlike_updated_at`。
 - 叙事摘要必须能回溯 `source_memory_ids`。
 - reset 后门能清空 humanlike 状态，但不误删 emotion 和 psychological 状态。
 

@@ -555,6 +555,33 @@ Validation complete:
   - Display name `多维情绪状态` matched.
   - Failed plugin data was `{}`.
 
+## 2026-05-07 Iteration 39
+
+Status: complete.
+
+- Closed remaining humanlike roadmap/iteration-log drift:
+  - replaced non-schema `daily_recovery_window` and `max_impulse_per_hour` with current humanlike timing/impulse config names,
+  - replaced `simulation_flags` with current public payload field `flags`,
+  - clarified that `humanlike_state_at_write` records source state time as `humanlike_updated_at`.
+- Added config schema contract coverage so README/roadmap/iteration docs do not drift back to those stale names.
+- Added public API payload assertions for `humanlike_state_at_write["humanlike_updated_at"]`.
+
+Validation complete:
+
+- `py -3.13 -m unittest tests.test_config_schema_contract tests.test_public_api tests.test_humanlike_engine -v`: 61 tests passed.
+- `py -3.13 -m unittest discover -s tests -v`: 151 tests passed.
+- `py -3.13 -m py_compile main.py emotion_engine.py humanlike_engine.py psychological_screening.py public_api.py prompts.py scripts\build_literature_kb.py scripts\build_humanlike_agent_literature_kb.py scripts\build_psychological_literature_kb.py scripts\package_plugin.py`: passed.
+- Bundled Node `--check` for `scripts\remote_smoke_playwright.js`, `scripts\remote_install_upload_playwright.js`, and `scripts\plugin_zip_preflight.js`: passed.
+- Bundled Node `scripts\plugin_zip_preflight.js dist\astrbot_plugin_emotional_state.zip astrbot_plugin_emotional_state`: passed, 49 entries.
+- `git diff --check`: passed, with CRLF conversion warnings only.
+- Remote smoke with metadata-matched version/display-name assertions: passed.
+  - AstrBot version `4.24.2`.
+  - Plugin API returned 30 plugins.
+  - `astrbot_plugin_emotional_state` was present and activated.
+  - Version `1.0.0` matched.
+  - Display name `多维情绪状态` matched.
+  - Failed plugin data was `{}`.
+
 ## 2026-05-07 Iteration 38
 
 Status: complete.

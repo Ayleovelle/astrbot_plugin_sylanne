@@ -56,6 +56,7 @@ This file stores durable discoveries from implementation, review, and remote tes
 - Upload zip preflight should validate identity at three levels: filename, explicit root directory, and zip-internal `metadata.yaml` `name:`. A package whose `metadata.yaml` names a different plugin must fail locally before `remote_install_upload_playwright.js` can call AstrBot's install-upload endpoint.
 - Public service discovery should reject objects that only mimic the method surface but advertise old or missing public API/schema versions. Other plugins should use `get_emotion_service(...)` and `get_humanlike_service(...)` so method completeness and schema compatibility are checked together.
 - The current LivingMemory-compatible humanlike memory annotation name is `humanlike_state_at_write`, not the earlier roadmap placeholder `humanlike_at_write`. `humanlike_memory_write_enabled` defaults to `true`; early fields such as `humanlike_personification_level` and `humanlike_dependency_guard_level` remain non-schema ideas unless later implemented with docs and tests.
+- Humanlike public snapshots use `flags`, not `simulation_flags`. Humanlike memory annotations expose the source state timestamp as `humanlike_updated_at`; `updated_at` remains a snapshot/state field, not an annotation field.
 
 ## 2026-05-07 Branch Maintenance
 
