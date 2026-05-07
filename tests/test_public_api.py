@@ -578,6 +578,73 @@ class MemoryPayloadPublicApiTests(unittest.TestCase):
         self.assertIn("citation_ids", captured["prompt"])
         self.assertEqual(observation.label, "neutral")
 
+    def test_low_reasoning_mode_does_not_change_local_state_dynamics(self):
+        self._install_astrbot_stubs()
+        from emotion_engine import EmotionState, build_persona_profile
+        from main import EmotionalStatePlugin
+
+        llm_payload = (
+            '{"label":"anger","dimensions":{"valence":-0.55,"arousal":0.66,'
+            '"dominance":0.12,"goal_congruence":-0.62,"certainty":0.58,'
+            '"control":-0.35,"affiliation":-0.48},"confidence":0.82,'
+            '"appraisal":{"relationship_decision":{"decision":"boundary",'
+            '"intensity":0.54,"forgiveness":0.28,"reason":"fixed"}},'
+            '"reason":"fixed observation"}'
+        )
+
+        async def fake_provider_id(self, event):
+            return "provider"
+
+        class FakeContext:
+            async def llm_generate(self, **kwargs):
+                return SimpleNamespace(completion_text=llm_payload)
+
+        async def run_case(low_reasoning):
+            plugin = self._new_plugin(
+                {
+                    "low_reasoning_friendly_mode": low_reasoning,
+                    "low_reasoning_max_context_chars": 60,
+                    "max_context_chars": 5000,
+                },
+            )
+            plugin.context = FakeContext()
+            persona_profile = build_persona_profile(
+                persona_id="p",
+                name="p",
+                text="敏感 谨慎 但重视边界",
+            )
+            previous = EmotionState.initial(persona_profile)
+            previous.updated_at = 1000.0
+            observation = await plugin._assess_emotion(
+                event=SimpleNamespace(unified_msg_origin="s1"),
+                phase="pre_response",
+                previous_state=previous,
+                persona_profile=persona_profile,
+                context_text="A" * 200,
+                current_text="B" * 200,
+            )
+            state = plugin._engine_for_persona(persona_profile).update(
+                previous,
+                observation,
+                profile=persona_profile,
+                now=1020.0,
+            )
+            return state.to_dict()
+
+        original_provider_id = EmotionalStatePlugin._provider_id
+        EmotionalStatePlugin._provider_id = fake_provider_id
+        try:
+            normal = asyncio.run(run_case(False))
+            low = asyncio.run(run_case(True))
+        finally:
+            EmotionalStatePlugin._provider_id = original_provider_id
+
+        self.assertEqual(low["values"], normal["values"])
+        self.assertEqual(low["label"], normal["label"])
+        self.assertEqual(low["last_alpha"], normal["last_alpha"])
+        self.assertEqual(low["last_surprise"], normal["last_surprise"])
+        self.assertEqual(low["consequences"], normal["consequences"])
+
     def test_psychological_observe_is_disabled_by_default_for_commits(self):
         self._install_astrbot_stubs()
         from main import EmotionalStatePlugin
