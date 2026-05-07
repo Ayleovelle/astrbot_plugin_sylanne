@@ -1909,7 +1909,7 @@ Current sandbox limitation:
 
 ## 2026-05-08 Iteration 76 Release Verification
 
-Status: local and remote validation complete; GitHub publication in progress.
+Status: complete and published.
 
 - Added `.gitignore` coverage for `personality_literature_kb/raw/` so the 500MB+ OpenAlex raw cache remains local and cannot be staged accidentally.
 - Release-review subagent found no package blocker; it recommended committing only the non-raw personality KB products:
@@ -1942,4 +1942,14 @@ Status: local and remote validation complete; GitHub publication in progress.
   - User requested GCM popup authentication; `git credential-manager github login` succeeded through the existing `Ayleovelle` GitHub account and GitHub user probe returned HTTP 200.
   - Pushed `main` to `origin`: `c808dbc..7ce9fe9`.
   - Pushed local tag `v0.0.2-beta` to `origin`.
+- GitHub prerelease:
+  - release URL: `https://github.com/Ayleovelle/astrbot_plugin_emotional_state/releases/tag/v0.0.2-beta`;
+  - release id: `319073688`;
+  - target commit: `ddfb47b97603baf3a8ce26e9aeb80d5d71282953`;
+  - asset id: `414579083`;
+  - asset state: `uploaded`;
+  - asset size: `25550031`;
+  - asset digest: `sha256:a41966c39fe97608f0ba0316e08f3b389e3e1beae700190c6c426632397489a0`;
+  - download URL: `https://github.com/Ayleovelle/astrbot_plugin_emotional_state/releases/download/v0.0.2-beta/astrbot_plugin_emotional_state.zip`.
+  - Note: a later local bookkeeping commit `63de191` records GCM recovery; Git HTTPS transport reset before it could be pushed, but the published prerelease targets the validated feature release commit and package.
 
