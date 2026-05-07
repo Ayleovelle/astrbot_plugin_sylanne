@@ -73,6 +73,7 @@ def install_astrbot_stubs():
 def new_plugin(config=None):
     from emotion_engine import EmotionEngine, EmotionParameters
     from humanlike_engine import HumanlikeEngine
+    from lifelike_learning_engine import LifelikeLearningEngine
     from main import EmotionalStatePlugin
     from moral_repair_engine import MoralRepairEngine
     from psychological_screening import PsychologicalScreeningEngine
@@ -83,10 +84,12 @@ def new_plugin(config=None):
     plugin.engine = EmotionEngine(plugin.base_parameters)
     plugin.psychological_engine = PsychologicalScreeningEngine()
     plugin.humanlike_engine = HumanlikeEngine()
+    plugin.lifelike_learning_engine = LifelikeLearningEngine()
     plugin.moral_repair_engine = MoralRepairEngine()
     plugin._memory_cache = {}
     plugin._psychological_memory_cache = {}
     plugin._humanlike_memory_cache = {}
+    plugin._lifelike_learning_memory_cache = {}
     plugin._moral_repair_memory_cache = {}
     plugin._last_request_text = {}
     plugin.context = SimpleNamespace()
@@ -181,6 +184,7 @@ class CommandAndToolSmokeTests(unittest.TestCase):
                 "get_bot_emotion_state",
                 "simulate_bot_emotion_update",
                 "get_bot_humanlike_state",
+                "get_bot_lifelike_learning_state",
                 "get_bot_moral_repair_state",
                 "get_bot_integrated_self_state",
             },
@@ -333,6 +337,43 @@ class CommandAndToolSmokeTests(unittest.TestCase):
 
         self.assertEqual(len(outputs), 1)
         self.assertIn("\u672a\u542f\u7528", outputs[0])
+
+    def test_disabled_lifelike_state_command_does_not_load_state(self):
+        plugin = new_plugin()
+
+        async def fake_load_lifelike_state(self, session_key):
+            raise AssertionError("disabled lifelike command must not load state")
+
+        bind_async(plugin, "_load_lifelike_learning_state", fake_load_lifelike_state)
+
+        outputs = asyncio.run(
+            collect_async_generator(plugin.lifelike_learning_status(FakeEvent())),
+        )
+
+        self.assertEqual(len(outputs), 1)
+        self.assertIn("\u672a\u542f\u7528", outputs[0])
+
+    def test_lifelike_reset_command_uses_independent_backdoor(self):
+        allowed = new_plugin(
+            {
+                "allow_emotion_reset_backdoor": False,
+                "allow_lifelike_learning_reset_backdoor": True,
+            },
+        )
+        deleted = []
+
+        async def fake_delete_lifelike_state(self, session_key):
+            deleted.append(session_key)
+
+        bind_async(allowed, "_delete_lifelike_learning_state", fake_delete_lifelike_state)
+
+        outputs = asyncio.run(
+            collect_async_generator(allowed.lifelike_learning_reset(FakeEvent("s-life"))),
+        )
+
+        self.assertEqual(deleted, ["s-life"])
+        self.assertEqual(len(outputs), 1)
+        self.assertIn("\u5df2\u91cd\u7f6e", outputs[0])
 
     def test_get_bot_emotion_state_tool_summary_trims_llm_exposure(self):
         plugin = new_plugin()

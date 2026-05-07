@@ -3,4 +3,15 @@ dist/
 __pycache__/
 *.py[cod]
 .pytest_cache/
-personality_literature_kb/raw/
+literature_kb/
+personality_literature_kb/
+psychological_literature_kb/
+humanlike_agent_literature_kb/
+docs/literature_kb.md
+docs/humanlike_agent_literature_kb.md
+scripts/build_literature_kb.py
+scripts/build_personality_literature_kb.py
+scripts/build_psychological_literature_kb.py
+scripts/build_humanlike_agent_literature_kb.py
+tests/test_literature_kb_scripts.py
+texput.log

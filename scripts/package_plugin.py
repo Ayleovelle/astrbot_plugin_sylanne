@@ -13,6 +13,7 @@ INCLUDE_ROOT_FILES = {
     "main.py",
     "emotion_engine.py",
     "humanlike_engine.py",
+    "lifelike_learning_engine.py",
     "integrated_self.py",
     "moral_repair_engine.py",
     "psychological_screening.py",
@@ -27,10 +28,11 @@ INCLUDE_ROOT_FILES = {
 
 INCLUDE_DIRS = {
     "docs",
-    "literature_kb",
-    "personality_literature_kb",
-    "psychological_literature_kb",
-    "humanlike_agent_literature_kb",
+}
+
+EXCLUDED_FILES = {
+    Path("docs/literature_kb.md"),
+    Path("docs/humanlike_agent_literature_kb.md"),
 }
 
 EXCLUDED_PARTS = {
@@ -42,6 +44,10 @@ EXCLUDED_PARTS = {
     "tests",
     "scripts",
     "raw",
+    "literature_kb",
+    "personality_literature_kb",
+    "psychological_literature_kb",
+    "humanlike_agent_literature_kb",
 }
 
 EXCLUDED_SUFFIXES = {
@@ -52,6 +58,8 @@ EXCLUDED_SUFFIXES = {
 
 def should_include(path: Path) -> bool:
     relative = path.relative_to(ROOT)
+    if relative in EXCLUDED_FILES:
+        return False
     parts = set(relative.parts)
     if parts & EXCLUDED_PARTS:
         return False

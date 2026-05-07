@@ -51,6 +51,17 @@ try:
         heuristic_humanlike_observation,
         humanlike_state_to_public_payload,
     )
+    from .lifelike_learning_engine import (
+        PUBLIC_LIFELIKE_LEARNING_SCHEMA_VERSION,
+        LifelikeLearningEngine,
+        LifelikeLearningParameters,
+        LifelikeLearningState,
+        build_lifelike_memory_annotation,
+        build_lifelike_prompt_fragment,
+        format_lifelike_state_for_user,
+        heuristic_lifelike_observation,
+        lifelike_state_to_public_payload,
+    )
     from .moral_repair_engine import (
         PUBLIC_MORAL_REPAIR_SCHEMA_VERSION,
         MoralRepairEngine,
@@ -121,6 +132,17 @@ except ImportError:
         heuristic_humanlike_observation,
         humanlike_state_to_public_payload,
     )
+    from lifelike_learning_engine import (
+        PUBLIC_LIFELIKE_LEARNING_SCHEMA_VERSION,
+        LifelikeLearningEngine,
+        LifelikeLearningParameters,
+        LifelikeLearningState,
+        build_lifelike_memory_annotation,
+        build_lifelike_prompt_fragment,
+        format_lifelike_state_for_user,
+        heuristic_lifelike_observation,
+        lifelike_state_to_public_payload,
+    )
     from moral_repair_engine import (
         PUBLIC_MORAL_REPAIR_SCHEMA_VERSION,
         MoralRepairEngine,
@@ -182,6 +204,12 @@ _REQUIRED_EMOTION_SERVICE_METHODS: tuple[str, ...] = (
     "replay_integrated_self_bundle",
     "probe_integrated_self_compatibility",
     "export_integrated_self_diagnostics",
+    "get_lifelike_learning_snapshot",
+    "get_lifelike_initiative_policy",
+    "get_lifelike_prompt_fragment",
+    "observe_lifelike_text",
+    "simulate_lifelike_update",
+    "reset_lifelike_learning_state",
 )
 
 _REQUIRED_EMOTION_SERVICE_VERSIONS: dict[str, str] = {
@@ -191,6 +219,7 @@ _REQUIRED_EMOTION_SERVICE_VERSIONS: dict[str, str] = {
     "personality_profile_schema_version": PUBLIC_PERSONALITY_PROFILE_SCHEMA_VERSION,
     "psychological_screening_schema_version": PUBLIC_SCREENING_SCHEMA_VERSION,
     "integrated_self_schema_version": PUBLIC_INTEGRATED_SELF_SCHEMA_VERSION,
+    "lifelike_learning_schema_version": PUBLIC_LIFELIKE_LEARNING_SCHEMA_VERSION,
 }
 
 
@@ -238,6 +267,7 @@ class EmotionalStatePlugin(Star):
     humanlike_state_schema_version = PUBLIC_HUMANLIKE_SCHEMA_VERSION
     moral_repair_state_schema_version = PUBLIC_MORAL_REPAIR_SCHEMA_VERSION
     integrated_self_schema_version = PUBLIC_INTEGRATED_SELF_SCHEMA_VERSION
+    lifelike_learning_schema_version = PUBLIC_LIFELIKE_LEARNING_SCHEMA_VERSION
 
     def __init__(self, context: Context, config: AstrBotConfig | None = None):
         super().__init__(context)
@@ -248,12 +278,16 @@ class EmotionalStatePlugin(Star):
             self._build_psychological_parameters(),
         )
         self.humanlike_engine = HumanlikeEngine(self._build_humanlike_parameters())
+        self.lifelike_learning_engine = LifelikeLearningEngine(
+            self._build_lifelike_learning_parameters(),
+        )
         self.moral_repair_engine = MoralRepairEngine(
             self._build_moral_repair_parameters(),
         )
         self._memory_cache: dict[str, EmotionState] = {}
         self._psychological_memory_cache: dict[str, PsychologicalScreeningState] = {}
         self._humanlike_memory_cache: dict[str, HumanlikeState] = {}
+        self._lifelike_learning_memory_cache: dict[str, LifelikeLearningState] = {}
         self._moral_repair_memory_cache: dict[str, MoralRepairState] = {}
         self._last_request_text: dict[str, str] = {}
 
@@ -261,6 +295,7 @@ class EmotionalStatePlugin(Star):
         self._memory_cache.clear()
         self._psychological_memory_cache.clear()
         self._humanlike_memory_cache.clear()
+        self._lifelike_learning_memory_cache.clear()
         self._moral_repair_memory_cache.clear()
         self._last_request_text.clear()
 
@@ -281,6 +316,7 @@ class EmotionalStatePlugin(Star):
         current_text = self._event_text(event) or request.prompt or ""
         self._last_request_text[session_key] = context_text
         humanlike_state: HumanlikeState | None = None
+        lifelike_learning_state: LifelikeLearningState | None = None
         moral_repair_state: MoralRepairState | None = None
 
         if self._assessment_timing() in {"pre", "both"}:
@@ -306,6 +342,23 @@ class EmotionalStatePlugin(Star):
                 observation,
             )
             await self._save_humanlike_state(session_key, humanlike_state)
+
+        if self._lifelike_learning_enabled():
+            previous_lifelike_state = await self._load_lifelike_learning_state(
+                session_key,
+            )
+            observation = heuristic_lifelike_observation(
+                "\n\n".join(part for part in (context_text, current_text) if part),
+                source="llm_request",
+            )
+            lifelike_learning_state = self.lifelike_learning_engine.update(
+                previous_lifelike_state,
+                observation,
+            )
+            await self._save_lifelike_learning_state(
+                session_key,
+                lifelike_learning_state,
+            )
 
         if self._moral_repair_modeling_enabled():
             previous_moral_repair_state = await self._load_moral_repair_state(
@@ -335,6 +388,19 @@ class EmotionalStatePlugin(Star):
                             humanlike_state,
                             safety_boundary=self._safety_boundary_enabled(),
                         ),
+                    ).mark_as_temp(),
+                )
+            if (
+                self._lifelike_learning_enabled()
+                and self._lifelike_learning_injection_enabled()
+            ):
+                lifelike_learning_state = (
+                    lifelike_learning_state
+                    or await self._load_lifelike_learning_state(session_key)
+                )
+                request.extra_user_content_parts.append(
+                    TextPart(
+                        text=build_lifelike_prompt_fragment(lifelike_learning_state),
                     ).mark_as_temp(),
                 )
             if (
@@ -553,6 +619,7 @@ class EmotionalStatePlugin(Star):
             written_at=written_at,
         )
         humanlike_snapshot: dict[str, Any] | None = None
+        lifelike_learning_snapshot: dict[str, Any] | None = None
         moral_repair_snapshot: dict[str, Any] | None = None
         if self._cfg_bool("humanlike_memory_write_enabled", True):
             humanlike_snapshot = await self.get_humanlike_snapshot(
@@ -570,6 +637,22 @@ class EmotionalStatePlugin(Star):
             payload["humanlike_state_at_write"] = annotation
             if include_raw_snapshot:
                 payload["humanlike_snapshot"] = humanlike_snapshot
+        if self._cfg_bool("lifelike_learning_memory_write_enabled", True):
+            lifelike_learning_snapshot = await self.get_lifelike_learning_snapshot(
+                event_or_session,
+                request=request,
+                session_key=resolved_session_key,
+                exposure="plugin_safe",
+                include_prompt_fragment=include_prompt_fragment,
+            )
+            annotation = build_lifelike_memory_annotation(
+                lifelike_learning_snapshot,
+                source=source,
+                written_at=written_at,
+            )
+            payload["lifelike_learning_state_at_write"] = annotation
+            if include_raw_snapshot:
+                payload["lifelike_learning_snapshot"] = lifelike_learning_snapshot
         if self._cfg_bool("moral_repair_memory_write_enabled", True):
             moral_repair_snapshot = await self.get_moral_repair_snapshot(
                 event_or_session,
@@ -594,8 +677,10 @@ class EmotionalStatePlugin(Star):
                 include_raw_snapshots=include_raw_snapshot,
                 emotion_snapshot=snapshot,
                 humanlike_snapshot=humanlike_snapshot,
+                lifelike_learning_snapshot=lifelike_learning_snapshot,
                 moral_repair_snapshot=moral_repair_snapshot,
                 include_humanlike=humanlike_snapshot is not None,
+                include_lifelike_learning=lifelike_learning_snapshot is not None,
                 include_moral_repair=moral_repair_snapshot is not None,
                 include_psychological=False,
             )
@@ -654,9 +739,11 @@ class EmotionalStatePlugin(Star):
         include_raw_snapshots: bool = False,
         emotion_snapshot: dict[str, Any] | None = None,
         humanlike_snapshot: dict[str, Any] | None = None,
+        lifelike_learning_snapshot: dict[str, Any] | None = None,
         moral_repair_snapshot: dict[str, Any] | None = None,
         psychological_snapshot: dict[str, Any] | None = None,
         include_humanlike: bool = True,
+        include_lifelike_learning: bool = True,
         include_moral_repair: bool = True,
         include_psychological: bool = True,
         degradation_profile: str | None = None,
@@ -690,6 +777,14 @@ class EmotionalStatePlugin(Star):
                 exposure="plugin_safe",
                 include_prompt_fragment=False,
             )
+        if include_lifelike_learning and lifelike_learning_snapshot is None:
+            lifelike_learning_snapshot = await self.get_lifelike_learning_snapshot(
+                event_or_session,
+                request=request,
+                session_key=resolved_session_key,
+                exposure="plugin_safe",
+                include_prompt_fragment=False,
+            )
         if include_moral_repair and moral_repair_snapshot is None:
             moral_repair_snapshot = await self.get_moral_repair_snapshot(
                 event_or_session,
@@ -708,6 +803,7 @@ class EmotionalStatePlugin(Star):
             session_key=resolved_session_key,
             emotion_snapshot=emotion_snapshot,
             humanlike_snapshot=humanlike_snapshot,
+            lifelike_learning_snapshot=lifelike_learning_snapshot,
             moral_repair_snapshot=moral_repair_snapshot,
             psychological_snapshot=psychological_snapshot,
             include_raw_snapshots=include_raw_snapshots,
@@ -961,6 +1057,144 @@ class EmotionalStatePlugin(Star):
         if not self._humanlike_reset_allowed():
             return False
         await self._delete_humanlike_state(session_key)
+        return True
+
+    async def get_lifelike_learning_snapshot(
+        self,
+        event_or_session: AstrMessageEvent | str | None = None,
+        *,
+        request: ProviderRequest | None = None,
+        session_key: str | None = None,
+        exposure: str = "plugin_safe",
+        include_prompt_fragment: bool = False,
+    ) -> dict[str, Any]:
+        """Public API: return learned common-ground, user-profile, and initiative state."""
+        session_key = self._resolve_public_session_key(
+            event_or_session,
+            request=request,
+            session_key=session_key,
+        )
+        if not self._lifelike_learning_enabled():
+            return self._lifelike_learning_disabled_payload(
+                session_key,
+                exposure=exposure,
+                include_prompt_fragment=include_prompt_fragment,
+            )
+        state = await self._load_lifelike_learning_state(session_key)
+        payload = state.to_public_dict(session_key=session_key, exposure=exposure)
+        if include_prompt_fragment:
+            payload["prompt_fragment"] = build_lifelike_prompt_fragment(state)
+        return payload
+
+    async def get_lifelike_initiative_policy(
+        self,
+        event_or_session: AstrMessageEvent | str | None = None,
+        *,
+        request: ProviderRequest | None = None,
+        session_key: str | None = None,
+    ) -> dict[str, Any]:
+        """Public API: return the current speak/brief/ask/silence policy."""
+        snapshot = await self.get_lifelike_learning_snapshot(
+            event_or_session,
+            request=request,
+            session_key=session_key,
+            exposure="plugin_safe",
+        )
+        return dict(snapshot.get("initiative_policy") or {})
+
+    async def get_lifelike_prompt_fragment(
+        self,
+        event_or_session: AstrMessageEvent | str | None = None,
+        *,
+        request: ProviderRequest | None = None,
+        session_key: str | None = None,
+    ) -> str:
+        """Public API: return common-ground and pacing guidance for prompt use."""
+        session_key = self._resolve_public_session_key(
+            event_or_session,
+            request=request,
+            session_key=session_key,
+        )
+        if not self._lifelike_learning_enabled():
+            return ""
+        state = await self._load_lifelike_learning_state(session_key)
+        return build_lifelike_prompt_fragment(state)
+
+    async def observe_lifelike_text(
+        self,
+        event_or_session: AstrMessageEvent | str | None = None,
+        text: str = "",
+        *,
+        request: ProviderRequest | None = None,
+        session_key: str | None = None,
+        source: str = "plugin",
+        commit: bool = True,
+        observed_at: float | None = None,
+    ) -> dict[str, Any]:
+        """Public API: update or simulate common-ground learning from text."""
+        session_key = self._resolve_public_session_key(
+            event_or_session,
+            request=request,
+            session_key=session_key,
+        )
+        if commit and not self._lifelike_learning_enabled():
+            return self._lifelike_learning_disabled_payload(session_key)
+        previous_state = await self._load_lifelike_learning_state(session_key)
+        observation = heuristic_lifelike_observation(text, source=source)
+        state = self.lifelike_learning_engine.update(
+            previous_state,
+            observation,
+            now=observed_at,
+        )
+        if commit:
+            await self._save_lifelike_learning_state(session_key, state)
+        payload = state.to_public_dict(session_key=session_key, exposure="internal")
+        payload["observation"] = {
+            "source": observation.source,
+            "confidence": observation.confidence,
+            "reason": observation.reason,
+            "flags": list(observation.flags),
+            "committed": commit,
+        }
+        return payload
+
+    async def simulate_lifelike_update(
+        self,
+        event_or_session: AstrMessageEvent | str | None = None,
+        text: str = "",
+        *,
+        request: ProviderRequest | None = None,
+        session_key: str | None = None,
+        source: str = "plugin",
+        observed_at: float | None = None,
+    ) -> dict[str, Any]:
+        """Public API: simulate common-ground learning without writing state."""
+        return await self.observe_lifelike_text(
+            event_or_session,
+            text,
+            request=request,
+            session_key=session_key,
+            source=source,
+            commit=False,
+            observed_at=observed_at,
+        )
+
+    async def reset_lifelike_learning_state(
+        self,
+        event_or_session: AstrMessageEvent | str | None = None,
+        *,
+        request: ProviderRequest | None = None,
+        session_key: str | None = None,
+    ) -> bool:
+        """Public API: reset one session's learned common-ground state."""
+        session_key = self._resolve_public_session_key(
+            event_or_session,
+            request=request,
+            session_key=session_key,
+        )
+        if not self._lifelike_learning_reset_allowed():
+            return False
+        await self._delete_lifelike_learning_state(session_key)
         return True
 
     async def get_moral_repair_snapshot(
@@ -1391,6 +1625,21 @@ class EmotionalStatePlugin(Star):
         )
         yield event.plain_result(json.dumps(snapshot, ensure_ascii=False))
 
+    @filter.llm_tool(name="get_bot_lifelike_learning_state")
+    async def get_bot_lifelike_learning_state_tool(
+        self,
+        event: AstrMessageEvent,
+        detail: str = "summary",
+    ):
+        """Get the bot's learned common-ground and initiative state, read-only."""
+        full = str(detail or "").strip().lower() == "full"
+        snapshot = await self.get_lifelike_learning_snapshot(
+            event,
+            exposure="internal" if full else "plugin_safe",
+            include_prompt_fragment=full,
+        )
+        yield event.plain_result(json.dumps(snapshot, ensure_ascii=False))
+
     @filter.llm_tool(name="get_bot_moral_repair_state")
     async def get_bot_moral_repair_state_tool(
         self,
@@ -1481,6 +1730,24 @@ class EmotionalStatePlugin(Star):
             return
         await self._delete_humanlike_state(self._session_key(event))
         yield event.plain_result("已重置当前会话的拟人状态。")
+
+    @filter.command("lifelike_state", alias={"生命化状态", "共同语境"})
+    async def lifelike_learning_status(self, event: AstrMessageEvent):
+        """View the current session's learned common-ground state."""
+        if not self._lifelike_learning_enabled():
+            yield event.plain_result("生命化学习状态未启用。")
+            return
+        state = await self._load_lifelike_learning_state(self._session_key(event))
+        yield event.plain_result(format_lifelike_state_for_user(state))
+
+    @filter.command("lifelike_reset", alias={"生命化状态重置", "共同语境重置"})
+    async def lifelike_learning_reset(self, event: AstrMessageEvent):
+        """Reset the current session's learned common-ground state."""
+        if not self._lifelike_learning_reset_allowed():
+            yield event.plain_result("配置已关闭生命化学习状态重置。")
+            return
+        await self._delete_lifelike_learning_state(self._session_key(event))
+        yield event.plain_result("已重置当前会话的生命化学习状态。")
 
     @filter.command("moral_repair_state", alias={"道德修复状态", "信任修复状态"})
     async def moral_repair_status(self, event: AstrMessageEvent):
@@ -1785,6 +2052,55 @@ class EmotionalStatePlugin(Star):
         except Exception as exc:
             logger.debug(f"{PLUGIN_NAME}: humanlike KV delete failed: {exc}")
 
+    async def _load_lifelike_learning_state(
+        self,
+        session_key: str,
+    ) -> LifelikeLearningState:
+        if session_key in self._lifelike_learning_memory_cache:
+            state = self._lifelike_learning_memory_cache[session_key]
+            decayed_state = self.lifelike_learning_engine.passive_update(state)
+            if decayed_state.to_dict() != state.to_dict():
+                state = decayed_state
+                await self._save_lifelike_learning_state(session_key, state)
+            self._lifelike_learning_memory_cache[session_key] = state
+            return state
+        try:
+            data = await self.get_kv_data(
+                self._lifelike_learning_kv_key(session_key),
+                None,
+            )
+        except Exception as exc:
+            logger.debug(f"{PLUGIN_NAME}: lifelike learning KV read failed, using empty state: {exc}")
+            data = None
+        state = LifelikeLearningState.from_dict(data)
+        decayed_state = self.lifelike_learning_engine.passive_update(state)
+        if decayed_state.to_dict() != state.to_dict():
+            state = decayed_state
+            await self._save_lifelike_learning_state(session_key, state)
+        self._lifelike_learning_memory_cache[session_key] = state
+        return state
+
+    async def _save_lifelike_learning_state(
+        self,
+        session_key: str,
+        state: LifelikeLearningState,
+    ) -> None:
+        self._lifelike_learning_memory_cache[session_key] = state
+        try:
+            await self.put_kv_data(
+                self._lifelike_learning_kv_key(session_key),
+                state.to_dict(),
+            )
+        except Exception as exc:
+            logger.debug(f"{PLUGIN_NAME}: lifelike learning KV write failed, keeping memory only: {exc}")
+
+    async def _delete_lifelike_learning_state(self, session_key: str) -> None:
+        self._lifelike_learning_memory_cache.pop(session_key, None)
+        try:
+            await self.delete_kv_data(self._lifelike_learning_kv_key(session_key))
+        except Exception as exc:
+            logger.debug(f"{PLUGIN_NAME}: lifelike learning KV delete failed: {exc}")
+
     async def _load_moral_repair_state(self, session_key: str) -> MoralRepairState:
         if session_key in self._moral_repair_memory_cache:
             state = self._moral_repair_memory_cache[session_key]
@@ -1914,6 +2230,24 @@ class EmotionalStatePlugin(Star):
             trajectory_limit=self._cfg_int("humanlike_trajectory_limit", 40),
         )
 
+    def _build_lifelike_learning_parameters(self) -> LifelikeLearningParameters:
+        return LifelikeLearningParameters(
+            state_half_life_seconds=self._cfg_float(
+                "lifelike_learning_half_life_seconds",
+                2592000.0,
+            ),
+            min_update_interval_seconds=self._cfg_float(
+                "lifelike_learning_min_update_interval_seconds",
+                10.0,
+            ),
+            max_terms=self._cfg_int("lifelike_learning_max_terms", 120),
+            trajectory_limit=self._cfg_int("lifelike_learning_trajectory_limit", 60),
+            confidence_growth=self._cfg_float(
+                "lifelike_learning_confidence_growth",
+                0.25,
+            ),
+        )
+
     def _build_moral_repair_parameters(self) -> MoralRepairParameters:
         return MoralRepairParameters(
             alpha_base=self._cfg_float("moral_repair_alpha_base", 0.28),
@@ -1974,6 +2308,15 @@ class EmotionalStatePlugin(Star):
     def _humanlike_reset_allowed(self) -> bool:
         return self._cfg_bool("allow_humanlike_reset_backdoor", True)
 
+    def _lifelike_learning_enabled(self) -> bool:
+        return self._cfg_bool("enable_lifelike_learning", False)
+
+    def _lifelike_learning_injection_enabled(self) -> bool:
+        return self._cfg_float("lifelike_learning_injection_strength", 0.30) > 0.0
+
+    def _lifelike_learning_reset_allowed(self) -> bool:
+        return self._cfg_bool("allow_lifelike_learning_reset_backdoor", True)
+
     def _moral_repair_modeling_enabled(self) -> bool:
         return self._cfg_bool("enable_moral_repair_state", False)
 
@@ -2013,6 +2356,46 @@ class EmotionalStatePlugin(Star):
             "trajectory",
             "confidence",
             "last_reason",
+        ):
+            payload.pop(internal_key, None)
+        if include_prompt_fragment:
+            payload["prompt_fragment"] = ""
+        return payload
+
+    def _lifelike_learning_disabled_payload(
+        self,
+        session_key: str,
+        *,
+        exposure: str = "plugin_safe",
+        include_prompt_fragment: bool = False,
+    ) -> dict[str, Any]:
+        state = LifelikeLearningState.initial()
+        payload = lifelike_state_to_public_payload(
+            state,
+            session_key=session_key,
+            exposure=exposure,
+        )
+        payload["enabled"] = False
+        payload["reason"] = "enable_lifelike_learning is false"
+        payload["initiative_policy"] = {
+            "schema_version": "astrbot.lifelike_initiative_policy.v1",
+            "kind": "lifelike_initiative_policy",
+            "action": "brief_ack",
+            "initiative_score": 0.0,
+            "silence_score": 0.0,
+            "common_ground": 0.0,
+            "boundary": 0.0,
+            "uncertain_terms": [],
+            "flags": ["lifelike_learning_disabled"],
+            "allowed_actions": ["brief_acknowledgement", "follow_user_lead"],
+        }
+        for internal_key in (
+            "values",
+            "dimensions",
+            "trajectory",
+            "lexicon",
+            "user_profile",
+            "last_observation",
         ):
             payload.pop(internal_key, None)
         if include_prompt_fragment:
@@ -2326,6 +2709,9 @@ class EmotionalStatePlugin(Star):
 
     def _humanlike_kv_key(self, session_key: str) -> str:
         return "humanlike_state:" + session_key.replace("/", "_").replace("\\", "_")
+
+    def _lifelike_learning_kv_key(self, session_key: str) -> str:
+        return "lifelike_learning:" + session_key.replace("/", "_").replace("\\", "_")
 
     def _moral_repair_kv_key(self, session_key: str) -> str:
         return "moral_repair_state:" + session_key.replace("/", "_").replace("\\", "_")

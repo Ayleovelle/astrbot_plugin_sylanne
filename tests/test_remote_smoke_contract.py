@@ -113,6 +113,10 @@ class RemoteSmokeContractTests(unittest.TestCase):
         self.assertIn("$env:NODE_PATH", checklist)
         self.assertIn("& $node --check scripts\\remote_smoke_playwright.js", checklist)
         self.assertIn(
+            "& $node --check scripts\\remote_cleanup_plugin_playwright.js",
+            checklist,
+        )
+        self.assertIn(
             "& $node --check scripts\\remote_install_upload_playwright.js",
             checklist,
         )
@@ -207,6 +211,7 @@ class RemoteSmokeContractTests(unittest.TestCase):
             "main.py",
             "emotion_engine.py",
             "humanlike_engine.py",
+            "lifelike_learning_engine.py",
             "integrated_self.py",
             "moral_repair_engine.py",
             "psychological_screening.py",
@@ -257,6 +262,24 @@ class RemoteSmokeContractTests(unittest.TestCase):
             readme,
         )
         self.assertIn(f'astrbot_version: "{astrbot_version}"', readme)
+
+    def test_readme_records_beta_pr_iterations_in_order(self):
+        readme = (ROOT / "README.md").read_text(encoding="utf-8")
+        section = readme.split("### 0.0.2-beta PR 迭代记录", 1)[1].split(
+            "## 项目定位",
+            1,
+        )[0]
+        expected = [f"0.0.2-beta-pr-{index}" for index in range(1, 11)]
+
+        found = re.findall(r"`(0\.0\.2-beta-pr-\d+)`", section)
+        self.assertEqual(expected, found)
+        for version in expected:
+            with self.subTest(version=version):
+                self.assertIn(f"| `{version}` | complete |", section)
+        self.assertIn(
+            "不改变 `metadata.yaml` 中对外安装版本 `0.0.2-beta`",
+            section,
+        )
 
     def test_remote_smoke_script_uses_environment_credentials(self):
         script = (ROOT / "scripts" / "remote_smoke_playwright.js").read_text(
@@ -324,6 +347,11 @@ class RemoteSmokeContractTests(unittest.TestCase):
         self.assertIn("ASTRBOT_EXPECT_PLUGIN", script)
         self.assertIn("/api/plugin/install-upload", script)
         self.assertIn("assertZipLooksUploadable", script)
+        self.assertIn('toString("base64")', script)
+        self.assertIn("atob(base64)", script)
+        self.assertIn('credentials: "include"', script)
+        self.assertNotIn("Array.from(zipBytes)", script)
+        self.assertNotIn("page.context().request.post", script)
         self.assertIn("readUInt32LE(0)", preflight)
         self.assertIn("readUInt16LE(26)", preflight)
         self.assertIn("readCentralDirectoryNames", preflight)
@@ -336,6 +364,7 @@ class RemoteSmokeContractTests(unittest.TestCase):
             "main.py",
             "emotion_engine.py",
             "humanlike_engine.py",
+            "lifelike_learning_engine.py",
             "integrated_self.py",
             "moral_repair_engine.py",
             "psychological_screening.py",
@@ -381,6 +410,52 @@ class RemoteSmokeContractTests(unittest.TestCase):
         self.assertNotIn(remote_host_sentinel, script)
         self.assertNotIn("username = \"root\"", script)
         self.assertNotIn("password = \"", script)
+
+    def test_remote_cleanup_script_is_exactly_allowlisted(self):
+        script = (
+            ROOT / "scripts" / "remote_cleanup_plugin_playwright.js"
+        ).read_text(encoding="utf-8")
+        readme = (ROOT / "README.md").read_text(encoding="utf-8")
+        checklist = (ROOT / "docs" / "release_branch_sync_checklist.md").read_text(
+            encoding="utf-8",
+        )
+
+        self.assertIn('ALLOWED_PLUGIN = "astrbot_plugin_emotional_state"', script)
+        self.assertIn("ASTRBOT_REMOTE_CLEAN_CONFIRM", script)
+        self.assertIn("ASTRBOT_REMOTE_CLEAN_FORMAL", script)
+        self.assertIn("ASTRBOT_REMOTE_CLEAN_FAILED_UPLOAD", script)
+        self.assertIn("/api/plugin/uninstall", script)
+        self.assertIn("/api/plugin/uninstall-failed", script)
+        self.assertIn("plugin_upload_${expectedPlugin}", script)
+        self.assertIn("pluginMatchesExactly", script)
+        self.assertIn("delete_config: false", script)
+        self.assertIn("delete_data: false", script)
+        self.assertIn("astrbot_plugin_livingmemory", script)
+        self.assertIn("untouchedByDesign: true", script)
+        self.assertNotIn("includes(expectedPlugin)", script)
+        self.assertNotIn("startsWith(expectedPlugin)", script)
+        self.assertNotIn("method: \"DELETE\"", script)
+        self.assertNotIn("delete_config: true", script)
+        self.assertNotIn("delete_data: true", script)
+        for document in (readme, checklist):
+            with self.subTest(document_contains_cleanup_contract=True):
+                self.assertIn("scripts\\remote_cleanup_plugin_playwright.js", document)
+                self.assertIn(
+                    '$env:ASTRBOT_REMOTE_CLEAN_CONFIRM = "astrbot_plugin_emotional_state"',
+                    document,
+                )
+                self.assertIn(
+                    '$env:ASTRBOT_REMOTE_CLEAN_FORMAL = "1"',
+                    document,
+                )
+                self.assertIn(
+                    '$env:ASTRBOT_REMOTE_CLEAN_FAILED_UPLOAD = "1"',
+                    document,
+                )
+                self.assertIn("plugin_upload_astrbot_plugin_emotional_state", document)
+                self.assertIn("delete_config=false", document)
+                self.assertIn("delete_data=false", document)
+                self.assertIn("LivingMemory", document)
 
     def test_remote_install_script_only_allows_upload_install_mutation(self):
         script = (

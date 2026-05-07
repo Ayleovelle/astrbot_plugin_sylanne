@@ -71,12 +71,17 @@ function summarizePluginPayload(payload) {
 }
 
 async function uploadPlugin(page, zipPath) {
-  const zipBytes = fs.readFileSync(zipPath);
-  return await page.evaluate(async ({ bytesArray, fileName }) => {
+  const zipBase64 = fs.readFileSync(zipPath).toString("base64");
+  return await page.evaluate(async ({ base64, fileName }) => {
+    const binary = atob(base64);
+    const bytes = new Uint8Array(binary.length);
+    for (let index = 0; index < binary.length; index += 1) {
+      bytes[index] = binary.charCodeAt(index);
+    }
     const form = new FormData();
     form.append(
       "file",
-      new File([new Uint8Array(bytesArray)], fileName, { type: "application/zip" }),
+      new File([bytes], fileName, { type: "application/zip" }),
     );
     form.append("ignore_version_check", "false");
     const response = await fetch("/api/plugin/install-upload", {
@@ -97,7 +102,7 @@ async function uploadPlugin(page, zipPath) {
       json,
     };
   }, {
-    bytesArray: Array.from(zipBytes),
+    base64: zipBase64,
     fileName: path.basename(zipPath),
   });
 }

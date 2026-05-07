@@ -26,20 +26,22 @@
 | 主题 | 内容 |
 | --- | --- |
 | [当前版本与兼容范围](#当前版本与兼容范围) | 插件版本、AstrBot 版本、Python 要求、许可证和发布状态。 |
+| [0.0.2-beta PR 迭代记录](#002-beta-pr-迭代记录) | 本地预发布迭代 `0.0.2-beta-pr-x` 的顺序记录。 |
 | [项目定位](#项目定位) | 为什么本插件不是普通的 prompt 人设增强。 |
 | [核心能力](#核心能力总览) | 7 维情绪、人格建模、真实时间记忆、关系修复、公共 API。 |
 | [快速开始](#快速开始) | Release zip、仓库安装、手动复制、最小配置和检查命令。 |
 | [命令速查](#命令) | 用户可直接在会话里调用的状态、重置和诊断命令。 |
 | [配置指南](#配置指南) | 核心配置、低推理模式、后果衰减、humanlike、心理筛查。 |
 | [工作流](#工作流) | `on_llm_request` / `on_llm_response` 如何更新和注入状态。 |
-| [LivingMemory 兼容](#livingmemory--长期记忆兼容) | 写入记忆时冻结 `emotion_at_write`、`humanlike_state_at_write`、`moral_repair_state_at_write` 和 `integrated_self_state_at_write`。 |
+| [LivingMemory 兼容](#livingmemory--长期记忆兼容) | 写入记忆时冻结 `emotion_at_write`、`humanlike_state_at_write`、`lifelike_learning_state_at_write`、`moral_repair_state_at_write` 和 `integrated_self_state_at_write`。 |
 | [公共 API](#公共-api) | 其他插件如何读取、模拟、提交、重置情绪状态。 |
 | [打包、上传与新仓库发布](#打包上传与新仓库发布) | 构建 zip、预检、WebUI 上传、GitHub 新仓库发布清单。 |
 | [情绪模型](#情绪模型) | 维度定义、公式推导、人格基线、真实时间半衰期。 |
 | [关系与后果](#关系与后果) | 生气原因、是否原谅、冷处理、错误是否已改正。 |
 | [拟人状态](#拟人状态-humanlike_state) | `humanlike_state` 的 P0 维度和表达调制边界。 |
+| [生命化学习](#生命化学习-lifelike_learning_state) | 新词、黑话、共同语境、用户画像证据和开口/沉默策略。 |
 | [心理筛查](#非诊断心理状态筛查) | 备用的长期状态建模，不做诊断。 |
-| [文献知识库](#文献知识库) | 情绪、人格量化、心理筛查、拟人代理的知识库目录。 |
+| [本地文献知识库](#本地文献知识库) | 情绪、人格量化、心理筛查、拟人代理的本地-only 研究资料。 |
 | [测试与维护](#测试与维护) | 本地测试命令、分支策略。 |
 | [故障排查](#故障排查) | 常见问题和处理顺序。 |
 
@@ -57,7 +59,24 @@
 | 许可证 | `GPL-3.0-or-later` |
 | 运行时第三方依赖 | 当前无额外依赖，见 `requirements.txt` |
 
-`0.0.2-beta` 是预发布版本，用于首轮公开安装、文档验收、AstrBot WebUI 上传验证和第三方插件 API 适配试跑。当前版本的重点是把“情绪化 bot”从单次 prompt 风格控制推进到可持久化的状态服务：核心情绪默认启用，`humanlike_state`、`moral_repair_state`、`psychological_screening` 等长期模块默认关闭，由配置显式打开。发布包会包含运行代码、README、LICENSE、配置 schema、docs 和精选文献知识库；不会包含 `tests/`、`scripts/`、`raw/`、`output/`、`dist/` 等开发与缓存目录。
+`0.0.2-beta` 是预发布版本，用于首轮公开安装、文档验收、AstrBot WebUI 上传验证和第三方插件 API 适配试跑。当前版本的重点是把“情绪化 bot”从单次 prompt 风格控制推进到可持久化的状态服务：核心情绪默认启用，`humanlike_state`、`lifelike_learning_state`、`moral_repair_state`、`psychological_screening` 等长期模块默认关闭，由配置显式打开。发布包会包含运行代码、README、LICENSE、配置 schema 和 docs；不会包含 `tests/`、`scripts/`、`literature_kb/`、`personality_literature_kb/`、`psychological_literature_kb/`、`humanlike_agent_literature_kb/`、`raw/`、`output/`、`dist/` 等开发、研究或缓存目录。
+
+### 0.0.2-beta PR 迭代记录
+
+`0.0.2-beta-pr-x` 是本地预发布迭代序号，不改变 `metadata.yaml` 中对外安装版本 `0.0.2-beta`。每一轮都必须有明确改动、验证和恢复记录；最终远程可安装包仍以 `0.0.2-beta` 对外暴露。
+
+| 本地迭代号 | 状态 | 对应任务 | 结果摘要 |
+| --- | --- | --- | --- |
+| `0.0.2-beta-pr-1` | complete | 生命化学习核心状态 | 新增 `lifelike_learning_engine.py`，支持新词/黑话、用户画像证据、偏好、边界和真实时间半衰期。 |
+| `0.0.2-beta-pr-2` | complete | AstrBot 生命周期接入 | 接入 `on_llm_request`、KV、prompt 注入、`/lifelike_state`、`/lifelike_reset` 和 `get_bot_lifelike_learning_state`。 |
+| `0.0.2-beta-pr-3` | complete | LivingMemory 写入注解 | `build_emotion_memory_payload(...)` 写入 `lifelike_learning_state_at_write`，冻结当时共同语境。 |
+| `0.0.2-beta-pr-4` | complete | 综合自我仲裁 | integrated self 使用共同语境决定轻问、短应、开口、安静或安全打断。 |
+| `0.0.2-beta-pr-5` | complete | 第三方公共 API | 导出 `LIFELIKE_LEARNING_SCHEMA_VERSION`、`LifelikeLearningServiceProtocol` 和 `get_lifelike_learning_service`。 |
+| `0.0.2-beta-pr-6` | complete | 配置和 README 契约 | `_conf_schema.json` 增加 9 个 lifelike 配置项，并补齐命令、LLM tool、LivingMemory 和 Public API 文档。 |
+| `0.0.2-beta-pr-7` | complete | 发布包和 zip 预检 | 打包脚本和 zip preflight 强制包含 `lifelike_learning_engine.py`。 |
+| `0.0.2-beta-pr-8` | complete | 产品理念固化 | README 写入 “More lifelike, not merely better” 的共同语境解释和部署者拥有灵魂的边界。 |
+| `0.0.2-beta-pr-9` | complete | 全量本地验证 | 236 个单元测试、`py_compile`、`json.tool`、Node 语法检查、package build、zip preflight 全部通过。 |
+| `0.0.2-beta-pr-10` | complete | 远程清理、上传和 smoke | 远程先删旧同名插件，再上传当前 zip；严格 smoke 通过，LivingMemory 仍可见。 |
 
 ---
 
@@ -76,6 +95,7 @@
 | --- | --- | --- |
 | `emotion_state` | 核心情绪状态。维护 7 维向量、人格基线、后果状态和关系修复判断。 | 开启 |
 | `humanlike_state` | 拟人/有机体样表达调制。维护能量、压力、注意力、边界需求等状态。 | 关闭 |
+| `lifelike_learning_state` | 生命化学习/共同语境层。维护新词、黑话、用户画像证据、偏好、边界和开口/沉默时机。 | 关闭 |
 | `psychological_screening` | 非诊断心理状态筛查与长期趋势备用模块。 | 关闭 |
 
 核心设计原则：
@@ -85,7 +105,8 @@
 - **人格是先验，不只是文风**：不同 AstrBot persona 有不同基线、反应强度和恢复速度。
 - **真实时间优先于消息轮数**：状态恢复、冷处理和后果衰减按时间戳计算，不能靠刷屏洗掉。
 - **公共 API 优先于私有 KV**：其他插件应调用稳定 async 方法，不直接读写内部 key。
-- **后门可配置**：`allow_emotion_reset_backdoor` 和 `allow_humanlike_reset_backdoor` 默认开启，便于异常状态紧急重置。
+- **共同语境要先求证再使用**：新词和小圈子黑话在置信度不足时只触发轻量追问，不假装已经懂。
+- **后门可配置**：`allow_emotion_reset_backdoor`、`allow_humanlike_reset_backdoor` 和 `allow_lifelike_learning_reset_backdoor` 默认开启，便于异常状态紧急重置。
 
 ---
 
@@ -110,6 +131,7 @@
 | 公共 API | 开启 | 其他插件可读取快照、提交观察、模拟更新、构造 prompt fragment 或重置状态。 |
 | 低推理友好模式 | 默认关闭 | 用短提示词和简单公式降低小模型 token 压力。 |
 | 拟人状态模块 | 默认关闭 | `humanlike_state` 可调制能量、压力、注意力、边界和透明度。 |
+| 生命化学习模块 | 默认关闭 | `lifelike_learning_state` 学习新词、黑话、用户偏好、共同语境和说话/沉默时机。 |
 | 心理筛查模块 | 默认关闭 | 只做非诊断趋势记录和红旗提示，不做疾病判断。 |
 
 ---
@@ -144,6 +166,7 @@ astrbot_plugin_emotional_state/
 ├── main.py
 ├── emotion_engine.py
 ├── humanlike_engine.py
+├── lifelike_learning_engine.py
 ├── integrated_self.py
 ├── moral_repair_engine.py
 ├── psychological_screening.py
@@ -153,11 +176,7 @@ astrbot_plugin_emotional_state/
 ├── requirements.txt
 ├── LICENSE
 ├── README.md
-├── docs/
-├── literature_kb/
-├── personality_literature_kb/
-├── psychological_literature_kb/
-└── humanlike_agent_literature_kb/
+└── docs/
 ```
 
 ### 方式二：从 GitHub 仓库安装
@@ -188,6 +207,7 @@ data/plugins/
     ├── main.py
     ├── emotion_engine.py
     ├── humanlike_engine.py
+    ├── lifelike_learning_engine.py
     ├── integrated_self.py
     ├── moral_repair_engine.py
     ├── psychological_screening.py
@@ -197,14 +217,10 @@ data/plugins/
     ├── requirements.txt
     ├── LICENSE
     ├── README.md
-    ├── docs/
-    ├── literature_kb/
-    ├── personality_literature_kb/
-    ├── psychological_literature_kb/
-    └── humanlike_agent_literature_kb/
+    └── docs/
 ```
 
-`tests/`、`scripts/`、`raw/`、`output/`、`dist/` 属于仓库开发、验证或缓存内容，发布 zip 不会包含这些目录。
+`tests/`、`scripts/`、四个 `*_literature_kb/` 知识库目录、`raw/`、`output/`、`dist/` 属于仓库开发、研究或缓存内容，发布 zip 不会包含这些目录。
 
 然后在 AstrBot WebUI 中重载或启用插件。
 
@@ -276,11 +292,12 @@ low_reasoning_max_context_chars = 1200
 
 ```text
 /humanlike_state
+/lifelike_state
 /moral_repair_state
 /psych_state
 ```
 
-`/emotion_reset`、`/humanlike_reset` 和 `/moral_repair_reset` 是异常状态恢复命令，分别受 `allow_emotion_reset_backdoor`、`allow_humanlike_reset_backdoor`、`allow_moral_repair_reset_backdoor` 控制。
+`/emotion_reset`、`/humanlike_reset`、`/lifelike_reset` 和 `/moral_repair_reset` 是异常状态恢复命令，分别受 `allow_emotion_reset_backdoor`、`allow_humanlike_reset_backdoor`、`allow_lifelike_learning_reset_backdoor`、`allow_moral_repair_reset_backdoor` 控制。
 
 ---
 
@@ -295,6 +312,8 @@ low_reasoning_max_context_chars = 1200
 | `/psych_state` | `/心理筛查`、`/心理状态` | 查看非诊断心理状态筛查快照。 |
 | `/humanlike_state` | `/拟人状态`、`/有机体状态` | 查看拟人状态。 |
 | `/humanlike_reset` | `/拟人状态重置` | 重置拟人状态，受 `allow_humanlike_reset_backdoor` 控制。 |
+| `/lifelike_state` | `/生命化状态`、`/共同语境` | 查看生命化学习状态，包括新词、黑话、用户画像证据和开口策略。 |
+| `/lifelike_reset` | `/生命化状态重置`、`/共同语境重置` | 重置生命化学习状态，受 `allow_lifelike_learning_reset_backdoor` 控制。 |
 | `/moral_repair_state` | `/道德修复状态`、`/信任修复状态` | 查看道德修复/信任修复状态。 |
 | `/moral_repair_reset` | `/道德修复重置`、`/信任修复重置` | 重置道德修复状态，受 `allow_moral_repair_reset_backdoor` 控制。 |
 | `/integrated_self` | `/综合自我状态`、`/自我状态` | 查看跨模块综合自我状态仲裁。 |
@@ -364,6 +383,26 @@ low_reasoning_max_context_chars = 1200
 ```
 
 重置当前会话的 `humanlike_state`。该命令受 `allow_humanlike_reset_backdoor` 控制；默认允许。
+
+### 生命化学习状态
+
+```text
+/lifelike_state
+/生命化状态
+/共同语境
+```
+
+查看当前会话的生命化学习状态。该模块默认 `enable_lifelike_learning=false`，开启后会按真实时间学习用户画像证据、新词、黑话、喜恶、边界提示和当前是否适合开口。
+
+### 重置生命化学习状态
+
+```text
+/lifelike_reset
+/生命化状态重置
+/共同语境重置
+```
+
+重置当前会话的 `lifelike_learning_state`。该命令受 `allow_lifelike_learning_reset_backdoor` 控制；默认允许。
 
 ### 道德修复状态
 
@@ -614,7 +653,7 @@ Derived factors:
 \end{aligned}
 ```
 
-Evidence basis: Big Five structure is grounded by Digman 1990, Goldberg 1990, and McCrae & Costa 1987; HEXACO extension by Ashton & Lee 2007; personality state distributions and situation-response dynamics by Fleeson 2001 and Mischel & Shoda 1995; BIS/BAS by Carver & White 1994; need for closure by Webster & Kruglanski 1994; attachment dimensions by Fraley, Waller & Brennan 2000; and emotion-regulation differences by Gross & John 2003. Candidate and curated records are stored in `personality_literature_kb/evidence-map.md`.
+Evidence basis: Big Five structure is grounded by Digman 1990, Goldberg 1990, and McCrae & Costa 1987; HEXACO extension by Ashton & Lee 2007; personality state distributions and situation-response dynamics by Fleeson 2001 and Mischel & Shoda 1995; BIS/BAS by Carver & White 1994; need for closure by Webster & Kruglanski 1994; attachment dimensions by Fraley, Waller & Brennan 2000; and emotion-regulation differences by Gross & John 2003. The large retrieval index is kept as a local-only research asset and is not part of the public repository or release zip.
 
 </details>
 
@@ -1030,6 +1069,22 @@ enable_safety_boundary = false
 | `consequence_decay` | `0.68` | 旧版每轮后果衰减系数。新版主要使用 `consequence_half_life_seconds`。 |
 | `cold_war_turns` | `3` | 旧版冷处理持续轮数。新版主要使用 `cold_war_duration_seconds`。 |
 
+### 生命化学习 / 共同语境
+
+| 配置项 | 类型 | 默认值 | 说明 |
+| --- | --- | --- | --- |
+| `enable_lifelike_learning` | bool | `false` | 启用生命化学习状态模块。 |
+| `lifelike_learning_injection_strength` | float | `0.3` | 注入强度。`0` 表示只学习不注入共同语境 prompt。 |
+| `lifelike_learning_half_life_seconds` | float | `2592000` | 状态真实时间半衰期，默认 30 天。 |
+| `lifelike_learning_min_update_interval_seconds` | float | `10` | 反刷屏最小有效更新时间间隔。 |
+| `lifelike_learning_max_terms` | int | `120` | 最多保留的新词/黑话条目数。 |
+| `lifelike_learning_trajectory_limit` | int | `60` | 轨迹最多保留点数。 |
+| `lifelike_learning_confidence_growth` | float | `0.25` | 新词/黑话每次证据带来的置信增长。 |
+| `lifelike_learning_memory_write_enabled` | bool | `true` | 记忆写入时附带生命化学习状态注解。 |
+| `allow_lifelike_learning_reset_backdoor` | bool | `true` | 是否允许重置生命化学习状态。 |
+
+`lifelike_learning_state` 是 session scoped 的共同语境层。它会记录“这个用户常用什么词、喜欢什么、不喜欢什么、何时需要距离感、何时适合轻轻追问”，但不会把这些记录当成事实证明。置信度不足的新词会进入 `ask_before_using`，让 bot 先问一句，而不是装作自己已经懂。
+
 ---
 
 ## LivingMemory / 长期记忆兼容
@@ -1081,6 +1136,8 @@ if emotion:
     memory["emotion_at_write"] = payload["emotion_at_write"]
     if "humanlike_state_at_write" in payload:
         memory["humanlike_state_at_write"] = payload["humanlike_state_at_write"]
+    if "lifelike_learning_state_at_write" in payload:
+        memory["lifelike_learning_state_at_write"] = payload["lifelike_learning_state_at_write"]
     if "moral_repair_state_at_write" in payload:
         memory["moral_repair_state_at_write"] = payload["moral_repair_state_at_write"]
     if "integrated_self_state_at_write" in payload:
@@ -1139,6 +1196,27 @@ humanlike_memory_write_enabled = true
 }
 ```
 
+### `lifelike_learning_state_at_write`
+
+如果：
+
+```text
+lifelike_learning_memory_write_enabled = true
+```
+
+则 `build_emotion_memory_payload(...)` 会额外写入 `lifelike_learning_state_at_write`。默认值是 `true`。
+
+该字段冻结写入当时的共同语境、已确认新词、仍需先问再用的新词、用户画像证据计数、边界提示和 `initiative_policy`。它不保存原始消息文本，也不把用户画像当作不可错的事实；其他插件使用时应把它当作“当时的关系语境和节奏线索”。
+
+即使 `enable_lifelike_learning=false`，payload 也会标记：
+
+```json
+{
+  "enabled": false,
+  "reason": "enable_lifelike_learning is false"
+}
+```
+
 ### `moral_repair_state_at_write`
 
 如果：
@@ -1192,6 +1270,7 @@ include_prompt_fragment=True
 from astrbot_plugin_emotional_state.public_api import (
     get_emotion_service,
     get_humanlike_service,
+    get_lifelike_learning_service,
     get_moral_repair_service,
 )
 ```
@@ -1253,6 +1332,16 @@ if humanlike:
     state = await humanlike.get_humanlike_snapshot(event, exposure="plugin_safe")
 ```
 
+`get_lifelike_learning_service(context)` 同样返回已激活插件实例，但类型协议包含 lifelike learning 方法：
+
+```python
+lifelike = get_lifelike_learning_service(self.context)
+
+if lifelike:
+    state = await lifelike.get_lifelike_learning_snapshot(event, exposure="plugin_safe")
+    policy = await lifelike.get_lifelike_initiative_policy(event)
+```
+
 `get_moral_repair_service(context)` 同样返回已激活插件实例，但类型协议包含 moral repair 方法：
 
 ```python
@@ -1269,7 +1358,7 @@ meta = self.context.get_registered_star("astrbot_plugin_emotional_state")
 emotion = meta.star_cls if meta and meta.activated else None
 ```
 
-这只能作为临时兼容兜底，不保证公共 API 完整，也不会校验版本/schema。长期维护时更推荐 `public_api.get_emotion_service(...)`、`public_api.get_humanlike_service(...)` 和 `public_api.get_moral_repair_service(...)`。这些 helper 会校验核心方法是否完整，并校验公开版本/schema 是否匹配，能避免其他插件拿到只有部分旧接口或旧数据契约的实例。
+这只能作为临时兼容兜底，不保证公共 API 完整，也不会校验版本/schema。长期维护时更推荐 `public_api.get_emotion_service(...)`、`public_api.get_humanlike_service(...)`、`public_api.get_lifelike_learning_service(...)` 和 `public_api.get_moral_repair_service(...)`。这些 helper 会校验核心方法是否完整，并校验公开版本/schema 是否匹配，能避免其他插件拿到只有部分旧接口或旧数据契约的实例。
 
 ### 情绪 API
 
@@ -1293,6 +1382,12 @@ emotion = meta.star_cls if meta and meta.activated else None
 | `replay_integrated_self_bundle(bundle)` | 否 | 离线回放综合自我状态核心摘要，不读取 KV。 |
 | `probe_integrated_self_compatibility(payload=None, event_or_session=None)` | 否 | 检查 payload 是否满足当前综合自我 schema。 |
 | `export_integrated_self_diagnostics(event_or_session)` | 否 | 导出脱敏维护诊断摘要。 |
+| `get_lifelike_learning_snapshot(event_or_session, exposure="plugin_safe")` | 否 | 获取生命化学习/共同语境快照。 |
+| `get_lifelike_initiative_policy(event_or_session)` | 否 | 获取当前适合开口、短应、追问或沉默的节奏策略。 |
+| `get_lifelike_prompt_fragment(event_or_session)` | 否 | 获取共同语境和对话节奏 prompt 片段。 |
+| `observe_lifelike_text(event_or_session, text)` | 是 | 提交文本观察并更新新词、黑话、用户画像和边界线索。 |
+| `simulate_lifelike_update(event_or_session, text)` | 否 | 模拟生命化学习更新，不落库。 |
+| `reset_lifelike_learning_state(event_or_session)` | 是 | 重置生命化学习状态；受 `allow_lifelike_learning_reset_backdoor` 控制。 |
 
 `event_or_session` 可以是 AstrBot 事件对象，也可以是字符串 `session_key`。
 
@@ -1347,6 +1442,7 @@ if repair_status in {"repaired", "restored"}:
 | `get_bot_emotion_state` | 获取当前 bot 情绪状态摘要。 |
 | `simulate_bot_emotion_update` | 模拟某段文本会怎样改变情绪。 |
 | `get_bot_humanlike_state` | 获取当前拟人状态摘要。 |
+| `get_bot_lifelike_learning_state` | 获取当前生命化学习/共同语境状态摘要。 |
 | `get_bot_moral_repair_state` | 获取当前道德修复/信任修复状态摘要。 |
 | `get_bot_integrated_self_state` | 获取当前综合自我状态和跨模块仲裁摘要。 |
 
@@ -1363,6 +1459,7 @@ if repair_status in {"repaired", "restored"}:
 | `PERSONALITY_PROFILE_SCHEMA_VERSION` | `astrbot.personality_profile.v1` |
 | `PSYCHOLOGICAL_SCREENING_SCHEMA_VERSION` | `astrbot.psychological_screening.v1` |
 | `HUMANLIKE_STATE_SCHEMA_VERSION` | `astrbot.humanlike_state.v1` |
+| `LIFELIKE_LEARNING_SCHEMA_VERSION` | `astrbot.lifelike_learning_state.v1` |
 | `MORAL_REPAIR_STATE_SCHEMA_VERSION` | `astrbot.moral_repair_state.v1` |
 | `INTEGRATED_SELF_SCHEMA_VERSION` | `astrbot.integrated_self_state.v1` |
 
@@ -1454,6 +1551,19 @@ emotion_state -> humanlike_state -> prompt/style modulation
 
 默认关闭时，`get_humanlike_snapshot(...)` 会返回 `enabled=false` 的 payload，`get_humanlike_values(...)` 可能返回空 dict。第三方插件应先检查 `snapshot.get("enabled")`，或用 `values.get("energy")` 这类安全读取。
 
+### Lifelike Learning API
+
+| 方法 | 是否写入状态 | 用途 |
+| --- | --- | --- |
+| `get_lifelike_learning_snapshot(event_or_session, exposure="plugin_safe")` | 否 | 获取生命化学习/共同语境快照。 |
+| `get_lifelike_initiative_policy(event_or_session)` | 否 | 获取当前适合开口、短应、追问或沉默的节奏策略。 |
+| `get_lifelike_prompt_fragment(event_or_session)` | 否 | 获取共同语境和对话节奏 prompt。 |
+| `observe_lifelike_text(event_or_session, text)` | 是 | 提交文本观察并更新新词、黑话、用户画像和边界线索。 |
+| `simulate_lifelike_update(event_or_session, text)` | 否 | 模拟更新，不落库。 |
+| `reset_lifelike_learning_state(event_or_session)` | 是 | 重置状态；受 `allow_lifelike_learning_reset_backdoor` 控制。 |
+
+默认关闭时，`get_lifelike_learning_snapshot(...)` 会返回 `enabled=false` 的 payload，`get_lifelike_initiative_policy(...)` 会退化为 `brief_ack`。第三方插件不应直接使用内部 KV，也不应把未确认黑话当作确定知识。
+
 ### Moral Repair API
 
 | 方法 | 是否写入状态 | 用途 |
@@ -1480,6 +1590,59 @@ humanlike 允许他/她表现得更像“有生活痕迹的角色”，例如低
 - 需要用户承担现实照护责任。
 
 如果 `dependency_risk` 高，插件会倾向于降低排他依恋、内疚操控、病弱卖惨和黏性表达。
+
+---
+
+## 生命化学习 `lifelike_learning_state`
+
+`lifelike_learning_state` 是一个独立的共同语境子系统，默认关闭：
+
+```text
+enable_lifelike_learning = false
+```
+
+它的目标不是让 bot “更完美”，而是让他/她更像长期相处的人：会记住你常用的新词和小圈子黑话，会逐步积累你的偏好、边界和行为风格，也会判断现在该自然开口、短短回应、轻轻追问，还是先保持安静。
+
+### 维度
+
+| 字段 | 含义 |
+| --- | --- |
+| `familiarity` | 会话熟悉度和长期相处感。 |
+| `common_ground` | 共同语境强度。 |
+| `jargon_density` | 本地新词/黑话证据密度。 |
+| `preference_certainty` | 对用户喜恶和偏好的确信度。 |
+| `rapport` | 关系融洽度。 |
+| `boundary_sensitivity` | 对用户边界、疲惫、距离感的敏感度。 |
+| `initiative_readiness` | 主动开口准备度。 |
+| `silence_comfort` | 舒适沉默和不强行接话的倾向。 |
+
+### 配置项
+
+| 配置项 | 类型 | 默认值 | 说明 |
+| --- | --- | --- | --- |
+| `enable_lifelike_learning` | bool | `false` | 启用生命化学习状态模块。 |
+| `lifelike_learning_injection_strength` | float | `0.3` | 注入强度。`0` 表示不注入。 |
+| `lifelike_learning_half_life_seconds` | float | `2592000` | 状态真实时间半衰期，默认 30 天。 |
+| `lifelike_learning_min_update_interval_seconds` | float | `10` | 反刷屏最小有效更新时间间隔。 |
+| `lifelike_learning_max_terms` | int | `120` | 最多保留的新词/黑话条目数。 |
+| `lifelike_learning_trajectory_limit` | int | `60` | 轨迹最多保留点数。 |
+| `lifelike_learning_confidence_growth` | float | `0.25` | 新词/黑话每次证据带来的置信增长。 |
+| `lifelike_learning_memory_write_enabled` | bool | `true` | 记忆写入时附带生命化学习状态注解。 |
+| `allow_lifelike_learning_reset_backdoor` | bool | `true` | 是否允许重置生命化学习状态。 |
+
+### 使用边界
+
+新词和黑话会先进入低置信状态。低置信词不会被自然使用，只会让 bot 在合适的时候轻轻问一句；多次证据出现后，才会从 `ask_before_using=true` 过渡到可自然使用。用户画像同样是证据计数，不是事实判决。
+
+`initiative_policy.action` 可能是：
+
+| action | 含义 |
+| --- | --- |
+| `speak_now` | 共同语境足够，适合自然开口。 |
+| `brief_ack` | 适合短应，跟随用户节奏。 |
+| `ask_clarifying` | 有未确认新词或黑话，先轻问。 |
+| `stay_silent` | 边界或沉默舒适度较高，不强行推进话题。 |
+| `safety_interrupt` | 出现需要打断的风险信号。 |
 
 ---
 
@@ -1641,70 +1804,13 @@ enable_psychological_screening = false
 
 ---
 
-## 文献知识库
+## 本地文献知识库
 
-本项目保留了四个知识库，便于后续继续扩展模型。
+本项目在开发机本地保留四类文献知识库，分别服务于情绪模型、人格量化、心理筛查和拟人代理长期建模。它们是本地-only 研究资料：不上传到 GitHub，不进入 release zip，也不作为插件安装所需资源。
 
-### 情绪模型知识库
+公开仓库只保留可运行插件、理论文档、配置、测试和打包工具。README 与 `docs/theory.md` 中的强论证只绑定到可核验的 foundational sources；大规模检索记录用于后续筛选、扩展和人工复核。
 
-目录：`literature_kb/`
-
-当前构建结果见 `docs/literature_kb.md`：
-
-| 文件 | 用途 |
-| --- | --- |
-| `literature_kb/works.jsonl` | 去重后的机器可读文献库。 |
-| `literature_kb/works.csv` | 表格检索索引。 |
-| `literature_kb/top_journal_candidates.jsonl` | 顶刊/高影响候选。 |
-| `literature_kb/evidence-map.md` | 证据到建模主张的映射。 |
-| `literature_kb/topic-summary.md` | 检索主题和期刊分布。 |
-| `literature_kb/manifest.json` | 构建元数据。 |
-
-当前统计：
-
-- 去重文献：1727 篇。
-- 顶刊/高影响候选：120 篇。
-- 数据源：OpenAlex Works API。
-
-### 心理筛查知识库
-
-目录：`psychological_literature_kb/`
-
-当前统计见 `docs/psychological_screening.md`：
-
-- 去重文献：4401 篇。
-- 顶刊/高影响候选：260 篇。
-- 精选候选：`psychological_literature_kb/curated/top_200.jsonl`。
-
-### 人格量化知识库
-
-目录：`personality_literature_kb/`
-
-这是 `0.0.2-beta` 新增的人格量化证据库，由 `scripts/build_personality_literature_kb.py` 从 OpenAlex Works API 自动检索、缓存、去重和筛选。它用于支撑 13 维人格先验、人格到情绪基线的映射、人格到反应性/边界/修复倾向的参数调制，以及 public payload 中的 `personality_model.schema_version = astrbot.personality_profile.v1`。
-
-当前统计见 `personality_literature_kb/manifest.json`：
-
-- Target candidate retrieval: `20000`。
-- Raw retrieved records: `21964`。
-- Deduplicated works: `19196`。
-- Curated top candidates: `500`。
-- Target met: `true`。
-- 精选候选：`personality_literature_kb/curated/top_500.jsonl`。
-- 证据地图：`personality_literature_kb/evidence-map.md`，其中 `PERS-F001` 到 `PERS-F012` 是 verified DOI metadata 级 foundational sources。
-
-重要边界：该 KB 是 metadata/abstract-level 自动检索索引，不声称人工全文精读 20000 篇论文。README 和 theory 中的强论证只绑定到 DOI 可核验的 foundational sources；候选记录用于后续筛选、扩展和人工复核。
-
-### 拟人代理知识库
-
-目录：`humanlike_agent_literature_kb/`
-
-当前统计见 `docs/humanlike_agent_literature_kb.md`：
-
-- 去重文献：3983 篇。
-- 顶刊/高影响候选：320 篇。
-- 精选候选：`humanlike_agent_literature_kb/curated/top_200.jsonl`。
-
-该知识库覆盖：
+本地知识库覆盖的主题包括：
 
 - 稳态、异稳态、内感与预测加工。
 - 昼夜节律、睡眠压力、疲劳与认知表现。
@@ -1730,11 +1836,9 @@ enable_psychological_screening = false
 | 文档 | 内容 |
 | --- | --- |
 | `docs/theory.md` | 多维情绪状态模型、公式推导和理论说明。 |
-| `docs/literature_kb.md` | 情绪模型文献知识库说明。 |
 | `docs/psychological_screening.md` | 非诊断心理筛查模块说明。 |
 | `docs/humanlike_agent_model_roadmap.md` | 拟人/有机体样代理模型路线。 |
 | `docs/humanlike_agent_iteration_log.md` | humanlike 模块 10 轮自我迭代记录。 |
-| `docs/humanlike_agent_literature_kb.md` | 拟人代理文献知识库说明。 |
 | `docs/branching_strategy.md` | 功能分支维护策略。 |
 | `docs/release_branch_sync_checklist.md` | 当前基线提交、发布包预检和维护分支同步清单。 |
 
@@ -1810,7 +1914,7 @@ py -3.13 scripts\package_plugin.py --output dist\astrbot_plugin_emotional_state.
 | 检查项 | 要求 |
 | --- | --- |
 | 顶层目录 | 所有文件都必须在 `astrbot_plugin_emotional_state/` 下。 |
-| 必要文件 | 包含 `__init__.py`、`metadata.yaml`、`main.py`、`emotion_engine.py`、`humanlike_engine.py`、`integrated_self.py`、`moral_repair_engine.py`、`psychological_screening.py`、`prompts.py`、`public_api.py`、`README.md`、`LICENSE`、`requirements.txt`、`_conf_schema.json`。 |
+| 必要文件 | 包含 `__init__.py`、`metadata.yaml`、`main.py`、`emotion_engine.py`、`humanlike_engine.py`、`lifelike_learning_engine.py`、`integrated_self.py`、`moral_repair_engine.py`、`psychological_screening.py`、`prompts.py`、`public_api.py`、`README.md`、`LICENSE`、`requirements.txt`、`_conf_schema.json`。 |
 | 插件身份 | zip 内 `metadata.yaml name:` 必须等于 `astrbot_plugin_emotional_state`。 |
 | 排除目录 | 不应包含 `tests/`、`scripts/`、`output/`、`dist/`、`raw/`、`__pycache__/`、`.git/`。 |
 | 许可证 | 发布包必须包含 `LICENSE`，协议为 `GPL-3.0-or-later`。 |
@@ -1859,7 +1963,7 @@ py -3.13 -m unittest discover -s tests -v
 语法检查：
 
 ```powershell
-py -3.13 -m py_compile main.py emotion_engine.py psychological_screening.py humanlike_engine.py integrated_self.py moral_repair_engine.py prompts.py public_api.py scripts\build_literature_kb.py scripts\build_personality_literature_kb.py scripts\build_psychological_literature_kb.py scripts\build_humanlike_agent_literature_kb.py scripts\package_plugin.py
+py -3.13 -m py_compile main.py emotion_engine.py psychological_screening.py humanlike_engine.py lifelike_learning_engine.py integrated_self.py moral_repair_engine.py prompts.py public_api.py scripts\package_plugin.py
 ```
 
 配置 schema 检查：
@@ -1874,11 +1978,11 @@ py -3.13 -m json.tool _conf_schema.json
 py -3.13 scripts\package_plugin.py --output dist\astrbot_plugin_emotional_state.zip
 ```
 
-发布包会保留插件运行文件、README、docs、四个文献知识库的成品索引和精选条目，例如 `manifest.json`、`works.jsonl`、`curated/top_200.jsonl`、`personality_literature_kb/curated/top_500.jsonl`、`evidence-map.md`。知识库目录下的 `raw/` 是检索和重建知识库用的原始缓存，默认不进入发布包；这样可以保留后续研究迭代需要的材料，同时避免远程上传包体积失控。
+发布包会保留插件运行文件、README 和 docs。四个文献知识库目录 `literature_kb/`、`personality_literature_kb/`、`psychological_literature_kb/`、`humanlike_agent_literature_kb/` 是本地-only 研究资料，不上传到 GitHub，也不进入 release zip；这样可以保留后续研究迭代需要的材料，同时避免远程上传包体积失控。
 
 发布 zip 的第一项会显式写入 `astrbot_plugin_emotional_state/` 目录项，以兼容 AstrBot WebUI 的 `install-upload` 解压逻辑。不要手工重新压缩成“缺少顶层目录项”的 zip，否则部分 AstrBot 版本会把第一个文件路径误判成目录。
 
-发布包还会保留插件根目录下的 `__init__.py`、`public_api.py`、`main.py`、`emotion_engine.py`、`humanlike_engine.py`、`integrated_self.py`、`moral_repair_engine.py`、`psychological_screening.py` 和 `prompts.py`。这保证其他插件在安装后可以通过 `from astrbot_plugin_emotional_state.public_api import ...` 按包名导入公共 API。
+发布包还会保留插件根目录下的 `__init__.py`、`public_api.py`、`main.py`、`emotion_engine.py`、`humanlike_engine.py`、`lifelike_learning_engine.py`、`integrated_self.py`、`moral_repair_engine.py`、`psychological_screening.py` 和 `prompts.py`。这保证其他插件在安装后可以通过 `from astrbot_plugin_emotional_state.public_api import ...` 按包名导入公共 API。
 
 远程只读烟测：
 
@@ -1918,6 +2022,21 @@ WebUI 插件卡片可能显示 `displayName` 而不是插件目录名，所以 s
 
 只读 smoke 会把 `/api/stat/version`、`/api/plugin/get` 和 `/api/plugin/source/get-failed-plugins` 都作为基础健康检查，并在输出的 `apiHealth` 中集中列出三个端点的状态。失败插件接口不是 `200` 时会以退出码 `9` 失败；接口健康时，`failedPluginSummary` 会给出失败插件总数、名称、`hasExpectedPluginFailure` 和 `unrelatedCount`。`failedPlugins` 可以包含远程服务器上其他插件的失败记录；只要 `expectedPluginChecks.ok=true`、`expectedFailedPlugin` 为 `null`，且目标插件 `containsExpectedPlugin=true`、`expectedPluginRuntime.activated !== false`、版本/显示名断言通过，就表示目标插件安装、启用和版本匹配通过。只有目标插件命中 failed record 时才会触发退出码 `5`。
 
+远程测试前如果需要清掉旧同名插件和失败上传残留，使用独立清理脚本。它只允许 `astrbot_plugin_emotional_state` 这个精确目标，确认值也必须是同一个插件名；它不会删除 LivingMemory 或其他插件：
+
+```powershell
+$env:ASTRBOT_REMOTE_URL = "http://your-astrbot-host:15356/"
+$env:ASTRBOT_REMOTE_USERNAME = "your-user"
+$env:ASTRBOT_REMOTE_PASSWORD = "your-password"
+$env:ASTRBOT_EXPECT_PLUGIN = "astrbot_plugin_emotional_state"
+$env:ASTRBOT_REMOTE_CLEAN_CONFIRM = "astrbot_plugin_emotional_state"
+$env:ASTRBOT_REMOTE_CLEAN_FORMAL = "1"
+$env:ASTRBOT_REMOTE_CLEAN_FAILED_UPLOAD = "1"
+& $node scripts\remote_cleanup_plugin_playwright.js
+```
+
+清理脚本只会调用 `POST /api/plugin/uninstall` 删除正式 `astrbot_plugin_emotional_state`，以及 `POST /api/plugin/uninstall-failed` 删除 `plugin_upload_astrbot_plugin_emotional_state`，并固定 `delete_config=false`、`delete_data=false`。如果匹配到多个正式候选或多个失败候选，它会拒绝执行。
+
 远程上传安装是独立脚本，默认不会执行。需要先构建发布包，再显式确认上传：
 
 ```powershell
@@ -1933,7 +2052,7 @@ $env:ASTRBOT_REMOTE_INSTALL_CONFIRM = "1"
 
 上传脚本只允许调用 AstrBot WebUI 的 `install-upload` 安装端点；若 WebUI 留下 `plugin_upload_<插件名>` 失败安装残留，脚本只会调用 `uninstall-failed` 清理这个失败上传目录，并固定 `delete_config=false`、`delete_data=false`。它不会删除正式插件、覆盖正式插件目录、更新插件、重启 AstrBot、保存配置或写入本地 cookie/session。如果远端返回“目录 `<插件名>` 已存在”，脚本会输出 `installOutcome="already_installed_no_overwrite"`、`alreadyInstalled=true`、`overwriteAttempted=false` 和 `formalPluginDirectoryPreserved=true`，表示正式插件目录被保留，后续应通过只读 smoke 查看实际运行版本。上传成功后，再运行上面的 `ASTRBOT_EXPECT_PLUGIN` 只读烟测作为最终验证。
 
-上传脚本在真正发起安装请求之前会完整读取 zip central directory 做本地预检：所有条目必须位于 `astrbot_plugin_emotional_state/` 下，路径必须是相对 POSIX 路径，且不能包含 `.` / `..` 不安全路径段；必须包含 `__init__.py`、`metadata.yaml`、`main.py`、`emotion_engine.py`、`humanlike_engine.py`、`integrated_self.py`、`moral_repair_engine.py`、`psychological_screening.py`、`prompts.py`、`public_api.py`、`README.md`、`LICENSE`、`requirements.txt`、`_conf_schema.json`，并拒绝 `tests/`、`scripts/`、`output/`、`dist/`、`raw/`、`__pycache__/`、`.git/` 等本地或研究缓存目录。预检还会读取 zip 内的 `metadata.yaml`，确认其中 `name:` 精确等于 CLI 参数或 `ASTRBOT_EXPECT_PLUGIN` 传入的插件目录名。
+上传脚本在真正发起安装请求之前会完整读取 zip central directory 做本地预检：所有条目必须位于 `astrbot_plugin_emotional_state/` 下，路径必须是相对 POSIX 路径，且不能包含 `.` / `..` 不安全路径段；必须包含 `__init__.py`、`metadata.yaml`、`main.py`、`emotion_engine.py`、`humanlike_engine.py`、`lifelike_learning_engine.py`、`integrated_self.py`、`moral_repair_engine.py`、`psychological_screening.py`、`prompts.py`、`public_api.py`、`README.md`、`LICENSE`、`requirements.txt`、`_conf_schema.json`，并拒绝 `tests/`、`scripts/`、`output/`、`dist/`、`raw/`、`__pycache__/`、`.git/` 等本地或研究缓存目录。预检还会读取 zip 内的 `metadata.yaml`，确认其中 `name:` 精确等于 CLI 参数或 `ASTRBOT_EXPECT_PLUGIN` 传入的插件目录名。
 
 也可以单独运行预检，不连接远程服务器：
 
@@ -1947,6 +2066,7 @@ $env:ASTRBOT_REMOTE_INSTALL_CONFIRM = "1"
 
 ```powershell
 & $node --check scripts\remote_smoke_playwright.js
+& $node --check scripts\remote_cleanup_plugin_playwright.js
 & $node --check scripts\remote_install_upload_playwright.js
 & $node --check scripts\plugin_zip_preflight.js
 ```
@@ -1963,9 +2083,8 @@ $env:ASTRBOT_REMOTE_INSTALL_CONFIRM = "1"
 | `tests/test_integrated_self.py` | 综合自我状态总线、因果 trace、policy plan、deterministic replay、schema compatibility、脱敏 diagnostics 和 LivingMemory envelope。 |
 | `tests/test_humanlike_engine.py` | P0 拟人状态、快照分层、注入片段、记忆注解。 |
 | `tests/test_moral_repair_engine.py` | 道德修复状态、欺骗风险识别、内疚/责任/补偿/信任修复、策略禁止边界和记忆注解。 |
-| `tests/test_literature_kb_scripts.py` | 四个文献 KB 构建脚本的去重、分类、输出结构和坏缓存容错。 |
 | `tests/test_document_math_contract.py` | README 和 `docs/theory.md` 的 GitHub fenced math、LaTeX 宏白名单、禁用宏和脆弱写法检查。 |
-| `tests/test_package_plugin.py` | 发布 zip 的目录根、成品 KB 纳入、raw/cache/tests/scripts/output 排除、包体积上限、metadata 身份校验和上传前 zip 预检失败路径。 |
+| `tests/test_package_plugin.py` | 发布 zip 的目录根、知识库排除、raw/cache/tests/scripts/output 排除、包体积上限、metadata 身份校验和上传前 zip 预检失败路径。 |
 | `tests/test_psychological_screening.py` | 非诊断筛查、量表启发、红旗信号、长期轨迹。 |
 | `tests/test_remote_smoke_contract.py` | 远程烟测脚本必须使用环境变量读取凭据、保持只读、忽略截图产物，并锁定 API 健康摘要、UI best-effort 字段、上传脚本边界、bundled Node 文档契约、metadata 驱动的插件身份、zip/env 示例、slug/badge/version/display_name 契约。 |
 

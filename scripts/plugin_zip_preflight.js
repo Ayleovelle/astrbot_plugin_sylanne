@@ -136,6 +136,7 @@ function assertZipLooksUploadable(zipPath, expectedPlugin, options = {}) {
     `${expectedPlugin}/main.py`,
     `${expectedPlugin}/emotion_engine.py`,
     `${expectedPlugin}/humanlike_engine.py`,
+    `${expectedPlugin}/lifelike_learning_engine.py`,
     `${expectedPlugin}/integrated_self.py`,
     `${expectedPlugin}/moral_repair_engine.py`,
     `${expectedPlugin}/psychological_screening.py`,
@@ -154,6 +155,10 @@ function assertZipLooksUploadable(zipPath, expectedPlugin, options = {}) {
     "raw",
     "__pycache__",
     ".git",
+    "literature_kb",
+    "personality_literature_kb",
+    "psychological_literature_kb",
+    "humanlike_agent_literature_kb",
   ]);
   for (const name of names) {
     if (!name.startsWith(expectedDirectory)) {

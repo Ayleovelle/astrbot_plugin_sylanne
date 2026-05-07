@@ -15,6 +15,7 @@ EMOTION_MEMORY_SCHEMA_VERSION = "astrbot.emotion_memory.v1"
 PERSONALITY_PROFILE_SCHEMA_VERSION = "astrbot.personality_profile.v1"
 PSYCHOLOGICAL_SCREENING_SCHEMA_VERSION = "astrbot.psychological_screening.v1"
 HUMANLIKE_STATE_SCHEMA_VERSION = "astrbot.humanlike_state.v1"
+LIFELIKE_LEARNING_SCHEMA_VERSION = "astrbot.lifelike_learning_state.v1"
 MORAL_REPAIR_STATE_SCHEMA_VERSION = "astrbot.moral_repair_state.v1"
 INTEGRATED_SELF_SCHEMA_VERSION = "astrbot.integrated_self_state.v1"
 PSYCHOLOGICAL_RISK_BOOLEAN_FIELDS = PUBLIC_RISK_BOOLEAN_FIELDS
@@ -32,6 +33,7 @@ class EmotionServiceProtocol(Protocol):
     personality_profile_schema_version: str
     psychological_screening_schema_version: str
     integrated_self_schema_version: str
+    lifelike_learning_schema_version: str
 
     async def get_emotion_snapshot(
         self,
@@ -267,6 +269,69 @@ class EmotionServiceProtocol(Protocol):
     ) -> dict[str, Any]:
         ...
 
+    async def get_lifelike_learning_snapshot(
+        self,
+        event_or_session: Any = None,
+        *,
+        request: Any = None,
+        session_key: str | None = None,
+        exposure: str = "plugin_safe",
+        include_prompt_fragment: bool = False,
+    ) -> dict[str, Any]:
+        ...
+
+    async def get_lifelike_initiative_policy(
+        self,
+        event_or_session: Any = None,
+        *,
+        request: Any = None,
+        session_key: str | None = None,
+    ) -> dict[str, Any]:
+        ...
+
+    async def get_lifelike_prompt_fragment(
+        self,
+        event_or_session: Any = None,
+        *,
+        request: Any = None,
+        session_key: str | None = None,
+    ) -> str:
+        ...
+
+    async def observe_lifelike_text(
+        self,
+        event_or_session: Any = None,
+        text: str = "",
+        *,
+        request: Any = None,
+        session_key: str | None = None,
+        source: str = "plugin",
+        commit: bool = True,
+        observed_at: float | None = None,
+    ) -> dict[str, Any]:
+        ...
+
+    async def simulate_lifelike_update(
+        self,
+        event_or_session: Any = None,
+        text: str = "",
+        *,
+        request: Any = None,
+        session_key: str | None = None,
+        source: str = "plugin",
+        observed_at: float | None = None,
+    ) -> dict[str, Any]:
+        ...
+
+    async def reset_lifelike_learning_state(
+        self,
+        event_or_session: Any = None,
+        *,
+        request: Any = None,
+        session_key: str | None = None,
+    ) -> bool:
+        ...
+
 
 @runtime_checkable
 class HumanlikeStateServiceProtocol(EmotionServiceProtocol, Protocol):
@@ -404,6 +469,74 @@ class MoralRepairStateServiceProtocol(EmotionServiceProtocol, Protocol):
         ...
 
 
+@runtime_checkable
+class LifelikeLearningServiceProtocol(EmotionServiceProtocol, Protocol):
+    lifelike_learning_schema_version: str
+
+    async def get_lifelike_learning_snapshot(
+        self,
+        event_or_session: Any = None,
+        *,
+        request: Any = None,
+        session_key: str | None = None,
+        exposure: str = "plugin_safe",
+        include_prompt_fragment: bool = False,
+    ) -> dict[str, Any]:
+        ...
+
+    async def get_lifelike_initiative_policy(
+        self,
+        event_or_session: Any = None,
+        *,
+        request: Any = None,
+        session_key: str | None = None,
+    ) -> dict[str, Any]:
+        ...
+
+    async def get_lifelike_prompt_fragment(
+        self,
+        event_or_session: Any = None,
+        *,
+        request: Any = None,
+        session_key: str | None = None,
+    ) -> str:
+        ...
+
+    async def observe_lifelike_text(
+        self,
+        event_or_session: Any = None,
+        text: str = "",
+        *,
+        request: Any = None,
+        session_key: str | None = None,
+        source: str = "plugin",
+        commit: bool = True,
+        observed_at: float | None = None,
+    ) -> dict[str, Any]:
+        ...
+
+    async def simulate_lifelike_update(
+        self,
+        event_or_session: Any = None,
+        text: str = "",
+        *,
+        request: Any = None,
+        session_key: str | None = None,
+        source: str = "plugin",
+        observed_at: float | None = None,
+    ) -> dict[str, Any]:
+        ...
+
+    async def reset_lifelike_learning_state(
+        self,
+        event_or_session: Any = None,
+        *,
+        request: Any = None,
+        session_key: str | None = None,
+    ) -> bool:
+        ...
+
+
 def get_emotion_service(context: Any) -> EmotionServiceProtocol | None:
     """Return the activated emotion service plugin from an AstrBot Context."""
     getter = getattr(context, "get_registered_star", None)
@@ -437,6 +570,12 @@ def get_emotion_service(context: Any) -> EmotionServiceProtocol | None:
         "replay_integrated_self_bundle",
         "probe_integrated_self_compatibility",
         "export_integrated_self_diagnostics",
+        "get_lifelike_learning_snapshot",
+        "get_lifelike_initiative_policy",
+        "get_lifelike_prompt_fragment",
+        "observe_lifelike_text",
+        "simulate_lifelike_update",
+        "reset_lifelike_learning_state",
     )
     expected_versions = {
         "emotion_api_version": EMOTION_API_VERSION,
@@ -445,6 +584,7 @@ def get_emotion_service(context: Any) -> EmotionServiceProtocol | None:
         "personality_profile_schema_version": PERSONALITY_PROFILE_SCHEMA_VERSION,
         "psychological_screening_schema_version": PSYCHOLOGICAL_SCREENING_SCHEMA_VERSION,
         "integrated_self_schema_version": INTEGRATED_SELF_SCHEMA_VERSION,
+        "lifelike_learning_schema_version": LIFELIKE_LEARNING_SCHEMA_VERSION,
     }
     if (
         plugin
@@ -489,6 +629,26 @@ def get_moral_repair_service(context: Any) -> MoralRepairStateServiceProtocol | 
     if (
         plugin
         and getattr(plugin, "moral_repair_state_schema_version", None) == MORAL_REPAIR_STATE_SCHEMA_VERSION
+        and all(callable(getattr(plugin, name, None)) for name in required)
+    ):
+        return plugin
+    return None
+
+
+def get_lifelike_learning_service(context: Any) -> LifelikeLearningServiceProtocol | None:
+    """Return the activated lifelike-learning service if available."""
+    plugin = get_emotion_service(context)
+    required = (
+        "get_lifelike_learning_snapshot",
+        "get_lifelike_initiative_policy",
+        "get_lifelike_prompt_fragment",
+        "observe_lifelike_text",
+        "simulate_lifelike_update",
+        "reset_lifelike_learning_state",
+    )
+    if (
+        plugin
+        and getattr(plugin, "lifelike_learning_schema_version", None) == LIFELIKE_LEARNING_SCHEMA_VERSION
         and all(callable(getattr(plugin, name, None)) for name in required)
     ):
         return plugin

@@ -111,6 +111,23 @@ This file stores durable discoveries from implementation, review, and remote tes
 - Local Edge executable exists at:
   `C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe`
 
+## 2026-05-08 Remote Cleanup And Upload Findings
+
+- Destructive reinstall tests must first run `scripts\remote_cleanup_plugin_playwright.js`, not the ordinary read-only smoke script.
+- Cleanup is intentionally allowlisted to one plugin name: `astrbot_plugin_emotional_state`.
+- Required cleanup confirmation:
+  - `ASTRBOT_EXPECT_PLUGIN=astrbot_plugin_emotional_state`;
+  - `ASTRBOT_REMOTE_CLEAN_CONFIRM=astrbot_plugin_emotional_state`;
+  - `ASTRBOT_REMOTE_CLEAN_FORMAL=1`;
+  - `ASTRBOT_REMOTE_CLEAN_FAILED_UPLOAD=1`.
+- Cleanup must only touch:
+  - formal plugin record exactly matching `astrbot_plugin_emotional_state`;
+  - failed upload directory exactly matching `plugin_upload_astrbot_plugin_emotional_state`.
+- Cleanup must never target LivingMemory or unrelated plugins. The 2026-05-08 remote run observed LivingMemory before and after cleanup with count `1`.
+- `scripts\remote_install_upload_playwright.js` must upload inside page context with `credentials: "include"` so AstrBot's browser login session is used.
+- Do not reintroduce `Array.from(zipBytes)` for zip upload. The 25MB package caused Node heap exhaustion when converted to a giant numeric array.
+- Do not use `page.context().request.post` for the upload endpoint unless the script explicitly transfers the same auth state; the first request-based attempt returned `401 未授权`.
+
 ## 2026-05-07 Moral Repair Boundary
 
 - The requested "deception / wrongdoing / guilt / compensation" extension was implemented as a safe moral repair model, not as a capability for generating deception tactics, cover-up plans, manipulation, retaliation, or evasion of accountability.

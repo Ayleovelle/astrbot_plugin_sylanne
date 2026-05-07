@@ -231,6 +231,74 @@ class AstrBotLifecycleTests(unittest.TestCase):
         self.assertIn("bot_emotion_state", texts[0])
         self.assertNotIn("simulated humanlike-state", texts[0])
 
+    def test_lifelike_learning_enabled_with_zero_strength_updates_without_injection(self):
+        from lifelike_learning_engine import LifelikeLearningState
+
+        plugin = new_plugin(
+            {
+                "assessment_timing": "post",
+                "enable_lifelike_learning": True,
+                "lifelike_learning_injection_strength": 0.0,
+            },
+        )
+        self._bind_common_state_hooks(plugin)
+        lifelike_saves = []
+
+        async def fake_load_lifelike_state(self, session_key):
+            return LifelikeLearningState.initial()
+
+        async def fake_save_lifelike_state(self, session_key, state):
+            lifelike_saves.append((session_key, state))
+
+        bind_async(plugin, "_load_lifelike_learning_state", fake_load_lifelike_state)
+        bind_async(plugin, "_save_lifelike_learning_state", fake_save_lifelike_state)
+        request = fake_request(
+            session_id="s-life",
+            prompt="『桥隧猫』就是会熬夜改桥梁模型的人。",
+        )
+
+        asyncio.run(plugin.on_llm_request(FakeEvent("s-life"), request))
+
+        self.assertEqual(len(lifelike_saves), 1)
+        self.assertEqual(lifelike_saves[0][0], "s-life")
+        self.assertIn("桥隧猫", lifelike_saves[0][1].lexicon)
+        texts = [part.text for part in request.extra_user_content_parts]
+        self.assertEqual(len(texts), 1)
+        self.assertIn("bot_emotion_state", texts[0])
+        self.assertNotIn("lifelike common-ground", texts[0])
+
+    def test_lifelike_learning_injects_when_enabled_and_strength_positive(self):
+        from lifelike_learning_engine import LifelikeLearningState
+
+        plugin = new_plugin(
+            {
+                "assessment_timing": "post",
+                "enable_lifelike_learning": True,
+                "lifelike_learning_injection_strength": 0.3,
+            },
+        )
+        self._bind_common_state_hooks(plugin)
+
+        async def fake_load_lifelike_state(self, session_key):
+            return LifelikeLearningState.initial()
+
+        async def fake_save_lifelike_state(self, session_key, state):
+            pass
+
+        bind_async(plugin, "_load_lifelike_learning_state", fake_load_lifelike_state)
+        bind_async(plugin, "_save_lifelike_learning_state", fake_save_lifelike_state)
+        request = fake_request(
+            session_id="s-life-inject",
+            prompt="我喜欢自然闲聊，桥隧猫就是会熬夜改模型的人。",
+        )
+
+        asyncio.run(plugin.on_llm_request(FakeEvent("s-life-inject"), request))
+
+        texts = [part.text for part in request.extra_user_content_parts]
+        self.assertEqual(len(texts), 2)
+        self.assertIn("bot_emotion_state", texts[0])
+        self.assertIn("lifelike common-ground", texts[1])
+
 
 if __name__ == "__main__":
     unittest.main()

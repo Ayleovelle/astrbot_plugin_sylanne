@@ -127,9 +127,11 @@ class DocumentMathContractTests(unittest.TestCase):
         self.assertIn("10.1177/0956797610372634", readme)
         self.assertIn("10.1037/a0013965", readme)
         self.assertIn("astrbot.personality_profile.v1", readme)
-        self.assertIn("personality_literature_kb/curated/top_500.jsonl", readme)
-        self.assertIn("Raw retrieved records: `21964`", readme)
-        self.assertIn("Deduplicated works: `19196`", readme)
+        self.assertIn("本地-only 研究资料", readme)
+        self.assertIn("不上传到 GitHub，不进入 release zip", readme)
+        self.assertNotIn("personality_literature_kb/curated/top_500.jsonl", readme)
+        self.assertNotIn("Raw retrieved records: `21964`", readme)
+        self.assertNotIn("Deduplicated works: `19196`", readme)
         self.assertIn(
             "<summary>展开行动倾向、关系决策与后果衰减公式</summary>",
             readme,

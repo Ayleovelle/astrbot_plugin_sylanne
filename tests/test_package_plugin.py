@@ -46,21 +46,22 @@ class PackagePluginTests(unittest.TestCase):
         self.assertIn("metadata.yaml", files)
         self.assertIn("main.py", files)
         self.assertIn("integrated_self.py", files)
+        self.assertIn("lifelike_learning_engine.py", files)
         self.assertIn("moral_repair_engine.py", files)
         self.assertIn("LICENSE", files)
         self.assertIn("README.md", files)
         self.assertIn("docs/theory.md", files)
-        self.assertIn("literature_kb/manifest.json", files)
-        self.assertIn("literature_kb/works.jsonl", files)
-        self.assertIn("personality_literature_kb/manifest.json", files)
-        self.assertIn("personality_literature_kb/curated/top_500.jsonl", files)
-        self.assertIn("psychological_literature_kb/curated/top_200.jsonl", files)
-        self.assertIn("humanlike_agent_literature_kb/curated/top_200.jsonl", files)
+        self.assertNotIn("docs/literature_kb.md", files)
+        self.assertNotIn("docs/humanlike_agent_literature_kb.md", files)
         self.assertNotIn("scripts/package_plugin.py", files)
         self.assertNotIn("task_plan.md", files)
         self.assertNotIn("progress.md", files)
         self.assertNotIn("findings.md", files)
         self.assertNotIn(".gitignore", files)
+        self.assertFalse(any(path.startswith("literature_kb/") for path in files))
+        self.assertFalse(any(path.startswith("personality_literature_kb/") for path in files))
+        self.assertFalse(any(path.startswith("psychological_literature_kb/") for path in files))
+        self.assertFalse(any(path.startswith("humanlike_agent_literature_kb/") for path in files))
         self.assertFalse(any(path.startswith("tests/") for path in files))
         self.assertFalse(any(path.startswith("output/") for path in files))
         self.assertFalse(any("/raw/" in path or path.startswith("raw/") for path in files))
@@ -100,6 +101,7 @@ class PackagePluginTests(unittest.TestCase):
             "main.py",
             "emotion_engine.py",
             "humanlike_engine.py",
+            "lifelike_learning_engine.py",
             "integrated_self.py",
             "moral_repair_engine.py",
             "psychological_screening.py",
@@ -113,10 +115,12 @@ class PackagePluginTests(unittest.TestCase):
         self.assertIn(prefix + "_conf_schema.json", names)
         self.assertIn(prefix + "README.md", names)
         self.assertIn(prefix + "LICENSE", names)
-        self.assertIn(prefix + "literature_kb/works.jsonl", names)
-        self.assertIn(prefix + "personality_literature_kb/curated/top_500.jsonl", names)
-        self.assertIn(prefix + "psychological_literature_kb/curated/top_200.jsonl", names)
-        self.assertIn(prefix + "humanlike_agent_literature_kb/curated/top_200.jsonl", names)
+        self.assertNotIn(prefix + "docs/literature_kb.md", names)
+        self.assertNotIn(prefix + "docs/humanlike_agent_literature_kb.md", names)
+        self.assertFalse(any(name.startswith(prefix + "literature_kb/") for name in names))
+        self.assertFalse(any(name.startswith(prefix + "personality_literature_kb/") for name in names))
+        self.assertFalse(any(name.startswith(prefix + "psychological_literature_kb/") for name in names))
+        self.assertFalse(any(name.startswith(prefix + "humanlike_agent_literature_kb/") for name in names))
         self.assertFalse(any(name.startswith(prefix + "tests/") for name in names))
         self.assertFalse(any(name.startswith(prefix + "scripts/") for name in names))
         self.assertFalse(any(name.startswith(prefix + "output/") for name in names))
@@ -213,6 +217,7 @@ class PluginZipPreflightTests(unittest.TestCase):
             (prefix + "main.py", "# runtime\n"),
             (prefix + "emotion_engine.py", "# runtime\n"),
             (prefix + "humanlike_engine.py", "# runtime\n"),
+            (prefix + "lifelike_learning_engine.py", "# runtime\n"),
             (prefix + "integrated_self.py", "# runtime\n"),
             (prefix + "moral_repair_engine.py", "# runtime\n"),
             (prefix + "psychological_screening.py", "# runtime\n"),
@@ -251,6 +256,10 @@ class PluginZipPreflightTests(unittest.TestCase):
             entries = self._valid_entries() + [
                 (f"{PLUGIN_NAME}/raw/cache.jsonl", "{}\n"),
                 (f"{PLUGIN_NAME}/tests/test_plugin.py", "\n"),
+                (f"{PLUGIN_NAME}/literature_kb/works.jsonl", "{}\n"),
+                (f"{PLUGIN_NAME}/personality_literature_kb/works.jsonl", "{}\n"),
+                (f"{PLUGIN_NAME}/psychological_literature_kb/works.jsonl", "{}\n"),
+                (f"{PLUGIN_NAME}/humanlike_agent_literature_kb/works.jsonl", "{}\n"),
             ]
             self._write_zip(output, entries)
 
@@ -264,6 +273,7 @@ class PluginZipPreflightTests(unittest.TestCase):
             "__init__.py",
             "_conf_schema.json",
             "integrated_self.py",
+            "lifelike_learning_engine.py",
             "LICENSE",
             "moral_repair_engine.py",
             "public_api.py",

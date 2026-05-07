@@ -14,12 +14,14 @@ from public_api import (
     EMOTION_SCHEMA_VERSION,
     HUMANLIKE_STATE_SCHEMA_VERSION,
     INTEGRATED_SELF_SCHEMA_VERSION,
+    LIFELIKE_LEARNING_SCHEMA_VERSION,
     MORAL_REPAIR_STATE_SCHEMA_VERSION,
     PERSONALITY_PROFILE_SCHEMA_VERSION,
     PSYCHOLOGICAL_RISK_BOOLEAN_FIELDS,
     PSYCHOLOGICAL_SCREENING_SCHEMA_VERSION,
     get_emotion_service,
     get_humanlike_service,
+    get_lifelike_learning_service,
     get_moral_repair_service,
 )
 
@@ -128,6 +130,7 @@ class FakeEmotionService:
     personality_profile_schema_version = "astrbot.personality_profile.v1"
     psychological_screening_schema_version = "astrbot.psychological_screening.v1"
     integrated_self_schema_version = "astrbot.integrated_self_state.v1"
+    lifelike_learning_schema_version = "astrbot.lifelike_learning_state.v1"
 
     async def get_emotion_snapshot(self, *args, **kwargs):
         return {}
@@ -198,6 +201,24 @@ class FakeEmotionService:
     async def export_integrated_self_diagnostics(self, *args, **kwargs):
         return {}
 
+    async def get_lifelike_learning_snapshot(self, *args, **kwargs):
+        return {}
+
+    async def get_lifelike_initiative_policy(self, *args, **kwargs):
+        return {}
+
+    async def get_lifelike_prompt_fragment(self, *args, **kwargs):
+        return ""
+
+    async def observe_lifelike_text(self, *args, **kwargs):
+        return {}
+
+    async def simulate_lifelike_update(self, *args, **kwargs):
+        return {}
+
+    async def reset_lifelike_learning_state(self, *args, **kwargs):
+        return True
+
 
 class FakeHumanlikeService(FakeEmotionService):
     humanlike_state_schema_version = "astrbot.humanlike_state.v1"
@@ -241,6 +262,10 @@ class FakeMoralRepairService(FakeEmotionService):
 
     async def reset_moral_repair_state(self, *args, **kwargs):
         return True
+
+
+class FakeLifelikeLearningService(FakeEmotionService):
+    lifelike_learning_schema_version = "astrbot.lifelike_learning_state.v1"
 
 
 class PublicApiTests(unittest.TestCase):
@@ -353,6 +378,12 @@ class PublicApiTests(unittest.TestCase):
             "astrbot.integrated_self_state.v1",
         )
 
+    def test_lifelike_learning_schema_constant_is_exported(self):
+        self.assertEqual(
+            LIFELIKE_LEARNING_SCHEMA_VERSION,
+            "astrbot.lifelike_learning_state.v1",
+        )
+
     def test_get_emotion_service_rejects_plugin_without_memory_payload_api(self):
         class OldEmotionService(FakeEmotionService):
             build_emotion_memory_payload = None
@@ -388,6 +419,7 @@ class PublicApiTests(unittest.TestCase):
             "personality_profile_schema_version",
             "psychological_screening_schema_version",
             "integrated_self_schema_version",
+            "lifelike_learning_schema_version",
         )
         for field in version_fields:
             with self.subTest(field=field):
@@ -438,12 +470,25 @@ class PublicApiTests(unittest.TestCase):
 
         self.assertIsNone(get_moral_repair_service(context))
 
+    def test_get_lifelike_learning_service_returns_activated_plugin(self):
+        plugin = FakeLifelikeLearningService()
+        context = FakeContext(SimpleNamespace(activated=True, star_cls=plugin))
+        self.assertIs(get_lifelike_learning_service(context), plugin)
+
+    def test_get_lifelike_learning_service_rejects_wrong_schema_version(self):
+        plugin = FakeLifelikeLearningService()
+        plugin.lifelike_learning_schema_version = "astrbot.lifelike_learning_state.v0"
+        context = FakeContext(SimpleNamespace(activated=True, star_cls=plugin))
+
+        self.assertIsNone(get_lifelike_learning_service(context))
+
     def test_public_service_contract_matches_plugin_implementation(self):
         public_tree = module_tree("public_api.py")
         main_tree = module_tree("main.py")
         emotion_protocol = class_async_methods(public_tree, "EmotionServiceProtocol")
         humanlike_protocol = class_async_methods(public_tree, "HumanlikeStateServiceProtocol")
         moral_repair_protocol = class_async_methods(public_tree, "MoralRepairStateServiceProtocol")
+        lifelike_protocol = class_async_methods(public_tree, "LifelikeLearningServiceProtocol")
         plugin_methods = class_async_methods(main_tree, "EmotionalStatePlugin")
         main_required = set(
             assigned_string_tuple(main_tree, "_REQUIRED_EMOTION_SERVICE_METHODS"),
@@ -457,6 +502,9 @@ class PublicApiTests(unittest.TestCase):
         public_moral_repair_required = set(
             function_required_tuple(public_tree, "get_moral_repair_service"),
         )
+        public_lifelike_required = set(
+            function_required_tuple(public_tree, "get_lifelike_learning_service"),
+        )
 
         self.assertEqual(emotion_protocol, main_required)
         self.assertEqual(emotion_protocol, public_required)
@@ -465,6 +513,8 @@ class PublicApiTests(unittest.TestCase):
         self.assertEqual(set(), public_humanlike_required - plugin_methods)
         self.assertEqual(moral_repair_protocol, public_moral_repair_required)
         self.assertEqual(set(), public_moral_repair_required - plugin_methods)
+        self.assertEqual(lifelike_protocol, public_lifelike_required)
+        self.assertEqual(set(), public_lifelike_required - plugin_methods)
 
     def test_main_register_decorator_uses_plugin_name_constant(self):
         tree = ast.parse((ROOT / "main.py").read_text(encoding="utf-8"))
@@ -500,11 +550,15 @@ class PublicApiTests(unittest.TestCase):
         moral_repair_protocol_constants = emotion_protocol_constants | {
             "moral_repair_state_schema_version",
         }
+        lifelike_protocol_constants = emotion_protocol_constants | {
+            "lifelike_learning_schema_version",
+        }
         plugin_constants = class_constant_names(main_tree, "EmotionalStatePlugin")
 
         self.assertLessEqual(emotion_protocol_constants, plugin_constants)
         self.assertLessEqual(humanlike_protocol_constants, plugin_constants)
         self.assertLessEqual(moral_repair_protocol_constants, plugin_constants)
+        self.assertLessEqual(lifelike_protocol_constants, plugin_constants)
         self.assertIn("EMOTION_API_VERSION", {node.id for node in ast.walk(public_tree) if isinstance(node, ast.Name)})
         self.assertIn("PUBLIC_API_VERSION", {node.id for node in ast.walk(main_tree) if isinstance(node, ast.Name)})
 
@@ -658,6 +712,7 @@ class MemoryPayloadPublicApiTests(unittest.TestCase):
     def _new_plugin(self, config=None):
         from emotion_engine import EmotionEngine, EmotionParameters
         from humanlike_engine import HumanlikeEngine
+        from lifelike_learning_engine import LifelikeLearningEngine
         from main import EmotionalStatePlugin
         from moral_repair_engine import MoralRepairEngine
         from psychological_screening import PsychologicalScreeningEngine
@@ -668,10 +723,12 @@ class MemoryPayloadPublicApiTests(unittest.TestCase):
         plugin.engine = EmotionEngine(plugin.base_parameters)
         plugin.psychological_engine = PsychologicalScreeningEngine()
         plugin.humanlike_engine = HumanlikeEngine()
+        plugin.lifelike_learning_engine = LifelikeLearningEngine()
         plugin.moral_repair_engine = MoralRepairEngine()
         plugin._memory_cache = {}
         plugin._psychological_memory_cache = {}
         plugin._humanlike_memory_cache = {}
+        plugin._lifelike_learning_memory_cache = {}
         plugin._moral_repair_memory_cache = {}
         plugin._last_request_text = {}
         plugin.context = SimpleNamespace()
@@ -690,6 +747,7 @@ class MemoryPayloadPublicApiTests(unittest.TestCase):
         self.assertEqual(snapshot["session_key"], "s-integrated")
         self.assertEqual(snapshot["modules"]["emotion"]["enabled"], True)
         self.assertEqual(snapshot["modules"]["humanlike"]["enabled"], False)
+        self.assertEqual(snapshot["modules"]["lifelike_learning"]["enabled"], False)
         self.assertEqual(snapshot["modules"]["moral_repair"]["enabled"], False)
         self.assertIn("response_posture", snapshot)
         self.assertIn("connection_readiness", snapshot["state_index"])
@@ -1878,22 +1936,28 @@ class MemoryPayloadPublicApiTests(unittest.TestCase):
         async def fake_delete_humanlike(self, session_key):
             deleted.append(("humanlike", session_key))
 
+        async def fake_delete_lifelike(self, session_key):
+            deleted.append(("lifelike", session_key))
+
         async def fake_delete_moral_repair(self, session_key):
             deleted.append(("moral_repair", session_key))
 
         original_delete_state = EmotionalStatePlugin._delete_state
         original_delete_psychological = EmotionalStatePlugin._delete_psychological_state
         original_delete_humanlike = EmotionalStatePlugin._delete_humanlike_state
+        original_delete_lifelike = EmotionalStatePlugin._delete_lifelike_learning_state
         original_delete_moral_repair = EmotionalStatePlugin._delete_moral_repair_state
         EmotionalStatePlugin._delete_state = fake_delete_state
         EmotionalStatePlugin._delete_psychological_state = fake_delete_psychological
         EmotionalStatePlugin._delete_humanlike_state = fake_delete_humanlike
+        EmotionalStatePlugin._delete_lifelike_learning_state = fake_delete_lifelike
         EmotionalStatePlugin._delete_moral_repair_state = fake_delete_moral_repair
         try:
             locked = self._new_plugin(
                 {
                     "allow_emotion_reset_backdoor": False,
                     "allow_humanlike_reset_backdoor": False,
+                    "allow_lifelike_learning_reset_backdoor": False,
                     "allow_moral_repair_reset_backdoor": False,
                 },
             )
@@ -1905,6 +1969,9 @@ class MemoryPayloadPublicApiTests(unittest.TestCase):
             )
             self.assertFalse(
                 asyncio.run(locked.reset_humanlike_state(session_key="s1")),
+            )
+            self.assertFalse(
+                asyncio.run(locked.reset_lifelike_learning_state(session_key="s1")),
             )
             self.assertFalse(
                 asyncio.run(locked.reset_moral_repair_state(session_key="s1")),
@@ -1922,12 +1989,16 @@ class MemoryPayloadPublicApiTests(unittest.TestCase):
                 asyncio.run(allowed.reset_humanlike_state(session_key="s1")),
             )
             self.assertTrue(
+                asyncio.run(allowed.reset_lifelike_learning_state(session_key="s1")),
+            )
+            self.assertTrue(
                 asyncio.run(allowed.reset_moral_repair_state(session_key="s1")),
             )
         finally:
             EmotionalStatePlugin._delete_state = original_delete_state
             EmotionalStatePlugin._delete_psychological_state = original_delete_psychological
             EmotionalStatePlugin._delete_humanlike_state = original_delete_humanlike
+            EmotionalStatePlugin._delete_lifelike_learning_state = original_delete_lifelike
             EmotionalStatePlugin._delete_moral_repair_state = original_delete_moral_repair
 
         self.assertEqual(
@@ -1936,6 +2007,7 @@ class MemoryPayloadPublicApiTests(unittest.TestCase):
                 ("emotion", "s1"),
                 ("psychological", "s1"),
                 ("humanlike", "s1"),
+                ("lifelike", "s1"),
                 ("moral_repair", "s1"),
             ],
         )
@@ -2068,6 +2140,83 @@ class MemoryPayloadPublicApiTests(unittest.TestCase):
         self.assertEqual(values, {})
         self.assertEqual(fragment, "")
 
+    def test_lifelike_direct_public_api_disabled_payloads(self):
+        self._install_astrbot_stubs()
+        from main import EmotionalStatePlugin
+
+        async def fake_load_lifelike_state(self, session_key):
+            raise AssertionError("disabled lifelike API must not load state")
+
+        original_load_lifelike = EmotionalStatePlugin._load_lifelike_learning_state
+        EmotionalStatePlugin._load_lifelike_learning_state = fake_load_lifelike_state
+        try:
+            plugin = self._new_plugin()
+            snapshot = asyncio.run(
+                plugin.get_lifelike_learning_snapshot(
+                    session_key="s-life",
+                    include_prompt_fragment=True,
+                ),
+            )
+            policy = asyncio.run(
+                plugin.get_lifelike_initiative_policy(session_key="s-life"),
+            )
+            fragment = asyncio.run(
+                plugin.get_lifelike_prompt_fragment(session_key="s-life"),
+            )
+        finally:
+            EmotionalStatePlugin._load_lifelike_learning_state = original_load_lifelike
+
+        self.assertFalse(snapshot["enabled"])
+        self.assertEqual(snapshot["reason"], "enable_lifelike_learning is false")
+        self.assertEqual(snapshot["prompt_fragment"], "")
+        self.assertEqual(policy["action"], "brief_ack")
+        self.assertEqual(fragment, "")
+
+    def test_lifelike_observe_can_commit_and_simulate_without_saving(self):
+        self._install_astrbot_stubs()
+        from lifelike_learning_engine import LifelikeLearningState
+        from main import EmotionalStatePlugin
+
+        saved = []
+
+        async def fake_load(self, session_key):
+            state = LifelikeLearningState.initial()
+            state.updated_at = 100.0
+            return state
+
+        async def fake_save(self, session_key, state):
+            saved.append((session_key, state))
+
+        original_load = EmotionalStatePlugin._load_lifelike_learning_state
+        original_save = EmotionalStatePlugin._save_lifelike_learning_state
+        EmotionalStatePlugin._load_lifelike_learning_state = fake_load
+        EmotionalStatePlugin._save_lifelike_learning_state = fake_save
+        try:
+            plugin = self._new_plugin({"enable_lifelike_learning": True})
+            committed = asyncio.run(
+                plugin.observe_lifelike_text(
+                    session_key="s-life",
+                    text="『桥隧猫』就是会熬夜改桥梁模型的人，我喜欢自然聊天。",
+                    observed_at=120.0,
+                ),
+            )
+            simulated = asyncio.run(
+                plugin.simulate_lifelike_update(
+                    session_key="s-life",
+                    text="桥隧猫就是会熬夜改桥梁模型的人。",
+                    observed_at=130.0,
+                ),
+            )
+        finally:
+            EmotionalStatePlugin._load_lifelike_learning_state = original_load
+            EmotionalStatePlugin._save_lifelike_learning_state = original_save
+
+        self.assertEqual(saved[0][0], "s-life")
+        self.assertTrue(committed["observation"]["committed"])
+        self.assertIn("桥隧猫", committed["lexicon"])
+        self.assertFalse(simulated["observation"]["committed"])
+        self.assertEqual(len(saved), 1)
+
     def test_memory_payload_can_disable_humanlike_annotation(self):
         self._install_astrbot_stubs()
         from emotion_engine import EmotionState
@@ -2105,6 +2254,74 @@ class MemoryPayloadPublicApiTests(unittest.TestCase):
         self.assertEqual(payload["emotion_at_write"]["label"], "calm")
         self.assertEqual(payload["memory_text"], "memory")
         self.assertEqual(payload["session_key"], "livingmemory:user-1")
+
+    def test_memory_payload_can_include_lifelike_annotation_without_raw_snapshot(self):
+        self._install_astrbot_stubs()
+        from emotion_engine import EmotionState
+        from main import EmotionalStatePlugin
+
+        async def fake_load_state(self, session_key, persona_profile=None):
+            state = EmotionState.initial()
+            state.label = "curious"
+            return state
+
+        async def fake_lifelike_snapshot(self, *args, **kwargs):
+            return {
+                "schema_version": "astrbot.lifelike_learning_state.v1",
+                "kind": "lifelike_learning_state",
+                "session_key": kwargs["session_key"],
+                "enabled": True,
+                "updated_at": 12.0,
+                "initiative_policy": {
+                    "action": "ask_clarifying",
+                    "uncertain_terms": ["桥隧猫"],
+                },
+                "common_ground": {
+                    "known_terms": [
+                        {
+                            "term": "桥隧猫",
+                            "confidence": 0.4,
+                            "ask_before_using": True,
+                            "sensitive": False,
+                        },
+                    ],
+                    "profile_counts": {"likes": 1},
+                },
+                "flags": ["local_jargon_detected"],
+                "privacy": {"raw_message_text_excluded": True},
+            }
+
+        original_load_state = EmotionalStatePlugin._load_state
+        original_lifelike_snapshot = EmotionalStatePlugin.get_lifelike_learning_snapshot
+        EmotionalStatePlugin._load_state = fake_load_state
+        EmotionalStatePlugin.get_lifelike_learning_snapshot = fake_lifelike_snapshot
+        try:
+            payload = asyncio.run(
+                self._new_plugin(
+                    {
+                        "humanlike_memory_write_enabled": False,
+                        "moral_repair_memory_write_enabled": False,
+                    },
+                ).build_emotion_memory_payload(
+                    session_key="livingmemory:lifelike",
+                    memory="plain memory",
+                    source="livingmemory",
+                    include_raw_snapshot=False,
+                    written_at=20.0,
+                ),
+            )
+        finally:
+            EmotionalStatePlugin._load_state = original_load_state
+            EmotionalStatePlugin.get_lifelike_learning_snapshot = original_lifelike_snapshot
+
+        self.assertIn("lifelike_learning_state_at_write", payload)
+        self.assertNotIn("lifelike_learning_snapshot", payload)
+        annotation = payload["lifelike_learning_state_at_write"]
+        self.assertEqual(annotation["kind"], "lifelike_learning_state_at_write")
+        self.assertEqual(annotation["initiative_policy"]["action"], "ask_clarifying")
+        envelope = payload["state_annotations_at_write"]
+        self.assertIn("lifelike_learning_state_at_write", envelope["annotation_keys"])
+        self.assertIn("lifelike_learning_state_at_write", envelope["annotations"])
 
     def test_livingmemory_shaped_write_uses_frozen_minimal_payload(self):
         self._install_astrbot_stubs()

@@ -199,6 +199,66 @@ class IntegratedSelfTests(unittest.TestCase):
         self.assertIn("crisis_like_signal", plan["must_preserve_signals"])
         self.assertIn("diagnose_mental_disorder", plan["blocked_actions"])
 
+    def test_lifelike_learning_uncertain_jargon_prefers_clarification(self):
+        snapshot = build_integrated_self_snapshot(
+            session_key="s-life",
+            emotion_snapshot={
+                "schema_version": "astrbot.emotion_state.v2",
+                "kind": "emotion_state",
+                "values": {"valence": 0.1, "affiliation": 0.2},
+            },
+            lifelike_learning_snapshot={
+                "schema_version": "astrbot.lifelike_learning_state.v1",
+                "kind": "lifelike_learning_state",
+                "enabled": True,
+                "updated_at": 95.0,
+                "values": {
+                    "common_ground": 0.18,
+                    "familiarity": 0.25,
+                    "initiative_readiness": 0.45,
+                    "silence_comfort": 0.35,
+                },
+                "initiative_policy": {
+                    "action": "ask_clarifying",
+                    "uncertain_terms": ["桥隧猫"],
+                },
+                "flags": ["local_jargon_detected"],
+            },
+            now=100.0,
+        )
+
+        self.assertEqual(snapshot["response_posture"], "curious_clarification")
+        self.assertIn("ask_light_clarifying_question", snapshot["allowed_actions"])
+        self.assertIn("lifelike_initiative_policy", snapshot["policy_plan"]["must_preserve_signals"])
+        self.assertTrue(any(item["module"] == "lifelike_learning" for item in snapshot["causal_trace"]))
+
+    def test_lifelike_learning_high_boundary_prefers_quiet_presence(self):
+        snapshot = build_integrated_self_snapshot(
+            session_key="s-quiet",
+            emotion_snapshot={
+                "schema_version": "astrbot.emotion_state.v2",
+                "kind": "emotion_state",
+                "values": {"valence": 0.0, "affiliation": 0.0},
+            },
+            lifelike_learning_snapshot={
+                "schema_version": "astrbot.lifelike_learning_state.v1",
+                "kind": "lifelike_learning_state",
+                "enabled": True,
+                "values": {
+                    "common_ground": 0.5,
+                    "boundary_sensitivity": 0.88,
+                    "initiative_readiness": 0.2,
+                    "silence_comfort": 0.82,
+                },
+                "initiative_policy": {"action": "stay_silent"},
+            },
+            now=100.0,
+        )
+
+        self.assertEqual(snapshot["response_posture"], "quiet_presence")
+        self.assertIn("wait_for_user_lead", snapshot["allowed_actions"])
+        self.assertGreater(snapshot["state_index"]["silence_comfort"], 0.8)
+
     def test_compatibility_probe_reports_missing_fields(self):
         good = build_integrated_self_snapshot(
             session_key="s-ok",

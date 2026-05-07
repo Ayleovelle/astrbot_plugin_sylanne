@@ -27,6 +27,7 @@ def build_integrated_self_snapshot(
     session_key: str,
     emotion_snapshot: dict[str, Any],
     humanlike_snapshot: dict[str, Any] | None = None,
+    lifelike_learning_snapshot: dict[str, Any] | None = None,
     moral_repair_snapshot: dict[str, Any] | None = None,
     psychological_snapshot: dict[str, Any] | None = None,
     include_raw_snapshots: bool = False,
@@ -37,34 +38,40 @@ def build_integrated_self_snapshot(
     now = time.time() if now is None else float(now)
     degradation_profile = _normalize_degradation_profile(degradation_profile)
     humanlike_snapshot = humanlike_snapshot or {}
+    lifelike_learning_snapshot = lifelike_learning_snapshot or {}
     moral_repair_snapshot = moral_repair_snapshot or {}
     psychological_snapshot = psychological_snapshot or {}
 
     emotion_values = _emotion_values(emotion_snapshot)
     humanlike_values = _values(humanlike_snapshot)
+    lifelike_values = _values(lifelike_learning_snapshot)
     moral_values = _values(moral_repair_snapshot)
     psych_values = _values(psychological_snapshot)
 
     modules = {
         "emotion": _module_status(emotion_snapshot, default_enabled=True),
         "humanlike": _module_status(humanlike_snapshot),
+        "lifelike_learning": _module_status(lifelike_learning_snapshot),
         "moral_repair": _module_status(moral_repair_snapshot),
         "psychological_screening": _module_status(psychological_snapshot),
     }
     flags = _dedupe(
         _string_list(humanlike_snapshot.get("flags"))
+        + _string_list(lifelike_learning_snapshot.get("flags"))
         + _string_list(moral_repair_snapshot.get("flags"))
         + _string_list((psychological_snapshot.get("risk") or {}).get("red_flags"))
     )
     risk = _integrated_risk(
         emotion_snapshot=emotion_snapshot,
         humanlike_snapshot=humanlike_snapshot,
+        lifelike_learning_snapshot=lifelike_learning_snapshot,
         moral_repair_snapshot=moral_repair_snapshot,
         psychological_snapshot=psychological_snapshot,
     )
     posture = _derive_response_posture(
         emotion_snapshot=emotion_snapshot,
         humanlike_snapshot=humanlike_snapshot,
+        lifelike_learning_snapshot=lifelike_learning_snapshot,
         moral_repair_snapshot=moral_repair_snapshot,
         psychological_snapshot=psychological_snapshot,
         risk=risk,
@@ -73,6 +80,7 @@ def build_integrated_self_snapshot(
     state_index = _state_index(
         emotion_values=emotion_values,
         humanlike_values=humanlike_values,
+        lifelike_values=lifelike_values,
         moral_values=moral_values,
         psych_values=psych_values,
         risk=risk,
@@ -81,12 +89,14 @@ def build_integrated_self_snapshot(
         posture=posture,
         risk=risk,
         emotion_snapshot=emotion_snapshot,
+        lifelike_learning_snapshot=lifelike_learning_snapshot,
         moral_repair_snapshot=moral_repair_snapshot,
         psychological_snapshot=psychological_snapshot,
     )
     causal_trace = build_integrated_self_causal_trace(
         emotion_snapshot=emotion_snapshot,
         humanlike_snapshot=humanlike_snapshot,
+        lifelike_learning_snapshot=lifelike_learning_snapshot,
         moral_repair_snapshot=moral_repair_snapshot,
         psychological_snapshot=psychological_snapshot,
         now=now,
@@ -131,6 +141,7 @@ def build_integrated_self_snapshot(
         payload["snapshots"] = {
             "emotion": emotion_snapshot,
             "humanlike": humanlike_snapshot,
+            "lifelike_learning": lifelike_learning_snapshot,
             "moral_repair": moral_repair_snapshot,
             "psychological_screening": psychological_snapshot,
         }
@@ -141,6 +152,7 @@ def build_integrated_self_causal_trace(
     *,
     emotion_snapshot: dict[str, Any],
     humanlike_snapshot: dict[str, Any] | None = None,
+    lifelike_learning_snapshot: dict[str, Any] | None = None,
     moral_repair_snapshot: dict[str, Any] | None = None,
     psychological_snapshot: dict[str, Any] | None = None,
     now: float | None = None,
@@ -150,6 +162,7 @@ def build_integrated_self_causal_trace(
     now = time.time() if now is None else float(now)
     profile = _normalize_degradation_profile(degradation_profile)
     humanlike_snapshot = humanlike_snapshot or {}
+    lifelike_learning_snapshot = lifelike_learning_snapshot or {}
     moral_repair_snapshot = moral_repair_snapshot or {}
     psychological_snapshot = psychological_snapshot or {}
     trace: list[dict[str, Any]] = []
@@ -243,6 +256,41 @@ def build_integrated_self_causal_trace(
                 ),
             )
 
+    lifelike_values = _values(lifelike_learning_snapshot)
+    initiative_policy = (
+        lifelike_learning_snapshot.get("initiative_policy")
+        if isinstance(lifelike_learning_snapshot.get("initiative_policy"), dict)
+        else {}
+    )
+    if lifelike_values or initiative_policy:
+        trace.append(
+            _trace_item(
+                module="lifelike_learning",
+                signal=f"initiative:{initiative_policy.get('action', 'unknown')}",
+                evidence_weight=max(
+                    lifelike_values.get("common_ground", 0.0),
+                    lifelike_values.get("familiarity", 0.0),
+                    lifelike_values.get("boundary_sensitivity", 0.0),
+                    0.36,
+                ),
+                captured_at=lifelike_learning_snapshot.get("updated_at"),
+                now=now,
+                summary=(
+                    _compact_key_values(
+                        lifelike_values,
+                        (
+                            "common_ground",
+                            "familiarity",
+                            "initiative_readiness",
+                            "silence_comfort",
+                        ),
+                    )
+                    + f"; action={initiative_policy.get('action', 'unknown')}"
+                ),
+                flags=_string_list(lifelike_learning_snapshot.get("flags"), limit=6),
+            ),
+        )
+
     moral_values = _values(moral_repair_snapshot)
     moral_risk = moral_repair_snapshot.get("risk") if isinstance(moral_repair_snapshot.get("risk"), dict) else {}
     if moral_values or moral_repair_snapshot.get("flags"):
@@ -334,12 +382,16 @@ def build_integrated_self_policy_plan(
     boundary = clamp(state_index.get("boundary_need", 0.0))
     repair = clamp(state_index.get("repair_pressure", 0.0))
     connection = clamp(state_index.get("connection_readiness", 0.0))
+    initiative = clamp(state_index.get("initiative_readiness", 0.0))
+    silence = clamp(state_index.get("silence_comfort", 0.0))
     modulation = {
         "warmth": round(clamp(0.35 + 0.45 * connection + 0.15 * repair - 0.30 * boundary - 0.40 * safety), 6),
-        "brevity": round(clamp(0.18 + 0.45 * boundary + 0.20 * safety), 6),
+        "brevity": round(clamp(0.18 + 0.45 * boundary + 0.20 * safety + 0.18 * silence), 6),
         "boundary_directness": round(clamp(0.22 + 0.58 * boundary + 0.18 * safety), 6),
         "repair_directness": round(clamp(0.20 + 0.62 * repair), 6),
-        "persona_intensity": round(clamp(0.82 - 0.55 * safety - 0.25 * boundary), 6),
+        "persona_intensity": round(clamp(0.82 + 0.10 * initiative - 0.55 * safety - 0.25 * boundary), 6),
+        "initiative": round(initiative, 6),
+        "silence_preference": round(silence, 6),
     }
     trace_limit = _trace_limit(profile)
     if profile == "minimal":
@@ -360,6 +412,8 @@ def build_integrated_self_policy_plan(
         must_preserve.append("moral_repair_transparency")
     if risk.get("relationship_boundary_active"):
         must_preserve.append("relationship_boundary_active")
+    if posture in {"quiet_presence", "curious_clarification"}:
+        must_preserve.append("lifelike_initiative_policy")
     return {
         "schema_version": "astrbot.integrated_self_policy_plan.v1",
         "kind": "integrated_self_policy_plan",
@@ -563,6 +617,7 @@ def build_state_annotations_memory_envelope(
     annotation_keys = (
         "emotion_at_write",
         "humanlike_state_at_write",
+        "lifelike_learning_state_at_write",
         "moral_repair_state_at_write",
         "integrated_self_state_at_write",
     )
@@ -635,6 +690,7 @@ def _integrated_risk(
     *,
     emotion_snapshot: dict[str, Any],
     humanlike_snapshot: dict[str, Any],
+    lifelike_learning_snapshot: dict[str, Any],
     moral_repair_snapshot: dict[str, Any],
     psychological_snapshot: dict[str, Any],
 ) -> dict[str, Any]:
@@ -644,6 +700,7 @@ def _integrated_risk(
         _string_list(psych_risk.get("red_flags"))
         + _string_list(moral_repair_snapshot.get("flags"))
         + _string_list(humanlike_snapshot.get("flags"))
+        + _string_list(lifelike_learning_snapshot.get("flags"))
     )
     requires_human_review = bool(psych_risk.get("requires_human_review"))
     crisis_like = bool(psych_risk.get("crisis_like_signal") or psych_risk.get("other_harm_signal"))
@@ -681,6 +738,7 @@ def _derive_response_posture(
     *,
     emotion_snapshot: dict[str, Any],
     humanlike_snapshot: dict[str, Any],
+    lifelike_learning_snapshot: dict[str, Any],
     moral_repair_snapshot: dict[str, Any],
     psychological_snapshot: dict[str, Any],
     risk: dict[str, Any],
@@ -693,9 +751,21 @@ def _derive_response_posture(
     if priority == "transparent_repair":
         return "transparent_repair"
     human_values = _values(humanlike_snapshot)
+    lifelike_policy = (
+        lifelike_learning_snapshot.get("initiative_policy")
+        if isinstance(lifelike_learning_snapshot.get("initiative_policy"), dict)
+        else {}
+    )
+    lifelike_action = str(lifelike_policy.get("action") or "")
     moral_values = _values(moral_repair_snapshot)
+    if lifelike_action == "safety_interrupt":
+        return "crisis_support"
     if _has_active_effect(emotion_snapshot, "cold_war") or human_values.get("boundary_need", 0.0) >= 0.65:
         return "bounded_distance"
+    if lifelike_action == "ask_clarifying":
+        return "curious_clarification"
+    if lifelike_action == "stay_silent":
+        return "quiet_presence"
     if moral_values.get("repair_motivation", 0.0) >= 0.55 or moral_values.get("trust_repair", 0.0) >= 0.55:
         return "warm_repair"
     emotion_values = _emotion_values(emotion_snapshot)
@@ -737,6 +807,16 @@ def _derive_allowed_actions(posture: str, risk: dict[str, Any]) -> list[str]:
             "confirm_user_intent",
             "keep_accountability_visible",
         ],
+        "curious_clarification": [
+            "ask_light_clarifying_question",
+            "avoid_pretending_to_know",
+            "keep_reply_natural",
+        ],
+        "quiet_presence": [
+            "use_minimal_ack_if_required",
+            "do_not_force_topic",
+            "wait_for_user_lead",
+        ],
         "warm_presence": [
             "respond_warmly",
             "match_persona_style",
@@ -758,6 +838,7 @@ def _state_index(
     *,
     emotion_values: dict[str, float],
     humanlike_values: dict[str, float],
+    lifelike_values: dict[str, float],
     moral_values: dict[str, float],
     psych_values: dict[str, float],
     risk: dict[str, Any],
@@ -766,14 +847,18 @@ def _state_index(
         0.42
         + 0.24 * emotion_values.get("valence", 0.0)
         + 0.24 * emotion_values.get("affiliation", 0.0)
+        + 0.18 * lifelike_values.get("common_ground", 0.0)
+        + 0.10 * lifelike_values.get("familiarity", 0.0)
         + 0.18 * moral_values.get("trust_repair", 0.0)
         - 0.22 * humanlike_values.get("boundary_need", 0.0)
+        - 0.18 * lifelike_values.get("boundary_sensitivity", 0.0)
         - 0.18 * moral_values.get("avoidance_risk", 0.0)
         - 0.20 * psych_values.get("distress", 0.0),
     )
     boundary = clamp(
         max(
             humanlike_values.get("boundary_need", 0.0),
+            lifelike_values.get("boundary_sensitivity", 0.0),
             moral_values.get("avoidance_risk", 0.0),
             psych_values.get("distress", 0.0),
             0.72 if risk.get("relationship_boundary_active") else 0.0,
@@ -801,6 +886,9 @@ def _state_index(
         "boundary_need": round(boundary, 6),
         "repair_pressure": round(repair, 6),
         "safety_priority": round(safety, 6),
+        "common_ground": round(clamp(lifelike_values.get("common_ground", 0.0)), 6),
+        "initiative_readiness": round(clamp(lifelike_values.get("initiative_readiness", 0.0)), 6),
+        "silence_comfort": round(clamp(lifelike_values.get("silence_comfort", 0.0)), 6),
     }
 
 
@@ -809,6 +897,7 @@ def _arbitration_payload(
     posture: str,
     risk: dict[str, Any],
     emotion_snapshot: dict[str, Any],
+    lifelike_learning_snapshot: dict[str, Any],
     moral_repair_snapshot: dict[str, Any],
     psychological_snapshot: dict[str, Any],
 ) -> dict[str, Any]:
@@ -819,6 +908,13 @@ def _arbitration_payload(
         reasons.append("moral repair requires transparent correction, not strategy generation")
     if risk.get("relationship_boundary_active"):
         reasons.append("emotion consequence indicates temporary relationship boundary")
+    initiative_policy = (
+        lifelike_learning_snapshot.get("initiative_policy")
+        if isinstance(lifelike_learning_snapshot.get("initiative_policy"), dict)
+        else {}
+    )
+    if initiative_policy.get("action") in {"ask_clarifying", "stay_silent", "brief_ack"}:
+        reasons.append(f"lifelike_initiative={initiative_policy.get('action')}")
     relationship = emotion_snapshot.get("relationship") if isinstance(emotion_snapshot.get("relationship"), dict) else {}
     decision = (relationship.get("relationship_decision") or {}).get("decision")
     if decision:
@@ -831,6 +927,7 @@ def _arbitration_payload(
             "psychological_safety",
             "moral_repair_transparency",
             "relationship_boundary",
+            "lifelike_common_ground_and_initiative",
             "humanlike_resource_modulation",
             "emotion_style",
         ],

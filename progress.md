@@ -1953,3 +1953,110 @@ Status: complete and published.
   - download URL: `https://github.com/Ayleovelle/astrbot_plugin_emotional_state/releases/download/v0.0.2-beta/astrbot_plugin_emotional_state.zip`.
   - Note: a later local bookkeeping commit `63de191` records GCM recovery; Git HTTPS transport reset before it could be pushed, but the published prerelease targets the validated feature release commit and package.
 
+## 2026-05-08 Iterations 77-86 Lifelike Learning Stack
+
+Status: complete locally and remote-tested on the test server.
+
+- Added `lifelike_learning_engine.py`:
+  - schema `astrbot.lifelike_learning_state.v1`;
+  - 8D state: familiarity, common_ground, jargon_density, preference_certainty, rapport, boundary_sensitivity, initiative_readiness, silence_comfort;
+  - local jargon/new-word extraction with `ask_before_using` until confidence is high enough;
+  - user profile evidence for preferences, dislikes, boundary notes, and behavioral style;
+  - real-time half-life decay, min-update interval gating, trajectory cap, sanitized public payloads, prompt fragment, and LivingMemory annotation.
+- Integrated lifelike learning into runtime:
+  - `main.py` lifecycle update/injection when `enable_lifelike_learning=true`;
+  - KV persistence under `lifelike_learning:<session>`;
+  - `/lifelike_state`, `/lifelike_reset`, aliases `/生命化状态`, `/共同语境`, `/生命化状态重置`, `/共同语境重置`;
+  - LLM tool `get_bot_lifelike_learning_state`;
+  - public methods `get_lifelike_learning_snapshot`, `get_lifelike_initiative_policy`, `get_lifelike_prompt_fragment`, `observe_lifelike_text`, `simulate_lifelike_update`, `reset_lifelike_learning_state`.
+- Public API and memory compatibility:
+  - exported `LIFELIKE_LEARNING_SCHEMA_VERSION`;
+  - added `LifelikeLearningServiceProtocol` and `get_lifelike_learning_service`;
+  - `build_emotion_memory_payload` now writes `lifelike_learning_state_at_write` when `lifelike_learning_memory_write_enabled=true`;
+  - integrated self memory envelope can include lifelike annotation without raw message text.
+- Integrated-self arbitration now consumes lifelike snapshots:
+  - uncertain jargon can prefer `curious_clarification`;
+  - high boundary/silence comfort can prefer `quiet_presence`;
+  - state index includes common_ground, initiative_readiness, and silence_comfort.
+- Config/docs/package:
+  - `_conf_schema.json` added 9 lifelike config keys;
+  - README documents lifelike configs, commands, LLM tool, public API, LivingMemory annotation, release runtime files, and remote cleanup-before-test flow;
+  - package builder and zip preflight include `lifelike_learning_engine.py`.
+- Added `scripts/remote_cleanup_plugin_playwright.js` for destructive reinstall tests:
+  - allowlisted only to `astrbot_plugin_emotional_state`;
+  - exact-confirm env var `ASTRBOT_REMOTE_CLEAN_CONFIRM=astrbot_plugin_emotional_state`;
+  - deletes only exact formal plugin and exact `plugin_upload_astrbot_plugin_emotional_state`;
+  - always uses `delete_config=false` and `delete_data=false`;
+  - reports LivingMemory visibility and does not target it.
+- Fixed `scripts/remote_install_upload_playwright.js` after remote upload exposed two issues:
+  - `Array.from(zipBytes)` caused Node heap exhaustion for the 25MB zip;
+  - Playwright API request upload returned 401 because it did not carry the page login context;
+  - final fix uses page-context `fetch` with base64-to-Blob conversion, preserving authorization without huge numeric arrays.
+
+Validation completed:
+
+- `py -3.13 -m unittest discover -s tests -v`: 236 tests passed.
+- `py -3.13 -m py_compile main.py emotion_engine.py humanlike_engine.py lifelike_learning_engine.py integrated_self.py moral_repair_engine.py psychological_screening.py public_api.py prompts.py scripts\build_literature_kb.py scripts\build_personality_literature_kb.py scripts\build_psychological_literature_kb.py scripts\build_humanlike_agent_literature_kb.py scripts\package_plugin.py`: passed.
+- `py -3.13 -m json.tool _conf_schema.json`: passed.
+- Bundled Node syntax checks passed for `remote_smoke_playwright.js`, `remote_cleanup_plugin_playwright.js`, `remote_install_upload_playwright.js`, and `plugin_zip_preflight.js`.
+- `py -3.13 scripts\package_plugin.py --output dist\astrbot_plugin_emotional_state.zip`: passed.
+- `scripts\plugin_zip_preflight.js dist\astrbot_plugin_emotional_state.zip astrbot_plugin_emotional_state`: `ok=true`, size `25639108`, entries `61`.
+- zip SHA256: `491BD664EE7DAC8AC7A6B4ED256422454772F087FF8FCC1971F84DF5F8ACD4B7`.
+- `git diff --check`: passed with only Windows LF-to-CRLF warnings.
+
+Remote browser validation:
+
+- Cleanup step:
+  - formal candidate before cleanup: `astrbot_plugin_emotional_state`;
+  - `POST /api/plugin/uninstall` returned `status=ok`, message `卸载成功`;
+  - failed upload candidate before cleanup: none;
+  - formal and failed candidates after cleanup: none;
+  - LivingMemory observed before and after with count `1`.
+- Upload step:
+  - installed `dist\astrbot_plugin_emotional_state.zip`;
+  - upload returned `status=ok`, message `安装成功。`;
+  - plugin count increased from `13` to `14`;
+  - `astrbot_plugin_emotional_state` present;
+  - failed plugin map remained `{}`.
+- Strict remote smoke:
+  - AstrBot version `4.24.2`;
+  - expected plugin found and activated;
+  - version matched `0.0.2-beta`;
+  - display name matched `多维情绪状态`;
+  - `expectedPluginChecks.ok=true`;
+  - `expectedFailedPlugin=null`;
+  - failed plugin count `0`;
+  - UI showed `多维情绪状态 0.0.2-beta`;
+  - `astrbot_plugin_livingmemory 2.2.10` remained visible.
+
+## 2026-05-08 Iteration 87 README beta-pr Sequence Lock
+
+Status: complete locally and remote-tested after README update.
+
+- Added the README section `0.0.2-beta PR 迭代记录`.
+- Recorded the completed local prerelease sequence from `0.0.2-beta-pr-1` through `0.0.2-beta-pr-10` in strict order.
+- Clarified that `0.0.2-beta-pr-x` is a local prerelease iteration number and does not change the externally installed `metadata.yaml` version `0.0.2-beta`.
+- Added `tests/test_remote_smoke_contract.py::test_readme_records_beta_pr_iterations_in_order` so README order and `complete` status cannot drift silently.
+- Updated `task_plan.md` entry 87 with the README sequence and contract-test lock.
+- Rebuilt `dist\astrbot_plugin_emotional_state.zip` after README/progress changes:
+  - size `25639936`;
+  - entries `61`;
+  - SHA256 `41E048685B10A7C56B901297F7A775615037DA8CE65488E19DC6F2AB59418FE3`.
+- Validation after the README sequence lock:
+  - targeted README/config/command contract tests: 46 passed;
+  - `py_compile` for core runtime modules and `scripts\package_plugin.py`: passed;
+  - `_conf_schema.json` parsed with `json.tool`: passed;
+  - full unit suite: 237 tests passed;
+  - bundled Node syntax checks passed for remote cleanup, remote upload, remote smoke, and zip preflight scripts;
+  - zip preflight: `ok=true`.
+- Remote browser validation after cleanup-before-install:
+  - cleanup deleted only exact `astrbot_plugin_emotional_state`, with `delete_config=false` and `delete_data=false`;
+  - LivingMemory observed before/after cleanup with count `1`;
+  - upload installed the rebuilt zip and increased plugin count from `13` to `14`;
+  - strict smoke passed on AstrBot `4.24.2`;
+  - remote runtime version matched `0.0.2-beta`;
+  - display name matched `多维情绪状态`;
+  - `expectedPluginChecks.ok=true`;
+  - failed plugin count `0`;
+  - LivingMemory remained visible as `astrbot_plugin_livingmemory 2.2.10`.
+

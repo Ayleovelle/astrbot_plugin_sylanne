@@ -10,7 +10,8 @@ This checklist protects the current plugin baseline from being split across dirt
    - `output/`,
    - `__pycache__/`,
    - `*.py[cod]`,
-   - `.pytest_cache/`.
+   - `.pytest_cache/`,
+   - local-only literature KB paths and KB build helpers.
 3. Run local validation. Use Codex bundled Node when it exists; otherwise fall back to `node` from `PATH`:
 
 ```powershell
@@ -19,9 +20,10 @@ $nodeModules = "$HOME\.cache\codex-runtimes\codex-primary-runtime\dependencies\n
 if (Test-Path $node) { $env:NODE_PATH = $nodeModules } else { $node = "node" }
 
 py -3.13 -m unittest discover -s tests -v
-py -3.13 -m py_compile main.py emotion_engine.py humanlike_engine.py integrated_self.py moral_repair_engine.py psychological_screening.py public_api.py prompts.py scripts\build_literature_kb.py scripts\build_humanlike_agent_literature_kb.py scripts\build_psychological_literature_kb.py scripts\package_plugin.py
+py -3.13 -m py_compile main.py emotion_engine.py humanlike_engine.py lifelike_learning_engine.py integrated_self.py moral_repair_engine.py psychological_screening.py public_api.py prompts.py scripts\package_plugin.py
 py -3.13 scripts\package_plugin.py --output dist\astrbot_plugin_emotional_state.zip
 & $node --check scripts\remote_smoke_playwright.js
+& $node --check scripts\remote_cleanup_plugin_playwright.js
 & $node --check scripts\remote_install_upload_playwright.js
 & $node --check scripts\plugin_zip_preflight.js
 & $node scripts\plugin_zip_preflight.js dist\astrbot_plugin_emotional_state.zip astrbot_plugin_emotional_state
@@ -77,7 +79,7 @@ After `main` is clean:
 Only run `scripts\remote_install_upload_playwright.js` after:
 
 - the package preflight passes,
-- the preflight confirms the zip contains the runtime root files `__init__.py`, `main.py`, `emotion_engine.py`, `humanlike_engine.py`, `integrated_self.py`, `moral_repair_engine.py`, `psychological_screening.py`, `prompts.py`, and `public_api.py`,
+- the preflight confirms the zip contains the runtime root files `__init__.py`, `main.py`, `emotion_engine.py`, `humanlike_engine.py`, `lifelike_learning_engine.py`, `integrated_self.py`, `moral_repair_engine.py`, `psychological_screening.py`, `prompts.py`, and `public_api.py`,
 - the preflight confirms the zip contains the dependency declaration `requirements.txt`,
 - the preflight confirms the zip contains `LICENSE` and `metadata.yaml` declares `license: GPL-3.0-or-later`,
 - the preflight confirms zip `metadata.yaml` `name:` matches `ASTRBOT_EXPECT_PLUGIN`,
@@ -88,3 +90,17 @@ Only run `scripts\remote_install_upload_playwright.js` after:
 - the target server is intended to receive a new upload.
 
 Use `scripts\remote_smoke_playwright.js` for ordinary repeated validation.
+
+## Remote Cleanup Rule
+
+Only run `scripts\remote_cleanup_plugin_playwright.js` immediately before a destructive reinstall test, and only with:
+
+```powershell
+$env:ASTRBOT_EXPECT_PLUGIN = "astrbot_plugin_emotional_state"
+$env:ASTRBOT_REMOTE_CLEAN_CONFIRM = "astrbot_plugin_emotional_state"
+$env:ASTRBOT_REMOTE_CLEAN_FORMAL = "1"
+$env:ASTRBOT_REMOTE_CLEAN_FAILED_UPLOAD = "1"
+& $node scripts\remote_cleanup_plugin_playwright.js
+```
+
+The cleanup script is allowlisted to `astrbot_plugin_emotional_state`. It may delete only the exact formal plugin record and the exact failed-upload directory `plugin_upload_astrbot_plugin_emotional_state`, always with `delete_config=false` and `delete_data=false`. It must not delete LivingMemory or unrelated plugins.

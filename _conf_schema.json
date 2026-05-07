@@ -280,6 +280,57 @@
     "default": true,
     "hint": "默认开启，用于异常状态、严重后果或调试。"
   },
+  "enable_lifelike_learning": {
+    "description": "启用生命化学习状态模块",
+    "type": "bool",
+    "default": false,
+    "hint": "默认关闭。开启后会按会话持久化学习用户画像、新词、小圈子黑话、偏好、边界和说话/沉默时机。"
+  },
+  "lifelike_learning_injection_strength": {
+    "description": "生命化学习 prompt 注入强度",
+    "type": "float",
+    "default": 0.3,
+    "hint": "0 表示只学习不注入；大于 0 时在 inject_state 和 enable_lifelike_learning 同时开启后注入共同语境与节奏建议。"
+  },
+  "lifelike_learning_half_life_seconds": {
+    "description": "生命化学习状态真实时间半衰期（秒）",
+    "type": "float",
+    "default": 2592000,
+    "hint": "默认 30 天。用户画像、共同语境和关系熟悉度按真实时间缓慢回落，不能靠短时间刷屏覆盖。"
+  },
+  "lifelike_learning_min_update_interval_seconds": {
+    "description": "生命化学习反刷屏最小有效更新时间间隔（秒）",
+    "type": "float",
+    "default": 10
+  },
+  "lifelike_learning_max_terms": {
+    "description": "生命化学习最多保留的新词/黑话条目数",
+    "type": "int",
+    "default": 120
+  },
+  "lifelike_learning_trajectory_limit": {
+    "description": "生命化学习轨迹最多保留点数",
+    "type": "int",
+    "default": 60
+  },
+  "lifelike_learning_confidence_growth": {
+    "description": "新词/黑话置信度每次证据增长系数",
+    "type": "float",
+    "default": 0.25,
+    "hint": "越大越快从“先问再用”过渡到自然使用；建议保持保守。"
+  },
+  "lifelike_learning_memory_write_enabled": {
+    "description": "为记忆写入附带生命化学习状态标注",
+    "type": "bool",
+    "default": true,
+    "hint": "build_emotion_memory_payload 会附带 lifelike_learning_state_at_write，供 LivingMemory 等插件记录当时共同语境和开口策略。"
+  },
+  "allow_lifelike_learning_reset_backdoor": {
+    "description": "允许手动/API 重置生命化学习状态后门",
+    "type": "bool",
+    "default": true,
+    "hint": "默认开启，用于误学黑话、错误用户画像、边界异常或调试。"
+  },
   "enable_moral_repair_state": {
     "description": "Enable moral repair / trust repair state simulation",
     "type": "bool",
