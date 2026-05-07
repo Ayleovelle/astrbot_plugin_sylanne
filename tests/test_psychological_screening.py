@@ -5,6 +5,7 @@ from psychological_screening import (
     PsychologicalScreeningEngine,
     PsychologicalScreeningState,
     derive_scale_scores,
+    format_psychological_state_for_user,
     heuristic_psychological_observation,
     psychological_state_to_public_payload,
 )
@@ -107,6 +108,36 @@ class PsychologicalScreeningTests(unittest.TestCase):
         self.assertFalse(payload["diagnostic"])
         self.assertTrue(payload["safety"]["non_diagnostic_screening_only"])
         self.assertTrue(payload["safety"]["not_a_medical_device"])
+
+    def test_user_facing_psychological_text_stays_non_diagnostic(self):
+        state = PsychologicalScreeningState.initial()
+        state.values["distress"] = 0.72
+        state.values["anxiety_tension"] = 0.66
+        text = format_psychological_state_for_user(state)
+
+        self.assertIn("非诊断", text)
+        self.assertIn("不能替代", text)
+        self.assertIn("专业人员评估", text)
+        forbidden = ("确诊", "你患有", "疾病诊断", "治疗方案", "精神疾病")
+        for fragment in forbidden:
+            with self.subTest(fragment=fragment):
+                self.assertNotIn(fragment, text)
+
+    def test_user_facing_red_flag_text_requests_human_review_not_diagnosis(self):
+        observation = heuristic_psychological_observation("我不想活了，想伤害自己")
+        state = PsychologicalScreeningEngine().update(
+            PsychologicalScreeningState.initial(),
+            observation,
+            now=1000.0,
+        )
+        text = format_psychological_state_for_user(state)
+
+        self.assertIn("人工复核", text)
+        self.assertIn("危机热线", text)
+        self.assertIn("可信的人", text)
+        self.assertNotIn("确诊", text)
+        self.assertNotIn("治疗方案", text)
+        self.assertNotIn("你患有", text)
 
 
 if __name__ == "__main__":

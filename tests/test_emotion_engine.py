@@ -813,6 +813,67 @@ class EmotionEngineTests(unittest.TestCase):
         self.assertNotIn("prompt_fragment", payload["emotion_at_write"])
         self.assertNotIn("prompt_fragment", payload["emotion_snapshot"])
 
+    def test_memory_payload_deep_freezes_nested_snapshot_fields(self):
+        snapshot = {
+            "schema_version": "astrbot.emotion_state.v2",
+            "api_version": "1.0",
+            "session_key": "s-deep",
+            "emotion": {
+                "label": "guarded",
+                "confidence": 0.88,
+                "values": {"valence": -0.3},
+                "last_appraisal": {
+                    "conflict_analysis": {
+                        "cause": "user_fault",
+                        "evidence": {"citation_ids": ["KB0001"]},
+                    },
+                },
+            },
+            "relationship": {
+                "decision": "boundary",
+                "conflict_analysis": {
+                    "cause": "user_fault",
+                    "norm_violation_type": ["boundary_crossing"],
+                },
+            },
+            "consequences": {
+                "active_effects": {"direct_boundary": 900},
+            },
+            "persona": {"name": "careful"},
+        }
+
+        payload = build_emotion_memory_payload(
+            snapshot=snapshot,
+            memory={"text": "memory"},
+            written_at=123.0,
+        )
+        snapshot["relationship"]["conflict_analysis"]["cause"] = "bot_misread"
+        snapshot["relationship"]["conflict_analysis"]["norm_violation_type"].append(
+            "mutated",
+        )
+        snapshot["consequences"]["active_effects"]["direct_boundary"] = 0
+        snapshot["emotion"]["last_appraisal"]["conflict_analysis"]["evidence"][
+            "citation_ids"
+        ].append("MUTATED")
+
+        frozen = payload["emotion_at_write"]
+        self.assertEqual(
+            frozen["relationship"]["conflict_analysis"]["cause"],
+            "user_fault",
+        )
+        self.assertEqual(
+            frozen["relationship"]["conflict_analysis"]["norm_violation_type"],
+            ["boundary_crossing"],
+        )
+        self.assertEqual(
+            frozen["consequences"]["active_effects"]["direct_boundary"],
+            900,
+        )
+        self.assertEqual(
+            frozen["last_appraisal"]["conflict_analysis"]["evidence"]["citation_ids"],
+            ["KB0001"],
+        )
+
     def test_memory_payload_derives_text_from_string_memory(self):
         state = EmotionState.initial()
         snapshot = emotion_state_to_public_payload(state, session_key="session-1")
@@ -870,6 +931,38 @@ class EmotionEngineTests(unittest.TestCase):
         self.assertIn("不能羞辱", safe)
         self.assertNotIn("不能羞辱", raw)
         self.assertIn("调制语气", raw)
+
+    def test_assessment_prompts_keep_gender_neutral_bot_reference(self):
+        from prompts import build_assessment_prompt
+
+        profile = build_persona_profile(
+            persona_id="persona",
+            name="persona",
+            text="敏感 谨慎",
+        )
+        state = EmotionState.initial(profile)
+        normal = build_assessment_prompt(
+            phase="pre_response",
+            previous_state=state,
+            persona_profile=profile,
+            context_text="用户道歉了",
+            current_text="对不起，我会改。",
+            max_context_chars=200,
+        )
+        light = build_assessment_prompt(
+            phase="pre_response",
+            previous_state=state,
+            persona_profile=profile,
+            context_text="用户道歉了",
+            current_text="对不起，我会改。",
+            max_context_chars=200,
+            low_reasoning_friendly=True,
+        )
+
+        self.assertIn("他/她", normal)
+        self.assertIn("生气/受伤原因", light)
+        self.assertNotIn("为什么他会", normal)
+        self.assertNotIn("为什么她会", normal)
 
     def test_low_reasoning_assessment_prompt_is_shorter_but_compatible(self):
         from prompts import build_assessment_prompt

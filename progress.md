@@ -1,0 +1,394 @@
+# Progress
+
+## 2026-05-07 Iteration 11
+
+- Created persistent planning files: `task_plan.md`, `findings.md`, `progress.md`.
+- Added `.gitignore` so browser screenshots and Python cache files do not become accidental commits.
+- Added `scripts/remote_smoke_playwright.js` for repeatable, read-only remote dashboard smoke tests.
+- Hardened `build_emotion_memory_payload` with deep copy semantics.
+- Hardened `main.get_emotional_state_plugin` to require the full core emotion service API.
+- Added unit tests for:
+  - nested memory payload freeze behavior,
+  - `他/她` prompt contract,
+  - safety boundary config through emotion and humanlike public prompt fragments,
+  - main helper public API contract.
+
+Validation complete:
+
+- `py -3.13 -m unittest discover -s tests -v`: 122 tests passed.
+- `py -3.13 -m py_compile main.py emotion_engine.py humanlike_engine.py psychological_screening.py public_api.py prompts.py scripts/build_literature_kb.py scripts/build_humanlike_agent_literature_kb.py scripts/build_psychological_literature_kb.py`: passed.
+- Bundled Node `--check scripts/remote_smoke_playwright.js`: passed.
+- `git diff --check`: passed, with CRLF conversion warnings only.
+- Remote smoke via bundled Node and Playwright: passed.
+  - Login succeeded.
+  - Extension route loaded.
+  - AstrBot version `4.24.2`.
+  - Plugin API returned 29 plugins.
+  - Failed plugins data was `{}`.
+  - `astrbot_plugin_emotional_state` is still not installed on the remote server.
+
+Next iteration:
+
+- Iteration 12 starts with README documentation for repeatable remote smoke testing and recovery workflow.
+
+## 2026-05-07 Iteration 12
+
+- Documented remote read-only smoke testing in README.
+- Documented persistent iteration files and context-recovery flow in README.
+- Added README contract coverage to `tests/test_remote_smoke_contract.py`.
+
+Validation complete:
+
+- `py -3.13 -m unittest discover -s tests -v`: 123 tests passed.
+- `py -3.13 -m py_compile main.py emotion_engine.py humanlike_engine.py psychological_screening.py public_api.py prompts.py scripts/build_literature_kb.py scripts/build_humanlike_agent_literature_kb.py scripts/build_psychological_literature_kb.py`: passed.
+- Bundled Node `--check scripts/remote_smoke_playwright.js`: passed.
+- `git diff --check`: passed, with CRLF conversion warnings only.
+- Remote smoke via bundled Node and Playwright: passed.
+  - Login succeeded.
+  - Extension route loaded.
+  - AstrBot version `4.24.2`.
+  - Plugin API returned 29 plugins.
+  - Failed plugins data was `{}`.
+
+Next iteration:
+
+- Iteration 13 adds a LivingMemory-shaped compatibility test for raw snapshot off, humanlike annotation off, and memory text fallback.
+
+## 2026-05-07 Iteration 13
+
+- Added LivingMemory-shaped compatibility coverage in `tests/test_public_api.py`.
+- Covered `include_raw_snapshot=False` while preserving `emotion_at_write`.
+- Covered `humanlike_memory_write_enabled=False` without weakening the main emotion memory payload.
+- Covered `memory_text` fallback and explicit override precedence.
+
+Validation complete:
+
+- `py -3.13 -m unittest discover -s tests -v`: 126 tests passed.
+- `py -3.13 -m py_compile main.py emotion_engine.py humanlike_engine.py psychological_screening.py public_api.py prompts.py scripts/build_literature_kb.py scripts/build_humanlike_agent_literature_kb.py scripts/build_psychological_literature_kb.py`: passed.
+- Bundled Node `--check scripts/remote_smoke_playwright.js`: passed.
+- `git diff --check`: passed, with CRLF conversion warnings only.
+- Remote smoke via bundled Node and Playwright: passed.
+
+Next iteration:
+
+- Iteration 14 strengthens non-diagnostic psychological user-facing output tests.
+
+## 2026-05-07 Iteration 14
+
+- Added tests for user-facing psychological screening text.
+- Locked the non-diagnostic wording, professional-evaluation boundary, human-review language, and crisis support wording.
+- Added negative assertions against diagnosis/treatment-style wording.
+
+Validation complete:
+
+- `py -3.13 -m unittest discover -s tests -v`: 128 tests passed.
+- `py -3.13 -m py_compile main.py emotion_engine.py humanlike_engine.py psychological_screening.py public_api.py prompts.py scripts/build_literature_kb.py scripts/build_humanlike_agent_literature_kb.py scripts/build_psychological_literature_kb.py`: passed.
+- Bundled Node `--check scripts/remote_smoke_playwright.js`: passed.
+- `git diff --check`: passed, with CRLF conversion warnings only.
+- Remote smoke via bundled Node and Playwright: passed.
+
+Next iteration:
+
+- Iteration 15 reviews README/public API documentation against implementation and adds migration notes if needed.
+
+## 2026-05-07 Iteration 15
+
+- Added README guidance recommending `public_api.get_emotion_service(...)` and `get_humanlike_service(...)` for method-complete service discovery.
+- Added a README/API contract test that checks `public_api.py` protocol methods are documented.
+
+Validation complete:
+
+- `py -3.13 -m unittest discover -s tests -v`: 129 tests passed.
+- `py -3.13 -m py_compile main.py emotion_engine.py humanlike_engine.py psychological_screening.py public_api.py prompts.py scripts/build_literature_kb.py scripts/build_humanlike_agent_literature_kb.py scripts/build_psychological_literature_kb.py`: passed.
+- Bundled Node `--check scripts/remote_smoke_playwright.js`: passed.
+- `git diff --check`: passed, with CRLF conversion warnings only.
+- Remote smoke via bundled Node and Playwright: passed.
+  - Login succeeded.
+  - Extension route loaded.
+  - AstrBot version `4.24.2`.
+  - Plugin API returned 29 plugins.
+  - Failed plugins data was `{}`.
+
+Current blocker for remote plugin-runtime validation:
+
+- Remote server still does not have `astrbot_plugin_emotional_state` installed. Next remote validation with `ASTRBOT_EXPECT_PLUGIN=astrbot_plugin_emotional_state` should happen after deployment.
+
+## 2026-05-07 Remote Smoke Before Iteration 16
+
+- Ran `scripts\remote_smoke_playwright.js` with credentials supplied through environment variables only.
+- Result: remote dashboard login passed, extension page loaded, AstrBot version was `4.24.2`.
+- Plugin API returned 29 plugins, failed plugin data was `{}`.
+- `astrbot_plugin_livingmemory` was present.
+- `astrbot_plugin_emotional_state` was still not installed on the remote server, so runtime plugin validation remains blocked until a safe install path is used.
+
+## 2026-05-07 Iteration 16
+
+Status: complete.
+
+- Started from context recovery using `task_plan.md`, `findings.md`, `progress.md`, `git status`, and session catchup.
+- Subagent read-only review recommended package slimming before remote install because the current release zip included large raw literature caches.
+- Updated `scripts/package_plugin.py` so `raw/` KB build caches stay in the repository but are excluded from release zips.
+- Expanded `tests/test_package_plugin.py` to verify:
+  - release zip paths are rooted under `astrbot_plugin_emotional_state/`,
+  - paths are relative POSIX zip paths,
+  - runtime docs and finished KB artifacts remain included,
+  - raw caches, tests, scripts, output, local planning files, and git metadata stay excluded,
+  - release zip size remains below a remote-upload-friendly upper bound.
+- Updated README to document release packaging and the difference between finished KB artifacts and `raw/` research cache files.
+- Updated remote smoke README contract tests to require the packaging docs and the "after remote install" expected-plugin wording.
+
+Validation complete:
+
+- `py -3.13 -m unittest tests.test_package_plugin tests.test_remote_smoke_contract -v`: 8 tests passed.
+- `py -3.13 scripts\package_plugin.py --output dist\astrbot_plugin_emotional_state.zip`: passed; generated zip size was 10,128,064 bytes.
+- `py -3.13 -m unittest discover -s tests -v`: 132 tests passed.
+- `py -3.13 -m py_compile main.py emotion_engine.py humanlike_engine.py psychological_screening.py public_api.py prompts.py scripts\build_literature_kb.py scripts\build_humanlike_agent_literature_kb.py scripts\build_psychological_literature_kb.py scripts\package_plugin.py`: passed.
+- Bundled Node `--check scripts\remote_smoke_playwright.js`: passed.
+- `git diff --check`: passed, with CRLF conversion warnings only.
+- Remote smoke via bundled Node and Playwright: passed.
+  - Login succeeded.
+  - Extension route loaded.
+  - AstrBot version `4.24.2`.
+  - Plugin API returned 29 plugins.
+  - Failed plugin data was `{}`.
+  - `astrbot_plugin_livingmemory` was present.
+
+## 2026-05-07 Iteration 18
+
+Status: complete.
+
+- Strengthened `scripts\remote_smoke_playwright.js` so `ASTRBOT_EXPECT_PLUGIN` now checks two conditions:
+  - target plugin appears in `/api/plugin/get`,
+  - target plugin is not present in `/api/plugin/source/get-failed-plugins`.
+- Added contract coverage requiring `expectedFailedPlugin` handling and exit code `5` for expected-plugin failed-load detection.
+
+Validation complete:
+
+- `py -3.13 -m unittest tests.test_remote_smoke_contract -v`: 8 tests passed.
+- Bundled Node `--check scripts\remote_smoke_playwright.js`: passed.
+- `py -3.13 -m unittest discover -s tests -v`: 136 tests passed.
+- `git diff --check`: passed, with CRLF conversion warnings only.
+- Remote smoke with `ASTRBOT_EXPECT_PLUGIN=astrbot_plugin_emotional_state`: passed.
+  - Plugin API returned 30 plugins.
+  - Target plugin was present.
+  - `expectedFailedPlugin` was `null`.
+  - Failed plugin data was `{}`.
+  - `astrbot_plugin_emotional_state` was installed and loadable on the remote server.
+
+Next iteration:
+
+- Iteration 17 is remote install/runtime validation after a safe authorized install path is available.
+
+## 2026-05-07 Iteration 17
+
+Status: complete.
+
+- Started remote install/runtime validation after Iteration 16 produced a smaller release zip.
+- Initial browser inspection loaded the installed-plugin page without mutations and captured plugin API requests: /api/plugin/get, /api/plugin/source/get-failed-plugins, /api/plugin/source/get, /api/plugin/market_list.
+- Official AstrBot route inspection found POST /api/plugin/install-upload with multipart field file and optional ignore_version_check.
+- First remote upload attempt failed because the generated zip lacked an explicit first directory entry; AstrBot's upload installer interpreted `astrbot_plugin_emotional_state/README.md` as the update root and raised `NotADirectoryError`.
+- Updated `scripts/package_plugin.py` to write `astrbot_plugin_emotional_state/` as the first zip entry.
+- Added `tests/test_package_plugin.py` coverage for the explicit first directory entry.
+- Rebuilt `dist\astrbot_plugin_emotional_state.zip`; generated zip size was 10,128,541 bytes.
+- Remote upload install then succeeded and `astrbot_plugin_emotional_state` appeared in `/api/plugin/get`.
+- Added `scripts/remote_install_upload_playwright.js` as a separate explicit install script:
+  - requires `ASTRBOT_REMOTE_URL`, `ASTRBOT_REMOTE_USERNAME`, `ASTRBOT_REMOTE_PASSWORD`,
+  - requires `ASTRBOT_REMOTE_INSTALL_ZIP`,
+  - requires `ASTRBOT_EXPECT_PLUGIN`,
+  - requires `ASTRBOT_REMOTE_INSTALL_CONFIRM=1`,
+  - checks zip size and first zip entry before upload,
+  - only calls `install-upload`, plus `uninstall-failed` only to clean the matching already-installed failed upload record.
+- Updated README with the explicit remote install workflow and kept `remote_smoke_playwright.js` read-only.
+- Added remote install contract tests for confirmation, no hardcoded credentials/IP, no persisted sessions, and endpoint allowlist.
+
+Validation complete:
+
+- `py -3.13 -m unittest tests.test_package_plugin tests.test_remote_smoke_contract -v`: 12 tests passed after install-script contract additions.
+- Bundled Node `--check scripts\remote_smoke_playwright.js`: passed.
+- Bundled Node `--check scripts\remote_install_upload_playwright.js`: passed.
+- `py -3.13 -m unittest discover -s tests -v`: 136 tests passed.
+- `py -3.13 -m py_compile main.py emotion_engine.py humanlike_engine.py psychological_screening.py public_api.py prompts.py scripts\build_literature_kb.py scripts\build_humanlike_agent_literature_kb.py scripts\build_psychological_literature_kb.py scripts\package_plugin.py`: passed.
+- `git diff --check`: passed, with CRLF conversion warnings only.
+- `scripts\remote_install_upload_playwright.js`: passed against the test server; repeated upload was treated as idempotent already-installed success and cleaned the matching failed upload record.
+- `scripts\remote_smoke_playwright.js` with `ASTRBOT_EXPECT_PLUGIN=astrbot_plugin_emotional_state`: passed.
+  - Login succeeded.
+  - Extension route loaded.
+  - AstrBot version `4.24.2`.
+  - Plugin API returned 30 plugins.
+  - `astrbot_plugin_emotional_state` was present.
+  - Failed plugin data was `{}`.
+  - `astrbot_plugin_livingmemory` was present.
+
+- Official AstrBot route inspection found POST /api/plugin/install-upload with multipart field file and optional ignore_version_check.
+
+- First remote upload attempt failed: AstrBot install-upload returned NotADirectoryError because the zip did not include an explicit first directory entry before astrbot_plugin_emotional_state/README.md. Failed plugin record appeared as plugin_upload_astrbot_plugin_emotional_state.
+
+## 2026-05-07 Iteration 19
+
+Status: complete.
+
+- Ran remote smoke before continuing iteration:
+  - login succeeded,
+  - AstrBot version was `4.24.2`,
+  - plugin API returned 30 plugins,
+  - `astrbot_plugin_emotional_state` was present,
+  - failed plugin data was `{}`.
+- Strengthened `scripts\remote_smoke_playwright.js` so `ASTRBOT_EXPECT_PLUGIN` resolves the real plugin object from `/api/plugin/get`, not just the names list.
+- Added `expectedPluginRuntime` to the smoke output with plugin runtime metadata:
+  - name,
+  - displayName,
+  - version,
+  - activated,
+  - reserved,
+  - author,
+  - desc,
+  - repo,
+  - astrbotVersion,
+  - installedAt.
+- Added optional hard assertions:
+  - `ASTRBOT_EXPECT_PLUGIN_VERSION` exits with code `7` on mismatch,
+  - `ASTRBOT_EXPECT_PLUGIN_DISPLAY_NAME` exits with code `8` on mismatch,
+  - activated target plugin explicitly set to `false` exits with code `6`.
+- Updated README with the runtime-metadata smoke workflow.
+- Updated `tests/test_remote_smoke_contract.py` to lock the new environment-variable and exit-code contract.
+- Corrected the stale Iteration 18 progress line that said the plugin was still not installed.
+- Updated `task_plan.md` and `findings.md` so future context recovery starts from the installed-and-activated remote state.
+
+Validation complete:
+
+- `py -3.13 -m unittest tests.test_remote_smoke_contract -v`: 8 tests passed.
+- Bundled Node `--check scripts\remote_smoke_playwright.js`: passed.
+- Bundled Node `--check scripts\remote_install_upload_playwright.js`: passed.
+- `py -3.13 -m unittest discover -s tests -v`: 136 tests passed.
+- `py -3.13 -m py_compile main.py emotion_engine.py humanlike_engine.py psychological_screening.py public_api.py prompts.py scripts\build_literature_kb.py scripts\build_humanlike_agent_literature_kb.py scripts\build_psychological_literature_kb.py scripts\package_plugin.py`: passed.
+- `py -3.13 scripts\package_plugin.py --output dist\astrbot_plugin_emotional_state.zip`: passed.
+- `git diff --check`: passed, with CRLF conversion warnings only.
+- Remote smoke with `ASTRBOT_EXPECT_PLUGIN=astrbot_plugin_emotional_state`, `ASTRBOT_EXPECT_PLUGIN_VERSION=1.0.0`, and `ASTRBOT_EXPECT_PLUGIN_DISPLAY_NAME=多维情绪状态`: passed.
+  - `expectedPluginRuntime.activated=true`,
+  - version matched,
+  - display name matched,
+  - failed plugin data was `{}`.
+
+Next iteration:
+
+- Iteration 20 hardens the remote upload preflight by inspecting full zip contents before any upload mutation.
+
+## 2026-05-07 Iteration 20
+
+Status: complete.
+
+- Hardened `scripts\remote_install_upload_playwright.js` before upload mutation:
+  - added central-directory inspection,
+  - required all entries to live under `astrbot_plugin_emotional_state/`,
+  - rejected absolute paths, Windows backslashes, and parent traversal,
+  - required `metadata.yaml`, `main.py`, `README.md`, and `_conf_schema.json`,
+  - rejected `tests/`, `scripts/`, `output/`, `dist/`, `raw/`, `__pycache__/`, and `.git/`.
+- Updated README to document the uploadable package preflight contract.
+- Clarified that `scripts\remote_smoke_playwright.js` is the read-only script, avoiding ambiguity near the upload-script section.
+- Updated `tests/test_remote_smoke_contract.py` to lock central-directory preflight checks and forbidden path checks.
+
+Validation complete:
+
+- `py -3.13 -m unittest tests.test_package_plugin tests.test_remote_smoke_contract -v`: 12 tests passed.
+- Bundled Node `--check scripts\remote_install_upload_playwright.js`: passed.
+- Bundled Node `--check scripts\remote_smoke_playwright.js`: passed.
+- `py -3.13 scripts\package_plugin.py --output dist\astrbot_plugin_emotional_state.zip`: passed.
+- `py -3.13 -m unittest discover -s tests -v`: 136 tests passed.
+- `py -3.13 -m py_compile main.py emotion_engine.py humanlike_engine.py psychological_screening.py public_api.py prompts.py scripts\build_literature_kb.py scripts\build_humanlike_agent_literature_kb.py scripts\build_psychological_literature_kb.py scripts\package_plugin.py`: passed.
+- `git diff --check`: passed, with CRLF conversion warnings only.
+- Remote smoke with version/display-name assertions: passed.
+
+Next iteration:
+
+- Iteration 21 adds local unit coverage for remote install zip preflight failure cases without calling the remote server.
+
+## 2026-05-07 Iteration 21
+
+Status: complete.
+
+- Extracted upload zip preflight logic into `scripts\plugin_zip_preflight.js`.
+- Updated `scripts\remote_install_upload_playwright.js` to call the shared preflight module before any remote upload mutation.
+- Added CLI usage for local preflight:
+  - `node scripts\plugin_zip_preflight.js <zip> <plugin_name>`.
+- Added local unit coverage in `tests/test_package_plugin.py`:
+  - packaged plugin zip is accepted,
+  - missing explicit root directory entry is rejected,
+  - excluded `raw/` and `tests/` segments are rejected,
+  - missing required runtime file is rejected,
+  - parent traversal entries are rejected.
+- Updated README to document standalone zip preflight and Node syntax check for the new script.
+- Updated remote smoke contract tests so the upload script must call shared preflight, while central-directory assertions live in the shared preflight script.
+
+Validation complete:
+
+- `py -3.13 -m unittest tests.test_package_plugin -v`: 9 tests passed.
+- `py -3.13 -m unittest tests.test_package_plugin tests.test_remote_smoke_contract -v`: 17 tests passed.
+- Bundled Node `--check scripts\plugin_zip_preflight.js`: passed.
+- Bundled Node `--check scripts\remote_install_upload_playwright.js`: passed.
+- Bundled Node `--check scripts\remote_smoke_playwright.js`: passed.
+- `py -3.13 scripts\package_plugin.py --output dist\astrbot_plugin_emotional_state.zip`: passed.
+- `py -3.13 -m unittest discover -s tests -v`: 141 tests passed.
+- `py -3.13 -m py_compile main.py emotion_engine.py humanlike_engine.py psychological_screening.py public_api.py prompts.py scripts\build_literature_kb.py scripts\build_humanlike_agent_literature_kb.py scripts\build_psychological_literature_kb.py scripts\package_plugin.py`: passed.
+- `git diff --check`: passed, with CRLF conversion warnings only.
+- Remote smoke with version/display-name assertions: passed.
+
+Next iteration:
+
+- Iteration 22 reviews git branch/packaging state and prepares a maintainable branch split or commit staging plan.
+
+## 2026-05-07 Iteration 22
+
+Status: complete.
+
+- Reviewed existing branches:
+  - `main` is ahead of the original feature-branch baseline,
+  - most `codex/*` maintenance branches still point to early baseline commit `e640a36`,
+  - `codex/humanlike-agent-roadmap` points to `9a59dd8`,
+  - current Iteration 11-22 changes remain uncommitted on `main`.
+- Used a read-only subagent to independently inspect branch strategy and risks.
+- Updated `docs\branching_strategy.md`:
+  - added `codex/release-packaging` as the maintenance branch for packaging, upload preflight, install upload, and remote smoke contracts,
+  - recorded the current dirty-worktree risk,
+  - documented the safe sync order: validate main, commit baseline, sync integration branch, then sync feature branches.
+- Updated README branch table with `codex/release-packaging` and the warning not to reset feature branches from a dirty worktree.
+
+Validation complete:
+
+- `py -3.13 -m unittest tests.test_remote_smoke_contract -v`: 8 tests passed.
+- `py -3.13 -m unittest discover -s tests -v`: 141 tests passed.
+- `git diff --check`: passed, with CRLF conversion warnings only.
+- Remote smoke with version/display-name assertions: passed.
+
+Next iteration:
+
+- Iteration 23 adds a repository maintenance checklist for committing the current baseline and syncing feature branches without losing uncommitted work.
+
+## 2026-05-07 Iteration 23
+
+Status: complete.
+
+- Added `docs\release_branch_sync_checklist.md` with:
+  - pre-commit validation commands,
+  - remote read-only smoke workflow,
+  - commit contents and artifact exclusions,
+  - safe branch sync order,
+  - remote upload guardrails.
+- Updated README to link the new checklist in the documentation map.
+- Updated `docs\branching_strategy.md` to point to the checklist for executable sync steps.
+
+Validation complete:
+
+- `py -3.13 -m unittest tests.test_remote_smoke_contract tests.test_package_plugin -v`: 17 tests passed.
+- Bundled Node `--check scripts\remote_smoke_playwright.js`: passed.
+- Bundled Node `--check scripts\remote_install_upload_playwright.js`: passed.
+- Bundled Node `--check scripts\plugin_zip_preflight.js`: passed.
+- Bundled Node `scripts\plugin_zip_preflight.js dist\astrbot_plugin_emotional_state.zip astrbot_plugin_emotional_state`: passed, 48 entries.
+- `git diff --check`: passed, with CRLF conversion warnings only.
+- `py -3.13 -m unittest discover -s tests -v`: 141 tests passed.
+- `py -3.13 -m py_compile main.py emotion_engine.py humanlike_engine.py psychological_screening.py public_api.py prompts.py scripts\build_literature_kb.py scripts\build_humanlike_agent_literature_kb.py scripts\build_psychological_literature_kb.py scripts\package_plugin.py`: passed.
+- Remote smoke with version/display-name assertions: passed.
+
+Next iteration:
+
+- Iteration 24 commits the validated main baseline, then syncs integration/maintenance branches from the clean baseline.
+

@@ -851,6 +851,8 @@ meta = self.context.get_registered_star("astrbot_plugin_emotional_state")
 emotion = meta.star_cls if meta and meta.activated else None
 ```
 
+不过长期维护时更推荐 `public_api.get_emotion_service(...)` 和 `public_api.get_humanlike_service(...)`。这两个 helper 会校验核心方法是否完整，能避免其他插件拿到只有部分旧接口的实例。
+
 ### 情绪 API
 
 | 方法 | 是否写入状态 | 用途 |
@@ -1174,6 +1176,7 @@ enable_psychological_screening = false
 | `docs/humanlike_agent_iteration_log.md` | humanlike 模块 10 轮自我迭代记录。 |
 | `docs/humanlike_agent_literature_kb.md` | 拟人代理文献知识库说明。 |
 | `docs/branching_strategy.md` | 功能分支维护策略。 |
+| `docs/release_branch_sync_checklist.md` | 当前基线提交、发布包预检和维护分支同步清单。 |
 
 ---
 
@@ -1232,6 +1235,73 @@ py -3.13 -m py_compile main.py emotion_engine.py psychological_screening.py huma
 py -3.13 -m json.tool _conf_schema.json
 ```
 
+构建 AstrBot 发布包：
+
+```powershell
+py -3.13 scripts\package_plugin.py --output dist\astrbot_plugin_emotional_state.zip
+```
+
+发布包会保留插件运行文件、README、docs、三个文献知识库的成品索引和精选条目，例如 `manifest.json`、`works.jsonl`、`curated/top_200.jsonl`、`evidence-map.md`。三个知识库目录下的 `raw/` 是检索和重建知识库用的原始缓存，默认不进入发布包；这样可以保留后续研究迭代需要的材料，同时避免远程上传包体积失控。
+
+发布 zip 的第一项会显式写入 `astrbot_plugin_emotional_state/` 目录项，以兼容 AstrBot WebUI 的 `install-upload` 解压逻辑。不要手工重新压缩成“缺少顶层目录项”的 zip，否则部分 AstrBot 版本会把第一个文件路径误判成目录。
+
+远程只读烟测：
+
+```powershell
+$env:ASTRBOT_REMOTE_URL = "http://your-astrbot-host:15356/"
+$env:ASTRBOT_REMOTE_USERNAME = "your-user"
+$env:ASTRBOT_REMOTE_PASSWORD = "your-password"
+node scripts\remote_smoke_playwright.js
+```
+
+远程安装插件后，如果要把某个插件是否已经安装作为硬断言，可以额外设置：
+
+```powershell
+$env:ASTRBOT_EXPECT_PLUGIN = "astrbot_plugin_emotional_state"
+node scripts\remote_smoke_playwright.js
+```
+
+脚本会在输出 JSON 里写出 `expectedPluginRuntime`，包含插件列表 API 中返回的 `version`、`displayName`、`activated`、`author`、`astrbotVersion` 等只读字段。若目标插件存在但 `activated=false`，脚本会失败退出。需要把版本和显示名也作为硬断言时，可以额外设置：
+
+```powershell
+$env:ASTRBOT_EXPECT_PLUGIN_VERSION = "1.0.0"
+$env:ASTRBOT_EXPECT_PLUGIN_DISPLAY_NAME = "多维情绪状态"
+node scripts\remote_smoke_playwright.js
+```
+
+远程上传安装是独立脚本，默认不会执行。需要先构建发布包，再显式确认上传：
+
+```powershell
+py -3.13 scripts\package_plugin.py --output dist\astrbot_plugin_emotional_state.zip
+$env:ASTRBOT_REMOTE_URL = "http://your-astrbot-host:15356/"
+$env:ASTRBOT_REMOTE_USERNAME = "your-user"
+$env:ASTRBOT_REMOTE_PASSWORD = "your-password"
+$env:ASTRBOT_REMOTE_INSTALL_ZIP = "dist\astrbot_plugin_emotional_state.zip"
+$env:ASTRBOT_EXPECT_PLUGIN = "astrbot_plugin_emotional_state"
+$env:ASTRBOT_REMOTE_INSTALL_CONFIRM = "1"
+node scripts\remote_install_upload_playwright.js
+```
+
+上传脚本只允许调用 AstrBot WebUI 的 `install-upload` 安装端点，不会卸载插件、更新插件、重启 AstrBot、保存配置或写入本地 cookie/session。上传成功后，再运行上面的 `ASTRBOT_EXPECT_PLUGIN` 只读烟测作为最终验证。
+
+上传脚本在真正发起安装请求之前会完整读取 zip central directory 做本地预检：所有条目必须位于 `astrbot_plugin_emotional_state/` 下，路径必须是相对 POSIX 路径，必须包含 `metadata.yaml`、`main.py`、`README.md`、`_conf_schema.json`，并拒绝 `tests/`、`scripts/`、`output/`、`dist/`、`raw/`、`__pycache__/`、`.git/` 等本地或研究缓存目录。
+
+也可以单独运行预检，不连接远程服务器：
+
+```powershell
+node scripts\plugin_zip_preflight.js dist\astrbot_plugin_emotional_state.zip astrbot_plugin_emotional_state
+```
+
+`scripts\remote_smoke_playwright.js` 只做浏览器登录、版本读取、插件列表读取、失败插件列表读取和截图保存，不会安装插件、删除插件、重载插件、重启 AstrBot 或修改配置。截图会写入 `output/playwright/`，该目录默认被 `.gitignore` 忽略。
+
+语法检查远程烟测脚本：
+
+```powershell
+node --check scripts\remote_smoke_playwright.js
+node --check scripts\remote_install_upload_playwright.js
+node --check scripts\plugin_zip_preflight.js
+```
+
 ### 当前测试覆盖方向
 
 | 文件 | 重点 |
@@ -1243,7 +1313,27 @@ py -3.13 -m json.tool _conf_schema.json
 | `tests/test_public_api.py` | 公共快照、记忆 payload、simulate 不落库、reset 后门、插件服务协议、心理筛查 public API。 |
 | `tests/test_humanlike_engine.py` | P0 拟人状态、快照分层、注入片段、记忆注解。 |
 | `tests/test_literature_kb_scripts.py` | 三个文献 KB 构建脚本的去重、分类、输出结构和坏缓存容错。 |
+| `tests/test_package_plugin.py` | 发布 zip 的目录根、成品 KB 纳入、raw/cache/tests/scripts/output 排除、包体积上限和上传前 zip 预检失败路径。 |
 | `tests/test_psychological_screening.py` | 非诊断筛查、量表启发、红旗信号、长期轨迹。 |
+| `tests/test_remote_smoke_contract.py` | 远程烟测脚本必须使用环境变量读取凭据、保持只读、忽略截图产物。 |
+
+### 持久迭代计划
+
+为了避免长任务在上下文压缩后丢失状态，仓库根目录保留三份轻量工作记录：
+
+| 文件 | 用途 |
+| --- | --- |
+| `task_plan.md` | 当前迭代队列、完成状态、恢复检查表。 |
+| `findings.md` | 远程测试、代码审查、工具环境等发现。 |
+| `progress.md` | 每轮迭代的实际改动和验证结果。 |
+
+恢复工作时，先读这三个文件，再执行：
+
+```powershell
+git status --short --branch
+```
+
+然后从 `task_plan.md` 里第一个 `in_progress` 或 `pending` 迭代继续。每轮完成后至少跑本地单测；涉及远程流程、AstrBot WebUI 或插件加载状态时，再跑 `scripts\remote_smoke_playwright.js`。
 
 ### 分支策略
 
@@ -1259,7 +1349,10 @@ py -3.13 -m json.tool _conf_schema.json
 | `codex/literature-kbs` | 文献库构建脚本和证据地图。 |
 | `codex/humanlike-agent-roadmap` | humanlike 路线、文献库和迭代记录。 |
 | `codex/tests-validation` | 测试与验证策略。 |
+| `codex/release-packaging` | 发布 zip、上传预检、远程安装脚本和远程烟测契约。 |
 | `codex/docs-config` | README、docs、配置说明。 |
+
+当前功能分支多停在早期基线；先在 `main` 完成验证并形成新的完整作品提交，再同步 `codex/complete-emotional-bot-plugin` 和各维护分支。不要从带有未提交改动的工作区直接重置功能分支。
 
 ---
 

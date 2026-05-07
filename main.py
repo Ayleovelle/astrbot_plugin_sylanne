@@ -110,6 +110,25 @@ _INTERNAL_LLM_CALL: contextvars.ContextVar[bool] = contextvars.ContextVar(
     default=False,
 )
 
+_REQUIRED_EMOTION_SERVICE_METHODS: tuple[str, ...] = (
+    "get_emotion_snapshot",
+    "get_emotion_state",
+    "get_emotion_values",
+    "get_emotion_consequences",
+    "get_emotion_relationship",
+    "get_emotion_prompt_fragment",
+    "build_emotion_memory_payload",
+    "inject_emotion_context",
+    "observe_emotion_text",
+    "get_psychological_screening_snapshot",
+    "get_psychological_screening_values",
+    "observe_psychological_text",
+    "simulate_psychological_update",
+    "reset_psychological_screening_state",
+    "simulate_emotion_update",
+    "reset_emotion_state",
+)
+
 
 def get_emotional_state_plugin(context: Context) -> Any | None:
     """Return the activated emotional state plugin instance for other plugins."""
@@ -120,7 +139,10 @@ def get_emotional_state_plugin(context: Context) -> Any | None:
     if not metadata or not getattr(metadata, "activated", True):
         return None
     plugin = getattr(metadata, "star_cls", None)
-    if plugin is None or not hasattr(plugin, "get_emotion_snapshot"):
+    if plugin is None or not all(
+        callable(getattr(plugin, name, None))
+        for name in _REQUIRED_EMOTION_SERVICE_METHODS
+    ):
         return None
     return plugin
 

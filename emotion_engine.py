@@ -4,6 +4,7 @@ import json
 import math
 import re
 import time
+from copy import deepcopy
 from dataclasses import dataclass, field, replace
 from hashlib import sha256
 from typing import Any
@@ -757,7 +758,7 @@ def build_emotion_memory_payload(
     written_at: float | None = None,
 ) -> dict[str, Any]:
     """Build a versioned memory object annotated with the emotion at write time."""
-    snapshot = dict(snapshot)
+    snapshot = deepcopy(snapshot)
     if not include_prompt_fragment:
         snapshot.pop("prompt_fragment", None)
     emotion = dict(snapshot.get("emotion") or {})
