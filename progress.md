@@ -1613,4 +1613,11 @@ Status: in progress.
 - User clarified the initial repository release version should be `0.0.1-beta`, a prerelease version.
 - Updated `metadata.yaml`, README badge/current-version text, README remote smoke example, and `docs/release_branch_sync_checklist.md` to `0.0.1-beta`.
 - Re-ran version contract validation and rebuilt `dist\astrbot_plugin_emotional_state.zip`; zip preflight passed with 52 entries.
+- Direct `git push` to GitHub failed twice with connection reset; routing Git through the local Clash proxy at `http://127.0.0.1:7890` fixed the transport issue.
+- Set `origin` to `https://github.com/Ayleovelle/astrbot_plugin_emotional_state.git` without embedding token credentials.
+- Pushed `main` successfully through one-shot Git proxy and one-shot HTTP auth header:
+  - remote branch: `origin/main`,
+  - remote commit: `452487a642f801333a8e89e22d992712d1477721`,
+  - repository is public,
+  - default branch is `main`.
 
