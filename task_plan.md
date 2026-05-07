@@ -11,7 +11,7 @@ Build and maintain `astrbot_plugin_emotional_state`: an AstrBot plugin with mult
 - Branch: `main`.
 - Latest completed local baseline before this plan: 114 unit tests passed.
 - Remote dashboard smoke on 2026-05-07:
-  - `http://154.36.178.25:15356/` reachable over HTTP.
+  - `ASTRBOT_REMOTE_BASE_URL` target reachable over HTTP.
   - Browser login with provided credentials succeeded in UI.
   - AstrBot version: `4.24.2`.
   - `/api/plugin/get` returned 30 plugins and `/api/plugin/source/get-failed-plugins` returned empty data.
@@ -69,6 +69,7 @@ Build and maintain `astrbot_plugin_emotional_state`: an AstrBot plugin with mult
 | 55 | complete | Lock release package runtime-root files and align README install tree with publish boundaries | 172 unit tests, py_compile, package build, package preflight, Node syntax check, git diff check, leak scan, remote smoke |
 | 56 | complete | Align upload zip preflight required entries with release runtime-root contract | 172 unit tests, py_compile, package build, package preflight, Node syntax check, git diff check, leak scan, remote smoke |
 | 57 | complete | Require dependency declaration in upload preflight and release checklist | 172 unit tests, py_compile, package build, package preflight, Node syntax check, git diff check, leak scan, remote smoke |
+| 58 | complete | Lock README py_compile command and failed-upload cleanup docs to current package contract | 172 unit tests, py_compile, package build, package preflight, Node syntax check, git diff check, leak scan, remote smoke |
 
 ## Recovery Checklist
 

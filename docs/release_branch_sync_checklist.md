@@ -80,6 +80,7 @@ Only run `scripts\remote_install_upload_playwright.js` after:
 - the preflight confirms the zip contains the dependency declaration `requirements.txt`,
 - the preflight confirms zip `metadata.yaml` `name:` matches `ASTRBOT_EXPECT_PLUGIN`,
 - the zip uses relative POSIX paths and contains no unsafe `.` / `..` path segments,
+- any `uninstall-failed` call is only for the temporary `plugin_upload_<plugin>` failed-upload directory, with `delete_config=false` and `delete_data=false`,
 - `ASTRBOT_REMOTE_INSTALL_CONFIRM=1` is explicitly set,
 - the target server is intended to receive a new upload.
 

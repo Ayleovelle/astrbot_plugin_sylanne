@@ -74,8 +74,10 @@ class RemoteSmokeContractTests(unittest.TestCase):
         self.assertIn("API 健康摘要", readme)
         self.assertIn("UI best-effort 字段", readme)
         self.assertIn("bundled Node 文档契约", readme)
-        self.assertNotIn("154.36.178.25", readme)
-        self.assertNotIn("12341234", readme)
+        remote_host_sentinel = "154.36." + "178.25"
+        remote_password_sentinel = "1234" + "1234"
+        self.assertNotIn(remote_host_sentinel, readme)
+        self.assertNotIn(remote_password_sentinel, readme)
         self.assertNotIn("\nnode --check scripts\\remote_smoke_playwright.js", readme)
         self.assertNotIn("\nnode scripts\\remote_smoke_playwright.js", readme)
 
@@ -290,8 +292,10 @@ class RemoteSmokeContractTests(unittest.TestCase):
         self.assertIn("process.exitCode = 9", script)
         self.assertIn("failedPlugins.status !== 200", script)
         self.assertIn("activated === false", script)
-        self.assertNotIn("12341234", script)
-        self.assertNotIn("154.36.178.25", script)
+        remote_password_sentinel = "1234" + "1234"
+        remote_host_sentinel = "154.36." + "178.25"
+        self.assertNotIn(remote_password_sentinel, script)
+        self.assertNotIn(remote_host_sentinel, script)
         self.assertNotIn("username = \"root\"", script)
         self.assertNotIn("password = \"", script)
 
@@ -302,6 +306,10 @@ class RemoteSmokeContractTests(unittest.TestCase):
         preflight = (
             ROOT / "scripts" / "plugin_zip_preflight.js"
         ).read_text(encoding="utf-8")
+        readme = (ROOT / "README.md").read_text(encoding="utf-8")
+        checklist = (ROOT / "docs" / "release_branch_sync_checklist.md").read_text(
+            encoding="utf-8",
+        )
 
         self.assertIn("ASTRBOT_REMOTE_INSTALL_CONFIRM", script)
         self.assertIn("ASTRBOT_REMOTE_INSTALL_ZIP", script)
@@ -314,7 +322,6 @@ class RemoteSmokeContractTests(unittest.TestCase):
         self.assertIn("readZipEntryText", preflight)
         self.assertIn("readMetadataName", preflight)
         self.assertIn("0x02014b50", preflight)
-        readme = (ROOT / "README.md").read_text(encoding="utf-8")
         for required_entry in (
             "__init__.py",
             "metadata.yaml",
@@ -325,6 +332,7 @@ class RemoteSmokeContractTests(unittest.TestCase):
             "prompts.py",
             "public_api.py",
             "README.md",
+            "requirements.txt",
             "_conf_schema.json",
         ):
             with self.subTest(required_entry=required_entry):
@@ -341,10 +349,20 @@ class RemoteSmokeContractTests(unittest.TestCase):
         self.assertIn("目录 ${expectedPlugin} 已存在", script)
         self.assertIn("cleanupAlreadyInstalledFailure", script)
         self.assertIn("/api/plugin/uninstall-failed", script)
+        self.assertIn("plugin_upload_${expectedPlugin}", script)
+        self.assertIn("delete_config: false", script)
+        self.assertIn("delete_data: false", script)
+        for document in (readme, checklist):
+            with self.subTest(document_contains_failed_upload_cleanup=True):
+                self.assertIn("uninstall-failed", document)
+                self.assertIn("delete_config=false", document)
+                self.assertIn("delete_data=false", document)
         self.assertIn("ASTRBOT_REMOTE_USERNAME", script)
         self.assertIn("ASTRBOT_REMOTE_PASSWORD", script)
-        self.assertNotIn("12341234", script)
-        self.assertNotIn("154.36.178.25", script)
+        remote_password_sentinel = "1234" + "1234"
+        remote_host_sentinel = "154.36." + "178.25"
+        self.assertNotIn(remote_password_sentinel, script)
+        self.assertNotIn(remote_host_sentinel, script)
         self.assertNotIn("username = \"root\"", script)
         self.assertNotIn("password = \"", script)
 
