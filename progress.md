@@ -1794,7 +1794,7 @@ Remote smoke after publication:
 
 ## 2026-05-07 Remote Drift Diagnostics
 
-Status: complete locally; commit/push/release refresh pending.
+Status: complete and published.
 
 - User asked to continue after remote testing exposed that the server has an older formal install.
 - Added explicit strict-smoke drift diagnostics in `scripts\remote_smoke_playwright.js`:
@@ -1826,4 +1826,15 @@ Validation complete:
 - Rebuilt zip SHA256: `7ec427d2215a0a0a906c80024c620551c5c913b76fdb146e1ce06a37b953857c`.
 - Strict remote smoke with `ASTRBOT_EXPECT_PLUGIN_VERSION=0.0.1-beta` exited non-zero as expected because remote runtime is still `1.0.0`; output included `expectedPluginDrift.hasDrift=true`, expected `0.0.1-beta`, actual `1.0.0`, display name matched.
 - Non-strict remote smoke passed: target plugin found, activated, and absent from failed-plugin records.
+
+Publication complete:
+
+- Commit pushed to `origin/main`: `30453fe Clarify remote version drift diagnostics`.
+- Refreshed `v0.0.1-beta` release asset:
+  - deleted old asset id `414390354`,
+  - uploaded asset id `414399825`,
+  - state: `uploaded`,
+  - size: `10174954`,
+  - digest: `sha256:7ec427d2215a0a0a906c80024c620551c5c913b76fdb146e1ce06a37b953857c`,
+  - download URL: `https://github.com/Ayleovelle/astrbot_plugin_emotional_state/releases/download/v0.0.1-beta/astrbot_plugin_emotional_state.zip`.
 
