@@ -41,6 +41,7 @@ Build and maintain `astrbot_plugin_emotional_state`: an AstrBot plugin with mult
 | 27 | complete | Make remote smoke fail when the failed-plugins API is not healthy | 141 unit tests, py_compile, package preflight, Node syntax check, git diff check, remote smoke |
 | 28 | complete | Make remote smoke WebUI probing more deterministic and label UI fields as best-effort diagnostics | 141 unit tests, py_compile, package preflight, Node syntax check, git diff check, remote smoke |
 | 29 | complete | Make legacy remote smoke `pageData.hasExpectedPlugin` a compatibility alias for the combined UI check | 141 unit tests, py_compile, package preflight, Node syntax check, git diff check, remote smoke |
+| 30 | complete | Add centralized remote smoke API health diagnostics for the required read-only endpoints | 141 unit tests, py_compile, package preflight, Node syntax check, git diff check, remote smoke |
 
 ## Recovery Checklist
 

@@ -198,6 +198,23 @@ async function main() {
     const version = await getJson(page, "/api/stat/version");
     const pluginPayload = await getJson(page, "/api/plugin/get");
     const failedPlugins = await getJson(page, "/api/plugin/source/get-failed-plugins");
+    const apiHealth = {
+      statVersion: {
+        endpoint: "/api/stat/version",
+        status: version.status,
+        ok: version.status === 200,
+      },
+      pluginGet: {
+        endpoint: "/api/plugin/get",
+        status: pluginPayload.status,
+        ok: pluginPayload.status === 200,
+      },
+      failedPlugins: {
+        endpoint: "/api/plugin/source/get-failed-plugins",
+        status: failedPlugins.status,
+        ok: failedPlugins.status === 200,
+      },
+    };
     const pluginSummary = summarizePluginPayload(pluginPayload);
     const expectedPluginRecord = findPluginByName(pluginPayload, expectedPlugin);
     const containsExpectedPlugin = expectedPlugin
@@ -308,6 +325,7 @@ async function main() {
       loggedIn: authenticatedUrl.includes("#/dashboard/default"),
       extensionRouteLoaded: page.url().includes("#/extension#installed"),
       version: version.json && version.json.data,
+      apiHealth,
       pluginSummary,
       expectedPlugin: expectedPlugin || null,
       containsExpectedPlugin,

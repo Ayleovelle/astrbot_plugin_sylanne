@@ -588,3 +588,34 @@ Validation complete:
   - `pageData.hasExpectedPluginInUi=true`.
   - API-level install, activation, version, display-name, and failed-plugin checks all passed.
 
+## 2026-05-07 Iteration 30
+
+Status: complete.
+
+- Added centralized remote smoke API health diagnostics:
+  - `apiHealth.statVersion` for `/api/stat/version`,
+  - `apiHealth.pluginGet` for `/api/plugin/get`,
+  - `apiHealth.failedPlugins` for `/api/plugin/source/get-failed-plugins`.
+- Kept existing hard failure semantics:
+  - version/plugin API failures still set exit code `1`,
+  - failed-plugin endpoint failure still sets exit code `9`,
+  - expected plugin/runtime failures keep their existing exit codes.
+- Updated README to document the `apiHealth` summary.
+- Updated remote smoke contract tests to lock the new fields.
+
+Validation complete:
+
+- `py -3.13 -m unittest tests.test_remote_smoke_contract -v`: 8 tests passed.
+- Bundled Node `--check scripts\remote_smoke_playwright.js`: passed.
+- `py -3.13 -m unittest discover -s tests -v`: 141 tests passed.
+- `py -3.13 -m py_compile main.py emotion_engine.py humanlike_engine.py psychological_screening.py public_api.py prompts.py scripts\build_literature_kb.py scripts\build_humanlike_agent_literature_kb.py scripts\build_psychological_literature_kb.py scripts\package_plugin.py`: passed.
+- Bundled Node `--check scripts\remote_install_upload_playwright.js`: passed.
+- Bundled Node `--check scripts\plugin_zip_preflight.js`: passed.
+- Bundled Node `scripts\plugin_zip_preflight.js dist\astrbot_plugin_emotional_state.zip astrbot_plugin_emotional_state`: passed, 48 entries.
+- `git diff --check`: passed, with CRLF conversion warnings only.
+- Remote smoke with version/display-name assertions: passed.
+  - `apiHealth.statVersion.ok=true`.
+  - `apiHealth.pluginGet.ok=true`.
+  - `apiHealth.failedPlugins.ok=true`.
+  - API-level plugin detection and UI best-effort diagnostics passed.
+

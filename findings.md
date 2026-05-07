@@ -47,6 +47,7 @@ This file stores durable discoveries from implementation, review, and remote tes
 - `scripts/remote_smoke_playwright.js` now waits for extension-page readiness by looking for expected plugin id/displayName text, `.extension-title-row`, extension-like nodes, or plugin-like nodes. If this probe times out, it records `pageData.uiProbeStatus="best_effort_timeout"` without weakening API-level hard assertions.
 - Latest remote smoke after the UI probe change returned `pageData.uiProbeStatus="ready"`, `selectorCounts.extensionTitleRows=30`, `hasExpectedPluginDisplayName=true`, and `hasExpectedPluginInUi=true`; this confirms the plugin is visible in the rendered WebUI under its display name while API checks remain the source of truth.
 - Legacy `pageData.hasExpectedPlugin` should be read as a compatibility alias for `pageData.hasExpectedPluginInUi`, not as an ID-only check. Consumers that need the package directory text specifically should read `pageData.hasExpectedPluginId`.
+- Remote smoke now reports `apiHealth.statVersion`, `apiHealth.pluginGet`, and `apiHealth.failedPlugins` so endpoint status failures are visible in one place before reading the plugin summary or UI probe diagnostics.
 
 ## 2026-05-07 Branch Maintenance
 
