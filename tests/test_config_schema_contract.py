@@ -187,6 +187,8 @@ class ConfigSchemaContractTests(unittest.TestCase):
             "rapid_update_half_life_seconds": ("float", 20),
             "humanlike_state_half_life_seconds": ("float", 21600),
             "humanlike_trajectory_limit": ("int", 40),
+            "psychological_alpha_min": ("float", 0.04),
+            "psychological_alpha_max": ("float", 0.55),
             "psychological_state_half_life_seconds": ("float", 604800),
             "psychological_crisis_half_life_seconds": ("float", 2592000),
             "psychological_trajectory_limit": ("int", 40),
