@@ -1935,4 +1935,8 @@ Status: local and remote validation complete; GitHub publication in progress.
   - Strict smoke with `ASTRBOT_EXPECT_PLUGIN_VERSION=0.0.2-beta` exited non-zero as expected because the test server still runs the existing formal install `1.0.0`; output reported `expectedPluginDrift.hasDrift=true`, expected `0.0.2-beta`, actual `1.0.0`, display name matched.
   - Non-strict smoke passed: AstrBot `4.24.2`, target plugin found, activated, display name matched, LivingMemory detected, and the target plugin was absent from failed-plugin records.
   - The only failed-plugin entry was unrelated: `plugin_upload_astrbot_plugin_volcengine_asr`.
+- Git state:
+  - Created commit `ddfb47b Release 0.0.2-beta personality model`.
+  - Created local annotated tag `v0.0.2-beta`.
+  - Push is blocked because the current `GITHUB_TOKEN` visible to this process returns GitHub API `401 Unauthorized`; the token length is 40 and appears to be the old invalid token. No token value was printed.
 
