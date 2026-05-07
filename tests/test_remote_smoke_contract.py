@@ -69,6 +69,29 @@ class RemoteSmokeContractTests(unittest.TestCase):
         self.assertNotIn("\nnode --check scripts\\remote_smoke_playwright.js", readme)
         self.assertNotIn("\nnode scripts\\remote_smoke_playwright.js", readme)
 
+    def test_readme_test_matrix_documents_current_contract_scope(self):
+        readme = (ROOT / "README.md").read_text(encoding="utf-8")
+        section = readme.split("### 当前测试覆盖方向", 1)[1].split(
+            "### 持久迭代计划",
+            1,
+        )[0]
+        expected_fragments = (
+            "命令/alias",
+            "LLM tool 注册名",
+            "assessment_timing",
+            "typed config table",
+            "Protocol 方法面",
+            "required tuple",
+            "schema-version",
+            "metadata 驱动的插件身份",
+            "zip/env 示例",
+            "slug/badge/version/display_name",
+        )
+
+        for fragment in expected_fragments:
+            with self.subTest(fragment=fragment):
+                self.assertIn(fragment, section)
+
     def test_release_checklist_uses_bundled_node_fallback(self):
         checklist = (ROOT / "docs" / "release_branch_sync_checklist.md").read_text(
             encoding="utf-8",
