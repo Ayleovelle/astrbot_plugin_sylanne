@@ -27,6 +27,14 @@
 
 `scale_scores` 使用 PHQ-9-like、GAD-7-like、PSS-like、WHO-5-like、ISI-like 的启发式映射。这里的 `like` 很重要：插件没有施测原量表，也没有资格解释临床 cut-off，只能把它们作为结构化状态维度的参考。
 
+## 公共 API 返回形态
+
+- `enable_psychological_screening=false` 时，提交式 `observe_psychological_text(..., commit=True)` 会返回 `enabled=false` 的非诊断 payload，不会写入长期状态。
+- `get_psychological_screening_snapshot(...)` 和 `get_psychological_screening_values(...)` 仍可读取已有状态，便于其他插件在模块关闭后做迁移、调试或只读展示。
+- `simulate_psychological_update(...)` 永远不落库，即使模块关闭也可以用于候选文本预估。
+- payload 固定包含 `diagnostic=false`、`safety.non_diagnostic_screening_only=true` 和 `safety.not_a_medical_device=true`。
+- 出现自伤/自杀、伤害他人或严重功能受损等红旗信号时，`risk.requires_human_review=true`；插件应提示人工/专业支持或当地急救资源，而不是继续普通陪聊、输出疾病标签或承诺风险可控。
+
 ## 文献知识库
 
 心理筛查证据库位于 `psychological_literature_kb/`：

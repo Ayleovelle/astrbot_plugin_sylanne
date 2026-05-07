@@ -1,14 +1,18 @@
 import unittest
+from pathlib import Path
 
 from psychological_screening import (
     PsychologicalObservation,
     PsychologicalScreeningEngine,
     PsychologicalScreeningState,
+    SCREENING_DIMENSIONS,
     derive_scale_scores,
     format_psychological_state_for_user,
     heuristic_psychological_observation,
     psychological_state_to_public_payload,
 )
+
+ROOT = Path(__file__).resolve().parents[1]
 
 
 class PsychologicalScreeningTests(unittest.TestCase):
@@ -105,9 +109,20 @@ class PsychologicalScreeningTests(unittest.TestCase):
             session_key="s1",
         )
         self.assertEqual(payload["schema_version"], "astrbot.psychological_screening.v1")
+        self.assertEqual(payload["kind"], "psychological_screening_state")
         self.assertFalse(payload["diagnostic"])
+        self.assertEqual(
+            [dimension["key"] for dimension in payload["dimensions"]],
+            list(SCREENING_DIMENSIONS),
+        )
         self.assertTrue(payload["safety"]["non_diagnostic_screening_only"])
         self.assertTrue(payload["safety"]["not_a_medical_device"])
+        self.assertGreater(len(payload["safety"]["must_not"]), 0)
+        self.assertIn("risk", payload)
+        self.assertIn("requires_human_review", payload["risk"])
+        for scale_name, reference in payload["scale_references"].items():
+            with self.subTest(scale_name=scale_name):
+                self.assertFalse(reference["diagnostic"])
 
     def test_user_facing_psychological_text_stays_non_diagnostic(self):
         state = PsychologicalScreeningState.initial()
@@ -138,6 +153,30 @@ class PsychologicalScreeningTests(unittest.TestCase):
         self.assertNotIn("确诊", text)
         self.assertNotIn("治疗方案", text)
         self.assertNotIn("你患有", text)
+
+    def test_docs_describe_public_api_non_diagnostic_return_contract(self):
+        docs = (ROOT / "docs" / "psychological_screening.md").read_text(
+            encoding="utf-8",
+        )
+        expected_fragments = (
+            "enable_psychological_screening=false",
+            "enabled=false",
+            "不会写入长期状态",
+            "仍可读取已有状态",
+            "simulate_psychological_update",
+            "永远不落库",
+            "diagnostic=false",
+            "safety.non_diagnostic_screening_only=true",
+            "safety.not_a_medical_device=true",
+            "risk.requires_human_review=true",
+            "人工/专业支持",
+            "不是继续普通陪聊",
+            "输出疾病标签",
+        )
+
+        for fragment in expected_fragments:
+            with self.subTest(fragment=fragment):
+                self.assertIn(fragment, docs)
 
 
 if __name__ == "__main__":

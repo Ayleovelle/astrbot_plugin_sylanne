@@ -674,6 +674,35 @@ Validation complete:
   - Display name `多维情绪状态` matched.
   - Failed plugin data was `{}`.
 
+## 2026-05-07 Iteration 48
+
+Status: complete.
+
+- Clarified psychological screening public API semantics:
+  - `get_psychological_screening_snapshot(...)` and `get_psychological_screening_values(...)` are read-only and may read existing state even when modeling is disabled.
+  - `observe_psychological_text(..., commit=True)` is blocked by default `enable_psychological_screening=false` and returns an `enabled=false` non-diagnostic payload.
+  - `reset_psychological_screening_state(...)` reuses `allow_emotion_reset_backdoor`.
+- Expanded `docs\psychological_screening.md` with public API return-shape and non-diagnostic safety notes.
+- Added tests for public payload structure, scale reference non-diagnostic flags, docs contract coverage, and disabled psychological commit not loading or saving state.
+
+Validation complete:
+
+- `py -3.13 -m unittest tests.test_psychological_screening -v`: 10 tests passed.
+- `py -3.13 -m unittest tests.test_public_api.PublicApiTests tests.test_public_api.MemoryPayloadPublicApiTests.test_psychological_observe_is_disabled_by_default_for_commits -v`: 21 tests passed.
+- `py -3.13 -m unittest discover -s tests -v`: 167 tests passed.
+- `py -3.13 -m py_compile main.py emotion_engine.py humanlike_engine.py psychological_screening.py public_api.py prompts.py scripts\build_literature_kb.py scripts\build_humanlike_agent_literature_kb.py scripts\build_psychological_literature_kb.py scripts\package_plugin.py`: passed.
+- Bundled Node `--check` for `scripts\remote_smoke_playwright.js`, `scripts\remote_install_upload_playwright.js`, and `scripts\plugin_zip_preflight.js`: passed.
+- `py -3.13 scripts\package_plugin.py --output dist\astrbot_plugin_emotional_state.zip`: passed.
+- Bundled Node `scripts\plugin_zip_preflight.js dist\astrbot_plugin_emotional_state.zip astrbot_plugin_emotional_state`: passed, 49 entries.
+- `git diff --check`: passed, with CRLF conversion warnings only.
+- Remote smoke with metadata-matched plugin name/version/display-name assertions: passed.
+  - AstrBot version `4.24.2`.
+  - Plugin API returned 30 plugins.
+  - `astrbot_plugin_emotional_state` was present and activated.
+  - Version `1.0.0` matched.
+  - Display name `多维情绪状态` matched.
+  - Failed plugin data was `{}`.
+
 ## 2026-05-07 Iteration 47
 
 Status: complete.

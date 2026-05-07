@@ -923,13 +923,28 @@ class MemoryPayloadPublicApiTests(unittest.TestCase):
         plugin.config = {}
         plugin.psychological_engine = PsychologicalScreeningEngine()
         plugin._psychological_memory_cache = {}
-        payload = asyncio.run(
-            plugin.observe_psychological_text(
-                session_key="s1",
-                text="我压力很大",
-                commit=True,
-            ),
-        )
+
+        async def forbidden_load(self, session_key):
+            raise AssertionError("disabled psychological commit must not load state")
+
+        async def forbidden_save(self, session_key, state):
+            raise AssertionError("disabled psychological commit must not save state")
+
+        original_load = EmotionalStatePlugin._load_psychological_state
+        original_save = EmotionalStatePlugin._save_psychological_state
+        EmotionalStatePlugin._load_psychological_state = forbidden_load
+        EmotionalStatePlugin._save_psychological_state = forbidden_save
+        try:
+            payload = asyncio.run(
+                plugin.observe_psychological_text(
+                    session_key="s1",
+                    text="我压力很大",
+                    commit=True,
+                ),
+            )
+        finally:
+            EmotionalStatePlugin._load_psychological_state = original_load
+            EmotionalStatePlugin._save_psychological_state = original_save
         self.assertFalse(payload["enabled"])
         self.assertFalse(payload["diagnostic"])
 

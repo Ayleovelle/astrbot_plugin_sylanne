@@ -1097,7 +1097,18 @@ enable_psychological_screening = false
 | `get_psychological_screening_values(event_or_session)` | 否 | 只取维度值。 |
 | `observe_psychological_text(event_or_session, text)` | 是 | 提交文本并更新筛查状态。 |
 | `simulate_psychological_update(event_or_session, text)` | 否 | 模拟筛查变化，不落库。 |
-| `reset_psychological_screening_state(event_or_session)` | 是 | 重置筛查状态。 |
+| `reset_psychological_screening_state(event_or_session)` | 是 | 重置筛查状态；复用 `allow_emotion_reset_backdoor` 后门开关。 |
+
+`get_psychological_screening_snapshot(...)` 和 `get_psychological_screening_values(...)` 是只读读取已有状态；这不等于启用心理建模。只有 `observe_psychological_text(..., commit=True)` 会尝试写入长期状态，并会在默认 `enable_psychological_screening=false` 时被拦截，返回类似：
+
+```json
+{
+  "kind": "psychological_screening_state",
+  "diagnostic": false,
+  "enabled": false,
+  "reason": "enable_psychological_screening is false"
+}
+```
 
 出现自伤、自杀、伤害他人、严重功能受损等红旗信号时，payload 会把 `requires_human_review` 置为 `true`。这类场景应优先提示人工复核、当地急救、危机热线或身边可信的人，而不是继续普通陪聊或输出疾病标签。
 
