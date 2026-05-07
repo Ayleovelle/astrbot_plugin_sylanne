@@ -75,6 +75,7 @@ Only run `scripts\remote_install_upload_playwright.js` after:
 
 - the package preflight passes,
 - the preflight confirms zip `metadata.yaml` `name:` matches `ASTRBOT_EXPECT_PLUGIN`,
+- the zip uses relative POSIX paths and contains no unsafe `.` / `..` path segments,
 - `ASTRBOT_REMOTE_INSTALL_CONFIRM=1` is explicitly set,
 - the target server is intended to receive a new upload.
 

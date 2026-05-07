@@ -58,19 +58,23 @@ def should_include(path: Path) -> bool:
     return relative.parts[0] in INCLUDE_DIRS
 
 
-def collect_files() -> list[Path]:
+def collect_files(exclude_paths: set[Path] | None = None) -> list[Path]:
+    resolved_excludes = {path.resolve() for path in (exclude_paths or set())}
     files = [
         path for path in ROOT.rglob("*")
-        if path.is_file() and should_include(path)
+        if path.is_file()
+        and path.resolve() not in resolved_excludes
+        and should_include(path)
     ]
     return sorted(files, key=lambda item: item.relative_to(ROOT).as_posix())
 
 
 def build_package(output: Path) -> Path:
     output.parent.mkdir(parents=True, exist_ok=True)
+    files = collect_files(exclude_paths={output})
     with zipfile.ZipFile(output, "w", compression=zipfile.ZIP_DEFLATED) as archive:
         archive.writestr(f"{PLUGIN_NAME}/", "")
-        for file_path in collect_files():
+        for file_path in files:
             archive.write(
                 file_path,
                 Path(PLUGIN_NAME, file_path.relative_to(ROOT)).as_posix(),

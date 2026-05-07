@@ -156,6 +156,10 @@ function assertZipLooksUploadable(zipPath, expectedPlugin, options = {}) {
       throw new Error(`Zip entry must not contain parent traversal: ${name}`);
     }
     const relativeParts = name.slice(expectedDirectory.length).split("/").filter(Boolean);
+    const unsafePart = relativeParts.find((part) => part === "." || part === "..");
+    if (unsafePart) {
+      throw new Error(`Zip entry must not contain unsafe path segment ${unsafePart}: ${name}`);
+    }
     const forbidden = relativeParts.find((part) => forbiddenParts.has(part));
     if (forbidden) {
       throw new Error(`Zip entry contains excluded path segment ${forbidden}: ${name}`);
@@ -180,9 +184,11 @@ module.exports = {
 };
 
 if (require.main === module) {
-  const [, , zipPath, expectedPlugin] = process.argv;
+  const [, , zipPath, expectedPluginArg] = process.argv;
+  const expectedPlugin = expectedPluginArg || process.env.ASTRBOT_EXPECT_PLUGIN || "";
   if (!zipPath || !expectedPlugin) {
     console.error("Usage: node scripts/plugin_zip_preflight.js <zip> <plugin_name>");
+    console.error("Or set ASTRBOT_EXPECT_PLUGIN when <plugin_name> is omitted.");
     process.exit(64);
   }
   try {

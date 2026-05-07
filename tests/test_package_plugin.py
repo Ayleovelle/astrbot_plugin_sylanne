@@ -100,6 +100,18 @@ class PackagePluginTests(unittest.TestCase):
         _, size = self._zip_names()
         self.assertLess(size, 40 * 1024 * 1024)
 
+    def test_package_excludes_output_zip_even_inside_included_directory(self):
+        module = load_package_script()
+        output = ROOT / "docs" / f"{PLUGIN_NAME}.zip"
+        try:
+            module.build_package(output)
+            with zipfile.ZipFile(output) as archive:
+                names = set(archive.namelist())
+        finally:
+            output.unlink(missing_ok=True)
+
+        self.assertNotIn(f"{PLUGIN_NAME}/docs/{PLUGIN_NAME}.zip", names)
+
 
 class PluginZipPreflightTests(unittest.TestCase):
     def _node(self) -> str:
@@ -129,6 +141,23 @@ class PluginZipPreflightTests(unittest.TestCase):
                 PLUGIN_NAME,
             ],
             cwd=ROOT,
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            check=False,
+        )
+
+    def _preflight_with_env_plugin(self, zip_path: Path) -> subprocess.CompletedProcess[str]:
+        env = os.environ.copy()
+        env["ASTRBOT_EXPECT_PLUGIN"] = PLUGIN_NAME
+        return subprocess.run(
+            [
+                self._node(),
+                str(ROOT / "scripts" / "plugin_zip_preflight.js"),
+                str(zip_path),
+            ],
+            cwd=ROOT,
+            env=env,
             text=True,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
@@ -206,6 +235,36 @@ class PluginZipPreflightTests(unittest.TestCase):
 
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("parent traversal", result.stderr)
+
+    def test_zip_preflight_rejects_unsafe_dot_path_segments(self):
+        for unsafe_name in (
+            f"{PLUGIN_NAME}/docs/./notes.md",
+            f"{PLUGIN_NAME}/docs/../escape.txt",
+        ):
+            with self.subTest(unsafe_name=unsafe_name):
+                with tempfile.TemporaryDirectory() as temp_dir:
+                    output = Path(temp_dir) / f"{PLUGIN_NAME}.zip"
+                    entries = self._valid_entries() + [(unsafe_name, "bad\n")]
+                    self._write_zip(output, entries)
+
+                    result = self._preflight(output)
+
+                self.assertNotEqual(result.returncode, 0)
+                self.assertTrue(
+                    "unsafe path segment" in result.stderr
+                    or "parent traversal" in result.stderr,
+                )
+
+    def test_zip_preflight_uses_expected_plugin_environment_fallback(self):
+        module = load_package_script()
+        with tempfile.TemporaryDirectory() as temp_dir:
+            output = Path(temp_dir) / f"{PLUGIN_NAME}.zip"
+            module.build_package(output)
+
+            result = self._preflight_with_env_plugin(output)
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn('"ok":true', result.stdout.replace(" ", ""))
 
     def test_zip_preflight_rejects_metadata_name_mismatch(self):
         with tempfile.TemporaryDirectory() as temp_dir:
