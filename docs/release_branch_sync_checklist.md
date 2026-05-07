@@ -49,6 +49,7 @@ Commit the full validated baseline on `main` first. Include:
 - tests,
 - scripts,
 - docs,
+- `LICENSE` and GPL metadata,
 - persistent planning files.
 
 Do not commit generated `dist/` or `output/` artifacts.
@@ -78,6 +79,7 @@ Only run `scripts\remote_install_upload_playwright.js` after:
 - the package preflight passes,
 - the preflight confirms the zip contains the runtime root files `__init__.py`, `main.py`, `emotion_engine.py`, `humanlike_engine.py`, `moral_repair_engine.py`, `psychological_screening.py`, `prompts.py`, and `public_api.py`,
 - the preflight confirms the zip contains the dependency declaration `requirements.txt`,
+- the preflight confirms the zip contains `LICENSE` and `metadata.yaml` declares `license: GPL-3.0-or-later`,
 - the preflight confirms zip `metadata.yaml` `name:` matches `ASTRBOT_EXPECT_PLUGIN`,
 - the zip uses relative POSIX paths and contains no unsafe `.` / `..` path segments,
 - any `uninstall-failed` call is only for the temporary `plugin_upload_<plugin>` failed-upload directory, with `delete_config=false` and `delete_data=false`,

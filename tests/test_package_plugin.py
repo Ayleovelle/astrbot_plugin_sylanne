@@ -18,6 +18,7 @@ def metadata_value(name: str) -> str:
 
 
 PLUGIN_NAME = metadata_value("name")
+PLUGIN_LICENSE = "GPL-3.0-or-later"
 
 
 def load_package_script():
@@ -45,6 +46,7 @@ class PackagePluginTests(unittest.TestCase):
         self.assertIn("metadata.yaml", files)
         self.assertIn("main.py", files)
         self.assertIn("moral_repair_engine.py", files)
+        self.assertIn("LICENSE", files)
         self.assertIn("README.md", files)
         self.assertIn("docs/theory.md", files)
         self.assertIn("literature_kb/manifest.json", files)
@@ -77,6 +79,15 @@ class PackagePluginTests(unittest.TestCase):
         self.assertEqual(PLUGIN_NAME, metadata_value("name"))
         self.assertEqual(module.PLUGIN_NAME, metadata_value("name"))
 
+    def test_license_contract_is_gpl_and_documented(self):
+        readme = (ROOT / "README.md").read_text(encoding="utf-8")
+        license_text = (ROOT / "LICENSE").read_text(encoding="ascii")
+
+        self.assertEqual(PLUGIN_LICENSE, metadata_value("license"))
+        self.assertIn(PLUGIN_LICENSE, readme)
+        self.assertIn("GNU GENERAL PUBLIC LICENSE", license_text)
+        self.assertIn("Version 3", license_text)
+
     def test_package_zip_has_astrbot_plugin_root(self):
         names, _ = self._zip_names()
 
@@ -97,6 +108,7 @@ class PackagePluginTests(unittest.TestCase):
         self.assertIn(prefix + "metadata.yaml", names)
         self.assertIn(prefix + "_conf_schema.json", names)
         self.assertIn(prefix + "README.md", names)
+        self.assertIn(prefix + "LICENSE", names)
         self.assertIn(prefix + "literature_kb/works.jsonl", names)
         self.assertIn(prefix + "psychological_literature_kb/curated/top_200.jsonl", names)
         self.assertIn(prefix + "humanlike_agent_literature_kb/curated/top_200.jsonl", names)
@@ -201,6 +213,7 @@ class PluginZipPreflightTests(unittest.TestCase):
             (prefix + "prompts.py", "# runtime\n"),
             (prefix + "public_api.py", "# public API\n"),
             (prefix + "README.md", "# docs\n"),
+            (prefix + "LICENSE", "GNU GENERAL PUBLIC LICENSE\n"),
             (prefix + "requirements.txt", "# no dependencies\n"),
             (prefix + "_conf_schema.json", "{}\n"),
         ]
@@ -244,6 +257,7 @@ class PluginZipPreflightTests(unittest.TestCase):
         required_suffixes = (
             "__init__.py",
             "_conf_schema.json",
+            "LICENSE",
             "moral_repair_engine.py",
             "public_api.py",
             "requirements.txt",

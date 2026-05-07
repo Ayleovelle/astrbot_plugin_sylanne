@@ -1429,3 +1429,28 @@ Validation complete:
 - Leak scan for remote address/password in the repository excluding generated/runtime directories: passed.
 - Remote read-only smoke with expected plugin version/display-name assertions: passed. The target plugin was installed, activated, version-matched, display-name-matched, and absent from failed-plugin records.
 
+## 2026-05-07 Iteration 60
+
+Status: complete.
+
+- Declared the project license as `GPL-3.0-or-later`:
+  - added the standard GPLv3 `LICENSE` file,
+  - added `license: GPL-3.0-or-later` to `metadata.yaml`,
+  - updated README license section and install tree,
+  - included `LICENSE` in release package collection and upload zip preflight required entries,
+  - updated release checklist and contract tests so license metadata and package contents stay aligned.
+
+Validation complete:
+
+- `py -3.13 -m unittest tests.test_package_plugin tests.test_remote_smoke_contract -v`: 33 tests passed.
+- `py -3.13 -m unittest discover -s tests -v`: 194 tests passed.
+- `py -3.13 -m py_compile main.py emotion_engine.py humanlike_engine.py moral_repair_engine.py psychological_screening.py prompts.py public_api.py scripts\build_literature_kb.py scripts\build_psychological_literature_kb.py scripts\build_humanlike_agent_literature_kb.py scripts\package_plugin.py`: passed.
+- `py -3.13 -m json.tool _conf_schema.json`: passed.
+- Bundled Node `--check` for `scripts\plugin_zip_preflight.js`, `scripts\remote_smoke_playwright.js`, and `scripts\remote_install_upload_playwright.js`: passed.
+- `py -3.13 scripts\package_plugin.py --output dist\astrbot_plugin_emotional_state.zip`: passed.
+- Bundled Node `scripts\plugin_zip_preflight.js dist\astrbot_plugin_emotional_state.zip astrbot_plugin_emotional_state`: passed, 51 entries.
+- Zip inspection confirmed `astrbot_plugin_emotional_state/LICENSE` and `astrbot_plugin_emotional_state/metadata.yaml`.
+- `git diff --check`: passed, with CRLF conversion warnings only.
+- Leak scan for remote address/password in the repository excluding generated/runtime directories: passed.
+- Remote read-only smoke with expected plugin version/display-name assertions: passed.
+

@@ -167,6 +167,7 @@ class RemoteSmokeContractTests(unittest.TestCase):
             encoding="utf-8",
         )
         plugin_name = self._metadata_value("name")
+        plugin_license = self._metadata_value("license")
         expected_zip = f"dist\\{plugin_name}.zip"
 
         for document_name, document in (
@@ -195,6 +196,7 @@ class RemoteSmokeContractTests(unittest.TestCase):
                     f"& $node scripts\\plugin_zip_preflight.js {expected_zip} {plugin_name}",
                     document,
                 )
+                self.assertIn(plugin_license, document)
                 self.assertIn(
                     f"py -3.13 scripts\\package_plugin.py --output {expected_zip}",
                     document,
@@ -209,6 +211,7 @@ class RemoteSmokeContractTests(unittest.TestCase):
             "psychological_screening.py",
             "prompts.py",
             "public_api.py",
+            "LICENSE",
             "requirements.txt",
         ):
             with self.subTest(runtime_file=runtime_file):
@@ -334,6 +337,7 @@ class RemoteSmokeContractTests(unittest.TestCase):
             "prompts.py",
             "public_api.py",
             "README.md",
+            "LICENSE",
             "requirements.txt",
             "_conf_schema.json",
         ):
