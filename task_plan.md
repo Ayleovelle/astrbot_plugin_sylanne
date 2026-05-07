@@ -85,6 +85,7 @@ Build and maintain `astrbot_plugin_emotional_state`: an AstrBot plugin with mult
 | 71 | complete | Rewrite README as a release-ready plugin landing page using the ASR reference structure, then rebuild package and prepare new-repository publication | 208 unit tests, py_compile, json.tool, Node syntax checks, package build, package preflight, GitHub auth blocked |
 | 72 | complete | Create GitHub repository, update repo metadata, set prerelease version, push validated main branch, and publish prerelease package | Public repository and `v0.0.1-beta` prerelease published at `https://github.com/Ayleovelle/astrbot_plugin_emotional_state`; release zip SHA256 `3133f89e96ce5e124083da0867765f2d5d6d6b2ef074d0963a55eedf0de833ef` |
 | 73 | complete | Improve GitHub formula rendering using official mathematical expression syntax | GitHub fenced math retained; unsafe macros blocked by `tests/test_document_math_contract.py`; 212 tests passed; release asset refreshed with SHA256 `f2e8297c77aebab6d6059ab8ec3bea2bd8a738f14325d0c111cae246a6b89cd3` |
+| 74 | complete | Add top-journal model argumentation with collapsed full derivations and tighter formula notation | README/theory default summaries, folded derivations, DOI-backed evidence map, symbol cleanup (`O_t`, `H_t`, `F_t`), 213 tests, py_compile, json.tool, Node syntax, package build, package preflight, git diff check |
 
 ## Recovery Checklist
 

@@ -117,3 +117,22 @@ This file stores durable discoveries from implementation, review, and remote tes
 - Public moral repair payloads expose `deception_risk` and `harm_risk` only as risk signals. They also expose allowed repair actions such as clarification, correction, apology, compensation, trust repair, accountability, and human review.
 - `moral_repair_state_at_write` is a LivingMemory-compatible snapshot annotation and should be persisted alongside the memory text when enabled.
 - Release contracts must include `moral_repair_engine.py` anywhere runtime root files are enumerated: package file selection, zip preflight fixtures, README install tree, README upload preflight text, and release checklist.
+
+## 2026-05-07 Top-Journal Formula Argumentation
+
+- Verified source anchors for the README/theory evidence map:
+  - Russell 1980, *Journal of Personality and Social Psychology*, DOI `10.1037/h0077714`: supports circumplex / continuous valence-arousal style modeling.
+  - Scherer 2005, *Social Science Information*, DOI `10.1177/0539018405058216`: supports component/appraisal treatment of emotion measurement.
+  - Kuppens, Allen & Sheeber 2010, *Psychological Science*, DOI `10.1177/0956797610372634`: supports emotional inertia as resistance to change over time.
+  - Gross 1998, *Review of General Psychology*, DOI `10.1037/1089-2680.2.3.271`: supports emotion regulation as a dynamic process.
+  - Frijda, Kuipers & ter Schure 1989, *Journal of Personality and Social Psychology*, DOI `10.1037/0022-3514.57.2.212`: supports appraisal plus action readiness/action tendency.
+  - Carver & Harmon-Jones 2009, *Psychological Bulletin*, DOI `10.1037/a0013965`: supports anger as approach-related rather than always withdrawal/cold-war.
+- Documentation decision:
+  - README should show the skeleton and model rationale by default.
+  - Full formula derivation and detailed action-tendency formulas should stay inside `<details>`.
+  - `docs/theory.md` is the long-form theory appendix and should start with `## 重点版`.
+- Notation decision:
+  - `C_t` is reserved for certainty in the 7D emotion vector.
+  - `H_t` is conversation/history context.
+  - `O_t` is the consequence/action-tendency vector.
+  - `F_t` is conflict-analysis output.

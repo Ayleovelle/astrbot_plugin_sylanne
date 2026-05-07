@@ -1718,3 +1718,47 @@ Notes:
 
 - Two proxy upload attempts left `starter` assets or reset mid-transfer. Both were cleaned before the final direct upload succeeded.
 
+## 2026-05-07 Top-Journal Model Argumentation
+
+Status: complete locally; publication pending commit/push/release refresh.
+
+- User requested the model-formula argumentation to reference top-journal literature, with the full version folded and only important content shown by default.
+- Started a read-only subagent for independent review. It confirmed the summary/folded structure was mostly correct and flagged:
+  - README relationship/consequence formulas were still too visible by default,
+  - `Q_t` was overloaded as both certainty dimension and consequence vector,
+  - `C_t` / `E_(t-1)` notation weakened rigor.
+- Updated `README.md`:
+  - added `### 默认阅读：核心模型摘要`,
+  - added a DOI-backed top-journal evidence map,
+  - folded complete formula derivation and evidence under `<details>`,
+  - folded relationship/action-tendency formulas under `<details>`,
+  - kept conflict-cause defaults visible while folding extended formulas.
+- Updated `docs/theory.md`:
+  - added `## 重点版`,
+  - folded complete theory/proofs/references under `<details>`,
+  - renamed the old duplicate theory section to `## 2. 输入与建模假设`,
+  - clarified helper definitions for `combo`, `clip`, and indicator notation.
+- Tightened formula notation:
+  - certainty dimension now uses `C_t`,
+  - context uses `H_t`,
+  - consequence/action-tendency vector uses `O_t`,
+  - conflict analysis uses `F_t`,
+  - stale `Q_t` and `E_(t-1)` references are blocked by tests.
+- Updated `tests/test_document_math_contract.py` to lock:
+  - default summaries and folded full derivations,
+  - top-journal DOI anchors,
+  - folded relationship/action formulas,
+  - no stale `Q_t` or `E_(t-1)` notation.
+
+Validation complete:
+
+- `py -3.13 -m unittest tests.test_document_math_contract -v`: 5 tests passed.
+- `py -3.13 -m unittest discover -s tests -v`: 213 tests passed.
+- `py -3.13 -m py_compile main.py emotion_engine.py psychological_screening.py humanlike_engine.py integrated_self.py moral_repair_engine.py prompts.py public_api.py scripts\package_plugin.py`: passed.
+- `py -3.13 -m json.tool _conf_schema.json`: passed.
+- Bundled Node `--check` for `scripts\plugin_zip_preflight.js`, `scripts\remote_smoke_playwright.js`, and `scripts\remote_install_upload_playwright.js`: passed.
+- `py -3.13 scripts\package_plugin.py --output dist\astrbot_plugin_emotional_state.zip`: passed.
+- Bundled Node `scripts\plugin_zip_preflight.js dist\astrbot_plugin_emotional_state.zip astrbot_plugin_emotional_state`: passed with 52 entries, size `10174454`.
+- `git diff --check`: passed with CRLF conversion warnings only.
+- Rebuilt zip SHA256: `6bb7a92b919ae7433a253499d53b3f0d4eda251ce213fbe930c55c7712f8efcf`.
+

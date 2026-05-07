@@ -445,7 +445,7 @@ E_t(P) \in [-1, 1]^7
 ```math
 E_t =
 \begin{bmatrix}
-V_t & A_t & D_t & G_t & Q_t & K_t & S_t
+V_t & A_t & D_t & G_t & C_t & K_t & S_t
 \end{bmatrix}^{\mathsf T}
 ```
 
@@ -460,6 +460,34 @@ V_t & A_t & D_t & G_t & Q_t & K_t & S_t
 | 亲和度 | `affiliation` | 对用户的亲近和信任 | 靠近、修复、温度 | 距离感、防御、冷处理 |
 
 前三维对应 PAD 和环形情感模型；后四维来自 appraisal theory 与 OCC 对事件、行动者和对象的认知评价。
+
+### 默认阅读：核心模型摘要
+
+默认只需要理解五件事：
+
+| 层级 | 核心公式 | 设计理由 |
+| --- | --- | --- |
+| 状态空间 | `E_t(P) in [-1,1]^7` | 情绪不是单一标签，而是可连续调制的多维状态。 |
+| 人格先验 | `b_p = h_b(P)`，`theta_p = h_theta(P)` | persona 不只决定文风，也决定基线、反应强度和恢复速度。 |
+| 即时观测 | `X_t = tanh(WZ_t + beta)` | LLM 负责把上下文解释成 appraisal 与即时情绪观测。 |
+| 长期更新 | `E'_t = B_t + alpha_t(X_t-B_t)` | 当前刺激会改变状态，但不能一轮文本完全覆盖长期情绪。 |
+| 真实时间 | `gamma_p(Delta t)=1-2^{-Delta t/H_p}` | 恢复和冷处理按真实时间衰减，不能靠刷屏强行洗掉。 |
+
+这套模型的工程折中是：LLM 负责语义评价，本地公式负责惯性、限幅、半衰期、人格基线和后果衰减。下面是完整论证，默认折叠，维护模型或写论文时再展开。
+
+<details>
+<summary>展开完整公式推导与顶刊依据</summary>
+
+#### 顶刊证据映射
+
+| 模型部件 | 采用的工程形式 | 顶刊/高影响依据 | 插件中的取舍 |
+| --- | --- | --- | --- |
+| 多维情绪空间 | PAD + appraisal 扩展为 7 维向量 | Russell 1980, *Journal of Personality and Social Psychology*, DOI `10.1037/h0077714`；Mehrabian & Russell 1974；Scherer 2005, DOI `10.1177/0539018405058216`。 | 用连续向量保存状态，而不是只用“开心/生气/难过”标签。 |
+| 人格作为先验 | `b_p` 与 `theta_p` 从 persona 派生 | appraisal theory 强调评价依赖目标、责任、可控性和情境意义；Roseman 1991, DOI `10.1080/02699939108411034`。 | 不做临床人格测量，只把 persona 转成工程先验，让不同 bot 有不同默认姿态。 |
+| 惯性更新 | 加权二次目标函数推出指数平滑 | Kuppens、Allen & Sheeber 2010, *Psychological Science*, DOI `10.1177/0956797610372634`；Gross 1998, DOI `10.1037/1089-2680.2.3.271`。 | 用 `E_{t-1}` 与 `X_t` 的加权折中防止单轮文本劫持状态。 |
+| 置信门控与惊讶度 | `g(c_t)` 与 `delta_t` 调制 `alpha_t` | Scherer 2005 的 component process model；Roseman 1991 对概率、合法性、因果主体等 appraisal 维度的实验检验。 | 低置信 LLM 输出只轻微更新，高显著事件才提高步长。 |
+| 行动倾向 | `O_t` 表示 approach、withdrawal、repair 等后果 | Frijda, Kuipers & ter Schure 1989, *Journal of Personality and Social Psychology*, DOI `10.1037/0022-3514.57.2.212`；Carver & Harmon-Jones 2009, *Psychological Bulletin*, DOI `10.1037/a0013965`。 | 生气不必然冷战，可走边界、修复、求证或解决问题。 |
+| 冷处理与修复 | 关系决策 + 冲突成因 + 真实时间 active effect | Christensen & Heavey 1990, *Journal of Personality and Social Psychology*, DOI `10.1037/0022-3514.59.1.73`；Fehr et al. 2010, *Psychological Bulletin*, DOI `10.1037/a0019993`；Ohbuchi et al. 1989, DOI `10.1037/0022-3514.56.2.219`。 | 冷处理是可衰减后果状态；道歉、承认、补救和误读会压低惩罚性后果。 |
 
 ### 人格先验
 
@@ -508,15 +536,15 @@ T_p =
 设本轮输入为：
 
 ```math
-I_t = \{C_t, U_t, P, E_{t-1}\}
+I_t = \{H_t, U_t, P, E_{t-1}\}
 ```
 
 含义：
 
-- `C_t`：最近上下文。
+- `H_t`：最近上下文。
 - `U_t`：当前用户输入或 bot 回复。
 - `P`：当前 persona。
-- `E_(t-1)`：上一轮平滑状态。
+- `E_{t-1}`：上一轮平滑状态。
 
 理论上可以把 LLM 的判断拆成隐藏评价向量：
 
@@ -679,6 +707,8 @@ D_t = D'_t + \lambda\alpha_t(K'_t-D'_t)
 E_t = \Pi_{[-1,1]^7}(E_t)
 ```
 
+</details>
+
 ### 真实时间记忆
 
 核心时间参数：
@@ -702,10 +732,15 @@ E_t = \Pi_{[-1,1]^7}(E_t)
 
 ## 关系与后果
 
-情绪状态不会直接等于回复模板。插件先把情绪映射到行动倾向：
+情绪状态不会直接等于回复模板。默认只需要知道：插件会把 `E_t` 映射成后果状态 `O_t`，其中包括靠近、退避、边界、修复、确认、谨慎、反刍和解决问题等维度；这些后果按真实时间衰减，所以冷处理、缓和和修复不会被消息数量直接刷掉。生气后的走向由“维度公式 + LLM 关系判断 + 冲突成因分析”共同决定，不会把所有负面情绪都硬推成冷战。
+
+<details>
+<summary>展开行动倾向、关系决策与后果衰减公式</summary>
+
+插件先把情绪映射到行动倾向：
 
 ```math
-Q_t =
+O_t =
 \begin{bmatrix}
 \mathrm{approach} & \mathrm{withdrawal} & \mathrm{confrontation} &
 \mathrm{appeasement} & \mathrm{repair} & \mathrm{reassurance} &
@@ -717,7 +752,7 @@ Q_t =
 这些倾向按真实时间衰减：
 
 ```math
-Q_t = 2^{-\Delta t/H_q}Q_{t-1}+\mathrm{impulse}(E_t,X_t,\mathrm{appraisal}_t)
+O_t = 2^{-\Delta t/H_o}O_{t-1}+\mathrm{impulse}(E_t,X_t,\mathrm{appraisal}_t)
 ```
 
 | 后果维度 | 字段 | 常见表现 |
@@ -760,7 +795,14 @@ Q_t = 2^{-\Delta t/H_q}Q_{t-1}+\mathrm{impulse}(E_t,X_t,\mathrm{appraisal}_t)
 | `escalate` | 更强防御或冲突升级 | 提高对抗和表达强度。 |
 | `none` | 无明显关系事件 | 不额外触发关系后果。 |
 
+</details>
+
 ### 冲突原因分析
+
+默认逻辑：先判断冲突是否真的发生，再判断原因属于用户犯错、他/她任性、误读、双方共同作用还是外部因素；最后再看错误是否被承认、道歉是否可信、补救是否完成。只有“伤害较重、重复发生、补救不足、信任受损”同时较强时，冷处理或强边界才会持续；如果误读概率高或他/她本身反应过度，则会转向求证、修复或自我缓和。
+
+<details>
+<summary>展开扩展冲突成因与关系修复公式</summary>
 
 插件要求 LLM 同时输出：
 
@@ -804,6 +846,8 @@ Q_t = 2^{-\Delta t/H_q}Q_{t-1}+\mathrm{impulse}(E_t,X_t,\mathrm{appraisal}_t)
 | `repair_status` | 派生字段，表示 `unresolved`、`acknowledged`、`repaired`、`restored` 等修复阶段。 |
 
 如果 LLM 一开始判断为 `cold_war`，但冲突分析显示用户已经补救、道歉足够完整、bot 误读概率高，或者原因更像他/她任性，本地后果层会把冷处理转向修复，并清除或降低负面后果。
+
+</details>
 
 ### 安全边界开关
 

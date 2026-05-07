@@ -113,6 +113,33 @@ def iter_math_blocks():
 
 
 class DocumentMathContractTests(unittest.TestCase):
+    def test_theory_sections_default_to_summary_with_collapsed_full_version(self):
+        readme = (ROOT / "README.md").read_text(encoding="utf-8")
+        theory = (ROOT / "docs" / "theory.md").read_text(encoding="utf-8")
+
+        self.assertIn("### 默认阅读：核心模型摘要", readme)
+        self.assertIn("<summary>展开完整公式推导与顶刊依据</summary>", readme)
+        self.assertIn("<summary>展开扩展冲突成因与关系修复公式</summary>", readme)
+        self.assertIn("#### 顶刊证据映射", readme)
+        self.assertIn("10.1177/0956797610372634", readme)
+        self.assertIn("10.1037/a0013965", readme)
+        self.assertIn(
+            "<summary>展开行动倾向、关系决策与后果衰减公式</summary>",
+            readme,
+        )
+        self.assertIn("O_t = 2^{-\\Delta t/H_o}O_{t-1}", readme)
+        self.assertIn("## 重点版", theory)
+        self.assertIn(
+            "<summary>展开完整理论论证、公式推导与参考文献</summary>",
+            theory,
+        )
+        self.assertEqual(theory.count("## 2. 从认知评价到维度观测"), 0)
+        self.assertIn("## 2. 输入与建模假设", theory)
+        self.assertNotIn("Q_t", readme)
+        self.assertNotIn("Q_t", theory)
+        self.assertNotIn("E_(t-1)", readme)
+        self.assertNotIn("E_(t-1)", theory)
+
     def test_formula_blocks_use_github_math_fences(self):
         counts = {}
         for path in MATH_DOCUMENTS:

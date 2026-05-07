@@ -1,5 +1,26 @@
 # 多维情绪状态模型：理论说明
 
+## 重点版
+
+默认阅读只需要抓住这条链路：
+
+1. 情绪状态不是单一标签，而是受人格 `P` 调制的有界连续向量 `E_t(P) in [-1,1]^n`。
+2. `V/A/D` 继承 PAD 与 circumplex affect 的连续维度思想；`G/C/K/S` 引入 appraisal theory 对目标一致性、确定性、可控性和社交亲近的评价。
+3. LLM 负责把上下文解释成即时观测 `X_t` 与 appraisal；本地引擎负责真实时间半衰期、惯性、限幅和关系后果。
+4. 长期状态更新可视为在“上一状态/人格基线先验”与“当前观测”之间求二次优化折中，最终得到 `E'_t = B_t + alpha_t(X_t-B_t)`。
+5. 冷处理、修复、边界、求证等不是情绪标签本身，而是由 `O_t` 表示的后果状态，并按真实时间衰减。
+
+| 设计点 | 默认结论 | 顶刊/高影响依据 |
+| --- | --- | --- |
+| 连续情绪向量 | 用多维连续状态替代离散情绪标签。 | Russell 1980, *Journal of Personality and Social Psychology*；Mehrabian & Russell 1974。 |
+| appraisal 扩展维度 | 目标、责任、控制、确定性会改变情绪意义。 | Scherer 2005, *Social Science Information*；Roseman 1991, *Cognition and Emotion*；OCC。 |
+| 情绪惯性 | 单轮文本不能完全重写长期状态。 | Kuppens, Allen & Sheeber 2010, *Psychological Science*；Gross 1998, *Review of General Psychology*。 |
+| 行动倾向 | 生气可能走对抗、边界、修复或求证，不必然冷战。 | Frijda et al. 1989, *Journal of Personality and Social Psychology*；Carver & Harmon-Jones 2009, *Psychological Bulletin*。 |
+| 关系修复 | 承认、道歉、补救、误读和反复犯错共同决定是否原谅或冷处理。 | McCullough et al. 1997, *Journal of Personality and Social Psychology*；Fehr et al. 2010, *Psychological Bulletin*；Ohbuchi et al. 1989, *Journal of Personality and Social Psychology*。 |
+
+<details>
+<summary>展开完整理论论证、公式推导与参考文献</summary>
+
 ## 1. 建模边界
 
 本插件把情绪定义为 bot 的“计算性调制状态”，不把他/她等同于真实主观体验。形式上，情绪状态是一个有界连续向量，并被当前人格 `P` 调制：
@@ -13,21 +34,21 @@ E_t(P) \in [-1, 1]^n,\qquad n \ge 3
 ```math
 E_t =
 \begin{bmatrix}
-V_t & A_t & D_t & G_t & Q_t & K_t & S_t
+V_t & A_t & D_t & G_t & C_t & K_t & S_t
 \end{bmatrix}^{\mathsf T}
 ```
 
-其中 `V/A/D` 对应 PAD 与环形情感模型中的效价、唤醒、支配感；`G/Q/K/S` 分别表示目标一致性、确定性、可控性与社交亲近度，对应 appraisal theory 与 OCC 中对事件、行动者和对象的认知评价。
+其中 `V/A/D` 对应 PAD 与环形情感模型中的效价、唤醒、支配感；`G/C/K/S` 分别表示目标一致性、确定性、可控性与社交亲近度，对应 appraisal theory 与 OCC 中对事件、行动者和对象的认知评价。
 
-## 2. 从认知评价到维度观测
+## 2. 输入与建模假设
 
 设 LLM 读到的对话信息为：
 
 ```math
-I_t = \{C_t, U_t, P, E_{t-1}\}
+I_t = \{H_t, U_t, P, E_{t-1}\}
 ```
 
-其中 `C_t` 是上下文，`U_t` 是当前输入或 bot 当前回复，`P` 是当前 AstrBot persona，`E_(t-1)` 是上一轮平滑状态。插件把 persona 当作情绪评价的先验，而不是只当作输出文风。
+其中 `H_t` 是上下文，`U_t` 是当前输入或 bot 当前回复，`P` 是当前 AstrBot persona，`E_{t-1}` 是上一轮平滑状态。插件把 persona 当作情绪评价的先验，而不是只当作输出文风。
 
 ## 3. 人格画像到情绪先验
 
@@ -224,7 +245,7 @@ E_t=\Pi_{[-1,1]^n}(E_t)
 情绪状态并不直接等于回复模板。参考 Frijda 的 action readiness / action tendency 思路，插件把情绪状态再映射到后果状态：
 
 ```math
-Q_t =
+O_t =
 \begin{bmatrix}
 \mathrm{approach} & \mathrm{withdrawal} & \mathrm{confrontation} &
 \mathrm{appeasement} & \mathrm{repair} & \mathrm{reassurance} &
@@ -233,13 +254,13 @@ Q_t =
 \end{bmatrix}^{\mathsf T}
 ```
 
-`Q_t` 不是瞬时标签，而是会随真实时间衰减的持续状态：
+`O_t` 不是瞬时标签，而是会随真实时间衰减的持续状态：
 
 ```math
-Q_t = 2^{-\Delta t/H_q}Q_{t-1}+\mathrm{impulse}(E_t,X_t,\mathrm{appraisal}_t)
+O_t = 2^{-\Delta t/H_o}O_{t-1}+\mathrm{impulse}(E_t,X_t,\mathrm{appraisal}_t)
 ```
 
-其中 `H_q` 是后果强度半衰期，`impulse` 同时参考平滑后的长期情绪 `E_t` 与 LLM 即时观测 `X_t`。这样强烈刺激可以立刻留下后果，而长期状态又能决定这种后果是否持续；由于衰减项只使用 `Δt`，大量消息轮次不会快速消耗后果记忆。`cold_war` 等 active effect 使用 `expires_at` 时间戳保存剩余时长。
+其中 `H_o` 是后果强度半衰期，`impulse` 同时参考平滑后的长期情绪 `E_t` 与 LLM 即时观测 `X_t`。这样强烈刺激可以立刻留下后果，而长期状态又能决定这种后果是否持续；由于衰减项只使用 `Δt`，大量消息轮次不会快速消耗后果记忆。`cold_war` 等 active effect 使用 `expires_at` 时间戳保存剩余时长。
 
 维度对后果的作用：
 
@@ -266,7 +287,7 @@ low affiliation -> cold distance or rejection
 \end{aligned}
 ```
 
-这里 `combo` 使用“瓶颈维度 + 平均强度”的组合方式，而不是单纯连乘。原因是连乘会过度保守，导致强烈情绪也难以触发后果；瓶颈项确保必要条件存在，平均项确保整体强度被保留。
+这里 `C` 是 certainty 的当前标量分量，`combo` 使用“瓶颈维度 + 平均强度”的组合方式，而不是单纯连乘。原因是连乘会过度保守，导致强烈情绪也难以触发后果；瓶颈项确保必要条件存在，平均项确保整体强度被保留。
 
 公式层给出默认行动倾向，LLM appraisal 层再给出关系决策：
 
@@ -284,11 +305,11 @@ R_t.\mathrm{decision}
 进一步地，插件让 LLM 输出冲突成因分析：
 
 ```math
-C_t = \mathrm{conflict\_analysis}_{\mathrm{llm}}(I_t)
+F_t = \mathrm{conflict\_analysis}_{\mathrm{llm}}(I_t)
 ```
 
 ```math
-C_t.\mathrm{cause}
+F_t.\mathrm{cause}
 \in \{\mathrm{user\_fault},\mathrm{bot\_whim},\mathrm{bot\_misread},\mathrm{mutual},\mathrm{external},\mathrm{none}\}
 ```
 
@@ -320,9 +341,9 @@ C_t.\mathrm{cause}
 \right)
 ```
 
-`repair_signal_t` 对应“错误是否被承认并改正”；`grievance_t` 对应剩余的合理委屈或边界需求；`self_correction_t` 对应他/她该软化的强度。派生的 `repair_status` 按 `unresolved -> acknowledged -> apologized -> repaired -> restored` 分级，使其他插件不必重新解释 LLM 原始 JSON。若 LLM 没有显式给出 `relationship_decision`，`conflict_analysis` 仍会通过这些派生量影响 `Q_t`，避免冲突原因只停留在解释文本中。
+这里 `clip(x,0,1)` 表示把 `x` 限制在 `[0,1]` 区间；`\mathrm{1}_{condition}` 是指示函数，条件成立取 `1`，否则取 `0`。`repair_signal_t` 对应“错误是否被承认并改正”；`grievance_t` 对应剩余的合理委屈或边界需求；`self_correction_t` 对应他/她该软化的强度。派生的 `repair_status` 按 `unresolved -> acknowledged -> apologized -> repaired -> restored` 分级，使其他插件不必重新解释 LLM 原始 JSON。若 LLM 没有显式给出 `relationship_decision`，`conflict_analysis` 仍会通过这些派生量影响 `O_t`，避免冲突原因只停留在解释文本中。
 
-文献知识库扩充后，`C_t` 还包含更细的归因和关系修复字段：
+文献知识库扩充后，`F_t` 还包含更细的归因和关系修复字段：
 
 ```text
 intent_t      = perceived_intentionality_t
@@ -364,7 +385,7 @@ regload_t     = emotion_regulation_load_t
 
 ## 9. 稳定性
 
-若 `alpha_t in [0, 1]`、`gamma_p(Δt) in [0, 1]`，且 `E_(t-1), X_t, b_p` 都在 `[-1, 1]^n`，则 `B_t` 与 `E'_t` 都是有界向量的凸组合。因此，在耦合项较小且最后投影到 `[-1, 1]^n` 的条件下：
+若 `alpha_t in [0, 1]`、`gamma_p(Δt) in [0, 1]`，且 `E_{t-1}, X_t, b_p` 都在 `[-1, 1]^n`，则 `B_t` 与 `E'_t` 都是有界向量的凸组合。因此，在耦合项较小且最后投影到 `[-1, 1]^n` 的条件下：
 
 ```math
 E_t \in [-1,1]^n
@@ -397,3 +418,5 @@ E_t \in [-1,1]^n
 21. Fehr, R., Gelfand, M. J., & Nag, M. (2010). The road to forgiveness: A meta-analytic synthesis of its situational and dispositional correlates. *Psychological Bulletin, 136*(5), 894-914. https://doi.org/10.1037/a0019993
 22. Lewicki, R. J., Polin, B., & Lount, R. B., Jr. (2016). An exploration of the structure of effective apologies. *Negotiation and Conflict Management Research, 9*(2), 177-196. https://doi.org/10.1111/ncmr.12073
 23. Ohbuchi, K., Kameda, M., & Agarie, N. (1989). Apology as aggression control: Its role in mediating appraisal of and response to harm. *Journal of Personality and Social Psychology, 56*(2), 219-227. https://doi.org/10.1037/0022-3514.56.2.219
+
+</details>
