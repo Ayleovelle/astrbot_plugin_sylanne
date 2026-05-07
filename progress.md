@@ -1286,3 +1286,29 @@ Validation complete:
   - Display name `多维情绪状态` matched.
   - Failed plugin data was `{}`.
 
+## 2026-05-07 Iteration 54
+
+Status: complete.
+
+- Fixed packaged public API imports when third-party plugins import by package name:
+  - `public_api.py` now prefers relative import of `psychological_screening.PUBLIC_RISK_BOOLEAN_FIELDS`,
+  - keeps the top-level import fallback for direct local test/import compatibility.
+- Added a release-package regression test that:
+  - builds the plugin zip,
+  - extracts it under the metadata plugin directory,
+  - removes the repository root from `sys.path`,
+  - imports `astrbot_plugin_emotional_state.public_api` by package name.
+
+Validation complete:
+
+- `py -3.13 -m unittest tests.test_public_api -v`: 51 tests passed.
+- `py -3.13 -m py_compile public_api.py psychological_screening.py main.py`: passed.
+- `py -3.13 -m unittest discover -s tests -v`: 171 tests passed.
+- `py -3.13 -m py_compile main.py emotion_engine.py humanlike_engine.py psychological_screening.py public_api.py prompts.py scripts\build_literature_kb.py scripts\build_humanlike_agent_literature_kb.py scripts\build_psychological_literature_kb.py scripts\package_plugin.py`: passed.
+- Bundled Node `--check` for `scripts\remote_smoke_playwright.js`, `scripts\remote_install_upload_playwright.js`, and `scripts\plugin_zip_preflight.js`: passed.
+- `py -3.13 scripts\package_plugin.py --output dist\astrbot_plugin_emotional_state.zip`: passed.
+- Bundled Node `scripts\plugin_zip_preflight.js dist\astrbot_plugin_emotional_state.zip astrbot_plugin_emotional_state`: passed, 49 entries.
+- `git diff --check`: passed, with CRLF conversion warnings only.
+- Leak scan for remote address/password in this iteration's diff: passed.
+- Remote smoke with expected plugin version/display-name assertions: passed.
+

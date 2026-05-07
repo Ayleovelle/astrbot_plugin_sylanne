@@ -1,8 +1,10 @@
 import asyncio
 import ast
+import importlib
 import sys
 import types
 import unittest
+import zipfile
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -203,6 +205,42 @@ class PublicApiTests(unittest.TestCase):
         import public_api
 
         self.assertEqual(public_api.PLUGIN_NAME, metadata_value("name"))
+
+    def test_packaged_public_api_imports_by_plugin_package_name(self):
+        from scripts.package_plugin import build_package
+        import tempfile
+
+        plugin_name = metadata_value("name")
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp_path = Path(temp_dir)
+            zip_path = temp_path / f"{plugin_name}.zip"
+            extract_dir = temp_path / "extract"
+            build_package(zip_path)
+            with zipfile.ZipFile(zip_path) as archive:
+                archive.extractall(extract_dir)
+
+            original_path = list(sys.path)
+            old_modules = {
+                name: module
+                for name, module in sys.modules.items()
+                if name == plugin_name or name.startswith(f"{plugin_name}.")
+            }
+            for name in old_modules:
+                sys.modules.pop(name, None)
+            sys.path = [str(extract_dir)] + [
+                path for path in original_path if Path(path or ".").resolve() != ROOT
+            ]
+            try:
+                module = importlib.import_module(f"{plugin_name}.public_api")
+            finally:
+                sys.path = original_path
+                for name in list(sys.modules):
+                    if name == plugin_name or name.startswith(f"{plugin_name}."):
+                        sys.modules.pop(name, None)
+                sys.modules.update(old_modules)
+
+        self.assertEqual(module.PLUGIN_NAME, plugin_name)
+        self.assertTrue(callable(module.get_emotion_service))
 
     def test_get_emotion_service_rejects_inactive_plugin(self):
         plugin = FakeEmotionService()

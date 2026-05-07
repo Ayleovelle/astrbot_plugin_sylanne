@@ -65,6 +65,7 @@ Build and maintain `astrbot_plugin_emotional_state`: an AstrBot plugin with mult
 | 51 | complete | Reuse the psychological risk boolean field tuple in public API to prevent contract drift | 170 unit tests, py_compile, package build, package preflight, Node syntax check, git diff check, remote smoke |
 | 52 | complete | Add remote smoke failed-plugin summary so unrelated failures are distinguishable from target-plugin failures | 170 unit tests, py_compile, package build, package preflight, Node syntax check, git diff check, remote smoke |
 | 53 | complete | Add consolidated expected-plugin pass summary to remote smoke output | 170 unit tests, py_compile, package build, package preflight, Node syntax check, git diff check, remote smoke |
+| 54 | complete | Fix packaged public API import path when imported by plugin package name | 171 unit tests, py_compile, package build, package preflight, Node syntax check, git diff check, leak scan, remote smoke |
 
 ## Recovery Checklist
 

@@ -2,7 +2,10 @@ from __future__ import annotations
 
 from typing import Any, Protocol, runtime_checkable
 
-from psychological_screening import PUBLIC_RISK_BOOLEAN_FIELDS
+try:
+    from .psychological_screening import PUBLIC_RISK_BOOLEAN_FIELDS
+except ImportError:
+    from psychological_screening import PUBLIC_RISK_BOOLEAN_FIELDS
 
 
 PLUGIN_NAME = "astrbot_plugin_emotional_state"
