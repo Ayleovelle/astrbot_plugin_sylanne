@@ -131,8 +131,14 @@ function assertZipLooksUploadable(zipPath, expectedPlugin, options = {}) {
   }
   const names = readCentralDirectoryNames(zipPath);
   const requiredEntries = [
+    `${expectedPlugin}/__init__.py`,
     metadataEntry,
     `${expectedPlugin}/main.py`,
+    `${expectedPlugin}/emotion_engine.py`,
+    `${expectedPlugin}/humanlike_engine.py`,
+    `${expectedPlugin}/psychological_screening.py`,
+    `${expectedPlugin}/prompts.py`,
+    `${expectedPlugin}/public_api.py`,
     `${expectedPlugin}/README.md`,
     `${expectedPlugin}/_conf_schema.json`,
   ];

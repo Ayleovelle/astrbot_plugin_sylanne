@@ -189,8 +189,14 @@ class PluginZipPreflightTests(unittest.TestCase):
         prefix = f"{PLUGIN_NAME}/"
         return [
             (prefix, ""),
+            (prefix + "__init__.py", '"""plugin package"""\n'),
             (prefix + "metadata.yaml", f"name: {PLUGIN_NAME}\n"),
             (prefix + "main.py", "# runtime\n"),
+            (prefix + "emotion_engine.py", "# runtime\n"),
+            (prefix + "humanlike_engine.py", "# runtime\n"),
+            (prefix + "psychological_screening.py", "# runtime\n"),
+            (prefix + "prompts.py", "# runtime\n"),
+            (prefix + "public_api.py", "# public API\n"),
             (prefix + "README.md", "# docs\n"),
             (prefix + "_conf_schema.json", "{}\n"),
         ]
@@ -231,18 +237,25 @@ class PluginZipPreflightTests(unittest.TestCase):
         self.assertIn("excluded path segment", result.stderr)
 
     def test_zip_preflight_rejects_missing_required_runtime_file(self):
-        with tempfile.TemporaryDirectory() as temp_dir:
-            output = Path(temp_dir) / f"{PLUGIN_NAME}.zip"
-            entries = [
-                entry for entry in self._valid_entries()
-                if not entry[0].endswith("_conf_schema.json")
-            ]
-            self._write_zip(output, entries)
+        required_suffixes = (
+            "__init__.py",
+            "_conf_schema.json",
+            "public_api.py",
+        )
+        for suffix in required_suffixes:
+            with self.subTest(suffix=suffix):
+                with tempfile.TemporaryDirectory() as temp_dir:
+                    output = Path(temp_dir) / f"{PLUGIN_NAME}.zip"
+                    entries = [
+                        entry for entry in self._valid_entries()
+                        if not entry[0].endswith(suffix)
+                    ]
+                    self._write_zip(output, entries)
 
-            result = self._preflight(output)
+                    result = self._preflight(output)
 
-        self.assertNotEqual(result.returncode, 0)
-        self.assertIn("missing required plugin entry", result.stderr)
+                    self.assertNotEqual(result.returncode, 0)
+                    self.assertIn("missing required plugin entry", result.stderr)
 
     def test_zip_preflight_rejects_parent_traversal(self):
         with tempfile.TemporaryDirectory() as temp_dir:

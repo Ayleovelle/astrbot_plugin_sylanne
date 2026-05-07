@@ -300,9 +300,22 @@ class RemoteSmokeContractTests(unittest.TestCase):
         self.assertIn("readZipEntryText", preflight)
         self.assertIn("readMetadataName", preflight)
         self.assertIn("0x02014b50", preflight)
-        self.assertIn("metadata.yaml", preflight)
-        self.assertIn("main.py", preflight)
-        self.assertIn("_conf_schema.json", preflight)
+        readme = (ROOT / "README.md").read_text(encoding="utf-8")
+        for required_entry in (
+            "__init__.py",
+            "metadata.yaml",
+            "main.py",
+            "emotion_engine.py",
+            "humanlike_engine.py",
+            "psychological_screening.py",
+            "prompts.py",
+            "public_api.py",
+            "README.md",
+            "_conf_schema.json",
+        ):
+            with self.subTest(required_entry=required_entry):
+                self.assertIn(required_entry, preflight)
+                self.assertIn(required_entry, readme)
         self.assertIn("\"tests\"", preflight)
         self.assertIn("\"scripts\"", preflight)
         self.assertIn("\"output\"", preflight)

@@ -1334,3 +1334,26 @@ Validation complete:
 - Leak scan for remote address/password in this iteration's diff: passed.
 - Remote smoke with expected plugin version/display-name assertions: passed.
 
+## 2026-05-07 Iteration 56
+
+Status: complete.
+
+- Aligned upload zip preflight with the release package runtime-root contract:
+  - `scripts/plugin_zip_preflight.js` now requires `__init__.py`, `public_api.py`, and the root runtime modules,
+  - preflight fixture zips include the same required runtime files,
+  - missing required-entry tests cover `__init__.py`, `public_api.py`, and `_conf_schema.json`,
+  - README preflight documentation lists the full required entry set.
+
+Validation complete:
+
+- `py -3.13 -m unittest tests.test_package_plugin -v`: 16 tests passed.
+- `py -3.13 -m unittest tests.test_remote_smoke_contract -v`: 16 tests passed.
+- `py -3.13 -m unittest discover -s tests -v`: 172 tests passed.
+- `py -3.13 -m py_compile main.py emotion_engine.py humanlike_engine.py psychological_screening.py public_api.py prompts.py scripts\build_literature_kb.py scripts\build_humanlike_agent_literature_kb.py scripts\build_psychological_literature_kb.py scripts\package_plugin.py`: passed.
+- Bundled Node `--check` for `scripts\remote_smoke_playwright.js`, `scripts\remote_install_upload_playwright.js`, and `scripts\plugin_zip_preflight.js`: passed.
+- `py -3.13 scripts\package_plugin.py --output dist\astrbot_plugin_emotional_state.zip`: passed.
+- Bundled Node `scripts\plugin_zip_preflight.js dist\astrbot_plugin_emotional_state.zip astrbot_plugin_emotional_state`: passed, 49 entries.
+- `git diff --check`: passed, with CRLF conversion warnings only.
+- Leak scan for remote address/password in this iteration's diff: passed.
+- Remote smoke with expected plugin version/display-name assertions: passed.
+
