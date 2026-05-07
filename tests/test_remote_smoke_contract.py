@@ -4,9 +4,25 @@ from pathlib import Path
 
 
 ROOT = Path(__file__).resolve().parents[1]
+NODE_FALLBACK_SNIPPET = [
+    '$node = "$HOME\\.cache\\codex-runtimes\\codex-primary-runtime\\dependencies\\node\\bin\\node.exe"',
+    '$nodeModules = "$HOME\\.cache\\codex-runtimes\\codex-primary-runtime\\dependencies\\node\\node_modules"',
+    'if (Test-Path $node) { $env:NODE_PATH = $nodeModules } else { $node = "node" }',
+]
 
 
 class RemoteSmokeContractTests(unittest.TestCase):
+    def _node_fallback_lines(self, text):
+        return [
+            line
+            for line in text.splitlines()
+            if (
+                line.startswith("$node = ")
+                or line.startswith("$nodeModules = ")
+                or line.startswith("if (Test-Path $node)")
+            )
+        ]
+
     def test_readme_documents_remote_smoke_without_real_credentials(self):
         readme = (ROOT / "README.md").read_text(encoding="utf-8")
 
@@ -37,6 +53,8 @@ class RemoteSmokeContractTests(unittest.TestCase):
         self.assertIn("progress.md", readme)
         self.assertNotIn("154.36.178.25", readme)
         self.assertNotIn("12341234", readme)
+        self.assertNotIn("\nnode --check scripts\\remote_smoke_playwright.js", readme)
+        self.assertNotIn("\nnode scripts\\remote_smoke_playwright.js", readme)
 
     def test_release_checklist_uses_bundled_node_fallback(self):
         checklist = (ROOT / "docs" / "release_branch_sync_checklist.md").read_text(
@@ -54,6 +72,18 @@ class RemoteSmokeContractTests(unittest.TestCase):
         self.assertIn("& $node scripts\\remote_smoke_playwright.js", checklist)
         self.assertNotIn("\nnode --check scripts\\remote_smoke_playwright.js", checklist)
         self.assertNotIn("\nnode scripts\\remote_smoke_playwright.js", checklist)
+
+    def test_node_fallback_is_consistent_and_before_commands(self):
+        readme = (ROOT / "README.md").read_text(encoding="utf-8")
+        checklist = (ROOT / "docs" / "release_branch_sync_checklist.md").read_text(
+            encoding="utf-8",
+        )
+        fallback = self._node_fallback_lines(readme)
+
+        self.assertEqual(NODE_FALLBACK_SNIPPET, fallback)
+        self.assertEqual(fallback, self._node_fallback_lines(checklist))
+        self.assertLess(readme.index("codex-primary-runtime"), readme.index("& $node scripts\\remote_smoke_playwright.js"))
+        self.assertLess(checklist.index("codex-primary-runtime"), checklist.index("& $node --check scripts\\remote_smoke_playwright.js"))
 
     def test_remote_smoke_script_uses_environment_credentials(self):
         script = (ROOT / "scripts" / "remote_smoke_playwright.js").read_text(
