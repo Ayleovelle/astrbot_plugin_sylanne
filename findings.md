@@ -48,6 +48,7 @@ This file stores durable discoveries from implementation, review, and remote tes
 - Latest remote smoke after the UI probe change returned `pageData.uiProbeStatus="ready"`, `selectorCounts.extensionTitleRows=30`, `hasExpectedPluginDisplayName=true`, and `hasExpectedPluginInUi=true`; this confirms the plugin is visible in the rendered WebUI under its display name while API checks remain the source of truth.
 - Legacy `pageData.hasExpectedPlugin` should be read as a compatibility alias for `pageData.hasExpectedPluginInUi`, not as an ID-only check. Consumers that need the package directory text specifically should read `pageData.hasExpectedPluginId`.
 - Remote smoke now reports `apiHealth.statVersion`, `apiHealth.pluginGet`, and `apiHealth.failedPlugins` so endpoint status failures are visible in one place before reading the plugin summary or UI probe diagnostics.
+- In this Windows workspace, bare `node` may fail with access denied, while Codex bundled Node works. README and the release checklist now define `$node` with a Codex bundled Node fallback and set `NODE_PATH` for Playwright-dependent scripts.
 
 ## 2026-05-07 Branch Maintenance
 

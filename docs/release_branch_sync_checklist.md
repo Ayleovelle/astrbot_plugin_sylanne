@@ -11,16 +11,20 @@ This checklist protects the current plugin baseline from being split across dirt
    - `__pycache__/`,
    - `*.py[cod]`,
    - `.pytest_cache/`.
-3. Run local validation:
+3. Run local validation. Use Codex bundled Node when it exists; otherwise fall back to `node` from `PATH`:
 
 ```powershell
+$node = "$HOME\.cache\codex-runtimes\codex-primary-runtime\dependencies\node\bin\node.exe"
+$nodeModules = "$HOME\.cache\codex-runtimes\codex-primary-runtime\dependencies\node\node_modules"
+if (Test-Path $node) { $env:NODE_PATH = $nodeModules } else { $node = "node" }
+
 py -3.13 -m unittest discover -s tests -v
 py -3.13 -m py_compile main.py emotion_engine.py humanlike_engine.py psychological_screening.py public_api.py prompts.py scripts\build_literature_kb.py scripts\build_humanlike_agent_literature_kb.py scripts\build_psychological_literature_kb.py scripts\package_plugin.py
 py -3.13 scripts\package_plugin.py --output dist\astrbot_plugin_emotional_state.zip
-node --check scripts\remote_smoke_playwright.js
-node --check scripts\remote_install_upload_playwright.js
-node --check scripts\plugin_zip_preflight.js
-node scripts\plugin_zip_preflight.js dist\astrbot_plugin_emotional_state.zip astrbot_plugin_emotional_state
+& $node --check scripts\remote_smoke_playwright.js
+& $node --check scripts\remote_install_upload_playwright.js
+& $node --check scripts\plugin_zip_preflight.js
+& $node scripts\plugin_zip_preflight.js dist\astrbot_plugin_emotional_state.zip astrbot_plugin_emotional_state
 git diff --check
 ```
 
@@ -30,7 +34,7 @@ git diff --check
 $env:ASTRBOT_EXPECT_PLUGIN = "astrbot_plugin_emotional_state"
 $env:ASTRBOT_EXPECT_PLUGIN_VERSION = "1.0.0"
 $env:ASTRBOT_EXPECT_PLUGIN_DISPLAY_NAME = "多维情绪状态"
-node scripts\remote_smoke_playwright.js
+& $node scripts\remote_smoke_playwright.js
 ```
 
 Do not put real credentials or server addresses in committed files.

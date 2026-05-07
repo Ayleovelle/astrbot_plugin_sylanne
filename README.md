@@ -1247,18 +1247,26 @@ py -3.13 scripts\package_plugin.py --output dist\astrbot_plugin_emotional_state.
 
 远程只读烟测：
 
+如果当前环境里的 `node` 被系统拒绝执行，可以优先使用 Codex bundled Node；下面所有 Node 命令都沿用 `$node`：
+
+```powershell
+$node = "$HOME\.cache\codex-runtimes\codex-primary-runtime\dependencies\node\bin\node.exe"
+$nodeModules = "$HOME\.cache\codex-runtimes\codex-primary-runtime\dependencies\node\node_modules"
+if (Test-Path $node) { $env:NODE_PATH = $nodeModules } else { $node = "node" }
+```
+
 ```powershell
 $env:ASTRBOT_REMOTE_URL = "http://your-astrbot-host:15356/"
 $env:ASTRBOT_REMOTE_USERNAME = "your-user"
 $env:ASTRBOT_REMOTE_PASSWORD = "your-password"
-node scripts\remote_smoke_playwright.js
+& $node scripts\remote_smoke_playwright.js
 ```
 
 远程安装插件后，如果要把某个插件是否已经安装作为硬断言，可以额外设置：
 
 ```powershell
 $env:ASTRBOT_EXPECT_PLUGIN = "astrbot_plugin_emotional_state"
-node scripts\remote_smoke_playwright.js
+& $node scripts\remote_smoke_playwright.js
 ```
 
 脚本会在输出 JSON 里写出 `expectedPluginRuntime`，包含插件列表 API 中返回的 `version`、`displayName`、`activated`、`author`、`astrbotVersion` 等只读字段。若目标插件存在但 `activated=false`，脚本会失败退出。需要把版本和显示名也作为硬断言时，可以额外设置：
@@ -1266,7 +1274,7 @@ node scripts\remote_smoke_playwright.js
 ```powershell
 $env:ASTRBOT_EXPECT_PLUGIN_VERSION = "1.0.0"
 $env:ASTRBOT_EXPECT_PLUGIN_DISPLAY_NAME = "多维情绪状态"
-node scripts\remote_smoke_playwright.js
+& $node scripts\remote_smoke_playwright.js
 ```
 
 WebUI 插件卡片可能显示 `displayName` 而不是插件目录名，所以 smoke 输出里的 `pageData` 会同时给出 `hasExpectedPluginId`、`hasExpectedPluginDisplayName` 和综合字段 `hasExpectedPluginInUi`；旧字段 `hasExpectedPlugin` 保留为 `hasExpectedPluginInUi` 的兼容别名。判断插件是否安装和启用时，以 API 层的 `containsExpectedPlugin`、`expectedPluginRuntime` 和 `expectedFailedPlugin` 为准；UI 字段是 best-effort，只用于排查页面展示。若页面异步渲染较慢或前端结构变化，`pageData.uiProbeStatus`、`selectorCounts` 和 `bodyTextPreview` 会帮助判断是页面没渲染、选择器变化，还是插件确实没有显示。
@@ -1283,7 +1291,7 @@ $env:ASTRBOT_REMOTE_PASSWORD = "your-password"
 $env:ASTRBOT_REMOTE_INSTALL_ZIP = "dist\astrbot_plugin_emotional_state.zip"
 $env:ASTRBOT_EXPECT_PLUGIN = "astrbot_plugin_emotional_state"
 $env:ASTRBOT_REMOTE_INSTALL_CONFIRM = "1"
-node scripts\remote_install_upload_playwright.js
+& $node scripts\remote_install_upload_playwright.js
 ```
 
 上传脚本只允许调用 AstrBot WebUI 的 `install-upload` 安装端点，不会卸载插件、更新插件、重启 AstrBot、保存配置或写入本地 cookie/session。上传成功后，再运行上面的 `ASTRBOT_EXPECT_PLUGIN` 只读烟测作为最终验证。
@@ -1293,7 +1301,7 @@ node scripts\remote_install_upload_playwright.js
 也可以单独运行预检，不连接远程服务器：
 
 ```powershell
-node scripts\plugin_zip_preflight.js dist\astrbot_plugin_emotional_state.zip astrbot_plugin_emotional_state
+& $node scripts\plugin_zip_preflight.js dist\astrbot_plugin_emotional_state.zip astrbot_plugin_emotional_state
 ```
 
 `scripts\remote_smoke_playwright.js` 只做浏览器登录、版本读取、插件列表读取、失败插件列表读取和截图保存，不会安装插件、删除插件、重载插件、重启 AstrBot 或修改配置。截图会写入 `output/playwright/`，该目录默认被 `.gitignore` 忽略。
@@ -1301,9 +1309,9 @@ node scripts\plugin_zip_preflight.js dist\astrbot_plugin_emotional_state.zip ast
 语法检查远程烟测脚本：
 
 ```powershell
-node --check scripts\remote_smoke_playwright.js
-node --check scripts\remote_install_upload_playwright.js
-node --check scripts\plugin_zip_preflight.js
+& $node --check scripts\remote_smoke_playwright.js
+& $node --check scripts\remote_install_upload_playwright.js
+& $node --check scripts\plugin_zip_preflight.js
 ```
 
 ### 当前测试覆盖方向

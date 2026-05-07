@@ -12,6 +12,10 @@ class RemoteSmokeContractTests(unittest.TestCase):
 
         self.assertIn("scripts\\remote_smoke_playwright.js", readme)
         self.assertIn("scripts\\plugin_zip_preflight.js", readme)
+        self.assertIn("codex-primary-runtime", readme)
+        self.assertIn("$env:NODE_PATH", readme)
+        self.assertIn("& $node scripts\\remote_smoke_playwright.js", readme)
+        self.assertIn("& $node scripts\\plugin_zip_preflight.js", readme)
         self.assertIn("ASTRBOT_REMOTE_URL", readme)
         self.assertIn("ASTRBOT_REMOTE_USERNAME", readme)
         self.assertIn("ASTRBOT_REMOTE_PASSWORD", readme)
@@ -33,6 +37,23 @@ class RemoteSmokeContractTests(unittest.TestCase):
         self.assertIn("progress.md", readme)
         self.assertNotIn("154.36.178.25", readme)
         self.assertNotIn("12341234", readme)
+
+    def test_release_checklist_uses_bundled_node_fallback(self):
+        checklist = (ROOT / "docs" / "release_branch_sync_checklist.md").read_text(
+            encoding="utf-8",
+        )
+
+        self.assertIn("codex-primary-runtime", checklist)
+        self.assertIn("$env:NODE_PATH", checklist)
+        self.assertIn("& $node --check scripts\\remote_smoke_playwright.js", checklist)
+        self.assertIn(
+            "& $node --check scripts\\remote_install_upload_playwright.js",
+            checklist,
+        )
+        self.assertIn("& $node --check scripts\\plugin_zip_preflight.js", checklist)
+        self.assertIn("& $node scripts\\remote_smoke_playwright.js", checklist)
+        self.assertNotIn("\nnode --check scripts\\remote_smoke_playwright.js", checklist)
+        self.assertNotIn("\nnode scripts\\remote_smoke_playwright.js", checklist)
 
     def test_remote_smoke_script_uses_environment_credentials(self):
         script = (ROOT / "scripts" / "remote_smoke_playwright.js").read_text(

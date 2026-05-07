@@ -479,7 +479,7 @@ Validation complete:
 - `py -3.13 -m py_compile main.py emotion_engine.py humanlike_engine.py psychological_screening.py public_api.py prompts.py scripts\build_literature_kb.py scripts\build_humanlike_agent_literature_kb.py scripts\build_psychological_literature_kb.py scripts\package_plugin.py`: passed.
 - Bundled Node `--check scripts\remote_install_upload_playwright.js`: passed.
 - Bundled Node `--check scripts\plugin_zip_preflight.js`: passed.
-- Bundled Node `scripts\plugin_zip_preflight.js dist\astrbot_plugin_emotional_state.zip astrbot_plugin_emotional_state`: passed, 48 entries.
+- Bundled Node `scripts\plugin_zip_preflight.js dist\astrbot_plugin_emotional_state.zip astrbot_plugin_emotional_state`: passed, 49 entries.
 - `git diff --check`: passed, with CRLF conversion warnings only.
 - Remote smoke with version/display-name assertions: passed.
   - `pageData.hasExpectedPluginId=false`,
@@ -618,4 +618,29 @@ Validation complete:
   - `apiHealth.pluginGet.ok=true`.
   - `apiHealth.failedPlugins.ok=true`.
   - API-level plugin detection and UI best-effort diagnostics passed.
+
+## 2026-05-07 Iteration 31
+
+Status: complete.
+
+- Updated README remote smoke/install/preflight examples to use a `$node` variable:
+  - prefer Codex bundled Node at `$HOME\.cache\codex-runtimes\codex-primary-runtime\dependencies\node\bin\node.exe`,
+  - set `NODE_PATH` to the bundled `node_modules`,
+  - fall back to `node` from `PATH` if the bundled executable is missing.
+- Updated `docs\release_branch_sync_checklist.md` with the same Node fallback and converted Node commands to `& $node ...`.
+- Added remote smoke contract coverage so docs keep the bundled Node fallback and do not regress to bare `node` examples in the release checklist.
+
+Validation complete:
+
+- `py -3.13 -m unittest tests.test_remote_smoke_contract -v`: 9 tests passed.
+- Bundled Node `--check scripts\remote_smoke_playwright.js`: passed.
+- `py -3.13 -m unittest tests.test_remote_smoke_contract tests.test_package_plugin -v`: 18 tests passed.
+- `py -3.13 -m unittest discover -s tests -v`: 142 tests passed.
+- `py -3.13 -m py_compile main.py emotion_engine.py humanlike_engine.py psychological_screening.py public_api.py prompts.py scripts\build_literature_kb.py scripts\build_humanlike_agent_literature_kb.py scripts\build_psychological_literature_kb.py scripts\package_plugin.py`: passed.
+- `py -3.13 scripts\package_plugin.py --output dist\astrbot_plugin_emotional_state.zip`: passed.
+- Bundled Node `--check scripts\remote_install_upload_playwright.js`: passed.
+- Bundled Node `--check scripts\plugin_zip_preflight.js`: passed.
+- Bundled Node `scripts\plugin_zip_preflight.js dist\astrbot_plugin_emotional_state.zip astrbot_plugin_emotional_state`: passed, 49 entries.
+- `git diff --check`: passed, with CRLF conversion warnings only.
+- Remote smoke with bundled Node and version/display-name assertions: passed.
 
