@@ -716,3 +716,32 @@ Validation complete:
 - `git diff --check`: passed, with CRLF conversion warnings only.
 - Remote smoke with metadata-matched version/display-name assertions: passed.
 
+## 2026-05-07 Iteration 35
+
+Status: complete.
+
+- Added README badge/compatibility contract coverage in `tests\test_remote_smoke_contract.py`.
+- The new test reads `metadata.yaml` `version` and `astrbot_version`, then verifies:
+  - README visible version badge text,
+  - README version badge URL,
+  - README visible AstrBot compatibility badge text,
+  - README AstrBot compatibility badge URL,
+  - README metadata example for `astrbot_version`.
+- Fixed the local test expectation so the Shields URL encoding for `astrbot_version` includes `=` as `%3D`.
+
+Validation complete:
+
+- `py -3.13 -m unittest tests.test_remote_smoke_contract -v`: 12 tests passed.
+- `py -3.13 -m unittest discover -s tests -v`: 145 tests passed.
+- `py -3.13 -m py_compile main.py emotion_engine.py humanlike_engine.py psychological_screening.py public_api.py prompts.py scripts\build_literature_kb.py scripts\build_humanlike_agent_literature_kb.py scripts\build_psychological_literature_kb.py scripts\package_plugin.py`: passed.
+- Bundled Node `--check` for `scripts\remote_smoke_playwright.js`, `scripts\remote_install_upload_playwright.js`, and `scripts\plugin_zip_preflight.js`: passed.
+- Bundled Node `scripts\plugin_zip_preflight.js dist\astrbot_plugin_emotional_state.zip astrbot_plugin_emotional_state`: passed, 49 entries.
+- `git diff --check`: passed, with CRLF conversion warnings only.
+- Remote smoke with metadata-matched version/display-name assertions: passed.
+  - AstrBot version `4.24.2`.
+  - Plugin API returned 30 plugins.
+  - `astrbot_plugin_emotional_state` was present and activated.
+  - Version `1.0.0` matched.
+  - Display name `多维情绪状态` matched.
+  - Failed plugin data was `{}`.
+

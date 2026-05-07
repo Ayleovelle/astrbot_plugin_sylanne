@@ -126,6 +126,27 @@ class RemoteSmokeContractTests(unittest.TestCase):
                     ),
                 )
 
+    def test_readme_badges_and_compatibility_match_metadata(self):
+        readme = (ROOT / "README.md").read_text(encoding="utf-8")
+        version = self._metadata_value("version")
+        astrbot_version = self._metadata_value("astrbot_version")
+        encoded_astrbot = (
+            astrbot_version
+            .replace(">", "%3E")
+            .replace("=", "%3D")
+            .replace("<", "%3C")
+            .replace(",", "%2C")
+        )
+
+        self.assertIn(f"![Version {version}]", readme)
+        self.assertIn(f"https://img.shields.io/badge/version-{version}-blue", readme)
+        self.assertIn(f"![AstrBot {astrbot_version}]", readme)
+        self.assertIn(
+            f"https://img.shields.io/badge/AstrBot-{encoded_astrbot}-green",
+            readme,
+        )
+        self.assertIn(f'astrbot_version: "{astrbot_version}"', readme)
+
     def test_remote_smoke_script_uses_environment_credentials(self):
         script = (ROOT / "scripts" / "remote_smoke_playwright.js").read_text(
             encoding="utf-8",
