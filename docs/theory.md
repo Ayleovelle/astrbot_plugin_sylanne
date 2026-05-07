@@ -50,15 +50,103 @@ I_t = \{H_t, U_t, P, E_{t-1}\}
 
 其中 `H_t` 是上下文，`U_t` 是当前输入或 bot 当前回复，`P` 是当前 AstrBot persona，`E_{t-1}` 是上一轮平滑状态。插件把 persona 当作情绪评价的先验，而不是只当作输出文风。
 
-## 3. 人格画像到情绪先验
+## 3. 人格量化画像到情绪先验
 
-同一句用户文本对不同人格的意义不同。插件先从 persona 中构造画像：
+同一句用户文本对不同人格的意义不同。`0.0.2-beta` 不再只用少量风格关键词做人格偏置，而是生成一个版本化、可公开读取、可持久化的 13 维潜在人格先验。该先验仍然不是临床人格测量；它只把 AstrBot persona 文本转成工程参数，让不同 bot 的情绪基线、反应强度、边界敏感度、修复倾向和社交距离稳定可复现。
+
+插件先从 persona 中构造输入集合：
 
 ```math
 P = \{\mathrm{persona\_id}, \mathrm{name}, \mathrm{system\_prompt}, \mathrm{begin\_dialogs}\}
 ```
 
-再生成两类人格先验：
+公开 schema 常量为 `PUBLIC_PERSONALITY_PROFILE_SCHEMA_VERSION`，当前版本为：
+
+```math
+\mathrm{PUBLIC\_PERSONALITY\_PROFILE\_SCHEMA\_VERSION}
+=\mathrm{astrbot.personality\_profile.v1}
+```
+
+潜在人格向量为：
+
+```math
+q_p =
+\begin{bmatrix}
+O & N & X & A & L & H & R_a & R_v & I & B & F & U & W_s
+\end{bmatrix}^{\mathsf T}
+```
+
+各维含义如下：
+
+| 维度 | 含义 | 工程作用 |
+| --- | --- | --- |
+| `O` | openness | 新奇性、表达弹性、对模糊语义的开放度。 |
+| `N` | conscientiousness | 稳定履约、规则遵守、长期目标一致性。 |
+| `X` | extraversion | 靠近倾向、表达能量、社交恢复速度。 |
+| `A` | agreeableness | 修复、让步、合作和低敌意倾向。 |
+| `L` | neuroticism | 负性反应性、情绪波动和受伤敏感度。 |
+| `H` | honesty-humility | 信任修复、内疚、责任承认和道德姿态。 |
+| `R_a` | attachment anxiety | 被抛弃/被误解敏感度和确认需求。 |
+| `R_v` | attachment avoidance | 距离、回避、冷处理和依赖抑制倾向。 |
+| `I` | BIS sensitivity | 威胁监测、谨慎、防御和风险规避。 |
+| `B` | BAS drive | 目标追求、靠近、主动解决和奖励敏感度。 |
+| `F` | need for closure | 确定性需求、规则偏好和模糊容忍度。 |
+| `U` | emotion-regulation capacity | 再评价、克制、恢复和冲动抑制。 |
+| `W_s` | interpersonal warmth | 亲和、照顾、共情和靠近修复。 |
+
+人格画像来自三类不完美证据：persona 文本词汇指示、旧版工程 trait、结构先验。设多源观测为：
+
+```math
+y =
+\begin{bmatrix}
+y_{\mathrm{lex}} & y_{\mathrm{legacy}} & y_{\mathrm{struct}}
+\end{bmatrix}^{\mathsf T}
+```
+
+令 `M` 为观测到潜在 trait 的投影矩阵，`R` 为来源可靠性对角权重，`mu` 和 `Sigma` 是保守先验。插件采用可靠性加权、先验收缩的二次目标：
+
+```math
+J(q)=\|Mq-y\|_R^2+\lambda\|q-\mu\|_{\Sigma^{-1}}^2
+```
+
+求导：
+
+```math
+\frac{\partial J}{\partial q}=
+2M^{\mathsf T}R(Mq-y)+2\lambda\Sigma^{-1}(q-\mu)
+```
+
+令导数为零：
+
+```math
+(M^{\mathsf T}RM+\lambda\Sigma^{-1})q=
+M^{\mathsf T}Ry+\lambda\Sigma^{-1}\mu
+```
+
+得到闭式后验：
+
+```math
+q_p = \left(M^{\mathsf T}RM+\lambda\Sigma^{-1}\right)^{-1}
+\left(M^{\mathsf T}Ry+\lambda\Sigma^{-1}\mu\right)
+```
+
+后验方差近似为：
+
+```math
+V_q = \left(M^{\mathsf T}RM+\lambda\Sigma^{-1}\right)^{-1}
+```
+
+运行时为了保持轻量、确定性和无外部数值依赖，采用对角近似：
+
+```math
+q_i = \frac{\sum_j r_j y_{j,i}+\lambda\mu_i}{\sum_j r_j+\lambda}
+```
+
+```math
+\mathrm{var}_i = \frac{1}{\sum_j r_j+\lambda}
+```
+
+然后生成两类人格先验：
 
 ```math
 b_p = h_b(P), \qquad \theta_p = h_\theta(P)
@@ -66,30 +154,30 @@ b_p = h_b(P), \qquad \theta_p = h_\theta(P)
 
 `b_p` 是当前人格的稳定情绪基线；`theta_p` 是动力学参数偏置，包括基础更新步长、基线回归速度、反应强度、惊讶度到唤醒度的耦合强度等。
 
-工程实现上，插件使用确定性的 trait extractor 从 persona 文本中估计若干人格特征：
+映射形式为：
 
 ```math
-T_p =
-\begin{bmatrix}
-\mathrm{warmth} & \mathrm{shyness} & \mathrm{assertiveness} & \mathrm{volatility} &
-\mathrm{calmness} & \mathrm{optimism} & \mathrm{pessimism} & \mathrm{dutifulness}
-\end{bmatrix}^{\mathsf T}
+b_p = \Pi_{[-1,1]^7}(b_0+Bq_p)
 ```
 
-然后把这些特征映射到 `b_p` 与 `theta_p`。例如：
+```math
+\theta_p = \Pi_{[0.55,1.55]^m}(\theta_0+Cq_p)
+```
+
+其中 `Pi` 表示投影限幅，避免 persona 文本把情绪基线或动力学参数推到不稳定区间。再从 `q_p` 派生高层人格因子：
 
 ```math
 \begin{aligned}
-\mathrm{affiliation}_b
-&= \mathrm{affiliation}_0 + a_1\mathrm{warmth} + a_2\mathrm{optimism} - a_3\mathrm{pessimism},\\
-\mathrm{dominance}_b
-&= \mathrm{dominance}_0 + a_4\mathrm{assertiveness} - a_5\mathrm{shyness},\\
-\mathrm{reactivity}_p
-&= \mathrm{reactivity}_0\left(1+a_6\mathrm{volatility}+a_7\mathrm{shyness}-a_8\mathrm{calmness}\right).
+\mathrm{instability}_p &= a_1L+a_2R_a+a_3I-a_4U,\\
+\mathrm{distance}_p &= a_5R_v-a_6W_s-a_7X,\\
+\mathrm{repair}_p &= a_8A+a_9H+a_{10}U-a_{11}R_v,\\
+\mathrm{boundary}_p &= a_{12}I+a_{13}F+a_{14}N-a_{15}A.
 \end{aligned}
 ```
 
-这种设计的目的不是给人格做临床心理测量，而是在工程上让不同 bot 拥有不同的情绪“默认姿态”和“受刺激后的变化方式”。随后 LLM 仍会基于完整 persona 文本进行 appraisal 判断，因此 deterministic trait 只负责稳定先验，语义解释仍交给 LLM。
+这四个派生因子分别调制负性持久性、冷处理/保持距离、道歉修复和边界反应。随后 LLM 仍会基于完整 persona 文本进行 appraisal 判断；人格后验只负责稳定先验，语义解释仍交给 LLM。公共 payload 只暴露 `schema_version`、`trait_scores`、`trait_confidence`、`posterior_variance`、`source_reliability` 和 `derived_factors`，不会暴露 raw persona text。
+
+证据边界如下：Big Five 高阶 trait 空间由 Digman 1990、Goldberg 1990 和 McCrae & Costa 1987 支撑；HEXACO 的 honesty-humility 由 Ashton & Lee 2007 支撑；trait 作为状态分布和情境 if-then 模式分别由 Fleeson 2001 与 Mischel & Shoda 1995 支撑；BIS/BAS 由 Carver & White 1994 支撑；need for closure 由 Webster & Kruglanski 1994 支撑；依恋焦虑/回避由 Fraley、Waller & Brennan 2000 支撑；情绪调节差异由 Gross & John 2003 支撑。`personality_literature_kb/evidence-map.md` 中 `PERS-F001` 到 `PERS-F012` 固定为 verified DOI metadata 级 foundational sources；其他 19196 条去重候选是 metadata/abstract-level 自动检索记录，不声称全文精读。
 
 ## 4. 从认知评价到维度观测
 
@@ -418,5 +506,17 @@ E_t \in [-1,1]^n
 21. Fehr, R., Gelfand, M. J., & Nag, M. (2010). The road to forgiveness: A meta-analytic synthesis of its situational and dispositional correlates. *Psychological Bulletin, 136*(5), 894-914. https://doi.org/10.1037/a0019993
 22. Lewicki, R. J., Polin, B., & Lount, R. B., Jr. (2016). An exploration of the structure of effective apologies. *Negotiation and Conflict Management Research, 9*(2), 177-196. https://doi.org/10.1111/ncmr.12073
 23. Ohbuchi, K., Kameda, M., & Agarie, N. (1989). Apology as aggression control: Its role in mediating appraisal of and response to harm. *Journal of Personality and Social Psychology, 56*(2), 219-227. https://doi.org/10.1037/0022-3514.56.2.219
+24. Digman, J. M. (1990). Personality structure: Emergence of the five-factor model. *Annual Review of Psychology, 41*, 417-440. https://doi.org/10.1146/annurev.ps.41.020190.002221
+25. Goldberg, L. R. (1990). An alternative description of personality: The Big-Five factor structure. *Journal of Personality and Social Psychology, 59*(6), 1216-1229. https://doi.org/10.1037/0022-3514.59.6.1216
+26. McCrae, R. R., & Costa, P. T. (1987). Validation of the five-factor model of personality across instruments and observers. *Journal of Personality and Social Psychology, 52*(1), 81-90. https://doi.org/10.1037/0022-3514.52.1.81
+27. Ashton, M. C., & Lee, K. (2007). Empirical, theoretical, and practical advantages of the HEXACO model of personality structure. *Personality and Social Psychology Review, 11*(2), 150-166. https://doi.org/10.1177/1088868306294907
+28. DeYoung, C. G., Quilty, L. C., & Peterson, J. B. (2007). Between facets and domains: 10 aspects of the Big Five. *Journal of Personality and Social Psychology, 93*(5), 880-896. https://doi.org/10.1037/0022-3514.93.5.880
+29. DeYoung, C. G. (2015). Cybernetic Big Five Theory. *Journal of Research in Personality, 56*, 33-58. https://doi.org/10.1016/j.jrp.2014.07.004
+30. Fleeson, W. (2001). Toward a structure- and process-integrated view of personality: Traits as density distributions of states. *Journal of Personality and Social Psychology, 80*(6), 1011-1027. https://doi.org/10.1037/0022-3514.80.6.1011
+31. Mischel, W., & Shoda, Y. (1995). A cognitive-affective system theory of personality. *Psychological Review, 102*(2), 246-268. https://doi.org/10.1037/0033-295X.102.2.246
+32. Carver, C. S., & White, T. L. (1994). Behavioral inhibition, behavioral activation, and affective responses to impending reward and punishment. *Journal of Personality and Social Psychology, 67*(2), 319-333. https://doi.org/10.1037/0022-3514.67.2.319
+33. Webster, D. M., & Kruglanski, A. W. (1994). Individual differences in need for cognitive closure. *Journal of Personality and Social Psychology, 67*(6), 1049-1062. https://doi.org/10.1037/0022-3514.67.6.1049
+34. Fraley, R. C., Waller, N. G., & Brennan, K. A. (2000). An item-response theory analysis of self-report measures of adult attachment. *Journal of Personality and Social Psychology, 78*(2), 350-365. https://doi.org/10.1037/0022-3514.78.2.350
+35. Gross, J. J., & John, O. P. (2003). Individual differences in two emotion regulation processes: Implications for affect, relationships, and well-being. *Journal of Personality and Social Psychology, 85*(2), 348-362. https://doi.org/10.1037/0022-3514.85.2.348
 
 </details>

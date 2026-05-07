@@ -12,6 +12,7 @@ PLUGIN_NAME = "astrbot_plugin_emotional_state"
 EMOTION_API_VERSION = "1.0"
 EMOTION_SCHEMA_VERSION = "astrbot.emotion_state.v2"
 EMOTION_MEMORY_SCHEMA_VERSION = "astrbot.emotion_memory.v1"
+PERSONALITY_PROFILE_SCHEMA_VERSION = "astrbot.personality_profile.v1"
 PSYCHOLOGICAL_SCREENING_SCHEMA_VERSION = "astrbot.psychological_screening.v1"
 HUMANLIKE_STATE_SCHEMA_VERSION = "astrbot.humanlike_state.v1"
 MORAL_REPAIR_STATE_SCHEMA_VERSION = "astrbot.moral_repair_state.v1"
@@ -28,6 +29,7 @@ class EmotionServiceProtocol(Protocol):
     emotion_api_version: str
     emotion_schema_version: str
     emotion_memory_schema_version: str
+    personality_profile_schema_version: str
     psychological_screening_schema_version: str
     integrated_self_schema_version: str
 
@@ -440,6 +442,7 @@ def get_emotion_service(context: Any) -> EmotionServiceProtocol | None:
         "emotion_api_version": EMOTION_API_VERSION,
         "emotion_schema_version": EMOTION_SCHEMA_VERSION,
         "emotion_memory_schema_version": EMOTION_MEMORY_SCHEMA_VERSION,
+        "personality_profile_schema_version": PERSONALITY_PROFILE_SCHEMA_VERSION,
         "psychological_screening_schema_version": PSYCHOLOGICAL_SCREENING_SCHEMA_VERSION,
         "integrated_self_schema_version": INTEGRATED_SELF_SCHEMA_VERSION,
     }

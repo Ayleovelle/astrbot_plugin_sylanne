@@ -2,7 +2,7 @@
 
 > 让 AstrBot 维护一套可计算、可记忆、可解释、可被其他插件调用的多维情绪状态。
 
-![Version 0.0.1-beta](https://img.shields.io/badge/version-0.0.1-beta-blue)
+![Version 0.0.2-beta](https://img.shields.io/badge/version-0.0.2-beta-blue)
 ![AstrBot >=4.9.2,<5.0.0](https://img.shields.io/badge/AstrBot-%3E%3D4.9.2%2C%3C5.0.0-green)
 ![Python 3.10+](https://img.shields.io/badge/Python-3.10%2B-yellow)
 ![Schema astrbot.emotion_state.v2](https://img.shields.io/badge/schema-astrbot.emotion__state.v2-purple)
@@ -39,7 +39,7 @@
 | [关系与后果](#关系与后果) | 生气原因、是否原谅、冷处理、错误是否已改正。 |
 | [拟人状态](#拟人状态-humanlike_state) | `humanlike_state` 的 P0 维度和表达调制边界。 |
 | [心理筛查](#非诊断心理状态筛查) | 备用的长期状态建模，不做诊断。 |
-| [文献知识库](#文献知识库) | 情绪、心理筛查、拟人代理的知识库目录。 |
+| [文献知识库](#文献知识库) | 情绪、人格量化、心理筛查、拟人代理的知识库目录。 |
 | [测试与维护](#测试与维护) | 本地测试命令、分支策略。 |
 | [故障排查](#故障排查) | 常见问题和处理顺序。 |
 
@@ -51,13 +51,13 @@
 | --- | --- |
 | 插件目录名 | `astrbot_plugin_emotional_state` |
 | 显示名 | `多维情绪状态` |
-| 当前版本 | `0.0.1-beta` |
+| 当前版本 | `0.0.2-beta` |
 | AstrBot 版本 | `>=4.9.2,<5.0.0` |
 | Python | `3.10+` |
 | 许可证 | `GPL-3.0-or-later` |
 | 运行时第三方依赖 | 当前无额外依赖，见 `requirements.txt` |
 
-`0.0.1-beta` 是预发布版本，用于首轮公开安装、文档验收、AstrBot WebUI 上传验证和第三方插件 API 适配试跑。当前版本的重点是把“情绪化 bot”从单次 prompt 风格控制推进到可持久化的状态服务：核心情绪默认启用，`humanlike_state`、`moral_repair_state`、`psychological_screening` 等长期模块默认关闭，由配置显式打开。发布包会包含运行代码、README、LICENSE、配置 schema、docs 和精选文献知识库；不会包含 `tests/`、`scripts/`、`raw/`、`output/`、`dist/` 等开发与缓存目录。
+`0.0.2-beta` 是预发布版本，用于首轮公开安装、文档验收、AstrBot WebUI 上传验证和第三方插件 API 适配试跑。当前版本的重点是把“情绪化 bot”从单次 prompt 风格控制推进到可持久化的状态服务：核心情绪默认启用，`humanlike_state`、`moral_repair_state`、`psychological_screening` 等长期模块默认关闭，由配置显式打开。发布包会包含运行代码、README、LICENSE、配置 schema、docs 和精选文献知识库；不会包含 `tests/`、`scripts/`、`raw/`、`output/`、`dist/` 等开发与缓存目录。
 
 ---
 
@@ -155,6 +155,7 @@ astrbot_plugin_emotional_state/
 ├── README.md
 ├── docs/
 ├── literature_kb/
+├── personality_literature_kb/
 ├── psychological_literature_kb/
 └── humanlike_agent_literature_kb/
 ```
@@ -198,6 +199,7 @@ data/plugins/
     ├── README.md
     ├── docs/
     ├── literature_kb/
+    ├── personality_literature_kb/
     ├── psychological_literature_kb/
     └── humanlike_agent_literature_kb/
 ```
@@ -489,24 +491,36 @@ V_t & A_t & D_t & G_t & C_t & K_t & S_t
 | 行动倾向 | `O_t` 表示 approach、withdrawal、repair 等后果 | Frijda, Kuipers & ter Schure 1989, *Journal of Personality and Social Psychology*, DOI `10.1037/0022-3514.57.2.212`；Carver & Harmon-Jones 2009, *Psychological Bulletin*, DOI `10.1037/a0013965`。 | 生气不必然冷战，可走边界、修复、求证或解决问题。 |
 | 冷处理与修复 | 关系决策 + 冲突成因 + 真实时间 active effect | Christensen & Heavey 1990, *Journal of Personality and Social Psychology*, DOI `10.1037/0022-3514.59.1.73`；Fehr et al. 2010, *Psychological Bulletin*, DOI `10.1037/a0019993`；Ohbuchi et al. 1989, DOI `10.1037/0022-3514.56.2.219`。 | 冷处理是可衰减后果状态；道歉、承认、补救和误读会压低惩罚性后果。 |
 
-### 人格先验
+### Personality Prior
 
-同一句话对不同人格的意义不同。插件把 persona 作为情绪评价先验：
+From `0.0.2-beta`, persona modeling is no longer only a small style-keyword bias. The plugin builds a versioned 13-dimensional latent personality prior from the current AstrBot persona text. The vector covers Big Five traits, the HEXACO honesty-humility extension, attachment anxiety/avoidance, BIS/BAS, need for closure, emotion-regulation capacity, and interpersonal warmth.
+
+Default summary:
+
+```math
+q_p = \left(M^{\mathsf T}RM+\lambda\Sigma^{-1}\right)^{-1}
+\left(M^{\mathsf T}Ry+\lambda\Sigma^{-1}\mu\right)
+```
+
+```math
+b_p = \Pi_{[-1,1]^7}(b_0+Bq_p),\qquad
+\theta_p = \Pi_{[0.55,1.55]^m}(\theta_0+Cq_p)
+```
+
+Here `q_p` is the latent personality vector, `y` is the multi-source persona-text indicator vector, `R` is source reliability, and `mu` plus `Sigma` are conservative priors. Public payloads expose `personality_model.schema_version = astrbot.personality_profile.v1`, `trait_scores`, `trait_confidence`, `posterior_variance`, and `derived_factors`, but never expose raw persona text.
+
+This is not a clinical personality assessment. It is an engineering prior that gives different bots stable, reproducible, externally readable emotional baselines, reactivity, boundary sensitivity, repair orientation, and social distance.
+
+<details>
+<summary>Expand strict personality quantification formulas and journal-backed rationale</summary>
+
+Persona input:
 
 ```math
 P = \{\mathrm{persona\_id}, \mathrm{name}, \mathrm{system\_prompt}, \mathrm{begin\_dialogs}\}
 ```
 
-```math
-b_p = h_b(P), \qquad \theta_p = h_\theta(P)
-```
-
-其中：
-
-- `b_p` 是人格稳定情绪基线。
-- `theta_p` 是动力学参数偏置，例如反应强度、恢复速度、惊讶度耦合。
-
-实现上，插件会从 persona 文本中估计若干 trait：
+Legacy engineering traits remain for backward compatibility:
 
 ```math
 T_p =
@@ -516,20 +530,93 @@ T_p =
 \end{bmatrix}^{\mathsf T}
 ```
 
-然后映射到基线和参数。例如：
+The new latent vector is:
+
+```math
+q_p =
+\begin{bmatrix}
+O & N & X & A & L & H & R_a & R_v & I & B & F & U & W_s
+\end{bmatrix}^{\mathsf T}
+```
+
+The dimensions represent openness, conscientiousness, extraversion, agreeableness, neuroticism, honesty-humility, attachment anxiety, attachment avoidance, BIS sensitivity, BAS drive, need for closure, emotion-regulation capacity, and interpersonal warmth.
+
+Multi-source indicators:
+
+```math
+y =
+\begin{bmatrix}
+y_{\mathrm{lex}} & y_{\mathrm{legacy}} & y_{\mathrm{struct}}
+\end{bmatrix}^{\mathsf T}
+```
+
+The reliability-weighted posterior comes from a prior-shrunk least-squares objective:
+
+```math
+J(q)=\|Mq-y\|_R^2+\lambda\|q-\mu\|_{\Sigma^{-1}}^2
+```
+
+Derivative:
+
+```math
+\frac{\partial J}{\partial q}=
+2M^{\mathsf T}R(Mq-y)+2\lambda\Sigma^{-1}(q-\mu)
+```
+
+Set the derivative to zero:
+
+```math
+(M^{\mathsf T}RM+\lambda\Sigma^{-1})q=
+M^{\mathsf T}Ry+\lambda\Sigma^{-1}\mu
+```
+
+Closed-form posterior:
+
+```math
+q_p = \left(M^{\mathsf T}RM+\lambda\Sigma^{-1}\right)^{-1}
+\left(M^{\mathsf T}Ry+\lambda\Sigma^{-1}\mu\right)
+```
+
+Approximate posterior uncertainty:
+
+```math
+V_q = \left(M^{\mathsf T}RM+\lambda\Sigma^{-1}\right)^{-1}
+```
+
+The runtime uses a deterministic diagonal approximation:
+
+```math
+q_i = \frac{\sum_j r_j y_{j,i}+\lambda\mu_i}{\sum_j r_j+\lambda}
+```
+
+```math
+\mathrm{var}_i = \frac{1}{\sum_j r_j+\lambda}
+```
+
+The personality posterior maps to emotional baseline and dynamics:
+
+```math
+b_p = \Pi_{[-1,1]^7}(b_0+Bq_p)
+```
+
+```math
+\theta_p = \Pi_{[0.55,1.55]^m}(\theta_0+Cq_p)
+```
+
+Derived factors:
 
 ```math
 \begin{aligned}
-\mathrm{affiliation}_b
-&= \mathrm{affiliation}_0 + a_1\mathrm{warmth} + a_2\mathrm{optimism} - a_3\mathrm{pessimism},\\
-\mathrm{dominance}_b
-&= \mathrm{dominance}_0 + a_4\mathrm{assertiveness} - a_5\mathrm{shyness},\\
-\mathrm{reactivity}_p
-&= \mathrm{reactivity}_0\left(1 + a_6\mathrm{volatility} + a_7\mathrm{shyness} - a_8\mathrm{calmness}\right).
+\mathrm{instability}_p &= a_1L+a_2R_a+a_3I-a_4U,\\
+\mathrm{distance}_p &= a_5R_v-a_6W_s-a_7X,\\
+\mathrm{repair}_p &= a_8A+a_9H+a_{10}U-a_{11}R_v,\\
+\mathrm{boundary}_p &= a_{12}I+a_{13}F+a_{14}N-a_{15}A.
 \end{aligned}
 ```
 
-这不是临床人格测量，只是工程上的稳定先验。LLM 仍会读取完整 persona 文本进行语义评价。
+Evidence basis: Big Five structure is grounded by Digman 1990, Goldberg 1990, and McCrae & Costa 1987; HEXACO extension by Ashton & Lee 2007; personality state distributions and situation-response dynamics by Fleeson 2001 and Mischel & Shoda 1995; BIS/BAS by Carver & White 1994; need for closure by Webster & Kruglanski 1994; attachment dimensions by Fraley, Waller & Brennan 2000; and emotion-regulation differences by Gross & John 2003. Candidate and curated records are stored in `personality_literature_kb/evidence-map.md`.
+
+</details>
 
 ### LLM 观测
 
@@ -1273,6 +1360,7 @@ if repair_status in {"repaired", "restored"}:
 | --- | --- |
 | `EMOTION_SCHEMA_VERSION` | `astrbot.emotion_state.v2` |
 | `EMOTION_MEMORY_SCHEMA_VERSION` | `astrbot.emotion_memory.v1` |
+| `PERSONALITY_PROFILE_SCHEMA_VERSION` | `astrbot.personality_profile.v1` |
 | `PSYCHOLOGICAL_SCREENING_SCHEMA_VERSION` | `astrbot.psychological_screening.v1` |
 | `HUMANLIKE_STATE_SCHEMA_VERSION` | `astrbot.humanlike_state.v1` |
 | `MORAL_REPAIR_STATE_SCHEMA_VERSION` | `astrbot.moral_repair_state.v1` |
@@ -1555,7 +1643,7 @@ enable_psychological_screening = false
 
 ## 文献知识库
 
-本项目保留了三个知识库，便于后续继续扩展模型。
+本项目保留了四个知识库，便于后续继续扩展模型。
 
 ### 情绪模型知识库
 
@@ -1587,6 +1675,24 @@ enable_psychological_screening = false
 - 去重文献：4401 篇。
 - 顶刊/高影响候选：260 篇。
 - 精选候选：`psychological_literature_kb/curated/top_200.jsonl`。
+
+### 人格量化知识库
+
+目录：`personality_literature_kb/`
+
+这是 `0.0.2-beta` 新增的人格量化证据库，由 `scripts/build_personality_literature_kb.py` 从 OpenAlex Works API 自动检索、缓存、去重和筛选。它用于支撑 13 维人格先验、人格到情绪基线的映射、人格到反应性/边界/修复倾向的参数调制，以及 public payload 中的 `personality_model.schema_version = astrbot.personality_profile.v1`。
+
+当前统计见 `personality_literature_kb/manifest.json`：
+
+- Target candidate retrieval: `20000`。
+- Raw retrieved records: `21964`。
+- Deduplicated works: `19196`。
+- Curated top candidates: `500`。
+- Target met: `true`。
+- 精选候选：`personality_literature_kb/curated/top_500.jsonl`。
+- 证据地图：`personality_literature_kb/evidence-map.md`，其中 `PERS-F001` 到 `PERS-F012` 是 verified DOI metadata 级 foundational sources。
+
+重要边界：该 KB 是 metadata/abstract-level 自动检索索引，不声称人工全文精读 20000 篇论文。README 和 theory 中的强论证只绑定到 DOI 可核验的 foundational sources；候选记录用于后续筛选、扩展和人工复核。
 
 ### 拟人代理知识库
 
@@ -1736,7 +1842,7 @@ py -3.13 scripts\package_plugin.py --output dist\astrbot_plugin_emotional_state.
 | 7 | 创建 tag 和 GitHub Release，上传 `dist\astrbot_plugin_emotional_state.zip`。 |
 | 8 | 用 AstrBot WebUI 分别验证“Release zip 上传”和“仓库安装”两条路径。 |
 
-当前本地环境没有配置 `origin`，也没有可用的 `gh` CLI 或 `GITHUB_TOKEN` / `GH_TOKEN`。因此仓库创建必须依赖后续提供 GitHub 授权，或由维护者先在 GitHub 页面创建空仓库后再让本地推送。
+当前公开仓库为 `https://github.com/Ayleovelle/astrbot_plugin_emotional_state`。发布预发布版本时，先确认 `origin` 指向该仓库，再用本地 `GITHUB_TOKEN` / `GH_TOKEN` 推送 tag 和上传 Release 附件。不要把 token、远程 AstrBot 凭据、cookie 或服务器地址写入仓库。
 
 ---
 
@@ -1753,7 +1859,7 @@ py -3.13 -m unittest discover -s tests -v
 语法检查：
 
 ```powershell
-py -3.13 -m py_compile main.py emotion_engine.py psychological_screening.py humanlike_engine.py integrated_self.py moral_repair_engine.py prompts.py public_api.py scripts\build_literature_kb.py scripts\build_psychological_literature_kb.py scripts\build_humanlike_agent_literature_kb.py scripts\package_plugin.py
+py -3.13 -m py_compile main.py emotion_engine.py psychological_screening.py humanlike_engine.py integrated_self.py moral_repair_engine.py prompts.py public_api.py scripts\build_literature_kb.py scripts\build_personality_literature_kb.py scripts\build_psychological_literature_kb.py scripts\build_humanlike_agent_literature_kb.py scripts\package_plugin.py
 ```
 
 配置 schema 检查：
@@ -1768,7 +1874,7 @@ py -3.13 -m json.tool _conf_schema.json
 py -3.13 scripts\package_plugin.py --output dist\astrbot_plugin_emotional_state.zip
 ```
 
-发布包会保留插件运行文件、README、docs、三个文献知识库的成品索引和精选条目，例如 `manifest.json`、`works.jsonl`、`curated/top_200.jsonl`、`evidence-map.md`。三个知识库目录下的 `raw/` 是检索和重建知识库用的原始缓存，默认不进入发布包；这样可以保留后续研究迭代需要的材料，同时避免远程上传包体积失控。
+发布包会保留插件运行文件、README、docs、四个文献知识库的成品索引和精选条目，例如 `manifest.json`、`works.jsonl`、`curated/top_200.jsonl`、`personality_literature_kb/curated/top_500.jsonl`、`evidence-map.md`。知识库目录下的 `raw/` 是检索和重建知识库用的原始缓存，默认不进入发布包；这样可以保留后续研究迭代需要的材料，同时避免远程上传包体积失控。
 
 发布 zip 的第一项会显式写入 `astrbot_plugin_emotional_state/` 目录项，以兼容 AstrBot WebUI 的 `install-upload` 解压逻辑。不要手工重新压缩成“缺少顶层目录项”的 zip，否则部分 AstrBot 版本会把第一个文件路径误判成目录。
 
@@ -1801,7 +1907,7 @@ $env:ASTRBOT_EXPECT_PLUGIN = "astrbot_plugin_emotional_state"
 脚本会在输出 JSON 里写出 `expectedPluginRuntime`，包含插件列表 API 中返回的 `version`、`displayName`、`activated`、`author`、`astrbotVersion` 等只读字段。若目标插件存在但 `activated=false`，脚本会失败退出。需要把版本和显示名也作为硬断言时，可以额外设置：
 
 ```powershell
-$env:ASTRBOT_EXPECT_PLUGIN_VERSION = "0.0.1-beta"
+$env:ASTRBOT_EXPECT_PLUGIN_VERSION = "0.0.2-beta"
 $env:ASTRBOT_EXPECT_PLUGIN_DISPLAY_NAME = "多维情绪状态"
 & $node scripts\remote_smoke_playwright.js
 ```
@@ -1857,7 +1963,7 @@ $env:ASTRBOT_REMOTE_INSTALL_CONFIRM = "1"
 | `tests/test_integrated_self.py` | 综合自我状态总线、因果 trace、policy plan、deterministic replay、schema compatibility、脱敏 diagnostics 和 LivingMemory envelope。 |
 | `tests/test_humanlike_engine.py` | P0 拟人状态、快照分层、注入片段、记忆注解。 |
 | `tests/test_moral_repair_engine.py` | 道德修复状态、欺骗风险识别、内疚/责任/补偿/信任修复、策略禁止边界和记忆注解。 |
-| `tests/test_literature_kb_scripts.py` | 三个文献 KB 构建脚本的去重、分类、输出结构和坏缓存容错。 |
+| `tests/test_literature_kb_scripts.py` | 四个文献 KB 构建脚本的去重、分类、输出结构和坏缓存容错。 |
 | `tests/test_document_math_contract.py` | README 和 `docs/theory.md` 的 GitHub fenced math、LaTeX 宏白名单、禁用宏和脆弱写法检查。 |
 | `tests/test_package_plugin.py` | 发布 zip 的目录根、成品 KB 纳入、raw/cache/tests/scripts/output 排除、包体积上限、metadata 身份校验和上传前 zip 预检失败路径。 |
 | `tests/test_psychological_screening.py` | 非诊断筛查、量表启发、红旗信号、长期轨迹。 |

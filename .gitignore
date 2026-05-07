@@ -3,3 +3,4 @@ dist/
 __pycache__/
 *.py[cod]
 .pytest_cache/
+personality_literature_kb/raw/

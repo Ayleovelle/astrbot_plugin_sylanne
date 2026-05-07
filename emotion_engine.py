@@ -23,6 +23,7 @@ DIMENSIONS: tuple[str, ...] = (
 PUBLIC_API_VERSION = "1.0"
 PUBLIC_SCHEMA_VERSION = "astrbot.emotion_state.v2"
 PUBLIC_MEMORY_SCHEMA_VERSION = "astrbot.emotion_memory.v1"
+PUBLIC_PERSONALITY_PROFILE_SCHEMA_VERSION = "astrbot.personality_profile.v1"
 
 DIMENSION_LABELS: dict[str, str] = {
     "valence": "效价/愉悦度",
@@ -177,6 +178,357 @@ KEYWORD_TRAITS: dict[str, tuple[str, ...]] = {
     ),
 }
 
+PERSONALITY_TRAIT_DIMENSIONS: tuple[str, ...] = (
+    "openness",
+    "conscientiousness",
+    "extraversion",
+    "agreeableness",
+    "neuroticism",
+    "honesty_humility",
+    "attachment_anxiety",
+    "attachment_avoidance",
+    "bis_sensitivity",
+    "bas_drive",
+    "need_for_closure",
+    "emotion_regulation_capacity",
+    "interpersonal_warmth",
+)
+
+PERSONALITY_LEXICON: dict[str, dict[str, tuple[str, ...]]] = {
+    "openness": {
+        "positive": (
+            "好奇",
+            "想象",
+            "文学",
+            "诗",
+            "艺术",
+            "创造",
+            "探索",
+            "新奇",
+            "开放",
+            "curious",
+            "creative",
+            "imaginative",
+            "artistic",
+            "explore",
+        ),
+        "negative": (
+            "保守",
+            "死板",
+            "传统",
+            "按部就班",
+            "固定",
+            "conventional",
+            "rigid",
+        ),
+    },
+    "conscientiousness": {
+        "positive": (
+            "认真",
+            "负责",
+            "谨慎",
+            "守规矩",
+            "可靠",
+            "严谨",
+            "计划",
+            "秩序",
+            "细致",
+            "dutiful",
+            "careful",
+            "reliable",
+            "organized",
+        ),
+        "negative": (
+            "随便",
+            "散漫",
+            "冲动",
+            "粗心",
+            "chaotic",
+            "careless",
+            "impulsive",
+        ),
+    },
+    "extraversion": {
+        "positive": (
+            "开朗",
+            "活泼",
+            "热情",
+            "外向",
+            "主动",
+            "健谈",
+            "cheerful",
+            "outgoing",
+            "energetic",
+            "talkative",
+        ),
+        "negative": (
+            "内向",
+            "害羞",
+            "羞涩",
+            "安静",
+            "迟疑",
+            "reserved",
+            "shy",
+            "quiet",
+            "hesitant",
+        ),
+    },
+    "agreeableness": {
+        "positive": (
+            "温柔",
+            "关心",
+            "体贴",
+            "友好",
+            "亲近",
+            "照顾",
+            "鼓励",
+            "合作",
+            "kind",
+            "friendly",
+            "supportive",
+            "cooperative",
+        ),
+        "negative": (
+            "毒舌",
+            "尖锐",
+            "冷淡",
+            "疏离",
+            "强势",
+            "敌意",
+            "hostile",
+            "aloof",
+            "harsh",
+        ),
+    },
+    "neuroticism": {
+        "positive": (
+            "敏感",
+            "易怒",
+            "紧张",
+            "焦虑",
+            "不安",
+            "情绪化",
+            "脆弱",
+            "sensitive",
+            "anxious",
+            "volatile",
+            "nervous",
+        ),
+        "negative": (
+            "冷静",
+            "沉稳",
+            "平静",
+            "理性",
+            "克制",
+            "耐心",
+            "calm",
+            "steady",
+            "patient",
+        ),
+    },
+    "honesty_humility": {
+        "positive": (
+            "诚实",
+            "坦率",
+            "谦逊",
+            "正直",
+            "守信",
+            "公平",
+            "honest",
+            "humble",
+            "sincere",
+            "fair",
+        ),
+        "negative": (
+            "狡猾",
+            "欺骗",
+            "操控",
+            "自大",
+            "虚荣",
+            "deceptive",
+            "manipulative",
+            "arrogant",
+        ),
+    },
+    "attachment_anxiety": {
+        "positive": (
+            "害怕被抛弃",
+            "需要确认",
+            "患得患失",
+            "黏人",
+            "不安全感",
+            "reassurance",
+            "abandon",
+            "clingy",
+            "insecure",
+        ),
+        "negative": (
+            "安全感",
+            "信任",
+            "稳定关系",
+            "secure",
+            "trusting",
+        ),
+    },
+    "attachment_avoidance": {
+        "positive": (
+            "疏离",
+            "保持距离",
+            "不依赖",
+            "冷淡",
+            "独立",
+            "回避",
+            "distant",
+            "avoidant",
+            "aloof",
+            "independent",
+        ),
+        "negative": (
+            "亲近",
+            "依恋",
+            "愿意靠近",
+            "信任",
+            "close",
+            "warm",
+        ),
+    },
+    "bis_sensitivity": {
+        "positive": (
+            "谨慎",
+            "警惕",
+            "担心",
+            "害怕",
+            "风险",
+            "防御",
+            "cautious",
+            "vigilant",
+            "risk",
+            "defensive",
+        ),
+        "negative": (
+            "大胆",
+            "冒险",
+            "无畏",
+            "bold",
+            "risk-taking",
+        ),
+    },
+    "bas_drive": {
+        "positive": (
+            "主动",
+            "追求",
+            "目标",
+            "野心",
+            "兴奋",
+            "奖励",
+            "drive",
+            "goal",
+            "reward",
+            "ambitious",
+        ),
+        "negative": (
+            "低能量",
+            "退缩",
+            "无欲无求",
+            "passive",
+            "withdrawn",
+        ),
+    },
+    "need_for_closure": {
+        "positive": (
+            "确定",
+            "规则",
+            "秩序",
+            "明确",
+            "答案",
+            "稳定",
+            "certainty",
+            "rules",
+            "order",
+            "clear",
+        ),
+        "negative": (
+            "暧昧",
+            "开放结局",
+            "模糊",
+            "不确定",
+            "ambiguous",
+            "uncertain",
+        ),
+    },
+    "emotion_regulation_capacity": {
+        "positive": (
+            "冷静",
+            "克制",
+            "调节",
+            "耐心",
+            "沉稳",
+            "复盘",
+            "calm",
+            "regulated",
+            "patient",
+            "reflective",
+        ),
+        "negative": (
+            "失控",
+            "冲动",
+            "爆发",
+            "易怒",
+            "激动",
+            "impulsive",
+            "volatile",
+            "reactive",
+        ),
+    },
+    "interpersonal_warmth": {
+        "positive": (
+            "温柔",
+            "亲切",
+            "体贴",
+            "关怀",
+            "共情",
+            "照顾",
+            "warm",
+            "kind",
+            "empathic",
+            "supportive",
+        ),
+        "negative": (
+            "冷淡",
+            "疏离",
+            "刻薄",
+            "拒人千里",
+            "aloof",
+            "cold",
+            "harsh",
+        ),
+    },
+}
+
+PERSONALITY_SOURCE_RELIABILITY: dict[str, float] = {
+    "lexical_keywords": 0.58,
+    "legacy_trait_projection": 0.52,
+    "structure_prior": 0.42,
+}
+
+PERSONALITY_TRAIT_GROUPS: dict[str, tuple[str, ...]] = {
+    "big_five": (
+        "openness",
+        "conscientiousness",
+        "extraversion",
+        "agreeableness",
+        "neuroticism",
+    ),
+    "hexaco_extension": ("honesty_humility",),
+    "attachment": ("attachment_anxiety", "attachment_avoidance"),
+    "reinforcement_sensitivity": ("bis_sensitivity", "bas_drive"),
+    "regulatory_interpersonal": (
+        "need_for_closure",
+        "emotion_regulation_capacity",
+        "interpersonal_warmth",
+    ),
+}
+
 
 def clamp(value: float, low: float = -1.0, high: float = 1.0) -> float:
     return max(low, min(high, value))
@@ -264,6 +616,209 @@ def _keyword_score(text: str, keywords: tuple[str, ...]) -> float:
     return clamp(hits / length_scale, 0.0, 1.0)
 
 
+def _signed_keyword_score(
+    text: str,
+    *,
+    positive: tuple[str, ...],
+    negative: tuple[str, ...],
+) -> float:
+    positive_score = _keyword_score(text, positive)
+    negative_score = _keyword_score(text, negative)
+    return clamp(positive_score - negative_score)
+
+
+def _legacy_trait_projection(traits: dict[str, float]) -> dict[str, float]:
+    return {
+        "openness": clamp(0.40 * traits["optimism"] + 0.12 * traits["warmth"]),
+        "conscientiousness": clamp(
+            0.82 * traits["dutifulness"] + 0.12 * traits["calmness"]
+        ),
+        "extraversion": clamp(
+            0.56 * traits["optimism"]
+            + 0.30 * traits["assertiveness"]
+            - 0.42 * traits["shyness"]
+        ),
+        "agreeableness": clamp(
+            0.72 * traits["warmth"]
+            + 0.14 * traits["calmness"]
+            - 0.22 * traits["assertiveness"]
+        ),
+        "neuroticism": clamp(
+            0.66 * traits["volatility"]
+            + 0.30 * traits["shyness"]
+            + 0.22 * traits["pessimism"]
+            - 0.42 * traits["calmness"]
+        ),
+        "honesty_humility": clamp(
+            0.42 * traits["dutifulness"] + 0.20 * traits["warmth"]
+        ),
+        "attachment_anxiety": clamp(
+            0.54 * traits["shyness"]
+            + 0.34 * traits["volatility"]
+            + 0.18 * traits["pessimism"]
+            - 0.18 * traits["calmness"]
+        ),
+        "attachment_avoidance": clamp(
+            0.48 * traits["pessimism"]
+            + 0.16 * traits["shyness"]
+            - 0.42 * traits["warmth"]
+        ),
+        "bis_sensitivity": clamp(
+            0.42 * traits["shyness"]
+            + 0.30 * traits["dutifulness"]
+            + 0.26 * traits["volatility"]
+        ),
+        "bas_drive": clamp(
+            0.42 * traits["assertiveness"]
+            + 0.34 * traits["optimism"]
+            - 0.18 * traits["shyness"]
+        ),
+        "need_for_closure": clamp(
+            0.50 * traits["dutifulness"]
+            + 0.24 * traits["calmness"]
+            - 0.20 * traits["volatility"]
+        ),
+        "emotion_regulation_capacity": clamp(
+            0.70 * traits["calmness"]
+            + 0.18 * traits["dutifulness"]
+            - 0.45 * traits["volatility"]
+        ),
+        "interpersonal_warmth": clamp(
+            0.82 * traits["warmth"]
+            + 0.14 * traits["optimism"]
+            - 0.20 * traits["pessimism"]
+        ),
+    }
+
+
+def build_personality_model(
+    text: str,
+    traits: dict[str, float],
+    *,
+    strength: float = 1.0,
+) -> dict[str, Any]:
+    """Build a deterministic posterior personality vector from persona text."""
+    text = text or ""
+    strength = clamp(strength, 0.0, 2.0)
+    lexical = {
+        dimension: _signed_keyword_score(
+            text,
+            positive=rules["positive"],
+            negative=rules["negative"],
+        )
+        * strength
+        for dimension, rules in PERSONALITY_LEXICON.items()
+    }
+    legacy = _legacy_trait_projection(traits)
+    structure_prior = {
+        dimension: 0.0 for dimension in PERSONALITY_TRAIT_DIMENSIONS
+    }
+    if legacy["attachment_anxiety"] > 0.12:
+        structure_prior["bis_sensitivity"] = clamp(
+            0.35 * legacy["attachment_anxiety"]
+        )
+    if legacy["attachment_avoidance"] > 0.12:
+        structure_prior["agreeableness"] = clamp(
+            -0.24 * legacy["attachment_avoidance"]
+        )
+        structure_prior["interpersonal_warmth"] = clamp(
+            -0.30 * legacy["attachment_avoidance"]
+        )
+    if legacy["neuroticism"] > 0.12:
+        structure_prior["emotion_regulation_capacity"] = clamp(
+            -0.26 * legacy["neuroticism"]
+        )
+
+    sources = {
+        "lexical_keywords": lexical,
+        "legacy_trait_projection": legacy,
+        "structure_prior": structure_prior,
+    }
+    trait_scores: dict[str, float] = {}
+    confidence: dict[str, float] = {}
+    posterior_variance: dict[str, float] = {}
+    for dimension in PERSONALITY_TRAIT_DIMENSIONS:
+        numerator = 0.0
+        denominator = 0.18
+        signal_mass = 0.0
+        for source_name, values in sources.items():
+            reliability = PERSONALITY_SOURCE_RELIABILITY[source_name]
+            value = clamp(values.get(dimension, 0.0))
+            numerator += reliability * value
+            denominator += reliability
+            signal_mass += reliability * abs(value)
+        score = clamp(numerator / denominator)
+        trait_scores[dimension] = score
+        posterior_variance[dimension] = round(1.0 / denominator, 6)
+        confidence[dimension] = clamp(
+            0.18
+            + 0.68 * (signal_mass / max(denominator, 0.001))
+            + 0.10 * (1.0 - posterior_variance[dimension]),
+            0.0,
+            0.95,
+        )
+
+    instability = clamp(
+        0.42 * trait_scores["neuroticism"]
+        + 0.28 * trait_scores["attachment_anxiety"]
+        + 0.22 * trait_scores["bis_sensitivity"]
+        - 0.34 * trait_scores["emotion_regulation_capacity"]
+    )
+    social_distance = clamp(
+        0.48 * trait_scores["attachment_avoidance"]
+        - 0.36 * trait_scores["interpersonal_warmth"]
+        - 0.22 * trait_scores["extraversion"]
+    )
+    repair_orientation = clamp(
+        0.34 * trait_scores["agreeableness"]
+        + 0.28 * trait_scores["honesty_humility"]
+        + 0.20 * trait_scores["emotion_regulation_capacity"]
+        - 0.22 * trait_scores["attachment_avoidance"]
+    )
+    boundary_sensitivity = clamp(
+        0.32 * trait_scores["bis_sensitivity"]
+        + 0.26 * trait_scores["need_for_closure"]
+        + 0.20 * trait_scores["conscientiousness"]
+        - 0.18 * trait_scores["agreeableness"]
+    )
+    expressiveness = clamp(
+        0.42 * trait_scores["extraversion"]
+        + 0.26 * trait_scores["bas_drive"]
+        - 0.20 * trait_scores["attachment_avoidance"]
+    )
+
+    return {
+        "schema_version": PUBLIC_PERSONALITY_PROFILE_SCHEMA_VERSION,
+        "model": "reliability_weighted_latent_traits",
+        "trait_space": {
+            group: list(dimensions)
+            for group, dimensions in PERSONALITY_TRAIT_GROUPS.items()
+        },
+        "trait_scores": {
+            key: round(value, 6) for key, value in trait_scores.items()
+        },
+        "trait_confidence": {
+            key: round(value, 6) for key, value in confidence.items()
+        },
+        "posterior_variance": posterior_variance,
+        "source_reliability": dict(PERSONALITY_SOURCE_RELIABILITY),
+        "derived_factors": {
+            "instability": round(instability, 6),
+            "social_distance": round(social_distance, 6),
+            "repair_orientation": round(repair_orientation, 6),
+            "boundary_sensitivity": round(boundary_sensitivity, 6),
+            "expressiveness": round(expressiveness, 6),
+        },
+        "evidence_status": "persona_text_metadata_only",
+        "input_character_count": len(text),
+        "notes": [
+            "deterministic_persona_prior",
+            "not_clinical_personality_assessment",
+            "raw_persona_text_not_exported",
+        ],
+    }
+
+
 def _fingerprint(*parts: str) -> str:
     payload = "\n".join(part.strip() for part in parts if part)
     if not payload:
@@ -280,6 +835,7 @@ class PersonaProfile:
     baseline: dict[str, float] = field(default_factory=lambda: DEFAULT_BASELINE.copy())
     traits: dict[str, float] = field(default_factory=dict)
     parameter_bias: dict[str, float] = field(default_factory=dict)
+    personality_model: dict[str, Any] = field(default_factory=dict)
     source: str = "default"
 
     @classmethod
@@ -293,10 +849,15 @@ class PersonaProfile:
 
     def describe(self) -> str:
         traits = ", ".join(f"{key}={value:.2f}" for key, value in self.traits.items())
+        factors = self.personality_model.get("derived_factors") or {}
+        factor_text = ", ".join(
+            f"{key}={_as_float(value):.2f}" for key, value in factors.items()
+        )
         return (
             f"persona_id={self.persona_id or 'default'}, "
             f"name={self.name or 'default'}, "
-            f"fingerprint={self.fingerprint}, source={self.source}, traits=[{traits}]"
+            f"fingerprint={self.fingerprint}, source={self.source}, "
+            f"traits=[{traits}], personality_factors=[{factor_text}]"
         )
 
     def to_public_dict(self) -> dict[str, Any]:
@@ -319,6 +880,13 @@ def build_persona_profile(
         key: _keyword_score(text, keywords) * strength
         for key, keywords in KEYWORD_TRAITS.items()
     }
+    personality_model = build_personality_model(
+        text,
+        traits,
+        strength=strength,
+    )
+    personality_traits = personality_model["trait_scores"]
+    personality_factors = personality_model["derived_factors"]
 
     baseline = DEFAULT_BASELINE.copy()
     baseline["valence"] = clamp(
@@ -327,12 +895,24 @@ def build_persona_profile(
         + 0.14 * traits["optimism"]
         - 0.16 * traits["pessimism"],
     )
+    baseline["valence"] = clamp(
+        baseline["valence"]
+        + 0.06 * personality_traits["agreeableness"]
+        + 0.05 * personality_traits["interpersonal_warmth"]
+        - 0.06 * personality_traits["neuroticism"],
+    )
     baseline["arousal"] = clamp(
         baseline["arousal"]
         + 0.20 * traits["volatility"]
         + 0.16 * traits["shyness"]
         + 0.10 * traits["optimism"]
         - 0.20 * traits["calmness"],
+    )
+    baseline["arousal"] = clamp(
+        baseline["arousal"]
+        + 0.08 * personality_factors["instability"]
+        + 0.05 * personality_traits["bas_drive"]
+        - 0.06 * personality_traits["emotion_regulation_capacity"],
     )
     baseline["dominance"] = clamp(
         baseline["dominance"]
@@ -341,11 +921,23 @@ def build_persona_profile(
         + 0.08 * traits["calmness"]
         - 0.10 * traits["pessimism"],
     )
+    baseline["dominance"] = clamp(
+        baseline["dominance"]
+        + 0.06 * personality_traits["bas_drive"]
+        - 0.05 * personality_traits["attachment_anxiety"]
+        - 0.04 * personality_traits["bis_sensitivity"],
+    )
     baseline["goal_congruence"] = clamp(
         baseline["goal_congruence"]
         + 0.14 * traits["dutifulness"]
         + 0.08 * traits["warmth"]
         - 0.08 * traits["volatility"],
+    )
+    baseline["goal_congruence"] = clamp(
+        baseline["goal_congruence"]
+        + 0.06 * personality_traits["conscientiousness"]
+        + 0.04 * personality_traits["need_for_closure"]
+        - 0.04 * personality_traits["neuroticism"],
     )
     baseline["certainty"] = clamp(
         baseline["certainty"]
@@ -354,6 +946,12 @@ def build_persona_profile(
         - 0.16 * traits["shyness"]
         - 0.10 * traits["volatility"],
     )
+    baseline["certainty"] = clamp(
+        baseline["certainty"]
+        + 0.06 * personality_traits["emotion_regulation_capacity"]
+        + 0.05 * personality_traits["need_for_closure"]
+        - 0.05 * personality_traits["attachment_anxiety"],
+    )
     baseline["control"] = clamp(
         baseline["control"]
         + 0.18 * traits["assertiveness"]
@@ -361,12 +959,25 @@ def build_persona_profile(
         - 0.18 * traits["shyness"]
         - 0.08 * traits["volatility"],
     )
+    baseline["control"] = clamp(
+        baseline["control"]
+        + 0.06 * personality_traits["emotion_regulation_capacity"]
+        + 0.05 * personality_traits["conscientiousness"]
+        - 0.06 * personality_traits["neuroticism"],
+    )
     baseline["affiliation"] = clamp(
         baseline["affiliation"]
         + 0.24 * traits["warmth"]
         + 0.08 * traits["optimism"]
         - 0.20 * traits["pessimism"]
         - 0.08 * traits["assertiveness"],
+    )
+    baseline["affiliation"] = clamp(
+        baseline["affiliation"]
+        + 0.08 * personality_traits["interpersonal_warmth"]
+        + 0.06 * personality_traits["agreeableness"]
+        - 0.08 * personality_traits["attachment_avoidance"]
+        - 0.05 * personality_factors["social_distance"],
     )
 
     parameter_bias = {
@@ -396,8 +1007,38 @@ def build_persona_profile(
         + 0.10 * traits["calmness"]
         - 0.12 * traits["shyness"],
     }
+    parameter_bias["alpha_base"] += (
+        0.08 * personality_factors["instability"]
+        - 0.05 * personality_traits["emotion_regulation_capacity"]
+    )
+    parameter_bias["baseline_decay"] += (
+        0.08 * personality_traits["emotion_regulation_capacity"]
+        - 0.05 * personality_factors["instability"]
+    )
+    parameter_bias["baseline_half_life_seconds"] += (
+        0.12 * personality_factors["instability"]
+        + 0.06 * personality_traits["attachment_anxiety"]
+        - 0.08 * personality_traits["emotion_regulation_capacity"]
+    )
+    parameter_bias["reactivity"] += (
+        0.10 * personality_traits["neuroticism"]
+        + 0.08 * personality_traits["bis_sensitivity"]
+        - 0.06 * personality_traits["emotion_regulation_capacity"]
+    )
+    parameter_bias["arousal_from_surprise"] += (
+        0.06 * personality_traits["bas_drive"]
+        + 0.05 * personality_traits["neuroticism"]
+    )
+    parameter_bias["dominance_control_coupling"] += (
+        0.06 * personality_traits["conscientiousness"]
+        + 0.05 * personality_traits["emotion_regulation_capacity"]
+        - 0.04 * personality_traits["attachment_anxiety"]
+    )
     parameter_bias = {
         key: clamp(value, 0.55, 1.55) for key, value in parameter_bias.items()
+    }
+    personality_model["parameter_bias_basis"] = {
+        key: round(value, 6) for key, value in parameter_bias.items()
     }
 
     return PersonaProfile(
@@ -408,6 +1049,7 @@ def build_persona_profile(
         baseline=baseline,
         traits=traits,
         parameter_bias=parameter_bias,
+        personality_model=personality_model,
         source=source,
     )
 
@@ -543,6 +1185,7 @@ class EmotionState:
     persona_id: str = "default"
     persona_name: str = "default"
     persona_fingerprint: str = "default"
+    persona_model: dict[str, Any] = field(default_factory=dict)
     label: str = "neutral"
     confidence: float = 0.0
     turns: int = 0
@@ -562,6 +1205,7 @@ class EmotionState:
             persona_id=profile.persona_id,
             persona_name=profile.name,
             persona_fingerprint=profile.fingerprint,
+            persona_model=deepcopy(profile.personality_model),
         )
 
     @classmethod
@@ -573,6 +1217,11 @@ class EmotionState:
             persona_id=str(data.get("persona_id") or "default"),
             persona_name=str(data.get("persona_name") or "default"),
             persona_fingerprint=str(data.get("persona_fingerprint") or "default"),
+            persona_model=(
+                deepcopy(data.get("persona_model"))
+                if isinstance(data.get("persona_model"), dict)
+                else {}
+            ),
             label=str(data.get("label") or "neutral"),
             confidence=clamp(_as_float(data.get("confidence"), 0.0), 0.0, 1.0),
             turns=max(0, int(_as_float(data.get("turns"), 0))),
@@ -592,6 +1241,7 @@ class EmotionState:
             "persona_id": self.persona_id,
             "persona_name": self.persona_name,
             "persona_fingerprint": self.persona_fingerprint,
+            "persona_model": deepcopy(self.persona_model),
             "label": self.label,
             "confidence": round(self.confidence, 6),
             "turns": self.turns,
@@ -624,6 +1274,7 @@ def persona_profile_to_public_payload(profile: PersonaProfile) -> dict[str, Any]
         "name": profile.name,
         "fingerprint": profile.fingerprint,
         "source": profile.source,
+        "personality_model": deepcopy(profile.personality_model),
         "baseline": {
             key: round(profile.baseline.get(key, 0.0), 6) for key in DIMENSIONS
         },
@@ -726,6 +1377,7 @@ def emotion_state_to_public_payload(
             "persona_id": state.persona_id,
             "name": state.persona_name,
             "fingerprint": state.persona_fingerprint,
+            "personality_model": deepcopy(state.persona_model),
         },
         "relationship": relationship_state_to_public_payload(state.last_appraisal),
         "consequences": consequence_state_to_public_payload(state.consequences),
@@ -920,6 +1572,11 @@ class EmotionEngine:
             persona_fingerprint=(
                 profile.fingerprint if profile else previous.persona_fingerprint
             ),
+            persona_model=(
+                deepcopy(profile.personality_model)
+                if profile
+                else deepcopy(previous.persona_model)
+            ),
             label=observation.label or previous.label,
             confidence=confidence,
             turns=previous.turns + 1,
@@ -968,6 +1625,11 @@ class EmotionEngine:
             persona_name=profile.name if profile else previous.persona_name,
             persona_fingerprint=(
                 profile.fingerprint if profile else previous.persona_fingerprint
+            ),
+            persona_model=(
+                deepcopy(profile.personality_model)
+                if profile
+                else deepcopy(previous.persona_model)
             ),
             label=previous.label,
             confidence=previous.confidence,
@@ -2189,6 +2851,13 @@ def format_state_for_prompt(state: EmotionState) -> str:
     lines = [
         f"- persona: {state.persona_name} ({state.persona_id}, {state.persona_fingerprint})"
     ]
+    personality_factors = (state.persona_model or {}).get("derived_factors") or {}
+    if personality_factors:
+        factor_text = ", ".join(
+            f"{key}={_as_float(value):.2f}"
+            for key, value in personality_factors.items()
+        )
+        lines.append(f"- personality_factors: {factor_text}")
     lines.extend(
         f"- {key} ({DIMENSION_LABELS[key]}): {state.values[key]:+.3f}"
         for key in DIMENSIONS
@@ -2283,10 +2952,20 @@ def format_state_for_user(state: EmotionState) -> str:
     values = "\n".join(
         f"{DIMENSION_LABELS[key]}: {state.values[key]:+.3f}" for key in DIMENSIONS
     )
+    personality_factors = (state.persona_model or {}).get("derived_factors") or {}
+    personality_text = (
+        ", ".join(
+            f"{key}={_as_float(value):.2f}"
+            for key, value in personality_factors.items()
+        )
+        if personality_factors
+        else "未建模"
+    )
     reason = state.last_reason or "暂无最近解释。"
     return (
         f"人格: {state.persona_name} ({state.persona_id})\n"
         f"人格指纹: {state.persona_fingerprint}\n"
+        f"人格量化: {personality_text}\n"
         f"情绪标签: {state.label}\n"
         f"更新轮数: {state.turns}\n"
         f"上次更新时间: {time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(state.updated_at))}\n"

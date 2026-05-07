@@ -28,6 +28,7 @@ INCLUDE_ROOT_FILES = {
 INCLUDE_DIRS = {
     "docs",
     "literature_kb",
+    "personality_literature_kb",
     "psychological_literature_kb",
     "humanlike_agent_literature_kb",
 }

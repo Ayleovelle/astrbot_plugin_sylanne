@@ -220,6 +220,31 @@ class EmotionEngineTests(unittest.TestCase):
         biased = apply_persona_to_parameters(engine.parameters, profile)
         self.assertGreaterEqual(biased.reactivity, engine.parameters.reactivity)
 
+    def test_persona_profile_builds_versioned_personality_model(self):
+        profile = build_persona_profile(
+            persona_id="literary",
+            name="literary",
+            text=(
+                "文学 好奇 创造 温柔 关心 害羞 紧张 "
+                "谨慎 诚实 需要确认 保持距离"
+            ),
+        )
+        model = profile.personality_model
+
+        self.assertEqual(model["schema_version"], "astrbot.personality_profile.v1")
+        self.assertEqual(model["model"], "reliability_weighted_latent_traits")
+        self.assertIn("big_five", model["trait_space"])
+        self.assertIn("openness", model["trait_scores"])
+        self.assertIn("attachment_anxiety", model["trait_scores"])
+        self.assertIn("derived_factors", model)
+        self.assertIn("repair_orientation", model["derived_factors"])
+        self.assertIn("source_reliability", model)
+        self.assertEqual(model["evidence_status"], "persona_text_metadata_only")
+        self.assertIn("not_clinical_personality_assessment", model["notes"])
+        self.assertGreater(model["trait_scores"]["openness"], 0.0)
+        self.assertGreater(model["trait_scores"]["interpersonal_warmth"], 0.0)
+        self.assertGreaterEqual(model["posterior_variance"]["openness"], 0.0)
+
     def test_update_records_persona_fingerprint(self):
         profile = build_persona_profile(
             persona_id="careful",
@@ -236,6 +261,10 @@ class EmotionEngineTests(unittest.TestCase):
             now=1010.0,
         )
         self.assertEqual(state.persona_fingerprint, profile.fingerprint)
+        self.assertEqual(
+            state.persona_model["schema_version"],
+            "astrbot.personality_profile.v1",
+        )
 
     def test_anger_state_triggers_boundary_consequence(self):
         engine = EmotionEngine()
@@ -722,7 +751,12 @@ class EmotionEngineTests(unittest.TestCase):
         self.assertGreater(state.consequences.active_effects["cold_war"], 1750)
 
     def test_public_payload_has_versioned_contract(self):
-        state = EmotionState.initial()
+        profile = build_persona_profile(
+            persona_id="careful",
+            name="careful",
+            text="认真 负责 谨慎 诚实 温柔",
+        )
+        state = EmotionState.initial(profile)
         state.consequences.active_effects["cold_war"] = 2
         payload = emotion_state_to_public_payload(
             state,
@@ -734,6 +768,14 @@ class EmotionEngineTests(unittest.TestCase):
         self.assertEqual(payload["session_key"], "test-session")
         self.assertIn("valence", payload["emotion"]["values"])
         self.assertEqual(len(payload["emotion"]["dimensions"]), 7)
+        self.assertEqual(
+            payload["persona"]["personality_model"]["schema_version"],
+            "astrbot.personality_profile.v1",
+        )
+        self.assertIn(
+            "trait_scores",
+            payload["persona"]["personality_model"],
+        )
         self.assertIn("cold_war", payload["consequences"]["active_effects"])
         self.assertIn(
             "cold_war",
@@ -913,7 +955,13 @@ class EmotionEngineTests(unittest.TestCase):
         self.assertEqual(payload["persona_id"], "shy")
         self.assertIn("baseline", payload)
         self.assertIn("traits", payload)
+        self.assertIn("personality_model", payload)
+        self.assertEqual(
+            payload["personality_model"]["schema_version"],
+            "astrbot.personality_profile.v1",
+        )
         self.assertNotIn("text", payload)
+        self.assertNotIn("害羞", str(payload))
 
     def test_public_consequence_payload_labels_active_effects(self):
         state = EmotionState.initial()

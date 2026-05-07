@@ -32,7 +32,7 @@ git diff --check
 
 ```powershell
 $env:ASTRBOT_EXPECT_PLUGIN = "astrbot_plugin_emotional_state"
-$env:ASTRBOT_EXPECT_PLUGIN_VERSION = "0.0.1-beta"
+$env:ASTRBOT_EXPECT_PLUGIN_VERSION = "0.0.2-beta"
 $env:ASTRBOT_EXPECT_PLUGIN_DISPLAY_NAME = "多维情绪状态"
 & $node scripts\remote_smoke_playwright.js
 ```

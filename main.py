@@ -19,6 +19,7 @@ try:
         PersonaProfile,
         PUBLIC_API_VERSION,
         PUBLIC_MEMORY_SCHEMA_VERSION,
+        PUBLIC_PERSONALITY_PROFILE_SCHEMA_VERSION,
         PUBLIC_SCHEMA_VERSION,
         apply_persona_to_parameters,
         build_emotion_memory_payload as build_memory_payload,
@@ -88,6 +89,7 @@ except ImportError:
         PersonaProfile,
         PUBLIC_API_VERSION,
         PUBLIC_MEMORY_SCHEMA_VERSION,
+        PUBLIC_PERSONALITY_PROFILE_SCHEMA_VERSION,
         PUBLIC_SCHEMA_VERSION,
         apply_persona_to_parameters,
         build_emotion_memory_payload as build_memory_payload,
@@ -186,6 +188,7 @@ _REQUIRED_EMOTION_SERVICE_VERSIONS: dict[str, str] = {
     "emotion_api_version": PUBLIC_API_VERSION,
     "emotion_schema_version": PUBLIC_SCHEMA_VERSION,
     "emotion_memory_schema_version": PUBLIC_MEMORY_SCHEMA_VERSION,
+    "personality_profile_schema_version": PUBLIC_PERSONALITY_PROFILE_SCHEMA_VERSION,
     "psychological_screening_schema_version": PUBLIC_SCREENING_SCHEMA_VERSION,
     "integrated_self_schema_version": PUBLIC_INTEGRATED_SELF_SCHEMA_VERSION,
 }
@@ -223,13 +226,14 @@ def get_emotional_state_plugin(context: Context) -> Any | None:
     PLUGIN_NAME,
     "pidan",
     "基于 PAD/OCC/appraisal 与情绪动力学的 AstrBot 多维情绪状态插件",
-    "1.0.0",
+    "0.0.2-beta",
     "",
 )
 class EmotionalStatePlugin(Star):
     emotion_api_version = PUBLIC_API_VERSION
     emotion_schema_version = PUBLIC_SCHEMA_VERSION
     emotion_memory_schema_version = PUBLIC_MEMORY_SCHEMA_VERSION
+    personality_profile_schema_version = PUBLIC_PERSONALITY_PROFILE_SCHEMA_VERSION
     psychological_screening_schema_version = PUBLIC_SCREENING_SCHEMA_VERSION
     humanlike_state_schema_version = PUBLIC_HUMANLIKE_SCHEMA_VERSION
     moral_repair_state_schema_version = PUBLIC_MORAL_REPAIR_SCHEMA_VERSION
@@ -2070,6 +2074,7 @@ class EmotionalStatePlugin(Star):
             persona_id=profile.persona_id,
             persona_name=profile.name,
             persona_fingerprint=profile.fingerprint,
+            persona_model=profile.personality_model.copy(),
             label=state.label,
             confidence=state.confidence,
             turns=old_turns,

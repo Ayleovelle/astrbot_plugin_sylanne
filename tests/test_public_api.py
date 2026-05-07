@@ -15,6 +15,7 @@ from public_api import (
     HUMANLIKE_STATE_SCHEMA_VERSION,
     INTEGRATED_SELF_SCHEMA_VERSION,
     MORAL_REPAIR_STATE_SCHEMA_VERSION,
+    PERSONALITY_PROFILE_SCHEMA_VERSION,
     PSYCHOLOGICAL_RISK_BOOLEAN_FIELDS,
     PSYCHOLOGICAL_SCREENING_SCHEMA_VERSION,
     get_emotion_service,
@@ -124,6 +125,7 @@ class FakeEmotionService:
     emotion_api_version = "1.0"
     emotion_schema_version = "astrbot.emotion_state.v2"
     emotion_memory_schema_version = "astrbot.emotion_memory.v1"
+    personality_profile_schema_version = "astrbot.personality_profile.v1"
     psychological_screening_schema_version = "astrbot.psychological_screening.v1"
     integrated_self_schema_version = "astrbot.integrated_self_state.v1"
 
@@ -301,6 +303,12 @@ class PublicApiTests(unittest.TestCase):
     def test_memory_schema_constant_is_exported(self):
         self.assertEqual(EMOTION_MEMORY_SCHEMA_VERSION, "astrbot.emotion_memory.v1")
 
+    def test_personality_profile_schema_constant_is_exported(self):
+        self.assertEqual(
+            PERSONALITY_PROFILE_SCHEMA_VERSION,
+            "astrbot.personality_profile.v1",
+        )
+
     def test_emotion_api_constants_are_exported(self):
         self.assertEqual(EMOTION_API_VERSION, "1.0")
         self.assertEqual(EMOTION_SCHEMA_VERSION, "astrbot.emotion_state.v2")
@@ -377,6 +385,7 @@ class PublicApiTests(unittest.TestCase):
             "emotion_api_version",
             "emotion_schema_version",
             "emotion_memory_schema_version",
+            "personality_profile_schema_version",
             "psychological_screening_schema_version",
             "integrated_self_schema_version",
         )
@@ -482,6 +491,7 @@ class PublicApiTests(unittest.TestCase):
             "emotion_api_version",
             "emotion_schema_version",
             "emotion_memory_schema_version",
+            "personality_profile_schema_version",
             "psychological_screening_schema_version",
         }
         humanlike_protocol_constants = emotion_protocol_constants | {
@@ -562,6 +572,7 @@ class PublicApiTests(unittest.TestCase):
             emotion_api_version = "1.0"
             emotion_schema_version = "astrbot.emotion_state.v2"
             emotion_memory_schema_version = "astrbot.emotion_memory.v1"
+            personality_profile_schema_version = "astrbot.personality_profile.v1"
             psychological_screening_schema_version = "astrbot.psychological_screening.v1"
 
             async def get_emotion_snapshot(self):

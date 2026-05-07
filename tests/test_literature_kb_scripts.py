@@ -180,6 +180,46 @@ class LiteratureKbScriptTests(unittest.TestCase):
             self.assertIn("simulated agent design only", (out_dir / "README.md").read_text(encoding="utf-8"))
             self.assertIn("dependency", (out_dir / "design-rules.md").read_text(encoding="utf-8"))
 
+    def test_personality_kb_scores_traits_and_documents_20k_contract(self):
+        module = load_script("build_personality_literature_kb")
+        work = module.simplify_work(
+            sample_openalex_work(
+                title="Big Five personality structure and attachment anxiety in emotion regulation",
+                venue="Journal of Personality and Social Psychology",
+                abstract_terms={
+                    "big": [0],
+                    "five": [1],
+                    "personality": [2],
+                    "attachment": [3],
+                    "anxiety": [4],
+                    "emotion": [5],
+                    "regulation": [6],
+                },
+            ),
+            query_key="big_five_structure",
+            query="Big Five personality structure five factor model",
+        )
+        work["themes"] = module.classify_themes(work)
+        work["relevance_score"] = module.relevance_score(work)
+        work["source_id"] = "PERS00001"
+
+        self.assertIn("big_five_and_trait_structure", work["themes"])
+        self.assertIn("attachment_and_relationship_priors", work["themes"])
+        self.assertGreater(work["relevance_score"], 0.4)
+        self.assertGreaterEqual(len(module.FOUNDATIONAL_SOURCES), 10)
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            out_dir = Path(temp_dir)
+            module.write_jsonl(out_dir / "works.jsonl", [work])
+            module.write_csv(out_dir / "works.csv", [work])
+            module.write_markdown(out_dir, [work], [work], raw_total=20000, target=20000)
+
+            self.assertEqual(module.read_jsonl(out_dir / "works.jsonl")[0]["source_id"], "PERS00001")
+            self.assertIn("full-text reading", (out_dir / "README.md").read_text(encoding="utf-8"))
+            self.assertIn("PERS-F001", (out_dir / "evidence-map.md").read_text(encoding="utf-8"))
+            self.assertIn("Candidate Evidence Rows", (out_dir / "evidence-map.md").read_text(encoding="utf-8"))
+            self.assertIn("big_five_and_trait_structure", (out_dir / "topic-summary.md").read_text(encoding="utf-8"))
+
     def test_jsonl_reader_returns_none_for_bad_cache(self):
         module = load_script("build_literature_kb")
         with tempfile.TemporaryDirectory() as temp_dir:

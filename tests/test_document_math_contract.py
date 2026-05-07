@@ -12,6 +12,7 @@ MATH_DOCUMENTS = (
 ALLOWED_MATH_MACROS = {
     "Delta",
     "Pi",
+    "Sigma",
     "alpha",
     "arg",
     "begin",
@@ -30,11 +31,13 @@ ALLOWED_MATH_MACROS = {
     "max",
     "min",
     "mathrm",
+    "mu",
     "partial",
     "phi",
     "qquad",
     "right",
     "sqrt",
+    "sum",
     "tanh",
     "theta",
 }
@@ -123,6 +126,10 @@ class DocumentMathContractTests(unittest.TestCase):
         self.assertIn("#### 顶刊证据映射", readme)
         self.assertIn("10.1177/0956797610372634", readme)
         self.assertIn("10.1037/a0013965", readme)
+        self.assertIn("astrbot.personality_profile.v1", readme)
+        self.assertIn("personality_literature_kb/curated/top_500.jsonl", readme)
+        self.assertIn("Raw retrieved records: `21964`", readme)
+        self.assertIn("Deduplicated works: `19196`", readme)
         self.assertIn(
             "<summary>展开行动倾向、关系决策与后果衰减公式</summary>",
             readme,
@@ -135,6 +142,9 @@ class DocumentMathContractTests(unittest.TestCase):
         )
         self.assertEqual(theory.count("## 2. 从认知评价到维度观测"), 0)
         self.assertIn("## 2. 输入与建模假设", theory)
+        self.assertIn("PUBLIC_PERSONALITY_PROFILE_SCHEMA_VERSION", theory)
+        self.assertIn("PERS-F001", theory)
+        self.assertIn("10.1146/annurev.ps.41.020190.002221", theory)
         self.assertNotIn("Q_t", readme)
         self.assertNotIn("Q_t", theory)
         self.assertNotIn("E_(t-1)", readme)

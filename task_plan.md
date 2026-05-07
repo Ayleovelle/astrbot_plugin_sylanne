@@ -87,6 +87,7 @@ Build and maintain `astrbot_plugin_emotional_state`: an AstrBot plugin with mult
 | 73 | complete | Improve GitHub formula rendering using official mathematical expression syntax | GitHub fenced math retained; unsafe macros blocked by `tests/test_document_math_contract.py`; 212 tests passed; release asset refreshed with SHA256 `f2e8297c77aebab6d6059ab8ec3bea2bd8a738f14325d0c111cae246a6b89cd3` |
 | 74 | complete | Add top-journal model argumentation with collapsed full derivations and tighter formula notation | README/theory default summaries, folded derivations, DOI-backed evidence map, symbol cleanup (`O_t`, `H_t`, `F_t`), 213 tests, py_compile, json.tool, Node syntax, package build, package preflight, git diff check |
 | 75 | complete | Clarify remote version drift and already-installed upload diagnostics | `expectedPluginDrift`, `installOutcome=already_installed_no_overwrite`, README/checklist docs, 213 tests, py_compile, json.tool, Node syntax, package build, package preflight, strict remote smoke confirmed exit 7 drift, non-strict remote smoke passed |
+| 76 | in_progress | Release `0.0.2-beta` with stricter quantitative personality modeling, a 20k-record personality literature metadata KB, updated formulas/docs/tests, remote smoke, and prerelease upload | 216 tests, py_compile, json.tool, Node syntax checks, package build, zip preflight, git diff check, strict remote drift check, and non-strict remote smoke complete; push and GitHub prerelease upload pending |
 
 ## Recovery Checklist
 
@@ -117,4 +118,6 @@ When context is compacted or a new session starts:
 | PowerShell may display UTF-8 Chinese as mojibake | accepted | File bytes are UTF-8; use `[Console]::OutputEncoding=[System.Text.Encoding]::UTF8` when inspecting. |
 | `rg.exe` may fail with access denied in this environment | accepted | Use PowerShell `Select-String` fallback. |
 | Remote server lacks this plugin | resolved | Installed through WebUI upload on 2026-05-07; remote smoke now finds `astrbot_plugin_emotional_state`. |
-| Raw literature KB caches are large | mitigating | `raw/` remains in the repository for future research iteration, but is excluded from release zips by `scripts/package_plugin.py`. |
+| Raw literature KB caches are large | mitigating | `personality_literature_kb/raw/` remains local for future research iteration, is ignored by `.gitignore`, and is excluded from release zips by `scripts/package_plugin.py`. |
+| `session-catchup.py` fails under bare `python` with Python 2-style parser | active | Use `py -3.13` or read `task_plan.md`, `findings.md`, and `progress.md` directly. |
+| Python `tempfile.TemporaryDirectory()` was not writable in an earlier sandbox context | resolved | Re-run on 2026-05-08 completed `py -3.13 -m unittest discover -s tests -v` with 216 tests OK. |
