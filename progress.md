@@ -674,6 +674,34 @@ Validation complete:
   - Display name `多维情绪状态` matched.
   - Failed plugin data was `{}`.
 
+## 2026-05-07 Iteration 47
+
+Status: complete.
+
+- Hardened README public API examples for third-party plugin authors:
+  - LivingMemory dict-merge example now keeps the original memory when the emotion service is unavailable or version-mismatched.
+  - Direct AstrBot star lookup is documented as a temporary fallback that does not validate API completeness or schema versions.
+  - `build_emotion_memory_payload(...)` table signature now names the important keyword arguments: `session_key`, `memory_text`, `source`, and `include_raw_snapshot`.
+  - Humanlike API docs now warn that disabled mode returns `enabled=false` and values may be empty.
+- Added README contract coverage for these safe fallback notes.
+
+Validation complete:
+
+- `py -3.13 -m unittest tests.test_remote_smoke_contract -v`: 16 tests passed.
+- `py -3.13 -m unittest discover -s tests -v`: 166 tests passed.
+- `py -3.13 -m py_compile main.py emotion_engine.py humanlike_engine.py psychological_screening.py public_api.py prompts.py scripts\build_literature_kb.py scripts\build_humanlike_agent_literature_kb.py scripts\build_psychological_literature_kb.py scripts\package_plugin.py`: passed.
+- Bundled Node `--check` for `scripts\remote_smoke_playwright.js`, `scripts\remote_install_upload_playwright.js`, and `scripts\plugin_zip_preflight.js`: passed.
+- `py -3.13 scripts\package_plugin.py --output dist\astrbot_plugin_emotional_state.zip`: passed.
+- Bundled Node `scripts\plugin_zip_preflight.js dist\astrbot_plugin_emotional_state.zip astrbot_plugin_emotional_state`: passed, 49 entries.
+- `git diff --check`: passed, with CRLF conversion warnings only.
+- Remote smoke with metadata-matched plugin name/version/display-name assertions: passed.
+  - AstrBot version `4.24.2`.
+  - Plugin API returned 30 plugins.
+  - `astrbot_plugin_emotional_state` was present and activated.
+  - Version `1.0.0` matched.
+  - Display name `多维情绪状态` matched.
+  - Failed plugin data was `{}`.
+
 ## 2026-05-07 Iteration 46
 
 Status: complete.

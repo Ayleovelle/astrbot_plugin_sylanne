@@ -58,6 +58,7 @@ Build and maintain `astrbot_plugin_emotional_state`: an AstrBot plugin with mult
 | 44 | complete | Refresh README test matrix for recently locked command/config/public API/metadata contracts | 162 unit tests, py_compile, package build, package preflight, Node syntax check, git diff check, remote smoke |
 | 45 | complete | Lock psychological alpha min/max defaults as explicit schema contract values | 162 unit tests, py_compile, package build, package preflight, Node syntax check, git diff check, remote smoke |
 | 46 | complete | Harden release packaging against self-inclusion and preflight plugin-name drift | 165 unit tests, py_compile, package build, package preflight, Node syntax check, git diff check, remote smoke |
+| 47 | complete | Clarify public API README examples for safe third-party plugin fallback behavior | 166 unit tests, py_compile, package build, package preflight, Node syntax check, git diff check, remote smoke |
 
 ## Recovery Checklist
 

@@ -733,19 +733,21 @@ if emotion:
 await livingmemory.add_memory(event, memory)
 ```
 
-如果 LivingMemory 的接口只能写普通 dict，也可以合并字段：
+如果 LivingMemory 的接口只能写普通 dict，也可以合并字段；即使情绪插件未安装、未激活或版本不匹配，也要保留原始 memory 写入：
 
 ```python
-payload = await emotion.build_emotion_memory_payload(
-    event,
-    memory={"text": memory_text},
-    memory_text=memory_text,
-    source="livingmemory",
-)
+memory = {"text": memory_text}
 
-memory["emotion_at_write"] = payload["emotion_at_write"]
-if "humanlike_state_at_write" in payload:
-    memory["humanlike_state_at_write"] = payload["humanlike_state_at_write"]
+if emotion:
+    payload = await emotion.build_emotion_memory_payload(
+        event,
+        memory=memory,
+        memory_text=memory_text,
+        source="livingmemory",
+    )
+    memory["emotion_at_write"] = payload["emotion_at_write"]
+    if "humanlike_state_at_write" in payload:
+        memory["humanlike_state_at_write"] = payload["humanlike_state_at_write"]
 ```
 
 如果没有 `AstrMessageEvent`，必须显式传入稳定的 `session_key`：
@@ -851,7 +853,7 @@ meta = self.context.get_registered_star("astrbot_plugin_emotional_state")
 emotion = meta.star_cls if meta and meta.activated else None
 ```
 
-不过长期维护时更推荐 `public_api.get_emotion_service(...)` 和 `public_api.get_humanlike_service(...)`。这两个 helper 会校验核心方法是否完整，并校验公开版本/schema 是否匹配，能避免其他插件拿到只有部分旧接口或旧数据契约的实例。
+这只能作为临时兼容兜底，不保证公共 API 完整，也不会校验版本/schema。长期维护时更推荐 `public_api.get_emotion_service(...)` 和 `public_api.get_humanlike_service(...)`。这两个 helper 会校验核心方法是否完整，并校验公开版本/schema 是否匹配，能避免其他插件拿到只有部分旧接口或旧数据契约的实例。
 
 ### 情绪 API
 
@@ -863,7 +865,7 @@ emotion = meta.star_cls if meta and meta.activated else None
 | `get_emotion_consequences(event_or_session)` | 否 | 只取行动倾向和持续效果。 |
 | `get_emotion_relationship(event_or_session)` | 否 | 只取关系判断、冲突原因和修复状态。 |
 | `get_emotion_prompt_fragment(event_or_session)` | 否 | 给其他插件注入 prompt 的文本片段。 |
-| `build_emotion_memory_payload(event_or_session, memory, source="livingmemory")` | 否 | 给长期记忆生成带状态注解的 payload。 |
+| `build_emotion_memory_payload(event_or_session=None, memory=None, *, session_key=None, memory_text="", source="livingmemory", include_raw_snapshot=True)` | 否 | 给长期记忆生成带状态注解的 payload。 |
 | `inject_emotion_context(event, request)` | 否 | 直接给 `ProviderRequest` 追加情绪上下文。 |
 | `observe_emotion_text(event_or_session, text, role="plugin", source="plugin")` | 是 | 外部插件提交文本观测并更新状态。 |
 | `simulate_emotion_update(event_or_session, text)` | 否 | 预测候选文本会怎样影响状态，不落库。 |
@@ -1007,6 +1009,8 @@ emotion_state -> humanlike_state -> prompt/style modulation
 | `observe_humanlike_text(event_or_session, text)` | 是 | 提交文本观察并更新状态。 |
 | `simulate_humanlike_update(event_or_session, text)` | 否 | 模拟更新，不落库。 |
 | `reset_humanlike_state(event_or_session)` | 是 | 重置状态；受 `allow_humanlike_reset_backdoor` 控制。 |
+
+默认关闭时，`get_humanlike_snapshot(...)` 会返回 `enabled=false` 的 payload，`get_humanlike_values(...)` 可能返回空 dict。第三方插件应先检查 `snapshot.get("enabled")`，或用 `values.get("energy")` 这类安全读取。
 
 ### 表达边界
 

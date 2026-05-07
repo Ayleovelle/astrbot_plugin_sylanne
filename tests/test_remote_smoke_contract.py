@@ -395,6 +395,30 @@ class RemoteSmokeContractTests(unittest.TestCase):
         self.assertIn("校验核心方法是否完整", readme)
         self.assertIn("校验公开版本/schema 是否匹配", readme)
 
+    def test_readme_public_api_examples_document_safe_fallbacks(self):
+        readme = (ROOT / "README.md").read_text(encoding="utf-8")
+        livingmemory_section = readme.split(
+            "如果 LivingMemory 的接口只能写普通 dict",
+            1,
+        )[1].split("如果没有 `AstrMessageEvent`", 1)[0]
+        humanlike_section = readme.split("### Humanlike API", 1)[1].split(
+            "### 表达边界",
+            1,
+        )[0]
+        fallback_section = readme.split(
+            "如果不能 import helper",
+            1,
+        )[1].split("### 情绪 API", 1)[0]
+
+        self.assertIn("if emotion:", livingmemory_section)
+        self.assertIn("未安装、未激活或版本不匹配", livingmemory_section)
+        self.assertIn("不保证公共 API 完整", fallback_section)
+        self.assertIn("不会校验版本/schema", fallback_section)
+        self.assertIn("enabled=false", humanlike_section)
+        self.assertIn("get_humanlike_values", humanlike_section)
+        self.assertIn('snapshot.get("enabled")', humanlike_section)
+        self.assertIn('values.get("energy")', humanlike_section)
+
 
 if __name__ == "__main__":
     unittest.main()
