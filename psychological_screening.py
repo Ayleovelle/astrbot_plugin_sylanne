@@ -8,6 +8,15 @@ from typing import Any
 
 PUBLIC_SCREENING_SCHEMA_VERSION = "astrbot.psychological_screening.v1"
 
+PUBLIC_RISK_BOOLEAN_FIELDS: tuple[str, ...] = (
+    "requires_human_review",
+    "crisis_like_signal",
+    "other_harm_signal",
+    "severe_function_impairment_signal",
+    "severe_function_impairment",
+    "severe_sleep_disruption",
+)
+
 SCREENING_DIMENSIONS: tuple[str, ...] = (
     "distress",
     "anxiety_tension",
@@ -386,20 +395,7 @@ def psychological_state_to_public_payload(
         ],
         "scale_scores": scale_scores,
         "scale_references": SCALE_REFERENCES,
-        "risk": {
-            "red_flags": list(state.red_flags[:12]),
-            "requires_human_review": bool(state.red_flags),
-            "crisis_like_signal": "self_harm_signal" in state.red_flags,
-            "other_harm_signal": "other_harm_signal" in state.red_flags,
-            "severe_function_impairment_signal": (
-                "severe_function_impairment_signal" in state.red_flags
-            ),
-            "severe_function_impairment": (
-                "severe_function_impairment" in state.red_flags
-                or "severe_function_impairment_signal" in state.red_flags
-            ),
-            "severe_sleep_disruption": "severe_sleep_disruption" in state.red_flags,
-        },
+        "risk": public_risk_payload(state.red_flags),
         "trajectory": list(state.trajectory[-40:]),
         "confidence": round(state.confidence, 6),
         "turns": state.turns,
@@ -415,6 +411,29 @@ def psychological_state_to_public_payload(
             ],
         },
     }
+
+
+def public_risk_payload(red_flags: list[str]) -> dict[str, Any]:
+    flags = list(red_flags[:12])
+    flag_set = set(flags)
+    risk = {
+        "red_flags": flags,
+        "requires_human_review": bool(flags),
+        "crisis_like_signal": "self_harm_signal" in flag_set,
+        "other_harm_signal": "other_harm_signal" in flag_set,
+        "severe_function_impairment_signal": (
+            "severe_function_impairment_signal" in flag_set
+        ),
+        "severe_function_impairment": (
+            "severe_function_impairment" in flag_set
+            or "severe_function_impairment_signal" in flag_set
+        ),
+        "severe_sleep_disruption": "severe_sleep_disruption" in flag_set,
+    }
+    missing = [key for key in PUBLIC_RISK_BOOLEAN_FIELDS if key not in risk]
+    if missing:
+        raise AssertionError(f"public risk payload missing fields: {missing}")
+    return risk
 
 
 def _contains_self_harm_signal(text: str) -> bool:

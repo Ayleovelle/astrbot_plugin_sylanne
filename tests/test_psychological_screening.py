@@ -5,6 +5,7 @@ from psychological_screening import (
     PsychologicalObservation,
     PsychologicalScreeningEngine,
     PsychologicalScreeningState,
+    PUBLIC_RISK_BOOLEAN_FIELDS,
     SCREENING_DIMENSIONS,
     derive_scale_scores,
     format_psychological_state_for_user,
@@ -70,6 +71,28 @@ class PsychologicalScreeningTests(unittest.TestCase):
         self.assertTrue(payload["risk"]["severe_function_impairment_signal"])
         self.assertTrue(payload["risk"]["severe_function_impairment"])
         self.assertGreater(payload["values"]["function_impairment"], 0.0)
+
+    def test_public_risk_boolean_field_contract(self):
+        payload = psychological_state_to_public_payload(
+            PsychologicalScreeningState.initial(),
+            session_key="s1",
+        )
+
+        self.assertEqual(
+            PUBLIC_RISK_BOOLEAN_FIELDS,
+            (
+                "requires_human_review",
+                "crisis_like_signal",
+                "other_harm_signal",
+                "severe_function_impairment_signal",
+                "severe_function_impairment",
+                "severe_sleep_disruption",
+            ),
+        )
+        for field in PUBLIC_RISK_BOOLEAN_FIELDS:
+            with self.subTest(field=field):
+                self.assertIn(field, payload["risk"])
+                self.assertIsInstance(payload["risk"][field], bool)
 
     def test_severe_sleep_disruption_has_machine_readable_risk_flag(self):
         state = PsychologicalScreeningEngine().update(
@@ -188,6 +211,13 @@ class PsychologicalScreeningTests(unittest.TestCase):
             "safety.non_diagnostic_screening_only=true",
             "safety.not_a_medical_device=true",
             "risk.requires_human_review=true",
+            'payload["risk"]["requires_human_review"]',
+            "PSYCHOLOGICAL_RISK_BOOLEAN_FIELDS",
+            "requires_human_review",
+            "crisis_like_signal",
+            "other_harm_signal",
+            'payload["risk"]["severe_function_impairment"]',
+            'payload["risk"]["severe_sleep_disruption"]',
             "risk.severe_function_impairment",
             "risk.severe_sleep_disruption",
             "人工/专业支持",

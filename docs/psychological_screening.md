@@ -33,7 +33,7 @@
 - `get_psychological_screening_snapshot(...)` 和 `get_psychological_screening_values(...)` 仍可读取已有状态，便于其他插件在模块关闭后做迁移、调试或只读展示。
 - `simulate_psychological_update(...)` 永远不落库，即使模块关闭也可以用于候选文本预估。
 - payload 固定包含 `diagnostic=false`、`safety.non_diagnostic_screening_only=true` 和 `safety.not_a_medical_device=true`。
-- 出现自伤/自杀、伤害他人、严重功能受损或严重睡眠受扰等红旗信号时，`risk.requires_human_review=true`；`risk.severe_function_impairment` 和 `risk.severe_sleep_disruption` 是给其他插件分支判断用的机器可读布尔字段。插件应提示人工/专业支持或当地急救资源，而不是继续普通陪聊、输出疾病标签或承诺风险可控。
+- 出现自伤/自杀、伤害他人、严重功能受损或严重睡眠受扰等红旗信号时，`payload["risk"]["requires_human_review"]`（即 `risk.requires_human_review=true`）会置为 `true`；`PSYCHOLOGICAL_RISK_BOOLEAN_FIELDS` 列出稳定的机器可读风险布尔字段：`requires_human_review`、`crisis_like_signal`、`other_harm_signal`、`severe_function_impairment_signal`、`severe_function_impairment`、`severe_sleep_disruption`。插件可以用 `payload["risk"]["severe_function_impairment"]`（`risk.severe_function_impairment`）和 `payload["risk"]["severe_sleep_disruption"]`（`risk.severe_sleep_disruption`）做分支判断。插件应提示人工/专业支持或当地急救资源，而不是继续普通陪聊、输出疾病标签或承诺风险可控。
 
 ## 文献知识库
 

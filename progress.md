@@ -873,6 +873,39 @@ Validation complete:
   - `astrbot_plugin_livingmemory` was present.
   - Failed plugin data was `{}`.
 
+## 2026-05-07 Iteration 50
+
+Status: complete.
+
+- Exported a stable psychological risk boolean field contract:
+  - `psychological_screening.PUBLIC_RISK_BOOLEAN_FIELDS`,
+  - `public_api.PSYCHOLOGICAL_RISK_BOOLEAN_FIELDS`.
+- Refactored public psychological risk construction through `public_risk_payload(...)` so the payload and exported field list stay aligned.
+- Clarified README and `docs\psychological_screening.md` so third-party plugins read nested fields such as `payload["risk"]["requires_human_review"]` instead of treating risk flags as top-level payload keys.
+- Added contract tests for:
+  - the exported public API constant,
+  - all declared risk boolean fields being present and boolean in public payloads,
+  - README/docs wording for nested risk access.
+- Incorporated read-only subagent review feedback on the README nested field ambiguity.
+
+Validation complete:
+
+- `py -3.13 -m unittest tests.test_psychological_screening tests.test_public_api -v`: 62 tests passed.
+- `py -3.13 -m unittest discover -s tests -v`: 170 tests passed.
+- `py -3.13 -m py_compile psychological_screening.py public_api.py main.py`: passed.
+- Bundled Node `--check` for `scripts\remote_smoke_playwright.js`, `scripts\remote_install_upload_playwright.js`, and `scripts\plugin_zip_preflight.js`: passed.
+- `py -3.13 scripts\package_plugin.py --output dist\astrbot_plugin_emotional_state.zip`: passed.
+- Bundled Node `scripts\plugin_zip_preflight.js dist\astrbot_plugin_emotional_state.zip astrbot_plugin_emotional_state`: passed, 49 entries.
+- `git diff --check`: passed, with CRLF conversion warnings only.
+- Remote smoke with metadata-matched plugin name/version/display-name assertions: passed.
+  - AstrBot version `4.24.2`.
+  - Plugin API returned 30 plugins.
+  - `astrbot_plugin_emotional_state` was present and activated.
+  - Version `1.0.0` matched.
+  - Display name `多维情绪状态` matched.
+  - `astrbot_plugin_livingmemory` was present.
+  - Failed plugin data was `{}`.
+
 ## 2026-05-07 Iteration 38
 
 Status: complete.

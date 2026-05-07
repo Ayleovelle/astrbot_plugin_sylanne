@@ -11,6 +11,7 @@ from public_api import (
     EMOTION_MEMORY_SCHEMA_VERSION,
     EMOTION_SCHEMA_VERSION,
     HUMANLIKE_STATE_SCHEMA_VERSION,
+    PSYCHOLOGICAL_RISK_BOOLEAN_FIELDS,
     PSYCHOLOGICAL_SCREENING_SCHEMA_VERSION,
     get_emotion_service,
     get_humanlike_service,
@@ -223,6 +224,19 @@ class PublicApiTests(unittest.TestCase):
         self.assertEqual(
             PSYCHOLOGICAL_SCREENING_SCHEMA_VERSION,
             "astrbot.psychological_screening.v1",
+        )
+
+    def test_psychological_risk_boolean_fields_are_exported(self):
+        self.assertEqual(
+            PSYCHOLOGICAL_RISK_BOOLEAN_FIELDS,
+            (
+                "requires_human_review",
+                "crisis_like_signal",
+                "other_harm_signal",
+                "severe_function_impairment_signal",
+                "severe_function_impairment",
+                "severe_sleep_disruption",
+            ),
         )
 
     def test_humanlike_schema_constant_is_exported(self):
