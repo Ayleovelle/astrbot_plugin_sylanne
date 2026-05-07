@@ -1352,6 +1352,14 @@ class EmotionalStatePlugin(Star):
         )
         payload["enabled"] = False
         payload["reason"] = "enable_humanlike_state is false"
+        for internal_key in (
+            "values",
+            "dimensions",
+            "trajectory",
+            "confidence",
+            "last_reason",
+        ):
+            payload.pop(internal_key, None)
         if include_prompt_fragment:
             payload["prompt_fragment"] = ""
         return payload

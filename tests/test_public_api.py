@@ -874,6 +874,134 @@ class MemoryPayloadPublicApiTests(unittest.TestCase):
             ],
         )
 
+    def test_public_session_key_resolution_precedence(self):
+        self._install_astrbot_stubs()
+
+        plugin = self._new_plugin()
+        event = SimpleNamespace(unified_msg_origin="event-session")
+        request = SimpleNamespace(session_id="request-session")
+
+        self.assertEqual(
+            plugin._resolve_public_session_key(
+                event,
+                request=request,
+                session_key="explicit-session",
+            ),
+            "explicit-session",
+        )
+        self.assertEqual(
+            plugin._resolve_public_session_key(
+                "string-session",
+                request=request,
+            ),
+            "string-session",
+        )
+        self.assertEqual(
+            plugin._resolve_public_session_key(event, request=request),
+            "event-session",
+        )
+        self.assertEqual(
+            plugin._resolve_public_session_key(None, request=request),
+            "request-session",
+        )
+        self.assertEqual(plugin._resolve_public_session_key(None), "global")
+
+    def test_get_emotion_state_as_dict_false_returns_detached_copy(self):
+        self._install_astrbot_stubs()
+        from emotion_engine import EmotionState
+        from main import EmotionalStatePlugin
+
+        stored = EmotionState.initial()
+        stored.label = "stored"
+        stored.values["valence"] = 0.25
+
+        async def fake_load_state(self, session_key, persona_profile=None):
+            return stored
+
+        original_load_state = EmotionalStatePlugin._load_state
+        EmotionalStatePlugin._load_state = fake_load_state
+        try:
+            plugin = self._new_plugin()
+            detached = asyncio.run(
+                plugin.get_emotion_state(session_key="s1", as_dict=False),
+            )
+        finally:
+            EmotionalStatePlugin._load_state = original_load_state
+
+        self.assertIsNot(detached, stored)
+        self.assertEqual(detached.label, "stored")
+        detached.label = "mutated"
+        detached.values["valence"] = -1.0
+        self.assertEqual(stored.label, "stored")
+        self.assertEqual(stored.values["valence"], 0.25)
+
+    def test_simulate_emotion_update_does_not_save_and_marks_uncommitted(self):
+        self._install_astrbot_stubs()
+        from emotion_engine import EmotionState
+        from main import EmotionalStatePlugin
+
+        async def fake_load_state(self, session_key, persona_profile=None):
+            state = EmotionState.initial(persona_profile)
+            state.updated_at = 1000.0
+            return state
+
+        async def fake_save_state(self, session_key, state):
+            raise AssertionError("simulate_emotion_update must not save")
+
+        original_load_state = EmotionalStatePlugin._load_state
+        original_save_state = EmotionalStatePlugin._save_state
+        EmotionalStatePlugin._load_state = fake_load_state
+        EmotionalStatePlugin._save_state = fake_save_state
+        try:
+            plugin = self._new_plugin({"use_llm_assessor": False})
+            payload = asyncio.run(
+                plugin.simulate_emotion_update(
+                    session_key="s1",
+                    text="I am only simulating this candidate reply.",
+                    role="assistant",
+                    source="unit_test",
+                    observed_at=1010.0,
+                ),
+            )
+        finally:
+            EmotionalStatePlugin._load_state = original_load_state
+            EmotionalStatePlugin._save_state = original_save_state
+
+        self.assertEqual(payload["session_key"], "s1")
+        self.assertFalse(payload["observation"]["committed"])
+        self.assertEqual(payload["observation"]["source"], "unit_test")
+        self.assertEqual(payload["observation"]["role"], "assistant")
+
+    def test_humanlike_direct_public_api_disabled_payloads(self):
+        self._install_astrbot_stubs()
+        from main import EmotionalStatePlugin
+
+        async def fake_load_humanlike_state(self, session_key):
+            raise AssertionError("disabled humanlike API must not load state")
+
+        original_load_humanlike = EmotionalStatePlugin._load_humanlike_state
+        EmotionalStatePlugin._load_humanlike_state = fake_load_humanlike_state
+        try:
+            plugin = self._new_plugin()
+            snapshot = asyncio.run(
+                plugin.get_humanlike_snapshot(
+                    session_key="s1",
+                    include_prompt_fragment=True,
+                ),
+            )
+            values = asyncio.run(plugin.get_humanlike_values(session_key="s1"))
+            fragment = asyncio.run(
+                plugin.get_humanlike_prompt_fragment(session_key="s1"),
+            )
+        finally:
+            EmotionalStatePlugin._load_humanlike_state = original_load_humanlike
+
+        self.assertFalse(snapshot["enabled"])
+        self.assertEqual(snapshot["reason"], "enable_humanlike_state is false")
+        self.assertEqual(snapshot["prompt_fragment"], "")
+        self.assertEqual(values, {})
+        self.assertEqual(fragment, "")
+
     def test_memory_payload_can_disable_humanlike_annotation(self):
         self._install_astrbot_stubs()
         from emotion_engine import EmotionState
