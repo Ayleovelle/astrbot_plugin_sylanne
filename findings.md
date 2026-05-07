@@ -69,6 +69,8 @@ This file stores durable discoveries from implementation, review, and remote tes
   - `codex/tests-validation`,
   - `codex/release-packaging`,
   - `codex/docs-config`.
+- Maintenance branches were later synced to `b2bddf3` after the branch-sync status commit.
+- Final Iteration 25 validation passed after branch sync; after committing the final status entry, branches should be synced one last time to the final HEAD.
 
 ## 2026-05-07 Review Findings
 
