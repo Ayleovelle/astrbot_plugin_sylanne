@@ -60,6 +60,16 @@ class PackagePluginTests(unittest.TestCase):
         self.assertFalse(any("/raw/" in path or path.startswith("raw/") for path in files))
         self.assertFalse(any("__pycache__" in path for path in files))
 
+    def test_readme_install_tree_matches_release_package_boundaries(self):
+        readme = (ROOT / "README.md").read_text(encoding="utf-8")
+        install_tree = readme.split("```text", 1)[1].split("```", 1)[0]
+
+        self.assertIn("astrbot_plugin_emotional_state/", install_tree)
+        self.assertIn("__init__.py", install_tree)
+        self.assertIn("public_api.py", install_tree)
+        self.assertNotIn("tests/", install_tree)
+        self.assertIn("发布 zip 不会包含这些目录", readme)
+
     def test_package_plugin_name_matches_metadata(self):
         module = load_package_script()
 
@@ -70,8 +80,19 @@ class PackagePluginTests(unittest.TestCase):
         names, _ = self._zip_names()
 
         prefix = f"{metadata_value('name')}/"
+        runtime_root_files = {
+            "__init__.py",
+            "main.py",
+            "emotion_engine.py",
+            "humanlike_engine.py",
+            "psychological_screening.py",
+            "prompts.py",
+            "public_api.py",
+        }
+        for filename in runtime_root_files:
+            with self.subTest(filename=filename):
+                self.assertIn(prefix + filename, names)
         self.assertIn(prefix + "metadata.yaml", names)
-        self.assertIn(prefix + "main.py", names)
         self.assertIn(prefix + "_conf_schema.json", names)
         self.assertIn(prefix + "README.md", names)
         self.assertIn(prefix + "literature_kb/works.jsonl", names)

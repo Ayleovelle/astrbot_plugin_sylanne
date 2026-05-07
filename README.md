@@ -100,6 +100,7 @@
 ```text
 data/plugins/
 └── astrbot_plugin_emotional_state/
+    ├── __init__.py
     ├── metadata.yaml
     ├── main.py
     ├── emotion_engine.py
@@ -111,11 +112,12 @@ data/plugins/
     ├── requirements.txt
     ├── README.md
     ├── docs/
-    ├── tests/
     ├── literature_kb/
     ├── psychological_literature_kb/
     └── humanlike_agent_literature_kb/
 ```
+
+`tests/`、`scripts/`、`raw/`、`output/`、`dist/` 属于仓库开发、验证或缓存内容，发布 zip 不会包含这些目录。
 
 然后在 AstrBot WebUI 中重载或启用插件。
 
@@ -1259,6 +1261,8 @@ py -3.13 scripts\package_plugin.py --output dist\astrbot_plugin_emotional_state.
 发布包会保留插件运行文件、README、docs、三个文献知识库的成品索引和精选条目，例如 `manifest.json`、`works.jsonl`、`curated/top_200.jsonl`、`evidence-map.md`。三个知识库目录下的 `raw/` 是检索和重建知识库用的原始缓存，默认不进入发布包；这样可以保留后续研究迭代需要的材料，同时避免远程上传包体积失控。
 
 发布 zip 的第一项会显式写入 `astrbot_plugin_emotional_state/` 目录项，以兼容 AstrBot WebUI 的 `install-upload` 解压逻辑。不要手工重新压缩成“缺少顶层目录项”的 zip，否则部分 AstrBot 版本会把第一个文件路径误判成目录。
+
+发布包还会保留插件根目录下的 `__init__.py`、`public_api.py`、`main.py`、`emotion_engine.py`、`humanlike_engine.py`、`psychological_screening.py` 和 `prompts.py`。这保证其他插件在安装后可以通过 `from astrbot_plugin_emotional_state.public_api import ...` 按包名导入公共 API。
 
 远程只读烟测：
 
