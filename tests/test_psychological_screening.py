@@ -68,7 +68,24 @@ class PsychologicalScreeningTests(unittest.TestCase):
         self.assertFalse(payload["diagnostic"])
         self.assertTrue(payload["risk"]["requires_human_review"])
         self.assertTrue(payload["risk"]["severe_function_impairment_signal"])
+        self.assertTrue(payload["risk"]["severe_function_impairment"])
         self.assertGreater(payload["values"]["function_impairment"], 0.0)
+
+    def test_severe_sleep_disruption_has_machine_readable_risk_flag(self):
+        state = PsychologicalScreeningEngine().update(
+            PsychologicalScreeningState.initial(),
+            PsychologicalObservation(
+                values={"sleep_disruption": 0.8},
+                confidence=0.9,
+            ),
+            now=1000.0,
+        )
+        payload = psychological_state_to_public_payload(state, session_key="s1")
+
+        self.assertIn("severe_sleep_disruption", state.red_flags)
+        self.assertTrue(payload["risk"]["requires_human_review"])
+        self.assertTrue(payload["risk"]["severe_sleep_disruption"])
+        self.assertFalse(payload["diagnostic"])
 
     def test_trajectory_is_capped_to_configured_limit(self):
         engine = PsychologicalScreeningEngine()
@@ -120,6 +137,8 @@ class PsychologicalScreeningTests(unittest.TestCase):
         self.assertGreater(len(payload["safety"]["must_not"]), 0)
         self.assertIn("risk", payload)
         self.assertIn("requires_human_review", payload["risk"])
+        self.assertIn("severe_function_impairment", payload["risk"])
+        self.assertIn("severe_sleep_disruption", payload["risk"])
         for scale_name, reference in payload["scale_references"].items():
             with self.subTest(scale_name=scale_name):
                 self.assertFalse(reference["diagnostic"])
@@ -169,6 +188,8 @@ class PsychologicalScreeningTests(unittest.TestCase):
             "safety.non_diagnostic_screening_only=true",
             "safety.not_a_medical_device=true",
             "risk.requires_human_review=true",
+            "risk.severe_function_impairment",
+            "risk.severe_sleep_disruption",
             "人工/专业支持",
             "不是继续普通陪聊",
             "输出疾病标签",

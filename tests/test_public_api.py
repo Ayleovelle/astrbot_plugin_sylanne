@@ -1043,6 +1043,7 @@ class MemoryPayloadPublicApiTests(unittest.TestCase):
         self.assertEqual(snapshot["session_key"], "s2")
         self.assertEqual(snapshot["values"]["sleep_disruption"], 0.77)
         self.assertIn("severe_sleep_disruption", snapshot["risk"]["red_flags"])
+        self.assertTrue(snapshot["risk"]["severe_sleep_disruption"])
         self.assertEqual(snapshot["turns"], 3)
         self.assertFalse(snapshot["diagnostic"])
 

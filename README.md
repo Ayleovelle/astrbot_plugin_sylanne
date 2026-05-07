@@ -1110,7 +1110,7 @@ enable_psychological_screening = false
 }
 ```
 
-出现自伤、自杀、伤害他人、严重功能受损等红旗信号时，payload 会把 `requires_human_review` 置为 `true`。这类场景应优先提示人工复核、当地急救、危机热线或身边可信的人，而不是继续普通陪聊或输出疾病标签。
+出现自伤、自杀、伤害他人、严重功能受损或严重睡眠受扰等红旗信号时，payload 会把 `requires_human_review` 置为 `true`。`risk.severe_function_impairment` 和 `risk.severe_sleep_disruption` 是给其他插件分支判断用的机器可读布尔字段。这类场景应优先提示人工复核、当地急救、危机热线或身边可信的人，而不是继续普通陪聊或输出疾病标签。
 
 ---
 

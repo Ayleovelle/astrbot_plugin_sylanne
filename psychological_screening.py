@@ -394,6 +394,11 @@ def psychological_state_to_public_payload(
             "severe_function_impairment_signal": (
                 "severe_function_impairment_signal" in state.red_flags
             ),
+            "severe_function_impairment": (
+                "severe_function_impairment" in state.red_flags
+                or "severe_function_impairment_signal" in state.red_flags
+            ),
+            "severe_sleep_disruption": "severe_sleep_disruption" in state.red_flags,
         },
         "trajectory": list(state.trajectory[-40:]),
         "confidence": round(state.confidence, 6),

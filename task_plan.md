@@ -60,6 +60,7 @@ Build and maintain `astrbot_plugin_emotional_state`: an AstrBot plugin with mult
 | 46 | complete | Harden release packaging against self-inclusion and preflight plugin-name drift | 165 unit tests, py_compile, package build, package preflight, Node syntax check, git diff check, remote smoke |
 | 47 | complete | Clarify public API README examples for safe third-party plugin fallback behavior | 166 unit tests, py_compile, package build, package preflight, Node syntax check, git diff check, remote smoke |
 | 48 | complete | Lock psychological screening non-diagnostic public API return semantics | 167 unit tests, py_compile, package build, package preflight, Node syntax check, git diff check, remote smoke |
+| 49 | complete | Add machine-readable psychological severe impairment and sleep-disruption risk flags | 168 unit tests, py_compile, package build, package preflight, Node syntax check, git diff check, leak scan, remote smoke |
 
 ## Recovery Checklist
 
