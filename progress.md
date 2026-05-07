@@ -1939,4 +1939,7 @@ Status: local and remote validation complete; GitHub publication in progress.
   - Created commit `ddfb47b Release 0.0.2-beta personality model`.
   - Created local annotated tag `v0.0.2-beta`.
   - Push is blocked because the current `GITHUB_TOKEN` visible to this process returns GitHub API `401 Unauthorized`; the token length is 40 and appears to be the old invalid token. No token value was printed.
+  - User requested GCM popup authentication; `git credential-manager github login` succeeded through the existing `Ayleovelle` GitHub account and GitHub user probe returned HTTP 200.
+  - Pushed `main` to `origin`: `c808dbc..7ce9fe9`.
+  - Pushed local tag `v0.0.2-beta` to `origin`.
 
