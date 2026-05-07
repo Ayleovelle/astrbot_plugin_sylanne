@@ -587,6 +587,36 @@ Validation complete:
   - Display name `多维情绪状态` matched.
   - Failed plugin data was `{}`.
 
+## 2026-05-07 Iteration 41
+
+Status: complete.
+
+- Added runtime-derived config contract coverage for `assessment_timing`:
+  - the test now extracts accepted timing options from `main.py` `_assessment_timing()`,
+  - `_conf_schema.json` `assessment_timing.options` must match the runtime accepted set,
+  - README must document the `assessment_timing` typed row and each accepted option.
+- Added README typed config table coverage:
+  - every schema key must appear in a typed README config row,
+  - only legacy compatibility keys `baseline_decay`, `consequence_decay`, and `cold_war_turns` may stay outside the typed rows,
+  - README row types must match schema types.
+
+Validation complete:
+
+- `py -3.13 -m unittest tests.test_config_schema_contract -v`: 11 tests passed.
+- `py -3.13 -m unittest discover -s tests -v`: 157 tests passed.
+- `py -3.13 -m py_compile main.py emotion_engine.py humanlike_engine.py psychological_screening.py public_api.py prompts.py scripts\build_literature_kb.py scripts\build_humanlike_agent_literature_kb.py scripts\build_psychological_literature_kb.py scripts\package_plugin.py`: passed.
+- Bundled Node `--check` for `scripts\remote_smoke_playwright.js`, `scripts\remote_install_upload_playwright.js`, and `scripts\plugin_zip_preflight.js`: passed.
+- `py -3.13 scripts\package_plugin.py --output dist\astrbot_plugin_emotional_state.zip`: passed.
+- Bundled Node `scripts\plugin_zip_preflight.js dist\astrbot_plugin_emotional_state.zip astrbot_plugin_emotional_state`: passed, 49 entries.
+- `git diff --check`: passed, with CRLF conversion warnings only.
+- Remote smoke with metadata-matched plugin name/version/display-name assertions: passed.
+  - AstrBot version `4.24.2`.
+  - Plugin API returned 30 plugins.
+  - `astrbot_plugin_emotional_state` was present and activated.
+  - Version `1.0.0` matched.
+  - Display name `多维情绪状态` matched.
+  - Failed plugin data was `{}`.
+
 ## 2026-05-07 Iteration 39
 
 Status: complete.

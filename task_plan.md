@@ -52,6 +52,7 @@ Build and maintain `astrbot_plugin_emotional_state`: an AstrBot plugin with mult
 | 38 | complete | Align humanlike roadmap docs with current memory payload and config schema names | 151 unit tests, py_compile, package preflight, Node syntax check, git diff check, remote smoke |
 | 39 | complete | Close remaining humanlike roadmap drift around flags and annotation timestamps | 151 unit tests, py_compile, package preflight, Node syntax check, git diff check, remote smoke |
 | 40 | complete | Lock plugin identity references to metadata.yaml name | 156 unit tests, py_compile, package build, package preflight, Node syntax check, git diff check, remote smoke |
+| 41 | complete | Lock assessment_timing runtime/schema/README options and typed config table coverage | 157 unit tests, py_compile, package build, package preflight, Node syntax check, git diff check, remote smoke |
 
 ## Recovery Checklist
 

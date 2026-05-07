@@ -52,6 +52,35 @@ def runtime_config_calls():
     return calls
 
 
+def runtime_assessment_timing_options():
+    tree = ast.parse((ROOT / "main.py").read_text(encoding="utf-8"))
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.FunctionDef) or node.name != "_assessment_timing":
+            continue
+        for child in ast.walk(node):
+            if not isinstance(child, ast.Compare):
+                continue
+            if not (
+                isinstance(child.left, ast.Name)
+                and child.left.id == "timing"
+                and len(child.ops) == 1
+                and isinstance(child.ops[0], ast.In)
+                and len(child.comparators) == 1
+                and isinstance(child.comparators[0], ast.Set)
+            ):
+                continue
+            values = []
+            for element in child.comparators[0].elts:
+                if not isinstance(element, ast.Constant) or not isinstance(
+                    element.value,
+                    str,
+                ):
+                    continue
+                values.append(element.value)
+            return sorted(values)
+    raise AssertionError("main.py _assessment_timing runtime options not found")
+
+
 def schema():
     return json.loads((ROOT / "_conf_schema.json").read_text(encoding="utf-8"))
 
@@ -70,6 +99,32 @@ def readme_config_defaults():
             continue
         defaults.setdefault(match.group("key"), set()).add(match.group("default"))
     return defaults
+
+
+def readme_typed_config_rows():
+    readme = (ROOT / "README.md").read_text(encoding="utf-8")
+    rows = {}
+    valid_types = {"bool", "string", "int", "float"}
+    for line in readme.splitlines():
+        if not line.startswith("| `"):
+            continue
+        cells = [cell.strip() for cell in line.strip().strip("|").split("|")]
+        if len(cells) < 4:
+            continue
+        key_cell, type_cell, default_cell = cells[:3]
+        if not (
+            key_cell.startswith("`")
+            and key_cell.endswith("`")
+            and type_cell in valid_types
+            and default_cell.startswith("`")
+            and default_cell.endswith("`")
+        ):
+            continue
+        rows[key_cell.strip("`")] = {
+            "type": type_cell,
+            "default": default_cell.strip("`"),
+        }
+    return rows
 
 
 def normalize_default(value):
@@ -179,8 +234,14 @@ class ConfigSchemaContractTests(unittest.TestCase):
 
     def test_assessment_timing_schema_matches_runtime_options(self):
         cfg = schema()
-        self.assertEqual(cfg["assessment_timing"]["options"], ["pre", "post", "both"])
+        runtime_options = runtime_assessment_timing_options()
+        readme = (ROOT / "README.md").read_text(encoding="utf-8")
+
+        self.assertEqual(sorted(cfg["assessment_timing"]["options"]), runtime_options)
         self.assertEqual(cfg["assessment_timing"]["default"], "both")
+        self.assertIn("| `assessment_timing` | string | `both` |", readme)
+        for option in runtime_options:
+            self.assertIn(option, readme)
 
     def test_provider_schema_keeps_astrbot_selector_contract(self):
         cfg = schema()
@@ -211,6 +272,27 @@ class ConfigSchemaContractTests(unittest.TestCase):
             "emotion_provider_id",
         }
         self.assertEqual(missing - allowed_omissions, set())
+
+    def test_readme_typed_config_table_covers_non_legacy_schema_keys(self):
+        cfg = schema()
+        typed_rows = readme_typed_config_rows()
+        legacy_config_keys = {
+            "baseline_decay",
+            "consequence_decay",
+            "cold_war_turns",
+        }
+        missing = set(cfg) - set(typed_rows) - legacy_config_keys
+        type_mismatches = {
+            key: {
+                "readme": row["type"],
+                "schema": cfg[key]["type"],
+            }
+            for key, row in typed_rows.items()
+            if key in cfg and row["type"] != cfg[key]["type"]
+        }
+
+        self.assertEqual(missing, set())
+        self.assertEqual(type_mismatches, {})
 
     def test_humanlike_docs_match_current_schema_names(self):
         cfg = schema()
