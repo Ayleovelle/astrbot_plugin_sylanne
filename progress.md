@@ -555,6 +555,37 @@ Validation complete:
   - Display name `多维情绪状态` matched.
   - Failed plugin data was `{}`.
 
+## 2026-05-07 Iteration 38
+
+Status: complete.
+
+- Aligned `docs\humanlike_agent_model_roadmap.md` with the current implementation:
+  - `humanlike_state_at_write` is the current memory payload key,
+  - `humanlike_memory_write_enabled` defaults to `true`,
+  - roadmap config examples now use existing schema keys.
+- Updated `docs\humanlike_agent_iteration_log.md` so early proposed fields are clearly marked as not part of the current schema.
+- Added `tests\test_config_schema_contract.py` coverage to prevent README/roadmap drift back to:
+  - `humanlike_at_write`,
+  - `humanlike_personification_level`,
+  - `humanlike_dependency_guard_level`,
+  - `dependency_guard_level` as current roadmap/README config.
+
+Validation complete:
+
+- `py -3.13 -m unittest tests.test_config_schema_contract tests.test_public_api tests.test_remote_smoke_contract -v`: 67 tests passed.
+- `py -3.13 -m unittest discover -s tests -v`: 151 tests passed.
+- `py -3.13 -m py_compile main.py emotion_engine.py humanlike_engine.py psychological_screening.py public_api.py prompts.py scripts\build_literature_kb.py scripts\build_humanlike_agent_literature_kb.py scripts\build_psychological_literature_kb.py scripts\package_plugin.py`: passed.
+- Bundled Node `--check` for `scripts\remote_smoke_playwright.js`, `scripts\remote_install_upload_playwright.js`, and `scripts\plugin_zip_preflight.js`: passed.
+- Bundled Node `scripts\plugin_zip_preflight.js dist\astrbot_plugin_emotional_state.zip astrbot_plugin_emotional_state`: passed, 49 entries.
+- `git diff --check`: passed, with CRLF conversion warnings only.
+- Remote smoke with metadata-matched version/display-name assertions: passed.
+  - AstrBot version `4.24.2`.
+  - Plugin API returned 30 plugins.
+  - `astrbot_plugin_emotional_state` was present and activated.
+  - Version `1.0.0` matched.
+  - Display name `多维情绪状态` matched.
+  - Failed plugin data was `{}`.
+
 ## 2026-05-07 Iteration 37
 
 Status: complete.

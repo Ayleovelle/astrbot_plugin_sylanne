@@ -97,11 +97,12 @@ P1/P2 再扩展 `sleep_debt`、`circadian_phase`、`relationship_story_strength`
 {
   "enable_humanlike_state": false,
   "humanlike_injection_strength": 0.35,
-  "humanlike_personification_level": "medium",
-  "humanlike_memory_write_enabled": false,
+  "humanlike_memory_write_enabled": true,
   "humanlike_clinical_like_enabled": false,
-  "humanlike_dependency_guard_level": "strict",
   "humanlike_state_half_life_seconds": 21600,
+  "humanlike_min_update_interval_seconds": 8,
+  "humanlike_rapid_update_half_life_seconds": 20,
+  "humanlike_max_impulse_per_update": 0.18,
   "humanlike_trajectory_limit": 40,
   "allow_humanlike_reset_backdoor": true
 }
@@ -152,7 +153,7 @@ psychological_screening
   -> 只提供非诊断风险与长期趋势，不参与人格魅力或依恋强化
 
 livingmemory / 其他记忆插件
-  -> 写入事件时同时冻结 emotion_at_write 与 humanlike_at_write
+  -> 写入事件时同时冻结 emotion_at_write 与 humanlike_state_at_write
 
 humanlike_state
   -> 只读上述状态，输出表达调制和状态快照
@@ -195,7 +196,7 @@ humanlike_state
 | --- | --- |
 | P0 | 新增 `humanlike_engine.py`、schema、半衰期、clamp、重置后门、公共快照 |
 | P1 | 接入 `main.py` 和 `public_api.py`，提供 `get_humanlike_snapshot`、`observe_humanlike_text`、`simulate_humanlike_update` |
-| P2 | 给 livingmemory payload 增加 `humanlike_at_write`，与 `emotion_at_write` 同时冻结 |
+| P2 | 给 livingmemory payload 增加 `humanlike_state_at_write`，与 `emotion_at_write` 同时冻结 |
 | P3 | 新增 humanlike prompt fragment，只调制语气、节奏、主动性、边界感 |
 | P4 | 增加反思/叙事摘要任务，把长期记忆压缩成 self story 与 relationship story |
 | P5 | 增加测试：半衰期、轨迹截断、非诊断字段、默认关闭/弱注入、simulate 不落库 |
@@ -209,7 +210,7 @@ humanlike_state
 - 半衰期和刷屏限幅按真实时间工作。
 - 同一输入在高/低 `energy` 下只改变表达长度和主动性，不改变事实结论。
 - 危机、自伤、医疗咨询、法律/金融高风险场景绕过拟人调制。
-- `humanlike_at_write` 冻结写入时状态，并保留 `written_at` 与状态 `updated_at`。
+- `humanlike_state_at_write` 冻结写入时状态，并保留 `written_at` 与状态 `updated_at`。
 - 叙事摘要必须能回溯 `source_memory_ids`。
 - reset 后门能清空 humanlike 状态，但不误删 emotion 和 psychological 状态。
 

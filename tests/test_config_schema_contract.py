@@ -212,6 +212,29 @@ class ConfigSchemaContractTests(unittest.TestCase):
         }
         self.assertEqual(missing - allowed_omissions, set())
 
+    def test_humanlike_docs_match_current_schema_names(self):
+        cfg = schema()
+        readme = (ROOT / "README.md").read_text(encoding="utf-8")
+        roadmap = (ROOT / "docs" / "humanlike_agent_model_roadmap.md").read_text(
+            encoding="utf-8",
+        )
+        iteration_log = (
+            ROOT / "docs" / "humanlike_agent_iteration_log.md"
+        ).read_text(encoding="utf-8")
+        combined = "\n".join((readme, roadmap, iteration_log))
+
+        self.assertIn("humanlike_state_at_write", combined)
+        self.assertNotIn("humanlike_at_write", combined)
+        self.assertNotIn("humanlike_personification_level", readme)
+        self.assertNotIn("humanlike_personification_level", roadmap)
+        self.assertNotIn("humanlike_dependency_guard_level", readme)
+        self.assertNotIn("humanlike_dependency_guard_level", roadmap)
+        self.assertNotIn("dependency_guard_level", readme)
+        self.assertNotIn("dependency_guard_level", roadmap)
+        self.assertIn("未进入当前 schema", iteration_log)
+        self.assertEqual(cfg["humanlike_memory_write_enabled"]["default"], True)
+        self.assertIn('"humanlike_memory_write_enabled": true', roadmap)
+
 
 if __name__ == "__main__":
     unittest.main()

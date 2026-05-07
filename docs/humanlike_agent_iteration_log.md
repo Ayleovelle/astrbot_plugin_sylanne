@@ -12,8 +12,8 @@
 ## 迭代 2：默认开关与强度分级
 
 - 问题：现有文档提到默认关闭或弱注入，但没有列出可实现配置。
-- 决策：首版配置应至少包含 `enable_humanlike_state`、`humanlike_injection_strength`、`humanlike_personification_level`、`humanlike_memory_write_enabled`、`humanlike_clinical_like_enabled`、`humanlike_dependency_guard_level`。
-- 落地：默认 `enable_humanlike_state=false`，默认 `humanlike_clinical_like_enabled=false`，默认 `humanlike_dependency_guard_level=strict`。
+- 决策：首版配置应至少包含 `enable_humanlike_state`、`humanlike_injection_strength`、`humanlike_memory_write_enabled`、`humanlike_clinical_like_enabled`、真实时间半衰期、刷屏限幅、轨迹上限和重置后门。
+- 落地：默认 `enable_humanlike_state=false`，默认 `humanlike_memory_write_enabled=true`，默认 `humanlike_clinical_like_enabled=false`。早期设想的 `humanlike_personification_level` 与 `humanlike_dependency_guard_level` 未进入当前 schema。
 - 残余风险：用户可配置关闭边界时，仍需保留状态重置后门和审计日志。
 
 ## 迭代 3：P0 最小可行状态集
@@ -41,7 +41,7 @@
 
 - 问题：`attachment_signal`、`gratitude`、`resentment`、`relationship_story` 容易增强用户依赖。
 - 决策：依恋相关字段只进入 plugin-safe snapshot，不直接进入 user-facing explanation；高依赖风险时降低排他性、分离焦虑、占有欲和“需要你”的表达。
-- 落地：新增 `dependency_guard_level` 和 `exclusive_attachment_blocked=true` 语义。
+- 落地：当前 P0 没有独立配置 `dependency_guard_level`；依赖风险通过 `dependency_risk`、`simulation_flags`、`output_modulation` 与 prompt fragment 约束表达，后续如新增配置必须同步 `_conf_schema.json`、README 和测试。
 - 残余风险：剧情类插件可能主动读取关系字段强化黏性，需要 API 文档约束。
 
 ## 迭代 7：叙事记忆来源约束
