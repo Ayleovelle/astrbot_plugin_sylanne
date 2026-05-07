@@ -1720,7 +1720,7 @@ Notes:
 
 ## 2026-05-07 Top-Journal Model Argumentation
 
-Status: complete locally; publication pending commit/push/release refresh.
+Status: complete and published.
 
 - User requested the model-formula argumentation to reference top-journal literature, with the full version folded and only important content shown by default.
 - Started a read-only subagent for independent review. It confirmed the summary/folded structure was mostly correct and flagged:
@@ -1761,4 +1761,20 @@ Validation complete:
 - Bundled Node `scripts\plugin_zip_preflight.js dist\astrbot_plugin_emotional_state.zip astrbot_plugin_emotional_state`: passed with 52 entries, size `10174454`.
 - `git diff --check`: passed with CRLF conversion warnings only.
 - Rebuilt zip SHA256: `6bb7a92b919ae7433a253499d53b3f0d4eda251ce213fbe930c55c7712f8efcf`.
+
+Publication complete:
+
+- Commit pushed to `origin/main`: `cff6579 Add top-journal theory summary`.
+- GitHub branch API confirmed `main` at `cff65798b3cc5a3459461d5774be900eda16f5ae`.
+- Refreshed `v0.0.1-beta` release asset:
+  - deleted old asset id `414378225`,
+  - uploaded asset id `414390354`,
+  - state: `uploaded`,
+  - size: `10174454`,
+  - digest: `sha256:6bb7a92b919ae7433a253499d53b3f0d4eda251ce213fbe930c55c7712f8efcf`,
+  - download URL: `https://github.com/Ayleovelle/astrbot_plugin_emotional_state/releases/download/v0.0.1-beta/astrbot_plugin_emotional_state.zip`.
+
+Notes:
+
+- Bare `git ls-remote` failed once with direct network timeout and once through proxy with `bad record mac`; the GitHub branch API succeeded and confirmed the pushed commit.
 
