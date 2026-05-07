@@ -703,6 +703,134 @@ class MemoryPayloadPublicApiTests(unittest.TestCase):
         self.assertGreater(payload["values"]["anxiety_tension"], 0.0)
         self.assertFalse(payload["diagnostic"])
 
+    def test_psychological_snapshot_and_values_read_when_module_disabled(self):
+        self._install_astrbot_stubs()
+        from main import EmotionalStatePlugin
+        from psychological_screening import PsychologicalScreeningState
+
+        async def fake_load(self, session_key):
+            state = PsychologicalScreeningState.initial()
+            state.values["distress"] = 0.42
+            state.updated_at = 1000.0
+            return state
+
+        original_load = EmotionalStatePlugin._load_psychological_state
+        EmotionalStatePlugin._load_psychological_state = fake_load
+        try:
+            plugin = self._new_plugin()
+            snapshot = asyncio.run(
+                plugin.get_psychological_screening_snapshot(session_key="s1"),
+            )
+            values = asyncio.run(
+                plugin.get_psychological_screening_values(session_key="s1"),
+            )
+        finally:
+            EmotionalStatePlugin._load_psychological_state = original_load
+
+        self.assertEqual(snapshot["session_key"], "s1")
+        self.assertNotIn("enabled", snapshot)
+        self.assertFalse(snapshot["diagnostic"])
+        self.assertEqual(snapshot["values"]["distress"], 0.42)
+        self.assertEqual(values["distress"], 0.42)
+
+    def test_psychological_snapshot_reads_enabled_saved_state(self):
+        self._install_astrbot_stubs()
+        from main import EmotionalStatePlugin
+        from psychological_screening import PsychologicalScreeningState
+
+        async def fake_load(self, session_key):
+            state = PsychologicalScreeningState.initial()
+            state.values["sleep_disruption"] = 0.77
+            state.red_flags = ["severe_sleep_disruption"]
+            state.turns = 3
+            state.updated_at = 2000.0
+            return state
+
+        original_load = EmotionalStatePlugin._load_psychological_state
+        EmotionalStatePlugin._load_psychological_state = fake_load
+        try:
+            plugin = self._new_plugin({"enable_psychological_screening": True})
+            snapshot = asyncio.run(
+                plugin.get_psychological_screening_snapshot(session_key="s2"),
+            )
+        finally:
+            EmotionalStatePlugin._load_psychological_state = original_load
+
+        self.assertEqual(snapshot["session_key"], "s2")
+        self.assertEqual(snapshot["values"]["sleep_disruption"], 0.77)
+        self.assertIn("severe_sleep_disruption", snapshot["risk"]["red_flags"])
+        self.assertEqual(snapshot["turns"], 3)
+        self.assertFalse(snapshot["diagnostic"])
+
+    def test_psychological_simulate_does_not_save_even_when_disabled(self):
+        self._install_astrbot_stubs()
+        from main import EmotionalStatePlugin
+        from psychological_screening import PsychologicalScreeningState
+
+        async def fake_load(self, session_key):
+            state = PsychologicalScreeningState.initial()
+            state.updated_at = 1000.0
+            return state
+
+        async def fake_save(self, session_key, state):
+            raise AssertionError("simulate_psychological_update must not save")
+
+        original_load = EmotionalStatePlugin._load_psychological_state
+        original_save = EmotionalStatePlugin._save_psychological_state
+        EmotionalStatePlugin._load_psychological_state = fake_load
+        EmotionalStatePlugin._save_psychological_state = fake_save
+        try:
+            plugin = self._new_plugin()
+            payload = asyncio.run(
+                plugin.simulate_psychological_update(
+                    session_key="s1",
+                    text="我焦虑到睡不着",
+                    source="unit_test",
+                    observed_at=1010.0,
+                ),
+            )
+        finally:
+            EmotionalStatePlugin._load_psychological_state = original_load
+            EmotionalStatePlugin._save_psychological_state = original_save
+
+        self.assertEqual(payload["session_key"], "s1")
+        self.assertGreater(payload["values"]["anxiety_tension"], 0.0)
+        self.assertFalse(payload["observation"]["committed"])
+        self.assertEqual(payload["observation"]["source"], "unit_test")
+
+    def test_psychological_reset_backdoor_is_independent_of_module_enabled(self):
+        self._install_astrbot_stubs()
+        from main import EmotionalStatePlugin
+
+        deleted = []
+
+        async def fake_delete(self, session_key):
+            deleted.append(session_key)
+
+        original_delete = EmotionalStatePlugin._delete_psychological_state
+        EmotionalStatePlugin._delete_psychological_state = fake_delete
+        try:
+            disabled_module = self._new_plugin({"enable_psychological_screening": False})
+            self.assertTrue(
+                asyncio.run(
+                    disabled_module.reset_psychological_screening_state(
+                        session_key="disabled-module",
+                    ),
+                ),
+            )
+            locked = self._new_plugin({"allow_emotion_reset_backdoor": False})
+            self.assertFalse(
+                asyncio.run(
+                    locked.reset_psychological_screening_state(
+                        session_key="locked",
+                    ),
+                ),
+            )
+        finally:
+            EmotionalStatePlugin._delete_psychological_state = original_delete
+
+        self.assertEqual(deleted, ["disabled-module"])
+
     def test_humanlike_observe_is_disabled_by_default_for_commits(self):
         self._install_astrbot_stubs()
         from humanlike_engine import HumanlikeEngine
