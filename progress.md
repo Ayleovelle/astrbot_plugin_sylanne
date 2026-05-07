@@ -1587,3 +1587,27 @@ Status: complete.
   - `GITHUB_TOKEN` and `GH_TOKEN` are not present,
   - therefore remote repository creation is blocked until GitHub authentication is provided or an empty repository is created manually.
 
+## 2026-05-07 GitHub Repository Creation Attempt
+
+Status: in progress.
+
+- User set `GITHUB_TOKEN` in the Windows User environment; the current shell process still did not inherit `$env:GITHUB_TOKEN`, but `[Environment]::GetEnvironmentVariable("GITHUB_TOKEN", "User")` returned a token without printing it.
+- GitHub API `/user` succeeded and identified the account as `Ayleovelle`.
+- Existing repository check for `Ayleovelle/astrbot_plugin_emotional_state` returned not found.
+- Repository creation via `POST https://api.github.com/user/repos` failed with:
+  - HTTP 403,
+  - `Resource not accessible by personal access token`.
+- Interpretation: the token is valid enough to read account identity, but does not have permission to create repositories. Next step requires either a token with repository creation permission or a manually created empty GitHub repository URL.
+- User updated the token and retry succeeded:
+  - created `Ayleovelle/astrbot_plugin_emotional_state`,
+  - repository URL: `https://github.com/Ayleovelle/astrbot_plugin_emotional_state`,
+  - clone URL: `https://github.com/Ayleovelle/astrbot_plugin_emotional_state.git`.
+- Updated `metadata.yaml repo` and README repository install examples to the real GitHub URL.
+- Validation after repository URL update:
+  - `py -3.13 -m unittest tests.test_remote_smoke_contract tests.test_config_schema_contract tests.test_package_plugin -v`: 44 tests passed.
+  - `py -3.13 -m py_compile main.py emotion_engine.py psychological_screening.py humanlike_engine.py integrated_self.py moral_repair_engine.py prompts.py public_api.py scripts\package_plugin.py`: passed.
+  - `py -3.13 -m json.tool _conf_schema.json`: passed.
+  - `git diff --check`: passed with CRLF conversion warnings only.
+  - `py -3.13 scripts\package_plugin.py --output dist\astrbot_plugin_emotional_state.zip`: passed.
+  - bundled Node `scripts\plugin_zip_preflight.js dist\astrbot_plugin_emotional_state.zip astrbot_plugin_emotional_state`: passed with 52 entries.
+

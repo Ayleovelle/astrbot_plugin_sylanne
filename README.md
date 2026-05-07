@@ -164,16 +164,16 @@ astrbot_plugin_emotional_state/
 新仓库创建并推送后，在 AstrBot WebUI 的仓库安装入口填写：
 
 ```text
-https://github.com/<your-github-user-or-org>/astrbot_plugin_emotional_state
+https://github.com/Ayleovelle/astrbot_plugin_emotional_state
 ```
 
 如果 WebUI 要求 `.git` 后缀：
 
 ```text
-https://github.com/<your-github-user-or-org>/astrbot_plugin_emotional_state.git
+https://github.com/Ayleovelle/astrbot_plugin_emotional_state.git
 ```
 
-发布到新仓库前，需要同步修改 `metadata.yaml` 里的 `repo:` 字段，并确认 README、Release 附件名、插件目录名和 `metadata.yaml name:` 都保持 `astrbot_plugin_emotional_state`。
+新仓库地址已经写入 `metadata.yaml` 的 `repo:` 字段；后续发布 Release 时，只需要确认 README、Release 附件名、插件目录名和 `metadata.yaml name:` 都保持 `astrbot_plugin_emotional_state`。
 
 ### 方式三：手动复制到插件目录
 

@@ -5,6 +5,6 @@ short_desc: 让 AstrBot 拥有可量化、可持续更新的情绪状态。
 version: 1.0.0
 author: pidan
 license: GPL-3.0-or-later
-repo: ""
+repo: "https://github.com/Ayleovelle/astrbot_plugin_emotional_state"
 support_platforms: []
 astrbot_version: ">=4.9.2,<5.0.0"
