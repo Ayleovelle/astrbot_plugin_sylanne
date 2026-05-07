@@ -62,6 +62,7 @@ Build and maintain `astrbot_plugin_emotional_state`: an AstrBot plugin with mult
 | 48 | complete | Lock psychological screening non-diagnostic public API return semantics | 167 unit tests, py_compile, package build, package preflight, Node syntax check, git diff check, remote smoke |
 | 49 | complete | Add machine-readable psychological severe impairment and sleep-disruption risk flags | 168 unit tests, py_compile, package build, package preflight, Node syntax check, git diff check, leak scan, remote smoke |
 | 50 | complete | Export stable psychological risk boolean field contract and clarify nested README/docs access | 170 unit tests, py_compile, package build, package preflight, Node syntax check, git diff check, remote smoke |
+| 51 | complete | Reuse the psychological risk boolean field tuple in public API to prevent contract drift | 170 unit tests, py_compile, package build, package preflight, Node syntax check, git diff check, remote smoke |
 
 ## Recovery Checklist
 

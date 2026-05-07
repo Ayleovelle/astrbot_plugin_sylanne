@@ -227,6 +227,9 @@ class PublicApiTests(unittest.TestCase):
         )
 
     def test_psychological_risk_boolean_fields_are_exported(self):
+        from psychological_screening import PUBLIC_RISK_BOOLEAN_FIELDS
+
+        self.assertIs(PSYCHOLOGICAL_RISK_BOOLEAN_FIELDS, PUBLIC_RISK_BOOLEAN_FIELDS)
         self.assertEqual(
             PSYCHOLOGICAL_RISK_BOOLEAN_FIELDS,
             (

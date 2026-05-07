@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from typing import Any, Protocol, runtime_checkable
 
+from psychological_screening import PUBLIC_RISK_BOOLEAN_FIELDS
+
 
 PLUGIN_NAME = "astrbot_plugin_emotional_state"
 EMOTION_API_VERSION = "1.0"
@@ -9,14 +11,7 @@ EMOTION_SCHEMA_VERSION = "astrbot.emotion_state.v2"
 EMOTION_MEMORY_SCHEMA_VERSION = "astrbot.emotion_memory.v1"
 PSYCHOLOGICAL_SCREENING_SCHEMA_VERSION = "astrbot.psychological_screening.v1"
 HUMANLIKE_STATE_SCHEMA_VERSION = "astrbot.humanlike_state.v1"
-PSYCHOLOGICAL_RISK_BOOLEAN_FIELDS: tuple[str, ...] = (
-    "requires_human_review",
-    "crisis_like_signal",
-    "other_harm_signal",
-    "severe_function_impairment_signal",
-    "severe_function_impairment",
-    "severe_sleep_disruption",
-)
+PSYCHOLOGICAL_RISK_BOOLEAN_FIELDS = PUBLIC_RISK_BOOLEAN_FIELDS
 
 
 def _has_expected_public_versions(plugin: Any, expected: dict[str, str]) -> bool:

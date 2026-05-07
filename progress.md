@@ -873,6 +873,33 @@ Validation complete:
   - `astrbot_plugin_livingmemory` was present.
   - Failed plugin data was `{}`.
 
+## 2026-05-07 Iteration 51
+
+Status: complete.
+
+- Removed the duplicated hardcoded psychological risk field tuple from `public_api.py`.
+- `public_api.PSYCHOLOGICAL_RISK_BOOLEAN_FIELDS` now directly aliases `psychological_screening.PUBLIC_RISK_BOOLEAN_FIELDS`, so the runtime payload contract and public API export cannot drift independently.
+- Strengthened `tests\test_public_api.py` with an identity assertion for the shared tuple.
+- Incorporated read-only subagent review feedback on the constant drift risk.
+
+Validation complete:
+
+- `py -3.13 -m unittest tests.test_public_api tests.test_psychological_screening -v`: 62 tests passed.
+- `py -3.13 -m unittest discover -s tests -v`: 170 tests passed.
+- `py -3.13 -m py_compile public_api.py psychological_screening.py main.py`: passed.
+- Bundled Node `--check` for `scripts\remote_smoke_playwright.js`, `scripts\remote_install_upload_playwright.js`, and `scripts\plugin_zip_preflight.js`: passed.
+- `py -3.13 scripts\package_plugin.py --output dist\astrbot_plugin_emotional_state.zip`: passed.
+- Bundled Node `scripts\plugin_zip_preflight.js dist\astrbot_plugin_emotional_state.zip astrbot_plugin_emotional_state`: passed, 49 entries.
+- `git diff --check`: passed, with CRLF conversion warnings only.
+- Remote smoke with metadata-matched plugin name/version/display-name assertions: passed for `astrbot_plugin_emotional_state`.
+  - AstrBot version `4.24.2`.
+  - Plugin API returned 30 plugins.
+  - `astrbot_plugin_emotional_state` was present and activated.
+  - Version `1.0.0` matched.
+  - Display name `多维情绪状态` matched.
+  - `astrbot_plugin_livingmemory` was present.
+  - Remote server reported one unrelated failed-plugin record for `plugin_upload_astrbot_plugin_volcengine_asr` because that directory already exists.
+
 ## 2026-05-07 Iteration 50
 
 Status: complete.
