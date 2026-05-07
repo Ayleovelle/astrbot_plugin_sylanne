@@ -76,6 +76,8 @@ After `main` is clean:
 Only run `scripts\remote_install_upload_playwright.js` after:
 
 - the package preflight passes,
+- the preflight confirms the zip contains the runtime root files `__init__.py`, `main.py`, `emotion_engine.py`, `humanlike_engine.py`, `psychological_screening.py`, `prompts.py`, and `public_api.py`,
+- the preflight confirms the zip contains the dependency declaration `requirements.txt`,
 - the preflight confirms zip `metadata.yaml` `name:` matches `ASTRBOT_EXPECT_PLUGIN`,
 - the zip uses relative POSIX paths and contains no unsafe `.` / `..` path segments,
 - `ASTRBOT_REMOTE_INSTALL_CONFIRM=1` is explicitly set,

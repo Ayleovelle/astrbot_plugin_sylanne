@@ -198,6 +198,7 @@ class PluginZipPreflightTests(unittest.TestCase):
             (prefix + "prompts.py", "# runtime\n"),
             (prefix + "public_api.py", "# public API\n"),
             (prefix + "README.md", "# docs\n"),
+            (prefix + "requirements.txt", "# no dependencies\n"),
             (prefix + "_conf_schema.json", "{}\n"),
         ]
 
@@ -241,6 +242,7 @@ class PluginZipPreflightTests(unittest.TestCase):
             "__init__.py",
             "_conf_schema.json",
             "public_api.py",
+            "requirements.txt",
         )
         for suffix in required_suffixes:
             with self.subTest(suffix=suffix):

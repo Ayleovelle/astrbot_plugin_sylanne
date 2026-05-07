@@ -140,6 +140,7 @@ function assertZipLooksUploadable(zipPath, expectedPlugin, options = {}) {
     `${expectedPlugin}/prompts.py`,
     `${expectedPlugin}/public_api.py`,
     `${expectedPlugin}/README.md`,
+    `${expectedPlugin}/requirements.txt`,
     `${expectedPlugin}/_conf_schema.json`,
   ];
   const forbiddenParts = new Set([

@@ -198,6 +198,20 @@ class RemoteSmokeContractTests(unittest.TestCase):
                     document,
                 )
 
+        for runtime_file in (
+            "__init__.py",
+            "main.py",
+            "emotion_engine.py",
+            "humanlike_engine.py",
+            "psychological_screening.py",
+            "prompts.py",
+            "public_api.py",
+            "requirements.txt",
+        ):
+            with self.subTest(runtime_file=runtime_file):
+                self.assertIn(runtime_file, readme)
+                self.assertIn(runtime_file, checklist)
+
     def test_documented_plugin_slug_references_match_metadata(self):
         plugin_name = self._metadata_value("name")
         allowed_external_references = {"astrbot_plugin_volcengine_asr"}
