@@ -1630,3 +1630,29 @@ Status: in progress.
   - SHA256: `3133f89e96ce5e124083da0867765f2d5d6d6b2ef074d0963a55eedf0de833ef`,
   - download URL: `https://github.com/Ayleovelle/astrbot_plugin_emotional_state/releases/download/v0.0.1-beta/astrbot_plugin_emotional_state.zip`.
 
+## 2026-05-07 Formula Rendering Polish
+
+Status: in progress.
+
+- User requested learning GitHub's official mathematical expression documentation and optimizing formula presentation.
+- Read the GitHub Docs page `working-with-advanced-formatting/writing-mathematical-expressions`.
+- Applicable rules for this repository:
+  - use inline `$...$` sparingly because tables and dollar signs can conflict with Markdown parsing,
+  - use `$` backtick form for inline math only when escaping is needed,
+  - use fenced ```math blocks for long standalone formulas in README/docs because GitHub renders them through MathJax and they avoid Markdown syntax conflicts.
+- Started a read-only subagent to inspect README/theory formula locations and test-risk areas.
+- Converted standalone mathematical formulas in `README.md` and `docs/theory.md` from plain `text` fences to GitHub-renderable ```math fences.
+- Kept JSON, YAML, Python, Mermaid, shell snippets, install trees, config values, and natural-language rule lists as ordinary code/text blocks.
+- Formula fence sanity check passed:
+  - `README.md`: 26 math fences, balanced fences.
+  - `docs/theory.md`: 37 math fences, balanced fences.
+- Contract validation passed:
+  - `py -3.13 -m unittest tests.test_remote_smoke_contract tests.test_config_schema_contract tests.test_package_plugin -v`: 44 tests passed.
+- Additional validation passed:
+  - `py -3.13 -m py_compile main.py emotion_engine.py psychological_screening.py humanlike_engine.py integrated_self.py moral_repair_engine.py prompts.py public_api.py scripts\package_plugin.py`: passed.
+  - `py -3.13 -m json.tool _conf_schema.json`: passed.
+  - `git diff --check`: passed with CRLF conversion warnings only.
+  - `py -3.13 scripts\package_plugin.py --output dist\astrbot_plugin_emotional_state.zip`: passed.
+  - bundled Node `scripts\plugin_zip_preflight.js dist\astrbot_plugin_emotional_state.zip astrbot_plugin_emotional_state`: passed with 52 entries.
+  - rebuilt zip SHA256: `ed2c93505d0caa3f567293fea272f4d3a1556da817d08d27cccd602c62641cbf`.
+

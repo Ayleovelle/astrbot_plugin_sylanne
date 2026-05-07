@@ -84,6 +84,7 @@ Build and maintain `astrbot_plugin_emotional_state`: an AstrBot plugin with mult
 | 70 | complete | Run full validation, remote smoke, branch sync, and write a complete revolutionary-iteration handoff | Implementation commit `e86735b`; final status recorded; remote smoke passed; maintenance branches synced to latest HEAD |
 | 71 | complete | Rewrite README as a release-ready plugin landing page using the ASR reference structure, then rebuild package and prepare new-repository publication | 208 unit tests, py_compile, json.tool, Node syntax checks, package build, package preflight, GitHub auth blocked |
 | 72 | complete | Create GitHub repository, update repo metadata, set prerelease version, push validated main branch, and publish prerelease package | Public repository and `v0.0.1-beta` prerelease published at `https://github.com/Ayleovelle/astrbot_plugin_emotional_state`; release zip SHA256 `3133f89e96ce5e124083da0867765f2d5d6d6b2ef074d0963a55eedf0de833ef` |
+| 73 | in_progress | Improve GitHub formula rendering using official mathematical expression syntax | README/docs formula blocks converted; contract tests, py_compile, json.tool, package build, and package preflight passed; release asset refresh pending |
 
 ## Recovery Checklist
 
