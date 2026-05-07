@@ -1620,4 +1620,13 @@ Status: in progress.
   - remote commit: `452487a642f801333a8e89e22d992712d1477721`,
   - repository is public,
   - default branch is `main`.
+- After recording publication status, pushed follow-up commit `56c3fa5bb6a8a0d4f03e2770aacecf3d2eec8e42` to `origin/main`.
+- Created GitHub prerelease `v0.0.1-beta`:
+  - release URL: `https://github.com/Ayleovelle/astrbot_plugin_emotional_state/releases/tag/v0.0.1-beta`,
+  - prerelease: true,
+  - draft: false,
+  - asset: `astrbot_plugin_emotional_state.zip`,
+  - asset size: `10170923`,
+  - SHA256: `3133f89e96ce5e124083da0867765f2d5d6d6b2ef074d0963a55eedf0de833ef`,
+  - download URL: `https://github.com/Ayleovelle/astrbot_plugin_emotional_state/releases/download/v0.0.1-beta/astrbot_plugin_emotional_state.zip`.
 
