@@ -51,6 +51,7 @@ This file stores durable discoveries from implementation, review, and remote tes
 - In this Windows workspace, bare `node` may fail with access denied, while Codex bundled Node works. README and the release checklist now define `$node` with a Codex bundled Node fallback and set `NODE_PATH` for Playwright-dependent scripts.
 - Contract tests now require the README and release checklist to share the same three-line `$node` fallback snippet and define it before the first documented Node/Playwright command.
 - README's test coverage matrix now reflects the expanded remote smoke contract: credentials by environment, read-only behavior, ignored screenshots, API health summary, UI best-effort diagnostics, upload-script boundaries, and bundled Node documentation.
+- Remote smoke documentation now has contract coverage tying `ASTRBOT_EXPECT_PLUGIN_VERSION` and `ASTRBOT_EXPECT_PLUGIN_DISPLAY_NAME` examples to `metadata.yaml` `version` and `display_name`, preventing release docs from drifting when metadata changes.
 
 ## 2026-05-07 Branch Maintenance
 

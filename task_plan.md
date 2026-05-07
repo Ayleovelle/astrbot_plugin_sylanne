@@ -45,6 +45,7 @@ Build and maintain `astrbot_plugin_emotional_state`: an AstrBot plugin with mult
 | 31 | complete | Document bundled Node fallback for remote smoke and package preflight commands | 141 unit tests, py_compile, package preflight, Node syntax check, git diff check, remote smoke |
 | 32 | complete | Lock Node fallback documentation ordering and consistency with contract tests | 143 unit tests, py_compile, package preflight, Node syntax check, git diff check, remote smoke |
 | 33 | complete | Refresh README test matrix for expanded remote smoke contract coverage | 143 unit tests, py_compile, package preflight, Node syntax check, git diff check, remote smoke |
+| 34 | complete | Lock documented remote smoke version and display-name assertions to metadata.yaml | 144 unit tests, py_compile, package preflight, Node syntax check, git diff check, remote smoke |
 
 ## Recovery Checklist
 

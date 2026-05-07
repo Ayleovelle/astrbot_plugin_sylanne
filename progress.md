@@ -692,3 +692,27 @@ Validation complete:
 - `git diff --check`: passed, with CRLF conversion warnings only.
 - Remote smoke with bundled Node and version/display-name assertions: passed.
 
+## 2026-05-07 Iteration 34
+
+Status: complete.
+
+- Added a remote smoke documentation contract tying version/display-name assertions to `metadata.yaml`.
+- `tests\test_remote_smoke_contract.py` now reads:
+  - `metadata.yaml` `version`,
+  - `metadata.yaml` `display_name`.
+- README and `docs\release_branch_sync_checklist.md` must document matching:
+  - `ASTRBOT_EXPECT_PLUGIN_VERSION`,
+  - `ASTRBOT_EXPECT_PLUGIN_DISPLAY_NAME`.
+
+Validation complete:
+
+- `py -3.13 -m unittest tests.test_remote_smoke_contract -v`: 11 tests passed.
+- Bundled Node `--check scripts\remote_smoke_playwright.js`: passed.
+- `py -3.13 -m unittest discover -s tests -v`: 144 tests passed.
+- `py -3.13 -m py_compile main.py emotion_engine.py humanlike_engine.py psychological_screening.py public_api.py prompts.py scripts\build_literature_kb.py scripts\build_humanlike_agent_literature_kb.py scripts\build_psychological_literature_kb.py scripts\package_plugin.py`: passed.
+- Bundled Node `--check scripts\remote_install_upload_playwright.js`: passed.
+- Bundled Node `--check scripts\plugin_zip_preflight.js`: passed.
+- Bundled Node `scripts\plugin_zip_preflight.js dist\astrbot_plugin_emotional_state.zip astrbot_plugin_emotional_state`: passed, 49 entries.
+- `git diff --check`: passed, with CRLF conversion warnings only.
+- Remote smoke with metadata-matched version/display-name assertions: passed.
+

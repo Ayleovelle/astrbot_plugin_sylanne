@@ -1,5 +1,6 @@
 import unittest
 import ast
+import re
 from pathlib import Path
 
 
@@ -12,6 +13,15 @@ NODE_FALLBACK_SNIPPET = [
 
 
 class RemoteSmokeContractTests(unittest.TestCase):
+    def _metadata_value(self, name):
+        for line in (ROOT / "metadata.yaml").read_text(encoding="utf-8").splitlines():
+            if line.startswith(f"{name}:"):
+                return line.split(":", 1)[1].strip().strip('"')
+        self.fail(f"metadata.yaml missing {name}")
+
+    def _powershell_env_values(self, text, name):
+        return re.findall(rf'\$env:{re.escape(name)}\s*=\s*"([^"]+)"', text)
+
     def _node_fallback_lines(self, text):
         return [
             line
@@ -87,6 +97,34 @@ class RemoteSmokeContractTests(unittest.TestCase):
         self.assertEqual(fallback, self._node_fallback_lines(checklist))
         self.assertLess(readme.index("codex-primary-runtime"), readme.index("& $node scripts\\remote_smoke_playwright.js"))
         self.assertLess(checklist.index("codex-primary-runtime"), checklist.index("& $node --check scripts\\remote_smoke_playwright.js"))
+
+    def test_remote_smoke_expected_runtime_values_match_metadata(self):
+        readme = (ROOT / "README.md").read_text(encoding="utf-8")
+        checklist = (ROOT / "docs" / "release_branch_sync_checklist.md").read_text(
+            encoding="utf-8",
+        )
+        expected_version = self._metadata_value("version")
+        expected_display_name = self._metadata_value("display_name")
+
+        for document_name, document in (
+            ("README.md", readme),
+            ("docs/release_branch_sync_checklist.md", checklist),
+        ):
+            with self.subTest(document=document_name):
+                self.assertEqual(
+                    [expected_version],
+                    self._powershell_env_values(
+                        document,
+                        "ASTRBOT_EXPECT_PLUGIN_VERSION",
+                    ),
+                )
+                self.assertEqual(
+                    [expected_display_name],
+                    self._powershell_env_values(
+                        document,
+                        "ASTRBOT_EXPECT_PLUGIN_DISPLAY_NAME",
+                    ),
+                )
 
     def test_remote_smoke_script_uses_environment_credentials(self):
         script = (ROOT / "scripts" / "remote_smoke_playwright.js").read_text(
