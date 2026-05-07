@@ -118,6 +118,29 @@ def documented_commands_from_main():
     return commands
 
 
+def documented_llm_tools_from_main():
+    tree = ast.parse((ROOT / "main.py").read_text(encoding="utf-8"))
+    tools = set()
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.AsyncFunctionDef):
+            continue
+        for decorator in node.decorator_list:
+            if not (
+                isinstance(decorator, ast.Call)
+                and isinstance(decorator.func, ast.Attribute)
+                and decorator.func.attr == "llm_tool"
+            ):
+                continue
+            for keyword in decorator.keywords:
+                if (
+                    keyword.arg == "name"
+                    and isinstance(keyword.value, ast.Constant)
+                    and isinstance(keyword.value.value, str)
+                ):
+                    tools.add(keyword.value.value)
+    return tools
+
+
 async def collect_async_generator(generator):
     items = []
     async for item in generator:
@@ -144,6 +167,22 @@ class CommandAndToolSmokeTests(unittest.TestCase):
         for command in sorted(documented_commands_from_main()):
             with self.subTest(command=command):
                 self.assertIn(f"/{command}", readme)
+
+    def test_readme_documents_registered_llm_tools(self):
+        readme = (ROOT / "README.md").read_text(encoding="utf-8")
+        tools = documented_llm_tools_from_main()
+
+        self.assertEqual(
+            tools,
+            {
+                "get_bot_emotion_state",
+                "simulate_bot_emotion_update",
+                "get_bot_humanlike_state",
+            },
+        )
+        for tool in sorted(tools):
+            with self.subTest(tool=tool):
+                self.assertIn(f"| `{tool}` |", readme)
 
     def test_emotion_reset_command_denies_delete_when_backdoor_disabled(self):
         plugin = new_plugin({"allow_emotion_reset_backdoor": False})

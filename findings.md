@@ -62,6 +62,7 @@ This file stores durable discoveries from implementation, review, and remote tes
 - README typed configuration tables are the maintainers' practical source of truth for new config keys. Schema keys should appear there with the same type unless they are explicitly legacy compatibility fields.
 - Public API compatibility has three synchronized surfaces: `public_api.py` Protocol methods, service discovery required-method tuples, and `EmotionalStatePlugin` async methods. A method added to only one surface should fail tests before release.
 - AstrBot command names and aliases are public user-facing entry points. README command snippets should be generated from, or at least contract-tested against, `@filter.command(...)` decorators.
+- LLM tool registration names are also public surface. Behavior tests are not enough; README's LLM tool table should stay locked to `@filter.llm_tool(name=...)` names.
 
 ## 2026-05-07 Branch Maintenance
 
