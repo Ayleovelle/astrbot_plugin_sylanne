@@ -1,7 +1,9 @@
 import asyncio
+import ast
 import sys
 import types
 import unittest
+from pathlib import Path
 from types import SimpleNamespace
 
 from public_api import (
@@ -15,12 +17,24 @@ from public_api import (
 )
 
 
+ROOT = Path(__file__).resolve().parents[1]
+
+
+def metadata_value(name: str) -> str:
+    for line in (ROOT / "metadata.yaml").read_text(encoding="utf-8").splitlines():
+        if line.startswith(f"{name}:"):
+            return line.split(":", 1)[1].strip().strip('"')
+    raise AssertionError(f"metadata.yaml missing {name}")
+
+
 class FakeContext:
     def __init__(self, metadata):
         self.metadata = metadata
+        self.requested_names = []
 
     def get_registered_star(self, name):
-        if name == "astrbot_plugin_emotional_state":
+        self.requested_names.append(name)
+        if name == metadata_value("name"):
             return self.metadata
         return None
 
@@ -107,6 +121,12 @@ class PublicApiTests(unittest.TestCase):
         plugin = FakeEmotionService()
         context = FakeContext(SimpleNamespace(activated=True, star_cls=plugin))
         self.assertIs(get_emotion_service(context), plugin)
+        self.assertEqual([metadata_value("name")], context.requested_names)
+
+    def test_public_plugin_name_matches_metadata(self):
+        import public_api
+
+        self.assertEqual(public_api.PLUGIN_NAME, metadata_value("name"))
 
     def test_get_emotion_service_rejects_inactive_plugin(self):
         plugin = FakeEmotionService()
@@ -201,6 +221,24 @@ class PublicApiTests(unittest.TestCase):
 
         self.assertIsNone(get_humanlike_service(context))
 
+    def test_main_register_decorator_uses_plugin_name_constant(self):
+        tree = ast.parse((ROOT / "main.py").read_text(encoding="utf-8"))
+        class_node = next(
+            node
+            for node in tree.body
+            if isinstance(node, ast.ClassDef) and node.name == "EmotionalStatePlugin"
+        )
+        register_call = next(
+            decorator
+            for decorator in class_node.decorator_list
+            if isinstance(decorator, ast.Call)
+            and isinstance(decorator.func, ast.Name)
+            and decorator.func.id == "register"
+        )
+
+        self.assertIsInstance(register_call.args[0], ast.Name)
+        self.assertEqual("PLUGIN_NAME", register_call.args[0].id)
+
     def test_main_helper_uses_full_emotion_service_contract(self):
         def passthrough_decorator(*args, **kwargs):
             def decorate(func):
@@ -259,6 +297,7 @@ class PublicApiTests(unittest.TestCase):
         sys.modules.setdefault("astrbot.core.agent.message", message)
 
         from main import get_emotional_state_plugin
+        import main
 
         class SnapshotOnly:
             emotion_api_version = "1.0"
@@ -282,6 +321,7 @@ class PublicApiTests(unittest.TestCase):
             SimpleNamespace(activated=True, star_cls=FakeEmotionService()),
         )
 
+        self.assertEqual(main.PLUGIN_NAME, metadata_value("name"))
         self.assertIsNone(get_emotional_state_plugin(incomplete))
         self.assertIsNone(get_emotional_state_plugin(wrong_version))
         self.assertIs(get_emotional_state_plugin(complete), complete.metadata.star_cls)

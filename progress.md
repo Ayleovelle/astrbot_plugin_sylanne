@@ -555,6 +555,38 @@ Validation complete:
   - Display name `多维情绪状态` matched.
   - Failed plugin data was `{}`.
 
+## 2026-05-07 Iteration 40
+
+Status: complete.
+
+- Added metadata-driven plugin identity contract coverage:
+  - README and release checklist `ASTRBOT_EXPECT_PLUGIN` examples must equal `metadata.yaml` `name`,
+  - README/checklist package build and zip preflight commands must use `dist\<metadata name>.zip`,
+  - README/checklist plugin slug references must match `metadata.yaml` `name`, with the documented external README reference explicitly allowlisted,
+  - `scripts\package_plugin.py` `PLUGIN_NAME` must equal `metadata.yaml` `name`,
+  - package zip root tests now derive the expected root from `metadata.yaml`,
+  - `main.PLUGIN_NAME` and `public_api.PLUGIN_NAME` must equal `metadata.yaml` `name`,
+  - `main.py` must keep `@register(...)` bound to `PLUGIN_NAME`,
+  - public API tests now assert service discovery queries the metadata-derived plugin name.
+- Adjusted contract test logic to allow README to document both smoke and install examples while still requiring every `ASTRBOT_EXPECT_PLUGIN` value to match metadata.
+
+Validation complete:
+
+- `py -3.13 -m unittest tests.test_remote_smoke_contract tests.test_package_plugin tests.test_public_api -v`: 73 tests passed.
+- `py -3.13 -m unittest discover -s tests -v`: 156 tests passed.
+- `py -3.13 -m py_compile main.py emotion_engine.py humanlike_engine.py psychological_screening.py public_api.py prompts.py scripts\build_literature_kb.py scripts\build_humanlike_agent_literature_kb.py scripts\build_psychological_literature_kb.py scripts\package_plugin.py`: passed.
+- Bundled Node `--check` for `scripts\remote_smoke_playwright.js`, `scripts\remote_install_upload_playwright.js`, and `scripts\plugin_zip_preflight.js`: passed.
+- `py -3.13 scripts\package_plugin.py --output dist\astrbot_plugin_emotional_state.zip`: passed.
+- Bundled Node `scripts\plugin_zip_preflight.js dist\astrbot_plugin_emotional_state.zip astrbot_plugin_emotional_state`: passed, 49 entries.
+- `git diff --check`: passed, with CRLF conversion warnings only.
+- Remote smoke with metadata-matched plugin name/version/display-name assertions: passed.
+  - AstrBot version `4.24.2`.
+  - Plugin API returned 30 plugins.
+  - `astrbot_plugin_emotional_state` was present and activated.
+  - Version `1.0.0` matched.
+  - Display name `多维情绪状态` matched.
+  - Failed plugin data was `{}`.
+
 ## 2026-05-07 Iteration 39
 
 Status: complete.

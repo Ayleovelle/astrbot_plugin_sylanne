@@ -8,7 +8,16 @@ from pathlib import Path
 
 
 ROOT = Path(__file__).resolve().parents[1]
-PLUGIN_NAME = "astrbot_plugin_emotional_state"
+
+
+def metadata_value(name: str) -> str:
+    for line in (ROOT / "metadata.yaml").read_text(encoding="utf-8").splitlines():
+        if line.startswith(f"{name}:"):
+            return line.split(":", 1)[1].strip().strip('"')
+    raise AssertionError(f"metadata.yaml missing {name}")
+
+
+PLUGIN_NAME = metadata_value("name")
 
 
 def load_package_script():
@@ -51,10 +60,16 @@ class PackagePluginTests(unittest.TestCase):
         self.assertFalse(any("/raw/" in path or path.startswith("raw/") for path in files))
         self.assertFalse(any("__pycache__" in path for path in files))
 
+    def test_package_plugin_name_matches_metadata(self):
+        module = load_package_script()
+
+        self.assertEqual(PLUGIN_NAME, metadata_value("name"))
+        self.assertEqual(module.PLUGIN_NAME, metadata_value("name"))
+
     def test_package_zip_has_astrbot_plugin_root(self):
         names, _ = self._zip_names()
 
-        prefix = "astrbot_plugin_emotional_state/"
+        prefix = f"{metadata_value('name')}/"
         self.assertIn(prefix + "metadata.yaml", names)
         self.assertIn(prefix + "main.py", names)
         self.assertIn(prefix + "_conf_schema.json", names)
@@ -78,7 +93,7 @@ class PackagePluginTests(unittest.TestCase):
             with zipfile.ZipFile(output) as archive:
                 first = archive.infolist()[0]
 
-        self.assertEqual(first.filename, "astrbot_plugin_emotional_state/")
+        self.assertEqual(first.filename, f"{metadata_value('name')}/")
         self.assertTrue(first.is_dir())
 
     def test_package_zip_stays_small_enough_for_remote_upload(self):
@@ -124,7 +139,7 @@ class PluginZipPreflightTests(unittest.TestCase):
         prefix = f"{PLUGIN_NAME}/"
         return [
             (prefix, ""),
-            (prefix + "metadata.yaml", "name: astrbot_plugin_emotional_state\n"),
+            (prefix + "metadata.yaml", f"name: {PLUGIN_NAME}\n"),
             (prefix + "main.py", "# runtime\n"),
             (prefix + "README.md", "# docs\n"),
             (prefix + "_conf_schema.json", "{}\n"),

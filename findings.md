@@ -57,6 +57,7 @@ This file stores durable discoveries from implementation, review, and remote tes
 - Public service discovery should reject objects that only mimic the method surface but advertise old or missing public API/schema versions. Other plugins should use `get_emotion_service(...)` and `get_humanlike_service(...)` so method completeness and schema compatibility are checked together.
 - The current LivingMemory-compatible humanlike memory annotation name is `humanlike_state_at_write`, not the earlier roadmap placeholder `humanlike_at_write`. `humanlike_memory_write_enabled` defaults to `true`; early fields such as `humanlike_personification_level` and `humanlike_dependency_guard_level` remain non-schema ideas unless later implemented with docs and tests.
 - Humanlike public snapshots use `flags`, not `simulation_flags`. Humanlike memory annotations expose the source state timestamp as `humanlike_updated_at`; `updated_at` remains a snapshot/state field, not an annotation field.
+- Plugin identity has multiple externally visible surfaces: `metadata.yaml name`, `main.PLUGIN_NAME`, `public_api.PLUGIN_NAME`, `scripts/package_plugin.py` `PLUGIN_NAME`, release zip root, README install/smoke commands, and release checklist commands. These should be tested together so future renames cannot split package identity from remote validation commands.
 
 ## 2026-05-07 Branch Maintenance
 

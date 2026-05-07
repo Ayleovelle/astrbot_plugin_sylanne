@@ -126,6 +126,63 @@ class RemoteSmokeContractTests(unittest.TestCase):
                     ),
                 )
 
+    def test_documented_plugin_identity_values_match_metadata(self):
+        readme = (ROOT / "README.md").read_text(encoding="utf-8")
+        checklist = (ROOT / "docs" / "release_branch_sync_checklist.md").read_text(
+            encoding="utf-8",
+        )
+        plugin_name = self._metadata_value("name")
+        expected_zip = f"dist\\{plugin_name}.zip"
+
+        for document_name, document in (
+            ("README.md", readme),
+            ("docs/release_branch_sync_checklist.md", checklist),
+        ):
+            with self.subTest(document=document_name):
+                expected_plugin_values = self._powershell_env_values(
+                    document,
+                    "ASTRBOT_EXPECT_PLUGIN",
+                )
+                self.assertGreaterEqual(len(expected_plugin_values), 1)
+                self.assertEqual(
+                    {plugin_name},
+                    set(expected_plugin_values),
+                )
+                if "ASTRBOT_REMOTE_INSTALL_ZIP" in document:
+                    self.assertEqual(
+                        [expected_zip],
+                        self._powershell_env_values(
+                            document,
+                            "ASTRBOT_REMOTE_INSTALL_ZIP",
+                        ),
+                    )
+                self.assertIn(
+                    f"& $node scripts\\plugin_zip_preflight.js {expected_zip} {plugin_name}",
+                    document,
+                )
+                self.assertIn(
+                    f"py -3.13 scripts\\package_plugin.py --output {expected_zip}",
+                    document,
+                )
+
+    def test_documented_plugin_slug_references_match_metadata(self):
+        plugin_name = self._metadata_value("name")
+        allowed_external_references = {"astrbot_plugin_volcengine_asr"}
+
+        for relative_path in (
+            Path("README.md"),
+            Path("docs") / "release_branch_sync_checklist.md",
+        ):
+            document = (ROOT / relative_path).read_text(encoding="utf-8")
+            slugs = set(re.findall(r"astrbot_plugin_[A-Za-z0-9_]+", document))
+
+            with self.subTest(document=str(relative_path)):
+                self.assertGreaterEqual(slugs, {plugin_name})
+                self.assertEqual(
+                    set(),
+                    slugs - {plugin_name} - allowed_external_references,
+                )
+
     def test_readme_badges_and_compatibility_match_metadata(self):
         readme = (ROOT / "README.md").read_text(encoding="utf-8")
         version = self._metadata_value("version")
