@@ -50,6 +50,7 @@ This file stores durable discoveries from implementation, review, and remote tes
 - Remote smoke now reports `apiHealth.statVersion`, `apiHealth.pluginGet`, and `apiHealth.failedPlugins` so endpoint status failures are visible in one place before reading the plugin summary or UI probe diagnostics.
 - In this Windows workspace, bare `node` may fail with access denied, while Codex bundled Node works. README and the release checklist now define `$node` with a Codex bundled Node fallback and set `NODE_PATH` for Playwright-dependent scripts.
 - Contract tests now require the README and release checklist to share the same three-line `$node` fallback snippet and define it before the first documented Node/Playwright command.
+- README's test coverage matrix now reflects the expanded remote smoke contract: credentials by environment, read-only behavior, ignored screenshots, API health summary, UI best-effort diagnostics, upload-script boundaries, and bundled Node documentation.
 
 ## 2026-05-07 Branch Maintenance
 

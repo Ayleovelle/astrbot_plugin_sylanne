@@ -1327,7 +1327,7 @@ $env:ASTRBOT_REMOTE_INSTALL_CONFIRM = "1"
 | `tests/test_literature_kb_scripts.py` | 三个文献 KB 构建脚本的去重、分类、输出结构和坏缓存容错。 |
 | `tests/test_package_plugin.py` | 发布 zip 的目录根、成品 KB 纳入、raw/cache/tests/scripts/output 排除、包体积上限和上传前 zip 预检失败路径。 |
 | `tests/test_psychological_screening.py` | 非诊断筛查、量表启发、红旗信号、长期轨迹。 |
-| `tests/test_remote_smoke_contract.py` | 远程烟测脚本必须使用环境变量读取凭据、保持只读、忽略截图产物。 |
+| `tests/test_remote_smoke_contract.py` | 远程烟测脚本必须使用环境变量读取凭据、保持只读、忽略截图产物，并锁定 API 健康摘要、UI best-effort 字段、上传脚本边界和 bundled Node 文档契约。 |
 
 ### 持久迭代计划
 
