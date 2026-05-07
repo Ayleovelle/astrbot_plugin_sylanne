@@ -559,3 +559,32 @@ Validation complete:
   - `pageData.hasExpectedPluginDisplayName=true`.
   - `pageData.hasExpectedPluginInUi=true`.
 
+## 2026-05-07 Iteration 29
+
+Status: complete.
+
+- Removed a misleading remote smoke UI compatibility edge:
+  - `pageData.hasExpectedPluginId` remains the exact plugin-directory/id text check,
+  - `pageData.hasExpectedPluginDisplayName` remains the display-name text check,
+  - `pageData.hasExpectedPluginInUi` remains the combined UI diagnostic,
+  - legacy `pageData.hasExpectedPlugin` now aliases `hasExpectedPluginInUi`.
+- Updated README to document the legacy alias explicitly.
+- Updated the remote smoke contract test to lock `hasExpectedPlugin: hasExpectedPluginInUi`.
+
+Validation complete:
+
+- `py -3.13 -m unittest tests.test_remote_smoke_contract -v`: 8 tests passed.
+- Bundled Node `--check scripts\remote_smoke_playwright.js`: passed.
+- `py -3.13 -m unittest discover -s tests -v`: 141 tests passed.
+- `py -3.13 -m py_compile main.py emotion_engine.py humanlike_engine.py psychological_screening.py public_api.py prompts.py scripts\build_literature_kb.py scripts\build_humanlike_agent_literature_kb.py scripts\build_psychological_literature_kb.py scripts\package_plugin.py`: passed.
+- Bundled Node `--check scripts\remote_install_upload_playwright.js`: passed.
+- Bundled Node `--check scripts\plugin_zip_preflight.js`: passed.
+- Bundled Node `scripts\plugin_zip_preflight.js dist\astrbot_plugin_emotional_state.zip astrbot_plugin_emotional_state`: passed, 48 entries.
+- `git diff --check`: passed, with CRLF conversion warnings only.
+- Remote smoke with version/display-name assertions: passed.
+  - `pageData.hasExpectedPlugin=true`.
+  - `pageData.hasExpectedPluginId=false`.
+  - `pageData.hasExpectedPluginDisplayName=true`.
+  - `pageData.hasExpectedPluginInUi=true`.
+  - API-level install, activation, version, display-name, and failed-plugin checks all passed.
+

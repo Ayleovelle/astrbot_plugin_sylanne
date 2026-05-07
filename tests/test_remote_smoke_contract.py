@@ -44,6 +44,7 @@ class RemoteSmokeContractTests(unittest.TestCase):
         self.assertIn("ASTRBOT_REMOTE_ARTIFACT_DIR", script)
         self.assertIn("expectedFailedPlugin", script)
         self.assertIn("expectedPluginRuntime", script)
+        self.assertIn("hasExpectedPlugin: hasExpectedPluginInUi", script)
         self.assertIn("hasExpectedPluginDisplayName", script)
         self.assertIn("hasExpectedPluginInUi", script)
         self.assertIn("titleHasExpectedPlugin", script)

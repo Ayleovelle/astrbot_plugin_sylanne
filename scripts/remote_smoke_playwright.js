@@ -278,15 +278,16 @@ async function main() {
           || (expectedDisplayName && title.includes(expectedDisplayName))
         ))
         : null;
+      const hasExpectedPluginInUi = expected || expectedDisplayName
+        ? Boolean(hasExpectedPluginId || hasExpectedPluginDisplayName || titleHasExpectedPlugin)
+        : null;
       return {
         title: document.title,
         url: location.href,
-        hasExpectedPlugin: hasExpectedPluginId,
+        hasExpectedPlugin: hasExpectedPluginInUi,
         hasExpectedPluginId,
         hasExpectedPluginDisplayName,
-        hasExpectedPluginInUi: expected || expectedDisplayName
-          ? Boolean(hasExpectedPluginId || hasExpectedPluginDisplayName || titleHasExpectedPlugin)
-          : null,
+        hasExpectedPluginInUi,
         uiProbeStatus: pluginTitles.length > 0 || hasExpectedPluginId || hasExpectedPluginDisplayName
           ? "ready"
           : waitStatus,
