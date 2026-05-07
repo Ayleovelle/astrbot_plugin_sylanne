@@ -575,13 +575,13 @@ E_t = X_t
 情绪会被单轮文本完全支配，表现为跳变。插件改为求解一个带惯性的加权最小化问题：
 
 ```math
-E_t = \underset{E}{\arg\min}\; J(E)
+E_t = \arg\min_E  J(E)
 ```
 
 ```math
 J(E) =
-(1-\alpha_t)\lVert E-B_t\rVert_W^2
-+ \alpha_t\lVert E-X_t\rVert_W^2
+(1-\alpha_t)\|E-B_t\|_W^2
++ \alpha_t\|E-X_t\|_W^2
 ```
 
 其中 `B_t` 是上一状态经人格基线回归后的先验：
@@ -629,7 +629,7 @@ E'_t = B_t + \alpha_t(X_t-B_t)
 
 ```math
 \alpha_t =
-\operatorname{clamp}\left(
+\mathrm{clamp}\left(
 \alpha_{\mathrm{base},p}\,g(c_t)(1+r_p\delta_t),
 \alpha_{\min},
 \alpha_{\max}
@@ -653,7 +653,7 @@ g(c_t) = \frac{1}{1+\exp[-k(c_t-c_0)]}
 \delta_t =
 \sqrt{
 \frac{(X_t-B_t)^{\mathsf T}W(X_t-B_t)}
-{\operatorname{tr}(W)}
+{\mathrm{tr}(W)}
 }
 ```
 
@@ -664,7 +664,7 @@ g(c_t) = \frac{1}{1+\exp[-k(c_t-c_0)]}
 惊讶度提升唤醒度：
 
 ```math
-A_t = A'_t + \eta\alpha_t\delta_t\left(1-\lvert A'_t\rvert\right)
+A_t = A'_t + \eta\alpha_t\delta_t\left(1-|A'_t|\right)
 ```
 
 可控性牵引支配感：
@@ -717,7 +717,7 @@ Q_t =
 这些倾向按真实时间衰减：
 
 ```math
-Q_t = 2^{-\Delta t/H_q}Q_{t-1}+\operatorname{impulse}(E_t,X_t,\mathrm{appraisal}_t)
+Q_t = 2^{-\Delta t/H_q}Q_{t-1}+\mathrm{impulse}(E_t,X_t,\mathrm{appraisal}_t)
 ```
 
 | 后果维度 | 字段 | 常见表现 |

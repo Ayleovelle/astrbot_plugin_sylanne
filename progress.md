@@ -1655,4 +1655,18 @@ Status: in progress.
   - `py -3.13 scripts\package_plugin.py --output dist\astrbot_plugin_emotional_state.zip`: passed.
   - bundled Node `scripts\plugin_zip_preflight.js dist\astrbot_plugin_emotional_state.zip astrbot_plugin_emotional_state`: passed with 52 entries.
   - rebuilt zip SHA256: `ed2c93505d0caa3f567293fea272f4d3a1556da817d08d27cccd602c62641cbf`.
+- User reported GitHub rendered an error: `The following macros are not allowed: operatorname`.
+- Replaced GitHub-sensitive macros while keeping LaTeX math blocks:
+  - `\operatorname{...}` -> `\mathrm{...}`,
+  - `\underset{E}{\arg\min}` -> `\arg\min_E`,
+  - `\lVert...\rVert` -> `\|...\|`,
+  - `\lvert...\rvert` -> plain `|...|`,
+  - `\mathbf 1` -> `\mathrm{I}`.
+- Macro scan now shows no `operatorname`, `underset`, `lVert`, `rVert`, `lvert`, `rvert`, or `mathbf` in README/theory formulas.
+- Re-ran contract tests: 44 passed.
+- Rebuilt zip after macro compatibility pass:
+  - `py -3.13 scripts\package_plugin.py --output dist\astrbot_plugin_emotional_state.zip`: passed.
+  - bundled Node preflight: passed with 52 entries.
+  - SHA256: `6e589f2ce7b7e69547e84c35bfd08d6a1a7fe2bbf81794dcdf710ca0508bb5db`.
+- Deleted the incomplete GitHub Release `starter` asset left by the timed-out upload attempt.
 
