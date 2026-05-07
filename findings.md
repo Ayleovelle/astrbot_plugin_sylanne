@@ -57,6 +57,18 @@ This file stores durable discoveries from implementation, review, and remote tes
 - Most feature branches point to the early baseline commit `e640a36`; `codex/humanlike-agent-roadmap` points to `9a59dd8`; `main` points to `4010a12` plus current uncommitted Iteration 11-22 changes.
 - Added `codex/release-packaging` to the documented strategy as a maintenance branch for release zips, upload preflight, remote install scripts, and remote smoke contracts.
 - Do not reset or move feature branches from the current dirty working tree. Recommended order is: finish validation on `main`, commit the complete baseline, then sync `codex/complete-emotional-bot-plugin` and feature branches from a clean state.
+- Main baseline commit `976ee99` was created after validation.
+- Maintenance branches were synced to `976ee99` from a clean worktree:
+  - `codex/complete-emotional-bot-plugin`,
+  - `codex/emotion-core`,
+  - `codex/astrbot-integration`,
+  - `codex/public-api-memory`,
+  - `codex/psychological-screening`,
+  - `codex/literature-kbs`,
+  - `codex/humanlike-agent-roadmap`,
+  - `codex/tests-validation`,
+  - `codex/release-packaging`,
+  - `codex/docs-config`.
 
 ## 2026-05-07 Review Findings
 
