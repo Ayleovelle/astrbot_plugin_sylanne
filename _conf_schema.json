@@ -280,6 +280,82 @@
     "default": true,
     "hint": "默认开启，用于异常状态、严重后果或调试。"
   },
+  "enable_moral_repair_state": {
+    "description": "Enable moral repair / trust repair state simulation",
+    "type": "bool",
+    "default": false,
+    "hint": "Default off. Maintains moral_repair_state for deception/harm risk signals, guilt, responsibility, apology, compensation, and trust repair. It must not generate deception or wrongdoing strategies."
+  },
+  "moral_repair_injection_strength": {
+    "description": "Moral repair prompt injection strength",
+    "type": "float",
+    "default": 0.35,
+    "hint": "0 disables moral repair prompt injection. Values greater than 0 only apply when inject_state and enable_moral_repair_state are both enabled."
+  },
+  "moral_repair_alpha_base": {
+    "description": "Moral repair base update step",
+    "type": "float",
+    "default": 0.28
+  },
+  "moral_repair_alpha_min": {
+    "description": "Moral repair minimum update step",
+    "type": "float",
+    "default": 0.03
+  },
+  "moral_repair_alpha_max": {
+    "description": "Moral repair maximum update step",
+    "type": "float",
+    "default": 0.42
+  },
+  "moral_repair_confidence_midpoint": {
+    "description": "Moral repair confidence gate midpoint",
+    "type": "float",
+    "default": 0.5
+  },
+  "moral_repair_confidence_slope": {
+    "description": "Moral repair confidence gate slope",
+    "type": "float",
+    "default": 6.0
+  },
+  "moral_repair_state_half_life_seconds": {
+    "description": "Moral repair real-time half-life in seconds",
+    "type": "float",
+    "default": 604800,
+    "hint": "Default 7 days. Long-running guilt, responsibility, avoidance, and trust repair drift by real elapsed time and cannot be flushed by message flooding."
+  },
+  "moral_repair_min_update_interval_seconds": {
+    "description": "Moral repair anti-spam minimum effective update interval",
+    "type": "float",
+    "default": 8
+  },
+  "moral_repair_rapid_update_half_life_seconds": {
+    "description": "Moral repair rapid-update gate half-life in seconds",
+    "type": "float",
+    "default": 30
+  },
+  "moral_repair_max_impulse_per_update": {
+    "description": "Moral repair maximum impulse per update",
+    "type": "float",
+    "default": 0.16,
+    "hint": "Caps a single text observation so long text cannot overwrite the long-term state."
+  },
+  "moral_repair_trajectory_limit": {
+    "description": "Moral repair maximum trajectory points",
+    "type": "int",
+    "default": 40
+  },
+  "moral_repair_memory_write_enabled": {
+    "description": "Attach moral repair state annotations to memory writes",
+    "type": "bool",
+    "default": true,
+    "hint": "build_emotion_memory_payload adds moral_repair_state_at_write so livingmemory-like plugins can store responsibility, guilt, compensation, and trust-repair state at write time."
+  },
+  "allow_moral_repair_reset_backdoor": {
+    "description": "Allow manual/API reset backdoor for moral repair state",
+    "type": "bool",
+    "default": true,
+    "hint": "Default on for abnormal states, severe consequences, and debugging."
+  },
   "psychological_alpha_base": {
     "description": "心理筛查状态基础更新步长",
     "type": "float",

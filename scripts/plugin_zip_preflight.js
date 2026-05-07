@@ -136,6 +136,7 @@ function assertZipLooksUploadable(zipPath, expectedPlugin, options = {}) {
     `${expectedPlugin}/main.py`,
     `${expectedPlugin}/emotion_engine.py`,
     `${expectedPlugin}/humanlike_engine.py`,
+    `${expectedPlugin}/moral_repair_engine.py`,
     `${expectedPlugin}/psychological_screening.py`,
     `${expectedPlugin}/prompts.py`,
     `${expectedPlugin}/public_api.py`,

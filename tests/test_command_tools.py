@@ -74,6 +74,7 @@ def new_plugin(config=None):
     from emotion_engine import EmotionEngine, EmotionParameters
     from humanlike_engine import HumanlikeEngine
     from main import EmotionalStatePlugin
+    from moral_repair_engine import MoralRepairEngine
     from psychological_screening import PsychologicalScreeningEngine
 
     plugin = EmotionalStatePlugin.__new__(EmotionalStatePlugin)
@@ -82,9 +83,11 @@ def new_plugin(config=None):
     plugin.engine = EmotionEngine(plugin.base_parameters)
     plugin.psychological_engine = PsychologicalScreeningEngine()
     plugin.humanlike_engine = HumanlikeEngine()
+    plugin.moral_repair_engine = MoralRepairEngine()
     plugin._memory_cache = {}
     plugin._psychological_memory_cache = {}
     plugin._humanlike_memory_cache = {}
+    plugin._moral_repair_memory_cache = {}
     plugin._last_request_text = {}
     plugin.context = SimpleNamespace()
     return plugin
@@ -178,6 +181,7 @@ class CommandAndToolSmokeTests(unittest.TestCase):
                 "get_bot_emotion_state",
                 "simulate_bot_emotion_update",
                 "get_bot_humanlike_state",
+                "get_bot_moral_repair_state",
             },
         )
         for tool in sorted(tools):
@@ -243,6 +247,45 @@ class CommandAndToolSmokeTests(unittest.TestCase):
         self.assertEqual(len(outputs), 1)
         self.assertIn("\u5173\u95ed", outputs[0])
 
+    def test_moral_repair_reset_command_uses_independent_backdoor(self):
+        allowed = new_plugin(
+            {
+                "allow_emotion_reset_backdoor": False,
+                "allow_moral_repair_reset_backdoor": True,
+            },
+        )
+        deleted = []
+
+        async def fake_delete_moral_repair_state(self, session_key):
+            deleted.append(session_key)
+
+        bind_async(allowed, "_delete_moral_repair_state", fake_delete_moral_repair_state)
+
+        outputs = asyncio.run(
+            collect_async_generator(allowed.moral_repair_reset(FakeEvent("s-moral"))),
+        )
+
+        self.assertEqual(deleted, ["s-moral"])
+        self.assertEqual(len(outputs), 1)
+        self.assertIn("\u5df2\u91cd\u7f6e", outputs[0])
+
+    def test_moral_repair_reset_command_denies_when_backdoor_disabled(self):
+        denied = new_plugin({"allow_moral_repair_reset_backdoor": False})
+        deleted = []
+
+        async def fake_delete_moral_repair_state(self, session_key):
+            deleted.append(session_key)
+
+        bind_async(denied, "_delete_moral_repair_state", fake_delete_moral_repair_state)
+
+        outputs = asyncio.run(
+            collect_async_generator(denied.moral_repair_reset(FakeEvent("s-moral"))),
+        )
+
+        self.assertEqual(deleted, [])
+        self.assertEqual(len(outputs), 1)
+        self.assertIn("\u5173\u95ed", outputs[0])
+
     def test_disabled_psych_state_command_does_not_load_state(self):
         plugin = new_plugin()
 
@@ -270,6 +313,21 @@ class CommandAndToolSmokeTests(unittest.TestCase):
 
         outputs = asyncio.run(
             collect_async_generator(plugin.humanlike_status(FakeEvent())),
+        )
+
+        self.assertEqual(len(outputs), 1)
+        self.assertIn("\u672a\u542f\u7528", outputs[0])
+
+    def test_disabled_moral_repair_state_command_does_not_load_state(self):
+        plugin = new_plugin()
+
+        async def fake_load_moral_repair_state(self, session_key):
+            raise AssertionError("disabled command must not load moral repair state")
+
+        bind_async(plugin, "_load_moral_repair_state", fake_load_moral_repair_state)
+
+        outputs = asyncio.run(
+            collect_async_generator(plugin.moral_repair_status(FakeEvent())),
         )
 
         self.assertEqual(len(outputs), 1)
@@ -370,6 +428,24 @@ class CommandAndToolSmokeTests(unittest.TestCase):
 
         self.assertFalse(payload["enabled"])
         self.assertEqual(payload["reason"], "enable_humanlike_state is false")
+        self.assertEqual(payload["exposure"], "plugin_safe")
+
+    def test_get_bot_moral_repair_state_tool_default_disabled_payload_is_json(self):
+        plugin = new_plugin()
+
+        payload = json.loads(
+            asyncio.run(
+                collect_async_generator(
+                    plugin.get_bot_moral_repair_state_tool(
+                        FakeEvent(),
+                        detail="summary",
+                    ),
+                ),
+            )[0],
+        )
+
+        self.assertFalse(payload["enabled"])
+        self.assertEqual(payload["reason"], "enable_moral_repair_state is false")
         self.assertEqual(payload["exposure"], "plugin_safe")
 
     def test_llm_tool_simulate_bot_emotion_update_is_read_only(self):

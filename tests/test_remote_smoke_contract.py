@@ -205,6 +205,7 @@ class RemoteSmokeContractTests(unittest.TestCase):
             "main.py",
             "emotion_engine.py",
             "humanlike_engine.py",
+            "moral_repair_engine.py",
             "psychological_screening.py",
             "prompts.py",
             "public_api.py",
@@ -328,6 +329,7 @@ class RemoteSmokeContractTests(unittest.TestCase):
             "main.py",
             "emotion_engine.py",
             "humanlike_engine.py",
+            "moral_repair_engine.py",
             "psychological_screening.py",
             "prompts.py",
             "public_api.py",
@@ -442,6 +444,7 @@ class RemoteSmokeContractTests(unittest.TestCase):
             if node.name not in {
                 "EmotionServiceProtocol",
                 "HumanlikeStateServiceProtocol",
+                "MoralRepairStateServiceProtocol",
             }:
                 continue
             for item in node.body:
@@ -454,6 +457,7 @@ class RemoteSmokeContractTests(unittest.TestCase):
 
         self.assertIn("get_emotion_service", readme)
         self.assertIn("get_humanlike_service", readme)
+        self.assertIn("get_moral_repair_service", readme)
         self.assertIn("校验核心方法是否完整", readme)
         self.assertIn("校验公开版本/schema 是否匹配", readme)
 

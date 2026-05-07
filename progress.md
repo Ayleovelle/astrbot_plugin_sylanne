@@ -1404,3 +1404,28 @@ Validation complete:
 - Leak scan for remote address/password in this iteration's diff: passed.
 - Remote smoke with expected plugin version/display-name assertions: passed.
 
+## 2026-05-07 Iteration 59
+
+Status: complete.
+
+- Added a safe moral repair subsystem instead of implementing deception or wrongdoing strategy generation:
+  - new `moral_repair_engine.py` with deception/harm risk signals, guilt, shame, responsibility, apology readiness, compensation readiness, trust repair, accountability, avoidance risk, time-based decay, rapid-update gating, prompt fragments, memory annotations, and public payload boundaries,
+  - plugin lifecycle integration updates moral repair state from request/response text when enabled and injects repair-oriented prompt context when configured,
+  - public API helper `get_moral_repair_service(...)`, schema constant, plugin methods, commands, and LLM tool are documented and contract-tested,
+  - LivingMemory-shaped payload can include `moral_repair_state_at_write`,
+  - release package and upload preflight now require `moral_repair_engine.py`.
+
+Validation complete:
+
+- `py -3.13 -m unittest tests.test_package_plugin tests.test_remote_smoke_contract -v`: 32 tests passed.
+- `py -3.13 -m unittest tests.test_command_tools tests.test_public_api tests.test_moral_repair_engine tests.test_config_schema_contract -v`: 94 tests passed.
+- `py -3.13 -m unittest discover -s tests -v`: 193 tests passed.
+- `py -3.13 -m py_compile main.py emotion_engine.py humanlike_engine.py moral_repair_engine.py psychological_screening.py prompts.py public_api.py scripts\build_literature_kb.py scripts\build_psychological_literature_kb.py scripts\build_humanlike_agent_literature_kb.py scripts\package_plugin.py`: passed.
+- `py -3.13 -m json.tool _conf_schema.json`: passed.
+- Bundled Node `--check` for `scripts\remote_smoke_playwright.js`, `scripts\remote_install_upload_playwright.js`, and `scripts\plugin_zip_preflight.js`: passed.
+- `py -3.13 scripts\package_plugin.py --output dist\astrbot_plugin_emotional_state.zip`: passed.
+- Bundled Node `scripts\plugin_zip_preflight.js dist\astrbot_plugin_emotional_state.zip astrbot_plugin_emotional_state`: passed, 50 entries.
+- `git diff --check`: passed, with CRLF conversion warnings only.
+- Leak scan for remote address/password in the repository excluding generated/runtime directories: passed.
+- Remote read-only smoke with expected plugin version/display-name assertions: passed. The target plugin was installed, activated, version-matched, display-name-matched, and absent from failed-plugin records.
+

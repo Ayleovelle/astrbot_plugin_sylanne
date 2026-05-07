@@ -110,3 +110,10 @@ This file stores durable discoveries from implementation, review, and remote tes
   `C:\Users\pidan\.cache\codex-runtimes\codex-primary-runtime\dependencies\node\node_modules`
 - Local Edge executable exists at:
   `C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe`
+
+## 2026-05-07 Moral Repair Boundary
+
+- The requested "deception / wrongdoing / guilt / compensation" extension was implemented as a safe moral repair model, not as a capability for generating deception tactics, cover-up plans, manipulation, retaliation, or evasion of accountability.
+- Public moral repair payloads expose `deception_risk` and `harm_risk` only as risk signals. They also expose allowed repair actions such as clarification, correction, apology, compensation, trust repair, accountability, and human review.
+- `moral_repair_state_at_write` is a LivingMemory-compatible snapshot annotation and should be persisted alongside the memory text when enabled.
+- Release contracts must include `moral_repair_engine.py` anywhere runtime root files are enumerated: package file selection, zip preflight fixtures, README install tree, README upload preflight text, and release checklist.

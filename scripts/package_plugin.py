@@ -13,6 +13,7 @@ INCLUDE_ROOT_FILES = {
     "main.py",
     "emotion_engine.py",
     "humanlike_engine.py",
+    "moral_repair_engine.py",
     "psychological_screening.py",
     "prompts.py",
     "public_api.py",

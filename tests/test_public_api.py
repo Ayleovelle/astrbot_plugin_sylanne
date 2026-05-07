@@ -13,10 +13,12 @@ from public_api import (
     EMOTION_MEMORY_SCHEMA_VERSION,
     EMOTION_SCHEMA_VERSION,
     HUMANLIKE_STATE_SCHEMA_VERSION,
+    MORAL_REPAIR_STATE_SCHEMA_VERSION,
     PSYCHOLOGICAL_RISK_BOOLEAN_FIELDS,
     PSYCHOLOGICAL_SCREENING_SCHEMA_VERSION,
     get_emotion_service,
     get_humanlike_service,
+    get_moral_repair_service,
 )
 
 
@@ -194,6 +196,28 @@ class FakeHumanlikeService(FakeEmotionService):
         return True
 
 
+class FakeMoralRepairService(FakeEmotionService):
+    moral_repair_state_schema_version = "astrbot.moral_repair_state.v1"
+
+    async def get_moral_repair_snapshot(self, *args, **kwargs):
+        return {}
+
+    async def get_moral_repair_values(self, *args, **kwargs):
+        return {}
+
+    async def get_moral_repair_prompt_fragment(self, *args, **kwargs):
+        return ""
+
+    async def observe_moral_repair_text(self, *args, **kwargs):
+        return {}
+
+    async def simulate_moral_repair_update(self, *args, **kwargs):
+        return {}
+
+    async def reset_moral_repair_state(self, *args, **kwargs):
+        return True
+
+
 class PublicApiTests(unittest.TestCase):
     def test_get_emotion_service_returns_activated_plugin(self):
         plugin = FakeEmotionService()
@@ -286,6 +310,12 @@ class PublicApiTests(unittest.TestCase):
             "astrbot.humanlike_state.v1",
         )
 
+    def test_moral_repair_schema_constant_is_exported(self):
+        self.assertEqual(
+            MORAL_REPAIR_STATE_SCHEMA_VERSION,
+            "astrbot.moral_repair_state.v1",
+        )
+
     def test_get_emotion_service_rejects_plugin_without_memory_payload_api(self):
         class OldEmotionService(FakeEmotionService):
             build_emotion_memory_payload = None
@@ -351,11 +381,30 @@ class PublicApiTests(unittest.TestCase):
 
         self.assertIsNone(get_humanlike_service(context))
 
+    def test_get_moral_repair_service_returns_activated_plugin(self):
+        plugin = FakeMoralRepairService()
+        context = FakeContext(SimpleNamespace(activated=True, star_cls=plugin))
+        self.assertIs(get_moral_repair_service(context), plugin)
+
+    def test_get_moral_repair_service_rejects_incomplete_plugin(self):
+        context = FakeContext(
+            SimpleNamespace(activated=True, star_cls=FakeEmotionService()),
+        )
+        self.assertIsNone(get_moral_repair_service(context))
+
+    def test_get_moral_repair_service_rejects_wrong_schema_version(self):
+        plugin = FakeMoralRepairService()
+        plugin.moral_repair_state_schema_version = "astrbot.moral_repair_state.v0"
+        context = FakeContext(SimpleNamespace(activated=True, star_cls=plugin))
+
+        self.assertIsNone(get_moral_repair_service(context))
+
     def test_public_service_contract_matches_plugin_implementation(self):
         public_tree = module_tree("public_api.py")
         main_tree = module_tree("main.py")
         emotion_protocol = class_async_methods(public_tree, "EmotionServiceProtocol")
         humanlike_protocol = class_async_methods(public_tree, "HumanlikeStateServiceProtocol")
+        moral_repair_protocol = class_async_methods(public_tree, "MoralRepairStateServiceProtocol")
         plugin_methods = class_async_methods(main_tree, "EmotionalStatePlugin")
         main_required = set(
             assigned_string_tuple(main_tree, "_REQUIRED_EMOTION_SERVICE_METHODS"),
@@ -366,12 +415,17 @@ class PublicApiTests(unittest.TestCase):
         public_humanlike_required = set(
             function_required_tuple(public_tree, "get_humanlike_service"),
         )
+        public_moral_repair_required = set(
+            function_required_tuple(public_tree, "get_moral_repair_service"),
+        )
 
         self.assertEqual(emotion_protocol, main_required)
         self.assertEqual(emotion_protocol, public_required)
         self.assertEqual(set(), emotion_protocol - plugin_methods)
         self.assertEqual(humanlike_protocol, public_humanlike_required)
         self.assertEqual(set(), public_humanlike_required - plugin_methods)
+        self.assertEqual(moral_repair_protocol, public_moral_repair_required)
+        self.assertEqual(set(), public_moral_repair_required - plugin_methods)
 
     def test_main_register_decorator_uses_plugin_name_constant(self):
         tree = ast.parse((ROOT / "main.py").read_text(encoding="utf-8"))
@@ -403,10 +457,14 @@ class PublicApiTests(unittest.TestCase):
         humanlike_protocol_constants = emotion_protocol_constants | {
             "humanlike_state_schema_version",
         }
+        moral_repair_protocol_constants = emotion_protocol_constants | {
+            "moral_repair_state_schema_version",
+        }
         plugin_constants = class_constant_names(main_tree, "EmotionalStatePlugin")
 
         self.assertLessEqual(emotion_protocol_constants, plugin_constants)
         self.assertLessEqual(humanlike_protocol_constants, plugin_constants)
+        self.assertLessEqual(moral_repair_protocol_constants, plugin_constants)
         self.assertIn("EMOTION_API_VERSION", {node.id for node in ast.walk(public_tree) if isinstance(node, ast.Name)})
         self.assertIn("PUBLIC_API_VERSION", {node.id for node in ast.walk(main_tree) if isinstance(node, ast.Name)})
 
@@ -560,6 +618,7 @@ class MemoryPayloadPublicApiTests(unittest.TestCase):
         from emotion_engine import EmotionEngine, EmotionParameters
         from humanlike_engine import HumanlikeEngine
         from main import EmotionalStatePlugin
+        from moral_repair_engine import MoralRepairEngine
         from psychological_screening import PsychologicalScreeningEngine
 
         plugin = EmotionalStatePlugin.__new__(EmotionalStatePlugin)
@@ -568,9 +627,11 @@ class MemoryPayloadPublicApiTests(unittest.TestCase):
         plugin.engine = EmotionEngine(plugin.base_parameters)
         plugin.psychological_engine = PsychologicalScreeningEngine()
         plugin.humanlike_engine = HumanlikeEngine()
+        plugin.moral_repair_engine = MoralRepairEngine()
         plugin._memory_cache = {}
         plugin._psychological_memory_cache = {}
         plugin._humanlike_memory_cache = {}
+        plugin._moral_repair_memory_cache = {}
         plugin._last_request_text = {}
         plugin.context = SimpleNamespace()
         return plugin
@@ -1260,6 +1321,108 @@ class MemoryPayloadPublicApiTests(unittest.TestCase):
         self.assertFalse(payload["observation"]["committed"])
         self.assertIn("boundary_pressure", payload["flags"])
 
+    def test_moral_repair_observe_is_disabled_by_default_for_commits(self):
+        self._install_astrbot_stubs()
+        from main import EmotionalStatePlugin
+        from moral_repair_engine import MoralRepairEngine
+
+        async def fake_load(self, session_key):
+            raise AssertionError("disabled moral repair commit must not load state")
+
+        original_load = EmotionalStatePlugin._load_moral_repair_state
+        EmotionalStatePlugin._load_moral_repair_state = fake_load
+        try:
+            plugin = self._new_plugin()
+            plugin.moral_repair_engine = MoralRepairEngine()
+            payload = asyncio.run(
+                plugin.observe_moral_repair_text(
+                    session_key="s-disabled",
+                    text="I lied.",
+                    commit=True,
+                ),
+            )
+        finally:
+            EmotionalStatePlugin._load_moral_repair_state = original_load
+
+        self.assertFalse(payload["enabled"])
+        self.assertEqual(payload["reason"], "enable_moral_repair_state is false")
+        self.assertFalse(payload["diagnostic"])
+
+    def test_moral_repair_observe_can_commit_when_enabled(self):
+        self._install_astrbot_stubs()
+        from main import EmotionalStatePlugin
+        from moral_repair_engine import MoralRepairEngine, MoralRepairState
+
+        saved = []
+
+        async def fake_load(self, session_key):
+            state = MoralRepairState.initial()
+            state.updated_at = 990.0
+            return state
+
+        async def fake_save(self, session_key, state):
+            saved.append((session_key, state))
+
+        original_load = EmotionalStatePlugin._load_moral_repair_state
+        original_save = EmotionalStatePlugin._save_moral_repair_state
+        EmotionalStatePlugin._load_moral_repair_state = fake_load
+        EmotionalStatePlugin._save_moral_repair_state = fake_save
+        try:
+            plugin = self._new_plugin({"enable_moral_repair_state": True})
+            plugin.moral_repair_engine = MoralRepairEngine()
+            payload = asyncio.run(
+                plugin.observe_moral_repair_text(
+                    session_key="s1",
+                    text="I was wrong, sorry. I will make it up.",
+                    source="unit_test",
+                    observed_at=1000.0,
+                ),
+            )
+        finally:
+            EmotionalStatePlugin._load_moral_repair_state = original_load
+            EmotionalStatePlugin._save_moral_repair_state = original_save
+
+        self.assertEqual(saved[0][0], "s1")
+        self.assertEqual(payload["session_key"], "s1")
+        self.assertTrue(payload["observation"]["committed"])
+        self.assertIn("apology_cue", payload["flags"])
+        self.assertIn("apologize", payload["repair"]["recommended_actions"])
+
+    def test_moral_repair_simulate_does_not_save(self):
+        self._install_astrbot_stubs()
+        from main import EmotionalStatePlugin
+        from moral_repair_engine import MoralRepairEngine, MoralRepairState
+
+        async def fake_load(self, session_key):
+            state = MoralRepairState.initial()
+            state.updated_at = 990.0
+            return state
+
+        async def fake_save(self, session_key, state):
+            raise AssertionError("simulate_moral_repair_update must not save")
+
+        original_load = EmotionalStatePlugin._load_moral_repair_state
+        original_save = EmotionalStatePlugin._save_moral_repair_state
+        EmotionalStatePlugin._load_moral_repair_state = fake_load
+        EmotionalStatePlugin._save_moral_repair_state = fake_save
+        try:
+            plugin = self._new_plugin({"enable_moral_repair_state": True})
+            plugin.moral_repair_engine = MoralRepairEngine()
+            payload = asyncio.run(
+                plugin.simulate_moral_repair_update(
+                    session_key="s1",
+                    text="I lied and I should correct the falsehood.",
+                    observed_at=1000.0,
+                ),
+            )
+        finally:
+            EmotionalStatePlugin._load_moral_repair_state = original_load
+            EmotionalStatePlugin._save_moral_repair_state = original_save
+
+        self.assertFalse(payload["observation"]["committed"])
+        self.assertIn("deception_risk_detected", payload["flags"])
+        self.assertTrue(payload["risk"]["must_not_generate_strategy"])
+
     def test_memory_payload_includes_humanlike_state_at_write(self):
         self._install_astrbot_stubs()
         from emotion_engine import EmotionState
@@ -1317,6 +1480,67 @@ class MemoryPayloadPublicApiTests(unittest.TestCase):
         )
         self.assertNotIn("updated_at", payload["humanlike_state_at_write"])
 
+    def test_memory_payload_includes_moral_repair_state_at_write(self):
+        self._install_astrbot_stubs()
+        from emotion_engine import EmotionState
+        from main import EmotionalStatePlugin
+
+        async def fake_load_state(self, session_key, persona_profile=None):
+            state = EmotionState.initial()
+            state.label = "careful"
+            return state
+
+        async def fake_moral_repair_snapshot(self, *args, **kwargs):
+            return {
+                "schema_version": "astrbot.moral_repair_state.v1",
+                "kind": "moral_repair_state",
+                "session_key": kwargs["session_key"],
+                "exposure": "plugin_safe",
+                "enabled": True,
+                "diagnostic": False,
+                "simulated_agent_state": True,
+                "updated_at": 12.0,
+                "risk": {
+                    "deception_risk": 0.2,
+                    "must_not_generate_strategy": True,
+                },
+                "repair": {"repair_motivation": 0.7},
+                "flags": ["apology_cue"],
+                "prompt_fragment": "not persisted",
+            }
+
+        original_load_state = EmotionalStatePlugin._load_state
+        original_moral_repair_snapshot = EmotionalStatePlugin.get_moral_repair_snapshot
+        EmotionalStatePlugin._load_state = fake_load_state
+        EmotionalStatePlugin.get_moral_repair_snapshot = fake_moral_repair_snapshot
+        try:
+            plugin = EmotionalStatePlugin.__new__(EmotionalStatePlugin)
+            plugin.config = {"humanlike_memory_write_enabled": False}
+            payload = asyncio.run(
+                plugin.build_emotion_memory_payload(
+                    session_key="livingmemory:moral",
+                    memory={"text": "memory"},
+                    source="livingmemory",
+                    written_at=20.0,
+                ),
+            )
+        finally:
+            EmotionalStatePlugin._load_state = original_load_state
+            EmotionalStatePlugin.get_moral_repair_snapshot = original_moral_repair_snapshot
+
+        self.assertIn("moral_repair_state_at_write", payload)
+        self.assertEqual(
+            payload["moral_repair_state_at_write"]["schema_version"],
+            "astrbot.moral_repair_state.v1",
+        )
+        self.assertEqual(payload["moral_repair_state_at_write"]["source"], "livingmemory")
+        self.assertEqual(payload["moral_repair_state_at_write"]["written_at"], 20.0)
+        self.assertEqual(
+            payload["moral_repair_state_at_write"]["moral_repair_updated_at"],
+            12.0,
+        )
+        self.assertNotIn("prompt_fragment", payload["moral_repair_state_at_write"])
+
     def test_memory_payload_includes_disabled_humanlike_annotation_by_default(self):
         self._install_astrbot_stubs()
         from emotion_engine import EmotionState
@@ -1331,7 +1555,7 @@ class MemoryPayloadPublicApiTests(unittest.TestCase):
         original_load_state = EmotionalStatePlugin._load_state
         EmotionalStatePlugin._load_state = fake_load_state
         try:
-            plugin = self._new_plugin()
+            plugin = self._new_plugin({"moral_repair_memory_write_enabled": False})
             payload = asyncio.run(
                 plugin.build_emotion_memory_payload(
                     session_key="livingmemory:user-1",
@@ -1420,6 +1644,41 @@ class MemoryPayloadPublicApiTests(unittest.TestCase):
         self.assertNotIn("Never use the simulated state", relaxed_fragment)
         self.assertIn("Dependency guard active", relaxed_fragment)
 
+    def test_moral_repair_prompt_fragment_respects_safety_boundary_config(self):
+        self._install_astrbot_stubs()
+        from main import EmotionalStatePlugin
+        from moral_repair_engine import MoralRepairState
+
+        async def fake_load_moral_repair_state(self, session_key):
+            state = MoralRepairState.initial()
+            state.values["deception_risk"] = 0.8
+            return state
+
+        original_load = EmotionalStatePlugin._load_moral_repair_state
+        EmotionalStatePlugin._load_moral_repair_state = fake_load_moral_repair_state
+        try:
+            base_config = {"enable_moral_repair_state": True}
+            default_fragment = asyncio.run(
+                self._new_plugin(base_config).get_moral_repair_prompt_fragment(
+                    session_key="s-safe",
+                ),
+            )
+            relaxed_fragment = asyncio.run(
+                self._new_plugin(
+                    {
+                        **base_config,
+                        "enable_safety_boundary": False,
+                    },
+                ).get_moral_repair_prompt_fragment(session_key="s-raw"),
+            )
+        finally:
+            EmotionalStatePlugin._load_moral_repair_state = original_load
+
+        self.assertIn("Never generate deception tactics", default_fragment)
+        self.assertIn("Do not use guilt or shame", default_fragment)
+        self.assertIn("Never generate deception tactics", relaxed_fragment)
+        self.assertNotIn("Do not use guilt or shame", relaxed_fragment)
+
     def test_reset_public_methods_respect_backdoor_config(self):
         self._install_astrbot_stubs()
         from main import EmotionalStatePlugin
@@ -1435,17 +1694,23 @@ class MemoryPayloadPublicApiTests(unittest.TestCase):
         async def fake_delete_humanlike(self, session_key):
             deleted.append(("humanlike", session_key))
 
+        async def fake_delete_moral_repair(self, session_key):
+            deleted.append(("moral_repair", session_key))
+
         original_delete_state = EmotionalStatePlugin._delete_state
         original_delete_psychological = EmotionalStatePlugin._delete_psychological_state
         original_delete_humanlike = EmotionalStatePlugin._delete_humanlike_state
+        original_delete_moral_repair = EmotionalStatePlugin._delete_moral_repair_state
         EmotionalStatePlugin._delete_state = fake_delete_state
         EmotionalStatePlugin._delete_psychological_state = fake_delete_psychological
         EmotionalStatePlugin._delete_humanlike_state = fake_delete_humanlike
+        EmotionalStatePlugin._delete_moral_repair_state = fake_delete_moral_repair
         try:
             locked = self._new_plugin(
                 {
                     "allow_emotion_reset_backdoor": False,
                     "allow_humanlike_reset_backdoor": False,
+                    "allow_moral_repair_reset_backdoor": False,
                 },
             )
             self.assertFalse(
@@ -1456,6 +1721,9 @@ class MemoryPayloadPublicApiTests(unittest.TestCase):
             )
             self.assertFalse(
                 asyncio.run(locked.reset_humanlike_state(session_key="s1")),
+            )
+            self.assertFalse(
+                asyncio.run(locked.reset_moral_repair_state(session_key="s1")),
             )
             self.assertEqual(deleted, [])
 
@@ -1469,10 +1737,14 @@ class MemoryPayloadPublicApiTests(unittest.TestCase):
             self.assertTrue(
                 asyncio.run(allowed.reset_humanlike_state(session_key="s1")),
             )
+            self.assertTrue(
+                asyncio.run(allowed.reset_moral_repair_state(session_key="s1")),
+            )
         finally:
             EmotionalStatePlugin._delete_state = original_delete_state
             EmotionalStatePlugin._delete_psychological_state = original_delete_psychological
             EmotionalStatePlugin._delete_humanlike_state = original_delete_humanlike
+            EmotionalStatePlugin._delete_moral_repair_state = original_delete_moral_repair
 
         self.assertEqual(
             deleted,
@@ -1480,6 +1752,7 @@ class MemoryPayloadPublicApiTests(unittest.TestCase):
                 ("emotion", "s1"),
                 ("psychological", "s1"),
                 ("humanlike", "s1"),
+                ("moral_repair", "s1"),
             ],
         )
 

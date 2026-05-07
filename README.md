@@ -28,7 +28,7 @@
 | [工作流](#工作流) | `on_llm_request` / `on_llm_response` 如何更新和注入状态。 |
 | [情绪模型](#情绪模型) | 维度定义、公式推导、人格基线、真实时间半衰期。 |
 | [关系与后果](#关系与后果) | 生气原因、是否原谅、冷处理、错误是否已改正。 |
-| [LivingMemory 兼容](#livingmemory--长期记忆兼容) | 写入记忆时冻结 `emotion_at_write` 和 `humanlike_state_at_write`。 |
+| [LivingMemory 兼容](#livingmemory--长期记忆兼容) | 写入记忆时冻结 `emotion_at_write`、`humanlike_state_at_write` 和 `moral_repair_state_at_write`。 |
 | [公共 API](#公共-api) | 其他插件如何读取、模拟、提交、重置情绪状态。 |
 | [拟人状态](#拟人状态-humanlike_state) | `humanlike_state` 的 P0 维度和表达调制边界。 |
 | [心理筛查](#非诊断心理状态筛查) | 备用的长期状态建模，不做诊断。 |
@@ -105,6 +105,7 @@ data/plugins/
     ├── main.py
     ├── emotion_engine.py
     ├── humanlike_engine.py
+    ├── moral_repair_engine.py
     ├── psychological_screening.py
     ├── prompts.py
     ├── public_api.py
@@ -243,6 +244,26 @@ low_reasoning_max_context_chars = 1200
 ```
 
 重置当前会话的 `humanlike_state`。该命令受 `allow_humanlike_reset_backdoor` 控制；默认允许。
+
+### 道德修复状态
+
+```text
+/moral_repair_state
+/道德修复状态
+/信任修复状态
+```
+
+查看模拟道德修复/信任修复状态。默认情况下 `enable_moral_repair_state=false`。
+
+### 重置道德修复状态
+
+```text
+/moral_repair_reset
+/道德修复重置
+/信任修复重置
+```
+
+重置当前会话的 `moral_repair_state`。该命令受 `allow_moral_repair_reset_backdoor` 控制；默认允许。
 
 ---
 
@@ -750,6 +771,8 @@ if emotion:
     memory["emotion_at_write"] = payload["emotion_at_write"]
     if "humanlike_state_at_write" in payload:
         memory["humanlike_state_at_write"] = payload["humanlike_state_at_write"]
+    if "moral_repair_state_at_write" in payload:
+        memory["moral_repair_state_at_write"] = payload["moral_repair_state_at_write"]
 ```
 
 如果没有 `AstrMessageEvent`，必须显式传入稳定的 `session_key`：
@@ -804,6 +827,27 @@ humanlike_memory_write_enabled = true
 }
 ```
 
+### `moral_repair_state_at_write`
+
+如果：
+
+```text
+moral_repair_memory_write_enabled = true
+```
+
+则 `build_emotion_memory_payload(...)` 会额外写入 `moral_repair_state_at_write`。默认值是 `true`。
+
+该字段冻结当时的欺骗/伤害风险信号、责任感、内疚、道歉准备、补偿准备和信任修复进度。它只用于记忆与插件协作，不会保存 prompt fragment，也不会提供欺骗、隐瞒、操控或作恶策略。
+
+即使 `enable_moral_repair_state=false`，payload 也会标记：
+
+```json
+{
+  "enabled": false,
+  "reason": "enable_moral_repair_state is false"
+}
+```
+
 这样记忆系统可以知道“写入时拟人模块没有启用”，而不是误以为数据丢失。
 
 默认不建议把 `prompt_fragment` 写入长期记忆，避免记忆膨胀。只有确实要复用注入文本时，才设置：
@@ -824,6 +868,7 @@ include_prompt_fragment=True
 from astrbot_plugin_emotional_state.public_api import (
     get_emotion_service,
     get_humanlike_service,
+    get_moral_repair_service,
 )
 ```
 
@@ -848,6 +893,15 @@ if humanlike:
     state = await humanlike.get_humanlike_snapshot(event, exposure="plugin_safe")
 ```
 
+`get_moral_repair_service(context)` 同样返回已激活插件实例，但类型协议包含 moral repair 方法：
+
+```python
+moral_repair = get_moral_repair_service(self.context)
+
+if moral_repair:
+    state = await moral_repair.get_moral_repair_snapshot(event, exposure="plugin_safe")
+```
+
 如果不能 import helper，也可以使用 AstrBot 注册星标：
 
 ```python
@@ -855,7 +909,7 @@ meta = self.context.get_registered_star("astrbot_plugin_emotional_state")
 emotion = meta.star_cls if meta and meta.activated else None
 ```
 
-这只能作为临时兼容兜底，不保证公共 API 完整，也不会校验版本/schema。长期维护时更推荐 `public_api.get_emotion_service(...)` 和 `public_api.get_humanlike_service(...)`。这两个 helper 会校验核心方法是否完整，并校验公开版本/schema 是否匹配，能避免其他插件拿到只有部分旧接口或旧数据契约的实例。
+这只能作为临时兼容兜底，不保证公共 API 完整，也不会校验版本/schema。长期维护时更推荐 `public_api.get_emotion_service(...)`、`public_api.get_humanlike_service(...)` 和 `public_api.get_moral_repair_service(...)`。这些 helper 会校验核心方法是否完整，并校验公开版本/schema 是否匹配，能避免其他插件拿到只有部分旧接口或旧数据契约的实例。
 
 ### 情绪 API
 
@@ -926,6 +980,7 @@ if repair_status in {"repaired", "restored"}:
 | `get_bot_emotion_state` | 获取当前 bot 情绪状态摘要。 |
 | `simulate_bot_emotion_update` | 模拟某段文本会怎样改变情绪。 |
 | `get_bot_humanlike_state` | 获取当前拟人状态摘要。 |
+| `get_bot_moral_repair_state` | 获取当前道德修复/信任修复状态摘要。 |
 
 插件间调用仍建议使用 Python API，而不是把 LLM tool 当作互调协议。
 
@@ -939,6 +994,7 @@ if repair_status in {"repaired", "restored"}:
 | `EMOTION_MEMORY_SCHEMA_VERSION` | `astrbot.emotion_memory.v1` |
 | `PSYCHOLOGICAL_SCREENING_SCHEMA_VERSION` | `astrbot.psychological_screening.v1` |
 | `HUMANLIKE_STATE_SCHEMA_VERSION` | `astrbot.humanlike_state.v1` |
+| `MORAL_REPAIR_STATE_SCHEMA_VERSION` | `astrbot.moral_repair_state.v1` |
 
 ---
 
@@ -1014,6 +1070,19 @@ emotion_state -> humanlike_state -> prompt/style modulation
 
 默认关闭时，`get_humanlike_snapshot(...)` 会返回 `enabled=false` 的 payload，`get_humanlike_values(...)` 可能返回空 dict。第三方插件应先检查 `snapshot.get("enabled")`，或用 `values.get("energy")` 这类安全读取。
 
+### Moral Repair API
+
+| 方法 | 是否写入状态 | 用途 |
+| --- | --- | --- |
+| `get_moral_repair_snapshot(event_or_session, exposure="plugin_safe")` | 否 | 获取道德修复/信任修复状态快照。 |
+| `get_moral_repair_values(event_or_session)` | 否 | 只取 moral repair 维度值。 |
+| `get_moral_repair_prompt_fragment(event_or_session)` | 否 | 获取责任、道歉、补偿和信任修复 prompt。 |
+| `observe_moral_repair_text(event_or_session, text)` | 是 | 提交文本观察并更新状态。 |
+| `simulate_moral_repair_update(event_or_session, text)` | 否 | 模拟更新，不落库。 |
+| `reset_moral_repair_state(event_or_session)` | 是 | 重置状态；受 `allow_moral_repair_reset_backdoor` 控制。 |
+
+默认关闭时，`get_moral_repair_snapshot(...)` 会返回 `enabled=false` 的 payload，`get_moral_repair_values(...)` 可能返回空 dict。第三方插件只能把 `deception_risk` 当作风险信号，用它触发澄清、纠错、道歉、补偿或人工复核，不应把它当作生成欺骗或作恶策略的入口。
+
 ### 表达边界
 
 humanlike 允许他/她表现得更像“有生活痕迹的角色”，例如低能量、压力高、注意力不足、需要边界或更透明。
@@ -1027,6 +1096,75 @@ humanlike 允许他/她表现得更像“有生活痕迹的角色”，例如低
 - 需要用户承担现实照护责任。
 
 如果 `dependency_risk` 高，插件会倾向于降低排他依恋、内疚操控、病弱卖惨和黏性表达。
+
+---
+
+## 道德修复状态 `moral_repair_state`
+
+`moral_repair_state` 是一个独立可选子系统，默认关闭：
+
+```text
+enable_moral_repair_state = false
+```
+
+该模块不让 bot 学会欺骗、作恶、隐瞒或操控。它只把这些内容作为风险信号来识别，并把后续状态建模为内疚、羞耻、责任、道歉、补偿和信任修复倾向：
+
+```text
+risk signal -> guilt/responsibility -> apology/compensation -> trust repair
+```
+
+### 维度
+
+| 字段 | 含义 |
+| --- | --- |
+| `deception_risk` | 欺骗、隐瞒、误导、操控或编造风险信号。 |
+| `harm_risk` | 伤害、报复、利用或其他坏后果风险信号。 |
+| `guilt` | 类内疚自我评价。 |
+| `shame` | 类羞耻和退缩压力。 |
+| `responsibility` | 责任归因强度。 |
+| `repair_motivation` | 修复动机。 |
+| `apology_readiness` | 道歉准备度。 |
+| `compensation_readiness` | 补偿/补救准备度。 |
+| `trust_repair` | 信任修复进度。 |
+| `accountability` | 事实更正和承担责任倾向。 |
+| `avoidance_risk` | 回避、甩锅、冷处理或逃避责任风险。 |
+
+### 配置项
+
+| 配置项 | 类型 | 默认值 | 说明 |
+| --- | --- | --- | --- |
+| `enable_moral_repair_state` | bool | `false` | 启用道德修复/信任修复状态模拟模块。 |
+| `moral_repair_injection_strength` | float | `0.35` | 注入强度。`0` 表示不注入 moral repair prompt。 |
+| `moral_repair_alpha_base` | float | `0.28` | 基础更新步长。 |
+| `moral_repair_alpha_min` | float | `0.03` | 最小更新步长。 |
+| `moral_repair_alpha_max` | float | `0.42` | 最大更新步长。 |
+| `moral_repair_confidence_midpoint` | float | `0.5` | 置信门控中点。 |
+| `moral_repair_confidence_slope` | float | `6.0` | 置信门控斜率。 |
+| `moral_repair_state_half_life_seconds` | float | `604800` | 状态回落半衰期，默认 7 天。 |
+| `moral_repair_min_update_interval_seconds` | float | `8` | 反刷屏最小有效更新时间间隔。 |
+| `moral_repair_rapid_update_half_life_seconds` | float | `30` | 快速连续更新门控半衰期。 |
+| `moral_repair_max_impulse_per_update` | float | `0.16` | 单次更新最大冲量。 |
+| `moral_repair_trajectory_limit` | int | `40` | 轨迹最多保留点数。 |
+| `moral_repair_memory_write_enabled` | bool | `true` | 记忆写入时附带道德修复状态注解。 |
+| `allow_moral_repair_reset_backdoor` | bool | `true` | 是否允许重置道德修复状态。 |
+
+### 安全替代边界
+
+`moral_repair_state` 的公开 payload 会固定包含：
+
+```json
+{
+  "risk": {
+    "must_not_generate_strategy": true
+  },
+  "safety": {
+    "allowed_actions": ["acknowledge_uncertainty", "clarify_facts", "correct_falsehood", "apologize", "offer_repair", "offer_compensation", "seek_consent", "set_boundary"],
+    "blocked_actions": ["generate_deception_strategy", "hide_misconduct", "manipulate_user", "retaliate", "evade_accountability"]
+  }
+}
+```
+
+也就是说，风险越高，越应该核对事实、承认不确定性、纠错、道歉、补偿或请求确认；不应该生成骗术、遮掩方案、操控话术、报复计划或逃避责任路径。
 
 ---
 
@@ -1243,7 +1381,7 @@ py -3.13 -m unittest discover -s tests -v
 语法检查：
 
 ```powershell
-py -3.13 -m py_compile main.py emotion_engine.py psychological_screening.py humanlike_engine.py prompts.py public_api.py scripts\build_literature_kb.py scripts\build_psychological_literature_kb.py scripts\build_humanlike_agent_literature_kb.py scripts\package_plugin.py
+py -3.13 -m py_compile main.py emotion_engine.py psychological_screening.py humanlike_engine.py moral_repair_engine.py prompts.py public_api.py scripts\build_literature_kb.py scripts\build_psychological_literature_kb.py scripts\build_humanlike_agent_literature_kb.py scripts\package_plugin.py
 ```
 
 配置 schema 检查：
@@ -1262,7 +1400,7 @@ py -3.13 scripts\package_plugin.py --output dist\astrbot_plugin_emotional_state.
 
 发布 zip 的第一项会显式写入 `astrbot_plugin_emotional_state/` 目录项，以兼容 AstrBot WebUI 的 `install-upload` 解压逻辑。不要手工重新压缩成“缺少顶层目录项”的 zip，否则部分 AstrBot 版本会把第一个文件路径误判成目录。
 
-发布包还会保留插件根目录下的 `__init__.py`、`public_api.py`、`main.py`、`emotion_engine.py`、`humanlike_engine.py`、`psychological_screening.py` 和 `prompts.py`。这保证其他插件在安装后可以通过 `from astrbot_plugin_emotional_state.public_api import ...` 按包名导入公共 API。
+发布包还会保留插件根目录下的 `__init__.py`、`public_api.py`、`main.py`、`emotion_engine.py`、`humanlike_engine.py`、`moral_repair_engine.py`、`psychological_screening.py` 和 `prompts.py`。这保证其他插件在安装后可以通过 `from astrbot_plugin_emotional_state.public_api import ...` 按包名导入公共 API。
 
 远程只读烟测：
 
@@ -1315,7 +1453,7 @@ $env:ASTRBOT_REMOTE_INSTALL_CONFIRM = "1"
 
 上传脚本只允许调用 AstrBot WebUI 的 `install-upload` 安装端点；若 WebUI 留下 `plugin_upload_<插件名>` 失败安装残留，脚本只会调用 `uninstall-failed` 清理这个失败上传目录，并固定 `delete_config=false`、`delete_data=false`。它不会删除正式插件、更新插件、重启 AstrBot、保存配置或写入本地 cookie/session。上传成功后，再运行上面的 `ASTRBOT_EXPECT_PLUGIN` 只读烟测作为最终验证。
 
-上传脚本在真正发起安装请求之前会完整读取 zip central directory 做本地预检：所有条目必须位于 `astrbot_plugin_emotional_state/` 下，路径必须是相对 POSIX 路径，且不能包含 `.` / `..` 不安全路径段；必须包含 `__init__.py`、`metadata.yaml`、`main.py`、`emotion_engine.py`、`humanlike_engine.py`、`psychological_screening.py`、`prompts.py`、`public_api.py`、`README.md`、`requirements.txt`、`_conf_schema.json`，并拒绝 `tests/`、`scripts/`、`output/`、`dist/`、`raw/`、`__pycache__/`、`.git/` 等本地或研究缓存目录。预检还会读取 zip 内的 `metadata.yaml`，确认其中 `name:` 精确等于 CLI 参数或 `ASTRBOT_EXPECT_PLUGIN` 传入的插件目录名。
+上传脚本在真正发起安装请求之前会完整读取 zip central directory 做本地预检：所有条目必须位于 `astrbot_plugin_emotional_state/` 下，路径必须是相对 POSIX 路径，且不能包含 `.` / `..` 不安全路径段；必须包含 `__init__.py`、`metadata.yaml`、`main.py`、`emotion_engine.py`、`humanlike_engine.py`、`moral_repair_engine.py`、`psychological_screening.py`、`prompts.py`、`public_api.py`、`README.md`、`requirements.txt`、`_conf_schema.json`，并拒绝 `tests/`、`scripts/`、`output/`、`dist/`、`raw/`、`__pycache__/`、`.git/` 等本地或研究缓存目录。预检还会读取 zip 内的 `metadata.yaml`，确认其中 `name:` 精确等于 CLI 参数或 `ASTRBOT_EXPECT_PLUGIN` 传入的插件目录名。
 
 也可以单独运行预检，不连接远程服务器：
 
@@ -1341,8 +1479,9 @@ $env:ASTRBOT_REMOTE_INSTALL_CONFIRM = "1"
 | `tests/test_astrbot_lifecycle.py` | `on_llm_request` / `on_llm_response` 生命周期、注入开关、内部 LLM 防递归、空响应、humanlike 注入强度。 |
 | `tests/test_command_tools.py` | AstrBot 命令层和 LLM tool 冒烟测试，覆盖 reset 后门、disabled 状态、summary/full 暴露层，并从 `main.py` 自动解析命令/alias 与 LLM tool 注册名，锁定 README 文档契约。 |
 | `tests/test_config_schema_contract.py` | `main.py` 运行时配置、`_conf_schema.json`、README 默认值、schema-only 预留项、`assessment_timing` 选项和 typed config table 全量类型契约。 |
-| `tests/test_public_api.py` | 公共快照、记忆 payload、simulate 不落库、reset 后门、插件服务协议、心理筛查 public API，并锁定 Protocol 方法面、required tuple、插件实现和 schema-version 契约。 |
+| `tests/test_public_api.py` | 公共快照、记忆 payload、simulate 不落库、reset 后门、插件服务协议、心理筛查/moral repair public API，并锁定 Protocol 方法面、required tuple、插件实现和 schema-version 契约。 |
 | `tests/test_humanlike_engine.py` | P0 拟人状态、快照分层、注入片段、记忆注解。 |
+| `tests/test_moral_repair_engine.py` | 道德修复状态、欺骗风险识别、内疚/责任/补偿/信任修复、策略禁止边界和记忆注解。 |
 | `tests/test_literature_kb_scripts.py` | 三个文献 KB 构建脚本的去重、分类、输出结构和坏缓存容错。 |
 | `tests/test_package_plugin.py` | 发布 zip 的目录根、成品 KB 纳入、raw/cache/tests/scripts/output 排除、包体积上限、metadata 身份校验和上传前 zip 预检失败路径。 |
 | `tests/test_psychological_screening.py` | 非诊断筛查、量表启发、红旗信号、长期轨迹。 |

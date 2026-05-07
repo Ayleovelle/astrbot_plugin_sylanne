@@ -70,6 +70,7 @@ Build and maintain `astrbot_plugin_emotional_state`: an AstrBot plugin with mult
 | 56 | complete | Align upload zip preflight required entries with release runtime-root contract | 172 unit tests, py_compile, package build, package preflight, Node syntax check, git diff check, leak scan, remote smoke |
 | 57 | complete | Require dependency declaration in upload preflight and release checklist | 172 unit tests, py_compile, package build, package preflight, Node syntax check, git diff check, leak scan, remote smoke |
 | 58 | complete | Lock README py_compile command and failed-upload cleanup docs to current package contract | 172 unit tests, py_compile, package build, package preflight, Node syntax check, git diff check, leak scan, remote smoke |
+| 59 | complete | Add moral repair state module as a safe alternative to deception/wrongdoing simulation | 193 unit tests, py_compile, json.tool, package build, package preflight, Node syntax check, git diff check, leak scan, remote smoke |
 
 ## Recovery Checklist
 

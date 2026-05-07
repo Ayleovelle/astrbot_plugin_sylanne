@@ -44,6 +44,7 @@ class PackagePluginTests(unittest.TestCase):
 
         self.assertIn("metadata.yaml", files)
         self.assertIn("main.py", files)
+        self.assertIn("moral_repair_engine.py", files)
         self.assertIn("README.md", files)
         self.assertIn("docs/theory.md", files)
         self.assertIn("literature_kb/manifest.json", files)
@@ -85,6 +86,7 @@ class PackagePluginTests(unittest.TestCase):
             "main.py",
             "emotion_engine.py",
             "humanlike_engine.py",
+            "moral_repair_engine.py",
             "psychological_screening.py",
             "prompts.py",
             "public_api.py",
@@ -194,6 +196,7 @@ class PluginZipPreflightTests(unittest.TestCase):
             (prefix + "main.py", "# runtime\n"),
             (prefix + "emotion_engine.py", "# runtime\n"),
             (prefix + "humanlike_engine.py", "# runtime\n"),
+            (prefix + "moral_repair_engine.py", "# runtime\n"),
             (prefix + "psychological_screening.py", "# runtime\n"),
             (prefix + "prompts.py", "# runtime\n"),
             (prefix + "public_api.py", "# public API\n"),
@@ -241,6 +244,7 @@ class PluginZipPreflightTests(unittest.TestCase):
         required_suffixes = (
             "__init__.py",
             "_conf_schema.json",
+            "moral_repair_engine.py",
             "public_api.py",
             "requirements.txt",
         )

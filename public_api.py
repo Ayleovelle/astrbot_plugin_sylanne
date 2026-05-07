@@ -14,6 +14,7 @@ EMOTION_SCHEMA_VERSION = "astrbot.emotion_state.v2"
 EMOTION_MEMORY_SCHEMA_VERSION = "astrbot.emotion_memory.v1"
 PSYCHOLOGICAL_SCREENING_SCHEMA_VERSION = "astrbot.psychological_screening.v1"
 HUMANLIKE_STATE_SCHEMA_VERSION = "astrbot.humanlike_state.v1"
+MORAL_REPAIR_STATE_SCHEMA_VERSION = "astrbot.moral_repair_state.v1"
 PSYCHOLOGICAL_RISK_BOOLEAN_FIELDS = PUBLIC_RISK_BOOLEAN_FIELDS
 
 
@@ -267,6 +268,74 @@ class HumanlikeStateServiceProtocol(EmotionServiceProtocol, Protocol):
         ...
 
 
+@runtime_checkable
+class MoralRepairStateServiceProtocol(EmotionServiceProtocol, Protocol):
+    moral_repair_state_schema_version: str
+
+    async def get_moral_repair_snapshot(
+        self,
+        event_or_session: Any = None,
+        *,
+        request: Any = None,
+        session_key: str | None = None,
+        exposure: str = "plugin_safe",
+        include_prompt_fragment: bool = False,
+    ) -> dict[str, Any]:
+        ...
+
+    async def get_moral_repair_values(
+        self,
+        event_or_session: Any = None,
+        *,
+        request: Any = None,
+        session_key: str | None = None,
+    ) -> dict[str, float]:
+        ...
+
+    async def get_moral_repair_prompt_fragment(
+        self,
+        event_or_session: Any = None,
+        *,
+        request: Any = None,
+        session_key: str | None = None,
+    ) -> str:
+        ...
+
+    async def observe_moral_repair_text(
+        self,
+        event_or_session: Any = None,
+        text: str = "",
+        *,
+        request: Any = None,
+        session_key: str | None = None,
+        source: str = "plugin",
+        commit: bool = True,
+        observed_at: float | None = None,
+    ) -> dict[str, Any]:
+        ...
+
+    async def simulate_moral_repair_update(
+        self,
+        event_or_session: Any = None,
+        text: str = "",
+        *,
+        request: Any = None,
+        session_key: str | None = None,
+        source: str = "plugin",
+        observed_at: float | None = None,
+    ) -> dict[str, Any]:
+        ...
+
+    async def reset_moral_repair_state(
+        self,
+        event_or_session: Any = None,
+        *,
+        request: Any = None,
+        session_key: str | None = None,
+    ) -> bool:
+        ...
+
+
 def get_emotion_service(context: Any) -> EmotionServiceProtocol | None:
     """Return the activated emotion service plugin from an AstrBot Context."""
     getter = getattr(context, "get_registered_star", None)
@@ -323,6 +392,26 @@ def get_humanlike_service(context: Any) -> HumanlikeStateServiceProtocol | None:
     if (
         plugin
         and getattr(plugin, "humanlike_state_schema_version", None) == HUMANLIKE_STATE_SCHEMA_VERSION
+        and all(callable(getattr(plugin, name, None)) for name in required)
+    ):
+        return plugin
+    return None
+
+
+def get_moral_repair_service(context: Any) -> MoralRepairStateServiceProtocol | None:
+    """Return the activated optional moral-repair service if available."""
+    plugin = get_emotion_service(context)
+    required = (
+        "get_moral_repair_snapshot",
+        "get_moral_repair_values",
+        "get_moral_repair_prompt_fragment",
+        "observe_moral_repair_text",
+        "simulate_moral_repair_update",
+        "reset_moral_repair_state",
+    )
+    if (
+        plugin
+        and getattr(plugin, "moral_repair_state_schema_version", None) == MORAL_REPAIR_STATE_SCHEMA_VERSION
         and all(callable(getattr(plugin, name, None)) for name in required)
     ):
         return plugin
