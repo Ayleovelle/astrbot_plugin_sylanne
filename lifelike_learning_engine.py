@@ -146,6 +146,31 @@ class UserProfileEvidence:
         }
 
 
+def _copy_jargon_entry(entry: JargonEntry) -> JargonEntry:
+    return JargonEntry(
+        term=entry.term,
+        surface_forms=list(entry.surface_forms[:8]),
+        candidate_meanings=list(entry.candidate_meanings[:6]),
+        community_context=entry.community_context[:120],
+        confidence=entry.confidence,
+        evidence_count=entry.evidence_count,
+        first_seen_at=entry.first_seen_at,
+        last_seen_at=entry.last_seen_at,
+        ask_before_using=entry.ask_before_using,
+        sensitive=entry.sensitive,
+    )
+
+
+def _copy_user_profile(profile: UserProfileEvidence) -> UserProfileEvidence:
+    return UserProfileEvidence(
+        facts=dict(list(profile.facts.items())[:32]),
+        likes=list(profile.likes[:24]),
+        dislikes=list(profile.dislikes[:24]),
+        style_preferences=list(profile.style_preferences[:24]),
+        boundary_notes=list(profile.boundary_notes[:24]),
+    )
+
+
 @dataclass(slots=True)
 class LifelikeLearningState:
     values: dict[str, float] = field(default_factory=lambda: dict(DEFAULT_VALUES))
@@ -268,7 +293,7 @@ class LifelikeLearningEngine:
         return LifelikeLearningState(
             values=values,
             lexicon=dict(previous.lexicon),
-            user_profile=UserProfileEvidence.from_dict(previous.user_profile.to_dict()),
+            user_profile=_copy_user_profile(previous.user_profile),
             turns=previous.turns,
             updated_at=now,
             last_observation=previous.last_observation,
@@ -323,10 +348,7 @@ class LifelikeLearningEngine:
         now: float,
         evidence: float,
     ) -> dict[str, JargonEntry]:
-        lexicon = {
-            key: JargonEntry.from_dict(value.to_dict()) or value
-            for key, value in previous.items()
-        }
+        lexicon = {key: _copy_jargon_entry(value) for key, value in previous.items()}
         for raw_term in observation.terms:
             term = _clean_term(raw_term)
             if not term:
@@ -376,7 +398,7 @@ class LifelikeLearningEngine:
         previous: UserProfileEvidence,
         observation: LifelikeObservation,
     ) -> UserProfileEvidence:
-        profile = UserProfileEvidence.from_dict(previous.to_dict())
+        profile = _copy_user_profile(previous)
         profile.facts.update(
             {
                 str(key)[:48]: str(value)[:160]
@@ -508,11 +530,12 @@ def derive_initiative_policy(
         values = _values_from_public_or_state_dict(state)
         flags = _string_list(state.get("flags") if isinstance(state, dict) else [])
         raw_lexicon = state.get("lexicon") if isinstance(state, dict) else {}
-        lexicon = {
-            key: JargonEntry.from_dict(value)
-            for key, value in raw_lexicon.items()
-            if JargonEntry.from_dict(value) is not None
-        } if isinstance(raw_lexicon, dict) else {}
+        lexicon = {}
+        if isinstance(raw_lexicon, dict):
+            for key, value in raw_lexicon.items():
+                entry = JargonEntry.from_dict(value)
+                if entry is not None:
+                    lexicon[key] = entry
     risk = risk or {}
     human_values = _nested_values(humanlike_snapshot or {})
     emotion_values = _nested_values(emotion_snapshot or {})
@@ -814,7 +837,9 @@ def append_trajectory(
         "terms": list(terms[:6]),
         "flags": list(flags[:8]),
     }
-    return (list(previous or []) + [item])[-max(1, int(limit)) :]
+    limit = max(1, int(limit))
+    prefix = list((previous or [])[-(limit - 1) :]) if limit > 1 else []
+    return prefix + [item]
 
 
 def _initiative_allowed_actions(action: str) -> list[str]:

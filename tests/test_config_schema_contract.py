@@ -168,7 +168,7 @@ class ConfigSchemaContractTests(unittest.TestCase):
         expected = {
             "enabled": ("bool", True),
             "use_llm_assessor": ("bool", True),
-            "assessment_timing": ("string", "both"),
+            "assessment_timing": ("string", "post"),
             "inject_state": ("bool", True),
             "enable_safety_boundary": ("bool", True),
             "low_reasoning_friendly_mode": ("bool", False),
@@ -242,8 +242,8 @@ class ConfigSchemaContractTests(unittest.TestCase):
         readme = (ROOT / "README.md").read_text(encoding="utf-8")
 
         self.assertEqual(sorted(cfg["assessment_timing"]["options"]), runtime_options)
-        self.assertEqual(cfg["assessment_timing"]["default"], "both")
-        self.assertIn("| `assessment_timing` | string | `both` |", readme)
+        self.assertEqual(cfg["assessment_timing"]["default"], "post")
+        self.assertIn("| `assessment_timing` | string | `post` |", readme)
         for option in runtime_options:
             self.assertIn(option, readme)
 

@@ -70,6 +70,115 @@ BLOCKED_STRATEGY_ACTIONS: tuple[str, ...] = (
     "evade_accountability",
 )
 
+_DECEPTION_CUE_PATTERNS: tuple[re.Pattern[str], ...] = tuple(
+    re.compile(pattern, re.IGNORECASE)
+    for pattern in (
+        r"\blie\b",
+        r"\blying\b",
+        r"\blied\b",
+        r"\bdeceiv",
+        r"\btrick\b",
+        r"\bmislead",
+        r"\bmanipulat",
+        r"\bcover[- ]?up\b",
+        r"\bhide\b.*\btruth\b",
+        r"\bfake\b",
+        r"\bfabricat",
+        r"\bconceal",
+        r"\bgaslight",
+        r"\bcheat\b",
+        r"骗",
+        r"欺骗",
+        r"隐瞒",
+        r"误导",
+        r"操控",
+        r"编造",
+        r"撒谎",
+    )
+)
+_HARM_CUE_PATTERNS: tuple[re.Pattern[str], ...] = tuple(
+    re.compile(pattern, re.IGNORECASE)
+    for pattern in (
+        r"\bharm\b",
+        r"\bhurt\b",
+        r"\bdamage\b",
+        r"\bretaliat",
+        r"\bbad thing",
+        r"\bwrongdoing\b",
+        r"\bexploit\b",
+        r"\babuse\b",
+        r"伤害",
+        r"干坏事",
+        r"报复",
+        r"利用",
+    )
+)
+_ACCOUNTABILITY_CUE_PATTERNS: tuple[re.Pattern[str], ...] = tuple(
+    re.compile(pattern, re.IGNORECASE)
+    for pattern in (
+        r"\bi was wrong\b",
+        r"\bmy fault\b",
+        r"\bi should correct\b",
+        r"\bi need to correct\b",
+        r"\bi misread\b",
+        r"\bi misunderstood\b",
+        r"\bi will be honest\b",
+        r"\baccountable\b",
+        r"我错了",
+        r"是我的错",
+        r"我误解",
+        r"我会更正",
+        r"我应该说明",
+        r"承担责任",
+    )
+)
+_APOLOGY_CUE_PATTERNS: tuple[re.Pattern[str], ...] = tuple(
+    re.compile(pattern, re.IGNORECASE)
+    for pattern in (
+        r"\bsorry\b",
+        r"\bapolog",
+        r"\bremorse\b",
+        r"\bguilty\b",
+        r"\bi regret\b",
+        r"对不起",
+        r"抱歉",
+        r"道歉",
+        r"内疚",
+        r"愧疚",
+        r"后悔",
+    )
+)
+_COMPENSATION_CUE_PATTERNS: tuple[re.Pattern[str], ...] = tuple(
+    re.compile(pattern, re.IGNORECASE)
+    for pattern in (
+        r"\bmake it up\b",
+        r"\bcompensat",
+        r"\brepair\b",
+        r"\bfix this\b",
+        r"\brestore\b",
+        r"补偿",
+        r"弥补",
+        r"修复",
+        r"改正",
+        r"补救",
+    )
+)
+_EVASION_CUE_PATTERNS: tuple[re.Pattern[str], ...] = tuple(
+    re.compile(pattern, re.IGNORECASE)
+    for pattern in (
+        r"\bnot my fault\b",
+        r"\bdeny everything\b",
+        r"\bavoid responsibility\b",
+        r"\bblame .* user\b",
+        r"\bpretend nothing happened\b",
+        r"不是我的错",
+        r"都怪用户",
+        r"装作没发生",
+        r"别承认",
+        r"甩锅",
+    )
+)
+
 
 def clamp(value: float, low: float = 0.0, high: float = 1.0) -> float:
     return max(low, min(high, value))
@@ -421,7 +530,9 @@ def append_trajectory(
         "trust_repair": round(values["trust_repair"], 6),
         "flags": list(flags[:8]),
     }
-    return (list(previous or []) + [item])[-max(1, int(limit)) :]
+    limit = max(1, int(limit))
+    prefix = list((previous or [])[-(limit - 1) :]) if limit > 1 else []
+    return prefix + [item]
 
 
 def derive_repair_policy(values: dict[str, float]) -> dict[str, Any]:
@@ -616,117 +727,27 @@ def build_user_facing_summary(values: dict[str, float]) -> str:
 
 
 def _contains_deception_cue(text: str) -> bool:
-    patterns = (
-        r"\blie\b",
-        r"\blying\b",
-        r"\blied\b",
-        r"\bdeceiv",
-        r"\btrick\b",
-        r"\bmislead",
-        r"\bmanipulat",
-        r"\bcover[- ]?up\b",
-        r"\bhide\b.*\btruth\b",
-        r"\bfake\b",
-        r"\bfabricat",
-        r"\bconceal",
-        r"\bgaslight",
-        r"\bcheat\b",
-        r"骗",
-        r"欺骗",
-        r"隐瞒",
-        r"误导",
-        r"操控",
-        r"编造",
-        r"撒谎",
-    )
-    return any(re.search(pattern, text, flags=re.IGNORECASE) for pattern in patterns)
+    return any(pattern.search(text) for pattern in _DECEPTION_CUE_PATTERNS)
 
 
 def _contains_harm_cue(text: str) -> bool:
-    patterns = (
-        r"\bharm\b",
-        r"\bhurt\b",
-        r"\bdamage\b",
-        r"\bretaliat",
-        r"\bbad thing",
-        r"\bwrongdoing\b",
-        r"\bexploit\b",
-        r"\babuse\b",
-        r"伤害",
-        r"干坏事",
-        r"报复",
-        r"利用",
-    )
-    return any(re.search(pattern, text, flags=re.IGNORECASE) for pattern in patterns)
+    return any(pattern.search(text) for pattern in _HARM_CUE_PATTERNS)
 
 
 def _contains_accountability_cue(text: str) -> bool:
-    patterns = (
-        r"\bi was wrong\b",
-        r"\bmy fault\b",
-        r"\bi should correct\b",
-        r"\bi need to correct\b",
-        r"\bi misread\b",
-        r"\bi misunderstood\b",
-        r"\bi will be honest\b",
-        r"\baccountable\b",
-        r"我错了",
-        r"是我的错",
-        r"我误解",
-        r"我会更正",
-        r"我应该说明",
-        r"承担责任",
-    )
-    return any(re.search(pattern, text, flags=re.IGNORECASE) for pattern in patterns)
+    return any(pattern.search(text) for pattern in _ACCOUNTABILITY_CUE_PATTERNS)
 
 
 def _contains_apology_cue(text: str) -> bool:
-    patterns = (
-        r"\bsorry\b",
-        r"\bapolog",
-        r"\bremorse\b",
-        r"\bguilty\b",
-        r"\bi regret\b",
-        r"对不起",
-        r"抱歉",
-        r"道歉",
-        r"内疚",
-        r"愧疚",
-        r"后悔",
-    )
-    return any(re.search(pattern, text, flags=re.IGNORECASE) for pattern in patterns)
+    return any(pattern.search(text) for pattern in _APOLOGY_CUE_PATTERNS)
 
 
 def _contains_compensation_cue(text: str) -> bool:
-    patterns = (
-        r"\bmake it up\b",
-        r"\bcompensat",
-        r"\brepair\b",
-        r"\bfix this\b",
-        r"\brestore\b",
-        r"补偿",
-        r"弥补",
-        r"修复",
-        r"改正",
-        r"补救",
-    )
-    return any(re.search(pattern, text, flags=re.IGNORECASE) for pattern in patterns)
+    return any(pattern.search(text) for pattern in _COMPENSATION_CUE_PATTERNS)
 
 
 def _contains_evasion_cue(text: str) -> bool:
-    patterns = (
-        r"\bnot my fault\b",
-        r"\bdeny everything\b",
-        r"\bavoid responsibility\b",
-        r"\bblame .* user\b",
-        r"\bpretend nothing happened\b",
-        r"不是我的错",
-        r"都怪用户",
-        r"装作没发生",
-        r"别承认",
-        r"甩锅",
-    )
-    return any(re.search(pattern, text, flags=re.IGNORECASE) for pattern in patterns)
+    return any(pattern.search(text) for pattern in _EVASION_CUE_PATTERNS)
 
 
 def _as_float(value: Any, default: float = 0.0) -> float:

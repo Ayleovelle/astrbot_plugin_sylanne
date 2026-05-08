@@ -16,6 +16,7 @@ PERSONALITY_PROFILE_SCHEMA_VERSION = "astrbot.personality_profile.v1"
 PSYCHOLOGICAL_SCREENING_SCHEMA_VERSION = "astrbot.psychological_screening.v1"
 HUMANLIKE_STATE_SCHEMA_VERSION = "astrbot.humanlike_state.v1"
 LIFELIKE_LEARNING_SCHEMA_VERSION = "astrbot.lifelike_learning_state.v1"
+PERSONALITY_DRIFT_SCHEMA_VERSION = "astrbot.personality_drift_state.v1"
 MORAL_REPAIR_STATE_SCHEMA_VERSION = "astrbot.moral_repair_state.v1"
 INTEGRATED_SELF_SCHEMA_VERSION = "astrbot.integrated_self_state.v1"
 PSYCHOLOGICAL_RISK_BOOLEAN_FIELDS = PUBLIC_RISK_BOOLEAN_FIELDS
@@ -34,6 +35,7 @@ class EmotionServiceProtocol(Protocol):
     psychological_screening_schema_version: str
     integrated_self_schema_version: str
     lifelike_learning_schema_version: str
+    personality_drift_schema_version: str
 
     async def get_emotion_snapshot(
         self,
@@ -332,6 +334,77 @@ class EmotionServiceProtocol(Protocol):
     ) -> bool:
         ...
 
+    async def get_personality_drift_snapshot(
+        self,
+        event_or_session: Any = None,
+        *,
+        request: Any = None,
+        session_key: str | None = None,
+        exposure: str = "plugin_safe",
+        include_prompt_fragment: bool = False,
+    ) -> dict[str, Any]:
+        ...
+
+    async def get_personality_drift_values(
+        self,
+        event_or_session: Any = None,
+        *,
+        request: Any = None,
+        session_key: str | None = None,
+    ) -> dict[str, float]:
+        ...
+
+    async def get_personality_drift_prompt_fragment(
+        self,
+        event_or_session: Any = None,
+        *,
+        request: Any = None,
+        session_key: str | None = None,
+    ) -> str:
+        ...
+
+    async def observe_personality_drift_event(
+        self,
+        event_or_session: Any = None,
+        text: str = "",
+        *,
+        request: Any = None,
+        session_key: str | None = None,
+        source: str = "plugin",
+        trait_impulses: dict[str, float] | None = None,
+        intensity: float | None = None,
+        reliability: float | None = None,
+        relationship_importance: float | None = None,
+        commit: bool = True,
+        observed_at: float | None = None,
+    ) -> dict[str, Any]:
+        ...
+
+    async def simulate_personality_drift_update(
+        self,
+        event_or_session: Any = None,
+        text: str = "",
+        *,
+        request: Any = None,
+        session_key: str | None = None,
+        source: str = "plugin",
+        trait_impulses: dict[str, float] | None = None,
+        intensity: float | None = None,
+        reliability: float | None = None,
+        relationship_importance: float | None = None,
+        observed_at: float | None = None,
+    ) -> dict[str, Any]:
+        ...
+
+    async def reset_personality_drift_state(
+        self,
+        event_or_session: Any = None,
+        *,
+        request: Any = None,
+        session_key: str | None = None,
+    ) -> bool:
+        ...
+
 
 @runtime_checkable
 class HumanlikeStateServiceProtocol(EmotionServiceProtocol, Protocol):
@@ -537,6 +610,82 @@ class LifelikeLearningServiceProtocol(EmotionServiceProtocol, Protocol):
         ...
 
 
+@runtime_checkable
+class PersonalityDriftServiceProtocol(EmotionServiceProtocol, Protocol):
+    personality_drift_schema_version: str
+
+    async def get_personality_drift_snapshot(
+        self,
+        event_or_session: Any = None,
+        *,
+        request: Any = None,
+        session_key: str | None = None,
+        exposure: str = "plugin_safe",
+        include_prompt_fragment: bool = False,
+    ) -> dict[str, Any]:
+        ...
+
+    async def get_personality_drift_values(
+        self,
+        event_or_session: Any = None,
+        *,
+        request: Any = None,
+        session_key: str | None = None,
+    ) -> dict[str, float]:
+        ...
+
+    async def get_personality_drift_prompt_fragment(
+        self,
+        event_or_session: Any = None,
+        *,
+        request: Any = None,
+        session_key: str | None = None,
+    ) -> str:
+        ...
+
+    async def observe_personality_drift_event(
+        self,
+        event_or_session: Any = None,
+        text: str = "",
+        *,
+        request: Any = None,
+        session_key: str | None = None,
+        source: str = "plugin",
+        trait_impulses: dict[str, float] | None = None,
+        intensity: float | None = None,
+        reliability: float | None = None,
+        relationship_importance: float | None = None,
+        commit: bool = True,
+        observed_at: float | None = None,
+    ) -> dict[str, Any]:
+        ...
+
+    async def simulate_personality_drift_update(
+        self,
+        event_or_session: Any = None,
+        text: str = "",
+        *,
+        request: Any = None,
+        session_key: str | None = None,
+        source: str = "plugin",
+        trait_impulses: dict[str, float] | None = None,
+        intensity: float | None = None,
+        reliability: float | None = None,
+        relationship_importance: float | None = None,
+        observed_at: float | None = None,
+    ) -> dict[str, Any]:
+        ...
+
+    async def reset_personality_drift_state(
+        self,
+        event_or_session: Any = None,
+        *,
+        request: Any = None,
+        session_key: str | None = None,
+    ) -> bool:
+        ...
+
+
 def get_emotion_service(context: Any) -> EmotionServiceProtocol | None:
     """Return the activated emotion service plugin from an AstrBot Context."""
     getter = getattr(context, "get_registered_star", None)
@@ -576,6 +725,12 @@ def get_emotion_service(context: Any) -> EmotionServiceProtocol | None:
         "observe_lifelike_text",
         "simulate_lifelike_update",
         "reset_lifelike_learning_state",
+        "get_personality_drift_snapshot",
+        "get_personality_drift_values",
+        "get_personality_drift_prompt_fragment",
+        "observe_personality_drift_event",
+        "simulate_personality_drift_update",
+        "reset_personality_drift_state",
     )
     expected_versions = {
         "emotion_api_version": EMOTION_API_VERSION,
@@ -585,6 +740,7 @@ def get_emotion_service(context: Any) -> EmotionServiceProtocol | None:
         "psychological_screening_schema_version": PSYCHOLOGICAL_SCREENING_SCHEMA_VERSION,
         "integrated_self_schema_version": INTEGRATED_SELF_SCHEMA_VERSION,
         "lifelike_learning_schema_version": LIFELIKE_LEARNING_SCHEMA_VERSION,
+        "personality_drift_schema_version": PERSONALITY_DRIFT_SCHEMA_VERSION,
     }
     if (
         plugin
@@ -649,6 +805,26 @@ def get_lifelike_learning_service(context: Any) -> LifelikeLearningServiceProtoc
     if (
         plugin
         and getattr(plugin, "lifelike_learning_schema_version", None) == LIFELIKE_LEARNING_SCHEMA_VERSION
+        and all(callable(getattr(plugin, name, None)) for name in required)
+    ):
+        return plugin
+    return None
+
+
+def get_personality_drift_service(context: Any) -> PersonalityDriftServiceProtocol | None:
+    """Return the activated slow personality-drift service if available."""
+    plugin = get_emotion_service(context)
+    required = (
+        "get_personality_drift_snapshot",
+        "get_personality_drift_values",
+        "get_personality_drift_prompt_fragment",
+        "observe_personality_drift_event",
+        "simulate_personality_drift_update",
+        "reset_personality_drift_state",
+    )
+    if (
+        plugin
+        and getattr(plugin, "personality_drift_schema_version", None) == PERSONALITY_DRIFT_SCHEMA_VERSION
         and all(callable(getattr(plugin, name, None)) for name in required)
     ):
         return plugin

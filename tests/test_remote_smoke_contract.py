@@ -212,6 +212,7 @@ class RemoteSmokeContractTests(unittest.TestCase):
             "emotion_engine.py",
             "humanlike_engine.py",
             "lifelike_learning_engine.py",
+            "personality_drift_engine.py",
             "integrated_self.py",
             "moral_repair_engine.py",
             "psychological_screening.py",
@@ -265,21 +266,32 @@ class RemoteSmokeContractTests(unittest.TestCase):
 
     def test_readme_records_beta_pr_iterations_in_order(self):
         readme = (ROOT / "README.md").read_text(encoding="utf-8")
-        section = readme.split("### 0.0.2-beta PR 迭代记录", 1)[1].split(
+        section = readme.split("### 0.1.0-beta 迭代记录", 1)[1].split(
             "## 项目定位",
             1,
         )[0]
-        expected = [f"0.0.2-beta-pr-{index}" for index in range(1, 11)]
+        summary = section.split(
+            "<summary>历史预发布批次摘要（0.0.2-beta-pr-1 至 0.0.2-beta-pr-19）</summary>",
+            1,
+        )[1].split("</details>", 1)[0]
+        details = section.split(
+            "<summary>展开逐轮工程迭代明细（Iteration 11-149）</summary>",
+            1,
+        )[1].split("</details>", 1)[0]
+        expected = [f"0.0.2-beta-pr-{index}" for index in range(1, 20)]
 
-        found = re.findall(r"`(0\.0\.2-beta-pr-\d+)`", section)
+        found = re.findall(r"`(0\.0\.2-beta-pr-\d+)`", summary)
         self.assertEqual(expected, found)
         for version in expected:
             with self.subTest(version=version):
-                self.assertIn(f"| `{version}` | complete |", section)
+                self.assertIn(f"| `{version}` | complete |", summary)
         self.assertIn(
-            "不改变 `metadata.yaml` 中对外安装版本 `0.0.2-beta`",
+            "对外安装版本由 `metadata.yaml` 和 `main.py @register(...)` 共同声明为 `0.1.0-beta`",
             section,
         )
+        for index in range(11, 150):
+            with self.subTest(iteration=index):
+                self.assertRegex(details, rf"\| {index} \| complete \| .+ \| .+ \|")
 
     def test_remote_smoke_script_uses_environment_credentials(self):
         script = (ROOT / "scripts" / "remote_smoke_playwright.js").read_text(
@@ -365,6 +377,7 @@ class RemoteSmokeContractTests(unittest.TestCase):
             "emotion_engine.py",
             "humanlike_engine.py",
             "lifelike_learning_engine.py",
+            "personality_drift_engine.py",
             "integrated_self.py",
             "moral_repair_engine.py",
             "psychological_screening.py",

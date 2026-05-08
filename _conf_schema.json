@@ -31,7 +31,7 @@
   "assessment_timing": {
     "description": "情绪估计时机",
     "type": "string",
-    "default": "both",
+    "default": "post",
     "options": [
       "pre",
       "post",
@@ -71,7 +71,31 @@
   "max_context_chars": {
     "description": "情绪估计时最多读取的上下文字数",
     "type": "int",
-    "default": 2600
+    "default": 1600
+  },
+  "request_context_max_chars": {
+    "description": "生命周期钩子拼接上下文时的总字数上限",
+    "type": "int",
+    "default": 1600,
+    "hint": "用于在进入情绪估计 prompt 前先截断滚动上下文，降低内部 LLM token 和本地字符串拼接成本。"
+  },
+  "assessor_timeout_seconds": {
+    "description": "情绪估计 LLM 调用超时秒数",
+    "type": "float",
+    "default": 4.0,
+    "hint": "超过该时间会回退到本地启发式估计，避免内部评估拖慢主回复。"
+  },
+  "provider_id_cache_ttl_seconds": {
+    "description": "当前会话 Provider ID 短缓存秒数",
+    "type": "float",
+    "default": 30.0,
+    "hint": "emotion_provider_id 留空时生效，减少每轮重复查询当前 Provider。"
+  },
+  "passive_load_fresh_seconds": {
+    "description": "状态缓存命中后的被动衰减短路秒数",
+    "type": "float",
+    "default": 1.0,
+    "hint": "短时间内连续读取同一状态时跳过被动衰减计算和 KV 写回，降低公共 API 与 prompt 注入延迟。"
   },
   "assessor_temperature": {
     "description": "情绪估计 LLM 的 temperature",
@@ -330,6 +354,83 @@
     "type": "bool",
     "default": true,
     "hint": "默认开启，用于误学黑话、错误用户画像、边界异常或调试。"
+  },
+  "enable_personality_drift": {
+    "description": "Enable slow real-time personality drift / adaptation state",
+    "type": "bool",
+    "default": false,
+    "hint": "Default off. When enabled, the bot's personality profile is subtly adapted by long-term events using real elapsed time, not message count."
+  },
+  "personality_drift_injection_strength": {
+    "description": "Personality drift prompt injection strength",
+    "type": "float",
+    "default": 0.22,
+    "hint": "0 disables prompt injection. Values greater than 0 add a small slow-adaptation hint when inject_state and enable_personality_drift are both enabled."
+  },
+  "personality_drift_apply_strength": {
+    "description": "Strength used when applying drift offsets to the runtime persona profile",
+    "type": "float",
+    "default": 0.65
+  },
+  "personality_drift_half_life_seconds": {
+    "description": "Personality drift real-time half-life in seconds",
+    "type": "float",
+    "default": 7776000,
+    "hint": "Default 90 days. Trait offsets slowly return toward the static persona anchor by real elapsed time."
+  },
+  "personality_drift_rapid_update_half_life_seconds": {
+    "description": "Personality drift rapid-update gate half-life in seconds",
+    "type": "float",
+    "default": 86400,
+    "hint": "Default 1 day. Dense short-term messages are gated so they cannot force long-term personality changes."
+  },
+  "personality_drift_min_update_interval_seconds": {
+    "description": "Personality drift minimum fully effective update interval",
+    "type": "float",
+    "default": 21600
+  },
+  "personality_drift_learning_rate": {
+    "description": "Personality drift event-to-trait learning rate",
+    "type": "float",
+    "default": 0.055
+  },
+  "personality_drift_event_threshold": {
+    "description": "Minimum event signal before a drift update is consolidated",
+    "type": "float",
+    "default": 0.12
+  },
+  "personality_drift_max_impulse_per_update": {
+    "description": "Maximum signed trait impulse per update",
+    "type": "float",
+    "default": 0.015,
+    "hint": "Caps one event so a single message or flood cannot rewrite the persona."
+  },
+  "personality_drift_max_trait_offset": {
+    "description": "Maximum absolute offset from the static persona trait prior",
+    "type": "float",
+    "default": 0.22
+  },
+  "personality_drift_confidence_growth": {
+    "description": "Confidence growth per consolidated drift event",
+    "type": "float",
+    "default": 0.1
+  },
+  "personality_drift_trajectory_limit": {
+    "description": "Maximum personality drift trajectory points",
+    "type": "int",
+    "default": 80
+  },
+  "personality_drift_memory_write_enabled": {
+    "description": "Attach personality drift state annotations to memory writes",
+    "type": "bool",
+    "default": true,
+    "hint": "build_emotion_memory_payload adds personality_drift_state_at_write for LivingMemory-like plugins."
+  },
+  "allow_personality_drift_reset_backdoor": {
+    "description": "Allow manual/API reset backdoor for personality drift state",
+    "type": "bool",
+    "default": true,
+    "hint": "Default on for abnormal adaptation, persona pollution, severe consequences, or debugging."
   },
   "enable_moral_repair_state": {
     "description": "Enable moral repair / trust repair state simulation",

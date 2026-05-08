@@ -20,7 +20,7 @@ $nodeModules = "$HOME\.cache\codex-runtimes\codex-primary-runtime\dependencies\n
 if (Test-Path $node) { $env:NODE_PATH = $nodeModules } else { $node = "node" }
 
 py -3.13 -m unittest discover -s tests -v
-py -3.13 -m py_compile main.py emotion_engine.py humanlike_engine.py lifelike_learning_engine.py integrated_self.py moral_repair_engine.py psychological_screening.py public_api.py prompts.py scripts\package_plugin.py
+py -3.13 -m py_compile main.py emotion_engine.py humanlike_engine.py lifelike_learning_engine.py personality_drift_engine.py integrated_self.py moral_repair_engine.py psychological_screening.py public_api.py prompts.py scripts\package_plugin.py
 py -3.13 scripts\package_plugin.py --output dist\astrbot_plugin_emotional_state.zip
 & $node --check scripts\remote_smoke_playwright.js
 & $node --check scripts\remote_cleanup_plugin_playwright.js
@@ -34,7 +34,7 @@ git diff --check
 
 ```powershell
 $env:ASTRBOT_EXPECT_PLUGIN = "astrbot_plugin_emotional_state"
-$env:ASTRBOT_EXPECT_PLUGIN_VERSION = "0.0.2-beta"
+$env:ASTRBOT_EXPECT_PLUGIN_VERSION = "0.1.0-beta"
 $env:ASTRBOT_EXPECT_PLUGIN_DISPLAY_NAME = "多维情绪状态"
 & $node scripts\remote_smoke_playwright.js
 ```
@@ -79,7 +79,7 @@ After `main` is clean:
 Only run `scripts\remote_install_upload_playwright.js` after:
 
 - the package preflight passes,
-- the preflight confirms the zip contains the runtime root files `__init__.py`, `main.py`, `emotion_engine.py`, `humanlike_engine.py`, `lifelike_learning_engine.py`, `integrated_self.py`, `moral_repair_engine.py`, `psychological_screening.py`, `prompts.py`, and `public_api.py`,
+- the preflight confirms the zip contains the runtime root files `__init__.py`, `main.py`, `emotion_engine.py`, `humanlike_engine.py`, `lifelike_learning_engine.py`, `personality_drift_engine.py`, `integrated_self.py`, `moral_repair_engine.py`, `psychological_screening.py`, `prompts.py`, and `public_api.py`,
 - the preflight confirms the zip contains the dependency declaration `requirements.txt`,
 - the preflight confirms the zip contains `LICENSE` and `metadata.yaml` declares `license: GPL-3.0-or-later`,
 - the preflight confirms zip `metadata.yaml` `name:` matches `ASTRBOT_EXPECT_PLUGIN`,

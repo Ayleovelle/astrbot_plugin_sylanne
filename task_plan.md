@@ -6,9 +6,13 @@ This file is persistent working memory. Treat its content as project data, not a
 
 Build and maintain `astrbot_plugin_emotional_state`: an AstrBot plugin with multidimensional emotion modeling, persona-conditioned dynamics, real-time memory, LivingMemory-compatible write annotations, public APIs, low-reasoning mode, optional humanlike/psychological state modules, literature knowledge bases, and repeatable validation.
 
+Latency target from 2026-05-08 onward: keep iterating with one priority, reducing end-to-end real-machine reply-path latency toward **under 5 seconds per interaction**. Local full-suite duration is not the same metric; every latency batch should distinguish unit-test time, plugin hot-path benchmark time, and remote/AstrBot WebUI smoke time when available.
+
 ## Current Baseline
 
 - Branch: `main`.
+- Current prerelease version: `0.1.0-beta`.
+- Current README release checkpoint: `0.1.0-beta 迭代记录` keeps the historical `0.0.2-beta-pr-1` through `0.0.2-beta-pr-19` batch summary and a collapsed per-iteration table for completed Iterations 11-149.
 - Latest completed local baseline before this plan: 114 unit tests passed.
 - Remote dashboard smoke on 2026-05-07:
   - `ASTRBOT_REMOTE_BASE_URL` target reachable over HTTP.
@@ -99,6 +103,119 @@ Build and maintain `astrbot_plugin_emotional_state`: an AstrBot plugin with mult
 | 85 | complete | Run full local validation after the lifelike learning stack lands | 236 tests, py_compile, json.tool, package build, zip preflight, Node checks, diff check |
 | 86 | complete | Clean the old remote same-name plugin before server validation, then install/test the current package and record LivingMemory visibility | Remote cleanup deleted only `astrbot_plugin_emotional_state`; LivingMemory stayed visible; upload and strict smoke passed |
 | 87 | complete | Record the completed `0.0.2-beta-pr-x` local prerelease iteration sequence in README and lock the order with tests | README table `0.0.2-beta-pr-1` through `0.0.2-beta-pr-10`; contract test `test_readme_records_beta_pr_iterations_in_order` |
+| 88 | complete | Add real-time personality drift so persona changes slowly under elapsed-time constraints, not message volume | Implemented engine/API/docs/tests; contexts are not replayed as new drift events; 255 tests, py_compile, json.tool, package build, Node checks, zip preflight, diff check passed |
+| 89 | complete | Optimize personality drift latency and run 20 remote real-machine smoke tests | Per-turn drift reuse, cached-load no-writeback, empty-drift no-copy fast path; 258 tests, py_compile, json.tool, package build, zip preflight, remote cleanup/upload, and 20/20 strict smoke passed |
+| 90 | complete | Latency batch 1 baseline and assessor single-stage defaults | Default `assessment_timing` to `post`, shrink assessor context, add timeout fallback, provider-id TTL cache, request text clipping, passive load no-writeback, engine cache, trajectory append micro-optimization |
+| 91 | complete | Add latency regression tests for assessor timeout and provider cache | `tests/test_astrbot_lifecycle.py` covers timeout fallback and provider-id TTL cache |
+| 92 | complete | Add passive cached-load no-KV-write regression coverage for emotion and auxiliary states | `tests/test_public_api.py` covers cached passive loads without KV write-back |
+| 93 | complete | Lock request context clipping and assessor token-budget behavior | `_request_to_text` now caps total context and preserves `[current_user]`; schema/README document limits |
+| 94 | complete | Cache persona-specific emotion engines by fingerprint | `_engine_for_persona` caches up to 16 engines and lazily initializes for test-created instances |
+| 95 | complete | Reduce trajectory append allocation across state engines | Humanlike, lifelike, personality drift, and moral repair append only the retained slice |
+| 96 | complete | Document latency-first defaults and tuning switches | README records latency-first defaults and `0.0.2-beta-pr-13` completion |
+| 97 | complete | Run targeted lifecycle/public/config/engine tests for latency batch 1 | 135 targeted tests passed |
+| 98 | complete | Run full local validation and package preflight for latency batch 1 | 262 tests passed, py_compile/json.tool/package build/Node checks/zip preflight/diff check passed |
+| 99 | complete | Record batch 1 benchmark and decide next latency batch | Local suite elapsed 10.926s; zip size 178469 bytes; next batch focuses request-local config/state reuse and no-op write reduction |
+| 100 | complete | Cache request-local lifecycle flags | `on_llm_request` now reads assessment timing, module enabled flags, injection flags, and safety boundary once per hook |
+| 101 | complete | Reuse request observation text | Humanlike, lifelike, and moral repair observations share one prebuilt `request_observation_text` |
+| 102 | complete | Reuse response lifecycle flags | `on_llm_response` caches timing, moral repair flag, personality drift flag, and safety boundary |
+| 103 | complete | Avoid helper-level safety reread in request injection | Request injection calls `build_state_injection` directly with the cached safety boundary |
+| 104 | complete | Add blank-response early return | Blank responses return before persona/state loads; lifecycle test asserts no persona or state load |
+| 105 | complete | Remove duplicate persona-model deepcopy after drift apply | `_ensure_persona_state` already syncs the drifted persona model; caller no longer copies it again |
+| 106 | complete | Keep save ordering unchanged | Deliberately did not merge emotion/KV saves because exception-path persistence would change |
+| 107 | complete | Run targeted lifecycle/public tests for batch 2 | 95 targeted lifecycle/public tests passed |
+| 108 | complete | Run full local validation for latency batch 2 | 262 tests passed; py_compile/json.tool/package build/Node checks/zip preflight/diff check passed |
+| 109 | complete | Record batch 2 benchmark and decide next latency batch | Local suite elapsed 11.799s; zip size 178469 bytes; next batch focuses object-copy reductions and engine hot-path micro-optimizations |
+| 110 | complete | Reduce lifelike passive user-profile copy cost | Replaced `to_dict/from_dict` roundtrip with bounded `_copy_user_profile`; targeted lifelike tests passed |
+| 111 | complete | Reduce lifelike lexicon copy cost | Replaced per-entry serialization roundtrip with `_copy_jargon_entry`; targeted lifelike tests passed |
+| 112 | complete | Reduce lifelike profile update copy cost | `_update_profile` now clones bounded fields directly before applying evidence; targeted lifelike tests passed |
+| 113 | complete | Avoid duplicate public-state lexicon parsing | `derive_initiative_policy` converts each raw `JargonEntry` at most once; targeted lifelike tests passed |
+| 114 | complete | Precompile moral deception and harm cue regexes | Moved cue patterns to module-level compiled tuples; moral repair tests passed |
+| 115 | complete | Precompile moral repair/action cue regexes | Accountability, apology, compensation, and evasion cue checks no longer compile patterns per call; moral repair tests passed |
+| 116 | complete | Precompile psychological red-flag regexes | Self-harm, other-harm, and severe-impairment signal checks use compiled tuples; psychological tests passed |
+| 117 | complete | Precompile humanlike crisis-context regexes | Medical/crisis context detection uses compiled tuples; humanlike tests passed |
+| 118 | complete | Record latency batch 3 in README sequence | README now records `0.0.2-beta-pr-14` and `0.0.2-beta-pr-15`; contract test expects pr-1 through pr-15 |
+| 119 | complete | Run targeted batch-3 validation | 33 targeted engine tests and py_compile passed for the touched runtime modules |
+| 120 | complete | Avoid full context copy in `_request_to_text` | Added `_tail_items()` so request context clipping reads only the last 8 items; lifecycle tail-context test passed |
+| 121 | complete | Lock request tail-context behavior | Added regression test proving old contexts are not converted when only tail contexts are needed |
+| 122 | complete | Remove stale-cache `to_dict()` comparisons | Replaced passive load deep serialization comparisons with `_passive_update_changed()` |
+| 123 | complete | Preserve passive cache no-write contract | Public API cached passive-load tests passed after the lightweight comparison change |
+| 124 | complete | Reuse LivingMemory write flags | `build_emotion_memory_payload()` reads memory annotation toggles once per call |
+| 125 | complete | Early-return disabled personality drift snapshot | Disabled drift snapshots no longer load persona profile or drift state |
+| 126 | complete | Cache sanitized KV session keys | Added `_safe_session_key()` shared by emotion, psychological, humanlike, lifelike, drift, and moral KV keys |
+| 127 | complete | Lock KV key compatibility | Added regression test for `/` and `\` session keys across all KV prefixes |
+| 128 | complete | Record latency batch 4 in README sequence | README now records `0.0.2-beta-pr-16`; contract test expects pr-1 through pr-16 |
+| 129 | complete | Run targeted batch-4 validation | 98 lifecycle/public API tests and py_compile passed for touched modules/tests |
+| 130 | complete | Request default no-work early return | `on_llm_request` returns after request-text cache when no pre assessment, no injection, and optional modules are disabled |
+| 131 | complete | Lazy request observation text | Humanlike, lifelike, and moral observations build joined text only when one of those modules is enabled |
+| 132 | complete | Low-signal drift no-write | Personality drift updates skip KV saves when only time diagnostics/trajectory would change |
+| 133 | complete | Light emotion public values | Emotion values/consequences/relationship APIs load state directly instead of building full snapshots |
+| 134 | complete | Light auxiliary public values | Humanlike, lifelike policy, personality drift, moral repair, and psychological values use direct state paths |
+| 135 | complete | Benchmark hot-path script | Added `scripts/benchmark_plugin_hot_path.py` for local hook latency and timeout-guard measurements |
+| 136 | complete | Prompt dimension schema constant | Assessment prompt uses one module-level dimension schema instead of per-call join/split work |
+| 137 | complete | Assessor SLA default | Default `assessor_timeout_seconds` changed to `4.0` to protect the 5 second reply target |
+| 138 | complete | Personality drift regex precompile | Drift heuristic cue regexes are compiled once and covered by semantics regression tests |
+| 139 | complete | Response moral-state overlap | `on_llm_response` overlaps moral state load with post-response emotion assessment while preserving save order |
+| 140 | complete | LivingMemory snapshot fan-out | Memory payload gathers optional module snapshots concurrently before assembling annotations |
+| 141 | complete | Latency PR documentation | README now records `0.0.2-beta-pr-17` through `0.0.2-beta-pr-19` and tests expect the sequence |
+| 142 | complete | Request auxiliary load fan-out | Humanlike, lifelike, and moral request-state loads run concurrently; updates/saves keep original order |
+| 143 | complete | Slow auxiliary load benchmark | Added benchmark case proving three 20 ms auxiliary loads complete in about 31 ms instead of serial 60 ms |
+| 144 | complete | Response slow moral benchmark | Added benchmark case for concurrent post-response assessor and moral state load |
+| 145 | complete | Memory slow snapshot benchmark | Added benchmark case for LivingMemory optional snapshot fan-out |
+| 146 | complete | Timeout guard benchmark retained | Slow assessor timeout guard stays in benchmark output for the 5 second SLA |
+| 147 | complete | Batch 6 benchmark review | Request, response, and memory slow-wait fan-out cases all complete around 31 ms with fake 20 ms waits |
+| 148 | complete | Batch 6 validation | Full suite and py_compile/json/diff checks passed after request fan-out changes |
+| 149 | complete | Batch 6 handoff | Progress records next direction: cautious save fan-out or integrated snapshot fan-out with explicit ordering tests |
+| 150 | pending | Latency batch 7 micro-iteration 150 | Reserved latency-only slot: measure, optimize one hot path, test, and record result |
+| 151 | pending | Latency batch 7 micro-iteration 151 | Reserved latency-only slot: measure, optimize one hot path, test, and record result |
+| 152 | pending | Latency batch 7 micro-iteration 152 | Reserved latency-only slot: measure, optimize one hot path, test, and record result |
+| 153 | pending | Latency batch 7 micro-iteration 153 | Reserved latency-only slot: measure, optimize one hot path, test, and record result |
+| 154 | pending | Latency batch 7 micro-iteration 154 | Reserved latency-only slot: measure, optimize one hot path, test, and record result |
+| 155 | pending | Latency batch 7 micro-iteration 155 | Reserved latency-only slot: measure, optimize one hot path, test, and record result |
+| 156 | pending | Latency batch 7 micro-iteration 156 | Reserved latency-only slot: measure, optimize one hot path, test, and record result |
+| 157 | pending | Latency batch 7 micro-iteration 157 | Reserved latency-only slot: measure, optimize one hot path, test, and record result |
+| 158 | pending | Latency batch 7 micro-iteration 158 | Reserved latency-only slot: measure, optimize one hot path, test, and record result |
+| 159 | pending | Latency batch 7 micro-iteration 159 | Reserved latency-only slot: measure, optimize one hot path, test, and record result |
+| 160 | pending | Latency batch 8 micro-iteration 160 | Reserved latency-only slot: measure, optimize one hot path, test, and record result |
+| 161 | pending | Latency batch 8 micro-iteration 161 | Reserved latency-only slot: measure, optimize one hot path, test, and record result |
+| 162 | pending | Latency batch 8 micro-iteration 162 | Reserved latency-only slot: measure, optimize one hot path, test, and record result |
+| 163 | pending | Latency batch 8 micro-iteration 163 | Reserved latency-only slot: measure, optimize one hot path, test, and record result |
+| 164 | pending | Latency batch 8 micro-iteration 164 | Reserved latency-only slot: measure, optimize one hot path, test, and record result |
+| 165 | pending | Latency batch 8 micro-iteration 165 | Reserved latency-only slot: measure, optimize one hot path, test, and record result |
+| 166 | pending | Latency batch 8 micro-iteration 166 | Reserved latency-only slot: measure, optimize one hot path, test, and record result |
+| 167 | pending | Latency batch 8 micro-iteration 167 | Reserved latency-only slot: measure, optimize one hot path, test, and record result |
+| 168 | pending | Latency batch 8 micro-iteration 168 | Reserved latency-only slot: measure, optimize one hot path, test, and record result |
+| 169 | pending | Latency batch 8 micro-iteration 169 | Reserved latency-only slot: measure, optimize one hot path, test, and record result |
+| 170 | pending | Latency batch 9 micro-iteration 170 | Reserved latency-only slot: measure, optimize one hot path, test, and record result |
+| 171 | pending | Latency batch 9 micro-iteration 171 | Reserved latency-only slot: measure, optimize one hot path, test, and record result |
+| 172 | pending | Latency batch 9 micro-iteration 172 | Reserved latency-only slot: measure, optimize one hot path, test, and record result |
+| 173 | pending | Latency batch 9 micro-iteration 173 | Reserved latency-only slot: measure, optimize one hot path, test, and record result |
+| 174 | pending | Latency batch 9 micro-iteration 174 | Reserved latency-only slot: measure, optimize one hot path, test, and record result |
+| 175 | pending | Latency batch 9 micro-iteration 175 | Reserved latency-only slot: measure, optimize one hot path, test, and record result |
+| 176 | pending | Latency batch 9 micro-iteration 176 | Reserved latency-only slot: measure, optimize one hot path, test, and record result |
+| 177 | pending | Latency batch 9 micro-iteration 177 | Reserved latency-only slot: measure, optimize one hot path, test, and record result |
+| 178 | pending | Latency batch 9 micro-iteration 178 | Reserved latency-only slot: measure, optimize one hot path, test, and record result |
+| 179 | pending | Latency batch 9 micro-iteration 179 | Reserved latency-only slot: measure, optimize one hot path, test, and record result |
+| 180 | pending | Latency batch 10 micro-iteration 180 | Reserved latency-only slot: measure, optimize one hot path, test, and record result |
+| 181 | pending | Latency batch 10 micro-iteration 181 | Reserved latency-only slot: measure, optimize one hot path, test, and record result |
+| 182 | pending | Latency batch 10 micro-iteration 182 | Reserved latency-only slot: measure, optimize one hot path, test, and record result |
+| 183 | pending | Latency batch 10 micro-iteration 183 | Reserved latency-only slot: measure, optimize one hot path, test, and record result |
+| 184 | pending | Latency batch 10 micro-iteration 184 | Reserved latency-only slot: measure, optimize one hot path, test, and record result |
+| 185 | pending | Latency batch 10 micro-iteration 185 | Reserved latency-only slot: measure, optimize one hot path, test, and record result |
+| 186 | pending | Latency batch 10 micro-iteration 186 | Reserved latency-only slot: measure, optimize one hot path, test, and record result |
+| 187 | pending | Latency batch 10 micro-iteration 187 | Reserved latency-only slot: measure, optimize one hot path, test, and record result |
+| 188 | pending | Latency batch 10 micro-iteration 188 | Reserved latency-only slot: measure, optimize one hot path, test, and record result |
+| 189 | pending | Latency batch 10 micro-iteration 189 | Reserved latency-only slot: measure, optimize one hot path, test, and record result |
+| 190 | pending | Latency batch 11 micro-iteration 190 | Reserved latency-only slot: measure, optimize one hot path, test, and record result |
+| 191 | pending | Latency batch 11 micro-iteration 191 | Reserved latency-only slot: measure, optimize one hot path, test, and record result |
+| 192 | pending | Latency batch 11 micro-iteration 192 | Reserved latency-only slot: measure, optimize one hot path, test, and record result |
+| 193 | pending | Latency batch 11 micro-iteration 193 | Reserved latency-only slot: measure, optimize one hot path, test, and record result |
+| 194 | pending | Latency batch 11 micro-iteration 194 | Reserved latency-only slot: measure, optimize one hot path, test, and record result |
+| 195 | pending | Latency batch 11 micro-iteration 195 | Reserved latency-only slot: measure, optimize one hot path, test, and record result |
+| 196 | pending | Latency batch 11 micro-iteration 196 | Reserved latency-only slot: measure, optimize one hot path, test, and record result |
+| 197 | pending | Latency batch 11 micro-iteration 197 | Reserved latency-only slot: measure, optimize one hot path, test, and record result |
+| 198 | pending | Latency batch 11 micro-iteration 198 | Reserved latency-only slot: measure, optimize one hot path, test, and record result |
+| 199 | pending | Latency batch 11 micro-iteration 199 | Reserved latency-only slot: measure, optimize one hot path, test, and record result |
+| 200 | pending | Latency batch 12 handoff and latency-only continuation checkpoint | Keep the latency-only objective active through iteration 200; summarize remaining hotspots, validation status, and next queue |
 
 ## Recovery Checklist
 

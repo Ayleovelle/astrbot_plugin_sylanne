@@ -2060,3 +2060,321 @@ Status: complete locally and remote-tested after README update.
   - failed plugin count `0`;
   - LivingMemory remained visible as `astrbot_plugin_livingmemory 2.2.10`.
 
+## 2026-05-08 Iteration 88 Real-Time Personality Drift
+
+Status: complete locally.
+
+- Added `personality_drift_engine.py` with `astrbot.personality_drift_state.v1`.
+- Model invariant: persona text remains the static anchor; runtime drift is a bounded session-scoped offset with real-time half-life, rapid-update gate, per-event impulse cap, total offset cap, and reset backdoor.
+- Main lifecycle integration:
+  - `on_llm_request` and `on_llm_response` update drift only when `enable_personality_drift=true`;
+  - request-side drift uses only the current message as a new event, not rolling `contexts` or system prompt, so old context cannot be replayed into new long-term personality evidence;
+  - prompt injection is controlled by `personality_drift_injection_strength`;
+  - runtime persona profile is adapted only when a base persona exists.
+- Public API added:
+  - `get_personality_drift_snapshot`;
+  - `get_personality_drift_values`;
+  - `get_personality_drift_prompt_fragment`;
+  - `observe_personality_drift_event`;
+  - `simulate_personality_drift_update`;
+  - `reset_personality_drift_state`;
+  - `get_personality_drift_service`.
+- LivingMemory integration adds `personality_drift_state_at_write`, including the write-time drift summary and timestamp without raw message text.
+- README updated with:
+  - `0.0.2-beta-pr-11`;
+  - commands and LLM tool;
+  - typed config table for all personality drift schema keys;
+  - real-time drift formulas and literature-backed derivation;
+  - release file lists and py_compile command.
+- Validation completed:
+  - `py -3.13 -m unittest discover -s tests -v`: 255 tests passed.
+  - `py -3.13 -m py_compile main.py emotion_engine.py humanlike_engine.py lifelike_learning_engine.py personality_drift_engine.py integrated_self.py moral_repair_engine.py psychological_screening.py public_api.py prompts.py scripts\package_plugin.py`: passed.
+  - `py -3.13 -m json.tool _conf_schema.json`: passed.
+  - bundled Node syntax checks passed for `plugin_zip_preflight.js`, `remote_smoke_playwright.js`, `remote_cleanup_plugin_playwright.js`, and `remote_install_upload_playwright.js`.
+  - `py -3.13 scripts\package_plugin.py --output dist\astrbot_plugin_emotional_state.zip`: passed.
+  - `scripts\plugin_zip_preflight.js dist\astrbot_plugin_emotional_state.zip astrbot_plugin_emotional_state`: `ok=true`, entries `23`.
+  - zip exclusion check confirmed no local literature KB, tests, or scripts in the package, and confirmed `personality_drift_engine.py` is included.
+  - `git diff --check`: passed with Windows LF-to-CRLF warnings only.
+
+## 2026-05-08 Iteration 89 Personality Drift Latency Optimization And 20x Remote Smoke
+
+Status: complete locally and remote-tested.
+
+- Added low-risk latency optimizations for `enable_personality_drift=true`:
+  - `on_llm_request` and `on_llm_response` now reuse the first loaded personality drift state across runtime persona adaptation, drift update, and prompt injection.
+  - `_load_personality_drift_state` no longer writes KV during cached/read-only passive loads; one-second same-turn reads return the cached object.
+  - empty drift offsets return the original persona profile without deep-copying personality models.
+- Added regression tests for per-turn drift-state reuse, cached-load no-writeback, and empty-drift no-copy fast path.
+- README now records this round as `0.0.2-beta-pr-12` and the README contract test locks the ordered local prerelease sequence through pr-12.
+- Local validation completed before remote install:
+  - `py -3.13 -m unittest discover -s tests -v`: 258 tests passed.
+  - `py -3.13 -m py_compile main.py emotion_engine.py humanlike_engine.py lifelike_learning_engine.py personality_drift_engine.py integrated_self.py moral_repair_engine.py psychological_screening.py public_api.py prompts.py scripts\package_plugin.py`: passed.
+  - `py -3.13 -m json.tool _conf_schema.json`: passed.
+  - bundled Node syntax checks passed for `plugin_zip_preflight.js`, `remote_smoke_playwright.js`, `remote_cleanup_plugin_playwright.js`, and `remote_install_upload_playwright.js`.
+  - `py -3.13 scripts\package_plugin.py --output dist\astrbot_plugin_emotional_state.zip`: passed.
+  - `scripts\plugin_zip_preflight.js dist\astrbot_plugin_emotional_state.zip astrbot_plugin_emotional_state`: `ok=true`, size `176604`, entries `23`.
+- Remote validation:
+  - the user-provided `1145` port timed out on TCP/HTTP checks, while the earlier `15356` AstrBot port was reachable and used for effective validation;
+  - cleanup deleted only exact `astrbot_plugin_emotional_state`, with `delete_config=false` and `delete_data=false`;
+  - LivingMemory was observed before and after cleanup with count `1`;
+  - upload installed the rebuilt zip, plugin count increased from `13` to `14`, and failed plugin map remained `{}`;
+  - strict smoke against AstrBot `4.24.2` confirmed plugin found, activated, version `0.0.2-beta`, display name `多维情绪状态`, `expectedPluginChecks.ok=true`, `expectedFailedPlugin=null`, failed plugin count `0`, failed requests `0`, and LivingMemory visible.
+- 20 effective remote smoke iterations:
+  - attempts `20`, successes `20`, failures `0`;
+  - elapsed seconds: average `12.07`, min `11.13`, max `13.65`;
+  - every run had `found=true`, `activated=true`, `versionMatches=true`, `displayNameMatches=true`, `expectedPluginFailed=false`, `pluginCount=14`, `uiExpectedVisible=true`, and `livingMemoryVisible=true`.
+
+
+
+## 2026-05-08 Iteration 90-99 Latency Batch 1
+
+Status: complete locally.
+
+Goal: start the requested latency-only iteration run and keep it persistent through iteration `200`. Persistent range is `90-200` in `task_plan.md`; every slot is latency-only and must record measurement, optimization, test, and result.
+
+Implemented in batch 1 so far:
+
+- Default `assessment_timing` changed from `both` to `post` to avoid two internal LLM assessments per turn by default.
+- `max_context_chars` default reduced from `2600` to `1600`.
+- Added `request_context_max_chars` to clip lifecycle context before assessor prompt construction.
+- Added `assessor_timeout_seconds`; timeout falls back to heuristic observation.
+- Added `provider_id_cache_ttl_seconds` to avoid repeated provider lookup when `emotion_provider_id` is blank.
+- Added `passive_load_fresh_seconds` and changed cached passive reads for emotion/humanlike/lifelike/moral states so read paths do not write KV.
+- Added persona fingerprint emotion-engine cache.
+- Optimized trajectory append in humanlike, lifelike, personality drift, and moral repair engines to copy only the retained prefix.
+- Added tests for provider-id cache, assessor timeout fallback, request context clipping, and cached passive load no-writeback.
+- Extended the persistent latency-only queue from `90-189` to `90-200` so context compaction cannot erase the user's updated target.
+
+Validation:
+
+- Targeted lifecycle/public/config/engine suite passed: 135 tests OK.
+- `py_compile` passed for main runtime modules.
+- `_conf_schema.json` parsed with `json.tool`.
+- Full test suite passed: 262 tests OK in 10.926 seconds.
+- Package build produced `dist\astrbot_plugin_emotional_state.zip`.
+- Node syntax checks passed for zip preflight, remote smoke, remote cleanup, and remote install scripts.
+- Zip preflight passed: `ok=true`, size `178469`, entries `23`.
+- `git diff --check` passed.
+
+Remote validation: not run for this local-only latency batch. The next remote-facing install or explicit remote-smoke request should still clean the old same-name plugin first.
+
+Next latency batch direction:
+
+- Iterations `100-109`: request-local config/state reuse, fewer repeated enabled checks, fewer repeated context joins, and no-op write reduction where tests can prove unchanged behavior.
+
+## 2026-05-08 Iteration 100-109 Latency Batch 2
+
+Status: complete locally.
+
+Goal: reduce lifecycle hook overhead without changing state persistence semantics.
+
+Implemented so far:
+
+- Cached request-local lifecycle flags in `on_llm_request`: assessment timing, enabled states, injection switches, safety boundary, and `inject_state`.
+- Reused one `request_observation_text` across humanlike, lifelike, and moral repair heuristics.
+- Cached response-local timing, enabled flags, and safety boundary.
+- Moved blank response return ahead of persona/profile/state loading; added regression coverage that blank responses do not load persona or emotion state.
+- Avoided an extra `_build_state_injection()` safety config read by calling `build_state_injection(..., safety_boundary=...)` directly on the request hot path.
+- Removed duplicate `persona_model` deep copy after applying personality drift; `_ensure_persona_state()` already synchronizes it.
+- Deliberately kept save ordering unchanged because merging writes could change exception-path persistence.
+
+Validation so far:
+
+- Targeted lifecycle/public suite passed: 95 tests OK.
+- `py_compile` passed for `main.py` and `tests/test_astrbot_lifecycle.py`.
+
+Validation:
+
+- Targeted lifecycle/public suite passed: 95 tests OK.
+- Full suite passed: 262 tests OK in 11.799 seconds.
+- `py_compile` passed for runtime modules and `tests/test_astrbot_lifecycle.py`.
+- `_conf_schema.json` parsed with `json.tool`.
+- Package build produced `dist\astrbot_plugin_emotional_state.zip`.
+- Node syntax checks passed for zip preflight, remote smoke, remote cleanup, and remote install scripts.
+- Zip preflight passed: `ok=true`, size `178469`, entries `23`.
+- `git diff --check` passed.
+
+Next latency batch direction:
+
+- Iterations `110-119`: object-copy reductions and engine hot-path micro-optimizations. Avoid changing KV save order or public payload isolation unless tests prove the boundary remains safe.
+
+## 2026-05-08 Iteration 110-119 Latency Batch 3
+
+Status: complete locally.
+
+Goal: reduce object-copy overhead and repeated regex compilation on engine hot paths without changing public payload isolation or KV save ordering.
+
+Implemented:
+
+- Added bounded copy helpers in `lifelike_learning_engine.py` for `JargonEntry` and `UserProfileEvidence`, replacing repeated `to_dict/from_dict` roundtrips in passive update, lexicon update, and profile update paths.
+- Changed `derive_initiative_policy()` to parse raw lexicon entries once instead of calling `JargonEntry.from_dict()` twice per item.
+- Precompiled moral repair cue patterns for deception, harm, accountability, apology, compensation, and evasion checks.
+- Precompiled psychological screening red-flag patterns for self-harm, other-harm, and severe function-impairment signals.
+- Precompiled humanlike medical/crisis context patterns.
+- Updated README prerelease iteration table through `0.0.2-beta-pr-15` and extended the README order contract accordingly.
+
+Validation so far:
+
+- Targeted engine suite passed: 33 tests OK.
+- `py_compile` passed for `lifelike_learning_engine.py`, `moral_repair_engine.py`, `psychological_screening.py`, and `humanlike_engine.py`.
+
+Next latency batch direction:
+
+- Iterations `120-129`: reduce request text/context copying, remove stale-cache `to_dict()` comparisons where identity/change markers are sufficient, and reuse memory payload configuration reads. Keep public payload isolation tests in the required validation set.
+
+## 2026-05-08 Iteration 120-129 Latency Batch 4
+
+Status: complete locally.
+
+Goal: reduce request hot-path copying, stale-cache serialization work, and repeated public-memory configuration reads while preserving read-only and disabled-module contracts.
+
+Implemented:
+
+- Added `_tail_items()` and changed `_request_to_text()` so it reads only the last 8 contexts instead of copying the full `request.contexts` list first.
+- Added lifecycle regression coverage proving old contexts are not converted when only the tail context window is needed.
+- Replaced passive cached-load `decayed_state.to_dict() != state.to_dict()` comparisons with `_passive_update_changed()`, avoiding whole-state serialization on emotion, humanlike, lifelike, and moral repair read paths.
+- Centralized `build_emotion_memory_payload()` memory annotation flags so each call reads the five write toggles once.
+- Made disabled personality drift snapshots return before persona-profile or drift-state loading.
+- Added `_safe_session_key()` and reused its sanitized key across emotion, psychological, humanlike, lifelike, personality drift, and moral repair KV prefixes.
+- Updated README prerelease iteration table through `0.0.2-beta-pr-16` and extended the README order contract accordingly.
+
+Validation so far:
+
+- Targeted lifecycle/public API suite passed: 98 tests OK.
+- `py_compile` passed for `main.py`, `tests/test_astrbot_lifecycle.py`, and `tests/test_public_api.py`.
+
+Next latency batch direction:
+
+- Iterations `130-139`: consider low-risk prompt-fragment/snapshot reuse and direct disabled payload shortcuts. Defer `asyncio.gather()` snapshot fan-out until enough tests are added for ordering and exception behavior.
+
+## 2026-05-08 Latency Target Update
+
+Status: active.
+
+The user clarified the latency objective: continue iterative optimization with the goal of bringing the real interaction reply path under 5 seconds. This is now recorded in `task_plan.md` as the guiding target through iteration `200`.
+
+Measurement rule:
+
+- Do not treat full unit-test suite duration as reply latency.
+- Track three separate numbers when possible: local unit-test duration, local plugin hot-path benchmark duration, and remote real-machine WebUI/plugin smoke duration.
+- Future latency batches should prefer optimizations that reduce real hook/API work on the default path before cosmetic or documentation changes.
+
+## 2026-05-08 Iteration 130-141 Latency Batch 5
+
+Status: complete locally.
+
+Goal: continue the latency-only run toward the user target of under 5 seconds per real interaction, separating local hook overhead from slow internal LLM or KV wait time.
+
+Implemented:
+
+- Kept the earlier request no-work early return, lazy observation text join, low-signal personality drift no-write, and direct public values/policy paths as `0.0.2-beta-pr-17`.
+- Added `scripts/benchmark_plugin_hot_path.py` to report local hook metrics and a slow-assessor timeout-guard case.
+- Changed `assessor_timeout_seconds` default from `8.0` to `4.0`, matching the 5 second reply target by allowing heuristic fallback before the internal assessor consumes the full budget.
+- Precomputed the assessment prompt dimension schema in `prompts.py` instead of joining/splitting dimensions on every prompt build.
+- Precompiled personality drift heuristic regex patterns and added semantics coverage for English warmth/repair cues.
+- In `on_llm_response`, prefetch moral repair state concurrently with post-response emotion assessment, while preserving emotion save before moral save.
+- In `build_emotion_memory_payload`, fetch humanlike, lifelike, personality drift, and moral repair snapshots concurrently, then assemble LivingMemory annotations in the original order.
+- README now records `0.0.2-beta-pr-17` through `0.0.2-beta-pr-19`; the README sequence contract expects pr-1 through pr-19.
+
+Validation so far:
+
+- `py -3.13 -m unittest tests.test_personality_drift_engine tests.test_config_schema_contract tests.test_astrbot_lifecycle -v`: 38 tests OK.
+- `py -3.13 -m unittest tests.test_public_api tests.test_astrbot_lifecycle -v`: 100 tests OK.
+- `py -3.13 -m py_compile main.py prompts.py personality_drift_engine.py scripts\benchmark_plugin_hot_path.py tests\test_public_api.py tests\test_astrbot_lifecycle.py`: passed.
+- `py -3.13 scripts\benchmark_plugin_hot_path.py`:
+  - `request_default_post_inject mean_ms=0.028 p95_ms=0.035`
+  - `request_no_request_work mean_ms=0.005 p95_ms=0.005`
+  - `request_optional_modules_enabled mean_ms=1.357 p95_ms=1.887`
+  - `response_post_assessment mean_ms=0.082 p95_ms=0.132`
+  - `response_slow_assessor_timeout_guard mean_ms=109.124 p95_ms=109.899` with a 50 ms configured timeout and 200 ms fake provider delay.
+
+Next latency batch direction:
+
+- Iterations `142-149`: add more realistic slow-KV benchmarks, consider optional request-state load/save fan-out with tests, and only attempt integrated-self snapshot fan-out after exception/ordering behavior is covered.
+
+## 2026-05-08 Iteration 142-143 Latency Batch 6 Start
+
+Status: complete locally for 142-143.
+
+Implemented:
+
+- `on_llm_request` now fans out humanlike, lifelike, and moral repair state loads when those optional modules are enabled, then keeps update and save ordering unchanged.
+- Added lifecycle regression coverage with three 50 ms auxiliary loads; the request hook completes under the serial-load bound and still saves Humanlike, Lifelike, and Moral states in order.
+- Extended `scripts/benchmark_plugin_hot_path.py` with `request_slow_aux_load_fanout`, using three fake 20 ms auxiliary loads to make KV-like waiting visible.
+
+Validation:
+
+- `py -3.13 -m unittest tests.test_astrbot_lifecycle -v`: 20 tests OK.
+- `py -3.13 -m py_compile main.py tests\test_astrbot_lifecycle.py scripts\benchmark_plugin_hot_path.py`: passed.
+- `py -3.13 scripts\benchmark_plugin_hot_path.py` after fan-out:
+  - `request_default_post_inject mean_ms=0.031 p95_ms=0.043`
+  - `request_no_request_work mean_ms=0.005 p95_ms=0.005`
+  - `request_optional_modules_enabled mean_ms=1.257 p95_ms=1.673`
+  - `request_slow_aux_load_fanout mean_ms=30.812 p95_ms=32.488`
+  - `response_post_assessment mean_ms=0.089 p95_ms=0.156`
+  - `response_slow_assessor_timeout_guard mean_ms=107.737 p95_ms=109.209`
+
+Next latency batch direction:
+
+- Continue from iteration `144`: add slow response/memory payload benchmarks, then consider carefully bounded save fan-out or integrated snapshot fan-out only where ordering and exception behavior are explicitly tested.
+
+## 2026-05-08 Iteration 144-149 Latency Batch 6 Close
+
+Status: complete locally.
+
+Implemented:
+
+- Extended `scripts/benchmark_plugin_hot_path.py` with:
+  - `response_slow_moral_load_fanout` for concurrent post-response emotion assessment and moral-state load.
+  - `memory_slow_snapshot_fanout` for LivingMemory optional snapshot fan-out.
+  - Existing timeout guard remains visible for the 5 second SLA.
+- No new runtime behavior beyond the already landed request/response/memory fan-out; this slice is measurement hardening and handoff stability.
+
+Validation:
+
+- Full suite after runtime fan-out: `269 tests OK` in `9.880s`.
+- `py_compile` passed for runtime modules and benchmark script.
+- `_conf_schema.json` parsed with `json.tool`.
+- `git diff --check` passed with line-ending warnings only.
+- `scripts\plugin_zip_preflight.js dist\astrbot_plugin_emotional_state.zip astrbot_plugin_emotional_state`: `ok=true`, size `180883`, entries `23`.
+- Final benchmark:
+  - `request_default_post_inject mean_ms=0.026 p95_ms=0.037`
+  - `request_no_request_work mean_ms=0.005 p95_ms=0.005`
+  - `request_optional_modules_enabled mean_ms=1.366 p95_ms=1.814`
+  - `request_slow_aux_load_fanout mean_ms=30.869 p95_ms=32.465`
+  - `response_post_assessment mean_ms=0.085 p95_ms=0.101`
+  - `response_slow_moral_load_fanout mean_ms=30.980 p95_ms=31.959`
+  - `response_slow_assessor_timeout_guard mean_ms=108.739 p95_ms=109.674`
+  - `memory_slow_snapshot_fanout mean_ms=31.157 p95_ms=31.878`
+
+Next latency batch direction:
+
+- Continue from iteration `150`: investigate save fan-out or batching only with tests proving command/reset consistency and exception behavior; otherwise prefer more no-op write reduction and integrated-self minimal snapshot paths.
+
+## 2026-05-08 v0.1.0-beta Main Merge Documentation Checkpoint
+
+Status: complete on `main`.
+
+Implemented:
+
+- Confirmed the working branch is already `main`.
+- Updated the public prerelease version to `0.1.0-beta` in `metadata.yaml` and `main.py @register(...)`.
+- Updated README badges, current-version table, current-version description, remote smoke version example, and the personality-prior version reference.
+- Reworked the README iteration area as `0.1.0-beta 迭代记录`.
+- Preserved the historical `0.0.2-beta-pr-1` through `0.0.2-beta-pr-19` batch summary in a `<details open>` block.
+- Added a collapsed per-iteration engineering detail table for completed Iterations 11-149, generated from `task_plan.md`.
+- Updated `docs/release_branch_sync_checklist.md` and `docs/theory.md` to match the new prerelease version.
+- Updated the README contract test so it checks both the historical beta-pr summary and the collapsed Iteration 11-149 details.
+
+Validation:
+
+- `py -3.13 -m unittest tests.test_remote_smoke_contract -v`: 18 tests OK.
+- `py -3.13 -m unittest discover -s tests -v`: 269 tests OK.
+- `py -3.13 -m json.tool _conf_schema.json`: passed.
+- `py -3.13 -m py_compile main.py emotion_engine.py humanlike_engine.py lifelike_learning_engine.py personality_drift_engine.py integrated_self.py moral_repair_engine.py psychological_screening.py public_api.py prompts.py scripts\package_plugin.py scripts\benchmark_plugin_hot_path.py`: passed.
+- Node syntax checks passed for `remote_smoke_playwright.js`, `remote_cleanup_plugin_playwright.js`, `remote_install_upload_playwright.js`, and `plugin_zip_preflight.js`.
+- `py -3.13 scripts\package_plugin.py --output dist\astrbot_plugin_emotional_state.zip`: built `dist\astrbot_plugin_emotional_state.zip`.
+- `scripts\plugin_zip_preflight.js dist\astrbot_plugin_emotional_state.zip astrbot_plugin_emotional_state`: `ok=true`, size `189176`, entries `23`.
+- `git diff --check` and `git diff --cached --check`: passed with only Git line-ending warnings.
+- Credential/server literal scan over runtime, docs, scripts, tests, and metadata paths: no matches.
+- Knowledge base directories remain local-only: ignored by `.gitignore` and not tracked.

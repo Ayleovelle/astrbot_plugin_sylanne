@@ -1,7 +1,11 @@
 from __future__ import annotations
 
 import contextvars
+import asyncio
 import json
+import time
+from copy import deepcopy
+from collections.abc import Sequence
 from typing import Any
 
 from astrbot.api import AstrBotConfig, logger
@@ -58,9 +62,23 @@ try:
         LifelikeLearningState,
         build_lifelike_memory_annotation,
         build_lifelike_prompt_fragment,
+        derive_initiative_policy,
         format_lifelike_state_for_user,
         heuristic_lifelike_observation,
         lifelike_state_to_public_payload,
+    )
+    from .personality_drift_engine import (
+        PUBLIC_PERSONALITY_DRIFT_SCHEMA_VERSION,
+        PersonalityDriftEngine,
+        PersonalityDriftObservation,
+        PersonalityDriftParameters,
+        PersonalityDriftState,
+        apply_personality_drift_to_profile,
+        build_personality_drift_memory_annotation,
+        build_personality_drift_prompt_fragment,
+        format_personality_drift_state_for_user,
+        heuristic_personality_drift_observation,
+        personality_drift_state_to_public_payload,
     )
     from .moral_repair_engine import (
         PUBLIC_MORAL_REPAIR_SCHEMA_VERSION,
@@ -139,9 +157,23 @@ except ImportError:
         LifelikeLearningState,
         build_lifelike_memory_annotation,
         build_lifelike_prompt_fragment,
+        derive_initiative_policy,
         format_lifelike_state_for_user,
         heuristic_lifelike_observation,
         lifelike_state_to_public_payload,
+    )
+    from personality_drift_engine import (
+        PUBLIC_PERSONALITY_DRIFT_SCHEMA_VERSION,
+        PersonalityDriftEngine,
+        PersonalityDriftObservation,
+        PersonalityDriftParameters,
+        PersonalityDriftState,
+        apply_personality_drift_to_profile,
+        build_personality_drift_memory_annotation,
+        build_personality_drift_prompt_fragment,
+        format_personality_drift_state_for_user,
+        heuristic_personality_drift_observation,
+        personality_drift_state_to_public_payload,
     )
     from moral_repair_engine import (
         PUBLIC_MORAL_REPAIR_SCHEMA_VERSION,
@@ -210,6 +242,12 @@ _REQUIRED_EMOTION_SERVICE_METHODS: tuple[str, ...] = (
     "observe_lifelike_text",
     "simulate_lifelike_update",
     "reset_lifelike_learning_state",
+    "get_personality_drift_snapshot",
+    "get_personality_drift_values",
+    "get_personality_drift_prompt_fragment",
+    "observe_personality_drift_event",
+    "simulate_personality_drift_update",
+    "reset_personality_drift_state",
 )
 
 _REQUIRED_EMOTION_SERVICE_VERSIONS: dict[str, str] = {
@@ -220,6 +258,7 @@ _REQUIRED_EMOTION_SERVICE_VERSIONS: dict[str, str] = {
     "psychological_screening_schema_version": PUBLIC_SCREENING_SCHEMA_VERSION,
     "integrated_self_schema_version": PUBLIC_INTEGRATED_SELF_SCHEMA_VERSION,
     "lifelike_learning_schema_version": PUBLIC_LIFELIKE_LEARNING_SCHEMA_VERSION,
+    "personality_drift_schema_version": PUBLIC_PERSONALITY_DRIFT_SCHEMA_VERSION,
 }
 
 
@@ -255,7 +294,7 @@ def get_emotional_state_plugin(context: Context) -> Any | None:
     PLUGIN_NAME,
     "pidan",
     "基于 PAD/OCC/appraisal 与情绪动力学的 AstrBot 多维情绪状态插件",
-    "0.0.2-beta",
+    "0.1.0-beta",
     "",
 )
 class EmotionalStatePlugin(Star):
@@ -268,6 +307,7 @@ class EmotionalStatePlugin(Star):
     moral_repair_state_schema_version = PUBLIC_MORAL_REPAIR_SCHEMA_VERSION
     integrated_self_schema_version = PUBLIC_INTEGRATED_SELF_SCHEMA_VERSION
     lifelike_learning_schema_version = PUBLIC_LIFELIKE_LEARNING_SCHEMA_VERSION
+    personality_drift_schema_version = PUBLIC_PERSONALITY_DRIFT_SCHEMA_VERSION
 
     def __init__(self, context: Context, config: AstrBotConfig | None = None):
         super().__init__(context)
@@ -281,6 +321,9 @@ class EmotionalStatePlugin(Star):
         self.lifelike_learning_engine = LifelikeLearningEngine(
             self._build_lifelike_learning_parameters(),
         )
+        self.personality_drift_engine = PersonalityDriftEngine(
+            self._build_personality_drift_parameters(),
+        )
         self.moral_repair_engine = MoralRepairEngine(
             self._build_moral_repair_parameters(),
         )
@@ -288,7 +331,10 @@ class EmotionalStatePlugin(Star):
         self._psychological_memory_cache: dict[str, PsychologicalScreeningState] = {}
         self._humanlike_memory_cache: dict[str, HumanlikeState] = {}
         self._lifelike_learning_memory_cache: dict[str, LifelikeLearningState] = {}
+        self._personality_drift_memory_cache: dict[str, PersonalityDriftState] = {}
         self._moral_repair_memory_cache: dict[str, MoralRepairState] = {}
+        self._engine_cache: dict[str, EmotionEngine] = {}
+        self._provider_id_cache: dict[str, tuple[float, str | None]] = {}
         self._last_request_text: dict[str, str] = {}
 
     async def terminate(self):
@@ -296,7 +342,10 @@ class EmotionalStatePlugin(Star):
         self._psychological_memory_cache.clear()
         self._humanlike_memory_cache.clear()
         self._lifelike_learning_memory_cache.clear()
+        self._personality_drift_memory_cache.clear()
         self._moral_repair_memory_cache.clear()
+        self._engine_cache.clear()
+        self._provider_id_cache.clear()
         self._last_request_text.clear()
 
     @filter.on_llm_request()
@@ -308,18 +357,60 @@ class EmotionalStatePlugin(Star):
         if _INTERNAL_LLM_CALL.get() or not self._cfg_bool("enabled", True):
             return
 
+        assessment_timing = self._assessment_timing()
+        humanlike_enabled = self._humanlike_modeling_enabled()
+        lifelike_enabled = self._lifelike_learning_enabled()
+        moral_repair_enabled = self._moral_repair_modeling_enabled()
+        personality_drift_enabled = self._personality_drift_enabled()
+        safety_boundary = self._safety_boundary_enabled()
+        inject_state = self._cfg_bool("inject_state", True)
+        humanlike_injection_enabled = (
+            humanlike_enabled and self._humanlike_injection_enabled()
+        )
+        lifelike_injection_enabled = (
+            lifelike_enabled and self._lifelike_learning_injection_enabled()
+        )
+        personality_drift_injection_enabled = (
+            personality_drift_enabled and self._personality_drift_injection_enabled()
+        )
+        moral_repair_injection_enabled = (
+            moral_repair_enabled and self._moral_repair_injection_enabled()
+        )
         session_key = self._session_key(event, request)
-        persona_profile = await self._persona_profile(event, request)
+        context_text = self._request_to_text(request)
+        self._last_request_text[session_key] = context_text
+        needs_request_state = (
+            assessment_timing in {"pre", "both"}
+            or inject_state
+            or humanlike_enabled
+            or lifelike_enabled
+            or moral_repair_enabled
+            or personality_drift_enabled
+        )
+        if not needs_request_state:
+            return
+
+        base_persona_profile = await self._persona_profile(event, request)
+        personality_drift_state: PersonalityDriftState | None = None
+        if personality_drift_enabled:
+            personality_drift_state = await self._load_personality_drift_state(
+                session_key,
+                base_persona_profile,
+            )
+        persona_profile = await self._runtime_persona_profile(
+            session_key,
+            base_persona_profile,
+            personality_drift_state,
+        )
         state = await self._load_state(session_key, persona_profile)
         engine = self._engine_for_persona(persona_profile)
-        context_text = self._request_to_text(request)
         current_text = self._event_text(event) or request.prompt or ""
-        self._last_request_text[session_key] = context_text
+        request_observation_text: str | None = None
         humanlike_state: HumanlikeState | None = None
         lifelike_learning_state: LifelikeLearningState | None = None
         moral_repair_state: MoralRepairState | None = None
 
-        if self._assessment_timing() in {"pre", "both"}:
+        if assessment_timing in {"pre", "both"}:
             observation = await self._assess_emotion(
                 event=event,
                 phase="pre_response",
@@ -331,10 +422,31 @@ class EmotionalStatePlugin(Star):
             state = engine.update(state, observation, profile=persona_profile)
             await self._save_state(session_key, state)
 
-        if self._humanlike_modeling_enabled():
-            previous_humanlike_state = await self._load_humanlike_state(session_key)
+        auxiliary_load_tasks: dict[str, asyncio.Task[Any]] = {}
+        if humanlike_enabled:
+            auxiliary_load_tasks["humanlike"] = asyncio.create_task(
+                self._load_humanlike_state(session_key),
+            )
+        if lifelike_enabled:
+            auxiliary_load_tasks["lifelike"] = asyncio.create_task(
+                self._load_lifelike_learning_state(session_key),
+            )
+        if moral_repair_enabled:
+            auxiliary_load_tasks["moral_repair"] = asyncio.create_task(
+                self._load_moral_repair_state(session_key),
+            )
+        if auxiliary_load_tasks:
+            await asyncio.gather(*auxiliary_load_tasks.values())
+
+        if humanlike_enabled:
+            if request_observation_text is None:
+                request_observation_text = self._join_observation_text(
+                    context_text,
+                    current_text,
+                )
+            previous_humanlike_state = auxiliary_load_tasks["humanlike"].result()
             observation = heuristic_humanlike_observation(
-                "\n\n".join(part for part in (context_text, current_text) if part),
+                request_observation_text,
                 source="llm_request",
             )
             humanlike_state = self.humanlike_engine.update(
@@ -343,12 +455,15 @@ class EmotionalStatePlugin(Star):
             )
             await self._save_humanlike_state(session_key, humanlike_state)
 
-        if self._lifelike_learning_enabled():
-            previous_lifelike_state = await self._load_lifelike_learning_state(
-                session_key,
-            )
+        if lifelike_enabled:
+            if request_observation_text is None:
+                request_observation_text = self._join_observation_text(
+                    context_text,
+                    current_text,
+                )
+            previous_lifelike_state = auxiliary_load_tasks["lifelike"].result()
             observation = heuristic_lifelike_observation(
-                "\n\n".join(part for part in (context_text, current_text) if part),
+                request_observation_text,
                 source="llm_request",
             )
             lifelike_learning_state = self.lifelike_learning_engine.update(
@@ -360,12 +475,15 @@ class EmotionalStatePlugin(Star):
                 lifelike_learning_state,
             )
 
-        if self._moral_repair_modeling_enabled():
-            previous_moral_repair_state = await self._load_moral_repair_state(
-                session_key,
-            )
+        if moral_repair_enabled:
+            if request_observation_text is None:
+                request_observation_text = self._join_observation_text(
+                    context_text,
+                    current_text,
+                )
+            previous_moral_repair_state = auxiliary_load_tasks["moral_repair"].result()
             observation = heuristic_moral_repair_observation(
-                "\n\n".join(part for part in (context_text, current_text) if part),
+                request_observation_text,
                 source="llm_request",
             )
             moral_repair_state = self.moral_repair_engine.update(
@@ -374,11 +492,81 @@ class EmotionalStatePlugin(Star):
             )
             await self._save_moral_repair_state(session_key, moral_repair_state)
 
-        if self._cfg_bool("inject_state", True):
-            request.extra_user_content_parts.append(
-                TextPart(text=self._build_state_injection(state)).mark_as_temp(),
+        if personality_drift_enabled:
+            drift_persona_fingerprint = (
+                base_persona_profile.fingerprint
+                if base_persona_profile is not None
+                else "default"
             )
-            if self._humanlike_modeling_enabled() and self._humanlike_injection_enabled():
+            previous_personality_drift_state = personality_drift_state
+            if previous_personality_drift_state is None:
+                previous_personality_drift_state = await self._load_personality_drift_state(
+                    session_key,
+                    base_persona_profile,
+                )
+            emotion_snapshot = state.to_public_dict(
+                session_key=session_key,
+                include_safety=safety_boundary,
+            )
+            lifelike_snapshot = (
+                lifelike_learning_state.to_public_dict(
+                    session_key=session_key,
+                    exposure="internal",
+                )
+                if lifelike_learning_state is not None
+                else None
+            )
+            moral_snapshot = (
+                moral_repair_state.to_public_dict(
+                    session_key=session_key,
+                    exposure="internal",
+                    safety_boundary=safety_boundary,
+                )
+                if moral_repair_state is not None
+                else None
+            )
+            observation = heuristic_personality_drift_observation(
+                current_text,
+                source="llm_request",
+                emotion_snapshot=emotion_snapshot,
+                lifelike_snapshot=lifelike_snapshot,
+                moral_repair_snapshot=moral_snapshot,
+            )
+            personality_drift_state = self.personality_drift_engine.update(
+                previous_personality_drift_state,
+                observation,
+                persona_fingerprint=drift_persona_fingerprint,
+            )
+            personality_drift_changed = self._personality_drift_changed(
+                personality_drift_state,
+                previous_personality_drift_state,
+            )
+            if personality_drift_changed:
+                await self._save_personality_drift_state(
+                    session_key,
+                    personality_drift_state,
+                )
+            else:
+                personality_drift_state = previous_personality_drift_state
+            if personality_drift_changed and base_persona_profile is not None:
+                persona_profile = self._apply_personality_drift(
+                    base_persona_profile,
+                    personality_drift_state,
+                )
+                state = self._ensure_persona_state(state, persona_profile)
+                engine = self._engine_for_persona(persona_profile)
+                await self._save_state(session_key, state)
+
+        if inject_state:
+            request.extra_user_content_parts.append(
+                TextPart(
+                    text=build_state_injection(
+                        state,
+                        safety_boundary=safety_boundary,
+                    ),
+                ).mark_as_temp(),
+            )
+            if humanlike_injection_enabled:
                 humanlike_state = humanlike_state or await self._load_humanlike_state(
                     session_key,
                 )
@@ -386,14 +574,11 @@ class EmotionalStatePlugin(Star):
                     TextPart(
                         text=build_humanlike_prompt_fragment(
                             humanlike_state,
-                            safety_boundary=self._safety_boundary_enabled(),
+                            safety_boundary=safety_boundary,
                         ),
                     ).mark_as_temp(),
                 )
-            if (
-                self._lifelike_learning_enabled()
-                and self._lifelike_learning_injection_enabled()
-            ):
+            if lifelike_injection_enabled:
                 lifelike_learning_state = (
                     lifelike_learning_state
                     or await self._load_lifelike_learning_state(session_key)
@@ -403,10 +588,22 @@ class EmotionalStatePlugin(Star):
                         text=build_lifelike_prompt_fragment(lifelike_learning_state),
                     ).mark_as_temp(),
                 )
-            if (
-                self._moral_repair_modeling_enabled()
-                and self._moral_repair_injection_enabled()
-            ):
+            if personality_drift_injection_enabled:
+                personality_drift_state = (
+                    personality_drift_state
+                    or await self._load_personality_drift_state(
+                        session_key,
+                        base_persona_profile,
+                    )
+                )
+                request.extra_user_content_parts.append(
+                    TextPart(
+                        text=build_personality_drift_prompt_fragment(
+                            personality_drift_state,
+                        ),
+                    ).mark_as_temp(),
+                )
+            if moral_repair_injection_enabled:
                 moral_repair_state = (
                     moral_repair_state
                     or await self._load_moral_repair_state(session_key)
@@ -415,7 +612,7 @@ class EmotionalStatePlugin(Star):
                     TextPart(
                         text=build_moral_repair_prompt_fragment(
                             moral_repair_state,
-                            safety_boundary=self._safety_boundary_enabled(),
+                            safety_boundary=safety_boundary,
                         ),
                     ).mark_as_temp(),
                 )
@@ -428,30 +625,64 @@ class EmotionalStatePlugin(Star):
     ) -> None:
         if _INTERNAL_LLM_CALL.get() or not self._cfg_bool("enabled", True):
             return
-        if self._assessment_timing() not in {"post", "both"}:
+        assessment_timing = self._assessment_timing()
+        if assessment_timing not in {"post", "both"}:
             return
 
-        session_key = self._session_key(event)
-        persona_profile = await self._persona_profile(event, None)
-        state = await self._load_state(session_key, persona_profile)
-        engine = self._engine_for_persona(persona_profile)
         response_text = getattr(response, "completion_text", "") or ""
         if not response_text.strip():
             return
 
-        observation = await self._assess_emotion(
-            event=event,
-            phase="post_response",
-            previous_state=state,
-            persona_profile=persona_profile,
-            context_text=self._last_request_text.get(session_key, ""),
-            current_text=response_text,
-        )
-        state = engine.update(state, observation, profile=persona_profile)
-        await self._save_state(session_key, state)
-        if self._moral_repair_modeling_enabled():
-            previous_moral_repair_state = await self._load_moral_repair_state(
+        moral_repair_enabled = self._moral_repair_modeling_enabled()
+        personality_drift_enabled = self._personality_drift_enabled()
+        safety_boundary = self._safety_boundary_enabled()
+        session_key = self._session_key(event)
+        base_persona_profile = await self._persona_profile(event, None)
+        personality_drift_state: PersonalityDriftState | None = None
+        if personality_drift_enabled:
+            personality_drift_state = await self._load_personality_drift_state(
                 session_key,
+                base_persona_profile,
+            )
+        persona_profile = await self._runtime_persona_profile(
+            session_key,
+            base_persona_profile,
+            personality_drift_state,
+        )
+        state = await self._load_state(session_key, persona_profile)
+        engine = self._engine_for_persona(persona_profile)
+        moral_repair_load_task: asyncio.Task[MoralRepairState] | None = None
+        if moral_repair_enabled:
+            moral_repair_load_task = asyncio.create_task(
+                self._load_moral_repair_state(session_key),
+            )
+
+        try:
+            observation = await self._assess_emotion(
+                event=event,
+                phase="post_response",
+                previous_state=state,
+                persona_profile=persona_profile,
+                context_text=self._last_request_text.get(session_key, ""),
+                current_text=response_text,
+            )
+            state = engine.update(state, observation, profile=persona_profile)
+            await self._save_state(session_key, state)
+        except Exception:
+            if moral_repair_load_task is not None and not moral_repair_load_task.done():
+                moral_repair_load_task.cancel()
+            if moral_repair_load_task is not None:
+                try:
+                    await moral_repair_load_task
+                except asyncio.CancelledError:
+                    pass
+            raise
+
+        if moral_repair_enabled:
+            previous_moral_repair_state = (
+                await moral_repair_load_task
+                if moral_repair_load_task is not None
+                else await self._load_moral_repair_state(session_key)
             )
             moral_repair_observation = heuristic_moral_repair_observation(
                 response_text,
@@ -462,6 +693,39 @@ class EmotionalStatePlugin(Star):
                 moral_repair_observation,
             )
             await self._save_moral_repair_state(session_key, moral_repair_state)
+        if personality_drift_enabled:
+            drift_persona_fingerprint = (
+                base_persona_profile.fingerprint
+                if base_persona_profile is not None
+                else "default"
+            )
+            previous_personality_drift_state = personality_drift_state
+            if previous_personality_drift_state is None:
+                previous_personality_drift_state = await self._load_personality_drift_state(
+                    session_key,
+                    base_persona_profile,
+                )
+            observation = heuristic_personality_drift_observation(
+                response_text,
+                source="llm_response",
+                emotion_snapshot=state.to_public_dict(
+                    session_key=session_key,
+                    include_safety=safety_boundary,
+                ),
+            )
+            personality_drift_state = self.personality_drift_engine.update(
+                previous_personality_drift_state,
+                observation,
+                persona_fingerprint=drift_persona_fingerprint,
+            )
+            if self._personality_drift_changed(
+                personality_drift_state,
+                previous_personality_drift_state,
+            ):
+                await self._save_personality_drift_state(
+                    session_key,
+                    personality_drift_state,
+                )
 
     async def get_emotion_snapshot(
         self,
@@ -478,19 +742,29 @@ class EmotionalStatePlugin(Star):
             session_key=session_key,
         )
         event = event_or_session if self._looks_like_event(event_or_session) else None
-        persona_profile = await self._public_persona_profile(
+        base_persona_profile = await self._public_persona_profile(
             event,
             request,
             allow_default=event is not None,
         )
+        persona_profile = await self._runtime_persona_profile(
+            session_key,
+            base_persona_profile,
+        )
         state = await self._load_state(session_key, persona_profile)
+        safety_boundary = self._safety_boundary_enabled()
         prompt_fragment = (
-            self._build_state_injection(state) if include_prompt_fragment else None
+            self._build_state_injection(
+                state,
+                safety_boundary=safety_boundary,
+            )
+            if include_prompt_fragment
+            else None
         )
         return state.to_public_dict(
             session_key=session_key,
             prompt_fragment=prompt_fragment,
-            include_safety=self._safety_boundary_enabled(),
+            include_safety=safety_boundary,
         )
 
     async def get_emotion_state(
@@ -508,10 +782,14 @@ class EmotionalStatePlugin(Star):
             session_key=session_key,
         )
         event = event_or_session if self._looks_like_event(event_or_session) else None
-        persona_profile = await self._public_persona_profile(
+        base_persona_profile = await self._public_persona_profile(
             event,
             request,
             allow_default=event is not None,
+        )
+        persona_profile = await self._runtime_persona_profile(
+            session_key,
+            base_persona_profile,
         )
         state = await self._load_state(session_key, persona_profile)
         return state.to_dict() if as_dict else EmotionState.from_dict(state.to_dict())
@@ -524,12 +802,23 @@ class EmotionalStatePlugin(Star):
         session_key: str | None = None,
     ) -> dict[str, float]:
         """Public API: return only the 7D bounded emotion vector."""
-        snapshot = await self.get_emotion_snapshot(
+        session_key = self._resolve_public_session_key(
             event_or_session,
             request=request,
             session_key=session_key,
         )
-        return dict(snapshot["emotion"]["values"])
+        event = event_or_session if self._looks_like_event(event_or_session) else None
+        base_persona_profile = await self._public_persona_profile(
+            event,
+            request,
+            allow_default=event is not None,
+        )
+        persona_profile = await self._runtime_persona_profile(
+            session_key,
+            base_persona_profile,
+        )
+        state = await self._load_state(session_key, persona_profile)
+        return {key: round(state.values.get(key, 0.0), 6) for key in state.values}
 
     async def get_emotion_consequences(
         self,
@@ -539,12 +828,23 @@ class EmotionalStatePlugin(Star):
         session_key: str | None = None,
     ) -> dict[str, Any]:
         """Public API: return action tendencies and active persistent effects."""
-        snapshot = await self.get_emotion_snapshot(
+        session_key = self._resolve_public_session_key(
             event_or_session,
             request=request,
             session_key=session_key,
         )
-        return dict(snapshot["consequences"])
+        event = event_or_session if self._looks_like_event(event_or_session) else None
+        base_persona_profile = await self._public_persona_profile(
+            event,
+            request,
+            allow_default=event is not None,
+        )
+        persona_profile = await self._runtime_persona_profile(
+            session_key,
+            base_persona_profile,
+        )
+        state = await self._load_state(session_key, persona_profile)
+        return state.consequences.to_public_dict()
 
     async def get_emotion_relationship(
         self,
@@ -554,12 +854,23 @@ class EmotionalStatePlugin(Star):
         session_key: str | None = None,
     ) -> dict[str, Any]:
         """Public API: return relationship decision, conflict cause and repair status."""
-        snapshot = await self.get_emotion_snapshot(
+        session_key = self._resolve_public_session_key(
             event_or_session,
             request=request,
             session_key=session_key,
         )
-        return dict(snapshot["relationship"])
+        event = event_or_session if self._looks_like_event(event_or_session) else None
+        base_persona_profile = await self._public_persona_profile(
+            event,
+            request,
+            allow_default=event is not None,
+        )
+        persona_profile = await self._runtime_persona_profile(
+            session_key,
+            base_persona_profile,
+        )
+        state = await self._load_state(session_key, persona_profile)
+        return relationship_state_to_public_payload(state.last_appraisal)
 
     async def get_emotion_prompt_fragment(
         self,
@@ -575,10 +886,14 @@ class EmotionalStatePlugin(Star):
             session_key=session_key,
         )
         event = event_or_session if self._looks_like_event(event_or_session) else None
-        persona_profile = await self._public_persona_profile(
+        base_persona_profile = await self._public_persona_profile(
             event,
             request,
             allow_default=event is not None,
+        )
+        persona_profile = await self._runtime_persona_profile(
+            session_key,
+            base_persona_profile,
         )
         state = await self._load_state(session_key, persona_profile)
         return self._build_state_injection(state)
@@ -621,14 +936,69 @@ class EmotionalStatePlugin(Star):
         humanlike_snapshot: dict[str, Any] | None = None
         lifelike_learning_snapshot: dict[str, Any] | None = None
         moral_repair_snapshot: dict[str, Any] | None = None
-        if self._cfg_bool("humanlike_memory_write_enabled", True):
-            humanlike_snapshot = await self.get_humanlike_snapshot(
-                event_or_session,
-                request=request,
-                session_key=resolved_session_key,
-                exposure="plugin_safe",
-                include_prompt_fragment=include_prompt_fragment,
+        personality_drift_snapshot: dict[str, Any] | None = None
+        include_humanlike_memory = self._cfg_bool("humanlike_memory_write_enabled", True)
+        include_lifelike_memory = self._cfg_bool(
+            "lifelike_learning_memory_write_enabled",
+            True,
+        )
+        include_personality_drift_memory = self._cfg_bool(
+            "personality_drift_memory_write_enabled",
+            True,
+        )
+        include_moral_repair_memory = self._cfg_bool(
+            "moral_repair_memory_write_enabled",
+            True,
+        )
+        include_integrated_self_memory = self._cfg_bool(
+            "integrated_self_memory_write_enabled",
+            True,
+        )
+        snapshot_tasks: dict[str, asyncio.Task[dict[str, Any]]] = {}
+        if include_humanlike_memory:
+            snapshot_tasks["humanlike"] = asyncio.create_task(
+                self.get_humanlike_snapshot(
+                    event_or_session,
+                    request=request,
+                    session_key=resolved_session_key,
+                    exposure="plugin_safe",
+                    include_prompt_fragment=include_prompt_fragment,
+                ),
             )
+        if include_lifelike_memory:
+            snapshot_tasks["lifelike"] = asyncio.create_task(
+                self.get_lifelike_learning_snapshot(
+                    event_or_session,
+                    request=request,
+                    session_key=resolved_session_key,
+                    exposure="plugin_safe",
+                    include_prompt_fragment=include_prompt_fragment,
+                ),
+            )
+        if include_personality_drift_memory:
+            snapshot_tasks["personality_drift"] = asyncio.create_task(
+                self.get_personality_drift_snapshot(
+                    event_or_session,
+                    request=request,
+                    session_key=resolved_session_key,
+                    exposure="plugin_safe",
+                    include_prompt_fragment=include_prompt_fragment,
+                ),
+            )
+        if include_moral_repair_memory:
+            snapshot_tasks["moral_repair"] = asyncio.create_task(
+                self.get_moral_repair_snapshot(
+                    event_or_session,
+                    request=request,
+                    session_key=resolved_session_key,
+                    exposure="plugin_safe",
+                    include_prompt_fragment=include_prompt_fragment,
+                ),
+            )
+        if snapshot_tasks:
+            await asyncio.gather(*snapshot_tasks.values())
+        if include_humanlike_memory:
+            humanlike_snapshot = snapshot_tasks["humanlike"].result()
             annotation = build_humanlike_memory_annotation(
                 humanlike_snapshot,
                 source=source,
@@ -637,14 +1007,8 @@ class EmotionalStatePlugin(Star):
             payload["humanlike_state_at_write"] = annotation
             if include_raw_snapshot:
                 payload["humanlike_snapshot"] = humanlike_snapshot
-        if self._cfg_bool("lifelike_learning_memory_write_enabled", True):
-            lifelike_learning_snapshot = await self.get_lifelike_learning_snapshot(
-                event_or_session,
-                request=request,
-                session_key=resolved_session_key,
-                exposure="plugin_safe",
-                include_prompt_fragment=include_prompt_fragment,
-            )
+        if include_lifelike_memory:
+            lifelike_learning_snapshot = snapshot_tasks["lifelike"].result()
             annotation = build_lifelike_memory_annotation(
                 lifelike_learning_snapshot,
                 source=source,
@@ -653,14 +1017,18 @@ class EmotionalStatePlugin(Star):
             payload["lifelike_learning_state_at_write"] = annotation
             if include_raw_snapshot:
                 payload["lifelike_learning_snapshot"] = lifelike_learning_snapshot
-        if self._cfg_bool("moral_repair_memory_write_enabled", True):
-            moral_repair_snapshot = await self.get_moral_repair_snapshot(
-                event_or_session,
-                request=request,
-                session_key=resolved_session_key,
-                exposure="plugin_safe",
-                include_prompt_fragment=include_prompt_fragment,
+        if include_personality_drift_memory:
+            personality_drift_snapshot = snapshot_tasks["personality_drift"].result()
+            annotation = build_personality_drift_memory_annotation(
+                personality_drift_snapshot,
+                source=source,
+                written_at=written_at,
             )
+            payload["personality_drift_state_at_write"] = annotation
+            if include_raw_snapshot:
+                payload["personality_drift_snapshot"] = personality_drift_snapshot
+        if include_moral_repair_memory:
+            moral_repair_snapshot = snapshot_tasks["moral_repair"].result()
             annotation = build_moral_repair_memory_annotation(
                 moral_repair_snapshot,
                 source=source,
@@ -669,7 +1037,7 @@ class EmotionalStatePlugin(Star):
             payload["moral_repair_state_at_write"] = annotation
             if include_raw_snapshot:
                 payload["moral_repair_snapshot"] = moral_repair_snapshot
-        if self._cfg_bool("integrated_self_memory_write_enabled", True):
+        if include_integrated_self_memory:
             integrated_snapshot = await self.get_integrated_self_snapshot(
                 event_or_session,
                 request=request,
@@ -678,9 +1046,11 @@ class EmotionalStatePlugin(Star):
                 emotion_snapshot=snapshot,
                 humanlike_snapshot=humanlike_snapshot,
                 lifelike_learning_snapshot=lifelike_learning_snapshot,
+                personality_drift_snapshot=personality_drift_snapshot,
                 moral_repair_snapshot=moral_repair_snapshot,
                 include_humanlike=humanlike_snapshot is not None,
                 include_lifelike_learning=lifelike_learning_snapshot is not None,
+                include_personality_drift=personality_drift_snapshot is not None,
                 include_moral_repair=moral_repair_snapshot is not None,
                 include_psychological=False,
             )
@@ -740,10 +1110,12 @@ class EmotionalStatePlugin(Star):
         emotion_snapshot: dict[str, Any] | None = None,
         humanlike_snapshot: dict[str, Any] | None = None,
         lifelike_learning_snapshot: dict[str, Any] | None = None,
+        personality_drift_snapshot: dict[str, Any] | None = None,
         moral_repair_snapshot: dict[str, Any] | None = None,
         psychological_snapshot: dict[str, Any] | None = None,
         include_humanlike: bool = True,
         include_lifelike_learning: bool = True,
+        include_personality_drift: bool = True,
         include_moral_repair: bool = True,
         include_psychological: bool = True,
         degradation_profile: str | None = None,
@@ -785,6 +1157,14 @@ class EmotionalStatePlugin(Star):
                 exposure="plugin_safe",
                 include_prompt_fragment=False,
             )
+        if include_personality_drift and personality_drift_snapshot is None:
+            personality_drift_snapshot = await self.get_personality_drift_snapshot(
+                event_or_session,
+                request=request,
+                session_key=resolved_session_key,
+                exposure="plugin_safe",
+                include_prompt_fragment=False,
+            )
         if include_moral_repair and moral_repair_snapshot is None:
             moral_repair_snapshot = await self.get_moral_repair_snapshot(
                 event_or_session,
@@ -804,6 +1184,7 @@ class EmotionalStatePlugin(Star):
             emotion_snapshot=emotion_snapshot,
             humanlike_snapshot=humanlike_snapshot,
             lifelike_learning_snapshot=lifelike_learning_snapshot,
+            personality_drift_snapshot=personality_drift_snapshot,
             moral_repair_snapshot=moral_repair_snapshot,
             psychological_snapshot=psychological_snapshot,
             include_raw_snapshots=include_raw_snapshots,
@@ -929,15 +1310,16 @@ class EmotionalStatePlugin(Star):
                 include_prompt_fragment=include_prompt_fragment,
             )
         state = await self._load_humanlike_state(session_key)
+        safety_boundary = self._safety_boundary_enabled()
         payload = state.to_public_dict(
             session_key=session_key,
             exposure=exposure,
-            safety_boundary=self._safety_boundary_enabled(),
+            safety_boundary=safety_boundary,
         )
         if include_prompt_fragment:
             payload["prompt_fragment"] = build_humanlike_prompt_fragment(
                 state,
-                safety_boundary=self._safety_boundary_enabled(),
+                safety_boundary=safety_boundary,
             )
         return payload
 
@@ -949,13 +1331,15 @@ class EmotionalStatePlugin(Star):
         session_key: str | None = None,
     ) -> dict[str, float]:
         """Public API: return internal humanlike dimensions for trusted plugins."""
-        snapshot = await self.get_humanlike_snapshot(
+        session_key = self._resolve_public_session_key(
             event_or_session,
             request=request,
             session_key=session_key,
-            exposure="internal",
         )
-        return dict(snapshot.get("values") or {})
+        if not self._humanlike_modeling_enabled():
+            return {}
+        state = await self._load_humanlike_state(session_key)
+        return {key: round(value, 6) for key, value in state.values.items()}
 
     async def get_humanlike_prompt_fragment(
         self,
@@ -1006,10 +1390,11 @@ class EmotionalStatePlugin(Star):
         )
         if commit:
             await self._save_humanlike_state(session_key, state)
+        safety_boundary = self._safety_boundary_enabled()
         payload = state.to_public_dict(
             session_key=session_key,
             exposure="internal",
-            safety_boundary=self._safety_boundary_enabled(),
+            safety_boundary=safety_boundary,
         )
         payload["observation"] = {
             "source": observation.source,
@@ -1094,13 +1479,19 @@ class EmotionalStatePlugin(Star):
         session_key: str | None = None,
     ) -> dict[str, Any]:
         """Public API: return the current speak/brief/ask/silence policy."""
-        snapshot = await self.get_lifelike_learning_snapshot(
+        session_key = self._resolve_public_session_key(
             event_or_session,
             request=request,
             session_key=session_key,
-            exposure="plugin_safe",
         )
-        return dict(snapshot.get("initiative_policy") or {})
+        if not self._lifelike_learning_enabled():
+            return dict(
+                self._lifelike_learning_disabled_payload(
+                    session_key,
+                )["initiative_policy"],
+            )
+        state = await self._load_lifelike_learning_state(session_key)
+        return derive_initiative_policy(state)
 
     async def get_lifelike_prompt_fragment(
         self,
@@ -1197,6 +1588,240 @@ class EmotionalStatePlugin(Star):
         await self._delete_lifelike_learning_state(session_key)
         return True
 
+    async def get_personality_drift_snapshot(
+        self,
+        event_or_session: AstrMessageEvent | str | None = None,
+        *,
+        request: ProviderRequest | None = None,
+        session_key: str | None = None,
+        exposure: str = "plugin_safe",
+        include_prompt_fragment: bool = False,
+    ) -> dict[str, Any]:
+        """Public API: return slow real-time personality adaptation state."""
+        session_key = self._resolve_public_session_key(
+            event_or_session,
+            request=request,
+            session_key=session_key,
+        )
+        if not self._personality_drift_enabled():
+            return self._personality_drift_disabled_payload(
+                session_key,
+                exposure=exposure,
+                include_prompt_fragment=include_prompt_fragment,
+            )
+        event = event_or_session if self._looks_like_event(event_or_session) else None
+        base_persona_profile = await self._public_persona_profile(
+            event,
+            request,
+            allow_default=True,
+        )
+        state = await self._load_personality_drift_state(
+            session_key,
+            base_persona_profile,
+        )
+        payload = state.to_public_dict(session_key=session_key, exposure=exposure)
+        if include_prompt_fragment:
+            payload["prompt_fragment"] = build_personality_drift_prompt_fragment(state)
+        return payload
+
+    async def get_personality_drift_values(
+        self,
+        event_or_session: AstrMessageEvent | str | None = None,
+        *,
+        request: ProviderRequest | None = None,
+        session_key: str | None = None,
+    ) -> dict[str, float]:
+        """Public API: return internal personality drift control dimensions."""
+        session_key = self._resolve_public_session_key(
+            event_or_session,
+            request=request,
+            session_key=session_key,
+        )
+        if not self._personality_drift_enabled():
+            return {}
+        event = event_or_session if self._looks_like_event(event_or_session) else None
+        base_persona_profile = await self._public_persona_profile(
+            event,
+            request,
+            allow_default=event is not None,
+        )
+        state = await self._load_personality_drift_state(
+            session_key,
+            base_persona_profile,
+        )
+        return {key: round(value, 6) for key, value in state.values.items()}
+
+    async def get_personality_drift_prompt_fragment(
+        self,
+        event_or_session: AstrMessageEvent | str | None = None,
+        *,
+        request: ProviderRequest | None = None,
+        session_key: str | None = None,
+    ) -> str:
+        """Public API: return a slow-adaptation prompt fragment for other plugins."""
+        session_key = self._resolve_public_session_key(
+            event_or_session,
+            request=request,
+            session_key=session_key,
+        )
+        if not self._personality_drift_enabled():
+            return ""
+        event = event_or_session if self._looks_like_event(event_or_session) else None
+        base_persona_profile = await self._public_persona_profile(
+            event,
+            request,
+            allow_default=True,
+        )
+        state = await self._load_personality_drift_state(
+            session_key,
+            base_persona_profile,
+        )
+        return build_personality_drift_prompt_fragment(state)
+
+    async def observe_personality_drift_event(
+        self,
+        event_or_session: AstrMessageEvent | str | None = None,
+        text: str = "",
+        *,
+        request: ProviderRequest | None = None,
+        session_key: str | None = None,
+        source: str = "plugin",
+        trait_impulses: dict[str, float] | None = None,
+        intensity: float | None = None,
+        reliability: float | None = None,
+        relationship_importance: float | None = None,
+        commit: bool = True,
+        observed_at: float | None = None,
+    ) -> dict[str, Any]:
+        """Public API: update or simulate slow personality drift from an event."""
+        session_key = self._resolve_public_session_key(
+            event_or_session,
+            request=request,
+            session_key=session_key,
+        )
+        event = event_or_session if self._looks_like_event(event_or_session) else None
+        base_persona_profile = await self._public_persona_profile(
+            event,
+            request,
+            allow_default=True,
+        )
+        if commit and not self._personality_drift_enabled():
+            return self._personality_drift_disabled_payload(
+                session_key,
+                base_persona_profile,
+            )
+        previous_state = await self._load_personality_drift_state(
+            session_key,
+            base_persona_profile,
+        )
+        observation = heuristic_personality_drift_observation(text, source=source)
+        if trait_impulses:
+            observation = PersonalityDriftObservation.from_dict(
+                {
+                    **observation.to_dict(),
+                    "trait_impulses": trait_impulses,
+                    "intensity": intensity if intensity is not None else observation.intensity,
+                    "reliability": (
+                        reliability if reliability is not None else observation.reliability
+                    ),
+                    "relationship_importance": (
+                        relationship_importance
+                        if relationship_importance is not None
+                        else observation.relationship_importance
+                    ),
+                    "event_type": "plugin_trait_impulse",
+                    "source": source,
+                },
+            )
+        elif intensity is not None or reliability is not None or relationship_importance is not None:
+            observation = PersonalityDriftObservation.from_dict(
+                {
+                    **observation.to_dict(),
+                    "intensity": intensity if intensity is not None else observation.intensity,
+                    "reliability": (
+                        reliability if reliability is not None else observation.reliability
+                    ),
+                    "relationship_importance": (
+                        relationship_importance
+                        if relationship_importance is not None
+                        else observation.relationship_importance
+                    ),
+                    "source": source,
+                },
+            )
+        state = self.personality_drift_engine.update(
+            previous_state,
+            observation,
+            persona_fingerprint=(
+                base_persona_profile.fingerprint
+                if base_persona_profile is not None
+                else "default"
+            ),
+            now=observed_at,
+        )
+        if commit:
+            await self._save_personality_drift_state(session_key, state)
+        payload = state.to_public_dict(session_key=session_key, exposure="internal")
+        payload["observation"] = {
+            "source": observation.source,
+            "event_type": observation.event_type,
+            "intensity": observation.intensity,
+            "reliability": observation.reliability,
+            "relationship_importance": observation.relationship_importance,
+            "trait_impulses": dict(observation.trait_impulses),
+            "reason": observation.reason,
+            "flags": list(observation.flags),
+            "committed": commit,
+        }
+        return payload
+
+    async def simulate_personality_drift_update(
+        self,
+        event_or_session: AstrMessageEvent | str | None = None,
+        text: str = "",
+        *,
+        request: ProviderRequest | None = None,
+        session_key: str | None = None,
+        source: str = "plugin",
+        trait_impulses: dict[str, float] | None = None,
+        intensity: float | None = None,
+        reliability: float | None = None,
+        relationship_importance: float | None = None,
+        observed_at: float | None = None,
+    ) -> dict[str, Any]:
+        """Public API: simulate slow personality drift without writing state."""
+        return await self.observe_personality_drift_event(
+            event_or_session,
+            text,
+            request=request,
+            session_key=session_key,
+            source=source,
+            trait_impulses=trait_impulses,
+            intensity=intensity,
+            reliability=reliability,
+            relationship_importance=relationship_importance,
+            commit=False,
+            observed_at=observed_at,
+        )
+
+    async def reset_personality_drift_state(
+        self,
+        event_or_session: AstrMessageEvent | str | None = None,
+        *,
+        request: ProviderRequest | None = None,
+        session_key: str | None = None,
+    ) -> bool:
+        """Public API: reset one session's slow personality drift state."""
+        session_key = self._resolve_public_session_key(
+            event_or_session,
+            request=request,
+            session_key=session_key,
+        )
+        if not self._personality_drift_reset_allowed():
+            return False
+        await self._delete_personality_drift_state(session_key)
+        return True
+
     async def get_moral_repair_snapshot(
         self,
         event_or_session: AstrMessageEvent | str | None = None,
@@ -1219,15 +1844,16 @@ class EmotionalStatePlugin(Star):
                 include_prompt_fragment=include_prompt_fragment,
             )
         state = await self._load_moral_repair_state(session_key)
+        safety_boundary = self._safety_boundary_enabled()
         payload = state.to_public_dict(
             session_key=session_key,
             exposure=exposure,
-            safety_boundary=self._safety_boundary_enabled(),
+            safety_boundary=safety_boundary,
         )
         if include_prompt_fragment:
             payload["prompt_fragment"] = build_moral_repair_prompt_fragment(
                 state,
-                safety_boundary=self._safety_boundary_enabled(),
+                safety_boundary=safety_boundary,
             )
         return payload
 
@@ -1239,13 +1865,15 @@ class EmotionalStatePlugin(Star):
         session_key: str | None = None,
     ) -> dict[str, float]:
         """Public API: return internal moral repair dimensions for plugins."""
-        snapshot = await self.get_moral_repair_snapshot(
+        session_key = self._resolve_public_session_key(
             event_or_session,
             request=request,
             session_key=session_key,
-            exposure="internal",
         )
-        return dict(snapshot.get("values") or {})
+        if not self._moral_repair_modeling_enabled():
+            return {}
+        state = await self._load_moral_repair_state(session_key)
+        return {key: round(value, 6) for key, value in state.values.items()}
 
     async def get_moral_repair_prompt_fragment(
         self,
@@ -1296,10 +1924,11 @@ class EmotionalStatePlugin(Star):
         )
         if commit:
             await self._save_moral_repair_state(session_key, state)
+        safety_boundary = self._safety_boundary_enabled()
         payload = state.to_public_dict(
             session_key=session_key,
             exposure="internal",
-            safety_boundary=self._safety_boundary_enabled(),
+            safety_boundary=safety_boundary,
         )
         payload["observation"] = {
             "source": observation.source,
@@ -1373,10 +2002,14 @@ class EmotionalStatePlugin(Star):
             session_key=session_key,
         )
         event = event_or_session if self._looks_like_event(event_or_session) else None
-        persona_profile = persona_profile or await self._public_persona_profile(
+        base_persona_profile = persona_profile or await self._public_persona_profile(
             event,
             request,
             allow_default=event is not None,
+        )
+        persona_profile = await self._runtime_persona_profile(
+            session_key,
+            base_persona_profile,
         )
         previous_state = await self._load_state(session_key, persona_profile)
         engine = self._engine_for_persona(persona_profile)
@@ -1399,11 +2032,15 @@ class EmotionalStatePlugin(Star):
         )
         if commit:
             await self._save_state(session_key, state)
+        safety_boundary = self._safety_boundary_enabled()
         payload = emotion_state_to_public_payload(
             state,
             session_key=session_key,
-            prompt_fragment=self._build_state_injection(state),
-            include_safety=self._safety_boundary_enabled(),
+            prompt_fragment=self._build_state_injection(
+                state,
+                safety_boundary=safety_boundary,
+            ),
+            include_safety=safety_boundary,
         )
         payload["observation"] = {
             "source": observation.source,
@@ -1445,12 +2082,13 @@ class EmotionalStatePlugin(Star):
         session_key: str | None = None,
     ) -> dict[str, float]:
         """Public API: return non-diagnostic psychological screening dimensions."""
-        snapshot = await self.get_psychological_screening_snapshot(
+        session_key = self._resolve_public_session_key(
             event_or_session,
             request=request,
             session_key=session_key,
         )
-        return dict(snapshot["values"])
+        state = await self._load_psychological_state(session_key)
+        return {key: round(value, 6) for key, value in state.values.items()}
 
     async def observe_psychological_text(
         self,
@@ -1640,6 +2278,21 @@ class EmotionalStatePlugin(Star):
         )
         yield event.plain_result(json.dumps(snapshot, ensure_ascii=False))
 
+    @filter.llm_tool(name="get_bot_personality_drift_state")
+    async def get_bot_personality_drift_state_tool(
+        self,
+        event: AstrMessageEvent,
+        detail: str = "summary",
+    ):
+        """Get the bot's slow real-time personality drift state, read-only."""
+        full = str(detail or "").strip().lower() == "full"
+        snapshot = await self.get_personality_drift_snapshot(
+            event,
+            exposure="internal" if full else "plugin_safe",
+            include_prompt_fragment=full,
+        )
+        yield event.plain_result(json.dumps(snapshot, ensure_ascii=False))
+
     @filter.llm_tool(name="get_bot_moral_repair_state")
     async def get_bot_moral_repair_state_tool(
         self,
@@ -1748,6 +2401,28 @@ class EmotionalStatePlugin(Star):
             return
         await self._delete_lifelike_learning_state(self._session_key(event))
         yield event.plain_result("已重置当前会话的生命化学习状态。")
+
+    @filter.command("personality_drift_state", alias={"人格漂移状态", "人格适应状态"})
+    async def personality_drift_status(self, event: AstrMessageEvent):
+        """View the current session's slow real-time personality drift state."""
+        if not self._personality_drift_enabled():
+            yield event.plain_result("人格漂移状态未启用。")
+            return
+        profile = await self._persona_profile(event, None)
+        state = await self._load_personality_drift_state(
+            self._session_key(event),
+            profile,
+        )
+        yield event.plain_result(format_personality_drift_state_for_user(state))
+
+    @filter.command("personality_drift_reset", alias={"人格漂移重置", "人格适应重置"})
+    async def personality_drift_reset(self, event: AstrMessageEvent):
+        """Reset the current session's slow personality drift state."""
+        if not self._personality_drift_reset_allowed():
+            yield event.plain_result("配置已关闭人格漂移重置后门。")
+            return
+        await self._delete_personality_drift_state(self._session_key(event))
+        yield event.plain_result("已重置当前会话的人格漂移状态。")
 
     @filter.command("moral_repair_state", alias={"道德修复状态", "信任修复状态"})
     async def moral_repair_status(self, event: AstrMessageEvent):
@@ -1864,10 +2539,11 @@ class EmotionalStatePlugin(Star):
         event: AstrMessageEvent,
         phase: str,
         previous_state: EmotionState,
-        persona_profile: PersonaProfile,
+        persona_profile: PersonaProfile | None,
         context_text: str,
         current_text: str,
     ) -> EmotionObservation:
+        persona_profile = persona_profile or PersonaProfile.default()
         if not self._cfg_bool("use_llm_assessor", True):
             return heuristic_observation(current_text, profile=persona_profile)
 
@@ -1880,7 +2556,7 @@ class EmotionalStatePlugin(Star):
             )
 
         low_reasoning_friendly = self._cfg_bool("low_reasoning_friendly_mode", False)
-        max_context_chars = self._cfg_int("max_context_chars", 2600)
+        max_context_chars = self._cfg_int("max_context_chars", 1600)
         if low_reasoning_friendly:
             max_context_chars = min(
                 max_context_chars,
@@ -1904,21 +2580,27 @@ class EmotionalStatePlugin(Star):
 
         token = _INTERNAL_LLM_CALL.set(True)
         try:
-            llm_resp = await self.context.llm_generate(
-                chat_provider_id=provider_id,
-                prompt=prompt,
-                system_prompt=system_prompt,
-                temperature=self._cfg_float("assessor_temperature", 0.1),
+            llm_resp = await asyncio.wait_for(
+                self.context.llm_generate(
+                    chat_provider_id=provider_id,
+                    prompt=prompt,
+                    system_prompt=system_prompt,
+                    temperature=self._cfg_float("assessor_temperature", 0.1),
+                ),
+                timeout=max(0.1, self._cfg_float("assessor_timeout_seconds", 4.0)),
             )
+        except asyncio.TimeoutError:
+            self._log_warning(f"{PLUGIN_NAME}: LLM 情绪估计超时，启用回退估计。")
+            return heuristic_observation(current_text, profile=persona_profile)
         except Exception as exc:
-            logger.warning(f"{PLUGIN_NAME}: LLM 情绪估计失败，启用回退估计: {exc}")
+            self._log_warning(f"{PLUGIN_NAME}: LLM 情绪估计失败，启用回退估计: {exc}")
             return heuristic_observation(current_text, profile=persona_profile)
         finally:
             _INTERNAL_LLM_CALL.reset(token)
 
         observation = observation_from_llm_text(getattr(llm_resp, "completion_text", ""))
         if observation is None:
-            logger.warning(f"{PLUGIN_NAME}: 情绪估计输出不是可解析 JSON，启用回退估计。")
+            self._log_warning(f"{PLUGIN_NAME}: 情绪估计输出不是可解析 JSON，启用回退估计。")
             return heuristic_observation(current_text, profile=persona_profile)
         return observation
 
@@ -1926,12 +2608,24 @@ class EmotionalStatePlugin(Star):
         configured = str(self._cfg("emotion_provider_id", "") or "").strip()
         if configured:
             return configured
+        if not hasattr(self, "_provider_id_cache"):
+            self._provider_id_cache = {}
+        umo = str(getattr(event, "unified_msg_origin", "") or "global")
+        cached = self._provider_id_cache.get(umo)
+        now = time.time()
+        if cached and now - cached[0] <= max(
+            0.0,
+            self._cfg_float("provider_id_cache_ttl_seconds", 30.0),
+        ):
+            return cached[1]
         try:
-            return await self.context.get_current_chat_provider_id(
+            provider_id = await self.context.get_current_chat_provider_id(
                 umo=event.unified_msg_origin,
             )
+            self._provider_id_cache[umo] = (now, provider_id)
+            return provider_id
         except Exception as exc:
-            logger.warning(f"{PLUGIN_NAME}: 获取当前 LLM Provider 失败: {exc}")
+            self._log_warning(f"{PLUGIN_NAME}: 获取当前 LLM Provider 失败: {exc}")
             return None
 
     async def _load_state(
@@ -1942,11 +2636,13 @@ class EmotionalStatePlugin(Star):
         if session_key in self._memory_cache:
             state = self._memory_cache[session_key]
             state = self._ensure_persona_state(state, persona_profile)
+            if self._passive_load_is_fresh(state):
+                self._memory_cache[session_key] = state
+                return state
             engine = self._engine_for_persona(persona_profile)
             decayed_state = engine.passive_update(state, profile=persona_profile)
-            if decayed_state.to_dict() != state.to_dict():
+            if self._passive_update_changed(decayed_state, state):
                 state = decayed_state
-                await self._save_state(session_key, state)
             self._memory_cache[session_key] = state
             return state
         kv_key = self._kv_key(session_key)
@@ -1957,11 +2653,13 @@ class EmotionalStatePlugin(Star):
             data = None
         state = EmotionState.from_dict(data)
         state = self._ensure_persona_state(state, persona_profile)
+        if self._passive_load_is_fresh(state):
+            self._memory_cache[session_key] = state
+            return state
         engine = self._engine_for_persona(persona_profile)
         decayed_state = engine.passive_update(state, profile=persona_profile)
-        if decayed_state.to_dict() != state.to_dict():
+        if self._passive_update_changed(decayed_state, state):
             state = decayed_state
-            await self._save_state(session_key, state)
         self._memory_cache[session_key] = state
         return state
 
@@ -2015,10 +2713,11 @@ class EmotionalStatePlugin(Star):
     async def _load_humanlike_state(self, session_key: str) -> HumanlikeState:
         if session_key in self._humanlike_memory_cache:
             state = self._humanlike_memory_cache[session_key]
+            if self._passive_load_is_fresh(state):
+                return state
             decayed_state = self.humanlike_engine.passive_update(state)
-            if decayed_state.to_dict() != state.to_dict():
+            if self._passive_update_changed(decayed_state, state):
                 state = decayed_state
-                await self._save_humanlike_state(session_key, state)
             self._humanlike_memory_cache[session_key] = state
             return state
         try:
@@ -2027,10 +2726,12 @@ class EmotionalStatePlugin(Star):
             logger.debug(f"{PLUGIN_NAME}: humanlike KV read failed, using empty state: {exc}")
             data = None
         state = HumanlikeState.from_dict(data)
+        if self._passive_load_is_fresh(state):
+            self._humanlike_memory_cache[session_key] = state
+            return state
         decayed_state = self.humanlike_engine.passive_update(state)
-        if decayed_state.to_dict() != state.to_dict():
+        if self._passive_update_changed(decayed_state, state):
             state = decayed_state
-            await self._save_humanlike_state(session_key, state)
         self._humanlike_memory_cache[session_key] = state
         return state
 
@@ -2058,10 +2759,11 @@ class EmotionalStatePlugin(Star):
     ) -> LifelikeLearningState:
         if session_key in self._lifelike_learning_memory_cache:
             state = self._lifelike_learning_memory_cache[session_key]
+            if self._passive_load_is_fresh(state):
+                return state
             decayed_state = self.lifelike_learning_engine.passive_update(state)
-            if decayed_state.to_dict() != state.to_dict():
+            if self._passive_update_changed(decayed_state, state):
                 state = decayed_state
-                await self._save_lifelike_learning_state(session_key, state)
             self._lifelike_learning_memory_cache[session_key] = state
             return state
         try:
@@ -2073,10 +2775,12 @@ class EmotionalStatePlugin(Star):
             logger.debug(f"{PLUGIN_NAME}: lifelike learning KV read failed, using empty state: {exc}")
             data = None
         state = LifelikeLearningState.from_dict(data)
+        if self._passive_load_is_fresh(state):
+            self._lifelike_learning_memory_cache[session_key] = state
+            return state
         decayed_state = self.lifelike_learning_engine.passive_update(state)
-        if decayed_state.to_dict() != state.to_dict():
+        if self._passive_update_changed(decayed_state, state):
             state = decayed_state
-            await self._save_lifelike_learning_state(session_key, state)
         self._lifelike_learning_memory_cache[session_key] = state
         return state
 
@@ -2101,13 +2805,106 @@ class EmotionalStatePlugin(Star):
         except Exception as exc:
             logger.debug(f"{PLUGIN_NAME}: lifelike learning KV delete failed: {exc}")
 
+    async def _load_personality_drift_state(
+        self,
+        session_key: str,
+        profile: PersonaProfile | None = None,
+    ) -> PersonalityDriftState:
+        fingerprint = profile.fingerprint if profile is not None else "default"
+        if session_key in self._personality_drift_memory_cache:
+            state = self._personality_drift_memory_cache[session_key]
+            return self._passive_personality_drift_state(state, fingerprint)
+        try:
+            data = await self.get_kv_data(
+                self._personality_drift_kv_key(session_key),
+                None,
+            )
+        except Exception as exc:
+            logger.debug(f"{PLUGIN_NAME}: personality drift KV read failed, using empty state: {exc}")
+            data = None
+        state = PersonalityDriftState.from_dict(data)
+        state = self._passive_personality_drift_state(state, fingerprint)
+        self._personality_drift_memory_cache[session_key] = state
+        return state
+
+    def _passive_personality_drift_state(
+        self,
+        state: PersonalityDriftState,
+        fingerprint: str,
+    ) -> PersonalityDriftState:
+        if state.persona_fingerprint != str(fingerprint or "default"):
+            return self.personality_drift_engine.passive_update(
+                state,
+                persona_fingerprint=fingerprint,
+            )
+        elapsed = max(0.0, time.time() - state.updated_at)
+        if elapsed <= 1.0:
+            return state
+        return self.personality_drift_engine.passive_update(
+            state,
+            persona_fingerprint=fingerprint,
+        )
+
+    def _passive_load_is_fresh(self, state: Any) -> bool:
+        updated_at = getattr(state, "updated_at", None)
+        try:
+            elapsed = time.time() - float(updated_at)
+        except (TypeError, ValueError):
+            return False
+        return elapsed <= max(0.0, self._cfg_float("passive_load_fresh_seconds", 1.0))
+
+    def _passive_update_changed(self, updated: Any, previous: Any) -> bool:
+        if updated is not previous:
+            return True
+        try:
+            return float(getattr(updated, "updated_at")) != float(
+                getattr(previous, "updated_at"),
+            )
+        except (TypeError, ValueError):
+            return False
+
+    def _personality_drift_changed(
+        self,
+        updated: PersonalityDriftState,
+        previous: PersonalityDriftState,
+    ) -> bool:
+        return (
+            updated.evidence_count != previous.evidence_count
+            or updated.persona_fingerprint != previous.persona_fingerprint
+            or updated.trait_offsets != previous.trait_offsets
+            or updated.trait_confidence != previous.trait_confidence
+            or updated.flags != previous.flags
+        )
+
+    async def _save_personality_drift_state(
+        self,
+        session_key: str,
+        state: PersonalityDriftState,
+    ) -> None:
+        self._personality_drift_memory_cache[session_key] = state
+        try:
+            await self.put_kv_data(
+                self._personality_drift_kv_key(session_key),
+                state.to_dict(),
+            )
+        except Exception as exc:
+            logger.debug(f"{PLUGIN_NAME}: personality drift KV write failed, keeping memory only: {exc}")
+
+    async def _delete_personality_drift_state(self, session_key: str) -> None:
+        self._personality_drift_memory_cache.pop(session_key, None)
+        try:
+            await self.delete_kv_data(self._personality_drift_kv_key(session_key))
+        except Exception as exc:
+            logger.debug(f"{PLUGIN_NAME}: personality drift KV delete failed: {exc}")
+
     async def _load_moral_repair_state(self, session_key: str) -> MoralRepairState:
         if session_key in self._moral_repair_memory_cache:
             state = self._moral_repair_memory_cache[session_key]
+            if self._passive_load_is_fresh(state):
+                return state
             decayed_state = self.moral_repair_engine.passive_update(state)
-            if decayed_state.to_dict() != state.to_dict():
+            if self._passive_update_changed(decayed_state, state):
                 state = decayed_state
-                await self._save_moral_repair_state(session_key, state)
             self._moral_repair_memory_cache[session_key] = state
             return state
         try:
@@ -2116,10 +2913,12 @@ class EmotionalStatePlugin(Star):
             logger.debug(f"{PLUGIN_NAME}: moral repair KV read failed, using empty state: {exc}")
             data = None
         state = MoralRepairState.from_dict(data)
+        if self._passive_load_is_fresh(state):
+            self._moral_repair_memory_cache[session_key] = state
+            return state
         decayed_state = self.moral_repair_engine.passive_update(state)
-        if decayed_state.to_dict() != state.to_dict():
+        if self._passive_update_changed(decayed_state, state):
             state = decayed_state
-            await self._save_moral_repair_state(session_key, state)
         self._moral_repair_memory_cache[session_key] = state
         return state
 
@@ -2248,6 +3047,37 @@ class EmotionalStatePlugin(Star):
             ),
         )
 
+    def _build_personality_drift_parameters(self) -> PersonalityDriftParameters:
+        return PersonalityDriftParameters(
+            state_half_life_seconds=self._cfg_float(
+                "personality_drift_half_life_seconds",
+                7776000.0,
+            ),
+            rapid_update_half_life_seconds=self._cfg_float(
+                "personality_drift_rapid_update_half_life_seconds",
+                86400.0,
+            ),
+            min_update_interval_seconds=self._cfg_float(
+                "personality_drift_min_update_interval_seconds",
+                21600.0,
+            ),
+            learning_rate=self._cfg_float("personality_drift_learning_rate", 0.055),
+            event_threshold=self._cfg_float("personality_drift_event_threshold", 0.12),
+            max_impulse_per_update=self._cfg_float(
+                "personality_drift_max_impulse_per_update",
+                0.015,
+            ),
+            max_trait_offset=self._cfg_float(
+                "personality_drift_max_trait_offset",
+                0.22,
+            ),
+            confidence_growth=self._cfg_float(
+                "personality_drift_confidence_growth",
+                0.10,
+            ),
+            trajectory_limit=self._cfg_int("personality_drift_trajectory_limit", 80),
+        )
+
     def _build_moral_repair_parameters(self) -> MoralRepairParameters:
         return MoralRepairParameters(
             alpha_base=self._cfg_float("moral_repair_alpha_base", 0.28),
@@ -2280,8 +3110,18 @@ class EmotionalStatePlugin(Star):
     def _engine_for_persona(self, profile: PersonaProfile | None) -> EmotionEngine:
         if profile is None or not self._cfg_bool("persona_modeling", True):
             return self.engine
+        if not hasattr(self, "_engine_cache"):
+            self._engine_cache = {}
+        cached = self._engine_cache.get(profile.fingerprint)
+        if cached is not None:
+            return cached
         parameters = apply_persona_to_parameters(self.base_parameters, profile)
-        return EmotionEngine(parameters=parameters, baseline=profile.baseline)
+        engine = EmotionEngine(parameters=parameters, baseline=profile.baseline)
+        self._engine_cache[profile.fingerprint] = engine
+        if len(self._engine_cache) > 16:
+            first_key = next(iter(self._engine_cache))
+            self._engine_cache.pop(first_key, None)
+        return engine
 
     def _safety_boundary_enabled(self) -> bool:
         return self._cfg_bool("enable_safety_boundary", True)
@@ -2316,6 +3156,15 @@ class EmotionalStatePlugin(Star):
 
     def _lifelike_learning_reset_allowed(self) -> bool:
         return self._cfg_bool("allow_lifelike_learning_reset_backdoor", True)
+
+    def _personality_drift_enabled(self) -> bool:
+        return self._cfg_bool("enable_personality_drift", False)
+
+    def _personality_drift_injection_enabled(self) -> bool:
+        return self._cfg_float("personality_drift_injection_strength", 0.22) > 0.0
+
+    def _personality_drift_reset_allowed(self) -> bool:
+        return self._cfg_bool("allow_personality_drift_reset_backdoor", True)
 
     def _moral_repair_modeling_enabled(self) -> bool:
         return self._cfg_bool("enable_moral_repair_state", False)
@@ -2402,6 +3251,36 @@ class EmotionalStatePlugin(Star):
             payload["prompt_fragment"] = ""
         return payload
 
+    def _personality_drift_disabled_payload(
+        self,
+        session_key: str,
+        profile: PersonaProfile | None = None,
+        *,
+        exposure: str = "plugin_safe",
+        include_prompt_fragment: bool = False,
+    ) -> dict[str, Any]:
+        state = PersonalityDriftState.initial(
+            persona_fingerprint=profile.fingerprint if profile is not None else "default",
+        )
+        payload = personality_drift_state_to_public_payload(
+            state,
+            session_key=session_key,
+            exposure=exposure,
+        )
+        payload["enabled"] = False
+        payload["reason"] = "enable_personality_drift is false"
+        for internal_key in (
+            "trait_offsets",
+            "trait_confidence",
+            "trajectory",
+            "last_event_summary",
+            "created_at",
+        ):
+            payload.pop(internal_key, None)
+        if include_prompt_fragment:
+            payload["prompt_fragment"] = ""
+        return payload
+
     def _humanlike_disabled_payload(
         self,
         session_key: str,
@@ -2430,10 +3309,19 @@ class EmotionalStatePlugin(Star):
             payload["prompt_fragment"] = ""
         return payload
 
-    def _build_state_injection(self, state: EmotionState) -> str:
+    def _build_state_injection(
+        self,
+        state: EmotionState,
+        *,
+        safety_boundary: bool | None = None,
+    ) -> str:
         return build_state_injection(
             state,
-            safety_boundary=self._safety_boundary_enabled(),
+            safety_boundary=(
+                self._safety_boundary_enabled()
+                if safety_boundary is None
+                else safety_boundary
+            ),
         )
 
     def _ensure_persona_state(
@@ -2444,6 +3332,7 @@ class EmotionalStatePlugin(Star):
         if not profile or not self._cfg_bool("persona_modeling", True):
             return state
         if state.persona_fingerprint == profile.fingerprint:
+            state.persona_model = deepcopy(profile.personality_model)
             return state
         if self._cfg_bool("reset_on_persona_change", True):
             return EmotionState.initial(profile)
@@ -2543,6 +3432,36 @@ class EmotionalStatePlugin(Star):
             strength=self._cfg_float("persona_influence", 1.0),
         )
 
+    async def _runtime_persona_profile(
+        self,
+        session_key: str,
+        profile: PersonaProfile | None,
+        drift_state: PersonalityDriftState | None = None,
+    ) -> PersonaProfile | None:
+        if (
+            profile is None
+            or not self._cfg_bool("persona_modeling", True)
+            or not self._personality_drift_enabled()
+        ):
+            return profile
+        drift_state = drift_state or await self._load_personality_drift_state(
+            session_key,
+            profile,
+        )
+        return self._apply_personality_drift(profile, drift_state)
+
+    def _apply_personality_drift(
+        self,
+        profile: PersonaProfile,
+        state: PersonalityDriftState | None,
+    ) -> PersonaProfile:
+        adapted = apply_personality_drift_to_profile(
+            profile,
+            state,
+            strength=self._cfg_float("personality_drift_apply_strength", 0.65),
+        )
+        return adapted if adapted is not None else profile
+
     async def _resolve_selected_persona(
         self,
         event: AstrMessageEvent,
@@ -2629,28 +3548,60 @@ class EmotionalStatePlugin(Star):
             return None
 
     def _assessment_timing(self) -> str:
-        timing = str(self._cfg("assessment_timing", "both") or "both").strip().lower()
+        timing = str(self._cfg("assessment_timing", "post") or "post").strip().lower()
         if timing in {"pre", "post", "both"}:
             return timing
-        return "both"
+        return "post"
 
     def _request_to_text(self, request: ProviderRequest) -> str:
-        parts: list[str] = []
+        context_parts: list[str] = []
+        max_total_chars = max(300, self._cfg_int("request_context_max_chars", 1600))
         if request.system_prompt:
-            parts.append("[system]\n" + self._clip(request.system_prompt, 800))
-        for item in list(request.contexts or [])[-8:]:
-            parts.append(self._context_item_to_text(item))
-        if request.prompt:
-            parts.append("[current_user]\n" + request.prompt)
+            context_parts.append("[system]\n" + self._clip(request.system_prompt, 800))
+        for item in self._tail_items(request.contexts or (), 8):
+            context_parts.append(self._clip(self._context_item_to_text(item), 600))
         if request.extra_user_content_parts:
             extra = []
             for part in request.extra_user_content_parts[-3:]:
                 text = getattr(part, "text", "")
                 if text:
-                    extra.append(text)
+                    extra.append(self._clip(str(text), 400))
             if extra:
-                parts.append("[extra_user_content]\n" + "\n".join(extra))
-        return "\n\n".join(part for part in parts if part)
+                context_parts.append("[extra_user_content]\n" + "\n".join(extra))
+
+        current_block = ""
+        if request.prompt:
+            current_budget = min(900, max(80, max_total_chars // 2))
+            current_block = "[current_user]\n" + self._clip(
+                str(request.prompt),
+                current_budget,
+            )
+        context_text = "\n\n".join(part for part in context_parts if part)
+        if not current_block:
+            return self._clip(context_text, max_total_chars)
+        remaining = max_total_chars - len(current_block) - 2
+        if context_text and remaining >= 40:
+            context_text = self._clip(context_text, remaining)
+            return context_text + "\n\n" + current_block
+        return current_block
+
+    def _join_observation_text(self, context_text: str, current_text: str) -> str:
+        if context_text and current_text:
+            return context_text + "\n\n" + current_text
+        return context_text or current_text or ""
+
+    def _tail_items(self, items: Any, limit: int) -> list[Any]:
+        limit = max(0, int(limit))
+        if limit <= 0 or items is None:
+            return []
+        if isinstance(items, Sequence) and not isinstance(items, (str, bytes, bytearray)):
+            return list(items[-limit:])
+        tail: list[Any] = []
+        for item in items:
+            tail.append(item)
+            if len(tail) > limit:
+                tail.pop(0)
+        return tail
 
     def _context_item_to_text(self, item: Any) -> str:
         if not isinstance(item, dict):
@@ -2701,20 +3652,38 @@ class EmotionalStatePlugin(Star):
             return str(request.session_id)
         return "global"
 
+    def _safe_session_key(self, session_key: str) -> str:
+        cache = getattr(self, "_safe_session_key_cache", None)
+        if cache is None:
+            cache = {}
+            self._safe_session_key_cache = cache
+        raw_key = str(session_key)
+        cached = cache.get(raw_key)
+        if cached is not None:
+            return cached
+        safe_key = raw_key.replace("/", "_").replace("\\", "_")
+        if len(cache) >= 128:
+            cache.clear()
+        cache[raw_key] = safe_key
+        return safe_key
+
     def _kv_key(self, session_key: str) -> str:
-        return "emotion_state:" + session_key.replace("/", "_").replace("\\", "_")
+        return "emotion_state:" + self._safe_session_key(session_key)
 
     def _psychological_kv_key(self, session_key: str) -> str:
-        return "psychological_screening:" + session_key.replace("/", "_").replace("\\", "_")
+        return "psychological_screening:" + self._safe_session_key(session_key)
 
     def _humanlike_kv_key(self, session_key: str) -> str:
-        return "humanlike_state:" + session_key.replace("/", "_").replace("\\", "_")
+        return "humanlike_state:" + self._safe_session_key(session_key)
 
     def _lifelike_learning_kv_key(self, session_key: str) -> str:
-        return "lifelike_learning:" + session_key.replace("/", "_").replace("\\", "_")
+        return "lifelike_learning:" + self._safe_session_key(session_key)
+
+    def _personality_drift_kv_key(self, session_key: str) -> str:
+        return "personality_drift:" + self._safe_session_key(session_key)
 
     def _moral_repair_kv_key(self, session_key: str) -> str:
-        return "moral_repair_state:" + session_key.replace("/", "_").replace("\\", "_")
+        return "moral_repair_state:" + self._safe_session_key(session_key)
 
     def _cfg(self, key: str, default: Any) -> Any:
         if not hasattr(self.config, "get"):
@@ -2741,6 +3710,11 @@ class EmotionalStatePlugin(Star):
             return int(self._cfg(key, default))
         except (TypeError, ValueError):
             return default
+
+    def _log_warning(self, message: str) -> None:
+        writer = getattr(logger, "warning", None) or getattr(logger, "debug", None)
+        if callable(writer):
+            writer(message)
 
     def _clip(self, text: str, limit: int) -> str:
         if len(text) <= limit:

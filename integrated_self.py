@@ -28,6 +28,7 @@ def build_integrated_self_snapshot(
     emotion_snapshot: dict[str, Any],
     humanlike_snapshot: dict[str, Any] | None = None,
     lifelike_learning_snapshot: dict[str, Any] | None = None,
+    personality_drift_snapshot: dict[str, Any] | None = None,
     moral_repair_snapshot: dict[str, Any] | None = None,
     psychological_snapshot: dict[str, Any] | None = None,
     include_raw_snapshots: bool = False,
@@ -39,12 +40,14 @@ def build_integrated_self_snapshot(
     degradation_profile = _normalize_degradation_profile(degradation_profile)
     humanlike_snapshot = humanlike_snapshot or {}
     lifelike_learning_snapshot = lifelike_learning_snapshot or {}
+    personality_drift_snapshot = personality_drift_snapshot or {}
     moral_repair_snapshot = moral_repair_snapshot or {}
     psychological_snapshot = psychological_snapshot or {}
 
     emotion_values = _emotion_values(emotion_snapshot)
     humanlike_values = _values(humanlike_snapshot)
     lifelike_values = _values(lifelike_learning_snapshot)
+    personality_drift_values = _values(personality_drift_snapshot)
     moral_values = _values(moral_repair_snapshot)
     psych_values = _values(psychological_snapshot)
 
@@ -52,12 +55,14 @@ def build_integrated_self_snapshot(
         "emotion": _module_status(emotion_snapshot, default_enabled=True),
         "humanlike": _module_status(humanlike_snapshot),
         "lifelike_learning": _module_status(lifelike_learning_snapshot),
+        "personality_drift": _module_status(personality_drift_snapshot),
         "moral_repair": _module_status(moral_repair_snapshot),
         "psychological_screening": _module_status(psychological_snapshot),
     }
     flags = _dedupe(
         _string_list(humanlike_snapshot.get("flags"))
         + _string_list(lifelike_learning_snapshot.get("flags"))
+        + _string_list(personality_drift_snapshot.get("flags"))
         + _string_list(moral_repair_snapshot.get("flags"))
         + _string_list((psychological_snapshot.get("risk") or {}).get("red_flags"))
     )
@@ -83,6 +88,7 @@ def build_integrated_self_snapshot(
         lifelike_values=lifelike_values,
         moral_values=moral_values,
         psych_values=psych_values,
+        personality_drift_values=personality_drift_values,
         risk=risk,
     )
     arbitration = _arbitration_payload(
@@ -97,6 +103,7 @@ def build_integrated_self_snapshot(
         emotion_snapshot=emotion_snapshot,
         humanlike_snapshot=humanlike_snapshot,
         lifelike_learning_snapshot=lifelike_learning_snapshot,
+        personality_drift_snapshot=personality_drift_snapshot,
         moral_repair_snapshot=moral_repair_snapshot,
         psychological_snapshot=psychological_snapshot,
         now=now,
@@ -112,6 +119,7 @@ def build_integrated_self_snapshot(
             emotion_snapshot,
             humanlike_snapshot,
             moral_repair_snapshot,
+            personality_drift_snapshot,
             psychological_snapshot,
         ),
         "modules": modules,
@@ -142,6 +150,7 @@ def build_integrated_self_snapshot(
             "emotion": emotion_snapshot,
             "humanlike": humanlike_snapshot,
             "lifelike_learning": lifelike_learning_snapshot,
+            "personality_drift": personality_drift_snapshot,
             "moral_repair": moral_repair_snapshot,
             "psychological_screening": psychological_snapshot,
         }
@@ -153,6 +162,7 @@ def build_integrated_self_causal_trace(
     emotion_snapshot: dict[str, Any],
     humanlike_snapshot: dict[str, Any] | None = None,
     lifelike_learning_snapshot: dict[str, Any] | None = None,
+    personality_drift_snapshot: dict[str, Any] | None = None,
     moral_repair_snapshot: dict[str, Any] | None = None,
     psychological_snapshot: dict[str, Any] | None = None,
     now: float | None = None,
@@ -163,6 +173,7 @@ def build_integrated_self_causal_trace(
     profile = _normalize_degradation_profile(degradation_profile)
     humanlike_snapshot = humanlike_snapshot or {}
     lifelike_learning_snapshot = lifelike_learning_snapshot or {}
+    personality_drift_snapshot = personality_drift_snapshot or {}
     moral_repair_snapshot = moral_repair_snapshot or {}
     psychological_snapshot = psychological_snapshot or {}
     trace: list[dict[str, Any]] = []
@@ -288,6 +299,40 @@ def build_integrated_self_causal_trace(
                     + f"; action={initiative_policy.get('action', 'unknown')}"
                 ),
                 flags=_string_list(lifelike_learning_snapshot.get("flags"), limit=6),
+            ),
+        )
+
+    personality_drift_values = _values(personality_drift_snapshot)
+    top_offsets = (
+        personality_drift_snapshot.get("top_offsets")
+        if isinstance(personality_drift_snapshot.get("top_offsets"), list)
+        else []
+    )
+    if personality_drift_values or top_offsets:
+        rendered_offsets = ", ".join(
+            f"{item.get('trait')}={_as_float(item.get('offset'), 0.0):+.2f}"
+            for item in top_offsets[:5]
+            if isinstance(item, dict)
+        )
+        trace.append(
+            _trace_item(
+                module="personality_drift",
+                signal="real_time_trait_adaptation",
+                evidence_weight=max(
+                    personality_drift_values.get("drift_intensity", 0.0),
+                    personality_drift_values.get("event_consolidation", 0.0),
+                    0.30,
+                ),
+                captured_at=personality_drift_snapshot.get("updated_at"),
+                now=now,
+                summary=(
+                    _compact_key_values(
+                        personality_drift_values,
+                        ("drift_intensity", "anchor_strength", "time_gate"),
+                    )
+                    + (f"; offsets={rendered_offsets}" if rendered_offsets else "")
+                ),
+                flags=_string_list(personality_drift_snapshot.get("flags"), limit=6),
             ),
         )
 
@@ -618,6 +663,7 @@ def build_state_annotations_memory_envelope(
         "emotion_at_write",
         "humanlike_state_at_write",
         "lifelike_learning_state_at_write",
+        "personality_drift_state_at_write",
         "moral_repair_state_at_write",
         "integrated_self_state_at_write",
     )
@@ -841,14 +887,18 @@ def _state_index(
     lifelike_values: dict[str, float],
     moral_values: dict[str, float],
     psych_values: dict[str, float],
+    personality_drift_values: dict[str, float],
     risk: dict[str, Any],
 ) -> dict[str, float]:
+    drift = clamp(personality_drift_values.get("drift_intensity", 0.0))
+    anchor = clamp(personality_drift_values.get("anchor_strength", 1.0))
     connection = clamp(
         0.42
         + 0.24 * emotion_values.get("valence", 0.0)
         + 0.24 * emotion_values.get("affiliation", 0.0)
         + 0.18 * lifelike_values.get("common_ground", 0.0)
         + 0.10 * lifelike_values.get("familiarity", 0.0)
+        + 0.05 * drift
         + 0.18 * moral_values.get("trust_repair", 0.0)
         - 0.22 * humanlike_values.get("boundary_need", 0.0)
         - 0.18 * lifelike_values.get("boundary_sensitivity", 0.0)
@@ -889,6 +939,8 @@ def _state_index(
         "common_ground": round(clamp(lifelike_values.get("common_ground", 0.0)), 6),
         "initiative_readiness": round(clamp(lifelike_values.get("initiative_readiness", 0.0)), 6),
         "silence_comfort": round(clamp(lifelike_values.get("silence_comfort", 0.0)), 6),
+        "personality_drift_intensity": round(drift, 6),
+        "personality_anchor_strength": round(anchor, 6),
     }
 
 

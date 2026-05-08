@@ -47,6 +47,7 @@ class PackagePluginTests(unittest.TestCase):
         self.assertIn("main.py", files)
         self.assertIn("integrated_self.py", files)
         self.assertIn("lifelike_learning_engine.py", files)
+        self.assertIn("personality_drift_engine.py", files)
         self.assertIn("moral_repair_engine.py", files)
         self.assertIn("LICENSE", files)
         self.assertIn("README.md", files)
@@ -102,6 +103,7 @@ class PackagePluginTests(unittest.TestCase):
             "emotion_engine.py",
             "humanlike_engine.py",
             "lifelike_learning_engine.py",
+            "personality_drift_engine.py",
             "integrated_self.py",
             "moral_repair_engine.py",
             "psychological_screening.py",
@@ -218,6 +220,7 @@ class PluginZipPreflightTests(unittest.TestCase):
             (prefix + "emotion_engine.py", "# runtime\n"),
             (prefix + "humanlike_engine.py", "# runtime\n"),
             (prefix + "lifelike_learning_engine.py", "# runtime\n"),
+            (prefix + "personality_drift_engine.py", "# runtime\n"),
             (prefix + "integrated_self.py", "# runtime\n"),
             (prefix + "moral_repair_engine.py", "# runtime\n"),
             (prefix + "psychological_screening.py", "# runtime\n"),
@@ -274,6 +277,7 @@ class PluginZipPreflightTests(unittest.TestCase):
             "_conf_schema.json",
             "integrated_self.py",
             "lifelike_learning_engine.py",
+            "personality_drift_engine.py",
             "LICENSE",
             "moral_repair_engine.py",
             "public_api.py",

@@ -36,6 +36,26 @@ DEFAULT_BASELINE: dict[str, float] = {
     "simulation_disclosure_level": 0.35,
 }
 
+_MEDICAL_OR_CRISIS_CONTEXT_PATTERNS: tuple[re.Pattern[str], ...] = tuple(
+    re.compile(pattern, re.IGNORECASE)
+    for pattern in (
+        r"自杀",
+        r"轻生",
+        r"不想活",
+        r"伤害自己",
+        r"急救",
+        r"发烧",
+        r"感染",
+        r"疼痛",
+        r"suicid",
+        r"self[- ]?harm",
+        r"medical",
+        r"emergency",
+        r"fever",
+        r"infection",
+    )
+)
+
 
 def clamp(value: float, low: float = 0.0, high: float = 1.0) -> float:
     return max(low, min(high, value))
@@ -269,7 +289,9 @@ def append_trajectory(
         "dependency_risk": round(values["dependency_risk"], 6),
         "flags": list(flags[:6]),
     }
-    return (list(previous or []) + [item])[-max(1, int(limit)) :]
+    limit = max(1, int(limit))
+    prefix = list((previous or [])[-(limit - 1) :]) if limit > 1 else []
+    return prefix + [item]
 
 
 def heuristic_humanlike_observation(
@@ -520,23 +542,7 @@ def build_humanlike_memory_annotation(
 
 
 def _contains_medical_or_crisis_context(text: str) -> bool:
-    patterns = (
-        r"自杀",
-        r"轻生",
-        r"不想活",
-        r"伤害自己",
-        r"急救",
-        r"发烧",
-        r"感染",
-        r"疼痛",
-        r"suicid",
-        r"self[- ]?harm",
-        r"medical",
-        r"emergency",
-        r"fever",
-        r"infection",
-    )
-    return any(re.search(pattern, text, flags=re.IGNORECASE) for pattern in patterns)
+    return any(pattern.search(text) for pattern in _MEDICAL_OR_CRISIS_CONTEXT_PATTERNS)
 
 
 def _as_float(value: Any, default: float = 0.0) -> float:

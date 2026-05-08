@@ -16,6 +16,12 @@ except ImportError:
     )
 
 
+DIMENSION_SCHEMA = "\n".join(
+    f'    "{dimension}": 0.0{"," if index < len(DIMENSIONS) - 1 else ""}'
+    for index, dimension in enumerate(DIMENSIONS)
+)
+
+
 ASSESSOR_SYSTEM_PROMPT = """你是 AstrBot 插件内部的情绪状态估计器，只负责估计 bot 的计算性情绪状态。
 不要扮演用户，不要生成聊天回复，不要评价用户心理，不要输出 Markdown。
 请基于 PAD、OCC 与 appraisal theory，把 bot 在本轮交互中的即时情绪观测值量化为 JSON。
@@ -62,7 +68,6 @@ def build_assessment_prompt(
 ) -> str:
     context_text = (context_text or "")[-max_context_chars:]
     current_text = (current_text or "")[-max_context_chars:]
-    dimensions = ", ".join(DIMENSIONS)
     if low_reasoning_friendly:
         return f"""任务：估计 bot 本轮即时情绪观测值 X_t。低推理模型友好模式：只做简单打分。
 
@@ -93,13 +98,7 @@ def build_assessment_prompt(
 {{
   "label": "short_emotion_label",
   "dimensions": {{
-    "{dimensions.split(', ')[0]}": 0.0,
-    "{dimensions.split(', ')[1]}": 0.0,
-    "{dimensions.split(', ')[2]}": 0.0,
-    "{dimensions.split(', ')[3]}": 0.0,
-    "{dimensions.split(', ')[4]}": 0.0,
-    "{dimensions.split(', ')[5]}": 0.0,
-    "{dimensions.split(', ')[6]}": 0.0
+{DIMENSION_SCHEMA}
   }},
   "confidence": 0.0,
   "appraisal": {{
@@ -156,13 +155,7 @@ def build_assessment_prompt(
 {{
   "label": "简短英文或拼音情绪标签",
   "dimensions": {{
-    "{dimensions.split(', ')[0]}": 0.0,
-    "{dimensions.split(', ')[1]}": 0.0,
-    "{dimensions.split(', ')[2]}": 0.0,
-    "{dimensions.split(', ')[3]}": 0.0,
-    "{dimensions.split(', ')[4]}": 0.0,
-    "{dimensions.split(', ')[5]}": 0.0,
-    "{dimensions.split(', ')[6]}": 0.0
+{DIMENSION_SCHEMA}
   }},
   "confidence": 0.0,
   "appraisal": {{

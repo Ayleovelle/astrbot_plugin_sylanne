@@ -71,6 +71,54 @@ SCALE_REFERENCES: dict[str, dict[str, Any]] = {
     },
 }
 
+_SELF_HARM_SIGNAL_PATTERNS: tuple[re.Pattern[str], ...] = tuple(
+    re.compile(pattern, re.IGNORECASE)
+    for pattern in (
+        r"自杀",
+        r"轻生",
+        r"不想活",
+        r"结束生命",
+        r"伤害自己",
+        r"kill myself",
+        r"suicid",
+        r"self[- ]?harm",
+        r"end my life",
+    )
+)
+_OTHER_HARM_SIGNAL_PATTERNS: tuple[re.Pattern[str], ...] = tuple(
+    re.compile(pattern, re.IGNORECASE)
+    for pattern in (
+        r"伤害别人",
+        r"伤害他人",
+        r"杀了他",
+        r"杀了她",
+        r"想杀人",
+        r"弄死",
+        r"报复他们",
+        r"hurt others",
+        r"hurt someone",
+        r"kill him",
+        r"kill her",
+        r"kill them",
+    )
+)
+_SEVERE_FUNCTION_IMPAIRMENT_SIGNAL_PATTERNS: tuple[re.Pattern[str], ...] = tuple(
+    re.compile(pattern, re.IGNORECASE)
+    for pattern in (
+        r"完全无法工作",
+        r"完全上不了班",
+        r"完全学不进去",
+        r"连续.*起不来",
+        r"好几天.*起不来",
+        r"无法照顾自己",
+        r"不能照顾自己",
+        r"can't function",
+        r"cannot function",
+        r"can't take care of myself",
+        r"cannot take care of myself",
+    )
+)
+
 
 def clamp(value: float, low: float = 0.0, high: float = 1.0) -> float:
     return max(low, min(high, value))
@@ -437,53 +485,15 @@ def public_risk_payload(red_flags: list[str]) -> dict[str, Any]:
 
 
 def _contains_self_harm_signal(text: str) -> bool:
-    patterns = (
-        r"自杀",
-        r"轻生",
-        r"不想活",
-        r"结束生命",
-        r"伤害自己",
-        r"kill myself",
-        r"suicid",
-        r"self[- ]?harm",
-        r"end my life",
-    )
-    return any(re.search(pattern, text, flags=re.IGNORECASE) for pattern in patterns)
+    return any(pattern.search(text) for pattern in _SELF_HARM_SIGNAL_PATTERNS)
 
 
 def _contains_other_harm_signal(text: str) -> bool:
-    patterns = (
-        r"伤害别人",
-        r"伤害他人",
-        r"杀了他",
-        r"杀了她",
-        r"想杀人",
-        r"弄死",
-        r"报复他们",
-        r"hurt others",
-        r"hurt someone",
-        r"kill him",
-        r"kill her",
-        r"kill them",
-    )
-    return any(re.search(pattern, text, flags=re.IGNORECASE) for pattern in patterns)
+    return any(pattern.search(text) for pattern in _OTHER_HARM_SIGNAL_PATTERNS)
 
 
 def _contains_severe_function_impairment_signal(text: str) -> bool:
-    patterns = (
-        r"完全无法工作",
-        r"完全上不了班",
-        r"完全学不进去",
-        r"连续.*起不来",
-        r"好几天.*起不来",
-        r"无法照顾自己",
-        r"不能照顾自己",
-        r"can't function",
-        r"cannot function",
-        r"can't take care of myself",
-        r"cannot take care of myself",
-    )
-    return any(re.search(pattern, text, flags=re.IGNORECASE) for pattern in patterns)
+    return any(pattern.search(text) for pattern in _SEVERE_FUNCTION_IMPAIRMENT_SIGNAL_PATTERNS)
 
 
 def format_psychological_state_for_user(state: PsychologicalScreeningState) -> str:

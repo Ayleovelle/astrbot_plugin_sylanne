@@ -259,6 +259,59 @@ class IntegratedSelfTests(unittest.TestCase):
         self.assertIn("wait_for_user_lead", snapshot["allowed_actions"])
         self.assertGreater(snapshot["state_index"]["silence_comfort"], 0.8)
 
+    def test_personality_drift_enters_trace_without_overriding_posture(self):
+        snapshot = build_integrated_self_snapshot(
+            session_key="s-drift",
+            emotion_snapshot={
+                "schema_version": "astrbot.emotion_state.v2",
+                "kind": "emotion_state",
+                "values": {"valence": 0.0, "affiliation": 0.0},
+            },
+            personality_drift_snapshot={
+                "schema_version": "astrbot.personality_drift_state.v1",
+                "kind": "personality_drift_state",
+                "enabled": True,
+                "updated_at": 90.0,
+                "values": {
+                    "drift_intensity": 0.42,
+                    "anchor_strength": 0.58,
+                    "time_gate": 1.0,
+                },
+                "top_offsets": [
+                    {"trait": "interpersonal_warmth", "offset": 0.06},
+                    {"trait": "attachment_avoidance", "offset": -0.04},
+                ],
+                "flags": ["personality_drift_event_consolidated"],
+            },
+            now=100.0,
+        )
+
+        self.assertEqual(snapshot["modules"]["personality_drift"]["kind"], "personality_drift_state")
+        self.assertEqual(snapshot["response_posture"], "steady_presence")
+        self.assertGreater(snapshot["state_index"]["personality_drift_intensity"], 0.0)
+        self.assertTrue(any(item["module"] == "personality_drift" for item in snapshot["causal_trace"]))
+
+    def test_personality_drift_timestamp_updates_integrated_self_timestamp(self):
+        snapshot = build_integrated_self_snapshot(
+            session_key="s-drift-time",
+            emotion_snapshot={
+                "schema_version": "astrbot.emotion_state.v2",
+                "kind": "emotion_state",
+                "updated_at": 10.0,
+                "values": {"valence": 0.0},
+            },
+            personality_drift_snapshot={
+                "schema_version": "astrbot.personality_drift_state.v1",
+                "kind": "personality_drift_state",
+                "enabled": True,
+                "updated_at": 188.0,
+                "values": {"drift_intensity": 0.1, "anchor_strength": 0.9},
+            },
+            now=100.0,
+        )
+
+        self.assertEqual(snapshot["updated_at"], 188.0)
+
     def test_compatibility_probe_reports_missing_fields(self):
         good = build_integrated_self_snapshot(
             session_key="s-ok",
@@ -297,6 +350,9 @@ class IntegratedSelfTests(unittest.TestCase):
             {
                 "session_key": "s-diag",
                 "emotion_at_write": {"kind": "emotion_state_at_write"},
+                "personality_drift_state_at_write": {
+                    "kind": "personality_drift_state_at_write",
+                },
                 "integrated_self_state_at_write": annotation,
                 "integrated_self_snapshot": snapshot,
             },
@@ -308,6 +364,7 @@ class IntegratedSelfTests(unittest.TestCase):
         self.assertNotIn("snapshots", diagnostics)
         self.assertIn("causal_trace_summary", annotation)
         self.assertIn("integrated_self_state_at_write", envelope["annotation_keys"])
+        self.assertIn("personality_drift_state_at_write", envelope["annotation_keys"])
         self.assertNotIn("integrated_self_snapshot", envelope["annotations"])
         self.assertFalse(envelope["raw_snapshots_included"])
 

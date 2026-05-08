@@ -2,7 +2,7 @@ name: astrbot_plugin_emotional_state
 display_name: 多维情绪状态
 desc: 基于 PAD、OCC、appraisal theory 与情绪动力学，让 AstrBot 维护可计算的多维情绪状态。
 short_desc: 让 AstrBot 拥有可量化、可持续更新的情绪状态。
-version: 0.0.2-beta
+version: 0.1.0-beta
 author: pidan
 license: GPL-3.0-or-later
 repo: "https://github.com/Ayleovelle/astrbot_plugin_emotional_state"

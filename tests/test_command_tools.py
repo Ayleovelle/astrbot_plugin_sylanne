@@ -76,6 +76,7 @@ def new_plugin(config=None):
     from lifelike_learning_engine import LifelikeLearningEngine
     from main import EmotionalStatePlugin
     from moral_repair_engine import MoralRepairEngine
+    from personality_drift_engine import PersonalityDriftEngine
     from psychological_screening import PsychologicalScreeningEngine
 
     plugin = EmotionalStatePlugin.__new__(EmotionalStatePlugin)
@@ -85,11 +86,13 @@ def new_plugin(config=None):
     plugin.psychological_engine = PsychologicalScreeningEngine()
     plugin.humanlike_engine = HumanlikeEngine()
     plugin.lifelike_learning_engine = LifelikeLearningEngine()
+    plugin.personality_drift_engine = PersonalityDriftEngine()
     plugin.moral_repair_engine = MoralRepairEngine()
     plugin._memory_cache = {}
     plugin._psychological_memory_cache = {}
     plugin._humanlike_memory_cache = {}
     plugin._lifelike_learning_memory_cache = {}
+    plugin._personality_drift_memory_cache = {}
     plugin._moral_repair_memory_cache = {}
     plugin._last_request_text = {}
     plugin.context = SimpleNamespace()
@@ -185,6 +188,7 @@ class CommandAndToolSmokeTests(unittest.TestCase):
                 "simulate_bot_emotion_update",
                 "get_bot_humanlike_state",
                 "get_bot_lifelike_learning_state",
+                "get_bot_personality_drift_state",
                 "get_bot_moral_repair_state",
                 "get_bot_integrated_self_state",
             },
@@ -375,6 +379,53 @@ class CommandAndToolSmokeTests(unittest.TestCase):
         self.assertEqual(len(outputs), 1)
         self.assertIn("\u5df2\u91cd\u7f6e", outputs[0])
 
+    def test_personality_drift_reset_command_uses_independent_backdoor(self):
+        allowed = new_plugin(
+            {
+                "allow_emotion_reset_backdoor": False,
+                "allow_personality_drift_reset_backdoor": True,
+            },
+        )
+        deleted = []
+
+        async def fake_delete_personality_drift_state(self, session_key):
+            deleted.append(session_key)
+
+        bind_async(
+            allowed,
+            "_delete_personality_drift_state",
+            fake_delete_personality_drift_state,
+        )
+
+        outputs = asyncio.run(
+            collect_async_generator(
+                allowed.personality_drift_reset(FakeEvent("s-drift")),
+            ),
+        )
+
+        self.assertEqual(deleted, ["s-drift"])
+        self.assertEqual(len(outputs), 1)
+        self.assertIn("\u5df2\u91cd\u7f6e", outputs[0])
+
+    def test_disabled_personality_drift_state_command_does_not_load_state(self):
+        plugin = new_plugin()
+
+        async def fake_load_personality_drift_state(self, session_key, profile=None):
+            raise AssertionError("disabled personality drift command must not load state")
+
+        bind_async(
+            plugin,
+            "_load_personality_drift_state",
+            fake_load_personality_drift_state,
+        )
+
+        outputs = asyncio.run(
+            collect_async_generator(plugin.personality_drift_status(FakeEvent())),
+        )
+
+        self.assertEqual(len(outputs), 1)
+        self.assertIn("\u672a\u542f\u7528", outputs[0])
+
     def test_get_bot_emotion_state_tool_summary_trims_llm_exposure(self):
         plugin = new_plugin()
         template = {
@@ -488,6 +539,24 @@ class CommandAndToolSmokeTests(unittest.TestCase):
 
         self.assertFalse(payload["enabled"])
         self.assertEqual(payload["reason"], "enable_moral_repair_state is false")
+        self.assertEqual(payload["exposure"], "plugin_safe")
+
+    def test_get_bot_personality_drift_state_tool_default_disabled_payload_is_json(self):
+        plugin = new_plugin()
+
+        payload = json.loads(
+            asyncio.run(
+                collect_async_generator(
+                    plugin.get_bot_personality_drift_state_tool(
+                        FakeEvent(),
+                        detail="summary",
+                    ),
+                ),
+            )[0],
+        )
+
+        self.assertFalse(payload["enabled"])
+        self.assertEqual(payload["reason"], "enable_personality_drift is false")
         self.assertEqual(payload["exposure"], "plugin_safe")
 
     def test_llm_tool_simulate_bot_emotion_update_is_read_only(self):
