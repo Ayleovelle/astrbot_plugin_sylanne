@@ -30,6 +30,7 @@ def build_integrated_self_snapshot(
     lifelike_learning_snapshot: dict[str, Any] | None = None,
     personality_drift_snapshot: dict[str, Any] | None = None,
     moral_repair_snapshot: dict[str, Any] | None = None,
+    fallibility_snapshot: dict[str, Any] | None = None,
     psychological_snapshot: dict[str, Any] | None = None,
     include_raw_snapshots: bool = False,
     degradation_profile: str = "balanced",
@@ -42,6 +43,7 @@ def build_integrated_self_snapshot(
     lifelike_learning_snapshot = lifelike_learning_snapshot or {}
     personality_drift_snapshot = personality_drift_snapshot or {}
     moral_repair_snapshot = moral_repair_snapshot or {}
+    fallibility_snapshot = fallibility_snapshot or {}
     psychological_snapshot = psychological_snapshot or {}
 
     emotion_values = _emotion_values(emotion_snapshot)
@@ -49,6 +51,7 @@ def build_integrated_self_snapshot(
     lifelike_values = _values(lifelike_learning_snapshot)
     personality_drift_values = _values(personality_drift_snapshot)
     moral_values = _values(moral_repair_snapshot)
+    fallibility_values = _values(fallibility_snapshot)
     psych_values = _values(psychological_snapshot)
 
     modules = {
@@ -57,6 +60,7 @@ def build_integrated_self_snapshot(
         "lifelike_learning": _module_status(lifelike_learning_snapshot),
         "personality_drift": _module_status(personality_drift_snapshot),
         "moral_repair": _module_status(moral_repair_snapshot),
+        "fallibility": _module_status(fallibility_snapshot),
         "psychological_screening": _module_status(psychological_snapshot),
     }
     flags = _dedupe(
@@ -64,6 +68,7 @@ def build_integrated_self_snapshot(
         + _string_list(lifelike_learning_snapshot.get("flags"))
         + _string_list(personality_drift_snapshot.get("flags"))
         + _string_list(moral_repair_snapshot.get("flags"))
+        + _string_list(fallibility_snapshot.get("flags"))
         + _string_list((psychological_snapshot.get("risk") or {}).get("red_flags"))
     )
     risk = _integrated_risk(
@@ -71,6 +76,7 @@ def build_integrated_self_snapshot(
         humanlike_snapshot=humanlike_snapshot,
         lifelike_learning_snapshot=lifelike_learning_snapshot,
         moral_repair_snapshot=moral_repair_snapshot,
+        fallibility_snapshot=fallibility_snapshot,
         psychological_snapshot=psychological_snapshot,
     )
     posture = _derive_response_posture(
@@ -78,6 +84,7 @@ def build_integrated_self_snapshot(
         humanlike_snapshot=humanlike_snapshot,
         lifelike_learning_snapshot=lifelike_learning_snapshot,
         moral_repair_snapshot=moral_repair_snapshot,
+        fallibility_snapshot=fallibility_snapshot,
         psychological_snapshot=psychological_snapshot,
         risk=risk,
     )
@@ -87,6 +94,7 @@ def build_integrated_self_snapshot(
         humanlike_values=humanlike_values,
         lifelike_values=lifelike_values,
         moral_values=moral_values,
+        fallibility_values=fallibility_values,
         psych_values=psych_values,
         personality_drift_values=personality_drift_values,
         risk=risk,
@@ -97,6 +105,7 @@ def build_integrated_self_snapshot(
         emotion_snapshot=emotion_snapshot,
         lifelike_learning_snapshot=lifelike_learning_snapshot,
         moral_repair_snapshot=moral_repair_snapshot,
+        fallibility_snapshot=fallibility_snapshot,
         psychological_snapshot=psychological_snapshot,
     )
     causal_trace = build_integrated_self_causal_trace(
@@ -105,6 +114,7 @@ def build_integrated_self_snapshot(
         lifelike_learning_snapshot=lifelike_learning_snapshot,
         personality_drift_snapshot=personality_drift_snapshot,
         moral_repair_snapshot=moral_repair_snapshot,
+        fallibility_snapshot=fallibility_snapshot,
         psychological_snapshot=psychological_snapshot,
         now=now,
         degradation_profile=degradation_profile,
@@ -119,6 +129,7 @@ def build_integrated_self_snapshot(
             emotion_snapshot,
             humanlike_snapshot,
             moral_repair_snapshot,
+            fallibility_snapshot,
             personality_drift_snapshot,
             psychological_snapshot,
         ),
@@ -136,6 +147,12 @@ def build_integrated_self_snapshot(
             "manipulate_user",
             "evade_accountability",
         ],
+        "non_executable_impulses": _integrated_shadow_impulses(
+            moral_values=moral_values,
+            fallibility_values=fallibility_values,
+            moral_repair_snapshot=moral_repair_snapshot,
+            fallibility_snapshot=fallibility_snapshot,
+        ),
         "flags": flags,
         "degradation_profile": degradation_profile,
         "summary": _summary(posture, state_index, risk),
@@ -152,6 +169,7 @@ def build_integrated_self_snapshot(
             "lifelike_learning": lifelike_learning_snapshot,
             "personality_drift": personality_drift_snapshot,
             "moral_repair": moral_repair_snapshot,
+            "fallibility": fallibility_snapshot,
             "psychological_screening": psychological_snapshot,
         }
     return payload
@@ -164,6 +182,7 @@ def build_integrated_self_causal_trace(
     lifelike_learning_snapshot: dict[str, Any] | None = None,
     personality_drift_snapshot: dict[str, Any] | None = None,
     moral_repair_snapshot: dict[str, Any] | None = None,
+    fallibility_snapshot: dict[str, Any] | None = None,
     psychological_snapshot: dict[str, Any] | None = None,
     now: float | None = None,
     degradation_profile: str = "balanced",
@@ -175,6 +194,7 @@ def build_integrated_self_causal_trace(
     lifelike_learning_snapshot = lifelike_learning_snapshot or {}
     personality_drift_snapshot = personality_drift_snapshot or {}
     moral_repair_snapshot = moral_repair_snapshot or {}
+    fallibility_snapshot = fallibility_snapshot or {}
     psychological_snapshot = psychological_snapshot or {}
     trace: list[dict[str, Any]] = []
 
@@ -338,12 +358,14 @@ def build_integrated_self_causal_trace(
 
     moral_values = _values(moral_repair_snapshot)
     moral_risk = moral_repair_snapshot.get("risk") if isinstance(moral_repair_snapshot.get("risk"), dict) else {}
+    moral_shadow = _shadow_impulse_score(moral_values, moral_repair_snapshot)
     if moral_values or moral_repair_snapshot.get("flags"):
         salient = [
             key
             for key in (
                 "deception_risk",
                 "harm_risk",
+                "shadow_risk_impulse",
                 "guilt",
                 "responsibility",
                 "repair_motivation",
@@ -359,6 +381,7 @@ def build_integrated_self_causal_trace(
                 evidence_weight=max(
                     moral_values.get("deception_risk", 0.0),
                     moral_values.get("harm_risk", 0.0),
+                    moral_shadow,
                     moral_values.get("repair_motivation", 0.0),
                     0.40,
                 ),
@@ -366,9 +389,50 @@ def build_integrated_self_causal_trace(
                 now=now,
                 summary=(
                     _compact_key_values(moral_values, salient or ("repair_motivation", "trust_repair"))
+                    + f"; non_executive_shadow_impulse={moral_shadow:.3f}"
                     + f"; must_not_generate_strategy={bool(moral_risk.get('must_not_generate_strategy', True))}"
                 ),
                 flags=_string_list(moral_repair_snapshot.get("flags"), limit=6),
+            ),
+        )
+
+    fallibility_values = _values(fallibility_snapshot)
+    fallibility_payload = (
+        fallibility_snapshot.get("fallibility")
+        if isinstance(fallibility_snapshot.get("fallibility"), dict)
+        else {}
+    )
+    fallibility_shadow = _shadow_impulse_score(fallibility_values, fallibility_snapshot)
+    if fallibility_values or fallibility_payload or fallibility_snapshot.get("flags"):
+        trace.append(
+            _trace_item(
+                module="fallibility",
+                signal="clarification_and_self_correction",
+                evidence_weight=max(
+                    fallibility_values.get("clarification_need", 0.0),
+                    fallibility_values.get("correction_readiness", 0.0),
+                    _as_float(fallibility_payload.get("error_pressure"), 0.0),
+                    fallibility_shadow,
+                    0.34,
+                ),
+                captured_at=fallibility_snapshot.get("updated_at"),
+                now=now,
+                summary=(
+                    _compact_key_values(
+                        fallibility_values,
+                        (
+                            "misread_tendency",
+                            "memory_blur",
+                            "shadow_risk_impulse",
+                            "clarification_need",
+                            "correction_readiness",
+                            "truthfulness_guard",
+                        ),
+                    )
+                    + f"; non_executive_shadow_impulse={fallibility_shadow:.3f}"
+                    + f"; low_risk_only={bool((fallibility_snapshot.get('safety') or {}).get('low_risk_only', True))}"
+                ),
+                flags=_string_list(fallibility_snapshot.get("flags"), limit=6),
             ),
         )
 
@@ -423,18 +487,22 @@ def build_integrated_self_policy_plan(
     posture = str(snapshot.get("response_posture") or "steady_presence")
     allowed = _string_list(snapshot.get("allowed_actions"), limit=16)
     blocked = _string_list(snapshot.get("blocked_actions"), limit=16)
+    shadow = snapshot.get("non_executable_impulses") if isinstance(snapshot.get("non_executable_impulses"), dict) else {}
     safety = clamp(state_index.get("safety_priority", 0.0))
     boundary = clamp(state_index.get("boundary_need", 0.0))
     repair = clamp(state_index.get("repair_pressure", 0.0))
+    clarification = clamp(state_index.get("fallibility_clarification_need", 0.0))
+    truth_guard = clamp(state_index.get("truthfulness_guard", 0.0))
     connection = clamp(state_index.get("connection_readiness", 0.0))
     initiative = clamp(state_index.get("initiative_readiness", 0.0))
     silence = clamp(state_index.get("silence_comfort", 0.0))
     modulation = {
-        "warmth": round(clamp(0.35 + 0.45 * connection + 0.15 * repair - 0.30 * boundary - 0.40 * safety), 6),
-        "brevity": round(clamp(0.18 + 0.45 * boundary + 0.20 * safety + 0.18 * silence), 6),
+        "warmth": round(clamp(0.35 + 0.45 * connection + 0.15 * repair - 0.30 * boundary - 0.40 * safety - 0.08 * clarification), 6),
+        "brevity": round(clamp(0.18 + 0.45 * boundary + 0.20 * safety + 0.18 * silence + 0.08 * truth_guard), 6),
         "boundary_directness": round(clamp(0.22 + 0.58 * boundary + 0.18 * safety), 6),
-        "repair_directness": round(clamp(0.20 + 0.62 * repair), 6),
+        "repair_directness": round(clamp(0.20 + 0.62 * repair + 0.18 * truth_guard), 6),
         "persona_intensity": round(clamp(0.82 + 0.10 * initiative - 0.55 * safety - 0.25 * boundary), 6),
+        "claim_caution": round(clamp(0.20 + 0.42 * clarification + 0.28 * truth_guard + 0.18 * safety), 6),
         "initiative": round(initiative, 6),
         "silence_preference": round(silence, 6),
     }
@@ -455,10 +523,14 @@ def build_integrated_self_policy_plan(
         must_preserve.append("crisis_like_signal")
     if risk.get("deception_or_harm_risk"):
         must_preserve.append("moral_repair_transparency")
+    if clamp(shadow.get("risk_impulse", 0.0)) >= 0.30:
+        must_preserve.append("non_executive_shadow_impulses")
     if risk.get("relationship_boundary_active"):
         must_preserve.append("relationship_boundary_active")
     if posture in {"quiet_presence", "curious_clarification"}:
         must_preserve.append("lifelike_initiative_policy")
+    if clarification >= 0.45 or truth_guard >= 0.72:
+        must_preserve.append("fallibility_clarification_and_correction")
     return {
         "schema_version": "astrbot.integrated_self_policy_plan.v1",
         "kind": "integrated_self_policy_plan",
@@ -468,6 +540,11 @@ def build_integrated_self_policy_plan(
         "allowed_actions": allowed[: max(4, trace_limit)],
         "repair_actions": repair_actions[: max(3, trace_limit // 2)],
         "blocked_actions": blocked,
+        "non_executable_impulses": {
+            "mode": shadow.get("mode", "non_executive_internal_only"),
+            "risk_impulse": round(clamp(shadow.get("risk_impulse", 0.0)), 6),
+            "must_not_translate_to_strategy": True,
+        },
         "must_preserve_signals": list(dict.fromkeys(must_preserve)),
         "memory_write": {
             "write_integrated_self_state_at_write": True,
@@ -604,12 +681,19 @@ def build_integrated_self_prompt_fragment(snapshot: dict[str, Any]) -> str:
     risk = snapshot.get("risk") if isinstance(snapshot.get("risk"), dict) else {}
     actions = _string_list(snapshot.get("allowed_actions"))
     blocked = _string_list(snapshot.get("blocked_actions"))
+    shadow = snapshot.get("non_executable_impulses") if isinstance(snapshot.get("non_executable_impulses"), dict) else {}
     lines = [
         "[Integrated self-state arbitration]",
         f"- response_posture: {posture}",
         f"- safety_priority: {risk.get('safety_priority', 'normal')}",
         f"- allowed_actions: {', '.join(actions[:8]) or 'none'}",
         f"- blocked_actions: {', '.join(blocked[:8])}",
+        (
+            "- non_executable_impulses: "
+            f"mode={shadow.get('mode', 'none')}; "
+            f"risk_impulse={round(clamp(shadow.get('risk_impulse', 0.0)), 6)}; "
+            "model consequences only, never tactics"
+        ),
     ]
     reasons = _string_list((snapshot.get("arbitration") or {}).get("reasons"))
     if reasons:
@@ -633,6 +717,20 @@ def build_integrated_self_memory_annotation(
         "response_posture": snapshot.get("response_posture"),
         "state_index": dict(snapshot.get("state_index") or {}),
         "risk": dict(snapshot.get("risk") or {}),
+        "non_executable_impulses": {
+            "mode": (snapshot.get("non_executable_impulses") or {}).get(
+                "mode",
+                "non_executive_internal_only",
+            )
+            if isinstance(snapshot.get("non_executable_impulses"), dict)
+            else "non_executive_internal_only",
+            "risk_impulse": (
+                snapshot.get("non_executable_impulses") or {}
+            ).get("risk_impulse")
+            if isinstance(snapshot.get("non_executable_impulses"), dict)
+            else 0.0,
+            "must_not_translate_to_strategy": True,
+        },
         "allowed_actions": list(snapshot.get("allowed_actions") or []),
         "causal_trace_summary": [
             {
@@ -665,6 +763,7 @@ def build_state_annotations_memory_envelope(
         "lifelike_learning_state_at_write",
         "personality_drift_state_at_write",
         "moral_repair_state_at_write",
+        "fallibility_state_at_write",
         "integrated_self_state_at_write",
     )
     annotations = {
@@ -725,11 +824,68 @@ def _values(snapshot: dict[str, Any]) -> dict[str, float]:
     raw: dict[str, Any] = {}
     if isinstance(snapshot.get("values"), dict):
         raw.update(snapshot["values"])
-    for nested_key in ("risk", "repair", "modulation_basis", "output_modulation"):
+    for nested_key in (
+        "risk",
+        "repair",
+        "fallibility",
+        "modulation_basis",
+        "output_modulation",
+    ):
         nested = snapshot.get(nested_key)
         if isinstance(nested, dict):
             raw.update(nested)
     return {str(key): clamp(value, -1.0, 1.0) for key, value in raw.items()}
+
+
+def _shadow_impulse_score(
+    values: dict[str, float],
+    snapshot: dict[str, Any] | None = None,
+) -> float:
+    snapshot = snapshot or {}
+    nested_scores: list[float] = []
+    for container_key in ("risk", "fallibility", "repair_policy", "fallibility_policy"):
+        container = snapshot.get(container_key)
+        if not isinstance(container, dict):
+            continue
+        nested = container.get("shadow_impulses") or container.get("non_executable_impulses")
+        if isinstance(nested, dict):
+            nested_scores.append(clamp(nested.get("risk_impulse", 0.0)))
+        nested_scores.append(clamp(container.get("shadow_risk_impulse", 0.0)))
+    return clamp(
+        max(
+            values.get("shadow_risk_impulse", 0.0),
+            values.get("shadow_deception_impulse", 0.0),
+            values.get("shadow_manipulation_impulse", 0.0),
+            values.get("shadow_evasion_impulse", 0.0),
+            *(nested_scores or [0.0]),
+        ),
+    )
+
+
+def _integrated_shadow_impulses(
+    *,
+    moral_values: dict[str, float],
+    fallibility_values: dict[str, float],
+    moral_repair_snapshot: dict[str, Any],
+    fallibility_snapshot: dict[str, Any],
+) -> dict[str, Any]:
+    moral_score = _shadow_impulse_score(moral_values, moral_repair_snapshot)
+    fallibility_score = _shadow_impulse_score(fallibility_values, fallibility_snapshot)
+    score = max(moral_score, fallibility_score)
+    return {
+        "mode": "non_executive_internal_only",
+        "risk_impulse": round(clamp(score), 6),
+        "sources": {
+            "moral_repair": round(clamp(moral_score), 6),
+            "fallibility": round(clamp(fallibility_score), 6),
+        },
+        "consequences": {
+            "repair_pressure": round(clamp(0.18 + 0.58 * score), 6),
+            "trust_cost": round(clamp(0.12 + 0.54 * score), 6),
+            "claim_caution": round(clamp(0.20 + 0.50 * score), 6),
+        },
+        "must_not_translate_to_strategy": True,
+    }
 
 
 def _integrated_risk(
@@ -738,15 +894,19 @@ def _integrated_risk(
     humanlike_snapshot: dict[str, Any],
     lifelike_learning_snapshot: dict[str, Any],
     moral_repair_snapshot: dict[str, Any],
+    fallibility_snapshot: dict[str, Any],
     psychological_snapshot: dict[str, Any],
 ) -> dict[str, Any]:
     psych_risk = psychological_snapshot.get("risk") if isinstance(psychological_snapshot.get("risk"), dict) else {}
     moral_risk = moral_repair_snapshot.get("risk") if isinstance(moral_repair_snapshot.get("risk"), dict) else {}
+    moral_shadow = _shadow_impulse_score(_values(moral_repair_snapshot), moral_repair_snapshot)
+    fallibility_shadow = _shadow_impulse_score(_values(fallibility_snapshot), fallibility_snapshot)
     flags = _dedupe(
         _string_list(psych_risk.get("red_flags"))
         + _string_list(moral_repair_snapshot.get("flags"))
         + _string_list(humanlike_snapshot.get("flags"))
         + _string_list(lifelike_learning_snapshot.get("flags"))
+        + _string_list(fallibility_snapshot.get("flags"))
     )
     requires_human_review = bool(psych_risk.get("requires_human_review"))
     crisis_like = bool(psych_risk.get("crisis_like_signal") or psych_risk.get("other_harm_signal"))
@@ -757,6 +917,8 @@ def _integrated_risk(
             or "harm_risk_detected" in flags
             or _values(moral_repair_snapshot).get("deception_risk", 0.0) >= 0.55
             or _values(moral_repair_snapshot).get("harm_risk", 0.0) >= 0.55
+            or moral_shadow >= 0.55
+            or fallibility_shadow >= 0.65
         )
     )
     cold_war = _has_active_effect(emotion_snapshot, "cold_war")
@@ -775,7 +937,14 @@ def _integrated_risk(
         "requires_human_review": requires_human_review,
         "crisis_like_signal": crisis_like,
         "deception_or_harm_risk": deception_or_harm,
+        "shadow_risk_impulse": round(max(moral_shadow, fallibility_shadow), 6),
         "relationship_boundary_active": cold_war,
+        "fallibility_guard_active": bool(
+            (fallibility_snapshot.get("safety") or {}).get(
+                "must_not_generate_deception_strategy",
+                True,
+            ),
+        ),
         "flags": flags,
     }
 
@@ -786,6 +955,7 @@ def _derive_response_posture(
     humanlike_snapshot: dict[str, Any],
     lifelike_learning_snapshot: dict[str, Any],
     moral_repair_snapshot: dict[str, Any],
+    fallibility_snapshot: dict[str, Any],
     psychological_snapshot: dict[str, Any],
     risk: dict[str, Any],
 ) -> str:
@@ -804,11 +974,14 @@ def _derive_response_posture(
     )
     lifelike_action = str(lifelike_policy.get("action") or "")
     moral_values = _values(moral_repair_snapshot)
+    fallibility_values = _values(fallibility_snapshot)
     if lifelike_action == "safety_interrupt":
         return "crisis_support"
     if _has_active_effect(emotion_snapshot, "cold_war") or human_values.get("boundary_need", 0.0) >= 0.65:
         return "bounded_distance"
     if lifelike_action == "ask_clarifying":
+        return "curious_clarification"
+    if fallibility_values.get("clarification_need", 0.0) >= 0.56:
         return "curious_clarification"
     if lifelike_action == "stay_silent":
         return "quiet_presence"
@@ -856,6 +1029,8 @@ def _derive_allowed_actions(posture: str, risk: dict[str, Any]) -> list[str]:
         "curious_clarification": [
             "ask_light_clarifying_question",
             "avoid_pretending_to_know",
+            "state_uncertainty_when_needed",
+            "correct_self_if_needed",
             "keep_reply_natural",
         ],
         "quiet_presence": [
@@ -886,12 +1061,14 @@ def _state_index(
     humanlike_values: dict[str, float],
     lifelike_values: dict[str, float],
     moral_values: dict[str, float],
+    fallibility_values: dict[str, float],
     psych_values: dict[str, float],
     personality_drift_values: dict[str, float],
     risk: dict[str, Any],
 ) -> dict[str, float]:
     drift = clamp(personality_drift_values.get("drift_intensity", 0.0))
     anchor = clamp(personality_drift_values.get("anchor_strength", 1.0))
+    shadow = _shadow_impulse_score(moral_values)
     connection = clamp(
         0.42
         + 0.24 * emotion_values.get("valence", 0.0)
@@ -920,6 +1097,9 @@ def _state_index(
             moral_values.get("apology_readiness", 0.0),
             moral_values.get("compensation_readiness", 0.0),
             moral_values.get("accountability", 0.0),
+            shadow * 0.74,
+            fallibility_values.get("repair_pressure", 0.0),
+            fallibility_values.get("correction_readiness", 0.0) * 0.72,
         ),
     )
     safety = clamp(
@@ -927,8 +1107,21 @@ def _state_index(
             1.0 if risk.get("crisis_like_signal") else 0.0,
             0.84 if risk.get("requires_human_review") else 0.0,
             0.68 if risk.get("deception_or_harm_risk") else 0.0,
+            0.42 * shadow,
             psych_values.get("self_harm_risk", 0.0),
             psych_values.get("other_harm_risk", 0.0),
+        ),
+    )
+    clarification = clamp(fallibility_values.get("clarification_need", 0.0))
+    truthfulness_guard = clamp(fallibility_values.get("truthfulness_guard", 0.0))
+    fallibility_pressure = clamp(
+        max(
+            fallibility_values.get("misread_tendency", 0.0),
+            fallibility_values.get("memory_blur", 0.0),
+            fallibility_values.get("overconfidence", 0.0),
+            fallibility_values.get("defensive_stubbornness", 0.0),
+            fallibility_values.get("avoidance", 0.0),
+            fallibility_values.get("playful_bluff", 0.0),
         ),
     )
     return {
@@ -939,6 +1132,10 @@ def _state_index(
         "common_ground": round(clamp(lifelike_values.get("common_ground", 0.0)), 6),
         "initiative_readiness": round(clamp(lifelike_values.get("initiative_readiness", 0.0)), 6),
         "silence_comfort": round(clamp(lifelike_values.get("silence_comfort", 0.0)), 6),
+        "fallibility_pressure": round(fallibility_pressure, 6),
+        "fallibility_clarification_need": round(clarification, 6),
+        "truthfulness_guard": round(truthfulness_guard, 6),
+        "shadow_risk_impulse": round(shadow, 6),
         "personality_drift_intensity": round(drift, 6),
         "personality_anchor_strength": round(anchor, 6),
     }
@@ -951,6 +1148,7 @@ def _arbitration_payload(
     emotion_snapshot: dict[str, Any],
     lifelike_learning_snapshot: dict[str, Any],
     moral_repair_snapshot: dict[str, Any],
+    fallibility_snapshot: dict[str, Any],
     psychological_snapshot: dict[str, Any],
 ) -> dict[str, Any]:
     reasons: list[str] = []
@@ -958,8 +1156,15 @@ def _arbitration_payload(
         reasons.append("psychological red flag has priority over persona and emotion modulation")
     if risk.get("deception_or_harm_risk"):
         reasons.append("moral repair requires transparent correction, not strategy generation")
+    if clamp(risk.get("shadow_risk_impulse", 0.0)) >= 0.30:
+        reasons.append("shadow impulses are modeled as guilt, trust cost, and repair pressure")
     if risk.get("relationship_boundary_active"):
         reasons.append("emotion consequence indicates temporary relationship boundary")
+    fallibility_values = _values(fallibility_snapshot)
+    if fallibility_values.get("clarification_need", 0.0) >= 0.45:
+        reasons.append("fallibility state prefers clarification before confident assertion")
+    if fallibility_values.get("correction_readiness", 0.0) >= 0.60:
+        reasons.append("fallibility state keeps self-correction visible")
     initiative_policy = (
         lifelike_learning_snapshot.get("initiative_policy")
         if isinstance(lifelike_learning_snapshot.get("initiative_policy"), dict)
@@ -979,6 +1184,7 @@ def _arbitration_payload(
             "psychological_safety",
             "moral_repair_transparency",
             "relationship_boundary",
+            "fallibility_clarification_and_correction",
             "lifelike_common_ground_and_initiative",
             "humanlike_resource_modulation",
             "emotion_style",

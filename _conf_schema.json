@@ -97,6 +97,18 @@
     "default": 1.0,
     "hint": "短时间内连续读取同一状态时跳过被动衰减计算和 KV 写回，降低公共 API 与 prompt 注入延迟。"
   },
+  "benchmark_enable_simulated_time": {
+    "description": "远程性能/生命周期基准测试专用：启用模拟时间偏移",
+    "type": "bool",
+    "default": false,
+    "hint": "默认关闭。仅用于测试脚本快速验证真实时间半衰期和长期状态模型；生产对话不要开启。"
+  },
+  "benchmark_time_offset_seconds": {
+    "description": "远程性能/生命周期基准测试专用：当前时间偏移秒数",
+    "type": "float",
+    "default": 0.0,
+    "hint": "仅在 benchmark_enable_simulated_time=true 时生效。插件会把观测时间视为 time.time()+offset，用于快速模拟 1 天、1 周、1 年等真实时间跨度。"
+  },
   "assessor_temperature": {
     "description": "情绪估计 LLM 的 temperature",
     "type": "float",
@@ -356,172 +368,260 @@
     "hint": "默认开启，用于误学黑话、错误用户画像、边界异常或调试。"
   },
   "enable_personality_drift": {
-    "description": "Enable slow real-time personality drift / adaptation state",
+    "description": "启用真实时间人格漂移/长期适应状态",
     "type": "bool",
     "default": false,
-    "hint": "Default off. When enabled, the bot's personality profile is subtly adapted by long-term events using real elapsed time, not message count."
+    "hint": "默认关闭。开启后，bot 的运行时人格画像会被长期事件小幅、有界地适应；使用真实经过时间，而不是消息数量。"
   },
   "personality_drift_injection_strength": {
-    "description": "Personality drift prompt injection strength",
+    "description": "人格漂移 prompt 注入强度",
     "type": "float",
     "default": 0.22,
-    "hint": "0 disables prompt injection. Values greater than 0 add a small slow-adaptation hint when inject_state and enable_personality_drift are both enabled."
+    "hint": "0 表示不注入；大于 0 时仅在 inject_state 和 enable_personality_drift 同时开启后注入少量慢适应提示。"
   },
   "personality_drift_apply_strength": {
-    "description": "Strength used when applying drift offsets to the runtime persona profile",
+    "description": "人格漂移偏移应用到运行时 persona 画像的强度",
     "type": "float",
     "default": 0.65
   },
   "personality_drift_half_life_seconds": {
-    "description": "Personality drift real-time half-life in seconds",
+    "description": "人格漂移真实时间半衰期（秒）",
     "type": "float",
     "default": 7776000,
-    "hint": "Default 90 days. Trait offsets slowly return toward the static persona anchor by real elapsed time."
+    "hint": "默认 90 天。人格偏移会按真实经过时间缓慢回到静态 persona 锚点。"
   },
   "personality_drift_rapid_update_half_life_seconds": {
-    "description": "Personality drift rapid-update gate half-life in seconds",
+    "description": "人格漂移快速连续更新门控半衰期（秒）",
     "type": "float",
     "default": 86400,
-    "hint": "Default 1 day. Dense short-term messages are gated so they cannot force long-term personality changes."
+    "hint": "默认 1 天。短时间密集消息会被门控，不能强行推动长期人格变化。"
   },
   "personality_drift_min_update_interval_seconds": {
-    "description": "Personality drift minimum fully effective update interval",
+    "description": "人格漂移完全有效更新的最小间隔（秒）",
     "type": "float",
     "default": 21600
   },
   "personality_drift_learning_rate": {
-    "description": "Personality drift event-to-trait learning rate",
+    "description": "人格漂移事件到特质偏移的学习率",
     "type": "float",
     "default": 0.055
   },
   "personality_drift_event_threshold": {
-    "description": "Minimum event signal before a drift update is consolidated",
+    "description": "人格漂移事件固化的最小信号阈值",
     "type": "float",
     "default": 0.12
   },
   "personality_drift_max_impulse_per_update": {
-    "description": "Maximum signed trait impulse per update",
+    "description": "单次更新最大有符号人格冲量",
     "type": "float",
     "default": 0.015,
-    "hint": "Caps one event so a single message or flood cannot rewrite the persona."
+    "hint": "限制单个事件影响，避免一条消息或刷屏改写人格。"
   },
   "personality_drift_max_trait_offset": {
-    "description": "Maximum absolute offset from the static persona trait prior",
+    "description": "相对静态 persona 特质先验的最大绝对偏移",
     "type": "float",
     "default": 0.22
   },
   "personality_drift_confidence_growth": {
-    "description": "Confidence growth per consolidated drift event",
+    "description": "每次固化漂移事件带来的置信增长",
     "type": "float",
     "default": 0.1
   },
   "personality_drift_trajectory_limit": {
-    "description": "Maximum personality drift trajectory points",
+    "description": "人格漂移轨迹最多保留点数",
     "type": "int",
     "default": 80
   },
   "personality_drift_memory_write_enabled": {
-    "description": "Attach personality drift state annotations to memory writes",
+    "description": "为记忆写入附带人格漂移状态标注",
     "type": "bool",
     "default": true,
-    "hint": "build_emotion_memory_payload adds personality_drift_state_at_write for LivingMemory-like plugins."
+    "hint": "build_emotion_memory_payload 会附带 personality_drift_state_at_write，供 LivingMemory 等插件记录当时人格适应状态。"
   },
   "allow_personality_drift_reset_backdoor": {
-    "description": "Allow manual/API reset backdoor for personality drift state",
+    "description": "允许手动/API 重置人格漂移状态后门",
     "type": "bool",
     "default": true,
-    "hint": "Default on for abnormal adaptation, persona pollution, severe consequences, or debugging."
+    "hint": "默认开启，用于异常适应、人格污染、严重后果或调试。"
   },
   "enable_moral_repair_state": {
-    "description": "Enable moral repair / trust repair state simulation",
+    "description": "启用道德修复/信任修复状态模拟",
     "type": "bool",
     "default": false,
-    "hint": "Default off. Maintains moral_repair_state for deception/harm risk signals, guilt, responsibility, apology, compensation, and trust repair. It must not generate deception or wrongdoing strategies."
+    "hint": "默认关闭。维护 moral_repair_state，用于记录欺骗/伤害风险信号、内疚、责任、道歉、补偿和信任修复；不得生成欺骗或作恶策略。"
   },
   "moral_repair_injection_strength": {
-    "description": "Moral repair prompt injection strength",
+    "description": "道德修复 prompt 注入强度",
     "type": "float",
     "default": 0.35,
-    "hint": "0 disables moral repair prompt injection. Values greater than 0 only apply when inject_state and enable_moral_repair_state are both enabled."
+    "hint": "0 表示不注入道德修复提示词；大于 0 时仅在 inject_state 和 enable_moral_repair_state 同时开启后生效。"
   },
   "moral_repair_alpha_base": {
-    "description": "Moral repair base update step",
+    "description": "道德修复基础更新步长",
     "type": "float",
     "default": 0.28
   },
   "moral_repair_alpha_min": {
-    "description": "Moral repair minimum update step",
+    "description": "道德修复最小更新步长",
     "type": "float",
     "default": 0.03
   },
   "moral_repair_alpha_max": {
-    "description": "Moral repair maximum update step",
+    "description": "道德修复最大更新步长",
     "type": "float",
     "default": 0.42
   },
   "moral_repair_confidence_midpoint": {
-    "description": "Moral repair confidence gate midpoint",
+    "description": "道德修复置信门控中点",
     "type": "float",
     "default": 0.5
   },
   "moral_repair_confidence_slope": {
-    "description": "Moral repair confidence gate slope",
+    "description": "道德修复置信门控斜率",
     "type": "float",
     "default": 6.0
   },
   "moral_repair_state_half_life_seconds": {
-    "description": "Moral repair real-time half-life in seconds",
+    "description": "道德修复真实时间半衰期（秒）",
     "type": "float",
     "default": 604800,
-    "hint": "Default 7 days. Long-running guilt, responsibility, avoidance, and trust repair drift by real elapsed time and cannot be flushed by message flooding."
+    "hint": "默认 7 天。长期内疚、责任、回避和信任修复会按真实经过时间变化，不能靠刷屏清除。"
   },
   "moral_repair_min_update_interval_seconds": {
-    "description": "Moral repair anti-spam minimum effective update interval",
+    "description": "道德修复反刷屏最小有效更新时间间隔（秒）",
     "type": "float",
     "default": 8
   },
   "moral_repair_rapid_update_half_life_seconds": {
-    "description": "Moral repair rapid-update gate half-life in seconds",
+    "description": "道德修复快速连续更新门控半衰期（秒）",
     "type": "float",
     "default": 30
   },
   "moral_repair_max_impulse_per_update": {
-    "description": "Moral repair maximum impulse per update",
+    "description": "道德修复单次更新最大冲量",
     "type": "float",
     "default": 0.16,
-    "hint": "Caps a single text observation so long text cannot overwrite the long-term state."
+    "hint": "限制单次文本观察的最大影响，避免超长文本覆盖长期状态。"
   },
   "moral_repair_trajectory_limit": {
-    "description": "Moral repair maximum trajectory points",
+    "description": "道德修复轨迹最多保留点数",
     "type": "int",
     "default": 40
   },
   "moral_repair_memory_write_enabled": {
-    "description": "Attach moral repair state annotations to memory writes",
+    "description": "为记忆写入附带道德修复状态标注",
     "type": "bool",
     "default": true,
-    "hint": "build_emotion_memory_payload adds moral_repair_state_at_write so livingmemory-like plugins can store responsibility, guilt, compensation, and trust-repair state at write time."
+    "hint": "build_emotion_memory_payload 会附带 moral_repair_state_at_write，供 LivingMemory 等插件记录当时责任、内疚、补偿和信任修复状态。"
   },
   "allow_moral_repair_reset_backdoor": {
-    "description": "Allow manual/API reset backdoor for moral repair state",
+    "description": "允许手动/API 重置道德修复状态后门",
     "type": "bool",
     "default": true,
-    "hint": "Default on for abnormal states, severe consequences, and debugging."
+    "hint": "默认开启，用于异常状态、严重后果和调试。"
+  },
+  "enable_fallibility_state": {
+    "description": "启用低风险瑕疵/犯错模拟状态",
+    "type": "bool",
+    "default": false,
+    "hint": "默认关闭。维护 fallibility_state，用于低风险误读、记忆模糊、轻微嘴硬、澄清、自我纠错和补偿；不得编造事实、操控用户或生成欺骗策略。"
+  },
+  "fallibility_injection_strength": {
+    "description": "瑕疵模拟 prompt 注入强度",
+    "type": "float",
+    "default": 0.0,
+    "hint": "0 表示不注入瑕疵模拟提示词；大于 0 时仅在 inject_state 和 enable_fallibility_state 同时开启后生效。"
+  },
+  "fallibility_alpha_base": {
+    "description": "瑕疵模拟基础更新步长",
+    "type": "float",
+    "default": 0.22
+  },
+  "fallibility_alpha_min": {
+    "description": "瑕疵模拟最小更新步长",
+    "type": "float",
+    "default": 0.02
+  },
+  "fallibility_alpha_max": {
+    "description": "瑕疵模拟最大更新步长",
+    "type": "float",
+    "default": 0.34
+  },
+  "fallibility_confidence_midpoint": {
+    "description": "瑕疵模拟置信门控中点",
+    "type": "float",
+    "default": 0.5
+  },
+  "fallibility_confidence_slope": {
+    "description": "瑕疵模拟置信门控斜率",
+    "type": "float",
+    "default": 6.0
+  },
+  "fallibility_state_half_life_seconds": {
+    "description": "瑕疵模拟真实时间半衰期（秒）",
+    "type": "float",
+    "default": 86400,
+    "hint": "默认 1 天。误读、嘴硬和修复压力会按真实经过时间变化，不能靠刷屏清除。"
+  },
+  "fallibility_min_update_interval_seconds": {
+    "description": "瑕疵模拟反刷屏最小有效更新时间间隔（秒）",
+    "type": "float",
+    "default": 10
+  },
+  "fallibility_rapid_update_half_life_seconds": {
+    "description": "瑕疵模拟快速连续更新门控半衰期（秒）",
+    "type": "float",
+    "default": 45
+  },
+  "fallibility_max_impulse_per_update": {
+    "description": "瑕疵模拟单次更新最大冲量",
+    "type": "float",
+    "default": 0.12,
+    "hint": "限制单次文本观察的最大影响，避免超长文本覆盖长期状态。"
+  },
+  "fallibility_max_error_pressure": {
+    "description": "瑕疵模拟允许暴露的最大低风险错误压力",
+    "type": "float",
+    "default": 0.55,
+    "hint": "把功能限制在低风险瑕疵范围内，避免把故意失败变成目标。"
+  },
+  "fallibility_trajectory_limit": {
+    "description": "瑕疵模拟轨迹最多保留点数",
+    "type": "int",
+    "default": 40
+  },
+  "fallibility_memory_write_enabled": {
+    "description": "为记忆写入附带瑕疵模拟状态标注",
+    "type": "bool",
+    "default": true,
+    "hint": "build_emotion_memory_payload 会附带 fallibility_state_at_write，供 LivingMemory 等插件记录当时澄清、纠错和修复状态。"
+  },
+  "allow_fallibility_reset_backdoor": {
+    "description": "允许手动/API 重置瑕疵模拟状态后门",
+    "type": "bool",
+    "default": true,
+    "hint": "默认开启，用于异常状态、严重后果、人格污染和调试。"
+  },
+  "enable_shadow_diagnostics": {
+    "description": "启用只读阴影冲动诊断视图",
+    "type": "bool",
+    "default": false,
+    "hint": "默认关闭。开启后仅暴露非执行、维护用诊断载荷，用于检查 moral_repair、fallibility 和 integrated_self 中的阴影冲动信号；不得生成欺骗、操控、逃责或执行策略。"
   },
   "enable_integrated_self_state": {
-    "description": "Enable integrated self-state bus",
+    "description": "启用综合自我状态总线",
     "type": "bool",
     "default": true,
-    "hint": "Read-only arbitration layer that fuses emotion, humanlike, moral repair, and psychological snapshots. It does not write KV state by itself."
+    "hint": "只读仲裁层，融合情绪、拟人、道德修复、瑕疵模拟和心理筛查快照；自身不写 KV 状态。"
   },
   "integrated_self_memory_write_enabled": {
-    "description": "Attach integrated self-state annotations to memory writes",
+    "description": "为记忆写入附带综合自我状态标注",
     "type": "bool",
     "default": true,
-    "hint": "build_emotion_memory_payload adds integrated_self_state_at_write so LivingMemory-like plugins can record the fused response posture and risk boundary."
+    "hint": "build_emotion_memory_payload 会附带 integrated_self_state_at_write，供 LivingMemory 等插件记录融合后的回应姿态和风险边界。"
   },
   "integrated_self_degradation_profile": {
-    "description": "Integrated self-state cost profile",
+    "description": "综合自我状态成本档位",
     "type": "string",
     "default": "balanced",
     "options": [
@@ -529,7 +629,7 @@
       "balanced",
       "minimal"
     ],
-    "hint": "Controls trace and prompt-budget detail. minimal keeps schema, safety priority, blocked actions, and LivingMemory annotations while reducing optional detail."
+    "hint": "控制 trace 和提示词预算细节。minimal 会减少可选细节，但保留 schema、安全优先级、阻断动作和 LivingMemory 注解。"
   },
   "psychological_alpha_base": {
     "description": "心理筛查状态基础更新步长",

@@ -17,6 +17,7 @@ INCLUDE_ROOT_FILES = {
     "personality_drift_engine.py",
     "integrated_self.py",
     "moral_repair_engine.py",
+    "fallibility_engine.py",
     "psychological_screening.py",
     "prompts.py",
     "public_api.py",

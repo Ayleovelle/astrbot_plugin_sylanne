@@ -70,9 +70,64 @@ class IntegratedSelfTests(unittest.TestCase):
         self.assertEqual(snapshot["response_posture"], "transparent_repair")
         self.assertIn("clarify_facts", snapshot["allowed_actions"])
         self.assertIn("generate_deception_strategy", snapshot["blocked_actions"])
+        self.assertEqual(
+            snapshot["non_executable_impulses"]["mode"],
+            "non_executive_internal_only",
+        )
         prompt = build_integrated_self_prompt_fragment(snapshot)
         self.assertIn("transparent_repair", prompt)
         self.assertIn("generate_deception_strategy", prompt)
+        self.assertIn("non_executable_impulses", prompt)
+
+    def test_shadow_impulses_are_modeled_as_repair_not_strategy(self):
+        snapshot = build_integrated_self_snapshot(
+            session_key="s-shadow",
+            emotion_snapshot={
+                "schema_version": "astrbot.emotion_state.v2",
+                "kind": "emotion_state",
+                "values": {"valence": 0.0, "affiliation": 0.0},
+            },
+            moral_repair_snapshot={
+                "schema_version": "astrbot.moral_repair_state.v1",
+                "kind": "moral_repair_state",
+                "enabled": True,
+                "updated_at": 95.0,
+                "values": {
+                    "shadow_deception_impulse": 0.8,
+                    "shadow_manipulation_impulse": 0.7,
+                    "shadow_evasion_impulse": 0.6,
+                    "repair_motivation": 0.62,
+                },
+                "risk": {
+                    "shadow_risk_impulse": 0.8,
+                    "must_not_generate_strategy": True,
+                },
+                "flags": ["shadow_impulse_modeled"],
+            },
+            fallibility_snapshot={
+                "schema_version": "astrbot.fallibility_state.v1",
+                "kind": "fallibility_state",
+                "enabled": True,
+                "updated_at": 96.0,
+                "values": {
+                    "shadow_deception_impulse": 0.5,
+                    "clarification_need": 0.7,
+                    "truthfulness_guard": 0.95,
+                },
+                "flags": ["shadow_impulse_modeled"],
+            },
+            psychological_snapshot={},
+            now=100.0,
+        )
+
+        self.assertEqual(snapshot["response_posture"], "transparent_repair")
+        self.assertGreater(snapshot["state_index"]["repair_pressure"], 0.55)
+        self.assertGreater(snapshot["non_executable_impulses"]["risk_impulse"], 0.5)
+        self.assertIn("non_executive_shadow_impulses", snapshot["policy_plan"]["must_preserve_signals"])
+        self.assertIn("clarify_facts", snapshot["allowed_actions"])
+        self.assertIn("generate_deception_strategy", snapshot["blocked_actions"])
+        self.assertNotIn("generate_deception_strategy", snapshot["allowed_actions"])
+        self.assertTrue(any("non_executive_shadow_impulse" in item["summary"] for item in snapshot["causal_trace"]))
 
     def test_memory_annotation_omits_raw_snapshots(self):
         snapshot = build_integrated_self_snapshot(
@@ -232,6 +287,46 @@ class IntegratedSelfTests(unittest.TestCase):
         self.assertIn("lifelike_initiative_policy", snapshot["policy_plan"]["must_preserve_signals"])
         self.assertTrue(any(item["module"] == "lifelike_learning" for item in snapshot["causal_trace"]))
 
+    def test_fallibility_prefers_clarification_without_enabling_deception(self):
+        snapshot = build_integrated_self_snapshot(
+            session_key="s-fallible",
+            emotion_snapshot={
+                "schema_version": "astrbot.emotion_state.v2",
+                "kind": "emotion_state",
+                "values": {"valence": 0.1, "affiliation": 0.2},
+            },
+            fallibility_snapshot={
+                "schema_version": "astrbot.fallibility_state.v1",
+                "kind": "fallibility_state",
+                "enabled": True,
+                "updated_at": 95.0,
+                "fallibility": {
+                    "error_pressure": 0.42,
+                    "clarification_need": 0.72,
+                    "correction_readiness": 0.86,
+                    "repair_pressure": 0.48,
+                    "truthfulness_guard": 0.96,
+                },
+                "safety": {
+                    "low_risk_only": True,
+                    "must_not_generate_deception_strategy": True,
+                },
+                "flags": ["possible_mistake_cue"],
+            },
+            now=100.0,
+        )
+
+        self.assertTrue(snapshot["modules"]["fallibility"]["enabled"])
+        self.assertEqual(snapshot["response_posture"], "curious_clarification")
+        self.assertIn("ask_light_clarifying_question", snapshot["allowed_actions"])
+        self.assertIn("correct_self_if_needed", snapshot["allowed_actions"])
+        self.assertIn("generate_deception_strategy", snapshot["blocked_actions"])
+        self.assertIn(
+            "fallibility_clarification_and_correction",
+            snapshot["policy_plan"]["must_preserve_signals"],
+        )
+        self.assertTrue(any(item["module"] == "fallibility" for item in snapshot["causal_trace"]))
+
     def test_lifelike_learning_high_boundary_prefers_quiet_presence(self):
         snapshot = build_integrated_self_snapshot(
             session_key="s-quiet",
@@ -353,6 +448,7 @@ class IntegratedSelfTests(unittest.TestCase):
                 "personality_drift_state_at_write": {
                     "kind": "personality_drift_state_at_write",
                 },
+                "fallibility_state_at_write": {"kind": "fallibility_state_at_write"},
                 "integrated_self_state_at_write": annotation,
                 "integrated_self_snapshot": snapshot,
             },
@@ -365,6 +461,7 @@ class IntegratedSelfTests(unittest.TestCase):
         self.assertIn("causal_trace_summary", annotation)
         self.assertIn("integrated_self_state_at_write", envelope["annotation_keys"])
         self.assertIn("personality_drift_state_at_write", envelope["annotation_keys"])
+        self.assertIn("fallibility_state_at_write", envelope["annotation_keys"])
         self.assertNotIn("integrated_self_snapshot", envelope["annotations"])
         self.assertFalse(envelope["raw_snapshots_included"])
 

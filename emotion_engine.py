@@ -511,6 +511,19 @@ PERSONALITY_SOURCE_RELIABILITY: dict[str, float] = {
     "structure_prior": 0.42,
 }
 
+_LOWER_KEYWORD_TRAITS: dict[str, tuple[str, ...]] = {
+    key: tuple(keyword.lower() for keyword in keywords)
+    for key, keywords in KEYWORD_TRAITS.items()
+}
+
+_LOWER_PERSONALITY_LEXICON: dict[str, dict[str, tuple[str, ...]]] = {
+    dimension: {
+        polarity: tuple(keyword.lower() for keyword in keywords)
+        for polarity, keywords in rules.items()
+    }
+    for dimension, rules in PERSONALITY_LEXICON.items()
+}
+
 PERSONALITY_TRAIT_GROUPS: dict[str, tuple[str, ...]] = {
     "big_five": (
         "openness",
@@ -607,12 +620,17 @@ def normalize_vector(raw: Any, *, default: float = 0.0) -> dict[str, float]:
     return values
 
 
-def _keyword_score(text: str, keywords: tuple[str, ...]) -> float:
-    if not text:
+def _keyword_score(
+    text: str,
+    keywords: tuple[str, ...],
+    *,
+    lowered_text: str | None = None,
+) -> float:
+    if not text and lowered_text is None:
         return 0.0
-    lowered = text.lower()
-    hits = sum(lowered.count(keyword.lower()) for keyword in keywords)
-    length_scale = max(1.0, math.log1p(len(text)) / 4.2)
+    lowered = lowered_text if lowered_text is not None else text.lower()
+    hits = sum(lowered.count(keyword) for keyword in keywords)
+    length_scale = max(1.0, math.log1p(len(lowered)) / 4.2)
     return clamp(hits / length_scale, 0.0, 1.0)
 
 
@@ -621,9 +639,10 @@ def _signed_keyword_score(
     *,
     positive: tuple[str, ...],
     negative: tuple[str, ...],
+    lowered_text: str | None = None,
 ) -> float:
-    positive_score = _keyword_score(text, positive)
-    negative_score = _keyword_score(text, negative)
+    positive_score = _keyword_score(text, positive, lowered_text=lowered_text)
+    negative_score = _keyword_score(text, negative, lowered_text=lowered_text)
     return clamp(positive_score - negative_score)
 
 
@@ -699,15 +718,17 @@ def build_personality_model(
 ) -> dict[str, Any]:
     """Build a deterministic posterior personality vector from persona text."""
     text = text or ""
+    lowered_text = text.lower()
     strength = clamp(strength, 0.0, 2.0)
     lexical = {
         dimension: _signed_keyword_score(
             text,
             positive=rules["positive"],
             negative=rules["negative"],
+            lowered_text=lowered_text,
         )
         * strength
-        for dimension, rules in PERSONALITY_LEXICON.items()
+        for dimension, rules in _LOWER_PERSONALITY_LEXICON.items()
     }
     legacy = _legacy_trait_projection(traits)
     structure_prior = {
@@ -875,10 +896,11 @@ def build_persona_profile(
     persona_id = persona_id or "default"
     name = name or persona_id or "default"
     text = text or ""
+    lowered_text = text.lower()
     strength = clamp(strength, 0.0, 2.0)
     traits = {
-        key: _keyword_score(text, keywords) * strength
-        for key, keywords in KEYWORD_TRAITS.items()
+        key: _keyword_score(text, keywords, lowered_text=lowered_text) * strength
+        for key, keywords in _LOWER_KEYWORD_TRAITS.items()
     }
     personality_model = build_personality_model(
         text,

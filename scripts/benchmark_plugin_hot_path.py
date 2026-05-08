@@ -18,6 +18,7 @@ from tests.test_command_tools import bind_async, install_astrbot_stubs, new_plug
 
 async def _bind_fast_state_hooks(plugin, *, drift_saves: list | None = None) -> None:
     from emotion_engine import EmotionState
+    from fallibility_engine import FallibilityState
     from humanlike_engine import HumanlikeState
     from lifelike_learning_engine import LifelikeLearningState
     from moral_repair_engine import MoralRepairState
@@ -57,6 +58,12 @@ async def _bind_fast_state_hooks(plugin, *, drift_saves: list | None = None) -> 
     async def fake_save_moral_repair_state(self, session_key, state):
         return None
 
+    async def fake_load_fallibility_state(self, session_key):
+        return FallibilityState.initial()
+
+    async def fake_save_fallibility_state(self, session_key, state):
+        return None
+
     async def fake_load_personality_drift_state(self, session_key, profile=None):
         return PersonalityDriftState.initial(
             persona_fingerprint=profile.fingerprint if profile else "default",
@@ -76,6 +83,8 @@ async def _bind_fast_state_hooks(plugin, *, drift_saves: list | None = None) -> 
     bind_async(plugin, "_save_lifelike_learning_state", fake_save_lifelike_state)
     bind_async(plugin, "_load_moral_repair_state", fake_load_moral_repair_state)
     bind_async(plugin, "_save_moral_repair_state", fake_save_moral_repair_state)
+    bind_async(plugin, "_load_fallibility_state", fake_load_fallibility_state)
+    bind_async(plugin, "_save_fallibility_state", fake_save_fallibility_state)
     bind_async(plugin, "_load_personality_drift_state", fake_load_personality_drift_state)
     bind_async(plugin, "_save_personality_drift_state", fake_save_personality_drift_state)
 
@@ -106,6 +115,7 @@ async def _run_request_slow_aux_case(
     from humanlike_engine import HumanlikeState
     from lifelike_learning_engine import LifelikeLearningState
     from moral_repair_engine import MoralRepairState
+    from fallibility_engine import FallibilityState
 
     plugin = new_plugin(config)
     await _bind_fast_state_hooks(plugin)
@@ -122,9 +132,14 @@ async def _run_request_slow_aux_case(
         await asyncio.sleep(0.02)
         return MoralRepairState.initial()
 
+    async def slow_fallibility(self, session_key):
+        await asyncio.sleep(0.02)
+        return FallibilityState.initial()
+
     bind_async(plugin, "_load_humanlike_state", slow_humanlike)
     bind_async(plugin, "_load_lifelike_learning_state", slow_lifelike)
     bind_async(plugin, "_load_moral_repair_state", slow_moral)
+    bind_async(plugin, "_load_fallibility_state", slow_fallibility)
     samples: list[float] = []
     for _ in range(iterations):
         request = fake_request(session_id="bench-session", prompt=prompt)
@@ -170,6 +185,43 @@ async def _run_response_slow_moral_case(
 
     bind_async(plugin, "_assess_emotion", slow_assessor)
     bind_async(plugin, "_load_moral_repair_state", slow_moral)
+    samples: list[float] = []
+    for _ in range(iterations):
+        response = SimpleNamespace(completion_text=text)
+        started = time.perf_counter()
+        await plugin.on_llm_response(FakeEvent("bench-session"), response)
+        samples.append((time.perf_counter() - started) * 1000.0)
+    return _summarize(samples)
+
+
+async def _run_response_slow_moral_fallibility_case(
+    config: dict,
+    *,
+    iterations: int,
+    text: str,
+) -> dict:
+    from moral_repair_engine import MoralRepairState
+    from fallibility_engine import FallibilityState
+
+    plugin = new_plugin(config)
+    await _bind_fast_state_hooks(plugin)
+    plugin._last_request_text["bench-session"] = "cached request context"
+
+    async def slow_assessor(self, **kwargs):
+        await asyncio.sleep(0.02)
+        return fake_observation()
+
+    async def slow_moral(self, session_key):
+        await asyncio.sleep(0.02)
+        return MoralRepairState.initial()
+
+    async def slow_fallibility(self, session_key):
+        await asyncio.sleep(0.02)
+        return FallibilityState.initial()
+
+    bind_async(plugin, "_assess_emotion", slow_assessor)
+    bind_async(plugin, "_load_moral_repair_state", slow_moral)
+    bind_async(plugin, "_load_fallibility_state", slow_fallibility)
     samples: list[float] = []
     for _ in range(iterations):
         response = SimpleNamespace(completion_text=text)
@@ -233,10 +285,67 @@ async def _run_memory_slow_snapshot_case(config: dict, *, iterations: int) -> di
     async def fake_moral(*args, **kwargs):
         return await slow_snapshot("moral_repair_state")
 
+    async def fake_fallibility(*args, **kwargs):
+        return await slow_snapshot("fallibility_state")
+
     plugin.get_humanlike_snapshot = fake_humanlike
     plugin.get_lifelike_learning_snapshot = fake_lifelike
     plugin.get_personality_drift_snapshot = fake_drift
     plugin.get_moral_repair_snapshot = fake_moral
+    plugin.get_fallibility_snapshot = fake_fallibility
+    samples: list[float] = []
+    for _ in range(iterations):
+        started = time.perf_counter()
+        await plugin.build_emotion_memory_payload(
+            session_key="bench-session",
+            source="livingmemory",
+            include_raw_snapshot=False,
+        )
+        samples.append((time.perf_counter() - started) * 1000.0)
+    return _summarize(samples)
+
+
+async def _run_memory_slow_emotion_and_snapshot_case(
+    config: dict,
+    *,
+    iterations: int,
+) -> dict:
+    plugin = new_plugin(config)
+
+    async def slow_snapshot(kind):
+        await asyncio.sleep(0.02)
+        return {
+            "schema_version": f"astrbot.{kind}.v1",
+            "kind": kind,
+            "enabled": True,
+            "session_key": "bench-session",
+            "values": {},
+        }
+
+    async def fake_emotion(*args, **kwargs):
+        return await slow_snapshot("emotion_state")
+
+    async def fake_humanlike(*args, **kwargs):
+        return await slow_snapshot("humanlike_state")
+
+    async def fake_lifelike(*args, **kwargs):
+        return await slow_snapshot("lifelike_learning_state")
+
+    async def fake_drift(*args, **kwargs):
+        return await slow_snapshot("personality_drift_state")
+
+    async def fake_moral(*args, **kwargs):
+        return await slow_snapshot("moral_repair_state")
+
+    async def fake_fallibility(*args, **kwargs):
+        return await slow_snapshot("fallibility_state")
+
+    plugin.get_emotion_snapshot = fake_emotion
+    plugin.get_humanlike_snapshot = fake_humanlike
+    plugin.get_lifelike_learning_snapshot = fake_lifelike
+    plugin.get_personality_drift_snapshot = fake_drift
+    plugin.get_moral_repair_snapshot = fake_moral
+    plugin.get_fallibility_snapshot = fake_fallibility
     samples: list[float] = []
     for _ in range(iterations):
         started = time.perf_counter()
@@ -277,6 +386,7 @@ async def main() -> int:
                 "enable_lifelike_learning": False,
                 "enable_moral_repair_state": False,
                 "enable_personality_drift": False,
+                "enable_fallibility_state": False,
             },
             iterations=iterations,
             prompt="hello",
@@ -288,10 +398,12 @@ async def main() -> int:
                 "enable_lifelike_learning": True,
                 "enable_moral_repair_state": True,
                 "enable_personality_drift": True,
+                "enable_fallibility_state": True,
                 "humanlike_injection_strength": 0.0,
                 "lifelike_learning_injection_strength": 0.0,
                 "moral_repair_injection_strength": 0.0,
                 "personality_drift_injection_strength": 0.0,
+                "fallibility_injection_strength": 0.0,
             },
             iterations=iterations,
             prompt="hello",
@@ -302,9 +414,11 @@ async def main() -> int:
                 "enable_humanlike_state": True,
                 "enable_lifelike_learning": True,
                 "enable_moral_repair_state": True,
+                "enable_fallibility_state": True,
                 "humanlike_injection_strength": 0.0,
                 "lifelike_learning_injection_strength": 0.0,
                 "moral_repair_injection_strength": 0.0,
+                "fallibility_injection_strength": 0.0,
             },
             iterations=20,
             prompt="sorry, 桥隧猫 means bridge tunnel friend",
@@ -322,12 +436,25 @@ async def main() -> int:
             iterations=20,
             text="assistant response sorry repair",
         ),
+        "response_slow_moral_fallibility_fanout": await _run_response_slow_moral_fallibility_case(
+            {
+                "assessment_timing": "post",
+                "enable_moral_repair_state": True,
+                "enable_fallibility_state": True,
+            },
+            iterations=20,
+            text="assistant response sorry repair maybe mistake",
+        ),
         "response_slow_assessor_timeout_guard": await _run_slow_assessor_case(
             {"assessment_timing": "post", "assessor_timeout_seconds": 0.05},
             iterations=20,
             text="assistant response",
         ),
         "memory_slow_snapshot_fanout": await _run_memory_slow_snapshot_case(
+            {},
+            iterations=20,
+        ),
+        "memory_slow_emotion_and_snapshot_fanout": await _run_memory_slow_emotion_and_snapshot_case(
             {},
             iterations=20,
         ),

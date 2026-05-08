@@ -18,12 +18,115 @@ HUMANLIKE_STATE_SCHEMA_VERSION = "astrbot.humanlike_state.v1"
 LIFELIKE_LEARNING_SCHEMA_VERSION = "astrbot.lifelike_learning_state.v1"
 PERSONALITY_DRIFT_SCHEMA_VERSION = "astrbot.personality_drift_state.v1"
 MORAL_REPAIR_STATE_SCHEMA_VERSION = "astrbot.moral_repair_state.v1"
+FALLIBILITY_STATE_SCHEMA_VERSION = "astrbot.fallibility_state.v1"
 INTEGRATED_SELF_SCHEMA_VERSION = "astrbot.integrated_self_state.v1"
 PSYCHOLOGICAL_RISK_BOOLEAN_FIELDS = PUBLIC_RISK_BOOLEAN_FIELDS
 
 
 def _has_expected_public_versions(plugin: Any, expected: dict[str, str]) -> bool:
     return all(getattr(plugin, name, None) == value for name, value in expected.items())
+
+
+_EMOTION_SERVICE_REQUIRED_METHODS = (
+    "get_emotion_snapshot",
+    "get_emotion_state",
+    "get_emotion_values",
+    "get_emotion_consequences",
+    "get_emotion_relationship",
+    "get_emotion_prompt_fragment",
+    "build_emotion_memory_payload",
+    "inject_emotion_context",
+    "observe_emotion_text",
+    "get_psychological_screening_snapshot",
+    "get_psychological_screening_values",
+    "observe_psychological_text",
+    "simulate_psychological_update",
+    "reset_psychological_screening_state",
+    "simulate_emotion_update",
+    "reset_emotion_state",
+    "get_integrated_self_snapshot",
+    "get_integrated_self_prompt_fragment",
+    "get_integrated_self_policy_plan",
+    "build_integrated_self_replay_bundle",
+    "replay_integrated_self_bundle",
+    "probe_integrated_self_compatibility",
+    "export_integrated_self_diagnostics",
+    "get_lifelike_learning_snapshot",
+    "get_lifelike_initiative_policy",
+    "get_lifelike_prompt_fragment",
+    "observe_lifelike_text",
+    "simulate_lifelike_update",
+    "reset_lifelike_learning_state",
+    "get_personality_drift_snapshot",
+    "get_personality_drift_values",
+    "get_personality_drift_prompt_fragment",
+    "observe_personality_drift_event",
+    "simulate_personality_drift_update",
+    "reset_personality_drift_state",
+    "get_fallibility_snapshot",
+    "get_fallibility_values",
+    "get_fallibility_prompt_fragment",
+    "observe_fallibility_text",
+    "simulate_fallibility_update",
+    "reset_fallibility_state",
+)
+
+_EMOTION_SERVICE_EXPECTED_VERSIONS = {
+    "emotion_api_version": EMOTION_API_VERSION,
+    "emotion_schema_version": EMOTION_SCHEMA_VERSION,
+    "emotion_memory_schema_version": EMOTION_MEMORY_SCHEMA_VERSION,
+    "personality_profile_schema_version": PERSONALITY_PROFILE_SCHEMA_VERSION,
+    "psychological_screening_schema_version": PSYCHOLOGICAL_SCREENING_SCHEMA_VERSION,
+    "integrated_self_schema_version": INTEGRATED_SELF_SCHEMA_VERSION,
+    "lifelike_learning_schema_version": LIFELIKE_LEARNING_SCHEMA_VERSION,
+    "personality_drift_schema_version": PERSONALITY_DRIFT_SCHEMA_VERSION,
+    "fallibility_state_schema_version": FALLIBILITY_STATE_SCHEMA_VERSION,
+}
+
+_HUMANLIKE_SERVICE_REQUIRED_METHODS = (
+    "get_humanlike_snapshot",
+    "get_humanlike_values",
+    "get_humanlike_prompt_fragment",
+    "observe_humanlike_text",
+    "simulate_humanlike_update",
+    "reset_humanlike_state",
+)
+
+_MORAL_REPAIR_SERVICE_REQUIRED_METHODS = (
+    "get_moral_repair_snapshot",
+    "get_moral_repair_values",
+    "get_moral_repair_prompt_fragment",
+    "observe_moral_repair_text",
+    "simulate_moral_repair_update",
+    "reset_moral_repair_state",
+)
+
+_LIFELIKE_SERVICE_REQUIRED_METHODS = (
+    "get_lifelike_learning_snapshot",
+    "get_lifelike_initiative_policy",
+    "get_lifelike_prompt_fragment",
+    "observe_lifelike_text",
+    "simulate_lifelike_update",
+    "reset_lifelike_learning_state",
+)
+
+_PERSONALITY_DRIFT_SERVICE_REQUIRED_METHODS = (
+    "get_personality_drift_snapshot",
+    "get_personality_drift_values",
+    "get_personality_drift_prompt_fragment",
+    "observe_personality_drift_event",
+    "simulate_personality_drift_update",
+    "reset_personality_drift_state",
+)
+
+_FALLIBILITY_SERVICE_REQUIRED_METHODS = (
+    "get_fallibility_snapshot",
+    "get_fallibility_values",
+    "get_fallibility_prompt_fragment",
+    "observe_fallibility_text",
+    "simulate_fallibility_update",
+    "reset_fallibility_state",
+)
 
 
 @runtime_checkable
@@ -36,6 +139,7 @@ class EmotionServiceProtocol(Protocol):
     integrated_self_schema_version: str
     lifelike_learning_schema_version: str
     personality_drift_schema_version: str
+    fallibility_state_schema_version: str
 
     async def get_emotion_snapshot(
         self,
@@ -405,6 +509,69 @@ class EmotionServiceProtocol(Protocol):
     ) -> bool:
         ...
 
+    async def get_fallibility_snapshot(
+        self,
+        event_or_session: Any = None,
+        *,
+        request: Any = None,
+        session_key: str | None = None,
+        exposure: str = "plugin_safe",
+        include_prompt_fragment: bool = False,
+    ) -> dict[str, Any]:
+        ...
+
+    async def get_fallibility_values(
+        self,
+        event_or_session: Any = None,
+        *,
+        request: Any = None,
+        session_key: str | None = None,
+    ) -> dict[str, float]:
+        ...
+
+    async def get_fallibility_prompt_fragment(
+        self,
+        event_or_session: Any = None,
+        *,
+        request: Any = None,
+        session_key: str | None = None,
+    ) -> str:
+        ...
+
+    async def observe_fallibility_text(
+        self,
+        event_or_session: Any = None,
+        text: str = "",
+        *,
+        request: Any = None,
+        session_key: str | None = None,
+        source: str = "plugin",
+        commit: bool = True,
+        observed_at: float | None = None,
+    ) -> dict[str, Any]:
+        ...
+
+    async def simulate_fallibility_update(
+        self,
+        event_or_session: Any = None,
+        text: str = "",
+        *,
+        request: Any = None,
+        session_key: str | None = None,
+        source: str = "plugin",
+        observed_at: float | None = None,
+    ) -> dict[str, Any]:
+        ...
+
+    async def reset_fallibility_state(
+        self,
+        event_or_session: Any = None,
+        *,
+        request: Any = None,
+        session_key: str | None = None,
+    ) -> bool:
+        ...
+
 
 @runtime_checkable
 class HumanlikeStateServiceProtocol(EmotionServiceProtocol, Protocol):
@@ -686,6 +853,74 @@ class PersonalityDriftServiceProtocol(EmotionServiceProtocol, Protocol):
         ...
 
 
+@runtime_checkable
+class FallibilityServiceProtocol(EmotionServiceProtocol, Protocol):
+    fallibility_state_schema_version: str
+
+    async def get_fallibility_snapshot(
+        self,
+        event_or_session: Any = None,
+        *,
+        request: Any = None,
+        session_key: str | None = None,
+        exposure: str = "plugin_safe",
+        include_prompt_fragment: bool = False,
+    ) -> dict[str, Any]:
+        ...
+
+    async def get_fallibility_values(
+        self,
+        event_or_session: Any = None,
+        *,
+        request: Any = None,
+        session_key: str | None = None,
+    ) -> dict[str, float]:
+        ...
+
+    async def get_fallibility_prompt_fragment(
+        self,
+        event_or_session: Any = None,
+        *,
+        request: Any = None,
+        session_key: str | None = None,
+    ) -> str:
+        ...
+
+    async def observe_fallibility_text(
+        self,
+        event_or_session: Any = None,
+        text: str = "",
+        *,
+        request: Any = None,
+        session_key: str | None = None,
+        source: str = "plugin",
+        commit: bool = True,
+        observed_at: float | None = None,
+    ) -> dict[str, Any]:
+        ...
+
+    async def simulate_fallibility_update(
+        self,
+        event_or_session: Any = None,
+        text: str = "",
+        *,
+        request: Any = None,
+        session_key: str | None = None,
+        source: str = "plugin",
+        observed_at: float | None = None,
+    ) -> dict[str, Any]:
+        ...
+
+    async def reset_fallibility_state(
+        self,
+        event_or_session: Any = None,
+        *,
+        request: Any = None,
+        session_key: str | None = None,
+    ) -> bool:
+        ...
+
+
 def get_emotion_service(context: Any) -> EmotionServiceProtocol | None:
     """Return the activated emotion service plugin from an AstrBot Context."""
     getter = getattr(context, "get_registered_star", None)
@@ -695,57 +930,13 @@ def get_emotion_service(context: Any) -> EmotionServiceProtocol | None:
     if not metadata or not getattr(metadata, "activated", True):
         return None
     plugin = getattr(metadata, "star_cls", None)
-    required = (
-        "get_emotion_snapshot",
-        "get_emotion_state",
-        "get_emotion_values",
-        "get_emotion_consequences",
-        "get_emotion_relationship",
-        "get_emotion_prompt_fragment",
-        "build_emotion_memory_payload",
-        "inject_emotion_context",
-        "observe_emotion_text",
-        "get_psychological_screening_snapshot",
-        "get_psychological_screening_values",
-        "observe_psychological_text",
-        "simulate_psychological_update",
-        "reset_psychological_screening_state",
-        "simulate_emotion_update",
-        "reset_emotion_state",
-        "get_integrated_self_snapshot",
-        "get_integrated_self_prompt_fragment",
-        "get_integrated_self_policy_plan",
-        "build_integrated_self_replay_bundle",
-        "replay_integrated_self_bundle",
-        "probe_integrated_self_compatibility",
-        "export_integrated_self_diagnostics",
-        "get_lifelike_learning_snapshot",
-        "get_lifelike_initiative_policy",
-        "get_lifelike_prompt_fragment",
-        "observe_lifelike_text",
-        "simulate_lifelike_update",
-        "reset_lifelike_learning_state",
-        "get_personality_drift_snapshot",
-        "get_personality_drift_values",
-        "get_personality_drift_prompt_fragment",
-        "observe_personality_drift_event",
-        "simulate_personality_drift_update",
-        "reset_personality_drift_state",
-    )
-    expected_versions = {
-        "emotion_api_version": EMOTION_API_VERSION,
-        "emotion_schema_version": EMOTION_SCHEMA_VERSION,
-        "emotion_memory_schema_version": EMOTION_MEMORY_SCHEMA_VERSION,
-        "personality_profile_schema_version": PERSONALITY_PROFILE_SCHEMA_VERSION,
-        "psychological_screening_schema_version": PSYCHOLOGICAL_SCREENING_SCHEMA_VERSION,
-        "integrated_self_schema_version": INTEGRATED_SELF_SCHEMA_VERSION,
-        "lifelike_learning_schema_version": LIFELIKE_LEARNING_SCHEMA_VERSION,
-        "personality_drift_schema_version": PERSONALITY_DRIFT_SCHEMA_VERSION,
-    }
     if (
         plugin
-        and _has_expected_public_versions(plugin, expected_versions)
-        and all(callable(getattr(plugin, name, None)) for name in required)
+        and _has_expected_public_versions(plugin, _EMOTION_SERVICE_EXPECTED_VERSIONS)
+        and all(
+            callable(getattr(plugin, name, None))
+            for name in _EMOTION_SERVICE_REQUIRED_METHODS
+        )
     ):
         return plugin
     return None
@@ -754,18 +945,13 @@ def get_emotion_service(context: Any) -> EmotionServiceProtocol | None:
 def get_humanlike_service(context: Any) -> HumanlikeStateServiceProtocol | None:
     """Return the activated optional humanlike-state service if available."""
     plugin = get_emotion_service(context)
-    required = (
-        "get_humanlike_snapshot",
-        "get_humanlike_values",
-        "get_humanlike_prompt_fragment",
-        "observe_humanlike_text",
-        "simulate_humanlike_update",
-        "reset_humanlike_state",
-    )
     if (
         plugin
         and getattr(plugin, "humanlike_state_schema_version", None) == HUMANLIKE_STATE_SCHEMA_VERSION
-        and all(callable(getattr(plugin, name, None)) for name in required)
+        and all(
+            callable(getattr(plugin, name, None))
+            for name in _HUMANLIKE_SERVICE_REQUIRED_METHODS
+        )
     ):
         return plugin
     return None
@@ -774,18 +960,13 @@ def get_humanlike_service(context: Any) -> HumanlikeStateServiceProtocol | None:
 def get_moral_repair_service(context: Any) -> MoralRepairStateServiceProtocol | None:
     """Return the activated optional moral-repair service if available."""
     plugin = get_emotion_service(context)
-    required = (
-        "get_moral_repair_snapshot",
-        "get_moral_repair_values",
-        "get_moral_repair_prompt_fragment",
-        "observe_moral_repair_text",
-        "simulate_moral_repair_update",
-        "reset_moral_repair_state",
-    )
     if (
         plugin
         and getattr(plugin, "moral_repair_state_schema_version", None) == MORAL_REPAIR_STATE_SCHEMA_VERSION
-        and all(callable(getattr(plugin, name, None)) for name in required)
+        and all(
+            callable(getattr(plugin, name, None))
+            for name in _MORAL_REPAIR_SERVICE_REQUIRED_METHODS
+        )
     ):
         return plugin
     return None
@@ -794,18 +975,13 @@ def get_moral_repair_service(context: Any) -> MoralRepairStateServiceProtocol | 
 def get_lifelike_learning_service(context: Any) -> LifelikeLearningServiceProtocol | None:
     """Return the activated lifelike-learning service if available."""
     plugin = get_emotion_service(context)
-    required = (
-        "get_lifelike_learning_snapshot",
-        "get_lifelike_initiative_policy",
-        "get_lifelike_prompt_fragment",
-        "observe_lifelike_text",
-        "simulate_lifelike_update",
-        "reset_lifelike_learning_state",
-    )
     if (
         plugin
         and getattr(plugin, "lifelike_learning_schema_version", None) == LIFELIKE_LEARNING_SCHEMA_VERSION
-        and all(callable(getattr(plugin, name, None)) for name in required)
+        and all(
+            callable(getattr(plugin, name, None))
+            for name in _LIFELIKE_SERVICE_REQUIRED_METHODS
+        )
     ):
         return plugin
     return None
@@ -814,18 +990,28 @@ def get_lifelike_learning_service(context: Any) -> LifelikeLearningServiceProtoc
 def get_personality_drift_service(context: Any) -> PersonalityDriftServiceProtocol | None:
     """Return the activated slow personality-drift service if available."""
     plugin = get_emotion_service(context)
-    required = (
-        "get_personality_drift_snapshot",
-        "get_personality_drift_values",
-        "get_personality_drift_prompt_fragment",
-        "observe_personality_drift_event",
-        "simulate_personality_drift_update",
-        "reset_personality_drift_state",
-    )
     if (
         plugin
         and getattr(plugin, "personality_drift_schema_version", None) == PERSONALITY_DRIFT_SCHEMA_VERSION
-        and all(callable(getattr(plugin, name, None)) for name in required)
+        and all(
+            callable(getattr(plugin, name, None))
+            for name in _PERSONALITY_DRIFT_SERVICE_REQUIRED_METHODS
+        )
+    ):
+        return plugin
+    return None
+
+
+def get_fallibility_service(context: Any) -> FallibilityServiceProtocol | None:
+    """Return the activated optional low-risk fallibility service if available."""
+    plugin = get_emotion_service(context)
+    if (
+        plugin
+        and getattr(plugin, "fallibility_state_schema_version", None) == FALLIBILITY_STATE_SCHEMA_VERSION
+        and all(
+            callable(getattr(plugin, name, None))
+            for name in _FALLIBILITY_SERVICE_REQUIRED_METHODS
+        )
     ):
         return plugin
     return None

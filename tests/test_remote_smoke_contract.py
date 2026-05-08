@@ -58,7 +58,7 @@ class RemoteSmokeContractTests(unittest.TestCase):
         self.assertIn("apiHealth", readme)
         self.assertIn("uiProbeStatus", readme)
         self.assertIn("selectorCounts", readme)
-        self.assertIn("best-effort", readme)
+        self.assertIn("尽力诊断", readme)
         self.assertIn("/api/plugin/source/get-failed-plugins", readme)
         self.assertIn("退出码 `9`", readme)
         self.assertIn("退出码 `5`", readme)
@@ -72,8 +72,8 @@ class RemoteSmokeContractTests(unittest.TestCase):
         self.assertIn("findings.md", readme)
         self.assertIn("progress.md", readme)
         self.assertIn("API 健康摘要", readme)
-        self.assertIn("UI best-effort 字段", readme)
-        self.assertIn("bundled Node 文档契约", readme)
+        self.assertIn("UI 尽力诊断字段", readme)
+        self.assertIn("内置 Node 文档契约", readme)
         remote_host_sentinel = "154.36." + "178.25"
         remote_password_sentinel = "1234" + "1234"
         self.assertNotIn(remote_host_sentinel, readme)
@@ -89,9 +89,9 @@ class RemoteSmokeContractTests(unittest.TestCase):
         )[0]
         expected_fragments = (
             "命令/alias",
-            "LLM tool 注册名",
+            "LLM 工具注册名",
             "assessment_timing",
-            "typed config table",
+            "类型化配置表",
             "Protocol 方法面",
             "required tuple",
             "schema-version",
@@ -215,6 +215,7 @@ class RemoteSmokeContractTests(unittest.TestCase):
             "personality_drift_engine.py",
             "integrated_self.py",
             "moral_repair_engine.py",
+            "fallibility_engine.py",
             "psychological_screening.py",
             "prompts.py",
             "public_api.py",
@@ -255,7 +256,7 @@ class RemoteSmokeContractTests(unittest.TestCase):
             .replace(",", "%2C")
         )
 
-        self.assertIn(f"![Version {version}]", readme)
+        self.assertIn(f"![版本 {version}]", readme)
         self.assertIn(f"https://img.shields.io/badge/version-{version}-blue", readme)
         self.assertIn(f"![AstrBot {astrbot_version}]", readme)
         self.assertIn(
@@ -275,7 +276,7 @@ class RemoteSmokeContractTests(unittest.TestCase):
             1,
         )[1].split("</details>", 1)[0]
         details = section.split(
-            "<summary>展开逐轮工程迭代明细（Iteration 11-149）</summary>",
+            "<summary>展开逐轮工程迭代明细（第 11-200 次）</summary>",
             1,
         )[1].split("</details>", 1)[0]
         expected = [f"0.0.2-beta-pr-{index}" for index in range(1, 20)]
@@ -284,14 +285,14 @@ class RemoteSmokeContractTests(unittest.TestCase):
         self.assertEqual(expected, found)
         for version in expected:
             with self.subTest(version=version):
-                self.assertIn(f"| `{version}` | complete |", summary)
+                self.assertIn(f"| `{version}` | 已完成 |", summary)
         self.assertIn(
             "对外安装版本由 `metadata.yaml` 和 `main.py @register(...)` 共同声明为 `0.1.0-beta`",
             section,
         )
-        for index in range(11, 150):
+        for index in range(11, 201):
             with self.subTest(iteration=index):
-                self.assertRegex(details, rf"\| {index} \| complete \| .+ \| .+ \|")
+                self.assertRegex(details, rf"\| {index} \| 已完成 \| .+ \| .+ \|")
 
     def test_remote_smoke_script_uses_environment_credentials(self):
         script = (ROOT / "scripts" / "remote_smoke_playwright.js").read_text(
@@ -380,6 +381,7 @@ class RemoteSmokeContractTests(unittest.TestCase):
             "personality_drift_engine.py",
             "integrated_self.py",
             "moral_repair_engine.py",
+            "fallibility_engine.py",
             "psychological_screening.py",
             "prompts.py",
             "public_api.py",
@@ -509,6 +511,16 @@ class RemoteSmokeContractTests(unittest.TestCase):
         self.assertNotIn("localstorage", lowered)
         self.assertNotIn("sessionstorage", lowered)
 
+    def test_remote_lifecycle_benchmark_uses_simulated_state_time(self):
+        script = (
+            ROOT / "scripts" / "remote_emotion_benchmark_playwright.js"
+        ).read_text(encoding="utf-8")
+
+        self.assertIn("benchmark_enable_simulated_time: true", script)
+        self.assertIn("benchmark_time_offset_seconds", script)
+        self.assertIn("Math.max(0, Number(durationSeconds) || 0)", script)
+        self.assertIn("lifecycle_duration_seconds", script)
+
     def test_remote_smoke_script_is_read_only(self):
         script = (ROOT / "scripts" / "remote_smoke_playwright.js").read_text(
             encoding="utf-8",
@@ -548,6 +560,7 @@ class RemoteSmokeContractTests(unittest.TestCase):
                 "EmotionServiceProtocol",
                 "HumanlikeStateServiceProtocol",
                 "MoralRepairStateServiceProtocol",
+                "FallibilityServiceProtocol",
             }:
                 continue
             for item in node.body:
@@ -561,6 +574,7 @@ class RemoteSmokeContractTests(unittest.TestCase):
         self.assertIn("get_emotion_service", readme)
         self.assertIn("get_humanlike_service", readme)
         self.assertIn("get_moral_repair_service", readme)
+        self.assertIn("get_fallibility_service", readme)
         self.assertIn("校验核心方法是否完整", readme)
         self.assertIn("校验公开版本/schema 是否匹配", readme)
 
@@ -570,7 +584,7 @@ class RemoteSmokeContractTests(unittest.TestCase):
             "如果 LivingMemory 的接口只能写普通 dict",
             1,
         )[1].split("如果没有 `AstrMessageEvent`", 1)[0]
-        humanlike_section = readme.split("### Humanlike API", 1)[1].split(
+        humanlike_section = readme.split("### 拟人状态 API", 1)[1].split(
             "### 表达边界",
             1,
         )[0]

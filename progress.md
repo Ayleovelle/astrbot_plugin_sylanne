@@ -2378,3 +2378,228 @@ Validation:
 - `git diff --check` and `git diff --cached --check`: passed with only Git line-ending warnings.
 - Credential/server literal scan over runtime, docs, scripts, tests, and metadata paths: no matches.
 - Knowledge base directories remain local-only: ignored by `.gitignore` and not tracked.
+
+## 2026-05-08 Iteration 150-200 Latency Batch 7-12
+
+Status: complete locally. No upload, no remote smoke, no server mutation.
+
+Goal: continue the latency-only run through iteration `200`, reducing local hook/public-API overhead and keeping slow wait windows overlapped. This batch intentionally avoids save fan-out because save ordering and exception semantics are part of the plugin's state contract.
+
+Implemented:
+
+- Extended `scripts/benchmark_plugin_hot_path.py` so fallibility is bound in fast hooks, included in optional-module request benchmarks, included in slow request auxiliary fan-out, included in slow response fan-out, and included in slow LivingMemory snapshot fan-out.
+- Added `response_slow_moral_fallibility_fanout` and `memory_slow_emotion_and_snapshot_fanout` benchmark cases.
+- Trimmed `_tail_items()` allocation so sequence inputs return a tail slice directly and non-sequence inputs return a tuple.
+- Precompiled lifelike learning style and boundary regex patterns.
+- Moved public API service-discovery required-method tuples and expected-version mappings to module-level constants.
+- Changed `build_emotion_memory_payload()` so core emotion snapshot loading overlaps with optional module snapshot loading in one `asyncio.gather()` window.
+- Added public API regression coverage proving a slow emotion snapshot overlaps with five slow optional snapshots while preserving annotation output.
+- Pre-lowercased internal persona keyword and 13D personality lexicon copies; `build_persona_profile()` and `build_personality_model()` now lower persona text once per call and reuse that value during keyword scans.
+- Extended README engineering details from Iterations `11-149` to `11-200` and synchronized the README contract test without changing the historical `0.0.2-beta-pr-1` through `0.0.2-beta-pr-19` summary.
+
+Validation so far:
+
+- `py -3.13 -m unittest tests.test_public_api.MemoryPayloadPublicApiTests.test_memory_payload_fetches_optional_snapshots_concurrently tests.test_public_api.MemoryPayloadPublicApiTests.test_memory_payload_overlaps_emotion_snapshot_with_optional_snapshots tests.test_public_api.PublicApiTests.test_public_service_contract_matches_plugin_implementation -v`: 3 tests OK.
+- `py -3.13 -m unittest tests.test_astrbot_lifecycle tests.test_public_api -v`: 110 tests OK.
+- `py -3.13 -m unittest tests.test_emotion_engine tests.test_personality_drift_engine -v`: 47 tests OK.
+- `py -3.13 -m unittest tests.test_public_api.PublicApiTests -v`: 37 tests OK.
+- `py_compile` passed for touched runtime, public API, benchmark, and test modules.
+- Final local benchmark after the batch:
+  - `request_default_post_inject mean_ms=0.029 p95_ms=0.040`
+  - `request_no_request_work mean_ms=0.006 p95_ms=0.007`
+  - `request_optional_modules_enabled mean_ms=1.433 p95_ms=1.937`
+  - `request_slow_aux_load_fanout mean_ms=30.658 p95_ms=31.713`
+  - `response_post_assessment mean_ms=0.077 p95_ms=0.103`
+  - `response_slow_moral_load_fanout mean_ms=31.079 p95_ms=31.626`
+  - `response_slow_moral_fallibility_fanout mean_ms=31.070 p95_ms=31.880`
+  - `response_slow_assessor_timeout_guard mean_ms=109.122 p95_ms=110.994`
+  - `memory_slow_snapshot_fanout mean_ms=31.074 p95_ms=32.023`
+  - `memory_slow_emotion_and_snapshot_fanout mean_ms=31.089 p95_ms=31.859`
+
+Next latency direction:
+
+- Run full local validation and package preflight for this local-only checkpoint.
+- Keep reducing real reply latency by measuring actual provider/assessor wait and KV wait separately; do not parallelize saves unless explicit tests cover save ordering and exception behavior.
+
+## 2026-05-08 Remote gpt-5.5 Benchmark Calibration
+
+Status: calibration complete; full long-run pending in resumable batches.
+
+Implemented/verified:
+
+- Added `scripts/remote_emotion_benchmark_playwright.js` as a resumable low-concurrency remote benchmark runner.
+- Default remains dry-run; real calls require `ASTRBOT_BENCHMARK_DRY_RUN=0` and `ASTRBOT_BENCHMARK_CONFIRM=RUN_REMOTE_EMOTION_BENCHMARK`.
+- Runner uses ChatUI SSE endpoint `/api/chat/send`, creates a fresh session per sample, deletes the session after the sample, and records cleanup separately.
+- Runner parses SSE `agent_stats`, including AstrBot token fields `token_usage.input_other`, `token_usage.input_cached`, and `token_usage.output`.
+- Runner records endpoint latency, TTFT, agent internal duration/TTFT, token totals, config hash, input hash, session id, provider/model id, and event preview.
+- Runner supports `ASTRBOT_BENCHMARK_MAX_SAMPLES` for small resumable batches and aggregates prior `samples.jsonl` entries with the same `run_hash`.
+- Runner skips duplicate completed sample keys for the same `run_hash`, enabling continuation with the same `ASTRBOT_BENCHMARK_RUN_ID`.
+- Runner restores the original plugin config at the end by default.
+
+Remote setup:
+
+- Port `1145` timed out; port `15356` is reachable.
+- Removed the old same-name plugin with `delete_config=false` and `delete_data=false`; LivingMemory remained present before/after cleanup.
+- Uploaded current package `dist\astrbot_plugin_emotional_state.zip`.
+- Strict smoke passed against AstrBot `4.24.2`.
+- Remote runtime target plugin:
+  - `astrbot_plugin_emotional_state`
+  - version `0.1.0-beta`
+  - display name `多维情绪状态`
+  - activated `true`
+- Remote LivingMemory observed:
+  - `astrbot_plugin_livingmemory` version `2.2.10`
+  - `astrbot_plugin_lmem_control` version `0.0.1`
+
+Validation:
+
+- `scripts\plugin_zip_preflight.js dist\astrbot_plugin_emotional_state.zip astrbot_plugin_emotional_state`: `ok=true`, size `205987`, entries `24`.
+- `scripts\remote_cleanup_plugin_playwright.js`: success, LivingMemory untouched.
+- `scripts\remote_install_upload_playwright.js`: success, target plugin installed.
+- `scripts\remote_smoke_playwright.js`: success, strict version/display-name checks passed.
+- `scripts\remote_emotion_benchmark_playwright.js` dry-run: success, selected provider `1111/gpt-5.5`, model `gpt-5.5`.
+- Real 1-sample baseline probe:
+  - elapsed `18246 ms`
+  - TTFT `17650.4 ms`
+  - agent internal duration `2078.86 ms`
+  - agent internal TTFT `1931.00 ms`
+  - tokens `2658`
+  - token source `agent_stats`
+- Real 1-sample resumable/max-samples probe:
+  - elapsed `18049.4 ms`
+  - TTFT `17138.7 ms`
+  - tokens `2646`
+  - token source `agent_stats`
+  - `completed_items=1`, `work_items=2`, proving small-batch continuation works.
+
+Important limitation:
+
+- Current remote gpt-5.5 baseline is already around 18 seconds end-to-end for a short reply, so the requested full matrix is a long-running benchmark. At 18 seconds per sample, 3400 samples is roughly 17 hours before overhead. Full testing should be resumed in small batches with `ASTRBOT_BENCHMARK_RUN_ID` fixed.
+
+LivingMemory compatibility conclusion:
+
+- Remote black-box validation proves plugin coexistence and that cleanup/upload did not remove LivingMemory.
+- Field-level LivingMemory compatibility is proven locally by public API tests around `build_emotion_memory_payload(...)`; remote has no confirmed LivingMemory data-read interface, so remote field persistence is not claimed.
+
+## 2026-05-08 Remote Benchmark Resume After Server Restart
+
+Status: resumed; 2-thread calibration passed; long feature matrix is running in resumable batches.
+
+What changed in the runner:
+
+- `scripts/remote_emotion_benchmark_playwright.js` now allows `ASTRBOT_BENCHMARK_CONCURRENCY=2`, still capped by `MAX_CONCURRENCY=2`.
+- True two-page execution is implemented with a shared Playwright browser context so both worker pages inherit the same authenticated session.
+- Config writes are guarded by a small mutex, and the work queue is chunked by identical config patch so parallel samples do not race different feature settings.
+- Summary aggregation now deduplicates by `sample_key` and keeps the latest non-skipped record. This prevents old failed attempts from polluting later successful retries.
+- Resume completion now treats only the latest non-skipped `ok` sample as complete. Old failures are retried instead of being hidden by later skipped entries.
+- Provider token fallback is automatically disabled when concurrency is greater than 1 because provider-level token deltas are ambiguous under concurrent calls; `agent_stats` remains the primary token source.
+
+Remote state:
+
+- Test server health probe responded with HTTP 200 after restart.
+- 2-thread first probe exposed second worker `401 未授权`; fixed by using a shared browser context instead of separate browser contexts.
+- 2-thread retry cleared the auth issue.
+- Cleanup batch with `ASTRBOT_BENCHMARK_MAX_SAMPLES=6` completed successfully and replaced all stale failed baseline samples.
+
+Current official run:
+
+- Run id: `remote-emotion-v010-gpt55-feature-lifecycle`
+- Mode: `features`
+- Concurrency: `2`
+- Model/provider: selected provider `1111/gpt-5.5`, model `gpt-5.5`
+- Current summary after cleanup:
+  - `ok=true`
+  - `completed_items=111`
+  - `baseline_minimal ok_count=111`
+  - `baseline_minimal error_count=0`
+  - latency mean `16034.30 ms`, p50 `15400.30 ms`, p95 `20856.40 ms`
+  - TTFT mean `14310.03 ms`, p50 `13686.60 ms`, p95 `19893.70 ms`
+  - token mean `2734.50`, token source `agent_stats`
+
+Next command shape:
+
+- Continue `features` with the same run id, `ASTRBOT_BENCHMARK_CONCURRENCY=2`, and small batch sizes such as `ASTRBOT_BENCHMARK_MAX_SAMPLES=50`.
+- After `baseline_minimal` reaches 250 counted samples, the same work queue will move to the next feature case automatically.
+- Run lifecycle in a separate run id such as `remote-emotion-v010-gpt55-lifecycle` after feature matrix completion.
+
+## 2026-05-08 Remote Testing Documentation Added to README
+
+Status: documented and locally validated.
+
+What changed:
+
+- Added `docs/remote_testing.md` as the dedicated remote testing and benchmark document.
+- Added a README navigation entry for `docs/remote_testing.md`.
+- Added a README remote testing summary under the testing and maintenance section.
+- Documented the current official gpt-5.5 feature benchmark state:
+  - run id `remote-emotion-v010-gpt55-feature-lifecycle`
+  - requested model `gpt5.5`
+  - selected provider `1111/gpt-5.5`
+  - selected model name `gpt-5.5`
+  - concurrency `2`
+  - `900/2520` feature work items completed
+  - summary `ok=true`
+- Documented the current phase aggregates for `baseline_minimal`, `emotion_injection`, `low_reasoning`, and partial `humanlike`.
+- Documented that LivingMemory remote compatibility is currently a coexistence and non-deletion check, while field-level `emotion_at_write` compatibility remains proven by local public API tests.
+- Updated package tests so the release zip must include `docs/remote_testing.md`.
+- Added `scripts/run_remote_emotion_benchmark_batches.js` to run resumable low-concurrency benchmark batches without storing credentials in files.
+
+Validation:
+
+- `py -3.13 -m unittest tests.test_package_plugin -v`: 17 tests OK.
+- `py -3.13 -m unittest tests.test_document_math_contract -v`: 5 tests OK.
+- `node --check scripts\remote_emotion_benchmark_playwright.js`: passed.
+- `node --check scripts\run_remote_emotion_benchmark_batches.js`: passed.
+- `py -3.13 -m py_compile scripts\package_plugin.py`: passed.
+- `py -3.13 scripts\package_plugin.py --output dist\astrbot_plugin_emotional_state.zip`: success.
+- `node scripts\plugin_zip_preflight.js dist\astrbot_plugin_emotional_state.zip astrbot_plugin_emotional_state`: `ok=true`, size `205987`, entries `24`.
+
+Next command shape:
+
+- Continue feature benchmark batches only when the server is ready:
+  - keep `ASTRBOT_BENCHMARK_RUN_ID=remote-emotion-v010-gpt55-feature-lifecycle`
+  - keep `ASTRBOT_BENCHMARK_CONCURRENCY=2`
+  - use small `ASTRBOT_BENCHMARK_MAX_SAMPLES` values to avoid overheating
+- Start lifecycle benchmark later with a separate run id such as `remote-emotion-v010-gpt55-lifecycle`.
+
+## 2026-05-09 Simulated-Time Lifecycle Benchmark Support
+
+Status: implemented locally and verified with a 9-sample remote lifecycle simtime run.
+
+Reason:
+
+- The earlier lifecycle benchmark only placed elapsed-time text in the user prompt.
+- That measured how the model reacted to a written marker, but did not force internal emotion/personality/lifelike/moral/fallibility state updates to advance by the requested real-time duration.
+- The desired lifecycle test should be fast, but the state equations must still see a real seconds delta such as `86400` for 1 day or `31536000` for 1 year.
+
+Implemented:
+
+- Added `benchmark_enable_simulated_time` and `benchmark_time_offset_seconds` config keys.
+- Production default remains `benchmark_enable_simulated_time=false`, so normal conversations still use real `time.time()`.
+- When the benchmark flag is enabled, lifecycle hooks use `time.time()+benchmark_time_offset_seconds` as the observation time.
+- `on_llm_request` and `on_llm_response` now pass this observed time into emotion, humanlike, lifelike learning, moral repair, fallibility, and personality drift updates.
+- Passive state loads also accept the observed time, so decay/recovery is computed against the simulated timestamp before the new observation is applied.
+- `scripts/remote_emotion_benchmark_playwright.js` now injects the lifecycle duration into config as `benchmark_time_offset_seconds`, not only into prompt text.
+- Added tests proving simulated time advances saved lifecycle state timestamps and that the remote lifecycle benchmark uses state-level simulated time.
+- Documented the lifecycle change in `README.md` and `docs/remote_testing.md`.
+- Extended public observe/simulate APIs so explicit `observed_at` reaches state loads and engine updates consistently.
+- Fixed a transient `get_emotion_values()` regression where a plain query path tried to pass an undefined `observed_at`.
+- Locked benchmark simulated-time defaults in the config schema contract test.
+
+Validation:
+
+- `py -3.13 -m unittest tests.test_astrbot_lifecycle -v`: 23 tests OK.
+- `py -3.13 -m unittest tests.test_remote_smoke_contract -v`: 19 tests OK.
+- `py -3.13 -m py_compile main.py`: passed.
+- `node --check scripts\remote_emotion_benchmark_playwright.js` with Codex bundled Node: passed.
+- `py -3.13 -m unittest tests.test_public_api tests.test_astrbot_lifecycle -v`: 114 tests OK.
+- `py -3.13 -m unittest tests.test_remote_smoke_contract tests.test_config_schema_contract tests.test_package_plugin tests.test_document_math_contract -v`: 52 tests OK.
+- `py -3.13 -m py_compile main.py scripts\package_plugin.py`: passed.
+- Remote lifecycle simtime run `remote-emotion-v010-gpt55-lifecycle-simtime`: 9/9 samples OK, requested model `gpt5.5`, selected provider/model `1111/gpt-5.5` / `gpt-5.5`, concurrency 2, mean latency 9694.74 ms, p95 latency 11330.00 ms, mean TTFT 7822.18 ms, mean tokens 3756.56.
+
+Next command shape:
+
+- Rebuild package and upload before continuing feature/lifecycle benchmark batches.
+- Use `remote-emotion-v010-gpt55-lifecycle-simtime` for continued lifecycle simtime batches.
+- Keep `ASTRBOT_BENCHMARK_MODE=lifecycle`, `ASTRBOT_BENCHMARK_CONCURRENCY=2`, and small batch sizes.
+- If a lifecycle run is interrupted, confirm `benchmark_enable_simulated_time=false` and `benchmark_time_offset_seconds=0.0` before returning the server to ordinary use.

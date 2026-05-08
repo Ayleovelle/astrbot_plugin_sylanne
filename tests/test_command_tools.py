@@ -72,6 +72,7 @@ def install_astrbot_stubs():
 
 def new_plugin(config=None):
     from emotion_engine import EmotionEngine, EmotionParameters
+    from fallibility_engine import FallibilityEngine
     from humanlike_engine import HumanlikeEngine
     from lifelike_learning_engine import LifelikeLearningEngine
     from main import EmotionalStatePlugin
@@ -88,12 +89,14 @@ def new_plugin(config=None):
     plugin.lifelike_learning_engine = LifelikeLearningEngine()
     plugin.personality_drift_engine = PersonalityDriftEngine()
     plugin.moral_repair_engine = MoralRepairEngine()
+    plugin.fallibility_engine = FallibilityEngine()
     plugin._memory_cache = {}
     plugin._psychological_memory_cache = {}
     plugin._humanlike_memory_cache = {}
     plugin._lifelike_learning_memory_cache = {}
     plugin._personality_drift_memory_cache = {}
     plugin._moral_repair_memory_cache = {}
+    plugin._fallibility_memory_cache = {}
     plugin._last_request_text = {}
     plugin.context = SimpleNamespace()
     return plugin
@@ -190,6 +193,7 @@ class CommandAndToolSmokeTests(unittest.TestCase):
                 "get_bot_lifelike_learning_state",
                 "get_bot_personality_drift_state",
                 "get_bot_moral_repair_state",
+                "get_bot_fallibility_state",
                 "get_bot_integrated_self_state",
             },
         )
@@ -295,6 +299,45 @@ class CommandAndToolSmokeTests(unittest.TestCase):
         self.assertEqual(len(outputs), 1)
         self.assertIn("\u5173\u95ed", outputs[0])
 
+    def test_fallibility_reset_command_uses_independent_backdoor(self):
+        allowed = new_plugin(
+            {
+                "allow_emotion_reset_backdoor": False,
+                "allow_fallibility_reset_backdoor": True,
+            },
+        )
+        deleted = []
+
+        async def fake_delete_fallibility_state(self, session_key):
+            deleted.append(session_key)
+
+        bind_async(allowed, "_delete_fallibility_state", fake_delete_fallibility_state)
+
+        outputs = asyncio.run(
+            collect_async_generator(allowed.fallibility_reset(FakeEvent("s-fallibility"))),
+        )
+
+        self.assertEqual(deleted, ["s-fallibility"])
+        self.assertEqual(len(outputs), 1)
+        self.assertIn("\u5df2\u91cd\u7f6e", outputs[0])
+
+    def test_fallibility_reset_command_denies_when_backdoor_disabled(self):
+        denied = new_plugin({"allow_fallibility_reset_backdoor": False})
+        deleted = []
+
+        async def fake_delete_fallibility_state(self, session_key):
+            deleted.append(session_key)
+
+        bind_async(denied, "_delete_fallibility_state", fake_delete_fallibility_state)
+
+        outputs = asyncio.run(
+            collect_async_generator(denied.fallibility_reset(FakeEvent("s-fallibility"))),
+        )
+
+        self.assertEqual(deleted, [])
+        self.assertEqual(len(outputs), 1)
+        self.assertIn("\u5173\u95ed", outputs[0])
+
     def test_disabled_psych_state_command_does_not_load_state(self):
         plugin = new_plugin()
 
@@ -341,6 +384,115 @@ class CommandAndToolSmokeTests(unittest.TestCase):
 
         self.assertEqual(len(outputs), 1)
         self.assertIn("\u672a\u542f\u7528", outputs[0])
+
+    def test_disabled_fallibility_state_command_does_not_load_state(self):
+        plugin = new_plugin()
+
+        async def fake_load_fallibility_state(self, session_key):
+            raise AssertionError("disabled fallibility command must not load state")
+
+        bind_async(plugin, "_load_fallibility_state", fake_load_fallibility_state)
+
+        outputs = asyncio.run(
+            collect_async_generator(plugin.fallibility_status(FakeEvent())),
+        )
+
+        self.assertEqual(len(outputs), 1)
+        self.assertIn("\u672a\u542f\u7528", outputs[0])
+
+    def test_shadow_diagnostics_command_default_disabled_payload_is_json(self):
+        plugin = new_plugin()
+
+        async def fake_moral_repair_snapshot(self, *args, **kwargs):
+            raise AssertionError("disabled shadow diagnostics must not load moral state")
+
+        async def fake_fallibility_snapshot(self, *args, **kwargs):
+            raise AssertionError("disabled shadow diagnostics must not load fallibility state")
+
+        bind_async(plugin, "get_moral_repair_snapshot", fake_moral_repair_snapshot)
+        bind_async(plugin, "get_fallibility_snapshot", fake_fallibility_snapshot)
+
+        payload = json.loads(
+            asyncio.run(
+                collect_async_generator(plugin.shadow_diagnostics_status(FakeEvent())),
+            )[0],
+        )
+
+        self.assertFalse(payload["enabled"])
+        self.assertEqual(payload["kind"], "shadow_diagnostics")
+        self.assertEqual(payload["reason"], "enable_shadow_diagnostics is false")
+        self.assertFalse(payload["executable_strategy_enabled"])
+
+    def test_shadow_diagnostics_command_enabled_returns_non_executable_json(self):
+        plugin = new_plugin({"enable_shadow_diagnostics": True})
+
+        async def fake_moral_repair_snapshot(self, *args, **kwargs):
+            return {
+                "values": {
+                    "shadow_deception_impulse": 0.2,
+                    "shadow_manipulation_impulse": 0.1,
+                    "shadow_evasion_impulse": 0.3,
+                    "guilt": 0.6,
+                    "repair_motivation": 0.7,
+                    "compensation_readiness": 0.5,
+                    "trust_repair": 0.4,
+                },
+                "risk": {
+                    "shadow_impulses": {
+                        "deception": 0.2,
+                        "manipulation": 0.1,
+                        "evasion": 0.3,
+                    },
+                },
+            }
+
+        async def fake_fallibility_snapshot(self, *args, **kwargs):
+            return {
+                "values": {
+                    "shadow_deception_impulse": 0.15,
+                    "shadow_manipulation_impulse": 0.05,
+                    "shadow_evasion_impulse": 0.25,
+                    "clarification_need": 0.4,
+                    "correction_readiness": 0.8,
+                    "repair_pressure": 0.7,
+                    "truthfulness_guard": 0.9,
+                },
+                "fallibility": {
+                    "non_executable_impulses": {
+                        "deception": 0.15,
+                        "manipulation": 0.05,
+                        "evasion": 0.25,
+                    },
+                },
+            }
+
+        async def fake_integrated_snapshot(self, *args, **kwargs):
+            return {
+                "response_posture": "repair_first",
+                "state_index": {"repair_pressure": 0.7},
+                "risk": {"shadow_risk_impulse": 0.3},
+                "policy_plan": {"must_preserve_signals": ["truthfulness_guard"]},
+                "non_executable_impulses": {"shadow_risk_impulse": 0.3},
+            }
+
+        bind_async(plugin, "get_moral_repair_snapshot", fake_moral_repair_snapshot)
+        bind_async(plugin, "get_fallibility_snapshot", fake_fallibility_snapshot)
+        bind_async(plugin, "get_integrated_self_snapshot", fake_integrated_snapshot)
+
+        payload = json.loads(
+            asyncio.run(
+                collect_async_generator(plugin.shadow_diagnostics_status(FakeEvent())),
+            )[0],
+        )
+
+        self.assertTrue(payload["enabled"])
+        self.assertTrue(payload["diagnostic"])
+        self.assertFalse(payload["executable_strategy_enabled"])
+        self.assertEqual(payload["kind"], "shadow_diagnostics")
+        self.assertEqual(payload["consequences"]["response_posture"], "repair_first")
+        self.assertIn("generate_deception_strategy", payload["not_allowed"])
+        self.assertIn("execute_shadow_impulses", payload["not_allowed"])
+        self.assertNotIn("generate_deception_strategy", payload["allowed_uses"])
 
     def test_disabled_lifelike_state_command_does_not_load_state(self):
         plugin = new_plugin()
@@ -541,6 +693,24 @@ class CommandAndToolSmokeTests(unittest.TestCase):
         self.assertEqual(payload["reason"], "enable_moral_repair_state is false")
         self.assertEqual(payload["exposure"], "plugin_safe")
 
+    def test_get_bot_fallibility_state_tool_default_disabled_payload_is_json(self):
+        plugin = new_plugin()
+
+        payload = json.loads(
+            asyncio.run(
+                collect_async_generator(
+                    plugin.get_bot_fallibility_state_tool(
+                        FakeEvent(),
+                        detail="summary",
+                    ),
+                ),
+            )[0],
+        )
+
+        self.assertFalse(payload["enabled"])
+        self.assertEqual(payload["reason"], "enable_fallibility_state is false")
+        self.assertEqual(payload["exposure"], "plugin_safe")
+
     def test_get_bot_personality_drift_state_tool_default_disabled_payload_is_json(self):
         plugin = new_plugin()
 
@@ -564,7 +734,7 @@ class CommandAndToolSmokeTests(unittest.TestCase):
 
         plugin = new_plugin({"use_llm_assessor": False})
 
-        async def fake_load_state(self, session_key, persona_profile=None):
+        async def fake_load_state(self, session_key, persona_profile=None, **kwargs):
             state = EmotionState.initial(persona_profile)
             state.updated_at = 1000.0
             return state

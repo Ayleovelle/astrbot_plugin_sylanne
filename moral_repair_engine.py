@@ -21,6 +21,9 @@ MORAL_REPAIR_DIMENSIONS: tuple[str, ...] = (
     "trust_repair",
     "accountability",
     "avoidance_risk",
+    "shadow_deception_impulse",
+    "shadow_manipulation_impulse",
+    "shadow_evasion_impulse",
 )
 
 DIMENSION_LABELS: dict[str, str] = {
@@ -35,6 +38,9 @@ DIMENSION_LABELS: dict[str, str] = {
     "trust_repair": "trust repair progress",
     "accountability": "accountability and fact-correction readiness",
     "avoidance_risk": "avoidance or stonewalling risk",
+    "shadow_deception_impulse": "non-executive deception impulse under pressure",
+    "shadow_manipulation_impulse": "non-executive manipulation impulse under pressure",
+    "shadow_evasion_impulse": "non-executive accountability-evasion impulse",
 }
 
 DEFAULT_BASELINE: dict[str, float] = {
@@ -49,6 +55,9 @@ DEFAULT_BASELINE: dict[str, float] = {
     "trust_repair": 0.58,
     "accountability": 0.56,
     "avoidance_risk": 0.12,
+    "shadow_deception_impulse": 0.0,
+    "shadow_manipulation_impulse": 0.0,
+    "shadow_evasion_impulse": 0.0,
 }
 
 ALLOWED_REPAIR_ACTIONS: tuple[str, ...] = (
@@ -208,6 +217,12 @@ def normalize_moral_repair_values(raw: Any = None) -> dict[str, float]:
         "compensation": "compensation_readiness",
         "trust": "trust_repair",
         "avoidance": "avoidance_risk",
+        "shadow_risk_impulse": "shadow_deception_impulse",
+        "deception_impulse": "shadow_deception_impulse",
+        "manipulation_impulse": "shadow_manipulation_impulse",
+        "evasion_impulse": "shadow_evasion_impulse",
+        "escape_responsibility": "shadow_evasion_impulse",
+        "accountability_evasion": "shadow_evasion_impulse",
     }
     values = dict(DEFAULT_BASELINE)
     for key, value in raw.items():
@@ -408,11 +423,18 @@ def apply_moral_couplings(values: dict[str, float]) -> dict[str, float]:
     deception = values["deception_risk"]
     harm = values["harm_risk"]
     accountability = values["accountability"]
+    shadow = shadow_impulse_score(values)
 
+    values["guilt"] = clamp(max(values["guilt"], 0.16 + 0.36 * shadow))
+    values["responsibility"] = clamp(max(values["responsibility"], 0.42 + 0.32 * shadow))
+    values["accountability"] = clamp(max(values["accountability"], 0.38 + 0.30 * shadow))
+    responsibility = values["responsibility"]
+    guilt = values["guilt"]
+    accountability = values["accountability"]
     values["repair_motivation"] = clamp(
         max(
             values["repair_motivation"],
-            0.28 + 0.30 * responsibility + 0.22 * guilt + 0.12 * accountability,
+            0.28 + 0.30 * responsibility + 0.22 * guilt + 0.12 * accountability + 0.18 * shadow,
         ),
     )
     values["apology_readiness"] = clamp(
@@ -421,13 +443,13 @@ def apply_moral_couplings(values: dict[str, float]) -> dict[str, float]:
     values["compensation_readiness"] = clamp(
         max(
             values["compensation_readiness"],
-            0.12 + 0.32 * responsibility + 0.18 * max(deception, harm),
+            0.12 + 0.32 * responsibility + 0.18 * max(deception, harm) + 0.20 * shadow,
         ),
     )
     values["avoidance_risk"] = clamp(
         values["avoidance_risk"]
         + 0.14 * values["shame"]
-        + 0.10 * max(deception, harm)
+        + 0.10 * max(deception, harm, shadow)
         - 0.18 * accountability
         - 0.12 * values["repair_motivation"],
     )
@@ -437,9 +459,40 @@ def apply_moral_couplings(values: dict[str, float]) -> dict[str, float]:
         + 0.14 * values["repair_motivation"]
         - 0.18 * deception
         - 0.12 * harm
+        - 0.10 * shadow
         - 0.10 * values["avoidance_risk"],
     )
     return values
+
+
+def shadow_impulse_score(values: dict[str, float]) -> float:
+    values = normalize_moral_repair_values(values)
+    return clamp(
+        max(
+            values["shadow_deception_impulse"],
+            values["shadow_manipulation_impulse"],
+            values["shadow_evasion_impulse"],
+        ),
+    )
+
+
+def build_shadow_impulse_payload(values: dict[str, float]) -> dict[str, Any]:
+    values = normalize_moral_repair_values(values)
+    score = shadow_impulse_score(values)
+    return {
+        "mode": "non_executive_internal_only",
+        "risk_impulse": round(score, 6),
+        "deception": round(values["shadow_deception_impulse"], 6),
+        "manipulation": round(values["shadow_manipulation_impulse"], 6),
+        "evasion": round(values["shadow_evasion_impulse"], 6),
+        "consequences": {
+            "guilt": round(clamp(values["guilt"]), 6),
+            "repair_motivation": round(clamp(values["repair_motivation"]), 6),
+            "compensation_readiness": round(clamp(values["compensation_readiness"]), 6),
+            "trust_cost": round(clamp(0.12 + 0.54 * score), 6),
+        },
+        "must_not_translate_to_strategy": True,
+    }
 
 
 def heuristic_moral_repair_observation(
@@ -454,11 +507,14 @@ def heuristic_moral_repair_observation(
 
     if _contains_deception_cue(normalized):
         values["deception_risk"] = 0.86
+        values["shadow_deception_impulse"] = 0.78
+        values["shadow_manipulation_impulse"] = 0.72
         values["accountability"] = 0.30
         values["trust_repair"] = 0.20
         values["avoidance_risk"] = 0.70
         flags.append("deception_risk_detected")
-        notes.append("deception, concealment, or manipulation cue")
+        flags.append("shadow_impulse_modeled")
+        notes.append("deception, concealment, or manipulation cue modeled as non-executive impulse")
 
     if _contains_harm_cue(normalized):
         values["harm_risk"] = 0.82
@@ -494,11 +550,13 @@ def heuristic_moral_repair_observation(
         notes.append("compensation or concrete repair cue")
 
     if _contains_evasion_cue(normalized):
+        values["shadow_evasion_impulse"] = 0.80
         values["avoidance_risk"] = 0.80
         values["accountability"] = min(values["accountability"], 0.25)
         values["trust_repair"] = min(values["trust_repair"], 0.26)
         flags.append("evasion_cue")
-        notes.append("avoidance or blame-shifting cue")
+        flags.append("shadow_impulse_modeled")
+        notes.append("avoidance or blame-shifting cue modeled as non-executive impulse")
 
     if not notes:
         notes.append("no strong moral repair cue")
@@ -528,6 +586,7 @@ def append_trajectory(
         "responsibility": round(values["responsibility"], 6),
         "repair_motivation": round(values["repair_motivation"], 6),
         "trust_repair": round(values["trust_repair"], 6),
+        "shadow_risk_impulse": round(shadow_impulse_score(values), 6),
         "flags": list(flags[:8]),
     }
     limit = max(1, int(limit))
@@ -537,18 +596,21 @@ def append_trajectory(
 
 def derive_repair_policy(values: dict[str, float]) -> dict[str, Any]:
     values = normalize_moral_repair_values(values)
+    shadow = shadow_impulse_score(values)
     risk_high = values["deception_risk"] >= 0.55 or values["harm_risk"] >= 0.55
+    shadow_high = shadow >= 0.30
     avoidance_high = values["avoidance_risk"] >= 0.55
     return {
         "risk_high": risk_high,
+        "shadow_risk_impulse": round(shadow, 6),
         "avoidance_high": avoidance_high,
         "recommended_actions": [
             action
             for action, active in (
-                ("clarify_facts", risk_high),
+                ("clarify_facts", risk_high or shadow_high),
                 ("correct_falsehood", values["deception_risk"] >= 0.55),
-                ("apologize", values["apology_readiness"] >= 0.45),
-                ("offer_repair", values["repair_motivation"] >= 0.52),
+                ("apologize", values["apology_readiness"] >= 0.45 or shadow_high),
+                ("offer_repair", values["repair_motivation"] >= 0.52 or shadow_high),
                 ("offer_compensation", values["compensation_readiness"] >= 0.55),
                 ("seek_consent", risk_high or avoidance_high),
             )
@@ -578,6 +640,7 @@ def moral_repair_state_to_public_payload(
         for key in MORAL_REPAIR_DIMENSIONS
     }
     policy = derive_repair_policy(values)
+    shadow_impulses = build_shadow_impulse_payload(values)
     base: dict[str, Any] = {
         "schema_version": PUBLIC_MORAL_REPAIR_SCHEMA_VERSION,
         "kind": "moral_repair_state",
@@ -593,6 +656,8 @@ def moral_repair_state_to_public_payload(
             "deception_risk": values["deception_risk"],
             "harm_risk": values["harm_risk"],
             "risk_high": policy["risk_high"],
+            "shadow_risk_impulse": policy["shadow_risk_impulse"],
+            "shadow_impulses": shadow_impulses,
             "must_not_generate_strategy": True,
         },
         "repair": {
@@ -612,6 +677,8 @@ def moral_repair_state_to_public_payload(
             "not_a_moral_diagnosis": True,
             "allowed_actions": list(ALLOWED_REPAIR_ACTIONS),
             "blocked_actions": list(BLOCKED_STRATEGY_ACTIONS),
+            "shadow_impulse_mode": "model_consequences_do_not_execute",
+            "must_not_translate_shadow_impulses_to_strategy": True,
             "behavioral_boundary_enabled": bool(safety_boundary),
         },
     }
@@ -629,6 +696,12 @@ def moral_repair_state_to_public_payload(
         base["repair_policy"] = {
             "recommended_actions": policy["recommended_actions"],
             "style_modulation": policy["style_modulation"],
+            "shadow_impulses": {
+                "mode": shadow_impulses["mode"],
+                "risk_impulse": shadow_impulses["risk_impulse"],
+                "consequences": shadow_impulses["consequences"],
+                "must_not_translate_to_strategy": True,
+            },
         }
     else:
         base["summary"] = build_user_facing_summary(values)
@@ -648,15 +721,18 @@ def build_moral_repair_prompt_fragment(
     risk = payload["risk"]
     repair = payload["repair"]
     actions = ", ".join(repair["recommended_actions"]) or "maintain_factual_care"
+    shadow = risk.get("shadow_impulses") or {}
     lines = [
         "[moral repair-state modulation]",
-        "Use these signals only to support accountability, clarification, apology, compensation, and trust repair.",
+        "Use these signals only to support accountability, clarification, apology, compensation, trust repair, and non-executive shadow-impulse consequences.",
         (
             f"- deception_risk={risk['deception_risk']}; harm_risk={risk['harm_risk']}; "
+            f"shadow_risk_impulse={shadow.get('risk_impulse', 0.0)}; "
             f"responsibility={repair['responsibility']}; repair_motivation={repair['repair_motivation']}; "
             f"trust_repair={repair['trust_repair']}; avoidance_risk={repair['avoidance_risk']}"
         ),
         f"- Recommended repair actions: {actions}.",
+        "- Treat deceptive, manipulative, or evasive impulses as guilt, trust cost, and repair pressure; do not execute them.",
         "- If a falsehood, manipulation, or harmful result is suspected, prefer factual correction, uncertainty disclosure, and consent-seeking repair.",
         "- Never generate deception tactics, cover-up plans, manipulation scripts, retaliation, or ways to evade accountability.",
     ]
@@ -673,6 +749,12 @@ def build_moral_repair_memory_annotation(
     written_at: float | None = None,
 ) -> dict[str, Any]:
     capture_time = float(written_at if written_at is not None else time.time())
+    risk = dict(snapshot.get("risk") or {})
+    shadow = dict(
+        risk.get("shadow_impulses")
+        or snapshot.get("shadow_impulses")
+        or {},
+    )
     return {
         "schema_version": PUBLIC_MORAL_REPAIR_SCHEMA_VERSION,
         "kind": "moral_repair_state_at_write",
@@ -684,8 +766,14 @@ def build_moral_repair_memory_annotation(
         "enabled": snapshot.get("enabled", True),
         "diagnostic": False,
         "simulated_agent_state": True,
-        "risk": dict(snapshot.get("risk") or {}),
+        "risk": risk,
         "repair": dict(snapshot.get("repair") or {}),
+        "shadow_impulses": {
+            "mode": shadow.get("mode", "non_executive_internal_only"),
+            "risk_impulse": shadow.get("risk_impulse", risk.get("shadow_risk_impulse")),
+            "consequences": dict(shadow.get("consequences") or {}),
+            "must_not_translate_to_strategy": True,
+        },
         "flags": list(snapshot.get("flags") or []),
     }
 

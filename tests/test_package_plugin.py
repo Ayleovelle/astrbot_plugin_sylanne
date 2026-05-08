@@ -49,9 +49,11 @@ class PackagePluginTests(unittest.TestCase):
         self.assertIn("lifelike_learning_engine.py", files)
         self.assertIn("personality_drift_engine.py", files)
         self.assertIn("moral_repair_engine.py", files)
+        self.assertIn("fallibility_engine.py", files)
         self.assertIn("LICENSE", files)
         self.assertIn("README.md", files)
         self.assertIn("docs/theory.md", files)
+        self.assertIn("docs/remote_testing.md", files)
         self.assertNotIn("docs/literature_kb.md", files)
         self.assertNotIn("docs/humanlike_agent_literature_kb.md", files)
         self.assertNotIn("scripts/package_plugin.py", files)
@@ -106,6 +108,7 @@ class PackagePluginTests(unittest.TestCase):
             "personality_drift_engine.py",
             "integrated_self.py",
             "moral_repair_engine.py",
+            "fallibility_engine.py",
             "psychological_screening.py",
             "prompts.py",
             "public_api.py",
@@ -117,6 +120,7 @@ class PackagePluginTests(unittest.TestCase):
         self.assertIn(prefix + "_conf_schema.json", names)
         self.assertIn(prefix + "README.md", names)
         self.assertIn(prefix + "LICENSE", names)
+        self.assertIn(prefix + "docs/remote_testing.md", names)
         self.assertNotIn(prefix + "docs/literature_kb.md", names)
         self.assertNotIn(prefix + "docs/humanlike_agent_literature_kb.md", names)
         self.assertFalse(any(name.startswith(prefix + "literature_kb/") for name in names))
@@ -223,6 +227,7 @@ class PluginZipPreflightTests(unittest.TestCase):
             (prefix + "personality_drift_engine.py", "# runtime\n"),
             (prefix + "integrated_self.py", "# runtime\n"),
             (prefix + "moral_repair_engine.py", "# runtime\n"),
+            (prefix + "fallibility_engine.py", "# runtime\n"),
             (prefix + "psychological_screening.py", "# runtime\n"),
             (prefix + "prompts.py", "# runtime\n"),
             (prefix + "public_api.py", "# public API\n"),
@@ -280,6 +285,7 @@ class PluginZipPreflightTests(unittest.TestCase):
             "personality_drift_engine.py",
             "LICENSE",
             "moral_repair_engine.py",
+            "fallibility_engine.py",
             "public_api.py",
             "requirements.txt",
         )

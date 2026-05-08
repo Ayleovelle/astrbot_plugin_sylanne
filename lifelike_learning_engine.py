@@ -46,6 +46,15 @@ KNOWN_GENERIC_TERMS = {
     "livingmemory",
 }
 
+_STYLE_AVOID_MARKDOWN_RE = re.compile(r"别.*(?:长篇大论|markdown|分点|列表)")
+_STYLE_NATURAL_RE = re.compile(r"(?:自然|闲聊|像人|口语|短一点|少分点)")
+_STYLE_RIGOR_RE = re.compile(r"(?:详细|严谨|公式|文献|测试)")
+_BOUNDARY_NO_FAKE_OR_LEAK_RE = re.compile(
+    r"(?:别|不要|不许).{0,8}(?:装懂|乱用|外传|泄露)"
+)
+_BOUNDARY_SILENCE_RE = re.compile(r"(?:闭嘴|别说话|先别回|少说|安静)")
+_BOUNDARY_PRIVATE_RE = re.compile(r"(?:隐私|小圈子|私下|不要外传)")
+
 
 def clamp(value: Any, lower: float = 0.0, upper: float = 1.0) -> float:
     try:
@@ -798,22 +807,22 @@ def extract_preferences(text: str) -> tuple[list[str], list[str]]:
 
 def extract_style_preferences(text: str) -> list[str]:
     preferences = []
-    if re.search(r"别.*(?:长篇大论|markdown|分点|列表)", text):
+    if _STYLE_AVOID_MARKDOWN_RE.search(text):
         preferences.append("avoid_long_markdown_lists")
-    if re.search(r"(?:自然|闲聊|像人|口语|短一点|少分点)", text):
+    if _STYLE_NATURAL_RE.search(text):
         preferences.append("natural_conversational_style")
-    if re.search(r"(?:详细|严谨|公式|文献|测试)", text):
+    if _STYLE_RIGOR_RE.search(text):
         preferences.append("rigorous_engineering_detail_when_requested")
     return preferences
 
 
 def extract_boundary_notes(text: str) -> list[str]:
     notes = []
-    if re.search(r"(?:别|不要|不许).{0,8}(?:装懂|乱用|外传|泄露)", text):
+    if _BOUNDARY_NO_FAKE_OR_LEAK_RE.search(text):
         notes.append("do_not_fake_or_leak_local_terms")
-    if re.search(r"(?:闭嘴|别说话|先别回|少说|安静)", text):
+    if _BOUNDARY_SILENCE_RE.search(text):
         notes.append("respect_silence_or_brief_reply")
-    if re.search(r"(?:隐私|小圈子|私下|不要外传)", text):
+    if _BOUNDARY_PRIVATE_RE.search(text):
         notes.append("keep_common_ground_session_scoped")
     return notes
 

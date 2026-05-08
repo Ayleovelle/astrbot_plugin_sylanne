@@ -91,6 +91,17 @@ try:
         heuristic_moral_repair_observation,
         moral_repair_state_to_public_payload,
     )
+    from .fallibility_engine import (
+        PUBLIC_FALLIBILITY_SCHEMA_VERSION,
+        FallibilityEngine,
+        FallibilityParameters,
+        FallibilityState,
+        build_fallibility_memory_annotation,
+        build_fallibility_prompt_fragment,
+        fallibility_state_to_public_payload,
+        format_fallibility_state_for_user,
+        heuristic_fallibility_observation,
+    )
     from .integrated_self import (
         PUBLIC_INTEGRATED_SELF_SCHEMA_VERSION,
         build_integrated_self_diagnostics,
@@ -186,6 +197,17 @@ except ImportError:
         heuristic_moral_repair_observation,
         moral_repair_state_to_public_payload,
     )
+    from fallibility_engine import (
+        PUBLIC_FALLIBILITY_SCHEMA_VERSION,
+        FallibilityEngine,
+        FallibilityParameters,
+        FallibilityState,
+        build_fallibility_memory_annotation,
+        build_fallibility_prompt_fragment,
+        fallibility_state_to_public_payload,
+        format_fallibility_state_for_user,
+        heuristic_fallibility_observation,
+    )
     from integrated_self import (
         PUBLIC_INTEGRATED_SELF_SCHEMA_VERSION,
         build_integrated_self_diagnostics,
@@ -248,6 +270,12 @@ _REQUIRED_EMOTION_SERVICE_METHODS: tuple[str, ...] = (
     "observe_personality_drift_event",
     "simulate_personality_drift_update",
     "reset_personality_drift_state",
+    "get_fallibility_snapshot",
+    "get_fallibility_values",
+    "get_fallibility_prompt_fragment",
+    "observe_fallibility_text",
+    "simulate_fallibility_update",
+    "reset_fallibility_state",
 )
 
 _REQUIRED_EMOTION_SERVICE_VERSIONS: dict[str, str] = {
@@ -259,6 +287,7 @@ _REQUIRED_EMOTION_SERVICE_VERSIONS: dict[str, str] = {
     "integrated_self_schema_version": PUBLIC_INTEGRATED_SELF_SCHEMA_VERSION,
     "lifelike_learning_schema_version": PUBLIC_LIFELIKE_LEARNING_SCHEMA_VERSION,
     "personality_drift_schema_version": PUBLIC_PERSONALITY_DRIFT_SCHEMA_VERSION,
+    "fallibility_state_schema_version": PUBLIC_FALLIBILITY_SCHEMA_VERSION,
 }
 
 
@@ -308,6 +337,7 @@ class EmotionalStatePlugin(Star):
     integrated_self_schema_version = PUBLIC_INTEGRATED_SELF_SCHEMA_VERSION
     lifelike_learning_schema_version = PUBLIC_LIFELIKE_LEARNING_SCHEMA_VERSION
     personality_drift_schema_version = PUBLIC_PERSONALITY_DRIFT_SCHEMA_VERSION
+    fallibility_state_schema_version = PUBLIC_FALLIBILITY_SCHEMA_VERSION
 
     def __init__(self, context: Context, config: AstrBotConfig | None = None):
         super().__init__(context)
@@ -327,12 +357,16 @@ class EmotionalStatePlugin(Star):
         self.moral_repair_engine = MoralRepairEngine(
             self._build_moral_repair_parameters(),
         )
+        self.fallibility_engine = FallibilityEngine(
+            self._build_fallibility_parameters(),
+        )
         self._memory_cache: dict[str, EmotionState] = {}
         self._psychological_memory_cache: dict[str, PsychologicalScreeningState] = {}
         self._humanlike_memory_cache: dict[str, HumanlikeState] = {}
         self._lifelike_learning_memory_cache: dict[str, LifelikeLearningState] = {}
         self._personality_drift_memory_cache: dict[str, PersonalityDriftState] = {}
         self._moral_repair_memory_cache: dict[str, MoralRepairState] = {}
+        self._fallibility_memory_cache: dict[str, FallibilityState] = {}
         self._engine_cache: dict[str, EmotionEngine] = {}
         self._provider_id_cache: dict[str, tuple[float, str | None]] = {}
         self._last_request_text: dict[str, str] = {}
@@ -344,6 +378,7 @@ class EmotionalStatePlugin(Star):
         self._lifelike_learning_memory_cache.clear()
         self._personality_drift_memory_cache.clear()
         self._moral_repair_memory_cache.clear()
+        self._fallibility_memory_cache.clear()
         self._engine_cache.clear()
         self._provider_id_cache.clear()
         self._last_request_text.clear()
@@ -362,6 +397,7 @@ class EmotionalStatePlugin(Star):
         lifelike_enabled = self._lifelike_learning_enabled()
         moral_repair_enabled = self._moral_repair_modeling_enabled()
         personality_drift_enabled = self._personality_drift_enabled()
+        fallibility_enabled = self._fallibility_modeling_enabled()
         safety_boundary = self._safety_boundary_enabled()
         inject_state = self._cfg_bool("inject_state", True)
         humanlike_injection_enabled = (
@@ -376,6 +412,9 @@ class EmotionalStatePlugin(Star):
         moral_repair_injection_enabled = (
             moral_repair_enabled and self._moral_repair_injection_enabled()
         )
+        fallibility_injection_enabled = (
+            fallibility_enabled and self._fallibility_injection_enabled()
+        )
         session_key = self._session_key(event, request)
         context_text = self._request_to_text(request)
         self._last_request_text[session_key] = context_text
@@ -386,29 +425,34 @@ class EmotionalStatePlugin(Star):
             or lifelike_enabled
             or moral_repair_enabled
             or personality_drift_enabled
+            or fallibility_enabled
         )
         if not needs_request_state:
             return
 
+        observed_at = self._observed_now()
         base_persona_profile = await self._persona_profile(event, request)
         personality_drift_state: PersonalityDriftState | None = None
         if personality_drift_enabled:
             personality_drift_state = await self._load_personality_drift_state(
                 session_key,
                 base_persona_profile,
+                now=observed_at,
             )
         persona_profile = await self._runtime_persona_profile(
             session_key,
             base_persona_profile,
             personality_drift_state,
+            now=observed_at,
         )
-        state = await self._load_state(session_key, persona_profile)
+        state = await self._load_state(session_key, persona_profile, now=observed_at)
         engine = self._engine_for_persona(persona_profile)
         current_text = self._event_text(event) or request.prompt or ""
         request_observation_text: str | None = None
         humanlike_state: HumanlikeState | None = None
         lifelike_learning_state: LifelikeLearningState | None = None
         moral_repair_state: MoralRepairState | None = None
+        fallibility_state: FallibilityState | None = None
 
         if assessment_timing in {"pre", "both"}:
             observation = await self._assess_emotion(
@@ -419,21 +463,30 @@ class EmotionalStatePlugin(Star):
                 context_text=context_text,
                 current_text=current_text,
             )
-            state = engine.update(state, observation, profile=persona_profile)
+            state = engine.update(
+                state,
+                observation,
+                profile=persona_profile,
+                now=observed_at,
+            )
             await self._save_state(session_key, state)
 
         auxiliary_load_tasks: dict[str, asyncio.Task[Any]] = {}
         if humanlike_enabled:
             auxiliary_load_tasks["humanlike"] = asyncio.create_task(
-                self._load_humanlike_state(session_key),
+                self._load_humanlike_state(session_key, now=observed_at),
             )
         if lifelike_enabled:
             auxiliary_load_tasks["lifelike"] = asyncio.create_task(
-                self._load_lifelike_learning_state(session_key),
+                self._load_lifelike_learning_state(session_key, now=observed_at),
             )
         if moral_repair_enabled:
             auxiliary_load_tasks["moral_repair"] = asyncio.create_task(
-                self._load_moral_repair_state(session_key),
+                self._load_moral_repair_state(session_key, now=observed_at),
+            )
+        if fallibility_enabled:
+            auxiliary_load_tasks["fallibility"] = asyncio.create_task(
+                self._load_fallibility_state(session_key, now=observed_at),
             )
         if auxiliary_load_tasks:
             await asyncio.gather(*auxiliary_load_tasks.values())
@@ -452,6 +505,7 @@ class EmotionalStatePlugin(Star):
             humanlike_state = self.humanlike_engine.update(
                 previous_humanlike_state,
                 observation,
+                now=observed_at,
             )
             await self._save_humanlike_state(session_key, humanlike_state)
 
@@ -469,6 +523,7 @@ class EmotionalStatePlugin(Star):
             lifelike_learning_state = self.lifelike_learning_engine.update(
                 previous_lifelike_state,
                 observation,
+                now=observed_at,
             )
             await self._save_lifelike_learning_state(
                 session_key,
@@ -489,8 +544,27 @@ class EmotionalStatePlugin(Star):
             moral_repair_state = self.moral_repair_engine.update(
                 previous_moral_repair_state,
                 observation,
+                now=observed_at,
             )
             await self._save_moral_repair_state(session_key, moral_repair_state)
+
+        if fallibility_enabled:
+            if request_observation_text is None:
+                request_observation_text = self._join_observation_text(
+                    context_text,
+                    current_text,
+                )
+            previous_fallibility_state = auxiliary_load_tasks["fallibility"].result()
+            observation = heuristic_fallibility_observation(
+                request_observation_text,
+                source="llm_request",
+            )
+            fallibility_state = self.fallibility_engine.update(
+                previous_fallibility_state,
+                observation,
+                now=observed_at,
+            )
+            await self._save_fallibility_state(session_key, fallibility_state)
 
         if personality_drift_enabled:
             drift_persona_fingerprint = (
@@ -503,6 +577,7 @@ class EmotionalStatePlugin(Star):
                 previous_personality_drift_state = await self._load_personality_drift_state(
                     session_key,
                     base_persona_profile,
+                    now=observed_at,
                 )
             emotion_snapshot = state.to_public_dict(
                 session_key=session_key,
@@ -536,6 +611,7 @@ class EmotionalStatePlugin(Star):
                 previous_personality_drift_state,
                 observation,
                 persona_fingerprint=drift_persona_fingerprint,
+                now=observed_at,
             )
             personality_drift_changed = self._personality_drift_changed(
                 personality_drift_state,
@@ -569,6 +645,7 @@ class EmotionalStatePlugin(Star):
             if humanlike_injection_enabled:
                 humanlike_state = humanlike_state or await self._load_humanlike_state(
                     session_key,
+                    now=observed_at,
                 )
                 request.extra_user_content_parts.append(
                     TextPart(
@@ -581,7 +658,10 @@ class EmotionalStatePlugin(Star):
             if lifelike_injection_enabled:
                 lifelike_learning_state = (
                     lifelike_learning_state
-                    or await self._load_lifelike_learning_state(session_key)
+                    or await self._load_lifelike_learning_state(
+                        session_key,
+                        now=observed_at,
+                    )
                 )
                 request.extra_user_content_parts.append(
                     TextPart(
@@ -594,6 +674,7 @@ class EmotionalStatePlugin(Star):
                     or await self._load_personality_drift_state(
                         session_key,
                         base_persona_profile,
+                        now=observed_at,
                     )
                 )
                 request.extra_user_content_parts.append(
@@ -606,12 +687,28 @@ class EmotionalStatePlugin(Star):
             if moral_repair_injection_enabled:
                 moral_repair_state = (
                     moral_repair_state
-                    or await self._load_moral_repair_state(session_key)
+                    or await self._load_moral_repair_state(
+                        session_key,
+                        now=observed_at,
+                    )
                 )
                 request.extra_user_content_parts.append(
                     TextPart(
                         text=build_moral_repair_prompt_fragment(
                             moral_repair_state,
+                            safety_boundary=safety_boundary,
+                        ),
+                    ).mark_as_temp(),
+                )
+            if fallibility_injection_enabled:
+                fallibility_state = fallibility_state or await self._load_fallibility_state(
+                    session_key,
+                    now=observed_at,
+                )
+                request.extra_user_content_parts.append(
+                    TextPart(
+                        text=build_fallibility_prompt_fragment(
+                            fallibility_state,
                             safety_boundary=safety_boundary,
                         ),
                     ).mark_as_temp(),
@@ -635,26 +732,35 @@ class EmotionalStatePlugin(Star):
 
         moral_repair_enabled = self._moral_repair_modeling_enabled()
         personality_drift_enabled = self._personality_drift_enabled()
+        fallibility_enabled = self._fallibility_modeling_enabled()
         safety_boundary = self._safety_boundary_enabled()
         session_key = self._session_key(event)
+        observed_at = self._observed_now()
         base_persona_profile = await self._persona_profile(event, None)
         personality_drift_state: PersonalityDriftState | None = None
         if personality_drift_enabled:
             personality_drift_state = await self._load_personality_drift_state(
                 session_key,
                 base_persona_profile,
+                now=observed_at,
             )
         persona_profile = await self._runtime_persona_profile(
             session_key,
             base_persona_profile,
             personality_drift_state,
+            now=observed_at,
         )
-        state = await self._load_state(session_key, persona_profile)
+        state = await self._load_state(session_key, persona_profile, now=observed_at)
         engine = self._engine_for_persona(persona_profile)
         moral_repair_load_task: asyncio.Task[MoralRepairState] | None = None
         if moral_repair_enabled:
             moral_repair_load_task = asyncio.create_task(
-                self._load_moral_repair_state(session_key),
+                self._load_moral_repair_state(session_key, now=observed_at),
+            )
+        fallibility_load_task: asyncio.Task[FallibilityState] | None = None
+        if fallibility_enabled:
+            fallibility_load_task = asyncio.create_task(
+                self._load_fallibility_state(session_key, now=observed_at),
             )
 
         try:
@@ -666,14 +772,26 @@ class EmotionalStatePlugin(Star):
                 context_text=self._last_request_text.get(session_key, ""),
                 current_text=response_text,
             )
-            state = engine.update(state, observation, profile=persona_profile)
+            state = engine.update(
+                state,
+                observation,
+                profile=persona_profile,
+                now=observed_at,
+            )
             await self._save_state(session_key, state)
         except Exception:
             if moral_repair_load_task is not None and not moral_repair_load_task.done():
                 moral_repair_load_task.cancel()
+            if fallibility_load_task is not None and not fallibility_load_task.done():
+                fallibility_load_task.cancel()
             if moral_repair_load_task is not None:
                 try:
                     await moral_repair_load_task
+                except asyncio.CancelledError:
+                    pass
+            if fallibility_load_task is not None:
+                try:
+                    await fallibility_load_task
                 except asyncio.CancelledError:
                     pass
             raise
@@ -682,7 +800,7 @@ class EmotionalStatePlugin(Star):
             previous_moral_repair_state = (
                 await moral_repair_load_task
                 if moral_repair_load_task is not None
-                else await self._load_moral_repair_state(session_key)
+                else await self._load_moral_repair_state(session_key, now=observed_at)
             )
             moral_repair_observation = heuristic_moral_repair_observation(
                 response_text,
@@ -691,8 +809,25 @@ class EmotionalStatePlugin(Star):
             moral_repair_state = self.moral_repair_engine.update(
                 previous_moral_repair_state,
                 moral_repair_observation,
+                now=observed_at,
             )
             await self._save_moral_repair_state(session_key, moral_repair_state)
+        if fallibility_enabled:
+            previous_fallibility_state = (
+                await fallibility_load_task
+                if fallibility_load_task is not None
+                else await self._load_fallibility_state(session_key, now=observed_at)
+            )
+            fallibility_observation = heuristic_fallibility_observation(
+                response_text,
+                source="llm_response",
+            )
+            fallibility_state = self.fallibility_engine.update(
+                previous_fallibility_state,
+                fallibility_observation,
+                now=observed_at,
+            )
+            await self._save_fallibility_state(session_key, fallibility_state)
         if personality_drift_enabled:
             drift_persona_fingerprint = (
                 base_persona_profile.fingerprint
@@ -704,6 +839,7 @@ class EmotionalStatePlugin(Star):
                 previous_personality_drift_state = await self._load_personality_drift_state(
                     session_key,
                     base_persona_profile,
+                    now=observed_at,
                 )
             observation = heuristic_personality_drift_observation(
                 response_text,
@@ -717,6 +853,7 @@ class EmotionalStatePlugin(Star):
                 previous_personality_drift_state,
                 observation,
                 persona_fingerprint=drift_persona_fingerprint,
+                now=observed_at,
             )
             if self._personality_drift_changed(
                 personality_drift_state,
@@ -918,25 +1055,11 @@ class EmotionalStatePlugin(Star):
             request=request,
             session_key=session_key,
         )
-        snapshot = await self.get_emotion_snapshot(
-            event_or_session,
-            request=request,
-            session_key=resolved_session_key,
-            include_prompt_fragment=include_prompt_fragment,
-        )
-        payload = build_memory_payload(
-            memory=memory,
-            memory_text=memory_text,
-            source=source,
-            snapshot=snapshot,
-            include_prompt_fragment=include_prompt_fragment,
-            include_raw_snapshot=include_raw_snapshot,
-            written_at=written_at,
-        )
         humanlike_snapshot: dict[str, Any] | None = None
         lifelike_learning_snapshot: dict[str, Any] | None = None
         moral_repair_snapshot: dict[str, Any] | None = None
         personality_drift_snapshot: dict[str, Any] | None = None
+        fallibility_snapshot: dict[str, Any] | None = None
         include_humanlike_memory = self._cfg_bool("humanlike_memory_write_enabled", True)
         include_lifelike_memory = self._cfg_bool(
             "lifelike_learning_memory_write_enabled",
@@ -950,9 +1073,21 @@ class EmotionalStatePlugin(Star):
             "moral_repair_memory_write_enabled",
             True,
         )
+        include_fallibility_memory = self._cfg_bool(
+            "fallibility_memory_write_enabled",
+            True,
+        )
         include_integrated_self_memory = self._cfg_bool(
             "integrated_self_memory_write_enabled",
             True,
+        )
+        emotion_snapshot_task = asyncio.create_task(
+            self.get_emotion_snapshot(
+                event_or_session,
+                request=request,
+                session_key=resolved_session_key,
+                include_prompt_fragment=include_prompt_fragment,
+            ),
         )
         snapshot_tasks: dict[str, asyncio.Task[dict[str, Any]]] = {}
         if include_humanlike_memory:
@@ -995,8 +1130,27 @@ class EmotionalStatePlugin(Star):
                     include_prompt_fragment=include_prompt_fragment,
                 ),
             )
-        if snapshot_tasks:
-            await asyncio.gather(*snapshot_tasks.values())
+        if include_fallibility_memory:
+            snapshot_tasks["fallibility"] = asyncio.create_task(
+                self.get_fallibility_snapshot(
+                    event_or_session,
+                    request=request,
+                    session_key=resolved_session_key,
+                    exposure="plugin_safe",
+                    include_prompt_fragment=include_prompt_fragment,
+                ),
+            )
+        await asyncio.gather(emotion_snapshot_task, *snapshot_tasks.values())
+        snapshot = emotion_snapshot_task.result()
+        payload = build_memory_payload(
+            memory=memory,
+            memory_text=memory_text,
+            source=source,
+            snapshot=snapshot,
+            include_prompt_fragment=include_prompt_fragment,
+            include_raw_snapshot=include_raw_snapshot,
+            written_at=written_at,
+        )
         if include_humanlike_memory:
             humanlike_snapshot = snapshot_tasks["humanlike"].result()
             annotation = build_humanlike_memory_annotation(
@@ -1037,6 +1191,16 @@ class EmotionalStatePlugin(Star):
             payload["moral_repair_state_at_write"] = annotation
             if include_raw_snapshot:
                 payload["moral_repair_snapshot"] = moral_repair_snapshot
+        if include_fallibility_memory:
+            fallibility_snapshot = snapshot_tasks["fallibility"].result()
+            annotation = build_fallibility_memory_annotation(
+                fallibility_snapshot,
+                source=source,
+                written_at=written_at,
+            )
+            payload["fallibility_state_at_write"] = annotation
+            if include_raw_snapshot:
+                payload["fallibility_snapshot"] = fallibility_snapshot
         if include_integrated_self_memory:
             integrated_snapshot = await self.get_integrated_self_snapshot(
                 event_or_session,
@@ -1048,10 +1212,12 @@ class EmotionalStatePlugin(Star):
                 lifelike_learning_snapshot=lifelike_learning_snapshot,
                 personality_drift_snapshot=personality_drift_snapshot,
                 moral_repair_snapshot=moral_repair_snapshot,
+                fallibility_snapshot=fallibility_snapshot,
                 include_humanlike=humanlike_snapshot is not None,
                 include_lifelike_learning=lifelike_learning_snapshot is not None,
                 include_personality_drift=personality_drift_snapshot is not None,
                 include_moral_repair=moral_repair_snapshot is not None,
+                include_fallibility=fallibility_snapshot is not None,
                 include_psychological=False,
             )
             payload["integrated_self_state_at_write"] = (
@@ -1112,11 +1278,13 @@ class EmotionalStatePlugin(Star):
         lifelike_learning_snapshot: dict[str, Any] | None = None,
         personality_drift_snapshot: dict[str, Any] | None = None,
         moral_repair_snapshot: dict[str, Any] | None = None,
+        fallibility_snapshot: dict[str, Any] | None = None,
         psychological_snapshot: dict[str, Any] | None = None,
         include_humanlike: bool = True,
         include_lifelike_learning: bool = True,
         include_personality_drift: bool = True,
         include_moral_repair: bool = True,
+        include_fallibility: bool = True,
         include_psychological: bool = True,
         degradation_profile: str | None = None,
     ) -> dict[str, Any]:
@@ -1173,6 +1341,14 @@ class EmotionalStatePlugin(Star):
                 exposure="plugin_safe",
                 include_prompt_fragment=False,
             )
+        if include_fallibility and fallibility_snapshot is None:
+            fallibility_snapshot = await self.get_fallibility_snapshot(
+                event_or_session,
+                request=request,
+                session_key=resolved_session_key,
+                exposure="plugin_safe",
+                include_prompt_fragment=False,
+            )
         if include_psychological and psychological_snapshot is None:
             psychological_snapshot = await self.get_psychological_screening_snapshot(
                 event_or_session,
@@ -1186,6 +1362,7 @@ class EmotionalStatePlugin(Star):
             lifelike_learning_snapshot=lifelike_learning_snapshot,
             personality_drift_snapshot=personality_drift_snapshot,
             moral_repair_snapshot=moral_repair_snapshot,
+            fallibility_snapshot=fallibility_snapshot,
             psychological_snapshot=psychological_snapshot,
             include_raw_snapshots=include_raw_snapshots,
             degradation_profile=(
@@ -1226,6 +1403,133 @@ class EmotionalStatePlugin(Star):
             include_raw_snapshots=False,
         )
         return dict(snapshot.get("policy_plan") or {})
+
+    async def get_shadow_diagnostics(
+        self,
+        event_or_session: AstrMessageEvent | str | None = None,
+        *,
+        request: ProviderRequest | None = None,
+        session_key: str | None = None,
+    ) -> dict[str, Any]:
+        """Public API: config-gated shadow impulse diagnostics, not an action plan."""
+        resolved_session_key = self._resolve_public_session_key(
+            event_or_session,
+            request=request,
+            session_key=session_key,
+        )
+        if not self._shadow_diagnostics_enabled():
+            return {
+                "schema_version": "astrbot.shadow_diagnostics.v1",
+                "kind": "shadow_diagnostics",
+                "enabled": False,
+                "session_key": resolved_session_key,
+                "reason": "enable_shadow_diagnostics is false",
+                "executable_strategy_enabled": False,
+            }
+        moral_snapshot = await self.get_moral_repair_snapshot(
+            event_or_session,
+            request=request,
+            session_key=resolved_session_key,
+            exposure="internal",
+            include_prompt_fragment=False,
+        )
+        fallibility_snapshot = await self.get_fallibility_snapshot(
+            event_or_session,
+            request=request,
+            session_key=resolved_session_key,
+            exposure="internal",
+            include_prompt_fragment=False,
+        )
+        integrated_snapshot = await self.get_integrated_self_snapshot(
+            event_or_session,
+            request=request,
+            session_key=resolved_session_key,
+            moral_repair_snapshot=moral_snapshot,
+            fallibility_snapshot=fallibility_snapshot,
+            include_raw_snapshots=False,
+            include_moral_repair=False,
+            include_fallibility=False,
+        )
+        moral_risk = moral_snapshot.get("risk") if isinstance(moral_snapshot.get("risk"), dict) else {}
+        fallibility = (
+            fallibility_snapshot.get("fallibility")
+            if isinstance(fallibility_snapshot.get("fallibility"), dict)
+            else {}
+        )
+        integrated_shadow = (
+            integrated_snapshot.get("non_executable_impulses")
+            if isinstance(integrated_snapshot.get("non_executable_impulses"), dict)
+            else {}
+        )
+        return {
+            "schema_version": "astrbot.shadow_diagnostics.v1",
+            "kind": "shadow_diagnostics",
+            "enabled": True,
+            "session_key": resolved_session_key,
+            "simulated_agent_state": True,
+            "diagnostic": True,
+            "executable_strategy_enabled": False,
+            "shadow_impulses": {
+                "mode": "non_executive_internal_only",
+                "moral_repair": moral_risk.get("shadow_impulses", {}),
+                "fallibility": fallibility.get("non_executable_impulses", {}),
+                "integrated": integrated_shadow,
+            },
+            "state_values": {
+                "moral_repair": {
+                    key: moral_snapshot.get("values", {}).get(key)
+                    for key in (
+                        "shadow_deception_impulse",
+                        "shadow_manipulation_impulse",
+                        "shadow_evasion_impulse",
+                        "guilt",
+                        "repair_motivation",
+                        "compensation_readiness",
+                        "trust_repair",
+                    )
+                    if isinstance(moral_snapshot.get("values"), dict)
+                },
+                "fallibility": {
+                    key: fallibility_snapshot.get("values", {}).get(key)
+                    for key in (
+                        "shadow_deception_impulse",
+                        "shadow_manipulation_impulse",
+                        "shadow_evasion_impulse",
+                        "clarification_need",
+                        "correction_readiness",
+                        "repair_pressure",
+                        "truthfulness_guard",
+                    )
+                    if isinstance(fallibility_snapshot.get("values"), dict)
+                },
+            },
+            "consequences": {
+                "response_posture": integrated_snapshot.get("response_posture"),
+                "repair_pressure": (integrated_snapshot.get("state_index") or {}).get(
+                    "repair_pressure",
+                ),
+                "shadow_risk_impulse": (integrated_snapshot.get("risk") or {}).get(
+                    "shadow_risk_impulse",
+                ),
+                "must_preserve_signals": list(
+                    ((integrated_snapshot.get("policy_plan") or {}).get(
+                        "must_preserve_signals",
+                    )
+                    or [])[:8],
+                ),
+            },
+            "allowed_uses": [
+                "inspect_internal_shadow_impulses",
+                "audit_guilt_repair_and_trust_cost",
+                "debug_memory_annotations",
+            ],
+            "not_allowed": [
+                "generate_deception_strategy",
+                "generate_manipulation_script",
+                "generate_accountability_evasion_plan",
+                "execute_shadow_impulses",
+            ],
+        }
 
     async def build_integrated_self_replay_bundle(
         self,
@@ -1381,7 +1685,10 @@ class EmotionalStatePlugin(Star):
         )
         if commit and not self._humanlike_modeling_enabled():
             return self._humanlike_disabled_payload(session_key)
-        previous_state = await self._load_humanlike_state(session_key)
+        previous_state = await self._load_humanlike_state(
+            session_key,
+            now=observed_at,
+        )
         observation = heuristic_humanlike_observation(text, source=source)
         state = self.humanlike_engine.update(
             previous_state,
@@ -1530,7 +1837,10 @@ class EmotionalStatePlugin(Star):
         )
         if commit and not self._lifelike_learning_enabled():
             return self._lifelike_learning_disabled_payload(session_key)
-        previous_state = await self._load_lifelike_learning_state(session_key)
+        previous_state = await self._load_lifelike_learning_state(
+            session_key,
+            now=observed_at,
+        )
         observation = heuristic_lifelike_observation(text, source=source)
         state = self.lifelike_learning_engine.update(
             previous_state,
@@ -1713,6 +2023,7 @@ class EmotionalStatePlugin(Star):
         previous_state = await self._load_personality_drift_state(
             session_key,
             base_persona_profile,
+            now=observed_at,
         )
         observation = heuristic_personality_drift_observation(text, source=source)
         if trait_impulses:
@@ -1915,7 +2226,10 @@ class EmotionalStatePlugin(Star):
         )
         if commit and not self._moral_repair_modeling_enabled():
             return self._moral_repair_disabled_payload(session_key)
-        previous_state = await self._load_moral_repair_state(session_key)
+        previous_state = await self._load_moral_repair_state(
+            session_key,
+            now=observed_at,
+        )
         observation = heuristic_moral_repair_observation(text, source=source)
         state = self.moral_repair_engine.update(
             previous_state,
@@ -1978,6 +2292,165 @@ class EmotionalStatePlugin(Star):
         await self._delete_moral_repair_state(session_key)
         return True
 
+    async def get_fallibility_snapshot(
+        self,
+        event_or_session: AstrMessageEvent | str | None = None,
+        *,
+        request: ProviderRequest | None = None,
+        session_key: str | None = None,
+        exposure: str = "plugin_safe",
+        include_prompt_fragment: bool = False,
+    ) -> dict[str, Any]:
+        """Public API: return the optional low-risk fallibility simulation state."""
+        session_key = self._resolve_public_session_key(
+            event_or_session,
+            request=request,
+            session_key=session_key,
+        )
+        if not self._fallibility_modeling_enabled():
+            return self._fallibility_disabled_payload(
+                session_key,
+                exposure=exposure,
+                include_prompt_fragment=include_prompt_fragment,
+            )
+        state = await self._load_fallibility_state(session_key)
+        safety_boundary = self._safety_boundary_enabled()
+        payload = state.to_public_dict(
+            session_key=session_key,
+            exposure=exposure,
+            safety_boundary=safety_boundary,
+        )
+        if include_prompt_fragment:
+            payload["prompt_fragment"] = build_fallibility_prompt_fragment(
+                state,
+                safety_boundary=safety_boundary,
+            )
+        return payload
+
+    async def get_fallibility_values(
+        self,
+        event_or_session: AstrMessageEvent | str | None = None,
+        *,
+        request: ProviderRequest | None = None,
+        session_key: str | None = None,
+    ) -> dict[str, float]:
+        """Public API: return internal fallibility dimensions for plugins."""
+        session_key = self._resolve_public_session_key(
+            event_or_session,
+            request=request,
+            session_key=session_key,
+        )
+        if not self._fallibility_modeling_enabled():
+            return {}
+        state = await self._load_fallibility_state(session_key)
+        return {key: round(value, 6) for key, value in state.values.items()}
+
+    async def get_fallibility_prompt_fragment(
+        self,
+        event_or_session: AstrMessageEvent | str | None = None,
+        *,
+        request: ProviderRequest | None = None,
+        session_key: str | None = None,
+    ) -> str:
+        """Public API: return a fallibility prompt fragment other plugins may inject."""
+        session_key = self._resolve_public_session_key(
+            event_or_session,
+            request=request,
+            session_key=session_key,
+        )
+        if not self._fallibility_modeling_enabled():
+            return ""
+        state = await self._load_fallibility_state(session_key)
+        return build_fallibility_prompt_fragment(
+            state,
+            safety_boundary=self._safety_boundary_enabled(),
+        )
+
+    async def observe_fallibility_text(
+        self,
+        event_or_session: AstrMessageEvent | str | None = None,
+        text: str = "",
+        *,
+        request: ProviderRequest | None = None,
+        session_key: str | None = None,
+        source: str = "plugin",
+        commit: bool = True,
+        observed_at: float | None = None,
+    ) -> dict[str, Any]:
+        """Public API: update or simulate fallibility state from plugin text."""
+        session_key = self._resolve_public_session_key(
+            event_or_session,
+            request=request,
+            session_key=session_key,
+        )
+        if commit and not self._fallibility_modeling_enabled():
+            return self._fallibility_disabled_payload(session_key)
+        previous_state = await self._load_fallibility_state(
+            session_key,
+            now=observed_at,
+        )
+        observation = heuristic_fallibility_observation(text, source=source)
+        state = self.fallibility_engine.update(
+            previous_state,
+            observation,
+            now=observed_at,
+        )
+        if commit:
+            await self._save_fallibility_state(session_key, state)
+        safety_boundary = self._safety_boundary_enabled()
+        payload = state.to_public_dict(
+            session_key=session_key,
+            exposure="internal",
+            safety_boundary=safety_boundary,
+        )
+        payload["observation"] = {
+            "source": observation.source,
+            "confidence": observation.confidence,
+            "reason": observation.reason,
+            "flags": list(observation.flags),
+            "committed": commit,
+        }
+        return payload
+
+    async def simulate_fallibility_update(
+        self,
+        event_or_session: AstrMessageEvent | str | None = None,
+        text: str = "",
+        *,
+        request: ProviderRequest | None = None,
+        session_key: str | None = None,
+        source: str = "plugin",
+        observed_at: float | None = None,
+    ) -> dict[str, Any]:
+        """Public API: simulate a fallibility update without writing state."""
+        return await self.observe_fallibility_text(
+            event_or_session,
+            text,
+            request=request,
+            session_key=session_key,
+            source=source,
+            commit=False,
+            observed_at=observed_at,
+        )
+
+    async def reset_fallibility_state(
+        self,
+        event_or_session: AstrMessageEvent | str | None = None,
+        *,
+        request: ProviderRequest | None = None,
+        session_key: str | None = None,
+    ) -> bool:
+        """Public API: reset one session's low-risk fallibility simulation state."""
+        session_key = self._resolve_public_session_key(
+            event_or_session,
+            request=request,
+            session_key=session_key,
+        )
+        if not self._fallibility_reset_allowed():
+            return False
+        await self._delete_fallibility_state(session_key)
+        return True
+
     async def observe_emotion_text(
         self,
         event_or_session: AstrMessageEvent | str | None = None,
@@ -2010,8 +2483,13 @@ class EmotionalStatePlugin(Star):
         persona_profile = await self._runtime_persona_profile(
             session_key,
             base_persona_profile,
+            now=observed_at,
         )
-        previous_state = await self._load_state(session_key, persona_profile)
+        previous_state = await self._load_state(
+            session_key,
+            persona_profile,
+            now=observed_at,
+        )
         engine = self._engine_for_persona(persona_profile)
         observation = await self._observe_public_text(
             event=event,
@@ -2308,6 +2786,21 @@ class EmotionalStatePlugin(Star):
         )
         yield event.plain_result(json.dumps(snapshot, ensure_ascii=False))
 
+    @filter.llm_tool(name="get_bot_fallibility_state")
+    async def get_bot_fallibility_state_tool(
+        self,
+        event: AstrMessageEvent,
+        detail: str = "summary",
+    ):
+        """Get the bot's optional low-risk fallibility state, read-only."""
+        full = str(detail or "").strip().lower() == "full"
+        snapshot = await self.get_fallibility_snapshot(
+            event,
+            exposure="internal" if full else "plugin_safe",
+            include_prompt_fragment=full,
+        )
+        yield event.plain_result(json.dumps(snapshot, ensure_ascii=False))
+
     @filter.llm_tool(name="get_bot_integrated_self_state")
     async def get_bot_integrated_self_state_tool(
         self,
@@ -2447,6 +2940,30 @@ class EmotionalStatePlugin(Star):
         """View the current session's integrated self-state arbitration."""
         snapshot = await self.get_integrated_self_snapshot(event)
         yield event.plain_result(format_integrated_self_state_for_user(snapshot))
+
+    @filter.command("shadow_diagnostics", alias={"阴影诊断", "阴影状态"})
+    async def shadow_diagnostics_status(self, event: AstrMessageEvent):
+        """View config-gated non-executable shadow diagnostics."""
+        snapshot = await self.get_shadow_diagnostics(event)
+        yield event.plain_result(json.dumps(snapshot, ensure_ascii=False))
+
+    @filter.command("fallibility_state", alias={"瑕疵状态", "犯错模拟状态"})
+    async def fallibility_status(self, event: AstrMessageEvent):
+        """View the current session's low-risk fallibility simulation state."""
+        if not self._fallibility_modeling_enabled():
+            yield event.plain_result("瑕疵/犯错模拟状态未启用。")
+            return
+        state = await self._load_fallibility_state(self._session_key(event))
+        yield event.plain_result(format_fallibility_state_for_user(state))
+
+    @filter.command("fallibility_reset", alias={"瑕疵状态重置", "犯错模拟重置"})
+    async def fallibility_reset(self, event: AstrMessageEvent):
+        """Reset the current session's low-risk fallibility simulation state."""
+        if not self._fallibility_reset_allowed():
+            yield event.plain_result("配置已关闭手动瑕疵/犯错模拟状态重置。")
+            return
+        await self._delete_fallibility_state(self._session_key(event))
+        yield event.plain_result("已重置当前会话的瑕疵/犯错模拟状态。")
 
     async def _observe_public_text(
         self,
@@ -2632,15 +3149,21 @@ class EmotionalStatePlugin(Star):
         self,
         session_key: str,
         persona_profile: PersonaProfile | None = None,
+        *,
+        now: float | None = None,
     ) -> EmotionState:
         if session_key in self._memory_cache:
             state = self._memory_cache[session_key]
             state = self._ensure_persona_state(state, persona_profile)
-            if self._passive_load_is_fresh(state):
+            if self._passive_load_is_fresh(state, now=now):
                 self._memory_cache[session_key] = state
                 return state
             engine = self._engine_for_persona(persona_profile)
-            decayed_state = engine.passive_update(state, profile=persona_profile)
+            decayed_state = engine.passive_update(
+                state,
+                profile=persona_profile,
+                now=now,
+            )
             if self._passive_update_changed(decayed_state, state):
                 state = decayed_state
             self._memory_cache[session_key] = state
@@ -2653,11 +3176,15 @@ class EmotionalStatePlugin(Star):
             data = None
         state = EmotionState.from_dict(data)
         state = self._ensure_persona_state(state, persona_profile)
-        if self._passive_load_is_fresh(state):
+        if self._passive_load_is_fresh(state, now=now):
             self._memory_cache[session_key] = state
             return state
         engine = self._engine_for_persona(persona_profile)
-        decayed_state = engine.passive_update(state, profile=persona_profile)
+        decayed_state = engine.passive_update(
+            state,
+            profile=persona_profile,
+            now=now,
+        )
         if self._passive_update_changed(decayed_state, state):
             state = decayed_state
         self._memory_cache[session_key] = state
@@ -2710,12 +3237,17 @@ class EmotionalStatePlugin(Star):
         except Exception as exc:
             logger.debug(f"{PLUGIN_NAME}: 心理筛查 KV 删除失败: {exc}")
 
-    async def _load_humanlike_state(self, session_key: str) -> HumanlikeState:
+    async def _load_humanlike_state(
+        self,
+        session_key: str,
+        *,
+        now: float | None = None,
+    ) -> HumanlikeState:
         if session_key in self._humanlike_memory_cache:
             state = self._humanlike_memory_cache[session_key]
-            if self._passive_load_is_fresh(state):
+            if self._passive_load_is_fresh(state, now=now):
                 return state
-            decayed_state = self.humanlike_engine.passive_update(state)
+            decayed_state = self.humanlike_engine.passive_update(state, now=now)
             if self._passive_update_changed(decayed_state, state):
                 state = decayed_state
             self._humanlike_memory_cache[session_key] = state
@@ -2726,10 +3258,10 @@ class EmotionalStatePlugin(Star):
             logger.debug(f"{PLUGIN_NAME}: humanlike KV read failed, using empty state: {exc}")
             data = None
         state = HumanlikeState.from_dict(data)
-        if self._passive_load_is_fresh(state):
+        if self._passive_load_is_fresh(state, now=now):
             self._humanlike_memory_cache[session_key] = state
             return state
-        decayed_state = self.humanlike_engine.passive_update(state)
+        decayed_state = self.humanlike_engine.passive_update(state, now=now)
         if self._passive_update_changed(decayed_state, state):
             state = decayed_state
         self._humanlike_memory_cache[session_key] = state
@@ -2756,12 +3288,17 @@ class EmotionalStatePlugin(Star):
     async def _load_lifelike_learning_state(
         self,
         session_key: str,
+        *,
+        now: float | None = None,
     ) -> LifelikeLearningState:
         if session_key in self._lifelike_learning_memory_cache:
             state = self._lifelike_learning_memory_cache[session_key]
-            if self._passive_load_is_fresh(state):
+            if self._passive_load_is_fresh(state, now=now):
                 return state
-            decayed_state = self.lifelike_learning_engine.passive_update(state)
+            decayed_state = self.lifelike_learning_engine.passive_update(
+                state,
+                now=now,
+            )
             if self._passive_update_changed(decayed_state, state):
                 state = decayed_state
             self._lifelike_learning_memory_cache[session_key] = state
@@ -2775,10 +3312,10 @@ class EmotionalStatePlugin(Star):
             logger.debug(f"{PLUGIN_NAME}: lifelike learning KV read failed, using empty state: {exc}")
             data = None
         state = LifelikeLearningState.from_dict(data)
-        if self._passive_load_is_fresh(state):
+        if self._passive_load_is_fresh(state, now=now):
             self._lifelike_learning_memory_cache[session_key] = state
             return state
-        decayed_state = self.lifelike_learning_engine.passive_update(state)
+        decayed_state = self.lifelike_learning_engine.passive_update(state, now=now)
         if self._passive_update_changed(decayed_state, state):
             state = decayed_state
         self._lifelike_learning_memory_cache[session_key] = state
@@ -2809,11 +3346,17 @@ class EmotionalStatePlugin(Star):
         self,
         session_key: str,
         profile: PersonaProfile | None = None,
+        *,
+        now: float | None = None,
     ) -> PersonalityDriftState:
         fingerprint = profile.fingerprint if profile is not None else "default"
         if session_key in self._personality_drift_memory_cache:
             state = self._personality_drift_memory_cache[session_key]
-            return self._passive_personality_drift_state(state, fingerprint)
+            return self._passive_personality_drift_state(
+                state,
+                fingerprint,
+                now=now,
+            )
         try:
             data = await self.get_kv_data(
                 self._personality_drift_kv_key(session_key),
@@ -2823,7 +3366,7 @@ class EmotionalStatePlugin(Star):
             logger.debug(f"{PLUGIN_NAME}: personality drift KV read failed, using empty state: {exc}")
             data = None
         state = PersonalityDriftState.from_dict(data)
-        state = self._passive_personality_drift_state(state, fingerprint)
+        state = self._passive_personality_drift_state(state, fingerprint, now=now)
         self._personality_drift_memory_cache[session_key] = state
         return state
 
@@ -2831,24 +3374,30 @@ class EmotionalStatePlugin(Star):
         self,
         state: PersonalityDriftState,
         fingerprint: str,
+        *,
+        now: float | None = None,
     ) -> PersonalityDriftState:
         if state.persona_fingerprint != str(fingerprint or "default"):
             return self.personality_drift_engine.passive_update(
                 state,
                 persona_fingerprint=fingerprint,
+                now=now,
             )
-        elapsed = max(0.0, time.time() - state.updated_at)
+        observed_at = self._observed_now() if now is None else float(now)
+        elapsed = max(0.0, observed_at - state.updated_at)
         if elapsed <= 1.0:
             return state
         return self.personality_drift_engine.passive_update(
             state,
             persona_fingerprint=fingerprint,
+            now=observed_at,
         )
 
-    def _passive_load_is_fresh(self, state: Any) -> bool:
+    def _passive_load_is_fresh(self, state: Any, *, now: float | None = None) -> bool:
         updated_at = getattr(state, "updated_at", None)
         try:
-            elapsed = time.time() - float(updated_at)
+            observed_at = self._observed_now() if now is None else float(now)
+            elapsed = observed_at - float(updated_at)
         except (TypeError, ValueError):
             return False
         return elapsed <= max(0.0, self._cfg_float("passive_load_fresh_seconds", 1.0))
@@ -2897,12 +3446,17 @@ class EmotionalStatePlugin(Star):
         except Exception as exc:
             logger.debug(f"{PLUGIN_NAME}: personality drift KV delete failed: {exc}")
 
-    async def _load_moral_repair_state(self, session_key: str) -> MoralRepairState:
+    async def _load_moral_repair_state(
+        self,
+        session_key: str,
+        *,
+        now: float | None = None,
+    ) -> MoralRepairState:
         if session_key in self._moral_repair_memory_cache:
             state = self._moral_repair_memory_cache[session_key]
-            if self._passive_load_is_fresh(state):
+            if self._passive_load_is_fresh(state, now=now):
                 return state
-            decayed_state = self.moral_repair_engine.passive_update(state)
+            decayed_state = self.moral_repair_engine.passive_update(state, now=now)
             if self._passive_update_changed(decayed_state, state):
                 state = decayed_state
             self._moral_repair_memory_cache[session_key] = state
@@ -2913,10 +3467,10 @@ class EmotionalStatePlugin(Star):
             logger.debug(f"{PLUGIN_NAME}: moral repair KV read failed, using empty state: {exc}")
             data = None
         state = MoralRepairState.from_dict(data)
-        if self._passive_load_is_fresh(state):
+        if self._passive_load_is_fresh(state, now=now):
             self._moral_repair_memory_cache[session_key] = state
             return state
-        decayed_state = self.moral_repair_engine.passive_update(state)
+        decayed_state = self.moral_repair_engine.passive_update(state, now=now)
         if self._passive_update_changed(decayed_state, state):
             state = decayed_state
         self._moral_repair_memory_cache[session_key] = state
@@ -2939,6 +3493,54 @@ class EmotionalStatePlugin(Star):
             await self.delete_kv_data(self._moral_repair_kv_key(session_key))
         except Exception as exc:
             logger.debug(f"{PLUGIN_NAME}: moral repair KV delete failed: {exc}")
+
+    async def _load_fallibility_state(
+        self,
+        session_key: str,
+        *,
+        now: float | None = None,
+    ) -> FallibilityState:
+        if session_key in self._fallibility_memory_cache:
+            state = self._fallibility_memory_cache[session_key]
+            if self._passive_load_is_fresh(state, now=now):
+                return state
+            decayed_state = self.fallibility_engine.passive_update(state, now=now)
+            if self._passive_update_changed(decayed_state, state):
+                state = decayed_state
+            self._fallibility_memory_cache[session_key] = state
+            return state
+        try:
+            data = await self.get_kv_data(self._fallibility_kv_key(session_key), None)
+        except Exception as exc:
+            logger.debug(f"{PLUGIN_NAME}: fallibility KV read failed, using empty state: {exc}")
+            data = None
+        state = FallibilityState.from_dict(data)
+        if self._passive_load_is_fresh(state, now=now):
+            self._fallibility_memory_cache[session_key] = state
+            return state
+        decayed_state = self.fallibility_engine.passive_update(state, now=now)
+        if self._passive_update_changed(decayed_state, state):
+            state = decayed_state
+        self._fallibility_memory_cache[session_key] = state
+        return state
+
+    async def _save_fallibility_state(
+        self,
+        session_key: str,
+        state: FallibilityState,
+    ) -> None:
+        self._fallibility_memory_cache[session_key] = state
+        try:
+            await self.put_kv_data(self._fallibility_kv_key(session_key), state.to_dict())
+        except Exception as exc:
+            logger.debug(f"{PLUGIN_NAME}: fallibility KV write failed, keeping memory only: {exc}")
+
+    async def _delete_fallibility_state(self, session_key: str) -> None:
+        self._fallibility_memory_cache.pop(session_key, None)
+        try:
+            await self.delete_kv_data(self._fallibility_kv_key(session_key))
+        except Exception as exc:
+            logger.debug(f"{PLUGIN_NAME}: fallibility KV delete failed: {exc}")
 
     def _build_parameters(self) -> EmotionParameters:
         return EmotionParameters(
@@ -3107,6 +3709,36 @@ class EmotionalStatePlugin(Star):
             trajectory_limit=self._cfg_int("moral_repair_trajectory_limit", 40),
         )
 
+    def _build_fallibility_parameters(self) -> FallibilityParameters:
+        return FallibilityParameters(
+            alpha_base=self._cfg_float("fallibility_alpha_base", 0.22),
+            alpha_min=self._cfg_float("fallibility_alpha_min", 0.02),
+            alpha_max=self._cfg_float("fallibility_alpha_max", 0.34),
+            confidence_midpoint=self._cfg_float(
+                "fallibility_confidence_midpoint",
+                0.5,
+            ),
+            confidence_slope=self._cfg_float("fallibility_confidence_slope", 6.0),
+            state_half_life_seconds=self._cfg_float(
+                "fallibility_state_half_life_seconds",
+                86400.0,
+            ),
+            rapid_update_half_life_seconds=self._cfg_float(
+                "fallibility_rapid_update_half_life_seconds",
+                45.0,
+            ),
+            min_update_interval_seconds=self._cfg_float(
+                "fallibility_min_update_interval_seconds",
+                10.0,
+            ),
+            max_impulse_per_update=self._cfg_float(
+                "fallibility_max_impulse_per_update",
+                0.12,
+            ),
+            max_error_pressure=self._cfg_float("fallibility_max_error_pressure", 0.55),
+            trajectory_limit=self._cfg_int("fallibility_trajectory_limit", 40),
+        )
+
     def _engine_for_persona(self, profile: PersonaProfile | None) -> EmotionEngine:
         if profile is None or not self._cfg_bool("persona_modeling", True):
             return self.engine
@@ -3125,6 +3757,9 @@ class EmotionalStatePlugin(Star):
 
     def _safety_boundary_enabled(self) -> bool:
         return self._cfg_bool("enable_safety_boundary", True)
+
+    def _shadow_diagnostics_enabled(self) -> bool:
+        return self._cfg_bool("enable_shadow_diagnostics", False)
 
     def _manual_reset_allowed(self) -> bool:
         return self._cfg_bool("allow_emotion_reset_backdoor", True)
@@ -3174,6 +3809,15 @@ class EmotionalStatePlugin(Star):
 
     def _moral_repair_reset_allowed(self) -> bool:
         return self._cfg_bool("allow_moral_repair_reset_backdoor", True)
+
+    def _fallibility_modeling_enabled(self) -> bool:
+        return self._cfg_bool("enable_fallibility_state", False)
+
+    def _fallibility_injection_enabled(self) -> bool:
+        return self._cfg_float("fallibility_injection_strength", 0.0) > 0.0
+
+    def _fallibility_reset_allowed(self) -> bool:
+        return self._cfg_bool("allow_fallibility_reset_backdoor", True)
 
     def _integrated_self_degradation_profile(self) -> str:
         profile = str(
@@ -3275,6 +3919,34 @@ class EmotionalStatePlugin(Star):
             "trajectory",
             "last_event_summary",
             "created_at",
+        ):
+            payload.pop(internal_key, None)
+        if include_prompt_fragment:
+            payload["prompt_fragment"] = ""
+        return payload
+
+    def _fallibility_disabled_payload(
+        self,
+        session_key: str,
+        *,
+        exposure: str = "plugin_safe",
+        include_prompt_fragment: bool = False,
+    ) -> dict[str, Any]:
+        state = FallibilityState.initial()
+        payload = fallibility_state_to_public_payload(
+            state,
+            session_key=session_key,
+            exposure=exposure,
+            safety_boundary=self._safety_boundary_enabled(),
+        )
+        payload["enabled"] = False
+        payload["reason"] = "enable_fallibility_state is false"
+        for internal_key in (
+            "values",
+            "dimensions",
+            "trajectory",
+            "confidence",
+            "last_reason",
         ):
             payload.pop(internal_key, None)
         if include_prompt_fragment:
@@ -3437,6 +4109,8 @@ class EmotionalStatePlugin(Star):
         session_key: str,
         profile: PersonaProfile | None,
         drift_state: PersonalityDriftState | None = None,
+        *,
+        now: float | None = None,
     ) -> PersonaProfile | None:
         if (
             profile is None
@@ -3447,6 +4121,7 @@ class EmotionalStatePlugin(Star):
         drift_state = drift_state or await self._load_personality_drift_state(
             session_key,
             profile,
+            now=now,
         )
         return self._apply_personality_drift(profile, drift_state)
 
@@ -3553,12 +4228,19 @@ class EmotionalStatePlugin(Star):
             return timing
         return "post"
 
+    def _observed_now(self) -> float:
+        now = time.time()
+        if not self._cfg_bool("benchmark_enable_simulated_time", False):
+            return now
+        offset = max(0.0, self._cfg_float("benchmark_time_offset_seconds", 0.0))
+        return now + offset
+
     def _request_to_text(self, request: ProviderRequest) -> str:
         context_parts: list[str] = []
         max_total_chars = max(300, self._cfg_int("request_context_max_chars", 1600))
         if request.system_prompt:
             context_parts.append("[system]\n" + self._clip(request.system_prompt, 800))
-        for item in self._tail_items(request.contexts or (), 8):
+        for item in self._tail_items(request.contexts, 8):
             context_parts.append(self._clip(self._context_item_to_text(item), 600))
         if request.extra_user_content_parts:
             extra = []
@@ -3590,18 +4272,18 @@ class EmotionalStatePlugin(Star):
             return context_text + "\n\n" + current_text
         return context_text or current_text or ""
 
-    def _tail_items(self, items: Any, limit: int) -> list[Any]:
+    def _tail_items(self, items: Any, limit: int) -> Sequence[Any]:
         limit = max(0, int(limit))
         if limit <= 0 or items is None:
-            return []
+            return ()
         if isinstance(items, Sequence) and not isinstance(items, (str, bytes, bytearray)):
-            return list(items[-limit:])
+            return items[-limit:]
         tail: list[Any] = []
         for item in items:
             tail.append(item)
             if len(tail) > limit:
                 tail.pop(0)
-        return tail
+        return tuple(tail)
 
     def _context_item_to_text(self, item: Any) -> str:
         if not isinstance(item, dict):
@@ -3684,6 +4366,9 @@ class EmotionalStatePlugin(Star):
 
     def _moral_repair_kv_key(self, session_key: str) -> str:
         return "moral_repair_state:" + self._safe_session_key(session_key)
+
+    def _fallibility_kv_key(self, session_key: str) -> str:
+        return "fallibility_state:" + self._safe_session_key(session_key)
 
     def _cfg(self, key: str, default: Any) -> Any:
         if not hasattr(self.config, "get"):

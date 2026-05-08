@@ -58,7 +58,7 @@ class AstrBotLifecycleTests(unittest.TestCase):
         async def fake_persona(self, event, request):
             return None
 
-        async def fake_load_state(self, session_key, persona_profile=None):
+        async def fake_load_state(self, session_key, persona_profile=None, **kwargs):
             state = EmotionState.initial()
             state.updated_at = 1000.0
             return state
@@ -131,6 +131,125 @@ class AstrBotLifecycleTests(unittest.TestCase):
         self.assertEqual(assessment_calls[0]["phase"], "pre_response")
         self.assertEqual(assessment_calls[0]["current_text"], "用户当前消息")
         self.assertIn("用户当前消息", plugin._last_request_text["s-pre"])
+
+    def test_benchmark_simulated_time_drives_lifecycle_update_timestamp(self):
+        plugin = new_plugin(
+            {
+                "assessment_timing": "pre",
+                "inject_state": False,
+                "benchmark_enable_simulated_time": True,
+                "benchmark_time_offset_seconds": 86400.0,
+            },
+        )
+        saves, _ = self._bind_common_state_hooks(plugin)
+        request = fake_request(session_id="s-sim-time", prompt="lifecycle marker")
+        before = time.time()
+
+        asyncio.run(plugin.on_llm_request(FakeEvent("s-sim-time"), request))
+
+        self.assertEqual(len(saves), 1)
+        self.assertGreaterEqual(saves[0][1].updated_at, before + 86399.0)
+        self.assertLessEqual(saves[0][1].updated_at, time.time() + 86401.0)
+
+    def test_benchmark_time_offset_is_ignored_until_explicitly_enabled(self):
+        plugin = new_plugin(
+            {
+                "assessment_timing": "pre",
+                "inject_state": False,
+                "benchmark_enable_simulated_time": False,
+                "benchmark_time_offset_seconds": 31536000.0,
+            },
+        )
+        saves, _ = self._bind_common_state_hooks(plugin)
+        request = fake_request(session_id="s-real-time", prompt="normal marker")
+        before = time.time()
+
+        asyncio.run(plugin.on_llm_request(FakeEvent("s-real-time"), request))
+
+        self.assertEqual(len(saves), 1)
+        self.assertGreaterEqual(saves[0][1].updated_at, before)
+        self.assertLessEqual(saves[0][1].updated_at, time.time() + 1.0)
+
+    def test_simulated_time_reaches_injection_only_auxiliary_fallback_loads(self):
+        from fallibility_engine import FallibilityState
+        from humanlike_engine import HumanlikeState
+        from lifelike_learning_engine import LifelikeLearningState
+        from moral_repair_engine import MoralRepairState
+        from personality_drift_engine import PersonalityDriftState
+
+        offset = 604800.0
+        plugin = new_plugin(
+            {
+                "assessment_timing": "post",
+                "enable_humanlike_state": True,
+                "enable_lifelike_learning": True,
+                "enable_personality_drift": True,
+                "enable_moral_repair_state": True,
+                "enable_fallibility_state": True,
+                "fallibility_injection_strength": 0.3,
+                "benchmark_enable_simulated_time": True,
+                "benchmark_time_offset_seconds": offset,
+            },
+        )
+        self._bind_common_state_hooks(plugin)
+        seen_now = []
+
+        async def fake_load_humanlike(self, session_key, *, now=None):
+            seen_now.append(("humanlike", now))
+            state = HumanlikeState.initial()
+            state.updated_at = 1.0
+            return state
+
+        async def fake_load_lifelike(self, session_key, *, now=None):
+            seen_now.append(("lifelike", now))
+            state = LifelikeLearningState.initial()
+            state.updated_at = 1.0
+            return state
+
+        async def fake_load_drift(self, session_key, profile=None, *, now=None):
+            seen_now.append(("drift", now))
+            return PersonalityDriftState.initial(
+                persona_fingerprint=profile.fingerprint if profile else "default",
+                now=1.0,
+            )
+
+        async def fake_load_moral(self, session_key, *, now=None):
+            seen_now.append(("moral", now))
+            state = MoralRepairState.initial()
+            state.updated_at = 1.0
+            return state
+
+        async def fake_load_fallibility(self, session_key, *, now=None):
+            seen_now.append(("fallibility", now))
+            state = FallibilityState.initial()
+            state.updated_at = 1.0
+            return state
+
+        async def fake_save_aux(self, session_key, state):
+            pass
+
+        bind_async(plugin, "_load_humanlike_state", fake_load_humanlike)
+        bind_async(plugin, "_load_lifelike_learning_state", fake_load_lifelike)
+        bind_async(plugin, "_load_personality_drift_state", fake_load_drift)
+        bind_async(plugin, "_load_moral_repair_state", fake_load_moral)
+        bind_async(plugin, "_load_fallibility_state", fake_load_fallibility)
+        bind_async(plugin, "_save_humanlike_state", fake_save_aux)
+        bind_async(plugin, "_save_lifelike_learning_state", fake_save_aux)
+        bind_async(plugin, "_save_personality_drift_state", fake_save_aux)
+        bind_async(plugin, "_save_moral_repair_state", fake_save_aux)
+        bind_async(plugin, "_save_fallibility_state", fake_save_aux)
+        request = fake_request(session_id="s-fallback-simtime", prompt="quiet update")
+        before = time.time()
+
+        asyncio.run(plugin.on_llm_request(FakeEvent("s-fallback-simtime"), request))
+
+        self.assertEqual(
+            {name for name, _ in seen_now},
+            {"humanlike", "lifelike", "drift", "moral", "fallibility"},
+        )
+        for _, observed_at in seen_now:
+            self.assertGreaterEqual(observed_at, before + offset - 1.0)
+            self.assertLessEqual(observed_at, time.time() + offset + 1.0)
 
     def test_on_llm_request_post_timing_skips_pre_assessment_but_injects_state(self):
         plugin = new_plugin({"assessment_timing": "post"})
@@ -266,7 +385,7 @@ class AstrBotLifecycleTests(unittest.TestCase):
             await asyncio.sleep(0.05)
             return fake_observation()
 
-        async def slow_load_moral(self, session_key):
+        async def slow_load_moral(self, session_key, **kwargs):
             await asyncio.sleep(0.05)
             return MoralRepairState.initial()
 
@@ -348,7 +467,7 @@ class AstrBotLifecycleTests(unittest.TestCase):
         self._bind_common_state_hooks(plugin)
         humanlike_saves = []
 
-        async def fake_load_humanlike_state(self, session_key):
+        async def fake_load_humanlike_state(self, session_key, **kwargs):
             return HumanlikeState.initial()
 
         async def fake_save_humanlike_state(self, session_key, state):
@@ -380,7 +499,7 @@ class AstrBotLifecycleTests(unittest.TestCase):
         self._bind_common_state_hooks(plugin)
         lifelike_saves = []
 
-        async def fake_load_lifelike_state(self, session_key):
+        async def fake_load_lifelike_state(self, session_key, **kwargs):
             return LifelikeLearningState.initial()
 
         async def fake_save_lifelike_state(self, session_key, state):
@@ -415,7 +534,7 @@ class AstrBotLifecycleTests(unittest.TestCase):
         )
         self._bind_common_state_hooks(plugin)
 
-        async def fake_load_lifelike_state(self, session_key):
+        async def fake_load_lifelike_state(self, session_key, **kwargs):
             return LifelikeLearningState.initial()
 
         async def fake_save_lifelike_state(self, session_key, state):
@@ -435,10 +554,79 @@ class AstrBotLifecycleTests(unittest.TestCase):
         self.assertIn("bot_emotion_state", texts[0])
         self.assertIn("lifelike common-ground", texts[1])
 
+    def test_fallibility_enabled_with_zero_strength_updates_without_injection(self):
+        from fallibility_engine import FallibilityState
+
+        plugin = new_plugin(
+            {
+                "assessment_timing": "post",
+                "enable_fallibility_state": True,
+                "fallibility_injection_strength": 0.0,
+            },
+        )
+        self._bind_common_state_hooks(plugin)
+        fallibility_saves = []
+
+        async def fake_load_fallibility_state(self, session_key, **kwargs):
+            return FallibilityState.initial()
+
+        async def fake_save_fallibility_state(self, session_key, state):
+            fallibility_saves.append((session_key, state))
+
+        bind_async(plugin, "_load_fallibility_state", fake_load_fallibility_state)
+        bind_async(plugin, "_save_fallibility_state", fake_save_fallibility_state)
+        request = fake_request(
+            session_id="s-fallibility",
+            prompt="I may have misread that, sorry, I should correct it.",
+        )
+
+        asyncio.run(plugin.on_llm_request(FakeEvent("s-fallibility"), request))
+
+        self.assertEqual(len(fallibility_saves), 1)
+        self.assertEqual(fallibility_saves[0][0], "s-fallibility")
+        self.assertIn("possible_mistake_cue", fallibility_saves[0][1].flags)
+        texts = [part.text for part in request.extra_user_content_parts]
+        self.assertEqual(len(texts), 1)
+        self.assertIn("bot_emotion_state", texts[0])
+        self.assertNotIn("fallibility-state modulation", texts[0])
+
+    def test_fallibility_injects_when_enabled_and_strength_positive(self):
+        from fallibility_engine import FallibilityState
+
+        plugin = new_plugin(
+            {
+                "assessment_timing": "post",
+                "enable_fallibility_state": True,
+                "fallibility_injection_strength": 0.3,
+            },
+        )
+        self._bind_common_state_hooks(plugin)
+
+        async def fake_load_fallibility_state(self, session_key, **kwargs):
+            return FallibilityState.initial()
+
+        async def fake_save_fallibility_state(self, session_key, state):
+            pass
+
+        bind_async(plugin, "_load_fallibility_state", fake_load_fallibility_state)
+        bind_async(plugin, "_save_fallibility_state", fake_save_fallibility_state)
+        request = fake_request(
+            session_id="s-fallibility-inject",
+            prompt="I may have misread that.",
+        )
+
+        asyncio.run(plugin.on_llm_request(FakeEvent("s-fallibility-inject"), request))
+
+        texts = [part.text for part in request.extra_user_content_parts]
+        self.assertEqual(len(texts), 2)
+        self.assertIn("bot_emotion_state", texts[0])
+        self.assertIn("fallibility-state modulation", texts[1])
+
     def test_on_llm_request_overlaps_auxiliary_state_loads(self):
         from humanlike_engine import HumanlikeState
         from lifelike_learning_engine import LifelikeLearningState
         from moral_repair_engine import MoralRepairState
+        from fallibility_engine import FallibilityState
 
         plugin = new_plugin(
             {
@@ -446,25 +634,31 @@ class AstrBotLifecycleTests(unittest.TestCase):
                 "enable_humanlike_state": True,
                 "enable_lifelike_learning": True,
                 "enable_moral_repair_state": True,
+                "enable_fallibility_state": True,
                 "humanlike_injection_strength": 0.0,
                 "lifelike_learning_injection_strength": 0.0,
                 "moral_repair_injection_strength": 0.0,
+                "fallibility_injection_strength": 0.0,
             },
         )
         self._bind_common_state_hooks(plugin)
         saves = []
 
-        async def slow_humanlike(self, session_key):
+        async def slow_humanlike(self, session_key, **kwargs):
             await asyncio.sleep(0.05)
             return HumanlikeState.initial()
 
-        async def slow_lifelike(self, session_key):
+        async def slow_lifelike(self, session_key, **kwargs):
             await asyncio.sleep(0.05)
             return LifelikeLearningState.initial()
 
-        async def slow_moral(self, session_key):
+        async def slow_moral(self, session_key, **kwargs):
             await asyncio.sleep(0.05)
             return MoralRepairState.initial()
+
+        async def slow_fallibility(self, session_key, **kwargs):
+            await asyncio.sleep(0.05)
+            return FallibilityState.initial()
 
         async def save_aux(self, session_key, state):
             saves.append((session_key, type(state).__name__))
@@ -472,9 +666,11 @@ class AstrBotLifecycleTests(unittest.TestCase):
         bind_async(plugin, "_load_humanlike_state", slow_humanlike)
         bind_async(plugin, "_load_lifelike_learning_state", slow_lifelike)
         bind_async(plugin, "_load_moral_repair_state", slow_moral)
+        bind_async(plugin, "_load_fallibility_state", slow_fallibility)
         bind_async(plugin, "_save_humanlike_state", save_aux)
         bind_async(plugin, "_save_lifelike_learning_state", save_aux)
         bind_async(plugin, "_save_moral_repair_state", save_aux)
+        bind_async(plugin, "_save_fallibility_state", save_aux)
 
         started = time.perf_counter()
         asyncio.run(
@@ -488,7 +684,12 @@ class AstrBotLifecycleTests(unittest.TestCase):
         self.assertLess(elapsed, 0.16)
         self.assertEqual(
             [state_name for _, state_name in saves],
-            ["HumanlikeState", "LifelikeLearningState", "MoralRepairState"],
+            [
+                "HumanlikeState",
+                "LifelikeLearningState",
+                "MoralRepairState",
+                "FallibilityState",
+            ],
         )
 
     def test_personality_drift_enabled_uses_real_time_state_without_forcing_prompt(self):
@@ -512,7 +713,12 @@ class AstrBotLifecycleTests(unittest.TestCase):
         self._bind_common_state_hooks(plugin)
         drift_saves = []
 
-        async def fake_load_personality_drift_state(self, session_key, profile=None):
+        async def fake_load_personality_drift_state(
+            self,
+            session_key,
+            profile=None,
+            **kwargs,
+        ):
             return PersonalityDriftState.initial(
                 persona_fingerprint=profile.fingerprint if profile else "default",
                 now=0.0,
@@ -548,7 +754,12 @@ class AstrBotLifecycleTests(unittest.TestCase):
         self._bind_common_state_hooks(plugin)
         drift_saves = []
 
-        async def fake_load_personality_drift_state(self, session_key, profile=None):
+        async def fake_load_personality_drift_state(
+            self,
+            session_key,
+            profile=None,
+            **kwargs,
+        ):
             return PersonalityDriftState.initial(
                 persona_fingerprint=profile.fingerprint if profile else "default",
                 now=0.0,
@@ -583,7 +794,12 @@ class AstrBotLifecycleTests(unittest.TestCase):
         )
         self._bind_common_state_hooks(plugin)
 
-        async def fake_load_personality_drift_state(self, session_key, profile=None):
+        async def fake_load_personality_drift_state(
+            self,
+            session_key,
+            profile=None,
+            **kwargs,
+        ):
             state = PersonalityDriftState.initial(
                 persona_fingerprint=profile.fingerprint if profile else "default",
                 now=0.0,
@@ -619,7 +835,12 @@ class AstrBotLifecycleTests(unittest.TestCase):
         self._bind_common_state_hooks(plugin)
         loads = []
 
-        async def fake_load_personality_drift_state(self, session_key, profile=None):
+        async def fake_load_personality_drift_state(
+            self,
+            session_key,
+            profile=None,
+            **kwargs,
+        ):
             loads.append(session_key)
             state = PersonalityDriftState.initial(
                 persona_fingerprint=profile.fingerprint if profile else "default",

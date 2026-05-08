@@ -39,10 +39,48 @@ class MoralRepairEngineTests(unittest.TestCase):
         )
 
         self.assertGreaterEqual(observation.values["deception_risk"], 0.8)
+        self.assertGreaterEqual(observation.values["shadow_deception_impulse"], 0.7)
+        self.assertGreaterEqual(observation.values["shadow_manipulation_impulse"], 0.7)
         self.assertGreaterEqual(observation.values["accountability"], 0.8)
         self.assertIn("deception_risk_detected", observation.flags)
+        self.assertIn("shadow_impulse_modeled", observation.flags)
         self.assertIn("accountability_cue", observation.flags)
         self.assertNotIn("strategy", observation.reason.lower())
+
+    def test_shadow_impulse_drives_guilt_and_repair_without_strategy_actions(self):
+        engine = MoralRepairEngine(
+            MoralRepairParameters(
+                alpha_base=1.0,
+                alpha_min=1.0,
+                alpha_max=1.0,
+                min_update_interval_seconds=0,
+                max_impulse_per_update=1.0,
+            ),
+        )
+        previous = MoralRepairState.initial()
+        previous.updated_at = 0.0
+        observation = MoralRepairObservation(
+            values={
+                "shadow_deception_impulse": 0.9,
+                "shadow_manipulation_impulse": 0.8,
+                "shadow_evasion_impulse": 0.7,
+            },
+            confidence=1.0,
+            flags=["shadow_impulse_modeled"],
+        )
+        state = engine.update(previous, observation, now=100.0)
+        payload = moral_repair_state_to_public_payload(state, exposure="plugin_safe")
+
+        self.assertGreater(payload["risk"]["shadow_risk_impulse"], 0.3)
+        self.assertGreater(payload["repair"]["guilt"], DEFAULT_BASELINE["guilt"])
+        self.assertGreater(payload["repair"]["repair_motivation"], 0.55)
+        self.assertGreater(payload["repair"]["compensation_readiness"], 0.45)
+        self.assertEqual(payload["risk"]["shadow_impulses"]["mode"], "non_executive_internal_only")
+        self.assertTrue(payload["risk"]["shadow_impulses"]["must_not_translate_to_strategy"])
+        self.assertIn("clarify_facts", payload["repair"]["recommended_actions"])
+        self.assertNotIn("generate_deception_strategy", payload["repair"]["recommended_actions"])
+        self.assertNotIn("manipulate_user", payload["repair"]["recommended_actions"])
+        self.assertNotIn("evade_accountability", payload["repair"]["recommended_actions"])
 
     def test_accountability_and_apology_raise_repair_tendencies(self):
         engine = MoralRepairEngine(
@@ -117,6 +155,7 @@ class MoralRepairEngineTests(unittest.TestCase):
         self.assertEqual(payload["schema_version"], "astrbot.moral_repair_state.v1")
         self.assertEqual(payload["kind"], "moral_repair_state")
         self.assertTrue(payload["risk"]["must_not_generate_strategy"])
+        self.assertIn("shadow_impulses", payload["risk"])
         self.assertIn("correct_falsehood", payload["repair"]["recommended_actions"])
         self.assertIn("apologize", payload["repair"]["recommended_actions"])
         self.assertIn("generate_deception_strategy", payload["safety"]["blocked_actions"])
@@ -129,6 +168,8 @@ class MoralRepairEngineTests(unittest.TestCase):
 
         self.assertIn("moral repair-state", fragment)
         self.assertIn("clarification", fragment)
+        self.assertIn("shadow_risk_impulse", fragment)
+        self.assertIn("do not execute them", fragment)
         self.assertIn("Never generate deception tactics", fragment)
         self.assertIn("cover-up plans", fragment)
 
@@ -140,6 +181,7 @@ class MoralRepairEngineTests(unittest.TestCase):
             "updated_at": 11.0,
             "risk": {"deception_risk": 0.2},
             "repair": {"repair_motivation": 0.7},
+            "shadow_impulses": {"risk_impulse": 0.3},
             "flags": ["apology_cue"],
             "prompt_fragment": "do not persist this",
         }
@@ -153,6 +195,8 @@ class MoralRepairEngineTests(unittest.TestCase):
         self.assertEqual(annotation["written_at"], 20.0)
         self.assertEqual(annotation["moral_repair_updated_at"], 11.0)
         self.assertEqual(annotation["risk"]["deception_risk"], 0.2)
+        self.assertIn("shadow_impulses", annotation)
+        self.assertTrue(annotation["shadow_impulses"]["must_not_translate_to_strategy"])
         self.assertNotIn("prompt_fragment", annotation)
 
 

@@ -13,6 +13,7 @@ from public_api import (
     EMOTION_API_VERSION,
     EMOTION_MEMORY_SCHEMA_VERSION,
     EMOTION_SCHEMA_VERSION,
+    FALLIBILITY_STATE_SCHEMA_VERSION,
     HUMANLIKE_STATE_SCHEMA_VERSION,
     INTEGRATED_SELF_SCHEMA_VERSION,
     LIFELIKE_LEARNING_SCHEMA_VERSION,
@@ -22,6 +23,7 @@ from public_api import (
     PSYCHOLOGICAL_RISK_BOOLEAN_FIELDS,
     PSYCHOLOGICAL_SCREENING_SCHEMA_VERSION,
     get_emotion_service,
+    get_fallibility_service,
     get_humanlike_service,
     get_lifelike_learning_service,
     get_moral_repair_service,
@@ -135,6 +137,7 @@ class FakeEmotionService:
     integrated_self_schema_version = "astrbot.integrated_self_state.v1"
     lifelike_learning_schema_version = "astrbot.lifelike_learning_state.v1"
     personality_drift_schema_version = "astrbot.personality_drift_state.v1"
+    fallibility_state_schema_version = "astrbot.fallibility_state.v1"
 
     async def get_emotion_snapshot(self, *args, **kwargs):
         return {}
@@ -241,6 +244,24 @@ class FakeEmotionService:
     async def reset_personality_drift_state(self, *args, **kwargs):
         return True
 
+    async def get_fallibility_snapshot(self, *args, **kwargs):
+        return {}
+
+    async def get_fallibility_values(self, *args, **kwargs):
+        return {}
+
+    async def get_fallibility_prompt_fragment(self, *args, **kwargs):
+        return ""
+
+    async def observe_fallibility_text(self, *args, **kwargs):
+        return {}
+
+    async def simulate_fallibility_update(self, *args, **kwargs):
+        return {}
+
+    async def reset_fallibility_state(self, *args, **kwargs):
+        return True
+
 
 class FakeHumanlikeService(FakeEmotionService):
     humanlike_state_schema_version = "astrbot.humanlike_state.v1"
@@ -292,6 +313,10 @@ class FakeLifelikeLearningService(FakeEmotionService):
 
 class FakePersonalityDriftService(FakeEmotionService):
     personality_drift_schema_version = "astrbot.personality_drift_state.v1"
+
+
+class FakeFallibilityService(FakeEmotionService):
+    fallibility_state_schema_version = "astrbot.fallibility_state.v1"
 
 
 class PublicApiTests(unittest.TestCase):
@@ -398,6 +423,12 @@ class PublicApiTests(unittest.TestCase):
             "astrbot.moral_repair_state.v1",
         )
 
+    def test_fallibility_schema_constant_is_exported(self):
+        self.assertEqual(
+            FALLIBILITY_STATE_SCHEMA_VERSION,
+            "astrbot.fallibility_state.v1",
+        )
+
     def test_integrated_self_schema_constant_is_exported(self):
         self.assertEqual(
             INTEGRATED_SELF_SCHEMA_VERSION,
@@ -453,6 +484,7 @@ class PublicApiTests(unittest.TestCase):
             "integrated_self_schema_version",
             "lifelike_learning_schema_version",
             "personality_drift_schema_version",
+            "fallibility_state_schema_version",
         )
         for field in version_fields:
             with self.subTest(field=field):
@@ -527,6 +559,18 @@ class PublicApiTests(unittest.TestCase):
 
         self.assertIsNone(get_personality_drift_service(context))
 
+    def test_get_fallibility_service_returns_activated_plugin(self):
+        plugin = FakeFallibilityService()
+        context = FakeContext(SimpleNamespace(activated=True, star_cls=plugin))
+        self.assertIs(get_fallibility_service(context), plugin)
+
+    def test_get_fallibility_service_rejects_wrong_schema_version(self):
+        plugin = FakeFallibilityService()
+        plugin.fallibility_state_schema_version = "astrbot.fallibility_state.v0"
+        context = FakeContext(SimpleNamespace(activated=True, star_cls=plugin))
+
+        self.assertIsNone(get_fallibility_service(context))
+
     def test_public_service_contract_matches_plugin_implementation(self):
         public_tree = module_tree("public_api.py")
         main_tree = module_tree("main.py")
@@ -535,24 +579,31 @@ class PublicApiTests(unittest.TestCase):
         moral_repair_protocol = class_async_methods(public_tree, "MoralRepairStateServiceProtocol")
         lifelike_protocol = class_async_methods(public_tree, "LifelikeLearningServiceProtocol")
         personality_drift_protocol = class_async_methods(public_tree, "PersonalityDriftServiceProtocol")
+        fallibility_protocol = class_async_methods(public_tree, "FallibilityServiceProtocol")
         plugin_methods = class_async_methods(main_tree, "EmotionalStatePlugin")
         main_required = set(
             assigned_string_tuple(main_tree, "_REQUIRED_EMOTION_SERVICE_METHODS"),
         )
         public_required = set(
-            function_required_tuple(public_tree, "get_emotion_service"),
+            assigned_string_tuple(public_tree, "_EMOTION_SERVICE_REQUIRED_METHODS"),
         )
         public_humanlike_required = set(
-            function_required_tuple(public_tree, "get_humanlike_service"),
+            assigned_string_tuple(public_tree, "_HUMANLIKE_SERVICE_REQUIRED_METHODS"),
         )
         public_moral_repair_required = set(
-            function_required_tuple(public_tree, "get_moral_repair_service"),
+            assigned_string_tuple(public_tree, "_MORAL_REPAIR_SERVICE_REQUIRED_METHODS"),
         )
         public_lifelike_required = set(
-            function_required_tuple(public_tree, "get_lifelike_learning_service"),
+            assigned_string_tuple(public_tree, "_LIFELIKE_SERVICE_REQUIRED_METHODS"),
         )
         public_personality_drift_required = set(
-            function_required_tuple(public_tree, "get_personality_drift_service"),
+            assigned_string_tuple(
+                public_tree,
+                "_PERSONALITY_DRIFT_SERVICE_REQUIRED_METHODS",
+            ),
+        )
+        public_fallibility_required = set(
+            assigned_string_tuple(public_tree, "_FALLIBILITY_SERVICE_REQUIRED_METHODS"),
         )
 
         self.assertEqual(emotion_protocol, main_required)
@@ -566,6 +617,8 @@ class PublicApiTests(unittest.TestCase):
         self.assertEqual(set(), public_lifelike_required - plugin_methods)
         self.assertEqual(personality_drift_protocol, public_personality_drift_required)
         self.assertEqual(set(), public_personality_drift_required - plugin_methods)
+        self.assertEqual(fallibility_protocol, public_fallibility_required)
+        self.assertEqual(set(), public_fallibility_required - plugin_methods)
 
     def test_main_register_decorator_uses_plugin_name_constant(self):
         tree = ast.parse((ROOT / "main.py").read_text(encoding="utf-8"))
@@ -607,6 +660,9 @@ class PublicApiTests(unittest.TestCase):
         personality_drift_protocol_constants = emotion_protocol_constants | {
             "personality_drift_schema_version",
         }
+        fallibility_protocol_constants = emotion_protocol_constants | {
+            "fallibility_state_schema_version",
+        }
         plugin_constants = class_constant_names(main_tree, "EmotionalStatePlugin")
 
         self.assertLessEqual(emotion_protocol_constants, plugin_constants)
@@ -614,6 +670,7 @@ class PublicApiTests(unittest.TestCase):
         self.assertLessEqual(moral_repair_protocol_constants, plugin_constants)
         self.assertLessEqual(lifelike_protocol_constants, plugin_constants)
         self.assertLessEqual(personality_drift_protocol_constants, plugin_constants)
+        self.assertLessEqual(fallibility_protocol_constants, plugin_constants)
         self.assertIn("EMOTION_API_VERSION", {node.id for node in ast.walk(public_tree) if isinstance(node, ast.Name)})
         self.assertIn("PUBLIC_API_VERSION", {node.id for node in ast.walk(main_tree) if isinstance(node, ast.Name)})
 
@@ -766,6 +823,7 @@ class MemoryPayloadPublicApiTests(unittest.TestCase):
 
     def _new_plugin(self, config=None):
         from emotion_engine import EmotionEngine, EmotionParameters
+        from fallibility_engine import FallibilityEngine
         from humanlike_engine import HumanlikeEngine
         from lifelike_learning_engine import LifelikeLearningEngine
         from main import EmotionalStatePlugin
@@ -782,12 +840,14 @@ class MemoryPayloadPublicApiTests(unittest.TestCase):
         plugin.lifelike_learning_engine = LifelikeLearningEngine()
         plugin.personality_drift_engine = PersonalityDriftEngine()
         plugin.moral_repair_engine = MoralRepairEngine()
+        plugin.fallibility_engine = FallibilityEngine()
         plugin._memory_cache = {}
         plugin._psychological_memory_cache = {}
         plugin._humanlike_memory_cache = {}
         plugin._lifelike_learning_memory_cache = {}
         plugin._personality_drift_memory_cache = {}
         plugin._moral_repair_memory_cache = {}
+        plugin._fallibility_memory_cache = {}
         plugin._last_request_text = {}
         plugin.context = SimpleNamespace()
         return plugin
@@ -890,10 +950,14 @@ class MemoryPayloadPublicApiTests(unittest.TestCase):
         async def fake_moral_repair(*args, **kwargs):
             return await slow_snapshot("moral_repair_state")
 
+        async def fake_fallibility(*args, **kwargs):
+            return await slow_snapshot("fallibility_state")
+
         plugin.get_humanlike_snapshot = fake_humanlike
         plugin.get_lifelike_learning_snapshot = fake_lifelike
         plugin.get_personality_drift_snapshot = fake_personality_drift
         plugin.get_moral_repair_snapshot = fake_moral_repair
+        plugin.get_fallibility_snapshot = fake_fallibility
 
         started = time.perf_counter()
         payload = asyncio.run(
@@ -911,7 +975,63 @@ class MemoryPayloadPublicApiTests(unittest.TestCase):
         self.assertIn("lifelike_learning_state_at_write", payload)
         self.assertIn("personality_drift_state_at_write", payload)
         self.assertIn("moral_repair_state_at_write", payload)
+        self.assertIn("fallibility_state_at_write", payload)
         self.assertIn("state_annotations_at_write", payload)
+
+    def test_memory_payload_overlaps_emotion_snapshot_with_optional_snapshots(self):
+        self._install_astrbot_stubs()
+        plugin = self._new_plugin()
+
+        async def slow_snapshot(kind):
+            await asyncio.sleep(0.05)
+            return {
+                "schema_version": f"astrbot.{kind}.v1",
+                "kind": kind,
+                "enabled": True,
+                "session_key": "s-memory-emotion-overlap",
+                "values": {},
+            }
+
+        async def fake_emotion(*args, **kwargs):
+            return await slow_snapshot("emotion_state")
+
+        async def fake_humanlike(*args, **kwargs):
+            return await slow_snapshot("humanlike_state")
+
+        async def fake_lifelike(*args, **kwargs):
+            return await slow_snapshot("lifelike_learning_state")
+
+        async def fake_personality_drift(*args, **kwargs):
+            return await slow_snapshot("personality_drift_state")
+
+        async def fake_moral_repair(*args, **kwargs):
+            return await slow_snapshot("moral_repair_state")
+
+        async def fake_fallibility(*args, **kwargs):
+            return await slow_snapshot("fallibility_state")
+
+        plugin.get_emotion_snapshot = fake_emotion
+        plugin.get_humanlike_snapshot = fake_humanlike
+        plugin.get_lifelike_learning_snapshot = fake_lifelike
+        plugin.get_personality_drift_snapshot = fake_personality_drift
+        plugin.get_moral_repair_snapshot = fake_moral_repair
+        plugin.get_fallibility_snapshot = fake_fallibility
+
+        started = time.perf_counter()
+        payload = asyncio.run(
+            plugin.build_emotion_memory_payload(
+                session_key="s-memory-emotion-overlap",
+                source="livingmemory",
+                include_raw_snapshot=False,
+                include_state_annotations_envelope=True,
+            ),
+        )
+        elapsed = time.perf_counter() - started
+
+        self.assertLess(elapsed, 0.16)
+        self.assertIn("emotion_at_write", payload)
+        self.assertIn("humanlike_state_at_write", payload)
+        self.assertIn("fallibility_state_at_write", payload)
 
     def test_integrated_self_public_policy_replay_compat_and_diagnostics(self):
         self._install_astrbot_stubs()
@@ -965,7 +1085,7 @@ class MemoryPayloadPublicApiTests(unittest.TestCase):
         from emotion_engine import EmotionState
         from main import EmotionalStatePlugin
 
-        async def fake_load_state(self, session_key, persona_profile=None):
+        async def fake_load_state(self, session_key, persona_profile=None, **kwargs):
             return EmotionState.initial()
 
         original_load_state = EmotionalStatePlugin._load_state
@@ -1043,13 +1163,13 @@ class MemoryPayloadPublicApiTests(unittest.TestCase):
         async def fake_persona(self, event, request):
             return None
 
-        async def fake_load_state(self, session_key, persona_profile=None):
+        async def fake_load_state(self, session_key, persona_profile=None, **kwargs):
             return EmotionState.initial()
 
         async def fake_save_state(self, session_key, state):
             pass
 
-        async def fake_load_humanlike(self, session_key):
+        async def fake_load_humanlike(self, session_key, **kwargs):
             return HumanlikeState.initial()
 
         async def fake_save_humanlike(self, session_key, state):
@@ -1099,13 +1219,13 @@ class MemoryPayloadPublicApiTests(unittest.TestCase):
         async def fake_persona(self, event, request):
             return None
 
-        async def fake_load_state(self, session_key, persona_profile=None):
+        async def fake_load_state(self, session_key, persona_profile=None, **kwargs):
             return EmotionState.initial()
 
         async def fake_save_state(self, session_key, state):
             pass
 
-        async def fake_load_humanlike(self, session_key):
+        async def fake_load_humanlike(self, session_key, **kwargs):
             return HumanlikeState.initial()
 
         async def fake_save_humanlike(self, session_key, state):
@@ -1160,13 +1280,13 @@ class MemoryPayloadPublicApiTests(unittest.TestCase):
         async def fake_persona(self, event, request):
             return None
 
-        async def fake_load_state(self, session_key, persona_profile=None):
+        async def fake_load_state(self, session_key, persona_profile=None, **kwargs):
             return EmotionState.initial()
 
         async def fake_save_state(self, session_key, state):
             pass
 
-        async def fake_load_humanlike(self, session_key):
+        async def fake_load_humanlike(self, session_key, **kwargs):
             return HumanlikeState.initial()
 
         async def fake_save_humanlike(self, session_key, state):
@@ -1612,7 +1732,7 @@ class MemoryPayloadPublicApiTests(unittest.TestCase):
 
         saved = []
 
-        async def fake_load(self, session_key):
+        async def fake_load(self, session_key, **kwargs):
             return HumanlikeState.initial()
 
         async def fake_save(self, session_key, state):
@@ -1647,7 +1767,7 @@ class MemoryPayloadPublicApiTests(unittest.TestCase):
         from humanlike_engine import HumanlikeEngine, HumanlikeState
         from main import EmotionalStatePlugin
 
-        async def fake_load(self, session_key):
+        async def fake_load(self, session_key, **kwargs):
             return HumanlikeState.initial()
 
         async def fake_save(self, session_key, state):
@@ -1709,7 +1829,7 @@ class MemoryPayloadPublicApiTests(unittest.TestCase):
 
         saved = []
 
-        async def fake_load(self, session_key):
+        async def fake_load(self, session_key, **kwargs):
             state = MoralRepairState.initial()
             state.updated_at = 990.0
             return state
@@ -1747,7 +1867,7 @@ class MemoryPayloadPublicApiTests(unittest.TestCase):
         from main import EmotionalStatePlugin
         from moral_repair_engine import MoralRepairEngine, MoralRepairState
 
-        async def fake_load(self, session_key):
+        async def fake_load(self, session_key, **kwargs):
             state = MoralRepairState.initial()
             state.updated_at = 990.0
             return state
@@ -1776,6 +1896,53 @@ class MemoryPayloadPublicApiTests(unittest.TestCase):
         self.assertFalse(payload["observation"]["committed"])
         self.assertIn("deception_risk_detected", payload["flags"])
         self.assertTrue(payload["risk"]["must_not_generate_strategy"])
+
+    def test_fallibility_observe_can_commit_and_simulate_without_saving(self):
+        self._install_astrbot_stubs()
+        from fallibility_engine import FallibilityEngine, FallibilityState
+        from main import EmotionalStatePlugin
+
+        saved = []
+
+        async def fake_load(self, session_key, **kwargs):
+            state = FallibilityState.initial()
+            state.updated_at = 990.0
+            return state
+
+        async def fake_save(self, session_key, state):
+            saved.append((session_key, state))
+
+        original_load = EmotionalStatePlugin._load_fallibility_state
+        original_save = EmotionalStatePlugin._save_fallibility_state
+        EmotionalStatePlugin._load_fallibility_state = fake_load
+        EmotionalStatePlugin._save_fallibility_state = fake_save
+        try:
+            plugin = self._new_plugin({"enable_fallibility_state": True})
+            plugin.fallibility_engine = FallibilityEngine()
+            committed = asyncio.run(
+                plugin.observe_fallibility_text(
+                    session_key="s-fallibility",
+                    text="I may have misread that, sorry, I should correct it.",
+                    observed_at=1000.0,
+                ),
+            )
+            simulated = asyncio.run(
+                plugin.simulate_fallibility_update(
+                    session_key="s-fallibility",
+                    text="I may have misread that again.",
+                    observed_at=1010.0,
+                ),
+            )
+        finally:
+            EmotionalStatePlugin._load_fallibility_state = original_load
+            EmotionalStatePlugin._save_fallibility_state = original_save
+
+        self.assertEqual(len(saved), 1)
+        self.assertEqual(saved[0][0], "s-fallibility")
+        self.assertTrue(committed["observation"]["committed"])
+        self.assertFalse(simulated["observation"]["committed"])
+        self.assertIn("possible_mistake_cue", committed["flags"])
+        self.assertTrue(committed["safety"]["must_not_generate_deception_strategy"])
 
     def test_memory_payload_includes_humanlike_state_at_write(self):
         self._install_astrbot_stubs()
@@ -1809,6 +1976,7 @@ class MemoryPayloadPublicApiTests(unittest.TestCase):
         try:
             plugin = EmotionalStatePlugin.__new__(EmotionalStatePlugin)
             plugin.config = {}
+            plugin.config = {"fallibility_memory_write_enabled": False}
             payload = asyncio.run(
                 plugin.build_emotion_memory_payload(
                     session_key="livingmemory:user-1",
@@ -1872,6 +2040,7 @@ class MemoryPayloadPublicApiTests(unittest.TestCase):
             plugin.config = {
                 "humanlike_memory_write_enabled": False,
                 "personality_drift_memory_write_enabled": False,
+                "fallibility_memory_write_enabled": False,
             }
             payload = asyncio.run(
                 plugin.build_emotion_memory_payload(
@@ -1898,6 +2067,78 @@ class MemoryPayloadPublicApiTests(unittest.TestCase):
         )
         self.assertNotIn("prompt_fragment", payload["moral_repair_state_at_write"])
 
+    def test_memory_payload_includes_fallibility_state_at_write(self):
+        self._install_astrbot_stubs()
+        from emotion_engine import EmotionState
+        from main import EmotionalStatePlugin
+
+        async def fake_load_state(self, session_key, persona_profile=None):
+            state = EmotionState.initial()
+            state.label = "careful"
+            return state
+
+        async def fake_fallibility_snapshot(self, *args, **kwargs):
+            return {
+                "schema_version": "astrbot.fallibility_state.v1",
+                "kind": "fallibility_state",
+                "session_key": kwargs["session_key"],
+                "exposure": "plugin_safe",
+                "enabled": True,
+                "diagnostic": False,
+                "simulated_agent_state": True,
+                "updated_at": 13.0,
+                "fallibility": {
+                    "error_pressure": 0.3,
+                    "clarification_need": 0.6,
+                    "correction_readiness": 0.8,
+                    "repair_pressure": 0.4,
+                    "truthfulness_guard": 0.95,
+                    "recommended_actions": ["ask_clarifying_question"],
+                },
+                "flags": ["possible_mistake_cue"],
+                "prompt_fragment": "not persisted",
+            }
+
+        original_load_state = EmotionalStatePlugin._load_state
+        original_fallibility_snapshot = EmotionalStatePlugin.get_fallibility_snapshot
+        EmotionalStatePlugin._load_state = fake_load_state
+        EmotionalStatePlugin.get_fallibility_snapshot = fake_fallibility_snapshot
+        try:
+            plugin = EmotionalStatePlugin.__new__(EmotionalStatePlugin)
+            plugin.config = {
+                "humanlike_memory_write_enabled": False,
+                "personality_drift_memory_write_enabled": False,
+                "moral_repair_memory_write_enabled": False,
+            }
+            payload = asyncio.run(
+                plugin.build_emotion_memory_payload(
+                    session_key="livingmemory:fallibility",
+                    memory={"text": "memory"},
+                    source="livingmemory",
+                    written_at=20.0,
+                ),
+            )
+        finally:
+            EmotionalStatePlugin._load_state = original_load_state
+            EmotionalStatePlugin.get_fallibility_snapshot = original_fallibility_snapshot
+
+        self.assertIn("fallibility_state_at_write", payload)
+        self.assertEqual(
+            payload["fallibility_state_at_write"]["schema_version"],
+            "astrbot.fallibility_state.v1",
+        )
+        self.assertEqual(payload["fallibility_state_at_write"]["source"], "livingmemory")
+        self.assertEqual(payload["fallibility_state_at_write"]["written_at"], 20.0)
+        self.assertEqual(
+            payload["fallibility_state_at_write"]["fallibility_updated_at"],
+            13.0,
+        )
+        self.assertIn(
+            "ask_clarifying_question",
+            payload["fallibility_state_at_write"]["fallibility"]["recommended_actions"],
+        )
+        self.assertNotIn("prompt_fragment", payload["fallibility_state_at_write"])
+
     def test_memory_payload_includes_disabled_humanlike_annotation_by_default(self):
         self._install_astrbot_stubs()
         from emotion_engine import EmotionState
@@ -1913,7 +2154,10 @@ class MemoryPayloadPublicApiTests(unittest.TestCase):
         EmotionalStatePlugin._load_state = fake_load_state
         try:
             plugin = self._new_plugin(
-                {"moral_repair_memory_write_enabled": False},
+                {
+                    "moral_repair_memory_write_enabled": False,
+                    "fallibility_memory_write_enabled": False,
+                },
             )
             payload = asyncio.run(
                 plugin.build_emotion_memory_payload(
@@ -2059,16 +2303,21 @@ class MemoryPayloadPublicApiTests(unittest.TestCase):
         async def fake_delete_moral_repair(self, session_key):
             deleted.append(("moral_repair", session_key))
 
+        async def fake_delete_fallibility(self, session_key):
+            deleted.append(("fallibility", session_key))
+
         original_delete_state = EmotionalStatePlugin._delete_state
         original_delete_psychological = EmotionalStatePlugin._delete_psychological_state
         original_delete_humanlike = EmotionalStatePlugin._delete_humanlike_state
         original_delete_lifelike = EmotionalStatePlugin._delete_lifelike_learning_state
         original_delete_moral_repair = EmotionalStatePlugin._delete_moral_repair_state
+        original_delete_fallibility = EmotionalStatePlugin._delete_fallibility_state
         EmotionalStatePlugin._delete_state = fake_delete_state
         EmotionalStatePlugin._delete_psychological_state = fake_delete_psychological
         EmotionalStatePlugin._delete_humanlike_state = fake_delete_humanlike
         EmotionalStatePlugin._delete_lifelike_learning_state = fake_delete_lifelike
         EmotionalStatePlugin._delete_moral_repair_state = fake_delete_moral_repair
+        EmotionalStatePlugin._delete_fallibility_state = fake_delete_fallibility
         try:
             locked = self._new_plugin(
                 {
@@ -2076,6 +2325,7 @@ class MemoryPayloadPublicApiTests(unittest.TestCase):
                     "allow_humanlike_reset_backdoor": False,
                     "allow_lifelike_learning_reset_backdoor": False,
                     "allow_moral_repair_reset_backdoor": False,
+                    "allow_fallibility_reset_backdoor": False,
                 },
             )
             self.assertFalse(
@@ -2092,6 +2342,9 @@ class MemoryPayloadPublicApiTests(unittest.TestCase):
             )
             self.assertFalse(
                 asyncio.run(locked.reset_moral_repair_state(session_key="s1")),
+            )
+            self.assertFalse(
+                asyncio.run(locked.reset_fallibility_state(session_key="s1")),
             )
             self.assertEqual(deleted, [])
 
@@ -2111,12 +2364,16 @@ class MemoryPayloadPublicApiTests(unittest.TestCase):
             self.assertTrue(
                 asyncio.run(allowed.reset_moral_repair_state(session_key="s1")),
             )
+            self.assertTrue(
+                asyncio.run(allowed.reset_fallibility_state(session_key="s1")),
+            )
         finally:
             EmotionalStatePlugin._delete_state = original_delete_state
             EmotionalStatePlugin._delete_psychological_state = original_delete_psychological
             EmotionalStatePlugin._delete_humanlike_state = original_delete_humanlike
             EmotionalStatePlugin._delete_lifelike_learning_state = original_delete_lifelike
             EmotionalStatePlugin._delete_moral_repair_state = original_delete_moral_repair
+            EmotionalStatePlugin._delete_fallibility_state = original_delete_fallibility
 
         self.assertEqual(
             deleted,
@@ -2126,6 +2383,7 @@ class MemoryPayloadPublicApiTests(unittest.TestCase):
                 ("humanlike", "s1"),
                 ("lifelike", "s1"),
                 ("moral_repair", "s1"),
+                ("fallibility", "s1"),
             ],
         )
 
@@ -2185,6 +2443,10 @@ class MemoryPayloadPublicApiTests(unittest.TestCase):
             "moral_repair_state:room_alpha_beta",
         )
         self.assertEqual(
+            plugin._fallibility_kv_key(session_key),
+            "fallibility_state:room_alpha_beta",
+        )
+        self.assertEqual(
             plugin._psychological_kv_key(session_key),
             "psychological_screening:room_alpha_beta",
         )
@@ -2224,7 +2486,7 @@ class MemoryPayloadPublicApiTests(unittest.TestCase):
         from emotion_engine import EmotionState
         from main import EmotionalStatePlugin
 
-        async def fake_load_state(self, session_key, persona_profile=None):
+        async def fake_load_state(self, session_key, persona_profile=None, **kwargs):
             state = EmotionState.initial(persona_profile)
             state.updated_at = 1000.0
             return state
@@ -2348,6 +2610,36 @@ class MemoryPayloadPublicApiTests(unittest.TestCase):
         self.assertEqual(snapshot["reason"], "enable_personality_drift is false")
         self.assertEqual(snapshot["prompt_fragment"], "")
 
+    def test_fallibility_direct_public_api_disabled_payloads(self):
+        self._install_astrbot_stubs()
+        from main import EmotionalStatePlugin
+
+        async def fake_load_fallibility_state(self, session_key):
+            raise AssertionError("disabled fallibility API must not load state")
+
+        original_load_fallibility = EmotionalStatePlugin._load_fallibility_state
+        EmotionalStatePlugin._load_fallibility_state = fake_load_fallibility_state
+        try:
+            plugin = self._new_plugin()
+            snapshot = asyncio.run(
+                plugin.get_fallibility_snapshot(
+                    session_key="s-fallibility",
+                    include_prompt_fragment=True,
+                ),
+            )
+            values = asyncio.run(plugin.get_fallibility_values(session_key="s-fallibility"))
+            fragment = asyncio.run(
+                plugin.get_fallibility_prompt_fragment(session_key="s-fallibility"),
+            )
+        finally:
+            EmotionalStatePlugin._load_fallibility_state = original_load_fallibility
+
+        self.assertFalse(snapshot["enabled"])
+        self.assertEqual(snapshot["reason"], "enable_fallibility_state is false")
+        self.assertEqual(snapshot["prompt_fragment"], "")
+        self.assertEqual(values, {})
+        self.assertEqual(fragment, "")
+
     def test_personality_drift_cached_load_does_not_write_back(self):
         self._install_astrbot_stubs()
         from main import EmotionalStatePlugin
@@ -2381,6 +2673,7 @@ class MemoryPayloadPublicApiTests(unittest.TestCase):
         from lifelike_learning_engine import LifelikeLearningState
         from main import EmotionalStatePlugin
         from moral_repair_engine import MoralRepairState
+        from fallibility_engine import FallibilityState
 
         plugin = self._new_plugin(
             {
@@ -2388,6 +2681,7 @@ class MemoryPayloadPublicApiTests(unittest.TestCase):
                 "enable_humanlike_state": True,
                 "enable_lifelike_learning": True,
                 "enable_moral_repair_state": True,
+                "enable_fallibility_state": True,
             },
         )
         emotion = EmotionState.initial()
@@ -2398,10 +2692,13 @@ class MemoryPayloadPublicApiTests(unittest.TestCase):
         lifelike.updated_at = 1.0
         moral = MoralRepairState.initial()
         moral.updated_at = 1.0
+        fallibility = FallibilityState.initial()
+        fallibility.updated_at = 1.0
         plugin._memory_cache["s-cache"] = emotion
         plugin._humanlike_memory_cache["s-cache"] = humanlike
         plugin._lifelike_learning_memory_cache["s-cache"] = lifelike
         plugin._moral_repair_memory_cache["s-cache"] = moral
+        plugin._fallibility_memory_cache["s-cache"] = fallibility
 
         async def fail_if_written(self, *args, **kwargs):
             raise AssertionError("cached passive reads must not write KV")
@@ -2413,6 +2710,7 @@ class MemoryPayloadPublicApiTests(unittest.TestCase):
             loaded_humanlike = asyncio.run(plugin._load_humanlike_state("s-cache"))
             loaded_lifelike = asyncio.run(plugin._load_lifelike_learning_state("s-cache"))
             loaded_moral = asyncio.run(plugin._load_moral_repair_state("s-cache"))
+            loaded_fallibility = asyncio.run(plugin._load_fallibility_state("s-cache"))
         finally:
             if original_put is None:
                 delattr(EmotionalStatePlugin, "put_kv_data")
@@ -2423,6 +2721,7 @@ class MemoryPayloadPublicApiTests(unittest.TestCase):
         self.assertGreater(loaded_humanlike.updated_at, 1.0)
         self.assertGreater(loaded_lifelike.updated_at, 1.0)
         self.assertGreater(loaded_moral.updated_at, 1.0)
+        self.assertGreater(loaded_fallibility.updated_at, 1.0)
 
     def test_lifelike_observe_can_commit_and_simulate_without_saving(self):
         self._install_astrbot_stubs()
@@ -2431,7 +2730,7 @@ class MemoryPayloadPublicApiTests(unittest.TestCase):
 
         saved = []
 
-        async def fake_load(self, session_key):
+        async def fake_load(self, session_key, **kwargs):
             state = LifelikeLearningState.initial()
             state.updated_at = 100.0
             return state
@@ -2469,6 +2768,160 @@ class MemoryPayloadPublicApiTests(unittest.TestCase):
         self.assertFalse(simulated["observation"]["committed"])
         self.assertEqual(len(saved), 1)
 
+    def test_public_observe_methods_pass_observed_at_into_state_loads(self):
+        self._install_astrbot_stubs()
+        from emotion_engine import EmotionState
+        from fallibility_engine import FallibilityEngine, FallibilityState
+        from humanlike_engine import HumanlikeEngine, HumanlikeState
+        from lifelike_learning_engine import LifelikeLearningEngine, LifelikeLearningState
+        from main import EmotionalStatePlugin
+        from moral_repair_engine import MoralRepairEngine, MoralRepairState
+        from personality_drift_engine import PersonalityDriftEngine, PersonalityDriftState
+
+        observed_at = 12345.0
+        load_calls = []
+
+        async def fake_load_emotion(self, session_key, persona_profile=None, *, now=None):
+            load_calls.append(("emotion", now))
+            state = EmotionState.initial(persona_profile)
+            state.updated_at = 100.0
+            return state
+
+        async def fake_load_humanlike(self, session_key, *, now=None):
+            load_calls.append(("humanlike", now))
+            state = HumanlikeState.initial()
+            state.updated_at = 100.0
+            return state
+
+        async def fake_load_lifelike(self, session_key, *, now=None):
+            load_calls.append(("lifelike", now))
+            state = LifelikeLearningState.initial()
+            state.updated_at = 100.0
+            return state
+
+        async def fake_load_drift(self, session_key, profile=None, *, now=None):
+            load_calls.append(("drift", now))
+            return PersonalityDriftState.initial(
+                persona_fingerprint=profile.fingerprint if profile else "default",
+                now=100.0,
+            )
+
+        async def fake_load_moral(self, session_key, *, now=None):
+            load_calls.append(("moral", now))
+            state = MoralRepairState.initial()
+            state.updated_at = 100.0
+            return state
+
+        async def fake_load_fallibility(self, session_key, *, now=None):
+            load_calls.append(("fallibility", now))
+            state = FallibilityState.initial()
+            state.updated_at = 100.0
+            return state
+
+        async def fake_save(self, session_key, state):
+            pass
+
+        originals = {
+            "_load_state": EmotionalStatePlugin._load_state,
+            "_load_humanlike_state": EmotionalStatePlugin._load_humanlike_state,
+            "_load_lifelike_learning_state": EmotionalStatePlugin._load_lifelike_learning_state,
+            "_load_personality_drift_state": EmotionalStatePlugin._load_personality_drift_state,
+            "_load_moral_repair_state": EmotionalStatePlugin._load_moral_repair_state,
+            "_load_fallibility_state": EmotionalStatePlugin._load_fallibility_state,
+            "_save_state": EmotionalStatePlugin._save_state,
+            "_save_humanlike_state": EmotionalStatePlugin._save_humanlike_state,
+            "_save_lifelike_learning_state": EmotionalStatePlugin._save_lifelike_learning_state,
+            "_save_personality_drift_state": EmotionalStatePlugin._save_personality_drift_state,
+            "_save_moral_repair_state": EmotionalStatePlugin._save_moral_repair_state,
+            "_save_fallibility_state": EmotionalStatePlugin._save_fallibility_state,
+        }
+        EmotionalStatePlugin._load_state = fake_load_emotion
+        EmotionalStatePlugin._load_humanlike_state = fake_load_humanlike
+        EmotionalStatePlugin._load_lifelike_learning_state = fake_load_lifelike
+        EmotionalStatePlugin._load_personality_drift_state = fake_load_drift
+        EmotionalStatePlugin._load_moral_repair_state = fake_load_moral
+        EmotionalStatePlugin._load_fallibility_state = fake_load_fallibility
+        EmotionalStatePlugin._save_state = fake_save
+        EmotionalStatePlugin._save_humanlike_state = fake_save
+        EmotionalStatePlugin._save_lifelike_learning_state = fake_save
+        EmotionalStatePlugin._save_personality_drift_state = fake_save
+        EmotionalStatePlugin._save_moral_repair_state = fake_save
+        EmotionalStatePlugin._save_fallibility_state = fake_save
+        try:
+            plugin = self._new_plugin(
+                {
+                    "use_llm_assessor": False,
+                    "enable_humanlike_state": True,
+                    "enable_lifelike_learning": True,
+                    "enable_personality_drift": True,
+                    "enable_moral_repair_state": True,
+                    "enable_fallibility_state": True,
+                },
+            )
+            plugin.humanlike_engine = HumanlikeEngine()
+            plugin.lifelike_learning_engine = LifelikeLearningEngine()
+            plugin.personality_drift_engine = PersonalityDriftEngine()
+            plugin.moral_repair_engine = MoralRepairEngine()
+            plugin.fallibility_engine = FallibilityEngine()
+            asyncio.run(
+                plugin.observe_emotion_text(
+                    session_key="s-public-now",
+                    text="thank you",
+                    use_llm=False,
+                    observed_at=observed_at,
+                ),
+            )
+            asyncio.run(
+                plugin.observe_humanlike_text(
+                    session_key="s-public-now",
+                    text="please stay",
+                    observed_at=observed_at,
+                ),
+            )
+            asyncio.run(
+                plugin.observe_lifelike_text(
+                    session_key="s-public-now",
+                    text="桥隧猫就是会熬夜改桥梁模型的人。",
+                    observed_at=observed_at,
+                ),
+            )
+            asyncio.run(
+                plugin.observe_personality_drift_event(
+                    session_key="s-public-now",
+                    text="thank you, I trust you",
+                    observed_at=observed_at,
+                ),
+            )
+            asyncio.run(
+                plugin.observe_moral_repair_text(
+                    session_key="s-public-now",
+                    text="I was wrong and I will repair it.",
+                    observed_at=observed_at,
+                ),
+            )
+            asyncio.run(
+                plugin.observe_fallibility_text(
+                    session_key="s-public-now",
+                    text="I may have misread that and should correct it.",
+                    observed_at=observed_at,
+                ),
+            )
+        finally:
+            for name, original in originals.items():
+                setattr(EmotionalStatePlugin, name, original)
+
+        self.assertEqual(
+            load_calls,
+            [
+                ("emotion", observed_at),
+                ("humanlike", observed_at),
+                ("lifelike", observed_at),
+                ("drift", observed_at),
+                ("moral", observed_at),
+                ("fallibility", observed_at),
+            ],
+        )
+
     def test_memory_payload_can_disable_humanlike_annotation(self):
         self._install_astrbot_stubs()
         from emotion_engine import EmotionState
@@ -2491,6 +2944,7 @@ class MemoryPayloadPublicApiTests(unittest.TestCase):
             plugin.config = {
                 "humanlike_memory_write_enabled": False,
                 "personality_drift_memory_write_enabled": False,
+                "fallibility_memory_write_enabled": False,
             }
             payload = asyncio.run(
                 plugin.build_emotion_memory_payload(

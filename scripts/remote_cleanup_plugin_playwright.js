@@ -145,6 +145,7 @@ async function main() {
   const confirm = env("ASTRBOT_REMOTE_CLEAN_CONFIRM");
   const cleanFormal = env("ASTRBOT_REMOTE_CLEAN_FORMAL") === "1";
   const cleanFailedUpload = env("ASTRBOT_REMOTE_CLEAN_FAILED_UPLOAD", "1") !== "0";
+  const allowMultipleFormal = env("ASTRBOT_REMOTE_CLEAN_ALLOW_MULTIPLE_FORMAL") === "1";
   const artifactDir = env(
     "ASTRBOT_REMOTE_ARTIFACT_DIR",
     path.join("output", "playwright"),
@@ -206,9 +207,20 @@ async function main() {
     if (cleanFormal && formalCandidates.length === 1) {
       formalCleanup = await uninstallFormalPlugin(page, expectedPlugin);
       await page.waitForTimeout(3000);
+    } else if (cleanFormal && formalCandidates.length > 1 && allowMultipleFormal) {
+      formalCleanup = [];
+      for (let index = 0; index < formalCandidates.length; index += 1) {
+        const result = await uninstallFormalPlugin(page, expectedPlugin);
+        formalCleanup.push({
+          index,
+          candidate: pluginIdentityFields(formalCandidates[index]),
+          result,
+        });
+        await page.waitForTimeout(2500);
+      }
     } else if (cleanFormal && formalCandidates.length > 1) {
       throw new Error(
-        `Refusing to uninstall: expected one exact formal candidate, found ${formalCandidates.length}.`,
+        `Refusing to uninstall: expected one exact formal candidate, found ${formalCandidates.length}. Set ASTRBOT_REMOTE_CLEAN_ALLOW_MULTIPLE_FORMAL=1 to remove all exact same-name candidates.`,
       );
     }
 
@@ -251,6 +263,7 @@ async function main() {
       allowlist: ALLOWED_PLUGIN,
       cleanFormal,
       cleanFailedUpload,
+      allowMultipleFormal,
       delete_config: false,
       delete_data: false,
       formalCandidatesBefore: formalCandidates.map(pluginIdentityFields),
