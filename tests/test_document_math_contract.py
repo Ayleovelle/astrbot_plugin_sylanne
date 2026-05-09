@@ -124,9 +124,13 @@ class DocumentMathContractTests(unittest.TestCase):
         theory = (ROOT / "docs" / "theory.md").read_text(encoding="utf-8")
 
         self.assertIn("### 默认阅读：核心模型摘要", readme)
-        self.assertIn("<summary>展开完整公式推导与顶刊依据</summary>", readme)
+        self.assertIn(
+            "<summary>论文附录 S1｜SHIT Journal 风格：完整公式推导、证据映射与文献依据</summary>",
+            readme,
+        )
+        self.assertIn("#### Supplementary Note S1", readme)
+        self.assertIn("#### S1.1 顶刊证据映射", readme)
         self.assertIn("<summary>展开扩展冲突成因与关系修复公式</summary>", readme)
-        self.assertIn("#### 顶刊证据映射", readme)
         self.assertIn("10.1177/0956797610372634", readme)
         self.assertIn("10.1037/a0013965", readme)
         self.assertIn("astrbot.personality_profile.v1", readme)
