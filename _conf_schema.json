@@ -39,16 +39,295 @@
     ],
     "hint": "pre 会在回复前影响本轮语气；post 会根据 bot 实际回复修正状态；both 效果最好但消耗更多。"
   },
+  "background_post_assessment": {
+    "description": "把回复后的情绪评估放到后台执行",
+    "type": "bool",
+    "default": false,
+    "hint": "默认关闭以保持兼容。开启后，当 assessment_timing 包含 post 时，插件不会在 on_llm_response 中等待内部情绪评估完成；同一会话按 FIFO 队列串行处理，保留完整轨迹但状态会稍后更新。"
+  },
+  "background_post_queue_limit": {
+    "description": "每个会话后台回复后评估队列上限",
+    "type": "int",
+    "default": 0,
+    "hint": "默认 0 表示不限制，保留完整轨迹。若担心极端刷屏压垮后台，可设置正整数；超过后会丢弃最旧的未处理项。"
+  },
+  "background_post_max_workers": {
+    "description": "每个会话后台回复后评估最大并发 worker 数",
+    "type": "int",
+    "default": 5,
+    "hint": "开启 background_post_assessment 后生效。同一会话最多同时运行多少个后台观测评估 worker；状态写入仍按消息顺序提交，空队列后 worker 会自动结束。"
+  },
+  "background_post_queue_checkpoint_enabled": {
+    "description": "Persist background post-assessment queue checkpoints",
+    "type": "bool",
+    "default": true,
+    "hint": "When enabled, queued background post-assessment jobs are checkpointed to KV so a restart can resume uncommitted state updates."
+  },
+  "background_post_job_lease_seconds": {
+    "description": "Lease seconds for an active background post-assessment job",
+    "type": "float",
+    "default": 120.0,
+    "hint": "If a worker disappears while holding a job, an expired lease lets the queue recover it instead of leaving the trajectory stuck."
+  },
+  "background_post_job_timeout_seconds": {
+    "description": "Timeout seconds for a single background post-assessment job",
+    "type": "float",
+    "default": 0.0,
+    "hint": "0 disables the per-job timeout. Positive values convert stuck jobs into retryable failures."
+  },
+  "background_post_retry_max_attempts": {
+    "description": "Maximum attempts before a background post-assessment job enters dead-letter",
+    "type": "int",
+    "default": 3,
+    "hint": "Retries preserve ordered state commits. A job is dead-lettered only after this many failed attempts."
+  },
+  "background_post_retry_base_delay_seconds": {
+    "description": "Base delay seconds for background post-assessment retries",
+    "type": "float",
+    "default": 2.0,
+    "hint": "Retry delay uses exponential backoff from this base delay."
+  },
+  "background_post_retry_max_delay_seconds": {
+    "description": "Maximum retry delay seconds for background post-assessment retries",
+    "type": "float",
+    "default": 60.0,
+    "hint": "Caps exponential retry backoff so a noisy failure does not wait forever before becoming visible."
+  },
+  "background_post_dead_letter_limit": {
+    "description": "Maximum retained dead-letter job summaries per session",
+    "type": "int",
+    "default": 100,
+    "hint": "Dead letters store diagnostic metadata without raw request or response text."
+  },
+  "background_post_diagnostics_warn_lag_count": {
+    "description": "Queued plus active background jobs required for a runtime lag warning",
+    "type": "int",
+    "default": 20,
+    "hint": "Runtime diagnostics report warning_level=warn when a session exceeds this count."
+  },
+  "background_post_diagnostics_warn_lag_seconds": {
+    "description": "Oldest queued or active job age required for a runtime lag warning",
+    "type": "float",
+    "default": 60.0,
+    "hint": "Runtime diagnostics report warning_level=warn when the oldest pending state update is older than this."
+  },
+  "enable_low_signal_light_assessment": {
+    "description": "Use lightweight local assessment for low-signal turns",
+    "type": "bool",
+    "default": true,
+    "hint": "Short acknowledgements, blank turns, emoji/punctuation-only turns, and simple repeats avoid the LLM assessor while preserving a small causal trace."
+  },
+  "low_signal_max_chars": {
+    "description": "Maximum text length for low-signal lightweight assessment",
+    "type": "int",
+    "default": 12,
+    "hint": "Only very short low-signal messages are bypassed; normal content still uses the configured assessor path."
+  },
+  "agent_speaker_relationship_tracking": {
+    "description": "Agent keeps a per-speaker relationship/emotion track in group chats",
+    "type": "bool",
+    "default": true,
+    "hint": "When enabled, the conversation track still receives every message, and the agent also saves a conversation+speaker directed relationship track for the current speaker."
+  },
+  "agent_include_speaker_in_assessment": {
+    "description": "Agent marks the current speaker inside emotion-assessment text",
+    "type": "bool",
+    "default": true,
+    "hint": "When AstrBot exposes a sender id or nickname, the internal assessment text includes a speaker marker so the agent can distinguish who said the message."
+  },
+  "agent_identity_profile_limit": {
+    "description": "Maximum cached conversation/speaker identity profiles",
+    "type": "int",
+    "default": 256,
+    "hint": "Large group chats prune old silent speaker profiles after this limit while keeping the active conversation and current speaker."
+  },
+  "agent_identity_ttl_seconds": {
+    "description": "Seconds before silent speaker identity profiles are pruned",
+    "type": "float",
+    "default": 2592000.0,
+    "hint": "Default is 30 days. Set 0 to disable TTL pruning and rely only on the profile limit."
+  },
+  "enable_group_atmosphere_state": {
+    "description": "启用群聊氛围/房间气氛状态建模",
+    "type": "bool",
+    "default": true,
+    "hint": "默认开启。维护独立 group_atmosphere_state，用于记录群聊热度、参与节奏、共享情绪和开口/收束时机；可通过 get_bot_group_atmosphere_state 或 query_agent_state 查询。"
+  },
+  "group_atmosphere_injection_strength": {
+    "description": "群聊氛围状态 prompt 注入强度",
+    "type": "float",
+    "default": 0.25,
+    "hint": "0 表示不注入群聊氛围提示词；大于 0 时仅在 inject_state 和 enable_group_atmosphere_state 同时开启后生效。compact 注入会提示主 LLM 按需调用工具查询细节。"
+  },
+  "group_atmosphere_alpha_base": {
+    "description": "群聊氛围状态基础更新步长",
+    "type": "float",
+    "default": 0.34
+  },
+  "group_atmosphere_alpha_min": {
+    "description": "群聊氛围状态最小更新步长",
+    "type": "float",
+    "default": 0.04
+  },
+  "group_atmosphere_alpha_max": {
+    "description": "群聊氛围状态最大更新步长",
+    "type": "float",
+    "default": 0.52
+  },
+  "group_atmosphere_half_life_seconds": {
+    "description": "群聊氛围状态真实时间半衰期（秒）",
+    "type": "float",
+    "default": 1800.0,
+    "hint": "默认 30 分钟。群体热度、紧张度和参与节奏会按真实经过时间回落，不靠刷屏快速清空。"
+  },
+  "group_atmosphere_trajectory_limit": {
+    "description": "群聊氛围状态轨迹最多保留点数",
+    "type": "int",
+    "default": 60
+  },
+  "group_atmosphere_join_cooldown_turns": {
+    "description": "Bot group-chat join cooldown measured in room turns",
+    "type": "int",
+    "default": 2,
+    "hint": "After the bot replies in a group conversation, participation policy prefers listening for this many room turns unless attention is high."
+  },
+  "group_atmosphere_join_cooldown_seconds": {
+    "description": "Bot group-chat join cooldown measured in seconds",
+    "type": "float",
+    "default": 45.0,
+    "hint": "After the bot replies in a group conversation, participation policy prefers listening for this many seconds unless attention is high."
+  },
+  "group_atmosphere_join_cooldown_bypass_attention": {
+    "description": "Bot attention threshold that bypasses group-chat join cooldown",
+    "type": "float",
+    "default": 0.8,
+    "hint": "If the room is clearly addressing the bot, cooldown will not suppress joining."
+  },
+  "enable_agent_causal_trail": {
+    "description": "启用 agent 状态因果轨迹记录",
+    "type": "bool",
+    "default": true,
+    "hint": "默认开启。记录脱敏的近期状态更新因果链，包括阶段、模块、输入摘要、前后状态摘要和原因列表，供 query_agent_state(state=\"trail\") 与公共 API 只读查询。"
+  },
+  "agent_trail_limit": {
+    "description": "每个会话保留的 agent 因果轨迹条数",
+    "type": "int",
+    "default": 80,
+    "hint": "限制内存和 KV 中保存的最近因果轨迹环形缓冲长度；读取时仍可传 limit 只取更少条目。"
+  },
+  "agent_trail_compaction_enabled": {
+    "description": "Expose a compacted low-signal view for agent causal trail queries",
+    "type": "bool",
+    "default": true,
+    "hint": "The raw trail is retained; query responses also expose compacted_items for low-signal spans."
+  },
+  "agent_trail_low_signal_delta_threshold": {
+    "description": "Maximum state delta considered low signal for trail compaction",
+    "type": "float",
+    "default": 0.03,
+    "hint": "Consecutive trail items whose largest value change is below this threshold can be summarized in compacted_items."
+  },
+  "agent_trail_low_signal_window": {
+    "description": "Low-signal trail window size before compacting",
+    "type": "int",
+    "default": 5,
+    "hint": "Small low-signal runs stay readable; longer repeated runs become a compacted summary item."
+  },
   "inject_state": {
     "description": "把当前情绪状态作为临时上下文注入 LLM 请求",
     "type": "bool",
     "default": true
+  },
+  "state_injection_detail": {
+    "description": "Default detail level for the main emotion-state prompt injection",
+    "type": "string",
+    "default": "compact",
+    "options": [
+      "compact",
+      "full"
+    ],
+    "hint": "compact injects a short style-control summary and tells the LLM to query tools for details; full restores the previous verbose prompt fragment."
+  },
+  "state_injection_compact_mode": {
+    "description": "Compact injection mode for emotion and group-atmosphere state",
+    "type": "string",
+    "default": "snapshot",
+    "options": [
+      "snapshot",
+      "diff"
+    ],
+    "hint": "snapshot keeps the current compact behavior. diff sends a full compact snapshot periodically and otherwise only material state changes."
+  },
+  "state_injection_diff_threshold": {
+    "description": "Minimum emotion-state value delta included in diff injection",
+    "type": "float",
+    "default": 0.08,
+    "hint": "Only values that changed by at least this amount are listed in diff injection mode."
+  },
+  "group_atmosphere_injection_diff_threshold": {
+    "description": "Minimum group-atmosphere value delta included in diff injection",
+    "type": "float",
+    "default": 0.08,
+    "hint": "Only room-mood values that changed by at least this amount are listed in diff injection mode."
+  },
+  "state_injection_diff_force_every_turns": {
+    "description": "Turns between forced compact snapshots while using diff injection",
+    "type": "int",
+    "default": 6,
+    "hint": "Prevents long conversations from relying only on deltas forever."
+  },
+  "auxiliary_state_injection_detail": {
+    "description": "Default detail level for auxiliary state prompt injections",
+    "type": "string",
+    "default": "compact",
+    "options": [
+      "compact",
+      "full",
+      "off"
+    ],
+    "hint": "compact injects a short tool-query hint for enabled auxiliary modules; full injects the previous verbose fragments; off skips auxiliary prompt fragments."
+  },
+  "state_injection_request_budget_chars": {
+    "description": "Estimated visible main LLM request character budget used before appending state injections",
+    "type": "int",
+    "default": 32000,
+    "hint": "Plugin-side guardrail only. It estimates system prompt, history, prompt, existing extra parts, tools/functions and persona-like fields before appending state text. It does not change stored trajectories."
+  },
+  "state_injection_reserved_chars": {
+    "description": "Reserved character margin kept free inside the state injection request budget",
+    "type": "int",
+    "default": 3000,
+    "hint": "Keeps room for downstream provider formatting, tool schemas, persona expansion and platform wrappers that the plugin can only estimate."
+  },
+  "state_injection_max_added_chars": {
+    "description": "Maximum total characters this plugin may append as temporary state injection parts per main LLM request",
+    "type": "int",
+    "default": 2400,
+    "hint": "Limits only prompt injection into the main request. State updates, background assessment and detailed trajectories still continue."
+  },
+  "state_injection_max_parts": {
+    "description": "Maximum number of temporary state injection parts appended per main LLM request",
+    "type": "int",
+    "default": 8,
+    "hint": "Prevents many enabled state layers from creating too many temporary request parts."
+  },
+  "llm_tool_response_max_chars": {
+    "description": "Maximum JSON characters returned by each state LLM Tool call",
+    "type": "int",
+    "default": 16000,
+    "hint": "When full state/tool output exceeds this cap, the tool returns valid bounded JSON with truncated/degraded metadata instead of a huge payload."
   },
   "enable_safety_boundary": {
     "description": "启用情绪后果安全边界",
     "type": "bool",
     "default": true,
     "hint": "默认开启。开启时会把冷处理限制为轻微降频、短句、边界感，并禁止羞辱、威胁、操控或拒绝必要帮助；关闭后只按情绪后果调制语气和互动策略。"
+  },
+  "block_deception_manipulation_evasion_actions": {
+    "description": "Block deception/manipulation/evasion action directives emitted by plugin state layers",
+    "type": "bool",
+    "default": false,
+    "hint": "Default false keeps these signals observable without adding plugin-level blocked_actions/not_allowed/refuse actions. Set true to restore the old hard-blocking payload and prompt behavior."
   },
   "persona_modeling": {
     "description": "根据当前会话人格建立不同的情绪基线和反应参数",
@@ -196,7 +475,7 @@
     "description": "触发情绪后果的阈值",
     "type": "float",
     "default": 0.48,
-    "hint": "越低越容易触发冷战、回避、修复等后果。"
+    "hint": "越低越容易触发冷战、争辩/对质、回避、修复等后果。"
   },
   "consequence_strength": {
     "description": "情绪后果强度倍率",
@@ -220,7 +499,7 @@
     "description": "普通短期情绪后果持续时间（秒）",
     "type": "float",
     "default": 900,
-    "hint": "用于直接设边界、谨慎核对、主动修复等非冷处理效果，默认 15 分钟。"
+    "hint": "用于直接设边界、直接对质、无理争吵风险、谨慎核对、主动修复等非冷处理效果，默认 15 分钟。"
   },
   "allow_emotion_reset_backdoor": {
     "description": "允许手动/公共 API 重置情绪状态后门",
@@ -448,7 +727,7 @@
     "description": "启用道德修复/信任修复状态模拟",
     "type": "bool",
     "default": false,
-    "hint": "默认关闭。维护 moral_repair_state，用于记录欺骗/伤害风险信号、内疚、责任、道歉、补偿和信任修复；不得生成欺骗或作恶策略。"
+    "hint": "默认关闭。维护 moral_repair_state，用于记录欺骗/伤害风险信号、内疚、责任、道歉、补偿和信任修复；默认仅观察欺骗/操控/逃责类信号，是否输出插件层硬阻断由 block_deception_manipulation_evasion_actions 控制。"
   },
   "moral_repair_injection_strength": {
     "description": "道德修复 prompt 注入强度",
@@ -524,7 +803,7 @@
     "description": "启用低风险瑕疵/犯错模拟状态",
     "type": "bool",
     "default": false,
-    "hint": "默认关闭。维护 fallibility_state，用于低风险误读、记忆模糊、轻微嘴硬、澄清、自我纠错和补偿；不得编造事实、操控用户或生成欺骗策略。"
+    "hint": "默认关闭。维护 fallibility_state，用于低风险误读、记忆模糊、轻微嘴硬、澄清、自我纠错和补偿；默认仅观察编造事实、操控和欺骗策略相关信号，是否输出插件层硬阻断由 block_deception_manipulation_evasion_actions 控制。"
   },
   "fallibility_injection_strength": {
     "description": "瑕疵模拟 prompt 注入强度",
@@ -606,7 +885,7 @@
     "description": "启用只读阴影冲动诊断视图",
     "type": "bool",
     "default": false,
-    "hint": "默认关闭。开启后仅暴露非执行、维护用诊断载荷，用于检查 moral_repair、fallibility 和 integrated_self 中的阴影冲动信号；不得生成欺骗、操控、逃责或执行策略。"
+    "hint": "默认关闭。开启后仅暴露非执行、维护用诊断载荷，用于检查 moral_repair、fallibility 和 integrated_self 中的阴影冲动信号；默认诊断策略为 observe，是否输出插件层硬阻断由 block_deception_manipulation_evasion_actions 控制。"
   },
   "enable_integrated_self_state": {
     "description": "启用综合自我状态总线",
@@ -629,7 +908,7 @@
       "balanced",
       "minimal"
     ],
-    "hint": "控制 trace 和提示词预算细节。minimal 会减少可选细节，但保留 schema、安全优先级、阻断动作和 LivingMemory 注解。"
+    "hint": "控制 trace 和提示词预算细节。minimal 会减少可选细节，但保留 schema、安全优先级、已存在的诊断/阻断字段和 LivingMemory 注解。"
   },
   "psychological_alpha_base": {
     "description": "心理筛查状态基础更新步长",

@@ -1,6 +1,6 @@
 # 远程测试与性能基准文档
 
-本文记录 `astrbot_plugin_emotional_state` 的远程验证方法、当前阶段性实测结果、LivingMemory 兼容检查口径，以及继续跑完完整矩阵时的注意事项。
+本文记录 `astrbot_plugin_emotional_state` 的远程验证方法、`0.5.0` 状态层实测结果、LivingMemory 兼容检查口径，以及后续复现实验时的数据隔离规则。
 
 ## 测试边界
 
@@ -16,46 +16,82 @@
 
 ## 当前实测结论
 
-截至 `2026-05-08T15:45:33Z`，官方远程性能 run 的阶段性结果如下：
+截至 `2026-05-09T13:15:49Z`，`0.5.0` 状态层官方远程性能数据已经完成两组正式口径：`gpt5.5` 完整 feature 矩阵，以及同一模型、同一状态层配置面下的 no-emotion 对照。DeepSeek 相关 feature 矩阵已按用户要求取消，不再继续跑，也不纳入正式结论。
 
 | 项目 | 值 |
 | --- | --- |
-| run id | `remote-emotion-v010-gpt55-feature-lifecycle` |
-| AstrBot 远程端口 | `15356` |
-| 插件版本 | `0.1.0-beta` |
+| feature run id | `remote-emotion-v050-gpt55-feature-state-layer-real` |
+| no-emotion run id | `remote-emotion-v050-gpt55-noemotion-control-state-layer-c3-250-real` |
+| 插件版本 | `0.5.0` |
 | 请求模型 | `gpt5.5` |
 | 实际选中 provider | `1111/gpt-5.5` |
 | 实际模型名 | `gpt-5.5` |
-| 并发 | `2` |
+| 并发 | `3` |
 | 样本间隔 | `1000 ms` |
-| feature 总工作量 | `2520` 条，含预热 |
-| 已完成有效样本 | `900` 条 |
-| 当前状态 | 阶段性完成，未跑完整矩阵；summary 为 `ok=true` |
+| feature 有效样本 | `2500/2500` |
+| feature 失败请求 | `0` |
+| no-emotion 有效样本 | `250/250` |
+| no-emotion 失败请求 | `0` |
+| token 口径 | SSE `agent_stats`，provider fallback 关闭 |
+| 当前状态 | `gpt5.5` 正式矩阵与 no-emotion 对照均完成 |
 
 模型确认口径：
 
-- `summary.json` 中 `requested_model=gpt5.5`。
-- `summary.json` 中 `selected_provider.provider_id=1111/gpt-5.5`。
-- `summary.json` 中 `selected_provider.model_name=gpt-5.5`。
-- 最近成功样本的 `provider_id` 和 `model_name` 也均为 `1111/gpt-5.5` / `gpt-5.5`。
+- feature 与 no-emotion 两个正式 `summary.json` 均为 `requested_model=gpt5.5`。
+- 两个正式 `summary.json` 的 `selected_provider.provider_id=1111/gpt-5.5`。
+- 两个正式 `summary.json` 的 `selected_provider.model_name=gpt-5.5`。
+- 原始 benchmark 产物位于被 `.gitignore` 忽略的 `output/remote_emotion_benchmark_official/` 下；README 和本文只记录聚合结果，不记录远程服务器地址或凭据。
 
-## 阶段性性能结果
+## gpt-5.5 正式 feature 矩阵
 
-下表为 `output/remote_emotion_benchmark_official/remote-emotion-v010-gpt55-feature-lifecycle/summary.json` 的阶段性聚合结果。延迟单位为毫秒。
+下表为 `output/remote_emotion_benchmark_official/remote-emotion-v050-gpt55-feature-state-layer-real/summary.json` 的正式聚合结果。延迟单位为毫秒，增量相对 `baseline_minimal` 计算。
 
-| case | 有效样本 | 错误 | 平均延迟 | p50 延迟 | p95 延迟 | 平均 token | 平均延迟增量 | 平均 token 增量 |
-| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
-| `baseline_minimal` | 250 | 0 | 14697.71 | 14410.10 | 19975.40 | 2703.00 | 基线 | 基线 |
-| `emotion_injection` | 250 | 0 | 13371.48 | 13789.30 | 17762.50 | 3091.93 | -1326.24 | +388.93 |
-| `low_reasoning` | 250 | 0 | 16689.39 | 16834.40 | 20160.30 | 2682.47 | +1991.67 | -20.53 |
-| `humanlike` | 150 | 0 | 12900.42 | 13287.10 | 17768.50 | 3181.99 | -1797.30 | +478.99 |
+| case | 有效样本 | 错误 | 平均延迟 | p50 延迟 | p95 延迟 | 平均 TTFT | 平均 token | 平均延迟增量 | p95 增量 | token 增量 |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| `baseline_minimal` | 250 | 0 | 16308.11 | 16440.20 | 22441.70 | 12565.41 | 2726.52 | 基线 | 基线 | 基线 |
+| `emotion_injection` | 250 | 0 | 17277.68 | 17195.90 | 25870.60 | 13601.02 | 3120.93 | +969.56 | +3428.90 | +394.41 |
+| `low_reasoning` | 250 | 0 | 20550.09 | 20288.60 | 25698.40 | 12579.65 | 2727.24 | +4241.97 | +3256.70 | +0.72 |
+| `humanlike` | 250 | 0 | 17112.82 | 17466.30 | 23717.90 | 13313.04 | 3171.38 | +804.71 | +1276.20 | +444.86 |
+| `lifelike_learning` | 250 | 0 | 16376.29 | 16857.30 | 21981.60 | 13064.36 | 3168.79 | +68.18 | -460.10 | +442.27 |
+| `personality_drift` | 250 | 0 | 17009.38 | 17620.50 | 23335.20 | 13210.54 | 3175.14 | +701.27 | +893.50 | +448.62 |
+| `moral_repair` | 250 | 0 | 16450.77 | 16295.70 | 22808.70 | 12585.68 | 3177.38 | +142.65 | +367.00 | +450.86 |
+| `fallibility_low_risk` | 250 | 0 | 16714.61 | 16624.60 | 23386.00 | 12930.12 | 3119.09 | +406.50 | +944.30 | +392.57 |
+| `integrated_self_full` | 250 | 0 | 16149.86 | 15956.10 | 22174.30 | 12649.54 | 3121.31 | -158.26 | -267.40 | +394.79 |
+| `all_safe_modules` | 250 | 0 | 20777.29 | 20351.20 | 27496.30 | 13309.28 | 3329.84 | +4469.17 | +5054.60 | +603.32 |
 
 解释：
 
-- `emotion_injection` 和 `humanlike` 的平均延迟低于 baseline，不能简单理解为功能必然加速；远程模型排队、服务端负载和时间窗口会影响端到端延迟。
-- token 增量更适合评价功能开销。当前阶段中 `emotion_injection` 约增加 `388.93` token，`humanlike` 约增加 `478.99` token。
-- `low_reasoning` 当前平均 token 略低于 baseline，但端到端延迟更高。这说明低推理友好模式减少提示词成本不等于一定降低远程模型排队时间。
-- 2 并发下 provider 级 token 差分会被并发请求污染，因此脚本自动关闭 provider token fallback，优先使用 SSE `agent_stats`。
+- `all_safe_modules` 是当前完整安全模块组合下的最高开销点，平均延迟比 baseline 高 `4469.17 ms`，平均 token 高 `603.32`。
+- `low_reasoning` 的 token 与 baseline 基本持平，但端到端延迟反而更高，说明远程模型排队、provider 调度和采样窗口会影响延迟，不能只用 prompt 长度解释。
+- `integrated_self_full` 平均延迟略低于 baseline，但 token 仍增加 `394.79`。这类负延迟增量应理解为远程端到端波动，不代表功能具备必然加速效果。
+- token 增量更适合评价提示词注入和状态注解开销；端到端延迟则必须结合时间窗口、远程负载和 p95 一起看。
+
+## no-emotion 对照
+
+no-emotion 对照使用当前 `0.5.0` 状态层配置面，仅把顶层 `enabled=false`，用于估计插件状态层参与主回复路径时的残余差异。
+
+| case | 有效样本 | 错误 | 平均延迟 | p50 延迟 | p95 延迟 | 平均 TTFT | 平均 token |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| `no_emotion_control` | 250 | 0 | 16023.63 | 15507.10 | 23892.90 | 12334.33 | 2741.02 |
+
+与 `baseline_minimal` 对比：
+
+| 对比项 | 差值 |
+| --- | ---: |
+| 平均延迟 | -284.48 ms |
+| p95 延迟 | +1451.20 ms |
+| 平均 token | +14.50 |
+
+该对照显示：在这组远程样本里，顶层关闭插件与 `baseline_minimal` 的平均延迟差异小于 0.3 秒，但 p95 更高。这个结果更像远程排队/时间窗波动，而不是稳定的本地插件开销；本地热路径仍应以 `scripts/benchmark_plugin_hot_path.py` 为准。
+
+## DeepSeek 取消说明
+
+`remote-emotion-v050-deepseek-v4-flash-feature-state-layer-c3-2500-real` 是已中止的探索性残留：`summary.json` 为 `ok=false`，只完成 `295/2500` 条有效样本，并出现 `1` 个失败请求。用户已经明确取消 DeepSeek 后续测试，因此：
+
+- 不继续跑 DeepSeek feature 矩阵。
+- 不把该目录写成正式对照。
+- 不用它论证不同推理能力模型对插件延迟或 token 的影响。
+- 后续若重新开启跨模型对比，必须用新的 run id 和新的确认记录，避免把这段残留混入正式数据。
 
 ## 已完成的远程安装与兼容检查
 
@@ -70,7 +106,7 @@
 
 - AstrBot 版本：`4.24.2`。
 - 目标插件：`astrbot_plugin_emotional_state`。
-- 目标版本：`0.1.0-beta`。
+- 目标版本：`0.5.0`。
 - 显示名：`多维情绪状态`。
 - 启用状态：`true`。
 - 目标插件未出现在失败插件列表中。
@@ -104,7 +140,7 @@ $env:ASTRBOT_REMOTE_URL = "http://your-astrbot-host:15356/"
 $env:ASTRBOT_REMOTE_USERNAME = "your-user"
 $env:ASTRBOT_REMOTE_PASSWORD = "your-password"
 $env:ASTRBOT_EXPECT_PLUGIN = "astrbot_plugin_emotional_state"
-$env:ASTRBOT_EXPECT_VERSION = "0.1.0-beta"
+$env:ASTRBOT_EXPECT_PLUGIN_VERSION = "0.5.0"
 
 & $node scripts\remote_smoke_playwright.js
 ```
@@ -121,15 +157,15 @@ if (Test-Path $node) { $env:NODE_PATH = $nodeModules } else { $node = "node" }
 $env:ASTRBOT_REMOTE_URL = "http://your-astrbot-host:15356/"
 $env:ASTRBOT_REMOTE_USERNAME = "your-user"
 $env:ASTRBOT_REMOTE_PASSWORD = "your-password"
-$env:ASTRBOT_BENCHMARK_RUN_ID = "remote-emotion-v010-gpt55-feature-lifecycle"
+$env:ASTRBOT_BENCHMARK_RUN_ID = "remote-emotion-v050-gpt55-feature-state-layer-real"
 $env:ASTRBOT_BENCHMARK_MODE = "features"
 $env:ASTRBOT_BENCHMARK_MODEL = "gpt5.5"
-$env:ASTRBOT_BENCHMARK_CONCURRENCY = "2"
+$env:ASTRBOT_BENCHMARK_CONCURRENCY = "3"
 $env:ASTRBOT_BENCHMARK_MAX_SAMPLES = "50"
 $env:ASTRBOT_BENCHMARK_SLEEP_MS = "1000"
 $env:ASTRBOT_BENCHMARK_DRY_RUN = "0"
 $env:ASTRBOT_BENCHMARK_CONFIRM = "RUN_REMOTE_EMOTION_BENCHMARK"
-$env:ASTRBOT_BENCHMARK_TOKEN_FALLBACK = "1"
+$env:ASTRBOT_BENCHMARK_TOKEN_FALLBACK = "0"
 $env:ASTRBOT_REMOTE_ARTIFACT_DIR = "output\remote_emotion_benchmark_official"
 
 & $node scripts\remote_emotion_benchmark_playwright.js
@@ -139,7 +175,7 @@ $env:ASTRBOT_REMOTE_ARTIFACT_DIR = "output\remote_emotion_benchmark_official"
 
 ```powershell
 $env:ASTRBOT_BENCHMARK_BATCHES = "3"
-$env:ASTRBOT_BENCHMARK_TARGET_COMPLETED = "900"
+$env:ASTRBOT_BENCHMARK_TARGET_COMPLETED = "2500"
 & $node scripts\run_remote_emotion_benchmark_batches.js
 ```
 
@@ -154,10 +190,10 @@ $env:ASTRBOT_BENCHMARK_TARGET_COMPLETED = "900"
 - 旧失败样本会被续跑重试，不会被永久计入失败。
 - 同一个 `RUN_ID` 和相同 `run_hash` 用于断点续跑；改动矩阵、mode 或模型会生成不同 `run_hash`。
 
-2 并发实现边界：
+并发实现边界：
 
-- `ASTRBOT_BENCHMARK_CONCURRENCY` 最高允许 `2`。
-- 两个 worker 页面共享同一个 Playwright browser context，避免第二个 worker 未授权。
+- `scripts\remote_emotion_benchmark_playwright.js` 当前把 `ASTRBOT_BENCHMARK_CONCURRENCY` 上限钳制为 `3`。
+- 多个 worker 页面共享同一个 Playwright browser context，避免额外 worker 未授权。
 - 配置写入使用互斥锁。
 - work queue 会按相同配置分块，防止不同 feature case 并发互相踩配置。
 
@@ -178,22 +214,7 @@ $env:ASTRBOT_BENCHMARK_TARGET_COMPLETED = "900"
 
 每个 case 默认 `250` 条有效样本，并带 `2` 条预热。完整 feature run 共有 `2520` 个 work item。
 
-当前已完成：
-
-- `baseline_minimal`：250/250
-- `emotion_injection`：250/250
-- `low_reasoning`：250/250
-- `humanlike`：150/250
-
-仍待完成：
-
-- `humanlike` 剩余 100 条
-- `lifelike_learning`
-- `personality_drift`
-- `moral_repair`
-- `fallibility_low_risk`
-- `integrated_self_full`
-- `all_safe_modules`
+当前正式 `gpt5.5` run 已完成全部 10 个 case，每个 case `250/250`，失败请求为 `0`。`remote-emotion-v050-gpt55-feature-state-layer-fullmatrix` 是 dry-run 目录，没有 `summary.json`，不得用于报告。
 
 ## 生命周期测试计划
 
@@ -286,4 +307,4 @@ $env:ASTRBOT_BENCHMARK_MAX_SAMPLES = "25"
 - 本地插件热路径开销应以 `scripts/benchmark_plugin_hot_path.py` 为准。
 - token 增量更适合判断提示词注入、状态注解和模块开启成本。
 - 远程性能结果需要和同一时间窗口内的 baseline 对照，不要跨天直接比较。
-- 未完成完整矩阵前，只能称为阶段性结果。
+- 未完成完整矩阵前，只能称为阶段性结果；当前 `gpt5.5` v0.5.0 状态层 feature 矩阵已经完成，可以作为正式 `gpt5.5` 结论。

@@ -20,6 +20,7 @@ PERSONALITY_DRIFT_SCHEMA_VERSION = "astrbot.personality_drift_state.v1"
 MORAL_REPAIR_STATE_SCHEMA_VERSION = "astrbot.moral_repair_state.v1"
 FALLIBILITY_STATE_SCHEMA_VERSION = "astrbot.fallibility_state.v1"
 INTEGRATED_SELF_SCHEMA_VERSION = "astrbot.integrated_self_state.v1"
+GROUP_ATMOSPHERE_SCHEMA_VERSION = "astrbot.group_atmosphere_state.v1"
 PSYCHOLOGICAL_RISK_BOOLEAN_FIELDS = PUBLIC_RISK_BOOLEAN_FIELDS
 
 
@@ -128,6 +129,15 @@ _FALLIBILITY_SERVICE_REQUIRED_METHODS = (
     "reset_fallibility_state",
 )
 
+_GROUP_ATMOSPHERE_SERVICE_REQUIRED_METHODS = (
+    "get_group_atmosphere_snapshot",
+    "get_group_atmosphere_values",
+    "get_group_atmosphere_prompt_fragment",
+    "observe_group_atmosphere_text",
+    "simulate_group_atmosphere_update",
+    "reset_group_atmosphere_state",
+)
+
 
 @runtime_checkable
 class EmotionServiceProtocol(Protocol):
@@ -148,6 +158,7 @@ class EmotionServiceProtocol(Protocol):
         request: Any = None,
         session_key: str | None = None,
         include_prompt_fragment: bool = False,
+        prompt_fragment_detail: str | None = None,
     ) -> dict[str, Any]:
         ...
 
@@ -921,6 +932,75 @@ class FallibilityServiceProtocol(EmotionServiceProtocol, Protocol):
         ...
 
 
+@runtime_checkable
+class GroupAtmosphereServiceProtocol(EmotionServiceProtocol, Protocol):
+    group_atmosphere_schema_version: str
+
+    async def get_group_atmosphere_snapshot(
+        self,
+        event_or_session: Any = None,
+        *,
+        request: Any = None,
+        session_key: str | None = None,
+        exposure: str = "plugin_safe",
+        include_prompt_fragment: bool = False,
+    ) -> dict[str, Any]:
+        ...
+
+    async def get_group_atmosphere_values(
+        self,
+        event_or_session: Any = None,
+        *,
+        request: Any = None,
+        session_key: str | None = None,
+    ) -> dict[str, float]:
+        ...
+
+    async def get_group_atmosphere_prompt_fragment(
+        self,
+        event_or_session: Any = None,
+        *,
+        request: Any = None,
+        session_key: str | None = None,
+        detail: str | None = None,
+    ) -> str:
+        ...
+
+    async def observe_group_atmosphere_text(
+        self,
+        event_or_session: Any = None,
+        text: str = "",
+        *,
+        request: Any = None,
+        session_key: str | None = None,
+        source: str = "plugin",
+        commit: bool = True,
+        observed_at: float | None = None,
+    ) -> dict[str, Any]:
+        ...
+
+    async def simulate_group_atmosphere_update(
+        self,
+        event_or_session: Any = None,
+        text: str = "",
+        *,
+        request: Any = None,
+        session_key: str | None = None,
+        source: str = "plugin",
+        observed_at: float | None = None,
+    ) -> dict[str, Any]:
+        ...
+
+    async def reset_group_atmosphere_state(
+        self,
+        event_or_session: Any = None,
+        *,
+        request: Any = None,
+        session_key: str | None = None,
+    ) -> bool:
+        ...
+
+
 def get_emotion_service(context: Any) -> EmotionServiceProtocol | None:
     """Return the activated emotion service plugin from an AstrBot Context."""
     getter = getattr(context, "get_registered_star", None)
@@ -1011,6 +1091,22 @@ def get_fallibility_service(context: Any) -> FallibilityServiceProtocol | None:
         and all(
             callable(getattr(plugin, name, None))
             for name in _FALLIBILITY_SERVICE_REQUIRED_METHODS
+        )
+    ):
+        return plugin
+    return None
+
+
+def get_group_atmosphere_service(context: Any) -> GroupAtmosphereServiceProtocol | None:
+    """Return the activated optional group-atmosphere service if available."""
+    plugin = get_emotion_service(context)
+    if (
+        plugin
+        and getattr(plugin, "group_atmosphere_schema_version", None)
+        == GROUP_ATMOSPHERE_SCHEMA_VERSION
+        and all(
+            callable(getattr(plugin, name, None))
+            for name in _GROUP_ATMOSPHERE_SERVICE_REQUIRED_METHODS
         )
     ):
         return plugin

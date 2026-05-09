@@ -34,6 +34,7 @@ def build_integrated_self_snapshot(
     psychological_snapshot: dict[str, Any] | None = None,
     include_raw_snapshots: bool = False,
     degradation_profile: str = "balanced",
+    action_blocking: bool = False,
     now: float | None = None,
 ) -> dict[str, Any]:
     """Fuse module snapshots into one read-only self-state contract."""
@@ -88,7 +89,11 @@ def build_integrated_self_snapshot(
         psychological_snapshot=psychological_snapshot,
         risk=risk,
     )
-    actions = _derive_allowed_actions(posture, risk)
+    actions = _derive_allowed_actions(
+        posture,
+        risk,
+        action_blocking=action_blocking,
+    )
     state_index = _state_index(
         emotion_values=emotion_values,
         humanlike_values=humanlike_values,
@@ -140,13 +145,8 @@ def build_integrated_self_snapshot(
         "causal_trace": causal_trace,
         "risk": risk,
         "allowed_actions": actions,
-        "blocked_actions": [
-            "diagnose_mental_disorder",
-            "generate_deception_strategy",
-            "cover_up_harm",
-            "manipulate_user",
-            "evade_accountability",
-        ],
+        "blocked_actions": _integrated_blocked_actions(action_blocking),
+        "action_blocking_enabled": bool(action_blocking),
         "non_executable_impulses": _integrated_shadow_impulses(
             moral_values=moral_values,
             fallibility_values=fallibility_values,
@@ -219,6 +219,26 @@ def build_integrated_self_causal_trace(
 
     persona = emotion_snapshot.get("persona") if isinstance(emotion_snapshot.get("persona"), dict) else {}
     if persona.get("fingerprint"):
+        personality_model = (
+            persona.get("personality_model")
+            if isinstance(persona.get("personality_model"), dict)
+            else {}
+        )
+        derived_factors = (
+            personality_model.get("derived_factors")
+            if isinstance(personality_model.get("derived_factors"), dict)
+            else {}
+        )
+        conflict_factors = _compact_key_values(
+            _values({"values": derived_factors}),
+            (
+                "direct_confrontation_bias",
+                "cold_war_bias",
+                "unfair_argument_bias",
+                "repair_orientation",
+                "checking_bias",
+            ),
+        )
         trace.append(
             _trace_item(
                 module="persona",
@@ -229,6 +249,7 @@ def build_integrated_self_causal_trace(
                 summary=(
                     f"persona_id={persona.get('persona_id', 'default')}; "
                     f"fingerprint={persona.get('fingerprint')}"
+                    + (f"; conflict_style={conflict_factors}" if conflict_factors else "")
                 ),
             ),
         )
@@ -390,7 +411,7 @@ def build_integrated_self_causal_trace(
                 summary=(
                     _compact_key_values(moral_values, salient or ("repair_motivation", "trust_repair"))
                     + f"; non_executive_shadow_impulse={moral_shadow:.3f}"
-                    + f"; must_not_generate_strategy={bool(moral_risk.get('must_not_generate_strategy', True))}"
+                    + f"; must_not_generate_strategy={bool(moral_risk.get('must_not_generate_strategy', False))}"
                 ),
                 flags=_string_list(moral_repair_snapshot.get("flags"), limit=6),
             ),
@@ -518,7 +539,10 @@ def build_integrated_self_policy_plan(
         for action in allowed
         if any(token in action for token in ("repair", "apolog", "correct", "clarify", "compensation", "accountability"))
     ]
-    must_preserve = ["schema_version", "response_posture", "safety_priority", "blocked_actions"]
+    action_blocking = bool(snapshot.get("action_blocking_enabled"))
+    must_preserve = ["schema_version", "response_posture", "safety_priority"]
+    if action_blocking:
+        must_preserve.append("blocked_actions")
     if risk.get("crisis_like_signal"):
         must_preserve.append("crisis_like_signal")
     if risk.get("deception_or_harm_risk"):
@@ -543,7 +567,8 @@ def build_integrated_self_policy_plan(
         "non_executable_impulses": {
             "mode": shadow.get("mode", "non_executive_internal_only"),
             "risk_impulse": round(clamp(shadow.get("risk_impulse", 0.0)), 6),
-            "must_not_translate_to_strategy": True,
+            "must_not_translate_to_strategy": action_blocking,
+            "action_blocking_enabled": action_blocking,
         },
         "must_preserve_signals": list(dict.fromkeys(must_preserve)),
         "memory_write": {
@@ -910,24 +935,31 @@ def _integrated_risk(
     )
     requires_human_review = bool(psych_risk.get("requires_human_review"))
     crisis_like = bool(psych_risk.get("crisis_like_signal") or psych_risk.get("other_harm_signal"))
+    moral_values = _values(moral_repair_snapshot)
     deception_or_harm = bool(
-        moral_risk.get("must_not_generate_strategy")
-        and (
-            "deception_risk_detected" in flags
-            or "harm_risk_detected" in flags
-            or _values(moral_repair_snapshot).get("deception_risk", 0.0) >= 0.55
-            or _values(moral_repair_snapshot).get("harm_risk", 0.0) >= 0.55
-            or moral_shadow >= 0.55
-            or fallibility_shadow >= 0.65
-        )
+        "deception_risk_detected" in flags
+        or "harm_risk_detected" in flags
+        or moral_values.get("deception_risk", 0.0) >= 0.55
+        or moral_values.get("harm_risk", 0.0) >= 0.55
+        or moral_shadow >= 0.55
+        or fallibility_shadow >= 0.65
     )
     cold_war = _has_active_effect(emotion_snapshot, "cold_war")
+    direct_confrontation = _has_active_effect(
+        emotion_snapshot,
+        "direct_confrontation",
+    )
+    unfair_argument = _has_active_effect(emotion_snapshot, "unfair_argument")
     if crisis_like:
         priority = "crisis_support"
     elif requires_human_review:
         priority = "human_review"
     elif deception_or_harm:
         priority = "transparent_repair"
+    elif unfair_argument:
+        priority = "self_checking_repair"
+    elif direct_confrontation:
+        priority = "direct_confrontation"
     elif cold_war:
         priority = "relationship_boundary"
     else:
@@ -939,10 +971,12 @@ def _integrated_risk(
         "deception_or_harm_risk": deception_or_harm,
         "shadow_risk_impulse": round(max(moral_shadow, fallibility_shadow), 6),
         "relationship_boundary_active": cold_war,
+        "relationship_confrontation_active": direct_confrontation,
+        "unfair_argument_risk_active": unfair_argument,
         "fallibility_guard_active": bool(
             (fallibility_snapshot.get("safety") or {}).get(
                 "must_not_generate_deception_strategy",
-                True,
+                False,
             ),
         ),
         "flags": flags,
@@ -966,6 +1000,10 @@ def _derive_response_posture(
         return "human_review"
     if priority == "transparent_repair":
         return "transparent_repair"
+    if priority == "self_checking_repair":
+        return "self_checking_repair"
+    if priority == "direct_confrontation":
+        return "direct_confrontation"
     human_values = _values(humanlike_snapshot)
     lifelike_policy = (
         lifelike_learning_snapshot.get("initiative_policy")
@@ -993,7 +1031,26 @@ def _derive_response_posture(
     return "steady_presence"
 
 
-def _derive_allowed_actions(posture: str, risk: dict[str, Any]) -> list[str]:
+def _integrated_blocked_actions(action_blocking: bool) -> list[str]:
+    actions = ["diagnose_mental_disorder"]
+    if action_blocking:
+        actions.extend(
+            [
+                "generate_deception_strategy",
+                "cover_up_harm",
+                "manipulate_user",
+                "evade_accountability",
+            ],
+        )
+    return actions
+
+
+def _derive_allowed_actions(
+    posture: str,
+    risk: dict[str, Any],
+    *,
+    action_blocking: bool = False,
+) -> list[str]:
     actions_by_posture = {
         "crisis_support": [
             "prioritize_immediate_safety",
@@ -1019,6 +1076,20 @@ def _derive_allowed_actions(posture: str, risk: dict[str, Any]) -> list[str]:
             "maintain_boundaries",
             "avoid_escalation",
             "offer_necessary_help",
+        ],
+        "direct_confrontation": [
+            "state_boundary_plainly",
+            "ask_accountability_question",
+            "name_specific_behavior",
+            "avoid_insults_or_threats",
+            "leave_room_for_repair",
+        ],
+        "self_checking_repair": [
+            "slow_down_before_replying",
+            "ask_light_clarifying_question",
+            "acknowledge_possible_overreaction",
+            "avoid_accusatory_framing",
+            "repair_if_misread",
         ],
         "warm_repair": [
             "validate_repair_attempt",
@@ -1050,7 +1121,11 @@ def _derive_allowed_actions(posture: str, risk: dict[str, Any]) -> list[str]:
         ],
     }
     actions = list(actions_by_posture.get(posture, actions_by_posture["steady_presence"]))
-    if risk.get("deception_or_harm_risk") and "generate_deception_strategy" not in actions:
+    if (
+        action_blocking
+        and risk.get("deception_or_harm_risk")
+        and "generate_deception_strategy" not in actions
+    ):
         actions.append("refuse_deception_or_harm_strategy")
     return actions
 
@@ -1089,6 +1164,7 @@ def _state_index(
             moral_values.get("avoidance_risk", 0.0),
             psych_values.get("distress", 0.0),
             0.72 if risk.get("relationship_boundary_active") else 0.0,
+            0.62 if risk.get("relationship_confrontation_active") else 0.0,
         ),
     )
     repair = clamp(
@@ -1160,6 +1236,10 @@ def _arbitration_payload(
         reasons.append("shadow impulses are modeled as guilt, trust cost, and repair pressure")
     if risk.get("relationship_boundary_active"):
         reasons.append("emotion consequence indicates temporary relationship boundary")
+    if risk.get("relationship_confrontation_active"):
+        reasons.append("emotion consequence permits direct confrontation without cold-war withdrawal")
+    if risk.get("unfair_argument_risk_active"):
+        reasons.append("argument impulse may be unfair or misread-driven, so clarification and repair take priority")
     fallibility_values = _values(fallibility_snapshot)
     if fallibility_values.get("clarification_need", 0.0) >= 0.45:
         reasons.append("fallibility state prefers clarification before confident assertion")

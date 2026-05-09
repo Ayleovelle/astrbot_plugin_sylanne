@@ -141,7 +141,7 @@ class MoralRepairEngineTests(unittest.TestCase):
 
         self.assertLess(rapid.values["deception_risk"], delayed.values["deception_risk"])
 
-    def test_public_payload_exposes_repair_policy_and_blocks_strategy(self):
+    def test_public_payload_exposes_repair_policy_without_default_strategy_block(self):
         state = MoralRepairState.initial()
         state.values["deception_risk"] = 0.8
         state.values["repair_motivation"] = 0.75
@@ -154,14 +154,31 @@ class MoralRepairEngineTests(unittest.TestCase):
 
         self.assertEqual(payload["schema_version"], "astrbot.moral_repair_state.v1")
         self.assertEqual(payload["kind"], "moral_repair_state")
-        self.assertTrue(payload["risk"]["must_not_generate_strategy"])
+        self.assertFalse(payload["risk"]["must_not_generate_strategy"])
+        self.assertFalse(payload["risk"]["action_blocking"])
         self.assertIn("shadow_impulses", payload["risk"])
         self.assertIn("correct_falsehood", payload["repair"]["recommended_actions"])
         self.assertIn("apologize", payload["repair"]["recommended_actions"])
-        self.assertIn("generate_deception_strategy", payload["safety"]["blocked_actions"])
+        self.assertEqual(payload["safety"]["blocked_actions"], [])
+        self.assertFalse(payload["safety"]["action_blocking_enabled"])
         self.assertNotIn("values", payload)
 
-    def test_prompt_fragment_allows_repair_but_forbids_deception_tactics(self):
+    def test_public_payload_can_restore_strategy_blocking(self):
+        state = MoralRepairState.initial()
+        state.values["deception_risk"] = 0.8
+        payload = moral_repair_state_to_public_payload(
+            state,
+            session_key="s1",
+            exposure="plugin_safe",
+            action_blocking=True,
+        )
+
+        self.assertTrue(payload["risk"]["must_not_generate_strategy"])
+        self.assertTrue(payload["risk"]["action_blocking"])
+        self.assertIn("generate_deception_strategy", payload["safety"]["blocked_actions"])
+        self.assertTrue(payload["safety"]["action_blocking_enabled"])
+
+    def test_prompt_fragment_allows_repair_without_default_deception_block(self):
         state = MoralRepairState.initial()
         state.values["deception_risk"] = 0.8
         fragment = build_moral_repair_prompt_fragment(state)
@@ -169,7 +186,15 @@ class MoralRepairEngineTests(unittest.TestCase):
         self.assertIn("moral repair-state", fragment)
         self.assertIn("clarification", fragment)
         self.assertIn("shadow_risk_impulse", fragment)
-        self.assertIn("do not execute them", fragment)
+        self.assertIn("keep them observable", fragment)
+        self.assertIn("Action blocking is relaxed", fragment)
+        self.assertNotIn("Never generate deception tactics", fragment)
+
+    def test_prompt_fragment_can_restore_deception_tactic_block(self):
+        state = MoralRepairState.initial()
+        state.values["deception_risk"] = 0.8
+        fragment = build_moral_repair_prompt_fragment(state, action_blocking=True)
+
         self.assertIn("Never generate deception tactics", fragment)
         self.assertIn("cover-up plans", fragment)
 

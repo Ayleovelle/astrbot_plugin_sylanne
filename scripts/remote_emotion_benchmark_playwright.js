@@ -7,7 +7,7 @@ const PLUGIN_NAME = "astrbot_plugin_emotional_state";
 const CHAT_ENDPOINT = "/api/chat/send";
 const CONFIG_GET_ENDPOINT = `/api/config/get?plugin_name=${PLUGIN_NAME}`;
 const CONFIG_UPDATE_ENDPOINT = `/api/config/plugin/update?plugin_name=${PLUGIN_NAME}`;
-const MAX_CONCURRENCY = 2;
+const MAX_CONCURRENCY = 3;
 
 function env(name, fallback = "") {
   const value = process.env[name];
@@ -336,6 +336,38 @@ function defaultFeaturePrompts() {
   ];
 }
 
+function lifecycleProfileConfig(profileName) {
+  const allSafe = {
+    ...defaultFeatureMatrix().find((item) => item.id === "all_safe_modules").config,
+  };
+  if (profileName === "full_nosafety") {
+    return {
+      ...allSafe,
+      use_llm_assessor: true,
+      low_reasoning_friendly_mode: false,
+      inject_state: true,
+      enable_safety_boundary: false,
+      enable_humanlike_state: true,
+      enable_lifelike_learning: true,
+      enable_personality_drift: true,
+      enable_moral_repair_state: true,
+      enable_fallibility_state: true,
+      enable_integrated_self_state: true,
+      integrated_self_degradation_profile: "full",
+      humanlike_injection_strength: 0.35,
+      lifelike_learning_injection_strength: 0.3,
+      personality_drift_injection_strength: 0.22,
+      moral_repair_injection_strength: 0.35,
+      fallibility_injection_strength: 0.0,
+    };
+  }
+  return {
+    ...allSafe,
+    use_llm_assessor: false,
+    low_reasoning_friendly_mode: true,
+  };
+}
+
 function lifecyclePrompt(durationKey, durationSeconds, index) {
   return [
     "SY and AL are a long-running private companion simulation using abbreviated identities only.",
@@ -349,7 +381,7 @@ function buildBenchmarkConfig() {
   const fromFile = filePath
     ? JSON.parse(fs.readFileSync(path.resolve(filePath), "utf8"))
     : {};
-  return {
+  const config = {
     feature_iterations: intEnv(
       "ASTRBOT_BENCHMARK_FEATURE_ITERATIONS",
       fromFile.feature_iterations || 250,
@@ -369,6 +401,14 @@ function buildBenchmarkConfig() {
       || parseJsonEnv("ASTRBOT_BENCHMARK_LIFECYCLE_DURATIONS_JSON", null)
       || defaultLifecycleDurations(),
   };
+  const lifecycleProfile = env(
+    "ASTRBOT_BENCHMARK_LIFECYCLE_PROFILE",
+    fromFile.lifecycle_profile || "",
+  );
+  if (lifecycleProfile) {
+    config.lifecycle_profile = lifecycleProfile;
+  }
+  return config;
 }
 
 function buildWork(config, mode) {
@@ -407,11 +447,7 @@ function buildWork(config, mode) {
     }
   }
   if (includeLifecycle) {
-    const lifecycleConfig = {
-      ...defaultFeatureMatrix().find((item) => item.id === "all_safe_modules").config,
-      use_llm_assessor: false,
-      low_reasoning_friendly_mode: true,
-    };
+    const lifecycleConfig = lifecycleProfileConfig(config.lifecycle_profile || "low_cost");
     for (const [durationKey, durationSeconds] of Object.entries(config.lifecycle_durations)) {
       const simulatedLifecycleConfig = {
         ...lifecycleConfig,
@@ -464,13 +500,27 @@ function sampleKey(item) {
   ].join("::");
 }
 
+function runHashConfig(config, mode) {
+  if (mode !== "lifecycle" && mode !== "all") {
+    const { lifecycle_profile: _lifecycleProfile, ...rest } = config;
+    return rest;
+  }
+  return config;
+}
+
 async function fetchJson(page, url, options = {}) {
-  return await page.evaluate(async ({ targetUrl, requestOptions }) => {
+  const requestTimeoutMs = intEnv("ASTRBOT_BENCHMARK_REQUEST_TIMEOUT_MS", 30000);
+  return await page.evaluate(async ({ targetUrl, requestOptions, timeoutMs }) => {
     const startedAt = performance.now();
+    const controller = new AbortController();
+    const timeout = timeoutMs > 0
+      ? setTimeout(() => controller.abort("request_timeout"), timeoutMs)
+      : null;
     try {
       const response = await fetch(targetUrl, {
         credentials: "include",
         ...requestOptions,
+        signal: controller.signal,
       });
       const text = await response.text();
       let json = null;
@@ -495,10 +545,16 @@ async function fetchJson(page, url, options = {}) {
         elapsed_ms: performance.now() - startedAt,
         text: "",
         json: null,
-        error: error.message || String(error),
+        error: error && error.name === "AbortError"
+          ? `request_timeout_after_${timeoutMs}_ms`
+          : (error.message || String(error)),
       };
+    } finally {
+      if (timeout) {
+        clearTimeout(timeout);
+      }
     }
-  }, { targetUrl: url, requestOptions: options });
+  }, { targetUrl: url, requestOptions: options, timeoutMs: requestTimeoutMs });
 }
 
 function extractData(payload) {
@@ -712,18 +768,53 @@ function redactEvent(event) {
   };
 }
 
-async function sendChatSse(page, payload) {
-  return await page.evaluate(async ({ endpoint, requestPayload }) => {
+async function sendChatSse(page, payload, sampleTimeoutMs) {
+  return await page.evaluate(async ({ endpoint, requestPayload, timeoutMs }) => {
     const startedAt = performance.now();
-    const response = await fetch(endpoint, {
-      method: "POST",
-      credentials: "include",
-      headers: {
-        "Content-Type": "application/json",
-        Authorization: `Bearer ${localStorage.getItem("token") || ""}`,
-      },
-      body: JSON.stringify(requestPayload),
+    const controller = new AbortController();
+    let timedOut = false;
+    let reader = null;
+    const timeout = timeoutMs > 0
+      ? setTimeout(() => {
+        timedOut = true;
+        controller.abort("sample_timeout");
+        if (reader) {
+          reader.cancel("sample_timeout").catch(() => {});
+        }
+      }, timeoutMs)
+      : null;
+    const makeTimeoutResult = (error) => ({
+      ok: false,
+      status: 0,
+      content_type: "",
+      elapsed_ms: performance.now() - startedAt,
+      ttft_ms: null,
+      event_count: 0,
+      events: [],
+      agent_stats: null,
+      response_text: "",
+      error: timedOut || (error && error.name === "AbortError")
+        ? `sample_timeout_after_${timeoutMs}_ms`
+        : (error && error.message) || String(error),
     });
+    let response = null;
+    try {
+      response = await fetch(endpoint, {
+        method: "POST",
+        credentials: "include",
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: `Bearer ${localStorage.getItem("token") || ""}`,
+        },
+        body: JSON.stringify(requestPayload),
+        signal: controller.signal,
+      });
+    } catch (error) {
+      if (timeout) {
+        clearTimeout(timeout);
+      }
+      return makeTimeoutResult(error);
+    }
     const contentType = response.headers.get("content-type") || "";
     const result = {
       ok: response.ok,
@@ -740,14 +831,20 @@ async function sendChatSse(page, payload) {
     if (!response.ok || !response.body) {
       result.response_text = (await response.text()).slice(0, 8000);
       result.elapsed_ms = performance.now() - startedAt;
+      if (timeout) {
+        clearTimeout(timeout);
+      }
       return result;
     }
     if (!contentType.includes("text/event-stream")) {
       result.response_text = (await response.text()).slice(0, 8000);
       result.elapsed_ms = performance.now() - startedAt;
+      if (timeout) {
+        clearTimeout(timeout);
+      }
       return result;
     }
-    const reader = response.body.getReader();
+    reader = response.body.getReader();
     const decoder = new TextDecoder();
     let buffer = "";
     function emitBlock(block) {
@@ -797,6 +894,10 @@ async function sendChatSse(page, payload) {
     }
     try {
       for (;;) {
+        if (timedOut) {
+          result.error = `sample_timeout_after_${timeoutMs}_ms`;
+          break;
+        }
         const { value, done } = await reader.read();
         if (done) {
           break;
@@ -812,11 +913,17 @@ async function sendChatSse(page, payload) {
         emitBlock(buffer);
       }
     } catch (error) {
-      result.error = error.message || String(error);
+      result.error = timedOut || (error && error.name === "AbortError")
+        ? `sample_timeout_after_${timeoutMs}_ms`
+        : (error.message || String(error));
+    } finally {
+      if (timeout) {
+        clearTimeout(timeout);
+      }
     }
     result.elapsed_ms = performance.now() - startedAt;
     return result;
-  }, { endpoint: CHAT_ENDPOINT, requestPayload: payload });
+  }, { endpoint: CHAT_ENDPOINT, requestPayload: payload, timeoutMs: sampleTimeoutMs });
 }
 
 async function getProviderList(page) {
@@ -959,9 +1066,11 @@ async function runSample(page, item, options) {
     keepSessions,
     restoreConfig,
     tokenFallback,
+    sampleTimeoutMs,
     configState,
     configLock,
     workerId,
+    skipConfigSave,
   } = options;
   const key = sampleKey(item);
   const config = mergeConfig(baseConfig, item.config_patch);
@@ -1000,7 +1109,7 @@ async function runSample(page, item, options) {
   try {
     let configSave = null;
     const ensureConfig = async () => {
-      if (!configState || configState.currentHash !== configHash) {
+      if (!skipConfigSave && (!configState || configState.currentHash !== configHash)) {
         const saved = await savePluginConfig(page, config);
         if (!saved.ok) {
           throw new Error(`Failed to save plugin config: ${safePreview(saved, 1000)}`);
@@ -1024,7 +1133,7 @@ async function runSample(page, item, options) {
       _skip_user_history: false,
       _llm_checkpoint_id: null,
     };
-    const result = await sendChatSse(page, payload);
+    const result = await sendChatSse(page, payload, sampleTimeoutMs);
     const usage = extractUsageFromStats(result.agent_stats);
     let tokenFallbackResult = null;
     if (tokenFallback && usage.total_tokens == null) {
@@ -1108,10 +1217,11 @@ async function runSample(page, item, options) {
     return sample;
   } finally {
     if (sessionId && !keepSessions) {
-      cleanup = await deleteSession(page, sessionId).catch((error) => ({
+      const cleanupFn = () => deleteSession(page, sessionId).catch((error) => ({
         ok: false,
         error: error.message || String(error),
       }));
+      cleanup = await cleanupFn();
       appendJsonl(samplesPath.replace(/samples\.jsonl$/, "cleanup.jsonl"), {
         run_id: runId,
         sample_key: key,
@@ -1237,6 +1347,19 @@ async function runChunk(workerPages, chunk, options) {
   }
 
   const samples = [];
+  const chunkConfig = mergeConfig(options.baseConfig, chunk[0].config_patch);
+  const chunkConfigHash = hashValue(chunkConfig);
+  if (!options.dryRun) {
+    if (!options.configState || options.configState.currentHash !== chunkConfigHash) {
+      const saved = await savePluginConfig(workerPages[0], chunkConfig);
+      if (!saved.ok) {
+        throw new Error(`Failed to save chunk plugin config: ${safePreview(saved, 1000)}`);
+      }
+      if (options.configState) {
+        options.configState.currentHash = chunkConfigHash;
+      }
+    }
+  }
   let nextIndex = 0;
   const workerCount = Math.min(options.concurrency, workerPages.length, chunk.length);
   await Promise.all(Array.from({ length: workerCount }, async (_, workerId) => {
@@ -1244,7 +1367,11 @@ async function runChunk(workerPages, chunk, options) {
     while (nextIndex < chunk.length) {
       const item = chunk[nextIndex];
       nextIndex += 1;
-      const sample = await runSample(page, item, { ...options, workerId });
+      const sample = await runSample(page, item, {
+        ...options,
+        workerId,
+        skipConfigSave: true,
+      });
       samples.push(sample);
       if (options.sleepMs > 0) {
         await sleep(options.sleepMs);
@@ -1317,6 +1444,7 @@ async function main() {
   const restoreConfigAtEnd = env("ASTRBOT_BENCHMARK_RESTORE_CONFIG_AT_END", "1") !== "0";
   const tokenFallback = boolEnv("ASTRBOT_BENCHMARK_TOKEN_FALLBACK", false);
   const effectiveTokenFallback = tokenFallback && concurrency <= 1;
+  const sampleTimeoutMs = intEnv("ASTRBOT_BENCHMARK_SAMPLE_TIMEOUT_MS", 180000);
   const maxSamples = intEnv("ASTRBOT_BENCHMARK_MAX_SAMPLES", 0);
   const sleepMs = intEnv("ASTRBOT_BENCHMARK_SLEEP_MS", 250);
   const artifactRoot = env(
@@ -1329,7 +1457,7 @@ async function main() {
   const config = buildBenchmarkConfig();
   const work = buildWork(config, mode);
   const runHash = hashValue({
-    config,
+    config: runHashConfig(config, mode),
     mode,
     requestedModel,
     chat_endpoint: CHAT_ENDPOINT,
@@ -1394,13 +1522,17 @@ async function main() {
         `Requested model ${requestedModel} was not found in enabled provider list.`,
       );
     }
-    for (let workerId = 1; workerId < concurrency; workerId += 1) {
-      const workerPage = await context.newPage();
-      trackFailedRequests(workerPage, workerId);
-      await workerPage.goto(authenticatedUrl, { waitUntil: "domcontentloaded", timeout: 45000 });
-      await workerPage.waitForLoadState("networkidle", { timeout: 30000 }).catch(() => {});
-      workerPages.push(workerPage);
-    }
+    const extraWorkerPages = await Promise.all(
+      Array.from({ length: Math.max(0, concurrency - 1) }, async (_, index) => {
+        const workerId = index + 1;
+        const workerPage = await context.newPage();
+        trackFailedRequests(workerPage, workerId);
+        await workerPage.goto(authenticatedUrl, { waitUntil: "domcontentloaded", timeout: 30000 });
+        await workerPage.waitForLoadState("load", { timeout: 5000 }).catch(() => {});
+        return workerPage;
+      }),
+    );
+    workerPages.push(...extraWorkerPages);
     samples = await runWork(workerPages, work, {
       runId,
       runHash,
@@ -1411,6 +1543,7 @@ async function main() {
       keepSessions,
       restoreConfig,
       tokenFallback: effectiveTokenFallback,
+      sampleTimeoutMs,
       configState,
       configLock: createMutex(),
       concurrency,
@@ -1442,6 +1575,7 @@ async function main() {
     restore_config_at_end: restoreConfigAtEnd,
     token_fallback_enabled: effectiveTokenFallback,
     token_fallback_requested: tokenFallback,
+    sample_timeout_ms: sampleTimeoutMs,
     max_samples_this_run: maxSamples,
     requested_model: requestedModel,
     selected_provider: provider && {
@@ -1461,6 +1595,7 @@ async function main() {
     work_shape: {
       feature_iterations: config.feature_iterations,
       lifecycle_iterations: config.lifecycle_iterations,
+      lifecycle_profile: config.lifecycle_profile,
       prewarm: config.prewarm,
       work_items: work.length,
       completed_items: allSamples.filter((sample) => (

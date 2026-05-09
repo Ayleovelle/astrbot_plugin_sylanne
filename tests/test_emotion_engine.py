@@ -96,6 +96,19 @@ class EmotionEngineTests(unittest.TestCase):
         self.assertEqual(conflict["cause"], "user_fault")
         self.assertTrue(conflict["repaired"])
 
+    def test_relationship_decision_accepts_confront_aliases(self):
+        payload = relationship_state_to_public_payload(
+            {
+                "relationship_decision": {
+                    "decision": "argue",
+                    "intensity": 0.7,
+                    "reason": "需要直接说清楚。",
+                },
+            },
+        )
+
+        self.assertEqual(payload["relationship_decision"]["decision"], "confront")
+
     def test_conflict_analysis_derives_repair_status(self):
         payload = relationship_state_to_public_payload(
             {
@@ -166,6 +179,20 @@ class EmotionEngineTests(unittest.TestCase):
         self.assertIn("boundary_crossing", conflict["norm_violation_type"])
         self.assertEqual(conflict["withdrawal_motive"], "self_protection")
         self.assertGreater(conflict["grievance_score"], 0.5)
+        self.assertIn("dialogue_viability", conflict)
+        self.assertIn("confrontation_readiness", conflict)
+        self.assertIn("cold_war_readiness", conflict)
+        self.assertIn("unfair_argument_risk", conflict)
+        self.assertIn(
+            conflict["confrontation_motive"],
+            {
+                "truth_seeking",
+                "boundary_defense",
+                "accountability_request",
+                "punishment",
+                "none",
+            },
+        )
 
     def test_update_moves_state_toward_observation(self):
         engine = EmotionEngine()
@@ -238,6 +265,10 @@ class EmotionEngineTests(unittest.TestCase):
         self.assertIn("attachment_anxiety", model["trait_scores"])
         self.assertIn("derived_factors", model)
         self.assertIn("repair_orientation", model["derived_factors"])
+        self.assertIn("direct_confrontation_bias", model["derived_factors"])
+        self.assertIn("cold_war_bias", model["derived_factors"])
+        self.assertIn("unfair_argument_bias", model["derived_factors"])
+        self.assertIn("checking_bias", model["derived_factors"])
         self.assertIn("source_reliability", model)
         self.assertEqual(model["evidence_status"], "persona_text_metadata_only")
         self.assertIn("not_clinical_personality_assessment", model["notes"])
@@ -426,6 +457,338 @@ class EmotionEngineTests(unittest.TestCase):
         state = engine.update(previous, observation, now=1010.0)
         self.assertIn("direct_boundary", state.consequences.active_effects)
         self.assertGreater(state.consequences.values["confrontation"], 0.5)
+
+    def test_confront_decision_triggers_direct_confrontation_not_cold_war(self):
+        engine = EmotionEngine()
+        previous = EmotionState.initial()
+        previous.updated_at = 1000.0
+        observation = EmotionObservation(
+            values={
+                "valence": -0.78,
+                "arousal": 0.82,
+                "dominance": 0.72,
+                "goal_congruence": -0.85,
+                "certainty": 0.82,
+                "control": 0.58,
+                "affiliation": -0.22,
+            },
+            confidence=0.93,
+            label="anger_confront",
+            appraisal={
+                "relationship_decision": {
+                    "decision": "confront",
+                    "intensity": 0.85,
+                    "forgiveness": 0.1,
+                    "relationship_importance": 0.55,
+                    "reason": "要把越界行为说清楚。",
+                },
+                "conflict_analysis": {
+                    "cause": "user_fault",
+                    "fault_severity": 0.85,
+                    "perceived_intentionality": 0.72,
+                    "controllability": 0.7,
+                    "trust_damage": 0.25,
+                    "boundary_legitimacy": 0.9,
+                    "dialogue_viability": 0.66,
+                    "confrontation_motive": "boundary_defense",
+                    "ambiguity_level": 0.05,
+                    "misread_likelihood": 0.03,
+                    "user_acknowledged": False,
+                    "repaired": False,
+                },
+            },
+        )
+
+        state = engine.update(previous, observation, now=1010.0)
+
+        self.assertIn("direct_confrontation", state.consequences.active_effects)
+        self.assertIn("direct_boundary", state.consequences.active_effects)
+        self.assertNotIn("cold_war", state.consequences.active_effects)
+        self.assertGreater(state.consequences.values["argument"], 0.4)
+        self.assertGreater(state.consequences.values["problem_solving"], 0.0)
+
+    def test_high_resentment_low_dialogue_prefers_cold_war_over_argument(self):
+        engine = EmotionEngine()
+        previous = EmotionState.initial()
+        previous.updated_at = 1000.0
+        observation = EmotionObservation(
+            values={
+                "valence": -0.75,
+                "arousal": -0.35,
+                "dominance": -0.2,
+                "goal_congruence": -0.72,
+                "certainty": 0.5,
+                "control": -0.55,
+                "affiliation": -0.82,
+            },
+            confidence=0.9,
+            label="cold_anger",
+            appraisal={
+                "relationship_decision": {
+                    "decision": "cold_war",
+                    "intensity": 0.78,
+                    "forgiveness": 0.08,
+                    "relationship_importance": 0.5,
+                    "reason": "现在说下去只会更糟。",
+                },
+                "conflict_analysis": {
+                    "cause": "user_fault",
+                    "fault_severity": 0.75,
+                    "repeat_offense": 0.8,
+                    "trust_damage": 0.82,
+                    "resentment_residue": 0.78,
+                    "dialogue_viability": 0.1,
+                    "emotion_regulation_load": 0.78,
+                    "withdrawal_motive": "self_protection",
+                    "ambiguity_level": 0.1,
+                    "misread_likelihood": 0.05,
+                },
+            },
+        )
+
+        state = engine.update(previous, observation, now=1010.0)
+
+        self.assertIn("cold_war", state.consequences.active_effects)
+        self.assertGreater(state.consequences.values["withdrawal"], 0.6)
+        self.assertLess(state.consequences.values["argument"], 0.35)
+
+    def test_bot_whim_can_create_unfair_argument_but_prefers_checking(self):
+        engine = EmotionEngine()
+        previous = EmotionState.initial()
+        previous.updated_at = 1000.0
+        observation = EmotionObservation(
+            values={
+                "valence": -0.55,
+                "arousal": 0.78,
+                "dominance": 0.45,
+                "goal_congruence": -0.42,
+                "certainty": -0.45,
+                "control": -0.2,
+                "affiliation": 0.05,
+            },
+            confidence=0.85,
+            label="unfair_argument",
+            appraisal={
+                "relationship_decision": {
+                    "decision": "confront",
+                    "intensity": 0.65,
+                    "forgiveness": 0.25,
+                    "relationship_importance": 0.6,
+                    "reason": "可能是一时上头。",
+                },
+                "conflict_analysis": {
+                    "cause": "bot_whim",
+                    "bot_whim_level": 0.78,
+                    "emotion_regulation_load": 0.76,
+                    "ambiguity_level": 0.62,
+                    "misread_likelihood": 0.66,
+                    "dialogue_viability": 0.5,
+                    "boundary_legitimacy": 0.15,
+                    "reason": "没有足够证据证明用户有错。",
+                },
+            },
+        )
+
+        state = engine.update(previous, observation, now=1010.0)
+
+        self.assertIn("unfair_argument", state.consequences.active_effects)
+        self.assertIn("careful_checking", state.consequences.active_effects)
+        self.assertNotIn("cold_war", state.consequences.active_effects)
+        self.assertGreater(state.consequences.values["caution"], 0.3)
+        self.assertGreater(state.consequences.values["repair"], 0.0)
+
+    def test_persona_model_modulates_argument_vs_withdrawal(self):
+        expressive = build_persona_profile(
+            persona_id="direct",
+            name="direct",
+            text="外向 直率 坚定 边界 清楚 主动 目标 追求",
+        )
+        avoidant = build_persona_profile(
+            persona_id="quiet",
+            name="quiet",
+            text="内向 回避 沉默 谨慎 保持距离 害羞 紧张",
+        )
+        engine = EmotionEngine()
+        observation = EmotionObservation(
+            values={
+                "valence": -0.7,
+                "arousal": 0.72,
+                "dominance": 0.62,
+                "goal_congruence": -0.72,
+                "certainty": 0.65,
+                "control": 0.2,
+                "affiliation": -0.35,
+            },
+            confidence=0.9,
+            label="anger_boundary",
+            appraisal={
+                "relationship_decision": {
+                    "decision": "confront",
+                    "intensity": 0.68,
+                    "forgiveness": 0.15,
+                    "relationship_importance": 0.45,
+                },
+                "conflict_analysis": {
+                    "cause": "user_fault",
+                    "fault_severity": 0.7,
+                    "boundary_legitimacy": 0.72,
+                    "dialogue_viability": 0.45,
+                    "ambiguity_level": 0.12,
+                    "misread_likelihood": 0.05,
+                },
+            },
+        )
+
+        direct_state = engine.update(
+            EmotionState.initial(expressive),
+            observation,
+            profile=expressive,
+            now=1010.0,
+        )
+        quiet_state = engine.update(
+            EmotionState.initial(avoidant),
+            observation,
+            profile=avoidant,
+            now=1010.0,
+        )
+
+        self.assertGreater(
+            direct_state.consequences.values["argument"],
+            quiet_state.consequences.values["argument"],
+        )
+        self.assertGreaterEqual(
+            quiet_state.consequences.values["withdrawal"],
+            direct_state.consequences.values["withdrawal"],
+        )
+
+    def test_persona_conflict_style_factors_are_exported_and_modulate_readiness(self):
+        direct = build_persona_profile(
+            persona_id="direct",
+            name="direct",
+            text="外向 直率 坚定 主动 目标 追求 边界 清楚",
+        )
+        quiet = build_persona_profile(
+            persona_id="quiet",
+            name="quiet",
+            text="回避 沉默 保持距离 内向 害羞 谨慎",
+        )
+        direct_factors = direct.personality_model["derived_factors"]
+        quiet_factors = quiet.personality_model["derived_factors"]
+
+        self.assertGreater(
+            direct_factors["direct_confrontation_bias"],
+            quiet_factors["direct_confrontation_bias"],
+        )
+        self.assertGreater(
+            quiet_factors["cold_war_bias"],
+            direct_factors["cold_war_bias"],
+        )
+
+        appraisal = {
+            "conflict_analysis": {
+                "cause": "user_fault",
+                "fault_severity": 0.65,
+                "boundary_legitimacy": 0.7,
+                "dialogue_viability": 0.38,
+                "trust_damage": 0.38,
+                "ambiguity_level": 0.18,
+                "misread_likelihood": 0.05,
+            },
+            "persona_model": direct.personality_model,
+        }
+        direct_payload = relationship_state_to_public_payload(appraisal)
+        quiet_payload = relationship_state_to_public_payload(
+            {
+                "conflict_analysis": appraisal["conflict_analysis"],
+                "persona_model": quiet.personality_model,
+            },
+        )
+
+        self.assertGreater(
+            direct_payload["conflict_analysis"]["confrontation_readiness"],
+            quiet_payload["conflict_analysis"]["confrontation_readiness"],
+        )
+        self.assertGreater(
+            quiet_payload["conflict_analysis"]["cold_war_readiness"],
+            direct_payload["conflict_analysis"]["cold_war_readiness"],
+        )
+        self.assertIn(
+            "personality_conflict_modulation",
+            direct_payload["conflict_analysis"],
+        )
+
+        public_payload = persona_profile_to_public_payload(direct)
+        self.assertIn(
+            "direct_confrontation_bias",
+            public_payload["personality_model"]["derived_factors"],
+        )
+
+    def test_persona_unfair_argument_bias_changes_overreaction_strength(self):
+        volatile = build_persona_profile(
+            persona_id="volatile",
+            name="volatile",
+            text="敏感 情绪化 激动 冲动 焦虑 不安",
+        )
+        regulated = build_persona_profile(
+            persona_id="regulated",
+            name="regulated",
+            text="冷静 克制 耐心 诚实 温柔 负责 复盘 修复",
+        )
+        engine = EmotionEngine()
+        observation = EmotionObservation(
+            values={
+                "valence": -0.42,
+                "arousal": 0.72,
+                "dominance": 0.2,
+                "goal_congruence": -0.32,
+                "certainty": -0.35,
+                "control": -0.1,
+                "affiliation": -0.1,
+            },
+            confidence=0.86,
+            label="possible_overreaction",
+            appraisal={
+                "relationship_decision": {
+                    "decision": "confront",
+                    "intensity": 0.5,
+                    "forgiveness": 0.1,
+                    "relationship_importance": 0.42,
+                },
+                "conflict_analysis": {
+                    "cause": "bot_whim",
+                    "fault_severity": 0.35,
+                    "bot_whim_level": 0.36,
+                    "ambiguity_level": 0.35,
+                    "misread_likelihood": 0.34,
+                    "emotion_regulation_load": 0.55,
+                    "dialogue_viability": 0.42,
+                    "boundary_legitimacy": 0.3,
+                },
+            },
+        )
+
+        volatile_state = engine.update(
+            EmotionState.initial(volatile),
+            observation,
+            profile=volatile,
+            now=1010.0,
+        )
+        regulated_state = engine.update(
+            EmotionState.initial(regulated),
+            observation,
+            profile=regulated,
+            now=1010.0,
+        )
+
+        self.assertIn("unfair_argument", volatile_state.consequences.active_effects)
+        self.assertGreater(
+            volatile_state.consequences.values["argument"],
+            regulated_state.consequences.values["argument"],
+        )
+        self.assertGreaterEqual(
+            regulated_state.consequences.values["repair"],
+            volatile_state.consequences.values["repair"],
+        )
 
     def test_conflict_repaired_user_fault_clears_cold_war(self):
         engine = EmotionEngine()
@@ -966,9 +1329,14 @@ class EmotionEngineTests(unittest.TestCase):
     def test_public_consequence_payload_labels_active_effects(self):
         state = EmotionState.initial()
         state.consequences.active_effects["direct_boundary"] = 2
+        state.consequences.active_effects["direct_confrontation"] = 3
         payload = consequence_state_to_public_payload(state.consequences)
         self.assertEqual(payload["active_effect_labels"]["direct_boundary"], "直接设边界")
-        self.assertEqual(len(payload["dimensions"]), 10)
+        self.assertEqual(
+            payload["active_effect_labels"]["direct_confrontation"],
+            "直接对质",
+        )
+        self.assertEqual(len(payload["dimensions"]), 11)
 
     def test_state_injection_safety_boundary_is_configurable(self):
         from prompts import build_state_injection
@@ -1035,7 +1403,12 @@ class EmotionEngineTests(unittest.TestCase):
         self.assertIn("低推理模型友好模式", light)
         self.assertIn("relationship_decision", light)
         self.assertIn("conflict_analysis", light)
-        self.assertIn("forgive|repair|boundary|cold_war|escalate|none", light)
+        self.assertIn("forgive|repair|boundary|confront|cold_war|escalate|none", light)
+        self.assertIn("直接对质", full)
+        self.assertIn("冷处理", full)
+        self.assertIn("无理取闹风险", full)
+        self.assertIn("personality_factors", full)
+        self.assertIn("unfair_argument_risk", light)
         self.assertNotIn("citation_ids", light)
 
 

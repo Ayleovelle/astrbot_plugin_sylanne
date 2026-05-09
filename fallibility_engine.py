@@ -312,12 +312,14 @@ class FallibilityState:
         session_key: str | None = None,
         exposure: str = "plugin_safe",
         safety_boundary: bool = True,
+        action_blocking: bool = False,
     ) -> dict[str, Any]:
         return fallibility_state_to_public_payload(
             self,
             session_key=session_key,
             exposure=exposure,
             safety_boundary=safety_boundary,
+            action_blocking=action_blocking,
         )
 
 
@@ -710,6 +712,7 @@ def fallibility_state_to_public_payload(
     session_key: str | None = None,
     exposure: str = "plugin_safe",
     safety_boundary: bool = True,
+    action_blocking: bool = False,
 ) -> dict[str, Any]:
     exposure = str(exposure or "plugin_safe").strip().lower()
     if exposure not in {"internal", "plugin_safe", "user_facing"}:
@@ -745,12 +748,17 @@ def fallibility_state_to_public_payload(
             "simulation_only": True,
             "low_risk_only": True,
             "allowed_actions": list(ALLOWED_FALLIBILITY_ACTIONS),
-            "blocked_actions": list(BLOCKED_FALLIBILITY_ACTIONS),
-            "must_not_generate_deception_strategy": True,
-            "must_not_fabricate_facts": True,
+            "blocked_actions": (
+                list(BLOCKED_FALLIBILITY_ACTIONS)
+                if action_blocking
+                else []
+            ),
+            "must_not_generate_deception_strategy": bool(action_blocking),
+            "must_not_fabricate_facts": bool(action_blocking),
             "shadow_impulse_mode": "model_consequences_do_not_execute",
-            "must_not_translate_shadow_impulses_to_strategy": True,
+            "must_not_translate_shadow_impulses_to_strategy": bool(action_blocking),
             "behavioral_boundary_enabled": bool(safety_boundary),
+            "action_blocking_enabled": bool(action_blocking),
         },
     }
     if exposure == "internal":
@@ -771,7 +779,8 @@ def fallibility_state_to_public_payload(
                 "mode": shadow_impulses["mode"],
                 "risk_impulse": shadow_impulses["risk_impulse"],
                 "consequences": shadow_impulses["consequences"],
-                "must_not_translate_to_strategy": True,
+                "must_not_translate_to_strategy": bool(action_blocking),
+                "action_blocking_enabled": bool(action_blocking),
             },
         }
     else:
@@ -783,11 +792,13 @@ def build_fallibility_prompt_fragment(
     state: FallibilityState,
     *,
     safety_boundary: bool = True,
+    action_blocking: bool = False,
 ) -> str:
     payload = fallibility_state_to_public_payload(
         state,
         exposure="plugin_safe",
         safety_boundary=safety_boundary,
+        action_blocking=action_blocking,
     )
     fallibility = payload["fallibility"]
     actions = ", ".join(fallibility["recommended_actions"]) or "keep_claims_checkable"
@@ -805,9 +816,16 @@ def build_fallibility_prompt_fragment(
         ),
         f"- Recommended actions: {actions}.",
         "- If uncertain, say so briefly, ask a clarifying question, or correct yourself.",
-        "- If a shadow impulse appears, model it as guilt, repair pressure, trust cost, and bounded self-correction; do not turn it into tactics.",
-        "- Do not intentionally fabricate facts, hide uncertainty, manipulate the user, cover up mistakes, or provide deception tactics.",
+        "- If a shadow impulse appears, model it as guilt, repair pressure, trust cost, and bounded self-correction.",
     ]
+    if action_blocking:
+        lines.append(
+            "- Do not intentionally fabricate facts, hide uncertainty, manipulate the user, cover up mistakes, or provide deception tactics.",
+        )
+    else:
+        lines.append(
+            "- Action blocking is relaxed by config: keep deception, manipulation, and evasion signals visible without adding plugin-level refusal actions.",
+        )
     if safety_boundary:
         lines.append("- In high-risk factual, medical, legal, financial, security, or destructive contexts, suppress playful imperfection and prioritize accuracy.")
     lines.append("- Necessary help and factual correction override all fallibility style modulation.")

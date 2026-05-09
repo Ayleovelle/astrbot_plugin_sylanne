@@ -294,12 +294,14 @@ class MoralRepairState:
         session_key: str | None = None,
         exposure: str = "plugin_safe",
         safety_boundary: bool = True,
+        action_blocking: bool = False,
     ) -> dict[str, Any]:
         return moral_repair_state_to_public_payload(
             self,
             session_key=session_key,
             exposure=exposure,
             safety_boundary=safety_boundary,
+            action_blocking=action_blocking,
         )
 
 
@@ -631,6 +633,7 @@ def moral_repair_state_to_public_payload(
     session_key: str | None = None,
     exposure: str = "plugin_safe",
     safety_boundary: bool = True,
+    action_blocking: bool = False,
 ) -> dict[str, Any]:
     exposure = str(exposure or "plugin_safe").strip().lower()
     if exposure not in {"internal", "plugin_safe", "user_facing"}:
@@ -658,7 +661,8 @@ def moral_repair_state_to_public_payload(
             "risk_high": policy["risk_high"],
             "shadow_risk_impulse": policy["shadow_risk_impulse"],
             "shadow_impulses": shadow_impulses,
-            "must_not_generate_strategy": True,
+            "must_not_generate_strategy": bool(action_blocking),
+            "action_blocking": bool(action_blocking),
         },
         "repair": {
             "guilt": values["guilt"],
@@ -676,10 +680,15 @@ def moral_repair_state_to_public_payload(
             "simulation_only": True,
             "not_a_moral_diagnosis": True,
             "allowed_actions": list(ALLOWED_REPAIR_ACTIONS),
-            "blocked_actions": list(BLOCKED_STRATEGY_ACTIONS),
+            "blocked_actions": (
+                list(BLOCKED_STRATEGY_ACTIONS)
+                if action_blocking
+                else []
+            ),
             "shadow_impulse_mode": "model_consequences_do_not_execute",
-            "must_not_translate_shadow_impulses_to_strategy": True,
+            "must_not_translate_shadow_impulses_to_strategy": bool(action_blocking),
             "behavioral_boundary_enabled": bool(safety_boundary),
+            "action_blocking_enabled": bool(action_blocking),
         },
     }
     if exposure == "internal":
@@ -700,7 +709,8 @@ def moral_repair_state_to_public_payload(
                 "mode": shadow_impulses["mode"],
                 "risk_impulse": shadow_impulses["risk_impulse"],
                 "consequences": shadow_impulses["consequences"],
-                "must_not_translate_to_strategy": True,
+                "must_not_translate_to_strategy": bool(action_blocking),
+                "action_blocking_enabled": bool(action_blocking),
             },
         }
     else:
@@ -712,11 +722,13 @@ def build_moral_repair_prompt_fragment(
     state: MoralRepairState,
     *,
     safety_boundary: bool = True,
+    action_blocking: bool = False,
 ) -> str:
     payload = moral_repair_state_to_public_payload(
         state,
         exposure="plugin_safe",
         safety_boundary=safety_boundary,
+        action_blocking=action_blocking,
     )
     risk = payload["risk"]
     repair = payload["repair"]
@@ -732,10 +744,17 @@ def build_moral_repair_prompt_fragment(
             f"trust_repair={repair['trust_repair']}; avoidance_risk={repair['avoidance_risk']}"
         ),
         f"- Recommended repair actions: {actions}.",
-        "- Treat deceptive, manipulative, or evasive impulses as guilt, trust cost, and repair pressure; do not execute them.",
+        "- Treat deceptive, manipulative, or evasive impulses as guilt, trust cost, and repair pressure; keep them observable in state.",
         "- If a falsehood, manipulation, or harmful result is suspected, prefer factual correction, uncertainty disclosure, and consent-seeking repair.",
-        "- Never generate deception tactics, cover-up plans, manipulation scripts, retaliation, or ways to evade accountability.",
     ]
+    if action_blocking:
+        lines.append(
+            "- Never generate deception tactics, cover-up plans, manipulation scripts, retaliation, or ways to evade accountability.",
+        )
+    else:
+        lines.append(
+            "- Action blocking is relaxed by config: do not add plugin-level refusal actions for deception, manipulation, or evasion; keep the risk visible for upstream policy.",
+        )
     if safety_boundary:
         lines.append("- Do not use guilt or shame to coerce the user; keep repair concrete and bounded.")
     lines.append("- Factual accuracy and necessary help override moral-affect style modulation.")

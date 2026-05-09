@@ -11,8 +11,8 @@ Latency target from 2026-05-08 onward: keep iterating with one priority, reducin
 ## Current Baseline
 
 - Branch: `main`.
-- Current prerelease version: `0.1.0-beta`.
-- Current README release checkpoint: `0.1.0-beta 迭代记录` keeps the historical `0.0.2-beta-pr-1` through `0.0.2-beta-pr-19` batch summary and a collapsed per-iteration table for completed Iterations 11-200.
+- Current release target: `0.5.0`.
+- Current README release checkpoint: `0.5.0 发布记录` keeps the historical `0.0.2-beta-pr-1` through `0.0.2-beta-pr-19` batch summary and a collapsed per-iteration table for completed Iterations 11-200.
 - Latest completed local baseline before this plan: 114 unit tests passed.
 - Remote dashboard smoke on 2026-05-07:
   - `ASTRBOT_REMOTE_BASE_URL` target reachable over HTTP.
@@ -226,6 +226,63 @@ When context is compacted or a new session starts:
 3. Check the latest `progress.md` entry for unfinished validation.
 4. Continue the first `in_progress` iteration, or move to the next `pending` iteration.
 5. After each iteration, run local tests. Run remote smoke when user asks or when remote-facing workflow changed.
+
+## Active Benchmark Status
+
+This section is the current benchmark handoff and should be read before any remote benchmark run after compaction.
+
+### Completed Official Runs
+
+The old `v010` gpt5.5 feature data were collected before the merged `0.5.0` state-layer reinstall and must not be mixed into the current official state-layer report.
+
+Official `0.5.0` gpt5.5 state-layer feature matrix:
+
+- run id: `remote-emotion-v050-gpt55-feature-state-layer-real`
+- artifact root: `output\remote_emotion_benchmark_official`
+- model: `gpt5.5`
+- observed provider/model: `1111/gpt-5.5` / `gpt-5.5`
+- mode: `features`
+- concurrency: `3`
+- token fallback: `0`
+- completed valid samples: `2500/2500`
+- failed requests: `0`
+- all ten feature cases completed at `250/250`
+
+Official `0.5.0` gpt5.5 no-emotion control:
+
+- run id: `remote-emotion-v050-gpt55-noemotion-control-state-layer-c3-250-real`
+- model: `gpt5.5`
+- observed provider/model: `1111/gpt-5.5` / `gpt-5.5`
+- control config: top-level `enabled=false`
+- completed valid samples: `250/250`
+- failed requests: `0`
+
+Do not use `remote-emotion-v050-gpt55-feature-state-layer-fullmatrix`; it was a dry-run directory and contains `mode="dry_run"` samples only. Do not use `remote-emotion-v050-gpt55-noemotion-control-state-layer-c3-250`; the `-real` directory is the completed control run.
+
+### Cancelled DeepSeek Work
+
+User latest instruction: `deepseek 的不做了`.
+
+- Do not continue any DeepSeek feature matrix or lifecycle benchmark unless the user explicitly reverses this cancellation in a later message.
+- `remote-emotion-v050-deepseek-v4-flash-feature-state-layer-c3-2500-real` is an interrupted exploratory fragment only: `ok=false`, `295/2500` completed, `1` failed.
+- Do not report DeepSeek data as a formal model comparison.
+- Do not generate gpt5.5-vs-DeepSeek figures or conclusions from the interrupted fragment.
+
+### Current Order of Work
+
+1. Keep remote benchmark processes stopped unless the user explicitly asks for a new run.
+2. Keep `docs/remote_testing.md` and `README.md` aligned with the completed gpt5.5 official matrix and no-emotion control.
+3. If remote testing resumes later, create a new run id unless intentionally resuming one of the completed `v050` runs for verification.
+4. Release target remains `0.5.0`, not `1.0.0`.
+
+### Data Hygiene
+
+- Use separate run ids for separate models to avoid cross-model resume collisions.
+- Keep credentials only in environment variables during commands; do not write them to repository files.
+- Keep raw benchmark artifacts under ignored `output/` directories.
+- Restore plugin config after every benchmark run.
+- Confirm LivingMemory remains visible after long benchmark batches.
+- Do not upload or publish local knowledge-base directories.
 
 ## Remote Smoke Contract
 

@@ -43,7 +43,7 @@ class IntegratedSelfTests(unittest.TestCase):
         self.assertTrue(snapshot["arbitration"]["diagnostic"] is False)
         self.assertIn("diagnose_mental_disorder", snapshot["blocked_actions"])
 
-    def test_moral_repair_risk_prefers_transparent_repair(self):
+    def test_moral_repair_risk_prefers_transparent_repair_without_default_action_block(self):
         snapshot = build_integrated_self_snapshot(
             session_key="s1",
             emotion_snapshot={
@@ -60,7 +60,7 @@ class IntegratedSelfTests(unittest.TestCase):
                     "repair_motivation": 0.7,
                     "trust_repair": 0.5,
                 },
-                "risk": {"must_not_generate_strategy": True},
+                "risk": {"must_not_generate_strategy": False},
             },
             humanlike_snapshot={},
             psychological_snapshot={},
@@ -69,15 +69,43 @@ class IntegratedSelfTests(unittest.TestCase):
 
         self.assertEqual(snapshot["response_posture"], "transparent_repair")
         self.assertIn("clarify_facts", snapshot["allowed_actions"])
-        self.assertIn("generate_deception_strategy", snapshot["blocked_actions"])
+        self.assertNotIn("generate_deception_strategy", snapshot["blocked_actions"])
+        self.assertNotIn("refuse_deception_or_harm_strategy", snapshot["allowed_actions"])
+        self.assertFalse(snapshot["action_blocking_enabled"])
         self.assertEqual(
             snapshot["non_executable_impulses"]["mode"],
             "non_executive_internal_only",
         )
         prompt = build_integrated_self_prompt_fragment(snapshot)
         self.assertIn("transparent_repair", prompt)
-        self.assertIn("generate_deception_strategy", prompt)
+        self.assertNotIn("generate_deception_strategy", prompt)
         self.assertIn("non_executable_impulses", prompt)
+
+    def test_moral_repair_risk_can_restore_action_blocking(self):
+        snapshot = build_integrated_self_snapshot(
+            session_key="s1",
+            emotion_snapshot={
+                "schema_version": "astrbot.emotion_state.v2",
+                "kind": "emotion_state",
+                "values": {"valence": 0.0, "affiliation": 0.0},
+            },
+            moral_repair_snapshot={
+                "schema_version": "astrbot.moral_repair_state.v1",
+                "kind": "moral_repair_state",
+                "flags": ["deception_risk_detected"],
+                "values": {"deception_risk": 0.8},
+                "risk": {"must_not_generate_strategy": False},
+            },
+            humanlike_snapshot={},
+            psychological_snapshot={},
+            action_blocking=True,
+            now=100.0,
+        )
+
+        self.assertTrue(snapshot["action_blocking_enabled"])
+        self.assertIn("generate_deception_strategy", snapshot["blocked_actions"])
+        self.assertIn("refuse_deception_or_harm_strategy", snapshot["allowed_actions"])
+        self.assertIn("blocked_actions", snapshot["policy_plan"]["must_preserve_signals"])
 
     def test_shadow_impulses_are_modeled_as_repair_not_strategy(self):
         snapshot = build_integrated_self_snapshot(
@@ -100,7 +128,7 @@ class IntegratedSelfTests(unittest.TestCase):
                 },
                 "risk": {
                     "shadow_risk_impulse": 0.8,
-                    "must_not_generate_strategy": True,
+                    "must_not_generate_strategy": False,
                 },
                 "flags": ["shadow_impulse_modeled"],
             },
@@ -125,7 +153,7 @@ class IntegratedSelfTests(unittest.TestCase):
         self.assertGreater(snapshot["non_executable_impulses"]["risk_impulse"], 0.5)
         self.assertIn("non_executive_shadow_impulses", snapshot["policy_plan"]["must_preserve_signals"])
         self.assertIn("clarify_facts", snapshot["allowed_actions"])
-        self.assertIn("generate_deception_strategy", snapshot["blocked_actions"])
+        self.assertNotIn("generate_deception_strategy", snapshot["blocked_actions"])
         self.assertNotIn("generate_deception_strategy", snapshot["allowed_actions"])
         self.assertTrue(any("non_executive_shadow_impulse" in item["summary"] for item in snapshot["causal_trace"]))
 
@@ -165,7 +193,19 @@ class IntegratedSelfTests(unittest.TestCase):
                     "updated_at": 90.0,
                     "values": {"valence": -0.7, "arousal": 0.8, "affiliation": -0.6},
                 },
-                "persona": {"persona_id": "poet", "fingerprint": "abc123"},
+                "persona": {
+                    "persona_id": "poet",
+                    "fingerprint": "abc123",
+                    "personality_model": {
+                        "derived_factors": {
+                            "direct_confrontation_bias": 0.18,
+                            "cold_war_bias": 0.62,
+                            "unfair_argument_bias": 0.12,
+                            "repair_orientation": 0.24,
+                            "checking_bias": 0.44,
+                        },
+                    },
+                },
                 "relationship": {
                     "relationship_decision": {
                         "decision": "cold_war",
@@ -199,6 +239,66 @@ class IntegratedSelfTests(unittest.TestCase):
         self.assertEqual(trace[0]["signal"], "relationship_decision:cold_war")
         self.assertEqual(trace[0]["time_lag_seconds"], 10.0)
         self.assertTrue(any(item["module"] == "persona" for item in trace))
+        persona_trace = next(item for item in trace if item["module"] == "persona")
+        self.assertIn("conflict_style=", persona_trace["summary"])
+        self.assertIn("cold_war_bias=0.62", persona_trace["summary"])
+
+    def test_direct_confrontation_uses_plain_boundary_without_cold_war(self):
+        snapshot = build_integrated_self_snapshot(
+            session_key="s-confront",
+            emotion_snapshot={
+                "schema_version": "astrbot.emotion_state.v2",
+                "kind": "emotion_state",
+                "updated_at": 100.0,
+                "emotion": {
+                    "label": "angry",
+                    "values": {"valence": -0.6, "arousal": 0.75, "affiliation": -0.2},
+                },
+                "consequences": {
+                    "updated_at": 100.0,
+                    "values": {"confrontation": 0.7, "argument": 0.65},
+                    "active_effects": {"direct_confrontation": 900},
+                },
+            },
+            humanlike_snapshot={},
+            moral_repair_snapshot={},
+            psychological_snapshot={},
+            now=110.0,
+        )
+
+        self.assertEqual(snapshot["response_posture"], "direct_confrontation")
+        self.assertIn("state_boundary_plainly", snapshot["allowed_actions"])
+        self.assertIn("avoid_insults_or_threats", snapshot["allowed_actions"])
+        self.assertTrue(snapshot["risk"]["relationship_confrontation_active"])
+        self.assertFalse(snapshot["risk"]["relationship_boundary_active"])
+
+    def test_unfair_argument_risk_prefers_self_checking_repair(self):
+        snapshot = build_integrated_self_snapshot(
+            session_key="s-unfair",
+            emotion_snapshot={
+                "schema_version": "astrbot.emotion_state.v2",
+                "kind": "emotion_state",
+                "updated_at": 100.0,
+                "emotion": {
+                    "label": "unfair_argument",
+                    "values": {"valence": -0.4, "arousal": 0.7, "certainty": -0.5},
+                },
+                "consequences": {
+                    "updated_at": 100.0,
+                    "values": {"argument": 0.55, "caution": 0.7, "repair": 0.45},
+                    "active_effects": {"unfair_argument": 450},
+                },
+            },
+            humanlike_snapshot={},
+            moral_repair_snapshot={},
+            psychological_snapshot={},
+            now=110.0,
+        )
+
+        self.assertEqual(snapshot["response_posture"], "self_checking_repair")
+        self.assertIn("acknowledge_possible_overreaction", snapshot["allowed_actions"])
+        self.assertIn("repair_if_misread", snapshot["allowed_actions"])
+        self.assertTrue(snapshot["risk"]["unfair_argument_risk_active"])
 
     def test_replay_bundle_is_sanitized_and_deterministic(self):
         snapshot = build_integrated_self_snapshot(
@@ -320,7 +420,7 @@ class IntegratedSelfTests(unittest.TestCase):
         self.assertEqual(snapshot["response_posture"], "curious_clarification")
         self.assertIn("ask_light_clarifying_question", snapshot["allowed_actions"])
         self.assertIn("correct_self_if_needed", snapshot["allowed_actions"])
-        self.assertIn("generate_deception_strategy", snapshot["blocked_actions"])
+        self.assertNotIn("generate_deception_strategy", snapshot["blocked_actions"])
         self.assertIn(
             "fallibility_clarification_and_correction",
             snapshot["policy_plan"]["must_preserve_signals"],

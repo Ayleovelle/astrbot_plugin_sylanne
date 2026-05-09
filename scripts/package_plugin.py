@@ -10,8 +10,10 @@ PLUGIN_NAME = "astrbot_plugin_emotional_state"
 
 INCLUDE_ROOT_FILES = {
     "__init__.py",
+    "agent_identity.py",
     "main.py",
     "emotion_engine.py",
+    "group_atmosphere_engine.py",
     "humanlike_engine.py",
     "lifelike_learning_engine.py",
     "personality_drift_engine.py",

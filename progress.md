@@ -2603,3 +2603,375 @@ Next command shape:
 - Use `remote-emotion-v010-gpt55-lifecycle-simtime` for continued lifecycle simtime batches.
 - Keep `ASTRBOT_BENCHMARK_MODE=lifecycle`, `ASTRBOT_BENCHMARK_CONCURRENCY=2`, and small batch sizes.
 - If a lifecycle run is interrupted, confirm `benchmark_enable_simulated_time=false` and `benchmark_time_offset_seconds=0.0` before returning the server to ordinary use.
+
+## 2026-05-09 Cross-Model Lifecycle Benchmark Plan Update
+
+Status: plan persisted before continuing remote execution.
+
+Reason:
+
+- User clarified that `gpt-5.5` lifecycle has already been run and should not be repeated unnecessarily.
+- Remaining work now has two tracks: finish the already-started `gpt-5.5` feature-toggle matrix, then run simulated-time lifecycle tests for the requested non-5.5 models.
+
+Persisted in `task_plan.md`:
+
+- Keep `remote-emotion-v010-gpt55-lifecycle-simtime-onepass` as the completed `gpt-5.5` lifecycle baseline.
+- Continue `remote-emotion-v010-gpt55-feature-postupload` feature benchmark until `2520/2520`.
+- Use isolated lifecycle run ids for:
+  - `gpt-5.4`
+  - `gpt-5.4-mini`
+  - `deepseek-v4-flash`
+  - `deepseek-v4-pro`
+  - `gemini-2.5-flash`
+  - `gemini-flash-lite-latest`
+  - `gemini-flash-latest`
+  - `gemini-pro-latest`
+  - `mimo-v2.5`
+  - `mimo-v2.5-pro`
+- Keep remote concurrency at `2`, restore plugin config after runs, and avoid writing credentials to repository files.
+
+Next:
+
+- Do not resume the `gpt-5.5` feature benchmark unless the user explicitly asks for feature/pressure benchmarking again.
+- Run one state-level simulated-time lifecycle pass for each remaining model, then aggregate tables and figures for README/docs.
+- Figure stage must include a dedicated personality-drift trajectory plot over simulated time, in addition to lifecycle latency/token comparison and fitting plots.
+
+## 2026-05-09 Feature Benchmark Paused by User
+
+Status: remote feature benchmark process stopped.
+
+Reason:
+
+- User clarified that follow-up tests should only run state-level simulated-time lifecycle tests, not pressure tests.
+
+Action:
+
+- Stopped the background batch process for `remote-emotion-v010-gpt55-feature-postupload`.
+- Confirmed no remaining Node benchmark process matching `remote_emotion_benchmark` / `run_remote_emotion_benchmark_batches`.
+- Kept the partial feature benchmark artifacts as local reference only.
+
+Latest partial feature state before stopping:
+
+- run id: `remote-emotion-v010-gpt55-feature-postupload`
+- mode: `features`
+- requested model: `gpt5.5`
+- selected provider/model: `1111/gpt-5.5` / `gpt-5.5`
+- completed items observed: `1190/2520`
+- failed requests: `0`
+
+## 2026-05-09 Lifecycle Benchmark Profile Correction
+
+Status: official lifecycle profile corrected before model sweep.
+
+User correction:
+
+- Lifecycle tests must use state-level simulated time.
+- Lifecycle tests must enable all plugin state features.
+- Safety boundary must be disabled for this benchmark profile.
+- If the earlier `gpt-5.5` lifecycle run did not use this full profile, it must be rerun.
+
+Decision:
+
+- Treat `remote-emotion-v010-gpt55-lifecycle-simtime-onepass` as a non-final low-cost lifecycle probe.
+- Official lifecycle run ids now use suffix `lifecycle-full-nosafety`.
+- Official profile must include:
+  - `use_llm_assessor=true`
+  - `low_reasoning_friendly_mode=false`
+  - `inject_state=true`
+  - `enable_safety_boundary=false`
+  - `enable_humanlike_state=true`
+  - `enable_lifelike_learning=true`
+  - `enable_personality_drift=true`
+  - `enable_moral_repair_state=true`
+  - `enable_fallibility_state=true`
+  - `enable_integrated_self_state=true`
+  - `integrated_self_degradation_profile=full`
+  - `benchmark_enable_simulated_time=true` with per-duration offsets
+
+Validation update:
+
+- Added `ASTRBOT_BENCHMARK_LIFECYCLE_PROFILE=full_nosafety` support in `scripts/remote_emotion_benchmark_playwright.js`.
+- Script syntax check passed.
+- Contract tests for simulated state time and full no-safety lifecycle profile passed.
+- Official `gpt5.5` full-profile lifecycle run completed:
+  - run id: `remote-emotion-v010-gpt55-lifecycle-full-nosafety`
+  - requested model: `gpt5.5`
+  - selected provider/model: `1111/gpt-5.5` / `gpt-5.5`
+  - lifecycle profile: `full_nosafety`
+  - completed: `9/9`
+  - failed requests: `0`
+- Official `gpt-5.4` full-profile lifecycle run completed:
+  - run id: `remote-emotion-v010-gpt54-lifecycle-full-nosafety`
+  - selected provider/model: `1111/gpt-5.4` / `gpt-5.4`
+  - completed: `9/9`
+  - failed requests: `0`
+- Official `gpt-5.4-mini` full-profile lifecycle run completed:
+  - run id: `remote-emotion-v010-gpt54-mini-lifecycle-full-nosafety`
+  - selected provider/model: `1111/gpt-5.4-mini` / `gpt-5.4-mini`
+  - completed: `9/9`
+  - failed requests: `0`
+- Historical `deepseek-v4-flash` full-profile lifecycle run completed before later cancellation:
+  - run id: `remote-emotion-v010-deepseek-v4-flash-lifecycle-full-nosafety`
+  - selected provider/model: `deepseek/deepseek-v4-flash` / `deepseek-v4-flash`
+  - completed: `9/9`
+  - failed requests: `0`
+  - note: `lifecycle_6m` token count is a visible high outlier candidate and should be marked during analysis rather than silently dropped.
+  - superseded note: later user instruction cancelled further DeepSeek work; keep this as historical local context only, not as a current formal comparison target.
+
+## 2026-05-09 Superseded Feature Matrix and DeepSeek Comparison Plan
+
+Status: superseded by later `deepseek 的不做了` instruction and by the completed `v050` gpt5.5 official matrix.
+
+Historical user correction at that time:
+
+- `gpt5.5` feature matrix still must be completed.
+- Then `deepseek-v4-flash` must run a complete feature matrix as well.
+- Compare the two matrices to evaluate whether model reasoning strength or model-side behavior explains latency increase.
+
+Supersession:
+
+- Do not resume the DeepSeek feature matrix from this historical plan.
+- Do not use this section as current task guidance after context compaction.
+- Current formal report uses `remote-emotion-v050-gpt55-feature-state-layer-real` and `remote-emotion-v050-gpt55-noemotion-control-state-layer-c3-250-real`.
+
+Historical `gpt5.5` feature matrix summary:
+
+- run id: `remote-emotion-v010-gpt55-feature-postupload`
+- requested/selected model: `gpt5.5` -> `1111/gpt-5.5` / `gpt-5.5`
+- completed: `1190/2520`
+- failed requests: `0`
+- case progress:
+  - `baseline_minimal`: `250/250`
+  - `emotion_injection`: `250/250`
+  - `low_reasoning`: `250/250`
+  - `humanlike`: `250/250`
+  - `lifelike_learning`: `190/250`
+  - `personality_drift`: not started
+  - `moral_repair`: not started
+  - `fallibility_low_risk`: not started
+  - `integrated_self_full`: not started
+  - `all_safe_modules`: not started
+
+Superseded benchmark sequence retained for audit only:
+
+1. This sequence is no longer active.
+2. Do not run `remote-emotion-v010-deepseek-v4-flash-feature-fullmatrix`.
+3. Do not report `gpt5.5` vs `deepseek-v4-flash` feature-matrix conclusions from this historical plan.
+4. Current docs must point to the completed `v050` gpt5.5 matrix and no-emotion control.
+
+Current `gpt5.5` feature continuation status:
+
+- Script run hash is back to the original `857212d153b6a842e18d324cdba0484332ce084bceef7d1afe254e929a32b6cd`.
+- A transient bad-hash partial run `8242272726e5f39fbfae93e7de0d9dc7b4df863787b4197217cd4894622e45d0` exists in `samples.jsonl`, but summary/continuation uses only the original hash.
+- Latest observed summary: `1592/2520`, `0` failed.
+- Completed cases: `baseline_minimal`, `emotion_injection`, `low_reasoning`, `humanlike`, `lifelike_learning`, `personality_drift`.
+- Current case: `moral_repair` at `92/250`.
+- Remaining after `moral_repair`: `fallibility_low_risk`, `integrated_self_full`, `all_safe_modules`.
+
+## 2026-05-09 Release Target Correction
+
+Status: release target updated.
+
+- User changed the formal release target from `1.0.0` to `0.5.0`.
+- Do not label this as v1.0.0 in README, docs, metadata, Git tags, or release notes.
+- A transient script issue was found: adding `lifecycle_profile` changed feature-mode `run_hash`, causing a new `gpt5.5` feature hash to start from baseline again. The benchmark process was stopped, and the script now ignores `lifecycle_profile` in feature-only run hashes so the old `1190/2520` feature run can resume.
+
+## 2026-05-09 Experimental State Layer Merge and Remote Reinstall
+
+Status: local verification passed; remote `0.5.0` installed; new gpt5.5 feature matrix running.
+
+Local merge scope:
+
+- Merged experiment-state runtime files into main:
+  - `agent_identity.py`
+  - `group_atmosphere_engine.py`
+  - group atmosphere/state query/runtime diagnostics wiring in `main.py`
+  - group atmosphere public API in `public_api.py`
+  - package/preflight/test contracts
+- Updated `docs/theory.md` with:
+  - conversation/speaker state-track formula
+  - group atmosphere 7-D state formula
+  - real-time half-life update
+  - interrupt risk and joinability equations
+  - diff injection, cooldown, FIFO post-assessment, and public API boundary notes
+- Fixed `scripts/remote_state_layer_ab_config.json` to use current schema keys:
+  - `enable_group_atmosphere_state`
+  - `group_atmosphere_injection_strength`
+  - `group_atmosphere_injection_diff_threshold`
+  - `background_post_dead_letter_limit`
+  - `agent_trail_low_signal_delta_threshold`
+  - `agent_trail_low_signal_window`
+
+Local validation passed:
+
+- `py -3.13 -m unittest tests.test_document_math_contract -v`
+- `py -3.13 -m unittest tests.test_group_atmosphere_engine tests.test_public_api tests.test_config_schema_contract tests.test_package_plugin -v`
+- `py -3.13 -m py_compile __init__.py agent_identity.py main.py emotion_engine.py group_atmosphere_engine.py psychological_screening.py humanlike_engine.py lifelike_learning_engine.py personality_drift_engine.py integrated_self.py moral_repair_engine.py fallibility_engine.py prompts.py public_api.py`
+- `py -3.13 -m unittest discover -s tests -v` -> `370 tests OK`
+- `py -3.13 scripts\benchmark_plugin_hot_path.py`
+- bundled Node `--check` for `scripts\remote_emotion_benchmark_playwright.js` and `scripts\plugin_zip_preflight.js`
+- `py -3.13 scripts\package_plugin.py --output dist\astrbot_plugin_emotional_state.zip`
+- bundled Node `scripts\plugin_zip_preflight.js dist\astrbot_plugin_emotional_state.zip astrbot_plugin_emotional_state` -> `ok=true`
+- `git diff --check`
+
+Remote notes:
+
+- User said current reachable port was changed, but local TCP/browser smoke could not reach that alternate port.
+- The earlier remote test endpoint remained reachable and was used for smoke/install/testing. Do not write the concrete server address into public-facing docs.
+- Strict smoke before reinstall found old runtime `0.1.0-beta`.
+- Cleanup script removed only `astrbot_plugin_emotional_state` with `delete_config=false` and `delete_data=false`; LivingMemory before/after count remained `1`.
+- Upload/install was interrupted by user, but follow-up strict smoke confirmed remote runtime is now:
+  - plugin `astrbot_plugin_emotional_state`
+  - version `0.5.0`
+  - activated `true`
+  - failed plugin count `0`
+  - LivingMemory visible
+
+New official feature matrix for the merged state-layer build:
+
+- run id: `remote-emotion-v050-gpt55-feature-state-layer-real`
+- model request: `gpt5.5`
+- selected provider/model observed: `1111/gpt-5.5` / `gpt-5.5`
+- plugin version on remote: `0.5.0`
+- mode: `features`
+- concurrency: `3`
+- token fallback: `0`
+- artifact root: `output\remote_emotion_benchmark_official`
+- first real probe completed:
+  - completed valid samples: `28/2500`
+  - failed requests: `0`
+  - current case: `baseline_minimal`
+  - mean latency: `15826.16 ms`
+  - p95 latency: `22973.90 ms`
+  - mean tokens: `2724.93`
+
+Important hygiene:
+
+- A dry-run directory exists at `output\remote_emotion_benchmark_official\remote-emotion-v050-gpt55-feature-state-layer-fullmatrix`.
+- It contains `mode="dry_run"` samples and no summary. Do not use it in reports.
+- The real run is `remote-emotion-v050-gpt55-feature-state-layer-real`.
+- Background batch process was started with:
+  - `ASTRBOT_BENCHMARK_MAX_SAMPLES=150`
+  - `ASTRBOT_BENCHMARK_BATCHES=4`
+  - `ASTRBOT_BENCHMARK_TARGET_COMPLETED=628`
+  - `ASTRBOT_BENCHMARK_CONCURRENCY=3`
+- Check progress by reading:
+  - `output\remote_emotion_benchmark_official\remote-emotion-v050-gpt55-feature-state-layer-real\summary.json`
+  - `output\remote_emotion_benchmark_official\remote-emotion-v050-gpt55-feature-state-layer-real\batch-run.log`
+  - `output\remote_emotion_benchmark_official\remote-emotion-v050-gpt55-feature-state-layer-real\batch-run.err.log`
+
+Checkpoint after the first background batch group:
+
+- timestamp: `2026-05-09T08:35:00Z`
+- completed valid samples: `624/2500`
+- failed requests: `0`
+- completed cases:
+  - `baseline_minimal`: `250/250`, mean latency `16308.11 ms`, p95 `22441.70 ms`, mean tokens `2726.52`
+  - `emotion_injection`: `250/250`, mean latency `17277.68 ms`, p95 `25870.60 ms`, mean tokens `3120.93`
+- current case:
+  - `low_reasoning`: `124/250`, mean latency `20810.20 ms`, p95 `24845.20 ms`, mean tokens `2726.27`
+- observed deltas vs baseline:
+  - `emotion_injection`: `+969.56 ms` mean latency, `+3428.90 ms` p95, `+394.41` mean tokens
+  - `low_reasoning` partial: `+4502.08 ms` mean latency, `+2403.50 ms` p95, `-0.25` mean tokens
+- next action: continue the same run id with `ASTRBOT_BENCHMARK_CONCURRENCY=3`, token fallback off, restore config at end.
+
+Checkpoint after the second background batch group:
+
+- timestamp: `2026-05-09T09:52:50Z`
+- completed valid samples: `1220/2500`
+- failed requests: `0`
+- completed cases:
+  - `baseline_minimal`: `250/250`, mean latency `16308.11 ms`, p95 `22441.70 ms`, mean tokens `2726.52`
+  - `emotion_injection`: `250/250`, mean latency `17277.68 ms`, p95 `25870.60 ms`, mean tokens `3120.93`
+  - `low_reasoning`: `250/250`, mean latency `20550.09 ms`, p95 `25698.40 ms`, mean tokens `2727.24`
+  - `humanlike`: `250/250`, mean latency `17112.82 ms`, p95 `23717.90 ms`, mean tokens `3171.38`
+- current case:
+  - `lifelike_learning`: `220/250`, mean latency `16352.27 ms`, p95 `21908.70 ms`, mean tokens `3167.90`
+- observed deltas vs baseline:
+  - `emotion_injection`: `+969.56 ms` mean latency, `+3428.90 ms` p95, `+394.41` mean tokens
+  - `low_reasoning`: `+4241.97 ms` mean latency, `+3256.70 ms` p95, `+0.72` mean tokens
+  - `humanlike`: `+804.71 ms` mean latency, `+1276.20 ms` p95, `+444.86` mean tokens
+  - `lifelike_learning` partial: `+44.15 ms` mean latency, `-533.00 ms` p95, `+441.38` mean tokens
+- next action: continue the same run id toward `1820/2500`; expected next completed cases are `lifelike_learning`, `personality_drift`, and most of `moral_repair`.
+
+Checkpoint after the third/fourth background batch group:
+
+- timestamp: `2026-05-09T11:08:59Z`
+- completed valid samples: `1814/2500`
+- failed requests: `0`
+- completed cases:
+  - `baseline_minimal`: `250/250`, mean latency `16308.11 ms`, p95 `22441.70 ms`, mean tokens `2726.52`
+  - `emotion_injection`: `250/250`, mean latency `17277.68 ms`, p95 `25870.60 ms`, mean tokens `3120.93`
+  - `low_reasoning`: `250/250`, mean latency `20550.09 ms`, p95 `25698.40 ms`, mean tokens `2727.24`
+  - `humanlike`: `250/250`, mean latency `17112.82 ms`, p95 `23717.90 ms`, mean tokens `3171.38`
+  - `lifelike_learning`: `250/250`, mean latency `16376.29 ms`, p95 `21981.60 ms`, mean tokens `3168.79`
+  - `personality_drift`: `250/250`, mean latency `17009.38 ms`, p95 `23335.20 ms`, mean tokens `3175.14`
+  - `moral_repair`: `250/250`, mean latency `16450.77 ms`, p95 `22808.70 ms`, mean tokens `3177.38`
+- current case:
+  - `fallibility_low_risk`: `64/250`, mean latency `16946.81 ms`, p95 `23386.00 ms`, mean tokens `3117.42`
+- observed deltas vs baseline:
+  - `emotion_injection`: `+969.56 ms` mean latency, `+3428.90 ms` p95, `+394.41` mean tokens
+  - `low_reasoning`: `+4241.97 ms` mean latency, `+3256.70 ms` p95, `+0.72` mean tokens
+  - `humanlike`: `+804.71 ms` mean latency, `+1276.20 ms` p95, `+444.86` mean tokens
+  - `lifelike_learning`: `+68.18 ms` mean latency, `-460.10 ms` p95, `+442.27` mean tokens
+  - `personality_drift`: `+701.27 ms` mean latency, `+893.50 ms` p95, `+448.62` mean tokens
+  - `moral_repair`: `+142.66 ms` mean latency, `+367.00 ms` p95, `+450.86` mean tokens
+  - `fallibility_low_risk` partial: `+638.70 ms` mean latency, `+944.30 ms` p95, `+390.90` mean tokens
+- next action: continue the same run id with `ASTRBOT_BENCHMARK_CONCURRENCY=3`, token fallback off, restore config at end, target `2500/2500`.
+
+Final `gpt5.5` state-layer feature matrix checkpoint:
+
+- timestamp: `2026-05-09T12:39:13Z`
+- run id: `remote-emotion-v050-gpt55-feature-state-layer-real`
+- requested/selected model: `gpt5.5` -> `1111/gpt-5.5` / `gpt-5.5`
+- completed valid samples: `2500/2500`
+- failed requests: `0`
+- all ten feature cases completed at `250/250`:
+  - `baseline_minimal`: mean latency `16308.11 ms`, p95 `22441.70 ms`, mean tokens `2726.52`
+  - `emotion_injection`: mean latency `17277.68 ms`, p95 `25870.60 ms`, mean tokens `3120.93`
+  - `low_reasoning`: mean latency `20550.09 ms`, p95 `25698.40 ms`, mean tokens `2727.24`
+  - `humanlike`: mean latency `17112.82 ms`, p95 `23717.90 ms`, mean tokens `3171.38`
+  - `lifelike_learning`: mean latency `16376.29 ms`, p95 `21981.60 ms`, mean tokens `3168.79`
+  - `personality_drift`: mean latency `17009.38 ms`, p95 `23335.20 ms`, mean tokens `3175.14`
+  - `moral_repair`: mean latency `16450.77 ms`, p95 `22808.70 ms`, mean tokens `3177.38`
+  - `fallibility_low_risk`: mean latency `16714.61 ms`, p95 `23386.00 ms`, mean tokens `3119.09`
+  - `integrated_self_full`: mean latency `16149.86 ms`, p95 `22174.30 ms`, mean tokens `3121.31`
+  - `all_safe_modules`: mean latency `20777.29 ms`, p95 `27496.30 ms`, mean tokens `3329.84`
+- next actions:
+  - run a new `v050` no-emotion control because older complete control data were collected before the state-layer config surface existed
+  - then continue the DeepSeek full feature matrix without mixing old `v010` gpt5.5 data into the `v050` report
+
+Final `gpt5.5` state-layer no-emotion control checkpoint:
+
+- timestamp: `2026-05-09T13:15:49Z`
+- run id: `remote-emotion-v050-gpt55-noemotion-control-state-layer-c3-250-real`
+- requested/selected model: `gpt5.5` -> `1111/gpt-5.5` / `gpt-5.5`
+- control config: only `enabled=false` on top of the current remote `0.5.0` state-layer config surface
+- completed valid samples: `250/250`
+- failed requests: `0`
+- `no_emotion_control`: mean latency `16023.63 ms`, p95 `23892.90 ms`, mean tokens `2741.02`
+- comparison anchor:
+  - `v050` `baseline_minimal` mean latency `16308.11 ms`, p95 `22441.70 ms`, mean tokens `2726.52`
+  - no-emotion vs baseline mean latency delta `-284.48 ms`, p95 delta `+1451.20 ms`, token mean delta `+14.50`
+- next action at that time was superseded by the user's later cancellation of DeepSeek testing.
+
+## 2026-05-09 DeepSeek Cancellation and v0.5.0 Report Sync
+
+Status: DeepSeek feature matrix cancelled; gpt5.5 results are the only formal v0.5.0 remote feature benchmark in the current report.
+
+User latest instruction:
+
+- `deepseek 的不做了`
+
+Action taken:
+
+- Do not continue `remote-emotion-v050-deepseek-v4-flash-feature-state-layer-c3-2500-real`.
+- Treat the DeepSeek run as an interrupted exploratory fragment only:
+  - `ok=false`
+  - completed valid samples: `295/2500`
+  - failed requests: `1`
+  - not included in formal conclusions
+- Updated documentation targets to use only:
+  - gpt5.5 official feature matrix: `remote-emotion-v050-gpt55-feature-state-layer-real`, `2500/2500`, failed `0`
+  - gpt5.5 no-emotion control: `remote-emotion-v050-gpt55-noemotion-control-state-layer-c3-250-real`, `250/250`, failed `0`
+- Updated `task_plan.md` so context-compaction recovery will not resume DeepSeek work by mistake.

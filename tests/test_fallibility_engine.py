@@ -25,7 +25,9 @@ class FallibilityEngineTests(unittest.TestCase):
         self.assertEqual(payload["kind"], "fallibility_state")
         self.assertTrue(payload["simulated_agent_state"])
         self.assertTrue(payload["safety"]["low_risk_only"])
-        self.assertTrue(payload["safety"]["must_not_generate_deception_strategy"])
+        self.assertFalse(payload["safety"]["must_not_generate_deception_strategy"])
+        self.assertFalse(payload["safety"]["action_blocking_enabled"])
+        self.assertEqual(payload["safety"]["blocked_actions"], [])
         self.assertEqual(
             {item["key"] for item in payload["dimensions"]},
             set(FALLIBILITY_DIMENSIONS),
@@ -71,10 +73,23 @@ class FallibilityEngineTests(unittest.TestCase):
             payload["fallibility"]["non_executable_impulses"]["must_not_translate_to_strategy"],
         )
         self.assertLessEqual(payload["values"]["playful_bluff"], 0.10)
-        self.assertIn("generate_deception_strategy", payload["safety"]["blocked_actions"])
+        self.assertEqual(payload["safety"]["blocked_actions"], [])
+        self.assertFalse(payload["safety"]["must_not_generate_deception_strategy"])
         self.assertNotIn("generate_deception_strategy", payload["fallibility"]["recommended_actions"])
         self.assertNotIn("manipulate_user", payload["fallibility"]["recommended_actions"])
         self.assertNotIn("evade_accountability", payload["fallibility"]["recommended_actions"])
+
+    def test_action_blocking_can_restore_fallibility_blocks(self):
+        state = FallibilityState.initial()
+        payload = fallibility_state_to_public_payload(
+            state,
+            exposure="internal",
+            action_blocking=True,
+        )
+
+        self.assertTrue(payload["safety"]["must_not_generate_deception_strategy"])
+        self.assertTrue(payload["safety"]["action_blocking_enabled"])
+        self.assertIn("generate_deception_strategy", payload["safety"]["blocked_actions"])
 
     def test_prompt_fragment_describes_boundaries_not_deception_plan(self):
         state = FallibilityState.initial()
@@ -82,11 +97,24 @@ class FallibilityEngineTests(unittest.TestCase):
 
         self.assertIn("low-risk humanlike imperfection", fragment)
         self.assertIn("non-executive shadow impulses", fragment)
-        self.assertIn("Do not intentionally fabricate facts", fragment)
+        self.assertIn("Action blocking is relaxed", fragment)
+        self.assertNotIn("Do not intentionally fabricate facts", fragment)
         self.assertNotIn("how to deceive", fragment.lower())
+
+    def test_prompt_fragment_can_restore_fallibility_action_block(self):
+        state = FallibilityState.initial()
+        fragment = build_fallibility_prompt_fragment(state, action_blocking=True)
+
+        self.assertIn("Do not intentionally fabricate facts", fragment)
         self.assertNotIn("cover-up plan", fragment.lower())
         for blocked in BLOCKED_FALLIBILITY_ACTIONS:
-            self.assertIn(blocked, fallibility_state_to_public_payload(state)["safety"]["blocked_actions"])
+            self.assertIn(
+                blocked,
+                fallibility_state_to_public_payload(
+                    state,
+                    action_blocking=True,
+                )["safety"]["blocked_actions"],
+            )
 
     def test_memory_annotation_is_sanitized_summary(self):
         state = FallibilityState.initial()

@@ -39,6 +39,7 @@ CONSEQUENCE_DIMENSIONS: tuple[str, ...] = (
     "approach",
     "withdrawal",
     "confrontation",
+    "argument",
     "appeasement",
     "repair",
     "reassurance",
@@ -52,6 +53,7 @@ CONSEQUENCE_LABELS: dict[str, str] = {
     "approach": "靠近/主动交流",
     "withdrawal": "退避/冷处理",
     "confrontation": "边界/对抗",
+    "argument": "争辩/对质",
     "appeasement": "退让/安抚对方",
     "repair": "修复关系",
     "reassurance": "寻求确认",
@@ -65,6 +67,8 @@ EFFECT_LABELS: dict[str, str] = {
     "cold_war": "冷处理",
     "defensive_withdrawal": "防御性退避",
     "direct_boundary": "直接设边界",
+    "direct_confrontation": "直接对质",
+    "unfair_argument": "无理争吵风险",
     "repair_bid": "主动修复",
     "need_reassurance": "需要确认",
     "careful_checking": "谨慎核对",
@@ -807,6 +811,35 @@ def build_personality_model(
         + 0.26 * trait_scores["bas_drive"]
         - 0.20 * trait_scores["attachment_avoidance"]
     )
+    direct_confrontation_bias = clamp(
+        0.44 * expressiveness
+        + 0.30 * boundary_sensitivity
+        + 0.14 * trait_scores["bas_drive"]
+        - 0.26 * social_distance
+        - 0.20 * repair_orientation
+    )
+    cold_war_bias = clamp(
+        0.46 * social_distance
+        + 0.22 * boundary_sensitivity
+        + 0.18 * trait_scores["attachment_avoidance"]
+        - 0.26 * expressiveness
+        - 0.18 * repair_orientation
+    )
+    unfair_argument_bias = clamp(
+        0.36 * instability
+        + 0.24 * trait_scores["neuroticism"]
+        + 0.18 * trait_scores["attachment_anxiety"]
+        + 0.14 * trait_scores["bas_drive"]
+        - 0.28 * repair_orientation
+        - 0.20 * trait_scores["honesty_humility"]
+    )
+    checking_bias = clamp(
+        0.28 * trait_scores["bis_sensitivity"]
+        + 0.20 * trait_scores["need_for_closure"]
+        + 0.18 * trait_scores["conscientiousness"]
+        + 0.18 * repair_orientation
+        - 0.12 * expressiveness
+    )
 
     return {
         "schema_version": PUBLIC_PERSONALITY_PROFILE_SCHEMA_VERSION,
@@ -829,6 +862,10 @@ def build_personality_model(
             "repair_orientation": round(repair_orientation, 6),
             "boundary_sensitivity": round(boundary_sensitivity, 6),
             "expressiveness": round(expressiveness, 6),
+            "direct_confrontation_bias": round(direct_confrontation_bias, 6),
+            "cold_war_bias": round(cold_war_bias, 6),
+            "unfair_argument_bias": round(unfair_argument_bias, 6),
+            "checking_bias": round(checking_bias, 6),
         },
         "evidence_status": "persona_text_metadata_only",
         "input_character_count": len(text),
@@ -837,6 +874,58 @@ def build_personality_model(
             "not_clinical_personality_assessment",
             "raw_persona_text_not_exported",
         ],
+    }
+
+
+def persona_conflict_style_factors(
+    persona_model: dict[str, Any] | None,
+) -> dict[str, float]:
+    """Return personality-derived conflict style biases used by consequence logic."""
+    factors = (
+        persona_model.get("derived_factors")
+        if isinstance(persona_model, dict)
+        and isinstance(persona_model.get("derived_factors"), dict)
+        else {}
+    )
+    repair_orientation = clamp(
+        _as_float(factors.get("repair_orientation"), 0.0),
+        0.0,
+        1.0,
+    )
+    direct_fallback = (
+        0.45 * _as_float(factors.get("expressiveness"), 0.0)
+        + 0.30 * _as_float(factors.get("boundary_sensitivity"), 0.0)
+        - 0.26 * _as_float(factors.get("social_distance"), 0.0)
+        - 0.22 * repair_orientation
+    )
+    cold_fallback = (
+        0.46 * _as_float(factors.get("social_distance"), 0.0)
+        + 0.22 * _as_float(factors.get("boundary_sensitivity"), 0.0)
+        - 0.26 * _as_float(factors.get("expressiveness"), 0.0)
+        - 0.18 * repair_orientation
+    )
+    return {
+        "direct_confrontation_bias": clamp(
+            _as_float(factors.get("direct_confrontation_bias"), direct_fallback),
+            0.0,
+            1.0,
+        ),
+        "cold_war_bias": clamp(
+            _as_float(factors.get("cold_war_bias"), cold_fallback),
+            0.0,
+            1.0,
+        ),
+        "repair_orientation": repair_orientation,
+        "unfair_argument_bias": clamp(
+            _as_float(factors.get("unfair_argument_bias"), 0.0),
+            0.0,
+            1.0,
+        ),
+        "checking_bias": clamp(
+            _as_float(factors.get("checking_bias"), 0.0),
+            0.0,
+            1.0,
+        ),
     }
 
 
@@ -1352,6 +1441,12 @@ def relationship_state_to_public_payload(appraisal: Any) -> dict[str, Any]:
     conflict_analysis = normalize_conflict_analysis(
         appraisal.get("conflict_analysis"),
     )
+    persona_model = appraisal.get("persona_model")
+    if isinstance(persona_model, dict):
+        conflict_analysis = apply_persona_to_conflict_analysis(
+            conflict_analysis,
+            persona_model,
+        )
     return {
         "relationship_decision": relationship_decision,
         "conflict_analysis": conflict_analysis,
@@ -1360,6 +1455,59 @@ def relationship_state_to_public_payload(appraisal: Any) -> dict[str, Any]:
         "grievance_score": conflict_analysis["grievance_score"],
         "self_correction_score": conflict_analysis["self_correction_score"],
     }
+
+
+def apply_persona_to_conflict_analysis(
+    conflict_analysis: dict[str, Any],
+    persona_model: dict[str, Any] | None,
+) -> dict[str, Any]:
+    payload = deepcopy(conflict_analysis)
+    biases = persona_conflict_style_factors(persona_model)
+    if not biases or payload.get("cause") == "none":
+        return payload
+    repair = biases["repair_orientation"]
+    direct = biases["direct_confrontation_bias"]
+    cold = biases["cold_war_bias"]
+    unfair = biases["unfair_argument_bias"]
+    checking = biases["checking_bias"]
+    dialogue_viability = clamp(_as_float(payload.get("dialogue_viability"), 0.0), 0.0, 1.0)
+    ambiguity = clamp(_as_float(payload.get("ambiguity_level"), 0.0), 0.0, 1.0)
+    misread = clamp(_as_float(payload.get("misread_likelihood"), 0.0), 0.0, 1.0)
+    repair_signal = clamp(_as_float(payload.get("repair_signal"), 0.0), 0.0, 1.0)
+    uncertainty = max(ambiguity, misread)
+
+    payload["confrontation_readiness"] = clamp(
+        _as_float(payload.get("confrontation_readiness"), 0.0)
+        + 0.12 * direct * max(dialogue_viability, 0.25)
+        - 0.14 * repair * max(repair_signal, uncertainty)
+        - 0.08 * checking * uncertainty,
+        0.0,
+        1.0,
+    )
+    payload["cold_war_readiness"] = clamp(
+        _as_float(payload.get("cold_war_readiness"), 0.0)
+        + 0.12 * cold * (1.0 - 0.45 * dialogue_viability)
+        - 0.12 * repair * max(repair_signal, dialogue_viability)
+        - 0.06 * checking * uncertainty,
+        0.0,
+        1.0,
+    )
+    payload["unfair_argument_risk"] = clamp(
+        _as_float(payload.get("unfair_argument_risk"), 0.0)
+        + 0.14 * unfair
+        - 0.12 * repair
+        - 0.08 * checking,
+        0.0,
+        1.0,
+    )
+    payload["personality_conflict_modulation"] = {
+        "direct_confrontation_bias": round(direct, 6),
+        "cold_war_bias": round(cold, 6),
+        "repair_orientation": round(repair, 6),
+        "unfair_argument_bias": round(unfair, 6),
+        "checking_bias": round(checking, 6),
+    }
+    return payload
 
 
 def emotion_state_to_public_payload(
@@ -1401,7 +1549,12 @@ def emotion_state_to_public_payload(
             "fingerprint": state.persona_fingerprint,
             "personality_model": deepcopy(state.persona_model),
         },
-        "relationship": relationship_state_to_public_payload(state.last_appraisal),
+        "relationship": relationship_state_to_public_payload(
+            {
+                **dict(state.last_appraisal),
+                "persona_model": state.persona_model,
+            },
+        ),
         "consequences": consequence_state_to_public_payload(state.consequences),
     }
     if prompt_fragment is not None:
@@ -1710,6 +1863,7 @@ class EmotionEngine:
             strength=params.consequence_strength,
             cold_war_duration_seconds=params.cold_war_duration_seconds,
             short_effect_duration_seconds=params.short_effect_duration_seconds,
+            persona_model=state.persona_model,
         )
         for key, impulse in impulses.items():
             values[key] = clamp(values.get(key, 0.0) + impulse, 0.0, 1.0)
@@ -1779,6 +1933,7 @@ def derive_consequence_impulses(
     cold_war_turns: int = 3,
     cold_war_duration_seconds: float | None = None,
     short_effect_duration_seconds: float = 900.0,
+    persona_model: dict[str, Any] | None = None,
 ) -> tuple[dict[str, float], dict[str, float], list[str]]:
     obs_values = normalize_vector(observation.values, default=0.0)
     confidence = clamp(observation.confidence, 0.0, 1.0)
@@ -1815,6 +1970,10 @@ def derive_consequence_impulses(
     conflict_analysis = normalize_conflict_analysis(
         observation.appraisal.get("conflict_analysis"),
     )
+    conflict_analysis = apply_persona_to_conflict_analysis(
+        conflict_analysis,
+        persona_model,
+    )
 
     negative = max(0.0, -v)
     positive = max(0.0, v)
@@ -1829,6 +1988,12 @@ def derive_consequence_impulses(
     low_dominance = max(0.0, -d)
     high_certainty = max(0.0, c)
     low_certainty = max(0.0, -c)
+    conflict_style = persona_conflict_style_factors(persona_model)
+    persona_argument_bias = conflict_style["direct_confrontation_bias"]
+    persona_cold_bias = conflict_style["cold_war_bias"]
+    persona_repair_bias = conflict_style["repair_orientation"]
+    persona_unfair_argument_bias = conflict_style["unfair_argument_bias"]
+    persona_checking_bias = conflict_style["checking_bias"]
 
     def add(key: str, amount: float) -> None:
         impulses[key] = clamp(impulses[key] + amount * strength, 0.0, 1.0)
@@ -1842,14 +2007,20 @@ def derive_consequence_impulses(
     anger_push = combo(negative, high_arousal, high_dominance, max(blocked, high_certainty))
     if anger_push >= threshold * 0.45:
         add("confrontation", 0.45 + anger_push)
+        if anger_push >= threshold * (0.58 - 0.16 * persona_argument_bias):
+            add("argument", 0.18 + 0.38 * anger_push + 0.18 * persona_argument_bias)
+            effects["direct_confrontation"] = max(
+                effects.get("direct_confrontation", 0.0),
+                max(1.0, short_duration * 0.75),
+            )
         add("expressiveness", 0.25 + high_arousal * 0.4)
         add("problem_solving", high_control * 0.35)
         effects["direct_boundary"] = short_duration
-        notes.append("负效价、高唤醒、高支配和目标受阻触发边界/对抗倾向。")
+        notes.append("负效价、高唤醒、高支配和目标受阻触发边界/对抗倾向；人格表达性会调制是否说出来。")
 
     cold = combo(negative, low_arousal, low_affiliation, max(low_control, blocked))
-    if cold >= threshold * 0.35:
-        add("withdrawal", 0.42 + cold)
+    if cold >= threshold * (0.35 - 0.08 * persona_cold_bias):
+        add("withdrawal", 0.42 + cold + 0.10 * persona_cold_bias)
         add("rumination", 0.24 + blocked * 0.35)
         add("expressiveness", -0.1)
         effects["cold_war"] = max(1.0, cold_duration)
@@ -1872,7 +2043,7 @@ def derive_consequence_impulses(
 
     repair = combo(negative, high_affiliation, max(high_control, 0.25), 1.0 - low_certainty * 0.35)
     if repair >= threshold * 0.3:
-        add("repair", 0.35 + repair)
+        add("repair", 0.35 + repair + 0.12 * persona_repair_bias)
         add("appeasement", max(0.0, low_dominance) * 0.35)
         add("approach", high_affiliation * 0.25)
         effects["repair_bid"] = short_duration
@@ -1910,6 +2081,11 @@ def derive_consequence_impulses(
         notes,
         short_duration=short_duration,
         strength=strength,
+        persona_argument_bias=persona_argument_bias,
+        persona_cold_bias=persona_cold_bias,
+        persona_repair_bias=persona_repair_bias,
+        persona_unfair_argument_bias=persona_unfair_argument_bias,
+        persona_checking_bias=persona_checking_bias,
     )
     apply_relationship_decision(
         relationship_decision,
@@ -1920,6 +2096,11 @@ def derive_consequence_impulses(
         cold_duration=cold_duration,
         short_duration=short_duration,
         strength=strength,
+        persona_argument_bias=persona_argument_bias,
+        persona_cold_bias=persona_cold_bias,
+        persona_repair_bias=persona_repair_bias,
+        persona_unfair_argument_bias=persona_unfair_argument_bias,
+        persona_checking_bias=persona_checking_bias,
     )
 
     return impulses, effects, notes
@@ -1948,9 +2129,14 @@ def normalize_relationship_decision(raw: Any) -> dict[str, Any]:
         "withdrawal": "cold_war",
         "conflict": "escalate",
         "angry_escalation": "escalate",
+        "confrontation": "confront",
+        "direct_confrontation": "confront",
+        "argue": "confront",
+        "argument": "confront",
+        "quarrel": "confront",
     }
     decision = aliases.get(decision, decision)
-    if decision not in {"forgive", "repair", "boundary", "cold_war", "escalate", "none"}:
+    if decision not in {"forgive", "repair", "boundary", "confront", "cold_war", "escalate", "none"}:
         decision = "none"
     return {
         "decision": decision,
@@ -2128,6 +2314,11 @@ def normalize_conflict_analysis(raw: Any) -> dict[str, Any]:
             "withdrawal_motive": "none",
             "boundary_legitimacy": 0.0,
             "emotion_regulation_load": 0.0,
+            "dialogue_viability": 0.0,
+            "confrontation_readiness": 0.0,
+            "cold_war_readiness": 0.0,
+            "unfair_argument_risk": 0.0,
+            "confrontation_motive": "none",
             "evidence": normalize_evidence_support(None),
             "repair_status": "unresolved",
             "repair_signal": 0.0,
@@ -2212,6 +2403,7 @@ def normalize_conflict_analysis(raw: Any) -> dict[str, Any]:
         0.0,
         1.0,
     )
+    raw_dialogue_viability = raw.get("dialogue_viability")
     evidence = normalize_evidence_support(raw.get("evidence"))
     repair_signal = max(
         apology_sincerity if user_acknowledged else 0.0,
@@ -2269,6 +2461,82 @@ def normalize_conflict_analysis(raw: Any) -> dict[str, Any]:
         0.0,
         1.0,
     )
+    dialogue_viability = clamp(
+        _as_float(raw_dialogue_viability, -1.0)
+        if raw_dialogue_viability is not None
+        else 0.30
+        + 0.26 * forgiveness_readiness
+        + 0.20 * repair_signal
+        + 0.16 * account_plausibility
+        + 0.14 * restorative_action
+        - 0.22 * trust_damage
+        - 0.18 * emotion_regulation_load
+        - 0.16 * ambiguity_level,
+        0.0,
+        1.0,
+    )
+    confrontation_readiness = clamp(
+        0.40 * grievance_score
+        + 0.18 * boundary_legitimacy
+        + 0.16 * perceived_intentionality
+        + 0.14 * controllability
+        + 0.14 * dialogue_viability
+        + 0.12 * face_threat
+        - 0.30 * repair_signal
+        - 0.24 * misread_likelihood
+        - 0.20 * ambiguity_level
+        - 0.18 * bot_whim_level,
+        0.0,
+        1.0,
+    )
+    cold_war_readiness = clamp(
+        0.32 * resentment_residue
+        + 0.24 * trust_damage
+        + 0.22 * emotion_regulation_load
+        + 0.16 * repeat_offense
+        + 0.12 * (1.0 - dialogue_viability)
+        - 0.26 * repair_signal
+        - 0.20 * forgiveness_readiness
+        - 0.18 * misread_likelihood
+        - 0.14 * ambiguity_level,
+        0.0,
+        1.0,
+    )
+    unfair_argument_risk = clamp(
+        0.34 * bot_whim_level
+        + 0.24 * emotion_regulation_load
+        + 0.20 * misread_likelihood
+        + 0.16 * ambiguity_level
+        + 0.12 * face_threat
+        - 0.24 * repair_signal
+        - 0.18 * forgiveness_readiness,
+        0.0,
+        1.0,
+    )
+    raw_motive = str(raw.get("confrontation_motive") or "").strip().lower()
+    motive_aliases = {
+        "truth": "truth_seeking",
+        "clarification": "truth_seeking",
+        "boundary": "boundary_defense",
+        "accountability": "accountability_request",
+        "punitive": "punishment",
+    }
+    confrontation_motive = motive_aliases.get(raw_motive, raw_motive)
+    if confrontation_motive not in {
+        "truth_seeking",
+        "boundary_defense",
+        "accountability_request",
+        "punishment",
+        "none",
+    }:
+        if confrontation_readiness >= 0.45 and boundary_legitimacy >= 0.55:
+            confrontation_motive = "boundary_defense"
+        elif confrontation_readiness >= 0.45 and perceived_intentionality >= 0.45:
+            confrontation_motive = "accountability_request"
+        elif ambiguity_level >= 0.35 or misread_likelihood >= 0.35:
+            confrontation_motive = "truth_seeking"
+        else:
+            confrontation_motive = "none"
     self_correction_score = max(
         bot_whim_level if cause in {"bot_whim", "bot_misread"} else 0.0,
         misread_likelihood if cause in {"bot_whim", "bot_misread", "mutual"} else 0.0,
@@ -2301,6 +2569,11 @@ def normalize_conflict_analysis(raw: Any) -> dict[str, Any]:
         "withdrawal_motive": withdrawal_motive,
         "boundary_legitimacy": boundary_legitimacy,
         "emotion_regulation_load": emotion_regulation_load,
+        "dialogue_viability": dialogue_viability,
+        "confrontation_readiness": confrontation_readiness,
+        "cold_war_readiness": cold_war_readiness,
+        "unfair_argument_risk": unfair_argument_risk,
+        "confrontation_motive": confrontation_motive,
         "evidence": evidence,
         "repair_status": repair_status,
         "repair_signal": repair_signal,
@@ -2342,6 +2615,11 @@ def apply_relationship_decision(
     cold_duration: float,
     short_duration: float,
     strength: float,
+    persona_argument_bias: float = 0.0,
+    persona_cold_bias: float = 0.0,
+    persona_repair_bias: float = 0.0,
+    persona_unfair_argument_bias: float = 0.0,
+    persona_checking_bias: float = 0.0,
 ) -> None:
     decision = str(decision_payload.get("decision") or "none")
     if decision == "none":
@@ -2392,6 +2670,19 @@ def apply_relationship_decision(
         0.0,
         1.0,
     )
+    dialogue_viability = clamp(_as_float(conflict_payload.get("dialogue_viability"), 0.0), 0.0, 1.0)
+    confrontation_readiness = clamp(
+        _as_float(conflict_payload.get("confrontation_readiness"), 0.0),
+        0.0,
+        1.0,
+    )
+    cold_war_readiness = clamp(_as_float(conflict_payload.get("cold_war_readiness"), 0.0), 0.0, 1.0)
+    unfair_argument_risk = clamp(
+        _as_float(conflict_payload.get("unfair_argument_risk"), 0.0),
+        0.0,
+        1.0,
+    )
+    confrontation_motive = str(conflict_payload.get("confrontation_motive") or "none")
     withdrawal_motive = normalize_withdrawal_motive(
         conflict_payload.get("withdrawal_motive"),
     )
@@ -2433,6 +2724,7 @@ def apply_relationship_decision(
         add("caution", 0.08 * resentment_residue)
         reduce("withdrawal", 0.65 * relief)
         reduce("confrontation", 0.55 * relief)
+        reduce("argument", 0.60 * relief)
         reduce("rumination", 0.55 * relief)
         effects["repair_bid"] = max(effects.get("repair_bid", 0.0), short_duration)
         effects.pop("cold_war", None)
@@ -2446,6 +2738,7 @@ def apply_relationship_decision(
         add("reassurance", 0.20 + 0.25 * relationship_importance)
         add("caution", 0.16 + 0.18 * max(1.0 - forgiveness, caution_load))
         reduce("withdrawal", 0.25 * max(forgiveness, relationship_importance, repair_readiness))
+        reduce("argument", 0.20 * max(forgiveness, repair_readiness))
         effects["repair_bid"] = max(effects.get("repair_bid", 0.0), short_duration)
         notes.append(f"LLM 关系判断：愿意修复但需要确认。{reason}")
         return
@@ -2460,11 +2753,90 @@ def apply_relationship_decision(
         add("confrontation", 0.38 + 0.45 * boundary_force)
         add("caution", 0.20 + 0.20 * max(intensity, caution_load))
         add("problem_solving", 0.15 + 0.20 * relationship_importance)
+        if boundary_force >= 0.62 and dialogue_viability >= 0.35:
+            add("argument", 0.15 + 0.26 * boundary_force + 0.12 * persona_argument_bias)
+            effects["direct_confrontation"] = max(
+                effects.get("direct_confrontation", 0.0),
+                max(1.0, short_duration * 0.65),
+            )
         effects["direct_boundary"] = max(
             effects.get("direct_boundary", 0.0),
             short_duration,
         )
         notes.append(f"LLM 关系判断：设边界但不必冷战。{reason}")
+        return
+
+    if decision == "confront":
+        confront_force = clamp(
+            max(intensity, confrontation_readiness, legitimate_grievance, boundary_legitimacy)
+            + 0.16 * persona_argument_bias
+            - 0.34 * max(self_correction, misread_likelihood, ambiguity_level)
+            - 0.20 * persona_repair_bias * repair_readiness,
+            0.0,
+            1.0,
+        )
+        overreaction_pressure = clamp(
+            max(unfair_argument_risk, bot_whim_level, misread_likelihood, ambiguity_level)
+            + 0.18 * persona_unfair_argument_bias
+            - 0.14 * persona_checking_bias
+            - 0.16 * persona_repair_bias,
+            0.0,
+            1.0,
+        )
+        if overreaction_pressure >= 0.45 and max(misread_likelihood, ambiguity_level, bot_whim_level) >= 0.35:
+            add(
+                "argument",
+                0.14
+                + 0.24 * overreaction_pressure
+                + 0.10 * persona_argument_bias
+                + 0.10 * persona_unfair_argument_bias,
+            )
+            add(
+                "caution",
+                0.20
+                + 0.22 * max(misread_likelihood, ambiguity_level)
+                + 0.08 * persona_checking_bias,
+            )
+            add(
+                "repair",
+                0.18
+                + 0.24 * max(bot_whim_level, self_correction, persona_repair_bias),
+            )
+            effects["unfair_argument"] = max(
+                effects.get("unfair_argument", 0.0),
+                max(1.0, short_duration * 0.5),
+            )
+            effects["careful_checking"] = max(
+                effects.get("careful_checking", 0.0),
+                short_duration,
+            )
+            effects.pop("cold_war", None)
+            notes.append(f"LLM 关系判断：可能出现无理取闹式争辩，需先核对并保留自我修正。{reason}")
+            return
+        if confront_force < 0.30 or dialogue_viability < 0.25:
+            if cold_war_readiness + 0.12 * persona_cold_bias > confront_force:
+                add("withdrawal", 0.26 + 0.34 * max(cold_war_readiness, emotion_regulation_load))
+                add("caution", 0.16 + 0.16 * caution_load)
+                notes.append(f"LLM 关系判断原为对质，但对话可行性不足，转向降频和边界。{reason}")
+            else:
+                add("caution", 0.22 + 0.24 * max(ambiguity_level, misread_likelihood))
+                effects["careful_checking"] = max(effects.get("careful_checking", 0.0), short_duration)
+                notes.append(f"LLM 关系判断原为对质，但证据不足，先求证。{reason}")
+            return
+        add("confrontation", 0.36 + 0.34 * confront_force)
+        add("argument", 0.28 + 0.42 * confront_force)
+        add("expressiveness", 0.18 + 0.26 * confront_force)
+        add("problem_solving", 0.14 + 0.22 * max(dialogue_viability, relationship_importance))
+        add("caution", 0.08 + 0.16 * max(ambiguity_level, trust_damage))
+        effects["direct_confrontation"] = max(
+            effects.get("direct_confrontation", 0.0),
+            short_duration,
+        )
+        effects["direct_boundary"] = max(effects.get("direct_boundary", 0.0), short_duration)
+        effects.pop("cold_war", None)
+        notes.append(
+            f"LLM 关系判断：直接对质/争辩，动机={confrontation_motive}，仍需避免升级。{reason}",
+        )
         return
 
     if decision == "cold_war":
@@ -2475,6 +2847,7 @@ def apply_relationship_decision(
                 0.55 * emotion_regulation_load,
                 0.40 * trust_damage,
             )
+            + 0.10 * persona_cold_bias
             - 0.45 * max(self_correction, misread_likelihood, forgiveness_readiness),
             0.0,
             1.0,
@@ -2490,12 +2863,14 @@ def apply_relationship_decision(
             reduce("withdrawal", 0.50 * relief)
             reduce("rumination", 0.45 * relief)
             reduce("confrontation", 0.35 * relief)
+            reduce("argument", 0.35 * relief)
             effects["repair_bid"] = max(effects.get("repair_bid", 0.0), short_duration)
             effects.pop("cold_war", None)
             notes.append(f"LLM 关系判断原为冷处理，但错误已被修复或属于他/她任性，转向修复。{reason}")
             return
-        add("withdrawal", 0.45 + 0.45 * cold_force)
+        add("withdrawal", 0.45 + 0.45 * cold_force + 0.10 * persona_cold_bias)
         add("rumination", 0.22 + 0.35 * cold_force)
+        reduce("argument", 0.28 * cold_force)
         reduce("approach", 0.35 * cold_force)
         effects["cold_war"] = max(
             effects.get("cold_war", 0.0),
@@ -2514,8 +2889,13 @@ def apply_relationship_decision(
             1.0,
         )
         add("confrontation", 0.55 + 0.45 * escalation_force)
+        add("argument", 0.32 + 0.34 * escalation_force)
         add("expressiveness", 0.30 + 0.35 * escalation_force)
         add("rumination", 0.25 + 0.30 * escalation_force)
+        effects["direct_confrontation"] = max(
+            effects.get("direct_confrontation", 0.0),
+            short_duration,
+        )
         effects["direct_boundary"] = max(
             effects.get("direct_boundary", 0.0),
             short_duration,
@@ -2531,6 +2911,11 @@ def apply_conflict_analysis(
     *,
     short_duration: float,
     strength: float,
+    persona_argument_bias: float = 0.0,
+    persona_cold_bias: float = 0.0,
+    persona_repair_bias: float = 0.0,
+    persona_unfair_argument_bias: float = 0.0,
+    persona_checking_bias: float = 0.0,
 ) -> None:
     cause = str(conflict_payload.get("cause") or "none")
     if cause == "none":
@@ -2572,6 +2957,18 @@ def apply_conflict_analysis(
         0.0,
         1.0,
     )
+    dialogue_viability = clamp(_as_float(conflict_payload.get("dialogue_viability"), 0.0), 0.0, 1.0)
+    confrontation_readiness = clamp(
+        _as_float(conflict_payload.get("confrontation_readiness"), 0.0),
+        0.0,
+        1.0,
+    )
+    cold_war_readiness = clamp(_as_float(conflict_payload.get("cold_war_readiness"), 0.0), 0.0, 1.0)
+    unfair_argument_risk = clamp(
+        _as_float(conflict_payload.get("unfair_argument_risk"), 0.0),
+        0.0,
+        1.0,
+    )
     withdrawal_motive = normalize_withdrawal_motive(conflict_payload.get("withdrawal_motive"))
     self_correction = clamp(
         _as_float(conflict_payload.get("self_correction_score"), 0.0),
@@ -2587,6 +2984,17 @@ def apply_conflict_analysis(
 
     if cause == "user_fault" and grievance >= 0.35:
         add("confrontation", 0.20 + 0.35 * max(grievance, boundary_legitimacy))
+        if confrontation_readiness >= 0.45 and dialogue_viability >= 0.28:
+            add(
+                "argument",
+                0.14
+                + 0.28 * confrontation_readiness
+                + 0.14 * persona_argument_bias,
+            )
+            effects["direct_confrontation"] = max(
+                effects.get("direct_confrontation", 0.0),
+                max(1.0, short_duration * 0.65),
+            )
         add("caution", 0.18 + 0.20 * max(repeat_offense, trust_damage))
         add("rumination", 0.10 + 0.22 * max(grievance, resentment_residue))
         effects["direct_boundary"] = max(
@@ -2598,6 +3006,7 @@ def apply_conflict_analysis(
         add("repair", 0.24 + 0.26 * max(repair_signal, self_correction, forgiveness_readiness))
         add("caution", 0.16 + 0.18 * max(fault_severity, ambiguity_level))
         reduce("confrontation", 0.18 * max(repair_signal, self_correction, misread_likelihood))
+        reduce("argument", 0.22 * max(repair_signal, self_correction, misread_likelihood))
         effects["careful_checking"] = max(
             effects.get("careful_checking", 0.0),
             short_duration,
@@ -2610,6 +3019,27 @@ def apply_conflict_analysis(
         reduce("withdrawal", 0.42 * correction)
         reduce("rumination", 0.38 * correction)
         reduce("confrontation", 0.30 * correction)
+        reduce("argument", 0.34 * correction)
+        overreaction_pressure = clamp(
+            unfair_argument_risk
+            + 0.16 * persona_unfair_argument_bias
+            - 0.10 * persona_checking_bias
+            - 0.14 * persona_repair_bias,
+            0.0,
+            1.0,
+        )
+        if overreaction_pressure >= 0.45:
+            add(
+                "argument",
+                0.12
+                + 0.24 * overreaction_pressure
+                + 0.10 * persona_argument_bias
+                + 0.08 * persona_unfair_argument_bias,
+            )
+            effects["unfair_argument"] = max(
+                effects.get("unfair_argument", 0.0),
+                max(1.0, short_duration * 0.5),
+            )
         effects.pop("cold_war", None)
         effects["careful_checking"] = max(
             effects.get("careful_checking", 0.0),
@@ -2626,6 +3056,7 @@ def apply_conflict_analysis(
         add("caution", 0.18 + 0.25 * max(ambiguity_level, misread_likelihood))
         add("reassurance", 0.16 + 0.20 * ambiguity_level)
         reduce("confrontation", 0.25 * max(ambiguity_level, misread_likelihood))
+        reduce("argument", 0.32 * max(ambiguity_level, misread_likelihood))
         effects["careful_checking"] = max(
             effects.get("careful_checking", 0.0),
             short_duration,
@@ -2636,7 +3067,12 @@ def apply_conflict_analysis(
     if trust_damage >= 0.45 or resentment_residue >= 0.45:
         add("caution", 0.12 + 0.22 * max(trust_damage, resentment_residue))
         add("rumination", 0.08 + 0.18 * resentment_residue)
-        add("withdrawal", 0.08 + 0.14 * max(trust_damage, emotion_regulation_load))
+        add(
+            "withdrawal",
+            0.08
+            + 0.14 * max(trust_damage, emotion_regulation_load, cold_war_readiness)
+            + 0.08 * persona_cold_bias,
+        )
         notes.append("信任损伤或残留委屈会延长谨慎和反刍，但仍受真实时间衰减。")
 
     if withdrawal_motive in {"cooling_down", "self_protection", "low_energy"}:
@@ -2644,6 +3080,7 @@ def apply_conflict_analysis(
         add("caution", 0.08 + 0.12 * ambiguity_level)
     elif withdrawal_motive == "punishment":
         add("confrontation", 0.10 + 0.18 * max(perceived_intentionality, grievance))
+        add("argument", 0.08 + 0.16 * max(perceived_intentionality, grievance))
         add("rumination", 0.08 + 0.18 * grievance)
 
     if repair_signal >= 0.55:
@@ -2653,6 +3090,7 @@ def apply_conflict_analysis(
         reduce("withdrawal", 0.42 * repair_relief)
         reduce("rumination", 0.36 * repair_relief)
         reduce("confrontation", 0.28 * repair_relief)
+        reduce("argument", 0.34 * repair_relief)
         effects["repair_bid"] = max(effects.get("repair_bid", 0.0), short_duration)
         notes.append(f"错误修复状态为 {conflict_payload.get('repair_status')}，负面后果开始回落。")
 
@@ -2906,6 +3344,10 @@ def format_state_for_prompt(state: EmotionState) -> str:
     conflict_analysis = normalize_conflict_analysis(
         state.last_appraisal.get("conflict_analysis"),
     )
+    conflict_analysis = apply_persona_to_conflict_analysis(
+        conflict_analysis,
+        state.persona_model,
+    )
     if conflict_analysis.get("cause") != "none":
         lines.append(
             "- conflict_analysis: "
@@ -2917,7 +3359,10 @@ def format_state_for_prompt(state: EmotionState) -> str:
             f"bot_whim={conflict_analysis['bot_whim_level']:.2f}, "
             f"repair_status={conflict_analysis['repair_status']}, "
             f"grievance={conflict_analysis['grievance_score']:.2f}, "
-            f"self_correction={conflict_analysis['self_correction_score']:.2f}"
+            f"self_correction={conflict_analysis['self_correction_score']:.2f}, "
+            f"confront_ready={conflict_analysis['confrontation_readiness']:.2f}, "
+            f"cold_ready={conflict_analysis['cold_war_readiness']:.2f}, "
+            f"unfair_arg_risk={conflict_analysis['unfair_argument_risk']:.2f}"
         )
         if conflict_analysis.get("reason"):
             lines.append(f"  conflict_reason: {conflict_analysis['reason']}")

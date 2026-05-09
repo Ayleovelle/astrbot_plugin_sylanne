@@ -14,6 +14,7 @@ from public_api import (
     EMOTION_MEMORY_SCHEMA_VERSION,
     EMOTION_SCHEMA_VERSION,
     FALLIBILITY_STATE_SCHEMA_VERSION,
+    GROUP_ATMOSPHERE_SCHEMA_VERSION,
     HUMANLIKE_STATE_SCHEMA_VERSION,
     INTEGRATED_SELF_SCHEMA_VERSION,
     LIFELIKE_LEARNING_SCHEMA_VERSION,
@@ -24,6 +25,7 @@ from public_api import (
     PSYCHOLOGICAL_SCREENING_SCHEMA_VERSION,
     get_emotion_service,
     get_fallibility_service,
+    get_group_atmosphere_service,
     get_humanlike_service,
     get_lifelike_learning_service,
     get_moral_repair_service,
@@ -319,6 +321,28 @@ class FakeFallibilityService(FakeEmotionService):
     fallibility_state_schema_version = "astrbot.fallibility_state.v1"
 
 
+class FakeGroupAtmosphereService(FakeEmotionService):
+    group_atmosphere_schema_version = "astrbot.group_atmosphere_state.v1"
+
+    async def get_group_atmosphere_snapshot(self, *args, **kwargs):
+        return {}
+
+    async def get_group_atmosphere_values(self, *args, **kwargs):
+        return {}
+
+    async def get_group_atmosphere_prompt_fragment(self, *args, **kwargs):
+        return ""
+
+    async def observe_group_atmosphere_text(self, *args, **kwargs):
+        return {}
+
+    async def simulate_group_atmosphere_update(self, *args, **kwargs):
+        return {}
+
+    async def reset_group_atmosphere_state(self, *args, **kwargs):
+        return True
+
+
 class PublicApiTests(unittest.TestCase):
     def test_get_emotion_service_returns_activated_plugin(self):
         plugin = FakeEmotionService()
@@ -447,6 +471,12 @@ class PublicApiTests(unittest.TestCase):
             "astrbot.personality_drift_state.v1",
         )
 
+    def test_group_atmosphere_schema_constant_is_exported(self):
+        self.assertEqual(
+            GROUP_ATMOSPHERE_SCHEMA_VERSION,
+            "astrbot.group_atmosphere_state.v1",
+        )
+
     def test_get_emotion_service_rejects_plugin_without_memory_payload_api(self):
         class OldEmotionService(FakeEmotionService):
             build_emotion_memory_payload = None
@@ -498,6 +528,13 @@ class PublicApiTests(unittest.TestCase):
         plugin = FakeEmotionService()
         context = FakeContext(SimpleNamespace(activated=True, star_cls=plugin))
         self.assertIs(get_emotion_service(context), plugin)
+
+    def test_get_emotion_service_keeps_accepting_service_without_group_atmosphere_api(self):
+        plugin = FakeEmotionService()
+        context = FakeContext(SimpleNamespace(activated=True, star_cls=plugin))
+
+        self.assertIs(get_emotion_service(context), plugin)
+        self.assertIsNone(get_group_atmosphere_service(context))
 
     def test_get_humanlike_service_returns_activated_plugin(self):
         plugin = FakeHumanlikeService()
@@ -571,6 +608,24 @@ class PublicApiTests(unittest.TestCase):
 
         self.assertIsNone(get_fallibility_service(context))
 
+    def test_get_group_atmosphere_service_returns_activated_plugin(self):
+        plugin = FakeGroupAtmosphereService()
+        context = FakeContext(SimpleNamespace(activated=True, star_cls=plugin))
+        self.assertIs(get_group_atmosphere_service(context), plugin)
+
+    def test_get_group_atmosphere_service_rejects_incomplete_plugin(self):
+        context = FakeContext(
+            SimpleNamespace(activated=True, star_cls=FakeEmotionService()),
+        )
+        self.assertIsNone(get_group_atmosphere_service(context))
+
+    def test_get_group_atmosphere_service_rejects_wrong_schema_version(self):
+        plugin = FakeGroupAtmosphereService()
+        plugin.group_atmosphere_schema_version = "astrbot.group_atmosphere_state.v0"
+        context = FakeContext(SimpleNamespace(activated=True, star_cls=plugin))
+
+        self.assertIsNone(get_group_atmosphere_service(context))
+
     def test_public_service_contract_matches_plugin_implementation(self):
         public_tree = module_tree("public_api.py")
         main_tree = module_tree("main.py")
@@ -580,6 +635,7 @@ class PublicApiTests(unittest.TestCase):
         lifelike_protocol = class_async_methods(public_tree, "LifelikeLearningServiceProtocol")
         personality_drift_protocol = class_async_methods(public_tree, "PersonalityDriftServiceProtocol")
         fallibility_protocol = class_async_methods(public_tree, "FallibilityServiceProtocol")
+        group_atmosphere_protocol = class_async_methods(public_tree, "GroupAtmosphereServiceProtocol")
         plugin_methods = class_async_methods(main_tree, "EmotionalStatePlugin")
         main_required = set(
             assigned_string_tuple(main_tree, "_REQUIRED_EMOTION_SERVICE_METHODS"),
@@ -605,9 +661,18 @@ class PublicApiTests(unittest.TestCase):
         public_fallibility_required = set(
             assigned_string_tuple(public_tree, "_FALLIBILITY_SERVICE_REQUIRED_METHODS"),
         )
+        public_group_atmosphere_required = set(
+            assigned_string_tuple(
+                public_tree,
+                "_GROUP_ATMOSPHERE_SERVICE_REQUIRED_METHODS",
+            ),
+        )
 
         self.assertEqual(emotion_protocol, main_required)
         self.assertEqual(emotion_protocol, public_required)
+        self.assertTrue(
+            public_group_atmosphere_required.isdisjoint(public_required),
+        )
         self.assertEqual(set(), emotion_protocol - plugin_methods)
         self.assertEqual(humanlike_protocol, public_humanlike_required)
         self.assertEqual(set(), public_humanlike_required - plugin_methods)
@@ -619,6 +684,8 @@ class PublicApiTests(unittest.TestCase):
         self.assertEqual(set(), public_personality_drift_required - plugin_methods)
         self.assertEqual(fallibility_protocol, public_fallibility_required)
         self.assertEqual(set(), public_fallibility_required - plugin_methods)
+        self.assertEqual(group_atmosphere_protocol, public_group_atmosphere_required)
+        self.assertEqual(set(), public_group_atmosphere_required - plugin_methods)
 
     def test_main_register_decorator_uses_plugin_name_constant(self):
         tree = ast.parse((ROOT / "main.py").read_text(encoding="utf-8"))
@@ -637,6 +704,8 @@ class PublicApiTests(unittest.TestCase):
 
         self.assertIsInstance(register_call.args[0], ast.Name)
         self.assertEqual("PLUGIN_NAME", register_call.args[0].id)
+        self.assertIsInstance(register_call.args[3], ast.Constant)
+        self.assertEqual(metadata_value("version"), register_call.args[3].value)
 
     def test_public_service_versions_match_plugin_class_versions(self):
         public_tree = module_tree("public_api.py")
@@ -663,6 +732,9 @@ class PublicApiTests(unittest.TestCase):
         fallibility_protocol_constants = emotion_protocol_constants | {
             "fallibility_state_schema_version",
         }
+        group_atmosphere_protocol_constants = emotion_protocol_constants | {
+            "group_atmosphere_schema_version",
+        }
         plugin_constants = class_constant_names(main_tree, "EmotionalStatePlugin")
 
         self.assertLessEqual(emotion_protocol_constants, plugin_constants)
@@ -671,6 +743,7 @@ class PublicApiTests(unittest.TestCase):
         self.assertLessEqual(lifelike_protocol_constants, plugin_constants)
         self.assertLessEqual(personality_drift_protocol_constants, plugin_constants)
         self.assertLessEqual(fallibility_protocol_constants, plugin_constants)
+        self.assertLessEqual(group_atmosphere_protocol_constants, plugin_constants)
         self.assertIn("EMOTION_API_VERSION", {node.id for node in ast.walk(public_tree) if isinstance(node, ast.Name)})
         self.assertIn("PUBLIC_API_VERSION", {node.id for node in ast.walk(main_tree) if isinstance(node, ast.Name)})
 
@@ -849,6 +922,7 @@ class MemoryPayloadPublicApiTests(unittest.TestCase):
         plugin._moral_repair_memory_cache = {}
         plugin._fallibility_memory_cache = {}
         plugin._last_request_text = {}
+        plugin._last_state_injection_diagnostics = {}
         plugin.context = SimpleNamespace()
         return plugin
 
@@ -1269,6 +1343,68 @@ class MemoryPayloadPublicApiTests(unittest.TestCase):
         texts = [part.text for part in request.extra_user_content_parts]
         self.assertEqual(len(texts), 2)
         self.assertIn("bot_emotion_state", texts[0])
+        self.assertIn("bot_auxiliary_state", texts[1])
+        self.assertIn("get_bot_humanlike_state", texts[1])
+
+    def test_on_llm_request_can_use_full_auxiliary_injection_for_compatibility(self):
+        self._install_astrbot_stubs()
+        from emotion_engine import EmotionState
+        from humanlike_engine import HumanlikeState
+        from main import EmotionalStatePlugin
+
+        async def fake_persona(self, event, request):
+            return None
+
+        async def fake_load_state(self, session_key, persona_profile=None, **kwargs):
+            return EmotionState.initial()
+
+        async def fake_save_state(self, session_key, state):
+            pass
+
+        async def fake_load_humanlike(self, session_key, **kwargs):
+            return HumanlikeState.initial()
+
+        async def fake_save_humanlike(self, session_key, state):
+            pass
+
+        original_persona = EmotionalStatePlugin._persona_profile
+        original_load_state = EmotionalStatePlugin._load_state
+        original_save_state = EmotionalStatePlugin._save_state
+        original_load_humanlike = EmotionalStatePlugin._load_humanlike_state
+        original_save_humanlike = EmotionalStatePlugin._save_humanlike_state
+        EmotionalStatePlugin._persona_profile = fake_persona
+        EmotionalStatePlugin._load_state = fake_load_state
+        EmotionalStatePlugin._save_state = fake_save_state
+        EmotionalStatePlugin._load_humanlike_state = fake_load_humanlike
+        EmotionalStatePlugin._save_humanlike_state = fake_save_humanlike
+        try:
+            plugin = self._new_plugin(
+                {
+                    "use_llm_assessor": False,
+                    "assessment_timing": "pre",
+                    "enable_humanlike_state": True,
+                    "humanlike_injection_strength": 0.35,
+                    "auxiliary_state_injection_detail": "full",
+                },
+            )
+            event = SimpleNamespace(unified_msg_origin="s1", message_str="hello")
+            request = SimpleNamespace(
+                system_prompt="",
+                contexts=[],
+                prompt="hello",
+                extra_user_content_parts=[],
+                session_id="s1",
+            )
+            asyncio.run(plugin.on_llm_request(event, request))
+        finally:
+            EmotionalStatePlugin._persona_profile = original_persona
+            EmotionalStatePlugin._load_state = original_load_state
+            EmotionalStatePlugin._save_state = original_save_state
+            EmotionalStatePlugin._load_humanlike_state = original_load_humanlike
+            EmotionalStatePlugin._save_humanlike_state = original_save_humanlike
+
+        texts = [part.text for part in request.extra_user_content_parts]
+        self.assertEqual(len(texts), 2)
         self.assertIn("simulated humanlike-state", texts[1])
 
     def test_on_llm_request_does_not_inject_humanlike_when_inject_state_false_or_strength_zero(self):
@@ -1895,7 +2031,29 @@ class MemoryPayloadPublicApiTests(unittest.TestCase):
 
         self.assertFalse(payload["observation"]["committed"])
         self.assertIn("deception_risk_detected", payload["flags"])
-        self.assertTrue(payload["risk"]["must_not_generate_strategy"])
+        self.assertFalse(payload["risk"]["must_not_generate_strategy"])
+        self.assertFalse(payload["risk"]["action_blocking"])
+        self.assertEqual(payload["safety"]["blocked_actions"], [])
+
+        blocking_plugin = self._new_plugin(
+            {
+                "enable_moral_repair_state": True,
+                "block_deception_manipulation_evasion_actions": True,
+            },
+        )
+        blocking_plugin.moral_repair_engine = MoralRepairEngine()
+        blocking_payload = asyncio.run(
+            blocking_plugin.simulate_moral_repair_update(
+                session_key="s1",
+                text="I lied and I should correct the falsehood.",
+                observed_at=1000.0,
+            ),
+        )
+        self.assertTrue(blocking_payload["risk"]["must_not_generate_strategy"])
+        self.assertIn(
+            "generate_deception_strategy",
+            blocking_payload["safety"]["blocked_actions"],
+        )
 
     def test_fallibility_observe_can_commit_and_simulate_without_saving(self):
         self._install_astrbot_stubs()
@@ -1942,7 +2100,30 @@ class MemoryPayloadPublicApiTests(unittest.TestCase):
         self.assertTrue(committed["observation"]["committed"])
         self.assertFalse(simulated["observation"]["committed"])
         self.assertIn("possible_mistake_cue", committed["flags"])
-        self.assertTrue(committed["safety"]["must_not_generate_deception_strategy"])
+        self.assertFalse(committed["safety"]["must_not_generate_deception_strategy"])
+        self.assertEqual(committed["safety"]["blocked_actions"], [])
+
+        blocking_plugin = self._new_plugin(
+            {
+                "enable_fallibility_state": True,
+                "block_deception_manipulation_evasion_actions": True,
+            },
+        )
+        blocking_plugin.fallibility_engine = FallibilityEngine()
+        blocking_payload = asyncio.run(
+            blocking_plugin.simulate_fallibility_update(
+                session_key="s-fallibility",
+                text="I may have misread that again.",
+                observed_at=1010.0,
+            ),
+        )
+        self.assertTrue(
+            blocking_payload["safety"]["must_not_generate_deception_strategy"],
+        )
+        self.assertIn(
+            "generate_deception_strategy",
+            blocking_payload["safety"]["blocked_actions"],
+        )
 
     def test_memory_payload_includes_humanlike_state_at_write(self):
         self._install_astrbot_stubs()
@@ -2024,7 +2205,7 @@ class MemoryPayloadPublicApiTests(unittest.TestCase):
                 "updated_at": 12.0,
                 "risk": {
                     "deception_risk": 0.2,
-                    "must_not_generate_strategy": True,
+                    "must_not_generate_strategy": False,
                 },
                 "repair": {"repair_motivation": 0.7},
                 "flags": ["apology_cue"],
@@ -2189,14 +2370,19 @@ class MemoryPayloadPublicApiTests(unittest.TestCase):
         original_load_state = EmotionalStatePlugin._load_state
         EmotionalStatePlugin._load_state = fake_load_state
         try:
-            default_plugin = self._new_plugin()
+            default_plugin = self._new_plugin({"state_injection_detail": "full"})
             default_snapshot = asyncio.run(
                 default_plugin.get_emotion_snapshot(
                     session_key="s-safe",
                     include_prompt_fragment=True,
                 ),
             )
-            relaxed_plugin = self._new_plugin({"enable_safety_boundary": False})
+            relaxed_plugin = self._new_plugin(
+                {
+                    "enable_safety_boundary": False,
+                    "state_injection_detail": "full",
+                },
+            )
             relaxed_snapshot = asyncio.run(
                 relaxed_plugin.get_emotion_snapshot(
                     session_key="s-raw",
@@ -2247,7 +2433,7 @@ class MemoryPayloadPublicApiTests(unittest.TestCase):
         self.assertNotIn("Never use the simulated state", relaxed_fragment)
         self.assertIn("Dependency guard active", relaxed_fragment)
 
-    def test_moral_repair_prompt_fragment_respects_safety_boundary_config(self):
+    def test_moral_repair_prompt_fragment_respects_safety_and_action_blocking_config(self):
         self._install_astrbot_stubs()
         from main import EmotionalStatePlugin
         from moral_repair_engine import MoralRepairState
@@ -2274,13 +2460,57 @@ class MemoryPayloadPublicApiTests(unittest.TestCase):
                     },
                 ).get_moral_repair_prompt_fragment(session_key="s-raw"),
             )
+            blocking_fragment = asyncio.run(
+                self._new_plugin(
+                    {
+                        **base_config,
+                        "block_deception_manipulation_evasion_actions": True,
+                    },
+                ).get_moral_repair_prompt_fragment(session_key="s-block")
+            )
         finally:
             EmotionalStatePlugin._load_moral_repair_state = original_load
 
-        self.assertIn("Never generate deception tactics", default_fragment)
+        self.assertNotIn("Never generate deception tactics", default_fragment)
+        self.assertIn("Action blocking is relaxed", default_fragment)
         self.assertIn("Do not use guilt or shame", default_fragment)
-        self.assertIn("Never generate deception tactics", relaxed_fragment)
+        self.assertNotIn("Never generate deception tactics", relaxed_fragment)
         self.assertNotIn("Do not use guilt or shame", relaxed_fragment)
+        self.assertIn("Never generate deception tactics", blocking_fragment)
+
+    def test_fallibility_prompt_fragment_respects_action_blocking_config(self):
+        self._install_astrbot_stubs()
+        from fallibility_engine import FallibilityState
+        from main import EmotionalStatePlugin
+
+        async def fake_load_fallibility_state(self, session_key):
+            state = FallibilityState.initial()
+            state.values["shadow_deception_impulse"] = 0.8
+            return state
+
+        original_load = EmotionalStatePlugin._load_fallibility_state
+        EmotionalStatePlugin._load_fallibility_state = fake_load_fallibility_state
+        try:
+            base_config = {"enable_fallibility_state": True}
+            default_fragment = asyncio.run(
+                self._new_plugin(base_config).get_fallibility_prompt_fragment(
+                    session_key="s-safe",
+                ),
+            )
+            blocking_fragment = asyncio.run(
+                self._new_plugin(
+                    {
+                        **base_config,
+                        "block_deception_manipulation_evasion_actions": True,
+                    },
+                ).get_fallibility_prompt_fragment(session_key="s-block")
+            )
+        finally:
+            EmotionalStatePlugin._load_fallibility_state = original_load
+
+        self.assertIn("Action blocking is relaxed", default_fragment)
+        self.assertNotIn("Do not intentionally fabricate facts", default_fragment)
+        self.assertIn("Do not intentionally fabricate facts", blocking_fragment)
 
     def test_reset_public_methods_respect_backdoor_config(self):
         self._install_astrbot_stubs()

@@ -1,5 +1,6 @@
 import asyncio
 import ast
+import collections
 import copy
 import json
 import sys
@@ -73,6 +74,7 @@ def install_astrbot_stubs():
 def new_plugin(config=None):
     from emotion_engine import EmotionEngine, EmotionParameters
     from fallibility_engine import FallibilityEngine
+    from group_atmosphere_engine import GroupAtmosphereEngine
     from humanlike_engine import HumanlikeEngine
     from lifelike_learning_engine import LifelikeLearningEngine
     from main import EmotionalStatePlugin
@@ -90,6 +92,7 @@ def new_plugin(config=None):
     plugin.personality_drift_engine = PersonalityDriftEngine()
     plugin.moral_repair_engine = MoralRepairEngine()
     plugin.fallibility_engine = FallibilityEngine()
+    plugin.group_atmosphere_engine = GroupAtmosphereEngine()
     plugin._memory_cache = {}
     plugin._psychological_memory_cache = {}
     plugin._humanlike_memory_cache = {}
@@ -97,7 +100,30 @@ def new_plugin(config=None):
     plugin._personality_drift_memory_cache = {}
     plugin._moral_repair_memory_cache = {}
     plugin._fallibility_memory_cache = {}
+    plugin._group_atmosphere_memory_cache = {}
+    plugin._agent_identity_profile_cache = {}
+    plugin._agent_trail_cache = {}
+    plugin._agent_turn_sequence = {}
+    plugin._engine_cache = {}
+    plugin._provider_id_cache = {}
     plugin._last_request_text = {}
+    plugin._last_state_injection_diagnostics = {}
+    plugin._background_tasks = set()
+    plugin._background_post_tasks = {}
+    plugin._background_post_queues = {}
+    plugin._background_post_active = {}
+    plugin._background_post_sequence = {}
+    plugin._background_post_latest_enqueued = {}
+    plugin._background_post_last_committed = {}
+    plugin._background_post_skipped = {}
+    plugin._background_post_dead_letters = {}
+    plugin._background_post_recovered_sessions = set()
+    plugin._background_post_checkpoint_tasks = set()
+    plugin._background_post_checkpoint_generation = {}
+    plugin._background_post_checkpoint_locks = {}
+    plugin._state_injection_snapshot_cache = {}
+    plugin._group_atmosphere_injection_snapshot_cache = {}
+    plugin._terminating = False
     plugin.context = SimpleNamespace()
     return plugin
 
@@ -161,12 +187,20 @@ async def collect_async_generator(generator):
 
 
 class FakeEvent:
-    def __init__(self, session_id="session-1", message="hello"):
+    def __init__(self, session_id="session-1", message="hello", sender_id=None, sender_name=None):
         self.unified_msg_origin = session_id
         self.message_str = message
+        self._sender_id = sender_id
+        self._sender_name = sender_name
 
     def plain_result(self, text):
         return text
+
+    def get_sender_id(self):
+        return self._sender_id or ""
+
+    def get_sender_name(self):
+        return self._sender_name or ""
 
 
 class CommandAndToolSmokeTests(unittest.TestCase):
@@ -195,6 +229,8 @@ class CommandAndToolSmokeTests(unittest.TestCase):
                 "get_bot_moral_repair_state",
                 "get_bot_fallibility_state",
                 "get_bot_integrated_self_state",
+                "get_bot_group_atmosphere_state",
+                "query_agent_state",
             },
         )
         for tool in sorted(tools):
@@ -488,11 +524,56 @@ class CommandAndToolSmokeTests(unittest.TestCase):
         self.assertTrue(payload["enabled"])
         self.assertTrue(payload["diagnostic"])
         self.assertFalse(payload["executable_strategy_enabled"])
+        self.assertFalse(payload["action_blocking_enabled"])
+        self.assertEqual(payload["strategy_policy"], "observe")
         self.assertEqual(payload["kind"], "shadow_diagnostics")
         self.assertEqual(payload["consequences"]["response_posture"], "repair_first")
+        self.assertEqual(payload["not_allowed"], [])
+        self.assertNotIn("generate_deception_strategy", payload["allowed_uses"])
+
+    def test_shadow_diagnostics_can_restore_action_blocking_not_allowed(self):
+        plugin = new_plugin(
+            {
+                "enable_shadow_diagnostics": True,
+                "block_deception_manipulation_evasion_actions": True,
+            },
+        )
+
+        async def fake_moral_repair_snapshot(self, *args, **kwargs):
+            return {
+                "values": {"shadow_deception_impulse": 0.2},
+                "risk": {"shadow_impulses": {"deception": 0.2}},
+            }
+
+        async def fake_fallibility_snapshot(self, *args, **kwargs):
+            return {
+                "values": {"shadow_evasion_impulse": 0.25},
+                "fallibility": {"non_executable_impulses": {"evasion": 0.25}},
+            }
+
+        async def fake_integrated_snapshot(self, *args, **kwargs):
+            return {
+                "response_posture": "repair_first",
+                "state_index": {"repair_pressure": 0.7},
+                "risk": {"shadow_risk_impulse": 0.3},
+                "policy_plan": {"must_preserve_signals": ["truthfulness_guard"]},
+                "non_executable_impulses": {"shadow_risk_impulse": 0.3},
+            }
+
+        bind_async(plugin, "get_moral_repair_snapshot", fake_moral_repair_snapshot)
+        bind_async(plugin, "get_fallibility_snapshot", fake_fallibility_snapshot)
+        bind_async(plugin, "get_integrated_self_snapshot", fake_integrated_snapshot)
+
+        payload = json.loads(
+            asyncio.run(
+                collect_async_generator(plugin.shadow_diagnostics_status(FakeEvent())),
+            )[0],
+        )
+
+        self.assertTrue(payload["action_blocking_enabled"])
+        self.assertEqual(payload["strategy_policy"], "block")
         self.assertIn("generate_deception_strategy", payload["not_allowed"])
         self.assertIn("execute_shadow_impulses", payload["not_allowed"])
-        self.assertNotIn("generate_deception_strategy", payload["allowed_uses"])
 
     def test_disabled_lifelike_state_command_does_not_load_state(self):
         plugin = new_plugin()
@@ -612,8 +693,44 @@ class CommandAndToolSmokeTests(unittest.TestCase):
 
         self.assertNotIn("prompt_fragment", summary)
         self.assertEqual(summary["consequences"]["notes"], ["note-1", "note-2"])
+        self.assertEqual(summary["track"]["kind"], "conversation")
         self.assertEqual(full["prompt_fragment"], "full prompt fragment")
         self.assertEqual(full["consequences"]["notes"], ["note-1", "note-2", "note-3"])
+        self.assertEqual(full["track"]["kind"], "conversation")
+
+    def test_get_bot_emotion_state_tool_can_query_current_speaker_track(self):
+        plugin = new_plugin()
+        calls = []
+
+        async def fake_snapshot(self, *args, **kwargs):
+            calls.append(kwargs)
+            return {
+                "kind": "emotion_state",
+                "session_key": kwargs.get("session_key"),
+                "prompt_fragment": "full prompt fragment",
+                "emotion": {"label": "careful"},
+                "consequences": {"notes": ["speaker-note"]},
+            }
+
+        bind_async(plugin, "get_emotion_snapshot", fake_snapshot)
+
+        speaker_json = asyncio.run(
+            collect_async_generator(
+                plugin.get_bot_emotion_state_tool(
+                    FakeEvent("group-1", sender_id="user-a", sender_name="Alice"),
+                    detail="full",
+                    track="speaker",
+                ),
+            ),
+        )[0]
+        speaker = json.loads(speaker_json)
+
+        self.assertEqual(calls[0]["session_key"], "group-1::speaker:user-a")
+        self.assertEqual(calls[0]["prompt_fragment_detail"], "full")
+        self.assertEqual(speaker["session_key"], "group-1::speaker:user-a")
+        self.assertEqual(speaker["track"]["kind"], "speaker")
+        self.assertEqual(speaker["track"]["speaker_id"], "user-a")
+        self.assertEqual(speaker["track"]["speaker_name"], "Alice")
 
     def test_get_bot_humanlike_state_tool_uses_layered_exposure(self):
         plugin = new_plugin()
@@ -728,6 +845,331 @@ class CommandAndToolSmokeTests(unittest.TestCase):
         self.assertFalse(payload["enabled"])
         self.assertEqual(payload["reason"], "enable_personality_drift is false")
         self.assertEqual(payload["exposure"], "plugin_safe")
+
+    def test_get_bot_group_atmosphere_state_tool_uses_layered_exposure(self):
+        plugin = new_plugin()
+        calls = []
+
+        async def fake_snapshot(self, *args, **kwargs):
+            calls.append(
+                (
+                    kwargs.get("exposure"),
+                    kwargs.get("include_prompt_fragment"),
+                ),
+            )
+            return {
+                "kind": "group_atmosphere_state",
+                "enabled": True,
+                "exposure": kwargs.get("exposure"),
+                "prompt_fragment": "room fragment"
+                if kwargs.get("include_prompt_fragment")
+                else "",
+            }
+
+        bind_async(plugin, "get_group_atmosphere_snapshot", fake_snapshot)
+
+        summary = json.loads(
+            asyncio.run(
+                collect_async_generator(
+                    plugin.get_bot_group_atmosphere_state_tool(
+                        FakeEvent(),
+                        detail="summary",
+                    ),
+                ),
+            )[0],
+        )
+        full = json.loads(
+            asyncio.run(
+                collect_async_generator(
+                    plugin.get_bot_group_atmosphere_state_tool(
+                        FakeEvent(),
+                        detail="full",
+                    ),
+                ),
+            )[0],
+        )
+
+        self.assertEqual(calls, [("plugin_safe", False), ("internal", True)])
+        self.assertEqual(summary["exposure"], "plugin_safe")
+        self.assertEqual(full["exposure"], "internal")
+        self.assertEqual(full["prompt_fragment"], "room fragment")
+
+    def test_query_agent_state_tool_returns_unified_payload(self):
+        plugin = new_plugin()
+        calls = []
+
+        async def fake_query(self, *args, **kwargs):
+            calls.append(kwargs)
+            return {
+                "kind": "agent_state_query",
+                "state": kwargs.get("state"),
+                "detail": kwargs.get("detail"),
+                "track": {"kind": kwargs.get("track")},
+                "runtime": {"enabled": kwargs.get("include_runtime")},
+                "snapshots": {},
+            }
+
+        bind_async(plugin, "query_agent_state", fake_query)
+
+        payload = json.loads(
+            asyncio.run(
+                collect_async_generator(
+                    plugin.query_agent_state_tool(
+                        FakeEvent("group-query"),
+                        state="group_atmosphere",
+                        detail="full",
+                        track="speaker",
+                        include_runtime=True,
+                    ),
+                ),
+            )[0],
+        )
+
+        self.assertEqual(calls[0]["state"], "group_atmosphere")
+        self.assertEqual(calls[0]["detail"], "full")
+        self.assertEqual(calls[0]["track"], "speaker")
+        self.assertTrue(calls[0]["include_runtime"])
+        self.assertEqual(payload["state"], "group_atmosphere")
+        self.assertEqual(payload["runtime"], {"enabled": True})
+
+    def test_llm_tool_json_result_is_bounded_and_valid_json(self):
+        plugin = new_plugin({"llm_tool_response_max_chars": 420})
+
+        async def fake_query(self, *args, **kwargs):
+            return {
+                "schema_version": "astrbot.agent_state_query.v1",
+                "kind": "agent_state_query",
+                "state": kwargs.get("state"),
+                "detail": kwargs.get("detail"),
+                "session_key": "s-tool-budget",
+                "snapshots": {
+                    "emotion": {
+                        "kind": "emotion_state",
+                        "session_key": "s-tool-budget",
+                        "emotion": {"label": "focused", "confidence": 0.9},
+                        "prompt_fragment": "very-long-fragment-" + "x" * 5000,
+                        "trajectory": ["raw"] * 200,
+                    },
+                },
+            }
+
+        bind_async(plugin, "query_agent_state", fake_query)
+
+        raw = asyncio.run(
+            collect_async_generator(
+                plugin.query_agent_state_tool(
+                    FakeEvent("s-tool-budget"),
+                    state="all",
+                    detail="full",
+                ),
+            ),
+        )[0]
+        payload = json.loads(raw)
+
+        self.assertLessEqual(len(raw), 420)
+        self.assertTrue(payload["truncated"])
+        self.assertTrue(payload["degraded"])
+        self.assertNotIn("very-long-fragment", raw)
+        self.assertIn("original_chars", payload)
+
+    def test_query_agent_state_summary_trims_emotion_prompt_fragment(self):
+        plugin = new_plugin()
+        template = {
+            "kind": "emotion_state",
+            "prompt_fragment": "full prompt fragment",
+            "emotion": {"label": "focused"},
+            "consequences": {
+                "notes": ["note-1", "note-2", "note-3"],
+            },
+        }
+
+        async def fake_snapshot(self, *args, **kwargs):
+            payload = copy.deepcopy(template)
+            if kwargs.get("include_prompt_fragment"):
+                payload["prompt_fragment"] = "full prompt fragment"
+            return payload
+
+        bind_async(plugin, "get_emotion_snapshot", fake_snapshot)
+
+        payload = asyncio.run(
+            plugin.query_agent_state(
+                FakeEvent("group-query", sender_id="user-a", sender_name="Alice"),
+                state="emotion",
+                detail="summary",
+                track="speaker",
+            ),
+        )
+
+        emotion = payload["snapshots"]["emotion"]
+        self.assertNotIn("prompt_fragment", emotion)
+        self.assertEqual(emotion["track"]["kind"], "speaker")
+        self.assertEqual(emotion["track"]["speaker_track_id"], "group-query::speaker:user-a")
+        self.assertEqual(emotion["consequences"]["notes"], ["note-1", "note-2"])
+
+    def test_query_agent_state_accepts_integrated_self_alias(self):
+        plugin = new_plugin()
+        calls = []
+
+        async def fake_integrated_snapshot(self, *args, **kwargs):
+            calls.append(kwargs)
+            return {"kind": "integrated_self_state", "enabled": True}
+
+        bind_async(plugin, "get_integrated_self_snapshot", fake_integrated_snapshot)
+
+        payload = asyncio.run(
+            plugin.query_agent_state(
+                FakeEvent("group-query"),
+                state="integrated_self",
+                detail="full",
+            ),
+        )
+
+        self.assertEqual(payload["state"], "integrated")
+        self.assertIn("integrated", payload["snapshots"])
+        self.assertEqual(payload["snapshots"]["integrated"]["kind"], "integrated_self_state")
+        self.assertTrue(calls[0]["include_raw_snapshots"])
+
+    def test_query_agent_state_runtime_diagnostics_omits_raw_message_text(self):
+        plugin = new_plugin()
+        payload = asyncio.run(
+            plugin.query_agent_state(
+                FakeEvent(
+                    "group-runtime",
+                    message="secret raw text must not appear",
+                    sender_id="user-a",
+                    sender_name="Alice",
+                ),
+                state="runtime",
+                include_runtime=True,
+            ),
+        )
+
+        serialized = json.dumps(payload, ensure_ascii=False)
+        self.assertEqual(payload["state"], "runtime")
+        self.assertIn("runtime", payload)
+        self.assertNotIn("secret raw text must not appear", serialized)
+
+    def test_runtime_diagnostics_reports_background_lag_without_raw_content(self):
+        plugin = new_plugin(
+            {
+                "background_post_assessment": True,
+                "background_post_queue_limit": 2,
+                "background_post_max_workers": 3,
+                "background_post_diagnostics_warn_lag_count": 3,
+                "background_post_diagnostics_warn_lag_seconds": 999999999.0,
+            },
+        )
+        from main import _BackgroundPostJob
+
+        event = FakeEvent(
+            "s-diag",
+            message="secret text",
+            sender_id="u1",
+            sender_name="Alice",
+        )
+        identity = plugin._agent_identity(event)
+        plugin._background_post_queues["s-diag"] = collections.deque(
+            [
+                _BackgroundPostJob(event, identity, "reply-2", "ctx-2", 2, 100.0),
+                _BackgroundPostJob(event, identity, "reply-3", "ctx-3", 3, 110.0),
+            ],
+        )
+        plugin._background_post_active["s-diag"] = {
+            1: _BackgroundPostJob(event, identity, "reply-1", "ctx-1", 1, 90.0),
+        }
+        plugin._background_post_tasks["s-diag"] = SimpleNamespace(done=lambda: False)
+        plugin._background_post_sequence["s-diag"] = 3
+        plugin._background_post_latest_enqueued["s-diag"] = 3
+        plugin._background_post_last_committed["s-diag"] = 0
+        plugin._background_post_skipped["s-diag"] = {0}
+
+        payload = asyncio.run(
+            plugin.get_agent_runtime_diagnostics(event, include_sessions=True),
+        )
+
+        serialized = json.dumps(payload, ensure_ascii=False)
+        bg = payload["background_post_assessment"]
+        self.assertTrue(bg["enabled"])
+        self.assertTrue(bg["checkpoint_enabled"])
+        self.assertEqual(bg["queue_limit"], 2)
+        self.assertEqual(bg["max_workers"], 3)
+        self.assertTrue(bg["active_task"])
+        self.assertEqual(bg["queued"], 2)
+        self.assertEqual(bg["queue_depth"], 2)
+        self.assertEqual(bg["active_workers"], 1)
+        self.assertEqual(bg["lag_count"], 3)
+        self.assertEqual(bg["latest_enqueued"], 3)
+        self.assertEqual(bg["last_committed"], 0)
+        self.assertEqual(bg["state_lag_count"], 3)
+        self.assertEqual(bg["skipped_count"], 1)
+        self.assertIn("s-diag", payload["sessions"])
+        self.assertEqual(bg["warning_level"], "warn")
+        self.assertIn("lag_count_high", bg["warnings"])
+        self.assertEqual(bg["retrying_count"], 0)
+        self.assertEqual(bg["dead_letter_count"], 0)
+        self.assertEqual(bg["expired_lease_count"], 0)
+        self.assertNotIn("secret text", serialized)
+
+    def test_runtime_diagnostics_reports_retry_dead_letter_and_expired_lease(self):
+        plugin = new_plugin(
+            {
+                "background_post_assessment": True,
+                "background_post_diagnostics_warn_lag_count": 1,
+            },
+        )
+        from main import _BackgroundPostJob
+
+        event = FakeEvent("s-diag-warn", message="secret text", sender_id="u1")
+        identity = plugin._agent_identity(event)
+        retrying = _BackgroundPostJob(event, identity, "secret retry", "secret ctx", 1, 100.0)
+        retrying.attempts = 1
+        retrying.next_retry_at = 9999999999.0
+        retrying.last_error_type = "RuntimeError"
+        retrying.last_failed_at = 101.0
+        expired = _BackgroundPostJob(event, identity, "secret active", "secret ctx", 2, 100.0)
+        expired.leased_at = 100.0
+        expired.lease_until = 100.1
+        dead = _BackgroundPostJob(event, identity, "secret dead", "secret ctx", 3, 100.0)
+        dead.attempts = 3
+        dead.last_error_type = "TimeoutError"
+        dead.last_failed_at = 120.0
+        dead.dead_lettered_at = 121.0
+        plugin._background_post_queues["s-diag-warn"] = collections.deque([retrying])
+        plugin._background_post_active["s-diag-warn"] = {2: expired}
+        plugin._background_post_dead_letters["s-diag-warn"] = collections.deque([dead])
+        plugin._background_post_latest_enqueued["s-diag-warn"] = 3
+
+        payload = asyncio.run(plugin.get_agent_runtime_diagnostics("s-diag-warn"))
+        bg = payload["background_post_assessment"]
+        serialized = json.dumps(payload, ensure_ascii=False)
+
+        self.assertEqual(bg["retrying_count"], 1)
+        self.assertEqual(bg["dead_letter_count"], 1)
+        self.assertEqual(bg["expired_lease_count"], 1)
+        self.assertEqual(bg["warning_level"], "error")
+        self.assertIn("retrying", bg["warnings"])
+        self.assertIn("dead_letter", bg["warnings"])
+        self.assertIn("expired_lease", bg["warnings"])
+        self.assertEqual(bg["last_error_type"], "TimeoutError")
+        self.assertEqual(bg["dead_letters"][0]["sequence"], 3)
+        self.assertNotIn("secret retry", serialized)
+        self.assertNotIn("secret active", serialized)
+        self.assertNotIn("secret dead", serialized)
+        self.assertNotIn("secret ctx", serialized)
+
+    def test_runtime_diagnostics_with_event_does_not_write_identity_cache(self):
+        plugin = new_plugin()
+        event = FakeEvent(
+            "s-readonly-runtime",
+            message="hello",
+            sender_id="user-a",
+            sender_name="Alice",
+        )
+
+        payload = asyncio.run(plugin.get_agent_runtime_diagnostics(event))
+
+        self.assertEqual(payload["identity"]["speaker_track_id"], "s-readonly-runtime::speaker:user-a")
+        self.assertEqual(plugin._agent_identity_profile_cache, {})
 
     def test_llm_tool_simulate_bot_emotion_update_is_read_only(self):
         from emotion_engine import EmotionState

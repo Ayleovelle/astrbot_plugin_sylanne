@@ -50,6 +50,8 @@ class PackagePluginTests(unittest.TestCase):
         self.assertIn("personality_drift_engine.py", files)
         self.assertIn("moral_repair_engine.py", files)
         self.assertIn("fallibility_engine.py", files)
+        self.assertIn("agent_identity.py", files)
+        self.assertIn("group_atmosphere_engine.py", files)
         self.assertIn("LICENSE", files)
         self.assertIn("README.md", files)
         self.assertIn("docs/theory.md", files)
@@ -76,6 +78,8 @@ class PackagePluginTests(unittest.TestCase):
 
         self.assertIn("astrbot_plugin_emotional_state/", install_tree)
         self.assertIn("__init__.py", install_tree)
+        self.assertIn("agent_identity.py", install_tree)
+        self.assertIn("group_atmosphere_engine.py", install_tree)
         self.assertIn("public_api.py", install_tree)
         self.assertNotIn("tests/", install_tree)
         self.assertIn("发布 zip 不会包含这些目录", readme)
@@ -101,8 +105,10 @@ class PackagePluginTests(unittest.TestCase):
         prefix = f"{metadata_value('name')}/"
         runtime_root_files = {
             "__init__.py",
+            "agent_identity.py",
             "main.py",
             "emotion_engine.py",
+            "group_atmosphere_engine.py",
             "humanlike_engine.py",
             "lifelike_learning_engine.py",
             "personality_drift_engine.py",
@@ -220,8 +226,10 @@ class PluginZipPreflightTests(unittest.TestCase):
             (prefix, ""),
             (prefix + "__init__.py", '"""plugin package"""\n'),
             (prefix + "metadata.yaml", f"name: {PLUGIN_NAME}\n"),
+            (prefix + "agent_identity.py", "# runtime\n"),
             (prefix + "main.py", "# runtime\n"),
             (prefix + "emotion_engine.py", "# runtime\n"),
+            (prefix + "group_atmosphere_engine.py", "# runtime\n"),
             (prefix + "humanlike_engine.py", "# runtime\n"),
             (prefix + "lifelike_learning_engine.py", "# runtime\n"),
             (prefix + "personality_drift_engine.py", "# runtime\n"),
@@ -280,6 +288,8 @@ class PluginZipPreflightTests(unittest.TestCase):
         required_suffixes = (
             "__init__.py",
             "_conf_schema.json",
+            "agent_identity.py",
+            "group_atmosphere_engine.py",
             "integrated_self.py",
             "lifelike_learning_engine.py",
             "personality_drift_engine.py",

@@ -267,7 +267,7 @@ class RemoteSmokeContractTests(unittest.TestCase):
 
     def test_readme_records_beta_pr_iterations_in_order(self):
         readme = (ROOT / "README.md").read_text(encoding="utf-8")
-        section = readme.split("### 0.1.0-beta 迭代记录", 1)[1].split(
+        section = readme.split("### 0.5.0 发布记录", 1)[1].split(
             "## 项目定位",
             1,
         )[0]
@@ -287,7 +287,7 @@ class RemoteSmokeContractTests(unittest.TestCase):
             with self.subTest(version=version):
                 self.assertIn(f"| `{version}` | 已完成 |", summary)
         self.assertIn(
-            "对外安装版本由 `metadata.yaml` 和 `main.py @register(...)` 共同声明为 `0.1.0-beta`",
+            "对外安装版本由 `metadata.yaml` 和 `main.py @register(...)` 共同声明为 `0.5.0`",
             section,
         )
         for index in range(11, 201):
@@ -520,6 +520,33 @@ class RemoteSmokeContractTests(unittest.TestCase):
         self.assertIn("benchmark_time_offset_seconds", script)
         self.assertIn("Math.max(0, Number(durationSeconds) || 0)", script)
         self.assertIn("lifecycle_duration_seconds", script)
+
+    def test_remote_lifecycle_benchmark_has_full_no_safety_profile(self):
+        script = (
+            ROOT / "scripts" / "remote_emotion_benchmark_playwright.js"
+        ).read_text(encoding="utf-8")
+
+        self.assertIn('profileName === "full_nosafety"', script)
+        self.assertIn("use_llm_assessor: true", script)
+        self.assertIn("low_reasoning_friendly_mode: false", script)
+        self.assertIn("enable_safety_boundary: false", script)
+        self.assertIn("enable_humanlike_state: true", script)
+        self.assertIn("enable_lifelike_learning: true", script)
+        self.assertIn("enable_personality_drift: true", script)
+        self.assertIn("enable_moral_repair_state: true", script)
+        self.assertIn("enable_fallibility_state: true", script)
+        self.assertIn('integrated_self_degradation_profile: "full"', script)
+        self.assertIn("lifecycle_profile", script)
+
+    def test_remote_feature_benchmark_hash_ignores_lifecycle_profile(self):
+        script = (
+            ROOT / "scripts" / "remote_emotion_benchmark_playwright.js"
+        ).read_text(encoding="utf-8")
+
+        self.assertIn("function runHashConfig(config, mode)", script)
+        self.assertIn('mode !== "lifecycle" && mode !== "all"', script)
+        self.assertIn("lifecycle_profile: _lifecycleProfile", script)
+        self.assertIn("config: runHashConfig(config, mode)", script)
 
     def test_remote_smoke_script_is_read_only(self):
         script = (ROOT / "scripts" / "remote_smoke_playwright.js").read_text(

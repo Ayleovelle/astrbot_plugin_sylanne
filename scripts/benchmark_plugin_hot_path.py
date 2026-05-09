@@ -29,7 +29,7 @@ async def _bind_fast_state_hooks(plugin, *, drift_saves: list | None = None) -> 
     async def fake_persona(self, event, request):
         return None
 
-    async def fake_load_state(self, session_key, persona_profile=None):
+    async def fake_load_state(self, session_key, persona_profile=None, **kwargs):
         state = EmotionState.initial()
         state.updated_at = time.time()
         return state
@@ -40,31 +40,31 @@ async def _bind_fast_state_hooks(plugin, *, drift_saves: list | None = None) -> 
     async def fake_assess_emotion(self, **kwargs):
         return fake_observation()
 
-    async def fake_load_humanlike_state(self, session_key):
+    async def fake_load_humanlike_state(self, session_key, **kwargs):
         return HumanlikeState.initial()
 
     async def fake_save_humanlike_state(self, session_key, state):
         return None
 
-    async def fake_load_lifelike_state(self, session_key):
+    async def fake_load_lifelike_state(self, session_key, **kwargs):
         return LifelikeLearningState.initial()
 
     async def fake_save_lifelike_state(self, session_key, state):
         return None
 
-    async def fake_load_moral_repair_state(self, session_key):
+    async def fake_load_moral_repair_state(self, session_key, **kwargs):
         return MoralRepairState.initial()
 
     async def fake_save_moral_repair_state(self, session_key, state):
         return None
 
-    async def fake_load_fallibility_state(self, session_key):
+    async def fake_load_fallibility_state(self, session_key, **kwargs):
         return FallibilityState.initial()
 
     async def fake_save_fallibility_state(self, session_key, state):
         return None
 
-    async def fake_load_personality_drift_state(self, session_key, profile=None):
+    async def fake_load_personality_drift_state(self, session_key, profile=None, **kwargs):
         return PersonalityDriftState.initial(
             persona_fingerprint=profile.fingerprint if profile else "default",
             now=time.time(),
@@ -120,19 +120,19 @@ async def _run_request_slow_aux_case(
     plugin = new_plugin(config)
     await _bind_fast_state_hooks(plugin)
 
-    async def slow_humanlike(self, session_key):
+    async def slow_humanlike(self, session_key, **kwargs):
         await asyncio.sleep(0.02)
         return HumanlikeState.initial()
 
-    async def slow_lifelike(self, session_key):
+    async def slow_lifelike(self, session_key, **kwargs):
         await asyncio.sleep(0.02)
         return LifelikeLearningState.initial()
 
-    async def slow_moral(self, session_key):
+    async def slow_moral(self, session_key, **kwargs):
         await asyncio.sleep(0.02)
         return MoralRepairState.initial()
 
-    async def slow_fallibility(self, session_key):
+    async def slow_fallibility(self, session_key, **kwargs):
         await asyncio.sleep(0.02)
         return FallibilityState.initial()
 
@@ -179,7 +179,7 @@ async def _run_response_slow_moral_case(
         await asyncio.sleep(0.02)
         return fake_observation()
 
-    async def slow_moral(self, session_key):
+    async def slow_moral(self, session_key, **kwargs):
         await asyncio.sleep(0.02)
         return MoralRepairState.initial()
 
@@ -211,11 +211,11 @@ async def _run_response_slow_moral_fallibility_case(
         await asyncio.sleep(0.02)
         return fake_observation()
 
-    async def slow_moral(self, session_key):
+    async def slow_moral(self, session_key, **kwargs):
         await asyncio.sleep(0.02)
         return MoralRepairState.initial()
 
-    async def slow_fallibility(self, session_key):
+    async def slow_fallibility(self, session_key, **kwargs):
         await asyncio.sleep(0.02)
         return FallibilityState.initial()
 
@@ -258,6 +258,49 @@ async def _run_slow_assessor_case(config: dict, *, iterations: int, text: str) -
         await plugin.on_llm_response(FakeEvent("bench-session"), response)
         samples.append((time.perf_counter() - started) * 1000.0)
     return _summarize(samples)
+
+
+async def _run_background_slow_assessor_case(
+    config: dict,
+    *,
+    iterations: int,
+    text: str,
+) -> dict:
+    from main import EmotionalStatePlugin
+
+    plugin = new_plugin(config)
+    await _bind_fast_state_hooks(plugin)
+    plugin._last_request_text["bench-session"] = "cached request context"
+    plugin._assess_emotion = EmotionalStatePlugin._assess_emotion.__get__(
+        plugin,
+        type(plugin),
+    )
+
+    async def fake_provider_id(self, event):
+        return "slow-provider"
+
+    async def slow_llm_generate(**kwargs):
+        await asyncio.sleep(0.2)
+        return SimpleNamespace(completion_text='{"label":"late"}')
+
+    bind_async(plugin, "_provider_id", fake_provider_id)
+    plugin.context = SimpleNamespace(llm_generate=slow_llm_generate)
+    samples: list[float] = []
+    drain_samples: list[float] = []
+    for _ in range(iterations):
+        response = SimpleNamespace(completion_text=text)
+        started = time.perf_counter()
+        await plugin.on_llm_response(FakeEvent("bench-session"), response)
+        samples.append((time.perf_counter() - started) * 1000.0)
+    if plugin._background_tasks:
+        drain_started = time.perf_counter()
+        await asyncio.gather(*plugin._background_tasks, return_exceptions=True)
+        drain_samples.append((time.perf_counter() - drain_started) * 1000.0)
+    summary = _summarize(samples)
+    if drain_samples:
+        drain_summary = _summarize(drain_samples)
+        summary["drain_ms"] = drain_summary["max_ms"]
+    return summary
 
 
 async def _run_memory_slow_snapshot_case(config: dict, *, iterations: int) -> dict:
@@ -447,6 +490,15 @@ async def main() -> int:
         ),
         "response_slow_assessor_timeout_guard": await _run_slow_assessor_case(
             {"assessment_timing": "post", "assessor_timeout_seconds": 0.05},
+            iterations=20,
+            text="assistant response",
+        ),
+        "response_background_post_assessment": await _run_background_slow_assessor_case(
+            {
+                "assessment_timing": "post",
+                "background_post_assessment": True,
+                "assessor_timeout_seconds": 0.05,
+            },
             iterations=20,
             text="assistant response",
         ),

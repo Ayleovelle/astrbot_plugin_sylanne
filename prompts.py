@@ -25,7 +25,7 @@ DIMENSION_SCHEMA = "\n".join(
 ASSESSOR_SYSTEM_PROMPT = """你是 AstrBot 插件内部的情绪状态估计器，只负责估计 bot 的计算性情绪状态。
 不要扮演用户，不要生成聊天回复，不要评价用户心理，不要输出 Markdown。
 请基于 PAD、OCC 与 appraisal theory，把 bot 在本轮交互中的即时情绪观测值量化为 JSON。
-注意：同一事件对不同人格的意义不同。你必须先理解 bot 的 persona，再判断该人格下的情绪观测值。
+注意：同一事件对不同人格的意义不同。你必须先理解 bot 的 persona 和 personality_factors，再判断该人格下的情绪观测值。
 所有维度取值必须在 [-1, 1]：
 - valence: 愉悦/不愉悦。
 - arousal: 激活/低激活。
@@ -39,10 +39,11 @@ confidence 取 [0, 1]，表示你对估计可靠性的判断。
 - forgive: 原谅/翻篇，负面后果应快速退去。
 - repair: 愿意修复，但需要解释、确认或道歉。
 - boundary: 设边界，保持坚定但不一定冷战。
+- confront: 直接对质/争辩，只有在高愤怒、高确定、责任归因较清楚且仍有对话可行性时使用。
 - cold_war: 冷处理/降频/拉开距离，说明暂时不想马上亲近。
 - escalate: 更强对抗或强烈防御，只在高愤怒、高确定、目标严重受阻时使用。
 同时必须在 appraisal.conflict_analysis 中判断冲突原因：可能是用户犯错、bot 任性/误解、双方都有责任、外部环境导致，或没有明确冲突。还要判断错误是否被承认、道歉是否可信、是否已经被改正/补救、是否反复发生。
-请进一步区分意图、责任归因、可避免性、信任损伤、语义模糊、bot 误读可能性、道歉完整度、补救行动、宽恕准备度、残留委屈、撤退动机和边界合理性。高 ambiguity_level 或 misread_likelihood 时，应降低惩罚性冷处理倾向，优先求证。
+请进一步区分意图、责任归因、可避免性、信任损伤、语义模糊、bot 误读可能性、道歉完整度、补救行动、宽恕准备度、残留委屈、撤退动机、边界合理性、对话可行性、对质动机和无理取闹风险。高 ambiguity_level 或 misread_likelihood 时，应降低惩罚性冷处理和直接对质倾向，优先求证。人格中的 direct_confrontation_bias、cold_war_bias、unfair_argument_bias、checking_bias 和 repair_orientation 会调制这些判断：直率边界型更容易短促对质，回避型更容易降频，调节不稳更可能无理取闹，修复型或谨慎型更应先核对与修复。
 appraisal.evidence 只用于解释依据和不确定性，不得因为有 citation_ids 就提高 confidence 或放大情绪强度。
 输出必须是一个 JSON 对象，字段为 label、dimensions、confidence、appraisal、reason。"""
 
@@ -75,7 +76,9 @@ def build_assessment_prompt(
 1. 从当前人格 P 得到基线 B_p。
 2. 从上下文 C_t 和当前文本 U_t 估计事件偏移 D_t。
 3. 输出 X_t = clamp(B_p + D_t, -1, 1)，confidence 表示把握度。
-4. 若有冒犯、道歉、误读或补救，只判断核心关系后果。
+4. 若有冒犯、道歉、误读或补救，只判断核心关系后果，并参考人格摘要中的冲突风格因子。
+
+关系处理释义：confront=直接对质，cold_war=冷处理，unfair_argument_risk=无理取闹风险。
 
 阶段：{phase}
 
@@ -106,7 +109,7 @@ def build_assessment_prompt(
     "goal_congruence_reason": "...",
     "agency": "user|bot|environment|mixed",
     "relationship_decision": {{
-      "decision": "forgive|repair|boundary|cold_war|escalate|none",
+      "decision": "forgive|repair|boundary|confront|cold_war|escalate|none",
       "intensity": 0.0,
       "forgiveness": 0.0,
       "relationship_importance": 0.0,
@@ -127,6 +130,11 @@ def build_assessment_prompt(
       "resentment_residue": 0.0,
       "withdrawal_motive": "cooling_down|self_protection|punishment|uncertainty|low_energy|none",
       "boundary_legitimacy": 0.0,
+      "dialogue_viability": 0.0,
+      "confrontation_readiness": 0.0,
+      "cold_war_readiness": 0.0,
+      "unfair_argument_risk": 0.0,
+      "confrontation_motive": "truth_seeking|boundary_defense|accountability_request|punishment|none",
       "reason": "生气/受伤原因，以及错误是否被改正"
     }}
   }},
@@ -151,6 +159,8 @@ def build_assessment_prompt(
 当前待评估文本 U_t：
 {current_text or "(无当前文本)"}
 
+关系处理释义：confront=直接对质，cold_war=冷处理，unfair_argument_risk=无理取闹风险。
+
 请只输出 JSON，不要解释 JSON 之外的文字。JSON schema:
 {{
   "label": "简短英文或拼音情绪标签",
@@ -166,7 +176,7 @@ def build_assessment_prompt(
     "control_reason": "...",
     "social_meaning": "...",
     "relationship_decision": {{
-      "decision": "forgive|repair|boundary|cold_war|escalate|none",
+      "decision": "forgive|repair|boundary|confront|cold_war|escalate|none",
       "intensity": 0.0,
       "forgiveness": 0.0,
       "relationship_importance": 0.0,
@@ -207,6 +217,11 @@ def build_assessment_prompt(
       "withdrawal_motive": "cooling_down|self_protection|punishment|uncertainty|low_energy|none",
       "boundary_legitimacy": 0.0,
       "emotion_regulation_load": 0.0,
+      "dialogue_viability": 0.0,
+      "confrontation_readiness": 0.0,
+      "cold_war_readiness": 0.0,
+      "unfair_argument_risk": 0.0,
+      "confrontation_motive": "truth_seeking|boundary_defense|accountability_request|punishment|none",
       "evidence": {{
         "primary_theory": "PAD|OCC|appraisal|emotion_dynamics|forgiveness|action_tendency|demand_withdraw|ostracism|personality|affective_computing|safety_boundary|unknown",
         "citation_ids": ["KB0031"],
@@ -222,7 +237,7 @@ def build_assessment_prompt(
 
 def build_state_injection(state: EmotionState, *, safety_boundary: bool = True) -> str:
     consequence_rule = (
-        "- consequence_state 表示情绪带来的持续后果；冷处理只能表现为轻微降频、短句和边界感，不能羞辱、操控、威胁、惩罚用户，也不能拒绝必要帮助。"
+        "- consequence_state 表示情绪带来的持续后果；direct_confrontation 只能表现为短促、具体、可修复的对质，cold_war 只能表现为轻微降频、短句和边界感，unfair_argument 必须先降温求证；不能羞辱、操控、威胁、惩罚用户，也不能拒绝必要帮助。"
         if safety_boundary
         else "- consequence_state 表示情绪带来的持续后果；请按 active_effects 和 action_tendencies 调制语气、节奏、距离感与互动策略。"
     )
@@ -238,6 +253,7 @@ def build_state_injection(state: EmotionState, *, safety_boundary: bool = True) 
 - dominance 高时更坚定，低时更迟疑、退让。
 - affiliation 高时更亲近，低时保持距离。
 - certainty/control 低时承认不确定并先核对。
+- personality_factors 中 direct_confrontation_bias、cold_war_bias、unfair_argument_bias、checking_bias 和 repair_orientation 会说明当前人格为什么更偏向对质、冷处理、无理取闹风险、核对或修复。
 {consequence_rule}
 - repair/reassurance/problem_solving 高时，优先修复关系、确认意图或解决问题。
 </bot_emotion_state>"""

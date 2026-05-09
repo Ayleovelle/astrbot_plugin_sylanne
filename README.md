@@ -2,7 +2,7 @@
 
 > 让 AstrBot 维护一套可计算、可记忆、可解释、可被其他插件调用的多维情绪状态。
 
-![版本 0.1.0-beta](https://img.shields.io/badge/version-0.1.0-beta-blue)
+![版本 0.5.0](https://img.shields.io/badge/version-0.5.0-blue)
 ![AstrBot >=4.9.2,<5.0.0](https://img.shields.io/badge/AstrBot-%3E%3D4.9.2%2C%3C5.0.0-green)
 ![Python 3.10+](https://img.shields.io/badge/Python-3.10%2B-yellow)
 ![协议 astrbot.emotion_state.v2](https://img.shields.io/badge/schema-astrbot.emotion__state.v2-purple)
@@ -26,7 +26,7 @@
 | 主题 | 内容 |
 | --- | --- |
 | [当前版本与兼容范围](#当前版本与兼容范围) | 插件版本、AstrBot 版本、Python 要求、许可证和发布状态。 |
-| [0.1.0-beta 迭代记录](#010-beta-迭代记录) | 当前 beta 发布摘要、历史 PR 顺序和可折叠逐轮工程迭代明细。 |
+| [0.5.0 发布记录](#050-发布记录) | 当前发布摘要、历史 PR 顺序和可折叠逐轮工程迭代明细。 |
 | [项目定位](#项目定位) | 为什么本插件不是普通的提示词人设增强。 |
 | [核心能力](#核心能力总览) | 7 维情绪、人格建模、真实时间记忆、关系修复、公共 API。 |
 | [快速开始](#快速开始) | 发布 zip 包、仓库安装、手动复制、最小配置和检查命令。 |
@@ -54,17 +54,17 @@
 | --- | --- |
 | 插件目录名 | `astrbot_plugin_emotional_state` |
 | 显示名 | `多维情绪状态` |
-| 当前版本 | `0.1.0-beta` |
+| 当前版本 | `0.5.0` |
 | AstrBot 版本 | `>=4.9.2,<5.0.0` |
 | Python | `3.10+` |
 | 许可证 | `GPL-3.0-or-later` |
 | 运行时第三方依赖 | 当前无额外依赖，见 `requirements.txt` |
 
-`0.1.0-beta` 是当前预发布版本，用于把生命化学习、真实时间人格漂移、LivingMemory 情绪注解、公共 API、发布包边界和延迟优化批次合并到 `main` 后的统一验收。当前版本的重点是把“情绪化 bot”从单次提示词风格控制推进到可持久化的状态服务：核心情绪默认启用，`humanlike_state`、`lifelike_learning_state`、`moral_repair_state`、`fallibility_state`、`psychological_screening` 等长期模块默认关闭，由配置显式打开。发布包会包含运行代码、README、LICENSE、配置 schema 和 docs；不会包含 `tests/`、`scripts/`、`literature_kb/`、`personality_literature_kb/`、`psychological_literature_kb/`、`humanlike_agent_literature_kb/`、`raw/`、`output/`、`dist/` 等开发、研究或缓存目录。
+`0.5.0` 是当前发布目标，用于把生命化学习、真实时间人格漂移、LivingMemory 情绪注解、公共 API、发布包边界、延迟优化批次和跨模型实测报告合并到 `main` 后的统一验收。当前版本的重点是把“情绪化 bot”从单次提示词风格控制推进到可持久化的状态服务：核心情绪默认启用，`humanlike_state`、`lifelike_learning_state`、`moral_repair_state`、`fallibility_state`、`psychological_screening` 等长期模块默认关闭，由配置显式打开。发布包会包含运行代码、README、LICENSE、配置 schema 和 docs；不会包含 `tests/`、`scripts/`、`literature_kb/`、`personality_literature_kb/`、`psychological_literature_kb/`、`humanlike_agent_literature_kb/`、`raw/`、`output/`、`dist/` 等开发、研究或缓存目录。
 
-### 0.1.0-beta 迭代记录
+### 0.5.0 发布记录
 
-`v0.1.0-beta` 合并在 `main` 上，对外安装版本由 `metadata.yaml` 和 `main.py @register(...)` 共同声明为 `0.1.0-beta`。下面保留 `0.0.2-beta-pr-x` 历史预发布批次，便于追溯从生命化学习、人格漂移到延迟专项的阶段性合入；完整工程迭代明细默认折叠，避免 README 首屏过长。
+`v0.5.0` 合并在 `main` 上，对外安装版本由 `metadata.yaml` 和 `main.py @register(...)` 共同声明为 `0.5.0`。下面保留 `0.0.2-beta-pr-x` 历史预发布批次，便于追溯从生命化学习、人格漂移到延迟专项的阶段性合入；完整工程迭代明细默认折叠，避免 README 首屏过长。
 
 <details open>
 <summary>历史预发布批次摘要（0.0.2-beta-pr-1 至 0.0.2-beta-pr-19）</summary>
@@ -380,9 +380,11 @@ py -3.13 scripts\package_plugin.py --output dist\astrbot_plugin_emotional_state.
 ```text
 astrbot_plugin_emotional_state/
 ├── __init__.py
+├── agent_identity.py
 ├── metadata.yaml
 ├── main.py
 ├── emotion_engine.py
+├── group_atmosphere_engine.py
 ├── humanlike_engine.py
 ├── lifelike_learning_engine.py
 ├── personality_drift_engine.py
@@ -903,7 +905,7 @@ s_t=r_t c_t g(\Delta t;T_g)(0.72+0.28q_t)
 
 ### 人格先验
 
-从 `0.1.0-beta` 开始，人格建模不再只是少量风格关键词偏置。插件会从当前 AstrBot persona 文本构造一个带版本号的 13 维潜在人格先验向量，覆盖大五人格、HEXACO 中的诚实-谦逊扩展、依恋焦虑/回避、BIS/BAS、认知闭合需要、情绪调节能力和人际温暖度。
+从 `0.5.0` 开始，人格建模不再只是少量风格关键词偏置。插件会从当前 AstrBot persona 文本构造一个带版本号的 13 维潜在人格先验向量，覆盖大五人格、HEXACO 中的诚实-谦逊扩展、依恋焦虑/回避、BIS/BAS、认知闭合需要、情绪调节能力和人际温暖度。
 
 默认摘要：
 
@@ -1399,6 +1401,68 @@ enable_safety_boundary = false
 
 低推理模式只影响 LLM 如何估计即时观测值，不改变本地状态平滑、真实时间衰减、人格基线、后果映射、冷处理持续时间和重置后门。
 
+### 状态注入、后台评估与工具预算
+
+这些配置主要服务 `0.5.0` 的状态层实验合并：减少主回复链路等待、压缩临时 prompt 注入、把详细状态交给工具按需查询。
+
+| 配置项 | 类型 | 默认值 | 说明 |
+| --- | --- | --- | --- |
+| `background_post_assessment` | bool | `false` | 把 post 阶段情绪评估放到后台执行；默认关闭以保持兼容。 |
+| `background_post_queue_limit` | int | `0` | 每个会话后台 post 评估队列上限；`0` 表示不限制。 |
+| `background_post_max_workers` | int | `5` | 每个会话后台 post 评估 worker 上限；状态提交仍保持顺序。 |
+| `background_post_queue_checkpoint_enabled` | bool | `true` | 将未提交后台队列写入 KV 检查点，重启后可恢复。 |
+| `background_post_job_lease_seconds` | float | `120.0` | 后台任务租约秒数；租约过期后可回收未完成任务。 |
+| `background_post_job_timeout_seconds` | float | `0.0` | 单个后台任务超时秒数；`0` 表示不启用任务级超时。 |
+| `background_post_retry_max_attempts` | int | `3` | 后台任务进入 dead-letter 前的最大尝试次数。 |
+| `background_post_retry_base_delay_seconds` | float | `2.0` | 后台任务重试指数退避的基础延迟。 |
+| `background_post_retry_max_delay_seconds` | float | `60.0` | 后台任务重试退避最大延迟。 |
+| `background_post_dead_letter_limit` | int | `100` | 每个会话保留的 dead-letter 诊断摘要数量。 |
+| `background_post_diagnostics_warn_lag_count` | int | `20` | 队列与活跃后台任务数量达到该值时诊断标记为 warn。 |
+| `background_post_diagnostics_warn_lag_seconds` | float | `60.0` | 最老后台任务等待超过该秒数时诊断标记为 warn。 |
+| `enable_low_signal_light_assessment` | bool | `true` | 对很短、低信号消息使用本地轻评估，避免无意义内部 LLM 调用。 |
+| `low_signal_max_chars` | int | `12` | 低信号轻评估的最大文本长度。 |
+| `state_injection_detail` | string | `compact` | 主情绪状态注入细节：`compact` 或 `full`。 |
+| `state_injection_compact_mode` | string | `snapshot` | 紧凑注入模式：`snapshot` 全量小快照，`diff` 只注入显著变化。 |
+| `state_injection_diff_threshold` | float | `0.08` | emotion diff 注入的最小维度变化阈值。 |
+| `state_injection_diff_force_every_turns` | int | `6` | diff 模式下强制发送紧凑快照的间隔轮数。 |
+| `auxiliary_state_injection_detail` | string | `compact` | 辅助状态注入细节：`compact`、`full` 或 `off`。 |
+| `state_injection_request_budget_chars` | int | `32000` | 主 LLM 请求可见字符预算估计；超预算时跳过状态注入。 |
+| `state_injection_reserved_chars` | int | `3000` | 给 provider 包装、工具 schema 和 persona 展开预留的字符余量。 |
+| `state_injection_max_added_chars` | int | `2400` | 单次主请求中本插件最多追加的临时状态注入字符数。 |
+| `state_injection_max_parts` | int | `8` | 单次主请求中本插件最多追加的临时状态注入片段数。 |
+| `llm_tool_response_max_chars` | int | `16000` | 每个状态 LLM Tool 返回 JSON 的最大字符数。 |
+
+`background_post_assessment=true` 时，主回复结束后不会等待内部 post 评估完成，状态会稍后进入 KV。这个模式适合压低用户可感知延迟；如果你更重视每轮立即同步状态，就保持默认关闭。
+
+### 群聊氛围、说话人轨道与因果轨迹
+
+群聊状态层把“房间气氛”和“当前说话人”从普通会话情绪中拆出来，让 bot 更会判断什么时候开口、什么时候先听。
+
+| 配置项 | 类型 | 默认值 | 说明 |
+| --- | --- | --- | --- |
+| `agent_speaker_relationship_tracking` | bool | `true` | 在群聊中维护 conversation + speaker 的定向关系/情绪轨道。 |
+| `agent_include_speaker_in_assessment` | bool | `true` | 内部评估文本中标记当前说话人，便于区分不同用户。 |
+| `agent_identity_profile_limit` | int | `256` | 最多缓存的会话/说话人身份画像数。 |
+| `agent_identity_ttl_seconds` | float | `2592000.0` | 静默身份画像的 TTL，默认 30 天；`0` 表示仅按数量上限裁剪。 |
+| `enable_group_atmosphere_state` | bool | `true` | 启用群聊氛围/房间气氛状态建模。 |
+| `group_atmosphere_injection_strength` | float | `0.25` | 群聊氛围 prompt 注入强度；`0` 表示只记录不注入。 |
+| `group_atmosphere_alpha_base` | float | `0.34` | 群聊氛围状态基础更新步长。 |
+| `group_atmosphere_alpha_min` | float | `0.04` | 群聊氛围状态最小更新步长。 |
+| `group_atmosphere_alpha_max` | float | `0.52` | 群聊氛围状态最大更新步长。 |
+| `group_atmosphere_half_life_seconds` | float | `1800.0` | 群聊氛围状态真实时间半衰期，默认 30 分钟。 |
+| `group_atmosphere_trajectory_limit` | int | `60` | 群聊氛围轨迹最多保留点数。 |
+| `group_atmosphere_join_cooldown_turns` | int | `2` | bot 在群聊发言后，按房间轮数计算的冷却期。 |
+| `group_atmosphere_join_cooldown_seconds` | float | `45.0` | bot 在群聊发言后，按真实秒数计算的冷却期。 |
+| `group_atmosphere_join_cooldown_bypass_attention` | float | `0.8` | 群内明显呼叫 bot 时绕过冷却的注意力阈值。 |
+| `group_atmosphere_injection_diff_threshold` | float | `0.08` | 群聊氛围 diff 注入的最小维度变化阈值。 |
+| `enable_agent_causal_trail` | bool | `true` | 启用脱敏 agent 因果轨迹，记录状态变化原因链。 |
+| `agent_trail_limit` | int | `80` | 每个会话保留的因果轨迹条数。 |
+| `agent_trail_compaction_enabled` | bool | `true` | 查询时提供低信号轨迹压缩视图。 |
+| `agent_trail_low_signal_delta_threshold` | float | `0.03` | 轨迹压缩中判定低信号状态变化的最大 delta。 |
+| `agent_trail_low_signal_window` | int | `5` | 连续低信号轨迹达到该窗口后压缩为摘要。 |
+
+群聊氛围维度包括 `activity_level`、`tension`、`playfulness`、`supportiveness`、`bot_attention`、`interrupt_risk` 和 `joinability`。这些值不会替代核心情绪，只是告诉 bot：现在适合自然加入、短应一下、先听，还是避免打断。
+
 ### 人格建模
 
 | 配置项 | 类型 | 默认值 | 说明 |
@@ -1439,6 +1503,7 @@ enable_safety_boundary = false
 | `cold_war_duration_seconds` | float | `1800` | 冷处理真实持续时间，默认 30 分钟。 |
 | `short_effect_duration_seconds` | float | `900` | 普通短期后果持续时间，默认 15 分钟。 |
 | `enable_safety_boundary` | bool | `true` | 情绪后果安全边界，默认开启，可关闭。 |
+| `block_deception_manipulation_evasion_actions` | bool | `false` | 是否输出插件层硬阻断动作；默认关闭，保留风险可观察但不额外写入阻断动作。 |
 | `allow_emotion_reset_backdoor` | bool | `true` | 是否允许手动/API 重置情绪状态。 |
 
 兼容项：
@@ -1983,6 +2048,8 @@ if repair_status in {"repaired", "restored"}:
 | `get_bot_moral_repair_state` | 获取当前道德修复/信任修复状态摘要。 |
 | `get_bot_fallibility_state` | 获取当前低风险瑕疵/犯错模拟状态摘要。 |
 | `get_bot_integrated_self_state` | 获取当前综合自我状态和跨模块仲裁摘要。 |
+| `get_bot_group_atmosphere_state` | 获取当前群聊氛围、开口时机和打断风险摘要。 |
+| `query_agent_state` | 统一查询 emotion、speaker、group_atmosphere、trail、runtime 或 all 状态。 |
 
 插件间调用仍建议使用 Python API，而不是把 LLM 工具当作互调协议。
 
@@ -2002,6 +2069,7 @@ if repair_status in {"repaired", "restored"}:
 | `MORAL_REPAIR_STATE_SCHEMA_VERSION` | `astrbot.moral_repair_state.v1` |
 | `FALLIBILITY_STATE_SCHEMA_VERSION` | `astrbot.fallibility_state.v1` |
 | `INTEGRATED_SELF_SCHEMA_VERSION` | `astrbot.integrated_self_state.v1` |
+| `GROUP_ATMOSPHERE_SCHEMA_VERSION` | `astrbot.group_atmosphere_state.v1` |
 
 ### 综合自我 API
 
@@ -2016,6 +2084,21 @@ if repair_status in {"repaired", "restored"}:
 | `export_integrated_self_diagnostics(event_or_session)` | 否 | 返回脱敏诊断包，只含模块状态、风险布尔和 trace 摘要。 |
 
 该总线的优先级顺序为：非诊断心理安全 > 道德修复透明性 > 关系边界 > 拟人资源调制 > 情绪风格。它还会输出 `causal_trace`、`policy_plan` 和 `compatibility`，用于解释每次状态仲裁为什么发生、低成本部署时保留哪些信号、以及第三方插件是否拿到了当前 schema。它不会生成诊断结论，也不会生成欺骗、隐瞒、操控或规避责任策略。
+
+### 群聊氛围与统一 agent 状态 API
+
+| 方法 | 是否写入状态 | 用途 |
+| --- | --- | --- |
+| `get_group_atmosphere_snapshot(event_or_session, exposure="plugin_safe")` | 否 | 获取群聊氛围、参与策略、冷却状态和轨迹摘要。 |
+| `get_group_atmosphere_values(event_or_session)` | 否 | 只读取群聊氛围 7 维数值。 |
+| `get_group_atmosphere_prompt_fragment(event_or_session)` | 否 | 获取可注入的群聊氛围提示词片段。 |
+| `observe_group_atmosphere_text(event_or_session, text)` | 是 | 提交文本观察并更新群聊氛围状态。 |
+| `simulate_group_atmosphere_update(event_or_session, text)` | 否 | 模拟群聊氛围更新，不写入 KV。 |
+| `reset_group_atmosphere_state(event_or_session)` | 是 | 重置当前会话群聊氛围状态。 |
+| `query_agent_state(event_or_session, state="all", detail="summary", track="conversation")` | 否 | 统一查询 emotion、speaker、group_atmosphere、trail、runtime 或 all。 |
+| `get_agent_runtime_diagnostics(event_or_session)` | 否 | 获取后台评估、注入预算和队列滞后诊断。 |
+
+`get_group_atmosphere_service(context)` 会校验核心服务存在、公开版本/schema 匹配，以及群聊氛围方法是否完整。其他插件需要群聊气氛、开口时机或房间级轨迹时，应优先走这个 helper；如果 helper 不可用，再回退到原本业务逻辑。
 
 ---
 
@@ -2577,16 +2660,24 @@ py -3.13 scripts\package_plugin.py --output dist\astrbot_plugin_emotional_state.
 
 ## 测试与维护
 
-远程测试、上传验证、性能基准和 LivingMemory 兼容检查的完整口径见 `docs/remote_testing.md`。当前阶段性远程性能 run 为 `remote-emotion-v010-gpt55-feature-lifecycle`：请求模型 `gpt5.5`，实际选中 provider `1111/gpt-5.5` / 模型 `gpt-5.5`，并发 `2`，已完成 `900/2520` 个 feature work item，summary 为 `ok=true`。该结果仍是阶段性结果，剩余 feature case 需要继续用同一规则分批续跑；生命周期测试改用模拟时间偏移快速覆盖 `1d` 到 `1y` 的真实秒差，不需要真的等待自然时间流逝。`remote-emotion-v010-gpt55-lifecycle-simtime` 已完成 9 个时间尺度的小批状态级模拟时间验证：`9/9` 成功，平均延迟 `9694.74 ms`，p95 延迟 `11330.00 ms`，平均 token `3756.56`。如果远程生命周期测试中途被中断，恢复前应确认 `benchmark_enable_simulated_time=false` 且 `benchmark_time_offset_seconds=0.0`。
+远程测试、上传验证、性能基准和 LivingMemory 兼容检查的完整口径见 `docs/remote_testing.md`。当前 `0.5.0` 状态层正式性能数据为 `remote-emotion-v050-gpt55-feature-state-layer-real`：请求模型 `gpt5.5`，实际选中 provider `1111/gpt-5.5` / 模型 `gpt-5.5`，并发 `3`，完整 feature 矩阵已完成 `2500/2500` 个有效样本，失败请求 `0`。同一配置面下的 no-emotion 对照为 `remote-emotion-v050-gpt55-noemotion-control-state-layer-c3-250-real`：完成 `250/250`，失败请求 `0`。DeepSeek feature 矩阵已按用户要求取消，残留的 `295/2500` 探索样本不纳入正式结论。
 
-阶段性聚合如下：
+`gpt5.5` 正式聚合如下，延迟单位为毫秒，增量相对 `baseline_minimal`：
 
-| case | 有效样本 | 错误 | 平均延迟 ms | p95 延迟 ms | 平均 token |
-| --- | ---: | ---: | ---: | ---: | ---: |
-| `baseline_minimal` | 250 | 0 | 14697.71 | 19975.40 | 2703.00 |
-| `emotion_injection` | 250 | 0 | 13371.48 | 17762.50 | 3091.93 |
-| `low_reasoning` | 250 | 0 | 16689.39 | 20160.30 | 2682.47 |
-| `humanlike` | 150 | 0 | 12900.42 | 17768.50 | 3181.99 |
+| case | 有效样本 | 错误 | 平均延迟 | p95 延迟 | 平均 token | 平均延迟增量 | token 增量 |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| `baseline_minimal` | 250 | 0 | 16308.11 | 22441.70 | 2726.52 | 基线 | 基线 |
+| `emotion_injection` | 250 | 0 | 17277.68 | 25870.60 | 3120.93 | +969.56 | +394.41 |
+| `low_reasoning` | 250 | 0 | 20550.09 | 25698.40 | 2727.24 | +4241.97 | +0.72 |
+| `humanlike` | 250 | 0 | 17112.82 | 23717.90 | 3171.38 | +804.71 | +444.86 |
+| `lifelike_learning` | 250 | 0 | 16376.29 | 21981.60 | 3168.79 | +68.18 | +442.27 |
+| `personality_drift` | 250 | 0 | 17009.38 | 23335.20 | 3175.14 | +701.27 | +448.62 |
+| `moral_repair` | 250 | 0 | 16450.77 | 22808.70 | 3177.38 | +142.65 | +450.86 |
+| `fallibility_low_risk` | 250 | 0 | 16714.61 | 23386.00 | 3119.09 | +406.50 | +392.57 |
+| `integrated_self_full` | 250 | 0 | 16149.86 | 22174.30 | 3121.31 | -158.26 | +394.79 |
+| `all_safe_modules` | 250 | 0 | 20777.29 | 27496.30 | 3329.84 | +4469.17 | +603.32 |
+
+no-emotion 对照与 `baseline_minimal` 的差异为：平均延迟 `-284.48 ms`，p95 延迟 `+1451.20 ms`，平均 token `+14.50`。端到端延迟包含 WebUI、AstrBot、插件、provider、网络和模型排队；本地插件热路径开销仍以 `scripts\benchmark_plugin_hot_path.py` 为准。生命周期测试改用模拟时间偏移快速覆盖 `1d` 到 `1y` 的真实秒差，不需要真的等待自然时间流逝。如果远程生命周期测试中途被中断，恢复前应确认 `benchmark_enable_simulated_time=false` 且 `benchmark_time_offset_seconds=0.0`。
 
 ### 本地测试命令
 
@@ -2647,7 +2738,7 @@ $env:ASTRBOT_EXPECT_PLUGIN = "astrbot_plugin_emotional_state"
 脚本会在输出 JSON 里写出 `expectedPluginRuntime`，包含插件列表 API 中返回的 `version`、`displayName`、`activated`、`author`、`astrbotVersion` 等只读字段。若目标插件存在但 `activated=false`，脚本会失败退出。需要把版本和显示名也作为硬断言时，可以额外设置：
 
 ```powershell
-$env:ASTRBOT_EXPECT_PLUGIN_VERSION = "0.1.0-beta"
+$env:ASTRBOT_EXPECT_PLUGIN_VERSION = "0.5.0"
 $env:ASTRBOT_EXPECT_PLUGIN_DISPLAY_NAME = "多维情绪状态"
 & $node scripts\remote_smoke_playwright.js
 ```
@@ -2688,7 +2779,7 @@ $env:ASTRBOT_REMOTE_INSTALL_CONFIRM = "1"
 
 上传脚本只允许调用 AstrBot WebUI 的 `install-upload` 安装端点；若 WebUI 留下 `plugin_upload_<插件名>` 失败安装残留，脚本只会调用 `uninstall-failed` 清理这个失败上传目录，并固定 `delete_config=false`、`delete_data=false`。它不会删除正式插件、覆盖正式插件目录、更新插件、重启 AstrBot、保存配置或写入本地 cookie/session。如果远端返回“目录 `<插件名>` 已存在”，脚本会输出 `installOutcome="already_installed_no_overwrite"`、`alreadyInstalled=true`、`overwriteAttempted=false` 和 `formalPluginDirectoryPreserved=true`，表示正式插件目录被保留，后续应通过只读烟测查看实际运行版本。上传成功后，再运行上面的 `ASTRBOT_EXPECT_PLUGIN` 只读烟测作为最终验证。
 
-上传脚本在真正发起安装请求之前会完整读取 zip 中央目录做本地预检：所有条目必须位于 `astrbot_plugin_emotional_state/` 下，路径必须是相对 POSIX 路径，且不能包含 `.` / `..` 不安全路径段；必须包含 `__init__.py`、`metadata.yaml`、`main.py`、`emotion_engine.py`、`humanlike_engine.py`、`lifelike_learning_engine.py`、`personality_drift_engine.py`、`integrated_self.py`、`moral_repair_engine.py`、`fallibility_engine.py`、`psychological_screening.py`、`prompts.py`、`public_api.py`、`README.md`、`LICENSE`、`requirements.txt`、`_conf_schema.json`，并拒绝 `tests/`、`scripts/`、`output/`、`dist/`、`raw/`、`__pycache__/`、`.git/` 等本地或研究缓存目录。预检还会读取 zip 内的 `metadata.yaml`，确认其中 `name:` 精确等于 CLI 参数或 `ASTRBOT_EXPECT_PLUGIN` 传入的插件目录名。
+上传脚本在真正发起安装请求之前会完整读取 zip 中央目录做本地预检：所有条目必须位于 `astrbot_plugin_emotional_state/` 下，路径必须是相对 POSIX 路径，且不能包含 `.` / `..` 不安全路径段；必须包含 `__init__.py`、`agent_identity.py`、`metadata.yaml`、`main.py`、`emotion_engine.py`、`group_atmosphere_engine.py`、`humanlike_engine.py`、`lifelike_learning_engine.py`、`personality_drift_engine.py`、`integrated_self.py`、`moral_repair_engine.py`、`fallibility_engine.py`、`psychological_screening.py`、`prompts.py`、`public_api.py`、`README.md`、`LICENSE`、`requirements.txt`、`_conf_schema.json`，并拒绝 `tests/`、`scripts/`、`output/`、`dist/`、`raw/`、`__pycache__/`、`.git/` 等本地或研究缓存目录。预检还会读取 zip 内的 `metadata.yaml`，确认其中 `name:` 精确等于 CLI 参数或 `ASTRBOT_EXPECT_PLUGIN` 传入的插件目录名。
 
 也可以单独运行预检，不连接远程服务器：
 

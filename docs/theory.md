@@ -50,9 +50,35 @@ I_t = \{H_t, U_t, P, E_{t-1}\}
 
 其中 `H_t` 是上下文，`U_t` 是当前输入或 bot 当前回复，`P` 是当前 AstrBot persona，`E_{t-1}` 是上一轮平滑状态。插件把 persona 当作情绪评价的先验，而不是只当作输出文风。
 
+### 会话身份与状态轨道
+
+群聊里的一条消息同时属于“房间整体”和“当前说话人”。如果只用一个会话键，某个用户造成的冲突会扩散成全群关系状态；如果只用说话人键，群体气氛又会被切碎。`0.5.0` 因此把状态轨道拆成 `conversation_id` 与 `speaker_track_id`：前者记录当前房间或私聊的整体状态，后者记录 bot 对当前发言者的定向情绪和关系轨迹。
+
+轨道选择可写成：
+
+```math
+k_t =
+\begin{cases}
+\mathrm{speaker\_track\_id}_t & \mathrm{speaker\_id}_t\\
+\mathrm{conversation\_id}_t & \mathrm{otherwise}
+\end{cases}
+```
+
+为避免不同平台或不同群里的同名用户互相污染，公开查询中使用规范化说话人标识：
+
+```math
+c_t =
+\begin{cases}
+\mathrm{platform\_id}_t:\mathrm{speaker\_id}_t & \mathrm{platform\_id}_t\\
+\mathrm{speaker\_id}_t & \mathrm{otherwise}
+\end{cases}
+```
+
+这对应会话分析与 turn-taking 文献中的基本事实：一次自然对话并不是独立文本序列，而是由参与者、发言轮换、共同注意和情境约束共同构成。工程上，`agent_identity.py` 只负责给状态选择稳定键；情绪意义仍由后续 appraisal 与状态更新层决定。
+
 ## 3. 人格量化画像到情绪先验
 
-同一句用户文本对不同人格的意义不同。`0.1.0-beta` 不再只用少量风格关键词做人格偏置，而是生成一个版本化、可公开读取、可持久化的 13 维潜在人格先验。该先验仍然不是临床人格测量；它只把 AstrBot persona 文本转成工程参数，让不同 bot 的情绪基线、反应强度、边界敏感度、修复倾向和社交距离稳定可复现。
+同一句用户文本对不同人格的意义不同。`0.5.0` 不再只用少量风格关键词做人格偏置，而是生成一个版本化、可公开读取、可持久化的 13 维潜在人格先验。该先验仍然不是临床人格测量；它只把 AstrBot persona 文本转成工程参数，让不同 bot 的情绪基线、反应强度、边界敏感度、修复倾向和社交距离稳定可复现。
 
 插件先从 persona 中构造输入集合：
 
@@ -328,6 +354,81 @@ E_t=\Pi_{[-1,1]^n}(E_t)
 
 其中 `Pi` 是逐维裁剪。
 
+### 群聊氛围状态层
+
+群聊氛围不是 bot 自身情绪，而是房间层的参与时机信号。它回答的问题是：现在是适合自然加入、短应一下、先听，还是避免打断。`0.5.0` 用七维有界向量表示群聊氛围：
+
+```math
+A^g_t =
+\begin{bmatrix}
+a_t & r_t & p_t & s_t & b_t & i_t & j_t
+\end{bmatrix}^{\mathsf T}
+```
+
+其中 `a_t` 是活跃度，`r_t` 是紧张度，`p_t` 是玩笑/轻松度，`s_t` 是互相支持度，`b_t` 是群内对 bot 的注意，`i_t` 是打断风险，`j_t` 是加入适宜度。所有维度都在 `[0,1]`，并按真实时间回归到房间基线 `mu_g`：
+
+```math
+d^g_t = 2^{-\Delta t/H_g}
+```
+
+```math
+A^{g0}_t=d^g_tA^g_{t-1}+(1-d^g_t)\mu_g
+```
+
+观测 `X^g_t` 来自本地轻量启发式或未来的外部观察器。置信度越高，更新步长越大，但仍由上下界限制：
+
+```math
+\alpha^g_t =
+\mathrm{clamp}\left(
+\alpha^g_{\mathrm{base}}(0.35+c_t),
+\alpha^g_{\min},
+\alpha^g_{\max}
+\right)
+```
+
+```math
+A^g_t =
+\Pi_{[0,1]^7}\left(
+A^{g0}_t+\alpha^g_t(X^g_t-A^{g0}_t)
+\right)
+```
+
+默认启发式把打断风险写成线性可解释项：
+
+```math
+i_t =
+\mathrm{clamp}\left(
+0.18+0.32a_t+0.38r_t-0.25b_t-0.12s_t,
+0,
+1
+\right)
+```
+
+加入适宜度则提高 bot 被点名、支持性和轻松氛围的权重，同时压低高打断风险、高紧张和过高房间活跃度：
+
+```math
+j_t =
+\mathrm{clamp}\left(
+0.30+0.45b_t+0.18s_t+0.12p_t-0.35i_t-0.20r_t-0.20\max(0,a_t-0.55),
+0,
+1
+\right)
+```
+
+参与策略由阈值给出：
+
+```math
+\mathrm{hold}_t =
+\mathrm{I}_{i_t \ge 0.55}\mathrm{I}_{b_t < 0.45}
+```
+
+```math
+\mathrm{join}_t =
+\mathrm{I}_{j_t \ge 0.55}(1-\mathrm{hold}_t)
+```
+
+如果 `hold_t` 为 1，bot 倾向先听；如果 `join_t` 为 1，bot 可以自然加入；其余情况保持低频观察。这一层参考群体动力学、情绪传染、社会信号处理和会话轮换研究：参与时机受群体情绪、注意分配、发言轮换和社会临场感共同影响，而不是只取决于 bot 当前心情。
+
 ## 8. 情绪后果与行动倾向
 
 情绪状态并不直接等于回复模板。参考 Frijda 的 action readiness / action tendency 思路，插件把情绪状态再映射到后果状态：
@@ -471,6 +572,39 @@ regload_t     = emotion_regulation_load_t
 
 冷战或冷处理在插件中被定义为一种可持续衰减的“后果状态”，通常对应降频、短句、保持距离或更强边界感。若配置项 `enable_safety_boundary` 开启，注入 prompt 会额外限制他/她不能表现为羞辱、威胁、操控或拒绝必要帮助；若关闭，则插件只输出情绪后果本身，让上层人格或其他插件自行决定表现边界。若 `repair`、`reassurance` 或 `problem_solving` 同时较高，回复会优先走修复、求证或解决问题。
 
+### 注入压缩、冷却与公共 API 边界
+
+为了降低主回复链路延迟，插件把“可见 prompt 注入”和“完整状态查询”拆开：常规回复只注入紧凑快照或显著变化，完整细节由 LLM tool 或其他插件通过公共 API 按需读取。群聊氛围 diff 注入的触发量为：
+
+```math
+\Delta^g_t =
+\max_i |A^g_{t,i}-A^{ginj}_{t-1,i}|
+```
+
+```math
+e^g_t =
+\max\left(
+\mathrm{I}_{\Delta^g_t \ge h_g},
+\mathrm{I}_{n_t \ge N_g}
+\right)
+```
+
+其中 `h_g` 是 diff 阈值，`n_t` 是距离上次强制快照的轮数。这样可以避免把几乎不变的状态反复塞进主模型上下文。
+
+群聊开口冷却同时使用房间轮数与真实秒数：
+
+```math
+q_t = \max(0,T_c-(N_t-N^{join}_t))
+```
+
+```math
+s_t = \max(0,S_c-(T_t-T^{join}_t))
+```
+
+当 `q_t` 或 `s_t` 仍为正，且 `b_t` 没有超过绕过阈值时，参与策略会偏向 `listen` 或 `hold`，防止 bot 连续插话。后台 post 评估也遵守同一会话 FIFO 提交：主回复可以先返回，状态作业稍后完成，但同一会话的提交顺序不被打乱。
+
+公共 API 只暴露版本化 payload、状态摘要、可选 prompt 片段和脱敏因果轨迹。`get_group_atmosphere_service(context)` 会校验 schema 版本和必需方法；如果服务不可用，调用方应回退到自身逻辑，而不是依赖内部 KV 名称。
+
 ## 9. 稳定性
 
 若 `alpha_t in [0, 1]`、`gamma_p(Δt) in [0, 1]`，且 `E_{t-1}, X_t, b_p` 都在 `[-1, 1]^n`，则 `B_t` 与 `E'_t` 都是有界向量的凸组合。因此，在耦合项较小且最后投影到 `[-1, 1]^n` 的条件下：
@@ -518,5 +652,11 @@ E_t \in [-1,1]^n
 33. Webster, D. M., & Kruglanski, A. W. (1994). Individual differences in need for cognitive closure. *Journal of Personality and Social Psychology, 67*(6), 1049-1062. https://doi.org/10.1037/0022-3514.67.6.1049
 34. Fraley, R. C., Waller, N. G., & Brennan, K. A. (2000). An item-response theory analysis of self-report measures of adult attachment. *Journal of Personality and Social Psychology, 78*(2), 350-365. https://doi.org/10.1037/0022-3514.78.2.350
 35. Gross, J. J., & John, O. P. (2003). Individual differences in two emotion regulation processes: Implications for affect, relationships, and well-being. *Journal of Personality and Social Psychology, 85*(2), 348-362. https://doi.org/10.1037/0022-3514.85.2.348
+36. Sacks, H., Schegloff, E. A., & Jefferson, G. (1974). A simplest systematics for the organization of turn-taking for conversation. *Language, 50*(4), 696-735. https://doi.org/10.2307/412243
+37. Clark, H. H., & Brennan, S. E. (1991). Grounding in communication. In L. B. Resnick, J. M. Levine, & S. D. Teasley (Eds.), *Perspectives on Socially Shared Cognition* (pp. 127-149). American Psychological Association.
+38. Vinciarelli, A., Pantic, M., & Bourlard, H. (2009). Social signal processing: Survey of an emerging domain. *Image and Vision Computing, 27*(12), 1743-1759. https://doi.org/10.1016/j.imavis.2008.11.007
+39. Barsade, S. G. (2002). The ripple effect: Emotional contagion and its influence on group behavior. *Administrative Science Quarterly, 47*(4), 644-675. https://doi.org/10.2307/3094912
+40. Kendon, A. (1967). Some functions of gaze-direction in social interaction. *Acta Psychologica, 26*, 22-63. https://doi.org/10.1016/0001-6918(67)90005-4
+41. Short, J., Williams, E., & Christie, B. (1976). *The Social Psychology of Telecommunications*. Wiley.
 
 </details>
