@@ -8,13 +8,23 @@
 ![协议 astrbot.emotion_state.v2](https://img.shields.io/badge/schema-astrbot.emotion__state.v2-purple)
 ![许可证 GPL-3.0-or-later](https://img.shields.io/badge/license-GPL--3.0--or--later-red)
 
-`astrbot_plugin_emotional_state` 是一个面向 AstrBot 的“情绪状态层”和“插件公共状态服务”。它不是只在提示词里写几句“你要有喜怒哀乐”，而是把 bot 的情绪、关系后果、人格差异、长期记忆注解、拟人状态、道德修复状态和非诊断心理筛查拆成可测试、可持久化、可调用的工程模块。
+`astrbot_plugin_emotional_state` 是一个面向 AstrBot 的“情绪状态层”和“插件公共状态服务”。它不是只在提示词里写几句“你要有喜怒哀乐”，而是把 bot 的情绪、关系后果、人格差异、长期记忆注解、拟人状态、道德修复状态、群聊氛围、后台评估队列和非诊断心理筛查拆成可测试、可持久化、可调用的工程模块。
 
 `astrbot_plugin_emotional_state` 不是一个简单的“给 bot 加情绪标签”的插件。他/她的核心目标是：
 
 > 让不同人格的 bot 在长期对话中形成可解释、可持续、可重置、可被记忆系统记录的计算性情绪轨迹。
 
 本插件会让 LLM 根据上下文、用户当前文本、bot 人格和上一轮状态，判断当前情绪观测值；本地引擎再用真实时间半衰期、人格基线、置信门控、关系修复和后果状态机更新长期状态。最后，这个状态会作为临时上下文注入下一次 LLM 请求，影响语气、节奏、社交距离、边界感和修复倾向。
+
+`1.0.0` 实验版最强的部分不是单个公式，而是把状态层改造成“可并行、可后台恢复、可群聊分轨”的运行时系统：
+
+| 能力 | 作用 |
+| --- | --- |
+| 后台 post 评估 | 可把回复后的内部情绪评估放进后台队列，主回复先返回；队列支持每会话 FIFO 提交、KV 检查点、租约回收、重试和 dead-letter 诊断。 |
+| 多线程/并发状态加载 | 请求、响应和记忆写入阶段会并发读取可选状态快照；慢状态加载、内部评估和 LivingMemory 注解不再简单串行等待。 |
+| 群聊分层建模 | 同时维护房间级 `conversation_id` 和说话人级 `speaker_track_id`，避免一个人的冲突污染全群，也避免群聊气氛被切碎。 |
+| 群聊氛围与开口时机 | `group_atmosphere_state` 记录活跃度、紧张度、玩笑度、支持度、bot 注意力、打断风险和加入适宜度，帮助 bot 判断该开口、短应、先听还是避免插话。 |
+| 统一 agent 诊断 API | 其他插件可通过公共 API 查询 emotion、speaker、group_atmosphere、trail、runtime 或 all 状态，而不是读内部 KV。 |
 
 > **重要提示**
 > 这里的“情绪”“拟人状态”“道德修复”“心理筛查”都是工程上的模拟状态，不代表真实意识、真实主观体验、真实身体、真实疾病或临床诊断。心理相关模块只输出非诊断趋势和风险提示，不替代任何医学、心理咨询或危机干预流程。
@@ -38,7 +48,7 @@
 | 主题 | 内容 |
 | --- | --- |
 | [当前版本与兼容范围](#当前版本与兼容范围) | 插件版本、AstrBot 版本、Python 要求、许可证和发布状态。 |
-| [1.0.0 实验版整合发布记录](#100-实验版整合发布记录) | 当前发布摘要、重构遗漏、工作流变化、效率对比和历史迭代折叠入口。 |
+| [1.0.0 实验版整合发布记录](#100-实验版整合发布记录) | 后台处理、并发状态加载、群聊分层、工作流变化、效率对比和历史迭代折叠入口。 |
 | [项目定位](#项目定位) | 为什么本插件不是普通的提示词人设增强。 |
 | [核心能力](#核心能力总览) | 7 维情绪、人格建模、真实时间记忆、关系修复、公共 API。 |
 | [快速开始](#快速开始) | 发布 zip 包、仓库安装、手动复制、最小配置和检查命令。 |
@@ -72,7 +82,7 @@
 | 许可证 | `GPL-3.0-or-later` |
 | 运行时第三方依赖 | 当前无额外依赖，见 `requirements.txt` |
 
-`1.0.0` 把状态层实验版正式整合到 `main`：生命化学习、真实时间人格漂移、LivingMemory 情绪注解、公共 API、发布包边界、延迟优化批次、gpt-5.5 完整功能开关矩阵和跨模型生命周期单轮拟合都进入统一发布口径。当前版本的重点是把“情绪化 bot”从单次提示词风格控制推进到可持久化的状态服务：核心情绪默认启用，`humanlike_state`、`lifelike_learning_state`、`moral_repair_state`、`fallibility_state`、`psychological_screening` 等长期模块默认关闭，由配置显式打开。
+`1.0.0` 把状态层实验版正式整合到 `main`：后台 post 评估队列、多线程/并发状态加载、群聊分层建模、群聊氛围、生命化学习、真实时间人格漂移、LivingMemory 情绪注解、公共 API、发布包边界、延迟优化批次、gpt-5.5 完整功能开关矩阵和跨模型生命周期单轮拟合都进入统一发布口径。当前版本的重点是把“情绪化 bot”从单次提示词风格控制推进到可持久化、可后台恢复、可并发查询、可群聊分轨的状态服务：核心情绪默认启用，`group_atmosphere_state` 默认启用，`humanlike_state`、`lifelike_learning_state`、`moral_repair_state`、`fallibility_state`、`psychological_screening` 等长期模块默认关闭，由配置显式打开。
 
 发布包会包含运行代码、README、LICENSE、配置 schema、docs 和 `docs/assets/` 中的聚合图表；不会包含 `tests/`、`scripts/`、`literature_kb/`、`personality_literature_kb/`、`psychological_literature_kb/`、`humanlike_agent_literature_kb/`、`raw/`、`output/`、`dist/` 等开发、研究、原始样本或缓存目录。
 
@@ -85,10 +95,25 @@
 | 类别 | 结果 |
 | --- | --- |
 | 实验版整合 | 生命化学习、人格漂移、群聊氛围、瑕疵模拟、道德修复、综合自我和 LivingMemory 注解统一进入主线。 |
+| 后台处理 | `background_post_assessment` 可把 post 阶段内部评估移出主回复链路；后台队列支持每会话 FIFO、检查点恢复、租约、重试、dead-letter 和运行时诊断。 |
+| 多线程/并发 | 请求阶段并发加载辅助状态，响应阶段并发预取道德修复/瑕疵状态，LivingMemory 写入并发获取可选快照；状态提交仍按确定顺序落库。 |
+| 群聊系统 | `conversation_id` 记录房间整体，`speaker_track_id` 记录 bot 对当前说话人的定向情绪；`group_atmosphere_state` 评估打断风险、加入适宜度和开口冷却。 |
 | 工作流 | 请求前注入状态、响应后更新状态、可选后台 post 评估、记忆写入时冻结当时状态；详细流程见 [工作流](#工作流)。 |
 | 效率 | 默认 `assessment_timing=post`、低信号轻评估、provider 短缓存、状态注入预算、并发读取可选快照，减少主回复链路等待。 |
 | 发布边界 | 知识库和原始 benchmark 仍是本地资料，不进入 GitHub 和发布 zip。 |
 | 公开契约 | 插件版本为 `1.0.0`；公共 API 版本仍为 `1.0`，schema 仍保持 `astrbot.emotion_state.v2` 等版本化契约。 |
+
+运行时亮点可以按这条链路理解：
+
+```mermaid
+flowchart LR
+  A["用户/群聊消息"] --> B["解析会话轨道和说话人轨道"]
+  B --> C["并发读取 emotion / humanlike / lifelike / drift / moral / fallibility / group_atmosphere 快照"]
+  C --> D["在预算内注入紧凑状态"]
+  D --> E["主回复先完成"]
+  E --> F["post 评估可进入后台队列"]
+  F --> G["按会话顺序提交状态并写入 LivingMemory 注解"]
+```
 
 重构后仍刻意没有放进 `v1.0.0` 的内容：
 
@@ -2862,15 +2887,16 @@ $env:ASTRBOT_REMOTE_INSTALL_CONFIRM = "1"
 | 文件 | 重点 |
 | --- | --- |
 | `tests/test_emotion_engine.py` | 情绪更新、人格基线、真实时间衰减、关系修复、冷处理清除。 |
-| `tests/test_astrbot_lifecycle.py` | `on_llm_request` / `on_llm_response` 生命周期、注入开关、内部 LLM 防递归、空响应、humanlike 注入强度。 |
+| `tests/test_astrbot_lifecycle.py` | `on_llm_request` / `on_llm_response` 生命周期、后台 post 队列、FIFO 提交、后台诊断、请求/响应辅助状态并发加载、群聊 conversation/speaker 分轨、群聊氛围加入策略。 |
 | `tests/test_command_tools.py` | AstrBot 命令层和 LLM 工具冒烟测试，覆盖 reset 后门、disabled 状态、summary/full 暴露层，并从 `main.py` 自动解析命令/alias 与 LLM 工具注册名，锁定 README 文档契约。 |
 | `tests/test_config_schema_contract.py` | `main.py` 运行时配置、`_conf_schema.json`、README 默认值、仅 schema 预留项、`assessment_timing` 选项和类型化配置表全量类型契约。 |
-| `tests/test_public_api.py` | 公共快照、记忆载荷、simulate 不落库、reset 后门、插件服务协议、心理筛查/moral repair 公共 API，并锁定 Protocol 方法面、required tuple、插件实现和 schema-version 契约。 |
+| `tests/test_public_api.py` | 公共快照、记忆载荷、simulate 不落库、reset 后门、插件服务协议、`query_agent_state` 的 conversation/speaker/group_atmosphere/runtime 查询契约、LivingMemory 并发快照 fan-out、心理筛查/moral repair 公共 API，并锁定 Protocol 方法面、required tuple、插件实现和 schema-version 契约。 |
 | `tests/test_integrated_self.py` | 综合自我状态总线、因果 trace、policy plan、确定性回放、schema 兼容性、脱敏诊断和 LivingMemory 信封。 |
 | `tests/test_humanlike_engine.py` | P0 拟人状态、快照分层、注入片段、记忆注解。 |
 | `tests/test_moral_repair_engine.py` | 道德修复状态、欺骗风险识别、内疚/责任/补偿/信任修复、策略禁止边界和记忆注解。 |
 | `tests/test_fallibility_engine.py` | 瑕疵模拟状态、真实时间衰减、澄清/纠错耦合、提示词边界和记忆注解。 |
 | `tests/test_document_math_contract.py` | README 和 `docs/theory.md` 的 GitHub fenced math、LaTeX 宏白名单、禁用宏和脆弱写法检查。 |
+| `tests/test_group_atmosphere_engine.py` | 群聊氛围 7 维状态、开口/先听/避免打断策略、真实时间半衰、冷却和 diff 注入。 |
 | `tests/test_package_plugin.py` | 发布 zip 的目录根、知识库排除、raw/cache/tests/scripts/output 排除、包体积上限、metadata 身份校验和上传前 zip 预检失败路径。 |
 | `tests/test_psychological_screening.py` | 非诊断筛查、量表启发、红旗信号、长期轨迹。 |
 | `tests/test_remote_smoke_contract.py` | 远程烟测脚本必须使用环境变量读取凭据、保持只读、忽略截图产物，并锁定 API 健康摘要、UI 尽力诊断字段、上传脚本边界、内置 Node 文档契约、metadata 驱动的插件身份、zip/env 示例、slug/badge/version/display_name 契约。 |

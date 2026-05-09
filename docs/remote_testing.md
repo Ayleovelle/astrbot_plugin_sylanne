@@ -197,6 +197,21 @@ $env:ASTRBOT_BENCHMARK_TARGET_COMPLETED = "2500"
 - 配置写入使用互斥锁。
 - 工作队列会按相同配置分块，防止不同功能用例并发互相踩配置。
 
+## 状态层并发与后台能力验证边界
+
+远程性能基准里的“并发”是 ChatUI 样本并发，用来观察端到端延迟、TTFT、token 和远程稳定性；它不等同于完整证明插件内部所有后台/并发机制。
+
+`1.0.0` 的后台处理、多线程/并发状态读取和群聊分层主要由本地单元测试锁定：
+
+| 能力 | 主要验证位置 | 远程口径 |
+| --- | --- | --- |
+| 后台 post 评估 | `tests/test_astrbot_lifecycle.py` 覆盖后台队列、同会话 FIFO、检查点恢复、租约、重试、dead-letter 和诊断。 | 远程只观察开启相关功能后的端到端稳定性，不读取内部队列。 |
+| 并发状态读取 | `tests/test_astrbot_lifecycle.py` 与 `tests/test_public_api.py` 覆盖请求辅助状态、响应后评估、道德/瑕疵状态、LivingMemory 可选快照 fan-out。 | 远程性能数据只反映整体延迟，不把每个内部 await 单独拆账。 |
+| 群聊分轨 | `tests/test_astrbot_lifecycle.py` 覆盖 `conversation_id` 与 `speaker_track_id` 的分离和当前说话人注入。 | 远程烟测只确认插件加载和端到端可用，不模拟完整多人群聊。 |
+| 群聊氛围 | `tests/test_group_atmosphere_engine.py` 与生命周期测试覆盖 `activity/tension/playfulness/supportiveness/bot_attention/interrupt_risk/joinability`、开口冷却和 diff 注入。 | 远程基准可作为稳定性参考，不替代理论维度与策略测试。 |
+
+因此，README 和本文中的远程结果应解读为“已安装、可运行、端到端性能可观测”；内部后台队列、并发 fan-out、群聊状态分轨和加入策略的正确性，以本地测试为主。
+
 ## 完整功能矩阵
 
 默认功能用例顺序：
