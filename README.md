@@ -2,7 +2,7 @@
 
 > 让 AstrBot 维护一套可计算、可记忆、可解释、可被其他插件调用的多维情绪状态。
 
-![版本 0.5.0](https://img.shields.io/badge/version-0.5.0-blue)
+![版本 1.0.0](https://img.shields.io/badge/version-1.0.0-blue)
 ![AstrBot >=4.9.2,<5.0.0](https://img.shields.io/badge/AstrBot-%3E%3D4.9.2%2C%3C5.0.0-green)
 ![Python 3.10+](https://img.shields.io/badge/Python-3.10%2B-yellow)
 ![协议 astrbot.emotion_state.v2](https://img.shields.io/badge/schema-astrbot.emotion__state.v2-purple)
@@ -21,12 +21,24 @@
 
 ---
 
+## 先读这里
+
+如果你只是想安装和使用，按这个顺序看就够了：
+
+1. [当前版本与兼容范围](#当前版本与兼容范围)
+2. [快速开始](#快速开始)
+3. [最小可用配置](#最小可用配置)
+4. [命令](#命令)
+5. [LivingMemory / 长期记忆兼容](#livingmemory--长期记忆兼容)
+
+如果你要维护、二次开发或复现实验，再看后面的公共 API、模型公式、远程测试、发布历史和故障排查。旧迭代记录、完整公式和复现实验默认折叠；README 首页只保留当前版本的结论、入口和关键表格。
+
 ## 快速导航
 
 | 主题 | 内容 |
 | --- | --- |
 | [当前版本与兼容范围](#当前版本与兼容范围) | 插件版本、AstrBot 版本、Python 要求、许可证和发布状态。 |
-| [0.5.0 发布记录](#050-发布记录) | 当前发布摘要、历史 PR 顺序和可折叠逐轮工程迭代明细。 |
+| [1.0.0 实验版整合发布记录](#100-实验版整合发布记录) | 当前发布摘要、重构遗漏、工作流变化、效率对比和历史迭代折叠入口。 |
 | [项目定位](#项目定位) | 为什么本插件不是普通的提示词人设增强。 |
 | [核心能力](#核心能力总览) | 7 维情绪、人格建模、真实时间记忆、关系修复、公共 API。 |
 | [快速开始](#快速开始) | 发布 zip 包、仓库安装、手动复制、最小配置和检查命令。 |
@@ -54,19 +66,41 @@
 | --- | --- |
 | 插件目录名 | `astrbot_plugin_emotional_state` |
 | 显示名 | `多维情绪状态` |
-| 当前版本 | `0.5.0` |
+| 当前版本 | `1.0.0` |
 | AstrBot 版本 | `>=4.9.2,<5.0.0` |
 | Python | `3.10+` |
 | 许可证 | `GPL-3.0-or-later` |
 | 运行时第三方依赖 | 当前无额外依赖，见 `requirements.txt` |
 
-`0.5.0` 是当前发布目标，用于把生命化学习、真实时间人格漂移、LivingMemory 情绪注解、公共 API、发布包边界、延迟优化批次和跨模型实测报告合并到 `main` 后的统一验收。当前版本的重点是把“情绪化 bot”从单次提示词风格控制推进到可持久化的状态服务：核心情绪默认启用，`humanlike_state`、`lifelike_learning_state`、`moral_repair_state`、`fallibility_state`、`psychological_screening` 等长期模块默认关闭，由配置显式打开。发布包会包含运行代码、README、LICENSE、配置 schema 和 docs；不会包含 `tests/`、`scripts/`、`literature_kb/`、`personality_literature_kb/`、`psychological_literature_kb/`、`humanlike_agent_literature_kb/`、`raw/`、`output/`、`dist/` 等开发、研究或缓存目录。
+`1.0.0` 把状态层实验版正式整合到 `main`：生命化学习、真实时间人格漂移、LivingMemory 情绪注解、公共 API、发布包边界、延迟优化批次、gpt-5.5 完整功能开关矩阵和跨模型生命周期单轮拟合都进入统一发布口径。当前版本的重点是把“情绪化 bot”从单次提示词风格控制推进到可持久化的状态服务：核心情绪默认启用，`humanlike_state`、`lifelike_learning_state`、`moral_repair_state`、`fallibility_state`、`psychological_screening` 等长期模块默认关闭，由配置显式打开。
 
-### 0.5.0 发布记录
+发布包会包含运行代码、README、LICENSE、配置 schema、docs 和 `docs/assets/` 中的聚合图表；不会包含 `tests/`、`scripts/`、`literature_kb/`、`personality_literature_kb/`、`psychological_literature_kb/`、`humanlike_agent_literature_kb/`、`raw/`、`output/`、`dist/` 等开发、研究、原始样本或缓存目录。
 
-`v0.5.0` 合并在 `main` 上，对外安装版本由 `metadata.yaml` 和 `main.py @register(...)` 共同声明为 `0.5.0`。下面保留 `0.0.2-beta-pr-x` 历史预发布批次，便于追溯从生命化学习、人格漂移到延迟专项的阶段性合入；完整工程迭代明细默认折叠，避免 README 首屏过长。
+### 1.0.0 实验版整合发布记录
 
-<details open>
+`v1.0.0` 合并在 `main` 上，对外安装版本由 `metadata.yaml` 和 `main.py @register(...)` 共同声明为 `1.0.0`。这个版本不是直接把旧实验分支 `codex/lifelike-learning-initiative` 普通合并进来，而是采用“主线已吸收 + 风险记录”的方式：保留主线中已经验证过的运行时、测试、公共 API 和性能报告，拒绝把旧分支里的本地知识库、过期打包规则和可能回退新状态层的改动带入正式发布。
+
+当前版本的主要变化：
+
+| 类别 | 结果 |
+| --- | --- |
+| 实验版整合 | 生命化学习、人格漂移、群聊氛围、瑕疵模拟、道德修复、综合自我和 LivingMemory 注解统一进入主线。 |
+| 工作流 | 请求前注入状态、响应后更新状态、可选后台 post 评估、记忆写入时冻结当时状态；详细流程见 [工作流](#工作流)。 |
+| 效率 | 默认 `assessment_timing=post`、低信号轻评估、provider 短缓存、状态注入预算、并发读取可选快照，减少主回复链路等待。 |
+| 发布边界 | 知识库和原始 benchmark 仍是本地资料，不进入 GitHub 和发布 zip。 |
+| 公开契约 | 插件版本为 `1.0.0`；公共 API 版本仍为 `1.0`，schema 仍保持 `astrbot.emotion_state.v2` 等版本化契约。 |
+
+重构后仍刻意没有放进 `v1.0.0` 的内容：
+
+| 遗留项 | 原因 | 后续处理 |
+| --- | --- | --- |
+| 旧实验分支的本地知识库目录 | 会把 `literature_kb/` 等仅本地资料上传到仓库和发布包。 | 保留在本机，未来只人工摘取小段非 KB 代码。 |
+| 旧实验分支的打包规则 | 会重新引入过期文件选择和发布边界。 | 继续使用当前 `scripts/package_plugin.py` 与 zip 预检。 |
+| 跨模型生命周期大样本统计 | 当前只有每模型 9 个时间尺度、每尺度 1 条样本。 | README 只写“单轮拟合参考”，正式统计需另开 run id。 |
+| DeepSeek 功能开关完整矩阵 | 用户已取消该测试线。 | 不作为正式结论；如恢复必须新建 run id。 |
+| 原始远程样本与截图 | 可能包含远程环境痕迹，且体积大。 | 保留在被忽略的 `output/`，README 只放聚合结果。 |
+
+<details>
 <summary>历史预发布批次摘要（0.0.2-beta-pr-1 至 0.0.2-beta-pr-19）</summary>
 
 | 本地迭代号 | 状态 | 对应任务 | 结果摘要 |
@@ -459,7 +493,7 @@ astrbot_version: ">=4.9.2,<5.0.0"
 `requirements.txt` 当前没有第三方运行时依赖：
 
 ```text
-# No third-party runtime dependencies.
+# 当前没有第三方运行时依赖。
 ```
 
 也就是说，插件主要依赖 AstrBot 自身的插件运行环境。
@@ -905,7 +939,7 @@ s_t=r_t c_t g(\Delta t;T_g)(0.72+0.28q_t)
 
 ### 人格先验
 
-从 `0.5.0` 开始，人格建模不再只是少量风格关键词偏置。插件会从当前 AstrBot persona 文本构造一个带版本号的 13 维潜在人格先验向量，覆盖大五人格、HEXACO 中的诚实-谦逊扩展、依恋焦虑/回避、BIS/BAS、认知闭合需要、情绪调节能力和人际温暖度。
+从状态层实验版开始，人格建模不再只是少量风格关键词偏置。插件会从当前 AstrBot persona 文本构造一个带版本号的 13 维潜在人格先验向量，覆盖大五人格、HEXACO 中的诚实-谦逊扩展、依恋焦虑/回避、BIS/BAS、认知闭合需要、情绪调节能力和人际温暖度。
 
 默认摘要：
 
@@ -1403,7 +1437,7 @@ enable_safety_boundary = false
 
 ### 状态注入、后台评估与工具预算
 
-这些配置主要服务 `0.5.0` 的状态层实验合并：减少主回复链路等待、压缩临时 prompt 注入、把详细状态交给工具按需查询。
+这些配置主要服务 `1.0.0` 的状态层整合：减少主回复链路等待、压缩临时 prompt 注入、把详细状态交给工具按需查询。
 
 | 配置项 | 类型 | 默认值 | 说明 |
 | --- | --- | --- | --- |
@@ -2660,7 +2694,32 @@ py -3.13 scripts\package_plugin.py --output dist\astrbot_plugin_emotional_state.
 
 ## 测试与维护
 
-远程测试、上传验证、性能基准和 LivingMemory 兼容检查的完整口径见 `docs/remote_testing.md`。当前 `0.5.0` 状态层正式性能数据为 `remote-emotion-v050-gpt55-feature-state-layer-real`：请求模型 `gpt5.5`，实际选中 provider `1111/gpt-5.5` / 模型 `gpt-5.5`，并发 `3`，完整 feature 矩阵已完成 `2500/2500` 个有效样本，失败请求 `0`。同一配置面下的 no-emotion 对照为 `remote-emotion-v050-gpt55-noemotion-control-state-layer-c3-250-real`：完成 `250/250`，失败请求 `0`。DeepSeek feature 矩阵已按用户要求取消，残留的 `295/2500` 探索样本不纳入正式结论。
+远程测试、上传验证、性能基准和 LivingMemory 兼容检查的完整口径见 `docs/remote_testing.md`。`1.0.0` 沿用已完成的状态层正式性能数据：功能矩阵运行编号为 `remote-emotion-v050-gpt55-feature-state-layer-real`，请求模型 `gpt5.5`，实际选中 provider `1111/gpt-5.5` / 模型 `gpt-5.5`，并发 `3`，完整功能开关矩阵已完成 `2500/2500` 个有效样本，失败请求 `0`。同一配置面下的关闭情绪对照运行编号为 `remote-emotion-v050-gpt55-noemotion-control-state-layer-c3-250-real`：完成 `250/250`，失败请求 `0`。DeepSeek 功能矩阵已按用户要求取消，残留的 `295/2500` 探索样本不纳入正式结论。
+
+跨模型生命周期模拟采用状态级模拟时间快速覆盖 `1d` 到 `1y`。当前每个模型为 9 个时间尺度各 1 条样本，所以它只能作为发布参考拟合，不能替代每个尺度 100 次以上的正式统计。
+
+![跨模型生命周期模拟拟合对比](docs/assets/lifecycle_model_fit.svg)
+
+<details>
+<summary>展开跨模型生命周期单轮拟合表</summary>
+
+| 模型 | 样本 | 平均延迟 ms | p95 延迟 ms | 平均 token | 延迟斜率 ms/log2(天) | 延迟 R2 | token 斜率 | token R2 |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| `gpt-5.5` | 9 | 13238.69 | 14724.94 | 3714.44 | -143.41 | 0.136 | -1.65 | 0.046 |
+| `gpt-5.4` | 9 | 13664.23 | 15847.90 | 3685.78 | 102.43 | 0.046 | 3.04 | 0.120 |
+| `gpt-5.4-mini` | 9 | 11798.89 | 13705.78 | 3651.33 | -3.22 | 0.000 | 0.87 | 0.269 |
+| `deepseek-v4-flash` | 9 | 13676.18 | 15841.24 | 5966.78 | -122.96 | 0.041 | 354.10 | 0.066 |
+| `deepseek-v4-pro` | 9 | 19813.90 | 23825.10 | 4811.33 | -600.61 | 0.299 | -20.74 | 0.422 |
+| `gemini-2.5-flash` | 9 | 11561.28 | 13045.74 | 3992.89 | 25.12 | 0.005 | -79.99 | 0.019 |
+| `gemini-flash-lite-latest` | 9 | 32602.13 | 45391.16 | 4735.33 | 2251.29 | 0.442 | -43.81 | 0.320 |
+| `gemini-flash-latest` | 9 | 17438.13 | 21929.92 | 7073.89 | 465.60 | 0.213 | 563.13 | 0.346 |
+| `gemini-pro-latest` | 9 | 17915.60 | 19008.80 | 4435.33 | -158.71 | 0.140 | 1.07 | 0.166 |
+| `mimo-v2.5` | 9 | 18394.20 | 22864.32 | 9128.11 | -684.69 | 0.364 | 778.87 | 0.142 |
+| `mimo-v2.5-pro` | 9 | 17305.32 | 22552.18 | 6947.78 | 147.63 | 0.014 | 311.09 | 0.068 |
+
+拟合模型为 `y = beta0 + beta1 log2(天)`。斜率越大，表示模拟生命周期变长时延迟或 token 越倾向增加；但当前每个时间尺度只有 1 条样本，远程排队和 provider 抖动会显著影响 R2。聚合 CSV 位于 `docs/assets/lifecycle_model_fit_summary.csv`。
+
+</details>
 
 `gpt5.5` 正式聚合如下，延迟单位为毫秒，增量相对 `baseline_minimal`：
 
@@ -2677,7 +2736,7 @@ py -3.13 scripts\package_plugin.py --output dist\astrbot_plugin_emotional_state.
 | `integrated_self_full` | 250 | 0 | 16149.86 | 22174.30 | 3121.31 | -158.26 | +394.79 |
 | `all_safe_modules` | 250 | 0 | 20777.29 | 27496.30 | 3329.84 | +4469.17 | +603.32 |
 
-no-emotion 对照与 `baseline_minimal` 的差异为：平均延迟 `-284.48 ms`，p95 延迟 `+1451.20 ms`，平均 token `+14.50`。端到端延迟包含 WebUI、AstrBot、插件、provider、网络和模型排队；本地插件热路径开销仍以 `scripts\benchmark_plugin_hot_path.py` 为准。生命周期测试改用模拟时间偏移快速覆盖 `1d` 到 `1y` 的真实秒差，不需要真的等待自然时间流逝。如果远程生命周期测试中途被中断，恢复前应确认 `benchmark_enable_simulated_time=false` 且 `benchmark_time_offset_seconds=0.0`。
+关闭情绪对照与 `baseline_minimal` 的差异为：平均延迟 `-284.48 ms`，p95 延迟 `+1451.20 ms`，平均 token `+14.50`。端到端延迟包含 WebUI、AstrBot、插件、provider、网络和模型排队；本地插件热路径开销仍以 `scripts\benchmark_plugin_hot_path.py` 为准。生命周期测试改用模拟时间偏移快速覆盖 `1d` 到 `1y` 的真实秒差，不需要真的等待自然时间流逝。如果远程生命周期测试中途被中断，恢复前应确认 `benchmark_enable_simulated_time=false` 且 `benchmark_time_offset_seconds=0.0`。
 
 ### 本地测试命令
 
@@ -2738,7 +2797,7 @@ $env:ASTRBOT_EXPECT_PLUGIN = "astrbot_plugin_emotional_state"
 脚本会在输出 JSON 里写出 `expectedPluginRuntime`，包含插件列表 API 中返回的 `version`、`displayName`、`activated`、`author`、`astrbotVersion` 等只读字段。若目标插件存在但 `activated=false`，脚本会失败退出。需要把版本和显示名也作为硬断言时，可以额外设置：
 
 ```powershell
-$env:ASTRBOT_EXPECT_PLUGIN_VERSION = "0.5.0"
+$env:ASTRBOT_EXPECT_PLUGIN_VERSION = "1.0.0"
 $env:ASTRBOT_EXPECT_PLUGIN_DISPLAY_NAME = "多维情绪状态"
 & $node scripts\remote_smoke_playwright.js
 ```

@@ -34,6 +34,12 @@ INCLUDE_DIRS = {
     "docs",
 }
 
+ALLOWED_DOC_ASSETS = {
+    Path("docs/assets/lifecycle_model_fit.svg"),
+    Path("docs/assets/lifecycle_model_fit_summary.csv"),
+    Path("docs/assets/lifecycle_model_fit_table.md"),
+}
+
 EXCLUDED_FILES = {
     Path("docs/literature_kb.md"),
     Path("docs/humanlike_agent_literature_kb.md"),
@@ -62,6 +68,8 @@ EXCLUDED_SUFFIXES = {
 
 def should_include(path: Path) -> bool:
     relative = path.relative_to(ROOT)
+    if len(relative.parts) >= 2 and relative.parts[:2] == ("docs", "assets"):
+        return relative in ALLOWED_DOC_ASSETS
     if relative in EXCLUDED_FILES:
         return False
     parts = set(relative.parts)

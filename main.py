@@ -436,7 +436,7 @@ def get_emotional_state_plugin(context: Context) -> Any | None:
     PLUGIN_NAME,
     "pidan",
     "基于 PAD/OCC/appraisal 与情绪动力学的 AstrBot 多维情绪状态插件",
-    "0.5.0",
+    "1.0.0",
     "",
 )
 class EmotionalStatePlugin(Star):

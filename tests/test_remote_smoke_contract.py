@@ -267,7 +267,8 @@ class RemoteSmokeContractTests(unittest.TestCase):
 
     def test_readme_records_beta_pr_iterations_in_order(self):
         readme = (ROOT / "README.md").read_text(encoding="utf-8")
-        section = readme.split("### 0.5.0 发布记录", 1)[1].split(
+        metadata_version = self._metadata_value("version")
+        section = readme.split(f"### {metadata_version} 实验版整合发布记录", 1)[1].split(
             "## 项目定位",
             1,
         )[0]
@@ -283,11 +284,11 @@ class RemoteSmokeContractTests(unittest.TestCase):
 
         found = re.findall(r"`(0\.0\.2-beta-pr-\d+)`", summary)
         self.assertEqual(expected, found)
-        for version in expected:
-            with self.subTest(version=version):
-                self.assertIn(f"| `{version}` | 已完成 |", summary)
+        for pr_version in expected:
+            with self.subTest(version=pr_version):
+                self.assertIn(f"| `{pr_version}` | 已完成 |", summary)
         self.assertIn(
-            "对外安装版本由 `metadata.yaml` 和 `main.py @register(...)` 共同声明为 `0.5.0`",
+            f"对外安装版本由 `metadata.yaml` 和 `main.py @register(...)` 共同声明为 `{metadata_version}`",
             section,
         )
         for index in range(11, 201):

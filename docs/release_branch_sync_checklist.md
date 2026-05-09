@@ -1,18 +1,18 @@
-# Release And Branch Sync Checklist
+# 发布与分支同步清单
 
-This checklist protects the current plugin baseline from being split across dirty branches.
+这份清单用于保护当前插件基线，避免功能、文档和发布包被拆散到未整理的分支里。
 
-## Before Committing
+## 提交前检查
 
-1. Confirm the working branch is `main`.
-2. Confirm generated artifacts are ignored:
+1. 确认当前工作分支是 `main`。
+2. 确认生成物已经被忽略：
    - `dist/`,
    - `output/`,
    - `__pycache__/`,
    - `*.py[cod]`,
    - `.pytest_cache/`,
-   - local-only literature KB paths and KB build helpers.
-3. Run local validation. Use Codex bundled Node when it exists; otherwise fall back to `node` from `PATH`:
+   - 仅本地使用的文献知识库路径和知识库构建辅助文件。
+3. 运行本地验证。优先使用 Codex 内置 Node；如果不存在，再回退到 `PATH` 中的 `node`：
 
 ```powershell
 $node = "$HOME\.cache\codex-runtimes\codex-primary-runtime\dependencies\node\bin\node.exe"
@@ -30,38 +30,38 @@ py -3.13 scripts\package_plugin.py --output dist\astrbot_plugin_emotional_state.
 git diff --check
 ```
 
-4. Run remote read-only smoke when remote validation is available:
+4. 当远程验证环境可用时，运行远程只读烟测：
 
 ```powershell
 $env:ASTRBOT_EXPECT_PLUGIN = "astrbot_plugin_emotional_state"
-$env:ASTRBOT_EXPECT_PLUGIN_VERSION = "0.5.0"
+$env:ASTRBOT_EXPECT_PLUGIN_VERSION = "1.0.0"
 $env:ASTRBOT_EXPECT_PLUGIN_DISPLAY_NAME = "多维情绪状态"
 & $node scripts\remote_smoke_playwright.js
 ```
 
-Read `expectedPluginChecks.ok`, `expectedFailedPlugin`, `failedPluginSummary.hasExpectedPluginFailure`, `containsExpectedPlugin`, `expectedPluginRuntime`, `expectedPluginVersionMatches`, `expectedPluginDisplayNameMatches`, and `expectedPluginDrift` together. Remote `failedPlugins` may contain unrelated plugin failures; only the expected plugin in failed records is a target-plugin failure and exit code `5`. Exit code `7` means the expected plugin exists but its runtime version differs from `ASTRBOT_EXPECT_PLUGIN_VERSION`; exit code `8` means the runtime display name differs from `ASTRBOT_EXPECT_PLUGIN_DISPLAY_NAME`.
+需要一起查看 `expectedPluginChecks.ok`、`expectedFailedPlugin`、`failedPluginSummary.hasExpectedPluginFailure`、`containsExpectedPlugin`、`expectedPluginRuntime`、`expectedPluginVersionMatches`、`expectedPluginDisplayNameMatches` 和 `expectedPluginDrift`。远程 `failedPlugins` 里可能有无关插件失败；只有目标插件出现在失败记录里，才算目标插件失败，对应退出码 `5`。退出码 `7` 表示目标插件存在，但运行时版本与 `ASTRBOT_EXPECT_PLUGIN_VERSION` 不一致；退出码 `8` 表示运行时显示名与 `ASTRBOT_EXPECT_PLUGIN_DISPLAY_NAME` 不一致。
 
-Do not put real credentials or server addresses in committed files.
+不要把真实凭据或服务器地址写入将被提交的文件。
 
-## Commit Order
+## 提交顺序
 
-Commit the full validated baseline on `main` first. Include:
+先在 `main` 上提交完整且已验证的基线。提交内容包括：
 
-- core runtime files,
-- tests,
-- scripts,
-- docs,
-- `LICENSE` and GPL metadata,
-- persistent planning files.
+- 核心运行时文件，
+- 测试，
+- 脚本，
+- 文档，
+- `LICENSE` 和 GPL 元数据，
+- 持久化计划文件。
 
-Do not commit generated `dist/` or `output/` artifacts.
+不要提交生成的 `dist/` 或 `output/` 产物。
 
-## Branch Sync Order
+## 分支同步顺序
 
-After `main` is clean:
+当 `main` 保持干净后：
 
-1. Move or merge `codex/complete-emotional-bot-plugin` to the new `main` baseline.
-2. Sync maintenance branches from the clean baseline:
+1. 将 `codex/complete-emotional-bot-plugin` 移动或合并到新的 `main` 基线。
+2. 从干净基线同步维护分支：
    - `codex/emotion-core`,
    - `codex/astrbot-integration`,
    - `codex/public-api-memory`,
@@ -71,29 +71,29 @@ After `main` is clean:
    - `codex/tests-validation`,
    - `codex/release-packaging`,
    - `codex/docs-config`.
-3. Keep branches complete enough to run tests. Do not delete unrelated modules to make a branch "smaller".
-4. For future feature work, develop on the relevant maintenance branch, then merge back to the integration branch and `main`.
+3. 每个分支都要完整到足以运行测试。不要为了让分支“更小”而删除无关模块。
+4. 未来功能开发先放到对应维护分支，再合并回集成分支和 `main`。
 
-## Remote Upload Rule
+## 远程上传规则
 
-Only run `scripts\remote_install_upload_playwright.js` after:
+只有满足以下条件后，才运行 `scripts\remote_install_upload_playwright.js`：
 
-- the package preflight passes,
-- the preflight confirms the zip contains the runtime root files `__init__.py`, `main.py`, `emotion_engine.py`, `humanlike_engine.py`, `lifelike_learning_engine.py`, `personality_drift_engine.py`, `integrated_self.py`, `moral_repair_engine.py`, `fallibility_engine.py`, `psychological_screening.py`, `prompts.py`, and `public_api.py`,
-- the preflight confirms the zip contains the dependency declaration `requirements.txt`,
-- the preflight confirms the zip contains `LICENSE` and `metadata.yaml` declares `license: GPL-3.0-or-later`,
-- the preflight confirms zip `metadata.yaml` `name:` matches `ASTRBOT_EXPECT_PLUGIN`,
-- the zip uses relative POSIX paths and contains no unsafe `.` / `..` path segments,
-- any `uninstall-failed` call is only for the temporary `plugin_upload_<plugin>` failed-upload directory, with `delete_config=false` and `delete_data=false`,
-- `installOutcome="already_installed_no_overwrite"` with `overwriteAttempted=false` is treated as diagnostic success only: it means the formal plugin directory already existed and was not overwritten, so strict version smoke may still report drift,
-- `ASTRBOT_REMOTE_INSTALL_CONFIRM=1` is explicitly set,
-- the target server is intended to receive a new upload.
+- 发布包预检通过；
+- 预检确认 zip 内包含运行时根文件 `__init__.py`、`main.py`、`emotion_engine.py`、`humanlike_engine.py`、`lifelike_learning_engine.py`、`personality_drift_engine.py`、`integrated_self.py`、`moral_repair_engine.py`、`fallibility_engine.py`、`psychological_screening.py`、`prompts.py` 和 `public_api.py`；
+- 预检确认 zip 内包含依赖声明 `requirements.txt`；
+- 预检确认 zip 内包含 `LICENSE`，且 `metadata.yaml` 声明 `license: GPL-3.0-or-later`；
+- 预检确认 zip 内 `metadata.yaml` 的 `name:` 与 `ASTRBOT_EXPECT_PLUGIN` 匹配；
+- zip 使用相对 POSIX 路径，且不包含不安全的 `.` / `..` 路径段；
+- 任何 `uninstall-failed` 调用都只针对临时的 `plugin_upload_<plugin>` 失败上传目录，并且使用 `delete_config=false`、`delete_data=false`；
+- `installOutcome="already_installed_no_overwrite"` 且 `overwriteAttempted=false` 只视为诊断成功：这表示正式插件目录已经存在且未被覆盖，因此严格版本烟测仍可能报告漂移；
+- 已显式设置 `ASTRBOT_REMOTE_INSTALL_CONFIRM=1`；
+- 目标服务器确实要接收一次新上传。
 
-Use `scripts\remote_smoke_playwright.js` for ordinary repeated validation.
+普通重复验证使用 `scripts\remote_smoke_playwright.js`。
 
-## Remote Cleanup Rule
+## 远程清理规则
 
-Only run `scripts\remote_cleanup_plugin_playwright.js` immediately before a destructive reinstall test, and only with:
+只有在破坏性重装测试前，才运行 `scripts\remote_cleanup_plugin_playwright.js`，并且必须使用：
 
 ```powershell
 $env:ASTRBOT_EXPECT_PLUGIN = "astrbot_plugin_emotional_state"
@@ -103,4 +103,4 @@ $env:ASTRBOT_REMOTE_CLEAN_FAILED_UPLOAD = "1"
 & $node scripts\remote_cleanup_plugin_playwright.js
 ```
 
-The cleanup script is allowlisted to `astrbot_plugin_emotional_state`. It may delete only the exact formal plugin record and the exact failed-upload directory `plugin_upload_astrbot_plugin_emotional_state`, always with `delete_config=false` and `delete_data=false`. It must not delete LivingMemory or unrelated plugins.
+清理脚本只允许操作 `astrbot_plugin_emotional_state`。它只能删除精确匹配的正式插件记录，以及精确匹配的失败上传目录 `plugin_upload_astrbot_plugin_emotional_state`，并始终使用 `delete_config=false` 和 `delete_data=false`。它不得删除 LivingMemory 或任何无关插件。

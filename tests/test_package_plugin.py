@@ -56,6 +56,21 @@ class PackagePluginTests(unittest.TestCase):
         self.assertIn("README.md", files)
         self.assertIn("docs/theory.md", files)
         self.assertIn("docs/remote_testing.md", files)
+        self.assertIn("docs/assets/lifecycle_model_fit.svg", files)
+        self.assertIn("docs/assets/lifecycle_model_fit_summary.csv", files)
+        self.assertIn("docs/assets/lifecycle_model_fit_table.md", files)
+        self.assertFalse(
+            any(
+                path.startswith("docs/assets/")
+                and path
+                not in {
+                    "docs/assets/lifecycle_model_fit.svg",
+                    "docs/assets/lifecycle_model_fit_summary.csv",
+                    "docs/assets/lifecycle_model_fit_table.md",
+                }
+                for path in files
+            )
+        )
         self.assertNotIn("docs/literature_kb.md", files)
         self.assertNotIn("docs/humanlike_agent_literature_kb.md", files)
         self.assertNotIn("scripts/package_plugin.py", files)
@@ -127,6 +142,21 @@ class PackagePluginTests(unittest.TestCase):
         self.assertIn(prefix + "README.md", names)
         self.assertIn(prefix + "LICENSE", names)
         self.assertIn(prefix + "docs/remote_testing.md", names)
+        self.assertIn(prefix + "docs/assets/lifecycle_model_fit.svg", names)
+        self.assertIn(prefix + "docs/assets/lifecycle_model_fit_summary.csv", names)
+        self.assertIn(prefix + "docs/assets/lifecycle_model_fit_table.md", names)
+        self.assertFalse(
+            any(
+                name.startswith(prefix + "docs/assets/")
+                and name
+                not in {
+                    prefix + "docs/assets/lifecycle_model_fit.svg",
+                    prefix + "docs/assets/lifecycle_model_fit_summary.csv",
+                    prefix + "docs/assets/lifecycle_model_fit_table.md",
+                }
+                for name in names
+            )
+        )
         self.assertNotIn(prefix + "docs/literature_kb.md", names)
         self.assertNotIn(prefix + "docs/humanlike_agent_literature_kb.md", names)
         self.assertFalse(any(name.startswith(prefix + "literature_kb/") for name in names))

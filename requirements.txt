@@ -1,2 +1,1 @@
-# No third-party runtime dependencies.
-
+# 当前没有第三方运行时依赖。

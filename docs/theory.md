@@ -52,7 +52,7 @@ I_t = \{H_t, U_t, P, E_{t-1}\}
 
 ### 会话身份与状态轨道
 
-群聊里的一条消息同时属于“房间整体”和“当前说话人”。如果只用一个会话键，某个用户造成的冲突会扩散成全群关系状态；如果只用说话人键，群体气氛又会被切碎。`0.5.0` 因此把状态轨道拆成 `conversation_id` 与 `speaker_track_id`：前者记录当前房间或私聊的整体状态，后者记录 bot 对当前发言者的定向情绪和关系轨迹。
+群聊里的一条消息同时属于“房间整体”和“当前说话人”。如果只用一个会话键，某个用户造成的冲突会扩散成全群关系状态；如果只用说话人键，群体气氛又会被切碎。`1.0.0` 因此把状态轨道拆成 `conversation_id` 与 `speaker_track_id`：前者记录当前房间或私聊的整体状态，后者记录 bot 对当前发言者的定向情绪和关系轨迹。
 
 轨道选择可写成：
 
@@ -78,7 +78,7 @@ c_t =
 
 ## 3. 人格量化画像到情绪先验
 
-同一句用户文本对不同人格的意义不同。`0.5.0` 不再只用少量风格关键词做人格偏置，而是生成一个版本化、可公开读取、可持久化的 13 维潜在人格先验。该先验仍然不是临床人格测量；它只把 AstrBot persona 文本转成工程参数，让不同 bot 的情绪基线、反应强度、边界敏感度、修复倾向和社交距离稳定可复现。
+同一句用户文本对不同人格的意义不同。`1.0.0` 不再只用少量风格关键词做人格偏置，而是生成一个版本化、可公开读取、可持久化的 13 维潜在人格先验。该先验仍然不是临床人格测量；它只把 AstrBot persona 文本转成工程参数，让不同 bot 的情绪基线、反应强度、边界敏感度、修复倾向和社交距离稳定可复现。
 
 插件先从 persona 中构造输入集合：
 
@@ -356,7 +356,7 @@ E_t=\Pi_{[-1,1]^n}(E_t)
 
 ### 群聊氛围状态层
 
-群聊氛围不是 bot 自身情绪，而是房间层的参与时机信号。它回答的问题是：现在是适合自然加入、短应一下、先听，还是避免打断。`0.5.0` 用七维有界向量表示群聊氛围：
+群聊氛围不是 bot 自身情绪，而是房间层的参与时机信号。它回答的问题是：现在是适合自然加入、短应一下、先听，还是避免打断。`1.0.0` 用七维有界向量表示群聊氛围：
 
 ```math
 A^g_t =
@@ -454,15 +454,15 @@ O_t = 2^{-\Delta t/H_o}O_{t-1}+\mathrm{impulse}(E_t,X_t,\mathrm{appraisal}_t)
 维度对后果的作用：
 
 ```text
-negative valence -> withdrawal / confrontation / repair
-high arousal -> expressiveness and urgency
-high dominance -> confrontation and boundary setting
-low dominance -> appeasement or reassurance
-low goal_congruence -> frustration, complaint, cold distance
-low certainty -> caution and clarification
-low control -> withdrawal or shutdown
-high affiliation -> repair and warm approach
-low affiliation -> cold distance or rejection
+负性效价 -> 退避 / 对抗 / 修复
+高唤醒 -> 表达增强与紧迫感
+高支配感 -> 对抗与边界设置
+低支配感 -> 安抚或寻求确认
+低目标一致性 -> 挫败、抱怨、冷距离
+低确定性 -> 谨慎与澄清
+低可控性 -> 退避或停摆
+高亲近度 -> 修复与温暖靠近
+低亲近度 -> 冷距离或拒绝
 ```
 
 复合规则示例：
