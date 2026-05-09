@@ -236,7 +236,7 @@ flowchart LR
 | 71 | 已完成 | 重写 README 为可发布插件首页，补齐项目定位、工作流、配置、边界、排障和维护说明 | 208 个单元测试、py_compile、json.tool、Node 语法检查、打包构建、打包预检；GitHub 鉴权受阻 |
 | 72 | 已完成 | 创建 GitHub 仓库、更新仓库元数据、设置预发布版本、推送已验证 main 分支并发布预发布包 | 公共仓库和 `v0.0.1-beta` 预发布已创建；发布 zip SHA256 `3133f89e96ce5e124083da0867765f2d5d6d6b2ef074d0963a55eedf0de833ef` |
 | 73 | 已完成 | 按 GitHub 官方数学表达式语法优化公式渲染 | 保留 GitHub fenced math；禁用危险宏由 `tests/test_document_math_contract.py` 锁定；212 个测试通过；发布资产已刷新 |
-| 74 | 已完成 | 增加顶刊模型论证、折叠完整推导和更严谨的公式记号 | README/theory 默认摘要、折叠推导、DOI 证据映射、符号清理（`O_t`、`H_t`、`F_t`）；213 个测试、py_compile、json.tool、Node 语法、打包构建、打包预检、git diff 检查 |
+| 74 | 已完成 | 增加代表性文献模型论证、折叠完整推导和更严谨的公式记号 | README/theory 默认摘要、折叠推导、DOI 文献依据、符号清理（`O_t`、`H_t`、`F_t`）；213 个测试、py_compile、json.tool、Node 语法、打包构建、打包预检、git diff 检查 |
 | 75 | 已完成 | 澄清远程版本漂移和“已安装不覆盖”的上传诊断 | `expectedPluginDrift`、`installOutcome=already_installed_no_overwrite`、README/checklist 文档；213 个测试、py_compile、json.tool、Node 语法、打包构建、打包预检；严格远程烟测确认退出码 7 漂移，非严格远程烟测通过 |
 | 76 | 已完成 | 发布 `0.0.2-beta`：加入更严格的人格量化模型、2 万条人格文献元数据知识库、更新公式/文档/测试、远程烟测和预发布上传 | 已发布 `v0.0.2-beta` 预发布；216 个测试、py_compile、json.tool、Node 语法检查、打包构建、zip 预检、git diff 检查、严格远程漂移检查和非严格远程烟测完成 |
 | 77 | 已完成 | 新增持久化生命化学习状态，记录新词、本地黑话、用户画像事实、偏好和对话节奏 | `lifelike_learning_engine.py`；8 维状态；真实时间半衰期；单元测试；不泄露原始消息 |
@@ -993,7 +993,7 @@ s_t=r_t c_t g^D_t\phi^D_t(q_t,v_{t-1},\Delta p_{t-1})
 </details>
 
 <details>
-<summary>论文附录 S1｜SHIT Journal 风格：完整公式推导、证据映射与文献依据</summary>
+<summary>论文附录 S1｜完整公式推导、代表性文献依据与工程取舍</summary>
 
 #### Supplementary Note S1
 
@@ -1005,9 +1005,9 @@ s_t=r_t c_t g^D_t\phi^D_t(q_t,v_{t-1},\Delta p_{t-1})
 
 **引用格式**：建议将本节视为 `Supplementary Note S1`，正文快速阅读只引用“情绪模型”小节；需要复现、审稿或二次开发时再展开此附录。
 
-#### S1.1 顶刊证据映射
+#### S1.1 代表性文献依据
 
-| 模型部件 | 采用的工程形式 | 顶刊/高影响依据 | 插件中的取舍 |
+| 模型部件 | 采用的工程形式 | 代表性文献依据 | 插件中的取舍 |
 | --- | --- | --- | --- |
 | 多维情绪空间 | PAD + appraisal 扩展为 7 维向量 | Russell 1980, *Journal of Personality and Social Psychology*, DOI `10.1037/h0077714`；Mehrabian & Russell 1974；Scherer 2005, DOI `10.1177/0539018405058216`。 | 用连续向量保存状态，而不是只用“开心/生气/难过”标签。 |
 | 人格作为先验 | `b_p` 与 `theta_p` 从 persona 派生 | 评价理论强调评价依赖目标、责任、可控性和情境意义；Roseman 1991, DOI `10.1080/02699939108411034`。 | 不做临床人格测量，只把 persona 转成工程先验，让不同 bot 有不同默认姿态。 |

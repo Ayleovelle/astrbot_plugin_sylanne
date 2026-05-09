@@ -11,7 +11,7 @@
 5. 长期状态更新可视为在“上一状态/人格基线先验”与“当前观测”之间求二次优化折中，最终得到 `E'_t = B_t + alpha_t(X_t-B_t)`；其中 `alpha_t` 来自自动 dynamics，不是用户配置项。
 6. 冷处理、修复、边界、求证等不是情绪标签本身，而是由 `O_t` 表示的后果状态，并按真实时间衰减。
 
-| 设计点 | 默认结论 | 顶刊/高影响依据 |
+| 设计点 | 默认结论 | 代表性文献依据 |
 | --- | --- | --- |
 | 连续情绪向量 | 用多维连续状态替代离散情绪标签。 | Russell 1980, *Journal of Personality and Social Psychology*；Mehrabian & Russell 1974。 |
 | appraisal 扩展维度 | 目标、责任、控制、确定性会改变情绪意义。 | Scherer 2005, *Social Science Information*；Roseman 1991, *Cognition and Emotion*；OCC。 |
