@@ -2,7 +2,7 @@
 
 > 让 AstrBot 维护一套可计算、可记忆、可解释、可被其他插件调用的多维情绪状态。
 
-![版本 1.0.0-exp](https://img.shields.io/badge/version-1.0.0-exp-blue)
+![版本 1.0.0](https://img.shields.io/badge/version-1.0.0-blue)
 ![AstrBot >=4.9.2,<5.0.0](https://img.shields.io/badge/AstrBot-%3E%3D4.9.2%2C%3C5.0.0-green)
 ![Python 3.10+](https://img.shields.io/badge/Python-3.10%2B-yellow)
 ![协议 astrbot.emotion_state.v2](https://img.shields.io/badge/schema-astrbot.emotion__state.v2-purple)
@@ -16,7 +16,7 @@
 
 本插件会让 LLM 根据上下文、用户当前文本、bot 人格和上一轮状态，判断当前情绪观测值；本地引擎再用真实时间半衰期、人格基线、置信门控、关系修复和后果状态机更新长期状态。最后，这个状态会作为临时上下文注入下一次 LLM 请求，影响语气、节奏、社交距离、边界感和修复倾向。
 
-`1.0.0-exp` 实验版最强的部分不是单个公式，而是把状态层改造成“可并行、可后台恢复、可群聊分轨”的运行时系统：
+`1.0.0` 正式版的重点不是单个公式，而是把状态层稳定成“可并行、可后台恢复、可群聊分轨”的运行时系统：
 
 | 能力 | 作用 |
 | --- | --- |
@@ -51,7 +51,7 @@
 | 主题 | 内容 |
 | --- | --- |
 | [当前版本与兼容范围](#当前版本与兼容范围) | 插件版本、AstrBot 版本、Python 要求、许可证和发布状态。 |
-| [1.0.0-exp 实验版整合发布记录](#100-exp-实验版整合发布记录) | 后台处理、并发状态加载、群聊分层、工作流变化、效率对比和历史迭代折叠入口。 |
+| [1.0.0 正式版发布记录](#100-正式版发布记录) | 后台处理、并发状态加载、群聊分层、工作流变化、效率对比和历史迭代折叠入口。 |
 | [项目定位](#项目定位) | 为什么本插件不是普通的提示词人设增强。 |
 | [核心能力](#核心能力总览) | 7 维情绪、人格建模、真实时间记忆、关系修复、公共 API。 |
 | [快速开始](#快速开始) | 发布 zip 包、仓库安装、手动复制、最小配置和检查命令。 |
@@ -79,32 +79,32 @@
 | --- | --- |
 | 插件目录名 | `astrbot_plugin_emotional_state` |
 | 显示名 | `多维情绪状态` |
-| 当前版本 | `1.0.0-exp` |
+| 当前版本 | `1.0.0` |
 | AstrBot 版本 | `>=4.9.2,<5.0.0` |
 | Python | `3.10+` |
 | 许可证 | `GPL-3.0-or-later` |
 | 运行时第三方依赖 | 当前无额外依赖，见 `requirements.txt` |
 
-`1.0.0-exp` 把状态层实验版整合到 `main`，作为预发布版本验证：后台 post 评估队列、多线程/并发状态加载、群聊分层建模、群聊氛围、生命化学习、真实时间人格漂移、LivingMemory 情绪注解、公共 API、发布包边界、延迟优化批次、gpt-5.5 完整功能开关矩阵和跨模型生命周期单轮拟合都进入统一发布口径。当前版本的重点是把“情绪化 bot”从单次提示词风格控制推进到可持久化、可后台恢复、可并发查询、可群聊分轨的状态服务：核心情绪、后台 post 评估、`group_atmosphere_state`、`humanlike_state`、`lifelike_learning_state` 和 `personality_drift_state` 默认自动运行且不暴露用户开关；道德修复、瑕疵模拟、心理筛查等实验/维护模块仍由配置者显式打开。
+`1.0.0` 把前期状态层实验成果稳定整合到 `main`，定位为正式版：后台 post 评估队列、多线程/并发状态加载、群聊分层建模、群聊氛围、生命化学习、真实时间人格漂移、LivingMemory 情绪注解、公共 API、发布包边界、延迟优化批次、gpt-5.5 完整功能开关矩阵和跨模型生命周期单轮拟合都进入统一发布口径。当前版本的重点是把“情绪化 bot”从单次提示词风格控制推进到可持久化、可后台恢复、可并发查询、可群聊分轨的状态服务：核心情绪、后台 post 评估、`group_atmosphere_state`、`humanlike_state`、`lifelike_learning_state` 和 `personality_drift_state` 默认自动运行且不暴露用户开关；道德修复、瑕疵模拟、心理筛查等实验/维护模块仍由配置者显式打开。
 
 发布包会包含运行代码、README、LICENSE、配置 schema、docs 和 `docs/assets/` 中的聚合图表；不会包含 `tests/`、`scripts/`、`literature_kb/`、`personality_literature_kb/`、`psychological_literature_kb/`、`humanlike_agent_literature_kb/`、`raw/`、`output/`、`dist/` 等开发、研究、原始样本或缓存目录。
 
-### 1.0.0-exp 实验版整合发布记录
+### 1.0.0 正式版发布记录
 
-`v1.0.0-exp` 合并在 `main` 上，对外安装版本由 `metadata.yaml` 和 `main.py @register(...)` 共同声明为 `1.0.0-exp`。这个版本不是直接把旧实验分支 `codex/lifelike-learning-initiative` 普通合并进来，而是采用“主线已吸收 + 风险记录”的方式：保留主线中已经验证过的运行时、测试、公共 API 和性能报告，拒绝把旧分支里的本地知识库、过期打包规则和可能回退新状态层的改动带入正式发布。
+`v1.0.0` 合并在 `main` 上，对外安装版本由 `metadata.yaml` 和 `main.py @register(...)` 共同声明为 `1.0.0`。这个版本不是直接把旧实验分支 `codex/lifelike-learning-initiative` 普通合并进来，而是采用“主线已吸收 + 风险记录”的方式：保留主线中已经验证过的运行时、测试、公共 API 和性能报告，拒绝把旧分支里的本地知识库、过期打包规则和可能回退新状态层的改动带入正式发布。
 
 当前版本的主要变化：
 
 | 类别 | 结果 |
 | --- | --- |
-| 实验版整合 | 生命化学习、人格漂移、群聊氛围、瑕疵模拟、道德修复、综合自我和 LivingMemory 注解统一进入主线。 |
+| 状态层整合 | 生命化学习、人格漂移、群聊氛围、瑕疵模拟、道德修复、综合自我和 LivingMemory 注解统一进入主线。 |
 | 后台处理 | post 阶段内部评估默认进入后台链路；后台队列支持每会话 FIFO、检查点恢复、租约、重试、dead-letter 和运行时诊断。 |
 | 多线程/并发 | 请求阶段并发加载辅助状态，响应阶段并发预取道德修复/瑕疵状态，LivingMemory 写入并发获取可选快照；状态提交仍按确定顺序落库。 |
 | 群聊系统 | `conversation_id` 记录房间整体，`speaker_track_id` 记录 bot 对当前说话人的定向情绪；`group_atmosphere_state` 评估打断风险、加入适宜度和开口冷却。 |
 | 工作流 | 请求前注入状态、响应后更新状态、可选后台 post 评估、记忆写入时冻结当时状态；详细流程见 [工作流](#工作流)。 |
 | 效率 | 默认 `assessment_timing=post`、低信号轻评估、provider 短缓存、状态注入预算、并发读取可选快照，减少主回复链路等待。 |
 | 发布边界 | 知识库和原始 benchmark 仍是本地资料，不进入 GitHub 和发布 zip。 |
-| 公开契约 | 插件版本为 `1.0.0-exp`；公共 API 版本仍为 `1.0`，schema 仍保持 `astrbot.emotion_state.v2` 等版本化契约。 |
+| 公开契约 | 插件版本为 `1.0.0`；公共 API 版本仍为 `1.0`，schema 仍保持 `astrbot.emotion_state.v2` 等版本化契约。 |
 
 运行时亮点可以按这条链路理解。手机端若不渲染 Mermaid，也会优先显示下面的静态图：
 
@@ -131,7 +131,7 @@ flowchart LR
 
 </details>
 
-重构后仍刻意没有放进 `v1.0.0-exp` 的内容：
+重构后仍刻意没有放进 `v1.0.0` 的内容：
 
 | 遗留项 | 原因 | 后续处理 |
 | --- | --- | --- |
@@ -681,7 +681,7 @@ low_reasoning_max_context_chars = 1200
 /有机体状态
 ```
 
-查看模拟拟人状态。该状态层在 `1.0.0-exp` 中默认自动运行；如果只想减少主提示词注入，调整 `auxiliary_state_injection_detail`，不要寻找已移除的 `enable_humanlike_state` 开关。
+查看模拟拟人状态。该状态层在 `1.0.0` 中默认自动运行；如果只想减少主提示词注入，调整 `auxiliary_state_injection_detail`，不要寻找已移除的 `enable_humanlike_state` 开关。
 
 ### 重置拟人状态
 
@@ -1516,7 +1516,7 @@ enable_safety_boundary = false
 
 ### 状态注入、后台评估与工具预算
 
-这些配置主要服务 `1.0.0-exp` 的状态层整合：减少主回复链路等待、压缩临时 prompt 注入、把详细状态交给工具按需查询。
+这些配置主要服务 `1.0.0` 的状态层整合：减少主回复链路等待、压缩临时 prompt 注入、把详细状态交给工具按需查询。
 
 | 配置项 | 类型 | 默认值 | 说明 |
 | --- | --- | --- | --- |
@@ -2623,13 +2623,13 @@ py -3.13 scripts\package_plugin.py --output dist\astrbot_plugin_emotional_state.
 | 7 | 创建标签和 GitHub 发布版本，上传 `dist\astrbot_plugin_emotional_state.zip`。 |
 | 8 | 用 AstrBot WebUI 分别验证“发布 zip 包上传”和“仓库安装”两条路径。 |
 
-当前公开仓库为 `https://github.com/Ayleovelle/astrbot_plugin_emotional_state`。发布预发布版本时，先确认 `origin` 指向该仓库，再用本地 `GITHUB_TOKEN` / `GH_TOKEN` 推送标签和上传 GitHub 发布附件。不要把令牌、远程 AstrBot 凭据、cookie 或服务器地址写入仓库。
+当前公开仓库为 `https://github.com/Ayleovelle/astrbot_plugin_emotional_state`。发布正式版本时，先确认 `origin` 指向该仓库，再用本地 `GITHUB_TOKEN` / `GH_TOKEN` 推送标签和上传 GitHub 发布附件。不要把令牌、远程 AstrBot 凭据、cookie 或服务器地址写入仓库。
 
 ---
 
 ## 测试与维护
 
-远程测试、上传验证、性能基准和 LivingMemory 兼容检查的完整口径见 `docs/remote_testing.md`。`1.0.0-exp` 沿用已完成的状态层正式性能数据：功能矩阵运行编号为 `remote-emotion-v050-gpt55-feature-state-layer-real`，请求模型 `gpt5.5`，实际选中 provider `1111/gpt-5.5` / 模型 `gpt-5.5`，并发 `3`，完整功能开关矩阵已完成 `2500/2500` 个有效样本，失败请求 `0`。同一配置面下的关闭情绪对照运行编号为 `remote-emotion-v050-gpt55-noemotion-control-state-layer-c3-250-real`：完成 `250/250`，失败请求 `0`。DeepSeek 功能矩阵已按用户要求取消，残留的 `295/2500` 探索样本不纳入正式结论。
+远程测试、上传验证、性能基准和 LivingMemory 兼容检查的完整口径见 `docs/remote_testing.md`。`1.0.0` 沿用已完成的状态层正式性能数据：功能矩阵运行编号为 `remote-emotion-v050-gpt55-feature-state-layer-real`，请求模型 `gpt5.5`，实际选中 provider `1111/gpt-5.5` / 模型 `gpt-5.5`，并发 `3`，完整功能开关矩阵已完成 `2500/2500` 个有效样本，失败请求 `0`。同一配置面下的关闭情绪对照运行编号为 `remote-emotion-v050-gpt55-noemotion-control-state-layer-c3-250-real`：完成 `250/250`，失败请求 `0`。DeepSeek 功能矩阵已按用户要求取消，残留的 `295/2500` 探索样本不纳入正式结论。
 
 跨模型生命周期模拟采用状态级模拟时间快速覆盖 `1d` 到 `1y`。当前每个模型为 9 个时间尺度各 1 条样本，所以它只能作为发布参考拟合，不能替代每个尺度 100 次以上的正式统计。
 
@@ -2732,7 +2732,7 @@ $env:ASTRBOT_EXPECT_PLUGIN = "astrbot_plugin_emotional_state"
 脚本会在输出 JSON 里写出 `expectedPluginRuntime`，包含插件列表 API 中返回的 `version`、`displayName`、`activated`、`author`、`astrbotVersion` 等只读字段。若目标插件存在但 `activated=false`，脚本会失败退出。需要把版本和显示名也作为硬断言时，可以额外设置：
 
 ```powershell
-$env:ASTRBOT_EXPECT_PLUGIN_VERSION = "1.0.0-exp"
+$env:ASTRBOT_EXPECT_PLUGIN_VERSION = "1.0.0"
 $env:ASTRBOT_EXPECT_PLUGIN_DISPLAY_NAME = "多维情绪状态"
 & $node scripts\remote_smoke_playwright.js
 ```
@@ -2951,7 +2951,7 @@ inject_state = false
 humanlike_memory_write_enabled = true
 ```
 
-拟人状态默认自动运行。若没有看到 `humanlike_state_at_write`，优先确认插件是否为 `1.0.0-exp`、`humanlike_memory_write_enabled=true`，以及调用方是否保留了完整记忆载荷。
+拟人状态默认自动运行。若没有看到 `humanlike_state_at_write`，优先确认插件是否为 `1.0.0`、`humanlike_memory_write_enabled=true`，以及调用方是否保留了完整记忆载荷。
 
 ### 拟人状态没有生效
 

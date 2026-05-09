@@ -269,7 +269,7 @@ class RemoteSmokeContractTests(unittest.TestCase):
     def test_readme_records_beta_pr_iterations_in_order(self):
         readme = (ROOT / "README.md").read_text(encoding="utf-8")
         metadata_version = self._metadata_value("version")
-        section = readme.split(f"### {metadata_version} 实验版整合发布记录", 1)[1].split(
+        section = readme.split(f"### {metadata_version} 正式版发布记录", 1)[1].split(
             "## 项目定位",
             1,
         )[0]

@@ -198,7 +198,7 @@ function defaultLifecycleDurations() {
 function offOptionalModules() {
   return {
     enable_psychological_screening: false,
-    // v1.0.0-exp keeps these state layers always on in runtime.
+    // v1.0.0 keeps these state layers always on in runtime.
     // Legacy keys are still sent in benchmark patches for old-server compatibility.
     enable_humanlike_state: false,
     enable_lifelike_learning: false,

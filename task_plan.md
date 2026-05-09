@@ -22,14 +22,14 @@ Latency target from 2026-05-08 onward: keep iterating with one priority, reducin
   - Remote server has `astrbot_plugin_emotional_state` installed and activated.
 - Remote server did have `astrbot_plugin_livingmemory` and `astrbot_plugin_emotionai_pro`.
 
-## Active Task - 2026-05-09 v1.0.0-exp Pre-release Work
+## Active Task - 2026-05-09 v1.0.0 Release Work
 
 Status: in progress. This section is the recovery anchor if context is compacted.
 
 User-facing release target:
 
-- Version label: `1.0.0-exp`.
-- Type: pre-release / experimental.
+- Version label: `1.0.0`.
+- Type: formal release.
 - Do not upload to GitHub release unless the user later asks. Local package and remote AstrBot test are allowed if needed for validation.
 - README must be rewritten in Chinese, with a quick-start path plus full technical documentation. Reference style: `https://github.com/DBJD-CR/astrbot_plugin_proactive_chat`.
 - Config schema descriptions/hints should be Chinese wherever possible.
@@ -336,14 +336,14 @@ User latest instruction: `deepseek 的不做了`.
 1. Keep remote benchmark processes stopped unless the user explicitly asks for a new run.
 2. Keep `docs/remote_testing.md` and `README.md` aligned with the completed gpt5.5 official matrix and no-emotion control.
 3. If remote testing resumes later, create a new run id unless intentionally resuming one of the completed `v050` runs for verification.
-4. Release target remains `0.5.0`, not `1.0.0`.
+4. Release target is now the formal `1.0.0` package with no suffix.
 
 ### Experimental Branch Integration
 
 The only local branch not merged into `main` is `codex/lifelike-learning-initiative` at `a9e790a`. Treat it as a historical experiment branch, not as a branch to merge normally:
 
 - Its runtime ideas were reworked into main by later commits, especially `b4cb101`, `389a246`, and `c13a5cf`.
-- Main already contains the lifelike learning runtime, tests, public API, LivingMemory annotation, real-time decay, group-atmosphere state layer, and v0.5.0 benchmark report.
+- Main already contains the lifelike learning runtime, tests, public API, LivingMemory annotation, real-time decay, group-atmosphere state layer, and current benchmark report.
 - A normal merge would reintroduce local knowledge-base directories and remove newer state-layer files from the merge view; do not merge it into main.
 - If any future salvage is needed, cherry-pick only small runtime/test/documentation hunks after verifying they do not include knowledge-base files.
 
