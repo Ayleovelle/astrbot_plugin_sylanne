@@ -13,6 +13,7 @@ ALLOWED_MATH_MACROS = {
     "Delta",
     "Pi",
     "Sigma",
+    "Theta",
     "alpha",
     "arg",
     "begin",
@@ -35,10 +36,12 @@ ALLOWED_MATH_MACROS = {
     "partial",
     "phi",
     "qquad",
+    "rho",
     "right",
     "sqrt",
     "sum",
     "tanh",
+    "tau",
     "theta",
 }
 
@@ -136,7 +139,10 @@ class DocumentMathContractTests(unittest.TestCase):
             "<summary>展开行动倾向、关系决策与后果衰减公式</summary>",
             readme,
         )
-        self.assertIn("O_t = 2^{-\\Delta t/H_o}O_{t-1}", readme)
+        self.assertIn("\\Theta^O_t=f_O(P_t,E_t,X_t,F_t,\\Delta t,\\Theta^O_{t-1})", readme)
+        self.assertIn("O_t = 2^{-\\Delta t/H^O_t}O_{t-1}", readme)
+        self.assertNotIn("personality_drift_apply_strength", readme)
+        self.assertNotIn("personality_drift_event_threshold", readme)
         self.assertIn("## 重点版", theory)
         self.assertIn(
             "<summary>展开完整理论论证、公式推导与参考文献</summary>",

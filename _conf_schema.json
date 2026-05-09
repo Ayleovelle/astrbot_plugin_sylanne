@@ -39,169 +39,107 @@
     ],
     "hint": "pre 会在回复前影响本轮语气；post 会根据 bot 实际回复修正状态；both 效果最好但消耗更多。"
   },
-  "background_post_assessment": {
-    "description": "把回复后的情绪评估放到后台执行",
-    "type": "bool",
-    "default": false,
-    "hint": "默认关闭以保持兼容。开启后，当 assessment_timing 包含 post 时，插件不会在 on_llm_response 中等待内部情绪评估完成；同一会话按 FIFO 队列串行处理，保留完整轨迹但状态会稍后更新。"
-  },
   "background_post_queue_limit": {
-    "description": "每个会话后台回复后评估队列上限",
+    "description": "每个会话后台 post 评估队列上限",
     "type": "int",
     "default": 0,
-    "hint": "默认 0 表示不限制，保留完整轨迹。若担心极端刷屏压垮后台，可设置正整数；超过后会丢弃最旧的未处理项。"
+    "hint": "后台 post 评估自动开启。0 表示不限制；大于 0 时，超过上限的最旧任务会被跳过以保护延迟。"
   },
-  "background_post_max_workers": {
-    "description": "每个会话后台回复后评估最大并发 worker 数",
-    "type": "int",
-    "default": 5,
-    "hint": "开启 background_post_assessment 后生效。同一会话最多同时运行多少个后台观测评估 worker；状态写入仍按消息顺序提交，空队列后 worker 会自动结束。"
+  "enable_dynamic_background_workers": {
+    "description": "启用动态后台 worker 扩容",
+    "type": "bool",
+    "default": false,
+    "hint": "默认关闭。高负载时可在每会话基础 3 个 worker 之外最多临时增加 5 个 worker；状态提交仍保持顺序，但会增加 API、token 和 CPU 压力。"
   },
   "background_post_queue_checkpoint_enabled": {
-    "description": "Persist background post-assessment queue checkpoints",
+    "description": "启用后台队列检查点",
     "type": "bool",
     "default": true,
-    "hint": "When enabled, queued background post-assessment jobs are checkpointed to KV so a restart can resume uncommitted state updates."
+    "hint": "把未提交的后台任务写入 KV；插件重启后会尝试恢复队列，避免状态轨迹断裂。"
   },
   "background_post_job_lease_seconds": {
-    "description": "Lease seconds for an active background post-assessment job",
+    "description": "后台任务租约秒数",
     "type": "float",
     "default": 120.0,
-    "hint": "If a worker disappears while holding a job, an expired lease lets the queue recover it instead of leaving the trajectory stuck."
+    "hint": "单个 worker 领取任务后的租约时间；租约过期后任务可被回收并重新排队。"
   },
   "background_post_job_timeout_seconds": {
-    "description": "Timeout seconds for a single background post-assessment job",
+    "description": "后台任务超时秒数",
     "type": "float",
     "default": 0.0,
-    "hint": "0 disables the per-job timeout. Positive values convert stuck jobs into retryable failures."
+    "hint": "0 表示不启用任务级超时；大于 0 时，超过该时长的后台评估会按失败处理并进入重试。"
   },
   "background_post_retry_max_attempts": {
-    "description": "Maximum attempts before a background post-assessment job enters dead-letter",
+    "description": "后台任务最大重试次数",
     "type": "int",
     "default": 3,
-    "hint": "Retries preserve ordered state commits. A job is dead-lettered only after this many failed attempts."
+    "hint": "后台评估失败后最多重试的次数；超过后进入 dead-letter 诊断队列。"
   },
   "background_post_retry_base_delay_seconds": {
-    "description": "Base delay seconds for background post-assessment retries",
+    "description": "后台重试基础延迟秒数",
     "type": "float",
     "default": 2.0,
-    "hint": "Retry delay uses exponential backoff from this base delay."
+    "hint": "后台任务失败后的指数退避基础延迟。"
   },
   "background_post_retry_max_delay_seconds": {
-    "description": "Maximum retry delay seconds for background post-assessment retries",
+    "description": "后台重试最大延迟秒数",
     "type": "float",
     "default": 60.0,
-    "hint": "Caps exponential retry backoff so a noisy failure does not wait forever before becoming visible."
+    "hint": "限制指数退避的最大等待时间。"
   },
   "background_post_dead_letter_limit": {
-    "description": "Maximum retained dead-letter job summaries per session",
+    "description": "后台 dead-letter 保留条数",
     "type": "int",
     "default": 100,
-    "hint": "Dead letters store diagnostic metadata without raw request or response text."
+    "hint": "每个会话最多保留的失败任务诊断摘要数量。"
   },
   "background_post_diagnostics_warn_lag_count": {
-    "description": "Queued plus active background jobs required for a runtime lag warning",
+    "description": "后台队列数量告警阈值",
     "type": "int",
     "default": 20,
-    "hint": "Runtime diagnostics report warning_level=warn when a session exceeds this count."
+    "hint": "排队任务和活跃任务数量达到该值时，运行时诊断会标记 warning_level=warn。"
   },
   "background_post_diagnostics_warn_lag_seconds": {
-    "description": "Oldest queued or active job age required for a runtime lag warning",
+    "description": "后台队列等待告警秒数",
     "type": "float",
     "default": 60.0,
-    "hint": "Runtime diagnostics report warning_level=warn when the oldest pending state update is older than this."
+    "hint": "最老任务等待超过该秒数时，运行时诊断会标记 warning_level=warn。"
   },
   "enable_low_signal_light_assessment": {
-    "description": "Use lightweight local assessment for low-signal turns",
+    "description": "启用低信息量轻量评估",
     "type": "bool",
     "default": true,
-    "hint": "Short acknowledgements, blank turns, emoji/punctuation-only turns, and simple repeats avoid the LLM assessor while preserving a small causal trace."
+    "hint": "默认开启。短确认、空消息或纯符号消息会跳过 LLM 情绪评估，改用本地轻量估计。"
   },
   "low_signal_max_chars": {
-    "description": "Maximum text length for low-signal lightweight assessment",
+    "description": "低信息量文本最大字符数",
     "type": "int",
     "default": 12,
-    "hint": "Only very short low-signal messages are bypassed; normal content still uses the configured assessor path."
+    "hint": "小于等于该长度且符合低信息模式的文本会优先使用轻量评估。"
   },
   "agent_speaker_relationship_tracking": {
-    "description": "Agent keeps a per-speaker relationship/emotion track in group chats",
+    "description": "启用发言者关系分轨记录",
     "type": "bool",
     "default": true,
-    "hint": "When enabled, the conversation track still receives every message, and the agent also saves a conversation+speaker directed relationship track for the current speaker."
+    "hint": "默认开启。群聊或多用户场景下，会同时维护 conversation 与 speaker 级别的情绪关系轨迹。"
   },
   "agent_include_speaker_in_assessment": {
-    "description": "Agent marks the current speaker inside emotion-assessment text",
+    "description": "评估时加入发言者标识",
     "type": "bool",
     "default": true,
-    "hint": "When AstrBot exposes a sender id or nickname, the internal assessment text includes a speaker marker so the agent can distinguish who said the message."
+    "hint": "当 AstrBot 能提供用户 ID 或昵称时，会把发言者信息加入内部评估上下文，帮助区分不同人的关系状态。"
   },
   "agent_identity_profile_limit": {
-    "description": "Maximum cached conversation/speaker identity profiles",
+    "description": "发言者身份画像缓存上限",
     "type": "int",
     "default": 256,
-    "hint": "Large group chats prune old silent speaker profiles after this limit while keeping the active conversation and current speaker."
+    "hint": "限制内存中保留的发言者身份与别名画像数量，防止长期群聊无限增长。"
   },
   "agent_identity_ttl_seconds": {
-    "description": "Seconds before silent speaker identity profiles are pruned",
+    "description": "发言者身份画像保留秒数",
     "type": "float",
     "default": 2592000.0,
-    "hint": "Default is 30 days. Set 0 to disable TTL pruning and rely only on the profile limit."
-  },
-  "enable_group_atmosphere_state": {
-    "description": "启用群聊氛围/房间气氛状态建模",
-    "type": "bool",
-    "default": true,
-    "hint": "默认开启。维护独立 group_atmosphere_state，用于记录群聊热度、参与节奏、共享情绪和开口/收束时机；可通过 get_bot_group_atmosphere_state 或 query_agent_state 查询。"
-  },
-  "group_atmosphere_injection_strength": {
-    "description": "群聊氛围状态 prompt 注入强度",
-    "type": "float",
-    "default": 0.25,
-    "hint": "0 表示不注入群聊氛围提示词；大于 0 时仅在 inject_state 和 enable_group_atmosphere_state 同时开启后生效。compact 注入会提示主 LLM 按需调用工具查询细节。"
-  },
-  "group_atmosphere_alpha_base": {
-    "description": "群聊氛围状态基础更新步长",
-    "type": "float",
-    "default": 0.34
-  },
-  "group_atmosphere_alpha_min": {
-    "description": "群聊氛围状态最小更新步长",
-    "type": "float",
-    "default": 0.04
-  },
-  "group_atmosphere_alpha_max": {
-    "description": "群聊氛围状态最大更新步长",
-    "type": "float",
-    "default": 0.52
-  },
-  "group_atmosphere_half_life_seconds": {
-    "description": "群聊氛围状态真实时间半衰期（秒）",
-    "type": "float",
-    "default": 1800.0,
-    "hint": "默认 30 分钟。群体热度、紧张度和参与节奏会按真实经过时间回落，不靠刷屏快速清空。"
-  },
-  "group_atmosphere_trajectory_limit": {
-    "description": "群聊氛围状态轨迹最多保留点数",
-    "type": "int",
-    "default": 60
-  },
-  "group_atmosphere_join_cooldown_turns": {
-    "description": "Bot group-chat join cooldown measured in room turns",
-    "type": "int",
-    "default": 2,
-    "hint": "After the bot replies in a group conversation, participation policy prefers listening for this many room turns unless attention is high."
-  },
-  "group_atmosphere_join_cooldown_seconds": {
-    "description": "Bot group-chat join cooldown measured in seconds",
-    "type": "float",
-    "default": 45.0,
-    "hint": "After the bot replies in a group conversation, participation policy prefers listening for this many seconds unless attention is high."
-  },
-  "group_atmosphere_join_cooldown_bypass_attention": {
-    "description": "Bot attention threshold that bypasses group-chat join cooldown",
-    "type": "float",
-    "default": 0.8,
-    "hint": "If the room is clearly addressing the bot, cooldown will not suppress joining."
+    "hint": "默认 30 天。0 表示不按时间清理，只受数量上限限制。"
   },
   "enable_agent_causal_trail": {
     "description": "启用 agent 状态因果轨迹记录",
@@ -216,22 +154,22 @@
     "hint": "限制内存和 KV 中保存的最近因果轨迹环形缓冲长度；读取时仍可传 limit 只取更少条目。"
   },
   "agent_trail_compaction_enabled": {
-    "description": "Expose a compacted low-signal view for agent causal trail queries",
+    "description": "启用 agent 因果轨迹压缩",
     "type": "bool",
     "default": true,
-    "hint": "The raw trail is retained; query responses also expose compacted_items for low-signal spans."
+    "hint": "把连续低变化的状态更新压缩为 compacted_items，降低读取和存储成本。"
   },
   "agent_trail_low_signal_delta_threshold": {
-    "description": "Maximum state delta considered low signal for trail compaction",
+    "description": "因果轨迹低变化阈值",
     "type": "float",
     "default": 0.03,
-    "hint": "Consecutive trail items whose largest value change is below this threshold can be summarized in compacted_items."
+    "hint": "状态变化小于该阈值的连续记录可被压缩为 compacted_items。"
   },
   "agent_trail_low_signal_window": {
-    "description": "Low-signal trail window size before compacting",
+    "description": "因果轨迹压缩窗口",
     "type": "int",
     "default": 5,
-    "hint": "Small low-signal runs stay readable; longer repeated runs become a compacted summary item."
+    "hint": "连续达到该数量的低变化记录会被合并为一个压缩摘要。"
   },
   "inject_state": {
     "description": "把当前情绪状态作为临时上下文注入 LLM 请求",
@@ -239,45 +177,45 @@
     "default": true
   },
   "state_injection_detail": {
-    "description": "Default detail level for the main emotion-state prompt injection",
+    "description": "主情绪状态注入细节",
     "type": "string",
     "default": "compact",
     "options": [
       "compact",
       "full"
     ],
-    "hint": "compact injects a short style-control summary and tells the LLM to query tools for details; full restores the previous verbose prompt fragment."
+    "hint": "compact 只注入摘要，减少 token；full 注入完整状态细节。"
   },
   "state_injection_compact_mode": {
-    "description": "Compact injection mode for emotion and group-atmosphere state",
+    "description": "主情绪 compact 注入模式",
     "type": "string",
     "default": "snapshot",
     "options": [
       "snapshot",
       "diff"
     ],
-    "hint": "snapshot keeps the current compact behavior. diff sends a full compact snapshot periodically and otherwise only material state changes."
+    "hint": "snapshot 每轮注入快照；diff 只在变化明显或达到强制轮次时注入差分摘要。"
   },
   "state_injection_diff_threshold": {
-    "description": "Minimum emotion-state value delta included in diff injection",
+    "description": "主情绪 diff 注入变化阈值",
     "type": "float",
     "default": 0.08,
-    "hint": "Only values that changed by at least this amount are listed in diff injection mode."
+    "hint": "状态维度变化超过该阈值时才写入 diff 摘要。"
   },
   "group_atmosphere_injection_diff_threshold": {
-    "description": "Minimum group-atmosphere value delta included in diff injection",
+    "description": "群聊氛围 diff 注入变化阈值",
     "type": "float",
     "default": 0.08,
-    "hint": "Only room-mood values that changed by at least this amount are listed in diff injection mode."
+    "hint": "群聊氛围维度变化超过该阈值时才写入 diff 摘要。"
   },
   "state_injection_diff_force_every_turns": {
-    "description": "Turns between forced compact snapshots while using diff injection",
+    "description": "diff 模式强制快照轮次",
     "type": "int",
     "default": 6,
-    "hint": "Prevents long conversations from relying only on deltas forever."
+    "hint": "即使变化较小，也会每隔该轮数注入一次 compact 快照。"
   },
   "auxiliary_state_injection_detail": {
-    "description": "Default detail level for auxiliary state prompt injections",
+    "description": "辅助状态注入细节",
     "type": "string",
     "default": "compact",
     "options": [
@@ -285,37 +223,37 @@
       "full",
       "off"
     ],
-    "hint": "compact injects a short tool-query hint for enabled auxiliary modules; full injects the previous verbose fragments; off skips auxiliary prompt fragments."
+    "hint": "compact 注入摘要；full 注入较完整细节；off 关闭拟人、生命化学习、人格漂移、群聊氛围等辅助状态注入。"
   },
   "state_injection_request_budget_chars": {
-    "description": "Estimated visible main LLM request character budget used before appending state injections",
+    "description": "单次 LLM 请求总字符预算",
     "type": "int",
     "default": 32000,
-    "hint": "Plugin-side guardrail only. It estimates system prompt, history, prompt, existing extra parts, tools/functions and persona-like fields before appending state text. It does not change stored trajectories."
+    "hint": "用于估算 prompt 与 extra parts 的总长度，避免状态注入把请求撑爆。"
   },
   "state_injection_reserved_chars": {
-    "description": "Reserved character margin kept free inside the state injection request budget",
+    "description": "状态注入保留字符预算",
     "type": "int",
     "default": 3000,
-    "hint": "Keeps room for downstream provider formatting, tool schemas, persona expansion and platform wrappers that the plugin can only estimate."
+    "hint": "为 provider、工具 schema 和用户正文预留空间，减少超长请求风险。"
   },
   "state_injection_max_added_chars": {
-    "description": "Maximum total characters this plugin may append as temporary state injection parts per main LLM request",
+    "description": "单次 LLM 请求最多新增状态字符数",
     "type": "int",
     "default": 2400,
-    "hint": "Limits only prompt injection into the main request. State updates, background assessment and detailed trajectories still continue."
+    "hint": "限制本插件向 LLM 请求中额外注入的状态文本总量。"
   },
   "state_injection_max_parts": {
-    "description": "Maximum number of temporary state injection parts appended per main LLM request",
+    "description": "单次 LLM 请求最多新增状态片段数",
     "type": "int",
     "default": 8,
-    "hint": "Prevents many enabled state layers from creating too many temporary request parts."
+    "hint": "限制本插件向 LLM 请求中额外追加的临时上下文片段数量。"
   },
   "llm_tool_response_max_chars": {
-    "description": "Maximum JSON characters returned by each state LLM Tool call",
+    "description": "单次 LLM Tool 返回 JSON 最大字符数",
     "type": "int",
     "default": 16000,
-    "hint": "When full state/tool output exceeds this cap, the tool returns valid bounded JSON with truncated/degraded metadata instead of a huge payload."
+    "hint": "full 查询可能很长；超过该上限时会返回截断提示，让调用方改用更窄的查询。"
   },
   "enable_safety_boundary": {
     "description": "启用情绪后果安全边界",
@@ -324,28 +262,10 @@
     "hint": "默认开启。开启时会把冷处理限制为轻微降频、短句、边界感，并禁止羞辱、威胁、操控或拒绝必要帮助；关闭后只按情绪后果调制语气和互动策略。"
   },
   "block_deception_manipulation_evasion_actions": {
-    "description": "Block deception/manipulation/evasion action directives emitted by plugin state layers",
+    "description": "阻断欺骗、操控、逃责类动作",
     "type": "bool",
     "default": false,
-    "hint": "Default false keeps these signals observable without adding plugin-level blocked_actions/not_allowed/refuse actions. Set true to restore the old hard-blocking payload and prompt behavior."
-  },
-  "persona_modeling": {
-    "description": "根据当前会话人格建立不同的情绪基线和反应参数",
-    "type": "bool",
-    "default": true,
-    "hint": "启用后，不同 AstrBot persona 会有不同的情绪初始状态、惯性和反应强度。"
-  },
-  "persona_influence": {
-    "description": "人格对情绪模型的影响强度",
-    "type": "float",
-    "default": 1.0,
-    "hint": "0 表示几乎不使用人格偏置，1 为默认，2 为强人格化。"
-  },
-  "reset_on_persona_change": {
-    "description": "检测到当前会话切换人格时重置情绪状态",
-    "type": "bool",
-    "default": true,
-    "hint": "关闭后会把旧状态迁移到新人格基线附近，而不是完全重置。"
+    "hint": "默认关闭。开启后，综合自我与阴影诊断中的 blocked_actions、not_allowed、refuse 等字段会作为插件层硬阻断信号。"
   },
   "max_context_chars": {
     "description": "情绪估计时最多读取的上下文字数",
@@ -389,117 +309,10 @@
     "hint": "仅在 benchmark_enable_simulated_time=true 时生效。插件会把观测时间视为 time.time()+offset，用于快速模拟 1 天、1 周、1 年等真实时间跨度。"
   },
   "assessor_temperature": {
-    "description": "情绪估计 LLM 的 temperature",
+    "description": "内部评估 LLM 温度",
     "type": "float",
-    "default": 0.1
-  },
-  "alpha_base": {
-    "description": "基础更新步长 alpha_base",
-    "type": "float",
-    "default": 0.42,
-    "hint": "越大越容易被当前对话影响。"
-  },
-  "alpha_min": {
-    "description": "最小更新步长",
-    "type": "float",
-    "default": 0.06
-  },
-  "alpha_max": {
-    "description": "最大更新步长",
-    "type": "float",
-    "default": 0.72
-  },
-  "baseline_decay": {
-    "description": "兼容项：旧版基线回归系数 gamma",
-    "type": "float",
-    "default": 0.035,
-    "hint": "新版默认不再按轮次衰减，真实恢复速度请使用 baseline_half_life_seconds。"
-  },
-  "baseline_half_life_seconds": {
-    "description": "情绪向人格基线自然恢复的半衰期（秒）",
-    "type": "float",
-    "default": 21600,
-    "hint": "默认 6 小时。真实时间每过一个半衰期，偏离人格基线的部分约减少一半；不会因为刷屏而加速恢复。"
-  },
-  "reactivity": {
-    "description": "惊讶度反应系数 r",
-    "type": "float",
-    "default": 0.55,
-    "hint": "越大，突然事件造成的情绪变化越强。"
-  },
-  "confidence_midpoint": {
-    "description": "置信门控中点 c0",
-    "type": "float",
-    "default": 0.5
-  },
-  "confidence_slope": {
-    "description": "置信门控斜率 k",
-    "type": "float",
-    "default": 7.0
-  },
-  "min_update_interval_seconds": {
-    "description": "反刷屏最小有效更新时间间隔（秒）",
-    "type": "float",
-    "default": 8,
-    "hint": "短时间内连续提交大量文本时，本轮情绪更新会被削弱，避免用海量文本强行刷掉情绪。"
-  },
-  "rapid_update_half_life_seconds": {
-    "description": "快速连续更新的门控半衰期（秒）",
-    "type": "float",
-    "default": 20,
-    "hint": "越大，短时间连刷对情绪的影响越弱；设为 0 可基本关闭该门控。"
-  },
-  "arousal_from_surprise": {
-    "description": "惊讶度对唤醒度的耦合强度",
-    "type": "float",
-    "default": 0.18
-  },
-  "dominance_control_coupling": {
-    "description": "支配感与可控性的耦合强度",
-    "type": "float",
-    "default": 0.12
-  },
-  "consequence_decay": {
-    "description": "兼容项：旧版情绪后果每轮衰减系数",
-    "type": "float",
-    "default": 0.68,
-    "hint": "新版默认不再按轮次衰减，真实后果持续请使用 consequence_half_life_seconds。"
-  },
-  "consequence_half_life_seconds": {
-    "description": "情绪后果强度自然衰减半衰期（秒）",
-    "type": "float",
-    "default": 10800,
-    "hint": "默认 3 小时。行动倾向只随真实时间衰减，不会被大量消息快速刷掉。"
-  },
-  "consequence_threshold": {
-    "description": "触发情绪后果的阈值",
-    "type": "float",
-    "default": 0.48,
-    "hint": "越低越容易触发冷战、争辩/对质、回避、修复等后果。"
-  },
-  "consequence_strength": {
-    "description": "情绪后果强度倍率",
-    "type": "float",
-    "default": 1.0,
-    "hint": "0 表示几乎不产生持续后果，1 为默认，2 为更强烈。"
-  },
-  "cold_war_turns": {
-    "description": "兼容项：旧版冷处理持续轮数",
-    "type": "int",
-    "default": 3,
-    "hint": "新版请使用 cold_war_duration_seconds。"
-  },
-  "cold_war_duration_seconds": {
-    "description": "冷处理触发后的真实持续时间（秒）",
-    "type": "float",
-    "default": 1800,
-    "hint": "默认 30 分钟。期间不会因为聊天轮数增加而自动缩短。"
-  },
-  "short_effect_duration_seconds": {
-    "description": "普通短期情绪后果持续时间（秒）",
-    "type": "float",
-    "default": 900,
-    "hint": "用于直接设边界、直接对质、无理争吵风险、谨慎核对、主动修复等非冷处理效果，默认 15 分钟。"
+    "default": 0.1,
+    "hint": "建议保持较低，提升 JSON 输出稳定性。"
   },
   "allow_emotion_reset_backdoor": {
     "description": "允许手动/公共 API 重置情绪状态后门",
@@ -512,70 +325,6 @@
     "type": "bool",
     "default": false,
     "hint": "默认关闭。开启后可通过公共 API 或 /psych_state 记录与查看心理状态筛查。该模块仅用于状态记录和风险提示，不提供疾病诊断或医疗建议。"
-  },
-  "enable_humanlike_state": {
-    "description": "启用拟人化状态模拟模块",
-    "type": "bool",
-    "default": false,
-    "hint": "默认关闭。开启后维护独立 humanlike_state，用于资源、边界、透明度和依赖风险调制。"
-  },
-  "humanlike_injection_strength": {
-    "description": "拟人化状态注入强度",
-    "type": "float",
-    "default": 0.35,
-    "hint": "0 表示不注入拟人化调制片段；大于 0 时仅在 inject_state 和 enable_humanlike_state 同时开启后生效。"
-  },
-  "humanlike_alpha_base": {
-    "description": "拟人化状态基础更新步长",
-    "type": "float",
-    "default": 0.3
-  },
-  "humanlike_alpha_min": {
-    "description": "拟人化状态最小更新步长",
-    "type": "float",
-    "default": 0.03
-  },
-  "humanlike_alpha_max": {
-    "description": "拟人化状态最大更新步长",
-    "type": "float",
-    "default": 0.46
-  },
-  "humanlike_confidence_midpoint": {
-    "description": "拟人化状态置信门控中点",
-    "type": "float",
-    "default": 0.5
-  },
-  "humanlike_confidence_slope": {
-    "description": "拟人化状态置信门控斜率",
-    "type": "float",
-    "default": 6.0
-  },
-  "humanlike_state_half_life_seconds": {
-    "description": "拟人化状态按真实时间回落的半衰期（秒）",
-    "type": "float",
-    "default": 21600,
-    "hint": "默认 6 小时。状态按真实经过时间衰减，不能靠短时间大量文本强行刷掉长期状态。"
-  },
-  "humanlike_min_update_interval_seconds": {
-    "description": "拟人化状态反刷屏最小有效更新时间间隔（秒）",
-    "type": "float",
-    "default": 8
-  },
-  "humanlike_rapid_update_half_life_seconds": {
-    "description": "拟人化状态快速连续更新门控半衰期（秒）",
-    "type": "float",
-    "default": 20
-  },
-  "humanlike_max_impulse_per_update": {
-    "description": "拟人化状态单次更新最大冲量",
-    "type": "float",
-    "default": 0.18,
-    "hint": "限制单次文本观察的最大影响，避免超长文本覆盖长期状态。"
-  },
-  "humanlike_trajectory_limit": {
-    "description": "拟人化状态轨迹最多保留点数",
-    "type": "int",
-    "default": 40
   },
   "humanlike_memory_write_enabled": {
     "description": "为记忆写入附带拟人化状态标注",
@@ -595,45 +344,6 @@
     "default": true,
     "hint": "默认开启，用于异常状态、严重后果或调试。"
   },
-  "enable_lifelike_learning": {
-    "description": "启用生命化学习状态模块",
-    "type": "bool",
-    "default": false,
-    "hint": "默认关闭。开启后会按会话持久化学习用户画像、新词、小圈子黑话、偏好、边界和说话/沉默时机。"
-  },
-  "lifelike_learning_injection_strength": {
-    "description": "生命化学习 prompt 注入强度",
-    "type": "float",
-    "default": 0.3,
-    "hint": "0 表示只学习不注入；大于 0 时在 inject_state 和 enable_lifelike_learning 同时开启后注入共同语境与节奏建议。"
-  },
-  "lifelike_learning_half_life_seconds": {
-    "description": "生命化学习状态真实时间半衰期（秒）",
-    "type": "float",
-    "default": 2592000,
-    "hint": "默认 30 天。用户画像、共同语境和关系熟悉度按真实时间缓慢回落，不能靠短时间刷屏覆盖。"
-  },
-  "lifelike_learning_min_update_interval_seconds": {
-    "description": "生命化学习反刷屏最小有效更新时间间隔（秒）",
-    "type": "float",
-    "default": 10
-  },
-  "lifelike_learning_max_terms": {
-    "description": "生命化学习最多保留的新词/黑话条目数",
-    "type": "int",
-    "default": 120
-  },
-  "lifelike_learning_trajectory_limit": {
-    "description": "生命化学习轨迹最多保留点数",
-    "type": "int",
-    "default": 60
-  },
-  "lifelike_learning_confidence_growth": {
-    "description": "新词/黑话置信度每次证据增长系数",
-    "type": "float",
-    "default": 0.25,
-    "hint": "越大越快从“先问再用”过渡到自然使用；建议保持保守。"
-  },
   "lifelike_learning_memory_write_enabled": {
     "description": "为记忆写入附带生命化学习状态标注",
     "type": "bool",
@@ -645,71 +355,6 @@
     "type": "bool",
     "default": true,
     "hint": "默认开启，用于误学黑话、错误用户画像、边界异常或调试。"
-  },
-  "enable_personality_drift": {
-    "description": "启用真实时间人格漂移/长期适应状态",
-    "type": "bool",
-    "default": false,
-    "hint": "默认关闭。开启后，bot 的运行时人格画像会被长期事件小幅、有界地适应；使用真实经过时间，而不是消息数量。"
-  },
-  "personality_drift_injection_strength": {
-    "description": "人格漂移 prompt 注入强度",
-    "type": "float",
-    "default": 0.22,
-    "hint": "0 表示不注入；大于 0 时仅在 inject_state 和 enable_personality_drift 同时开启后注入少量慢适应提示。"
-  },
-  "personality_drift_apply_strength": {
-    "description": "人格漂移偏移应用到运行时 persona 画像的强度",
-    "type": "float",
-    "default": 0.65
-  },
-  "personality_drift_half_life_seconds": {
-    "description": "人格漂移真实时间半衰期（秒）",
-    "type": "float",
-    "default": 7776000,
-    "hint": "默认 90 天。人格偏移会按真实经过时间缓慢回到静态 persona 锚点。"
-  },
-  "personality_drift_rapid_update_half_life_seconds": {
-    "description": "人格漂移快速连续更新门控半衰期（秒）",
-    "type": "float",
-    "default": 86400,
-    "hint": "默认 1 天。短时间密集消息会被门控，不能强行推动长期人格变化。"
-  },
-  "personality_drift_min_update_interval_seconds": {
-    "description": "人格漂移完全有效更新的最小间隔（秒）",
-    "type": "float",
-    "default": 21600
-  },
-  "personality_drift_learning_rate": {
-    "description": "人格漂移事件到特质偏移的学习率",
-    "type": "float",
-    "default": 0.055
-  },
-  "personality_drift_event_threshold": {
-    "description": "人格漂移事件固化的最小信号阈值",
-    "type": "float",
-    "default": 0.12
-  },
-  "personality_drift_max_impulse_per_update": {
-    "description": "单次更新最大有符号人格冲量",
-    "type": "float",
-    "default": 0.015,
-    "hint": "限制单个事件影响，避免一条消息或刷屏改写人格。"
-  },
-  "personality_drift_max_trait_offset": {
-    "description": "相对静态 persona 特质先验的最大绝对偏移",
-    "type": "float",
-    "default": 0.22
-  },
-  "personality_drift_confidence_growth": {
-    "description": "每次固化漂移事件带来的置信增长",
-    "type": "float",
-    "default": 0.1
-  },
-  "personality_drift_trajectory_limit": {
-    "description": "人格漂移轨迹最多保留点数",
-    "type": "int",
-    "default": 80
   },
   "personality_drift_memory_write_enabled": {
     "description": "为记忆写入附带人格漂移状态标注",
@@ -729,64 +374,6 @@
     "default": false,
     "hint": "默认关闭。维护 moral_repair_state，用于记录欺骗/伤害风险信号、内疚、责任、道歉、补偿和信任修复；默认仅观察欺骗/操控/逃责类信号，是否输出插件层硬阻断由 block_deception_manipulation_evasion_actions 控制。"
   },
-  "moral_repair_injection_strength": {
-    "description": "道德修复 prompt 注入强度",
-    "type": "float",
-    "default": 0.35,
-    "hint": "0 表示不注入道德修复提示词；大于 0 时仅在 inject_state 和 enable_moral_repair_state 同时开启后生效。"
-  },
-  "moral_repair_alpha_base": {
-    "description": "道德修复基础更新步长",
-    "type": "float",
-    "default": 0.28
-  },
-  "moral_repair_alpha_min": {
-    "description": "道德修复最小更新步长",
-    "type": "float",
-    "default": 0.03
-  },
-  "moral_repair_alpha_max": {
-    "description": "道德修复最大更新步长",
-    "type": "float",
-    "default": 0.42
-  },
-  "moral_repair_confidence_midpoint": {
-    "description": "道德修复置信门控中点",
-    "type": "float",
-    "default": 0.5
-  },
-  "moral_repair_confidence_slope": {
-    "description": "道德修复置信门控斜率",
-    "type": "float",
-    "default": 6.0
-  },
-  "moral_repair_state_half_life_seconds": {
-    "description": "道德修复真实时间半衰期（秒）",
-    "type": "float",
-    "default": 604800,
-    "hint": "默认 7 天。长期内疚、责任、回避和信任修复会按真实经过时间变化，不能靠刷屏清除。"
-  },
-  "moral_repair_min_update_interval_seconds": {
-    "description": "道德修复反刷屏最小有效更新时间间隔（秒）",
-    "type": "float",
-    "default": 8
-  },
-  "moral_repair_rapid_update_half_life_seconds": {
-    "description": "道德修复快速连续更新门控半衰期（秒）",
-    "type": "float",
-    "default": 30
-  },
-  "moral_repair_max_impulse_per_update": {
-    "description": "道德修复单次更新最大冲量",
-    "type": "float",
-    "default": 0.16,
-    "hint": "限制单次文本观察的最大影响，避免超长文本覆盖长期状态。"
-  },
-  "moral_repair_trajectory_limit": {
-    "description": "道德修复轨迹最多保留点数",
-    "type": "int",
-    "default": 40
-  },
   "moral_repair_memory_write_enabled": {
     "description": "为记忆写入附带道德修复状态标注",
     "type": "bool",
@@ -804,70 +391,6 @@
     "type": "bool",
     "default": false,
     "hint": "默认关闭。维护 fallibility_state，用于低风险误读、记忆模糊、轻微嘴硬、澄清、自我纠错和补偿；默认仅观察编造事实、操控和欺骗策略相关信号，是否输出插件层硬阻断由 block_deception_manipulation_evasion_actions 控制。"
-  },
-  "fallibility_injection_strength": {
-    "description": "瑕疵模拟 prompt 注入强度",
-    "type": "float",
-    "default": 0.0,
-    "hint": "0 表示不注入瑕疵模拟提示词；大于 0 时仅在 inject_state 和 enable_fallibility_state 同时开启后生效。"
-  },
-  "fallibility_alpha_base": {
-    "description": "瑕疵模拟基础更新步长",
-    "type": "float",
-    "default": 0.22
-  },
-  "fallibility_alpha_min": {
-    "description": "瑕疵模拟最小更新步长",
-    "type": "float",
-    "default": 0.02
-  },
-  "fallibility_alpha_max": {
-    "description": "瑕疵模拟最大更新步长",
-    "type": "float",
-    "default": 0.34
-  },
-  "fallibility_confidence_midpoint": {
-    "description": "瑕疵模拟置信门控中点",
-    "type": "float",
-    "default": 0.5
-  },
-  "fallibility_confidence_slope": {
-    "description": "瑕疵模拟置信门控斜率",
-    "type": "float",
-    "default": 6.0
-  },
-  "fallibility_state_half_life_seconds": {
-    "description": "瑕疵模拟真实时间半衰期（秒）",
-    "type": "float",
-    "default": 86400,
-    "hint": "默认 1 天。误读、嘴硬和修复压力会按真实经过时间变化，不能靠刷屏清除。"
-  },
-  "fallibility_min_update_interval_seconds": {
-    "description": "瑕疵模拟反刷屏最小有效更新时间间隔（秒）",
-    "type": "float",
-    "default": 10
-  },
-  "fallibility_rapid_update_half_life_seconds": {
-    "description": "瑕疵模拟快速连续更新门控半衰期（秒）",
-    "type": "float",
-    "default": 45
-  },
-  "fallibility_max_impulse_per_update": {
-    "description": "瑕疵模拟单次更新最大冲量",
-    "type": "float",
-    "default": 0.12,
-    "hint": "限制单次文本观察的最大影响，避免超长文本覆盖长期状态。"
-  },
-  "fallibility_max_error_pressure": {
-    "description": "瑕疵模拟允许暴露的最大低风险错误压力",
-    "type": "float",
-    "default": 0.55,
-    "hint": "把功能限制在低风险瑕疵范围内，避免把故意失败变成目标。"
-  },
-  "fallibility_trajectory_limit": {
-    "description": "瑕疵模拟轨迹最多保留点数",
-    "type": "int",
-    "default": 40
   },
   "fallibility_memory_write_enabled": {
     "description": "为记忆写入附带瑕疵模拟状态标注",
@@ -909,40 +432,5 @@
       "minimal"
     ],
     "hint": "控制 trace 和提示词预算细节。minimal 会减少可选细节，但保留 schema、安全优先级、已存在的诊断/阻断字段和 LivingMemory 注解。"
-  },
-  "psychological_alpha_base": {
-    "description": "心理筛查状态基础更新步长",
-    "type": "float",
-    "default": 0.32,
-    "hint": "越大越容易被当前文本影响；建议保持保守。"
-  },
-  "psychological_alpha_min": {
-    "description": "心理筛查状态最小更新步长",
-    "type": "float",
-    "default": 0.04,
-    "hint": "低置信或短间隔输入时仍保留的最小更新幅度，建议保持较低。"
-  },
-  "psychological_alpha_max": {
-    "description": "心理筛查状态最大更新步长",
-    "type": "float",
-    "default": 0.55,
-    "hint": "限制单次文本对长期心理筛查状态的最大影响，避免单轮文本过度改写趋势。"
-  },
-  "psychological_state_half_life_seconds": {
-    "description": "心理筛查长期状态自然回落半衰期（秒）",
-    "type": "float",
-    "default": 604800,
-    "hint": "默认 7 天。用于长期状态趋势，而不是单次诊断。"
-  },
-  "psychological_crisis_half_life_seconds": {
-    "description": "心理红旗风险信号保留半衰期（秒）",
-    "type": "float",
-    "default": 2592000,
-    "hint": "默认 30 天。红旗信号用于人工复核和安全分流，不用于疾病标签。"
-  },
-  "psychological_trajectory_limit": {
-    "description": "心理筛查轨迹最多保留点数",
-    "type": "int",
-    "default": 40
   }
 }

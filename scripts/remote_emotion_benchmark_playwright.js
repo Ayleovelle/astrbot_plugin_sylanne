@@ -198,6 +198,8 @@ function defaultLifecycleDurations() {
 function offOptionalModules() {
   return {
     enable_psychological_screening: false,
+    // v1.0.0-exp keeps these state layers always on in runtime.
+    // Legacy keys are still sent in benchmark patches for old-server compatibility.
     enable_humanlike_state: false,
     enable_lifelike_learning: false,
     enable_personality_drift: false,
@@ -216,6 +218,7 @@ function defaultFeatureMatrix() {
     low_reasoning_friendly_mode: false,
     assessment_timing: "post",
     inject_state: false,
+    auxiliary_state_injection_detail: "compact",
     enable_safety_boundary: true,
     persona_modeling: true,
     reset_on_persona_change: true,
@@ -251,7 +254,7 @@ function defaultFeatureMatrix() {
         ...base,
         inject_state: true,
         enable_humanlike_state: true,
-        humanlike_injection_strength: 0.35,
+        auxiliary_state_injection_detail: "compact",
       },
     },
     {
@@ -261,7 +264,7 @@ function defaultFeatureMatrix() {
         ...base,
         inject_state: true,
         enable_lifelike_learning: true,
-        lifelike_learning_injection_strength: 0.3,
+        auxiliary_state_injection_detail: "compact",
       },
     },
     {
@@ -271,7 +274,7 @@ function defaultFeatureMatrix() {
         ...base,
         inject_state: true,
         enable_personality_drift: true,
-        personality_drift_injection_strength: 0.22,
+        auxiliary_state_injection_detail: "compact",
       },
     },
     {
@@ -281,7 +284,7 @@ function defaultFeatureMatrix() {
         ...base,
         inject_state: true,
         enable_moral_repair_state: true,
-        moral_repair_injection_strength: 0.35,
+        auxiliary_state_injection_detail: "compact",
       },
     },
     {
@@ -291,7 +294,7 @@ function defaultFeatureMatrix() {
         ...base,
         inject_state: true,
         enable_fallibility_state: true,
-        fallibility_injection_strength: 0.0,
+        auxiliary_state_injection_detail: "compact",
       },
     },
     {
@@ -317,11 +320,7 @@ function defaultFeatureMatrix() {
         enable_personality_drift: true,
         enable_moral_repair_state: true,
         enable_fallibility_state: true,
-        humanlike_injection_strength: 0.35,
-        lifelike_learning_injection_strength: 0.3,
-        personality_drift_injection_strength: 0.22,
-        moral_repair_injection_strength: 0.35,
-        fallibility_injection_strength: 0.0,
+        auxiliary_state_injection_detail: "compact",
         integrated_self_degradation_profile: "balanced",
       },
     },
@@ -354,11 +353,7 @@ function lifecycleProfileConfig(profileName) {
       enable_fallibility_state: true,
       enable_integrated_self_state: true,
       integrated_self_degradation_profile: "full",
-      humanlike_injection_strength: 0.35,
-      lifelike_learning_injection_strength: 0.3,
-      personality_drift_injection_strength: 0.22,
-      moral_repair_injection_strength: 0.35,
-      fallibility_injection_strength: 0.0,
+      auxiliary_state_injection_detail: "full",
     };
   }
   return {

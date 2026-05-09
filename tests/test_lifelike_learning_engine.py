@@ -8,7 +8,10 @@ from lifelike_learning_engine import (
     build_lifelike_memory_annotation,
     build_lifelike_prompt_fragment,
     derive_initiative_policy,
+    derive_proactive_speech_decision,
     heuristic_lifelike_observation,
+    local_proactive_topic_judgement,
+    rank_proactive_topics,
     lifelike_state_to_public_payload,
 )
 
@@ -114,9 +117,13 @@ class LifelikeLearningEngineTests(unittest.TestCase):
         self.assertIn("values", internal)
         self.assertIn("lexicon", internal)
         self.assertNotIn("values", plugin_safe)
+        self.assertIn("dynamics", plugin_safe)
+        self.assertIn("state_half_life_seconds", plugin_safe["dynamics"])
         self.assertIn("common_ground", plugin_safe)
         self.assertNotIn("lexicon", user_facing)
         self.assertEqual(annotation["kind"], "lifelike_learning_state_at_write")
+        self.assertIn("dynamics", annotation)
+        self.assertIn("state_half_life_seconds", annotation["dynamics"])
         self.assertEqual(annotation["source"], "livingmemory")
         self.assertEqual(annotation["written_at"], 120.0)
         self.assertTrue(annotation["privacy"]["raw_message_text_excluded"])
@@ -131,9 +138,66 @@ class LifelikeLearningEngineTests(unittest.TestCase):
         state.values["rapport"] = 0.9
 
         decayed = engine.passive_update(state, now=100.0)
-        expected = DEFAULT_VALUES["rapport"] + (0.9 - DEFAULT_VALUES["rapport"]) * 0.5
 
-        self.assertAlmostEqual(decayed.values["rapport"], expected)
+        self.assertIn("state_half_life_seconds", decayed.dynamics)
+        self.assertNotEqual(decayed.dynamics["state_half_life_seconds"], 100.0)
+        self.assertLess(decayed.values["rapport"], 0.9)
+        self.assertGreater(decayed.values["rapport"], DEFAULT_VALUES["rapport"])
+
+    def test_lifelike_learning_dynamics_follow_evidence_and_boundaries_smoothly(self):
+        engine = LifelikeLearningEngine()
+        state = LifelikeLearningState.initial()
+        jargon = heuristic_lifelike_observation(
+            "our small circle calls this bridge-cat, and I like when you learn the term",
+        )
+        learned = engine.update(state, jargon, now=100.0)
+        cautious = engine.update(
+            learned,
+            heuristic_lifelike_observation("please stay quiet first and do not spread private terms"),
+            now=110.0,
+        )
+
+        self.assertIn("confidence_growth", learned.dynamics)
+        self.assertIn("min_update_interval_seconds", cautious.dynamics)
+        self.assertGreater(learned.dynamics["confidence_growth"], 0.0)
+        self.assertGreaterEqual(
+            cautious.dynamics["min_update_interval_seconds"],
+            learned.dynamics["min_update_interval_seconds"],
+        )
+        self.assertLess(
+            abs(cautious.dynamics["value_step_scale"] - learned.dynamics["value_step_scale"]),
+            1.0,
+        )
+
+    def test_mutual_need_mode_is_modeled_without_fixed_topic_template(self):
+        engine = LifelikeLearningEngine()
+        state = engine.update(
+            LifelikeLearningState.initial(),
+            heuristic_lifelike_observation(
+                "我希望我们是一种双方都有需要和被需要的相处模式，你也可以需要我。"
+            ),
+            now=100.0,
+        )
+        state.values["rapport"] = 0.82
+        state.values["common_ground"] = 0.72
+        state.values["initiative_readiness"] = 0.82
+        state.values["boundary_sensitivity"] = 0.12
+        state.values["mutual_need_balance"] = 0.78
+        state.values["being_needed_readiness"] = 0.72
+        state.values["need_expression_readiness"] = 0.58
+        decision = derive_proactive_speech_decision(
+            state,
+            emotion_snapshot={"values": {"affiliation": 0.8, "valence": 0.4}},
+            group_snapshot={"values": {"joinability": 0.9, "bot_attention": 0.7}},
+        )
+        topics = rank_proactive_topics(state, candidate_context="刚才在聊相处模式。")
+        judgement = local_proactive_topic_judgement(decision, topics)
+
+        self.assertIn("mutual_need_evidence", state.flags)
+        self.assertGreater(state.values["mutual_need_balance"], DEFAULT_VALUES["mutual_need_balance"])
+        self.assertEqual(decision["needs"]["mode"], "mutual_need")
+        self.assertIn(judgement["need_mode"], {"mutual_need", "user_need", "bot_need"})
+        self.assertNotEqual(judgement["speech_intent"], "")
 
 
 if __name__ == "__main__":

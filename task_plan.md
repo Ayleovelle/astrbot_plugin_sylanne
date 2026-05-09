@@ -20,7 +20,70 @@ Latency target from 2026-05-08 onward: keep iterating with one priority, reducin
   - AstrBot version: `4.24.2`.
   - `/api/plugin/get` returned 30 plugins and `/api/plugin/source/get-failed-plugins` returned empty data.
   - Remote server has `astrbot_plugin_emotional_state` installed and activated.
-  - Remote server did have `astrbot_plugin_livingmemory` and `astrbot_plugin_emotionai_pro`.
+- Remote server did have `astrbot_plugin_livingmemory` and `astrbot_plugin_emotionai_pro`.
+
+## Active Task - 2026-05-09 v1.0.0-exp Pre-release Work
+
+Status: in progress. This section is the recovery anchor if context is compacted.
+
+User-facing release target:
+
+- Version label: `1.0.0-exp`.
+- Type: pre-release / experimental.
+- Do not upload to GitHub release unless the user later asks. Local package and remote AstrBot test are allowed if needed for validation.
+- README must be rewritten in Chinese, with a quick-start path plus full technical documentation. Reference style: `https://github.com/DBJD-CR/astrbot_plugin_proactive_chat`.
+- Config schema descriptions/hints should be Chinese wherever possible.
+- Add a disclaimer: this plugin is for exploration and learning of emotional LLM modeling. Extra resource cost, disabling reset backdoors, relaxing safety boundaries, or resulting damage are borne by the user/operator.
+- GitHub-visible commit/file-list messages should use Chinese wording when committing later, so the repository page does not show English messages such as `Initial commit`.
+
+Current uncommitted implementation state:
+
+- `main.py` already partially changed:
+  - `PERSONA_MODELING_ENABLED = True`, `PERSONA_INFLUENCE_STRENGTH = 1.0`, `RESET_ON_PERSONA_CHANGE = True`, `PERSONALITY_DRIFT_APPLY_STRENGTH = 0.65`.
+  - Core emotion dynamics no longer read user config for `alpha_base`, `reactivity`, `baseline_half_life_seconds`, `min_update_interval_seconds`, etc.
+  - `HumanlikeParameters()`, `LifelikeLearningParameters()`, and `PersonalityDriftParameters()` use internal defaults.
+  - `humanlike`, `lifelike_learning`, and `personality_drift` enabled helpers now always return `True`.
+  - Auxiliary prompt injection for those three layers is controlled by the unified `auxiliary_state_injection_detail`, not per-module injection strength.
+  - Engine cache key now includes adaptive personality-drift signature so drift changes can affect runtime dynamics.
+- `_conf_schema.json` already partially changed:
+  - Removed user-facing knobs for persona modeling, core emotion dynamics, humanlike internals, lifelike internals, and personality drift internals.
+  - Still needs contract tests and README alignment.
+- Tests and README are not yet updated and are expected to fail until the next phases are complete.
+
+New functional requirements to implement:
+
+- Proactive speech:
+  - Bot can decide whether to speak proactively.
+  - The speak/silence decision must be determined by a strict modeling formula, not a hand-written toggle-only heuristic.
+  - Proactive topic selection must be intelligent: select from learned common ground, current emotion, group atmosphere, persona drift, recent events, uncertainty/new words, and repair needs.
+  - Need rigorous README theory section for proactive speaking and topic selection, with formulas and literature-backed rationale.
+- Background/parallel execution:
+  - Any plugin functionality that can safely run in background should be automatically enabled and not user-configurable.
+  - Investigate additional modules that can move off the user-visible hot path without breaking state truthfulness.
+  - Existing background post-assessment should become automatic unless a hard correctness constraint blocks it.
+- Dynamic worker expansion:
+  - Add optional high-load helper workers.
+  - Switch required; default off.
+  - When enabled, high-load prediction may add no more than 5 extra workers.
+  - Output/state commit order must remain deterministic and preserve the real emotional trajectory.
+  - Config hint must warn about extra resource consumption and runtime pressure.
+- Stability validation:
+  - Self-check code for bugs.
+  - Run local tests.
+  - Package and preflight.
+  - Run 100 full-feature real-machine tests on the AstrBot test server after cleaning old same-name plugin if install testing is needed.
+  - After successful stability validation, merge the validation report into README.
+
+Immediate next phases:
+
+| Phase | Status | Scope |
+| --- | --- | --- |
+| A | in_progress | Finish auto-on/non-configurable internal dynamics migration and update tests |
+| B | pending | Add proactive speech formula, topic-selection model, public API/command surface if needed |
+| C | pending | Auto-enable safe background work and add optional high-load worker expansion with ordered commits |
+| D | pending | Translate config schema English strings to Chinese and add disclaimer |
+| E | pending | Rewrite README in Chinese with quick start, full docs, formulas, validation report |
+| F | pending | Run local validation, package preflight, and 100 full-feature remote tests |
 
 ## Iteration Queue
 

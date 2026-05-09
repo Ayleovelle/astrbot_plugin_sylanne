@@ -62,8 +62,35 @@ class PersonalityDriftEngineTests(unittest.TestCase):
 
         decayed = engine.passive_update(state, persona_fingerprint="p", now=100.0)
 
-        self.assertAlmostEqual(decayed.trait_offsets["interpersonal_warmth"], 0.10)
-        self.assertAlmostEqual(decayed.trait_confidence["interpersonal_warmth"], 0.40)
+        self.assertIn("state_half_life_seconds", decayed.dynamics)
+        self.assertNotEqual(decayed.dynamics["state_half_life_seconds"], 100.0)
+        self.assertLess(decayed.trait_offsets["interpersonal_warmth"], 0.20)
+        self.assertGreater(decayed.trait_offsets["interpersonal_warmth"], 0.0)
+        self.assertLess(decayed.trait_confidence["interpersonal_warmth"], 0.80)
+        self.assertGreater(decayed.trait_confidence["interpersonal_warmth"], 0.0)
+
+    def test_drift_dynamics_are_auto_derived_and_smoothed(self):
+        engine = PersonalityDriftEngine()
+        state = PersonalityDriftState.initial(persona_fingerprint="p", now=0.0)
+        event = PersonalityDriftObservation(
+            trait_impulses={"attachment_anxiety": 1.0, "interpersonal_warmth": -0.5},
+            intensity=0.9,
+            reliability=0.85,
+            relationship_importance=0.8,
+            reason="strong relationship event",
+        )
+
+        first = engine.update(state, event, persona_fingerprint="p", now=10.0)
+        second = engine.update(first, event, persona_fingerprint="p", now=20.0)
+
+        self.assertIn("learning_rate", first.dynamics)
+        self.assertIn("max_impulse_per_update", first.dynamics)
+        self.assertNotEqual(first.dynamics["learning_rate"], engine.parameters.learning_rate)
+        self.assertGreaterEqual(second.dynamics["min_update_interval_seconds"], 1800.0)
+        self.assertLess(
+            abs(second.dynamics["learning_rate"] - first.dynamics["learning_rate"]),
+            0.05,
+        )
 
     def test_max_trait_offset_caps_long_term_adaptation(self):
         engine = PersonalityDriftEngine(
@@ -175,7 +202,9 @@ class PersonalityDriftEngineTests(unittest.TestCase):
 
         self.assertEqual(payload["schema_version"], PUBLIC_PERSONALITY_DRIFT_SCHEMA_VERSION)
         self.assertNotIn("trait_offsets", payload)
+        self.assertIn("dynamics", payload)
         self.assertEqual(annotation["kind"], "personality_drift_state_at_write")
+        self.assertIn("dynamics", annotation)
         self.assertEqual(annotation["written_at"], 120.0)
         self.assertTrue(annotation["privacy"]["raw_message_text_excluded"])
         self.assertIn("Real elapsed time matters", prompt)

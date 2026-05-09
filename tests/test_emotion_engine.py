@@ -601,37 +601,37 @@ class EmotionEngineTests(unittest.TestCase):
         expressive = build_persona_profile(
             persona_id="direct",
             name="direct",
-            text="外向 直率 坚定 边界 清楚 主动 目标 追求",
+            text="outgoing active assertive confident direct energetic talkative boundary clear goal pursuit",
         )
         avoidant = build_persona_profile(
             persona_id="quiet",
             name="quiet",
-            text="内向 回避 沉默 谨慎 保持距离 害羞 紧张",
+            text="shy anxious avoidant quiet reserved hesitant nervous distance cautious",
         )
         engine = EmotionEngine()
         observation = EmotionObservation(
             values={
-                "valence": -0.7,
-                "arousal": 0.72,
-                "dominance": 0.62,
-                "goal_congruence": -0.72,
-                "certainty": 0.65,
+                "valence": -0.45,
+                "arousal": 0.50,
+                "dominance": 0.45,
+                "goal_congruence": -0.52,
+                "certainty": 0.45,
                 "control": 0.2,
-                "affiliation": -0.35,
+                "affiliation": -0.25,
             },
-            confidence=0.9,
+            confidence=0.8,
             label="anger_boundary",
             appraisal={
                 "relationship_decision": {
                     "decision": "confront",
-                    "intensity": 0.68,
+                    "intensity": 0.45,
                     "forgiveness": 0.15,
                     "relationship_importance": 0.45,
                 },
                 "conflict_analysis": {
                     "cause": "user_fault",
-                    "fault_severity": 0.7,
-                    "boundary_legitimacy": 0.72,
+                    "fault_severity": 0.45,
+                    "boundary_legitimacy": 0.52,
                     "dialogue_viability": 0.45,
                     "ambiguity_level": 0.12,
                     "misread_likelihood": 0.05,
@@ -1112,6 +1112,168 @@ class EmotionEngineTests(unittest.TestCase):
             state = engine.update(state, neutral, now=1000.0 + step)
         self.assertGreater(state.consequences.values["withdrawal"], 0.95)
         self.assertGreater(state.consequences.active_effects["cold_war"], 1750)
+
+    def test_consequence_dynamics_are_auto_derived_and_smoothed(self):
+        engine = EmotionEngine()
+        avoidant = build_persona_profile(
+            persona_id="avoidant",
+            name="avoidant",
+            text="shy anxious avoidant quiet reserved hesitant nervous distance cautious",
+        )
+        repair = build_persona_profile(
+            persona_id="repair",
+            name="repair",
+            text="warm calm honest patient gentle responsible careful repair forgiving",
+        )
+        base_values = {
+            "valence": -0.52,
+            "arousal": -0.25,
+            "dominance": -0.15,
+            "goal_congruence": -0.55,
+            "certainty": 0.2,
+            "control": -0.35,
+            "affiliation": -0.5,
+        }
+        unresolved = EmotionObservation(
+            values=base_values,
+            confidence=0.85,
+            appraisal={
+                "relationship_decision": {
+                    "decision": "cold_war",
+                    "intensity": 0.72,
+                    "forgiveness": 0.05,
+                    "relationship_importance": 0.7,
+                },
+                "conflict_analysis": {
+                    "cause": "user_fault",
+                    "fault_severity": 0.8,
+                    "repeat_offense": 0.7,
+                    "trust_damage": 0.7,
+                    "resentment_residue": 0.72,
+                    "emotion_regulation_load": 0.6,
+                    "dialogue_viability": 0.15,
+                },
+            },
+        )
+        repaired = EmotionObservation(
+            values=base_values,
+            confidence=0.85,
+            appraisal={
+                "relationship_decision": {
+                    "decision": "repair",
+                    "intensity": 0.4,
+                    "forgiveness": 0.8,
+                    "relationship_importance": 0.7,
+                },
+                "conflict_analysis": {
+                    "cause": "user_fault",
+                    "fault_severity": 0.35,
+                    "user_acknowledged": True,
+                    "apology_sincerity": 0.85,
+                    "repaired": True,
+                    "repair_quality": 0.8,
+                    "repair_signal": 0.8,
+                    "forgiveness_readiness": 0.85,
+                    "dialogue_viability": 0.75,
+                },
+            },
+        )
+
+        cold_state = engine.update(
+            EmotionState.initial(avoidant),
+            unresolved,
+            profile=avoidant,
+            now=1000.0,
+        )
+        repair_state = engine.update(
+            EmotionState.initial(repair),
+            repaired,
+            profile=repair,
+            now=1000.0,
+        )
+
+        self.assertGreater(
+            cold_state.consequences.dynamics["cold_war_duration_seconds"],
+            repair_state.consequences.dynamics["cold_war_duration_seconds"],
+        )
+        self.assertGreater(
+            cold_state.consequences.dynamics["half_life_seconds"],
+            repair_state.consequences.dynamics["half_life_seconds"],
+        )
+        followup = engine.update(
+            cold_state,
+            repaired,
+            profile=avoidant,
+            now=1010.0,
+        )
+        self.assertLess(
+            followup.consequences.dynamics["cold_war_duration_seconds"],
+            cold_state.consequences.dynamics["cold_war_duration_seconds"],
+        )
+        self.assertGreater(
+            followup.consequences.dynamics["cold_war_duration_seconds"],
+            repair_state.consequences.dynamics["cold_war_duration_seconds"],
+        )
+
+    def test_emotion_update_dynamics_are_auto_derived(self):
+        engine = EmotionEngine()
+        reactive = build_persona_profile(
+            persona_id="reactive",
+            name="reactive",
+            text="shy anxious nervous volatile avoidant cautious",
+        )
+        regulated = build_persona_profile(
+            persona_id="regulated",
+            name="regulated",
+            text="calm patient careful warm forgiving responsible",
+        )
+        observation = EmotionObservation(
+            values={
+                "valence": -0.55,
+                "arousal": 0.65,
+                "dominance": -0.2,
+                "goal_congruence": -0.6,
+                "certainty": -0.25,
+                "control": -0.45,
+                "affiliation": -0.25,
+            },
+            confidence=0.8,
+            appraisal={
+                "conflict_analysis": {
+                    "cause": "user_fault",
+                    "fault_severity": 0.65,
+                    "trust_damage": 0.55,
+                    "emotion_regulation_load": 0.6,
+                },
+            },
+        )
+
+        reactive_state = engine.update(
+            EmotionState.initial(reactive),
+            observation,
+            profile=reactive,
+            now=1000.0,
+        )
+        regulated_state = engine.update(
+            EmotionState.initial(regulated),
+            observation,
+            profile=regulated,
+            now=1000.0,
+        )
+
+        self.assertIn("baseline_half_life_seconds", reactive_state.dynamics)
+        self.assertNotEqual(
+            reactive_state.dynamics["baseline_half_life_seconds"],
+            engine.parameters.baseline_half_life_seconds,
+        )
+        self.assertGreater(
+            reactive_state.dynamics["baseline_half_life_seconds"],
+            regulated_state.dynamics["baseline_half_life_seconds"],
+        )
+        self.assertGreater(
+            reactive_state.dynamics["rapid_update_half_life_seconds"],
+            0.0,
+        )
 
     def test_public_payload_has_versioned_contract(self):
         profile = build_persona_profile(

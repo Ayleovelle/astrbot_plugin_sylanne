@@ -3,6 +3,7 @@ from __future__ import annotations
 import re
 import time
 from dataclasses import dataclass, field
+from math import exp as math_exp
 from typing import Any
 
 
@@ -132,6 +133,26 @@ def half_life_multiplier(elapsed_seconds: float, half_life_seconds: float) -> fl
     return clamp(2.0 ** (-elapsed_seconds / half_life_seconds), 0.0, 1.0)
 
 
+def half_life_fraction(elapsed_seconds: float, half_life_seconds: float) -> float:
+    if elapsed_seconds <= 0:
+        return 0.0
+    if half_life_seconds <= 0:
+        return 1.0
+    return clamp(1.0 - 2.0 ** (-elapsed_seconds / half_life_seconds), 0.0, 1.0)
+
+
+def _normalize_dynamics(raw: Any) -> dict[str, float]:
+    if not isinstance(raw, dict):
+        return {}
+    result: dict[str, float] = {}
+    for key, value in raw.items():
+        try:
+            result[str(key)] = float(value)
+        except (TypeError, ValueError):
+            continue
+    return result
+
+
 def normalize_screening_values(raw: Any = None) -> dict[str, float]:
     raw = raw if isinstance(raw, dict) else {}
     aliases = {
@@ -181,6 +202,7 @@ class PsychologicalScreeningState:
     red_flags: list[str] = field(default_factory=list)
     scale_scores: dict[str, dict[str, float]] = field(default_factory=dict)
     trajectory: list[dict[str, Any]] = field(default_factory=list)
+    dynamics: dict[str, float] = field(default_factory=dict)
 
     @classmethod
     def initial(cls) -> "PsychologicalScreeningState":
@@ -199,6 +221,7 @@ class PsychologicalScreeningState:
             red_flags=_as_string_list(data.get("red_flags"), limit=12),
             scale_scores=_normalize_scale_scores(data.get("scale_scores")),
             trajectory=_normalize_trajectory(data.get("trajectory")),
+            dynamics=_normalize_dynamics(data.get("dynamics")),
         )
 
     def to_dict(self) -> dict[str, Any]:
@@ -211,6 +234,9 @@ class PsychologicalScreeningState:
             "red_flags": list(self.red_flags[:12]),
             "scale_scores": self.scale_scores,
             "trajectory": list(self.trajectory[-40:]),
+            "dynamics": {
+                key: round(value, 6) for key, value in self.dynamics.items()
+            },
         }
 
     def to_public_dict(self, *, session_key: str | None = None) -> dict[str, Any]:
@@ -229,6 +255,216 @@ class PsychologicalScreeningParameters:
     trajectory_limit: int = 40
 
 
+@dataclass(slots=True)
+class PsychologicalScreeningDynamics:
+    state_half_life_seconds: float
+    crisis_half_life_seconds: float
+    alpha_base: float
+    alpha_min: float
+    alpha_max: float
+    confidence_midpoint: float
+    confidence_slope: float
+    review_threshold: float
+    severe_impairment_threshold: float
+    severe_sleep_threshold: float
+    smoothing_half_life_seconds: float
+
+    def to_dict(self) -> dict[str, float]:
+        return {
+            "state_half_life_seconds": round(self.state_half_life_seconds, 6),
+            "crisis_half_life_seconds": round(self.crisis_half_life_seconds, 6),
+            "alpha_base": round(self.alpha_base, 6),
+            "alpha_min": round(self.alpha_min, 6),
+            "alpha_max": round(self.alpha_max, 6),
+            "confidence_midpoint": round(self.confidence_midpoint, 6),
+            "confidence_slope": round(self.confidence_slope, 6),
+            "review_threshold": round(self.review_threshold, 6),
+            "severe_impairment_threshold": round(self.severe_impairment_threshold, 6),
+            "severe_sleep_threshold": round(self.severe_sleep_threshold, 6),
+            "smoothing_half_life_seconds": round(self.smoothing_half_life_seconds, 6),
+        }
+
+
+def derive_psychological_dynamics(
+    parameters: PsychologicalScreeningParameters,
+    previous: PsychologicalScreeningState,
+    observation: PsychologicalObservation | None = None,
+    *,
+    personality_model: dict[str, Any] | None = None,
+    elapsed_seconds: float = 0.0,
+) -> PsychologicalScreeningDynamics:
+    values = normalize_screening_values(previous.values)
+    observation = observation or PsychologicalObservation(values={}, confidence=0.0)
+    obs_values = normalize_screening_values(observation.values)
+    persona = _persona_factors(personality_model)
+    confidence = clamp(observation.confidence)
+    red_flags = set(_as_string_list(previous.red_flags, limit=12) + _as_string_list(observation.red_flags, limit=12))
+    crisis = 1.0 if {"self_harm_signal", "other_harm_signal"} & red_flags else 0.0
+    impairment = max(values["function_impairment"], obs_values["function_impairment"])
+    sleep = max(values["sleep_disruption"], obs_values["sleep_disruption"])
+    distress = max(values["distress"], obs_values["distress"])
+    anxiety = max(values["anxiety_tension"], obs_values["anxiety_tension"])
+    depression = max(values["depressive_tone"], obs_values["depressive_tone"])
+    wellbeing_loss = max(1.0 - values["wellbeing"], 1.0 - obs_values["wellbeing"])
+    load = clamp(
+        0.22 * distress
+        + 0.18 * max(anxiety, depression)
+        + 0.16 * impairment
+        + 0.12 * sleep
+        + 0.12 * wellbeing_loss
+        + 0.10 * crisis
+        + 0.10 * persona["instability"]
+        - 0.08 * persona["repair_orientation"],
+    )
+    evidence = clamp(confidence + 0.18 * crisis + 0.10 * load)
+    damping_need = clamp(
+        0.28 * crisis
+        + 0.18 * load
+        + 0.12 * persona["instability"]
+        + 0.10 * (1.0 - confidence),
+    )
+    smoothing_half_life = clamp(
+        90.0
+        + 900.0
+        * (
+            0.24
+            + 0.26 * damping_need
+            + 0.16 * load
+            + 0.10 * persona["drift_intensity"]
+            - 0.12 * evidence
+        ),
+        60.0,
+        2400.0,
+    )
+    previous_dynamics = previous.dynamics
+    target_half_life = clamp(
+        parameters.state_half_life_seconds
+        * math_exp(
+            0.44 * load
+            + 0.22 * persona["instability"]
+            - 0.24 * max(0.0, values["wellbeing"] - 0.5)
+        ),
+        86400.0,
+        7776000.0,
+    )
+    target_crisis_half_life = clamp(
+        parameters.crisis_half_life_seconds
+        * math_exp(0.68 * crisis + 0.24 * impairment + 0.18 * persona["instability"]),
+        604800.0,
+        15552000.0,
+    )
+    target_alpha_base = clamp(
+        parameters.alpha_base * math_exp(0.28 * evidence + 0.10 * load - 0.26 * damping_need),
+        0.01,
+        0.85,
+    )
+    target_alpha_min = clamp(
+        parameters.alpha_min * math_exp(0.18 * evidence - 0.20 * damping_need),
+        0.0,
+        0.50,
+    )
+    target_alpha_max = clamp(
+        parameters.alpha_max * math_exp(0.24 * evidence + 0.10 * load - 0.24 * damping_need),
+        0.05,
+        0.95,
+    )
+    if target_alpha_min > target_alpha_max:
+        target_alpha_min = target_alpha_max
+    return PsychologicalScreeningDynamics(
+        state_half_life_seconds=_smooth_dynamic_value(
+            previous_dynamics,
+            "state_half_life_seconds",
+            target_half_life,
+            elapsed_seconds=elapsed_seconds,
+            smoothing_half_life_seconds=smoothing_half_life,
+            low=86400.0,
+            high=7776000.0,
+        ),
+        crisis_half_life_seconds=_smooth_dynamic_value(
+            previous_dynamics,
+            "crisis_half_life_seconds",
+            target_crisis_half_life,
+            elapsed_seconds=elapsed_seconds,
+            smoothing_half_life_seconds=smoothing_half_life,
+            low=604800.0,
+            high=15552000.0,
+        ),
+        alpha_base=_smooth_dynamic_value(
+            previous_dynamics,
+            "alpha_base",
+            target_alpha_base,
+            elapsed_seconds=elapsed_seconds,
+            smoothing_half_life_seconds=smoothing_half_life,
+            low=0.01,
+            high=0.85,
+        ),
+        alpha_min=_smooth_dynamic_value(
+            previous_dynamics,
+            "alpha_min",
+            target_alpha_min,
+            elapsed_seconds=elapsed_seconds,
+            smoothing_half_life_seconds=smoothing_half_life,
+            low=0.0,
+            high=0.50,
+        ),
+        alpha_max=_smooth_dynamic_value(
+            previous_dynamics,
+            "alpha_max",
+            target_alpha_max,
+            elapsed_seconds=elapsed_seconds,
+            smoothing_half_life_seconds=smoothing_half_life,
+            low=0.05,
+            high=0.95,
+        ),
+        confidence_midpoint=_smooth_dynamic_value(
+            previous_dynamics,
+            "confidence_midpoint",
+            clamp(parameters.confidence_midpoint + 0.08 * damping_need - 0.06 * crisis, 0.25, 0.78),
+            elapsed_seconds=elapsed_seconds,
+            smoothing_half_life_seconds=smoothing_half_life,
+            low=0.25,
+            high=0.78,
+        ),
+        confidence_slope=_smooth_dynamic_value(
+            previous_dynamics,
+            "confidence_slope",
+            clamp(parameters.confidence_slope * math_exp(0.20 * evidence - 0.10 * damping_need), 2.0, 12.0),
+            elapsed_seconds=elapsed_seconds,
+            smoothing_half_life_seconds=smoothing_half_life,
+            low=2.0,
+            high=12.0,
+        ),
+        review_threshold=_smooth_dynamic_value(
+            previous_dynamics,
+            "review_threshold",
+            clamp(0.35 - 0.12 * crisis - 0.06 * load, 0.18, 0.45),
+            elapsed_seconds=elapsed_seconds,
+            smoothing_half_life_seconds=smoothing_half_life,
+            low=0.18,
+            high=0.45,
+        ),
+        severe_impairment_threshold=_smooth_dynamic_value(
+            previous_dynamics,
+            "severe_impairment_threshold",
+            clamp(0.70 - 0.08 * crisis - 0.05 * persona["instability"], 0.52, 0.82),
+            elapsed_seconds=elapsed_seconds,
+            smoothing_half_life_seconds=smoothing_half_life,
+            low=0.52,
+            high=0.82,
+        ),
+        severe_sleep_threshold=_smooth_dynamic_value(
+            previous_dynamics,
+            "severe_sleep_threshold",
+            clamp(0.75 - 0.06 * crisis - 0.04 * load, 0.58, 0.86),
+            elapsed_seconds=elapsed_seconds,
+            smoothing_half_life_seconds=smoothing_half_life,
+            low=0.58,
+            high=0.86,
+        ),
+        smoothing_half_life_seconds=smoothing_half_life,
+    )
+
+
 class PsychologicalScreeningEngine:
     """Non-diagnostic psychological screening state estimator."""
 
@@ -238,27 +474,75 @@ class PsychologicalScreeningEngine:
     ) -> None:
         self.parameters = parameters or PsychologicalScreeningParameters()
 
-    def update(
+    def passive_update(
         self,
         previous: PsychologicalScreeningState | None,
-        observation: PsychologicalObservation,
         *,
+        personality_model: dict[str, Any] | None = None,
         now: float | None = None,
     ) -> PsychologicalScreeningState:
         previous = previous or PsychologicalScreeningState.initial()
         now = time.time() if now is None else float(now)
         elapsed = max(0.0, now - previous.updated_at)
-        decay = half_life_multiplier(elapsed, self.parameters.state_half_life_seconds)
+        if elapsed <= 0:
+            return previous
+        dynamics = derive_psychological_dynamics(
+            self.parameters,
+            previous,
+            personality_model=personality_model,
+            elapsed_seconds=elapsed,
+        )
+        decay = half_life_multiplier(elapsed, dynamics.state_half_life_seconds)
+        values: dict[str, float] = {}
+        for key in SCREENING_DIMENSIONS:
+            baseline = 0.5 if key == "wellbeing" else 0.0
+            values[key] = clamp(
+                baseline + (previous.values.get(key, baseline) - baseline) * decay,
+            )
+        return PsychologicalScreeningState(
+            values=values,
+            confidence=previous.confidence,
+            turns=previous.turns,
+            updated_at=now,
+            last_reason=previous.last_reason,
+            red_flags=list(previous.red_flags[:12]),
+            scale_scores=derive_scale_scores(values),
+            trajectory=list(previous.trajectory[-self.parameters.trajectory_limit :]),
+            dynamics=dynamics.to_dict(),
+        )
+
+    def update(
+        self,
+        previous: PsychologicalScreeningState | None,
+        observation: PsychologicalObservation,
+        *,
+        personality_model: dict[str, Any] | None = None,
+        now: float | None = None,
+    ) -> PsychologicalScreeningState:
+        previous = previous or PsychologicalScreeningState.initial()
+        now = time.time() if now is None else float(now)
+        elapsed = max(0.0, now - previous.updated_at)
+        dynamics = derive_psychological_dynamics(
+            self.parameters,
+            previous,
+            observation,
+            personality_model=personality_model,
+            elapsed_seconds=elapsed,
+        )
+        decay = half_life_multiplier(elapsed, dynamics.state_half_life_seconds)
         obs_values = normalize_screening_values(observation.values)
         confidence = clamp(observation.confidence)
         gate = 1.0 / (
             1.0
-            + pow(2.718281828, -self.parameters.confidence_slope * (confidence - self.parameters.confidence_midpoint))
+            + math_exp(
+                -dynamics.confidence_slope
+                * (confidence - dynamics.confidence_midpoint),
+            )
         )
         alpha = clamp(
-            self.parameters.alpha_base * gate,
-            self.parameters.alpha_min,
-            self.parameters.alpha_max,
+            dynamics.alpha_base * gate,
+            dynamics.alpha_min,
+            dynamics.alpha_max,
         )
         values: dict[str, float] = {}
         for key in SCREENING_DIMENSIONS:
@@ -271,6 +555,7 @@ class PsychologicalScreeningEngine:
             observation.red_flags,
             previous_values=previous.values,
             observation_values=obs_values,
+            dynamics=dynamics.to_dict(),
         )
         scale_scores = derive_scale_scores(values)
         trajectory = append_trajectory(
@@ -289,6 +574,7 @@ class PsychologicalScreeningEngine:
             red_flags=red_flags,
             scale_scores=scale_scores,
             trajectory=trajectory,
+            dynamics=dynamics.to_dict(),
         )
 
 
@@ -336,13 +622,24 @@ def merge_red_flags(
     *,
     previous_values: dict[str, float],
     observation_values: dict[str, float],
+    dynamics: dict[str, float] | None = None,
 ) -> list[str]:
     flags = list(dict.fromkeys(_as_string_list(previous, limit=12) + _as_string_list(current, limit=12)))
-    if max(previous_values.get("self_harm_risk", 0.0), observation_values.get("self_harm_risk", 0.0)) >= 0.35:
+    dynamics = dynamics or {}
+    review_threshold = _as_float(dynamics.get("review_threshold"), 0.35)
+    severe_impairment_threshold = _as_float(
+        dynamics.get("severe_impairment_threshold"),
+        0.70,
+    )
+    severe_sleep_threshold = _as_float(
+        dynamics.get("severe_sleep_threshold"),
+        0.75,
+    )
+    if max(previous_values.get("self_harm_risk", 0.0), observation_values.get("self_harm_risk", 0.0)) >= review_threshold:
         flags.append("self_harm_signal")
-    if observation_values.get("function_impairment", 0.0) >= 0.7:
+    if observation_values.get("function_impairment", 0.0) >= severe_impairment_threshold:
         flags.append("severe_function_impairment")
-    if observation_values.get("sleep_disruption", 0.0) >= 0.75:
+    if observation_values.get("sleep_disruption", 0.0) >= severe_sleep_threshold:
         flags.append("severe_sleep_disruption")
     return list(dict.fromkeys(flags))[:12]
 
@@ -431,6 +728,7 @@ def psychological_state_to_public_payload(
 ) -> dict[str, Any]:
     values = {key: round(state.values.get(key, 0.0), 6) for key in SCREENING_DIMENSIONS}
     scale_scores = state.scale_scores or derive_scale_scores(values)
+    dynamics = _effective_psychological_dynamics(state)
     return {
         "schema_version": PUBLIC_SCREENING_SCHEMA_VERSION,
         "kind": "psychological_screening_state",
@@ -445,6 +743,7 @@ def psychological_state_to_public_payload(
         "scale_references": SCALE_REFERENCES,
         "risk": public_risk_payload(state.red_flags),
         "trajectory": list(state.trajectory[-40:]),
+        "dynamics": dynamics,
         "confidence": round(state.confidence, 6),
         "turns": state.turns,
         "updated_at": state.updated_at,
@@ -522,6 +821,67 @@ def format_psychological_state_for_user(state: PsychologicalScreeningState) -> s
             ],
         )
     return "\n".join(lines)
+
+
+def _effective_psychological_dynamics(
+    state: PsychologicalScreeningState,
+) -> dict[str, float]:
+    defaults = {
+        "state_half_life_seconds": 604800.0,
+        "crisis_half_life_seconds": 2592000.0,
+        "review_threshold": 0.35,
+        "severe_impairment_threshold": 0.70,
+        "severe_sleep_threshold": 0.75,
+    }
+    dynamics = dict(defaults)
+    dynamics.update(
+        {
+            key: _as_float(value, dynamics.get(key, 0.0))
+            for key, value in (state.dynamics or {}).items()
+        },
+    )
+    return {key: round(value, 6) for key, value in dynamics.items()}
+
+
+def _persona_factors(personality_model: dict[str, Any] | None) -> dict[str, float]:
+    factors = (
+        personality_model.get("derived_factors")
+        if isinstance(personality_model, dict)
+        and isinstance(personality_model.get("derived_factors"), dict)
+        else {}
+    )
+    adaptive = (
+        personality_model.get("adaptive_drift")
+        if isinstance(personality_model, dict)
+        and isinstance(personality_model.get("adaptive_drift"), dict)
+        else {}
+    )
+    adaptive_values = (
+        adaptive.get("values") if isinstance(adaptive.get("values"), dict) else {}
+    )
+    return {
+        "instability": clamp(_as_float(factors.get("instability"), 0.0)),
+        "repair_orientation": clamp(_as_float(factors.get("repair_orientation"), 0.0)),
+        "drift_intensity": clamp(_as_float(adaptive_values.get("drift_intensity"), 0.0)),
+    }
+
+
+def _smooth_dynamic_value(
+    previous: dict[str, float],
+    key: str,
+    target: float,
+    *,
+    elapsed_seconds: float,
+    smoothing_half_life_seconds: float,
+    low: float,
+    high: float,
+) -> float:
+    target = clamp(target, low, high)
+    if key not in previous:
+        return target
+    old = clamp(_as_float(previous.get(key), target), low, high)
+    fraction = half_life_fraction(elapsed_seconds, smoothing_half_life_seconds)
+    return clamp(old + fraction * (target - old), low, high)
 
 
 def _as_float(value: Any, default: float = 0.0) -> float:

@@ -69,6 +69,33 @@ def real_time_gate(elapsed_seconds: float, gate_half_life_seconds: float) -> flo
     return clamp(1.0 - 2.0 ** (-elapsed_seconds / gate_half_life_seconds))
 
 
+def _normalize_dynamics(raw: Any) -> dict[str, float]:
+    if not isinstance(raw, dict):
+        return {}
+    return {
+        str(key): max(0.0, _as_float(value, 0.0))
+        for key, value in raw.items()
+    }
+
+
+def _smooth_dynamic_value(
+    previous: dict[str, float],
+    key: str,
+    target: float,
+    *,
+    elapsed_seconds: float,
+    smoothing_half_life_seconds: float,
+    low: float,
+    high: float,
+) -> float:
+    target = clamp(target, low, high)
+    if key not in previous:
+        return target
+    mix = real_time_gate(elapsed_seconds, smoothing_half_life_seconds)
+    old = clamp(previous.get(key), low, high)
+    return clamp(old + mix * (target - old), low, high)
+
+
 @dataclass(slots=True)
 class PersonalityDriftObservation:
     text: str = ""
@@ -132,6 +159,7 @@ class PersonalityDriftState:
     values: dict[str, float] = field(
         default_factory=lambda: dict(DEFAULT_PERSONALITY_DRIFT_VALUES),
     )
+    dynamics: dict[str, float] = field(default_factory=dict)
     persona_fingerprint: str = "default"
     evidence_count: int = 0
     created_at: float = field(default_factory=time.time)
@@ -176,11 +204,13 @@ class PersonalityDriftState:
             for key, value in raw_values.items():
                 if key in values:
                     values[key] = clamp(value)
+        dynamics = _normalize_dynamics(data.get("dynamics"))
         now = time.time()
         return cls(
             trait_offsets=offsets,
             trait_confidence=confidence,
             values=values,
+            dynamics=dynamics,
             persona_fingerprint=str(data.get("persona_fingerprint") or "default"),
             evidence_count=max(0, int(_as_float(data.get("evidence_count"), 0.0))),
             created_at=_as_float(data.get("created_at"), now),
@@ -204,6 +234,9 @@ class PersonalityDriftState:
             "values": {
                 key: round(self.values.get(key, DEFAULT_PERSONALITY_DRIFT_VALUES[key]), 6)
                 for key in DEFAULT_PERSONALITY_DRIFT_VALUES
+            },
+            "dynamics": {
+                key: round(value, 6) for key, value in self.dynamics.items()
             },
             "persona_fingerprint": self.persona_fingerprint,
             "evidence_count": self.evidence_count,
@@ -240,6 +273,255 @@ class PersonalityDriftParameters:
     trajectory_limit: int = 80
 
 
+@dataclass(slots=True)
+class PersonalityDriftDynamics:
+    state_half_life_seconds: float
+    rapid_update_half_life_seconds: float
+    min_update_interval_seconds: float
+    learning_rate: float
+    event_threshold: float
+    max_impulse_per_update: float
+    max_trait_offset: float
+    confidence_growth: float
+    smoothing_half_life_seconds: float
+
+    def to_dict(self) -> dict[str, float]:
+        return {
+            "state_half_life_seconds": round(self.state_half_life_seconds, 6),
+            "rapid_update_half_life_seconds": round(self.rapid_update_half_life_seconds, 6),
+            "min_update_interval_seconds": round(self.min_update_interval_seconds, 6),
+            "learning_rate": round(self.learning_rate, 6),
+            "event_threshold": round(self.event_threshold, 6),
+            "max_impulse_per_update": round(self.max_impulse_per_update, 6),
+            "max_trait_offset": round(self.max_trait_offset, 6),
+            "confidence_growth": round(self.confidence_growth, 6),
+            "smoothing_half_life_seconds": round(self.smoothing_half_life_seconds, 6),
+        }
+
+
+def derive_personality_drift_dynamics(
+    parameters: PersonalityDriftParameters,
+    previous: PersonalityDriftState,
+    observation: PersonalityDriftObservation | None = None,
+    *,
+    elapsed_seconds: float = 0.0,
+) -> PersonalityDriftDynamics:
+    observation = observation or PersonalityDriftObservation()
+    values = {
+        key: clamp(previous.values.get(key, DEFAULT_PERSONALITY_DRIFT_VALUES[key]))
+        for key in DEFAULT_PERSONALITY_DRIFT_VALUES
+    }
+    mean_abs_offset = clamp(
+        sum(abs(previous.trait_offsets.get(key, 0.0)) for key in PERSONALITY_TRAIT_DIMENSIONS)
+        / max(0.22 * len(PERSONALITY_TRAIT_DIMENSIONS), 1e-6),
+    )
+    mean_confidence = clamp(
+        sum(previous.trait_confidence.get(key, 0.0) for key in PERSONALITY_TRAIT_DIMENSIONS)
+        / len(PERSONALITY_TRAIT_DIMENSIONS),
+    )
+    impulse_mass = clamp(
+        sum(abs(signed_clamp(value)) for value in observation.trait_impulses.values())
+        / max(len(observation.trait_impulses), 1),
+    )
+    relationship = clamp(observation.relationship_importance)
+    reliability = clamp(observation.reliability)
+    event_intensity = clamp(observation.intensity)
+    event_pressure = clamp(
+        0.38 * event_intensity
+        + 0.24 * reliability
+        + 0.18 * relationship
+        + 0.12 * impulse_mass
+        + 0.08 * values["relationship_sensitivity"],
+    )
+    anchor_need = clamp(
+        0.42 * values["anchor_strength"]
+        + 0.24 * mean_confidence
+        + 0.20 * mean_abs_offset
+        + 0.14 * (1.0 - reliability),
+    )
+    consolidation = clamp(
+        0.36 * mean_confidence
+        + 0.26 * values["event_consolidation"]
+        + 0.18 * relationship
+        + 0.12 * reliability
+        - 0.18 * mean_abs_offset,
+    )
+    smoothing_half_life = clamp(
+        21600.0
+        + 172800.0
+        * (
+            0.28
+            + 0.24 * anchor_need
+            + 0.20 * consolidation
+            + 0.14 * mean_abs_offset
+            - 0.16 * event_pressure
+        ),
+        3600.0,
+        604800.0,
+    )
+    target_state_half_life = clamp(
+        parameters.state_half_life_seconds
+        * math.exp(
+            0.42 * consolidation
+            + 0.24 * anchor_need
+            + 0.16 * mean_confidence
+            - 0.28 * event_pressure
+        ),
+        2592000.0,
+        31536000.0,
+    )
+    target_rapid_half_life = clamp(
+        parameters.rapid_update_half_life_seconds
+        * math.exp(
+            0.44 * anchor_need
+            + 0.22 * mean_abs_offset
+            - 0.36 * event_pressure
+            - 0.12 * relationship
+        ),
+        3600.0,
+        604800.0,
+    )
+    target_min_interval = clamp(
+        parameters.min_update_interval_seconds
+        * math.exp(
+            0.56 * anchor_need
+            + 0.22 * mean_confidence
+            - 0.46 * event_pressure
+            - 0.12 * relationship
+        ),
+        1800.0,
+        259200.0,
+    )
+    target_learning_rate = clamp(
+        parameters.learning_rate
+        * math.exp(
+            0.38 * event_pressure
+            + 0.16 * relationship
+            - 0.42 * anchor_need
+            - 0.18 * mean_abs_offset
+        ),
+        0.008,
+        0.10,
+    )
+    target_event_threshold = clamp(
+        parameters.event_threshold
+        + 0.10 * anchor_need
+        + 0.06 * mean_abs_offset
+        - 0.09 * event_pressure
+        - 0.04 * reliability,
+        0.04,
+        0.32,
+    )
+    target_impulse_cap = clamp(
+        parameters.max_impulse_per_update
+        * math.exp(
+            0.30 * event_pressure
+            + 0.12 * relationship
+            - 0.48 * anchor_need
+            - 0.24 * mean_abs_offset
+        ),
+        0.002,
+        0.03,
+    )
+    target_offset_cap = clamp(
+        parameters.max_trait_offset
+        * math.exp(
+            0.24 * consolidation
+            + 0.18 * relationship
+            - 0.32 * anchor_need
+        ),
+        0.08,
+        0.28,
+    )
+    target_confidence_growth = clamp(
+        parameters.confidence_growth
+        * math.exp(
+            0.30 * reliability
+            + 0.18 * consolidation
+            + 0.12 * relationship
+            - 0.34 * mean_confidence
+        ),
+        0.02,
+        0.18,
+    )
+    previous_dynamics = previous.dynamics
+    return PersonalityDriftDynamics(
+        state_half_life_seconds=_smooth_dynamic_value(
+            previous_dynamics,
+            "state_half_life_seconds",
+            target_state_half_life,
+            elapsed_seconds=elapsed_seconds,
+            smoothing_half_life_seconds=smoothing_half_life,
+            low=2592000.0,
+            high=31536000.0,
+        ),
+        rapid_update_half_life_seconds=_smooth_dynamic_value(
+            previous_dynamics,
+            "rapid_update_half_life_seconds",
+            target_rapid_half_life,
+            elapsed_seconds=elapsed_seconds,
+            smoothing_half_life_seconds=smoothing_half_life,
+            low=3600.0,
+            high=604800.0,
+        ),
+        min_update_interval_seconds=_smooth_dynamic_value(
+            previous_dynamics,
+            "min_update_interval_seconds",
+            target_min_interval,
+            elapsed_seconds=elapsed_seconds,
+            smoothing_half_life_seconds=smoothing_half_life,
+            low=1800.0,
+            high=259200.0,
+        ),
+        learning_rate=_smooth_dynamic_value(
+            previous_dynamics,
+            "learning_rate",
+            target_learning_rate,
+            elapsed_seconds=elapsed_seconds,
+            smoothing_half_life_seconds=smoothing_half_life,
+            low=0.008,
+            high=0.10,
+        ),
+        event_threshold=_smooth_dynamic_value(
+            previous_dynamics,
+            "event_threshold",
+            target_event_threshold,
+            elapsed_seconds=elapsed_seconds,
+            smoothing_half_life_seconds=smoothing_half_life,
+            low=0.04,
+            high=0.32,
+        ),
+        max_impulse_per_update=_smooth_dynamic_value(
+            previous_dynamics,
+            "max_impulse_per_update",
+            target_impulse_cap,
+            elapsed_seconds=elapsed_seconds,
+            smoothing_half_life_seconds=smoothing_half_life,
+            low=0.002,
+            high=0.03,
+        ),
+        max_trait_offset=_smooth_dynamic_value(
+            previous_dynamics,
+            "max_trait_offset",
+            target_offset_cap,
+            elapsed_seconds=elapsed_seconds,
+            smoothing_half_life_seconds=smoothing_half_life,
+            low=0.08,
+            high=0.28,
+        ),
+        confidence_growth=_smooth_dynamic_value(
+            previous_dynamics,
+            "confidence_growth",
+            target_confidence_growth,
+            elapsed_seconds=elapsed_seconds,
+            smoothing_half_life_seconds=smoothing_half_life,
+            low=0.02,
+            high=0.18,
+        ),
+        smoothing_half_life_seconds=smoothing_half_life,
+    )
+
+
 class PersonalityDriftEngine:
     def __init__(self, parameters: PersonalityDriftParameters | None = None) -> None:
         self.parameters = parameters or PersonalityDriftParameters()
@@ -262,11 +544,16 @@ class PersonalityDriftEngine:
                 now=now,
             )
         elapsed = max(0.0, now - previous.updated_at)
-        decay = half_life_multiplier(elapsed, self.parameters.state_half_life_seconds)
+        dynamics = derive_personality_drift_dynamics(
+            self.parameters,
+            previous,
+            elapsed_seconds=elapsed,
+        )
+        decay = half_life_multiplier(elapsed, dynamics.state_half_life_seconds)
         offsets = {
             key: signed_clamp(
                 previous.trait_offsets.get(key, 0.0) * decay,
-                self.parameters.max_trait_offset,
+                dynamics.max_trait_offset,
             )
             for key in PERSONALITY_TRAIT_DIMENSIONS
         }
@@ -279,13 +566,14 @@ class PersonalityDriftEngine:
             confidence,
             time_gate=real_time_gate(
                 elapsed,
-                self.parameters.rapid_update_half_life_seconds,
+                dynamics.rapid_update_half_life_seconds,
             ),
         )
         return PersonalityDriftState(
             trait_offsets=offsets,
             trait_confidence=confidence,
             values=values,
+            dynamics=dynamics.to_dict(),
             persona_fingerprint=previous.persona_fingerprint,
             evidence_count=previous.evidence_count,
             created_at=previous.created_at,
@@ -314,36 +602,42 @@ class PersonalityDriftEngine:
             now=now,
         )
         elapsed = max(0.0, now - previous.updated_at)
+        dynamics = derive_personality_drift_dynamics(
+            self.parameters,
+            prior,
+            observation,
+            elapsed_seconds=elapsed,
+        )
         if previous.evidence_count <= 0:
             gate = 1.0
-        elif elapsed >= self.parameters.min_update_interval_seconds:
+        elif elapsed >= dynamics.min_update_interval_seconds:
             gate = 1.0
         else:
-            gate = real_time_gate(elapsed, self.parameters.rapid_update_half_life_seconds)
+            gate = real_time_gate(elapsed, dynamics.rapid_update_half_life_seconds)
         signal = clamp(observation.intensity) * clamp(observation.reliability) * gate
         signal *= 0.72 + 0.28 * clamp(observation.relationship_importance)
 
         offsets = dict(prior.trait_offsets)
         confidence = dict(prior.trait_confidence)
         effective_impulses: dict[str, float] = {}
-        if signal >= self.parameters.event_threshold:
+        if signal >= dynamics.event_threshold:
             for key, raw in observation.trait_impulses.items():
                 if key not in PERSONALITY_TRAIT_DIMENSIONS:
                     continue
                 impulse = signed_clamp(
-                    signed_clamp(raw) * self.parameters.learning_rate * signal,
-                    self.parameters.max_impulse_per_update,
+                    signed_clamp(raw) * dynamics.learning_rate * signal,
+                    dynamics.max_impulse_per_update,
                 )
                 if abs(impulse) <= 1e-9:
                     continue
                 offsets[key] = signed_clamp(
                     offsets.get(key, 0.0) + impulse,
-                    self.parameters.max_trait_offset,
+                    dynamics.max_trait_offset,
                 )
                 confidence[key] = clamp(
                     confidence.get(key, 0.0)
-                    + self.parameters.confidence_growth
-                    * (abs(impulse) / max(self.parameters.max_impulse_per_update, 1e-6)),
+                    + dynamics.confidence_growth
+                    * (abs(impulse) / max(dynamics.max_impulse_per_update, 1e-6)),
                 )
                 effective_impulses[key] = round(impulse, 6)
 
@@ -367,6 +661,7 @@ class PersonalityDriftEngine:
             trait_offsets=offsets,
             trait_confidence=confidence,
             values=values,
+            dynamics=dynamics.to_dict(),
             persona_fingerprint=str(persona_fingerprint or "default"),
             evidence_count=prior.evidence_count + (1 if effective_impulses else 0),
             created_at=prior.created_at,
@@ -530,7 +825,7 @@ def apply_personality_drift_to_profile(
     profile: PersonaProfile | None,
     drift: PersonalityDriftState | dict[str, Any] | None,
     *,
-    strength: float = 1.0,
+    strength: float | None = None,
 ) -> PersonaProfile | None:
     if profile is None or drift is None:
         return profile
@@ -541,7 +836,39 @@ def apply_personality_drift_to_profile(
     )
     if state.persona_fingerprint != profile.fingerprint:
         return profile
-    strength = clamp(strength, 0.0, 1.0)
+    if strength is None:
+        values = {
+            key: clamp(state.values.get(key, DEFAULT_PERSONALITY_DRIFT_VALUES[key]))
+            for key in DEFAULT_PERSONALITY_DRIFT_VALUES
+        }
+        dynamics = _normalize_dynamics(state.dynamics)
+        mean_confidence = clamp(
+            sum(state.trait_confidence.get(key, 0.0) for key in PERSONALITY_TRAIT_DIMENSIONS)
+            / len(PERSONALITY_TRAIT_DIMENSIONS),
+        )
+        mean_abs_offset = clamp(
+            sum(abs(state.trait_offsets.get(key, 0.0)) for key in PERSONALITY_TRAIT_DIMENSIONS)
+            / max(0.22 * len(PERSONALITY_TRAIT_DIMENSIONS), 1e-6),
+        )
+        offset_cap = clamp(dynamics.get("max_trait_offset", 0.22), 0.08, 0.28)
+        learning_rate = clamp(dynamics.get("learning_rate", 0.055), 0.008, 0.10)
+        anchor = values["anchor_strength"]
+        consolidation = values["event_consolidation"]
+        drift_intensity = values["drift_intensity"]
+        strength = clamp(
+            0.18
+            + 0.30 * drift_intensity
+            + 0.22 * mean_abs_offset
+            + 0.18 * mean_confidence
+            + 0.16 * consolidation
+            + 0.12 * (offset_cap / 0.28)
+            + 0.08 * (learning_rate / 0.10)
+            - 0.24 * anchor,
+            0.08,
+            0.88,
+        )
+    else:
+        strength = clamp(strength, 0.0, 1.0)
     if strength <= 0:
         return profile
     if not any(abs(state.trait_offsets.get(key, 0.0)) > 1e-9 for key in PERSONALITY_TRAIT_DIMENSIONS):
@@ -625,6 +952,9 @@ def personality_drift_state_to_public_payload(
             key: round(state.values.get(key, DEFAULT_PERSONALITY_DRIFT_VALUES[key]), 6)
             for key in DEFAULT_PERSONALITY_DRIFT_VALUES
         },
+        "dynamics": {
+            key: round(value, 6) for key, value in state.dynamics.items()
+        },
         "top_offsets": top_offsets,
         "summary": build_personality_drift_summary(state),
         "model": {
@@ -707,6 +1037,7 @@ def build_personality_drift_memory_annotation(
         "session_key": snapshot.get("session_key"),
         "evidence_count": snapshot.get("evidence_count"),
         "values": dict(snapshot.get("values") or {}),
+        "dynamics": dict(snapshot.get("dynamics") or {}),
         "top_offsets": list(snapshot.get("top_offsets") or [])[:8],
         "flags": list(snapshot.get("flags") or [])[:12],
         "privacy": dict(snapshot.get("privacy") or {}),
@@ -816,6 +1147,7 @@ def _adaptive_drift_payload(
             for key in PERSONALITY_TRAIT_DIMENSIONS
         },
         "values": dict(state.values),
+        "dynamics": dict(state.dynamics),
         "top_offsets": _top_offsets(state.trait_offsets, limit=8),
         "evidence_count": state.evidence_count,
         "updated_at": state.updated_at,

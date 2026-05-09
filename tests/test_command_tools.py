@@ -225,6 +225,7 @@ class CommandAndToolSmokeTests(unittest.TestCase):
                 "simulate_bot_emotion_update",
                 "get_bot_humanlike_state",
                 "get_bot_lifelike_learning_state",
+                "get_bot_proactive_speech_decision",
                 "get_bot_personality_drift_state",
                 "get_bot_moral_repair_state",
                 "get_bot_fallibility_state",
@@ -391,11 +392,14 @@ class CommandAndToolSmokeTests(unittest.TestCase):
         self.assertEqual(len(outputs), 1)
         self.assertIn("\u672a\u542f\u7528", outputs[0])
 
-    def test_disabled_humanlike_state_command_does_not_load_state(self):
+    def test_humanlike_state_command_reads_always_on_state(self):
         plugin = new_plugin()
+        loaded = []
 
         async def fake_load_humanlike_state(self, session_key):
-            raise AssertionError("disabled command must not load humanlike state")
+            from humanlike_engine import HumanlikeState
+            loaded.append(session_key)
+            return HumanlikeState.initial()
 
         bind_async(plugin, "_load_humanlike_state", fake_load_humanlike_state)
 
@@ -404,7 +408,8 @@ class CommandAndToolSmokeTests(unittest.TestCase):
         )
 
         self.assertEqual(len(outputs), 1)
-        self.assertIn("\u672a\u542f\u7528", outputs[0])
+        self.assertEqual(loaded, ["session-1"])
+        self.assertIn("拟人", outputs[0])
 
     def test_disabled_moral_repair_state_command_does_not_load_state(self):
         plugin = new_plugin()
@@ -575,11 +580,14 @@ class CommandAndToolSmokeTests(unittest.TestCase):
         self.assertIn("generate_deception_strategy", payload["not_allowed"])
         self.assertIn("execute_shadow_impulses", payload["not_allowed"])
 
-    def test_disabled_lifelike_state_command_does_not_load_state(self):
+    def test_lifelike_state_command_reads_always_on_state(self):
         plugin = new_plugin()
+        loaded = []
 
         async def fake_load_lifelike_state(self, session_key):
-            raise AssertionError("disabled lifelike command must not load state")
+            from lifelike_learning_engine import LifelikeLearningState
+            loaded.append(session_key)
+            return LifelikeLearningState.initial()
 
         bind_async(plugin, "_load_lifelike_learning_state", fake_load_lifelike_state)
 
@@ -588,7 +596,8 @@ class CommandAndToolSmokeTests(unittest.TestCase):
         )
 
         self.assertEqual(len(outputs), 1)
-        self.assertIn("\u672a\u542f\u7528", outputs[0])
+        self.assertEqual(loaded, ["session-1"])
+        self.assertIn("生命化", outputs[0])
 
     def test_lifelike_reset_command_uses_independent_backdoor(self):
         allowed = new_plugin(
@@ -640,11 +649,14 @@ class CommandAndToolSmokeTests(unittest.TestCase):
         self.assertEqual(len(outputs), 1)
         self.assertIn("\u5df2\u91cd\u7f6e", outputs[0])
 
-    def test_disabled_personality_drift_state_command_does_not_load_state(self):
+    def test_personality_drift_state_command_reads_always_on_state(self):
         plugin = new_plugin()
+        loaded = []
 
         async def fake_load_personality_drift_state(self, session_key, profile=None):
-            raise AssertionError("disabled personality drift command must not load state")
+            from personality_drift_engine import PersonalityDriftState
+            loaded.append(session_key)
+            return PersonalityDriftState.initial()
 
         bind_async(
             plugin,
@@ -657,7 +669,8 @@ class CommandAndToolSmokeTests(unittest.TestCase):
         )
 
         self.assertEqual(len(outputs), 1)
-        self.assertIn("\u672a\u542f\u7528", outputs[0])
+        self.assertEqual(loaded, ["session-1"])
+        self.assertIn("人格漂移", outputs[0])
 
     def test_get_bot_emotion_state_tool_summary_trims_llm_exposure(self):
         plugin = new_plugin()
@@ -777,7 +790,7 @@ class CommandAndToolSmokeTests(unittest.TestCase):
         self.assertEqual(full["exposure"], "internal")
         self.assertEqual(full["prompt_fragment"], "fragment")
 
-    def test_get_bot_humanlike_state_tool_default_disabled_payload_is_json(self):
+    def test_get_bot_humanlike_state_tool_default_payload_is_json(self):
         plugin = new_plugin()
 
         payload = json.loads(
@@ -788,8 +801,7 @@ class CommandAndToolSmokeTests(unittest.TestCase):
             )[0],
         )
 
-        self.assertFalse(payload["enabled"])
-        self.assertEqual(payload["reason"], "enable_humanlike_state is false")
+        self.assertTrue(payload["enabled"])
         self.assertEqual(payload["exposure"], "plugin_safe")
 
     def test_get_bot_moral_repair_state_tool_default_disabled_payload_is_json(self):
@@ -828,7 +840,7 @@ class CommandAndToolSmokeTests(unittest.TestCase):
         self.assertEqual(payload["reason"], "enable_fallibility_state is false")
         self.assertEqual(payload["exposure"], "plugin_safe")
 
-    def test_get_bot_personality_drift_state_tool_default_disabled_payload_is_json(self):
+    def test_get_bot_personality_drift_state_tool_default_payload_is_json(self):
         plugin = new_plugin()
 
         payload = json.loads(
@@ -842,8 +854,7 @@ class CommandAndToolSmokeTests(unittest.TestCase):
             )[0],
         )
 
-        self.assertFalse(payload["enabled"])
-        self.assertEqual(payload["reason"], "enable_personality_drift is false")
+        self.assertTrue(payload["enabled"])
         self.assertEqual(payload["exposure"], "plugin_safe")
 
     def test_get_bot_group_atmosphere_state_tool_uses_layered_exposure(self):

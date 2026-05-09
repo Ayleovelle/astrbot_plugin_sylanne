@@ -3,6 +3,7 @@ import unittest
 from fallibility_engine import (
     BLOCKED_FALLIBILITY_ACTIONS,
     FALLIBILITY_DIMENSIONS,
+    FallibilityObservation,
     FallibilityEngine,
     FallibilityState,
     build_fallibility_memory_annotation,
@@ -49,6 +50,58 @@ class FallibilityEngineTests(unittest.TestCase):
         self.assertIn("correction_cue", payload["flags"])
         self.assertGreater(payload["values"]["correction_readiness"], 0.58)
         self.assertIn("correct_self", payload["fallibility"]["recommended_actions"])
+
+    def test_dynamics_roundtrip_public_payload_and_personality_modulation(self):
+        expressive_persona = {
+            "derived_factors": {
+                "instability": 0.5,
+                "social_distance": 0.1,
+                "repair_orientation": 0.2,
+                "boundary_sensitivity": 0.1,
+                "expressiveness": 0.9,
+            },
+            "adaptive_drift": {"values": {"drift_intensity": 0.2}},
+        }
+        guarded_persona = {
+            "derived_factors": {
+                "instability": 0.1,
+                "social_distance": 0.4,
+                "repair_orientation": 0.7,
+                "boundary_sensitivity": 0.8,
+                "expressiveness": 0.1,
+            },
+            "adaptive_drift": {"values": {"drift_intensity": 0.1}},
+        }
+        previous = FallibilityState.initial()
+        previous.updated_at = 0.0
+        observation = FallibilityObservation(
+            values={"playful_bluff": 0.6, "overconfidence": 0.5},
+            confidence=0.9,
+        )
+        engine = FallibilityEngine()
+
+        expressive = engine.update(
+            previous,
+            observation,
+            personality_model=expressive_persona,
+            now=60.0,
+        )
+        guarded = engine.update(
+            previous,
+            observation,
+            personality_model=guarded_persona,
+            now=60.0,
+        )
+        restored = FallibilityState.from_dict(expressive.to_dict())
+        payload = fallibility_state_to_public_payload(expressive, exposure="plugin_safe")
+
+        self.assertIn("max_error_pressure", expressive.dynamics)
+        self.assertIn("dynamics", payload)
+        self.assertEqual(restored.dynamics["max_error_pressure"], expressive.dynamics["max_error_pressure"])
+        self.assertGreater(
+            expressive.dynamics["max_error_pressure"],
+            guarded.dynamics["max_error_pressure"],
+        )
 
     def test_high_risk_and_deception_requests_raise_guard(self):
         engine = FallibilityEngine()

@@ -1,0 +1,95 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1320" height="900" viewBox="0 0 1320 900" role="img" aria-labelledby="title desc">
+  <title id="title">工作流与主动发言支路</title>
+  <desc id="desc">展示 AstrBot 请求响应生命周期和主动发言裁决流程。</desc>
+  <defs>
+    <marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse">
+      <path d="M 0 0 L 10 5 L 0 10 z" fill="#2563eb"/>
+    </marker>
+    <style>
+      .bg { fill: #f8fafc; }
+      .panel { fill: #eef2ff; stroke: #c7d2fe; stroke-width: 2; }
+      .panel2 { fill: #fff7ed; stroke: #fed7aa; stroke-width: 2; }
+      .node { fill: #ffffff; stroke: #334155; stroke-width: 2; }
+      .node2 { fill: #ffffff; stroke: #9a3412; stroke-width: 2; }
+      .decision { fill: #ffffff; stroke: #7c3aed; stroke-width: 2; }
+      .text { font-family: "Microsoft YaHei", "Noto Sans CJK SC", Arial, sans-serif; font-size: 20px; fill: #0f172a; }
+      .small { font-size: 17px; fill: #334155; }
+      .label { font-size: 24px; font-weight: 700; fill: #1e293b; }
+      .arrow { stroke: #2563eb; stroke-width: 3; fill: none; marker-end: url(#arrow); }
+      .orange { stroke: #ea580c; }
+    </style>
+  </defs>
+  <rect class="bg" width="1320" height="900"/>
+  <rect class="panel" x="38" y="36" width="594" height="822" rx="18"/>
+  <text class="label" x="66" y="76">请求 / 回复生命周期</text>
+  <g>
+    <rect class="node" x="86" y="108" width="236" height="64" rx="12"/>
+    <text class="text" x="204" y="147" text-anchor="middle">用户输入 / 插件输入</text>
+    <rect class="node" x="86" y="208" width="236" height="64" rx="12"/>
+    <text class="text" x="204" y="247" text-anchor="middle">读取会话与 persona</text>
+    <rect class="node" x="86" y="308" width="236" height="76" rx="12"/>
+    <text class="text" x="204" y="342" text-anchor="middle">加载 emotion_state</text>
+    <text class="small" x="204" y="368" text-anchor="middle">以及辅助状态</text>
+    <path class="decision" d="M204 428 L338 492 L204 556 L70 492 Z"/>
+    <text class="text" x="204" y="486" text-anchor="middle">pre 更新?</text>
+    <text class="small" x="204" y="514" text-anchor="middle">assessment_timing</text>
+    <rect class="node" x="362" y="456" width="210" height="72" rx="12"/>
+    <text class="text" x="467" y="486" text-anchor="middle">生成观测 X_t</text>
+    <text class="small" x="467" y="512" text-anchor="middle">LLM 或启发式</text>
+    <rect class="node" x="86" y="600" width="236" height="76" rx="12"/>
+    <text class="text" x="204" y="633" text-anchor="middle">注入状态片段</text>
+    <text class="small" x="204" y="660" text-anchor="middle">emotion / aux 摘要</text>
+    <rect class="node" x="86" y="724" width="236" height="64" rx="12"/>
+    <text class="text" x="204" y="763" text-anchor="middle">调用主 LLM 并回复</text>
+    <rect class="node" x="362" y="724" width="210" height="64" rx="12"/>
+    <text class="text" x="467" y="750" text-anchor="middle">post 后台评估</text>
+    <text class="small" x="467" y="776" text-anchor="middle">按会话顺序提交</text>
+  </g>
+  <path class="arrow" d="M204 172 V208"/>
+  <path class="arrow" d="M204 272 V308"/>
+  <path class="arrow" d="M204 384 V428"/>
+  <path class="arrow" d="M338 492 H362"/>
+  <path class="arrow" d="M467 528 C467 572 322 574 258 600"/>
+  <path class="arrow" d="M204 556 V600"/>
+  <path class="arrow" d="M204 676 V724"/>
+  <path class="arrow" d="M322 756 H362"/>
+  <text class="small" x="356" y="456">是</text>
+  <text class="small" x="222" y="584">否 / 已更新</text>
+
+  <rect class="panel2" x="688" y="36" width="594" height="822" rx="18"/>
+  <text class="label" x="716" y="76">主动发言裁决</text>
+  <g>
+    <rect class="node2" x="736" y="108" width="250" height="76" rx="12"/>
+    <text class="text" x="861" y="140" text-anchor="middle">调度器 / 其他插件</text>
+    <text class="small" x="861" y="167" text-anchor="middle">调用 proactive API</text>
+    <rect class="node2" x="736" y="230" width="250" height="92" rx="12"/>
+    <text class="text" x="861" y="263" text-anchor="middle">并发读取状态</text>
+    <text class="small" x="861" y="290" text-anchor="middle">情绪、共同语境、群聊</text>
+    <text class="small" x="861" y="314" text-anchor="middle">拟人状态、人格漂移</text>
+    <rect class="node2" x="736" y="368" width="250" height="98" rx="12"/>
+    <text class="text" x="861" y="399" text-anchor="middle">计算开口分数</text>
+    <text class="small" x="861" y="426" text-anchor="middle">互需平衡、冷却</text>
+    <text class="small" x="861" y="450" text-anchor="middle">沉默舒适度、打断风险</text>
+    <path class="decision" d="M861 510 L1004 574 L861 638 L718 574 Z"/>
+    <text class="text" x="861" y="568" text-anchor="middle">允许开口?</text>
+    <text class="small" x="861" y="596" text-anchor="middle">公式门控</text>
+    <rect class="node2" x="1028" y="538" width="200" height="72" rx="12"/>
+    <text class="text" x="1128" y="566" text-anchor="middle">保持沉默</text>
+    <text class="small" x="1128" y="592" text-anchor="middle">短应 / 延后</text>
+    <rect class="node2" x="736" y="684" width="250" height="76" rx="12"/>
+    <text class="text" x="861" y="716" text-anchor="middle">抽取上下文候选主题</text>
+    <text class="small" x="861" y="743" text-anchor="middle">不使用预设话题模板</text>
+    <rect class="node2" x="736" y="796" width="250" height="54" rx="12"/>
+    <text class="text" x="861" y="830" text-anchor="middle">LLM 裁决需求与开口风格</text>
+  </g>
+  <path class="arrow orange" d="M861 184 V230"/>
+  <path class="arrow orange" d="M861 322 V368"/>
+  <path class="arrow orange" d="M861 466 V510"/>
+  <path class="arrow orange" d="M1004 574 H1028"/>
+  <path class="arrow orange" d="M861 638 V684"/>
+  <path class="arrow orange" d="M861 760 V796"/>
+  <text class="small" x="1008" y="548">否</text>
+  <text class="small" x="878" y="662">是</text>
+  <path class="arrow" d="M467 724 C620 666 650 276 736 276"/>
+  <text class="small" x="640" y="470" text-anchor="middle">状态快照供主动裁决读取</text>
+</svg>

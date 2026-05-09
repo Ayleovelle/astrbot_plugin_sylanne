@@ -153,3 +153,40 @@ This file stores durable discoveries from implementation, review, and remote tes
   - `H_t` is conversation/history context.
   - `O_t` is the consequence/action-tendency vector.
   - `F_t` is conflict-analysis output.
+
+## 2026-05-09 Auto-On Dynamics And Proactive Speech Requirements
+
+- User requires the chain `personality drift -> persona modeling -> all dynamics`.
+- Runtime ownership rule:
+  - Core emotion dynamics, humanlike-state dynamics, lifelike-learning dynamics, and personality-drift dynamics are internal model parameters.
+  - They must not be user-configurable in `_conf_schema.json`.
+  - Old config keys may remain in user files, but runtime must ignore them.
+- Always-on rule:
+  - Persona modeling is always on.
+  - Humanlike state is always on.
+  - Lifelike learning is always on.
+  - Personality drift is always on.
+  - These cannot be disabled by `enable_* = false`.
+- Reset backdoors remain configurable because they are operational recovery controls, not model dynamics.
+- Unified prompt budget rule:
+  - Per-module injection strengths for humanlike/lifelike/personality drift should not be used.
+  - Use `auxiliary_state_injection_detail` for whether auxiliary state is injected into prompts.
+- Theory evidence anchors to cite in README:
+  - Moors, Ellsworth, Scherer & Frijda 2013, Emotion Review, DOI `10.1177/1754073912468165`: appraisal as event-to-emotion bridge.
+  - Kuppens, Allen & Sheeber 2010, Psychological Science, DOI `10.1177/0956797610372634`: emotional inertia / real-time persistence.
+  - Fleeson & Jayawickreme 2015, Journal of Research in Personality, DOI `10.1016/j.jrp.2014.10.009`: whole trait / traits as state distributions.
+  - Roberts, Walton & Viechtbauer 2006, Psychological Bulletin, DOI `10.1037/0033-2909.132.1.1`: mean-level personality change across life course.
+  - Specht, Egloff & Schmukle 2011, Journal of Personality and Social Psychology, DOI `10.1037/a0024950`: stability and change across life course.
+  - Bolger & Schilling 1991, Journal of Personality, DOI `10.1111/j.1467-6494.1991.tb00253.x`: personality affects stress exposure/reactivity.
+  - Russell 2003, Psychological Review, DOI `10.1037/0033-295X.110.1.145`: core affect as continuous emotion representation.
+  - Gross 1998, Review of General Psychology, DOI `10.1037/1089-2680.2.3.271`: emotion regulation as a dynamic process.
+- Proactive speech model should be documented as:
+  - `S_t = sigmoid(w_E E_t + w_L L_t + w_G G_t + w_R R_t + w_U U_t - w_B B_t - w_Q Q_t - tau)`
+  - Speak when `S_t` exceeds threshold and cooldown/order gates allow.
+  - Topic utility should rank candidates by common-ground confidence, novelty, emotional fit, relationship repair need, group attention, and risk.
+  - Silence should remain a valid action when boundary/risk/overload/cooldown dominates.
+- Dynamic worker expansion:
+  - Default off.
+  - If enabled, cap extra workers at 5.
+  - Workers can process assessment jobs in parallel, but state commits must be ordered by sequence to preserve emotional trajectory.
+  - README must warn about extra token/API/CPU pressure.

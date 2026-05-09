@@ -65,7 +65,12 @@ try:
         LifelikeLearningState,
         build_lifelike_memory_annotation,
         build_lifelike_prompt_fragment,
+        build_proactive_topic_assessment_prompt,
         derive_initiative_policy,
+        derive_proactive_speech_decision,
+        rank_proactive_topics,
+        local_proactive_topic_judgement,
+        normalize_proactive_topic_judgement,
         format_lifelike_state_for_user,
         heuristic_lifelike_observation,
         lifelike_state_to_public_payload,
@@ -181,7 +186,12 @@ except ImportError:
         LifelikeLearningState,
         build_lifelike_memory_annotation,
         build_lifelike_prompt_fragment,
+        build_proactive_topic_assessment_prompt,
         derive_initiative_policy,
+        derive_proactive_speech_decision,
+        rank_proactive_topics,
+        local_proactive_topic_judgement,
+        normalize_proactive_topic_judgement,
         format_lifelike_state_for_user,
         heuristic_lifelike_observation,
         lifelike_state_to_public_payload,
@@ -256,6 +266,11 @@ _INTERNAL_LLM_CALL: contextvars.ContextVar[bool] = contextvars.ContextVar(
     "astrbot_emotional_state_internal_llm_call",
     default=False,
 )
+PERSONA_MODELING_ENABLED = True
+PERSONA_INFLUENCE_STRENGTH = 1.0
+RESET_ON_PERSONA_CHANGE = True
+BACKGROUND_POST_BASE_WORKERS = 3
+BACKGROUND_POST_DYNAMIC_EXTRA_WORKER_CAP = 5
 
 
 @dataclass
@@ -373,6 +388,7 @@ _REQUIRED_EMOTION_SERVICE_METHODS: tuple[str, ...] = (
     "export_integrated_self_diagnostics",
     "get_lifelike_learning_snapshot",
     "get_lifelike_initiative_policy",
+    "get_proactive_speech_decision",
     "get_lifelike_prompt_fragment",
     "observe_lifelike_text",
     "simulate_lifelike_update",
@@ -436,7 +452,7 @@ def get_emotional_state_plugin(context: Context) -> Any | None:
     PLUGIN_NAME,
     "pidan",
     "基于 PAD/OCC/appraisal 与情绪动力学的 AstrBot 多维情绪状态插件",
-    "1.0.0",
+    "1.0.0-exp",
     "",
 )
 class EmotionalStatePlugin(Star):
@@ -714,7 +730,13 @@ class EmotionalStatePlugin(Star):
         auxiliary_load_tasks: dict[str, asyncio.Task[Any]] = {}
         if humanlike_enabled:
             auxiliary_load_tasks["humanlike"] = asyncio.create_task(
-                self._load_humanlike_state(session_key, now=observed_at),
+                self._load_humanlike_state(
+                    session_key,
+                    personality_model=self._personality_model_from_profile(
+                        persona_profile,
+                    ),
+                    now=observed_at,
+                ),
             )
         if lifelike_enabled:
             auxiliary_load_tasks["lifelike"] = asyncio.create_task(
@@ -722,15 +744,33 @@ class EmotionalStatePlugin(Star):
             )
         if moral_repair_enabled:
             auxiliary_load_tasks["moral_repair"] = asyncio.create_task(
-                self._load_moral_repair_state(session_key, now=observed_at),
+                self._load_moral_repair_state(
+                    session_key,
+                    personality_model=self._personality_model_from_profile(
+                        persona_profile,
+                    ),
+                    now=observed_at,
+                ),
             )
         if fallibility_enabled:
             auxiliary_load_tasks["fallibility"] = asyncio.create_task(
-                self._load_fallibility_state(session_key, now=observed_at),
+                self._load_fallibility_state(
+                    session_key,
+                    personality_model=self._personality_model_from_profile(
+                        persona_profile,
+                    ),
+                    now=observed_at,
+                ),
             )
         if group_atmosphere_enabled:
             auxiliary_load_tasks["group_atmosphere"] = asyncio.create_task(
-                self._load_group_atmosphere_state(session_key, now=observed_at),
+                self._load_group_atmosphere_state(
+                    session_key,
+                    personality_model=self._personality_model_from_profile(
+                        persona_profile,
+                    ),
+                    now=observed_at,
+                ),
             )
         if auxiliary_load_tasks:
             await asyncio.gather(*auxiliary_load_tasks.values())
@@ -749,6 +789,9 @@ class EmotionalStatePlugin(Star):
             humanlike_state = self.humanlike_engine.update(
                 previous_humanlike_state,
                 observation,
+                personality_model=self._personality_model_from_profile(
+                    persona_profile,
+                ),
                 now=observed_at,
             )
             await self._save_humanlike_state(session_key, humanlike_state)
@@ -788,6 +831,9 @@ class EmotionalStatePlugin(Star):
             moral_repair_state = self.moral_repair_engine.update(
                 previous_moral_repair_state,
                 observation,
+                personality_model=self._personality_model_from_profile(
+                    persona_profile,
+                ),
                 now=observed_at,
             )
             await self._save_moral_repair_state(session_key, moral_repair_state)
@@ -806,6 +852,9 @@ class EmotionalStatePlugin(Star):
             fallibility_state = self.fallibility_engine.update(
                 previous_fallibility_state,
                 observation,
+                personality_model=self._personality_model_from_profile(
+                    persona_profile,
+                ),
                 now=observed_at,
             )
             await self._save_fallibility_state(session_key, fallibility_state)
@@ -831,6 +880,9 @@ class EmotionalStatePlugin(Star):
             group_atmosphere_state = self.group_atmosphere_engine.update(
                 previous_group_atmosphere_state,
                 observation,
+                personality_model=self._personality_model_from_profile(
+                    persona_profile,
+                ),
                 now=observed_at,
             )
             await self._save_group_atmosphere_state(
@@ -976,6 +1028,9 @@ class EmotionalStatePlugin(Star):
             if humanlike_injection_enabled:
                 humanlike_state = humanlike_state or await self._load_humanlike_state(
                     session_key,
+                    personality_model=self._personality_model_from_profile(
+                        persona_profile,
+                    ),
                     now=observed_at,
                 )
                 appended = self._append_temp_text_part(
@@ -1055,6 +1110,9 @@ class EmotionalStatePlugin(Star):
                     moral_repair_state
                     or await self._load_moral_repair_state(
                         session_key,
+                        personality_model=self._personality_model_from_profile(
+                            persona_profile,
+                        ),
                         now=observed_at,
                     )
                 )
@@ -1081,6 +1139,9 @@ class EmotionalStatePlugin(Star):
             if fallibility_injection_enabled:
                 fallibility_state = fallibility_state or await self._load_fallibility_state(
                     session_key,
+                    personality_model=self._personality_model_from_profile(
+                        persona_profile,
+                    ),
                     now=observed_at,
                 )
                 appended = self._append_temp_text_part(
@@ -1108,6 +1169,9 @@ class EmotionalStatePlugin(Star):
                     group_atmosphere_state
                     or await self._load_group_atmosphere_state(
                         session_key,
+                        personality_model=self._personality_model_from_profile(
+                            persona_profile,
+                        ),
                         now=observed_at,
                     )
                 )
@@ -1163,12 +1227,24 @@ class EmotionalStatePlugin(Star):
         if self._group_atmosphere_modeling_enabled() and self._group_atmosphere_applies(
             identity,
         ):
+            observed_at = self._observed_now()
+            base_persona_profile = await self._persona_profile(event, None)
+            persona_profile = await self._runtime_persona_profile(
+                identity.conversation_id,
+                base_persona_profile,
+                now=observed_at,
+            )
             group_state = await self._load_group_atmosphere_state(
                 identity.conversation_id,
+                personality_model=self._personality_model_from_profile(
+                    persona_profile,
+                ),
+                now=observed_at,
             )
             cooled = self._apply_group_atmosphere_join_cooldown(
                 identity.conversation_id,
                 group_state,
+                now=observed_at,
                 bot_response=True,
             )
             await self._save_group_atmosphere_state(identity.conversation_id, cooled)
@@ -1177,7 +1253,7 @@ class EmotionalStatePlugin(Star):
         if assessment_timing not in {"post", "both"}:
             return
 
-        if self._cfg_bool("background_post_assessment", False):
+        if self._background_post_assessment_enabled():
             self._schedule_background_post_assessment(
                 event,
                 response_text,
@@ -1222,12 +1298,24 @@ class EmotionalStatePlugin(Star):
         moral_repair_load_task: asyncio.Task[MoralRepairState] | None = None
         if moral_repair_enabled:
             moral_repair_load_task = asyncio.create_task(
-                self._load_moral_repair_state(session_key, now=observed_at),
+                self._load_moral_repair_state(
+                    session_key,
+                    personality_model=self._personality_model_from_profile(
+                        persona_profile,
+                    ),
+                    now=observed_at,
+                ),
             )
         fallibility_load_task: asyncio.Task[FallibilityState] | None = None
         if fallibility_enabled:
             fallibility_load_task = asyncio.create_task(
-                self._load_fallibility_state(session_key, now=observed_at),
+                self._load_fallibility_state(
+                    session_key,
+                    personality_model=self._personality_model_from_profile(
+                        persona_profile,
+                    ),
+                    now=observed_at,
+                ),
             )
 
         try:
@@ -1324,7 +1412,13 @@ class EmotionalStatePlugin(Star):
             previous_moral_repair_state = (
                 await moral_repair_load_task
                 if moral_repair_load_task is not None
-                else await self._load_moral_repair_state(session_key, now=observed_at)
+                else await self._load_moral_repair_state(
+                    session_key,
+                    personality_model=self._personality_model_from_profile(
+                        persona_profile,
+                    ),
+                    now=observed_at,
+                )
             )
             moral_repair_observation = heuristic_moral_repair_observation(
                 response_text,
@@ -1333,6 +1427,9 @@ class EmotionalStatePlugin(Star):
             moral_repair_state = self.moral_repair_engine.update(
                 previous_moral_repair_state,
                 moral_repair_observation,
+                personality_model=self._personality_model_from_profile(
+                    persona_profile,
+                ),
                 now=observed_at,
             )
             await self._save_moral_repair_state(session_key, moral_repair_state)
@@ -1340,7 +1437,13 @@ class EmotionalStatePlugin(Star):
             previous_fallibility_state = (
                 await fallibility_load_task
                 if fallibility_load_task is not None
-                else await self._load_fallibility_state(session_key, now=observed_at)
+                else await self._load_fallibility_state(
+                    session_key,
+                    personality_model=self._personality_model_from_profile(
+                        persona_profile,
+                    ),
+                    now=observed_at,
+                )
             )
             fallibility_observation = heuristic_fallibility_observation(
                 response_text,
@@ -1349,6 +1452,9 @@ class EmotionalStatePlugin(Star):
             fallibility_state = self.fallibility_engine.update(
                 previous_fallibility_state,
                 fallibility_observation,
+                personality_model=self._personality_model_from_profile(
+                    persona_profile,
+                ),
                 now=observed_at,
             )
             await self._save_fallibility_state(session_key, fallibility_state)
@@ -1527,7 +1633,7 @@ class EmotionalStatePlugin(Star):
         if not queue:
             return []
         now = self._observed_now()
-        max_workers = max(1, self._cfg_int("background_post_max_workers", 5))
+        max_workers = self._background_post_max_workers(session_key)
         batch: list[_BackgroundPostJob] = []
         while queue and len(batch) < max_workers:
             job = queue[0]
@@ -1688,6 +1794,30 @@ class EmotionalStatePlugin(Star):
         if not retry_times:
             return 0.0
         return min(0.25, max(0.0, min(retry_times) - now))
+
+    def _background_post_assessment_enabled(self) -> bool:
+        return True
+
+    def _dynamic_background_workers_enabled(self) -> bool:
+        return self._cfg_bool("enable_dynamic_background_workers", False)
+
+    def _background_post_dynamic_extra_workers(self, session_key: str) -> int:
+        if not self._dynamic_background_workers_enabled():
+            return 0
+        queue = getattr(self, "_background_post_queues", {}).get(session_key)
+        active = getattr(self, "_background_post_active", {}).get(session_key, {})
+        pressure = len(queue or ()) + len(active or {})
+        if pressure <= BACKGROUND_POST_BASE_WORKERS:
+            return 0
+        return min(
+            BACKGROUND_POST_DYNAMIC_EXTRA_WORKER_CAP,
+            max(0, pressure - BACKGROUND_POST_BASE_WORKERS),
+        )
+
+    def _background_post_max_workers(self, session_key: str) -> int:
+        return BACKGROUND_POST_BASE_WORKERS + self._background_post_dynamic_extra_workers(
+            session_key,
+        )
 
     async def _assess_background_post_job(
         self,
@@ -2744,13 +2874,19 @@ class EmotionalStatePlugin(Star):
         elif warnings:
             warning_level = "warn"
         return {
-            "enabled": self._cfg_bool("background_post_assessment", False),
+            "enabled": self._background_post_assessment_enabled(),
             "checkpoint_enabled": self._cfg_bool(
                 "background_post_queue_checkpoint_enabled",
                 True,
             ),
             "queue_limit": max(0, self._cfg_int("background_post_queue_limit", 0)),
-            "max_workers": max(1, self._cfg_int("background_post_max_workers", 5)),
+            "max_workers": self._background_post_max_workers(session_key),
+            "base_workers": BACKGROUND_POST_BASE_WORKERS,
+            "dynamic_extra_workers_enabled": self._dynamic_background_workers_enabled(),
+            "dynamic_extra_workers": self._background_post_dynamic_extra_workers(
+                session_key,
+            ),
+            "dynamic_extra_worker_cap": BACKGROUND_POST_DYNAMIC_EXTRA_WORKER_CAP,
             "active_task": bool(active_task is not None and not active_task.done()),
             "active_workers": active_workers,
             "queued": queue_depth,
@@ -3368,14 +3504,22 @@ class EmotionalStatePlugin(Star):
         )
         if commit and not self._humanlike_modeling_enabled():
             return self._humanlike_disabled_payload(session_key)
+        persona_profile = await self._public_runtime_persona_profile(
+            event_or_session,
+            request=request,
+            session_key=session_key,
+            observed_at=observed_at,
+        )
         previous_state = await self._load_humanlike_state(
             session_key,
+            personality_model=self._personality_model_from_profile(persona_profile),
             now=observed_at,
         )
         observation = heuristic_humanlike_observation(text, source=source)
         state = self.humanlike_engine.update(
             previous_state,
             observation,
+            personality_model=self._personality_model_from_profile(persona_profile),
             now=observed_at,
         )
         if commit:
@@ -3525,8 +3669,15 @@ class EmotionalStatePlugin(Star):
             if self._looks_like_event(event_or_session)
             else ConversationIdentity(conversation_id=session_key)
         )
+        persona_profile = await self._public_runtime_persona_profile(
+            event_or_session,
+            request=request,
+            session_key=session_key,
+            observed_at=observed_at,
+        )
         previous_state = await self._load_group_atmosphere_state(
             session_key,
+            personality_model=self._personality_model_from_profile(persona_profile),
             now=observed_at,
         )
         observation = heuristic_group_atmosphere_observation(
@@ -3539,6 +3690,7 @@ class EmotionalStatePlugin(Star):
         state = self.group_atmosphere_engine.update(
             previous_state,
             observation,
+            personality_model=self._personality_model_from_profile(persona_profile),
             now=observed_at,
         )
         if commit:
@@ -3640,6 +3792,208 @@ class EmotionalStatePlugin(Star):
             )
         state = await self._load_lifelike_learning_state(session_key)
         return derive_initiative_policy(state)
+
+    async def get_proactive_speech_decision(
+        self,
+        event_or_session: AstrMessageEvent | str | None = None,
+        *,
+        request: ProviderRequest | None = None,
+        session_key: str | None = None,
+        candidate_context: str = "",
+        use_llm: bool = True,
+    ) -> dict[str, Any]:
+        """Public API: decide whether the bot should proactively speak now."""
+        session_key = self._resolve_public_session_key(
+            event_or_session,
+            request=request,
+            session_key=session_key,
+        )
+        emotion_task = asyncio.create_task(
+            self.get_emotion_snapshot(
+                event_or_session,
+                request=request,
+                session_key=session_key,
+                include_prompt_fragment=False,
+            ),
+        )
+        lifelike_task = asyncio.create_task(
+            self.get_lifelike_learning_snapshot(
+                event_or_session,
+                request=request,
+                session_key=session_key,
+                exposure="internal",
+                include_prompt_fragment=False,
+            ),
+        )
+        humanlike_task = asyncio.create_task(
+            self.get_humanlike_snapshot(
+                event_or_session,
+                request=request,
+                session_key=session_key,
+                exposure="plugin_safe",
+                include_prompt_fragment=False,
+            ),
+        )
+        group_task = asyncio.create_task(
+            self.get_group_atmosphere_snapshot(
+                event_or_session,
+                request=request,
+                session_key=session_key,
+                exposure="plugin_safe",
+                include_prompt_fragment=False,
+            ),
+        )
+        moral_task: asyncio.Task[dict[str, Any]] | None = None
+        if self._moral_repair_modeling_enabled():
+            moral_task = asyncio.create_task(
+                self.get_moral_repair_snapshot(
+                    event_or_session,
+                    request=request,
+                    session_key=session_key,
+                    exposure="plugin_safe",
+                    include_prompt_fragment=False,
+                ),
+            )
+        fallibility_task: asyncio.Task[dict[str, Any]] | None = None
+        if self._fallibility_modeling_enabled():
+            fallibility_task = asyncio.create_task(
+                self.get_fallibility_snapshot(
+                    event_or_session,
+                    request=request,
+                    session_key=session_key,
+                    exposure="plugin_safe",
+                    include_prompt_fragment=False,
+                ),
+            )
+        tasks = [emotion_task, lifelike_task, humanlike_task, group_task]
+        if moral_task is not None:
+            tasks.append(moral_task)
+        if fallibility_task is not None:
+            tasks.append(fallibility_task)
+        await asyncio.gather(*tasks)
+        risk: dict[str, Any] = {}
+        if moral_task is not None:
+            risk["moral_repair"] = moral_task.result()
+        if fallibility_task is not None:
+            risk["fallibility"] = fallibility_task.result()
+        decision = derive_proactive_speech_decision(
+            lifelike_task.result(),
+            emotion_snapshot=emotion_task.result(),
+            humanlike_snapshot=humanlike_task.result(),
+            group_snapshot=group_task.result(),
+            risk=risk,
+        )
+        topics = rank_proactive_topics(
+            lifelike_task.result(),
+            emotion_snapshot=emotion_task.result(),
+            group_snapshot=group_task.result(),
+            risk=risk,
+            candidate_context=candidate_context,
+        )
+        decision["session_key"] = session_key
+        decision["topics"] = topics
+        decision["selected_topic"] = topics[0] if topics else None
+        topic_judgement = await self._judge_proactive_topic(
+            event_or_session,
+            decision=decision,
+            topics=topics,
+            candidate_context=candidate_context,
+            use_llm=use_llm,
+        )
+        decision["topic_judgement"] = topic_judgement
+        if topic_judgement.get("topic_text"):
+            decision["selected_topic"] = {
+                "topic": topic_judgement["topic_text"],
+                "kind": topic_judgement.get("need_mode", "llm_topic"),
+                "score": topic_judgement.get("confidence", 0.0),
+                "ask_before_using": topic_judgement.get("need_mode") == "clarify",
+                "confidence": topic_judgement.get("confidence", 0.0),
+                "reason": topic_judgement.get("reason", ""),
+                "source": topic_judgement.get("source", "llm"),
+            }
+        if topic_judgement.get("need_mode") == "silence":
+            decision["should_speak"] = False
+            decision["action"] = "stay_silent"
+        decision["dispatch_policy"] = {
+            "external_dispatch_required": True,
+            "plugin_only_decides": True,
+            "silence_is_valid": True,
+            "ordered_state_commit_required": True,
+        }
+        return decision
+
+    async def _judge_proactive_topic(
+        self,
+        event_or_session: AstrMessageEvent | str | None,
+        *,
+        decision: dict[str, Any],
+        topics: list[dict[str, Any]],
+        candidate_context: str,
+        use_llm: bool,
+    ) -> dict[str, Any]:
+        fallback = local_proactive_topic_judgement(decision, topics)
+        if not use_llm or not self._cfg_bool("use_llm_assessor", True):
+            return fallback
+        event = event_or_session if self._looks_like_event(event_or_session) else None
+        if event is None:
+            fallback["reason"] += " 未传入事件对象，无法调用当前会话 LLM。"
+            return fallback
+        provider_id = await self._provider_id(event)
+        if not provider_id:
+            fallback["reason"] += " 当前没有可用 Provider，使用本地回退。"
+            return fallback
+        prompt = build_proactive_topic_assessment_prompt(
+            decision=decision,
+            topic_candidates=topics,
+            candidate_context=candidate_context,
+            max_context_chars=self._cfg_int("max_context_chars", 1600),
+        )
+        token = _INTERNAL_LLM_CALL.set(True)
+        try:
+            llm_resp = await asyncio.wait_for(
+                self.context.llm_generate(
+                    chat_provider_id=provider_id,
+                    prompt=prompt,
+                    system_prompt=(
+                        "你是插件内部的主动发言裁决器，只输出 JSON，不直接生成聊天回复。"
+                    ),
+                    temperature=self._cfg_float("assessor_temperature", 0.1),
+                ),
+                timeout=max(0.1, self._cfg_float("assessor_timeout_seconds", 4.0)),
+            )
+        except asyncio.TimeoutError:
+            fallback["reason"] += " 主动发言话题 LLM 裁决超时，使用本地回退。"
+            return fallback
+        except Exception as exc:
+            fallback["reason"] += f" 主动发言话题 LLM 裁决失败，使用本地回退: {exc}"
+            return fallback
+        finally:
+            _INTERNAL_LLM_CALL.reset(token)
+        judgement = self._parse_proactive_topic_judgement(
+            getattr(llm_resp, "completion_text", ""),
+        )
+        if judgement is None:
+            fallback["reason"] += " 主动发言话题 LLM 输出不可解析，使用本地回退。"
+            return fallback
+        if decision.get("action") == "stay_silent":
+            judgement["should_speak"] = False
+            judgement["need_mode"] = "silence"
+            judgement["opening_style"] = "stay_silent"
+        return judgement
+
+    def _parse_proactive_topic_judgement(self, text: str) -> dict[str, Any] | None:
+        raw = str(text or "").strip()
+        if not raw:
+            return None
+        start = raw.find("{")
+        end = raw.rfind("}")
+        if start < 0 or end <= start:
+            return None
+        try:
+            data = json.loads(raw[start : end + 1])
+        except json.JSONDecodeError:
+            return None
+        return normalize_proactive_topic_judgement(data)
 
     async def get_lifelike_prompt_fragment(
         self,
@@ -4071,14 +4425,22 @@ class EmotionalStatePlugin(Star):
         )
         if commit and not self._moral_repair_modeling_enabled():
             return self._moral_repair_disabled_payload(session_key)
+        persona_profile = await self._public_runtime_persona_profile(
+            event_or_session,
+            request=request,
+            session_key=session_key,
+            observed_at=observed_at,
+        )
         previous_state = await self._load_moral_repair_state(
             session_key,
+            personality_model=self._personality_model_from_profile(persona_profile),
             now=observed_at,
         )
         observation = heuristic_moral_repair_observation(text, source=source)
         state = self.moral_repair_engine.update(
             previous_state,
             observation,
+            personality_model=self._personality_model_from_profile(persona_profile),
             now=observed_at,
         )
         if commit:
@@ -4236,14 +4598,22 @@ class EmotionalStatePlugin(Star):
         )
         if commit and not self._fallibility_modeling_enabled():
             return self._fallibility_disabled_payload(session_key)
+        persona_profile = await self._public_runtime_persona_profile(
+            event_or_session,
+            request=request,
+            session_key=session_key,
+            observed_at=observed_at,
+        )
         previous_state = await self._load_fallibility_state(
             session_key,
+            personality_model=self._personality_model_from_profile(persona_profile),
             now=observed_at,
         )
         observation = heuristic_fallibility_observation(text, source=source)
         state = self.fallibility_engine.update(
             previous_state,
             observation,
+            personality_model=self._personality_model_from_profile(persona_profile),
             now=observed_at,
         )
         if commit:
@@ -4446,11 +4816,22 @@ class EmotionalStatePlugin(Star):
             request=request,
             session_key=session_key,
         )
-        previous_state = await self._load_psychological_state(session_key)
+        persona_profile = await self._public_runtime_persona_profile(
+            event_or_session,
+            request=request,
+            session_key=session_key,
+            observed_at=observed_at,
+        )
+        previous_state = await self._load_psychological_state(
+            session_key,
+            personality_model=self._personality_model_from_profile(persona_profile),
+            now=observed_at,
+        )
         observation = heuristic_psychological_observation(text, source=source)
         state = self.psychological_engine.update(
             previous_state,
             observation,
+            personality_model=self._personality_model_from_profile(persona_profile),
             now=observed_at,
         )
         if commit:
@@ -4667,6 +5048,21 @@ class EmotionalStatePlugin(Star):
         )
         yield event.plain_result(self._llm_tool_json_result(snapshot))
 
+    @filter.llm_tool(name="get_bot_proactive_speech_decision")
+    async def get_bot_proactive_speech_decision_tool(
+        self,
+        event: AstrMessageEvent,
+        candidate_context: str = "",
+        use_llm: bool = True,
+    ):
+        """Decide whether the bot should proactively speak and suggest topics."""
+        decision = await self.get_proactive_speech_decision(
+            event,
+            candidate_context=candidate_context,
+            use_llm=use_llm,
+        )
+        yield event.plain_result(self._llm_tool_json_result(decision))
+
     @filter.llm_tool(name="get_bot_personality_drift_state")
     async def get_bot_personality_drift_state_tool(
         self,
@@ -4749,8 +5145,8 @@ class EmotionalStatePlugin(Star):
         yield event.plain_result(
             "模型：E_t = clip(B_t + alpha_t (X_t - B_t) + coupling_t)。\n"
             "B_t = (1-gamma_p)E_(t-1)+gamma_p b_p，其中 b_p 是当前人格基线。\n"
-            "delta_t 为加权欧氏惊讶度；"
-            "alpha_t = clamp(alpha_base,p * sigmoid(k(c_t-c0)) * (1+r_p delta_t), alpha_min, alpha_max)。\n"
+            "delta_t 为加权欧氏惊讶度；alpha_t、gamma_p、门控和耦合强度都由运行时人格、"
+            "上一轮 dynamics、置信度、惊讶度和真实时间间隔自动推导。\n"
             "维度：valence, arousal, dominance, goal_congruence, certainty, control, affiliation。"
         )
 
@@ -4934,7 +5330,7 @@ class EmotionalStatePlugin(Star):
             return await self._persona_profile(event, request)
         if request is None and not allow_default:
             return None
-        if not self._cfg_bool("persona_modeling", True):
+        if not PERSONA_MODELING_ENABLED:
             return PersonaProfile.default()
 
         persona_id = "default"
@@ -4958,7 +5354,7 @@ class EmotionalStatePlugin(Star):
             name=persona_name,
             text="\n\n".join(pieces),
             source="public_api_request" if pieces else "public_api_default",
-            strength=self._cfg_float("persona_influence", 1.0),
+            strength=PERSONA_INFLUENCE_STRENGTH,
         )
 
     async def _assess_emotion(
@@ -5138,15 +5534,37 @@ class EmotionalStatePlugin(Star):
     async def _load_psychological_state(
         self,
         session_key: str,
+        *,
+        personality_model: dict[str, Any] | None = None,
+        now: float | None = None,
     ) -> PsychologicalScreeningState:
         if session_key in self._psychological_memory_cache:
-            return self._psychological_memory_cache[session_key]
+            state = self._psychological_memory_cache[session_key]
+            if self._passive_load_is_fresh(state, now=now):
+                return state
+            decayed_state = self.psychological_engine.passive_update(
+                state,
+                personality_model=personality_model,
+                now=now,
+            )
+            if self._passive_update_changed(decayed_state, state):
+                state = decayed_state
+            self._psychological_memory_cache[session_key] = state
+            return state
         try:
             data = await self.get_kv_data(self._psychological_kv_key(session_key), None)
         except Exception as exc:
             logger.debug(f"{PLUGIN_NAME}: 心理筛查 KV 读取失败，使用空状态: {exc}")
             data = None
         state = PsychologicalScreeningState.from_dict(data)
+        if not self._passive_load_is_fresh(state, now=now):
+            decayed_state = self.psychological_engine.passive_update(
+                state,
+                personality_model=personality_model,
+                now=now,
+            )
+            if self._passive_update_changed(decayed_state, state):
+                state = decayed_state
         self._psychological_memory_cache[session_key] = state
         return state
 
@@ -5172,13 +5590,19 @@ class EmotionalStatePlugin(Star):
         self,
         session_key: str,
         *,
+        personality_model: dict[str, Any] | None = None,
         now: float | None = None,
     ) -> HumanlikeState:
+        self._ensure_runtime_state_containers()
         if session_key in self._humanlike_memory_cache:
             state = self._humanlike_memory_cache[session_key]
             if self._passive_load_is_fresh(state, now=now):
                 return state
-            decayed_state = self.humanlike_engine.passive_update(state, now=now)
+            decayed_state = self.humanlike_engine.passive_update(
+                state,
+                personality_model=personality_model,
+                now=now,
+            )
             if self._passive_update_changed(decayed_state, state):
                 state = decayed_state
             self._humanlike_memory_cache[session_key] = state
@@ -5192,7 +5616,11 @@ class EmotionalStatePlugin(Star):
         if self._passive_load_is_fresh(state, now=now):
             self._humanlike_memory_cache[session_key] = state
             return state
-        decayed_state = self.humanlike_engine.passive_update(state, now=now)
+        decayed_state = self.humanlike_engine.passive_update(
+            state,
+            personality_model=personality_model,
+            now=now,
+        )
         if self._passive_update_changed(decayed_state, state):
             state = decayed_state
         self._humanlike_memory_cache[session_key] = state
@@ -5203,6 +5631,7 @@ class EmotionalStatePlugin(Star):
         session_key: str,
         state: HumanlikeState,
     ) -> None:
+        self._ensure_runtime_state_containers()
         self._humanlike_memory_cache[session_key] = state
         try:
             await self.put_kv_data(self._humanlike_kv_key(session_key), state.to_dict())
@@ -5210,6 +5639,7 @@ class EmotionalStatePlugin(Star):
             logger.debug(f"{PLUGIN_NAME}: humanlike KV write failed, keeping memory only: {exc}")
 
     async def _delete_humanlike_state(self, session_key: str) -> None:
+        self._ensure_runtime_state_containers()
         self._humanlike_memory_cache.pop(session_key, None)
         try:
             await self.delete_kv_data(self._humanlike_kv_key(session_key))
@@ -5222,6 +5652,7 @@ class EmotionalStatePlugin(Star):
         *,
         now: float | None = None,
     ) -> LifelikeLearningState:
+        self._ensure_runtime_state_containers()
         if session_key in self._lifelike_learning_memory_cache:
             state = self._lifelike_learning_memory_cache[session_key]
             if self._passive_load_is_fresh(state, now=now):
@@ -5257,6 +5688,7 @@ class EmotionalStatePlugin(Star):
         session_key: str,
         state: LifelikeLearningState,
     ) -> None:
+        self._ensure_runtime_state_containers()
         self._lifelike_learning_memory_cache[session_key] = state
         try:
             await self.put_kv_data(
@@ -5267,6 +5699,7 @@ class EmotionalStatePlugin(Star):
             logger.debug(f"{PLUGIN_NAME}: lifelike learning KV write failed, keeping memory only: {exc}")
 
     async def _delete_lifelike_learning_state(self, session_key: str) -> None:
+        self._ensure_runtime_state_containers()
         self._lifelike_learning_memory_cache.pop(session_key, None)
         try:
             await self.delete_kv_data(self._lifelike_learning_kv_key(session_key))
@@ -5280,6 +5713,7 @@ class EmotionalStatePlugin(Star):
         *,
         now: float | None = None,
     ) -> PersonalityDriftState:
+        self._ensure_runtime_state_containers()
         fingerprint = profile.fingerprint if profile is not None else "default"
         if session_key in self._personality_drift_memory_cache:
             state = self._personality_drift_memory_cache[session_key]
@@ -5324,6 +5758,48 @@ class EmotionalStatePlugin(Star):
             now=observed_at,
         )
 
+    def _ensure_runtime_state_containers(self) -> None:
+        if not hasattr(self, "humanlike_engine"):
+            self.humanlike_engine = HumanlikeEngine(
+                self._build_humanlike_parameters(),
+            )
+        if not hasattr(self, "lifelike_learning_engine"):
+            self.lifelike_learning_engine = LifelikeLearningEngine(
+                self._build_lifelike_learning_parameters(),
+            )
+        if not hasattr(self, "personality_drift_engine"):
+            self.personality_drift_engine = PersonalityDriftEngine(
+                self._build_personality_drift_parameters(),
+            )
+        if not hasattr(self, "moral_repair_engine"):
+            self.moral_repair_engine = MoralRepairEngine(
+                self._build_moral_repair_parameters(),
+            )
+        if not hasattr(self, "fallibility_engine"):
+            self.fallibility_engine = FallibilityEngine(
+                self._build_fallibility_parameters(),
+            )
+        if not hasattr(self, "group_atmosphere_engine"):
+            self.group_atmosphere_engine = GroupAtmosphereEngine(
+                self._build_group_atmosphere_parameters(),
+            )
+        if not hasattr(self, "_memory_cache"):
+            self._memory_cache = {}
+        if not hasattr(self, "_psychological_memory_cache"):
+            self._psychological_memory_cache = {}
+        if not hasattr(self, "_humanlike_memory_cache"):
+            self._humanlike_memory_cache = {}
+        if not hasattr(self, "_lifelike_learning_memory_cache"):
+            self._lifelike_learning_memory_cache = {}
+        if not hasattr(self, "_personality_drift_memory_cache"):
+            self._personality_drift_memory_cache = {}
+        if not hasattr(self, "_moral_repair_memory_cache"):
+            self._moral_repair_memory_cache = {}
+        if not hasattr(self, "_fallibility_memory_cache"):
+            self._fallibility_memory_cache = {}
+        if not hasattr(self, "_group_atmosphere_memory_cache"):
+            self._group_atmosphere_memory_cache = {}
+
     def _passive_load_is_fresh(self, state: Any, *, now: float | None = None) -> bool:
         updated_at = getattr(state, "updated_at", None)
         try:
@@ -5361,6 +5837,7 @@ class EmotionalStatePlugin(Star):
         session_key: str,
         state: PersonalityDriftState,
     ) -> None:
+        self._ensure_runtime_state_containers()
         self._personality_drift_memory_cache[session_key] = state
         try:
             await self.put_kv_data(
@@ -5371,6 +5848,7 @@ class EmotionalStatePlugin(Star):
             logger.debug(f"{PLUGIN_NAME}: personality drift KV write failed, keeping memory only: {exc}")
 
     async def _delete_personality_drift_state(self, session_key: str) -> None:
+        self._ensure_runtime_state_containers()
         self._personality_drift_memory_cache.pop(session_key, None)
         try:
             await self.delete_kv_data(self._personality_drift_kv_key(session_key))
@@ -5381,13 +5859,18 @@ class EmotionalStatePlugin(Star):
         self,
         session_key: str,
         *,
+        personality_model: dict[str, Any] | None = None,
         now: float | None = None,
     ) -> MoralRepairState:
         if session_key in self._moral_repair_memory_cache:
             state = self._moral_repair_memory_cache[session_key]
             if self._passive_load_is_fresh(state, now=now):
                 return state
-            decayed_state = self.moral_repair_engine.passive_update(state, now=now)
+            decayed_state = self.moral_repair_engine.passive_update(
+                state,
+                personality_model=personality_model,
+                now=now,
+            )
             if self._passive_update_changed(decayed_state, state):
                 state = decayed_state
             self._moral_repair_memory_cache[session_key] = state
@@ -5401,7 +5884,11 @@ class EmotionalStatePlugin(Star):
         if self._passive_load_is_fresh(state, now=now):
             self._moral_repair_memory_cache[session_key] = state
             return state
-        decayed_state = self.moral_repair_engine.passive_update(state, now=now)
+        decayed_state = self.moral_repair_engine.passive_update(
+            state,
+            personality_model=personality_model,
+            now=now,
+        )
         if self._passive_update_changed(decayed_state, state):
             state = decayed_state
         self._moral_repair_memory_cache[session_key] = state
@@ -5429,13 +5916,18 @@ class EmotionalStatePlugin(Star):
         self,
         session_key: str,
         *,
+        personality_model: dict[str, Any] | None = None,
         now: float | None = None,
     ) -> FallibilityState:
         if session_key in self._fallibility_memory_cache:
             state = self._fallibility_memory_cache[session_key]
             if self._passive_load_is_fresh(state, now=now):
                 return state
-            decayed_state = self.fallibility_engine.passive_update(state, now=now)
+            decayed_state = self.fallibility_engine.passive_update(
+                state,
+                personality_model=personality_model,
+                now=now,
+            )
             if self._passive_update_changed(decayed_state, state):
                 state = decayed_state
             self._fallibility_memory_cache[session_key] = state
@@ -5449,7 +5941,11 @@ class EmotionalStatePlugin(Star):
         if self._passive_load_is_fresh(state, now=now):
             self._fallibility_memory_cache[session_key] = state
             return state
-        decayed_state = self.fallibility_engine.passive_update(state, now=now)
+        decayed_state = self.fallibility_engine.passive_update(
+            state,
+            personality_model=personality_model,
+            now=now,
+        )
         if self._passive_update_changed(decayed_state, state):
             state = decayed_state
         self._fallibility_memory_cache[session_key] = state
@@ -5477,6 +5973,7 @@ class EmotionalStatePlugin(Star):
         self,
         session_key: str,
         *,
+        personality_model: dict[str, Any] | None = None,
         now: float | None = None,
     ) -> GroupAtmosphereState:
         if session_key in self._group_atmosphere_memory_cache:
@@ -5485,6 +5982,7 @@ class EmotionalStatePlugin(Star):
                 return state
             decayed_state = self.group_atmosphere_engine.passive_update(
                 state,
+                personality_model=personality_model,
                 now=now,
             )
             if self._passive_update_changed(decayed_state, state):
@@ -5503,7 +6001,11 @@ class EmotionalStatePlugin(Star):
         if self._passive_load_is_fresh(state, now=now):
             self._group_atmosphere_memory_cache[session_key] = state
             return state
-        decayed_state = self.group_atmosphere_engine.passive_update(state, now=now)
+        decayed_state = self.group_atmosphere_engine.passive_update(
+            state,
+            personality_model=personality_model,
+            now=now,
+        )
         if self._passive_update_changed(decayed_state, state):
             state = decayed_state
         self._group_atmosphere_memory_cache[session_key] = state
@@ -5531,229 +6033,70 @@ class EmotionalStatePlugin(Star):
             logger.debug(f"{PLUGIN_NAME}: group atmosphere KV delete failed: {exc}")
 
     def _build_parameters(self) -> EmotionParameters:
-        return EmotionParameters(
-            alpha_base=self._cfg_float("alpha_base", 0.42),
-            alpha_min=self._cfg_float("alpha_min", 0.06),
-            alpha_max=self._cfg_float("alpha_max", 0.72),
-            baseline_decay=self._cfg_float("baseline_decay", 0.035),
-            baseline_half_life_seconds=self._cfg_float(
-                "baseline_half_life_seconds",
-                21600.0,
-            ),
-            reactivity=self._cfg_float("reactivity", 0.55),
-            confidence_midpoint=self._cfg_float("confidence_midpoint", 0.5),
-            confidence_slope=self._cfg_float("confidence_slope", 7.0),
-            min_update_interval_seconds=self._cfg_float(
-                "min_update_interval_seconds",
-                8.0,
-            ),
-            rapid_update_half_life_seconds=self._cfg_float(
-                "rapid_update_half_life_seconds",
-                20.0,
-            ),
-            arousal_from_surprise=self._cfg_float("arousal_from_surprise", 0.18),
-            dominance_control_coupling=self._cfg_float(
-                "dominance_control_coupling",
-                0.12,
-            ),
-            consequence_decay=self._cfg_float("consequence_decay", 0.68),
-            consequence_half_life_seconds=self._cfg_float(
-                "consequence_half_life_seconds",
-                10800.0,
-            ),
-            consequence_threshold=self._cfg_float("consequence_threshold", 0.48),
-            consequence_strength=self._cfg_float("consequence_strength", 1.0),
-            cold_war_turns=self._cfg_int("cold_war_turns", 3),
-            cold_war_duration_seconds=self._cfg_float(
-                "cold_war_duration_seconds",
-                1800.0,
-            ),
-            short_effect_duration_seconds=self._cfg_float(
-                "short_effect_duration_seconds",
-                900.0,
-            ),
-        )
+        return EmotionParameters()
 
     def _build_psychological_parameters(self) -> PsychologicalScreeningParameters:
-        return PsychologicalScreeningParameters(
-            alpha_base=self._cfg_float("psychological_alpha_base", 0.32),
-            alpha_min=self._cfg_float("psychological_alpha_min", 0.04),
-            alpha_max=self._cfg_float("psychological_alpha_max", 0.55),
-            state_half_life_seconds=self._cfg_float(
-                "psychological_state_half_life_seconds",
-                604800.0,
-            ),
-            crisis_half_life_seconds=self._cfg_float(
-                "psychological_crisis_half_life_seconds",
-                2592000.0,
-            ),
-            trajectory_limit=self._cfg_int("psychological_trajectory_limit", 40),
-        )
+        return PsychologicalScreeningParameters()
 
     def _build_humanlike_parameters(self) -> HumanlikeParameters:
-        return HumanlikeParameters(
-            alpha_base=self._cfg_float("humanlike_alpha_base", 0.30),
-            alpha_min=self._cfg_float("humanlike_alpha_min", 0.03),
-            alpha_max=self._cfg_float("humanlike_alpha_max", 0.46),
-            confidence_midpoint=self._cfg_float(
-                "humanlike_confidence_midpoint",
-                0.5,
-            ),
-            confidence_slope=self._cfg_float("humanlike_confidence_slope", 6.0),
-            state_half_life_seconds=self._cfg_float(
-                "humanlike_state_half_life_seconds",
-                21600.0,
-            ),
-            rapid_update_half_life_seconds=self._cfg_float(
-                "humanlike_rapid_update_half_life_seconds",
-                20.0,
-            ),
-            min_update_interval_seconds=self._cfg_float(
-                "humanlike_min_update_interval_seconds",
-                8.0,
-            ),
-            max_impulse_per_update=self._cfg_float(
-                "humanlike_max_impulse_per_update",
-                0.18,
-            ),
-            trajectory_limit=self._cfg_int("humanlike_trajectory_limit", 40),
-        )
+        return HumanlikeParameters()
 
     def _build_lifelike_learning_parameters(self) -> LifelikeLearningParameters:
-        return LifelikeLearningParameters(
-            state_half_life_seconds=self._cfg_float(
-                "lifelike_learning_half_life_seconds",
-                2592000.0,
-            ),
-            min_update_interval_seconds=self._cfg_float(
-                "lifelike_learning_min_update_interval_seconds",
-                10.0,
-            ),
-            max_terms=self._cfg_int("lifelike_learning_max_terms", 120),
-            trajectory_limit=self._cfg_int("lifelike_learning_trajectory_limit", 60),
-            confidence_growth=self._cfg_float(
-                "lifelike_learning_confidence_growth",
-                0.25,
-            ),
-        )
+        return LifelikeLearningParameters()
 
     def _build_personality_drift_parameters(self) -> PersonalityDriftParameters:
-        return PersonalityDriftParameters(
-            state_half_life_seconds=self._cfg_float(
-                "personality_drift_half_life_seconds",
-                7776000.0,
-            ),
-            rapid_update_half_life_seconds=self._cfg_float(
-                "personality_drift_rapid_update_half_life_seconds",
-                86400.0,
-            ),
-            min_update_interval_seconds=self._cfg_float(
-                "personality_drift_min_update_interval_seconds",
-                21600.0,
-            ),
-            learning_rate=self._cfg_float("personality_drift_learning_rate", 0.055),
-            event_threshold=self._cfg_float("personality_drift_event_threshold", 0.12),
-            max_impulse_per_update=self._cfg_float(
-                "personality_drift_max_impulse_per_update",
-                0.015,
-            ),
-            max_trait_offset=self._cfg_float(
-                "personality_drift_max_trait_offset",
-                0.22,
-            ),
-            confidence_growth=self._cfg_float(
-                "personality_drift_confidence_growth",
-                0.10,
-            ),
-            trajectory_limit=self._cfg_int("personality_drift_trajectory_limit", 80),
-        )
+        return PersonalityDriftParameters()
 
     def _build_moral_repair_parameters(self) -> MoralRepairParameters:
-        return MoralRepairParameters(
-            alpha_base=self._cfg_float("moral_repair_alpha_base", 0.28),
-            alpha_min=self._cfg_float("moral_repair_alpha_min", 0.03),
-            alpha_max=self._cfg_float("moral_repair_alpha_max", 0.42),
-            confidence_midpoint=self._cfg_float(
-                "moral_repair_confidence_midpoint",
-                0.5,
-            ),
-            confidence_slope=self._cfg_float("moral_repair_confidence_slope", 6.0),
-            state_half_life_seconds=self._cfg_float(
-                "moral_repair_state_half_life_seconds",
-                604800.0,
-            ),
-            rapid_update_half_life_seconds=self._cfg_float(
-                "moral_repair_rapid_update_half_life_seconds",
-                30.0,
-            ),
-            min_update_interval_seconds=self._cfg_float(
-                "moral_repair_min_update_interval_seconds",
-                8.0,
-            ),
-            max_impulse_per_update=self._cfg_float(
-                "moral_repair_max_impulse_per_update",
-                0.16,
-            ),
-            trajectory_limit=self._cfg_int("moral_repair_trajectory_limit", 40),
-        )
+        return MoralRepairParameters()
 
     def _build_fallibility_parameters(self) -> FallibilityParameters:
-        return FallibilityParameters(
-            alpha_base=self._cfg_float("fallibility_alpha_base", 0.22),
-            alpha_min=self._cfg_float("fallibility_alpha_min", 0.02),
-            alpha_max=self._cfg_float("fallibility_alpha_max", 0.34),
-            confidence_midpoint=self._cfg_float(
-                "fallibility_confidence_midpoint",
-                0.5,
-            ),
-            confidence_slope=self._cfg_float("fallibility_confidence_slope", 6.0),
-            state_half_life_seconds=self._cfg_float(
-                "fallibility_state_half_life_seconds",
-                86400.0,
-            ),
-            rapid_update_half_life_seconds=self._cfg_float(
-                "fallibility_rapid_update_half_life_seconds",
-                45.0,
-            ),
-            min_update_interval_seconds=self._cfg_float(
-                "fallibility_min_update_interval_seconds",
-                10.0,
-            ),
-            max_impulse_per_update=self._cfg_float(
-                "fallibility_max_impulse_per_update",
-                0.12,
-            ),
-            max_error_pressure=self._cfg_float("fallibility_max_error_pressure", 0.55),
-            trajectory_limit=self._cfg_int("fallibility_trajectory_limit", 40),
-        )
+        return FallibilityParameters()
 
     def _build_group_atmosphere_parameters(self) -> GroupAtmosphereParameters:
-        return GroupAtmosphereParameters(
-            alpha_base=self._cfg_float("group_atmosphere_alpha_base", 0.34),
-            alpha_min=self._cfg_float("group_atmosphere_alpha_min", 0.04),
-            alpha_max=self._cfg_float("group_atmosphere_alpha_max", 0.52),
-            state_half_life_seconds=self._cfg_float(
-                "group_atmosphere_half_life_seconds",
-                1800.0,
-            ),
-            trajectory_limit=self._cfg_int("group_atmosphere_trajectory_limit", 60),
-        )
+        return GroupAtmosphereParameters()
 
     def _engine_for_persona(self, profile: PersonaProfile | None) -> EmotionEngine:
-        if profile is None or not self._cfg_bool("persona_modeling", True):
+        if profile is None or not PERSONA_MODELING_ENABLED:
             return self.engine
         if not hasattr(self, "_engine_cache"):
             self._engine_cache = {}
-        cached = self._engine_cache.get(profile.fingerprint)
+        cache_key = self._persona_engine_cache_key(profile)
+        cached = self._engine_cache.get(cache_key)
         if cached is not None:
             return cached
         parameters = apply_persona_to_parameters(self.base_parameters, profile)
         engine = EmotionEngine(parameters=parameters, baseline=profile.baseline)
-        self._engine_cache[profile.fingerprint] = engine
+        self._engine_cache[cache_key] = engine
         if len(self._engine_cache) > 16:
             first_key = next(iter(self._engine_cache))
             self._engine_cache.pop(first_key, None)
         return engine
+
+    def _personality_model_from_profile(
+        self,
+        profile: PersonaProfile | None,
+    ) -> dict[str, Any] | None:
+        if profile is None or not PERSONA_MODELING_ENABLED:
+            return None
+        model = getattr(profile, "personality_model", None)
+        return model if isinstance(model, dict) else None
+
+    def _persona_engine_cache_key(self, profile: PersonaProfile) -> str:
+        drift = profile.personality_model.get("adaptive_drift")
+        if not isinstance(drift, dict):
+            return profile.fingerprint
+        payload = {
+            "fingerprint": profile.fingerprint,
+            "trait_offsets": drift.get("trait_offsets"),
+            "trait_confidence": drift.get("trait_confidence"),
+            "strength": drift.get("strength"),
+            "updated_at": drift.get("updated_at"),
+        }
+        digest = sha256(
+            json.dumps(payload, sort_keys=True, ensure_ascii=False).encode("utf-8"),
+        ).hexdigest()[:16]
+        return f"{profile.fingerprint}:drift:{digest}"
 
     def _safety_boundary_enabled(self) -> bool:
         return self._cfg_bool("enable_safety_boundary", True)
@@ -5781,28 +6124,28 @@ class EmotionalStatePlugin(Star):
         return payload
 
     def _humanlike_modeling_enabled(self) -> bool:
-        return self._cfg_bool("enable_humanlike_state", False)
+        return True
 
     def _humanlike_injection_enabled(self) -> bool:
-        return self._cfg_float("humanlike_injection_strength", 0.35) > 0.0
+        return self._auxiliary_state_injection_detail() != "off"
 
     def _humanlike_reset_allowed(self) -> bool:
         return self._cfg_bool("allow_humanlike_reset_backdoor", True)
 
     def _lifelike_learning_enabled(self) -> bool:
-        return self._cfg_bool("enable_lifelike_learning", False)
+        return True
 
     def _lifelike_learning_injection_enabled(self) -> bool:
-        return self._cfg_float("lifelike_learning_injection_strength", 0.30) > 0.0
+        return self._auxiliary_state_injection_detail() != "off"
 
     def _lifelike_learning_reset_allowed(self) -> bool:
         return self._cfg_bool("allow_lifelike_learning_reset_backdoor", True)
 
     def _personality_drift_enabled(self) -> bool:
-        return self._cfg_bool("enable_personality_drift", False)
+        return True
 
     def _personality_drift_injection_enabled(self) -> bool:
-        return self._cfg_float("personality_drift_injection_strength", 0.22) > 0.0
+        return self._auxiliary_state_injection_detail() != "off"
 
     def _personality_drift_reset_allowed(self) -> bool:
         return self._cfg_bool("allow_personality_drift_reset_backdoor", True)
@@ -5811,7 +6154,7 @@ class EmotionalStatePlugin(Star):
         return self._cfg_bool("enable_moral_repair_state", False)
 
     def _moral_repair_injection_enabled(self) -> bool:
-        return self._cfg_float("moral_repair_injection_strength", 0.35) > 0.0
+        return self._auxiliary_state_injection_detail() != "off"
 
     def _moral_repair_reset_allowed(self) -> bool:
         return self._cfg_bool("allow_moral_repair_reset_backdoor", True)
@@ -5820,16 +6163,16 @@ class EmotionalStatePlugin(Star):
         return self._cfg_bool("enable_fallibility_state", False)
 
     def _fallibility_injection_enabled(self) -> bool:
-        return self._cfg_float("fallibility_injection_strength", 0.0) > 0.0
+        return self._auxiliary_state_injection_detail() != "off"
 
     def _fallibility_reset_allowed(self) -> bool:
         return self._cfg_bool("allow_fallibility_reset_backdoor", True)
 
     def _group_atmosphere_modeling_enabled(self) -> bool:
-        return self._cfg_bool("enable_group_atmosphere_state", True)
+        return True
 
     def _group_atmosphere_injection_enabled(self) -> bool:
-        return self._cfg_float("group_atmosphere_injection_strength", 0.25) > 0.0
+        return self._auxiliary_state_injection_detail() != "off"
 
     def _group_atmosphere_applies(
         self,
@@ -6350,20 +6693,45 @@ class EmotionalStatePlugin(Star):
         bot_response: bool = False,
     ) -> GroupAtmosphereState:
         now = self._observed_now() if now is None else float(now)
+        dynamics = getattr(state, "dynamics", {}) if state is not None else {}
+        if not dynamics:
+            try:
+                from group_atmosphere_engine import derive_group_atmosphere_dynamics
+
+                dynamics_obj = derive_group_atmosphere_dynamics(
+                    self.group_atmosphere_engine.parameters,
+                    state,
+                    personality_model=None,
+                    elapsed_seconds=0.0,
+                )
+                dynamics = dynamics_obj.to_dict()
+                state.dynamics = dict(dynamics)
+            except Exception as exc:
+                logger.debug(f"{PLUGIN_NAME}: group atmosphere dynamics fallback failed: {exc}")
         cooldown_turns = max(
             0,
-            self._cfg_int("group_atmosphere_join_cooldown_turns", 2),
+            int(
+                round(
+                    self._as_float_value(
+                        (dynamics or {}).get("join_cooldown_turns"),
+                        2.0,
+                    ),
+                ),
+            ),
         )
         cooldown_seconds = max(
             0.0,
-            self._cfg_float("group_atmosphere_join_cooldown_seconds", 45.0),
+            self._as_float_value(
+                (dynamics or {}).get("join_cooldown_seconds"),
+                45.0,
+            ),
         )
-        bypass_attention = max(
-            0.0,
-            min(
-                1.0,
-                self._cfg_float(
-                    "group_atmosphere_join_cooldown_bypass_attention",
+        bypass_attention = min(
+            1.0,
+            max(
+                0.0,
+                self._as_float_value(
+                    (dynamics or {}).get("join_cooldown_bypass_attention"),
                     0.80,
                 ),
             ),
@@ -6437,12 +6805,12 @@ class EmotionalStatePlugin(Star):
         state: EmotionState,
         profile: PersonaProfile | None,
     ) -> EmotionState:
-        if not profile or not self._cfg_bool("persona_modeling", True):
+        if not profile or not PERSONA_MODELING_ENABLED:
             return state
         if state.persona_fingerprint == profile.fingerprint:
             state.persona_model = deepcopy(profile.personality_model)
             return state
-        if self._cfg_bool("reset_on_persona_change", True):
+        if RESET_ON_PERSONA_CHANGE:
             return EmotionState.initial(profile)
 
         old_turns = state.turns
@@ -6470,7 +6838,7 @@ class EmotionalStatePlugin(Star):
         event: AstrMessageEvent,
         request: ProviderRequest | None,
     ) -> PersonaProfile:
-        if not self._cfg_bool("persona_modeling", True):
+        if not PERSONA_MODELING_ENABLED:
             return PersonaProfile.default()
 
         persona_id = "default"
@@ -6537,7 +6905,7 @@ class EmotionalStatePlugin(Star):
             name=persona_name,
             text=text,
             source=source,
-            strength=self._cfg_float("persona_influence", 1.0),
+            strength=PERSONA_INFLUENCE_STRENGTH,
         )
 
     async def _runtime_persona_profile(
@@ -6550,8 +6918,7 @@ class EmotionalStatePlugin(Star):
     ) -> PersonaProfile | None:
         if (
             profile is None
-            or not self._cfg_bool("persona_modeling", True)
-            or not self._personality_drift_enabled()
+            or not PERSONA_MODELING_ENABLED
         ):
             return profile
         drift_state = drift_state or await self._load_personality_drift_state(
@@ -6561,6 +6928,35 @@ class EmotionalStatePlugin(Star):
         )
         return self._apply_personality_drift(profile, drift_state)
 
+    async def _public_runtime_persona_profile(
+        self,
+        event_or_session: AstrMessageEvent | str | None = None,
+        *,
+        request: ProviderRequest | None = None,
+        session_key: str | None = None,
+        observed_at: float | None = None,
+    ) -> PersonaProfile | None:
+        event = event_or_session if self._looks_like_event(event_or_session) else None
+        base_profile = await self._public_persona_profile(
+            event,
+            request,
+            allow_default=event is not None,
+        )
+        resolved_key = session_key or (
+            self._resolve_public_session_key(
+                event_or_session,
+                request=request,
+                session_key=session_key,
+            )
+            if event is not None or request is not None
+            else "global"
+        )
+        return await self._runtime_persona_profile(
+            resolved_key,
+            base_profile,
+            now=observed_at,
+        )
+
     def _apply_personality_drift(
         self,
         profile: PersonaProfile,
@@ -6569,7 +6965,6 @@ class EmotionalStatePlugin(Star):
         adapted = apply_personality_drift_to_profile(
             profile,
             state,
-            strength=self._cfg_float("personality_drift_apply_strength", 0.65),
         )
         return adapted if adapted is not None else profile
 

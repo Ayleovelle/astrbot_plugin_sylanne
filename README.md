@@ -2,7 +2,7 @@
 
 > 让 AstrBot 维护一套可计算、可记忆、可解释、可被其他插件调用的多维情绪状态。
 
-![版本 1.0.0](https://img.shields.io/badge/version-1.0.0-blue)
+![版本 1.0.0-exp](https://img.shields.io/badge/version-1.0.0-exp-blue)
 ![AstrBot >=4.9.2,<5.0.0](https://img.shields.io/badge/AstrBot-%3E%3D4.9.2%2C%3C5.0.0-green)
 ![Python 3.10+](https://img.shields.io/badge/Python-3.10%2B-yellow)
 ![协议 astrbot.emotion_state.v2](https://img.shields.io/badge/schema-astrbot.emotion__state.v2-purple)
@@ -16,7 +16,7 @@
 
 本插件会让 LLM 根据上下文、用户当前文本、bot 人格和上一轮状态，判断当前情绪观测值；本地引擎再用真实时间半衰期、人格基线、置信门控、关系修复和后果状态机更新长期状态。最后，这个状态会作为临时上下文注入下一次 LLM 请求，影响语气、节奏、社交距离、边界感和修复倾向。
 
-`1.0.0` 实验版最强的部分不是单个公式，而是把状态层改造成“可并行、可后台恢复、可群聊分轨”的运行时系统：
+`1.0.0-exp` 实验版最强的部分不是单个公式，而是把状态层改造成“可并行、可后台恢复、可群聊分轨”的运行时系统：
 
 | 能力 | 作用 |
 | --- | --- |
@@ -25,6 +25,9 @@
 | 群聊分层建模 | 同时维护房间级 `conversation_id` 和说话人级 `speaker_track_id`，避免一个人的冲突污染全群，也避免群聊气氛被切碎。 |
 | 群聊氛围与开口时机 | `group_atmosphere_state` 记录活跃度、紧张度、玩笑度、支持度、bot 注意力、打断风险和加入适宜度，帮助 bot 判断该开口、短应、先听还是避免插话。 |
 | 统一 agent 诊断 API | 其他插件可通过公共 API 查询 emotion、speaker、group_atmosphere、trail、runtime 或 all 状态，而不是读内部 KV。 |
+
+> **代码与模型来源**
+> 本项目未使用、复制或改写外部参考项目的代码、配置、资源、测试、发布脚本、许可证文本或文档表达。README 的信息架构、运行代码、配置 schema、公共 API、测试、公式推导和模型实现均由本项目独立整理与编写；情绪、人格式先验、人格漂移、主动发言和互需模式的状态变量、公式与更新规则均基于公开文献证据自行归纳、抽象、建模和实现。
 
 > **重要提示**
 > 这里的“情绪”“拟人状态”“道德修复”“心理筛查”都是工程上的模拟状态，不代表真实意识、真实主观体验、真实身体、真实疾病或临床诊断。心理相关模块只输出非诊断趋势和风险提示，不替代任何医学、心理咨询或危机干预流程。
@@ -48,7 +51,7 @@
 | 主题 | 内容 |
 | --- | --- |
 | [当前版本与兼容范围](#当前版本与兼容范围) | 插件版本、AstrBot 版本、Python 要求、许可证和发布状态。 |
-| [1.0.0 实验版整合发布记录](#100-实验版整合发布记录) | 后台处理、并发状态加载、群聊分层、工作流变化、效率对比和历史迭代折叠入口。 |
+| [1.0.0-exp 实验版整合发布记录](#100-exp-实验版整合发布记录) | 后台处理、并发状态加载、群聊分层、工作流变化、效率对比和历史迭代折叠入口。 |
 | [项目定位](#项目定位) | 为什么本插件不是普通的提示词人设增强。 |
 | [核心能力](#核心能力总览) | 7 维情绪、人格建模、真实时间记忆、关系修复、公共 API。 |
 | [快速开始](#快速开始) | 发布 zip 包、仓库安装、手动复制、最小配置和检查命令。 |
@@ -76,34 +79,39 @@
 | --- | --- |
 | 插件目录名 | `astrbot_plugin_emotional_state` |
 | 显示名 | `多维情绪状态` |
-| 当前版本 | `1.0.0` |
+| 当前版本 | `1.0.0-exp` |
 | AstrBot 版本 | `>=4.9.2,<5.0.0` |
 | Python | `3.10+` |
 | 许可证 | `GPL-3.0-or-later` |
 | 运行时第三方依赖 | 当前无额外依赖，见 `requirements.txt` |
 
-`1.0.0` 把状态层实验版正式整合到 `main`：后台 post 评估队列、多线程/并发状态加载、群聊分层建模、群聊氛围、生命化学习、真实时间人格漂移、LivingMemory 情绪注解、公共 API、发布包边界、延迟优化批次、gpt-5.5 完整功能开关矩阵和跨模型生命周期单轮拟合都进入统一发布口径。当前版本的重点是把“情绪化 bot”从单次提示词风格控制推进到可持久化、可后台恢复、可并发查询、可群聊分轨的状态服务：核心情绪默认启用，`group_atmosphere_state` 默认启用，`humanlike_state`、`lifelike_learning_state`、`moral_repair_state`、`fallibility_state`、`psychological_screening` 等长期模块默认关闭，由配置显式打开。
+`1.0.0-exp` 把状态层实验版整合到 `main`，作为预发布版本验证：后台 post 评估队列、多线程/并发状态加载、群聊分层建模、群聊氛围、生命化学习、真实时间人格漂移、LivingMemory 情绪注解、公共 API、发布包边界、延迟优化批次、gpt-5.5 完整功能开关矩阵和跨模型生命周期单轮拟合都进入统一发布口径。当前版本的重点是把“情绪化 bot”从单次提示词风格控制推进到可持久化、可后台恢复、可并发查询、可群聊分轨的状态服务：核心情绪、后台 post 评估、`group_atmosphere_state`、`humanlike_state`、`lifelike_learning_state` 和 `personality_drift_state` 默认自动运行且不暴露用户开关；道德修复、瑕疵模拟、心理筛查等实验/维护模块仍由配置者显式打开。
 
 发布包会包含运行代码、README、LICENSE、配置 schema、docs 和 `docs/assets/` 中的聚合图表；不会包含 `tests/`、`scripts/`、`literature_kb/`、`personality_literature_kb/`、`psychological_literature_kb/`、`humanlike_agent_literature_kb/`、`raw/`、`output/`、`dist/` 等开发、研究、原始样本或缓存目录。
 
-### 1.0.0 实验版整合发布记录
+### 1.0.0-exp 实验版整合发布记录
 
-`v1.0.0` 合并在 `main` 上，对外安装版本由 `metadata.yaml` 和 `main.py @register(...)` 共同声明为 `1.0.0`。这个版本不是直接把旧实验分支 `codex/lifelike-learning-initiative` 普通合并进来，而是采用“主线已吸收 + 风险记录”的方式：保留主线中已经验证过的运行时、测试、公共 API 和性能报告，拒绝把旧分支里的本地知识库、过期打包规则和可能回退新状态层的改动带入正式发布。
+`v1.0.0-exp` 合并在 `main` 上，对外安装版本由 `metadata.yaml` 和 `main.py @register(...)` 共同声明为 `1.0.0-exp`。这个版本不是直接把旧实验分支 `codex/lifelike-learning-initiative` 普通合并进来，而是采用“主线已吸收 + 风险记录”的方式：保留主线中已经验证过的运行时、测试、公共 API 和性能报告，拒绝把旧分支里的本地知识库、过期打包规则和可能回退新状态层的改动带入正式发布。
 
 当前版本的主要变化：
 
 | 类别 | 结果 |
 | --- | --- |
 | 实验版整合 | 生命化学习、人格漂移、群聊氛围、瑕疵模拟、道德修复、综合自我和 LivingMemory 注解统一进入主线。 |
-| 后台处理 | `background_post_assessment` 可把 post 阶段内部评估移出主回复链路；后台队列支持每会话 FIFO、检查点恢复、租约、重试、dead-letter 和运行时诊断。 |
+| 后台处理 | post 阶段内部评估默认进入后台链路；后台队列支持每会话 FIFO、检查点恢复、租约、重试、dead-letter 和运行时诊断。 |
 | 多线程/并发 | 请求阶段并发加载辅助状态，响应阶段并发预取道德修复/瑕疵状态，LivingMemory 写入并发获取可选快照；状态提交仍按确定顺序落库。 |
 | 群聊系统 | `conversation_id` 记录房间整体，`speaker_track_id` 记录 bot 对当前说话人的定向情绪；`group_atmosphere_state` 评估打断风险、加入适宜度和开口冷却。 |
 | 工作流 | 请求前注入状态、响应后更新状态、可选后台 post 评估、记忆写入时冻结当时状态；详细流程见 [工作流](#工作流)。 |
 | 效率 | 默认 `assessment_timing=post`、低信号轻评估、provider 短缓存、状态注入预算、并发读取可选快照，减少主回复链路等待。 |
 | 发布边界 | 知识库和原始 benchmark 仍是本地资料，不进入 GitHub 和发布 zip。 |
-| 公开契约 | 插件版本为 `1.0.0`；公共 API 版本仍为 `1.0`，schema 仍保持 `astrbot.emotion_state.v2` 等版本化契约。 |
+| 公开契约 | 插件版本为 `1.0.0-exp`；公共 API 版本仍为 `1.0`，schema 仍保持 `astrbot.emotion_state.v2` 等版本化契约。 |
 
-运行时亮点可以按这条链路理解：
+运行时亮点可以按这条链路理解。手机端若不渲染 Mermaid，也会优先显示下面的静态图：
+
+![运行时总览](docs/assets/runtime_overview.svg)
+
+<details>
+<summary>展开 Mermaid 源码</summary>
 
 ```mermaid
 flowchart LR
@@ -113,9 +121,17 @@ flowchart LR
   D --> E["主回复先完成"]
   E --> F["post 评估可进入后台队列"]
   F --> G["按会话顺序提交状态并写入 LivingMemory 注解"]
+
+  H["调度器 / 其他插件 / LLM 工具请求主动发言"] --> I["读取 emotion / lifelike / group / humanlike / drift"]
+  I --> J{"公式判断此刻是否适合开口"}
+  J -- "适合" --> K["LLM 裁决需求、话题方向和开口风格"]
+  J -- "不适合" --> L["保持沉默 / 短应 / 延后"]
+  K --> M["生成主动消息候选"]
 ```
 
-重构后仍刻意没有放进 `v1.0.0` 的内容：
+</details>
+
+重构后仍刻意没有放进 `v1.0.0-exp` 的内容：
 
 | 遗留项 | 原因 | 后续处理 |
 | --- | --- | --- |
@@ -217,7 +233,7 @@ flowchart LR
 | 68 | 已完成 | 扩展 LivingMemory 集成契约，加入综合自我状态注解 | `state_annotations_at_write` 信封测试 |
 | 69 | 已完成 | 围绕综合自我状态面强化发布、README 和远程烟测契约 | 208 个全量测试、33 个打包/远程契约测试、py_compile、json.tool、Node 语法、打包预检、泄漏扫描 |
 | 70 | 已完成 | 运行全量验证、远程烟测、分支同步，并写完整的革命性迭代交接记录 | 实现提交 `e86735b`；最终状态已记录；远程烟测通过；维护分支同步到最新 HEAD |
-| 71 | 已完成 | 参考 ASR 插件结构重写 README 为可发布插件首页，随后重建包并准备新仓库发布 | 208 个单元测试、py_compile、json.tool、Node 语法检查、打包构建、打包预检；GitHub 鉴权受阻 |
+| 71 | 已完成 | 重写 README 为可发布插件首页，补齐项目定位、工作流、配置、边界、排障和维护说明 | 208 个单元测试、py_compile、json.tool、Node 语法检查、打包构建、打包预检；GitHub 鉴权受阻 |
 | 72 | 已完成 | 创建 GitHub 仓库、更新仓库元数据、设置预发布版本、推送已验证 main 分支并发布预发布包 | 公共仓库和 `v0.0.1-beta` 预发布已创建；发布 zip SHA256 `3133f89e96ce5e124083da0867765f2d5d6d6b2ef074d0963a55eedf0de833ef` |
 | 73 | 已完成 | 按 GitHub 官方数学表达式语法优化公式渲染 | 保留 GitHub fenced math；禁用危险宏由 `tests/test_document_math_contract.py` 锁定；212 个测试通过；发布资产已刷新 |
 | 74 | 已完成 | 增加顶刊模型论证、折叠完整推导和更严谨的公式记号 | README/theory 默认摘要、折叠推导、DOI 证据映射、符号清理（`O_t`、`H_t`、`F_t`）；213 个测试、py_compile、json.tool、Node 语法、打包构建、打包预检、git diff 检查 |
@@ -393,7 +409,7 @@ flowchart LR
 | 7 维情绪向量 | 开启 | `valence`、`arousal`、`dominance`、`goal_congruence`、`certainty`、`control`、`affiliation`。 |
 | 人格建模 | 开启 | 从当前 AstrBot persona 构造基线和参数偏置，让不同 bot 的反应不同。 |
 | 真实时间半衰期 | 开启 | 情绪、后果、冷处理都按真实经过时间衰减，不按消息数量衰减。 |
-| 反刷屏门控 | 开启 | `min_update_interval_seconds` 和 `rapid_update_half_life_seconds` 会削弱短时间连续更新。 |
+| 反刷屏门控 | 开启 | 短时间连续更新会被自动门控降权，门控强度写入各状态的 `dynamics`。 |
 | 关系修复判断 | 开启 | LLM 判断原谅、修复、设边界、冷处理、升级冲突或无冲突。 |
 | 冲突原因分析 | 开启 | 区分用户犯错、bot 任性、bot 误读、双方责任、外部原因或无冲突。 |
 | 错误改正判断 | 开启 | 判断用户是否承认、道歉是否可信、是否补救、是否反复发生。 |
@@ -404,9 +420,11 @@ flowchart LR
 | LivingMemory 注解 | 开启 | 写入长期记忆时可冻结当时的 `emotion_at_write`。 |
 | 公共 API | 开启 | 其他插件可读取快照、提交观察、模拟更新、构造提示词片段或重置状态。 |
 | 低推理友好模式 | 默认关闭 | 用短提示词和简单公式降低小模型令牌压力。 |
-| 拟人状态模块 | 默认关闭 | `humanlike_state` 可调制能量、压力、注意力、边界和透明度。 |
-| 生命化学习模块 | 默认关闭 | `lifelike_learning_state` 学习新词、黑话、用户偏好、共同语境和说话/沉默时机。 |
-| 人格漂移模块 | 默认关闭 | `personality_drift_state` 让长期事件按真实时间小幅改变运行时 persona 偏移。 |
+| 拟人状态模块 | 自动开启 | `humanlike_state` 可调制能量、压力、注意力、边界和透明度；内部动力学参数由插件按人格自动传递，不允许用户手动调细参。 |
+| 生命化学习模块 | 自动开启 | `lifelike_learning_state` 学习新词、黑话、用户偏好、共同语境和说话/沉默时机。 |
+| 人格漂移模块 | 自动开启 | `personality_drift_state` 让长期事件按真实时间小幅改变运行时 persona 偏移，并自动反馈给人格建模。 |
+| 群聊氛围模块 | 自动开启 | `group_atmosphere_state` 维护房间气氛、打断风险和加入适宜度，支持群聊分轨。 |
+| 主动发言裁决 | 自动开启 | 是否开口、满足谁的需要、话题方向与开口风格由状态公式和 LLM 裁决共同决定，不使用预设话题模板。 |
 | 道德修复模块 | 默认关闭 | `moral_repair_state` 记录责任、内疚、道歉、补偿和信任修复趋势。 |
 | 瑕疵模拟模块 | 默认关闭 | `fallibility_state` 让他/她可以有误读、记忆模糊、轻微嘴硬和事后纠错，但不生成欺骗或作恶策略。 |
 | 心理筛查模块 | 默认关闭 | 只做非诊断趋势记录和红旗提示，不做疾病判断。 |
@@ -663,7 +681,7 @@ low_reasoning_max_context_chars = 1200
 /有机体状态
 ```
 
-查看模拟拟人状态。默认情况下 `enable_humanlike_state=false`。
+查看模拟拟人状态。该状态层在 `1.0.0-exp` 中默认自动运行；如果只想减少主提示词注入，调整 `auxiliary_state_injection_detail`，不要寻找已移除的 `enable_humanlike_state` 开关。
 
 ### 重置拟人状态
 
@@ -682,7 +700,7 @@ low_reasoning_max_context_chars = 1200
 /共同语境
 ```
 
-查看当前会话的生命化学习状态。该模块默认 `enable_lifelike_learning=false`，开启后会按真实时间学习用户画像证据、新词、黑话、喜恶、边界提示和当前是否适合开口。
+查看当前会话的生命化学习状态。该模块默认自动运行，会按真实时间学习用户画像证据、新词、黑话、喜恶、边界提示和当前是否适合开口。
 
 ### 重置生命化学习状态
 
@@ -702,7 +720,7 @@ low_reasoning_max_context_chars = 1200
 /人格适应状态
 ```
 
-查看当前会话的 `personality_drift_state`。该模块默认 `enable_personality_drift=false`；开启后，人格只会围绕静态 persona 锚点产生缓慢、有界的真实时间偏移。短时间大量消息不会线性累积人格变化，滚动上下文也不会被反复当作新证据。
+查看当前会话的 `personality_drift_state`。该模块默认自动运行；人格只会围绕静态 persona 锚点产生缓慢、有界的真实时间偏移。短时间大量消息不会线性累积人格变化，滚动上下文也不会被反复当作新证据。
 
 ### 重置人格漂移状态
 
@@ -778,12 +796,17 @@ low_reasoning_max_context_chars = 1200
 
 ## 工作流
 
-插件在 AstrBot LLM 请求前后工作。
+插件在 AstrBot LLM 请求前后工作；主动说话模块是单独的裁决支路，由调度器、其他插件或 LLM 工具调用。
+
+![工作流与主动发言支路](docs/assets/workflow_and_proactive.svg)
+
+<details>
+<summary>展开 Mermaid 源码</summary>
 
 ```mermaid
 flowchart TD
     A["用户输入 / 其他插件输入"] --> B["读取 session_key 与当前 persona"]
-    B --> C["加载 emotion_state"]
+    B --> C["加载 emotion_state 与辅助状态"]
     C --> D{"assessment_timing 包含 pre ?"}
     D -- "是" --> E["LLM/启发式生成即时观测 X_t"]
     E --> F["本地公式更新 E_t 与 consequences"]
@@ -791,23 +814,35 @@ flowchart TD
     F --> H{"inject_state ?"}
     G --> H
     H -- "是" --> I["临时注入 emotion 提示词片段"]
-    I --> J{"enable_humanlike_state 且注入强度 > 0 ?"}
-    J -- "是" --> K["临时注入 humanlike 提示词片段"]
+    I --> J{"辅助状态注入未关闭 ?"}
+    J -- "是" --> K["临时注入 humanlike / lifelike / drift / group 摘要"]
     J -- "否" --> L["调用主 LLM"]
     K --> L
     H -- "否" --> L
     L --> M["bot 回复"]
     M --> N{"assessment_timing 包含 post ?"}
-    N -- "是" --> O["根据 bot 实际回复二次校正状态"]
+    N -- "是" --> O["post 评估进入后台队列并按序提交"]
     N -- "否" --> P["结束"]
     O --> P
+
+    Q["主动发言调度器 / 其他插件 / get_bot_proactive_speech_decision"] --> R["并发读取情绪、共同语境、群聊氛围、拟人状态和人格漂移"]
+    R --> S["计算互需平衡、开口冲动、沉默舒适度、打断风险和冷却"]
+    S --> T{"本地公式允许开口 ?"}
+    T -- "否" --> U["保持沉默 / 短应 / 延后"]
+    T -- "是" --> V["从上下文抽取候选主题，不使用预设话题模板"]
+    V --> W["LLM 裁决需求、被需要感、话题方向和开口风格"]
+    W --> X["返回主动消息候选，由调用方决定是否发送"]
 ```
+
+</details>
 
 几个关键点：
 
 - `pre` 更新会影响本轮回复语气。
 - `post` 更新会根据 bot 实际说出口的内容修正状态。
 - `both` 最完整，但会多一次情绪评估消耗。
+- 主动发言不会靠固定话题库触发；它先由公式判断是否适合开口，再让 LLM 在当前上下文候选主题中裁决“为什么说、说什么方向、怎么开口”。
+- 主动发言裁决结果默认只返回给调用方；是否真正发送消息由 AstrBot 调度器、群聊插件或其他调用方执行，避免绕过上层消息工作流。
 - 注入使用临时 `TextPart`，不会直接写进长期消息记录。
 - 状态落库使用 AstrBot KV，不建议外部插件直接改内部 key。
 
@@ -861,11 +896,20 @@ V_t & A_t & D_t & G_t & C_t & K_t & S_t
 静态 persona 仍是人格锚点；长期事件只写入一个会话级有界偏移 `Delta p_t`。模型核心是：先按真实经过时间回拉到锚点，再让当前真实事件产生很小冲量。历史上下文不会被重复当作新事件；`evidence_count` 只用于诊断，不是消息数权重。
 
 ```math
-\lambda(\Delta t;T_p)=2^{-\Delta t/T_p}
+\theta^D_t=f_D(p_0,\Delta p_{t-1},v_{t-1},x_t,\Delta t,\theta^D_{t-1})
 ```
 
 ```math
-g(\Delta t;T_g)=1-2^{-\Delta t/T_g}
+\theta^D_t=(1-w^D_t)\theta^D_{t-1}+w^D_t\theta^{D*}_t
+```
+
+```math
+\lambda^D_t=2^{-\Delta t/H^D_t},\qquad
+g^D_t=1-2^{-\Delta t/G^D_t}
+```
+
+```math
+s_t=r_t c_t g^D_t\phi^D_t(q_t,v_{t-1},\Delta p_{t-1})
 ```
 
 ```math
@@ -873,18 +917,18 @@ g(\Delta t;T_g)=1-2^{-\Delta t/T_g}
 =
 \mathrm{clip}
 \left(
-\lambda(\Delta t;T_p)\Delta p_{t-1}^{(i)}
+\lambda^D_t\Delta p_{t-1}^{(i)}
 +
-\mathrm{clip}\left(\eta s_t u_t^{(i)},-e_{\max},e_{\max}\right),
--O_{\max},O_{\max}
+\mathrm{clip}\left(\eta^D_t s_t u_t^{(i)},-e^D_t,e^D_t\right),
+-O^D_t,O^D_t
 \right)
 ```
 
 ```math
-p_t^{(i)}=\mathrm{clip}\left(p_0^{(i)}+\beta\Delta p_t^{(i)},-1,1\right)
+p_t^{(i)}=\mathrm{clip}\left(p_0^{(i)}+\beta^D_t\Delta p_t^{(i)},-1,1\right)
 ```
 
-这里 `p_0` 是 AstrBot persona 推导出的静态人格先验，`Delta p_t` 是相对偏移，`u_t` 是当前事件映射到人格维度的冲量向量，`T_p` 默认 90 天，`T_g` 默认 1 天，`e_max` 默认 `0.015`，`O_max` 默认 `0.22`。所以一条消息、短时间刷屏或重复上下文都不能把他/她强行改造成另一个人。
+这里 `p_0` 是 AstrBot persona 推导出的静态人格先验，`Delta p_t` 是相对偏移，`u_t` 是当前事件映射到人格维度的冲量向量。`H^D_t`、`G^D_t`、`e^D_t`、`O^D_t`、`beta^D_t` 和事件固化门限都来自 `personality_drift_state.dynamics` 的本地自动推导：锚定强度越高、证据越稀薄、偏移越大，漂移越慢；事件越可靠、关系越重要、真实时间间隔越充分，冲量才更容易被固化。所以一条消息、短时间刷屏或重复上下文都不能把他/她强行改造成另一个人。
 
 <details>
 <summary>展开人格漂移公式推导与文献依据</summary>
@@ -900,28 +944,28 @@ p_0\in[-1,1]^d
 运行时人格不是直接改写 `p_0`，而是：
 
 ```math
-p_t=p_0+\beta\Delta p_t
+p_t=p_0+\beta^D_t\Delta p_t
 ```
 
-其中 `beta` 是 `personality_drift_apply_strength`。为了使漂移回到锚点，先对上一时刻偏移做半衰：
+其中 `beta^D_t` 不是配置项，而是由漂移强度、trait 置信度、锚定强度、偏移幅度和 `personality_drift_state.dynamics` 自动派生。为了使漂移回到锚点，先对上一时刻偏移做半衰：
 
 ```math
-\Delta p_{t,\mathrm{decay}}=\lambda(\Delta t;T_p)\Delta p_{t-1}
+\Delta p_{t,\mathrm{decay}}=\lambda^D_t\Delta p_{t-1}
 ```
 
 短时刷屏门控写作：
 
 ```math
-g(\Delta t;T_g)=1-2^{-\Delta t/T_g}
+g^D_t=1-2^{-\Delta t/G^D_t}
 ```
 
-当 `Delta t` 很小时，`g` 接近 0；只有真实时间经过后，事件冲量才逐渐被放行。事件信号：
+当 `Delta t` 很小时，`g^D_t` 接近 0；只有真实时间经过后，事件冲量才逐渐被放行。事件信号：
 
 ```math
-s_t=r_t c_t g(\Delta t;T_g)(0.72+0.28q_t)
+s_t=r_t c_t g^D_t\phi^D_t(q_t,v_{t-1},\Delta p_{t-1})
 ```
 
-其中 `r_t` 是事件强度，`c_t` 是可靠性，`q_t` 是关系重要性。单维更新：
+其中 `r_t` 是事件强度，`c_t` 是可靠性，`q_t` 是关系重要性，`v_{t-1}` 是上一轮漂移状态摘要，`phi^D_t` 是本地派生的关系-锚定调制项。单维更新：
 
 ```math
 \Delta p_t^{(i)}
@@ -930,12 +974,12 @@ s_t=r_t c_t g(\Delta t;T_g)(0.72+0.28q_t)
 \left(
 \Delta p_{t,\mathrm{decay}}^{(i)}
 +
-\mathrm{clip}\left(\eta s_t u_t^{(i)},-e_{\max},e_{\max}\right),
--O_{\max},O_{\max}
+\mathrm{clip}\left(\eta^D_t s_t u_t^{(i)},-e^D_t,e^D_t\right),
+-O^D_t,O^D_t
 \right)
 ```
 
-如果事件信号低于 `personality_drift_event_threshold`，则不固化为人格漂移证据。实现上 `on_llm_request` 只把当前消息作为人格漂移事件；滚动 `contexts`、系统提示词和注入状态不会被重复计入长期人格偏移。外部插件可通过 `observed_at` 传入真实事件时间，模型使用 `now - updated_at` 计算门控与半衰。
+如果事件信号低于当前自动派生的事件固化门限，则不固化为人格漂移证据。实现上 `on_llm_request` 只把当前消息作为人格漂移事件；滚动 `contexts`、系统提示词和注入状态不会被重复计入长期人格偏移。外部插件可通过 `observed_at` 传入真实事件时间，模型使用 `now - updated_at` 计算门控与半衰。
 
 主要依据：
 
@@ -1269,22 +1313,21 @@ E_t = \Pi_{[-1,1]^7}(E_t)
 
 ### 真实时间记忆
 
-核心时间参数：
+核心原则：
 
-| 配置项 | 默认值 | 含义 |
-| --- | --- | --- |
-| `baseline_half_life_seconds` | `21600` | 情绪向人格基线自然恢复的半衰期，默认 6 小时。 |
-| `consequence_half_life_seconds` | `10800` | 行动倾向强度自然衰减半衰期，默认 3 小时。 |
-| `cold_war_duration_seconds` | `1800` | 冷处理持续真实时间，默认 30 分钟。 |
-| `short_effect_duration_seconds` | `900` | 普通短期效果持续时间，默认 15 分钟。 |
-| `min_update_interval_seconds` | `8` | 短时间连续更新会被削弱。 |
-| `rapid_update_half_life_seconds` | `20` | 快速连续更新门控半衰期。 |
+| 项目 | 含义 |
+| --- | --- |
+| 真实时间衰减 | 情绪、后果、冷处理、修复和人格漂移都按真实经过时间计算，不按消息数量计算。 |
+| 自动动力学 | 半衰期、冷处理时长、短期后果时长、更新步长、反刷屏门控和冲量上限都由本地公式从运行时人格模型、当前状态、置信度、冲突成因、修复信号和真实时间间隔推导。 |
+| 低 LLM 参与 | LLM 只提供语义观测、关系判断和冲突成因；不直接给出这些数值参数。 |
+| 可追溯快照 | 推导后的有效参数会写入 `emotion.dynamics`、`consequences.dynamics` 和各辅助状态的 `dynamics`，供调试和 LivingMemory 注解回溯。 |
 
 这意味着：
 
-- 过了 6 小时，情绪偏离人格基线的部分约减少一半。
+- 状态恢复速度会随人格漂移、关系稳定度、事件强度和修复质量自动改变。
 - 冷处理剩余时间不会因为用户刷很多条消息而快速消耗。
-- 大量文本可以形成新的观测，但不能绕过最小更新时间和单次更新限幅。
+- 大量文本可以形成新的观测，但不能绕过真实时间门控、平滑和单次更新限幅。
+- 除最初人格建模入口外，用户不能手动把半衰期、阈值、冷却、冲量或学习率调成固定数值。
 
 ---
 
@@ -1310,8 +1353,19 @@ O_t =
 这些倾向按真实时间衰减：
 
 ```math
-O_t = 2^{-\Delta t/H_o}O_{t-1}+\mathrm{impulse}(E_t,X_t,\mathrm{appraisal}_t)
+\Theta^O_t=f_O(P_t,E_t,X_t,F_t,\Delta t,\Theta^O_{t-1})
 ```
+
+```math
+\Theta^O_t=(1-\rho^O_t)\Theta^O_{t-1}+\rho^O_t\Theta^{O*}_t
+```
+
+```math
+O_t = 2^{-\Delta t/H^O_t}O_{t-1}
++\mathrm{clip}\left(I^O_t(E_t,X_t,F_t),-M^O_t,M^O_t\right)
+```
+
+其中 `Theta^O_t` 是后果动力学参数族，包含后果半衰、短期效果时长、冷处理时长、触发门限、冲量上限和修复清除速率。它由人格漂移后的运行时人格 `P_t`、长期情绪 `E_t`、即时观测 `X_t`、冲突成因 `F_t` 和真实时间间隔自动推导，再与上一轮参数低通平滑。LLM 不直接给出 `H^O_t`、`M^O_t` 或冷处理时长；他/她只给出语义观察、关系判断和冲突原因。
 
 | 后果维度 | 字段 | 常见表现 |
 | --- | --- | --- |
@@ -1462,13 +1516,12 @@ enable_safety_boundary = false
 
 ### 状态注入、后台评估与工具预算
 
-这些配置主要服务 `1.0.0` 的状态层整合：减少主回复链路等待、压缩临时 prompt 注入、把详细状态交给工具按需查询。
+这些配置主要服务 `1.0.0-exp` 的状态层整合：减少主回复链路等待、压缩临时 prompt 注入、把详细状态交给工具按需查询。
 
 | 配置项 | 类型 | 默认值 | 说明 |
 | --- | --- | --- | --- |
-| `background_post_assessment` | bool | `false` | 把 post 阶段情绪评估放到后台执行；默认关闭以保持兼容。 |
 | `background_post_queue_limit` | int | `0` | 每个会话后台 post 评估队列上限；`0` 表示不限制。 |
-| `background_post_max_workers` | int | `5` | 每个会话后台 post 评估 worker 上限；状态提交仍保持顺序。 |
+| `enable_dynamic_background_workers` | bool | `false` | 高负载时允许每会话在基础 3 个后台 worker 外最多临时增加 5 个 worker；状态提交仍保持顺序。 |
 | `background_post_queue_checkpoint_enabled` | bool | `true` | 将未提交后台队列写入 KV 检查点，重启后可恢复。 |
 | `background_post_job_lease_seconds` | float | `120.0` | 后台任务租约秒数；租约过期后可回收未完成任务。 |
 | `background_post_job_timeout_seconds` | float | `0.0` | 单个后台任务超时秒数；`0` 表示不启用任务级超时。 |
@@ -1491,7 +1544,7 @@ enable_safety_boundary = false
 | `state_injection_max_parts` | int | `8` | 单次主请求中本插件最多追加的临时状态注入片段数。 |
 | `llm_tool_response_max_chars` | int | `16000` | 每个状态 LLM Tool 返回 JSON 的最大字符数。 |
 
-`background_post_assessment=true` 时，主回复结束后不会等待内部 post 评估完成，状态会稍后进入 KV。这个模式适合压低用户可感知延迟；如果你更重视每轮立即同步状态，就保持默认关闭。
+post 评估后台化默认自动开启，主回复结束后不会等待内部 post 评估完成，状态会稍后按会话顺序进入 KV。`enable_dynamic_background_workers=false` 时使用固定基础 worker，打开后才会在高负载下额外扩容；它可能增加 API、token 与 CPU 压力，所以默认关闭。
 
 ### 群聊氛围、说话人轨道与因果轨迹
 
@@ -1503,109 +1556,54 @@ enable_safety_boundary = false
 | `agent_include_speaker_in_assessment` | bool | `true` | 内部评估文本中标记当前说话人，便于区分不同用户。 |
 | `agent_identity_profile_limit` | int | `256` | 最多缓存的会话/说话人身份画像数。 |
 | `agent_identity_ttl_seconds` | float | `2592000.0` | 静默身份画像的 TTL，默认 30 天；`0` 表示仅按数量上限裁剪。 |
-| `enable_group_atmosphere_state` | bool | `true` | 启用群聊氛围/房间气氛状态建模。 |
-| `group_atmosphere_injection_strength` | float | `0.25` | 群聊氛围 prompt 注入强度；`0` 表示只记录不注入。 |
-| `group_atmosphere_alpha_base` | float | `0.34` | 群聊氛围状态基础更新步长。 |
-| `group_atmosphere_alpha_min` | float | `0.04` | 群聊氛围状态最小更新步长。 |
-| `group_atmosphere_alpha_max` | float | `0.52` | 群聊氛围状态最大更新步长。 |
-| `group_atmosphere_half_life_seconds` | float | `1800.0` | 群聊氛围状态真实时间半衰期，默认 30 分钟。 |
-| `group_atmosphere_trajectory_limit` | int | `60` | 群聊氛围轨迹最多保留点数。 |
-| `group_atmosphere_join_cooldown_turns` | int | `2` | bot 在群聊发言后，按房间轮数计算的冷却期。 |
-| `group_atmosphere_join_cooldown_seconds` | float | `45.0` | bot 在群聊发言后，按真实秒数计算的冷却期。 |
-| `group_atmosphere_join_cooldown_bypass_attention` | float | `0.8` | 群内明显呼叫 bot 时绕过冷却的注意力阈值。 |
-| `group_atmosphere_injection_diff_threshold` | float | `0.08` | 群聊氛围 diff 注入的最小维度变化阈值。 |
+| `group_atmosphere_injection_diff_threshold` | float | `0.08` | 群聊氛围 diff 注入的工程压缩阈值；只影响 prompt 注入频率，不参与情绪/人格动力学。 |
 | `enable_agent_causal_trail` | bool | `true` | 启用脱敏 agent 因果轨迹，记录状态变化原因链。 |
 | `agent_trail_limit` | int | `80` | 每个会话保留的因果轨迹条数。 |
 | `agent_trail_compaction_enabled` | bool | `true` | 查询时提供低信号轨迹压缩视图。 |
-| `agent_trail_low_signal_delta_threshold` | float | `0.03` | 轨迹压缩中判定低信号状态变化的最大 delta。 |
+| `agent_trail_low_signal_delta_threshold` | float | `0.03` | 因果轨迹压缩的工程阈值；不参与情绪/人格动力学。 |
 | `agent_trail_low_signal_window` | int | `5` | 连续低信号轨迹达到该窗口后压缩为摘要。 |
 
 群聊氛围维度包括 `activity_level`、`tension`、`playfulness`、`supportiveness`、`bot_attention`、`interrupt_risk` 和 `joinability`。这些值不会替代核心情绪，只是告诉 bot：现在适合自然加入、短应一下、先听，还是避免打断。
 
+`group_atmosphere_state` 默认自动运行，不提供总开关，也不提供 `alpha`、半衰期、开口冷却、绕过注意力阈值或轨迹长度等细参旋钮。群聊更新步长、回落半衰、hold/join 阈值、开口冷却轮数、冷却秒数和绕过阈值都会由本地公式根据运行时人格模型、房间活跃度、紧张度、支持度、bot 被点名程度、近期发言轨迹和真实时间间隔自动推导，并写入 `group_atmosphere_state.dynamics`。LLM 只在需要时判断语境意义和话题方向，不直接输出这些数值。
+
 ### 人格建模
 
-| 配置项 | 类型 | 默认值 | 说明 |
-| --- | --- | --- | --- |
-| `persona_modeling` | bool | `true` | 根据当前会话人格建立不同情绪基线和反应参数。 |
-| `persona_influence` | float | `1.0` | 人格影响强度。`0` 几乎不用人格偏置，`2` 更强人格化。 |
-| `reset_on_persona_change` | bool | `true` | 检测到 persona 切换时重置状态。关闭后会迁移到新人格基线附近。 |
+人格建模是整条链路的源头：插件会从 AstrBot 当前 persona 构造运行时人格画像、情绪基线、trait 分数、置信度和派生因子。后续人格漂移只改变运行时画像的小幅偏移，不改写原始 persona 文本。除最初 persona 本身外，用户不能把后续动力学细参手动固定。
 
 ### 情绪动力学
 
-| 配置项 | 类型 | 默认值 | 说明 |
-| --- | --- | --- | --- |
-| `alpha_base` | float | `0.42` | 基础更新步长。越大越容易被当前文本影响。 |
-| `alpha_min` | float | `0.06` | 最小更新步长。 |
-| `alpha_max` | float | `0.72` | 最大更新步长。 |
-| `baseline_half_life_seconds` | float | `21600` | 向人格基线恢复半衰期，默认 6 小时。 |
-| `reactivity` | float | `0.55` | 惊讶度反应系数。 |
-| `confidence_midpoint` | float | `0.5` | 置信门控中点。 |
-| `confidence_slope` | float | `7.0` | 置信门控斜率。 |
-| `min_update_interval_seconds` | float | `8` | 反刷屏最小有效更新时间间隔。 |
-| `rapid_update_half_life_seconds` | float | `20` | 快速连续更新门控半衰期。 |
-| `arousal_from_surprise` | float | `0.18` | 惊讶度对唤醒度的耦合强度。 |
-| `dominance_control_coupling` | float | `0.12` | 可控性牵引支配感的耦合强度。 |
-
-兼容项：
-
-| 配置项 | 默认值 | 说明 |
-| --- | --- | --- |
-| `baseline_decay` | `0.035` | 旧版按轮次基线回归系数。新版主要使用 `baseline_half_life_seconds`。 |
+主情绪的更新步长、最小/最大步长、基线回落半衰、置信门控、短时反刷屏门控、惊讶耦合和支配感耦合都不是配置项。它们会在每次更新时由 `derive_emotion_update_dynamics(...)` 根据运行时人格模型、上一状态、当前观测置信度、惊讶度、真实时间间隔和已有 `state.dynamics` 自动派生。推导结果会写入 `emotion.dynamics`，用于解释“为什么这一轮更敏感/更稳定/更慢恢复”。
 
 ### 情绪后果
 
 | 配置项 | 类型 | 默认值 | 说明 |
 | --- | --- | --- | --- |
-| `consequence_half_life_seconds` | float | `10800` | 情绪后果强度半衰期，默认 3 小时。 |
-| `consequence_threshold` | float | `0.48` | 触发情绪后果的阈值。 |
-| `consequence_strength` | float | `1.0` | 后果强度倍率。`0` 几乎不产生持续后果。 |
-| `cold_war_duration_seconds` | float | `1800` | 冷处理真实持续时间，默认 30 分钟。 |
-| `short_effect_duration_seconds` | float | `900` | 普通短期后果持续时间，默认 15 分钟。 |
 | `enable_safety_boundary` | bool | `true` | 情绪后果安全边界，默认开启，可关闭。 |
 | `block_deception_manipulation_evasion_actions` | bool | `false` | 是否输出插件层硬阻断动作；默认关闭，保留风险可观察但不额外写入阻断动作。 |
 | `allow_emotion_reset_backdoor` | bool | `true` | 是否允许手动/API 重置情绪状态。 |
 
-兼容项：
+情绪后果的半衰期、触发阈值、强度倍率、冷处理时长和短期后果时长不再作为用户配置项。它们只是代码内部的先验尺度，最终生效值会由本地状态机根据人格画像、人格漂移、当前情绪向量、冲突成因、修复信号、误读概率、信任损伤、重复犯错和真实时间间隔自动推导，并写入 `consequences.dynamics`。相邻轮次会按真实时间低通平滑，所以不会因为一条消息突然跳变，也不能靠刷消息把冷处理或反刍后果刷掉。
 
-| 配置项 | 默认值 | 说明 |
-| --- | --- | --- |
-| `consequence_decay` | `0.68` | 旧版每轮后果衰减系数。新版主要使用 `consequence_half_life_seconds`。 |
-| `cold_war_turns` | `3` | 旧版冷处理持续轮数。新版主要使用 `cold_war_duration_seconds`。 |
+LLM 在这里只负责给出语义观察：`relationship_decision`、`conflict_analysis` 和各维度情绪观测。本地公式负责计算有效参数、限幅、半衰、冷却和清除逻辑；低推理模型友好模式只会缩短 LLM 观察提示词，不会把这些动力学交给 LLM 随机决定。
 
 ### 生命化学习 / 共同语境
 
 | 配置项 | 类型 | 默认值 | 说明 |
 | --- | --- | --- | --- |
-| `enable_lifelike_learning` | bool | `false` | 启用生命化学习状态模块。 |
-| `lifelike_learning_injection_strength` | float | `0.3` | 注入强度。`0` 表示只学习不注入共同语境提示词。 |
-| `lifelike_learning_half_life_seconds` | float | `2592000` | 状态真实时间半衰期，默认 30 天。 |
-| `lifelike_learning_min_update_interval_seconds` | float | `10` | 反刷屏最小有效更新时间间隔。 |
-| `lifelike_learning_max_terms` | int | `120` | 最多保留的新词/黑话条目数。 |
-| `lifelike_learning_trajectory_limit` | int | `60` | 轨迹最多保留点数。 |
-| `lifelike_learning_confidence_growth` | float | `0.25` | 新词/黑话每次证据带来的置信增长。 |
 | `lifelike_learning_memory_write_enabled` | bool | `true` | 记忆写入时附带生命化学习状态注解。 |
 | `allow_lifelike_learning_reset_backdoor` | bool | `true` | 是否允许重置生命化学习状态。 |
 
-`lifelike_learning_state` 是会话级共同语境层。它会记录“这个用户常用什么词、喜欢什么、不喜欢什么、何时需要距离感、何时适合轻轻追问”，但不会把这些记录当成事实证明。置信度不足的新词会进入 `ask_before_using`，让 bot 先问一句，而不是装作自己已经懂。
+`lifelike_learning_state` 是会话级共同语境层，默认自动运行。它会记录“这个用户常用什么词、喜欢什么、不喜欢什么、何时需要距离感、何时适合轻轻追问”，但不会把这些记录当成事实证明。置信度不足的新词会进入 `ask_before_using`，让 bot 先问一句，而不是装作自己已经懂。学习半衰期、最小更新时间、词条置信增长、状态步长和反刷屏门控都由本地公式根据共同语境、边界敏感度、熟悉度、互需平衡和真实时间自动推导，并写入 `lifelike_learning_state.dynamics`；用户不能手工调这些细参，LLM 也不直接决定这些数值。
 
 ### 真实时间人格漂移
 
 | 配置项 | 类型 | 默认值 | 说明 |
 | --- | --- | --- | --- |
-| `enable_personality_drift` | bool | `false` | 启用人格漂移/长期适应状态。 |
-| `personality_drift_injection_strength` | float | `0.22` | 注入强度。`0` 表示只维护状态，不注入人格漂移提示词。 |
-| `personality_drift_apply_strength` | float | `0.65` | 把漂移偏移应用到运行时 persona 画像的强度。 |
-| `personality_drift_half_life_seconds` | float | `7776000` | 人格偏移回到静态 persona 锚点的真实时间半衰期，默认 90 天。 |
-| `personality_drift_rapid_update_half_life_seconds` | float | `86400` | 短时更新门控半衰期，默认 1 天，用于防止刷屏强推长期人格变化。 |
-| `personality_drift_min_update_interval_seconds` | float | `21600` | 间隔达到该真实秒数后，下一次有效事件才完全放行，默认 6 小时。 |
-| `personality_drift_learning_rate` | float | `0.055` | 事件冲量到人格偏移的学习率。 |
-| `personality_drift_event_threshold` | float | `0.12` | 事件信号低于该阈值时不固化为人格漂移证据。 |
-| `personality_drift_max_impulse_per_update` | float | `0.015` | 单次事件对任一人格维度的最大有符号冲量。 |
-| `personality_drift_max_trait_offset` | float | `0.22` | 任一人格维度相对静态 persona 的最大绝对偏移。 |
-| `personality_drift_confidence_growth` | float | `0.1` | 每次有效固化事件带来的漂移置信增长。 |
-| `personality_drift_trajectory_limit` | int | `80` | 最多保留的人格漂移轨迹点数。 |
 | `personality_drift_memory_write_enabled` | bool | `true` | 记忆写入时附带 `personality_drift_state_at_write`。 |
 | `allow_personality_drift_reset_backdoor` | bool | `true` | 是否允许重置人格漂移状态。 |
+
+人格漂移默认自动运行，且不允许用户直接调整学习率、半衰期、最大偏移或注入强度。流程固定为：真实时间事件先更新 `personality_drift_state`，人格漂移再小幅改变运行时人格建模，最后由人格建模影响情绪、拟人、生命化学习、群聊氛围、道德修复和瑕疵模拟等动力学。漂移学习率、事件阈值、最大单次冲量、最大 trait 偏移、短时门控半衰和长期锚定半衰都会根据锚定强度、证据巩固、关系重要性、事件强度、可靠度和已有偏移自动派生，并写入 `personality_drift_state.dynamics`。这样能保留长期相处的潜移默化变化，同时避免把人格变成可手调旋钮。
 
 该模块只改变运行时画像的小幅偏移，不改写原始 persona 文本。`on_llm_request` 固化人格漂移时只使用当前消息作为新事件；历史 `contexts` 和系统提示词只服务即时情绪理解，不会被重复计入长期人格证据。外部插件若要写入事件，应使用 `observe_personality_drift_event(..., observed_at=...)`，其中 `observed_at` 是真实时间戳；不给时间戳时使用当前系统时间。
 
@@ -1614,38 +1612,17 @@ enable_safety_boundary = false
 | 配置项 | 类型 | 默认值 | 说明 |
 | --- | --- | --- | --- |
 | `enable_moral_repair_state` | bool | `false` | 启用道德修复/信任修复状态模拟模块。 |
-| `moral_repair_injection_strength` | float | `0.35` | 注入强度。`0` 表示不注入 moral repair 提示词。 |
-| `moral_repair_alpha_base` | float | `0.28` | 基础更新步长。 |
-| `moral_repair_alpha_min` | float | `0.03` | 最小更新步长。 |
-| `moral_repair_alpha_max` | float | `0.42` | 最大更新步长。 |
-| `moral_repair_confidence_midpoint` | float | `0.5` | 置信门控中点。 |
-| `moral_repair_confidence_slope` | float | `6.0` | 置信门控斜率。 |
-| `moral_repair_state_half_life_seconds` | float | `604800` | 状态真实时间半衰期，默认 7 天。 |
-| `moral_repair_min_update_interval_seconds` | float | `8` | 反刷屏最小有效更新时间间隔。 |
-| `moral_repair_rapid_update_half_life_seconds` | float | `30` | 快速连续更新门控半衰期。 |
-| `moral_repair_max_impulse_per_update` | float | `0.16` | 单次更新最大冲量。 |
-| `moral_repair_trajectory_limit` | int | `40` | 轨迹最多保留点数。 |
 | `moral_repair_memory_write_enabled` | bool | `true` | 记忆写入时附带道德修复状态注解。 |
 | `allow_moral_repair_reset_backdoor` | bool | `true` | 是否允许重置道德修复状态。 |
 | `enable_fallibility_state` | bool | `false` | 启用低风险瑕疵/犯错模拟状态。 |
-| `fallibility_injection_strength` | float | `0.0` | 注入强度。`0` 表示只维护状态，不注入瑕疵模拟提示词。 |
-| `fallibility_alpha_base` | float | `0.22` | 基础更新步长。 |
-| `fallibility_alpha_min` | float | `0.02` | 最小更新步长。 |
-| `fallibility_alpha_max` | float | `0.34` | 最大更新步长。 |
-| `fallibility_confidence_midpoint` | float | `0.5` | 置信门控中点。 |
-| `fallibility_confidence_slope` | float | `6.0` | 置信门控斜率。 |
-| `fallibility_state_half_life_seconds` | float | `86400` | 状态真实时间半衰期，默认 1 天。 |
-| `fallibility_min_update_interval_seconds` | float | `10` | 反刷屏最小有效更新时间间隔。 |
-| `fallibility_rapid_update_half_life_seconds` | float | `45` | 快速连续更新门控半衰期。 |
-| `fallibility_max_impulse_per_update` | float | `0.12` | 单次更新最大冲量。 |
-| `fallibility_max_error_pressure` | float | `0.55` | 最大低风险错误压力，防止把故意失败当目标。 |
-| `fallibility_trajectory_limit` | int | `40` | 轨迹最多保留点数。 |
 | `fallibility_memory_write_enabled` | bool | `true` | 记忆写入时附带瑕疵模拟状态注解。 |
 | `allow_fallibility_reset_backdoor` | bool | `true` | 是否允许重置瑕疵模拟状态。 |
 | `enable_shadow_diagnostics` | bool | `false` | 启用只读阴影诊断视图；默认关闭，只暴露非执行诊断信号。 |
 | `enable_integrated_self_state` | bool | `true` | 启用只读综合自我状态总线。 |
 | `integrated_self_memory_write_enabled` | bool | `true` | 记忆写入时附带综合自我状态注解。 |
 | `integrated_self_degradation_profile` | string | `balanced` | 综合自我状态成本档位：`full`、`balanced` 或 `minimal`。 |
+
+道德修复和瑕疵模拟的更新步长、置信门控、状态半衰、快速门控、冲量上限、错误压力上限和轨迹保留策略都由本地公式自动派生，不写入 `_conf_schema.json`，也不允许用户手调。开启模块后，LLM 只提供风险观察和语义归因；有效动力学会分别写入 `moral_repair_state.dynamics` 与 `fallibility_state.dynamics`，供公共 API、LivingMemory 注解和排障使用。
 
 `fallibility_state` 只模拟低风险、不关键的瑕疵感：误读、记忆模糊、轻微嘴硬、逞强、回避、随后澄清、承认可能错了、纠正和补偿。它不是欺骗模块；风险越高，越会提高 `truthfulness_guard`、`clarification_need` 和 `correction_readiness`。
 
@@ -1755,14 +1732,7 @@ humanlike_memory_write_enabled = true
 
 则 `build_emotion_memory_payload(...)` 会额外写入 `humanlike_state_at_write`。默认值是 `true`。
 
-即使 `enable_humanlike_state=false`，载荷也会标记：
-
-```json
-{
-  "enabled": false,
-  "reason": "enable_humanlike_state is false"
-}
-```
+拟人状态默认自动运行，载荷通常会包含 `enabled=true`、公开摘要和 `humanlike_state_at_write`。只有插件整体关闭、旧版本兼容或内部降级时，调用方才需要按 `enabled=false` 做静默降级。
 
 ### `lifelike_learning_state_at_write`
 
@@ -1776,14 +1746,7 @@ lifelike_learning_memory_write_enabled = true
 
 该字段冻结写入当时的共同语境、已确认新词、仍需先问再用的新词、用户画像证据计数、边界提示和 `initiative_policy`。它不保存原始消息文本，也不把用户画像当作不可错的事实；其他插件使用时应把它当作“当时的关系语境和节奏线索”。
 
-即使 `enable_lifelike_learning=false`，载荷也会标记：
-
-```json
-{
-  "enabled": false,
-  "reason": "enable_lifelike_learning is false"
-}
-```
+生命化学习默认自动运行，载荷通常会包含 `enabled=true`、共同语境摘要和主动性策略。只有插件整体关闭、旧版本兼容或内部降级时，调用方才需要按 `enabled=false` 做静默降级。
 
 ### `personality_drift_state_at_write`
 
@@ -1797,14 +1760,7 @@ personality_drift_memory_write_enabled = true
 
 该字段冻结写入当时的人格漂移摘要：`updated_at`、`evidence_count`、`drift_intensity`、`anchor_strength`、`time_gate` 和主要有界偏移。它不保存原始消息文本，也不保存完整 `trait_offsets`，用于让 LivingMemory 或剧情插件知道“这条记忆写入时他/她的人格适应处在哪个真实时间阶段”。
 
-即使 `enable_personality_drift=false`，载荷也会标记：
-
-```json
-{
-  "enabled": false,
-  "reason": "enable_personality_drift is false"
-}
-```
+人格漂移默认自动运行，载荷通常会包含 `enabled=true` 和真实时间漂移摘要。只有插件整体关闭、旧版本兼容或内部降级时，调用方才需要按 `enabled=false` 做静默降级。
 
 ### `moral_repair_state_at_write`
 
@@ -2026,6 +1982,7 @@ emotion = meta.star_cls if meta and meta.activated else None
 | `get_shadow_diagnostics(event_or_session)` | 否 | 获取配置门控的只读阴影冲动诊断载荷；不生成或执行策略。 |
 | `get_lifelike_learning_snapshot(event_or_session, exposure="plugin_safe")` | 否 | 获取生命化学习/共同语境快照。 |
 | `get_lifelike_initiative_policy(event_or_session)` | 否 | 获取当前适合开口、短应、追问或沉默的节奏策略。 |
+| `get_proactive_speech_decision(event_or_session, candidate_context="", use_llm=True)` | 否 | 基于情绪、共同语境、群聊氛围、沉默舒适度和互需平衡判断是否应主动发言；话题由 LLM 裁决，不使用预设模板。 |
 | `get_lifelike_prompt_fragment(event_or_session)` | 否 | 获取共同语境和对话节奏提示词片段。 |
 | `observe_lifelike_text(event_or_session, text)` | 是 | 提交文本观察并更新新词、黑话、用户画像和边界线索。 |
 | `simulate_lifelike_update(event_or_session, text)` | 否 | 模拟生命化学习更新，不落库。 |
@@ -2104,6 +2061,7 @@ if repair_status in {"repaired", "restored"}:
 | `get_bot_humanlike_state` | 获取当前拟人状态摘要。 |
 | `get_bot_lifelike_learning_state` | 获取当前生命化学习/共同语境状态摘要。 |
 | `get_bot_personality_drift_state` | 获取当前真实时间人格漂移状态摘要。 |
+| `get_bot_proactive_speech_decision` | 判断当前是否适合主动开口，并给出由状态模型和 LLM 裁决的需求、话题方向与开口风格。 |
 | `get_bot_moral_repair_state` | 获取当前道德修复/信任修复状态摘要。 |
 | `get_bot_fallibility_state` | 获取当前低风险瑕疵/犯错模拟状态摘要。 |
 | `get_bot_integrated_self_state` | 获取当前综合自我状态和跨模块仲裁摘要。 |
@@ -2163,11 +2121,7 @@ if repair_status in {"repaired", "restored"}:
 
 ## 拟人状态 `humanlike_state`
 
-`humanlike_state` 是一个独立的 P0 子系统，默认关闭：
-
-```text
-enable_humanlike_state = false
-```
+`humanlike_state` 是一个独立的 P0 子系统，默认自动运行。用户不需要、也不能通过配置直接关闭它；如果只想减少主 LLM 中的拟人状态文字，使用 `auxiliary_state_injection_detail=off` 控制注入即可，状态本身仍会用于记忆注解和公共 API。
 
 该模块不是把“生病”“疲惫”“依恋”塞进情绪向量，而是新建一个表达调制层：
 
@@ -2188,25 +2142,15 @@ emotion_state -> humanlike_state -> 提示词/风格调制
 | `dependency_risk` | 依赖/操控风险 | 高风险时降低排他性、病弱卖惨和黏性表达。 |
 | `simulation_disclosure_level` | 透明度需求 | 高时提醒这是模拟状态。 |
 
-### 配置项
+### 可配置项
 
 | 配置项 | 类型 | 默认值 | 说明 |
 | --- | --- | --- | --- |
-| `enable_humanlike_state` | bool | `false` | 启用拟人化状态模拟模块。 |
-| `humanlike_injection_strength` | float | `0.35` | 注入强度。`0` 表示不注入。 |
-| `humanlike_alpha_base` | float | `0.3` | 基础更新步长。 |
-| `humanlike_alpha_min` | float | `0.03` | 最小更新步长。 |
-| `humanlike_alpha_max` | float | `0.46` | 最大更新步长。 |
-| `humanlike_confidence_midpoint` | float | `0.5` | 置信门控中点。 |
-| `humanlike_confidence_slope` | float | `6.0` | 置信门控斜率。 |
-| `humanlike_state_half_life_seconds` | float | `21600` | 状态回落半衰期，默认 6 小时。 |
-| `humanlike_min_update_interval_seconds` | float | `8` | 反刷屏最小有效更新时间间隔。 |
-| `humanlike_rapid_update_half_life_seconds` | float | `20` | 快速连续更新门控半衰期。 |
-| `humanlike_max_impulse_per_update` | float | `0.18` | 单次更新最大冲量。 |
-| `humanlike_trajectory_limit` | int | `40` | 轨迹最多保留点数。 |
 | `humanlike_memory_write_enabled` | bool | `true` | 记忆写入时附带拟人状态注解。 |
 | `humanlike_clinical_like_enabled` | bool | `false` | 预留配置位；当前不提供疾病诊断。 |
 | `allow_humanlike_reset_backdoor` | bool | `true` | 是否允许重置拟人状态。 |
+
+能量、压力、注意力预算、边界需求等动力学参数由插件内部先验尺度、人格建模和运行状态自动传递得到，不在配置表中开放。这样可以保证“人格漂移影响人格建模，人格建模影响各状态动力学”的链路稳定，而不是让用户手动把角色调成任意数值。
 
 ### 快照分层
 
@@ -2231,7 +2175,7 @@ emotion_state -> humanlike_state -> 提示词/风格调制
 | `simulate_humanlike_update(event_or_session, text)` | 否 | 模拟更新，不落库。 |
 | `reset_humanlike_state(event_or_session)` | 是 | 重置状态；受 `allow_humanlike_reset_backdoor` 控制。 |
 
-默认关闭时，`get_humanlike_snapshot(...)` 会返回 `enabled=false` 的载荷，`get_humanlike_values(...)` 可能返回空 dict。第三方插件应先检查 `snapshot.get("enabled")`，或用 `values.get("energy")` 这类安全读取。
+第三方插件仍应先检查 `snapshot.get("enabled")`，或用 `values.get("energy")` 这类安全读取，以兼容旧版本、插件整体关闭或内部降级。
 
 ### 生命化学习 API
 
@@ -2290,11 +2234,7 @@ humanlike 允许他/她表现得更像“有生活痕迹的角色”，例如低
 
 ## 生命化学习 `lifelike_learning_state`
 
-`lifelike_learning_state` 是一个独立的共同语境子系统，默认关闭：
-
-```text
-enable_lifelike_learning = false
-```
+`lifelike_learning_state` 是一个独立的共同语境子系统，默认自动运行。它不提供总开关；用户可以控制记忆写入、重置后门和辅助状态注入细节，但不能手动调半衰期、学习率或词条增长权重。
 
 它的目标不是让 bot “更完美”，而是让他/她更像长期相处的人：会记住你常用的新词和小圈子黑话，会逐步积累你的偏好、边界和行为风格，也会判断现在该自然开口、短短回应、轻轻追问，还是先保持安静。
 
@@ -2311,17 +2251,10 @@ enable_lifelike_learning = false
 | `initiative_readiness` | 主动开口准备度。 |
 | `silence_comfort` | 舒适沉默和不强行接话的倾向。 |
 
-### 配置项
+### 可配置项
 
 | 配置项 | 类型 | 默认值 | 说明 |
 | --- | --- | --- | --- |
-| `enable_lifelike_learning` | bool | `false` | 启用生命化学习状态模块。 |
-| `lifelike_learning_injection_strength` | float | `0.3` | 注入强度。`0` 表示不注入。 |
-| `lifelike_learning_half_life_seconds` | float | `2592000` | 状态真实时间半衰期，默认 30 天。 |
-| `lifelike_learning_min_update_interval_seconds` | float | `10` | 反刷屏最小有效更新时间间隔。 |
-| `lifelike_learning_max_terms` | int | `120` | 最多保留的新词/黑话条目数。 |
-| `lifelike_learning_trajectory_limit` | int | `60` | 轨迹最多保留点数。 |
-| `lifelike_learning_confidence_growth` | float | `0.25` | 新词/黑话每次证据带来的置信增长。 |
 | `lifelike_learning_memory_write_enabled` | bool | `true` | 记忆写入时附带生命化学习状态注解。 |
 | `allow_lifelike_learning_reset_backdoor` | bool | `true` | 是否允许重置生命化学习状态。 |
 
@@ -2371,20 +2304,10 @@ enable_fallibility_state = false
 | 配置项 | 类型 | 默认值 | 说明 |
 | --- | --- | --- | --- |
 | `enable_fallibility_state` | bool | `false` | 启用低风险瑕疵/犯错模拟状态。 |
-| `fallibility_injection_strength` | float | `0.0` | 注入强度。`0` 表示不注入。 |
-| `fallibility_alpha_base` | float | `0.22` | 基础更新步长。 |
-| `fallibility_alpha_min` | float | `0.02` | 最小更新步长。 |
-| `fallibility_alpha_max` | float | `0.34` | 最大更新步长。 |
-| `fallibility_confidence_midpoint` | float | `0.5` | 置信门控中点。 |
-| `fallibility_confidence_slope` | float | `6.0` | 置信门控斜率。 |
-| `fallibility_state_half_life_seconds` | float | `86400` | 状态回落半衰期，默认 1 天。 |
-| `fallibility_min_update_interval_seconds` | float | `10` | 反刷屏最小有效更新时间间隔。 |
-| `fallibility_rapid_update_half_life_seconds` | float | `45` | 快速连续更新门控半衰期。 |
-| `fallibility_max_impulse_per_update` | float | `0.12` | 单次更新最大冲量。 |
-| `fallibility_max_error_pressure` | float | `0.55` | 最大低风险错误压力。 |
-| `fallibility_trajectory_limit` | int | `40` | 轨迹最多保留点数。 |
 | `fallibility_memory_write_enabled` | bool | `true` | 记忆写入时附带瑕疵状态注解。 |
 | `allow_fallibility_reset_backdoor` | bool | `true` | 是否允许重置瑕疵状态。 |
+
+瑕疵模拟的半衰期、步长、冲量、错误压力上限、反刷屏门控和轨迹裁剪都由 `fallibility_state.dynamics` 自动给出。它们来自运行时人格模型、风险线索、纠错需要、真实时间间隔和上一轮 dynamics 的平滑传递，不是可配置项。
 
 ### 允许与阻断
 
@@ -2447,22 +2370,13 @@ enable_moral_repair_state = false
 | 配置项 | 类型 | 默认值 | 说明 |
 | --- | --- | --- | --- |
 | `enable_moral_repair_state` | bool | `false` | 启用道德修复/信任修复状态模拟模块。 |
-| `moral_repair_injection_strength` | float | `0.35` | 注入强度。`0` 表示不注入 moral repair 提示词。 |
-| `moral_repair_alpha_base` | float | `0.28` | 基础更新步长。 |
-| `moral_repair_alpha_min` | float | `0.03` | 最小更新步长。 |
-| `moral_repair_alpha_max` | float | `0.42` | 最大更新步长。 |
-| `moral_repair_confidence_midpoint` | float | `0.5` | 置信门控中点。 |
-| `moral_repair_confidence_slope` | float | `6.0` | 置信门控斜率。 |
-| `moral_repair_state_half_life_seconds` | float | `604800` | 状态回落半衰期，默认 7 天。 |
-| `moral_repair_min_update_interval_seconds` | float | `8` | 反刷屏最小有效更新时间间隔。 |
-| `moral_repair_rapid_update_half_life_seconds` | float | `30` | 快速连续更新门控半衰期。 |
-| `moral_repair_max_impulse_per_update` | float | `0.16` | 单次更新最大冲量。 |
-| `moral_repair_trajectory_limit` | int | `40` | 轨迹最多保留点数。 |
 | `moral_repair_memory_write_enabled` | bool | `true` | 记忆写入时附带道德修复状态注解。 |
 | `allow_moral_repair_reset_backdoor` | bool | `true` | 是否允许重置道德修复状态。 |
 | `enable_integrated_self_state` | bool | `true` | 启用只读综合自我状态总线。 |
 | `integrated_self_memory_write_enabled` | bool | `true` | 记忆写入时附带综合自我状态注解。 |
 | `integrated_self_degradation_profile` | string | `balanced` | 综合自我状态成本档位：`full`、`balanced` 或 `minimal`。`minimal` 会减少 trace 和提示词预算，但保留 schema、安全优先级、阻断动作和 LivingMemory 注解。 |
+
+道德修复的内疚、责任、道歉、补偿、回避风险和信任修复速度不会由用户调细参控制。模块只暴露启用、记忆写入、重置和综合自我成本档位；其余动力学由 `moral_repair_state.dynamics` 在真实时间下自动推导。
 
 ### 安全替代边界
 
@@ -2538,12 +2452,8 @@ enable_psychological_screening = false
 | 配置项 | 类型 | 默认值 | 说明 |
 | --- | --- | --- | --- |
 | `enable_psychological_screening` | bool | `false` | 启用非诊断心理状态筛查。 |
-| `psychological_alpha_base` | float | `0.32` | 基础更新步长。 |
-| `psychological_alpha_min` | float | `0.04` | 最小更新步长。 |
-| `psychological_alpha_max` | float | `0.55` | 最大更新步长，限制单次文本过度改写长期趋势。 |
-| `psychological_state_half_life_seconds` | float | `604800` | 长期状态自然回落半衰期，默认 7 天。 |
-| `psychological_crisis_half_life_seconds` | float | `2592000` | 红旗风险保留半衰期，默认 30 天。 |
-| `psychological_trajectory_limit` | int | `40` | 轨迹最多保留点数。 |
+
+心理筛查的趋势更新步长、长期状态半衰、红旗保留半衰、冲量限幅和轨迹长度也不是配置项。它们会根据非诊断风险线索、状态负荷、红旗强度、人格/边界调制和真实时间自动推导，并写入 `psychological_screening_state.dynamics`；红旗信号会保守保留，普通趋势则平滑回落。
 
 ### 心理筛查 API
 
@@ -2719,7 +2629,7 @@ py -3.13 scripts\package_plugin.py --output dist\astrbot_plugin_emotional_state.
 
 ## 测试与维护
 
-远程测试、上传验证、性能基准和 LivingMemory 兼容检查的完整口径见 `docs/remote_testing.md`。`1.0.0` 沿用已完成的状态层正式性能数据：功能矩阵运行编号为 `remote-emotion-v050-gpt55-feature-state-layer-real`，请求模型 `gpt5.5`，实际选中 provider `1111/gpt-5.5` / 模型 `gpt-5.5`，并发 `3`，完整功能开关矩阵已完成 `2500/2500` 个有效样本，失败请求 `0`。同一配置面下的关闭情绪对照运行编号为 `remote-emotion-v050-gpt55-noemotion-control-state-layer-c3-250-real`：完成 `250/250`，失败请求 `0`。DeepSeek 功能矩阵已按用户要求取消，残留的 `295/2500` 探索样本不纳入正式结论。
+远程测试、上传验证、性能基准和 LivingMemory 兼容检查的完整口径见 `docs/remote_testing.md`。`1.0.0-exp` 沿用已完成的状态层正式性能数据：功能矩阵运行编号为 `remote-emotion-v050-gpt55-feature-state-layer-real`，请求模型 `gpt5.5`，实际选中 provider `1111/gpt-5.5` / 模型 `gpt-5.5`，并发 `3`，完整功能开关矩阵已完成 `2500/2500` 个有效样本，失败请求 `0`。同一配置面下的关闭情绪对照运行编号为 `remote-emotion-v050-gpt55-noemotion-control-state-layer-c3-250-real`：完成 `250/250`，失败请求 `0`。DeepSeek 功能矩阵已按用户要求取消，残留的 `295/2500` 探索样本不纳入正式结论。
 
 跨模型生命周期模拟采用状态级模拟时间快速覆盖 `1d` 到 `1y`。当前每个模型为 9 个时间尺度各 1 条样本，所以它只能作为发布参考拟合，不能替代每个尺度 100 次以上的正式统计。
 
@@ -2822,7 +2732,7 @@ $env:ASTRBOT_EXPECT_PLUGIN = "astrbot_plugin_emotional_state"
 脚本会在输出 JSON 里写出 `expectedPluginRuntime`，包含插件列表 API 中返回的 `version`、`displayName`、`activated`、`author`、`astrbotVersion` 等只读字段。若目标插件存在但 `activated=false`，脚本会失败退出。需要把版本和显示名也作为硬断言时，可以额外设置：
 
 ```powershell
-$env:ASTRBOT_EXPECT_PLUGIN_VERSION = "1.0.0"
+$env:ASTRBOT_EXPECT_PLUGIN_VERSION = "1.0.0-exp"
 $env:ASTRBOT_EXPECT_PLUGIN_DISPLAY_NAME = "多维情绪状态"
 & $node scripts\remote_smoke_playwright.js
 ```
@@ -2963,36 +2873,23 @@ git status --short --branch
 
 ### 情绪变化太剧烈
 
-降低：
+不要手工调 `alpha`、半衰期、阈值、冷却或冲量。新版不把这些细参暴露给用户；它们会由人格漂移后的运行时人格模型、本轮 LLM 观测置信度、事件强度、冲突成因和真实时间间隔自动推导。优先检查：
 
-```text
-alpha_base
-alpha_max
-reactivity
-consequence_strength
-```
-
-提高：
-
-```text
-baseline_half_life_seconds
-min_update_interval_seconds
-rapid_update_half_life_seconds
-consequence_threshold
-```
+1. 当前 persona 是否过度强调高反应、高防御或高边界。
+2. `/emotion_state`、`/emotion_model` 或公共 API 中的 `dynamics` 是否显示高事件强度、高置信度或低平滑门控。
+3. LLM appraisal 是否把普通玩笑误判成高 `fault_severity`、高 `trust_damage` 或低 `misread_likelihood`。
+4. 是否需要用 `/emotion_reset` 重置异常状态，而不是试图通过刷消息洗掉状态。
 
 ### 情绪恢复太慢
 
-降低：
+不要手工调后果半衰期、冷处理时长或短期后果时长；这些细参由本地状态机自动计算。优先检查：
 
-```text
-baseline_half_life_seconds
-consequence_half_life_seconds
-cold_war_duration_seconds
-short_effect_duration_seconds
-```
+1. 当前 persona 是否把高回避、高边界或低修复倾向写得过重。
+2. LLM 的 `conflict_analysis` 是否持续给出高 `trust_damage`、高 `repeat_offense` 或低 `repair_signal`。
+3. 用户是否已有承认、道歉、补救、解释或澄清，且这些信号被观察到。
+4. 是否需要用 `/emotion_state`、`/emotion_effects` 或公共 API 查看 `consequences.dynamics`，确认是自动推导导致的长半衰，而不是配置误解。
 
-也可以使用 `/emotion_reset`，前提是：
+必要时也可以使用 `/emotion_reset`，前提是：
 
 ```text
 allow_emotion_reset_backdoor = true
@@ -3002,7 +2899,7 @@ allow_emotion_reset_backdoor = true
 
 冷处理按真实时间持续，不按消息数量消耗。检查：
 
-1. 当前是否还在 `cold_war_duration_seconds` 范围内。
+1. 当前是否仍处于自动推导出的 `cold_war` 有效期内。
 2. 用户是否有承认、道歉、补救或解释。
 3. LLM 是否输出了 `forgive`、`repair` 或较高 `forgiveness_readiness`。
 4. `enable_safety_boundary` 只控制表现边界，不会直接清除冷处理。
@@ -3054,16 +2951,15 @@ inject_state = false
 humanlike_memory_write_enabled = true
 ```
 
-如果 `enable_humanlike_state=false`，载荷仍可能出现，但会标记 `enabled=false`。
+拟人状态默认自动运行。若没有看到 `humanlike_state_at_write`，优先确认插件是否为 `1.0.0-exp`、`humanlike_memory_write_enabled=true`，以及调用方是否保留了完整记忆载荷。
 
 ### 拟人状态没有生效
 
 检查：
 
 ```text
-enable_humanlike_state = true
 inject_state = true
-humanlike_injection_strength > 0
+auxiliary_state_injection_detail = compact
 ```
 
 然后使用：
@@ -3094,8 +2990,7 @@ enable_psychological_screening = true
 
 ```text
 enable_safety_boundary = true
-humanlike_injection_strength = 0.15
-enable_humanlike_state = false
+auxiliary_state_injection_detail = compact
 humanlike_clinical_like_enabled = false
 ```
 
@@ -3146,9 +3041,11 @@ consequences = await emotion.get_emotion_consequences(event)
 
 ---
 
-## 参考结构来源
+## 独立来源声明
 
-这份 README 的组织方式参考了 [Ayleovelle/astrbot_plugin_volcengine_asr](https://github.com/Ayleovelle/astrbot_plugin_volcengine_asr) 的项目主页写法：先讲项目定位，再讲工作流、配置、边界、排障和维护，而不是只堆参数。
+本 README 的信息架构由本项目根据插件实际功能独立整理，未复制外部项目的源码、配置、资源、测试、发布脚本、许可证文本或文档表达。
+
+本插件的运行代码、配置 schema、公共 API、测试、公式推导和模型实现均由本项目独立编写。公式和模型不是外部项目的派生实现，而是基于公开文献证据自行总结、抽象、推导并落地为工程状态机；这不改变本项目的 `GPL-3.0-or-later` 授权边界。
 
 ---
 

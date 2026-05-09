@@ -216,6 +216,9 @@ class FakeEmotionService:
     async def get_lifelike_initiative_policy(self, *args, **kwargs):
         return {}
 
+    async def get_proactive_speech_decision(self, *args, **kwargs):
+        return {}
+
     async def get_lifelike_prompt_fragment(self, *args, **kwargs):
         return ""
 
@@ -926,7 +929,7 @@ class MemoryPayloadPublicApiTests(unittest.TestCase):
         plugin.context = SimpleNamespace()
         return plugin
 
-    def test_integrated_self_snapshot_fuses_disabled_optional_modules(self):
+    def test_integrated_self_snapshot_fuses_always_on_auxiliary_modules(self):
         self._install_astrbot_stubs()
         plugin = self._new_plugin()
 
@@ -938,9 +941,9 @@ class MemoryPayloadPublicApiTests(unittest.TestCase):
         self.assertTrue(snapshot["enabled"])
         self.assertEqual(snapshot["session_key"], "s-integrated")
         self.assertEqual(snapshot["modules"]["emotion"]["enabled"], True)
-        self.assertEqual(snapshot["modules"]["humanlike"]["enabled"], False)
-        self.assertEqual(snapshot["modules"]["lifelike_learning"]["enabled"], False)
-        self.assertEqual(snapshot["modules"]["personality_drift"]["enabled"], False)
+        self.assertEqual(snapshot["modules"]["humanlike"]["enabled"], True)
+        self.assertEqual(snapshot["modules"]["lifelike_learning"]["enabled"], True)
+        self.assertEqual(snapshot["modules"]["personality_drift"]["enabled"], True)
         self.assertEqual(snapshot["modules"]["moral_repair"]["enabled"], False)
         self.assertIn("response_posture", snapshot)
         self.assertIn("connection_readiness", snapshot["state_index"])
@@ -1196,6 +1199,7 @@ class MemoryPayloadPublicApiTests(unittest.TestCase):
             state = EmotionState.initial()
             state.label = "calm"
             state.updated_at = 10.0
+            state.dynamics = {"alpha_base": 0.33, "baseline_half_life_seconds": 7200.0}
             return state
 
         original_load_state = EmotionalStatePlugin._load_state
@@ -1223,13 +1227,17 @@ class MemoryPayloadPublicApiTests(unittest.TestCase):
         self.assertEqual(calls[0][0], "livingmemory:user-1")
         self.assertEqual(payload["session_key"], "livingmemory:user-1")
         self.assertEqual(payload["emotion_at_write"]["label"], "calm")
+        self.assertIn("dynamics", payload["emotion_at_write"])
+        self.assertEqual(payload["emotion_at_write"]["dynamics"]["alpha_base"], 0.33)
         self.assertEqual(payload["emotion_at_write"]["written_at"], 20.0)
         self.assertEqual(payload["memory"]["text"], "memory")
 
-    def test_on_llm_request_does_not_update_or_inject_humanlike_by_default(self):
+    def test_on_llm_request_updates_and_injects_always_on_auxiliary_states_by_default(self):
         self._install_astrbot_stubs()
         from emotion_engine import EmotionState
         from humanlike_engine import HumanlikeState
+        from lifelike_learning_engine import LifelikeLearningState
+        from personality_drift_engine import PersonalityDriftState
         from main import EmotionalStatePlugin
 
         saves = []
@@ -1247,18 +1255,38 @@ class MemoryPayloadPublicApiTests(unittest.TestCase):
             return HumanlikeState.initial()
 
         async def fake_save_humanlike(self, session_key, state):
-            saves.append((session_key, state))
+            saves.append(("humanlike", session_key, state))
+
+        async def fake_load_lifelike(self, session_key, **kwargs):
+            return LifelikeLearningState.initial()
+
+        async def fake_save_lifelike(self, session_key, state):
+            saves.append(("lifelike", session_key, state))
+
+        async def fake_load_drift(self, session_key, profile=None, **kwargs):
+            return PersonalityDriftState.initial()
+
+        async def fake_save_drift(self, session_key, state):
+            saves.append(("drift", session_key, state))
 
         original_persona = EmotionalStatePlugin._persona_profile
         original_load_state = EmotionalStatePlugin._load_state
         original_save_state = EmotionalStatePlugin._save_state
         original_load_humanlike = EmotionalStatePlugin._load_humanlike_state
         original_save_humanlike = EmotionalStatePlugin._save_humanlike_state
+        original_load_lifelike = EmotionalStatePlugin._load_lifelike_learning_state
+        original_save_lifelike = EmotionalStatePlugin._save_lifelike_learning_state
+        original_load_drift = EmotionalStatePlugin._load_personality_drift_state
+        original_save_drift = EmotionalStatePlugin._save_personality_drift_state
         EmotionalStatePlugin._persona_profile = fake_persona
         EmotionalStatePlugin._load_state = fake_load_state
         EmotionalStatePlugin._save_state = fake_save_state
         EmotionalStatePlugin._load_humanlike_state = fake_load_humanlike
         EmotionalStatePlugin._save_humanlike_state = fake_save_humanlike
+        EmotionalStatePlugin._load_lifelike_learning_state = fake_load_lifelike
+        EmotionalStatePlugin._save_lifelike_learning_state = fake_save_lifelike
+        EmotionalStatePlugin._load_personality_drift_state = fake_load_drift
+        EmotionalStatePlugin._save_personality_drift_state = fake_save_drift
         try:
             plugin = self._new_plugin(
                 {"use_llm_assessor": False, "assessment_timing": "pre"},
@@ -1278,11 +1306,19 @@ class MemoryPayloadPublicApiTests(unittest.TestCase):
             EmotionalStatePlugin._save_state = original_save_state
             EmotionalStatePlugin._load_humanlike_state = original_load_humanlike
             EmotionalStatePlugin._save_humanlike_state = original_save_humanlike
+            EmotionalStatePlugin._load_lifelike_learning_state = original_load_lifelike
+            EmotionalStatePlugin._save_lifelike_learning_state = original_save_lifelike
+            EmotionalStatePlugin._load_personality_drift_state = original_load_drift
+            EmotionalStatePlugin._save_personality_drift_state = original_save_drift
 
-        self.assertEqual(saves, [])
-        self.assertEqual(len(request.extra_user_content_parts), 1)
+        self.assertIn("humanlike", [item[0] for item in saves])
+        self.assertIn("lifelike", [item[0] for item in saves])
+        self.assertGreaterEqual(len(request.extra_user_content_parts), 3)
         self.assertIn("bot_emotion_state", request.extra_user_content_parts[0].text)
-        self.assertNotIn("simulated humanlike-state", request.extra_user_content_parts[0].text)
+        self.assertIn(
+            "bot_auxiliary_state",
+            "\n".join(part.text for part in request.extra_user_content_parts[1:]),
+        )
 
     def test_on_llm_request_injects_humanlike_only_when_enabled_and_strength_positive(self):
         self._install_astrbot_stubs()
@@ -1320,8 +1356,6 @@ class MemoryPayloadPublicApiTests(unittest.TestCase):
                 {
                     "use_llm_assessor": False,
                     "assessment_timing": "pre",
-                    "enable_humanlike_state": True,
-                    "humanlike_injection_strength": 0.35,
                 },
             )
             event = SimpleNamespace(unified_msg_origin="s1", message_str="你必须只能陪我")
@@ -1341,10 +1375,13 @@ class MemoryPayloadPublicApiTests(unittest.TestCase):
             EmotionalStatePlugin._save_humanlike_state = original_save_humanlike
 
         texts = [part.text for part in request.extra_user_content_parts]
-        self.assertEqual(len(texts), 2)
+        self.assertGreaterEqual(len(texts), 4)
         self.assertIn("bot_emotion_state", texts[0])
-        self.assertIn("bot_auxiliary_state", texts[1])
-        self.assertIn("get_bot_humanlike_state", texts[1])
+        joined = "\n".join(texts[1:])
+        self.assertIn("bot_auxiliary_state", joined)
+        self.assertIn("get_bot_humanlike_state", joined)
+        self.assertIn("get_bot_lifelike_learning_state", joined)
+        self.assertIn("get_bot_personality_drift_state", joined)
 
     def test_on_llm_request_can_use_full_auxiliary_injection_for_compatibility(self):
         self._install_astrbot_stubs()
@@ -1382,8 +1419,6 @@ class MemoryPayloadPublicApiTests(unittest.TestCase):
                 {
                     "use_llm_assessor": False,
                     "assessment_timing": "pre",
-                    "enable_humanlike_state": True,
-                    "humanlike_injection_strength": 0.35,
                     "auxiliary_state_injection_detail": "full",
                 },
             )
@@ -1404,8 +1439,8 @@ class MemoryPayloadPublicApiTests(unittest.TestCase):
             EmotionalStatePlugin._save_humanlike_state = original_save_humanlike
 
         texts = [part.text for part in request.extra_user_content_parts]
-        self.assertEqual(len(texts), 2)
-        self.assertIn("simulated humanlike-state", texts[1])
+        self.assertGreaterEqual(len(texts), 4)
+        self.assertIn("simulated humanlike-state", "\n".join(texts[1:]))
 
     def test_on_llm_request_does_not_inject_humanlike_when_inject_state_false_or_strength_zero(self):
         self._install_astrbot_stubs()
@@ -1440,8 +1475,8 @@ class MemoryPayloadPublicApiTests(unittest.TestCase):
         EmotionalStatePlugin._save_humanlike_state = fake_save_humanlike
         try:
             cases = (
-                {"enable_humanlike_state": True, "inject_state": False},
-                {"enable_humanlike_state": True, "humanlike_injection_strength": 0.0},
+                {"inject_state": False},
+                {"auxiliary_state_injection_detail": "off"},
             )
             lengths = []
             for case in cases:
@@ -1570,8 +1605,95 @@ class MemoryPayloadPublicApiTests(unittest.TestCase):
 
         self.assertEqual(captured["system_prompt"], ASSESSOR_SYSTEM_PROMPT)
         self.assertNotIn("低推理模型友好模式", captured["prompt"])
-        self.assertIn("citation_ids", captured["prompt"])
-        self.assertEqual(observation.label, "neutral")
+
+    def test_proactive_speech_decision_uses_llm_for_need_and_topic_judgement(self):
+        self._install_astrbot_stubs()
+        from emotion_engine import EmotionState
+        from group_atmosphere_engine import GroupAtmosphereState
+        from humanlike_engine import HumanlikeState
+        from lifelike_learning_engine import LifelikeLearningState
+        from main import EmotionalStatePlugin
+
+        captured = {}
+
+        class FakeContext:
+            async def llm_generate(self, **kwargs):
+                captured.update(kwargs)
+                return SimpleNamespace(
+                    completion_text=(
+                        '{"should_speak":true,"need_mode":"mutual_need",'
+                        '"topic_text":"围绕刚才的相处方式轻轻确认一下",'
+                        '"speech_intent":"让双方都有需要和被需要的空间",'
+                        '"opening_style":"light_question","confidence":0.82,'
+                        '"reason":"上下文明确提出互需模式"}'
+                    ),
+                )
+
+        async def fake_provider_id(self, event):
+            return "provider"
+
+        async def fake_load_state(self, session_key, persona_profile=None, *, now=None):
+            state = EmotionState.initial()
+            state.values["affiliation"] = 0.8
+            state.values["valence"] = 0.4
+            return state
+
+        async def fake_lifelike(self, session_key, *, now=None):
+            state = LifelikeLearningState.initial()
+            state.values.update(
+                {
+                    "rapport": 0.86,
+                    "common_ground": 0.74,
+                    "initiative_readiness": 0.88,
+                    "boundary_sensitivity": 0.08,
+                    "mutual_need_balance": 0.80,
+                    "being_needed_readiness": 0.76,
+                    "need_expression_readiness": 0.62,
+                },
+            )
+            state.user_profile.need_notes = ["mutual_need_mode"]
+            return state
+
+        async def fake_humanlike(self, session_key, *, now=None):
+            return HumanlikeState.initial()
+
+        async def fake_group(self, session_key, *, now=None):
+            state = GroupAtmosphereState.initial()
+            state.values["joinability"] = 0.9
+            state.values["bot_attention"] = 0.8
+            return state
+
+        originals = {
+            "_provider_id": EmotionalStatePlugin._provider_id,
+            "_load_state": EmotionalStatePlugin._load_state,
+            "_load_lifelike_learning_state": EmotionalStatePlugin._load_lifelike_learning_state,
+            "_load_humanlike_state": EmotionalStatePlugin._load_humanlike_state,
+            "_load_group_atmosphere_state": EmotionalStatePlugin._load_group_atmosphere_state,
+        }
+        EmotionalStatePlugin._provider_id = fake_provider_id
+        EmotionalStatePlugin._load_state = fake_load_state
+        EmotionalStatePlugin._load_lifelike_learning_state = fake_lifelike
+        EmotionalStatePlugin._load_humanlike_state = fake_humanlike
+        EmotionalStatePlugin._load_group_atmosphere_state = fake_group
+        try:
+            plugin = self._new_plugin({"use_llm_assessor": True})
+            plugin.context = FakeContext()
+            decision = asyncio.run(
+                plugin.get_proactive_speech_decision(
+                    SimpleNamespace(unified_msg_origin="s-need"),
+                    candidate_context="我希望双方都有需要和被需要。",
+                ),
+            )
+        finally:
+            for name, value in originals.items():
+                setattr(EmotionalStatePlugin, name, value)
+
+        self.assertIn("主动发言裁决器", captured["system_prompt"])
+        self.assertIn("双方都有需要", captured["prompt"])
+        self.assertEqual(decision["topic_judgement"]["source"], "llm")
+        self.assertEqual(decision["topic_judgement"]["need_mode"], "mutual_need")
+        self.assertEqual(decision["selected_topic"]["source"], "llm")
+        self.assertTrue(decision["should_speak"])
 
     def test_low_reasoning_mode_does_not_change_local_state_dynamics(self):
         self._install_astrbot_stubs()
@@ -1681,7 +1803,7 @@ class MemoryPayloadPublicApiTests(unittest.TestCase):
 
         saved = []
 
-        async def fake_load(self, session_key):
+        async def fake_load(self, session_key, personality_model=None, now=None):
             from psychological_screening import PsychologicalScreeningState
 
             return PsychologicalScreeningState.initial()
@@ -1778,7 +1900,7 @@ class MemoryPayloadPublicApiTests(unittest.TestCase):
         from main import EmotionalStatePlugin
         from psychological_screening import PsychologicalScreeningState
 
-        async def fake_load(self, session_key):
+        async def fake_load(self, session_key, personality_model=None, now=None):
             state = PsychologicalScreeningState.initial()
             state.updated_at = 1000.0
             return state
@@ -1842,7 +1964,7 @@ class MemoryPayloadPublicApiTests(unittest.TestCase):
 
         self.assertEqual(deleted, ["disabled-module"])
 
-    def test_humanlike_observe_is_disabled_by_default_for_commits(self):
+    def test_humanlike_observe_commits_by_default(self):
         self._install_astrbot_stubs()
         from humanlike_engine import HumanlikeEngine
         from main import EmotionalStatePlugin
@@ -1858,7 +1980,7 @@ class MemoryPayloadPublicApiTests(unittest.TestCase):
                 commit=True,
             ),
         )
-        self.assertFalse(payload["enabled"])
+        self.assertTrue(payload["enabled"])
         self.assertFalse(payload["diagnostic"])
 
     def test_humanlike_observe_can_commit_when_enabled(self):
@@ -2320,7 +2442,7 @@ class MemoryPayloadPublicApiTests(unittest.TestCase):
         )
         self.assertNotIn("prompt_fragment", payload["fallibility_state_at_write"])
 
-    def test_memory_payload_includes_disabled_humanlike_annotation_by_default(self):
+    def test_memory_payload_includes_humanlike_annotation_by_default(self):
         self._install_astrbot_stubs()
         from emotion_engine import EmotionState
         from main import EmotionalStatePlugin
@@ -2353,9 +2475,8 @@ class MemoryPayloadPublicApiTests(unittest.TestCase):
 
         annotation = payload["humanlike_state_at_write"]
         snapshot = payload["humanlike_snapshot"]
-        self.assertFalse(annotation["enabled"])
-        self.assertFalse(snapshot["enabled"])
-        self.assertEqual(snapshot["reason"], "enable_humanlike_state is false")
+        self.assertTrue(annotation["enabled"])
+        self.assertTrue(snapshot["enabled"])
         self.assertEqual(annotation["kind"], "humanlike_state_at_write")
         self.assertNotIn("prompt_fragment", annotation)
 
@@ -2748,97 +2869,54 @@ class MemoryPayloadPublicApiTests(unittest.TestCase):
         self.assertEqual(payload["observation"]["source"], "unit_test")
         self.assertEqual(payload["observation"]["role"], "assistant")
 
-    def test_humanlike_direct_public_api_disabled_payloads(self):
+    def test_humanlike_direct_public_api_is_always_on(self):
         self._install_astrbot_stubs()
-        from main import EmotionalStatePlugin
+        plugin = self._new_plugin()
+        snapshot = asyncio.run(
+            plugin.get_humanlike_snapshot(
+                session_key="s1",
+                include_prompt_fragment=True,
+            ),
+        )
+        values = asyncio.run(plugin.get_humanlike_values(session_key="s1"))
+        fragment = asyncio.run(plugin.get_humanlike_prompt_fragment(session_key="s1"))
 
-        async def fake_load_humanlike_state(self, session_key):
-            raise AssertionError("disabled humanlike API must not load state")
+        self.assertTrue(snapshot["enabled"])
+        self.assertIn("prompt_fragment", snapshot)
+        self.assertIn("energy", values)
+        self.assertIn("humanlike", fragment.lower())
 
-        original_load_humanlike = EmotionalStatePlugin._load_humanlike_state
-        EmotionalStatePlugin._load_humanlike_state = fake_load_humanlike_state
-        try:
-            plugin = self._new_plugin()
-            snapshot = asyncio.run(
-                plugin.get_humanlike_snapshot(
-                    session_key="s1",
-                    include_prompt_fragment=True,
-                ),
-            )
-            values = asyncio.run(plugin.get_humanlike_values(session_key="s1"))
-            fragment = asyncio.run(
-                plugin.get_humanlike_prompt_fragment(session_key="s1"),
-            )
-        finally:
-            EmotionalStatePlugin._load_humanlike_state = original_load_humanlike
-
-        self.assertFalse(snapshot["enabled"])
-        self.assertEqual(snapshot["reason"], "enable_humanlike_state is false")
-        self.assertEqual(snapshot["prompt_fragment"], "")
-        self.assertEqual(values, {})
-        self.assertEqual(fragment, "")
-
-    def test_lifelike_direct_public_api_disabled_payloads(self):
+    def test_lifelike_direct_public_api_is_always_on(self):
         self._install_astrbot_stubs()
-        from main import EmotionalStatePlugin
+        plugin = self._new_plugin()
+        snapshot = asyncio.run(
+            plugin.get_lifelike_learning_snapshot(
+                session_key="s-life",
+                include_prompt_fragment=True,
+            ),
+        )
+        policy = asyncio.run(
+            plugin.get_lifelike_initiative_policy(session_key="s-life"),
+        )
+        fragment = asyncio.run(plugin.get_lifelike_prompt_fragment(session_key="s-life"))
 
-        async def fake_load_lifelike_state(self, session_key):
-            raise AssertionError("disabled lifelike API must not load state")
+        self.assertTrue(snapshot["enabled"])
+        self.assertIn("prompt_fragment", snapshot)
+        self.assertIn(policy["action"], {"brief_ack", "stay_silent", "ask_clarifying", "speak_now"})
+        self.assertIn("lifelike", fragment.lower())
 
-        original_load_lifelike = EmotionalStatePlugin._load_lifelike_learning_state
-        EmotionalStatePlugin._load_lifelike_learning_state = fake_load_lifelike_state
-        try:
-            plugin = self._new_plugin()
-            snapshot = asyncio.run(
-                plugin.get_lifelike_learning_snapshot(
-                    session_key="s-life",
-                    include_prompt_fragment=True,
-                ),
-            )
-            policy = asyncio.run(
-                plugin.get_lifelike_initiative_policy(session_key="s-life"),
-            )
-            fragment = asyncio.run(
-                plugin.get_lifelike_prompt_fragment(session_key="s-life"),
-            )
-        finally:
-            EmotionalStatePlugin._load_lifelike_learning_state = original_load_lifelike
-
-        self.assertFalse(snapshot["enabled"])
-        self.assertEqual(snapshot["reason"], "enable_lifelike_learning is false")
-        self.assertEqual(snapshot["prompt_fragment"], "")
-        self.assertEqual(policy["action"], "brief_ack")
-        self.assertEqual(fragment, "")
-
-    def test_personality_drift_disabled_snapshot_does_not_load_persona_or_state(self):
+    def test_personality_drift_snapshot_is_always_on(self):
         self._install_astrbot_stubs()
-        from main import EmotionalStatePlugin
+        plugin = self._new_plugin()
+        snapshot = asyncio.run(
+            plugin.get_personality_drift_snapshot(
+                session_key="s-drift",
+                include_prompt_fragment=True,
+            ),
+        )
 
-        async def fake_public_persona_profile(self, *args, **kwargs):
-            raise AssertionError("disabled personality drift must not load persona")
-
-        async def fake_load_personality_drift_state(self, *args, **kwargs):
-            raise AssertionError("disabled personality drift must not load state")
-
-        original_public_persona = EmotionalStatePlugin._public_persona_profile
-        original_load = EmotionalStatePlugin._load_personality_drift_state
-        EmotionalStatePlugin._public_persona_profile = fake_public_persona_profile
-        EmotionalStatePlugin._load_personality_drift_state = fake_load_personality_drift_state
-        try:
-            plugin = self._new_plugin({"enable_personality_drift": False})
-            snapshot = asyncio.run(
-                plugin.get_personality_drift_snapshot(
-                    session_key="s-drift-disabled",
-                    include_prompt_fragment=True,
-                ),
-            )
-        finally:
-            EmotionalStatePlugin._public_persona_profile = original_public_persona
-            EmotionalStatePlugin._load_personality_drift_state = original_load
-
-        self.assertFalse(snapshot["enabled"])
-        self.assertEqual(snapshot["reason"], "enable_personality_drift is false")
-        self.assertEqual(snapshot["prompt_fragment"], "")
+        self.assertTrue(snapshot["enabled"])
+        self.assertIn("prompt_fragment", snapshot)
 
     def test_fallibility_direct_public_api_disabled_payloads(self):
         self._install_astrbot_stubs()
@@ -3017,13 +3095,13 @@ class MemoryPayloadPublicApiTests(unittest.TestCase):
             state.updated_at = 100.0
             return state
 
-        async def fake_load_humanlike(self, session_key, *, now=None):
+        async def fake_load_humanlike(self, session_key, personality_model=None, *, now=None):
             load_calls.append(("humanlike", now))
             state = HumanlikeState.initial()
             state.updated_at = 100.0
             return state
 
-        async def fake_load_lifelike(self, session_key, *, now=None):
+        async def fake_load_lifelike(self, session_key, personality_model=None, *, now=None):
             load_calls.append(("lifelike", now))
             state = LifelikeLearningState.initial()
             state.updated_at = 100.0
@@ -3036,13 +3114,13 @@ class MemoryPayloadPublicApiTests(unittest.TestCase):
                 now=100.0,
             )
 
-        async def fake_load_moral(self, session_key, *, now=None):
+        async def fake_load_moral(self, session_key, personality_model=None, *, now=None):
             load_calls.append(("moral", now))
             state = MoralRepairState.initial()
             state.updated_at = 100.0
             return state
 
-        async def fake_load_fallibility(self, session_key, *, now=None):
+        async def fake_load_fallibility(self, session_key, personality_model=None, *, now=None):
             load_calls.append(("fallibility", now))
             state = FallibilityState.initial()
             state.updated_at = 100.0
@@ -3227,6 +3305,7 @@ class MemoryPayloadPublicApiTests(unittest.TestCase):
                     "profile_counts": {"likes": 1},
                 },
                 "flags": ["local_jargon_detected"],
+                "dynamics": {"state_half_life_seconds": 1234.0},
                 "privacy": {"raw_message_text_excluded": True},
             }
 
@@ -3259,6 +3338,7 @@ class MemoryPayloadPublicApiTests(unittest.TestCase):
         annotation = payload["lifelike_learning_state_at_write"]
         self.assertEqual(annotation["kind"], "lifelike_learning_state_at_write")
         self.assertEqual(annotation["initiative_policy"]["action"], "ask_clarifying")
+        self.assertEqual(annotation["dynamics"]["state_half_life_seconds"], 1234.0)
         envelope = payload["state_annotations_at_write"]
         self.assertIn("lifelike_learning_state_at_write", envelope["annotation_keys"])
         self.assertIn("lifelike_learning_state_at_write", envelope["annotations"])

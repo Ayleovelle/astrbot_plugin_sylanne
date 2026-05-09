@@ -228,7 +228,6 @@ class RemoteSmokeContractTests(unittest.TestCase):
 
     def test_documented_plugin_slug_references_match_metadata(self):
         plugin_name = self._metadata_value("name")
-        allowed_external_references = {"astrbot_plugin_volcengine_asr"}
 
         for relative_path in (
             Path("README.md"),
@@ -239,10 +238,12 @@ class RemoteSmokeContractTests(unittest.TestCase):
 
             with self.subTest(document=str(relative_path)):
                 self.assertGreaterEqual(slugs, {plugin_name})
-                self.assertEqual(
-                    set(),
-                    slugs - {plugin_name} - allowed_external_references,
-                )
+                self.assertEqual(set(), slugs - {plugin_name})
+        readme = (ROOT / "README.md").read_text(encoding="utf-8")
+        self.assertIn("独立来源声明", readme)
+        self.assertIn("未使用、复制或改写外部参考项目的代码、配置、资源、测试、发布脚本、许可证文本或文档表达", readme)
+        self.assertIn("运行代码、配置 schema、公共 API、测试、公式推导和模型实现均由本项目独立编写", readme)
+        self.assertIn("公式和模型不是外部项目的派生实现", readme)
 
     def test_readme_badges_and_compatibility_match_metadata(self):
         readme = (ROOT / "README.md").read_text(encoding="utf-8")
@@ -390,6 +391,8 @@ class RemoteSmokeContractTests(unittest.TestCase):
             "LICENSE",
             "requirements.txt",
             "_conf_schema.json",
+            "docs/assets/runtime_overview.svg",
+            "docs/assets/workflow_and_proactive.svg",
         ):
             with self.subTest(required_entry=required_entry):
                 self.assertIn(required_entry, preflight)
@@ -537,6 +540,7 @@ class RemoteSmokeContractTests(unittest.TestCase):
         self.assertIn("enable_moral_repair_state: true", script)
         self.assertIn("enable_fallibility_state: true", script)
         self.assertIn('integrated_self_degradation_profile: "full"', script)
+        self.assertIn('auxiliary_state_injection_detail: "full"', script)
         self.assertIn("lifecycle_profile", script)
 
     def test_remote_feature_benchmark_hash_ignores_lifecycle_profile(self):

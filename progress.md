@@ -3005,3 +3005,21 @@ Decision:
 - Treat it as a historical experiment residue already absorbed by later mainline work.
 - Keep knowledge-base directories local and ignored.
 - Future integration from that branch, if ever needed, must be manual cherry-pick of small code/test hunks only, with no knowledge-base files.
+
+## 2026-05-09 Active v1.0.0-exp Work Log
+
+- User asked to record the upcoming large work to survive context compaction.
+- Wrote the new recovery anchor into `task_plan.md` under `Active Task - 2026-05-09 v1.0.0-exp Pre-release Work`.
+- Wrote current modeling/theory decisions into `findings.md`.
+- Current code status before continuing:
+  - `main.py` partially migrated internal dynamics and always-on humanlike/lifelike/personality drift.
+  - `_conf_schema.json` partially removed user-facing internal dynamics/config knobs.
+  - Tests and README are known to need updates.
+- New requirements captured:
+  - formula-driven proactive speaking and intelligent topic selection,
+  - auto-enabled safe background parallelism,
+  - optional high-load worker expansion capped at 5 extra workers with ordered commits,
+  - Chinese config/schema/README,
+  - disclaimer,
+  - 100 full-feature remote stability tests,
+  - local pre-release version `1.0.0-exp`, no upload for now.

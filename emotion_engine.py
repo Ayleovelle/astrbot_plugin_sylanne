@@ -1222,6 +1222,7 @@ class ConsequenceState:
     )
     active_effects: dict[str, int] = field(default_factory=dict)
     effect_expires_at: dict[str, float] = field(default_factory=dict)
+    dynamics: dict[str, float] = field(default_factory=dict)
     notes: list[str] = field(default_factory=list)
     updated_at: float = field(default_factory=time.time)
 
@@ -1267,10 +1268,17 @@ class ConsequenceState:
             if expires_at > updated_at
         }
         raw_notes = data.get("notes") if isinstance(data.get("notes"), list) else []
+        raw_dynamics = (
+            data.get("dynamics") if isinstance(data.get("dynamics"), dict) else {}
+        )
         return cls(
             values=values,
             active_effects=active_effects,
             effect_expires_at=effect_expires_at,
+            dynamics={
+                str(key): max(0.0, _as_float(value, 0.0))
+                for key, value in raw_dynamics.items()
+            },
             notes=[str(item) for item in raw_notes[:6]],
             updated_at=updated_at,
         )
@@ -1281,6 +1289,9 @@ class ConsequenceState:
             "active_effects": dict(self.active_effects),
             "effect_expires_at": {
                 key: round(value, 6) for key, value in self.effect_expires_at.items()
+            },
+            "dynamics": {
+                key: round(value, 6) for key, value in self.dynamics.items()
             },
             "notes": list(self.notes[:6]),
             "updated_at": self.updated_at,
@@ -1305,6 +1316,7 @@ class EmotionState:
     last_alpha: float = 0.0
     last_surprise: float = 0.0
     last_appraisal: dict[str, Any] = field(default_factory=dict)
+    dynamics: dict[str, float] = field(default_factory=dict)
     consequences: ConsequenceState = field(default_factory=ConsequenceState.initial)
 
     @classmethod
@@ -1343,6 +1355,14 @@ class EmotionState:
             last_appraisal=data.get("last_appraisal")
             if isinstance(data.get("last_appraisal"), dict)
             else {},
+            dynamics={
+                str(key): max(0.0, _as_float(value, 0.0))
+                for key, value in (
+                    data.get("dynamics")
+                    if isinstance(data.get("dynamics"), dict)
+                    else {}
+                ).items()
+            },
             consequences=ConsequenceState.from_dict(data.get("consequences")),
         )
 
@@ -1361,6 +1381,9 @@ class EmotionState:
             "last_alpha": round(self.last_alpha, 6),
             "last_surprise": round(self.last_surprise, 6),
             "last_appraisal": self.last_appraisal,
+            "dynamics": {
+                key: round(value, 6) for key, value in self.dynamics.items()
+            },
             "consequences": self.consequences.to_dict(),
         }
 
@@ -1422,6 +1445,10 @@ def consequence_state_to_public_payload(
             key: round(value, 6)
             for key, value in consequences.effect_expires_at.items()
             if consequences.active_effects.get(key, 0) > 0
+        },
+        "dynamics": {
+            key: round(value, 6)
+            for key, value in consequences.dynamics.items()
         },
         "active_effect_labels": {
             key: EFFECT_LABELS.get(key, key)
@@ -1542,6 +1569,9 @@ def emotion_state_to_public_payload(
             "last_surprise": round(state.last_surprise, 6),
             "last_reason": state.last_reason,
             "last_appraisal": dict(state.last_appraisal),
+            "dynamics": {
+                key: round(value, 6) for key, value in state.dynamics.items()
+            },
         },
         "persona": {
             "persona_id": state.persona_id,
@@ -1610,6 +1640,7 @@ def build_emotion_memory_payload(
         "label": emotion.get("label"),
         "confidence": emotion.get("confidence", 0.0),
         "values": dict(emotion.get("values") or {}),
+        "dynamics": dict(emotion.get("dynamics") or {}),
         "persona": persona,
         "relationship": relationship,
         "consequences": consequences,
@@ -1667,6 +1698,570 @@ class EmotionParameters:
     )
 
 
+@dataclass(slots=True)
+class EmotionUpdateDynamics:
+    alpha_base: float
+    alpha_min: float
+    alpha_max: float
+    baseline_half_life_seconds: float
+    reactivity: float
+    min_update_interval_seconds: float
+    rapid_update_half_life_seconds: float
+    arousal_from_surprise: float
+    dominance_control_coupling: float
+    smoothing_half_life_seconds: float
+
+    def to_dict(self) -> dict[str, float]:
+        return {
+            "alpha_base": round(self.alpha_base, 6),
+            "alpha_min": round(self.alpha_min, 6),
+            "alpha_max": round(self.alpha_max, 6),
+            "baseline_half_life_seconds": round(self.baseline_half_life_seconds, 6),
+            "reactivity": round(self.reactivity, 6),
+            "min_update_interval_seconds": round(self.min_update_interval_seconds, 6),
+            "rapid_update_half_life_seconds": round(self.rapid_update_half_life_seconds, 6),
+            "arousal_from_surprise": round(self.arousal_from_surprise, 6),
+            "dominance_control_coupling": round(self.dominance_control_coupling, 6),
+            "smoothing_half_life_seconds": round(self.smoothing_half_life_seconds, 6),
+        }
+
+
+def derive_emotion_update_dynamics(
+    parameters: EmotionParameters,
+    previous: EmotionState,
+    observation: EmotionObservation | None = None,
+    profile: PersonaProfile | None = None,
+    *,
+    elapsed_seconds: float = 0.0,
+) -> EmotionUpdateDynamics:
+    observation = observation or EmotionObservation.neutral()
+    persona_model = (
+        profile.personality_model
+        if profile is not None
+        else previous.persona_model
+    )
+    persona = _persona_model_factors(persona_model)
+    obs_values = normalize_vector(observation.values, default=0.0)
+    prev_values = normalize_vector(previous.values, default=0.0)
+    appraisal = observation.appraisal if isinstance(observation.appraisal, dict) else {}
+    conflict = normalize_conflict_analysis(appraisal.get("conflict_analysis"))
+    conflict = apply_persona_to_conflict_analysis(conflict, persona_model)
+    confidence = clamp(observation.confidence, 0.0, 1.0)
+    negative = max(_positive(-obs_values["valence"]), _positive(-prev_values["valence"]))
+    arousal_load = max(abs(obs_values["arousal"]), abs(prev_values["arousal"]))
+    control_loss = max(_positive(-obs_values["control"]), _positive(-prev_values["control"]))
+    affiliation_loss = max(
+        _positive(-obs_values["affiliation"]),
+        _positive(-prev_values["affiliation"]),
+    )
+    goal_block = max(
+        _positive(-obs_values["goal_congruence"]),
+        _positive(-prev_values["goal_congruence"]),
+    )
+    repair_signal = _positive(_as_float(conflict.get("repair_signal"), 0.0))
+    forgiveness = _positive(_as_float(conflict.get("forgiveness_readiness"), 0.0))
+    ambiguity = _positive(_as_float(conflict.get("ambiguity_level"), 0.0))
+    misread = _positive(_as_float(conflict.get("misread_likelihood"), 0.0))
+    trust_damage = _positive(_as_float(conflict.get("trust_damage"), 0.0))
+    regulation_load = _positive(_as_float(conflict.get("emotion_regulation_load"), 0.0))
+    conflict_load = clamp(
+        0.24 * negative
+        + 0.20 * goal_block
+        + 0.16 * control_loss
+        + 0.14 * affiliation_loss
+        + 0.14 * trust_damage
+        + 0.12 * regulation_load
+        - 0.20 * max(repair_signal, forgiveness)
+        - 0.10 * max(ambiguity, misread),
+        0.0,
+        1.0,
+    )
+    confidence_load = clamp(confidence + 0.16 * conflict_load - 0.10 * ambiguity)
+    damping_need = clamp(
+        0.26 * persona["instability"]
+        + 0.22 * regulation_load
+        + 0.16 * ambiguity
+        + 0.16 * misread
+        + 0.12 * (1.0 - confidence)
+        - 0.20 * persona["repair_orientation"],
+        0.0,
+        1.0,
+    )
+    adapt_pressure = clamp(
+        0.24 * confidence_load
+        + 0.20 * conflict_load
+        + 0.16 * arousal_load
+        + 0.12 * persona["boundary_sensitivity"]
+        + 0.10 * persona["drift_intensity"]
+        - 0.16 * damping_need,
+        0.0,
+        1.0,
+    )
+    smoothing_half_life = clamp(
+        45.0
+        + 360.0
+        * (
+            0.22
+            + 0.22 * damping_need
+            + 0.16 * persona["instability"]
+            + 0.12 * persona["drift_intensity"]
+            - 0.14 * adapt_pressure
+        ),
+        20.0,
+        600.0,
+    )
+    bias = profile.parameter_bias if profile is not None else {}
+    bias = bias if isinstance(bias, dict) else {}
+    target_alpha_base = clamp(
+        parameters.alpha_base
+        * _as_float(bias.get("alpha_base"), 1.0)
+        * math.exp(0.28 * adapt_pressure - 0.22 * damping_need),
+        0.01,
+        0.92,
+    )
+    target_alpha_min = clamp(
+        parameters.alpha_min
+        * math.exp(0.18 * confidence_load - 0.16 * damping_need),
+        0.01,
+        0.25,
+    )
+    target_alpha_max = clamp(
+        parameters.alpha_max
+        * math.exp(0.24 * adapt_pressure - 0.20 * damping_need),
+        0.18,
+        0.95,
+    )
+    if target_alpha_min > target_alpha_max * 0.8:
+        target_alpha_min = target_alpha_max * 0.8
+    target_baseline_half_life = clamp(
+        parameters.baseline_half_life_seconds
+        * _as_float(bias.get("baseline_half_life_seconds"), 1.0)
+        * math.exp(
+            0.34 * persona["instability"]
+            + 0.24 * conflict_load
+            + 0.18 * persona["drift_intensity"]
+            - 0.28 * max(repair_signal, forgiveness)
+            - 0.16 * persona["repair_orientation"]
+        ),
+        900.0,
+        172800.0,
+    )
+    target_reactivity = clamp(
+        parameters.reactivity
+        * _as_float(bias.get("reactivity"), 1.0)
+        * math.exp(0.34 * confidence_load + 0.20 * conflict_load - 0.28 * damping_need),
+        0.05,
+        2.2,
+    )
+    target_min_interval = clamp(
+        parameters.min_update_interval_seconds
+        * math.exp(0.45 * damping_need - 0.30 * confidence_load),
+        1.0,
+        120.0,
+    )
+    target_rapid_half_life = clamp(
+        parameters.rapid_update_half_life_seconds
+        * math.exp(0.55 * damping_need + 0.18 * persona["instability"] - 0.25 * confidence_load),
+        3.0,
+        900.0,
+    )
+    target_arousal_surprise = clamp(
+        parameters.arousal_from_surprise
+        * _as_float(bias.get("arousal_from_surprise"), 1.0)
+        * math.exp(0.24 * arousal_load + 0.18 * persona["instability"] - 0.20 * damping_need),
+        0.02,
+        0.8,
+    )
+    target_dominance_coupling = clamp(
+        parameters.dominance_control_coupling
+        * _as_float(bias.get("dominance_control_coupling"), 1.0)
+        * math.exp(0.22 * confidence_load + 0.14 * persona["repair_orientation"] - 0.18 * control_loss),
+        0.01,
+        0.8,
+    )
+    previous_dynamics = previous.dynamics
+    return EmotionUpdateDynamics(
+        alpha_base=_smooth_dynamic_value(
+            previous_dynamics,
+            "alpha_base",
+            target_alpha_base,
+            elapsed_seconds=elapsed_seconds,
+            smoothing_half_life_seconds=smoothing_half_life,
+            low=0.01,
+            high=0.92,
+        ),
+        alpha_min=_smooth_dynamic_value(
+            previous_dynamics,
+            "alpha_min",
+            target_alpha_min,
+            elapsed_seconds=elapsed_seconds,
+            smoothing_half_life_seconds=smoothing_half_life,
+            low=0.01,
+            high=0.25,
+        ),
+        alpha_max=_smooth_dynamic_value(
+            previous_dynamics,
+            "alpha_max",
+            target_alpha_max,
+            elapsed_seconds=elapsed_seconds,
+            smoothing_half_life_seconds=smoothing_half_life,
+            low=0.18,
+            high=0.95,
+        ),
+        baseline_half_life_seconds=_smooth_dynamic_value(
+            previous_dynamics,
+            "baseline_half_life_seconds",
+            target_baseline_half_life,
+            elapsed_seconds=elapsed_seconds,
+            smoothing_half_life_seconds=smoothing_half_life,
+            low=900.0,
+            high=172800.0,
+        ),
+        reactivity=_smooth_dynamic_value(
+            previous_dynamics,
+            "reactivity",
+            target_reactivity,
+            elapsed_seconds=elapsed_seconds,
+            smoothing_half_life_seconds=smoothing_half_life,
+            low=0.05,
+            high=2.2,
+        ),
+        min_update_interval_seconds=_smooth_dynamic_value(
+            previous_dynamics,
+            "min_update_interval_seconds",
+            target_min_interval,
+            elapsed_seconds=elapsed_seconds,
+            smoothing_half_life_seconds=smoothing_half_life,
+            low=1.0,
+            high=120.0,
+        ),
+        rapid_update_half_life_seconds=_smooth_dynamic_value(
+            previous_dynamics,
+            "rapid_update_half_life_seconds",
+            target_rapid_half_life,
+            elapsed_seconds=elapsed_seconds,
+            smoothing_half_life_seconds=smoothing_half_life,
+            low=3.0,
+            high=900.0,
+        ),
+        arousal_from_surprise=_smooth_dynamic_value(
+            previous_dynamics,
+            "arousal_from_surprise",
+            target_arousal_surprise,
+            elapsed_seconds=elapsed_seconds,
+            smoothing_half_life_seconds=smoothing_half_life,
+            low=0.02,
+            high=0.8,
+        ),
+        dominance_control_coupling=_smooth_dynamic_value(
+            previous_dynamics,
+            "dominance_control_coupling",
+            target_dominance_coupling,
+            elapsed_seconds=elapsed_seconds,
+            smoothing_half_life_seconds=smoothing_half_life,
+            low=0.01,
+            high=0.8,
+        ),
+        smoothing_half_life_seconds=smoothing_half_life,
+    )
+
+
+@dataclass(slots=True)
+class ConsequenceDynamics:
+    """Effective consequence parameters derived locally from state, not user knobs."""
+
+    half_life_seconds: float
+    threshold: float
+    strength: float
+    cold_war_duration_seconds: float
+    short_effect_duration_seconds: float
+    smoothing_half_life_seconds: float
+
+    def to_dict(self) -> dict[str, float]:
+        return {
+            "half_life_seconds": round(self.half_life_seconds, 6),
+            "threshold": round(self.threshold, 6),
+            "strength": round(self.strength, 6),
+            "cold_war_duration_seconds": round(self.cold_war_duration_seconds, 6),
+            "short_effect_duration_seconds": round(self.short_effect_duration_seconds, 6),
+            "smoothing_half_life_seconds": round(self.smoothing_half_life_seconds, 6),
+        }
+
+
+def _positive(value: float) -> float:
+    return clamp(value, 0.0, 1.0)
+
+
+def _persona_model_factors(persona_model: dict[str, Any] | None) -> dict[str, float]:
+    factors = (
+        persona_model.get("derived_factors")
+        if isinstance(persona_model, dict)
+        and isinstance(persona_model.get("derived_factors"), dict)
+        else {}
+    )
+    adaptive = (
+        persona_model.get("adaptive_drift")
+        if isinstance(persona_model, dict)
+        and isinstance(persona_model.get("adaptive_drift"), dict)
+        else {}
+    )
+    adaptive_values = (
+        adaptive.get("values")
+        if isinstance(adaptive.get("values"), dict)
+        else {}
+    )
+    return {
+        "instability": _positive(_as_float(factors.get("instability"), 0.0)),
+        "social_distance": _positive(_as_float(factors.get("social_distance"), 0.0)),
+        "repair_orientation": _positive(_as_float(factors.get("repair_orientation"), 0.0)),
+        "boundary_sensitivity": _positive(_as_float(factors.get("boundary_sensitivity"), 0.0)),
+        "expressiveness": _positive(_as_float(factors.get("expressiveness"), 0.0)),
+        "drift_intensity": _positive(_as_float(adaptive_values.get("drift_intensity"), 0.0)),
+        "event_consolidation": _positive(_as_float(adaptive_values.get("event_consolidation"), 0.0)),
+    }
+
+
+def _smooth_dynamic_value(
+    previous: dict[str, float],
+    key: str,
+    target: float,
+    *,
+    elapsed_seconds: float,
+    smoothing_half_life_seconds: float,
+    low: float,
+    high: float,
+) -> float:
+    target = clamp(target, low, high)
+    if key not in previous:
+        return target
+    fraction = half_life_fraction(elapsed_seconds, smoothing_half_life_seconds)
+    old = clamp(_as_float(previous.get(key), target), low, high)
+    return clamp(old + fraction * (target - old), low, high)
+
+
+def derive_consequence_dynamics(
+    parameters: EmotionParameters,
+    state: EmotionState,
+    observation: EmotionObservation,
+    previous: ConsequenceState | None = None,
+    *,
+    elapsed_seconds: float = 0.0,
+) -> ConsequenceDynamics:
+    """Derive effective consequence dynamics from personality, appraisal, and state."""
+    previous_dynamics = previous.dynamics if previous is not None else {}
+    persona = _persona_model_factors(state.persona_model)
+    relationship = normalize_relationship_decision(
+        observation.appraisal.get("relationship_decision"),
+    )
+    conflict = normalize_conflict_analysis(
+        observation.appraisal.get("conflict_analysis"),
+    )
+    conflict = apply_persona_to_conflict_analysis(conflict, state.persona_model)
+    values = normalize_vector(state.values, default=0.0)
+    obs_values = normalize_vector(observation.values, default=0.0)
+
+    negative_load = max(
+        _positive(-values["valence"]),
+        _positive(-obs_values["valence"]),
+    )
+    low_affiliation = max(
+        _positive(-values["affiliation"]),
+        _positive(-obs_values["affiliation"]),
+    )
+    low_control = max(_positive(-values["control"]), _positive(-obs_values["control"]))
+    low_goal = max(
+        _positive(-values["goal_congruence"]),
+        _positive(-obs_values["goal_congruence"]),
+    )
+    high_arousal = max(_positive(values["arousal"]), _positive(obs_values["arousal"]))
+    low_arousal = max(_positive(-values["arousal"]), _positive(-obs_values["arousal"]))
+    relation_intensity = _positive(_as_float(relationship.get("intensity"), 0.0))
+    relationship_importance = _positive(
+        _as_float(relationship.get("relationship_importance"), 0.0),
+    )
+
+    grievance = _positive(_as_float(conflict.get("grievance_score"), 0.0))
+    trust_damage = _positive(_as_float(conflict.get("trust_damage"), 0.0))
+    resentment = _positive(_as_float(conflict.get("resentment_residue"), 0.0))
+    repeat = _positive(_as_float(conflict.get("repeat_offense"), 0.0))
+    repair_signal = _positive(_as_float(conflict.get("repair_signal"), 0.0))
+    forgiveness = _positive(_as_float(conflict.get("forgiveness_readiness"), 0.0))
+    ambiguity = _positive(_as_float(conflict.get("ambiguity_level"), 0.0))
+    misread = _positive(_as_float(conflict.get("misread_likelihood"), 0.0))
+    dialogue = _positive(_as_float(conflict.get("dialogue_viability"), 0.0))
+    regulation_load = _positive(_as_float(conflict.get("emotion_regulation_load"), 0.0))
+    cold_readiness = _positive(_as_float(conflict.get("cold_war_readiness"), 0.0))
+    confrontation = _positive(_as_float(conflict.get("confrontation_readiness"), 0.0))
+    repair_load = max(repair_signal, forgiveness, 0.45 * dialogue)
+    uncertainty_relief = max(ambiguity, misread) * (0.55 + 0.45 * persona["repair_orientation"])
+
+    persistence = clamp(
+        0.26 * grievance
+        + 0.22 * resentment
+        + 0.18 * trust_damage
+        + 0.14 * repeat
+        + 0.12 * negative_load
+        + 0.12 * low_affiliation
+        + 0.10 * persona["instability"]
+        + 0.10 * persona["social_distance"]
+        + 0.08 * persona["drift_intensity"]
+        - 0.22 * repair_load
+        - 0.12 * persona["repair_orientation"]
+        - 0.10 * uncertainty_relief,
+        0.0,
+        1.0,
+    )
+    action_pressure = clamp(
+        0.24 * relation_intensity
+        + 0.22 * max(cold_readiness, confrontation)
+        + 0.16 * negative_load
+        + 0.14 * high_arousal
+        + 0.12 * low_goal
+        + 0.10 * low_control
+        + 0.08 * persona["boundary_sensitivity"]
+        - 0.18 * repair_load
+        - 0.10 * ambiguity,
+        0.0,
+        1.0,
+    )
+    cold_pressure = clamp(
+        0.26 * cold_readiness
+        + 0.18 * low_arousal
+        + 0.18 * low_affiliation
+        + 0.16 * resentment
+        + 0.12 * regulation_load
+        + 0.12 * persona["social_distance"]
+        + 0.10 * persona_conflict_style_factors(state.persona_model)["cold_war_bias"]
+        + 0.08 * relationship_importance
+        - 0.24 * repair_load
+        - 0.14 * dialogue
+        - 0.12 * uncertainty_relief,
+        0.0,
+        1.0,
+    )
+    smoothing_half_life = clamp(
+        90.0
+        + 540.0
+        * (
+            0.22
+            + 0.24 * persona["instability"]
+            + 0.18 * persona["drift_intensity"]
+            + 0.16 * action_pressure
+            + 0.12 * regulation_load
+            - 0.14 * repair_load
+        ),
+        60.0,
+        900.0,
+    )
+    target_half_life = clamp(
+        parameters.consequence_half_life_seconds
+        * math.exp(
+            0.82 * persistence
+            + 0.28 * persona["instability"]
+            + 0.22 * persona["social_distance"]
+            - 0.46 * repair_load
+            - 0.18 * uncertainty_relief
+        ),
+        900.0,
+        86400.0,
+    )
+    target_threshold = clamp(
+        parameters.consequence_threshold
+        + 0.10 * repair_load
+        + 0.06 * ambiguity
+        + 0.05 * persona["repair_orientation"]
+        - 0.12 * action_pressure
+        - 0.07 * persona["boundary_sensitivity"],
+        0.24,
+        0.78,
+    )
+    target_strength = clamp(
+        parameters.consequence_strength
+        * math.exp(
+            0.45 * action_pressure
+            + 0.18 * persona["instability"]
+            + 0.16 * persona["boundary_sensitivity"]
+            - 0.30 * repair_load
+            - 0.14 * ambiguity
+        ),
+        0.35,
+        1.85,
+    )
+    target_cold_duration = clamp(
+        parameters.cold_war_duration_seconds
+        * math.exp(
+            0.78 * cold_pressure
+            + 0.24 * resentment
+            + 0.18 * trust_damage
+            + 0.15 * relationship_importance
+            - 0.55 * repair_load
+            - 0.22 * uncertainty_relief
+        ),
+        120.0,
+        21600.0,
+    )
+    target_short_duration = clamp(
+        parameters.short_effect_duration_seconds
+        * math.exp(
+            0.34 * action_pressure
+            + 0.20 * high_arousal
+            + 0.12 * persona["expressiveness"]
+            - 0.28 * repair_load
+        ),
+        60.0,
+        7200.0,
+    )
+
+    return ConsequenceDynamics(
+        half_life_seconds=_smooth_dynamic_value(
+            previous_dynamics,
+            "half_life_seconds",
+            target_half_life,
+            elapsed_seconds=elapsed_seconds,
+            smoothing_half_life_seconds=smoothing_half_life,
+            low=900.0,
+            high=86400.0,
+        ),
+        threshold=_smooth_dynamic_value(
+            previous_dynamics,
+            "threshold",
+            target_threshold,
+            elapsed_seconds=elapsed_seconds,
+            smoothing_half_life_seconds=smoothing_half_life,
+            low=0.24,
+            high=0.78,
+        ),
+        strength=_smooth_dynamic_value(
+            previous_dynamics,
+            "strength",
+            target_strength,
+            elapsed_seconds=elapsed_seconds,
+            smoothing_half_life_seconds=smoothing_half_life,
+            low=0.35,
+            high=1.85,
+        ),
+        cold_war_duration_seconds=_smooth_dynamic_value(
+            previous_dynamics,
+            "cold_war_duration_seconds",
+            target_cold_duration,
+            elapsed_seconds=elapsed_seconds,
+            smoothing_half_life_seconds=smoothing_half_life,
+            low=120.0,
+            high=21600.0,
+        ),
+        short_effect_duration_seconds=_smooth_dynamic_value(
+            previous_dynamics,
+            "short_effect_duration_seconds",
+            target_short_duration,
+            elapsed_seconds=elapsed_seconds,
+            smoothing_half_life_seconds=smoothing_half_life,
+            low=60.0,
+            high=7200.0,
+        ),
+        smoothing_half_life_seconds=smoothing_half_life,
+    )
+
+
 class EmotionEngine:
     """State estimator for a bounded multidimensional emotion vector."""
 
@@ -1692,9 +2287,16 @@ class EmotionEngine:
         elapsed_seconds = max(0.0, now - previous.updated_at)
         obs_values = normalize_vector(observation.values, default=0.0)
         baseline = profile.baseline if profile else self.baseline
+        dynamics = derive_emotion_update_dynamics(
+            params,
+            previous,
+            observation,
+            profile,
+            elapsed_seconds=elapsed_seconds,
+        )
         baseline_decay = half_life_fraction(
             elapsed_seconds,
-            params.baseline_half_life_seconds,
+            dynamics.baseline_half_life_seconds,
         )
 
         prior = {
@@ -1717,27 +2319,27 @@ class EmotionEngine:
         confidence_gate = sigmoid(
             params.confidence_slope * (confidence - params.confidence_midpoint),
         )
-        rapid_gate = self._rapid_update_gate(elapsed_seconds)
+        rapid_gate = self._rapid_update_gate(elapsed_seconds, dynamics)
         alpha = clamp(
-            params.alpha_base * confidence_gate * (1.0 + params.reactivity * surprise),
-            params.alpha_min,
-            params.alpha_max,
+            dynamics.alpha_base * confidence_gate * (1.0 + dynamics.reactivity * surprise),
+            dynamics.alpha_min,
+            dynamics.alpha_max,
         )
-        alpha = clamp(alpha * rapid_gate, 0.0, params.alpha_max)
+        alpha = clamp(alpha * rapid_gate, 0.0, dynamics.alpha_max)
 
         updated = {
             key: clamp(prior[key] + alpha * (obs_values[key] - prior[key]))
             for key in DIMENSIONS
         }
 
-        arousal_boost = params.arousal_from_surprise * alpha * surprise
+        arousal_boost = dynamics.arousal_from_surprise * alpha * surprise
         updated["arousal"] = clamp(
             updated["arousal"] + arousal_boost * (1.0 - abs(updated["arousal"])),
         )
         control_gap = updated["control"] - updated["dominance"]
         updated["dominance"] = clamp(
             updated["dominance"]
-            + params.dominance_control_coupling * alpha * control_gap,
+            + dynamics.dominance_control_coupling * alpha * control_gap,
         )
 
         next_state = EmotionState(
@@ -1760,6 +2362,7 @@ class EmotionEngine:
             last_alpha=alpha,
             last_surprise=surprise,
             last_appraisal=observation.appraisal,
+            dynamics=dynamics.to_dict(),
         )
         next_state.consequences = self.update_consequences(
             previous.consequences,
@@ -1783,9 +2386,16 @@ class EmotionEngine:
             return previous
         params = self.parameters
         baseline = profile.baseline if profile else self.baseline
+        dynamics = derive_emotion_update_dynamics(
+            params,
+            previous,
+            None,
+            profile,
+            elapsed_seconds=elapsed_seconds,
+        )
         baseline_decay = half_life_fraction(
             elapsed_seconds,
-            params.baseline_half_life_seconds,
+            dynamics.baseline_half_life_seconds,
         )
         values = {
             key: clamp(
@@ -1814,6 +2424,7 @@ class EmotionEngine:
             last_alpha=previous.last_alpha,
             last_surprise=previous.last_surprise,
             last_appraisal=previous.last_appraisal,
+            dynamics=dynamics.to_dict(),
         )
         state.consequences = self.passive_update_consequences(
             previous.consequences,
@@ -1821,13 +2432,27 @@ class EmotionEngine:
         )
         return state
 
-    def _rapid_update_gate(self, elapsed_seconds: float) -> float:
+    def _rapid_update_gate(
+        self,
+        elapsed_seconds: float,
+        dynamics: EmotionUpdateDynamics | None = None,
+    ) -> float:
         params = self.parameters
-        min_interval = max(0.0, params.min_update_interval_seconds)
+        min_interval = max(
+            0.0,
+            dynamics.min_update_interval_seconds
+            if dynamics is not None
+            else params.min_update_interval_seconds,
+        )
         if min_interval <= 0 or elapsed_seconds >= min_interval:
             return 1.0
         floor = 0.08
-        half_life = max(0.001, params.rapid_update_half_life_seconds)
+        half_life = max(
+            0.001,
+            dynamics.rapid_update_half_life_seconds
+            if dynamics is not None
+            else params.rapid_update_half_life_seconds,
+        )
         gate = floor + (1.0 - floor) * half_life_fraction(elapsed_seconds, half_life)
         return clamp(gate, floor, 1.0)
 
@@ -1843,9 +2468,16 @@ class EmotionEngine:
         params = self.parameters
         now = time.time() if now is None else float(now)
         elapsed_seconds = max(0.0, now - previous.updated_at)
+        dynamics = derive_consequence_dynamics(
+            params,
+            state,
+            observation,
+            previous,
+            elapsed_seconds=elapsed_seconds,
+        )
         decay = half_life_multiplier(
             elapsed_seconds,
-            params.consequence_half_life_seconds,
+            dynamics.half_life_seconds,
         )
         values = {
             key: clamp(previous.values.get(key, 0.0) * decay, 0.0, 1.0)
@@ -1859,10 +2491,10 @@ class EmotionEngine:
         impulses, effects, notes = derive_consequence_impulses(
             state.values,
             observation,
-            threshold=params.consequence_threshold,
-            strength=params.consequence_strength,
-            cold_war_duration_seconds=params.cold_war_duration_seconds,
-            short_effect_duration_seconds=params.short_effect_duration_seconds,
+            threshold=dynamics.threshold,
+            strength=dynamics.strength,
+            cold_war_duration_seconds=dynamics.cold_war_duration_seconds,
+            short_effect_duration_seconds=dynamics.short_effect_duration_seconds,
             persona_model=state.persona_model,
         )
         for key, impulse in impulses.items():
@@ -1885,6 +2517,7 @@ class EmotionEngine:
             values=values,
             active_effects=active_effects,
             effect_expires_at=effect_expires_at,
+            dynamics=dynamics.to_dict(),
             notes=merged_notes,
             updated_at=now,
         )
@@ -1898,9 +2531,15 @@ class EmotionEngine:
         previous = previous or ConsequenceState.initial()
         now = time.time() if now is None else float(now)
         elapsed_seconds = max(0.0, now - previous.updated_at)
+        half_life_seconds = _as_float(
+            previous.dynamics.get("half_life_seconds")
+            if isinstance(previous.dynamics, dict)
+            else None,
+            self.parameters.consequence_half_life_seconds,
+        )
         decay = half_life_multiplier(
             elapsed_seconds,
-            self.parameters.consequence_half_life_seconds,
+            half_life_seconds,
         )
         values = {
             key: clamp(previous.values.get(key, 0.0) * decay, 0.0, 1.0)
@@ -1919,6 +2558,7 @@ class EmotionEngine:
             values=values,
             active_effects=active_effects,
             effect_expires_at=effect_expires_at,
+            dynamics=dict(previous.dynamics),
             notes=list(previous.notes[:6]),
             updated_at=now,
         )

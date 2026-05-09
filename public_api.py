@@ -54,6 +54,7 @@ _EMOTION_SERVICE_REQUIRED_METHODS = (
     "export_integrated_self_diagnostics",
     "get_lifelike_learning_snapshot",
     "get_lifelike_initiative_policy",
+    "get_proactive_speech_decision",
     "get_lifelike_prompt_fragment",
     "observe_lifelike_text",
     "simulate_lifelike_update",
@@ -105,6 +106,7 @@ _MORAL_REPAIR_SERVICE_REQUIRED_METHODS = (
 _LIFELIKE_SERVICE_REQUIRED_METHODS = (
     "get_lifelike_learning_snapshot",
     "get_lifelike_initiative_policy",
+    "get_proactive_speech_decision",
     "get_lifelike_prompt_fragment",
     "observe_lifelike_text",
     "simulate_lifelike_update",
@@ -403,6 +405,17 @@ class EmotionServiceProtocol(Protocol):
         *,
         request: Any = None,
         session_key: str | None = None,
+    ) -> dict[str, Any]:
+        ...
+
+    async def get_proactive_speech_decision(
+        self,
+        event_or_session: Any = None,
+        *,
+        request: Any = None,
+        session_key: str | None = None,
+        candidate_context: str = "",
+        use_llm: bool = True,
     ) -> dict[str, Any]:
         ...
 
@@ -741,6 +754,17 @@ class LifelikeLearningServiceProtocol(EmotionServiceProtocol, Protocol):
         *,
         request: Any = None,
         session_key: str | None = None,
+    ) -> dict[str, Any]:
+        ...
+
+    async def get_proactive_speech_decision(
+        self,
+        event_or_session: Any = None,
+        *,
+        request: Any = None,
+        session_key: str | None = None,
+        candidate_context: str = "",
+        use_llm: bool = True,
     ) -> dict[str, Any]:
         ...
 

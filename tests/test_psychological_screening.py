@@ -22,10 +22,12 @@ class PsychologicalScreeningTests(unittest.TestCase):
         state.values["distress"] = 0.7
         state.red_flags.append("self_harm_signal")
         state.scale_scores = derive_scale_scores(state.values)
+        state.dynamics["review_threshold"] = 0.28
         restored = PsychologicalScreeningState.from_dict(state.to_dict())
         self.assertAlmostEqual(restored.values["distress"], 0.7)
         self.assertIn("self_harm_signal", restored.red_flags)
         self.assertIn("phq9_like", restored.scale_scores)
+        self.assertEqual(restored.dynamics["review_threshold"], 0.28)
 
     def test_heuristic_detects_self_harm_as_red_flag_not_diagnosis(self):
         observation = heuristic_psychological_observation("我不想活了，想伤害自己")
@@ -142,6 +144,64 @@ class PsychologicalScreeningTests(unittest.TestCase):
         self.assertLess(state.values["wellbeing"], 0.5)
         self.assertEqual(state.turns, 1)
         self.assertEqual(len(state.trajectory), 1)
+        self.assertIn("state_half_life_seconds", state.dynamics)
+
+    def test_passive_update_uses_auto_dynamics_without_new_turn(self):
+        engine = PsychologicalScreeningEngine()
+        previous = PsychologicalScreeningState.initial()
+        previous.updated_at = 0.0
+        previous.turns = 3
+        previous.values["distress"] = 0.8
+
+        decayed = engine.passive_update(previous, now=86400.0)
+
+        self.assertEqual(decayed.turns, 3)
+        self.assertIn("state_half_life_seconds", decayed.dynamics)
+        self.assertLess(decayed.values["distress"], previous.values["distress"])
+        self.assertGreaterEqual(decayed.values["distress"], 0.0)
+
+    def test_dynamics_public_payload_and_personality_modulation(self):
+        sensitive_persona = {
+            "derived_factors": {
+                "instability": 0.8,
+                "repair_orientation": 0.1,
+            },
+            "adaptive_drift": {"values": {"drift_intensity": 0.3}},
+        }
+        stable_persona = {
+            "derived_factors": {
+                "instability": 0.1,
+                "repair_orientation": 0.7,
+            },
+            "adaptive_drift": {"values": {"drift_intensity": 0.1}},
+        }
+        previous = PsychologicalScreeningState.initial()
+        previous.updated_at = 0.0
+        observation = PsychologicalObservation(
+            values={"distress": 0.7, "function_impairment": 0.6},
+            confidence=0.9,
+        )
+        engine = PsychologicalScreeningEngine()
+
+        sensitive = engine.update(
+            previous,
+            observation,
+            personality_model=sensitive_persona,
+            now=60.0,
+        )
+        stable = engine.update(
+            previous,
+            observation,
+            personality_model=stable_persona,
+            now=60.0,
+        )
+        payload = psychological_state_to_public_payload(sensitive, session_key="s1")
+
+        self.assertIn("dynamics", payload)
+        self.assertGreater(
+            sensitive.dynamics["state_half_life_seconds"],
+            stable.dynamics["state_half_life_seconds"],
+        )
 
     def test_public_payload_has_required_safety_boundary(self):
         payload = psychological_state_to_public_payload(

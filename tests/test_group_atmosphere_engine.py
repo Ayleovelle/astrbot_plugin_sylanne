@@ -54,6 +54,56 @@ class GroupAtmosphereEngineTests(unittest.TestCase):
         self.assertEqual(len(restored.trajectory), 1)
         self.assertEqual(restored.trajectory[0]["source"], "unit")
 
+    def test_dynamics_roundtrip_and_personality_modulation(self):
+        cautious_persona = {
+            "derived_factors": {
+                "instability": 0.6,
+                "social_distance": 0.7,
+                "boundary_sensitivity": 0.8,
+                "expressiveness": 0.1,
+            },
+            "adaptive_drift": {"values": {"drift_intensity": 0.4}},
+        }
+        expressive_persona = {
+            "derived_factors": {
+                "instability": 0.1,
+                "social_distance": 0.0,
+                "boundary_sensitivity": 0.0,
+                "expressiveness": 0.8,
+            },
+            "adaptive_drift": {"values": {"drift_intensity": 0.1}},
+        }
+        previous = GroupAtmosphereState.initial()
+        previous.updated_at = 0.0
+        observation = GroupAtmosphereObservation(
+            values={"bot_attention": 0.8, "joinability": 0.7},
+            confidence=0.9,
+        )
+        engine = GroupAtmosphereEngine()
+
+        cautious = engine.update(
+            previous,
+            observation,
+            personality_model=cautious_persona,
+            now=60.0,
+        )
+        expressive = engine.update(
+            previous,
+            observation,
+            personality_model=expressive_persona,
+            now=60.0,
+        )
+        restored = GroupAtmosphereState.from_dict(cautious.to_dict())
+        payload = group_atmosphere_state_to_public_payload(cautious)
+
+        self.assertIn("join_threshold", cautious.dynamics)
+        self.assertIn("dynamics", payload)
+        self.assertEqual(restored.dynamics["join_threshold"], cautious.dynamics["join_threshold"])
+        self.assertGreater(
+            cautious.dynamics["join_cooldown_seconds"],
+            expressive.dynamics["join_cooldown_seconds"],
+        )
+
     def test_from_dict_normalizes_invalid_and_out_of_range_values(self):
         restored = GroupAtmosphereState.from_dict(
             {

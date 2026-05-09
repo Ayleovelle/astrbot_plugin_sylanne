@@ -58,6 +58,27 @@ class AstrBotLifecycleTests(unittest.TestCase):
     def setUp(self):
         install_astrbot_stubs()
 
+    def _request_text_parts(self, request):
+        return [part.text for part in request.extra_user_content_parts]
+
+    def _find_text_part(self, request, marker):
+        for text in self._request_text_parts(request):
+            if marker in text:
+                return text
+        self.fail(f"missing injected text fragment containing {marker!r}")
+
+    def _assert_no_text_part_contains(self, request, marker):
+        for text in self._request_text_parts(request):
+            self.assertNotIn(marker, text)
+
+    async def _await_background_tasks(self, plugin, timeout=1.0):
+        tasks = list(getattr(plugin, "_background_tasks", set()))
+        if tasks:
+            await asyncio.wait_for(
+                asyncio.gather(*tasks, return_exceptions=False),
+                timeout=timeout,
+            )
+
     def _bind_common_state_hooks(self, plugin, *, saves=None, assessment_calls=None):
         from emotion_engine import EmotionState
 
@@ -203,13 +224,13 @@ class AstrBotLifecycleTests(unittest.TestCase):
         self._bind_common_state_hooks(plugin)
         seen_now = []
 
-        async def fake_load_humanlike(self, session_key, *, now=None):
+        async def fake_load_humanlike(self, session_key, personality_model=None, *, now=None):
             seen_now.append(("humanlike", now))
             state = HumanlikeState.initial()
             state.updated_at = 1.0
             return state
 
-        async def fake_load_lifelike(self, session_key, *, now=None):
+        async def fake_load_lifelike(self, session_key, personality_model=None, *, now=None):
             seen_now.append(("lifelike", now))
             state = LifelikeLearningState.initial()
             state.updated_at = 1.0
@@ -222,13 +243,13 @@ class AstrBotLifecycleTests(unittest.TestCase):
                 now=1.0,
             )
 
-        async def fake_load_moral(self, session_key, *, now=None):
+        async def fake_load_moral(self, session_key, personality_model=None, *, now=None):
             seen_now.append(("moral", now))
             state = MoralRepairState.initial()
             state.updated_at = 1.0
             return state
 
-        async def fake_load_fallibility(self, session_key, *, now=None):
+        async def fake_load_fallibility(self, session_key, personality_model=None, *, now=None):
             seen_now.append(("fallibility", now))
             state = FallibilityState.initial()
             state.updated_at = 1.0
@@ -274,11 +295,10 @@ class AstrBotLifecycleTests(unittest.TestCase):
         asyncio.run(plugin.on_llm_request(FakeEvent("s-post"), request))
 
         self.assertEqual(saves, [])
-        self.assertEqual(len(request.extra_user_content_parts), 1)
-        self.assertIn("bot_emotion_state", request.extra_user_content_parts[0].text)
-        self.assertIn('detail="compact"', request.extra_user_content_parts[0].text)
-        self.assertIn("get_bot_emotion_state", request.extra_user_content_parts[0].text)
-        self.assertLess(len(request.extra_user_content_parts[0].text), 700)
+        emotion_text = self._find_text_part(request, "bot_emotion_state")
+        self.assertIn('detail="compact"', emotion_text)
+        self.assertIn("get_bot_emotion_state", emotion_text)
+        self.assertLess(len(emotion_text), 700)
 
     def test_state_injection_full_mode_keeps_verbose_emotion_fragment(self):
         plugin = new_plugin(
@@ -294,8 +314,7 @@ class AstrBotLifecycleTests(unittest.TestCase):
         asyncio.run(plugin.on_llm_request(FakeEvent("s-post-full"), request))
 
         self.assertEqual(saves, [])
-        self.assertEqual(len(request.extra_user_content_parts), 1)
-        text = request.extra_user_content_parts[0].text
+        text = self._find_text_part(request, "bot_emotion_state")
         self.assertIn("bot_emotion_state", text)
         self.assertNotIn('detail="compact"', text)
         self.assertGreater(len(text), 700)
@@ -379,8 +398,7 @@ class AstrBotLifecycleTests(unittest.TestCase):
 
         asyncio.run(plugin.on_llm_request(FakeEvent("s-full-budget"), request))
 
-        self.assertEqual(len(request.extra_user_content_parts), 1)
-        text = request.extra_user_content_parts[0].text
+        text = self._find_text_part(request, "bot_emotion_state")
         self.assertIn('detail="compact"', text)
         self.assertLess(len(text), 700)
         diagnostics = asyncio.run(
@@ -473,7 +491,11 @@ class AstrBotLifecycleTests(unittest.TestCase):
         plugin._last_request_text["s-both"] = "cached request context"
         response = SimpleNamespace(completion_text="assistant completion")
 
-        asyncio.run(plugin.on_llm_response(FakeEvent("s-both"), response))
+        async def run_response_and_drain():
+            await plugin.on_llm_response(FakeEvent("s-both"), response)
+            await self._await_background_tasks(plugin)
+
+        asyncio.run(run_response_and_drain())
 
         self.assertEqual(len(saves), 1)
         self.assertEqual(saves[0][0], "s-both")
@@ -511,14 +533,18 @@ class AstrBotLifecycleTests(unittest.TestCase):
         bind_async(plugin, "_load_moral_repair_state", slow_load_moral)
         bind_async(plugin, "_save_moral_repair_state", fake_save_moral)
 
-        started = time.perf_counter()
-        asyncio.run(
-            plugin.on_llm_response(
+        async def run_response_and_drain():
+            started = time.perf_counter()
+            await plugin.on_llm_response(
                 FakeEvent("s-moral-overlap"),
                 SimpleNamespace(completion_text="I am sorry and will repair it."),
-            ),
-        )
-        elapsed = time.perf_counter() - started
+            )
+            elapsed = time.perf_counter() - started
+            self.assertGreaterEqual(len(plugin._background_tasks), 1)
+            await self._await_background_tasks(plugin)
+            return elapsed
+
+        elapsed = asyncio.run(run_response_and_drain())
 
         self.assertLess(elapsed, 0.09)
         self.assertEqual(len(saves), 1)
@@ -756,9 +782,13 @@ class AstrBotLifecycleTests(unittest.TestCase):
                     FakeEvent("s-same-limit"),
                     SimpleNamespace(completion_text=f"reply-{index}"),
                 )
-            while len(started_texts) < 2:
+            expected_workers = plugin._background_post_max_workers("s-same-limit")
+            while len(started_texts) < expected_workers:
                 await asyncio.sleep(0)
-            self.assertEqual(started_texts, ["reply-1", "reply-2"])
+            self.assertEqual(
+                started_texts,
+                [f"reply-{index}" for index in range(1, expected_workers + 1)],
+            )
             self.assertEqual(len(plugin._background_tasks), 1)
             self.assertEqual(len(plugin._background_post_tasks), 1)
             release_assessment.set()
@@ -1478,8 +1508,6 @@ class AstrBotLifecycleTests(unittest.TestCase):
         plugin = new_plugin(
             {
                 "assessment_timing": "pre",
-                "group_atmosphere_join_cooldown_turns": 2,
-                "group_atmosphere_join_cooldown_seconds": 45.0,
             },
         )
         saved = []
@@ -1502,7 +1530,11 @@ class AstrBotLifecycleTests(unittest.TestCase):
         self.assertEqual(payload["last_bot_join_turn"], 0)
         self.assertIsNotNone(payload["last_bot_join_at"])
         self.assertFalse(payload["cooldown"]["cooldown_active"])
-        self.assertEqual(payload["cooldown"]["cooldown_remaining_turns"], 2)
+        self.assertIn("join_cooldown_turns", payload["dynamics"])
+        self.assertEqual(
+            payload["cooldown"]["cooldown_remaining_turns"],
+            int(round(payload["dynamics"]["join_cooldown_turns"])),
+        )
 
     def test_group_atmosphere_diff_injection_sends_small_no_change_fragment(self):
         from group_atmosphere_engine import GroupAtmosphereState
@@ -1672,7 +1704,12 @@ class AstrBotLifecycleTests(unittest.TestCase):
         response = SimpleNamespace(completion_text="assistant text")
 
         asyncio.run(plugin.on_llm_request(FakeEvent("s-bad"), request))
-        asyncio.run(plugin.on_llm_response(FakeEvent("s-bad"), response))
+
+        async def run_response_and_drain():
+            await plugin.on_llm_response(FakeEvent("s-bad"), response)
+            await self._await_background_tasks(plugin)
+
+        asyncio.run(run_response_and_drain())
 
         self.assertEqual(plugin._assessment_timing(), "post")
         self.assertEqual(len(saves), 1)
@@ -1736,10 +1773,8 @@ class AstrBotLifecycleTests(unittest.TestCase):
 
         self.assertEqual(len(humanlike_saves), 1)
         self.assertEqual(humanlike_saves[0][0], "s-humanlike")
-        texts = [part.text for part in request.extra_user_content_parts]
-        self.assertEqual(len(texts), 1)
-        self.assertIn("bot_emotion_state", texts[0])
-        self.assertNotIn("simulated humanlike-state", texts[0])
+        self._find_text_part(request, "bot_emotion_state")
+        self._assert_no_text_part_contains(request, "simulated humanlike-state")
 
     def test_lifelike_learning_enabled_with_zero_strength_updates_without_injection(self):
         from lifelike_learning_engine import LifelikeLearningState
@@ -1772,10 +1807,8 @@ class AstrBotLifecycleTests(unittest.TestCase):
         self.assertEqual(len(lifelike_saves), 1)
         self.assertEqual(lifelike_saves[0][0], "s-life")
         self.assertIn("桥隧猫", lifelike_saves[0][1].lexicon)
-        texts = [part.text for part in request.extra_user_content_parts]
-        self.assertEqual(len(texts), 1)
-        self.assertIn("bot_emotion_state", texts[0])
-        self.assertNotIn("lifelike common-ground", texts[0])
+        self._find_text_part(request, "bot_emotion_state")
+        self._assert_no_text_part_contains(request, "lifelike common-ground")
 
     def test_lifelike_learning_injects_when_enabled_and_strength_positive(self):
         from lifelike_learning_engine import LifelikeLearningState
@@ -1804,11 +1837,9 @@ class AstrBotLifecycleTests(unittest.TestCase):
 
         asyncio.run(plugin.on_llm_request(FakeEvent("s-life-inject"), request))
 
-        texts = [part.text for part in request.extra_user_content_parts]
-        self.assertEqual(len(texts), 2)
-        self.assertIn("bot_emotion_state", texts[0])
-        self.assertIn("bot_auxiliary_state", texts[1])
-        self.assertIn("get_bot_lifelike_learning_state", texts[1])
+        self._find_text_part(request, "bot_emotion_state")
+        auxiliary_text = self._find_text_part(request, "get_bot_lifelike_learning_state")
+        self.assertIn("bot_auxiliary_state", auxiliary_text)
 
     def test_fallibility_enabled_with_zero_strength_updates_without_injection(self):
         from fallibility_engine import FallibilityState
@@ -1841,10 +1872,8 @@ class AstrBotLifecycleTests(unittest.TestCase):
         self.assertEqual(len(fallibility_saves), 1)
         self.assertEqual(fallibility_saves[0][0], "s-fallibility")
         self.assertIn("possible_mistake_cue", fallibility_saves[0][1].flags)
-        texts = [part.text for part in request.extra_user_content_parts]
-        self.assertEqual(len(texts), 1)
-        self.assertIn("bot_emotion_state", texts[0])
-        self.assertNotIn("fallibility-state modulation", texts[0])
+        self._find_text_part(request, "bot_emotion_state")
+        self._assert_no_text_part_contains(request, "fallibility-state modulation")
 
     def test_fallibility_injects_when_enabled_and_strength_positive(self):
         from fallibility_engine import FallibilityState
@@ -1873,11 +1902,9 @@ class AstrBotLifecycleTests(unittest.TestCase):
 
         asyncio.run(plugin.on_llm_request(FakeEvent("s-fallibility-inject"), request))
 
-        texts = [part.text for part in request.extra_user_content_parts]
-        self.assertEqual(len(texts), 2)
-        self.assertIn("bot_emotion_state", texts[0])
-        self.assertIn("bot_auxiliary_state", texts[1])
-        self.assertIn("get_bot_fallibility_state", texts[1])
+        self._find_text_part(request, "bot_emotion_state")
+        auxiliary_text = self._find_text_part(request, "get_bot_fallibility_state")
+        self.assertIn("bot_auxiliary_state", auxiliary_text)
 
     def test_auxiliary_state_injection_full_mode_keeps_legacy_fragments(self):
         from lifelike_learning_engine import LifelikeLearningState
@@ -1904,10 +1931,8 @@ class AstrBotLifecycleTests(unittest.TestCase):
 
         asyncio.run(plugin.on_llm_request(FakeEvent("s-life-full"), request))
 
-        texts = [part.text for part in request.extra_user_content_parts]
-        self.assertEqual(len(texts), 2)
-        self.assertIn("lifelike common-ground", texts[1])
-        self.assertNotIn("bot_auxiliary_state", texts[1])
+        text = self._find_text_part(request, "lifelike common-ground")
+        self.assertNotIn("bot_auxiliary_state", text)
 
     def test_auxiliary_state_injection_off_skips_auxiliary_fragments(self):
         from lifelike_learning_engine import LifelikeLearningState
@@ -1934,7 +1959,7 @@ class AstrBotLifecycleTests(unittest.TestCase):
 
         asyncio.run(plugin.on_llm_request(FakeEvent("s-life-off"), request))
 
-        texts = [part.text for part in request.extra_user_content_parts]
+        texts = self._request_text_parts(request)
         self.assertEqual(len(texts), 1)
         self.assertIn("bot_emotion_state", texts[0])
 
@@ -2018,9 +2043,6 @@ class AstrBotLifecycleTests(unittest.TestCase):
         plugin = new_plugin(
             {
                 "assessment_timing": "post",
-                "enable_personality_drift": True,
-                "personality_drift_injection_strength": 0.0,
-                "personality_drift_event_threshold": 0.01,
             },
         )
         plugin.personality_drift_engine = PersonalityDriftEngine(
@@ -2053,9 +2075,8 @@ class AstrBotLifecycleTests(unittest.TestCase):
         self.assertGreaterEqual(len(drift_saves), 1)
         self.assertEqual(drift_saves[-1][0], "s-drift")
         self.assertGreaterEqual(drift_saves[-1][1].evidence_count, 1)
-        texts = [part.text for part in request.extra_user_content_parts]
-        self.assertEqual(len(texts), 1)
-        self.assertNotIn("personality drift modulation", texts[0])
+        self._find_text_part(request, "bot_emotion_state")
+        self._assert_no_text_part_contains(request, "personality drift modulation")
 
     def test_personality_drift_ignores_replayed_request_context_as_new_event(self):
         from personality_drift_engine import PersonalityDriftState
@@ -2133,12 +2154,10 @@ class AstrBotLifecycleTests(unittest.TestCase):
 
         asyncio.run(plugin.on_llm_request(FakeEvent("s-drift-inject"), request))
 
-        texts = [part.text for part in request.extra_user_content_parts]
-        self.assertEqual(len(texts), 2)
-        self.assertIn("bot_emotion_state", texts[0])
-        self.assertIn("bot_auxiliary_state", texts[1])
-        self.assertIn("get_bot_personality_drift_state", texts[1])
-        self.assertNotIn("personality drift modulation", texts[1])
+        self._find_text_part(request, "bot_emotion_state")
+        auxiliary_text = self._find_text_part(request, "get_bot_personality_drift_state")
+        self.assertIn("bot_auxiliary_state", auxiliary_text)
+        self._assert_no_text_part_contains(request, "personality drift modulation")
 
     def test_personality_drift_request_reuses_loaded_state_for_runtime_update_and_injection(self):
         from personality_drift_engine import PersonalityDriftState

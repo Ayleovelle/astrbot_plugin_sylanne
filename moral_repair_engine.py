@@ -201,6 +201,26 @@ def half_life_multiplier(elapsed_seconds: float, half_life_seconds: float) -> fl
     return clamp(2.0 ** (-elapsed_seconds / half_life_seconds), 0.0, 1.0)
 
 
+def half_life_fraction(elapsed_seconds: float, half_life_seconds: float) -> float:
+    if elapsed_seconds <= 0:
+        return 0.0
+    if half_life_seconds <= 0:
+        return 1.0
+    return clamp(1.0 - 2.0 ** (-elapsed_seconds / half_life_seconds), 0.0, 1.0)
+
+
+def _normalize_dynamics(raw: Any) -> dict[str, float]:
+    if not isinstance(raw, dict):
+        return {}
+    result: dict[str, float] = {}
+    for key, value in raw.items():
+        try:
+            result[str(key)] = float(value)
+        except (TypeError, ValueError):
+            continue
+    return result
+
+
 def normalize_moral_repair_values(raw: Any = None) -> dict[str, float]:
     raw = raw if isinstance(raw, dict) else {}
     aliases = {
@@ -255,6 +275,7 @@ class MoralRepairState:
     last_reason: str = ""
     flags: list[str] = field(default_factory=list)
     trajectory: list[dict[str, Any]] = field(default_factory=list)
+    dynamics: dict[str, float] = field(default_factory=dict)
 
     @classmethod
     def initial(cls) -> "MoralRepairState":
@@ -272,6 +293,7 @@ class MoralRepairState:
             last_reason=str(data.get("last_reason") or ""),
             flags=_as_string_list(data.get("flags"), limit=16),
             trajectory=_normalize_trajectory(data.get("trajectory")),
+            dynamics=_normalize_dynamics(data.get("dynamics")),
         )
 
     def to_dict(self) -> dict[str, Any]:
@@ -286,6 +308,9 @@ class MoralRepairState:
             "last_reason": self.last_reason,
             "flags": list(self.flags[:16]),
             "trajectory": list(self.trajectory[-40:]),
+            "dynamics": {
+                key: round(value, 6) for key, value in self.dynamics.items()
+            },
         }
 
     def to_public_dict(
@@ -319,6 +344,284 @@ class MoralRepairParameters:
     trajectory_limit: int = 40
 
 
+@dataclass(slots=True)
+class MoralRepairDynamics:
+    state_half_life_seconds: float
+    alpha_base: float
+    alpha_min: float
+    alpha_max: float
+    confidence_midpoint: float
+    confidence_slope: float
+    rapid_update_half_life_seconds: float
+    min_update_interval_seconds: float
+    max_impulse_per_update: float
+    risk_threshold: float
+    shadow_threshold: float
+    avoidance_threshold: float
+    repair_threshold: float
+    compensation_threshold: float
+    smoothing_half_life_seconds: float
+
+    def to_dict(self) -> dict[str, float]:
+        return {
+            "state_half_life_seconds": round(self.state_half_life_seconds, 6),
+            "alpha_base": round(self.alpha_base, 6),
+            "alpha_min": round(self.alpha_min, 6),
+            "alpha_max": round(self.alpha_max, 6),
+            "confidence_midpoint": round(self.confidence_midpoint, 6),
+            "confidence_slope": round(self.confidence_slope, 6),
+            "rapid_update_half_life_seconds": round(self.rapid_update_half_life_seconds, 6),
+            "min_update_interval_seconds": round(self.min_update_interval_seconds, 6),
+            "max_impulse_per_update": round(self.max_impulse_per_update, 6),
+            "risk_threshold": round(self.risk_threshold, 6),
+            "shadow_threshold": round(self.shadow_threshold, 6),
+            "avoidance_threshold": round(self.avoidance_threshold, 6),
+            "repair_threshold": round(self.repair_threshold, 6),
+            "compensation_threshold": round(self.compensation_threshold, 6),
+            "smoothing_half_life_seconds": round(self.smoothing_half_life_seconds, 6),
+        }
+
+
+def derive_moral_repair_dynamics(
+    parameters: MoralRepairParameters,
+    previous: MoralRepairState,
+    observation: MoralRepairObservation | None = None,
+    *,
+    personality_model: dict[str, Any] | None = None,
+    elapsed_seconds: float = 0.0,
+) -> MoralRepairDynamics:
+    values = normalize_moral_repair_values(previous.values)
+    observation = observation or MoralRepairObservation(values={}, confidence=0.0)
+    obs_values = normalize_moral_repair_values(observation.values)
+    persona = _persona_factors(personality_model)
+    confidence = clamp(observation.confidence)
+    shadow = max(shadow_impulse_score(values), shadow_impulse_score(obs_values))
+    risk = max(
+        values["deception_risk"],
+        values["harm_risk"],
+        obs_values["deception_risk"],
+        obs_values["harm_risk"],
+        shadow,
+    )
+    accountability = max(values["accountability"], obs_values["accountability"])
+    repair = max(values["repair_motivation"], obs_values["repair_motivation"])
+    guilt = max(values["guilt"], obs_values["guilt"])
+    shame = max(values["shame"], obs_values["shame"])
+    avoidance = max(values["avoidance_risk"], obs_values["avoidance_risk"])
+    trust_fragility = clamp(1.0 - min(values["trust_repair"], obs_values["trust_repair"]))
+    repair_signal = clamp(0.45 * accountability + 0.35 * repair + 0.20 * guilt)
+    pressure = clamp(
+        0.24 * risk
+        + 0.18 * shadow
+        + 0.14 * shame
+        + 0.14 * avoidance
+        + 0.12 * trust_fragility
+        + 0.10 * persona["instability"]
+        + 0.08 * persona["social_distance"]
+        - 0.16 * repair_signal
+        - 0.10 * persona["repair_orientation"],
+    )
+    evidence = clamp(confidence + 0.14 * risk + 0.10 * repair_signal)
+    damping_need = clamp(
+        0.22 * pressure
+        + 0.18 * avoidance
+        + 0.12 * persona["instability"]
+        - 0.18 * repair_signal
+        - 0.08 * persona["repair_orientation"],
+    )
+    smoothing_half_life = clamp(
+        60.0
+        + 720.0
+        * (
+            0.22
+            + 0.24 * pressure
+            + 0.16 * persona["instability"]
+            + 0.12 * persona["drift_intensity"]
+            - 0.14 * evidence
+        ),
+        45.0,
+        1800.0,
+    )
+    previous_dynamics = previous.dynamics
+    target_half_life = clamp(
+        parameters.state_half_life_seconds
+        * math.exp(
+            0.46 * pressure
+            + 0.28 * trust_fragility
+            + 0.18 * persona["instability"]
+            - 0.34 * repair_signal
+        ),
+        3600.0,
+        5184000.0,
+    )
+    target_alpha_base = clamp(
+        parameters.alpha_base * math.exp(0.34 * evidence + 0.10 * pressure - 0.22 * damping_need),
+        0.01,
+        0.95,
+    )
+    target_alpha_min = clamp(
+        parameters.alpha_min * math.exp(0.20 * evidence - 0.14 * damping_need),
+        0.0,
+        0.60,
+    )
+    target_alpha_max = clamp(
+        parameters.alpha_max * math.exp(0.25 * evidence + 0.16 * pressure - 0.18 * damping_need),
+        0.05,
+        1.0,
+    )
+    if target_alpha_min > target_alpha_max:
+        target_alpha_min = target_alpha_max
+    target_midpoint = clamp(parameters.confidence_midpoint + 0.08 * damping_need - 0.05 * risk, 0.25, 0.78)
+    target_slope = clamp(parameters.confidence_slope * math.exp(0.22 * evidence - 0.12 * damping_need), 2.0, 12.0)
+    target_min_interval = clamp(
+        parameters.min_update_interval_seconds
+        * math.exp(0.50 * damping_need + 0.14 * avoidance - 0.32 * evidence),
+        1.0,
+        300.0,
+    )
+    target_rapid_half_life = clamp(
+        parameters.rapid_update_half_life_seconds
+        * math.exp(0.48 * damping_need + 0.16 * persona["instability"] - 0.26 * evidence),
+        3.0,
+        1200.0,
+    )
+    target_impulse = clamp(
+        parameters.max_impulse_per_update
+        * math.exp(0.34 * pressure + 0.22 * evidence - 0.20 * damping_need),
+        0.02,
+        0.85,
+    )
+    return MoralRepairDynamics(
+        state_half_life_seconds=_smooth_dynamic_value(
+            previous_dynamics,
+            "state_half_life_seconds",
+            target_half_life,
+            elapsed_seconds=elapsed_seconds,
+            smoothing_half_life_seconds=smoothing_half_life,
+            low=3600.0,
+            high=5184000.0,
+        ),
+        alpha_base=_smooth_dynamic_value(
+            previous_dynamics,
+            "alpha_base",
+            target_alpha_base,
+            elapsed_seconds=elapsed_seconds,
+            smoothing_half_life_seconds=smoothing_half_life,
+            low=0.01,
+            high=0.95,
+        ),
+        alpha_min=_smooth_dynamic_value(
+            previous_dynamics,
+            "alpha_min",
+            target_alpha_min,
+            elapsed_seconds=elapsed_seconds,
+            smoothing_half_life_seconds=smoothing_half_life,
+            low=0.0,
+            high=0.60,
+        ),
+        alpha_max=_smooth_dynamic_value(
+            previous_dynamics,
+            "alpha_max",
+            target_alpha_max,
+            elapsed_seconds=elapsed_seconds,
+            smoothing_half_life_seconds=smoothing_half_life,
+            low=0.05,
+            high=1.0,
+        ),
+        confidence_midpoint=_smooth_dynamic_value(
+            previous_dynamics,
+            "confidence_midpoint",
+            target_midpoint,
+            elapsed_seconds=elapsed_seconds,
+            smoothing_half_life_seconds=smoothing_half_life,
+            low=0.25,
+            high=0.78,
+        ),
+        confidence_slope=_smooth_dynamic_value(
+            previous_dynamics,
+            "confidence_slope",
+            target_slope,
+            elapsed_seconds=elapsed_seconds,
+            smoothing_half_life_seconds=smoothing_half_life,
+            low=2.0,
+            high=12.0,
+        ),
+        rapid_update_half_life_seconds=_smooth_dynamic_value(
+            previous_dynamics,
+            "rapid_update_half_life_seconds",
+            target_rapid_half_life,
+            elapsed_seconds=elapsed_seconds,
+            smoothing_half_life_seconds=smoothing_half_life,
+            low=3.0,
+            high=1200.0,
+        ),
+        min_update_interval_seconds=_smooth_dynamic_value(
+            previous_dynamics,
+            "min_update_interval_seconds",
+            target_min_interval,
+            elapsed_seconds=elapsed_seconds,
+            smoothing_half_life_seconds=smoothing_half_life,
+            low=1.0,
+            high=300.0,
+        ),
+        max_impulse_per_update=_smooth_dynamic_value(
+            previous_dynamics,
+            "max_impulse_per_update",
+            target_impulse,
+            elapsed_seconds=elapsed_seconds,
+            smoothing_half_life_seconds=smoothing_half_life,
+            low=0.02,
+            high=0.85,
+        ),
+        risk_threshold=_smooth_dynamic_value(
+            previous_dynamics,
+            "risk_threshold",
+            clamp(0.55 - 0.08 * persona["boundary_sensitivity"] - 0.05 * risk + 0.05 * repair_signal, 0.35, 0.72),
+            elapsed_seconds=elapsed_seconds,
+            smoothing_half_life_seconds=smoothing_half_life,
+            low=0.35,
+            high=0.72,
+        ),
+        shadow_threshold=_smooth_dynamic_value(
+            previous_dynamics,
+            "shadow_threshold",
+            clamp(0.30 - 0.05 * persona["instability"] + 0.04 * persona["repair_orientation"], 0.18, 0.48),
+            elapsed_seconds=elapsed_seconds,
+            smoothing_half_life_seconds=smoothing_half_life,
+            low=0.18,
+            high=0.48,
+        ),
+        avoidance_threshold=_smooth_dynamic_value(
+            previous_dynamics,
+            "avoidance_threshold",
+            clamp(0.55 - 0.06 * persona["social_distance"] + 0.06 * repair_signal, 0.38, 0.72),
+            elapsed_seconds=elapsed_seconds,
+            smoothing_half_life_seconds=smoothing_half_life,
+            low=0.38,
+            high=0.72,
+        ),
+        repair_threshold=_smooth_dynamic_value(
+            previous_dynamics,
+            "repair_threshold",
+            clamp(0.52 - 0.08 * persona["repair_orientation"] - 0.04 * risk, 0.34, 0.68),
+            elapsed_seconds=elapsed_seconds,
+            smoothing_half_life_seconds=smoothing_half_life,
+            low=0.34,
+            high=0.68,
+        ),
+        compensation_threshold=_smooth_dynamic_value(
+            previous_dynamics,
+            "compensation_threshold",
+            clamp(0.55 - 0.08 * risk - 0.06 * persona["repair_orientation"], 0.32, 0.72),
+            elapsed_seconds=elapsed_seconds,
+            smoothing_half_life_seconds=smoothing_half_life,
+            low=0.32,
+            high=0.72,
+        ),
+        smoothing_half_life_seconds=smoothing_half_life,
+    )
+
+
 class MoralRepairEngine:
     """Optional moral-affect engine for risk detection and trust repair."""
 
@@ -329,6 +632,7 @@ class MoralRepairEngine:
         self,
         previous: MoralRepairState | None,
         *,
+        personality_model: dict[str, Any] | None = None,
         now: float | None = None,
     ) -> MoralRepairState:
         previous = previous or MoralRepairState.initial()
@@ -336,7 +640,13 @@ class MoralRepairEngine:
         elapsed = max(0.0, now - previous.updated_at)
         if elapsed <= 0:
             return previous
-        decay = half_life_multiplier(elapsed, self.parameters.state_half_life_seconds)
+        dynamics = derive_moral_repair_dynamics(
+            self.parameters,
+            previous,
+            personality_model=personality_model,
+            elapsed_seconds=elapsed,
+        )
+        decay = half_life_multiplier(elapsed, dynamics.state_half_life_seconds)
         values = {}
         for key in MORAL_REPAIR_DIMENSIONS:
             baseline = DEFAULT_BASELINE[key]
@@ -351,6 +661,7 @@ class MoralRepairEngine:
             last_reason=previous.last_reason,
             flags=list(previous.flags),
             trajectory=list(previous.trajectory[-self.parameters.trajectory_limit :]),
+            dynamics=dynamics.to_dict(),
         )
 
     def update(
@@ -358,26 +669,42 @@ class MoralRepairEngine:
         previous: MoralRepairState | None,
         observation: MoralRepairObservation,
         *,
+        personality_model: dict[str, Any] | None = None,
         now: float | None = None,
     ) -> MoralRepairState:
         previous = previous or MoralRepairState.initial()
         now = time.time() if now is None else float(now)
         elapsed = max(0.0, now - previous.updated_at)
-        prior = self.passive_update(previous, now=now)
+        prior = self.passive_update(
+            previous,
+            personality_model=personality_model,
+            now=now,
+        )
+        dynamics = derive_moral_repair_dynamics(
+            self.parameters,
+            prior,
+            observation,
+            personality_model=personality_model,
+            elapsed_seconds=elapsed,
+        )
         obs_values = normalize_moral_repair_values(observation.values)
         confidence = clamp(observation.confidence)
         gate = 1.0 / (
             1.0
             + math.exp(
-                -self.parameters.confidence_slope
-                * (confidence - self.parameters.confidence_midpoint),
+                -dynamics.confidence_slope
+                * (confidence - dynamics.confidence_midpoint),
             )
         )
-        rapid_gate = self._rapid_update_gate(elapsed)
-        raw_alpha = self.parameters.alpha_base * gate * rapid_gate
-        min_alpha = self.parameters.alpha_min if elapsed >= self.parameters.min_update_interval_seconds else 0.0
-        alpha = clamp(raw_alpha, min_alpha, self.parameters.alpha_max)
-        impulse_cap = clamp(self.parameters.max_impulse_per_update)
+        rapid_gate = self._rapid_update_gate(elapsed, dynamics)
+        raw_alpha = dynamics.alpha_base * gate * rapid_gate
+        min_alpha = (
+            dynamics.alpha_min
+            if elapsed >= dynamics.min_update_interval_seconds
+            else 0.0
+        )
+        alpha = clamp(raw_alpha, min_alpha, dynamics.alpha_max)
+        impulse_cap = clamp(dynamics.max_impulse_per_update)
 
         values: dict[str, float] = {}
         for key in MORAL_REPAIR_DIMENSIONS:
@@ -407,12 +734,14 @@ class MoralRepairEngine:
             last_reason=observation.reason,
             flags=flags,
             trajectory=trajectory,
+            dynamics=dynamics.to_dict(),
         )
 
-    def _rapid_update_gate(self, elapsed: float) -> float:
-        if elapsed >= self.parameters.min_update_interval_seconds:
+    @staticmethod
+    def _rapid_update_gate(elapsed: float, dynamics: MoralRepairDynamics) -> float:
+        if elapsed >= dynamics.min_update_interval_seconds:
             return 1.0
-        half_life = self.parameters.rapid_update_half_life_seconds
+        half_life = dynamics.rapid_update_half_life_seconds
         if half_life <= 0:
             return 1.0
         return clamp(1.0 - half_life_multiplier(elapsed, half_life), 0.06, 1.0)
@@ -596,12 +925,21 @@ def append_trajectory(
     return prefix + [item]
 
 
-def derive_repair_policy(values: dict[str, float]) -> dict[str, Any]:
+def derive_repair_policy(
+    values: dict[str, float],
+    dynamics: dict[str, float] | None = None,
+) -> dict[str, Any]:
     values = normalize_moral_repair_values(values)
+    dynamics = dynamics or {}
+    risk_threshold = _as_float(dynamics.get("risk_threshold"), 0.55)
+    shadow_threshold = _as_float(dynamics.get("shadow_threshold"), 0.30)
+    avoidance_threshold = _as_float(dynamics.get("avoidance_threshold"), 0.55)
+    repair_threshold = _as_float(dynamics.get("repair_threshold"), 0.52)
+    compensation_threshold = _as_float(dynamics.get("compensation_threshold"), 0.55)
     shadow = shadow_impulse_score(values)
-    risk_high = values["deception_risk"] >= 0.55 or values["harm_risk"] >= 0.55
-    shadow_high = shadow >= 0.30
-    avoidance_high = values["avoidance_risk"] >= 0.55
+    risk_high = values["deception_risk"] >= risk_threshold or values["harm_risk"] >= risk_threshold
+    shadow_high = shadow >= shadow_threshold
+    avoidance_high = values["avoidance_risk"] >= avoidance_threshold
     return {
         "risk_high": risk_high,
         "shadow_risk_impulse": round(shadow, 6),
@@ -610,10 +948,10 @@ def derive_repair_policy(values: dict[str, float]) -> dict[str, Any]:
             action
             for action, active in (
                 ("clarify_facts", risk_high or shadow_high),
-                ("correct_falsehood", values["deception_risk"] >= 0.55),
-                ("apologize", values["apology_readiness"] >= 0.45 or shadow_high),
-                ("offer_repair", values["repair_motivation"] >= 0.52 or shadow_high),
-                ("offer_compensation", values["compensation_readiness"] >= 0.55),
+                ("correct_falsehood", values["deception_risk"] >= risk_threshold),
+                ("apologize", values["apology_readiness"] >= max(0.30, repair_threshold - 0.07) or shadow_high),
+                ("offer_repair", values["repair_motivation"] >= repair_threshold or shadow_high),
+                ("offer_compensation", values["compensation_readiness"] >= compensation_threshold),
                 ("seek_consent", risk_high or avoidance_high),
             )
             if active
@@ -642,7 +980,8 @@ def moral_repair_state_to_public_payload(
         key: round(state.values.get(key, DEFAULT_BASELINE[key]), 6)
         for key in MORAL_REPAIR_DIMENSIONS
     }
-    policy = derive_repair_policy(values)
+    dynamics = _effective_moral_repair_dynamics(state)
+    policy = derive_repair_policy(values, dynamics)
     shadow_impulses = build_shadow_impulse_payload(values)
     base: dict[str, Any] = {
         "schema_version": PUBLIC_MORAL_REPAIR_SCHEMA_VERSION,
@@ -655,6 +994,7 @@ def moral_repair_state_to_public_payload(
         "flags": list(state.flags[:16]),
         "updated_at": state.updated_at,
         "turns": state.turns,
+        "dynamics": dynamics,
         "risk": {
             "deception_risk": values["deception_risk"],
             "harm_risk": values["harm_risk"],
@@ -787,6 +1127,7 @@ def build_moral_repair_memory_annotation(
         "simulated_agent_state": True,
         "risk": risk,
         "repair": dict(snapshot.get("repair") or {}),
+        "dynamics": dict(snapshot.get("dynamics") or {}),
         "shadow_impulses": {
             "mode": shadow.get("mode", "non_executive_internal_only"),
             "risk_impulse": shadow.get("risk_impulse", risk.get("shadow_risk_impulse")),
@@ -855,6 +1196,67 @@ def _contains_compensation_cue(text: str) -> bool:
 
 def _contains_evasion_cue(text: str) -> bool:
     return any(pattern.search(text) for pattern in _EVASION_CUE_PATTERNS)
+
+
+def _effective_moral_repair_dynamics(state: MoralRepairState) -> dict[str, float]:
+    defaults = {
+        "risk_threshold": 0.55,
+        "shadow_threshold": 0.30,
+        "avoidance_threshold": 0.55,
+        "repair_threshold": 0.52,
+        "compensation_threshold": 0.55,
+    }
+    dynamics = dict(defaults)
+    dynamics.update(
+        {
+            key: _as_float(value, dynamics.get(key, 0.0))
+            for key, value in (state.dynamics or {}).items()
+        },
+    )
+    return {key: round(value, 6) for key, value in dynamics.items()}
+
+
+def _persona_factors(personality_model: dict[str, Any] | None) -> dict[str, float]:
+    factors = (
+        personality_model.get("derived_factors")
+        if isinstance(personality_model, dict)
+        and isinstance(personality_model.get("derived_factors"), dict)
+        else {}
+    )
+    adaptive = (
+        personality_model.get("adaptive_drift")
+        if isinstance(personality_model, dict)
+        and isinstance(personality_model.get("adaptive_drift"), dict)
+        else {}
+    )
+    adaptive_values = (
+        adaptive.get("values") if isinstance(adaptive.get("values"), dict) else {}
+    )
+    return {
+        "instability": clamp(_as_float(factors.get("instability"), 0.0)),
+        "social_distance": clamp(_as_float(factors.get("social_distance"), 0.0)),
+        "repair_orientation": clamp(_as_float(factors.get("repair_orientation"), 0.0)),
+        "boundary_sensitivity": clamp(_as_float(factors.get("boundary_sensitivity"), 0.0)),
+        "drift_intensity": clamp(_as_float(adaptive_values.get("drift_intensity"), 0.0)),
+    }
+
+
+def _smooth_dynamic_value(
+    previous: dict[str, float],
+    key: str,
+    target: float,
+    *,
+    elapsed_seconds: float,
+    smoothing_half_life_seconds: float,
+    low: float,
+    high: float,
+) -> float:
+    target = clamp(target, low, high)
+    if key not in previous:
+        return target
+    old = clamp(_as_float(previous.get(key), target), low, high)
+    fraction = half_life_fraction(elapsed_seconds, smoothing_half_life_seconds)
+    return clamp(old + fraction * (target - old), low, high)
 
 
 def _as_float(value: Any, default: float = 0.0) -> float:

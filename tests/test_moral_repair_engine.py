@@ -105,7 +105,7 @@ class MoralRepairEngineTests(unittest.TestCase):
         self.assertGreater(state.values["compensation_readiness"], 0.45)
         self.assertLess(state.values["avoidance_risk"], 0.35)
 
-    def test_passive_update_uses_real_elapsed_time_half_life(self):
+    def test_passive_update_uses_auto_derived_real_time_dynamics(self):
         engine = MoralRepairEngine(
             MoralRepairParameters(state_half_life_seconds=100.0),
         )
@@ -113,10 +113,64 @@ class MoralRepairEngineTests(unittest.TestCase):
         state.updated_at = 0.0
         state.values["guilt"] = 1.0
         decayed = engine.passive_update(state, now=100.0)
+        later = engine.passive_update(state, now=300.0)
 
-        expected = DEFAULT_BASELINE["guilt"] + (1.0 - DEFAULT_BASELINE["guilt"]) * 0.5
-        self.assertAlmostEqual(decayed.values["guilt"], expected)
+        self.assertIn("state_half_life_seconds", decayed.dynamics)
+        self.assertNotEqual(decayed.dynamics["state_half_life_seconds"], 100.0)
+        self.assertLess(decayed.values["guilt"], 1.0)
+        self.assertGreater(decayed.values["guilt"], DEFAULT_BASELINE["guilt"])
+        self.assertLess(later.values["guilt"], decayed.values["guilt"])
         self.assertEqual(decayed.updated_at, 100.0)
+
+    def test_dynamics_roundtrip_public_payload_and_personality_modulation(self):
+        distant_persona = {
+            "derived_factors": {
+                "instability": 0.7,
+                "social_distance": 0.7,
+                "repair_orientation": 0.1,
+                "boundary_sensitivity": 0.7,
+            },
+            "adaptive_drift": {"values": {"drift_intensity": 0.3}},
+        }
+        repair_persona = {
+            "derived_factors": {
+                "instability": 0.1,
+                "social_distance": 0.1,
+                "repair_orientation": 0.9,
+                "boundary_sensitivity": 0.1,
+            },
+            "adaptive_drift": {"values": {"drift_intensity": 0.1}},
+        }
+        previous = MoralRepairState.initial()
+        previous.updated_at = 0.0
+        observation = MoralRepairObservation(
+            values={"deception_risk": 0.8, "avoidance_risk": 0.7},
+            confidence=0.9,
+        )
+        engine = MoralRepairEngine()
+
+        distant = engine.update(
+            previous,
+            observation,
+            personality_model=distant_persona,
+            now=60.0,
+        )
+        repairing = engine.update(
+            previous,
+            observation,
+            personality_model=repair_persona,
+            now=60.0,
+        )
+        restored = MoralRepairState.from_dict(distant.to_dict())
+        payload = moral_repair_state_to_public_payload(distant, exposure="plugin_safe")
+
+        self.assertIn("risk_threshold", distant.dynamics)
+        self.assertIn("dynamics", payload)
+        self.assertEqual(restored.dynamics["risk_threshold"], distant.dynamics["risk_threshold"])
+        self.assertGreater(
+            distant.dynamics["state_half_life_seconds"],
+            repairing.dynamics["state_half_life_seconds"],
+        )
 
     def test_rapid_updates_are_gated(self):
         engine = MoralRepairEngine(

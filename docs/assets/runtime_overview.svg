@@ -1,0 +1,80 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1280" height="560" viewBox="0 0 1280 560" role="img" aria-labelledby="title desc">
+  <title id="title">运行时总览</title>
+  <desc id="desc">展示消息链路、后台评估、记忆注解和主动发言裁决支路。</desc>
+  <defs>
+    <marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse">
+      <path d="M 0 0 L 10 5 L 0 10 z" fill="#2563eb"/>
+    </marker>
+    <style>
+      .bg { fill: #f8fafc; }
+      .lane { fill: #eef2ff; stroke: #c7d2fe; stroke-width: 2; }
+      .lane2 { fill: #ecfdf5; stroke: #a7f3d0; stroke-width: 2; }
+      .node { fill: #ffffff; stroke: #334155; stroke-width: 2; }
+      .node2 { fill: #ffffff; stroke: #047857; stroke-width: 2; }
+      .text { font-family: "Microsoft YaHei", "Noto Sans CJK SC", Arial, sans-serif; font-size: 22px; fill: #0f172a; }
+      .small { font-size: 18px; fill: #334155; }
+      .label { font-size: 24px; font-weight: 700; fill: #1e293b; }
+      .arrow { stroke: #2563eb; stroke-width: 3; fill: none; marker-end: url(#arrow); }
+      .dash { stroke-dasharray: 8 8; }
+    </style>
+  </defs>
+  <rect class="bg" width="1280" height="560" rx="0"/>
+  <rect class="lane" x="38" y="42" width="1204" height="220" rx="18"/>
+  <text class="label" x="64" y="82">主回复与状态落库链路</text>
+  <g>
+    <rect class="node" x="64" y="118" width="150" height="82" rx="12"/>
+    <text class="text" x="139" y="153" text-anchor="middle">用户/群聊</text>
+    <text class="text" x="139" y="182" text-anchor="middle">消息</text>
+    <rect class="node" x="246" y="118" width="158" height="82" rx="12"/>
+    <text class="text" x="325" y="153" text-anchor="middle">解析会话</text>
+    <text class="text" x="325" y="182" text-anchor="middle">与说话人</text>
+    <rect class="node" x="436" y="105" width="210" height="108" rx="12"/>
+    <text class="text" x="541" y="141" text-anchor="middle">并发读取状态</text>
+    <text class="small" x="541" y="171" text-anchor="middle">emotion / lifelike</text>
+    <text class="small" x="541" y="197" text-anchor="middle">drift / group 等</text>
+    <rect class="node" x="678" y="118" width="158" height="82" rx="12"/>
+    <text class="text" x="757" y="153" text-anchor="middle">预算内</text>
+    <text class="text" x="757" y="182" text-anchor="middle">注入状态</text>
+    <rect class="node" x="868" y="118" width="150" height="82" rx="12"/>
+    <text class="text" x="943" y="153" text-anchor="middle">主回复</text>
+    <text class="text" x="943" y="182" text-anchor="middle">先返回</text>
+    <rect class="node" x="1050" y="105" width="164" height="108" rx="12"/>
+    <text class="text" x="1132" y="141" text-anchor="middle">后台评估</text>
+    <text class="small" x="1132" y="171" text-anchor="middle">FIFO / 重试</text>
+    <text class="small" x="1132" y="197" text-anchor="middle">记忆注解</text>
+  </g>
+  <path class="arrow" d="M214 159 H246"/>
+  <path class="arrow" d="M404 159 H436"/>
+  <path class="arrow" d="M646 159 H678"/>
+  <path class="arrow" d="M836 159 H868"/>
+  <path class="arrow" d="M1018 159 H1050"/>
+
+  <rect class="lane2" x="38" y="304" width="1204" height="214" rx="18"/>
+  <text class="label" x="64" y="344">主动发言裁决支路</text>
+  <g>
+    <rect class="node2" x="64" y="378" width="188" height="84" rx="12"/>
+    <text class="text" x="158" y="413" text-anchor="middle">调度器 / 插件</text>
+    <text class="small" x="158" y="442" text-anchor="middle">或 LLM 工具调用</text>
+    <rect class="node2" x="292" y="366" width="190" height="108" rx="12"/>
+    <text class="text" x="387" y="403" text-anchor="middle">读取状态快照</text>
+    <text class="small" x="387" y="432" text-anchor="middle">情绪 / 共同语境</text>
+    <text class="small" x="387" y="458" text-anchor="middle">群聊 / 人格漂移</text>
+    <rect class="node2" x="522" y="366" width="190" height="108" rx="12"/>
+    <text class="text" x="617" y="403" text-anchor="middle">公式判定</text>
+    <text class="small" x="617" y="432" text-anchor="middle">互需、冷却</text>
+    <text class="small" x="617" y="458" text-anchor="middle">打断风险</text>
+    <rect class="node2" x="752" y="366" width="190" height="108" rx="12"/>
+    <text class="text" x="847" y="403" text-anchor="middle">LLM 裁决</text>
+    <text class="small" x="847" y="432" text-anchor="middle">需求、话题</text>
+    <text class="small" x="847" y="458" text-anchor="middle">开口风格</text>
+    <rect class="node2" x="982" y="378" width="206" height="84" rx="12"/>
+    <text class="text" x="1085" y="413" text-anchor="middle">返回候选</text>
+    <text class="small" x="1085" y="442" text-anchor="middle">由调用方决定发送</text>
+  </g>
+  <path class="arrow" d="M252 420 H292"/>
+  <path class="arrow" d="M482 420 H522"/>
+  <path class="arrow" d="M712 420 H752"/>
+  <path class="arrow" d="M942 420 H982"/>
+  <path class="arrow dash" d="M1132 213 C1132 265 617 288 617 366"/>
+  <text class="small" x="708" y="288" text-anchor="middle">长期状态反哺主动性</text>
+</svg>

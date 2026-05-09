@@ -224,6 +224,26 @@ def half_life_multiplier(elapsed_seconds: float, half_life_seconds: float) -> fl
     return clamp(2.0 ** (-elapsed_seconds / half_life_seconds))
 
 
+def half_life_fraction(elapsed_seconds: float, half_life_seconds: float) -> float:
+    if elapsed_seconds <= 0:
+        return 0.0
+    if half_life_seconds <= 0:
+        return 1.0
+    return clamp(1.0 - 2.0 ** (-elapsed_seconds / half_life_seconds), 0.0, 1.0)
+
+
+def _normalize_dynamics(raw: Any) -> dict[str, float]:
+    if not isinstance(raw, dict):
+        return {}
+    result: dict[str, float] = {}
+    for key, value in raw.items():
+        try:
+            result[str(key)] = float(value)
+        except (TypeError, ValueError):
+            continue
+    return result
+
+
 def normalize_fallibility_values(raw: Any = None) -> dict[str, float]:
     raw = raw if isinstance(raw, dict) else {}
     aliases = {
@@ -272,6 +292,7 @@ class FallibilityState:
     last_reason: str = ""
     flags: list[str] = field(default_factory=list)
     trajectory: list[dict[str, Any]] = field(default_factory=list)
+    dynamics: dict[str, float] = field(default_factory=dict)
 
     @classmethod
     def initial(cls) -> "FallibilityState":
@@ -289,6 +310,7 @@ class FallibilityState:
             last_reason=str(data.get("last_reason") or "")[:240],
             flags=_as_string_list(data.get("flags"), limit=16),
             trajectory=_normalize_trajectory(data.get("trajectory")),
+            dynamics=_normalize_dynamics(data.get("dynamics")),
         )
 
     def to_dict(self) -> dict[str, Any]:
@@ -304,6 +326,9 @@ class FallibilityState:
             "last_reason": self.last_reason,
             "flags": list(self.flags[:16]),
             "trajectory": list(self.trajectory[-40:]),
+            "dynamics": {
+                key: round(value, 6) for key, value in self.dynamics.items()
+            },
         }
 
     def to_public_dict(
@@ -338,6 +363,294 @@ class FallibilityParameters:
     trajectory_limit: int = 40
 
 
+@dataclass(slots=True)
+class FallibilityDynamics:
+    state_half_life_seconds: float
+    alpha_base: float
+    alpha_min: float
+    alpha_max: float
+    confidence_midpoint: float
+    confidence_slope: float
+    rapid_update_half_life_seconds: float
+    min_update_interval_seconds: float
+    max_impulse_per_update: float
+    max_error_pressure: float
+    clarification_threshold: float
+    correction_threshold: float
+    truth_guard_threshold: float
+    shadow_threshold: float
+    smoothing_half_life_seconds: float
+
+    def to_dict(self) -> dict[str, float]:
+        return {
+            "state_half_life_seconds": round(self.state_half_life_seconds, 6),
+            "alpha_base": round(self.alpha_base, 6),
+            "alpha_min": round(self.alpha_min, 6),
+            "alpha_max": round(self.alpha_max, 6),
+            "confidence_midpoint": round(self.confidence_midpoint, 6),
+            "confidence_slope": round(self.confidence_slope, 6),
+            "rapid_update_half_life_seconds": round(self.rapid_update_half_life_seconds, 6),
+            "min_update_interval_seconds": round(self.min_update_interval_seconds, 6),
+            "max_impulse_per_update": round(self.max_impulse_per_update, 6),
+            "max_error_pressure": round(self.max_error_pressure, 6),
+            "clarification_threshold": round(self.clarification_threshold, 6),
+            "correction_threshold": round(self.correction_threshold, 6),
+            "truth_guard_threshold": round(self.truth_guard_threshold, 6),
+            "shadow_threshold": round(self.shadow_threshold, 6),
+            "smoothing_half_life_seconds": round(self.smoothing_half_life_seconds, 6),
+        }
+
+
+def derive_fallibility_dynamics(
+    parameters: FallibilityParameters,
+    previous: FallibilityState,
+    observation: FallibilityObservation | None = None,
+    *,
+    personality_model: dict[str, Any] | None = None,
+    elapsed_seconds: float = 0.0,
+) -> FallibilityDynamics:
+    values = normalize_fallibility_values(previous.values)
+    observation = observation or FallibilityObservation(values={}, confidence=0.0)
+    obs_values = normalize_fallibility_values(observation.values)
+    persona = _persona_factors(personality_model)
+    confidence = clamp(observation.confidence)
+    shadow = max(shadow_impulse_score(values), shadow_impulse_score(obs_values))
+    high_risk = 1.0 if "high_risk_guard" in observation.flags or "deception_request_guard" in observation.flags else 0.0
+    error_pressure = max(
+        values["misread_tendency"],
+        values["memory_blur"],
+        values["overconfidence"],
+        values["defensive_stubbornness"],
+        values["avoidance"],
+        values["playful_bluff"],
+        obs_values["misread_tendency"],
+        obs_values["memory_blur"],
+        obs_values["overconfidence"],
+        obs_values["defensive_stubbornness"],
+        obs_values["avoidance"],
+        obs_values["playful_bluff"],
+        0.70 * shadow,
+    )
+    correction = max(values["correction_readiness"], obs_values["correction_readiness"])
+    truth_guard = max(values["truthfulness_guard"], obs_values["truthfulness_guard"])
+    clarification = max(values["clarification_need"], obs_values["clarification_need"])
+    pressure = clamp(
+        0.24 * error_pressure
+        + 0.18 * shadow
+        + 0.18 * high_risk
+        + 0.12 * persona["instability"]
+        + 0.10 * persona["social_distance"]
+        - 0.18 * truth_guard
+        - 0.10 * correction,
+    )
+    evidence = clamp(confidence + 0.12 * clarification + 0.12 * high_risk)
+    damping_need = clamp(
+        0.32 * high_risk
+        + 0.18 * truth_guard
+        + 0.14 * persona["boundary_sensitivity"]
+        + 0.10 * pressure
+        - 0.14 * persona["expressiveness"],
+    )
+    smoothing_half_life = clamp(
+        35.0
+        + 420.0
+        * (
+            0.20
+            + 0.24 * damping_need
+            + 0.18 * pressure
+            + 0.10 * persona["drift_intensity"]
+            - 0.12 * evidence
+        ),
+        20.0,
+        900.0,
+    )
+    previous_dynamics = previous.dynamics
+    target_half_life = clamp(
+        parameters.state_half_life_seconds
+        * math.exp(
+            0.38 * pressure
+            + 0.24 * persona["instability"]
+            + 0.18 * error_pressure
+            - 0.34 * correction
+            - 0.22 * truth_guard
+        ),
+        1800.0,
+        1209600.0,
+    )
+    target_alpha_base = clamp(
+        parameters.alpha_base * math.exp(0.30 * evidence + 0.10 * pressure - 0.24 * damping_need),
+        0.01,
+        0.85,
+    )
+    target_alpha_min = clamp(
+        parameters.alpha_min * math.exp(0.18 * evidence - 0.18 * damping_need),
+        0.0,
+        0.45,
+    )
+    target_alpha_max = clamp(
+        parameters.alpha_max * math.exp(0.24 * evidence + 0.12 * pressure - 0.22 * damping_need),
+        0.05,
+        0.95,
+    )
+    if target_alpha_min > target_alpha_max:
+        target_alpha_min = target_alpha_max
+    target_midpoint = clamp(parameters.confidence_midpoint + 0.08 * damping_need - 0.05 * high_risk, 0.25, 0.78)
+    target_slope = clamp(parameters.confidence_slope * math.exp(0.20 * evidence - 0.10 * damping_need), 2.0, 12.0)
+    target_min_interval = clamp(
+        parameters.min_update_interval_seconds
+        * math.exp(0.50 * damping_need + 0.10 * persona["social_distance"] - 0.30 * evidence),
+        1.0,
+        300.0,
+    )
+    target_rapid_half_life = clamp(
+        parameters.rapid_update_half_life_seconds
+        * math.exp(0.48 * damping_need + 0.14 * persona["instability"] - 0.24 * evidence),
+        3.0,
+        1200.0,
+    )
+    target_impulse = clamp(
+        parameters.max_impulse_per_update
+        * math.exp(0.30 * pressure + 0.18 * evidence - 0.28 * high_risk - 0.12 * damping_need),
+        0.01,
+        0.70,
+    )
+    target_error_cap = clamp(
+        parameters.max_error_pressure
+        * math.exp(0.28 * persona["expressiveness"] + 0.18 * pressure - 0.70 * high_risk - 0.24 * truth_guard),
+        0.03,
+        0.70,
+    )
+    return FallibilityDynamics(
+        state_half_life_seconds=_smooth_dynamic_value(
+            previous_dynamics,
+            "state_half_life_seconds",
+            target_half_life,
+            elapsed_seconds=elapsed_seconds,
+            smoothing_half_life_seconds=smoothing_half_life,
+            low=1800.0,
+            high=1209600.0,
+        ),
+        alpha_base=_smooth_dynamic_value(
+            previous_dynamics,
+            "alpha_base",
+            target_alpha_base,
+            elapsed_seconds=elapsed_seconds,
+            smoothing_half_life_seconds=smoothing_half_life,
+            low=0.01,
+            high=0.85,
+        ),
+        alpha_min=_smooth_dynamic_value(
+            previous_dynamics,
+            "alpha_min",
+            target_alpha_min,
+            elapsed_seconds=elapsed_seconds,
+            smoothing_half_life_seconds=smoothing_half_life,
+            low=0.0,
+            high=0.45,
+        ),
+        alpha_max=_smooth_dynamic_value(
+            previous_dynamics,
+            "alpha_max",
+            target_alpha_max,
+            elapsed_seconds=elapsed_seconds,
+            smoothing_half_life_seconds=smoothing_half_life,
+            low=0.05,
+            high=0.95,
+        ),
+        confidence_midpoint=_smooth_dynamic_value(
+            previous_dynamics,
+            "confidence_midpoint",
+            target_midpoint,
+            elapsed_seconds=elapsed_seconds,
+            smoothing_half_life_seconds=smoothing_half_life,
+            low=0.25,
+            high=0.78,
+        ),
+        confidence_slope=_smooth_dynamic_value(
+            previous_dynamics,
+            "confidence_slope",
+            target_slope,
+            elapsed_seconds=elapsed_seconds,
+            smoothing_half_life_seconds=smoothing_half_life,
+            low=2.0,
+            high=12.0,
+        ),
+        rapid_update_half_life_seconds=_smooth_dynamic_value(
+            previous_dynamics,
+            "rapid_update_half_life_seconds",
+            target_rapid_half_life,
+            elapsed_seconds=elapsed_seconds,
+            smoothing_half_life_seconds=smoothing_half_life,
+            low=3.0,
+            high=1200.0,
+        ),
+        min_update_interval_seconds=_smooth_dynamic_value(
+            previous_dynamics,
+            "min_update_interval_seconds",
+            target_min_interval,
+            elapsed_seconds=elapsed_seconds,
+            smoothing_half_life_seconds=smoothing_half_life,
+            low=1.0,
+            high=300.0,
+        ),
+        max_impulse_per_update=_smooth_dynamic_value(
+            previous_dynamics,
+            "max_impulse_per_update",
+            target_impulse,
+            elapsed_seconds=elapsed_seconds,
+            smoothing_half_life_seconds=smoothing_half_life,
+            low=0.01,
+            high=0.70,
+        ),
+        max_error_pressure=_smooth_dynamic_value(
+            previous_dynamics,
+            "max_error_pressure",
+            target_error_cap,
+            elapsed_seconds=elapsed_seconds,
+            smoothing_half_life_seconds=smoothing_half_life,
+            low=0.03,
+            high=0.70,
+        ),
+        clarification_threshold=_smooth_dynamic_value(
+            previous_dynamics,
+            "clarification_threshold",
+            clamp(0.50 - 0.08 * high_risk - 0.06 * truth_guard + 0.04 * persona["expressiveness"], 0.30, 0.68),
+            elapsed_seconds=elapsed_seconds,
+            smoothing_half_life_seconds=smoothing_half_life,
+            low=0.30,
+            high=0.68,
+        ),
+        correction_threshold=_smooth_dynamic_value(
+            previous_dynamics,
+            "correction_threshold",
+            clamp(0.60 - 0.08 * high_risk - 0.06 * persona["repair_orientation"], 0.38, 0.74),
+            elapsed_seconds=elapsed_seconds,
+            smoothing_half_life_seconds=smoothing_half_life,
+            low=0.38,
+            high=0.74,
+        ),
+        truth_guard_threshold=_smooth_dynamic_value(
+            previous_dynamics,
+            "truth_guard_threshold",
+            clamp(0.78 - 0.10 * high_risk - 0.05 * pressure, 0.55, 0.90),
+            elapsed_seconds=elapsed_seconds,
+            smoothing_half_life_seconds=smoothing_half_life,
+            low=0.55,
+            high=0.90,
+        ),
+        shadow_threshold=_smooth_dynamic_value(
+            previous_dynamics,
+            "shadow_threshold",
+            clamp(0.30 - 0.08 * high_risk - 0.04 * persona["instability"], 0.16, 0.48),
+            elapsed_seconds=elapsed_seconds,
+            smoothing_half_life_seconds=smoothing_half_life,
+            low=0.16,
+            high=0.48,
+        ),
+        smoothing_half_life_seconds=smoothing_half_life,
+    )
+
+
 class FallibilityEngine:
     """Optional low-risk imperfection simulator with real-time decay."""
 
@@ -348,6 +661,7 @@ class FallibilityEngine:
         self,
         previous: FallibilityState | None,
         *,
+        personality_model: dict[str, Any] | None = None,
         now: float | None = None,
     ) -> FallibilityState:
         previous = previous or FallibilityState.initial()
@@ -355,7 +669,13 @@ class FallibilityEngine:
         elapsed = max(0.0, now - previous.updated_at)
         if elapsed <= 0:
             return previous
-        decay = half_life_multiplier(elapsed, self.parameters.state_half_life_seconds)
+        dynamics = derive_fallibility_dynamics(
+            self.parameters,
+            previous,
+            personality_model=personality_model,
+            elapsed_seconds=elapsed,
+        )
+        decay = half_life_multiplier(elapsed, dynamics.state_half_life_seconds)
         values = {}
         for key in FALLIBILITY_DIMENSIONS:
             baseline = DEFAULT_VALUES[key]
@@ -370,6 +690,7 @@ class FallibilityEngine:
             last_reason=previous.last_reason,
             flags=list(previous.flags),
             trajectory=list(previous.trajectory[-self.parameters.trajectory_limit :]),
+            dynamics=dynamics.to_dict(),
         )
 
     def update(
@@ -377,30 +698,42 @@ class FallibilityEngine:
         previous: FallibilityState | None,
         observation: FallibilityObservation,
         *,
+        personality_model: dict[str, Any] | None = None,
         now: float | None = None,
     ) -> FallibilityState:
         previous = previous or FallibilityState.initial()
         now = time.time() if now is None else float(now)
         elapsed = max(0.0, now - previous.updated_at)
-        prior = self.passive_update(previous, now=now)
+        prior = self.passive_update(
+            previous,
+            personality_model=personality_model,
+            now=now,
+        )
+        dynamics = derive_fallibility_dynamics(
+            self.parameters,
+            prior,
+            observation,
+            personality_model=personality_model,
+            elapsed_seconds=elapsed,
+        )
         obs_values = normalize_fallibility_values(observation.values)
         confidence = clamp(observation.confidence)
         gate = 1.0 / (
             1.0
             + math.exp(
-                -self.parameters.confidence_slope
-                * (confidence - self.parameters.confidence_midpoint),
+                -dynamics.confidence_slope
+                * (confidence - dynamics.confidence_midpoint),
             )
         )
-        rapid_gate = self._rapid_update_gate(elapsed)
-        raw_alpha = self.parameters.alpha_base * gate * rapid_gate
+        rapid_gate = self._rapid_update_gate(elapsed, dynamics)
+        raw_alpha = dynamics.alpha_base * gate * rapid_gate
         min_alpha = (
-            self.parameters.alpha_min
-            if elapsed >= self.parameters.min_update_interval_seconds
+            dynamics.alpha_min
+            if elapsed >= dynamics.min_update_interval_seconds
             else 0.0
         )
-        alpha = clamp(raw_alpha, min_alpha, self.parameters.alpha_max)
-        impulse_cap = clamp(self.parameters.max_impulse_per_update)
+        alpha = clamp(raw_alpha, min_alpha, dynamics.alpha_max)
+        impulse_cap = clamp(dynamics.max_impulse_per_update)
 
         values: dict[str, float] = {}
         for key in FALLIBILITY_DIMENSIONS:
@@ -414,7 +747,7 @@ class FallibilityEngine:
 
         values = apply_fallibility_couplings(
             values,
-            max_error_pressure=self.parameters.max_error_pressure,
+            max_error_pressure=dynamics.max_error_pressure,
         )
         flags = list(
             dict.fromkeys(
@@ -437,12 +770,14 @@ class FallibilityEngine:
             last_reason=observation.reason,
             flags=flags,
             trajectory=trajectory,
+            dynamics=dynamics.to_dict(),
         )
 
-    def _rapid_update_gate(self, elapsed: float) -> float:
-        if elapsed >= self.parameters.min_update_interval_seconds:
+    @staticmethod
+    def _rapid_update_gate(elapsed: float, dynamics: FallibilityDynamics) -> float:
+        if elapsed >= dynamics.min_update_interval_seconds:
             return 1.0
-        half_life = self.parameters.rapid_update_half_life_seconds
+        half_life = dynamics.rapid_update_half_life_seconds
         if half_life <= 0:
             return 1.0
         return clamp(1.0 - half_life_multiplier(elapsed, half_life), 0.05, 1.0)
@@ -646,8 +981,16 @@ def append_trajectory(
     return prefix + [item]
 
 
-def derive_fallibility_policy(values: dict[str, float]) -> dict[str, Any]:
+def derive_fallibility_policy(
+    values: dict[str, float],
+    dynamics: dict[str, float] | None = None,
+) -> dict[str, Any]:
     values = normalize_fallibility_values(values)
+    dynamics = dynamics or {}
+    clarification_threshold = _as_float(dynamics.get("clarification_threshold"), 0.50)
+    correction_threshold = _as_float(dynamics.get("correction_threshold"), 0.60)
+    truth_guard_threshold = _as_float(dynamics.get("truth_guard_threshold"), 0.78)
+    shadow_threshold = _as_float(dynamics.get("shadow_threshold"), 0.30)
     shadow_pressure = shadow_impulse_score(values)
     error_pressure = max(
         values["misread_tendency"],
@@ -658,10 +1001,10 @@ def derive_fallibility_policy(values: dict[str, float]) -> dict[str, Any]:
         values["playful_bluff"],
         0.70 * shadow_pressure,
     )
-    clarification_high = values["clarification_need"] >= 0.50
-    correction_high = values["correction_readiness"] >= 0.60
-    truth_guard_high = values["truthfulness_guard"] >= 0.78
-    shadow_high = shadow_pressure >= 0.30
+    clarification_high = values["clarification_need"] >= clarification_threshold
+    correction_high = values["correction_readiness"] >= correction_threshold
+    truth_guard_high = values["truthfulness_guard"] >= truth_guard_threshold
+    shadow_high = shadow_pressure >= shadow_threshold
     return {
         "error_pressure": round(error_pressure, 6),
         "shadow_risk_impulse": round(shadow_pressure, 6),
@@ -721,7 +1064,8 @@ def fallibility_state_to_public_payload(
         key: round(state.values.get(key, DEFAULT_VALUES[key]), 6)
         for key in FALLIBILITY_DIMENSIONS
     }
-    policy = derive_fallibility_policy(values)
+    dynamics = _effective_fallibility_dynamics(state)
+    policy = derive_fallibility_policy(values, dynamics)
     shadow_impulses = build_shadow_impulse_payload(values)
     base: dict[str, Any] = {
         "schema_version": PUBLIC_FALLIBILITY_SCHEMA_VERSION,
@@ -734,6 +1078,7 @@ def fallibility_state_to_public_payload(
         "flags": list(state.flags[:16]),
         "updated_at": state.updated_at,
         "turns": state.turns,
+        "dynamics": dynamics,
         "fallibility": {
             "error_pressure": policy["error_pressure"],
             "shadow_risk_impulse": policy["shadow_risk_impulse"],
@@ -861,6 +1206,7 @@ def build_fallibility_memory_annotation(
             "shadow_risk_impulse": fallibility.get("shadow_risk_impulse"),
             "recommended_actions": list(fallibility.get("recommended_actions") or [])[:8],
         },
+        "dynamics": dict(snapshot.get("dynamics") or {}),
         "shadow_impulses": {
             "mode": shadow.get("mode", "non_executive_internal_only"),
             "risk_impulse": shadow.get("risk_impulse", fallibility.get("shadow_risk_impulse")),
@@ -929,6 +1275,68 @@ def _contains_playful_bluff_cue(text: str) -> bool:
 
 def _contains_deception_request(text: str) -> bool:
     return any(pattern.search(text) for pattern in _DECEPTION_REQUEST_PATTERNS)
+
+
+def _effective_fallibility_dynamics(state: FallibilityState) -> dict[str, float]:
+    defaults = {
+        "clarification_threshold": 0.50,
+        "correction_threshold": 0.60,
+        "truth_guard_threshold": 0.78,
+        "shadow_threshold": 0.30,
+        "max_error_pressure": 0.55,
+    }
+    dynamics = dict(defaults)
+    dynamics.update(
+        {
+            key: _as_float(value, dynamics.get(key, 0.0))
+            for key, value in (state.dynamics or {}).items()
+        },
+    )
+    return {key: round(value, 6) for key, value in dynamics.items()}
+
+
+def _persona_factors(personality_model: dict[str, Any] | None) -> dict[str, float]:
+    factors = (
+        personality_model.get("derived_factors")
+        if isinstance(personality_model, dict)
+        and isinstance(personality_model.get("derived_factors"), dict)
+        else {}
+    )
+    adaptive = (
+        personality_model.get("adaptive_drift")
+        if isinstance(personality_model, dict)
+        and isinstance(personality_model.get("adaptive_drift"), dict)
+        else {}
+    )
+    adaptive_values = (
+        adaptive.get("values") if isinstance(adaptive.get("values"), dict) else {}
+    )
+    return {
+        "instability": clamp(_as_float(factors.get("instability"), 0.0)),
+        "social_distance": clamp(_as_float(factors.get("social_distance"), 0.0)),
+        "repair_orientation": clamp(_as_float(factors.get("repair_orientation"), 0.0)),
+        "boundary_sensitivity": clamp(_as_float(factors.get("boundary_sensitivity"), 0.0)),
+        "expressiveness": clamp(_as_float(factors.get("expressiveness"), 0.0)),
+        "drift_intensity": clamp(_as_float(adaptive_values.get("drift_intensity"), 0.0)),
+    }
+
+
+def _smooth_dynamic_value(
+    previous: dict[str, float],
+    key: str,
+    target: float,
+    *,
+    elapsed_seconds: float,
+    smoothing_half_life_seconds: float,
+    low: float,
+    high: float,
+) -> float:
+    target = clamp(target, low, high)
+    if key not in previous:
+        return target
+    old = clamp(_as_float(previous.get(key), target), low, high)
+    fraction = half_life_fraction(elapsed_seconds, smoothing_half_life_seconds)
+    return clamp(old + fraction * (target - old), low, high)
 
 
 def _as_float(value: Any, default: float = 0.0) -> float:

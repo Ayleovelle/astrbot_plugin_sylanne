@@ -59,6 +59,8 @@ class PackagePluginTests(unittest.TestCase):
         self.assertIn("docs/assets/lifecycle_model_fit.svg", files)
         self.assertIn("docs/assets/lifecycle_model_fit_summary.csv", files)
         self.assertIn("docs/assets/lifecycle_model_fit_table.md", files)
+        self.assertIn("docs/assets/runtime_overview.svg", files)
+        self.assertIn("docs/assets/workflow_and_proactive.svg", files)
         self.assertFalse(
             any(
                 path.startswith("docs/assets/")
@@ -67,6 +69,8 @@ class PackagePluginTests(unittest.TestCase):
                     "docs/assets/lifecycle_model_fit.svg",
                     "docs/assets/lifecycle_model_fit_summary.csv",
                     "docs/assets/lifecycle_model_fit_table.md",
+                    "docs/assets/runtime_overview.svg",
+                    "docs/assets/workflow_and_proactive.svg",
                 }
                 for path in files
             )
@@ -145,6 +149,8 @@ class PackagePluginTests(unittest.TestCase):
         self.assertIn(prefix + "docs/assets/lifecycle_model_fit.svg", names)
         self.assertIn(prefix + "docs/assets/lifecycle_model_fit_summary.csv", names)
         self.assertIn(prefix + "docs/assets/lifecycle_model_fit_table.md", names)
+        self.assertIn(prefix + "docs/assets/runtime_overview.svg", names)
+        self.assertIn(prefix + "docs/assets/workflow_and_proactive.svg", names)
         self.assertFalse(
             any(
                 name.startswith(prefix + "docs/assets/")
@@ -153,6 +159,8 @@ class PackagePluginTests(unittest.TestCase):
                     prefix + "docs/assets/lifecycle_model_fit.svg",
                     prefix + "docs/assets/lifecycle_model_fit_summary.csv",
                     prefix + "docs/assets/lifecycle_model_fit_table.md",
+                    prefix + "docs/assets/runtime_overview.svg",
+                    prefix + "docs/assets/workflow_and_proactive.svg",
                 }
                 for name in names
             )
@@ -273,6 +281,8 @@ class PluginZipPreflightTests(unittest.TestCase):
             (prefix + "LICENSE", "GNU GENERAL PUBLIC LICENSE\n"),
             (prefix + "requirements.txt", "# no dependencies\n"),
             (prefix + "_conf_schema.json", "{}\n"),
+            (prefix + "docs/assets/runtime_overview.svg", "<svg></svg>\n"),
+            (prefix + "docs/assets/workflow_and_proactive.svg", "<svg></svg>\n"),
         ]
 
     def test_zip_preflight_accepts_packaged_plugin_zip(self):

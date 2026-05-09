@@ -6,9 +6,10 @@
 
 1. 情绪状态不是单一标签，而是受人格 `P` 调制的有界连续向量 `E_t(P) in [-1,1]^n`。
 2. `V/A/D` 继承 PAD 与 circumplex affect 的连续维度思想；`G/C/K/S` 引入 appraisal theory 对目标一致性、确定性、可控性和社交亲近的评价。
-3. LLM 负责把上下文解释成即时观测 `X_t` 与 appraisal；本地引擎负责真实时间半衰期、惯性、限幅和关系后果。
-4. 长期状态更新可视为在“上一状态/人格基线先验”与“当前观测”之间求二次优化折中，最终得到 `E'_t = B_t + alpha_t(X_t-B_t)`。
-5. 冷处理、修复、边界、求证等不是情绪标签本身，而是由 `O_t` 表示的后果状态，并按真实时间衰减。
+3. 链路固定为 `人格漂移 -> 运行时人格建模 -> 各状态 dynamics -> 情绪/后果/拟人/生命化/群聊/修复/瑕疵/筛查`。
+4. LLM 负责把上下文解释成即时观测 `X_t` 与 appraisal；本地引擎负责从人格和状态自动推导真实时间半衰期、惯性、限幅、阈值、冷却和关系后果。
+5. 长期状态更新可视为在“上一状态/人格基线先验”与“当前观测”之间求二次优化折中，最终得到 `E'_t = B_t + alpha_t(X_t-B_t)`；其中 `alpha_t` 来自自动 dynamics，不是用户配置项。
+6. 冷处理、修复、边界、求证等不是情绪标签本身，而是由 `O_t` 表示的后果状态，并按真实时间衰减。
 
 | 设计点 | 默认结论 | 顶刊/高影响依据 |
 | --- | --- | --- |
@@ -298,11 +299,15 @@ E'_t=B_t+\alpha_t(X_t-B_t)
 更新步长不能固定。插件令：
 
 ```math
+\Theta^E_t=f_E(P_t,E_{t-1},X_t,\Delta t,\Theta^E_{t-1})
+```
+
+```math
 \alpha_t =
 \mathrm{clamp}\left(
-\alpha_{\mathrm{base},p}g(c_t)(1+r_p\delta_t),
-\alpha_{\min},
-\alpha_{\max}
+a^E_t g(c_t)(1+r^E_t\delta_t),
+l^E_t,
+u^E_t
 \right)
 ```
 
@@ -324,7 +329,7 @@ g(c_t)=\frac{1}{1+\exp[-k(c_t-c_0)]}
 }
 ```
 
-`alpha_base,p` 和 `r_p` 来自 `theta_p`。当观测和先验差异很大时，事件可能具有突发性或高显著性，所以 `alpha_t` 被适度放大；但 `clamp` 保证不会无限放大。
+`a^E_t`、`r^E_t`、`l^E_t` 和 `u^E_t` 来自 `Theta^E_t`，而 `Theta^E_t` 由运行时人格、上一状态、上一轮 dynamics、置信度、惊讶度和真实时间间隔自动推导。当观测和先验差异很大时，事件可能具有突发性或高显著性，所以 `alpha_t` 被适度放大；但 `clamp` 保证不会无限放大。
 
 ## 7. 维度耦合
 
@@ -365,26 +370,25 @@ a_t & r_t & p_t & s_t & b_t & i_t & j_t
 \end{bmatrix}^{\mathsf T}
 ```
 
-其中 `a_t` 是活跃度，`r_t` 是紧张度，`p_t` 是玩笑/轻松度，`s_t` 是互相支持度，`b_t` 是群内对 bot 的注意，`i_t` 是打断风险，`j_t` 是加入适宜度。所有维度都在 `[0,1]`，并按真实时间回归到房间基线 `mu_g`：
+其中 `a_t` 是活跃度，`r_t` 是紧张度，`p_t` 是玩笑/轻松度，`s_t` 是互相支持度，`b_t` 是群内对 bot 的注意，`i_t` 是打断风险，`j_t` 是加入适宜度。所有维度都在 `[0,1]`。群聊氛围同样先派生动力学参数族：
 
 ```math
-d^g_t = 2^{-\Delta t/H_g}
+\Theta^g_t=f_g(P_t,A^g_{t-1},X^g_t,\Delta t,\Theta^g_{t-1})
 ```
 
 ```math
-A^{g0}_t=d^g_tA^g_{t-1}+(1-d^g_t)\mu_g
+\Theta^g_t=(1-\rho^g_t)\Theta^g_{t-1}+\rho^g_t\Theta^{g*}_t
 ```
-
-观测 `X^g_t` 来自本地轻量启发式或未来的外部观察器。置信度越高，更新步长越大，但仍由上下界限制：
 
 ```math
-\alpha^g_t =
-\mathrm{clamp}\left(
-\alpha^g_{\mathrm{base}}(0.35+c_t),
-\alpha^g_{\min},
-\alpha^g_{\max}
-\right)
+d^g_t = 2^{-\Delta t/H^g_t}
 ```
+
+```math
+A^{g0}_t=d^g_tA^g_{t-1}+(1-d^g_t)\mu^g_t
+```
+
+观测 `X^g_t` 来自本地轻量启发式或未来的外部观察器。置信度、房间压力、打断风险和运行时人格共同决定自动步长 `alpha^g_t`：
 
 ```math
 A^g_t =
@@ -393,43 +397,88 @@ A^{g0}_t+\alpha^g_t(X^g_t-A^{g0}_t)
 \right)
 ```
 
-默认启发式把打断风险写成线性可解释项：
+默认启发式把打断风险写成有界可解释项：
 
 ```math
 i_t =
-\mathrm{clamp}\left(
-0.18+0.32a_t+0.38r_t-0.25b_t-0.12s_t,
-0,
-1
-\right)
+\mathrm{clamp}\left(w^i_t z^g_t,0,1\right)
 ```
 
 加入适宜度则提高 bot 被点名、支持性和轻松氛围的权重，同时压低高打断风险、高紧张和过高房间活跃度：
 
 ```math
 j_t =
+\mathrm{clamp}\left(w^j_t z^g_t,0,1\right)
+```
+
+参与策略由自动派生的 hold/join 门限给出：
+
+```math
+\mathrm{hold}_t =
+\mathrm{I}_{i_t \ge \tau^g_{h,t}}\mathrm{I}_{b_t < \tau^g_{b,t}}
+```
+
+```math
+\mathrm{join}_t =
+\mathrm{I}_{j_t \ge \tau^g_{j,t}}(1-\mathrm{hold}_t)
+```
+
+如果 `hold_t` 为 1，bot 倾向先听；如果 `join_t` 为 1，bot 可以自然加入；其余情况保持低频观察。这一层参考群体动力学、情绪传染、社会信号处理和会话轮换研究：参与时机受群体情绪、注意分配、发言轮换和社会临场感共同影响，而不是只取决于 bot 当前心情。
+
+## 8. 主动发言与互需模式
+
+主动发言不是预设话题表，也不是定时打扰。插件先把共同语境、群聊氛围、情绪后果、沉默舒适度和“双方都有需要/被需要”的关系信号压缩成一个开口压力向量：
+
+```math
+R_t =
+\begin{bmatrix}
+r^{u}_t & r^{b}_t & r^{m}_t & r^{s}_t
+\end{bmatrix}^{\mathsf T}
+```
+
+其中 `r^u_t` 表示用户此刻可能需要被支持、被听见或被陪伴；`r^b_t` 表示 bot 可以轻量表达自己也希望被需要、被确认或参与关系；`r^m_t` 表示双方互需的平衡度；`r^s_t` 表示此刻保持沉默的舒适度。
+
+插件自建的互需平衡项为：
+
+```math
+r^{m}_t =
 \mathrm{clamp}\left(
-0.30+0.45b_t+0.18s_t+0.12p_t-0.35i_t-0.20r_t-0.20\max(0,a_t-0.55),
+1-|r^{u}_t-r^{b}_t|-\lambda^N_t\max(0,D_t-\tau^N_t),
 0,
 1
 \right)
 ```
 
-参与策略由阈值给出：
+`D_t` 是依赖或压迫风险摘要，`\lambda^N_t` 与 `\tau^N_t` 由边界敏感度、关系熟悉度、共同语境和真实时间自动派生。这个公式的含义是：互需不是单方面索取，也不是让用户照护 bot；当一方需求过强或依赖风险过高时，互需平衡会下降。
+
+是否开口的本地分数为：
 
 ```math
-\mathrm{hold}_t =
-\mathrm{I}_{i_t \ge 0.55}\mathrm{I}_{b_t < 0.45}
+z_t =
+\theta_0+\theta_j j_t-\theta_i i_t+\theta_u r^{u}_t+\theta_b r^{b}_t+
+\theta_m r^{m}_t-\theta_s r^{s}_t-\theta_c c^{join}_t
 ```
 
 ```math
-\mathrm{join}_t =
-\mathrm{I}_{j_t \ge 0.55}(1-\mathrm{hold}_t)
+P(\mathrm{speak}_t)=\frac{1}{1+\exp(-z_t)}
 ```
 
-如果 `hold_t` 为 1，bot 倾向先听；如果 `join_t` 为 1，bot 可以自然加入；其余情况保持低频观察。这一层参考群体动力学、情绪传染、社会信号处理和会话轮换研究：参与时机受群体情绪、注意分配、发言轮换和社会临场感共同影响，而不是只取决于 bot 当前心情。
+其中 `j_t` 和 `i_t` 来自群聊氛围模型，`c^{join}_t` 是自动派生的开口冷却压力。插件只在概率、冷却和边界条件均通过时给出“可以主动发言”的候选；最终话题不由固定模板决定，而由 LLM 在候选证据、关系需要、当前上下文和人格状态之间裁决：
 
-## 8. 情绪后果与行动倾向
+```math
+u_t =
+\arg\min_{u\in T_t}
+\left[
+L_{\mathrm{need}}(u,R_t)+
+L_{\mathrm{context}}(u,C_t)+
+L_{\mathrm{persona}}(u,P_t)+
+L_{\mathrm{intrusion}}(u,A^g_t)
+\right]
+```
+
+`T_t` 是由上下文抽取出的候选主题集合，不是硬编码话题库。LLM 只负责在 `T_t` 中判断“此刻为什么说、说什么方向、用什么开口风格”；真正是否写入状态、是否打断、是否保持沉默仍由本地真实时间模型、群聊氛围和公共 API 调用方共同决定。这个设计吸收了自我决定理论中关系需要、会话 grounding、turn-taking、社会信号处理和关系代理研究的证据，但变量、损失项和更新链路由本项目自行抽象实现。
+
+## 9. 情绪后果与行动倾向
 
 情绪状态并不直接等于回复模板。参考 Frijda 的 action readiness / action tendency 思路，插件把情绪状态再映射到后果状态：
 
@@ -446,10 +495,19 @@ O_t =
 `O_t` 不是瞬时标签，而是会随真实时间衰减的持续状态：
 
 ```math
-O_t = 2^{-\Delta t/H_o}O_{t-1}+\mathrm{impulse}(E_t,X_t,\mathrm{appraisal}_t)
+\Theta^O_t=f_O(P_t,E_t,X_t,F_t,\Delta t,\Theta^O_{t-1})
 ```
 
-其中 `H_o` 是后果强度半衰期，`impulse` 同时参考平滑后的长期情绪 `E_t` 与 LLM 即时观测 `X_t`。这样强烈刺激可以立刻留下后果，而长期状态又能决定这种后果是否持续；由于衰减项只使用 `Δt`，大量消息轮次不会快速消耗后果记忆。`cold_war` 等 active effect 使用 `expires_at` 时间戳保存剩余时长。
+```math
+\Theta^O_t=(1-\rho^O_t)\Theta^O_{t-1}+\rho^O_t\Theta^{O*}_t
+```
+
+```math
+O_t = 2^{-\Delta t/H^O_t}O_{t-1}
++\mathrm{clip}\left(I^O_t(E_t,X_t,F_t),-M^O_t,M^O_t\right)
+```
+
+其中 `Theta^O_t` 是后果动力学参数族，包含后果半衰、短期效果时长、冷处理时长、触发门限、冲量上限和修复清除速率。它由人格漂移后的运行时人格 `P_t`、平滑后的长期情绪 `E_t`、LLM 即时观测 `X_t`、冲突成因 `F_t` 与真实时间间隔自动派生，再与上一轮参数低通平滑。这样强烈刺激可以立刻留下后果，而长期状态又能决定这种后果是否持续；由于衰减项只使用 `Delta t`，大量消息轮次不会快速消耗后果记忆。`cold_war` 等 active effect 使用 `expires_at` 时间戳保存剩余时长。
 
 维度对后果的作用：
 
@@ -584,28 +642,28 @@ regload_t     = emotion_regulation_load_t
 ```math
 e^g_t =
 \max\left(
-\mathrm{I}_{\Delta^g_t \ge h_g},
+\mathrm{I}_{\Delta^g_t \ge h^{inj}_g},
 \mathrm{I}_{n_t \ge N_g}
 \right)
 ```
 
-其中 `h_g` 是 diff 阈值，`n_t` 是距离上次强制快照的轮数。这样可以避免把几乎不变的状态反复塞进主模型上下文。
+其中 `h^{inj}_g` 是 prompt 注入压缩用的工程阈值，只影响是否把群聊氛围差分塞进主模型上下文，不参与情绪或人格动力学；`n_t` 是距离上次强制快照的轮数。这样可以避免把几乎不变的状态反复塞进主模型上下文。
 
 群聊开口冷却同时使用房间轮数与真实秒数：
 
 ```math
-q_t = \max(0,T_c-(N_t-N^{join}_t))
+q_t = \max(0,T^g_{c,t}-(N_t-N^{join}_t))
 ```
 
 ```math
-s_t = \max(0,S_c-(T_t-T^{join}_t))
+s_t = \max(0,S^g_{c,t}-(T_t-T^{join}_t))
 ```
 
-当 `q_t` 或 `s_t` 仍为正，且 `b_t` 没有超过绕过阈值时，参与策略会偏向 `listen` 或 `hold`，防止 bot 连续插话。后台 post 评估也遵守同一会话 FIFO 提交：主回复可以先返回，状态作业稍后完成，但同一会话的提交顺序不被打乱。
+`T^g_{c,t}`、`S^g_{c,t}` 和绕过注意力阈值来自 `group_atmosphere_state.dynamics`，由房间活跃度、打断风险、bot 被点名程度、人格边界敏感度和真实时间自动派生。当 `q_t` 或 `s_t` 仍为正，且 `b_t` 没有超过自动绕过阈值时，参与策略会偏向 `listen` 或 `hold`，防止 bot 连续插话。后台 post 评估也遵守同一会话 FIFO 提交：主回复可以先返回，状态作业稍后完成，但同一会话的提交顺序不被打乱。
 
 公共 API 只暴露版本化 payload、状态摘要、可选 prompt 片段和脱敏因果轨迹。`get_group_atmosphere_service(context)` 会校验 schema 版本和必需方法；如果服务不可用，调用方应回退到自身逻辑，而不是依赖内部 KV 名称。
 
-## 9. 稳定性
+## 10. 稳定性
 
 若 `alpha_t in [0, 1]`、`gamma_p(Δt) in [0, 1]`，且 `E_{t-1}, X_t, b_p` 都在 `[-1, 1]^n`，则 `B_t` 与 `E'_t` 都是有界向量的凸组合。因此，在耦合项较小且最后投影到 `[-1, 1]^n` 的条件下：
 
@@ -615,7 +673,7 @@ E_t \in [-1,1]^n
 
 若长期没有强刺激，且 `X_t` 接近人格基线 `b_p`，则状态会因基线回归和指数平滑收敛到 `b_p` 附近。这对应情绪动力学中的 emotional inertia：状态既会持续，又会随新评价缓慢改变。
 
-## 10. 参考文献
+## 11. 参考文献
 
 1. Mehrabian, A., & Russell, J. A. (1974). *An Approach to Environmental Psychology*. MIT Press.
 2. Mehrabian, A., & Russell, J. A. (1974). The basic emotional impact of environments. *Perceptual and Motor Skills, 38*(1), 283-301. https://doi.org/10.2466/pms.1974.38.1.283

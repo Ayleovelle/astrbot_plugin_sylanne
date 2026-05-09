@@ -69,6 +69,26 @@ def half_life_multiplier(elapsed_seconds: float, half_life_seconds: float) -> fl
     return clamp(2.0 ** (-elapsed_seconds / half_life_seconds), 0.0, 1.0)
 
 
+def half_life_fraction(elapsed_seconds: float, half_life_seconds: float) -> float:
+    if elapsed_seconds <= 0:
+        return 0.0
+    if half_life_seconds <= 0:
+        return 1.0
+    return clamp(1.0 - 2.0 ** (-elapsed_seconds / half_life_seconds), 0.0, 1.0)
+
+
+def _normalize_dynamics(raw: Any) -> dict[str, float]:
+    if not isinstance(raw, dict):
+        return {}
+    result: dict[str, float] = {}
+    for key, value in raw.items():
+        try:
+            result[str(key)] = float(value)
+        except (TypeError, ValueError):
+            continue
+    return result
+
+
 def normalize_humanlike_values(raw: Any = None) -> dict[str, float]:
     raw = raw if isinstance(raw, dict) else {}
     aliases = {
@@ -111,6 +131,7 @@ class HumanlikeState:
     last_reason: str = ""
     flags: list[str] = field(default_factory=list)
     trajectory: list[dict[str, Any]] = field(default_factory=list)
+    dynamics: dict[str, float] = field(default_factory=dict)
 
     @classmethod
     def initial(cls) -> "HumanlikeState":
@@ -128,6 +149,7 @@ class HumanlikeState:
             last_reason=str(data.get("last_reason") or ""),
             flags=_as_string_list(data.get("flags"), limit=12),
             trajectory=_normalize_trajectory(data.get("trajectory")),
+            dynamics=_normalize_dynamics(data.get("dynamics")),
         )
 
     def to_dict(self) -> dict[str, Any]:
@@ -142,6 +164,9 @@ class HumanlikeState:
             "last_reason": self.last_reason,
             "flags": list(self.flags[:12]),
             "trajectory": list(self.trajectory[-40:]),
+            "dynamics": {
+                key: round(value, 6) for key, value in self.dynamics.items()
+            },
         }
 
     def to_public_dict(
@@ -173,6 +198,295 @@ class HumanlikeParameters:
     trajectory_limit: int = 40
 
 
+@dataclass(slots=True)
+class HumanlikeDynamics:
+    state_half_life_seconds: float
+    alpha_base: float
+    alpha_min: float
+    alpha_max: float
+    confidence_midpoint: float
+    confidence_slope: float
+    rapid_update_half_life_seconds: float
+    min_update_interval_seconds: float
+    max_impulse_per_update: float
+    low_energy_threshold: float
+    high_stress_threshold: float
+    high_boundary_threshold: float
+    dependency_threshold: float
+    disclosure_threshold: float
+    smoothing_half_life_seconds: float
+
+    def to_dict(self) -> dict[str, float]:
+        return {
+            "state_half_life_seconds": round(self.state_half_life_seconds, 6),
+            "alpha_base": round(self.alpha_base, 6),
+            "alpha_min": round(self.alpha_min, 6),
+            "alpha_max": round(self.alpha_max, 6),
+            "confidence_midpoint": round(self.confidence_midpoint, 6),
+            "confidence_slope": round(self.confidence_slope, 6),
+            "rapid_update_half_life_seconds": round(self.rapid_update_half_life_seconds, 6),
+            "min_update_interval_seconds": round(self.min_update_interval_seconds, 6),
+            "max_impulse_per_update": round(self.max_impulse_per_update, 6),
+            "low_energy_threshold": round(self.low_energy_threshold, 6),
+            "high_stress_threshold": round(self.high_stress_threshold, 6),
+            "high_boundary_threshold": round(self.high_boundary_threshold, 6),
+            "dependency_threshold": round(self.dependency_threshold, 6),
+            "disclosure_threshold": round(self.disclosure_threshold, 6),
+            "smoothing_half_life_seconds": round(self.smoothing_half_life_seconds, 6),
+        }
+
+
+def derive_humanlike_dynamics(
+    parameters: HumanlikeParameters,
+    previous: HumanlikeState,
+    observation: HumanlikeObservation | None = None,
+    *,
+    personality_model: dict[str, Any] | None = None,
+    elapsed_seconds: float = 0.0,
+) -> HumanlikeDynamics:
+    """Derive effective humanlike dynamics locally from state and persona."""
+    values = normalize_humanlike_values(previous.values)
+    observation = observation or HumanlikeObservation(values={}, confidence=0.0)
+    obs_values = normalize_humanlike_values(observation.values)
+    persona = _persona_factors(personality_model)
+    confidence = clamp(observation.confidence)
+    stress = max(values["stress_load"], obs_values["stress_load"])
+    boundary = max(values["boundary_need"], obs_values["boundary_need"])
+    dependency = max(values["dependency_risk"], obs_values["dependency_risk"])
+    disclosure = max(
+        values["simulation_disclosure_level"],
+        obs_values["simulation_disclosure_level"],
+    )
+    low_energy = max(1.0 - values["energy"], 1.0 - obs_values["energy"])
+    attention_loss = max(
+        1.0 - values["attention_budget"],
+        1.0 - obs_values["attention_budget"],
+    )
+    repair_signal = 1.0 if "repair_attempt" in observation.flags else 0.0
+    crisis_signal = 1.0 if "bypass_humanlike_roleplay" in observation.flags else 0.0
+    pressure = clamp(
+        0.20 * stress
+        + 0.18 * boundary
+        + 0.16 * dependency
+        + 0.14 * low_energy
+        + 0.12 * attention_loss
+        + 0.10 * disclosure
+        + 0.10 * persona["instability"]
+        + 0.08 * persona["boundary_sensitivity"]
+        + 0.08 * persona["drift_intensity"]
+        - 0.16 * repair_signal
+        - 0.08 * persona["repair_orientation"],
+    )
+    evidence = clamp(confidence + 0.12 * pressure + 0.10 * crisis_signal)
+    damping_need = clamp(
+        0.22 * boundary
+        + 0.18 * dependency
+        + 0.16 * crisis_signal
+        + 0.12 * persona["instability"]
+        + 0.10 * attention_loss
+        - 0.12 * repair_signal,
+    )
+    smoothing_half_life = clamp(
+        30.0
+        + 300.0
+        * (
+            0.20
+            + 0.26 * damping_need
+            + 0.16 * pressure
+            + 0.12 * persona["drift_intensity"]
+            - 0.12 * evidence
+        ),
+        20.0,
+        480.0,
+    )
+    previous_dynamics = previous.dynamics
+    target_half_life = clamp(
+        parameters.state_half_life_seconds
+        * math.exp(
+            0.38 * pressure
+            + 0.22 * persona["instability"]
+            + 0.14 * persona["social_distance"]
+            - 0.28 * repair_signal
+        ),
+        600.0,
+        172800.0,
+    )
+    target_alpha_base = clamp(
+        parameters.alpha_base * math.exp(0.32 * evidence - 0.22 * damping_need),
+        0.01,
+        0.95,
+    )
+    target_alpha_min = clamp(
+        parameters.alpha_min * math.exp(0.18 * evidence - 0.12 * damping_need),
+        0.0,
+        0.95,
+    )
+    target_alpha_max = clamp(
+        parameters.alpha_max * math.exp(0.24 * evidence + 0.12 * pressure - 0.18 * damping_need),
+        0.05,
+        1.0,
+    )
+    if target_alpha_min > target_alpha_max:
+        target_alpha_min = target_alpha_max
+    target_midpoint = clamp(
+        parameters.confidence_midpoint + 0.08 * damping_need - 0.06 * crisis_signal,
+        0.25,
+        0.75,
+    )
+    target_slope = clamp(
+        parameters.confidence_slope * math.exp(0.22 * evidence - 0.14 * damping_need),
+        2.0,
+        12.0,
+    )
+    target_min_interval = clamp(
+        parameters.min_update_interval_seconds
+        * math.exp(0.45 * damping_need + 0.16 * persona["social_distance"] - 0.30 * evidence),
+        1.0,
+        180.0,
+    )
+    target_rapid_half_life = clamp(
+        parameters.rapid_update_half_life_seconds
+        * math.exp(0.45 * damping_need + 0.16 * persona["instability"] - 0.24 * evidence),
+        3.0,
+        900.0,
+    )
+    target_impulse = clamp(
+        parameters.max_impulse_per_update
+        * math.exp(0.28 * pressure + 0.18 * evidence - 0.18 * damping_need),
+        0.02,
+        0.80,
+    )
+    return HumanlikeDynamics(
+        state_half_life_seconds=_smooth_dynamic_value(
+            previous_dynamics,
+            "state_half_life_seconds",
+            target_half_life,
+            elapsed_seconds=elapsed_seconds,
+            smoothing_half_life_seconds=smoothing_half_life,
+            low=600.0,
+            high=172800.0,
+        ),
+        alpha_base=_smooth_dynamic_value(
+            previous_dynamics,
+            "alpha_base",
+            target_alpha_base,
+            elapsed_seconds=elapsed_seconds,
+            smoothing_half_life_seconds=smoothing_half_life,
+            low=0.01,
+            high=0.95,
+        ),
+        alpha_min=_smooth_dynamic_value(
+            previous_dynamics,
+            "alpha_min",
+            target_alpha_min,
+            elapsed_seconds=elapsed_seconds,
+            smoothing_half_life_seconds=smoothing_half_life,
+            low=0.0,
+            high=0.95,
+        ),
+        alpha_max=_smooth_dynamic_value(
+            previous_dynamics,
+            "alpha_max",
+            target_alpha_max,
+            elapsed_seconds=elapsed_seconds,
+            smoothing_half_life_seconds=smoothing_half_life,
+            low=0.05,
+            high=1.0,
+        ),
+        confidence_midpoint=_smooth_dynamic_value(
+            previous_dynamics,
+            "confidence_midpoint",
+            target_midpoint,
+            elapsed_seconds=elapsed_seconds,
+            smoothing_half_life_seconds=smoothing_half_life,
+            low=0.25,
+            high=0.75,
+        ),
+        confidence_slope=_smooth_dynamic_value(
+            previous_dynamics,
+            "confidence_slope",
+            target_slope,
+            elapsed_seconds=elapsed_seconds,
+            smoothing_half_life_seconds=smoothing_half_life,
+            low=2.0,
+            high=12.0,
+        ),
+        rapid_update_half_life_seconds=_smooth_dynamic_value(
+            previous_dynamics,
+            "rapid_update_half_life_seconds",
+            target_rapid_half_life,
+            elapsed_seconds=elapsed_seconds,
+            smoothing_half_life_seconds=smoothing_half_life,
+            low=3.0,
+            high=900.0,
+        ),
+        min_update_interval_seconds=_smooth_dynamic_value(
+            previous_dynamics,
+            "min_update_interval_seconds",
+            target_min_interval,
+            elapsed_seconds=elapsed_seconds,
+            smoothing_half_life_seconds=smoothing_half_life,
+            low=1.0,
+            high=180.0,
+        ),
+        max_impulse_per_update=_smooth_dynamic_value(
+            previous_dynamics,
+            "max_impulse_per_update",
+            target_impulse,
+            elapsed_seconds=elapsed_seconds,
+            smoothing_half_life_seconds=smoothing_half_life,
+            low=0.02,
+            high=0.80,
+        ),
+        low_energy_threshold=_smooth_dynamic_value(
+            previous_dynamics,
+            "low_energy_threshold",
+            clamp(0.35 - 0.04 * persona["expressiveness"] + 0.05 * pressure, 0.22, 0.48),
+            elapsed_seconds=elapsed_seconds,
+            smoothing_half_life_seconds=smoothing_half_life,
+            low=0.22,
+            high=0.48,
+        ),
+        high_stress_threshold=_smooth_dynamic_value(
+            previous_dynamics,
+            "high_stress_threshold",
+            clamp(0.65 - 0.06 * persona["instability"] + 0.05 * persona["boundary_sensitivity"], 0.50, 0.78),
+            elapsed_seconds=elapsed_seconds,
+            smoothing_half_life_seconds=smoothing_half_life,
+            low=0.50,
+            high=0.78,
+        ),
+        high_boundary_threshold=_smooth_dynamic_value(
+            previous_dynamics,
+            "high_boundary_threshold",
+            clamp(0.65 - 0.07 * persona["boundary_sensitivity"] + 0.05 * persona["repair_orientation"], 0.48, 0.78),
+            elapsed_seconds=elapsed_seconds,
+            smoothing_half_life_seconds=smoothing_half_life,
+            low=0.48,
+            high=0.78,
+        ),
+        dependency_threshold=_smooth_dynamic_value(
+            previous_dynamics,
+            "dependency_threshold",
+            clamp(0.50 - 0.05 * persona["instability"] + 0.06 * persona["social_distance"], 0.38, 0.68),
+            elapsed_seconds=elapsed_seconds,
+            smoothing_half_life_seconds=smoothing_half_life,
+            low=0.38,
+            high=0.68,
+        ),
+        disclosure_threshold=_smooth_dynamic_value(
+            previous_dynamics,
+            "disclosure_threshold",
+            clamp(0.65 - 0.12 * crisis_signal + 0.04 * persona["repair_orientation"], 0.42, 0.78),
+            elapsed_seconds=elapsed_seconds,
+            smoothing_half_life_seconds=smoothing_half_life,
+            low=0.42,
+            high=0.78,
+        ),
+        smoothing_half_life_seconds=smoothing_half_life,
+    )
+
+
 class HumanlikeEngine:
     """P0 simulated humanlike-state engine for style/resource modulation."""
 
@@ -183,6 +497,7 @@ class HumanlikeEngine:
         self,
         previous: HumanlikeState | None,
         *,
+        personality_model: dict[str, Any] | None = None,
         now: float | None = None,
     ) -> HumanlikeState:
         previous = previous or HumanlikeState.initial()
@@ -190,7 +505,13 @@ class HumanlikeEngine:
         elapsed = max(0.0, now - previous.updated_at)
         if elapsed <= 0:
             return previous
-        decay = half_life_multiplier(elapsed, self.parameters.state_half_life_seconds)
+        dynamics = derive_humanlike_dynamics(
+            self.parameters,
+            previous,
+            personality_model=personality_model,
+            elapsed_seconds=elapsed,
+        )
+        decay = half_life_multiplier(elapsed, dynamics.state_half_life_seconds)
         values = {}
         for key in HUMANLIKE_DIMENSIONS:
             baseline = DEFAULT_BASELINE[key]
@@ -205,6 +526,7 @@ class HumanlikeEngine:
             last_reason=previous.last_reason,
             flags=list(previous.flags),
             trajectory=list(previous.trajectory[-self.parameters.trajectory_limit :]),
+            dynamics=dynamics.to_dict(),
         )
 
     def update(
@@ -212,26 +534,42 @@ class HumanlikeEngine:
         previous: HumanlikeState | None,
         observation: HumanlikeObservation,
         *,
+        personality_model: dict[str, Any] | None = None,
         now: float | None = None,
     ) -> HumanlikeState:
         previous = previous or HumanlikeState.initial()
         now = time.time() if now is None else float(now)
         elapsed = max(0.0, now - previous.updated_at)
-        prior = self.passive_update(previous, now=now)
+        prior = self.passive_update(
+            previous,
+            personality_model=personality_model,
+            now=now,
+        )
+        dynamics = derive_humanlike_dynamics(
+            self.parameters,
+            prior,
+            observation,
+            personality_model=personality_model,
+            elapsed_seconds=elapsed,
+        )
         obs_values = normalize_humanlike_values(observation.values)
         confidence = clamp(observation.confidence)
         gate = 1.0 / (
             1.0
             + math.exp(
-                -self.parameters.confidence_slope
-                * (confidence - self.parameters.confidence_midpoint),
+                -dynamics.confidence_slope
+                * (confidence - dynamics.confidence_midpoint),
             )
         )
-        rapid_gate = self._rapid_update_gate(elapsed)
-        raw_alpha = self.parameters.alpha_base * gate * rapid_gate
-        min_alpha = self.parameters.alpha_min if elapsed >= self.parameters.min_update_interval_seconds else 0.0
-        alpha = clamp(raw_alpha, min_alpha, self.parameters.alpha_max)
-        impulse_cap = clamp(self.parameters.max_impulse_per_update, 0.0, 1.0)
+        rapid_gate = self._rapid_update_gate(elapsed, dynamics)
+        raw_alpha = dynamics.alpha_base * gate * rapid_gate
+        min_alpha = (
+            dynamics.alpha_min
+            if elapsed >= dynamics.min_update_interval_seconds
+            else 0.0
+        )
+        alpha = clamp(raw_alpha, min_alpha, dynamics.alpha_max)
+        impulse_cap = clamp(dynamics.max_impulse_per_update, 0.0, 1.0)
 
         values: dict[str, float] = {}
         for key in HUMANLIKE_DIMENSIONS:
@@ -261,12 +599,14 @@ class HumanlikeEngine:
             last_reason=observation.reason,
             flags=flags,
             trajectory=trajectory,
+            dynamics=dynamics.to_dict(),
         )
 
-    def _rapid_update_gate(self, elapsed: float) -> float:
-        if elapsed >= self.parameters.min_update_interval_seconds:
+    @staticmethod
+    def _rapid_update_gate(elapsed: float, dynamics: HumanlikeDynamics) -> float:
+        if elapsed >= dynamics.min_update_interval_seconds:
             return 1.0
-        half_life = self.parameters.rapid_update_half_life_seconds
+        half_life = dynamics.rapid_update_half_life_seconds
         if half_life <= 0:
             return 1.0
         return clamp(1.0 - half_life_multiplier(elapsed, half_life), 0.08, 1.0)
@@ -405,6 +745,7 @@ def humanlike_state_to_public_payload(
         key: round(state.values.get(key, DEFAULT_BASELINE[key]), 6)
         for key in HUMANLIKE_DIMENSIONS
     }
+    dynamics = _effective_humanlike_dynamics(state)
     base: dict[str, Any] = {
         "schema_version": PUBLIC_HUMANLIKE_SCHEMA_VERSION,
         "kind": "humanlike_state",
@@ -417,6 +758,9 @@ def humanlike_state_to_public_payload(
         "flags": list(state.flags[:12]),
         "updated_at": state.updated_at,
         "turns": state.turns,
+        "dynamics": {
+            key: round(value, 6) for key, value in dynamics.items()
+        },
         "safety": {
             "simulation_only": True,
             "not_sentience": True,
@@ -435,12 +779,12 @@ def humanlike_state_to_public_payload(
         base["last_reason"] = state.last_reason
     elif exposure == "plugin_safe":
         base["modulation_basis"] = {
-            "low_energy": values["energy"] <= 0.35,
-            "high_stress": values["stress_load"] >= 0.65,
+            "low_energy": values["energy"] <= dynamics["low_energy_threshold"],
+            "high_stress": values["stress_load"] >= dynamics["high_stress_threshold"],
             "low_attention": values["attention_budget"] <= 0.45,
-            "high_boundary_need": values["boundary_need"] >= 0.65,
-            "dependency_guard_active": values["dependency_risk"] >= 0.5,
-            "disclosure_recommended": values["simulation_disclosure_level"] >= 0.65,
+            "high_boundary_need": values["boundary_need"] >= dynamics["high_boundary_threshold"],
+            "dependency_guard_active": values["dependency_risk"] >= dynamics["dependency_threshold"],
+            "disclosure_recommended": values["simulation_disclosure_level"] >= dynamics["disclosure_threshold"],
         }
     else:
         base["summary"] = build_user_facing_summary(values)
@@ -537,12 +881,75 @@ def build_humanlike_memory_annotation(
         "simulated_agent_state": True,
         "diagnostic": False,
         "output_modulation": dict(snapshot.get("output_modulation") or {}),
+        "dynamics": dict(snapshot.get("dynamics") or {}),
         "flags": list(snapshot.get("flags") or []),
     }
 
 
 def _contains_medical_or_crisis_context(text: str) -> bool:
     return any(pattern.search(text) for pattern in _MEDICAL_OR_CRISIS_CONTEXT_PATTERNS)
+
+
+def _effective_humanlike_dynamics(state: HumanlikeState) -> dict[str, float]:
+    defaults = {
+        "low_energy_threshold": 0.35,
+        "high_stress_threshold": 0.65,
+        "high_boundary_threshold": 0.65,
+        "dependency_threshold": 0.50,
+        "disclosure_threshold": 0.65,
+    }
+    dynamics = dict(defaults)
+    dynamics.update(
+        {
+            key: _as_float(value, dynamics.get(key, 0.0))
+            for key, value in (state.dynamics or {}).items()
+        },
+    )
+    return dynamics
+
+
+def _persona_factors(personality_model: dict[str, Any] | None) -> dict[str, float]:
+    factors = (
+        personality_model.get("derived_factors")
+        if isinstance(personality_model, dict)
+        and isinstance(personality_model.get("derived_factors"), dict)
+        else {}
+    )
+    adaptive = (
+        personality_model.get("adaptive_drift")
+        if isinstance(personality_model, dict)
+        and isinstance(personality_model.get("adaptive_drift"), dict)
+        else {}
+    )
+    adaptive_values = (
+        adaptive.get("values") if isinstance(adaptive.get("values"), dict) else {}
+    )
+    return {
+        "instability": clamp(_as_float(factors.get("instability"), 0.0)),
+        "social_distance": clamp(_as_float(factors.get("social_distance"), 0.0)),
+        "repair_orientation": clamp(_as_float(factors.get("repair_orientation"), 0.0)),
+        "boundary_sensitivity": clamp(_as_float(factors.get("boundary_sensitivity"), 0.0)),
+        "expressiveness": clamp(_as_float(factors.get("expressiveness"), 0.0)),
+        "drift_intensity": clamp(_as_float(adaptive_values.get("drift_intensity"), 0.0)),
+    }
+
+
+def _smooth_dynamic_value(
+    previous: dict[str, float],
+    key: str,
+    target: float,
+    *,
+    elapsed_seconds: float,
+    smoothing_half_life_seconds: float,
+    low: float,
+    high: float,
+) -> float:
+    target = clamp(target, low, high)
+    if key not in previous:
+        return target
+    old = clamp(_as_float(previous.get(key), target), low, high)
+    fraction = half_life_fraction(elapsed_seconds, smoothing_half_life_seconds)
+    return clamp(old + fraction * (target - old), low, high)
 
 
 def _as_float(value: Any, default: float = 0.0) -> float:
