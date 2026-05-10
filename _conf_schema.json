@@ -63,6 +63,150 @@
     "default": 160,
     "hint": "限制主动发言短句长度，避免主动打扰时输出长篇内容。"
   },
+  "enable_realtime_chat": {
+    "description": "启用真人即时聊天分条发送",
+    "type": "bool",
+    "default": true,
+    "hint": "开启后插件会把可接管的回复或主动消息拆成多条短消息，按打字速度顺序发送。"
+  },
+  "realtime_chat_style_prompt_enabled": {
+    "description": "启用即时聊天风格提示",
+    "type": "bool",
+    "default": true,
+    "hint": "在请求中加入短提示，要求主模型少用报告腔、Markdown 和编号清单，优先自然聊天短句。"
+  },
+  "realtime_chat_intercept_llm_response": {
+    "description": "接管默认 LLM 回复并分条发送",
+    "type": "bool",
+    "default": true,
+    "hint": "开启后 on_llm_response 会尝试清空原 completion_text，并用 context.send_message 顺序发送分条消息；若平台不支持改写响应，可关闭此项。"
+  },
+  "realtime_chat_dry_run_default": {
+    "description": "即时聊天发送默认试算",
+    "type": "bool",
+    "default": false,
+    "hint": "公共 API request_realtime_chat_dispatch 未显式传 dry_run 时是否只返回分条计划而不发送。"
+  },
+  "realtime_chat_max_parts": {
+    "description": "即时聊天最多分条数",
+    "type": "int",
+    "default": 5,
+    "hint": "控制一次回复最多拆成多少条，避免刷屏。"
+  },
+  "realtime_chat_min_part_chars": {
+    "description": "即时聊天最短分条字符数",
+    "type": "int",
+    "default": 3,
+    "hint": "过短片段会与相邻片段合并。"
+  },
+  "realtime_chat_max_part_chars": {
+    "description": "即时聊天单条最大字符数",
+    "type": "int",
+    "default": 72,
+    "hint": "长句会按标点和软长度切分。"
+  },
+  "realtime_chat_chars_per_second": {
+    "description": "模拟打字速度每秒字符数",
+    "type": "float",
+    "default": 7.0,
+    "hint": "用于估算分条之间等待时间。"
+  },
+  "realtime_chat_min_delay_seconds": {
+    "description": "即时聊天最小等待秒数",
+    "type": "float",
+    "default": 0.35,
+    "hint": "每条消息前的最小停顿。"
+  },
+  "realtime_chat_max_delay_seconds": {
+    "description": "即时聊天最大等待秒数",
+    "type": "float",
+    "default": 4.0,
+    "hint": "限制模拟打字等待上限，避免长回复拖太久。"
+  },
+  "realtime_chat_jitter_ratio": {
+    "description": "即时聊天等待抖动比例",
+    "type": "float",
+    "default": 0.22,
+    "hint": "给打字间隔加入稳定随机抖动，让节奏更自然。"
+  },
+  "realtime_chat_session_cooldown_seconds": {
+    "description": "即时聊天同会话接管冷却秒数",
+    "type": "float",
+    "default": 0.0,
+    "hint": "0 表示不启用；大于 0 时可防止连续接管造成刷屏。"
+  },
+  "realtime_chat_strip_markdown": {
+    "description": "即时聊天发送前清理 Markdown",
+    "type": "bool",
+    "default": true,
+    "hint": "开启后会移除常见 Markdown 标记，降低人机味。"
+  },
+  "enable_sticker_reaction": {
+    "description": "启用表情包氛围回应",
+    "type": "bool",
+    "default": true,
+    "hint": "根据情绪、群聊氛围和文本线索选择是否补发一张表情包。"
+  },
+  "sticker_default_repo_url": {
+    "description": "默认表情包参考仓库",
+    "type": "string",
+    "default": "https://github.com/zhaoolee/ChineseBQB.git",
+    "hint": "仅作为用户自行准备素材的默认来源提示；插件包不会下载、镜像或分发该仓库。"
+  },
+  "sticker_local_root": {
+    "description": "本地表情包目录",
+    "type": "string",
+    "default": "",
+    "hint": "填写本机已准备的表情包目录；留空时只使用已学习的用户表情元数据。"
+  },
+  "sticker_allowed_extensions": {
+    "description": "允许索引的表情包扩展名",
+    "type": "string",
+    "default": ".jpg,.jpeg,.png,.gif,.webp",
+    "hint": "用英文逗号分隔。"
+  },
+  "sticker_selected_packs": {
+    "description": "表情包子包筛选词",
+    "type": "string",
+    "default": "",
+    "hint": "留空索引全部；填写后只索引路径中包含这些关键词的文件。"
+  },
+  "sticker_index_limit": {
+    "description": "表情包索引上限",
+    "type": "int",
+    "default": 1000,
+    "hint": "限制本地扫描出的候选表情数量。"
+  },
+  "sticker_index_cache_ttl_seconds": {
+    "description": "表情包索引缓存秒数",
+    "type": "float",
+    "default": 86400.0,
+    "hint": "避免每轮回复都扫描大目录。"
+  },
+  "sticker_max_file_bytes": {
+    "description": "单个表情包最大字节数",
+    "type": "int",
+    "default": 5242880,
+    "hint": "超过该大小的图片不进入候选，避免发送过大文件。"
+  },
+  "sticker_send_probability": {
+    "description": "表情包发送概率系数",
+    "type": "float",
+    "default": 0.18,
+    "hint": "本地意图分数会乘以该系数做门控，避免频繁发图。"
+  },
+  "sticker_learn_user_images": {
+    "description": "学习用户表情包元数据",
+    "type": "bool",
+    "default": true,
+    "hint": "开启后会记录用户发过的图片/表情的轻量来源信息，用于以后选择；不把二进制图片写入发布包。"
+  },
+  "sticker_learned_limit": {
+    "description": "每会话学习表情上限",
+    "type": "int",
+    "default": 200,
+    "hint": "限制每个会话保留的用户表情元数据数量。"
+  },
   "background_post_queue_limit": {
     "description": "每个会话后台 post 评估队列上限",
     "type": "int",

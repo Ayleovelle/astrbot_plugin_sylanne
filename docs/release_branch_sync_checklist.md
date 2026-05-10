@@ -1,4 +1,4 @@
-# 发布与分支同步清单
+﻿# 发布与分支同步清单
 
 这份清单用于保护当前插件基线，避免功能、文档和发布包被拆散到未整理的分支里。
 
@@ -20,7 +20,7 @@ $nodeModules = "$HOME\.cache\codex-runtimes\codex-primary-runtime\dependencies\n
 if (Test-Path $node) { $env:NODE_PATH = $nodeModules } else { $node = "node" }
 
 py -3.13 -m unittest discover -s tests -v
-py -3.13 -m py_compile main.py emotion_engine.py humanlike_engine.py lifelike_learning_engine.py personality_drift_engine.py integrated_self.py moral_repair_engine.py fallibility_engine.py psychological_screening.py public_api.py prompts.py scripts\package_plugin.py
+py -3.13 -m py_compile main.py emotion_engine.py humanlike_engine.py lifelike_learning_engine.py personality_drift_engine.py realtime_chat_engine.py integrated_self.py moral_repair_engine.py fallibility_engine.py psychological_screening.py public_api.py prompts.py scripts\package_plugin.py
 py -3.13 scripts\package_plugin.py --output dist\astrbot_plugin_emotional_state.zip
 & $node --check scripts\remote_smoke_playwright.js
 & $node --check scripts\remote_cleanup_plugin_playwright.js
@@ -34,7 +34,7 @@ git diff --check
 
 ```powershell
 $env:ASTRBOT_EXPECT_PLUGIN = "astrbot_plugin_emotional_state"
-$env:ASTRBOT_EXPECT_PLUGIN_VERSION = "1.2.0"
+$env:ASTRBOT_EXPECT_PLUGIN_VERSION = "1.5.0"
 $env:ASTRBOT_EXPECT_PLUGIN_DISPLAY_NAME = "多维情绪状态"
 & $node scripts\remote_smoke_playwright.js
 ```
@@ -80,7 +80,7 @@ $env:ASTRBOT_EXPECT_PLUGIN_DISPLAY_NAME = "多维情绪状态"
 只有满足以下条件后，才运行 `scripts\remote_install_upload_playwright.js`：
 
 - 发布包预检通过；
-- 预检确认 zip 内包含运行时根文件 `__init__.py`、`main.py`、`emotion_engine.py`、`humanlike_engine.py`、`lifelike_learning_engine.py`、`personality_drift_engine.py`、`integrated_self.py`、`moral_repair_engine.py`、`fallibility_engine.py`、`psychological_screening.py`、`prompts.py` 和 `public_api.py`；
+- 预检确认 zip 内包含运行时根文件 `__init__.py`、`main.py`、`emotion_engine.py`、`humanlike_engine.py`、`lifelike_learning_engine.py`、`personality_drift_engine.py`、`realtime_chat_engine.py`、`integrated_self.py`、`moral_repair_engine.py`、`fallibility_engine.py`、`psychological_screening.py`、`prompts.py` 和 `public_api.py`；
 - 预检确认 zip 内包含依赖声明 `requirements.txt`；
 - 预检确认 zip 内包含 `CHANGELOG.md`，避免 AstrBot 更新日志页显示空状态；
 - 预检确认 zip 内包含 `LICENSE`，且 `metadata.yaml` 声明 `license: GPL-3.0-or-later`；

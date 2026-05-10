@@ -1,4 +1,4 @@
-# 远程测试与性能基准文档
+﻿# 远程测试与性能基准文档
 
 本文记录 `astrbot_plugin_emotional_state` 的远程验证方法、`1.0.0` 状态层实测结果、当前版本只读烟测口径、LivingMemory 兼容检查口径，以及后续复现实验时的数据隔离规则。
 
@@ -140,7 +140,7 @@ $env:ASTRBOT_REMOTE_URL = "http://your-astrbot-host:15356/"
 $env:ASTRBOT_REMOTE_USERNAME = "your-user"
 $env:ASTRBOT_REMOTE_PASSWORD = "your-password"
 $env:ASTRBOT_EXPECT_PLUGIN = "astrbot_plugin_emotional_state"
-$env:ASTRBOT_EXPECT_PLUGIN_VERSION = "1.1.0"
+$env:ASTRBOT_EXPECT_PLUGIN_VERSION = "1.5.0"
 
 & $node scripts\remote_smoke_playwright.js
 ```

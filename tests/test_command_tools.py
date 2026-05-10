@@ -33,6 +33,25 @@ def install_astrbot_stubs():
         def mark_as_temp(self):
             return self
 
+    class FakeMessageChain:
+        def __init__(self):
+            self.parts = []
+
+        def message(self, text):
+            self.parts.append(("message", text))
+            return self
+
+        def file_image(self, path):
+            self.parts.append(("file_image", path))
+            return self
+
+        def image(self, value):
+            self.parts.append(("image", value))
+            return self
+
+        def __str__(self):
+            return "|".join(f"{kind}:{value}" for kind, value in self.parts)
+
     astrbot = types.ModuleType("astrbot")
     api = types.ModuleType("astrbot.api")
     api.AstrBotConfig = dict
@@ -41,6 +60,7 @@ def install_astrbot_stubs():
     event = types.ModuleType("astrbot.api.event")
     event.AstrMessageEvent = object
     event.filter = FakeFilter
+    event.MessageChain = FakeMessageChain
 
     provider = types.ModuleType("astrbot.api.provider")
     provider.LLMResponse = object
@@ -126,6 +146,9 @@ def new_plugin(config=None):
     plugin._internal_assessor_llm_inflight = 0
     plugin._proactive_dispatch_last_sent = {}
     plugin._proactive_dispatch_audit = {}
+    plugin._realtime_chat_last_sent = {}
+    plugin._sticker_index_cache = {}
+    plugin._sticker_memory_cache = {}
     plugin._state_injection_snapshot_cache = {}
     plugin._group_atmosphere_injection_snapshot_cache = {}
     plugin._terminating = False

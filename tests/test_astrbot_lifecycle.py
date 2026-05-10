@@ -2352,6 +2352,147 @@ class AstrBotLifecycleTests(unittest.TestCase):
 
         self.assertEqual(loads, ["s-drift-reuse"])
 
+    def test_realtime_chat_plan_splits_reply_and_bounds_delay(self):
+        plugin = new_plugin(
+            {
+                "realtime_chat_max_parts": 4,
+                "realtime_chat_max_part_chars": 18,
+                "realtime_chat_min_delay_seconds": 0.1,
+                "realtime_chat_max_delay_seconds": 1.0,
+                "enable_sticker_reaction": False,
+            },
+        )
+
+        plan = asyncio.run(
+            plugin.get_realtime_chat_plan(
+                "s-realtime-plan",
+                "那、那个……我先确认一下。这个地方可以拆开说！然后再慢慢收束。",
+            ),
+        )
+
+        self.assertEqual(plan["kind"], "realtime_chat_plan")
+        self.assertLessEqual(plan["message_count"], 4)
+        self.assertGreaterEqual(plan["message_count"], 2)
+        for part in plan["message_parts"]:
+            self.assertLessEqual(part["delay_before_seconds"], 1.0)
+            self.assertGreaterEqual(part["delay_before_seconds"], 0.0)
+
+    def test_realtime_chat_dispatch_dry_run_does_not_send(self):
+        sent = []
+
+        class FakeContext:
+            async def send_message(self, origin, message):
+                sent.append((origin, message))
+
+        plugin = new_plugin({"enable_sticker_reaction": False})
+        plugin.context = FakeContext()
+
+        result = asyncio.run(
+            plugin.request_realtime_chat_dispatch(
+                FakeEvent("s-realtime-dry"),
+                "第一句。第二句。",
+                dry_run=True,
+            ),
+        )
+
+        self.assertFalse(result["sent"])
+        self.assertEqual(result["blocked_reason"], "dry_run")
+        self.assertEqual(sent, [])
+
+    def test_realtime_chat_dispatch_sends_parts_in_order(self):
+        sent = []
+
+        class FakeContext:
+            async def send_message(self, origin, message):
+                sent.append((origin, str(message)))
+                return {"ok": True}
+
+        plugin = new_plugin(
+            {
+                "enable_sticker_reaction": False,
+                "realtime_chat_min_delay_seconds": 0.0,
+                "realtime_chat_max_delay_seconds": 0.0,
+            },
+        )
+        plugin.context = FakeContext()
+
+        result = asyncio.run(
+            plugin.request_realtime_chat_dispatch(
+                FakeEvent("s-realtime-send"),
+                "第一句。第二句！",
+                dry_run=False,
+            ),
+        )
+
+        self.assertTrue(result["sent"])
+        self.assertEqual([origin for origin, _ in sent], ["s-realtime-send", "s-realtime-send"])
+        self.assertIn("第一句", sent[0][1])
+        self.assertIn("第二句", sent[1][1])
+
+    def test_on_llm_response_intercepts_completion_and_schedules_realtime_send(self):
+        sent = []
+
+        class FakeContext:
+            async def send_message(self, origin, message):
+                sent.append((origin, str(message)))
+                return {"ok": True}
+
+        plugin = new_plugin(
+            {
+                "assessment_timing": "post",
+                "enable_realtime_chat": True,
+                "realtime_chat_intercept_llm_response": True,
+                "enable_sticker_reaction": False,
+                "realtime_chat_min_delay_seconds": 0.0,
+                "realtime_chat_max_delay_seconds": 0.0,
+            },
+        )
+        plugin.context = FakeContext()
+        saves, assessment_calls = self._bind_common_state_hooks(plugin)
+        response = SimpleNamespace(completion_text="第一句。第二句。")
+
+        async def run_response():
+            await plugin.on_llm_response(FakeEvent("s-intercept"), response)
+            await self._await_background_tasks(plugin)
+
+        asyncio.run(run_response())
+
+        self.assertEqual(response.completion_text, "")
+        self.assertEqual(len(sent), 2)
+        self.assertEqual(assessment_calls[0]["current_text"], "第一句。第二句。")
+        self.assertEqual(saves[0][0], "s-intercept")
+
+    def test_observe_sticker_usage_stores_metadata_only(self):
+        stored = {}
+
+        async def fake_get(self, key, default=None):
+            return stored.get(key, default)
+
+        async def fake_put(self, key, value):
+            stored[key] = value
+
+        plugin = new_plugin()
+        bind_async(plugin, "get_kv_data", fake_get)
+        bind_async(plugin, "put_kv_data", fake_put)
+
+        result = asyncio.run(
+            plugin.observe_sticker_usage(
+                "s-sticker",
+                {
+                    "url": "https://example.test/a.gif",
+                    "name": "笑死",
+                    "binary": "not stored",
+                    "interest_score": 0.9,
+                },
+            ),
+        )
+
+        self.assertTrue(result["committed"])
+        self.assertEqual(result["memory_count"], 1)
+        saved = next(iter(stored.values()))[0]
+        self.assertEqual(saved["url"], "https://example.test/a.gif")
+        self.assertNotIn("binary", saved)
+
 
 if __name__ == "__main__":
     unittest.main()

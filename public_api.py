@@ -56,6 +56,9 @@ _EMOTION_SERVICE_REQUIRED_METHODS = (
     "get_lifelike_initiative_policy",
     "get_proactive_speech_decision",
     "request_proactive_speech_dispatch",
+    "get_realtime_chat_plan",
+    "request_realtime_chat_dispatch",
+    "observe_sticker_usage",
     "get_lifelike_prompt_fragment",
     "observe_lifelike_text",
     "simulate_lifelike_update",
@@ -109,6 +112,9 @@ _LIFELIKE_SERVICE_REQUIRED_METHODS = (
     "get_lifelike_initiative_policy",
     "get_proactive_speech_decision",
     "request_proactive_speech_dispatch",
+    "get_realtime_chat_plan",
+    "request_realtime_chat_dispatch",
+    "observe_sticker_usage",
     "get_lifelike_prompt_fragment",
     "observe_lifelike_text",
     "simulate_lifelike_update",
@@ -432,6 +438,43 @@ class EmotionServiceProtocol(Protocol):
         dry_run: bool = False,
         force: bool = False,
         message_text: str = "",
+        realtime: bool | None = None,
+    ) -> dict[str, Any]:
+        ...
+
+    async def get_realtime_chat_plan(
+        self,
+        event_or_session: Any = None,
+        text: str = "",
+        *,
+        request: Any = None,
+        session_key: str | None = None,
+        include_sticker: bool = True,
+    ) -> dict[str, Any]:
+        ...
+
+    async def request_realtime_chat_dispatch(
+        self,
+        event_or_session: Any = None,
+        text: str = "",
+        *,
+        request: Any = None,
+        session_key: str | None = None,
+        dry_run: bool | None = None,
+        force: bool = False,
+    ) -> dict[str, Any]:
+        ...
+
+    async def observe_sticker_usage(
+        self,
+        event_or_session: Any = None,
+        sticker: dict[str, Any] | None = None,
+        *,
+        request: Any = None,
+        session_key: str | None = None,
+        source: str = "plugin",
+        commit: bool = True,
+        observed_at: float | None = None,
     ) -> dict[str, Any]:
         ...
 
@@ -795,6 +838,43 @@ class LifelikeLearningServiceProtocol(EmotionServiceProtocol, Protocol):
         dry_run: bool = False,
         force: bool = False,
         message_text: str = "",
+        realtime: bool | None = None,
+    ) -> dict[str, Any]:
+        ...
+
+    async def get_realtime_chat_plan(
+        self,
+        event_or_session: Any = None,
+        text: str = "",
+        *,
+        request: Any = None,
+        session_key: str | None = None,
+        include_sticker: bool = True,
+    ) -> dict[str, Any]:
+        ...
+
+    async def request_realtime_chat_dispatch(
+        self,
+        event_or_session: Any = None,
+        text: str = "",
+        *,
+        request: Any = None,
+        session_key: str | None = None,
+        dry_run: bool | None = None,
+        force: bool = False,
+    ) -> dict[str, Any]:
+        ...
+
+    async def observe_sticker_usage(
+        self,
+        event_or_session: Any = None,
+        sticker: dict[str, Any] | None = None,
+        *,
+        request: Any = None,
+        session_key: str | None = None,
+        source: str = "plugin",
+        commit: bool = True,
+        observed_at: float | None = None,
     ) -> dict[str, Any]:
         ...
 

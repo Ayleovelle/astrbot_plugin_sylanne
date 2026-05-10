@@ -4,6 +4,7 @@ import contextvars
 import asyncio
 import json
 import time
+import os
 from collections import deque
 from copy import deepcopy
 from dataclasses import dataclass
@@ -138,6 +139,15 @@ try:
         build_state_injection,
     )
     from .agent_identity import ConversationIdentity, conversation_identity_from_event
+    from .realtime_chat_engine import (
+        RealtimeChatSettings,
+        StickerSettings,
+        build_realtime_chat_plan,
+        build_sticker_memory_item,
+        index_local_stickers,
+        merge_sticker_memory,
+        realtime_style_prompt_fragment,
+    )
 except ImportError:
     from emotion_engine import (
         EmotionEngine,
@@ -259,6 +269,15 @@ except ImportError:
         build_state_injection,
     )
     from agent_identity import ConversationIdentity, conversation_identity_from_event
+    from realtime_chat_engine import (
+        RealtimeChatSettings,
+        StickerSettings,
+        build_realtime_chat_plan,
+        build_sticker_memory_item,
+        index_local_stickers,
+        merge_sticker_memory,
+        realtime_style_prompt_fragment,
+    )
 
 
 PLUGIN_NAME = "astrbot_plugin_emotional_state"
@@ -397,6 +416,9 @@ _REQUIRED_EMOTION_SERVICE_METHODS: tuple[str, ...] = (
     "get_lifelike_initiative_policy",
     "get_proactive_speech_decision",
     "request_proactive_speech_dispatch",
+    "get_realtime_chat_plan",
+    "request_realtime_chat_dispatch",
+    "observe_sticker_usage",
     "get_lifelike_prompt_fragment",
     "observe_lifelike_text",
     "simulate_lifelike_update",
@@ -460,7 +482,7 @@ def get_emotional_state_plugin(context: Context) -> Any | None:
     PLUGIN_NAME,
     "pidan",
     "基于 PAD/OCC/appraisal 与情绪动力学的 AstrBot 多维情绪状态插件",
-    "1.2.0",
+    "1.5.0",
     "",
 )
 class EmotionalStatePlugin(Star):
@@ -534,6 +556,9 @@ class EmotionalStatePlugin(Star):
         self._internal_assessor_llm_inflight = 0
         self._proactive_dispatch_last_sent: dict[str, float] = {}
         self._proactive_dispatch_audit: dict[str, deque[dict[str, Any]]] = {}
+        self._realtime_chat_last_sent: dict[str, float] = {}
+        self._sticker_index_cache: dict[str, Any] = {}
+        self._sticker_memory_cache: dict[str, list[dict[str, Any]]] = {}
         self._state_injection_snapshot_cache: dict[str, dict[str, Any]] = {}
         self._group_atmosphere_injection_snapshot_cache: dict[str, dict[str, Any]] = {}
         self._terminating = False
@@ -577,6 +602,9 @@ class EmotionalStatePlugin(Star):
         self._agent_identity_profile_cache.clear()
         self._agent_trail_cache.clear()
         self._agent_turn_sequence.clear()
+        self._realtime_chat_last_sent.clear()
+        self._sticker_index_cache.clear()
+        self._sticker_memory_cache.clear()
         self._state_injection_snapshot_cache.clear()
         self._group_atmosphere_injection_snapshot_cache.clear()
         self._engine_cache.clear()
@@ -602,6 +630,7 @@ class EmotionalStatePlugin(Star):
         safety_boundary = self._safety_boundary_enabled()
         action_blocking = self._shadow_action_blocking_enabled()
         inject_state = self._cfg_bool("inject_state", True)
+        realtime_chat_enabled = self._realtime_chat_enabled()
         identity = self._agent_identity(event, request)
         group_atmosphere_enabled = (
             self._group_atmosphere_modeling_enabled()
@@ -629,6 +658,17 @@ class EmotionalStatePlugin(Star):
         await self._observe_agent_identity(identity, now=self._observed_now())
         context_text = self._request_to_text(request)
         self._last_request_text[session_key] = context_text
+        if self._sticker_learning_enabled():
+            observed_stickers = self._extract_sticker_observations_from_event(event)
+            if observed_stickers:
+                self._schedule_background_task(
+                    self._observe_stickers_background(
+                        event,
+                        observed_stickers,
+                        session_key=session_key,
+                    ),
+                    label="sticker_usage_observation",
+                )
         needs_request_state = (
             assessment_timing in {"pre", "both"}
             or inject_state
@@ -638,6 +678,7 @@ class EmotionalStatePlugin(Star):
             or personality_drift_enabled
             or fallibility_enabled
             or group_atmosphere_enabled
+            or realtime_chat_enabled
         )
         if not needs_request_state:
             return
@@ -1224,6 +1265,26 @@ class EmotionalStatePlugin(Star):
                     )
             self._record_state_injection_diagnostics(injection_budget)
 
+        if (
+            inject_state
+            and self._auxiliary_state_injection_detail() != "off"
+            and realtime_chat_enabled
+            and self._cfg_bool(
+                "realtime_chat_style_prompt_enabled",
+                True,
+            )
+        ):
+            self._append_temp_text_part(
+                request,
+                realtime_style_prompt_fragment(),
+                source="realtime_chat.style",
+                budget=(
+                    self._state_injection_budget_for_request(session_key, request)
+                    if inject_state
+                    else None
+                ),
+            )
+
     @filter.on_llm_response()
     async def on_llm_response(
         self,
@@ -1237,6 +1298,27 @@ class EmotionalStatePlugin(Star):
         if not response_text.strip():
             return
         identity = self._agent_identity(event)
+        realtime_dispatch_task: asyncio.Task[Any] | None = None
+        if self._should_intercept_realtime_chat_response(event, response_text):
+            plan = await self.get_realtime_chat_plan(
+                event,
+                text=response_text,
+                session_key=identity.conversation_id,
+            )
+            if plan.get("message_parts"):
+                try:
+                    setattr(response, "completion_text", "")
+                except Exception:
+                    pass
+                realtime_dispatch_task = self._schedule_background_task(
+                    self._send_realtime_chat_plan(
+                        event,
+                        plan,
+                        source="llm_response_intercept",
+                    ),
+                    label="realtime_chat_response_dispatch",
+                )
+                del realtime_dispatch_task
         if self._group_atmosphere_modeling_enabled() and self._group_atmosphere_applies(
             identity,
         ):
@@ -4187,6 +4269,7 @@ class EmotionalStatePlugin(Star):
         dry_run: bool = False,
         force: bool = False,
         message_text: str = "",
+        realtime: bool | None = None,
     ) -> dict[str, Any]:
         """Public API: request and optionally execute an AstrBot proactive send."""
         resolved_session = self._resolve_public_session_key(
@@ -4210,6 +4293,18 @@ class EmotionalStatePlugin(Star):
         )
         dispatch["dry_run"] = bool(dry_run)
         dispatch["force"] = bool(force)
+        use_realtime = (
+            self._realtime_chat_enabled()
+            if realtime is None
+            else bool(realtime)
+        )
+        if use_realtime:
+            dispatch["realtime_chat_plan"] = await self.get_realtime_chat_plan(
+                event_or_session,
+                text=dispatch["message_text"],
+                request=request,
+                session_key=resolved_session,
+            )
         blocked_reason = self._proactive_dispatch_blocked_reason(
             decision,
             dispatch,
@@ -4231,7 +4326,14 @@ class EmotionalStatePlugin(Star):
                 "blocked_reason": blocked_reason,
             }
         try:
-            send_result = await self._send_proactive_message(event_or_session, dispatch["message_text"])
+            if use_realtime:
+                send_result = await self._send_realtime_chat_plan(
+                    event_or_session,
+                    dispatch["realtime_chat_plan"],
+                    source="proactive_dispatch",
+                )
+            else:
+                send_result = await self._send_proactive_message(event_or_session, dispatch["message_text"])
         except Exception as exc:
             dispatch["sent"] = False
             dispatch["blocked_reason"] = "send_failed"
@@ -4269,6 +4371,165 @@ class EmotionalStatePlugin(Star):
             "dispatch_request": dispatch,
             "sent": True,
             "blocked_reason": "",
+        }
+
+    async def get_realtime_chat_plan(
+        self,
+        event_or_session: AstrMessageEvent | str | None = None,
+        text: str = "",
+        *,
+        request: ProviderRequest | None = None,
+        session_key: str | None = None,
+        include_sticker: bool = True,
+    ) -> dict[str, Any]:
+        """Public API: build QQ-like split message and sticker plan without sending."""
+        resolved_session = self._resolve_public_session_key(
+            event_or_session,
+            request=request,
+            session_key=session_key,
+        )
+        emotion_task = asyncio.create_task(
+            self.get_emotion_values(
+                event_or_session,
+                request=request,
+                session_key=resolved_session,
+            ),
+        )
+        group_task = asyncio.create_task(
+            self.get_group_atmosphere_values(
+                event_or_session,
+                request=request,
+                session_key=resolved_session,
+            ),
+        )
+        sticker_candidates: list[dict[str, Any]] = []
+        if include_sticker and self._sticker_reaction_enabled():
+            sticker_candidates = await self._sticker_candidates(resolved_session)
+        emotion_values, atmosphere_values = await asyncio.gather(emotion_task, group_task)
+        plan = build_realtime_chat_plan(
+            text,
+            settings=self._realtime_chat_settings(),
+            session_key=resolved_session,
+            now=self._observed_now(),
+            emotion_values=emotion_values,
+            atmosphere_values=atmosphere_values,
+            sticker_candidates=sticker_candidates,
+            sticker_settings=self._sticker_settings(),
+        )
+        plan["dry_run_default"] = self._cfg_bool("realtime_chat_dry_run_default", False)
+        plan["intercept_llm_response"] = self._cfg_bool(
+            "realtime_chat_intercept_llm_response",
+            True,
+        )
+        return plan
+
+    async def request_realtime_chat_dispatch(
+        self,
+        event_or_session: AstrMessageEvent | str | None = None,
+        text: str = "",
+        *,
+        request: ProviderRequest | None = None,
+        session_key: str | None = None,
+        dry_run: bool | None = None,
+        force: bool = False,
+    ) -> dict[str, Any]:
+        """Public API: split and optionally send one reply as sequential chat messages."""
+        resolved_session = self._resolve_public_session_key(
+            event_or_session,
+            request=request,
+            session_key=session_key,
+        )
+        plan = await self.get_realtime_chat_plan(
+            event_or_session,
+            text=text,
+            request=request,
+            session_key=resolved_session,
+        )
+        effective_dry_run = (
+            self._cfg_bool("realtime_chat_dry_run_default", False)
+            if dry_run is None
+            else bool(dry_run)
+        )
+        blocked_reason = self._realtime_chat_blocked_reason(
+            event_or_session,
+            plan,
+            dry_run=effective_dry_run,
+            force=force,
+        )
+        if blocked_reason:
+            return {
+                "schema_version": "astrbot.realtime_chat_dispatch_result.v1",
+                "kind": "realtime_chat_dispatch_result",
+                "session_key": resolved_session,
+                "plan": plan,
+                "sent": False,
+                "dry_run": effective_dry_run,
+                "blocked_reason": blocked_reason,
+            }
+        send_result = await self._send_realtime_chat_plan(
+            event_or_session,
+            plan,
+            source="public_api",
+        )
+        return {
+            "schema_version": "astrbot.realtime_chat_dispatch_result.v1",
+            "kind": "realtime_chat_dispatch_result",
+            "session_key": resolved_session,
+            "plan": plan,
+            "sent": True,
+            "dry_run": False,
+            "blocked_reason": "",
+            "send_result": send_result,
+        }
+
+    async def observe_sticker_usage(
+        self,
+        event_or_session: AstrMessageEvent | str | None = None,
+        sticker: dict[str, Any] | None = None,
+        *,
+        request: ProviderRequest | None = None,
+        session_key: str | None = None,
+        source: str = "plugin",
+        commit: bool = True,
+        observed_at: float | None = None,
+    ) -> dict[str, Any]:
+        """Public API: learn a user sticker as lightweight metadata, never as binary."""
+        resolved_session = self._resolve_public_session_key(
+            event_or_session,
+            request=request,
+            session_key=session_key,
+        )
+        if not self._sticker_learning_enabled():
+            return {
+                "schema_version": "astrbot.sticker_memory_result.v1",
+                "kind": "sticker_memory_result",
+                "enabled": False,
+                "session_key": resolved_session,
+                "committed": False,
+                "reason": "sticker_learning_disabled",
+            }
+        item = build_sticker_memory_item(
+            dict(sticker or {}),
+            session_key=resolved_session,
+            now=observed_at if observed_at is not None else self._observed_now(),
+            source=source,
+        )
+        current = await self._load_sticker_memory(resolved_session)
+        updated = merge_sticker_memory(
+            current,
+            item,
+            limit=max(1, self._cfg_int("sticker_learned_limit", 200)),
+        )
+        if commit:
+            await self._save_sticker_memory(resolved_session, updated)
+        return {
+            "schema_version": "astrbot.sticker_memory_result.v1",
+            "kind": "sticker_memory_result",
+            "enabled": True,
+            "session_key": resolved_session,
+            "committed": bool(commit),
+            "item": item,
+            "memory_count": len(updated),
         }
 
     async def _judge_proactive_topic(
@@ -4529,6 +4790,56 @@ class EmotionalStatePlugin(Star):
             "result": self._bounded_scalar_or_summary(result),
         }
 
+    async def _send_realtime_chat_plan(
+        self,
+        event_or_session: AstrMessageEvent | str | None,
+        plan: dict[str, Any],
+        *,
+        source: str,
+    ) -> dict[str, Any]:
+        origin = self._proactive_unified_msg_origin(event_or_session)
+        if not origin:
+            raise RuntimeError("missing unified_msg_origin")
+        send_message = getattr(getattr(self, "context", None), "send_message", None)
+        if not callable(send_message):
+            raise RuntimeError("context.send_message is not available")
+        parts = list(plan.get("message_parts") or [])
+        results: list[dict[str, Any]] = []
+        for part in parts:
+            delay = max(0.0, self._as_float_value(part.get("delay_before_seconds"), 0.0))
+            if delay > 0:
+                await asyncio.sleep(delay)
+            text = str(part.get("text") or "").strip()
+            if not text:
+                continue
+            message = self._build_astrbot_message_chain(text)
+            result = await send_message(origin, message)
+            results.append(
+                {
+                    "index": part.get("index"),
+                    "text_chars": len(text),
+                    "message_type": type(message).__name__,
+                    "result": self._bounded_scalar_or_summary(result),
+                },
+            )
+        sticker_result = None
+        sticker = plan.get("sticker") if isinstance(plan.get("sticker"), dict) else {}
+        if sticker.get("should_send"):
+            candidate = sticker.get("candidate")
+            if isinstance(candidate, dict):
+                sticker_message = self._build_astrbot_sticker_message(candidate)
+                sticker_result = await send_message(origin, sticker_message)
+        session_key = str(plan.get("session_key") or self._resolve_public_session_key(event_or_session))
+        self._realtime_chat_last_sent_cache()[session_key] = self._observed_now()
+        return {
+            "api": "context.send_message",
+            "source": source,
+            "unified_msg_origin": origin,
+            "message_count": len(results),
+            "results": results,
+            "sticker_result": self._bounded_scalar_or_summary(sticker_result),
+        }
+
     def _build_astrbot_message_chain(self, text: str) -> Any:
         try:
             from astrbot.api.event import MessageChain  # type: ignore
@@ -4539,6 +4850,90 @@ class EmotionalStatePlugin(Star):
         except Exception:
             pass
         return str(text)
+
+    def _build_astrbot_sticker_message(self, candidate: dict[str, Any]) -> Any:
+        path = str(candidate.get("path") or "")
+        url = str(candidate.get("url") or "")
+        fallback = str(candidate.get("name") or candidate.get("relative_path") or "表情包")
+        try:
+            from astrbot.api.event import MessageChain  # type: ignore
+
+            chain = MessageChain()
+            for method_name, value in (
+                ("file_image", path),
+                ("image", path or url),
+                ("url_image", url),
+            ):
+                method = getattr(chain, method_name, None)
+                if callable(method) and value:
+                    return method(value)
+            if hasattr(chain, "message") and callable(chain.message):
+                return chain.message(f"[表情包] {fallback}")
+        except Exception:
+            pass
+        return f"[表情包] {fallback}"
+
+    def _realtime_chat_blocked_reason(
+        self,
+        event_or_session: AstrMessageEvent | str | None,
+        plan: dict[str, Any],
+        *,
+        dry_run: bool,
+        force: bool,
+    ) -> str:
+        if dry_run:
+            return "dry_run"
+        if not self._realtime_chat_enabled() and not force:
+            return "realtime_chat_disabled"
+        if not self._looks_like_event(event_or_session):
+            return "missing_event_origin"
+        if not self._proactive_unified_msg_origin(event_or_session):
+            return "missing_unified_msg_origin"
+        if not plan.get("message_parts"):
+            return "empty_message"
+        session_key = str(plan.get("session_key") or self._resolve_public_session_key(event_or_session))
+        if not force and self._realtime_chat_on_cooldown(session_key):
+            return "cooldown_active"
+        if not hasattr(getattr(self, "context", None), "send_message"):
+            return "missing_send_message_api"
+        return ""
+
+    def _should_intercept_realtime_chat_response(
+        self,
+        event: AstrMessageEvent,
+        response_text: str,
+    ) -> bool:
+        if not self._realtime_chat_enabled():
+            return False
+        if not self._cfg_bool("realtime_chat_intercept_llm_response", True):
+            return False
+        if not str(response_text or "").strip():
+            return False
+        if not self._looks_like_event(event):
+            return False
+        if not hasattr(getattr(self, "context", None), "send_message"):
+            return False
+        session_key = self._session_key(event)
+        return not self._realtime_chat_on_cooldown(session_key)
+
+    def _realtime_chat_on_cooldown(self, session_key: str) -> bool:
+        cooldown = max(
+            0.0,
+            self._cfg_float("realtime_chat_session_cooldown_seconds", 0.0),
+        )
+        if cooldown <= 0:
+            return False
+        last_sent = self._realtime_chat_last_sent_cache().get(session_key)
+        if last_sent is None:
+            return False
+        return self._observed_now() - float(last_sent) < cooldown
+
+    def _realtime_chat_last_sent_cache(self) -> dict[str, float]:
+        cache = getattr(self, "_realtime_chat_last_sent", None)
+        if cache is None:
+            cache = {}
+            self._realtime_chat_last_sent = cache
+        return cache
 
     def _proactive_unified_msg_origin(
         self,
@@ -8548,8 +8943,215 @@ class EmotionalStatePlugin(Star):
     def _agent_trail_kv_key(self, session_key: str) -> str:
         return "agent_trail:" + self._safe_session_key(session_key)
 
+    def _sticker_memory_kv_key(self, session_key: str) -> str:
+        return "sticker_memory:" + self._safe_session_key(session_key)
+
     def _background_post_checkpoint_kv_key(self, session_key: str) -> str:
         return "background_post_queue:" + self._safe_session_key(session_key)
+
+    def _realtime_chat_enabled(self) -> bool:
+        return self._cfg_bool("enable_realtime_chat", True)
+
+    def _realtime_chat_settings(self) -> RealtimeChatSettings:
+        return RealtimeChatSettings(
+            enabled=self._realtime_chat_enabled(),
+            max_parts=max(1, self._cfg_int("realtime_chat_max_parts", 5)),
+            min_part_chars=max(1, self._cfg_int("realtime_chat_min_part_chars", 3)),
+            max_part_chars=max(12, self._cfg_int("realtime_chat_max_part_chars", 72)),
+            chars_per_second=max(
+                1.0,
+                self._cfg_float("realtime_chat_chars_per_second", 7.0),
+            ),
+            min_delay_seconds=max(
+                0.0,
+                self._cfg_float("realtime_chat_min_delay_seconds", 0.35),
+            ),
+            max_delay_seconds=max(
+                0.0,
+                self._cfg_float("realtime_chat_max_delay_seconds", 4.0),
+            ),
+            jitter_ratio=max(
+                0.0,
+                self._cfg_float("realtime_chat_jitter_ratio", 0.22),
+            ),
+            strip_markdown=self._cfg_bool("realtime_chat_strip_markdown", True),
+        )
+
+    def _sticker_reaction_enabled(self) -> bool:
+        return self._cfg_bool("enable_sticker_reaction", True)
+
+    def _sticker_learning_enabled(self) -> bool:
+        return self._cfg_bool("sticker_learn_user_images", True)
+
+    def _sticker_settings(self) -> StickerSettings:
+        return StickerSettings(
+            enabled=self._sticker_reaction_enabled(),
+            local_root=str(self._cfg("sticker_local_root", "") or ""),
+            default_repo_url=str(
+                self._cfg(
+                    "sticker_default_repo_url",
+                    "https://github.com/zhaoolee/ChineseBQB.git",
+                )
+                or ""
+            ),
+            allowed_extensions=str(
+                self._cfg("sticker_allowed_extensions", ".jpg,.jpeg,.png,.gif,.webp")
+                or ""
+            ),
+            selected_packs=str(self._cfg("sticker_selected_packs", "") or ""),
+            index_limit=max(0, self._cfg_int("sticker_index_limit", 1000)),
+            max_file_bytes=max(
+                1,
+                self._cfg_int("sticker_max_file_bytes", 5242880),
+            ),
+            send_probability=max(
+                0.0,
+                min(1.0, self._cfg_float("sticker_send_probability", 0.18)),
+            ),
+            learned_enabled=self._sticker_learning_enabled(),
+        )
+
+    async def _sticker_candidates(self, session_key: str) -> list[dict[str, Any]]:
+        settings = self._sticker_settings()
+        candidates = self._local_sticker_index(settings)
+        if settings.learned_enabled:
+            candidates.extend(await self._load_sticker_memory(session_key))
+        return candidates
+
+    def _local_sticker_index(self, settings: StickerSettings) -> list[dict[str, Any]]:
+        cache = getattr(self, "_sticker_index_cache", None)
+        if cache is None:
+            cache = {}
+            self._sticker_index_cache = cache
+        cache_key = json.dumps(
+            {
+                "root": settings.local_root,
+                "extensions": settings.allowed_extensions,
+                "packs": settings.selected_packs,
+                "limit": settings.index_limit,
+                "max_bytes": settings.max_file_bytes,
+            },
+            ensure_ascii=False,
+            sort_keys=True,
+        )
+        now = self._observed_now()
+        ttl = max(0.0, self._cfg_float("sticker_index_cache_ttl_seconds", 86400.0))
+        cached = cache.get(cache_key)
+        if cached and (ttl <= 0 or now - float(cached.get("indexed_at", 0.0)) <= ttl):
+            return list(cached.get("items") or [])
+        items = index_local_stickers(settings)
+        cache[cache_key] = {"indexed_at": now, "items": items}
+        return list(items)
+
+    async def _load_sticker_memory(self, session_key: str) -> list[dict[str, Any]]:
+        cache = getattr(self, "_sticker_memory_cache", None)
+        if cache is None:
+            cache = {}
+            self._sticker_memory_cache = cache
+        if session_key in cache:
+            return [dict(item) for item in cache[session_key]]
+        try:
+            data = await self.get_kv_data(self._sticker_memory_kv_key(session_key), [])
+        except Exception as exc:
+            logger.debug(f"{PLUGIN_NAME}: sticker memory KV read failed: {exc}")
+            data = []
+        items = [dict(item) for item in data if isinstance(item, dict)] if isinstance(data, list) else []
+        cache[session_key] = items
+        return [dict(item) for item in items]
+
+    async def _save_sticker_memory(
+        self,
+        session_key: str,
+        items: list[dict[str, Any]],
+    ) -> None:
+        if not hasattr(self, "_sticker_memory_cache"):
+            self._sticker_memory_cache = {}
+        self._sticker_memory_cache[session_key] = [dict(item) for item in items]
+        try:
+            await self.put_kv_data(self._sticker_memory_kv_key(session_key), items)
+        except Exception as exc:
+            logger.debug(f"{PLUGIN_NAME}: sticker memory KV write failed: {exc}")
+
+    async def _observe_stickers_background(
+        self,
+        event: AstrMessageEvent,
+        stickers: list[dict[str, Any]],
+        *,
+        session_key: str,
+    ) -> None:
+        for sticker in stickers[:5]:
+            await self.observe_sticker_usage(
+                event,
+                sticker,
+                session_key=session_key,
+                source="astrbot_event",
+                commit=True,
+            )
+
+    def _extract_sticker_observations_from_event(
+        self,
+        event: AstrMessageEvent,
+    ) -> list[dict[str, Any]]:
+        candidates: list[Any] = []
+        for attr in (
+            "message_obj",
+            "message_chain",
+            "message",
+            "messages",
+            "raw_message",
+            "chain",
+        ):
+            value = getattr(event, attr, None)
+            if value is None:
+                continue
+            if isinstance(value, (list, tuple)):
+                candidates.extend(value)
+            else:
+                candidates.append(value)
+        observations: list[dict[str, Any]] = []
+        for item in candidates:
+            observation = self._sticker_observation_from_message_part(item)
+            if observation:
+                observations.append(observation)
+        return observations[:8]
+
+    def _sticker_observation_from_message_part(self, item: Any) -> dict[str, Any] | None:
+        if isinstance(item, dict):
+            type_text = str(item.get("type") or item.get("message_type") or "").lower()
+            keys = item
+        else:
+            type_text = str(
+                getattr(item, "type", "")
+                or getattr(item, "message_type", "")
+                or item.__class__.__name__,
+            ).lower()
+            keys = {
+                name: getattr(item, name, None)
+                for name in (
+                    "url",
+                    "file",
+                    "file_path",
+                    "path",
+                    "file_id",
+                    "id",
+                    "name",
+                    "filename",
+                    "mime",
+                    "mime_type",
+                )
+            }
+        if not any(marker in type_text for marker in ("image", "sticker", "face", "emoji")):
+            if not any(keys.get(key) for key in ("url", "file", "file_path", "path", "file_id")):
+                return None
+        return {
+            "type": type_text or "image",
+            "url": keys.get("url"),
+            "path": keys.get("path") or keys.get("file") or keys.get("file_path"),
+            "file_id": keys.get("file_id") or keys.get("id"),
+            "name": keys.get("name") or keys.get("filename"),
+            "mime": keys.get("mime") or keys.get("mime_type"),
+            "interest_score": 0.55,
+        }
 
     def _low_signal_text_profile(self, text: str) -> dict[str, Any]:
         stripped = str(text or "").strip()

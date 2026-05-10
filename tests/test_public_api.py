@@ -222,6 +222,15 @@ class FakeEmotionService:
     async def request_proactive_speech_dispatch(self, *args, **kwargs):
         return {}
 
+    async def get_realtime_chat_plan(self, *args, **kwargs):
+        return {}
+
+    async def request_realtime_chat_dispatch(self, *args, **kwargs):
+        return {}
+
+    async def observe_sticker_usage(self, *args, **kwargs):
+        return {}
+
     async def get_lifelike_prompt_fragment(self, *args, **kwargs):
         return ""
 
@@ -1818,9 +1827,10 @@ class MemoryPayloadPublicApiTests(unittest.TestCase):
 
         self.assertTrue(result["sent"])
         self.assertEqual(sent[0][0], "s-proactive")
-        self.assertIn("桥隧交叉项目", str(sent[0][1]))
+        sent_text = "\n".join(str(message) for _, message in sent)
+        self.assertIn("桥隧交叉项目", sent_text)
         self.assertEqual(second["blocked_reason"], "cooldown_active")
-        self.assertEqual(len(sent), 1)
+        self.assertEqual(len(sent), result["dispatch_request"]["realtime_chat_plan"]["message_count"])
         self.assertEqual(saves[0][0], "s-proactive")
 
     def test_proactive_speech_dispatch_default_disabled_returns_request_only(self):

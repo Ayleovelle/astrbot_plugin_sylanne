@@ -1,8 +1,8 @@
-# AstrBot 多维情绪状态插件
+﻿# AstrBot 多维情绪状态插件
 
 > 让 AstrBot 维护一套可计算、可记忆、可解释、可被其他插件调用的多维情绪状态。
 
-![版本 1.2.0](https://img.shields.io/badge/version-1.2.0-blue)
+![版本 1.5.0](https://img.shields.io/badge/version-1.5.0-blue)
 ![AstrBot >=4.9.2,<5.0.0](https://img.shields.io/badge/AstrBot-%3E%3D4.9.2%2C%3C5.0.0-green)
 ![Python 3.10+](https://img.shields.io/badge/Python-3.10%2B-yellow)
 ![协议 astrbot.emotion_state.v2](https://img.shields.io/badge/schema-astrbot.emotion__state.v2-purple)
@@ -16,7 +16,7 @@
 
 本插件会让 LLM 根据上下文、用户当前文本、bot 人格和上一轮状态，判断当前情绪观测值；本地引擎再用真实时间半衰期、人格基线、置信门控、关系修复和后果状态机更新长期状态。最后，这个状态会作为临时上下文注入下一次 LLM 请求，影响语气、节奏、社交距离、边界感和修复倾向。
 
-`1.2.0` 的重点是把主动发言从“只读裁决”推进到“可审计发送请求”：他/她会先由公式判断是否适合开口，再让 LLM 裁决理由、证据、话题和短句；默认不发送，配置者开启后才会调用 AstrBot 主动发送接口。
+`1.5.0` 的重点是把回复从“一整段 LLM 输出”推进到“更像即时聊天的分条表达”：他/她会按本地节奏模型拆成短消息，模拟打字间隔，必要时根据情绪和氛围补发表情包；表情素材默认使用本地目录索引，也可以学习用户发过的有趣表情元数据，但不会把外部表情库或用户图片打进发布包。
 
 | 能力 | 作用 |
 | --- | --- |
@@ -26,6 +26,8 @@
 | 群聊分层建模 | 同时维护房间级 `conversation_id` 和说话人级 `speaker_track_id`，避免一个人的冲突污染全群，也避免群聊气氛被切碎。 |
 | 群聊氛围与开口时机 | `group_atmosphere_state` 记录活跃度、紧张度、玩笑度、支持度、bot 注意力、打断风险和加入适宜度，帮助 bot 判断该开口、短应、先听还是避免插话。 |
 | 统一状态查询接口（agent API） | 其他插件可通过公共接口（API）查询核心情绪、说话人轨道、群聊氛围、因果轨迹、运行时诊断或总览状态，而不是读取内部 KV。 |
+| 真人即时聊天 | 可把回复拆成多条短消息，按打字速度、长度和稳定抖动顺序发送，降低长篇报告腔。 |
+| 表情包回应与学习 | 根据当前情绪、群聊氛围和文本线索选择表情包；可记录用户表情的轻量元数据，形成小圈子里的表情共同语境。 |
 
 > **代码与模型来源**
 > 本项目未使用、复制或改写外部参考项目的代码、配置、资源、测试、发布脚本、许可证文本或文档表达。README 的信息架构、运行代码、配置结构（schema）、公共接口（API）、测试、公式推导和模型实现均由本项目独立整理与编写；情绪、人格式先验、人格漂移、主动发言和互需模式的状态变量、公式与更新规则均基于公开文献证据自行归纳、抽象、建模和实现。
@@ -52,7 +54,7 @@
 | 主题 | 内容 |
 | --- | --- |
 | [当前版本与兼容范围](#当前版本与兼容范围) | 插件版本、AstrBot 版本、Python 要求、许可证和发布状态。 |
-| [1.2.0 正式版发布记录](#120-正式版发布记录) | 主动发言发送执行层、可审计 `dispatch_request`、话题证据、LLM 工具、配置、测试与包体。 |
+| [1.5.0 正式版发布记录](#150-正式版发布记录) | 真人即时聊天、分条发送、打字间隔、表情包回应、用户表情学习、公共 API、测试与包体。 |
 | [项目定位](#项目定位) | 为什么本插件不是普通的提示词人设增强。 |
 | [核心能力](#核心能力总览) | 7 维情绪、人格建模、真实时间记忆、关系修复、公共 API。 |
 | [快速开始](#快速开始) | 发布 zip 包、仓库安装、手动复制、最小配置和检查命令。 |
@@ -80,33 +82,31 @@
 | --- | --- |
 | 插件目录名 | `astrbot_plugin_emotional_state` |
 | 显示名 | `多维情绪状态` |
-| 当前版本 | `1.2.0` |
+| 当前版本 | `1.5.0` |
 | AstrBot 版本 | `>=4.9.2,<5.0.0` |
 | Python | `3.10+` |
 | 许可证 | `GPL-3.0-or-later` |
 | 运行时第三方依赖 | 当前无额外依赖，见 `requirements.txt` |
 
-`1.2.0` 在 `1.1.0` 后台并行、群聊分轨和智能 worker 基线上继续推进主动发言。这个版本把“想开口”拆成两层：`get_proactive_speech_decision(...)` 仍然只读，只返回是否适合开口、为什么、证据是什么、话题方向和短句草案；`request_proactive_speech_dispatch(...)` 才负责生成可审计发送请求，并在配置者显式开启后调用 AstrBot 主动发送接口。核心情绪、回复后后台评估（post）、`group_atmosphere_state`、`humanlike_state`、`lifelike_learning_state` 和 `personality_drift_state` 默认自动运行且不暴露细参开关；道德修复、瑕疵模拟、心理筛查等实验/维护模块仍由配置者显式打开。
+`1.5.0` 在 `1.2.0` 主动发言发送层上继续推进表达拟真：默认启用即时聊天风格提示、分条发送计划、回复接管和表情包氛围回应。核心情绪、回复后后台评估（post）、`group_atmosphere_state`、`humanlike_state`、`lifelike_learning_state`、`personality_drift_state` 和即时聊天节奏默认自动运行；道德修复、瑕疵模拟、心理筛查等实验/维护模块仍由配置者显式打开。
 
 发布包会包含运行代码、README、CHANGELOG、LICENSE、配置结构（schema）、docs 和 `docs/assets/` 中的聚合图表；不会包含 `tests/`、`scripts/`、`literature_kb/`、`personality_literature_kb/`、`psychological_literature_kb/`、`humanlike_agent_literature_kb/`、`raw/`、`output/`、`dist/` 等开发、研究、原始样本或缓存目录。
 
-### 1.2.0 正式版发布记录
+### 1.5.0 正式版发布记录
 
-`v1.2.0` 合并在 `main` 上，对外安装版本由 `metadata.yaml` 和 `main.py @register(...)` 共同声明为 `1.2.0`。本版以 `1.1.0` 的后台并行、群聊分轨和智能 worker 为基线，新增主动发言发送执行层：只读裁决仍然可用；配置者显式开启后，插件才会向 AstrBot 调度链路请求主动发送。
+`v1.5.0` 合并在 `main` 上，对外安装版本由 `metadata.yaml` 和 `main.py @register(...)` 共同声明为 `1.5.0`。本版以 `1.2.0` 的主动发言发送层为基线，新增真人即时聊天表达层：回复可以被拆成多条短消息，按打字速度顺序发出，并在氛围适合时补发表情包。
 
 当前版本的主要变化：
 
 | 类别 | 结果 |
 | --- | --- |
-| 主动发送执行层 | 新增 `request_proactive_speech_dispatch(...)`，可在配置允许、冷却通过、会话目标明确时调用 AstrBot `context.send_message(...)` 主动发消息。 |
-| 只读裁决保留 | `get_proactive_speech_decision(...)` 仍然不写状态、不发送消息，但会返回 `dispatch_request`，方便调度器、群聊插件或外部插件审计后自行处理。 |
-| 话题证据 | 新增进度关心、想念、调皮打扰、轻量整蛊和修复等话题模式；每次主动开口必须带 `topic_evidence`，不能凭空套模板。 |
-| 发送门控 | 新增 `enable_proactive_speech_dispatch`、同会话冷却、TTL、最大字符数和 `dry_run`，默认只返回请求，不真正发送。 |
-| LLM 工具 | 新增 `request_bot_proactive_speech_dispatch` 工具，默认 `dry_run=true`，便于模型先试算理由、话题和短句，再由配置决定是否放行。 |
-| 审计与轨迹 | 主动发送结果会写入主动发送审计；真正发送后，会把当次主动话语写回生命化学习轨迹，避免主动行为脱离长期情绪和共同语境。 |
-| 工作流 | 工作流图已补充“裁决、生成 dispatch_request、冷却检查、发送执行、审计写入”支路；手机端仍提供静态 SVG。 |
-| 发布边界 | 知识库和原始性能基准样本仍是本地资料，不进入 GitHub 和发布 zip。 |
-| 公开契约 | 插件版本为 `1.2.0`；公共 API 版本仍为 `1.0`，schema 仍保持 `astrbot.emotion_state.v2` 等版本化契约。 |
+| 真人即时聊天 | 新增 `get_realtime_chat_plan(...)` 与 `request_realtime_chat_dispatch(...)`，可生成分条计划或直接按顺序发送。 |
+| 回复接管 | `on_llm_response` 可在平台支持时清空原始 `completion_text`，再用 AstrBot `context.send_message(...)` 分条发送，避免整段回复和分条回复重复出现。 |
+| 打字间隔 | 分条间隔由字符数、每秒字符数、最小/最大等待和稳定抖动共同决定，既像即时聊天，又避免长回复拖太久。 |
+| 表情包回应 | 新增本地表情包索引、氛围意图判断和兼容图片发送适配；默认参考 `ChineseBQB` 仓库地址，但不自动下载、不镜像、不打包素材。 |
+| 偷表情包学习 | 新增 `observe_sticker_usage(...)`，只记录用户表情的 URL、路径、file_id、标签和兴趣分，不把图片二进制写入插件包。 |
+| 主动发送整合 | 主动发言 dispatch 可自动走即时聊天计划，主动关心、想念、调皮打扰等短句也能分条发送。 |
+| 公开契约 | 插件版本为 `1.5.0`；公共 API 版本仍为 `1.0`，schema 仍保持 `astrbot.emotion_state.v2` 等版本化契约。 |
 
 运行时亮点可以按这条链路理解。手机端若不渲染 Mermaid，也会优先显示下面的静态图：
 
@@ -472,6 +472,7 @@ astrbot_plugin_emotional_state/
 ├── humanlike_engine.py
 ├── lifelike_learning_engine.py
 ├── personality_drift_engine.py
+├── realtime_chat_engine.py
 ├── integrated_self.py
 ├── moral_repair_engine.py
 ├── fallibility_engine.py
@@ -516,6 +517,7 @@ data/plugins/
     ├── humanlike_engine.py
     ├── lifelike_learning_engine.py
     ├── personality_drift_engine.py
+    ├── realtime_chat_engine.py
     ├── integrated_self.py
     ├── moral_repair_engine.py
     ├── fallibility_engine.py
@@ -1555,6 +1557,39 @@ enable_safety_boundary = false
 
 返回结果里的 `dispatch_request` 会包含 `requested`、`reason`、`topic_evidence`、`message_text`、`unified_msg_origin`、`idempotency_key`、`sent` 和 `blocked_reason`。常见未发送原因包括 `dispatch_disabled`、`cooldown_active`、`missing_event_origin`、`missing_send_message_api`、`decision_declined` 和 `dry_run`。
 
+### 真人即时聊天与表情包
+
+即时聊天层负责“怎么发出去”，不重新替代情绪模型本身。文本仍由主 LLM 生成；插件只在本地做分条、节奏、冷却、表情包候选选择和轻量记忆。这样可以降低 token 消耗，也能让其他插件直接调用计划接口。
+
+| 配置项 | 类型 | 默认值 | 说明 |
+| --- | --- | --- | --- |
+| `enable_realtime_chat` | bool | `true` | 是否启用真人即时聊天分条发送。 |
+| `realtime_chat_style_prompt_enabled` | bool | `true` | 请求阶段加入短提示，让主模型少用报告腔、Markdown 和编号清单。 |
+| `realtime_chat_intercept_llm_response` | bool | `true` | 是否在 `on_llm_response` 尝试接管默认回复并分条发送；若平台不支持改写响应，可关闭。 |
+| `realtime_chat_dry_run_default` | bool | `false` | 公共 API 未显式传 `dry_run` 时是否只返回计划不发送。 |
+| `realtime_chat_max_parts` | int | `5` | 一次回复最多拆成多少条。 |
+| `realtime_chat_min_part_chars` | int | `3` | 过短片段会并入相邻片段。 |
+| `realtime_chat_max_part_chars` | int | `72` | 单条消息最大字符数。 |
+| `realtime_chat_chars_per_second` | float | `7.0` | 模拟打字速度。 |
+| `realtime_chat_min_delay_seconds` | float | `0.35` | 单条消息前最小等待。 |
+| `realtime_chat_max_delay_seconds` | float | `4.0` | 单条消息前最大等待。 |
+| `realtime_chat_jitter_ratio` | float | `0.22` | 等待时间的稳定抖动比例。 |
+| `realtime_chat_session_cooldown_seconds` | float | `0.0` | 同会话分条接管冷却；`0` 表示不启用。 |
+| `realtime_chat_strip_markdown` | bool | `true` | 分条前清理常见 Markdown 标记。 |
+| `enable_sticker_reaction` | bool | `true` | 是否根据情绪和氛围补发表情包。 |
+| `sticker_default_repo_url` | string | `https://github.com/zhaoolee/ChineseBQB.git` | 默认表情包参考仓库，仅供用户自行准备素材；插件不分发该仓库。 |
+| `sticker_local_root` | string | `""` | 本地表情包目录。 |
+| `sticker_allowed_extensions` | string | `.jpg,.jpeg,.png,.gif,.webp` | 允许索引的图片扩展名。 |
+| `sticker_selected_packs` | string | `""` | 表情包子包筛选词，留空表示不筛选。 |
+| `sticker_index_limit` | int | `1000` | 本地表情包索引上限。 |
+| `sticker_index_cache_ttl_seconds` | float | `86400.0` | 表情包索引缓存秒数。 |
+| `sticker_max_file_bytes` | int | `5242880` | 单个候选图片最大字节数。 |
+| `sticker_send_probability` | float | `0.18` | 表情包发送概率系数，避免频繁发图。 |
+| `sticker_learn_user_images` | bool | `true` | 是否学习用户表情包元数据。 |
+| `sticker_learned_limit` | int | `200` | 每会话保留的用户表情元数据上限。 |
+
+`ChineseBQB` 仓库体积很大且未随本插件重新授权分发，所以本插件只保留默认 URL 和本地目录索引能力。发布 zip 不包含 `ChineseBQB/`、用户偷来的表情包、缓存图片或外部素材库；“偷表情包”只表示记录轻量来源信息，方便以后在同一会话氛围下复用。
+
 ### 低推理模型友好模式
 
 | 配置项 | 类型 | 默认值 | 说明 |
@@ -2033,7 +2068,10 @@ emotion = meta.star_cls if meta and meta.activated else None
 | `get_lifelike_learning_snapshot(event_or_session, exposure="plugin_safe")` | 否 | 获取生命化学习/共同语境快照。 |
 | `get_lifelike_initiative_policy(event_or_session)` | 否 | 获取当前适合开口、短应、追问或沉默的节奏策略。 |
 | `get_proactive_speech_decision(event_or_session, candidate_context="", use_llm=True)` | 否 | 判断当前是否适合主动开口，并返回理由、证据、话题方向、短句草案和 `dispatch_request`。 |
-| `request_proactive_speech_dispatch(event_or_session, candidate_context="", use_llm=True, dry_run=False, force=False)` | 是 | 请求 AstrBot 主动发送；默认受 `enable_proactive_speech_dispatch` 和冷却控制，发送后会写入主动发送审计与生命化学习轨迹。 |
+| `request_proactive_speech_dispatch(event_or_session, candidate_context="", use_llm=True, dry_run=False, force=False, realtime=None)` | 是 | 请求 AstrBot 主动发送；默认受 `enable_proactive_speech_dispatch` 和冷却控制，可自动走即时聊天分条发送。 |
+| `get_realtime_chat_plan(event_or_session, text, include_sticker=True)` | 否 | 生成即时聊天分条、打字间隔和表情包候选计划，不发送。 |
+| `request_realtime_chat_dispatch(event_or_session, text, dry_run=None, force=False)` | 是 | 按计划顺序发送多条即时聊天消息；`dry_run` 可只试算。 |
+| `observe_sticker_usage(event_or_session, sticker)` | 是 | 记录用户表情包轻量元数据，供后续表情共同语境使用，不保存二进制图片。 |
 | `get_lifelike_prompt_fragment(event_or_session)` | 否 | 获取共同语境和对话节奏提示词片段。 |
 | `observe_lifelike_text(event_or_session, text)` | 是 | 提交文本观察并更新新词、黑话、用户画像和边界线索。 |
 | `simulate_lifelike_update(event_or_session, text)` | 否 | 模拟生命化学习更新，不落库。 |
@@ -2645,7 +2683,7 @@ py -3.13 scripts\package_plugin.py --output dist\astrbot_plugin_emotional_state.
 | 检查项 | 要求 |
 | --- | --- |
 | 顶层目录 | 所有文件都必须在 `astrbot_plugin_emotional_state/` 下。 |
-| 必要文件 | 包含 `__init__.py`、`metadata.yaml`、`main.py`、`emotion_engine.py`、`humanlike_engine.py`、`lifelike_learning_engine.py`、`personality_drift_engine.py`、`integrated_self.py`、`moral_repair_engine.py`、`fallibility_engine.py`、`psychological_screening.py`、`prompts.py`、`public_api.py`、`README.md`、`CHANGELOG.md`、`LICENSE`、`requirements.txt`、`_conf_schema.json`。 |
+| 必要文件 | 包含 `__init__.py`、`metadata.yaml`、`main.py`、`emotion_engine.py`、`humanlike_engine.py`、`lifelike_learning_engine.py`、`personality_drift_engine.py`、`realtime_chat_engine.py`、`integrated_self.py`、`moral_repair_engine.py`、`fallibility_engine.py`、`psychological_screening.py`、`prompts.py`、`public_api.py`、`README.md`、`CHANGELOG.md`、`LICENSE`、`requirements.txt`、`_conf_schema.json`。 |
 | 插件身份 | zip 内 `metadata.yaml name:` 必须等于 `astrbot_plugin_emotional_state`。 |
 | 排除目录 | 不应包含 `tests/`、`scripts/`、`output/`、`dist/`、`raw/`、`__pycache__/`、`.git/`。 |
 | 许可证 | 发布包必须包含 `LICENSE`，协议为 `GPL-3.0-or-later`。 |
@@ -2750,7 +2788,7 @@ py -3.13 -m unittest discover -s tests -v
 语法检查：
 
 ```powershell
-py -3.13 -m py_compile main.py emotion_engine.py psychological_screening.py humanlike_engine.py lifelike_learning_engine.py personality_drift_engine.py integrated_self.py moral_repair_engine.py fallibility_engine.py prompts.py public_api.py scripts\package_plugin.py
+py -3.13 -m py_compile main.py emotion_engine.py psychological_screening.py humanlike_engine.py lifelike_learning_engine.py personality_drift_engine.py realtime_chat_engine.py integrated_self.py moral_repair_engine.py fallibility_engine.py prompts.py public_api.py scripts\package_plugin.py
 ```
 
 配置 schema 检查：
@@ -2769,7 +2807,7 @@ py -3.13 scripts\package_plugin.py --output dist\astrbot_plugin_emotional_state.
 
 发布 zip 的第一项会显式写入 `astrbot_plugin_emotional_state/` 目录项，以兼容 AstrBot WebUI 的 `install-upload` 解压逻辑。不要手工重新压缩成“缺少顶层目录项”的 zip，否则部分 AstrBot 版本会把第一个文件路径误判成目录。
 
-发布包还会保留插件根目录下的 `__init__.py`、`public_api.py`、`main.py`、`emotion_engine.py`、`humanlike_engine.py`、`lifelike_learning_engine.py`、`personality_drift_engine.py`、`integrated_self.py`、`moral_repair_engine.py`、`fallibility_engine.py`、`psychological_screening.py` 和 `prompts.py`。这保证其他插件在安装后可以通过 `from astrbot_plugin_emotional_state.public_api import ...` 按包名导入公共 API。
+发布包还会保留插件根目录下的 `__init__.py`、`public_api.py`、`main.py`、`emotion_engine.py`、`humanlike_engine.py`、`lifelike_learning_engine.py`、`personality_drift_engine.py`、`realtime_chat_engine.py`、`integrated_self.py`、`moral_repair_engine.py`、`fallibility_engine.py`、`psychological_screening.py` 和 `prompts.py`。这保证其他插件在安装后可以通过 `from astrbot_plugin_emotional_state.public_api import ...` 按包名导入公共 API。
 
 远程只读烟测：
 
@@ -2798,7 +2836,7 @@ $env:ASTRBOT_EXPECT_PLUGIN = "astrbot_plugin_emotional_state"
 脚本会在输出 JSON 里写出 `expectedPluginRuntime`，包含插件列表 API 中返回的 `version`、`displayName`、`activated`、`author`、`astrbotVersion` 等只读字段。若目标插件存在但 `activated=false`，脚本会失败退出。需要把版本和显示名也作为硬断言时，可以额外设置：
 
 ```powershell
-$env:ASTRBOT_EXPECT_PLUGIN_VERSION = "1.2.0"
+$env:ASTRBOT_EXPECT_PLUGIN_VERSION = "1.5.0"
 $env:ASTRBOT_EXPECT_PLUGIN_DISPLAY_NAME = "多维情绪状态"
 & $node scripts\remote_smoke_playwright.js
 ```
@@ -2839,7 +2877,7 @@ $env:ASTRBOT_REMOTE_INSTALL_CONFIRM = "1"
 
 上传脚本只允许调用 AstrBot WebUI 的 `install-upload` 安装端点；若 WebUI 留下 `plugin_upload_<插件名>` 失败安装残留，脚本只会调用 `uninstall-failed` 清理这个失败上传目录，并固定 `delete_config=false`、`delete_data=false`。它不会删除正式插件、覆盖正式插件目录、更新插件、重启 AstrBot、保存配置或写入本地 cookie/session。如果远端返回“目录 `<插件名>` 已存在”，脚本会输出 `installOutcome="already_installed_no_overwrite"`、`alreadyInstalled=true`、`overwriteAttempted=false` 和 `formalPluginDirectoryPreserved=true`，表示正式插件目录被保留，后续应通过只读烟测查看实际运行版本。上传成功后，再运行上面的 `ASTRBOT_EXPECT_PLUGIN` 只读烟测作为最终验证。
 
-上传脚本在真正发起安装请求之前会完整读取 zip 中央目录做本地预检：所有条目必须位于 `astrbot_plugin_emotional_state/` 下，路径必须是相对 POSIX 路径，且不能包含 `.` / `..` 不安全路径段；必须包含 `__init__.py`、`agent_identity.py`、`metadata.yaml`、`main.py`、`emotion_engine.py`、`group_atmosphere_engine.py`、`humanlike_engine.py`、`lifelike_learning_engine.py`、`personality_drift_engine.py`、`integrated_self.py`、`moral_repair_engine.py`、`fallibility_engine.py`、`psychological_screening.py`、`prompts.py`、`public_api.py`、`README.md`、`LICENSE`、`requirements.txt`、`_conf_schema.json`，并拒绝 `tests/`、`scripts/`、`output/`、`dist/`、`raw/`、`__pycache__/`、`.git/` 等本地或研究缓存目录。预检还会读取 zip 内的 `metadata.yaml`，确认其中 `name:` 精确等于 CLI 参数或 `ASTRBOT_EXPECT_PLUGIN` 传入的插件目录名。
+上传脚本在真正发起安装请求之前会完整读取 zip 中央目录做本地预检：所有条目必须位于 `astrbot_plugin_emotional_state/` 下，路径必须是相对 POSIX 路径，且不能包含 `.` / `..` 不安全路径段；必须包含 `__init__.py`、`agent_identity.py`、`metadata.yaml`、`main.py`、`emotion_engine.py`、`group_atmosphere_engine.py`、`humanlike_engine.py`、`lifelike_learning_engine.py`、`personality_drift_engine.py`、`realtime_chat_engine.py`、`integrated_self.py`、`moral_repair_engine.py`、`fallibility_engine.py`、`psychological_screening.py`、`prompts.py`、`public_api.py`、`README.md`、`LICENSE`、`requirements.txt`、`_conf_schema.json`，并拒绝 `tests/`、`scripts/`、`output/`、`dist/`、`raw/`、`__pycache__/`、`.git/` 等本地或研究缓存目录。预检还会读取 zip 内的 `metadata.yaml`，确认其中 `name:` 精确等于 CLI 参数或 `ASTRBOT_EXPECT_PLUGIN` 传入的插件目录名。
 
 也可以单独运行预检，不连接远程服务器：
 
@@ -3017,7 +3055,7 @@ inject_state = false
 humanlike_memory_write_enabled = true
 ```
 
-拟人状态默认自动运行。若没有看到 `humanlike_state_at_write`，优先确认插件是否为 `1.1.0`、`humanlike_memory_write_enabled=true`，以及调用方是否保留了完整记忆载荷。
+拟人状态默认自动运行。若没有看到 `humanlike_state_at_write`，优先确认插件是否为 `1.5.0`、`humanlike_memory_write_enabled=true`，以及调用方是否保留了完整记忆载荷。
 
 ### 拟人状态没有生效
 
