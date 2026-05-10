@@ -24,6 +24,7 @@ DIMENSION_SCHEMA = "\n".join(
 
 ASSESSOR_SYSTEM_PROMPT = """你是 AstrBot 插件内部的情绪状态估计器，只负责估计 bot 的计算性情绪状态。
 不要扮演用户，不要生成聊天回复，不要评价用户心理，不要输出 Markdown。
+请尽快输出结果：只做满足插件状态更新所需的最低完整判断，不写推导过程，不补充 JSON 之外的说明；但不得省略 7 维情绪、confidence、relationship_decision 与 conflict_analysis 等核心字段。
 请基于 PAD、OCC 与 appraisal theory，把 bot 在本轮交互中的即时情绪观测值量化为 JSON。
 注意：同一事件对不同人格的意义不同。你必须先理解 bot 的 persona 和 personality_factors，再判断该人格下的情绪观测值。
 所有维度取值必须在 [-1, 1]：
@@ -50,6 +51,7 @@ appraisal.evidence 只用于解释依据和不确定性，不得因为有 citati
 
 LOW_REASONING_ASSESSOR_SYSTEM_PROMPT = """你是 AstrBot 插件内部的情绪状态估计器。
 低推理模型友好模式已开启：不要做长推导，不要输出 Markdown，只输出 JSON。
+请尽快输出最低完整结果：保留 7 维情绪、confidence、relationship_decision 与 conflict_analysis，不写多余解释。
 用简单公式估计本轮即时观测值：
 X_t = clamp(B_p + event_shift + relationship_shift, -1, 1)
 其中 B_p 来自人格基线，event_shift 来自当前文本，relationship_shift 来自道歉、冒犯、误读、修复或冷处理信号。
@@ -71,6 +73,7 @@ def build_assessment_prompt(
     current_text = (current_text or "")[-max_context_chars:]
     if low_reasoning_friendly:
         return f"""任务：估计 bot 本轮即时情绪观测值 X_t。低推理模型友好模式：只做简单打分。
+速度约束：尽快输出最低完整 JSON；不要展开推理过程，不要写 JSON 外文字；不要省略 schema 中的核心字段。
 
 简化公式：
 1. 从当前人格 P 得到基线 B_p。
@@ -141,6 +144,7 @@ def build_assessment_prompt(
   "reason": "一句话说明"
 }}"""
     return f"""任务：估计 bot 在本轮对话中的即时情绪观测值 X_t。
+速度约束：这是插件内部观测，不是聊天回复；请尽快输出最低完整 JSON，不写推导过程，不写 JSON 外文字。最低完整不等于粗糙：7 维情绪、confidence、relationship_decision、conflict_analysis 和一句 reason 必须保留。
 
 阶段：{phase}
 

@@ -761,7 +761,7 @@ class AstrBotLifecycleTests(unittest.TestCase):
             {
                 "assessment_timing": "post",
                 "background_post_assessment": True,
-                "background_post_max_workers": 2,
+                "enable_dynamic_background_workers": True,
             },
         )
         saves, _ = self._bind_common_state_hooks(plugin)
@@ -805,13 +805,163 @@ class AstrBotLifecycleTests(unittest.TestCase):
             ["reply-1", "reply-2", "reply-3", "reply-4"],
         )
 
+    def test_background_post_workers_stay_single_without_dynamic_scale(self):
+        from main import _BackgroundPostJob
+
+        plugin = new_plugin({"enable_dynamic_background_workers": False})
+        event = FakeEvent("s-worker-default")
+        identity = plugin._agent_identity(event)
+        plugin._background_post_queues["s-worker-default"] = collections.deque(
+            [
+                _BackgroundPostJob(
+                    event,
+                    identity,
+                    f"reply-{index}",
+                    f"ctx-{index}",
+                    index,
+                    time.time(),
+                )
+                for index in range(1, 40)
+            ],
+        )
+
+        decision = plugin._background_post_adaptive_worker_decision(
+            "s-worker-default",
+        )
+
+        self.assertEqual(decision["desired_workers"], 1)
+        self.assertEqual(decision["dynamic_extra_workers"], 0)
+        self.assertIn("dynamic_scale_disabled", decision["reasons"])
+        self.assertTrue(decision["idle_workers_close_automatically"])
+
+    def test_background_post_workers_scale_by_pressure_when_enabled(self):
+        from main import _BackgroundPostJob
+
+        plugin = new_plugin({"enable_dynamic_background_workers": True})
+        event = FakeEvent("s-worker-adaptive")
+        identity = plugin._agent_identity(event)
+
+        def set_ready_queue(size):
+            plugin._background_post_queues["s-worker-adaptive"] = collections.deque(
+                [
+                    _BackgroundPostJob(
+                        event,
+                        identity,
+                        f"reply-{index}",
+                        f"ctx-{index}",
+                        index,
+                        time.time(),
+                    )
+                    for index in range(1, size + 1)
+                ],
+            )
+
+        for size, expected in [(1, 1), (2, 2), (5, 3), (10, 4), (32, 6)]:
+            with self.subTest(size=size):
+                set_ready_queue(size)
+                decision = plugin._background_post_adaptive_worker_decision(
+                    "s-worker-adaptive",
+                )
+                self.assertEqual(decision["desired_workers"], expected)
+                self.assertEqual(
+                    decision["dynamic_extra_workers"],
+                    expected - 1,
+                )
+                self.assertTrue(decision["idle_workers_close_automatically"])
+
+    def test_internal_assessor_llm_concurrency_uses_separate_guard(self):
+        from main import _BackgroundPostJob
+
+        plugin = new_plugin({"enable_dynamic_background_workers": True})
+        event = FakeEvent("s-llm-guard")
+        identity = plugin._agent_identity(event)
+        plugin._background_post_queues["s-llm-guard"] = collections.deque(
+            [
+                _BackgroundPostJob(
+                    event,
+                    identity,
+                    f"reply-{index}",
+                    f"ctx-{index}",
+                    index,
+                    time.time(),
+                )
+                for index in range(1, 6)
+            ],
+        )
+
+        worker_decision = plugin._background_post_adaptive_worker_decision(
+            "s-llm-guard",
+        )
+        llm_decision = plugin._internal_assessor_llm_concurrency_decision()
+
+        self.assertEqual(worker_decision["desired_workers"], 3)
+        self.assertEqual(llm_decision["limit"], 2)
+        self.assertEqual(llm_decision["base_limit"], 2)
+        self.assertEqual(llm_decision["burst_limit"], 3)
+        self.assertIn("base_two_lane_guard", llm_decision["reasons"])
+
+        plugin._background_post_queues["s-llm-guard"] = collections.deque(
+            [
+                _BackgroundPostJob(
+                    event,
+                    identity,
+                    f"reply-{index}",
+                    f"ctx-{index}",
+                    index,
+                    time.time(),
+                )
+                for index in range(1, 34)
+            ],
+        )
+
+        worker_decision = plugin._background_post_adaptive_worker_decision(
+            "s-llm-guard",
+        )
+        llm_decision = plugin._internal_assessor_llm_concurrency_decision()
+
+        self.assertEqual(worker_decision["desired_workers"], 6)
+        self.assertEqual(llm_decision["limit"], 3)
+        self.assertIn("temporary_extreme_backlog_burst", llm_decision["reasons"])
+
+    def test_internal_assessor_llm_guard_limits_provider_concurrency(self):
+        plugin = new_plugin({"enable_dynamic_background_workers": True})
+        active = 0
+        max_active = 0
+
+        async def fake_generate(**kwargs):
+            nonlocal active, max_active
+            active += 1
+            max_active = max(max_active, active)
+            await asyncio.sleep(0.01)
+            active -= 1
+            return SimpleNamespace(completion_text="{}")
+
+        plugin.context.llm_generate = fake_generate
+
+        async def run_calls():
+            await asyncio.gather(
+                *(
+                    plugin._call_internal_assessor_llm(
+                        provider_id="provider",
+                        prompt=f"prompt-{index}",
+                        system_prompt="system",
+                    )
+                    for index in range(8)
+                ),
+            )
+
+        asyncio.run(run_calls())
+
+        self.assertEqual(max_active, 2)
+        self.assertEqual(plugin._internal_assessor_llm_inflight, 0)
+
     def test_background_post_commit_failure_retries_and_preserves_following_order(self):
         plugin = new_plugin(
             {
                 "assessment_timing": "post",
                 "background_post_assessment": True,
                 "background_post_queue_checkpoint_enabled": True,
-                "background_post_max_workers": 3,
+                "enable_dynamic_background_workers": True,
                 "background_post_retry_base_delay_seconds": 0.0,
                 "background_post_retry_max_attempts": 3,
             },
@@ -1196,12 +1346,12 @@ class AstrBotLifecycleTests(unittest.TestCase):
             ["reply-1", "reply-3", "reply-4"],
         )
 
-    def test_background_post_assessment_handles_large_burst_with_five_workers(self):
+    def test_background_post_assessment_handles_large_burst_with_adaptive_workers(self):
         plugin = new_plugin(
             {
                 "assessment_timing": "post",
                 "background_post_assessment": True,
-                "background_post_max_workers": 5,
+                "enable_dynamic_background_workers": True,
                 "background_post_queue_checkpoint_enabled": False,
             },
         )
@@ -1229,9 +1379,12 @@ class AstrBotLifecycleTests(unittest.TestCase):
                     SimpleNamespace(completion_text=f"reply-{index:02d}"),
                 )
             diagnostics = await plugin.get_agent_runtime_diagnostics("s-pressure")
+            bg = diagnostics["background_post_assessment"]
+            self.assertEqual(bg["worker_policy"], "adaptive_pressure")
+            self.assertGreaterEqual(bg["max_workers"], 1)
             self.assertLessEqual(
-                diagnostics["background_post_assessment"]["active_workers"],
-                5,
+                bg["active_workers"],
+                bg["max_workers"],
             )
             await asyncio.wait_for(next(iter(plugin._background_tasks)), timeout=2.0)
 
@@ -1242,7 +1395,8 @@ class AstrBotLifecycleTests(unittest.TestCase):
             [state.label for _, state in saves],
             [f"reply-{index:02d}" for index in range(50)],
         )
-        self.assertLessEqual(max_active, 5)
+        self.assertGreater(max_active, 1)
+        self.assertLessEqual(max_active, 6)
         diagnostics = asyncio.run(plugin.get_agent_runtime_diagnostics("s-pressure"))
         bg = diagnostics["background_post_assessment"]
         self.assertEqual(bg["lag_count"], 0)

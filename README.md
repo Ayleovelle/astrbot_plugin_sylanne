@@ -2,7 +2,7 @@
 
 > 让 AstrBot 维护一套可计算、可记忆、可解释、可被其他插件调用的多维情绪状态。
 
-![版本 1.0.0](https://img.shields.io/badge/version-1.0.0-blue)
+![版本 1.1.0](https://img.shields.io/badge/version-1.1.0-blue)
 ![AstrBot >=4.9.2,<5.0.0](https://img.shields.io/badge/AstrBot-%3E%3D4.9.2%2C%3C5.0.0-green)
 ![Python 3.10+](https://img.shields.io/badge/Python-3.10%2B-yellow)
 ![协议 astrbot.emotion_state.v2](https://img.shields.io/badge/schema-astrbot.emotion__state.v2-purple)
@@ -16,18 +16,19 @@
 
 本插件会让 LLM 根据上下文、用户当前文本、bot 人格和上一轮状态，判断当前情绪观测值；本地引擎再用真实时间半衰期、人格基线、置信门控、关系修复和后果状态机更新长期状态。最后，这个状态会作为临时上下文注入下一次 LLM 请求，影响语气、节奏、社交距离、边界感和修复倾向。
 
-`1.0.0` 正式版的重点不是单个公式，而是把状态层稳定成“可并行、可后台恢复、可群聊分轨”的运行时系统：
+`1.1.0` 的重点不是再堆一个公式，而是把状态层整理成更顺滑的长期运行系统：能后台处理、能并发读取、能群聊分轨，也能让后台 worker 按压力自动扩缩。
 
 | 能力 | 作用 |
 | --- | --- |
-| 后台 post 评估 | 可把回复后的内部情绪评估放进后台队列，主回复先返回；队列支持每会话 FIFO 提交、KV 检查点、租约回收、重试和 dead-letter 诊断。 |
-| 多线程/并发状态加载 | 请求、响应和记忆写入阶段会并发读取可选状态快照；慢状态加载、内部评估和 LivingMemory 注解不再简单串行等待。 |
+| 回复后后台评估（post） | 可把回复后的内部情绪评估放进后台队列，主回复先返回；队列支持同一会话先进先出（FIFO）提交、AstrBot 键值存储（KV）检查点、租约回收、重试和失败任务留存（dead-letter）诊断。 |
+| 并发状态加载 | 请求、响应和记忆写入阶段会并发读取可选状态快照；慢状态加载、内部评估和 LivingMemory 注解不再简单串行等待。 |
+| 智能后台 worker | 默认每会话 1 个 worker；打开动态扩容后，插件按队列深度、等待时间、重试和租约压力自适应扩到最多 6 个，空闲后自动关闭；内部判断 LLM 另有并发闸门，默认最多 2 路、极端积压最多 3 路。 |
 | 群聊分层建模 | 同时维护房间级 `conversation_id` 和说话人级 `speaker_track_id`，避免一个人的冲突污染全群，也避免群聊气氛被切碎。 |
 | 群聊氛围与开口时机 | `group_atmosphere_state` 记录活跃度、紧张度、玩笑度、支持度、bot 注意力、打断风险和加入适宜度，帮助 bot 判断该开口、短应、先听还是避免插话。 |
-| 统一 agent 诊断 API | 其他插件可通过公共 API 查询 emotion、speaker、group_atmosphere、trail、runtime 或 all 状态，而不是读内部 KV。 |
+| 统一状态查询接口（agent API） | 其他插件可通过公共接口（API）查询核心情绪、说话人轨道、群聊氛围、因果轨迹、运行时诊断或总览状态，而不是读取内部 KV。 |
 
 > **代码与模型来源**
-> 本项目未使用、复制或改写外部参考项目的代码、配置、资源、测试、发布脚本、许可证文本或文档表达。README 的信息架构、运行代码、配置 schema、公共 API、测试、公式推导和模型实现均由本项目独立整理与编写；情绪、人格式先验、人格漂移、主动发言和互需模式的状态变量、公式与更新规则均基于公开文献证据自行归纳、抽象、建模和实现。
+> 本项目未使用、复制或改写外部参考项目的代码、配置、资源、测试、发布脚本、许可证文本或文档表达。README 的信息架构、运行代码、配置结构（schema）、公共接口（API）、测试、公式推导和模型实现均由本项目独立整理与编写；情绪、人格式先验、人格漂移、主动发言和互需模式的状态变量、公式与更新规则均基于公开文献证据自行归纳、抽象、建模和实现。
 
 > **重要提示**
 > 这里的“情绪”“拟人状态”“道德修复”“心理筛查”都是工程上的模拟状态，不代表真实意识、真实主观体验、真实身体、真实疾病或临床诊断。心理相关模块只输出非诊断趋势和风险提示，不替代任何医学、心理咨询或危机干预流程。
@@ -44,14 +45,14 @@
 4. [命令](#命令)
 5. [LivingMemory / 长期记忆兼容](#livingmemory--长期记忆兼容)
 
-如果你要维护、二次开发或复现实验，再看后面的公共 API、模型公式、远程测试、发布历史和故障排查。旧迭代记录、完整公式和复现实验默认折叠；README 首页只保留当前版本的结论、入口和关键表格。
+如果你要维护、二次开发或复现实验，再看后面的公共 API、模型公式、远程测试、发布历史和故障排查。旧迭代记录、完整公式和复现实验放在折叠块里；README 首页只保留当前版本的结论、入口和关键表格。
 
 ## 快速导航
 
 | 主题 | 内容 |
 | --- | --- |
 | [当前版本与兼容范围](#当前版本与兼容范围) | 插件版本、AstrBot 版本、Python 要求、许可证和发布状态。 |
-| [1.0.0 正式版发布记录](#100-正式版发布记录) | 后台处理、并发状态加载、群聊分层、工作流变化、效率对比和历史迭代折叠入口。 |
+| [1.1.0 正式版发布记录](#110-正式版发布记录) | 后台处理、并发状态加载、智能 worker、工作流变化、效率对比和历史迭代折叠入口。 |
 | [项目定位](#项目定位) | 为什么本插件不是普通的提示词人设增强。 |
 | [核心能力](#核心能力总览) | 7 维情绪、人格建模、真实时间记忆、关系修复、公共 API。 |
 | [快速开始](#快速开始) | 发布 zip 包、仓库安装、手动复制、最小配置和检查命令。 |
@@ -79,32 +80,34 @@
 | --- | --- |
 | 插件目录名 | `astrbot_plugin_emotional_state` |
 | 显示名 | `多维情绪状态` |
-| 当前版本 | `1.0.0` |
+| 当前版本 | `1.1.0` |
 | AstrBot 版本 | `>=4.9.2,<5.0.0` |
 | Python | `3.10+` |
 | 许可证 | `GPL-3.0-or-later` |
 | 运行时第三方依赖 | 当前无额外依赖，见 `requirements.txt` |
 
-`1.0.0` 把前期状态层实验成果稳定整合到 `main`，定位为正式版：后台 post 评估队列、多线程/并发状态加载、群聊分层建模、群聊氛围、生命化学习、真实时间人格漂移、LivingMemory 情绪注解、公共 API、发布包边界、延迟优化批次、gpt-5.5 完整功能开关矩阵和跨模型生命周期单轮拟合都进入统一发布口径。当前版本的重点是把“情绪化 bot”从单次提示词风格控制推进到可持久化、可后台恢复、可并发查询、可群聊分轨的状态服务：核心情绪、后台 post 评估、`group_atmosphere_state`、`humanlike_state`、`lifelike_learning_state` 和 `personality_drift_state` 默认自动运行且不暴露用户开关；道德修复、瑕疵模拟、心理筛查等实验/维护模块仍由配置者显式打开。
+`1.1.0` 在 `1.0.0` 状态层正式基线上继续优化运行时。这个版本把“情绪化 bot”从单次提示词风格控制推进到可持久化、可后台恢复、可并发查询、可群聊分轨的状态服务，同时进一步减少内部判断 LLM 的无效等待和后台队列的固定并发假设。核心情绪、回复后后台评估（post）、`group_atmosphere_state`、`humanlike_state`、`lifelike_learning_state` 和 `personality_drift_state` 默认自动运行且不暴露细参开关；道德修复、瑕疵模拟、心理筛查等实验/维护模块仍由配置者显式打开。远程性能基准、跨模型生命周期拟合和历史迭代记录放在后文维护章节，普通部署不需要先读完它们。
 
-发布包会包含运行代码、README、LICENSE、配置 schema、docs 和 `docs/assets/` 中的聚合图表；不会包含 `tests/`、`scripts/`、`literature_kb/`、`personality_literature_kb/`、`psychological_literature_kb/`、`humanlike_agent_literature_kb/`、`raw/`、`output/`、`dist/` 等开发、研究、原始样本或缓存目录。
+发布包会包含运行代码、README、LICENSE、配置结构（schema）、docs 和 `docs/assets/` 中的聚合图表；不会包含 `tests/`、`scripts/`、`literature_kb/`、`personality_literature_kb/`、`psychological_literature_kb/`、`humanlike_agent_literature_kb/`、`raw/`、`output/`、`dist/` 等开发、研究、原始样本或缓存目录。
 
-### 1.0.0 正式版发布记录
+### 1.1.0 正式版发布记录
 
-`v1.0.0` 合并在 `main` 上，对外安装版本由 `metadata.yaml` 和 `main.py @register(...)` 共同声明为 `1.0.0`。这个版本不是直接把旧实验分支 `codex/lifelike-learning-initiative` 普通合并进来，而是采用“主线已吸收 + 风险记录”的方式：保留主线中已经验证过的运行时、测试、公共 API 和性能报告，拒绝把旧分支里的本地知识库、过期打包规则和可能回退新状态层的改动带入正式发布。
+`v1.1.0` 合并在 `main` 上，对外安装版本由 `metadata.yaml` 和 `main.py @register(...)` 共同声明为 `1.1.0`。本版以 `1.0.0` 正式状态层为基线：已经验证过的运行时、测试、公共 API 和性能报告继续保留；本轮重点是评估链路、后台队列和工作流说明的运行时优化。
 
 当前版本的主要变化：
 
 | 类别 | 结果 |
 | --- | --- |
 | 状态层整合 | 生命化学习、人格漂移、群聊氛围、瑕疵模拟、道德修复、综合自我和 LivingMemory 注解统一进入主线。 |
-| 后台处理 | post 阶段内部评估默认进入后台链路；后台队列支持每会话 FIFO、检查点恢复、租约、重试、dead-letter 和运行时诊断。 |
-| 多线程/并发 | 请求阶段并发加载辅助状态，响应阶段并发预取道德修复/瑕疵状态，LivingMemory 写入并发获取可选快照；状态提交仍按确定顺序落库。 |
+| 回复后后台评估 | post 阶段内部评估默认进入后台链路；后台队列支持同一会话先进先出（FIFO）、检查点恢复、租约、重试、失败任务留存（dead-letter）和运行时诊断。 |
+| 并发处理 | 请求阶段并发加载辅助状态，响应阶段并发预取道德修复/瑕疵状态，LivingMemory 写入并发获取可选快照；状态提交仍按确定顺序落库。 |
+| 智能 worker | 后台评估默认基础 `1` 个 worker；开启动态扩容后按队列深度、等待年龄、重试和租约压力逐级扩到最多 `6` 个，空闲 worker 自动关闭；判断 LLM 走独立并发闸门，默认最多 `2` 路，极端积压才临时到 `3` 路。 |
+| 判断 LLM | `assessor_timeout_seconds` 默认改为 `0.0`，不再用硬超时惩罚慢推理模型；提示词要求尽快输出最低完整 JSON，但保留 7 维情绪、置信度、关系决策和冲突分析。 |
 | 群聊系统 | `conversation_id` 记录房间整体，`speaker_track_id` 记录 bot 对当前说话人的定向情绪；`group_atmosphere_state` 评估打断风险、加入适宜度和开口冷却。 |
-| 工作流 | 请求前注入状态、响应后更新状态、可选后台 post 评估、记忆写入时冻结当时状态；详细流程见 [工作流](#工作流)。 |
-| 效率 | 默认 `assessment_timing=post`、低信号轻评估、provider 短缓存、状态注入预算、并发读取可选快照，减少主回复链路等待。 |
-| 发布边界 | 知识库和原始 benchmark 仍是本地资料，不进入 GitHub 和发布 zip。 |
-| 公开契约 | 插件版本为 `1.0.0`；公共 API 版本仍为 `1.0`，schema 仍保持 `astrbot.emotion_state.v2` 等版本化契约。 |
+| 工作流 | 请求前注入状态、响应后更新状态、可选回复后后台评估（post）、记忆写入时冻结当时状态；详细流程见 [工作流](#工作流)。 |
+| 效率 | 默认 `assessment_timing=post`、低信号轻评估、模型提供方短缓存、状态注入预算、并发读取可选快照，减少主回复链路等待。 |
+| 发布边界 | 知识库和原始性能基准样本仍是本地资料，不进入 GitHub 和发布 zip。 |
+| 公开契约 | 插件版本为 `1.1.0`；公共 API 版本仍为 `1.0`，schema 仍保持 `astrbot.emotion_state.v2` 等版本化契约。 |
 
 运行时亮点可以按这条链路理解。手机端若不渲染 Mermaid，也会优先显示下面的静态图：
 
@@ -116,22 +119,26 @@
 ```mermaid
 flowchart LR
   A["用户/群聊消息"] --> B["解析会话轨道和说话人轨道"]
-  B --> C["并发读取 emotion / humanlike / lifelike / drift / moral / fallibility / group_atmosphere 快照"]
+  B --> C["并发读取状态快照：emotion / humanlike / lifelike / drift / moral / fallibility / group_atmosphere"]
   C --> D["在预算内注入紧凑状态"]
   D --> E["主回复先完成"]
-  E --> F["post 评估可进入后台队列"]
-  F --> G["按会话顺序提交状态并写入 LivingMemory 注解"]
+  E --> F["post 评估进入后台队列"]
+  F --> G["压力评估：队列深度 / 等待时间 / 重试 / 租约"]
+  G --> H["自适应 workers：基础 1，总上限 6，空闲自动关闭"]
+  H --> I["判断 LLM 闸门：默认 2 路，极端积压最多 3 路"]
+  I --> J["并行处理，按 sequence 顺序提交"]
+  J --> Q["写入 AstrBot KV 与 LivingMemory 情绪注解"]
 
-  H["调度器 / 其他插件 / LLM 工具请求主动发言"] --> I["读取 emotion / lifelike / group / humanlike / drift"]
-  I --> J{"公式判断此刻是否适合开口"}
-  J -- "适合" --> K["LLM 裁决需求、话题方向和开口风格"]
-  J -- "不适合" --> L["保持沉默 / 短应 / 延后"]
-  K --> M["生成主动消息候选"]
+  K["调度器 / 其他插件 / LLM 工具请求主动发言"] --> L["并发读取 emotion / lifelike / group / humanlike / drift"]
+  L --> M{"公式判断此刻是否适合开口"}
+  M -- "适合" --> N["LLM 裁决需求、话题方向和开口风格"]
+  M -- "不适合" --> O["保持沉默 / 短应 / 延后"]
+  N --> P["生成主动消息候选"]
 ```
 
 </details>
 
-重构后仍刻意没有放进 `v1.0.0` 的内容：
+重构后仍刻意没有放进 `v1.1.0` 的内容：
 
 | 遗留项 | 原因 | 后续处理 |
 | --- | --- | --- |
@@ -163,7 +170,7 @@ flowchart LR
 | `0.0.2-beta-pr-15` | 已完成 | 延迟专项第三批优化 | 生命化学习状态减少 `to_dict/from_dict` 往返，热路径正则预编译，主动开口策略解析词典只转换一次。 |
 | `0.0.2-beta-pr-16` | 已完成 | 延迟专项第四批优化 | `_request_to_text()` 只读取尾部上下文、被动缓存读取移除整状态序列化比较、LivingMemory 写入开关集中读取、禁用人格漂移早退、KV key 清洗复用缓存。 |
 | `0.0.2-beta-pr-17` | 已完成 | 延迟专项第五批优化 | 请求默认无状态工作早退、状态轻查询直读、低信号人格漂移不写 KV，并新增本地热路径基准测试。 |
-| `0.0.2-beta-pr-18` | 已完成 | 5 秒目标 SLA 默认值 | `assessor_timeout_seconds` 默认降为 `4.0`，慢内部 LLM 自动回退启发式估计；提示词维度 schema 常量化、人格漂移正则预编译。 |
+| `0.0.2-beta-pr-18` | 已完成 | 旧版 5 秒目标 SLA 尝试 | 当时曾把 `assessor_timeout_seconds` 调低来保护主链路；当前 `1.1.0` 已改为默认不限制硬超时，避免慢推理模型被误伤。 |
 | `0.0.2-beta-pr-19` | 已完成 | 真实链路并发等待削减 | `on_llm_response` 并发预取道德修复状态，LivingMemory 写入并发获取可选状态快照，保持注解结构和保存顺序。 |
 
 </details>
@@ -299,7 +306,7 @@ flowchart LR
 | 134 | 已完成 | 轻量辅助公共值读取 | Humanlike、lifelike 策略、人格漂移、道德修复和心理值走直接状态路径 |
 | 135 | 已完成 | 热路径基准脚本 | 新增 `scripts/benchmark_plugin_hot_path.py`，用于本地 hook 延迟和超时保护测量 |
 | 136 | 已完成 | 提示词维度 schema 常量化 | 评估提示词使用模块级维度 schema，避免每次调用 join/split |
-| 137 | 已完成 | 评估器 SLA 默认值 | `assessor_timeout_seconds` 默认改为 `4.0`，保护 5 秒回复目标 |
+| 137 | 已完成 | 旧版评估器 SLA 默认值 | 历史上曾把评估器超时作为延迟保护；当前版本默认取消硬超时，只在压测或成本保护时手动开启 |
 | 138 | 已完成 | 人格漂移正则预编译 | 漂移启发线索正则只编译一次，并用语义回归测试覆盖 |
 | 139 | 已完成 | 响应道德状态并发预取 | `on_llm_response` 在响应后情绪评估时并发加载道德状态，同时保留保存顺序 |
 | 140 | 已完成 | LivingMemory 快照并发获取 | 记忆载荷在组装注解前并发获取可选模块快照 |
@@ -381,9 +388,10 @@ flowchart LR
 | 层 | 作用 | 默认状态 |
 | --- | --- | --- |
 | `emotion_state` | 核心情绪状态。维护 7 维向量、人格基线、后果状态和关系修复判断。 | 开启 |
-| `humanlike_state` | 拟人/有机体样表达调制。维护能量、压力、注意力、边界需求等状态。 | 关闭 |
-| `lifelike_learning_state` | 生命化学习/共同语境层。维护新词、黑话、用户画像证据、偏好、边界和开口/沉默时机。 | 关闭 |
-| `personality_drift_state` | 真实时间人格漂移层。让 persona 在长期事件中小幅、有界、缓慢适应。 | 关闭 |
+| `humanlike_state` | 拟人/有机体样表达调制。维护能量、压力、注意力、边界需求等状态。 | 自动开启 |
+| `lifelike_learning_state` | 生命化学习/共同语境层。维护新词、黑话、用户画像证据、偏好、边界和开口/沉默时机。 | 自动开启 |
+| `personality_drift_state` | 真实时间人格漂移层。让 persona 在长期事件中小幅、有界、缓慢适应。 | 自动开启 |
+| `group_atmosphere_state` | 群聊氛围层。维护房间活跃度、紧张度、支持度、打断风险和加入适宜度。 | 自动开启 |
 | `moral_repair_state` | 道德修复/信任修复层。记录责任、内疚、道歉、补偿和修复趋势。 | 关闭 |
 | `fallibility_state` | 瑕疵/犯错模拟层。维护误读、记忆模糊、轻微嘴硬、澄清、纠错和补偿压力。 | 关闭 |
 | `psychological_screening` | 非诊断心理状态筛查与长期趋势备用模块。 | 关闭 |
@@ -394,7 +402,7 @@ flowchart LR
 - **本地公式负责状态动力学**：半衰期、平滑、限幅、冷处理持续时间不交给 LLM 随意决定。
 - **人格是先验，不只是文风**：不同 AstrBot persona 有不同基线、反应强度和恢复速度。
 - **真实时间优先于消息轮数**：状态恢复、冷处理和后果衰减按时间戳计算，不能靠刷屏洗掉。
-- **公共 API 优先于私有 KV**：其他插件应调用稳定 async 方法，不直接读写内部 key。
+- **公共接口优先于私有存储**：其他插件应调用稳定异步方法，不直接读写内部 KV key。
 - **共同语境要先求证再使用**：新词和小圈子黑话在置信度不足时只触发轻量追问，不假装已经懂。
 - **后门可配置**：`allow_emotion_reset_backdoor`、`allow_humanlike_reset_backdoor`、`allow_lifelike_learning_reset_backdoor`、`allow_personality_drift_reset_backdoor`、`allow_moral_repair_reset_backdoor` 和 `allow_fallibility_reset_backdoor` 默认开启，便于异常状态紧急重置。
 
@@ -589,12 +597,17 @@ low_reasoning_max_context_chars = 1200
 /integrated_self
 ```
 
-如果打开了可选模块，再检查：
+自动运行的辅助状态也可以继续检查：
 
 ```text
 /humanlike_state
 /lifelike_state
 /personality_drift_state
+```
+
+如果打开了可选维护模块，再检查：
+
+```text
 /moral_repair_state
 /fallibility_state
 /psych_state
@@ -806,7 +819,7 @@ low_reasoning_max_context_chars = 1200
 ```mermaid
 flowchart TD
     A["用户输入 / 其他插件输入"] --> B["读取 session_key 与当前 persona"]
-    B --> C["加载 emotion_state 与辅助状态"]
+    B --> C["并发加载 emotion_state 与辅助状态"]
     C --> D{"assessment_timing 包含 pre ?"}
     D -- "是" --> E["LLM/启发式生成即时观测 X_t"]
     E --> F["本地公式更新 E_t 与 consequences"]
@@ -821,17 +834,22 @@ flowchart TD
     H -- "否" --> L
     L --> M["bot 回复"]
     M --> N{"assessment_timing 包含 post ?"}
-    N -- "是" --> O["post 评估进入后台队列并按序提交"]
-    N -- "否" --> P["结束"]
-    O --> P
+    N -- "是" --> O["post 评估进入后台队列"]
+    O --> P["自动压力评分：队列深度、等待年龄、重试、租约"]
+    P --> Q["自适应 workers：基础 1，总上限 6，空闲关闭"]
+    Q --> R["判断 LLM 闸门：默认 2 路，极端积压最多 3 路"]
+    R --> S["并行处理，结果按 sequence 顺序提交"]
+    S --> AC["写入 KV / 记忆注解 / runtime 诊断"]
+    N -- "否" --> T["结束"]
+    AC --> T
 
-    Q["主动发言调度器 / 其他插件 / get_bot_proactive_speech_decision"] --> R["并发读取情绪、共同语境、群聊氛围、拟人状态和人格漂移"]
-    R --> S["计算互需平衡、开口冲动、沉默舒适度、打断风险和冷却"]
-    S --> T{"本地公式允许开口 ?"}
-    T -- "否" --> U["保持沉默 / 短应 / 延后"]
-    T -- "是" --> V["从上下文抽取候选主题，不使用预设话题模板"]
-    V --> W["LLM 裁决需求、被需要感、话题方向和开口风格"]
-    W --> X["返回主动消息候选，由调用方决定是否发送"]
+    U["主动发言调度器 / 其他插件 / get_bot_proactive_speech_decision"] --> V["并发读取情绪、共同语境、群聊氛围、拟人状态和人格漂移"]
+    V --> W["计算互需平衡、开口冲动、沉默舒适度、打断风险和冷却"]
+    W --> X{"本地公式允许开口 ?"}
+    X -- "否" --> Y["保持沉默 / 短应 / 延后"]
+    X -- "是" --> Z["从上下文抽取候选主题，不使用预设话题模板"]
+    Z --> AA["LLM 裁决需求、被需要感、话题方向和开口风格"]
+    AA --> AB["返回主动消息候选，由调用方决定是否发送"]
 ```
 
 </details>
@@ -889,7 +907,7 @@ V_t & A_t & D_t & G_t & C_t & K_t & S_t
 | 长期更新 | `E'_t = B_t + alpha_t(X_t-B_t)` | 当前刺激会改变状态，但不能一轮文本完全覆盖长期情绪。 |
 | 真实时间 | `gamma_p(Delta t)=1-2^{-Delta t/H_p}` | 恢复和冷处理按真实时间衰减，不能靠刷屏强行洗掉。 |
 
-这套模型的工程折中是：LLM 负责语义评价，本地公式负责惯性、限幅、半衰期、人格基线和后果衰减。下面是完整论证，默认折叠，维护模型或写论文时再展开。
+这套模型的工程折中是：LLM 负责语义评价，本地公式负责惯性、限幅、半衰期、人格基线和后果衰减。下面是完整论证，已折叠；维护模型、复现实验或写论文时再展开。
 
 ### 真实时间人格漂移模型
 
@@ -1506,12 +1524,14 @@ enable_safety_boundary = false
 | `inject_state` | bool | `true` | 是否把当前状态临时注入主 LLM。 |
 | `max_context_chars` | int | `1600` | 情绪估计读取的最大上下文字数。 |
 | `request_context_max_chars` | int | `1600` | 生命周期钩子拼接上下文时的总字数上限。 |
-| `assessor_timeout_seconds` | float | `4.0` | 情绪估计 LLM 超时秒数；默认按 5 秒回复目标保守设置，超时后回退到启发式估计；追求质量可调高。 |
+| `assessor_timeout_seconds` | float | `0.0` | 情绪估计 LLM 硬超时秒数；`0` 表示不限制，等待模型自然返回。只有压测、成本保护或隔离极慢模型时才建议设为大于 `0`。 |
 | `provider_id_cache_ttl_seconds` | float | `30.0` | 未配置 `emotion_provider_id` 时，当前会话提供方标识的短缓存秒数。 |
 | `passive_load_fresh_seconds` | float | `1.0` | 短时间重复读状态时跳过被动衰减计算，减少公共 API 与注入路径延迟。 |
 | `benchmark_enable_simulated_time` | bool | `false` | 远程性能/生命周期基准测试专用；开启后允许测试脚本注入模拟时间偏移。 |
 | `benchmark_time_offset_seconds` | float | `0.0` | 远程性能/生命周期基准测试专用；仅在 `benchmark_enable_simulated_time=true` 时把观测时间视为 `time.time()+offset`。 |
 | `assessor_temperature` | float | `0.1` | 情绪估计模型 temperature。 |
+
+内部判断 LLM 的提示词会要求“尽快输出最低完整 JSON”：不写长推导，不输出 Markdown，但必须保留 7 维情绪、置信度、关系决策和冲突分析。这样控制的是输出篇幅，不是削掉建模字段；默认取消硬超时后，慢模型也能自然返回最低可用观测。
 
 `benchmark_enable_simulated_time` 和 `benchmark_time_offset_seconds` 只用于测试真实时间半衰期、人格漂移和长期状态模型。生产对话应保持默认关闭；生命周期 benchmark 会临时把 offset 设置为 `1d`、`1w`、`1m`、`1y` 等秒数，跑完后由远程脚本恢复原配置。
 
@@ -1526,35 +1546,35 @@ enable_safety_boundary = false
 
 ### 状态注入、后台评估与工具预算
 
-这些配置主要服务 `1.0.0` 的状态层整合：减少主回复链路等待、压缩临时 prompt 注入、把详细状态交给工具按需查询。
+这些配置主要服务 `1.0.0` 的状态层整合：减少主回复链路等待、压缩临时提示词（prompt）注入、把详细状态交给工具按需查询。
 
 | 配置项 | 类型 | 默认值 | 说明 |
 | --- | --- | --- | --- |
-| `background_post_queue_limit` | int | `0` | 每个会话后台 post 评估队列上限；`0` 表示不限制。 |
-| `enable_dynamic_background_workers` | bool | `false` | 高负载时允许每会话在基础 3 个后台 worker 外最多临时增加 5 个 worker；状态提交仍保持顺序。 |
+| `background_post_queue_limit` | int | `0` | 每个会话回复后后台评估（post）队列上限；`0` 表示不限制。 |
+| `enable_dynamic_background_workers` | bool | `false` | 高负载时允许插件按队列深度、等待时间、重试和租约压力自适应选择后台工作器（worker）数量；基础为 `1`，总 worker 数硬上限固定为 `6`，空闲后自动关闭，状态提交仍保持顺序。内部判断 LLM 另有并发闸门，默认最多 `2` 路、极端积压最多 `3` 路。 |
 | `background_post_queue_checkpoint_enabled` | bool | `true` | 将未提交后台队列写入 KV 检查点，重启后可恢复。 |
 | `background_post_job_lease_seconds` | float | `120.0` | 后台任务租约秒数；租约过期后可回收未完成任务。 |
 | `background_post_job_timeout_seconds` | float | `0.0` | 单个后台任务超时秒数；`0` 表示不启用任务级超时。 |
-| `background_post_retry_max_attempts` | int | `3` | 后台任务进入 dead-letter 前的最大尝试次数。 |
+| `background_post_retry_max_attempts` | int | `3` | 后台任务进入失败任务留存队列（dead-letter）前的最大尝试次数。 |
 | `background_post_retry_base_delay_seconds` | float | `2.0` | 后台任务重试指数退避的基础延迟。 |
 | `background_post_retry_max_delay_seconds` | float | `60.0` | 后台任务重试退避最大延迟。 |
-| `background_post_dead_letter_limit` | int | `100` | 每个会话保留的 dead-letter 诊断摘要数量。 |
+| `background_post_dead_letter_limit` | int | `100` | 每个会话保留的失败任务留存（dead-letter）诊断摘要数量。 |
 | `background_post_diagnostics_warn_lag_count` | int | `20` | 队列与活跃后台任务数量达到该值时诊断标记为 warn。 |
 | `background_post_diagnostics_warn_lag_seconds` | float | `60.0` | 最老后台任务等待超过该秒数时诊断标记为 warn。 |
 | `enable_low_signal_light_assessment` | bool | `true` | 对很短、低信号消息使用本地轻评估，避免无意义内部 LLM 调用。 |
 | `low_signal_max_chars` | int | `12` | 低信号轻评估的最大文本长度。 |
 | `state_injection_detail` | string | `compact` | 主情绪状态注入细节：`compact` 或 `full`。 |
 | `state_injection_compact_mode` | string | `snapshot` | 紧凑注入模式：`snapshot` 全量小快照，`diff` 只注入显著变化。 |
-| `state_injection_diff_threshold` | float | `0.08` | emotion diff 注入的最小维度变化阈值。 |
+| `state_injection_diff_threshold` | float | `0.08` | 核心情绪差分（diff）注入的最小维度变化阈值。 |
 | `state_injection_diff_force_every_turns` | int | `6` | diff 模式下强制发送紧凑快照的间隔轮数。 |
 | `auxiliary_state_injection_detail` | string | `compact` | 辅助状态注入细节：`compact`、`full` 或 `off`。 |
 | `state_injection_request_budget_chars` | int | `32000` | 主 LLM 请求可见字符预算估计；超预算时跳过状态注入。 |
-| `state_injection_reserved_chars` | int | `3000` | 给 provider 包装、工具 schema 和 persona 展开预留的字符余量。 |
+| `state_injection_reserved_chars` | int | `3000` | 给模型提供方包装、工具 schema 和 persona 展开预留的字符余量。 |
 | `state_injection_max_added_chars` | int | `2400` | 单次主请求中本插件最多追加的临时状态注入字符数。 |
 | `state_injection_max_parts` | int | `8` | 单次主请求中本插件最多追加的临时状态注入片段数。 |
 | `llm_tool_response_max_chars` | int | `16000` | 每个状态 LLM Tool 返回 JSON 的最大字符数。 |
 
-post 评估后台化默认自动开启，主回复结束后不会等待内部 post 评估完成，状态会稍后按会话顺序进入 KV。`enable_dynamic_background_workers=false` 时使用固定基础 worker，打开后才会在高负载下额外扩容；它可能增加 API、token 与 CPU 压力，所以默认关闭。
+回复后评估（post）后台化默认自动开启，主回复结束后不会等待内部 post 评估完成，状态会稍后按会话顺序进入 AstrBot KV。`enable_dynamic_background_workers=false` 时每个会话只使用基础 `1` 个后台 worker；打开后也不会直接跳到固定并发，而是由插件根据队列压力逐级扩容，空闲后自动收掉。它可能增加 API、token 与 CPU 压力，所以默认关闭。
 
 ### 群聊氛围、说话人轨道与因果轨迹
 
@@ -2198,7 +2218,7 @@ emotion_state -> humanlike_state -> 提示词/风格调制
 | `simulate_lifelike_update(event_or_session, text)` | 否 | 模拟更新，不落库。 |
 | `reset_lifelike_learning_state(event_or_session)` | 是 | 重置状态；受 `allow_lifelike_learning_reset_backdoor` 控制。 |
 
-默认关闭时，`get_lifelike_learning_snapshot(...)` 会返回 `enabled=false` 的载荷，`get_lifelike_initiative_policy(...)` 会退化为 `brief_ack`。第三方插件不应直接使用内部 KV，也不应把未确认黑话当作确定知识。
+插件整体关闭、旧版本兼容或内部降级时，`get_lifelike_learning_snapshot(...)` 会返回 `enabled=false` 的载荷，`get_lifelike_initiative_policy(...)` 会退化为 `brief_ack`。第三方插件不应直接使用内部 KV，也不应把未确认黑话当作确定知识。
 
 ### 道德修复 API
 
@@ -2639,7 +2659,14 @@ py -3.13 scripts\package_plugin.py --output dist\astrbot_plugin_emotional_state.
 
 ## 测试与维护
 
-远程测试、上传验证、性能基准和 LivingMemory 兼容检查的完整口径见 `docs/remote_testing.md`。`1.0.0` 沿用已完成的状态层正式性能数据：功能矩阵运行编号为 `remote-emotion-v050-gpt55-feature-state-layer-real`，请求模型 `gpt5.5`，实际选中 provider `1111/gpt-5.5` / 模型 `gpt-5.5`，并发 `3`，完整功能开关矩阵已完成 `2500/2500` 个有效样本，失败请求 `0`。同一配置面下的关闭情绪对照运行编号为 `remote-emotion-v050-gpt55-noemotion-control-state-layer-c3-250-real`：完成 `250/250`，失败请求 `0`。DeepSeek 功能矩阵已按用户要求取消，残留的 `295/2500` 探索样本不纳入正式结论。
+远程测试、上传验证、性能基准和 LivingMemory 兼容检查的完整口径见 `docs/remote_testing.md`。这里先给结论：`1.0.0` 已完成 gpt-5.5 功能矩阵和关闭情绪对照，目标插件样本失败数为 `0`；DeepSeek 功能矩阵已按用户要求取消，残留探索样本不纳入正式结论。
+
+<details>
+<summary>展开远程性能运行编号和样本口径</summary>
+
+`1.0.0` 沿用已完成的状态层正式性能数据：功能矩阵运行编号为 `remote-emotion-v050-gpt55-feature-state-layer-real`，请求模型 `gpt5.5`，实际选中 provider `1111/gpt-5.5` / 模型 `gpt-5.5`，并发 `3`，完整功能开关矩阵已完成 `2500/2500` 个有效样本，失败请求 `0`。同一配置面下的关闭情绪对照运行编号为 `remote-emotion-v050-gpt55-noemotion-control-state-layer-c3-250-real`：完成 `250/250`，失败请求 `0`。DeepSeek 功能矩阵残留 `295/2500` 探索样本，不作为正式性能结论。
+
+</details>
 
 跨模型生命周期模拟采用状态级模拟时间快速覆盖 `1d` 到 `1y`。当前每个模型为 9 个时间尺度各 1 条样本，所以它只能作为发布参考拟合，不能替代每个尺度 100 次以上的正式统计。
 
@@ -2666,6 +2693,9 @@ py -3.13 scripts\package_plugin.py --output dist\astrbot_plugin_emotional_state.
 
 </details>
 
+<details>
+<summary>展开 gpt-5.5 功能矩阵聚合表</summary>
+
 `gpt5.5` 正式聚合如下，延迟单位为毫秒，增量相对 `baseline_minimal`：
 
 | case | 有效样本 | 错误 | 平均延迟 | p95 延迟 | 平均 token | 平均延迟增量 | token 增量 |
@@ -2682,6 +2712,8 @@ py -3.13 scripts\package_plugin.py --output dist\astrbot_plugin_emotional_state.
 | `all_safe_modules` | 250 | 0 | 20777.29 | 27496.30 | 3329.84 | +4469.17 | +603.32 |
 
 关闭情绪对照与 `baseline_minimal` 的差异为：平均延迟 `-284.48 ms`，p95 延迟 `+1451.20 ms`，平均 token `+14.50`。端到端延迟包含 WebUI、AstrBot、插件、provider、网络和模型排队；本地插件热路径开销仍以 `scripts\benchmark_plugin_hot_path.py` 为准。生命周期测试改用模拟时间偏移快速覆盖 `1d` 到 `1y` 的真实秒差，不需要真的等待自然时间流逝。如果远程生命周期测试中途被中断，恢复前应确认 `benchmark_enable_simulated_time=false` 且 `benchmark_time_offset_seconds=0.0`。
+
+</details>
 
 ### 本地测试命令
 
@@ -2742,7 +2774,7 @@ $env:ASTRBOT_EXPECT_PLUGIN = "astrbot_plugin_emotional_state"
 脚本会在输出 JSON 里写出 `expectedPluginRuntime`，包含插件列表 API 中返回的 `version`、`displayName`、`activated`、`author`、`astrbotVersion` 等只读字段。若目标插件存在但 `activated=false`，脚本会失败退出。需要把版本和显示名也作为硬断言时，可以额外设置：
 
 ```powershell
-$env:ASTRBOT_EXPECT_PLUGIN_VERSION = "1.0.0"
+$env:ASTRBOT_EXPECT_PLUGIN_VERSION = "1.1.0"
 $env:ASTRBOT_EXPECT_PLUGIN_DISPLAY_NAME = "多维情绪状态"
 & $node scripts\remote_smoke_playwright.js
 ```
@@ -2961,7 +2993,7 @@ inject_state = false
 humanlike_memory_write_enabled = true
 ```
 
-拟人状态默认自动运行。若没有看到 `humanlike_state_at_write`，优先确认插件是否为 `1.0.0`、`humanlike_memory_write_enabled=true`，以及调用方是否保留了完整记忆载荷。
+拟人状态默认自动运行。若没有看到 `humanlike_state_at_write`，优先确认插件是否为 `1.1.0`、`humanlike_memory_write_enabled=true`，以及调用方是否保留了完整记忆载荷。
 
 ### 拟人状态没有生效
 

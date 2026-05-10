@@ -269,8 +269,15 @@ _INTERNAL_LLM_CALL: contextvars.ContextVar[bool] = contextvars.ContextVar(
 PERSONA_MODELING_ENABLED = True
 PERSONA_INFLUENCE_STRENGTH = 1.0
 RESET_ON_PERSONA_CHANGE = True
-BACKGROUND_POST_BASE_WORKERS = 3
+BACKGROUND_POST_BASE_WORKERS = 1
 BACKGROUND_POST_DYNAMIC_EXTRA_WORKER_CAP = 5
+BACKGROUND_POST_TOTAL_WORKER_CAP = (
+    BACKGROUND_POST_BASE_WORKERS + BACKGROUND_POST_DYNAMIC_EXTRA_WORKER_CAP
+)
+INTERNAL_ASSESSOR_LLM_BASE_CONCURRENCY = 2
+INTERNAL_ASSESSOR_LLM_BURST_CONCURRENCY = 3
+INTERNAL_ASSESSOR_LLM_BURST_READY_THRESHOLD = 32
+INTERNAL_ASSESSOR_LLM_BURST_WAIT_SECONDS = 90.0
 
 
 @dataclass
@@ -452,7 +459,7 @@ def get_emotional_state_plugin(context: Context) -> Any | None:
     PLUGIN_NAME,
     "pidan",
     "基于 PAD/OCC/appraisal 与情绪动力学的 AstrBot 多维情绪状态插件",
-    "1.0.0",
+    "1.1.0",
     "",
 )
 class EmotionalStatePlugin(Star):
@@ -521,6 +528,9 @@ class EmotionalStatePlugin(Star):
         self._background_post_checkpoint_tasks: set[asyncio.Task[Any]] = set()
         self._background_post_checkpoint_generation: dict[str, int] = {}
         self._background_post_checkpoint_locks: dict[str, asyncio.Lock] = {}
+        self._internal_assessor_llm_condition: asyncio.Condition | None = None
+        self._internal_assessor_llm_condition_loop: Any = None
+        self._internal_assessor_llm_inflight = 0
         self._state_injection_snapshot_cache: dict[str, dict[str, Any]] = {}
         self._group_atmosphere_injection_snapshot_cache: dict[str, dict[str, Any]] = {}
         self._terminating = False
@@ -1801,23 +1811,223 @@ class EmotionalStatePlugin(Star):
     def _dynamic_background_workers_enabled(self) -> bool:
         return self._cfg_bool("enable_dynamic_background_workers", False)
 
+    def _background_post_worker_pressure(self, session_key: str) -> dict[str, Any]:
+        queue = list(getattr(self, "_background_post_queues", {}).get(session_key) or ())
+        active = getattr(self, "_background_post_active", {}).get(session_key, {}) or {}
+        now = self._observed_now()
+        ready = [
+            job
+            for job in queue
+            if job.next_retry_at is None or job.next_retry_at <= now
+        ]
+        retrying = [
+            job
+            for job in queue
+            if job.next_retry_at is not None and job.next_retry_at > now
+        ]
+        expired = [
+            job
+            for job in active.values()
+            if job.lease_until is not None and job.lease_until <= now
+        ]
+        tracked = ready + list(active.values())
+        oldest_ready_age = (
+            max(0.0, now - min(job.observed_at for job in ready))
+            if ready
+            else 0.0
+        )
+        lag_seconds = (
+            max(0.0, now - min(job.observed_at for job in tracked))
+            if tracked
+            else 0.0
+        )
+        return {
+            "ready_count": len(ready),
+            "queued_count": len(queue),
+            "active_count": len(active),
+            "retrying_count": len(retrying),
+            "expired_lease_count": len(expired),
+            "oldest_ready_age_seconds": oldest_ready_age,
+            "lag_seconds": lag_seconds,
+        }
+
+    def _background_post_adaptive_worker_decision(
+        self,
+        session_key: str,
+    ) -> dict[str, Any]:
+        pressure = self._background_post_worker_pressure(session_key)
+        desired = BACKGROUND_POST_BASE_WORKERS
+        reasons: list[str] = ["base_single_worker"]
+        if self._dynamic_background_workers_enabled():
+            ready_count = pressure["ready_count"]
+            oldest_ready_age = pressure["oldest_ready_age_seconds"]
+            if ready_count >= 2 or oldest_ready_age >= 2.0:
+                desired = 2
+                reasons.append("moderate_queue_or_wait")
+            if ready_count >= 5 or oldest_ready_age >= 8.0:
+                desired = 3
+                reasons.append("sustained_backlog")
+            if ready_count >= 10 or oldest_ready_age >= 20.0:
+                desired = 4
+                reasons.append("heavy_backlog")
+            if ready_count >= 18 or oldest_ready_age >= 45.0:
+                desired = 5
+                reasons.append("severe_backlog")
+            if ready_count >= 32 or oldest_ready_age >= 90.0:
+                desired = 6
+                reasons.append("extreme_backlog")
+            if pressure["expired_lease_count"] and ready_count >= 2:
+                desired = min(
+                    BACKGROUND_POST_TOTAL_WORKER_CAP,
+                    desired + 1,
+                )
+                reasons.append("expired_lease_recovery")
+            if pressure["retrying_count"] and ready_count >= 4:
+                desired = min(
+                    BACKGROUND_POST_TOTAL_WORKER_CAP,
+                    desired + 1,
+                )
+                reasons.append("retry_pressure")
+        else:
+            reasons.append("dynamic_scale_disabled")
+        desired = max(
+            BACKGROUND_POST_BASE_WORKERS,
+            min(
+                BACKGROUND_POST_TOTAL_WORKER_CAP,
+                desired,
+            ),
+        )
+        return {
+            "desired_workers": desired,
+            "dynamic_extra_workers": max(0, desired - BACKGROUND_POST_BASE_WORKERS),
+            "reasons": reasons,
+            "pressure": pressure,
+            "idle_workers_close_automatically": True,
+        }
+
     def _background_post_dynamic_extra_workers(self, session_key: str) -> int:
         if not self._dynamic_background_workers_enabled():
             return 0
-        queue = getattr(self, "_background_post_queues", {}).get(session_key)
-        active = getattr(self, "_background_post_active", {}).get(session_key, {})
-        pressure = len(queue or ()) + len(active or {})
-        if pressure <= BACKGROUND_POST_BASE_WORKERS:
-            return 0
-        return min(
-            BACKGROUND_POST_DYNAMIC_EXTRA_WORKER_CAP,
-            max(0, pressure - BACKGROUND_POST_BASE_WORKERS),
+        return int(
+            self._background_post_adaptive_worker_decision(session_key)[
+                "dynamic_extra_workers"
+            ],
         )
 
     def _background_post_max_workers(self, session_key: str) -> int:
-        return BACKGROUND_POST_BASE_WORKERS + self._background_post_dynamic_extra_workers(
-            session_key,
+        return int(
+            self._background_post_adaptive_worker_decision(session_key)[
+                "desired_workers"
+            ],
         )
+
+    def _internal_assessor_llm_pressure(self) -> dict[str, Any]:
+        queues = getattr(self, "_background_post_queues", {}) or {}
+        active_map = getattr(self, "_background_post_active", {}) or {}
+        now = self._observed_now()
+        ready: list[_BackgroundPostJob] = []
+        queued: list[_BackgroundPostJob] = []
+        expired: list[_BackgroundPostJob] = []
+        for queue in queues.values():
+            for job in queue or ():
+                queued.append(job)
+                if job.next_retry_at is None or job.next_retry_at <= now:
+                    ready.append(job)
+        for active in active_map.values():
+            for job in (active or {}).values():
+                if job.lease_until is not None and job.lease_until <= now:
+                    expired.append(job)
+        oldest_ready_age = (
+            max(0.0, now - min(job.observed_at for job in ready))
+            if ready
+            else 0.0
+        )
+        return {
+            "ready_count": len(ready),
+            "queued_count": len(queued),
+            "expired_lease_count": len(expired),
+            "oldest_ready_age_seconds": oldest_ready_age,
+        }
+
+    def _internal_assessor_llm_concurrency_decision(self) -> dict[str, Any]:
+        pressure = self._internal_assessor_llm_pressure()
+        limit = INTERNAL_ASSESSOR_LLM_BASE_CONCURRENCY
+        reasons: list[str] = ["base_two_lane_guard"]
+        if self._dynamic_background_workers_enabled() and (
+            pressure["ready_count"] >= INTERNAL_ASSESSOR_LLM_BURST_READY_THRESHOLD
+            or pressure["oldest_ready_age_seconds"]
+            >= INTERNAL_ASSESSOR_LLM_BURST_WAIT_SECONDS
+            or pressure["expired_lease_count"] >= 2
+        ):
+            limit = INTERNAL_ASSESSOR_LLM_BURST_CONCURRENCY
+            reasons.append("temporary_extreme_backlog_burst")
+        limit = max(
+            1,
+            min(INTERNAL_ASSESSOR_LLM_BURST_CONCURRENCY, int(limit)),
+        )
+        return {
+            "limit": limit,
+            "base_limit": INTERNAL_ASSESSOR_LLM_BASE_CONCURRENCY,
+            "burst_limit": INTERNAL_ASSESSOR_LLM_BURST_CONCURRENCY,
+            "reasons": reasons,
+            "pressure": pressure,
+        }
+
+    def _internal_assessor_llm_condition_for_loop(self) -> asyncio.Condition:
+        loop = asyncio.get_running_loop()
+        if (
+            getattr(self, "_internal_assessor_llm_condition", None) is None
+            or getattr(self, "_internal_assessor_llm_condition_loop", None) is not loop
+        ):
+            self._internal_assessor_llm_condition = asyncio.Condition()
+            self._internal_assessor_llm_condition_loop = loop
+            self._internal_assessor_llm_inflight = 0
+        return self._internal_assessor_llm_condition
+
+    async def _acquire_internal_assessor_llm_slot(self) -> dict[str, Any]:
+        condition = self._internal_assessor_llm_condition_for_loop()
+        async with condition:
+            while True:
+                decision = self._internal_assessor_llm_concurrency_decision()
+                if self._internal_assessor_llm_inflight < decision["limit"]:
+                    self._internal_assessor_llm_inflight += 1
+                    return decision
+                await condition.wait()
+
+    async def _release_internal_assessor_llm_slot(self) -> None:
+        condition = self._internal_assessor_llm_condition_for_loop()
+        async with condition:
+            self._internal_assessor_llm_inflight = max(
+                0,
+                self._internal_assessor_llm_inflight - 1,
+            )
+            condition.notify_all()
+
+    async def _call_internal_assessor_llm(
+        self,
+        *,
+        provider_id: str,
+        prompt: str,
+        system_prompt: str,
+    ) -> Any:
+        await self._acquire_internal_assessor_llm_slot()
+        try:
+            call = self.context.llm_generate(
+                chat_provider_id=provider_id,
+                prompt=prompt,
+                system_prompt=system_prompt,
+                temperature=self._cfg_float("assessor_temperature", 0.1),
+            )
+            timeout_seconds = max(
+                0.0,
+                self._cfg_float("assessor_timeout_seconds", 0.0),
+            )
+            if timeout_seconds <= 0:
+                return await call
+            return await asyncio.wait_for(call, timeout=timeout_seconds)
+        finally:
+            await self._release_internal_assessor_llm_slot()
+
 
     async def _assess_background_post_job(
         self,
@@ -2873,6 +3083,10 @@ class EmotionalStatePlugin(Star):
             warning_level = "error"
         elif warnings:
             warning_level = "warn"
+        worker_decision = self._background_post_adaptive_worker_decision(session_key)
+        worker_pressure = worker_decision["pressure"]
+        assessor_llm_decision = self._internal_assessor_llm_concurrency_decision()
+        assessor_llm_pressure = assessor_llm_decision["pressure"]
         return {
             "enabled": self._background_post_assessment_enabled(),
             "checkpoint_enabled": self._cfg_bool(
@@ -2880,13 +3094,41 @@ class EmotionalStatePlugin(Star):
                 True,
             ),
             "queue_limit": max(0, self._cfg_int("background_post_queue_limit", 0)),
-            "max_workers": self._background_post_max_workers(session_key),
+            "max_workers": worker_decision["desired_workers"],
             "base_workers": BACKGROUND_POST_BASE_WORKERS,
             "dynamic_extra_workers_enabled": self._dynamic_background_workers_enabled(),
-            "dynamic_extra_workers": self._background_post_dynamic_extra_workers(
-                session_key,
-            ),
+            "dynamic_extra_workers": worker_decision["dynamic_extra_workers"],
             "dynamic_extra_worker_cap": BACKGROUND_POST_DYNAMIC_EXTRA_WORKER_CAP,
+            "total_worker_cap": BACKGROUND_POST_TOTAL_WORKER_CAP,
+            "worker_policy": "adaptive_pressure",
+            "worker_scale_reasons": worker_decision["reasons"],
+            "worker_ready_count": worker_pressure["ready_count"],
+            "worker_oldest_ready_age_seconds": round(
+                worker_pressure["oldest_ready_age_seconds"],
+                6,
+            ),
+            "idle_workers_close_automatically": worker_decision[
+                "idle_workers_close_automatically"
+            ],
+            "internal_assessor_llm_concurrency_policy": "adaptive_two_lane_guard",
+            "internal_assessor_llm_concurrency_limit": assessor_llm_decision["limit"],
+            "internal_assessor_llm_base_concurrency": assessor_llm_decision[
+                "base_limit"
+            ],
+            "internal_assessor_llm_burst_concurrency": assessor_llm_decision[
+                "burst_limit"
+            ],
+            "internal_assessor_llm_inflight": getattr(
+                self,
+                "_internal_assessor_llm_inflight",
+                0,
+            ),
+            "internal_assessor_llm_limit_reasons": assessor_llm_decision["reasons"],
+            "internal_assessor_llm_ready_count": assessor_llm_pressure["ready_count"],
+            "internal_assessor_llm_oldest_ready_age_seconds": round(
+                assessor_llm_pressure["oldest_ready_age_seconds"],
+                6,
+            ),
             "active_task": bool(active_task is not None and not active_task.done()),
             "active_workers": active_workers,
             "queued": queue_depth,
@@ -3950,16 +4192,12 @@ class EmotionalStatePlugin(Star):
         )
         token = _INTERNAL_LLM_CALL.set(True)
         try:
-            llm_resp = await asyncio.wait_for(
-                self.context.llm_generate(
-                    chat_provider_id=provider_id,
-                    prompt=prompt,
-                    system_prompt=(
-                        "你是插件内部的主动发言裁决器，只输出 JSON，不直接生成聊天回复。"
-                    ),
-                    temperature=self._cfg_float("assessor_temperature", 0.1),
+            llm_resp = await self._call_internal_assessor_llm(
+                provider_id=provider_id,
+                prompt=prompt,
+                system_prompt=(
+                    "你是插件内部的主动发言裁决器，只输出 JSON，不直接生成聊天回复。"
                 ),
-                timeout=max(0.1, self._cfg_float("assessor_timeout_seconds", 4.0)),
             )
         except asyncio.TimeoutError:
             fallback["reason"] += " 主动发言话题 LLM 裁决超时，使用本地回退。"
@@ -5424,14 +5662,10 @@ class EmotionalStatePlugin(Star):
 
         token = _INTERNAL_LLM_CALL.set(True)
         try:
-            llm_resp = await asyncio.wait_for(
-                self.context.llm_generate(
-                    chat_provider_id=provider_id,
-                    prompt=prompt,
-                    system_prompt=system_prompt,
-                    temperature=self._cfg_float("assessor_temperature", 0.1),
-                ),
-                timeout=max(0.1, self._cfg_float("assessor_timeout_seconds", 4.0)),
+            llm_resp = await self._call_internal_assessor_llm(
+                provider_id=provider_id,
+                prompt=prompt,
+                system_prompt=system_prompt,
             )
         except asyncio.TimeoutError:
             self._log_warning(f"{PLUGIN_NAME}: LLM 情绪估计超时，启用回退估计。")

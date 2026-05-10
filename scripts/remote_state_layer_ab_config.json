@@ -28,7 +28,7 @@
         "use_llm_assessor": false,
         "assessment_timing": "post",
         "background_post_assessment": true,
-        "background_post_max_workers": 5,
+        "enable_dynamic_background_workers": true,
         "background_post_queue_checkpoint_enabled": true,
         "background_post_dead_letter_limit": 100,
         "inject_state": true,

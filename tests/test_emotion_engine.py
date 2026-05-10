@@ -1573,6 +1573,35 @@ class EmotionEngineTests(unittest.TestCase):
         self.assertIn("unfair_argument_risk", light)
         self.assertNotIn("citation_ids", light)
 
+    def test_assessment_prompt_asks_for_fast_minimal_but_complete_json(self):
+        from prompts import (
+            ASSESSOR_SYSTEM_PROMPT,
+            LOW_REASONING_ASSESSOR_SYSTEM_PROMPT,
+            build_assessment_prompt,
+        )
+
+        profile = build_persona_profile(
+            persona_id="quiet",
+            name="quiet",
+            text="谨慎 内向 重视边界",
+        )
+        state = EmotionState.initial(profile)
+        prompt = build_assessment_prompt(
+            phase="pre_response",
+            previous_state=state,
+            persona_profile=profile,
+            context_text="用户之前道歉，但又重复开过界玩笑。",
+            current_text="对不起，我会改。",
+            max_context_chars=1200,
+        )
+
+        self.assertIn("尽快输出最低完整 JSON", prompt)
+        self.assertIn("最低完整不等于粗糙", prompt)
+        self.assertIn("relationship_decision", prompt)
+        self.assertIn("conflict_analysis", prompt)
+        self.assertIn("只做满足插件状态更新所需的最低完整判断", ASSESSOR_SYSTEM_PROMPT)
+        self.assertIn("保留 7 维情绪", LOW_REASONING_ASSESSOR_SYSTEM_PROMPT)
+
 
 if __name__ == "__main__":
     unittest.main()

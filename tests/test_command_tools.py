@@ -121,6 +121,9 @@ def new_plugin(config=None):
     plugin._background_post_checkpoint_tasks = set()
     plugin._background_post_checkpoint_generation = {}
     plugin._background_post_checkpoint_locks = {}
+    plugin._internal_assessor_llm_condition = None
+    plugin._internal_assessor_llm_condition_loop = None
+    plugin._internal_assessor_llm_inflight = 0
     plugin._state_injection_snapshot_cache = {}
     plugin._group_atmosphere_injection_snapshot_cache = {}
     plugin._terminating = False
@@ -1065,7 +1068,6 @@ class CommandAndToolSmokeTests(unittest.TestCase):
             {
                 "background_post_assessment": True,
                 "background_post_queue_limit": 2,
-                "background_post_max_workers": 3,
                 "background_post_diagnostics_warn_lag_count": 3,
                 "background_post_diagnostics_warn_lag_seconds": 999999999.0,
             },
@@ -1103,7 +1105,23 @@ class CommandAndToolSmokeTests(unittest.TestCase):
         self.assertTrue(bg["enabled"])
         self.assertTrue(bg["checkpoint_enabled"])
         self.assertEqual(bg["queue_limit"], 2)
-        self.assertEqual(bg["max_workers"], 3)
+        self.assertEqual(bg["max_workers"], 1)
+        self.assertEqual(bg["base_workers"], 1)
+        self.assertFalse(bg["dynamic_extra_workers_enabled"])
+        self.assertEqual(bg["dynamic_extra_workers"], 0)
+        self.assertEqual(bg["dynamic_extra_worker_cap"], 5)
+        self.assertEqual(bg["total_worker_cap"], 6)
+        self.assertEqual(bg["worker_policy"], "adaptive_pressure")
+        self.assertIn("dynamic_scale_disabled", bg["worker_scale_reasons"])
+        self.assertTrue(bg["idle_workers_close_automatically"])
+        self.assertEqual(
+            bg["internal_assessor_llm_concurrency_policy"],
+            "adaptive_two_lane_guard",
+        )
+        self.assertEqual(bg["internal_assessor_llm_concurrency_limit"], 2)
+        self.assertEqual(bg["internal_assessor_llm_base_concurrency"], 2)
+        self.assertEqual(bg["internal_assessor_llm_burst_concurrency"], 3)
+        self.assertEqual(bg["internal_assessor_llm_inflight"], 0)
         self.assertTrue(bg["active_task"])
         self.assertEqual(bg["queued"], 2)
         self.assertEqual(bg["queue_depth"], 2)
