@@ -3023,3 +3023,45 @@ Decision:
   - disclaimer,
   - 100 full-feature remote stability tests,
   - formal release version `1.0.0`, no suffix.
+
+## 2026-05-10 Proactive Dispatch Execution Layer
+
+Status: implemented locally; not uploaded in this turn.
+
+What changed:
+
+- `get_proactive_speech_decision(...)` remains the read-only decision API, but now includes a `dispatch_request` payload with reason, evidence, message text, origin, idempotency key, TTL, and blocked/sent fields.
+- Added `request_proactive_speech_dispatch(...)` as the side-effect API. It can call AstrBot `context.send_message(unified_msg_origin, MessageChain().message(text))` when:
+  - model/formula decision requests speech,
+  - `enable_proactive_speech_dispatch=true` or caller uses `force=True`,
+  - an event with `unified_msg_origin` is available,
+  - `context.send_message` exists,
+  - same-session cooldown is not active.
+- Added LLM tool `request_bot_proactive_speech_dispatch`; it defaults to `dry_run=True` so a tool call can inspect the dispatch request without sending.
+- Added topic/intent evidence modes:
+  - `progress_check`
+  - `missing_user`
+  - `playful_ping`
+  - `prank_light`
+- Added config keys:
+  - `enable_proactive_speech_dispatch=false`
+  - `proactive_speech_dispatch_cooldown_seconds=1800.0`
+  - `proactive_speech_dispatch_ttl_seconds=120`
+  - `proactive_speech_max_chars=160`
+- Updated README and `docs/assets/workflow_and_proactive.svg` to show proactive decision -> dispatch request -> optional AstrBot send.
+
+Validation:
+
+- `py -3.13 -m unittest tests.test_lifelike_learning_engine tests.test_public_api tests.test_command_tools tests.test_config_schema_contract -v`: 158 tests OK.
+- `py -3.13 -m unittest discover -s tests -v`: 391 tests OK.
+- `py -3.13 -m py_compile main.py lifelike_learning_engine.py public_api.py tests\test_public_api.py tests\test_command_tools.py tests\test_lifelike_learning_engine.py`: OK.
+- `python -m json.tool _conf_schema.json`: OK.
+- SVG XML parse for `docs/assets/workflow_and_proactive.svg`: OK.
+- `py -3.13 scripts\package_plugin.py --output dist\astrbot_plugin_emotional_state.zip`: OK.
+- Bundled Node zip preflight: `{"ok":true,"size":301813,"entries":32}`.
+- `git diff --check`: OK, with expected CRLF warnings only.
+
+Notes:
+
+- Bare `rg.exe` and `node.exe` were access-denied in this environment; used PowerShell `Select-String` and bundled Node fallback.
+- Official AstrBot send-message guidance checked on 2026-05-10: proactive messages should use saved `event.unified_msg_origin` and `self.context.send_message(unified_msg_origin, MessageChain().message(...))`.

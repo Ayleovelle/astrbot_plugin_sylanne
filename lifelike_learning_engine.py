@@ -71,6 +71,11 @@ _USER_NEED_RE = re.compile(
 _BOT_NEEDED_RE = re.compile(
     r"(?:你需要我|你也可以需要|bot.*需要|让.*被需要|我也想帮上忙|可以依靠我)"
 )
+_PROGRESS_TOPIC_RE = re.compile(
+    r"(?:进度|做到哪|怎么样了|论文|作业|项目|实验|测试|服务器|仓库|代码|迭代|复习|考试|ddl|deadline|"
+    r"研究|课题|开题|投稿|桥梁|隧道|模型|训练|数据|报告|文档|README)",
+    re.IGNORECASE,
+)
 
 
 def clamp(value: Any, lower: float = 0.0, upper: float = 1.0) -> float:
@@ -1184,6 +1189,110 @@ def rank_proactive_topics(
     being_needed = values.get("being_needed_readiness", 0.0)
     need_expression = values.get("need_expression_readiness", 0.0)
     boundary = values.get("boundary_sensitivity", 0.0)
+    rapport = values.get("rapport", 0.0)
+    common = values.get("common_ground", 0.0)
+    playfulness = group_values.get("playfulness", 0.0)
+    progress_sources: list[str] = []
+    for key, value in list(profile.facts.items())[:16]:
+        item = f"{key}: {value}".strip(": ")
+        if _PROGRESS_TOPIC_RE.search(item):
+            progress_sources.append(item[:120])
+    for note in profile.need_notes[:12]:
+        if _PROGRESS_TOPIC_RE.search(note):
+            progress_sources.append(note[:120])
+    if candidate_context and _PROGRESS_TOPIC_RE.search(candidate_context):
+        progress_sources.append(candidate_context.strip()[-120:])
+    progress_sources = _dedupe(progress_sources)[:4]
+    if progress_sources:
+        progress_score = (
+            0.22
+            + 0.24 * common
+            + 0.20 * values.get("preference_confidence", 0.0)
+            + 0.16 * being_needed
+            + 0.12 * rapport
+            - 0.14 * boundary
+        )
+        candidates.append(
+            {
+                "topic": progress_sources[0],
+                "kind": "progress_check",
+                "score": round(clamp(progress_score), 6),
+                "ask_before_using": False,
+                "confidence": round(clamp(0.35 + 0.35 * common), 6),
+                "reason": "用户近期事项或上下文出现进度线索，适合低打扰关心进展",
+                "evidence": {
+                    "sources": progress_sources,
+                    "common_ground": round(common, 6),
+                    "being_needed_readiness": round(being_needed, 6),
+                },
+            },
+        )
+    missing_score = (
+        0.18
+        + 0.28 * need_expression
+        + 0.24 * mutual_need
+        + 0.16 * rapport
+        + 0.12 * max(0.0, emotion_values.get("affiliation", 0.0))
+        - 0.24 * boundary
+    )
+    if missing_score >= 0.36:
+        candidates.append(
+            {
+                "topic": "",
+                "kind": "missing_user",
+                "score": round(clamp(missing_score), 6),
+                "ask_before_using": True,
+                "confidence": round(clamp(max(need_expression, mutual_need, rapport)), 6),
+                "reason": "互需与亲近信号较高，允许表达克制的想念或想确认用户是否还在",
+                "evidence": {
+                    "need_expression_readiness": round(need_expression, 6),
+                    "mutual_need_balance": round(mutual_need, 6),
+                    "rapport": round(rapport, 6),
+                },
+            },
+        )
+    playful_score = (
+        0.16
+        + 0.30 * playfulness
+        + 0.18 * rapport
+        + 0.12 * max(0.0, emotion_values.get("valence", 0.0))
+        - 0.20 * boundary
+        - 0.22 * group_values.get("tension", 0.0)
+        - 0.18 * group_values.get("interrupt_risk", 0.0)
+    )
+    if playful_score >= 0.34:
+        candidates.append(
+            {
+                "topic": "",
+                "kind": "playful_ping",
+                "score": round(clamp(playful_score), 6),
+                "ask_before_using": True,
+                "confidence": round(clamp(max(playfulness, rapport)), 6),
+                "reason": "群聊或关系氛围较轻松，适合调皮地轻轻打扰一下",
+                "evidence": {
+                    "playfulness": round(playfulness, 6),
+                    "rapport": round(rapport, 6),
+                    "interrupt_risk": round(group_values.get("interrupt_risk", 0.0), 6),
+                },
+            },
+        )
+    prank_score = playful_score - 0.08 + 0.10 * common - 0.10 * boundary
+    if prank_score >= 0.42:
+        candidates.append(
+            {
+                "topic": "",
+                "kind": "prank_light",
+                "score": round(clamp(prank_score), 6),
+                "ask_before_using": True,
+                "confidence": round(clamp(max(playfulness, common)), 6),
+                "reason": "轻松氛围和共同语境足够，可选择不伤人的轻量整蛊式开场",
+                "evidence": {
+                    "playfulness": round(playfulness, 6),
+                    "common_ground": round(common, 6),
+                    "boundary_sensitivity": round(boundary, 6),
+                },
+            },
+        )
     if max(mutual_need, being_needed, need_expression) >= 0.32:
         candidates.append(
             {
@@ -1239,8 +1348,10 @@ def build_proactive_topic_assessment_prompt(
 约束：
 1. 不要使用预设话题模板。只能根据上下文、状态信号、候选证据和关系需要选择话题。
 2. “双方都有需要和被需要”可以成立，但必须克制：不能黏人，不能用情绪绑架用户，不能假装知道没有证据的黑话。
-3. 如果证据不足，topic_text 留空或写成轻量澄清方向；不要编造用户喜好。
-4. 输出必须是 JSON 对象，不要输出 Markdown。
+3. 可以选择关心用户某件事的进度、表达克制想念、调皮打扰、轻量整蛊或关系修复；但必须能从候选证据、最近上下文或状态信号中说明理由。
+4. 轻量整蛊只能是无害玩笑、假装敲门、卖关子一秒这种短互动，不能欺骗事实、威胁、羞辱、诱导转账或破坏用户任务。
+5. 如果证据不足，topic_text 留空或写成轻量澄清方向；不要编造用户喜好。
+6. 输出必须是 JSON 对象，不要输出 Markdown。
 
 主动发言模型结果：
 {json_dumps_compact(decision)}
@@ -1254,10 +1365,12 @@ def build_proactive_topic_assessment_prompt(
 输出 JSON schema：
 {{
   "should_speak": true,
-  "need_mode": "user_need|bot_need|mutual_need|repair|clarify|listen|silence",
+  "need_mode": "user_need|bot_need|mutual_need|repair|clarify|listen|silence|progress_check|missing_user|playful_ping|prank_light",
   "topic_text": "由上下文推理出的具体话题；无合适话题时留空",
   "speech_intent": "一句话说明主动开口想满足什么需要",
-  "opening_style": "short_care|light_question|repair_bid|shared_context|quiet_presence|stay_silent",
+  "opening_style": "short_care|light_question|repair_bid|shared_context|quiet_presence|stay_silent|progress_check|playful_ping|tiny_prank",
+  "topic_evidence": "一句话说明话题证据来自哪里，例如用户近期事项、共同语境、状态信号或最近上下文",
+  "draft_message": "给发送层参考的一句短消息，不要超过 80 个汉字；不确定时留空",
   "confidence": 0.0,
   "reason": "一句话解释为什么此刻这样处理"
 }}"""
@@ -1275,6 +1388,10 @@ def normalize_proactive_topic_judgement(data: Any) -> dict[str, Any] | None:
         "clarify",
         "listen",
         "silence",
+        "progress_check",
+        "missing_user",
+        "playful_ping",
+        "prank_light",
     }:
         need_mode = "clarify"
     opening_style = str(data.get("opening_style") or "light_question").strip()
@@ -1285,6 +1402,9 @@ def normalize_proactive_topic_judgement(data: Any) -> dict[str, Any] | None:
         "shared_context",
         "quiet_presence",
         "stay_silent",
+        "progress_check",
+        "playful_ping",
+        "tiny_prank",
     }:
         opening_style = "light_question"
     return {
@@ -1295,6 +1415,8 @@ def normalize_proactive_topic_judgement(data: Any) -> dict[str, Any] | None:
         "topic_text": str(data.get("topic_text") or "").strip()[:160],
         "speech_intent": str(data.get("speech_intent") or "").strip()[:200],
         "opening_style": opening_style,
+        "topic_evidence": str(data.get("topic_evidence") or "").strip()[:240],
+        "draft_message": str(data.get("draft_message") or "").strip()[:120],
         "confidence": round(clamp(data.get("confidence")), 6),
         "reason": str(data.get("reason") or "").strip()[:240],
         "source": "llm",
@@ -1308,9 +1430,19 @@ def local_proactive_topic_judgement(
     needs = decision.get("needs") if isinstance(decision.get("needs"), dict) else {}
     flags = set(decision.get("flags") or [])
     action = str(decision.get("action") or "")
+    selected = topic_candidates[0] if topic_candidates else {}
+    selected_kind = str(selected.get("kind") or "")
     if action == "stay_silent":
         need_mode = "silence"
         opening_style = "stay_silent"
+    elif selected_kind in {"progress_check", "missing_user", "playful_ping", "prank_light"}:
+        need_mode = selected_kind
+        opening_style = {
+            "progress_check": "progress_check",
+            "missing_user": "light_question",
+            "playful_ping": "playful_ping",
+            "prank_light": "tiny_prank",
+        }[selected_kind]
     elif "repair_topic_preferred" in flags or action == "repair_bid":
         need_mode = "repair"
         opening_style = "repair_bid"
@@ -1329,8 +1461,10 @@ def local_proactive_topic_judgement(
     else:
         need_mode = "listen"
         opening_style = "quiet_presence"
-    selected = topic_candidates[0] if topic_candidates else {}
     topic_text = str(selected.get("topic") or "").strip()
+    topic_evidence = selected.get("reason", "")
+    if isinstance(selected.get("evidence"), dict):
+        topic_evidence = json_dumps_compact(selected.get("evidence"))
     return {
         "schema_version": "astrbot.proactive_topic_judgement.v1",
         "kind": "llm_topic_judgement",
@@ -1339,6 +1473,8 @@ def local_proactive_topic_judgement(
         "topic_text": topic_text[:160],
         "speech_intent": _local_topic_intent(need_mode),
         "opening_style": opening_style,
+        "topic_evidence": str(topic_evidence or "")[:240],
+        "draft_message": _local_topic_draft(need_mode, topic_text),
         "confidence": round(clamp(selected.get("confidence", decision.get("score", 0.0))), 6),
         "reason": "本地回退：根据需求向量、边界和候选证据选择发言方向，具体措辞交给上层 LLM。",
         "source": "local_fallback",
@@ -1358,8 +1494,39 @@ def _local_topic_intent(need_mode: str) -> str:
         "clarify": "在证据不足时先温和确认，不装懂。",
         "listen": "保持低打扰陪伴，把话语权留给用户。",
         "silence": "此刻沉默或极短回应比主动展开更合适。",
+        "progress_check": "基于用户近期事项或上下文进度线索，低打扰地关心进展。",
+        "missing_user": "表达克制的想念和陪伴需要，同时给用户保留不回复的空间。",
+        "playful_ping": "在氛围轻松时调皮地打个招呼，维持有来有往的关系感。",
+        "prank_light": "用无害的小玩笑制造一点互动感，不改变事实也不制造压力。",
     }
     return mapping.get(need_mode, mapping["clarify"])
+
+
+def _local_topic_draft(need_mode: str, topic_text: str) -> str:
+    topic = str(topic_text or "").strip()
+    if need_mode == "progress_check":
+        if topic:
+            return f"那、那个……你之前提到的{topic}，现在进度还顺吗？"
+        return "那、那个……你之前那件事，现在进度还顺吗？"
+    if need_mode == "missing_user":
+        return "那、那个……我只是路过确认一下，你今天还好吗？"
+    if need_mode == "playful_ping":
+        return "咦，我、我来轻轻敲一下门。你现在方便被打扰一下吗？"
+    if need_mode == "prank_light":
+        return "等、等等，我发现一件很重要的小事：你是不是又在偷偷忙到忘记休息了？"
+    if need_mode == "repair":
+        return "那、那个……刚才如果我哪里说重了，我想先轻轻澄清一下。"
+    if need_mode == "user_need":
+        return "那、那个……你现在需要我陪你把这件事顺一下吗？"
+    if need_mode == "bot_need":
+        return "我、我也想参与一点点，可以吗？"
+    if need_mode == "mutual_need":
+        return "那、那个……我想确认一下，我们现在这样互相需要的节奏还舒服吗？"
+    if need_mode == "clarify":
+        return "我有点不确定，能不能轻轻确认一句？"
+    if need_mode == "listen":
+        return "我在。你要是想继续说，我会听。"
+    return ""
 
 
 def lifelike_state_to_public_payload(

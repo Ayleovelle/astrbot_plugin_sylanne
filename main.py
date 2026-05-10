@@ -396,6 +396,7 @@ _REQUIRED_EMOTION_SERVICE_METHODS: tuple[str, ...] = (
     "get_lifelike_learning_snapshot",
     "get_lifelike_initiative_policy",
     "get_proactive_speech_decision",
+    "request_proactive_speech_dispatch",
     "get_lifelike_prompt_fragment",
     "observe_lifelike_text",
     "simulate_lifelike_update",
@@ -459,7 +460,7 @@ def get_emotional_state_plugin(context: Context) -> Any | None:
     PLUGIN_NAME,
     "pidan",
     "基于 PAD/OCC/appraisal 与情绪动力学的 AstrBot 多维情绪状态插件",
-    "1.1.0",
+    "1.2.0",
     "",
 )
 class EmotionalStatePlugin(Star):
@@ -531,6 +532,8 @@ class EmotionalStatePlugin(Star):
         self._internal_assessor_llm_condition: asyncio.Condition | None = None
         self._internal_assessor_llm_condition_loop: Any = None
         self._internal_assessor_llm_inflight = 0
+        self._proactive_dispatch_last_sent: dict[str, float] = {}
+        self._proactive_dispatch_audit: dict[str, deque[dict[str, Any]]] = {}
         self._state_injection_snapshot_cache: dict[str, dict[str, Any]] = {}
         self._group_atmosphere_injection_snapshot_cache: dict[str, dict[str, Any]] = {}
         self._terminating = False
@@ -4157,12 +4160,116 @@ class EmotionalStatePlugin(Star):
             decision["should_speak"] = False
             decision["action"] = "stay_silent"
         decision["dispatch_policy"] = {
-            "external_dispatch_required": True,
-            "plugin_only_decides": True,
+            "external_dispatch_required": False,
+            "plugin_only_decides": False,
             "silence_is_valid": True,
             "ordered_state_commit_required": True,
+            "plugin_can_request_astrbot_send": True,
+            "send_api": "context.send_message(unified_msg_origin, MessageChain().message(text))",
+            "direct_send_method": "request_proactive_speech_dispatch",
         }
+        decision["dispatch_request"] = self._build_proactive_dispatch_request(
+            decision,
+            event_or_session=event_or_session,
+            session_key=session_key,
+            candidate_context=candidate_context,
+        )
         return decision
+
+    async def request_proactive_speech_dispatch(
+        self,
+        event_or_session: AstrMessageEvent | str | None = None,
+        *,
+        request: ProviderRequest | None = None,
+        session_key: str | None = None,
+        candidate_context: str = "",
+        use_llm: bool = True,
+        dry_run: bool = False,
+        force: bool = False,
+        message_text: str = "",
+    ) -> dict[str, Any]:
+        """Public API: request and optionally execute an AstrBot proactive send."""
+        resolved_session = self._resolve_public_session_key(
+            event_or_session,
+            request=request,
+            session_key=session_key,
+        )
+        decision = await self.get_proactive_speech_decision(
+            event_or_session,
+            request=request,
+            session_key=resolved_session,
+            candidate_context=candidate_context,
+            use_llm=use_llm,
+        )
+        dispatch = self._build_proactive_dispatch_request(
+            decision,
+            event_or_session=event_or_session,
+            session_key=resolved_session,
+            candidate_context=candidate_context,
+            override_text=message_text,
+        )
+        dispatch["dry_run"] = bool(dry_run)
+        dispatch["force"] = bool(force)
+        blocked_reason = self._proactive_dispatch_blocked_reason(
+            decision,
+            dispatch,
+            event_or_session=event_or_session,
+            dry_run=dry_run,
+            force=force,
+        )
+        if blocked_reason:
+            dispatch["sent"] = False
+            dispatch["blocked_reason"] = blocked_reason
+            self._record_proactive_dispatch_audit(resolved_session, dispatch)
+            return {
+                "schema_version": "astrbot.proactive_dispatch_result.v1",
+                "kind": "proactive_dispatch_result",
+                "session_key": resolved_session,
+                "decision": decision,
+                "dispatch_request": dispatch,
+                "sent": False,
+                "blocked_reason": blocked_reason,
+            }
+        try:
+            send_result = await self._send_proactive_message(event_or_session, dispatch["message_text"])
+        except Exception as exc:
+            dispatch["sent"] = False
+            dispatch["blocked_reason"] = "send_failed"
+            dispatch["send_error"] = str(exc)[:240]
+            self._record_proactive_dispatch_audit(resolved_session, dispatch)
+            return {
+                "schema_version": "astrbot.proactive_dispatch_result.v1",
+                "kind": "proactive_dispatch_result",
+                "session_key": resolved_session,
+                "decision": decision,
+                "dispatch_request": dispatch,
+                "sent": False,
+                "blocked_reason": "send_failed",
+            }
+        now = self._observed_now()
+        self._proactive_last_sent_cache()[resolved_session] = now
+        dispatch["sent"] = True
+        dispatch["sent_at"] = now
+        dispatch["send_result"] = send_result
+        self._record_proactive_dispatch_audit(resolved_session, dispatch)
+        await self.observe_lifelike_text(
+            event_or_session,
+            dispatch["message_text"],
+            request=request,
+            session_key=resolved_session,
+            source="proactive_dispatch",
+            commit=True,
+            observed_at=now,
+        )
+        return {
+            "schema_version": "astrbot.proactive_dispatch_result.v1",
+            "kind": "proactive_dispatch_result",
+            "session_key": resolved_session,
+            "decision": decision,
+            "dispatch_request": dispatch,
+            "sent": True,
+            "blocked_reason": "",
+        }
 
     async def _judge_proactive_topic(
         self,
@@ -4232,6 +4339,233 @@ class EmotionalStatePlugin(Star):
         except json.JSONDecodeError:
             return None
         return normalize_proactive_topic_judgement(data)
+
+    def _build_proactive_dispatch_request(
+        self,
+        decision: dict[str, Any],
+        *,
+        event_or_session: AstrMessageEvent | str | None,
+        session_key: str,
+        candidate_context: str,
+        override_text: str = "",
+    ) -> dict[str, Any]:
+        judgement = decision.get("topic_judgement")
+        if not isinstance(judgement, dict):
+            judgement = {}
+        topic = decision.get("selected_topic")
+        if not isinstance(topic, dict):
+            topic = {}
+        message_text = self._compose_proactive_message_text(
+            judgement,
+            selected_topic=topic,
+            override_text=override_text,
+        )
+        topic_evidence = str(
+            judgement.get("topic_evidence")
+            or topic.get("reason")
+            or decision.get("reason")
+            or "",
+        ).strip()
+        origin = self._proactive_unified_msg_origin(event_or_session)
+        request_payload = {
+            "schema_version": "astrbot.proactive_dispatch_request.v1",
+            "kind": "proactive_dispatch_request",
+            "requested": bool(decision.get("should_speak"))
+            and bool(judgement.get("should_speak", True))
+            and str(judgement.get("need_mode") or "") != "silence",
+            "session_key": session_key,
+            "unified_msg_origin": origin,
+            "action": str(decision.get("action") or ""),
+            "need_mode": str(judgement.get("need_mode") or ""),
+            "opening_style": str(judgement.get("opening_style") or ""),
+            "speech_intent": str(judgement.get("speech_intent") or "")[:200],
+            "topic_text": str(judgement.get("topic_text") or topic.get("topic") or "")[:160],
+            "topic_evidence": topic_evidence[:240],
+            "reason": str(judgement.get("reason") or decision.get("reason") or "")[:240],
+            "message_text": message_text,
+            "max_chars": max(1, self._cfg_int("proactive_speech_max_chars", 160)),
+            "idempotency_key": self._proactive_dispatch_idempotency_key(
+                session_key=session_key,
+                decision=decision,
+                message_text=message_text,
+            ),
+            "ttl_seconds": max(1, self._cfg_int("proactive_speech_dispatch_ttl_seconds", 120)),
+            "requires_generation": False,
+            "context_excerpt": self._clip(str(candidate_context or ""), 160),
+            "sent": False,
+            "blocked_reason": "",
+        }
+        if not request_payload["message_text"]:
+            request_payload["requested"] = False
+            request_payload["blocked_reason"] = "empty_message"
+        return request_payload
+
+    def _compose_proactive_message_text(
+        self,
+        judgement: dict[str, Any],
+        *,
+        selected_topic: dict[str, Any],
+        override_text: str = "",
+    ) -> str:
+        max_chars = max(1, self._cfg_int("proactive_speech_max_chars", 160))
+        raw = str(override_text or judgement.get("draft_message") or "").strip()
+        if not raw:
+            need_mode = str(judgement.get("need_mode") or "")
+            topic = str(judgement.get("topic_text") or selected_topic.get("topic") or "").strip()
+            raw = self._fallback_proactive_message(need_mode, topic)
+        return self._clip_one_line(raw, max_chars)
+
+    def _fallback_proactive_message(self, need_mode: str, topic: str) -> str:
+        topic = str(topic or "").strip()
+        if need_mode == "progress_check":
+            if topic:
+                return f"那、那个……你之前提到的{topic}，现在进度还顺吗？"
+            return "那、那个……你之前那件事，现在进度还顺吗？"
+        if need_mode == "missing_user":
+            return "那、那个……我只是路过确认一下，你今天还好吗？"
+        if need_mode == "playful_ping":
+            return "咦，我、我来轻轻敲一下门。你现在方便被打扰一下吗？"
+        if need_mode == "prank_light":
+            return "等、等等，我发现一件重要小事：你是不是又在偷偷忙到忘记休息了？"
+        if need_mode == "repair":
+            return "那、那个……刚才如果我哪里说重了，我想先轻轻澄清一下。"
+        if need_mode == "user_need":
+            return "那、那个……你现在需要我陪你把这件事顺一下吗？"
+        if need_mode == "bot_need":
+            return "我、我也想参与一点点，可以吗？"
+        if need_mode == "mutual_need":
+            return "那、那个……我想确认一下，我们现在这样互相需要的节奏还舒服吗？"
+        if need_mode == "clarify":
+            return "我有点不确定，能不能轻轻确认一句？"
+        if need_mode == "listen":
+            return "我在。你要是想继续说，我会听。"
+        return ""
+
+    def _proactive_dispatch_blocked_reason(
+        self,
+        decision: dict[str, Any],
+        dispatch: dict[str, Any],
+        *,
+        event_or_session: AstrMessageEvent | str | None,
+        dry_run: bool,
+        force: bool,
+    ) -> str:
+        if dry_run:
+            return "dry_run"
+        if not dispatch.get("requested"):
+            return str(dispatch.get("blocked_reason") or "decision_declined")
+        if not force and not self._cfg_bool("enable_proactive_speech_dispatch", False):
+            return "dispatch_disabled"
+        if not self._looks_like_event(event_or_session):
+            return "missing_event_origin"
+        if not dispatch.get("unified_msg_origin"):
+            return "missing_unified_msg_origin"
+        if not str(dispatch.get("message_text") or "").strip():
+            return "empty_message"
+        if self._proactive_dispatch_on_cooldown(str(dispatch.get("session_key") or "")):
+            return "cooldown_active"
+        if not hasattr(getattr(self, "context", None), "send_message"):
+            return "missing_send_message_api"
+        if decision.get("action") == "stay_silent":
+            return "decision_silence"
+        return ""
+
+    def _proactive_dispatch_on_cooldown(self, session_key: str) -> bool:
+        cooldown = max(
+            0.0,
+            self._cfg_float("proactive_speech_dispatch_cooldown_seconds", 1800.0),
+        )
+        if cooldown <= 0:
+            return False
+        last_sent = self._proactive_last_sent_cache().get(session_key)
+        if last_sent is None:
+            return False
+        return self._observed_now() - float(last_sent) < cooldown
+
+    def _proactive_last_sent_cache(self) -> dict[str, float]:
+        cache = getattr(self, "_proactive_dispatch_last_sent", None)
+        if cache is None:
+            cache = {}
+            self._proactive_dispatch_last_sent = cache
+        return cache
+
+    def _record_proactive_dispatch_audit(self, session_key: str, dispatch: dict[str, Any]) -> None:
+        audit = getattr(self, "_proactive_dispatch_audit", None)
+        if audit is None:
+            audit = {}
+            self._proactive_dispatch_audit = audit
+        entries = audit.setdefault(session_key, deque(maxlen=24))
+        entries.append(
+            {
+                "schema_version": "astrbot.proactive_dispatch_audit.v1",
+                "recorded_at": self._observed_now(),
+                "idempotency_key": dispatch.get("idempotency_key"),
+                "requested": bool(dispatch.get("requested")),
+                "sent": bool(dispatch.get("sent")),
+                "blocked_reason": dispatch.get("blocked_reason", ""),
+                "need_mode": dispatch.get("need_mode", ""),
+                "topic_text": dispatch.get("topic_text", ""),
+                "topic_evidence": dispatch.get("topic_evidence", ""),
+            },
+        )
+
+    async def _send_proactive_message(
+        self,
+        event_or_session: AstrMessageEvent | str | None,
+        text: str,
+    ) -> dict[str, Any]:
+        origin = self._proactive_unified_msg_origin(event_or_session)
+        if not origin:
+            raise RuntimeError("missing unified_msg_origin")
+        send_message = getattr(getattr(self, "context", None), "send_message", None)
+        if not callable(send_message):
+            raise RuntimeError("context.send_message is not available")
+        message = self._build_astrbot_message_chain(text)
+        result = await send_message(origin, message)
+        return {
+            "api": "context.send_message",
+            "unified_msg_origin": origin,
+            "message_type": type(message).__name__,
+            "result": self._bounded_scalar_or_summary(result),
+        }
+
+    def _build_astrbot_message_chain(self, text: str) -> Any:
+        try:
+            from astrbot.api.event import MessageChain  # type: ignore
+
+            chain = MessageChain()
+            if hasattr(chain, "message") and callable(chain.message):
+                return chain.message(str(text))
+        except Exception:
+            pass
+        return str(text)
+
+    def _proactive_unified_msg_origin(
+        self,
+        event_or_session: AstrMessageEvent | str | None,
+    ) -> str:
+        if self._looks_like_event(event_or_session):
+            return str(getattr(event_or_session, "unified_msg_origin", "") or "")
+        return ""
+
+    def _proactive_dispatch_idempotency_key(
+        self,
+        *,
+        session_key: str,
+        decision: dict[str, Any],
+        message_text: str,
+    ) -> str:
+        basis = json.dumps(
+            {
+                "session_key": session_key,
+                "action": decision.get("action"),
+                "score": decision.get("score"),
+                "message_text": message_text,
+            },
+            ensure_ascii=False,
+            sort_keys=True,
+        )
+        return sha256(basis.encode("utf-8", errors="ignore")).hexdigest()[:24]
 
     async def get_lifelike_prompt_fragment(
         self,
@@ -5300,6 +5634,27 @@ class EmotionalStatePlugin(Star):
             use_llm=use_llm,
         )
         yield event.plain_result(self._llm_tool_json_result(decision))
+
+    @filter.llm_tool(name="request_bot_proactive_speech_dispatch")
+    async def request_bot_proactive_speech_dispatch_tool(
+        self,
+        event: AstrMessageEvent,
+        candidate_context: str = "",
+        use_llm: bool = True,
+        dry_run: bool = True,
+        force: bool = False,
+        message_text: str = "",
+    ):
+        """Request AstrBot proactive message dispatch with evidence and diagnostics."""
+        result = await self.request_proactive_speech_dispatch(
+            event,
+            candidate_context=candidate_context,
+            use_llm=use_llm,
+            dry_run=dry_run,
+            force=force,
+            message_text=message_text,
+        )
+        yield event.plain_result(self._llm_tool_json_result(result))
 
     @filter.llm_tool(name="get_bot_personality_drift_state")
     async def get_bot_personality_drift_state_tool(
@@ -8285,6 +8640,10 @@ class EmotionalStatePlugin(Star):
         writer = getattr(logger, "warning", None) or getattr(logger, "debug", None)
         if callable(writer):
             writer(message)
+
+    def _clip_one_line(self, text: str, limit: int) -> str:
+        cleaned = " ".join(str(text or "").split())
+        return self._clip(cleaned, limit)
 
     def _clip(self, text: str, limit: int) -> str:
         if len(text) <= limit:

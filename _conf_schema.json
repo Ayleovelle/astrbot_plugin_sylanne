@@ -39,6 +39,30 @@
     ],
     "hint": "pre 会在回复前影响本轮语气；post 会根据 bot 实际回复修正状态；both 效果最好但消耗更多。"
   },
+  "enable_proactive_speech_dispatch": {
+    "description": "启用主动发言发送执行",
+    "type": "bool",
+    "default": false,
+    "hint": "默认关闭时只返回主动发言裁决和 dispatch_request，不调用 AstrBot 发送接口。开启后 request_proactive_speech_dispatch 可在模型判断应开口且冷却通过时调用 context.send_message 主动发送。"
+  },
+  "proactive_speech_dispatch_cooldown_seconds": {
+    "description": "主动发言发送冷却秒数",
+    "type": "float",
+    "default": 1800.0,
+    "hint": "防止主动发言刷屏；同一会话两次真正发送之间至少间隔该秒数。0 表示不启用冷却。"
+  },
+  "proactive_speech_dispatch_ttl_seconds": {
+    "description": "主动发言请求有效期秒数",
+    "type": "int",
+    "default": 120,
+    "hint": "dispatch_request 的建议有效期；外部调度器可据此丢弃过期请求。"
+  },
+  "proactive_speech_max_chars": {
+    "description": "主动发言单条消息最大字符数",
+    "type": "int",
+    "default": 160,
+    "hint": "限制主动发言短句长度，避免主动打扰时输出长篇内容。"
+  },
   "background_post_queue_limit": {
     "description": "每个会话后台 post 评估队列上限",
     "type": "int",

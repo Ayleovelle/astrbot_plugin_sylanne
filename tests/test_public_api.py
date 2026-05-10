@@ -219,6 +219,9 @@ class FakeEmotionService:
     async def get_proactive_speech_decision(self, *args, **kwargs):
         return {}
 
+    async def request_proactive_speech_dispatch(self, *args, **kwargs):
+        return {}
+
     async def get_lifelike_prompt_fragment(self, *args, **kwargs):
         return ""
 
@@ -926,6 +929,11 @@ class MemoryPayloadPublicApiTests(unittest.TestCase):
         plugin._fallibility_memory_cache = {}
         plugin._last_request_text = {}
         plugin._last_state_injection_diagnostics = {}
+        plugin._proactive_dispatch_last_sent = {}
+        plugin._proactive_dispatch_audit = {}
+        plugin._internal_assessor_llm_condition = None
+        plugin._internal_assessor_llm_condition_loop = None
+        plugin._internal_assessor_llm_inflight = 0
         plugin.context = SimpleNamespace()
         return plugin
 
@@ -1694,6 +1702,175 @@ class MemoryPayloadPublicApiTests(unittest.TestCase):
         self.assertEqual(decision["topic_judgement"]["need_mode"], "mutual_need")
         self.assertEqual(decision["selected_topic"]["source"], "llm")
         self.assertTrue(decision["should_speak"])
+        self.assertTrue(decision["dispatch_request"]["requested"])
+        self.assertIn("message_text", decision["dispatch_request"])
+
+    def test_proactive_speech_dispatch_executes_when_enabled_and_records_cooldown(self):
+        self._install_astrbot_stubs()
+        from emotion_engine import EmotionState
+        from group_atmosphere_engine import GroupAtmosphereState
+        from humanlike_engine import HumanlikeState
+        from lifelike_learning_engine import LifelikeLearningState
+        from main import EmotionalStatePlugin
+
+        sent = []
+
+        class FakeContext:
+            async def send_message(self, origin, message):
+                sent.append((origin, message))
+                return {"ok": True}
+
+        async def fake_load_state(self, session_key, persona_profile=None, *, now=None):
+            state = EmotionState.initial()
+            state.values["affiliation"] = 0.8
+            state.values["valence"] = 0.4
+            return state
+
+        async def fake_lifelike(self, session_key, *, now=None):
+            state = LifelikeLearningState.initial()
+            state.values.update(
+                {
+                    "rapport": 0.9,
+                    "common_ground": 0.82,
+                    "initiative_readiness": 0.9,
+                    "boundary_sensitivity": 0.05,
+                    "mutual_need_balance": 0.76,
+                    "being_needed_readiness": 0.78,
+                    "need_expression_readiness": 0.64,
+                    "preference_confidence": 0.7,
+                },
+            )
+            state.user_profile.facts["project"] = "桥隧交叉项目进度"
+            return state
+
+        async def fake_humanlike(self, session_key, *, now=None):
+            return HumanlikeState.initial()
+
+        async def fake_group(self, session_key, *, now=None):
+            state = GroupAtmosphereState.initial()
+            state.values["joinability"] = 0.92
+            state.values["bot_attention"] = 0.82
+            state.values["playfulness"] = 0.72
+            state.values["interrupt_risk"] = 0.05
+            return state
+
+        async def fake_judge(self, event_or_session, *, decision, topics, candidate_context, use_llm):
+            return {
+                "schema_version": "astrbot.proactive_topic_judgement.v1",
+                "kind": "llm_topic_judgement",
+                "should_speak": True,
+                "need_mode": "progress_check",
+                "topic_text": "桥隧交叉项目进度",
+                "speech_intent": "关心用户近期项目进展",
+                "opening_style": "progress_check",
+                "topic_evidence": "用户画像事实里记录了项目进度线索",
+                "draft_message": "那、那个……桥隧交叉项目现在进度还顺吗？",
+                "confidence": 0.86,
+                "reason": "进度线索明确且打扰风险低",
+                "source": "llm",
+            }
+
+        saves = []
+
+        async def fake_save_lifelike(self, session_key, state):
+            saves.append((session_key, state.last_observation))
+
+        originals = {
+            "_load_state": EmotionalStatePlugin._load_state,
+            "_load_lifelike_learning_state": EmotionalStatePlugin._load_lifelike_learning_state,
+            "_load_humanlike_state": EmotionalStatePlugin._load_humanlike_state,
+            "_load_group_atmosphere_state": EmotionalStatePlugin._load_group_atmosphere_state,
+            "_judge_proactive_topic": EmotionalStatePlugin._judge_proactive_topic,
+            "_save_lifelike_learning_state": EmotionalStatePlugin._save_lifelike_learning_state,
+        }
+        EmotionalStatePlugin._load_state = fake_load_state
+        EmotionalStatePlugin._load_lifelike_learning_state = fake_lifelike
+        EmotionalStatePlugin._load_humanlike_state = fake_humanlike
+        EmotionalStatePlugin._load_group_atmosphere_state = fake_group
+        EmotionalStatePlugin._judge_proactive_topic = fake_judge
+        EmotionalStatePlugin._save_lifelike_learning_state = fake_save_lifelike
+        try:
+            plugin = self._new_plugin(
+                {
+                    "enable_proactive_speech_dispatch": True,
+                    "proactive_speech_dispatch_cooldown_seconds": 1800.0,
+                },
+            )
+            plugin.context = FakeContext()
+            event = SimpleNamespace(unified_msg_origin="s-proactive")
+            result = asyncio.run(
+                plugin.request_proactive_speech_dispatch(
+                    event,
+                    candidate_context="用户正在推进桥隧交叉项目。",
+                    use_llm=False,
+                ),
+            )
+            second = asyncio.run(
+                plugin.request_proactive_speech_dispatch(
+                    event,
+                    candidate_context="用户正在推进桥隧交叉项目。",
+                    use_llm=False,
+                ),
+            )
+        finally:
+            for name, value in originals.items():
+                setattr(EmotionalStatePlugin, name, value)
+
+        self.assertTrue(result["sent"])
+        self.assertEqual(sent[0][0], "s-proactive")
+        self.assertIn("桥隧交叉项目", str(sent[0][1]))
+        self.assertEqual(second["blocked_reason"], "cooldown_active")
+        self.assertEqual(len(sent), 1)
+        self.assertEqual(saves[0][0], "s-proactive")
+
+    def test_proactive_speech_dispatch_default_disabled_returns_request_only(self):
+        self._install_astrbot_stubs()
+        from main import EmotionalStatePlugin
+
+        async def fake_decision(self, *args, **kwargs):
+            return {
+                "schema_version": "astrbot.proactive_speech_policy.v1",
+                "kind": "proactive_speech_decision",
+                "action": "speak_now",
+                "should_speak": True,
+                "score": 0.8,
+                "reason": "test",
+                "selected_topic": {"topic": "测试话题", "reason": "测试证据"},
+                "topic_judgement": {
+                    "should_speak": True,
+                    "need_mode": "missing_user",
+                    "opening_style": "light_question",
+                    "speech_intent": "想念用户",
+                    "topic_text": "测试话题",
+                    "topic_evidence": "测试证据",
+                    "draft_message": "那、那个……我只是确认一下你还好吗？",
+                    "reason": "测试理由",
+                },
+            }
+
+        called = []
+
+        class FakeContext:
+            async def send_message(self, origin, message):
+                called.append((origin, message))
+
+        original = EmotionalStatePlugin.get_proactive_speech_decision
+        EmotionalStatePlugin.get_proactive_speech_decision = fake_decision
+        try:
+            plugin = self._new_plugin()
+            plugin.context = FakeContext()
+            result = asyncio.run(
+                plugin.request_proactive_speech_dispatch(
+                    SimpleNamespace(unified_msg_origin="s-disabled"),
+                ),
+            )
+        finally:
+            EmotionalStatePlugin.get_proactive_speech_decision = original
+
+        self.assertFalse(result["sent"])
+        self.assertEqual(result["blocked_reason"], "dispatch_disabled")
+        self.assertTrue(result["dispatch_request"]["requested"])
+        self.assertEqual(called, [])
 
     def test_low_reasoning_mode_does_not_change_local_state_dynamics(self):
         self._install_astrbot_stubs()

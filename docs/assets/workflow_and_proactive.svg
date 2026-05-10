@@ -1,6 +1,6 @@
-<svg xmlns="http://www.w3.org/2000/svg" width="1460" height="1060" viewBox="0 0 1460 1060" role="img" aria-labelledby="title desc">
+<svg xmlns="http://www.w3.org/2000/svg" width="1460" height="1240" viewBox="0 0 1460 1240" role="img" aria-labelledby="title desc">
   <title id="title">工作流与主动发言支路</title>
-  <desc id="desc">展示 AstrBot 请求响应生命周期、后台智能 worker、判断 LLM 并发闸门、并行状态读取和主动发言裁决流程。</desc>
+  <desc id="desc">展示 AstrBot 请求响应生命周期、后台智能 worker、判断 LLM 并发闸门、并行状态读取、主动发言裁决和主动发送请求流程。</desc>
   <defs>
     <marker id="arrowBlue" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse">
       <path d="M 0 0 L 10 5 L 0 10 z" fill="#2563eb"/>
@@ -29,9 +29,9 @@
       .dash { stroke-dasharray: 8 8; }
     </style>
   </defs>
-  <rect class="bg" width="1460" height="1060"/>
+  <rect class="bg" width="1460" height="1240"/>
 
-  <rect class="panel" x="34" y="34" width="430" height="976" rx="18"/>
+  <rect class="panel" x="34" y="34" width="430" height="1156" rx="18"/>
   <text class="label" x="62" y="74">请求 / 回复生命周期</text>
   <g>
     <rect class="node" x="86" y="108" width="260" height="62" rx="12"/>
@@ -67,7 +67,7 @@
   <path class="arrowBlue" d="M216 706 V746"/>
   <path class="arrowBlue" d="M216 830 V870"/>
 
-  <rect class="panelWorker" x="514" y="34" width="430" height="976" rx="18"/>
+  <rect class="panelWorker" x="514" y="34" width="430" height="1156" rx="18"/>
   <text class="label" x="542" y="74">post 后台与智能 worker</text>
   <g>
     <rect class="nodeGreen" x="574" y="108" width="270" height="74" rx="12"/>
@@ -105,12 +105,12 @@
   <path class="arrowGreen" d="M709 776 V824"/>
   <path class="arrowGreen dash" d="M346 903 C432 903 432 145 574 145"/>
 
-  <rect class="panelProactive" x="994" y="34" width="430" height="976" rx="18"/>
-  <text class="label" x="1022" y="74">主动发言裁决</text>
+  <rect class="panelProactive" x="994" y="34" width="430" height="1156" rx="18"/>
+  <text class="label" x="1022" y="74">主动发言裁决与发送</text>
   <g>
     <rect class="nodeOrange" x="1054" y="108" width="270" height="74" rx="12"/>
-    <text class="text" x="1189" y="139" text-anchor="middle">调度器 / 其他插件</text>
-    <text class="small" x="1189" y="164" text-anchor="middle">调用 proactive API</text>
+    <text class="text" x="1189" y="139" text-anchor="middle">调度器 / 工具</text>
+    <text class="small" x="1189" y="164" text-anchor="middle">decision 或 dispatch API</text>
 
     <rect class="nodeOrange" x="1054" y="230" width="270" height="92" rx="12"/>
     <text class="text" x="1189" y="263" text-anchor="middle">并发读取状态</text>
@@ -126,18 +126,31 @@
     <text class="text" x="1189" y="571" text-anchor="middle">允许开口?</text>
     <text class="small" x="1189" y="599" text-anchor="middle">公式门控</text>
 
-    <rect class="nodeOrange" x="1054" y="690" width="270" height="82" rx="12"/>
-    <text class="text" x="1189" y="722" text-anchor="middle">抽取候选主题</text>
-    <text class="small" x="1189" y="749" text-anchor="middle">不使用预设话题模板</text>
+    <rect class="nodeOrange" x="1054" y="690" width="270" height="86" rx="12"/>
+    <text class="text" x="1189" y="720" text-anchor="middle">抽取候选证据</text>
+    <text class="small" x="1189" y="746" text-anchor="middle">进度 / 想念 / 调皮</text>
+    <text class="small" x="1189" y="768" text-anchor="middle">整蛊 / 修复 / 黑话</text>
 
-    <rect class="nodeOrange" x="1054" y="820" width="270" height="84" rx="12"/>
-    <text class="text" x="1189" y="853" text-anchor="middle">LLM 裁决需求</text>
-    <text class="small" x="1189" y="880" text-anchor="middle">被需要感 / 话题 / 开口风格</text>
+    <rect class="nodeOrange" x="1054" y="824" width="270" height="92" rx="12"/>
+    <text class="text" x="1189" y="856" text-anchor="middle">LLM 裁决需求</text>
+    <text class="small" x="1189" y="882" text-anchor="middle">理由 / 证据 / 短句草案</text>
+    <text class="small" x="1189" y="904" text-anchor="middle">不使用固定话题模板</text>
+
+    <rect class="nodeOrange" x="1054" y="960" width="270" height="88" rx="12"/>
+    <text class="text" x="1189" y="991" text-anchor="middle">生成 dispatch_request</text>
+    <text class="small" x="1189" y="1017" text-anchor="middle">origin / reason / evidence</text>
+    <text class="small" x="1189" y="1039" text-anchor="middle">idempotency / TTL</text>
+
+    <path class="decision" d="M1189 1080 L1328 1136 L1189 1192 L1050 1136 Z"/>
+    <text class="text" x="1189" y="1129" text-anchor="middle">执行发送?</text>
+    <text class="small" x="1189" y="1155" text-anchor="middle">开关、冷却、origin</text>
   </g>
   <path class="arrowOrange" d="M1189 182 V230"/>
   <path class="arrowOrange" d="M1189 322 V370"/>
   <path class="arrowOrange" d="M1189 468 V516"/>
   <path class="arrowOrange" d="M1189 640 V690"/>
-  <path class="arrowOrange" d="M1189 772 V820"/>
+  <path class="arrowOrange" d="M1189 776 V824"/>
+  <path class="arrowOrange" d="M1189 916 V960"/>
+  <path class="arrowOrange" d="M1189 1048 V1080"/>
   <path class="arrowOrange dash" d="M844 870 C950 870 950 276 1054 276"/>
 </svg>

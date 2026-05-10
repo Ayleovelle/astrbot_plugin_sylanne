@@ -199,6 +199,44 @@ class LifelikeLearningEngineTests(unittest.TestCase):
         self.assertIn(judgement["need_mode"], {"mutual_need", "user_need", "bot_need"})
         self.assertNotEqual(judgement["speech_intent"], "")
 
+    def test_proactive_topics_include_progress_missing_and_playful_evidence(self):
+        state = LifelikeLearningState.initial()
+        state.values.update(
+            {
+                "rapport": 0.9,
+                "common_ground": 0.82,
+                "preference_confidence": 0.72,
+                "initiative_readiness": 0.86,
+                "boundary_sensitivity": 0.06,
+                "mutual_need_balance": 0.74,
+                "being_needed_readiness": 0.78,
+                "need_expression_readiness": 0.68,
+            },
+        )
+        state.user_profile.facts["project"] = "桥隧交叉项目进度"
+
+        topics = rank_proactive_topics(
+            state,
+            emotion_snapshot={"values": {"affiliation": 0.8, "valence": 0.6}},
+            group_snapshot={
+                "values": {
+                    "playfulness": 0.78,
+                    "tension": 0.02,
+                    "interrupt_risk": 0.04,
+                },
+            },
+            candidate_context="刚才聊到论文和项目进度。",
+            limit=8,
+        )
+        kinds = {topic["kind"] for topic in topics}
+
+        self.assertIn("progress_check", kinds)
+        self.assertIn("missing_user", kinds)
+        self.assertIn("playful_ping", kinds)
+        self.assertTrue(
+            any(topic.get("evidence") for topic in topics if topic["kind"] == "progress_check"),
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

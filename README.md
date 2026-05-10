@@ -2,7 +2,7 @@
 
 > 让 AstrBot 维护一套可计算、可记忆、可解释、可被其他插件调用的多维情绪状态。
 
-![版本 1.1.0](https://img.shields.io/badge/version-1.1.0-blue)
+![版本 1.2.0](https://img.shields.io/badge/version-1.2.0-blue)
 ![AstrBot >=4.9.2,<5.0.0](https://img.shields.io/badge/AstrBot-%3E%3D4.9.2%2C%3C5.0.0-green)
 ![Python 3.10+](https://img.shields.io/badge/Python-3.10%2B-yellow)
 ![协议 astrbot.emotion_state.v2](https://img.shields.io/badge/schema-astrbot.emotion__state.v2-purple)
@@ -16,7 +16,7 @@
 
 本插件会让 LLM 根据上下文、用户当前文本、bot 人格和上一轮状态，判断当前情绪观测值；本地引擎再用真实时间半衰期、人格基线、置信门控、关系修复和后果状态机更新长期状态。最后，这个状态会作为临时上下文注入下一次 LLM 请求，影响语气、节奏、社交距离、边界感和修复倾向。
 
-`1.1.0` 的重点不是再堆一个公式，而是把状态层整理成更顺滑的长期运行系统：能后台处理、能并发读取、能群聊分轨，也能让后台 worker 按压力自动扩缩。
+`1.2.0` 的重点是把主动发言从“只读裁决”推进到“可审计发送请求”：他/她会先由公式判断是否适合开口，再让 LLM 裁决理由、证据、话题和短句；默认不发送，配置者开启后才会调用 AstrBot 主动发送接口。
 
 | 能力 | 作用 |
 | --- | --- |
@@ -52,7 +52,7 @@
 | 主题 | 内容 |
 | --- | --- |
 | [当前版本与兼容范围](#当前版本与兼容范围) | 插件版本、AstrBot 版本、Python 要求、许可证和发布状态。 |
-| [1.1.0 正式版发布记录](#110-正式版发布记录) | 后台处理、并发状态加载、智能 worker、工作流变化、效率对比和历史迭代折叠入口。 |
+| [1.2.0 正式版发布记录](#120-正式版发布记录) | 主动发言发送执行层、可审计 `dispatch_request`、话题证据、LLM 工具、配置、测试与包体。 |
 | [项目定位](#项目定位) | 为什么本插件不是普通的提示词人设增强。 |
 | [核心能力](#核心能力总览) | 7 维情绪、人格建模、真实时间记忆、关系修复、公共 API。 |
 | [快速开始](#快速开始) | 发布 zip 包、仓库安装、手动复制、最小配置和检查命令。 |
@@ -80,34 +80,33 @@
 | --- | --- |
 | 插件目录名 | `astrbot_plugin_emotional_state` |
 | 显示名 | `多维情绪状态` |
-| 当前版本 | `1.1.0` |
+| 当前版本 | `1.2.0` |
 | AstrBot 版本 | `>=4.9.2,<5.0.0` |
 | Python | `3.10+` |
 | 许可证 | `GPL-3.0-or-later` |
 | 运行时第三方依赖 | 当前无额外依赖，见 `requirements.txt` |
 
-`1.1.0` 在 `1.0.0` 状态层正式基线上继续优化运行时。这个版本把“情绪化 bot”从单次提示词风格控制推进到可持久化、可后台恢复、可并发查询、可群聊分轨的状态服务，同时进一步减少内部判断 LLM 的无效等待和后台队列的固定并发假设。核心情绪、回复后后台评估（post）、`group_atmosphere_state`、`humanlike_state`、`lifelike_learning_state` 和 `personality_drift_state` 默认自动运行且不暴露细参开关；道德修复、瑕疵模拟、心理筛查等实验/维护模块仍由配置者显式打开。远程性能基准、跨模型生命周期拟合和历史迭代记录放在后文维护章节，普通部署不需要先读完它们。
+`1.2.0` 在 `1.1.0` 后台并行、群聊分轨和智能 worker 基线上继续推进主动发言。这个版本把“想开口”拆成两层：`get_proactive_speech_decision(...)` 仍然只读，只返回是否适合开口、为什么、证据是什么、话题方向和短句草案；`request_proactive_speech_dispatch(...)` 才负责生成可审计发送请求，并在配置者显式开启后调用 AstrBot 主动发送接口。核心情绪、回复后后台评估（post）、`group_atmosphere_state`、`humanlike_state`、`lifelike_learning_state` 和 `personality_drift_state` 默认自动运行且不暴露细参开关；道德修复、瑕疵模拟、心理筛查等实验/维护模块仍由配置者显式打开。
 
 发布包会包含运行代码、README、LICENSE、配置结构（schema）、docs 和 `docs/assets/` 中的聚合图表；不会包含 `tests/`、`scripts/`、`literature_kb/`、`personality_literature_kb/`、`psychological_literature_kb/`、`humanlike_agent_literature_kb/`、`raw/`、`output/`、`dist/` 等开发、研究、原始样本或缓存目录。
 
-### 1.1.0 正式版发布记录
+### 1.2.0 正式版发布记录
 
-`v1.1.0` 合并在 `main` 上，对外安装版本由 `metadata.yaml` 和 `main.py @register(...)` 共同声明为 `1.1.0`。本版以 `1.0.0` 正式状态层为基线：已经验证过的运行时、测试、公共 API 和性能报告继续保留；本轮重点是评估链路、后台队列和工作流说明的运行时优化。
+`v1.2.0` 合并在 `main` 上，对外安装版本由 `metadata.yaml` 和 `main.py @register(...)` 共同声明为 `1.2.0`。本版以 `1.1.0` 的后台并行、群聊分轨和智能 worker 为基线，新增主动发言发送执行层：只读裁决仍然可用；配置者显式开启后，插件才会向 AstrBot 调度链路请求主动发送。
 
 当前版本的主要变化：
 
 | 类别 | 结果 |
 | --- | --- |
-| 状态层整合 | 生命化学习、人格漂移、群聊氛围、瑕疵模拟、道德修复、综合自我和 LivingMemory 注解统一进入主线。 |
-| 回复后后台评估 | post 阶段内部评估默认进入后台链路；后台队列支持同一会话先进先出（FIFO）、检查点恢复、租约、重试、失败任务留存（dead-letter）和运行时诊断。 |
-| 并发处理 | 请求阶段并发加载辅助状态，响应阶段并发预取道德修复/瑕疵状态，LivingMemory 写入并发获取可选快照；状态提交仍按确定顺序落库。 |
-| 智能 worker | 后台评估默认基础 `1` 个 worker；开启动态扩容后按队列深度、等待年龄、重试和租约压力逐级扩到最多 `6` 个，空闲 worker 自动关闭；判断 LLM 走独立并发闸门，默认最多 `2` 路，极端积压才临时到 `3` 路。 |
-| 判断 LLM | `assessor_timeout_seconds` 默认改为 `0.0`，不再用硬超时惩罚慢推理模型；提示词要求尽快输出最低完整 JSON，但保留 7 维情绪、置信度、关系决策和冲突分析。 |
-| 群聊系统 | `conversation_id` 记录房间整体，`speaker_track_id` 记录 bot 对当前说话人的定向情绪；`group_atmosphere_state` 评估打断风险、加入适宜度和开口冷却。 |
-| 工作流 | 请求前注入状态、响应后更新状态、可选回复后后台评估（post）、记忆写入时冻结当时状态；详细流程见 [工作流](#工作流)。 |
-| 效率 | 默认 `assessment_timing=post`、低信号轻评估、模型提供方短缓存、状态注入预算、并发读取可选快照，减少主回复链路等待。 |
+| 主动发送执行层 | 新增 `request_proactive_speech_dispatch(...)`，可在配置允许、冷却通过、会话目标明确时调用 AstrBot `context.send_message(...)` 主动发消息。 |
+| 只读裁决保留 | `get_proactive_speech_decision(...)` 仍然不写状态、不发送消息，但会返回 `dispatch_request`，方便调度器、群聊插件或外部插件审计后自行处理。 |
+| 话题证据 | 新增进度关心、想念、调皮打扰、轻量整蛊和修复等话题模式；每次主动开口必须带 `topic_evidence`，不能凭空套模板。 |
+| 发送门控 | 新增 `enable_proactive_speech_dispatch`、同会话冷却、TTL、最大字符数和 `dry_run`，默认只返回请求，不真正发送。 |
+| LLM 工具 | 新增 `request_bot_proactive_speech_dispatch` 工具，默认 `dry_run=true`，便于模型先试算理由、话题和短句，再由配置决定是否放行。 |
+| 审计与轨迹 | 主动发送结果会写入主动发送审计；真正发送后，会把当次主动话语写回生命化学习轨迹，避免主动行为脱离长期情绪和共同语境。 |
+| 工作流 | 工作流图已补充“裁决、生成 dispatch_request、冷却检查、发送执行、审计写入”支路；手机端仍提供静态 SVG。 |
 | 发布边界 | 知识库和原始性能基准样本仍是本地资料，不进入 GitHub 和发布 zip。 |
-| 公开契约 | 插件版本为 `1.1.0`；公共 API 版本仍为 `1.0`，schema 仍保持 `astrbot.emotion_state.v2` 等版本化契约。 |
+| 公开契约 | 插件版本为 `1.2.0`；公共 API 版本仍为 `1.0`，schema 仍保持 `astrbot.emotion_state.v2` 等版本化契约。 |
 
 运行时亮点可以按这条链路理解。手机端若不渲染 Mermaid，也会优先显示下面的静态图：
 
@@ -138,7 +137,7 @@ flowchart LR
 
 </details>
 
-重构后仍刻意没有放进 `v1.1.0` 的内容：
+重构后仍刻意没有放进 `v1.2.0` 的内容：
 
 | 遗留项 | 原因 | 后续处理 |
 | --- | --- | --- |
@@ -809,7 +808,7 @@ low_reasoning_max_context_chars = 1200
 
 ## 工作流
 
-插件在 AstrBot LLM 请求前后工作；主动说话模块是单独的裁决支路，由调度器、其他插件或 LLM 工具调用。
+插件在 AstrBot LLM 请求前后工作；主动说话模块是单独的裁决与发送请求支路。默认只返回可审计请求；配置者开启 `enable_proactive_speech_dispatch=true` 后，插件可在公式和 LLM 同意、冷却通过、会话目标明确时调用 AstrBot 主动发送接口。
 
 ![工作流与主动发言支路](docs/assets/workflow_and_proactive.svg)
 
@@ -843,13 +842,17 @@ flowchart TD
     N -- "否" --> T["结束"]
     AC --> T
 
-    U["主动发言调度器 / 其他插件 / get_bot_proactive_speech_decision"] --> V["并发读取情绪、共同语境、群聊氛围、拟人状态和人格漂移"]
+    U["主动发言调度器 / 其他插件 / LLM 工具"] --> V["并发读取情绪、共同语境、群聊氛围、拟人状态和人格漂移"]
     V --> W["计算互需平衡、开口冲动、沉默舒适度、打断风险和冷却"]
     W --> X{"本地公式允许开口 ?"}
     X -- "否" --> Y["保持沉默 / 短应 / 延后"]
-    X -- "是" --> Z["从上下文抽取候选主题，不使用预设话题模板"]
-    Z --> AA["LLM 裁决需求、被需要感、话题方向和开口风格"]
-    AA --> AB["返回主动消息候选，由调用方决定是否发送"]
+    X -- "是" --> Z["抽取候选证据：进度关心 / 想念 / 调皮打扰 / 轻量整蛊 / 修复"]
+    Z --> AA["LLM 裁决需求、理由、话题证据和短消息草案"]
+    AA --> AB["生成 dispatch_request：原因、证据、目标会话、幂等键、TTL"]
+    AB --> AD{"发送执行开启且冷却通过 ?"}
+    AD -- "否" --> AE["返回未发送诊断：disabled / cooldown / missing_origin / silence"]
+    AD -- "是" --> AF["调用 context.send_message(unified_msg_origin, message)"]
+    AF --> AG["写入主动发送审计，并把当次主动话语写入生命化学习轨迹"]
 ```
 
 </details>
@@ -859,8 +862,10 @@ flowchart TD
 - `pre` 更新会影响本轮回复语气。
 - `post` 更新会根据 bot 实际说出口的内容修正状态。
 - `both` 最完整，但会多一次情绪评估消耗。
-- 主动发言不会靠固定话题库触发；它先由公式判断是否适合开口，再让 LLM 在当前上下文候选主题中裁决“为什么说、说什么方向、怎么开口”。
-- 主动发言裁决结果默认只返回给调用方；是否真正发送消息由 AstrBot 调度器、群聊插件或其他调用方执行，避免绕过上层消息工作流。
+- 主动发言不会靠固定话题库触发；它先由公式判断是否适合开口，再让 LLM 在当前上下文候选主题中裁决“为什么说、证据是什么、说什么方向、怎么短句开口”。
+- `get_proactive_speech_decision(...)` 仍是只读裁决；`request_proactive_speech_dispatch(...)` 会生成 `dispatch_request`，并在配置允许时真正向 AstrBot `context.send_message` 请求发送。
+- 话题来源必须可解释：用户某件事的进度、共同语境里的近期事项、想念/陪伴需要、调皮打扰、轻量整蛊或修复需求都要带 `topic_evidence`。
+- 主动发送默认关闭；打开后仍受同会话冷却、沉默裁决、缺失 `unified_msg_origin`、缺失 `send_message` 接口等诊断保护。
 - 注入使用临时 `TextPart`，不会直接写进长期消息记录。
 - 状态落库使用 AstrBot KV，不建议外部插件直接改内部 key。
 
@@ -1535,6 +1540,19 @@ enable_safety_boundary = false
 
 `benchmark_enable_simulated_time` 和 `benchmark_time_offset_seconds` 只用于测试真实时间半衰期、人格漂移和长期状态模型。生产对话应保持默认关闭；生命周期 benchmark 会临时把 offset 设置为 `1d`、`1w`、`1m`、`1y` 等秒数，跑完后由远程脚本恢复原配置。
 
+### 主动发言发送
+
+主动发言分两层：`get_proactive_speech_decision(...)` 只读裁决，`request_proactive_speech_dispatch(...)` 负责生成可审计发送请求，并在配置允许时调用 AstrBot 发送链路。话题不能凭空冒出来，必须带 `topic_evidence`，例如“用户近期项目进度”“共同语境中的黑话”“互需/想念信号”“轻松氛围下的调皮打扰”。
+
+| 配置项 | 类型 | 默认值 | 说明 |
+| --- | --- | --- | --- |
+| `enable_proactive_speech_dispatch` | bool | `false` | 是否允许插件真正调用 `context.send_message` 主动发消息。关闭时只返回 `dispatch_request` 和未发送原因。 |
+| `proactive_speech_dispatch_cooldown_seconds` | float | `1800.0` | 同一会话两次主动发送之间的冷却秒数，避免主动打扰刷屏。 |
+| `proactive_speech_dispatch_ttl_seconds` | int | `120` | 主动发送请求的建议有效期，外部调度器可据此丢弃过期请求。 |
+| `proactive_speech_max_chars` | int | `160` | 主动发言短句最大字符数。 |
+
+返回结果里的 `dispatch_request` 会包含 `requested`、`reason`、`topic_evidence`、`message_text`、`unified_msg_origin`、`idempotency_key`、`sent` 和 `blocked_reason`。常见未发送原因包括 `dispatch_disabled`、`cooldown_active`、`missing_event_origin`、`missing_send_message_api`、`decision_declined` 和 `dry_run`。
+
 ### 低推理模型友好模式
 
 | 配置项 | 类型 | 默认值 | 说明 |
@@ -2012,7 +2030,8 @@ emotion = meta.star_cls if meta and meta.activated else None
 | `get_shadow_diagnostics(event_or_session)` | 否 | 获取配置门控的只读阴影冲动诊断载荷；不生成或执行策略。 |
 | `get_lifelike_learning_snapshot(event_or_session, exposure="plugin_safe")` | 否 | 获取生命化学习/共同语境快照。 |
 | `get_lifelike_initiative_policy(event_or_session)` | 否 | 获取当前适合开口、短应、追问或沉默的节奏策略。 |
-| `get_proactive_speech_decision(event_or_session, candidate_context="", use_llm=True)` | 否 | 基于情绪、共同语境、群聊氛围、沉默舒适度和互需平衡判断是否应主动发言；话题由 LLM 裁决，不使用预设模板。 |
+| `get_proactive_speech_decision(event_or_session, candidate_context="", use_llm=True)` | 否 | 判断当前是否适合主动开口，并返回理由、证据、话题方向、短句草案和 `dispatch_request`。 |
+| `request_proactive_speech_dispatch(event_or_session, candidate_context="", use_llm=True, dry_run=False, force=False)` | 是 | 请求 AstrBot 主动发送；默认受 `enable_proactive_speech_dispatch` 和冷却控制，发送后会写入主动发送审计与生命化学习轨迹。 |
 | `get_lifelike_prompt_fragment(event_or_session)` | 否 | 获取共同语境和对话节奏提示词片段。 |
 | `observe_lifelike_text(event_or_session, text)` | 是 | 提交文本观察并更新新词、黑话、用户画像和边界线索。 |
 | `simulate_lifelike_update(event_or_session, text)` | 否 | 模拟生命化学习更新，不落库。 |
@@ -2092,6 +2111,7 @@ if repair_status in {"repaired", "restored"}:
 | `get_bot_lifelike_learning_state` | 获取当前生命化学习/共同语境状态摘要。 |
 | `get_bot_personality_drift_state` | 获取当前真实时间人格漂移状态摘要。 |
 | `get_bot_proactive_speech_decision` | 判断当前是否适合主动开口，并给出由状态模型和 LLM 裁决的需求、话题方向与开口风格。 |
+| `request_bot_proactive_speech_dispatch` | 请求主动发言发送，返回理由、话题证据、短句、发送结果和阻断诊断；工具默认 `dry_run=true`。 |
 | `get_bot_moral_repair_state` | 获取当前道德修复/信任修复状态摘要。 |
 | `get_bot_fallibility_state` | 获取当前低风险瑕疵/犯错模拟状态摘要。 |
 | `get_bot_integrated_self_state` | 获取当前综合自我状态和跨模块仲裁摘要。 |
@@ -2213,6 +2233,8 @@ emotion_state -> humanlike_state -> 提示词/风格调制
 | --- | --- | --- |
 | `get_lifelike_learning_snapshot(event_or_session, exposure="plugin_safe")` | 否 | 获取生命化学习/共同语境快照。 |
 | `get_lifelike_initiative_policy(event_or_session)` | 否 | 获取当前适合开口、短应、追问或沉默的节奏策略。 |
+| `get_proactive_speech_decision(event_or_session, candidate_context="", use_llm=True)` | 否 | 只读判断是否适合主动开口，并返回理由、证据、话题方向、短句草案和 `dispatch_request`。 |
+| `request_proactive_speech_dispatch(event_or_session, candidate_context="", use_llm=True, dry_run=False, force=False)` | 是 | 请求 AstrBot 主动发送；默认受 `enable_proactive_speech_dispatch` 和冷却控制。 |
 | `get_lifelike_prompt_fragment(event_or_session)` | 否 | 获取共同语境和对话节奏提示词。 |
 | `observe_lifelike_text(event_or_session, text)` | 是 | 提交文本观察并更新新词、黑话、用户画像和边界线索。 |
 | `simulate_lifelike_update(event_or_session, text)` | 否 | 模拟更新，不落库。 |
@@ -2774,7 +2796,7 @@ $env:ASTRBOT_EXPECT_PLUGIN = "astrbot_plugin_emotional_state"
 脚本会在输出 JSON 里写出 `expectedPluginRuntime`，包含插件列表 API 中返回的 `version`、`displayName`、`activated`、`author`、`astrbotVersion` 等只读字段。若目标插件存在但 `activated=false`，脚本会失败退出。需要把版本和显示名也作为硬断言时，可以额外设置：
 
 ```powershell
-$env:ASTRBOT_EXPECT_PLUGIN_VERSION = "1.1.0"
+$env:ASTRBOT_EXPECT_PLUGIN_VERSION = "1.2.0"
 $env:ASTRBOT_EXPECT_PLUGIN_DISPLAY_NAME = "多维情绪状态"
 & $node scripts\remote_smoke_playwright.js
 ```

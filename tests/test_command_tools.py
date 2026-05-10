@@ -124,6 +124,8 @@ def new_plugin(config=None):
     plugin._internal_assessor_llm_condition = None
     plugin._internal_assessor_llm_condition_loop = None
     plugin._internal_assessor_llm_inflight = 0
+    plugin._proactive_dispatch_last_sent = {}
+    plugin._proactive_dispatch_audit = {}
     plugin._state_injection_snapshot_cache = {}
     plugin._group_atmosphere_injection_snapshot_cache = {}
     plugin._terminating = False
@@ -229,6 +231,7 @@ class CommandAndToolSmokeTests(unittest.TestCase):
                 "get_bot_humanlike_state",
                 "get_bot_lifelike_learning_state",
                 "get_bot_proactive_speech_decision",
+                "request_bot_proactive_speech_dispatch",
                 "get_bot_personality_drift_state",
                 "get_bot_moral_repair_state",
                 "get_bot_fallibility_state",
@@ -240,6 +243,32 @@ class CommandAndToolSmokeTests(unittest.TestCase):
         for tool in sorted(tools):
             with self.subTest(tool=tool):
                 self.assertIn(f"| `{tool}` |", readme)
+
+    def test_request_bot_proactive_speech_dispatch_tool_dry_run_by_default(self):
+        plugin = new_plugin()
+        event = FakeEvent("s-proactive-tool")
+
+        async def fake_dispatch(self, event_or_session, **kwargs):
+            return {
+                "schema_version": "astrbot.proactive_dispatch_result.v1",
+                "kind": "proactive_dispatch_result",
+                "dry_run_seen": kwargs.get("dry_run"),
+                "session_key": getattr(event_or_session, "unified_msg_origin", ""),
+                "sent": False,
+            }
+
+        bind_async(plugin, "request_proactive_speech_dispatch", fake_dispatch)
+
+        payload = json.loads(
+            asyncio.run(
+                collect_async_generator(
+                    plugin.request_bot_proactive_speech_dispatch_tool(event),
+                ),
+            )[0],
+        )
+
+        self.assertTrue(payload["dry_run_seen"])
+        self.assertFalse(payload["sent"])
 
     def test_emotion_reset_command_denies_delete_when_backdoor_disabled(self):
         plugin = new_plugin({"allow_emotion_reset_backdoor": False})

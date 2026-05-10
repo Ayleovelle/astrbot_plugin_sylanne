@@ -190,3 +190,28 @@ This file stores durable discoveries from implementation, review, and remote tes
   - If enabled, cap extra workers at 5.
   - Workers can process assessment jobs in parallel, but state commits must be ordered by sequence to preserve emotional trajectory.
   - README must warn about extra token/API/CPU pressure.
+
+## 2026-05-10 Proactive Dispatch Design Finding
+
+- Proactive speech now has two explicit layers:
+  - decision layer: `get_proactive_speech_decision(...)`, no side effects;
+  - dispatch layer: `request_proactive_speech_dispatch(...)`, may call AstrBot send API when configured.
+- The dispatch layer is intentionally auditable. Every request carries:
+  - `need_mode`,
+  - `opening_style`,
+  - `speech_intent`,
+  - `topic_text`,
+  - `topic_evidence`,
+  - `reason`,
+  - `message_text`,
+  - `idempotency_key`,
+  - `blocked_reason`.
+- Topic selection was extended from generic topic ranking to evidence-backed intents:
+  - progress check: user/project/task/course/research progress evidence,
+  - missing user: mutual-need and need-expression signal,
+  - playful ping: playfulness and low interruption risk,
+  - light prank: common ground and playful atmosphere without fact deception.
+- Dispatch defaults to not sending (`enable_proactive_speech_dispatch=false`), but the capability to request actual AstrBot sending exists and can be enabled by configuration or forced by an explicit caller.
+- Same-session cooldown defaults to `1800.0` seconds and is checked before send execution.
+- LLM tool `request_bot_proactive_speech_dispatch` defaults to `dry_run=True` so tool use does not surprise-send unless explicitly requested.
+- Successful proactive send is observed back into lifelike learning with source `proactive_dispatch`, so the bot's own initiative becomes part of the relationship/common-ground trajectory.
