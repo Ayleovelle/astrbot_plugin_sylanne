@@ -26,6 +26,7 @@ INCLUDE_ROOT_FILES = {
     "metadata.yaml",
     "_conf_schema.json",
     "README.md",
+    "CHANGELOG.md",
     "LICENSE",
     "requirements.txt",
 }

@@ -219,6 +219,7 @@ class RemoteSmokeContractTests(unittest.TestCase):
             "psychological_screening.py",
             "prompts.py",
             "public_api.py",
+            "CHANGELOG.md",
             "LICENSE",
             "requirements.txt",
         ):
@@ -388,6 +389,7 @@ class RemoteSmokeContractTests(unittest.TestCase):
             "prompts.py",
             "public_api.py",
             "README.md",
+            "CHANGELOG.md",
             "LICENSE",
             "requirements.txt",
             "_conf_schema.json",

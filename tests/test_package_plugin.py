@@ -54,6 +54,7 @@ class PackagePluginTests(unittest.TestCase):
         self.assertIn("group_atmosphere_engine.py", files)
         self.assertIn("LICENSE", files)
         self.assertIn("README.md", files)
+        self.assertIn("CHANGELOG.md", files)
         self.assertIn("docs/theory.md", files)
         self.assertIn("docs/remote_testing.md", files)
         self.assertIn("docs/assets/lifecycle_model_fit.svg", files)
@@ -144,6 +145,7 @@ class PackagePluginTests(unittest.TestCase):
         self.assertIn(prefix + "metadata.yaml", names)
         self.assertIn(prefix + "_conf_schema.json", names)
         self.assertIn(prefix + "README.md", names)
+        self.assertIn(prefix + "CHANGELOG.md", names)
         self.assertIn(prefix + "LICENSE", names)
         self.assertIn(prefix + "docs/remote_testing.md", names)
         self.assertIn(prefix + "docs/assets/lifecycle_model_fit.svg", names)
@@ -278,6 +280,7 @@ class PluginZipPreflightTests(unittest.TestCase):
             (prefix + "prompts.py", "# runtime\n"),
             (prefix + "public_api.py", "# public API\n"),
             (prefix + "README.md", "# docs\n"),
+            (prefix + "CHANGELOG.md", "# changelog\n"),
             (prefix + "LICENSE", "GNU GENERAL PUBLIC LICENSE\n"),
             (prefix + "requirements.txt", "# no dependencies\n"),
             (prefix + "_conf_schema.json", "{}\n"),
@@ -336,6 +339,7 @@ class PluginZipPreflightTests(unittest.TestCase):
             "LICENSE",
             "moral_repair_engine.py",
             "fallibility_engine.py",
+            "CHANGELOG.md",
             "public_api.py",
             "requirements.txt",
         )

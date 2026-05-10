@@ -51,6 +51,7 @@ $env:ASTRBOT_EXPECT_PLUGIN_DISPLAY_NAME = "多维情绪状态"
 - 测试，
 - 脚本，
 - 文档，
+- `CHANGELOG.md`，
 - `LICENSE` 和 GPL 元数据，
 - 持久化计划文件。
 
@@ -81,6 +82,7 @@ $env:ASTRBOT_EXPECT_PLUGIN_DISPLAY_NAME = "多维情绪状态"
 - 发布包预检通过；
 - 预检确认 zip 内包含运行时根文件 `__init__.py`、`main.py`、`emotion_engine.py`、`humanlike_engine.py`、`lifelike_learning_engine.py`、`personality_drift_engine.py`、`integrated_self.py`、`moral_repair_engine.py`、`fallibility_engine.py`、`psychological_screening.py`、`prompts.py` 和 `public_api.py`；
 - 预检确认 zip 内包含依赖声明 `requirements.txt`；
+- 预检确认 zip 内包含 `CHANGELOG.md`，避免 AstrBot 更新日志页显示空状态；
 - 预检确认 zip 内包含 `LICENSE`，且 `metadata.yaml` 声明 `license: GPL-3.0-or-later`；
 - 预检确认 zip 内 `metadata.yaml` 的 `name:` 与 `ASTRBOT_EXPECT_PLUGIN` 匹配；
 - zip 使用相对 POSIX 路径，且不包含不安全的 `.` / `..` 路径段；

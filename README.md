@@ -88,7 +88,7 @@
 
 `1.2.0` 在 `1.1.0` 后台并行、群聊分轨和智能 worker 基线上继续推进主动发言。这个版本把“想开口”拆成两层：`get_proactive_speech_decision(...)` 仍然只读，只返回是否适合开口、为什么、证据是什么、话题方向和短句草案；`request_proactive_speech_dispatch(...)` 才负责生成可审计发送请求，并在配置者显式开启后调用 AstrBot 主动发送接口。核心情绪、回复后后台评估（post）、`group_atmosphere_state`、`humanlike_state`、`lifelike_learning_state` 和 `personality_drift_state` 默认自动运行且不暴露细参开关；道德修复、瑕疵模拟、心理筛查等实验/维护模块仍由配置者显式打开。
 
-发布包会包含运行代码、README、LICENSE、配置结构（schema）、docs 和 `docs/assets/` 中的聚合图表；不会包含 `tests/`、`scripts/`、`literature_kb/`、`personality_literature_kb/`、`psychological_literature_kb/`、`humanlike_agent_literature_kb/`、`raw/`、`output/`、`dist/` 等开发、研究、原始样本或缓存目录。
+发布包会包含运行代码、README、CHANGELOG、LICENSE、配置结构（schema）、docs 和 `docs/assets/` 中的聚合图表；不会包含 `tests/`、`scripts/`、`literature_kb/`、`personality_literature_kb/`、`psychological_literature_kb/`、`humanlike_agent_literature_kb/`、`raw/`、`output/`、`dist/` 等开发、研究、原始样本或缓存目录。
 
 ### 1.2.0 正式版发布记录
 
@@ -482,6 +482,7 @@ astrbot_plugin_emotional_state/
 ├── requirements.txt
 ├── LICENSE
 ├── README.md
+├── CHANGELOG.md
 └── docs/
 ```
 
@@ -525,6 +526,7 @@ data/plugins/
     ├── requirements.txt
     ├── LICENSE
     ├── README.md
+    ├── CHANGELOG.md
     └── docs/
 ```
 
@@ -2643,7 +2645,7 @@ py -3.13 scripts\package_plugin.py --output dist\astrbot_plugin_emotional_state.
 | 检查项 | 要求 |
 | --- | --- |
 | 顶层目录 | 所有文件都必须在 `astrbot_plugin_emotional_state/` 下。 |
-| 必要文件 | 包含 `__init__.py`、`metadata.yaml`、`main.py`、`emotion_engine.py`、`humanlike_engine.py`、`lifelike_learning_engine.py`、`personality_drift_engine.py`、`integrated_self.py`、`moral_repair_engine.py`、`fallibility_engine.py`、`psychological_screening.py`、`prompts.py`、`public_api.py`、`README.md`、`LICENSE`、`requirements.txt`、`_conf_schema.json`。 |
+| 必要文件 | 包含 `__init__.py`、`metadata.yaml`、`main.py`、`emotion_engine.py`、`humanlike_engine.py`、`lifelike_learning_engine.py`、`personality_drift_engine.py`、`integrated_self.py`、`moral_repair_engine.py`、`fallibility_engine.py`、`psychological_screening.py`、`prompts.py`、`public_api.py`、`README.md`、`CHANGELOG.md`、`LICENSE`、`requirements.txt`、`_conf_schema.json`。 |
 | 插件身份 | zip 内 `metadata.yaml name:` 必须等于 `astrbot_plugin_emotional_state`。 |
 | 排除目录 | 不应包含 `tests/`、`scripts/`、`output/`、`dist/`、`raw/`、`__pycache__/`、`.git/`。 |
 | 许可证 | 发布包必须包含 `LICENSE`，协议为 `GPL-3.0-or-later`。 |
