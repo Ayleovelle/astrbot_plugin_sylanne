@@ -149,6 +149,7 @@ def new_plugin(config=None):
     plugin._proactive_dispatch_last_sent = {}
     plugin._proactive_dispatch_audit = {}
     plugin._realtime_chat_last_sent = {}
+    plugin._last_realtime_chat_adaptive_settings = {}
     plugin._sticker_index_cache = {}
     plugin._sticker_memory_cache = {}
     plugin._state_injection_snapshot_cache = {}

@@ -360,6 +360,17 @@ class _StateInjectionBudget:
         return self.max_added_chars - self.added_chars
 
 
+@dataclass
+class _StateInjectionDecision:
+    primary_detail: str = "compact"
+    compact_mode: str = "snapshot"
+    auxiliary_detail: str = "compact"
+    emotion_diff_threshold: float = 0.08
+    group_diff_threshold: float = 0.08
+    force_every_turns: int = 6
+    reasons: list[str] | None = None
+
+
 class _RecoveredBackgroundEvent:
     def __init__(
         self,
@@ -562,6 +573,7 @@ class EmotionalStatePlugin(Star):
         self._proactive_dispatch_last_sent: dict[str, float] = {}
         self._proactive_dispatch_audit: dict[str, deque[dict[str, Any]]] = {}
         self._realtime_chat_last_sent: dict[str, float] = {}
+        self._last_realtime_chat_adaptive_settings: dict[str, dict[str, Any]] = {}
         self._sticker_index_cache: dict[str, Any] = {}
         self._sticker_memory_cache: dict[str, list[dict[str, Any]]] = {}
         self._state_injection_snapshot_cache: dict[str, dict[str, Any]] = {}
@@ -663,6 +675,11 @@ class EmotionalStatePlugin(Star):
         await self._observe_agent_identity(identity, now=self._observed_now())
         context_text = self._request_to_text(request)
         self._last_request_text[session_key] = context_text
+        await self._observe_proactive_dispatch_feedback(
+            session_key,
+            self._event_text(event) or request.prompt or "",
+            observed_at=self._observed_now(),
+        )
         if self._sticker_learning_enabled():
             observed_stickers = self._extract_sticker_observations_from_event(event)
             if observed_stickers:
@@ -1041,6 +1058,11 @@ class EmotionalStatePlugin(Star):
                 session_key,
                 request,
             )
+            injection_decision = self._state_injection_decision(
+                session_key,
+                state,
+                budget=injection_budget,
+            )
             appended_emotion = self._append_temp_text_part(
                 request,
                 self._build_state_injection_for_session(
@@ -1048,6 +1070,7 @@ class EmotionalStatePlugin(Star):
                     state,
                     safety_boundary=safety_boundary,
                     commit_snapshot=False,
+                    decision=injection_decision,
                 ),
                 source="emotion",
                 budget=injection_budget,
@@ -1055,7 +1078,7 @@ class EmotionalStatePlugin(Star):
             )
             if appended_emotion:
                 self._commit_state_injection_snapshot_for_session(session_key, state)
-            elif self._state_injection_detail() == "full":
+            elif injection_decision.primary_detail == "full":
                 fallback_emotion = self._append_temp_text_part(
                     request,
                     self._build_compact_state_injection(
@@ -1100,11 +1123,12 @@ class EmotionalStatePlugin(Star):
                             humanlike_state,
                             safety_boundary=safety_boundary,
                         ),
+                        decision=injection_decision,
                     ),
                     source="humanlike",
                     budget=injection_budget,
                 )
-                if not appended and self._auxiliary_state_injection_detail() == "full":
+                if not appended and injection_decision.auxiliary_detail == "full":
                     self._append_temp_text_part(
                         request,
                         self._build_compact_auxiliary_state_injection("humanlike"),
@@ -1126,11 +1150,12 @@ class EmotionalStatePlugin(Star):
                         lambda: build_lifelike_prompt_fragment(
                             lifelike_learning_state,
                         ),
+                        decision=injection_decision,
                     ),
                     source="lifelike_learning",
                     budget=injection_budget,
                 )
-                if not appended and self._auxiliary_state_injection_detail() == "full":
+                if not appended and injection_decision.auxiliary_detail == "full":
                     self._append_temp_text_part(
                         request,
                         self._build_compact_auxiliary_state_injection("lifelike_learning"),
@@ -1153,11 +1178,12 @@ class EmotionalStatePlugin(Star):
                         lambda: build_personality_drift_prompt_fragment(
                             personality_drift_state,
                         ),
+                        decision=injection_decision,
                     ),
                     source="personality_drift",
                     budget=injection_budget,
                 )
-                if not appended and self._auxiliary_state_injection_detail() == "full":
+                if not appended and injection_decision.auxiliary_detail == "full":
                     self._append_temp_text_part(
                         request,
                         self._build_compact_auxiliary_state_injection("personality_drift"),
@@ -1184,11 +1210,12 @@ class EmotionalStatePlugin(Star):
                             safety_boundary=safety_boundary,
                             action_blocking=action_blocking,
                         ),
+                        decision=injection_decision,
                     ),
                     source="moral_repair",
                     budget=injection_budget,
                 )
-                if not appended and self._auxiliary_state_injection_detail() == "full":
+                if not appended and injection_decision.auxiliary_detail == "full":
                     self._append_temp_text_part(
                         request,
                         self._build_compact_auxiliary_state_injection("moral_repair"),
@@ -1212,11 +1239,12 @@ class EmotionalStatePlugin(Star):
                             safety_boundary=safety_boundary,
                             action_blocking=action_blocking,
                         ),
+                        decision=injection_decision,
                     ),
                     source="fallibility",
                     budget=injection_budget,
                 )
-                if not appended and self._auxiliary_state_injection_detail() == "full":
+                if not appended and injection_decision.auxiliary_detail == "full":
                     self._append_temp_text_part(
                         request,
                         self._build_compact_auxiliary_state_injection("fallibility"),
@@ -1248,18 +1276,20 @@ class EmotionalStatePlugin(Star):
                             session_key,
                             group_atmosphere_state,
                             commit_snapshot=False,
+                            decision=injection_decision,
                         ),
+                        decision=injection_decision,
                     ),
                     source="group_atmosphere",
                     budget=injection_budget,
                 )
                 if appended:
-                    if self._auxiliary_state_injection_detail() == "full":
+                    if injection_decision.compact_mode == "diff":
                         self._commit_group_atmosphere_injection_snapshot_for_session(
                             session_key,
                             group_atmosphere_state,
                         )
-                elif self._auxiliary_state_injection_detail() == "full":
+                elif injection_decision.auxiliary_detail == "full":
                     self._append_temp_text_part(
                         request,
                         self._build_compact_auxiliary_state_injection(
@@ -1268,11 +1298,13 @@ class EmotionalStatePlugin(Star):
                         source="group_atmosphere.compact_fallback",
                         budget=injection_budget,
                     )
-            self._record_state_injection_diagnostics(injection_budget)
+            self._record_state_injection_diagnostics(
+                injection_budget,
+                decision=injection_decision,
+            )
 
         if (
             inject_state
-            and self._auxiliary_state_injection_detail() != "off"
             and realtime_chat_enabled
             and self._cfg_bool(
                 "realtime_chat_style_prompt_enabled",
@@ -4726,19 +4758,69 @@ class EmotionalStatePlugin(Star):
                 session_key=resolved_session,
             ),
         )
+        lifelike_task = asyncio.create_task(
+            self.get_lifelike_learning_snapshot(
+                event_or_session,
+                request=request,
+                session_key=resolved_session,
+                exposure="plugin_safe",
+                include_prompt_fragment=False,
+            ),
+        )
+        persona_task = asyncio.create_task(
+            self._public_runtime_persona_profile(
+                event_or_session,
+                request=request,
+                session_key=resolved_session,
+            ),
+        )
         sticker_candidates: list[dict[str, Any]] = []
         if include_sticker and self._sticker_reaction_enabled():
             sticker_candidates = await self._sticker_candidates(resolved_session)
-        emotion_values, atmosphere_values = await asyncio.gather(emotion_task, group_task)
+        emotion_values, atmosphere_values, lifelike_snapshot, persona_profile = (
+            await asyncio.gather(
+                emotion_task,
+                group_task,
+                lifelike_task,
+                persona_task,
+            )
+        )
+        realtime_settings, realtime_adaptive = self._derive_realtime_chat_settings(
+            persona_profile=persona_profile,
+            emotion_values=emotion_values,
+            atmosphere_values=atmosphere_values,
+            lifelike_snapshot=lifelike_snapshot,
+        )
+        sticker_settings, sticker_adaptive = self._derive_sticker_settings(
+            persona_profile=persona_profile,
+            emotion_values=emotion_values,
+            atmosphere_values=atmosphere_values,
+            lifelike_snapshot=lifelike_snapshot,
+        )
         plan = build_realtime_chat_plan(
             text,
-            settings=self._realtime_chat_settings(),
+            settings=realtime_settings,
             session_key=resolved_session,
             now=self._observed_now(),
             emotion_values=emotion_values,
             atmosphere_values=atmosphere_values,
             sticker_candidates=sticker_candidates,
-            sticker_settings=self._sticker_settings(),
+            sticker_settings=sticker_settings,
+        )
+        plan["settings"] = {
+            "max_parts": realtime_settings.max_parts,
+            "min_part_chars": realtime_settings.min_part_chars,
+            "max_part_chars": realtime_settings.max_part_chars,
+            "strip_markdown": realtime_settings.strip_markdown,
+        }
+        plan["adaptive"] = {
+            "realtime_chat": realtime_adaptive,
+            "sticker": sticker_adaptive,
+        }
+        if not hasattr(self, "_last_realtime_chat_adaptive_settings"):
+            self._last_realtime_chat_adaptive_settings = {}
+        self._last_realtime_chat_adaptive_settings[resolved_session] = deepcopy(
+            plan["adaptive"],
         )
         plan["dry_run_default"] = self._cfg_bool("realtime_chat_dry_run_default", False)
         plan["intercept_llm_response"] = self._cfg_bool(
@@ -4940,10 +5022,12 @@ class EmotionalStatePlugin(Star):
         topic = decision.get("selected_topic")
         if not isinstance(topic, dict):
             topic = {}
+        adaptive_policy = self._derive_proactive_dispatch_policy(decision)
         message_text = self._compose_proactive_message_text(
             judgement,
             selected_topic=topic,
             override_text=override_text,
+            max_chars=int(adaptive_policy["max_chars"]),
         )
         topic_evidence = str(
             judgement.get("topic_evidence")
@@ -4968,13 +5052,16 @@ class EmotionalStatePlugin(Star):
             "topic_evidence": topic_evidence[:240],
             "reason": str(judgement.get("reason") or decision.get("reason") or "")[:240],
             "message_text": message_text,
-            "max_chars": max(1, self._cfg_int("proactive_speech_max_chars", 160)),
+            "max_chars": int(adaptive_policy["max_chars"]),
+            "ttl_seconds": int(adaptive_policy["ttl_seconds"]),
+            "cooldown_seconds": float(adaptive_policy["cooldown_seconds"]),
+            "feedback_window_seconds": float(adaptive_policy["feedback_window_seconds"]),
+            "adaptive_policy": adaptive_policy,
             "idempotency_key": self._proactive_dispatch_idempotency_key(
                 session_key=session_key,
                 decision=decision,
                 message_text=message_text,
             ),
-            "ttl_seconds": max(1, self._cfg_int("proactive_speech_dispatch_ttl_seconds", 120)),
             "requires_generation": False,
             "context_excerpt": self._clip(str(candidate_context or ""), 160),
             "sent": False,
@@ -4991,14 +5078,101 @@ class EmotionalStatePlugin(Star):
         *,
         selected_topic: dict[str, Any],
         override_text: str = "",
+        max_chars: int | None = None,
     ) -> str:
-        max_chars = max(1, self._cfg_int("proactive_speech_max_chars", 160))
+        max_chars = max(1, int(max_chars or 160))
         raw = str(override_text or judgement.get("draft_message") or "").strip()
         if not raw:
             need_mode = str(judgement.get("need_mode") or "")
             topic = str(judgement.get("topic_text") or selected_topic.get("topic") or "").strip()
             raw = self._fallback_proactive_message(need_mode, topic)
         return self._clip_one_line(raw, max_chars)
+
+    def _derive_proactive_dispatch_policy(
+        self,
+        decision: dict[str, Any],
+    ) -> dict[str, Any]:
+        if self._runtime_parameter_debug_override_enabled():
+            return {
+                "source": "debug_config_override",
+                "debug_override_used": True,
+                "max_chars": max(
+                    1,
+                    self._debug_cfg_int("proactive_speech_max_chars", 160),
+                ),
+                "ttl_seconds": max(
+                    1,
+                    self._debug_cfg_int("proactive_speech_dispatch_ttl_seconds", 120),
+                ),
+                "cooldown_seconds": max(
+                    0.0,
+                    self._debug_cfg_float(
+                        "proactive_speech_dispatch_cooldown_seconds",
+                        1800.0,
+                    ),
+                ),
+                "feedback_window_seconds": 1800.0,
+            }
+        signals = decision.get("signals") if isinstance(decision.get("signals"), dict) else {}
+        score = self._clamp01(decision.get("score", 0.0))
+        boundary = self._clamp01(signals.get("boundary", 0.0))
+        overload = self._clamp01(signals.get("overload", 0.0))
+        repair_need = self._clamp01(signals.get("repair_need", 0.0))
+        companionship = self._clamp01(signals.get("companionship_need", 0.0))
+        user_need = self._clamp01(signals.get("user_need_to_be_met", 0.0))
+        bot_need = self._clamp01(signals.get("bot_need_to_express", 0.0))
+        urgency = self._clamp01(
+            0.20
+            + 0.46 * score
+            + 0.20 * repair_need
+            + 0.16 * user_need
+            + 0.12 * bot_need
+            + 0.10 * companionship
+            - 0.22 * boundary
+            - 0.20 * overload,
+        )
+        restraint = self._clamp01(
+            0.18
+            + 0.38 * boundary
+            + 0.34 * overload
+            + 0.16 * (1.0 - score)
+            - 0.12 * repair_need,
+        )
+        max_chars = int(round(92 + 104 * urgency - 42 * restraint))
+        max_chars = max(64, min(240, max_chars))
+        ttl_seconds = int(round(70 + 240 * restraint + 180 * (1.0 - urgency)))
+        ttl_seconds = max(60, min(600, ttl_seconds))
+        cooldown_seconds = round(
+            520
+            + 3600 * restraint
+            + 1250 * (1.0 - urgency)
+            - 820 * repair_need,
+            3,
+        )
+        cooldown_seconds = max(240.0, min(7200.0, cooldown_seconds))
+        feedback_window_seconds = round(
+            max(600.0, min(7200.0, 0.60 * cooldown_seconds + 900 * restraint)),
+            3,
+        )
+        return {
+            "source": "state_formula",
+            "debug_override_used": False,
+            "max_chars": max_chars,
+            "ttl_seconds": ttl_seconds,
+            "cooldown_seconds": cooldown_seconds,
+            "feedback_window_seconds": feedback_window_seconds,
+            "urgency": round(urgency, 6),
+            "restraint": round(restraint, 6),
+            "signals": {
+                "score": round(score, 6),
+                "boundary": round(boundary, 6),
+                "overload": round(overload, 6),
+                "repair_need": round(repair_need, 6),
+                "companionship_need": round(companionship, 6),
+                "user_need_to_be_met": round(user_need, 6),
+                "bot_need_to_express": round(bot_need, 6),
+            },
+        }
 
     def _fallback_proactive_message(self, need_mode: str, topic: str) -> str:
         topic = str(topic or "").strip()
@@ -5047,7 +5221,13 @@ class EmotionalStatePlugin(Star):
             return "missing_unified_msg_origin"
         if not str(dispatch.get("message_text") or "").strip():
             return "empty_message"
-        if self._proactive_dispatch_on_cooldown(str(dispatch.get("session_key") or "")):
+        if self._proactive_dispatch_on_cooldown(
+            str(dispatch.get("session_key") or ""),
+            cooldown_seconds=self._as_float_value(
+                dispatch.get("cooldown_seconds"),
+                1800.0,
+            ),
+        ):
             return "cooldown_active"
         if not hasattr(getattr(self, "context", None), "send_message"):
             return "missing_send_message_api"
@@ -5055,11 +5235,13 @@ class EmotionalStatePlugin(Star):
             return "decision_silence"
         return ""
 
-    def _proactive_dispatch_on_cooldown(self, session_key: str) -> bool:
-        cooldown = max(
-            0.0,
-            self._cfg_float("proactive_speech_dispatch_cooldown_seconds", 1800.0),
-        )
+    def _proactive_dispatch_on_cooldown(
+        self,
+        session_key: str,
+        *,
+        cooldown_seconds: float | None = None,
+    ) -> bool:
+        cooldown = max(0.0, self._as_float_value(cooldown_seconds, 1800.0))
         if cooldown <= 0:
             return False
         last_sent = self._proactive_last_sent_cache().get(session_key)
@@ -5087,12 +5269,87 @@ class EmotionalStatePlugin(Star):
                 "idempotency_key": dispatch.get("idempotency_key"),
                 "requested": bool(dispatch.get("requested")),
                 "sent": bool(dispatch.get("sent")),
+                "sent_at": dispatch.get("sent_at"),
                 "blocked_reason": dispatch.get("blocked_reason", ""),
                 "need_mode": dispatch.get("need_mode", ""),
                 "topic_text": dispatch.get("topic_text", ""),
                 "topic_evidence": dispatch.get("topic_evidence", ""),
+                "feedback_status": (
+                    "pending" if dispatch.get("sent") else "not_sent"
+                ),
+                "feedback_window_seconds": self._as_float_value(
+                    dispatch.get("feedback_window_seconds"),
+                    1800.0,
+                ),
             },
         )
+
+    async def _observe_proactive_dispatch_feedback(
+        self,
+        session_key: str,
+        user_text: str,
+        *,
+        observed_at: float | None = None,
+    ) -> None:
+        audit = getattr(self, "_proactive_dispatch_audit", None)
+        if not isinstance(audit, dict):
+            return
+        entries = audit.get(session_key)
+        if not entries:
+            return
+        now = self._observed_now() if observed_at is None else float(observed_at)
+        text_profile = self._low_signal_text_profile(user_text)
+        for entry in reversed(entries):
+            if entry.get("feedback_status") not in {"pending", "", None}:
+                continue
+            if not entry.get("sent"):
+                continue
+            sent_at = self._as_float_value(entry.get("sent_at"), 0.0)
+            window = max(
+                60.0,
+                self._as_float_value(entry.get("feedback_window_seconds"), 1800.0),
+            )
+            elapsed = max(0.0, now - sent_at) if sent_at > 0 else 0.0
+            if sent_at > 0 and elapsed > window:
+                entry["feedback_status"] = "unanswered"
+                entry["feedback_observed_at"] = now
+                entry["feedback_elapsed_seconds"] = round(elapsed, 6)
+                await self.observe_lifelike_text(
+                    session_key=session_key,
+                    text=(
+                        "主动发言没有被及时回应；以后更谨慎地判断开口时机，"
+                        "降低打扰感，优先等待用户自然接话。"
+                    ),
+                    source="proactive_feedback",
+                    commit=True,
+                    observed_at=now,
+                )
+                return
+            status = "cold_reply" if text_profile.get("is_low_signal") else "received_reply"
+            entry["feedback_status"] = status
+            entry["feedback_signal_kind"] = text_profile.get("kind")
+            entry["feedback_observed_at"] = now
+            entry["feedback_elapsed_seconds"] = round(elapsed, 6)
+            if status == "cold_reply":
+                await self.observe_lifelike_text(
+                    session_key=session_key,
+                    text=(
+                        "主动发言后只收到低信号回应，可能造成冷场；以后更谨慎，"
+                        "减少调皮打扰，优先选择有明确证据的话题。"
+                    ),
+                    source="proactive_feedback",
+                    commit=True,
+                    observed_at=now,
+                )
+            else:
+                await self.observe_lifelike_text(
+                    session_key=session_key,
+                    text="主动发言被用户接住，可轻微增加共同语境和被需要感。",
+                    source="proactive_feedback",
+                    commit=True,
+                    observed_at=now,
+                )
+            return
 
     async def _send_proactive_message(
         self,
@@ -5151,8 +5408,26 @@ class EmotionalStatePlugin(Star):
         if sticker.get("should_send"):
             candidate = sticker.get("candidate")
             if isinstance(candidate, dict):
-                sticker_message = self._build_astrbot_sticker_message(candidate)
-                sticker_result = await send_message(origin, sticker_message)
+                judgement = await self._judge_sticker_consistency(
+                    event_or_session,
+                    plan=plan,
+                    sticker=sticker,
+                    candidate=candidate,
+                )
+                if judgement.get("approved"):
+                    sticker_message = self._build_astrbot_sticker_message(candidate)
+                    raw_sticker_result = await send_message(origin, sticker_message)
+                    sticker_result = {
+                        "sent": True,
+                        "judgement": judgement,
+                        "result": self._bounded_scalar_or_summary(raw_sticker_result),
+                    }
+                else:
+                    sticker_result = {
+                        "sent": False,
+                        "blocked_reason": "llm_rejected",
+                        "judgement": judgement,
+                    }
         session_key = str(plan.get("session_key") or self._resolve_public_session_key(event_or_session))
         self._realtime_chat_last_sent_cache()[session_key] = self._observed_now()
         return {
@@ -5162,6 +5437,148 @@ class EmotionalStatePlugin(Star):
             "message_count": len(results),
             "results": results,
             "sticker_result": self._bounded_scalar_or_summary(sticker_result),
+        }
+
+    async def _judge_sticker_consistency(
+        self,
+        event_or_session: AstrMessageEvent | str | None,
+        *,
+        plan: dict[str, Any],
+        sticker: dict[str, Any],
+        candidate: dict[str, Any],
+    ) -> dict[str, Any]:
+        local = self._local_sticker_consistency_judgement(
+            plan=plan,
+            sticker=sticker,
+            candidate=candidate,
+        )
+        if not self._cfg_bool("sticker_llm_consistency_check_enabled", True):
+            return local
+        event = event_or_session if self._looks_like_event(event_or_session) else None
+        if event is None or not self._cfg_bool("use_llm_assessor", True):
+            return local
+        provider_id = await self._provider_id(event)
+        if not provider_id:
+            return local
+        prompt = self._build_sticker_consistency_prompt(
+            plan=plan,
+            sticker=sticker,
+            candidate=candidate,
+        )
+        token = _INTERNAL_LLM_CALL.set(True)
+        try:
+            llm_resp = await self._call_internal_assessor_llm(
+                provider_id=provider_id,
+                prompt=prompt,
+                system_prompt="你是插件内部表情包一致性检查器，只输出 JSON。",
+            )
+        except Exception as exc:
+            local["reason"] += f"; llm_check_failed={str(exc)[:80]}"
+            return local
+        finally:
+            _INTERNAL_LLM_CALL.reset(token)
+        parsed = self._parse_sticker_consistency_judgement(
+            getattr(llm_resp, "completion_text", ""),
+        )
+        return parsed or local
+
+    def _local_sticker_consistency_judgement(
+        self,
+        *,
+        plan: dict[str, Any],
+        sticker: dict[str, Any],
+        candidate: dict[str, Any],
+    ) -> dict[str, Any]:
+        intent = str(sticker.get("intent") or "").lower()
+        text = " ".join(
+            str(part.get("text") or "")
+            for part in list(plan.get("message_parts") or [])[:4]
+            if isinstance(part, dict)
+        ).lower()
+        descriptor = " ".join(
+            str(candidate.get(key) or "")
+            for key in ("name", "relative_path", "path", "url")
+        ).lower()
+        tags = " ".join(str(tag).lower() for tag in candidate.get("tags") or [])
+        evidence = descriptor + " " + tags
+        negative = {"angry", "怒", "生气", "骂", "嫌弃", "阴阳", "刀", "哭"}
+        celebratory = {"celebrate", "好耶", "赢", "开心", "happy"}
+        comfort = {"comfort", "抱抱", "摸摸", "安慰", "哭", "泪"}
+        conflict = False
+        if intent in {"comfort", "apology"} and any(word in evidence for word in negative):
+            conflict = True
+        if intent == "celebrate" and any(word in evidence for word in negative):
+            conflict = True
+        if "对不起" in text and any(word in evidence for word in celebratory):
+            conflict = True
+        if intent == "comfort" and any(word in evidence for word in comfort):
+            conflict = False
+        return {
+            "approved": not conflict,
+            "source": "local_consistency_gate",
+            "reason": (
+                "candidate tags match inferred intent"
+                if not conflict
+                else "candidate tags may conflict with reply mood"
+            ),
+            "intent": intent,
+        }
+
+    def _build_sticker_consistency_prompt(
+        self,
+        *,
+        plan: dict[str, Any],
+        sticker: dict[str, Any],
+        candidate: dict[str, Any],
+    ) -> str:
+        message_text = "\n".join(
+            str(part.get("text") or "")
+            for part in list(plan.get("message_parts") or [])[:4]
+            if isinstance(part, dict)
+        )
+        candidate_summary = {
+            key: candidate.get(key)
+            for key in ("name", "relative_path", "origin", "tags", "extension")
+            if key in candidate
+        }
+        return (
+            "请判断候选表情包是否与本轮回复语气一致。只看标签、文件名和意图，不需要图片二进制。\n"
+            "如果可能造成反讽、误伤、冒犯、与安慰/道歉/关心意图冲突，approved=false。\n"
+            "输出 JSON: {\"approved\": true|false, \"reason\": \"短理由\"}\n"
+            f"回复文本: {self._clip(message_text, 500)}\n"
+            f"表情意图: {json.dumps(sticker, ensure_ascii=False)[:600]}\n"
+            f"候选表情: {json.dumps(candidate_summary, ensure_ascii=False)}"
+        )
+
+    def _parse_sticker_consistency_judgement(self, text: str) -> dict[str, Any] | None:
+        raw = str(text or "").strip()
+        start = raw.find("{")
+        end = raw.rfind("}")
+        if start < 0 or end <= start:
+            return None
+        try:
+            data = json.loads(raw[start : end + 1])
+        except json.JSONDecodeError:
+            return None
+        approved_raw = data.get("approved")
+        if isinstance(approved_raw, bool):
+            approved = approved_raw
+        elif isinstance(approved_raw, str):
+            normalized = approved_raw.strip().lower()
+            if normalized in {"true", "yes", "1", "approved", "通过"}:
+                approved = True
+            elif normalized in {"false", "no", "0", "rejected", "拒绝", "不通过"}:
+                approved = False
+            else:
+                return None
+        elif isinstance(approved_raw, (int, float)):
+            approved = bool(approved_raw)
+        else:
+            return None
+        return {
+            "approved": approved,
+            "source": "llm_consistency_gate",
+            "reason": str(data.get("reason") or "")[:240],
         }
 
     def _build_astrbot_message_chain(self, text: str) -> Any:
@@ -5241,10 +5658,31 @@ class EmotionalStatePlugin(Star):
         return not self._realtime_chat_on_cooldown(session_key)
 
     def _realtime_chat_on_cooldown(self, session_key: str) -> bool:
-        cooldown = max(
-            0.0,
-            self._cfg_float("realtime_chat_session_cooldown_seconds", 0.0),
+        adaptive = getattr(self, "_last_realtime_chat_adaptive_settings", {}).get(
+            session_key,
+            {},
         )
+        values = (
+            adaptive.get("realtime_chat", {}).get("values", {})
+            if isinstance(adaptive, dict)
+            else {}
+        )
+        restraint = (
+            adaptive.get("realtime_chat", {}).get("restraint", 0.0)
+            if isinstance(adaptive, dict)
+            else 0.0
+        )
+        cooldown = 0.0
+        if values:
+            cooldown = max(
+                0.0,
+                min(45.0, 2.0 + 24.0 * self._as_float_value(restraint, 0.0)),
+            )
+        if self._runtime_parameter_debug_override_enabled():
+            cooldown = max(
+                0.0,
+                self._debug_cfg_float("realtime_chat_session_cooldown_seconds", cooldown),
+            )
         if cooldown <= 0:
             return False
         last_sent = self._realtime_chat_last_sent_cache().get(session_key)
@@ -7435,7 +7873,7 @@ class EmotionalStatePlugin(Star):
         return True
 
     def _humanlike_injection_enabled(self) -> bool:
-        return self._auxiliary_state_injection_detail() != "off"
+        return True
 
     def _humanlike_reset_allowed(self) -> bool:
         return self._cfg_bool("allow_humanlike_reset_backdoor", True)
@@ -7444,7 +7882,7 @@ class EmotionalStatePlugin(Star):
         return True
 
     def _lifelike_learning_injection_enabled(self) -> bool:
-        return self._auxiliary_state_injection_detail() != "off"
+        return True
 
     def _lifelike_learning_reset_allowed(self) -> bool:
         return self._cfg_bool("allow_lifelike_learning_reset_backdoor", True)
@@ -7453,7 +7891,7 @@ class EmotionalStatePlugin(Star):
         return True
 
     def _personality_drift_injection_enabled(self) -> bool:
-        return self._auxiliary_state_injection_detail() != "off"
+        return True
 
     def _personality_drift_reset_allowed(self) -> bool:
         return self._cfg_bool("allow_personality_drift_reset_backdoor", True)
@@ -7462,7 +7900,7 @@ class EmotionalStatePlugin(Star):
         return self._cfg_bool("enable_moral_repair_state", False)
 
     def _moral_repair_injection_enabled(self) -> bool:
-        return self._auxiliary_state_injection_detail() != "off"
+        return True
 
     def _moral_repair_reset_allowed(self) -> bool:
         return self._cfg_bool("allow_moral_repair_reset_backdoor", True)
@@ -7471,7 +7909,7 @@ class EmotionalStatePlugin(Star):
         return self._cfg_bool("enable_fallibility_state", False)
 
     def _fallibility_injection_enabled(self) -> bool:
-        return self._auxiliary_state_injection_detail() != "off"
+        return True
 
     def _fallibility_reset_allowed(self) -> bool:
         return self._cfg_bool("allow_fallibility_reset_backdoor", True)
@@ -7480,7 +7918,7 @@ class EmotionalStatePlugin(Star):
         return True
 
     def _group_atmosphere_injection_enabled(self) -> bool:
-        return self._auxiliary_state_injection_detail() != "off"
+        return True
 
     def _group_atmosphere_applies(
         self,
@@ -7691,13 +8129,15 @@ class EmotionalStatePlugin(Star):
         state: EmotionState,
         *,
         safety_boundary: bool | None = None,
+        decision: _StateInjectionDecision | None = None,
     ) -> str:
         resolved_safety_boundary = (
             self._safety_boundary_enabled()
             if safety_boundary is None
             else safety_boundary
         )
-        if self._state_injection_detail() == "compact":
+        detail = decision.primary_detail if decision is not None else self._state_injection_detail()
+        if detail == "compact":
             return self._build_compact_state_injection(
                 state,
                 safety_boundary=resolved_safety_boundary,
@@ -7714,14 +8154,15 @@ class EmotionalStatePlugin(Star):
         *,
         safety_boundary: bool | None = None,
         commit_snapshot: bool = True,
+        decision: _StateInjectionDecision | None = None,
     ) -> str:
-        mode = str(
-            self._cfg("state_injection_compact_mode", "snapshot") or "snapshot",
-        ).strip().lower()
-        if self._state_injection_detail() != "compact" or mode != "diff":
+        decision = decision or self._state_injection_decision(session_key, state)
+        mode = decision.compact_mode
+        if decision.primary_detail != "compact" or mode != "diff":
             return self._build_state_injection(
                 state,
                 safety_boundary=safety_boundary,
+                decision=decision,
             )
         return self._build_diff_state_injection(
             session_key,
@@ -7732,6 +8173,7 @@ class EmotionalStatePlugin(Star):
                 else safety_boundary
             ),
             commit_snapshot=commit_snapshot,
+            decision=decision,
         )
 
     def _build_state_injection_for_detail(
@@ -7746,22 +8188,31 @@ class EmotionalStatePlugin(Star):
                 state,
                 safety_boundary=safety_boundary,
             )
+        if str(detail or "").strip().lower() == "compact":
+            return self._build_compact_state_injection(
+                state,
+                safety_boundary=safety_boundary,
+            )
         return self._build_state_injection(
             state,
             safety_boundary=safety_boundary,
         )
 
     def _state_injection_detail(self) -> str:
+        if not self._runtime_parameter_debug_override_enabled():
+            return "compact"
         detail = str(
-            self._cfg("state_injection_detail", "compact") or "compact",
+            self._debug_cfg("state_injection_detail", "compact") or "compact",
         ).strip().lower()
         if detail in {"compact", "full"}:
             return detail
         return "compact"
 
     def _auxiliary_state_injection_detail(self) -> str:
+        if not self._runtime_parameter_debug_override_enabled():
+            return "compact"
         detail = str(
-            self._cfg("auxiliary_state_injection_detail", "compact") or "compact",
+            self._debug_cfg("auxiliary_state_injection_detail", "compact") or "compact",
         ).strip().lower()
         if detail in {"compact", "full", "off"}:
             return detail
@@ -7802,6 +8253,106 @@ class EmotionalStatePlugin(Star):
             "</bot_emotion_state>"
         )
 
+    def _state_injection_decision(
+        self,
+        session_key: str,
+        state: EmotionState,
+        *,
+        budget: _StateInjectionBudget | None = None,
+    ) -> _StateInjectionDecision:
+        if self._runtime_parameter_debug_override_enabled():
+            detail = str(
+                self._debug_cfg("state_injection_detail", "compact") or "compact",
+            ).strip().lower()
+            compact_mode = str(
+                self._debug_cfg("state_injection_compact_mode", "snapshot")
+                or "snapshot",
+            ).strip().lower()
+            auxiliary = str(
+                self._debug_cfg("auxiliary_state_injection_detail", "compact")
+                or "compact",
+            ).strip().lower()
+            return _StateInjectionDecision(
+                primary_detail=detail if detail in {"compact", "full"} else "compact",
+                compact_mode=compact_mode if compact_mode in {"snapshot", "diff"} else "snapshot",
+                auxiliary_detail=(
+                    auxiliary if auxiliary in {"compact", "full", "off"} else "compact"
+                ),
+                emotion_diff_threshold=max(
+                    0.0,
+                    self._debug_cfg_float("state_injection_diff_threshold", 0.08),
+                ),
+                group_diff_threshold=max(
+                    0.0,
+                    self._debug_cfg_float(
+                        "group_atmosphere_injection_diff_threshold",
+                        0.08,
+                    ),
+                ),
+                force_every_turns=max(
+                    1,
+                    self._debug_cfg_int("state_injection_diff_force_every_turns", 6),
+                ),
+                reasons=["debug_config_override"],
+            )
+        values = state.values if state is not None else {}
+        arousal = abs(self._as_float_value(values.get("arousal"), 0.0))
+        valence = self._as_float_value(values.get("valence"), 0.0)
+        affiliation = self._as_float_value(values.get("affiliation"), 0.0)
+        active_effects = len(getattr(state.consequences, "active_effects", {}) or {})
+        relationship = state.last_appraisal.get("relationship_decision")
+        relationship_decision = ""
+        if isinstance(relationship, dict):
+            relationship_decision = str(relationship.get("decision") or "")
+        pressure = 0.0
+        if budget is not None and budget.effective_total_budget > 0:
+            pressure = self._clamp01(
+                budget.request_chars_before / max(1, budget.effective_total_budget),
+            )
+        salience = self._clamp01(
+            0.28 * arousal
+            + 0.18 * abs(valence)
+            + 0.14 * max(0.0, affiliation)
+            + 0.13 * min(active_effects, 4) / 4.0
+            + (0.18 if relationship_decision in {"cold_war", "confront", "repair"} else 0.0)
+            - 0.16 * pressure,
+        )
+        reasons = [
+            f"salience={salience:.2f}",
+            f"budget_pressure={pressure:.2f}",
+        ]
+        primary_detail = "compact"
+        compact_mode = "diff" if pressure >= 0.26 or salience < 0.34 else "snapshot"
+        auxiliary_detail = "compact"
+        if salience >= 0.74 and pressure < 0.36:
+            primary_detail = "full"
+            auxiliary_detail = "compact"
+            compact_mode = "snapshot"
+            reasons.append("high_salience_full_primary")
+        elif pressure >= 0.72:
+            auxiliary_detail = "off"
+            compact_mode = "diff"
+            reasons.append("high_budget_pressure_auxiliary_off")
+        elif salience >= 0.56 and pressure < 0.42:
+            auxiliary_detail = "compact"
+            compact_mode = "snapshot"
+            reasons.append("medium_salience_snapshot")
+        else:
+            reasons.append("low_or_ordinary_salience_diff_compact")
+        threshold = max(0.035, min(0.16, 0.06 + 0.08 * (1.0 - salience) + 0.04 * pressure))
+        group_threshold = max(0.035, min(0.16, threshold + 0.01))
+        force_every = int(round(4 + 5 * pressure + 3 * (1.0 - salience)))
+        force_every = max(3, min(10, force_every))
+        return _StateInjectionDecision(
+            primary_detail=primary_detail,
+            compact_mode=compact_mode,
+            auxiliary_detail=auxiliary_detail,
+            emotion_diff_threshold=round(threshold, 6),
+            group_diff_threshold=round(group_threshold, 6),
+            force_every_turns=force_every,
+            reasons=reasons,
+        )
+
     def _build_diff_state_injection(
         self,
         session_key: str,
@@ -7809,6 +8360,7 @@ class EmotionalStatePlugin(Star):
         *,
         safety_boundary: bool,
         commit_snapshot: bool = True,
+        decision: _StateInjectionDecision | None = None,
     ) -> str:
         cache = getattr(self, "_state_injection_snapshot_cache", None)
         if cache is None:
@@ -7818,8 +8370,9 @@ class EmotionalStatePlugin(Star):
         previous = cache.get(session_key)
         if commit_snapshot:
             cache[session_key] = current
-        threshold = max(0.0, self._cfg_float("state_injection_diff_threshold", 0.08))
-        force_every = max(1, self._cfg_int("state_injection_diff_force_every_turns", 6))
+        decision = decision or self._state_injection_decision(session_key, state)
+        threshold = max(0.0, decision.emotion_diff_threshold)
+        force_every = max(1, decision.force_every_turns)
         if previous is None or (state.turns > 0 and state.turns % force_every == 0):
             return self._build_compact_state_injection(
                 state,
@@ -7894,10 +8447,10 @@ class EmotionalStatePlugin(Star):
         state: GroupAtmosphereState,
         *,
         commit_snapshot: bool = True,
+        decision: _StateInjectionDecision | None = None,
     ) -> str:
-        mode = str(
-            self._cfg("state_injection_compact_mode", "snapshot") or "snapshot",
-        ).strip().lower()
+        decision = decision or self._state_injection_decision(session_key, None)
+        mode = decision.compact_mode
         if mode != "diff":
             return build_group_atmosphere_prompt_fragment(state)
         cache = getattr(self, "_group_atmosphere_injection_snapshot_cache", None)
@@ -7910,7 +8463,7 @@ class EmotionalStatePlugin(Star):
             cache[session_key] = current
         threshold = max(
             0.0,
-            self._cfg_float("group_atmosphere_injection_diff_threshold", 0.08),
+            decision.group_diff_threshold,
         )
         if previous is None:
             return build_group_atmosphere_prompt_fragment(state)
@@ -8082,8 +8635,14 @@ class EmotionalStatePlugin(Star):
         self,
         state_name: str,
         full_builder: Any,
+        *,
+        decision: _StateInjectionDecision | None = None,
     ) -> str:
-        detail = self._auxiliary_state_injection_detail()
+        detail = (
+            decision.auxiliary_detail
+            if decision is not None
+            else self._auxiliary_state_injection_detail()
+        )
         if detail == "full":
             return str(full_builder())
         if detail == "off":
@@ -8512,11 +9071,31 @@ class EmotionalStatePlugin(Star):
     def _record_state_injection_diagnostics(
         self,
         budget: _StateInjectionBudget,
+        *,
+        decision: _StateInjectionDecision | None = None,
     ) -> None:
         diagnostics = {
             "enabled": True,
             "estimate_only": True,
             "session_key": budget.session_key,
+            "mode_source": (
+                "debug_config_override"
+                if self._runtime_parameter_debug_override_enabled()
+                else "adaptive_state_budget"
+            ),
+            "auto_decision": (
+                {
+                    "primary_detail": decision.primary_detail,
+                    "compact_mode": decision.compact_mode,
+                    "auxiliary_detail": decision.auxiliary_detail,
+                    "emotion_diff_threshold": decision.emotion_diff_threshold,
+                    "group_diff_threshold": decision.group_diff_threshold,
+                    "force_every_turns": decision.force_every_turns,
+                    "reasons": list(decision.reasons or []),
+                }
+                if decision is not None
+                else None
+            ),
             "request_chars_before": budget.request_chars_before,
             "request_budget_chars": budget.request_budget_chars,
             "reserved_chars": budget.reserved_chars,
@@ -8556,6 +9135,12 @@ class EmotionalStatePlugin(Star):
             "enabled": self._cfg_bool("inject_state", True),
             "estimate_only": True,
             "session_key": session_key,
+            "mode_source": (
+                "debug_config_override"
+                if self._runtime_parameter_debug_override_enabled()
+                else "adaptive_state_budget"
+            ),
+            "auto_decision": None,
             "request_budget_chars": max(
                 0,
                 self._cfg_int("state_injection_request_budget_chars", 32000),
@@ -9277,29 +9862,151 @@ class EmotionalStatePlugin(Star):
         return self._cfg_bool("enable_realtime_chat", True)
 
     def _realtime_chat_settings(self) -> RealtimeChatSettings:
+        if not self._runtime_parameter_debug_override_enabled():
+            return self._base_realtime_chat_settings()
         return RealtimeChatSettings(
             enabled=self._realtime_chat_enabled(),
-            max_parts=max(1, self._cfg_int("realtime_chat_max_parts", 5)),
-            min_part_chars=max(1, self._cfg_int("realtime_chat_min_part_chars", 3)),
-            max_part_chars=max(12, self._cfg_int("realtime_chat_max_part_chars", 72)),
+            max_parts=max(1, self._debug_cfg_int("realtime_chat_max_parts", 5)),
+            min_part_chars=max(1, self._debug_cfg_int("realtime_chat_min_part_chars", 3)),
+            max_part_chars=max(12, self._debug_cfg_int("realtime_chat_max_part_chars", 72)),
             chars_per_second=max(
                 1.0,
-                self._cfg_float("realtime_chat_chars_per_second", 7.0),
+                self._debug_cfg_float("realtime_chat_chars_per_second", 7.0),
             ),
             min_delay_seconds=max(
                 0.0,
-                self._cfg_float("realtime_chat_min_delay_seconds", 0.35),
+                self._debug_cfg_float("realtime_chat_min_delay_seconds", 0.35),
             ),
             max_delay_seconds=max(
                 0.0,
-                self._cfg_float("realtime_chat_max_delay_seconds", 4.0),
+                self._debug_cfg_float("realtime_chat_max_delay_seconds", 4.0),
             ),
             jitter_ratio=max(
                 0.0,
-                self._cfg_float("realtime_chat_jitter_ratio", 0.22),
+                self._debug_cfg_float("realtime_chat_jitter_ratio", 0.22),
             ),
             strip_markdown=self._cfg_bool("realtime_chat_strip_markdown", True),
         )
+
+    def _base_realtime_chat_settings(self) -> RealtimeChatSettings:
+        return RealtimeChatSettings(
+            enabled=self._realtime_chat_enabled(),
+            max_parts=5,
+            min_part_chars=3,
+            max_part_chars=72,
+            chars_per_second=7.0,
+            min_delay_seconds=0.35,
+            max_delay_seconds=4.0,
+            jitter_ratio=0.22,
+            strip_markdown=self._cfg_bool("realtime_chat_strip_markdown", True),
+        )
+
+    def _derive_realtime_chat_settings(
+        self,
+        *,
+        persona_profile: PersonaProfile | None,
+        emotion_values: dict[str, float],
+        atmosphere_values: dict[str, float],
+        lifelike_snapshot: dict[str, Any] | None = None,
+    ) -> tuple[RealtimeChatSettings, dict[str, Any]]:
+        base = self._realtime_chat_settings()
+        if self._runtime_parameter_debug_override_enabled():
+            return base, {
+                "source": "debug_config_override",
+                "debug_override_used": True,
+                "reason": "runtime_parameter_debug_override_enabled",
+                "values": self._realtime_chat_settings_payload(base),
+            }
+        personality_model = (
+            getattr(persona_profile, "personality_model", None)
+            if persona_profile is not None
+            else None
+        )
+        factors = self._personality_derived_factors(personality_model)
+        traits = self._personality_trait_scores(personality_model)
+        lifelike_values = self._snapshot_values(lifelike_snapshot)
+        expressiveness = self._as_float_value(factors.get("expressiveness"), 0.42)
+        social_distance = self._as_float_value(factors.get("social_distance"), 0.24)
+        boundary = max(
+            self._as_float_value(factors.get("boundary_sensitivity"), 0.30),
+            self._as_float_value(lifelike_values.get("boundary_sensitivity"), 0.24),
+        )
+        instability = self._as_float_value(factors.get("instability"), 0.25)
+        warmth = self._as_float_value(traits.get("interpersonal_warmth"), 0.45)
+        arousal = max(0.0, self._as_float_value(emotion_values.get("arousal"), 0.0))
+        affiliation = self._as_float_value(emotion_values.get("affiliation"), 0.0)
+        tension = self._as_float_value(atmosphere_values.get("tension"), 0.0)
+        interrupt_risk = self._as_float_value(
+            atmosphere_values.get("interrupt_risk"),
+            0.0,
+        )
+        silence = self._as_float_value(lifelike_values.get("silence_comfort"), 0.30)
+        pace_drive = self._clamp01(
+            0.35
+            + 0.30 * expressiveness
+            + 0.18 * max(0.0, arousal)
+            + 0.12 * max(0.0, affiliation)
+            - 0.22 * social_distance
+            - 0.16 * boundary
+            - 0.14 * silence,
+        )
+        restraint = self._clamp01(
+            0.24
+            + 0.26 * social_distance
+            + 0.24 * boundary
+            + 0.18 * interrupt_risk
+            + 0.14 * tension
+            + 0.12 * silence
+            - 0.12 * warmth,
+        )
+        max_parts = int(round(3 + 4 * pace_drive - 2 * restraint))
+        max_parts = int(max(2, min(8, max_parts)))
+        min_part_chars = int(max(2, min(8, round(3 + 2 * restraint))))
+        max_part_chars = int(round(84 - 30 * pace_drive - 14 * restraint))
+        max_part_chars = int(max(32, min(96, max_part_chars)))
+        chars_per_second = round(
+            max(3.2, min(11.5, 5.2 + 4.5 * pace_drive - 1.4 * restraint)),
+            3,
+        )
+        min_delay = round(max(0.18, min(1.45, 0.26 + 0.70 * restraint)), 3)
+        max_delay = round(
+            max(1.4, min(6.5, 2.4 + 2.5 * restraint + 1.1 * (1.0 - pace_drive))),
+            3,
+        )
+        jitter = round(
+            max(0.08, min(0.48, 0.12 + 0.22 * instability + 0.16 * arousal)),
+            3,
+        )
+        settings = RealtimeChatSettings(
+            enabled=base.enabled,
+            max_parts=max_parts,
+            min_part_chars=min_part_chars,
+            max_part_chars=max_part_chars,
+            chars_per_second=chars_per_second,
+            min_delay_seconds=min_delay,
+            max_delay_seconds=max_delay,
+            jitter_ratio=jitter,
+            strip_markdown=base.strip_markdown,
+        )
+        return settings, {
+            "source": "personality_emotion_atmosphere",
+            "debug_override_used": False,
+            "pace_drive": round(pace_drive, 6),
+            "restraint": round(restraint, 6),
+            "signals": {
+                "expressiveness": round(expressiveness, 6),
+                "social_distance": round(social_distance, 6),
+                "boundary_sensitivity": round(boundary, 6),
+                "instability": round(instability, 6),
+                "warmth": round(warmth, 6),
+                "arousal": round(arousal, 6),
+                "affiliation": round(affiliation, 6),
+                "tension": round(tension, 6),
+                "interrupt_risk": round(interrupt_risk, 6),
+                "silence_comfort": round(silence, 6),
+            },
+            "values": self._realtime_chat_settings_payload(settings),
+        }
 
     def _sticker_reaction_enabled(self) -> bool:
         return self._cfg_bool("enable_sticker_reaction", True)
@@ -9308,6 +10015,8 @@ class EmotionalStatePlugin(Star):
         return self._cfg_bool("sticker_learn_user_images", True)
 
     def _sticker_settings(self) -> StickerSettings:
+        if not self._runtime_parameter_debug_override_enabled():
+            return self._base_sticker_settings()
         return StickerSettings(
             enabled=self._sticker_reaction_enabled(),
             local_root=str(self._cfg("sticker_local_root", "") or ""),
@@ -9330,10 +10039,112 @@ class EmotionalStatePlugin(Star):
             ),
             send_probability=max(
                 0.0,
-                min(1.0, self._cfg_float("sticker_send_probability", 0.18)),
+                min(1.0, self._debug_cfg_float("sticker_send_probability", 0.18)),
             ),
             learned_enabled=self._sticker_learning_enabled(),
         )
+
+    def _base_sticker_settings(self) -> StickerSettings:
+        return StickerSettings(
+            enabled=self._sticker_reaction_enabled(),
+            local_root=str(self._cfg("sticker_local_root", "") or ""),
+            default_repo_url=str(
+                self._cfg(
+                    "sticker_default_repo_url",
+                    "https://github.com/zhaoolee/ChineseBQB.git",
+                )
+                or ""
+            ),
+            allowed_extensions=str(
+                self._cfg("sticker_allowed_extensions", ".jpg,.jpeg,.png,.gif,.webp")
+                or ""
+            ),
+            selected_packs=str(self._cfg("sticker_selected_packs", "") or ""),
+            index_limit=1000,
+            max_file_bytes=5 * 1024 * 1024,
+            send_probability=0.18,
+            learned_enabled=self._sticker_learning_enabled(),
+        )
+
+    def _derive_sticker_settings(
+        self,
+        *,
+        persona_profile: PersonaProfile | None,
+        emotion_values: dict[str, float],
+        atmosphere_values: dict[str, float],
+        lifelike_snapshot: dict[str, Any] | None = None,
+    ) -> tuple[StickerSettings, dict[str, Any]]:
+        base = self._sticker_settings()
+        if self._runtime_parameter_debug_override_enabled():
+            return base, {
+                "source": "debug_config_override",
+                "debug_override_used": True,
+                "probability": round(base.send_probability, 6),
+                "reason": "runtime_parameter_debug_override_enabled",
+            }
+        personality_model = (
+            getattr(persona_profile, "personality_model", None)
+            if persona_profile is not None
+            else None
+        )
+        factors = self._personality_derived_factors(personality_model)
+        traits = self._personality_trait_scores(personality_model)
+        lifelike_values = self._snapshot_values(lifelike_snapshot)
+        expressiveness = self._as_float_value(factors.get("expressiveness"), 0.42)
+        warmth = self._as_float_value(traits.get("interpersonal_warmth"), 0.45)
+        boundary = max(
+            self._as_float_value(factors.get("boundary_sensitivity"), 0.30),
+            self._as_float_value(lifelike_values.get("boundary_sensitivity"), 0.24),
+        )
+        social_distance = self._as_float_value(factors.get("social_distance"), 0.24)
+        valence = self._as_float_value(emotion_values.get("valence"), 0.0)
+        arousal = abs(self._as_float_value(emotion_values.get("arousal"), 0.0))
+        affiliation = self._as_float_value(emotion_values.get("affiliation"), 0.0)
+        tension = self._as_float_value(atmosphere_values.get("tension"), 0.0)
+        interrupt_risk = self._as_float_value(
+            atmosphere_values.get("interrupt_risk"),
+            0.0,
+        )
+        probability = self._clamp01(
+            0.07
+            + 0.18 * expressiveness
+            + 0.15 * warmth
+            + 0.10 * max(0.0, affiliation)
+            + 0.08 * max(0.0, valence)
+            + 0.06 * arousal
+            - 0.16 * boundary
+            - 0.12 * social_distance
+            - 0.14 * tension
+            - 0.16 * interrupt_risk,
+        )
+        probability = max(0.02, min(0.42, probability))
+        settings = StickerSettings(
+            enabled=base.enabled,
+            local_root=base.local_root,
+            default_repo_url=base.default_repo_url,
+            allowed_extensions=base.allowed_extensions,
+            selected_packs=base.selected_packs,
+            index_limit=base.index_limit,
+            max_file_bytes=base.max_file_bytes,
+            send_probability=probability,
+            learned_enabled=base.learned_enabled,
+        )
+        return settings, {
+            "source": "personality_emotion_atmosphere",
+            "debug_override_used": False,
+            "probability": round(probability, 6),
+            "signals": {
+                "expressiveness": round(expressiveness, 6),
+                "warmth": round(warmth, 6),
+                "boundary_sensitivity": round(boundary, 6),
+                "social_distance": round(social_distance, 6),
+                "valence": round(valence, 6),
+                "arousal_abs": round(arousal, 6),
+                "affiliation": round(affiliation, 6),
+                "tension": round(tension, 6),
+                "interrupt_risk": round(interrupt_risk, 6),
+            },
+        }
 
     async def _sticker_candidates(self, session_key: str) -> list[dict[str, Any]]:
         settings = self._sticker_settings()
@@ -9522,6 +10333,61 @@ class EmotionalStatePlugin(Star):
         text = str(value).strip()
         return text or None
 
+    def _runtime_parameter_debug_override_enabled(self) -> bool:
+        return self._cfg_bool("runtime_parameter_debug_override_enabled", False)
+
+    def _clamp01(self, value: Any) -> float:
+        return max(0.0, min(1.0, self._as_float_value(value, 0.0)))
+
+    def _snapshot_values(self, snapshot: Any) -> dict[str, float]:
+        if not isinstance(snapshot, dict):
+            return {}
+        raw = snapshot.get("values")
+        if not isinstance(raw, dict):
+            raw = snapshot.get("dimensions")
+        if not isinstance(raw, dict):
+            return {}
+        return {
+            str(key): self._as_float_value(value, 0.0)
+            for key, value in raw.items()
+        }
+
+    def _personality_derived_factors(self, personality_model: Any) -> dict[str, float]:
+        if not isinstance(personality_model, dict):
+            return {}
+        raw = personality_model.get("derived_factors")
+        if not isinstance(raw, dict):
+            return {}
+        return {
+            str(key): self._as_float_value(value, 0.0)
+            for key, value in raw.items()
+        }
+
+    def _personality_trait_scores(self, personality_model: Any) -> dict[str, float]:
+        if not isinstance(personality_model, dict):
+            return {}
+        raw = personality_model.get("trait_scores")
+        if not isinstance(raw, dict):
+            return {}
+        return {
+            str(key): self._as_float_value(value, 0.0)
+            for key, value in raw.items()
+        }
+
+    def _realtime_chat_settings_payload(
+        self,
+        settings: RealtimeChatSettings,
+    ) -> dict[str, Any]:
+        return {
+            "max_parts": settings.max_parts,
+            "min_part_chars": settings.min_part_chars,
+            "max_part_chars": settings.max_part_chars,
+            "chars_per_second": round(settings.chars_per_second, 6),
+            "min_delay_seconds": round(settings.min_delay_seconds, 6),
+            "max_delay_seconds": round(settings.max_delay_seconds, 6),
+            "jitter_ratio": round(settings.jitter_ratio, 6),
+        }
+
     def _as_float_value(self, value: Any, default: float = 0.0) -> float:
         try:
             return float(value)
@@ -9544,6 +10410,14 @@ class EmotionalStatePlugin(Star):
             return value["value"]
         return value
 
+    def _debug_cfg(self, key: str, default: Any) -> Any:
+        if not hasattr(self.config, "get"):
+            return default
+        value = self.config.get(key, default)
+        if isinstance(value, dict) and "value" in value:
+            return value["value"]
+        return value
+
     def _cfg_bool(self, key: str, default: bool) -> bool:
         value = self._cfg(key, default)
         if isinstance(value, str):
@@ -9559,6 +10433,18 @@ class EmotionalStatePlugin(Star):
     def _cfg_int(self, key: str, default: int) -> int:
         try:
             return int(self._cfg(key, default))
+        except (TypeError, ValueError):
+            return default
+
+    def _debug_cfg_float(self, key: str, default: float) -> float:
+        try:
+            return float(self._debug_cfg(key, default))
+        except (TypeError, ValueError):
+            return default
+
+    def _debug_cfg_int(self, key: str, default: int) -> int:
+        try:
+            return int(self._debug_cfg(key, default))
         except (TypeError, ValueError):
             return default
 

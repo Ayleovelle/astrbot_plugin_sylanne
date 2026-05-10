@@ -170,9 +170,6 @@ class ConfigSchemaContractTests(unittest.TestCase):
             "use_llm_assessor": ("bool", True),
             "assessment_timing": ("string", "post"),
             "enable_proactive_speech_dispatch": ("bool", False),
-            "proactive_speech_dispatch_cooldown_seconds": ("float", 1800.0),
-            "proactive_speech_dispatch_ttl_seconds": ("int", 120),
-            "proactive_speech_max_chars": ("int", 160),
             "background_post_queue_limit": ("int", 0),
             "enable_dynamic_background_workers": ("bool", False),
             "background_post_queue_checkpoint_enabled": ("bool", True),
@@ -196,12 +193,7 @@ class ConfigSchemaContractTests(unittest.TestCase):
             "agent_trail_low_signal_delta_threshold": ("float", 0.03),
             "agent_trail_low_signal_window": ("int", 5),
             "inject_state": ("bool", True),
-            "state_injection_detail": ("string", "compact"),
-            "state_injection_compact_mode": ("string", "snapshot"),
-            "state_injection_diff_threshold": ("float", 0.08),
-            "group_atmosphere_injection_diff_threshold": ("float", 0.08),
-            "state_injection_diff_force_every_turns": ("int", 6),
-            "auxiliary_state_injection_detail": ("string", "compact"),
+            "runtime_parameter_debug_override_enabled": ("bool", False),
             "state_injection_request_budget_chars": ("int", 32000),
             "state_injection_reserved_chars": ("int", 3000),
             "state_injection_max_added_chars": ("int", 2400),
@@ -211,6 +203,7 @@ class ConfigSchemaContractTests(unittest.TestCase):
             "block_deception_manipulation_evasion_actions": ("bool", False),
             "low_reasoning_friendly_mode": ("bool", False),
             "low_reasoning_max_context_chars": ("int", 1200),
+            "sticker_llm_consistency_check_enabled": ("bool", True),
             "allow_emotion_reset_backdoor": ("bool", True),
             "enable_shadow_diagnostics": ("bool", False),
             "humanlike_memory_write_enabled": ("bool", True),
@@ -227,6 +220,30 @@ class ConfigSchemaContractTests(unittest.TestCase):
             with self.subTest(key=key):
                 self.assertEqual(cfg[key]["type"], type_name)
                 self.assertEqual(cfg[key]["default"], default)
+
+    def test_personality_expression_parameters_are_not_user_tunable(self):
+        cfg = schema()
+        hidden_keys = {
+            "proactive_speech_dispatch_cooldown_seconds",
+            "proactive_speech_dispatch_ttl_seconds",
+            "proactive_speech_max_chars",
+            "realtime_chat_max_parts",
+            "realtime_chat_min_part_chars",
+            "realtime_chat_max_part_chars",
+            "realtime_chat_chars_per_second",
+            "realtime_chat_min_delay_seconds",
+            "realtime_chat_max_delay_seconds",
+            "realtime_chat_jitter_ratio",
+            "realtime_chat_session_cooldown_seconds",
+            "sticker_send_probability",
+            "state_injection_detail",
+            "state_injection_compact_mode",
+            "state_injection_diff_threshold",
+            "group_atmosphere_injection_diff_threshold",
+            "state_injection_diff_force_every_turns",
+            "auxiliary_state_injection_detail",
+        }
+        self.assertFalse(hidden_keys & set(cfg))
 
     def test_schema_defaults_match_runtime_fallbacks(self):
         cfg = schema()

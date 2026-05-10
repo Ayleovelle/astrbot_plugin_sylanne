@@ -304,6 +304,7 @@ class AstrBotLifecycleTests(unittest.TestCase):
         plugin = new_plugin(
             {
                 "assessment_timing": "post",
+                "runtime_parameter_debug_override_enabled": True,
                 "state_injection_detail": "full",
             },
         )
@@ -387,6 +388,7 @@ class AstrBotLifecycleTests(unittest.TestCase):
         plugin = new_plugin(
             {
                 "assessment_timing": "post",
+                "runtime_parameter_debug_override_enabled": True,
                 "state_injection_detail": "full",
                 "state_injection_request_budget_chars": 8000,
                 "state_injection_reserved_chars": 500,
@@ -1937,6 +1939,7 @@ class AstrBotLifecycleTests(unittest.TestCase):
 
         plugin = new_plugin(
             {
+                "runtime_parameter_debug_override_enabled": True,
                 "state_injection_compact_mode": "diff",
                 "group_atmosphere_injection_diff_threshold": 0.08,
             },
@@ -2308,6 +2311,7 @@ class AstrBotLifecycleTests(unittest.TestCase):
         plugin = new_plugin(
             {
                 "assessment_timing": "post",
+                "runtime_parameter_debug_override_enabled": True,
                 "enable_lifelike_learning": True,
                 "lifelike_learning_injection_strength": 0.3,
                 "auxiliary_state_injection_detail": "full",
@@ -2336,6 +2340,7 @@ class AstrBotLifecycleTests(unittest.TestCase):
         plugin = new_plugin(
             {
                 "assessment_timing": "post",
+                "runtime_parameter_debug_override_enabled": True,
                 "enable_lifelike_learning": True,
                 "lifelike_learning_injection_strength": 0.3,
                 "auxiliary_state_injection_detail": "off",
@@ -2356,8 +2361,13 @@ class AstrBotLifecycleTests(unittest.TestCase):
         asyncio.run(plugin.on_llm_request(FakeEvent("s-life-off"), request))
 
         texts = self._request_text_parts(request)
-        self.assertEqual(len(texts), 1)
-        self.assertIn("bot_emotion_state", texts[0])
+        state_texts = [
+            text
+            for text in texts
+            if text.startswith("<bot_") or "bot_auxiliary_state" in text
+        ]
+        self.assertEqual(len(state_texts), 1)
+        self.assertIn("bot_emotion_state", state_texts[0])
 
     def test_on_llm_request_overlaps_auxiliary_state_loads(self):
         from humanlike_engine import HumanlikeState
@@ -2597,6 +2607,7 @@ class AstrBotLifecycleTests(unittest.TestCase):
     def test_realtime_chat_plan_splits_reply_and_bounds_delay(self):
         plugin = new_plugin(
             {
+                "runtime_parameter_debug_override_enabled": True,
                 "realtime_chat_max_parts": 4,
                 "realtime_chat_max_part_chars": 18,
                 "realtime_chat_min_delay_seconds": 0.1,
@@ -2618,6 +2629,188 @@ class AstrBotLifecycleTests(unittest.TestCase):
         for part in plan["message_parts"]:
             self.assertLessEqual(part["delay_before_seconds"], 1.0)
             self.assertGreaterEqual(part["delay_before_seconds"], 0.0)
+
+    def test_realtime_chat_runtime_settings_are_personality_adaptive(self):
+        plugin = new_plugin(
+            {
+                "enable_sticker_reaction": False,
+                "realtime_chat_max_parts": 1,
+                "realtime_chat_max_part_chars": 999,
+                "realtime_chat_chars_per_second": 1.0,
+                "realtime_chat_min_delay_seconds": 9.0,
+                "realtime_chat_max_delay_seconds": 9.0,
+            },
+        )
+
+        async def fake_runtime_profile(self, *args, **kwargs):
+            return SimpleNamespace(
+                personality_model={
+                    "derived_factors": {
+                        "expressiveness": 0.92,
+                        "social_distance": 0.08,
+                        "boundary_sensitivity": 0.18,
+                        "instability": 0.22,
+                    },
+                    "trait_scores": {
+                        "interpersonal_warmth": 0.82,
+                        "agreeableness": 0.74,
+                    },
+                },
+            )
+
+        bind_async(plugin, "_public_runtime_persona_profile", fake_runtime_profile)
+
+        plan = asyncio.run(
+            plugin.get_realtime_chat_plan(
+                FakeEvent("s-adaptive-chat"),
+                "第一句。第二句！第三句也想分开说。第四句慢慢收束。",
+            ),
+        )
+
+        adaptive = plan["adaptive"]["realtime_chat"]
+        self.assertFalse(adaptive["debug_override_used"])
+        self.assertEqual(adaptive["source"], "personality_emotion_atmosphere")
+        self.assertGreater(plan["message_count"], 1)
+        self.assertNotEqual(plan["typing"]["chars_per_second"], 1.0)
+        self.assertLess(plan["settings"]["max_part_chars"], 999)
+        self.assertLess(plan["typing"]["min_delay_seconds"], 9.0)
+
+    def test_proactive_dispatch_policy_is_adaptive_not_fixed_config(self):
+        plugin = new_plugin(
+            {
+                "proactive_speech_max_chars": 1,
+                "proactive_speech_dispatch_ttl_seconds": 1,
+                "proactive_speech_dispatch_cooldown_seconds": 1.0,
+            },
+        )
+        decision = {
+            "should_speak": True,
+            "action": "speak_now",
+            "score": 0.78,
+            "signals": {
+                "boundary": 0.18,
+                "overload": 0.12,
+                "repair_need": 0.08,
+                "companionship_need": 0.66,
+                "user_need_to_be_met": 0.52,
+                "bot_need_to_express": 0.48,
+            },
+            "topic_judgement": {
+                "should_speak": True,
+                "need_mode": "mutual_need",
+                "opening_style": "shared_context",
+                "draft_message": "那、那个……我想确认一下，我们现在这样互相需要的节奏还舒服吗？",
+                "topic_evidence": "mutual_need_balance 高",
+            },
+        }
+
+        dispatch = plugin._build_proactive_dispatch_request(
+            decision,
+            event_or_session=FakeEvent("s-proactive-adaptive"),
+            session_key="s-proactive-adaptive",
+            candidate_context="",
+        )
+
+        self.assertIn("adaptive_policy", dispatch)
+        self.assertFalse(dispatch["adaptive_policy"]["debug_override_used"])
+        self.assertGreater(dispatch["max_chars"], 1)
+        self.assertGreater(dispatch["ttl_seconds"], 1)
+        self.assertGreater(dispatch["cooldown_seconds"], 1.0)
+
+    def test_sticker_send_is_blocked_when_llm_consistency_rejects_candidate(self):
+        sent = []
+
+        class FakeContext:
+            async def send_message(self, origin, message):
+                sent.append((origin, str(message)))
+                return {"ok": True}
+
+        plugin = new_plugin()
+        plugin.context = FakeContext()
+
+        async def reject_sticker(self, *args, **kwargs):
+            return {
+                "approved": False,
+                "reason": "candidate mood conflicts with reply",
+                "source": "unit_test",
+            }
+
+        bind_async(plugin, "_judge_sticker_consistency", reject_sticker)
+        plan = {
+            "session_key": "s-sticker-check",
+            "message_parts": [
+                {"index": 0, "text": "那、那个……先慢慢来。", "delay_before_seconds": 0.0},
+            ],
+            "sticker": {
+                "should_send": True,
+                "intent": "comfort",
+                "candidate": {
+                    "path": "C:/tmp/angry.gif",
+                    "name": "angry",
+                    "tags": ["angry"],
+                },
+            },
+        }
+
+        result = asyncio.run(
+            plugin._send_realtime_chat_plan(
+                FakeEvent("s-sticker-check"),
+                plan,
+                source="unit_test",
+            ),
+        )
+
+        self.assertEqual(len(sent), 1)
+        self.assertEqual(result["sticker_result"]["sent"], False)
+        self.assertEqual(result["sticker_result"]["blocked_reason"], "llm_rejected")
+
+    def test_sticker_consistency_parser_treats_string_false_as_rejected(self):
+        plugin = new_plugin()
+
+        judgement = plugin._parse_sticker_consistency_judgement(
+            '{"approved": "false", "reason": "语气不一致"}',
+        )
+
+        self.assertIsNotNone(judgement)
+        self.assertFalse(judgement["approved"])
+        self.assertEqual(judgement["source"], "llm_consistency_gate")
+
+    def test_proactive_cold_reply_is_recorded_as_lifelike_feedback(self):
+        plugin = new_plugin()
+        plugin._proactive_dispatch_audit = {
+            "s-cold": collections.deque(
+                [
+                    {
+                        "sent": True,
+                        "sent_at": 100.0,
+                        "feedback_status": "pending",
+                        "feedback_window_seconds": 10.0,
+                        "need_mode": "playful_ping",
+                    },
+                ],
+                maxlen=24,
+            ),
+        }
+        observations = []
+
+        async def fake_observe_lifelike_text(self, event_or_session=None, text="", **kwargs):
+            observations.append({"text": text, **kwargs})
+            return {"ok": True}
+
+        bind_async(plugin, "observe_lifelike_text", fake_observe_lifelike_text)
+
+        asyncio.run(
+            plugin._observe_proactive_dispatch_feedback(
+                "s-cold",
+                "嗯",
+                observed_at=125.0,
+            ),
+        )
+
+        audit = plugin._proactive_dispatch_audit["s-cold"][-1]
+        self.assertEqual(audit["feedback_status"], "cold_reply")
+        self.assertEqual(observations[0]["source"], "proactive_feedback")
+        self.assertIn("更谨慎", observations[0]["text"])
 
     def test_realtime_chat_dispatch_dry_run_does_not_send(self):
         sent = []
@@ -2651,6 +2844,7 @@ class AstrBotLifecycleTests(unittest.TestCase):
 
         plugin = new_plugin(
             {
+                "runtime_parameter_debug_override_enabled": True,
                 "enable_sticker_reaction": False,
                 "realtime_chat_min_delay_seconds": 0.0,
                 "realtime_chat_max_delay_seconds": 0.0,
@@ -2685,6 +2879,7 @@ class AstrBotLifecycleTests(unittest.TestCase):
                 "enable_realtime_chat": True,
                 "realtime_chat_intercept_llm_response": True,
                 "enable_sticker_reaction": False,
+                "runtime_parameter_debug_override_enabled": True,
                 "realtime_chat_min_delay_seconds": 0.0,
                 "realtime_chat_max_delay_seconds": 0.0,
             },

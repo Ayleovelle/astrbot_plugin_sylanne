@@ -1436,6 +1436,7 @@ class MemoryPayloadPublicApiTests(unittest.TestCase):
                 {
                     "use_llm_assessor": False,
                     "assessment_timing": "pre",
+                    "runtime_parameter_debug_override_enabled": True,
                     "auxiliary_state_injection_detail": "full",
                 },
             )
@@ -1493,7 +1494,10 @@ class MemoryPayloadPublicApiTests(unittest.TestCase):
         try:
             cases = (
                 {"inject_state": False},
-                {"auxiliary_state_injection_detail": "off"},
+                {
+                    "runtime_parameter_debug_override_enabled": True,
+                    "auxiliary_state_injection_detail": "off",
+                },
             )
             lengths = []
             for case in cases:
@@ -1512,7 +1516,13 @@ class MemoryPayloadPublicApiTests(unittest.TestCase):
                     session_id="s1",
                 )
                 asyncio.run(plugin.on_llm_request(event, request))
-                lengths.append(len(request.extra_user_content_parts))
+                state_parts = [
+                    part
+                    for part in request.extra_user_content_parts
+                    if str(part.text).startswith("<bot_")
+                    or "bot_auxiliary_state" in str(part.text)
+                ]
+                lengths.append(len(state_parts))
         finally:
             EmotionalStatePlugin._persona_profile = original_persona
             EmotionalStatePlugin._load_state = original_load_state
@@ -2678,7 +2688,12 @@ class MemoryPayloadPublicApiTests(unittest.TestCase):
         original_load_state = EmotionalStatePlugin._load_state
         EmotionalStatePlugin._load_state = fake_load_state
         try:
-            default_plugin = self._new_plugin({"state_injection_detail": "full"})
+            default_plugin = self._new_plugin(
+                {
+                    "runtime_parameter_debug_override_enabled": True,
+                    "state_injection_detail": "full",
+                },
+            )
             default_snapshot = asyncio.run(
                 default_plugin.get_emotion_snapshot(
                     session_key="s-safe",
@@ -2688,6 +2703,7 @@ class MemoryPayloadPublicApiTests(unittest.TestCase):
             relaxed_plugin = self._new_plugin(
                 {
                     "enable_safety_boundary": False,
+                    "runtime_parameter_debug_override_enabled": True,
                     "state_injection_detail": "full",
                 },
             )

@@ -699,7 +699,7 @@ low_reasoning_max_context_chars = 1200
 /有机体状态
 ```
 
-查看模拟拟人状态。该状态层在 `1.0.0` 中默认自动运行；如果只想减少主提示词注入，调整 `auxiliary_state_injection_detail`，不要寻找已移除的 `enable_humanlike_state` 开关。
+查看模拟拟人状态。该状态层在 `1.0.0` 中默认自动运行；主提示词里注入多少拟人状态由插件根据预算和状态显著性自动决定，不再提供手动注入档位。
 
 ### 重置拟人状态
 
@@ -1555,11 +1555,10 @@ enable_safety_boundary = false
 | 配置项 | 类型 | 默认值 | 说明 |
 | --- | --- | --- | --- |
 | `enable_proactive_speech_dispatch` | bool | `false` | 是否允许插件真正调用 `context.send_message` 主动发消息。关闭时只返回 `dispatch_request` 和未发送原因。 |
-| `proactive_speech_dispatch_cooldown_seconds` | float | `1800.0` | 同一会话两次主动发送之间的冷却秒数，避免主动打扰刷屏。 |
-| `proactive_speech_dispatch_ttl_seconds` | int | `120` | 主动发送请求的建议有效期，外部调度器可据此丢弃过期请求。 |
-| `proactive_speech_max_chars` | int | `160` | 主动发言短句最大字符数。 |
 
-返回结果里的 `dispatch_request` 会包含 `requested`、`reason`、`topic_evidence`、`message_text`、`unified_msg_origin`、`idempotency_key`、`sent` 和 `blocked_reason`。常见未发送原因包括 `dispatch_disabled`、`cooldown_active`、`missing_event_origin`、`missing_send_message_api`、`decision_declined` 和 `dry_run`。
+主动发言的冷却、有效期、句子长度和反馈观察窗口不会暴露为普通配置。插件会根据 `score`、边界敏感、打扰风险、修复需要、用户被照顾需要、bot 自己想被需要的程度自动计算，并写入 `dispatch_request.adaptive_policy`。如果主动发言后用户没有回应，或只回了“嗯”“好”这类低信号短句，插件会把它记录为 `unanswered` 或 `cold_reply`，后续会更谨慎地判断开口时机。
+
+返回结果里的 `dispatch_request` 会包含 `requested`、`reason`、`topic_evidence`、`message_text`、`unified_msg_origin`、`idempotency_key`、`adaptive_policy`、`sent` 和 `blocked_reason`。常见未发送原因包括 `dispatch_disabled`、`cooldown_active`、`missing_event_origin`、`missing_send_message_api`、`decision_declined` 和 `dry_run`。
 
 ### 真人即时聊天与表情包
 
@@ -1571,16 +1570,9 @@ enable_safety_boundary = false
 | `realtime_chat_style_prompt_enabled` | bool | `true` | 请求阶段加入短提示，让主模型少用报告腔、Markdown 和编号清单。 |
 | `realtime_chat_intercept_llm_response` | bool | `true` | 是否在 `on_llm_response` 尝试接管默认回复并分条发送；若平台不支持改写响应，可关闭。 |
 | `realtime_chat_dry_run_default` | bool | `false` | 公共 API 未显式传 `dry_run` 时是否只返回计划不发送。 |
-| `realtime_chat_max_parts` | int | `5` | 一次回复最多拆成多少条。 |
-| `realtime_chat_min_part_chars` | int | `3` | 过短片段会并入相邻片段。 |
-| `realtime_chat_max_part_chars` | int | `72` | 单条消息最大字符数。 |
-| `realtime_chat_chars_per_second` | float | `7.0` | 模拟打字速度。 |
-| `realtime_chat_min_delay_seconds` | float | `0.35` | 单条消息前最小等待。 |
-| `realtime_chat_max_delay_seconds` | float | `4.0` | 单条消息前最大等待。 |
-| `realtime_chat_jitter_ratio` | float | `0.22` | 等待时间的稳定抖动比例。 |
-| `realtime_chat_session_cooldown_seconds` | float | `0.0` | 同会话分条接管冷却；`0` 表示不启用。 |
 | `realtime_chat_strip_markdown` | bool | `true` | 分条前清理常见 Markdown 标记。 |
 | `enable_sticker_reaction` | bool | `true` | 是否根据情绪和氛围补发表情包。 |
+| `sticker_llm_consistency_check_enabled` | bool | `true` | 表情包发送前做意图一致性检查，避免文件名/标签与本轮回复语气冲突。 |
 | `sticker_default_repo_url` | string | `https://github.com/zhaoolee/ChineseBQB.git` | 默认表情包参考仓库，仅供用户自行准备素材；插件不分发该仓库。 |
 | `sticker_local_root` | string | `""` | 本地表情包目录。 |
 | `sticker_allowed_extensions` | string | `.jpg,.jpeg,.png,.gif,.webp` | 允许索引的图片扩展名。 |
@@ -1588,9 +1580,10 @@ enable_safety_boundary = false
 | `sticker_index_limit` | int | `1000` | 本地表情包索引上限。 |
 | `sticker_index_cache_ttl_seconds` | float | `86400.0` | 表情包索引缓存秒数。 |
 | `sticker_max_file_bytes` | int | `5242880` | 单个候选图片最大字节数。 |
-| `sticker_send_probability` | float | `0.18` | 表情包发送概率系数，避免频繁发图。 |
 | `sticker_learn_user_images` | bool | `true` | 是否学习用户表情包元数据。 |
 | `sticker_learned_limit` | int | `200` | 每会话保留的用户表情元数据上限。 |
+
+即时聊天的分条数量、单条长度、打字速度、停顿、抖动、同会话接管冷却和表情包发送概率，都由人格模型、当前情绪、群聊氛围和生命化学习状态自动派生。外向、亲近、情绪唤醒高时会更容易分成自然短句；边界敏感、疏离、群聊紧张或打断风险高时会更克制、更少发图、更慢开口。`get_realtime_chat_plan(...)` 会在返回值的 `adaptive.realtime_chat` 和 `adaptive.sticker` 中说明当轮为什么这样计算。
 
 `ChineseBQB` 仓库体积很大且未随本插件重新授权分发，所以本插件只保留默认 URL 和本地目录索引能力。发布 zip 不包含 `ChineseBQB/`、用户偷来的表情包、缓存图片或外部素材库；“偷表情包”只表示记录轻量来源信息，方便以后在同一会话氛围下复用。
 
@@ -1622,16 +1615,14 @@ enable_safety_boundary = false
 | `background_post_diagnostics_warn_lag_seconds` | float | `60.0` | 最老后台任务等待超过该秒数时诊断标记为 warn。 |
 | `enable_low_signal_light_assessment` | bool | `true` | 对很短、低信号消息使用本地轻评估，避免无意义内部 LLM 调用。 |
 | `low_signal_max_chars` | int | `12` | 低信号轻评估的最大文本长度。 |
-| `state_injection_detail` | string | `compact` | 主情绪状态注入细节：`compact` 或 `full`。 |
-| `state_injection_compact_mode` | string | `snapshot` | 紧凑注入模式：`snapshot` 全量小快照，`diff` 只注入显著变化。 |
-| `state_injection_diff_threshold` | float | `0.08` | 核心情绪差分（diff）注入的最小维度变化阈值。 |
-| `state_injection_diff_force_every_turns` | int | `6` | diff 模式下强制发送紧凑快照的间隔轮数。 |
-| `auxiliary_state_injection_detail` | string | `compact` | 辅助状态注入细节：`compact`、`full` 或 `off`。 |
+| `runtime_parameter_debug_override_enabled` | bool | `false` | 运行时参数调试覆盖。默认关闭；开启后才允许维护者临时读取旧配置键排查。 |
 | `state_injection_request_budget_chars` | int | `32000` | 主 LLM 请求可见字符预算估计；超预算时跳过状态注入。 |
 | `state_injection_reserved_chars` | int | `3000` | 给模型提供方包装、工具 schema 和 persona 展开预留的字符余量。 |
 | `state_injection_max_added_chars` | int | `2400` | 单次主请求中本插件最多追加的临时状态注入字符数。 |
 | `state_injection_max_parts` | int | `8` | 单次主请求中本插件最多追加的临时状态注入片段数。 |
 | `llm_tool_response_max_chars` | int | `16000` | 每个状态 LLM Tool 返回 JSON 的最大字符数。 |
+
+主情绪状态注入不再由用户选择 `compact/full/diff`。插件会根据状态显著性、关系后果、活跃效果、请求预算压力和历史快照自动决定：高显著且预算宽裕时给主状态更多细节；普通或预算紧张时使用 compact/diff；辅助状态通常只给工具提示，把完整状态留给 LLM Tool 按需查询。诊断接口 `query_agent_state(state="runtime")` 会显示 `state_injection.auto_decision`。
 
 回复后评估（post）后台化默认自动开启，主回复结束后不会等待内部 post 评估完成，状态会稍后按会话顺序进入 AstrBot KV。`enable_dynamic_background_workers=false` 时每个会话只使用基础 `1` 个后台 worker；打开后也不会直接跳到固定并发，而是由插件根据队列压力、环境压力和全局活跃 worker 预算逐级扩容。CPU/内存压力偏高时会自动降档，环境压力无法读取时按保守档处理；已有任务不会被强杀，但后续领取会变少，空闲后自动收掉。它可能增加 API、token 与 CPU 压力，所以默认关闭。
 
@@ -1645,7 +1636,6 @@ enable_safety_boundary = false
 | `agent_include_speaker_in_assessment` | bool | `true` | 内部评估文本中标记当前说话人，便于区分不同用户。 |
 | `agent_identity_profile_limit` | int | `256` | 最多缓存的会话/说话人身份画像数。 |
 | `agent_identity_ttl_seconds` | float | `2592000.0` | 静默身份画像的 TTL，默认 30 天；`0` 表示仅按数量上限裁剪。 |
-| `group_atmosphere_injection_diff_threshold` | float | `0.08` | 群聊氛围 diff 注入的工程压缩阈值；只影响 prompt 注入频率，不参与情绪/人格动力学。 |
 | `enable_agent_causal_trail` | bool | `true` | 启用脱敏 agent 因果轨迹，记录状态变化原因链。 |
 | `agent_trail_limit` | int | `80` | 每个会话保留的因果轨迹条数。 |
 | `agent_trail_compaction_enabled` | bool | `true` | 查询时提供低信号轨迹压缩视图。 |
@@ -2215,7 +2205,7 @@ if repair_status in {"repaired", "restored"}:
 
 ## 拟人状态 `humanlike_state`
 
-`humanlike_state` 是一个独立的 P0 子系统，默认自动运行。用户不需要、也不能通过配置直接关闭它；如果只想减少主 LLM 中的拟人状态文字，使用 `auxiliary_state_injection_detail=off` 控制注入即可，状态本身仍会用于记忆注解和公共 API。
+`humanlike_state` 是一个独立的 P0 子系统，默认自动运行。用户不需要、也不能通过配置直接关闭它；主 LLM 中是否看到完整拟人状态由状态显著性和预算自动决定，状态本身仍会用于记忆注解和公共 API。
 
 该模块不是把“生病”“疲惫”“依恋”塞进情绪向量，而是新建一个表达调制层：
 
@@ -3084,7 +3074,6 @@ humanlike_memory_write_enabled = true
 
 ```text
 inject_state = true
-auxiliary_state_injection_detail = compact
 ```
 
 然后使用：
@@ -3115,7 +3104,6 @@ enable_psychological_screening = true
 
 ```text
 enable_safety_boundary = true
-auxiliary_state_injection_detail = compact
 humanlike_clinical_like_enabled = false
 ```
 

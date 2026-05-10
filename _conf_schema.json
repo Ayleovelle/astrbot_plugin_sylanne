@@ -45,24 +45,6 @@
     "default": false,
     "hint": "默认关闭时只返回主动发言裁决和 dispatch_request，不调用 AstrBot 发送接口。开启后 request_proactive_speech_dispatch 可在模型判断应开口且冷却通过时调用 context.send_message 主动发送。"
   },
-  "proactive_speech_dispatch_cooldown_seconds": {
-    "description": "主动发言发送冷却秒数",
-    "type": "float",
-    "default": 1800.0,
-    "hint": "防止主动发言刷屏；同一会话两次真正发送之间至少间隔该秒数。0 表示不启用冷却。"
-  },
-  "proactive_speech_dispatch_ttl_seconds": {
-    "description": "主动发言请求有效期秒数",
-    "type": "int",
-    "default": 120,
-    "hint": "dispatch_request 的建议有效期；外部调度器可据此丢弃过期请求。"
-  },
-  "proactive_speech_max_chars": {
-    "description": "主动发言单条消息最大字符数",
-    "type": "int",
-    "default": 160,
-    "hint": "限制主动发言短句长度，避免主动打扰时输出长篇内容。"
-  },
   "enable_realtime_chat": {
     "description": "启用真人即时聊天分条发送",
     "type": "bool",
@@ -87,54 +69,6 @@
     "default": false,
     "hint": "公共 API request_realtime_chat_dispatch 未显式传 dry_run 时是否只返回分条计划而不发送。"
   },
-  "realtime_chat_max_parts": {
-    "description": "即时聊天最多分条数",
-    "type": "int",
-    "default": 5,
-    "hint": "控制一次回复最多拆成多少条，避免刷屏。"
-  },
-  "realtime_chat_min_part_chars": {
-    "description": "即时聊天最短分条字符数",
-    "type": "int",
-    "default": 3,
-    "hint": "过短片段会与相邻片段合并。"
-  },
-  "realtime_chat_max_part_chars": {
-    "description": "即时聊天单条最大字符数",
-    "type": "int",
-    "default": 72,
-    "hint": "长句会按标点和软长度切分。"
-  },
-  "realtime_chat_chars_per_second": {
-    "description": "模拟打字速度每秒字符数",
-    "type": "float",
-    "default": 7.0,
-    "hint": "用于估算分条之间等待时间。"
-  },
-  "realtime_chat_min_delay_seconds": {
-    "description": "即时聊天最小等待秒数",
-    "type": "float",
-    "default": 0.35,
-    "hint": "每条消息前的最小停顿。"
-  },
-  "realtime_chat_max_delay_seconds": {
-    "description": "即时聊天最大等待秒数",
-    "type": "float",
-    "default": 4.0,
-    "hint": "限制模拟打字等待上限，避免长回复拖太久。"
-  },
-  "realtime_chat_jitter_ratio": {
-    "description": "即时聊天等待抖动比例",
-    "type": "float",
-    "default": 0.22,
-    "hint": "给打字间隔加入稳定随机抖动，让节奏更自然。"
-  },
-  "realtime_chat_session_cooldown_seconds": {
-    "description": "即时聊天同会话接管冷却秒数",
-    "type": "float",
-    "default": 0.0,
-    "hint": "0 表示不启用；大于 0 时可防止连续接管造成刷屏。"
-  },
   "realtime_chat_strip_markdown": {
     "description": "即时聊天发送前清理 Markdown",
     "type": "bool",
@@ -146,6 +80,12 @@
     "type": "bool",
     "default": true,
     "hint": "根据情绪、群聊氛围和文本线索选择是否补发一张表情包。"
+  },
+  "sticker_llm_consistency_check_enabled": {
+    "description": "启用表情包发送前一致性检查",
+    "type": "bool",
+    "default": true,
+    "hint": "发送表情包前用内部判断 LLM 或本地回退检查文件名、标签与本轮回复意图是否一致，避免发出与语气冲突的图。"
   },
   "sticker_default_repo_url": {
     "description": "默认表情包参考仓库",
@@ -188,12 +128,6 @@
     "type": "int",
     "default": 5242880,
     "hint": "超过该大小的图片不进入候选，避免发送过大文件。"
-  },
-  "sticker_send_probability": {
-    "description": "表情包发送概率系数",
-    "type": "float",
-    "default": 0.18,
-    "hint": "本地意图分数会乘以该系数做门控，避免频繁发图。"
   },
   "sticker_learn_user_images": {
     "description": "学习用户表情包元数据",
@@ -344,54 +278,11 @@
     "type": "bool",
     "default": true
   },
-  "state_injection_detail": {
-    "description": "主情绪状态注入细节",
-    "type": "string",
-    "default": "compact",
-    "options": [
-      "compact",
-      "full"
-    ],
-    "hint": "compact 只注入摘要，减少 token；full 注入完整状态细节。"
-  },
-  "state_injection_compact_mode": {
-    "description": "主情绪 compact 注入模式",
-    "type": "string",
-    "default": "snapshot",
-    "options": [
-      "snapshot",
-      "diff"
-    ],
-    "hint": "snapshot 每轮注入快照；diff 只在变化明显或达到强制轮次时注入差分摘要。"
-  },
-  "state_injection_diff_threshold": {
-    "description": "主情绪 diff 注入变化阈值",
-    "type": "float",
-    "default": 0.08,
-    "hint": "状态维度变化超过该阈值时才写入 diff 摘要。"
-  },
-  "group_atmosphere_injection_diff_threshold": {
-    "description": "群聊氛围 diff 注入变化阈值",
-    "type": "float",
-    "default": 0.08,
-    "hint": "群聊氛围维度变化超过该阈值时才写入 diff 摘要。"
-  },
-  "state_injection_diff_force_every_turns": {
-    "description": "diff 模式强制快照轮次",
-    "type": "int",
-    "default": 6,
-    "hint": "即使变化较小，也会每隔该轮数注入一次 compact 快照。"
-  },
-  "auxiliary_state_injection_detail": {
-    "description": "辅助状态注入细节",
-    "type": "string",
-    "default": "compact",
-    "options": [
-      "compact",
-      "full",
-      "off"
-    ],
-    "hint": "compact 注入摘要；full 注入较完整细节；off 关闭拟人、生命化学习、人格漂移、群聊氛围等辅助状态注入。"
+  "runtime_parameter_debug_override_enabled": {
+    "description": "启用运行时参数调试覆盖",
+    "type": "bool",
+    "default": false,
+    "hint": "默认关闭。关闭时状态注入细节、主动发言冷却/长度、即时聊天分条/打字速度、表情包概率均由人格模型、情绪、群聊氛围和预算自动计算；开启后仅供维护者临时读取旧配置键做排查。"
   },
   "state_injection_request_budget_chars": {
     "description": "单次 LLM 请求总字符预算",
