@@ -297,6 +297,9 @@ INTERNAL_ASSESSOR_LLM_BASE_CONCURRENCY = 2
 INTERNAL_ASSESSOR_LLM_BURST_CONCURRENCY = 3
 INTERNAL_ASSESSOR_LLM_BURST_READY_THRESHOLD = 32
 INTERNAL_ASSESSOR_LLM_BURST_WAIT_SECONDS = 90.0
+BACKGROUND_POST_RESOURCE_SAMPLE_TTL_SECONDS = 1.0
+BACKGROUND_POST_WORKER_SCALE_MIN_INTERVAL_SECONDS = 2.0
+BACKGROUND_POST_WORKER_SCALE_MAX_INTERVAL_SECONDS = 14.0
 
 
 @dataclass
@@ -482,7 +485,7 @@ def get_emotional_state_plugin(context: Context) -> Any | None:
     PLUGIN_NAME,
     "pidan",
     "基于 PAD/OCC/appraisal 与情绪动力学的 AstrBot 多维情绪状态插件",
-    "1.5.0",
+    "1.6.0",
     "",
 )
 class EmotionalStatePlugin(Star):
@@ -551,6 +554,8 @@ class EmotionalStatePlugin(Star):
         self._background_post_checkpoint_tasks: set[asyncio.Task[Any]] = set()
         self._background_post_checkpoint_generation: dict[str, int] = {}
         self._background_post_checkpoint_locks: dict[str, asyncio.Lock] = {}
+        self._background_post_worker_state: dict[str, dict[str, Any]] = {}
+        self._background_post_resource_cache: dict[str, Any] = {}
         self._internal_assessor_llm_condition: asyncio.Condition | None = None
         self._internal_assessor_llm_condition_loop: Any = None
         self._internal_assessor_llm_inflight = 0
@@ -1887,6 +1892,20 @@ class EmotionalStatePlugin(Star):
             if job.next_retry_at is not None and job.next_retry_at > now
         ]
         if not retry_times:
+            decision = self._background_post_adaptive_worker_decision(session_key)
+            if decision["dispatch_workers"] <= 0:
+                return min(
+                    0.25,
+                    max(
+                        0.02,
+                        float(
+                            decision.get("scale_state", {}).get(
+                                "next_scale_in_seconds",
+                                0.05,
+                            ),
+                        ),
+                    ),
+                )
             return 0.0
         return min(0.25, max(0.0, min(retry_times) - now))
 
@@ -1895,6 +1914,12 @@ class EmotionalStatePlugin(Star):
 
     def _dynamic_background_workers_enabled(self) -> bool:
         return self._cfg_bool("enable_dynamic_background_workers", False)
+
+    def _round_optional_ratio(self, value: Any) -> float | None:
+        numeric = self._optional_float(value)
+        if numeric is None:
+            return None
+        return round(max(0.0, min(1.0, numeric)), 6)
 
     def _background_post_worker_pressure(self, session_key: str) -> dict[str, Any]:
         queue = list(getattr(self, "_background_post_queues", {}).get(session_key) or ())
@@ -1936,57 +1961,318 @@ class EmotionalStatePlugin(Star):
             "lag_seconds": lag_seconds,
         }
 
+    def _background_post_global_active_workers(self, *, session_key: str = "") -> int:
+        active_map = getattr(self, "_background_post_active", {}) or {}
+        total = 0
+        for key, active in active_map.items():
+            if session_key and key == session_key:
+                continue
+            total += len(active or {})
+        return total
+
+    def _memory_pressure_ratio(self) -> tuple[float | None, str]:
+        try:
+            if os.name == "nt":
+                import ctypes
+
+                class _MemoryStatusEx(ctypes.Structure):
+                    _fields_ = [
+                        ("dwLength", ctypes.c_ulong),
+                        ("dwMemoryLoad", ctypes.c_ulong),
+                        ("ullTotalPhys", ctypes.c_ulonglong),
+                        ("ullAvailPhys", ctypes.c_ulonglong),
+                        ("ullTotalPageFile", ctypes.c_ulonglong),
+                        ("ullAvailPageFile", ctypes.c_ulonglong),
+                        ("ullTotalVirtual", ctypes.c_ulonglong),
+                        ("ullAvailVirtual", ctypes.c_ulonglong),
+                        ("sullAvailExtendedVirtual", ctypes.c_ulonglong),
+                    ]
+
+                status = _MemoryStatusEx()
+                status.dwLength = ctypes.sizeof(_MemoryStatusEx)
+                if ctypes.windll.kernel32.GlobalMemoryStatusEx(ctypes.byref(status)):
+                    return min(1.0, max(0.0, status.dwMemoryLoad / 100.0)), "windows"
+                return None, "windows_unavailable"
+            meminfo_path = "/proc/meminfo"
+            if os.path.exists(meminfo_path):
+                values: dict[str, float] = {}
+                with open(meminfo_path, "r", encoding="utf-8") as handle:
+                    for line in handle:
+                        if ":" not in line:
+                            continue
+                        key, raw_value = line.split(":", 1)
+                        parts = raw_value.strip().split()
+                        if not parts:
+                            continue
+                        try:
+                            values[key] = float(parts[0])
+                        except ValueError:
+                            continue
+                total = values.get("MemTotal")
+                available = values.get("MemAvailable")
+                if total and available is not None:
+                    ratio = 1.0 - (available / total)
+                    return min(1.0, max(0.0, ratio)), "proc_meminfo"
+            return None, "unsupported"
+        except Exception:
+            return None, "unavailable"
+
+    def _cpu_pressure_ratio(self) -> tuple[float | None, str]:
+        try:
+            getloadavg = getattr(os, "getloadavg", None)
+            cpu_count = os.cpu_count() or 1
+            if callable(getloadavg):
+                load_1m, _, _ = getloadavg()
+                return min(1.0, max(0.0, float(load_1m) / max(1, cpu_count))), "loadavg"
+            return None, "unsupported"
+        except Exception:
+            return None, "unavailable"
+
+    def _background_post_resource_pressure(self) -> dict[str, Any]:
+        now = self._observed_now()
+        cache = getattr(self, "_background_post_resource_cache", None)
+        if not isinstance(cache, dict):
+            cache = {}
+            self._background_post_resource_cache = cache
+        cached_at = float(cache.get("sampled_at") or 0.0)
+        if now - cached_at < BACKGROUND_POST_RESOURCE_SAMPLE_TTL_SECONDS:
+            cached = cache.get("value")
+            if isinstance(cached, dict):
+                return dict(cached)
+
+        cpu_ratio, cpu_source = self._cpu_pressure_ratio()
+        memory_ratio, memory_source = self._memory_pressure_ratio()
+        known_ratios = [
+            ratio
+            for ratio in (cpu_ratio, memory_ratio)
+            if isinstance(ratio, (int, float))
+        ]
+        unknown = not known_ratios
+        combined = max(known_ratios) if known_ratios else 0.0
+        if unknown:
+            level = "unknown"
+            cap = 2
+            reason = "environment_pressure_unknown_conservative"
+        elif combined >= 0.95:
+            level = "critical"
+            cap = 1
+            reason = "environment_pressure_critical"
+        elif combined >= 0.85:
+            level = "high"
+            cap = 2
+            reason = "environment_pressure_high"
+        elif combined >= 0.75:
+            level = "elevated"
+            cap = 3
+            reason = "environment_pressure_elevated"
+        else:
+            level = "normal"
+            cap = BACKGROUND_POST_TOTAL_WORKER_CAP
+            reason = "environment_pressure_normal"
+        pressure = {
+            "cpu_load_ratio": cpu_ratio,
+            "cpu_source": cpu_source,
+            "memory_load_ratio": memory_ratio,
+            "memory_source": memory_source,
+            "combined_load_ratio": combined,
+            "unknown": unknown,
+            "level": level,
+            "worker_cap": max(1, min(BACKGROUND_POST_TOTAL_WORKER_CAP, cap)),
+            "reason": reason,
+            "sampled_at": now,
+        }
+        cache["sampled_at"] = now
+        cache["value"] = dict(pressure)
+        return pressure
+
+    def _background_post_scale_interval(self, pressure: dict[str, Any]) -> float:
+        ready_count = max(0, int(pressure.get("ready_count") or 0))
+        oldest_ready_age = max(
+            0.0,
+            float(pressure.get("oldest_ready_age_seconds") or 0.0),
+        )
+        urgency = min(1.0, max(ready_count / 32.0, oldest_ready_age / 90.0))
+        interval = (
+            BACKGROUND_POST_WORKER_SCALE_MAX_INTERVAL_SECONDS
+            - (
+                BACKGROUND_POST_WORKER_SCALE_MAX_INTERVAL_SECONDS
+                - BACKGROUND_POST_WORKER_SCALE_MIN_INTERVAL_SECONDS
+            )
+            * urgency
+        )
+        return max(
+            BACKGROUND_POST_WORKER_SCALE_MIN_INTERVAL_SECONDS,
+            min(BACKGROUND_POST_WORKER_SCALE_MAX_INTERVAL_SECONDS, interval),
+        )
+
+    def _background_post_apply_scale_smoothing(
+        self,
+        session_key: str,
+        desired: int,
+        pressure: dict[str, Any],
+        reasons: list[str],
+        *,
+        commit: bool = False,
+    ) -> tuple[int, dict[str, Any]]:
+        now = self._observed_now()
+        states = getattr(self, "_background_post_worker_state", None)
+        if not isinstance(states, dict):
+            states = {}
+            self._background_post_worker_state = states
+        stored_state = states.get(session_key)
+        state = dict(stored_state) if isinstance(stored_state, dict) else {
+            "current_workers": BACKGROUND_POST_BASE_WORKERS,
+            "last_scaled_at": 0.0,
+        }
+        current = max(
+            BACKGROUND_POST_BASE_WORKERS,
+            min(
+                BACKGROUND_POST_TOTAL_WORKER_CAP,
+                int(state.get("current_workers") or BACKGROUND_POST_BASE_WORKERS),
+            ),
+        )
+        target = max(
+            BACKGROUND_POST_BASE_WORKERS,
+            min(BACKGROUND_POST_TOTAL_WORKER_CAP, int(desired)),
+        )
+        interval = self._background_post_scale_interval(pressure)
+        last_scaled_at = float(state.get("last_scaled_at") or 0.0)
+        next_scale_in = 0.0
+        if target > current:
+            elapsed = now - last_scaled_at
+            if elapsed >= interval:
+                current = min(target, current + 1)
+                state["last_scaled_at"] = now
+                reasons.append("worker_scale_step_up")
+            else:
+                next_scale_in = max(0.0, interval - elapsed)
+                reasons.append("worker_scale_cooldown")
+        elif target < current:
+            current = target
+            state["last_scaled_at"] = now
+            reasons.append("worker_scale_step_down")
+        state.update(
+            {
+                "current_workers": current,
+                "target_workers": target,
+                "scale_interval_seconds": interval,
+                "updated_at": now,
+            },
+        )
+        if commit:
+            states[session_key] = dict(state)
+        return current, {
+            "current_workers": current,
+            "target_workers": target,
+            "scale_interval_seconds": interval,
+            "last_scaled_at": state["last_scaled_at"],
+            "next_scale_in_seconds": next_scale_in,
+            "committed": commit,
+        }
+
     def _background_post_adaptive_worker_decision(
         self,
         session_key: str,
+        *,
+        commit_scale: bool = False,
     ) -> dict[str, Any]:
         pressure = self._background_post_worker_pressure(session_key)
-        desired = BACKGROUND_POST_BASE_WORKERS
+        target = BACKGROUND_POST_BASE_WORKERS
         reasons: list[str] = ["base_single_worker"]
         if self._dynamic_background_workers_enabled():
             ready_count = pressure["ready_count"]
             oldest_ready_age = pressure["oldest_ready_age_seconds"]
             if ready_count >= 2 or oldest_ready_age >= 2.0:
-                desired = 2
+                target = 2
                 reasons.append("moderate_queue_or_wait")
             if ready_count >= 5 or oldest_ready_age >= 8.0:
-                desired = 3
+                target = 3
                 reasons.append("sustained_backlog")
             if ready_count >= 10 or oldest_ready_age >= 20.0:
-                desired = 4
+                target = 4
                 reasons.append("heavy_backlog")
             if ready_count >= 18 or oldest_ready_age >= 45.0:
-                desired = 5
+                target = 5
                 reasons.append("severe_backlog")
             if ready_count >= 32 or oldest_ready_age >= 90.0:
-                desired = 6
+                target = 6
                 reasons.append("extreme_backlog")
             if pressure["expired_lease_count"] and ready_count >= 2:
-                desired = min(
+                target = min(
                     BACKGROUND_POST_TOTAL_WORKER_CAP,
-                    desired + 1,
+                    target + 1,
                 )
                 reasons.append("expired_lease_recovery")
             if pressure["retrying_count"] and ready_count >= 4:
-                desired = min(
+                target = min(
                     BACKGROUND_POST_TOTAL_WORKER_CAP,
-                    desired + 1,
+                    target + 1,
                 )
                 reasons.append("retry_pressure")
         else:
             reasons.append("dynamic_scale_disabled")
-        desired = max(
+
+        target = max(
             BACKGROUND_POST_BASE_WORKERS,
             min(
                 BACKGROUND_POST_TOTAL_WORKER_CAP,
-                desired,
+                target,
             ),
         )
+        queue_target = target
+        resource_pressure = self._background_post_resource_pressure()
+        resource_cap = max(
+            1,
+            min(
+                BACKGROUND_POST_TOTAL_WORKER_CAP,
+                int(resource_pressure.get("worker_cap") or BACKGROUND_POST_BASE_WORKERS),
+            ),
+        )
+        if target > resource_cap:
+            reasons.append(str(resource_pressure.get("reason") or "environment_pressure"))
+        elif self._dynamic_background_workers_enabled():
+            reasons.append(str(resource_pressure.get("reason") or "environment_pressure"))
+        effective_global_cap = max(
+            1,
+            min(BACKGROUND_POST_TOTAL_WORKER_CAP, resource_cap),
+        )
+        target = min(target, effective_global_cap)
+        smoothed, scale_state = self._background_post_apply_scale_smoothing(
+            session_key,
+            target,
+            pressure,
+            reasons,
+            commit=commit_scale,
+        )
+        active_current = max(0, int(pressure.get("active_count") or 0))
+        active_other = self._background_post_global_active_workers(
+            session_key=session_key,
+        )
+        active_total = active_current + active_other
+        global_available_slots = max(0, effective_global_cap - active_total)
+        session_available_slots = max(0, smoothed - active_current)
+        dispatch_workers = min(session_available_slots, global_available_slots)
+        if active_other:
+            reasons.append("global_worker_budget_shared")
+        if global_available_slots <= 0:
+            reasons.append("global_worker_budget_exhausted")
+        elif dispatch_workers < session_available_slots:
+            reasons.append("global_worker_budget_limited")
         return {
-            "desired_workers": desired,
-            "dynamic_extra_workers": max(0, desired - BACKGROUND_POST_BASE_WORKERS),
+            "desired_workers": smoothed,
+            "queue_target_workers": queue_target,
+            "target_workers": target,
+            "smoothed_workers": smoothed,
+            "dispatch_workers": dispatch_workers,
+            "dynamic_extra_workers": max(0, smoothed - BACKGROUND_POST_BASE_WORKERS),
             "reasons": reasons,
             "pressure": pressure,
+            "resource_pressure": resource_pressure,
+            "global_active_other_workers": active_other,
+            "global_active_workers": active_total,
+            "global_worker_cap": effective_global_cap,
+            "global_available_worker_slots": global_available_slots,
+            "scale_state": scale_state,
             "idle_workers_close_automatically": True,
         }
 
@@ -2001,8 +2287,11 @@ class EmotionalStatePlugin(Star):
 
     def _background_post_max_workers(self, session_key: str) -> int:
         return int(
-            self._background_post_adaptive_worker_decision(session_key)[
-                "desired_workers"
+            self._background_post_adaptive_worker_decision(
+                session_key,
+                commit_scale=True,
+            )[
+                "dispatch_workers"
             ],
         )
 
@@ -3170,6 +3459,8 @@ class EmotionalStatePlugin(Star):
             warning_level = "warn"
         worker_decision = self._background_post_adaptive_worker_decision(session_key)
         worker_pressure = worker_decision["pressure"]
+        resource_pressure = worker_decision["resource_pressure"]
+        scale_state = worker_decision["scale_state"]
         assessor_llm_decision = self._internal_assessor_llm_concurrency_decision()
         assessor_llm_pressure = assessor_llm_decision["pressure"]
         return {
@@ -3185,8 +3476,41 @@ class EmotionalStatePlugin(Star):
             "dynamic_extra_workers": worker_decision["dynamic_extra_workers"],
             "dynamic_extra_worker_cap": BACKGROUND_POST_DYNAMIC_EXTRA_WORKER_CAP,
             "total_worker_cap": BACKGROUND_POST_TOTAL_WORKER_CAP,
-            "worker_policy": "adaptive_pressure",
+            "worker_policy": "adaptive_resource_guarded_pressure",
             "worker_scale_reasons": worker_decision["reasons"],
+            "worker_queue_target": worker_decision["queue_target_workers"],
+            "worker_target_after_resource_guard": worker_decision["target_workers"],
+            "worker_smoothed_limit": worker_decision["smoothed_workers"],
+            "worker_dispatch_slots": worker_decision["dispatch_workers"],
+            "worker_global_cap": worker_decision["global_worker_cap"],
+            "worker_global_active": worker_decision["global_active_workers"],
+            "worker_global_active_other": worker_decision["global_active_other_workers"],
+            "worker_global_available_slots": worker_decision[
+                "global_available_worker_slots"
+            ],
+            "worker_scale_interval_seconds": round(
+                scale_state["scale_interval_seconds"],
+                6,
+            ),
+            "worker_next_scale_in_seconds": round(
+                scale_state["next_scale_in_seconds"],
+                6,
+            ),
+            "environment_pressure_level": resource_pressure["level"],
+            "environment_pressure_unknown": bool(resource_pressure["unknown"]),
+            "environment_worker_cap": resource_pressure["worker_cap"],
+            "environment_pressure_reason": resource_pressure["reason"],
+            "environment_cpu_load_ratio": self._round_optional_ratio(
+                resource_pressure.get("cpu_load_ratio"),
+            ),
+            "environment_memory_load_ratio": self._round_optional_ratio(
+                resource_pressure.get("memory_load_ratio"),
+            ),
+            "environment_combined_load_ratio": self._round_optional_ratio(
+                resource_pressure.get("combined_load_ratio"),
+            ),
+            "environment_cpu_source": resource_pressure.get("cpu_source", ""),
+            "environment_memory_source": resource_pressure.get("memory_source", ""),
             "worker_ready_count": worker_pressure["ready_count"],
             "worker_oldest_ready_age_seconds": round(
                 worker_pressure["oldest_ready_age_seconds"],

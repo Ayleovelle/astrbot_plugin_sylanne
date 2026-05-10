@@ -141,6 +141,8 @@ def new_plugin(config=None):
     plugin._background_post_checkpoint_tasks = set()
     plugin._background_post_checkpoint_generation = {}
     plugin._background_post_checkpoint_locks = {}
+    plugin._background_post_worker_state = {}
+    plugin._background_post_resource_cache = {}
     plugin._internal_assessor_llm_condition = None
     plugin._internal_assessor_llm_condition_loop = None
     plugin._internal_assessor_llm_inflight = 0
@@ -1163,8 +1165,20 @@ class CommandAndToolSmokeTests(unittest.TestCase):
         self.assertEqual(bg["dynamic_extra_workers"], 0)
         self.assertEqual(bg["dynamic_extra_worker_cap"], 5)
         self.assertEqual(bg["total_worker_cap"], 6)
-        self.assertEqual(bg["worker_policy"], "adaptive_pressure")
+        self.assertEqual(bg["worker_policy"], "adaptive_resource_guarded_pressure")
         self.assertIn("dynamic_scale_disabled", bg["worker_scale_reasons"])
+        self.assertEqual(bg["worker_queue_target"], 1)
+        self.assertEqual(bg["worker_target_after_resource_guard"], 1)
+        self.assertEqual(bg["worker_smoothed_limit"], 1)
+        self.assertEqual(bg["worker_global_cap"], bg["environment_worker_cap"])
+        self.assertIn(
+            bg["environment_pressure_level"],
+            {"normal", "elevated", "high", "critical", "unknown"},
+        )
+        self.assertIn("environment_pressure_reason", bg)
+        self.assertIn("environment_cpu_load_ratio", bg)
+        self.assertIn("environment_memory_load_ratio", bg)
+        self.assertIn("worker_dispatch_slots", bg)
         self.assertTrue(bg["idle_workers_close_automatically"])
         self.assertEqual(
             bg["internal_assessor_llm_concurrency_policy"],

@@ -217,7 +217,7 @@
     "description": "启用动态后台 worker 扩容",
     "type": "bool",
     "default": false,
-    "hint": "默认关闭。开启后由插件根据队列深度、等待时间、重试和租约压力自适应选择后台 worker 数量；总 worker 数硬上限固定为 6，空闲 worker 会自动关闭。内部判断 LLM 另有并发闸门，默认最多 2 路、极端积压时最多 3 路，避免并行 worker 直接打爆模型服务。会增加 API、token 和 CPU 压力。"
+    "hint": "默认关闭。开启后由插件根据队列深度、等待时间、重试、租约压力以及当前 CPU/内存环境压力自适应选择后台 worker 数量；全插件同时活跃的后台 worker 硬上限固定为 6，环境压力高或压力未知时会保守降档，并通过冷却时间逐级扩容，空闲 worker 会自动关闭。内部判断 LLM 另有并发闸门，默认最多 2 路、极端积压时最多 3 路，避免并行 worker 直接打爆模型服务。会增加 API、token 和 CPU 压力。"
   },
   "background_post_queue_checkpoint_enabled": {
     "description": "启用后台队列检查点",

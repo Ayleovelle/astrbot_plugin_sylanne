@@ -1,6 +1,6 @@
 <svg xmlns="http://www.w3.org/2000/svg" width="1460" height="1240" viewBox="0 0 1460 1240" role="img" aria-labelledby="title desc">
   <title id="title">工作流与主动发言支路</title>
-  <desc id="desc">展示 AstrBot 请求响应生命周期、后台智能 worker、判断 LLM 并发闸门、并行状态读取、主动发言裁决和主动发送请求流程。</desc>
+  <desc id="desc">展示 AstrBot 请求响应生命周期、带 CPU/内存环境守卫和全局预算的后台智能 worker、判断 LLM 并发闸门、并行状态读取、主动发言裁决和主动发送请求流程。</desc>
   <defs>
     <marker id="arrowBlue" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse">
       <path d="M 0 0 L 10 5 L 0 10 z" fill="#2563eb"/>
@@ -68,7 +68,7 @@
   <path class="arrowBlue" d="M216 830 V870"/>
 
   <rect class="panelWorker" x="514" y="34" width="430" height="1156" rx="18"/>
-  <text class="label" x="542" y="74">post 后台与智能 worker</text>
+  <text class="label" x="542" y="74">post 后台与智能 worker 守卫</text>
   <g>
     <rect class="nodeGreen" x="574" y="108" width="270" height="74" rx="12"/>
     <text class="text" x="709" y="139" text-anchor="middle">post 任务进入队列</text>
@@ -79,24 +79,24 @@
     <text class="small" x="709" y="315" text-anchor="middle">队列/等待/重试/租约</text>
 
     <rect class="nodeGreen" x="574" y="404" width="270" height="92" rx="12"/>
-    <text class="text" x="709" y="437" text-anchor="middle">自适应 workers</text>
-    <text class="small" x="709" y="464" text-anchor="middle">基础 1，总上限 6</text>
-    <text class="small" x="709" y="488" text-anchor="middle">空闲自动关闭</text>
+    <text class="text" x="709" y="437" text-anchor="middle">资源守卫</text>
+    <text class="small" x="709" y="464" text-anchor="middle">CPU / 内存压力</text>
+    <text class="small" x="709" y="488" text-anchor="middle">未知压力保守降档</text>
 
     <rect class="nodeGreen" x="574" y="544" width="270" height="92" rx="12"/>
-    <text class="text" x="709" y="578" text-anchor="middle">判断 LLM 闸门</text>
-    <text class="small" x="709" y="604" text-anchor="middle">默认 2 路，极端最多 3</text>
-    <text class="small" x="709" y="628" text-anchor="middle">最低完整 JSON / 本地轻评估</text>
+    <text class="text" x="709" y="578" text-anchor="middle">全局预算和平滑扩容</text>
+    <text class="small" x="709" y="604" text-anchor="middle">同时活跃总上限 6</text>
+    <text class="small" x="709" y="628" text-anchor="middle">冷却内每轮最多升 1 档</text>
 
     <rect class="nodeGreen" x="574" y="684" width="270" height="92" rx="12"/>
-    <text class="text" x="709" y="718" text-anchor="middle">顺序提交状态</text>
-    <text class="small" x="709" y="744" text-anchor="middle">按 sequence 合并结果</text>
-    <text class="small" x="709" y="768" text-anchor="middle">失败重试 / dead-letter</text>
+    <text class="text" x="709" y="718" text-anchor="middle">判断 LLM 闸门</text>
+    <text class="small" x="709" y="744" text-anchor="middle">默认 2 路，极端最多 3</text>
+    <text class="small" x="709" y="768" text-anchor="middle">最低完整 JSON / 本地轻评估</text>
 
     <rect class="nodeGreen" x="574" y="824" width="270" height="92" rx="12"/>
-    <text class="text" x="709" y="858" text-anchor="middle">KV / 记忆 / 诊断</text>
-    <text class="small" x="709" y="884" text-anchor="middle">LivingMemory 注解</text>
-    <text class="small" x="709" y="908" text-anchor="middle">runtime diagnostics</text>
+    <text class="text" x="709" y="858" text-anchor="middle">顺序提交与诊断</text>
+    <text class="small" x="709" y="884" text-anchor="middle">KV / LivingMemory 注解</text>
+    <text class="small" x="709" y="908" text-anchor="middle">重试 / dead-letter / runtime</text>
   </g>
   <path class="arrowGreen" d="M709 182 V232"/>
   <path class="arrowGreen" d="M709 356 V404"/>

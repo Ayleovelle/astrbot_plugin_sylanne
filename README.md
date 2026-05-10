@@ -2,7 +2,7 @@
 
 > 让 AstrBot 维护一套可计算、可记忆、可解释、可被其他插件调用的多维情绪状态。
 
-![版本 1.5.0](https://img.shields.io/badge/version-1.5.0-blue)
+![版本 1.6.0](https://img.shields.io/badge/version-1.6.0-blue)
 ![AstrBot >=4.9.2,<5.0.0](https://img.shields.io/badge/AstrBot-%3E%3D4.9.2%2C%3C5.0.0-green)
 ![Python 3.10+](https://img.shields.io/badge/Python-3.10%2B-yellow)
 ![协议 astrbot.emotion_state.v2](https://img.shields.io/badge/schema-astrbot.emotion__state.v2-purple)
@@ -16,13 +16,13 @@
 
 本插件会让 LLM 根据上下文、用户当前文本、bot 人格和上一轮状态，判断当前情绪观测值；本地引擎再用真实时间半衰期、人格基线、置信门控、关系修复和后果状态机更新长期状态。最后，这个状态会作为临时上下文注入下一次 LLM 请求，影响语气、节奏、社交距离、边界感和修复倾向。
 
-`1.5.0` 的重点是把回复从“一整段 LLM 输出”推进到“更像即时聊天的分条表达”：他/她会按本地节奏模型拆成短消息，模拟打字间隔，必要时根据情绪和氛围补发表情包；表情素材默认使用本地目录索引，也可以学习用户发过的有趣表情元数据，但不会把外部表情库或用户图片打进发布包。
+`1.6.0` 的重点是把后台 worker 从“只看队列压力的加速器”收束成“受环境压力和全局预算保护的调度器”：他/她仍然可以在积压时后台并行处理状态，但会同时参考 CPU/内存压力、未知压力保守档、全局活跃 worker 预算和扩容冷却，避免服务器在短时间积压时被并发撑爆。`1.5.0` 加入的真人即时聊天、分条发送、表情包回应和表情元数据学习继续保留。
 
 | 能力 | 作用 |
 | --- | --- |
 | 回复后后台评估（post） | 可把回复后的内部情绪评估放进后台队列，主回复先返回；队列支持同一会话先进先出（FIFO）提交、AstrBot 键值存储（KV）检查点、租约回收、重试和失败任务留存（dead-letter）诊断。 |
 | 并发状态加载 | 请求、响应和记忆写入阶段会并发读取可选状态快照；慢状态加载、内部评估和 LivingMemory 注解不再简单串行等待。 |
-| 智能后台 worker | 默认每会话 1 个 worker；打开动态扩容后，插件按队列深度、等待时间、重试和租约压力自适应扩到最多 6 个，空闲后自动关闭；内部判断 LLM 另有并发闸门，默认最多 2 路、极端积压最多 3 路。 |
+| 智能后台 worker | 默认每会话 1 个 worker；打开动态扩容后，插件会同时看队列压力、等待时间、重试/租约压力和 CPU/内存环境压力，全插件同时活跃后台 worker 硬上限固定为 6，并通过冷却时间逐级扩容、空闲后自动关闭；内部判断 LLM 另有并发闸门，默认最多 2 路、极端积压最多 3 路。 |
 | 群聊分层建模 | 同时维护房间级 `conversation_id` 和说话人级 `speaker_track_id`，避免一个人的冲突污染全群，也避免群聊气氛被切碎。 |
 | 群聊氛围与开口时机 | `group_atmosphere_state` 记录活跃度、紧张度、玩笑度、支持度、bot 注意力、打断风险和加入适宜度，帮助 bot 判断该开口、短应、先听还是避免插话。 |
 | 统一状态查询接口（agent API） | 其他插件可通过公共接口（API）查询核心情绪、说话人轨道、群聊氛围、因果轨迹、运行时诊断或总览状态，而不是读取内部 KV。 |
@@ -54,7 +54,7 @@
 | 主题 | 内容 |
 | --- | --- |
 | [当前版本与兼容范围](#当前版本与兼容范围) | 插件版本、AstrBot 版本、Python 要求、许可证和发布状态。 |
-| [1.5.0 正式版发布记录](#150-正式版发布记录) | 真人即时聊天、分条发送、打字间隔、表情包回应、用户表情学习、公共 API、测试与包体。 |
+| [1.6.0 正式版发布记录](#160-正式版发布记录) | CPU/内存环境守卫、全局 worker 预算、平滑扩容、诊断字段、测试与包体。 |
 | [项目定位](#项目定位) | 为什么本插件不是普通的提示词人设增强。 |
 | [核心能力](#核心能力总览) | 7 维情绪、人格建模、真实时间记忆、关系修复、公共 API。 |
 | [快速开始](#快速开始) | 发布 zip 包、仓库安装、手动复制、最小配置和检查命令。 |
@@ -82,31 +82,31 @@
 | --- | --- |
 | 插件目录名 | `astrbot_plugin_emotional_state` |
 | 显示名 | `多维情绪状态` |
-| 当前版本 | `1.5.0` |
+| 当前版本 | `1.6.0` |
 | AstrBot 版本 | `>=4.9.2,<5.0.0` |
 | Python | `3.10+` |
 | 许可证 | `GPL-3.0-or-later` |
 | 运行时第三方依赖 | 当前无额外依赖，见 `requirements.txt` |
 
-`1.5.0` 在 `1.2.0` 主动发言发送层上继续推进表达拟真：默认启用即时聊天风格提示、分条发送计划、回复接管和表情包氛围回应。核心情绪、回复后后台评估（post）、`group_atmosphere_state`、`humanlike_state`、`lifelike_learning_state`、`personality_drift_state` 和即时聊天节奏默认自动运行；道德修复、瑕疵模拟、心理筛查等实验/维护模块仍由配置者显式打开。
+`1.6.0` 在 `1.5.0` 真人即时聊天表达层上继续强化后台稳定性：默认启用即时聊天风格提示、分条发送计划、回复接管和表情包氛围回应；当配置者打开动态后台 worker 后，扩容会同时受 CPU/内存压力、未知压力保守档、全局活跃 worker 硬上限和冷却平滑控制约束。核心情绪、回复后后台评估（post）、`group_atmosphere_state`、`humanlike_state`、`lifelike_learning_state`、`personality_drift_state` 和即时聊天节奏默认自动运行；道德修复、瑕疵模拟、心理筛查等实验/维护模块仍由配置者显式打开。
 
 发布包会包含运行代码、README、CHANGELOG、LICENSE、配置结构（schema）、docs 和 `docs/assets/` 中的聚合图表；不会包含 `tests/`、`scripts/`、`literature_kb/`、`personality_literature_kb/`、`psychological_literature_kb/`、`humanlike_agent_literature_kb/`、`raw/`、`output/`、`dist/` 等开发、研究、原始样本或缓存目录。
 
-### 1.5.0 正式版发布记录
+### 1.6.0 正式版发布记录
 
-`v1.5.0` 合并在 `main` 上，对外安装版本由 `metadata.yaml` 和 `main.py @register(...)` 共同声明为 `1.5.0`。本版以 `1.2.0` 的主动发言发送层为基线，新增真人即时聊天表达层：回复可以被拆成多条短消息，按打字速度顺序发出，并在氛围适合时补发表情包。
+`v1.6.0` 合并在 `main` 上，对外安装版本由 `metadata.yaml` 和 `main.py @register(...)` 共同声明为 `1.6.0`。本版以 `1.5.0` 的即时聊天表达层为基线，重点修正动态后台 worker 在高积压场景下可能把服务器压力放大的问题：扩容不再只看队列，而是同时看环境压力、全局预算和扩容冷却。
 
 当前版本的主要变化：
 
 | 类别 | 结果 |
 | --- | --- |
-| 真人即时聊天 | 新增 `get_realtime_chat_plan(...)` 与 `request_realtime_chat_dispatch(...)`，可生成分条计划或直接按顺序发送。 |
-| 回复接管 | `on_llm_response` 可在平台支持时清空原始 `completion_text`，再用 AstrBot `context.send_message(...)` 分条发送，避免整段回复和分条回复重复出现。 |
-| 打字间隔 | 分条间隔由字符数、每秒字符数、最小/最大等待和稳定抖动共同决定，既像即时聊天，又避免长回复拖太久。 |
-| 表情包回应 | 新增本地表情包索引、氛围意图判断和兼容图片发送适配；默认参考 `ChineseBQB` 仓库地址，但不自动下载、不镜像、不打包素材。 |
-| 偷表情包学习 | 新增 `observe_sticker_usage(...)`，只记录用户表情的 URL、路径、file_id、标签和兴趣分，不把图片二进制写入插件包。 |
-| 主动发送整合 | 主动发言 dispatch 可自动走即时聊天计划，主动关心、想念、调皮打扰等短句也能分条发送。 |
-| 公开契约 | 插件版本为 `1.5.0`；公共 API 版本仍为 `1.0`，schema 仍保持 `astrbot.emotion_state.v2` 等版本化契约。 |
+| 环境压力守卫 | 动态后台 worker 会采样 CPU 与内存压力；高压时自动降档，无法读取环境压力时进入保守档。 |
+| 全局并发预算 | 后台 worker 的硬上限从“单会话理解”收束为“全插件同时活跃后台任务最多 `6`”，避免多会话同时积压叠加打爆服务。 |
+| 平滑扩容 | 即使队列瞬时暴涨，也会通过冷却时间逐级升档，每轮最多升 `1` 档；已有任务不强杀，后续领取自动变少。 |
+| 只读诊断安全 | runtime 诊断只预览 worker 决策，不会因为查看日志或调用诊断命令而推进扩容状态。 |
+| 可观测性 | 运行时诊断新增环境压力等级、CPU/内存占用比例、资源 cap、全局活跃 worker、可领取槽位和扩容冷却字段。 |
+| 流程图与配置 | README、配置提示和手机端静态 SVG 流程图同步展示环境守卫、全局预算和平滑扩容。 |
+| 公开契约 | 插件版本为 `1.6.0`；公共 API 版本仍为 `1.0`，schema 仍保持 `astrbot.emotion_state.v2` 等版本化契约。 |
 
 运行时亮点可以按这条链路理解。手机端若不渲染 Mermaid，也会优先显示下面的静态图：
 
@@ -123,13 +123,15 @@ flowchart LR
   D --> E["主回复先完成"]
   E --> F["post 评估进入后台队列"]
   F --> G["压力评估：队列深度 / 等待时间 / 重试 / 租约"]
-  G --> H["自适应 workers：基础 1，总上限 6，空闲自动关闭"]
-  H --> I["判断 LLM 闸门：默认 2 路，极端积压最多 3 路"]
-  I --> J["并行处理，按 sequence 顺序提交"]
-  J --> Q["写入 AstrBot KV 与 LivingMemory 情绪注解"]
+  G --> H["环境守卫：CPU / 内存 / 未知压力保守降档"]
+  H --> I["全局预算：同时活跃后台 worker 总上限 6"]
+  I --> J["平滑扩容：冷却时间内每轮最多升 1 档"]
+  J --> K["判断 LLM 闸门：默认 2 路，极端积压最多 3 路"]
+  K --> L["并行处理，按 sequence 顺序提交"]
+  L --> Q["写入 AstrBot KV 与 LivingMemory 情绪注解"]
 
-  K["调度器 / 其他插件 / LLM 工具请求主动发言"] --> L["并发读取 emotion / lifelike / group / humanlike / drift"]
-  L --> M{"公式判断此刻是否适合开口"}
+  R["调度器 / 其他插件 / LLM 工具请求主动发言"] --> S["并发读取 emotion / lifelike / group / humanlike / drift"]
+  S --> M{"公式判断此刻是否适合开口"}
   M -- "适合" --> N["LLM 裁决需求、话题方向和开口风格"]
   M -- "不适合" --> O["保持沉默 / 短应 / 延后"]
   N --> P["生成主动消息候选"]
@@ -839,14 +841,16 @@ flowchart TD
     M --> N{"assessment_timing 包含 post ?"}
     N -- "是" --> O["post 评估进入后台队列"]
     O --> P["自动压力评分：队列深度、等待年龄、重试、租约"]
-    P --> Q["自适应 workers：基础 1，总上限 6，空闲关闭"]
-    Q --> R["判断 LLM 闸门：默认 2 路，极端积压最多 3 路"]
-    R --> S["并行处理，结果按 sequence 顺序提交"]
-    S --> AC["写入 KV / 记忆注解 / runtime 诊断"]
-    N -- "否" --> T["结束"]
+    P --> Q["环境守卫：CPU、内存、未知压力保守降档"]
+    Q --> R["全局预算：同时活跃后台 worker 总上限 6"]
+    R --> S["平滑扩容：冷却时间内每轮最多升 1 档"]
+    S --> T["判断 LLM 闸门：默认 2 路，极端积压最多 3 路"]
+    T --> U["并行处理，结果按 sequence 顺序提交"]
+    U --> AC["写入 KV / 记忆注解 / runtime 诊断"]
+    N -- "否" --> AH["结束"]
     AC --> T
 
-    U["主动发言调度器 / 其他插件 / LLM 工具"] --> V["并发读取情绪、共同语境、群聊氛围、拟人状态和人格漂移"]
+    AI["主动发言调度器 / 其他插件 / LLM 工具"] --> V["并发读取情绪、共同语境、群聊氛围、拟人状态和人格漂移"]
     V --> W["计算互需平衡、开口冲动、沉默舒适度、打断风险和冷却"]
     W --> X{"本地公式允许开口 ?"}
     X -- "否" --> Y["保持沉默 / 短应 / 延后"]
@@ -1606,7 +1610,7 @@ enable_safety_boundary = false
 | 配置项 | 类型 | 默认值 | 说明 |
 | --- | --- | --- | --- |
 | `background_post_queue_limit` | int | `0` | 每个会话回复后后台评估（post）队列上限；`0` 表示不限制。 |
-| `enable_dynamic_background_workers` | bool | `false` | 高负载时允许插件按队列深度、等待时间、重试和租约压力自适应选择后台工作器（worker）数量；基础为 `1`，总 worker 数硬上限固定为 `6`，空闲后自动关闭，状态提交仍保持顺序。内部判断 LLM 另有并发闸门，默认最多 `2` 路、极端积压最多 `3` 路。 |
+| `enable_dynamic_background_workers` | bool | `false` | 高负载时允许插件按队列深度、等待时间、重试、租约压力和 CPU/内存环境压力自适应选择后台工作器（worker）数量；基础为 `1`，全插件同时活跃后台 worker 硬上限固定为 `6`，环境压力高或压力未知时会自动降档，并通过冷却时间逐级扩容，空闲后自动关闭，状态提交仍保持顺序。内部判断 LLM 另有并发闸门，默认最多 `2` 路、极端积压最多 `3` 路。 |
 | `background_post_queue_checkpoint_enabled` | bool | `true` | 将未提交后台队列写入 KV 检查点，重启后可恢复。 |
 | `background_post_job_lease_seconds` | float | `120.0` | 后台任务租约秒数；租约过期后可回收未完成任务。 |
 | `background_post_job_timeout_seconds` | float | `0.0` | 单个后台任务超时秒数；`0` 表示不启用任务级超时。 |
@@ -1629,7 +1633,7 @@ enable_safety_boundary = false
 | `state_injection_max_parts` | int | `8` | 单次主请求中本插件最多追加的临时状态注入片段数。 |
 | `llm_tool_response_max_chars` | int | `16000` | 每个状态 LLM Tool 返回 JSON 的最大字符数。 |
 
-回复后评估（post）后台化默认自动开启，主回复结束后不会等待内部 post 评估完成，状态会稍后按会话顺序进入 AstrBot KV。`enable_dynamic_background_workers=false` 时每个会话只使用基础 `1` 个后台 worker；打开后也不会直接跳到固定并发，而是由插件根据队列压力逐级扩容，空闲后自动收掉。它可能增加 API、token 与 CPU 压力，所以默认关闭。
+回复后评估（post）后台化默认自动开启，主回复结束后不会等待内部 post 评估完成，状态会稍后按会话顺序进入 AstrBot KV。`enable_dynamic_background_workers=false` 时每个会话只使用基础 `1` 个后台 worker；打开后也不会直接跳到固定并发，而是由插件根据队列压力、环境压力和全局活跃 worker 预算逐级扩容。CPU/内存压力偏高时会自动降档，环境压力无法读取时按保守档处理；已有任务不会被强杀，但后续领取会变少，空闲后自动收掉。它可能增加 API、token 与 CPU 压力，所以默认关闭。
 
 ### 群聊氛围、说话人轨道与因果轨迹
 
@@ -2853,7 +2857,7 @@ $env:ASTRBOT_EXPECT_PLUGIN = "astrbot_plugin_emotional_state"
 脚本会在输出 JSON 里写出 `expectedPluginRuntime`，包含插件列表 API 中返回的 `version`、`displayName`、`activated`、`author`、`astrbotVersion` 等只读字段。若目标插件存在但 `activated=false`，脚本会失败退出。需要把版本和显示名也作为硬断言时，可以额外设置：
 
 ```powershell
-$env:ASTRBOT_EXPECT_PLUGIN_VERSION = "1.5.0"
+$env:ASTRBOT_EXPECT_PLUGIN_VERSION = "1.6.0"
 $env:ASTRBOT_EXPECT_PLUGIN_DISPLAY_NAME = "多维情绪状态"
 & $node scripts\remote_smoke_playwright.js
 ```
@@ -3072,7 +3076,7 @@ inject_state = false
 humanlike_memory_write_enabled = true
 ```
 
-拟人状态默认自动运行。若没有看到 `humanlike_state_at_write`，优先确认插件是否为 `1.5.0`、`humanlike_memory_write_enabled=true`，以及调用方是否保留了完整记忆载荷。
+拟人状态默认自动运行。若没有看到 `humanlike_state_at_write`，优先确认插件是否为 `1.6.0` 或更新版本、`humanlike_memory_write_enabled=true`，以及调用方是否保留了完整记忆载荷。
 
 ### 拟人状态没有生效
 

@@ -756,6 +756,51 @@ class AstrBotLifecycleTests(unittest.TestCase):
 
         self.assertEqual(started_sessions, {"s-a", "s-b"})
 
+    def _bind_background_worker_environment(
+        self,
+        plugin,
+        *,
+        level="normal",
+        worker_cap=6,
+        cpu=0.2,
+        memory=0.3,
+        now=None,
+    ):
+        if now is not None:
+            plugin._test_now = now
+
+            def observed_now(self):
+                return self._test_now
+
+            plugin._observed_now = observed_now.__get__(plugin, type(plugin))
+
+        def resource_pressure(self):
+            if cpu is None and memory is None:
+                combined = 0.0
+            else:
+                combined = max(
+                    value
+                    for value in (cpu, memory)
+                    if value is not None
+                )
+            return {
+                "cpu_load_ratio": cpu,
+                "cpu_source": "unit_test",
+                "memory_load_ratio": memory,
+                "memory_source": "unit_test",
+                "combined_load_ratio": combined,
+                "unknown": level == "unknown",
+                "level": level,
+                "worker_cap": worker_cap,
+                "reason": f"environment_pressure_{level}",
+                "sampled_at": getattr(plugin, "_test_now", time.time()),
+            }
+
+        plugin._background_post_resource_pressure = resource_pressure.__get__(
+            plugin,
+            type(plugin),
+        )
+
     def test_background_post_assessment_parallelizes_same_session_assessments(self):
         plugin = new_plugin(
             {
@@ -764,6 +809,7 @@ class AstrBotLifecycleTests(unittest.TestCase):
                 "enable_dynamic_background_workers": True,
             },
         )
+        self._bind_background_worker_environment(plugin, now=1000.0)
         saves, _ = self._bind_common_state_hooks(plugin)
         release_assessment = asyncio.Event()
         started_texts = []
@@ -809,6 +855,7 @@ class AstrBotLifecycleTests(unittest.TestCase):
         from main import _BackgroundPostJob
 
         plugin = new_plugin({"enable_dynamic_background_workers": False})
+        self._bind_background_worker_environment(plugin, now=1000.0)
         event = FakeEvent("s-worker-default")
         identity = plugin._agent_identity(event)
         plugin._background_post_queues["s-worker-default"] = collections.deque(
@@ -838,6 +885,7 @@ class AstrBotLifecycleTests(unittest.TestCase):
         from main import _BackgroundPostJob
 
         plugin = new_plugin({"enable_dynamic_background_workers": True})
+        self._bind_background_worker_environment(plugin, now=1000.0)
         event = FakeEvent("s-worker-adaptive")
         identity = plugin._agent_identity(event)
 
@@ -856,23 +904,214 @@ class AstrBotLifecycleTests(unittest.TestCase):
                 ],
             )
 
-        for size, expected in [(1, 1), (2, 2), (5, 3), (10, 4), (32, 6)]:
+        for size, expected_target in [(1, 1), (2, 2), (5, 3), (10, 4), (32, 6)]:
             with self.subTest(size=size):
+                plugin._background_post_worker_state.clear()
                 set_ready_queue(size)
                 decision = plugin._background_post_adaptive_worker_decision(
                     "s-worker-adaptive",
                 )
-                self.assertEqual(decision["desired_workers"], expected)
+                self.assertEqual(decision["queue_target_workers"], expected_target)
+                self.assertLessEqual(decision["desired_workers"], 2)
+                self.assertGreaterEqual(decision["desired_workers"], 1)
                 self.assertEqual(
                     decision["dynamic_extra_workers"],
-                    expected - 1,
+                    max(0, decision["desired_workers"] - 1),
                 )
                 self.assertTrue(decision["idle_workers_close_automatically"])
+
+    def test_background_post_workers_ramp_up_in_steps_and_cooldown(self):
+        from main import _BackgroundPostJob
+
+        plugin = new_plugin({"enable_dynamic_background_workers": True})
+        self._bind_background_worker_environment(plugin, now=1000.0)
+        event = FakeEvent("s-worker-ramp")
+        identity = plugin._agent_identity(event)
+        plugin._background_post_queues["s-worker-ramp"] = collections.deque(
+            [
+                _BackgroundPostJob(
+                    event,
+                    identity,
+                    f"reply-{index}",
+                    f"ctx-{index}",
+                    index,
+                    900.0,
+                )
+                for index in range(1, 40)
+            ],
+        )
+
+        first = plugin._background_post_adaptive_worker_decision(
+            "s-worker-ramp",
+            commit_scale=True,
+        )
+        self.assertTrue(first["scale_state"]["committed"])
+        second = plugin._background_post_adaptive_worker_decision(
+            "s-worker-ramp",
+            commit_scale=True,
+        )
+        plugin._test_now += first["scale_state"]["scale_interval_seconds"] + 0.01
+        third = plugin._background_post_adaptive_worker_decision(
+            "s-worker-ramp",
+            commit_scale=True,
+        )
+
+        self.assertEqual(first["queue_target_workers"], 6)
+        self.assertEqual(first["desired_workers"], 2)
+        self.assertEqual(second["desired_workers"], 2)
+        self.assertIn("worker_scale_cooldown", second["reasons"])
+        self.assertEqual(third["desired_workers"], 3)
+        self.assertIn("worker_scale_step_up", third["reasons"])
+
+    def test_background_post_worker_preview_does_not_commit_scale_state(self):
+        from main import _BackgroundPostJob
+
+        plugin = new_plugin({"enable_dynamic_background_workers": True})
+        self._bind_background_worker_environment(plugin, now=1000.0)
+        event = FakeEvent("s-worker-preview")
+        identity = plugin._agent_identity(event)
+        plugin._background_post_queues["s-worker-preview"] = collections.deque(
+            [
+                _BackgroundPostJob(
+                    event,
+                    identity,
+                    f"reply-{index}",
+                    f"ctx-{index}",
+                    index,
+                    900.0,
+                )
+                for index in range(1, 40)
+            ],
+        )
+
+        preview = plugin._background_post_adaptive_worker_decision("s-worker-preview")
+        self.assertFalse(preview["scale_state"]["committed"])
+        self.assertNotIn("s-worker-preview", plugin._background_post_worker_state)
+
+        dispatch_slots = plugin._background_post_max_workers("s-worker-preview")
+
+        self.assertEqual(dispatch_slots, 2)
+        self.assertIn("s-worker-preview", plugin._background_post_worker_state)
+
+    def test_background_post_workers_throttle_under_environment_pressure(self):
+        from main import _BackgroundPostJob
+
+        plugin = new_plugin({"enable_dynamic_background_workers": True})
+        self._bind_background_worker_environment(
+            plugin,
+            level="high",
+            worker_cap=2,
+            cpu=0.91,
+            memory=0.62,
+            now=1000.0,
+        )
+        event = FakeEvent("s-worker-throttle")
+        identity = plugin._agent_identity(event)
+        plugin._background_post_queues["s-worker-throttle"] = collections.deque(
+            [
+                _BackgroundPostJob(
+                    event,
+                    identity,
+                    f"reply-{index}",
+                    f"ctx-{index}",
+                    index,
+                    900.0,
+                )
+                for index in range(1, 40)
+            ],
+        )
+
+        decision = plugin._background_post_adaptive_worker_decision(
+            "s-worker-throttle",
+        )
+
+        self.assertEqual(decision["queue_target_workers"], 6)
+        self.assertEqual(decision["target_workers"], 2)
+        self.assertLessEqual(decision["desired_workers"], 2)
+        self.assertLessEqual(decision["dispatch_workers"], 2)
+        self.assertEqual(decision["resource_pressure"]["level"], "high")
+        self.assertIn("environment_pressure_high", decision["reasons"])
+
+    def test_background_post_workers_respect_global_worker_budget(self):
+        from main import _BackgroundPostJob
+
+        plugin = new_plugin({"enable_dynamic_background_workers": True})
+        self._bind_background_worker_environment(plugin, now=1000.0)
+        event = FakeEvent("s-worker-budget")
+        identity = plugin._agent_identity(event)
+        plugin._background_post_active["busy-a"] = {
+            index: _BackgroundPostJob(event, identity, "busy", "ctx", index, 990.0)
+            for index in range(1, 4)
+        }
+        plugin._background_post_active["busy-b"] = {
+            index: _BackgroundPostJob(event, identity, "busy", "ctx", index + 10, 990.0)
+            for index in range(1, 4)
+        }
+        plugin._background_post_queues["s-worker-budget"] = collections.deque(
+            [
+                _BackgroundPostJob(
+                    event,
+                    identity,
+                    f"reply-{index}",
+                    f"ctx-{index}",
+                    index,
+                    900.0,
+                )
+                for index in range(1, 40)
+            ],
+        )
+
+        decision = plugin._background_post_adaptive_worker_decision(
+            "s-worker-budget",
+        )
+
+        self.assertEqual(decision["global_worker_cap"], 6)
+        self.assertEqual(decision["global_active_other_workers"], 6)
+        self.assertEqual(decision["dispatch_workers"], 0)
+        self.assertIn("global_worker_budget_exhausted", decision["reasons"])
+
+    def test_background_post_workers_use_conservative_cap_when_environment_unknown(self):
+        from main import _BackgroundPostJob
+
+        plugin = new_plugin({"enable_dynamic_background_workers": True})
+        self._bind_background_worker_environment(
+            plugin,
+            level="unknown",
+            worker_cap=2,
+            cpu=None,
+            memory=None,
+            now=1000.0,
+        )
+        event = FakeEvent("s-worker-unknown")
+        identity = plugin._agent_identity(event)
+        plugin._background_post_queues["s-worker-unknown"] = collections.deque(
+            [
+                _BackgroundPostJob(
+                    event,
+                    identity,
+                    f"reply-{index}",
+                    f"ctx-{index}",
+                    index,
+                    900.0,
+                )
+                for index in range(1, 40)
+            ],
+        )
+
+        decision = plugin._background_post_adaptive_worker_decision(
+            "s-worker-unknown",
+        )
+
+        self.assertEqual(decision["resource_pressure"]["level"], "unknown")
+        self.assertEqual(decision["target_workers"], 2)
+        self.assertLessEqual(decision["dispatch_workers"], 2)
+        self.assertIn("environment_pressure_unknown", decision["reasons"])
 
     def test_internal_assessor_llm_concurrency_uses_separate_guard(self):
         from main import _BackgroundPostJob
 
         plugin = new_plugin({"enable_dynamic_background_workers": True})
+        self._bind_background_worker_environment(plugin, now=1000.0)
         event = FakeEvent("s-llm-guard")
         identity = plugin._agent_identity(event)
         plugin._background_post_queues["s-llm-guard"] = collections.deque(
@@ -894,7 +1133,8 @@ class AstrBotLifecycleTests(unittest.TestCase):
         )
         llm_decision = plugin._internal_assessor_llm_concurrency_decision()
 
-        self.assertEqual(worker_decision["desired_workers"], 3)
+        self.assertEqual(worker_decision["queue_target_workers"], 3)
+        self.assertLessEqual(worker_decision["desired_workers"], 2)
         self.assertEqual(llm_decision["limit"], 2)
         self.assertEqual(llm_decision["base_limit"], 2)
         self.assertEqual(llm_decision["burst_limit"], 3)
@@ -919,7 +1159,8 @@ class AstrBotLifecycleTests(unittest.TestCase):
         )
         llm_decision = plugin._internal_assessor_llm_concurrency_decision()
 
-        self.assertEqual(worker_decision["desired_workers"], 6)
+        self.assertEqual(worker_decision["queue_target_workers"], 6)
+        self.assertLessEqual(worker_decision["desired_workers"], 3)
         self.assertEqual(llm_decision["limit"], 3)
         self.assertIn("temporary_extreme_backlog_burst", llm_decision["reasons"])
 
@@ -1355,6 +1596,7 @@ class AstrBotLifecycleTests(unittest.TestCase):
                 "background_post_queue_checkpoint_enabled": False,
             },
         )
+        self._bind_background_worker_environment(plugin, now=1000.0)
         saves, _ = self._bind_common_state_hooks(plugin)
         active = 0
         max_active = 0
@@ -1380,11 +1622,11 @@ class AstrBotLifecycleTests(unittest.TestCase):
                 )
             diagnostics = await plugin.get_agent_runtime_diagnostics("s-pressure")
             bg = diagnostics["background_post_assessment"]
-            self.assertEqual(bg["worker_policy"], "adaptive_pressure")
+            self.assertEqual(bg["worker_policy"], "adaptive_resource_guarded_pressure")
             self.assertGreaterEqual(bg["max_workers"], 1)
             self.assertLessEqual(
                 bg["active_workers"],
-                bg["max_workers"],
+                bg["worker_global_cap"],
             )
             await asyncio.wait_for(next(iter(plugin._background_tasks)), timeout=2.0)
 

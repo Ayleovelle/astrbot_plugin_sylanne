@@ -1,6 +1,6 @@
 <svg xmlns="http://www.w3.org/2000/svg" width="1480" height="780" viewBox="0 0 1480 780" role="img" aria-labelledby="title desc">
   <title id="title">运行时总览</title>
-  <desc id="desc">展示主回复链路、后台自适应 worker、判断 LLM 并发闸门、并行状态读取、顺序提交和主动发言裁决支路。</desc>
+  <desc id="desc">展示主回复链路、带 CPU/内存环境守卫和全局预算的后台自适应 worker、判断 LLM 并发闸门、并行状态读取、顺序提交和主动发言裁决支路。</desc>
   <defs>
     <marker id="arrowBlue" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse">
       <path d="M 0 0 L 10 5 L 0 10 z" fill="#2563eb"/>
@@ -68,31 +68,31 @@
   <path class="arrowBlue" d="M1070 153 H1104"/>
 
   <rect class="laneWorker" x="36" y="286" width="1408" height="214" rx="18"/>
-  <text class="label" x="64" y="326">后台智能 worker：自动评分，限流评估，空闲关闭</text>
+  <text class="label" x="64" y="326">后台智能 worker：环境守卫，全局预算，平滑扩容</text>
   <g>
     <path class="decision" d="M188 364 L322 424 L188 484 L54 424 Z"/>
     <text class="text" x="188" y="416" text-anchor="middle">压力评分</text>
     <text class="small" x="188" y="444" text-anchor="middle">队列/等待/重试/租约</text>
 
     <rect class="nodeGreen" x="370" y="370" width="220" height="108" rx="12"/>
-    <text class="text" x="480" y="405" text-anchor="middle">自适应 workers</text>
-    <text class="small" x="480" y="435" text-anchor="middle">基础 1，总上限 6</text>
-    <text class="small" x="480" y="460" text-anchor="middle">空闲后自动退出</text>
+    <text class="text" x="480" y="405" text-anchor="middle">资源守卫</text>
+    <text class="small" x="480" y="435" text-anchor="middle">CPU / 内存 / 未知压力</text>
+    <text class="small" x="480" y="460" text-anchor="middle">高压自动降档</text>
 
     <rect class="nodeGreen" x="640" y="370" width="226" height="108" rx="12"/>
-    <text class="text" x="753" y="405" text-anchor="middle">判断 LLM 闸门</text>
-    <text class="small" x="753" y="435" text-anchor="middle">默认 2 路，极端最多 3</text>
-    <text class="small" x="753" y="460" text-anchor="middle">低信号走本地轻评估</text>
+    <text class="text" x="753" y="405" text-anchor="middle">全局 worker 预算</text>
+    <text class="small" x="753" y="435" text-anchor="middle">同时活跃总上限 6</text>
+    <text class="small" x="753" y="460" text-anchor="middle">冷却内每轮升 1 档</text>
 
     <rect class="nodeGreen" x="916" y="370" width="200" height="108" rx="12"/>
-    <text class="text" x="1016" y="405" text-anchor="middle">顺序提交</text>
-    <text class="small" x="1016" y="435" text-anchor="middle">按 sequence 合并结果</text>
-    <text class="small" x="1016" y="460" text-anchor="middle">失败重试 / dead-letter</text>
+    <text class="text" x="1016" y="405" text-anchor="middle">判断 LLM 闸门</text>
+    <text class="small" x="1016" y="435" text-anchor="middle">默认 2 路，极端最多 3</text>
+    <text class="small" x="1016" y="460" text-anchor="middle">低信号走本地轻评估</text>
 
     <rect class="nodeGreen" x="1166" y="370" width="230" height="108" rx="12"/>
-    <text class="text" x="1281" y="405" text-anchor="middle">状态落库与诊断</text>
-    <text class="small" x="1281" y="435" text-anchor="middle">AstrBot KV / 记忆注解</text>
-    <text class="small" x="1281" y="460" text-anchor="middle">runtime diagnostics</text>
+    <text class="text" x="1281" y="405" text-anchor="middle">顺序提交与诊断</text>
+    <text class="small" x="1281" y="435" text-anchor="middle">sequence 合并 / KV</text>
+    <text class="small" x="1281" y="460" text-anchor="middle">记忆注解 / runtime</text>
   </g>
   <path class="arrowGreen" d="M322 424 H370"/>
   <path class="arrowGreen" d="M590 424 H640"/>
