@@ -123,7 +123,7 @@ class DocumentMathContractTests(unittest.TestCase):
         readme = (ROOT / "README.md").read_text(encoding="utf-8")
         theory = (ROOT / "docs" / "theory.md").read_text(encoding="utf-8")
 
-        self.assertIn("### 默认阅读：核心模型摘要", readme)
+        self.assertIn("### 核心模型摘要", readme)
         self.assertIn(
             "<summary>论文附录 S1｜完整公式推导、代表性文献依据与工程取舍</summary>",
             readme,
