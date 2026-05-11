@@ -2,7 +2,7 @@
 
 > <span style="font-size: 1.08em;"><strong>Soulful Yearning Lifelike AstrBot Neural Narrative Engine</strong>。她维护的不只是“情绪标签”，而是情绪、人格、记忆、氛围、主动性和表达节奏交织成的长期状态。</span>
 
-![版本 1.8.4](https://img.shields.io/badge/version-1.8.4-blue)
+![版本 1.8.5](https://img.shields.io/badge/version-1.8.5-blue)
 ![AstrBot >=4.9.2,<5.0.0](https://img.shields.io/badge/AstrBot-%3E%3D4.9.2%2C%3C5.0.0-green)
 ![Python 3.10+](https://img.shields.io/badge/Python-3.10%2B-yellow)
 ![协议 astrbot.emotion_state.v2](https://img.shields.io/badge/schema-astrbot.emotion__state.v2-purple)
@@ -39,7 +39,7 @@
 
 <br clear="right">
 
-`1.8.4` 是 `1.8.3` 之后的 bug 修复版：保留用户说话节奏学习、即时聊天自适应分段和长回复不省略能力，并继续修复输入侧分块理解。她会先等疑似未说完的用户碎片合并，再把完整意图交给主 LLM 和情绪模型；bot 回复被插话打断时只记录中性事实，正向还是负面交给状态模型结合人格和语境判断。
+`1.8.5` 是 `1.8.4` 之后的 bug 修复版：保留用户说话节奏学习、即时聊天自适应分段、输入碎片合并和长回复不省略能力，并继续修复即时聊天图片/表情包发送、官方自动上下文压缩兼容和发布包缺少自有记忆模块的问题。她会先等疑似未说完的用户碎片合并，再把完整意图交给主 LLM 和情绪模型；bot 回复被插话打断时只记录中性事实，正向还是负面交给状态模型结合人格和语境判断。
 
 | 能力 | 作用 |
 | --- | --- |
@@ -75,6 +75,7 @@
 | 主题 | 内容 |
 | --- | --- |
 | [当前版本与兼容范围](#当前版本与兼容范围) | 插件版本、AstrBot 版本、Python 要求、许可证和发布状态。 |
+| [1.8.5 bug 修复发布记录](#185-bug-修复发布记录) | 修复即时聊天图片/表情包发送、官方自动上下文压缩兼容和包体缺失记忆模块。 |
 | [1.8.4 bug 修复发布记录](#184-bug-修复发布记录) | 修复用户分段输入、情绪延后评估和插话打断事件。 |
 | [1.8.3 bug 修复发布记录](#183-bug-修复发布记录) | 修复即时聊天分条接管时整段主回复和分条消息重复发送。 |
 | [1.8.2 bug 修复发布记录](#182-bug-修复发布记录) | 修复即时聊天分条接管、用户插话和旧回复过期后的上下文丢失。 |
@@ -107,15 +108,30 @@
 | --- | --- |
 | 插件目录名 | `astrbot_plugin_sylanne` |
 | 显示名 | `Sylanne` |
-| 当前版本 | `1.8.4` |
+| 当前版本 | `1.8.5` |
 | AstrBot 版本 | `>=4.9.2,<5.0.0` |
 | Python | `3.10+` |
 | 许可证 | `GPL-3.0-or-later` |
 | 运行时第三方依赖 | 当前无额外依赖，见 `requirements.txt` |
 
-`1.8.4` 在 `1.8.3` 的即时聊天接管修复基础上继续收紧输入侧：默认仍不主动发送，配置者同时开启 `enable_proactive_speech_scheduler=true` 与 `enable_proactive_speech_dispatch=true` 后，她才会从最近可触达会话中选择候选，结合情绪、群聊氛围、双方需要、冷却、近期上下文摘要、Sylanne 自有记忆召回摘要和 LLM 话题裁决，请求 AstrBot 主动发送。即时聊天分条发送会监听用户插话；NapCat/OneBot 撤回会推进会话 epoch 并让旧输出自然过期；用户连续发“我！/就！/是！”或“我只是很纳闷 / 为啥你要问我 / 是从哪里看来的”这类碎片时，输入侧会先合并成一轮意图，再交给主 LLM 和情绪模型理解。核心情绪、回复后后台评估（post）、`group_atmosphere_state`、`humanlike_state`、`lifelike_learning_state`、`personality_drift_state`、Sylanne 自有记忆、即时聊天节奏和欺骗/操控/逃责类动作阻断默认自动运行；道德修复、瑕疵模拟、心理筛查等实验/维护模块仍由配置者显式打开。
+`1.8.5` 在 `1.8.4` 的输入侧修复基础上继续收紧输出侧和发布边界：默认仍不主动发送，配置者同时开启 `enable_proactive_speech_scheduler=true` 与 `enable_proactive_speech_dispatch=true` 后，她才会从最近可触达会话中选择候选，结合情绪、群聊氛围、双方需要、冷却、近期上下文摘要、Sylanne 自有记忆召回摘要和 LLM 话题裁决，请求 AstrBot 主动发送。即时聊天分条发送会监听用户插话；NapCat/OneBot 撤回会推进会话 epoch 并让旧输出自然过期；用户连续发“我！/就！/是！”或“我只是很纳闷 / 为啥你要问我 / 是从哪里看来的”这类碎片时，输入侧会先合并成一轮意图，再交给主 LLM 和情绪模型理解。`1.8.5` 还会保留图片链、优先用 AstrBot URL 图片组件发送 URL-only 表情包，并清洗官方自动上下文压缩摘要中的 Sylanne 内部块，避免实时影子和记忆召回重复回灌。核心情绪、回复后后台评估（post）、`group_atmosphere_state`、`humanlike_state`、`lifelike_learning_state`、`personality_drift_state`、Sylanne 自有记忆、即时聊天节奏和欺骗/操控/逃责类动作阻断默认自动运行；道德修复、瑕疵模拟、心理筛查等实验/维护模块仍由配置者显式打开。
 
 发布包会包含运行代码、README、CHANGELOG、LICENSE、配置结构（schema）、docs 和 `docs/assets/` 中的聚合图表；不会包含 `tests/`、`scripts/`、`literature_kb/`、`personality_literature_kb/`、`psychological_literature_kb/`、`humanlike_agent_literature_kb/`、`raw/`、`output/`、`dist/` 等开发、研究、原始样本或缓存目录。
+
+### 1.8.5 bug 修复发布记录
+
+`v1.8.5` 合并在 `main` 上，对外安装版本由 `metadata.yaml` 和 `main.py @register(...)` 共同声明为 `1.8.5`。本版按版本规则提升第三位版本号：只修复即时聊天图片/表情包发送、官方自动上下文压缩兼容和发布包缺失自有记忆模块，不改变公共 API 版本。
+
+当前版本的主要变化：
+
+| 类别 | 结果 |
+| --- | --- |
+| 图片与表情包发送 | 即时聊天分段接管时会保留 `result_chain` / `message_chain` 中的图片段，避免分段文本把图片或表情包掐掉。 |
+| URL-only 表情包 | 检测到只包含图片 URL 的表情包时，优先使用 AstrBot URL 图片组件发送，不退化成纯文本链接。 |
+| 官方上下文压缩兼容 | 清洗官方自动上下文压缩摘要中的 Sylanne 内部块，避免记忆召回、实时影子和压缩摘要互相重复注入。 |
+| 实时影子去重 | 如果官方压缩摘要已经包含实时历史影子，本地 shadow 会标记为已消费，下一轮不再重复塞回提示词。 |
+| 发布包完整性 | 发布脚本已把 `memory_engine.py` 纳入运行包，`dist/astrbot_plugin_sylanne.zip` 可直接安装自有记忆模块。 |
+| 公开契约 | 插件版本为 `1.8.5`；公共 API 版本仍为 `1.0`，schema 仍保持 `astrbot.emotion_state.v2` 等版本化契约。 |
 
 ### 1.8.4 bug 修复发布记录
 
@@ -2913,7 +2929,7 @@ $env:ASTRBOT_EXPECT_PLUGIN = "astrbot_plugin_sylanne"
 脚本会在输出 JSON 里写出 `expectedPluginRuntime`，包含插件列表 API 中返回的 `version`、`displayName`、`activated`、`author`、`astrbotVersion` 等只读字段。若目标插件存在但 `activated=false`，脚本会失败退出。需要把版本和显示名也作为硬断言时，可以额外设置：
 
 ```powershell
-$env:ASTRBOT_EXPECT_PLUGIN_VERSION = "1.8.4"
+$env:ASTRBOT_EXPECT_PLUGIN_VERSION = "1.8.5"
 $env:ASTRBOT_EXPECT_PLUGIN_DISPLAY_NAME = "Sylanne"
 & $node scripts\remote_smoke_playwright.js
 ```
@@ -3132,7 +3148,7 @@ inject_state = false
 humanlike_memory_write_enabled = true
 ```
 
-拟人状态默认自动运行。若没有看到 `humanlike_state_at_write`，优先确认插件是否为 `1.8.4` 或更新版本、`humanlike_memory_write_enabled=true`，以及调用方是否保留了完整记忆载荷。
+拟人状态默认自动运行。若没有看到 `humanlike_state_at_write`，优先确认插件是否为 `1.8.5` 或更新版本、`humanlike_memory_write_enabled=true`，以及调用方是否保留了完整记忆载荷。
 
 ### 拟人状态没有生效
 
