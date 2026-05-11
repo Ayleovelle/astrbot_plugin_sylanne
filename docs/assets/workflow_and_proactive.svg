@@ -1,6 +1,6 @@
-<svg xmlns="http://www.w3.org/2000/svg" width="1460" height="1240" viewBox="0 0 1460 1240" role="img" aria-labelledby="title desc">
-  <title id="title">工作流与主动发言支路</title>
-  <desc id="desc">展示 AstrBot 请求响应生命周期、带 CPU/内存环境守卫和全局预算的后台智能 worker、判断 LLM 并发闸门、并行状态读取、主动发言裁决和主动发送请求流程。</desc>
+<svg xmlns="http://www.w3.org/2000/svg" width="1560" height="1180" viewBox="0 0 1560 1180" role="img" aria-labelledby="title desc">
+  <title id="title">工作流对比与后台并行调度</title>
+  <desc id="desc">展示旧版单线程链路与当前版本的主回复链路、回复后后台队列、动态后台工作器池、资源守卫、顺序提交和主动发言支路。</desc>
   <defs>
     <marker id="arrowBlue" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse">
       <path d="M 0 0 L 10 5 L 0 10 z" fill="#2563eb"/>
@@ -11,146 +11,240 @@
     <marker id="arrowOrange" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse">
       <path d="M 0 0 L 10 5 L 0 10 z" fill="#ea580c"/>
     </marker>
+    <marker id="arrowGray" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse">
+      <path d="M 0 0 L 10 5 L 0 10 z" fill="#64748b"/>
+    </marker>
     <style>
       .bg { fill: #f8fafc; }
-      .panel { fill: #eef2ff; stroke: #c7d2fe; stroke-width: 2; }
-      .panelWorker { fill: #ecfdf5; stroke: #a7f3d0; stroke-width: 2; }
-      .panelProactive { fill: #fff7ed; stroke: #fed7aa; stroke-width: 2; }
+      .title { font-family: "Microsoft YaHei", "Noto Sans CJK SC", Arial, sans-serif; font-size: 34px; font-weight: 800; fill: #0f172a; }
+      .subtitle { font-family: "Microsoft YaHei", "Noto Sans CJK SC", Arial, sans-serif; font-size: 18px; fill: #475569; }
+      .laneOld { fill: #f1f5f9; stroke: #cbd5e1; stroke-width: 2; }
+      .laneMain { fill: #eef2ff; stroke: #c7d2fe; stroke-width: 2; }
+      .laneQueue { fill: #ecfdf5; stroke: #a7f3d0; stroke-width: 2; }
+      .laneProactive { fill: #fff7ed; stroke: #fed7aa; stroke-width: 2; }
       .node { fill: #ffffff; stroke: #334155; stroke-width: 2; }
-      .nodeGreen { fill: #ffffff; stroke: #047857; stroke-width: 2; }
-      .nodeOrange { fill: #ffffff; stroke: #9a3412; stroke-width: 2; }
-      .decision { fill: #ffffff; stroke: #7c3aed; stroke-width: 2; }
-      .text { font-family: "Microsoft YaHei", "Noto Sans CJK SC", Arial, sans-serif; font-size: 20px; fill: #0f172a; }
-      .small { font-family: "Microsoft YaHei", "Noto Sans CJK SC", Arial, sans-serif; font-size: 16px; fill: #334155; }
-      .label { font-family: "Microsoft YaHei", "Noto Sans CJK SC", Arial, sans-serif; font-size: 24px; font-weight: 700; fill: #1e293b; }
-      .arrowBlue { stroke: #2563eb; stroke-width: 3; fill: none; marker-end: url(#arrowBlue); }
-      .arrowGreen { stroke: #059669; stroke-width: 3; fill: none; marker-end: url(#arrowGreen); }
-      .arrowOrange { stroke: #ea580c; stroke-width: 3; fill: none; marker-end: url(#arrowOrange); }
-      .dash { stroke-dasharray: 8 8; }
+      .nodeBlue { fill: #ffffff; stroke: #2563eb; stroke-width: 2.4; }
+      .nodeGreen { fill: #ffffff; stroke: #059669; stroke-width: 2.4; }
+      .nodeOrange { fill: #ffffff; stroke: #ea580c; stroke-width: 2.4; }
+      .nodeOld { fill: #ffffff; stroke: #64748b; stroke-width: 2; }
+      .queue { fill: #d1fae5; stroke: #059669; stroke-width: 2.4; }
+      .worker { fill: #ffffff; stroke: #16a34a; stroke-width: 2.4; }
+      .guard { fill: #fef3c7; stroke: #d97706; stroke-width: 2.2; }
+      .decision { fill: #ffffff; stroke: #7c3aed; stroke-width: 2.4; }
+      .badgeBlue { fill: #dbeafe; stroke: #93c5fd; stroke-width: 1.5; }
+      .badgeGreen { fill: #dcfce7; stroke: #86efac; stroke-width: 1.5; }
+      .badgeOrange { fill: #ffedd5; stroke: #fdba74; stroke-width: 1.5; }
+      .text { font-family: "Microsoft YaHei", "Noto Sans CJK SC", Arial, sans-serif; font-size: 19px; fill: #0f172a; }
+      .small { font-family: "Microsoft YaHei", "Noto Sans CJK SC", Arial, sans-serif; font-size: 15px; fill: #334155; }
+      .tiny { font-family: "Microsoft YaHei", "Noto Sans CJK SC", Arial, sans-serif; font-size: 13px; fill: #475569; }
+      .laneTitle { font-family: "Microsoft YaHei", "Noto Sans CJK SC", Arial, sans-serif; font-size: 24px; font-weight: 800; fill: #1e293b; }
+      .arrowBlue { stroke: #2563eb; stroke-width: 3.2; fill: none; marker-end: url(#arrowBlue); }
+      .arrowGreen { stroke: #059669; stroke-width: 3.2; fill: none; marker-end: url(#arrowGreen); }
+      .arrowOrange { stroke: #ea580c; stroke-width: 3.2; fill: none; marker-end: url(#arrowOrange); }
+      .arrowGray { stroke: #64748b; stroke-width: 2.8; fill: none; marker-end: url(#arrowGray); }
+      .dash { stroke-dasharray: 9 8; }
+      .thick { stroke-width: 5; }
     </style>
   </defs>
-  <rect class="bg" width="1460" height="1240"/>
 
-  <rect class="panel" x="34" y="34" width="430" height="1156" rx="18"/>
-  <text class="label" x="62" y="74">请求 / 回复生命周期</text>
-  <g>
-    <rect class="node" x="86" y="108" width="260" height="62" rx="12"/>
-    <text class="text" x="216" y="146" text-anchor="middle">用户输入 / 插件输入</text>
+  <rect class="bg" width="1560" height="1180"/>
+  <text class="title" x="60" y="58">Sylanne 当前工作流：主回复先走，后台工作器并行收束</text>
+  <text class="subtitle" x="60" y="88">重点不是“多开线程”，而是把慢评估移出主链路，并用资源守卫、全局预算和顺序提交保护情绪轨迹。</text>
 
-    <rect class="node" x="86" y="210" width="260" height="74" rx="12"/>
-    <text class="text" x="216" y="241" text-anchor="middle">读取会话与 persona</text>
-    <text class="small" x="216" y="266" text-anchor="middle">conversation / speaker</text>
+  <rect class="laneOld" x="42" y="126" width="312" height="970" rx="20"/>
+  <text class="laneTitle" x="66" y="166">0.5.0 旧版单线程</text>
+  <text class="small" x="66" y="194">请求内顺序执行，容易互相等待</text>
 
-    <rect class="node" x="86" y="324" width="260" height="86" rx="12"/>
-    <text class="text" x="216" y="356" text-anchor="middle">并发加载状态</text>
-    <text class="small" x="216" y="382" text-anchor="middle">emotion + auxiliary snapshots</text>
+  <rect class="laneMain" x="390" y="126" width="340" height="970" rx="20"/>
+  <text class="laneTitle" x="414" y="166">当前主回复链路</text>
+  <text class="small" x="414" y="194">只保留必要状态，尽快返回回复</text>
 
-    <path class="decision" d="M216 456 L342 516 L216 576 L90 516 Z"/>
-    <text class="text" x="216" y="510" text-anchor="middle">pre 更新?</text>
-    <text class="small" x="216" y="537" text-anchor="middle">assessment_timing</text>
+  <rect class="laneQueue" x="766" y="126" width="432" height="970" rx="20"/>
+  <text class="laneTitle" x="790" y="166">后台运行：队列 + 并行工作器池</text>
+  <text class="small" x="790" y="194">并行处理，但按同一会话顺序提交</text>
+  <rect class="badgeGreen" x="804" y="214" width="356" height="44" rx="14"/>
+  <text class="small" x="982" y="242" text-anchor="middle">后台持续运行，不阻塞主回复</text>
 
-    <rect class="node" x="86" y="624" width="260" height="82" rx="12"/>
-    <text class="text" x="216" y="656" text-anchor="middle">生成观测 X_t</text>
-    <text class="small" x="216" y="682" text-anchor="middle">短输出 LLM 或启发式</text>
+  <rect class="laneProactive" x="1234" y="126" width="284" height="970" rx="20"/>
+  <text class="laneTitle" x="1258" y="166">主动发言支路</text>
+  <text class="small" x="1258" y="194">低频醒来，先判断再请求发送</text>
 
-    <rect class="node" x="86" y="746" width="260" height="84" rx="12"/>
-    <text class="text" x="216" y="779" text-anchor="middle">预算内注入状态</text>
-    <text class="small" x="216" y="806" text-anchor="middle">emotion / humanlike / group 等</text>
+  <g id="old-flow">
+    <rect class="nodeOld" x="78" y="246" width="238" height="58" rx="12"/>
+    <text class="text" x="197" y="282" text-anchor="middle">用户消息</text>
+    <path class="arrowGray" d="M197 304 V344"/>
 
-    <rect class="node" x="86" y="870" width="260" height="66" rx="12"/>
-    <text class="text" x="216" y="910" text-anchor="middle">主 LLM 回复先返回</text>
+    <rect class="nodeOld" x="78" y="344" width="238" height="72" rx="12"/>
+    <text class="text" x="197" y="374" text-anchor="middle">顺序读取状态</text>
+    <text class="tiny" x="197" y="398" text-anchor="middle">情绪、记忆、辅助层依次等待</text>
+    <path class="arrowGray" d="M197 416 V456"/>
+
+    <rect class="nodeOld" x="78" y="456" width="238" height="72" rx="12"/>
+    <text class="text" x="197" y="486" text-anchor="middle">请求内评估</text>
+    <text class="tiny" x="197" y="510" text-anchor="middle">慢模型会拖住主回复</text>
+    <path class="arrowGray" d="M197 528 V568"/>
+
+    <rect class="nodeOld" x="78" y="568" width="238" height="72" rx="12"/>
+    <text class="text" x="197" y="598" text-anchor="middle">注入提示词</text>
+    <text class="tiny" x="197" y="622" text-anchor="middle">状态细节更容易堆进上下文</text>
+    <path class="arrowGray" d="M197 640 V680"/>
+
+    <rect class="nodeOld" x="78" y="680" width="238" height="72" rx="12"/>
+    <text class="text" x="197" y="710" text-anchor="middle">主模型回复</text>
+    <text class="tiny" x="197" y="734" text-anchor="middle">用户必须等整条链路完成</text>
+    <path class="arrowGray" d="M197 752 V792"/>
+
+    <rect class="nodeOld" x="78" y="792" width="238" height="72" rx="12"/>
+    <text class="text" x="197" y="822" text-anchor="middle">写回状态</text>
+    <text class="tiny" x="197" y="846" text-anchor="middle">失败时排查粒度较粗</text>
+
+    <rect class="badgeBlue" x="82" y="922" width="230" height="92" rx="14"/>
+    <text class="small" x="197" y="952" text-anchor="middle">问题表现</text>
+    <text class="tiny" x="197" y="976" text-anchor="middle">慢评估阻塞回复</text>
+    <text class="tiny" x="197" y="998" text-anchor="middle">群聊和主动发言难以分层</text>
   </g>
-  <path class="arrowBlue" d="M216 170 V210"/>
-  <path class="arrowBlue" d="M216 284 V324"/>
-  <path class="arrowBlue" d="M216 410 V456"/>
-  <path class="arrowBlue" d="M216 576 V624"/>
-  <path class="arrowBlue" d="M216 706 V746"/>
-  <path class="arrowBlue" d="M216 830 V870"/>
 
-  <rect class="panelWorker" x="514" y="34" width="430" height="1156" rx="18"/>
-  <text class="label" x="542" y="74">post 后台与智能 worker 守卫</text>
-  <g>
-    <rect class="nodeGreen" x="574" y="108" width="270" height="74" rx="12"/>
-    <text class="text" x="709" y="139" text-anchor="middle">post 任务进入队列</text>
-    <text class="small" x="709" y="164" text-anchor="middle">记录 sequence，不阻塞主回复</text>
+  <g id="main-flow">
+    <rect class="nodeBlue" x="430" y="246" width="260" height="58" rx="12"/>
+    <text class="text" x="560" y="282" text-anchor="middle">用户 / 群聊消息</text>
+    <path class="arrowBlue" d="M560 304 V344"/>
 
-    <path class="decision" d="M709 232 L846 294 L709 356 L572 294 Z"/>
-    <text class="text" x="709" y="287" text-anchor="middle">压力评分</text>
-    <text class="small" x="709" y="315" text-anchor="middle">队列/等待/重试/租约</text>
+    <rect class="nodeBlue" x="430" y="344" width="260" height="78" rx="12"/>
+    <text class="text" x="560" y="375" text-anchor="middle">解析会话轨道</text>
+    <text class="tiny" x="560" y="399" text-anchor="middle">房间级与说话人级分开</text>
+    <path class="arrowBlue" d="M560 422 V462"/>
 
-    <rect class="nodeGreen" x="574" y="404" width="270" height="92" rx="12"/>
-    <text class="text" x="709" y="437" text-anchor="middle">资源守卫</text>
-    <text class="small" x="709" y="464" text-anchor="middle">CPU / 内存压力</text>
-    <text class="small" x="709" y="488" text-anchor="middle">未知压力保守降档</text>
+    <rect class="nodeBlue" x="430" y="462" width="260" height="88" rx="12"/>
+    <text class="text" x="560" y="494" text-anchor="middle">并发读取快照</text>
+    <text class="tiny" x="560" y="518" text-anchor="middle">情绪 / 拟人 / 群聊 / 漂移</text>
+    <text class="tiny" x="560" y="538" text-anchor="middle">只取本轮必要摘要</text>
+    <path class="arrowBlue" d="M560 550 V590"/>
 
-    <rect class="nodeGreen" x="574" y="544" width="270" height="92" rx="12"/>
-    <text class="text" x="709" y="578" text-anchor="middle">全局预算和平滑扩容</text>
-    <text class="small" x="709" y="604" text-anchor="middle">同时活跃总上限 6</text>
-    <text class="small" x="709" y="628" text-anchor="middle">冷却内每轮最多升 1 档</text>
+    <rect class="nodeBlue" x="430" y="590" width="260" height="86" rx="12"/>
+    <text class="text" x="560" y="622" text-anchor="middle">预算内临时注入</text>
+    <text class="tiny" x="560" y="646" text-anchor="middle">完整状态留给工具按需查询</text>
+    <path class="arrowBlue" d="M560 676 V716"/>
 
-    <rect class="nodeGreen" x="574" y="684" width="270" height="92" rx="12"/>
-    <text class="text" x="709" y="718" text-anchor="middle">判断 LLM 闸门</text>
-    <text class="small" x="709" y="744" text-anchor="middle">默认 2 路，极端最多 3</text>
-    <text class="small" x="709" y="768" text-anchor="middle">最低完整 JSON / 本地轻评估</text>
+    <rect class="nodeBlue" x="430" y="716" width="260" height="78" rx="12"/>
+    <text class="text" x="560" y="747" text-anchor="middle">主回复先返回</text>
+    <text class="tiny" x="560" y="771" text-anchor="middle">不等待回复后内部评估</text>
 
-    <rect class="nodeGreen" x="574" y="824" width="270" height="92" rx="12"/>
-    <text class="text" x="709" y="858" text-anchor="middle">顺序提交与诊断</text>
-    <text class="small" x="709" y="884" text-anchor="middle">KV / LivingMemory 注解</text>
-    <text class="small" x="709" y="908" text-anchor="middle">重试 / dead-letter / runtime</text>
+    <rect class="badgeBlue" x="430" y="874" width="260" height="108" rx="14"/>
+    <text class="small" x="560" y="904" text-anchor="middle">主链路只做三件事</text>
+    <text class="tiny" x="560" y="928" text-anchor="middle">取必要状态</text>
+    <text class="tiny" x="560" y="950" text-anchor="middle">让语气受影响</text>
+    <text class="tiny" x="560" y="972" text-anchor="middle">尽快把话说出去</text>
   </g>
-  <path class="arrowGreen" d="M709 182 V232"/>
-  <path class="arrowGreen" d="M709 356 V404"/>
-  <path class="arrowGreen" d="M709 496 V544"/>
-  <path class="arrowGreen" d="M709 636 V684"/>
-  <path class="arrowGreen" d="M709 776 V824"/>
-  <path class="arrowGreen dash" d="M346 903 C432 903 432 145 574 145"/>
 
-  <rect class="panelProactive" x="994" y="34" width="430" height="1156" rx="18"/>
-  <text class="label" x="1022" y="74">主动发言裁决与发送</text>
-  <g>
-    <rect class="nodeOrange" x="1054" y="108" width="270" height="74" rx="12"/>
-    <text class="text" x="1189" y="139" text-anchor="middle">调度器 / 工具</text>
-    <text class="small" x="1189" y="164" text-anchor="middle">decision 或 dispatch API</text>
+  <g id="queue-and-workers">
+    <rect class="queue" x="806" y="278" width="352" height="78" rx="14"/>
+    <text class="text" x="982" y="309" text-anchor="middle">回复后任务入后台队列</text>
+    <text class="tiny" x="982" y="334" text-anchor="middle">带顺序号、租约、重试信息，不阻塞主回复</text>
 
-    <rect class="nodeOrange" x="1054" y="230" width="270" height="92" rx="12"/>
-    <text class="text" x="1189" y="263" text-anchor="middle">并发读取状态</text>
-    <text class="small" x="1189" y="290" text-anchor="middle">情绪、共同语境、群聊</text>
-    <text class="small" x="1189" y="314" text-anchor="middle">拟人状态、人格漂移</text>
+    <path class="arrowGreen thick" d="M690 755 C744 755 748 317 806 317"/>
 
-    <rect class="nodeOrange" x="1054" y="370" width="270" height="98" rx="12"/>
-    <text class="text" x="1189" y="401" text-anchor="middle">计算开口分数</text>
-    <text class="small" x="1189" y="428" text-anchor="middle">互需平衡、冷却</text>
-    <text class="small" x="1189" y="452" text-anchor="middle">沉默舒适度、打断风险</text>
+    <rect class="guard" x="806" y="394" width="352" height="92" rx="14"/>
+    <text class="text" x="982" y="426" text-anchor="middle">压力与资源守卫</text>
+    <text class="tiny" x="982" y="451" text-anchor="middle">队列深度、等待时间、重试、租约</text>
+    <text class="tiny" x="982" y="473" text-anchor="middle">CPU / 内存压力高时自动降档</text>
+    <path class="arrowGreen" d="M982 356 V394"/>
 
-    <path class="decision" d="M1189 516 L1328 578 L1189 640 L1050 578 Z"/>
-    <text class="text" x="1189" y="571" text-anchor="middle">允许开口?</text>
-    <text class="small" x="1189" y="599" text-anchor="middle">公式门控</text>
+    <rect class="nodeGreen" x="806" y="530" width="352" height="92" rx="14"/>
+    <text class="text" x="982" y="562" text-anchor="middle">自动决定开几个后台工作器</text>
+    <text class="tiny" x="982" y="588" text-anchor="middle">基础 1 个，逐级扩容，不直接冲到上限</text>
+    <text class="tiny" x="982" y="610" text-anchor="middle">全插件同时活跃硬上限：6</text>
+    <path class="arrowGreen" d="M982 486 V530"/>
 
-    <rect class="nodeOrange" x="1054" y="690" width="270" height="86" rx="12"/>
-    <text class="text" x="1189" y="720" text-anchor="middle">抽取候选证据</text>
-    <text class="small" x="1189" y="746" text-anchor="middle">进度 / 想念 / 调皮</text>
-    <text class="small" x="1189" y="768" text-anchor="middle">整蛊 / 修复 / 黑话</text>
+    <rect class="badgeGreen" x="830" y="650" width="304" height="34" rx="12"/>
+    <text class="tiny" x="982" y="672" text-anchor="middle">并行工作器池 / 后台持续运行 / 空闲自动收束</text>
 
-    <rect class="nodeOrange" x="1054" y="824" width="270" height="92" rx="12"/>
-    <text class="text" x="1189" y="856" text-anchor="middle">LLM 裁决需求</text>
-    <text class="small" x="1189" y="882" text-anchor="middle">理由 / 证据 / 短句草案</text>
-    <text class="small" x="1189" y="904" text-anchor="middle">不使用固定话题模板</text>
+    <g id="worker-pool">
+      <rect class="worker" x="816" y="706" width="96" height="72" rx="14"/>
+      <text class="small" x="864" y="736" text-anchor="middle">工作器 1</text>
+      <text class="tiny" x="864" y="758" text-anchor="middle">活跃</text>
 
-    <rect class="nodeOrange" x="1054" y="960" width="270" height="88" rx="12"/>
-    <text class="text" x="1189" y="991" text-anchor="middle">生成 dispatch_request</text>
-    <text class="small" x="1189" y="1017" text-anchor="middle">origin / reason / evidence</text>
-    <text class="small" x="1189" y="1039" text-anchor="middle">idempotency / TTL</text>
+      <rect class="worker" x="928" y="706" width="96" height="72" rx="14"/>
+      <text class="small" x="976" y="736" text-anchor="middle">工作器 2</text>
+      <text class="tiny" x="976" y="758" text-anchor="middle">活跃</text>
 
-    <path class="decision" d="M1189 1080 L1328 1136 L1189 1192 L1050 1136 Z"/>
-    <text class="text" x="1189" y="1129" text-anchor="middle">执行发送?</text>
-    <text class="small" x="1189" y="1155" text-anchor="middle">开关、冷却、origin</text>
+      <rect class="worker" x="1040" y="706" width="96" height="72" rx="14"/>
+      <text class="small" x="1088" y="736" text-anchor="middle">工作器 3</text>
+      <text class="tiny" x="1088" y="758" text-anchor="middle">活跃</text>
+
+      <rect class="worker" x="816" y="802" width="96" height="72" rx="14" opacity="0.58"/>
+      <text class="small" x="864" y="832" text-anchor="middle">工作器 4</text>
+      <text class="tiny" x="864" y="854" text-anchor="middle">待命</text>
+
+      <rect class="worker" x="928" y="802" width="96" height="72" rx="14" opacity="0.58"/>
+      <text class="small" x="976" y="832" text-anchor="middle">工作器 5</text>
+      <text class="tiny" x="976" y="854" text-anchor="middle">待命</text>
+
+      <rect class="worker" x="1040" y="802" width="96" height="72" rx="14" opacity="0.58"/>
+      <text class="small" x="1088" y="832" text-anchor="middle">工作器 6</text>
+      <text class="tiny" x="1088" y="854" text-anchor="middle">待命</text>
+
+      <text class="small" x="982" y="912" text-anchor="middle">后台最多 6 个工作器；判断模型另有并发闸门</text>
+    </g>
+
+    <path class="arrowGreen" d="M982 622 V706"/>
+    <path class="arrowGreen dash" d="M982 742 C942 706 890 690 864 706"/>
+    <path class="arrowGreen dash" d="M982 742 C970 706 976 690 976 706"/>
+    <path class="arrowGreen dash" d="M982 742 C1010 706 1040 690 1088 706"/>
+
+    <rect class="nodeGreen" x="806" y="960" width="352" height="78" rx="14"/>
+    <text class="text" x="982" y="992" text-anchor="middle">并行评估，顺序提交</text>
+    <text class="tiny" x="982" y="1016" text-anchor="middle">同一会话按顺序号写入，避免情绪轨迹乱序</text>
+    <path class="arrowGreen" d="M982 874 V960"/>
+
   </g>
-  <path class="arrowOrange" d="M1189 182 V230"/>
-  <path class="arrowOrange" d="M1189 322 V370"/>
-  <path class="arrowOrange" d="M1189 468 V516"/>
-  <path class="arrowOrange" d="M1189 640 V690"/>
-  <path class="arrowOrange" d="M1189 776 V824"/>
-  <path class="arrowOrange" d="M1189 916 V960"/>
-  <path class="arrowOrange" d="M1189 1048 V1080"/>
-  <path class="arrowOrange dash" d="M844 870 C950 870 950 276 1054 276"/>
+
+  <g id="proactive-flow">
+    <rect class="nodeOrange" x="1264" y="246" width="224" height="70" rx="12"/>
+    <text class="text" x="1376" y="274" text-anchor="middle">最近可触达会话</text>
+    <text class="tiny" x="1376" y="298" text-anchor="middle">登记来源与冷却窗口</text>
+    <path class="arrowOrange" d="M1376 316 V356"/>
+
+    <rect class="nodeOrange" x="1264" y="356" width="224" height="82" rx="12"/>
+    <text class="text" x="1376" y="386" text-anchor="middle">低频后台醒来</text>
+    <text class="tiny" x="1376" y="410" text-anchor="middle">先检查环境压力</text>
+    <path class="arrowOrange" d="M1376 438 V478"/>
+
+    <rect class="nodeOrange" x="1264" y="478" width="224" height="94" rx="12"/>
+    <text class="text" x="1376" y="508" text-anchor="middle">公式计算开口时机</text>
+    <text class="tiny" x="1376" y="532" text-anchor="middle">想念、关心、调皮</text>
+    <text class="tiny" x="1376" y="554" text-anchor="middle">互需、冷却、打断风险</text>
+    <path class="arrowOrange" d="M1376 572 V612"/>
+
+    <rect class="nodeOrange" x="1264" y="612" width="224" height="94" rx="12"/>
+    <text class="text" x="1376" y="642" text-anchor="middle">大模型裁决话题</text>
+    <text class="tiny" x="1376" y="666" text-anchor="middle">必须带证据，不用固定模板</text>
+    <text class="tiny" x="1376" y="688" text-anchor="middle">生成短消息候选</text>
+    <path class="arrowOrange" d="M1376 706 V746"/>
+
+    <rect class="nodeOrange" x="1264" y="746" width="224" height="86" rx="12"/>
+    <text class="text" x="1376" y="778" text-anchor="middle">请求 AstrBot 发送</text>
+    <text class="tiny" x="1376" y="802" text-anchor="middle">默认关闭；开启后仍受冷却</text>
+    <path class="arrowOrange" d="M1376 832 V872"/>
+
+    <rect class="nodeOrange" x="1264" y="872" width="224" height="86" rx="12"/>
+    <text class="text" x="1376" y="904" text-anchor="middle">记录反馈</text>
+    <text class="tiny" x="1376" y="928" text-anchor="middle">未回复、冷场、被打断都会回写</text>
+  </g>
+
+  <path class="arrowOrange dash" d="M1152 961 C1204 961 1210 281 1264 281"/>
+  <path class="arrowGreen dash" d="M982 1000 C982 1050 560 1050 560 794"/>
+
+  <g id="legend">
+    <rect class="badgeBlue" x="58" y="1110" width="350" height="44" rx="14"/>
+    <text class="small" x="233" y="1138" text-anchor="middle">蓝色：主回复路径，优先降低用户等待</text>
+
+    <rect class="badgeGreen" x="436" y="1110" width="410" height="44" rx="14"/>
+    <text class="small" x="641" y="1138" text-anchor="middle">绿色：后台队列和工作器池，负责慢评估与顺序落库</text>
+
+    <rect class="badgeOrange" x="874" y="1110" width="372" height="44" rx="14"/>
+    <text class="small" x="1060" y="1138" text-anchor="middle">橙色：主动发言，不是定时模板，而是状态驱动</text>
+
+    <rect class="laneOld" x="1274" y="1110" width="226" height="44" rx="14"/>
+    <text class="small" x="1387" y="1138" text-anchor="middle">灰色：0.5.0 旧单线程链路</text>
+  </g>
 </svg>

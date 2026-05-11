@@ -2655,6 +2655,31 @@ class AstrBotLifecycleTests(unittest.TestCase):
             self.assertLessEqual(len(part["text"]), runtime_limit)
         self.assertNotIn("...", plan["message_parts"][-1]["text"])
 
+    def test_realtime_chat_plan_keeps_explicit_line_break_fragments(self):
+        plugin = new_plugin(
+            {
+                "runtime_parameter_debug_override_enabled": True,
+                "realtime_chat_max_parts": 8,
+                "realtime_chat_max_part_chars": 80,
+                "enable_sticker_reaction": False,
+            },
+        )
+
+        plan = asyncio.run(
+            plugin.get_realtime_chat_plan(
+                "s-realtime-line-fragments",
+                "第一段先说。\n第二段单独发。\n第三段也拆开。\n第四段继续拆。"
+                "\n第五段保持碎片。"
+            ),
+        )
+
+        parts = [part["text"] for part in plan["message_parts"]]
+        self.assertGreaterEqual(plan["message_count"], 5)
+        self.assertIn("第一段先说。", parts[0])
+        self.assertIn("第二段单独发。", parts[1])
+        self.assertIn("第三段也拆开。", parts[2])
+        self.assertTrue(all("\n" not in part for part in parts))
+
     def test_realtime_chat_runtime_settings_are_personality_adaptive(self):
         plugin = new_plugin(
             {

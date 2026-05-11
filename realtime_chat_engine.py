@@ -132,18 +132,25 @@ def split_realtime_text(
     text = normalize_realtime_text(text, strip_markdown=False)
     if not text:
         return []
+    explicit_line_break_mode = "\n" in text
     hard_chunks: list[str] = []
     for block in re.split(r"\n{2,}", text):
         block = block.strip()
         if not block:
             continue
-        hard_chunks.extend(_split_by_delimiters(block, _SENTENCE_BREAK_RE))
+        if explicit_line_break_mode and "\n" in block:
+            hard_chunks.extend(_split_by_explicit_lines(block, settings.max_part_chars))
+        else:
+            hard_chunks.extend(_split_by_delimiters(block, _SENTENCE_BREAK_RE))
     chunks: list[str] = []
     for chunk in hard_chunks:
         if len(chunk) <= settings.max_part_chars:
             chunks.append(chunk)
             continue
         chunks.extend(_split_long_chunk(chunk, settings.max_part_chars))
+    if explicit_line_break_mode:
+        bounded = _limit_parts(chunks, settings.max_parts, settings.max_part_chars)
+        return [part for part in bounded if part.strip()]
     merged = _merge_short_chunks(chunks, settings.min_part_chars, settings.max_part_chars)
     bounded = _limit_parts(merged, settings.max_parts, settings.max_part_chars)
     return [part for part in bounded if part.strip()]
@@ -384,6 +391,19 @@ def _split_by_delimiters(text: str, pattern: re.Pattern[str]) -> list[str]:
     if current.strip():
         chunks.append(current.strip())
     return chunks or [text.strip()]
+
+
+def _split_by_explicit_lines(text: str, max_chars: int) -> list[str]:
+    chunks: list[str] = []
+    for line in text.split("\n"):
+        line = line.strip()
+        if not line:
+            continue
+        if len(line) <= max_chars:
+            chunks.append(line)
+            continue
+        chunks.extend(_split_long_chunk(line, max_chars))
+    return chunks
 
 
 def _split_long_chunk(text: str, max_chars: int) -> list[str]:
