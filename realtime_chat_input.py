@@ -41,6 +41,21 @@ _COMPLETION_LIKELY_MARKERS = (
     "没了",
     "以上",
 )
+_HANGING_CLAUSE_MARKERS = (
+    "是为了",
+    "为了",
+    "因为",
+    "所以",
+    "然后",
+    "接着",
+    "以及",
+    "而且",
+    "但是",
+    "可是",
+    "让你",
+    "让你更",
+    "更好地去",
+)
 _STANDALONE_SHORT_REPLIES = {
     "好",
     "好的",
@@ -70,6 +85,7 @@ _CONTINUATION_PREFIXES = {
     "那个",
 }
 _SETUP_PREFIXES = {
+    "你要",
     "我只是",
     "我就是",
     "我就",
@@ -340,6 +356,16 @@ def _should_emit_window(
         return True
     if len(fragments) < 3:
         return False
+    if _has_hanging_tail(fragments[-1].text):
+        return False
+    if _has_hanging_tail(fragments[-2].text) and not _looks_like_clause_completion(
+        fragments[-1].text,
+    ):
+        return False
+    if _has_hanging_tail(fragments[-2].text) and _looks_like_clause_completion(
+        fragments[-1].text,
+    ):
+        return True
     if _looks_like_closing_fragment(fragments[-1].text):
         return True
     merged = merge_input_fragments([item.text for item in fragments])
@@ -378,6 +404,8 @@ def _should_start_fragment_window(text: str, settings: RealtimeInputSettings) ->
         return len(value) <= max_chars + 8
     if any(value.startswith(prefix) for prefix in _SETUP_PREFIXES):
         return len(value) <= max_chars + 8
+    if _has_hanging_tail(value):
+        return len(value) <= max_chars + 10
     return False
 
 
@@ -390,6 +418,8 @@ def _can_append_to_existing_window(text: str, settings: RealtimeInputSettings) -
         return True
     if any(value.startswith(prefix) for prefix in _CONTINUATION_PREFIXES | _SETUP_PREFIXES):
         return len(value) <= max_chars + 8
+    if _has_hanging_tail(value):
+        return len(value) <= max_chars + 10
     return _looks_like_semantic_question(value) and len(value) <= max_chars + 8
 
 
@@ -426,6 +456,28 @@ def _looks_like_complete_correction(text: str) -> bool:
     if not any(value.startswith(prefix) for prefix in _CONTINUATION_PREFIXES):
         return False
     return ("，" in value or "," in value or "。" in value) and len(_compact_fragment_text(value)) > 5
+
+
+def _has_hanging_tail(text: str) -> bool:
+    value = normalize_input_fragment_text(text)
+    compact = _compact_fragment_text(value)
+    if not compact:
+        return False
+    if compact in {"是为了", "为了", "因为", "所以", "然后", "接着", "以及", "而且", "但是", "可是"}:
+        return True
+    return any(compact.endswith(marker) for marker in _HANGING_CLAUSE_MARKERS)
+
+
+def _looks_like_clause_completion(text: str) -> bool:
+    value = normalize_input_fragment_text(text)
+    compact = _compact_fragment_text(value)
+    if not compact:
+        return False
+    if _looks_like_closing_fragment(value):
+        return True
+    if compact.endswith(("呀", "啊", "哦", "呢", "嘛", "啦", "了", "吧")) and len(compact) >= 3:
+        return True
+    return len(compact) >= 5 and not _has_hanging_tail(value)
 
 
 def _compact_fragment_text(text: str) -> str:

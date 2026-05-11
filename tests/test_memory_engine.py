@@ -3,10 +3,12 @@ import unittest
 from memory_engine import (
     MemoryRecord,
     SylanneMemoryState,
+    apply_memory_time_decay,
     build_memory_prompt_fragment,
     derive_memory_dynamics,
     observe_memory_event,
     recall_memory,
+    reinforce_recalled_memories,
 )
 
 
@@ -141,6 +143,172 @@ class SylanneMemoryEngineTests(unittest.TestCase):
         self.assertIn("sylanne_memory_recall", fragment)
         self.assertIn("README 要中文", fragment)
         self.assertLessEqual(len(fragment), 220)
+
+    def test_recalled_memory_is_reinforced_after_use(self):
+        state = SylanneMemoryState.initial(now=0.0)
+        state.records.append(
+            MemoryRecord(
+                text="用户说过插件文档页不要再显示旧版本。",
+                summary="插件文档页不要再显示旧版本。",
+                session_key="s-version",
+                speaker_id="u1",
+                created_at=10.0,
+                updated_at=10.0,
+                depth=0.42,
+                confidence=0.46,
+                layers={"semantic": 0.6},
+            ),
+        )
+
+        items = recall_memory(state, query="为什么文档还是旧版本", now=20.0)
+        reinforced = reinforce_recalled_memories(
+            state,
+            items,
+            query="为什么文档还是旧版本",
+            now=20.0,
+        )
+        record = reinforced.records[0]
+
+        self.assertEqual(record.recall_count, 1)
+        self.assertEqual(record.last_recalled_at, 20.0)
+        self.assertGreater(record.depth, 0.42)
+        self.assertGreater(record.confidence, 0.46)
+        self.assertIn("retrieval_reinforcement", record.auto_parameters)
+
+    def test_recall_can_associate_neighbor_memories_with_hard_budget(self):
+        state = SylanneMemoryState.initial(now=0.0)
+        state.dynamics.recall_limit = 1
+        state.dynamics.associative_recall_limit = 2
+        state.records.extend(
+            [
+                MemoryRecord(
+                    memory_id="core-them",
+                    text="用户解释过：他们指插件的其他用户，不是恋爱对象。",
+                    summary="他们指插件的其他用户。",
+                    session_key="s-assoc",
+                    created_at=10.0,
+                    updated_at=10.0,
+                    depth=0.86,
+                    confidence=0.82,
+                    layers={"episodic": 0.8, "relationship": 0.7},
+                    associations={
+                        "tone-soft": 0.86,
+                        "readme-cn": 0.74,
+                        "overflow": 0.72,
+                    },
+                ),
+                MemoryRecord(
+                    memory_id="tone-soft",
+                    text="用户希望 Sylanne 对插件使用者说话时温和一点，别炫耀。",
+                    summary="对插件使用者说话要温和、别炫耀。",
+                    session_key="s-assoc",
+                    created_at=12.0,
+                    updated_at=12.0,
+                    depth=0.70,
+                    confidence=0.72,
+                    layers={"semantic": 0.7, "relationship": 0.5},
+                ),
+                MemoryRecord(
+                    memory_id="readme-cn",
+                    text="用户反复要求 README 能用中文就用中文。",
+                    summary="README 要尽量中文。",
+                    session_key="s-assoc",
+                    created_at=14.0,
+                    updated_at=14.0,
+                    depth=0.68,
+                    confidence=0.70,
+                    layers={"semantic": 0.8},
+                ),
+                MemoryRecord(
+                    memory_id="overflow",
+                    text="这条也有关联，但不应该超过联想预算。",
+                    summary="超过预算的关联记忆。",
+                    session_key="s-assoc",
+                    created_at=16.0,
+                    updated_at=16.0,
+                    depth=0.66,
+                    confidence=0.68,
+                    layers={"semantic": 0.5},
+                ),
+            ],
+        )
+
+        items = recall_memory(state, query="那你想对他们说什么", now=20.0, limit=1)
+        summaries = [item.record.summary for item in items]
+
+        self.assertLessEqual(len(items), 3)
+        self.assertIn("他们指插件的其他用户。", summaries)
+        self.assertIn("对插件使用者说话要温和、别炫耀。", summaries)
+        self.assertIn("README 要尽量中文。", summaries)
+        self.assertNotIn("超过预算的关联记忆。", summaries)
+        associative = [item for item in items if "associative_recall" in item.reasons]
+        self.assertEqual(len(associative), 2)
+
+    def test_stale_weak_memory_is_forgotten_by_real_time_decay(self):
+        state = SylanneMemoryState.initial(now=0.0)
+        state.dynamics.decay_half_life_seconds = 10.0
+        state.records.append(
+            MemoryRecord(
+                text="一次很弱的临时噪声。",
+                summary="临时噪声。",
+                session_key="s-forget",
+                speaker_id="u1",
+                created_at=0.0,
+                updated_at=0.0,
+                depth=0.06,
+                confidence=0.08,
+                layers={"episodic": 0.1},
+                auto_parameters={"decay_half_life_seconds": 10.0},
+            ),
+        )
+        state.records.append(
+            MemoryRecord(
+                text="用户明确说过 README 要中文。",
+                summary="README 要中文。",
+                session_key="s-forget",
+                speaker_id="u1",
+                created_at=0.0,
+                updated_at=0.0,
+                depth=0.74,
+                confidence=0.70,
+                evidence_count=3,
+                layers={"semantic": 0.8},
+                auto_parameters={"decay_half_life_seconds": 10.0},
+            ),
+        )
+
+        decayed = apply_memory_time_decay(state, now=120.0)
+
+        self.assertEqual(len(decayed.records), 1)
+        self.assertEqual(decayed.records[0].summary, "README 要中文。")
+        self.assertIn("forgotten=1", decayed.dynamics.notes)
+
+    def test_compaction_scores_all_records_not_only_last_one(self):
+        state = SylanneMemoryState.initial(now=0.0)
+        state.dynamics.decay_half_life_seconds = 1000.0
+        for index in range(5):
+            state.records.append(
+                MemoryRecord(
+                    memory_id=f"m-{index}",
+                    text=f"长期记忆 {index}",
+                    summary=f"长期记忆 {index}",
+                    session_key="s-compact",
+                    created_at=float(index),
+                    updated_at=float(index),
+                    depth=0.10 + index * 0.18,
+                    confidence=0.20 + index * 0.12,
+                    evidence_count=2,
+                    auto_parameters={"decay_half_life_seconds": 1000.0},
+                    associations={"m-4": 0.5} if index == 0 else {},
+                ),
+            )
+
+        compacted = apply_memory_time_decay(state, now=20.0, hard_limit=3)
+        summaries = [record.summary for record in compacted.records]
+
+        self.assertEqual(len(compacted.records), 3)
+        self.assertEqual(summaries, ["长期记忆 4", "长期记忆 3", "长期记忆 2"])
+        self.assertEqual(compacted.records[-1].associations, {})
 
 
 if __name__ == "__main__":

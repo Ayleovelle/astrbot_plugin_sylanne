@@ -136,9 +136,11 @@ try:
     from .memory_engine import (
         MemoryRecallItem,
         SylanneMemoryState,
+        apply_memory_time_decay,
         build_memory_prompt_fragment,
         observe_memory_event,
         recall_memory,
+        reinforce_recalled_memories,
     )
     from .prompts import (
         ASSESSOR_SYSTEM_PROMPT,
@@ -279,9 +281,11 @@ except ImportError:
     from memory_engine import (
         MemoryRecallItem,
         SylanneMemoryState,
+        apply_memory_time_decay,
         build_memory_prompt_fragment,
         observe_memory_event,
         recall_memory,
+        reinforce_recalled_memories,
     )
     from prompts import (
         ASSESSOR_SYSTEM_PROMPT,
@@ -548,7 +552,7 @@ def get_emotional_state_plugin(context: Context) -> Any | None:
     PLUGIN_NAME,
     "pidan",
     "Soulful Yearning Lifelike AstrBot Neural Narrative Engine：维护情绪、人格、记忆、氛围和表达节奏的 Sylanne",
-    "1.8.6",
+    "2.0.0",
     "",
 )
 class EmotionalStatePlugin(Star):
@@ -5334,6 +5338,10 @@ class EmotionalStatePlugin(Star):
             query = str(candidate.get("candidate_context_excerpt") or "").strip()
         if not query:
             return ""
+        query = self._clip(
+            query + "\n主动聊天需要参考：提醒方式、说话语气、相处偏好、关心进度、边界感。",
+            900,
+        )
         try:
             state = await self._load_sylanne_memory_state(session_key)
             items = recall_memory(
@@ -5349,6 +5357,12 @@ class EmotionalStatePlugin(Star):
         items = self._filter_mature_sylanne_memory_recall_items(items)
         if not items:
             return ""
+        await self._reinforce_sylanne_memory_recall_items(
+            session_key,
+            state,
+            items,
+            query=query,
+        )
         lines = ["Sylanne 自有记忆召回摘要："]
         for index, item in enumerate(items[:3], 1):
             record = item.record
@@ -5407,11 +5421,19 @@ class EmotionalStatePlugin(Star):
             logger.debug(f"{PLUGIN_NAME}: Sylanne memory request recall failed: {exc}")
             return ""
         items = self._filter_mature_sylanne_memory_recall_items(items)
-        return build_memory_prompt_fragment(
+        fragment = build_memory_prompt_fragment(
             items,
             session_key=session_key,
             max_chars=SYLANNE_MEMORY_RECALL_INJECTION_MAX_CHARS,
         )
+        if fragment:
+            await self._reinforce_sylanne_memory_recall_items(
+                session_key,
+                state,
+                items,
+                query=query,
+            )
+        return fragment
 
     def _filter_mature_sylanne_memory_recall_items(
         self,
@@ -5433,6 +5455,27 @@ class EmotionalStatePlugin(Star):
             if age >= min_age:
                 matured.append(item)
         return matured
+
+    async def _reinforce_sylanne_memory_recall_items(
+        self,
+        session_key: str,
+        state: SylanneMemoryState,
+        items: list[MemoryRecallItem],
+        *,
+        query: str,
+    ) -> None:
+        if not items:
+            return
+        try:
+            reinforced = reinforce_recalled_memories(
+                state,
+                items,
+                query=query,
+                now=self._observed_now(),
+            )
+            await self._save_sylanne_memory_state(session_key, reinforced)
+        except Exception as exc:
+            logger.debug(f"{PLUGIN_NAME}: Sylanne memory reinforcement failed: {exc}")
 
     def _sylanne_memory_recall_maturation_seconds(
         self,
@@ -10332,10 +10375,16 @@ class EmotionalStatePlugin(Star):
         *,
         now: float | None = None,
     ) -> SylanneMemoryState:
-        del now
+        observed_now = self._observed_now() if now is None else float(now)
         self._ensure_runtime_state_containers()
         if session_key in self._sylanne_memory_cache:
-            return self._sylanne_memory_cache[session_key]
+            state = self._sylanne_memory_cache[session_key]
+            before = state.to_dict()
+            decayed_state = apply_memory_time_decay(state, now=observed_now)
+            if decayed_state.to_dict() != before:
+                await self._save_sylanne_memory_state(session_key, decayed_state)
+                return decayed_state
+            return state
         try:
             data = await self.get_kv_data(
                 self._sylanne_memory_kv_key(session_key),
@@ -10345,7 +10394,11 @@ class EmotionalStatePlugin(Star):
             logger.debug(f"{PLUGIN_NAME}: Sylanne memory KV read failed, using empty state: {exc}")
             data = None
         state = SylanneMemoryState.from_dict(data)
+        before = state.to_dict()
+        state = apply_memory_time_decay(state, now=observed_now)
         self._sylanne_memory_cache[session_key] = state
+        if data is not None and state.to_dict() != before:
+            await self._save_sylanne_memory_state(session_key, state)
         return state
 
     async def _save_sylanne_memory_state(

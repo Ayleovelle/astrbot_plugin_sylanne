@@ -663,7 +663,142 @@ s_t = \max(0,S^g_{c,t}-(T_t-T^{join}_t))
 
 公共 API 只暴露版本化 payload、状态摘要、可选 prompt 片段和脱敏因果轨迹。`get_group_atmosphere_service(context)` 会校验 schema 版本和必需方法；如果服务不可用，调用方应回退到自身逻辑，而不是依赖内部 KV 名称。
 
-## 10. 稳定性
+## 10. 自有记忆知识库、关联召回与遗忘
+
+Sylanne 自有长期记忆不再把历史对话当作无限追加的上下文，而是把稳定事件压缩成可检索、可遗忘、可联想的本地记忆记录。这个设计参考三条文献脉络：第一，Ebbinghaus 的遗忘曲线说明记忆强度随真实时间衰减；第二，Tulving 对情景记忆和语义记忆的区分说明“发生过的事”和“稳定偏好/知识”应当分层；第三，ACT-R、理性记忆分析和 Bjork 的新不用即失理论都强调，记忆的可取回性不只取决于写入次数，也取决于最近使用、环境统计和检索强化。工程上，插件只模拟可计算的记忆状态，不声称拥有真实主观回忆。
+
+对每条记忆 `m_i`，先定义 query 与摘要/正文的轻量语义相似度：
+
+```math
+s_i(q)=
+\frac{|T(q)\cap T(m_i)|}
+{\sqrt{|T(q)|\,|T(m_i)|+\epsilon}},
+```
+
+其中 `T(\cdot)` 是本地分词后的 token 集合，`\epsilon` 是防止空集合除零的极小量。当前实现不依赖外部向量库，因此它更接近低成本稀疏检索；若后续接入向量检索，也必须保留同样的预算闸门。
+
+真实时间新鲜度写成半衰形式：
+
+```math
+f_i(t)=2^{-\frac{t-t_i^{u}}{h_i}},
+```
+
+其中 `t_i^{u}` 是该记忆最后一次内容更新或衰减检查时间，`h_i` 是由人格漂移、共同语境、关系权重和情绪显著性自动派生的半衰期。直接召回分数为：
+
+```math
+R_i =
+\mathrm{clip}\left(
+0.42s_i(q)
++0.24d_i
++0.18c_i
++0.16f_i(t)
+-0.22\eta_i,\;0,\;1
+\right),
+```
+
+其中 `d_i` 是记忆深度，`c_i` 是置信度，`\eta_i` 是干扰强度。`R_i` 只有在 `s_i(q)>0` 时才会进入候选，避免无语义命中的旧记忆凭深度乱入当前对话。
+
+用户提出“记忆之间会相互联系相互影响”后，2.0.0 增加了轻量关联图。每条记忆有稳定 `memory_id`，并只保存同会话内少量关联边：
+
+```math
+G_M=(M,A),\qquad
+a_{ij}\in[0,1],\qquad
+|\mathcal N(i)|\le K_a .
+```
+
+关联边权不是 LLM 随机判断，而由本地公式推导：
+
+```math
+a_{ij}=
+\mathrm{clip}\left(
+0.34s_{ij}
++0.24\ell_{ij}
++0.16e_{ij}
++0.14\tau_{ij}
++0.12\kappa_{ij},\;0,\;1
+\right).
+```
+
+这里 `s_{ij}` 是两条记忆摘要/正文的 token 相似度，`\ell_{ij}` 是记忆层权重重叠，`e_{ij}` 是情绪签名接近度，`\tau_{ij}` 是真实时间接近度，`\kappa_{ij}` 是两条记忆共同的巩固强度。写入时只扫描同会话最近窗口，而不是全库建图；每条记录只保留 top-3 边，避免长期运行后图结构爆炸。
+
+召回分两步。第一步只根据 query 选直接命中集合：
+
+```math
+P_q=\mathrm{TopK}_{K_p}\{R_i:s_i(q)>0\}.
+```
+
+第二步只从 `P_q` 的一跳邻居里取少量联想记忆：
+
+```math
+A_q =
+\mathrm{TopK}_{K_a}
+\left\{
+\mathrm{clip}\left(
+R_i(0.42+0.20g_t)a_{ij}
++0.10d_j
++0.06c_j
+-0.14\eta_j,\;0,\;1
+\right)
+: i\in P_q,\;j\in \mathcal N(i)
+\right\}.
+```
+
+其中 `g_t` 是当前自有记忆巩固强度。最终注入集合为：
+
+```math
+C_q=P_q\cup A_q,\qquad |C_q|\le K_p+K_a,\qquad
+\mathrm{chars}(C_q)\le B_M .
+```
+
+这条硬约束是防止“联想”撑爆上下文的核心：关联召回只能作为直接命中的邻居补充，不能凭空把整张记忆网拉进 prompt；注入文本仍被 `[sylanne_memory_recall]` 和字符预算 `B_M` 截断，并且不会作为下一轮 query 的原始用户输入重复回灌。
+
+当一条记忆真的进入 prompt 后，才触发检索强化：
+
+```math
+g_i =
+\mathrm{clip}\left(
+0.018+0.050R_i+0.028s_i(q)+0.018g_t,\;0,\;0.12
+\right).
+```
+
+```math
+d_i \leftarrow d_i+g_i(1-d_i),
+\qquad
+c_i \leftarrow c_i+0.72g_i(1-c_i),
+\qquad
+\eta_i \leftarrow \eta_i(1-0.35g_i).
+```
+
+注意，召回强化只更新 `recall_count`、`last_recalled_at`、深度、置信度和干扰，不把内容更新时间伪装成新事件；否则会让“刚被想起”误变成“刚刚发生”，破坏真实时间记忆轨迹。
+
+遗忘侧先计算巩固度：
+
+```math
+C_i =
+\mathrm{clip}\left(
+0.46d_i+0.26c_i
++0.16\min(1,n_i^e/4)
++0.12\min(1,n_i^r/5),\;0,\;1
+\right),
+```
+
+再合成生存度：
+
+```math
+S_i=\mathrm{clip}\left(0.34f_i(t)+0.66C_i,\;0,\;1\right).
+```
+
+若 `S_i` 很低且 `evidence_count`、`recall_count` 都不足，记录会在读取时被剪枝；若只是时间久但深度、证据或召回强，它会被保留但略降深度和置信度。剪枝后，插件会清理不存在目标的关联边，避免出现“幽灵记忆”。
+
+这套模型把“发生的事情会影响记忆，记忆会影响对话内容”落到三个可测试约束上：
+
+1. 写入只生成有限记录和有限边，不把原始历史全文塞回上下文。
+2. 召回必须先有当前 query 的直接语义命中，再联想少量邻居。
+3. 真实时间、证据次数、召回次数和记忆深度共同决定强化或遗忘。
+
+因此，自有记忆层既能帮主 LLM 理解“他们”“刚才那个”“上次说的进度”这类长期指代，也不会因为记忆越积越多而把 prompt 推向不可控。
+
+## 11. 稳定性
 
 若 `alpha_t in [0, 1]`、`gamma_p(Δt) in [0, 1]`，且 `E_{t-1}, X_t, b_p` 都在 `[-1, 1]^n`，则 `B_t` 与 `E'_t` 都是有界向量的凸组合。因此，在耦合项较小且最后投影到 `[-1, 1]^n` 的条件下：
 
@@ -673,7 +808,7 @@ E_t \in [-1,1]^n
 
 若长期没有强刺激，且 `X_t` 接近人格基线 `b_p`，则状态会因基线回归和指数平滑收敛到 `b_p` 附近。这对应情绪动力学中的 emotional inertia：状态既会持续，又会随新评价缓慢改变。
 
-## 11. 参考文献
+## 12. 参考文献
 
 1. Mehrabian, A., & Russell, J. A. (1974). *An Approach to Environmental Psychology*. MIT Press.
 2. Mehrabian, A., & Russell, J. A. (1974). The basic emotional impact of environments. *Perceptual and Motor Skills, 38*(1), 283-301. https://doi.org/10.2466/pms.1974.38.1.283
@@ -716,5 +851,14 @@ E_t \in [-1,1]^n
 39. Barsade, S. G. (2002). The ripple effect: Emotional contagion and its influence on group behavior. *Administrative Science Quarterly, 47*(4), 644-675. https://doi.org/10.2307/3094912
 40. Kendon, A. (1967). Some functions of gaze-direction in social interaction. *Acta Psychologica, 26*, 22-63. https://doi.org/10.1016/0001-6918(67)90005-4
 41. Short, J., Williams, E., & Christie, B. (1976). *The Social Psychology of Telecommunications*. Wiley.
+42. Ebbinghaus, H. (1913). *Memory: A Contribution to Experimental Psychology* (H. A. Ruger & C. E. Bussenius, Trans.). Teachers College, Columbia University. Original work published 1885.
+43. Tulving, E. (1972). Episodic and semantic memory. In E. Tulving & W. Donaldson (Eds.), *Organization of Memory* (pp. 381-403). Academic Press.
+44. Anderson, J. R., & Schooler, L. J. (1991). Reflections of the environment in memory. *Psychological Science, 2*(6), 396-408. https://doi.org/10.1111/j.1467-9280.1991.tb00174.x
+45. Anderson, J. R., Bothell, D., Byrne, M. D., Douglass, S., Lebiere, C., & Qin, Y. (2004). An integrated theory of the mind. *Psychological Review, 111*(4), 1036-1060. https://doi.org/10.1037/0033-295X.111.4.1036
+46. Bjork, R. A., & Bjork, E. L. (1992). A new theory of disuse and an old theory of stimulus fluctuation. In A. Healy, S. Kosslyn, & R. Shiffrin (Eds.), *From Learning Processes to Cognitive Processes: Essays in Honor of William K. Estes* (Vol. 2, pp. 35-67). Erlbaum.
+47. McClelland, J. L., McNaughton, B. L., & O'Reilly, R. C. (1995). Why there are complementary learning systems in the hippocampus and neocortex. *Psychological Review, 102*(3), 419-457. https://doi.org/10.1037/0033-295X.102.3.419
+48. Schacter, D. L. (1999). The seven sins of memory: Insights from psychology and cognitive neuroscience. *American Psychologist, 54*(3), 182-203. https://doi.org/10.1037/0003-066X.54.3.182
+49. Park, J. S., O'Brien, J. C., Cai, C. J., Morris, M. R., Liang, P., & Bernstein, M. S. (2023). Generative agents: Interactive simulacra of human behavior. *Proceedings of the 36th Annual ACM Symposium on User Interface Software and Technology*. https://doi.org/10.1145/3586183.3606763
+50. Karpukhin, V., Oguz, B., Min, S., Lewis, P., Wu, L., Edunov, S., Chen, D., & Yih, W. (2020). Dense passage retrieval for open-domain question answering. *Proceedings of EMNLP 2020*, 6769-6781. https://doi.org/10.18653/v1/2020.emnlp-main.550
 
 </details>

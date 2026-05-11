@@ -2,7 +2,7 @@
 
 > <span style="font-size: 1.08em;"><strong>Soulful Yearning Lifelike AstrBot Neural Narrative Engine</strong>。她维护的不只是“情绪标签”，而是情绪、人格、记忆、氛围、主动性和表达节奏交织成的长期状态。</span>
 
-![版本 1.8.6](https://img.shields.io/badge/version-1.8.6-blue)
+![版本 2.0.0](https://img.shields.io/badge/version-2.0.0-blue)
 ![AstrBot >=4.9.2,<5.0.0](https://img.shields.io/badge/AstrBot-%3E%3D4.9.2%2C%3C5.0.0-green)
 ![Python 3.10+](https://img.shields.io/badge/Python-3.10%2B-yellow)
 ![协议 astrbot.emotion_state.v2](https://img.shields.io/badge/schema-astrbot.emotion__state.v2-purple)
@@ -39,7 +39,7 @@
 
 <br clear="right">
 
-`1.8.6` 是当前安装文档展示修复版：保留用户说话节奏学习、即时聊天自适应分段、输入碎片合并、长回复不省略、图片/表情包发送兼容、官方自动上下文压缩兼容和自有记忆模块打包。她会先等疑似未说完的用户碎片合并，再把完整意图交给主 LLM 和情绪模型；bot 回复被插话打断时只记录中性事实，正向还是负面交给状态模型结合人格和语境判断。
+`2.0.0` 是自有记忆知识库层的首个正式大版本：Sylanne 不再依赖外部长期记忆插件，而是把稳定事件写入本地 KV 记忆库，按真实时间强化、遗忘和限长召回。记忆之间会建立少量可解释关联边；调出核心记忆时，她会在硬预算内自动联想少量相邻记忆，帮助理解“他们”“刚才那个”“上次进度”这类长期指代，但不会把整张记忆网塞进 prompt。她仍会保留用户说话节奏学习、即时聊天自适应分段、输入碎片合并、长回复不省略、图片/表情包发送兼容、官方自动上下文压缩兼容和主动发言调度。
 
 | 能力 | 作用 |
 | --- | --- |
@@ -75,7 +75,7 @@
 | 主题 | 内容 |
 | --- | --- |
 | [当前版本与兼容范围](#当前版本与兼容范围) | 插件版本、AstrBot 版本、Python 要求、许可证和发布状态。 |
-| [当前版本发布记录](#当前版本发布记录) | 修复插件文档展示旧版本、图片/表情包发送、官方自动上下文压缩兼容和包体缺失记忆模块。 |
+| [当前版本发布记录](#当前版本发布记录) | 自有记忆知识库层、关联召回、真实时间强化/遗忘、模块自检和包体发布说明。 |
 | [项目定位](#项目定位) | 为什么本插件不是普通的提示词人设增强。 |
 | [核心能力](#核心能力总览) | 7 维情绪、人格建模、真实时间记忆、关系修复、公共 API。 |
 | [快速开始](#快速开始) | 发布 zip 包、仓库安装、手动复制、最小配置和检查命令。 |
@@ -103,31 +103,30 @@
 | --- | --- |
 | 插件目录名 | `astrbot_plugin_sylanne` |
 | 显示名 | `Sylanne` |
-| 当前版本 | `1.8.6` |
+| 当前版本 | `2.0.0` |
 | AstrBot 版本 | `>=4.9.2,<5.0.0` |
 | Python | `3.10+` |
 | 许可证 | `GPL-3.0-or-later` |
 | 运行时第三方依赖 | 当前无额外依赖，见 `requirements.txt` |
 
-`1.8.6` 继续收紧输出侧、发布边界和插件文档展示：默认仍不主动发送，配置者同时开启 `enable_proactive_speech_scheduler=true` 与 `enable_proactive_speech_dispatch=true` 后，她才会从最近可触达会话中选择候选，结合情绪、群聊氛围、双方需要、冷却、近期上下文摘要、Sylanne 自有记忆召回摘要和 LLM 话题裁决，请求 AstrBot 主动发送。即时聊天分条发送会监听用户插话；NapCat/OneBot 撤回会推进会话 epoch 并让旧输出自然过期；用户连续发“我！/就！/是！”或“我只是很纳闷 / 为啥你要问我 / 是从哪里看来的”这类碎片时，输入侧会先合并成一轮意图，再交给主 LLM 和情绪模型理解。当前版本还会保留图片链、优先用 AstrBot URL 图片组件发送 URL-only 表情包，并清洗官方自动上下文压缩摘要中的 Sylanne 内部块，避免实时影子和记忆召回重复回灌。核心情绪、回复后后台评估（post）、`group_atmosphere_state`、`humanlike_state`、`lifelike_learning_state`、`personality_drift_state`、Sylanne 自有记忆、即时聊天节奏和欺骗/操控/逃责类动作阻断默认自动运行；道德修复、瑕疵模拟、心理筛查等实验/维护模块仍由配置者显式打开。
+`2.0.0` 把 Sylanne 自有记忆升级为轻量本地知识库：稳定事件写入独立记录，每条记录带 `memory_id`、摘要、情绪签名、关系签名、深度、置信度、证据次数、召回次数、真实时间衰减参数和少量关联边。普通回复、插话恢复和主动发言会先做直接召回，再在硬预算内联想少量相邻记忆；召回结果仍只作为 `[sylanne_memory_recall]` 限长摘要注入，不会把整库塞回提示词。默认仍不主动发送，配置者同时开启 `enable_proactive_speech_scheduler=true` 与 `enable_proactive_speech_dispatch=true` 后，她才会从最近可触达会话中选择候选，结合情绪、群聊氛围、双方需要、冷却、近期上下文摘要、自有记忆召回摘要和 LLM 话题裁决，请求 AstrBot 主动发送。即时聊天分条发送会监听用户插话；NapCat/OneBot 撤回会推进会话 epoch 并让旧输出自然过期；用户连续发“我！/就！/是！”或“我只是很纳闷 / 为啥你要问我 / 是从哪里看来的”这类碎片时，输入侧会先合并成一轮意图，再交给主 LLM 和情绪模型理解。当前版本还会保留图片链、优先用 AstrBot URL 图片组件发送 URL-only 表情包，并清洗官方自动上下文压缩摘要中的 Sylanne 内部块，避免实时影子和记忆召回重复回灌。核心情绪、回复后后台评估（post）、`group_atmosphere_state`、`humanlike_state`、`lifelike_learning_state`、`personality_drift_state`、Sylanne 自有记忆、即时聊天节奏和欺骗/操控/逃责类动作阻断默认自动运行；道德修复、瑕疵模拟、心理筛查等实验/维护模块仍由配置者显式打开。
 
 发布包会包含运行代码、README、CHANGELOG、LICENSE、配置结构（schema）、docs 和 `docs/assets/` 中的聚合图表；不会包含 `tests/`、`scripts/`、`literature_kb/`、`personality_literature_kb/`、`psychological_literature_kb/`、`humanlike_agent_literature_kb/`、`raw/`、`output/`、`dist/` 等开发、研究、原始样本或缓存目录。
 
 ### 当前版本发布记录
 
-`v1.8.6` 合并在 `main` 上，对外安装版本由 `metadata.yaml` 和 `main.py @register(...)` 共同声明为 `1.8.6`。本版按版本规则提升第三位版本号：只修复插件文档展示旧版本、即时聊天图片/表情包发送、官方自动上下文压缩兼容和发布包缺失自有记忆模块，不改变公共 API 版本。
+`v2.0.0` 合并在 `main` 上，对外安装版本由 `metadata.yaml` 和 `main.py @register(...)` 共同声明为 `2.0.0`。本版按版本规则提升第一位版本号：自有记忆层从“状态注解与少量召回”升级为“可强化、可遗忘、可关联联想的本地知识库层”，属于跨世代架构升级；公共 API 版本仍保持 `1.0`，schema 仍保持向后兼容。
 
 当前版本的主要变化：
 
 | 类别 | 结果 |
 | --- | --- |
-| 图片与表情包发送 | 即时聊天分段接管时会保留 `result_chain` / `message_chain` 中的图片段，避免分段文本把图片或表情包掐掉。 |
-| URL-only 表情包 | 检测到只包含图片 URL 的表情包时，优先使用 AstrBot URL 图片组件发送，不退化成纯文本链接。 |
-| 官方上下文压缩兼容 | 清洗官方自动上下文压缩摘要中的 Sylanne 内部块，避免记忆召回、实时影子和压缩摘要互相重复注入。 |
-| 实时影子去重 | 如果官方压缩摘要已经包含实时历史影子，本地 shadow 会标记为已消费，下一轮不再重复塞回提示词。 |
-| 发布包完整性 | 发布脚本已把 `memory_engine.py` 纳入运行包，`dist/astrbot_plugin_sylanne.zip` 可直接安装自有记忆模块。 |
-| 文档展示 | README 当前展示区只保留当前版本；旧版本明细移交给 `CHANGELOG.md`，避免插件管理页摘要误抓历史版本。 |
-| 公开契约 | 插件版本为 `1.8.6`；公共 API 版本仍为 `1.0`，schema 仍保持 `astrbot.emotion_state.v2` 等版本化契约。 |
+| 自有记忆知识库 | 每条长期记忆独立存储，包含稳定 `memory_id`、摘要、情绪签名、关系签名、深度、置信度、证据次数、召回次数、真实时间衰减参数和自动动力学快照。 |
+| 关联联想召回 | 直接命中的记忆会在硬预算内带出少量相邻记忆；关联边由摘要相似度、层类型重叠、情绪接近度、时间接近度和巩固强度本地计算，不交给 LLM 随机决定。 |
+| 强化与遗忘 | 只有真正注入 prompt 的记忆才会触发召回强化；长期无证据、无召回且深度/置信度很低的弱记忆会按真实时间剪枝，并清理悬空关联边。 |
+| 上下文安全预算 | 召回结果只作为 `[sylanne_memory_recall]` 限长摘要注入，并继续受请求预算和官方上下文压缩清洗逻辑约束。 |
+| 模块互斥自检 | 发布前覆盖自有记忆、主动发言、官方上下文压缩、即时聊天、公共 API、配置契约和包体预检，验证模块之间不会互相回灌或重复调用外部 LivingMemory。 |
+| 公开契约 | 插件版本为 `2.0.0`；公共 API 版本仍为 `1.0`，schema 仍保持 `astrbot.emotion_state.v2` 等版本化契约。 |
 
 旧版本发布记录统一放在 `CHANGELOG.md`。README 只展示当前版本，避免插件管理页从历史段落误抓旧版本号。
 
@@ -1694,6 +1693,10 @@ LLM 在这里只负责给出语义观察：`relationship_decision`、`conflict_a
 
 Sylanne 不再依赖外部长期记忆插件。每次稳定用户输入、主动聊天候选和被打断回复的关键摘要，都会进入 Sylanne 自有记忆层；后续普通回复、插话恢复和主动聊天调度都会使用 `[sylanne_memory_recall]` 的限长摘要帮助主 LLM 理解指代、偏好、共同经历和相处方式。
 
+这层记忆更接近一个轻量本地知识库，而不是聊天上下文的无限追加：每条记忆会存成独立记录，包含 `summary`、限长 `text`、会话键、说话人、记忆层类型、情绪签名、关系签名、深度、置信度、证据次数、召回次数、上次召回时间和自动动力学参数。普通回复和主动聊天只按当前 query 检索少量高分摘要，注入 `[sylanne_memory_recall]`，不会把整个记忆库塞进 prompt。
+
+记忆会按真实时间变化。相似事件再次发生时，`evidence_count`、`depth` 和 `confidence` 会被巩固；某条记忆真正被召回并注入上下文后，`recall_count`、`last_recalled_at` 和 `retrieval_reinforcement` 会更新，让常被用到且有解释价值的记忆更稳。长期没有证据、没有召回、深度和置信度都很低的旧记忆，会在读取时按半衰期被削弱，必要时从 KV 中落盘删除；重要记忆则因为证据、深度、置信度和召回次数更高而更抗遗忘。
+
 记忆核心参数由插件自动设置，不提供手动数值旋钮：
 
 | 自动参数 | 来源 |
@@ -1704,8 +1707,17 @@ Sylanne 不再依赖外部长期记忆插件。每次稳定用户输入、主动
 | 召回成熟等待 | 群聊紧张度、打断风险、置信度和巩固强度。 |
 | 压缩阈值 | 巩固强度与共同语境。 |
 | 干扰敏感度 | 群聊紧张度、打断风险和不确定性。 |
+| 召回强化 | 召回评分、语义匹配、巩固强度和真实召回时间。 |
+| 遗忘剪枝 | 真实时间半衰、记忆深度、置信度、证据次数和召回次数。 |
+| 联想关联 | 摘要相似度、记忆层重叠、情绪接近度、真实时间接近度和共同巩固强度。 |
 
 这些参数会写入 `sylanne_memory.dynamics` 和每条记忆的 `auto_parameters`，只允许通过调试视图查看，不允许配置者手动覆盖。这样能保证“人格漂移影响人格建模，人格建模影响记忆动力学”，而不是把长期相处变成一组手调滑块。
+
+2.0.0 以后，记忆之间还会形成一张很轻的关系网：每条记忆只保留同会话内少量高权重邻居。普通召回会先按当前 query 命中核心记忆，再从核心记忆的一跳邻居里取少量联想记忆；联想结果仍和核心召回一起压缩进同一个 `[sylanne_memory_recall]`，继续受字符预算限制。这样她能在看到“他们”时想起“他们指插件的其他用户”，再顺手想起“对插件使用者说话要温和、别炫耀”，但不会把整个记忆库都倒进上下文。
+
+完整理论和公式见 [docs/theory.md](docs/theory.md) 的“自有记忆知识库、关联召回与遗忘”一节。
+
+自有 KV 记忆和 `build_emotion_memory_payload(...)` 是两条边界不同的能力：自有 KV 负责 Sylanne 自己的按需检索和长期相处痕迹；`build_emotion_memory_payload(...)` 负责给其他插件写入外部记录时冻结 `emotion_at_write`、`humanlike_state_at_write`、`lifelike_learning_state_at_write` 等状态注解。前者追求低 prompt 负担和可遗忘，后者追求写入时状态可追溯。
 
 | 配置项 | 类型 | 默认值 | 说明 |
 | --- | --- | --- | --- |
@@ -2852,7 +2864,7 @@ $env:ASTRBOT_EXPECT_PLUGIN = "astrbot_plugin_sylanne"
 脚本会在输出 JSON 里写出 `expectedPluginRuntime`，包含插件列表 API 中返回的 `version`、`displayName`、`activated`、`author`、`astrbotVersion` 等只读字段。若目标插件存在但 `activated=false`，脚本会失败退出。需要把版本和显示名也作为硬断言时，可以额外设置：
 
 ```powershell
-$env:ASTRBOT_EXPECT_PLUGIN_VERSION = "1.8.6"
+$env:ASTRBOT_EXPECT_PLUGIN_VERSION = "2.0.0"
 $env:ASTRBOT_EXPECT_PLUGIN_DISPLAY_NAME = "Sylanne"
 & $node scripts\remote_smoke_playwright.js
 ```
@@ -3071,7 +3083,7 @@ inject_state = false
 humanlike_memory_write_enabled = true
 ```
 
-拟人状态默认自动运行。若没有看到 `humanlike_state_at_write`，优先确认插件是否为 `1.8.6` 或更新版本、`humanlike_memory_write_enabled=true`，以及调用方是否保留了完整记忆载荷。
+拟人状态默认自动运行。若没有看到 `humanlike_state_at_write`，优先确认插件是否为 `2.0.0` 或更新版本、`humanlike_memory_write_enabled=true`，以及调用方是否保留了完整记忆载荷。
 
 ### 拟人状态没有生效
 

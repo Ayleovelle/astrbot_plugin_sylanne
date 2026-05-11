@@ -4,6 +4,7 @@ import math
 import re
 import time
 from dataclasses import dataclass, field
+from hashlib import sha1
 from typing import Any
 
 
@@ -101,6 +102,7 @@ class MemoryDynamics:
     interference_sensitivity: float = 0.35
     compression_threshold: float = 0.55
     recall_limit: int = 3
+    associative_recall_limit: int = 2
     recall_maturation_seconds: float = 2.0
     notes: list[str] = field(default_factory=lambda: ["auto_derived"])
 
@@ -119,6 +121,10 @@ class MemoryDynamics:
             interference_sensitivity=clamp(data.get("interference_sensitivity")),
             compression_threshold=clamp(data.get("compression_threshold")),
             recall_limit=max(1, min(5, int(_as_float(data.get("recall_limit"), 3)))),
+            associative_recall_limit=max(
+                0,
+                min(2, int(_as_float(data.get("associative_recall_limit"), 2))),
+            ),
             recall_maturation_seconds=max(
                 0.0,
                 min(20.0, _as_float(data.get("recall_maturation_seconds"), 2.0)),
@@ -135,6 +141,7 @@ class MemoryDynamics:
             "interference_sensitivity": round(self.interference_sensitivity, 6),
             "compression_threshold": round(self.compression_threshold, 6),
             "recall_limit": int(self.recall_limit),
+            "associative_recall_limit": int(self.associative_recall_limit),
             "recall_maturation_seconds": round(self.recall_maturation_seconds, 6),
             "notes": list(self.notes[:8]),
         }
@@ -145,6 +152,7 @@ class MemoryRecord:
     text: str
     summary: str
     session_key: str
+    memory_id: str = ""
     speaker_id: str = ""
     created_at: float = field(default_factory=time.time)
     updated_at: float = field(default_factory=time.time)
@@ -157,6 +165,7 @@ class MemoryRecord:
     recall_count: int = 0
     last_recalled_at: float = 0.0
     interference: float = 0.0
+    associations: dict[str, float] = field(default_factory=dict)
     auto_parameters: dict[str, Any] = field(default_factory=dict)
 
     @classmethod
@@ -172,10 +181,19 @@ class MemoryRecord:
             for k, v in (data.get("layers") or {}).items()
             if str(k).strip()
         } if isinstance(data.get("layers"), dict) else {}
+        memory_id = str(data.get("memory_id") or "").strip()
+        if not memory_id:
+            memory_id = _make_memory_id(
+                str(data.get("session_key") or "global"),
+                summary or text,
+                _as_float(data.get("created_at"), 0.0),
+                str(data.get("speaker_id") or ""),
+            )
         return cls(
             text=text or summary,
             summary=summary,
             session_key=str(data.get("session_key") or "global"),
+            memory_id=memory_id,
             speaker_id=str(data.get("speaker_id") or ""),
             created_at=_as_float(data.get("created_at"), time.time()),
             updated_at=_as_float(data.get("updated_at"), time.time()),
@@ -193,6 +211,11 @@ class MemoryRecord:
             recall_count=max(0, int(_as_float(data.get("recall_count"), 0))),
             last_recalled_at=_as_float(data.get("last_recalled_at"), 0.0),
             interference=clamp(data.get("interference")),
+            associations={
+                str(k): clamp(v)
+                for k, v in (data.get("associations") or {}).items()
+                if str(k).strip()
+            } if isinstance(data.get("associations"), dict) else {},
             auto_parameters=dict(data.get("auto_parameters") or {})
             if isinstance(data.get("auto_parameters"), dict)
             else {},
@@ -200,6 +223,7 @@ class MemoryRecord:
 
     def to_dict(self) -> dict[str, Any]:
         return {
+            "memory_id": self.memory_id,
             "text": self.text[:1600],
             "summary": self.summary[:360],
             "session_key": self.session_key,
@@ -218,6 +242,11 @@ class MemoryRecord:
             "recall_count": int(self.recall_count),
             "last_recalled_at": self.last_recalled_at,
             "interference": round(clamp(self.interference), 6),
+            "associations": {
+                k: round(clamp(v), 6)
+                for k, v in self.associations.items()
+                if str(k).strip() and clamp(v) > 0.0
+            },
             "auto_parameters": dict(self.auto_parameters),
         }
 
@@ -356,6 +385,8 @@ def derive_memory_dynamics(
     compression_threshold = clamp(0.38 + 0.28 * consolidation + 0.18 * common_ground)
     recall_limit = int(round(2 + 3 * clamp(0.45 * relationship + 0.35 * salience + 0.20 * common_ground)))
     recall_limit = max(2, min(5, recall_limit))
+    associative_recall_limit = int(round(2 * clamp(0.50 * common_ground + 0.30 * relationship + 0.20 * consolidation)))
+    associative_recall_limit = max(0, min(2, associative_recall_limit))
     recall_maturation_seconds = clamp(
         0.8
         + 3.6 * interference
@@ -375,11 +406,13 @@ def derive_memory_dynamics(
         interference_sensitivity=interference,
         compression_threshold=compression_threshold,
         recall_limit=recall_limit,
+        associative_recall_limit=associative_recall_limit,
         recall_maturation_seconds=recall_maturation_seconds,
         notes=[
             "auto_derived",
             "personality_to_memory_dynamics",
             "real_time_decay",
+            "associative_memory_budgeted",
             "no_user_tunable_core_parameters",
         ],
     )
@@ -432,6 +465,12 @@ def observe_memory_event(
         text=text,
         summary=summary,
         session_key=str(session_key or "global"),
+        memory_id=_make_memory_id(
+            str(session_key or "global"),
+            summary,
+            timestamp,
+            str(speaker_id or ""),
+        ),
         speaker_id=str(speaker_id or ""),
         created_at=timestamp,
         updated_at=timestamp,
@@ -462,8 +501,16 @@ def observe_memory_event(
         existing.confidence = clamp(existing.confidence + mix * (confidence - existing.confidence) + 0.05)
         existing.layers = _merge_layer_weights(existing.layers, layers, mix=mix)
         existing.auto_parameters = dynamics.to_dict()
+        target = existing
     else:
         state.records.append(record)
+        target = record
+    _refresh_memory_associations(
+        state.records,
+        target,
+        dynamics=dynamics,
+        now=timestamp,
+    )
     state.records = _compact_records(state.records, dynamics=dynamics, now=timestamp)
     state.dynamics = dynamics
     state.updated_at = timestamp
@@ -483,6 +530,7 @@ def recall_memory(
     if not query:
         return []
     recall_limit = max(1, min(5, int(limit or state.dynamics.recall_limit or 3)))
+    associative_limit = max(0, min(2, int(state.dynamics.associative_recall_limit)))
     items: list[MemoryRecallItem] = []
     for record in state.records:
         elapsed = max(0.0, timestamp - record.updated_at)
@@ -497,7 +545,7 @@ def recall_memory(
             _similarity(query, record.summary),
             0.82 * _similarity(query, record.text),
         )
-        if semantic <= 0 and record.depth < 0.72:
+        if semantic <= 0.0:
             continue
         score = clamp(
             0.42 * semantic
@@ -517,7 +565,131 @@ def recall_memory(
             reasons.append("real_time_fresh")
         items.append(MemoryRecallItem(record=record, score=score, reasons=reasons))
     items.sort(key=lambda item: item.score, reverse=True)
-    return items[:recall_limit]
+    primary = items[:recall_limit]
+    if not primary or associative_limit <= 0:
+        return primary
+    associated = _associated_recall_items(
+        state.records,
+        primary,
+        now=timestamp,
+        limit=associative_limit,
+        state=state,
+    )
+    combined = primary + associated
+    combined.sort(key=lambda item: item.score, reverse=True)
+    return combined[: recall_limit + associative_limit]
+
+
+def reinforce_recalled_memories(
+    state: SylanneMemoryState,
+    items: list[MemoryRecallItem],
+    *,
+    query: str = "",
+    now: float | None = None,
+) -> SylanneMemoryState:
+    """Strengthen memories after they are actually recalled into context."""
+    if not items:
+        return state
+    timestamp = time.time() if now is None else float(now)
+    query = _clean_text(query, 900)
+    by_id = {id(item.record): item for item in items}
+    for record in state.records:
+        item = by_id.get(id(record))
+        if item is None:
+            continue
+        semantic = max(
+            _similarity(query, record.summary),
+            0.82 * _similarity(query, record.text),
+        ) if query else 0.0
+        retrieval_gain = clamp(
+            0.018
+            + 0.050 * item.score
+            + 0.028 * semantic
+            + 0.018 * state.dynamics.consolidation_gain,
+            0.0,
+            0.12,
+        )
+        record.recall_count += 1
+        record.last_recalled_at = timestamp
+        record.depth = clamp(record.depth + retrieval_gain * (1.0 - record.depth))
+        record.confidence = clamp(
+            record.confidence + 0.72 * retrieval_gain * (1.0 - record.confidence),
+        )
+        record.interference = clamp(
+            record.interference * (1.0 - 0.35 * retrieval_gain),
+        )
+        params = dict(record.auto_parameters or {})
+        params["retrieval_reinforcement"] = {
+            "last_query_excerpt": _clip(query, 120),
+            "last_score": round(clamp(item.score), 6),
+            "gain": round(retrieval_gain, 6),
+            "updated_at": timestamp,
+        }
+        params["last_decay_at"] = timestamp
+        record.auto_parameters = params
+    state.updated_at = max(state.updated_at, timestamp)
+    return state
+
+
+def apply_memory_time_decay(
+    state: SylanneMemoryState,
+    *,
+    now: float | None = None,
+    hard_limit: int = 128,
+) -> SylanneMemoryState:
+    """Apply real-time forgetting and prune weak stale memories."""
+    timestamp = time.time() if now is None else float(now)
+    kept: list[MemoryRecord] = []
+    forgotten = 0
+    changed = False
+    for record in state.records:
+        params = dict(record.auto_parameters or {})
+        last_decay_at = _as_float(params.get("last_decay_at"), record.updated_at)
+        elapsed = max(0.0, timestamp - last_decay_at)
+        half_life = _as_float(
+            params.get("decay_half_life_seconds"),
+            state.dynamics.decay_half_life_seconds,
+        )
+        retention = half_life_multiplier(elapsed, half_life)
+        consolidation = clamp(
+            0.46 * record.depth
+            + 0.26 * record.confidence
+            + 0.16 * min(1.0, record.evidence_count / 4.0)
+            + 0.12 * min(1.0, record.recall_count / 5.0),
+        )
+        survival = clamp(0.34 * retention + 0.66 * consolidation)
+        if survival < 0.12 and record.evidence_count <= 1 and record.recall_count <= 0:
+            forgotten += 1
+            changed = True
+            continue
+        decay_pressure = clamp(1.0 - retention)
+        if decay_pressure > 0.0001:
+            record.depth = clamp(
+                record.depth * (1.0 - 0.18 * decay_pressure * (1.0 - consolidation)),
+            )
+            record.confidence = clamp(
+                record.confidence * (1.0 - 0.14 * decay_pressure * (1.0 - consolidation)),
+            )
+            record.interference = clamp(
+                record.interference
+                + state.dynamics.interference_sensitivity * 0.035 * decay_pressure,
+            )
+            params["last_decay_at"] = timestamp
+            record.auto_parameters = params
+            changed = True
+        kept.append(record)
+    compacted = _compact_records(kept, dynamics=state.dynamics, now=timestamp, hard_limit=hard_limit)
+    if len(compacted) != len(kept):
+        changed = True
+    state.records = compacted
+    notes = [note for note in state.dynamics.notes if not note.startswith("forgotten=")]
+    if forgotten:
+        notes.append(f"forgotten={forgotten}")
+        changed = True
+    state.dynamics.notes = notes[:8]
+    if changed:
+        state.updated_at = max(state.updated_at, timestamp)
+    return state
 
 
 def build_memory_prompt_fragment(
@@ -572,6 +744,16 @@ def _derive_layers(
     }
 
 
+def _make_memory_id(
+    session_key: str,
+    summary: str,
+    created_at: float,
+    speaker_id: str = "",
+) -> str:
+    seed = f"{session_key}|{speaker_id}|{created_at:.6f}|{summary[:240]}"
+    return sha1(seed.encode("utf-8", errors="ignore")).hexdigest()[:16]
+
+
 def _find_merge_candidate(
     records: list[MemoryRecord],
     record: MemoryRecord,
@@ -582,6 +764,184 @@ def _find_merge_candidate(
         if _similarity(existing.summary, record.summary) >= 0.62:
             return existing
     return None
+
+
+def _refresh_memory_associations(
+    records: list[MemoryRecord],
+    target: MemoryRecord,
+    *,
+    dynamics: MemoryDynamics,
+    now: float,
+    window: int = 24,
+    per_record_limit: int = 3,
+) -> None:
+    if not target.memory_id:
+        target.memory_id = _make_memory_id(
+            target.session_key,
+            target.summary or target.text,
+            target.created_at,
+            target.speaker_id,
+        )
+    candidates = []
+    for other in records[-window:]:
+        if other is target or other.session_key != target.session_key:
+            continue
+        if not other.memory_id:
+            other.memory_id = _make_memory_id(
+                other.session_key,
+                other.summary or other.text,
+                other.created_at,
+                other.speaker_id,
+            )
+        weight = _association_weight(
+            target,
+            other,
+            dynamics=dynamics,
+            now=now,
+        )
+        if weight >= 0.24:
+            candidates.append((weight, other))
+    candidates.sort(key=lambda item: item[0], reverse=True)
+    target.associations = {
+        other.memory_id: round(weight, 6)
+        for weight, other in candidates[:per_record_limit]
+    }
+    for weight, other in candidates[:per_record_limit]:
+        merged = dict(other.associations or {})
+        merged[target.memory_id] = max(clamp(weight * 0.92), clamp(merged.get(target.memory_id, 0.0)))
+        sorted_edges = sorted(merged.items(), key=lambda item: clamp(item[1]), reverse=True)
+        other.associations = {
+            str(memory_id): round(clamp(edge_weight), 6)
+            for memory_id, edge_weight in sorted_edges[:per_record_limit]
+            if str(memory_id).strip() and str(memory_id) != other.memory_id
+        }
+
+
+def _association_weight(
+    first: MemoryRecord,
+    second: MemoryRecord,
+    *,
+    dynamics: MemoryDynamics,
+    now: float,
+) -> float:
+    semantic = max(
+        _similarity(first.summary, second.summary),
+        0.78 * _similarity(first.text, second.text),
+    )
+    shared_layers = set(first.layers) & set(second.layers)
+    layer_overlap = 0.0
+    if shared_layers:
+        layer_overlap = sum(
+            min(clamp(first.layers.get(key)), clamp(second.layers.get(key)))
+            for key in shared_layers
+        ) / max(1, len(shared_layers))
+    emotional_keys = set(first.emotional_signature) & set(second.emotional_signature)
+    emotional_proximity = 0.0
+    if emotional_keys:
+        distance = sum(
+            abs(first.emotional_signature.get(key, 0.0) - second.emotional_signature.get(key, 0.0))
+            for key in emotional_keys
+        ) / max(1, len(emotional_keys))
+        emotional_proximity = clamp(1.0 - distance / 2.0)
+    temporal = half_life_multiplier(
+        abs(first.updated_at - second.updated_at),
+        max(3600.0, dynamics.decay_half_life_seconds * 0.18),
+    )
+    consolidation = clamp(
+        0.5 * min(first.depth, second.depth)
+        + 0.3 * min(first.confidence, second.confidence)
+        + 0.2 * dynamics.consolidation_gain,
+    )
+    return clamp(
+        0.34 * semantic
+        + 0.24 * layer_overlap
+        + 0.16 * emotional_proximity
+        + 0.14 * temporal
+        + 0.12 * consolidation,
+    )
+
+
+def _associated_recall_items(
+    records: list[MemoryRecord],
+    primary: list[MemoryRecallItem],
+    *,
+    now: float,
+    limit: int,
+    state: SylanneMemoryState,
+) -> list[MemoryRecallItem]:
+    del now
+    if limit <= 0:
+        return []
+    by_id = {
+        record.memory_id: record
+        for record in records
+        if record.memory_id
+    }
+    used_ids = {item.record.memory_id for item in primary if item.record.memory_id}
+    candidates: dict[str, MemoryRecallItem] = {}
+    for parent in primary:
+        parent_id = parent.record.memory_id
+        if not parent_id:
+            continue
+        for target_id, weight in sorted(
+            (parent.record.associations or {}).items(),
+            key=lambda item: clamp(item[1]),
+            reverse=True,
+        ):
+            if target_id in used_ids:
+                continue
+            record = by_id.get(target_id)
+            if record is None or record.session_key != parent.record.session_key:
+                continue
+            association = clamp(weight)
+            if association < 0.24:
+                continue
+            score = clamp(
+                parent.score
+                * (0.42 + 0.20 * state.dynamics.consolidation_gain)
+                * association
+                + 0.10 * record.depth
+                + 0.06 * record.confidence
+                - 0.14 * record.interference,
+            )
+            if score <= 0.08:
+                continue
+            existing = candidates.get(target_id)
+            if existing is None or score > existing.score:
+                candidates[target_id] = MemoryRecallItem(
+                    record=record,
+                    score=score,
+                    reasons=[
+                        "associative_recall",
+                        f"linked_from={parent_id}",
+                    ],
+                )
+    selected = sorted(candidates.values(), key=lambda item: item.score, reverse=True)
+    return selected[:limit]
+
+
+def _prune_memory_associations(records: list[MemoryRecord]) -> None:
+    existing_ids = {
+        record.memory_id
+        for record in records
+        if record.memory_id
+    }
+    for record in records:
+        if not record.memory_id:
+            record.memory_id = _make_memory_id(
+                record.session_key,
+                record.summary or record.text,
+                record.created_at,
+                record.speaker_id,
+            )
+            existing_ids.add(record.memory_id)
+        record.associations = {
+            str(memory_id): clamp(weight)
+            for memory_id, weight in (record.associations or {}).items()
+            if str(memory_id) in existing_ids
+            and str(memory_id) != record.memory_id
+            and clamp(weight) > 0.0
+        }
 
 
 def _merge_layer_weights(
@@ -605,6 +965,7 @@ def _compact_records(
     hard_limit: int = 128,
 ) -> list[MemoryRecord]:
     if len(records) <= hard_limit:
+        _prune_memory_associations(records)
         return records
     scored = []
     for record in records:
@@ -618,7 +979,9 @@ def _compact_records(
         keep_score = 0.45 * record.depth + 0.25 * record.confidence + 0.20 * freshness + 0.10 * min(1.0, record.evidence_count / 4)
         scored.append((keep_score, record))
     scored.sort(key=lambda item: item[0], reverse=True)
-    return [record for _, record in scored[:hard_limit]]
+    compacted = [record for _, record in scored[:hard_limit]]
+    _prune_memory_associations(compacted)
+    return compacted
 
 
 def _string_list(value: Any, *, limit: int = 8) -> list[str]:

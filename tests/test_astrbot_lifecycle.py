@@ -1433,6 +1433,45 @@ class AstrBotLifecycleTests(unittest.TestCase):
         self.assertNotIn(saved_key, stored)
         self.assertNotIn("room/with\\slash", plugin._sylanne_memory_cache)
 
+    def test_sylanne_memory_load_persists_real_time_forgetting(self):
+        from memory_engine import MemoryRecord, SylanneMemoryState
+
+        plugin = new_plugin()
+        stored = {}
+
+        async def fake_get_kv(self, key, default=None):
+            return stored.get(key, default)
+
+        async def fake_put_kv(self, key, value):
+            stored[key] = value
+
+        bind_async(plugin, "get_kv_data", fake_get_kv)
+        bind_async(plugin, "put_kv_data", fake_put_kv)
+        state = SylanneMemoryState.initial(now=0.0)
+        state.dynamics.decay_half_life_seconds = 10.0
+        state.records.append(
+            MemoryRecord(
+                text="一次很弱的临时噪声。",
+                summary="临时噪声。",
+                session_key="s-forget-kv",
+                created_at=0.0,
+                updated_at=0.0,
+                depth=0.05,
+                confidence=0.06,
+                auto_parameters={"decay_half_life_seconds": 10.0},
+            ),
+        )
+        stored[plugin._sylanne_memory_kv_key("s-forget-kv")] = state.to_dict()
+
+        loaded = asyncio.run(
+            plugin._load_sylanne_memory_state("s-forget-kv", now=120.0),
+        )
+
+        saved = stored[plugin._sylanne_memory_kv_key("s-forget-kv")]
+        self.assertEqual(loaded.records, [])
+        self.assertEqual(saved["records"], [])
+        self.assertIn("forgotten=1", saved["dynamics"]["notes"])
+
     def test_background_post_recovery_merges_checkpoint_before_new_local_job(self):
         plugin = new_plugin(
             {
@@ -3154,12 +3193,13 @@ class AstrBotLifecycleTests(unittest.TestCase):
                 return None
 
         plugin.context = FakeContext()
+        plugin._observed_now = lambda: 20.0
         state = SylanneMemoryState.initial(now=0.0)
         state.records.extend(
             [
                 MemoryRecord(
-                    text="用户之前说过，周日晚上容易因为论文图表焦虑。",
-                    summary="用户周日晚上容易因为论文图表焦虑。",
+                    text="用户之前说过，今晚改论文图表时容易焦虑。",
+                    summary="用户今晚改论文图表时容易焦虑。",
                     session_key="s-proactive-memory",
                     created_at=10.0,
                     updated_at=10.0,
@@ -3204,7 +3244,7 @@ class AstrBotLifecycleTests(unittest.TestCase):
         self.assertEqual(result["checked"], 1)
         context = dispatched[0]
         self.assertIn("Sylanne 自有记忆召回摘要", context)
-        self.assertIn("论文图表焦虑", context)
+        self.assertIn("论文图表", context)
         self.assertIn("轻轻提醒", context)
 
     def test_proactive_scheduler_context_includes_recent_request_context_excerpt(self):
@@ -3348,6 +3388,129 @@ class AstrBotLifecycleTests(unittest.TestCase):
         self.assertIn("sylanne_memory_recall", injected)
         self.assertIn("用户刚才解释过", injected)
         self.assertIn("不要把插件用户误会成恋爱对象", injected)
+
+    def test_on_llm_request_reinforces_recalled_sylanne_memory(self):
+        from memory_engine import MemoryRecord, SylanneMemoryState
+
+        plugin = new_plugin(
+            {
+                "assessment_timing": "post",
+                "inject_state": False,
+                "enable_realtime_chat": True,
+                "enable_sticker_reaction": False,
+                "use_llm_assessor": False,
+            },
+        )
+        self._bind_common_state_hooks(plugin)
+        plugin._observed_now = lambda: 20.0
+        state = SylanneMemoryState.initial(now=0.0)
+        state.records.append(
+            MemoryRecord(
+                text="用户说过插件文档页不要显示旧版本。",
+                summary="插件文档页不要显示旧版本。",
+                session_key="s-reinforce-request",
+                speaker_id="u1",
+                created_at=10.0,
+                updated_at=10.0,
+                depth=0.42,
+                confidence=0.44,
+                layers={"semantic": 0.8},
+            ),
+        )
+        plugin._sylanne_memory_cache["s-reinforce-request"] = state
+        saved = []
+
+        async def fake_save_memory(self, session_key, saved_state):
+            saved.append((session_key, saved_state.to_dict()))
+            self._sylanne_memory_cache[session_key] = saved_state
+
+        bind_async(plugin, "_save_sylanne_memory_state", fake_save_memory)
+        request = fake_request(
+            session_id="s-reinforce-request",
+            prompt="为什么插件文档页还是旧版本",
+        )
+
+        asyncio.run(
+            plugin.on_llm_request(
+                FakeEvent(
+                    "s-reinforce-request",
+                    message="为什么插件文档页还是旧版本",
+                    sender_id="u1",
+                ),
+                request,
+            ),
+        )
+
+        injected = "\n".join(self._request_text_parts(request))
+        self.assertIn("sylanne_memory_recall", injected)
+        self.assertEqual(saved[-1][0], "s-reinforce-request")
+        saved_record = saved[-1][1]["records"][0]
+        self.assertEqual(saved_record["recall_count"], 1)
+        self.assertGreater(saved_record["depth"], 0.42)
+
+    def test_on_llm_request_can_include_associated_sylanne_memory(self):
+        from memory_engine import MemoryRecord, SylanneMemoryState
+
+        plugin = new_plugin(
+            {
+                "assessment_timing": "post",
+                "inject_state": False,
+                "enable_realtime_chat": True,
+                "enable_sticker_reaction": False,
+                "use_llm_assessor": False,
+            },
+        )
+        self._bind_common_state_hooks(plugin)
+        state = SylanneMemoryState.initial(now=0.0)
+        state.dynamics.recall_limit = 1
+        state.dynamics.associative_recall_limit = 1
+        state.records.extend(
+            [
+                MemoryRecord(
+                    memory_id="core-them",
+                    text="用户解释过：他们指插件的其他用户，不是恋爱对象。",
+                    summary="他们指插件的其他用户。",
+                    session_key="s-associated-request",
+                    created_at=10.0,
+                    updated_at=10.0,
+                    depth=0.91,
+                    confidence=0.84,
+                    associations={"tone-soft": 0.88},
+                ),
+                MemoryRecord(
+                    memory_id="tone-soft",
+                    text="用户希望 Sylanne 对插件使用者说话时温和一点，别像炫耀。",
+                    summary="对插件使用者说话要温和，别炫耀。",
+                    session_key="s-associated-request",
+                    created_at=11.0,
+                    updated_at=11.0,
+                    depth=0.74,
+                    confidence=0.70,
+                ),
+            ],
+        )
+        plugin._sylanne_memory_cache["s-associated-request"] = state
+        request = fake_request(
+            session_id="s-associated-request",
+            prompt="那你想对他们说什么",
+        )
+
+        asyncio.run(
+            plugin.on_llm_request(
+                FakeEvent(
+                    "s-associated-request",
+                    message="那你想对他们说什么",
+                    sender_id="u1",
+                ),
+                request,
+            ),
+        )
+
+        injected = "\n".join(self._request_text_parts(request))
+        self.assertIn("sylanne_memory_recall", injected)
+        self.assertIn("他们指插件的其他用户", injected)
+        self.assertIn("对插件使用者说话要温和", injected)
+        self.assertLessEqual(len(injected), 1800)
 
     def test_on_llm_request_does_not_call_external_livingmemory(self):
         plugin = new_plugin(
@@ -4832,6 +4995,46 @@ class AstrBotLifecycleTests(unittest.TestCase):
         self.assertEqual(len(calls), 1)
         self.assertEqual(len(assessment_calls), 1)
         self.assertGreaterEqual(len(saves), 1)
+
+    def test_realtime_input_complete_llm_gate_skips_remaining_max_wait(self):
+        plugin = new_plugin(
+            {
+                "assessment_timing": "pre",
+                "inject_state": False,
+                "enable_realtime_chat": True,
+                "enable_sticker_reaction": False,
+                "use_llm_assessor": True,
+                "realtime_input_completion_probe_delay_seconds": 0.0,
+                "realtime_input_completion_max_wait_seconds": 20.0,
+            },
+        )
+        plugin._observed_now = lambda: 4050.0
+        self._bind_common_state_hooks(plugin)
+        waits = []
+
+        async def fake_provider_id(self, event):
+            return "provider"
+
+        async def fake_call_llm(self, *, provider_id, prompt, system_prompt):
+            return SimpleNamespace(
+                completion_text='{"is_complete": true, "confidence": 0.96, "reason": "已经完整"}',
+            )
+
+        async def fake_wait(self, session_key, payload, wait_seconds):
+            waits.append(wait_seconds)
+            return True
+
+        bind_async(plugin, "_provider_id", fake_provider_id)
+        bind_async(plugin, "_call_internal_assessor_llm", fake_call_llm)
+        bind_async(plugin, "_wait_realtime_input_window_unchanged", fake_wait)
+        event = FakeEvent("s-llm-release-fast", message="我！", sender_id="u1")
+        request = fake_request(session_id="s-llm-release-fast", prompt="我！")
+
+        asyncio.run(plugin.on_llm_request(event, request))
+
+        self.assertFalse(event.stopped)
+        self.assertEqual(waits, [0.0])
+        self.assertEqual(plugin._realtime_input_fragment_windows, {})
 
     def test_realtime_input_llm_gate_releases_incomplete_fragment_after_max_wait(self):
         plugin = new_plugin(

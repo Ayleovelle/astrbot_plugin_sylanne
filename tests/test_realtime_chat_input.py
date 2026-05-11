@@ -149,6 +149,37 @@ class RealtimeChatInputTests(unittest.TestCase):
         self.assertFalse(changed["should_inject"])
         self.assertFalse(late["should_inject"])
 
+    def test_hanging_purpose_clause_waits_for_following_fragment(self):
+        windows = {}
+        settings = RealtimeInputSettings(max_window_seconds=5.0, max_fragments=6)
+        sequence = [
+            "你要这样想",
+            "我大修",
+            "是为了",
+            "让你更好地去",
+            "记住呀",
+        ]
+        payloads = [
+            observe_realtime_input_fragment(
+                windows,
+                session_key="s-purpose",
+                speaker_key="u1",
+                text=text,
+                now=float(index),
+                settings=settings,
+            )
+            for index, text in enumerate(sequence)
+        ]
+
+        self.assertFalse(payloads[2]["should_inject"])
+        self.assertTrue(payloads[2]["should_hold"])
+        self.assertFalse(payloads[3]["should_inject"])
+        self.assertTrue(payloads[3]["should_hold"])
+        self.assertTrue(payloads[4]["should_inject"])
+        self.assertIn("是为了", payloads[4]["merged_intent"])
+        self.assertIn("让你更好地去", payloads[4]["merged_intent"])
+        self.assertIn("记住呀", payloads[4]["merged_intent"])
+
 
 if __name__ == "__main__":
     unittest.main()
