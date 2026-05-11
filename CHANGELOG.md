@@ -2,6 +2,22 @@
 
 本文件用于 AstrBot 插件市场/管理页展示更新内容。更完整的设计说明、公式推导、测试矩阵和维护手册见 `README.md`。
 
+## 1.8.6
+
+发布日期：2026-05-12
+
+### 修复
+
+- 修复插件文档页可能抓取 README 顶部历史发布记录、从而误显示旧版本的问题；README 当前展示区只保留当前版本，旧版本明细保留在本文件中。
+- 同步 `metadata.yaml`、`main.py @register(...)`、README 徽章、远程烟测期望版本和发布包内文档为 `1.8.6`。
+- 保留上一版的即时聊天图片/表情包发送、官方自动上下文压缩兼容和自有记忆模块打包修复。
+
+### 验证
+
+- `python -m pytest -q tests/test_package_plugin.py -k "package or zip_preflight"`
+- `python -m py_compile main.py realtime_chat_engine.py realtime_chat_input.py memory_engine.py public_api.py scripts\package_plugin.py`
+- 发布包内 `metadata.yaml`、`main.py` 和 `README.md` 均指向 `1.8.6`。
+
 ## 1.8.5
 
 发布日期：2026-05-12
