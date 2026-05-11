@@ -3,7 +3,7 @@ const path = require("path");
 const crypto = require("crypto");
 const { chromium } = require("playwright");
 
-const PLUGIN_NAME = "astrbot_plugin_emotional_state";
+const PLUGIN_NAME = "astrbot_plugin_sylanne";
 const CHAT_ENDPOINT = "/api/chat/send";
 const CONFIG_GET_ENDPOINT = `/api/config/get?plugin_name=${PLUGIN_NAME}`;
 const CONFIG_UPDATE_ENDPOINT = `/api/config/plugin/update?plugin_name=${PLUGIN_NAME}`;

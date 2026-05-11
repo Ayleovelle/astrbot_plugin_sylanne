@@ -280,7 +280,7 @@ except ImportError:
     )
 
 
-PLUGIN_NAME = "astrbot_plugin_emotional_state"
+PLUGIN_NAME = "astrbot_plugin_sylanne"
 _INTERNAL_LLM_CALL: contextvars.ContextVar[bool] = contextvars.ContextVar(
     "astrbot_emotional_state_internal_llm_call",
     default=False,
@@ -495,7 +495,7 @@ def get_emotional_state_plugin(context: Context) -> Any | None:
 @register(
     PLUGIN_NAME,
     "pidan",
-    "Soulful Lifelike AstrBot State Layer：维护情绪、人格、记忆、氛围和表达节奏的灵澜状态插件",
+    "Soulful Yearning Lifelike AstrBot Neural Narrative Engine：维护情绪、人格、记忆、氛围和表达节奏的灵澜状态插件",
     "1.6.0",
     "",
 )

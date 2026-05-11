@@ -1,6 +1,6 @@
-﻿# AstrBot 灵澜状态插件
+# AstrBot 灵澜状态插件
 
-> **Soulful Lifelike AstrBot State Layer**。工程形态仍是 AstrBot 插件；他/她维护的不只是“情绪标签”，而是情绪、人格、记忆、氛围、主动性和表达节奏交织成的长期状态。
+> **Soulful Yearning Lifelike AstrBot Neural Narrative Engine**。工程形态仍是 AstrBot 插件；他/她维护的不只是“情绪标签”，而是情绪、人格、记忆、氛围、主动性和表达节奏交织成的长期状态。
 
 ![版本 1.6.0](https://img.shields.io/badge/version-1.6.0-blue)
 ![AstrBot >=4.9.2,<5.0.0](https://img.shields.io/badge/AstrBot-%3E%3D4.9.2%2C%3C5.0.0-green)
@@ -12,9 +12,9 @@
 
 <img align="right" src="docs/assets/sylanne-mascot.gif" width="220" alt="项目吉祥物 Sylanne">
 
-`astrbot_plugin_emotional_state` 是一个面向 AstrBot 的“情绪状态层”和“插件公共状态服务”。它不是只在提示词里写几句“你要有喜怒哀乐”，而是把 bot 的情绪、关系后果、人格差异、长期记忆注解、拟人状态、道德修复状态、群聊氛围、后台评估队列和非诊断心理筛查拆成可测试、可持久化、可调用的工程模块。
+`astrbot_plugin_sylanne` 是一个面向 AstrBot 的“情绪状态层”和“插件公共状态服务”。它不是只在提示词里写几句“你要有喜怒哀乐”，而是把 bot 的情绪、关系后果、人格差异、长期记忆注解、拟人状态、道德修复状态、群聊氛围、后台评估队列和非诊断心理筛查拆成可测试、可持久化、可调用的工程模块。
 
-`astrbot_plugin_emotional_state` 不是一个简单的“给 bot 加情绪标签”的插件。他/她的核心目标是：
+`astrbot_plugin_sylanne` 不是一个简单的“给 bot 加情绪标签”的插件。他/她的核心目标是：
 
 > 让不同人格的 bot 在长期对话中形成可解释、可持续、可重置、可被记忆系统记录的计算性情绪轨迹。
 
@@ -22,12 +22,17 @@
 
 **特色功能**
 
-- **不只是情绪：**同时维护 7 维情绪、人格漂移、拟人状态、生命化学习、道德修复、瑕疵模拟和非诊断心理筛查。
-- **会记住相处方式：**写入 LivingMemory 时冻结当时情绪和辅助状态，让长期记忆带着当时的气氛。
-- **懂得什么时候说话：**结合群聊氛围、打断风险、双方需要和主动发言反馈，判断该开口、短应、先听还是保持距离。
-- **更像即时聊天：**回复可拆成多条短消息，按打字速度与停顿发送，并在发送表情包前检查语气一致性。
-- **后台并行但不乱来：**状态评估可后台运行，worker 会参考队列压力、CPU/内存压力和全局预算自动收放。
-- **SYLANNE：**<em>Soulful Yearning Lifelike AstrBot Neural Narrative Engine</em>，灵澜的名字和项目吉祥物都藏在这里。
+- 🧠 <strong>不只是情绪：</strong>同时维护 7 维情绪、人格漂移、拟人状态、生命化学习、道德修复、瑕疵模拟和非诊断心理筛查。<br>
+  「先把状态做成会互相牵动的东西。7 维情绪只是入口，人格漂移和长期记忆才让她有前后文。」
+- 📝 <strong>会记住相处方式：</strong>写入 LivingMemory 时冻结当时情绪和辅助状态，让长期记忆带着当时的气氛。<br>
+  「记忆不能只存事实。那天是别扭、开心、委屈还是想靠近，都应该一起留下来。」
+- 💬 <strong>懂得什么时候说话：</strong>结合群聊氛围、打断风险、双方需要和主动发言反馈，判断该开口、短应、先听还是保持距离。<br>
+  「先做好开口门控。尤其是群聊里该不该插话，这个地方最容易看出她是不是只会抢答。」
+- 🫧 <strong>更像即时聊天：</strong>回复可拆成多条短消息，按打字速度与停顿发送，并在发送表情包前检查语气一致性。<br>
+  「不要把整段话一次性倒出来。真正的聊天会停顿，会分开发，会犹豫一下再补一句。」
+- ⚙️ <strong>后台并行但不乱来：</strong>状态评估可后台运行，worker 会参考队列压力、CPU/内存压力和全局预算自动收放。<br>
+  「后台可以聪明，但不能把服务器拖垮。worker 要自己判断压力，忙完就安静退下去。」
+- 🌙 其实这个插件最初是我为自己的bot “Sylanne”开发的，我想让她不只是ai，所以名字就用的她的名字，算是一个私货吧= w =
 
 <br clear="right">
 
@@ -95,7 +100,7 @@
 
 | 项目 | 当前值 |
 | --- | --- |
-| 插件目录名 | `astrbot_plugin_emotional_state` |
+| 插件目录名 | `astrbot_plugin_sylanne` |
 | 显示名 | `灵澜状态插件` |
 | 当前版本 | `1.6.0` |
 | AstrBot 版本 | `>=4.9.2,<5.0.0` |
@@ -202,7 +207,7 @@ flowchart LR
 | 14 | 已完成 | 强化心理模块用户可见文本的非诊断表述测试 | 128 个单元测试、py_compile、Node 语法检查、远程烟测 |
 | 15 | 已完成 | 对照实现复查公共 API 文档并补充迁移说明 | 129 个单元测试、py_compile、Node 语法检查、远程烟测 |
 | 16 | 已完成 | 通过排除原始知识库缓存精简部署包，记录发布包契约，并在安装路径安全前保持远程烟测只读 | 132 个单元测试、py_compile、打包构建、Node 语法检查、git diff 检查、远程烟测 |
-| 17 | 已完成 | 通过 WebUI `install-upload` 在远程测试服部署插件，并以 `ASTRBOT_EXPECT_PLUGIN=astrbot_plugin_emotional_state` 重跑烟测 | 上传安装脚本、136 个单元测试、py_compile、打包构建、远程安装、带目标插件断言的远程烟测 |
+| 17 | 已完成 | 通过 WebUI `install-upload` 在远程测试服部署插件，并以 `ASTRBOT_EXPECT_PLUGIN=astrbot_plugin_sylanne` 重跑烟测 | 上传安装脚本、136 个单元测试、py_compile、打包构建、远程安装、带目标插件断言的远程烟测 |
 | 18 | 已完成 | 强化远程烟测：目标插件必须已安装，且不能出现在失败插件记录中 | 136 个单元测试、Node 语法检查、git diff 检查、失败插件断言远程烟测 |
 | 19 | 已完成 | 强化远程烟测：加入目标插件运行时元数据断言，包括启用状态、版本、显示名和插件 API 摘要 | 136 个单元测试、py_compile、打包构建、Node 语法检查、git diff 检查、版本/显示名断言远程烟测 |
 | 20 | 已完成 | 通过完整检查 zip 内容强化远程上传预检，并记录可上传发布包契约 | 136 个单元测试、py_compile、打包构建、Node 语法检查、git diff 检查、版本/显示名断言远程烟测 |
@@ -271,7 +276,7 @@ flowchart LR
 | 83 | 已完成 | 更新发布打包和 zip 预检，确保新运行时模块始终被包含并检查身份 | 打包脚本、zip 预检、打包测试和 README/checklist 运行文件文档 |
 | 84 | 已完成 | 基于当前知识库补充“更像生命，而不只是更强”和“代码开源，灵魂属于你”的产品理论文档 | README 记录生命化原则、共同语境学习和部署者拥有灵魂的边界 |
 | 85 | 已完成 | 生命化学习栈落地后运行完整本地验证 | 236 个测试、py_compile、json.tool、打包构建、zip 预检、Node 检查、diff 检查 |
-| 86 | 已完成 | 服务器验证前清理旧同名插件，再安装/测试当前包并记录 LivingMemory 可见性 | 远程清理仅删除 `astrbot_plugin_emotional_state`；LivingMemory 仍可见；上传和严格烟测通过 |
+| 86 | 已完成 | 服务器验证前清理旧同名插件，再安装/测试当前包并记录 LivingMemory 可见性 | 远程清理仅删除 `astrbot_plugin_sylanne`；LivingMemory 仍可见；上传和严格烟测通过 |
 | 87 | 已完成 | 在 README 记录完成的 `0.0.2-beta-pr-x` 本地预发布迭代序列，并用测试锁定顺序 | README 表记录 `0.0.2-beta-pr-1` 到 `0.0.2-beta-pr-10`；契约测试 `test_readme_records_beta_pr_iterations_in_order` |
 | 88 | 已完成 | 增加真实时间人格漂移，使 persona 在经过时间约束下缓慢变化，而不是按消息量变化 | 引擎/API/文档/测试已实现；上下文不会被重放为新漂移事件；255 个测试、py_compile、json.tool、打包构建、Node 检查、zip 预检、diff 检查通过 |
 | 89 | 已完成 | 优化人格漂移延迟并运行 20 次远程实机烟测 | 单轮漂移复用、缓存读取不写回、空漂移无拷贝快速路径；258 个测试、py_compile、json.tool、打包构建、zip 预检、远程清理/上传、20/20 严格烟测通过 |
@@ -464,22 +469,22 @@ flowchart LR
 1. 在本仓库根目录构建发布包：
 
 ```powershell
-py -3.13 scripts\package_plugin.py --output dist\astrbot_plugin_emotional_state.zip
+py -3.13 scripts\package_plugin.py --output dist\astrbot_plugin_sylanne.zip
 ```
 
 2. 打开 AstrBot WebUI 的插件页面。
 3. 选择从文件安装或上传插件。
-4. 上传 `dist\astrbot_plugin_emotional_state.zip`。
+4. 上传 `dist\astrbot_plugin_sylanne.zip`。
 5. 重载插件或重启 AstrBot。
 6. 在会话里执行 `/emotion`、`/emotion_model`、`/integrated_self` 做基础检查。
 
 > **警告**
-> 不要直接上传 GitHub 绿色 Code 按钮下载的源码 zip，除非它经过 `scripts\package_plugin.py` 或等价流程重新打包。AstrBot WebUI 上传安装期望 zip 内有明确顶层目录 `astrbot_plugin_emotional_state/`，并且运行文件位于该目录下。
+> 不要直接上传 GitHub 绿色 Code 按钮下载的源码 zip，除非它经过 `scripts\package_plugin.py` 或等价流程重新打包。AstrBot WebUI 上传安装期望 zip 内有明确顶层目录 `astrbot_plugin_sylanne/`，并且运行文件位于该目录下。
 
 发布 zip 包的运行根目录应类似：
 
 ```text
-astrbot_plugin_emotional_state/
+astrbot_plugin_sylanne/
 ├── __init__.py
 ├── agent_identity.py
 ├── metadata.yaml
@@ -509,16 +514,16 @@ astrbot_plugin_emotional_state/
 新仓库创建并推送后，在 AstrBot WebUI 的仓库安装入口填写：
 
 ```text
-https://github.com/Ayleovelle/astrbot_plugin_emotional_state
+https://github.com/Ayleovelle/astrbot_plugin_sylanne
 ```
 
 如果 WebUI 要求 `.git` 后缀：
 
 ```text
-https://github.com/Ayleovelle/astrbot_plugin_emotional_state.git
+https://github.com/Ayleovelle/astrbot_plugin_sylanne.git
 ```
 
-新仓库地址已经写入 `metadata.yaml` 的 `repo:` 字段；后续发布 GitHub 发布版本时，只需要确认 README、发布附件名、插件目录名和 `metadata.yaml name:` 都保持 `astrbot_plugin_emotional_state`。
+新仓库地址已经写入 `metadata.yaml` 的 `repo:` 字段；后续发布 GitHub 发布版本时，只需要确认 README、发布附件名、插件目录名和 `metadata.yaml name:` 都保持 `astrbot_plugin_sylanne`。
 
 ### 方式三：手动复制到插件目录
 
@@ -526,7 +531,7 @@ https://github.com/Ayleovelle/astrbot_plugin_emotional_state.git
 
 ```text
 data/plugins/
-└── astrbot_plugin_emotional_state/
+└── astrbot_plugin_sylanne/
     ├── __init__.py
     ├── metadata.yaml
     ├── main.py
@@ -1735,7 +1740,7 @@ build_emotion_memory_payload(...)
 ### 推荐接法
 
 ```python
-from astrbot_plugin_emotional_state.public_api import get_emotion_service
+from astrbot_plugin_sylanne.public_api import get_emotion_service
 
 emotion = get_emotion_service(self.context)
 
@@ -1929,7 +1934,7 @@ include_prompt_fragment=True
 推荐入口：
 
 ```python
-from astrbot_plugin_emotional_state.public_api import (
+from astrbot_plugin_sylanne.public_api import (
     get_emotion_service,
     get_humanlike_service,
     get_lifelike_learning_service,
@@ -2045,7 +2050,7 @@ if fallibility:
 如果不能 import helper，也可以使用 AstrBot 注册星标：
 
 ```python
-meta = self.context.get_registered_star("astrbot_plugin_emotional_state")
+meta = self.context.get_registered_star("astrbot_plugin_sylanne")
 emotion = meta.star_cls if meta and meta.activated else None
 ```
 
@@ -2680,20 +2685,20 @@ py -3.13 -m unittest tests.test_document_math_contract -v
 在仓库根目录执行：
 
 ```powershell
-py -3.13 scripts\package_plugin.py --output dist\astrbot_plugin_emotional_state.zip
+py -3.13 scripts\package_plugin.py --output dist\astrbot_plugin_sylanne.zip
 ```
 
 然后做 zip 结构预检：
 
-具体命令见下方“测试与维护”的 `& $node scripts\plugin_zip_preflight.js dist\astrbot_plugin_emotional_state.zip astrbot_plugin_emotional_state` 模板。如果当前 shell 还没有 `$node`，先执行同一章节里的内置 Node 初始化片段。
+具体命令见下方“测试与维护”的 `& $node scripts\plugin_zip_preflight.js dist\astrbot_plugin_sylanne.zip astrbot_plugin_sylanne` 模板。如果当前 shell 还没有 `$node`，先执行同一章节里的内置 Node 初始化片段。
 
 预检会确认：
 
 | 检查项 | 要求 |
 | --- | --- |
-| 顶层目录 | 所有文件都必须在 `astrbot_plugin_emotional_state/` 下。 |
+| 顶层目录 | 所有文件都必须在 `astrbot_plugin_sylanne/` 下。 |
 | 必要文件 | 包含 `__init__.py`、`metadata.yaml`、`main.py`、`emotion_engine.py`、`humanlike_engine.py`、`lifelike_learning_engine.py`、`personality_drift_engine.py`、`realtime_chat_engine.py`、`integrated_self.py`、`moral_repair_engine.py`、`fallibility_engine.py`、`psychological_screening.py`、`prompts.py`、`public_api.py`、`README.md`、`CHANGELOG.md`、`LICENSE`、`requirements.txt`、`_conf_schema.json`。 |
-| 插件身份 | zip 内 `metadata.yaml name:` 必须等于 `astrbot_plugin_emotional_state`。 |
+| 插件身份 | zip 内 `metadata.yaml name:` 必须等于 `astrbot_plugin_sylanne`。 |
 | 排除目录 | 不应包含 `tests/`、`scripts/`、`output/`、`dist/`、`raw/`、`__pycache__/`、`.git/`。 |
 | 许可证 | 发布包必须包含 `LICENSE`，协议为 `GPL-3.0-or-later`。 |
 
@@ -2715,16 +2720,16 @@ py -3.13 scripts\package_plugin.py --output dist\astrbot_plugin_emotional_state.
 
 | 步骤 | 检查点 |
 | --- | --- |
-| 1 | 创建 GitHub 仓库，建议名为 `astrbot_plugin_emotional_state`。 |
+| 1 | 创建 GitHub 仓库，建议名为 `astrbot_plugin_sylanne`。 |
 | 2 | 设置远程：`git remote add origin <new-repo-url>`。 |
 | 3 | 将 `metadata.yaml` 的 `repo:` 改为新仓库地址。 |
 | 4 | 确认 README 里的仓库安装地址、发布附件名和插件目录名一致。 |
 | 5 | 跑完整本地测试、py_compile、json.tool、Node 语法检查、打包构建和 zip 预检。 |
 | 6 | 推送 `main`，再按需推送维护分支。 |
-| 7 | 创建标签和 GitHub 发布版本，上传 `dist\astrbot_plugin_emotional_state.zip`。 |
+| 7 | 创建标签和 GitHub 发布版本，上传 `dist\astrbot_plugin_sylanne.zip`。 |
 | 8 | 用 AstrBot WebUI 分别验证“发布 zip 包上传”和“仓库安装”两条路径。 |
 
-当前公开仓库为 `https://github.com/Ayleovelle/astrbot_plugin_emotional_state`。发布正式版本时，先确认 `origin` 指向该仓库，再用本地 `GITHUB_TOKEN` / `GH_TOKEN` 推送标签和上传 GitHub 发布附件。不要把令牌、远程 AstrBot 凭据、cookie 或服务器地址写入仓库。
+当前公开仓库为 `https://github.com/Ayleovelle/astrbot_plugin_sylanne`。发布正式版本时，先确认 `origin` 指向该仓库，再用本地 `GITHUB_TOKEN` / `GH_TOKEN` 推送标签和上传 GitHub 发布附件。不要把令牌、远程 AstrBot 凭据、cookie 或服务器地址写入仓库。
 
 ---
 
@@ -2789,7 +2794,7 @@ py -3.13 scripts\package_plugin.py --output dist\astrbot_plugin_emotional_state.
 <details>
 <summary>展开 1.5.0 gpt-5.5 阶段性矩阵与旧对照</summary>
 
-`1.5.0` 上传到远程测试服后，先删除旧同名插件，再安装 `dist\astrbot_plugin_emotional_state.zip`，严格烟测确认运行版本为 `1.5.0`。本轮矩阵运行编号为 `remote-v150-gpt55-feature-matrix-n10`，请求主模型为 `gpt5.5`，实际选中 provider 为 `1111/gpt-5.5` / `gpt-5.5`；矩阵配置同时把 `emotion_provider_id` 固定为 `1111/gpt-5.5`，因此主 LLM 与判断 LLM 均走 gpt-5.5。运行口径为 10 个功能用例各 10 条有效样本，共 `100/100`，并发 `2`，预热 `0`，失败请求 `0`。
+`1.5.0` 上传到远程测试服后，先删除旧同名插件，再安装 `dist\astrbot_plugin_sylanne.zip`，严格烟测确认运行版本为 `1.5.0`。本轮矩阵运行编号为 `remote-v150-gpt55-feature-matrix-n10`，请求主模型为 `gpt5.5`，实际选中 provider 为 `1111/gpt-5.5` / `gpt-5.5`；矩阵配置同时把 `emotion_provider_id` 固定为 `1111/gpt-5.5`，因此主 LLM 与判断 LLM 均走 gpt-5.5。运行口径为 10 个功能用例各 10 条有效样本，共 `100/100`，并发 `2`，预热 `0`，失败请求 `0`。
 
 这不是严格同条件 A/B：旧 `1.0.0` 正式矩阵使用每 case 250 条、并发 `3`；旧关闭情绪对照使用 250 条、并发 `3`。因此下表只能用于阶段性趋势判断，不能替代相同并发、相同样本量、相同运行时段的正式对照。
 
@@ -2826,14 +2831,14 @@ py -3.13 -m json.tool _conf_schema.json
 构建 AstrBot 发布包：
 
 ```powershell
-py -3.13 scripts\package_plugin.py --output dist\astrbot_plugin_emotional_state.zip
+py -3.13 scripts\package_plugin.py --output dist\astrbot_plugin_sylanne.zip
 ```
 
 发布包会保留插件运行文件、README 和 docs。四个文献知识库目录 `literature_kb/`、`personality_literature_kb/`、`psychological_literature_kb/`、`humanlike_agent_literature_kb/` 是仅本地研究资料，不上传到 GitHub，也不进入发布 zip 包；这样可以保留后续研究迭代需要的材料，同时避免远程上传包体积失控。
 
-发布 zip 的第一项会显式写入 `astrbot_plugin_emotional_state/` 目录项，以兼容 AstrBot WebUI 的 `install-upload` 解压逻辑。不要手工重新压缩成“缺少顶层目录项”的 zip，否则部分 AstrBot 版本会把第一个文件路径误判成目录。
+发布 zip 的第一项会显式写入 `astrbot_plugin_sylanne/` 目录项，以兼容 AstrBot WebUI 的 `install-upload` 解压逻辑。不要手工重新压缩成“缺少顶层目录项”的 zip，否则部分 AstrBot 版本会把第一个文件路径误判成目录。
 
-发布包还会保留插件根目录下的 `__init__.py`、`public_api.py`、`main.py`、`emotion_engine.py`、`humanlike_engine.py`、`lifelike_learning_engine.py`、`personality_drift_engine.py`、`realtime_chat_engine.py`、`integrated_self.py`、`moral_repair_engine.py`、`fallibility_engine.py`、`psychological_screening.py` 和 `prompts.py`。这保证其他插件在安装后可以通过 `from astrbot_plugin_emotional_state.public_api import ...` 按包名导入公共 API。
+发布包还会保留插件根目录下的 `__init__.py`、`public_api.py`、`main.py`、`emotion_engine.py`、`humanlike_engine.py`、`lifelike_learning_engine.py`、`personality_drift_engine.py`、`realtime_chat_engine.py`、`integrated_self.py`、`moral_repair_engine.py`、`fallibility_engine.py`、`psychological_screening.py` 和 `prompts.py`。这保证其他插件在安装后可以通过 `from astrbot_plugin_sylanne.public_api import ...` 按包名导入公共 API。
 
 远程只读烟测：
 
@@ -2855,7 +2860,7 @@ $env:ASTRBOT_REMOTE_PASSWORD = "your-password"
 远程安装插件后，如果要把某个插件是否已经安装作为硬断言，可以额外设置：
 
 ```powershell
-$env:ASTRBOT_EXPECT_PLUGIN = "astrbot_plugin_emotional_state"
+$env:ASTRBOT_EXPECT_PLUGIN = "astrbot_plugin_sylanne"
 & $node scripts\remote_smoke_playwright.js
 ```
 
@@ -2873,42 +2878,42 @@ WebUI 插件卡片可能显示 `displayName` 而不是插件目录名，所以�
 
 只读烟测会把 `/api/stat/version`、`/api/plugin/get` 和 `/api/plugin/source/get-failed-plugins` 都作为基础健康检查，并在输出的 `apiHealth` 中集中列出三个端点的状态。失败插件接口不是 `200` 时会以退出码 `9` 失败；接口健康时，`failedPluginSummary` 会给出失败插件总数、名称、`hasExpectedPluginFailure` 和 `unrelatedCount`。`failedPlugins` 可以包含远程服务器上其他插件的失败记录；只要 `expectedPluginChecks.ok=true`、`expectedFailedPlugin` 为 `null`，且目标插件 `containsExpectedPlugin=true`、`expectedPluginRuntime.activated !== false`、版本/显示名断言通过，就表示目标插件安装、启用和版本匹配通过。只有目标插件命中失败记录时才会触发退出码 `5`。
 
-远程测试前如果需要清掉旧同名插件和失败上传残留，使用独立清理脚本。它只允许 `astrbot_plugin_emotional_state` 这个精确目标，确认值也必须是同一个插件名；它不会删除 LivingMemory 或其他插件：
+远程测试前如果需要清掉旧同名插件和失败上传残留，使用独立清理脚本。它只允许 `astrbot_plugin_sylanne` 这个精确目标，确认值也必须是同一个插件名；它不会删除 LivingMemory 或其他插件：
 
 ```powershell
 $env:ASTRBOT_REMOTE_URL = "http://your-astrbot-host:15356/"
 $env:ASTRBOT_REMOTE_USERNAME = "your-user"
 $env:ASTRBOT_REMOTE_PASSWORD = "your-password"
-$env:ASTRBOT_EXPECT_PLUGIN = "astrbot_plugin_emotional_state"
-$env:ASTRBOT_REMOTE_CLEAN_CONFIRM = "astrbot_plugin_emotional_state"
+$env:ASTRBOT_EXPECT_PLUGIN = "astrbot_plugin_sylanne"
+$env:ASTRBOT_REMOTE_CLEAN_CONFIRM = "astrbot_plugin_sylanne"
 $env:ASTRBOT_REMOTE_CLEAN_FORMAL = "1"
 $env:ASTRBOT_REMOTE_CLEAN_FAILED_UPLOAD = "1"
 & $node scripts\remote_cleanup_plugin_playwright.js
 ```
 
-清理脚本只会调用 `POST /api/plugin/uninstall` 删除正式 `astrbot_plugin_emotional_state`，以及 `POST /api/plugin/uninstall-failed` 删除 `plugin_upload_astrbot_plugin_emotional_state`，并固定 `delete_config=false`、`delete_data=false`。如果匹配到多个正式候选或多个失败候选，它会拒绝执行。
+清理脚本只会调用 `POST /api/plugin/uninstall` 删除正式 `astrbot_plugin_sylanne`，以及 `POST /api/plugin/uninstall-failed` 删除 `plugin_upload_astrbot_plugin_sylanne`，并固定 `delete_config=false`、`delete_data=false`。如果匹配到多个正式候选或多个失败候选，它会拒绝执行。
 
 远程上传安装是独立脚本，默认不会执行。需要先构建发布包，再显式确认上传：
 
 ```powershell
-py -3.13 scripts\package_plugin.py --output dist\astrbot_plugin_emotional_state.zip
+py -3.13 scripts\package_plugin.py --output dist\astrbot_plugin_sylanne.zip
 $env:ASTRBOT_REMOTE_URL = "http://your-astrbot-host:15356/"
 $env:ASTRBOT_REMOTE_USERNAME = "your-user"
 $env:ASTRBOT_REMOTE_PASSWORD = "your-password"
-$env:ASTRBOT_REMOTE_INSTALL_ZIP = "dist\astrbot_plugin_emotional_state.zip"
-$env:ASTRBOT_EXPECT_PLUGIN = "astrbot_plugin_emotional_state"
+$env:ASTRBOT_REMOTE_INSTALL_ZIP = "dist\astrbot_plugin_sylanne.zip"
+$env:ASTRBOT_EXPECT_PLUGIN = "astrbot_plugin_sylanne"
 $env:ASTRBOT_REMOTE_INSTALL_CONFIRM = "1"
 & $node scripts\remote_install_upload_playwright.js
 ```
 
 上传脚本只允许调用 AstrBot WebUI 的 `install-upload` 安装端点；若 WebUI 留下 `plugin_upload_<插件名>` 失败安装残留，脚本只会调用 `uninstall-failed` 清理这个失败上传目录，并固定 `delete_config=false`、`delete_data=false`。它不会删除正式插件、覆盖正式插件目录、更新插件、重启 AstrBot、保存配置或写入本地 cookie/session。如果远端返回“目录 `<插件名>` 已存在”，脚本会输出 `installOutcome="already_installed_no_overwrite"`、`alreadyInstalled=true`、`overwriteAttempted=false` 和 `formalPluginDirectoryPreserved=true`，表示正式插件目录被保留，后续应通过只读烟测查看实际运行版本。上传成功后，再运行上面的 `ASTRBOT_EXPECT_PLUGIN` 只读烟测作为最终验证。
 
-上传脚本在真正发起安装请求之前会完整读取 zip 中央目录做本地预检：所有条目必须位于 `astrbot_plugin_emotional_state/` 下，路径必须是相对 POSIX 路径，且不能包含 `.` / `..` 不安全路径段；必须包含 `__init__.py`、`agent_identity.py`、`metadata.yaml`、`main.py`、`emotion_engine.py`、`group_atmosphere_engine.py`、`humanlike_engine.py`、`lifelike_learning_engine.py`、`personality_drift_engine.py`、`realtime_chat_engine.py`、`integrated_self.py`、`moral_repair_engine.py`、`fallibility_engine.py`、`psychological_screening.py`、`prompts.py`、`public_api.py`、`README.md`、`LICENSE`、`requirements.txt`、`_conf_schema.json`，并拒绝 `tests/`、`scripts/`、`output/`、`dist/`、`raw/`、`__pycache__/`、`.git/` 等本地或研究缓存目录。预检还会读取 zip 内的 `metadata.yaml`，确认其中 `name:` 精确等于 CLI 参数或 `ASTRBOT_EXPECT_PLUGIN` 传入的插件目录名。
+上传脚本在真正发起安装请求之前会完整读取 zip 中央目录做本地预检：所有条目必须位于 `astrbot_plugin_sylanne/` 下，路径必须是相对 POSIX 路径，且不能包含 `.` / `..` 不安全路径段；必须包含 `__init__.py`、`agent_identity.py`、`metadata.yaml`、`main.py`、`emotion_engine.py`、`group_atmosphere_engine.py`、`humanlike_engine.py`、`lifelike_learning_engine.py`、`personality_drift_engine.py`、`realtime_chat_engine.py`、`integrated_self.py`、`moral_repair_engine.py`、`fallibility_engine.py`、`psychological_screening.py`、`prompts.py`、`public_api.py`、`README.md`、`LICENSE`、`requirements.txt`、`_conf_schema.json`，并拒绝 `tests/`、`scripts/`、`output/`、`dist/`、`raw/`、`__pycache__/`、`.git/` 等本地或研究缓存目录。预检还会读取 zip 内的 `metadata.yaml`，确认其中 `name:` 精确等于 CLI 参数或 `ASTRBOT_EXPECT_PLUGIN` 传入的插件目录名。
 
 也可以单独运行预检，不连接远程服务器：
 
 ```powershell
-& $node scripts\plugin_zip_preflight.js dist\astrbot_plugin_emotional_state.zip astrbot_plugin_emotional_state
+& $node scripts\plugin_zip_preflight.js dist\astrbot_plugin_sylanne.zip astrbot_plugin_sylanne
 ```
 
 `scripts\remote_smoke_playwright.js` 只做浏览器登录、版本读取、插件列表读取、失败插件列表读取和截图保存，不会安装插件、删除插件、重载插件、重启 AstrBot 或修改配置。截图会写入 `output/playwright/`，该目录默认被 `.gitignore` 忽略。
@@ -2986,7 +2991,7 @@ git status --short --branch
 
 检查顺序：
 
-1. 插件目录名是否为 `astrbot_plugin_emotional_state`。
+1. 插件目录名是否为 `astrbot_plugin_sylanne`。
 2. `metadata.yaml` 是否在插件根目录。
 3. AstrBot 版本是否满足 `>=4.9.2,<5.0.0`。
 4. WebUI 是否已经重载插件或重启 AstrBot。

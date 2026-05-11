@@ -396,6 +396,7 @@ class RemoteSmokeContractTests(unittest.TestCase):
             "requirements.txt",
             "_conf_schema.json",
             "docs/assets/runtime_overview.svg",
+            "docs/assets/sylanne-mascot.gif",
             "docs/assets/workflow_and_proactive.svg",
         ):
             with self.subTest(required_entry=required_entry):
@@ -443,7 +444,7 @@ class RemoteSmokeContractTests(unittest.TestCase):
             encoding="utf-8",
         )
 
-        self.assertIn('ALLOWED_PLUGIN = "astrbot_plugin_emotional_state"', script)
+        self.assertIn('ALLOWED_PLUGIN = "astrbot_plugin_sylanne"', script)
         self.assertIn("ASTRBOT_REMOTE_CLEAN_CONFIRM", script)
         self.assertIn("ASTRBOT_REMOTE_CLEAN_FORMAL", script)
         self.assertIn("ASTRBOT_REMOTE_CLEAN_FAILED_UPLOAD", script)
@@ -464,7 +465,7 @@ class RemoteSmokeContractTests(unittest.TestCase):
             with self.subTest(document_contains_cleanup_contract=True):
                 self.assertIn("scripts\\remote_cleanup_plugin_playwright.js", document)
                 self.assertIn(
-                    '$env:ASTRBOT_REMOTE_CLEAN_CONFIRM = "astrbot_plugin_emotional_state"',
+                    '$env:ASTRBOT_REMOTE_CLEAN_CONFIRM = "astrbot_plugin_sylanne"',
                     document,
                 )
                 self.assertIn(
@@ -475,7 +476,7 @@ class RemoteSmokeContractTests(unittest.TestCase):
                     '$env:ASTRBOT_REMOTE_CLEAN_FAILED_UPLOAD = "1"',
                     document,
                 )
-                self.assertIn("plugin_upload_astrbot_plugin_emotional_state", document)
+                self.assertIn("plugin_upload_astrbot_plugin_sylanne", document)
                 self.assertIn("delete_config=false", document)
                 self.assertIn("delete_data=false", document)
                 self.assertIn("LivingMemory", document)

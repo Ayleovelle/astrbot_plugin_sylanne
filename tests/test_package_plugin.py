@@ -62,6 +62,7 @@ class PackagePluginTests(unittest.TestCase):
         self.assertIn("docs/assets/lifecycle_model_fit_summary.csv", files)
         self.assertIn("docs/assets/lifecycle_model_fit_table.md", files)
         self.assertIn("docs/assets/runtime_overview.svg", files)
+        self.assertIn("docs/assets/sylanne-mascot.gif", files)
         self.assertIn("docs/assets/workflow_and_proactive.svg", files)
         self.assertFalse(
             any(
@@ -72,6 +73,7 @@ class PackagePluginTests(unittest.TestCase):
                     "docs/assets/lifecycle_model_fit_summary.csv",
                     "docs/assets/lifecycle_model_fit_table.md",
                     "docs/assets/runtime_overview.svg",
+                    "docs/assets/sylanne-mascot.gif",
                     "docs/assets/workflow_and_proactive.svg",
                 }
                 for path in files
@@ -97,7 +99,7 @@ class PackagePluginTests(unittest.TestCase):
         readme = (ROOT / "README.md").read_text(encoding="utf-8")
         install_tree = readme.split("```text", 1)[1].split("```", 1)[0]
 
-        self.assertIn("astrbot_plugin_emotional_state/", install_tree)
+        self.assertIn("astrbot_plugin_sylanne/", install_tree)
         self.assertIn("__init__.py", install_tree)
         self.assertIn("agent_identity.py", install_tree)
         self.assertIn("group_atmosphere_engine.py", install_tree)
@@ -154,6 +156,7 @@ class PackagePluginTests(unittest.TestCase):
         self.assertIn(prefix + "docs/assets/lifecycle_model_fit_summary.csv", names)
         self.assertIn(prefix + "docs/assets/lifecycle_model_fit_table.md", names)
         self.assertIn(prefix + "docs/assets/runtime_overview.svg", names)
+        self.assertIn(prefix + "docs/assets/sylanne-mascot.gif", names)
         self.assertIn(prefix + "docs/assets/workflow_and_proactive.svg", names)
         self.assertFalse(
             any(
@@ -164,6 +167,7 @@ class PackagePluginTests(unittest.TestCase):
                     prefix + "docs/assets/lifecycle_model_fit_summary.csv",
                     prefix + "docs/assets/lifecycle_model_fit_table.md",
                     prefix + "docs/assets/runtime_overview.svg",
+                    prefix + "docs/assets/sylanne-mascot.gif",
                     prefix + "docs/assets/workflow_and_proactive.svg",
                 }
                 for name in names
@@ -288,6 +292,7 @@ class PluginZipPreflightTests(unittest.TestCase):
             (prefix + "requirements.txt", "# no dependencies\n"),
             (prefix + "_conf_schema.json", "{}\n"),
             (prefix + "docs/assets/runtime_overview.svg", "<svg></svg>\n"),
+            (prefix + "docs/assets/sylanne-mascot.gif", "GIF89a\n"),
             (prefix + "docs/assets/workflow_and_proactive.svg", "<svg></svg>\n"),
         ]
 

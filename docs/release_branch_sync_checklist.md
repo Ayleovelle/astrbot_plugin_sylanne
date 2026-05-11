@@ -1,4 +1,4 @@
-﻿# 发布与分支同步清单
+# 发布与分支同步清单
 
 这份清单用于保护当前插件基线，避免功能、文档和发布包被拆散到未整理的分支里。
 
@@ -21,19 +21,19 @@ if (Test-Path $node) { $env:NODE_PATH = $nodeModules } else { $node = "node" }
 
 py -3.13 -m unittest discover -s tests -v
 py -3.13 -m py_compile main.py emotion_engine.py humanlike_engine.py lifelike_learning_engine.py personality_drift_engine.py realtime_chat_engine.py integrated_self.py moral_repair_engine.py fallibility_engine.py psychological_screening.py public_api.py prompts.py scripts\package_plugin.py
-py -3.13 scripts\package_plugin.py --output dist\astrbot_plugin_emotional_state.zip
+py -3.13 scripts\package_plugin.py --output dist\astrbot_plugin_sylanne.zip
 & $node --check scripts\remote_smoke_playwright.js
 & $node --check scripts\remote_cleanup_plugin_playwright.js
 & $node --check scripts\remote_install_upload_playwright.js
 & $node --check scripts\plugin_zip_preflight.js
-& $node scripts\plugin_zip_preflight.js dist\astrbot_plugin_emotional_state.zip astrbot_plugin_emotional_state
+& $node scripts\plugin_zip_preflight.js dist\astrbot_plugin_sylanne.zip astrbot_plugin_sylanne
 git diff --check
 ```
 
 4. 当远程验证环境可用时，运行远程只读烟测：
 
 ```powershell
-$env:ASTRBOT_EXPECT_PLUGIN = "astrbot_plugin_emotional_state"
+$env:ASTRBOT_EXPECT_PLUGIN = "astrbot_plugin_sylanne"
 $env:ASTRBOT_EXPECT_PLUGIN_VERSION = "1.6.0"
 $env:ASTRBOT_EXPECT_PLUGIN_DISPLAY_NAME = "灵澜状态插件"
 & $node scripts\remote_smoke_playwright.js
@@ -98,11 +98,11 @@ $env:ASTRBOT_EXPECT_PLUGIN_DISPLAY_NAME = "灵澜状态插件"
 只有在破坏性重装测试前，才运行 `scripts\remote_cleanup_plugin_playwright.js`，并且必须使用：
 
 ```powershell
-$env:ASTRBOT_EXPECT_PLUGIN = "astrbot_plugin_emotional_state"
-$env:ASTRBOT_REMOTE_CLEAN_CONFIRM = "astrbot_plugin_emotional_state"
+$env:ASTRBOT_EXPECT_PLUGIN = "astrbot_plugin_sylanne"
+$env:ASTRBOT_REMOTE_CLEAN_CONFIRM = "astrbot_plugin_sylanne"
 $env:ASTRBOT_REMOTE_CLEAN_FORMAL = "1"
 $env:ASTRBOT_REMOTE_CLEAN_FAILED_UPLOAD = "1"
 & $node scripts\remote_cleanup_plugin_playwright.js
 ```
 
-清理脚本只允许操作 `astrbot_plugin_emotional_state`。它只能删除精确匹配的正式插件记录，以及精确匹配的失败上传目录 `plugin_upload_astrbot_plugin_emotional_state`，并始终使用 `delete_config=false` 和 `delete_data=false`。它不得删除 LivingMemory 或任何无关插件。
+清理脚本只允许操作 `astrbot_plugin_sylanne`。它只能删除精确匹配的正式插件记录，以及精确匹配的失败上传目录 `plugin_upload_astrbot_plugin_sylanne`，并始终使用 `delete_config=false` 和 `delete_data=false`。它不得删除 LivingMemory 或任何无关插件。

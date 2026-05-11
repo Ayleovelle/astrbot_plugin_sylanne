@@ -6,7 +6,7 @@ from pathlib import Path
 
 
 ROOT = Path(__file__).resolve().parents[1]
-PLUGIN_NAME = "astrbot_plugin_emotional_state"
+PLUGIN_NAME = "astrbot_plugin_sylanne"
 
 INCLUDE_ROOT_FILES = {
     "__init__.py",
@@ -41,6 +41,7 @@ ALLOWED_DOC_ASSETS = {
     Path("docs/assets/lifecycle_model_fit_summary.csv"),
     Path("docs/assets/lifecycle_model_fit_table.md"),
     Path("docs/assets/runtime_overview.svg"),
+    Path("docs/assets/sylanne-mascot.gif"),
     Path("docs/assets/workflow_and_proactive.svg"),
 }
 

@@ -8,7 +8,7 @@ except ImportError:
     from psychological_screening import PUBLIC_RISK_BOOLEAN_FIELDS
 
 
-PLUGIN_NAME = "astrbot_plugin_emotional_state"
+PLUGIN_NAME = "astrbot_plugin_sylanne"
 EMOTION_API_VERSION = "1.0"
 EMOTION_SCHEMA_VERSION = "astrbot.emotion_state.v2"
 EMOTION_MEMORY_SCHEMA_VERSION = "astrbot.emotion_memory.v1"

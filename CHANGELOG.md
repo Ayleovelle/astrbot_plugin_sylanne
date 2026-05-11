@@ -23,7 +23,7 @@
 
 - 新增环境压力降档、未知压力保守档、全局 worker 预算、平滑扩容和只读诊断不提交状态的单元测试。
 - `py -3.13 -m unittest tests.test_package_plugin tests.test_config_schema_contract tests.test_astrbot_lifecycle tests.test_command_tools tests.test_public_api -v`：236 项通过。
-- `dist/astrbot_plugin_emotional_state.zip` 包含运行时必要文件，不包含本地知识库和输出目录。
+- `dist/astrbot_plugin_sylanne.zip` 包含运行时必要文件，不包含本地知识库和输出目录。
 
 ## 1.5.0
 
