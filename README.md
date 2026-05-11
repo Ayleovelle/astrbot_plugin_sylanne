@@ -622,6 +622,7 @@ low_reasoning_max_context_chars = 1200
 | `/humanlike_reset` | `/拟人状态重置` | 重置拟人状态，受 `allow_humanlike_reset_backdoor` 控制。 |
 | `/lifelike_state` | `/生命化状态`、`/共同语境` | 查看生命化学习状态，包括新词、黑话、用户画像证据和开口策略。 |
 | `/lifelike_reset` | `/生命化状态重置`、`/共同语境重置` | 重置生命化学习状态，受 `allow_lifelike_learning_reset_backdoor` 控制。 |
+| `/sylanne_memory` | `/记忆查询`、`/查询记忆`、`/灵澜记忆` | 只读查询 Sylanne 自有记忆，显示命中摘要、深度、置信度和召回评分，用于检查记忆模块是否正常工作。 |
 | `/personality_drift_state` | `/人格漂移状态`、`/人格适应状态` | 查看真实时间人格漂移状态、锚点强度、时间门控和主要偏移。 |
 | `/personality_drift_reset` | `/人格漂移重置`、`/人格适应重置` | 重置人格漂移状态，受 `allow_personality_drift_reset_backdoor` 控制。 |
 | `/moral_repair_state` | `/道德修复状态`、`/信任修复状态` | 查看道德修复/信任修复状态。 |
@@ -716,6 +717,17 @@ low_reasoning_max_context_chars = 1200
 ```
 
 重置当前会话的 `lifelike_learning_state`。该命令受 `allow_lifelike_learning_reset_backdoor` 控制；默认允许。
+
+### 查询 Sylanne 自有记忆
+
+```text
+/sylanne_memory README
+/记忆查询 README
+/查询记忆 README
+/灵澜记忆 README
+```
+
+只读查询当前会话的自有长期记忆。返回内容会包含命中摘要、召回分数、记忆深度、置信度、证据次数和召回次数，方便配置者确认记忆有没有写入、能不能按关键词召回。这个入口不会强化记忆，也不会修改 `recall_count`、深度或置信度；真正对话里的召回仍由插件按预算自动注入 `[sylanne_memory_recall]`。
 
 ### 人格漂移状态
 
@@ -2286,6 +2298,7 @@ emotion_state -> humanlike_state -> 提示词/风格调制
 | `get_lifelike_initiative_policy(event_or_session)` | 否 | 获取当前适合开口、短应、追问或沉默的节奏策略。 |
 | `get_proactive_speech_decision(event_or_session, candidate_context="", use_llm=True)` | 否 | 只读判断是否适合主动开口，并返回理由、证据、话题方向、短句草案和 `dispatch_request`。 |
 | `request_proactive_speech_dispatch(event_or_session, candidate_context="", use_llm=True, dry_run=False, force=False)` | 是 | 请求 AstrBot 主动发送；默认受 `enable_proactive_speech_dispatch` 和冷却控制。 |
+| `query_sylanne_memory(event_or_session=None, query="", limit=5, include_dynamics=False)` | 否 | 只读查询 Sylanne 自有记忆，返回命中摘要、召回评分、深度、置信度、证据次数和召回次数；不会强化或改写记忆。 |
 | `get_lifelike_prompt_fragment(event_or_session)` | 否 | 获取共同语境和对话节奏提示词。 |
 | `observe_lifelike_text(event_or_session, text)` | 是 | 提交文本观察并更新新词、黑话、用户画像和边界线索。 |
 | `simulate_lifelike_update(event_or_session, text)` | 否 | 模拟更新，不落库。 |

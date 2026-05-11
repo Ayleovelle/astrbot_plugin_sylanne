@@ -135,6 +135,7 @@ try:
     )
     from .memory_engine import (
         MemoryRecallItem,
+        PUBLIC_MEMORY_STORE_SCHEMA_VERSION,
         SylanneMemoryState,
         apply_memory_time_decay,
         build_memory_prompt_fragment,
@@ -280,6 +281,7 @@ except ImportError:
     )
     from memory_engine import (
         MemoryRecallItem,
+        PUBLIC_MEMORY_STORE_SCHEMA_VERSION,
         SylanneMemoryState,
         apply_memory_time_decay,
         build_memory_prompt_fragment,
@@ -391,6 +393,7 @@ class _StateInjectionBudget:
     reserved_chars: int
     max_added_chars: int
     max_parts: int
+    compat_mode: str = ""
     added_chars: int = 0
     added_parts: int = 0
     skipped: list[dict[str, Any]] = None
@@ -489,6 +492,7 @@ _REQUIRED_EMOTION_SERVICE_METHODS: tuple[str, ...] = (
     "request_realtime_chat_dispatch",
     "observe_user_message_withdrawal",
     "observe_sticker_usage",
+    "query_sylanne_memory",
     "get_lifelike_prompt_fragment",
     "observe_lifelike_text",
     "simulate_lifelike_update",
@@ -783,9 +787,11 @@ class EmotionalStatePlugin(Star):
         self._record_conversation_pending_response_epoch(session_key, input_epoch)
         observed_at = self._observed_now()
         current_user_text = self._event_text(event) or str(getattr(request, "prompt", "") or "")
+        model_hint = await self._request_model_hint_for_event(event, request)
         early_injection_budget = self._state_injection_budget_for_request(
             session_key,
             request,
+            model_hint=model_hint,
         )
         await self._observe_agent_identity(identity, now=observed_at)
         fragment_payload = await self._observe_realtime_input_fragment_context_if_any(
@@ -1251,6 +1257,12 @@ class EmotionalStatePlugin(Star):
             injection_budget = self._state_injection_budget_for_request(
                 session_key,
                 request,
+                model_hint=model_hint,
+            )
+            self._append_gemini_visible_output_guard_if_needed(
+                request,
+                injection_budget,
+                model_hint=model_hint,
             )
             self._append_realtime_input_fragment_context_if_any(
                 event,
@@ -1596,6 +1608,7 @@ class EmotionalStatePlugin(Star):
                 response,
                 response_text,
                 reason="late_llm_response_after_user_message",
+                clear_completion=True,
             )
             self._stop_default_response_send(
                 event,
@@ -3476,6 +3489,102 @@ class EmotionalStatePlugin(Star):
                     written_at=written_at,
                 )
             )
+        return payload
+
+    async def query_sylanne_memory(
+        self,
+        event_or_session: AstrMessageEvent | str | None = None,
+        query: str = "",
+        *,
+        request: ProviderRequest | None = None,
+        session_key: str | None = None,
+        limit: int = 5,
+        include_dynamics: bool = False,
+        now: float | None = None,
+    ) -> dict[str, Any]:
+        """Public API: read-only query for Sylanne's own long-term memory."""
+        resolved_session_key = self._resolve_public_session_key(
+            event_or_session,
+            request=request,
+            session_key=session_key,
+        )
+        clean_query = self._clip_one_line(query, 900)
+        if not clean_query and self._looks_like_event(event_or_session):
+            clean_query = self._clip_one_line(
+                getattr(event_or_session, "message_str", "") or "",
+                900,
+            )
+        if not self._sylanne_memory_enabled():
+            return {
+                "schema_version": PUBLIC_MEMORY_STORE_SCHEMA_VERSION,
+                "kind": "sylanne_memory_query",
+                "enabled": False,
+                "read_only": True,
+                "session_key": resolved_session_key,
+                "query": self._clip_one_line(clean_query, 160),
+                "result_count": 0,
+                "total_records": 0,
+                "results": [],
+                "reason": "enable_sylanne_memory is false",
+            }
+        timestamp = self._observed_now() if now is None else float(now)
+        try:
+            state = await self._load_sylanne_memory_state(
+                resolved_session_key,
+                now=timestamp,
+            )
+        except Exception as exc:
+            logger.debug(f"{PLUGIN_NAME}: Sylanne memory query failed: {exc}")
+            return {
+                "schema_version": PUBLIC_MEMORY_STORE_SCHEMA_VERSION,
+                "kind": "sylanne_memory_query",
+                "enabled": True,
+                "read_only": True,
+                "session_key": resolved_session_key,
+                "query": self._clip_one_line(clean_query, 160),
+                "result_count": 0,
+                "total_records": 0,
+                "results": [],
+                "warning": "memory_state_unavailable",
+            }
+        bounded_limit = max(1, min(10, int(limit or 5)))
+        items = (
+            recall_memory(
+                state,
+                query=clean_query,
+                now=timestamp,
+                limit=min(5, bounded_limit),
+            )
+            if clean_query
+            else []
+        )
+        results = [
+            self._sylanne_memory_record_query_payload(item, now=timestamp)
+            for item in items[:bounded_limit]
+        ]
+        payload: dict[str, Any] = {
+            "schema_version": PUBLIC_MEMORY_STORE_SCHEMA_VERSION,
+            "kind": "sylanne_memory_query",
+            "enabled": True,
+            "read_only": True,
+            "session_key": resolved_session_key,
+            "query": clean_query,
+            "result_count": len(results),
+            "total_records": len(state.records),
+            "event_count": int(getattr(state, "event_count", 0)),
+            "results": results,
+            "notes": [
+                "查询入口只用于检查记忆模块，不会强化召回次数或修改记忆权重。",
+                "正常对话召回仍会按预算注入 sylanne_memory_recall 摘要。",
+            ],
+        }
+        if include_dynamics:
+            payload["dynamics"] = state.dynamics.to_dict()
+            if state.compaction_summary:
+                payload["compaction_summary"] = self._clip_one_line(
+                    state.compaction_summary,
+                    360,
+                )
         return payload
 
     async def inject_emotion_context(
@@ -5477,6 +5586,84 @@ class EmotionalStatePlugin(Star):
         except Exception as exc:
             logger.debug(f"{PLUGIN_NAME}: Sylanne memory reinforcement failed: {exc}")
 
+    def _sylanne_memory_record_query_payload(
+        self,
+        item: MemoryRecallItem,
+        *,
+        now: float,
+    ) -> dict[str, Any]:
+        record = item.record
+        age_seconds = max(0.0, float(now) - float(record.updated_at or record.created_at))
+        payload: dict[str, Any] = {
+            "memory_id": str(record.memory_id or ""),
+            "summary": self._clip_one_line(record.summary or record.text, 220),
+            "text_excerpt": self._clip_one_line(record.text, 260),
+            "score": round(float(item.score), 6),
+            "depth": round(float(record.depth), 6),
+            "confidence": round(float(record.confidence), 6),
+            "evidence_count": int(record.evidence_count),
+            "recall_count": int(record.recall_count),
+            "age_seconds": round(age_seconds, 3),
+            "updated_at": float(record.updated_at),
+            "reasons": list(item.reasons[:6]),
+        }
+        if record.layers:
+            payload["layers"] = {
+                str(key): round(float(value), 4)
+                for key, value in list(record.layers.items())[:6]
+            }
+        if record.emotional_signature:
+            payload["emotional_signature"] = {
+                str(key): round(float(value), 4)
+                for key, value in list(record.emotional_signature.items())[:8]
+            }
+        if record.associations:
+            payload["association_count"] = len(record.associations)
+            payload["top_associations"] = [
+                {
+                    "memory_id": str(memory_id),
+                    "weight": round(float(weight), 4),
+                }
+                for memory_id, weight in sorted(
+                    record.associations.items(),
+                    key=lambda pair: float(pair[1] or 0.0),
+                    reverse=True,
+                )[:3]
+            ]
+        return payload
+
+    def _format_sylanne_memory_query_for_user(self, payload: dict[str, Any]) -> str:
+        if not payload.get("enabled", True):
+            return "Sylanne 自有记忆未启用：enable_sylanne_memory=false。"
+        if payload.get("warning"):
+            return "Sylanne 自有记忆暂时无法读取，请稍后再试或检查日志。"
+        query = self._clip_one_line(str(payload.get("query") or ""), 120)
+        header = (
+            "Sylanne 自有记忆查询（只读调试视图）\n"
+            f"会话：{self._clip_one_line(str(payload.get('session_key') or ''), 80)}\n"
+            f"关键词：{query or '未提供'}\n"
+            f"命中：{int(payload.get('result_count') or 0)} / "
+            f"{int(payload.get('total_records') or 0)}"
+        )
+        results = payload.get("results") or []
+        if not results:
+            return (
+                header
+                + "\n没有查到相关记忆。可以先正常聊几轮，等稳定事件写入后再查。"
+            )
+        lines = [header]
+        for index, item in enumerate(results[:5], 1):
+            lines.append(
+                f"{index}. {item.get('summary') or item.get('text_excerpt') or ''}\n"
+                f"   score={float(item.get('score') or 0.0):.2f}, "
+                f"depth={float(item.get('depth') or 0.0):.2f}, "
+                f"confidence={float(item.get('confidence') or 0.0):.2f}, "
+                f"evidence={int(item.get('evidence_count') or 0)}, "
+                f"recall={int(item.get('recall_count') or 0)}"
+            )
+        lines.append("提示：这个入口只读，不会因为查询本身强化或改写记忆。")
+        return self._clip("\n".join(lines), 1800)
+
     def _sylanne_memory_recall_maturation_seconds(
         self,
         item: MemoryRecallItem,
@@ -6966,6 +7153,7 @@ class EmotionalStatePlugin(Star):
         text: str,
         *,
         reason: str,
+        clear_completion: bool = False,
     ) -> None:
         preserved = str(text or "")
         for name, value in (
@@ -6976,10 +7164,11 @@ class EmotionalStatePlugin(Star):
                 setattr(response, name, value)
             except Exception:
                 pass
-        try:
-            setattr(response, "completion_text", "")
-        except Exception:
-            pass
+        if clear_completion:
+            try:
+                setattr(response, "completion_text", "")
+            except Exception:
+                pass
 
     def _stop_default_response_send(
         self,
@@ -7930,8 +8119,16 @@ class EmotionalStatePlugin(Star):
                 " / ".join(parts) if parts else text,
                 REALTIME_ASSISTANT_HISTORY_EXCERPT_CHARS,
             ),
+            "question_excerpt": self._extract_pending_bot_question_excerpt(
+                " / ".join(parts) if parts else text,
+            ),
             "consumed": False,
         }
+        question_excerpt = str(entry.get("question_excerpt") or "").strip()
+        entry["looks_like_question"] = bool(question_excerpt)
+        entry["expects_short_answer"] = bool(
+            question_excerpt and self._looks_like_choice_or_direct_question(question_excerpt),
+        )
         cache = self._realtime_assistant_history_shadow_cache()
         queue = cache.setdefault(
             key,
@@ -7967,6 +8164,23 @@ class EmotionalStatePlugin(Star):
                 pass
             return False
         item = pending[-1]
+        if self._agent_history_already_contains_realtime_shadow(request, item):
+            item["consumed"] = True
+            item["consumed_at"] = self._observed_now()
+            item["consumed_reason"] = "agent_history_already_contains_reply"
+            return False
+        if self._should_anchor_short_answer_to_realtime_question(item, current_user_text):
+            appended = self._append_realtime_pending_bot_question_context(
+                request,
+                item,
+                current_user_text=current_user_text,
+                budget=budget,
+            )
+            if appended:
+                item["consumed"] = True
+                item["consumed_at"] = self._observed_now()
+                item["consumed_reason"] = "short_answer_bound_to_last_question"
+                return True
         if self._context_compression_summary_covers_realtime_shadow(request, item):
             item["consumed"] = True
             item["consumed_at"] = self._observed_now()
@@ -7996,6 +8210,116 @@ class EmotionalStatePlugin(Star):
             item["consumed"] = True
             item["consumed_at"] = self._observed_now()
         return appended
+
+    def _extract_pending_bot_question_excerpt(self, text: str) -> str:
+        value = " ".join(str(text or "").split()).strip()
+        if not value:
+            return ""
+        parts = [
+            part.strip()
+            for part in re.split(r"(?<=[。！？!?；;])\s+|/+", value)
+            if part.strip()
+        ]
+        candidates = parts or [value]
+        for candidate in reversed(candidates[-4:]):
+            if self._looks_like_choice_or_direct_question(candidate):
+                return self._head_text(candidate, 220)
+        if self._looks_like_choice_or_direct_question(value):
+            return self._head_text(value, 220)
+        return ""
+
+    def _looks_like_choice_or_direct_question(self, text: str) -> bool:
+        value = " ".join(str(text or "").split()).strip()
+        if not value:
+            return False
+        lowered = value.lower()
+        question_mark = "?" in value or "？" in value
+        choice_markers = (
+            "还是",
+            "或者",
+            "要不要",
+            "是不是",
+            "是否",
+            "哪一个",
+            "哪个",
+            "选",
+            "A/",
+            "B/",
+            "a/",
+            "b/",
+            "ip",
+            "域名",
+        )
+        if question_mark:
+            return True
+        if any(marker in value for marker in choice_markers):
+            return True
+        if " or " in lowered or " vs " in lowered:
+            return True
+        return False
+
+    def _looks_like_short_answer_to_pending_question(self, text: str) -> bool:
+        value = " ".join(str(text or "").split()).strip()
+        if not value:
+            return False
+        if "\n" in str(text or ""):
+            return False
+        if len(value) > 18:
+            return False
+        if "?" in value or "？" in value:
+            return False
+        compact = re.sub(r"[\s，。！？!?；;、,.]+", "", value)
+        if not compact:
+            return False
+        if len(compact) <= 10:
+            return True
+        return bool(re.fullmatch(r"[A-Za-z0-9_.:-]{1,18}", compact))
+
+    def _should_anchor_short_answer_to_realtime_question(
+        self,
+        item: dict[str, Any],
+        current_user_text: str,
+    ) -> bool:
+        question = str(item.get("question_excerpt") or "").strip()
+        if not question:
+            return False
+        if not bool(item.get("expects_short_answer") or item.get("looks_like_question")):
+            return False
+        return self._looks_like_short_answer_to_pending_question(current_user_text)
+
+    def _append_realtime_pending_bot_question_context(
+        self,
+        request: ProviderRequest,
+        item: dict[str, Any],
+        *,
+        current_user_text: str,
+        budget: _StateInjectionBudget | None,
+    ) -> bool:
+        question = self._head_one_line(str(item.get("question_excerpt") or ""), 220)
+        if not question:
+            return False
+        user_answer = self._head_one_line(str(current_user_text or ""), 80)
+        text = "\n".join(
+            [
+                "[sylanne_realtime_pending_bot_question]",
+                "上一轮 bot 刚提出了一个未闭合问题或二选一问题；当前用户短句优先视为对这个问题的回答，不要把它当成孤立的新话题。",
+                "如果回答很短，例如 IP、域名、A、B、可以、不行，请先绑定到 last_bot_question，再继续给出下一步。",
+                "source={source}; full_hash={hash}; expects_short_answer={expects}".format(
+                    source=self._head_one_line(str(item.get("source") or ""), 48),
+                    hash=str(item.get("full_text_hash") or "")[:16],
+                    expects=bool(item.get("expects_short_answer")),
+                ),
+                "last_bot_question=" + question,
+                "current_user_short_answer=" + user_answer,
+            ],
+        )
+        text = self._head_text(text, REALTIME_ASSISTANT_HISTORY_INJECTION_MAX_CHARS)
+        return self._append_temp_text_part(
+            request,
+            text,
+            source="realtime_pending_bot_question",
+            budget=budget,
+        )
 
     def _should_defer_realtime_shadow_for_low_signal(self, current_user_text: str) -> bool:
         profile = self._low_signal_text_profile(current_user_text)
@@ -8037,6 +8361,42 @@ class EmotionalStatePlugin(Star):
             return True
         excerpt = self._head_one_line(str(item.get("excerpt") or ""), 80)
         return bool(excerpt and excerpt in context_text)
+
+    def _agent_history_already_contains_realtime_shadow(
+        self,
+        request: ProviderRequest,
+        item: dict[str, Any],
+    ) -> bool:
+        context_text = "\n".join(
+            self._context_item_to_text(context_item)
+            for context_item in self._tail_items(getattr(request, "contexts", []) or [], 8)
+        )
+        if not context_text:
+            return False
+        excerpt = self._head_one_line(str(item.get("excerpt") or ""), 96)
+        if excerpt and excerpt in context_text:
+            return True
+        question = self._head_one_line(str(item.get("question_excerpt") or ""), 96)
+        if question and question in context_text:
+            return True
+        full_hash = str(item.get("full_text_hash") or "")
+        if full_hash and full_hash[:16] in context_text:
+            return True
+        normalized_context = self._normalize_realtime_history_match_text(context_text)
+        for candidate in (
+            str(item.get("excerpt") or ""),
+            str(item.get("question_excerpt") or ""),
+        ):
+            normalized_candidate = self._normalize_realtime_history_match_text(candidate)
+            if normalized_candidate and normalized_candidate in normalized_context:
+                return True
+        return False
+
+    def _normalize_realtime_history_match_text(self, text: str) -> str:
+        value = str(text or "").lower()
+        value = value.replace("/", "")
+        value = re.sub(r"[\s，。！？!?；;、,.：:（）()【】\\[\\]\"'“”‘’]+", "", value)
+        return value.strip()
 
     def _realtime_chat_active_dispatch_cache(self) -> dict[str, dict[str, Any]]:
         cache = getattr(self, "_realtime_chat_active_dispatches", None)
@@ -9610,6 +9970,23 @@ class EmotionalStatePlugin(Star):
             return
         await self._delete_fallibility_state(self._session_key(event))
         yield event.plain_result("已重置当前会话的瑕疵/犯错模拟状态。")
+
+    @filter.command("sylanne_memory", alias={"记忆查询", "查询记忆", "灵澜记忆"})
+    async def sylanne_memory_status(
+        self,
+        event: AstrMessageEvent,
+        query: str = "",
+    ):
+        """Read-only query for Sylanne's own long-term memory."""
+        payload = await self.query_sylanne_memory(
+            event,
+            query=query,
+            include_dynamics=self._cfg_bool(
+                "sylanne_memory_debug_view_enabled",
+                False,
+            ),
+        )
+        yield event.plain_result(self._format_sylanne_memory_query_for_user(payload))
 
     async def _observe_public_text(
         self,
@@ -11691,6 +12068,8 @@ class EmotionalStatePlugin(Star):
         self,
         session_key: str,
         request: ProviderRequest,
+        *,
+        model_hint: str = "",
     ) -> _StateInjectionBudget:
         request_budget_chars = max(
             0,
@@ -11705,6 +12084,11 @@ class EmotionalStatePlugin(Star):
             self._cfg_int("state_injection_max_added_chars", 2400),
         )
         max_parts = max(1, self._cfg_int("state_injection_max_parts", 8))
+        compat_mode = ""
+        if self._is_gemini_empty_output_risk_model(model_hint):
+            compat_mode = "gemini_empty_output_guard"
+            max_added_chars = min(max_added_chars, 1200)
+            max_parts = min(max_parts, 5)
         return _StateInjectionBudget(
             session_key=session_key,
             request_chars_before=self._estimate_provider_request_chars(request),
@@ -11712,6 +12096,105 @@ class EmotionalStatePlugin(Star):
             reserved_chars=reserved_chars,
             max_added_chars=max_added_chars,
             max_parts=max_parts,
+            compat_mode=compat_mode,
+        )
+
+    def _request_model_hint_text(
+        self,
+        request: ProviderRequest | None,
+        *,
+        provider_id: str | None = None,
+    ) -> str:
+        hints: list[str] = []
+        if provider_id:
+            hints.append(str(provider_id))
+        for name in (
+            "model",
+            "model_name",
+            "llm_model",
+            "chat_model",
+            "provider_id",
+            "provider",
+        ):
+            value = getattr(request, name, None) if request is not None else None
+            if value:
+                hints.append(str(value))
+        for name in ("metadata", "params", "provider_settings"):
+            value = getattr(request, name, None) if request is not None else None
+            if not isinstance(value, dict):
+                continue
+            for key in ("model", "model_name", "provider", "provider_id"):
+                item = value.get(key)
+                if item:
+                    hints.append(str(item))
+        compact: list[str] = []
+        seen: set[str] = set()
+        for hint in hints:
+            text = " ".join(str(hint or "").split()).strip()
+            if not text or text in seen:
+                continue
+            seen.add(text)
+            compact.append(text)
+        return " | ".join(compact)
+
+    def _is_gemini_empty_output_risk_model(self, model_hint: str | None) -> bool:
+        text = str(model_hint or "").lower()
+        if "gemini" not in text:
+            return False
+        return any(
+            marker in text
+            for marker in (
+                "preview",
+                "flash",
+                "latest",
+                "openai",
+                "compatible",
+            )
+        )
+
+    async def _request_model_hint_for_event(
+        self,
+        event: AstrMessageEvent,
+        request: ProviderRequest,
+    ) -> str:
+        provider_hint = str(self._cfg("emotion_provider_id", "") or "").strip()
+        if not provider_hint and callable(
+            getattr(getattr(self, "context", None), "get_current_chat_provider_id", None),
+        ):
+            provider_hint = str(await self._provider_id(event) or "").strip()
+        return self._request_model_hint_text(request, provider_id=provider_hint)
+
+    def _append_gemini_visible_output_guard_if_needed(
+        self,
+        request: ProviderRequest,
+        budget: _StateInjectionBudget | None,
+        *,
+        model_hint: str = "",
+    ) -> bool:
+        if not self._is_gemini_empty_output_risk_model(model_hint):
+            return False
+        source = "gemini_visible_output_guard"
+        if self._request_has_temp_text_source(request, source):
+            return False
+        text = (
+            "[sylanne_gemini_visible_output_guard]\n"
+            "兼容提醒：当前 Gemini/OpenAI 兼容模型可能在内部推理后返回空 content。"
+            "除非本轮确实必须调用工具，否则请直接输出可见的自然语言回复；"
+            "不要只进行隐藏思考、空白输出或只返回不可见推理。"
+        )
+        effective_budget = budget
+        if (
+            budget is not None
+            and budget.request_budget_chars > 0
+            and budget.request_chars_before >= budget.effective_total_budget
+        ):
+            effective_budget = None
+        return self._append_temp_text_part(
+            request,
+            text,
+            source=source,
+            budget=effective_budget,
+            required=True,
         )
 
     def _append_temp_text_part(
@@ -11789,6 +12272,7 @@ class EmotionalStatePlugin(Star):
         important_sources = {
             "realtime_chat_active_dispatch",
             "realtime_assistant_history_shadow",
+            "realtime_pending_bot_question",
             "interrupted_reply_breakpoint",
             "realtime_input_fragments",
             "user_correction_context",
@@ -11811,10 +12295,12 @@ class EmotionalStatePlugin(Star):
         source_markers = {
             "realtime_chat_active_dispatch": "sylanne_realtime_active_dispatch",
             "realtime_assistant_history_shadow": "sylanne_realtime_assistant_history",
+            "realtime_pending_bot_question": "sylanne_realtime_pending_bot_question",
             "interrupted_reply_breakpoint": "sylanne_interrupted_reply_breakpoint",
             "realtime_input_fragments": "sylanne_user_message_fragments",
             "user_correction_context": "sylanne_user_correction_context",
             "sylanne_memory_recall": "sylanne_memory_recall",
+            "gemini_visible_output_guard": "sylanne_gemini_visible_output_guard",
         }
         marker = source_markers.get(source, f"sylanne_source:{source}")
         for part in getattr(request, "extra_user_content_parts", []) or []:
@@ -11884,6 +12370,7 @@ class EmotionalStatePlugin(Star):
             "effective_total_budget_chars": budget.effective_total_budget,
             "max_added_chars": budget.max_added_chars,
             "max_parts": budget.max_parts,
+            "compat_mode": budget.compat_mode,
             "added_chars": budget.added_chars,
             "added_parts": budget.added_parts,
             "request_chars_after_plugin_estimate": (
@@ -11936,6 +12423,7 @@ class EmotionalStatePlugin(Star):
                 self._cfg_int("state_injection_max_added_chars", 2400),
             ),
             "max_parts": max(1, self._cfg_int("state_injection_max_parts", 8)),
+            "compat_mode": "",
             "added_chars": 0,
             "added_parts": 0,
             "appended": [],

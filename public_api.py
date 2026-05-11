@@ -60,6 +60,7 @@ _EMOTION_SERVICE_REQUIRED_METHODS = (
     "request_realtime_chat_dispatch",
     "observe_user_message_withdrawal",
     "observe_sticker_usage",
+    "query_sylanne_memory",
     "get_lifelike_prompt_fragment",
     "observe_lifelike_text",
     "simulate_lifelike_update",
@@ -489,6 +490,19 @@ class EmotionServiceProtocol(Protocol):
         source: str = "plugin",
         commit: bool = True,
         observed_at: float | None = None,
+    ) -> dict[str, Any]:
+        ...
+
+    async def query_sylanne_memory(
+        self,
+        event_or_session: Any = None,
+        query: str = "",
+        *,
+        request: Any = None,
+        session_key: str | None = None,
+        limit: int = 5,
+        include_dynamics: bool = False,
+        now: float | None = None,
     ) -> dict[str, Any]:
         ...
 

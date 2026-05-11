@@ -413,6 +413,67 @@ class AstrBotLifecycleTests(unittest.TestCase):
         self.assertNotIn("persona-" + "p" * 20, serialized)
         self.assertNotIn("history-" + "h" * 20, serialized)
 
+    def test_on_llm_request_applies_gemini_visible_output_guard(self):
+        plugin = new_plugin(
+            {
+                "assessment_timing": "post",
+                "state_injection_max_added_chars": 2400,
+                "state_injection_max_parts": 8,
+            },
+        )
+        self._bind_common_state_hooks(plugin)
+
+        async def fake_get_current_chat_provider_id(*, umo):
+            return "哈基米/gemini-3-flash-preview"
+
+        plugin.context = SimpleNamespace(
+            get_current_chat_provider_id=fake_get_current_chat_provider_id,
+        )
+        request = fake_request(session_id="s-gemini-guard", prompt="hello")
+
+        asyncio.run(plugin.on_llm_request(FakeEvent("s-gemini-guard"), request))
+
+        injected = "\n".join(self._request_text_parts(request))
+        self.assertIn("sylanne_gemini_visible_output_guard", injected)
+        self.assertEqual(
+            injected.count("sylanne_gemini_visible_output_guard"),
+            1,
+        )
+        diagnostics = asyncio.run(
+            plugin.get_agent_runtime_diagnostics("s-gemini-guard"),
+        )
+        injection = diagnostics["state_injection"]
+        self.assertEqual(injection["compat_mode"], "gemini_empty_output_guard")
+        self.assertLessEqual(injection["max_added_chars"], 1200)
+        self.assertLessEqual(injection["max_parts"], 5)
+
+    def test_non_gemini_request_keeps_normal_state_budget(self):
+        plugin = new_plugin(
+            {
+                "state_injection_max_added_chars": 2400,
+                "state_injection_max_parts": 8,
+            },
+        )
+        request = fake_request(session_id="s-gpt-budget", prompt="hello")
+        request.model = "gpt-5.5"
+
+        model_hint = plugin._request_model_hint_text(request)
+        budget = plugin._state_injection_budget_for_request(
+            "s-gpt-budget",
+            request,
+            model_hint=model_hint,
+        )
+        appended = plugin._append_gemini_visible_output_guard_if_needed(
+            request,
+            budget,
+            model_hint=model_hint,
+        )
+
+        self.assertFalse(appended)
+        self.assertEqual(budget.max_added_chars, 2400)
+        self.assertEqual(budget.max_parts, 8)
+        self.assertEqual(request.extra_user_content_parts, [])
+
     def test_full_state_injection_falls_back_to_compact_under_added_budget(self):
         plugin = new_plugin(
             {
@@ -3719,6 +3780,65 @@ class AstrBotLifecycleTests(unittest.TestCase):
         self.assertTrue(queue[-1]["consumed"])
         self.assertEqual(queue[-1]["consumed_reason"], "official_context_compression_summary")
 
+    def test_short_answer_anchors_to_previous_realtime_choice_question(self):
+        plugin = new_plugin({"enable_realtime_chat": True, "enable_sticker_reaction": False})
+        plugin._record_realtime_assistant_history_shadow(
+            "s-choice-anchor",
+            full_text="你是用 IP 直连的，还是域名呀？",
+            input_epoch=1,
+            message_parts=[{"text": "你是用 IP 直连的，还是域名呀？"}],
+            source="unit_test",
+        )
+        request = fake_request(session_id="s-choice-anchor", prompt="IP")
+
+        appended = plugin._append_realtime_continuity_context_if_any(
+            request,
+            "s-choice-anchor",
+            budget=None,
+            current_user_text="IP",
+        )
+
+        injected = "\n".join(self._request_text_parts(request))
+        self.assertTrue(appended)
+        self.assertIn("sylanne_realtime_pending_bot_question", injected)
+        self.assertIn("上一轮 bot 刚提出了一个未闭合问题", injected)
+        self.assertIn("你是用 IP 直连的，还是域名呀？", injected)
+        self.assertIn("current_user_short_answer=IP", injected)
+
+    def test_on_llm_request_keeps_short_answer_context_for_previous_bot_question(self):
+        plugin = new_plugin(
+            {
+                "assessment_timing": "post",
+                "inject_state": False,
+                "enable_realtime_chat": True,
+                "enable_sticker_reaction": False,
+                "use_llm_assessor": False,
+                "realtime_input_completion_probe_delay_seconds": 0.0,
+                "realtime_input_completion_max_wait_seconds": 0.0,
+            },
+        )
+        self._bind_common_state_hooks(plugin)
+        plugin._record_realtime_assistant_history_shadow(
+            "s-choice-request",
+            full_text="你是用 IP 直连的，还是域名呀？",
+            input_epoch=1,
+            message_parts=[{"text": "你是用 IP 直连的，还是域名呀？"}],
+            source="unit_test",
+        )
+        request = fake_request(session_id="s-choice-request", prompt="IP")
+
+        asyncio.run(
+            plugin.on_llm_request(
+                FakeEvent("s-choice-request", message="IP", sender_id="u1"),
+                request,
+            ),
+        )
+
+        injected = "\n".join(self._request_text_parts(request))
+        self.assertIn("sylanne_realtime_pending_bot_question", injected)
+        self.assertIn("current_user_short_answer=IP", injected)
+        self.assertIn("你是用 IP 直连的，还是域名呀？", injected)
+
     def test_interrupted_reply_recovery_can_include_sylanne_memory_summary(self):
         plugin = new_plugin(
             {
@@ -4128,7 +4248,10 @@ class AstrBotLifecycleTests(unittest.TestCase):
 
         asyncio.run(run_response())
 
-        self.assertEqual(response.completion_text, "")
+        self.assertEqual(
+            response.completion_text,
+            getattr(response, "_sylanne_intercepted_completion_text", ""),
+        )
         self.assertEqual(
             getattr(response, "_sylanne_intercepted_completion_text", ""),
             "第一句。第二句。",
@@ -4177,7 +4300,10 @@ class AstrBotLifecycleTests(unittest.TestCase):
 
         asyncio.run(run_response())
 
-        self.assertEqual(response.completion_text, "")
+        self.assertEqual(
+            response.completion_text,
+            getattr(response, "_sylanne_intercepted_completion_text", ""),
+        )
         self.assertTrue(
             any(("file_image", "C:/tmp/sylanne-image.png") in parts for _, _, parts in sent),
         )
@@ -4231,7 +4357,10 @@ class AstrBotLifecycleTests(unittest.TestCase):
 
         asyncio.run(run_response())
 
-        self.assertEqual(response.completion_text, "")
+        self.assertEqual(
+            response.completion_text,
+            getattr(response, "_sylanne_intercepted_completion_text", ""),
+        )
         self.assertEqual(
             getattr(response, "_sylanne_intercepted_completion_text", ""),
             "第一句。第二句。",
@@ -4293,7 +4422,10 @@ class AstrBotLifecycleTests(unittest.TestCase):
 
         injected = "\n".join(self._request_text_parts(next_request))
         duplicate_injected = "\n".join(self._request_text_parts(duplicate_request))
-        self.assertEqual(response.completion_text, "")
+        self.assertEqual(
+            response.completion_text,
+            getattr(response, "_sylanne_intercepted_completion_text", ""),
+        )
         self.assertIn(
             "插件的其他用户",
             getattr(response, "_sylanne_intercepted_completion_text", ""),
@@ -4304,6 +4436,67 @@ class AstrBotLifecycleTests(unittest.TestCase):
         self.assertIn("请先读 README", injected)
         self.assertLessEqual(len(injected), 1100)
         self.assertNotIn("sylanne_realtime_assistant_history", duplicate_injected)
+
+    def test_realtime_intercept_skips_shadow_when_agent_history_keeps_reply(self):
+        sent = []
+
+        class FakeContext:
+            async def send_message(self, origin, message):
+                sent.append((origin, str(message)))
+                return {"ok": True}
+
+        plugin = new_plugin(
+            {
+                "assessment_timing": "post",
+                "inject_state": False,
+                "enable_realtime_chat": True,
+                "realtime_chat_intercept_llm_response": True,
+                "enable_sticker_reaction": False,
+                "runtime_parameter_debug_override_enabled": True,
+                "realtime_chat_min_delay_seconds": 0.0,
+                "realtime_chat_max_delay_seconds": 0.0,
+            },
+        )
+        plugin.context = FakeContext()
+        self._bind_common_state_hooks(plugin)
+        response = SimpleNamespace(
+            completion_text="你是用 IP 直连的，还是域名呀？",
+        )
+
+        async def run_turns():
+            await plugin.on_llm_response(
+                FakeEvent("s-agent-history-kept", platform_name="aiocqhttp"),
+                response,
+            )
+            await self._await_background_tasks(plugin)
+            next_request = fake_request(
+                session_id="s-agent-history-kept",
+                prompt="IP",
+            )
+            next_request.contexts = [
+                {
+                    "role": "assistant",
+                    "content": response.completion_text,
+                },
+            ]
+            await plugin.on_llm_request(
+                FakeEvent("s-agent-history-kept", message="IP", sender_id="u1"),
+                next_request,
+            )
+            return next_request
+
+        next_request = asyncio.run(run_turns())
+
+        injected = "\n".join(self._request_text_parts(next_request))
+        self.assertEqual(
+            response.completion_text,
+            "你是用 IP 直连的，还是域名呀？",
+        )
+        intercepted = getattr(response, "_sylanne_intercepted_completion_text", "")
+        self.assertEqual(intercepted, response.completion_text)
+        self.assertTrue(sent)
+        self.assertNotIn("sylanne_realtime_assistant_history", injected)
+        self.assertNotIn("sylanne_realtime_pending_bot_question", injected)
 
     def test_unknown_platform_streaming_response_is_not_replayed(self):
         sent = []

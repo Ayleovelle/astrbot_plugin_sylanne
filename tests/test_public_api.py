@@ -234,6 +234,9 @@ class FakeEmotionService:
     async def observe_sticker_usage(self, *args, **kwargs):
         return {}
 
+    async def query_sylanne_memory(self, *args, **kwargs):
+        return {}
+
     async def get_lifelike_prompt_fragment(self, *args, **kwargs):
         return ""
 
@@ -3620,6 +3623,40 @@ class MemoryPayloadPublicApiTests(unittest.TestCase):
             ],
             "boundary",
         )
+
+    def test_query_sylanne_memory_public_api_is_read_only(self):
+        self._install_astrbot_stubs()
+        from memory_engine import MemoryRecord, SylanneMemoryState
+
+        plugin = self._new_plugin()
+        state = SylanneMemoryState.initial(now=10.0)
+        state.records.append(
+            MemoryRecord(
+                text="User prefers concise README quick-start examples.",
+                summary="Concise README quick-start examples.",
+                session_key="s-public-memory-query",
+                created_at=10.0,
+                updated_at=10.0,
+                depth=0.86,
+                confidence=0.8,
+                recall_count=0,
+            ),
+        )
+        plugin._sylanne_memory_cache = {"s-public-memory-query": state}
+
+        payload = asyncio.run(
+            plugin.query_sylanne_memory(
+                session_key="s-public-memory-query",
+                query="README quick-start",
+                now=12.0,
+            ),
+        )
+
+        self.assertTrue(payload["enabled"])
+        self.assertTrue(payload["read_only"])
+        self.assertEqual(payload["result_count"], 1)
+        self.assertIn("README", payload["results"][0]["summary"])
+        self.assertEqual(state.records[0].recall_count, 0)
 
     def test_memory_payload_without_raw_snapshot_keeps_humanlike_annotation(self):
         self._install_astrbot_stubs()

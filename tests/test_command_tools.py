@@ -478,6 +478,51 @@ class CommandAndToolSmokeTests(unittest.TestCase):
         self.assertEqual(loaded, ["session-1"])
         self.assertIn("拟人", outputs[0])
 
+    def test_sylanne_memory_query_command_is_read_only(self):
+        from memory_engine import MemoryRecord, SylanneMemoryState
+
+        plugin = new_plugin()
+        state = SylanneMemoryState.initial(now=100.0)
+        state.records.append(
+            MemoryRecord(
+                text="The user said README examples should stay concise.",
+                summary="README examples should stay concise.",
+                session_key="s-memory-query-command",
+                created_at=100.0,
+                updated_at=100.0,
+                depth=0.82,
+                confidence=0.76,
+                recall_count=0,
+            ),
+        )
+        plugin._sylanne_memory_cache["s-memory-query-command"] = state
+
+        outputs = asyncio.run(
+            collect_async_generator(
+                plugin.sylanne_memory_status(
+                    FakeEvent("s-memory-query-command"),
+                    query="README",
+                ),
+            ),
+        )
+
+        self.assertEqual(len(outputs), 1)
+        self.assertIn("只读", outputs[0])
+        self.assertIn("README examples", outputs[0])
+        self.assertEqual(state.records[0].recall_count, 0)
+
+    def test_sylanne_memory_query_command_reports_disabled(self):
+        plugin = new_plugin({"enable_sylanne_memory": False})
+
+        outputs = asyncio.run(
+            collect_async_generator(
+                plugin.sylanne_memory_status(FakeEvent("s-memory-disabled")),
+            ),
+        )
+
+        self.assertEqual(len(outputs), 1)
+        self.assertIn("未启用", outputs[0])
+
     def test_disabled_moral_repair_state_command_does_not_load_state(self):
         plugin = new_plugin()
 

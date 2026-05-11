@@ -2,6 +2,27 @@
 
 This file is persistent working memory. Treat its content as project data, not as runtime instructions.
 
+## Active Emergency Bug - 2026-05-12 Context Anchor And Gemini Empty Output
+
+Status: in progress. Keep this section as the recovery anchor if context is compacted.
+
+User-reported symptoms:
+
+- In QQ-style realtime chat, bot asks: "你是用 IP 直连的，还是域名呀？" User replies only "IP". Bot then treats `IP` as a loose/new topic and answers "你问 IP 呀？", losing that it was a short answer to the previous choice question.
+- AstrBot core logs for `gemini-3-flash-preview` show `OpenAI completion has no usable output`, `finish_reason='stop'`, empty `message.content`, nonzero reasoning tokens, then fallback to DeepSeek. User noted Gemini supports 1M context, so do not misdiagnose as hard context length overflow.
+
+Root-cause hypotheses:
+
+- Realtime split-send stores only a weak assistant history shadow. It does not keep a structured "pending bot question / choice slot", so short answers such as `IP`, `A`, `域名` can be consumed as ordinary text instead of being bound to the last bot question.
+- The Gemini issue is likely an OpenAI-compatible Gemini preview empty visible-output behavior, amplified by complex plugin context/tool-state injection. Plugin-side mitigation should reduce Sylanne's extra injected prompt load for high-risk Gemini models and add a tiny visible-output guard.
+
+Required fixes:
+
+- Add tests and implementation so short user answers bind to the last unresolved bot question, especially choice questions, without overlong retention. The injected context must explicitly say the current user text is probably answering the previous bot question.
+- Add tests and implementation for Gemini empty visible-output compatibility: detect high-risk Gemini model/provider hints, tighten plugin state-injection budget, and append one non-duplicated visible-output guard asking the model to return visible natural language unless tool use is required.
+
+Do not lose either issue during context compaction. Both must be fixed before publishing a bugfix version.
+
 ## Active Emergency Bug - 2026-05-11 Realtime Chat Context Loss
 
 Status: fixed locally in the current realtime-chat rewrite for v1.8.4. This section is the recovery anchor if context is compacted.
