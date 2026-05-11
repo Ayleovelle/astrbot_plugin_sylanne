@@ -4261,6 +4261,64 @@ class AstrBotLifecycleTests(unittest.TestCase):
         self.assertEqual(assessment_calls[0]["current_text"], "第一句。第二句。")
         self.assertEqual(saves[0][0], "s-intercept")
 
+    def test_on_llm_response_intercept_writes_visible_realtime_logs(self):
+        import main
+
+        sent = []
+        logs = []
+        original_logger = main.logger
+
+        class FakeLogger:
+            def info(self, message):
+                logs.append(str(message))
+
+            def debug(self, message):
+                logs.append(str(message))
+
+            def warning(self, message):
+                logs.append(str(message))
+
+        class FakeContext:
+            async def send_message(self, origin, message):
+                sent.append((origin, str(message)))
+                return {"ok": True}
+
+        plugin = new_plugin(
+            {
+                "assessment_timing": "post",
+                "enable_realtime_chat": True,
+                "realtime_chat_intercept_llm_response": True,
+                "enable_sticker_reaction": False,
+                "runtime_parameter_debug_override_enabled": True,
+                "realtime_chat_min_delay_seconds": 0.0,
+                "realtime_chat_max_delay_seconds": 0.0,
+            },
+        )
+        plugin.context = FakeContext()
+        self._bind_common_state_hooks(plugin)
+        response = SimpleNamespace(completion_text="第一句。第二句。")
+
+        async def run_response():
+            await plugin.on_llm_response(
+                FakeEvent("s-intercept-log", platform_name="aiocqhttp"),
+                response,
+            )
+            await self._await_background_tasks(plugin)
+
+        try:
+            main.logger = FakeLogger()
+            asyncio.run(run_response())
+        finally:
+            main.logger = original_logger
+
+        joined = "\n".join(logs)
+        self.assertIn("即时聊天接管主回复", joined)
+        self.assertIn("准备分条发送", joined)
+        self.assertIn("已发送分条 1/2", joined)
+        self.assertIn("分条发送完成", joined)
+        self.assertIn("第一句", joined)
+        self.assertEqual(len(sent), 2)
+
     def test_on_llm_response_intercept_preserves_result_chain_images(self):
         from astrbot.api.event import MessageChain
 

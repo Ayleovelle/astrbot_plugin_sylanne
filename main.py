@@ -556,7 +556,7 @@ def get_emotional_state_plugin(context: Context) -> Any | None:
     PLUGIN_NAME,
     "pidan",
     "Soulful Yearning Lifelike AstrBot Neural Narrative Engine：维护情绪、人格、记忆、氛围和表达节奏的 Sylanne",
-    "2.1.0",
+    "2.1.1",
     "",
 )
 class EmotionalStatePlugin(Star):
@@ -1623,8 +1623,17 @@ class EmotionalStatePlugin(Star):
                 session_key=identity.conversation_id,
             )
             plan["input_epoch"] = response_epoch
+            plan["full_text"] = response_text
             plan["media_parts"] = self._extract_realtime_response_media_parts(response)
             if plan.get("message_parts"):
+                self._log_info(
+                    f"{PLUGIN_NAME}: 即时聊天接管主回复 "
+                    f"session={identity.conversation_id} "
+                    f"epoch={response_epoch if response_epoch is not None else 'none'} "
+                    f"原文长度={len(response_text)} "
+                    f"分条数={len(plan.get('message_parts') or [])} "
+                    f"预览=\"{self._clip_one_line(response_text, 180)}\"",
+                )
                 self._preserve_intercepted_completion_text(
                     response,
                     response_text,
@@ -6482,6 +6491,18 @@ class EmotionalStatePlugin(Star):
                 for part in parts
                 if str(part.get("text") or "").strip()
             )
+        media_parts = self._normalize_realtime_media_parts(plan.get("media_parts"))
+        sticker = plan.get("sticker") if isinstance(plan.get("sticker"), dict) else {}
+        self._log_info(
+            f"{PLUGIN_NAME}: 准备分条发送 "
+            f"session={session_key} "
+            f"source={source} "
+            f"origin={self._clip_one_line(origin, 120)} "
+            f"分条数={len(parts)} "
+            f"媒体数={len(media_parts)} "
+            f"表情={bool(sticker.get('should_send'))} "
+            f"预览=\"{self._clip_one_line(full_text, 180)}\"",
+        )
         self._start_realtime_chat_active_dispatch(
             session_key,
             input_epoch=input_epoch,
@@ -6516,6 +6537,13 @@ class EmotionalStatePlugin(Star):
                         "result": self._bounded_scalar_or_summary(result),
                     },
                 )
+                self._log_info(
+                    f"{PLUGIN_NAME}: 已发送分条 "
+                    f"{len(results)}/{len(parts)} "
+                    f"session={session_key} "
+                    f"chars={len(text)} "
+                    f"文本=\"{self._clip_one_line(text, 180)}\"",
+                )
                 await asyncio.sleep(REALTIME_CHAT_INTERRUPT_GRACE_SECONDS)
                 if self._conversation_reply_is_stale(session_key, input_epoch):
                     interrupted_reason = "user_interrupted"
@@ -6543,9 +6571,7 @@ class EmotionalStatePlugin(Star):
             session_key,
             input_epoch,
         ):
-            for media_part in self._normalize_realtime_media_parts(
-                plan.get("media_parts"),
-            ):
+            for media_part in media_parts:
                 if self._conversation_reply_is_stale(session_key, input_epoch):
                     interrupted_reason = "user_interrupted"
                     break
@@ -6569,8 +6595,13 @@ class EmotionalStatePlugin(Star):
                         "result": self._bounded_scalar_or_summary(raw_media_result),
                     },
                 )
+                self._log_info(
+                    f"{PLUGIN_NAME}: 已发送实时聊天媒体 "
+                    f"session={session_key} "
+                    f"index={media_part.get('index')} "
+                    f"kind={media_part.get('kind')}",
+                )
         sticker_result = None
-        sticker = plan.get("sticker") if isinstance(plan.get("sticker"), dict) else {}
         if sticker.get("should_send") and not self._conversation_reply_is_stale(
             session_key,
             input_epoch,
@@ -6591,6 +6622,11 @@ class EmotionalStatePlugin(Star):
                         "judgement": judgement,
                         "result": self._bounded_scalar_or_summary(raw_sticker_result),
                     }
+                    self._log_info(
+                        f"{PLUGIN_NAME}: 已发送实时聊天表情 "
+                        f"session={session_key} "
+                        f"id={self._clip_one_line(str(candidate.get('id') or candidate.get('path') or candidate.get('url') or ''), 120)}",
+                    )
                 else:
                     sticker_result = {
                         "sent": False,
@@ -6612,6 +6648,13 @@ class EmotionalStatePlugin(Star):
                 source=source,
             )
             self._finish_realtime_chat_active_dispatch(session_key)
+            self._log_info(
+                f"{PLUGIN_NAME}: 分条发送被用户插话打断 "
+                f"session={session_key} "
+                f"reason={interrupted_reason} "
+                f"已发={len(results)} "
+                f"未发={max(0, len(parts) - len(results))}",
+            )
         self._realtime_chat_last_sent_cache()[session_key] = self._observed_now()
         payload = {
             "api": "context.send_message",
@@ -6625,6 +6668,14 @@ class EmotionalStatePlugin(Star):
         }
         if interrupted_reason:
             payload["interrupted_reason"] = interrupted_reason
+        else:
+            self._log_info(
+                f"{PLUGIN_NAME}: 分条发送完成 "
+                f"session={session_key} "
+                f"已发={len(results)} "
+                f"媒体={payload['media_count']} "
+                f"表情={bool(sticker_result and sticker_result.get('sent'))}",
+            )
         return payload
 
     async def _judge_sticker_consistency(
@@ -13860,6 +13911,11 @@ class EmotionalStatePlugin(Star):
 
     def _log_warning(self, message: str) -> None:
         writer = getattr(logger, "warning", None) or getattr(logger, "debug", None)
+        if callable(writer):
+            writer(message)
+
+    def _log_info(self, message: str) -> None:
+        writer = getattr(logger, "info", None) or getattr(logger, "debug", None)
         if callable(writer):
             writer(message)
 

@@ -2,6 +2,22 @@
 
 本文件用于 AstrBot 插件市场/管理页展示更新内容。更完整的设计说明、公式推导、测试矩阵和维护手册见 `README.md`。
 
+## 2.1.1
+
+发布日期：2026-05-12
+
+### 修复
+
+- 修复即时聊天接管主回复时，AstrBot 核心日志只显示空 `Prepare to send`、不方便确认插件是否已经接管和分条发送的问题。
+- 新增即时聊天接管链路的 `INFO` 级中文日志：接管主回复、准备分条发送、逐条发送、媒体/表情发送、完成发送或被用户插话打断都会留下可读记录。
+- 保持默认发送口阻断逻辑不变，避免整段主回复和分条消息重复发送。
+
+### 验证
+
+- `python -m pytest -q tests/test_astrbot_lifecycle.py -k "visible_realtime_logs or realtime_chat or realtime_intercept"`
+- `python -m py_compile main.py tests\test_astrbot_lifecycle.py`
+- `git diff --check`
+
 ## 2.1.0
 
 发布日期：2026-05-12

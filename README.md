@@ -2,7 +2,7 @@
 
 > <span style="font-size: 1.08em;"><strong>Soulful Yearning Lifelike AstrBot Neural Narrative Engine</strong>。她维护的不只是“情绪标签”，而是情绪、人格、记忆、氛围、主动性和表达节奏交织成的长期状态。</span>
 
-![版本 2.1.0](https://img.shields.io/badge/version-2.1.0-blue)
+![版本 2.1.1](https://img.shields.io/badge/version-2.1.1-blue)
 ![AstrBot >=4.9.2,<5.0.0](https://img.shields.io/badge/AstrBot-%3E%3D4.9.2%2C%3C5.0.0-green)
 ![Python 3.10+](https://img.shields.io/badge/Python-3.10%2B-yellow)
 ![协议 astrbot.emotion_state.v2](https://img.shields.io/badge/schema-astrbot.emotion__state.v2-purple)
@@ -39,7 +39,7 @@
 
 <br clear="right">
 
-`2.1.0` 在自有记忆知识库层基础上，新增只读记忆查询入口，并继续修复即时聊天上下文连续性：短答会更稳地锚定上一轮 bot 未闭合问题，分段接管时保留 Agent 原生历史，Gemini 兼容保护会尽量避免“有推理 token 但可见输出为空”的异常放大。Sylanne 仍不依赖外部长期记忆插件，而是把稳定事件写入本地 KV 记忆库，按真实时间强化、遗忘和限长召回。记忆之间会建立少量可解释关联边；调出核心记忆时，她会在硬预算内自动联想少量相邻记忆，帮助理解“他们”“刚才那个”“上次进度”这类长期指代，但不会把整张记忆网塞进 prompt。
+`2.1.1` 修复即时聊天接管时日志不可见的问题：AstrBot 默认发送口仍会被阻断，避免整段主回复重复发出；同时 Sylanne 会在日志中明确写出“接管主回复、准备分条发送、已发送分条、媒体/表情发送、完成或被用户插话打断”等状态，方便排查空消息日志。她仍不依赖外部长期记忆插件，而是把稳定事件写入本地 KV 记忆库，按真实时间强化、遗忘和限长召回。
 
 | 能力 | 作用 |
 | --- | --- |
@@ -103,19 +103,19 @@
 | --- | --- |
 | 插件目录名 | `astrbot_plugin_sylanne` |
 | 显示名 | `Sylanne` |
-| 当前版本 | `2.1.0` |
+| 当前版本 | `2.1.1` |
 | AstrBot 版本 | `>=4.9.2,<5.0.0` |
 | Python | `3.10+` |
 | 许可证 | `GPL-3.0-or-later` |
 | 运行时第三方依赖 | 当前无额外依赖，见 `requirements.txt` |
 
-`2.1.0` 保留 Sylanne 自有记忆知识库的全部机制，并补上面向使用者的只读查询入口：`/sylanne_memory`、`/记忆查询`、`/查询记忆`、`/灵澜记忆` 可查看当前会话命中的记忆摘要、召回分数、记忆深度、置信度、证据次数和召回次数；公共 API 也新增 `query_sylanne_memory(...)`，方便其他插件做只读诊断。这个查询不会强化记忆，也不会改写 `recall_count`、深度或置信度。当前版本还继续修复即时聊天上下文连续性：分段接管不再让 Agent 原生历史变空，旧回复会保留内部截断点，短答如 `IP` 会更稳地绑定上一轮 bot 的未闭合问题；Gemini 兼容保护会收紧高风险模型的额外状态注入，并要求判断模型返回可见自然语言。核心情绪、回复后后台评估（post）、`group_atmosphere_state`、`humanlike_state`、`lifelike_learning_state`、`personality_drift_state`、Sylanne 自有记忆、即时聊天节奏和欺骗/操控/逃责类动作阻断默认自动运行；道德修复、瑕疵模拟、心理筛查等实验/维护模块仍由配置者显式打开。
+`2.1.1` 保留 Sylanne 自有记忆知识库和 `2.1.0` 只读记忆查询入口，并补上即时聊天接管链路的可见日志：当主回复被插件接管时，日志会显示原文长度、分条数量、预览、每条发送结果、媒体/表情发送结果，以及用户插话导致的中断信息。核心情绪、回复后后台评估（post）、`group_atmosphere_state`、`humanlike_state`、`lifelike_learning_state`、`personality_drift_state`、Sylanne 自有记忆、即时聊天节奏和欺骗/操控/逃责类动作阻断默认自动运行；道德修复、瑕疵模拟、心理筛查等实验/维护模块仍由配置者显式打开。
 
 发布包会包含运行代码、README、CHANGELOG、LICENSE、配置结构（schema）、docs 和 `docs/assets/` 中的聚合图表；不会包含 `tests/`、`scripts/`、`literature_kb/`、`personality_literature_kb/`、`psychological_literature_kb/`、`humanlike_agent_literature_kb/`、`raw/`、`output/`、`dist/` 等开发、研究、原始样本或缓存目录。
 
 ### 当前版本发布记录
 
-`v2.1.0` 合并在 `main` 上，对外安装版本由 `metadata.yaml` 和 `main.py @register(...)` 共同声明为 `2.1.0`。本版按版本规则提升第二位版本号：在 `2.0.0` 自有记忆知识库层上新增只读记忆查询入口，并修复即时聊天上下文锚定与 Gemini 空可见输出兼容问题；公共 API 版本仍保持 `1.0`，schema 仍保持向后兼容。
+`v2.1.1` 合并在 `main` 上，对外安装版本由 `metadata.yaml` 和 `main.py @register(...)` 共同声明为 `2.1.1`。本版按版本规则提升第三位版本号：修复即时聊天接管后日志不可见的问题；公共 API 版本仍保持 `1.0`，schema 仍保持向后兼容。
 
 当前版本的主要变化：
 
@@ -127,7 +127,7 @@
 | 强化与遗忘 | 只有真正注入 prompt 的记忆才会触发召回强化；长期无证据、无召回且深度/置信度很低的弱记忆会按真实时间剪枝，并清理悬空关联边。 |
 | 上下文安全预算 | 召回结果只作为 `[sylanne_memory_recall]` 限长摘要注入，并继续受请求预算和官方上下文压缩清洗逻辑约束。 |
 | 模块互斥自检 | 发布前覆盖自有记忆、主动发言、官方上下文压缩、即时聊天、公共 API、配置契约和包体预检，验证模块之间不会互相回灌或重复调用外部 LivingMemory。 |
-| 公开契约 | 插件版本为 `2.1.0`；公共 API 版本仍为 `1.0`，schema 仍保持 `astrbot.emotion_state.v2` 等版本化契约。 |
+| 公开契约 | 插件版本为 `2.1.1`；公共 API 版本仍为 `1.0`，schema 仍保持 `astrbot.emotion_state.v2` 等版本化契约。 |
 
 旧版本发布记录统一放在 `CHANGELOG.md`。README 只展示当前版本，避免插件管理页从历史段落误抓旧版本号。
 
@@ -2878,7 +2878,7 @@ $env:ASTRBOT_EXPECT_PLUGIN = "astrbot_plugin_sylanne"
 脚本会在输出 JSON 里写出 `expectedPluginRuntime`，包含插件列表 API 中返回的 `version`、`displayName`、`activated`、`author`、`astrbotVersion` 等只读字段。若目标插件存在但 `activated=false`，脚本会失败退出。需要把版本和显示名也作为硬断言时，可以额外设置：
 
 ```powershell
-$env:ASTRBOT_EXPECT_PLUGIN_VERSION = "2.1.0"
+$env:ASTRBOT_EXPECT_PLUGIN_VERSION = "2.1.1"
 $env:ASTRBOT_EXPECT_PLUGIN_DISPLAY_NAME = "Sylanne"
 & $node scripts\remote_smoke_playwright.js
 ```
@@ -3097,7 +3097,7 @@ inject_state = false
 humanlike_memory_write_enabled = true
 ```
 
-拟人状态默认自动运行。若没有看到 `humanlike_state_at_write`，优先确认插件是否为 `2.1.0` 或更新版本、`humanlike_memory_write_enabled=true`，以及调用方是否保留了完整记忆载荷。
+拟人状态默认自动运行。若没有看到 `humanlike_state_at_write`，优先确认插件是否为 `2.1.1` 或更新版本、`humanlike_memory_write_enabled=true`，以及调用方是否保留了完整记忆载荷。
 
 ### 拟人状态没有生效
 
