@@ -339,7 +339,7 @@ PROACTIVE_SCHEDULER_IDLE_DELAY_SECONDS = 300.0
 PROACTIVE_SCHEDULER_NORMAL_DELAY_SECONDS = 120.0
 PROACTIVE_SCHEDULER_BUSY_DELAY_SECONDS = 240.0
 PROACTIVE_SCHEDULER_MAX_CHECKS_PER_ROUND = 2
-PROACTIVE_SCHEDULER_SESSION_RECHECK_SECONDS = 180.0
+PROACTIVE_SCHEDULER_SESSION_RECHECK_SECONDS = 900.0
 PROACTIVE_CONTEXT_WINDOW_LIMIT = 6
 PROACTIVE_CONTEXT_SUMMARY_MAX_CHARS = 1800
 PROACTIVE_MEMORY_RECALL_MAX_CHARS = 620
@@ -347,7 +347,7 @@ SYLANNE_MEMORY_RECALL_INJECTION_MAX_CHARS = 720
 SYLANNE_MEMORY_RECALL_QUERY_MAX_CHARS = 900
 INTERRUPTED_REPLY_BREAKPOINT_LIMIT = 4
 INTERRUPTED_REPLY_INJECTION_MAX_ITEMS = 1
-INTERRUPTED_REPLY_INJECTION_MAX_CHARS = 360
+INTERRUPTED_REPLY_INJECTION_MAX_CHARS = 720
 INTERRUPTED_REPLY_LOCAL_MAX_CHARS = 4000
 REALTIME_CHAT_INTERRUPT_GRACE_SECONDS = 0.05
 REALTIME_ASSISTANT_HISTORY_LIMIT = 3
@@ -416,6 +416,10 @@ class _StateInjectionBudget:
     @property
     def remaining_added_chars(self) -> int:
         return self.max_added_chars - self.added_chars
+
+    @property
+    def agent_owned_context(self) -> bool:
+        return self.compat_mode == "gemini_agent_owned_context"
 
 
 @dataclass
@@ -556,7 +560,7 @@ def get_emotional_state_plugin(context: Context) -> Any | None:
     PLUGIN_NAME,
     "pidan",
     "Soulful Yearning Lifelike AstrBot Neural Narrative Engine：维护情绪、人格、记忆、氛围和表达节奏的 Sylanne",
-    "2.1.1",
+    "2.1.2",
     "",
 )
 class EmotionalStatePlugin(Star):
@@ -1563,11 +1567,11 @@ class EmotionalStatePlugin(Star):
                 request,
                 realtime_style_prompt_fragment(),
                 source="realtime_chat.style",
-                budget=(
-                    self._state_injection_budget_for_request(session_key, request)
-                    if inject_state
-                    else None
-                ),
+                budget=injection_budget,
+            )
+            self._record_state_injection_diagnostics(
+                injection_budget,
+                decision=injection_decision,
             )
         await self._observe_sylanne_memory_event_if_enabled(
             session_key,
@@ -1587,6 +1591,9 @@ class EmotionalStatePlugin(Star):
         response: LLMResponse,
     ) -> None:
         if _INTERNAL_LLM_CALL.get() or not self._cfg_bool("enabled", True):
+            return
+
+        if self._response_has_tool_call_payload(response):
             return
 
         response_text = getattr(response, "completion_text", "") or ""
@@ -1634,15 +1641,6 @@ class EmotionalStatePlugin(Star):
                     f"分条数={len(plan.get('message_parts') or [])} "
                     f"预览=\"{self._clip_one_line(response_text, 180)}\"",
                 )
-                self._preserve_intercepted_completion_text(
-                    response,
-                    response_text,
-                    reason="realtime_chat_response_intercept",
-                )
-                self._stop_default_response_send(
-                    event,
-                    reason="realtime_chat_response_intercept",
-                )
                 if self._conversation_reply_is_stale(
                     identity.conversation_id,
                     response_epoch,
@@ -1655,7 +1653,33 @@ class EmotionalStatePlugin(Star):
                         full_text=response_text,
                         message_parts=plan.get("message_parts"),
                     )
+                    self._preserve_intercepted_completion_text(
+                        response,
+                        response_text,
+                        reason="user_interrupted_before_dispatch",
+                        clear_completion=True,
+                    )
+                    self._stop_default_response_send(
+                        event,
+                        reason="user_interrupted_before_dispatch",
+                    )
                 else:
+                    delivery_envelope = self._build_realtime_delivery_envelope_text(
+                        response_text,
+                        session_key=identity.conversation_id,
+                        input_epoch=response_epoch,
+                        message_parts=plan.get("message_parts"),
+                    )
+                    self._preserve_intercepted_completion_text(
+                        response,
+                        response_text,
+                        reason="realtime_chat_response_intercept",
+                        completion_text_override=delivery_envelope,
+                    )
+                    self._stop_default_response_send(
+                        event,
+                        reason="realtime_chat_response_intercept",
+                    )
                     realtime_dispatch_task = self._schedule_background_task(
                         self._send_realtime_chat_plan(
                             event,
@@ -5005,6 +5029,11 @@ class EmotionalStatePlugin(Star):
             candidate_context=candidate_context,
             use_llm=use_llm,
         )
+        topic_judgement = self._apply_proactive_topic_evidence_gate(
+            topic_judgement,
+            decision=decision,
+            topics=topics,
+        )
         decision["topic_judgement"] = topic_judgement
         if topic_judgement.get("topic_text"):
             decision["selected_topic"] = {
@@ -5499,6 +5528,15 @@ class EmotionalStatePlugin(Star):
         if not self._sylanne_memory_enabled():
             return False
         source = "sylanne_memory_recall"
+        if budget is not None and budget.agent_owned_context:
+            budget.skipped.append(
+                {
+                    "source": source,
+                    "chars": 0,
+                    "reason": "agent_owned_context",
+                },
+            )
+            return False
         if self._request_has_temp_text_source(request, source):
             return False
         text = await self._sylanne_memory_recall_summary_for_request(
@@ -5747,6 +5785,7 @@ class EmotionalStatePlugin(Star):
             "[sylanne_realtime_assistant_history]",
             "[sylanne_realtime_active_dispatch]",
             "[sylanne_interrupted_reply_breakpoint]",
+            "[sylanne_realtime_delivery_status]",
             "[sylanne_user_message_fragments]",
             "[sylanne_user_correction_context]",
         )
@@ -5757,6 +5796,9 @@ class EmotionalStatePlugin(Star):
         skipping = False
         for line in lines:
             stripped = line.strip()
+            if stripped == "[assistant_reply_original]":
+                skipping = False
+                continue
             if any(stripped.startswith(marker) for marker in internal_markers):
                 skipping = True
                 continue
@@ -6087,6 +6129,95 @@ class EmotionalStatePlugin(Star):
             judgement["opening_style"] = "stay_silent"
         return judgement
 
+    def _apply_proactive_topic_evidence_gate(
+        self,
+        judgement: dict[str, Any],
+        *,
+        decision: dict[str, Any],
+        topics: list[dict[str, Any]],
+    ) -> dict[str, Any]:
+        if str(judgement.get("need_mode") or "") != "progress_check":
+            return judgement
+        if self._has_supported_progress_topic(topics):
+            return judgement
+        return self._downgrade_unsupported_progress_judgement(
+            judgement,
+            decision=decision,
+            topics=topics,
+        )
+
+    def _has_supported_progress_topic(self, topics: list[dict[str, Any]]) -> bool:
+        for topic in topics:
+            if str(topic.get("kind") or "") != "progress_check":
+                continue
+            evidence = topic.get("evidence")
+            if isinstance(evidence, dict) and evidence.get("sources"):
+                return True
+            if str(topic.get("topic") or "").strip() and str(topic.get("reason") or "").strip():
+                return True
+        return False
+
+    def _downgrade_unsupported_progress_judgement(
+        self,
+        judgement: dict[str, Any],
+        *,
+        decision: dict[str, Any],
+        topics: list[dict[str, Any]],
+    ) -> dict[str, Any]:
+        playful = self._select_proactive_alternative_topic(
+            topics,
+            kinds={"playful_ping", "prank_light"},
+        )
+        if playful and bool(decision.get("should_speak")):
+            need_mode = str(playful.get("kind") or "playful_ping")
+            opening_style = "tiny_prank" if need_mode == "prank_light" else "playful_ping"
+            return {
+                "schema_version": "astrbot.proactive_topic_judgement.v1",
+                "kind": "llm_topic_judgement",
+                "should_speak": True,
+                "need_mode": need_mode,
+                "topic_text": "",
+                "speech_intent": "进度关心缺少明确证据，改成低压力的调皮轻打扰。",
+                "opening_style": opening_style,
+                "topic_evidence": str(playful.get("reason") or "轻松氛围信号")[:240],
+                "draft_message": self._fallback_proactive_message(need_mode, ""),
+                "confidence": self._clamp01(playful.get("confidence", judgement.get("confidence", 0.0))),
+                "reason": "progress_check 缺少明确进度证据，已降级为轻打扰，避免莫名其妙关心进度。",
+                "source": "evidence_gate",
+            }
+        return {
+            "schema_version": "astrbot.proactive_topic_judgement.v1",
+            "kind": "llm_topic_judgement",
+            "should_speak": False,
+            "need_mode": "silence",
+            "topic_text": "",
+            "speech_intent": "进度关心缺少明确证据，沉默比硬找话更像真人。",
+            "opening_style": "stay_silent",
+            "topic_evidence": "没有找到近期任务、期限、未完成事项或用户要求跟进的证据。",
+            "draft_message": "",
+            "confidence": self._clamp01(judgement.get("confidence", 0.0)),
+            "reason": "progress_check 缺少明确证据，本地门控阻断主动关心进度。",
+            "source": "evidence_gate",
+        }
+
+    def _select_proactive_alternative_topic(
+        self,
+        topics: list[dict[str, Any]],
+        *,
+        kinds: set[str],
+    ) -> dict[str, Any] | None:
+        candidates = [
+            topic
+            for topic in topics
+            if str(topic.get("kind") or "") in kinds
+        ]
+        if not candidates:
+            return None
+        return max(
+            candidates,
+            key=lambda topic: self._as_float_value(topic.get("score"), 0.0),
+        )
+
     def _parse_proactive_topic_judgement(self, text: str) -> dict[str, Any] | None:
         raw = str(text or "").strip()
         if not raw:
@@ -6116,7 +6247,10 @@ class EmotionalStatePlugin(Star):
         topic = decision.get("selected_topic")
         if not isinstance(topic, dict):
             topic = {}
-        adaptive_policy = self._derive_proactive_dispatch_policy(decision)
+        adaptive_policy = self._derive_proactive_dispatch_policy(
+            decision,
+            session_key=session_key,
+        )
         message_text = self._compose_proactive_message_text(
             judgement,
             selected_topic=topic,
@@ -6185,6 +6319,8 @@ class EmotionalStatePlugin(Star):
     def _derive_proactive_dispatch_policy(
         self,
         decision: dict[str, Any],
+        *,
+        session_key: str = "",
     ) -> dict[str, Any]:
         if self._runtime_parameter_debug_override_enabled():
             return {
@@ -6215,6 +6351,7 @@ class EmotionalStatePlugin(Star):
         companionship = self._clamp01(signals.get("companionship_need", 0.0))
         user_need = self._clamp01(signals.get("user_need_to_be_met", 0.0))
         bot_need = self._clamp01(signals.get("bot_need_to_express", 0.0))
+        feedback_pressure = self._proactive_feedback_pressure(session_key)
         urgency = self._clamp01(
             0.20
             + 0.46 * score
@@ -6230,6 +6367,7 @@ class EmotionalStatePlugin(Star):
             + 0.38 * boundary
             + 0.34 * overload
             + 0.16 * (1.0 - score)
+            + 0.30 * feedback_pressure
             - 0.12 * repair_need,
         )
         max_chars = int(round(92 + 104 * urgency - 42 * restraint))
@@ -6237,13 +6375,14 @@ class EmotionalStatePlugin(Star):
         ttl_seconds = int(round(70 + 240 * restraint + 180 * (1.0 - urgency)))
         ttl_seconds = max(60, min(600, ttl_seconds))
         cooldown_seconds = round(
-            520
-            + 3600 * restraint
-            + 1250 * (1.0 - urgency)
-            - 820 * repair_need,
+            3600
+            + 12600 * restraint
+            + 7200 * (1.0 - urgency)
+            + 9000 * feedback_pressure
+            - 1800 * repair_need,
             3,
         )
-        cooldown_seconds = max(240.0, min(7200.0, cooldown_seconds))
+        cooldown_seconds = max(3600.0, min(43200.0, cooldown_seconds))
         feedback_window_seconds = round(
             max(600.0, min(7200.0, 0.60 * cooldown_seconds + 900 * restraint)),
             3,
@@ -6257,6 +6396,7 @@ class EmotionalStatePlugin(Star):
             "feedback_window_seconds": feedback_window_seconds,
             "urgency": round(urgency, 6),
             "restraint": round(restraint, 6),
+            "feedback_pressure": round(feedback_pressure, 6),
             "signals": {
                 "score": round(score, 6),
                 "boundary": round(boundary, 6),
@@ -6265,15 +6405,87 @@ class EmotionalStatePlugin(Star):
                 "companionship_need": round(companionship, 6),
                 "user_need_to_be_met": round(user_need, 6),
                 "bot_need_to_express": round(bot_need, 6),
+                "feedback_pressure": round(feedback_pressure, 6),
             },
         }
+
+    def _proactive_feedback_pressure(self, session_key: str) -> float:
+        audit = getattr(self, "_proactive_dispatch_audit", None)
+        if not isinstance(audit, dict):
+            return 0.0
+        entries = list(audit.get(str(session_key or "global")) or [])[-6:]
+        if not entries:
+            return 0.0
+        pressure = 0.0
+        for index, entry in enumerate(reversed(entries), 1):
+            status = str(entry.get("feedback_status") or "")
+            weight = 1.0 / index
+            if status == "unanswered":
+                pressure += 0.34 * weight
+            elif status == "cold_reply":
+                pressure += 0.24 * weight
+            elif status == "pending":
+                pressure += 0.18 * weight
+            elif status == "received_reply":
+                pressure -= 0.10 * weight
+        return self._clamp01(pressure)
+
+    def _proactive_recent_activity_blocked_reason(
+        self,
+        session_key: str,
+        dispatch: dict[str, Any],
+    ) -> str:
+        sessions = getattr(self, "_proactive_candidate_sessions", None)
+        if not isinstance(sessions, dict):
+            return ""
+        candidate = sessions.get(str(session_key or "global"))
+        if not isinstance(candidate, dict):
+            return ""
+        last_seen = self._as_float_value(candidate.get("last_seen_at"), 0.0)
+        if last_seen <= 0.0:
+            return ""
+        age = max(0.0, self._observed_now() - last_seen)
+        min_idle = self._proactive_dispatch_min_idle_seconds(dispatch)
+        dispatch["quiet_gate"] = {
+            "schema_version": "astrbot.proactive_quiet_gate.v1",
+            "age_seconds": round(age, 3),
+            "min_idle_seconds": round(min_idle, 3),
+            "need_mode": str(dispatch.get("need_mode") or ""),
+            "reason": "recent user activity should not be followed by immediate proactive speech",
+        }
+        if age < min_idle:
+            return "recent_user_activity_quiet_period"
+        return ""
+
+    def _proactive_dispatch_min_idle_seconds(self, dispatch: dict[str, Any]) -> float:
+        need_mode = str(dispatch.get("need_mode") or "").strip()
+        base_by_mode = {
+            "repair": 600.0,
+            "progress_check": 1800.0,
+            "user_need": 1800.0,
+            "clarify": 2400.0,
+            "mutual_need": 3600.0,
+            "bot_need": 5400.0,
+            "missing_user": 7200.0,
+            "playful_ping": 7200.0,
+            "prank_light": 7200.0,
+        }
+        base = base_by_mode.get(need_mode, 5400.0)
+        policy = dispatch.get("adaptive_policy")
+        policy = policy if isinstance(policy, dict) else {}
+        restraint = self._clamp01(policy.get("restraint", 0.0))
+        feedback_pressure = self._clamp01(policy.get("feedback_pressure", 0.0))
+        if not str(dispatch.get("topic_evidence") or "").strip():
+            base += 1800.0
+        base += 1800.0 * restraint + 3600.0 * feedback_pressure
+        return max(600.0, min(21600.0, base))
 
     def _fallback_proactive_message(self, need_mode: str, topic: str) -> str:
         topic = str(topic or "").strip()
         if need_mode == "progress_check":
             if topic:
                 return f"那、那个……你之前提到的{topic}，现在进度还顺吗？"
-            return "那、那个……你之前那件事，现在进度还顺吗？"
+            return ""
         if need_mode == "missing_user":
             return "那、那个……我只是路过确认一下，你今天还好吗？"
         if need_mode == "playful_ping":
@@ -6315,6 +6527,13 @@ class EmotionalStatePlugin(Star):
             return "missing_unified_msg_origin"
         if not str(dispatch.get("message_text") or "").strip():
             return "empty_message"
+        if not force:
+            quiet_reason = self._proactive_recent_activity_blocked_reason(
+                str(dispatch.get("session_key") or ""),
+                dispatch,
+            )
+            if quiet_reason:
+                return quiet_reason
         if self._proactive_dispatch_on_cooldown(
             str(dispatch.get("session_key") or ""),
             cooldown_seconds=self._as_float_value(
@@ -7205,6 +7424,7 @@ class EmotionalStatePlugin(Star):
         *,
         reason: str,
         clear_completion: bool = False,
+        completion_text_override: str | None = None,
     ) -> None:
         preserved = str(text or "")
         for name, value in (
@@ -7220,6 +7440,103 @@ class EmotionalStatePlugin(Star):
                 setattr(response, "completion_text", "")
             except Exception:
                 pass
+        elif completion_text_override is not None:
+            try:
+                setattr(response, "completion_text", str(completion_text_override or ""))
+            except Exception:
+                pass
+
+    def _response_has_tool_call_payload(self, response: LLMResponse | Any) -> bool:
+        for node in self._response_tool_call_candidate_nodes(response):
+            role = str(self._read_response_field(node, "role") or "").strip().lower()
+            if role in {"tool", "function"}:
+                return True
+            finish_reason = str(
+                self._read_response_field(node, "finish_reason") or "",
+            ).strip().lower()
+            if finish_reason in {"tool_calls", "function_call"}:
+                return True
+            for field in (
+                "tool_calls",
+                "function_call",
+                "tools_call_args",
+                "tools_call_name",
+                "tools_call_id",
+                "tool_call_id",
+            ):
+                if self._response_field_has_payload(
+                    self._read_response_field(node, field),
+                ):
+                    return True
+        return False
+
+    def _response_tool_call_candidate_nodes(self, response: Any) -> list[Any]:
+        if response is None:
+            return []
+        nodes = [response]
+        for field in ("message", "choice", "raw_response", "raw_completion"):
+            value = self._read_response_field(response, field)
+            if value is not None:
+                nodes.append(value)
+        choices = self._read_response_field(response, "choices")
+        if isinstance(choices, Sequence) and not isinstance(choices, (str, bytes, bytearray)):
+            for choice in list(choices)[:2]:
+                nodes.append(choice)
+                message = self._read_response_field(choice, "message")
+                if message is not None:
+                    nodes.append(message)
+        return nodes
+
+    def _read_response_field(self, node: Any, field: str) -> Any:
+        if node is None:
+            return None
+        if isinstance(node, dict):
+            return node.get(field)
+        try:
+            return getattr(node, field)
+        except Exception:
+            return None
+
+    def _response_field_has_payload(self, value: Any) -> bool:
+        if value is None or value is False:
+            return False
+        if isinstance(value, str):
+            return bool(value.strip())
+        if isinstance(value, (list, tuple, set, frozenset, dict)):
+            return bool(value)
+        return True
+
+    def _build_realtime_delivery_envelope_text(
+        self,
+        text: str,
+        *,
+        session_key: str,
+        input_epoch: int | None,
+        message_parts: Sequence[dict[str, Any]] | None = None,
+    ) -> str:
+        original = str(text or "").strip()
+        parts = [
+            str(part.get("text") or "").strip()
+            for part in (message_parts or [])
+            if str(part.get("text") or "").strip()
+        ]
+        planned_parts = len(parts) if parts else (1 if original else 0)
+        header = "\n".join(
+            [
+                "[sylanne_realtime_delivery_status]",
+                "以下是 bot 刚生成的完整回复原文，但已被 Sylanne 即时聊天模块接管；AstrBot 默认发送口已被阻断，这不等于已经全部发给用户。",
+                "后续如果用户插话，请以 Sylanne 记录的实际已发送/未发送状态为准，不要假设用户已经读完整段回复。",
+                (
+                    "delivery_status=pending_dispatch; "
+                    f"planned_parts={planned_parts}; sent_parts=0; "
+                    f"unsent_parts={planned_parts}; input_epoch={'' if input_epoch is None else input_epoch}; "
+                    f"session={self._head_one_line(str(session_key or 'global'), 80)}; "
+                    f"full_hash={self._text_hash(original)[:16]}"
+                ),
+                "[assistant_reply_original]",
+            ],
+        )
+        return (header + "\n" + original).strip()
 
     def _stop_default_response_send(
         self,
@@ -7602,7 +7919,7 @@ class EmotionalStatePlugin(Star):
         items = pending[-max_items:]
         lines = [
             "[sylanne_interrupted_reply_breakpoint]",
-            "上一段回复被用户新消息或撤回打断。不要原样续发旧回复；只把它当作对话断点来理解当前消息。",
+            "上一段回复被用户新消息或撤回打断，而且没有完整送达。不要原样续发旧回复；只把它当作对话断点来理解当前消息。",
         ]
         for item in items:
             lines.append(
@@ -7617,6 +7934,12 @@ class EmotionalStatePlugin(Star):
                     full_hash=str(item.get("full_text_hash") or "")[:16],
                 ),
             )
+            sent_excerpt = str(item.get("sent_excerpt") or "").strip()
+            unsent_head = str(item.get("unsent_head") or "").strip()
+            if sent_excerpt:
+                lines.append("已发送摘要=" + self._head_one_line(sent_excerpt, 120))
+            if unsent_head:
+                lines.append("未发送开头=" + self._head_one_line(unsent_head, 120))
         text = "\n".join(lines)
         max_chars = INTERRUPTED_REPLY_INJECTION_MAX_CHARS
         text = self._head_text(text, max_chars)
@@ -8215,6 +8538,11 @@ class EmotionalStatePlugin(Star):
                 pass
             return False
         item = pending[-1]
+        if self._context_compression_summary_covers_realtime_shadow(request, item):
+            item["consumed"] = True
+            item["consumed_at"] = self._observed_now()
+            item["consumed_reason"] = "official_context_compression_summary"
+            return False
         if self._agent_history_already_contains_realtime_shadow(request, item):
             item["consumed"] = True
             item["consumed_at"] = self._observed_now()
@@ -8232,11 +8560,6 @@ class EmotionalStatePlugin(Star):
                 item["consumed_at"] = self._observed_now()
                 item["consumed_reason"] = "short_answer_bound_to_last_question"
                 return True
-        if self._context_compression_summary_covers_realtime_shadow(request, item):
-            item["consumed"] = True
-            item["consumed_at"] = self._observed_now()
-            item["consumed_reason"] = "official_context_compression_summary"
-            return False
         text = "\n".join(
             [
                 "[sylanne_realtime_assistant_history]",
@@ -12137,9 +12460,9 @@ class EmotionalStatePlugin(Star):
         max_parts = max(1, self._cfg_int("state_injection_max_parts", 8))
         compat_mode = ""
         if self._is_gemini_empty_output_risk_model(model_hint):
-            compat_mode = "gemini_empty_output_guard"
-            max_added_chars = min(max_added_chars, 1200)
-            max_parts = min(max_parts, 5)
+            compat_mode = "gemini_agent_owned_context"
+            max_added_chars = 0
+            max_parts = 1
         return _StateInjectionBudget(
             session_key=session_key,
             request_chars_before=self._estimate_provider_request_chars(request),
@@ -12224,6 +12547,15 @@ class EmotionalStatePlugin(Star):
     ) -> bool:
         if not self._is_gemini_empty_output_risk_model(model_hint):
             return False
+        if budget is not None and budget.agent_owned_context:
+            budget.skipped.append(
+                {
+                    "source": "gemini_visible_output_guard",
+                    "chars": 0,
+                    "reason": "agent_owned_context",
+                },
+            )
+            return False
         source = "gemini_visible_output_guard"
         if self._request_has_temp_text_source(request, source):
             return False
@@ -12257,6 +12589,15 @@ class EmotionalStatePlugin(Star):
         budget: _StateInjectionBudget | None = None,
         required: bool = False,
     ) -> bool:
+        if budget is not None and budget.agent_owned_context:
+            budget.skipped.append(
+                {
+                    "source": source,
+                    "chars": len(str(text or "")),
+                    "reason": "agent_owned_context",
+                },
+            )
+            return False
         if not text:
             if budget is not None:
                 budget.skipped.append(
@@ -12397,6 +12738,9 @@ class EmotionalStatePlugin(Star):
             "enabled": True,
             "estimate_only": True,
             "session_key": budget.session_key,
+            "context_owner": (
+                "agent" if budget.agent_owned_context else "sylanne_plugin"
+            ),
             "mode_source": (
                 "debug_config_override"
                 if self._runtime_parameter_debug_override_enabled()

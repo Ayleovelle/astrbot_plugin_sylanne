@@ -6,6 +6,7 @@ import time
 import types
 import unittest
 import zipfile
+from collections import deque
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -1729,6 +1730,194 @@ class MemoryPayloadPublicApiTests(unittest.TestCase):
         self.assertTrue(decision["should_speak"])
         self.assertTrue(decision["dispatch_request"]["requested"])
         self.assertIn("message_text", decision["dispatch_request"])
+
+    def test_proactive_progress_check_without_evidence_is_downgraded(self):
+        self._install_astrbot_stubs()
+        from emotion_engine import EmotionState
+        from group_atmosphere_engine import GroupAtmosphereState
+        from humanlike_engine import HumanlikeState
+        from lifelike_learning_engine import LifelikeLearningState
+        from main import EmotionalStatePlugin
+
+        class FakeContext:
+            async def llm_generate(self, **kwargs):
+                return SimpleNamespace(
+                    completion_text=(
+                        '{"should_speak":true,"need_mode":"progress_check",'
+                        '"topic_text":"","speech_intent":"关心进度",'
+                        '"opening_style":"progress_check","topic_evidence":"没有明确证据",'
+                        '"draft_message":"那、那个……你之前那件事现在进度还顺吗？",'
+                        '"confidence":0.83,"reason":"模型想问进度"}'
+                    ),
+                )
+
+        async def fake_provider_id(self, event):
+            return "provider"
+
+        async def fake_load_state(self, session_key, persona_profile=None, *, now=None):
+            state = EmotionState.initial()
+            state.values["affiliation"] = 0.7
+            state.values["valence"] = 0.5
+            return state
+
+        async def fake_lifelike(self, session_key, *, now=None):
+            state = LifelikeLearningState.initial()
+            state.values.update(
+                {
+                    "rapport": 0.86,
+                    "common_ground": 0.74,
+                    "initiative_readiness": 0.88,
+                    "boundary_sensitivity": 0.08,
+                    "mutual_need_balance": 0.68,
+                    "being_needed_readiness": 0.70,
+                    "need_expression_readiness": 0.60,
+                    "preference_confidence": 0.70,
+                },
+            )
+            return state
+
+        async def fake_humanlike(self, session_key, *, now=None):
+            return HumanlikeState.initial()
+
+        async def fake_group(self, session_key, *, now=None):
+            state = GroupAtmosphereState.initial()
+            state.values["joinability"] = 0.90
+            state.values["bot_attention"] = 0.82
+            state.values["playfulness"] = 0.76
+            state.values["interrupt_risk"] = 0.04
+            state.values["tension"] = 0.02
+            return state
+
+        originals = {
+            "_provider_id": EmotionalStatePlugin._provider_id,
+            "_load_state": EmotionalStatePlugin._load_state,
+            "_load_lifelike_learning_state": EmotionalStatePlugin._load_lifelike_learning_state,
+            "_load_humanlike_state": EmotionalStatePlugin._load_humanlike_state,
+            "_load_group_atmosphere_state": EmotionalStatePlugin._load_group_atmosphere_state,
+        }
+        EmotionalStatePlugin._provider_id = fake_provider_id
+        EmotionalStatePlugin._load_state = fake_load_state
+        EmotionalStatePlugin._load_lifelike_learning_state = fake_lifelike
+        EmotionalStatePlugin._load_humanlike_state = fake_humanlike
+        EmotionalStatePlugin._load_group_atmosphere_state = fake_group
+        try:
+            plugin = self._new_plugin({"use_llm_assessor": True})
+            plugin.context = FakeContext()
+            decision = asyncio.run(
+                plugin.get_proactive_speech_decision(
+                    SimpleNamespace(unified_msg_origin="s-no-progress"),
+                    candidate_context="刚才只是普通闲聊，话题已经结束。",
+                ),
+            )
+        finally:
+            for name, value in originals.items():
+                setattr(EmotionalStatePlugin, name, value)
+
+        judgement = decision["topic_judgement"]
+        self.assertEqual(judgement["source"], "evidence_gate")
+        self.assertIn(judgement["need_mode"], {"playful_ping", "prank_light", "silence"})
+        self.assertNotEqual(judgement["need_mode"], "progress_check")
+        self.assertNotIn("进度还顺", decision["dispatch_request"]["message_text"])
+
+    def test_proactive_dispatch_policy_extends_cooldown_after_cold_feedback(self):
+        self._install_astrbot_stubs()
+        from main import EmotionalStatePlugin
+
+        plugin = self._new_plugin()
+        decision = {
+            "score": 0.76,
+            "signals": {
+                "boundary": 0.08,
+                "overload": 0.05,
+                "repair_need": 0.0,
+                "companionship_need": 0.55,
+                "user_need_to_be_met": 0.50,
+                "bot_need_to_express": 0.44,
+            },
+        }
+        baseline = plugin._derive_proactive_dispatch_policy(
+            decision,
+            session_key="s-feedback",
+        )
+        plugin._proactive_dispatch_audit = {
+            "s-feedback": deque(
+                [
+                    {"sent": True, "feedback_status": "cold_reply"},
+                    {"sent": True, "feedback_status": "unanswered"},
+                ],
+                maxlen=24,
+            ),
+        }
+
+        cooled = plugin._derive_proactive_dispatch_policy(
+            decision,
+            session_key="s-feedback",
+        )
+
+        self.assertGreater(cooled["feedback_pressure"], 0.0)
+        self.assertGreater(cooled["cooldown_seconds"], baseline["cooldown_seconds"])
+
+    def test_proactive_dispatch_respects_recent_activity_quiet_period(self):
+        self._install_astrbot_stubs()
+
+        plugin = self._new_plugin({"enable_proactive_speech_dispatch": True})
+        plugin.context = SimpleNamespace(send_message=lambda *args, **kwargs: None)
+        plugin._proactive_candidate_sessions = {
+            "s-quiet": {
+                "session_key": "s-quiet",
+                "unified_msg_origin": "s-quiet",
+                "last_seen_at": 1000.0,
+            },
+        }
+        decision = {
+            "should_speak": True,
+            "action": "speak_now",
+            "score": 0.74,
+            "signals": {
+                "boundary": 0.08,
+                "overload": 0.05,
+                "repair_need": 0.0,
+                "companionship_need": 0.66,
+                "user_need_to_be_met": 0.42,
+                "bot_need_to_express": 0.58,
+            },
+            "topic_judgement": {
+                "should_speak": True,
+                "need_mode": "playful_ping",
+                "opening_style": "playful_ping",
+                "draft_message": "咦，我、我来轻轻敲一下门。你现在方便被打扰一下吗？",
+                "topic_evidence": "轻松氛围信号",
+            },
+        }
+        event = SimpleNamespace(unified_msg_origin="s-quiet")
+        dispatch = plugin._build_proactive_dispatch_request(
+            decision,
+            event_or_session=event,
+            session_key="s-quiet",
+            candidate_context="刚刚结束闲聊。",
+        )
+
+        plugin._observed_now = lambda: 1100.0
+        blocked = plugin._proactive_dispatch_blocked_reason(
+            decision,
+            dispatch,
+            event_or_session=event,
+            dry_run=False,
+            force=False,
+        )
+        self.assertEqual(blocked, "recent_user_activity_quiet_period")
+        self.assertIn("quiet_gate", dispatch)
+        self.assertGreater(dispatch["quiet_gate"]["min_idle_seconds"], 100.0)
+
+        plugin._observed_now = lambda: 20000.0
+        allowed = plugin._proactive_dispatch_blocked_reason(
+            decision,
+            dispatch,
+            event_or_session=event,
+            dry_run=False,
+            force=False,
+        )
+        self.assertEqual(allowed, "")
 
     def test_proactive_speech_dispatch_executes_when_enabled_and_records_cooldown(self):
         self._install_astrbot_stubs()

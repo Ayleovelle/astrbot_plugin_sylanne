@@ -1,6 +1,6 @@
 <svg xmlns="http://www.w3.org/2000/svg" width="1560" height="1180" viewBox="0 0 1560 1180" role="img" aria-labelledby="title desc">
-  <title id="title">工作流对比与后台并行调度</title>
-  <desc id="desc">展示旧版单线程链路与当前版本的主回复链路、回复后后台队列、动态后台工作器池、资源守卫、顺序提交和主动发言支路。</desc>
+  <title id="title">工作流对比、Agent 上下文与后台并行调度</title>
+  <desc id="desc">展示旧版单线程链路与当前版本的 Agent 持有上下文、Sylanne 投递接管、工具调用旁路、回复后后台队列、动态后台工作器池、资源守卫、顺序提交和主动发言安静门。</desc>
   <defs>
     <marker id="arrowBlue" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse">
       <path d="M 0 0 L 10 5 L 0 10 z" fill="#2563eb"/>
@@ -48,8 +48,8 @@
   </defs>
 
   <rect class="bg" width="1560" height="1180"/>
-  <text class="title" x="60" y="58">Sylanne 当前工作流：主回复先走，后台工作器并行收束</text>
-  <text class="subtitle" x="60" y="88">重点不是“多开线程”，而是把慢评估移出主链路，并用资源守卫、全局预算和顺序提交保护情绪轨迹。</text>
+  <text class="title" x="60" y="58">Sylanne 当前工作流：上下文归 Agent，投递由 Sylanne 接管</text>
+  <text class="subtitle" x="60" y="88">重点不是“多开线程”，而是让工具调用和长期上下文留在 Agent，Sylanne 只做短状态、记忆召回、投递信封和后台顺序提交。</text>
 
   <rect class="laneOld" x="42" y="126" width="312" height="970" rx="20"/>
   <text class="laneTitle" x="66" y="166">0.5.0 旧版单线程</text>
@@ -57,7 +57,7 @@
 
   <rect class="laneMain" x="390" y="126" width="340" height="970" rx="20"/>
   <text class="laneTitle" x="414" y="166">当前主回复链路</text>
-  <text class="small" x="414" y="194">只保留必要状态，尽快返回回复</text>
+  <text class="small" x="414" y="194">Agent 管上下文，Sylanne 管投递事实</text>
 
   <rect class="laneQueue" x="766" y="126" width="432" height="970" rx="20"/>
   <text class="laneTitle" x="790" y="166">后台运行：队列 + 并行工作器池</text>
@@ -110,30 +110,30 @@
     <path class="arrowBlue" d="M560 304 V344"/>
 
     <rect class="nodeBlue" x="430" y="344" width="260" height="78" rx="12"/>
-    <text class="text" x="560" y="375" text-anchor="middle">解析会话轨道</text>
-    <text class="tiny" x="560" y="399" text-anchor="middle">房间级与说话人级分开</text>
+    <text class="text" x="560" y="375" text-anchor="middle">Agent 持有上下文</text>
+    <text class="tiny" x="560" y="399" text-anchor="middle">插件只补短事实，不搬运大段历史</text>
     <path class="arrowBlue" d="M560 422 V462"/>
 
     <rect class="nodeBlue" x="430" y="462" width="260" height="88" rx="12"/>
-    <text class="text" x="560" y="494" text-anchor="middle">并发读取快照</text>
-    <text class="tiny" x="560" y="518" text-anchor="middle">情绪 / 拟人 / 群聊 / 漂移</text>
-    <text class="tiny" x="560" y="538" text-anchor="middle">只取本轮必要摘要</text>
+    <text class="text" x="560" y="494" text-anchor="middle">工具调用完全旁路</text>
+    <text class="tiny" x="560" y="518" text-anchor="middle">tool_calls / function_call 交回 Agent</text>
+    <text class="tiny" x="560" y="538" text-anchor="middle">不阻断、不改写、不消费 epoch</text>
     <path class="arrowBlue" d="M560 550 V590"/>
 
     <rect class="nodeBlue" x="430" y="590" width="260" height="86" rx="12"/>
-    <text class="text" x="560" y="622" text-anchor="middle">预算内临时注入</text>
-    <text class="tiny" x="560" y="646" text-anchor="middle">完整状态留给工具按需查询</text>
+    <text class="text" x="560" y="622" text-anchor="middle">短状态与自有记忆召回</text>
+    <text class="tiny" x="560" y="646" text-anchor="middle">只注入必要摘要，避免上下文膨胀</text>
     <path class="arrowBlue" d="M560 676 V716"/>
 
     <rect class="nodeBlue" x="430" y="716" width="260" height="78" rx="12"/>
-    <text class="text" x="560" y="747" text-anchor="middle">主回复先返回</text>
-    <text class="tiny" x="560" y="771" text-anchor="middle">不等待回复后内部评估</text>
+    <text class="text" x="560" y="747" text-anchor="middle">最终回复投递信封</text>
+    <text class="tiny" x="560" y="771" text-anchor="middle">分条接管，但 Agent 知道未必送达</text>
 
     <rect class="badgeBlue" x="430" y="874" width="260" height="108" rx="14"/>
-    <text class="small" x="560" y="904" text-anchor="middle">主链路只做三件事</text>
-    <text class="tiny" x="560" y="928" text-anchor="middle">取必要状态</text>
-    <text class="tiny" x="560" y="950" text-anchor="middle">让语气受影响</text>
-    <text class="tiny" x="560" y="972" text-anchor="middle">尽快把话说出去</text>
+    <text class="small" x="560" y="904" text-anchor="middle">主链路边界</text>
+    <text class="tiny" x="560" y="928" text-anchor="middle">上下文归 Agent</text>
+    <text class="tiny" x="560" y="950" text-anchor="middle">工具归 Agent</text>
+    <text class="tiny" x="560" y="972" text-anchor="middle">Sylanne 只接管最终文本投递</text>
   </g>
 
   <g id="queue-and-workers">
@@ -206,7 +206,7 @@
 
     <rect class="nodeOrange" x="1264" y="356" width="224" height="82" rx="12"/>
     <text class="text" x="1376" y="386" text-anchor="middle">低频后台醒来</text>
-    <text class="tiny" x="1376" y="410" text-anchor="middle">先检查环境压力</text>
+    <text class="tiny" x="1376" y="410" text-anchor="middle">先检查环境压力和安静门</text>
     <path class="arrowOrange" d="M1376 438 V478"/>
 
     <rect class="nodeOrange" x="1264" y="478" width="224" height="94" rx="12"/>
@@ -223,7 +223,7 @@
 
     <rect class="nodeOrange" x="1264" y="746" width="224" height="86" rx="12"/>
     <text class="text" x="1376" y="778" text-anchor="middle">请求 AstrBot 发送</text>
-    <text class="tiny" x="1376" y="802" text-anchor="middle">默认关闭；开启后仍受冷却</text>
+    <text class="tiny" x="1376" y="802" text-anchor="middle">默认关闭；仍受安静门和冷却</text>
     <path class="arrowOrange" d="M1376 832 V872"/>
 
     <rect class="nodeOrange" x="1264" y="872" width="224" height="86" rx="12"/>

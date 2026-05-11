@@ -10,6 +10,69 @@ User instruction:
 - Apply the established versioning rule: generation-level or major refactor updates increment the first version number; feature additions increment the second version number; bug fixes increment the third version number; experimental releases use an `exp` suffix.
 - Keep commit messages and release-facing notes in Chinese whenever practical.
 
+## Active Bugfix Anchor - 2026-05-12 Tool Calls, Proactive Frequency, Workflow Docs
+
+Status: local fix in progress; do not publish until the user asks.
+
+Do not lose these points during context compaction:
+
+- `on_llm_response` must only intercept final natural-language replies. If `LLMResponse` contains `tool_calls`, `function_call`, tool-role payloads, tool-call ids, `tools_call_*` fields, or `finish_reason=tool_calls/function_call`, Sylanne must return immediately. It must not call `stop_event()`, must not rewrite `completion_text`, must not schedule realtime split-send, and must not consume the pending response epoch. AstrBot Agent owns tool execution.
+- Proactive speech frequency was too high. Same-session recent activity now needs a real-time quiet gate before proactive dispatch. Non-urgent modes such as `playful_ping`, `prank_light`, `missing_user`, `bot_need`, and `mutual_need` require longer idle time; cold replies, unanswered proactive messages and feedback pressure lengthen cooldown. This is separate from the normal send cooldown.
+- Workflow documentation must say: context belongs to AstrBot Agent; Sylanne only adds short status facts, bounded self-memory recall, delivery envelopes, and background ordered state commits.
+- README memory section must explain that LivingMemory is a good full-lifecycle memory plugin and was the original integration target, but current realtime chat interception, split delivery, interruption bookkeeping, and Agent-owned context create lifecycle conflicts, so runtime compatibility is temporarily dropped in favor of Sylanne first-party memory.
+- The workflow SVG must remain a static SVG, not Mermaid/JSON, so mobile clients show the diagram instead of source text.
+
+## Active Architecture Constraint - 2026-05-12 Agent-Owned Context
+
+Status: active and non-negotiable for the current bugfix track. This is the recovery anchor if context is compacted.
+
+User decision:
+
+- 上下文就是交给 AstrBot Agent。
+- Sylanne 插件不能再把大段临时上下文、完整记忆、完整未发送回复或复杂状态说明持续塞进主 LLM prompt。
+- 插件的职责是：拦截主回复的默认发送口、接管分条投递、记录投递状态、记录情绪/记忆/主动性事实、按需提供极短的可审计摘要。
+- Agent 自己的历史才是主 LLM 理解上下文的第一来源。插件只补“Agent 不可能自然知道的投递事实”，例如：上一轮回复已生成但未全部发送、已发送几条、未发送摘要、用户在哪个时刻插话。
+
+Current must-fix items:
+
+1. Gemini / OpenAI-compatible preview 空输出：
+   - 高风险 Gemini 模型下，Sylanne 的状态注入预算应进入 `gemini_agent_owned_context` 模式。
+   - 该模式下 `extra_user_content_parts` 不应继续追加 Sylanne 临时上下文、记忆召回、实时聊天风格提示或 visible-output guard。
+   - 诊断里必须能看到 `context_owner=agent` 和被跳过的注入来源，方便日志排查。
+
+2. 即时聊天被用户插话后上下文错乱：
+   - `response.completion_text` 不能被简单清空成空历史。
+   - 主回复原文应保留给 Agent 历史，但标记为“由 Sylanne 即时聊天接管，默认发送口阻断，不等于已全部送达用户”。
+   - `_sylanne_intercepted_completion_text` 继续保存原始文本，供分条发送、情绪评估、记忆写入使用。
+   - 如果用户在第一条成功发出前连续补充多段消息，插件应把这些用户片段合并为同一轮输入事实，再触发主 LLM。
+   - 如果用户在 bot 分条发送中插话，插件必须记录：已发条数、未发条数、已发摘要、未发摘要、打断时间、打断原因，并在下一轮让 Agent 知道“上一段没有完整送达，不能假设用户已读完”。
+
+3. 用户分段理解：
+   - 用户多段连续发言不能逐条触发情绪判断和主回复。
+   - 判断 LLM 或轻量判定器应判断用户是否说完；若未说完则等一拍，最多等待 20s。
+   - 一旦判断用户已说完，立即关闭等待，不再硬等满 20s。
+   - 情绪判断必须等合并后的用户片段，避免碎片信息污染情绪轨迹。
+
+4. 主动聊天不许硬接话题：
+   - 话题结束后不要莫名其妙关心进度。
+   - `progress_check` 必须有明确证据：近期任务、项目、期限、未完成事项、用户主动提到的进度线索。
+   - 没有明确理由时，主动聊天应优先沉默；如果模型仍判定想开口，只能走“调皮/犯贱式轻打扰”或“想念/互需”这类有状态理由的短开口。
+   - 主动发言必须输出理由和话题证据；没有证据的进度关心应被本地规则降级或阻断。
+   - 主动发言频率必须显著降低并自适应；真人不会频繁醒来找话。频率应受真实时间、最近主动失败/冷场、对话刚结束、用户未回复、打断风险、关系状态和环境负载共同抑制。
+   - 调度器不能只因为后台轮询到了候选会话就发言；必须先通过“必要性/理由强度/打扰风险/沉默价值”的门控。
+   - 同一会话连续主动失败后应指数式延长冷却；用户自然恢复对话或明确欢迎主动聊天后才逐渐放松。
+
+5. README 修订：
+   - 顶部介绍不要塞 `docs/assets/sylanne-mascot-card.svg` / `sylanne-mascot.gif` 的工程说明。
+   - 素材说明如需保留，只能放到维护、打包或发布包说明段落。
+   - README 后续要解释“上下文归 Agent，插件只接管投递和状态事实”的新工作流。
+
+Validation target:
+
+- 先写/更新回归测试，再改生产代码。
+- 必测：Gemini agent-owned context、即时聊天投递信封、被打断后下一轮能知道未说完、用户分段合并、主动聊天无证据不做进度关心。
+- 当前修复属于 bugfix；若发布，按规则从已发布 `v2.1.1` 增加到 `v2.1.2`，涉及代码变动时必须同时上传包体。
+
 ## Active Emergency Bug - 2026-05-12 Context Anchor And Gemini Empty Output
 
 Status: in progress. Keep this section as the recovery anchor if context is compacted.

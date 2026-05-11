@@ -2,7 +2,7 @@
 
 > <span style="font-size: 1.08em;"><strong>Soulful Yearning Lifelike AstrBot Neural Narrative Engine</strong>。她维护的不只是“情绪标签”，而是情绪、人格、记忆、氛围、主动性和表达节奏交织成的长期状态。</span>
 
-![版本 2.1.1](https://img.shields.io/badge/version-2.1.1-blue)
+![版本 2.1.2](https://img.shields.io/badge/version-2.1.2-blue)
 ![AstrBot >=4.9.2,<5.0.0](https://img.shields.io/badge/AstrBot-%3E%3D4.9.2%2C%3C5.0.0-green)
 ![Python 3.10+](https://img.shields.io/badge/Python-3.10%2B-yellow)
 ![协议 astrbot.emotion_state.v2](https://img.shields.io/badge/schema-astrbot.emotion__state.v2-purple)
@@ -12,15 +12,13 @@
 
 <img align="right" src="docs/assets/sylanne-mascot-card.svg" width="320" alt="项目吉祥物 Sylanne，Sylanne向大家问好 = w =">
 
-`docs/assets/sylanne-mascot-card.svg` 是 README 顶部半包围吉祥物外壳；实际动图素材仍保留在 `docs/assets/sylanne-mascot.gif`，发布包会同时包含这两个文件。
-
 `astrbot_plugin_sylanne` 是一个面向 AstrBot 的“生命化状态引擎”和“插件公共状态服务”。她不是只在提示词里写几句“你要有喜怒哀乐”，而是把 engine 的情绪、关系后果、人格差异、长期记忆注解、拟人状态、道德修复状态、群聊氛围、后台评估队列和非诊断心理筛查拆成可测试、可持久化、可调用的工程模块。
 
 `astrbot_plugin_sylanne` 不是一个简单的“给 engine 加情绪标签”的插件。她的核心目标是：
 
 > 让不同人格的 engine 在长期对话中形成可解释、可持续、可重置、可被记忆系统记录的计算性情绪轨迹。
 
-本插件会让大模型根据上下文、用户当前文本、engine 人格和上一轮状态，判断当前情绪观测值；本地引擎再用真实时间半衰期、人格基线、置信门控、关系修复和后果状态机更新长期状态。最后，这个状态会作为临时上下文注入下一次大模型请求，影响语气、节奏、社交距离、边界感和修复倾向。
+本插件会让大模型根据 AstrBot Agent 自己维护的对话历史、用户当前文本、engine 人格和上一轮状态，判断当前情绪观测值；本地引擎再用真实时间半衰期、人格基线、置信门控、关系修复和后果状态机更新长期状态。Sylanne 不会把整段上下文抢到插件里重放；她只在必要时提供很短的状态摘要、记忆召回摘要和“已发/未发”这类 Agent 无法自然知道的投递事实。
 
 **特色功能**
 
@@ -39,7 +37,7 @@
 
 <br clear="right">
 
-`2.1.1` 修复即时聊天接管时日志不可见的问题：AstrBot 默认发送口仍会被阻断，避免整段主回复重复发出；同时 Sylanne 会在日志中明确写出“接管主回复、准备分条发送、已发送分条、媒体/表情发送、完成或被用户插话打断”等状态，方便排查空消息日志。她仍不依赖外部长期记忆插件，而是把稳定事件写入本地 KV 记忆库，按真实时间强化、遗忘和限长召回。
+`2.1.2` 修复即时聊天被用户插话后上下文错乱的问题：上下文继续由 AstrBot Agent 持有，Sylanne 只在主回复被即时聊天接管时写入“投递状态信封”，说明这段回复已生成、默认发送口被阻断、后续将由插件分条发送，但不等于用户已经读完整段。若用户在发送中途插话，插件会记录已发条数、未发条数、已发摘要和未发摘要，下一轮模型不会再误以为自己已经把话说完。主动聊天也收紧为“有证据才关心进度；没证据就沉默或轻微调皮打扰”，并根据冷场/未回复反馈自动拉长冷却。
 
 | 能力 | 作用 |
 | --- | --- |
@@ -75,7 +73,7 @@
 | 主题 | 内容 |
 | --- | --- |
 | [当前版本与兼容范围](#当前版本与兼容范围) | 插件版本、AstrBot 版本、Python 要求、许可证和发布状态。 |
-| [当前版本发布记录](#当前版本发布记录) | 自有记忆知识库层、关联召回、真实时间强化/遗忘、模块自检和包体发布说明。 |
+| [当前版本发布记录](#212-当前版本发布记录) | 自有记忆知识库层、关联召回、真实时间强化/遗忘、模块自检和包体发布说明。 |
 | [项目定位](#项目定位) | 为什么本插件不是普通的提示词人设增强。 |
 | [核心能力](#核心能力总览) | 7 维情绪、人格建模、真实时间记忆、关系修复、公共 API。 |
 | [快速开始](#快速开始) | 发布 zip 包、仓库安装、手动复制、最小配置和检查命令。 |
@@ -103,19 +101,19 @@
 | --- | --- |
 | 插件目录名 | `astrbot_plugin_sylanne` |
 | 显示名 | `Sylanne` |
-| 当前版本 | `2.1.1` |
+| 当前版本 | `2.1.2` |
 | AstrBot 版本 | `>=4.9.2,<5.0.0` |
 | Python | `3.10+` |
 | 许可证 | `GPL-3.0-or-later` |
 | 运行时第三方依赖 | 当前无额外依赖，见 `requirements.txt` |
 
-`2.1.1` 保留 Sylanne 自有记忆知识库和 `2.1.0` 只读记忆查询入口，并补上即时聊天接管链路的可见日志：当主回复被插件接管时，日志会显示原文长度、分条数量、预览、每条发送结果、媒体/表情发送结果，以及用户插话导致的中断信息。核心情绪、回复后后台评估（post）、`group_atmosphere_state`、`humanlike_state`、`lifelike_learning_state`、`personality_drift_state`、Sylanne 自有记忆、即时聊天节奏和欺骗/操控/逃责类动作阻断默认自动运行；道德修复、瑕疵模拟、心理筛查等实验/维护模块仍由配置者显式打开。
+`2.1.2` 保留 Sylanne 自有记忆知识库和 `2.1.0` 只读记忆查询入口，并补上 Agent-owned context 的即时聊天修复：主回复仍留在 Agent 历史中，但会带投递状态信封；真正发给用户的内容由 Sylanne 分条发送。核心情绪、回复后后台评估（post）、`group_atmosphere_state`、`humanlike_state`、`lifelike_learning_state`、`personality_drift_state`、Sylanne 自有记忆、即时聊天节奏和欺骗/操控/逃责类动作阻断默认自动运行；道德修复、瑕疵模拟、心理筛查等实验/维护模块仍由配置者显式打开。
 
-发布包会包含运行代码、README、CHANGELOG、LICENSE、配置结构（schema）、docs 和 `docs/assets/` 中的聚合图表；不会包含 `tests/`、`scripts/`、`literature_kb/`、`personality_literature_kb/`、`psychological_literature_kb/`、`humanlike_agent_literature_kb/`、`raw/`、`output/`、`dist/` 等开发、研究、原始样本或缓存目录。
+发布包会包含运行代码、README、CHANGELOG、LICENSE、配置结构（schema）、docs 和 `docs/assets/` 中的聚合图表与吉祥物素材，例如 `docs/assets/sylanne-mascot.gif`、`docs/assets/sylanne-mascot-card.svg` 和 `docs/assets/workflow_and_proactive.svg`；不会包含 `tests/`、`scripts/`、`literature_kb/`、`personality_literature_kb/`、`psychological_literature_kb/`、`humanlike_agent_literature_kb/`、`raw/`、`output/`、`dist/` 等开发、研究、原始样本或缓存目录。
 
-### 当前版本发布记录
+### 2.1.2 当前版本发布记录
 
-`v2.1.1` 合并在 `main` 上，对外安装版本由 `metadata.yaml` 和 `main.py @register(...)` 共同声明为 `2.1.1`。本版按版本规则提升第三位版本号：修复即时聊天接管后日志不可见的问题；公共 API 版本仍保持 `1.0`，schema 仍保持向后兼容。
+`v2.1.2` 合并在 `main` 上，对外安装版本由 `metadata.yaml` 和 `main.py @register(...)` 共同声明为 `2.1.2`。本版按版本规则提升第三位版本号：修复即时聊天投递状态、Gemini 风险模型空输出诱因和主动聊天频率/证据门控问题；公共 API 版本仍保持 `1.0`，schema 仍保持向后兼容。
 
 当前版本的主要变化：
 
@@ -125,9 +123,12 @@
 | 只读记忆查询 | 新增 `/sylanne_memory`、`/记忆查询`、`/查询记忆`、`/灵澜记忆` 和 `query_sylanne_memory(...)`，可检查记忆命中情况；查询不会强化或改写记忆。 |
 | 关联联想召回 | 直接命中的记忆会在硬预算内带出少量相邻记忆；关联边由摘要相似度、层类型重叠、情绪接近度、时间接近度和巩固强度本地计算，不交给 LLM 随机决定。 |
 | 强化与遗忘 | 只有真正注入 prompt 的记忆才会触发召回强化；长期无证据、无召回且深度/置信度很低的弱记忆会按真实时间剪枝，并清理悬空关联边。 |
+| Agent 上下文归属 | 对话上下文交给 AstrBot Agent；Sylanne 只补短状态摘要、短记忆召回和投递事实，Gemini 高风险模型会进入 `gemini_agent_owned_context` 模式并跳过额外 prompt 注入。 |
+| 即时聊天投递信封 | 主回复被接管时，Agent 历史会看到“已生成但未必已发送”的投递状态；用户插话后会记录已发/未发摘要，避免下一轮误以为旧回复已经完整送达。 |
+| 主动聊天门控 | `progress_check` 必须有明确进度证据；话题结束或证据不足时不会硬问“进度还顺吗”，会降级为沉默或低压力调皮打扰，并用冷场反馈自动延长冷却。 |
 | 上下文安全预算 | 召回结果只作为 `[sylanne_memory_recall]` 限长摘要注入，并继续受请求预算和官方上下文压缩清洗逻辑约束。 |
 | 模块互斥自检 | 发布前覆盖自有记忆、主动发言、官方上下文压缩、即时聊天、公共 API、配置契约和包体预检，验证模块之间不会互相回灌或重复调用外部 LivingMemory。 |
-| 公开契约 | 插件版本为 `2.1.1`；公共 API 版本仍为 `1.0`，schema 仍保持 `astrbot.emotion_state.v2` 等版本化契约。 |
+| 公开契约 | 插件版本为 `2.1.2`；公共 API 版本仍为 `1.0`，schema 仍保持 `astrbot.emotion_state.v2` 等版本化契约。 |
 
 旧版本发布记录统一放在 `CHANGELOG.md`。README 只展示当前版本，避免插件管理页从历史段落误抓旧版本号。
 
@@ -816,7 +817,7 @@ low_reasoning_max_context_chars = 1200
 
 0.5.0 之前的主链路更接近“单线程状态增强”：收到消息后，插件在请求内按顺序读取状态、做情绪评估、注入提示词，再等待主回复，最后把结果写回。这个结构容易理解，但慢状态、评估模型、记忆注解和主回复会相互等待，群聊和主动发言也很难自然插进去。
 
-当前版本把链路拆成“主回复链路 + 回复后后台队列 + 主动发言支路 + 统一状态查询”。主回复尽量先返回；回复后的内部评估进入后台队列，按会话顺序提交；主动发言由公式先判定开口时机，再让大模型裁决理由和话题；动态后台工作器会参考队列、CPU、内存和全局预算自动收放。下面这张图里，蓝色是主回复，绿色是后台工作器池，橙色是主动发言支路。
+当前版本把链路拆成“Agent 上下文 + Sylanne 投递层 + 回复后后台队列 + 主动发言支路 + 自有记忆召回”。主 LLM 的长期上下文仍交给 AstrBot Agent 持有；Sylanne 不再把大段临时历史塞进 prompt，只在必要时补充短状态事实、短记忆召回和“这段回复已生成但未必完整送达”的投递信封。主回复尽量先返回；回复后的内部评估进入后台队列，按会话顺序提交；主动发言由公式先判定开口时机，再让大模型裁决理由和话题；动态后台工作器会参考队列、CPU、内存和全局预算自动收放。下面这张图里，蓝色是主回复，绿色是后台工作器池，橙色是主动发言支路。
 
 ![工作流与主动发言支路](docs/assets/workflow_and_proactive.svg)
 
@@ -828,6 +829,8 @@ low_reasoning_max_context_chars = 1200
 - 主动发言不会靠固定话题库触发；它先由公式判断是否适合开口，再让大模型在当前上下文候选主题中裁决“为什么说、证据是什么、说什么方向、怎么短句开口”。
 - `get_proactive_speech_decision(...)` 仍是只读裁决；`request_proactive_speech_dispatch(...)` 会生成 `dispatch_request`，并在配置允许时真正向 AstrBot `context.send_message` 请求发送。
 - 话题来源必须可解释：用户某件事的进度、共同语境里的近期事项、想念/陪伴需要、调皮打扰、轻量整蛊或修复需求都要带 `topic_evidence`。
+- 主动发言不是轮询到候选就立刻发送；同一会话刚结束交流时会进入真实时间安静门，未回复、冷回复和连续主动失败会继续拉长冷却，让她更像“偶尔想起你”，而不是后台定时刷存在感。
+- 即时聊天只接管最终自然语言回复；如果 LLMResponse 处在工具调用阶段，Sylanne 会完全放行，不改写 `completion_text`，不 `stop_event()`，也不消费会话 epoch，避免打断 AstrBot Agent 的工具循环。
 - 主动发送默认关闭；打开后仍受同会话冷却、沉默裁决、缺失 `unified_msg_origin`、缺失 `send_message` 接口等诊断保护。
 - 注入使用临时 `TextPart`，不会直接写进长期消息记录。
 - 状态落库使用 AstrBot KV，不建议外部插件直接改内部 key。
@@ -843,7 +846,10 @@ low_reasoning_max_context_chars = 1200
 | 参数传递 | 冷却、长度、半衰期更接近静态配置。 | 人格漂移影响人格建模，人格建模再传递到情绪动力学、主动性、冷却、反馈窗口和表达节奏。 |
 | 主动聊天 | 只能由工具或其他插件请求一次主动发言。 | 可登记最近会话，后台低频醒来；话题由状态公式和大模型基于证据裁决，再通过 `context.send_message` 请求发送。 |
 | 话题来源 | 容易变成预设话题或模板开场。 | 必须带 `topic_evidence`，例如进度关心、共同语境、想念、调皮打扰、轻量修复或双方互需。 |
+| 主动频率 | 缺少“刚聊完就别打扰”的真实时间门控。 | 同一会话近期活跃、未回复、冷回复、打断风险和反馈压力会共同提高冷却；非紧急开口需要更长真实时间间隔。 |
 | 即时聊天 | 主大模型一次性吐出整段回复。 | 可拆成多条短消息，模拟打字停顿，并在表情包发送前做语气一致性检查。 |
+| 工具调用 | 回复接管和工具调用边界不够清晰。 | 只接管最终自然语言回复；工具调用中间响应完全交还 AstrBot Agent，避免工具链被分条模块截断。 |
+| 上下文归属 | 插件容易把临时摘要当成长上下文来源。 | 长期上下文归 AstrBot Agent；Sylanne 只补投递事实、短记忆召回和必要状态摘要。 |
 | 记忆写入 | 长期记忆更偏事实文本。 | Sylanne 自有记忆会冻结当时情绪、拟人状态、生命化学习和人格漂移，让记忆带着当时气氛。 |
 
 </details>
@@ -990,7 +996,7 @@ s_t=r_t c_t g^D_t\phi^D_t(q_t,v_{t-1},\Delta p_{t-1})
 - DeYoung, C. G. (2015). Cybernetic Big Five Theory. *Journal of Research in Personality*. DOI `10.1016/j.jrp.2014.07.004`.
 - Wrzus, C., & Roberts, B. W. (2017). Processes of personality development in adulthood: The TESSERA framework. *Personality and Social Psychology Review*. DOI `10.1177/1088868316652279`.
 - Baumert, A., Schmitt, M., Perugini, M., et al. (2017). Integrating personality structure, process, and development. *European Journal of Personality*. DOI `10.1002/per.2115`.
-- Roberts, B. W., Walton, K. E., & Viechtbauer, W. (2006). Patterns of mean-level change in personality traits across the life course. *Psychological Bulletin*. DOI `10.1037/0033-2909.132.1.1`.
+- Roberts, B. W., Walton, K. E., & Viechtbauer, W. (2006). Patterns of mean-level change in personality traits across the life course. *Psychological Bulletin*. DOI `10.1037/0033-2909.132.1.2`.
 
 </details>
 
@@ -1528,17 +1534,19 @@ enable_safety_boundary = false
 | `enable_proactive_speech_dispatch` | bool | `false` | 是否允许插件真正调用 `context.send_message` 主动发消息。关闭时只返回 `dispatch_request` 和未发送原因。 |
 | `enable_proactive_speech_scheduler` | bool | `false` | 是否启用后台主动聊天调度器。开启后会从最近可触达会话中选择候选；真正发送仍要求 `enable_proactive_speech_dispatch=true`。 |
 
-主动发言的后台调度器不是固定闹钟。她会先登记最近出现过、具备 `unified_msg_origin` 的会话；后台低频醒来时，会在环境压力不高、同会话未被锁住、近期没有重复检查的前提下，把最近用户消息和上下文摘要交给主动发言裁决。裁决仍然要经过本地公式、LLM 话题判断、冷却、发送开关和 `context.send_message` 接口检查。
+主动发言的后台调度器不是固定闹钟。她会先登记最近出现过、具备 `unified_msg_origin` 的会话；后台低频醒来时，会在环境压力不高、同会话未被锁住、近期没有重复检查的前提下，把最近用户消息和上下文摘要交给主动发言裁决。裁决仍然要经过本地公式、LLM 话题判断、真实时间安静门、冷却、发送开关和 `context.send_message` 接口检查。
 
 主动发言不会只看最后一句。每次用户请求都会写入一个短期上下文窗口，调度器醒来时会把最近几轮用户文本和请求上下文整理成“近期上下文摘要”，再附上当前请求摘要、打断/未完成回复摘要、主动反馈状态和 Sylanne 自有记忆召回摘要。召回 query 会综合当前用户消息、近期请求上下文和插件临时断点，因此用户连续补充“不是啊，我说的是插件其他用户 / 那他们呢”时，主 LLM 不会只看到最后一句“他们呢”。如果自有记忆为空或读取失败，链路会静默降级，不阻塞普通回复或主动聊天。
 
-主动发言的冷却、有效期、句子长度和反馈观察窗口不会暴露为普通配置。插件会根据 `score`、边界敏感、打扰风险、修复需要、用户被照顾需要、bot 自己想被需要的程度自动计算，并写入 `dispatch_request.adaptive_policy`。如果主动发言后用户没有回应，或只回了“嗯”“好”这类低信号短句，插件会把它记录为 `unanswered` 或 `cold_reply`，后续会更谨慎地判断开口时机。
+主动发言的冷却、有效期、句子长度、反馈观察窗口和刚聊完后的最短安静时间不会暴露为普通配置。插件会根据 `score`、边界敏感、打扰风险、修复需要、用户被照顾需要、bot 自己想被需要的程度、近期活跃时间和反馈压力自动计算，并写入 `dispatch_request.adaptive_policy` 与 `dispatch_request.quiet_gate`。如果主动发言后用户没有回应，或只回了“嗯”“好”这类低信号短句，插件会把它记录为 `unanswered` 或 `cold_reply`，后续会更谨慎地判断开口时机。
 
-返回结果里的 `dispatch_request` 会包含 `requested`、`reason`、`topic_evidence`、`message_text`、`unified_msg_origin`、`idempotency_key`、`adaptive_policy`、`sent` 和 `blocked_reason`。常见未发送原因包括 `dispatch_disabled`、`cooldown_active`、`missing_event_origin`、`missing_send_message_api`、`decision_declined` 和 `dry_run`。
+返回结果里的 `dispatch_request` 会包含 `requested`、`reason`、`topic_evidence`、`message_text`、`unified_msg_origin`、`idempotency_key`、`adaptive_policy`、`quiet_gate`、`sent` 和 `blocked_reason`。常见未发送原因包括 `dispatch_disabled`、`recent_user_activity_quiet_period`、`cooldown_active`、`missing_event_origin`、`missing_send_message_api`、`decision_declined` 和 `dry_run`。
 
 ### 真人即时聊天与表情包
 
 即时聊天层负责“怎么发出去”，不重新替代情绪模型本身。文本仍由主 LLM 生成；插件只在本地做分条、节奏、冷却、表情包候选选择和轻量记忆。这样可以降低 token 消耗，也能让其他插件直接调用计划接口。
+
+即时聊天接管只发生在最终自然语言回复上。若 AstrBot Agent 正在进行工具调用，`LLMResponse` 里带有 `tool_calls`、`function_call`、工具角色、工具调用 ID 或 `finish_reason=tool_calls`，Sylanne 会直接放行：不改写 `completion_text`，不阻断事件传播，不消费会话 epoch。这样工具查询、记忆查询和其他插件工具仍由 AstrBot Agent 原生循环处理；Sylanne 只在最终可发送文本出现后接管投递。
 
 | 配置项 | 类型 | 默认值 | 说明 |
 | --- | --- | --- | --- |
@@ -1706,6 +1714,8 @@ LLM 在这里只负责给出语义观察：`relationship_decision`、`conflict_a
 
 Sylanne 不再依赖外部长期记忆插件。每次稳定用户输入、主动聊天候选和被打断回复的关键摘要，都会进入 Sylanne 自有记忆层；后续普通回复、插话恢复和主动聊天调度都会使用 `[sylanne_memory_recall]` 的限长摘要帮助主 LLM 理解指代、偏好、共同经历和相处方式。
 
+放弃 LivingMemory 兼容不是因为 LivingMemory 不好。相反，LivingMemory 是一个很好的全生命周期记忆插件；这个项目一开始也确实是奔着“直接调用 LivingMemory，把情绪写进外部长期记忆”去做的。只是 Sylanne 后来叠加了即时聊天接管、分条发送、用户插话合并、未完整送达断点、主动发言调度和 Agent-owned context 之后，当前即时聊天链路会和外部全生命周期写入/召回逻辑发生冲突：同一段回复到底是“主 LLM 已生成”“默认发送口被阻断”“用户只读到前几条”还是“已经完整进入长期记忆”，需要插件自己精确区分。为了先保证记忆的正常写入、召回和上下文不乱，`2.0.0` 起暂时放弃对 LivingMemory 的运行时兼容，改为自研 Sylanne 自有记忆模块。后续如果两边生命周期边界能稳定对齐，再重新做可选适配。
+
 这层记忆更接近一个轻量本地知识库，而不是聊天上下文的无限追加：每条记忆会存成独立记录，包含 `summary`、限长 `text`、会话键、说话人、记忆层类型、情绪签名、关系签名、深度、置信度、证据次数、召回次数、上次召回时间和自动动力学参数。普通回复和主动聊天只按当前 query 检索少量高分摘要，注入 `[sylanne_memory_recall]`，不会把整个记忆库塞进 prompt。
 
 记忆会按真实时间变化。相似事件再次发生时，`evidence_count`、`depth` 和 `confidence` 会被巩固；某条记忆真正被召回并注入上下文后，`recall_count`、`last_recalled_at` 和 `retrieval_reinforcement` 会更新，让常被用到且有解释价值的记忆更稳。长期没有证据、没有召回、深度和置信度都很低的旧记忆，会在读取时按半衰期被削弱，必要时从 KV 中落盘删除；重要记忆则因为证据、深度、置信度和召回次数更高而更抗遗忘。
@@ -1770,7 +1780,7 @@ if emotion:
 await your_plugin_store.write(event, memory)
 ```
 
-如果目标插件只能写普通 dict，也可以合并字段；即使 Sylanne 未安装、未激活或版本不匹配，也要保留原始 memory 写入：
+如果 LivingMemory 的接口只能写普通 dict，也可以合并字段；即使 Sylanne 未安装、未激活或版本不匹配，也要保留原始 memory 写入：
 
 ```python
 memory = {"text": memory_text}
@@ -2878,7 +2888,7 @@ $env:ASTRBOT_EXPECT_PLUGIN = "astrbot_plugin_sylanne"
 脚本会在输出 JSON 里写出 `expectedPluginRuntime`，包含插件列表 API 中返回的 `version`、`displayName`、`activated`、`author`、`astrbotVersion` 等只读字段。若目标插件存在但 `activated=false`，脚本会失败退出。需要把版本和显示名也作为硬断言时，可以额外设置：
 
 ```powershell
-$env:ASTRBOT_EXPECT_PLUGIN_VERSION = "2.1.1"
+$env:ASTRBOT_EXPECT_PLUGIN_VERSION = "2.1.2"
 $env:ASTRBOT_EXPECT_PLUGIN_DISPLAY_NAME = "Sylanne"
 & $node scripts\remote_smoke_playwright.js
 ```
@@ -3097,7 +3107,7 @@ inject_state = false
 humanlike_memory_write_enabled = true
 ```
 
-拟人状态默认自动运行。若没有看到 `humanlike_state_at_write`，优先确认插件是否为 `2.1.1` 或更新版本、`humanlike_memory_write_enabled=true`，以及调用方是否保留了完整记忆载荷。
+拟人状态默认自动运行。若没有看到 `humanlike_state_at_write`，优先确认插件是否为 `2.1.2` 或更新版本、`humanlike_memory_write_enabled=true`，以及调用方是否保留了完整记忆载荷。
 
 ### 拟人状态没有生效
 

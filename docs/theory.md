@@ -671,11 +671,11 @@ Sylanne 自有长期记忆不再把历史对话当作无限追加的上下文，
 
 ```math
 s_i(q)=
-\frac{|T(q)\cap T(m_i)|}
-{\sqrt{|T(q)|\,|T(m_i)|+\epsilon}},
+\frac{|O(q,m_i)|}
+{\sqrt{|T(q)|\,|T(m_i)|+\eta_0}},
 ```
 
-其中 `T(\cdot)` 是本地分词后的 token 集合，`\epsilon` 是防止空集合除零的极小量。当前实现不依赖外部向量库，因此它更接近低成本稀疏检索；若后续接入向量检索，也必须保留同样的预算闸门。
+其中 `T(\cdot)` 是本地分词后的 token 集合，`O(q,m_i)` 表示 query 与记忆 token 的重叠集合，`\eta_0` 是防止空集合除零的极小量。当前实现不依赖外部向量库，因此它更接近低成本稀疏检索；若后续接入向量检索，也必须保留同样的预算闸门。
 
 真实时间新鲜度写成半衰形式：
 
@@ -703,7 +703,7 @@ R_i =
 ```math
 G_M=(M,A),\qquad
 a_{ij}\in[0,1],\qquad
-|\mathcal N(i)|\le K_a .
+K_a-|N_i|\ge 0 .
 ```
 
 关联边权不是 LLM 随机判断，而由本地公式推导：
@@ -712,14 +712,14 @@ a_{ij}\in[0,1],\qquad
 a_{ij}=
 \mathrm{clip}\left(
 0.34s_{ij}
-+0.24\ell_{ij}
++0.24l_{ij}
 +0.16e_{ij}
 +0.14\tau_{ij}
-+0.12\kappa_{ij},\;0,\;1
++0.12k_{ij},\;0,\;1
 \right).
 ```
 
-这里 `s_{ij}` 是两条记忆摘要/正文的 token 相似度，`\ell_{ij}` 是记忆层权重重叠，`e_{ij}` 是情绪签名接近度，`\tau_{ij}` 是真实时间接近度，`\kappa_{ij}` 是两条记忆共同的巩固强度。写入时只扫描同会话最近窗口，而不是全库建图；每条记录只保留 top-3 边，避免长期运行后图结构爆炸。
+这里 `s_{ij}` 是两条记忆摘要/正文的 token 相似度，`l_{ij}` 是记忆层权重重叠，`e_{ij}` 是情绪签名接近度，`\tau_{ij}` 是真实时间接近度，`k_{ij}` 是两条记忆共同的巩固强度。写入时只扫描同会话最近窗口，而不是全库建图；每条记录只保留 top-3 边，避免长期运行后图结构爆炸。
 
 召回分两步。第一步只根据 query 选直接命中集合：
 
@@ -739,15 +739,15 @@ R_i(0.42+0.20g_t)a_{ij}
 +0.06c_j
 -0.14\eta_j,\;0,\;1
 \right)
-: i\in P_q,\;j\in \mathcal N(i)
+: i\in P_q,\;j\in N_i
 \right\}.
 ```
 
 其中 `g_t` 是当前自有记忆巩固强度。最终注入集合为：
 
 ```math
-C_q=P_q\cup A_q,\qquad |C_q|\le K_p+K_a,\qquad
-\mathrm{chars}(C_q)\le B_M .
+C_q=\mathrm{union}(P_q,A_q),\qquad K_p+K_a-|C_q|\ge 0,\qquad
+B_M-\mathrm{chars}(C_q)\ge 0 .
 ```
 
 这条硬约束是防止“联想”撑爆上下文的核心：关联召回只能作为直接命中的邻居补充，不能凭空把整张记忆网拉进 prompt；注入文本仍被 `[sylanne_memory_recall]` 和字符预算 `B_M` 截断，并且不会作为下一轮 query 的原始用户输入重复回灌。
@@ -762,11 +762,11 @@ g_i =
 ```
 
 ```math
-d_i \leftarrow d_i+g_i(1-d_i),
+d_i' = d_i+g_i(1-d_i),
 \qquad
-c_i \leftarrow c_i+0.72g_i(1-c_i),
+c_i' = c_i+0.72g_i(1-c_i),
 \qquad
-\eta_i \leftarrow \eta_i(1-0.35g_i).
+\eta_i' = \eta_i(1-0.35g_i).
 ```
 
 注意，召回强化只更新 `recall_count`、`last_recalled_at`、深度、置信度和干扰，不把内容更新时间伪装成新事件；否则会让“刚被想起”误变成“刚刚发生”，破坏真实时间记忆轨迹。

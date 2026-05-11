@@ -237,6 +237,40 @@ class LifelikeLearningEngineTests(unittest.TestCase):
             any(topic.get("evidence") for topic in topics if topic["kind"] == "progress_check"),
         )
 
+    def test_proactive_topics_do_not_invent_progress_after_topic_is_closed(self):
+        state = LifelikeLearningState.initial()
+        state.values.update(
+            {
+                "rapport": 0.86,
+                "common_ground": 0.78,
+                "preference_confidence": 0.70,
+                "initiative_readiness": 0.88,
+                "boundary_sensitivity": 0.06,
+                "mutual_need_balance": 0.70,
+                "being_needed_readiness": 0.72,
+                "need_expression_readiness": 0.62,
+            },
+        )
+        state.user_profile.facts["readme"] = "README 已经写完，不用跟进。"
+
+        topics = rank_proactive_topics(
+            state,
+            emotion_snapshot={"values": {"affiliation": 0.7, "valence": 0.5}},
+            group_snapshot={
+                "values": {
+                    "playfulness": 0.70,
+                    "tension": 0.02,
+                    "interrupt_risk": 0.03,
+                },
+            },
+            candidate_context="刚才 README 话题已经结束了，先不聊进度。",
+            limit=8,
+        )
+        kinds = {topic["kind"] for topic in topics}
+
+        self.assertNotIn("progress_check", kinds)
+        self.assertIn("playful_ping", kinds)
+
 
 if __name__ == "__main__":
     unittest.main()

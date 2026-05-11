@@ -2,7 +2,7 @@ name: astrbot_plugin_sylanne
 display_name: Sylanne
 desc: Soulful Yearning Lifelike AstrBot Neural Narrative Engine；用情绪动力学、人格漂移、生命化学习、群聊氛围和后台状态调度维护可计算、可记忆、可调用的长期状态。
 short_desc: Soulful Yearning Lifelike AstrBot Neural Narrative Engine，Sylanne。
-version: 2.1.1
+version: 2.1.2
 author: pidan
 license: GPL-3.0-or-later
 repo: "https://github.com/Ayleovelle/astrbot_plugin_sylanne"

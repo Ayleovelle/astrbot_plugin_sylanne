@@ -1,5 +1,16 @@
 # Progress
 
+## 2026-05-12 Tool Calls And Proactive Quiet Gate
+
+Status: local bugfix validation in progress; not published.
+
+- Added regression coverage proving realtime reply interception must not catch tool-call LLM responses.
+- Added a guard so `on_llm_response` immediately returns for tool-call/function-call payloads, tool roles, tool-call ids and `finish_reason=tool_calls/function_call`; pending response epochs are preserved for the later final natural-language answer.
+- Added a proactive quiet gate so a just-active session is not immediately pinged by the proactive scheduler. The gate records `dispatch_request.quiet_gate` and can block with `recent_user_activity_quiet_period`.
+- Lengthened formula-derived proactive cooldowns so non-urgent proactive speech feels less like a background timer and more like occasional real-time initiative.
+- Updated README and `docs/assets/workflow_and_proactive.svg` to state that AstrBot Agent owns context and tools, while Sylanne owns delivery status, bounded memory recall and ordered background state commits.
+- Added README explanation for temporarily dropping LivingMemory runtime compatibility: LivingMemory is a good lifecycle memory plugin and was the original plan, but current realtime chat/split delivery/interruption bookkeeping conflicts with its lifecycle assumptions, so Sylanne first-party memory is used for now.
+
 ## 2026-05-07 Iteration 11
 
 - Created persistent planning files: `task_plan.md`, `findings.md`, `progress.md`.
@@ -3103,3 +3114,21 @@ Notes:
 - Validation:
   - `python -m pytest -q tests/test_astrbot_lifecycle.py -k "livingmemory or realtime_chat_explicit_dispatch_still_respects_cooldown or realtime_send_cooldown or intercepts_completion"` -> 8 passed.
   - `python -m pytest -q tests/test_config_schema_contract.py tests/test_remote_smoke_contract.py` -> 33 passed, 402 subtests passed.
+
+## 2026-05-12 Agent-Owned Context Plan Anchor
+
+- User explicitly clarified: “上下文就是交给 agent”。
+- Added `task_plan.md` section `Active Architecture Constraint - 2026-05-12 Agent-Owned Context` as the current recovery anchor.
+- Locked the design direction:
+  - AstrBot Agent owns the conversation context and history.
+  - Sylanne plugin should not keep pushing large temporary context into the main LLM prompt.
+  - Realtime chat interception must preserve the assistant reply for Agent history while preventing the default full-message send.
+  - The plugin only adds short auditable delivery facts when Agent cannot know them naturally, such as “reply generated but not fully sent”, sent/unsent counts, summaries, and interruption timing.
+  - Gemini high-risk models should use `gemini_agent_owned_context` and skip Sylanne extra prompt injection.
+  - Proactive speech must not invent progress checks without evidence; no-evidence initiative should become silence or playful/light teasing style with explicit state reason.
+- Next implementation pass should start from tests for:
+  - Gemini agent-owned context no-injection behavior,
+  - realtime delivery envelope in `response.completion_text`,
+  - interrupted split-send status visible to the next turn,
+  - user multi-part input aggregation,
+  - proactive topic judgement evidence gate.

@@ -76,6 +76,15 @@ _PROGRESS_TOPIC_RE = re.compile(
     r"研究|课题|开题|投稿|桥梁|隧道|模型|训练|数据|报告|文档|README)",
     re.IGNORECASE,
 )
+_PROGRESS_EXPLICIT_RE = re.compile(
+    r"(?:进度|做到哪|怎么样了|还顺|卡住|推进|deadline|ddl|截止|未完成|待办|还没|继续|"
+    r"提醒|跟进|催我|检查一下|帮我盯|这周|今天|明天|今晚|月底|开题|投稿|实验结果|测试结果)",
+    re.IGNORECASE,
+)
+_PROGRESS_CLOSED_RE = re.compile(
+    r"(?:已经|已|刚刚|刚才)?(?:完成|搞完|做完|结束|收尾完|解决了|不用跟进|别跟进|先不聊|话题结束|不用管)",
+    re.IGNORECASE,
+)
 
 
 def clamp(value: Any, lower: float = 0.0, upper: float = 1.0) -> float:
@@ -84,6 +93,19 @@ def clamp(value: Any, lower: float = 0.0, upper: float = 1.0) -> float:
     except (TypeError, ValueError):
         number = lower
     return max(lower, min(upper, number))
+
+
+def _progress_evidence_excerpt(text: str) -> str:
+    value = " ".join(str(text or "").split()).strip()
+    if not value:
+        return ""
+    if _PROGRESS_CLOSED_RE.search(value):
+        return ""
+    if not _PROGRESS_TOPIC_RE.search(value):
+        return ""
+    if not _PROGRESS_EXPLICIT_RE.search(value):
+        return ""
+    return value[-120:]
 
 
 def half_life_multiplier(elapsed_seconds: float, half_life_seconds: float) -> float:
@@ -1211,13 +1233,17 @@ def rank_proactive_topics(
     progress_sources: list[str] = []
     for key, value in list(profile.facts.items())[:16]:
         item = f"{key}: {value}".strip(": ")
-        if _PROGRESS_TOPIC_RE.search(item):
-            progress_sources.append(item[:120])
+        excerpt = _progress_evidence_excerpt(item)
+        if excerpt:
+            progress_sources.append(excerpt)
     for note in profile.need_notes[:12]:
-        if _PROGRESS_TOPIC_RE.search(note):
-            progress_sources.append(note[:120])
-    if candidate_context and _PROGRESS_TOPIC_RE.search(candidate_context):
-        progress_sources.append(candidate_context.strip()[-120:])
+        excerpt = _progress_evidence_excerpt(note)
+        if excerpt:
+            progress_sources.append(excerpt)
+    if candidate_context:
+        excerpt = _progress_evidence_excerpt(candidate_context)
+        if excerpt:
+            progress_sources.append(excerpt)
     progress_sources = _dedupe(progress_sources)[:4]
     if progress_sources:
         progress_score = (
@@ -1365,9 +1391,11 @@ def build_proactive_topic_assessment_prompt(
 1. 不要使用预设话题模板。只能根据上下文、状态信号、候选证据和关系需要选择话题。
 2. “双方都有需要和被需要”可以成立，但必须克制：不能黏人，不能用情绪绑架用户，不能假装知道没有证据的黑话。
 3. 可以选择关心用户某件事的进度、表达克制想念、调皮打扰、轻量整蛊或关系修复；但必须能从候选证据、最近上下文或状态信号中说明理由。
-4. 轻量整蛊只能是无害玩笑、假装敲门、卖关子一秒这种短互动，不能欺骗事实、威胁、羞辱、诱导转账或破坏用户任务。
-5. 如果证据不足，topic_text 留空或写成轻量澄清方向；不要编造用户喜好。
-6. 输出必须是 JSON 对象，不要输出 Markdown。
+4. progress_check 必须有明确证据：近期任务、期限、未完成事项、用户要求提醒/跟进或上下文中仍在推进的事项；话题已经结束时不要问进度。
+5. 如果只是想开口但没有可靠话题，要优先保持沉默；若状态确实适合打扰，只能用 playful_ping 或 prank_light 这种短小、低压力、调皮的方式。
+6. 轻量整蛊只能是无害玩笑、假装敲门、卖关子一秒这种短互动，不能欺骗事实、威胁、羞辱、诱导转账或破坏用户任务。
+7. 如果证据不足，topic_text 留空或写成轻量澄清方向；不要编造用户喜好。
+8. 输出必须是 JSON 对象，不要输出 Markdown。
 
 主动发言模型结果：
 {json_dumps_compact(decision)}
@@ -1523,7 +1551,7 @@ def _local_topic_draft(need_mode: str, topic_text: str) -> str:
     if need_mode == "progress_check":
         if topic:
             return f"那、那个……你之前提到的{topic}，现在进度还顺吗？"
-        return "那、那个……你之前那件事，现在进度还顺吗？"
+        return ""
     if need_mode == "missing_user":
         return "那、那个……我只是路过确认一下，你今天还好吗？"
     if need_mode == "playful_ping":
