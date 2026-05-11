@@ -69,6 +69,24 @@
     "default": true,
     "hint": "开启后 on_llm_response 会尝试接管默认回复，用 context.send_message 顺序发送分条消息；为避免上下文断裂，插件会保留一次性 assistant 历史影子供下一轮指代消解使用。若平台不支持响应改写，可关闭此项。"
   },
+  "realtime_input_completion_llm_gate_enabled": {
+    "description": "启用用户分段完整性 LLM 判断",
+    "type": "bool",
+    "default": true,
+    "hint": "开启后，当同一用户短时间连续发送疑似半句话、铺垫或碎片时，插件会先等一拍，再让内部判断 LLM 判断用户是否已经说完；未说完则继续等待，避免 bot 抢答半句话。"
+  },
+  "realtime_input_completion_probe_delay_seconds": {
+    "description": "用户分段完整性探测等待秒数",
+    "type": "float",
+    "default": 0.65,
+    "hint": "首次碎片后的基础等待时间。插件会根据碎片数量和窗口状态自动缩放该值；不是固定抢答延迟，也不会影响完整长句。"
+  },
+  "realtime_input_completion_max_wait_seconds": {
+    "description": "用户分段完整性最长等待秒数",
+    "type": "float",
+    "default": 20.0,
+    "hint": "判断 LLM 认为用户仍未说完时，单轮最多等待的时间上限。用户继续发送会刷新碎片窗口；超过上限仍未继续时会放行，避免永久沉默。"
+  },
   "realtime_chat_dry_run_default": {
     "description": "即时聊天发送默认试算",
     "type": "bool",

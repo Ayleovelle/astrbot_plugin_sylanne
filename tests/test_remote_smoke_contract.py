@@ -401,6 +401,7 @@ class RemoteSmokeContractTests(unittest.TestCase):
             "_conf_schema.json",
             "docs/assets/runtime_overview.svg",
             "docs/assets/sylanne-mascot.gif",
+            "docs/assets/sylanne-mascot-card.svg",
             "docs/assets/workflow_and_proactive.svg",
         ):
             with self.subTest(required_entry=required_entry):

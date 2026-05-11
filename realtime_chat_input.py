@@ -10,15 +10,75 @@ PUBLIC_REALTIME_INPUT_SCHEMA_VERSION = "astrbot.realtime_input_fragments.v1"
 _WHITESPACE_RE = re.compile(r"\s+")
 _CLOSING_PUNCTUATION_RE = re.compile(r"[。！？!?~～…]+$")
 _QUESTION_PARTICLES = {"吗", "嘛", "么", "呢", "不", "吧"}
+_QUESTION_MARKERS = (
+    "为什么",
+    "为啥",
+    "怎么",
+    "怎样",
+    "咋",
+    "哪里",
+    "哪儿",
+    "哪",
+    "谁",
+    "什么",
+    "几",
+    "多少",
+    "是否",
+    "是不是",
+    "有没有",
+    "吗",
+    "嘛",
+    "么",
+    "呢",
+    "从哪",
+    "看来的",
+)
+_COMPLETION_LIKELY_MARKERS = (
+    "就是这样",
+    "大概这样",
+    "就这样",
+    "说完了",
+    "没了",
+    "以上",
+)
+_STANDALONE_SHORT_REPLIES = {
+    "好",
+    "好的",
+    "嗯",
+    "嗯嗯",
+    "行",
+    "可以",
+    "ok",
+    "OK",
+    "谢谢",
+    "谢了",
+    "不用",
+    "不了",
+    "没事",
+    "知道了",
+    "明白",
+    "明白了",
+}
 _CONTINUATION_PREFIXES = {
     "不是",
     "不对",
     "就是",
     "我是说",
+    "我说的是",
+    "我的意思是",
     "刚刚",
     "那个",
-    "这",
-    "那",
+}
+_SETUP_PREFIXES = {
+    "我只是",
+    "我就是",
+    "我就",
+    "我有点",
+    "我觉得",
+    "我想说",
+    "我还",
+    "其实",
+    "等一下",
 }
 
 
@@ -56,9 +116,9 @@ def observe_realtime_input_fragment(
         windows.pop(session, None)
         return _empty_payload(session, speaker, reason="disabled_or_empty")
 
-    if not _is_fragment_candidate(normalized, settings):
+    if _looks_like_standalone_short_reply(normalized):
         windows.pop(session, None)
-        return _empty_payload(session, speaker, reason="not_fragment_candidate")
+        return _empty_payload(session, speaker, reason="standalone_short_reply")
 
     fragment = RealtimeInputFragment(
         text=normalized,
@@ -67,37 +127,90 @@ def observe_realtime_input_fragment(
         kind=classify_input_fragment(normalized),
     )
     previous = windows.get(session)
+    if _can_extend_window(previous, fragment, settings):
+        if not _can_append_to_existing_window(normalized, settings):
+            windows.pop(session, None)
+            return _empty_payload(session, speaker, reason="not_fragment_candidate")
+        fragments = list(previous.get("fragments") or [])
+        fragments.append(fragment)
+        fragments = fragments[-max(2, int(settings.max_fragments)) :]
+        previous["fragments"] = fragments
+        previous["updated_at"] = fragment.observed_at
+
+        if not _should_emit_window(fragments, settings):
+            sequence = [item.text for item in fragments]
+            return _empty_payload(
+                session,
+                speaker,
+                reason="waiting_for_more_fragments",
+                should_hold=True,
+                fragments=sequence,
+                merged_intent=merge_input_fragments(sequence),
+            )
+
+        windows.pop(session, None)
+        sequence = [item.text for item in fragments]
+        merged = merge_input_fragments(sequence)
+        return {
+            "schema_version": PUBLIC_REALTIME_INPUT_SCHEMA_VERSION,
+            "kind": "realtime_user_message_fragments",
+            "should_inject": True,
+            "session_key": session,
+            "speaker_key": speaker,
+            "fragment_count": len(sequence),
+            "fragments": sequence,
+            "display_sequence": " / ".join(sequence),
+            "merged_intent": merged,
+            "started_at": fragments[0].observed_at,
+            "updated_at": fragments[-1].observed_at,
+            "elapsed_seconds": round(max(0.0, fragments[-1].observed_at - fragments[0].observed_at), 6),
+            "reason": "short_interval_fragment_turn",
+        }
+
+    if not _should_start_fragment_window(normalized, settings):
+        windows.pop(session, None)
+        return _empty_payload(session, speaker, reason="not_fragment_candidate")
+
     if not _can_extend_window(previous, fragment, settings):
         windows[session] = _window_from_fragment(session, fragment)
-        return _empty_payload(session, speaker, reason="window_started")
+        return _empty_payload(
+            session,
+            speaker,
+            reason="window_started",
+            should_hold=True,
+            fragments=[fragment.text],
+            merged_intent=fragment.text,
+        )
 
-    fragments = list(previous.get("fragments") or [])
-    fragments.append(fragment)
-    fragments = fragments[-max(2, int(settings.max_fragments)) :]
-    previous["fragments"] = fragments
-    previous["updated_at"] = fragment.observed_at
+    return _empty_payload(session, speaker, reason="not_fragment_candidate")
 
-    if not _should_emit_window(fragments, settings):
-        return _empty_payload(session, speaker, reason="waiting_for_more_fragments")
 
-    windows.pop(session, None)
-    sequence = [item.text for item in fragments]
-    merged = merge_input_fragments(sequence)
-    return {
-        "schema_version": PUBLIC_REALTIME_INPUT_SCHEMA_VERSION,
-        "kind": "realtime_user_message_fragments",
-        "should_inject": True,
-        "session_key": session,
-        "speaker_key": speaker,
-        "fragment_count": len(sequence),
-        "fragments": sequence,
-        "display_sequence": " / ".join(sequence),
-        "merged_intent": merged,
-        "started_at": fragments[0].observed_at,
-        "updated_at": fragments[-1].observed_at,
-        "elapsed_seconds": round(max(0.0, fragments[-1].observed_at - fragments[0].observed_at), 6),
-        "reason": "short_interval_fragment_turn",
-    }
+def build_realtime_input_hold_injection(
+    payload: dict[str, Any],
+    *,
+    max_chars: int = 360,
+) -> str:
+    if not payload.get("should_hold"):
+        return ""
+    lines = [
+        "[sylanne_user_message_fragments_waiting]",
+        "用户可能正在把一句话分多条发送；当前不要把这些碎片当作完整语义。",
+        "reason={reason}; fragment_count={count}".format(
+            reason=str(payload.get("reason") or ""),
+            count=len(payload.get("fragments") or []),
+        ),
+        "fragments={sequence}".format(
+            sequence=str(payload.get("display_sequence") or ""),
+        ),
+        "partial_intent={merged}".format(
+            merged=str(payload.get("merged_intent") or ""),
+        ),
+    ]
+    text = "\n".join(lines).strip()
+    limit = max(120, int(max_chars))
+    if len(text) <= limit:
+        return text
+    return text[:limit].rstrip()
 
 
 def build_realtime_input_fragment_injection(
@@ -110,6 +223,7 @@ def build_realtime_input_fragment_injection(
     lines = [
         "[sylanne_user_message_fragments]",
         "同一用户在很短时间内分多条发送；请把下面碎片当作同一轮用户意图，而不是逐条误读或只回应最后一条。",
+        "如果当前 prompt 只包含最后一个碎片，请以 merged_intent 理解用户真正想说的话。",
         "fragment_count={count}; elapsed_seconds={elapsed}; schema={schema}".format(
             count=int(payload.get("fragment_count") or 0),
             elapsed=payload.get("elapsed_seconds", 0),
@@ -156,15 +270,30 @@ def merge_input_fragments(fragments: list[str]) -> str:
     return " ".join(cleaned).strip()
 
 
-def _empty_payload(session_key: str, speaker_key: str, *, reason: str) -> dict[str, Any]:
-    return {
+def _empty_payload(
+    session_key: str,
+    speaker_key: str,
+    *,
+    reason: str,
+    should_hold: bool = False,
+    fragments: list[str] | None = None,
+    merged_intent: str = "",
+) -> dict[str, Any]:
+    payload = {
         "schema_version": PUBLIC_REALTIME_INPUT_SCHEMA_VERSION,
         "kind": "realtime_user_message_fragments",
         "should_inject": False,
+        "should_hold": bool(should_hold),
         "session_key": session_key,
         "speaker_key": speaker_key,
         "reason": reason,
     }
+    if fragments:
+        payload["fragments"] = fragments
+        payload["display_sequence"] = " / ".join(fragments)
+    if merged_intent:
+        payload["merged_intent"] = merged_intent
+    return payload
 
 
 def _window_from_fragment(
@@ -211,7 +340,12 @@ def _should_emit_window(
         return True
     if len(fragments) < 3:
         return False
-    return _looks_like_closing_fragment(fragments[-1].text)
+    if _looks_like_closing_fragment(fragments[-1].text):
+        return True
+    merged = merge_input_fragments([item.text for item in fragments])
+    if _looks_like_semantic_question(merged):
+        return True
+    return any(marker in merged for marker in _COMPLETION_LIKELY_MARKERS)
 
 
 def _is_fragment_candidate(text: str, settings: RealtimeInputSettings) -> bool:
@@ -220,10 +354,43 @@ def _is_fragment_candidate(text: str, settings: RealtimeInputSettings) -> bool:
         return False
     if "\n" in value:
         return False
+    return _should_start_fragment_window(value, settings) or _can_append_to_existing_window(
+        value,
+        settings,
+    )
+
+
+def _should_start_fragment_window(text: str, settings: RealtimeInputSettings) -> bool:
+    value = normalize_input_fragment_text(text)
+    if not value or "\n" in value or _looks_like_standalone_short_reply(value):
+        return False
+    compact = _compact_fragment_text(value)
+    max_chars = max(2, int(settings.max_fragment_chars))
+    if _looks_like_complete_correction(value):
+        return False
+    if len(compact) <= 4:
+        return True
+    if all(not ch.isalnum() and not "\u4e00" <= ch <= "\u9fff" for ch in value):
+        return True
+    if _CLOSING_PUNCTUATION_RE.search(value) and len(compact) <= 8:
+        return True
+    if any(value.startswith(prefix) for prefix in _CONTINUATION_PREFIXES):
+        return len(value) <= max_chars + 8
+    if any(value.startswith(prefix) for prefix in _SETUP_PREFIXES):
+        return len(value) <= max_chars + 8
+    return False
+
+
+def _can_append_to_existing_window(text: str, settings: RealtimeInputSettings) -> bool:
+    value = normalize_input_fragment_text(text)
+    if not value or "\n" in value:
+        return False
     max_chars = max(2, int(settings.max_fragment_chars))
     if len(value) <= max_chars:
         return True
-    return any(value.startswith(prefix) for prefix in _CONTINUATION_PREFIXES) and len(value) <= max_chars + 8
+    if any(value.startswith(prefix) for prefix in _CONTINUATION_PREFIXES | _SETUP_PREFIXES):
+        return len(value) <= max_chars + 8
+    return _looks_like_semantic_question(value) and len(value) <= max_chars + 8
 
 
 def _looks_like_closing_fragment(text: str) -> bool:
@@ -233,3 +400,33 @@ def _looks_like_closing_fragment(text: str) -> bool:
     if _CLOSING_PUNCTUATION_RE.search(value):
         return True
     return value in _QUESTION_PARTICLES or value[-1] in _QUESTION_PARTICLES
+
+
+def _looks_like_standalone_short_reply(text: str) -> bool:
+    value = normalize_input_fragment_text(text)
+    if not value:
+        return False
+    compact = _compact_fragment_text(value)
+    if compact in _STANDALONE_SHORT_REPLIES:
+        return True
+    return compact.lower() in {item.lower() for item in _STANDALONE_SHORT_REPLIES}
+
+
+def _looks_like_semantic_question(text: str) -> bool:
+    value = normalize_input_fragment_text(text)
+    if not value:
+        return False
+    if "?" in value or "？" in value:
+        return True
+    return any(marker in value for marker in _QUESTION_MARKERS)
+
+
+def _looks_like_complete_correction(text: str) -> bool:
+    value = normalize_input_fragment_text(text)
+    if not any(value.startswith(prefix) for prefix in _CONTINUATION_PREFIXES):
+        return False
+    return ("，" in value or "," in value or "。" in value) and len(_compact_fragment_text(value)) > 5
+
+
+def _compact_fragment_text(text: str) -> str:
+    return re.sub(r"[。！？!?~～…，,、\s]+", "", normalize_input_fragment_text(text))

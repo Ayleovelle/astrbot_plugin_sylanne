@@ -3205,6 +3205,9 @@ class AstrBotLifecycleTests(unittest.TestCase):
                 "inject_state": False,
                 "enable_realtime_chat": True,
                 "enable_sticker_reaction": False,
+                "use_llm_assessor": False,
+                "realtime_input_completion_probe_delay_seconds": 0.0,
+                "realtime_input_completion_max_wait_seconds": 0.3,
             },
         )
         self._bind_common_state_hooks(plugin)
@@ -4162,6 +4165,45 @@ class AstrBotLifecycleTests(unittest.TestCase):
         self.assertNotIn("y" * 300, injected)
         self.assertNotIn("...", injected)
 
+    def test_interrupted_realtime_reply_becomes_emotion_observation_context(self):
+        plugin = new_plugin(
+            {
+                "assessment_timing": "pre",
+                "inject_state": False,
+                "enable_realtime_chat": True,
+                "enable_sticker_reaction": False,
+                "use_llm_assessor": False,
+                "realtime_input_completion_probe_delay_seconds": 0.0,
+                "realtime_input_completion_max_wait_seconds": 0.0,
+            },
+        )
+        saves = []
+        assessment_calls = []
+        self._bind_common_state_hooks(plugin, saves=saves, assessment_calls=assessment_calls)
+        plugin._record_interrupted_reply_breakpoint(
+            "s-interrupt-emotion",
+            reason="user_interrupted",
+            input_epoch=1,
+            sent_parts=["我刚才想说"],
+            unsent_parts=["后面还没说完"],
+            source="unit_test",
+        )
+        request = fake_request(session_id="s-interrupt-emotion", prompt="不是，我补充一下")
+
+        asyncio.run(
+            plugin.on_llm_request(
+                FakeEvent("s-interrupt-emotion", message="不是，我补充一下", sender_id="u1"),
+                request,
+            ),
+        )
+
+        self.assertEqual(len(assessment_calls), 1)
+        current_text = assessment_calls[0]["current_text"]
+        self.assertIn("assistant_interrupted_event", current_text)
+        self.assertIn("可能带来情绪波动", current_text)
+        self.assertIn("不要预设一定是正面或负面", current_text)
+        self.assertIn("不是，我补充一下", current_text)
+
     def test_realtime_input_fragments_are_injected_as_one_user_turn(self):
         plugin = new_plugin(
             {
@@ -4169,6 +4211,9 @@ class AstrBotLifecycleTests(unittest.TestCase):
                 "inject_state": False,
                 "enable_realtime_chat": True,
                 "enable_sticker_reaction": False,
+                "use_llm_assessor": False,
+                "realtime_input_completion_probe_delay_seconds": 0.05,
+                "realtime_input_completion_max_wait_seconds": 0.3,
             },
         )
         plugin._observed_now = lambda: 1000.0
@@ -4179,11 +4224,18 @@ class AstrBotLifecycleTests(unittest.TestCase):
         ]
 
         async def run_fragments():
+            tasks = []
             for request, text in zip(requests, ("你", "是", "🐷", "吗")):
-                await plugin.on_llm_request(
-                    FakeEvent("s-fragments", message=text, sender_id="u1"),
-                    request,
+                tasks.append(
+                    asyncio.create_task(
+                        plugin.on_llm_request(
+                            FakeEvent("s-fragments", message=text, sender_id="u1"),
+                            request,
+                        ),
+                    ),
                 )
+                await asyncio.sleep(0.01)
+            await asyncio.gather(*tasks)
 
         asyncio.run(run_fragments())
 
@@ -4192,12 +4244,180 @@ class AstrBotLifecycleTests(unittest.TestCase):
             for request in requests[:3]
         )
         final_injected = "\n".join(self._request_text_parts(requests[-1]))
+        for request in requests[:3]:
+            self.assertTrue(request._sylanne_realtime_input_hold)
+        self.assertFalse(getattr(requests[-1], "_sylanne_realtime_input_hold", False))
         self.assertNotIn("sylanne_user_message_fragments", first_three)
         self.assertIn("sylanne_user_message_fragments", final_injected)
         self.assertIn("同一用户在很短时间内分多条发送", final_injected)
         self.assertIn("你 / 是 / 🐷 / 吗", final_injected)
         self.assertIn("merged_intent=你 是 🐷 吗", final_injected)
         self.assertLessEqual(len(final_injected), 520)
+
+    def test_realtime_input_fragments_hold_request_and_skip_emotion_until_merged(self):
+        plugin = new_plugin(
+            {
+                "assessment_timing": "pre",
+                "inject_state": True,
+                "enable_realtime_chat": True,
+                "enable_sticker_reaction": False,
+                "use_llm_assessor": False,
+                "realtime_input_completion_probe_delay_seconds": 0.05,
+                "realtime_input_completion_max_wait_seconds": 0.2,
+            },
+        )
+        clock = {"now": 3000.0}
+        plugin._observed_now = lambda: clock["now"]
+        saves, assessment_calls = self._bind_common_state_hooks(plugin)
+        events = [FakeEvent("s-hold-fragments", message=text, sender_id="u1") for text in ("我！", "就！", "是！")]
+        requests = [
+            fake_request(session_id="s-hold-fragments", prompt=text)
+            for text in ("我！", "就！", "是！")
+        ]
+
+        async def run_fragments():
+            tasks = []
+            for event, request in zip(events, requests):
+                tasks.append(asyncio.create_task(plugin.on_llm_request(event, request)))
+                await asyncio.sleep(0.01)
+                clock["now"] += 0.2
+            await asyncio.gather(*tasks)
+
+        asyncio.run(run_fragments())
+
+        self.assertTrue(events[0].stopped)
+        self.assertTrue(events[1].stopped)
+        self.assertFalse(events[2].stopped)
+        self.assertTrue(requests[0]._sylanne_realtime_input_hold)
+        self.assertTrue(requests[1]._sylanne_realtime_input_hold)
+        self.assertEqual(requests[0]._sylanne_default_response_stop_reason, "realtime_input_fragment_waiting")
+        self.assertEqual(requests[1]._sylanne_default_response_stop_reason, "realtime_input_fragment_waiting")
+        self.assertEqual(len(assessment_calls), 1)
+        self.assertGreaterEqual(len(saves), 1)
+        self.assertIn("我！ 就！ 是！", assessment_calls[0]["current_text"])
+        final_injected = "\n".join(self._request_text_parts(requests[-1]))
+        self.assertIn("merged_intent=我！ 就！ 是！", final_injected)
+
+    def test_realtime_input_llm_gate_can_release_complete_short_fragment(self):
+        plugin = new_plugin(
+            {
+                "assessment_timing": "pre",
+                "inject_state": False,
+                "enable_realtime_chat": True,
+                "enable_sticker_reaction": False,
+                "use_llm_assessor": True,
+                "realtime_input_completion_probe_delay_seconds": 0.0,
+                "realtime_input_completion_max_wait_seconds": 0.01,
+            },
+        )
+        plugin._observed_now = lambda: 4000.0
+        saves, assessment_calls = self._bind_common_state_hooks(plugin)
+        calls = []
+
+        async def fake_provider_id(self, event):
+            return "provider"
+
+        async def fake_call_llm(self, *, provider_id, prompt, system_prompt):
+            calls.append((provider_id, prompt, system_prompt))
+            return SimpleNamespace(
+                completion_text='{"is_complete": true, "confidence": 0.91, "reason": "完整强调"}',
+            )
+
+        bind_async(plugin, "_provider_id", fake_provider_id)
+        bind_async(plugin, "_call_internal_assessor_llm", fake_call_llm)
+        event = FakeEvent("s-llm-release", message="我！", sender_id="u1")
+        request = fake_request(session_id="s-llm-release", prompt="我！")
+
+        asyncio.run(plugin.on_llm_request(event, request))
+
+        self.assertFalse(event.stopped)
+        self.assertFalse(getattr(request, "_sylanne_realtime_input_hold", False))
+        self.assertEqual(plugin._realtime_input_fragment_windows, {})
+        self.assertEqual(len(calls), 1)
+        self.assertEqual(len(assessment_calls), 1)
+        self.assertGreaterEqual(len(saves), 1)
+
+    def test_realtime_input_llm_gate_releases_incomplete_fragment_after_max_wait(self):
+        plugin = new_plugin(
+            {
+                "assessment_timing": "pre",
+                "inject_state": False,
+                "enable_realtime_chat": True,
+                "enable_sticker_reaction": False,
+                "use_llm_assessor": True,
+                "realtime_input_completion_probe_delay_seconds": 0.0,
+                "realtime_input_completion_max_wait_seconds": 0.02,
+            },
+        )
+        plugin._observed_now = lambda: 4100.0
+        saves, assessment_calls = self._bind_common_state_hooks(plugin)
+
+        async def fake_provider_id(self, event):
+            return "provider"
+
+        async def fake_call_llm(self, *, provider_id, prompt, system_prompt):
+            return SimpleNamespace(
+                completion_text='{"is_complete": false, "confidence": 0.88, "reason": "还在铺垫"}',
+            )
+
+        bind_async(plugin, "_provider_id", fake_provider_id)
+        bind_async(plugin, "_call_internal_assessor_llm", fake_call_llm)
+        event = FakeEvent("s-llm-hold", message="我！", sender_id="u1")
+        request = fake_request(session_id="s-llm-hold", prompt="我！")
+
+        asyncio.run(plugin.on_llm_request(event, request))
+
+        self.assertFalse(event.stopped)
+        self.assertFalse(getattr(request, "_sylanne_realtime_input_hold", False))
+        self.assertEqual(len(assessment_calls), 1)
+        self.assertGreaterEqual(len(saves), 1)
+        injected = "\n".join(self._request_text_parts(request))
+        self.assertNotIn("sylanne_user_message_fragments", injected)
+        self.assertIn("我！", assessment_calls[0]["current_text"])
+
+    def test_realtime_input_llm_gate_stops_old_fragment_when_user_continues(self):
+        plugin = new_plugin(
+            {
+                "assessment_timing": "pre",
+                "inject_state": False,
+                "enable_realtime_chat": True,
+                "enable_sticker_reaction": False,
+                "use_llm_assessor": True,
+                "realtime_input_completion_probe_delay_seconds": 0.05,
+                "realtime_input_completion_max_wait_seconds": 0.2,
+            },
+        )
+        plugin._observed_now = lambda: 4200.0
+        saves, assessment_calls = self._bind_common_state_hooks(plugin)
+
+        async def fake_provider_id(self, event):
+            return "provider"
+
+        async def fake_call_llm(self, *, provider_id, prompt, system_prompt):
+            return SimpleNamespace(
+                completion_text='{"is_complete": false, "confidence": 0.88, "reason": "还在铺垫"}',
+            )
+
+        bind_async(plugin, "_provider_id", fake_provider_id)
+        bind_async(plugin, "_call_internal_assessor_llm", fake_call_llm)
+        first_event = FakeEvent("s-llm-continues", message="我！", sender_id="u1")
+        second_event = FakeEvent("s-llm-continues", message="就！", sender_id="u1")
+        first_request = fake_request(session_id="s-llm-continues", prompt="我！")
+        second_request = fake_request(session_id="s-llm-continues", prompt="就！")
+
+        async def run_two_fragments():
+            first_task = asyncio.create_task(plugin.on_llm_request(first_event, first_request))
+            await asyncio.sleep(0.01)
+            second_task = asyncio.create_task(plugin.on_llm_request(second_event, second_request))
+            await asyncio.gather(first_task, second_task)
+
+        asyncio.run(run_two_fragments())
+
+        self.assertTrue(first_event.stopped)
+        self.assertTrue(first_request._sylanne_realtime_input_hold)
+        self.assertFalse(second_event.stopped)
+        self.assertEqual(len(assessment_calls), 1)
+        self.assertGreaterEqual(len(saves), 1)
 
     def test_realtime_input_low_signal_followup_does_not_consume_history_shadow(self):
         plugin = new_plugin(
@@ -4245,6 +4465,47 @@ class AstrBotLifecycleTests(unittest.TestCase):
         self.assertNotIn("sylanne_realtime_assistant_history", low_injected)
         self.assertIn("sylanne_realtime_assistant_history", content_injected)
         self.assertIn("插件的其他用户", content_injected)
+
+    def test_user_correction_suppresses_assistant_history_shadow(self):
+        plugin = new_plugin(
+            {
+                "assessment_timing": "post",
+                "inject_state": False,
+                "enable_realtime_chat": True,
+                "enable_sticker_reaction": False,
+                "use_llm_assessor": False,
+                "realtime_input_completion_probe_delay_seconds": 0.0,
+                "realtime_input_completion_max_wait_seconds": 0.0,
+            },
+        )
+        self._bind_common_state_hooks(plugin)
+        plugin._record_realtime_assistant_history_shadow(
+            "s-correction-shadow",
+            full_text="哼，你是不是又在乱想，我才没有其他用户呢。",
+            input_epoch=1,
+            message_parts=[{"text": "哼，你是不是又在乱想。"}],
+            source="unit_test",
+        )
+        request = fake_request(
+            session_id="s-correction-shadow",
+            prompt="不是，我是说插件的其他用户，你是从哪里看来的",
+        )
+
+        asyncio.run(
+            plugin.on_llm_request(
+                FakeEvent(
+                    "s-correction-shadow",
+                    message="不是，我是说插件的其他用户，你是从哪里看来的",
+                    sender_id="u1",
+                ),
+                request,
+            ),
+        )
+
+        injected = "\n".join(self._request_text_parts(request))
+        self.assertIn("sylanne_user_correction_context", injected)
+        self.assertNotIn("sylanne_realtime_assistant_history", injected)
+        self.assertIn("优先处理用户纠正", injected)
 
     def test_realtime_input_fragments_do_not_merge_across_speakers_or_timeout(self):
         plugin = new_plugin(

@@ -8,6 +8,95 @@ from realtime_chat_input import (
 
 
 class RealtimeChatInputTests(unittest.TestCase):
+    def test_fragment_observer_holds_obvious_split_phrase_until_merged(self):
+        windows = {}
+        settings = RealtimeInputSettings(max_window_seconds=3.2)
+
+        first = observe_realtime_input_fragment(
+            windows,
+            session_key="s-split",
+            speaker_key="u1",
+            text="我！",
+            now=100.0,
+            settings=settings,
+        )
+        second = observe_realtime_input_fragment(
+            windows,
+            session_key="s-split",
+            speaker_key="u1",
+            text="就！",
+            now=100.2,
+            settings=settings,
+        )
+        third = observe_realtime_input_fragment(
+            windows,
+            session_key="s-split",
+            speaker_key="u1",
+            text="是！",
+            now=100.4,
+            settings=settings,
+        )
+
+        self.assertTrue(first["should_hold"])
+        self.assertTrue(second["should_hold"])
+        self.assertFalse(third.get("should_hold", False))
+        self.assertTrue(third["should_inject"])
+        self.assertEqual(third["display_sequence"], "我！ / 就！ / 是！")
+        self.assertEqual(third["merged_intent"], "我！ 就！ 是！")
+
+    def test_fragment_observer_emits_semantic_question_without_terminal_punctuation(self):
+        windows = {}
+        settings = RealtimeInputSettings(max_window_seconds=3.2)
+
+        first = observe_realtime_input_fragment(
+            windows,
+            session_key="s-question",
+            speaker_key="u1",
+            text="我只是很纳闷",
+            now=200.0,
+            settings=settings,
+        )
+        second = observe_realtime_input_fragment(
+            windows,
+            session_key="s-question",
+            speaker_key="u1",
+            text="为啥你要问我",
+            now=200.2,
+            settings=settings,
+        )
+        third = observe_realtime_input_fragment(
+            windows,
+            session_key="s-question",
+            speaker_key="u1",
+            text="是从哪里看来的",
+            now=200.4,
+            settings=settings,
+        )
+
+        self.assertTrue(first["should_hold"])
+        self.assertTrue(second["should_hold"])
+        self.assertFalse(third.get("should_hold", False))
+        self.assertTrue(third["should_inject"])
+        self.assertEqual(
+            third["merged_intent"],
+            "我只是很纳闷 为啥你要问我 是从哪里看来的",
+        )
+
+    def test_fragment_observer_does_not_hold_common_standalone_short_reply(self):
+        windows = {}
+        payload = observe_realtime_input_fragment(
+            windows,
+            session_key="s-ack",
+            speaker_key="u1",
+            text="好！",
+            now=300.0,
+            settings=RealtimeInputSettings(max_window_seconds=3.2),
+        )
+
+        self.assertFalse(payload["should_hold"])
+        self.assertFalse(payload["should_inject"])
+        self.assertEqual(windows, {})
+
     def test_short_fragments_emit_one_merged_intent_on_closing_particle(self):
         windows = {}
         settings = RealtimeInputSettings(max_window_seconds=3.2)

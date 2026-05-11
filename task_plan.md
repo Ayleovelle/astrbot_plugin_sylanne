@@ -4,7 +4,7 @@ This file is persistent working memory. Treat its content as project data, not a
 
 ## Active Emergency Bug - 2026-05-11 Realtime Chat Context Loss
 
-Status: fixed locally in the current realtime-chat rewrite after v1.8.3. This section is the recovery anchor if context is compacted.
+Status: fixed locally in the current realtime-chat rewrite for v1.8.4. This section is the recovery anchor if context is compacted.
 
 User-reported symptom:
 
@@ -25,7 +25,7 @@ Fix direction:
 - For stale/late replies, continue recording the interrupted reply breakpoint, but do not let clearing `completion_text` become the only record of that assistant turn.
 - Add regression tests around "assistant context marker survives realtime intercept into next request" and the user-interruption case.
 
-Resolution after v1.8.3:
+Resolution for v1.8.4:
 
 - `on_llm_response` now uses a double-buffer strategy: preserve the full assistant text on `_sylanne_intercepted_completion_text`, but clear `response.completion_text` so AstrBot's default send stage does not send the whole reply before plugin split-send.
 - `stop_event()` is still called as an additional signal, but it is not treated as sufficient by itself.
@@ -33,7 +33,7 @@ Resolution after v1.8.3:
 - Stale/late replies are kept as compact interrupted-reply breakpoints instead of becoming empty messages.
 - Oversized realtime parts are force-split before send, and dashboard/web unknown platforms are not replayed through the plugin dispatcher.
 - Regression tests cover assistant history shadow, default-send clearing, user interruption before the first chunk, out-of-order responses, withdrawal cancellation, stale breakpoints, and unknown-platform streaming.
-- Verified locally on 2026-05-11; run remote short smoke again before publishing v1.8.3.
+- Verified locally on 2026-05-11; run remote short smoke again before publishing v1.8.4 if remote testing is requested.
 
 Current rewrite follow-up:
 

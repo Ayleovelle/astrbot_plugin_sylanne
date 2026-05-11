@@ -155,6 +155,7 @@ function assertZipLooksUploadable(zipPath, expectedPlugin, options = {}) {
     `${expectedPlugin}/_conf_schema.json`,
     `${expectedPlugin}/docs/assets/runtime_overview.svg`,
     `${expectedPlugin}/docs/assets/sylanne-mascot.gif`,
+    `${expectedPlugin}/docs/assets/sylanne-mascot-card.svg`,
     `${expectedPlugin}/docs/assets/workflow_and_proactive.svg`,
   ];
   const forbiddenParts = new Set([

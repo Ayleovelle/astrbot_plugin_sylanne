@@ -2,7 +2,7 @@
 
 > <span style="font-size: 1.08em;"><strong>Soulful Yearning Lifelike AstrBot Neural Narrative Engine</strong>。她维护的不只是“情绪标签”，而是情绪、人格、记忆、氛围、主动性和表达节奏交织成的长期状态。</span>
 
-![版本 1.8.3](https://img.shields.io/badge/version-1.8.3-blue)
+![版本 1.8.4](https://img.shields.io/badge/version-1.8.4-blue)
 ![AstrBot >=4.9.2,<5.0.0](https://img.shields.io/badge/AstrBot-%3E%3D4.9.2%2C%3C5.0.0-green)
 ![Python 3.10+](https://img.shields.io/badge/Python-3.10%2B-yellow)
 ![协议 astrbot.emotion_state.v2](https://img.shields.io/badge/schema-astrbot.emotion__state.v2-purple)
@@ -10,7 +10,9 @@
 
 ## 介绍
 
-<img align="right" src="docs/assets/sylanne-mascot.gif" width="300" alt="项目吉祥物 Sylanne">
+<img align="right" src="docs/assets/sylanne-mascot-card.svg" width="320" alt="项目吉祥物 Sylanne，Sylanne向大家问好 = w =">
+
+`docs/assets/sylanne-mascot-card.svg` 是 README 顶部半包围吉祥物外壳；实际动图素材仍保留在 `docs/assets/sylanne-mascot.gif`，发布包会同时包含这两个文件。
 
 `astrbot_plugin_sylanne` 是一个面向 AstrBot 的“生命化状态引擎”和“插件公共状态服务”。她不是只在提示词里写几句“你要有喜怒哀乐”，而是把 engine 的情绪、关系后果、人格差异、长期记忆注解、拟人状态、道德修复状态、群聊氛围、后台评估队列和非诊断心理筛查拆成可测试、可持久化、可调用的工程模块。
 
@@ -37,7 +39,7 @@
 
 <br clear="right">
 
-`1.8.3` 是 `1.8.2` 之后的 bug 修复版：保留用户说话节奏学习、即时聊天自适应分段和长回复不省略能力，并修复分条发送接管时“整段主回复先发、插件又分条发”的重复发送问题。当前开发版继续重做即时聊天链路：输入侧会把短时间连续碎片视为同一轮用户意图，主动聊天也会读取一段近期上下文摘要，而不是只看最后一句。
+`1.8.4` 是 `1.8.3` 之后的 bug 修复版：保留用户说话节奏学习、即时聊天自适应分段和长回复不省略能力，并继续修复输入侧分块理解。她会先等疑似未说完的用户碎片合并，再把完整意图交给主 LLM 和情绪模型；bot 回复被插话打断时只记录中性事实，正向还是负面交给状态模型结合人格和语境判断。
 
 | 能力 | 作用 |
 | --- | --- |
@@ -73,6 +75,7 @@
 | 主题 | 内容 |
 | --- | --- |
 | [当前版本与兼容范围](#当前版本与兼容范围) | 插件版本、AstrBot 版本、Python 要求、许可证和发布状态。 |
+| [1.8.4 bug 修复发布记录](#184-bug-修复发布记录) | 修复用户分段输入、情绪延后评估和插话打断事件。 |
 | [1.8.3 bug 修复发布记录](#183-bug-修复发布记录) | 修复即时聊天分条接管时整段主回复和分条消息重复发送。 |
 | [1.8.2 bug 修复发布记录](#182-bug-修复发布记录) | 修复即时聊天分条接管、用户插话和旧回复过期后的上下文丢失。 |
 | [1.8.1 bug 修复发布记录](#181-bug-修复发布记录) | 修复即时聊天分条接管后的 assistant 上下文丢失。 |
@@ -104,15 +107,30 @@
 | --- | --- |
 | 插件目录名 | `astrbot_plugin_sylanne` |
 | 显示名 | `Sylanne` |
-| 当前版本 | `1.8.3` |
+| 当前版本 | `1.8.4` |
 | AstrBot 版本 | `>=4.9.2,<5.0.0` |
 | Python | `3.10+` |
 | 许可证 | `GPL-3.0-or-later` |
 | 运行时第三方依赖 | 当前无额外依赖，见 `requirements.txt` |
 
-`1.8.3` 在 `1.8.2` 的上下文保留修复基础上继续收紧即时聊天接管链路：默认仍不主动发送，配置者同时开启 `enable_proactive_speech_scheduler=true` 与 `enable_proactive_speech_dispatch=true` 后，她才会从最近可触达会话中选择候选，结合情绪、群聊氛围、双方需要、冷却、近期上下文摘要、可选 LivingMemory 召回摘要和 LLM 话题裁决，请求 AstrBot 主动发送。即时聊天分条发送会监听用户插话；NapCat/OneBot 撤回会推进会话 epoch 并让旧输出自然过期；用户连续发“你 / 是 / 表情 / 吗”这类碎片时，输入侧会合并成一轮意图交给主 LLM 理解。核心情绪、回复后后台评估（post）、`group_atmosphere_state`、`humanlike_state`、`lifelike_learning_state`、`personality_drift_state`、即时聊天节奏和欺骗/操控/逃责类动作阻断默认自动运行；道德修复、瑕疵模拟、心理筛查等实验/维护模块仍由配置者显式打开。
+`1.8.4` 在 `1.8.3` 的即时聊天接管修复基础上继续收紧输入侧：默认仍不主动发送，配置者同时开启 `enable_proactive_speech_scheduler=true` 与 `enable_proactive_speech_dispatch=true` 后，她才会从最近可触达会话中选择候选，结合情绪、群聊氛围、双方需要、冷却、近期上下文摘要、可选 LivingMemory 召回摘要和 LLM 话题裁决，请求 AstrBot 主动发送。即时聊天分条发送会监听用户插话；NapCat/OneBot 撤回会推进会话 epoch 并让旧输出自然过期；用户连续发“我！/就！/是！”或“我只是很纳闷 / 为啥你要问我 / 是从哪里看来的”这类碎片时，输入侧会先合并成一轮意图，再交给主 LLM 和情绪模型理解。核心情绪、回复后后台评估（post）、`group_atmosphere_state`、`humanlike_state`、`lifelike_learning_state`、`personality_drift_state`、即时聊天节奏和欺骗/操控/逃责类动作阻断默认自动运行；道德修复、瑕疵模拟、心理筛查等实验/维护模块仍由配置者显式打开。
 
 发布包会包含运行代码、README、CHANGELOG、LICENSE、配置结构（schema）、docs 和 `docs/assets/` 中的聚合图表；不会包含 `tests/`、`scripts/`、`literature_kb/`、`personality_literature_kb/`、`psychological_literature_kb/`、`humanlike_agent_literature_kb/`、`raw/`、`output/`、`dist/` 等开发、研究、原始样本或缓存目录。
+
+### 1.8.4 bug 修复发布记录
+
+`v1.8.4` 合并在 `main` 上，对外安装版本由 `metadata.yaml` 和 `main.py @register(...)` 共同声明为 `1.8.4`。本版按版本规则提升第三位版本号：只修复即时聊天用户分段输入、情绪评估时机和插话打断上下文，不改变公共 API 版本。
+
+当前版本的主要变化：
+
+| 类别 | 结果 |
+| --- | --- |
+| 用户分段理解 | 同一用户短时间连续发送疑似半句话、强调碎片、铺垫句或来源追问时，先进入轻量碎片窗口；判断用户没说完时等待合并，最多等待 20 秒后放行。 |
+| 情绪评估时机 | 暂缓的碎片不会立即触发情绪评估；只有合并后的完整意图会进入情绪观测，避免碎片污染长期状态。 |
+| 纠正优先 | 用户说“不是、我的意思是、你从哪里看来的”等纠正/来源追问时，会注入纠正上下文并抑制上一轮 assistant 历史影子，减少旧误会延续。 |
+| 插话打断事件 | bot 话没说完就被用户插话时，会记录已发/未发摘要作为中性事件；正向还是负面由后续情绪判断模型结合人格、关系和语境自行判断。 |
+| 回归验证 | `tests/test_realtime_chat_input.py` 和 `tests/test_astrbot_lifecycle.py` 合计 121 项通过，5 个 subtests 通过。 |
+| 公开契约 | 插件版本为 `1.8.4`；公共 API 版本仍为 `1.0`，schema 仍保持 `astrbot.emotion_state.v2` 等版本化契约。 |
 
 ### 1.8.3 bug 修复发布记录
 
@@ -1577,6 +1595,9 @@ enable_safety_boundary = false
 | `enable_realtime_chat` | bool | `true` | 是否启用真人即时聊天分条发送。 |
 | `realtime_chat_style_prompt_enabled` | bool | `true` | 请求阶段加入短提示，让主模型少用报告腔、Markdown 和编号清单。 |
 | `realtime_chat_intercept_llm_response` | bool | `true` | 是否在 `on_llm_response` 尝试接管默认回复并分条发送；若平台不支持改写响应，可关闭。 |
+| `realtime_input_completion_llm_gate_enabled` | bool | `true` | 疑似用户还没说完时，是否调用内部判断 LLM 判断分段输入是否完整。 |
+| `realtime_input_completion_probe_delay_seconds` | float | `0.65` | 首个疑似碎片后的基础探测等待秒数；插件会按碎片数量和窗口状态自动缩放。 |
+| `realtime_input_completion_max_wait_seconds` | float | `20.0` | 判断用户仍未说完时的单轮最长等待时间；超过后放行，避免永久沉默。 |
 | `realtime_chat_dry_run_default` | bool | `false` | 公共 API 未显式传 `dry_run` 时是否只返回计划不发送。 |
 | `realtime_chat_strip_markdown` | bool | `true` | 分条前清理常见 Markdown 标记。 |
 | `enable_sticker_reaction` | bool | `true` | 是否根据情绪和氛围补发表情包。 |
@@ -1595,11 +1616,15 @@ enable_safety_boundary = false
 
 从 `1.8.0` 起，即时聊天会把用户说话方式纳入生命化学习：本地统计用户消息的平均句长、换行密度、标点停顿、短句倾向、长段倾向和碎片化程度，并以真实时间下的平滑方式写入 `lifelike_learning_state.user_profile.speaking_style`。分条时她不会直接复制用户口癖，而是把这些统计量折算成 `user_style_adaptation`：用户常用短句、换行和碎片化表达时，她会更愿意多分几条短消息；用户常写长段、正式说明或要求严谨细节时，她会保留更长的单条消息，避免把技术说明切得太碎。这个过程不额外调用判断 LLM，也不会把用户画像原文暴露在公共 plan 里。
 
-输入侧也会理解用户分段。若同一会话、同一说话人在很短时间内连续发出短字、表情、疑问收束词或明显续写片段，插件会先在本地维护一个轻量碎片窗口；当窗口形成完整意图时，会临时注入 `[sylanne_user_message_fragments]`，告诉主 LLM 把这些碎片当作同一轮用户话语。例如“你 / 是 / 🐷 / 吗”会被解释成“你 是 🐷 吗”，而不是只回应最后的“吗”。这个聚合只在同一说话人、短时间窗口内生效；换人、超时或长段文本会重新开窗，避免把群聊里不同人的话硬拼在一起。
+输入侧也会理解用户分段。若同一会话、同一说话人在很短时间内连续发出短字、表情、疑问收束词、明显续写片段或来源追问铺垫，插件会先在本地维护一个轻量碎片窗口；当窗口形成完整意图时，会临时注入 `[sylanne_user_message_fragments]`，告诉主 LLM 把这些碎片当作同一轮用户话语。例如“你 / 是 / 🐷 / 吗”会被解释成“你 是 🐷 吗”，“我只是很纳闷 / 为啥你要问我 / 是从哪里看来的”会被解释成一段完整的来源追问，而不是只回应最后一句。这个聚合只在同一说话人、短时间窗口内生效；换人、超时或长段文本会重新开窗，避免把群聊里不同人的话硬拼在一起。
+
+从 `1.8.4` 起，疑似没说完的碎片会先暂停默认回复，不立刻跑情绪评估。插件会短暂等待下一条消息；若开启 `realtime_input_completion_llm_gate_enabled`，还会让判断 LLM 只输出最小 JSON，判断用户是否已经把这句话说完。判断为未完成时继续等待，但单轮不超过 `realtime_input_completion_max_wait_seconds`，避免用户真的不说话时 bot 永久沉默。最终放行后，主 LLM 和情绪模型看到的是合并后的完整意图。
 
 长回复不会再为了满足 `max_parts` 硬上限而把尾部静默截成 `...`。`max_parts` 现在只表示日常偏好的初始分段数量；如果回复太长，分段器会继续按安全长度拆成更多消息，尽量避免平台把单条超长文本折叠成省略显示，也避免丢失正文。若用户在分条发送途中插话，剩余未发部分会被记录成低 token 的断点摘要，下一轮只把它作为“旧回复被打断”的上下文，不会把长文本全文塞回提示词。
 
 如果主 LLM 还在生成，用户已经补发了新消息，Sylanne 不会把旧回复硬塞到新上下文后面。插件会给每个会话维护一个轻量 `input_epoch`：用户新消息进入时 epoch 前进；旧回复到达时如果发现 epoch 已经过期，就让旧输出自然过期并跳过后台 post 情绪评估。已经开始分条发送时，每一条发送前也会检查 epoch；用户插话后剩余分条和表情包都会停止。对已经被即时聊天接管并实际发送的回复，插件会保留一次性 assistant 历史影子；如果用户在分条发送中途插话，也会把已经发出的短句作为活跃派发摘要临时注入新请求，用来维持“他们、刚才、那个”这类指代关系。低信号消息，例如单独的“？”或一个表情，不会立刻消费这份 assistant 历史影子；真正有内容的下一轮追问仍能拿到上下文。相关摘要注入后会立即消费，避免 token 持续膨胀。
+
+插话本身不会被硬编码为生气、开心或亲密。她只记录“bot 刚才有话没说完、已发了哪些、未发摘要是什么、用户随后补了什么”这些事实，并把它作为 `[assistant_interrupted_event]` 交给情绪判断。正向还是负面，要由判断模型结合人格、当前关系、用户语气和上下文自己判断。
 
 如果同时安装了 LivingMemory，普通回复链路也会尽量调用她的只读检索接口。召回内容只会被压缩成 `[sylanne_livingmemory_recall]` 短摘要，用来帮助主 LLM 理解“他们”“刚才那个”“之前说过的进度”这类指代和长期偏好；插件不会把整段记忆库塞回提示词，也不会因为 LivingMemory 没装、没启用、接口名不同、检索为空或检索报错而阻断回复。这个行为由 `enable_livingmemory_recall_injection` 控制，默认开启。
 
@@ -2876,7 +2901,7 @@ $env:ASTRBOT_EXPECT_PLUGIN = "astrbot_plugin_sylanne"
 脚本会在输出 JSON 里写出 `expectedPluginRuntime`，包含插件列表 API 中返回的 `version`、`displayName`、`activated`、`author`、`astrbotVersion` 等只读字段。若目标插件存在但 `activated=false`，脚本会失败退出。需要把版本和显示名也作为硬断言时，可以额外设置：
 
 ```powershell
-$env:ASTRBOT_EXPECT_PLUGIN_VERSION = "1.8.3"
+$env:ASTRBOT_EXPECT_PLUGIN_VERSION = "1.8.4"
 $env:ASTRBOT_EXPECT_PLUGIN_DISPLAY_NAME = "Sylanne"
 & $node scripts\remote_smoke_playwright.js
 ```
@@ -3095,7 +3120,7 @@ inject_state = false
 humanlike_memory_write_enabled = true
 ```
 
-拟人状态默认自动运行。若没有看到 `humanlike_state_at_write`，优先确认插件是否为 `1.8.3` 或更新版本、`humanlike_memory_write_enabled=true`，以及调用方是否保留了完整记忆载荷。
+拟人状态默认自动运行。若没有看到 `humanlike_state_at_write`，优先确认插件是否为 `1.8.4` 或更新版本、`humanlike_memory_write_enabled=true`，以及调用方是否保留了完整记忆载荷。
 
 ### 拟人状态没有生效
 

@@ -64,6 +64,7 @@ class PackagePluginTests(unittest.TestCase):
         self.assertIn("docs/assets/lifecycle_model_fit_table.md", files)
         self.assertIn("docs/assets/runtime_overview.svg", files)
         self.assertIn("docs/assets/sylanne-mascot.gif", files)
+        self.assertIn("docs/assets/sylanne-mascot-card.svg", files)
         self.assertIn("docs/assets/workflow_and_proactive.svg", files)
         self.assertFalse(
             any(
@@ -75,6 +76,7 @@ class PackagePluginTests(unittest.TestCase):
                     "docs/assets/lifecycle_model_fit_table.md",
                     "docs/assets/runtime_overview.svg",
                     "docs/assets/sylanne-mascot.gif",
+                    "docs/assets/sylanne-mascot-card.svg",
                     "docs/assets/workflow_and_proactive.svg",
                 }
                 for path in files
@@ -159,6 +161,7 @@ class PackagePluginTests(unittest.TestCase):
         self.assertIn(prefix + "docs/assets/lifecycle_model_fit_table.md", names)
         self.assertIn(prefix + "docs/assets/runtime_overview.svg", names)
         self.assertIn(prefix + "docs/assets/sylanne-mascot.gif", names)
+        self.assertIn(prefix + "docs/assets/sylanne-mascot-card.svg", names)
         self.assertIn(prefix + "docs/assets/workflow_and_proactive.svg", names)
         self.assertFalse(
             any(
@@ -170,6 +173,7 @@ class PackagePluginTests(unittest.TestCase):
                     prefix + "docs/assets/lifecycle_model_fit_table.md",
                     prefix + "docs/assets/runtime_overview.svg",
                     prefix + "docs/assets/sylanne-mascot.gif",
+                    prefix + "docs/assets/sylanne-mascot-card.svg",
                     prefix + "docs/assets/workflow_and_proactive.svg",
                 }
                 for name in names
@@ -296,6 +300,7 @@ class PluginZipPreflightTests(unittest.TestCase):
             (prefix + "_conf_schema.json", "{}\n"),
             (prefix + "docs/assets/runtime_overview.svg", "<svg></svg>\n"),
             (prefix + "docs/assets/sylanne-mascot.gif", "GIF89a\n"),
+            (prefix + "docs/assets/sylanne-mascot-card.svg", "<svg></svg>\n"),
             (prefix + "docs/assets/workflow_and_proactive.svg", "<svg></svg>\n"),
         ]
 

@@ -43,6 +43,7 @@ ALLOWED_DOC_ASSETS = {
     Path("docs/assets/lifecycle_model_fit_table.md"),
     Path("docs/assets/runtime_overview.svg"),
     Path("docs/assets/sylanne-mascot.gif"),
+    Path("docs/assets/sylanne-mascot-card.svg"),
     Path("docs/assets/workflow_and_proactive.svg"),
 }
 

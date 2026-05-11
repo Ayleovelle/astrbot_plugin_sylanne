@@ -151,6 +151,7 @@ try:
     )
     from .realtime_chat_input import (
         RealtimeInputSettings,
+        build_realtime_input_hold_injection,
         build_realtime_input_fragment_injection,
         observe_realtime_input_fragment,
     )
@@ -286,6 +287,7 @@ except ImportError:
     )
     from realtime_chat_input import (
         RealtimeInputSettings,
+        build_realtime_input_hold_injection,
         build_realtime_input_fragment_injection,
         observe_realtime_input_fragment,
     )
@@ -332,6 +334,8 @@ REALTIME_ASSISTANT_HISTORY_LIMIT = 3
 REALTIME_ASSISTANT_HISTORY_INJECTION_MAX_CHARS = 900
 REALTIME_ASSISTANT_HISTORY_EXCERPT_CHARS = 720
 REALTIME_INPUT_FRAGMENT_INJECTION_MAX_CHARS = 520
+REALTIME_INPUT_HOLD_INJECTION_MAX_CHARS = 360
+REALTIME_INPUT_LLM_WAIT_MAX_SECONDS = 20.0
 
 
 @dataclass
@@ -530,7 +534,7 @@ def get_emotional_state_plugin(context: Context) -> Any | None:
     PLUGIN_NAME,
     "pidan",
     "Soulful Yearning Lifelike AstrBot Neural Narrative Engine：维护情绪、人格、记忆、氛围和表达节奏的 Sylanne",
-    "1.8.3",
+    "1.8.4",
     "",
 )
 class EmotionalStatePlugin(Star):
@@ -760,7 +764,7 @@ class EmotionalStatePlugin(Star):
         observed_at = self._observed_now()
         current_user_text = self._event_text(event) or str(getattr(request, "prompt", "") or "")
         await self._observe_agent_identity(identity, now=observed_at)
-        self._append_realtime_input_fragment_context_if_any(
+        fragment_payload = await self._observe_realtime_input_fragment_context_if_any(
             event,
             request,
             identity,
@@ -768,6 +772,41 @@ class EmotionalStatePlugin(Star):
             observed_at=observed_at,
             budget=None,
         )
+        if self._realtime_input_fragment_should_hold(fragment_payload):
+            if await self._realtime_input_fragment_still_waiting_after_gate(
+                event,
+                identity,
+                fragment_payload,
+            ):
+                self._discard_conversation_pending_response_epoch(
+                    session_key,
+                    input_epoch,
+                )
+                self._mark_realtime_input_fragment_hold(
+                    event,
+                    request,
+                    fragment_payload,
+                )
+                self._cancel_realtime_chat_dispatches_for_session(
+                    session_key,
+                    reason="realtime_input_fragment_waiting",
+                )
+                self._last_request_text[session_key] = self._realtime_input_hold_context_text(
+                    request,
+                    current_user_text,
+                    fragment_payload,
+                )
+                return
+            self._release_realtime_input_fragment_window_if_unchanged(
+                session_key,
+                fragment_payload,
+            )
+            if len(fragment_payload.get("fragments") or []) > 1:
+                self._append_realtime_input_released_context_if_any(
+                    request,
+                    fragment_payload,
+                    budget=None,
+                )
         self._append_realtime_continuity_context_if_any(
             request,
             session_key,
@@ -855,7 +894,14 @@ class EmotionalStatePlugin(Star):
         before_state = EmotionState.from_dict(state.to_dict())
         current_text = self._agent_current_text(
             event,
-            self._event_text(event) or request.prompt or "",
+            self._realtime_input_merged_intent_from_payload(fragment_payload)
+            or self._event_text(event)
+            or request.prompt
+            or "",
+        )
+        current_text = self._augment_current_text_with_interruption_event(
+            session_key,
+            current_text,
         )
         request_observation_text: str | None = None
         humanlike_state: HumanlikeState | None = None
@@ -6805,6 +6851,25 @@ class EmotionalStatePlugin(Star):
         pending = self._conversation_pending_response_epochs.setdefault(key, deque(maxlen=12))
         pending.append(int(input_epoch))
 
+    def _discard_conversation_pending_response_epoch(
+        self,
+        session_key: str,
+        input_epoch: int | None,
+    ) -> None:
+        if input_epoch is None:
+            return
+        self._ensure_conversation_epoch_state()
+        key = str(session_key or "global")
+        pending = self._conversation_pending_response_epochs.get(key)
+        if not pending:
+            return
+        try:
+            pending.remove(int(input_epoch))
+        except ValueError:
+            return
+        if not pending:
+            self._conversation_pending_response_epochs.pop(key, None)
+
     def _consume_conversation_pending_response_epoch(
         self,
         session_key: str,
@@ -6915,6 +6980,60 @@ class EmotionalStatePlugin(Star):
             cache[key] = queue
         queue.append(entry)
 
+    def _latest_interrupted_reply_observation_text(self, session_key: str) -> str:
+        queue = self._interrupted_reply_breakpoint_cache().get(str(session_key or "global"))
+        if not queue:
+            return ""
+        pending = [item for item in queue if not item.get("emotion_observed")]
+        if not pending:
+            return ""
+        item = pending[-1]
+        item["emotion_observed"] = True
+        item["emotion_observed_at"] = self._observed_now()
+        return self._head_text(
+            "\n".join(
+                [
+                    "[assistant_interrupted_event]",
+                    "bot 刚才的回复在发送中或生成后被用户新消息打断；这本身可能带来情绪波动。"
+                    "请结合当前用户新消息判断这是亲密打断、正常补充、紧急纠正、冷场还是冲突升级；"
+                    "不要预设一定是正面或负面。",
+                    "reason={reason}; sent_count={sent_count}; unsent_count={unsent_count}; full_hash={hash}".format(
+                        reason=self._head_one_line(str(item.get("reason") or "interrupted"), 48),
+                        sent_count=int(item.get("sent_count") or 0),
+                        unsent_count=int(item.get("unsent_count") or 0),
+                        hash=str(item.get("full_text_hash") or "")[:16],
+                    ),
+                    "sent_excerpt={text}".format(
+                        text=self._head_one_line(str(item.get("sent_excerpt") or ""), 96),
+                    ),
+                    "unsent_head={text}".format(
+                        text=self._head_one_line(str(item.get("unsent_head") or ""), 96),
+                    ),
+                ],
+            ),
+            520,
+        )
+
+    def _augment_current_text_with_interruption_event(
+        self,
+        session_key: str,
+        current_text: str,
+    ) -> str:
+        interruption = self._latest_interrupted_reply_observation_text(session_key)
+        if not interruption:
+            return current_text
+        return self._clip(
+            "\n\n".join(
+                part
+                for part in (
+                    interruption,
+                    "[current_user]\n" + str(current_text or ""),
+                )
+                if part
+            ),
+            1600,
+        )
+
     def _append_interrupted_reply_breakpoint_if_any(
         self,
         request: ProviderRequest,
@@ -6971,6 +7090,18 @@ class EmotionalStatePlugin(Star):
         current_user_text: str = "",
     ) -> bool:
         appended = False
+        is_correction = self._looks_like_user_correction_or_source_query(
+            current_user_text,
+        )
+        if is_correction:
+            appended = (
+                self._append_user_correction_context(
+                    request,
+                    current_user_text,
+                    budget=budget,
+                )
+                or appended
+            )
         appended = (
             self._append_realtime_chat_active_dispatch_if_any(
                 request,
@@ -6980,11 +7111,15 @@ class EmotionalStatePlugin(Star):
             or appended
         )
         appended = (
-            self._append_realtime_assistant_history_shadow_if_any(
-                request,
-                session_key,
-                budget=budget,
-                current_user_text=current_user_text,
+            (
+                False
+                if is_correction
+                else self._append_realtime_assistant_history_shadow_if_any(
+                    request,
+                    session_key,
+                    budget=budget,
+                    current_user_text=current_user_text,
+                )
             )
             or appended
         )
@@ -6998,6 +7133,58 @@ class EmotionalStatePlugin(Star):
         )
         return appended
 
+    def _append_user_correction_context(
+        self,
+        request: ProviderRequest,
+        current_user_text: str,
+        *,
+        budget: _StateInjectionBudget | None,
+    ) -> bool:
+        text = "\n".join(
+            [
+                "[sylanne_user_correction_context]",
+                "用户当前发言可能是在纠正上一轮误读、澄清指代，或追问信息来源。",
+                "优先处理用户纠正和来源问题；如果上一轮理解错了，先简短承认并重述用户真正问题。",
+                "不要继续沿着上一轮误会、吃醋、撒娇、指责或自我辩解方向展开。",
+                "current_user=" + self._head_one_line(str(current_user_text or ""), 180),
+            ],
+        )
+        return self._append_temp_text_part(
+            request,
+            text,
+            source="user_correction_context",
+            budget=budget,
+        )
+
+    def _looks_like_user_correction_or_source_query(self, text: str) -> bool:
+        value = str(text or "").strip()
+        if not value:
+            return False
+        compact = re.sub(r"\s+", "", value)
+        correction_markers = (
+            "不是",
+            "不对",
+            "我是说",
+            "我说的是",
+            "我的意思是",
+            "你理解错",
+            "你误会",
+            "不是这个意思",
+        )
+        source_markers = (
+            "从哪里看来的",
+            "从哪儿看来的",
+            "从哪看来的",
+            "是从哪里看来的",
+            "哪里看来的",
+            "哪儿看来的",
+            "你从哪看",
+            "来源",
+            "依据",
+            "为啥你要问",
+        )
+        return any(marker in compact for marker in correction_markers + source_markers)
+
     def _append_realtime_input_fragment_context_if_any(
         self,
         event: AstrMessageEvent,
@@ -7008,17 +7195,54 @@ class EmotionalStatePlugin(Star):
         observed_at: float,
         budget: _StateInjectionBudget | None,
     ) -> bool:
+        payload = self._observe_realtime_input_fragment_context_sync(
+            request,
+            identity,
+            current_user_text=current_user_text,
+            observed_at=observed_at,
+            budget=budget,
+        )
+        return bool(payload.get("should_inject"))
+
+    async def _observe_realtime_input_fragment_context_if_any(
+        self,
+        event: AstrMessageEvent,
+        request: ProviderRequest,
+        identity: ConversationIdentity,
+        *,
+        current_user_text: str,
+        observed_at: float,
+        budget: _StateInjectionBudget | None,
+    ) -> dict[str, Any]:
+        del event
+        return self._observe_realtime_input_fragment_context_sync(
+            request,
+            identity,
+            current_user_text=current_user_text,
+            observed_at=observed_at,
+            budget=budget,
+        )
+
+    def _observe_realtime_input_fragment_context_sync(
+        self,
+        request: ProviderRequest,
+        identity: ConversationIdentity,
+        *,
+        current_user_text: str,
+        observed_at: float,
+        budget: _StateInjectionBudget | None,
+    ) -> dict[str, Any]:
         if not self._realtime_chat_enabled():
-            return False
+            return {}
         source = "realtime_input_fragments"
         if getattr(request, "_sylanne_realtime_input_observed", False):
-            return False
+            return {}
         try:
             setattr(request, "_sylanne_realtime_input_observed", True)
         except Exception:
             pass
         if self._request_has_temp_text_source(request, source):
-            return False
+            return {}
         payload = observe_realtime_input_fragment(
             self._realtime_input_fragment_window_cache(),
             session_key=identity.conversation_id,
@@ -7029,17 +7253,309 @@ class EmotionalStatePlugin(Star):
             now=observed_at,
             settings=self._realtime_input_settings(),
         )
+        try:
+            setattr(request, "_sylanne_realtime_input_payload", payload)
+        except Exception:
+            pass
         if not payload.get("should_inject"):
-            return False
+            return payload
         text = build_realtime_input_fragment_injection(
             payload,
+            max_chars=REALTIME_INPUT_FRAGMENT_INJECTION_MAX_CHARS,
+        )
+        self._append_temp_text_part(
+            request,
+            text,
+            source=source,
+            budget=budget,
+        )
+        return payload
+
+    def _realtime_input_fragment_should_hold(self, payload: dict[str, Any] | None) -> bool:
+        return bool(isinstance(payload, dict) and payload.get("should_hold"))
+
+    def _realtime_input_merged_intent_from_payload(
+        self,
+        payload: dict[str, Any] | None,
+    ) -> str:
+        if not isinstance(payload, dict):
+            return ""
+        if not payload.get("should_inject") and not payload.get("should_hold"):
+            return ""
+        return str(payload.get("merged_intent") or "").strip()
+
+    def _append_realtime_input_released_context_if_any(
+        self,
+        request: ProviderRequest,
+        payload: dict[str, Any] | None,
+        *,
+        budget: _StateInjectionBudget | None,
+    ) -> bool:
+        if not isinstance(payload, dict) or not payload.get("should_hold"):
+            return False
+        release_payload = dict(payload)
+        release_payload["should_inject"] = True
+        release_payload["reason"] = "released_after_completion_wait"
+        fragments = release_payload.get("fragments")
+        if isinstance(fragments, list):
+            release_payload["fragment_count"] = len(fragments)
+            release_payload["display_sequence"] = " / ".join(str(item) for item in fragments)
+        text = build_realtime_input_fragment_injection(
+            release_payload,
             max_chars=REALTIME_INPUT_FRAGMENT_INJECTION_MAX_CHARS,
         )
         return self._append_temp_text_part(
             request,
             text,
-            source=source,
+            source="realtime_input_fragments",
             budget=budget,
+        )
+
+    async def _realtime_input_fragment_still_waiting_after_gate(
+        self,
+        event: AstrMessageEvent,
+        identity: ConversationIdentity,
+        payload: dict[str, Any],
+    ) -> bool:
+        wait_seconds = self._realtime_input_completion_wait_seconds(payload)
+        if not await self._wait_realtime_input_window_unchanged(
+            identity.conversation_id,
+            payload,
+            wait_seconds,
+        ):
+            return True
+        if self._cfg_bool("use_llm_assessor", True) and self._cfg_bool(
+            "realtime_input_completion_llm_gate_enabled",
+            True,
+        ):
+            judgement = await self._judge_realtime_input_completion(event, payload)
+        else:
+            judgement = self._local_realtime_input_completion_judgement(payload)
+        if judgement.get("is_complete"):
+            return False
+        remaining = 0.0
+        if str(judgement.get("source") or "") == "llm_input_completion_gate":
+            remaining = max(
+                0.0,
+                self._realtime_input_completion_max_wait_seconds() - wait_seconds,
+            )
+        if not await self._wait_realtime_input_window_unchanged(
+            identity.conversation_id,
+            payload,
+            remaining,
+        ):
+            return True
+        if self._realtime_input_window_matches_payload(identity.conversation_id, payload):
+            return False
+        return True
+
+    async def _wait_realtime_input_window_unchanged(
+        self,
+        session_key: str,
+        payload: dict[str, Any],
+        wait_seconds: float,
+    ) -> bool:
+        deadline = self._loop_time() + max(0.0, float(wait_seconds))
+        while True:
+            if not self._realtime_input_window_matches_payload(session_key, payload):
+                return False
+            remaining = deadline - self._loop_time()
+            if remaining <= 0:
+                return True
+            await asyncio.sleep(min(0.08, remaining))
+
+    def _loop_time(self) -> float:
+        try:
+            return asyncio.get_running_loop().time()
+        except RuntimeError:
+            return time.monotonic()
+
+    def _realtime_input_completion_wait_seconds(self, payload: dict[str, Any]) -> float:
+        fragments = payload.get("fragments") if isinstance(payload, dict) else None
+        count = len(fragments) if isinstance(fragments, list) else 1
+        base = max(0.0, self._cfg_float("realtime_input_completion_probe_delay_seconds", 0.65))
+        if count > 1:
+            base *= 0.65
+        if str(payload.get("reason") or "") == "waiting_for_more_fragments":
+            base *= 0.55
+        return min(
+            self._realtime_input_completion_max_wait_seconds(),
+            base,
+        )
+
+    def _realtime_input_completion_max_wait_seconds(self) -> float:
+        return min(
+            REALTIME_INPUT_LLM_WAIT_MAX_SECONDS,
+            max(0.0, self._cfg_float("realtime_input_completion_max_wait_seconds", 20.0)),
+        )
+
+    def _realtime_input_window_matches_payload(
+        self,
+        session_key: str,
+        payload: dict[str, Any],
+    ) -> bool:
+        window = self._realtime_input_fragment_window_cache().get(
+            str(session_key or "global"),
+        )
+        if not isinstance(window, dict):
+            return False
+        current = [
+            getattr(item, "text", "")
+            for item in (window.get("fragments") or [])
+        ]
+        expected = [str(item or "") for item in (payload.get("fragments") or [])]
+        return bool(current) and current == expected
+
+    def _release_realtime_input_fragment_window_if_unchanged(
+        self,
+        session_key: str,
+        payload: dict[str, Any],
+    ) -> None:
+        if self._realtime_input_window_matches_payload(session_key, payload):
+            self._realtime_input_fragment_window_cache().pop(
+                str(session_key or "global"),
+                None,
+            )
+
+    async def _judge_realtime_input_completion(
+        self,
+        event: AstrMessageEvent,
+        payload: dict[str, Any],
+    ) -> dict[str, Any]:
+        fallback = self._local_realtime_input_completion_judgement(payload)
+        provider_id = await self._provider_id(event)
+        if not provider_id:
+            return fallback
+        token = _INTERNAL_LLM_CALL.set(True)
+        try:
+            llm_resp = await self._call_internal_assessor_llm(
+                provider_id=provider_id,
+                prompt=self._build_realtime_input_completion_prompt(payload),
+                system_prompt=(
+                    "你是聊天输入完整度判断器。只输出 JSON，不要解释。"
+                    "判断用户是否已经把当前这句话说完，宁可保守等待，也不要让 bot 抢答半句话。"
+                ),
+            )
+        except Exception as exc:
+            self._log_warning(f"{PLUGIN_NAME}: 输入分块完整度判断失败，使用本地回退: {exc}")
+            return fallback
+        finally:
+            _INTERNAL_LLM_CALL.reset(token)
+        parsed = self._parse_realtime_input_completion_judgement(
+            getattr(llm_resp, "completion_text", ""),
+        )
+        return parsed or fallback
+
+    def _build_realtime_input_completion_prompt(self, payload: dict[str, Any]) -> str:
+        fragments = [str(item or "") for item in (payload.get("fragments") or [])]
+        return (
+            "请判断下面同一用户短时间内发出的聊天碎片是否已经表达完整。\n"
+            "只输出 JSON：{\"is_complete\": true/false, \"confidence\": 0-1, \"reason\": \"...\"}。\n"
+            "规则：如果像半句话、强调铺垫、还在补充主语/谓语/宾语，就 is_complete=false；"
+            "如果已经形成可回复的完整问题、完整声明、完整纠正，则 is_complete=true。\n"
+            f"碎片序列：{json.dumps(fragments, ensure_ascii=False)}\n"
+            f"合并预览：{payload.get('merged_intent') or ''}"
+        )
+
+    def _parse_realtime_input_completion_judgement(
+        self,
+        text: str,
+    ) -> dict[str, Any] | None:
+        raw = str(text or "").strip()
+        start = raw.find("{")
+        end = raw.rfind("}")
+        if start < 0 or end <= start:
+            return None
+        try:
+            data = json.loads(raw[start : end + 1])
+        except json.JSONDecodeError:
+            return None
+        if not isinstance(data, dict):
+            return None
+        value = data.get("is_complete")
+        if isinstance(value, str):
+            value = value.strip().lower() in {"true", "yes", "1", "complete", "完整", "已完成"}
+        elif isinstance(value, (int, float)):
+            value = bool(value)
+        elif not isinstance(value, bool):
+            return None
+        return {
+            "is_complete": bool(value),
+            "confidence": self._clamp01(data.get("confidence", 0.5)),
+            "reason": self._head_one_line(str(data.get("reason") or ""), 160),
+            "source": "llm_input_completion_gate",
+        }
+
+    def _local_realtime_input_completion_judgement(
+        self,
+        payload: dict[str, Any],
+    ) -> dict[str, Any]:
+        reason = str(payload.get("reason") or "")
+        fragments = payload.get("fragments") if isinstance(payload.get("fragments"), list) else []
+        text = str(payload.get("merged_intent") or "").strip()
+        is_complete = reason == "waiting_for_more_fragments" and len(fragments) >= 3
+        if "?" in text or "？" in text:
+            is_complete = True
+        return {
+            "is_complete": bool(is_complete),
+            "confidence": 0.35,
+            "reason": "local_fragment_completion_fallback",
+            "source": "local",
+        }
+
+    def _mark_realtime_input_fragment_hold(
+        self,
+        event: AstrMessageEvent,
+        request: ProviderRequest,
+        payload: dict[str, Any],
+    ) -> None:
+        hold_text = build_realtime_input_hold_injection(
+            payload,
+            max_chars=REALTIME_INPUT_HOLD_INJECTION_MAX_CHARS,
+        )
+        for target in (event, request):
+            for name, value in (
+                ("_sylanne_realtime_input_hold", True),
+                ("_sylanne_realtime_input_hold_payload", payload),
+                ("_sylanne_default_response_stopped", True),
+                ("_sylanne_default_response_stop_reason", "realtime_input_fragment_waiting"),
+            ):
+                try:
+                    setattr(target, name, value)
+                except Exception:
+                    pass
+        if hold_text:
+            try:
+                setattr(request, "_sylanne_realtime_input_hold_text", hold_text)
+            except Exception:
+                pass
+        self._stop_default_response_send(
+            event,
+            reason="realtime_input_fragment_waiting",
+        )
+
+    def _realtime_input_hold_context_text(
+        self,
+        request: ProviderRequest,
+        current_user_text: str,
+        payload: dict[str, Any],
+    ) -> str:
+        hold_text = str(getattr(request, "_sylanne_realtime_input_hold_text", "") or "")
+        if not hold_text:
+            hold_text = build_realtime_input_hold_injection(
+                payload,
+                max_chars=REALTIME_INPUT_HOLD_INJECTION_MAX_CHARS,
+            )
+        return self._clip(
+            "\n\n".join(
+                part
+                for part in (
+                    hold_text,
+                    "[current_user_fragment]\n" + str(current_user_text or ""),
+                )
+                if part
+            ),
+            800,
         )
 
     def _interrupted_reply_runtime_summary(self, session_key: str) -> dict[str, Any]:
@@ -10790,6 +11306,7 @@ class EmotionalStatePlugin(Star):
             "realtime_assistant_history_shadow": "sylanne_realtime_assistant_history",
             "interrupted_reply_breakpoint": "sylanne_interrupted_reply_breakpoint",
             "realtime_input_fragments": "sylanne_user_message_fragments",
+            "user_correction_context": "sylanne_user_correction_context",
             "livingmemory_recall": "sylanne_livingmemory_recall",
         }
         marker = source_markers.get(source, f"sylanne_source:{source}")

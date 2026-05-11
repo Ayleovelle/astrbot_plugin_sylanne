@@ -1,0 +1,14 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="330" height="260" viewBox="0 0 330 260" role="img" aria-labelledby="title desc">
+  <title id="title">项目吉祥物 Sylanne</title>
+  <desc id="desc">Sylanne 向大家问好</desc>
+  <style>
+    text {
+      font-family: "LXGW WenKai", "Microsoft YaHei", "Noto Sans CJK SC", sans-serif;
+      fill: #5f6470;
+      font-size: 13px;
+      font-style: italic;
+    }
+  </style>
+  <image href="sylanne-mascot.gif" x="45" y="0" width="240" height="220" preserveAspectRatio="xMidYMid meet"/>
+  <text x="165" y="238" text-anchor="middle">Sylanne向大家问好 = w =</text>
+</svg>
