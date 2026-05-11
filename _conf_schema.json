@@ -1,6 +1,6 @@
 {
   "enabled": {
-    "description": "启用多维情绪状态插件",
+    "description": "启用灵澜状态插件",
     "type": "bool",
     "default": true
   },
@@ -244,19 +244,19 @@
     "hint": "默认 30 天。0 表示不按时间清理，只受数量上限限制。"
   },
   "enable_agent_causal_trail": {
-    "description": "启用 agent 状态因果轨迹记录",
+    "description": "启用插件状态因果轨迹记录",
     "type": "bool",
     "default": true,
     "hint": "默认开启。记录脱敏的近期状态更新因果链，包括阶段、模块、输入摘要、前后状态摘要和原因列表，供 query_agent_state(state=\"trail\") 与公共 API 只读查询。"
   },
   "agent_trail_limit": {
-    "description": "每个会话保留的 agent 因果轨迹条数",
+    "description": "每个会话保留的插件因果轨迹条数",
     "type": "int",
     "default": 80,
     "hint": "限制内存和 KV 中保存的最近因果轨迹环形缓冲长度；读取时仍可传 limit 只取更少条目。"
   },
   "agent_trail_compaction_enabled": {
-    "description": "启用 agent 因果轨迹压缩",
+    "description": "启用插件因果轨迹压缩",
     "type": "bool",
     "default": true,
     "hint": "把连续低变化的状态更新压缩为 compacted_items，降低读取和存储成本。"

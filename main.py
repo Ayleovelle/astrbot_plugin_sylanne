@@ -495,7 +495,7 @@ def get_emotional_state_plugin(context: Context) -> Any | None:
 @register(
     PLUGIN_NAME,
     "pidan",
-    "基于 PAD/OCC/appraisal 与情绪动力学的 AstrBot 多维情绪状态插件",
+    "Soulful Lifelike AstrBot State Layer：维护情绪、人格、记忆、氛围和表达节奏的灵澜状态插件",
     "1.6.0",
     "",
 )

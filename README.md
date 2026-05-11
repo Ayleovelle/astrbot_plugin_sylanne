@@ -1,6 +1,27 @@
-﻿# AstrBot 多维情绪状态插件
+﻿# AstrBot 灵澜状态插件
 
-> 让 AstrBot 维护一套可计算、可记忆、可解释、可被其他插件调用的多维情绪状态。
+> **Soulful Lifelike AstrBot State Layer**。工程形态仍是 AstrBot 插件；他/她维护的不只是“情绪标签”，而是情绪、人格、记忆、氛围、主动性和表达节奏交织成的长期状态。
+
+<table>
+  <tr>
+    <td width="66%" valign="top">
+      <strong>特色功能</strong>
+      <ul>
+        <li><strong>不只是情绪：</strong>同时维护 7 维情绪、人格漂移、拟人状态、生命化学习、道德修复、瑕疵模拟和非诊断心理筛查。</li>
+        <li><strong>会记住相处方式：</strong>写入 LivingMemory 时冻结当时情绪和辅助状态，让长期记忆带着当时的气氛。</li>
+        <li><strong>懂得什么时候说话：</strong>结合群聊氛围、打断风险、双方需要和主动发言反馈，判断该开口、短应、先听还是保持距离。</li>
+        <li><strong>更像即时聊天：</strong>回复可拆成多条短消息，按打字速度与停顿发送，并在发送表情包前检查语气一致性。</li>
+        <li><strong>后台并行但不乱来：</strong>状态评估可后台运行，worker 会参考队列压力、CPU/内存压力和全局预算自动收放。</li>
+        <li><strong>SYLANNE：</strong><em>Soulful, Yearning, Lifelike, AstrBot, Neural, Narrative, Engine</em>，灵澜的名字和项目吉祥物都藏在这里。</li>
+      </ul>
+    </td>
+    <td width="34%" align="center" valign="middle">
+      <img src="docs/assets/sylanne-mascot.gif" width="208" alt="项目吉祥物 Sylanne">
+      <br>
+      <sub>Sylanne：灵澜状态插件的项目吉祥物。</sub>
+    </td>
+  </tr>
+</table>
 
 ![版本 1.6.0](https://img.shields.io/badge/version-1.6.0-blue)
 ![AstrBot >=4.9.2,<5.0.0](https://img.shields.io/badge/AstrBot-%3E%3D4.9.2%2C%3C5.0.0-green)
@@ -25,7 +46,7 @@
 | 智能后台 worker | 默认每会话 1 个 worker；打开动态扩容后，插件会同时看队列压力、等待时间、重试/租约压力和 CPU/内存环境压力，全插件同时活跃后台 worker 硬上限固定为 6，并通过冷却时间逐级扩容、空闲后自动关闭；内部判断 LLM 另有并发闸门，默认最多 2 路、极端积压最多 3 路。 |
 | 群聊分层建模 | 同时维护房间级 `conversation_id` 和说话人级 `speaker_track_id`，避免一个人的冲突污染全群，也避免群聊气氛被切碎。 |
 | 群聊氛围与开口时机 | `group_atmosphere_state` 记录活跃度、紧张度、玩笑度、支持度、bot 注意力、打断风险和加入适宜度，帮助 bot 判断该开口、短应、先听还是避免插话。 |
-| 统一状态查询接口（agent API） | 其他插件可通过公共接口（API）查询核心情绪、说话人轨道、群聊氛围、因果轨迹、运行时诊断或总览状态，而不是读取内部 KV。 |
+| 统一插件状态查询 | 其他插件可通过公共接口（API）查询核心情绪、说话人轨道、群聊氛围、因果轨迹、运行时诊断或总览状态，而不是读取内部 KV。 |
 | 真人即时聊天 | 可把回复拆成多条短消息，按打字速度、长度和稳定抖动顺序发送，降低长篇报告腔。 |
 | 表情包回应与学习 | 根据当前情绪、群聊氛围和文本线索选择表情包；可记录用户表情的轻量元数据，形成小圈子里的表情共同语境。 |
 
@@ -81,7 +102,7 @@
 | 项目 | 当前值 |
 | --- | --- |
 | 插件目录名 | `astrbot_plugin_emotional_state` |
-| 显示名 | `多维情绪状态` |
+| 显示名 | `灵澜状态插件` |
 | 当前版本 | `1.6.0` |
 | AstrBot 版本 | `>=4.9.2,<5.0.0` |
 | Python | `3.10+` |
@@ -2186,7 +2207,7 @@ if repair_status in {"repaired", "restored"}:
 
 该总线的优先级顺序为：非诊断心理安全 > 道德修复透明性 > 关系边界 > 拟人资源调制 > 情绪风格。它还会输出 `causal_trace`、`policy_plan` 和 `compatibility`，用于解释每次状态仲裁为什么发生、低成本部署时保留哪些信号、以及第三方插件是否拿到了当前 schema。它不会生成诊断结论，也不会生成欺骗、隐瞒、操控或规避责任策略。
 
-### 群聊氛围与统一 agent 状态 API
+### 群聊氛围与统一插件状态 API
 
 | 方法 | 是否写入状态 | 用途 |
 | --- | --- | --- |
@@ -2848,7 +2869,7 @@ $env:ASTRBOT_EXPECT_PLUGIN = "astrbot_plugin_emotional_state"
 
 ```powershell
 $env:ASTRBOT_EXPECT_PLUGIN_VERSION = "1.6.0"
-$env:ASTRBOT_EXPECT_PLUGIN_DISPLAY_NAME = "多维情绪状态"
+$env:ASTRBOT_EXPECT_PLUGIN_DISPLAY_NAME = "灵澜状态插件"
 & $node scripts\remote_smoke_playwright.js
 ```
 

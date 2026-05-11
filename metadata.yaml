@@ -1,7 +1,7 @@
 name: astrbot_plugin_emotional_state
-display_name: 多维情绪状态
-desc: 基于 PAD、OCC、appraisal theory 与情绪动力学，让 AstrBot 维护可计算的多维情绪状态。
-short_desc: 让 AstrBot 拥有可量化、可持续更新的情绪状态。
+display_name: 灵澜状态插件
+desc: Soulful Lifelike AstrBot State Layer；工程形态仍是插件，用情绪动力学、人格漂移、生命化学习、群聊氛围和后台状态调度维护可计算、可记忆、可调用的长期状态。
+short_desc: Soulful Lifelike AstrBot State Layer，灵澜式长期状态插件。
 version: 1.6.0
 author: pidan
 license: GPL-3.0-or-later
