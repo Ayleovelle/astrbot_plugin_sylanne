@@ -1,8 +1,8 @@
-# AstrBot 灵澜状态插件
+# AstrBot Sylanne
 
-> **Soulful Yearning Lifelike AstrBot Neural Narrative Engine**。工程形态仍是 AstrBot 插件；他/她维护的不只是“情绪标签”，而是情绪、人格、记忆、氛围、主动性和表达节奏交织成的长期状态。
+> <span style="font-size: 1.08em;"><strong>Soulful Yearning Lifelike AstrBot Neural Narrative Engine</strong>。她维护的不只是“情绪标签”，而是情绪、人格、记忆、氛围、主动性和表达节奏交织成的长期状态。</span>
 
-![版本 1.6.0](https://img.shields.io/badge/version-1.6.0-blue)
+![版本 1.7.0](https://img.shields.io/badge/version-1.7.0-blue)
 ![AstrBot >=4.9.2,<5.0.0](https://img.shields.io/badge/AstrBot-%3E%3D4.9.2%2C%3C5.0.0-green)
 ![Python 3.10+](https://img.shields.io/badge/Python-3.10%2B-yellow)
 ![协议 astrbot.emotion_state.v2](https://img.shields.io/badge/schema-astrbot.emotion__state.v2-purple)
@@ -10,11 +10,11 @@
 
 ## 介绍
 
-<img align="right" src="docs/assets/sylanne-mascot.gif" width="220" alt="项目吉祥物 Sylanne">
+<img align="right" src="docs/assets/sylanne-mascot.gif" width="260" alt="项目吉祥物 Sylanne">
 
-`astrbot_plugin_sylanne` 是一个面向 AstrBot 的“情绪状态层”和“插件公共状态服务”。它不是只在提示词里写几句“你要有喜怒哀乐”，而是把 bot 的情绪、关系后果、人格差异、长期记忆注解、拟人状态、道德修复状态、群聊氛围、后台评估队列和非诊断心理筛查拆成可测试、可持久化、可调用的工程模块。
+`astrbot_plugin_sylanne` 是一个面向 AstrBot 的“情绪状态层”和“插件公共状态服务”。她不是只在提示词里写几句“你要有喜怒哀乐”，而是把 bot 的情绪、关系后果、人格差异、长期记忆注解、拟人状态、道德修复状态、群聊氛围、后台评估队列和非诊断心理筛查拆成可测试、可持久化、可调用的工程模块。
 
-`astrbot_plugin_sylanne` 不是一个简单的“给 bot 加情绪标签”的插件。他/她的核心目标是：
+`astrbot_plugin_sylanne` 不是一个简单的“给 bot 加情绪标签”的插件。她的核心目标是：
 
 > 让不同人格的 bot 在长期对话中形成可解释、可持续、可重置、可被记忆系统记录的计算性情绪轨迹。
 
@@ -22,21 +22,23 @@
 
 **特色功能**
 
-- 🧠 <strong>不只是情绪：</strong>同时维护 7 维情绪、人格漂移、拟人状态、生命化学习、道德修复、瑕疵模拟和非诊断心理筛查。<br>
-  「先把状态做成会互相牵动的东西。7 维情绪只是入口，人格漂移和长期记忆才让她有前后文。」
-- 📝 <strong>会记住相处方式：</strong>写入 LivingMemory 时冻结当时情绪和辅助状态，让长期记忆带着当时的气氛。<br>
-  「记忆不能只存事实。那天是别扭、开心、委屈还是想靠近，都应该一起留下来。」
-- 💬 <strong>懂得什么时候说话：</strong>结合群聊氛围、打断风险、双方需要和主动发言反馈，判断该开口、短应、先听还是保持距离。<br>
-  「先做好开口门控。尤其是群聊里该不该插话，这个地方最容易看出她是不是只会抢答。」
-- 🫧 <strong>更像即时聊天：</strong>回复可拆成多条短消息，按打字速度与停顿发送，并在发送表情包前检查语气一致性。<br>
-  「不要把整段话一次性倒出来。真正的聊天会停顿，会分开发，会犹豫一下再补一句。」
-- ⚙️ <strong>后台并行但不乱来：</strong>状态评估可后台运行，worker 会参考队列压力、CPU/内存压力和全局预算自动收放。<br>
-  「后台可以聪明，但不能把服务器拖垮。worker 要自己判断压力，忙完就安静退下去。」
+- 🧠 <span style="font-size: 1.04em;"><strong>不只是情绪：</strong>同时维护 7 维情绪、人格漂移、拟人状态、生命化学习、道德修复、瑕疵模拟和非诊断心理筛查。</span><br>
+  <sub><em>「先把状态做成会互相牵动的东西。7 维情绪只是入口，人格漂移和长期记忆才让她有前后文。」</em></sub>
+- 📝 <span style="font-size: 1.04em;"><strong>会记住相处方式：</strong>写入 LivingMemory 时冻结当时情绪和辅助状态，让长期记忆带着当时的气氛。</span><br>
+  <sub><em>「记忆不能只存事实。那天是别扭、开心、委屈还是想靠近，都应该一起留下来。」</em></sub>
+- 💬 <span style="font-size: 1.04em;"><strong>懂得什么时候说话：</strong>结合群聊氛围、打断风险、双方需要和主动发言反馈，判断该开口、短应、先听还是保持距离。</span><br>
+  <sub><em>「先做好开口门控。尤其是群聊里该不该插话，这个地方最容易看出她是不是只会抢答。」</em></sub>
+- 🌙 <span style="font-size: 1.04em;"><strong>会主动找你聊天：</strong>可记录最近可触达会话，后台低频醒来判断是否因为想念、关心进度、调皮打扰、关系修复或双方互需而请求 AstrBot 发消息。</span><br>
+  <sub><em>「不是定时刷屏，也不是预设话题库。她要先有理由、有证据，再决定要不要轻轻敲一下门。」</em></sub>
+- 🫧 <span style="font-size: 1.04em;"><strong>更像即时聊天：</strong>回复可拆成多条短消息，按打字速度与停顿发送，并在发送表情包前检查语气一致性。</span><br>
+  <sub><em>「不要把整段话一次性倒出来。真正的聊天会停顿，会分开发，会犹豫一下再补一句。」</em></sub>
+- ⚙️ <span style="font-size: 1.04em;"><strong>后台并行但不乱来：</strong>状态评估可后台运行，workers 会参考队列压力、CPU/内存压力和全局预算自动收放。</span><br>
+  <sub><em>「后台可以聪明，但不能把服务器拖垮。workers 要自己判断压力，忙完就安静退下去。」</em></sub>
 - 🌙 其实这个插件最初是我为自己的bot “Sylanne”开发的，我想让她不只是ai，所以名字就用的她的名字，算是一个私货吧= w =
 
 <br clear="right">
 
-`1.6.0` 的重点是把后台 worker 从“只看队列压力的加速器”收束成“受环境压力和全局预算保护的调度器”：他/她仍然可以在积压时后台并行处理状态，但会同时参考 CPU/内存压力、未知压力保守档、全局活跃 worker 预算和扩容冷却，避免服务器在短时间积压时被并发撑爆。`1.5.0` 加入的真人即时聊天、分条发送、表情包回应和表情元数据学习继续保留。
+`1.7.0` 的重点是把“主动聊天”从一次性工具请求补成后台闭环：她会记录最近可触达会话，低频醒来后由状态公式和 LLM 判断是否应该请求 AstrBot 主动发消息；同时加入用户插话中断、分条发送中途过期检查和 NapCat/OneBot 撤回接入，避免旧回复越过新的上下文。`1.6.0` 的环境压力守卫、全局 worker 预算和平滑扩容继续作为后台稳定性基线保留。
 
 | 能力 | 作用 |
 | --- | --- |
@@ -49,11 +51,9 @@
 | 真人即时聊天 | 可把回复拆成多条短消息，按打字速度、长度和稳定抖动顺序发送，降低长篇报告腔。 |
 | 表情包回应与学习 | 根据当前情绪、群聊氛围和文本线索选择表情包；可记录用户表情的轻量元数据，形成小圈子里的表情共同语境。 |
 
-> **代码与模型来源**
-> 本项目未使用、复制或改写外部参考项目的代码、配置、资源、测试、发布脚本、许可证文本或文档表达。README 的信息架构、运行代码、配置结构（schema）、公共接口（API）、测试、公式推导和模型实现均由本项目独立整理与编写；情绪、人格式先验、人格漂移、主动发言和互需模式的状态变量、公式与更新规则均基于公开文献证据自行归纳、抽象、建模和实现。
-
-> **重要提示**
-> 这里的“情绪”“拟人状态”“道德修复”“心理筛查”都是工程上的模拟状态，不代表真实意识、真实主观体验、真实身体、真实疾病或临床诊断。心理相关模块只输出非诊断趋势和风险提示，不替代任何医学、心理咨询或危机干预流程。
+> [!CAUTION]
+> **重要警示：本插件只用于 LLM 情绪化与拟人状态建模研究。**
+> 这里的“情绪”“拟人状态”“道德修复”“心理筛查”全部是工程模拟状态，不代表真实意识、真实主观体验、真实身体、真实疾病或临床诊断。心理相关模块只输出非诊断趋势和风险提示，不能替代医学诊断、心理咨询、危机干预或任何专业人工判断。关闭重置后门、关闭安全边界、开启高消耗功能或把模拟状态用于现实关系判断造成的风险，由使用者自行承担。
 
 ---
 
@@ -74,7 +74,7 @@
 | 主题 | 内容 |
 | --- | --- |
 | [当前版本与兼容范围](#当前版本与兼容范围) | 插件版本、AstrBot 版本、Python 要求、许可证和发布状态。 |
-| [1.6.0 正式版发布记录](#160-正式版发布记录) | CPU/内存环境守卫、全局 worker 预算、平滑扩容、诊断字段、测试与包体。 |
+| [1.7.0 正式版发布记录](#170-正式版发布记录) | 主动聊天后台调度闭环、用户插话中断、NapCat/OneBot 撤回接入、版本规则和测试与包体。 |
 | [项目定位](#项目定位) | 为什么本插件不是普通的提示词人设增强。 |
 | [核心能力](#核心能力总览) | 7 维情绪、人格建模、真实时间记忆、关系修复、公共 API。 |
 | [快速开始](#快速开始) | 发布 zip 包、仓库安装、手动复制、最小配置和检查命令。 |
@@ -101,32 +101,32 @@
 | 项目 | 当前值 |
 | --- | --- |
 | 插件目录名 | `astrbot_plugin_sylanne` |
-| 显示名 | `灵澜状态插件` |
-| 当前版本 | `1.6.0` |
+| 显示名 | `Sylanne` |
+| 当前版本 | `1.7.0` |
 | AstrBot 版本 | `>=4.9.2,<5.0.0` |
 | Python | `3.10+` |
 | 许可证 | `GPL-3.0-or-later` |
 | 运行时第三方依赖 | 当前无额外依赖，见 `requirements.txt` |
 
-`1.6.0` 在 `1.5.0` 真人即时聊天表达层上继续强化后台稳定性：默认启用即时聊天风格提示、分条发送计划、回复接管和表情包氛围回应；当配置者打开动态后台 worker 后，扩容会同时受 CPU/内存压力、未知压力保守档、全局活跃 worker 硬上限和冷却平滑控制约束。核心情绪、回复后后台评估（post）、`group_atmosphere_state`、`humanlike_state`、`lifelike_learning_state`、`personality_drift_state` 和即时聊天节奏默认自动运行；道德修复、瑕疵模拟、心理筛查等实验/维护模块仍由配置者显式打开。
+`1.7.0` 在 `1.6.0` 后台稳定性基线上补齐主动聊天闭环：默认仍不主动发送，配置者同时开启 `enable_proactive_speech_scheduler=true` 与 `enable_proactive_speech_dispatch=true` 后，她才会从最近可触达会话中选择候选，结合情绪、群聊氛围、双方需要、冷却、上下文证据和 LLM 话题裁决，请求 AstrBot 主动发送。即时聊天分条发送会监听用户插话；NapCat/OneBot 撤回会推进会话 epoch 并让旧输出自然过期。核心情绪、回复后后台评估（post）、`group_atmosphere_state`、`humanlike_state`、`lifelike_learning_state`、`personality_drift_state` 和即时聊天节奏默认自动运行；道德修复、瑕疵模拟、心理筛查等实验/维护模块仍由配置者显式打开。
 
 发布包会包含运行代码、README、CHANGELOG、LICENSE、配置结构（schema）、docs 和 `docs/assets/` 中的聚合图表；不会包含 `tests/`、`scripts/`、`literature_kb/`、`personality_literature_kb/`、`psychological_literature_kb/`、`humanlike_agent_literature_kb/`、`raw/`、`output/`、`dist/` 等开发、研究、原始样本或缓存目录。
 
-### 1.6.0 正式版发布记录
+### 1.7.0 正式版发布记录
 
-`v1.6.0` 合并在 `main` 上，对外安装版本由 `metadata.yaml` 和 `main.py @register(...)` 共同声明为 `1.6.0`。本版以 `1.5.0` 的即时聊天表达层为基线，重点修正动态后台 worker 在高积压场景下可能把服务器压力放大的问题：扩容不再只看队列，而是同时看环境压力、全局预算和扩容冷却。
+`v1.7.0` 合并在 `main` 上，对外安装版本由 `metadata.yaml` 和 `main.py @register(...)` 共同声明为 `1.7.0`。本版以 `1.6.0` 的后台 worker 稳定性为基线，重点补齐主动聊天调度闭环，以及用户插话、分条发送和 NapCat/OneBot 撤回场景下的上下文一致性。
 
 当前版本的主要变化：
 
 | 类别 | 结果 |
 | --- | --- |
-| 环境压力守卫 | 动态后台 worker 会采样 CPU 与内存压力；高压时自动降档，无法读取环境压力时进入保守档。 |
-| 全局并发预算 | 后台 worker 的硬上限从“单会话理解”收束为“全插件同时活跃后台任务最多 `6`”，避免多会话同时积压叠加打爆服务。 |
-| 平滑扩容 | 即使队列瞬时暴涨，也会通过冷却时间逐级升档，每轮最多升 `1` 档；已有任务不强杀，后续领取自动变少。 |
-| 只读诊断安全 | runtime 诊断只预览 worker 决策，不会因为查看日志或调用诊断命令而推进扩容状态。 |
-| 可观测性 | 运行时诊断新增环境压力等级、CPU/内存占用比例、资源 cap、全局活跃 worker、可领取槽位和扩容冷却字段。 |
-| 流程图与配置 | README、配置提示和手机端静态 SVG 流程图同步展示环境守卫、全局预算和平滑扩容。 |
-| 公开契约 | 插件版本为 `1.6.0`；公共 API 版本仍为 `1.0`，schema 仍保持 `astrbot.emotion_state.v2` 等版本化契约。 |
+| 主动聊天后台调度 | 新增 `enable_proactive_speech_scheduler`。开启后插件会登记最近可触达会话，后台低频醒来，在压力、冷却、同会话锁和发送开关都允许时请求主动发言裁决。 |
+| 主动发送闭环 | 主动话题仍由状态公式和 LLM 基于证据裁决，不使用固定话题库；真正发送仍要求 `enable_proactive_speech_dispatch=true`，并写入主动发送审计和生命化学习反馈。 |
+| 用户插话中断 | 每个会话维护 `input_epoch`。用户新消息进入后，旧 LLM 回复若已过期会被清空，不进入 post 情绪评估；分条发送中途也会逐条检查，避免旧话越过新上下文。 |
+| NapCat/OneBot 撤回接入 | 新增 `observe_user_message_withdrawal(...)` 公共 API，可解析 `friend_recall` / `group_recall` notice，撤回后推进 epoch、清理主动候选摘要，并让旧输出自然过期。 |
+| 后台稳定性继承 | `1.6.0` 的 CPU/内存环境守卫、全局 worker 硬上限 `6`、平滑扩容和只读诊断不提交状态继续保留。 |
+| 版本规则 | 以后发布遵循：第一位用于代码重构级或划世代级更新；第二位用于功能更新；第三位用于 bug 修复；实验版本在版本号后加 `exp` 后缀。 |
+| 公开契约 | 插件版本为 `1.7.0`；公共 API 版本仍为 `1.0`，schema 仍保持 `astrbot.emotion_state.v2` 等版本化契约。 |
 
 运行时亮点可以按这条链路理解。手机端若不渲染 Mermaid，也会优先显示下面的静态图：
 
@@ -834,7 +834,7 @@ low_reasoning_max_context_chars = 1200
 
 ## 工作流
 
-插件在 AstrBot LLM 请求前后工作；主动说话模块是单独的裁决与发送请求支路。默认只返回可审计请求；配置者开启 `enable_proactive_speech_dispatch=true` 后，插件可在公式和 LLM 同意、冷却通过、会话目标明确时调用 AstrBot 主动发送接口。
+插件在 AstrBot LLM 请求前后工作；主动说话模块是单独的裁决、后台调度与发送请求支路。默认只返回可审计请求；配置者同时开启 `enable_proactive_speech_scheduler=true` 与 `enable_proactive_speech_dispatch=true` 后，插件会记录最近可触达会话，并在低频后台调度中由公式和 LLM 判断是否该请求 AstrBot 主动发送接口。
 
 ![工作流与主动发言支路](docs/assets/workflow_and_proactive.svg)
 
@@ -896,6 +896,21 @@ flowchart TD
 - 主动发送默认关闭；打开后仍受同会话冷却、沉默裁决、缺失 `unified_msg_origin`、缺失 `send_message` 接口等诊断保护。
 - 注入使用临时 `TextPart`，不会直接写进长期消息记录。
 - 状态落库使用 AstrBot KV，不建议外部插件直接改内部 key。
+
+<details>
+<summary>展开早期工作流与当前工作流对比</summary>
+
+| 维度 | 早期工作流 | 当前工作流优势 |
+| --- | --- | --- |
+| 状态评估 | 请求内串行评估，回复容易被评估耗时拖住。 | `pre` 保持即时影响；`post` 进入后台队列，结果按 sequence 顺序提交，降低主链路延迟。 |
+| 后台处理 | worker 更像固定加速器，只处理积压。 | workers 会参考队列深度、等待年龄、CPU/内存压力、未知压力保守档和全局预算，空闲后自动收束。 |
+| 参数传递 | 冷却、长度、半衰期更接近静态配置。 | 人格漂移影响人格建模，人格建模再传递到情绪动力学、主动性、冷却、反馈窗口和表达节奏。 |
+| 主动聊天 | 只能由工具或其他插件请求一次主动发言。 | 可登记最近会话，后台低频醒来；话题由状态公式和 LLM 基于证据裁决，再通过 `context.send_message` 请求发送。 |
+| 话题来源 | 容易变成预设话题或模板开场。 | 必须带 `topic_evidence`，例如进度关心、共同语境、想念、调皮打扰、轻量修复或双方互需。 |
+| 即时聊天 | 主 LLM 一次性吐出整段回复。 | 可拆成多条短消息，模拟打字停顿，并在表情包发送前做语气一致性检查。 |
+| 记忆写入 | 长期记忆更偏事实文本。 | LivingMemory 写入时冻结当时情绪、拟人状态、生命化学习和人格漂移，让记忆带着当时气氛。 |
+
+</details>
 
 ---
 
@@ -1575,6 +1590,9 @@ enable_safety_boundary = false
 | 配置项 | 类型 | 默认值 | 说明 |
 | --- | --- | --- | --- |
 | `enable_proactive_speech_dispatch` | bool | `false` | 是否允许插件真正调用 `context.send_message` 主动发消息。关闭时只返回 `dispatch_request` 和未发送原因。 |
+| `enable_proactive_speech_scheduler` | bool | `false` | 是否启用后台主动聊天调度器。开启后会从最近可触达会话中选择候选；真正发送仍要求 `enable_proactive_speech_dispatch=true`。 |
+
+主动发言的后台调度器不是固定闹钟。她会先登记最近出现过、具备 `unified_msg_origin` 的会话；后台低频醒来时，会在环境压力不高、同会话未被锁住、近期没有重复检查的前提下，把最近用户消息和上下文摘要交给主动发言裁决。裁决仍然要经过本地公式、LLM 话题判断、冷却、发送开关和 `context.send_message` 接口检查。
 
 主动发言的冷却、有效期、句子长度和反馈观察窗口不会暴露为普通配置。插件会根据 `score`、边界敏感、打扰风险、修复需要、用户被照顾需要、bot 自己想被需要的程度自动计算，并写入 `dispatch_request.adaptive_policy`。如果主动发言后用户没有回应，或只回了“嗯”“好”这类低信号短句，插件会把它记录为 `unanswered` 或 `cold_reply`，后续会更谨慎地判断开口时机。
 
@@ -1604,6 +1622,10 @@ enable_safety_boundary = false
 | `sticker_learned_limit` | int | `200` | 每会话保留的用户表情元数据上限。 |
 
 即时聊天的分条数量、单条长度、打字速度、停顿、抖动、同会话接管冷却和表情包发送概率，都由人格模型、当前情绪、群聊氛围和生命化学习状态自动派生。外向、亲近、情绪唤醒高时会更容易分成自然短句；边界敏感、疏离、群聊紧张或打断风险高时会更克制、更少发图、更慢开口。`get_realtime_chat_plan(...)` 会在返回值的 `adaptive.realtime_chat` 和 `adaptive.sticker` 中说明当轮为什么这样计算。
+
+如果主 LLM 还在生成，用户已经补发了新消息，Sylanne 不会把旧回复硬塞到新上下文后面。插件会给每个会话维护一个轻量 `input_epoch`：用户新消息进入时 epoch 前进；旧回复到达时如果发现 epoch 已经过期，就清空旧 `completion_text` 并跳过后台 post 情绪评估。已经开始分条发送时，每一条发送前也会检查 epoch；用户插话后剩余分条和表情包都会停止。这不会删除 AstrBot 或平台自己的历史，只是不让旧输出污染当前对话节奏和情绪轨迹。
+
+NapCat/OneBot 的撤回事件也可以接入这个机制。NapCat 的撤回属于 OneBot `notice` 事件，私聊撤回为 `notice_type=friend_recall`，群撤回为 `notice_type=group_recall`，常见字段包括 `message_id`、`user_id`、群撤回里的 `group_id` 与 `operator_id`。如果适配器能把原始 notice 放在 `event.message_obj.raw_message`、`event.raw_message` 或同类字段里，插件可解析撤回载荷；其他插件也可以直接调用 `observe_user_message_withdrawal(...)`。撤回后会推进会话 epoch、清空该会话最近主动聊天候选摘要，并让旧回复自然过期。若平台没有把撤回事件交给插件，则只能等用户补发更正消息后按“新消息打断旧回复”处理。
 
 `ChineseBQB` 仓库体积很大且未随本插件重新授权分发，所以本插件只保留默认 URL 和本地目录索引能力。发布 zip 不包含 `ChineseBQB/`、用户偷来的表情包、缓存图片或外部素材库；“偷表情包”只表示记录轻量来源信息，方便以后在同一会话氛围下复用。
 
@@ -2085,6 +2107,7 @@ emotion = meta.star_cls if meta and meta.activated else None
 | `request_proactive_speech_dispatch(event_or_session, candidate_context="", use_llm=True, dry_run=False, force=False, realtime=None)` | 是 | 请求 AstrBot 主动发送；默认受 `enable_proactive_speech_dispatch` 和冷却控制，可自动走即时聊天分条发送。 |
 | `get_realtime_chat_plan(event_or_session, text, include_sticker=True)` | 否 | 生成即时聊天分条、打字间隔和表情包候选计划，不发送。 |
 | `request_realtime_chat_dispatch(event_or_session, text, dry_run=None, force=False)` | 是 | 按计划顺序发送多条即时聊天消息；`dry_run` 可只试算。 |
+| `observe_user_message_withdrawal(event_or_session=None, session_key=None, message_id="", reason="withdrawn")` | 是 | 标记用户撤回/更正消息，推进会话 epoch，停止旧分条输出，并清理最近主动聊天候选摘要。 |
 | `observe_sticker_usage(event_or_session, sticker)` | 是 | 记录用户表情包轻量元数据，供后续表情共同语境使用，不保存二进制图片。 |
 | `get_lifelike_prompt_fragment(event_or_session)` | 否 | 获取共同语境和对话节奏提示词片段。 |
 | `observe_lifelike_text(event_or_session, text)` | 是 | 提交文本观察并更新新词、黑话、用户画像和边界线索。 |
@@ -2867,8 +2890,8 @@ $env:ASTRBOT_EXPECT_PLUGIN = "astrbot_plugin_sylanne"
 脚本会在输出 JSON 里写出 `expectedPluginRuntime`，包含插件列表 API 中返回的 `version`、`displayName`、`activated`、`author`、`astrbotVersion` 等只读字段。若目标插件存在但 `activated=false`，脚本会失败退出。需要把版本和显示名也作为硬断言时，可以额外设置：
 
 ```powershell
-$env:ASTRBOT_EXPECT_PLUGIN_VERSION = "1.6.0"
-$env:ASTRBOT_EXPECT_PLUGIN_DISPLAY_NAME = "灵澜状态插件"
+$env:ASTRBOT_EXPECT_PLUGIN_VERSION = "1.7.0"
+$env:ASTRBOT_EXPECT_PLUGIN_DISPLAY_NAME = "Sylanne"
 & $node scripts\remote_smoke_playwright.js
 ```
 
@@ -3086,7 +3109,7 @@ inject_state = false
 humanlike_memory_write_enabled = true
 ```
 
-拟人状态默认自动运行。若没有看到 `humanlike_state_at_write`，优先确认插件是否为 `1.6.0` 或更新版本、`humanlike_memory_write_enabled=true`，以及调用方是否保留了完整记忆载荷。
+拟人状态默认自动运行。若没有看到 `humanlike_state_at_write`，优先确认插件是否为 `1.7.0` 或更新版本、`humanlike_memory_write_enabled=true`，以及调用方是否保留了完整记忆载荷。
 
 ### 拟人状态没有生效
 
@@ -3176,7 +3199,7 @@ consequences = await emotion.get_emotion_consequences(event)
 
 ## 独立来源声明
 
-本 README 的信息架构由本项目根据插件实际功能独立整理，未复制外部项目的源码、配置、资源、测试、发布脚本、许可证文本或文档表达。
+本 README 的信息架构由本项目根据插件实际功能独立整理，未使用、复制或改写外部参考项目的代码、配置、资源、测试、发布脚本、许可证文本或文档表达。
 
 本插件的运行代码、配置 schema、公共 API、测试、公式推导和模型实现均由本项目独立编写。公式和模型不是外部项目的派生实现，而是基于公开文献证据自行总结、抽象、推导并落地为工程状态机；这不改变本项目的 `GPL-3.0-or-later` 授权边界。
 

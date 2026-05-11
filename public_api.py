@@ -58,6 +58,7 @@ _EMOTION_SERVICE_REQUIRED_METHODS = (
     "request_proactive_speech_dispatch",
     "get_realtime_chat_plan",
     "request_realtime_chat_dispatch",
+    "observe_user_message_withdrawal",
     "observe_sticker_usage",
     "get_lifelike_prompt_fragment",
     "observe_lifelike_text",
@@ -114,6 +115,7 @@ _LIFELIKE_SERVICE_REQUIRED_METHODS = (
     "request_proactive_speech_dispatch",
     "get_realtime_chat_plan",
     "request_realtime_chat_dispatch",
+    "observe_user_message_withdrawal",
     "observe_sticker_usage",
     "get_lifelike_prompt_fragment",
     "observe_lifelike_text",
@@ -462,6 +464,18 @@ class EmotionServiceProtocol(Protocol):
         session_key: str | None = None,
         dry_run: bool | None = None,
         force: bool = False,
+    ) -> dict[str, Any]:
+        ...
+
+    async def observe_user_message_withdrawal(
+        self,
+        event_or_session: Any = None,
+        *,
+        request: Any = None,
+        session_key: str | None = None,
+        message_id: str = "",
+        reason: str = "withdrawn",
+        observed_at: float | None = None,
     ) -> dict[str, Any]:
         ...
 
@@ -862,6 +876,18 @@ class LifelikeLearningServiceProtocol(EmotionServiceProtocol, Protocol):
         session_key: str | None = None,
         dry_run: bool | None = None,
         force: bool = False,
+    ) -> dict[str, Any]:
+        ...
+
+    async def observe_user_message_withdrawal(
+        self,
+        event_or_session: Any = None,
+        *,
+        request: Any = None,
+        session_key: str | None = None,
+        message_id: str = "",
+        reason: str = "withdrawn",
+        observed_at: float | None = None,
     ) -> dict[str, Any]:
         ...
 

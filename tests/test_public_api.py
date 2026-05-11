@@ -228,6 +228,9 @@ class FakeEmotionService:
     async def request_realtime_chat_dispatch(self, *args, **kwargs):
         return {}
 
+    async def observe_user_message_withdrawal(self, *args, **kwargs):
+        return {}
+
     async def observe_sticker_usage(self, *args, **kwargs):
         return {}
 

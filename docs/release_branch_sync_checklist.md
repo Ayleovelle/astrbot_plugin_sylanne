@@ -2,6 +2,13 @@
 
 这份清单用于保护当前插件基线，避免功能、文档和发布包被拆散到未整理的分支里。
 
+## 版本号规则
+
+- 第一位版本号用于代码重构级或划世代级更新。
+- 第二位版本号用于新增功能或较大功能整合。
+- 第三位版本号用于 bug 修复和小范围兼容修正。
+- 实验版本在版本号后追加 `exp` 后缀；实验能力稳定后，再按实际影响级别并入正式版本号。
+
 ## 提交前检查
 
 1. 确认当前工作分支是 `main`。
@@ -34,8 +41,8 @@ git diff --check
 
 ```powershell
 $env:ASTRBOT_EXPECT_PLUGIN = "astrbot_plugin_sylanne"
-$env:ASTRBOT_EXPECT_PLUGIN_VERSION = "1.6.0"
-$env:ASTRBOT_EXPECT_PLUGIN_DISPLAY_NAME = "灵澜状态插件"
+$env:ASTRBOT_EXPECT_PLUGIN_VERSION = "1.7.0"
+$env:ASTRBOT_EXPECT_PLUGIN_DISPLAY_NAME = "Sylanne"
 & $node scripts\remote_smoke_playwright.js
 ```
 

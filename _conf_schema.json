@@ -1,6 +1,6 @@
 {
   "enabled": {
-    "description": "启用灵澜状态插件",
+    "description": "启用 Sylanne",
     "type": "bool",
     "default": true
   },
@@ -44,6 +44,12 @@
     "type": "bool",
     "default": false,
     "hint": "默认关闭时只返回主动发言裁决和 dispatch_request，不调用 AstrBot 发送接口。开启后 request_proactive_speech_dispatch 可在模型判断应开口且冷却通过时调用 context.send_message 主动发送。"
+  },
+  "enable_proactive_speech_scheduler": {
+    "description": "启用后台主动聊天调度器",
+    "type": "bool",
+    "default": false,
+    "hint": "默认关闭。开启后插件会记录最近可触达会话，并在后台低频醒来，由公式和 LLM 判断是否因为想念、关心进度、调皮打扰、关系修复或双方互需而请求 AstrBot 发送消息。真正发送仍需要同时开启“启用主动发言发送执行”。"
   },
   "enable_realtime_chat": {
     "description": "启用真人即时聊天分条发送",

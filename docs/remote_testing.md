@@ -107,7 +107,7 @@
 - AstrBot 版本：`4.24.2`。
 - 目标插件：`astrbot_plugin_sylanne`。
 - 目标版本：当时为 `1.0.0`；当前复现只读烟测时应以 `metadata.yaml` 中的版本为准。
-- 显示名：`灵澜状态插件`。
+- 显示名：`Sylanne`。
 - 启用状态：`true`。
 - 目标插件未出现在失败插件列表中。
 
@@ -140,7 +140,7 @@ $env:ASTRBOT_REMOTE_URL = "http://your-astrbot-host:15356/"
 $env:ASTRBOT_REMOTE_USERNAME = "your-user"
 $env:ASTRBOT_REMOTE_PASSWORD = "your-password"
 $env:ASTRBOT_EXPECT_PLUGIN = "astrbot_plugin_sylanne"
-$env:ASTRBOT_EXPECT_PLUGIN_VERSION = "1.6.0"
+$env:ASTRBOT_EXPECT_PLUGIN_VERSION = "1.7.0"
 
 & $node scripts\remote_smoke_playwright.js
 ```

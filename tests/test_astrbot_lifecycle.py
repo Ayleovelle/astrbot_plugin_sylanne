@@ -2717,6 +2717,149 @@ class AstrBotLifecycleTests(unittest.TestCase):
         self.assertGreater(dispatch["ttl_seconds"], 1)
         self.assertGreater(dispatch["cooldown_seconds"], 1.0)
 
+    def test_on_llm_request_registers_proactive_candidate_session(self):
+        plugin = new_plugin({"assessment_timing": "post", "inject_state": False})
+        request = fake_request(session_id="s-proactive-candidate", prompt="明天提醒我看实验。")
+
+        asyncio.run(
+            plugin.on_llm_request(
+                FakeEvent(
+                    "s-proactive-candidate",
+                    message="明天提醒我看实验。",
+                    sender_id="u-1",
+                    sender_name="A.L",
+                ),
+                request,
+            ),
+        )
+
+        candidate = plugin._proactive_candidate_sessions["s-proactive-candidate"]
+        self.assertEqual(candidate["unified_msg_origin"], "s-proactive-candidate")
+        self.assertIn("明天提醒我看实验", candidate["last_user_text_excerpt"])
+        self.assertEqual(candidate["speaker_id"], "u-1")
+
+    def test_proactive_scheduler_default_disabled_does_not_start(self):
+        plugin = new_plugin({"assessment_timing": "post", "inject_state": False})
+
+        async def fail_if_started(self):
+            raise AssertionError("proactive scheduler should stay disabled by default")
+
+        bind_async(plugin, "_proactive_scheduler_loop", fail_if_started)
+
+        asyncio.run(
+            plugin.on_llm_request(
+                FakeEvent("s-proactive-disabled", message="只是普通聊天。"),
+                fake_request(session_id="s-proactive-disabled", prompt="只是普通聊天。"),
+            ),
+        )
+
+        self.assertIsNone(plugin._proactive_scheduler_task)
+        self.assertEqual(plugin._background_tasks, set())
+
+    def test_proactive_scheduler_dispatches_registered_session_when_enabled(self):
+        plugin = new_plugin(
+            {
+                "assessment_timing": "post",
+                "inject_state": False,
+                "enable_proactive_speech_dispatch": True,
+                "enable_proactive_speech_scheduler": True,
+                "runtime_parameter_debug_override_enabled": True,
+                "realtime_chat_min_delay_seconds": 0.0,
+                "realtime_chat_max_delay_seconds": 0.0,
+                "enable_sticker_reaction": False,
+            },
+        )
+        plugin._background_post_resource_pressure = lambda: {
+            "level": "normal",
+            "worker_cap": 6,
+            "reason": "unit_test_normal_pressure",
+        }
+        dispatched = []
+
+        async def fake_dispatch(self, event_or_session, **kwargs):
+            dispatched.append(
+                {
+                    "event": event_or_session,
+                    "candidate_context": kwargs.get("candidate_context", ""),
+                    "dry_run": kwargs.get("dry_run"),
+                },
+            )
+            return {
+                "schema_version": "astrbot.proactive_dispatch_result.v1",
+                "kind": "proactive_dispatch_result",
+                "session_key": "s-proactive-run",
+                "sent": True,
+                "blocked_reason": "",
+            }
+
+        bind_async(plugin, "request_proactive_speech_dispatch", fake_dispatch)
+
+        async def run_once():
+            await plugin.on_llm_request(
+                FakeEvent("s-proactive-run", message="这周项目进度有点卡。"),
+                fake_request(session_id="s-proactive-run", prompt="这周项目进度有点卡。"),
+            )
+            result = await plugin._run_proactive_scheduler_once()
+            await plugin.terminate()
+            return result
+
+        result = asyncio.run(run_once())
+
+        self.assertEqual(result["checked"], 1)
+        self.assertEqual(result["dispatched"], 1)
+        self.assertEqual(dispatched[0]["event"].unified_msg_origin, "s-proactive-run")
+        self.assertFalse(dispatched[0]["dry_run"])
+        self.assertIn("最近用户消息", dispatched[0]["candidate_context"])
+
+    def test_proactive_scheduler_skips_missing_unified_origin(self):
+        plugin = new_plugin(
+            {
+                "enable_proactive_speech_dispatch": True,
+                "enable_proactive_speech_scheduler": True,
+            },
+        )
+        plugin._background_post_resource_pressure = lambda: {
+            "level": "normal",
+            "worker_cap": 6,
+            "reason": "unit_test_normal_pressure",
+        }
+        plugin._proactive_candidate_sessions = {
+            "s-missing-origin": {
+                "session_key": "s-missing-origin",
+                "unified_msg_origin": "",
+                "last_seen_at": plugin._observed_now(),
+                "last_user_text_excerpt": "缺少 origin。",
+            },
+        }
+
+        async def fail_if_dispatched(self, *args, **kwargs):
+            raise AssertionError("missing origin candidate must not dispatch")
+
+        bind_async(plugin, "request_proactive_speech_dispatch", fail_if_dispatched)
+
+        result = asyncio.run(plugin._run_proactive_scheduler_once())
+
+        self.assertEqual(result["checked"], 0)
+        self.assertEqual(result["dispatched"], 0)
+
+    def test_terminate_clears_proactive_scheduler_state(self):
+        plugin = new_plugin({"enable_proactive_speech_scheduler": True})
+        plugin._ensure_proactive_scheduler_state()
+        plugin._proactive_candidate_sessions = {
+            "s-old": {
+                "session_key": "s-old",
+                "unified_msg_origin": "s-old",
+                "last_seen_at": plugin._observed_now(),
+            },
+        }
+        plugin._proactive_scheduler_locks["s-old"] = asyncio.Lock()
+
+        asyncio.run(plugin.terminate())
+
+        self.assertIsNone(plugin._proactive_scheduler_task)
+        self.assertEqual(plugin._proactive_candidate_sessions, {})
+        self.assertEqual(plugin._proactive_scheduler_locks, {})
+
     def test_sticker_send_is_blocked_when_llm_consistency_rejects_candidate(self):
         sent = []
 
@@ -2898,6 +3041,202 @@ class AstrBotLifecycleTests(unittest.TestCase):
         self.assertEqual(len(sent), 2)
         self.assertEqual(assessment_calls[0]["current_text"], "第一句。第二句。")
         self.assertEqual(saves[0][0], "s-intercept")
+
+    def test_on_llm_response_drops_stale_realtime_reply_after_user_interrupts(self):
+        sent = []
+
+        class FakeContext:
+            async def send_message(self, origin, message):
+                sent.append((origin, str(message)))
+                return {"ok": True}
+
+        plugin = new_plugin(
+            {
+                "assessment_timing": "post",
+                "enable_realtime_chat": True,
+                "realtime_chat_intercept_llm_response": True,
+                "enable_sticker_reaction": False,
+            },
+        )
+        plugin.context = FakeContext()
+        saves, assessment_calls = self._bind_common_state_hooks(plugin)
+        first_event = FakeEvent("s-interrupt", message="第一条问题")
+        second_event = FakeEvent("s-interrupt", message="用户已经补充了新消息")
+        response = SimpleNamespace(completion_text="这是旧问题的长回复。")
+
+        async def run_interrupt():
+            await plugin.on_llm_request(
+                first_event,
+                fake_request(session_id="s-interrupt", prompt="第一条问题"),
+            )
+            await plugin.on_llm_request(
+                second_event,
+                fake_request(session_id="s-interrupt", prompt="用户已经补充了新消息"),
+            )
+            await plugin.on_llm_response(first_event, response)
+            await self._await_background_tasks(plugin)
+
+        asyncio.run(run_interrupt())
+
+        self.assertEqual(response.completion_text, "")
+        self.assertEqual(sent, [])
+        self.assertEqual(saves, [])
+        self.assertEqual(assessment_calls, [])
+
+    def test_on_llm_response_uses_pending_epoch_when_response_event_is_new_object(self):
+        sent = []
+
+        class FakeContext:
+            async def send_message(self, origin, message):
+                sent.append((origin, str(message)))
+                return {"ok": True}
+
+        plugin = new_plugin(
+            {
+                "assessment_timing": "post",
+                "enable_realtime_chat": True,
+                "realtime_chat_intercept_llm_response": True,
+                "enable_sticker_reaction": False,
+            },
+        )
+        plugin.context = FakeContext()
+        saves, assessment_calls = self._bind_common_state_hooks(plugin)
+        response = SimpleNamespace(completion_text="这是旧问题的长回复。")
+
+        async def run_interrupt():
+            await plugin.on_llm_request(
+                FakeEvent("s-interrupt-new-event", message="第一条问题"),
+                fake_request(session_id="s-interrupt-new-event", prompt="第一条问题"),
+            )
+            await plugin.on_llm_request(
+                FakeEvent("s-interrupt-new-event", message="用户已经补充了新消息"),
+                fake_request(
+                    session_id="s-interrupt-new-event",
+                    prompt="用户已经补充了新消息",
+                ),
+            )
+            await plugin.on_llm_response(
+                FakeEvent("s-interrupt-new-event", message="response wrapper"),
+                response,
+            )
+            await self._await_background_tasks(plugin)
+
+        asyncio.run(run_interrupt())
+
+        self.assertEqual(response.completion_text, "")
+        self.assertEqual(sent, [])
+        self.assertEqual(saves, [])
+        self.assertEqual(assessment_calls, [])
+
+    def test_realtime_chat_plan_stops_remaining_parts_when_user_interrupts(self):
+        sent = []
+
+        class FakeContext:
+            async def send_message(self, origin, message):
+                sent.append((origin, str(message)))
+                return {"ok": True}
+
+        plugin = new_plugin({"enable_sticker_reaction": False})
+        plugin.context = FakeContext()
+        plugin._conversation_input_epoch = {"s-part-interrupt": 1}
+        plan = {
+            "session_key": "s-part-interrupt",
+            "input_epoch": 1,
+            "message_parts": [
+                {"index": 0, "text": "第一句", "delay_before_seconds": 0.0},
+                {"index": 1, "text": "第二句", "delay_before_seconds": 0.0},
+            ],
+        }
+
+        original_chain = plugin._build_astrbot_message_chain
+
+        def interrupt_after_first(text):
+            message = original_chain(text)
+            plugin._conversation_input_epoch["s-part-interrupt"] = 2
+            return message
+
+        plugin._build_astrbot_message_chain = interrupt_after_first
+
+        result = asyncio.run(
+            plugin._send_realtime_chat_plan(
+                FakeEvent("s-part-interrupt"),
+                plan,
+                source="unit_test",
+            ),
+        )
+
+        self.assertEqual(len(sent), 1)
+        self.assertEqual(result["message_count"], 1)
+        self.assertEqual(result["interrupted_reason"], "user_interrupted")
+
+    def test_observe_user_message_withdrawal_invalidates_pending_output(self):
+        plugin = new_plugin()
+        plugin._conversation_input_epoch = {"s-withdraw": 1}
+        plugin._last_request_text = {"s-withdraw": "错字消息"}
+        plugin._proactive_candidate_sessions = {
+            "s-withdraw": {
+                "session_key": "s-withdraw",
+                "unified_msg_origin": "s-withdraw",
+                "last_user_text_excerpt": "错字消息",
+                "candidate_context_excerpt": "旧上下文",
+            },
+        }
+
+        result = asyncio.run(
+            plugin.observe_user_message_withdrawal(
+                session_key="s-withdraw",
+                message_id="m-100",
+                reason="napcat_friend_recall",
+            ),
+        )
+
+        self.assertEqual(result["input_epoch"], 2)
+        self.assertTrue(plugin._conversation_reply_is_stale("s-withdraw", 1))
+        self.assertNotIn("s-withdraw", plugin._last_request_text)
+        candidate = plugin._proactive_candidate_sessions["s-withdraw"]
+        self.assertEqual(candidate["last_user_text_excerpt"], "")
+        self.assertEqual(candidate["last_withdrawn_message_id"], "m-100")
+
+    def test_napcat_recall_payload_is_parsed_from_raw_notice(self):
+        plugin = new_plugin()
+        event = SimpleNamespace(
+            unified_msg_origin="group_123",
+            message_obj=SimpleNamespace(
+                raw_message={
+                    "post_type": "notice",
+                    "notice_type": "group_recall",
+                    "group_id": 123,
+                    "user_id": 456,
+                    "operator_id": 789,
+                    "message_id": 10001,
+                },
+            ),
+        )
+
+        payload = plugin._napcat_recall_payload(event)
+
+        self.assertEqual(payload["notice_type"], "group_recall")
+        self.assertEqual(payload["message_id"], "10001")
+        self.assertEqual(payload["group_id"], "123")
+        self.assertEqual(payload["operator_id"], "789")
+
+    def test_observe_user_message_withdrawal_uses_napcat_notice_type_by_default(self):
+        plugin = new_plugin()
+        event = SimpleNamespace(
+            unified_msg_origin="friend_456",
+            raw_message={
+                "post_type": "notice",
+                "notice_type": "friend_recall",
+                "user_id": 456,
+                "message_id": 20002,
+            },
+        )
+
+        result = asyncio.run(plugin.observe_user_message_withdrawal(event))
+
+        self.assertEqual(result["session_key"], "friend_456")
+        self.assertEqual(result["message_id"], "20002")
+        self.assertEqual(result["reason"], "friend_recall")
 
     def test_observe_sticker_usage_stores_metadata_only(self):
         stored = {}

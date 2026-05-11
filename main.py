@@ -300,6 +300,13 @@ INTERNAL_ASSESSOR_LLM_BURST_WAIT_SECONDS = 90.0
 BACKGROUND_POST_RESOURCE_SAMPLE_TTL_SECONDS = 1.0
 BACKGROUND_POST_WORKER_SCALE_MIN_INTERVAL_SECONDS = 2.0
 BACKGROUND_POST_WORKER_SCALE_MAX_INTERVAL_SECONDS = 14.0
+PROACTIVE_SCHEDULER_CANDIDATE_LIMIT = 64
+PROACTIVE_SCHEDULER_CANDIDATE_TTL_SECONDS = 604800.0
+PROACTIVE_SCHEDULER_IDLE_DELAY_SECONDS = 300.0
+PROACTIVE_SCHEDULER_NORMAL_DELAY_SECONDS = 120.0
+PROACTIVE_SCHEDULER_BUSY_DELAY_SECONDS = 240.0
+PROACTIVE_SCHEDULER_MAX_CHECKS_PER_ROUND = 2
+PROACTIVE_SCHEDULER_SESSION_RECHECK_SECONDS = 180.0
 
 
 @dataclass
@@ -310,6 +317,7 @@ class _BackgroundPostJob:
     request_context_text: str
     sequence: int
     observed_at: float
+    input_epoch: int | None = None
     attempts: int = 0
     leased_at: float | None = None
     lease_until: float | None = None
@@ -432,6 +440,7 @@ _REQUIRED_EMOTION_SERVICE_METHODS: tuple[str, ...] = (
     "request_proactive_speech_dispatch",
     "get_realtime_chat_plan",
     "request_realtime_chat_dispatch",
+    "observe_user_message_withdrawal",
     "observe_sticker_usage",
     "get_lifelike_prompt_fragment",
     "observe_lifelike_text",
@@ -495,8 +504,8 @@ def get_emotional_state_plugin(context: Context) -> Any | None:
 @register(
     PLUGIN_NAME,
     "pidan",
-    "Soulful Yearning Lifelike AstrBot Neural Narrative Engine：维护情绪、人格、记忆、氛围和表达节奏的灵澜状态插件",
-    "1.6.0",
+    "Soulful Yearning Lifelike AstrBot Neural Narrative Engine：维护情绪、人格、记忆、氛围和表达节奏的 Sylanne",
+    "1.7.0",
     "",
 )
 class EmotionalStatePlugin(Star):
@@ -552,6 +561,8 @@ class EmotionalStatePlugin(Star):
         self._provider_id_cache: dict[str, tuple[float, str | None]] = {}
         self._last_request_text: dict[str, str] = {}
         self._last_state_injection_diagnostics: dict[str, dict[str, Any]] = {}
+        self._conversation_input_epoch: dict[str, int] = {}
+        self._conversation_pending_response_epochs: dict[str, deque[int]] = {}
         self._background_tasks: set[asyncio.Task[Any]] = set()
         self._background_post_tasks: dict[str, asyncio.Task[Any]] = {}
         self._background_post_queues: dict[str, deque[_BackgroundPostJob]] = {}
@@ -572,6 +583,10 @@ class EmotionalStatePlugin(Star):
         self._internal_assessor_llm_inflight = 0
         self._proactive_dispatch_last_sent: dict[str, float] = {}
         self._proactive_dispatch_audit: dict[str, deque[dict[str, Any]]] = {}
+        self._proactive_candidate_sessions: dict[str, dict[str, Any]] = {}
+        self._proactive_scheduler_locks: dict[str, asyncio.Lock] = {}
+        self._proactive_scheduler_last_checked: dict[str, float] = {}
+        self._proactive_scheduler_task: asyncio.Task[Any] | None = None
         self._realtime_chat_last_sent: dict[str, float] = {}
         self._last_realtime_chat_adaptive_settings: dict[str, dict[str, Any]] = {}
         self._sticker_index_cache: dict[str, Any] = {}
@@ -608,6 +623,17 @@ class EmotionalStatePlugin(Star):
             self._background_post_checkpoint_generation.clear()
         if hasattr(self, "_background_post_checkpoint_locks"):
             self._background_post_checkpoint_locks.clear()
+        scheduler_task = getattr(self, "_proactive_scheduler_task", None)
+        if scheduler_task is not None and not scheduler_task.done():
+            scheduler_task.cancel()
+            await asyncio.gather(scheduler_task, return_exceptions=True)
+        self._proactive_scheduler_task = None
+        if hasattr(self, "_proactive_candidate_sessions"):
+            self._proactive_candidate_sessions.clear()
+        if hasattr(self, "_proactive_scheduler_locks"):
+            self._proactive_scheduler_locks.clear()
+        if hasattr(self, "_proactive_scheduler_last_checked"):
+            self._proactive_scheduler_last_checked.clear()
         self._memory_cache.clear()
         self._psychological_memory_cache.clear()
         self._humanlike_memory_cache.clear()
@@ -628,6 +654,10 @@ class EmotionalStatePlugin(Star):
         self._provider_id_cache.clear()
         self._last_request_text.clear()
         self._last_state_injection_diagnostics.clear()
+        if hasattr(self, "_conversation_input_epoch"):
+            self._conversation_input_epoch.clear()
+        if hasattr(self, "_conversation_pending_response_epochs"):
+            self._conversation_pending_response_epochs.clear()
 
     @filter.on_llm_request()
     async def on_llm_request(
@@ -673,12 +703,23 @@ class EmotionalStatePlugin(Star):
         )
         session_key = identity.conversation_id
         await self._observe_agent_identity(identity, now=self._observed_now())
+        input_epoch = self._bump_conversation_input_epoch(session_key, event=event)
+        self._record_conversation_pending_response_epoch(session_key, input_epoch)
         context_text = self._request_to_text(request)
         self._last_request_text[session_key] = context_text
+        observed_at = self._observed_now()
+        self._register_proactive_candidate_session(
+            event,
+            request=request,
+            identity=identity,
+            context_text=context_text,
+            observed_at=observed_at,
+        )
+        self._maybe_start_proactive_scheduler()
         await self._observe_proactive_dispatch_feedback(
             session_key,
             self._event_text(event) or request.prompt or "",
-            observed_at=self._observed_now(),
+            observed_at=observed_at,
         )
         if self._sticker_learning_enabled():
             observed_stickers = self._extract_sticker_observations_from_event(event)
@@ -705,7 +746,6 @@ class EmotionalStatePlugin(Star):
         if not needs_request_state:
             return
 
-        observed_at = self._observed_now()
         base_persona_profile = await self._persona_profile(event, request)
         personality_drift_state: PersonalityDriftState | None = None
         if personality_drift_enabled:
@@ -1335,6 +1375,16 @@ class EmotionalStatePlugin(Star):
         if not response_text.strip():
             return
         identity = self._agent_identity(event)
+        response_epoch = self._consume_conversation_pending_response_epoch(
+            identity.conversation_id,
+            event,
+        )
+        if self._conversation_reply_is_stale(identity.conversation_id, response_epoch):
+            try:
+                setattr(response, "completion_text", "")
+            except Exception:
+                pass
+            return
         realtime_dispatch_task: asyncio.Task[Any] | None = None
         if self._should_intercept_realtime_chat_response(event, response_text):
             plan = await self.get_realtime_chat_plan(
@@ -1342,20 +1392,27 @@ class EmotionalStatePlugin(Star):
                 text=response_text,
                 session_key=identity.conversation_id,
             )
+            plan["input_epoch"] = response_epoch
             if plan.get("message_parts"):
                 try:
                     setattr(response, "completion_text", "")
                 except Exception:
                     pass
-                realtime_dispatch_task = self._schedule_background_task(
-                    self._send_realtime_chat_plan(
-                        event,
-                        plan,
-                        source="llm_response_intercept",
-                    ),
-                    label="realtime_chat_response_dispatch",
-                )
-                del realtime_dispatch_task
+                if self._conversation_reply_is_stale(
+                    identity.conversation_id,
+                    response_epoch,
+                ):
+                    plan["interrupted_reason"] = "user_interrupted_before_dispatch"
+                else:
+                    realtime_dispatch_task = self._schedule_background_task(
+                        self._send_realtime_chat_plan(
+                            event,
+                            plan,
+                            source="llm_response_intercept",
+                        ),
+                        label="realtime_chat_response_dispatch",
+                    )
+                    del realtime_dispatch_task
         if self._group_atmosphere_modeling_enabled() and self._group_atmosphere_applies(
             identity,
         ):
@@ -1670,6 +1727,7 @@ class EmotionalStatePlugin(Star):
                 request_context_text=request_context_text,
                 sequence=sequence,
                 observed_at=self._observed_now(),
+                input_epoch=self._conversation_response_epoch(session_key, event),
             ),
         )
         queue_limit = max(0, self._cfg_int("background_post_queue_limit", 0))
@@ -2457,6 +2515,8 @@ class EmotionalStatePlugin(Star):
         session_key = job.identity.conversation_id
         if job.sequence in self._background_post_skipped.get(session_key, set()):
             return _BackgroundPostResult(job=job, skipped=True)
+        if self._conversation_reply_is_stale(session_key, job.input_epoch):
+            return _BackgroundPostResult(job=job, skipped=True)
         try:
             base_persona_profile = await self._persona_profile(job.event, None)
             personality_drift_state: PersonalityDriftState | None = None
@@ -2707,6 +2767,7 @@ class EmotionalStatePlugin(Star):
         payload = {
             "sequence": job.sequence,
             "observed_at": job.observed_at,
+            "input_epoch": job.input_epoch,
             "session_key": identity.conversation_id,
             "speaker_id": identity.speaker_id,
             "speaker_name": identity.speaker_name,
@@ -2758,6 +2819,7 @@ class EmotionalStatePlugin(Star):
             request_context_text=str(item.get("request_context_text") or ""),
             sequence=sequence,
             observed_at=self._as_float_value(item.get("observed_at"), self._observed_now()),
+            input_epoch=self._optional_int(item.get("input_epoch")),
             attempts=max(0, int(self._as_float_value(item.get("attempts"), 0))),
             leased_at=self._optional_float(item.get("leased_at")),
             lease_until=self._optional_float(item.get("lease_until")),
@@ -4729,6 +4791,217 @@ class EmotionalStatePlugin(Star):
             "blocked_reason": "",
         }
 
+    def _ensure_proactive_scheduler_state(self) -> None:
+        if not isinstance(getattr(self, "_proactive_candidate_sessions", None), dict):
+            self._proactive_candidate_sessions = {}
+        if not isinstance(getattr(self, "_proactive_scheduler_locks", None), dict):
+            self._proactive_scheduler_locks = {}
+        if not isinstance(getattr(self, "_proactive_scheduler_last_checked", None), dict):
+            self._proactive_scheduler_last_checked = {}
+        if not hasattr(self, "_proactive_scheduler_task"):
+            self._proactive_scheduler_task = None
+
+    def _proactive_scheduler_enabled(self) -> bool:
+        return self._cfg_bool("enable_proactive_speech_scheduler", False)
+
+    def _register_proactive_candidate_session(
+        self,
+        event: AstrMessageEvent,
+        *,
+        request: ProviderRequest | None = None,
+        identity: ConversationIdentity | None = None,
+        context_text: str = "",
+        observed_at: float | None = None,
+    ) -> None:
+        self._ensure_proactive_scheduler_state()
+        identity = identity or self._agent_identity(event, request)
+        session_key = identity.conversation_id
+        origin = self._proactive_unified_msg_origin(event)
+        if not session_key or not origin:
+            return
+        now = self._observed_now() if observed_at is None else float(observed_at)
+        user_text = self._event_text(event) or str(getattr(request, "prompt", "") or "")
+        candidate = {
+            "schema_version": "astrbot.proactive_candidate_session.v1",
+            "session_key": session_key,
+            "unified_msg_origin": origin,
+            "last_seen_at": now,
+            "last_user_text_excerpt": self._clip_one_line(user_text, 240),
+            "candidate_context_excerpt": self._clip(context_text, 900),
+            "speaker_id": identity.speaker_id or "",
+            "speaker_name": identity.speaker_name or "",
+            "group_id": identity.group_id or "",
+            "platform_id": identity.platform_id or "",
+        }
+        self._proactive_candidate_sessions[session_key] = candidate
+        self._prune_proactive_candidate_sessions(now=now)
+
+    def _prune_proactive_candidate_sessions(self, *, now: float | None = None) -> None:
+        self._ensure_proactive_scheduler_state()
+        now = self._observed_now() if now is None else float(now)
+        sessions = self._proactive_candidate_sessions
+        stale_cutoff = now - PROACTIVE_SCHEDULER_CANDIDATE_TTL_SECONDS
+        stale_keys = [
+            key
+            for key, candidate in sessions.items()
+            if self._as_float_value(candidate.get("last_seen_at"), 0.0) < stale_cutoff
+        ]
+        for key in stale_keys:
+            sessions.pop(key, None)
+            self._proactive_scheduler_locks.pop(key, None)
+            self._proactive_scheduler_last_checked.pop(key, None)
+        if len(sessions) <= PROACTIVE_SCHEDULER_CANDIDATE_LIMIT:
+            return
+        ordered = sorted(
+            sessions.items(),
+            key=lambda item: self._as_float_value(item[1].get("last_seen_at"), 0.0),
+            reverse=True,
+        )
+        keep = {key for key, _ in ordered[:PROACTIVE_SCHEDULER_CANDIDATE_LIMIT]}
+        for key in list(sessions):
+            if key not in keep:
+                sessions.pop(key, None)
+                self._proactive_scheduler_locks.pop(key, None)
+                self._proactive_scheduler_last_checked.pop(key, None)
+
+    def _maybe_start_proactive_scheduler(self) -> None:
+        self._ensure_proactive_scheduler_state()
+        if not self._proactive_scheduler_enabled() or getattr(self, "_terminating", False):
+            return
+        task = self._proactive_scheduler_task
+        if task is not None and not task.done():
+            return
+        self._proactive_scheduler_task = self._schedule_background_task(
+            self._proactive_scheduler_loop(),
+            label="proactive_speech_scheduler",
+        )
+
+    async def _proactive_scheduler_loop(self) -> None:
+        await asyncio.sleep(PROACTIVE_SCHEDULER_NORMAL_DELAY_SECONDS)
+        while self._proactive_scheduler_enabled() and not getattr(self, "_terminating", False):
+            result = await self._run_proactive_scheduler_once()
+            await asyncio.sleep(self._proactive_scheduler_next_delay(result))
+
+    def _proactive_scheduler_next_delay(self, result: dict[str, Any]) -> float:
+        if result.get("pressure_blocked"):
+            return PROACTIVE_SCHEDULER_BUSY_DELAY_SECONDS
+        if int(result.get("checked") or 0) <= 0:
+            return PROACTIVE_SCHEDULER_IDLE_DELAY_SECONDS
+        return PROACTIVE_SCHEDULER_NORMAL_DELAY_SECONDS
+
+    async def _run_proactive_scheduler_once(self) -> dict[str, Any]:
+        self._ensure_proactive_scheduler_state()
+        if not self._proactive_scheduler_enabled():
+            return {
+                "schema_version": "astrbot.proactive_scheduler_result.v1",
+                "enabled": False,
+                "checked": 0,
+                "dispatched": 0,
+                "skipped": 0,
+                "reason": "scheduler_disabled",
+            }
+        now = self._observed_now()
+        self._prune_proactive_candidate_sessions(now=now)
+        pressure = self._background_post_resource_pressure()
+        if pressure.get("level") == "critical":
+            return {
+                "schema_version": "astrbot.proactive_scheduler_result.v1",
+                "enabled": True,
+                "checked": 0,
+                "dispatched": 0,
+                "skipped": len(self._proactive_candidate_sessions),
+                "pressure": pressure,
+                "pressure_blocked": True,
+                "reason": "environment_pressure_critical",
+            }
+        max_checks = PROACTIVE_SCHEDULER_MAX_CHECKS_PER_ROUND
+        if pressure.get("level") in {"high", "elevated", "unknown"}:
+            max_checks = 1
+        candidates = sorted(
+            self._proactive_candidate_sessions.values(),
+            key=lambda item: self._as_float_value(item.get("last_seen_at"), 0.0),
+            reverse=True,
+        )
+        checked = 0
+        dispatched = 0
+        skipped = 0
+        diagnostics: list[dict[str, Any]] = []
+        for candidate in candidates:
+            if checked >= max_checks:
+                break
+            session_key = str(candidate.get("session_key") or "")
+            origin = str(candidate.get("unified_msg_origin") or "")
+            if not session_key or not origin:
+                skipped += 1
+                continue
+            last_checked = self._proactive_scheduler_last_checked.get(session_key)
+            if (
+                last_checked is not None
+                and now - float(last_checked) < PROACTIVE_SCHEDULER_SESSION_RECHECK_SECONDS
+            ):
+                skipped += 1
+                continue
+            lock = self._proactive_scheduler_locks.setdefault(session_key, asyncio.Lock())
+            if lock.locked():
+                skipped += 1
+                continue
+            async with lock:
+                self._proactive_scheduler_last_checked[session_key] = now
+                event = self._event_from_proactive_candidate(candidate)
+                result = await self.request_proactive_speech_dispatch(
+                    event,
+                    session_key=session_key,
+                    candidate_context=self._proactive_scheduler_candidate_context(candidate),
+                    use_llm=True,
+                    dry_run=not self._cfg_bool("enable_proactive_speech_dispatch", False),
+                    force=False,
+                )
+            checked += 1
+            if result.get("sent"):
+                dispatched += 1
+            diagnostics.append(
+                {
+                    "session_key": session_key,
+                    "sent": bool(result.get("sent")),
+                    "blocked_reason": str(result.get("blocked_reason") or ""),
+                },
+            )
+        return {
+            "schema_version": "astrbot.proactive_scheduler_result.v1",
+            "enabled": True,
+            "checked": checked,
+            "dispatched": dispatched,
+            "skipped": skipped,
+            "pressure": pressure,
+            "diagnostics": diagnostics,
+        }
+
+    def _event_from_proactive_candidate(self, candidate: dict[str, Any]) -> _RecoveredBackgroundEvent:
+        return _RecoveredBackgroundEvent(
+            session_key=str(candidate.get("unified_msg_origin") or candidate.get("session_key") or ""),
+            message=str(candidate.get("last_user_text_excerpt") or ""),
+            speaker_id=self._clean_optional_text(candidate.get("speaker_id")),
+            speaker_name=self._clean_optional_text(candidate.get("speaker_name")),
+            group_id=self._clean_optional_text(candidate.get("group_id")),
+            platform_id=self._clean_optional_text(candidate.get("platform_id")),
+        )
+
+    def _proactive_scheduler_candidate_context(self, candidate: dict[str, Any]) -> str:
+        parts = [
+            "后台主动聊天调度器正在判断是否应该主动开口。",
+            "不要使用预设话题库；只能基于状态模型、近期上下文、双方需要、关系修复或轻松调皮信号决定。",
+        ]
+        last_user_text = str(candidate.get("last_user_text_excerpt") or "").strip()
+        context_excerpt = str(candidate.get("candidate_context_excerpt") or "").strip()
+        if last_user_text:
+            parts.append(f"最近用户消息：{last_user_text}")
+        if context_excerpt:
+            parts.append(f"最近请求上下文：{self._clip(context_excerpt, 700)}")
+        speaker_name = str(candidate.get("speaker_name") or "").strip()
+        if speaker_name:
+            parts.append(f"最近说话者：{speaker_name}")
+        return "\n".join(parts)
+
     async def get_realtime_chat_plan(
         self,
         event_or_session: AstrMessageEvent | str | None = None,
@@ -4886,6 +5159,57 @@ class EmotionalStatePlugin(Star):
             "dry_run": False,
             "blocked_reason": "",
             "send_result": send_result,
+        }
+
+    async def observe_user_message_withdrawal(
+        self,
+        event_or_session: AstrMessageEvent | str | None = None,
+        *,
+        request: ProviderRequest | None = None,
+        session_key: str | None = None,
+        message_id: str = "",
+        reason: str = "withdrawn",
+        observed_at: float | None = None,
+    ) -> dict[str, Any]:
+        """Public API: mark a user recall/withdrawal so pending output stops."""
+        recall = self._napcat_recall_payload(event_or_session)
+        resolved_session = self._resolve_public_session_key(
+            event_or_session,
+            request=request,
+            session_key=session_key,
+        )
+        if not session_key and recall.get("group_id"):
+            resolved_session = str(
+                getattr(event_or_session, "unified_msg_origin", "") or resolved_session,
+            )
+        final_message_id = str(message_id or recall.get("message_id") or "")
+        final_reason = str(
+            recall.get("notice_type") if reason == "withdrawn" and recall else reason or "withdrawn",
+        )
+        epoch = self._bump_conversation_input_epoch(resolved_session)
+        now = self._observed_now() if observed_at is None else float(observed_at)
+        if isinstance(getattr(self, "_proactive_candidate_sessions", None), dict):
+            candidate = self._proactive_candidate_sessions.get(resolved_session)
+            if isinstance(candidate, dict):
+                candidate["last_user_text_excerpt"] = ""
+                candidate["candidate_context_excerpt"] = ""
+                candidate["last_withdrawn_message_id"] = final_message_id
+                candidate["last_withdrawn_at"] = now
+                candidate["last_withdrawal_reason"] = final_reason
+                if recall:
+                    candidate["last_withdrawal_notice"] = recall
+        if isinstance(getattr(self, "_last_request_text", None), dict):
+            self._last_request_text.pop(resolved_session, None)
+        return {
+            "schema_version": "astrbot.user_message_withdrawal.v1",
+            "kind": "user_message_withdrawal",
+            "session_key": resolved_session,
+            "message_id": final_message_id,
+            "reason": final_reason,
+            "notice": recall,
+            "input_epoch": epoch,
+            "observed_at": now,
+            "stale_output_policy": "stop_pending_realtime_parts_and_drop_late_llm_response",
         }
 
     async def observe_sticker_usage(
@@ -5386,10 +5710,19 @@ class EmotionalStatePlugin(Star):
             raise RuntimeError("context.send_message is not available")
         parts = list(plan.get("message_parts") or [])
         results: list[dict[str, Any]] = []
+        session_key = str(plan.get("session_key") or self._resolve_public_session_key(event_or_session))
+        input_epoch = self._optional_int(plan.get("input_epoch"))
+        interrupted_reason = ""
         for part in parts:
+            if self._conversation_reply_is_stale(session_key, input_epoch):
+                interrupted_reason = "user_interrupted"
+                break
             delay = max(0.0, self._as_float_value(part.get("delay_before_seconds"), 0.0))
             if delay > 0:
                 await asyncio.sleep(delay)
+            if self._conversation_reply_is_stale(session_key, input_epoch):
+                interrupted_reason = "user_interrupted"
+                break
             text = str(part.get("text") or "").strip()
             if not text:
                 continue
@@ -5405,7 +5738,10 @@ class EmotionalStatePlugin(Star):
             )
         sticker_result = None
         sticker = plan.get("sticker") if isinstance(plan.get("sticker"), dict) else {}
-        if sticker.get("should_send"):
+        if sticker.get("should_send") and not self._conversation_reply_is_stale(
+            session_key,
+            input_epoch,
+        ):
             candidate = sticker.get("candidate")
             if isinstance(candidate, dict):
                 judgement = await self._judge_sticker_consistency(
@@ -5428,9 +5764,8 @@ class EmotionalStatePlugin(Star):
                         "blocked_reason": "llm_rejected",
                         "judgement": judgement,
                     }
-        session_key = str(plan.get("session_key") or self._resolve_public_session_key(event_or_session))
         self._realtime_chat_last_sent_cache()[session_key] = self._observed_now()
-        return {
+        payload = {
             "api": "context.send_message",
             "source": source,
             "unified_msg_origin": origin,
@@ -5438,6 +5773,9 @@ class EmotionalStatePlugin(Star):
             "results": results,
             "sticker_result": self._bounded_scalar_or_summary(sticker_result),
         }
+        if interrupted_reason:
+            payload["interrupted_reason"] = interrupted_reason
+        return payload
 
     async def _judge_sticker_consistency(
         self,
@@ -5656,6 +5994,130 @@ class EmotionalStatePlugin(Star):
             return False
         session_key = self._session_key(event)
         return not self._realtime_chat_on_cooldown(session_key)
+
+    def _ensure_conversation_epoch_state(self) -> None:
+        if not isinstance(getattr(self, "_conversation_input_epoch", None), dict):
+            self._conversation_input_epoch = {}
+        if not isinstance(getattr(self, "_conversation_pending_response_epochs", None), dict):
+            self._conversation_pending_response_epochs = {}
+
+    def _bump_conversation_input_epoch(
+        self,
+        session_key: str,
+        *,
+        event: AstrMessageEvent | None = None,
+    ) -> int:
+        self._ensure_conversation_epoch_state()
+        key = str(session_key or "global")
+        current = max(0, int(self._conversation_input_epoch.get(key) or 0))
+        self._conversation_input_epoch[key] = current + 1
+        if event is not None:
+            try:
+                setattr(event, "_sylanne_input_epoch", current + 1)
+            except Exception:
+                pass
+        return current + 1
+
+    def _conversation_response_epoch(
+        self,
+        session_key: str,
+        event: AstrMessageEvent | None = None,
+    ) -> int | None:
+        event_epoch = self._optional_int(
+            getattr(event, "_sylanne_input_epoch", None) if event is not None else None,
+        )
+        if event_epoch is not None:
+            return event_epoch
+        self._ensure_conversation_epoch_state()
+        return max(0, int(self._conversation_input_epoch.get(str(session_key or "global")) or 0))
+
+    def _record_conversation_pending_response_epoch(
+        self,
+        session_key: str,
+        input_epoch: int | None,
+    ) -> None:
+        if input_epoch is None:
+            return
+        self._ensure_conversation_epoch_state()
+        key = str(session_key or "global")
+        pending = self._conversation_pending_response_epochs.setdefault(key, deque(maxlen=12))
+        pending.append(int(input_epoch))
+
+    def _consume_conversation_pending_response_epoch(
+        self,
+        session_key: str,
+        event: AstrMessageEvent | None = None,
+    ) -> int | None:
+        event_epoch = self._optional_int(
+            getattr(event, "_sylanne_input_epoch", None) if event is not None else None,
+        )
+        self._ensure_conversation_epoch_state()
+        key = str(session_key or "global")
+        pending = self._conversation_pending_response_epochs.get(key)
+        if pending:
+            epoch = pending.popleft()
+            if not pending:
+                self._conversation_pending_response_epochs.pop(key, None)
+            return int(epoch)
+        if event_epoch is not None:
+            return event_epoch
+        return self._conversation_response_epoch(key, event)
+
+    def _conversation_reply_is_stale(
+        self,
+        session_key: str,
+        input_epoch: int | None,
+    ) -> bool:
+        if input_epoch is None:
+            return False
+        self._ensure_conversation_epoch_state()
+        current = max(0, int(self._conversation_input_epoch.get(str(session_key or "global")) or 0))
+        return current > int(input_epoch)
+
+    def _napcat_recall_payload(
+        self,
+        event_or_session: AstrMessageEvent | str | None,
+    ) -> dict[str, str]:
+        if not self._looks_like_event(event_or_session):
+            return {}
+        raw = self._raw_platform_payload(event_or_session)
+        if not isinstance(raw, dict):
+            return {}
+        post_type = str(raw.get("post_type") or "").strip()
+        notice_type = str(raw.get("notice_type") or "").strip()
+        if post_type and post_type != "notice":
+            return {}
+        if notice_type not in {"friend_recall", "group_recall"}:
+            return {}
+        return {
+            "platform": "napcat_onebot",
+            "post_type": post_type or "notice",
+            "notice_type": notice_type,
+            "message_id": str(raw.get("message_id") or ""),
+            "user_id": str(raw.get("user_id") or ""),
+            "group_id": str(raw.get("group_id") or ""),
+            "operator_id": str(raw.get("operator_id") or ""),
+        }
+
+    def _raw_platform_payload(self, event: AstrMessageEvent) -> Any:
+        candidates = [
+            getattr(event, "raw_message", None),
+            getattr(event, "raw_event", None),
+            getattr(event, "raw", None),
+        ]
+        message_obj = getattr(event, "message_obj", None)
+        if message_obj is not None:
+            candidates.extend(
+                [
+                    getattr(message_obj, "raw_message", None),
+                    getattr(message_obj, "raw_event", None),
+                    getattr(message_obj, "raw", None),
+                ],
+            )
+        for candidate in candidates:
+            if isinstance(candidate, dict):
+                return candidate
+        return None
 
     def _realtime_chat_on_cooldown(self, session_key: str) -> bool:
         adaptive = getattr(self, "_last_realtime_chat_adaptive_settings", {}).get(
@@ -10399,6 +10861,14 @@ class EmotionalStatePlugin(Star):
             return None
         try:
             return float(value)
+        except (TypeError, ValueError):
+            return None
+
+    def _optional_int(self, value: Any) -> int | None:
+        if value is None or value == "":
+            return None
+        try:
+            return int(value)
         except (TypeError, ValueError):
             return None
 

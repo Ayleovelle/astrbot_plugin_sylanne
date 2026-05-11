@@ -170,6 +170,7 @@ class ConfigSchemaContractTests(unittest.TestCase):
             "use_llm_assessor": ("bool", True),
             "assessment_timing": ("string", "post"),
             "enable_proactive_speech_dispatch": ("bool", False),
+            "enable_proactive_speech_scheduler": ("bool", False),
             "background_post_queue_limit": ("int", 0),
             "enable_dynamic_background_workers": ("bool", False),
             "background_post_queue_checkpoint_enabled": ("bool", True),
