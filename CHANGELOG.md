@@ -2,6 +2,30 @@
 
 本文件用于 AstrBot 插件市场/管理页展示更新内容。更完整的设计说明、公式推导、测试矩阵和维护手册见 `README.md`。
 
+## 1.8.2
+
+发布日期：2026-05-11
+
+### 修复
+
+- 修复即时聊天分条接管主回复时可能触发 AstrBot “消息为空，跳过发送阶段”的问题：主回复文本会完整保留为上下文，插件只通过 `stop_event()` 阻断默认发送并接管分条发送。
+- 修复用户在分条发送前或发送中插话后，下一轮 LLM 可能不知道上一轮话还没说完的问题；已发送短句和未发送摘要会作为短上下文注入下一轮请求。
+- 修复过期回复、乱序回复和撤回打断时的旧回复处理：旧回复不再被清空，而是记录为低 token 的对话断点。
+- 强制二次拆分过长分条，避免 LLM 计划里出现“看似分段、实际长篇”的破碎长消息。
+- 未知平台或 WebUI/dashboard 流式响应不再被插件重放，避免浏览器端重复发送。
+
+### 文档
+
+- README 顶部吉祥物说明移动到图片下方，减少 GitHub/手机端排版错位。
+
+### 验证
+
+- `python -m pytest -q tests/test_astrbot_lifecycle.py`：101 项通过，5 个 subtests 通过。
+- `python -m pytest -q tests/test_package_plugin.py tests/test_remote_smoke_contract.py`：38 项通过，379 个 subtests 通过。
+- `python -m py_compile main.py tests/test_astrbot_lifecycle.py realtime_chat_engine.py` 通过。
+- `node scripts/plugin_zip_preflight.js dist/astrbot_plugin_sylanne.zip astrbot_plugin_sylanne` 通过。
+- 远程短烟测通过：AstrBot `4.24.2`，`Sylanne 1.8.1` 激活，失败插件为空，LivingMemory 未被删除。发布 `1.8.2` 时需重新上传并复测版本断言。
+
 ## 1.8.1
 
 发布日期：2026-05-11
