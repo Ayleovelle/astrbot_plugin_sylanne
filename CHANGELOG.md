@@ -2,6 +2,22 @@
 
 本文件用于 AstrBot 插件市场/管理页展示更新内容。更完整的设计说明、公式推导、测试矩阵和维护手册见 `README.md`。
 
+## 1.8.1
+
+发布日期：2026-05-11
+
+### 修复
+
+- 修复即时聊天分条发送后，`completion_text` 被接管导致上一轮 assistant 回复可能没有进入 AstrBot 普通 LLM 历史，从而在用户继续追问“他们、刚才、那个”等指代时发生上下文丢失的问题。
+- 分条发送完成后会保留一次性 assistant 历史影子；用户在分条发送中途插话时，会把已发送短句作为活跃派发摘要临时注入下一轮请求。
+- 相关摘要注入后立即消费，避免 token 持续膨胀。
+
+### 验证
+
+- `python -m pytest -q tests/test_astrbot_lifecycle.py`：95 项通过，5 个 subtests 通过。
+- `python -m json.tool _conf_schema.json` 通过。
+- `python -m py_compile main.py tests/test_astrbot_lifecycle.py` 通过。
+
 ## 1.8.0
 
 发布日期：2026-05-11

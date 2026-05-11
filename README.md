@@ -2,7 +2,7 @@
 
 > <span style="font-size: 1.08em;"><strong>Soulful Yearning Lifelike AstrBot Neural Narrative Engine</strong>。她维护的不只是“情绪标签”，而是情绪、人格、记忆、氛围、主动性和表达节奏交织成的长期状态。</span>
 
-![版本 1.8.0](https://img.shields.io/badge/version-1.8.0-blue)
+![版本 1.8.1](https://img.shields.io/badge/version-1.8.1-blue)
 ![AstrBot >=4.9.2,<5.0.0](https://img.shields.io/badge/AstrBot-%3E%3D4.9.2%2C%3C5.0.0-green)
 ![Python 3.10+](https://img.shields.io/badge/Python-3.10%2B-yellow)
 ![协议 astrbot.emotion_state.v2](https://img.shields.io/badge/schema-astrbot.emotion__state.v2-purple)
@@ -38,7 +38,7 @@
 
 <br clear="right">
 
-`1.8.0` 是 `1.7.x` 之后的小功能版：主动聊天后台闭环、用户插话中断、分条发送中途过期检查、NapCat/OneBot 撤回接入和默认阻断契约全部保留；本版重点加入“学习用户说话节奏来决定分段策略”，并修正长回复被硬截成 `...` 的问题。
+`1.8.1` 是 `1.8.0` 之后的 bug 修复版：保留用户说话节奏学习、即时聊天自适应分段和长回复不省略能力，并修复分条发送接管后可能导致下一轮代词指代断裂的上下文问题。
 
 | 能力 | 作用 |
 | --- | --- |
@@ -74,6 +74,7 @@
 | 主题 | 内容 |
 | --- | --- |
 | [当前版本与兼容范围](#当前版本与兼容范围) | 插件版本、AstrBot 版本、Python 要求、许可证和发布状态。 |
+| [1.8.1 bug 修复发布记录](#181-bug-修复发布记录) | 修复即时聊天分条接管后的 assistant 上下文丢失。 |
 | [1.8.0 小功能发布记录](#180-小功能发布记录) | 学习用户说话节奏，自适应即时聊天分段，并避免长回复静默省略。 |
 | [项目定位](#项目定位) | 为什么本插件不是普通的提示词人设增强。 |
 | [核心能力](#核心能力总览) | 7 维情绪、人格建模、真实时间记忆、关系修复、公共 API。 |
@@ -102,15 +103,29 @@
 | --- | --- |
 | 插件目录名 | `astrbot_plugin_sylanne` |
 | 显示名 | `Sylanne` |
-| 当前版本 | `1.8.0` |
+| 当前版本 | `1.8.1` |
 | AstrBot 版本 | `>=4.9.2,<5.0.0` |
 | Python | `3.10+` |
 | 许可证 | `GPL-3.0-or-later` |
 | 运行时第三方依赖 | 当前无额外依赖，见 `requirements.txt` |
 
-`1.8.0` 在 `1.7.x` 主动聊天闭环和默认阻断契约基础上扩展即时聊天表达层：默认仍不主动发送，配置者同时开启 `enable_proactive_speech_scheduler=true` 与 `enable_proactive_speech_dispatch=true` 后，她才会从最近可触达会话中选择候选，结合情绪、群聊氛围、双方需要、冷却、上下文证据和 LLM 话题裁决，请求 AstrBot 主动发送。即时聊天分条发送会监听用户插话；NapCat/OneBot 撤回会推进会话 epoch 并让旧输出自然过期。核心情绪、回复后后台评估（post）、`group_atmosphere_state`、`humanlike_state`、`lifelike_learning_state`、`personality_drift_state`、即时聊天节奏和欺骗/操控/逃责类动作阻断默认自动运行；道德修复、瑕疵模拟、心理筛查等实验/维护模块仍由配置者显式打开。
+`1.8.1` 在 `1.8.0` 的即时聊天表达层基础上修复上下文保留问题：默认仍不主动发送，配置者同时开启 `enable_proactive_speech_scheduler=true` 与 `enable_proactive_speech_dispatch=true` 后，她才会从最近可触达会话中选择候选，结合情绪、群聊氛围、双方需要、冷却、上下文证据和 LLM 话题裁决，请求 AstrBot 主动发送。即时聊天分条发送会监听用户插话；NapCat/OneBot 撤回会推进会话 epoch 并让旧输出自然过期。核心情绪、回复后后台评估（post）、`group_atmosphere_state`、`humanlike_state`、`lifelike_learning_state`、`personality_drift_state`、即时聊天节奏和欺骗/操控/逃责类动作阻断默认自动运行；道德修复、瑕疵模拟、心理筛查等实验/维护模块仍由配置者显式打开。
 
 发布包会包含运行代码、README、CHANGELOG、LICENSE、配置结构（schema）、docs 和 `docs/assets/` 中的聚合图表；不会包含 `tests/`、`scripts/`、`literature_kb/`、`personality_literature_kb/`、`psychological_literature_kb/`、`humanlike_agent_literature_kb/`、`raw/`、`output/`、`dist/` 等开发、研究、原始样本或缓存目录。
+
+### 1.8.1 bug 修复发布记录
+
+`v1.8.1` 合并在 `main` 上，对外安装版本由 `metadata.yaml` 和 `main.py @register(...)` 共同声明为 `1.8.1`。本版按版本规则提升第三位版本号：只修复即时聊天分条接管后的上下文丢失，不改变公共 API 版本。
+
+当前版本的主要变化：
+
+| 类别 | 结果 |
+| --- | --- |
+| 即时聊天历史影子 | 分条接管并实际发送后，保留一次性 assistant 历史影子，下一轮临时注入短上下文，防止“他们、刚才、那个”等指代断裂。 |
+| 插话中的活跃摘要 | 用户在分条发送中途插话时，会把已经发出的短句作为活跃派发摘要注入新请求，让 bot 接住当前话题。 |
+| token 控制 | 历史影子和活跃摘要都是短文本、一次性消费，不把长回复持续塞回 prompt。 |
+| 验证 | `tests/test_astrbot_lifecycle.py` 为 95 项通过，5 个 subtests 通过；`py_compile` 和 `_conf_schema.json` 校验通过。 |
+| 公开契约 | 插件版本为 `1.8.1`；公共 API 版本仍为 `1.0`，schema 仍保持 `astrbot.emotion_state.v2` 等版本化契约。 |
 
 ### 1.8.0 小功能发布记录
 
@@ -2812,7 +2827,7 @@ $env:ASTRBOT_EXPECT_PLUGIN = "astrbot_plugin_sylanne"
 脚本会在输出 JSON 里写出 `expectedPluginRuntime`，包含插件列表 API 中返回的 `version`、`displayName`、`activated`、`author`、`astrbotVersion` 等只读字段。若目标插件存在但 `activated=false`，脚本会失败退出。需要把版本和显示名也作为硬断言时，可以额外设置：
 
 ```powershell
-$env:ASTRBOT_EXPECT_PLUGIN_VERSION = "1.8.0"
+$env:ASTRBOT_EXPECT_PLUGIN_VERSION = "1.8.1"
 $env:ASTRBOT_EXPECT_PLUGIN_DISPLAY_NAME = "Sylanne"
 & $node scripts\remote_smoke_playwright.js
 ```
@@ -3031,7 +3046,7 @@ inject_state = false
 humanlike_memory_write_enabled = true
 ```
 
-拟人状态默认自动运行。若没有看到 `humanlike_state_at_write`，优先确认插件是否为 `1.8.0` 或更新版本、`humanlike_memory_write_enabled=true`，以及调用方是否保留了完整记忆载荷。
+拟人状态默认自动运行。若没有看到 `humanlike_state_at_write`，优先确认插件是否为 `1.8.1` 或更新版本、`humanlike_memory_write_enabled=true`，以及调用方是否保留了完整记忆载荷。
 
 ### 拟人状态没有生效
 
