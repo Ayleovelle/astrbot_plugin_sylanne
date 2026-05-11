@@ -311,6 +311,9 @@ INTERRUPTED_REPLY_BREAKPOINT_LIMIT = 4
 INTERRUPTED_REPLY_INJECTION_MAX_ITEMS = 1
 INTERRUPTED_REPLY_INJECTION_MAX_CHARS = 360
 INTERRUPTED_REPLY_LOCAL_MAX_CHARS = 4000
+REALTIME_ASSISTANT_HISTORY_LIMIT = 3
+REALTIME_ASSISTANT_HISTORY_INJECTION_MAX_CHARS = 900
+REALTIME_ASSISTANT_HISTORY_EXCERPT_CHARS = 720
 
 
 @dataclass
@@ -568,6 +571,8 @@ class EmotionalStatePlugin(Star):
         self._conversation_input_epoch: dict[str, int] = {}
         self._conversation_pending_response_epochs: dict[str, deque[int]] = {}
         self._interrupted_reply_breakpoints: dict[str, deque[dict[str, Any]]] = {}
+        self._realtime_assistant_history_shadows: dict[str, deque[dict[str, Any]]] = {}
+        self._realtime_chat_active_dispatches: dict[str, dict[str, Any]] = {}
         self._background_tasks: set[asyncio.Task[Any]] = set()
         self._background_post_tasks: dict[str, asyncio.Task[Any]] = {}
         self._background_post_queues: dict[str, deque[_BackgroundPostJob]] = {}
@@ -665,6 +670,10 @@ class EmotionalStatePlugin(Star):
             self._conversation_pending_response_epochs.clear()
         if hasattr(self, "_interrupted_reply_breakpoints"):
             self._interrupted_reply_breakpoints.clear()
+        if hasattr(self, "_realtime_assistant_history_shadows"):
+            self._realtime_assistant_history_shadows.clear()
+        if hasattr(self, "_realtime_chat_active_dispatches"):
+            self._realtime_chat_active_dispatches.clear()
 
     @filter.on_llm_request()
     async def on_llm_request(
@@ -751,6 +760,16 @@ class EmotionalStatePlugin(Star):
             or realtime_chat_enabled
         )
         if not needs_request_state:
+            self._append_realtime_chat_active_dispatch_if_any(
+                request,
+                session_key,
+                budget=None,
+            )
+            self._append_realtime_assistant_history_shadow_if_any(
+                request,
+                session_key,
+                budget=None,
+            )
             self._append_interrupted_reply_breakpoint_if_any(
                 request,
                 session_key,
@@ -1110,6 +1129,16 @@ class EmotionalStatePlugin(Star):
                 session_key,
                 request,
             )
+            self._append_realtime_chat_active_dispatch_if_any(
+                request,
+                session_key,
+                budget=injection_budget,
+            )
+            self._append_realtime_assistant_history_shadow_if_any(
+                request,
+                session_key,
+                budget=injection_budget,
+            )
             self._append_interrupted_reply_breakpoint_if_any(
                 request,
                 session_key,
@@ -1121,6 +1150,16 @@ class EmotionalStatePlugin(Star):
                 budget=injection_budget,
             )
         else:
+            self._append_realtime_chat_active_dispatch_if_any(
+                request,
+                session_key,
+                budget=None,
+            )
+            self._append_realtime_assistant_history_shadow_if_any(
+                request,
+                session_key,
+                budget=None,
+            )
             self._append_interrupted_reply_breakpoint_if_any(
                 request,
                 session_key,
@@ -1441,6 +1480,13 @@ class EmotionalStatePlugin(Star):
                         message_parts=plan.get("message_parts"),
                     )
                 else:
+                    self._record_realtime_assistant_history_shadow(
+                        identity.conversation_id,
+                        full_text=response_text,
+                        input_epoch=response_epoch,
+                        message_parts=plan.get("message_parts"),
+                        source="llm_response_intercept",
+                    )
                     realtime_dispatch_task = self._schedule_background_task(
                         self._send_realtime_chat_plan(
                             event,
@@ -5753,29 +5799,45 @@ class EmotionalStatePlugin(Star):
         session_key = str(plan.get("session_key") or self._resolve_public_session_key(event_or_session))
         input_epoch = self._optional_int(plan.get("input_epoch"))
         interrupted_reason = ""
-        for part in parts:
-            if self._conversation_reply_is_stale(session_key, input_epoch):
-                interrupted_reason = "user_interrupted"
-                break
-            delay = max(0.0, self._as_float_value(part.get("delay_before_seconds"), 0.0))
-            if delay > 0:
-                await asyncio.sleep(delay)
-            if self._conversation_reply_is_stale(session_key, input_epoch):
-                interrupted_reason = "user_interrupted"
-                break
-            text = str(part.get("text") or "").strip()
-            if not text:
-                continue
-            message = self._build_astrbot_message_chain(text)
-            result = await send_message(origin, message)
-            results.append(
-                {
-                    "index": part.get("index"),
-                    "text_chars": len(text),
-                    "message_type": type(message).__name__,
-                    "result": self._bounded_scalar_or_summary(result),
-                },
-            )
+        full_text = " ".join(
+            str(part.get("text") or "").strip()
+            for part in parts
+            if str(part.get("text") or "").strip()
+        )
+        self._start_realtime_chat_active_dispatch(
+            session_key,
+            input_epoch=input_epoch,
+            full_text=full_text,
+            source=source,
+        )
+        try:
+            for part in parts:
+                if self._conversation_reply_is_stale(session_key, input_epoch):
+                    interrupted_reason = "user_interrupted"
+                    break
+                delay = max(0.0, self._as_float_value(part.get("delay_before_seconds"), 0.0))
+                if delay > 0:
+                    await asyncio.sleep(delay)
+                if self._conversation_reply_is_stale(session_key, input_epoch):
+                    interrupted_reason = "user_interrupted"
+                    break
+                text = str(part.get("text") or "").strip()
+                if not text:
+                    continue
+                message = self._build_astrbot_message_chain(text)
+                result = await send_message(origin, message)
+                self._append_realtime_chat_active_dispatch_part(session_key, text)
+                results.append(
+                    {
+                        "index": part.get("index"),
+                        "text_chars": len(text),
+                        "message_type": type(message).__name__,
+                        "result": self._bounded_scalar_or_summary(result),
+                    },
+                )
+        finally:
+            if not interrupted_reason:
+                self._finish_realtime_chat_active_dispatch(session_key)
         sticker_result = None
         sticker = plan.get("sticker") if isinstance(plan.get("sticker"), dict) else {}
         if sticker.get("should_send") and not self._conversation_reply_is_stale(
@@ -5818,6 +5880,7 @@ class EmotionalStatePlugin(Star):
                 message_parts=parts,
                 source=source,
             )
+            self._finish_realtime_chat_active_dispatch(session_key)
         self._realtime_chat_last_sent_cache()[session_key] = self._observed_now()
         payload = {
             "api": "context.send_message",
@@ -6266,6 +6329,203 @@ class EmotionalStatePlugin(Star):
             "latest_sent_count": int(latest.get("sent_count") or 0) if latest else 0,
             "latest_unsent_count": int(latest.get("unsent_count") or 0) if latest else 0,
         }
+
+    def _realtime_assistant_history_shadow_cache(
+        self,
+    ) -> dict[str, deque[dict[str, Any]]]:
+        cache = getattr(self, "_realtime_assistant_history_shadows", None)
+        if not isinstance(cache, dict):
+            cache = {}
+            self._realtime_assistant_history_shadows = cache
+        return cache
+
+    def _record_realtime_assistant_history_shadow(
+        self,
+        session_key: str,
+        *,
+        full_text: str,
+        input_epoch: int | None,
+        message_parts: Sequence[dict[str, Any]] | None = None,
+        source: str = "llm_response_intercept",
+    ) -> None:
+        text = str(full_text or "").strip()
+        if not text:
+            return
+        key = str(session_key or "global")
+        parts = [
+            str(part.get("text") or "").strip()
+            for part in (message_parts or [])
+            if str(part.get("text") or "").strip()
+        ]
+        entry = {
+            "schema_version": "astrbot.realtime_assistant_history_shadow.v1",
+            "kind": "realtime_assistant_history_shadow",
+            "session_key": key,
+            "source": str(source or "llm_response_intercept"),
+            "input_epoch": input_epoch,
+            "recorded_at": self._observed_now(),
+            "message_count": len(parts) if parts else 1,
+            "full_text_chars": len(text),
+            "full_text_hash": self._text_hash(text),
+            "excerpt": self._head_text(
+                " / ".join(parts) if parts else text,
+                REALTIME_ASSISTANT_HISTORY_EXCERPT_CHARS,
+            ),
+            "consumed": False,
+        }
+        cache = self._realtime_assistant_history_shadow_cache()
+        queue = cache.setdefault(
+            key,
+            deque(maxlen=REALTIME_ASSISTANT_HISTORY_LIMIT),
+        )
+        if queue.maxlen != REALTIME_ASSISTANT_HISTORY_LIMIT:
+            queue = deque(queue, maxlen=REALTIME_ASSISTANT_HISTORY_LIMIT)
+            cache[key] = queue
+        queue.append(entry)
+
+    def _append_realtime_assistant_history_shadow_if_any(
+        self,
+        request: ProviderRequest,
+        session_key: str,
+        *,
+        budget: _StateInjectionBudget | None,
+    ) -> bool:
+        queue = self._realtime_assistant_history_shadow_cache().get(
+            str(session_key or "global"),
+        )
+        if not queue:
+            return False
+        pending = [item for item in queue if not item.get("consumed")]
+        if not pending:
+            return False
+        item = pending[-1]
+        text = "\n".join(
+            [
+                "[sylanne_realtime_assistant_history]",
+                "上一轮回复使用即时聊天分条发送，可能没有进入平台的普通 LLM 历史。下面是一次性短上下文，用来保持代词、指代和刚才话题，不要逐字复读。",
+                "source={source}; message_count={message_count}; chars={chars}; full_hash={hash}".format(
+                    source=self._head_one_line(str(item.get("source") or ""), 48),
+                    message_count=int(item.get("message_count") or 0),
+                    chars=int(item.get("full_text_chars") or 0),
+                    hash=str(item.get("full_text_hash") or "")[:16],
+                ),
+                str(item.get("excerpt") or "").strip(),
+            ],
+        )
+        text = self._head_text(text, REALTIME_ASSISTANT_HISTORY_INJECTION_MAX_CHARS)
+        appended = self._append_temp_text_part(
+            request,
+            text,
+            source="realtime_assistant_history_shadow",
+            budget=budget,
+        )
+        if appended:
+            item["consumed"] = True
+            item["consumed_at"] = self._observed_now()
+        return appended
+
+    def _realtime_chat_active_dispatch_cache(self) -> dict[str, dict[str, Any]]:
+        cache = getattr(self, "_realtime_chat_active_dispatches", None)
+        if not isinstance(cache, dict):
+            cache = {}
+            self._realtime_chat_active_dispatches = cache
+        return cache
+
+    def _start_realtime_chat_active_dispatch(
+        self,
+        session_key: str,
+        *,
+        input_epoch: int | None,
+        full_text: str,
+        source: str,
+    ) -> None:
+        text = str(full_text or "").strip()
+        if not text:
+            return
+        self._realtime_chat_active_dispatch_cache()[str(session_key or "global")] = {
+            "schema_version": "astrbot.realtime_chat_active_dispatch.v1",
+            "kind": "realtime_chat_active_dispatch",
+            "session_key": str(session_key or "global"),
+            "source": str(source or "realtime_chat"),
+            "input_epoch": input_epoch,
+            "started_at": self._observed_now(),
+            "full_text_chars": len(text),
+            "full_text_hash": self._text_hash(text),
+            "sent_parts": [],
+            "completed": False,
+        }
+
+    def _append_realtime_chat_active_dispatch_part(
+        self,
+        session_key: str,
+        text: str,
+    ) -> None:
+        active = self._realtime_chat_active_dispatch_cache().get(
+            str(session_key or "global"),
+        )
+        if not active:
+            return
+        part = str(text or "").strip()
+        if not part:
+            return
+        sent_parts = active.setdefault("sent_parts", [])
+        if isinstance(sent_parts, list):
+            sent_parts.append(part)
+            del sent_parts[:-8]
+
+    def _finish_realtime_chat_active_dispatch(self, session_key: str) -> None:
+        active = self._realtime_chat_active_dispatch_cache().get(
+            str(session_key or "global"),
+        )
+        if active:
+            active["completed"] = True
+            active["finished_at"] = self._observed_now()
+            self._realtime_chat_active_dispatch_cache().pop(
+                str(session_key or "global"),
+                None,
+            )
+
+    def _append_realtime_chat_active_dispatch_if_any(
+        self,
+        request: ProviderRequest,
+        session_key: str,
+        *,
+        budget: _StateInjectionBudget | None,
+    ) -> bool:
+        active = self._realtime_chat_active_dispatch_cache().get(
+            str(session_key or "global"),
+        )
+        if not active:
+            return False
+        sent_parts = [
+            str(part or "").strip()
+            for part in active.get("sent_parts", [])
+            if str(part or "").strip()
+        ]
+        if not sent_parts:
+            return False
+        text = "\n".join(
+            [
+                "[sylanne_realtime_active_dispatch]",
+                "上一轮回复正在即时聊天分条发送中，用户已经插话。下面是已经发出的短句，用来维持刚才话题和代词指代；不要复读，直接接住用户新消息。",
+                "source={source}; sent_count={sent_count}; full_hash={hash}".format(
+                    source=self._head_one_line(str(active.get("source") or ""), 48),
+                    sent_count=len(sent_parts),
+                    hash=str(active.get("full_text_hash") or "")[:16],
+                ),
+                self._head_text(
+                    " / ".join(sent_parts),
+                    REALTIME_ASSISTANT_HISTORY_EXCERPT_CHARS,
+                ),
+            ],
+        )
+        text = self._head_text(text, REALTIME_ASSISTANT_HISTORY_INJECTION_MAX_CHARS)
+        return self._append_temp_text_part(
+            request,
+            text,
+            source="realtime_chat_active_dispatch",
+            budget=budget,
+        )
 
     def _napcat_recall_payload(
         self,

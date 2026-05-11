@@ -3198,6 +3198,65 @@ class AstrBotLifecycleTests(unittest.TestCase):
         self.assertEqual(assessment_calls[0]["current_text"], "第一句。第二句。")
         self.assertEqual(saves[0][0], "s-intercept")
 
+    def test_realtime_intercept_preserves_assistant_context_for_next_turn(self):
+        sent = []
+
+        class FakeContext:
+            async def send_message(self, origin, message):
+                sent.append((origin, str(message)))
+                return {"ok": True}
+
+        plugin = new_plugin(
+            {
+                "assessment_timing": "post",
+                "inject_state": False,
+                "enable_realtime_chat": True,
+                "realtime_chat_intercept_llm_response": True,
+                "enable_sticker_reaction": False,
+                "runtime_parameter_debug_override_enabled": True,
+                "realtime_chat_min_delay_seconds": 0.0,
+                "realtime_chat_max_delay_seconds": 0.0,
+            },
+        )
+        plugin.context = FakeContext()
+        self._bind_common_state_hooks(plugin)
+        response = SimpleNamespace(
+            completion_text="我理解错了，你说的是插件的其他用户。我想对他们说：请先读 README。",
+        )
+
+        async def run_turns():
+            await plugin.on_llm_response(FakeEvent("s-realtime-history"), response)
+            await self._await_background_tasks(plugin)
+            next_request = fake_request(
+                session_id="s-realtime-history",
+                prompt="那你有什么想对他们说的吗",
+            )
+            await plugin.on_llm_request(
+                FakeEvent("s-realtime-history", message="那你有什么想对他们说的吗"),
+                next_request,
+            )
+            duplicate_request = fake_request(
+                session_id="s-realtime-history",
+                prompt="再说一遍",
+            )
+            await plugin.on_llm_request(
+                FakeEvent("s-realtime-history", message="再说一遍"),
+                duplicate_request,
+            )
+            return next_request, duplicate_request
+
+        next_request, duplicate_request = asyncio.run(run_turns())
+
+        injected = "\n".join(self._request_text_parts(next_request))
+        duplicate_injected = "\n".join(self._request_text_parts(duplicate_request))
+        self.assertEqual(response.completion_text, "")
+        self.assertTrue(sent)
+        self.assertIn("sylanne_realtime_assistant_history", injected)
+        self.assertIn("插件的其他用户", injected)
+        self.assertIn("请先读 README", injected)
+        self.assertLessEqual(len(injected), 1100)
+        self.assertNotIn("sylanne_realtime_assistant_history", duplicate_injected)
+
     def test_on_llm_response_drops_stale_realtime_reply_after_user_interrupts(self):
         sent = []
 
@@ -3395,6 +3454,60 @@ class AstrBotLifecycleTests(unittest.TestCase):
 
         self.assertEqual(len(sent), 1)
         self.assertEqual(result["message_count"], 1)
+        self.assertEqual(result["interrupted_reason"], "user_interrupted")
+
+    def test_realtime_chat_active_dispatch_is_visible_to_interrupting_request(self):
+        sent = []
+        first_sent = asyncio.Event()
+
+        class FakeContext:
+            async def send_message(self, origin, message):
+                sent.append((origin, str(message)))
+                first_sent.set()
+                return {"ok": True}
+
+        plugin = new_plugin({"enable_realtime_chat": True, "enable_sticker_reaction": False})
+        plugin.context = FakeContext()
+        plugin._conversation_input_epoch = {"s-active-interrupt": 1}
+        plan = {
+            "session_key": "s-active-interrupt",
+            "input_epoch": 1,
+            "message_parts": [
+                {"index": 0, "text": "我理解错了，你说的是插件的其他用户。", "delay_before_seconds": 0.0},
+                {"index": 1, "text": "我想对他们说：请先读 README。", "delay_before_seconds": 0.2},
+            ],
+        }
+
+        async def run_interrupting_request():
+            send_task = asyncio.create_task(
+                plugin._send_realtime_chat_plan(
+                    FakeEvent("s-active-interrupt"),
+                    plan,
+                    source="unit_test",
+                ),
+            )
+            await first_sent.wait()
+            interrupt_request = fake_request(
+                session_id="s-active-interrupt",
+                prompt="那你有什么想对他们说的吗",
+            )
+            await plugin.on_llm_request(
+                FakeEvent("s-active-interrupt", message="那你有什么想对他们说的吗"),
+                interrupt_request,
+            )
+            plugin._conversation_input_epoch["s-active-interrupt"] = 2
+            result = await send_task
+            return interrupt_request, result
+
+        interrupt_request, result = asyncio.run(run_interrupting_request())
+
+        injected = "\n".join(self._request_text_parts(interrupt_request))
+        self.assertEqual(
+            sent,
+            [("s-active-interrupt", "message:我理解错了，你说的是插件的其他用户。")],
+        )
+        self.assertIn("sylanne_realtime_active_dispatch", injected)
+        self.assertIn("插件的其他用户", injected)
         self.assertEqual(result["interrupted_reason"], "user_interrupted")
 
     def test_realtime_chat_interruption_records_low_token_resume_breakpoint(self):

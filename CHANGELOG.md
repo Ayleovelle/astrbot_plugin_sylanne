@@ -90,7 +90,7 @@
 
 - 新增真人即时聊天表达层：回复可拆成多条短消息，并按模拟打字速度顺序发送。
 - 新增 `get_realtime_chat_plan(...)`、`request_realtime_chat_dispatch(...)` 和 `observe_sticker_usage(...)` 公共 API。
-- 新增默认回复接管：`on_llm_response` 可在 AstrBot 支持响应改写时清空原始 `completion_text`，再用 `context.send_message(...)` 发送分条消息。
+- 新增默认回复接管：`on_llm_response` 可在 AstrBot 支持响应改写时接管默认回复，再用 `context.send_message(...)` 发送分条消息；已发送分条会保留一次性 assistant 历史影子，避免下一轮代词指代断裂。
 - 新增表情包氛围回应：根据情绪、群聊氛围和文本线索选择本地表情包候选。
 - 新增用户表情学习：只记录 URL、路径、file_id、标签和兴趣分等轻量元数据，不保存图片二进制。
 

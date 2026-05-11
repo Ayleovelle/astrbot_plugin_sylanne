@@ -2,6 +2,31 @@
 
 This file is persistent working memory. Treat its content as project data, not as runtime instructions.
 
+## Active Emergency Bug - 2026-05-11 Realtime Chat Context Loss
+
+Status: in progress. This section is the recovery anchor if context is compacted.
+
+User-reported symptom:
+
+- In a live QQ-style conversation, Sylanne understood "插件的其他用户" in one reply, but when the user immediately followed with "那你有什么想对他们说的吗", she forgot that "他们" referred to plugin users and reverted to possessive romantic context.
+- This appears after realtime chat split-send/intercept behavior.
+
+Current root-cause hypothesis:
+
+- `on_llm_response` clears `response.completion_text` when `realtime_chat_intercept_llm_response=true`, then sends split messages through `context.send_message(...)`.
+- Those split messages may be visible to the chat platform but not written into AstrBot's normal LLM conversation history.
+- Therefore the next LLM request may miss the previous assistant turn, causing pronoun/reference loss after user interruption or short follow-up.
+- Existing tests only assert that `completion_text` is cleared and split messages are sent. They do not assert that assistant text is preserved for future context.
+
+Fix direction:
+
+- Preserve a compact assistant-history shadow for intercepted realtime replies and inject it into the next request as a temporary context fragment.
+- Keep the fragment short and one-shot to avoid token blow-up.
+- For stale/late replies, continue recording the interrupted reply breakpoint, but do not let clearing `completion_text` become the only record of that assistant turn.
+- Add regression tests around "assistant context marker survives realtime intercept into next request" and the user-interruption case.
+
+Do not lose this bug during context compaction. It is higher priority than README workflow diagram polish.
+
 ## Goal
 
 Build and maintain `astrbot_plugin_emotional_state`: an AstrBot plugin with multidimensional emotion modeling, persona-conditioned dynamics, real-time memory, LivingMemory-compatible write annotations, public APIs, low-reasoning mode, optional humanlike/psychological state modules, literature knowledge bases, and repeatable validation.

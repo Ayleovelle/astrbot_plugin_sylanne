@@ -67,7 +67,7 @@
     "description": "接管默认 LLM 回复并分条发送",
     "type": "bool",
     "default": true,
-    "hint": "开启后 on_llm_response 会尝试清空原 completion_text，并用 context.send_message 顺序发送分条消息；若平台不支持改写响应，可关闭此项。"
+    "hint": "开启后 on_llm_response 会尝试接管默认回复，用 context.send_message 顺序发送分条消息；为避免上下文断裂，插件会保留一次性 assistant 历史影子供下一轮指代消解使用。若平台不支持响应改写，可关闭此项。"
   },
   "realtime_chat_dry_run_default": {
     "description": "即时聊天发送默认试算",
