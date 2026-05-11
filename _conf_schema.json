@@ -409,11 +409,29 @@
     "default": false,
     "hint": "默认关闭。开启后可通过公共 API 或 /psych_state 记录与查看心理状态筛查。该模块仅用于状态记录和风险提示，不提供疾病诊断或医疗建议。"
   },
+  "enable_sylanne_memory": {
+    "description": "启用 Sylanne 自有长期记忆模块",
+    "type": "bool",
+    "default": true,
+    "hint": "默认开启。发生的事情会写入自有记忆，后续对话会按限长召回摘要理解指代、偏好和共同经历；记忆深度、遗忘半衰期、召回数量、巩固强度和压缩阈值全部由人格、情绪、关系、群聊氛围和真实时间自动推导，不允许手动调数值。"
+  },
+  "sylanne_memory_debug_view_enabled": {
+    "description": "启用 Sylanne 记忆调试视图",
+    "type": "bool",
+    "default": false,
+    "hint": "默认关闭。开启后允许通过命令或公共 API 查看自有记忆的摘要、深度、召回评分和自动推导 dynamics；只用于排障，不提供核心参数手动覆盖。"
+  },
+  "allow_sylanne_memory_reset_backdoor": {
+    "description": "允许重置 Sylanne 自有记忆后门",
+    "type": "bool",
+    "default": true,
+    "hint": "默认开启，用于严重误记、上下文污染或异常状态时清空当前会话自有记忆。关闭后记忆重置命令和公共 API 会拒绝执行。"
+  },
   "humanlike_memory_write_enabled": {
     "description": "为记忆写入附带拟人化状态标注",
     "type": "bool",
     "default": true,
-    "hint": "build_emotion_memory_payload 会附带 humanlike_state_at_write，供 livingmemory 等插件记录当时状态。"
+    "hint": "build_emotion_memory_payload 会附带 humanlike_state_at_write，供 Sylanne 自有记忆或其他调用方记录当时状态。"
   },
   "humanlike_clinical_like_enabled": {
     "description": "启用类临床长期状态备用模块",
@@ -431,13 +449,7 @@
     "description": "为记忆写入附带生命化学习状态标注",
     "type": "bool",
     "default": true,
-    "hint": "build_emotion_memory_payload 会附带 lifelike_learning_state_at_write，供 LivingMemory 等插件记录当时共同语境和开口策略。"
-  },
-  "enable_livingmemory_recall_injection": {
-    "description": "启用 LivingMemory 只读召回上下文注入",
-    "type": "bool",
-    "default": true,
-    "hint": "默认开启。若检测到 LivingMemory 插件提供只读检索接口，普通回复、插话恢复和主动聊天会追加限长召回摘要，用于理解指代、偏好和长期相处背景；接口缺失或异常时静默降级。"
+    "hint": "build_emotion_memory_payload 会附带 lifelike_learning_state_at_write，供 Sylanne 自有记忆或其他调用方记录当时共同语境和开口策略。"
   },
   "allow_lifelike_learning_reset_backdoor": {
     "description": "允许手动/API 重置生命化学习状态后门",
@@ -449,7 +461,7 @@
     "description": "为记忆写入附带人格漂移状态标注",
     "type": "bool",
     "default": true,
-    "hint": "build_emotion_memory_payload 会附带 personality_drift_state_at_write，供 LivingMemory 等插件记录当时人格适应状态。"
+    "hint": "build_emotion_memory_payload 会附带 personality_drift_state_at_write，供 Sylanne 自有记忆或其他调用方记录当时人格适应状态。"
   },
   "allow_personality_drift_reset_backdoor": {
     "description": "允许手动/API 重置人格漂移状态后门",
@@ -467,7 +479,7 @@
     "description": "为记忆写入附带道德修复状态标注",
     "type": "bool",
     "default": true,
-    "hint": "build_emotion_memory_payload 会附带 moral_repair_state_at_write，供 LivingMemory 等插件记录当时责任、内疚、补偿和信任修复状态。"
+    "hint": "build_emotion_memory_payload 会附带 moral_repair_state_at_write，供 Sylanne 自有记忆或其他调用方记录当时责任、内疚、补偿和信任修复状态。"
   },
   "allow_moral_repair_reset_backdoor": {
     "description": "允许手动/API 重置道德修复状态后门",
@@ -485,7 +497,7 @@
     "description": "为记忆写入附带瑕疵模拟状态标注",
     "type": "bool",
     "default": true,
-    "hint": "build_emotion_memory_payload 会附带 fallibility_state_at_write，供 LivingMemory 等插件记录当时澄清、纠错和修复状态。"
+    "hint": "build_emotion_memory_payload 会附带 fallibility_state_at_write，供 Sylanne 自有记忆或其他调用方记录当时澄清、纠错和修复状态。"
   },
   "allow_fallibility_reset_backdoor": {
     "description": "允许手动/API 重置瑕疵模拟状态后门",
@@ -509,7 +521,7 @@
     "description": "为记忆写入附带综合自我状态标注",
     "type": "bool",
     "default": true,
-    "hint": "build_emotion_memory_payload 会附带 integrated_self_state_at_write，供 LivingMemory 等插件记录融合后的回应姿态和风险边界。"
+    "hint": "build_emotion_memory_payload 会附带 integrated_self_state_at_write，供 Sylanne 自有记忆或其他调用方记录融合后的回应姿态和风险边界。"
   },
   "integrated_self_degradation_profile": {
     "description": "综合自我状态成本档位",
@@ -520,6 +532,6 @@
       "balanced",
       "minimal"
     ],
-    "hint": "控制 trace 和提示词预算细节。minimal 会减少可选细节，但保留 schema、安全优先级、已存在的诊断/阻断字段和 LivingMemory 注解。"
+    "hint": "控制 trace 和提示词预算细节。minimal 会减少可选细节，但保留 schema、安全优先级、已存在的诊断/阻断字段和自有记忆注解。"
   }
 }

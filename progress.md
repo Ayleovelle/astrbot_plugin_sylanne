@@ -3065,3 +3065,41 @@ Notes:
 
 - Bare `rg.exe` and `node.exe` were access-denied in this environment; used PowerShell `Select-String` and bundled Node fallback.
 - Official AstrBot send-message guidance checked on 2026-05-10: proactive messages should use saved `event.unified_msg_origin` and `self.context.send_message(unified_msg_origin, MessageChain().message(...))`.
+
+## 2026-05-11 Debug Track Kickoff
+
+- User reported two urgent issues:
+  - realtime split-send looks like it failed,
+  - assistant context pool appears to be disturbed,
+  - LivingMemory should no longer be treated as the primary memory path.
+- Created a new persistent debug track in `task_plan.md` for:
+  - realtime split failure root cause,
+  - first-party memory module design,
+  - LivingMemory compatibility downgrade.
+- Read current request assembly and split-send code paths:
+  - `on_llm_request(...)`
+  - `_request_to_text(...)`
+  - `_append_temp_text_part(...)`
+  - `_send_realtime_chat_plan(...)`
+  - `_record_realtime_assistant_history_shadow(...)`
+  - `_append_realtime_assistant_history_shadow_if_any(...)`
+- Current evidence collected:
+  - `split_realtime_text(...)` already produces multi-part plans,
+  - `_send_realtime_chat_plan(...)` already sends each part individually,
+  - `sticker_default_repo_url` is only a reference hint and sticker indexing uses local files,
+  - the empty-output error log shows `prompt_tokens=89499`, which is more consistent with a huge upstream request than a single plugin bug.
+
+## 2026-05-11 Realtime Split Cooldown Fix And Memory Decoupling
+
+- Changed `_should_intercept_realtime_chat_response(...)` so ordinary LLM response interception is no longer blocked by `_realtime_chat_on_cooldown(...)`.
+- Kept explicit realtime dispatch cooldown intact through `_realtime_chat_blocked_reason(...)`.
+- Added lifecycle regression tests:
+  - `test_on_llm_response_intercepts_even_when_realtime_send_cooldown_is_active`
+  - `test_realtime_chat_explicit_dispatch_still_respects_cooldown`
+  - `test_on_llm_request_does_not_include_livingmemory_summary_by_default`
+- Moved early realtime continuity / optional recall injection under `_StateInjectionBudget` so context-pool additions are not inserted before budgeting.
+- Changed `enable_livingmemory_recall_injection` default from `true` to `false` in runtime, schema, README, and contract tests.
+- LivingMemory recall tests now explicitly enable the compatibility layer.
+- Validation:
+  - `python -m pytest -q tests/test_astrbot_lifecycle.py -k "livingmemory or realtime_chat_explicit_dispatch_still_respects_cooldown or realtime_send_cooldown or intercepts_completion"` -> 8 passed.
+  - `python -m pytest -q tests/test_config_schema_contract.py tests/test_remote_smoke_contract.py` -> 33 passed, 402 subtests passed.

@@ -129,6 +129,39 @@ Immediate next phases:
 | E | pending | Rewrite README in Chinese with quick start, full docs, formulas, validation report |
 | F | pending | Run local validation, package preflight, and 100 full-feature remote tests |
 
+## Active Debug Track - 2026-05-11 Realtime Split Failure And First-Party Memory Module
+
+Status: in progress.
+
+User direction:
+
+- Do not continue treating LivingMemory as the primary memory path.
+- Design and verify a first-party local memory module instead.
+- Memory behavior must be strictly argued, precise, and stable under real time.
+
+Confirmed / likely findings:
+
+- `split_realtime_text(...)` already produces multi-part plans when the text and length rules justify it.
+- `_send_realtime_chat_plan(...)` already sends each part individually through `send_message(...)`.
+- The strongest current suspect for the visual "分段失败" symptom is the intercept gate, especially `_realtime_chat_on_cooldown(session_key)`, which can make `_should_intercept_realtime_chat_response(...)` return false and let AstrBot send the original `completion_text` as one bubble.
+- The assistant history shadow is a second-order continuity path and must not be allowed to perturb the next turn's context pool.
+
+Planned work:
+
+1. Add a regression test for same-session intercept/cooldown behavior so a just-sent realtime reply cannot silently fall back to the default whole-message send.
+2. Separate the first-party memory contract from LivingMemory compatibility and define the local memory module as the main path.
+3. Write the memory module theory, including write-time state freezing, time-aware persistence, retrieval boundaries, reset backdoor, and public API expectations.
+4. Keep any optional LivingMemory support strictly compatibility-only and non-blocking.
+
+First-party memory module draft:
+
+- Storage identity: keyed by conversation id plus optional speaker id; group chat memory must separate shared atmosphere, speaker-specific traits, and relationship facts.
+- Write unit: `memory_event`, containing text summary, source event id/hash, observed real timestamp, emotion/persona/auxiliary states frozen at write time, confidence, salience, privacy tier, and decay/update policy.
+- Retrieval unit: bounded summaries, not raw transcript replay. Retrieval must rank by semantic relevance, recency under real-time decay, affective congruence, relationship salience, and uncertainty-repair need.
+- Temporal rule: repeated text must not instantly overwrite emotion or memory weight; updates use real elapsed time, half-life, and confidence accumulation.
+- Safety/recovery: keep reset backdoors and per-session purge; never upload local memory DB or knowledge cache to GitHub release packages.
+- Compatibility: LivingMemory read/write remains optional and disabled by default; first-party memory APIs should not require LivingMemory to be installed.
+
 ## Iteration Queue
 
 | Iteration | Status | Scope | Validation |

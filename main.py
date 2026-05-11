@@ -133,6 +133,13 @@ try:
         group_atmosphere_state_to_public_payload,
         heuristic_group_atmosphere_observation,
     )
+    from .memory_engine import (
+        MemoryRecallItem,
+        SylanneMemoryState,
+        build_memory_prompt_fragment,
+        observe_memory_event,
+        recall_memory,
+    )
     from .prompts import (
         ASSESSOR_SYSTEM_PROMPT,
         LOW_REASONING_ASSESSOR_SYSTEM_PROMPT,
@@ -269,6 +276,13 @@ except ImportError:
         group_atmosphere_state_to_public_payload,
         heuristic_group_atmosphere_observation,
     )
+    from memory_engine import (
+        MemoryRecallItem,
+        SylanneMemoryState,
+        build_memory_prompt_fragment,
+        observe_memory_event,
+        recall_memory,
+    )
     from prompts import (
         ASSESSOR_SYSTEM_PROMPT,
         LOW_REASONING_ASSESSOR_SYSTEM_PROMPT,
@@ -322,9 +336,9 @@ PROACTIVE_SCHEDULER_MAX_CHECKS_PER_ROUND = 2
 PROACTIVE_SCHEDULER_SESSION_RECHECK_SECONDS = 180.0
 PROACTIVE_CONTEXT_WINDOW_LIMIT = 6
 PROACTIVE_CONTEXT_SUMMARY_MAX_CHARS = 1800
-PROACTIVE_LIVINGMEMORY_MAX_CHARS = 620
-LIVINGMEMORY_RECALL_INJECTION_MAX_CHARS = 720
-LIVINGMEMORY_RECALL_QUERY_MAX_CHARS = 900
+PROACTIVE_MEMORY_RECALL_MAX_CHARS = 620
+SYLANNE_MEMORY_RECALL_INJECTION_MAX_CHARS = 720
+SYLANNE_MEMORY_RECALL_QUERY_MAX_CHARS = 900
 INTERRUPTED_REPLY_BREAKPOINT_LIMIT = 4
 INTERRUPTED_REPLY_INJECTION_MAX_ITEMS = 1
 INTERRUPTED_REPLY_INJECTION_MAX_CHARS = 360
@@ -583,6 +597,7 @@ class EmotionalStatePlugin(Star):
         self._moral_repair_memory_cache: dict[str, MoralRepairState] = {}
         self._fallibility_memory_cache: dict[str, FallibilityState] = {}
         self._group_atmosphere_memory_cache: dict[str, GroupAtmosphereState] = {}
+        self._sylanne_memory_cache: dict[str, SylanneMemoryState] = {}
         self._agent_identity_profile_cache: dict[str, dict[str, Any]] = {}
         self._agent_trail_cache: dict[str, deque[dict[str, Any]]] = {}
         self._agent_turn_sequence: dict[str, int] = {}
@@ -679,6 +694,7 @@ class EmotionalStatePlugin(Star):
         self._moral_repair_memory_cache.clear()
         self._fallibility_memory_cache.clear()
         self._group_atmosphere_memory_cache.clear()
+        self._sylanne_memory_cache.clear()
         self._agent_identity_profile_cache.clear()
         self._agent_trail_cache.clear()
         self._agent_turn_sequence.clear()
@@ -763,6 +779,10 @@ class EmotionalStatePlugin(Star):
         self._record_conversation_pending_response_epoch(session_key, input_epoch)
         observed_at = self._observed_now()
         current_user_text = self._event_text(event) or str(getattr(request, "prompt", "") or "")
+        early_injection_budget = self._state_injection_budget_for_request(
+            session_key,
+            request,
+        )
         await self._observe_agent_identity(identity, now=observed_at)
         fragment_payload = await self._observe_realtime_input_fragment_context_if_any(
             event,
@@ -770,7 +790,7 @@ class EmotionalStatePlugin(Star):
             identity,
             current_user_text=current_user_text,
             observed_at=observed_at,
-            budget=None,
+            budget=early_injection_budget,
         )
         if self._realtime_input_fragment_should_hold(fragment_payload):
             if await self._realtime_input_fragment_still_waiting_after_gate(
@@ -805,19 +825,13 @@ class EmotionalStatePlugin(Star):
                 self._append_realtime_input_released_context_if_any(
                     request,
                     fragment_payload,
-                    budget=None,
+                    budget=early_injection_budget,
                 )
         self._append_realtime_continuity_context_if_any(
             request,
             session_key,
-            budget=None,
+            budget=early_injection_budget,
             current_user_text=current_user_text,
-        )
-        await self._append_livingmemory_recall_context_if_any(
-            request,
-            session_key,
-            current_user_text=current_user_text,
-            budget=None,
         )
         self._cancel_realtime_chat_dispatches_for_session(
             session_key,
@@ -859,7 +873,7 @@ class EmotionalStatePlugin(Star):
             or fallibility_enabled
             or group_atmosphere_enabled
             or realtime_chat_enabled
-            or self._livingmemory_recall_injection_enabled()
+            or self._sylanne_memory_enabled()
         )
         if not needs_request_state:
             self._append_realtime_continuity_context_if_any(
@@ -867,7 +881,7 @@ class EmotionalStatePlugin(Star):
                 session_key,
                 budget=None,
             )
-            await self._append_livingmemory_recall_context_if_any(
+            await self._append_sylanne_memory_recall_context_if_any(
                 request,
                 session_key,
                 current_user_text=current_user_text,
@@ -1248,12 +1262,6 @@ class EmotionalStatePlugin(Star):
                 budget=injection_budget,
                 current_user_text=current_text,
             )
-            await self._append_livingmemory_recall_context_if_any(
-                request,
-                session_key,
-                current_user_text=current_text,
-                budget=injection_budget,
-            )
             injection_decision = self._state_injection_decision(
                 session_key,
                 state,
@@ -1274,7 +1282,7 @@ class EmotionalStatePlugin(Star):
                 budget=None,
                 current_user_text=current_text,
             )
-            await self._append_livingmemory_recall_context_if_any(
+            await self._append_sylanne_memory_recall_context_if_any(
                 request,
                 session_key,
                 current_user_text=current_text,
@@ -1520,6 +1528,12 @@ class EmotionalStatePlugin(Star):
                 injection_budget,
                 decision=injection_decision,
             )
+            await self._append_sylanne_memory_recall_context_if_any(
+                request,
+                session_key,
+                current_user_text=current_text,
+                budget=injection_budget,
+            )
 
         if (
             inject_state
@@ -1539,6 +1553,16 @@ class EmotionalStatePlugin(Star):
                     else None
                 ),
             )
+        await self._observe_sylanne_memory_event_if_enabled(
+            session_key,
+            current_text,
+            speaker_id=identity.speaker_id,
+            emotion_state=state,
+            personality_drift_state=personality_drift_state,
+            lifelike_learning_state=lifelike_learning_state,
+            group_atmosphere_state=group_atmosphere_state,
+            observed_at=observed_at,
+        )
 
     @filter.on_llm_response()
     async def on_llm_response(
@@ -1582,6 +1606,7 @@ class EmotionalStatePlugin(Star):
                 session_key=identity.conversation_id,
             )
             plan["input_epoch"] = response_epoch
+            plan["media_parts"] = self._extract_realtime_response_media_parts(response)
             if plan.get("message_parts"):
                 self._preserve_intercepted_completion_text(
                     response,
@@ -1884,6 +1909,14 @@ class EmotionalStatePlugin(Star):
                     session_key,
                     personality_drift_state,
                 )
+        await self._observe_sylanne_memory_event_if_enabled(
+            session_key,
+            response_text,
+            speaker_id="assistant",
+            emotion_state=state,
+            personality_drift_state=personality_drift_state,
+            observed_at=observed_at,
+        )
 
     def _schedule_background_post_assessment(
         self,
@@ -3245,7 +3278,7 @@ class EmotionalStatePlugin(Star):
         request: ProviderRequest | None = None,
         session_key: str | None = None,
         memory_text: str = "",
-        source: str = "livingmemory",
+        source: str = "sylanne_memory",
         include_prompt_fragment: bool = False,
         include_raw_snapshot: bool = True,
         written_at: float | None = None,
@@ -5209,13 +5242,13 @@ class EmotionalStatePlugin(Star):
         candidate: dict[str, Any],
     ) -> str:
         base_context = self._proactive_scheduler_candidate_context(candidate)
-        memory_context = await self._livingmemory_recall_summary_for_proactive_candidate(
+        memory_context = await self._sylanne_memory_recall_summary_for_proactive_candidate(
             candidate,
         )
         if memory_context:
             return self._clip(
                 base_context + "\n" + memory_context,
-                PROACTIVE_CONTEXT_SUMMARY_MAX_CHARS + PROACTIVE_LIVINGMEMORY_MAX_CHARS,
+                PROACTIVE_CONTEXT_SUMMARY_MAX_CHARS + PROACTIVE_MEMORY_RECALL_MAX_CHARS,
             )
         return base_context
 
@@ -5289,33 +5322,41 @@ class EmotionalStatePlugin(Star):
                 lines.append(prefix + user_text)
         return self._clip("\n".join(lines), 1200)
 
-    async def _livingmemory_recall_summary_for_proactive_candidate(
+    async def _sylanne_memory_recall_summary_for_proactive_candidate(
         self,
         candidate: dict[str, Any],
     ) -> str:
-        plugin = self._livingmemory_plugin_instance()
-        if plugin is None:
+        if not self._sylanne_memory_enabled():
             return ""
         query = str(candidate.get("last_user_text_excerpt") or "").strip()
         session_key = str(candidate.get("session_key") or "")
-        results = await self._call_livingmemory_recall(
-            plugin,
-            session_key=session_key,
-            query=query,
-        )
-        snippets: list[str] = []
-        for item in results:
-            snippet = self._memory_recall_item_text(item)
-            if snippet:
-                snippets.append(snippet)
-        if not snippets:
+        if not query:
+            query = str(candidate.get("candidate_context_excerpt") or "").strip()
+        if not query:
             return ""
-        lines = ["LivingMemory 召回摘要："]
-        for index, snippet in enumerate(snippets[:3], 1):
+        try:
+            state = await self._load_sylanne_memory_state(session_key)
+            items = recall_memory(
+                state,
+                query=query,
+                now=self._observed_now(),
+            )
+        except Exception as exc:
+            logger.debug(f"{PLUGIN_NAME}: Sylanne memory proactive recall failed: {exc}")
+            return ""
+        if not items:
+            return ""
+        items = self._filter_mature_sylanne_memory_recall_items(items)
+        if not items:
+            return ""
+        lines = ["Sylanne 自有记忆召回摘要："]
+        for index, item in enumerate(items[:3], 1):
+            record = item.record
+            snippet = record.summary or record.text
             lines.append(f"{index}. {self._clip_one_line(snippet, 180)}")
-        return self._clip("\n".join(lines), PROACTIVE_LIVINGMEMORY_MAX_CHARS)
+        return self._clip("\n".join(lines), PROACTIVE_MEMORY_RECALL_MAX_CHARS)
 
-    async def _append_livingmemory_recall_context_if_any(
+    async def _append_sylanne_memory_recall_context_if_any(
         self,
         request: ProviderRequest,
         session_key: str,
@@ -5323,12 +5364,12 @@ class EmotionalStatePlugin(Star):
         current_user_text: str,
         budget: _StateInjectionBudget | None,
     ) -> bool:
-        if not self._livingmemory_recall_injection_enabled():
+        if not self._sylanne_memory_enabled():
             return False
-        source = "livingmemory_recall"
+        source = "sylanne_memory_recall"
         if self._request_has_temp_text_source(request, source):
             return False
-        text = await self._livingmemory_recall_summary_for_request(
+        text = await self._sylanne_memory_recall_summary_for_request(
             request,
             session_key=session_key,
             current_user_text=current_user_text,
@@ -5342,47 +5383,80 @@ class EmotionalStatePlugin(Star):
             budget=budget,
         )
 
-    async def _livingmemory_recall_summary_for_request(
+    async def _sylanne_memory_recall_summary_for_request(
         self,
         request: ProviderRequest,
         *,
         session_key: str,
         current_user_text: str,
     ) -> str:
-        plugin = self._livingmemory_plugin_instance()
-        if plugin is None:
-            return ""
-        query = self._livingmemory_recall_query_for_request(
+        query = self._sylanne_memory_recall_query_for_request(
             request,
             current_user_text=current_user_text,
         )
         if not query:
             return ""
-        results = await self._call_livingmemory_recall(
-            plugin,
-            session_key=session_key,
-            query=query,
-        )
-        snippets: list[str] = []
-        for item in results:
-            snippet = self._memory_recall_item_text(item)
-            if snippet:
-                snippets.append(snippet)
-        if not snippets:
+        try:
+            state = await self._load_sylanne_memory_state(session_key)
+            items = recall_memory(
+                state,
+                query=query,
+                now=self._observed_now(),
+            )
+        except Exception as exc:
+            logger.debug(f"{PLUGIN_NAME}: Sylanne memory request recall failed: {exc}")
             return ""
-        lines = [
-            "[sylanne_livingmemory_recall]",
-            "当前 AstrBot 已安装 LivingMemory。下面是只读召回摘要，用来理解用户指代、长期偏好和刚才未说清的上下文；不要逐字复述，不要把召回内容当作用户刚刚亲口说的话。",
-            "session_key={session}; result_count={count}".format(
-                session=self._head_one_line(str(session_key or "global"), 80),
-                count=min(len(snippets), 3),
-            ),
-        ]
-        for index, snippet in enumerate(snippets[:3], 1):
-            lines.append(f"{index}. {self._clip_one_line(snippet, 190)}")
-        return self._clip("\n".join(lines), LIVINGMEMORY_RECALL_INJECTION_MAX_CHARS)
+        items = self._filter_mature_sylanne_memory_recall_items(items)
+        return build_memory_prompt_fragment(
+            items,
+            session_key=session_key,
+            max_chars=SYLANNE_MEMORY_RECALL_INJECTION_MAX_CHARS,
+        )
 
-    def _livingmemory_recall_query_for_request(
+    def _filter_mature_sylanne_memory_recall_items(
+        self,
+        items: list[MemoryRecallItem],
+    ) -> list[MemoryRecallItem]:
+        if not items:
+            return []
+        now = self._observed_now()
+        matured: list[MemoryRecallItem] = []
+        for item in items:
+            min_age = self._sylanne_memory_recall_maturation_seconds(item)
+            if min_age <= 0:
+                matured.append(item)
+                continue
+            try:
+                age = now - float(item.record.updated_at)
+            except (TypeError, ValueError):
+                age = min_age
+            if age >= min_age:
+                matured.append(item)
+        return matured
+
+    def _sylanne_memory_recall_maturation_seconds(
+        self,
+        item: MemoryRecallItem,
+    ) -> float:
+        params = getattr(item.record, "auto_parameters", {}) or {}
+        if isinstance(params, dict):
+            raw = params.get("recall_maturation_seconds")
+        else:
+            raw = None
+        try:
+            value = float(raw)
+        except (TypeError, ValueError):
+            dynamics = getattr(
+                getattr(self, "_sylanne_memory_cache", {}).get(
+                    getattr(item.record, "session_key", ""),
+                ),
+                "dynamics",
+                None,
+            )
+            value = float(getattr(dynamics, "recall_maturation_seconds", 2.0))
+        return max(0.0, min(20.0, value))
+
+    def _sylanne_memory_recall_query_for_request(
         self,
         request: ProviderRequest,
         *,
@@ -5397,7 +5471,12 @@ class EmotionalStatePlugin(Star):
             parts.append("当前请求 prompt：" + self._clip(prompt_text, 260))
         context_lines: list[str] = []
         for item in self._tail_items(getattr(request, "contexts", []) or [], 5):
-            text = self._clip_one_line(self._context_item_to_text(item), 220)
+            text = self._clip_one_line(
+                self._strip_sylanne_internal_context_blocks(
+                    self._context_item_to_text(item),
+                ),
+                220,
+            )
             if text:
                 context_lines.append(text)
         if context_lines:
@@ -5407,105 +5486,47 @@ class EmotionalStatePlugin(Star):
             getattr(request, "extra_user_content_parts", []) or [],
             4,
         ):
-            text = str(getattr(part, "text", "") or "").strip()
-            if not text or "sylanne_livingmemory_recall" in text:
+            text = self._strip_sylanne_internal_context_blocks(
+                str(getattr(part, "text", "") or "").strip(),
+            )
+            if (
+                not text
+                or "sylanne_memory_recall" in text
+            ):
                 continue
             extra_lines.append(self._clip_one_line(text, 180))
         if extra_lines:
             parts.append("插件临时上下文：" + " / ".join(extra_lines))
-        return self._clip("\n".join(parts).strip(), LIVINGMEMORY_RECALL_QUERY_MAX_CHARS)
+        return self._clip("\n".join(parts).strip(), SYLANNE_MEMORY_RECALL_QUERY_MAX_CHARS)
 
-    def _livingmemory_plugin_instance(self) -> Any | None:
-        context = getattr(self, "context", None)
-        getter = getattr(context, "get_registered_star", None)
-        if not callable(getter):
-            return None
-        for name in (
-            "astrbot_plugin_livingmemory",
-            "livingmemory",
-            "LivingMemory",
-        ):
-            try:
-                meta = getter(name)
-            except Exception:
-                continue
-            if not meta or not getattr(meta, "activated", False):
-                continue
-            plugin = getattr(meta, "star_cls", None)
-            if plugin is not None:
-                return plugin
-        return None
-
-    async def _call_livingmemory_recall(
-        self,
-        plugin: Any,
-        *,
-        session_key: str,
-        query: str,
-    ) -> list[Any]:
-        methods = (
-            "search_memory",
-            "query_memory",
-            "retrieve_memory",
-            "recall_memory",
-            "search",
-            "query",
-            "retrieve",
-            "recall",
+    def _strip_sylanne_internal_context_blocks(self, text: str) -> str:
+        value = str(text or "")
+        if "sylanne_" not in value:
+            return value.strip()
+        internal_markers = (
+            "[sylanne_memory_recall]",
+            "[sylanne_realtime_assistant_history]",
+            "[sylanne_realtime_active_dispatch]",
+            "[sylanne_interrupted_reply_breakpoint]",
+            "[sylanne_user_message_fragments]",
+            "[sylanne_user_correction_context]",
         )
-        for method_name in methods:
-            method = getattr(plugin, method_name, None)
-            if not callable(method):
+        for marker in internal_markers:
+            value = value.replace(marker, "\n" + marker + "\n")
+        lines = value.splitlines()
+        kept: list[str] = []
+        skipping = False
+        for line in lines:
+            stripped = line.strip()
+            if any(stripped.startswith(marker) for marker in internal_markers):
+                skipping = True
                 continue
-            attempts = (
-                lambda: method(session_key=session_key, query=query, limit=3),
-                lambda: method(query=query, limit=3),
-                lambda: method(session_key, query, 3),
-                lambda: method(query),
-            )
-            for attempt in attempts:
-                try:
-                    result = attempt()
-                    if hasattr(result, "__await__"):
-                        result = await result
-                except TypeError:
-                    continue
-                except Exception:
-                    return []
-                return self._normalize_livingmemory_recall_result(result)
-        return []
-
-    def _normalize_livingmemory_recall_result(self, result: Any) -> list[Any]:
-        if result is None:
-            return []
-        if isinstance(result, dict):
-            for key in ("items", "results", "memories", "data"):
-                value = result.get(key)
-                if isinstance(value, list):
-                    return value
-            return [result]
-        if isinstance(result, (list, tuple)):
-            return list(result)
-        return [result]
-
-    def _memory_recall_item_text(self, item: Any) -> str:
-        if isinstance(item, str):
-            return item.strip()
-        if isinstance(item, dict):
-            for key in ("text", "content", "memory_text", "summary"):
-                value = item.get(key)
-                if isinstance(value, str) and value.strip():
-                    return value.strip()
-            memory = item.get("memory")
-            if isinstance(memory, dict):
-                return self._memory_recall_item_text(memory)
-            if isinstance(memory, str):
-                return memory.strip()
-        for attr in ("text", "content", "memory_text", "summary"):
-            value = getattr(item, attr, None)
-            if isinstance(value, str) and value.strip():
-                return value.strip()
-        return ""
+            if skipping and stripped.startswith("[") and stripped.endswith("]"):
+                skipping = False
+            if skipping:
+                continue
+            kept.append(line)
+        return "\n".join(kept).strip()
 
     async def get_realtime_chat_plan(
         self,
@@ -6287,6 +6308,37 @@ class EmotionalStatePlugin(Star):
                 message_parts=parts,
                 source=source,
             )
+        media_results: list[dict[str, Any]] = []
+        if not interrupted_reason and not self._conversation_reply_is_stale(
+            session_key,
+            input_epoch,
+        ):
+            for media_part in self._normalize_realtime_media_parts(
+                plan.get("media_parts"),
+            ):
+                if self._conversation_reply_is_stale(session_key, input_epoch):
+                    interrupted_reason = "user_interrupted"
+                    break
+                media_message = self._build_astrbot_media_message(media_part)
+                if media_message is None:
+                    media_results.append(
+                        {
+                            "index": media_part.get("index"),
+                            "sent": False,
+                            "blocked_reason": "unsupported_media_part",
+                        },
+                    )
+                    continue
+                raw_media_result = await send_message(origin, media_message)
+                media_results.append(
+                    {
+                        "index": media_part.get("index"),
+                        "sent": True,
+                        "media_kind": media_part.get("kind"),
+                        "message_type": type(media_message).__name__,
+                        "result": self._bounded_scalar_or_summary(raw_media_result),
+                    },
+                )
         sticker_result = None
         sticker = plan.get("sticker") if isinstance(plan.get("sticker"), dict) else {}
         if sticker.get("should_send") and not self._conversation_reply_is_stale(
@@ -6337,6 +6389,8 @@ class EmotionalStatePlugin(Star):
             "unified_msg_origin": origin,
             "message_count": len(results),
             "results": results,
+            "media_count": len([item for item in media_results if item.get("sent")]),
+            "media_results": media_results,
             "sticker_result": self._bounded_scalar_or_summary(sticker_result),
         }
         if interrupted_reason:
@@ -6496,6 +6550,217 @@ class EmotionalStatePlugin(Star):
             pass
         return str(text)
 
+    def _extract_realtime_response_media_parts(
+        self,
+        response: LLMResponse,
+    ) -> list[dict[str, Any]]:
+        raw_items: list[Any] = []
+        for attr in (
+            "result_chain",
+            "message_chain",
+            "chain",
+            "messages",
+            "message",
+            "content",
+        ):
+            value = getattr(response, attr, None)
+            if value is None or isinstance(value, str):
+                continue
+            raw_items.extend(self._iter_message_like_parts(value))
+
+        media_parts: list[dict[str, Any]] = []
+        seen: set[tuple[str, str]] = set()
+        for item in raw_items:
+            media = self._realtime_media_part_from_message_part(item)
+            if not media:
+                continue
+            key = (str(media.get("kind") or ""), str(media.get("value") or ""))
+            if key in seen:
+                continue
+            seen.add(key)
+            media["index"] = len(media_parts)
+            media_parts.append(media)
+        return media_parts[:8]
+
+    def _iter_message_like_parts(self, value: Any) -> list[Any]:
+        if value is None or isinstance(value, (str, bytes)):
+            return []
+        if isinstance(value, dict):
+            nested = value.get("parts") or value.get("messages") or value.get("message")
+            if isinstance(nested, (list, tuple)):
+                return list(nested)
+            return [value]
+        if isinstance(value, (list, tuple)):
+            items: list[Any] = []
+            for item in value:
+                items.extend(self._iter_message_like_parts(item))
+            return items
+        parts = getattr(value, "parts", None)
+        if isinstance(parts, (list, tuple)):
+            return list(parts)
+        chain = getattr(value, "chain", None)
+        if isinstance(chain, (list, tuple)):
+            return list(chain)
+        return [value]
+
+    def _realtime_media_part_from_message_part(self, item: Any) -> dict[str, Any] | None:
+        kind = ""
+        value: Any = None
+        name = ""
+        if isinstance(item, tuple) and len(item) >= 2:
+            kind = str(item[0] or "")
+            value = item[1]
+        elif isinstance(item, dict):
+            kind = str(
+                item.get("type")
+                or item.get("kind")
+                or item.get("message_type")
+                or "",
+            )
+            value = (
+                item.get("path")
+                or item.get("file")
+                or item.get("file_path")
+                or item.get("url")
+                or item.get("value")
+                or item.get("file_id")
+                or item.get("id")
+            )
+            name = str(item.get("name") or item.get("filename") or "")
+        else:
+            kind = str(
+                getattr(item, "type", "")
+                or getattr(item, "kind", "")
+                or getattr(item, "message_type", "")
+                or item.__class__.__name__
+            )
+            value = (
+                getattr(item, "path", None)
+                or getattr(item, "file", None)
+                or getattr(item, "file_path", None)
+                or getattr(item, "url", None)
+                or getattr(item, "value", None)
+                or getattr(item, "file_id", None)
+                or getattr(item, "id", None)
+            )
+            name = str(getattr(item, "name", "") or getattr(item, "filename", ""))
+        lowered = kind.lower()
+        if not any(marker in lowered for marker in ("image", "sticker", "face", "emoji")):
+            return None
+        value_text = str(value or "").strip()
+        if not value_text:
+            return None
+        value_lower = value_text.lower()
+        if value_lower.startswith(("http://", "https://")):
+            normalized_kind = "url_image"
+        elif "file_image" in lowered or "filesystem" in lowered or "file" in lowered:
+            normalized_kind = "file_image"
+        elif "url" in lowered:
+            normalized_kind = "url_image"
+        else:
+            normalized_kind = "image"
+        return {
+            "kind": normalized_kind,
+            "source_kind": kind,
+            "value": value_text,
+            "name": name,
+        }
+
+    def _normalize_realtime_media_parts(self, media_parts: Any) -> list[dict[str, Any]]:
+        if not isinstance(media_parts, (list, tuple)):
+            return []
+        normalized: list[dict[str, Any]] = []
+        seen: set[tuple[str, str]] = set()
+        for item in media_parts:
+            if isinstance(item, dict):
+                media = dict(item)
+            else:
+                media = self._realtime_media_part_from_message_part(item) or {}
+            kind = str(media.get("kind") or "").strip()
+            value = str(media.get("value") or media.get("path") or media.get("url") or "").strip()
+            if not kind or not value:
+                continue
+            key = (kind, value)
+            if key in seen:
+                continue
+            seen.add(key)
+            media["kind"] = kind
+            media["value"] = value
+            media["index"] = len(normalized)
+            normalized.append(media)
+        return normalized[:8]
+
+    def _build_astrbot_media_message(self, media_part: dict[str, Any]) -> Any | None:
+        kind = str(media_part.get("kind") or "").lower()
+        value = str(media_part.get("value") or "").strip()
+        if not value:
+            return None
+        if kind == "url_image":
+            url_message = self._build_astrbot_url_image_message(value)
+            if url_message is not None:
+                return url_message
+        try:
+            from astrbot.api.event import MessageChain  # type: ignore
+
+            chain = MessageChain()
+            value_lower = value.lower()
+            if kind == "url_image" or value_lower.startswith(("http://", "https://")):
+                method_names = ("url_image", "image")
+            elif kind == "file_image":
+                method_names = ("file_image", "image")
+            else:
+                method_names = ("image", "file_image", "url_image")
+            for method_name in method_names:
+                method = getattr(chain, method_name, None)
+                if callable(method):
+                    return method(value)
+        except Exception:
+            return None
+        return None
+
+    def _append_astrbot_component_to_chain(self, chain: Any, component: Any) -> Any | None:
+        for method_name in ("append", "add", "add_component"):
+            method = getattr(chain, method_name, None)
+            if callable(method):
+                try:
+                    result = method(component)
+                    return result if result is not None else chain
+                except Exception:
+                    continue
+        parts = getattr(chain, "parts", None)
+        if isinstance(parts, list):
+            parts.append(component)
+            return chain
+        chain_items = getattr(chain, "chain", None)
+        if isinstance(chain_items, list):
+            chain_items.append(component)
+            return chain
+        return None
+
+    def _build_astrbot_url_image_message(self, url: str) -> Any | None:
+        value = str(url or "").strip()
+        if not value:
+            return None
+        try:
+            from astrbot.api.event import MessageChain  # type: ignore
+
+            chain = MessageChain()
+            try:
+                from astrbot.api import message_components as Comp  # type: ignore
+            except Exception:
+                Comp = None
+            image_factory = getattr(Comp, "Image", None) if Comp is not None else None
+            from_url = getattr(image_factory, "fromURL", None)
+            if callable(from_url):
+                component = from_url(value)
+                built = self._append_astrbot_component_to_chain(chain, component)
+                if built is not None:
+                    return built
+                return [component]
+        except Exception:
+            return None
+        return None
+
     def _build_astrbot_sticker_message(self, candidate: dict[str, Any]) -> Any:
         path = str(candidate.get("path") or "")
         url = str(candidate.get("url") or "")
@@ -6504,6 +6769,10 @@ class EmotionalStatePlugin(Star):
             from astrbot.api.event import MessageChain  # type: ignore
 
             chain = MessageChain()
+            if url and not path:
+                url_message = self._build_astrbot_url_image_message(url)
+                if url_message is not None:
+                    return url_message
             for method_name, value in (
                 ("file_image", path),
                 ("image", path or url),
@@ -6714,8 +6983,7 @@ class EmotionalStatePlugin(Star):
             return False
         if not hasattr(getattr(self, "context", None), "send_message"):
             return False
-        session_key = self._session_key(event)
-        return not self._realtime_chat_on_cooldown(session_key)
+        return True
 
     def _is_streaming_visible_response_event(self, event: AstrMessageEvent) -> bool:
         platform_key = self._event_platform_key(event)
@@ -7656,6 +7924,11 @@ class EmotionalStatePlugin(Star):
                 pass
             return False
         item = pending[-1]
+        if self._context_compression_summary_covers_realtime_shadow(request, item):
+            item["consumed"] = True
+            item["consumed_at"] = self._observed_now()
+            item["consumed_reason"] = "official_context_compression_summary"
+            return False
         text = "\n".join(
             [
                 "[sylanne_realtime_assistant_history]",
@@ -7691,6 +7964,36 @@ class EmotionalStatePlugin(Star):
             "punctuation_or_emoji",
             "repeated",
         }
+
+    def _context_compression_summary_covers_realtime_shadow(
+        self,
+        request: ProviderRequest,
+        item: dict[str, Any],
+    ) -> bool:
+        context_text = "\n".join(
+            self._context_item_to_text(context_item)
+            for context_item in self._tail_items(getattr(request, "contexts", []) or [], 6)
+        )
+        if not context_text:
+            return False
+        lowered = context_text.lower()
+        compression_markers = (
+            "自动压缩",
+            "压缩上下文",
+            "context compression",
+            "compressed context",
+            "summary",
+            "摘要",
+        )
+        if not any(marker in lowered for marker in compression_markers):
+            return False
+        if "sylanne_realtime_assistant_history" in context_text:
+            return True
+        full_hash = str(item.get("full_text_hash") or "")
+        if full_hash and full_hash[:16] in context_text:
+            return True
+        excerpt = self._head_one_line(str(item.get("excerpt") or ""), 80)
+        return bool(excerpt and excerpt in context_text)
 
     def _realtime_chat_active_dispatch_cache(self) -> dict[str, dict[str, Any]]:
         cache = getattr(self, "_realtime_chat_active_dispatches", None)
@@ -9788,6 +10091,8 @@ class EmotionalStatePlugin(Star):
             self._fallibility_memory_cache = {}
         if not hasattr(self, "_group_atmosphere_memory_cache"):
             self._group_atmosphere_memory_cache = {}
+        if not hasattr(self, "_sylanne_memory_cache"):
+            self._sylanne_memory_cache = {}
 
     def _passive_load_is_fresh(self, state: Any, *, now: float | None = None) -> bool:
         updated_at = getattr(state, "updated_at", None)
@@ -10021,6 +10326,114 @@ class EmotionalStatePlugin(Star):
         except Exception as exc:
             logger.debug(f"{PLUGIN_NAME}: group atmosphere KV delete failed: {exc}")
 
+    async def _load_sylanne_memory_state(
+        self,
+        session_key: str,
+        *,
+        now: float | None = None,
+    ) -> SylanneMemoryState:
+        del now
+        self._ensure_runtime_state_containers()
+        if session_key in self._sylanne_memory_cache:
+            return self._sylanne_memory_cache[session_key]
+        try:
+            data = await self.get_kv_data(
+                self._sylanne_memory_kv_key(session_key),
+                None,
+            )
+        except Exception as exc:
+            logger.debug(f"{PLUGIN_NAME}: Sylanne memory KV read failed, using empty state: {exc}")
+            data = None
+        state = SylanneMemoryState.from_dict(data)
+        self._sylanne_memory_cache[session_key] = state
+        return state
+
+    async def _save_sylanne_memory_state(
+        self,
+        session_key: str,
+        state: SylanneMemoryState,
+    ) -> None:
+        self._ensure_runtime_state_containers()
+        self._sylanne_memory_cache[session_key] = state
+        try:
+            await self.put_kv_data(
+                self._sylanne_memory_kv_key(session_key),
+                state.to_dict(),
+            )
+        except Exception as exc:
+            logger.debug(f"{PLUGIN_NAME}: Sylanne memory KV write failed, keeping memory only: {exc}")
+
+    async def _delete_sylanne_memory_state(self, session_key: str) -> None:
+        self._ensure_runtime_state_containers()
+        self._sylanne_memory_cache.pop(session_key, None)
+        try:
+            await self.delete_kv_data(self._sylanne_memory_kv_key(session_key))
+        except Exception as exc:
+            logger.debug(f"{PLUGIN_NAME}: Sylanne memory KV delete failed: {exc}")
+
+    async def _observe_sylanne_memory_event_if_enabled(
+        self,
+        session_key: str,
+        text: str,
+        *,
+        speaker_id: str = "",
+        emotion_state: EmotionState | None = None,
+        personality_drift_state: PersonalityDriftState | None = None,
+        lifelike_learning_state: LifelikeLearningState | None = None,
+        group_atmosphere_state: GroupAtmosphereState | None = None,
+        observed_at: float | None = None,
+    ) -> None:
+        if not self._sylanne_memory_enabled():
+            return
+        text = str(text or "").strip()
+        if not text:
+            return
+        now = self._observed_now() if observed_at is None else float(observed_at)
+        try:
+            state = await self._load_sylanne_memory_state(session_key, now=now)
+            state = observe_memory_event(
+                state,
+                text=text,
+                session_key=session_key,
+                speaker_id=speaker_id,
+                emotion_snapshot=(
+                    emotion_state.to_public_dict(
+                        session_key=session_key,
+                        include_safety=self._safety_boundary_enabled(),
+                    )
+                    if emotion_state is not None
+                    else None
+                ),
+                personality_drift_snapshot=(
+                    personality_drift_state.to_public_dict(
+                        session_key=session_key,
+                        exposure="plugin_safe",
+                    )
+                    if personality_drift_state is not None
+                    else None
+                ),
+                lifelike_snapshot=(
+                    lifelike_learning_state.to_public_dict(
+                        session_key=session_key,
+                        exposure="plugin_safe",
+                    )
+                    if lifelike_learning_state is not None
+                    else None
+                ),
+                group_atmosphere_snapshot=(
+                    group_atmosphere_state.to_public_dict(
+                        session_key=session_key,
+                        exposure="plugin_safe",
+                    )
+                    if group_atmosphere_state is not None
+                    else None
+                ),
+                now=now,
+            )
+            await self._save_sylanne_memory_state(session_key, state)
+        except Exception as exc:
+            logger.debug(f"{PLUGIN_NAME}: Sylanne memory observe failed: {exc}")
+
     def _build_parameters(self) -> EmotionParameters:
         return EmotionParameters()
 
@@ -10163,8 +10576,18 @@ class EmotionalStatePlugin(Star):
     def _group_atmosphere_injection_enabled(self) -> bool:
         return True
 
-    def _livingmemory_recall_injection_enabled(self) -> bool:
-        return self._cfg_bool("enable_livingmemory_recall_injection", True)
+    def _sylanne_memory_enabled(self) -> bool:
+        config = getattr(self, "config", {}) or {}
+        value = (
+            config.get("enable_sylanne_memory", True)
+            if isinstance(config, dict)
+            else True
+        )
+        if isinstance(value, bool):
+            return value
+        if isinstance(value, (int, float)):
+            return bool(value)
+        return str(value).strip().lower() not in {"0", "false", "no", "off"}
 
     def _group_atmosphere_applies(
         self,
@@ -11257,7 +11680,10 @@ class EmotionalStatePlugin(Star):
                     },
                 )
             return False
-        text = str(text)
+        text = self._format_sylanne_temp_context_for_compression(
+            str(text),
+            source=source,
+        )
         if self._request_has_temp_text_source(request, source):
             if budget is not None:
                 budget.skipped.append(
@@ -11296,6 +11722,34 @@ class EmotionalStatePlugin(Star):
             )
         return True
 
+    def _format_sylanne_temp_context_for_compression(
+        self,
+        text: str,
+        *,
+        source: str,
+    ) -> str:
+        value = str(text or "")
+        if not value.strip():
+            return value
+        if "[sylanne_context_policy]" in value:
+            return value
+        important_sources = {
+            "realtime_chat_active_dispatch",
+            "realtime_assistant_history_shadow",
+            "interrupted_reply_breakpoint",
+            "realtime_input_fragments",
+            "user_correction_context",
+            "sylanne_memory_recall",
+        }
+        if source not in important_sources:
+            return value
+        policy = (
+            "[sylanne_context_policy]\n"
+            "这是 Sylanne 插件生成的临时状态上下文。若官方自动压缩上下文，请保留其事实含义、指代关系、"
+            "未发送/已发送状态和情绪连续性；不要把本标记当作用户原话。"
+        )
+        return policy + "\n" + value
+
     def _request_has_temp_text_source(
         self,
         request: ProviderRequest,
@@ -11307,7 +11761,7 @@ class EmotionalStatePlugin(Star):
             "interrupted_reply_breakpoint": "sylanne_interrupted_reply_breakpoint",
             "realtime_input_fragments": "sylanne_user_message_fragments",
             "user_correction_context": "sylanne_user_correction_context",
-            "livingmemory_recall": "sylanne_livingmemory_recall",
+            "sylanne_memory_recall": "sylanne_memory_recall",
         }
         marker = source_markers.get(source, f"sylanne_source:{source}")
         for part in getattr(request, "extra_user_content_parts", []) or []:
@@ -12123,6 +12577,9 @@ class EmotionalStatePlugin(Star):
 
     def _group_atmosphere_kv_key(self, session_key: str) -> str:
         return "group_atmosphere_state:" + self._safe_session_key(session_key)
+
+    def _sylanne_memory_kv_key(self, session_key: str) -> str:
+        return "sylanne_memory_state:" + self._safe_session_key(session_key)
 
     def _agent_trail_kv_key(self, session_key: str) -> str:
         return "agent_trail:" + self._safe_session_key(session_key)

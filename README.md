@@ -26,7 +26,7 @@
 
 - 🧠 <span style="font-size: 1.04em;"><strong>不只是情绪：</strong>同时维护 7 维情绪、人格漂移、拟人状态、生命化学习、道德修复、瑕疵模拟和非诊断心理筛查。</span><br>
   <sub><em>「先把状态做成会互相牵动的东西。7 维情绪只是入口，人格漂移和长期记忆才让她有前后文。」</em></sub>
-- 📝 <span style="font-size: 1.04em;"><strong>会记住相处方式：</strong>写入 LivingMemory 时冻结当时情绪和辅助状态，让长期记忆带着当时的气氛。</span><br>
+- 📝 <span style="font-size: 1.04em;"><strong>会记住相处方式：</strong>Sylanne 自有记忆会记录事件、情绪、人格漂移和相处气氛，后续按真实时间与记忆深度限长召回。</span><br>
   <sub><em>「记忆不能只存事实。那天是别扭、开心、委屈还是想靠近，都应该一起留下来。」</em></sub>
 - 💬 <span style="font-size: 1.04em;"><strong>懂得什么时候说话：</strong>结合群聊氛围、打断风险、双方需要和主动发言反馈，判断该开口、短应、先听还是保持距离。</span><br>
   <sub><em>「先做好开口门控。尤其是群聊里该不该插话，这个地方最容易看出她是不是只会抢答。」</em></sub>
@@ -44,7 +44,7 @@
 | 能力 | 作用 |
 | --- | --- |
 | 回复后后台评估（`post`） | 可把回复后的内部情绪评估放进后台队列，主回复先返回；队列支持同一会话先进先出（FIFO）提交、AstrBot 键值存储（KV）检查点、租约回收、重试和失败任务留存诊断。 |
-| 并发状态加载 | 请求、响应和记忆写入阶段会并发读取可选状态快照；慢状态加载、内部评估和 LivingMemory 注解不再简单串行等待。 |
+| 并发状态加载 | 请求、响应和自有记忆写入阶段会并发读取可选状态快照；慢状态加载、内部评估和记忆注解不再简单串行等待。 |
 | 智能后台工作器 | 默认每会话 1 个后台工作器；打开动态扩容后，插件会同时看队列压力、等待时间、重试/租约压力和 CPU/内存环境压力，全插件同时活跃后台工作器硬上限固定为 6，并通过冷却时间逐级扩容、空闲后自动关闭；内部判断大模型另有并发闸门，默认最多 2 路、极端积压最多 3 路。 |
 | 群聊分层建模 | 同时维护房间级 `conversation_id` 和说话人级 `speaker_track_id`，避免一个人的冲突污染全群，也避免群聊气氛被切碎。 |
 | 群聊氛围与开口时机 | `group_atmosphere_state` 记录活跃度、紧张度、玩笑度、支持度、engine 注意力、打断风险和加入适宜度，帮助 engine 判断该开口、短应、先听还是避免插话。 |
@@ -66,7 +66,7 @@
 2. [快速开始](#快速开始)
 3. [最小可用配置](#最小可用配置)
 4. [命令](#命令)
-5. [LivingMemory / 长期记忆兼容](#livingmemory--长期记忆兼容)
+5. [Sylanne 自有长期记忆](#sylanne-自有长期记忆)
 
 如果你要维护、二次开发或复现实验，再看后面的公共 API、模型公式、远程测试、发布历史和故障排查。旧迭代记录、完整公式和复现实验放在折叠块里；README 首页只保留当前版本的结论、入口和关键表格。
 
@@ -86,7 +86,7 @@
 | [命令速查](#命令) | 用户可直接在会话里调用的状态、重置和诊断命令。 |
 | [配置指南](#配置指南) | 核心配置、低推理模式、后果衰减、humanlike、心理筛查。 |
 | [工作流对比（与 0.5.0）](#工作流对比与-050) | 对比旧版单线程链路和当前后台并行、主动发言、动态工作器链路。 |
-| [LivingMemory 兼容](#livingmemory--长期记忆兼容) | 写入记忆时冻结 `emotion_at_write`、`humanlike_state_at_write`、`lifelike_learning_state_at_write`、`moral_repair_state_at_write`、`fallibility_state_at_write` 和 `integrated_self_state_at_write`。 |
+| [Sylanne 自有长期记忆](#sylanne-自有长期记忆) | 写入自有记忆时冻结 `emotion_at_write`、`humanlike_state_at_write`、`lifelike_learning_state_at_write`、`moral_repair_state_at_write`、`fallibility_state_at_write` 和 `integrated_self_state_at_write`。 |
 | [公共 API](#公共-api) | 其他插件如何读取、模拟、提交、重置情绪状态。 |
 | [打包、上传与新仓库发布](#打包上传与新仓库发布) | 构建 zip、预检、WebUI 上传、GitHub 新仓库发布清单。 |
 | [情绪模型](#情绪模型) | 维度定义、公式推导、人格基线、真实时间半衰期。 |
@@ -113,7 +113,7 @@
 | 许可证 | `GPL-3.0-or-later` |
 | 运行时第三方依赖 | 当前无额外依赖，见 `requirements.txt` |
 
-`1.8.4` 在 `1.8.3` 的即时聊天接管修复基础上继续收紧输入侧：默认仍不主动发送，配置者同时开启 `enable_proactive_speech_scheduler=true` 与 `enable_proactive_speech_dispatch=true` 后，她才会从最近可触达会话中选择候选，结合情绪、群聊氛围、双方需要、冷却、近期上下文摘要、可选 LivingMemory 召回摘要和 LLM 话题裁决，请求 AstrBot 主动发送。即时聊天分条发送会监听用户插话；NapCat/OneBot 撤回会推进会话 epoch 并让旧输出自然过期；用户连续发“我！/就！/是！”或“我只是很纳闷 / 为啥你要问我 / 是从哪里看来的”这类碎片时，输入侧会先合并成一轮意图，再交给主 LLM 和情绪模型理解。核心情绪、回复后后台评估（post）、`group_atmosphere_state`、`humanlike_state`、`lifelike_learning_state`、`personality_drift_state`、即时聊天节奏和欺骗/操控/逃责类动作阻断默认自动运行；道德修复、瑕疵模拟、心理筛查等实验/维护模块仍由配置者显式打开。
+`1.8.4` 在 `1.8.3` 的即时聊天接管修复基础上继续收紧输入侧：默认仍不主动发送，配置者同时开启 `enable_proactive_speech_scheduler=true` 与 `enable_proactive_speech_dispatch=true` 后，她才会从最近可触达会话中选择候选，结合情绪、群聊氛围、双方需要、冷却、近期上下文摘要、Sylanne 自有记忆召回摘要和 LLM 话题裁决，请求 AstrBot 主动发送。即时聊天分条发送会监听用户插话；NapCat/OneBot 撤回会推进会话 epoch 并让旧输出自然过期；用户连续发“我！/就！/是！”或“我只是很纳闷 / 为啥你要问我 / 是从哪里看来的”这类碎片时，输入侧会先合并成一轮意图，再交给主 LLM 和情绪模型理解。核心情绪、回复后后台评估（post）、`group_atmosphere_state`、`humanlike_state`、`lifelike_learning_state`、`personality_drift_state`、Sylanne 自有记忆、即时聊天节奏和欺骗/操控/逃责类动作阻断默认自动运行；道德修复、瑕疵模拟、心理筛查等实验/维护模块仍由配置者显式打开。
 
 发布包会包含运行代码、README、CHANGELOG、LICENSE、配置结构（schema）、docs 和 `docs/assets/` 中的聚合图表；不会包含 `tests/`、`scripts/`、`literature_kb/`、`personality_literature_kb/`、`psychological_literature_kb/`、`humanlike_agent_literature_kb/`、`raw/`、`output/`、`dist/` 等开发、研究、原始样本或缓存目录。
 
@@ -143,7 +143,7 @@
 | 双缓冲接管 | 分条接管时，插件内部保留完整主回复用于上下文和评估，同时清空 `completion_text`，避免 AstrBot 默认发送口再发整段原文。 |
 | 过期回复处理 | 过期回复、乱序旧回复和用户插话打断也会内部保留原文，并清空默认发送口。 |
 | 输入碎片聚合 | 同一用户在短时间内连续发出的短字、表情和疑问收束词会被视为一轮用户意图，避免只回应最后一条或逐条误读。 |
-| 主动聊天上下文 | 主动聊天调度器使用近期上下文窗口摘要；如果检测到 LivingMemory 的只读检索接口，会追加限长记忆摘要，失败时静默降级。 |
+| 主动聊天上下文 | 主动聊天调度器使用近期上下文窗口摘要，并追加 Sylanne 自有记忆的限长召回摘要；读取失败时静默降级。 |
 | 回归验证 | 测试确认接管后 `response.completion_text` 为空，但 `_sylanne_intercepted_completion_text` 保留原文。 |
 | 公开契约 | 插件版本为 `1.8.3`；公共 API 版本仍为 `1.0`，schema 仍保持 `astrbot.emotion_state.v2` 等版本化契约。 |
 
@@ -473,7 +473,7 @@
 | 冷处理/冷战 | 开启 | 作为持续效果保存到 `active_effects`，按真实时间到期或被修复信号清除。 |
 | 安全边界开关 | 默认开启 | `enable_safety_boundary=true` 时限制冷处理表现；关闭后只保留普通情绪后果调制。 |
 | 临时注入 | 开启 | 使用 `TextPart(...).mark_as_temp()` 注入，不污染长期聊天记录。 |
-| LivingMemory 注解 | 开启 | 写入长期记忆时可冻结当时的 `emotion_at_write`。 |
+| Sylanne 自有记忆 | 开启 | 发生的事件会写入自有长期记忆，并冻结当时情绪、人格漂移和辅助状态。 |
 | 公共 API | 开启 | 其他插件可读取快照、提交观察、模拟更新、构造提示词片段或重置状态。 |
 | 低推理友好模式 | 默认关闭 | 用短提示词和简单公式降低小模型令牌压力。 |
 | 拟人状态模块 | 自动开启 | `humanlike_state` 可调制能量、压力、注意力、边界和透明度；内部动力学参数由插件按人格自动传递，不允许用户手动调细参。 |
@@ -893,7 +893,7 @@ low_reasoning_max_context_chars = 1200
 | 主动聊天 | 只能由工具或其他插件请求一次主动发言。 | 可登记最近会话，后台低频醒来；话题由状态公式和大模型基于证据裁决，再通过 `context.send_message` 请求发送。 |
 | 话题来源 | 容易变成预设话题或模板开场。 | 必须带 `topic_evidence`，例如进度关心、共同语境、想念、调皮打扰、轻量修复或双方互需。 |
 | 即时聊天 | 主大模型一次性吐出整段回复。 | 可拆成多条短消息，模拟打字停顿，并在表情包发送前做语气一致性检查。 |
-| 记忆写入 | 长期记忆更偏事实文本。 | LivingMemory 写入时冻结当时情绪、拟人状态、生命化学习和人格漂移，让记忆带着当时气氛。 |
+| 记忆写入 | 长期记忆更偏事实文本。 | Sylanne 自有记忆会冻结当时情绪、拟人状态、生命化学习和人格漂移，让记忆带着当时气氛。 |
 
 </details>
 
@@ -1381,7 +1381,7 @@ E_t = \Pi_{[-1,1]^7}(E_t)
 | 真实时间衰减 | 情绪、后果、冷处理、修复和人格漂移都按真实经过时间计算，不按消息数量计算。 |
 | 自动动力学 | 半衰期、冷处理时长、短期后果时长、更新步长、反刷屏门控和冲量上限都由本地公式从运行时人格模型、当前状态、置信度、冲突成因、修复信号和真实时间间隔推导。 |
 | 低 LLM 参与 | LLM 只提供语义观测、关系判断和冲突成因；不直接给出这些数值参数。 |
-| 可追溯快照 | 推导后的有效参数会写入 `emotion.dynamics`、`consequences.dynamics` 和各辅助状态的 `dynamics`，供调试和 LivingMemory 注解回溯。 |
+| 可追溯快照 | 推导后的有效参数会写入 `emotion.dynamics`、`consequences.dynamics`、`sylanne_memory.dynamics` 和各辅助状态的 `dynamics`，供调试、自有记忆和公共 API 回溯。 |
 
 这意味着：
 
@@ -1576,11 +1576,10 @@ enable_safety_boundary = false
 | --- | --- | --- | --- |
 | `enable_proactive_speech_dispatch` | bool | `false` | 是否允许插件真正调用 `context.send_message` 主动发消息。关闭时只返回 `dispatch_request` 和未发送原因。 |
 | `enable_proactive_speech_scheduler` | bool | `false` | 是否启用后台主动聊天调度器。开启后会从最近可触达会话中选择候选；真正发送仍要求 `enable_proactive_speech_dispatch=true`。 |
-| `enable_livingmemory_recall_injection` | bool | `true` | 如果检测到 LivingMemory 的只读检索接口，普通回复、插话恢复和主动聊天会追加限长召回摘要；接口缺失、为空或异常时静默降级。 |
 
 主动发言的后台调度器不是固定闹钟。她会先登记最近出现过、具备 `unified_msg_origin` 的会话；后台低频醒来时，会在环境压力不高、同会话未被锁住、近期没有重复检查的前提下，把最近用户消息和上下文摘要交给主动发言裁决。裁决仍然要经过本地公式、LLM 话题判断、冷却、发送开关和 `context.send_message` 接口检查。
 
-主动发言不会只看最后一句。每次用户请求都会写入一个短期上下文窗口，调度器醒来时会把最近几轮用户文本和请求上下文整理成“近期上下文摘要”，再附上当前请求摘要、打断/未完成回复摘要和主动反馈状态。若当前 AstrBot 已安装并激活 LivingMemory，且该插件暴露 `search_memory`、`query_memory`、`retrieve_memory`、`recall_memory` 或同类只读检索接口，Sylanne 会用“当前消息 + 近期上下文 + 插件临时断点”作为查询，追加最多三条限长记忆摘要；检索失败、接口不存在或返回为空时静默降级，不阻塞普通回复或主动聊天。
+主动发言不会只看最后一句。每次用户请求都会写入一个短期上下文窗口，调度器醒来时会把最近几轮用户文本和请求上下文整理成“近期上下文摘要”，再附上当前请求摘要、打断/未完成回复摘要、主动反馈状态和 Sylanne 自有记忆召回摘要。召回 query 会综合当前用户消息、近期请求上下文和插件临时断点，因此用户连续补充“不是啊，我说的是插件其他用户 / 那他们呢”时，主 LLM 不会只看到最后一句“他们呢”。如果自有记忆为空或读取失败，链路会静默降级，不阻塞普通回复或主动聊天。
 
 主动发言的冷却、有效期、句子长度和反馈观察窗口不会暴露为普通配置。插件会根据 `score`、边界敏感、打扰风险、修复需要、用户被照顾需要、bot 自己想被需要的程度自动计算，并写入 `dispatch_request.adaptive_policy`。如果主动发言后用户没有回应，或只回了“嗯”“好”这类低信号短句，插件会把它记录为 `unanswered` 或 `cold_reply`，后续会更谨慎地判断开口时机。
 
@@ -1626,7 +1625,7 @@ enable_safety_boundary = false
 
 插话本身不会被硬编码为生气、开心或亲密。她只记录“bot 刚才有话没说完、已发了哪些、未发摘要是什么、用户随后补了什么”这些事实，并把它作为 `[assistant_interrupted_event]` 交给情绪判断。正向还是负面，要由判断模型结合人格、当前关系、用户语气和上下文自己判断。
 
-如果同时安装了 LivingMemory，普通回复链路也会尽量调用她的只读检索接口。召回内容只会被压缩成 `[sylanne_livingmemory_recall]` 短摘要，用来帮助主 LLM 理解“他们”“刚才那个”“之前说过的进度”这类指代和长期偏好；插件不会把整段记忆库塞回提示词，也不会因为 LivingMemory 没装、没启用、接口名不同、检索为空或检索报错而阻断回复。这个行为由 `enable_livingmemory_recall_injection` 控制，默认开启。
+普通回复链路会优先使用 Sylanne 自有记忆。召回内容只会被压缩成 `[sylanne_memory_recall]` 短摘要，用来帮助主 LLM 理解“他们”“刚才那个”“之前说过的进度”这类指代和长期偏好；插件不会把整段记忆库塞回提示词，也不会因为记忆为空、KV 读取失败或召回分数不足而阻断回复。召回数量、成熟等待、记忆深度、遗忘半衰期、压缩阈值和干扰敏感度全部由本地公式按人格、情绪、关系、群聊氛围和真实时间自动推导，不提供用户手动调参入口。
 
 NapCat/OneBot 的撤回事件也可以接入这个机制。NapCat 的撤回属于 OneBot `notice` 事件，私聊撤回为 `notice_type=friend_recall`，群撤回为 `notice_type=group_recall`，常见字段包括 `message_id`、`user_id`、群撤回里的 `group_id` 与 `operator_id`。如果适配器能把原始 notice 放在 `event.message_obj.raw_message`、`event.raw_message` 或同类字段里，插件可解析撤回载荷；其他插件也可以直接调用 `observe_user_message_withdrawal(...)`。撤回后会推进会话 epoch、清空该会话最近主动聊天候选摘要，并让旧回复自然过期。若平台没有把撤回事件交给插件，则只能等用户补发更正消息后按“新消息打断旧回复”处理。
 
@@ -1746,29 +1745,42 @@ LLM 在这里只负责给出语义观察：`relationship_decision`、`conflict_a
 | `integrated_self_memory_write_enabled` | bool | `true` | 记忆写入时附带综合自我状态注解。 |
 | `integrated_self_degradation_profile` | string | `balanced` | 综合自我状态成本档位：`full`、`balanced` 或 `minimal`。 |
 
-道德修复和瑕疵模拟的更新步长、置信门控、状态半衰、快速门控、冲量上限、错误压力上限和轨迹保留策略都由本地公式自动派生，不写入 `_conf_schema.json`，也不允许用户手调。开启模块后，LLM 只提供风险观察和语义归因；有效动力学会分别写入 `moral_repair_state.dynamics` 与 `fallibility_state.dynamics`，供公共 API、LivingMemory 注解和排障使用。
+道德修复和瑕疵模拟的更新步长、置信门控、状态半衰、快速门控、冲量上限、错误压力上限和轨迹保留策略都由本地公式自动派生，不写入 `_conf_schema.json`，也不允许用户手调。开启模块后，LLM 只提供风险观察和语义归因；有效动力学会分别写入 `moral_repair_state.dynamics` 与 `fallibility_state.dynamics`，供公共 API、自有记忆注解和排障使用。
 
 `fallibility_state` 只模拟低风险、不关键的瑕疵感：误读、记忆模糊、轻微嘴硬、逞强、回避、随后澄清、承认可能错了、纠正和补偿。它不是欺骗模块；风险越高，越会提高 `truthfulness_guard`、`clarification_need` 和 `correction_readiness`。
 
 ---
 
-## LivingMemory / 长期记忆兼容
+## Sylanne 自有长期记忆
 
-写入长期记忆时，不要只保存“发生了什么”，也要保存“写入当时他/她处在什么情绪”。本插件提供：
+Sylanne 不再依赖外部长期记忆插件。每次稳定用户输入、主动聊天候选和被打断回复的关键摘要，都会进入 Sylanne 自有记忆层；后续普通回复、插话恢复和主动聊天调度都会使用 `[sylanne_memory_recall]` 的限长摘要帮助主 LLM 理解指代、偏好、共同经历和相处方式。
+
+记忆核心参数由插件自动设置，不提供手动数值旋钮：
+
+| 自动参数 | 来源 |
+| --- | --- |
+| 记忆深度 | 当前情绪显著性、关系权重、巩固强度、事件层类型。 |
+| 遗忘半衰期 | 人格漂移锚定、共同语境、关系强度、神经质/依恋相关偏移和真实时间。 |
+| 召回数量 | 关系权重、情绪显著性、共同语境强度。 |
+| 召回成熟等待 | 群聊紧张度、打断风险、置信度和巩固强度。 |
+| 压缩阈值 | 巩固强度与共同语境。 |
+| 干扰敏感度 | 群聊紧张度、打断风险和不确定性。 |
+
+这些参数会写入 `sylanne_memory.dynamics` 和每条记忆的 `auto_parameters`，只允许通过调试视图查看，不允许配置者手动覆盖。这样能保证“人格漂移影响人格建模，人格建模影响记忆动力学”，而不是把长期相处变成一组手调滑块。
+
+| 配置项 | 类型 | 默认值 | 说明 |
+| --- | --- | --- | --- |
+| `enable_sylanne_memory` | bool | `true` | 启用 Sylanne 自有长期记忆。关闭后不写入也不召回。 |
+| `sylanne_memory_debug_view_enabled` | bool | `false` | 允许查看记忆摘要、深度、召回评分和自动推导 dynamics；只用于排障，不提供参数覆盖。 |
+| `allow_sylanne_memory_reset_backdoor` | bool | `true` | 是否允许在严重误记、上下文污染或异常状态时重置当前会话自有记忆。 |
+
+如果其他插件只想把当时状态冻结进自己的记录，本插件仍提供：
 
 ```python
 build_emotion_memory_payload(...)
 ```
 
-这个方法不会更新情绪状态，只读取当前快照，并把 `emotion_at_write` 固定进记忆载荷。这样以后情绪变化不会覆盖旧记忆。
-
-反过来，如果 AstrBot 当前已经安装并激活 LivingMemory，且它暴露 `search_memory`、`query_memory`、`retrieve_memory`、`recall_memory` 或同类只读检索接口，Sylanne 也会在普通回复、插话恢复和主动聊天调度时尝试读取最多三条限长摘要。召回 query 会综合当前用户消息、近期请求上下文和插件临时断点，因此用户连续补充“不是啊，我说的是插件其他用户 / 那他们呢”时，主 LLM 不会只看到最后一句“他们呢”。该功能默认开启：
-
-```text
-enable_livingmemory_recall_injection = true
-```
-
-如果 LivingMemory 未安装、未激活、接口不存在、返回为空或检索抛错，Sylanne 会静默降级为无召回，不影响原始回复流程。
+这个方法不会更新情绪状态，只读取当前快照，并把 `emotion_at_write` 和可选辅助状态固定进记忆载荷。这样以后情绪变化不会覆盖旧记忆。
 
 ### 推荐接法
 
@@ -1787,14 +1799,14 @@ if emotion:
         event,
         memory=memory,
         memory_text=memory_text,
-        source="livingmemory",
+        source="sylanne_memory",
         include_prompt_fragment=False,
     )
 
-await livingmemory.add_memory(event, memory)
+await your_plugin_store.write(event, memory)
 ```
 
-如果 LivingMemory 的接口只能写普通 dict，也可以合并字段；即使情绪插件未安装、未激活或版本不匹配，也要保留原始 memory 写入：
+如果目标插件只能写普通 dict，也可以合并字段；即使 Sylanne 未安装、未激活或版本不匹配，也要保留原始 memory 写入：
 
 ```python
 memory = {"text": memory_text}
@@ -1804,7 +1816,7 @@ if emotion:
         event,
         memory=memory,
         memory_text=memory_text,
-        source="livingmemory",
+        source="sylanne_memory",
     )
     memory["emotion_at_write"] = payload["emotion_at_write"]
     if "humanlike_state_at_write" in payload:
@@ -1827,7 +1839,7 @@ if emotion:
 payload = await emotion.build_emotion_memory_payload(
     session_key="aiocqhttp:GroupMessage:12345",
     memory_text=memory_text,
-    source="livingmemory",
+    source="sylanne_memory",
 )
 ```
 
@@ -1840,7 +1852,7 @@ payload = await emotion.build_emotion_memory_payload(
 | `schema_version` | 记忆注解 schema，当前为 `astrbot.emotion_memory.v1`。 |
 | `captured_from_schema_version` | 来源快照结构版本。 |
 | `session_key` | 会话标识。 |
-| `source` | 写入来源，例如 `livingmemory`。 |
+| `source` | 写入来源，例如 `sylanne_memory` 或调用方自己的插件名。 |
 | `written_at` | 记忆写入时间。 |
 | `emotion_updated_at` | 情绪状态最后更新时间。 |
 | `label` | 当前情绪标签。 |
@@ -1890,7 +1902,7 @@ personality_drift_memory_write_enabled = true
 
 则 `build_emotion_memory_payload(...)` 会额外写入 `personality_drift_state_at_write`。默认值是 `true`。
 
-该字段冻结写入当时的人格漂移摘要：`updated_at`、`evidence_count`、`drift_intensity`、`anchor_strength`、`time_gate` 和主要有界偏移。它不保存原始消息文本，也不保存完整 `trait_offsets`，用于让 LivingMemory 或剧情插件知道“这条记忆写入时他/她的人格适应处在哪个真实时间阶段”。
+该字段冻结写入当时的人格漂移摘要：`updated_at`、`evidence_count`、`drift_intensity`、`anchor_strength`、`time_gate` 和主要有界偏移。它不保存原始消息文本，也不保存完整 `trait_offsets`，用于让自有记忆或剧情插件知道“这条记忆写入时他/她的人格适应处在哪个真实时间阶段”。
 
 人格漂移默认自动运行，载荷通常会包含 `enabled=true` 和真实时间漂移摘要。只有插件整体关闭、旧版本兼容或内部降级时，调用方才需要按 `enabled=false` 做静默降级。
 
@@ -2013,7 +2025,7 @@ if emotion:
     )
 ```
 
-如果 LivingMemory 或其他记忆插件要写入当时状态，优先使用 `build_emotion_memory_payload` 或综合自我信封，不要自己拼内部字段。若 `get_emotion_service(self.context)` 返回 `None`，说明插件未安装、未启用或版本不匹配；调用方应静默降级，而不是中断主流程。
+如果其他插件要写入当时状态，优先使用 `build_emotion_memory_payload` 或综合自我信封，不要自己拼内部字段。若 `get_emotion_service(self.context)` 返回 `None`，说明插件未安装、未启用或版本不匹配；调用方应静默降级，而不是中断主流程。
 
 ### 获取服务实例
 
@@ -2099,7 +2111,7 @@ emotion = meta.star_cls if meta and meta.activated else None
 | `get_emotion_consequences(event_or_session)` | 否 | 只取行动倾向和持续效果。 |
 | `get_emotion_relationship(event_or_session)` | 否 | 只取关系判断、冲突原因和修复状态。 |
 | `get_emotion_prompt_fragment(event_or_session)` | 否 | 给其他插件注入提示词文本片段。 |
-| `build_emotion_memory_payload(event_or_session=None, memory=None, *, session_key=None, memory_text="", source="livingmemory", include_raw_snapshot=True)` | 否 | 给长期记忆生成带状态注解的载荷。 |
+| `build_emotion_memory_payload(event_or_session=None, memory=None, *, session_key=None, memory_text="", source="sylanne_memory", include_raw_snapshot=True)` | 否 | 给长期记忆生成带状态注解的载荷。 |
 | `inject_emotion_context(event, request)` | 否 | 直接给 `ProviderRequest` 追加情绪上下文。 |
 | `observe_emotion_text(event_or_session, text, role="plugin", source="plugin")` | 是 | 外部插件提交文本观测并更新状态。 |
 | `simulate_emotion_update(event_or_session, text)` | 否 | 预测候选文本会怎样影响状态，不落库。 |
@@ -2514,7 +2526,7 @@ enable_moral_repair_state = false
 | `allow_moral_repair_reset_backdoor` | bool | `true` | 是否允许重置道德修复状态。 |
 | `enable_integrated_self_state` | bool | `true` | 启用只读综合自我状态总线。 |
 | `integrated_self_memory_write_enabled` | bool | `true` | 记忆写入时附带综合自我状态注解。 |
-| `integrated_self_degradation_profile` | string | `balanced` | 综合自我状态成本档位：`full`、`balanced` 或 `minimal`。`minimal` 会减少 trace 和提示词预算，但保留 schema、安全优先级、阻断动作和 LivingMemory 注解。 |
+| `integrated_self_degradation_profile` | string | `balanced` | 综合自我状态成本档位：`full`、`balanced` 或 `minimal`。`minimal` 会减少 trace 和提示词预算，但保留 schema、安全优先级、阻断动作和自有记忆注解。 |
 
 道德修复的内疚、责任、道歉、补偿、回避风险和信任修复速度不会由用户调细参控制。模块只暴露启用、记忆写入、重置和综合自我成本档位；其余动力学由 `moral_repair_state.dynamics` 在真实时间下自动推导。
 
@@ -3103,14 +3115,14 @@ low_reasoning_max_context_chars = 800
 inject_state = false
 ```
 
-### LivingMemory 没有写入情绪
+### 自有记忆没有写入情绪
 
 检查：
 
-1. 长期记忆插件是否调用了 `build_emotion_memory_payload(...)`。
-2. 是否把返回载荷原样写入，或至少合并了 `emotion_at_write`。
-3. 没有事件对象时是否显式传入 `session_key`。
-4. 是否误把 `include_prompt_fragment` 当作必须项；该参数默认可以关闭。
+1. `enable_sylanne_memory` 是否仍为默认 `true`。
+2. 当前会话是否已经有稳定用户输入；疑似未说完的碎片会先等待合并，不会立刻写入。
+3. 是否发生 KV 写入失败；失败时日志会保留 `Sylanne memory KV write failed`。
+4. 其他插件若单独写自己的记忆，是否调用了 `build_emotion_memory_payload(...)` 并保留 `emotion_at_write`。
 
 ### `humanlike_state_at_write` 没有出现
 

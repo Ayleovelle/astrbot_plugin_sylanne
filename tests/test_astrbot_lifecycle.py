@@ -1,6 +1,8 @@
 import asyncio
 import collections
+import sys
 import time
+import types
 import unittest
 from types import SimpleNamespace
 
@@ -1384,6 +1386,52 @@ class AstrBotLifecycleTests(unittest.TestCase):
         self.assertEqual(checkpoint["schema_version"], "astrbot.background_post_queue.v2")
         self.assertNotIn("response_text", checkpoint["dead_letters"][0])
         self.assertNotIn("request_context_text", checkpoint["dead_letters"][0])
+
+    def test_sylanne_memory_state_uses_dedicated_kv_cache_and_delete(self):
+        from memory_engine import MemoryRecord, SylanneMemoryState
+
+        plugin = new_plugin()
+        stored = {}
+
+        async def fake_get_kv(self, key, default=None):
+            return stored.get(key, default)
+
+        async def fake_put_kv(self, key, value):
+            stored[key] = value
+
+        async def fake_delete_kv(self, key):
+            stored.pop(key, None)
+
+        bind_async(plugin, "get_kv_data", fake_get_kv)
+        bind_async(plugin, "put_kv_data", fake_put_kv)
+        bind_async(plugin, "delete_kv_data", fake_delete_kv)
+        state = SylanneMemoryState.initial(now=10.0)
+        state.records.append(
+            MemoryRecord(
+                text="用户刚才解释过，他们指插件的其他用户。",
+                summary="他们指插件的其他用户。",
+                session_key="room/with\\slash",
+                created_at=10.0,
+                updated_at=10.0,
+                depth=0.84,
+                confidence=0.75,
+            ),
+        )
+
+        asyncio.run(plugin._save_sylanne_memory_state("room/with\\slash", state))
+        saved_key = plugin._sylanne_memory_kv_key("room/with\\slash")
+
+        self.assertEqual(saved_key, "sylanne_memory_state:room_with_slash")
+        self.assertIn(saved_key, stored)
+        plugin._sylanne_memory_cache.clear()
+        loaded = asyncio.run(plugin._load_sylanne_memory_state("room/with\\slash"))
+        self.assertEqual(loaded.records[0].summary, "他们指插件的其他用户。")
+        self.assertEqual(plugin._sylanne_memory_cache["room/with\\slash"], loaded)
+
+        asyncio.run(plugin._delete_sylanne_memory_state("room/with\\slash"))
+
+        self.assertNotIn(saved_key, stored)
+        self.assertNotIn("room/with\\slash", plugin._sylanne_memory_cache)
 
     def test_background_post_recovery_merges_checkpoint_before_new_local_job(self):
         plugin = new_plugin(
@@ -3079,7 +3127,7 @@ class AstrBotLifecycleTests(unittest.TestCase):
         self.assertIn("整理图表", context)
         self.assertGreater(len(context), 160)
 
-    def test_proactive_scheduler_context_can_include_livingmemory_summary(self):
+    def test_proactive_scheduler_context_can_include_sylanne_memory_summary(self):
         plugin = new_plugin(
             {
                 "assessment_timing": "post",
@@ -3093,13 +3141,11 @@ class AstrBotLifecycleTests(unittest.TestCase):
             "worker_cap": 6,
             "reason": "unit_test_normal_pressure",
         }
+        from memory_engine import MemoryRecord, SylanneMemoryState
 
         class FakeLivingMemory:
             async def search_memory(self, session_key=None, query="", limit=3):
-                return [
-                    {"text": "用户之前说过，周日晚上容易因为论文图表焦虑。"},
-                    {"content": "用户喜欢被轻轻提醒，而不是被命令。"},
-                ]
+                raise AssertionError("proactive scheduler must use Sylanne memory")
 
         class FakeContext:
             def get_registered_star(self, name):
@@ -3108,6 +3154,30 @@ class AstrBotLifecycleTests(unittest.TestCase):
                 return None
 
         plugin.context = FakeContext()
+        state = SylanneMemoryState.initial(now=0.0)
+        state.records.extend(
+            [
+                MemoryRecord(
+                    text="用户之前说过，周日晚上容易因为论文图表焦虑。",
+                    summary="用户周日晚上容易因为论文图表焦虑。",
+                    session_key="s-proactive-memory",
+                    created_at=10.0,
+                    updated_at=10.0,
+                    depth=0.9,
+                    confidence=0.82,
+                ),
+                MemoryRecord(
+                    text="用户喜欢被轻轻提醒，而不是被命令。",
+                    summary="用户喜欢被轻轻提醒，而不是被命令。",
+                    session_key="s-proactive-memory",
+                    created_at=11.0,
+                    updated_at=11.0,
+                    depth=0.86,
+                    confidence=0.8,
+                ),
+            ],
+        )
+        plugin._sylanne_memory_cache["s-proactive-memory"] = state
         dispatched = []
 
         async def fake_dispatch(self, event_or_session, **kwargs):
@@ -3133,7 +3203,7 @@ class AstrBotLifecycleTests(unittest.TestCase):
 
         self.assertEqual(result["checked"], 1)
         context = dispatched[0]
-        self.assertIn("LivingMemory 召回摘要", context)
+        self.assertIn("Sylanne 自有记忆召回摘要", context)
         self.assertIn("论文图表焦虑", context)
         self.assertIn("轻轻提醒", context)
 
@@ -3198,7 +3268,7 @@ class AstrBotLifecycleTests(unittest.TestCase):
         self.assertIn("最近请求上下文", context)
         self.assertIn("插件的其他用户", context)
 
-    def test_on_llm_request_can_include_livingmemory_summary_when_installed(self):
+    def test_on_llm_request_can_include_sylanne_memory_summary(self):
         plugin = new_plugin(
             {
                 "assessment_timing": "post",
@@ -3211,21 +3281,14 @@ class AstrBotLifecycleTests(unittest.TestCase):
             },
         )
         self._bind_common_state_hooks(plugin)
+        from memory_engine import MemoryRecord, SylanneMemoryState
+
         calls = []
 
         class FakeLivingMemory:
             async def search_memory(self, session_key=None, query="", limit=3):
-                calls.append(
-                    {
-                        "session_key": session_key,
-                        "query": query,
-                        "limit": limit,
-                    },
-                )
-                return [
-                    {"text": "用户刚才解释过，“他们”指插件的其他用户。"},
-                    {"content": "用户希望 bot 回答时不要把插件用户误会成恋爱对象。"},
-                ]
+                calls.append({"session_key": session_key, "query": query, "limit": limit})
+                raise AssertionError("on_llm_request must not call LivingMemory")
 
         class FakeContext:
             def get_registered_star(self, name):
@@ -3234,6 +3297,30 @@ class AstrBotLifecycleTests(unittest.TestCase):
                 return None
 
         plugin.context = FakeContext()
+        state = SylanneMemoryState.initial(now=0.0)
+        state.records.extend(
+            [
+                MemoryRecord(
+                    text="用户刚才解释过，“他们”指插件的其他用户。",
+                    summary="用户刚才解释过，“他们”指插件的其他用户。",
+                    session_key="s-request-memory",
+                    created_at=10.0,
+                    updated_at=10.0,
+                    depth=0.9,
+                    confidence=0.84,
+                ),
+                MemoryRecord(
+                    text="用户希望 bot 回答时不要把插件用户误会成恋爱对象。",
+                    summary="用户希望 bot 回答时不要把插件用户误会成恋爱对象。",
+                    session_key="s-request-memory",
+                    created_at=11.0,
+                    updated_at=11.0,
+                    depth=0.88,
+                    confidence=0.81,
+                ),
+            ],
+        )
+        plugin._sylanne_memory_cache["s-request-memory"] = state
         request = fake_request(
             session_id="s-request-memory",
             prompt="那你有什么想对他们说的吗",
@@ -3257,14 +3344,49 @@ class AstrBotLifecycleTests(unittest.TestCase):
         )
 
         injected = "\n".join(self._request_text_parts(request))
-        self.assertEqual(calls[0]["session_key"], "s-request-memory")
-        self.assertIn("插件的其他用户", calls[0]["query"])
-        self.assertIn("那你有什么想对他们说的吗", calls[0]["query"])
-        self.assertIn("sylanne_livingmemory_recall", injected)
+        self.assertEqual(calls, [])
+        self.assertIn("sylanne_memory_recall", injected)
         self.assertIn("用户刚才解释过", injected)
         self.assertIn("不要把插件用户误会成恋爱对象", injected)
 
-    def test_on_llm_request_livingmemory_recall_failure_silently_degrades(self):
+    def test_on_llm_request_does_not_call_external_livingmemory(self):
+        plugin = new_plugin(
+            {
+                "assessment_timing": "post",
+                "inject_state": False,
+                "enable_realtime_chat": True,
+                "enable_sticker_reaction": False,
+            },
+        )
+        self._bind_common_state_hooks(plugin)
+        calls = []
+
+        class FakeLivingMemory:
+            async def search_memory(self, session_key=None, query="", limit=3):
+                calls.append({"session_key": session_key, "query": query, "limit": limit})
+                return [{"text": "should not be injected by default"}]
+
+        class FakeContext:
+            def get_registered_star(self, name):
+                if name == "astrbot_plugin_livingmemory":
+                    return SimpleNamespace(activated=True, star_cls=FakeLivingMemory())
+                return None
+
+        plugin.context = FakeContext()
+        request = fake_request(session_id="s-request-memory-default-off", prompt="他们呢")
+
+        asyncio.run(
+            plugin.on_llm_request(
+                FakeEvent("s-request-memory-default-off", message="他们呢", sender_id="u1"),
+                request,
+            ),
+        )
+
+        injected = "\n".join(self._request_text_parts(request))
+        self.assertEqual(calls, [])
+        self.assertNotIn("sylanne_memory_recall", injected)
+
+    def test_on_llm_request_sylanne_memory_recall_failure_silently_degrades(self):
         plugin = new_plugin(
             {
                 "assessment_timing": "post",
@@ -3275,17 +3397,10 @@ class AstrBotLifecycleTests(unittest.TestCase):
         )
         self._bind_common_state_hooks(plugin)
 
-        class BrokenLivingMemory:
-            async def search_memory(self, session_key=None, query="", limit=3):
-                raise RuntimeError("livingmemory unavailable")
+        async def broken_load_memory(self, session_key, *, now=None):
+            raise RuntimeError("sylanne memory unavailable")
 
-        class FakeContext:
-            def get_registered_star(self, name):
-                if name == "astrbot_plugin_livingmemory":
-                    return SimpleNamespace(activated=True, star_cls=BrokenLivingMemory())
-                return None
-
-        plugin.context = FakeContext()
+        bind_async(plugin, "_load_sylanne_memory_state", broken_load_memory)
         request = fake_request(session_id="s-request-memory-fail", prompt="他们呢")
 
         asyncio.run(
@@ -3296,9 +3411,152 @@ class AstrBotLifecycleTests(unittest.TestCase):
         )
 
         injected = "\n".join(self._request_text_parts(request))
-        self.assertNotIn("sylanne_livingmemory_recall", injected)
+        self.assertNotIn("sylanne_memory_recall", injected)
 
-    def test_interrupted_reply_recovery_can_include_livingmemory_summary(self):
+    def test_sylanne_memory_recall_query_excludes_existing_recall_parts(self):
+        plugin = new_plugin()
+        request = fake_request(session_id="s-memory-query", prompt="current prompt")
+        request.contexts = [
+            {"role": "user", "content": "recent user context"},
+        ]
+        request.extra_user_content_parts.extend(
+            [
+                SimpleNamespace(
+                    text="[sylanne_memory_recall]\nold recalled memory must not become a query",
+                ),
+                SimpleNamespace(text="new temporary context can join query"),
+            ],
+        )
+
+        query = plugin._sylanne_memory_recall_query_for_request(
+            request,
+            current_user_text="current prompt",
+        )
+
+        self.assertIn("new temporary context", query)
+        self.assertNotIn("old recalled memory", query)
+        self.assertNotIn("sylanne_memory_recall", query)
+
+    def test_context_compression_summary_is_used_for_memory_query(self):
+        plugin = new_plugin()
+        request = fake_request(
+            session_id="s-compressed-memory-query",
+            prompt="what should I tell them now?",
+        )
+        request.contexts = [
+            {
+                "role": "system",
+                "content": (
+                    "AstrBot 自动压缩上下文摘要：用户刚才说明 them 指插件的其他使用者；"
+                    "助手已经道歉并准备给插件使用者留一句话。"
+                ),
+            },
+        ]
+
+        query = plugin._sylanne_memory_recall_query_for_request(
+            request,
+            current_user_text="what should I tell them now?",
+        )
+
+        self.assertIn("自动压缩上下文摘要", query)
+        self.assertIn("插件的其他使用者", query)
+        self.assertIn("what should I tell them now?", query)
+
+    def test_context_compression_summary_strips_sylanne_internal_blocks(self):
+        plugin = new_plugin()
+        request = fake_request(
+            session_id="s-compressed-internal-strip",
+            prompt="continue",
+        )
+        request.contexts = [
+            {
+                "role": "system",
+                "content": (
+                    "自动压缩上下文摘要：用户问的是插件使用者。\n"
+                    "[sylanne_memory_recall]\n"
+                    "old internal recall must not re-enter query\n"
+                    "[sylanne_realtime_assistant_history]\n"
+                    "old realtime shadow must not re-enter query\n"
+                    "摘要结束。"
+                ),
+            },
+        ]
+
+        query = plugin._sylanne_memory_recall_query_for_request(
+            request,
+            current_user_text="continue",
+        )
+
+        self.assertIn("插件使用者", query)
+        self.assertNotIn("old internal recall", query)
+        self.assertNotIn("old realtime shadow", query)
+        self.assertNotIn("sylanne_memory_recall", query)
+        self.assertNotIn("sylanne_realtime_assistant_history", query)
+
+    def test_context_compression_summary_strips_inline_sylanne_markers(self):
+        plugin = new_plugin()
+        request = fake_request(
+            session_id="s-compressed-inline-strip",
+            prompt="continue",
+        )
+        request.contexts = [
+            {
+                "role": "system",
+                "content": (
+                    "自动压缩上下文摘要：用户问的是插件使用者。"
+                    "[sylanne_memory_recall] old inline recall must not re-enter query。"
+                ),
+            },
+        ]
+
+        query = plugin._sylanne_memory_recall_query_for_request(
+            request,
+            current_user_text="continue",
+        )
+
+        self.assertIn("插件使用者", query)
+        self.assertNotIn("old inline recall", query)
+        self.assertNotIn("sylanne_memory_recall", query)
+
+    def test_context_compression_summary_prevents_duplicate_realtime_shadow(self):
+        plugin = new_plugin({"enable_realtime_chat": True, "enable_sticker_reaction": False})
+        plugin._record_realtime_assistant_history_shadow(
+            "s-compressed-shadow",
+            full_text="assistant already summarized by official compression",
+            input_epoch=1,
+            message_parts=[{"text": "assistant already summarized by official compression"}],
+            source="unit_test",
+        )
+        request = fake_request(
+            session_id="s-compressed-shadow",
+            prompt="continue from that",
+        )
+        request.contexts = [
+            {
+                "role": "system",
+                "content": (
+                    "官方自动压缩上下文摘要：上一轮助手已经说过 "
+                    "assistant already summarized by official compression。"
+                    "[sylanne_realtime_assistant_history]"
+                ),
+            },
+        ]
+
+        appended = plugin._append_realtime_assistant_history_shadow_if_any(
+            request,
+            "s-compressed-shadow",
+            budget=None,
+            current_user_text="continue from that",
+        )
+
+        injected = "\n".join(self._request_text_parts(request))
+        self.assertFalse(appended)
+        self.assertNotIn("sylanne_realtime_assistant_history", injected)
+        queue = plugin._realtime_assistant_history_shadow_cache()["s-compressed-shadow"]
+        self.assertTrue(queue[-1]["consumed"])
+        self.assertEqual(queue[-1]["consumed_reason"], "official_context_compression_summary")
+
+    def test_interrupted_reply_recovery_can_include_sylanne_memory_summary(self):
         plugin = new_plugin(
             {
                 "assessment_timing": "post",
@@ -3316,10 +3574,11 @@ class AstrBotLifecycleTests(unittest.TestCase):
             input_epoch=1,
             reason="user_interrupted",
         )
+        from memory_engine import MemoryRecord, SylanneMemoryState
 
         class FakeLivingMemory:
             async def search_memory(self, session_key=None, query="", limit=3):
-                return [{"text": "他们在这段对话里指插件的其他使用者。"}]
+                raise AssertionError("interrupted recovery must use Sylanne memory")
 
         class FakeContext:
             def get_registered_star(self, name):
@@ -3328,6 +3587,19 @@ class AstrBotLifecycleTests(unittest.TestCase):
                 return None
 
         plugin.context = FakeContext()
+        state = SylanneMemoryState.initial(now=0.0)
+        state.records.append(
+            MemoryRecord(
+                text="他们在这段对话里指插件的其他使用者。",
+                summary="他们在这段对话里指插件的其他使用者。",
+                session_key="s-breakpoint-memory",
+                created_at=10.0,
+                updated_at=10.0,
+                depth=0.9,
+                confidence=0.82,
+            ),
+        )
+        plugin._sylanne_memory_cache["s-breakpoint-memory"] = state
         request = fake_request(session_id="s-breakpoint-memory", prompt="那他们呢")
 
         asyncio.run(
@@ -3339,7 +3611,7 @@ class AstrBotLifecycleTests(unittest.TestCase):
 
         injected = "\n".join(self._request_text_parts(request))
         self.assertIn("sylanne_interrupted_reply_breakpoint", injected)
-        self.assertIn("sylanne_livingmemory_recall", injected)
+        self.assertIn("sylanne_memory_recall", injected)
         self.assertIn("其他使用者", injected)
 
     def test_proactive_scheduler_skips_missing_unified_origin(self):
@@ -3437,6 +3709,91 @@ class AstrBotLifecycleTests(unittest.TestCase):
         self.assertEqual(len(sent), 1)
         self.assertEqual(result["sticker_result"]["sent"], False)
         self.assertEqual(result["sticker_result"]["blocked_reason"], "llm_rejected")
+
+    def test_realtime_chat_plan_sends_url_sticker_as_image_message(self):
+        sent = []
+
+        class StrictMessageChain:
+            def __init__(self):
+                self.parts = []
+
+            def message(self, text):
+                self.parts.append(("message", text))
+                return self
+
+            def file_image(self, path):
+                self.parts.append(("file_image", path))
+                return self
+
+            def __str__(self):
+                return "|".join(f"{kind}:{value}" for kind, value in self.parts)
+
+        class FakeImage:
+            @staticmethod
+            def fromURL(url):
+                return ("image_url_component", url)
+
+        class FakeContext:
+            async def send_message(self, origin, message):
+                sent.append((origin, str(message), list(getattr(message, "parts", []))))
+                return {"ok": True}
+
+        plugin = new_plugin()
+        plugin.context = FakeContext()
+
+        async def approve_sticker(self, *args, **kwargs):
+            return {
+                "approved": True,
+                "reason": "unit test accepts candidate",
+                "source": "unit_test",
+            }
+
+        bind_async(plugin, "_judge_sticker_consistency", approve_sticker)
+        plan = {
+            "session_key": "s-url-sticker",
+            "message_parts": [
+                {"index": 0, "text": "look", "delay_before_seconds": 0.0},
+            ],
+            "sticker": {
+                "should_send": True,
+                "intent": "playful",
+                "candidate": {
+                    "url": "https://example.test/sylanne.png",
+                    "name": "url-sticker",
+                },
+            },
+        }
+
+        event_module = sys.modules["astrbot.api.event"]
+        old_chain = event_module.MessageChain
+        component_module = types.ModuleType("astrbot.api.message_components")
+        component_module.Image = FakeImage
+        old_component_module = sys.modules.get("astrbot.api.message_components")
+        event_module.MessageChain = StrictMessageChain
+        sys.modules["astrbot.api.message_components"] = component_module
+        try:
+            result = asyncio.run(
+                plugin._send_realtime_chat_plan(
+                    FakeEvent("s-url-sticker"),
+                    plan,
+                    source="unit_test",
+                ),
+            )
+        finally:
+            event_module.MessageChain = old_chain
+            if old_component_module is None:
+                sys.modules.pop("astrbot.api.message_components", None)
+            else:
+                sys.modules["astrbot.api.message_components"] = old_component_module
+
+        self.assertEqual(result["sticker_result"]["sent"], True)
+        self.assertTrue(
+            any(
+                ("image_url_component", "https://example.test/sylanne.png") in parts
+                for _, _, parts in sent
+            ),
+        )
+        self.assertFalse(any("[表情包]" in text for _, text, _ in sent))
 
     def test_sticker_consistency_parser_treats_string_false_as_rejected(self):
         plugin = new_plugin()
@@ -3539,6 +3896,44 @@ class AstrBotLifecycleTests(unittest.TestCase):
         self.assertIn("第一句", sent[0][1])
         self.assertIn("第二句", sent[1][1])
 
+    def test_realtime_chat_explicit_dispatch_still_respects_cooldown(self):
+        sent = []
+
+        class FakeContext:
+            async def send_message(self, origin, message):
+                sent.append((origin, str(message)))
+                return {"ok": True}
+
+        plugin = new_plugin(
+            {
+                "runtime_parameter_debug_override_enabled": True,
+                "enable_sticker_reaction": False,
+                "realtime_chat_session_cooldown_seconds": 9999.0,
+            },
+        )
+        plugin.context = FakeContext()
+        plugin._last_realtime_chat_adaptive_settings = {
+            "s-dispatch-cooldown": {
+                "realtime_chat": {
+                    "values": {"valence": 0.2},
+                    "restraint": 0.0,
+                },
+            },
+        }
+        plugin._realtime_chat_last_sent = {"s-dispatch-cooldown": time.time()}
+
+        result = asyncio.run(
+            plugin.request_realtime_chat_dispatch(
+                FakeEvent("s-dispatch-cooldown"),
+                "第一句。第二句。",
+                dry_run=False,
+            ),
+        )
+
+        self.assertFalse(result["sent"])
+        self.assertEqual(result["blocked_reason"], "cooldown_active")
+        self.assertEqual(sent, [])
+
     def test_on_llm_response_intercepts_completion_and_schedules_realtime_send(self):
         sent = []
 
@@ -3579,6 +3974,107 @@ class AstrBotLifecycleTests(unittest.TestCase):
         self.assertEqual(len(sent), 2)
         self.assertEqual(assessment_calls[0]["current_text"], "第一句。第二句。")
         self.assertEqual(saves[0][0], "s-intercept")
+
+    def test_on_llm_response_intercept_preserves_result_chain_images(self):
+        from astrbot.api.event import MessageChain
+
+        sent = []
+
+        class FakeContext:
+            async def send_message(self, origin, message):
+                sent.append((origin, str(message), list(getattr(message, "parts", []))))
+                return {"ok": True}
+
+        plugin = new_plugin(
+            {
+                "assessment_timing": "post",
+                "enable_realtime_chat": True,
+                "realtime_chat_intercept_llm_response": True,
+                "enable_sticker_reaction": False,
+                "runtime_parameter_debug_override_enabled": True,
+                "realtime_chat_min_delay_seconds": 0.0,
+                "realtime_chat_max_delay_seconds": 0.0,
+            },
+        )
+        plugin.context = FakeContext()
+        self._bind_common_state_hooks(plugin)
+        response = SimpleNamespace(
+            completion_text="look at this image. it should still arrive.",
+            result_chain=MessageChain()
+            .message("look at this image. it should still arrive.")
+            .file_image("C:/tmp/sylanne-image.png"),
+        )
+
+        async def run_response():
+            await plugin.on_llm_response(
+                FakeEvent("s-intercept-image", platform_name="aiocqhttp"),
+                response,
+            )
+            await self._await_background_tasks(plugin)
+
+        asyncio.run(run_response())
+
+        self.assertEqual(response.completion_text, "")
+        self.assertTrue(
+            any(("file_image", "C:/tmp/sylanne-image.png") in parts for _, _, parts in sent),
+        )
+        self.assertTrue(
+            any(
+                kind == "message" and "look at this image" in str(value)
+                for _, _, parts in sent
+                for kind, value in parts
+            ),
+        )
+
+    def test_on_llm_response_intercepts_even_when_realtime_send_cooldown_is_active(self):
+        sent = []
+
+        class FakeContext:
+            async def send_message(self, origin, message):
+                sent.append((origin, str(message)))
+                return {"ok": True}
+
+        plugin = new_plugin(
+            {
+                "assessment_timing": "post",
+                "enable_realtime_chat": True,
+                "realtime_chat_intercept_llm_response": True,
+                "enable_sticker_reaction": False,
+                "runtime_parameter_debug_override_enabled": True,
+                "realtime_chat_session_cooldown_seconds": 9999.0,
+                "realtime_chat_min_delay_seconds": 0.0,
+                "realtime_chat_max_delay_seconds": 0.0,
+            },
+        )
+        plugin.context = FakeContext()
+        self._bind_common_state_hooks(plugin)
+        plugin._last_realtime_chat_adaptive_settings = {
+            "s-intercept-cooldown": {
+                "realtime_chat": {
+                    "values": {"valence": 0.2},
+                    "restraint": 0.0,
+                },
+            },
+        }
+        plugin._realtime_chat_last_sent = {"s-intercept-cooldown": time.time()}
+        response = SimpleNamespace(completion_text="第一句。第二句。")
+
+        async def run_response():
+            await plugin.on_llm_response(
+                FakeEvent("s-intercept-cooldown", platform_name="aiocqhttp"),
+                response,
+            )
+            await self._await_background_tasks(plugin)
+
+        asyncio.run(run_response())
+
+        self.assertEqual(response.completion_text, "")
+        self.assertEqual(
+            getattr(response, "_sylanne_intercepted_completion_text", ""),
+            "第一句。第二句。",
+        )
+        self.assertTrue(sent)
+        self.assertGreaterEqual(len(sent), 2)
 
     def test_realtime_intercept_preserves_assistant_context_for_next_turn(self):
         sent = []

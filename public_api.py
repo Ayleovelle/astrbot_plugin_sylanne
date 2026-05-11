@@ -228,7 +228,7 @@ class EmotionServiceProtocol(Protocol):
         request: Any = None,
         session_key: str | None = None,
         memory_text: str = "",
-        source: str = "livingmemory",
+        source: str = "sylanne_memory",
         include_prompt_fragment: bool = False,
         include_raw_snapshot: bool = True,
         written_at: float | None = None,

@@ -121,6 +121,7 @@ def new_plugin(config=None):
     plugin._moral_repair_memory_cache = {}
     plugin._fallibility_memory_cache = {}
     plugin._group_atmosphere_memory_cache = {}
+    plugin._sylanne_memory_cache = {}
     plugin._agent_identity_profile_cache = {}
     plugin._agent_trail_cache = {}
     plugin._agent_turn_sequence = {}

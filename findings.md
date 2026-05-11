@@ -215,3 +215,21 @@ This file stores durable discoveries from implementation, review, and remote tes
 - Same-session cooldown defaults to `1800.0` seconds and is checked before send execution.
 - LLM tool `request_bot_proactive_speech_dispatch` defaults to `dry_run=True` so tool use does not surprise-send unless explicitly requested.
 - Successful proactive send is observed back into lifelike learning with source `proactive_dispatch`, so the bot's own initiative becomes part of the relationship/common-ground trajectory.
+
+## 2026-05-11 Realtime Split and Empty Output Debugging
+
+- The `OpenAI completion has no usable output` error is emitted by the provider/source adapter path, not by a plugin exception stack trace.
+- The observed log includes `model='gemini-3-flash-preview'` and `prompt_tokens=89499`, so the immediate failure is an empty model response after a very large prompt.
+- Current plugin-side request assembly is bounded:
+  - `_request_to_text()` clips context to a configured maximum,
+  - state injection uses `_state_injection_budget_for_request(...)`,
+  - `_append_temp_text_part(...)` enforces `max_added_chars` and `max_parts`.
+- The plugin can still contribute to prompt growth by adding continuity, memory recall, realtime input fragments, and state injection, but the current code does not look like it can alone explain an 89k-token prompt unless the upstream conversation context is already huge.
+- The realtime split-send path itself already splits and sends per part; the stronger current suspect for the visual "分段失败" symptom is the intercept gate and cooldown path, not the splitter.
+- Sticker support currently indexes only a local folder through `index_local_stickers(...)`. The `sticker_default_repo_url` pointing to `https://github.com/zhaoolee/ChineseBQB.git` is a reference/default hint, not an automatic GitHub fetch or clone step.
+- Therefore, "cannot retrieve stickers directly from ChineseBQB" is expected in the current implementation unless the user has already downloaded the pack into `sticker_local_root`.
+- Fix direction confirmed on 2026-05-11:
+  - `on_llm_response` realtime interception should not be blocked by realtime send cooldown, because otherwise the original completion falls back to AstrBot default whole-message sending.
+  - Explicit realtime dispatch / proactive dispatch should still respect cooldown and send throttling.
+  - Early realtime continuity and optional recall context should be budgeted before insertion, instead of being appended before state-injection budgeting.
+  - LivingMemory recall is now compatibility-only and disabled by default; the first-party memory module is the future main path.

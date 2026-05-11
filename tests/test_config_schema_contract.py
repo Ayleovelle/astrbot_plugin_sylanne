@@ -7,6 +7,27 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 
+SYLANNE_MEMORY_OPERATIONAL_SCHEMA_KEYS = {
+    "enable_sylanne_memory",
+    "sylanne_memory_debug_view_enabled",
+    "allow_sylanne_memory_reset_backdoor",
+}
+
+SYLANNE_MEMORY_CORE_HIDDEN_KEYS = {
+    "sylanne_memory_salience_bias",
+    "sylanne_memory_relationship_weight",
+    "sylanne_memory_consolidation_gain",
+    "sylanne_memory_decay_half_life_seconds",
+    "sylanne_memory_decay_half_life_days",
+    "sylanne_memory_recall_limit",
+    "sylanne_memory_depth_threshold",
+    "sylanne_memory_compression_threshold",
+    "sylanne_memory_interference_sensitivity",
+    "sylanne_memory_max_records",
+    "sylanne_memory_prompt_max_chars",
+    "sylanne_memory_max_prompt_chars",
+}
+
 
 def runtime_config_keys():
     tree = ast.parse((ROOT / "main.py").read_text(encoding="utf-8"))
@@ -157,7 +178,11 @@ class ConfigSchemaContractTests(unittest.TestCase):
 
     def test_schema_unused_keys_are_explicit_reserved_slots(self):
         unused = set(schema()) - runtime_config_keys()
-        self.assertEqual(unused, {"humanlike_clinical_like_enabled"})
+        self.assertEqual(
+            unused,
+            {"humanlike_clinical_like_enabled"}
+            | SYLANNE_MEMORY_OPERATIONAL_SCHEMA_KEYS,
+        )
         self.assertIn(
             "第一轮仅保留配置位",
             schema()["humanlike_clinical_like_enabled"].get("hint", ""),
@@ -207,9 +232,11 @@ class ConfigSchemaContractTests(unittest.TestCase):
             "sticker_llm_consistency_check_enabled": ("bool", True),
             "allow_emotion_reset_backdoor": ("bool", True),
             "enable_shadow_diagnostics": ("bool", False),
+            "enable_sylanne_memory": ("bool", True),
+            "sylanne_memory_debug_view_enabled": ("bool", False),
+            "allow_sylanne_memory_reset_backdoor": ("bool", True),
             "humanlike_memory_write_enabled": ("bool", True),
             "allow_humanlike_reset_backdoor": ("bool", True),
-            "enable_livingmemory_recall_injection": ("bool", True),
             "enable_psychological_screening": ("bool", False),
             "enable_integrated_self_state": ("bool", True),
             "integrated_self_memory_write_enabled": ("bool", True),
@@ -226,6 +253,7 @@ class ConfigSchemaContractTests(unittest.TestCase):
     def test_personality_expression_parameters_are_not_user_tunable(self):
         cfg = schema()
         hidden_keys = {
+            *SYLANNE_MEMORY_CORE_HIDDEN_KEYS,
             "proactive_speech_dispatch_cooldown_seconds",
             "proactive_speech_dispatch_ttl_seconds",
             "proactive_speech_max_chars",
@@ -246,6 +274,48 @@ class ConfigSchemaContractTests(unittest.TestCase):
             "auxiliary_state_injection_detail",
         }
         self.assertFalse(hidden_keys & set(cfg))
+
+    def test_sylanne_memory_schema_exposes_only_operational_switches(self):
+        cfg = schema()
+        exposed_memory_keys = {
+            key
+            for key in cfg
+            if key.startswith("sylanne_memory_")
+            or key in {
+                "enable_sylanne_memory",
+                "allow_sylanne_memory_reset_backdoor",
+            }
+        }
+
+        self.assertEqual(
+            exposed_memory_keys,
+            SYLANNE_MEMORY_OPERATIONAL_SCHEMA_KEYS,
+        )
+        self.assertTrue(SYLANNE_MEMORY_CORE_HIDDEN_KEYS.isdisjoint(cfg))
+        self.assertEqual(cfg["enable_sylanne_memory"]["default"], True)
+        self.assertEqual(
+            cfg["sylanne_memory_debug_view_enabled"]["default"],
+            False,
+        )
+        self.assertEqual(
+            cfg["allow_sylanne_memory_reset_backdoor"]["default"],
+            True,
+        )
+        self.assertNotIn("enable_livingmemory_recall_injection", cfg)
+        self.assertIn(
+            "不提供核心参数手动覆盖",
+            cfg["sylanne_memory_debug_view_enabled"]["hint"],
+        )
+
+    def test_current_readme_uses_first_party_memory_contract(self):
+        readme = (ROOT / "README.md").read_text(encoding="utf-8")
+        current_readme = readme.split("## 旧版迭代记录", 1)[0]
+
+        self.assertIn("## Sylanne 自有长期记忆", current_readme)
+        self.assertIn("source=\"sylanne_memory\"", current_readme)
+        self.assertNotIn("enable_livingmemory_recall_injection", current_readme)
+        self.assertNotIn("sylanne_livingmemory_recall", current_readme)
+        self.assertNotIn("source=\"livingmemory\"", current_readme)
 
     def test_schema_defaults_match_runtime_fallbacks(self):
         cfg = schema()
@@ -332,7 +402,15 @@ class ConfigSchemaContractTests(unittest.TestCase):
             "consequence_decay",
             "cold_war_turns",
         }
-        missing = set(cfg) - set(typed_rows) - legacy_config_keys
+        schema_only_operational_slots = (
+            SYLANNE_MEMORY_OPERATIONAL_SCHEMA_KEYS
+        )
+        missing = (
+            set(cfg)
+            - set(typed_rows)
+            - legacy_config_keys
+            - schema_only_operational_slots
+        )
         type_mismatches = {
             key: {
                 "readme": row["type"],
