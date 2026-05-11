@@ -21,6 +21,7 @@ INCLUDE_ROOT_FILES = {
     "realtime_chat_input.py",
     "integrated_self.py",
     "moral_repair_engine.py",
+    "memory_engine.py",
     "fallibility_engine.py",
     "psychological_screening.py",
     "prompts.py",
