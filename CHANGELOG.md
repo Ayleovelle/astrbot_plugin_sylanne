@@ -2,6 +2,27 @@
 
 本文件用于 AstrBot 插件市场/管理页展示更新内容。更完整的设计说明、公式推导、测试矩阵和维护手册见 `README.md`。
 
+## 1.8.0
+
+发布日期：2026-05-11
+
+### 新增
+
+- 即时聊天新增用户说话节奏学习：生命化学习会记录平均句长、换行密度、标点停顿、短句倾向、长段倾向和碎片化程度。
+- 分条策略会读取 `lifelike_learning_state.user_profile.speaking_style`，自动决定更短碎还是更完整的消息节奏。
+
+### 优化
+
+- 长回复不再为了满足 `max_parts` 偏好而把尾部静默截成 `...`；过长内容会继续拆成更多安全长度的消息。
+- 用户插话后的旧回复只写入低 token 断点摘要，下一轮不会把旧长文全文塞回提示词。
+- `get_realtime_chat_plan(...)` 只暴露派生后的 `user_style_adaptation` 数值，不暴露用户画像原文。
+
+### 验证
+
+- 新增用户说话风格学习、分条自适应、长回复不省略、插话断点低 token 注入相关测试。
+- `python -m py_compile main.py realtime_chat_engine.py lifelike_learning_engine.py` 通过。
+- `python -m pytest tests/test_astrbot_lifecycle.py -q`：92 项通过，5 个 subtests 通过。
+
 ## 1.7.1
 
 发布日期：2026-05-11

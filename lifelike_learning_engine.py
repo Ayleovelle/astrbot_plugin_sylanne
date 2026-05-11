@@ -193,6 +193,7 @@ class UserProfileEvidence:
     style_preferences: list[str] = field(default_factory=list)
     boundary_notes: list[str] = field(default_factory=list)
     need_notes: list[str] = field(default_factory=list)
+    speaking_style: dict[str, float] = field(default_factory=dict)
 
     @classmethod
     def from_dict(cls, data: Any) -> "UserProfileEvidence":
@@ -210,6 +211,7 @@ class UserProfileEvidence:
             style_preferences=_string_list(data.get("style_preferences"), limit=24),
             boundary_notes=_string_list(data.get("boundary_notes"), limit=24),
             need_notes=_string_list(data.get("need_notes"), limit=24),
+            speaking_style=_normalize_speaking_style(data.get("speaking_style")),
         )
 
     def to_dict(self) -> dict[str, Any]:
@@ -220,6 +222,7 @@ class UserProfileEvidence:
             "style_preferences": list(self.style_preferences[:24]),
             "boundary_notes": list(self.boundary_notes[:24]),
             "need_notes": list(self.need_notes[:24]),
+            "speaking_style": dict(self.speaking_style),
         }
 
 
@@ -246,6 +249,7 @@ def _copy_user_profile(profile: UserProfileEvidence) -> UserProfileEvidence:
         style_preferences=list(profile.style_preferences[:24]),
         boundary_notes=list(profile.boundary_notes[:24]),
         need_notes=list(profile.need_notes[:24]),
+        speaking_style=dict(profile.speaking_style),
     )
 
 
@@ -364,6 +368,7 @@ class LifelikeObservation:
     style_preferences: list[str] = field(default_factory=list)
     boundary_notes: list[str] = field(default_factory=list)
     need_notes: list[str] = field(default_factory=list)
+    speaking_style: dict[str, float] = field(default_factory=dict)
     confidence: float = 0.35
     source: str = "heuristic"
     reason: str = ""
@@ -699,6 +704,11 @@ class LifelikeLearningEngine:
         profile.need_notes = _dedupe(
             profile.need_notes + observation.need_notes,
         )[:24]
+        profile.speaking_style = _merge_speaking_style(
+            profile.speaking_style,
+            observation.speaking_style,
+            observation.confidence,
+        )
         return profile
 
     def _update_values(
@@ -797,6 +807,7 @@ def heuristic_lifelike_observation(
     source: str = "heuristic",
 ) -> LifelikeObservation:
     text = str(text or "")
+    speaking_style = infer_speaking_style(text)
     terms = extract_candidate_terms(text)
     facts = extract_user_facts(text)
     likes, dislikes = extract_preferences(text)
@@ -812,6 +823,8 @@ def heuristic_lifelike_observation(
         flags.append("boundary_preference_evidence")
     if need_notes:
         flags.append("mutual_need_evidence")
+    if speaking_style.get("confidence", 0.0) >= 0.18:
+        flags.append("speaking_style_evidence")
     reason_parts = []
     if terms:
         reason_parts.append(f"terms={','.join(terms[:6])}")
@@ -825,6 +838,8 @@ def heuristic_lifelike_observation(
         reason_parts.append("boundaries")
     if need_notes:
         reason_parts.append("mutual_need")
+    if speaking_style.get("confidence", 0.0) >= 0.18:
+        reason_parts.append("speaking_style")
     if not reason_parts:
         reason_parts.append("low-signal common-ground observation")
     return LifelikeObservation(
@@ -836,6 +851,7 @@ def heuristic_lifelike_observation(
         style_preferences=style_preferences,
         boundary_notes=boundary_notes,
         need_notes=need_notes,
+        speaking_style=speaking_style,
         confidence=0.52 if flags else 0.24,
         source=source,
         reason="; ".join(reason_parts),
@@ -1778,6 +1794,102 @@ def extract_style_preferences(text: str) -> list[str]:
     if _STYLE_RIGOR_RE.search(text):
         preferences.append("rigorous_engineering_detail_when_requested")
     return preferences
+
+
+def infer_speaking_style(text: str) -> dict[str, float]:
+    text = str(text or "").strip()
+    if not text:
+        return {}
+    char_count = len(text)
+    sentence_units = [
+        item.strip()
+        for item in re.split(r"[。！？!?…\n]+", text)
+        if item.strip()
+    ]
+    unit_count = max(1, len(sentence_units))
+    avg_unit_chars = char_count / unit_count
+    newline_density = clamp(text.count("\n") / max(1.0, char_count / 80.0))
+    punctuation_count = len(re.findall(r"[，。！？、,.!?…~～；;：:]", text))
+    punctuation_density = clamp(punctuation_count / max(1.0, char_count / 24.0))
+    short_turn_bias = clamp((24.0 - avg_unit_chars) / 22.0)
+    long_turn_bias = clamp((avg_unit_chars - 38.0) / 56.0)
+    fragment_bias = clamp(
+        0.46 * short_turn_bias
+        + 0.24 * newline_density
+        + 0.18 * punctuation_density
+        + 0.12 * clamp((unit_count - 1) / 5.0),
+    )
+    formal_block_bias = clamp(
+        0.55 * long_turn_bias
+        + 0.25 * (1.0 - punctuation_density)
+        + 0.20 * (1.0 - newline_density),
+    )
+    typing_speed_bias = clamp(
+        0.50
+        + 0.20 * long_turn_bias
+        - 0.16 * short_turn_bias
+        + 0.10 * punctuation_density,
+    )
+    confidence = clamp(min(1.0, char_count / 120.0) * (0.55 + 0.10 * min(unit_count, 4)))
+    return {
+        "avg_unit_chars": round(avg_unit_chars, 6),
+        "short_turn_bias": round(short_turn_bias, 6),
+        "long_turn_bias": round(long_turn_bias, 6),
+        "fragment_bias": round(fragment_bias, 6),
+        "formal_block_bias": round(formal_block_bias, 6),
+        "punctuation_density": round(punctuation_density, 6),
+        "newline_density": round(newline_density, 6),
+        "typing_speed_bias": round(typing_speed_bias, 6),
+        "confidence": round(confidence, 6),
+    }
+
+
+def _normalize_speaking_style(raw: Any) -> dict[str, float]:
+    if not isinstance(raw, dict):
+        return {}
+    keys = {
+        "avg_unit_chars",
+        "short_turn_bias",
+        "long_turn_bias",
+        "fragment_bias",
+        "formal_block_bias",
+        "punctuation_density",
+        "newline_density",
+        "typing_speed_bias",
+        "confidence",
+    }
+    result: dict[str, float] = {}
+    for key in keys:
+        if key not in raw:
+            continue
+        value = _as_float(raw.get(key), 0.0)
+        if key == "avg_unit_chars":
+            result[key] = round(max(1.0, min(240.0, value)), 6)
+        else:
+            result[key] = round(clamp(value), 6)
+    return result
+
+
+def _merge_speaking_style(
+    previous: dict[str, float],
+    observed: dict[str, float],
+    confidence: float,
+) -> dict[str, float]:
+    observed = _normalize_speaking_style(observed)
+    if not observed:
+        return _normalize_speaking_style(previous)
+    previous = _normalize_speaking_style(previous)
+    alpha = clamp(0.12 + 0.28 * confidence + 0.20 * observed.get("confidence", 0.0), 0.08, 0.48)
+    merged: dict[str, float] = {}
+    for key, value in observed.items():
+        old = previous.get(key, value)
+        if key == "confidence":
+            merged[key] = round(max(old, value), 6)
+        else:
+            merged[key] = round(old + alpha * (value - old), 6)
+    for key, value in previous.items():
+        merged.setdefault(key, value)
+    return _normalize_speaking_style(merged)
 
 
 def extract_boundary_notes(text: str) -> list[str]:

@@ -2624,11 +2624,36 @@ class AstrBotLifecycleTests(unittest.TestCase):
         )
 
         self.assertEqual(plan["kind"], "realtime_chat_plan")
-        self.assertLessEqual(plan["message_count"], 4)
         self.assertGreaterEqual(plan["message_count"], 2)
+        runtime_limit = plan["settings"]["max_part_chars"]
         for part in plan["message_parts"]:
+            self.assertLessEqual(len(part["text"]), runtime_limit)
             self.assertLessEqual(part["delay_before_seconds"], 1.0)
             self.assertGreaterEqual(part["delay_before_seconds"], 0.0)
+
+    def test_realtime_chat_plan_keeps_long_tail_without_ellipsis(self):
+        plugin = new_plugin(
+            {
+                "runtime_parameter_debug_override_enabled": True,
+                "realtime_chat_max_parts": 3,
+                "realtime_chat_max_part_chars": 8,
+                "enable_sticker_reaction": False,
+            },
+        )
+
+        plan = asyncio.run(
+            plugin.get_realtime_chat_plan(
+                "s-realtime-tail",
+                "第一句短。第二句短。第三句短。第四句短。第五句短。第六句短。第七句短。第八句短。第九句短。第十句短。",
+            ),
+        )
+
+        self.assertEqual(plan["kind"], "realtime_chat_plan")
+        self.assertGreater(plan["message_count"], 3)
+        runtime_limit = plan["settings"]["max_part_chars"]
+        for part in plan["message_parts"]:
+            self.assertLessEqual(len(part["text"]), runtime_limit)
+        self.assertNotIn("...", plan["message_parts"][-1]["text"])
 
     def test_realtime_chat_runtime_settings_are_personality_adaptive(self):
         plugin = new_plugin(
@@ -2674,6 +2699,112 @@ class AstrBotLifecycleTests(unittest.TestCase):
         self.assertNotEqual(plan["typing"]["chars_per_second"], 1.0)
         self.assertLess(plan["settings"]["max_part_chars"], 999)
         self.assertLess(plan["typing"]["min_delay_seconds"], 9.0)
+
+    def test_lifelike_learning_records_user_speaking_style(self):
+        from lifelike_learning_engine import LifelikeLearningState
+
+        plugin = new_plugin(
+            {
+                "assessment_timing": "post",
+                "enable_lifelike_learning": True,
+                "lifelike_learning_injection_strength": 0.0,
+            },
+        )
+        self._bind_common_state_hooks(plugin)
+        lifelike_saves = []
+
+        async def fake_load_lifelike_state(self, session_key, **kwargs):
+            return LifelikeLearningState.initial()
+
+        async def fake_save_lifelike_state(self, session_key, state):
+            lifelike_saves.append(state)
+
+        bind_async(plugin, "_load_lifelike_learning_state", fake_load_lifelike_state)
+        bind_async(plugin, "_save_lifelike_learning_state", fake_save_lifelike_state)
+
+        asyncio.run(
+            plugin.on_llm_request(
+                FakeEvent("s-speaking-style"),
+                fake_request(
+                    session_id="s-speaking-style",
+                    prompt="嗯嗯。\n这个要拆开说！\n别写成长篇 markdown，短一点自然一点。",
+                ),
+            ),
+        )
+
+        style = lifelike_saves[-1].user_profile.speaking_style
+        self.assertGreater(style["confidence"], 0.0)
+        self.assertGreater(style["fragment_bias"], 0.3)
+        self.assertGreater(style["short_turn_bias"], 0.1)
+
+    def test_realtime_chat_adapts_split_strategy_to_user_speaking_style(self):
+        from lifelike_learning_engine import LifelikeLearningState
+
+        text = "第一句先说明问题。第二句补一点上下文。第三句再说处理方式。第四句慢慢收束。第五句留个余地。"
+
+        async def fake_profile(self, *args, **kwargs):
+            return None
+
+        async def fake_emotion(self, *args, **kwargs):
+            return {}
+
+        async def fake_group(self, *args, **kwargs):
+            return {}
+
+        async def short_style_state(self, session_key, **kwargs):
+            state = LifelikeLearningState.initial()
+            state.user_profile.style_preferences = [
+                "natural_conversational_style",
+                "avoid_long_markdown_lists",
+            ]
+            state.user_profile.speaking_style = {
+                "fragment_bias": 0.92,
+                "short_turn_bias": 0.86,
+                "formal_block_bias": 0.08,
+                "typing_speed_bias": 0.48,
+                "confidence": 0.95,
+            }
+            return state
+
+        async def long_style_state(self, session_key, **kwargs):
+            state = LifelikeLearningState.initial()
+            state.user_profile.style_preferences = [
+                "rigorous_engineering_detail_when_requested",
+            ]
+            state.user_profile.speaking_style = {
+                "fragment_bias": 0.08,
+                "short_turn_bias": 0.04,
+                "formal_block_bias": 0.92,
+                "typing_speed_bias": 0.68,
+                "confidence": 0.95,
+            }
+            return state
+
+        short_plugin = new_plugin({"enable_sticker_reaction": False})
+        long_plugin = new_plugin({"enable_sticker_reaction": False})
+        for plugin in (short_plugin, long_plugin):
+            bind_async(plugin, "_public_runtime_persona_profile", fake_profile)
+            bind_async(plugin, "get_emotion_values", fake_emotion)
+            bind_async(plugin, "get_group_atmosphere_values", fake_group)
+        bind_async(short_plugin, "_load_lifelike_learning_state", short_style_state)
+        bind_async(long_plugin, "_load_lifelike_learning_state", long_style_state)
+
+        short_plan = asyncio.run(short_plugin.get_realtime_chat_plan("s-short-style", text))
+        long_plan = asyncio.run(long_plugin.get_realtime_chat_plan("s-long-style", text))
+
+        short_adaptive = short_plan["adaptive"]["realtime_chat"]
+        self.assertTrue(short_adaptive["user_style_adaptation"]["enabled"])
+        self.assertLess(
+            short_plan["settings"]["max_part_chars"],
+            long_plan["settings"]["max_part_chars"],
+        )
+        self.assertGreaterEqual(
+            short_plan["message_count"],
+            long_plan["message_count"],
+        )
+        serialized = str(short_adaptive)
+        self.assertNotIn("style_preferences", serialized)
+        self.assertNotIn("speaking_style", serialized)
 
     def test_proactive_dispatch_policy_is_adaptive_not_fixed_config(self):
         plugin = new_plugin(
@@ -3128,6 +3259,78 @@ class AstrBotLifecycleTests(unittest.TestCase):
         self.assertEqual(saves, [])
         self.assertEqual(assessment_calls, [])
 
+    def test_stale_reply_is_kept_as_compact_breakpoint_for_next_turn(self):
+        sent = []
+
+        class FakeContext:
+            async def send_message(self, origin, message):
+                sent.append((origin, str(message)))
+                return {"ok": True}
+
+        plugin = new_plugin(
+            {
+                "assessment_timing": "post",
+                "inject_state": False,
+                "enable_realtime_chat": True,
+                "realtime_chat_intercept_llm_response": True,
+                "enable_sticker_reaction": False,
+            },
+        )
+        plugin.context = FakeContext()
+        self._bind_common_state_hooks(plugin)
+        stale_response = SimpleNamespace(
+            completion_text="old-answer-start " + ("x" * 1200) + " old-answer-end",
+        )
+
+        async def run_interrupt_and_next_turn():
+            await plugin.on_llm_request(
+                FakeEvent("s-stale-breakpoint", message="first question"),
+                fake_request(session_id="s-stale-breakpoint", prompt="first question"),
+            )
+            await plugin.on_llm_request(
+                FakeEvent("s-stale-breakpoint", message="new message interrupts"),
+                fake_request(
+                    session_id="s-stale-breakpoint",
+                    prompt="new message interrupts",
+                ),
+            )
+            await plugin.on_llm_response(
+                FakeEvent("s-stale-breakpoint", message="first response wrapper"),
+                stale_response,
+            )
+            next_request = fake_request(
+                session_id="s-stale-breakpoint",
+                prompt="continue from the new message",
+            )
+            await plugin.on_llm_request(
+                FakeEvent("s-stale-breakpoint", message="continue from the new message"),
+                next_request,
+            )
+            duplicate_request = fake_request(
+                session_id="s-stale-breakpoint",
+                prompt="another follow up",
+            )
+            await plugin.on_llm_request(
+                FakeEvent("s-stale-breakpoint", message="another follow up"),
+                duplicate_request,
+            )
+            return next_request, duplicate_request
+
+        next_request, duplicate_request = asyncio.run(run_interrupt_and_next_turn())
+
+        injected = "\n".join(self._request_text_parts(next_request))
+        duplicate_injected = "\n".join(self._request_text_parts(duplicate_request))
+        self.assertEqual(stale_response.completion_text, "")
+        self.assertEqual(sent, [])
+        self.assertIn("sylanne_interrupted_reply_breakpoint", injected)
+        self.assertIn("late_llm_response_after_user_message", injected)
+        self.assertIn("unsent_count=1", injected)
+        self.assertIn("full_hash=", injected)
+        self.assertLessEqual(len(injected), 420)
+        self.assertNotIn("x" * 300, injected)
+        self.assertNotIn("...", injected)
+        self.assertNotIn("sylanne_interrupted_reply_breakpoint", duplicate_injected)
+
     def test_realtime_chat_plan_stops_remaining_parts_when_user_interrupts(self):
         sent = []
 
@@ -3168,6 +3371,76 @@ class AstrBotLifecycleTests(unittest.TestCase):
         self.assertEqual(len(sent), 1)
         self.assertEqual(result["message_count"], 1)
         self.assertEqual(result["interrupted_reason"], "user_interrupted")
+
+    def test_realtime_chat_interruption_records_low_token_resume_breakpoint(self):
+        sent = []
+
+        class FakeContext:
+            async def send_message(self, origin, message):
+                sent.append((origin, str(message)))
+                return {"ok": True}
+
+        plugin = new_plugin(
+            {
+                "assessment_timing": "post",
+                "inject_state": False,
+                "enable_sticker_reaction": False,
+            },
+        )
+        plugin.context = FakeContext()
+        self._bind_common_state_hooks(plugin)
+        plugin._conversation_input_epoch = {"s-part-breakpoint": 1}
+        plan = {
+            "session_key": "s-part-breakpoint",
+            "input_epoch": 1,
+            "message_parts": [
+                {"index": 0, "text": "first part", "delay_before_seconds": 0.0},
+                {
+                    "index": 1,
+                    "text": "second unsent part " + ("y" * 900),
+                    "delay_before_seconds": 0.0,
+                },
+            ],
+        }
+
+        original_chain = plugin._build_astrbot_message_chain
+
+        def interrupt_after_first(text):
+            message = original_chain(text)
+            plugin._conversation_input_epoch["s-part-breakpoint"] = 2
+            return message
+
+        async def run_interruption_and_next_turn():
+            plugin._build_astrbot_message_chain = interrupt_after_first
+            result = await plugin._send_realtime_chat_plan(
+                FakeEvent("s-part-breakpoint"),
+                plan,
+                source="unit_test",
+            )
+            plugin._build_astrbot_message_chain = original_chain
+            next_request = fake_request(
+                session_id="s-part-breakpoint",
+                prompt="what were you saying",
+            )
+            await plugin.on_llm_request(
+                FakeEvent("s-part-breakpoint", message="what were you saying"),
+                next_request,
+            )
+            return result, next_request
+
+        result, next_request = asyncio.run(run_interruption_and_next_turn())
+
+        injected = "\n".join(self._request_text_parts(next_request))
+        self.assertEqual(len(sent), 1)
+        self.assertEqual(result["message_count"], 1)
+        self.assertEqual(result["interrupted_reason"], "user_interrupted")
+        self.assertIn("sylanne_interrupted_reply_breakpoint", injected)
+        self.assertIn("sent_count=1", injected)
+        self.assertIn("unsent_count=1", injected)
+        self.assertIn("unsent_hash=", injected)
+        self.assertLessEqual(len(injected), 420)
+        self.assertNotIn("y" * 300, injected)
+        self.assertNotIn("...", injected)
 
     def test_observe_user_message_withdrawal_invalidates_pending_output(self):
         plugin = new_plugin()

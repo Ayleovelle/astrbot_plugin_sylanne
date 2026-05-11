@@ -2,7 +2,7 @@
 
 > <span style="font-size: 1.08em;"><strong>Soulful Yearning Lifelike AstrBot Neural Narrative Engine</strong>。她维护的不只是“情绪标签”，而是情绪、人格、记忆、氛围、主动性和表达节奏交织成的长期状态。</span>
 
-![版本 1.7.1](https://img.shields.io/badge/version-1.7.1-blue)
+![版本 1.8.0](https://img.shields.io/badge/version-1.8.0-blue)
 ![AstrBot >=4.9.2,<5.0.0](https://img.shields.io/badge/AstrBot-%3E%3D4.9.2%2C%3C5.0.0-green)
 ![Python 3.10+](https://img.shields.io/badge/Python-3.10%2B-yellow)
 ![协议 astrbot.emotion_state.v2](https://img.shields.io/badge/schema-astrbot.emotion__state.v2-purple)
@@ -38,7 +38,7 @@
 
 <br clear="right">
 
-`1.7.1` 是 `1.7.0` 后的修复版：主动聊天后台闭环、用户插话中断、分条发送中途过期检查和 NapCat/OneBot 撤回接入全部保留；本版把“阻断欺骗、操控、逃责类动作”修正为默认开启，只有显式关闭 `block_deception_manipulation_evasion_actions` 时才退回只观察风险。
+`1.8.0` 是 `1.7.x` 之后的小功能版：主动聊天后台闭环、用户插话中断、分条发送中途过期检查、NapCat/OneBot 撤回接入和默认阻断契约全部保留；本版重点加入“学习用户说话节奏来决定分段策略”，并修正长回复被硬截成 `...` 的问题。
 
 | 能力 | 作用 |
 | --- | --- |
@@ -74,7 +74,7 @@
 | 主题 | 内容 |
 | --- | --- |
 | [当前版本与兼容范围](#当前版本与兼容范围) | 插件版本、AstrBot 版本、Python 要求、许可证和发布状态。 |
-| [1.7.1 修复版发布记录](#171-修复版发布记录) | 默认开启欺骗/操控/逃责类动作阻断，保留显式关闭后的只观察路径。 |
+| [1.8.0 小功能发布记录](#180-小功能发布记录) | 学习用户说话节奏，自适应即时聊天分段，并避免长回复静默省略。 |
 | [项目定位](#项目定位) | 为什么本插件不是普通的提示词人设增强。 |
 | [核心能力](#核心能力总览) | 7 维情绪、人格建模、真实时间记忆、关系修复、公共 API。 |
 | [快速开始](#快速开始) | 发布 zip 包、仓库安装、手动复制、最小配置和检查命令。 |
@@ -102,29 +102,30 @@
 | --- | --- |
 | 插件目录名 | `astrbot_plugin_sylanne` |
 | 显示名 | `Sylanne` |
-| 当前版本 | `1.7.1` |
+| 当前版本 | `1.8.0` |
 | AstrBot 版本 | `>=4.9.2,<5.0.0` |
 | Python | `3.10+` |
 | 许可证 | `GPL-3.0-or-later` |
 | 运行时第三方依赖 | 当前无额外依赖，见 `requirements.txt` |
 
-`1.7.1` 在 `1.7.0` 主动聊天闭环基础上修正默认阻断契约：默认仍不主动发送，配置者同时开启 `enable_proactive_speech_scheduler=true` 与 `enable_proactive_speech_dispatch=true` 后，她才会从最近可触达会话中选择候选，结合情绪、群聊氛围、双方需要、冷却、上下文证据和 LLM 话题裁决，请求 AstrBot 主动发送。即时聊天分条发送会监听用户插话；NapCat/OneBot 撤回会推进会话 epoch 并让旧输出自然过期。核心情绪、回复后后台评估（post）、`group_atmosphere_state`、`humanlike_state`、`lifelike_learning_state`、`personality_drift_state`、即时聊天节奏和欺骗/操控/逃责类动作阻断默认自动运行；道德修复、瑕疵模拟、心理筛查等实验/维护模块仍由配置者显式打开。
+`1.8.0` 在 `1.7.x` 主动聊天闭环和默认阻断契约基础上扩展即时聊天表达层：默认仍不主动发送，配置者同时开启 `enable_proactive_speech_scheduler=true` 与 `enable_proactive_speech_dispatch=true` 后，她才会从最近可触达会话中选择候选，结合情绪、群聊氛围、双方需要、冷却、上下文证据和 LLM 话题裁决，请求 AstrBot 主动发送。即时聊天分条发送会监听用户插话；NapCat/OneBot 撤回会推进会话 epoch 并让旧输出自然过期。核心情绪、回复后后台评估（post）、`group_atmosphere_state`、`humanlike_state`、`lifelike_learning_state`、`personality_drift_state`、即时聊天节奏和欺骗/操控/逃责类动作阻断默认自动运行；道德修复、瑕疵模拟、心理筛查等实验/维护模块仍由配置者显式打开。
 
 发布包会包含运行代码、README、CHANGELOG、LICENSE、配置结构（schema）、docs 和 `docs/assets/` 中的聚合图表；不会包含 `tests/`、`scripts/`、`literature_kb/`、`personality_literature_kb/`、`psychological_literature_kb/`、`humanlike_agent_literature_kb/`、`raw/`、`output/`、`dist/` 等开发、研究、原始样本或缓存目录。
 
-### 1.7.1 修复版发布记录
+### 1.8.0 小功能发布记录
 
-`v1.7.1` 合并在 `main` 上，对外安装版本由 `metadata.yaml` 和 `main.py @register(...)` 共同声明为 `1.7.1`。本版是 `1.7.0` 的 bug 修复版，按版本规则只提升第三位版本号；修正内容是让 `block_deception_manipulation_evasion_actions` 的 schema 默认值、运行时默认值和 README 说明全部一致为“默认开启阻断”。
+`v1.8.0` 合并在 `main` 上，对外安装版本由 `metadata.yaml` 和 `main.py @register(...)` 共同声明为 `1.8.0`。本版按版本规则提升第二位版本号：新增用户说话节奏学习和即时聊天分段自适应，同时保留 `1.7.x` 的主动聊天、撤回、插话中断和默认阻断能力。
 
 当前版本的主要变化：
 
 | 类别 | 结果 |
 | --- | --- |
-| 默认阻断修正 | `block_deception_manipulation_evasion_actions` 现在默认 `true`，综合自我、道德修复、瑕疵模拟和阴影诊断会默认输出插件层硬阻断信号。 |
-| 显式关闭路径 | 配置者仍可显式设为 `false`，此时插件只保留风险观察、修复建议和透明性信号，不额外写入 `blocked_actions`、`not_allowed` 或 `refuse` 类硬阻断动作。 |
-| 文档与配置同步 | README、`_conf_schema.json`、远程烟测模板和配置表同步到 `1.7.1`，避免 UI 显示“默认关闭”但运行时按其他逻辑处理。 |
-| 前序能力保留 | `1.7.0` 的主动聊天后台调度、用户插话中断、分条发送中途检查和 NapCat/OneBot 撤回接入全部保留。 |
-| 公开契约 | 插件版本为 `1.7.1`；公共 API 版本仍为 `1.0`，schema 仍保持 `astrbot.emotion_state.v2` 等版本化契约。 |
+| 用户说话节奏学习 | 生命化学习会记录平均句长、换行密度、标点停顿、短句倾向、长段倾向和碎片化程度，并写入 `speaking_style`。 |
+| 即时聊天自适应 | 分条策略会读取 `speaking_style`，把用户偏短句、碎片化或长段正式说明的习惯折算成 `user_style_adaptation`。 |
+| 长回复不静默省略 | `max_parts` 不再把尾部硬截成 `...`；过长回复会继续拆成更多安全长度的消息。 |
+| 断点低 token 化 | 用户插话后的旧回复只注入低 token 断点摘要，不把长文本全文塞回下一轮提示词。 |
+| 前序能力保留 | `1.7.x` 的主动聊天后台调度、用户插话中断、分条发送中途检查、NapCat/OneBot 撤回接入和默认阻断契约全部保留。 |
+| 公开契约 | 插件版本为 `1.8.0`；公共 API 版本仍为 `1.0`，schema 仍保持 `astrbot.emotion_state.v2` 等版本化契约。 |
 
 运行时亮点可以按这条链路理解。手机端若不渲染 Mermaid，也会优先显示下面的静态图：
 
@@ -1621,6 +1622,10 @@ enable_safety_boundary = false
 
 即时聊天的分条数量、单条长度、打字速度、停顿、抖动、同会话接管冷却和表情包发送概率，都由人格模型、当前情绪、群聊氛围和生命化学习状态自动派生。外向、亲近、情绪唤醒高时会更容易分成自然短句；边界敏感、疏离、群聊紧张或打断风险高时会更克制、更少发图、更慢开口。`get_realtime_chat_plan(...)` 会在返回值的 `adaptive.realtime_chat` 和 `adaptive.sticker` 中说明当轮为什么这样计算。
 
+从 `1.8.0` 起，即时聊天会把用户说话方式纳入生命化学习：本地统计用户消息的平均句长、换行密度、标点停顿、短句倾向、长段倾向和碎片化程度，并以真实时间下的平滑方式写入 `lifelike_learning_state.user_profile.speaking_style`。分条时她不会直接复制用户口癖，而是把这些统计量折算成 `user_style_adaptation`：用户常用短句、换行和碎片化表达时，她会更愿意多分几条短消息；用户常写长段、正式说明或要求严谨细节时，她会保留更长的单条消息，避免把技术说明切得太碎。这个过程不额外调用判断 LLM，也不会把用户画像原文暴露在公共 plan 里。
+
+长回复不会再为了满足 `max_parts` 硬上限而把尾部静默截成 `...`。`max_parts` 现在只表示日常偏好的初始分段数量；如果回复太长，分段器会继续按安全长度拆成更多消息，尽量避免平台把单条超长文本折叠成省略显示，也避免丢失正文。若用户在分条发送途中插话，剩余未发部分会被记录成低 token 的断点摘要，下一轮只把它作为“旧回复被打断”的上下文，不会把长文本全文塞回提示词。
+
 如果主 LLM 还在生成，用户已经补发了新消息，Sylanne 不会把旧回复硬塞到新上下文后面。插件会给每个会话维护一个轻量 `input_epoch`：用户新消息进入时 epoch 前进；旧回复到达时如果发现 epoch 已经过期，就清空旧 `completion_text` 并跳过后台 post 情绪评估。已经开始分条发送时，每一条发送前也会检查 epoch；用户插话后剩余分条和表情包都会停止。这不会删除 AstrBot 或平台自己的历史，只是不让旧输出污染当前对话节奏和情绪轨迹。
 
 NapCat/OneBot 的撤回事件也可以接入这个机制。NapCat 的撤回属于 OneBot `notice` 事件，私聊撤回为 `notice_type=friend_recall`，群撤回为 `notice_type=group_recall`，常见字段包括 `message_id`、`user_id`、群撤回里的 `group_id` 与 `operator_id`。如果适配器能把原始 notice 放在 `event.message_obj.raw_message`、`event.raw_message` 或同类字段里，插件可解析撤回载荷；其他插件也可以直接调用 `observe_user_message_withdrawal(...)`。撤回后会推进会话 epoch、清空该会话最近主动聊天候选摘要，并让旧回复自然过期。若平台没有把撤回事件交给插件，则只能等用户补发更正消息后按“新消息打断旧回复”处理。
@@ -2888,7 +2893,7 @@ $env:ASTRBOT_EXPECT_PLUGIN = "astrbot_plugin_sylanne"
 脚本会在输出 JSON 里写出 `expectedPluginRuntime`，包含插件列表 API 中返回的 `version`、`displayName`、`activated`、`author`、`astrbotVersion` 等只读字段。若目标插件存在但 `activated=false`，脚本会失败退出。需要把版本和显示名也作为硬断言时，可以额外设置：
 
 ```powershell
-$env:ASTRBOT_EXPECT_PLUGIN_VERSION = "1.7.1"
+$env:ASTRBOT_EXPECT_PLUGIN_VERSION = "1.8.0"
 $env:ASTRBOT_EXPECT_PLUGIN_DISPLAY_NAME = "Sylanne"
 & $node scripts\remote_smoke_playwright.js
 ```
@@ -3107,7 +3112,7 @@ inject_state = false
 humanlike_memory_write_enabled = true
 ```
 
-拟人状态默认自动运行。若没有看到 `humanlike_state_at_write`，优先确认插件是否为 `1.7.1` 或更新版本、`humanlike_memory_write_enabled=true`，以及调用方是否保留了完整记忆载荷。
+拟人状态默认自动运行。若没有看到 `humanlike_state_at_write`，优先确认插件是否为 `1.8.0` 或更新版本、`humanlike_memory_write_enabled=true`，以及调用方是否保留了完整记忆载荷。
 
 ### 拟人状态没有生效
 

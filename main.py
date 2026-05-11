@@ -307,6 +307,10 @@ PROACTIVE_SCHEDULER_NORMAL_DELAY_SECONDS = 120.0
 PROACTIVE_SCHEDULER_BUSY_DELAY_SECONDS = 240.0
 PROACTIVE_SCHEDULER_MAX_CHECKS_PER_ROUND = 2
 PROACTIVE_SCHEDULER_SESSION_RECHECK_SECONDS = 180.0
+INTERRUPTED_REPLY_BREAKPOINT_LIMIT = 4
+INTERRUPTED_REPLY_INJECTION_MAX_ITEMS = 1
+INTERRUPTED_REPLY_INJECTION_MAX_CHARS = 360
+INTERRUPTED_REPLY_LOCAL_MAX_CHARS = 4000
 
 
 @dataclass
@@ -505,7 +509,7 @@ def get_emotional_state_plugin(context: Context) -> Any | None:
     PLUGIN_NAME,
     "pidan",
     "Soulful Yearning Lifelike AstrBot Neural Narrative Engine：维护情绪、人格、记忆、氛围和表达节奏的 Sylanne",
-    "1.7.1",
+    "1.8.0",
     "",
 )
 class EmotionalStatePlugin(Star):
@@ -563,6 +567,7 @@ class EmotionalStatePlugin(Star):
         self._last_state_injection_diagnostics: dict[str, dict[str, Any]] = {}
         self._conversation_input_epoch: dict[str, int] = {}
         self._conversation_pending_response_epochs: dict[str, deque[int]] = {}
+        self._interrupted_reply_breakpoints: dict[str, deque[dict[str, Any]]] = {}
         self._background_tasks: set[asyncio.Task[Any]] = set()
         self._background_post_tasks: dict[str, asyncio.Task[Any]] = {}
         self._background_post_queues: dict[str, deque[_BackgroundPostJob]] = {}
@@ -658,6 +663,8 @@ class EmotionalStatePlugin(Star):
             self._conversation_input_epoch.clear()
         if hasattr(self, "_conversation_pending_response_epochs"):
             self._conversation_pending_response_epochs.clear()
+        if hasattr(self, "_interrupted_reply_breakpoints"):
+            self._interrupted_reply_breakpoints.clear()
 
     @filter.on_llm_request()
     async def on_llm_request(
@@ -730,7 +737,7 @@ class EmotionalStatePlugin(Star):
                         observed_stickers,
                         session_key=session_key,
                     ),
-                    label="sticker_usage_observation",
+                        label="sticker_usage_observation",
                 )
         needs_request_state = (
             assessment_timing in {"pre", "both"}
@@ -744,6 +751,11 @@ class EmotionalStatePlugin(Star):
             or realtime_chat_enabled
         )
         if not needs_request_state:
+            self._append_interrupted_reply_breakpoint_if_any(
+                request,
+                session_key,
+                budget=None,
+            )
             return
 
         base_persona_profile = await self._persona_profile(event, request)
@@ -1098,11 +1110,23 @@ class EmotionalStatePlugin(Star):
                 session_key,
                 request,
             )
+            self._append_interrupted_reply_breakpoint_if_any(
+                request,
+                session_key,
+                budget=injection_budget,
+            )
             injection_decision = self._state_injection_decision(
                 session_key,
                 state,
                 budget=injection_budget,
             )
+        else:
+            self._append_interrupted_reply_breakpoint_if_any(
+                request,
+                session_key,
+                budget=None,
+            )
+        if inject_state:
             appended_emotion = self._append_temp_text_part(
                 request,
                 self._build_state_injection_for_session(
@@ -1380,6 +1404,12 @@ class EmotionalStatePlugin(Star):
             event,
         )
         if self._conversation_reply_is_stale(identity.conversation_id, response_epoch):
+            self._record_interrupted_reply_breakpoint(
+                identity.conversation_id,
+                reason="late_llm_response_after_user_message",
+                input_epoch=response_epoch,
+                full_text=response_text,
+            )
             try:
                 setattr(response, "completion_text", "")
             except Exception:
@@ -1403,6 +1433,13 @@ class EmotionalStatePlugin(Star):
                     response_epoch,
                 ):
                     plan["interrupted_reason"] = "user_interrupted_before_dispatch"
+                    self._record_interrupted_reply_breakpoint(
+                        identity.conversation_id,
+                        reason="user_interrupted_before_dispatch",
+                        input_epoch=response_epoch,
+                        full_text=response_text,
+                        message_parts=plan.get("message_parts"),
+                    )
                 else:
                     realtime_dispatch_task = self._schedule_background_task(
                         self._send_realtime_chat_plan(
@@ -3451,6 +3488,9 @@ class EmotionalStatePlugin(Star):
             "state_injection": self._state_injection_runtime_summary(
                 resolved_session_key,
             ),
+            "interrupted_reply_breakpoints": self._interrupted_reply_runtime_summary(
+                resolved_session_key,
+            ),
             "identity": self._agent_identity_profile_readonly(
                 event_or_session,
                 request=request,
@@ -5036,7 +5076,7 @@ class EmotionalStatePlugin(Star):
                 event_or_session,
                 request=request,
                 session_key=resolved_session,
-                exposure="plugin_safe",
+                exposure="internal",
                 include_prompt_fragment=False,
             ),
         )
@@ -5764,6 +5804,20 @@ class EmotionalStatePlugin(Star):
                         "blocked_reason": "llm_rejected",
                         "judgement": judgement,
                     }
+        if interrupted_reason:
+            self._record_interrupted_reply_breakpoint(
+                session_key,
+                reason=interrupted_reason,
+                input_epoch=input_epoch,
+                sent_parts=[str(item.get("text") or "") for item in parts[: len(results)]],
+                unsent_parts=[
+                    str(item.get("text") or "")
+                    for item in parts[len(results) :]
+                    if str(item.get("text") or "").strip()
+                ],
+                message_parts=parts,
+                source=source,
+            )
         self._realtime_chat_last_sent_cache()[session_key] = self._observed_now()
         payload = {
             "api": "context.send_message",
@@ -6073,6 +6127,145 @@ class EmotionalStatePlugin(Star):
         self._ensure_conversation_epoch_state()
         current = max(0, int(self._conversation_input_epoch.get(str(session_key or "global")) or 0))
         return current > int(input_epoch)
+
+    def _interrupted_reply_breakpoint_cache(
+        self,
+    ) -> dict[str, deque[dict[str, Any]]]:
+        cache = getattr(self, "_interrupted_reply_breakpoints", None)
+        if not isinstance(cache, dict):
+            cache = {}
+            self._interrupted_reply_breakpoints = cache
+        return cache
+
+    def _record_interrupted_reply_breakpoint(
+        self,
+        session_key: str,
+        *,
+        reason: str,
+        input_epoch: int | None,
+        full_text: str = "",
+        sent_parts: Sequence[str] | None = None,
+        unsent_parts: Sequence[str] | None = None,
+        message_parts: Sequence[dict[str, Any]] | None = None,
+        source: str = "",
+    ) -> None:
+        key = str(session_key or "global")
+        sent = [str(part or "").strip() for part in (sent_parts or []) if str(part or "").strip()]
+        unsent = [
+            str(part or "").strip()
+            for part in (unsent_parts or [])
+            if str(part or "").strip()
+        ]
+        if not unsent and message_parts:
+            sent_count = len(sent)
+            unsent = [
+                str(part.get("text") or "").strip()
+                for part in list(message_parts)[sent_count:]
+                if str(part.get("text") or "").strip()
+            ]
+        full = str(full_text or "").strip()
+        if not full:
+            full = "\n".join(sent + unsent).strip()
+        if not full and not sent and not unsent:
+            return
+        now = self._observed_now()
+        entry = {
+            "schema_version": "astrbot.interrupted_reply_breakpoint.v1",
+            "kind": "interrupted_reply_breakpoint",
+            "session_key": key,
+            "reason": str(reason or "interrupted"),
+            "source": str(source or "llm_response"),
+            "input_epoch": input_epoch,
+            "recorded_at": now,
+            "sent_count": len(sent),
+            "unsent_count": len(unsent) if unsent else (1 if full else 0),
+            "full_text_chars": len(full),
+            "sent_text_hash": self._text_hash(" / ".join(sent)),
+            "unsent_text_hash": self._text_hash(" / ".join(unsent) if unsent else full),
+            "full_text_hash": self._text_hash(full),
+            "sent_excerpt": self._head_one_line(" / ".join(sent), 96),
+            "unsent_head": self._head_one_line(
+                " / ".join(unsent) if unsent else full,
+                96,
+            ),
+            "full_text": self._head_text(full, INTERRUPTED_REPLY_LOCAL_MAX_CHARS),
+            "full_text_truncated": len(full) > INTERRUPTED_REPLY_LOCAL_MAX_CHARS,
+            "consumed": False,
+        }
+        limit = INTERRUPTED_REPLY_BREAKPOINT_LIMIT
+        cache = self._interrupted_reply_breakpoint_cache()
+        queue = cache.setdefault(key, deque(maxlen=limit))
+        if queue.maxlen != limit:
+            queue = deque(queue, maxlen=limit)
+            cache[key] = queue
+        queue.append(entry)
+
+    def _append_interrupted_reply_breakpoint_if_any(
+        self,
+        request: ProviderRequest,
+        session_key: str,
+        *,
+        budget: _StateInjectionBudget | None,
+    ) -> bool:
+        queue = self._interrupted_reply_breakpoint_cache().get(str(session_key or "global"))
+        if not queue:
+            return False
+        pending = [item for item in queue if not item.get("consumed")]
+        if not pending:
+            return False
+        max_items = INTERRUPTED_REPLY_INJECTION_MAX_ITEMS
+        items = pending[-max_items:]
+        lines = [
+            "[sylanne_interrupted_reply_breakpoint]",
+            "上一段回复被用户新消息或撤回打断。不要原样续发旧回复；只把它当作对话断点来理解当前消息。",
+        ]
+        for item in items:
+            lines.append(
+                "reason={reason}; sent_count={sent_count}; unsent_count={unsent_count}; "
+                "old_epoch={epoch}; full_chars={full_chars}; unsent_hash={unsent_hash}; full_hash={full_hash}".format(
+                    reason=self._head_one_line(str(item.get("reason") or "interrupted"), 48),
+                    sent_count=int(item.get("sent_count") or 0),
+                    unsent_count=int(item.get("unsent_count") or 0),
+                    epoch="" if item.get("input_epoch") is None else item.get("input_epoch"),
+                    full_chars=int(item.get("full_text_chars") or 0),
+                    unsent_hash=str(item.get("unsent_text_hash") or "")[:16],
+                    full_hash=str(item.get("full_text_hash") or "")[:16],
+                ),
+            )
+        text = "\n".join(lines)
+        max_chars = INTERRUPTED_REPLY_INJECTION_MAX_CHARS
+        text = self._head_text(text, max_chars)
+        appended = self._append_temp_text_part(
+            request,
+            text,
+            source="interrupted_reply_breakpoint",
+            budget=budget,
+        )
+        if appended:
+            for item in items:
+                item["consumed"] = True
+                item["consumed_at"] = self._observed_now()
+        return appended
+
+    def _interrupted_reply_runtime_summary(self, session_key: str) -> dict[str, Any]:
+        queue = self._interrupted_reply_breakpoint_cache().get(str(session_key or "global"))
+        items = list(queue or ())
+        pending = [item for item in items if not item.get("consumed")]
+        latest = items[-1] if items else {}
+        return {
+            "enabled": True,
+            "storage": "memory_only",
+            "token_policy": "compact_once_per_breakpoint",
+            "limit": INTERRUPTED_REPLY_BREAKPOINT_LIMIT,
+            "pending_count": len(pending),
+            "total_count": len(items),
+            "injection_max_items": INTERRUPTED_REPLY_INJECTION_MAX_ITEMS,
+            "injection_max_chars": INTERRUPTED_REPLY_INJECTION_MAX_CHARS,
+            "local_full_text_max_chars": INTERRUPTED_REPLY_LOCAL_MAX_CHARS,
+            "latest_reason": latest.get("reason", ""),
+            "latest_sent_count": int(latest.get("sent_count") or 0) if latest else 0,
+            "latest_unsent_count": int(latest.get("unsent_count") or 0) if latest else 0,
+        }
 
     def _napcat_recall_payload(
         self,
@@ -10387,6 +10580,40 @@ class EmotionalStatePlugin(Star):
         factors = self._personality_derived_factors(personality_model)
         traits = self._personality_trait_scores(personality_model)
         lifelike_values = self._snapshot_values(lifelike_snapshot)
+        user_style = self._lifelike_user_speaking_style(lifelike_snapshot)
+        user_profile = (
+            lifelike_snapshot.get("user_profile")
+            if isinstance(lifelike_snapshot, dict)
+            and isinstance(lifelike_snapshot.get("user_profile"), dict)
+            else {}
+        )
+        user_style_preferences = set(
+            str(item)
+            for item in (
+                user_profile.get("style_preferences")
+                if isinstance(user_profile, dict)
+                and isinstance(user_profile.get("style_preferences"), list)
+                else []
+            )
+        )
+        user_boundary_notes = set(
+            str(item)
+            for item in (
+                user_profile.get("boundary_notes")
+                if isinstance(user_profile, dict)
+                and isinstance(user_profile.get("boundary_notes"), list)
+                else []
+            )
+        )
+        user_need_notes = set(
+            str(item)
+            for item in (
+                user_profile.get("need_notes")
+                if isinstance(user_profile, dict)
+                and isinstance(user_profile.get("need_notes"), list)
+                else []
+            )
+        )
         expressiveness = self._as_float_value(factors.get("expressiveness"), 0.42)
         social_distance = self._as_float_value(factors.get("social_distance"), 0.24)
         boundary = max(
@@ -10403,11 +10630,27 @@ class EmotionalStatePlugin(Star):
             0.0,
         )
         silence = self._as_float_value(lifelike_values.get("silence_comfort"), 0.30)
+        style_fragment = self._clamp01(user_style.get("fragment_bias"))
+        style_long = self._clamp01(user_style.get("formal_block_bias"))
+        style_short = self._clamp01(user_style.get("short_turn_bias"))
+        style_speed = self._clamp01(user_style.get("typing_speed_bias"))
+        style_confidence = self._clamp01(user_style.get("confidence"))
+        natural_style = "natural_conversational_style" in user_style_preferences
+        avoid_long_markdown = "avoid_long_markdown_lists" in user_style_preferences
+        rigorous_when_requested = (
+            "rigorous_engineering_detail_when_requested" in user_style_preferences
+        )
+        prefers_brief_or_silent = (
+            "respect_silence_or_brief_reply" in user_boundary_notes
+        )
+        mutual_need_mode = "mutual_need_mode" in user_need_notes
         pace_drive = self._clamp01(
             0.35
             + 0.30 * expressiveness
             + 0.18 * max(0.0, arousal)
             + 0.12 * max(0.0, affiliation)
+            + 0.14 * style_fragment * style_confidence
+            + (0.05 if natural_style else 0.0)
             - 0.22 * social_distance
             - 0.16 * boundary
             - 0.14 * silence,
@@ -10419,15 +10662,45 @@ class EmotionalStatePlugin(Star):
             + 0.18 * interrupt_risk
             + 0.14 * tension
             + 0.12 * silence
+            + 0.10 * style_long * style_confidence
+            + (0.08 if prefers_brief_or_silent else 0.0)
             - 0.12 * warmth,
         )
-        max_parts = int(round(3 + 4 * pace_drive - 2 * restraint))
-        max_parts = int(max(2, min(8, max_parts)))
+        style_segment_bias = self._clamp01(
+            0.50
+            + 0.42 * style_fragment * style_confidence
+            + 0.18 * style_short * style_confidence
+            + (0.08 if avoid_long_markdown else 0.0)
+            + (0.04 if mutual_need_mode else 0.0)
+            - 0.34 * style_long * style_confidence
+            - (0.07 if rigorous_when_requested else 0.0)
+            - (0.10 if prefers_brief_or_silent else 0.0),
+        )
+        max_parts = int(round(3 + 4 * pace_drive - 2 * restraint + 3 * (style_segment_bias - 0.5)))
+        max_parts = int(max(2, min(10, max_parts)))
         min_part_chars = int(max(2, min(8, round(3 + 2 * restraint))))
-        max_part_chars = int(round(84 - 30 * pace_drive - 14 * restraint))
-        max_part_chars = int(max(32, min(96, max_part_chars)))
+        max_part_chars = int(
+            round(
+                84
+                - 30 * pace_drive
+                - 14 * restraint
+                - 24 * style_segment_bias
+                + 26 * style_long * style_confidence
+                + (8 if rigorous_when_requested else 0),
+            ),
+        )
+        max_part_chars = int(max(24, min(112, max_part_chars)))
         chars_per_second = round(
-            max(3.2, min(11.5, 5.2 + 4.5 * pace_drive - 1.4 * restraint)),
+            max(
+                3.2,
+                min(
+                    11.5,
+                    5.2
+                    + 4.5 * pace_drive
+                    - 1.4 * restraint
+                    + 1.2 * (style_speed - 0.5) * style_confidence,
+                ),
+            ),
             3,
         )
         min_delay = round(max(0.18, min(1.45, 0.26 + 0.70 * restraint)), 3)
@@ -10455,6 +10728,20 @@ class EmotionalStatePlugin(Star):
             "debug_override_used": False,
             "pace_drive": round(pace_drive, 6),
             "restraint": round(restraint, 6),
+            "user_style_adaptation": {
+                "enabled": style_confidence > 0.0,
+                "confidence": round(style_confidence, 6),
+                "segment_bias": round(style_segment_bias, 6),
+                "fragment_bias": round(style_fragment, 6),
+                "formal_block_bias": round(style_long, 6),
+                "short_turn_bias": round(style_short, 6),
+                "typing_speed_bias": round(style_speed, 6),
+                "natural_style": natural_style,
+                "avoid_long_markdown": avoid_long_markdown,
+                "rigorous_when_requested": rigorous_when_requested,
+                "prefers_brief_or_silent": prefers_brief_or_silent,
+                "mutual_need_mode": mutual_need_mode,
+            },
             "signals": {
                 "expressiveness": round(expressiveness, 6),
                 "social_distance": round(social_distance, 6),
@@ -10466,6 +10753,8 @@ class EmotionalStatePlugin(Star):
                 "tension": round(tension, 6),
                 "interrupt_risk": round(interrupt_risk, 6),
                 "silence_comfort": round(silence, 6),
+                "user_style_confidence": round(style_confidence, 6),
+                "user_style_segment_bias": round(style_segment_bias, 6),
             },
             "values": self._realtime_chat_settings_payload(settings),
         }
@@ -10814,6 +11103,23 @@ class EmotionalStatePlugin(Star):
             for key, value in raw.items()
         }
 
+    def _lifelike_user_speaking_style(self, snapshot: Any) -> dict[str, float]:
+        if not isinstance(snapshot, dict):
+            return {}
+        profile = snapshot.get("user_profile")
+        if not isinstance(profile, dict):
+            return {}
+        raw = profile.get("speaking_style")
+        if not isinstance(raw, dict):
+            return {}
+        result: dict[str, float] = {}
+        for key, value in raw.items():
+            if key == "avg_unit_chars":
+                result[key] = max(1.0, min(240.0, self._as_float_value(value, 0.0)))
+            else:
+                result[key] = self._clamp01(value)
+        return result
+
     def _personality_derived_factors(self, personality_model: Any) -> dict[str, float]:
         if not isinstance(personality_model, dict):
             return {}
@@ -10926,6 +11232,24 @@ class EmotionalStatePlugin(Star):
     def _clip_one_line(self, text: str, limit: int) -> str:
         cleaned = " ".join(str(text or "").split())
         return self._clip(cleaned, limit)
+
+    def _head_one_line(self, text: str, limit: int) -> str:
+        cleaned = " ".join(str(text or "").split())
+        return self._head_text(cleaned, limit)
+
+    def _head_text(self, text: str, limit: int) -> str:
+        text = str(text or "")
+        if limit <= 0:
+            return ""
+        if len(text) <= limit:
+            return text
+        return text[:limit]
+
+    def _text_hash(self, text: str) -> str:
+        value = str(text or "")
+        if not value:
+            return ""
+        return sha256(value.encode("utf-8", errors="ignore")).hexdigest()[:16]
 
     def _clip(self, text: str, limit: int) -> str:
         if len(text) <= limit:

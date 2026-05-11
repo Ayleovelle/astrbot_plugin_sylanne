@@ -427,13 +427,40 @@ def _merge_short_chunks(chunks: list[str], min_chars: int, max_chars: int) -> li
 
 def _limit_parts(chunks: list[str], max_parts: int, max_chars: int) -> list[str]:
     max_parts = max(1, int(max_parts))
-    if len(chunks) <= max_parts:
-        return chunks
-    head = chunks[: max_parts - 1]
-    tail = " ".join(chunks[max_parts - 1 :]).strip()
-    if len(tail) > max_chars * 2:
-        tail = tail[: max_chars * 2].rstrip() + "..."
-    return head + ([tail] if tail else [])
+    max_chars = max(12, int(max_chars))
+    bounded = [
+        piece
+        for chunk in chunks
+        for piece in _split_long_chunk(str(chunk or ""), max_chars)
+        if piece.strip()
+    ]
+    if len(bounded) <= max_parts:
+        return bounded
+    head = bounded[: max_parts - 1]
+    tail = _pack_bounded_chunks(bounded[max_parts - 1 :], max_chars)
+    return head + tail
+
+
+def _pack_bounded_chunks(chunks: list[str], max_chars: int) -> list[str]:
+    max_chars = max(12, int(max_chars))
+    packed: list[str] = []
+    pending = ""
+    for chunk in chunks:
+        chunk = str(chunk or "").strip()
+        if not chunk:
+            continue
+        if not pending:
+            pending = chunk
+            continue
+        candidate = (pending + " " + chunk).strip()
+        if len(candidate) <= max_chars:
+            pending = candidate
+        else:
+            packed.append(pending)
+            pending = chunk
+    if pending:
+        packed.append(pending)
+    return packed
 
 
 def _stable_unit(seed: str) -> float:

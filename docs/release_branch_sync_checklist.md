@@ -41,7 +41,7 @@ git diff --check
 
 ```powershell
 $env:ASTRBOT_EXPECT_PLUGIN = "astrbot_plugin_sylanne"
-$env:ASTRBOT_EXPECT_PLUGIN_VERSION = "1.7.1"
+$env:ASTRBOT_EXPECT_PLUGIN_VERSION = "1.8.0"
 $env:ASTRBOT_EXPECT_PLUGIN_DISPLAY_NAME = "Sylanne"
 & $node scripts\remote_smoke_playwright.js
 ```
