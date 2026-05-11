@@ -5,6 +5,7 @@ import asyncio
 import json
 import time
 import os
+import re
 from collections import deque
 from copy import deepcopy
 from dataclasses import dataclass
@@ -311,6 +312,7 @@ INTERRUPTED_REPLY_BREAKPOINT_LIMIT = 4
 INTERRUPTED_REPLY_INJECTION_MAX_ITEMS = 1
 INTERRUPTED_REPLY_INJECTION_MAX_CHARS = 360
 INTERRUPTED_REPLY_LOCAL_MAX_CHARS = 4000
+REALTIME_CHAT_INTERRUPT_GRACE_SECONDS = 0.05
 REALTIME_ASSISTANT_HISTORY_LIMIT = 3
 REALTIME_ASSISTANT_HISTORY_INJECTION_MAX_CHARS = 900
 REALTIME_ASSISTANT_HISTORY_EXCERPT_CHARS = 720
@@ -573,6 +575,7 @@ class EmotionalStatePlugin(Star):
         self._interrupted_reply_breakpoints: dict[str, deque[dict[str, Any]]] = {}
         self._realtime_assistant_history_shadows: dict[str, deque[dict[str, Any]]] = {}
         self._realtime_chat_active_dispatches: dict[str, dict[str, Any]] = {}
+        self._realtime_chat_dispatch_tasks: dict[str, set[asyncio.Task[Any]]] = {}
         self._background_tasks: set[asyncio.Task[Any]] = set()
         self._background_post_tasks: dict[str, asyncio.Task[Any]] = {}
         self._background_post_queues: dict[str, deque[_BackgroundPostJob]] = {}
@@ -674,6 +677,18 @@ class EmotionalStatePlugin(Star):
             self._realtime_assistant_history_shadows.clear()
         if hasattr(self, "_realtime_chat_active_dispatches"):
             self._realtime_chat_active_dispatches.clear()
+        realtime_dispatch_tasks = [
+            task
+            for tasks in getattr(self, "_realtime_chat_dispatch_tasks", {}).values()
+            for task in list(tasks)
+            if not task.done()
+        ]
+        if realtime_dispatch_tasks:
+            for task in realtime_dispatch_tasks:
+                task.cancel()
+            await asyncio.gather(*realtime_dispatch_tasks, return_exceptions=True)
+        if hasattr(self, "_realtime_chat_dispatch_tasks"):
+            self._realtime_chat_dispatch_tasks.clear()
 
     @filter.on_llm_request()
     async def on_llm_request(
@@ -718,12 +733,21 @@ class EmotionalStatePlugin(Star):
             group_atmosphere_enabled and self._group_atmosphere_injection_enabled()
         )
         session_key = identity.conversation_id
-        await self._observe_agent_identity(identity, now=self._observed_now())
         input_epoch = self._bump_conversation_input_epoch(session_key, event=event)
         self._record_conversation_pending_response_epoch(session_key, input_epoch)
+        observed_at = self._observed_now()
+        await self._observe_agent_identity(identity, now=observed_at)
+        self._append_realtime_continuity_context_if_any(
+            request,
+            session_key,
+            budget=None,
+        )
+        self._cancel_realtime_chat_dispatches_for_session(
+            session_key,
+            reason="new_user_message",
+        )
         context_text = self._request_to_text(request)
         self._last_request_text[session_key] = context_text
-        observed_at = self._observed_now()
         self._register_proactive_candidate_session(
             event,
             request=request,
@@ -760,17 +784,7 @@ class EmotionalStatePlugin(Star):
             or realtime_chat_enabled
         )
         if not needs_request_state:
-            self._append_realtime_chat_active_dispatch_if_any(
-                request,
-                session_key,
-                budget=None,
-            )
-            self._append_realtime_assistant_history_shadow_if_any(
-                request,
-                session_key,
-                budget=None,
-            )
-            self._append_interrupted_reply_breakpoint_if_any(
+            self._append_realtime_continuity_context_if_any(
                 request,
                 session_key,
                 budget=None,
@@ -1129,17 +1143,7 @@ class EmotionalStatePlugin(Star):
                 session_key,
                 request,
             )
-            self._append_realtime_chat_active_dispatch_if_any(
-                request,
-                session_key,
-                budget=injection_budget,
-            )
-            self._append_realtime_assistant_history_shadow_if_any(
-                request,
-                session_key,
-                budget=injection_budget,
-            )
-            self._append_interrupted_reply_breakpoint_if_any(
+            self._append_realtime_continuity_context_if_any(
                 request,
                 session_key,
                 budget=injection_budget,
@@ -1150,17 +1154,7 @@ class EmotionalStatePlugin(Star):
                 budget=injection_budget,
             )
         else:
-            self._append_realtime_chat_active_dispatch_if_any(
-                request,
-                session_key,
-                budget=None,
-            )
-            self._append_realtime_assistant_history_shadow_if_any(
-                request,
-                session_key,
-                budget=None,
-            )
-            self._append_interrupted_reply_breakpoint_if_any(
+            self._append_realtime_continuity_context_if_any(
                 request,
                 session_key,
                 budget=None,
@@ -1449,10 +1443,10 @@ class EmotionalStatePlugin(Star):
                 input_epoch=response_epoch,
                 full_text=response_text,
             )
-            try:
-                setattr(response, "completion_text", "")
-            except Exception:
-                pass
+            self._stop_default_response_send(
+                event,
+                reason="late_llm_response_after_user_message",
+            )
             return
         realtime_dispatch_task: asyncio.Task[Any] | None = None
         if self._should_intercept_realtime_chat_response(event, response_text):
@@ -1463,10 +1457,10 @@ class EmotionalStatePlugin(Star):
             )
             plan["input_epoch"] = response_epoch
             if plan.get("message_parts"):
-                try:
-                    setattr(response, "completion_text", "")
-                except Exception:
-                    pass
+                self._stop_default_response_send(
+                    event,
+                    reason="realtime_chat_response_intercept",
+                )
                 if self._conversation_reply_is_stale(
                     identity.conversation_id,
                     response_epoch,
@@ -1480,18 +1474,12 @@ class EmotionalStatePlugin(Star):
                         message_parts=plan.get("message_parts"),
                     )
                 else:
-                    self._record_realtime_assistant_history_shadow(
-                        identity.conversation_id,
-                        full_text=response_text,
-                        input_epoch=response_epoch,
-                        message_parts=plan.get("message_parts"),
-                        source="llm_response_intercept",
-                    )
                     realtime_dispatch_task = self._schedule_background_task(
                         self._send_realtime_chat_plan(
                             event,
                             plan,
                             source="llm_response_intercept",
+                            record_history_shadow=True,
                         ),
                         label="realtime_chat_response_dispatch",
                     )
@@ -4809,6 +4797,9 @@ class EmotionalStatePlugin(Star):
                 request=request,
                 session_key=resolved_session,
             )
+            dispatch["realtime_chat_plan"]["input_epoch"] = self._conversation_response_epoch(
+                resolved_session,
+            )
         blocked_reason = self._proactive_dispatch_blocked_reason(
             decision,
             dispatch,
@@ -5210,6 +5201,7 @@ class EmotionalStatePlugin(Star):
             request=request,
             session_key=resolved_session,
         )
+        plan["input_epoch"] = self._conversation_response_epoch(resolved_session)
         effective_dry_run = (
             self._cfg_bool("realtime_chat_dry_run_default", False)
             if dry_run is None
@@ -5273,6 +5265,10 @@ class EmotionalStatePlugin(Star):
             recall.get("notice_type") if reason == "withdrawn" and recall else reason or "withdrawn",
         )
         epoch = self._bump_conversation_input_epoch(resolved_session)
+        self._cancel_realtime_chat_dispatches_for_session(
+            resolved_session,
+            reason="user_message_withdrawal",
+        )
         now = self._observed_now() if observed_at is None else float(observed_at)
         if isinstance(getattr(self, "_proactive_candidate_sessions", None), dict):
             candidate = self._proactive_candidate_sessions.get(resolved_session)
@@ -5787,6 +5783,7 @@ class EmotionalStatePlugin(Star):
         plan: dict[str, Any],
         *,
         source: str,
+        record_history_shadow: bool = False,
     ) -> dict[str, Any]:
         origin = self._proactive_unified_msg_origin(event_or_session)
         if not origin:
@@ -5794,22 +5791,27 @@ class EmotionalStatePlugin(Star):
         send_message = getattr(getattr(self, "context", None), "send_message", None)
         if not callable(send_message):
             raise RuntimeError("context.send_message is not available")
-        parts = list(plan.get("message_parts") or [])
+        parts = self._normalize_realtime_dispatch_parts(plan)
         results: list[dict[str, Any]] = []
         session_key = str(plan.get("session_key") or self._resolve_public_session_key(event_or_session))
         input_epoch = self._optional_int(plan.get("input_epoch"))
         interrupted_reason = ""
-        full_text = " ".join(
-            str(part.get("text") or "").strip()
-            for part in parts
-            if str(part.get("text") or "").strip()
-        )
+        full_text = str(plan.get("full_text") or "").strip()
+        if not full_text:
+            full_text = " ".join(
+                str(part.get("text") or "").strip()
+                for part in parts
+                if str(part.get("text") or "").strip()
+            )
         self._start_realtime_chat_active_dispatch(
             session_key,
             input_epoch=input_epoch,
             full_text=full_text,
             source=source,
         )
+        current_task = asyncio.current_task()
+        if current_task is not None:
+            self._register_realtime_chat_dispatch_task(session_key, current_task)
         try:
             for part in parts:
                 if self._conversation_reply_is_stale(session_key, input_epoch):
@@ -5835,9 +5837,28 @@ class EmotionalStatePlugin(Star):
                         "result": self._bounded_scalar_or_summary(result),
                     },
                 )
+                await asyncio.sleep(REALTIME_CHAT_INTERRUPT_GRACE_SECONDS)
+                if self._conversation_reply_is_stale(session_key, input_epoch):
+                    interrupted_reason = "user_interrupted"
+                    break
+        except asyncio.CancelledError:
+            if self._conversation_reply_is_stale(session_key, input_epoch):
+                interrupted_reason = "user_interrupted"
+            else:
+                raise
         finally:
+            if current_task is not None:
+                self._unregister_realtime_chat_dispatch_task(session_key, current_task)
             if not interrupted_reason:
                 self._finish_realtime_chat_active_dispatch(session_key)
+        if record_history_shadow and results and not interrupted_reason:
+            self._record_realtime_assistant_history_shadow(
+                session_key,
+                full_text=full_text,
+                input_epoch=input_epoch,
+                message_parts=parts,
+                source=source,
+            )
         sticker_result = None
         sticker = plan.get("sticker") if isinstance(plan.get("sticker"), dict) else {}
         if sticker.get("should_send") and not self._conversation_reply_is_stale(
@@ -6094,6 +6115,137 @@ class EmotionalStatePlugin(Star):
             return "missing_send_message_api"
         return ""
 
+    def _normalize_realtime_dispatch_parts(
+        self,
+        plan: dict[str, Any],
+    ) -> list[dict[str, Any]]:
+        raw_parts = [
+            dict(part)
+            for part in list(plan.get("message_parts") or [])
+            if isinstance(part, dict) and str(part.get("text") or "").strip()
+        ]
+        settings_data = plan.get("settings") if isinstance(plan.get("settings"), dict) else {}
+        max_chars = max(
+            12,
+            min(96, self._optional_int(settings_data.get("max_part_chars")) or 72),
+        )
+        min_chars = max(
+            1,
+            min(max_chars, self._optional_int(settings_data.get("min_part_chars")) or 3),
+        )
+        normalized: list[dict[str, Any]] = []
+        for part in raw_parts:
+            text = str(part.get("text") or "").strip()
+            if not text:
+                continue
+            fragments = self._force_realtime_text_fragments(
+                text,
+                max_chars=max_chars,
+                min_chars=min_chars,
+            )
+            for fragment in fragments:
+                next_part = dict(part)
+                next_part["text"] = fragment
+                normalized.append(next_part)
+        for index, part in enumerate(normalized):
+            part["index"] = index
+        plan["message_parts"] = normalized
+        plan["message_count"] = len(normalized)
+        return normalized
+
+    def _force_realtime_text_fragments(
+        self,
+        text: str,
+        *,
+        max_chars: int,
+        min_chars: int,
+    ) -> list[str]:
+        value = re.sub(r"\s+", " ", str(text or "").strip())
+        if not value:
+            return []
+        if len(value) <= max_chars:
+            return [value]
+        pieces: list[str] = []
+        current = ""
+        for token in re.split(r"([。！？!?；;，,、：:…]+)", value):
+            if not token:
+                continue
+            candidate = current + token
+            if current and len(candidate) > max_chars:
+                pieces.extend(self._split_realtime_oversize_fragment(current, max_chars))
+                current = token.strip()
+            else:
+                current = candidate.strip()
+            if current and re.fullmatch(r".*[。！？!?；;…]+", current):
+                pieces.extend(self._split_realtime_oversize_fragment(current, max_chars))
+                current = ""
+        if current:
+            pieces.extend(self._split_realtime_oversize_fragment(current, max_chars))
+
+        merged: list[str] = []
+        for piece in pieces:
+            part = piece.strip()
+            if not part:
+                continue
+            if merged and len(merged[-1]) + 1 + len(part) <= max_chars and len(merged[-1]) < min_chars:
+                merged[-1] = f"{merged[-1]} {part}".strip()
+            else:
+                merged.append(part)
+        return merged or [value[:max_chars]]
+
+    def _split_realtime_oversize_fragment(
+        self,
+        text: str,
+        max_chars: int,
+    ) -> list[str]:
+        value = str(text or "").strip()
+        if not value:
+            return []
+        if len(value) <= max_chars:
+            return [value]
+        chunks: list[str] = []
+        start = 0
+        while start < len(value):
+            end = min(len(value), start + max_chars)
+            if end < len(value):
+                soft = max(
+                    value.rfind("，", start, end),
+                    value.rfind(",", start, end),
+                    value.rfind("、", start, end),
+                    value.rfind(" ", start, end),
+                )
+                if soft > start + max(8, max_chars // 3):
+                    end = soft + 1
+            chunks.append(value[start:end].strip())
+            start = end
+        return [chunk for chunk in chunks if chunk]
+
+    def _stop_default_response_send(
+        self,
+        event: AstrMessageEvent,
+        *,
+        reason: str,
+    ) -> bool:
+        stopped = False
+        stopper = getattr(event, "stop_event", None)
+        if callable(stopper):
+            try:
+                stopper()
+                stopped = True
+            except Exception as exc:
+                self._log_warning(
+                    f"{PLUGIN_NAME}: 阻断 AstrBot 默认发送失败，继续保留主回复文本供上下文使用: {exc}",
+                )
+        for name, value in (
+            ("_sylanne_default_response_stopped", True),
+            ("_sylanne_default_response_stop_reason", str(reason or "")),
+        ):
+            try:
+                setattr(event, name, value)
+            except Exception:
+                pass
+        return stopped
+
     def _should_intercept_realtime_chat_response(
         self,
         event: AstrMessageEvent,
@@ -6107,10 +6259,100 @@ class EmotionalStatePlugin(Star):
             return False
         if not self._looks_like_event(event):
             return False
+        if self._is_streaming_visible_response_event(event):
+            return False
+        if not self._supports_realtime_response_intercept_platform(event):
+            return False
         if not hasattr(getattr(self, "context", None), "send_message"):
             return False
         session_key = self._session_key(event)
         return not self._realtime_chat_on_cooldown(session_key)
+
+    def _is_streaming_visible_response_event(self, event: AstrMessageEvent) -> bool:
+        platform_key = self._event_platform_key(event)
+        if platform_key in {
+            "webchat",
+            "web",
+            "chatui",
+            "webui",
+            "astrbotwebchat",
+            "astrbotwebui",
+        }:
+            return True
+        if self._looks_like_webchat_uuid_session(event):
+            return True
+        return False
+
+    def _has_explicit_non_webchat_platform(self, event: AstrMessageEvent) -> bool:
+        platform_key = self._event_platform_key(event)
+        if not platform_key:
+            return False
+        return platform_key not in {
+            "webchat",
+            "web",
+            "chatui",
+            "webui",
+            "astrbotwebchat",
+            "astrbotwebui",
+        }
+
+    def _supports_realtime_response_intercept_platform(
+        self,
+        event: AstrMessageEvent,
+    ) -> bool:
+        if not self._has_explicit_non_webchat_platform(event):
+            return False
+        platform_key = self._event_platform_key(event)
+        supported = {
+            "aiocqhttp",
+            "onebot",
+            "napcat",
+            "napcatonebot",
+            "qq",
+            "qqofficial",
+            "telegram",
+            "discord",
+            "kook",
+            "lark",
+            "feishu",
+            "dingtalk",
+            "slack",
+            "wechat",
+            "wechatpadpro",
+            "gewechat",
+            "vocechat",
+        }
+        return platform_key in supported
+
+    def _event_platform_key(self, event: AstrMessageEvent) -> str:
+        platform_name = ""
+        getter = getattr(event, "get_platform_name", None)
+        if callable(getter):
+            try:
+                platform_name = str(getter() or "")
+            except Exception:
+                platform_name = ""
+        if not platform_name:
+            platform_name = str(getattr(event, "platform_name", "") or "")
+        if not platform_name:
+            getter = getattr(event, "get_platform_id", None)
+            if callable(getter):
+                try:
+                    platform_name = str(getter() or "")
+                except Exception:
+                    platform_name = ""
+        if not platform_name:
+            platform_name = str(getattr(event, "platform_id", "") or "")
+        return platform_name.strip().lower().replace("_", "").replace("-", "")
+
+    def _looks_like_webchat_uuid_session(self, event: AstrMessageEvent) -> bool:
+        session_key = str(getattr(event, "unified_msg_origin", "") or "").strip()
+        return bool(
+            re.fullmatch(
+            r"[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}",
+            session_key,
+            )
+        )
 
     def _ensure_conversation_epoch_state(self) -> None:
         if not isinstance(getattr(self, "_conversation_input_epoch", None), dict):
@@ -6171,13 +6413,20 @@ class EmotionalStatePlugin(Star):
         self._ensure_conversation_epoch_state()
         key = str(session_key or "global")
         pending = self._conversation_pending_response_epochs.get(key)
+        if event_epoch is not None:
+            if pending and event_epoch in pending:
+                try:
+                    pending.remove(event_epoch)
+                except ValueError:
+                    pass
+                if not pending:
+                    self._conversation_pending_response_epochs.pop(key, None)
+            return event_epoch
         if pending:
             epoch = pending.popleft()
             if not pending:
                 self._conversation_pending_response_epochs.pop(key, None)
             return int(epoch)
-        if event_epoch is not None:
-            return event_epoch
         return self._conversation_response_epoch(key, event)
 
     def _conversation_reply_is_stale(
@@ -6310,6 +6559,40 @@ class EmotionalStatePlugin(Star):
                 item["consumed_at"] = self._observed_now()
         return appended
 
+    def _append_realtime_continuity_context_if_any(
+        self,
+        request: ProviderRequest,
+        session_key: str,
+        *,
+        budget: _StateInjectionBudget | None,
+    ) -> bool:
+        appended = False
+        appended = (
+            self._append_realtime_chat_active_dispatch_if_any(
+                request,
+                session_key,
+                budget=budget,
+            )
+            or appended
+        )
+        appended = (
+            self._append_realtime_assistant_history_shadow_if_any(
+                request,
+                session_key,
+                budget=budget,
+            )
+            or appended
+        )
+        appended = (
+            self._append_interrupted_reply_breakpoint_if_any(
+                request,
+                session_key,
+                budget=budget,
+            )
+            or appended
+        )
+        return appended
+
     def _interrupted_reply_runtime_summary(self, session_key: str) -> dict[str, Any]:
         queue = self._interrupted_reply_breakpoint_cache().get(str(session_key or "global"))
         items = list(queue or ())
@@ -6431,6 +6714,57 @@ class EmotionalStatePlugin(Star):
             self._realtime_chat_active_dispatches = cache
         return cache
 
+    def _realtime_chat_dispatch_task_cache(self) -> dict[str, set[asyncio.Task[Any]]]:
+        cache = getattr(self, "_realtime_chat_dispatch_tasks", None)
+        if not isinstance(cache, dict):
+            cache = {}
+            self._realtime_chat_dispatch_tasks = cache
+        return cache
+
+    def _register_realtime_chat_dispatch_task(
+        self,
+        session_key: str,
+        task: asyncio.Task[Any],
+    ) -> None:
+        key = str(session_key or "global")
+        tasks = self._realtime_chat_dispatch_task_cache().setdefault(key, set())
+        tasks.add(task)
+
+    def _unregister_realtime_chat_dispatch_task(
+        self,
+        session_key: str,
+        task: asyncio.Task[Any],
+    ) -> None:
+        key = str(session_key or "global")
+        tasks = self._realtime_chat_dispatch_task_cache().get(key)
+        if not tasks:
+            return
+        tasks.discard(task)
+        if not tasks:
+            self._realtime_chat_dispatch_task_cache().pop(key, None)
+
+    def _cancel_realtime_chat_dispatches_for_session(
+        self,
+        session_key: str,
+        *,
+        reason: str,
+    ) -> int:
+        key = str(session_key or "global")
+        tasks = list(self._realtime_chat_dispatch_task_cache().get(key) or ())
+        cancelled = 0
+        current = asyncio.current_task()
+        for task in tasks:
+            if task is current or task.done():
+                continue
+            task.cancel()
+            cancelled += 1
+        if cancelled:
+            active = self._realtime_chat_active_dispatch_cache().get(key)
+            if active:
+                active["cancel_reason"] = str(reason or "user_interrupted")
+                active["cancel_requested_at"] = self._observed_now()
+        return cancelled
+
     def _start_realtime_chat_active_dispatch(
         self,
         session_key: str,
@@ -6451,6 +6785,7 @@ class EmotionalStatePlugin(Star):
             "started_at": self._observed_now(),
             "full_text_chars": len(text),
             "full_text_hash": self._text_hash(text),
+            "full_text": self._head_text(text, REALTIME_ASSISTANT_HISTORY_EXCERPT_CHARS),
             "sent_parts": [],
             "completed": False,
         }
@@ -6502,19 +6837,27 @@ class EmotionalStatePlugin(Star):
             for part in active.get("sent_parts", [])
             if str(part or "").strip()
         ]
-        if not sent_parts:
-            return False
+        has_started = bool(sent_parts)
+        full_text_excerpt = self._head_text(
+            str(active.get("full_text") or ""),
+            REALTIME_ASSISTANT_HISTORY_EXCERPT_CHARS,
+        )
+        continuity_hint = (
+            "上一轮回复正在由插件分条发送，用户已经插话；下面是已发出的短句，用来维持刚才话题和代词指代。不要复读旧文本，直接接住用户新消息。"
+            if has_started
+            else "上一轮回复已经生成并由插件接管分条，但在第一条真正发出前用户连续补充了新消息；下面是未发出的完整回复摘要，只用于理解上一轮意图和代词指代。不要复读未发出的旧回复，把用户补充视为同一轮上下文更新。"
+        )
         text = "\n".join(
             [
                 "[sylanne_realtime_active_dispatch]",
-                "上一轮回复正在即时聊天分条发送中，用户已经插话。下面是已经发出的短句，用来维持刚才话题和代词指代；不要复读，直接接住用户新消息。",
+                continuity_hint,
                 "source={source}; sent_count={sent_count}; full_hash={hash}".format(
                     source=self._head_one_line(str(active.get("source") or ""), 48),
                     sent_count=len(sent_parts),
                     hash=str(active.get("full_text_hash") or "")[:16],
                 ),
                 self._head_text(
-                    " / ".join(sent_parts),
+                    " / ".join(sent_parts) if has_started else full_text_excerpt,
                     REALTIME_ASSISTANT_HISTORY_EXCERPT_CHARS,
                 ),
             ],
@@ -9927,6 +10270,16 @@ class EmotionalStatePlugin(Star):
                 )
             return False
         text = str(text)
+        if self._request_has_temp_text_source(request, source):
+            if budget is not None:
+                budget.skipped.append(
+                    {
+                        "source": source,
+                        "chars": len(text),
+                        "reason": "already_appended",
+                    },
+                )
+            return False
         text_chars = len(text)
         if budget is not None:
             reason = self._state_injection_skip_reason(
@@ -9954,6 +10307,22 @@ class EmotionalStatePlugin(Star):
                 },
             )
         return True
+
+    def _request_has_temp_text_source(
+        self,
+        request: ProviderRequest,
+        source: str,
+    ) -> bool:
+        source_markers = {
+            "realtime_chat_active_dispatch": "sylanne_realtime_active_dispatch",
+            "realtime_assistant_history_shadow": "sylanne_realtime_assistant_history",
+            "interrupted_reply_breakpoint": "sylanne_interrupted_reply_breakpoint",
+        }
+        marker = source_markers.get(source, f"sylanne_source:{source}")
+        for part in getattr(request, "extra_user_content_parts", []) or []:
+            if marker in str(getattr(part, "text", "") or ""):
+                return True
+        return False
 
     def _state_injection_skip_reason(
         self,

@@ -11,17 +11,44 @@ except ModuleNotFoundError:
 
 
 class FakeEvent:
-    def __init__(self, session_id="session-1", message="hello", sender_id=None, sender_name=None):
+    def __init__(
+        self,
+        session_id="session-1",
+        message="hello",
+        sender_id=None,
+        sender_name=None,
+        platform_name="",
+        platform_id="",
+        group_id="",
+    ):
         self.unified_msg_origin = session_id
         self.message_str = message
         self._sender_id = sender_id
         self._sender_name = sender_name
+        self._platform_name = platform_name
+        self._platform_id = platform_id
+        self._group_id = group_id
+        self.stopped = False
+        self.stop_reason = ""
 
     def get_sender_id(self):
         return self._sender_id or ""
 
     def get_sender_name(self):
         return self._sender_name or ""
+
+    def get_platform_name(self):
+        return self._platform_name or ""
+
+    def get_platform_id(self):
+        return self._platform_id or ""
+
+    def get_group_id(self):
+        return self._group_id or ""
+
+    def stop_event(self):
+        self.stopped = True
+        self.stop_reason = getattr(self, "_sylanne_default_response_stop_reason", "")
 
 
 def fake_request(session_id="session-1", prompt="hello"):
@@ -2680,6 +2707,41 @@ class AstrBotLifecycleTests(unittest.TestCase):
         self.assertIn("第三段也拆开。", parts[2])
         self.assertTrue(all("\n" not in part for part in parts))
 
+    def test_realtime_dispatch_force_splits_oversized_parts_before_send(self):
+        sent = []
+
+        class FakeContext:
+            async def send_message(self, origin, message):
+                sent.append((origin, str(message)))
+                return {"ok": True}
+
+        plugin = new_plugin({"enable_sticker_reaction": False})
+        plugin.context = FakeContext()
+        long_text = (
+            "one very long realtime message without any helpful newline or markdown "
+            "that must be split by the plugin before it reaches the chat platform"
+        )
+        plan = {
+            "session_key": "s-force-split",
+            "settings": {"max_part_chars": 24, "min_part_chars": 3},
+            "message_parts": [
+                {"index": 0, "text": long_text, "delay_before_seconds": 0.0},
+            ],
+        }
+
+        asyncio.run(
+            plugin._send_realtime_chat_plan(
+                FakeEvent("s-force-split"),
+                plan,
+                source="unit_test",
+            ),
+        )
+
+        self.assertGreater(len(sent), 1)
+        self.assertTrue(
+            all(len(message.replace("message:", "")) <= 24 for _, message in sent),
+        )
+
     def test_realtime_chat_runtime_settings_are_personality_adaptive(self):
         plugin = new_plugin(
             {
@@ -3187,13 +3249,16 @@ class AstrBotLifecycleTests(unittest.TestCase):
         saves, assessment_calls = self._bind_common_state_hooks(plugin)
         response = SimpleNamespace(completion_text="第一句。第二句。")
 
+        event = FakeEvent("s-intercept", platform_name="aiocqhttp")
+
         async def run_response():
-            await plugin.on_llm_response(FakeEvent("s-intercept"), response)
+            await plugin.on_llm_response(event, response)
             await self._await_background_tasks(plugin)
 
         asyncio.run(run_response())
 
-        self.assertEqual(response.completion_text, "")
+        self.assertTrue(response.completion_text.strip())
+        self.assertTrue(event.stopped)
         self.assertEqual(len(sent), 2)
         self.assertEqual(assessment_calls[0]["current_text"], "第一句。第二句。")
         self.assertEqual(saves[0][0], "s-intercept")
@@ -3225,7 +3290,10 @@ class AstrBotLifecycleTests(unittest.TestCase):
         )
 
         async def run_turns():
-            await plugin.on_llm_response(FakeEvent("s-realtime-history"), response)
+            await plugin.on_llm_response(
+                FakeEvent("s-realtime-history", platform_name="aiocqhttp"),
+                response,
+            )
             await self._await_background_tasks(plugin)
             next_request = fake_request(
                 session_id="s-realtime-history",
@@ -3249,13 +3317,50 @@ class AstrBotLifecycleTests(unittest.TestCase):
 
         injected = "\n".join(self._request_text_parts(next_request))
         duplicate_injected = "\n".join(self._request_text_parts(duplicate_request))
-        self.assertEqual(response.completion_text, "")
+        self.assertTrue(response.completion_text.strip())
         self.assertTrue(sent)
         self.assertIn("sylanne_realtime_assistant_history", injected)
         self.assertIn("插件的其他用户", injected)
         self.assertIn("请先读 README", injected)
         self.assertLessEqual(len(injected), 1100)
         self.assertNotIn("sylanne_realtime_assistant_history", duplicate_injected)
+
+    def test_unknown_platform_streaming_response_is_not_replayed(self):
+        sent = []
+
+        class FakeContext:
+            async def send_message(self, origin, message):
+                sent.append((origin, str(message)))
+                return {"ok": True}
+
+        plugin = new_plugin(
+            {
+                "assessment_timing": "post",
+                "enable_realtime_chat": True,
+                "realtime_chat_intercept_llm_response": True,
+                "enable_sticker_reaction": False,
+            },
+        )
+        plugin.context = FakeContext()
+        self._bind_common_state_hooks(plugin)
+        response = SimpleNamespace(
+            completion_text="dashboard stream should stay in the visible response.",
+        )
+        event = FakeEvent("web-session", platform_name="dashboard")
+
+        asyncio.run(
+            plugin.on_llm_response(
+                event,
+                response,
+            ),
+        )
+
+        self.assertEqual(
+            response.completion_text,
+            "dashboard stream should stay in the visible response.",
+        )
+        self.assertFalse(event.stopped)
+        self.assertEqual(sent, [])
 
     def test_on_llm_response_drops_stale_realtime_reply_after_user_interrupts(self):
         sent = []
@@ -3293,7 +3398,7 @@ class AstrBotLifecycleTests(unittest.TestCase):
 
         asyncio.run(run_interrupt())
 
-        self.assertEqual(response.completion_text, "")
+        self.assertTrue(response.completion_text.strip())
         self.assertEqual(sent, [])
         self.assertEqual(saves, [])
         self.assertEqual(assessment_calls, [])
@@ -3338,10 +3443,45 @@ class AstrBotLifecycleTests(unittest.TestCase):
 
         asyncio.run(run_interrupt())
 
-        self.assertEqual(response.completion_text, "")
+        self.assertTrue(response.completion_text.strip())
         self.assertEqual(sent, [])
         self.assertEqual(saves, [])
         self.assertEqual(assessment_calls, [])
+
+    def test_on_llm_response_uses_event_epoch_when_responses_return_out_of_order(self):
+        plugin = new_plugin(
+            {
+                "assessment_timing": "post",
+                "inject_state": False,
+                "enable_realtime_chat": False,
+            },
+        )
+        saves, assessment_calls = self._bind_common_state_hooks(plugin)
+        first_event = FakeEvent("s-out-of-order", message="old question")
+        second_event = FakeEvent("s-out-of-order", message="new correction")
+        old_response = SimpleNamespace(completion_text="old answer")
+        new_response = SimpleNamespace(completion_text="new answer")
+
+        async def run_out_of_order():
+            await plugin.on_llm_request(
+                first_event,
+                fake_request(session_id="s-out-of-order", prompt="old question"),
+            )
+            await plugin.on_llm_request(
+                second_event,
+                fake_request(session_id="s-out-of-order", prompt="new correction"),
+            )
+            await plugin.on_llm_response(second_event, new_response)
+            await plugin.on_llm_response(first_event, old_response)
+            await self._await_background_tasks(plugin)
+
+        asyncio.run(run_out_of_order())
+
+        self.assertEqual(new_response.completion_text, "new answer")
+        self.assertEqual(old_response.completion_text, "old answer")
+        self.assertTrue(first_event.stopped)
+        self.assertEqual(len(saves), 1)
+        self.assertEqual(assessment_calls[0]["current_text"], "new answer")
 
     def test_stale_reply_is_kept_as_compact_breakpoint_for_next_turn(self):
         sent = []
@@ -3404,7 +3544,7 @@ class AstrBotLifecycleTests(unittest.TestCase):
 
         injected = "\n".join(self._request_text_parts(next_request))
         duplicate_injected = "\n".join(self._request_text_parts(duplicate_request))
-        self.assertEqual(stale_response.completion_text, "")
+        self.assertTrue(stale_response.completion_text.startswith("old-answer-start"))
         self.assertEqual(sent, [])
         self.assertIn("sylanne_interrupted_reply_breakpoint", injected)
         self.assertIn("late_llm_response_after_user_message", injected)
@@ -3455,6 +3595,111 @@ class AstrBotLifecycleTests(unittest.TestCase):
         self.assertEqual(len(sent), 1)
         self.assertEqual(result["message_count"], 1)
         self.assertEqual(result["interrupted_reason"], "user_interrupted")
+
+    def test_new_request_cancels_sleeping_realtime_dispatch_task(self):
+        sent = []
+        first_sent = asyncio.Event()
+
+        class FakeContext:
+            async def send_message(self, origin, message):
+                sent.append((origin, str(message)))
+                first_sent.set()
+                return {"ok": True}
+
+        plugin = new_plugin({"enable_realtime_chat": True, "enable_sticker_reaction": False})
+        plugin.context = FakeContext()
+        self._bind_common_state_hooks(plugin)
+        plugin._conversation_input_epoch = {"s-cancel-sleep": 1}
+        plan = {
+            "session_key": "s-cancel-sleep",
+            "input_epoch": 1,
+            "message_parts": [
+                {"index": 0, "text": "old first", "delay_before_seconds": 0.0},
+                {"index": 1, "text": "old delayed tail", "delay_before_seconds": 30.0},
+            ],
+        }
+
+        async def run_cancel():
+            send_task = asyncio.create_task(
+                plugin._send_realtime_chat_plan(
+                    FakeEvent("s-cancel-sleep"),
+                    plan,
+                    source="unit_test",
+                ),
+            )
+            await first_sent.wait()
+            await asyncio.sleep(0.12)
+            next_request = fake_request(
+                session_id="s-cancel-sleep",
+                prompt="new message while old reply is sleeping",
+            )
+            await plugin.on_llm_request(
+                FakeEvent("s-cancel-sleep", message="new message while old reply is sleeping"),
+                next_request,
+            )
+            result = await asyncio.wait_for(send_task, timeout=0.25)
+            return result, next_request
+
+        result, next_request = asyncio.run(run_cancel())
+
+        injected = "\n".join(self._request_text_parts(next_request))
+        self.assertEqual(sent, [("s-cancel-sleep", "message:old first")])
+        self.assertEqual(result["message_count"], 1)
+        self.assertEqual(result["interrupted_reason"], "user_interrupted")
+        self.assertIn("sylanne_realtime_active_dispatch", injected)
+        self.assertIn("old first", injected)
+
+    def test_new_request_before_first_chunk_keeps_unsent_reply_context(self):
+        sent = []
+
+        class FakeContext:
+            async def send_message(self, origin, message):
+                sent.append((origin, str(message)))
+                return {"ok": True}
+
+        plugin = new_plugin({"enable_realtime_chat": True, "enable_sticker_reaction": False})
+        plugin.context = FakeContext()
+        self._bind_common_state_hooks(plugin)
+        plugin._conversation_input_epoch = {"s-before-first": 1}
+        plan = {
+            "session_key": "s-before-first",
+            "input_epoch": 1,
+            "full_text": "unsent reply mentions plugin users and should remain as context",
+            "message_parts": [
+                {"index": 0, "text": "unsent reply mentions plugin users", "delay_before_seconds": 30.0},
+                {"index": 1, "text": "and should remain as context", "delay_before_seconds": 0.0},
+            ],
+        }
+
+        async def run_cancel_before_first_chunk():
+            send_task = asyncio.create_task(
+                plugin._send_realtime_chat_plan(
+                    FakeEvent("s-before-first"),
+                    plan,
+                    source="unit_test",
+                ),
+            )
+            await asyncio.sleep(0.05)
+            next_request = fake_request(
+                session_id="s-before-first",
+                prompt="new user supplement before first chunk",
+            )
+            await plugin.on_llm_request(
+                FakeEvent("s-before-first", message="new user supplement before first chunk"),
+                next_request,
+            )
+            result = await asyncio.wait_for(send_task, timeout=0.25)
+            return result, next_request
+
+        result, next_request = asyncio.run(run_cancel_before_first_chunk())
+
+        injected = "\n".join(self._request_text_parts(next_request))
+        self.assertEqual(sent, [])
+        self.assertEqual(result["message_count"], 0)
+        self.assertEqual(result["interrupted_reason"], "user_interrupted")
+        self.assertIn("sylanne_realtime_active_dispatch", injected)
+        self.assertIn("第一条真正发出前", injected)
+        self.assertIn("plugin users", injected)
 
     def test_realtime_chat_active_dispatch_is_visible_to_interrupting_request(self):
         sent = []
@@ -3607,6 +3852,52 @@ class AstrBotLifecycleTests(unittest.TestCase):
         candidate = plugin._proactive_candidate_sessions["s-withdraw"]
         self.assertEqual(candidate["last_user_text_excerpt"], "")
         self.assertEqual(candidate["last_withdrawn_message_id"], "m-100")
+
+    def test_withdrawal_cancels_sleeping_realtime_dispatch_task(self):
+        sent = []
+        first_sent = asyncio.Event()
+
+        class FakeContext:
+            async def send_message(self, origin, message):
+                sent.append((origin, str(message)))
+                first_sent.set()
+                return {"ok": True}
+
+        plugin = new_plugin({"enable_realtime_chat": True, "enable_sticker_reaction": False})
+        plugin.context = FakeContext()
+        plugin._conversation_input_epoch = {"s-withdraw-cancel": 1}
+        plan = {
+            "session_key": "s-withdraw-cancel",
+            "input_epoch": 1,
+            "message_parts": [
+                {"index": 0, "text": "old first", "delay_before_seconds": 0.0},
+                {"index": 1, "text": "old withdrawn tail", "delay_before_seconds": 30.0},
+            ],
+        }
+
+        async def run_withdrawal_cancel():
+            send_task = asyncio.create_task(
+                plugin._send_realtime_chat_plan(
+                    FakeEvent("s-withdraw-cancel"),
+                    plan,
+                    source="unit_test",
+                ),
+            )
+            await first_sent.wait()
+            await asyncio.sleep(0.12)
+            withdrawal = await plugin.observe_user_message_withdrawal(
+                session_key="s-withdraw-cancel",
+                message_id="m-200",
+            )
+            result = await asyncio.wait_for(send_task, timeout=0.25)
+            return withdrawal, result
+
+        withdrawal, result = asyncio.run(run_withdrawal_cancel())
+
+        self.assertEqual(withdrawal["input_epoch"], 2)
+        self.assertEqual(sent, [("s-withdraw-cancel", "message:old first")])
+        self.assertEqual(result["message_count"], 1)
+        self.assertEqual(result["interrupted_reason"], "user_interrupted")
 
     def test_napcat_recall_payload_is_parsed_from_raw_notice(self):
         plugin = new_plugin()
