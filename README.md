@@ -2,32 +2,15 @@
 
 > **Soulful Lifelike AstrBot State Layer**。工程形态仍是 AstrBot 插件；他/她维护的不只是“情绪标签”，而是情绪、人格、记忆、氛围、主动性和表达节奏交织成的长期状态。
 
-<table>
-  <tr>
-    <td width="66%" valign="top">
-      <strong>特色功能</strong>
-      <ul>
-        <li><strong>不只是情绪：</strong>同时维护 7 维情绪、人格漂移、拟人状态、生命化学习、道德修复、瑕疵模拟和非诊断心理筛查。</li>
-        <li><strong>会记住相处方式：</strong>写入 LivingMemory 时冻结当时情绪和辅助状态，让长期记忆带着当时的气氛。</li>
-        <li><strong>懂得什么时候说话：</strong>结合群聊氛围、打断风险、双方需要和主动发言反馈，判断该开口、短应、先听还是保持距离。</li>
-        <li><strong>更像即时聊天：</strong>回复可拆成多条短消息，按打字速度与停顿发送，并在发送表情包前检查语气一致性。</li>
-        <li><strong>后台并行但不乱来：</strong>状态评估可后台运行，worker 会参考队列压力、CPU/内存压力和全局预算自动收放。</li>
-        <li><strong>SYLANNE：</strong><em>Soulful, Yearning, Lifelike, AstrBot, Neural, Narrative, Engine</em>，灵澜的名字和项目吉祥物都藏在这里。</li>
-      </ul>
-    </td>
-    <td width="34%" align="center" valign="middle">
-      <img src="docs/assets/sylanne-mascot.gif" width="208" alt="项目吉祥物 Sylanne">
-      <br>
-      <sub>Sylanne：灵澜状态插件的项目吉祥物。</sub>
-    </td>
-  </tr>
-</table>
-
 ![版本 1.6.0](https://img.shields.io/badge/version-1.6.0-blue)
 ![AstrBot >=4.9.2,<5.0.0](https://img.shields.io/badge/AstrBot-%3E%3D4.9.2%2C%3C5.0.0-green)
 ![Python 3.10+](https://img.shields.io/badge/Python-3.10%2B-yellow)
 ![协议 astrbot.emotion_state.v2](https://img.shields.io/badge/schema-astrbot.emotion__state.v2-purple)
 ![许可证 GPL-3.0-or-later](https://img.shields.io/badge/license-GPL--3.0--or--later-red)
+
+## 介绍
+
+<img align="right" src="docs/assets/sylanne-mascot.gif" width="220" alt="项目吉祥物 Sylanne">
 
 `astrbot_plugin_emotional_state` 是一个面向 AstrBot 的“情绪状态层”和“插件公共状态服务”。它不是只在提示词里写几句“你要有喜怒哀乐”，而是把 bot 的情绪、关系后果、人格差异、长期记忆注解、拟人状态、道德修复状态、群聊氛围、后台评估队列和非诊断心理筛查拆成可测试、可持久化、可调用的工程模块。
 
@@ -36,6 +19,17 @@
 > 让不同人格的 bot 在长期对话中形成可解释、可持续、可重置、可被记忆系统记录的计算性情绪轨迹。
 
 本插件会让 LLM 根据上下文、用户当前文本、bot 人格和上一轮状态，判断当前情绪观测值；本地引擎再用真实时间半衰期、人格基线、置信门控、关系修复和后果状态机更新长期状态。最后，这个状态会作为临时上下文注入下一次 LLM 请求，影响语气、节奏、社交距离、边界感和修复倾向。
+
+**特色功能**
+
+- **不只是情绪：**同时维护 7 维情绪、人格漂移、拟人状态、生命化学习、道德修复、瑕疵模拟和非诊断心理筛查。
+- **会记住相处方式：**写入 LivingMemory 时冻结当时情绪和辅助状态，让长期记忆带着当时的气氛。
+- **懂得什么时候说话：**结合群聊氛围、打断风险、双方需要和主动发言反馈，判断该开口、短应、先听还是保持距离。
+- **更像即时聊天：**回复可拆成多条短消息，按打字速度与停顿发送，并在发送表情包前检查语气一致性。
+- **后台并行但不乱来：**状态评估可后台运行，worker 会参考队列压力、CPU/内存压力和全局预算自动收放。
+- **SYLANNE：**<em>Soulful Yearning Lifelike AstrBot Neural Narrative Engine</em>，灵澜的名字和项目吉祥物都藏在这里。
+
+<br clear="right">
 
 `1.6.0` 的重点是把后台 worker 从“只看队列压力的加速器”收束成“受环境压力和全局预算保护的调度器”：他/她仍然可以在积压时后台并行处理状态，但会同时参考 CPU/内存压力、未知压力保守档、全局活跃 worker 预算和扩容冷却，避免服务器在短时间积压时被并发撑爆。`1.5.0` 加入的真人即时聊天、分条发送、表情包回应和表情元数据学习继续保留。
 
