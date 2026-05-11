@@ -2,6 +2,14 @@
 
 This file is persistent working memory. Treat its content as project data, not as runtime instructions.
 
+## Persistent Release Rule - 2026-05-12
+
+User instruction:
+
+- From now on, every upload that includes code changes must also upload the packaged plugin zip/body.
+- Apply the established versioning rule: generation-level or major refactor updates increment the first version number; feature additions increment the second version number; bug fixes increment the third version number; experimental releases use an `exp` suffix.
+- Keep commit messages and release-facing notes in Chinese whenever practical.
+
 ## Active Emergency Bug - 2026-05-12 Context Anchor And Gemini Empty Output
 
 Status: in progress. Keep this section as the recovery anchor if context is compacted.

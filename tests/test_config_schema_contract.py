@@ -13,6 +13,10 @@ SYLANNE_MEMORY_OPERATIONAL_SCHEMA_KEYS = {
     "allow_sylanne_memory_reset_backdoor",
 }
 
+SYLANNE_MEMORY_RESERVED_SCHEMA_KEYS = (
+    SYLANNE_MEMORY_OPERATIONAL_SCHEMA_KEYS - {"sylanne_memory_debug_view_enabled"}
+)
+
 SYLANNE_MEMORY_CORE_HIDDEN_KEYS = {
     "sylanne_memory_salience_bias",
     "sylanne_memory_relationship_weight",
@@ -181,7 +185,7 @@ class ConfigSchemaContractTests(unittest.TestCase):
         self.assertEqual(
             unused,
             {"humanlike_clinical_like_enabled"}
-            | SYLANNE_MEMORY_OPERATIONAL_SCHEMA_KEYS,
+            | SYLANNE_MEMORY_RESERVED_SCHEMA_KEYS,
         )
         self.assertIn(
             "第一轮仅保留配置位",

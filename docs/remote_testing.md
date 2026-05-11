@@ -140,7 +140,7 @@ $env:ASTRBOT_REMOTE_URL = "http://your-astrbot-host:15356/"
 $env:ASTRBOT_REMOTE_USERNAME = "your-user"
 $env:ASTRBOT_REMOTE_PASSWORD = "your-password"
 $env:ASTRBOT_EXPECT_PLUGIN = "astrbot_plugin_sylanne"
-$env:ASTRBOT_EXPECT_PLUGIN_VERSION = "1.7.1"
+$env:ASTRBOT_EXPECT_PLUGIN_VERSION = "2.1.0"
 
 & $node scripts\remote_smoke_playwright.js
 ```

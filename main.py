@@ -556,7 +556,7 @@ def get_emotional_state_plugin(context: Context) -> Any | None:
     PLUGIN_NAME,
     "pidan",
     "Soulful Yearning Lifelike AstrBot Neural Narrative Engine：维护情绪、人格、记忆、氛围和表达节奏的 Sylanne",
-    "2.0.0",
+    "2.1.0",
     "",
 )
 class EmotionalStatePlugin(Star):
