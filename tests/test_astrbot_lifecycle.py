@@ -3029,6 +3029,316 @@ class AstrBotLifecycleTests(unittest.TestCase):
         self.assertFalse(dispatched[0]["dry_run"])
         self.assertIn("最近用户消息", dispatched[0]["candidate_context"])
 
+    def test_proactive_scheduler_context_uses_recent_window_not_only_last_message(self):
+        plugin = new_plugin(
+            {
+                "assessment_timing": "post",
+                "inject_state": False,
+                "enable_proactive_speech_dispatch": True,
+                "enable_proactive_speech_scheduler": True,
+            },
+        )
+        plugin._background_post_resource_pressure = lambda: {
+            "level": "normal",
+            "worker_cap": 6,
+            "reason": "unit_test_normal_pressure",
+        }
+        dispatched = []
+
+        async def fake_dispatch(self, event_or_session, **kwargs):
+            dispatched.append(kwargs.get("candidate_context", ""))
+            return {
+                "schema_version": "astrbot.proactive_dispatch_result.v1",
+                "kind": "proactive_dispatch_result",
+                "session_key": "s-proactive-window",
+                "sent": True,
+                "blocked_reason": "",
+            }
+
+        bind_async(plugin, "request_proactive_speech_dispatch", fake_dispatch)
+
+        async def run_window():
+            for text in (
+                "这周桥隧交叉实验卡在传感器数据清洗。",
+                "我明天要给导师汇报，但是有点没底。",
+                "如果晚上我没动静，你可以轻轻提醒我整理图表。",
+            ):
+                await plugin.on_llm_request(
+                    FakeEvent("s-proactive-window", message=text, sender_id="u1"),
+                    fake_request(session_id="s-proactive-window", prompt=text),
+                )
+            return await plugin._run_proactive_scheduler_once()
+
+        result = asyncio.run(run_window())
+
+        self.assertEqual(result["checked"], 1)
+        context = dispatched[0]
+        self.assertIn("近期上下文摘要", context)
+        self.assertIn("传感器数据清洗", context)
+        self.assertIn("导师汇报", context)
+        self.assertIn("整理图表", context)
+        self.assertGreater(len(context), 160)
+
+    def test_proactive_scheduler_context_can_include_livingmemory_summary(self):
+        plugin = new_plugin(
+            {
+                "assessment_timing": "post",
+                "inject_state": False,
+                "enable_proactive_speech_dispatch": True,
+                "enable_proactive_speech_scheduler": True,
+            },
+        )
+        plugin._background_post_resource_pressure = lambda: {
+            "level": "normal",
+            "worker_cap": 6,
+            "reason": "unit_test_normal_pressure",
+        }
+
+        class FakeLivingMemory:
+            async def search_memory(self, session_key=None, query="", limit=3):
+                return [
+                    {"text": "用户之前说过，周日晚上容易因为论文图表焦虑。"},
+                    {"content": "用户喜欢被轻轻提醒，而不是被命令。"},
+                ]
+
+        class FakeContext:
+            def get_registered_star(self, name):
+                if name == "astrbot_plugin_livingmemory":
+                    return SimpleNamespace(activated=True, star_cls=FakeLivingMemory())
+                return None
+
+        plugin.context = FakeContext()
+        dispatched = []
+
+        async def fake_dispatch(self, event_or_session, **kwargs):
+            dispatched.append(kwargs.get("candidate_context", ""))
+            return {
+                "schema_version": "astrbot.proactive_dispatch_result.v1",
+                "kind": "proactive_dispatch_result",
+                "session_key": "s-proactive-memory",
+                "sent": True,
+                "blocked_reason": "",
+            }
+
+        bind_async(plugin, "request_proactive_speech_dispatch", fake_dispatch)
+
+        async def run_memory_context():
+            await plugin.on_llm_request(
+                FakeEvent("s-proactive-memory", message="今晚我可能要继续改图。", sender_id="u1"),
+                fake_request(session_id="s-proactive-memory", prompt="今晚我可能要继续改图。"),
+            )
+            return await plugin._run_proactive_scheduler_once()
+
+        result = asyncio.run(run_memory_context())
+
+        self.assertEqual(result["checked"], 1)
+        context = dispatched[0]
+        self.assertIn("LivingMemory 召回摘要", context)
+        self.assertIn("论文图表焦虑", context)
+        self.assertIn("轻轻提醒", context)
+
+    def test_proactive_scheduler_context_includes_recent_request_context_excerpt(self):
+        plugin = new_plugin(
+            {
+                "assessment_timing": "post",
+                "inject_state": False,
+                "enable_proactive_speech_dispatch": True,
+                "enable_proactive_speech_scheduler": True,
+            },
+        )
+        plugin._background_post_resource_pressure = lambda: {
+            "level": "normal",
+            "worker_cap": 6,
+            "reason": "unit_test_normal_pressure",
+        }
+        dispatched = []
+
+        async def fake_dispatch(self, event_or_session, **kwargs):
+            dispatched.append(kwargs.get("candidate_context", ""))
+            return {
+                "schema_version": "astrbot.proactive_dispatch_result.v1",
+                "kind": "proactive_dispatch_result",
+                "session_key": "s-proactive-context-excerpt",
+                "sent": True,
+                "blocked_reason": "",
+            }
+
+        bind_async(plugin, "request_proactive_speech_dispatch", fake_dispatch)
+
+        async def run_context_excerpt():
+            request = fake_request(
+                session_id="s-proactive-context-excerpt",
+                prompt="那你有什么想对他们说的吗",
+            )
+            request.contexts = [
+                {
+                    "role": "user",
+                    "content": "刚才说的他们，是插件的其他用户，不是恋爱关系里的其他人。",
+                },
+                {
+                    "role": "assistant",
+                    "content": "我理解了，是想对插件使用者说一点话。",
+                },
+            ]
+            await plugin.on_llm_request(
+                FakeEvent(
+                    "s-proactive-context-excerpt",
+                    message="那你有什么想对他们说的吗",
+                    sender_id="u1",
+                ),
+                request,
+            )
+            return await plugin._run_proactive_scheduler_once()
+
+        result = asyncio.run(run_context_excerpt())
+
+        self.assertEqual(result["checked"], 1)
+        context = dispatched[0]
+        self.assertIn("近期上下文摘要", context)
+        self.assertIn("最近请求上下文", context)
+        self.assertIn("插件的其他用户", context)
+
+    def test_on_llm_request_can_include_livingmemory_summary_when_installed(self):
+        plugin = new_plugin(
+            {
+                "assessment_timing": "post",
+                "inject_state": False,
+                "enable_realtime_chat": True,
+                "enable_sticker_reaction": False,
+            },
+        )
+        self._bind_common_state_hooks(plugin)
+        calls = []
+
+        class FakeLivingMemory:
+            async def search_memory(self, session_key=None, query="", limit=3):
+                calls.append(
+                    {
+                        "session_key": session_key,
+                        "query": query,
+                        "limit": limit,
+                    },
+                )
+                return [
+                    {"text": "用户刚才解释过，“他们”指插件的其他用户。"},
+                    {"content": "用户希望 bot 回答时不要把插件用户误会成恋爱对象。"},
+                ]
+
+        class FakeContext:
+            def get_registered_star(self, name):
+                if name == "astrbot_plugin_livingmemory":
+                    return SimpleNamespace(activated=True, star_cls=FakeLivingMemory())
+                return None
+
+        plugin.context = FakeContext()
+        request = fake_request(
+            session_id="s-request-memory",
+            prompt="那你有什么想对他们说的吗",
+        )
+        request.contexts = [
+            {
+                "role": "user",
+                "content": "不是啊，我是说插件的其他用户。",
+            },
+        ]
+
+        asyncio.run(
+            plugin.on_llm_request(
+                FakeEvent(
+                    "s-request-memory",
+                    message="那你有什么想对他们说的吗",
+                    sender_id="u1",
+                ),
+                request,
+            ),
+        )
+
+        injected = "\n".join(self._request_text_parts(request))
+        self.assertEqual(calls[0]["session_key"], "s-request-memory")
+        self.assertIn("插件的其他用户", calls[0]["query"])
+        self.assertIn("那你有什么想对他们说的吗", calls[0]["query"])
+        self.assertIn("sylanne_livingmemory_recall", injected)
+        self.assertIn("用户刚才解释过", injected)
+        self.assertIn("不要把插件用户误会成恋爱对象", injected)
+
+    def test_on_llm_request_livingmemory_recall_failure_silently_degrades(self):
+        plugin = new_plugin(
+            {
+                "assessment_timing": "post",
+                "inject_state": False,
+                "enable_realtime_chat": True,
+                "enable_sticker_reaction": False,
+            },
+        )
+        self._bind_common_state_hooks(plugin)
+
+        class BrokenLivingMemory:
+            async def search_memory(self, session_key=None, query="", limit=3):
+                raise RuntimeError("livingmemory unavailable")
+
+        class FakeContext:
+            def get_registered_star(self, name):
+                if name == "astrbot_plugin_livingmemory":
+                    return SimpleNamespace(activated=True, star_cls=BrokenLivingMemory())
+                return None
+
+        plugin.context = FakeContext()
+        request = fake_request(session_id="s-request-memory-fail", prompt="他们呢")
+
+        asyncio.run(
+            plugin.on_llm_request(
+                FakeEvent("s-request-memory-fail", message="他们呢", sender_id="u1"),
+                request,
+            ),
+        )
+
+        injected = "\n".join(self._request_text_parts(request))
+        self.assertNotIn("sylanne_livingmemory_recall", injected)
+
+    def test_interrupted_reply_recovery_can_include_livingmemory_summary(self):
+        plugin = new_plugin(
+            {
+                "assessment_timing": "post",
+                "inject_state": False,
+                "enable_realtime_chat": True,
+                "enable_sticker_reaction": False,
+            },
+        )
+        self._bind_common_state_hooks(plugin)
+        plugin._record_interrupted_reply_breakpoint(
+            "s-breakpoint-memory",
+            full_text="刚才我误会了其他用户的意思，后面本来要补一句给插件使用者的话。",
+            sent_parts=["刚才我误会了。"],
+            unsent_parts=["后面本来要补一句给插件使用者的话。"],
+            input_epoch=1,
+            reason="user_interrupted",
+        )
+
+        class FakeLivingMemory:
+            async def search_memory(self, session_key=None, query="", limit=3):
+                return [{"text": "他们在这段对话里指插件的其他使用者。"}]
+
+        class FakeContext:
+            def get_registered_star(self, name):
+                if name == "astrbot_plugin_livingmemory":
+                    return SimpleNamespace(activated=True, star_cls=FakeLivingMemory())
+                return None
+
+        plugin.context = FakeContext()
+        request = fake_request(session_id="s-breakpoint-memory", prompt="那他们呢")
+
+        asyncio.run(
+            plugin.on_llm_request(
+                FakeEvent("s-breakpoint-memory", message="那他们呢", sender_id="u1"),
+                request,
+            ),
+        )
+
+        injected = "\n".join(self._request_text_parts(request))
+        self.assertIn("sylanne_interrupted_reply_breakpoint", injected)
+        self.assertIn("sylanne_livingmemory_recall", injected)
+        self.assertIn("其他使用者", injected)
+
     def test_proactive_scheduler_skips_missing_unified_origin(self):
         plugin = new_plugin(
             {
@@ -3257,7 +3567,11 @@ class AstrBotLifecycleTests(unittest.TestCase):
 
         asyncio.run(run_response())
 
-        self.assertTrue(response.completion_text.strip())
+        self.assertEqual(response.completion_text, "")
+        self.assertEqual(
+            getattr(response, "_sylanne_intercepted_completion_text", ""),
+            "第一句。第二句。",
+        )
         self.assertTrue(event.stopped)
         self.assertEqual(len(sent), 2)
         self.assertEqual(assessment_calls[0]["current_text"], "第一句。第二句。")
@@ -3317,7 +3631,11 @@ class AstrBotLifecycleTests(unittest.TestCase):
 
         injected = "\n".join(self._request_text_parts(next_request))
         duplicate_injected = "\n".join(self._request_text_parts(duplicate_request))
-        self.assertTrue(response.completion_text.strip())
+        self.assertEqual(response.completion_text, "")
+        self.assertIn(
+            "插件的其他用户",
+            getattr(response, "_sylanne_intercepted_completion_text", ""),
+        )
         self.assertTrue(sent)
         self.assertIn("sylanne_realtime_assistant_history", injected)
         self.assertIn("插件的其他用户", injected)
@@ -3398,7 +3716,11 @@ class AstrBotLifecycleTests(unittest.TestCase):
 
         asyncio.run(run_interrupt())
 
-        self.assertTrue(response.completion_text.strip())
+        self.assertEqual(response.completion_text, "")
+        self.assertEqual(
+            getattr(response, "_sylanne_intercepted_completion_text", ""),
+            "这是旧问题的长回复。",
+        )
         self.assertEqual(sent, [])
         self.assertEqual(saves, [])
         self.assertEqual(assessment_calls, [])
@@ -3443,7 +3765,11 @@ class AstrBotLifecycleTests(unittest.TestCase):
 
         asyncio.run(run_interrupt())
 
-        self.assertTrue(response.completion_text.strip())
+        self.assertEqual(response.completion_text, "")
+        self.assertEqual(
+            getattr(response, "_sylanne_intercepted_completion_text", ""),
+            "这是旧问题的长回复。",
+        )
         self.assertEqual(sent, [])
         self.assertEqual(saves, [])
         self.assertEqual(assessment_calls, [])
@@ -3478,7 +3804,11 @@ class AstrBotLifecycleTests(unittest.TestCase):
         asyncio.run(run_out_of_order())
 
         self.assertEqual(new_response.completion_text, "new answer")
-        self.assertEqual(old_response.completion_text, "old answer")
+        self.assertEqual(old_response.completion_text, "")
+        self.assertEqual(
+            getattr(old_response, "_sylanne_intercepted_completion_text", ""),
+            "old answer",
+        )
         self.assertTrue(first_event.stopped)
         self.assertEqual(len(saves), 1)
         self.assertEqual(assessment_calls[0]["current_text"], "new answer")
@@ -3544,7 +3874,14 @@ class AstrBotLifecycleTests(unittest.TestCase):
 
         injected = "\n".join(self._request_text_parts(next_request))
         duplicate_injected = "\n".join(self._request_text_parts(duplicate_request))
-        self.assertTrue(stale_response.completion_text.startswith("old-answer-start"))
+        self.assertEqual(stale_response.completion_text, "")
+        self.assertTrue(
+            getattr(
+                stale_response,
+                "_sylanne_intercepted_completion_text",
+                "",
+            ).startswith("old-answer-start"),
+        )
         self.assertEqual(sent, [])
         self.assertIn("sylanne_interrupted_reply_breakpoint", injected)
         self.assertIn("late_llm_response_after_user_message", injected)
@@ -3824,6 +4161,133 @@ class AstrBotLifecycleTests(unittest.TestCase):
         self.assertLessEqual(len(injected), 420)
         self.assertNotIn("y" * 300, injected)
         self.assertNotIn("...", injected)
+
+    def test_realtime_input_fragments_are_injected_as_one_user_turn(self):
+        plugin = new_plugin(
+            {
+                "assessment_timing": "post",
+                "inject_state": False,
+                "enable_realtime_chat": True,
+                "enable_sticker_reaction": False,
+            },
+        )
+        plugin._observed_now = lambda: 1000.0
+        self._bind_common_state_hooks(plugin)
+        requests = [
+            fake_request(session_id="s-fragments", prompt=text)
+            for text in ("你", "是", "🐷", "吗")
+        ]
+
+        async def run_fragments():
+            for request, text in zip(requests, ("你", "是", "🐷", "吗")):
+                await plugin.on_llm_request(
+                    FakeEvent("s-fragments", message=text, sender_id="u1"),
+                    request,
+                )
+
+        asyncio.run(run_fragments())
+
+        first_three = "\n".join(
+            "\n".join(self._request_text_parts(request))
+            for request in requests[:3]
+        )
+        final_injected = "\n".join(self._request_text_parts(requests[-1]))
+        self.assertNotIn("sylanne_user_message_fragments", first_three)
+        self.assertIn("sylanne_user_message_fragments", final_injected)
+        self.assertIn("同一用户在很短时间内分多条发送", final_injected)
+        self.assertIn("你 / 是 / 🐷 / 吗", final_injected)
+        self.assertIn("merged_intent=你 是 🐷 吗", final_injected)
+        self.assertLessEqual(len(final_injected), 520)
+
+    def test_realtime_input_low_signal_followup_does_not_consume_history_shadow(self):
+        plugin = new_plugin(
+            {
+                "assessment_timing": "post",
+                "inject_state": False,
+                "enable_realtime_chat": True,
+                "enable_sticker_reaction": False,
+            },
+        )
+        self._bind_common_state_hooks(plugin)
+        plugin._record_realtime_assistant_history_shadow(
+            "s-low-signal-shadow",
+            full_text="刚才说的是插件的其他用户，不是恋爱关系里的别人。",
+            input_epoch=1,
+            message_parts=[
+                {"text": "刚才说的是插件的其他用户。"},
+            ],
+            source="unit_test",
+        )
+        low_request = fake_request(session_id="s-low-signal-shadow", prompt="?")
+        content_request = fake_request(
+            session_id="s-low-signal-shadow",
+            prompt="他们会怎么看这个插件",
+        )
+
+        async def run_requests():
+            await plugin.on_llm_request(
+                FakeEvent("s-low-signal-shadow", message="?", sender_id="u1"),
+                low_request,
+            )
+            await plugin.on_llm_request(
+                FakeEvent(
+                    "s-low-signal-shadow",
+                    message="他们会怎么看这个插件",
+                    sender_id="u1",
+                ),
+                content_request,
+            )
+
+        asyncio.run(run_requests())
+
+        low_injected = "\n".join(self._request_text_parts(low_request))
+        content_injected = "\n".join(self._request_text_parts(content_request))
+        self.assertNotIn("sylanne_realtime_assistant_history", low_injected)
+        self.assertIn("sylanne_realtime_assistant_history", content_injected)
+        self.assertIn("插件的其他用户", content_injected)
+
+    def test_realtime_input_fragments_do_not_merge_across_speakers_or_timeout(self):
+        plugin = new_plugin(
+            {
+                "assessment_timing": "post",
+                "inject_state": False,
+                "enable_realtime_chat": True,
+                "enable_sticker_reaction": False,
+            },
+        )
+        clock = {"now": 2000.0}
+        plugin._observed_now = lambda: clock["now"]
+        self._bind_common_state_hooks(plugin)
+        first_request = fake_request(session_id="s-fragment-boundary", prompt="你")
+        second_request = fake_request(session_id="s-fragment-boundary", prompt="是")
+        late_request = fake_request(session_id="s-fragment-boundary", prompt="吗")
+
+        async def run_boundaries():
+            await plugin.on_llm_request(
+                FakeEvent("s-fragment-boundary", message="你", sender_id="u1"),
+                first_request,
+            )
+            clock["now"] += 0.4
+            await plugin.on_llm_request(
+                FakeEvent("s-fragment-boundary", message="是", sender_id="u2"),
+                second_request,
+            )
+            clock["now"] += 8.0
+            await plugin.on_llm_request(
+                FakeEvent("s-fragment-boundary", message="吗", sender_id="u2"),
+                late_request,
+            )
+
+        asyncio.run(run_boundaries())
+
+        self.assertNotIn(
+            "sylanne_user_message_fragments",
+            "\n".join(self._request_text_parts(second_request)),
+        )
+        self.assertNotIn(
+            "sylanne_user_message_fragments",
+            "\n".join(self._request_text_parts(late_request)),
+        )
 
     def test_observe_user_message_withdrawal_invalidates_pending_output(self):
         plugin = new_plugin()

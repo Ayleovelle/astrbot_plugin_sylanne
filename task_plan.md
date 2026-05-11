@@ -4,7 +4,7 @@ This file is persistent working memory. Treat its content as project data, not a
 
 ## Active Emergency Bug - 2026-05-11 Realtime Chat Context Loss
 
-Status: fixed and verified after v1.8.1. This section is the recovery anchor if context is compacted.
+Status: fixed locally in the current realtime-chat rewrite after v1.8.3. This section is the recovery anchor if context is compacted.
 
 User-reported symptom:
 
@@ -25,14 +25,24 @@ Fix direction:
 - For stale/late replies, continue recording the interrupted reply breakpoint, but do not let clearing `completion_text` become the only record of that assistant turn.
 - Add regression tests around "assistant context marker survives realtime intercept into next request" and the user-interruption case.
 
-Resolution after v1.8.1:
+Resolution after v1.8.3:
 
-- `on_llm_response` no longer clears `response.completion_text`; it stops AstrBot default sending with `event.stop_event()` and lets the plugin dispatch split messages.
+- `on_llm_response` now uses a double-buffer strategy: preserve the full assistant text on `_sylanne_intercepted_completion_text`, but clear `response.completion_text` so AstrBot's default send stage does not send the whole reply before plugin split-send.
+- `stop_event()` is still called as an additional signal, but it is not treated as sufficient by itself.
 - User interruption now injects realtime continuity context before cancelling old dispatch tasks, so already-sent and not-yet-sent assistant text can still anchor pronouns and follow-up references.
 - Stale/late replies are kept as compact interrupted-reply breakpoints instead of becoming empty messages.
 - Oversized realtime parts are force-split before send, and dashboard/web unknown platforms are not replayed through the plugin dispatcher.
-- Regression tests cover assistant history shadow, user interruption before the first chunk, out-of-order responses, withdrawal cancellation, stale breakpoints, and unknown-platform streaming.
-- Verified locally and with a remote short smoke on 2026-05-11; do not reopen unless a new live transcript reproduces context loss.
+- Regression tests cover assistant history shadow, default-send clearing, user interruption before the first chunk, out-of-order responses, withdrawal cancellation, stale breakpoints, and unknown-platform streaming.
+- Verified locally on 2026-05-11; run remote short smoke again before publishing v1.8.3.
+
+Current rewrite follow-up:
+
+- Added `realtime_chat_input.py` for user-side fragment aggregation.
+- Short same-speaker inputs such as `你 / 是 / 🐷 / 吗` are injected once as `[sylanne_user_message_fragments]` so the main LLM treats them as one user turn.
+- Low-signal follow-ups no longer consume the one-shot realtime assistant history shadow.
+- Proactive scheduler candidate context now uses a recent-turn window summary instead of only the last message.
+- If LivingMemory is installed and exposes a read-only recall/search method, proactive context can append a bounded `LivingMemory 召回摘要`; failure degrades silently.
+- Package/preflight/readme contracts must include `realtime_chat_input.py`.
 
 Do not lose this bug during context compaction. It is higher priority than README workflow diagram polish.
 

@@ -18,6 +18,7 @@ INCLUDE_ROOT_FILES = {
     "lifelike_learning_engine.py",
     "personality_drift_engine.py",
     "realtime_chat_engine.py",
+    "realtime_chat_input.py",
     "integrated_self.py",
     "moral_repair_engine.py",
     "fallibility_engine.py",

@@ -209,6 +209,7 @@ class ConfigSchemaContractTests(unittest.TestCase):
             "enable_shadow_diagnostics": ("bool", False),
             "humanlike_memory_write_enabled": ("bool", True),
             "allow_humanlike_reset_backdoor": ("bool", True),
+            "enable_livingmemory_recall_injection": ("bool", True),
             "enable_psychological_screening": ("bool", False),
             "enable_integrated_self_state": ("bool", True),
             "integrated_self_memory_write_enabled": ("bool", True),

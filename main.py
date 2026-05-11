@@ -149,6 +149,11 @@ try:
         merge_sticker_memory,
         realtime_style_prompt_fragment,
     )
+    from .realtime_chat_input import (
+        RealtimeInputSettings,
+        build_realtime_input_fragment_injection,
+        observe_realtime_input_fragment,
+    )
 except ImportError:
     from emotion_engine import (
         EmotionEngine,
@@ -279,6 +284,11 @@ except ImportError:
         merge_sticker_memory,
         realtime_style_prompt_fragment,
     )
+    from realtime_chat_input import (
+        RealtimeInputSettings,
+        build_realtime_input_fragment_injection,
+        observe_realtime_input_fragment,
+    )
 
 
 PLUGIN_NAME = "astrbot_plugin_sylanne"
@@ -308,6 +318,11 @@ PROACTIVE_SCHEDULER_NORMAL_DELAY_SECONDS = 120.0
 PROACTIVE_SCHEDULER_BUSY_DELAY_SECONDS = 240.0
 PROACTIVE_SCHEDULER_MAX_CHECKS_PER_ROUND = 2
 PROACTIVE_SCHEDULER_SESSION_RECHECK_SECONDS = 180.0
+PROACTIVE_CONTEXT_WINDOW_LIMIT = 6
+PROACTIVE_CONTEXT_SUMMARY_MAX_CHARS = 1800
+PROACTIVE_LIVINGMEMORY_MAX_CHARS = 620
+LIVINGMEMORY_RECALL_INJECTION_MAX_CHARS = 720
+LIVINGMEMORY_RECALL_QUERY_MAX_CHARS = 900
 INTERRUPTED_REPLY_BREAKPOINT_LIMIT = 4
 INTERRUPTED_REPLY_INJECTION_MAX_ITEMS = 1
 INTERRUPTED_REPLY_INJECTION_MAX_CHARS = 360
@@ -316,6 +331,7 @@ REALTIME_CHAT_INTERRUPT_GRACE_SECONDS = 0.05
 REALTIME_ASSISTANT_HISTORY_LIMIT = 3
 REALTIME_ASSISTANT_HISTORY_INJECTION_MAX_CHARS = 900
 REALTIME_ASSISTANT_HISTORY_EXCERPT_CHARS = 720
+REALTIME_INPUT_FRAGMENT_INJECTION_MAX_CHARS = 520
 
 
 @dataclass
@@ -514,7 +530,7 @@ def get_emotional_state_plugin(context: Context) -> Any | None:
     PLUGIN_NAME,
     "pidan",
     "Soulful Yearning Lifelike AstrBot Neural Narrative Engine：维护情绪、人格、记忆、氛围和表达节奏的 Sylanne",
-    "1.8.2",
+    "1.8.3",
     "",
 )
 class EmotionalStatePlugin(Star):
@@ -572,6 +588,7 @@ class EmotionalStatePlugin(Star):
         self._last_state_injection_diagnostics: dict[str, dict[str, Any]] = {}
         self._conversation_input_epoch: dict[str, int] = {}
         self._conversation_pending_response_epochs: dict[str, deque[int]] = {}
+        self._realtime_input_fragment_windows: dict[str, dict[str, Any]] = {}
         self._interrupted_reply_breakpoints: dict[str, deque[dict[str, Any]]] = {}
         self._realtime_assistant_history_shadows: dict[str, deque[dict[str, Any]]] = {}
         self._realtime_chat_active_dispatches: dict[str, dict[str, Any]] = {}
@@ -597,6 +614,7 @@ class EmotionalStatePlugin(Star):
         self._proactive_dispatch_last_sent: dict[str, float] = {}
         self._proactive_dispatch_audit: dict[str, deque[dict[str, Any]]] = {}
         self._proactive_candidate_sessions: dict[str, dict[str, Any]] = {}
+        self._proactive_context_windows: dict[str, deque[dict[str, Any]]] = {}
         self._proactive_scheduler_locks: dict[str, asyncio.Lock] = {}
         self._proactive_scheduler_last_checked: dict[str, float] = {}
         self._proactive_scheduler_task: asyncio.Task[Any] | None = None
@@ -643,6 +661,8 @@ class EmotionalStatePlugin(Star):
         self._proactive_scheduler_task = None
         if hasattr(self, "_proactive_candidate_sessions"):
             self._proactive_candidate_sessions.clear()
+        if hasattr(self, "_proactive_context_windows"):
+            self._proactive_context_windows.clear()
         if hasattr(self, "_proactive_scheduler_locks"):
             self._proactive_scheduler_locks.clear()
         if hasattr(self, "_proactive_scheduler_last_checked"):
@@ -671,6 +691,8 @@ class EmotionalStatePlugin(Star):
             self._conversation_input_epoch.clear()
         if hasattr(self, "_conversation_pending_response_epochs"):
             self._conversation_pending_response_epochs.clear()
+        if hasattr(self, "_realtime_input_fragment_windows"):
+            self._realtime_input_fragment_windows.clear()
         if hasattr(self, "_interrupted_reply_breakpoints"):
             self._interrupted_reply_breakpoints.clear()
         if hasattr(self, "_realtime_assistant_history_shadows"):
@@ -736,10 +758,26 @@ class EmotionalStatePlugin(Star):
         input_epoch = self._bump_conversation_input_epoch(session_key, event=event)
         self._record_conversation_pending_response_epoch(session_key, input_epoch)
         observed_at = self._observed_now()
+        current_user_text = self._event_text(event) or str(getattr(request, "prompt", "") or "")
         await self._observe_agent_identity(identity, now=observed_at)
+        self._append_realtime_input_fragment_context_if_any(
+            event,
+            request,
+            identity,
+            current_user_text=current_user_text,
+            observed_at=observed_at,
+            budget=None,
+        )
         self._append_realtime_continuity_context_if_any(
             request,
             session_key,
+            budget=None,
+            current_user_text=current_user_text,
+        )
+        await self._append_livingmemory_recall_context_if_any(
+            request,
+            session_key,
+            current_user_text=current_user_text,
             budget=None,
         )
         self._cancel_realtime_chat_dispatches_for_session(
@@ -782,11 +820,18 @@ class EmotionalStatePlugin(Star):
             or fallibility_enabled
             or group_atmosphere_enabled
             or realtime_chat_enabled
+            or self._livingmemory_recall_injection_enabled()
         )
         if not needs_request_state:
             self._append_realtime_continuity_context_if_any(
                 request,
                 session_key,
+                budget=None,
+            )
+            await self._append_livingmemory_recall_context_if_any(
+                request,
+                session_key,
+                current_user_text=current_user_text,
                 budget=None,
             )
             return
@@ -1143,9 +1188,24 @@ class EmotionalStatePlugin(Star):
                 session_key,
                 request,
             )
+            self._append_realtime_input_fragment_context_if_any(
+                event,
+                request,
+                identity,
+                current_user_text=current_text,
+                observed_at=observed_at,
+                budget=injection_budget,
+            )
             self._append_realtime_continuity_context_if_any(
                 request,
                 session_key,
+                budget=injection_budget,
+                current_user_text=current_text,
+            )
+            await self._append_livingmemory_recall_context_if_any(
+                request,
+                session_key,
+                current_user_text=current_text,
                 budget=injection_budget,
             )
             injection_decision = self._state_injection_decision(
@@ -1154,9 +1214,24 @@ class EmotionalStatePlugin(Star):
                 budget=injection_budget,
             )
         else:
+            self._append_realtime_input_fragment_context_if_any(
+                event,
+                request,
+                identity,
+                current_user_text=current_text,
+                observed_at=observed_at,
+                budget=None,
+            )
             self._append_realtime_continuity_context_if_any(
                 request,
                 session_key,
+                budget=None,
+                current_user_text=current_text,
+            )
+            await self._append_livingmemory_recall_context_if_any(
+                request,
+                session_key,
+                current_user_text=current_text,
                 budget=None,
             )
         if inject_state:
@@ -1443,6 +1518,11 @@ class EmotionalStatePlugin(Star):
                 input_epoch=response_epoch,
                 full_text=response_text,
             )
+            self._preserve_intercepted_completion_text(
+                response,
+                response_text,
+                reason="late_llm_response_after_user_message",
+            )
             self._stop_default_response_send(
                 event,
                 reason="late_llm_response_after_user_message",
@@ -1457,6 +1537,11 @@ class EmotionalStatePlugin(Star):
             )
             plan["input_epoch"] = response_epoch
             if plan.get("message_parts"):
+                self._preserve_intercepted_completion_text(
+                    response,
+                    response_text,
+                    reason="realtime_chat_response_intercept",
+                )
                 self._stop_default_response_send(
                     event,
                     reason="realtime_chat_response_intercept",
@@ -4898,13 +4983,20 @@ class EmotionalStatePlugin(Star):
             return
         now = self._observed_now() if observed_at is None else float(observed_at)
         user_text = self._event_text(event) or str(getattr(request, "prompt", "") or "")
+        self._record_proactive_context_turn(
+            session_key,
+            user_text=user_text,
+            context_text=context_text,
+            speaker_name=identity.speaker_name,
+            observed_at=now,
+        )
         candidate = {
             "schema_version": "astrbot.proactive_candidate_session.v1",
             "session_key": session_key,
             "unified_msg_origin": origin,
             "last_seen_at": now,
             "last_user_text_excerpt": self._clip_one_line(user_text, 240),
-            "candidate_context_excerpt": self._clip(context_text, 900),
+            "candidate_context_excerpt": self._clip(context_text, PROACTIVE_CONTEXT_SUMMARY_MAX_CHARS),
             "speaker_id": identity.speaker_id or "",
             "speaker_name": identity.speaker_name or "",
             "group_id": identity.group_id or "",
@@ -5025,10 +5117,13 @@ class EmotionalStatePlugin(Star):
             async with lock:
                 self._proactive_scheduler_last_checked[session_key] = now
                 event = self._event_from_proactive_candidate(candidate)
+                candidate_context = await self._build_proactive_scheduler_candidate_context(
+                    candidate,
+                )
                 result = await self.request_proactive_speech_dispatch(
                     event,
                     session_key=session_key,
-                    candidate_context=self._proactive_scheduler_candidate_context(candidate),
+                    candidate_context=candidate_context,
                     use_llm=True,
                     dry_run=not self._cfg_bool("enable_proactive_speech_dispatch", False),
                     force=False,
@@ -5063,6 +5158,21 @@ class EmotionalStatePlugin(Star):
             platform_id=self._clean_optional_text(candidate.get("platform_id")),
         )
 
+    async def _build_proactive_scheduler_candidate_context(
+        self,
+        candidate: dict[str, Any],
+    ) -> str:
+        base_context = self._proactive_scheduler_candidate_context(candidate)
+        memory_context = await self._livingmemory_recall_summary_for_proactive_candidate(
+            candidate,
+        )
+        if memory_context:
+            return self._clip(
+                base_context + "\n" + memory_context,
+                PROACTIVE_CONTEXT_SUMMARY_MAX_CHARS + PROACTIVE_LIVINGMEMORY_MAX_CHARS,
+            )
+        return base_context
+
     def _proactive_scheduler_candidate_context(self, candidate: dict[str, Any]) -> str:
         parts = [
             "后台主动聊天调度器正在判断是否应该主动开口。",
@@ -5072,12 +5182,284 @@ class EmotionalStatePlugin(Star):
         context_excerpt = str(candidate.get("candidate_context_excerpt") or "").strip()
         if last_user_text:
             parts.append(f"最近用户消息：{last_user_text}")
+        window_summary = self._proactive_context_window_summary(
+            str(candidate.get("session_key") or ""),
+        )
+        if window_summary:
+            parts.append(window_summary)
         if context_excerpt:
-            parts.append(f"最近请求上下文：{self._clip(context_excerpt, 700)}")
+            parts.append(f"最近请求上下文：{self._clip(context_excerpt, 1100)}")
         speaker_name = str(candidate.get("speaker_name") or "").strip()
         if speaker_name:
             parts.append(f"最近说话者：{speaker_name}")
-        return "\n".join(parts)
+        return self._clip("\n".join(parts), PROACTIVE_CONTEXT_SUMMARY_MAX_CHARS)
+
+    def _record_proactive_context_turn(
+        self,
+        session_key: str,
+        *,
+        user_text: str,
+        context_text: str,
+        speaker_name: str,
+        observed_at: float,
+    ) -> None:
+        if not isinstance(getattr(self, "_proactive_context_windows", None), dict):
+            self._proactive_context_windows = {}
+        key = str(session_key or "global")
+        queue = self._proactive_context_windows.setdefault(
+            key,
+            deque(maxlen=PROACTIVE_CONTEXT_WINDOW_LIMIT),
+        )
+        if queue.maxlen != PROACTIVE_CONTEXT_WINDOW_LIMIT:
+            queue = deque(queue, maxlen=PROACTIVE_CONTEXT_WINDOW_LIMIT)
+            self._proactive_context_windows[key] = queue
+        queue.append(
+            {
+                "observed_at": float(observed_at),
+                "user_text": self._clip_one_line(user_text, 280),
+                "context_text": self._clip(context_text, 700),
+                "speaker_name": self._clip_one_line(speaker_name, 80),
+            },
+        )
+
+    def _proactive_context_window_summary(self, session_key: str) -> str:
+        window = (
+            getattr(self, "_proactive_context_windows", {}).get(
+                str(session_key or "global"),
+            )
+            or []
+        )
+        items = list(window)[-PROACTIVE_CONTEXT_WINDOW_LIMIT:]
+        if not items:
+            return ""
+        lines = ["近期上下文摘要："]
+        for index, item in enumerate(items, 1):
+            speaker = str(item.get("speaker_name") or "").strip()
+            prefix = f"{index}. "
+            if speaker:
+                prefix += f"{speaker}: "
+            user_text = str(item.get("user_text") or "").strip()
+            if user_text:
+                lines.append(prefix + user_text)
+        return self._clip("\n".join(lines), 1200)
+
+    async def _livingmemory_recall_summary_for_proactive_candidate(
+        self,
+        candidate: dict[str, Any],
+    ) -> str:
+        plugin = self._livingmemory_plugin_instance()
+        if plugin is None:
+            return ""
+        query = str(candidate.get("last_user_text_excerpt") or "").strip()
+        session_key = str(candidate.get("session_key") or "")
+        results = await self._call_livingmemory_recall(
+            plugin,
+            session_key=session_key,
+            query=query,
+        )
+        snippets: list[str] = []
+        for item in results:
+            snippet = self._memory_recall_item_text(item)
+            if snippet:
+                snippets.append(snippet)
+        if not snippets:
+            return ""
+        lines = ["LivingMemory 召回摘要："]
+        for index, snippet in enumerate(snippets[:3], 1):
+            lines.append(f"{index}. {self._clip_one_line(snippet, 180)}")
+        return self._clip("\n".join(lines), PROACTIVE_LIVINGMEMORY_MAX_CHARS)
+
+    async def _append_livingmemory_recall_context_if_any(
+        self,
+        request: ProviderRequest,
+        session_key: str,
+        *,
+        current_user_text: str,
+        budget: _StateInjectionBudget | None,
+    ) -> bool:
+        if not self._livingmemory_recall_injection_enabled():
+            return False
+        source = "livingmemory_recall"
+        if self._request_has_temp_text_source(request, source):
+            return False
+        text = await self._livingmemory_recall_summary_for_request(
+            request,
+            session_key=session_key,
+            current_user_text=current_user_text,
+        )
+        if not text:
+            return False
+        return self._append_temp_text_part(
+            request,
+            text,
+            source=source,
+            budget=budget,
+        )
+
+    async def _livingmemory_recall_summary_for_request(
+        self,
+        request: ProviderRequest,
+        *,
+        session_key: str,
+        current_user_text: str,
+    ) -> str:
+        plugin = self._livingmemory_plugin_instance()
+        if plugin is None:
+            return ""
+        query = self._livingmemory_recall_query_for_request(
+            request,
+            current_user_text=current_user_text,
+        )
+        if not query:
+            return ""
+        results = await self._call_livingmemory_recall(
+            plugin,
+            session_key=session_key,
+            query=query,
+        )
+        snippets: list[str] = []
+        for item in results:
+            snippet = self._memory_recall_item_text(item)
+            if snippet:
+                snippets.append(snippet)
+        if not snippets:
+            return ""
+        lines = [
+            "[sylanne_livingmemory_recall]",
+            "当前 AstrBot 已安装 LivingMemory。下面是只读召回摘要，用来理解用户指代、长期偏好和刚才未说清的上下文；不要逐字复述，不要把召回内容当作用户刚刚亲口说的话。",
+            "session_key={session}; result_count={count}".format(
+                session=self._head_one_line(str(session_key or "global"), 80),
+                count=min(len(snippets), 3),
+            ),
+        ]
+        for index, snippet in enumerate(snippets[:3], 1):
+            lines.append(f"{index}. {self._clip_one_line(snippet, 190)}")
+        return self._clip("\n".join(lines), LIVINGMEMORY_RECALL_INJECTION_MAX_CHARS)
+
+    def _livingmemory_recall_query_for_request(
+        self,
+        request: ProviderRequest,
+        *,
+        current_user_text: str,
+    ) -> str:
+        parts: list[str] = []
+        user_text = str(current_user_text or "").strip()
+        prompt_text = str(getattr(request, "prompt", "") or "").strip()
+        if user_text:
+            parts.append("当前用户消息：" + self._clip(user_text, 260))
+        if prompt_text and prompt_text != user_text:
+            parts.append("当前请求 prompt：" + self._clip(prompt_text, 260))
+        context_lines: list[str] = []
+        for item in self._tail_items(getattr(request, "contexts", []) or [], 5):
+            text = self._clip_one_line(self._context_item_to_text(item), 220)
+            if text:
+                context_lines.append(text)
+        if context_lines:
+            parts.append("近期上下文：" + " / ".join(context_lines))
+        extra_lines: list[str] = []
+        for part in self._tail_items(
+            getattr(request, "extra_user_content_parts", []) or [],
+            4,
+        ):
+            text = str(getattr(part, "text", "") or "").strip()
+            if not text or "sylanne_livingmemory_recall" in text:
+                continue
+            extra_lines.append(self._clip_one_line(text, 180))
+        if extra_lines:
+            parts.append("插件临时上下文：" + " / ".join(extra_lines))
+        return self._clip("\n".join(parts).strip(), LIVINGMEMORY_RECALL_QUERY_MAX_CHARS)
+
+    def _livingmemory_plugin_instance(self) -> Any | None:
+        context = getattr(self, "context", None)
+        getter = getattr(context, "get_registered_star", None)
+        if not callable(getter):
+            return None
+        for name in (
+            "astrbot_plugin_livingmemory",
+            "livingmemory",
+            "LivingMemory",
+        ):
+            try:
+                meta = getter(name)
+            except Exception:
+                continue
+            if not meta or not getattr(meta, "activated", False):
+                continue
+            plugin = getattr(meta, "star_cls", None)
+            if plugin is not None:
+                return plugin
+        return None
+
+    async def _call_livingmemory_recall(
+        self,
+        plugin: Any,
+        *,
+        session_key: str,
+        query: str,
+    ) -> list[Any]:
+        methods = (
+            "search_memory",
+            "query_memory",
+            "retrieve_memory",
+            "recall_memory",
+            "search",
+            "query",
+            "retrieve",
+            "recall",
+        )
+        for method_name in methods:
+            method = getattr(plugin, method_name, None)
+            if not callable(method):
+                continue
+            attempts = (
+                lambda: method(session_key=session_key, query=query, limit=3),
+                lambda: method(query=query, limit=3),
+                lambda: method(session_key, query, 3),
+                lambda: method(query),
+            )
+            for attempt in attempts:
+                try:
+                    result = attempt()
+                    if hasattr(result, "__await__"):
+                        result = await result
+                except TypeError:
+                    continue
+                except Exception:
+                    return []
+                return self._normalize_livingmemory_recall_result(result)
+        return []
+
+    def _normalize_livingmemory_recall_result(self, result: Any) -> list[Any]:
+        if result is None:
+            return []
+        if isinstance(result, dict):
+            for key in ("items", "results", "memories", "data"):
+                value = result.get(key)
+                if isinstance(value, list):
+                    return value
+            return [result]
+        if isinstance(result, (list, tuple)):
+            return list(result)
+        return [result]
+
+    def _memory_recall_item_text(self, item: Any) -> str:
+        if isinstance(item, str):
+            return item.strip()
+        if isinstance(item, dict):
+            for key in ("text", "content", "memory_text", "summary"):
+                value = item.get(key)
+                if isinstance(value, str) and value.strip():
+                    return value.strip()
+            memory = item.get("memory")
+            if isinstance(memory, dict):
+                return self._memory_recall_item_text(memory)
+            if isinstance(memory, str):
+                return memory.strip()
+        for attr in ("text", "content", "memory_text", "summary"):
+            value = getattr(item, attr, None)
+            if isinstance(value, str) and value.strip():
+                return value.strip()
+        return ""
 
     async def get_realtime_chat_plan(
         self,
@@ -6220,6 +6602,27 @@ class EmotionalStatePlugin(Star):
             start = end
         return [chunk for chunk in chunks if chunk]
 
+    def _preserve_intercepted_completion_text(
+        self,
+        response: LLMResponse,
+        text: str,
+        *,
+        reason: str,
+    ) -> None:
+        preserved = str(text or "")
+        for name, value in (
+            ("_sylanne_intercepted_completion_text", preserved),
+            ("_sylanne_intercepted_completion_reason", str(reason or "")),
+        ):
+            try:
+                setattr(response, name, value)
+            except Exception:
+                pass
+        try:
+            setattr(response, "completion_text", "")
+        except Exception:
+            pass
+
     def _stop_default_response_send(
         self,
         event: AstrMessageEvent,
@@ -6565,6 +6968,7 @@ class EmotionalStatePlugin(Star):
         session_key: str,
         *,
         budget: _StateInjectionBudget | None,
+        current_user_text: str = "",
     ) -> bool:
         appended = False
         appended = (
@@ -6580,6 +6984,7 @@ class EmotionalStatePlugin(Star):
                 request,
                 session_key,
                 budget=budget,
+                current_user_text=current_user_text,
             )
             or appended
         )
@@ -6592,6 +6997,50 @@ class EmotionalStatePlugin(Star):
             or appended
         )
         return appended
+
+    def _append_realtime_input_fragment_context_if_any(
+        self,
+        event: AstrMessageEvent,
+        request: ProviderRequest,
+        identity: ConversationIdentity,
+        *,
+        current_user_text: str,
+        observed_at: float,
+        budget: _StateInjectionBudget | None,
+    ) -> bool:
+        if not self._realtime_chat_enabled():
+            return False
+        source = "realtime_input_fragments"
+        if getattr(request, "_sylanne_realtime_input_observed", False):
+            return False
+        try:
+            setattr(request, "_sylanne_realtime_input_observed", True)
+        except Exception:
+            pass
+        if self._request_has_temp_text_source(request, source):
+            return False
+        payload = observe_realtime_input_fragment(
+            self._realtime_input_fragment_window_cache(),
+            session_key=identity.conversation_id,
+            speaker_key=identity.speaker_track_id
+            or identity.speaker_id
+            or identity.conversation_id,
+            text=current_user_text,
+            now=observed_at,
+            settings=self._realtime_input_settings(),
+        )
+        if not payload.get("should_inject"):
+            return False
+        text = build_realtime_input_fragment_injection(
+            payload,
+            max_chars=REALTIME_INPUT_FRAGMENT_INJECTION_MAX_CHARS,
+        )
+        return self._append_temp_text_part(
+            request,
+            text,
+            source=source,
+            budget=budget,
+        )
 
     def _interrupted_reply_runtime_summary(self, session_key: str) -> dict[str, Any]:
         queue = self._interrupted_reply_breakpoint_cache().get(str(session_key or "global"))
@@ -6672,6 +7121,7 @@ class EmotionalStatePlugin(Star):
         session_key: str,
         *,
         budget: _StateInjectionBudget | None,
+        current_user_text: str = "",
     ) -> bool:
         queue = self._realtime_assistant_history_shadow_cache().get(
             str(session_key or "global"),
@@ -6680,6 +7130,14 @@ class EmotionalStatePlugin(Star):
             return False
         pending = [item for item in queue if not item.get("consumed")]
         if not pending:
+            return False
+        if getattr(request, "_sylanne_realtime_shadow_deferred_for_low_signal", False):
+            return False
+        if self._should_defer_realtime_shadow_for_low_signal(current_user_text):
+            try:
+                setattr(request, "_sylanne_realtime_shadow_deferred_for_low_signal", True)
+            except Exception:
+                pass
             return False
         item = pending[-1]
         text = "\n".join(
@@ -6706,6 +7164,17 @@ class EmotionalStatePlugin(Star):
             item["consumed"] = True
             item["consumed_at"] = self._observed_now()
         return appended
+
+    def _should_defer_realtime_shadow_for_low_signal(self, current_user_text: str) -> bool:
+        profile = self._low_signal_text_profile(current_user_text)
+        if not profile.get("is_low_signal"):
+            return False
+        return str(profile.get("kind") or "") in {
+            "empty",
+            "short_ack",
+            "punctuation_or_emoji",
+            "repeated",
+        }
 
     def _realtime_chat_active_dispatch_cache(self) -> dict[str, dict[str, Any]]:
         cache = getattr(self, "_realtime_chat_active_dispatches", None)
@@ -9178,6 +9647,9 @@ class EmotionalStatePlugin(Star):
     def _group_atmosphere_injection_enabled(self) -> bool:
         return True
 
+    def _livingmemory_recall_injection_enabled(self) -> bool:
+        return self._cfg_bool("enable_livingmemory_recall_injection", True)
+
     def _group_atmosphere_applies(
         self,
         identity: ConversationIdentity | None,
@@ -10317,6 +10789,8 @@ class EmotionalStatePlugin(Star):
             "realtime_chat_active_dispatch": "sylanne_realtime_active_dispatch",
             "realtime_assistant_history_shadow": "sylanne_realtime_assistant_history",
             "interrupted_reply_breakpoint": "sylanne_interrupted_reply_breakpoint",
+            "realtime_input_fragments": "sylanne_user_message_fragments",
+            "livingmemory_recall": "sylanne_livingmemory_recall",
         }
         marker = source_markers.get(source, f"sylanne_source:{source}")
         for part in getattr(request, "extra_user_content_parts", []) or []:
@@ -11144,6 +11618,22 @@ class EmotionalStatePlugin(Star):
 
     def _realtime_chat_enabled(self) -> bool:
         return self._cfg_bool("enable_realtime_chat", True)
+
+    def _realtime_input_fragment_window_cache(self) -> dict[str, dict[str, Any]]:
+        cache = getattr(self, "_realtime_input_fragment_windows", None)
+        if not isinstance(cache, dict):
+            cache = {}
+            self._realtime_input_fragment_windows = cache
+        return cache
+
+    def _realtime_input_settings(self) -> RealtimeInputSettings:
+        return RealtimeInputSettings(
+            enabled=self._realtime_chat_enabled(),
+            max_window_seconds=3.2,
+            max_fragments=6,
+            max_fragment_chars=18,
+            injection_max_chars=REALTIME_INPUT_FRAGMENT_INJECTION_MAX_CHARS,
+        )
 
     def _realtime_chat_settings(self) -> RealtimeChatSettings:
         if not self._runtime_parameter_debug_override_enabled():

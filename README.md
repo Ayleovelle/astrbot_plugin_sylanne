@@ -2,7 +2,7 @@
 
 > <span style="font-size: 1.08em;"><strong>Soulful Yearning Lifelike AstrBot Neural Narrative Engine</strong>。她维护的不只是“情绪标签”，而是情绪、人格、记忆、氛围、主动性和表达节奏交织成的长期状态。</span>
 
-![版本 1.8.2](https://img.shields.io/badge/version-1.8.2-blue)
+![版本 1.8.3](https://img.shields.io/badge/version-1.8.3-blue)
 ![AstrBot >=4.9.2,<5.0.0](https://img.shields.io/badge/AstrBot-%3E%3D4.9.2%2C%3C5.0.0-green)
 ![Python 3.10+](https://img.shields.io/badge/Python-3.10%2B-yellow)
 ![协议 astrbot.emotion_state.v2](https://img.shields.io/badge/schema-astrbot.emotion__state.v2-purple)
@@ -10,10 +10,7 @@
 
 ## 介绍
 
-<div align="right">
-  <img src="docs/assets/sylanne-mascot.gif" width="260" alt="项目吉祥物 Sylanne"><br>
-  <sub><em>Sylanne向大家问好 = w =</em></sub>
-</div>
+<img align="right" src="docs/assets/sylanne-mascot.gif" width="300" alt="项目吉祥物 Sylanne">
 
 `astrbot_plugin_sylanne` 是一个面向 AstrBot 的“生命化状态引擎”和“插件公共状态服务”。她不是只在提示词里写几句“你要有喜怒哀乐”，而是把 engine 的情绪、关系后果、人格差异、长期记忆注解、拟人状态、道德修复状态、群聊氛围、后台评估队列和非诊断心理筛查拆成可测试、可持久化、可调用的工程模块。
 
@@ -40,7 +37,7 @@
 
 <br clear="right">
 
-`1.8.2` 是 `1.8.1` 之后的 bug 修复版：保留用户说话节奏学习、即时聊天自适应分段和长回复不省略能力，并继续修复分条发送接管、用户插话、旧回复过期和未知平台流式响应导致的上下文问题。
+`1.8.3` 是 `1.8.2` 之后的 bug 修复版：保留用户说话节奏学习、即时聊天自适应分段和长回复不省略能力，并修复分条发送接管时“整段主回复先发、插件又分条发”的重复发送问题。当前开发版继续重做即时聊天链路：输入侧会把短时间连续碎片视为同一轮用户意图，主动聊天也会读取一段近期上下文摘要，而不是只看最后一句。
 
 | 能力 | 作用 |
 | --- | --- |
@@ -76,6 +73,7 @@
 | 主题 | 内容 |
 | --- | --- |
 | [当前版本与兼容范围](#当前版本与兼容范围) | 插件版本、AstrBot 版本、Python 要求、许可证和发布状态。 |
+| [1.8.3 bug 修复发布记录](#183-bug-修复发布记录) | 修复即时聊天分条接管时整段主回复和分条消息重复发送。 |
 | [1.8.2 bug 修复发布记录](#182-bug-修复发布记录) | 修复即时聊天分条接管、用户插话和旧回复过期后的上下文丢失。 |
 | [1.8.1 bug 修复发布记录](#181-bug-修复发布记录) | 修复即时聊天分条接管后的 assistant 上下文丢失。 |
 | [1.8.0 小功能发布记录](#180-小功能发布记录) | 学习用户说话节奏，自适应即时聊天分段，并避免长回复静默省略。 |
@@ -106,15 +104,30 @@
 | --- | --- |
 | 插件目录名 | `astrbot_plugin_sylanne` |
 | 显示名 | `Sylanne` |
-| 当前版本 | `1.8.2` |
+| 当前版本 | `1.8.3` |
 | AstrBot 版本 | `>=4.9.2,<5.0.0` |
 | Python | `3.10+` |
 | 许可证 | `GPL-3.0-or-later` |
 | 运行时第三方依赖 | 当前无额外依赖，见 `requirements.txt` |
 
-`1.8.2` 在 `1.8.1` 的上下文保留修复基础上继续收紧即时聊天接管链路：默认仍不主动发送，配置者同时开启 `enable_proactive_speech_scheduler=true` 与 `enable_proactive_speech_dispatch=true` 后，她才会从最近可触达会话中选择候选，结合情绪、群聊氛围、双方需要、冷却、上下文证据和 LLM 话题裁决，请求 AstrBot 主动发送。即时聊天分条发送会监听用户插话；NapCat/OneBot 撤回会推进会话 epoch 并让旧输出自然过期。核心情绪、回复后后台评估（post）、`group_atmosphere_state`、`humanlike_state`、`lifelike_learning_state`、`personality_drift_state`、即时聊天节奏和欺骗/操控/逃责类动作阻断默认自动运行；道德修复、瑕疵模拟、心理筛查等实验/维护模块仍由配置者显式打开。
+`1.8.3` 在 `1.8.2` 的上下文保留修复基础上继续收紧即时聊天接管链路：默认仍不主动发送，配置者同时开启 `enable_proactive_speech_scheduler=true` 与 `enable_proactive_speech_dispatch=true` 后，她才会从最近可触达会话中选择候选，结合情绪、群聊氛围、双方需要、冷却、近期上下文摘要、可选 LivingMemory 召回摘要和 LLM 话题裁决，请求 AstrBot 主动发送。即时聊天分条发送会监听用户插话；NapCat/OneBot 撤回会推进会话 epoch 并让旧输出自然过期；用户连续发“你 / 是 / 表情 / 吗”这类碎片时，输入侧会合并成一轮意图交给主 LLM 理解。核心情绪、回复后后台评估（post）、`group_atmosphere_state`、`humanlike_state`、`lifelike_learning_state`、`personality_drift_state`、即时聊天节奏和欺骗/操控/逃责类动作阻断默认自动运行；道德修复、瑕疵模拟、心理筛查等实验/维护模块仍由配置者显式打开。
 
 发布包会包含运行代码、README、CHANGELOG、LICENSE、配置结构（schema）、docs 和 `docs/assets/` 中的聚合图表；不会包含 `tests/`、`scripts/`、`literature_kb/`、`personality_literature_kb/`、`psychological_literature_kb/`、`humanlike_agent_literature_kb/`、`raw/`、`output/`、`dist/` 等开发、研究、原始样本或缓存目录。
+
+### 1.8.3 bug 修复发布记录
+
+`v1.8.3` 合并在 `main` 上，对外安装版本由 `metadata.yaml` 和 `main.py @register(...)` 共同声明为 `1.8.3`。本版按版本规则提升第三位版本号：只修复即时聊天分条接管时整段主回复和分条消息重复发送的问题，不改变公共 API 版本。
+
+当前版本的主要变化：
+
+| 类别 | 结果 |
+| --- | --- |
+| 双缓冲接管 | 分条接管时，插件内部保留完整主回复用于上下文和评估，同时清空 `completion_text`，避免 AstrBot 默认发送口再发整段原文。 |
+| 过期回复处理 | 过期回复、乱序旧回复和用户插话打断也会内部保留原文，并清空默认发送口。 |
+| 输入碎片聚合 | 同一用户在短时间内连续发出的短字、表情和疑问收束词会被视为一轮用户意图，避免只回应最后一条或逐条误读。 |
+| 主动聊天上下文 | 主动聊天调度器使用近期上下文窗口摘要；如果检测到 LivingMemory 的只读检索接口，会追加限长记忆摘要，失败时静默降级。 |
+| 回归验证 | 测试确认接管后 `response.completion_text` 为空，但 `_sylanne_intercepted_completion_text` 保留原文。 |
+| 公开契约 | 插件版本为 `1.8.3`；公共 API 版本仍为 `1.0`，schema 仍保持 `astrbot.emotion_state.v2` 等版本化契约。 |
 
 ### 1.8.2 bug 修复发布记录
 
@@ -124,7 +137,7 @@
 
 | 类别 | 结果 |
 | --- | --- |
-| 主回复保留 | 分条接管时不再清空 `completion_text`；插件通过 `stop_event()` 阻断默认发送，再由自身接管分条发送。 |
+| 主回复保留 | 分条接管时不再只依赖 `completion_text` 作为上下文；插件会尝试通过 `stop_event()` 阻断默认发送，再由自身接管分条发送。 |
 | 插话连续性 | 用户在第一条消息发出前或分条发送中途插话时，下一轮会注入已发短句或未发摘要，让 LLM 知道上一轮话还没说完。 |
 | 旧回复断点 | 过期回复、乱序回复和撤回打断不再变成空文本，而是记录为低 token 对话断点。 |
 | 分条质量 | 过长分条会被插件强制二次拆分，避免“看似分段、实际长篇”的破碎消息。 |
@@ -491,6 +504,7 @@ astrbot_plugin_sylanne/
 ├── lifelike_learning_engine.py
 ├── personality_drift_engine.py
 ├── realtime_chat_engine.py
+├── realtime_chat_input.py
 ├── integrated_self.py
 ├── moral_repair_engine.py
 ├── fallibility_engine.py
@@ -536,6 +550,7 @@ data/plugins/
     ├── lifelike_learning_engine.py
     ├── personality_drift_engine.py
     ├── realtime_chat_engine.py
+    ├── realtime_chat_input.py
     ├── integrated_self.py
     ├── moral_repair_engine.py
     ├── fallibility_engine.py
@@ -1013,7 +1028,7 @@ s_t=r_t c_t g^D_t\phi^D_t(q_t,v_{t-1},\Delta p_{t-1})
 <details>
 <summary>论文附录 S1｜完整公式推导、代表性文献依据与工程取舍</summary>
 
-#### 补充说明 S1
+#### Supplementary Note S1｜完整公式推导
 
 **题名**：面向 AstrBot 情绪状态层的多维人格调制动力学模型。
 
@@ -1543,8 +1558,11 @@ enable_safety_boundary = false
 | --- | --- | --- | --- |
 | `enable_proactive_speech_dispatch` | bool | `false` | 是否允许插件真正调用 `context.send_message` 主动发消息。关闭时只返回 `dispatch_request` 和未发送原因。 |
 | `enable_proactive_speech_scheduler` | bool | `false` | 是否启用后台主动聊天调度器。开启后会从最近可触达会话中选择候选；真正发送仍要求 `enable_proactive_speech_dispatch=true`。 |
+| `enable_livingmemory_recall_injection` | bool | `true` | 如果检测到 LivingMemory 的只读检索接口，普通回复、插话恢复和主动聊天会追加限长召回摘要；接口缺失、为空或异常时静默降级。 |
 
 主动发言的后台调度器不是固定闹钟。她会先登记最近出现过、具备 `unified_msg_origin` 的会话；后台低频醒来时，会在环境压力不高、同会话未被锁住、近期没有重复检查的前提下，把最近用户消息和上下文摘要交给主动发言裁决。裁决仍然要经过本地公式、LLM 话题判断、冷却、发送开关和 `context.send_message` 接口检查。
+
+主动发言不会只看最后一句。每次用户请求都会写入一个短期上下文窗口，调度器醒来时会把最近几轮用户文本和请求上下文整理成“近期上下文摘要”，再附上当前请求摘要、打断/未完成回复摘要和主动反馈状态。若当前 AstrBot 已安装并激活 LivingMemory，且该插件暴露 `search_memory`、`query_memory`、`retrieve_memory`、`recall_memory` 或同类只读检索接口，Sylanne 会用“当前消息 + 近期上下文 + 插件临时断点”作为查询，追加最多三条限长记忆摘要；检索失败、接口不存在或返回为空时静默降级，不阻塞普通回复或主动聊天。
 
 主动发言的冷却、有效期、句子长度和反馈观察窗口不会暴露为普通配置。插件会根据 `score`、边界敏感、打扰风险、修复需要、用户被照顾需要、bot 自己想被需要的程度自动计算，并写入 `dispatch_request.adaptive_policy`。如果主动发言后用户没有回应，或只回了“嗯”“好”这类低信号短句，插件会把它记录为 `unanswered` 或 `cold_reply`，后续会更谨慎地判断开口时机。
 
@@ -1577,9 +1595,13 @@ enable_safety_boundary = false
 
 从 `1.8.0` 起，即时聊天会把用户说话方式纳入生命化学习：本地统计用户消息的平均句长、换行密度、标点停顿、短句倾向、长段倾向和碎片化程度，并以真实时间下的平滑方式写入 `lifelike_learning_state.user_profile.speaking_style`。分条时她不会直接复制用户口癖，而是把这些统计量折算成 `user_style_adaptation`：用户常用短句、换行和碎片化表达时，她会更愿意多分几条短消息；用户常写长段、正式说明或要求严谨细节时，她会保留更长的单条消息，避免把技术说明切得太碎。这个过程不额外调用判断 LLM，也不会把用户画像原文暴露在公共 plan 里。
 
+输入侧也会理解用户分段。若同一会话、同一说话人在很短时间内连续发出短字、表情、疑问收束词或明显续写片段，插件会先在本地维护一个轻量碎片窗口；当窗口形成完整意图时，会临时注入 `[sylanne_user_message_fragments]`，告诉主 LLM 把这些碎片当作同一轮用户话语。例如“你 / 是 / 🐷 / 吗”会被解释成“你 是 🐷 吗”，而不是只回应最后的“吗”。这个聚合只在同一说话人、短时间窗口内生效；换人、超时或长段文本会重新开窗，避免把群聊里不同人的话硬拼在一起。
+
 长回复不会再为了满足 `max_parts` 硬上限而把尾部静默截成 `...`。`max_parts` 现在只表示日常偏好的初始分段数量；如果回复太长，分段器会继续按安全长度拆成更多消息，尽量避免平台把单条超长文本折叠成省略显示，也避免丢失正文。若用户在分条发送途中插话，剩余未发部分会被记录成低 token 的断点摘要，下一轮只把它作为“旧回复被打断”的上下文，不会把长文本全文塞回提示词。
 
-如果主 LLM 还在生成，用户已经补发了新消息，Sylanne 不会把旧回复硬塞到新上下文后面。插件会给每个会话维护一个轻量 `input_epoch`：用户新消息进入时 epoch 前进；旧回复到达时如果发现 epoch 已经过期，就让旧输出自然过期并跳过后台 post 情绪评估。已经开始分条发送时，每一条发送前也会检查 epoch；用户插话后剩余分条和表情包都会停止。对已经被即时聊天接管并实际发送的回复，插件会保留一次性 assistant 历史影子；如果用户在分条发送中途插话，也会把已经发出的短句作为活跃派发摘要临时注入新请求，用来维持“他们、刚才、那个”这类指代关系。相关摘要注入后会立即消费，避免 token 持续膨胀。
+如果主 LLM 还在生成，用户已经补发了新消息，Sylanne 不会把旧回复硬塞到新上下文后面。插件会给每个会话维护一个轻量 `input_epoch`：用户新消息进入时 epoch 前进；旧回复到达时如果发现 epoch 已经过期，就让旧输出自然过期并跳过后台 post 情绪评估。已经开始分条发送时，每一条发送前也会检查 epoch；用户插话后剩余分条和表情包都会停止。对已经被即时聊天接管并实际发送的回复，插件会保留一次性 assistant 历史影子；如果用户在分条发送中途插话，也会把已经发出的短句作为活跃派发摘要临时注入新请求，用来维持“他们、刚才、那个”这类指代关系。低信号消息，例如单独的“？”或一个表情，不会立刻消费这份 assistant 历史影子；真正有内容的下一轮追问仍能拿到上下文。相关摘要注入后会立即消费，避免 token 持续膨胀。
+
+如果同时安装了 LivingMemory，普通回复链路也会尽量调用她的只读检索接口。召回内容只会被压缩成 `[sylanne_livingmemory_recall]` 短摘要，用来帮助主 LLM 理解“他们”“刚才那个”“之前说过的进度”这类指代和长期偏好；插件不会把整段记忆库塞回提示词，也不会因为 LivingMemory 没装、没启用、接口名不同、检索为空或检索报错而阻断回复。这个行为由 `enable_livingmemory_recall_injection` 控制，默认开启。
 
 NapCat/OneBot 的撤回事件也可以接入这个机制。NapCat 的撤回属于 OneBot `notice` 事件，私聊撤回为 `notice_type=friend_recall`，群撤回为 `notice_type=group_recall`，常见字段包括 `message_id`、`user_id`、群撤回里的 `group_id` 与 `operator_id`。如果适配器能把原始 notice 放在 `event.message_obj.raw_message`、`event.raw_message` 或同类字段里，插件可解析撤回载荷；其他插件也可以直接调用 `observe_user_message_withdrawal(...)`。撤回后会推进会话 epoch、清空该会话最近主动聊天候选摘要，并让旧回复自然过期。若平台没有把撤回事件交给插件，则只能等用户补发更正消息后按“新消息打断旧回复”处理。
 
@@ -1714,6 +1736,14 @@ build_emotion_memory_payload(...)
 ```
 
 这个方法不会更新情绪状态，只读取当前快照，并把 `emotion_at_write` 固定进记忆载荷。这样以后情绪变化不会覆盖旧记忆。
+
+反过来，如果 AstrBot 当前已经安装并激活 LivingMemory，且它暴露 `search_memory`、`query_memory`、`retrieve_memory`、`recall_memory` 或同类只读检索接口，Sylanne 也会在普通回复、插话恢复和主动聊天调度时尝试读取最多三条限长摘要。召回 query 会综合当前用户消息、近期请求上下文和插件临时断点，因此用户连续补充“不是啊，我说的是插件其他用户 / 那他们呢”时，主 LLM 不会只看到最后一句“他们呢”。该功能默认开启：
+
+```text
+enable_livingmemory_recall_injection = true
+```
+
+如果 LivingMemory 未安装、未激活、接口不存在、返回为空或检索抛错，Sylanne 会静默降级为无召回，不影响原始回复流程。
 
 ### 推荐接法
 
@@ -2676,7 +2706,7 @@ py -3.13 scripts\package_plugin.py --output dist\astrbot_plugin_sylanne.zip
 | 检查项 | 要求 |
 | --- | --- |
 | 顶层目录 | 所有文件都必须在 `astrbot_plugin_sylanne/` 下。 |
-| 必要文件 | 包含 `__init__.py`、`metadata.yaml`、`main.py`、`emotion_engine.py`、`humanlike_engine.py`、`lifelike_learning_engine.py`、`personality_drift_engine.py`、`realtime_chat_engine.py`、`integrated_self.py`、`moral_repair_engine.py`、`fallibility_engine.py`、`psychological_screening.py`、`prompts.py`、`public_api.py`、`README.md`、`CHANGELOG.md`、`LICENSE`、`requirements.txt`、`_conf_schema.json`。 |
+| 必要文件 | 包含 `__init__.py`、`metadata.yaml`、`main.py`、`emotion_engine.py`、`humanlike_engine.py`、`lifelike_learning_engine.py`、`personality_drift_engine.py`、`realtime_chat_engine.py`、`realtime_chat_input.py`、`integrated_self.py`、`moral_repair_engine.py`、`fallibility_engine.py`、`psychological_screening.py`、`prompts.py`、`public_api.py`、`README.md`、`CHANGELOG.md`、`LICENSE`、`requirements.txt`、`_conf_schema.json`。 |
 | 插件身份 | zip 内 `metadata.yaml name:` 必须等于 `astrbot_plugin_sylanne`。 |
 | 排除目录 | 不应包含 `tests/`、`scripts/`、`output/`、`dist/`、`raw/`、`__pycache__/`、`.git/`。 |
 | 许可证 | 发布包必须包含 `LICENSE`，协议为 `GPL-3.0-or-later`。 |
@@ -2798,7 +2828,7 @@ py -3.13 -m unittest discover -s tests -v
 语法检查：
 
 ```powershell
-py -3.13 -m py_compile main.py emotion_engine.py psychological_screening.py humanlike_engine.py lifelike_learning_engine.py personality_drift_engine.py realtime_chat_engine.py integrated_self.py moral_repair_engine.py fallibility_engine.py prompts.py public_api.py scripts\package_plugin.py
+py -3.13 -m py_compile main.py emotion_engine.py psychological_screening.py humanlike_engine.py lifelike_learning_engine.py personality_drift_engine.py realtime_chat_engine.py realtime_chat_input.py integrated_self.py moral_repair_engine.py fallibility_engine.py prompts.py public_api.py scripts\package_plugin.py
 ```
 
 配置 schema 检查：
@@ -2817,7 +2847,7 @@ py -3.13 scripts\package_plugin.py --output dist\astrbot_plugin_sylanne.zip
 
 发布 zip 的第一项会显式写入 `astrbot_plugin_sylanne/` 目录项，以兼容 AstrBot WebUI 的 `install-upload` 解压逻辑。不要手工重新压缩成“缺少顶层目录项”的 zip，否则部分 AstrBot 版本会把第一个文件路径误判成目录。
 
-发布包还会保留插件根目录下的 `__init__.py`、`public_api.py`、`main.py`、`emotion_engine.py`、`humanlike_engine.py`、`lifelike_learning_engine.py`、`personality_drift_engine.py`、`realtime_chat_engine.py`、`integrated_self.py`、`moral_repair_engine.py`、`fallibility_engine.py`、`psychological_screening.py` 和 `prompts.py`。这保证其他插件在安装后可以通过 `from astrbot_plugin_sylanne.public_api import ...` 按包名导入公共 API。
+发布包还会保留插件根目录下的 `__init__.py`、`public_api.py`、`main.py`、`emotion_engine.py`、`humanlike_engine.py`、`lifelike_learning_engine.py`、`personality_drift_engine.py`、`realtime_chat_engine.py`、`realtime_chat_input.py`、`integrated_self.py`、`moral_repair_engine.py`、`fallibility_engine.py`、`psychological_screening.py` 和 `prompts.py`。这保证其他插件在安装后可以通过 `from astrbot_plugin_sylanne.public_api import ...` 按包名导入公共 API。
 
 远程只读烟测：
 
@@ -2846,7 +2876,7 @@ $env:ASTRBOT_EXPECT_PLUGIN = "astrbot_plugin_sylanne"
 脚本会在输出 JSON 里写出 `expectedPluginRuntime`，包含插件列表 API 中返回的 `version`、`displayName`、`activated`、`author`、`astrbotVersion` 等只读字段。若目标插件存在但 `activated=false`，脚本会失败退出。需要把版本和显示名也作为硬断言时，可以额外设置：
 
 ```powershell
-$env:ASTRBOT_EXPECT_PLUGIN_VERSION = "1.8.2"
+$env:ASTRBOT_EXPECT_PLUGIN_VERSION = "1.8.3"
 $env:ASTRBOT_EXPECT_PLUGIN_DISPLAY_NAME = "Sylanne"
 & $node scripts\remote_smoke_playwright.js
 ```
@@ -2887,7 +2917,7 @@ $env:ASTRBOT_REMOTE_INSTALL_CONFIRM = "1"
 
 上传脚本只允许调用 AstrBot WebUI 的 `install-upload` 安装端点；若 WebUI 留下 `plugin_upload_<插件名>` 失败安装残留，脚本只会调用 `uninstall-failed` 清理这个失败上传目录，并固定 `delete_config=false`、`delete_data=false`。它不会删除正式插件、覆盖正式插件目录、更新插件、重启 AstrBot、保存配置或写入本地 cookie/session。如果远端返回“目录 `<插件名>` 已存在”，脚本会输出 `installOutcome="already_installed_no_overwrite"`、`alreadyInstalled=true`、`overwriteAttempted=false` 和 `formalPluginDirectoryPreserved=true`，表示正式插件目录被保留，后续应通过只读烟测查看实际运行版本。上传成功后，再运行上面的 `ASTRBOT_EXPECT_PLUGIN` 只读烟测作为最终验证。
 
-上传脚本在真正发起安装请求之前会完整读取 zip 中央目录做本地预检：所有条目必须位于 `astrbot_plugin_sylanne/` 下，路径必须是相对 POSIX 路径，且不能包含 `.` / `..` 不安全路径段；必须包含 `__init__.py`、`agent_identity.py`、`metadata.yaml`、`main.py`、`emotion_engine.py`、`group_atmosphere_engine.py`、`humanlike_engine.py`、`lifelike_learning_engine.py`、`personality_drift_engine.py`、`realtime_chat_engine.py`、`integrated_self.py`、`moral_repair_engine.py`、`fallibility_engine.py`、`psychological_screening.py`、`prompts.py`、`public_api.py`、`README.md`、`LICENSE`、`requirements.txt`、`_conf_schema.json`，并拒绝 `tests/`、`scripts/`、`output/`、`dist/`、`raw/`、`__pycache__/`、`.git/` 等本地或研究缓存目录。预检还会读取 zip 内的 `metadata.yaml`，确认其中 `name:` 精确等于 CLI 参数或 `ASTRBOT_EXPECT_PLUGIN` 传入的插件目录名。
+上传脚本在真正发起安装请求之前会完整读取 zip 中央目录做本地预检：所有条目必须位于 `astrbot_plugin_sylanne/` 下，路径必须是相对 POSIX 路径，且不能包含 `.` / `..` 不安全路径段；必须包含 `__init__.py`、`agent_identity.py`、`metadata.yaml`、`main.py`、`emotion_engine.py`、`group_atmosphere_engine.py`、`humanlike_engine.py`、`lifelike_learning_engine.py`、`personality_drift_engine.py`、`realtime_chat_engine.py`、`realtime_chat_input.py`、`integrated_self.py`、`moral_repair_engine.py`、`fallibility_engine.py`、`psychological_screening.py`、`prompts.py`、`public_api.py`、`README.md`、`LICENSE`、`requirements.txt`、`_conf_schema.json`，并拒绝 `tests/`、`scripts/`、`output/`、`dist/`、`raw/`、`__pycache__/`、`.git/` 等本地或研究缓存目录。预检还会读取 zip 内的 `metadata.yaml`，确认其中 `name:` 精确等于 CLI 参数或 `ASTRBOT_EXPECT_PLUGIN` 传入的插件目录名。
 
 也可以单独运行预检，不连接远程服务器：
 
@@ -3065,7 +3095,7 @@ inject_state = false
 humanlike_memory_write_enabled = true
 ```
 
-拟人状态默认自动运行。若没有看到 `humanlike_state_at_write`，优先确认插件是否为 `1.8.2` 或更新版本、`humanlike_memory_write_enabled=true`，以及调用方是否保留了完整记忆载荷。
+拟人状态默认自动运行。若没有看到 `humanlike_state_at_write`，优先确认插件是否为 `1.8.3` 或更新版本、`humanlike_memory_write_enabled=true`，以及调用方是否保留了完整记忆载荷。
 
 ### 拟人状态没有生效
 

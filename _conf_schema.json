@@ -415,6 +415,12 @@
     "default": true,
     "hint": "build_emotion_memory_payload 会附带 lifelike_learning_state_at_write，供 LivingMemory 等插件记录当时共同语境和开口策略。"
   },
+  "enable_livingmemory_recall_injection": {
+    "description": "启用 LivingMemory 只读召回上下文注入",
+    "type": "bool",
+    "default": true,
+    "hint": "默认开启。若检测到 LivingMemory 插件提供只读检索接口，普通回复、插话恢复和主动聊天会追加限长召回摘要，用于理解指代、偏好和长期相处背景；接口缺失或异常时静默降级。"
+  },
   "allow_lifelike_learning_reset_backdoor": {
     "description": "允许手动/API 重置生命化学习状态后门",
     "type": "bool",
