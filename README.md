@@ -2,7 +2,7 @@
 
 > <span style="font-size: 1.08em;"><strong>Soulful Yearning Lifelike AstrBot Neural Narrative Engine</strong>。她维护的不只是“情绪标签”，而是情绪、人格、记忆、氛围、主动性和表达节奏交织成的长期状态。</span>
 
-![版本 1.7.0](https://img.shields.io/badge/version-1.7.0-blue)
+![版本 1.7.1](https://img.shields.io/badge/version-1.7.1-blue)
 ![AstrBot >=4.9.2,<5.0.0](https://img.shields.io/badge/AstrBot-%3E%3D4.9.2%2C%3C5.0.0-green)
 ![Python 3.10+](https://img.shields.io/badge/Python-3.10%2B-yellow)
 ![协议 astrbot.emotion_state.v2](https://img.shields.io/badge/schema-astrbot.emotion__state.v2-purple)
@@ -38,7 +38,7 @@
 
 <br clear="right">
 
-`1.7.0` 的重点是把“主动聊天”从一次性工具请求补成后台闭环：她会记录最近可触达会话，低频醒来后由状态公式和 LLM 判断是否应该请求 AstrBot 主动发消息；同时加入用户插话中断、分条发送中途过期检查和 NapCat/OneBot 撤回接入，避免旧回复越过新的上下文。`1.6.0` 的环境压力守卫、全局 worker 预算和平滑扩容继续作为后台稳定性基线保留。
+`1.7.1` 是 `1.7.0` 后的修复版：主动聊天后台闭环、用户插话中断、分条发送中途过期检查和 NapCat/OneBot 撤回接入全部保留；本版把“阻断欺骗、操控、逃责类动作”修正为默认开启，只有显式关闭 `block_deception_manipulation_evasion_actions` 时才退回只观察风险。
 
 | 能力 | 作用 |
 | --- | --- |
@@ -74,7 +74,7 @@
 | 主题 | 内容 |
 | --- | --- |
 | [当前版本与兼容范围](#当前版本与兼容范围) | 插件版本、AstrBot 版本、Python 要求、许可证和发布状态。 |
-| [1.7.0 正式版发布记录](#170-正式版发布记录) | 主动聊天后台调度闭环、用户插话中断、NapCat/OneBot 撤回接入、版本规则和测试与包体。 |
+| [1.7.1 修复版发布记录](#171-修复版发布记录) | 默认开启欺骗/操控/逃责类动作阻断，保留显式关闭后的只观察路径。 |
 | [项目定位](#项目定位) | 为什么本插件不是普通的提示词人设增强。 |
 | [核心能力](#核心能力总览) | 7 维情绪、人格建模、真实时间记忆、关系修复、公共 API。 |
 | [快速开始](#快速开始) | 发布 zip 包、仓库安装、手动复制、最小配置和检查命令。 |
@@ -102,31 +102,29 @@
 | --- | --- |
 | 插件目录名 | `astrbot_plugin_sylanne` |
 | 显示名 | `Sylanne` |
-| 当前版本 | `1.7.0` |
+| 当前版本 | `1.7.1` |
 | AstrBot 版本 | `>=4.9.2,<5.0.0` |
 | Python | `3.10+` |
 | 许可证 | `GPL-3.0-or-later` |
 | 运行时第三方依赖 | 当前无额外依赖，见 `requirements.txt` |
 
-`1.7.0` 在 `1.6.0` 后台稳定性基线上补齐主动聊天闭环：默认仍不主动发送，配置者同时开启 `enable_proactive_speech_scheduler=true` 与 `enable_proactive_speech_dispatch=true` 后，她才会从最近可触达会话中选择候选，结合情绪、群聊氛围、双方需要、冷却、上下文证据和 LLM 话题裁决，请求 AstrBot 主动发送。即时聊天分条发送会监听用户插话；NapCat/OneBot 撤回会推进会话 epoch 并让旧输出自然过期。核心情绪、回复后后台评估（post）、`group_atmosphere_state`、`humanlike_state`、`lifelike_learning_state`、`personality_drift_state` 和即时聊天节奏默认自动运行；道德修复、瑕疵模拟、心理筛查等实验/维护模块仍由配置者显式打开。
+`1.7.1` 在 `1.7.0` 主动聊天闭环基础上修正默认阻断契约：默认仍不主动发送，配置者同时开启 `enable_proactive_speech_scheduler=true` 与 `enable_proactive_speech_dispatch=true` 后，她才会从最近可触达会话中选择候选，结合情绪、群聊氛围、双方需要、冷却、上下文证据和 LLM 话题裁决，请求 AstrBot 主动发送。即时聊天分条发送会监听用户插话；NapCat/OneBot 撤回会推进会话 epoch 并让旧输出自然过期。核心情绪、回复后后台评估（post）、`group_atmosphere_state`、`humanlike_state`、`lifelike_learning_state`、`personality_drift_state`、即时聊天节奏和欺骗/操控/逃责类动作阻断默认自动运行；道德修复、瑕疵模拟、心理筛查等实验/维护模块仍由配置者显式打开。
 
 发布包会包含运行代码、README、CHANGELOG、LICENSE、配置结构（schema）、docs 和 `docs/assets/` 中的聚合图表；不会包含 `tests/`、`scripts/`、`literature_kb/`、`personality_literature_kb/`、`psychological_literature_kb/`、`humanlike_agent_literature_kb/`、`raw/`、`output/`、`dist/` 等开发、研究、原始样本或缓存目录。
 
-### 1.7.0 正式版发布记录
+### 1.7.1 修复版发布记录
 
-`v1.7.0` 合并在 `main` 上，对外安装版本由 `metadata.yaml` 和 `main.py @register(...)` 共同声明为 `1.7.0`。本版以 `1.6.0` 的后台 worker 稳定性为基线，重点补齐主动聊天调度闭环，以及用户插话、分条发送和 NapCat/OneBot 撤回场景下的上下文一致性。
+`v1.7.1` 合并在 `main` 上，对外安装版本由 `metadata.yaml` 和 `main.py @register(...)` 共同声明为 `1.7.1`。本版是 `1.7.0` 的 bug 修复版，按版本规则只提升第三位版本号；修正内容是让 `block_deception_manipulation_evasion_actions` 的 schema 默认值、运行时默认值和 README 说明全部一致为“默认开启阻断”。
 
 当前版本的主要变化：
 
 | 类别 | 结果 |
 | --- | --- |
-| 主动聊天后台调度 | 新增 `enable_proactive_speech_scheduler`。开启后插件会登记最近可触达会话，后台低频醒来，在压力、冷却、同会话锁和发送开关都允许时请求主动发言裁决。 |
-| 主动发送闭环 | 主动话题仍由状态公式和 LLM 基于证据裁决，不使用固定话题库；真正发送仍要求 `enable_proactive_speech_dispatch=true`，并写入主动发送审计和生命化学习反馈。 |
-| 用户插话中断 | 每个会话维护 `input_epoch`。用户新消息进入后，旧 LLM 回复若已过期会被清空，不进入 post 情绪评估；分条发送中途也会逐条检查，避免旧话越过新上下文。 |
-| NapCat/OneBot 撤回接入 | 新增 `observe_user_message_withdrawal(...)` 公共 API，可解析 `friend_recall` / `group_recall` notice，撤回后推进 epoch、清理主动候选摘要，并让旧输出自然过期。 |
-| 后台稳定性继承 | `1.6.0` 的 CPU/内存环境守卫、全局 worker 硬上限 `6`、平滑扩容和只读诊断不提交状态继续保留。 |
-| 版本规则 | 以后发布遵循：第一位用于代码重构级或划世代级更新；第二位用于功能更新；第三位用于 bug 修复；实验版本在版本号后加 `exp` 后缀。 |
-| 公开契约 | 插件版本为 `1.7.0`；公共 API 版本仍为 `1.0`，schema 仍保持 `astrbot.emotion_state.v2` 等版本化契约。 |
+| 默认阻断修正 | `block_deception_manipulation_evasion_actions` 现在默认 `true`，综合自我、道德修复、瑕疵模拟和阴影诊断会默认输出插件层硬阻断信号。 |
+| 显式关闭路径 | 配置者仍可显式设为 `false`，此时插件只保留风险观察、修复建议和透明性信号，不额外写入 `blocked_actions`、`not_allowed` 或 `refuse` 类硬阻断动作。 |
+| 文档与配置同步 | README、`_conf_schema.json`、远程烟测模板和配置表同步到 `1.7.1`，避免 UI 显示“默认关闭”但运行时按其他逻辑处理。 |
+| 前序能力保留 | `1.7.0` 的主动聊天后台调度、用户插话中断、分条发送中途检查和 NapCat/OneBot 撤回接入全部保留。 |
+| 公开契约 | 插件版本为 `1.7.1`；公共 API 版本仍为 `1.0`，schema 仍保持 `astrbot.emotion_state.v2` 等版本化契约。 |
 
 运行时亮点可以按这条链路理解。手机端若不渲染 Mermaid，也会优先显示下面的静态图：
 
@@ -1701,7 +1699,7 @@ NapCat/OneBot 的撤回事件也可以接入这个机制。NapCat 的撤回属�
 | 配置项 | 类型 | 默认值 | 说明 |
 | --- | --- | --- | --- |
 | `enable_safety_boundary` | bool | `true` | 情绪后果安全边界，默认开启，可关闭。 |
-| `block_deception_manipulation_evasion_actions` | bool | `false` | 是否输出插件层硬阻断动作；默认关闭，保留风险可观察但不额外写入阻断动作。 |
+| `block_deception_manipulation_evasion_actions` | bool | `true` | 是否输出插件层硬阻断动作；默认开启。关闭后只保留风险观察与修复建议，不额外写入阻断动作。 |
 | `allow_emotion_reset_backdoor` | bool | `true` | 是否允许手动/API 重置情绪状态。 |
 
 情绪后果的半衰期、触发阈值、强度倍率、冷处理时长和短期后果时长不再作为用户配置项。它们只是代码内部的先验尺度，最终生效值会由本地状态机根据人格画像、人格漂移、当前情绪向量、冲突成因、修复信号、误读概率、信任损伤、重复犯错和真实时间间隔自动推导，并写入 `consequences.dynamics`。相邻轮次会按真实时间低通平滑，所以不会因为一条消息突然跳变，也不能靠刷消息把冷处理或反刍后果刷掉。
@@ -2890,7 +2888,7 @@ $env:ASTRBOT_EXPECT_PLUGIN = "astrbot_plugin_sylanne"
 脚本会在输出 JSON 里写出 `expectedPluginRuntime`，包含插件列表 API 中返回的 `version`、`displayName`、`activated`、`author`、`astrbotVersion` 等只读字段。若目标插件存在但 `activated=false`，脚本会失败退出。需要把版本和显示名也作为硬断言时，可以额外设置：
 
 ```powershell
-$env:ASTRBOT_EXPECT_PLUGIN_VERSION = "1.7.0"
+$env:ASTRBOT_EXPECT_PLUGIN_VERSION = "1.7.1"
 $env:ASTRBOT_EXPECT_PLUGIN_DISPLAY_NAME = "Sylanne"
 & $node scripts\remote_smoke_playwright.js
 ```
@@ -3109,7 +3107,7 @@ inject_state = false
 humanlike_memory_write_enabled = true
 ```
 
-拟人状态默认自动运行。若没有看到 `humanlike_state_at_write`，优先确认插件是否为 `1.7.0` 或更新版本、`humanlike_memory_write_enabled=true`，以及调用方是否保留了完整记忆载荷。
+拟人状态默认自动运行。若没有看到 `humanlike_state_at_write`，优先确认插件是否为 `1.7.1` 或更新版本、`humanlike_memory_write_enabled=true`，以及调用方是否保留了完整记忆载荷。
 
 ### 拟人状态没有生效
 

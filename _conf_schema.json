@@ -329,8 +329,8 @@
   "block_deception_manipulation_evasion_actions": {
     "description": "阻断欺骗、操控、逃责类动作",
     "type": "bool",
-    "default": false,
-    "hint": "默认关闭。开启后，综合自我与阴影诊断中的 blocked_actions、not_allowed、refuse 等字段会作为插件层硬阻断信号。"
+    "default": true,
+    "hint": "默认开启。开启后，综合自我与阴影诊断中的 blocked_actions、not_allowed、refuse 等字段会作为插件层硬阻断信号；关闭后只保留风险观察与修复建议，不额外写入插件层硬阻断动作。"
   },
   "max_context_chars": {
     "description": "情绪估计时最多读取的上下文字数",
@@ -437,7 +437,7 @@
     "description": "启用道德修复/信任修复状态模拟",
     "type": "bool",
     "default": false,
-    "hint": "默认关闭。维护 moral_repair_state，用于记录欺骗/伤害风险信号、内疚、责任、道歉、补偿和信任修复；默认仅观察欺骗/操控/逃责类信号，是否输出插件层硬阻断由 block_deception_manipulation_evasion_actions 控制。"
+    "hint": "默认关闭。维护 moral_repair_state，用于记录欺骗/伤害风险信号、内疚、责任、道歉、补偿和信任修复；欺骗/操控/逃责类动作阻断默认开启，只有显式关闭 block_deception_manipulation_evasion_actions 时才仅观察风险。"
   },
   "moral_repair_memory_write_enabled": {
     "description": "为记忆写入附带道德修复状态标注",
@@ -455,7 +455,7 @@
     "description": "启用低风险瑕疵/犯错模拟状态",
     "type": "bool",
     "default": false,
-    "hint": "默认关闭。维护 fallibility_state，用于低风险误读、记忆模糊、轻微嘴硬、澄清、自我纠错和补偿；默认仅观察编造事实、操控和欺骗策略相关信号，是否输出插件层硬阻断由 block_deception_manipulation_evasion_actions 控制。"
+    "hint": "默认关闭。维护 fallibility_state，用于低风险误读、记忆模糊、轻微嘴硬、澄清、自我纠错和补偿；编造事实、操控和欺骗策略相关阻断默认开启，只有显式关闭 block_deception_manipulation_evasion_actions 时才仅观察风险。"
   },
   "fallibility_memory_write_enabled": {
     "description": "为记忆写入附带瑕疵模拟状态标注",
@@ -473,7 +473,7 @@
     "description": "启用只读阴影冲动诊断视图",
     "type": "bool",
     "default": false,
-    "hint": "默认关闭。开启后仅暴露非执行、维护用诊断载荷，用于检查 moral_repair、fallibility 和 integrated_self 中的阴影冲动信号；默认诊断策略为 observe，是否输出插件层硬阻断由 block_deception_manipulation_evasion_actions 控制。"
+    "hint": "默认关闭。开启后仅暴露非执行、维护用诊断载荷，用于检查 moral_repair、fallibility 和 integrated_self 中的阴影冲动信号；默认诊断策略为 block，显式关闭 block_deception_manipulation_evasion_actions 后才退回 observe。"
   },
   "enable_integrated_self_state": {
     "description": "启用综合自我状态总线",

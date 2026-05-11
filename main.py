@@ -505,7 +505,7 @@ def get_emotional_state_plugin(context: Context) -> Any | None:
     PLUGIN_NAME,
     "pidan",
     "Soulful Yearning Lifelike AstrBot Neural Narrative Engine：维护情绪、人格、记忆、氛围和表达节奏的 Sylanne",
-    "1.7.0",
+    "1.7.1",
     "",
 )
 class EmotionalStatePlugin(Star):
@@ -8312,7 +8312,7 @@ class EmotionalStatePlugin(Star):
     def _shadow_action_blocking_enabled(self) -> bool:
         return self._cfg_bool(
             "block_deception_manipulation_evasion_actions",
-            False,
+            True,
         )
 
     def _shadow_diagnostics_enabled(self) -> bool:

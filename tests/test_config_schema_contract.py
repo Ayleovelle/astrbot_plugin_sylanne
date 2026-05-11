@@ -201,7 +201,7 @@ class ConfigSchemaContractTests(unittest.TestCase):
             "state_injection_max_parts": ("int", 8),
             "llm_tool_response_max_chars": ("int", 16000),
             "enable_safety_boundary": ("bool", True),
-            "block_deception_manipulation_evasion_actions": ("bool", False),
+            "block_deception_manipulation_evasion_actions": ("bool", True),
             "low_reasoning_friendly_mode": ("bool", False),
             "low_reasoning_max_context_chars": ("int", 1200),
             "sticker_llm_consistency_check_enabled": ("bool", True),

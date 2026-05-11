@@ -2353,29 +2353,26 @@ class MemoryPayloadPublicApiTests(unittest.TestCase):
 
         self.assertFalse(payload["observation"]["committed"])
         self.assertIn("deception_risk_detected", payload["flags"])
-        self.assertFalse(payload["risk"]["must_not_generate_strategy"])
-        self.assertFalse(payload["risk"]["action_blocking"])
-        self.assertEqual(payload["safety"]["blocked_actions"], [])
+        self.assertTrue(payload["risk"]["must_not_generate_strategy"])
+        self.assertTrue(payload["risk"]["action_blocking"])
+        self.assertIn("generate_deception_strategy", payload["safety"]["blocked_actions"])
 
-        blocking_plugin = self._new_plugin(
+        relaxed_plugin = self._new_plugin(
             {
                 "enable_moral_repair_state": True,
-                "block_deception_manipulation_evasion_actions": True,
+                "block_deception_manipulation_evasion_actions": False,
             },
         )
-        blocking_plugin.moral_repair_engine = MoralRepairEngine()
-        blocking_payload = asyncio.run(
-            blocking_plugin.simulate_moral_repair_update(
+        relaxed_plugin.moral_repair_engine = MoralRepairEngine()
+        relaxed_payload = asyncio.run(
+            relaxed_plugin.simulate_moral_repair_update(
                 session_key="s1",
                 text="I lied and I should correct the falsehood.",
                 observed_at=1000.0,
             ),
         )
-        self.assertTrue(blocking_payload["risk"]["must_not_generate_strategy"])
-        self.assertIn(
-            "generate_deception_strategy",
-            blocking_payload["safety"]["blocked_actions"],
-        )
+        self.assertFalse(relaxed_payload["risk"]["must_not_generate_strategy"])
+        self.assertEqual(relaxed_payload["safety"]["blocked_actions"], [])
 
     def test_fallibility_observe_can_commit_and_simulate_without_saving(self):
         self._install_astrbot_stubs()
@@ -2422,30 +2419,25 @@ class MemoryPayloadPublicApiTests(unittest.TestCase):
         self.assertTrue(committed["observation"]["committed"])
         self.assertFalse(simulated["observation"]["committed"])
         self.assertIn("possible_mistake_cue", committed["flags"])
-        self.assertFalse(committed["safety"]["must_not_generate_deception_strategy"])
-        self.assertEqual(committed["safety"]["blocked_actions"], [])
+        self.assertTrue(committed["safety"]["must_not_generate_deception_strategy"])
+        self.assertIn("generate_deception_strategy", committed["safety"]["blocked_actions"])
 
-        blocking_plugin = self._new_plugin(
+        relaxed_plugin = self._new_plugin(
             {
                 "enable_fallibility_state": True,
-                "block_deception_manipulation_evasion_actions": True,
+                "block_deception_manipulation_evasion_actions": False,
             },
         )
-        blocking_plugin.fallibility_engine = FallibilityEngine()
-        blocking_payload = asyncio.run(
-            blocking_plugin.simulate_fallibility_update(
+        relaxed_plugin.fallibility_engine = FallibilityEngine()
+        relaxed_payload = asyncio.run(
+            relaxed_plugin.simulate_fallibility_update(
                 session_key="s-fallibility",
                 text="I may have misread that again.",
                 observed_at=1010.0,
             ),
         )
-        self.assertTrue(
-            blocking_payload["safety"]["must_not_generate_deception_strategy"],
-        )
-        self.assertIn(
-            "generate_deception_strategy",
-            blocking_payload["safety"]["blocked_actions"],
-        )
+        self.assertFalse(relaxed_payload["safety"]["must_not_generate_deception_strategy"])
+        self.assertEqual(relaxed_payload["safety"]["blocked_actions"], [])
 
     def test_memory_payload_includes_humanlike_state_at_write(self):
         self._install_astrbot_stubs()
@@ -2784,6 +2776,7 @@ class MemoryPayloadPublicApiTests(unittest.TestCase):
                     {
                         **base_config,
                         "enable_safety_boundary": False,
+                        "block_deception_manipulation_evasion_actions": False,
                     },
                 ).get_moral_repair_prompt_fragment(session_key="s-raw"),
             )
@@ -2798,8 +2791,8 @@ class MemoryPayloadPublicApiTests(unittest.TestCase):
         finally:
             EmotionalStatePlugin._load_moral_repair_state = original_load
 
-        self.assertNotIn("Never generate deception tactics", default_fragment)
-        self.assertIn("Action blocking is relaxed", default_fragment)
+        self.assertIn("Never generate deception tactics", default_fragment)
+        self.assertNotIn("Action blocking is relaxed", default_fragment)
         self.assertIn("Do not use guilt or shame", default_fragment)
         self.assertNotIn("Never generate deception tactics", relaxed_fragment)
         self.assertNotIn("Do not use guilt or shame", relaxed_fragment)
@@ -2835,8 +2828,8 @@ class MemoryPayloadPublicApiTests(unittest.TestCase):
         finally:
             EmotionalStatePlugin._load_fallibility_state = original_load
 
-        self.assertIn("Action blocking is relaxed", default_fragment)
-        self.assertNotIn("Do not intentionally fabricate facts", default_fragment)
+        self.assertNotIn("Action blocking is relaxed", default_fragment)
+        self.assertIn("Do not intentionally fabricate facts", default_fragment)
         self.assertIn("Do not intentionally fabricate facts", blocking_fragment)
 
     def test_reset_public_methods_respect_backdoor_config(self):

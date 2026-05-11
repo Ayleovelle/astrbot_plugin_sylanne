@@ -2,6 +2,20 @@
 
 本文件用于 AstrBot 插件市场/管理页展示更新内容。更完整的设计说明、公式推导、测试矩阵和维护手册见 `README.md`。
 
+## 1.7.1
+
+发布日期：2026-05-11
+
+### 修复
+
+- 修正 `block_deception_manipulation_evasion_actions` 的默认契约：配置 schema、运行时 fallback、README 和测试现在统一为默认开启阻断。
+- 默认情况下，道德修复、瑕疵模拟、综合自我和阴影诊断会输出 `blocked_actions`、`not_allowed`、`refuse` 等插件层硬阻断信号。
+- 显式设置 `block_deception_manipulation_evasion_actions=false` 时，仍保留只观察风险、透明修复和不额外阻断的维护路径。
+
+### 验证
+
+- 更新 schema 默认值、命令层阴影诊断、公共 API 和提示词片段相关测试。
+
 ## 1.7.0
 
 发布日期：2026-05-11

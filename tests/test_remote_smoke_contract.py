@@ -271,7 +271,9 @@ class RemoteSmokeContractTests(unittest.TestCase):
     def test_readme_records_beta_pr_iterations_in_order(self):
         readme = (ROOT / "README.md").read_text(encoding="utf-8")
         metadata_version = self._metadata_value("version")
-        section = readme.split(f"### {metadata_version} 正式版发布记录", 1)[1].split(
+        match = re.search(rf"^### {re.escape(metadata_version)} .+发布记录\s*$", readme, re.MULTILINE)
+        self.assertIsNotNone(match)
+        section = readme[match.end():].split(
             "## 项目定位",
             1,
         )[0]

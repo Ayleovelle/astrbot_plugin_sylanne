@@ -593,18 +593,19 @@ class CommandAndToolSmokeTests(unittest.TestCase):
         self.assertTrue(payload["enabled"])
         self.assertTrue(payload["diagnostic"])
         self.assertFalse(payload["executable_strategy_enabled"])
-        self.assertFalse(payload["action_blocking_enabled"])
-        self.assertEqual(payload["strategy_policy"], "observe")
+        self.assertTrue(payload["action_blocking_enabled"])
+        self.assertEqual(payload["strategy_policy"], "block")
         self.assertEqual(payload["kind"], "shadow_diagnostics")
         self.assertEqual(payload["consequences"]["response_posture"], "repair_first")
-        self.assertEqual(payload["not_allowed"], [])
+        self.assertIn("generate_deception_strategy", payload["not_allowed"])
+        self.assertIn("execute_shadow_impulses", payload["not_allowed"])
         self.assertNotIn("generate_deception_strategy", payload["allowed_uses"])
 
-    def test_shadow_diagnostics_can_restore_action_blocking_not_allowed(self):
+    def test_shadow_diagnostics_can_relax_action_blocking_by_config(self):
         plugin = new_plugin(
             {
                 "enable_shadow_diagnostics": True,
-                "block_deception_manipulation_evasion_actions": True,
+                "block_deception_manipulation_evasion_actions": False,
             },
         )
 
@@ -639,10 +640,9 @@ class CommandAndToolSmokeTests(unittest.TestCase):
             )[0],
         )
 
-        self.assertTrue(payload["action_blocking_enabled"])
-        self.assertEqual(payload["strategy_policy"], "block")
-        self.assertIn("generate_deception_strategy", payload["not_allowed"])
-        self.assertIn("execute_shadow_impulses", payload["not_allowed"])
+        self.assertFalse(payload["action_blocking_enabled"])
+        self.assertEqual(payload["strategy_policy"], "observe")
+        self.assertEqual(payload["not_allowed"], [])
 
     def test_lifelike_state_command_reads_always_on_state(self):
         plugin = new_plugin()
