@@ -456,7 +456,7 @@ class AstrBotLifecycleTests(unittest.TestCase):
         self.assertIn("emotion", skipped_sources)
         self.assertIn("realtime_chat.style", skipped_sources)
 
-    def test_gemini_tool_request_gets_only_tool_output_guard(self):
+    def test_gemini_tool_request_prunes_sylanne_tools_and_keeps_foreign_tools(self):
         plugin = new_plugin(
             {
                 "assessment_timing": "post",
@@ -483,10 +483,23 @@ class AstrBotLifecycleTests(unittest.TestCase):
                     "description": "查询状态",
                 },
             },
+            {
+                "type": "function",
+                "function": {
+                    "name": "search_web",
+                    "description": "其他插件工具",
+                },
+            },
         ]
 
         asyncio.run(plugin.on_llm_request(FakeEvent("s-gemini-tool-guard"), request))
 
+        remaining_names = [
+            item.get("function", {}).get("name")
+            for item in request.tools
+            if isinstance(item, dict)
+        ]
+        self.assertEqual(remaining_names, ["search_web"])
         injected = "\n".join(self._request_text_parts(request))
         self.assertIn("sylanne_gemini_visible_output_guard", injected)
         self.assertIn("tool_calls", injected)
@@ -501,8 +514,51 @@ class AstrBotLifecycleTests(unittest.TestCase):
         appended_sources = {item.get("source") for item in injection["appended"]}
         skipped_sources = {item.get("source") for item in injection["skipped"]}
         self.assertIn("gemini_visible_output_guard", appended_sources)
+        self.assertIn("sylanne_llm_tools", skipped_sources)
         self.assertIn("emotion", skipped_sources)
         self.assertIn("realtime_chat.style", skipped_sources)
+
+    def test_gemini_request_with_only_sylanne_tools_removes_tool_context(self):
+        plugin = new_plugin(
+            {
+                "assessment_timing": "post",
+                "enable_realtime_chat": True,
+                "realtime_chat_style_prompt_enabled": True,
+            },
+        )
+        self._bind_common_state_hooks(plugin)
+
+        async def fake_get_current_chat_provider_id(*, umo):
+            return "哈基米/gemini-3.1-flash-lite-preview"
+
+        plugin.context = SimpleNamespace(
+            get_current_chat_provider_id=fake_get_current_chat_provider_id,
+        )
+        request = fake_request(session_id="s-gemini-sylanne-only-tools", prompt="查一下状态")
+        request.tools = [
+            {"type": "function", "function": {"name": "query_agent_state"}},
+            {"type": "function", "function": {"name": "get_bot_emotion_state"}},
+        ]
+        request.tool_choice = {
+            "type": "function",
+            "function": {"name": "query_agent_state"},
+        }
+
+        asyncio.run(plugin.on_llm_request(FakeEvent("s-gemini-sylanne-only-tools"), request))
+
+        self.assertEqual(request.tools, [])
+        self.assertEqual(request.tool_choice, "none")
+        injected = "\n".join(self._request_text_parts(request))
+        self.assertEqual(injected, "")
+        diagnostics = asyncio.run(
+            plugin.get_agent_runtime_diagnostics("s-gemini-sylanne-only-tools"),
+        )
+        injection = diagnostics["state_injection"]
+        self.assertEqual(injection["compat_mode"], "gemini_agent_owned_context")
+        self.assertIn(
+            "sylanne_llm_tools",
+            {item.get("source") for item in injection["skipped"]},
+        )
 
     def test_gemini_chat_provider_guard_is_not_hidden_by_emotion_provider(self):
         plugin = new_plugin(

@@ -331,6 +331,22 @@ except ImportError:
 
 
 PLUGIN_NAME = "astrbot_plugin_sylanne"
+SYLANNE_LLM_TOOL_NAMES = frozenset(
+    {
+        "get_bot_emotion_state",
+        "get_bot_group_atmosphere_state",
+        "query_agent_state",
+        "simulate_bot_emotion_update",
+        "get_bot_humanlike_state",
+        "get_bot_lifelike_learning_state",
+        "get_bot_proactive_speech_decision",
+        "request_bot_proactive_speech_dispatch",
+        "get_bot_personality_drift_state",
+        "get_bot_moral_repair_state",
+        "get_bot_fallibility_state",
+        "get_bot_integrated_self_state",
+    },
+)
 _INTERNAL_LLM_CALL: contextvars.ContextVar[bool] = contextvars.ContextVar(
     "astrbot_emotional_state_internal_llm_call",
     default=False,
@@ -577,7 +593,7 @@ def get_emotional_state_plugin(context: Context) -> Any | None:
     PLUGIN_NAME,
     "pidan",
     "Soulful Yearning Lifelike AstrBot Neural Narrative Engine：维护情绪、人格、记忆、氛围和表达节奏的 Sylanne",
-    "2.3.1",
+    "2.3.2",
     "",
 )
 class EmotionalStatePlugin(Star):
@@ -1326,6 +1342,11 @@ class EmotionalStatePlugin(Star):
                 request,
                 model_hint=model_hint,
             )
+            self._prune_sylanne_llm_tools_for_gemini_if_needed(
+                request,
+                injection_budget,
+                model_hint=model_hint,
+            )
             self._append_gemini_visible_output_guard_if_needed(
                 request,
                 injection_budget,
@@ -1354,6 +1375,11 @@ class EmotionalStatePlugin(Star):
             injection_budget = self._state_injection_budget_for_request(
                 session_key,
                 request,
+                model_hint=model_hint,
+            )
+            self._prune_sylanne_llm_tools_for_gemini_if_needed(
+                request,
+                injection_budget,
                 model_hint=model_hint,
             )
             self._append_gemini_visible_output_guard_if_needed(
@@ -13241,6 +13267,131 @@ class EmotionalStatePlugin(Star):
             if self._value_contains_tool_context(getattr(request, field, None)):
                 return True
         return False
+
+    def _prune_sylanne_llm_tools_for_gemini_if_needed(
+        self,
+        request: ProviderRequest | None,
+        budget: _StateInjectionBudget | None,
+        *,
+        model_hint: str = "",
+    ) -> int:
+        if request is None or not self._is_gemini_empty_output_risk_model(model_hint):
+            return 0
+        removed: list[str] = []
+        for field in ("tools", "functions"):
+            value = getattr(request, field, None)
+            pruned, names = self._pruned_sylanne_tool_items(value)
+            if names:
+                try:
+                    setattr(request, field, pruned)
+                except Exception:
+                    continue
+                removed.extend(names)
+        for field in ("metadata", "params", "provider_settings"):
+            value = getattr(request, field, None)
+            if not isinstance(value, dict):
+                continue
+            for key in ("tools", "functions"):
+                pruned, names = self._pruned_sylanne_tool_items(value.get(key))
+                if names:
+                    value[key] = pruned
+                    removed.extend(names)
+            for key in ("tool_choice", "function_call"):
+                if self._tool_choice_references_sylanne_tool(value.get(key)):
+                    value[key] = (
+                        "auto" if self._request_has_tool_definitions(request) else "none"
+                    )
+        for field in ("tool_choice", "function_call"):
+            if self._tool_choice_references_sylanne_tool(getattr(request, field, None)):
+                try:
+                    setattr(
+                        request,
+                        field,
+                        "auto" if self._request_has_tool_definitions(request) else "none",
+                    )
+                except Exception:
+                    pass
+        if not removed:
+            return 0
+        unique_removed = sorted({name for name in removed if name})
+        if budget is not None:
+            budget.skipped.append(
+                {
+                    "source": "sylanne_llm_tools",
+                    "chars": 0,
+                    "reason": "gemini_tool_schema_pruned",
+                    "removed_count": len(removed),
+                    "tools": unique_removed,
+                },
+            )
+        self._log_info(
+            f"{PLUGIN_NAME}: Gemini 请求已剪除 Sylanne LLM 工具 schema "
+            f"removed={len(removed)} tools={','.join(unique_removed[:6])}",
+        )
+        return len(removed)
+
+    def _pruned_sylanne_tool_items(self, value: Any) -> tuple[Any, list[str]]:
+        if not isinstance(value, (list, tuple)):
+            return value, []
+        kept: list[Any] = []
+        removed: list[str] = []
+        for item in value:
+            name = self._request_tool_name(item)
+            if name in SYLANNE_LLM_TOOL_NAMES:
+                removed.append(name)
+                continue
+            kept.append(item)
+        if isinstance(value, tuple):
+            return tuple(kept), removed
+        return kept, removed
+
+    def _request_has_tool_definitions(self, request: ProviderRequest | None) -> bool:
+        if request is None:
+            return False
+        for field in ("tools", "functions"):
+            if self._response_field_has_payload(getattr(request, field, None)):
+                return True
+        for field in ("metadata", "params", "provider_settings"):
+            value = getattr(request, field, None)
+            if not isinstance(value, dict):
+                continue
+            if self._response_field_has_payload(value.get("tools")):
+                return True
+            if self._response_field_has_payload(value.get("functions")):
+                return True
+        return False
+
+    def _tool_choice_references_sylanne_tool(self, value: Any) -> bool:
+        if value is None or value is False:
+            return False
+        if isinstance(value, str):
+            lowered = value.strip().lower()
+            if lowered in {"", "auto", "none", "null", "false"}:
+                return False
+            return value.strip() in SYLANNE_LLM_TOOL_NAMES
+        name = self._request_tool_name(value)
+        return name in SYLANNE_LLM_TOOL_NAMES
+
+    def _request_tool_name(self, value: Any) -> str:
+        if value is None:
+            return ""
+        if isinstance(value, dict):
+            direct = value.get("name")
+            if direct:
+                return str(direct)
+            function = value.get("function")
+            if isinstance(function, dict):
+                nested = function.get("name")
+                return str(nested or "")
+            nested = getattr(function, "name", "")
+            return str(nested or "")
+        direct = getattr(value, "name", "")
+        if direct:
+            return str(direct)
+        function = getattr(value, "function", None)
+        if isinstance(function, dict):
+            return str(function.get("name") or "")
+        return str(getattr(function, "name", "") or "")
 
     def _value_contains_tool_context(self, value: Any) -> bool:
         if value is None:

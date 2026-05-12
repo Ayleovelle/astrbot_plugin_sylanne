@@ -2,6 +2,23 @@
 
 本文件用于 AstrBot 插件市场/管理页展示更新内容。更完整的设计说明、公式推导、测试矩阵和维护手册见 `README.md`。
 
+## 2.3.2
+
+发布日期：2026-05-12
+
+### 修复
+
+- 修复 Gemini 3.1 flash-lite preview 在工具选择阶段仍可能空输出的问题。Gemini 系模型请求会在进入 provider 前剪除 Sylanne 自己注册的 LLM Tool schema，避免 12 个状态工具每轮都压进工具列表。
+- 如果请求里只有 Sylanne 工具，会把工具列表剪空并把 `tool_choice/function_call` 改为 `none`；如果还有其他插件或框架工具，则只保留外部工具，并继续追加极短可见输出 / `tool_calls` 兼容提示。
+- 保留 Python 公共 API、聊天命令和非 Gemini 模型的 LLM Tool 行为不变；本修复只影响 Gemini 系主模型的请求前工具 schema。
+
+### 验证
+
+- `python -m pytest -q tests/test_astrbot_lifecycle.py -k "gemini or tool_call_response or tool_request or tool_result"`
+- `python -m pytest -q tests/test_command_tools.py -k "readme_documents_registered_llm_tools or llm_tool_json_result or query_agent_state_tool"`
+- `python -m pytest -q tests`
+- `python -m py_compile main.py realtime_chat_input.py`
+
 ## 2.3.1
 
 发布日期：2026-05-12
