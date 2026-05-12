@@ -1,6 +1,6 @@
 <svg xmlns="http://www.w3.org/2000/svg" width="1480" height="780" viewBox="0 0 1480 780" role="img" aria-labelledby="title desc">
   <title id="title">Sylanne 运行时总览</title>
-  <desc id="desc">展示 Sylanne 当前运行时链路。主回复链路突出两端：输入端把用户碎片、群聊消息和撤回事件放入碎片输入池，经完整度 LLM gate 合并成完整意图；输出端只在最终自然语言出现后接管，按语义智能拆条、模拟打字间隔、检查表情包并记录插话断点。中间由 AstrBot Agent 持有完整上下文和工具循环，只暴露唯一 LLM 工具 query_agent_state；后台链路由回复后任务队列、资源守卫、动态 workers、顺序提交和自有记忆库组成；主动发言链路由低频醒来、公式门控、LLM 话题裁决、AstrBot 调度发送和反馈冷却组成。</desc>
+  <desc id="desc">展示 Sylanne 当前运行时链路。主回复链路突出两端：输入端把用户碎片、群聊消息和撤回事件放入碎片输入池，经完整度 LLM gate 合并成完整意图；输出端只在最终自然语言出现后接管，按语义智能拆条、模拟打字间隔、检查表情包并记录插话断点。中间由 AstrBot Agent 持有完整上下文和外部工具循环，Sylanne 自有内部工具 schema 在主请求前隐藏；后台链路由回复后任务队列、资源守卫、动态 workers、顺序提交和自有记忆库组成；主动发言链路由低频醒来、公式门控、LLM 话题裁决、AstrBot 调度发送和反馈冷却组成。</desc>
   <defs>
     <marker id="arrowBlue" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse">
       <path d="M0 0 L10 5 L0 10 Z" fill="#2563eb"/>
@@ -73,9 +73,9 @@
   <text class="small" x="553" y="231" text-anchor="middle">完整上下文 + 工具循环</text>
 
   <rect class="guard" x="682" y="164" width="214" height="102" rx="12"/>
-  <text class="text" x="789" y="196" text-anchor="middle">唯一工具入口</text>
-  <text class="small" x="789" y="221" text-anchor="middle">query_agent_state</text>
-  <text class="small" x="789" y="244" text-anchor="middle">细分工具 schema 隐藏</text>
+  <text class="text" x="789" y="196" text-anchor="middle">内部工具归 bot</text>
+  <text class="small" x="789" y="221" text-anchor="middle">Sylanne tool schema 主请求隐藏</text>
+  <text class="small" x="789" y="244" text-anchor="middle">外部工具仍交给 Agent 循环</text>
 
   <rect class="nodeBlue" x="930" y="176" width="166" height="78" rx="12"/>
   <text class="text" x="1013" y="207" text-anchor="middle">主 LLM 回复</text>

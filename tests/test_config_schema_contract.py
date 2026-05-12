@@ -384,6 +384,14 @@ class ConfigSchemaContractTests(unittest.TestCase):
         self.assertEqual(cfg["emotion_provider_id"]["type"], "string")
         self.assertEqual(cfg["emotion_provider_id"]["default"], "")
         self.assertEqual(cfg["emotion_provider_id"].get("_special"), "select_provider")
+        self.assertEqual(
+            cfg["sylanne_memory_embedding_provider_id"].get("_special"),
+            "select_provider",
+        )
+        self.assertEqual(
+            cfg["sylanne_memory_embedding_provider_id"].get("provider_type"),
+            "embedding",
+        )
 
     def test_readme_backticked_config_defaults_match_schema(self):
         cfg = schema()

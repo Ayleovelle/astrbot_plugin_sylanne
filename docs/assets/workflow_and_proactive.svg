@@ -1,6 +1,6 @@
 <svg xmlns="http://www.w3.org/2000/svg" width="1560" height="1180" viewBox="0 0 1560 1180" role="img" aria-labelledby="title desc">
-  <title id="title">Sylanne 2.3.6 工作流：Agent 上下文、统一工具入口、后台并行与主动发言</title>
-  <desc id="desc">展示 Sylanne 当前工作流。旧版 0.5.0 单线程链路与当前链路对比；当前链路先把用户碎片化输入放入碎片池，由本地规则和判断 LLM 判断是否说完并合并为完整意图；AstrBot Agent 持有完整上下文和工具循环，Sylanne 只暴露 query_agent_state 一个 LLM 工具；最终自然语言由即时聊天投递层接管，按语义和用户说话习惯拆条，模拟打字间隔，记录已发、未发和被插话断点；回复后状态评估和记忆写入进入后台队列，动态 workers 根据 CPU、内存和队列压力自动收放，主动发言支路由公式门控和 LLM 话题裁决共同决定。</desc>
+  <title id="title">Sylanne 2.3.11 工作流：Agent 上下文、隐藏内部工具、后台并行与主动发言</title>
+  <desc id="desc">展示 Sylanne 当前工作流。旧版 0.5.0 单线程链路与当前链路对比；当前链路先把用户碎片化输入放入碎片池，由本地规则和判断 LLM 判断是否说完并合并为完整意图；AstrBot Agent 持有完整上下文和外部工具循环，Sylanne 自有内部工具 schema 在主请求前隐藏，插件能力改由 bot/Agent 路径、命令、公共 API 和设置 Page 使用；最终自然语言由即时聊天投递层接管，按语义和用户说话习惯拆条，模拟打字间隔，记录已发、未发和被插话断点；回复后状态评估和记忆写入进入后台队列，动态 workers 根据 CPU、内存和队列压力自动收放，主动发言支路由低频公式门控和 LLM 话题裁决共同决定。</desc>
   <defs>
     <marker id="arrowBlue" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="9" markerHeight="9" orient="auto-start-reverse">
       <path d="M0 0 L10 5 L0 10 Z" fill="#2563eb"/>
@@ -52,7 +52,7 @@
   </defs>
 
   <rect class="bg" width="1560" height="1180"/>
-  <text class="title" x="58" y="58">Sylanne 2.3.6 工作流：上下文归 Agent，状态与投递归 Sylanne</text>
+  <text class="title" x="58" y="58">Sylanne 2.3.11 工作流：上下文归 Agent，内部工具归 bot</text>
   <text class="subtitle" x="58" y="88">左侧高亮碎片整合：多段用户输入先合并成完整意图；右侧高亮即时聊天：最终回复按语义拆条、打字停顿、插话断点回写。</text>
 
   <rect class="laneOld" x="42" y="126" width="300" height="968" rx="20"/>
@@ -140,9 +140,9 @@
     <path class="arrowBlue" d="M569 542 V580"/>
 
     <rect class="guard" x="410" y="580" width="318" height="92" rx="14"/>
-    <text class="text" x="569" y="612" text-anchor="middle">唯一 LLM 工具入口</text>
-    <text class="tiny" x="569" y="636" text-anchor="middle">只暴露 query_agent_state(state, detail, track)</text>
-    <text class="tiny" x="569" y="656" text-anchor="middle">11 个细分工具隐藏，历史残留 schema 会被剪除</text>
+    <text class="text" x="569" y="612" text-anchor="middle">Sylanne 内部工具隐藏</text>
+    <text class="tiny" x="569" y="636" text-anchor="middle">主 LLM 请求前剪除 Sylanne 自有 tool schema</text>
+    <text class="tiny" x="569" y="656" text-anchor="middle">bot/Agent、命令、API 和设置 Page 仍可使用插件能力</text>
     <path class="arrowBlue" d="M569 672 V710"/>
 
     <rect class="nodeBlue" x="410" y="710" width="318" height="82" rx="14"/>

@@ -526,7 +526,7 @@ class AstrBotLifecycleTests(unittest.TestCase):
         self.assertIn("emotion", skipped_sources)
         self.assertIn("realtime_chat.style", skipped_sources)
 
-    def test_non_gemini_tool_request_hides_detail_tools_but_keeps_unified_entry(self):
+    def test_non_gemini_tool_request_hides_all_sylanne_tools_but_keeps_foreign_tools(self):
         plugin = new_plugin(
             {
                 "assessment_timing": "post",
@@ -563,7 +563,7 @@ class AstrBotLifecycleTests(unittest.TestCase):
             for item in request.tools
             if isinstance(item, dict)
         ]
-        self.assertEqual(remaining_names, ["query_agent_state", "search_web"])
+        self.assertEqual(remaining_names, ["search_web"])
         self.assertEqual(request.tool_choice, "auto")
         diagnostics = asyncio.run(
             plugin.get_agent_runtime_diagnostics("s-unified-tool-entry"),
@@ -3534,6 +3534,24 @@ class AstrBotLifecycleTests(unittest.TestCase):
         self.assertIsNone(plugin._proactive_scheduler_task)
         self.assertEqual(plugin._background_tasks, set())
 
+    def test_proactive_scheduler_defaults_are_low_frequency(self):
+        import main
+
+        plugin = new_plugin({"enable_proactive_speech_scheduler": True})
+
+        self.assertGreaterEqual(main.PROACTIVE_SCHEDULER_NORMAL_DELAY_SECONDS, 900.0)
+        self.assertGreaterEqual(main.PROACTIVE_SCHEDULER_IDLE_DELAY_SECONDS, 1800.0)
+        self.assertGreaterEqual(main.PROACTIVE_SCHEDULER_SESSION_RECHECK_SECONDS, 3600.0)
+        self.assertEqual(main.PROACTIVE_SCHEDULER_MAX_CHECKS_PER_ROUND, 1)
+        self.assertEqual(
+            plugin._proactive_scheduler_next_delay({"checked": 0}),
+            main.PROACTIVE_SCHEDULER_IDLE_DELAY_SECONDS,
+        )
+        self.assertEqual(
+            plugin._proactive_scheduler_next_delay({"checked": 1}),
+            main.PROACTIVE_SCHEDULER_NORMAL_DELAY_SECONDS,
+        )
+
     def test_proactive_scheduler_dispatches_registered_session_when_enabled(self):
         plugin = new_plugin(
             {
@@ -4643,6 +4661,45 @@ class AstrBotLifecycleTests(unittest.TestCase):
         self.assertIsNotNone(judgement)
         self.assertFalse(judgement["approved"])
         self.assertEqual(judgement["source"], "llm_consistency_gate")
+
+    def test_sticker_consistency_skips_llm_when_local_gate_approves(self):
+        plugin = new_plugin(
+            {
+                "use_llm_assessor": True,
+                "sticker_llm_consistency_check_enabled": True,
+            },
+        )
+        calls = []
+
+        async def fake_provider_id(self, event):
+            return "provider"
+
+        async def fail_call_llm(self, **kwargs):
+            calls.append(kwargs)
+            raise AssertionError("approved local sticker should not call LLM")
+
+        bind_async(plugin, "_provider_id", fake_provider_id)
+        bind_async(plugin, "_call_internal_assessor_llm", fail_call_llm)
+
+        judgement = asyncio.run(
+            plugin._judge_sticker_consistency(
+                FakeEvent("s-sticker-local-fast"),
+                plan={
+                    "message_parts": [
+                        {"text": "今天进度不错，给你一个开心的表情。"},
+                    ],
+                },
+                sticker={"intent": "celebrate"},
+                candidate={
+                    "name": "happy.png",
+                    "tags": ["happy", "celebrate"],
+                },
+            ),
+        )
+
+        self.assertEqual(calls, [])
+        self.assertTrue(judgement["approved"])
+        self.assertEqual(judgement["source"], "local_consistency_gate")
 
     def test_proactive_cold_reply_is_recorded_as_lifelike_feedback(self):
         plugin = new_plugin()
@@ -6419,6 +6476,54 @@ class AstrBotLifecycleTests(unittest.TestCase):
         self.assertNotIn("sylanne_realtime_assistant_history", injected)
         self.assertIn("优先处理用户纠正", injected)
 
+    def test_followup_clarification_gets_repetition_guard(self):
+        plugin = new_plugin(
+            {
+                "assessment_timing": "post",
+                "inject_state": False,
+                "enable_realtime_chat": True,
+                "enable_sticker_reaction": False,
+                "use_llm_assessor": False,
+            },
+        )
+        self._bind_common_state_hooks(plugin)
+        plugin._record_realtime_assistant_history_shadow(
+            "s-memory-clarification",
+            full_text=(
+                "原来你说的是那个具体的底层功能呀！那个模块就像我们的共同记忆库，"
+                "帮我把琐碎的瞬间都沉淀下来。"
+            ),
+            input_epoch=1,
+            message_parts=[
+                {"text": "原来你说的是那个具体的底层功能呀！"},
+                {"text": "那个模块就像我们的共同记忆库。"},
+            ],
+            source="unit_test",
+        )
+        request = fake_request(
+            session_id="s-memory-clarification",
+            prompt="我只是想好好确认一下嘛 我给你做的嵌入模型记忆模块",
+        )
+
+        asyncio.run(
+            plugin.on_llm_request(
+                FakeEvent(
+                    "s-memory-clarification",
+                    message="我只是想好好确认一下嘛 我给你做的嵌入模型记忆模块",
+                    sender_id="u1",
+                ),
+                request,
+            ),
+        )
+
+        injected = "\n".join(self._request_text_parts(request))
+        context_text = "\n".join(str(item) for item in request.contexts)
+        self.assertIn("sylanne_user_correction_context", injected)
+        self.assertIn("sylanne_history_reuse_guard", injected)
+        self.assertIn("不要复述上一轮", injected)
+        self.assertIn("二次澄清", injected)
+        self.assertIn("原来你说的是那个具体的底层功能", context_text)
+
     def test_sleep_fact_correction_suppresses_repeated_no_sleep_guess(self):
         plugin = new_plugin(
             {
@@ -6521,6 +6626,56 @@ class AstrBotLifecycleTests(unittest.TestCase):
         context_text = "\n".join(str(item) for item in thesis_request.contexts)
         self.assertIn("我昨晚十点多睡的啦", context_text)
         self.assertIn("你今天是准备继续改论文", context_text)
+
+    def test_short_answer_to_pending_question_skips_fragment_completion_gate(self):
+        plugin = new_plugin(
+            {
+                "assessment_timing": "post",
+                "inject_state": False,
+                "enable_realtime_chat": True,
+                "enable_sticker_reaction": False,
+                "use_llm_assessor": True,
+                "realtime_input_completion_probe_delay_seconds": 0.65,
+                "realtime_input_completion_max_wait_seconds": 6.0,
+            },
+        )
+        self._bind_common_state_hooks(plugin)
+        plugin._record_realtime_assistant_history_shadow(
+            "s-short-answer-no-gate",
+            full_text="喝了杯什么呀？",
+            input_epoch=1,
+            message_parts=[{"text": "喝了杯什么呀？"}],
+            source="unit_test",
+        )
+        waits = []
+
+        async def fake_provider_id(self, event):
+            return "provider"
+
+        async def fail_call_llm(self, **kwargs):
+            raise AssertionError("short answer should not call completion gate")
+
+        async def fake_wait(self, session_key, payload, wait_seconds):
+            waits.append(wait_seconds)
+            return True
+
+        bind_async(plugin, "_provider_id", fake_provider_id)
+        bind_async(plugin, "_call_internal_assessor_llm", fail_call_llm)
+        bind_async(plugin, "_wait_realtime_input_window_unchanged", fake_wait)
+        request = fake_request(session_id="s-short-answer-no-gate", prompt="咖啡啊")
+
+        asyncio.run(
+            plugin.on_llm_request(
+                FakeEvent("s-short-answer-no-gate", message="咖啡啊", sender_id="u1"),
+                request,
+            ),
+        )
+
+        injected = "\n".join(self._request_text_parts(request))
+        self.assertFalse(getattr(request, "_sylanne_realtime_input_hold", False))
+        self.assertEqual(waits, [])
+        self.assertIn("sylanne_realtime_pending_bot_question", injected)
+        self.assertIn("current_user_short_answer=咖啡啊", injected)
 
     def test_realtime_input_fragments_do_not_merge_across_speakers_or_timeout(self):
         plugin = new_plugin(

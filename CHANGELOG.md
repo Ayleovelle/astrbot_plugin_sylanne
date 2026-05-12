@@ -2,6 +2,24 @@
 
 本文件用于 AstrBot 插件市场/管理页展示更新内容。更完整的设计说明、公式推导、测试矩阵和维护手册见 `README.md`。
 
+## 2.3.11
+
+发布日期：2026-05-13
+
+### 修复
+
+- 将 Sylanne 自有 LLM Tool schema 对所有主聊天模型隐藏，`query_agent_state` 保留为兼容注册、命令/API 后端和内部路径，避免 Gemini/哈基米在工具轮次空回或把内部状态 JSON 发给用户。
+- 修复用户短答和二次澄清容易被误解的问题：命中上一轮 bot 问题的短答会跳过碎片完整度 gate；“我只是想确认嵌入模型记忆模块”这类澄清会追加复读抑制 guard。
+- 降低即时聊天延迟：碎片探测默认等待从 `0.65s` 降到 `0.25s`，语义等待上限从 `20s` 降到 `6s`；表情本地一致性已通过时不再额外调用内部 LLM。
+- 记忆 Embedding provider 改为 AstrBot 原生 provider 选择器，并在『记忆设置』Page 增加可点击 provider 卡片，保留手填 ID 兼容。
+- 主动聊天调度默认降频：正常约 15 分钟醒来一次，空闲约 30 分钟，同一会话约 1 小时内不重复复查，减少话题结束后的机械打扰。
+
+### 验证
+
+- `python -m pytest -q tests/test_astrbot_lifecycle.py -k "realtime_input or realtime_pending_bot_question or assistant_history_shadow or user_correction or gemini or tool_request or sticker_consistency or proactive_scheduler"`
+- `python -m pytest -q tests/test_command_tools.py -k "query_agent_state_tool or llm_tool_json_result or readme_documents_registered_llm_tools or memory_settings_page"`
+- `python -m pytest -q tests/test_config_schema_contract.py`
+
 ## 2.3.10
 
 发布日期：2026-05-13

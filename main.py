@@ -347,7 +347,7 @@ SYLANNE_LLM_TOOL_NAMES = frozenset(
         "get_bot_integrated_self_state",
     },
 )
-VISIBLE_SYLANNE_LLM_TOOL_NAMES = frozenset({"query_agent_state"})
+VISIBLE_SYLANNE_LLM_TOOL_NAMES = frozenset()
 _INTERNAL_LLM_CALL: contextvars.ContextVar[bool] = contextvars.ContextVar(
     "astrbot_emotional_state_internal_llm_call",
     default=False,
@@ -369,11 +369,11 @@ BACKGROUND_POST_WORKER_SCALE_MIN_INTERVAL_SECONDS = 2.0
 BACKGROUND_POST_WORKER_SCALE_MAX_INTERVAL_SECONDS = 14.0
 PROACTIVE_SCHEDULER_CANDIDATE_LIMIT = 64
 PROACTIVE_SCHEDULER_CANDIDATE_TTL_SECONDS = 604800.0
-PROACTIVE_SCHEDULER_IDLE_DELAY_SECONDS = 300.0
-PROACTIVE_SCHEDULER_NORMAL_DELAY_SECONDS = 120.0
-PROACTIVE_SCHEDULER_BUSY_DELAY_SECONDS = 240.0
-PROACTIVE_SCHEDULER_MAX_CHECKS_PER_ROUND = 2
-PROACTIVE_SCHEDULER_SESSION_RECHECK_SECONDS = 900.0
+PROACTIVE_SCHEDULER_IDLE_DELAY_SECONDS = 1800.0
+PROACTIVE_SCHEDULER_NORMAL_DELAY_SECONDS = 900.0
+PROACTIVE_SCHEDULER_BUSY_DELAY_SECONDS = 1200.0
+PROACTIVE_SCHEDULER_MAX_CHECKS_PER_ROUND = 1
+PROACTIVE_SCHEDULER_SESSION_RECHECK_SECONDS = 3600.0
 PROACTIVE_CONTEXT_WINDOW_LIMIT = 6
 PROACTIVE_CONTEXT_SUMMARY_MAX_CHARS = 1800
 PROACTIVE_MEMORY_RECALL_MAX_CHARS = 620
@@ -597,7 +597,7 @@ def get_emotional_state_plugin(context: Context) -> Any | None:
     PLUGIN_NAME,
     "pidan",
     "Soulful Yearning Lifelike AstrBot Neural Narrative Engine：维护情绪、人格、记忆、氛围和表达节奏的 Sylanne",
-    "2.3.10",
+    "2.3.11",
     "",
 )
 class EmotionalStatePlugin(Star):
@@ -839,14 +839,19 @@ class EmotionalStatePlugin(Star):
             model_hint=model_hint,
         )
         await self._observe_agent_identity(identity, now=observed_at)
-        fragment_payload = await self._observe_realtime_input_fragment_context_if_any(
-            event,
-            request,
-            identity,
-            current_user_text=current_user_text,
-            observed_at=observed_at,
-            budget=early_injection_budget,
-        )
+        fragment_payload = {}
+        if not self._current_user_text_answers_pending_realtime_question(
+            session_key,
+            current_user_text,
+        ):
+            fragment_payload = await self._observe_realtime_input_fragment_context_if_any(
+                event,
+                request,
+                identity,
+                current_user_text=current_user_text,
+                observed_at=observed_at,
+                budget=early_injection_budget,
+            )
         if self._realtime_input_fragment_should_hold(fragment_payload):
             if await self._realtime_input_fragment_still_waiting_after_gate(
                 event,
@@ -7375,6 +7380,8 @@ class EmotionalStatePlugin(Star):
             sticker=sticker,
             candidate=candidate,
         )
+        if local.get("approved"):
+            return local
         if not self._cfg_bool("sticker_llm_consistency_check_enabled", True):
             return local
         event = event_or_session if self._looks_like_event(event_or_session) else None
@@ -8539,6 +8546,8 @@ class EmotionalStatePlugin(Star):
             self._append_realtime_assistant_history_context_message_if_any(
                 request,
                 session_key,
+                budget=budget,
+                current_user_text=current_user_text,
             )
             correction_appended = self._append_user_correction_context(
                 request,
@@ -8589,10 +8598,53 @@ class EmotionalStatePlugin(Star):
         )
         return appended
 
+    def _current_user_text_answers_pending_realtime_question(
+        self,
+        session_key: str,
+        current_user_text: str = "",
+    ) -> bool:
+        queue = self._realtime_assistant_history_shadow_cache().get(
+            str(session_key or "global"),
+        )
+        if not queue:
+            return False
+        pending = [item for item in queue if not item.get("consumed")]
+        if not pending:
+            return False
+        return self._should_anchor_short_answer_to_realtime_question(
+            pending[-1],
+            current_user_text,
+        )
+
+    def _append_realtime_assistant_history_usage_guard(
+        self,
+        request: ProviderRequest,
+        *,
+        current_user_text: str = "",
+        budget: _StateInjectionBudget | None = None,
+    ) -> bool:
+        text = "\n".join(
+            [
+                "[sylanne_history_reuse_guard]",
+                "上一轮 assistant 原文只用于事实承接、指代消解和理解刚才说过什么；不要复述上一轮的句式、比喻、昵称、表情和整段结构。",
+                "如果用户正在二次澄清同一个对象或模块，优先回答用户刚澄清的具体对象，不要沿用上一轮误会或上一轮修辞。",
+                "current_user=" + self._head_one_line(str(current_user_text or ""), 160),
+            ],
+        )
+        return self._append_temp_text_part(
+            request,
+            text,
+            source="realtime_assistant_history_usage_guard",
+            budget=budget,
+        )
+
     def _append_realtime_assistant_history_context_message_if_any(
         self,
         request: ProviderRequest,
         session_key: str,
+        *,
+        budget: _StateInjectionBudget | None = None,
+        current_user_text: str = "",
     ) -> bool:
         queue = self._realtime_assistant_history_shadow_cache().get(
             str(session_key or "global"),
@@ -8605,11 +8657,18 @@ class EmotionalStatePlugin(Star):
         item = pending[-1]
         if self._agent_history_already_contains_realtime_shadow(request, item):
             return False
-        return self._append_agent_context_message(
+        appended = self._append_agent_context_message(
             request,
             role="assistant",
             content=str(item.get("full_text") or item.get("excerpt") or ""),
         )
+        if appended:
+            self._append_realtime_assistant_history_usage_guard(
+                request,
+                current_user_text=current_user_text,
+                budget=budget,
+            )
+        return appended
 
     def _append_user_correction_context(
         self,
@@ -8664,7 +8723,39 @@ class EmotionalStatePlugin(Star):
         )
         return (
             any(marker in compact for marker in correction_markers + source_markers)
+            or self._looks_like_followup_clarification(value)
             or self._looks_like_sleep_fact_correction(value)
+        )
+
+    def _looks_like_followup_clarification(self, text: str) -> bool:
+        value = str(text or "").strip()
+        if not value:
+            return False
+        compact = re.sub(r"\s+", "", value)
+        lowered = compact.lower()
+        clarification_markers = (
+            "我只是想",
+            "我是想",
+            "我就想",
+            "我想确认",
+            "我想问",
+            "我说的是",
+        )
+        topic_markers = (
+            "确认",
+            "问",
+            "说",
+            "讲",
+            "插件",
+            "模块",
+            "记忆",
+            "嵌入",
+            "embedding",
+            "工具",
+            "上下文",
+        )
+        return any(marker in compact for marker in clarification_markers) and any(
+            marker in lowered for marker in topic_markers
         )
 
     def _user_correction_extra_instructions(self, text: str) -> list[str]:
@@ -9164,7 +9255,7 @@ class EmotionalStatePlugin(Star):
     def _realtime_input_completion_wait_seconds(self, payload: dict[str, Any]) -> float:
         fragments = payload.get("fragments") if isinstance(payload, dict) else None
         count = len(fragments) if isinstance(fragments, list) else 1
-        base = max(0.0, self._cfg_float("realtime_input_completion_probe_delay_seconds", 0.65))
+        base = max(0.0, self._cfg_float("realtime_input_completion_probe_delay_seconds", 0.25))
         if count > 1:
             base *= 0.65
         if str(payload.get("reason") or "") == "waiting_for_more_fragments":
@@ -9177,7 +9268,7 @@ class EmotionalStatePlugin(Star):
     def _realtime_input_completion_max_wait_seconds(self) -> float:
         return min(
             REALTIME_INPUT_LLM_WAIT_MAX_SECONDS,
-            max(0.0, self._cfg_float("realtime_input_completion_max_wait_seconds", 20.0)),
+            max(0.0, self._cfg_float("realtime_input_completion_max_wait_seconds", 6.0)),
         )
 
     def _realtime_input_window_matches_payload(
@@ -9471,6 +9562,11 @@ class EmotionalStatePlugin(Star):
             request,
             role="assistant",
             content=str(item.get("full_text") or item.get("excerpt") or ""),
+        )
+        self._append_realtime_assistant_history_usage_guard(
+            request,
+            current_user_text=current_user_text,
+            budget=budget,
         )
         if self._should_anchor_short_answer_to_realtime_question(item, current_user_text):
             appended = self._append_realtime_pending_bot_question_context(
@@ -13699,8 +13795,7 @@ class EmotionalStatePlugin(Star):
         *,
         model_hint: str = "",
     ) -> frozenset[str]:
-        if self._is_gemini_empty_output_risk_model(model_hint):
-            return frozenset()
+        del model_hint
         return VISIBLE_SYLANNE_LLM_TOOL_NAMES
 
     def _pruned_sylanne_tool_items(
@@ -13896,6 +13991,7 @@ class EmotionalStatePlugin(Star):
         important_sources = {
             "realtime_chat_active_dispatch",
             "realtime_assistant_history_shadow",
+            "realtime_assistant_history_usage_guard",
             "realtime_pending_bot_question",
             "interrupted_reply_breakpoint",
             "realtime_input_fragments",
@@ -13920,6 +14016,7 @@ class EmotionalStatePlugin(Star):
         source_markers = {
             "realtime_chat_active_dispatch": "sylanne_realtime_active_dispatch",
             "realtime_assistant_history_shadow": "sylanne_realtime_assistant_history",
+            "realtime_assistant_history_usage_guard": "sylanne_history_reuse_guard",
             "realtime_pending_bot_question": "sylanne_realtime_pending_bot_question",
             "interrupted_reply_breakpoint": "sylanne_interrupted_reply_breakpoint",
             "realtime_input_fragments": "sylanne_user_message_fragments",

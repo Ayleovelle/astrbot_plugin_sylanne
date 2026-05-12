@@ -78,13 +78,13 @@
   "realtime_input_completion_probe_delay_seconds": {
     "description": "用户分段完整性探测等待秒数",
     "type": "float",
-    "default": 0.65,
+    "default": 0.25,
     "hint": "首次碎片后的基础等待时间。插件会根据碎片数量和窗口状态自动缩放该值；不是固定抢答延迟，也不会影响完整长句。"
   },
   "realtime_input_completion_max_wait_seconds": {
     "description": "用户分段完整性最长等待秒数",
     "type": "float",
-    "default": 20.0,
+    "default": 6.0,
     "hint": "判断 LLM 认为用户仍未说完时，单轮最多等待的时间上限。用户继续发送会刷新碎片窗口；超过上限仍未继续时会放行，避免永久沉默。"
   },
   "realtime_chat_dry_run_default": {
@@ -425,6 +425,8 @@
     "description": "Sylanne 记忆 Embedding 提供商（兼容手填）",
     "type": "string",
     "default": "",
+    "_special": "select_provider",
+    "provider_type": "embedding",
     "hint": "推荐在插件详情页的『记忆设置』Page 中下拉选择；这里保留手填 ID 作为兼容入口。留空时自动使用 AstrBot 当前可用的第一个 Embedding 提供商。该项只选择模型来源，不开放记忆动力学数值。"
   },
   "sylanne_memory_debug_view_enabled": {

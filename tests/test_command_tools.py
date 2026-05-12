@@ -321,6 +321,23 @@ class CommandAndToolSmokeTests(unittest.TestCase):
         self.assertFalse(invalid["ok"])
         self.assertEqual(invalid["error"], "unknown_embedding_provider")
 
+    def test_memory_settings_page_exposes_clickable_provider_cards(self):
+        index = (ROOT / "pages" / "memory-settings" / "index.html").read_text(
+            encoding="utf-8",
+        )
+        app = (ROOT / "pages" / "memory-settings" / "app.js").read_text(
+            encoding="utf-8",
+        )
+        style = (ROOT / "pages" / "memory-settings" / "style.css").read_text(
+            encoding="utf-8",
+        )
+
+        self.assertIn('id="providerCards"', index)
+        self.assertIn("renderProviderCards", app)
+        self.assertIn("provider-card", app)
+        self.assertIn("selectProvider(provider.id)", app)
+        self.assertIn(".provider-card.selected", style)
+
     def test_readme_documents_registered_commands_and_aliases(self):
         readme = (ROOT / "README.md").read_text(encoding="utf-8")
 
