@@ -594,7 +594,7 @@ def get_emotional_state_plugin(context: Context) -> Any | None:
     PLUGIN_NAME,
     "pidan",
     "Soulful Yearning Lifelike AstrBot Neural Narrative Engine：维护情绪、人格、记忆、氛围和表达节奏的 Sylanne",
-    "2.3.6",
+    "2.3.7",
     "",
 )
 class EmotionalStatePlugin(Star):
@@ -11260,12 +11260,20 @@ class EmotionalStatePlugin(Star):
         configured = str(self._cfg("emotion_provider_id", "") or "").strip()
         if configured:
             return configured
+        return await self._chat_provider_id(event, use_cache=True)
+
+    async def _chat_provider_id(
+        self,
+        event: AstrMessageEvent,
+        *,
+        use_cache: bool,
+    ) -> str | None:
         if not hasattr(self, "_provider_id_cache"):
             self._provider_id_cache = {}
         umo = str(getattr(event, "unified_msg_origin", "") or "global")
         cached = self._provider_id_cache.get(umo)
         now = time.time()
-        if cached and now - cached[0] <= max(
+        if use_cache and cached and now - cached[0] <= max(
             0.0,
             self._cfg_float("provider_id_cache_ttl_seconds", 30.0),
         ):
@@ -13244,23 +13252,32 @@ class EmotionalStatePlugin(Star):
 
     def _is_gemini_empty_output_risk_model(self, model_hint: str | None) -> bool:
         text = str(model_hint or "").lower()
-        return "gemini" in text
+        if not text:
+            return False
+        for segment in re.split(r"\s*\|\s*", text):
+            tokens = re.findall(r"[a-z0-9]+", segment)
+            for index, token in enumerate(tokens):
+                if token != "gemini" and not token.startswith("gemini"):
+                    continue
+                previous = tokens[index - 1] if index else ""
+                if previous in {"non", "not", "no", "without"}:
+                    continue
+                return True
+        return False
 
     async def _request_model_hint_for_event(
         self,
         event: AstrMessageEvent,
         request: ProviderRequest,
     ) -> str:
-        provider_hint = str(self._cfg("emotion_provider_id", "") or "").strip()
         chat_provider_hint = ""
         if callable(
             getattr(getattr(self, "context", None), "get_current_chat_provider_id", None),
         ):
-            chat_provider_hint = str(await self._provider_id(event) or "").strip()
-        provider_id = " | ".join(
-            item for item in (provider_hint, chat_provider_hint) if item
-        )
-        return self._request_model_hint_text(request, provider_id=provider_id)
+            chat_provider_hint = str(
+                await self._chat_provider_id(event, use_cache=False) or "",
+            ).strip()
+        return self._request_model_hint_text(request, provider_id=chat_provider_hint)
 
     def _append_gemini_visible_output_guard_if_needed(
         self,

@@ -670,7 +670,7 @@ class AstrBotLifecycleTests(unittest.TestCase):
         plugin = new_plugin(
             {
                 "assessment_timing": "post",
-                "emotion_provider_id": "safe-non-gemini-assessor",
+                "emotion_provider_id": "safe-assessor-provider",
                 "enable_realtime_chat": True,
                 "realtime_chat_style_prompt_enabled": True,
             },
@@ -695,6 +695,49 @@ class AstrBotLifecycleTests(unittest.TestCase):
         self.assertEqual(
             diagnostics["state_injection"]["compat_mode"],
             "gemini_agent_owned_context",
+        )
+
+    def test_gemini_emotion_provider_does_not_force_chat_context_owner(self):
+        plugin = new_plugin(
+            {
+                "assessment_timing": "post",
+                "emotion_provider_id": "gemini-assessor-provider",
+                "enable_realtime_chat": True,
+                "realtime_chat_style_prompt_enabled": True,
+            },
+        )
+        self._bind_common_state_hooks(plugin)
+
+        async def fake_get_current_chat_provider_id(*, umo):
+            return "openai/gpt-5.5"
+
+        plugin.context = SimpleNamespace(
+            get_current_chat_provider_id=fake_get_current_chat_provider_id,
+        )
+        request = fake_request(session_id="s-chat-provider-over-assessor", prompt="hello")
+
+        asyncio.run(plugin.on_llm_request(FakeEvent("s-chat-provider-over-assessor"), request))
+
+        diagnostics = asyncio.run(
+            plugin.get_agent_runtime_diagnostics("s-chat-provider-over-assessor"),
+        )
+        self.assertEqual(diagnostics["state_injection"]["compat_mode"], "")
+        self.assertEqual(
+            diagnostics["state_injection"]["context_owner"],
+            "sylanne_plugin",
+        )
+
+    def test_non_gemini_hint_does_not_trigger_gemini_compat_mode(self):
+        plugin = new_plugin()
+
+        self.assertFalse(
+            plugin._is_gemini_empty_output_risk_model("safe-non-gemini-assessor"),
+        )
+        self.assertFalse(
+            plugin._is_gemini_empty_output_risk_model("openai/gpt-5.5 | non-gemini"),
+        )
+        self.assertTrue(
+            plugin._is_gemini_empty_output_risk_model("google/gemini-3.1-flash-lite"),
         )
 
     def test_gemini_tool_result_context_gets_only_visible_output_guard(self):
@@ -828,6 +871,99 @@ class AstrBotLifecycleTests(unittest.TestCase):
         self.assertEqual(first, "provider-fast")
         self.assertEqual(second, "provider-fast")
         self.assertEqual(calls, ["s-provider"])
+
+    def test_request_model_hint_refetches_chat_provider_after_llm_switch(self):
+        plugin = new_plugin({"provider_id_cache_ttl_seconds": 30.0})
+        providers = collections.deque(
+            [
+                "gemini-3-flash-preview",
+                "openai/gpt-5.5",
+            ],
+        )
+        calls = []
+
+        async def fake_get_current_chat_provider_id(*, umo):
+            calls.append(umo)
+            return providers.popleft()
+
+        plugin.context = SimpleNamespace(
+            get_current_chat_provider_id=fake_get_current_chat_provider_id,
+        )
+
+        first_hint = asyncio.run(
+            plugin._request_model_hint_for_event(
+                FakeEvent("s-provider-switch"),
+                fake_request(session_id="s-provider-switch", prompt="first"),
+            ),
+        )
+        second_hint = asyncio.run(
+            plugin._request_model_hint_for_event(
+                FakeEvent("s-provider-switch"),
+                fake_request(session_id="s-provider-switch", prompt="second"),
+            ),
+        )
+
+        self.assertIn("gemini-3-flash-preview", first_hint)
+        self.assertIn("openai/gpt-5.5", second_hint)
+        self.assertNotIn("gemini", second_hint.lower())
+        self.assertEqual(calls, ["s-provider-switch", "s-provider-switch"])
+
+    def test_on_llm_request_recomputes_context_owner_after_llm_switch(self):
+        plugin = new_plugin(
+            {
+                "assessment_timing": "post",
+                "provider_id_cache_ttl_seconds": 30.0,
+                "enable_realtime_chat": True,
+                "realtime_chat_style_prompt_enabled": True,
+            },
+        )
+        self._bind_common_state_hooks(plugin)
+        providers = collections.deque(
+            [
+                "gemini-3-flash-preview",
+                "openai/gpt-5.5",
+            ],
+        )
+
+        async def fake_get_current_chat_provider_id(*, umo):
+            return providers.popleft()
+
+        plugin.context = SimpleNamespace(
+            get_current_chat_provider_id=fake_get_current_chat_provider_id,
+        )
+
+        asyncio.run(
+            plugin.on_llm_request(
+                FakeEvent("s-context-owner-switch"),
+                fake_request(session_id="s-context-owner-switch", prompt="first"),
+            ),
+        )
+        first_diagnostics = asyncio.run(
+            plugin.get_agent_runtime_diagnostics("s-context-owner-switch"),
+        )
+        self.assertEqual(
+            first_diagnostics["state_injection"]["compat_mode"],
+            "gemini_agent_owned_context",
+        )
+
+        second_request = fake_request(
+            session_id="s-context-owner-switch",
+            prompt="second",
+        )
+        asyncio.run(
+            plugin.on_llm_request(
+                FakeEvent("s-context-owner-switch"),
+                second_request,
+            ),
+        )
+        second_diagnostics = asyncio.run(
+            plugin.get_agent_runtime_diagnostics("s-context-owner-switch"),
+        )
+        second_injection = second_diagnostics["state_injection"]
+
+        self.assertEqual(second_injection["compat_mode"], "")
+        self.assertEqual(second_injection["context_owner"], "sylanne_plugin")
+        self.assertIn("realtime_chat_style", "\n".join(self._request_text_parts(second_request)))
 
     def test_assessor_timeout_falls_back_to_heuristic(self):
         from emotion_engine import EmotionState

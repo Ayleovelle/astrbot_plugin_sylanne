@@ -2,6 +2,23 @@
 
 本文件用于 AstrBot 插件市场/管理页展示更新内容。更完整的设计说明、公式推导、测试矩阵和维护手册见 `README.md`。
 
+## 2.3.7
+
+发布日期：2026-05-12
+
+### 修复
+
+- 修复同一会话切换主 LLM、fallback provider 或手动换模型后，Sylanne 仍沿用旧 provider 判断的问题。主回复请求现在每轮实时读取当前主聊天 provider 来决定上下文归属，不再被 `provider_id_cache_ttl_seconds` 的短缓存误导。
+- 修复 `emotion_provider_id` 影响主聊天上下文归属的问题。判断/情绪评估 provider 只用于内部评估调用，不再让主 LLM 请求误进入 `gemini_agent_owned_context`。
+- 收窄 Gemini 兼容模式识别规则，避免 `safe-non-gemini-assessor`、`non-gemini-provider` 这类名字被误判成 Gemini。
+- 保持 AstrBot Agent 继续拥有长期对话上下文；Sylanne 只补充短状态摘要、短记忆召回和即时聊天投递事实，切模型后不会再因为旧 Gemini 策略跳过这些必要上下文。
+
+### 验证
+
+- `python -m pytest -q tests/test_astrbot_lifecycle.py -k "provider_id_is_cached or llm_switch or context_owner_after_llm_switch or non_gemini_hint or gemini_chat_provider_guard or gemini_emotion_provider"`
+- `python -m pytest -q tests/test_astrbot_lifecycle.py -k "gemini or provider or agent_owned_context or realtime_input or realtime_continuity or tool_request"`
+- `python -m pytest -q tests/test_command_tools.py -k "query_agent_state_tool or llm_tool_json_result or sylanne_memory"`
+
 ## 2.3.6
 
 发布日期：2026-05-12
