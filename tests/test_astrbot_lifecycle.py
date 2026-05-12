@@ -456,6 +456,115 @@ class AstrBotLifecycleTests(unittest.TestCase):
         self.assertIn("emotion", skipped_sources)
         self.assertIn("realtime_chat.style", skipped_sources)
 
+    def test_gemini_tool_request_gets_only_tool_output_guard(self):
+        plugin = new_plugin(
+            {
+                "assessment_timing": "post",
+                "state_injection_max_added_chars": 2400,
+                "state_injection_max_parts": 8,
+                "enable_realtime_chat": True,
+                "realtime_chat_style_prompt_enabled": True,
+            },
+        )
+        self._bind_common_state_hooks(plugin)
+
+        async def fake_get_current_chat_provider_id(*, umo):
+            return "哈基米/gemini-3-flash-preview"
+
+        plugin.context = SimpleNamespace(
+            get_current_chat_provider_id=fake_get_current_chat_provider_id,
+        )
+        request = fake_request(session_id="s-gemini-tool-guard", prompt="帮我查一下记忆")
+        request.tools = [
+            {
+                "type": "function",
+                "function": {
+                    "name": "query_agent_state",
+                    "description": "查询状态",
+                },
+            },
+        ]
+
+        asyncio.run(plugin.on_llm_request(FakeEvent("s-gemini-tool-guard"), request))
+
+        injected = "\n".join(self._request_text_parts(request))
+        self.assertIn("sylanne_gemini_visible_output_guard", injected)
+        self.assertIn("tool_calls", injected)
+        self.assertNotIn("sylanne_emotion_state", injected)
+        self.assertNotIn("sylanne_realtime_style", injected)
+        diagnostics = asyncio.run(
+            plugin.get_agent_runtime_diagnostics("s-gemini-tool-guard"),
+        )
+        injection = diagnostics["state_injection"]
+        self.assertEqual(injection["compat_mode"], "gemini_agent_owned_context")
+        self.assertEqual(injection["context_owner"], "agent")
+        appended_sources = {item.get("source") for item in injection["appended"]}
+        skipped_sources = {item.get("source") for item in injection["skipped"]}
+        self.assertIn("gemini_visible_output_guard", appended_sources)
+        self.assertIn("emotion", skipped_sources)
+        self.assertIn("realtime_chat.style", skipped_sources)
+
+    def test_gemini_chat_provider_guard_is_not_hidden_by_emotion_provider(self):
+        plugin = new_plugin(
+            {
+                "assessment_timing": "post",
+                "emotion_provider_id": "safe-non-gemini-assessor",
+                "enable_realtime_chat": True,
+                "realtime_chat_style_prompt_enabled": True,
+            },
+        )
+        self._bind_common_state_hooks(plugin)
+
+        async def fake_get_current_chat_provider_id(*, umo):
+            return "哈基米/gemini-2.5-pro"
+
+        plugin.context = SimpleNamespace(
+            get_current_chat_provider_id=fake_get_current_chat_provider_id,
+        )
+        request = fake_request(session_id="s-gemini-chat-provider", prompt="hello")
+
+        asyncio.run(plugin.on_llm_request(FakeEvent("s-gemini-chat-provider"), request))
+
+        injected = "\n".join(self._request_text_parts(request))
+        self.assertEqual(injected, "")
+        diagnostics = asyncio.run(
+            plugin.get_agent_runtime_diagnostics("s-gemini-chat-provider"),
+        )
+        self.assertEqual(
+            diagnostics["state_injection"]["compat_mode"],
+            "gemini_agent_owned_context",
+        )
+
+    def test_gemini_tool_result_context_gets_only_visible_output_guard(self):
+        plugin = new_plugin(
+            {
+                "assessment_timing": "post",
+                "enable_realtime_chat": True,
+                "realtime_chat_style_prompt_enabled": True,
+            },
+        )
+        self._bind_common_state_hooks(plugin)
+
+        async def fake_get_current_chat_provider_id(*, umo):
+            return "google/gemini-pro"
+
+        plugin.context = SimpleNamespace(
+            get_current_chat_provider_id=fake_get_current_chat_provider_id,
+        )
+        request = fake_request(session_id="s-gemini-tool-result", prompt="继续回答")
+        request.contexts = [
+            {"role": "assistant", "tool_calls": [{"id": "call_1"}]},
+            {"role": "tool", "tool_call_id": "call_1", "content": '{"ok": true}'},
+        ]
+
+        asyncio.run(plugin.on_llm_request(FakeEvent("s-gemini-tool-result"), request))
+
+        injected = "\n".join(self._request_text_parts(request))
+        self.assertIn("sylanne_gemini_visible_output_guard", injected)
+        self.assertIn("可见的自然语言回复", injected)
+        self.assertNotIn("sylanne_emotion_state", injected)
+        self.assertNotIn("sylanne_realtime_style", injected)
+
     def test_non_gemini_request_keeps_normal_state_budget(self):
         plugin = new_plugin(
             {
@@ -5588,6 +5697,200 @@ class AstrBotLifecycleTests(unittest.TestCase):
         self.assertTrue(first_event.stopped)
         self.assertTrue(first_request._sylanne_realtime_input_hold)
         self.assertFalse(second_event.stopped)
+        self.assertEqual(len(assessment_calls), 1)
+        self.assertGreaterEqual(len(saves), 1)
+
+    def test_realtime_input_llm_incomplete_gate_merges_slow_semantic_fragments(self):
+        plugin = new_plugin(
+            {
+                "assessment_timing": "pre",
+                "inject_state": False,
+                "enable_realtime_chat": True,
+                "enable_sticker_reaction": False,
+                "use_llm_assessor": True,
+                "realtime_input_completion_probe_delay_seconds": 0.01,
+                "realtime_input_completion_max_wait_seconds": 20.0,
+            },
+        )
+        clock = {"now": 6000.0}
+        plugin._observed_now = lambda: clock["now"]
+        saves, assessment_calls = self._bind_common_state_hooks(plugin)
+        calls = []
+
+        async def fake_provider_id(self, event):
+            return "provider"
+
+        async def fake_call_llm(self, *, provider_id, prompt, system_prompt):
+            calls.append((provider_id, prompt, system_prompt))
+            complete = "是从哪里看来的" in prompt
+            return SimpleNamespace(
+                completion_text=(
+                    '{"is_complete": true, "confidence": 0.93, "reason": "追问已经完整"}'
+                    if complete
+                    else '{"is_complete": false, "confidence": 0.92, "reason": "铺垫后还在补充追问"}'
+                ),
+            )
+
+        bind_async(plugin, "_provider_id", fake_provider_id)
+        bind_async(plugin, "_call_internal_assessor_llm", fake_call_llm)
+        texts = ["我只是很纳闷", "为啥你要问我", "是从哪里看来的"]
+        events = [
+            FakeEvent("s-slow-semantic-fragments", message=text, sender_id="u1")
+            for text in texts
+        ]
+        requests = [
+            fake_request(session_id="s-slow-semantic-fragments", prompt=text)
+            for text in texts
+        ]
+
+        async def run_fragments():
+            first = asyncio.create_task(plugin.on_llm_request(events[0], requests[0]))
+            await asyncio.sleep(0.03)
+            clock["now"] += 5.0
+            second = asyncio.create_task(plugin.on_llm_request(events[1], requests[1]))
+            await asyncio.sleep(0.03)
+            clock["now"] += 4.0
+            third = asyncio.create_task(plugin.on_llm_request(events[2], requests[2]))
+            await asyncio.gather(first, second, third)
+
+        asyncio.run(run_fragments())
+
+        self.assertTrue(events[0].stopped)
+        self.assertTrue(events[1].stopped)
+        self.assertFalse(events[2].stopped)
+        final_injected = "\n".join(self._request_text_parts(requests[-1]))
+        self.assertIn("sylanne_user_message_fragments", final_injected)
+        self.assertIn("我只是很纳闷 / 为啥你要问我 / 是从哪里看来的", final_injected)
+        self.assertIn(
+            "merged_intent=我只是很纳闷 为啥你要问我 是从哪里看来的",
+            final_injected,
+        )
+        self.assertEqual(len(calls), 3)
+        self.assertEqual(len(assessment_calls), 1)
+        self.assertGreaterEqual(len(saves), 1)
+
+    def test_realtime_input_llm_gate_blocks_premature_emphasis_release_until_complete(self):
+        plugin = new_plugin(
+            {
+                "assessment_timing": "pre",
+                "inject_state": False,
+                "enable_realtime_chat": True,
+                "enable_sticker_reaction": False,
+                "use_llm_assessor": True,
+                "realtime_input_completion_probe_delay_seconds": 0.01,
+                "realtime_input_completion_max_wait_seconds": 20.0,
+            },
+        )
+        clock = {"now": 7000.0}
+        plugin._observed_now = lambda: clock["now"]
+        saves, assessment_calls = self._bind_common_state_hooks(plugin)
+        calls = []
+
+        async def fake_provider_id(self, event):
+            return "provider"
+
+        async def fake_call_llm(self, *, provider_id, prompt, system_prompt):
+            calls.append(prompt)
+            complete = "人！！！" in prompt
+            return SimpleNamespace(
+                completion_text=(
+                    '{"is_complete": true, "confidence": 0.97, "reason": "否定句补完为老人"}'
+                    if complete
+                    else '{"is_complete": false, "confidence": 0.9, "reason": "否定句还没补完"}'
+                ),
+            )
+
+        bind_async(plugin, "_provider_id", fake_provider_id)
+        bind_async(plugin, "_call_internal_assessor_llm", fake_call_llm)
+        texts = ["我！", "不！", "是！", "老！", "年", "人！！！"]
+        events = [
+            FakeEvent("s-emphasis-fragments", message=text, sender_id="u1")
+            for text in texts
+        ]
+        requests = [
+            fake_request(session_id="s-emphasis-fragments", prompt=text)
+            for text in texts
+        ]
+
+        async def run_fragments():
+            tasks = []
+            for index, (event, request) in enumerate(zip(events, requests)):
+                tasks.append(asyncio.create_task(plugin.on_llm_request(event, request)))
+                await asyncio.sleep(0.03)
+                if index < len(texts) - 1:
+                    clock["now"] += [1.5, 1.0, 1.8, 2.4, 1.9][index]
+            await asyncio.gather(*tasks)
+
+        asyncio.run(run_fragments())
+
+        for event in events[:-1]:
+            self.assertTrue(event.stopped)
+        self.assertFalse(events[-1].stopped)
+        final_injected = "\n".join(self._request_text_parts(requests[-1]))
+        self.assertIn("sylanne_user_message_fragments", final_injected)
+        self.assertIn("我！ / 不！ / 是！ / 老！ / 年 / 人！！！", final_injected)
+        self.assertIn("merged_intent=我！ 不！ 是！ 老！ 年 人！！！", final_injected)
+        self.assertGreaterEqual(len(calls), 4)
+        self.assertEqual(len(assessment_calls), 1)
+        self.assertGreaterEqual(len(saves), 1)
+
+    def test_realtime_input_llm_incomplete_release_after_max_wait_when_user_stops(self):
+        plugin = new_plugin(
+            {
+                "assessment_timing": "pre",
+                "inject_state": False,
+                "enable_realtime_chat": True,
+                "enable_sticker_reaction": False,
+                "use_llm_assessor": True,
+                "realtime_input_completion_probe_delay_seconds": 0.0,
+                "realtime_input_completion_max_wait_seconds": 0.12,
+            },
+        )
+        clock = {"now": 8000.0}
+        plugin._observed_now = lambda: clock["now"]
+        saves, assessment_calls = self._bind_common_state_hooks(plugin)
+        calls = []
+
+        async def fake_provider_id(self, event):
+            return "provider"
+
+        async def fake_call_llm(self, *, provider_id, prompt, system_prompt):
+            calls.append(prompt)
+            return SimpleNamespace(
+                completion_text=(
+                    '{"is_complete": false, "confidence": 0.91, '
+                    '"reason": "仍像强调铺垫，但用户没有继续输入"}'
+                ),
+            )
+
+        bind_async(plugin, "_provider_id", fake_provider_id)
+        bind_async(plugin, "_call_internal_assessor_llm", fake_call_llm)
+        texts = ["我！", "不！", "是！", "老！", "年", "人！！！"]
+        events = [
+            FakeEvent("s-incomplete-timeout-release", message=text, sender_id="u1")
+            for text in texts
+        ]
+        requests = [
+            fake_request(session_id="s-incomplete-timeout-release", prompt=text)
+            for text in texts
+        ]
+
+        async def run_fragments():
+            tasks = []
+            for index, (event, request) in enumerate(zip(events, requests)):
+                tasks.append(asyncio.create_task(plugin.on_llm_request(event, request)))
+                clock["now"] += 0.4 + index * 0.1
+                if index < len(events) - 1:
+                    await asyncio.sleep(0.02)
+            await asyncio.gather(*tasks)
+
+        asyncio.run(run_fragments())
+
+        self.assertFalse(events[-1].stopped)
+        final_injected = "\n".join(self._request_text_parts(requests[-1]))
+        self.assertIn("sylanne_user_message_fragments", final_injected)
+        self.assertIn("我！ / 不！ / 是！ / 老！ / 年 / 人！！！", final_injected)
+        self.assertGreaterEqual(len(calls), 1)
         self.assertEqual(len(assessment_calls), 1)
         self.assertGreaterEqual(len(saves), 1)
 

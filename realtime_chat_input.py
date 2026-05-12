@@ -341,6 +341,9 @@ def _can_extend_window(
         return False
     last = fragments[-1]
     last_time = float(getattr(last, "observed_at", previous.get("updated_at", 0.0)) or 0.0)
+    semantic_wait_until = float(previous.get("semantic_wait_until") or 0.0)
+    if semantic_wait_until > 0.0 and fragment.observed_at <= semantic_wait_until:
+        return True
     if fragment.observed_at - last_time > max(0.4, float(settings.max_window_seconds)):
         return False
     return True

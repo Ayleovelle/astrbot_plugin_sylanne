@@ -171,6 +171,7 @@ try:
         realtime_style_prompt_fragment,
     )
     from .realtime_chat_input import (
+        RealtimeInputFragment,
         RealtimeInputSettings,
         build_realtime_input_hold_injection,
         build_realtime_input_fragment_injection,
@@ -321,6 +322,7 @@ except ImportError:
         realtime_style_prompt_fragment,
     )
     from realtime_chat_input import (
+        RealtimeInputFragment,
         RealtimeInputSettings,
         build_realtime_input_hold_injection,
         build_realtime_input_fragment_injection,
@@ -575,7 +577,7 @@ def get_emotional_state_plugin(context: Context) -> Any | None:
     PLUGIN_NAME,
     "pidan",
     "Soulful Yearning Lifelike AstrBot Neural Narrative Engine：维护情绪、人格、记忆、氛围和表达节奏的 Sylanne",
-    "2.3.0",
+    "2.3.1",
     "",
 )
 class EmotionalStatePlugin(Star):
@@ -853,6 +855,51 @@ class EmotionalStatePlugin(Star):
             )
             if len(fragment_payload.get("fragments") or []) > 1:
                 self._append_realtime_input_released_context_if_any(
+                    request,
+                    fragment_payload,
+                    budget=early_injection_budget,
+                )
+        elif fragment_payload.get("should_inject"):
+            blocked_payload = await self._realtime_input_release_blocked_by_llm_gate(
+                event,
+                identity,
+                fragment_payload,
+            )
+            if blocked_payload is not None:
+                if await self._realtime_input_blocked_release_still_waiting(
+                    identity,
+                    blocked_payload,
+                ):
+                    self._discard_conversation_pending_response_epoch(
+                        session_key,
+                        input_epoch,
+                    )
+                    self._mark_realtime_input_fragment_hold(
+                        event,
+                        request,
+                        blocked_payload,
+                    )
+                    self._cancel_realtime_chat_dispatches_for_session(
+                        session_key,
+                        reason="realtime_input_fragment_waiting",
+                    )
+                    self._last_request_text[session_key] = self._realtime_input_hold_context_text(
+                        request,
+                        current_user_text,
+                        blocked_payload,
+                    )
+                    return
+                self._release_realtime_input_fragment_window_if_unchanged(
+                    session_key,
+                    blocked_payload,
+                )
+                self._append_realtime_input_released_context_if_any(
+                    request,
+                    blocked_payload,
+                    budget=early_injection_budget,
+                )
+            else:
+                self._append_realtime_input_fragment_payload_context(
                     request,
                     fragment_payload,
                     budget=early_injection_budget,
@@ -1304,26 +1351,37 @@ class EmotionalStatePlugin(Star):
                 budget=injection_budget,
             )
         else:
+            injection_budget = self._state_injection_budget_for_request(
+                session_key,
+                request,
+                model_hint=model_hint,
+            )
+            self._append_gemini_visible_output_guard_if_needed(
+                request,
+                injection_budget,
+                model_hint=model_hint,
+            )
             self._append_realtime_input_fragment_context_if_any(
                 event,
                 request,
                 identity,
                 current_user_text=current_text,
                 observed_at=observed_at,
-                budget=None,
+                budget=injection_budget,
             )
             self._append_realtime_continuity_context_if_any(
                 request,
                 session_key,
-                budget=None,
+                budget=injection_budget,
                 current_user_text=current_text,
             )
             await self._append_sylanne_memory_recall_context_if_any(
                 request,
                 session_key,
                 current_user_text=current_text,
-                budget=None,
+                budget=injection_budget,
             )
+            self._record_state_injection_diagnostics(injection_budget)
         if inject_state:
             appended_emotion = self._append_temp_text_part(
                 request,
@@ -8437,6 +8495,7 @@ class EmotionalStatePlugin(Star):
             current_user_text=current_user_text,
             observed_at=observed_at,
             budget=budget,
+            append=True,
         )
         return bool(payload.get("should_inject"))
 
@@ -8457,6 +8516,7 @@ class EmotionalStatePlugin(Star):
             current_user_text=current_user_text,
             observed_at=observed_at,
             budget=budget,
+            append=False,
         )
 
     def _observe_realtime_input_fragment_context_sync(
@@ -8467,6 +8527,7 @@ class EmotionalStatePlugin(Star):
         current_user_text: str,
         observed_at: float,
         budget: _StateInjectionBudget | None,
+        append: bool = True,
     ) -> dict[str, Any]:
         if not self._realtime_chat_enabled():
             return {}
@@ -8495,17 +8556,34 @@ class EmotionalStatePlugin(Star):
             pass
         if not payload.get("should_inject"):
             return payload
+        if not append:
+            return payload
+        self._append_realtime_input_fragment_payload_context(
+            request,
+            payload,
+            budget=budget,
+        )
+        return payload
+
+    def _append_realtime_input_fragment_payload_context(
+        self,
+        request: ProviderRequest,
+        payload: dict[str, Any],
+        *,
+        budget: _StateInjectionBudget | None,
+    ) -> bool:
+        if not isinstance(payload, dict) or not payload.get("should_inject"):
+            return False
         text = build_realtime_input_fragment_injection(
             payload,
             max_chars=REALTIME_INPUT_FRAGMENT_INJECTION_MAX_CHARS,
         )
-        self._append_temp_text_part(
+        return self._append_temp_text_part(
             request,
             text,
-            source=source,
+            source="realtime_input_fragments",
             budget=budget,
         )
-        return payload
 
     def _realtime_input_fragment_should_hold(self, payload: dict[str, Any] | None) -> bool:
         return bool(isinstance(payload, dict) and payload.get("should_hold"))
@@ -8519,6 +8597,103 @@ class EmotionalStatePlugin(Star):
         if not payload.get("should_inject") and not payload.get("should_hold"):
             return ""
         return str(payload.get("merged_intent") or "").strip()
+
+    async def _realtime_input_release_blocked_by_llm_gate(
+        self,
+        event: AstrMessageEvent,
+        identity: ConversationIdentity,
+        payload: dict[str, Any],
+    ) -> dict[str, Any] | None:
+        if not isinstance(payload, dict) or not payload.get("should_inject"):
+            return None
+        if not (
+            self._cfg_bool("use_llm_assessor", True)
+            and self._cfg_bool("realtime_input_completion_llm_gate_enabled", True)
+        ):
+            return None
+        judgement = await self._judge_realtime_input_completion(event, payload)
+        reliable_llm_gate = str(judgement.get("source") or "") == "llm_input_completion_gate"
+        if reliable_llm_gate and judgement.get("is_complete"):
+            return None
+        hold_payload = dict(payload)
+        hold_payload["should_inject"] = False
+        hold_payload["should_hold"] = True
+        hold_payload["reason"] = (
+            "llm_completion_gate_incomplete"
+            if reliable_llm_gate
+            else "llm_completion_gate_unavailable"
+        )
+        hold_payload["completion_judgement"] = judgement
+        self._restore_realtime_input_window_from_payload(
+            identity.conversation_id,
+            hold_payload,
+        )
+        self._mark_realtime_input_semantic_wait_window(
+            identity.conversation_id,
+            hold_payload,
+            judgement,
+        )
+        return hold_payload
+
+    async def _realtime_input_blocked_release_still_waiting(
+        self,
+        identity: ConversationIdentity,
+        payload: dict[str, Any],
+    ) -> bool:
+        if not isinstance(payload, dict) or not payload.get("should_hold"):
+            return False
+        if not await self._wait_realtime_input_window_unchanged(
+            identity.conversation_id,
+            payload,
+            self._realtime_input_completion_max_wait_seconds(),
+        ):
+            return True
+        return not self._realtime_input_window_matches_payload(
+            identity.conversation_id,
+            payload,
+        )
+
+    def _restore_realtime_input_window_from_payload(
+        self,
+        session_key: str,
+        payload: dict[str, Any],
+    ) -> None:
+        fragments = [
+            str(item or "").strip()
+            for item in (payload.get("fragments") or [])
+            if str(item or "").strip()
+        ]
+        if not fragments:
+            return
+        speaker_key = str(payload.get("speaker_key") or session_key or "unknown")
+        started_at = self._as_float_value(
+            payload.get("started_at") or payload.get("updated_at"),
+            self._observed_now(),
+        )
+        updated_at = self._as_float_value(
+            payload.get("updated_at") or started_at,
+            started_at,
+        )
+        span = max(0.0, updated_at - started_at)
+        denominator = max(1, len(fragments) - 1)
+        restored = [
+            RealtimeInputFragment(
+                text=text,
+                speaker_key=speaker_key,
+                observed_at=started_at + span * index / denominator,
+                kind="short_text",
+            )
+            for index, text in enumerate(fragments)
+        ]
+        self._realtime_input_fragment_window_cache()[str(session_key or "global")] = {
+            "schema_version": "astrbot.realtime_input_fragments.v1",
+            "kind": "realtime_user_message_fragment_window",
+            "session_key": str(session_key or "global"),
+            "speaker_key": speaker_key,
+            "started_at": started_at,
+            "updated_at": updated_at,
+            "fragments": restored,
+        }
 
     def _append_realtime_input_released_context_if_any(
         self,
@@ -8560,17 +8735,29 @@ class EmotionalStatePlugin(Star):
             wait_seconds,
         ):
             return True
-        if self._cfg_bool("use_llm_assessor", True) and self._cfg_bool(
+        llm_gate_enabled = self._cfg_bool("use_llm_assessor", True) and self._cfg_bool(
             "realtime_input_completion_llm_gate_enabled",
             True,
-        ):
+        )
+        if llm_gate_enabled:
             judgement = await self._judge_realtime_input_completion(event, payload)
         else:
             judgement = self._local_realtime_input_completion_judgement(payload)
-        if judgement.get("is_complete"):
+        reliable_llm_gate = str(judgement.get("source") or "") == "llm_input_completion_gate"
+        fragments = payload.get("fragments") if isinstance(payload, dict) else None
+        fragment_count = len(fragments) if isinstance(fragments, list) else 1
+        strict_gate_wait = reliable_llm_gate or (llm_gate_enabled and fragment_count > 1)
+        if judgement.get("is_complete") and (
+            reliable_llm_gate or not llm_gate_enabled or not strict_gate_wait
+        ):
             return False
+        self._mark_realtime_input_semantic_wait_window(
+            identity.conversation_id,
+            payload,
+            judgement,
+        )
         remaining = 0.0
-        if str(judgement.get("source") or "") == "llm_input_completion_gate":
+        if strict_gate_wait:
             remaining = max(
                 0.0,
                 self._realtime_input_completion_max_wait_seconds() - wait_seconds,
@@ -8584,6 +8771,48 @@ class EmotionalStatePlugin(Star):
         if self._realtime_input_window_matches_payload(identity.conversation_id, payload):
             return False
         return True
+
+    def _mark_realtime_input_semantic_wait_window(
+        self,
+        session_key: str,
+        payload: dict[str, Any],
+        judgement: dict[str, Any],
+    ) -> None:
+        if str(judgement.get("source") or "") != "llm_input_completion_gate":
+            fragments = payload.get("fragments") if isinstance(payload, dict) else None
+            fragment_count = len(fragments) if isinstance(fragments, list) else 1
+            if not (
+                self._cfg_bool("use_llm_assessor", True)
+                and self._cfg_bool("realtime_input_completion_llm_gate_enabled", True)
+                and fragment_count > 1
+            ):
+                return
+        if judgement.get("is_complete"):
+            return
+        window = self._realtime_input_fragment_window_cache().get(
+            str(session_key or "global"),
+        )
+        if not isinstance(window, dict):
+            return
+        if not self._realtime_input_window_matches_payload(session_key, payload):
+            return
+        updated_at = self._as_float_value(
+            payload.get("updated_at") or window.get("updated_at"),
+            self._observed_now(),
+        )
+        wait_until = updated_at + self._realtime_input_completion_max_wait_seconds()
+        window["semantic_wait_until"] = max(
+            self._as_float_value(window.get("semantic_wait_until"), 0.0),
+            wait_until,
+        )
+        window["semantic_wait_source"] = "llm_input_completion_gate"
+        window["semantic_wait_confidence"] = self._clamp01(
+            judgement.get("confidence", 0.5),
+        )
+        window["semantic_wait_reason"] = self._head_one_line(
+            str(judgement.get("reason") or ""),
+            160,
+        )
 
     async def _wait_realtime_input_window_unchanged(
         self,
@@ -12884,18 +13113,7 @@ class EmotionalStatePlugin(Star):
 
     def _is_gemini_empty_output_risk_model(self, model_hint: str | None) -> bool:
         text = str(model_hint or "").lower()
-        if "gemini" not in text:
-            return False
-        return any(
-            marker in text
-            for marker in (
-                "preview",
-                "flash",
-                "latest",
-                "openai",
-                "compatible",
-            )
-        )
+        return "gemini" in text
 
     async def _request_model_hint_for_event(
         self,
@@ -12903,11 +13121,15 @@ class EmotionalStatePlugin(Star):
         request: ProviderRequest,
     ) -> str:
         provider_hint = str(self._cfg("emotion_provider_id", "") or "").strip()
-        if not provider_hint and callable(
+        chat_provider_hint = ""
+        if callable(
             getattr(getattr(self, "context", None), "get_current_chat_provider_id", None),
         ):
-            provider_hint = str(await self._provider_id(event) or "").strip()
-        return self._request_model_hint_text(request, provider_id=provider_hint)
+            chat_provider_hint = str(await self._provider_id(event) or "").strip()
+        provider_id = " | ".join(
+            item for item in (provider_hint, chat_provider_hint) if item
+        )
+        return self._request_model_hint_text(request, provider_id=provider_id)
 
     def _append_gemini_visible_output_guard_if_needed(
         self,
@@ -12918,24 +13140,46 @@ class EmotionalStatePlugin(Star):
     ) -> bool:
         if not self._is_gemini_empty_output_risk_model(model_hint):
             return False
+        has_tool_context = self._request_has_tool_context(request)
         if budget is not None and budget.agent_owned_context:
-            budget.skipped.append(
-                {
-                    "source": "gemini_visible_output_guard",
-                    "chars": 0,
-                    "reason": "agent_owned_context",
-                },
-            )
-            return False
+            if not has_tool_context:
+                budget.skipped.append(
+                    {
+                        "source": "gemini_visible_output_guard",
+                        "chars": 0,
+                        "reason": "agent_owned_context",
+                    },
+                )
+                return False
         source = "gemini_visible_output_guard"
         if self._request_has_temp_text_source(request, source):
             return False
-        text = (
-            "[sylanne_gemini_visible_output_guard]\n"
-            "兼容提醒：当前 Gemini/OpenAI 兼容模型可能在内部推理后返回空 content。"
-            "除非本轮确实必须调用工具，否则请直接输出可见的自然语言回复；"
-            "不要只进行隐藏思考、空白输出或只返回不可见推理。"
-        )
+        text = self._gemini_visible_output_guard_text(has_tool_context=has_tool_context)
+        if budget is not None and budget.agent_owned_context and has_tool_context:
+            appended = self._append_temp_text_part(
+                request,
+                text,
+                source=source,
+                budget=None,
+                required=True,
+            )
+            if appended:
+                text_chars = len(
+                    self._format_sylanne_temp_context_for_compression(
+                        text,
+                        source=source,
+                    ),
+                )
+                budget.added_chars += text_chars
+                budget.added_parts += 1
+                budget.appended.append(
+                    {
+                        "source": source,
+                        "chars": text_chars,
+                        "reason": "gemini_tool_call_guard",
+                    },
+                )
+            return appended
         effective_budget = budget
         if (
             budget is not None
@@ -12950,6 +13194,88 @@ class EmotionalStatePlugin(Star):
             budget=effective_budget,
             required=True,
         )
+
+    def _gemini_visible_output_guard_text(self, *, has_tool_context: bool) -> str:
+        if has_tool_context:
+            return (
+                "[sylanne_gemini_visible_output_guard]\n"
+                "兼容提醒：当前 Gemini/OpenAI 兼容模型可能在内部推理后返回空 content。"
+                "如果本轮需要调用工具，必须返回提供商可解析的有效 tool_calls/function_call；"
+                "如果不需要工具，必须直接输出可见的自然语言回复。"
+                "不要只进行隐藏思考、空白输出或只返回不可见推理。"
+            )
+        return (
+            "[sylanne_gemini_visible_output_guard]\n"
+            "兼容提醒：当前 Gemini/OpenAI 兼容模型可能在内部推理后返回空 content。"
+            "除非本轮确实必须调用工具，否则请直接输出可见的自然语言回复；"
+            "不要只进行隐藏思考、空白输出或只返回不可见推理。"
+        )
+
+    def _request_has_tool_context(self, request: ProviderRequest | None) -> bool:
+        if request is None:
+            return False
+        for field in ("tools", "functions"):
+            if self._response_field_has_payload(getattr(request, field, None)):
+                return True
+        tool_choice = getattr(request, "tool_choice", None)
+        if isinstance(tool_choice, str):
+            if tool_choice.strip().lower() not in {"", "none", "null", "false"}:
+                return True
+        elif self._response_field_has_payload(tool_choice):
+            return True
+        for field in ("metadata", "params", "provider_settings"):
+            value = getattr(request, field, None)
+            if not isinstance(value, dict):
+                continue
+            if self._response_field_has_payload(value.get("tools")):
+                return True
+            if self._response_field_has_payload(value.get("functions")):
+                return True
+            nested_choice = value.get("tool_choice")
+            if isinstance(nested_choice, str):
+                if nested_choice.strip().lower() not in {"", "none", "null", "false"}:
+                    return True
+            elif self._response_field_has_payload(nested_choice):
+                return True
+        for field in ("contexts", "messages"):
+            if self._value_contains_tool_context(getattr(request, field, None)):
+                return True
+        return False
+
+    def _value_contains_tool_context(self, value: Any) -> bool:
+        if value is None:
+            return False
+        if isinstance(value, dict):
+            role = str(value.get("role") or "").strip().lower()
+            if role in {"tool", "function"}:
+                return True
+            for key in (
+                "tool_calls",
+                "function_call",
+                "tools_call_args",
+                "tools_call_name",
+                "tools_call_id",
+                "tool_call_id",
+            ):
+                if self._response_field_has_payload(value.get(key)):
+                    return True
+            return any(self._value_contains_tool_context(item) for item in value.values())
+        if isinstance(value, (list, tuple, set, frozenset, deque)):
+            return any(self._value_contains_tool_context(item) for item in value)
+        role = getattr(value, "role", None)
+        if str(role or "").strip().lower() in {"tool", "function"}:
+            return True
+        for key in (
+            "tool_calls",
+            "function_call",
+            "tools_call_args",
+            "tools_call_name",
+            "tools_call_id",
+            "tool_call_id",
+        ):
+            if self._response_field_has_payload(getattr(value, key, None)):
+                return True
+        return False
 
     def _append_temp_text_part(
         self,
