@@ -2,6 +2,23 @@
 
 本文件用于 AstrBot 插件市场/管理页展示更新内容。更完整的设计说明、公式推导、测试矩阵和维护手册见 `README.md`。
 
+## 2.3.4
+
+发布日期：2026-05-12
+
+### 修复
+
+- 将 Sylanne 细分 LLM Tool 对所有主 LLM 隐藏，只保留统一入口 `query_agent_state`。模型仍可通过 `state`、`detail`、`track` 和 `include_runtime` 查询情绪、记忆、群聊氛围、人格漂移、综合自我、运行诊断等状态。
+- 请求进入 provider 前会统一剪除历史残留或框架缓存中的细分 Sylanne 工具 schema；如果 `tool_choice/function_call` 指向被隐藏工具，会自动退回 `auto` 或 `none`，不影响外部插件工具。
+- 细分工具方法保留为内部兼容方法，不再注册给 AstrBot LLM Tool；插件命令、Python 公共 API、后台评估、主动发言、自有记忆和状态注入流程不受影响。
+
+### 验证
+
+- `python -m pytest -q tests/test_astrbot_lifecycle.py -k "non_gemini_tool_request_hides_detail_tools or gemini_tool_request_keeps or only_sylanne_tools_keeps or removed_sylanne_tool_choice"`
+- `python -m pytest -q tests/test_command_tools.py -k "readme_documents_registered_llm_tools or query_agent_state_tool or llm_tool_json_result or simulate_bot_emotion_update"`
+- `python -m pytest -q tests`
+- `python -m py_compile main.py realtime_chat_input.py`
+
 ## 2.3.3
 
 发布日期：2026-05-12

@@ -525,6 +525,55 @@ class AstrBotLifecycleTests(unittest.TestCase):
         self.assertIn("emotion", skipped_sources)
         self.assertIn("realtime_chat.style", skipped_sources)
 
+    def test_non_gemini_tool_request_hides_detail_tools_but_keeps_unified_entry(self):
+        plugin = new_plugin(
+            {
+                "assessment_timing": "post",
+                "state_injection_max_added_chars": 2400,
+                "state_injection_max_parts": 8,
+                "enable_realtime_chat": True,
+                "realtime_chat_style_prompt_enabled": True,
+            },
+        )
+        self._bind_common_state_hooks(plugin)
+
+        async def fake_get_current_chat_provider_id(*, umo):
+            return "openai/gpt-5.5"
+
+        plugin.context = SimpleNamespace(
+            get_current_chat_provider_id=fake_get_current_chat_provider_id,
+        )
+        request = fake_request(session_id="s-unified-tool-entry", prompt="查一下当前状态")
+        request.tools = [
+            {"type": "function", "function": {"name": "query_agent_state"}},
+            {"type": "function", "function": {"name": "get_bot_emotion_state"}},
+            {"type": "function", "function": {"name": "get_bot_integrated_self_state"}},
+            {"type": "function", "function": {"name": "search_web"}},
+        ]
+        request.tool_choice = {
+            "type": "function",
+            "function": {"name": "get_bot_emotion_state"},
+        }
+
+        asyncio.run(plugin.on_llm_request(FakeEvent("s-unified-tool-entry"), request))
+
+        remaining_names = [
+            item.get("function", {}).get("name")
+            for item in request.tools
+            if isinstance(item, dict)
+        ]
+        self.assertEqual(remaining_names, ["query_agent_state", "search_web"])
+        self.assertEqual(request.tool_choice, "auto")
+        diagnostics = asyncio.run(
+            plugin.get_agent_runtime_diagnostics("s-unified-tool-entry"),
+        )
+        injection = diagnostics["state_injection"]
+        self.assertEqual(injection["context_owner"], "sylanne_plugin")
+        self.assertIn(
+            "sylanne_llm_tools",
+            {item.get("source") for item in injection["skipped"]},
+        )
+
     def test_gemini_request_with_only_sylanne_tools_keeps_query_agent_state(self):
         plugin = new_plugin(
             {

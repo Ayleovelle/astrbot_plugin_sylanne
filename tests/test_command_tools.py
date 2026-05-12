@@ -335,17 +335,6 @@ class CommandAndToolSmokeTests(unittest.TestCase):
         self.assertEqual(
             tools,
             {
-                "get_bot_emotion_state",
-                "simulate_bot_emotion_update",
-                "get_bot_humanlike_state",
-                "get_bot_lifelike_learning_state",
-                "get_bot_proactive_speech_decision",
-                "request_bot_proactive_speech_dispatch",
-                "get_bot_personality_drift_state",
-                "get_bot_moral_repair_state",
-                "get_bot_fallibility_state",
-                "get_bot_integrated_self_state",
-                "get_bot_group_atmosphere_state",
                 "query_agent_state",
             },
         )

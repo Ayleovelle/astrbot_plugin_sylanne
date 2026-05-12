@@ -347,7 +347,7 @@ SYLANNE_LLM_TOOL_NAMES = frozenset(
         "get_bot_integrated_self_state",
     },
 )
-GEMINI_ALLOWED_SYLANNE_LLM_TOOL_NAMES = frozenset({"query_agent_state"})
+VISIBLE_SYLANNE_LLM_TOOL_NAMES = frozenset({"query_agent_state"})
 _INTERNAL_LLM_CALL: contextvars.ContextVar[bool] = contextvars.ContextVar(
     "astrbot_emotional_state_internal_llm_call",
     default=False,
@@ -594,7 +594,7 @@ def get_emotional_state_plugin(context: Context) -> Any | None:
     PLUGIN_NAME,
     "pidan",
     "Soulful Yearning Lifelike AstrBot Neural Narrative Engine：维护情绪、人格、记忆、氛围和表达节奏的 Sylanne",
-    "2.3.3",
+    "2.3.4",
     "",
 )
 class EmotionalStatePlugin(Star):
@@ -1343,7 +1343,7 @@ class EmotionalStatePlugin(Star):
                 request,
                 model_hint=model_hint,
             )
-            self._prune_sylanne_llm_tools_for_gemini_if_needed(
+            self._prune_hidden_sylanne_llm_tools_if_needed(
                 request,
                 injection_budget,
                 model_hint=model_hint,
@@ -1378,7 +1378,7 @@ class EmotionalStatePlugin(Star):
                 request,
                 model_hint=model_hint,
             )
-            self._prune_sylanne_llm_tools_for_gemini_if_needed(
+            self._prune_hidden_sylanne_llm_tools_if_needed(
                 request,
                 injection_budget,
                 model_hint=model_hint,
@@ -10586,7 +10586,6 @@ class EmotionalStatePlugin(Star):
             commit=False,
         )
 
-    @filter.llm_tool(name="get_bot_emotion_state")
     async def get_bot_emotion_state_tool(
         self,
         event: AstrMessageEvent,
@@ -10631,7 +10630,6 @@ class EmotionalStatePlugin(Star):
             snapshot["consequences"]["notes"] = snapshot["consequences"]["notes"][:2]
         yield event.plain_result(self._llm_tool_json_result(snapshot))
 
-    @filter.llm_tool(name="get_bot_group_atmosphere_state")
     async def get_bot_group_atmosphere_state_tool(
         self,
         event: AstrMessageEvent,
@@ -10665,7 +10663,6 @@ class EmotionalStatePlugin(Star):
         )
         yield event.plain_result(self._llm_tool_json_result(payload))
 
-    @filter.llm_tool(name="simulate_bot_emotion_update")
     async def simulate_bot_emotion_update_tool(
         self,
         event: AstrMessageEvent,
@@ -10688,7 +10685,6 @@ class EmotionalStatePlugin(Star):
         )
         yield event.plain_result(self._llm_tool_json_result(snapshot))
 
-    @filter.llm_tool(name="get_bot_humanlike_state")
     async def get_bot_humanlike_state_tool(
         self,
         event: AstrMessageEvent,
@@ -10703,7 +10699,6 @@ class EmotionalStatePlugin(Star):
         )
         yield event.plain_result(self._llm_tool_json_result(snapshot))
 
-    @filter.llm_tool(name="get_bot_lifelike_learning_state")
     async def get_bot_lifelike_learning_state_tool(
         self,
         event: AstrMessageEvent,
@@ -10718,7 +10713,6 @@ class EmotionalStatePlugin(Star):
         )
         yield event.plain_result(self._llm_tool_json_result(snapshot))
 
-    @filter.llm_tool(name="get_bot_proactive_speech_decision")
     async def get_bot_proactive_speech_decision_tool(
         self,
         event: AstrMessageEvent,
@@ -10733,7 +10727,6 @@ class EmotionalStatePlugin(Star):
         )
         yield event.plain_result(self._llm_tool_json_result(decision))
 
-    @filter.llm_tool(name="request_bot_proactive_speech_dispatch")
     async def request_bot_proactive_speech_dispatch_tool(
         self,
         event: AstrMessageEvent,
@@ -10754,7 +10747,6 @@ class EmotionalStatePlugin(Star):
         )
         yield event.plain_result(self._llm_tool_json_result(result))
 
-    @filter.llm_tool(name="get_bot_personality_drift_state")
     async def get_bot_personality_drift_state_tool(
         self,
         event: AstrMessageEvent,
@@ -10769,7 +10761,6 @@ class EmotionalStatePlugin(Star):
         )
         yield event.plain_result(self._llm_tool_json_result(snapshot))
 
-    @filter.llm_tool(name="get_bot_moral_repair_state")
     async def get_bot_moral_repair_state_tool(
         self,
         event: AstrMessageEvent,
@@ -10784,7 +10775,6 @@ class EmotionalStatePlugin(Star):
         )
         yield event.plain_result(self._llm_tool_json_result(snapshot))
 
-    @filter.llm_tool(name="get_bot_fallibility_state")
     async def get_bot_fallibility_state_tool(
         self,
         event: AstrMessageEvent,
@@ -10799,7 +10789,6 @@ class EmotionalStatePlugin(Star):
         )
         yield event.plain_result(self._llm_tool_json_result(snapshot))
 
-    @filter.llm_tool(name="get_bot_integrated_self_state")
     async def get_bot_integrated_self_state_tool(
         self,
         event: AstrMessageEvent,
@@ -13269,14 +13258,14 @@ class EmotionalStatePlugin(Star):
                 return True
         return False
 
-    def _prune_sylanne_llm_tools_for_gemini_if_needed(
+    def _prune_hidden_sylanne_llm_tools_if_needed(
         self,
         request: ProviderRequest | None,
         budget: _StateInjectionBudget | None,
         *,
         model_hint: str = "",
     ) -> int:
-        if request is None or not self._is_gemini_empty_output_risk_model(model_hint):
+        if request is None:
             return 0
         removed: list[str] = []
         for field in ("tools", "functions"):
@@ -13320,13 +13309,13 @@ class EmotionalStatePlugin(Star):
                 {
                     "source": "sylanne_llm_tools",
                     "chars": 0,
-                    "reason": "gemini_tool_schema_pruned",
+                    "reason": "hidden_detail_tool_schema_pruned",
                     "removed_count": len(removed),
                     "tools": unique_removed,
                 },
             )
         self._log_info(
-            f"{PLUGIN_NAME}: Gemini 请求已剪除 Sylanne LLM 工具 schema "
+            f"{PLUGIN_NAME}: 已隐藏 Sylanne 细分 LLM 工具 schema "
             f"removed={len(removed)} tools={','.join(unique_removed[:6])}",
         )
         return len(removed)
@@ -13340,7 +13329,7 @@ class EmotionalStatePlugin(Star):
             name = self._request_tool_name(item)
             if (
                 name in SYLANNE_LLM_TOOL_NAMES
-                and name not in GEMINI_ALLOWED_SYLANNE_LLM_TOOL_NAMES
+                and name not in VISIBLE_SYLANNE_LLM_TOOL_NAMES
             ):
                 removed.append(name)
                 continue
@@ -13375,12 +13364,12 @@ class EmotionalStatePlugin(Star):
             name = value.strip()
             return (
                 name in SYLANNE_LLM_TOOL_NAMES
-                and name not in GEMINI_ALLOWED_SYLANNE_LLM_TOOL_NAMES
+                and name not in VISIBLE_SYLANNE_LLM_TOOL_NAMES
             )
         name = self._request_tool_name(value)
         return (
             name in SYLANNE_LLM_TOOL_NAMES
-            and name not in GEMINI_ALLOWED_SYLANNE_LLM_TOOL_NAMES
+            and name not in VISIBLE_SYLANNE_LLM_TOOL_NAMES
         )
 
     def _request_tool_name(self, value: Any) -> str:
