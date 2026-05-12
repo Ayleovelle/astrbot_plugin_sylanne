@@ -1097,24 +1097,22 @@ class CommandAndToolSmokeTests(unittest.TestCase):
 
         bind_async(plugin, "query_agent_state", fake_query)
 
-        payload = json.loads(
-            asyncio.run(
-                collect_async_generator(
-                    plugin.query_agent_state_tool(
-                        FakeEvent("group-query"),
-                        state="group_atmosphere",
-                        detail="full",
-                        track="speaker",
-                        include_runtime=True,
-                    ),
-                ),
-            )[0],
+        raw = asyncio.run(
+            plugin.query_agent_state_tool(
+                FakeEvent("group-query"),
+                state="group_atmosphere",
+                detail="full",
+                track="speaker",
+                include_runtime=True,
+            ),
         )
+        payload = json.loads(raw)
 
         self.assertEqual(calls[0]["state"], "group_atmosphere")
         self.assertEqual(calls[0]["detail"], "full")
         self.assertEqual(calls[0]["track"], "speaker")
         self.assertTrue(calls[0]["include_runtime"])
+        self.assertIsInstance(raw, str)
         self.assertEqual(payload["state"], "group_atmosphere")
         self.assertEqual(payload["runtime"], {"enabled": True})
 
@@ -1142,17 +1140,16 @@ class CommandAndToolSmokeTests(unittest.TestCase):
         bind_async(plugin, "query_agent_state", fake_query)
 
         raw = asyncio.run(
-            collect_async_generator(
-                plugin.query_agent_state_tool(
-                    FakeEvent("s-tool-budget"),
-                    state="all",
-                    detail="full",
-                ),
+            plugin.query_agent_state_tool(
+                FakeEvent("s-tool-budget"),
+                state="all",
+                detail="full",
             ),
-        )[0]
+        )
         payload = json.loads(raw)
 
         self.assertLessEqual(len(raw), 420)
+        self.assertIsInstance(raw, str)
         self.assertTrue(payload["truncated"])
         self.assertTrue(payload["degraded"])
         self.assertNotIn("very-long-fragment", raw)

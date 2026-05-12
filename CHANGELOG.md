@@ -2,6 +2,25 @@
 
 本文件用于 AstrBot 插件市场/管理页展示更新内容。更完整的设计说明、公式推导、测试矩阵和维护手册见 `README.md`。
 
+## 2.3.6
+
+发布日期：2026-05-12
+
+### 修复
+
+- 修复 `query_agent_state_tool` 的返回值路径。它现在直接把 JSON 字符串返回给 AstrBot 工具循环，而不是走 `event.plain_result(...)`，从而避免 runner 把工具结果误判成“没有返回值，或者已将结果直接发送给用户”。
+- 继续保留 2.3.5 的内部工具 JSON 外泄阻断：若别的内部工具结果在缺少元数据时进入最终 `completion_text`，仍会被 `on_llm_response` 识别并阻断用户可见发送。
+- 同步 README、工作流图、版本号和发布包，让工具调用、工具返回和发布记录保持一致。
+
+### 验证
+
+- `python -m pytest -q tests/test_command_tools.py -k "query_agent_state_tool or llm_tool_json_result"`
+- `python -m pytest -q tests/test_astrbot_lifecycle.py -k "sylanne_tool_json_result or role_tool_result or tool_call_response or intercepts_completion or realtime_intercept"`
+- `python -m pytest -q tests`
+- `python -m py_compile main.py realtime_chat_input.py`
+- `python scripts\package_plugin.py`
+- `node scripts\plugin_zip_preflight.js dist\astrbot_plugin_sylanne.zip astrbot_plugin_sylanne`
+
 ## 2.3.5
 
 发布日期：2026-05-12
