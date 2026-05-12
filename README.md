@@ -2,7 +2,7 @@
 
 > <span style="font-size: 1.08em;"><strong>Soulful Yearning Lifelike AstrBot Neural Narrative Engine</strong>。她维护的不只是“情绪标签”，而是情绪、人格、记忆、氛围、主动性和表达节奏交织成的长期状态。</span>
 
-![版本 2.3.8](https://img.shields.io/badge/version-2.3.8-blue)
+![版本 2.3.9](https://img.shields.io/badge/version-2.3.9-blue)
 ![AstrBot >=4.9.2,<5.0.0](https://img.shields.io/badge/AstrBot-%3E%3D4.9.2%2C%3C5.0.0-green)
 ![Python 3.10+](https://img.shields.io/badge/Python-3.10%2B-yellow)
 ![协议 astrbot.emotion_state.v2](https://img.shields.io/badge/schema-astrbot.emotion__state.v2-purple)
@@ -37,7 +37,7 @@
 
 <br clear="right">
 
-`2.3.8` 是即时聊天短答锚定修复版：主聊天上下文仍交给 AstrBot Agent，Sylanne 只补短状态、短记忆和投递事实。上一轮回复被分条接管后，如果 bot 连续问了几句，下一轮用户只回“咖啡啊”“IP”“可以”这类短答，插件会把短答绑定到上一轮完整问句簇，而不是只绑定最后一个问号，更不会把它误判成用户正在发起新动作。`2.3.7` 的 LLM 切换 provider 实时判定、统一 `query_agent_state` 工具入口和 Gemini 兼容保护继续保留。
+`2.3.9` 是哈基米/Gemini 空回复规避版：主聊天上下文仍交给 AstrBot Agent，Sylanne 只补短状态、短记忆和投递事实。针对 `gemini-3-flash-preview` 这类 OpenAI 兼容模型可能出现“有 reasoning tokens 但 `content` 为空”的问题，Gemini 风险模型下不再向主 LLM 暴露 Sylanne 自己的 LLM Tool schema，并且每轮追加极短可见输出 guard；外部插件工具仍保留，非 Gemini 模型仍可通过统一入口 `query_agent_state` 查询状态。`2.3.8` 的即时聊天短答锚定修复继续保留。
 
 | 能力 | 作用 |
 | --- | --- |
@@ -73,7 +73,7 @@
 | 主题 | 内容 |
 | --- | --- |
 | [当前版本与兼容范围](#当前版本与兼容范围) | 插件版本、AstrBot 版本、Python 要求、许可证和发布状态。 |
-| [当前版本发布记录](#238-当前版本发布记录) | 即时聊天短答锚定修复、LLM 切换上下文修复、工具返回修复、工具 JSON 外泄阻断、统一工具入口、即时聊天碎片理解修复、自有记忆知识库层、向量召回、记忆设置 Page、关联召回、真实时间强化/遗忘、模块自检和包体发布说明。 |
+| [当前版本发布记录](#239-当前版本发布记录) | 哈基米/Gemini 空回复规避、即时聊天短答锚定修复、LLM 切换上下文修复、工具返回修复、工具 JSON 外泄阻断、统一工具入口、即时聊天碎片理解修复、自有记忆知识库层、向量召回、记忆设置 Page、关联召回、真实时间强化/遗忘、模块自检和包体发布说明。 |
 | [项目定位](#项目定位) | 为什么本插件不是普通的提示词人设增强。 |
 | [核心能力](#核心能力总览) | 7 维情绪、人格建模、真实时间记忆、关系修复、公共 API。 |
 | [快速开始](#快速开始) | 发布 zip 包、仓库安装、手动复制、最小配置和检查命令。 |
@@ -101,24 +101,27 @@
 | --- | --- |
 | 插件目录名 | `astrbot_plugin_sylanne` |
 | 显示名 | `Sylanne` |
-| 当前版本 | `2.3.8` |
+| 当前版本 | `2.3.9` |
 | AstrBot 版本 | `>=4.9.2,<5.0.0` |
 | Python | `3.10+` |
 | 许可证 | `GPL-3.0-or-later` |
 | 运行时第三方依赖 | 当前无额外依赖，见 `requirements.txt` |
 
-`2.3.8` 保留 Sylanne 自有记忆知识库、`2.1.0` 只读记忆查询入口、`2.1.3` Agent-owned context 即时聊天修复、`2.2.0` AstrBot Embedding 提供商驱动的向量召回、`2.3.0` 可视化记忆设置 Page、`2.3.1` 慢速碎片输入修复、`2.3.2` Gemini 工具 schema 瘦身、`2.3.3` Gemini 最小工具入口、`2.3.4` 全模型统一工具入口、`2.3.5` 工具 JSON 外泄修复、`2.3.6` 工具返回契约修复、`2.3.7` LLM 切换上下文归属修复，并补上即时聊天短答锚定的问句簇保留。核心情绪、回复后后台评估（post）、`group_atmosphere_state`、`humanlike_state`、`lifelike_learning_state`、`personality_drift_state`、Sylanne 自有记忆、即时聊天节奏和欺骗/操控/逃责类动作阻断默认自动运行；道德修复、瑕疵模拟、心理筛查等实验/维护模块仍由配置者显式打开。
+`2.3.9` 保留 Sylanne 自有记忆知识库、`2.1.0` 只读记忆查询入口、`2.1.3` Agent-owned context 即时聊天修复、`2.2.0` AstrBot Embedding 提供商驱动的向量召回、`2.3.0` 可视化记忆设置 Page、`2.3.1` 慢速碎片输入修复、`2.3.2` Gemini 工具 schema 瘦身、`2.3.3` Gemini 最小工具入口、`2.3.4` 全模型统一工具入口、`2.3.5` 工具 JSON 外泄修复、`2.3.6` 工具返回契约修复、`2.3.7` LLM 切换上下文归属修复、`2.3.8` 即时聊天短答锚定修复，并进一步规避哈基米/Gemini 空回复。核心情绪、回复后后台评估（post）、`group_atmosphere_state`、`humanlike_state`、`lifelike_learning_state`、`personality_drift_state`、Sylanne 自有记忆、即时聊天节奏和欺骗/操控/逃责类动作阻断默认自动运行；道德修复、瑕疵模拟、心理筛查等实验/维护模块仍由配置者显式打开。
 
 发布包会包含运行代码、README、CHANGELOG、LICENSE、配置结构（schema）、docs 和 `docs/assets/` 中的聚合图表与吉祥物素材，例如 `docs/assets/sylanne-mascot.gif`、`docs/assets/sylanne-mascot-card.svg` 和 `docs/assets/workflow_and_proactive.svg`；不会包含 `tests/`、`scripts/`、`literature_kb/`、`personality_literature_kb/`、`psychological_literature_kb/`、`humanlike_agent_literature_kb/`、`raw/`、`output/`、`dist/` 等开发、研究、原始样本或缓存目录。
 
-### 2.3.8 当前版本发布记录
+### 2.3.9 当前版本发布记录
 
-`v2.3.8` 合并在 `main` 上，对外安装版本由 `metadata.yaml` 和 `main.py @register(...)` 共同声明为 `2.3.8`。本版按版本规则提升第三位版本号：修复即时聊天接管后，用户短答没有绑定到上一轮完整问句簇的问题，不改变公共 API 版本；公共 API 版本仍保持 `1.0`，schema 仍保持向后兼容。
+`v2.3.9` 合并在 `main` 上，对外安装版本由 `metadata.yaml` 和 `main.py @register(...)` 共同声明为 `2.3.9`。本版按版本规则提升第三位版本号：降低哈基米/Gemini OpenAI 兼容模型返回空 `content` 的概率，不改变公共 API 版本；公共 API 版本仍保持 `1.0`，schema 仍保持向后兼容。
 
 当前版本的主要变化：
 
 | 类别 | 结果 |
 | --- | --- |
+| 哈基米空回复规避 | 对 `gemini-*`、`google/gemini-*` 或 provider 名含明确 Gemini 风险信号的主聊天请求，Sylanne 不再向模型暴露自己的 LLM Tool schema，包括 `query_agent_state`，避免模型进入内部状态工具调用后返回空 `content`。 |
+| 外部工具保留 | Gemini 风险模型下只移除 Sylanne 自己的状态工具；`search_web` 等外部插件工具仍按 AstrBot Agent 原生工具循环保留。非 Gemini 主模型仍保留统一只读入口 `query_agent_state`。 |
+| 可见输出 guard | Gemini 风险模型每轮都会追加一条极短兼容提醒；无工具时要求直接输出可见自然语言，有外部工具时要求返回有效 `tool_calls/function_call` 或可见自然语言，减少“只有不可见推理、用户端空回复”的情况。 |
 | 短答锚定修复 | 上一轮 bot 如果问了“喝了杯什么呀？这么神奇，一喝就困？”这类连续问句，用户下一轮只回“咖啡啊”时，Sylanne 会把它视为对上一轮问题的回答，而不是理解成“用户现在又要冲咖啡”。 |
 | 问句簇保留 | `realtime_assistant_history_shadow` 抽取未闭合问题时，会保留临近短问句和承接短句，避免只留下最后一个问号导致语义槽位丢失。 |
 | 短答提示增强 | 注入给主 LLM 的 `[sylanne_realtime_pending_bot_question]` 现在明确说明：名词或短答默认是在补全上一轮问题槽位，不要当成用户正在发起新的行动或命令。 |
@@ -132,8 +135,8 @@
 | 碎片语义 gate | 当本地规则准备释放碎片窗口时，会先调用判断 LLM 输出极短 JSON，确认用户是否已经说完；判断未完成时继续等待并合并，不让主 LLM 抢答半句话。 |
 | 慢速分段修复 | LLM gate 判定未完成后会写入语义等待窗口，后续同一用户在真实时间上限内继续补充时仍会被合并，即使间隔超过本地短窗口。 |
 | 上限释放 | 如果判断为未完成但用户真的停住，达到 `realtime_input_completion_max_wait_seconds` 后会释放合并后的碎片意图，避免 bot 永久沉默。 |
-| Gemini 工具轮次保护 | Gemini 系模型统一进入 `gemini_agent_owned_context`；带 `tools/functions/tool_choice` 或工具结果上下文时，只追加一条极短 guard，要求模型返回可见自然语言或有效 `tool_calls/function_call`，其余状态、记忆和风格注入全部跳过。 |
-| 全模型统一工具入口 | 主 LLM 只注册 `query_agent_state` 一个 Sylanne 工具；11 个细分工具保留为内部兼容方法，不再作为 LLM Tool 暴露。请求进入 provider 前还会剪除历史残留的细分工具 schema；如果还有外部插件工具，则同时保留外部工具。 |
+| Gemini 工具轮次保护 | Gemini 系模型统一进入 `gemini_agent_owned_context`；Sylanne 自己的状态工具不再暴露给 Gemini，外部工具仍保留。请求只追加一条极短 guard，要求模型返回可见自然语言或有效 `tool_calls/function_call`，其余状态、记忆和风格注入全部跳过。 |
+| 统一工具入口 | 非 Gemini 主 LLM 只注册 `query_agent_state` 一个 Sylanne 工具；11 个细分工具保留为内部兼容方法，不再作为 LLM Tool 暴露。Gemini 风险模型会连 `query_agent_state` 也一并隐藏，以优先避免空回；如果还有外部插件工具，则仍然保留外部工具。 |
 | 工具 JSON 外泄阻断 | 如果兼容层把 `query_agent_state`、情绪快照、运行时诊断等内部工具结果误作为最终 `completion_text` 交给发送阶段，Sylanne 会识别 `astrbot.*` 内部 `schema_version/kind`，清空默认发送内容并阻断用户可见发送；结构化工具调用仍交给 Agent 工具循环。 |
 | 只读记忆查询 | 新增 `/sylanne_memory`、`/记忆查询`、`/查询记忆`、`/灵澜记忆` 和 `query_sylanne_memory(...)`，可检查记忆命中情况；查询不会强化或改写记忆。 |
 | 关联联想召回 | 直接命中的记忆会在硬预算内带出少量相邻记忆；关联边由摘要相似度、层类型重叠、情绪接近度、时间接近度和巩固强度本地计算，不交给 LLM 随机决定。 |
@@ -143,7 +146,7 @@
 | 主动聊天门控 | `progress_check` 必须有明确进度证据；话题结束或证据不足时不会硬问“进度还顺吗”，会降级为沉默或低压力调皮打扰，并用冷场反馈自动延长冷却。 |
 | 上下文安全预算 | 召回结果只作为 `[sylanne_memory_recall]` 限长摘要注入，并继续受请求预算和官方上下文压缩清洗逻辑约束。 |
 | 模块互斥自检 | 发布前覆盖自有记忆、主动发言、官方上下文压缩、即时聊天、公共 API、配置契约和包体预检，验证模块之间不会互相回灌或重复调用外部 LivingMemory。 |
-| 公开契约 | 插件版本为 `2.3.8`；公共 API 版本仍为 `1.0`，schema 仍保持 `astrbot.emotion_state.v2` 等版本化契约。 |
+| 公开契约 | 插件版本为 `2.3.9`；公共 API 版本仍为 `1.0`，schema 仍保持 `astrbot.emotion_state.v2` 等版本化契约。 |
 
 旧版本发布记录统一放在 `CHANGELOG.md`。README 只展示当前版本，避免插件管理页从历史段落误抓旧版本号。
 
@@ -2896,7 +2899,7 @@ $env:ASTRBOT_EXPECT_PLUGIN = "astrbot_plugin_sylanne"
 脚本会在输出 JSON 里写出 `expectedPluginRuntime`，包含插件列表 API 中返回的 `version`、`displayName`、`activated`、`author`、`astrbotVersion` 等只读字段。若目标插件存在但 `activated=false`，脚本会失败退出。需要把版本和显示名也作为硬断言时，可以额外设置：
 
 ```powershell
-$env:ASTRBOT_EXPECT_PLUGIN_VERSION = "2.3.8"
+$env:ASTRBOT_EXPECT_PLUGIN_VERSION = "2.3.9"
 $env:ASTRBOT_EXPECT_PLUGIN_DISPLAY_NAME = "Sylanne"
 & $node scripts\remote_smoke_playwright.js
 ```

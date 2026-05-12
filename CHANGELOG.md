@@ -2,6 +2,22 @@
 
 本文件用于 AstrBot 插件市场/管理页展示更新内容。更完整的设计说明、公式推导、测试矩阵和维护手册见 `README.md`。
 
+## 2.3.9
+
+发布日期：2026-05-13
+
+### 修复
+
+- 降低哈基米/Gemini OpenAI 兼容模型出现 `OpenAI completion has no usable output` 的概率。高风险 Gemini 主聊天请求现在不再向模型暴露 Sylanne 自己的 LLM Tool schema，包括 `query_agent_state`，避免模型进入工具调用后返回空 `content`。
+- 外部插件工具仍会保留；非 Gemini 主模型仍保留统一只读入口 `query_agent_state`，11 个细分 Sylanne 工具继续只作为内部兼容方法存在。
+- Gemini/哈基米风险模型每轮都会追加一条极短可见输出 guard，即使本轮没有工具上下文，也明确要求模型返回可见自然语言，减少“有 reasoning tokens 但无用户可见文本”的空回。
+
+### 验证
+
+- `python -m pytest -q tests/test_astrbot_lifecycle.py -k "gemini_tool_request_hides_sylanne_tools or only_sylanne_tools_removes or agent_owned_context_for_gemini_risk_models or removed_sylanne_tool_choice"`
+- `python -m pytest -q tests/test_astrbot_lifecycle.py -k "gemini or provider or agent_owned_context or tool_request or tool_result or llm_switch"`
+- `python -m pytest -q tests/test_command_tools.py -k "query_agent_state_tool or llm_tool_json_result or readme_documents_registered_llm_tools"`
+
 ## 2.3.8
 
 发布日期：2026-05-12

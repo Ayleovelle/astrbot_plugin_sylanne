@@ -594,7 +594,7 @@ def get_emotional_state_plugin(context: Context) -> Any | None:
     PLUGIN_NAME,
     "pidan",
     "Soulful Yearning Lifelike AstrBot Neural Narrative Engine：维护情绪、人格、记忆、氛围和表达节奏的 Sylanne",
-    "2.3.8",
+    "2.3.9",
     "",
 )
 class EmotionalStatePlugin(Star):
@@ -13331,21 +13331,11 @@ class EmotionalStatePlugin(Star):
         if not self._is_gemini_empty_output_risk_model(model_hint):
             return False
         has_tool_context = self._request_has_tool_context(request)
-        if budget is not None and budget.agent_owned_context:
-            if not has_tool_context:
-                budget.skipped.append(
-                    {
-                        "source": "gemini_visible_output_guard",
-                        "chars": 0,
-                        "reason": "agent_owned_context",
-                    },
-                )
-                return False
         source = "gemini_visible_output_guard"
         if self._request_has_temp_text_source(request, source):
             return False
         text = self._gemini_visible_output_guard_text(has_tool_context=has_tool_context)
-        if budget is not None and budget.agent_owned_context and has_tool_context:
+        if budget is not None and budget.agent_owned_context:
             appended = self._append_temp_text_part(
                 request,
                 text,
@@ -13366,7 +13356,11 @@ class EmotionalStatePlugin(Star):
                     {
                         "source": source,
                         "chars": text_chars,
-                        "reason": "gemini_tool_call_guard",
+                        "reason": (
+                            "gemini_tool_call_guard"
+                            if has_tool_context
+                            else "gemini_visible_output_guard"
+                        ),
                     },
                 )
             return appended
@@ -13441,10 +13435,16 @@ class EmotionalStatePlugin(Star):
     ) -> int:
         if request is None:
             return 0
+        visible_names = self._visible_sylanne_llm_tool_names_for_request(
+            model_hint=model_hint,
+        )
         removed: list[str] = []
         for field in ("tools", "functions"):
             value = getattr(request, field, None)
-            pruned, names = self._pruned_sylanne_tool_items(value)
+            pruned, names = self._pruned_sylanne_tool_items(
+                value,
+                visible_names=visible_names,
+            )
             if names:
                 try:
                     setattr(request, field, pruned)
@@ -13456,17 +13456,26 @@ class EmotionalStatePlugin(Star):
             if not isinstance(value, dict):
                 continue
             for key in ("tools", "functions"):
-                pruned, names = self._pruned_sylanne_tool_items(value.get(key))
+                pruned, names = self._pruned_sylanne_tool_items(
+                    value.get(key),
+                    visible_names=visible_names,
+                )
                 if names:
                     value[key] = pruned
                     removed.extend(names)
             for key in ("tool_choice", "function_call"):
-                if self._tool_choice_references_sylanne_tool(value.get(key)):
+                if self._tool_choice_references_sylanne_tool(
+                    value.get(key),
+                    visible_names=visible_names,
+                ):
                     value[key] = (
                         "auto" if self._request_has_tool_definitions(request) else "none"
                     )
         for field in ("tool_choice", "function_call"):
-            if self._tool_choice_references_sylanne_tool(getattr(request, field, None)):
+            if self._tool_choice_references_sylanne_tool(
+                getattr(request, field, None),
+                visible_names=visible_names,
+            ):
                 try:
                     setattr(
                         request,
@@ -13494,17 +13503,28 @@ class EmotionalStatePlugin(Star):
         )
         return len(removed)
 
-    def _pruned_sylanne_tool_items(self, value: Any) -> tuple[Any, list[str]]:
+    def _visible_sylanne_llm_tool_names_for_request(
+        self,
+        *,
+        model_hint: str = "",
+    ) -> frozenset[str]:
+        if self._is_gemini_empty_output_risk_model(model_hint):
+            return frozenset()
+        return VISIBLE_SYLANNE_LLM_TOOL_NAMES
+
+    def _pruned_sylanne_tool_items(
+        self,
+        value: Any,
+        *,
+        visible_names: frozenset[str] = VISIBLE_SYLANNE_LLM_TOOL_NAMES,
+    ) -> tuple[Any, list[str]]:
         if not isinstance(value, (list, tuple)):
             return value, []
         kept: list[Any] = []
         removed: list[str] = []
         for item in value:
             name = self._request_tool_name(item)
-            if (
-                name in SYLANNE_LLM_TOOL_NAMES
-                and name not in VISIBLE_SYLANNE_LLM_TOOL_NAMES
-            ):
+            if name in SYLANNE_LLM_TOOL_NAMES and name not in visible_names:
                 removed.append(name)
                 continue
             kept.append(item)
@@ -13528,7 +13548,12 @@ class EmotionalStatePlugin(Star):
                 return True
         return False
 
-    def _tool_choice_references_sylanne_tool(self, value: Any) -> bool:
+    def _tool_choice_references_sylanne_tool(
+        self,
+        value: Any,
+        *,
+        visible_names: frozenset[str] = VISIBLE_SYLANNE_LLM_TOOL_NAMES,
+    ) -> bool:
         if value is None or value is False:
             return False
         if isinstance(value, str):
@@ -13536,15 +13561,9 @@ class EmotionalStatePlugin(Star):
             if lowered in {"", "auto", "none", "null", "false"}:
                 return False
             name = value.strip()
-            return (
-                name in SYLANNE_LLM_TOOL_NAMES
-                and name not in VISIBLE_SYLANNE_LLM_TOOL_NAMES
-            )
+            return name in SYLANNE_LLM_TOOL_NAMES and name not in visible_names
         name = self._request_tool_name(value)
-        return (
-            name in SYLANNE_LLM_TOOL_NAMES
-            and name not in VISIBLE_SYLANNE_LLM_TOOL_NAMES
-        )
+        return name in SYLANNE_LLM_TOOL_NAMES and name not in visible_names
 
     def _request_tool_name(self, value: Any) -> str:
         if value is None:

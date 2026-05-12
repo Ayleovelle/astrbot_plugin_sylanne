@@ -442,21 +442,22 @@ class AstrBotLifecycleTests(unittest.TestCase):
         asyncio.run(plugin.on_llm_request(FakeEvent("s-gemini-guard"), request))
 
         injected = "\n".join(self._request_text_parts(request))
-        self.assertEqual(injected, "")
+        self.assertIn("sylanne_gemini_visible_output_guard", injected)
+        self.assertIn("可见的自然语言回复", injected)
         diagnostics = asyncio.run(
             plugin.get_agent_runtime_diagnostics("s-gemini-guard"),
         )
         injection = diagnostics["state_injection"]
         self.assertEqual(injection["compat_mode"], "gemini_agent_owned_context")
         self.assertEqual(injection["max_added_chars"], 0)
-        self.assertEqual(injection["added_chars"], 0)
-        self.assertEqual(injection["appended"], [])
+        self.assertGreater(injection["added_chars"], 0)
+        appended_sources = {item.get("source") for item in injection["appended"]}
+        self.assertIn("gemini_visible_output_guard", appended_sources)
         skipped_sources = {item.get("source") for item in injection["skipped"]}
-        self.assertIn("gemini_visible_output_guard", skipped_sources)
         self.assertIn("emotion", skipped_sources)
         self.assertIn("realtime_chat.style", skipped_sources)
 
-    def test_gemini_tool_request_keeps_query_agent_state_and_foreign_tools(self):
+    def test_gemini_tool_request_hides_sylanne_tools_and_keeps_foreign_tools(self):
         plugin = new_plugin(
             {
                 "assessment_timing": "post",
@@ -506,7 +507,7 @@ class AstrBotLifecycleTests(unittest.TestCase):
             for item in request.tools
             if isinstance(item, dict)
         ]
-        self.assertEqual(remaining_names, ["query_agent_state", "search_web"])
+        self.assertEqual(remaining_names, ["search_web"])
         injected = "\n".join(self._request_text_parts(request))
         self.assertIn("sylanne_gemini_visible_output_guard", injected)
         self.assertIn("tool_calls", injected)
@@ -574,7 +575,7 @@ class AstrBotLifecycleTests(unittest.TestCase):
             {item.get("source") for item in injection["skipped"]},
         )
 
-    def test_gemini_request_with_only_sylanne_tools_keeps_query_agent_state(self):
+    def test_gemini_request_with_only_sylanne_tools_removes_tools_and_disables_tool_choice(self):
         plugin = new_plugin(
             {
                 "assessment_timing": "post",
@@ -607,17 +608,11 @@ class AstrBotLifecycleTests(unittest.TestCase):
             for item in request.tools
             if isinstance(item, dict)
         ]
-        self.assertEqual(remaining_names, ["query_agent_state"])
-        self.assertEqual(
-            request.tool_choice,
-            {
-                "type": "function",
-                "function": {"name": "query_agent_state"},
-            },
-        )
+        self.assertEqual(remaining_names, [])
+        self.assertEqual(request.tool_choice, "none")
         injected = "\n".join(self._request_text_parts(request))
         self.assertIn("sylanne_gemini_visible_output_guard", injected)
-        self.assertIn("tool_calls", injected)
+        self.assertIn("可见的自然语言回复", injected)
         diagnostics = asyncio.run(
             plugin.get_agent_runtime_diagnostics("s-gemini-sylanne-only-tools"),
         )
@@ -662,9 +657,9 @@ class AstrBotLifecycleTests(unittest.TestCase):
                 for item in request.tools
                 if isinstance(item, dict)
             ],
-            ["query_agent_state"],
+            [],
         )
-        self.assertEqual(request.tool_choice, "auto")
+        self.assertEqual(request.tool_choice, "none")
 
     def test_gemini_chat_provider_guard_is_not_hidden_by_emotion_provider(self):
         plugin = new_plugin(
@@ -688,7 +683,8 @@ class AstrBotLifecycleTests(unittest.TestCase):
         asyncio.run(plugin.on_llm_request(FakeEvent("s-gemini-chat-provider"), request))
 
         injected = "\n".join(self._request_text_parts(request))
-        self.assertEqual(injected, "")
+        self.assertIn("sylanne_gemini_visible_output_guard", injected)
+        self.assertIn("可见的自然语言回复", injected)
         diagnostics = asyncio.run(
             plugin.get_agent_runtime_diagnostics("s-gemini-chat-provider"),
         )
