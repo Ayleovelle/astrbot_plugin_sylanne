@@ -4686,6 +4686,105 @@ class AstrBotLifecycleTests(unittest.TestCase):
             [1],
         )
 
+    def test_on_llm_response_suppresses_sylanne_tool_json_result(self):
+        sent = []
+
+        class FakeContext:
+            async def send_message(self, origin, message):
+                sent.append((origin, str(message)))
+                return {"ok": True}
+
+        plugin = new_plugin(
+            {
+                "assessment_timing": "post",
+                "enable_realtime_chat": True,
+                "realtime_chat_intercept_llm_response": True,
+                "enable_sticker_reaction": False,
+                "runtime_parameter_debug_override_enabled": True,
+                "realtime_chat_min_delay_seconds": 0.0,
+                "realtime_chat_max_delay_seconds": 0.0,
+            },
+        )
+        plugin.context = FakeContext()
+        self._bind_common_state_hooks(plugin)
+        tool_json = (
+            '{"schema_version":"astrbot.emotion_state.v2",'
+            '"api_version":"1.0",'
+            '"kind":"emotion_state",'
+            '"emotion":{"values":{"valence":0.278675}},'
+            '"persona":{"name":"小哀同学"}}'
+        )
+        response = SimpleNamespace(completion_text=tool_json)
+        plugin._conversation_input_epoch = {"s-tool-json": 1}
+        plugin._record_conversation_pending_response_epoch("s-tool-json", 1)
+        event = FakeEvent("s-tool-json", platform_name="aiocqhttp")
+
+        asyncio.run(plugin.on_llm_response(event, response))
+
+        self.assertTrue(event.stopped)
+        self.assertEqual(response.completion_text, "")
+        self.assertEqual(
+            getattr(response, "_sylanne_intercepted_completion_text", ""),
+            tool_json,
+        )
+        self.assertEqual(
+            getattr(response, "_sylanne_intercepted_completion_reason", ""),
+            "sylanne_tool_json_result_suppressed",
+        )
+        self.assertEqual(
+            getattr(event, "_sylanne_default_response_stop_reason", ""),
+            "sylanne_tool_json_result_suppressed",
+        )
+        self.assertEqual(sent, [])
+        self.assertEqual(
+            list(plugin._conversation_pending_response_epochs["s-tool-json"]),
+            [1],
+        )
+
+    def test_on_llm_response_leaves_structured_role_tool_result_to_agent_loop(self):
+        sent = []
+
+        class FakeContext:
+            async def send_message(self, origin, message):
+                sent.append((origin, str(message)))
+                return {"ok": True}
+
+        plugin = new_plugin(
+            {
+                "assessment_timing": "post",
+                "enable_realtime_chat": True,
+                "realtime_chat_intercept_llm_response": True,
+                "enable_sticker_reaction": False,
+                "runtime_parameter_debug_override_enabled": True,
+                "realtime_chat_min_delay_seconds": 0.0,
+                "realtime_chat_max_delay_seconds": 0.0,
+            },
+        )
+        plugin.context = FakeContext()
+        self._bind_common_state_hooks(plugin)
+        response = SimpleNamespace(
+            role="tool",
+            tool_call_id="call_state",
+            completion_text='{"kind":"tool_result","content":"internal state only"}',
+        )
+        plugin._conversation_input_epoch = {"s-role-tool": 1}
+        plugin._record_conversation_pending_response_epoch("s-role-tool", 1)
+        event = FakeEvent("s-role-tool", platform_name="aiocqhttp")
+
+        asyncio.run(plugin.on_llm_response(event, response))
+
+        self.assertFalse(event.stopped)
+        self.assertEqual(
+            response.completion_text,
+            '{"kind":"tool_result","content":"internal state only"}',
+        )
+        self.assertFalse(hasattr(response, "_sylanne_intercepted_completion_text"))
+        self.assertEqual(sent, [])
+        self.assertEqual(
+            list(plugin._conversation_pending_response_epochs["s-role-tool"]),
+            [1],
+        )
+
     def test_tool_call_response_bypass_preserves_pending_epoch_for_final_reply(self):
         sent = []
 

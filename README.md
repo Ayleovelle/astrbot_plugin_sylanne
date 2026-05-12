@@ -2,7 +2,7 @@
 
 > <span style="font-size: 1.08em;"><strong>Soulful Yearning Lifelike AstrBot Neural Narrative Engine</strong>。她维护的不只是“情绪标签”，而是情绪、人格、记忆、氛围、主动性和表达节奏交织成的长期状态。</span>
 
-![版本 2.3.4](https://img.shields.io/badge/version-2.3.4-blue)
+![版本 2.3.5](https://img.shields.io/badge/version-2.3.5-blue)
 ![AstrBot >=4.9.2,<5.0.0](https://img.shields.io/badge/AstrBot-%3E%3D4.9.2%2C%3C5.0.0-green)
 ![Python 3.10+](https://img.shields.io/badge/Python-3.10%2B-yellow)
 ![协议 astrbot.emotion_state.v2](https://img.shields.io/badge/schema-astrbot.emotion__state.v2-purple)
@@ -12,13 +12,13 @@
 
 <img align="right" src="docs/assets/sylanne-mascot-card.svg" width="320" alt="项目吉祥物 Sylanne，Sylanne向大家问好 = w =">
 
-`astrbot_plugin_sylanne` 是一个面向 AstrBot 的“生命化状态引擎”和“插件公共状态服务”。她不是只在提示词里写几句“你要有喜怒哀乐”，而是把 engine 的情绪、关系后果、人格差异、长期记忆注解、拟人状态、道德修复状态、群聊氛围、后台评估队列和非诊断心理筛查拆成可测试、可持久化、可调用的工程模块。
+`astrbot_plugin_sylanne` 是一个面向 AstrBot 的“生命化状态引擎”和“插件公共状态服务”。她不是只在提示词里写几句“你要有喜怒哀乐”，而是把 bot 的情绪、关系后果、人格差异、长期记忆注解、拟人状态、道德修复状态、群聊氛围、后台评估队列和非诊断心理筛查拆成可测试、可持久化、可调用的工程模块。
 
-`astrbot_plugin_sylanne` 不是一个简单的“给 engine 加情绪标签”的插件。她的核心目标是：
+`astrbot_plugin_sylanne` 不是一个简单的“给 bot 加情绪标签”的插件。她的核心目标是：
 
-> 让不同人格的 engine 在长期对话中形成可解释、可持续、可重置、可被记忆系统记录的计算性情绪轨迹。
+> 让不同人格的 bot 在长期对话中形成可解释、可持续、可重置、可被记忆系统记录的计算性情绪轨迹。
 
-本插件会让大模型根据 AstrBot Agent 自己维护的对话历史、用户当前文本、engine 人格和上一轮状态，判断当前情绪观测值；本地引擎再用真实时间半衰期、人格基线、置信门控、关系修复和后果状态机更新长期状态。Sylanne 不会把整段上下文抢到插件里重放；她只在必要时提供很短的状态摘要、记忆召回摘要和“已发/未发”这类 Agent 无法自然知道的投递事实。
+本插件会让大模型根据 AstrBot Agent 自己维护的对话历史、用户当前文本、bot 人格和上一轮状态，判断当前情绪观测值；本地引擎再用真实时间半衰期、人格基线、置信门控、关系修复和后果状态机更新长期状态。Sylanne 不会把整段上下文抢到插件里重放；她只在必要时提供很短的状态摘要、记忆召回摘要和“已发/未发”这类 Agent 无法自然知道的投递事实。
 
 **特色功能**
 
@@ -37,7 +37,7 @@
 
 <br clear="right">
 
-`2.3.4` 是全模型统一工具入口修复版：主 LLM 不再直接看见 11 个细分 Sylanne LLM Tool，只保留统一入口 `query_agent_state`。LLM 仍可用 `query_agent_state(state="emotion"|"memory"|"group_atmosphere"|"runtime"|"all", detail="summary"|"full")` 查询 Sylanne 状态；插件命令、Python 公共 API、后台评估、主动发言、自有记忆和状态注入流程不受影响。这样工具面更小，模型选择更稳，但能力仍从统一入口进入。
+`2.3.5` 是工具结果外泄修复版：主 LLM 仍只看见统一入口 `query_agent_state`，但如果兼容层把 Sylanne 内部工具 JSON 误塞进最终 `completion_text`，插件会在发送前识别 `astrbot.*` 内部 `schema_version/kind`，清空默认发送内容并阻断用户可见发送。真正带 `tool_calls`、`function_call`、`role=tool/function` 或工具调用 ID 的结构化工具循环仍交给 AstrBot Agent，不会被 Sylanne 打断。LLM 仍可用 `query_agent_state(state="emotion"|"memory"|"group_atmosphere"|"runtime"|"all", detail="summary"|"full")` 查询 Sylanne 状态；插件命令、Python 公共 API、后台评估、主动发言、自有记忆和状态注入流程不受影响。
 
 | 能力 | 作用 |
 | --- | --- |
@@ -45,7 +45,7 @@
 | 并发状态加载 | 请求、响应和自有记忆写入阶段会并发读取可选状态快照；慢状态加载、内部评估和记忆注解不再简单串行等待。 |
 | 智能后台工作器 | 默认每会话 1 个后台工作器；打开动态扩容后，插件会同时看队列压力、等待时间、重试/租约压力和 CPU/内存环境压力，全插件同时活跃后台工作器硬上限固定为 6，并通过冷却时间逐级扩容、空闲后自动关闭；内部判断大模型另有并发闸门，默认最多 2 路、极端积压最多 3 路。 |
 | 群聊分层建模 | 同时维护房间级 `conversation_id` 和说话人级 `speaker_track_id`，避免一个人的冲突污染全群，也避免群聊气氛被切碎。 |
-| 群聊氛围与开口时机 | `group_atmosphere_state` 记录活跃度、紧张度、玩笑度、支持度、engine 注意力、打断风险和加入适宜度，帮助 engine 判断该开口、短应、先听还是避免插话。 |
+| 群聊氛围与开口时机 | `group_atmosphere_state` 记录活跃度、紧张度、玩笑度、支持度、bot 注意力、打断风险和加入适宜度，帮助 bot 判断该开口、短应、先听还是避免插话。 |
 | 统一插件状态查询 | 其他插件可通过公共接口查询核心情绪、说话人轨道、群聊氛围、因果轨迹、运行时诊断或总览状态，而不是读取内部 KV。 |
 | 真人即时聊天 | 可把回复拆成多条短消息，按打字速度、长度和稳定抖动顺序发送，降低长篇报告腔。 |
 | 表情包回应与学习 | 根据当前情绪、群聊氛围和文本线索选择表情包；可记录用户表情的轻量元数据，形成小圈子里的表情共同语境。 |
@@ -73,7 +73,7 @@
 | 主题 | 内容 |
 | --- | --- |
 | [当前版本与兼容范围](#当前版本与兼容范围) | 插件版本、AstrBot 版本、Python 要求、许可证和发布状态。 |
-| [当前版本发布记录](#234-当前版本发布记录) | 全模型统一工具入口、即时聊天碎片理解修复、自有记忆知识库层、向量召回、记忆设置 Page、关联召回、真实时间强化/遗忘、模块自检和包体发布说明。 |
+| [当前版本发布记录](#235-当前版本发布记录) | 工具 JSON 外泄阻断、统一工具入口、即时聊天碎片理解修复、自有记忆知识库层、向量召回、记忆设置 Page、关联召回、真实时间强化/遗忘、模块自检和包体发布说明。 |
 | [项目定位](#项目定位) | 为什么本插件不是普通的提示词人设增强。 |
 | [核心能力](#核心能力总览) | 7 维情绪、人格建模、真实时间记忆、关系修复、公共 API。 |
 | [快速开始](#快速开始) | 发布 zip 包、仓库安装、手动复制、最小配置和检查命令。 |
@@ -101,19 +101,19 @@
 | --- | --- |
 | 插件目录名 | `astrbot_plugin_sylanne` |
 | 显示名 | `Sylanne` |
-| 当前版本 | `2.3.4` |
+| 当前版本 | `2.3.5` |
 | AstrBot 版本 | `>=4.9.2,<5.0.0` |
 | Python | `3.10+` |
 | 许可证 | `GPL-3.0-or-later` |
 | 运行时第三方依赖 | 当前无额外依赖，见 `requirements.txt` |
 
-`2.3.4` 保留 Sylanne 自有记忆知识库、`2.1.0` 只读记忆查询入口、`2.1.3` Agent-owned context 即时聊天修复、`2.2.0` AstrBot Embedding 提供商驱动的向量召回、`2.3.0` 可视化记忆设置 Page、`2.3.1` 慢速碎片输入修复、`2.3.2` Gemini 工具 schema 瘦身和 `2.3.3` Gemini 最小工具入口，并进一步把细分 LLM Tool 对所有主 LLM 隐藏。核心情绪、回复后后台评估（post）、`group_atmosphere_state`、`humanlike_state`、`lifelike_learning_state`、`personality_drift_state`、Sylanne 自有记忆、即时聊天节奏和欺骗/操控/逃责类动作阻断默认自动运行；道德修复、瑕疵模拟、心理筛查等实验/维护模块仍由配置者显式打开。
+`2.3.5` 保留 Sylanne 自有记忆知识库、`2.1.0` 只读记忆查询入口、`2.1.3` Agent-owned context 即时聊天修复、`2.2.0` AstrBot Embedding 提供商驱动的向量召回、`2.3.0` 可视化记忆设置 Page、`2.3.1` 慢速碎片输入修复、`2.3.2` Gemini 工具 schema 瘦身、`2.3.3` Gemini 最小工具入口和 `2.3.4` 全模型统一工具入口，并修复内部工具 JSON 可能外泄到用户聊天窗口的问题。核心情绪、回复后后台评估（post）、`group_atmosphere_state`、`humanlike_state`、`lifelike_learning_state`、`personality_drift_state`、Sylanne 自有记忆、即时聊天节奏和欺骗/操控/逃责类动作阻断默认自动运行；道德修复、瑕疵模拟、心理筛查等实验/维护模块仍由配置者显式打开。
 
 发布包会包含运行代码、README、CHANGELOG、LICENSE、配置结构（schema）、docs 和 `docs/assets/` 中的聚合图表与吉祥物素材，例如 `docs/assets/sylanne-mascot.gif`、`docs/assets/sylanne-mascot-card.svg` 和 `docs/assets/workflow_and_proactive.svg`；不会包含 `tests/`、`scripts/`、`literature_kb/`、`personality_literature_kb/`、`psychological_literature_kb/`、`humanlike_agent_literature_kb/`、`raw/`、`output/`、`dist/` 等开发、研究、原始样本或缓存目录。
 
-### 2.3.4 当前版本发布记录
+### 2.3.5 当前版本发布记录
 
-`v2.3.4` 合并在 `main` 上，对外安装版本由 `metadata.yaml` 和 `main.py @register(...)` 共同声明为 `2.3.4`。本版按版本规则提升第三位版本号：只修复主 LLM 工具暴露面，不改变公共 API 版本；公共 API 版本仍保持 `1.0`，schema 仍保持向后兼容。
+`v2.3.5` 合并在 `main` 上，对外安装版本由 `metadata.yaml` 和 `main.py @register(...)` 共同声明为 `2.3.5`。本版按版本规则提升第三位版本号：修复内部工具 JSON 外泄，不改变公共 API 版本；公共 API 版本仍保持 `1.0`，schema 仍保持向后兼容。
 
 当前版本的主要变化：
 
@@ -127,6 +127,7 @@
 | 上限释放 | 如果判断为未完成但用户真的停住，达到 `realtime_input_completion_max_wait_seconds` 后会释放合并后的碎片意图，避免 bot 永久沉默。 |
 | Gemini 工具轮次保护 | Gemini 系模型统一进入 `gemini_agent_owned_context`；带 `tools/functions/tool_choice` 或工具结果上下文时，只追加一条极短 guard，要求模型返回可见自然语言或有效 `tool_calls/function_call`，其余状态、记忆和风格注入全部跳过。 |
 | 全模型统一工具入口 | 主 LLM 只注册 `query_agent_state` 一个 Sylanne 工具；11 个细分工具保留为内部兼容方法，不再作为 LLM Tool 暴露。请求进入 provider 前还会剪除历史残留的细分工具 schema；如果还有外部插件工具，则同时保留外部工具。 |
+| 工具 JSON 外泄阻断 | 如果兼容层把 `query_agent_state`、情绪快照、运行时诊断等内部工具结果误作为最终 `completion_text` 交给发送阶段，Sylanne 会识别 `astrbot.*` 内部 `schema_version/kind`，清空默认发送内容并阻断用户可见发送；结构化工具调用仍交给 Agent 工具循环。 |
 | 只读记忆查询 | 新增 `/sylanne_memory`、`/记忆查询`、`/查询记忆`、`/灵澜记忆` 和 `query_sylanne_memory(...)`，可检查记忆命中情况；查询不会强化或改写记忆。 |
 | 关联联想召回 | 直接命中的记忆会在硬预算内带出少量相邻记忆；关联边由摘要相似度、层类型重叠、情绪接近度、时间接近度和巩固强度本地计算，不交给 LLM 随机决定。 |
 | 强化与遗忘 | 只有真正注入 prompt 的记忆才会触发召回强化；长期无证据、无召回且深度/置信度很低的弱记忆会按真实时间剪枝，并清理悬空关联边。 |
@@ -135,7 +136,7 @@
 | 主动聊天门控 | `progress_check` 必须有明确进度证据；话题结束或证据不足时不会硬问“进度还顺吗”，会降级为沉默或低压力调皮打扰，并用冷场反馈自动延长冷却。 |
 | 上下文安全预算 | 召回结果只作为 `[sylanne_memory_recall]` 限长摘要注入，并继续受请求预算和官方上下文压缩清洗逻辑约束。 |
 | 模块互斥自检 | 发布前覆盖自有记忆、主动发言、官方上下文压缩、即时聊天、公共 API、配置契约和包体预检，验证模块之间不会互相回灌或重复调用外部 LivingMemory。 |
-| 公开契约 | 插件版本为 `2.3.4`；公共 API 版本仍为 `1.0`，schema 仍保持 `astrbot.emotion_state.v2` 等版本化契约。 |
+| 公开契约 | 插件版本为 `2.3.5`；公共 API 版本仍为 `1.0`，schema 仍保持 `astrbot.emotion_state.v2` 等版本化契约。 |
 
 旧版本发布记录统一放在 `CHANGELOG.md`。README 只展示当前版本，避免插件管理页从历史段落误抓旧版本号。
 
@@ -2888,7 +2889,7 @@ $env:ASTRBOT_EXPECT_PLUGIN = "astrbot_plugin_sylanne"
 脚本会在输出 JSON 里写出 `expectedPluginRuntime`，包含插件列表 API 中返回的 `version`、`displayName`、`activated`、`author`、`astrbotVersion` 等只读字段。若目标插件存在但 `activated=false`，脚本会失败退出。需要把版本和显示名也作为硬断言时，可以额外设置：
 
 ```powershell
-$env:ASTRBOT_EXPECT_PLUGIN_VERSION = "2.3.4"
+$env:ASTRBOT_EXPECT_PLUGIN_VERSION = "2.3.5"
 $env:ASTRBOT_EXPECT_PLUGIN_DISPLAY_NAME = "Sylanne"
 & $node scripts\remote_smoke_playwright.js
 ```

@@ -2,6 +2,26 @@
 
 本文件用于 AstrBot 插件市场/管理页展示更新内容。更完整的设计说明、公式推导、测试矩阵和维护手册见 `README.md`。
 
+## 2.3.5
+
+发布日期：2026-05-12
+
+### 修复
+
+- 修复 `query_agent_state` 等 Sylanne 内部工具结果在缺少工具元数据时，可能被当成普通聊天正文发给用户的问题。现在带 `astrbot.*` 内部 `schema_version` 与 `kind` 的工具 JSON 会在 `on_llm_response` 阶段被识别、清空默认发送内容并阻断用户可见发送。
+- 保留真正的 Agent 工具循环：带 `tool_calls`、`function_call`、`role=tool/function` 或工具调用 ID 的结构化响应仍直接交给 AstrBot Agent，不会被 Sylanne 清空，也不会消费待回复 epoch。
+- 同步 README 与工作流图，突出“用户碎片化输入合并”和“最终自然语言回复才进入即时聊天分条投递”，内部工具 JSON 不进入即时聊天分段。
+
+### 验证
+
+- `python -m pytest -q tests/test_astrbot_lifecycle.py -k "sylanne_tool_json_result or role_tool_result or tool_call_response"`
+- `python -m pytest -q tests/test_astrbot_lifecycle.py -k "tool_call_response or intercepts_completion or realtime_intercept or sylanne_tool_json_result"`
+- `python -m pytest -q tests/test_command_tools.py -k "query_agent_state_tool or llm_tool_json_result"`
+- `python -m pytest -q tests`
+- `python -m py_compile main.py realtime_chat_input.py`
+- `python scripts\package_plugin.py`
+- `node scripts\plugin_zip_preflight.js dist\astrbot_plugin_sylanne.zip astrbot_plugin_sylanne`
+
 ## 2.3.4
 
 发布日期：2026-05-12

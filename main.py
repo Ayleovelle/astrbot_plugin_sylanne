@@ -594,7 +594,7 @@ def get_emotional_state_plugin(context: Context) -> Any | None:
     PLUGIN_NAME,
     "pidan",
     "Soulful Yearning Lifelike AstrBot Neural Narrative Engine：维护情绪、人格、记忆、氛围和表达节奏的 Sylanne",
-    "2.3.4",
+    "2.3.5",
     "",
 )
 class EmotionalStatePlugin(Star):
@@ -1694,10 +1694,22 @@ class EmotionalStatePlugin(Star):
         if _INTERNAL_LLM_CALL.get() or not self._cfg_bool("enabled", True):
             return
 
+        response_text = getattr(response, "completion_text", "") or ""
         if self._response_has_tool_call_payload(response):
             return
+        if self._looks_like_sylanne_tool_json_result(response_text):
+            self._preserve_intercepted_completion_text(
+                response,
+                response_text,
+                reason="sylanne_tool_json_result_suppressed",
+                clear_completion=True,
+            )
+            self._stop_default_response_send(
+                event,
+                reason="sylanne_tool_json_result_suppressed",
+            )
+            return
 
-        response_text = getattr(response, "completion_text", "") or ""
         if not response_text.strip():
             return
         identity = self._agent_identity(event)
@@ -7916,6 +7928,109 @@ class EmotionalStatePlugin(Star):
                 ):
                     return True
         return False
+
+    def _looks_like_sylanne_tool_json_result(self, text: str) -> bool:
+        raw = str(text or "").strip()
+        if not raw or not raw.startswith("{"):
+            return False
+        head = raw[:4096]
+        if '"schema_version"' not in head or '"kind"' not in head:
+            return False
+        try:
+            payload = json.loads(raw)
+        except Exception:
+            return False
+        if not isinstance(payload, dict):
+            return False
+        schema = str(payload.get("schema_version") or "").strip()
+        kind = str(payload.get("kind") or "").strip()
+        if not schema or not kind or not schema.startswith("astrbot."):
+            return False
+        internal_schemas = {
+            PUBLIC_SCHEMA_VERSION,
+            PUBLIC_MEMORY_SCHEMA_VERSION,
+            PUBLIC_PERSONALITY_PROFILE_SCHEMA_VERSION,
+            PUBLIC_SCREENING_SCHEMA_VERSION,
+            PUBLIC_HUMANLIKE_SCHEMA_VERSION,
+            PUBLIC_MORAL_REPAIR_SCHEMA_VERSION,
+            PUBLIC_INTEGRATED_SELF_SCHEMA_VERSION,
+            PUBLIC_LIFELIKE_LEARNING_SCHEMA_VERSION,
+            PUBLIC_PERSONALITY_DRIFT_SCHEMA_VERSION,
+            PUBLIC_FALLIBILITY_SCHEMA_VERSION,
+            PUBLIC_GROUP_ATMOSPHERE_SCHEMA_VERSION,
+            PUBLIC_MEMORY_STORE_SCHEMA_VERSION,
+            "astrbot.agent_state_query.v1",
+            "astrbot.agent_runtime_diagnostics.v1",
+            "astrbot.agent_identity.v1",
+            "astrbot.agent_trail.v1",
+            "astrbot.agent_trail_item.v1",
+            "astrbot.agent_trail_compacted.v1",
+            "astrbot.background_post_queue.v2",
+            "astrbot.interrupted_reply_breakpoint.v1",
+            "astrbot.proactive_candidate_session.v1",
+            "astrbot.proactive_dispatch_audit.v1",
+            "astrbot.proactive_dispatch_request.v1",
+            "astrbot.proactive_dispatch_result.v1",
+            "astrbot.proactive_quiet_gate.v1",
+            "astrbot.proactive_scheduler_result.v1",
+            "astrbot.proactive_topic_judgement.v1",
+            "astrbot.realtime_assistant_history_shadow.v1",
+            "astrbot.realtime_chat_active_dispatch.v1",
+            "astrbot.realtime_chat_dispatch_result.v1",
+            "astrbot.realtime_input_fragments.v1",
+            "astrbot.shadow_diagnostics.v1",
+            "astrbot.sticker_memory_result.v1",
+            "astrbot.sylanne_memory_settings_page.v1",
+            "astrbot.tool_result.v1",
+            "astrbot.user_message_withdrawal.v1",
+        }
+        internal_kinds = {
+            "agent_runtime_diagnostics",
+            "agent_state_query",
+            "agent_trail",
+            "compacted_low_signal",
+            "emotion_annotated_memory",
+            "emotion_state",
+            "fallibility_state",
+            "fallibility_state_at_write",
+            "group_atmosphere_state",
+            "humanlike_state",
+            "humanlike_state_at_write",
+            "integrated_self_compatibility_probe",
+            "integrated_self_diagnostics",
+            "integrated_self_policy_plan",
+            "integrated_self_replay_bundle",
+            "integrated_self_replay_result",
+            "integrated_self_state",
+            "integrated_self_state_at_write",
+            "interrupted_reply_breakpoint",
+            "lifelike_initiative_policy",
+            "lifelike_learning_state",
+            "lifelike_learning_state_at_write",
+            "llm_topic_judgement",
+            "moral_repair_state",
+            "moral_repair_state_at_write",
+            "personality_drift_state",
+            "personality_drift_state_at_write",
+            "proactive_dispatch_request",
+            "proactive_dispatch_result",
+            "proactive_scheduler_result",
+            "psychological_screening_state",
+            "realtime_assistant_history_shadow",
+            "realtime_chat_active_dispatch",
+            "realtime_chat_dispatch_result",
+            "realtime_chat_plan",
+            "realtime_user_message_fragment_window",
+            "realtime_user_message_fragments",
+            "shadow_diagnostics",
+            "state_annotations_at_write",
+            "sticker_memory_item",
+            "sticker_memory_result",
+            "sylanne_memory_query",
+            "tool_result",
+            "user_message_withdrawal",
+        }
+        return schema in internal_schemas or kind in internal_kinds
 
     def _response_tool_call_candidate_nodes(self, response: Any) -> list[Any]:
         if response is None:
