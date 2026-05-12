@@ -2,6 +2,21 @@
 
 本文件用于 AstrBot 插件市场/管理页展示更新内容。更完整的设计说明、公式推导、测试矩阵和维护手册见 `README.md`。
 
+## 2.3.8
+
+发布日期：2026-05-12
+
+### 修复
+
+- 修复即时聊天分条接管后，用户短答没有稳定绑定到上一轮完整问句簇的问题。比如 bot 先问“喝了杯什么呀？这么神奇，一喝就困？”，用户只回“咖啡啊”时，现在会被视为对上一轮问题的回答，而不是被误解成“用户正在新发起冲咖啡/喝咖啡动作”。
+- `realtime_assistant_history_shadow` 抽取未闭合问题时，会保留临近短问句和承接短句，避免只留下最后一个问号导致槽位丢失。
+- `[sylanne_realtime_pending_bot_question]` 的短答提示更明确：名词或短答优先补全上一轮问题槽位，不要当成孤立新话题或新命令。
+
+### 验证
+
+- `python -m pytest -q tests/test_astrbot_lifecycle.py::AstrBotLifecycleTests::test_short_answer_context_keeps_question_cluster_for_split_reply`
+- `python -m pytest -q tests/test_astrbot_lifecycle.py -k "realtime_pending_bot_question or short_answer_context or assistant_history_shadow or low_signal_followup or correction_suppresses"`
+
 ## 2.3.7
 
 发布日期：2026-05-12

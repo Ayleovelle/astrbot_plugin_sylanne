@@ -594,7 +594,7 @@ def get_emotional_state_plugin(context: Context) -> Any | None:
     PLUGIN_NAME,
     "pidan",
     "Soulful Yearning Lifelike AstrBot Neural Narrative Engine：维护情绪、人格、记忆、氛围和表达节奏的 Sylanne",
-    "2.3.7",
+    "2.3.8",
     "",
 )
 class EmotionalStatePlugin(Star):
@@ -9324,16 +9324,57 @@ class EmotionalStatePlugin(Star):
             return ""
         parts = [
             part.strip()
-            for part in re.split(r"(?<=[。！？!?；;])\s+|/+", value)
+            for part in re.split(r"(?<=[。！？!?；;])\s*|/+", value)
             if part.strip()
         ]
         candidates = parts or [value]
-        for candidate in reversed(candidates[-4:]):
+        start_index = max(0, len(candidates) - 5)
+        for index in range(len(candidates) - 1, start_index - 1, -1):
+            candidate = candidates[index]
             if self._looks_like_choice_or_direct_question(candidate):
-                return self._head_text(candidate, 220)
+                return self._head_text(
+                    self._pending_bot_question_cluster(candidates, index),
+                    220,
+                )
         if self._looks_like_choice_or_direct_question(value):
             return self._head_text(value, 220)
         return ""
+
+    def _pending_bot_question_cluster(
+        self,
+        candidates: Sequence[str],
+        question_index: int,
+    ) -> str:
+        index = max(0, min(int(question_index), len(candidates) - 1))
+        start = index
+        while start > 0 and index - start < 3:
+            previous = str(candidates[start - 1] or "").strip()
+            if not previous:
+                break
+            cluster = " ".join(
+                str(item or "").strip()
+                for item in candidates[start - 1 : index + 1]
+                if str(item or "").strip()
+            )
+            if len(cluster) > 220:
+                break
+            if not (
+                self._looks_like_choice_or_direct_question(previous)
+                or self._looks_like_question_lead_in_clause(previous)
+            ):
+                break
+            start -= 1
+        return " ".join(
+            str(item or "").strip()
+            for item in candidates[start : index + 1]
+            if str(item or "").strip()
+        )
+
+    def _looks_like_question_lead_in_clause(self, text: str) -> bool:
+        value = " ".join(str(text or "").split()).strip()
+        if not value or len(value) > 28:
+            return False
+        return value.endswith(("，", ",", "、", "：", ":"))
 
     def _looks_like_choice_or_direct_question(self, text: str) -> bool:
         value = " ".join(str(text or "").split()).strip()
@@ -9411,6 +9452,7 @@ class EmotionalStatePlugin(Star):
                 "[sylanne_realtime_pending_bot_question]",
                 "上一轮 bot 刚提出了一个未闭合问题或二选一问题；当前用户短句优先视为对这个问题的回答，不要把它当成孤立的新话题。",
                 "如果回答很短，例如 IP、域名、A、B、可以、不行，请先绑定到 last_bot_question，再继续给出下一步。",
+                "像“咖啡啊”“域名”“IP”“可以”这类名词或短答，默认是在补全上一轮问题的槽位；不要把它当成用户正在发起新的行动或命令。",
                 "source={source}; full_hash={hash}; expects_short_answer={expects}".format(
                     source=self._head_one_line(str(item.get("source") or ""), 48),
                     hash=str(item.get("full_text_hash") or "")[:16],

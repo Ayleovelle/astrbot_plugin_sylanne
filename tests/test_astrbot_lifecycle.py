@@ -4354,6 +4354,50 @@ class AstrBotLifecycleTests(unittest.TestCase):
         self.assertIn("current_user_short_answer=IP", injected)
         self.assertIn("你是用 IP 直连的，还是域名呀？", injected)
 
+    def test_short_answer_context_keeps_question_cluster_for_split_reply(self):
+        plugin = new_plugin(
+            {
+                "assessment_timing": "post",
+                "inject_state": False,
+                "enable_realtime_chat": True,
+                "enable_sticker_reaction": False,
+                "use_llm_assessor": False,
+                "realtime_input_completion_probe_delay_seconds": 0.0,
+                "realtime_input_completion_max_wait_seconds": 0.0,
+            },
+        )
+        self._bind_common_state_hooks(plugin)
+        plugin._record_realtime_assistant_history_shadow(
+            "s-question-cluster",
+            full_text=(
+                "喝了杯什么呀？这么神奇，一喝就困？"
+                "☕️ 可别告诉我你又是那种熬到天亮才去补觉的夜猫子模式。"
+            ),
+            input_epoch=1,
+            message_parts=[
+                {"text": "喝了杯什么呀？"},
+                {"text": "这么神奇，"},
+                {"text": "一喝就困？"},
+                {"text": "☕️ 可别告诉我你又是那种熬到天亮才去补觉的夜猫子模式。"},
+            ],
+            source="unit_test",
+        )
+        request = fake_request(session_id="s-question-cluster", prompt="咖啡啊")
+
+        asyncio.run(
+            plugin.on_llm_request(
+                FakeEvent("s-question-cluster", message="咖啡啊", sender_id="u1"),
+                request,
+            ),
+        )
+
+        injected = "\n".join(self._request_text_parts(request))
+        self.assertIn("sylanne_realtime_pending_bot_question", injected)
+        self.assertIn("喝了杯什么呀？", injected)
+        self.assertIn("一喝就困？", injected)
+        self.assertIn("current_user_short_answer=咖啡啊", injected)
+        self.assertIn("不要把它当成用户正在发起新的行动", injected)
+
     def test_interrupted_reply_recovery_can_include_sylanne_memory_summary(self):
         plugin = new_plugin(
             {
