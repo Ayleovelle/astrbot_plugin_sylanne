@@ -3459,6 +3459,105 @@ class AstrBotLifecycleTests(unittest.TestCase):
         self.assertIn("用户刚才解释过", injected)
         self.assertIn("不要把插件用户误会成恋爱对象", injected)
 
+    def test_on_llm_request_can_use_configured_embedding_provider_for_memory_recall(self):
+        plugin = new_plugin(
+            {
+                "assessment_timing": "post",
+                "inject_state": False,
+                "enable_realtime_chat": True,
+                "enable_sticker_reaction": False,
+                "use_llm_assessor": False,
+                "sylanne_memory_vector_retrieval_enabled": True,
+                "sylanne_memory_embedding_provider_id": "embed-a",
+            },
+        )
+        self._bind_common_state_hooks(plugin)
+        from memory_engine import MemoryRecord, SylanneMemoryState
+
+        class FakeEmbeddingProvider:
+            provider_config = {"id": "embed-a", "provider_type": "embedding"}
+
+            async def get_embedding(self, text):
+                if "needle-query" in text or "alpha beta gamma" in text:
+                    return [1.0, 0.0, 0.0]
+                return [0.0, 1.0, 0.0]
+
+            async def get_embeddings(self, texts):
+                return [await self.get_embedding(text) for text in texts]
+
+            def get_dim(self):
+                return 3
+
+        provider = FakeEmbeddingProvider()
+
+        class FakeContext:
+            def get_provider_by_id(self, provider_id):
+                return provider if provider_id == "embed-a" else None
+
+            def get_all_embedding_providers(self):
+                return [provider]
+
+        plugin.context = FakeContext()
+        state = SylanneMemoryState.initial(now=0.0)
+        state.records.extend(
+            [
+                MemoryRecord(
+                    memory_id="dense-hit",
+                    text="alpha beta gamma",
+                    summary="alpha beta gamma",
+                    session_key="s-vector-request",
+                    created_at=10.0,
+                    updated_at=10.0,
+                    depth=0.52,
+                    confidence=0.64,
+                ),
+                MemoryRecord(
+                    memory_id="dense-miss",
+                    text="delta epsilon zeta",
+                    summary="delta epsilon zeta",
+                    session_key="s-vector-request",
+                    created_at=11.0,
+                    updated_at=11.0,
+                    depth=0.92,
+                    confidence=0.90,
+                ),
+            ],
+        )
+        plugin._sylanne_memory_cache["s-vector-request"] = state
+        saved = []
+
+        async def fake_save_memory(self, session_key, saved_state):
+            saved.append(saved_state.to_dict())
+            self._sylanne_memory_cache[session_key] = saved_state
+
+        bind_async(plugin, "_save_sylanne_memory_state", fake_save_memory)
+        request = fake_request(
+            session_id="s-vector-request",
+            prompt="needle-query",
+        )
+
+        asyncio.run(
+            plugin.on_llm_request(
+                FakeEvent(
+                    "s-vector-request",
+                    message="needle-query",
+                    sender_id="u1",
+                ),
+                request,
+            ),
+        )
+
+        injected = "\n".join(self._request_text_parts(request))
+        self.assertIn("sylanne_memory_recall", injected)
+        self.assertIn("alpha beta gamma", injected)
+        self.assertNotIn("delta epsilon zeta", injected)
+        self.assertTrue(saved)
+        saved_records = saved[-1]["records"]
+        self.assertTrue(any(record["semantic_embedding"] for record in saved_records))
+        self.assertTrue(
+            all(record["embedding_provider_id"] == "embed-a" for record in saved_records),
+        )
+
     def test_on_llm_request_reinforces_recalled_sylanne_memory(self):
         from memory_engine import MemoryRecord, SylanneMemoryState
 

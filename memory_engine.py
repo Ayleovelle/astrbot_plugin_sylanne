@@ -93,6 +93,103 @@ def _similarity(query: str, text: str) -> float:
     return len(q & t) / math.sqrt(len(q) * len(t))
 
 
+def normalize_embedding(raw: Any, *, limit: int = 4096) -> list[float]:
+    if not isinstance(raw, (list, tuple)):
+        return []
+    values: list[float] = []
+    for item in raw[:limit]:
+        try:
+            number = float(item)
+        except (TypeError, ValueError):
+            continue
+        if math.isfinite(number):
+            values.append(number)
+    norm = math.sqrt(sum(value * value for value in values))
+    if norm <= 1.0e-12:
+        return []
+    return [value / norm for value in values]
+
+
+def clean_embedding(raw: Any, *, limit: int = 4096) -> list[float]:
+    if not isinstance(raw, (list, tuple)):
+        return []
+    values: list[float] = []
+    for item in raw[:limit]:
+        try:
+            number = float(item)
+        except (TypeError, ValueError):
+            continue
+        if math.isfinite(number):
+            values.append(number)
+    return values
+
+
+def embedding_cosine(first: Any, second: Any) -> float:
+    left = normalize_embedding(first)
+    right = normalize_embedding(second)
+    if not left or not right or len(left) != len(right):
+        return 0.0
+    return clamp(sum(a * b for a, b in zip(left, right)))
+
+
+def memory_embedding_text(record: "MemoryRecord") -> str:
+    return _clip(
+        " / ".join(
+            part
+            for part in (
+                str(getattr(record, "summary", "") or "").strip(),
+                str(getattr(record, "text", "") or "").strip(),
+            )
+            if part
+        ),
+        1200,
+    )
+
+
+def memory_embedding_text_hash(text: str) -> str:
+    return sha1(_clean_text(text, 1200).encode("utf-8", errors="ignore")).hexdigest()[:16]
+
+
+def memory_record_needs_embedding(
+    record: "MemoryRecord",
+    *,
+    provider_id: str,
+) -> bool:
+    provider = str(provider_id or "").strip()
+    if not provider:
+        return False
+    text = memory_embedding_text(record)
+    if not text:
+        return False
+    return (
+        not getattr(record, "semantic_embedding", None)
+        or str(getattr(record, "embedding_provider_id", "") or "") != provider
+        or str(getattr(record, "embedding_text_hash", "") or "")
+        != memory_embedding_text_hash(text)
+    )
+
+
+def apply_memory_record_embedding(
+    record: "MemoryRecord",
+    embedding: Any,
+    *,
+    provider_id: str,
+    now: float | None = None,
+) -> bool:
+    vector = normalize_embedding(embedding)
+    provider = str(provider_id or "").strip()
+    if not vector or not provider:
+        return False
+    text = memory_embedding_text(record)
+    if not text:
+        return False
+    record.semantic_embedding = vector
+    record.embedding_provider_id = provider
+    record.embedding_updated_at = time.time() if now is None else float(now)
+    record.embedding_text_hash = memory_embedding_text_hash(text)
+    return True
+
+
 @dataclass(slots=True)
 class MemoryDynamics:
     salience_bias: float = 0.35
@@ -167,6 +264,10 @@ class MemoryRecord:
     interference: float = 0.0
     associations: dict[str, float] = field(default_factory=dict)
     auto_parameters: dict[str, Any] = field(default_factory=dict)
+    semantic_embedding: list[float] = field(default_factory=list)
+    embedding_provider_id: str = ""
+    embedding_updated_at: float = 0.0
+    embedding_text_hash: str = ""
 
     @classmethod
     def from_dict(cls, data: Any) -> "MemoryRecord | None":
@@ -219,6 +320,10 @@ class MemoryRecord:
             auto_parameters=dict(data.get("auto_parameters") or {})
             if isinstance(data.get("auto_parameters"), dict)
             else {},
+            semantic_embedding=clean_embedding(data.get("semantic_embedding")),
+            embedding_provider_id=str(data.get("embedding_provider_id") or ""),
+            embedding_updated_at=_as_float(data.get("embedding_updated_at"), 0.0),
+            embedding_text_hash=str(data.get("embedding_text_hash") or ""),
         )
 
     def to_dict(self) -> dict[str, Any]:
@@ -248,6 +353,10 @@ class MemoryRecord:
                 if str(k).strip() and clamp(v) > 0.0
             },
             "auto_parameters": dict(self.auto_parameters),
+            "semantic_embedding": [round(float(value), 8) for value in self.semantic_embedding],
+            "embedding_provider_id": str(self.embedding_provider_id or ""),
+            "embedding_updated_at": float(self.embedding_updated_at or 0.0),
+            "embedding_text_hash": str(self.embedding_text_hash or ""),
         }
 
 
@@ -524,6 +633,8 @@ def recall_memory(
     query: str,
     now: float | None = None,
     limit: int | None = None,
+    query_embedding: Any = None,
+    embedding_provider_id: str = "",
 ) -> list[MemoryRecallItem]:
     timestamp = time.time() if now is None else float(now)
     query = _clean_text(query, 900)
@@ -531,6 +642,8 @@ def recall_memory(
         return []
     recall_limit = max(1, min(5, int(limit or state.dynamics.recall_limit or 3)))
     associative_limit = max(0, min(2, int(state.dynamics.associative_recall_limit)))
+    normalized_query_embedding = normalize_embedding(query_embedding)
+    embedding_provider_id = str(embedding_provider_id or "").strip()
     items: list[MemoryRecallItem] = []
     for record in state.records:
         elapsed = max(0.0, timestamp - record.updated_at)
@@ -545,6 +658,22 @@ def recall_memory(
             _similarity(query, record.summary),
             0.82 * _similarity(query, record.text),
         )
+        vector_semantic = 0.0
+        if (
+            normalized_query_embedding
+            and embedding_provider_id
+            and str(record.embedding_provider_id or "") == embedding_provider_id
+            and record.semantic_embedding
+        ):
+            vector_semantic = embedding_cosine(
+                normalized_query_embedding,
+                record.semantic_embedding,
+            )
+            if vector_semantic > 0.0:
+                semantic = max(
+                    semantic,
+                    clamp(0.66 * vector_semantic + 0.34 * semantic),
+                )
         if semantic <= 0.0:
             continue
         score = clamp(
@@ -559,6 +688,8 @@ def recall_memory(
         reasons = []
         if semantic > 0.1:
             reasons.append("semantic_match")
+        if vector_semantic > 0.22:
+            reasons.append("vector_match")
         if record.depth > 0.55:
             reasons.append("deep_memory")
         if freshness > 0.4:

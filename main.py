@@ -6,6 +6,7 @@ import json
 import time
 import os
 import re
+import inspect
 from collections import deque
 from copy import deepcopy
 from dataclasses import dataclass
@@ -137,8 +138,12 @@ try:
         MemoryRecallItem,
         PUBLIC_MEMORY_STORE_SCHEMA_VERSION,
         SylanneMemoryState,
+        apply_memory_record_embedding,
         apply_memory_time_decay,
         build_memory_prompt_fragment,
+        memory_embedding_text,
+        memory_record_needs_embedding,
+        normalize_embedding,
         observe_memory_event,
         recall_memory,
         reinforce_recalled_memories,
@@ -283,8 +288,12 @@ except ImportError:
         MemoryRecallItem,
         PUBLIC_MEMORY_STORE_SCHEMA_VERSION,
         SylanneMemoryState,
+        apply_memory_record_embedding,
         apply_memory_time_decay,
         build_memory_prompt_fragment,
+        memory_embedding_text,
+        memory_record_needs_embedding,
+        normalize_embedding,
         observe_memory_event,
         recall_memory,
         reinforce_recalled_memories,
@@ -560,7 +569,7 @@ def get_emotional_state_plugin(context: Context) -> Any | None:
     PLUGIN_NAME,
     "pidan",
     "Soulful Yearning Lifelike AstrBot Neural Narrative Engine：维护情绪、人格、记忆、氛围和表达节奏的 Sylanne",
-    "2.1.2",
+    "2.2.0",
     "",
 )
 class EmotionalStatePlugin(Star):
@@ -3581,16 +3590,37 @@ class EmotionalStatePlugin(Star):
                 "warning": "memory_state_unavailable",
             }
         bounded_limit = max(1, min(10, int(limit or 5)))
+        query_embedding: list[float] = []
+        embedding_provider_id = ""
+        embedding_changed = False
+        if clean_query:
+            try:
+                query_embedding, embedding_provider_id, embedding_changed = (
+                    await self._sylanne_memory_vector_recall_inputs(
+                        state,
+                        query=clean_query,
+                        now=timestamp,
+                    )
+                )
+            except Exception as exc:
+                logger.debug(f"{PLUGIN_NAME}: Sylanne memory public vector query failed: {exc}")
         items = (
             recall_memory(
                 state,
                 query=clean_query,
                 now=timestamp,
                 limit=min(5, bounded_limit),
+                query_embedding=query_embedding,
+                embedding_provider_id=embedding_provider_id,
             )
             if clean_query
             else []
         )
+        if embedding_changed:
+            try:
+                await self._save_sylanne_memory_state(resolved_session_key, state)
+            except Exception as exc:
+                logger.debug(f"{PLUGIN_NAME}: Sylanne memory public vector save failed: {exc}")
         results = [
             self._sylanne_memory_record_query_payload(item, now=timestamp)
             for item in items[:bounded_limit]
@@ -5473,6 +5503,154 @@ class EmotionalStatePlugin(Star):
                 lines.append(prefix + user_text)
         return self._clip("\n".join(lines), 1200)
 
+    def _sylanne_memory_vector_retrieval_enabled(self) -> bool:
+        return self._cfg_bool("sylanne_memory_vector_retrieval_enabled", True)
+
+    async def _sylanne_memory_embedding_provider(self) -> tuple[Any | None, str]:
+        if not self._sylanne_memory_vector_retrieval_enabled():
+            return None, ""
+        context = getattr(self, "context", None)
+        if context is None:
+            return None, ""
+        configured = str(
+            self._cfg("sylanne_memory_embedding_provider_id", "") or "",
+        ).strip()
+        provider = None
+        if configured:
+            getter = getattr(context, "get_provider_by_id", None)
+            if callable(getter):
+                try:
+                    provider = getter(configured)
+                    if inspect.isawaitable(provider):
+                        provider = await provider
+                except Exception as exc:
+                    logger.debug(
+                        f"{PLUGIN_NAME}: Sylanne memory embedding provider lookup failed: {exc}",
+                    )
+                    provider = None
+        else:
+            getter = getattr(context, "get_all_embedding_providers", None)
+            if callable(getter):
+                try:
+                    providers = getter()
+                    if inspect.isawaitable(providers):
+                        providers = await providers
+                    provider = next(iter(providers or []), None)
+                except Exception as exc:
+                    logger.debug(
+                        f"{PLUGIN_NAME}: Sylanne memory embedding provider list failed: {exc}",
+                    )
+                    provider = None
+        if provider is None or not callable(getattr(provider, "get_embedding", None)):
+            return None, ""
+        provider_id = configured or self._sylanne_memory_embedding_provider_id(provider)
+        if not provider_id:
+            provider_id = "default_embedding_provider"
+        return provider, str(provider_id)
+
+    def _sylanne_memory_embedding_provider_id(self, provider: Any) -> str:
+        for attr in ("provider_id", "id", "name"):
+            value = getattr(provider, attr, None)
+            if value:
+                return str(value)
+        config = getattr(provider, "provider_config", None)
+        if isinstance(config, dict):
+            for key in ("id", "provider_id", "name"):
+                value = config.get(key)
+                if value:
+                    return str(value)
+        return ""
+
+    async def _sylanne_memory_embedding_for_text(
+        self,
+        provider: Any,
+        text: str,
+    ) -> list[float]:
+        text = self._clip(str(text or "").strip(), 1200)
+        if not text or provider is None:
+            return []
+        getter = getattr(provider, "get_embedding", None)
+        if not callable(getter):
+            return []
+        try:
+            embedding = getter(text)
+            if inspect.isawaitable(embedding):
+                embedding = await embedding
+            return normalize_embedding(embedding)
+        except Exception as exc:
+            logger.debug(f"{PLUGIN_NAME}: Sylanne memory query embedding failed: {exc}")
+            return []
+
+    async def _ensure_sylanne_memory_record_embeddings(
+        self,
+        state: SylanneMemoryState,
+        *,
+        provider: Any,
+        provider_id: str,
+        now: float,
+        max_records: int = 8,
+    ) -> bool:
+        if provider is None or not provider_id:
+            return False
+        candidates = [
+            record
+            for record in reversed(state.records[-32:])
+            if memory_record_needs_embedding(record, provider_id=provider_id)
+        ][: max(0, int(max_records))]
+        if not candidates:
+            return False
+        texts = [memory_embedding_text(record) for record in candidates]
+        vectors: list[Any] = []
+        batch_getter = getattr(provider, "get_embeddings", None)
+        if callable(batch_getter) and len(texts) > 1:
+            try:
+                result = batch_getter(texts)
+                if inspect.isawaitable(result):
+                    result = await result
+                vectors = list(result or [])
+            except Exception as exc:
+                logger.debug(f"{PLUGIN_NAME}: Sylanne memory batch embedding failed: {exc}")
+                vectors = []
+        if len(vectors) != len(candidates):
+            vectors = []
+            for text in texts:
+                vectors.append(await self._sylanne_memory_embedding_for_text(provider, text))
+        changed = False
+        for record, vector in zip(candidates, vectors):
+            changed = (
+                apply_memory_record_embedding(
+                    record,
+                    vector,
+                    provider_id=provider_id,
+                    now=now,
+                )
+                or changed
+            )
+        if changed:
+            state.updated_at = max(float(getattr(state, "updated_at", 0.0) or 0.0), now)
+        return changed
+
+    async def _sylanne_memory_vector_recall_inputs(
+        self,
+        state: SylanneMemoryState,
+        *,
+        query: str,
+        now: float,
+    ) -> tuple[list[float], str, bool]:
+        provider, provider_id = await self._sylanne_memory_embedding_provider()
+        if provider is None or not provider_id:
+            return [], "", False
+        changed = await self._ensure_sylanne_memory_record_embeddings(
+            state,
+            provider=provider,
+            provider_id=provider_id,
+            now=now,
+        )
+        query_embedding = await self._sylanne_memory_embedding_for_text(provider, query)
+        if not query_embedding:
+            return [], "", changed
+        return query_embedding, provider_id, changed
+
     async def _sylanne_memory_recall_summary_for_proactive_candidate(
         self,
         candidate: dict[str, Any],
@@ -5490,12 +5668,24 @@ class EmotionalStatePlugin(Star):
             900,
         )
         try:
+            now = self._observed_now()
             state = await self._load_sylanne_memory_state(session_key)
+            query_embedding, embedding_provider_id, embedding_changed = (
+                await self._sylanne_memory_vector_recall_inputs(
+                    state,
+                    query=query,
+                    now=now,
+                )
+            )
             items = recall_memory(
                 state,
                 query=query,
-                now=self._observed_now(),
+                now=now,
+                query_embedding=query_embedding,
+                embedding_provider_id=embedding_provider_id,
             )
+            if embedding_changed:
+                await self._save_sylanne_memory_state(session_key, state)
         except Exception as exc:
             logger.debug(f"{PLUGIN_NAME}: Sylanne memory proactive recall failed: {exc}")
             return ""
@@ -5567,12 +5757,24 @@ class EmotionalStatePlugin(Star):
         if not query:
             return ""
         try:
+            now = self._observed_now()
             state = await self._load_sylanne_memory_state(session_key)
+            query_embedding, embedding_provider_id, embedding_changed = (
+                await self._sylanne_memory_vector_recall_inputs(
+                    state,
+                    query=query,
+                    now=now,
+                )
+            )
             items = recall_memory(
                 state,
                 query=query,
-                now=self._observed_now(),
+                now=now,
+                query_embedding=query_embedding,
+                embedding_provider_id=embedding_provider_id,
             )
+            if embedding_changed:
+                await self._save_sylanne_memory_state(session_key, state)
         except Exception as exc:
             logger.debug(f"{PLUGIN_NAME}: Sylanne memory request recall failed: {exc}")
             return ""
@@ -11234,6 +11436,15 @@ class EmotionalStatePlugin(Star):
                 ),
                 now=now,
             )
+            provider, provider_id = await self._sylanne_memory_embedding_provider()
+            if provider is not None and provider_id:
+                await self._ensure_sylanne_memory_record_embeddings(
+                    state,
+                    provider=provider,
+                    provider_id=provider_id,
+                    now=now,
+                    max_records=3,
+                )
             await self._save_sylanne_memory_state(session_key, state)
         except Exception as exc:
             logger.debug(f"{PLUGIN_NAME}: Sylanne memory observe failed: {exc}")

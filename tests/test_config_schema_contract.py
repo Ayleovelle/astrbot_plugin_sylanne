@@ -9,13 +9,16 @@ ROOT = Path(__file__).resolve().parents[1]
 
 SYLANNE_MEMORY_OPERATIONAL_SCHEMA_KEYS = {
     "enable_sylanne_memory",
+    "sylanne_memory_vector_retrieval_enabled",
+    "sylanne_memory_embedding_provider_id",
     "sylanne_memory_debug_view_enabled",
     "allow_sylanne_memory_reset_backdoor",
 }
 
-SYLANNE_MEMORY_RESERVED_SCHEMA_KEYS = (
-    SYLANNE_MEMORY_OPERATIONAL_SCHEMA_KEYS - {"sylanne_memory_debug_view_enabled"}
-)
+SYLANNE_MEMORY_RESERVED_SCHEMA_KEYS = {
+    "enable_sylanne_memory",
+    "allow_sylanne_memory_reset_backdoor",
+}
 
 SYLANNE_MEMORY_CORE_HIDDEN_KEYS = {
     "sylanne_memory_salience_bias",
@@ -297,6 +300,14 @@ class ConfigSchemaContractTests(unittest.TestCase):
         )
         self.assertTrue(SYLANNE_MEMORY_CORE_HIDDEN_KEYS.isdisjoint(cfg))
         self.assertEqual(cfg["enable_sylanne_memory"]["default"], True)
+        self.assertEqual(
+            cfg["sylanne_memory_vector_retrieval_enabled"]["default"],
+            True,
+        )
+        self.assertEqual(
+            cfg["sylanne_memory_embedding_provider_id"]["default"],
+            "",
+        )
         self.assertEqual(
             cfg["sylanne_memory_debug_view_enabled"]["default"],
             False,

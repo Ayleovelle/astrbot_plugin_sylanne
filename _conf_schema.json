@@ -415,6 +415,18 @@
     "default": true,
     "hint": "默认开启。发生的事情会写入自有记忆，后续对话会按限长召回摘要理解指代、偏好和共同经历；记忆深度、遗忘半衰期、召回数量、巩固强度和压缩阈值全部由人格、情绪、关系、群聊氛围和真实时间自动推导，不允许手动调数值。"
   },
+  "sylanne_memory_vector_retrieval_enabled": {
+    "description": "启用 Sylanne 记忆向量检索",
+    "type": "bool",
+    "default": true,
+    "hint": "默认开启。若 AstrBot 已配置 Embedding 类型模型提供商，记忆会保存语义向量并在召回时结合余弦相似度；提供商不可用时自动退回关键词/关联图检索。"
+  },
+  "sylanne_memory_embedding_provider_id": {
+    "description": "Sylanne 记忆 Embedding 提供商 ID",
+    "type": "string",
+    "default": "",
+    "hint": "填写 AstrBot 中 Embedding 类型提供商的 ID；留空时自动使用 AstrBot 当前可用的第一个 Embedding 提供商。该项只选择模型来源，不开放记忆动力学数值。"
+  },
   "sylanne_memory_debug_view_enabled": {
     "description": "启用 Sylanne 记忆调试视图",
     "type": "bool",

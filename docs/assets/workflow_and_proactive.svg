@@ -123,6 +123,7 @@
     <rect class="nodeBlue" x="430" y="590" width="260" height="86" rx="12"/>
     <text class="text" x="560" y="622" text-anchor="middle">短状态与自有记忆召回</text>
     <text class="tiny" x="560" y="646" text-anchor="middle">只注入必要摘要，避免上下文膨胀</text>
+    <text class="tiny" x="560" y="666" text-anchor="middle">Embedding 向量 + 关键词 + 关联图</text>
     <path class="arrowBlue" d="M560 676 V716"/>
 
     <rect class="nodeBlue" x="430" y="716" width="260" height="78" rx="12"/>

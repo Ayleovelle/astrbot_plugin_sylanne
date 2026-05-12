@@ -675,7 +675,24 @@ s_i(q)=
 {\sqrt{|T(q)|\,|T(m_i)|+\eta_0}},
 ```
 
-其中 `T(\cdot)` 是本地分词后的 token 集合，`O(q,m_i)` 表示 query 与记忆 token 的重叠集合，`\eta_0` 是防止空集合除零的极小量。当前实现不依赖外部向量库，因此它更接近低成本稀疏检索；若后续接入向量检索，也必须保留同样的预算闸门。
+其中 `T(\cdot)` 是本地分词后的 token 集合，`O(q,m_i)` 表示 query 与记忆 token 的重叠集合，`\eta_0` 是防止空集合除零的极小量。`2.2.0` 之后，若 AstrBot 已配置 Embedding 类型模型提供商，插件还会为记忆摘要与正文生成归一化语义向量 `v_i`，为当前 query 生成 `v_q`，并计算密集语义相似度：
+
+```math
+r_i^v(q)=
+\max\left(0,\frac{v_q^{\mathsf T} v_i}{\|v_q\|_2\|v_i\|_2+\eta_v}\right).
+```
+
+稀疏相似度和密集相似度不是互相替代，而是取保守融合：
+
+```math
+s_i^*(q)=
+\max\left(
+s_i(q),
+\mathrm{clip}(0.66r_i^v(q)+0.34s_i(q),0,1)
+\right).
+```
+
+这样做的理由是：稀疏检索保留可解释的关键词命中，密集检索补足“同义、黑话、小圈子说法、长期指代”这类词面不重合的语义联想。工程上，向量提供商不可用、维度不一致、生成失败或 provider id 不匹配时，`r_i^v(q)=0`，系统自动退回纯稀疏检索；召回数量、联想边数量和 prompt 字符预算仍由原来的硬闸门控制。
 
 真实时间新鲜度写成半衰形式：
 
@@ -688,7 +705,7 @@ f_i(t)=2^{-\frac{t-t_i^{u}}{h_i}},
 ```math
 R_i =
 \mathrm{clip}\left(
-0.42s_i(q)
+0.42s_i^*(q)
 +0.24d_i
 +0.18c_i
 +0.16f_i(t)
@@ -696,7 +713,7 @@ R_i =
 \right),
 ```
 
-其中 `d_i` 是记忆深度，`c_i` 是置信度，`\eta_i` 是干扰强度。`R_i` 只有在 `s_i(q)>0` 时才会进入候选，避免无语义命中的旧记忆凭深度乱入当前对话。
+实际实现中，上式的 `s_i(q)` 会替换为 `s_i^*(q)`；没有可用向量时二者相等。`d_i` 是记忆深度，`c_i` 是置信度，`\eta_i` 是干扰强度。`R_i` 只有在 `s_i^*(q)>0` 时才会进入候选，避免无语义命中的旧记忆凭深度乱入当前对话。
 
 用户提出“记忆之间会相互联系相互影响”后，2.0.0 增加了轻量关联图。每条记忆有稳定 `memory_id`，并只保存同会话内少量关联边：
 
@@ -724,7 +741,7 @@ a_{ij}=
 召回分两步。第一步只根据 query 选直接命中集合：
 
 ```math
-P_q=\mathrm{TopK}_{K_p}\{R_i:s_i(q)>0\}.
+P_q=\mathrm{TopK}_{K_p}\{R_i:s_i^*(q)>0\}.
 ```
 
 第二步只从 `P_q` 的一跳邻居里取少量联想记忆：
@@ -860,5 +877,7 @@ E_t \in [-1,1]^n
 48. Schacter, D. L. (1999). The seven sins of memory: Insights from psychology and cognitive neuroscience. *American Psychologist, 54*(3), 182-203. https://doi.org/10.1037/0003-066X.54.3.182
 49. Park, J. S., O'Brien, J. C., Cai, C. J., Morris, M. R., Liang, P., & Bernstein, M. S. (2023). Generative agents: Interactive simulacra of human behavior. *Proceedings of the 36th Annual ACM Symposium on User Interface Software and Technology*. https://doi.org/10.1145/3586183.3606763
 50. Karpukhin, V., Oguz, B., Min, S., Lewis, P., Wu, L., Edunov, S., Chen, D., & Yih, W. (2020). Dense passage retrieval for open-domain question answering. *Proceedings of EMNLP 2020*, 6769-6781. https://doi.org/10.18653/v1/2020.emnlp-main.550
+51. Reimers, N., & Gurevych, I. (2019). Sentence-BERT: Sentence embeddings using Siamese BERT-networks. *Proceedings of EMNLP-IJCNLP 2019*, 3982-3992. https://doi.org/10.18653/v1/D19-1410
+52. Johnson, J., Douze, M., & Jegou, H. (2019). Billion-scale similarity search with GPUs. *IEEE Transactions on Big Data, 7*(3), 535-547. https://doi.org/10.1109/TBDATA.2019.2921572
 
 </details>

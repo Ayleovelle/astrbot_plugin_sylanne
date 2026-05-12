@@ -244,6 +244,73 @@ class SylanneMemoryEngineTests(unittest.TestCase):
         associative = [item for item in items if "associative_recall" in item.reasons]
         self.assertEqual(len(associative), 2)
 
+    def test_recall_can_use_embedding_vector_when_sparse_words_do_not_match(self):
+        state = SylanneMemoryState.initial(now=0.0)
+        state.records.extend(
+            [
+                MemoryRecord(
+                    memory_id="dense-hit",
+                    text="alpha beta gamma",
+                    summary="alpha beta gamma",
+                    session_key="s-vector",
+                    created_at=10.0,
+                    updated_at=10.0,
+                    depth=0.52,
+                    confidence=0.64,
+                    semantic_embedding=[1.0, 0.0, 0.0],
+                    embedding_provider_id="embed-a",
+                    embedding_updated_at=10.0,
+                    embedding_text_hash="hash-a",
+                ),
+                MemoryRecord(
+                    memory_id="dense-miss",
+                    text="delta epsilon zeta",
+                    summary="delta epsilon zeta",
+                    session_key="s-vector",
+                    created_at=11.0,
+                    updated_at=11.0,
+                    depth=0.88,
+                    confidence=0.90,
+                    semantic_embedding=[0.0, 1.0, 0.0],
+                    embedding_provider_id="embed-a",
+                    embedding_updated_at=11.0,
+                    embedding_text_hash="hash-b",
+                ),
+            ],
+        )
+
+        items = recall_memory(
+            state,
+            query="unrelated natural language query",
+            now=20.0,
+            limit=1,
+            query_embedding=[1.0, 0.0, 0.0],
+            embedding_provider_id="embed-a",
+        )
+
+        self.assertEqual([item.record.memory_id for item in items], ["dense-hit"])
+        self.assertIn("vector_match", items[0].reasons)
+
+    def test_memory_record_persists_embedding_metadata(self):
+        record = MemoryRecord(
+            memory_id="dense-persist",
+            text="record text",
+            summary="record summary",
+            session_key="s-vector",
+            semantic_embedding=[0.2, 0.4, 0.8],
+            embedding_provider_id="embed-a",
+            embedding_updated_at=123.0,
+            embedding_text_hash="hash-a",
+        )
+
+        restored = MemoryRecord.from_dict(record.to_dict())
+
+        self.assertIsNotNone(restored)
+        self.assertEqual(restored.semantic_embedding, [0.2, 0.4, 0.8])
+        self.assertEqual(restored.embedding_provider_id, "embed-a")
+        self.assertEqual(restored.embedding_updated_at, 123.0)
+        self.assertEqual(restored.embedding_text_hash, "hash-a")
+
     def test_stale_weak_memory_is_forgotten_by_real_time_decay(self):
         state = SylanneMemoryState.initial(now=0.0)
         state.dynamics.decay_half_life_seconds = 10.0
