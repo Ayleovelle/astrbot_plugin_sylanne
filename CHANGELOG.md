@@ -2,6 +2,21 @@
 
 本文件用于 AstrBot 插件市场/管理页展示更新内容。更完整的设计说明、公式推导、测试矩阵和维护手册见 `README.md`。
 
+## 2.3.10
+
+发布日期：2026-05-13
+
+### 修复
+
+- 修复即时聊天接管后，用户已经纠正“昨晚十点多睡了/早早起床了”，下一轮 bot 仍复读“你是不是没睡”的问题。
+- 被插件接管的上一轮 assistant 回复会补进 `request.contexts`，让主 LLM 直接看到完整前文，而不是只依赖短摘要。
+- 近期用户纠正事实会短暂缓存并作为真实 user 上下文补给下一轮，避免“我今天打算改论文”这类后续回复覆盖掉刚才的睡眠事实纠正。
+
+### 验证
+
+- `python -m pytest -q tests/test_astrbot_lifecycle.py -k "sleep_fact_correction or recent_sleep_correction"`
+- `python -m pytest -q tests/test_astrbot_lifecycle.py -k "realtime_pending_bot_question or assistant_history_shadow or user_correction or sleep_fact_correction or recent_sleep_correction or realtime_input_fragments"`
+
 ## 2.3.9
 
 发布日期：2026-05-13

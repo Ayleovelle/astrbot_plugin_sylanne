@@ -387,6 +387,9 @@ REALTIME_CHAT_INTERRUPT_GRACE_SECONDS = 0.05
 REALTIME_ASSISTANT_HISTORY_LIMIT = 3
 REALTIME_ASSISTANT_HISTORY_INJECTION_MAX_CHARS = 900
 REALTIME_ASSISTANT_HISTORY_EXCERPT_CHARS = 720
+RECENT_USER_CORRECTION_LIMIT = 4
+RECENT_USER_CORRECTION_TTL_SECONDS = 180.0
+RECENT_USER_CORRECTION_INJECTION_MAX_CHARS = 520
 REALTIME_INPUT_FRAGMENT_INJECTION_MAX_CHARS = 520
 REALTIME_INPUT_HOLD_INJECTION_MAX_CHARS = 360
 REALTIME_INPUT_LLM_WAIT_MAX_SECONDS = 20.0
@@ -594,7 +597,7 @@ def get_emotional_state_plugin(context: Context) -> Any | None:
     PLUGIN_NAME,
     "pidan",
     "Soulful Yearning Lifelike AstrBot Neural Narrative Engine：维护情绪、人格、记忆、氛围和表达节奏的 Sylanne",
-    "2.3.9",
+    "2.3.10",
     "",
 )
 class EmotionalStatePlugin(Star):
@@ -656,6 +659,7 @@ class EmotionalStatePlugin(Star):
         self._realtime_input_fragment_windows: dict[str, dict[str, Any]] = {}
         self._interrupted_reply_breakpoints: dict[str, deque[dict[str, Any]]] = {}
         self._realtime_assistant_history_shadows: dict[str, deque[dict[str, Any]]] = {}
+        self._recent_user_corrections: dict[str, deque[dict[str, Any]]] = {}
         self._realtime_chat_active_dispatches: dict[str, dict[str, Any]] = {}
         self._realtime_chat_dispatch_tasks: dict[str, set[asyncio.Task[Any]]] = {}
         self._background_tasks: set[asyncio.Task[Any]] = set()
@@ -764,6 +768,8 @@ class EmotionalStatePlugin(Star):
             self._interrupted_reply_breakpoints.clear()
         if hasattr(self, "_realtime_assistant_history_shadows"):
             self._realtime_assistant_history_shadows.clear()
+        if hasattr(self, "_recent_user_corrections"):
+            self._recent_user_corrections.clear()
         if hasattr(self, "_realtime_chat_active_dispatches"):
             self._realtime_chat_active_dispatches.clear()
         realtime_dispatch_tasks = [
@@ -8530,11 +8536,25 @@ class EmotionalStatePlugin(Star):
             current_user_text,
         )
         if is_correction:
+            self._append_realtime_assistant_history_context_message_if_any(
+                request,
+                session_key,
+            )
+            correction_appended = self._append_user_correction_context(
+                request,
+                current_user_text,
+                budget=budget,
+            )
+            if correction_appended:
+                self._record_recent_user_correction(session_key, current_user_text)
+            appended = correction_appended or appended
+        else:
             appended = (
-                self._append_user_correction_context(
+                self._append_recent_user_correction_context_if_any(
                     request,
-                    current_user_text,
+                    session_key,
                     budget=budget,
+                    current_user_text=current_user_text,
                 )
                 or appended
             )
@@ -8569,6 +8589,28 @@ class EmotionalStatePlugin(Star):
         )
         return appended
 
+    def _append_realtime_assistant_history_context_message_if_any(
+        self,
+        request: ProviderRequest,
+        session_key: str,
+    ) -> bool:
+        queue = self._realtime_assistant_history_shadow_cache().get(
+            str(session_key or "global"),
+        )
+        if not queue:
+            return False
+        pending = [item for item in queue if not item.get("consumed")]
+        if not pending:
+            return False
+        item = pending[-1]
+        if self._agent_history_already_contains_realtime_shadow(request, item):
+            return False
+        return self._append_agent_context_message(
+            request,
+            role="assistant",
+            content=str(item.get("full_text") or item.get("excerpt") or ""),
+        )
+
     def _append_user_correction_context(
         self,
         request: ProviderRequest,
@@ -8582,6 +8624,7 @@ class EmotionalStatePlugin(Star):
                 "用户当前发言可能是在纠正上一轮误读、澄清指代，或追问信息来源。",
                 "优先处理用户纠正和来源问题；如果上一轮理解错了，先简短承认并重述用户真正问题。",
                 "不要继续沿着上一轮误会、吃醋、撒娇、指责或自我辩解方向展开。",
+                *self._user_correction_extra_instructions(current_user_text),
                 "current_user=" + self._head_one_line(str(current_user_text or ""), 180),
             ],
         )
@@ -8619,7 +8662,148 @@ class EmotionalStatePlugin(Star):
             "依据",
             "为啥你要问",
         )
-        return any(marker in compact for marker in correction_markers + source_markers)
+        return (
+            any(marker in compact for marker in correction_markers + source_markers)
+            or self._looks_like_sleep_fact_correction(value)
+        )
+
+    def _user_correction_extra_instructions(self, text: str) -> list[str]:
+        if self._looks_like_sleep_fact_correction(text):
+            return [
+                "用户正在纠正睡眠/作息事实；把这条事实当作高优先级上下文。",
+                "不要再追问或暗示用户没睡、熬夜或刚才撒谎；后续回复应承认用户已经说明睡眠情况。",
+            ]
+        return []
+
+    def _looks_like_sleep_fact_correction(self, text: str) -> bool:
+        value = str(text or "").strip()
+        if not value:
+            return False
+        compact = re.sub(r"\s+", "", value)
+        first_person = any(marker in compact for marker in ("我", "俺", "人家"))
+        sleep_markers = (
+            "睡",
+            "睡觉",
+            "睡的",
+            "睡了",
+            "起床",
+            "早起",
+            "醒",
+        )
+        denies_no_sleep = compact.startswith(("没有", "没有啊", "没啊", "不是", "不对"))
+        has_sleep_fact = any(marker in compact for marker in sleep_markers)
+        has_time_fact = bool(
+            re.search(
+                r"(昨晚|昨天|昨夜|夜里|晚上|早上|今天|凌晨|点|十点|十一点|十二点|\d{1,2}[:：点])",
+                compact,
+            ),
+        )
+        has_early_wake_fact = any(
+            marker in compact
+            for marker in (
+                "早早起床",
+                "早起",
+                "起床啦",
+                "起来啦",
+                "已经起",
+            )
+        )
+        if first_person and has_sleep_fact and has_time_fact:
+            return True
+        if first_person and denies_no_sleep and (has_sleep_fact or has_early_wake_fact):
+            return True
+        return False
+
+    def _recent_user_correction_cache(self) -> dict[str, deque[dict[str, Any]]]:
+        cache = getattr(self, "_recent_user_corrections", None)
+        if not isinstance(cache, dict):
+            cache = {}
+            self._recent_user_corrections = cache
+        return cache
+
+    def _record_recent_user_correction(self, session_key: str, text: str) -> None:
+        value = " ".join(str(text or "").split()).strip()
+        if not value:
+            return
+        key = str(session_key or "global")
+        queue = self._recent_user_correction_cache().setdefault(
+            key,
+            deque(maxlen=RECENT_USER_CORRECTION_LIMIT),
+        )
+        if queue.maxlen != RECENT_USER_CORRECTION_LIMIT:
+            queue = deque(queue, maxlen=RECENT_USER_CORRECTION_LIMIT)
+            self._recent_user_correction_cache()[key] = queue
+        queue.append(
+            {
+                "schema_version": "astrbot.recent_user_correction.v1",
+                "kind": "recent_user_correction",
+                "session_key": key,
+                "text": self._head_one_line(value, 180),
+                "recorded_at": self._observed_now(),
+                "sleep_fact_correction": self._looks_like_sleep_fact_correction(value),
+                "hash": self._text_hash(value),
+            },
+        )
+
+    def _append_recent_user_correction_context_if_any(
+        self,
+        request: ProviderRequest,
+        session_key: str,
+        *,
+        budget: _StateInjectionBudget | None,
+        current_user_text: str = "",
+    ) -> bool:
+        key = str(session_key or "global")
+        queue = self._recent_user_correction_cache().get(key)
+        if not queue:
+            return False
+        now = self._observed_now()
+        fresh = [
+            item
+            for item in queue
+            if now - float(item.get("recorded_at") or 0.0)
+            <= RECENT_USER_CORRECTION_TTL_SECONDS
+        ]
+        if not fresh:
+            self._recent_user_correction_cache().pop(key, None)
+            return False
+        latest_items = fresh[-2:]
+        lines = [
+            "[sylanne_recent_user_correction_context]",
+            "用户刚刚纠正过 bot 的误读；这类事实优先级高于旧模板、旧猜测和上一轮关心话术。",
+            "如果当前用户在继续回答另一个问题，也必须保留这些纠正事实，不要在下一轮又复读被纠正的猜测。",
+        ]
+        if any(bool(item.get("sleep_fact_correction")) for item in latest_items):
+            lines.append(
+                "不要再追问或暗示用户没睡、熬夜或刚才撒谎；用户已经给过睡眠/作息事实。",
+            )
+        for item in latest_items:
+            self._append_agent_context_message(
+                request,
+                role="user",
+                content=str(item.get("text") or ""),
+            )
+            lines.append(
+                "recent_correction={text}; hash={hash}".format(
+                    text=self._head_one_line(str(item.get("text") or ""), 180),
+                    hash=str(item.get("hash") or "")[:16],
+                ),
+            )
+        if current_user_text:
+            lines.append(
+                "current_user="
+                + self._head_one_line(str(current_user_text or ""), 120),
+            )
+        text = self._head_text(
+            "\n".join(lines),
+            RECENT_USER_CORRECTION_INJECTION_MAX_CHARS,
+        )
+        return self._append_temp_text_part(
+            request,
+            text,
+            source="recent_user_correction_context",
+            budget=budget,
+        )
 
     def _append_realtime_input_fragment_context_if_any(
         self,
@@ -9222,6 +9406,8 @@ class EmotionalStatePlugin(Star):
             "message_count": len(parts) if parts else 1,
             "full_text_chars": len(text),
             "full_text_hash": self._text_hash(text),
+            "full_text": self._head_text(text, INTERRUPTED_REPLY_LOCAL_MAX_CHARS),
+            "full_text_truncated": len(text) > INTERRUPTED_REPLY_LOCAL_MAX_CHARS,
             "excerpt": self._head_text(
                 " / ".join(parts) if parts else text,
                 REALTIME_ASSISTANT_HISTORY_EXCERPT_CHARS,
@@ -9281,6 +9467,11 @@ class EmotionalStatePlugin(Star):
             item["consumed_at"] = self._observed_now()
             item["consumed_reason"] = "agent_history_already_contains_reply"
             return False
+        self._append_agent_context_message(
+            request,
+            role="assistant",
+            content=str(item.get("full_text") or item.get("excerpt") or ""),
+        )
         if self._should_anchor_short_answer_to_realtime_question(item, current_user_text):
             appended = self._append_realtime_pending_bot_question_context(
                 request,
@@ -13709,6 +13900,7 @@ class EmotionalStatePlugin(Star):
             "interrupted_reply_breakpoint",
             "realtime_input_fragments",
             "user_correction_context",
+            "recent_user_correction_context",
             "sylanne_memory_recall",
         }
         if source not in important_sources:
@@ -13732,6 +13924,7 @@ class EmotionalStatePlugin(Star):
             "interrupted_reply_breakpoint": "sylanne_interrupted_reply_breakpoint",
             "realtime_input_fragments": "sylanne_user_message_fragments",
             "user_correction_context": "sylanne_user_correction_context",
+            "recent_user_correction_context": "sylanne_recent_user_correction_context",
             "sylanne_memory_recall": "sylanne_memory_recall",
             "gemini_visible_output_guard": "sylanne_gemini_visible_output_guard",
         }
@@ -14093,6 +14286,33 @@ class EmotionalStatePlugin(Star):
                     text_parts.append(str(part.get("text", "")))
             return f"[{role}]\n" + "\n".join(text_parts)
         return f"[{role}]\n{json.dumps(content, ensure_ascii=False)}"
+
+    def _append_agent_context_message(
+        self,
+        request: ProviderRequest,
+        *,
+        role: str,
+        content: str,
+    ) -> bool:
+        text = str(content or "").strip()
+        if not text:
+            return False
+        contexts = getattr(request, "contexts", None)
+        if not isinstance(contexts, list):
+            contexts = []
+            try:
+                setattr(request, "contexts", contexts)
+            except Exception:
+                return False
+        normalized = self._normalize_realtime_history_match_text(text)
+        for item in self._tail_items(contexts, 10):
+            existing = self._normalize_realtime_history_match_text(
+                self._context_item_to_text(item),
+            )
+            if normalized and normalized in existing:
+                return False
+        contexts.append({"role": str(role or "assistant"), "content": text})
+        return True
 
     def _event_text(self, event: AstrMessageEvent) -> str:
         return str(getattr(event, "message_str", "") or "")

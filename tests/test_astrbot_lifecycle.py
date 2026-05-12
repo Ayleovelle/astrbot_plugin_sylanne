@@ -6419,6 +6419,109 @@ class AstrBotLifecycleTests(unittest.TestCase):
         self.assertNotIn("sylanne_realtime_assistant_history", injected)
         self.assertIn("优先处理用户纠正", injected)
 
+    def test_sleep_fact_correction_suppresses_repeated_no_sleep_guess(self):
+        plugin = new_plugin(
+            {
+                "assessment_timing": "post",
+                "inject_state": False,
+                "enable_realtime_chat": True,
+                "enable_sticker_reaction": False,
+                "use_llm_assessor": False,
+            },
+        )
+        self._bind_common_state_hooks(plugin)
+        plugin._record_realtime_assistant_history_shadow(
+            "s-sleep-correction",
+            full_text="五点多的早起和四点多的没睡很难区分，你是刚起床还是根本就没睡呀？",
+            input_epoch=1,
+            message_parts=[
+                {"text": "你是刚起床还是根本就没睡呀？"},
+            ],
+            source="unit_test",
+        )
+        request = fake_request(
+            session_id="s-sleep-correction",
+            prompt="我昨晚十点多睡的啦",
+        )
+
+        asyncio.run(
+            plugin.on_llm_request(
+                FakeEvent(
+                    "s-sleep-correction",
+                    message="我昨晚十点多睡的啦",
+                    sender_id="u1",
+                ),
+                request,
+            ),
+        )
+
+        injected = "\n".join(self._request_text_parts(request))
+        self.assertIn("sylanne_user_correction_context", injected)
+        self.assertIn("我昨晚十点多睡的啦", injected)
+        self.assertIn("不要再追问或暗示用户没睡", injected)
+        self.assertNotIn("sylanne_realtime_assistant_history", injected)
+        context_text = "\n".join(str(item) for item in request.contexts)
+        self.assertIn("你是刚起床还是根本就没睡呀？", context_text)
+
+    def test_recent_sleep_correction_is_carried_into_next_fragment_answer(self):
+        plugin = new_plugin(
+            {
+                "assessment_timing": "post",
+                "inject_state": False,
+                "enable_realtime_chat": True,
+                "enable_sticker_reaction": False,
+                "use_llm_assessor": False,
+            },
+        )
+        self._bind_common_state_hooks(plugin)
+        plugin._record_realtime_assistant_history_shadow(
+            "s-sleep-then-thesis",
+            full_text="你今天是准备继续改论文，还是单纯来找我撒娇呀？",
+            input_epoch=1,
+            message_parts=[
+                {"text": "你今天是准备继续改论文，还是单纯来找我撒娇呀？"},
+            ],
+            source="unit_test",
+        )
+        correction_request = fake_request(
+            session_id="s-sleep-then-thesis",
+            prompt="我昨晚十点多睡的啦",
+        )
+        thesis_request = fake_request(
+            session_id="s-sleep-then-thesis",
+            prompt="我今天打算改论文",
+        )
+
+        async def run_requests():
+            await plugin.on_llm_request(
+                FakeEvent(
+                    "s-sleep-then-thesis",
+                    message="我昨晚十点多睡的啦",
+                    sender_id="u1",
+                ),
+                correction_request,
+            )
+            await plugin.on_llm_request(
+                FakeEvent(
+                    "s-sleep-then-thesis",
+                    message="我今天打算改论文",
+                    sender_id="u1",
+                ),
+                thesis_request,
+            )
+
+        asyncio.run(run_requests())
+
+        injected = "\n".join(self._request_text_parts(thesis_request))
+        self.assertIn("sylanne_recent_user_correction_context", injected)
+        self.assertIn("我昨晚十点多睡的啦", injected)
+        self.assertIn("不要再追问或暗示用户没睡", injected)
+        self.assertIn("sylanne_realtime_pending_bot_question", injected)
+        self.assertIn("current_user_short_answer=我今天打算改论文", injected)
+        context_text = "\n".join(str(item) for item in thesis_request.contexts)
+        self.assertIn("我昨晚十点多睡的啦", context_text)
+        self.assertIn("你今天是准备继续改论文", context_text)
+
     def test_realtime_input_fragments_do_not_merge_across_speakers_or_timeout(self):
         plugin = new_plugin(
             {
