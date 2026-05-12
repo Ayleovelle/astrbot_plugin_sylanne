@@ -36,6 +36,7 @@ INCLUDE_ROOT_FILES = {
 
 INCLUDE_DIRS = {
     "docs",
+    "pages",
 }
 
 ALLOWED_DOC_ASSETS = {

@@ -422,10 +422,10 @@
     "hint": "默认开启。若 AstrBot 已配置 Embedding 类型模型提供商，记忆会保存语义向量并在召回时结合余弦相似度；提供商不可用时自动退回关键词/关联图检索。"
   },
   "sylanne_memory_embedding_provider_id": {
-    "description": "Sylanne 记忆 Embedding 提供商 ID",
+    "description": "Sylanne 记忆 Embedding 提供商（兼容手填）",
     "type": "string",
     "default": "",
-    "hint": "填写 AstrBot 中 Embedding 类型提供商的 ID；留空时自动使用 AstrBot 当前可用的第一个 Embedding 提供商。该项只选择模型来源，不开放记忆动力学数值。"
+    "hint": "推荐在插件详情页的『记忆设置』Page 中下拉选择；这里保留手填 ID 作为兼容入口。留空时自动使用 AstrBot 当前可用的第一个 Embedding 提供商。该项只选择模型来源，不开放记忆动力学数值。"
   },
   "sylanne_memory_debug_view_enabled": {
     "description": "启用 Sylanne 记忆调试视图",

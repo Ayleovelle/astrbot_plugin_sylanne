@@ -144,6 +144,7 @@ function assertZipLooksUploadable(zipPath, expectedPlugin, options = {}) {
     `${expectedPlugin}/realtime_chat_input.py`,
     `${expectedPlugin}/integrated_self.py`,
     `${expectedPlugin}/moral_repair_engine.py`,
+    `${expectedPlugin}/memory_engine.py`,
     `${expectedPlugin}/fallibility_engine.py`,
     `${expectedPlugin}/psychological_screening.py`,
     `${expectedPlugin}/prompts.py`,
@@ -157,6 +158,9 @@ function assertZipLooksUploadable(zipPath, expectedPlugin, options = {}) {
     `${expectedPlugin}/docs/assets/sylanne-mascot.gif`,
     `${expectedPlugin}/docs/assets/sylanne-mascot-card.svg`,
     `${expectedPlugin}/docs/assets/workflow_and_proactive.svg`,
+    `${expectedPlugin}/pages/memory-settings/index.html`,
+    `${expectedPlugin}/pages/memory-settings/app.js`,
+    `${expectedPlugin}/pages/memory-settings/style.css`,
   ];
   const forbiddenParts = new Set([
     "tests",

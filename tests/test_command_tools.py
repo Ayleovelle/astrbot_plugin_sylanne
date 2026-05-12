@@ -247,6 +247,80 @@ class CommandAndToolSmokeTests(unittest.TestCase):
     def setUp(self):
         install_astrbot_stubs()
 
+    def test_init_registers_memory_settings_page_apis(self):
+        from main import EmotionalStatePlugin, PLUGIN_NAME
+
+        class FakeContext:
+            def __init__(self):
+                self.registered = []
+
+            def register_web_api(self, route, handler, methods, desc):
+                self.registered.append((route, handler, methods, desc))
+
+        context = FakeContext()
+        EmotionalStatePlugin(context, {})
+
+        registered = {(route, tuple(methods)) for route, _, methods, _ in context.registered}
+        self.assertIn((f"/{PLUGIN_NAME}/memory-settings", ("GET",)), registered)
+        self.assertIn((f"/{PLUGIN_NAME}/memory-settings", ("POST",)), registered)
+
+    def test_memory_settings_page_lists_and_saves_embedding_provider_choice(self):
+        plugin = new_plugin({"sylanne_memory_embedding_provider_id": ""})
+
+        class SaveableConfig(dict):
+            def __init__(self, *args, **kwargs):
+                super().__init__(*args, **kwargs)
+                self.save_count = 0
+
+            def save_config(self):
+                self.save_count += 1
+
+        class FakeEmbeddingProvider:
+            def __init__(self, provider_id, model, dimensions):
+                self.provider_config = {
+                    "id": provider_id,
+                    "embedding_model": model,
+                    "embedding_dimensions": dimensions,
+                    "provider_type": "embedding",
+                }
+
+            def get_embedding(self, text):
+                return [0.1, 0.2]
+
+        class FakeContext:
+            def get_all_embedding_providers(self):
+                return [
+                    FakeEmbeddingProvider("embed-a", "text-embedding-a", 1024),
+                    FakeEmbeddingProvider("embed-b", "text-embedding-b", 1536),
+                ]
+
+        config = SaveableConfig(plugin.config)
+        plugin.config = config
+        plugin.context = FakeContext()
+
+        payload = asyncio.run(plugin._sylanne_memory_settings_page_payload())
+        self.assertEqual([item["id"] for item in payload["embedding_providers"]], ["embed-a", "embed-b"])
+        self.assertEqual(payload["current_embedding_provider_id"], "")
+        self.assertFalse(payload["native_config_embedding_selector_available"])
+
+        result = asyncio.run(
+            plugin._update_sylanne_memory_settings_from_page(
+                {"embedding_provider_id": "embed-b"},
+            ),
+        )
+
+        self.assertTrue(result["ok"])
+        self.assertEqual(plugin.config["sylanne_memory_embedding_provider_id"], "embed-b")
+        self.assertEqual(config.save_count, 1)
+
+        invalid = asyncio.run(
+            plugin._update_sylanne_memory_settings_from_page(
+                {"embedding_provider_id": "missing-provider"},
+            ),
+        )
+        self.assertFalse(invalid["ok"])
+        self.assertEqual(invalid["error"], "unknown_embedding_provider")
+
     def test_readme_documents_registered_commands_and_aliases(self):
         readme = (ROOT / "README.md").read_text(encoding="utf-8")
 

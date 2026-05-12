@@ -1,0 +1,56 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Sylanne 记忆设置</title>
+    <link rel="stylesheet" href="./style.css" />
+  </head>
+  <body>
+    <main class="shell">
+      <section class="panel">
+        <div class="heading">
+          <p class="eyebrow">Sylanne 自有记忆</p>
+          <h1>记忆 Embedding 提供商</h1>
+          <p class="intro">
+            这里会读取 AstrBot 当前可用的 Embedding 类型模型提供商，选择后写入
+            <code>sylanne_memory_embedding_provider_id</code>。原配置项仍保留手填兼容。
+          </p>
+        </div>
+
+        <div class="field">
+          <label for="provider">Embedding 提供商</label>
+          <select id="provider" disabled>
+            <option value="">正在读取可用提供商...</option>
+          </select>
+        </div>
+
+        <dl class="status-grid">
+          <div>
+            <dt>当前选择</dt>
+            <dd id="current">读取中</dd>
+          </div>
+          <div>
+            <dt>向量检索</dt>
+            <dd id="vector">读取中</dd>
+          </div>
+          <div>
+            <dt>可用数量</dt>
+            <dd id="count">读取中</dd>
+          </div>
+        </dl>
+
+        <div id="providerDetail" class="detail"></div>
+
+        <div class="actions">
+          <button id="refresh" type="button">刷新</button>
+          <button id="save" type="button" class="primary" disabled>保存选择</button>
+        </div>
+
+        <p id="message" class="message" role="status"></p>
+      </section>
+    </main>
+
+    <script type="module" src="./app.js"></script>
+  </body>
+</html>

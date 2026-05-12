@@ -66,6 +66,9 @@ class PackagePluginTests(unittest.TestCase):
         self.assertIn("docs/assets/sylanne-mascot.gif", files)
         self.assertIn("docs/assets/sylanne-mascot-card.svg", files)
         self.assertIn("docs/assets/workflow_and_proactive.svg", files)
+        self.assertIn("pages/memory-settings/index.html", files)
+        self.assertIn("pages/memory-settings/app.js", files)
+        self.assertIn("pages/memory-settings/style.css", files)
         self.assertFalse(
             any(
                 path.startswith("docs/assets/")
@@ -142,6 +145,7 @@ class PackagePluginTests(unittest.TestCase):
             "realtime_chat_input.py",
             "integrated_self.py",
             "moral_repair_engine.py",
+            "memory_engine.py",
             "fallibility_engine.py",
             "psychological_screening.py",
             "prompts.py",
@@ -163,6 +167,9 @@ class PackagePluginTests(unittest.TestCase):
         self.assertIn(prefix + "docs/assets/sylanne-mascot.gif", names)
         self.assertIn(prefix + "docs/assets/sylanne-mascot-card.svg", names)
         self.assertIn(prefix + "docs/assets/workflow_and_proactive.svg", names)
+        self.assertIn(prefix + "pages/memory-settings/index.html", names)
+        self.assertIn(prefix + "pages/memory-settings/app.js", names)
+        self.assertIn(prefix + "pages/memory-settings/style.css", names)
         self.assertFalse(
             any(
                 name.startswith(prefix + "docs/assets/")
@@ -289,6 +296,7 @@ class PluginZipPreflightTests(unittest.TestCase):
             (prefix + "realtime_chat_input.py", "# runtime\n"),
             (prefix + "integrated_self.py", "# runtime\n"),
             (prefix + "moral_repair_engine.py", "# runtime\n"),
+            (prefix + "memory_engine.py", "# runtime\n"),
             (prefix + "fallibility_engine.py", "# runtime\n"),
             (prefix + "psychological_screening.py", "# runtime\n"),
             (prefix + "prompts.py", "# runtime\n"),
@@ -302,6 +310,9 @@ class PluginZipPreflightTests(unittest.TestCase):
             (prefix + "docs/assets/sylanne-mascot.gif", "GIF89a\n"),
             (prefix + "docs/assets/sylanne-mascot-card.svg", "<svg></svg>\n"),
             (prefix + "docs/assets/workflow_and_proactive.svg", "<svg></svg>\n"),
+            (prefix + "pages/memory-settings/index.html", "<!doctype html>\n"),
+            (prefix + "pages/memory-settings/app.js", "export {};\n"),
+            (prefix + "pages/memory-settings/style.css", "body{}\n"),
         ]
 
     def test_zip_preflight_accepts_packaged_plugin_zip(self):
@@ -356,6 +367,7 @@ class PluginZipPreflightTests(unittest.TestCase):
             "realtime_chat_input.py",
             "LICENSE",
             "moral_repair_engine.py",
+            "memory_engine.py",
             "fallibility_engine.py",
             "CHANGELOG.md",
             "public_api.py",

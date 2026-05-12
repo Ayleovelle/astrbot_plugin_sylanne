@@ -21,6 +21,12 @@ from astrbot.api.star import Context, Star, register
 from astrbot.core.agent.message import TextPart
 
 try:
+    from quart import jsonify, request
+except Exception:  # pragma: no cover - local unit tests install lightweight AstrBot stubs only.
+    jsonify = None
+    request = None
+
+try:
     from .emotion_engine import (
         EmotionEngine,
         EmotionObservation,
@@ -569,7 +575,7 @@ def get_emotional_state_plugin(context: Context) -> Any | None:
     PLUGIN_NAME,
     "pidan",
     "Soulful Yearning Lifelike AstrBot Neural Narrative Engine：维护情绪、人格、记忆、氛围和表达节奏的 Sylanne",
-    "2.2.0",
+    "2.3.0",
     "",
 )
 class EmotionalStatePlugin(Star):
@@ -665,6 +671,7 @@ class EmotionalStatePlugin(Star):
         self._state_injection_snapshot_cache: dict[str, dict[str, Any]] = {}
         self._group_atmosphere_injection_snapshot_cache: dict[str, dict[str, Any]] = {}
         self._terminating = False
+        self._register_sylanne_memory_settings_page_apis()
 
     async def terminate(self):
         self._terminating = True
@@ -5560,6 +5567,159 @@ class EmotionalStatePlugin(Star):
                 if value:
                     return str(value)
         return ""
+
+    def _register_sylanne_memory_settings_page_apis(self) -> None:
+        registrar = getattr(getattr(self, "context", None), "register_web_api", None)
+        if not callable(registrar):
+            return
+        registrar(
+            f"/{PLUGIN_NAME}/memory-settings",
+            self._sylanne_memory_settings_page_get,
+            ["GET"],
+            "Sylanne 记忆设置页：读取 Embedding 提供商列表",
+        )
+        registrar(
+            f"/{PLUGIN_NAME}/memory-settings",
+            self._sylanne_memory_settings_page_post,
+            ["POST"],
+            "Sylanne 记忆设置页：保存 Embedding 提供商选择",
+        )
+
+    async def _sylanne_memory_settings_page_get(self) -> Any:
+        payload = await self._sylanne_memory_settings_page_payload()
+        if callable(jsonify):
+            return jsonify(payload)
+        return payload
+
+    async def _sylanne_memory_settings_page_post(self) -> Any:
+        body: Any = {}
+        if request is not None:
+            try:
+                body = await request.get_json(silent=True)
+            except TypeError:
+                body = await request.get_json()
+            except Exception as exc:
+                body = {"_request_error": str(exc)}
+        payload = await self._update_sylanne_memory_settings_from_page(body)
+        if callable(jsonify):
+            return jsonify(payload)
+        return payload
+
+    async def _sylanne_memory_settings_page_payload(self) -> dict[str, Any]:
+        providers = await self._sylanne_memory_embedding_provider_page_items()
+        current = str(
+            self._cfg("sylanne_memory_embedding_provider_id", "") or "",
+        ).strip()
+        known_ids = {str(item.get("id") or "") for item in providers}
+        return {
+            "schema_version": "astrbot.sylanne_memory_settings_page.v1",
+            "plugin_name": PLUGIN_NAME,
+            "current_embedding_provider_id": current,
+            "current_provider_known": not current or current in known_ids,
+            "vector_retrieval_enabled": self._cfg_bool(
+                "sylanne_memory_vector_retrieval_enabled",
+                True,
+            ),
+            "embedding_providers": providers,
+            "native_config_embedding_selector_available": False,
+            "notes": [
+                "AstrBot 当前配置 schema 没有公开 Embedding provider 专用选择器。",
+                "本页只保存 sylanne_memory_embedding_provider_id，旧配置和手填 ID 仍然兼容。",
+                "留空表示自动使用当前第一个可用 Embedding 提供商。",
+            ],
+        }
+
+    async def _update_sylanne_memory_settings_from_page(
+        self,
+        body: Any,
+    ) -> dict[str, Any]:
+        if not isinstance(body, dict):
+            body = {}
+        provider_id = str(body.get("embedding_provider_id") or "").strip()
+        providers = await self._sylanne_memory_embedding_provider_page_items()
+        known_ids = {str(item.get("id") or "") for item in providers}
+        if provider_id and provider_id not in known_ids:
+            return {
+                "ok": False,
+                "error": "unknown_embedding_provider",
+                "current_embedding_provider_id": str(
+                    self._cfg("sylanne_memory_embedding_provider_id", "") or "",
+                ).strip(),
+                "embedding_providers": providers,
+            }
+        if hasattr(self.config, "__setitem__"):
+            self.config["sylanne_memory_embedding_provider_id"] = provider_id
+        saver = getattr(self.config, "save_config", None)
+        if callable(saver):
+            result = saver()
+            if inspect.isawaitable(result):
+                await result
+        return {
+            "ok": True,
+            "current_embedding_provider_id": provider_id,
+            "embedding_providers": providers,
+        }
+
+    async def _sylanne_memory_embedding_provider_page_items(
+        self,
+    ) -> list[dict[str, Any]]:
+        context = getattr(self, "context", None)
+        getter = getattr(context, "get_all_embedding_providers", None)
+        if not callable(getter):
+            return []
+        try:
+            providers = getter()
+            if inspect.isawaitable(providers):
+                providers = await providers
+        except Exception as exc:
+            logger.debug(
+                f"{PLUGIN_NAME}: list embedding providers for memory settings failed: {exc}",
+            )
+            return []
+        if isinstance(providers, dict):
+            iterable = providers.values()
+        else:
+            iterable = providers or []
+        items: list[dict[str, Any]] = []
+        seen: set[str] = set()
+        for provider in iterable:
+            if provider is None or not callable(getattr(provider, "get_embedding", None)):
+                continue
+            provider_id = self._sylanne_memory_embedding_provider_id(provider)
+            if not provider_id or provider_id in seen:
+                continue
+            seen.add(provider_id)
+            config = getattr(provider, "provider_config", None)
+            if not isinstance(config, dict):
+                config = {}
+            items.append(
+                {
+                    "id": provider_id,
+                    "name": str(
+                        config.get("name")
+                        or config.get("display_name")
+                        or getattr(provider, "name", "")
+                        or provider_id,
+                    ),
+                    "provider_type": str(
+                        config.get("provider_type")
+                        or getattr(provider, "provider_type", "")
+                        or "embedding",
+                    ),
+                    "embedding_model": str(
+                        config.get("embedding_model")
+                        or config.get("model")
+                        or getattr(provider, "embedding_model", "")
+                        or "",
+                    ),
+                    "embedding_dimensions": self._optional_int(
+                        config.get("embedding_dimensions")
+                        or config.get("dimensions")
+                        or getattr(provider, "embedding_dimensions", None),
+                    ),
+                },
+            )
+        return items
 
     async def _sylanne_memory_embedding_for_text(
         self,

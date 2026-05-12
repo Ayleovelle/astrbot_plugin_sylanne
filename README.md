@@ -2,7 +2,7 @@
 
 > <span style="font-size: 1.08em;"><strong>Soulful Yearning Lifelike AstrBot Neural Narrative Engine</strong>。她维护的不只是“情绪标签”，而是情绪、人格、记忆、氛围、主动性和表达节奏交织成的长期状态。</span>
 
-![版本 2.2.0](https://img.shields.io/badge/version-2.2.0-blue)
+![版本 2.3.0](https://img.shields.io/badge/version-2.3.0-blue)
 ![AstrBot >=4.9.2,<5.0.0](https://img.shields.io/badge/AstrBot-%3E%3D4.9.2%2C%3C5.0.0-green)
 ![Python 3.10+](https://img.shields.io/badge/Python-3.10%2B-yellow)
 ![协议 astrbot.emotion_state.v2](https://img.shields.io/badge/schema-astrbot.emotion__state.v2-purple)
@@ -37,7 +37,7 @@
 
 <br clear="right">
 
-`2.2.0` 在 `2.1.3` 的 Agent-owned context 与即时聊天断点修复之上，给 Sylanne 自有记忆加入可选向量检索：若 AstrBot 已配置 Embedding 类型提供商，记忆写入和召回会保存/使用语义向量，并与关键词命中、关联图、记忆深度、置信度和真实时间新鲜度一起评分。Embedding 不可用时自动回退，不影响普通聊天。
+`2.3.0` 在 `2.2.0` 的向量记忆检索之上，新增插件详情页的『记忆设置』Page：Embedding 提供商可以直接从 AstrBot 当前可用列表里下拉选择，不必再手写 provider ID。旧配置项仍保留，手填 ID 和留空自动选择都继续兼容。
 
 | 能力 | 作用 |
 | --- | --- |
@@ -73,7 +73,7 @@
 | 主题 | 内容 |
 | --- | --- |
 | [当前版本与兼容范围](#当前版本与兼容范围) | 插件版本、AstrBot 版本、Python 要求、许可证和发布状态。 |
-| [当前版本发布记录](#220-当前版本发布记录) | 自有记忆知识库层、向量召回、关联召回、真实时间强化/遗忘、模块自检和包体发布说明。 |
+| [当前版本发布记录](#230-当前版本发布记录) | 自有记忆知识库层、向量召回、记忆设置 Page、关联召回、真实时间强化/遗忘、模块自检和包体发布说明。 |
 | [项目定位](#项目定位) | 为什么本插件不是普通的提示词人设增强。 |
 | [核心能力](#核心能力总览) | 7 维情绪、人格建模、真实时间记忆、关系修复、公共 API。 |
 | [快速开始](#快速开始) | 发布 zip 包、仓库安装、手动复制、最小配置和检查命令。 |
@@ -101,19 +101,19 @@
 | --- | --- |
 | 插件目录名 | `astrbot_plugin_sylanne` |
 | 显示名 | `Sylanne` |
-| 当前版本 | `2.2.0` |
+| 当前版本 | `2.3.0` |
 | AstrBot 版本 | `>=4.9.2,<5.0.0` |
 | Python | `3.10+` |
 | 许可证 | `GPL-3.0-or-later` |
 | 运行时第三方依赖 | 当前无额外依赖，见 `requirements.txt` |
 
-`2.2.0` 保留 Sylanne 自有记忆知识库、`2.1.0` 只读记忆查询入口和 `2.1.3` Agent-owned context 即时聊天修复，并新增 AstrBot Embedding 提供商驱动的向量召回。核心情绪、回复后后台评估（post）、`group_atmosphere_state`、`humanlike_state`、`lifelike_learning_state`、`personality_drift_state`、Sylanne 自有记忆、即时聊天节奏和欺骗/操控/逃责类动作阻断默认自动运行；道德修复、瑕疵模拟、心理筛查等实验/维护模块仍由配置者显式打开。
+`2.3.0` 保留 Sylanne 自有记忆知识库、`2.1.0` 只读记忆查询入口、`2.1.3` Agent-owned context 即时聊天修复和 `2.2.0` AstrBot Embedding 提供商驱动的向量召回，并新增可视化记忆设置 Page。核心情绪、回复后后台评估（post）、`group_atmosphere_state`、`humanlike_state`、`lifelike_learning_state`、`personality_drift_state`、Sylanne 自有记忆、即时聊天节奏和欺骗/操控/逃责类动作阻断默认自动运行；道德修复、瑕疵模拟、心理筛查等实验/维护模块仍由配置者显式打开。
 
 发布包会包含运行代码、README、CHANGELOG、LICENSE、配置结构（schema）、docs 和 `docs/assets/` 中的聚合图表与吉祥物素材，例如 `docs/assets/sylanne-mascot.gif`、`docs/assets/sylanne-mascot-card.svg` 和 `docs/assets/workflow_and_proactive.svg`；不会包含 `tests/`、`scripts/`、`literature_kb/`、`personality_literature_kb/`、`psychological_literature_kb/`、`humanlike_agent_literature_kb/`、`raw/`、`output/`、`dist/` 等开发、研究、原始样本或缓存目录。
 
-### 2.2.0 当前版本发布记录
+### 2.3.0 当前版本发布记录
 
-`v2.2.0` 合并在 `main` 上，对外安装版本由 `metadata.yaml` 和 `main.py @register(...)` 共同声明为 `2.2.0`。本版按版本规则提升第二位版本号：在自有记忆模块中新增可选向量检索，并继续保留 `2.1.3` 的即时聊天投递状态修复；公共 API 版本仍保持 `1.0`，schema 仍保持向后兼容。
+`v2.3.0` 合并在 `main` 上，对外安装版本由 `metadata.yaml` 和 `main.py @register(...)` 共同声明为 `2.3.0`。本版按版本规则提升第二位版本号：在自有记忆向量检索的基础上新增可视化记忆设置 Page，允许直接下拉选择 AstrBot Embedding 类型提供商；公共 API 版本仍保持 `1.0`，schema 仍保持向后兼容。
 
 当前版本的主要变化：
 
@@ -121,6 +121,7 @@
 | --- | --- |
 | 自有记忆知识库 | 每条长期记忆独立存储，包含稳定 `memory_id`、摘要、情绪签名、关系签名、深度、置信度、证据次数、召回次数、真实时间衰减参数和自动动力学快照。 |
 | 向量语义召回 | 可选择 AstrBot 已配置的 Embedding 类型模型提供商；记忆保存 `semantic_embedding`、`embedding_provider_id`、向量更新时间和文本哈希，召回时融合关键词相似度与余弦相似度。 |
+| 记忆设置 Page | 在 AstrBot 插件详情页打开『记忆设置』即可下拉选择 Embedding 提供商；`sylanne_memory_embedding_provider_id` 仍保留手填兼容，留空表示自动选择第一个可用提供商。 |
 | 只读记忆查询 | 新增 `/sylanne_memory`、`/记忆查询`、`/查询记忆`、`/灵澜记忆` 和 `query_sylanne_memory(...)`，可检查记忆命中情况；查询不会强化或改写记忆。 |
 | 关联联想召回 | 直接命中的记忆会在硬预算内带出少量相邻记忆；关联边由摘要相似度、层类型重叠、情绪接近度、时间接近度和巩固强度本地计算，不交给 LLM 随机决定。 |
 | 强化与遗忘 | 只有真正注入 prompt 的记忆才会触发召回强化；长期无证据、无召回且深度/置信度很低的弱记忆会按真实时间剪枝，并清理悬空关联边。 |
@@ -129,7 +130,7 @@
 | 主动聊天门控 | `progress_check` 必须有明确进度证据；话题结束或证据不足时不会硬问“进度还顺吗”，会降级为沉默或低压力调皮打扰，并用冷场反馈自动延长冷却。 |
 | 上下文安全预算 | 召回结果只作为 `[sylanne_memory_recall]` 限长摘要注入，并继续受请求预算和官方上下文压缩清洗逻辑约束。 |
 | 模块互斥自检 | 发布前覆盖自有记忆、主动发言、官方上下文压缩、即时聊天、公共 API、配置契约和包体预检，验证模块之间不会互相回灌或重复调用外部 LivingMemory。 |
-| 公开契约 | 插件版本为 `2.2.0`；公共 API 版本仍为 `1.0`，schema 仍保持 `astrbot.emotion_state.v2` 等版本化契约。 |
+| 公开契约 | 插件版本为 `2.3.0`；公共 API 版本仍为 `1.0`，schema 仍保持 `astrbot.emotion_state.v2` 等版本化契约。 |
 
 旧版本发布记录统一放在 `CHANGELOG.md`。README 只展示当前版本，避免插件管理页从历史段落误抓旧版本号。
 
@@ -1715,7 +1716,7 @@ LLM 在这里只负责给出语义观察：`relationship_decision`、`conflict_a
 
 Sylanne 不再依赖外部长期记忆插件。每次稳定用户输入、主动聊天候选和被打断回复的关键摘要，都会进入 Sylanne 自有记忆层；后续普通回复、插话恢复和主动聊天调度都会使用 `[sylanne_memory_recall]` 的限长摘要帮助主 LLM 理解指代、偏好、共同经历和相处方式。
 
-从 `2.2.0` 开始，自有记忆支持可选向量检索。你可以在 AstrBot 里先配置 Embedding 类型的模型提供商，再在 `sylanne_memory_embedding_provider_id` 填入对应 ID；留空时 Sylanne 会尝试使用第一个可用 Embedding 提供商。记忆召回会把关键词相似度、Embedding 余弦相似度、记忆深度、置信度、真实时间新鲜度和干扰强度一起计算。Embedding 不可用或报错时会自动退回原来的关键词 + 关联图检索，不阻断正常聊天。
+从 `2.2.0` 开始，自有记忆支持可选向量检索。`2.3.0` 以后推荐在 AstrBot 插件详情页打开『记忆设置』Page，直接从下拉框选择 Embedding 类型模型提供商；`sylanne_memory_embedding_provider_id` 仍保留手填兼容入口。留空时 Sylanne 会尝试使用第一个可用 Embedding 提供商。记忆召回会把关键词相似度、Embedding 余弦相似度、记忆深度、置信度、真实时间新鲜度和干扰强度一起计算。Embedding 不可用或报错时会自动退回原来的关键词 + 关联图检索，不阻断正常聊天。
 
 放弃 LivingMemory 兼容不是因为 LivingMemory 不好。相反，LivingMemory 是一个很好的全生命周期记忆插件；这个项目一开始也确实是奔着“直接调用 LivingMemory，把情绪写进外部长期记忆”去做的。只是 Sylanne 后来叠加了即时聊天接管、分条发送、用户插话合并、未完整送达断点、主动发言调度和 Agent-owned context 之后，当前即时聊天链路会和外部全生命周期写入/召回逻辑发生冲突：同一段回复到底是“主 LLM 已生成”“默认发送口被阻断”“用户只读到前几条”还是“已经完整进入长期记忆”，需要插件自己精确区分。为了先保证记忆的正常写入、召回和上下文不乱，`2.0.0` 起暂时放弃对 LivingMemory 的运行时兼容，改为自研 Sylanne 自有记忆模块。后续如果两边生命周期边界能稳定对齐，再重新做可选适配。
 
@@ -1749,7 +1750,7 @@ Sylanne 不再依赖外部长期记忆插件。每次稳定用户输入、主动
 | --- | --- | --- | --- |
 | `enable_sylanne_memory` | bool | `true` | 启用 Sylanne 自有长期记忆。关闭后不写入也不召回。 |
 | `sylanne_memory_vector_retrieval_enabled` | bool | `true` | 启用语义向量召回；AstrBot 中有 Embedding 提供商时会自动叠加余弦相似度，失败时回退关键词和关联图检索。 |
-| `sylanne_memory_embedding_provider_id` | string | `""` | 指定 AstrBot 的 Embedding 类型提供商 ID；留空时自动使用第一个可用 Embedding 提供商。 |
+| `sylanne_memory_embedding_provider_id` | string | `""` | 推荐在插件详情页的『记忆设置』Page 中下拉选择；这里保留手填 ID 兼容。留空时自动使用第一个可用 Embedding 提供商。 |
 | `sylanne_memory_debug_view_enabled` | bool | `false` | 允许查看记忆摘要、深度、召回评分和自动推导 dynamics；只用于排障，不提供参数覆盖。 |
 | `allow_sylanne_memory_reset_backdoor` | bool | `true` | 是否允许在严重误记、上下文污染或异常状态时重置当前会话自有记忆。 |
 
@@ -2893,7 +2894,7 @@ $env:ASTRBOT_EXPECT_PLUGIN = "astrbot_plugin_sylanne"
 脚本会在输出 JSON 里写出 `expectedPluginRuntime`，包含插件列表 API 中返回的 `version`、`displayName`、`activated`、`author`、`astrbotVersion` 等只读字段。若目标插件存在但 `activated=false`，脚本会失败退出。需要把版本和显示名也作为硬断言时，可以额外设置：
 
 ```powershell
-$env:ASTRBOT_EXPECT_PLUGIN_VERSION = "2.2.0"
+$env:ASTRBOT_EXPECT_PLUGIN_VERSION = "2.3.0"
 $env:ASTRBOT_EXPECT_PLUGIN_DISPLAY_NAME = "Sylanne"
 & $node scripts\remote_smoke_playwright.js
 ```
