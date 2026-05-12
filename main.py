@@ -347,6 +347,7 @@ SYLANNE_LLM_TOOL_NAMES = frozenset(
         "get_bot_integrated_self_state",
     },
 )
+GEMINI_ALLOWED_SYLANNE_LLM_TOOL_NAMES = frozenset({"query_agent_state"})
 _INTERNAL_LLM_CALL: contextvars.ContextVar[bool] = contextvars.ContextVar(
     "astrbot_emotional_state_internal_llm_call",
     default=False,
@@ -593,7 +594,7 @@ def get_emotional_state_plugin(context: Context) -> Any | None:
     PLUGIN_NAME,
     "pidan",
     "Soulful Yearning Lifelike AstrBot Neural Narrative Engine：维护情绪、人格、记忆、氛围和表达节奏的 Sylanne",
-    "2.3.2",
+    "2.3.3",
     "",
 )
 class EmotionalStatePlugin(Star):
@@ -13337,7 +13338,10 @@ class EmotionalStatePlugin(Star):
         removed: list[str] = []
         for item in value:
             name = self._request_tool_name(item)
-            if name in SYLANNE_LLM_TOOL_NAMES:
+            if (
+                name in SYLANNE_LLM_TOOL_NAMES
+                and name not in GEMINI_ALLOWED_SYLANNE_LLM_TOOL_NAMES
+            ):
                 removed.append(name)
                 continue
             kept.append(item)
@@ -13368,9 +13372,16 @@ class EmotionalStatePlugin(Star):
             lowered = value.strip().lower()
             if lowered in {"", "auto", "none", "null", "false"}:
                 return False
-            return value.strip() in SYLANNE_LLM_TOOL_NAMES
+            name = value.strip()
+            return (
+                name in SYLANNE_LLM_TOOL_NAMES
+                and name not in GEMINI_ALLOWED_SYLANNE_LLM_TOOL_NAMES
+            )
         name = self._request_tool_name(value)
-        return name in SYLANNE_LLM_TOOL_NAMES
+        return (
+            name in SYLANNE_LLM_TOOL_NAMES
+            and name not in GEMINI_ALLOWED_SYLANNE_LLM_TOOL_NAMES
+        )
 
     def _request_tool_name(self, value: Any) -> str:
         if value is None:

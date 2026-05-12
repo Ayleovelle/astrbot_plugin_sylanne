@@ -2,6 +2,23 @@
 
 本文件用于 AstrBot 插件市场/管理页展示更新内容。更完整的设计说明、公式推导、测试矩阵和维护手册见 `README.md`。
 
+## 2.3.3
+
+发布日期：2026-05-12
+
+### 修复
+
+- 修复 `2.3.2` 对 Gemini 系模型剪除 Sylanne LLM Tool 时过于激进的问题。现在 Gemini 仍会保留统一只读入口 `query_agent_state`，LLM 可以通过 `state` 和 `detail` 参数查询情绪、记忆、群聊氛围、运行诊断等 Sylanne 状态。
+- Gemini 下只隐藏其余 11 个细分 Sylanne 状态工具，减少工具选择 schema 压力；外部插件工具仍照常保留，非 Gemini 模型仍保留完整 12 个 Sylanne LLM Tool。
+- 如果 Gemini 的 `tool_choice/function_call` 强制指向被隐藏的细分 Sylanne 工具，会自动退回 `auto`；如果指向 `query_agent_state`，则保持原样。
+
+### 验证
+
+- `python -m pytest -q tests/test_astrbot_lifecycle.py -k "gemini or tool_call_response or tool_request or tool_result"`
+- `python -m pytest -q tests/test_command_tools.py -k "readme_documents_registered_llm_tools or llm_tool_json_result or query_agent_state_tool"`
+- `python -m pytest -q tests`
+- `python -m py_compile main.py realtime_chat_input.py`
+
 ## 2.3.2
 
 发布日期：2026-05-12
