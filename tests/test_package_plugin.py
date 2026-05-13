@@ -54,6 +54,7 @@ class PackagePluginTests(unittest.TestCase):
         self.assertIn("fallibility_engine.py", files)
         self.assertIn("agent_identity.py", files)
         self.assertIn("group_atmosphere_engine.py", files)
+        self.assertIn("logo.png", files)
         self.assertIn("LICENSE", files)
         self.assertIn("README.md", files)
         self.assertIn("CHANGELOG.md", files)
@@ -167,6 +168,7 @@ class PackagePluginTests(unittest.TestCase):
         self.assertIn(prefix + "README.md", names)
         self.assertIn(prefix + "CHANGELOG.md", names)
         self.assertIn(prefix + "LICENSE", names)
+        self.assertIn(prefix + "logo.png", names)
         self.assertIn(prefix + "docs/remote_testing.md", names)
         self.assertIn(prefix + "docs/assets/lifecycle_model_fit.svg", names)
         self.assertIn(prefix + "docs/assets/lifecycle_model_fit_summary.csv", names)
@@ -320,6 +322,7 @@ class PluginZipPreflightTests(unittest.TestCase):
             (prefix + "README.md", "# docs\n"),
             (prefix + "CHANGELOG.md", "# changelog\n"),
             (prefix + "LICENSE", "GNU GENERAL PUBLIC LICENSE\n"),
+            (prefix + "logo.png", "PNG\n"),
             (prefix + "requirements.txt", "# no dependencies\n"),
             (prefix + "_conf_schema.json", "{}\n"),
             (prefix + "docs/assets/runtime_overview.svg", "<svg></svg>\n"),

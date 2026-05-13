@@ -26,6 +26,7 @@ INCLUDE_ROOT_FILES = {
     "psychological_screening.py",
     "prompts.py",
     "public_api.py",
+    "logo.png",
     "metadata.yaml",
     "_conf_schema.json",
     "README.md",

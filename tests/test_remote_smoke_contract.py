@@ -394,6 +394,7 @@ class RemoteSmokeContractTests(unittest.TestCase):
             "psychological_screening.py",
             "prompts.py",
             "public_api.py",
+            "logo.png",
             "README.md",
             "CHANGELOG.md",
             "LICENSE",
