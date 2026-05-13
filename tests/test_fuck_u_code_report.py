@@ -94,9 +94,11 @@ class FuckUCodeReportTests(unittest.TestCase):
         self.assertIn("官方 JSON overallScore：`71.3/100`", markdown)
         self.assertIn("powered by Fuck-U-Code", markdown)
         self.assertIn("| 40.0/100 | 60.0/100 | 1 | 1 | 1 | `main.py` |", markdown)
-        self.assertIn("💩 发酵指数", ferment_svg)
-        self.assertIn("28.7/100 · 😷 屎气扑鼻", ferment_svg)
-        self.assertIn("powered by", powered_svg)
+        self.assertIn("CODE SMELL BY", ferment_svg)
+        self.assertIn("SCORE", ferment_svg)
+        self.assertIn("28.7", ferment_svg)
+        self.assertIn("屎气扑鼻", ferment_svg)
+        self.assertIn("POWERED BY", powered_svg)
         self.assertIn("Fuck-U-Code", powered_svg)
 
 

@@ -189,31 +189,70 @@ def text_width(text: str) -> int:
     return max(18, width + 10)
 
 
-def render_badge(label: str, message: str, color: str) -> str:
-    label_width = text_width(label)
-    message_width = text_width(message)
-    total_width = label_width + message_width
-    label_text_x = label_width / 2
-    message_text_x = label_width + message_width / 2
-    escaped_label = html.escape(label, quote=True)
-    escaped_message = html.escape(message, quote=True)
-    aria = html.escape(f"{label} {message}", quote=True)
-    return f"""<svg xmlns="http://www.w3.org/2000/svg" width="{total_width}" height="20" role="img" aria-label="{aria}">
+def badge_level_text(level: str) -> str:
+    text = str(level or "").strip()
+    parts = text.split(maxsplit=1)
+    if len(parts) == 2 and not any(char.isalnum() for char in parts[0]):
+        return parts[1]
+    return text
+
+
+def render_apple_score_badge(
+    *,
+    score: str,
+    official_level: str,
+    accent: str,
+) -> str:
+    product = "Fuck-U-Code"
+    eyebrow = "CODE SMELL BY"
+    score_label = "SCORE"
+    level = badge_level_text(official_level) or "未识别"
+    middle_width = max(128, text_width(product) + 22, text_width(eyebrow) + 20)
+    score_width = max(86, text_width(score) + 30, text_width(level) + 18)
+    total_width = 16 + 26 + 10 + middle_width + score_width + 14
+    score_x = total_width - score_width / 2 - 10
+    product_x = 52
+    aria = html.escape(f"CODE SMELL BY {product} SCORE {score} {level}", quote=True)
+    return f"""<svg xmlns="http://www.w3.org/2000/svg" width="{total_width}" height="42" viewBox="0 0 {total_width} 42" role="img" aria-label="{aria}">
   <title>{aria}</title>
-  <linearGradient id="s" x2="0" y2="100%">
-    <stop offset="0" stop-color="#fff" stop-opacity=".08"/>
-    <stop offset="1" stop-color="#000" stop-opacity=".08"/>
-  </linearGradient>
-  <clipPath id="r"><rect width="{total_width}" height="20" rx="3" fill="#fff"/></clipPath>
-  <g clip-path="url(#r)">
-    <rect width="{label_width}" height="20" fill="#555"/>
-    <rect x="{label_width}" width="{message_width}" height="20" fill="{color}"/>
-    <rect width="{total_width}" height="20" fill="url(#s)"/>
-  </g>
-  <g fill="#fff" text-anchor="middle" font-family="Verdana, DejaVu Sans, Microsoft YaHei, Segoe UI Emoji, sans-serif" font-size="11">
-    <text x="{label_text_x:.1f}" y="14">{escaped_label}</text>
-    <text x="{message_text_x:.1f}" y="14">{escaped_message}</text>
-  </g>
+  <defs>
+    <linearGradient id="card" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#fffaf2"/>
+      <stop offset="1" stop-color="#fffdf9"/>
+    </linearGradient>
+    <filter id="shadow" x="-4%" y="-12%" width="108%" height="130%">
+      <feDropShadow dx="0" dy="1" stdDeviation="0.8" flood-color="#7a4a2e" flood-opacity="0.12"/>
+    </filter>
+  </defs>
+  <rect x="0.5" y="0.5" width="{total_width - 1}" height="41" rx="8" fill="url(#card)" stroke="#edc9a7" filter="url(#shadow)"/>
+  <text x="17" y="28" font-family="Apple Color Emoji, Segoe UI Emoji, Noto Color Emoji, sans-serif" font-size="21">💩</text>
+  <text x="{product_x}" y="15" font-family="-apple-system, BlinkMacSystemFont, Segoe UI, Microsoft YaHei, sans-serif" font-size="7.5" font-weight="700" letter-spacing="0.6" fill="#805e4c">{html.escape(eyebrow)}</text>
+  <text x="{product_x}" y="31" font-family="-apple-system, BlinkMacSystemFont, Segoe UI, Microsoft YaHei, sans-serif" font-size="16" font-weight="800" fill="#6f3829">{html.escape(product)}</text>
+  <rect x="{total_width - score_width - 16}" y="8" width="1" height="26" rx="0.5" fill="#f0d8c1"/>
+  <text x="{score_x:.1f}" y="14" text-anchor="middle" font-family="-apple-system, BlinkMacSystemFont, Segoe UI, Microsoft YaHei, sans-serif" font-size="7.5" font-weight="800" letter-spacing="0.8" fill="#805e4c">{score_label}</text>
+  <text x="{score_x:.1f}" y="28" text-anchor="middle" font-family="-apple-system, BlinkMacSystemFont, Segoe UI, Microsoft YaHei, sans-serif" font-size="14" font-weight="800" fill="#5c3329">{html.escape(score)}</text>
+  <text x="{score_x:.1f}" y="37" text-anchor="middle" font-family="-apple-system, BlinkMacSystemFont, Segoe UI, Microsoft YaHei, sans-serif" font-size="7.5" font-weight="700" fill="{html.escape(accent, quote=True)}">{html.escape(level)}</text>
+</svg>
+"""
+
+
+def render_apple_powered_badge() -> str:
+    aria = "powered by Fuck-U-Code"
+    return f"""<svg xmlns="http://www.w3.org/2000/svg" width="178" height="42" viewBox="0 0 178 42" role="img" aria-label="{aria}">
+  <title>{aria}</title>
+  <defs>
+    <linearGradient id="card" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#fffaf2"/>
+      <stop offset="1" stop-color="#fffdf9"/>
+    </linearGradient>
+    <filter id="shadow" x="-4%" y="-12%" width="108%" height="130%">
+      <feDropShadow dx="0" dy="1" stdDeviation="0.8" flood-color="#7a4a2e" flood-opacity="0.12"/>
+    </filter>
+  </defs>
+  <rect x="0.5" y="0.5" width="177" height="41" rx="8" fill="url(#card)" stroke="#edc9a7" filter="url(#shadow)"/>
+  <text x="18" y="28" font-family="Apple Color Emoji, Segoe UI Emoji, Noto Color Emoji, sans-serif" font-size="19">💩</text>
+  <text x="48" y="15" font-family="-apple-system, BlinkMacSystemFont, Segoe UI, Microsoft YaHei, sans-serif" font-size="7.5" font-weight="700" letter-spacing="0.7" fill="#805e4c">POWERED BY</text>
+  <text x="48" y="31" font-family="-apple-system, BlinkMacSystemFont, Segoe UI, Microsoft YaHei, sans-serif" font-size="16" font-weight="800" fill="#6f3829">Fuck-U-Code</text>
 </svg>
 """
 
@@ -275,15 +314,15 @@ def write_report(summary: FuckUCodeSummary, args: argparse.Namespace) -> None:
         encoding="utf-8",
     )
     fermentation_badge_path.write_text(
-        render_badge(
-            "💩 发酵指数",
-            f"{format_fermentation_score(summary.fermentation_index)}/100 · {official_level}",
-            badge_color(summary.fermentation_index),
+        render_apple_score_badge(
+            score=format_fermentation_score(summary.fermentation_index),
+            official_level=official_level,
+            accent=badge_color(summary.fermentation_index),
         ),
         encoding="utf-8",
     )
     powered_badge_path.write_text(
-        render_badge("powered by", "Fuck-U-Code", "#111827"),
+        render_apple_powered_badge(),
         encoding="utf-8",
     )
 
