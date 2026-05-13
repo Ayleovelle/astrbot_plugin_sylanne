@@ -139,6 +139,7 @@ def new_plugin(config=None):
     plugin._realtime_delivery_context_dirty = set()
     plugin._realtime_delivery_context_restored = set()
     plugin._realtime_user_typing_until = {}
+    plugin._user_message_withdrawals = {}
     plugin._recent_user_corrections = {}
     plugin._recent_user_scene_turns = {}
     plugin._realtime_chat_active_dispatches = {}

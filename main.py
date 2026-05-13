@@ -388,6 +388,8 @@ REALTIME_ASSISTANT_HISTORY_LIMIT = 3
 REALTIME_ASSISTANT_HISTORY_INJECTION_MAX_CHARS = 900
 REALTIME_ASSISTANT_HISTORY_EXCERPT_CHARS = 720
 REALTIME_RESPONSE_INTERCEPT_DEDUP_LIMIT = 32
+USER_MESSAGE_WITHDRAWAL_CONTEXT_LIMIT = 4
+USER_MESSAGE_WITHDRAWAL_INJECTION_MAX_CHARS = 700
 RECENT_USER_CORRECTION_LIMIT = 4
 RECENT_USER_CORRECTION_TTL_SECONDS = 180.0
 RECENT_USER_CORRECTION_INJECTION_MAX_CHARS = 520
@@ -671,6 +673,7 @@ class EmotionalStatePlugin(Star):
         self._realtime_delivery_context_dirty: set[str] = set()
         self._realtime_delivery_context_restored: set[str] = set()
         self._realtime_user_typing_until: dict[str, float] = {}
+        self._user_message_withdrawals: dict[str, deque[dict[str, Any]]] = {}
         self._recent_user_corrections: dict[str, deque[dict[str, Any]]] = {}
         self._recent_user_scene_turns: dict[str, deque[dict[str, Any]]] = {}
         self._realtime_chat_active_dispatches: dict[str, dict[str, Any]] = {}
@@ -791,6 +794,8 @@ class EmotionalStatePlugin(Star):
             self._realtime_delivery_context_restored.clear()
         if hasattr(self, "_realtime_user_typing_until"):
             self._realtime_user_typing_until.clear()
+        if hasattr(self, "_user_message_withdrawals"):
+            self._user_message_withdrawals.clear()
         if hasattr(self, "_recent_user_corrections"):
             self._recent_user_corrections.clear()
         if hasattr(self, "_recent_user_scene_turns"):
@@ -844,11 +849,14 @@ class EmotionalStatePlugin(Star):
         empty_input_status = self._empty_input_typing_status_payload(event, request)
         if empty_input_status:
             session_key = self._resolve_public_session_key(event, request=request)
-            self._record_realtime_user_typing_status(session_key, empty_input_status)
+            reason = "empty_input_event"
+            if empty_input_status.get("dispatch_in_flight"):
+                self._record_realtime_user_typing_status(session_key, empty_input_status)
+                reason = "user_typing_empty_event"
             self._mark_control_event_no_llm_response(
                 event,
                 request,
-                reason="user_typing_empty_event",
+                reason=reason,
                 payload=empty_input_status,
             )
             return
@@ -6713,6 +6721,11 @@ class EmotionalStatePlugin(Star):
         final_reason = str(
             recall.get("notice_type") if reason == "withdrawn" and recall else reason or "withdrawn",
         )
+        previous_context_text = ""
+        if isinstance(getattr(self, "_last_request_text", None), dict):
+            previous_context_text = str(
+                self._last_request_text.get(resolved_session) or "",
+            )
         epoch = self._bump_conversation_input_epoch(resolved_session)
         self._cancel_realtime_chat_dispatches_for_session(
             resolved_session,
@@ -6729,9 +6742,7 @@ class EmotionalStatePlugin(Star):
                 candidate["last_withdrawal_reason"] = final_reason
                 if recall:
                     candidate["last_withdrawal_notice"] = recall
-        if isinstance(getattr(self, "_last_request_text", None), dict):
-            self._last_request_text.pop(resolved_session, None)
-        return {
+        withdrawal = {
             "schema_version": "astrbot.user_message_withdrawal.v1",
             "kind": "user_message_withdrawal",
             "session_key": resolved_session,
@@ -6740,8 +6751,16 @@ class EmotionalStatePlugin(Star):
             "notice": recall,
             "input_epoch": epoch,
             "observed_at": now,
+            "previous_user_excerpt": self._head_text(
+                previous_context_text,
+                USER_MESSAGE_WITHDRAWAL_INJECTION_MAX_CHARS,
+            ),
             "stale_output_policy": "stop_pending_realtime_parts_and_drop_late_llm_response",
         }
+        self._record_user_message_withdrawal_context(resolved_session, withdrawal)
+        if isinstance(getattr(self, "_last_request_text", None), dict):
+            self._last_request_text.pop(resolved_session, None)
+        return withdrawal
 
     async def observe_sticker_usage(
         self,
@@ -9114,7 +9133,11 @@ class EmotionalStatePlugin(Star):
         budget: _StateInjectionBudget | None,
         current_user_text: str = "",
     ) -> bool:
-        appended = False
+        appended = self._append_user_message_withdrawal_context_if_any(
+            request,
+            session_key,
+            budget=budget,
+        )
         is_correction = self._looks_like_user_correction_or_source_query(
             current_user_text,
         )
@@ -10297,6 +10320,103 @@ class EmotionalStatePlugin(Star):
         text = str(getattr(response, "completion_text", "") or "").lstrip()
         return text.startswith("[sylanne_realtime_delivery_status]")
 
+    def _user_message_withdrawal_context_cache(
+        self,
+    ) -> dict[str, deque[dict[str, Any]]]:
+        cache = getattr(self, "_user_message_withdrawals", None)
+        if not isinstance(cache, dict):
+            cache = {}
+            self._user_message_withdrawals = cache
+        return cache
+
+    def _record_user_message_withdrawal_context(
+        self,
+        session_key: str,
+        withdrawal: dict[str, Any],
+    ) -> None:
+        if not isinstance(withdrawal, dict):
+            return
+        key = str(session_key or withdrawal.get("session_key") or "global")
+        entry = {
+            "schema_version": "astrbot.user_message_withdrawal_context.v1",
+            "kind": "user_message_withdrawal",
+            "session_key": key,
+            "message_id": str(withdrawal.get("message_id") or ""),
+            "reason": str(withdrawal.get("reason") or "withdrawn"),
+            "notice": withdrawal.get("notice") if isinstance(withdrawal.get("notice"), dict) else {},
+            "input_epoch": withdrawal.get("input_epoch"),
+            "observed_at": self._as_float_value(
+                withdrawal.get("observed_at"),
+                self._observed_now(),
+            ),
+            "previous_user_excerpt": self._head_text(
+                str(withdrawal.get("previous_user_excerpt") or ""),
+                USER_MESSAGE_WITHDRAWAL_INJECTION_MAX_CHARS,
+            ),
+            "consumed": False,
+        }
+        cache = self._user_message_withdrawal_context_cache()
+        queue = cache.setdefault(
+            key,
+            deque(maxlen=USER_MESSAGE_WITHDRAWAL_CONTEXT_LIMIT),
+        )
+        if queue.maxlen != USER_MESSAGE_WITHDRAWAL_CONTEXT_LIMIT:
+            queue = deque(queue, maxlen=USER_MESSAGE_WITHDRAWAL_CONTEXT_LIMIT)
+            cache[key] = queue
+        queue.append(entry)
+        self._mark_realtime_delivery_context_dirty(key)
+
+    def _append_user_message_withdrawal_context_if_any(
+        self,
+        request: ProviderRequest,
+        session_key: str,
+        *,
+        budget: _StateInjectionBudget | None,
+    ) -> bool:
+        key = str(session_key or "global")
+        queue = self._user_message_withdrawal_context_cache().get(key)
+        if not queue:
+            return False
+        pending = [item for item in queue if not item.get("consumed")]
+        if not pending:
+            return False
+        items = pending[-USER_MESSAGE_WITHDRAWAL_CONTEXT_LIMIT:]
+        lines = [
+            "[sylanne_user_message_withdrawal]",
+            "用户刚才撤回了一条或多条消息。撤回本身不是新的普通聊天内容；后续回复应把它当作会话事实，不要继续回应已撤回内容，也不要把平台空事件当成用户发言。",
+        ]
+        for index, item in enumerate(items, start=1):
+            lines.append(
+                "withdrawal[{index}]: reason={reason}; message_id={message_id}; input_epoch={epoch}".format(
+                    index=index,
+                    reason=self._head_one_line(str(item.get("reason") or "withdrawn"), 48),
+                    message_id=self._head_one_line(str(item.get("message_id") or ""), 80),
+                    epoch="" if item.get("input_epoch") is None else item.get("input_epoch"),
+                ),
+            )
+            previous = str(item.get("previous_user_excerpt") or "").strip()
+            if previous:
+                lines.append(
+                    "withdrawn_context_excerpt="
+                    + self._head_one_line(previous, 220),
+                )
+        text = self._head_text(
+            "\n".join(lines),
+            USER_MESSAGE_WITHDRAWAL_INJECTION_MAX_CHARS,
+        )
+        appended = self._append_temp_text_part(
+            request,
+            text,
+            source="user_message_withdrawal",
+            budget=budget,
+        )
+        if appended:
+            for item in items:
+                item["consumed"] = True
+                item["consumed_at"] = self._observed_now()
+            self._mark_realtime_delivery_context_dirty(key)
+        return appended
+
     def _realtime_delivery_context_dirty_cache(self) -> set[str]:
         dirty = getattr(self, "_realtime_delivery_context_dirty", None)
         if not isinstance(dirty, set):
@@ -10328,6 +10448,11 @@ class EmotionalStatePlugin(Star):
             for item in list(self._interrupted_reply_breakpoint_cache().get(key) or ())
             if isinstance(item, dict)
         ]
+        withdrawals = [
+            dict(item)
+            for item in list(self._user_message_withdrawal_context_cache().get(key) or ())
+            if isinstance(item, dict)
+        ]
         return {
             "schema_version": "astrbot.realtime_delivery_context.v1",
             "kind": "realtime_delivery_context",
@@ -10335,6 +10460,7 @@ class EmotionalStatePlugin(Star):
             "updated_at": self._observed_now(),
             "shadows": shadows[-REALTIME_ASSISTANT_HISTORY_LIMIT:],
             "breakpoints": breakpoints[-INTERRUPTED_REPLY_BREAKPOINT_LIMIT:],
+            "withdrawals": withdrawals[-USER_MESSAGE_WITHDRAWAL_CONTEXT_LIMIT:],
         }
 
     async def _restore_realtime_delivery_context_if_needed(
@@ -10346,7 +10472,11 @@ class EmotionalStatePlugin(Star):
         if key in restored:
             return
         restored.add(key)
-        if self._realtime_assistant_history_shadow_cache().get(key) or self._interrupted_reply_breakpoint_cache().get(key):
+        if (
+            self._realtime_assistant_history_shadow_cache().get(key)
+            or self._interrupted_reply_breakpoint_cache().get(key)
+            or self._user_message_withdrawal_context_cache().get(key)
+        ):
             return
         try:
             data = await self.get_kv_data(
@@ -10369,6 +10499,11 @@ class EmotionalStatePlugin(Star):
             for item in list(data.get("breakpoints") or [])[-INTERRUPTED_REPLY_BREAKPOINT_LIMIT:]
             if isinstance(item, dict)
         ]
+        withdrawals = [
+            dict(item)
+            for item in list(data.get("withdrawals") or [])[-USER_MESSAGE_WITHDRAWAL_CONTEXT_LIMIT:]
+            if isinstance(item, dict)
+        ]
         if shadows:
             self._realtime_assistant_history_shadow_cache()[key] = deque(
                 shadows,
@@ -10378,6 +10513,11 @@ class EmotionalStatePlugin(Star):
             self._interrupted_reply_breakpoint_cache()[key] = deque(
                 breakpoints,
                 maxlen=INTERRUPTED_REPLY_BREAKPOINT_LIMIT,
+            )
+        if withdrawals:
+            self._user_message_withdrawal_context_cache()[key] = deque(
+                withdrawals,
+                maxlen=USER_MESSAGE_WITHDRAWAL_CONTEXT_LIMIT,
             )
 
     async def _save_realtime_delivery_context_if_dirty(self, session_key: str) -> None:
@@ -11045,17 +11185,30 @@ class EmotionalStatePlugin(Star):
             return {}
         if self._request_has_current_user_payload(request):
             return {}
+        session_key = self._resolve_public_session_key(event, request=request)
+        dispatch_in_flight = self._realtime_chat_dispatch_in_flight(session_key)
         hold_seconds = max(
             0.0,
             min(1.0, self._cfg_float("realtime_empty_input_typing_hold_seconds", 0.35)),
         )
-        if hold_seconds <= 0:
-            return {}
         return {
             "platform": "generic",
-            "kind": "empty_input_typing_status",
+            "kind": (
+                "empty_input_typing_status"
+                if dispatch_in_flight and hold_seconds > 0
+                else "empty_input_event"
+            ),
+            "dispatch_in_flight": dispatch_in_flight,
             "hold_seconds": hold_seconds,
         }
+
+    def _realtime_chat_dispatch_in_flight(self, session_key: str) -> bool:
+        key = str(session_key or "global")
+        active = self._realtime_chat_active_dispatch_cache().get(key)
+        if isinstance(active, dict) and not active.get("completed"):
+            return True
+        tasks = self._realtime_chat_dispatch_task_cache().get(key)
+        return any(not task.done() for task in list(tasks or ()))
 
     def _event_has_current_user_payload(self, event: AstrMessageEvent) -> bool:
         if self._event_text(event).strip():

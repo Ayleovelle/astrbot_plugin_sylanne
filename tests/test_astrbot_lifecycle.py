@@ -7852,6 +7852,44 @@ class AstrBotLifecycleTests(unittest.TestCase):
         self.assertEqual(result["message_id"], "20002")
         self.assertEqual(result["reason"], "friend_recall")
 
+    def test_napcat_recall_is_injected_for_next_llm_turn(self):
+        plugin = new_plugin(
+            {
+                "assessment_timing": "post",
+                "inject_state": False,
+                "enable_realtime_chat": True,
+                "enable_sticker_reaction": False,
+                "use_llm_assessor": False,
+            },
+        )
+        self._bind_common_state_hooks(plugin)
+        plugin._last_request_text = {"s-recall-context": "用户刚才撤回前的消息"}
+        recall_event = FakeEvent("s-recall-context", message="", platform_name="aiocqhttp")
+        recall_event.raw_message = {
+            "post_type": "notice",
+            "notice_type": "friend_recall",
+            "user_id": "u1",
+            "message_id": "m-recalled",
+        }
+        recall_request = fake_request(session_id="s-recall-context", prompt="")
+        next_request = fake_request(session_id="s-recall-context", prompt="我重新说一下")
+
+        async def run_recall_then_next_turn():
+            await plugin.on_llm_request(recall_event, recall_request)
+            await plugin.on_llm_request(
+                FakeEvent("s-recall-context", message="我重新说一下", sender_id="u1"),
+                next_request,
+            )
+
+        asyncio.run(run_recall_then_next_turn())
+
+        injected = "\n".join(self._request_text_parts(next_request))
+        self.assertTrue(recall_event.stopped)
+        self.assertTrue(recall_request._sylanne_control_event)
+        self.assertIn("sylanne_user_message_withdrawal", injected)
+        self.assertIn("m-recalled", injected)
+        self.assertIn("用户刚才撤回前的消息", injected)
+
     def test_napcat_input_status_is_held_without_creating_user_turn(self):
         plugin = new_plugin({"enable_realtime_chat": True})
         event = FakeEvent("s-input-status", message="", platform_name="aiocqhttp")
@@ -7932,6 +7970,28 @@ class AstrBotLifecycleTests(unittest.TestCase):
         self.assertEqual(plugin._conversation_input_epoch["s-empty-input"], 1)
         self.assertEqual(sent, [("s-empty-input", "message:still sent after typing pause")])
         self.assertNotIn("interrupted_reason", result)
+
+    def test_empty_input_event_without_realtime_dispatch_does_not_create_typing_hold(self):
+        plugin = new_plugin(
+            {
+                "enable_realtime_chat": True,
+                "realtime_empty_input_typing_hold_seconds": 0.02,
+            },
+        )
+        event = FakeEvent("s-empty-idle", message="", platform_name="aiocqhttp")
+        request = fake_request(session_id="s-empty-idle", prompt="")
+
+        asyncio.run(plugin.on_llm_request(event, request))
+
+        self.assertTrue(event.stopped)
+        self.assertTrue(request._sylanne_control_event)
+        self.assertEqual(
+            request._sylanne_default_response_stop_reason,
+            "empty_input_event",
+        )
+        self.assertNotIn("typing_hold_until", request._sylanne_control_event_payload)
+        self.assertNotIn("s-empty-idle", plugin._realtime_user_typing_until)
+        self.assertNotIn("s-empty-idle", plugin._conversation_input_epoch)
 
     def test_observe_sticker_usage_stores_metadata_only(self):
         stored = {}
