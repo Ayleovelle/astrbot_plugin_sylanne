@@ -1,4 +1,4 @@
-# 多维情绪状态模型：理论说明
+# Soulful Yearning Lifelike AstrBot Neural Narrative Engine 理论依据
 
 ## 重点版
 
