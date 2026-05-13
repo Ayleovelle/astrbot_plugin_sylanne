@@ -606,7 +606,7 @@ def get_emotional_state_plugin(context: Context) -> Any | None:
     PLUGIN_NAME,
     "Aylovelle.S.S",
     "Soulful Yearning Lifelike AstrBot Neural Narrative Engine：维护情绪、人格、记忆、氛围和表达节奏的 Sylanne",
-    "2.3.14",
+    "2.3.15",
     "",
 )
 class EmotionalStatePlugin(Star):
@@ -1778,7 +1778,7 @@ class EmotionalStatePlugin(Star):
             and realtime_chat_enabled
             and self._cfg_bool(
                 "realtime_chat_style_prompt_enabled",
-                True,
+                False,
             )
         ):
             self._append_temp_text_part(
@@ -6634,7 +6634,7 @@ class EmotionalStatePlugin(Star):
         plan["dry_run_default"] = self._cfg_bool("realtime_chat_dry_run_default", False)
         plan["intercept_llm_response"] = self._cfg_bool(
             "realtime_chat_intercept_llm_response",
-            True,
+            False,
         )
         return plan
 
@@ -7736,7 +7736,7 @@ class EmotionalStatePlugin(Star):
         )
         if local.get("approved"):
             return local
-        if not self._cfg_bool("sticker_llm_consistency_check_enabled", True):
+        if not self._cfg_bool("sticker_llm_consistency_check_enabled", False):
             return local
         event = event_or_session if self._looks_like_event(event_or_session) else None
         if event is None or not self._cfg_bool("use_llm_assessor", True):
@@ -8503,7 +8503,7 @@ class EmotionalStatePlugin(Star):
     ) -> bool:
         if not self._realtime_chat_enabled():
             return False
-        if not self._cfg_bool("realtime_chat_intercept_llm_response", True):
+        if not self._cfg_bool("realtime_chat_intercept_llm_response", False):
             return False
         if not str(response_text or "").strip():
             return False
@@ -9815,7 +9815,7 @@ class EmotionalStatePlugin(Star):
             return None
         if not (
             self._cfg_bool("use_llm_assessor", True)
-            and self._cfg_bool("realtime_input_completion_llm_gate_enabled", True)
+            and self._cfg_bool("realtime_input_completion_llm_gate_enabled", False)
         ):
             return None
         judgement = await self._judge_realtime_input_completion(event, payload)
@@ -9944,7 +9944,7 @@ class EmotionalStatePlugin(Star):
             return True
         llm_gate_enabled = self._cfg_bool("use_llm_assessor", True) and self._cfg_bool(
             "realtime_input_completion_llm_gate_enabled",
-            True,
+            False,
         )
         if llm_gate_enabled:
             judgement = await self._judge_realtime_input_completion(event, payload)
@@ -9990,7 +9990,7 @@ class EmotionalStatePlugin(Star):
             fragment_count = len(fragments) if isinstance(fragments, list) else 1
             if not (
                 self._cfg_bool("use_llm_assessor", True)
-                and self._cfg_bool("realtime_input_completion_llm_gate_enabled", True)
+                and self._cfg_bool("realtime_input_completion_llm_gate_enabled", False)
                 and fragment_count > 1
             ):
                 return
@@ -12934,7 +12934,7 @@ class EmotionalStatePlugin(Star):
         configured = str(self._cfg("fast_assessor_provider_id", "") or "").strip()
         if configured:
             return configured
-        return await self._provider_id(event)
+        return None
 
     def _fast_assessor_max_context_chars(self) -> int:
         return max(240, min(1200, self._cfg_int("fast_assessor_max_context_chars", 600)))
@@ -16158,7 +16158,7 @@ class EmotionalStatePlugin(Star):
         return "realtime_delivery_context:" + self._safe_session_key(session_key)
 
     def _realtime_chat_enabled(self) -> bool:
-        return self._cfg_bool("enable_realtime_chat", True)
+        return self._cfg_bool("enable_realtime_chat", False)
 
     def _realtime_input_fragment_window_cache(self) -> dict[str, dict[str, Any]]:
         cache = getattr(self, "_realtime_input_fragment_windows", None)
@@ -16420,10 +16420,10 @@ class EmotionalStatePlugin(Star):
         }
 
     def _sticker_reaction_enabled(self) -> bool:
-        return self._cfg_bool("enable_sticker_reaction", True)
+        return self._cfg_bool("enable_sticker_reaction", False)
 
     def _sticker_learning_enabled(self) -> bool:
-        return self._cfg_bool("sticker_learn_user_images", True)
+        return self._cfg_bool("sticker_learn_user_images", False)
 
     def _sticker_settings(self) -> StickerSettings:
         if not self._runtime_parameter_debug_override_enabled():

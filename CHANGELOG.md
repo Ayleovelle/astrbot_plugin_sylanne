@@ -2,6 +2,27 @@
 
 本文件用于 AstrBot 插件市场/管理页展示更新内容。更完整的设计说明、公式推导、测试矩阵和维护手册见 `README.md`。
 
+## 2.3.15
+
+发布日期：2026-05-13
+
+### 修复
+
+- 将真人即时聊天接管、即时聊天风格提示、默认回复接管、用户碎片 LLM gate、表情包回应、表情包一致性 LLM gate 和用户表情学习全部改为默认关闭。
+- `fast_assessor_provider_id` 改为显式选择开启：留空时不再回退到情绪估计 Provider 或当前会话模型，避免不知情用户产生额外 token 消耗。
+- README 增加高风险功能警告，并说明这些功能仍需更多真实体验和修复；删除用户说明书中不必要的打包排除清单和生硬声明。
+- 同步 `_conf_schema.json`、运行时 fallback、配置契约测试、版本号和远程烟测版本示例。
+
+### 验证
+
+- `py -3.13 -m pytest -q tests\test_config_schema_contract.py`
+- `py -3.13 -m pytest -q tests\test_remote_smoke_contract.py -k "badges_and_compatibility or records_beta_pr_iterations or remote_smoke_expected_runtime_values_match_metadata or documented_plugin_slug_references_match_metadata"`
+- `py -3.13 -m pytest -q tests\test_astrbot_lifecycle.py -k "fast_assessor_provider_is_opt_in_when_fast_unset or realtime_input_llm_gate_can_release_complete_short_fragment or sticker_consistency_uses_fast_assessor_for_llm_gate"`
+- `py -3.13 -m py_compile main.py`
+- `py -3.13 -m json.tool _conf_schema.json`
+- `py -3.13 scripts\package_plugin.py --output dist\astrbot_plugin_sylanne.zip`
+- `node scripts\plugin_zip_preflight.js dist\astrbot_plugin_sylanne.zip astrbot_plugin_sylanne`
+
 ## 2.3.14
 
 发布日期：2026-05-13

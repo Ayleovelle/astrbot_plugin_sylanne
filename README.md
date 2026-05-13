@@ -2,7 +2,7 @@
 
 > <span style="font-size: 1.08em;"><strong>Soulful Yearning Lifelike AstrBot Neural Narrative Engine</strong>。她维护的不只是“情绪标签”，而是情绪、人格、记忆、氛围、主动性和表达节奏交织成的长期状态。</span>
 
-![版本 2.3.14](https://img.shields.io/badge/version-2.3.14-blue)
+![版本 2.3.15](https://img.shields.io/badge/version-2.3.15-blue)
 ![AstrBot >=4.9.2,<5.0.0](https://img.shields.io/badge/AstrBot-%3E%3D4.9.2%2C%3C5.0.0-green)
 ![Python 3.10+](https://img.shields.io/badge/Python-3.10%2B-yellow)
 ![协议 astrbot.emotion_state.v2](https://img.shields.io/badge/schema-astrbot.emotion__state.v2-purple)
@@ -37,7 +37,7 @@
 
 <br clear="right">
 
-`2.3.14` 是发布展示修复版：基于 `2.3.13` 的等待期追发合并、即时聊天等待上限修复和 Agent-owned context 路径，进一步把插件管理页可见的作者、指令说明、LLM 工具说明和钩子说明同步到新发布包。发布 zip 已重新生成，包内 `main.py` 的可见 docstring 为中文，`metadata.yaml` 作者为 `Aylovelle.S.S`，并按 AstrBot 插件市场约束把包体预检上限收紧到 16MB。若远端仍显示旧英文说明，优先确认正式插件目录是否已经被新包覆盖，而不是只上传到了失败安装临时目录或被浏览器缓存读到旧页面。
+`2.3.15` 是风险默认收紧版：真人即时聊天接管、分条接管提示、用户碎片 LLM gate、表情包回应、表情包一致性 LLM gate 和用户表情学习都默认关闭。`fast_assessor_provider_id` 也改为显式选择后才启用第二个快判 LLM，避免用户不知情地产生额外 token 消耗。普通用户保持默认即可；只有愿意看日志、能接受上下文错乱、重复发送、漏发或平台发送异常等不可预料后果时，才建议在测试环境逐项打开。
 
 | 能力 | 作用 |
 | --- | --- |
@@ -73,7 +73,7 @@
 | 主题 | 内容 |
 | --- | --- |
 | [当前版本与兼容范围](#当前版本与兼容范围) | 插件版本、AstrBot 版本、Python 要求、许可证和发布状态。 |
-| [当前版本发布记录](#2314-当前版本发布记录) | 中文化插件页说明、作者显示修复、logo 排查提示、16MB 发布包预检，以及 2.3.13 的等待期追发合并和 Agent-owned context 基线。 |
+| [当前版本发布记录](#2315-当前版本发布记录) | 接管聊天、表情包和双 LLM 快判默认关闭，用户显式选择后才启用高风险链路或额外快判 LLM。 |
 | [项目定位](#项目定位) | 为什么本插件不是普通的提示词人设增强。 |
 | [核心能力](#核心能力总览) | 7 维情绪、人格建模、真实时间记忆、关系修复、公共 API。 |
 | [快速开始](#快速开始) | 发布 zip 包、仓库安装、手动复制、最小配置和检查命令。 |
@@ -101,24 +101,25 @@
 | --- | --- |
 | 插件目录名 | `astrbot_plugin_sylanne` |
 | 显示名 | `Sylanne` |
-| 当前版本 | `2.3.14` |
+| 当前版本 | `2.3.15` |
 | AstrBot 版本 | `>=4.9.2,<5.0.0` |
 | Python | `3.10+` |
 | 许可证 | `GPL-3.0-or-later` |
 | 运行时第三方依赖 | 当前无额外依赖，见 `requirements.txt` |
 
-`2.3.14` 保留 Sylanne 自有记忆知识库、`2.1.0` 只读记忆查询入口、`2.1.3` Agent-owned context 即时聊天修复、`2.2.0` AstrBot Embedding 提供商驱动的向量召回、`2.3.0` 可视化记忆设置 Page、`2.3.8` 即时聊天短答锚定修复、`2.3.9` 模型空回复降级经验、`2.3.10` 完整上下文回填、`2.3.11` 内部工具统一隐藏、`2.3.12` 主动聊天反馈修复和 `2.3.13` 等待期追发合并修复；本版进一步修复发布展示元数据、中文说明和包体预检边界。核心情绪、回复后后台评估（post）、`group_atmosphere_state`、`humanlike_state`、`lifelike_learning_state`、`personality_drift_state`、Sylanne 自有记忆、即时聊天节奏和欺骗/操控/逃责类动作阻断默认自动运行；道德修复、瑕疵模拟、心理筛查等实验/维护模块仍由配置者显式打开。
+`2.3.15` 保留 Sylanne 自有记忆知识库、`2.1.0` 只读记忆查询入口、`2.1.3` Agent-owned context 即时聊天修复、`2.2.0` AstrBot Embedding 提供商驱动的向量召回、`2.3.0` 可视化记忆设置 Page、`2.3.8` 即时聊天短答锚定修复、`2.3.9` 模型空回复降级经验、`2.3.10` 完整上下文回填、`2.3.11` 内部工具统一隐藏、`2.3.12` 主动聊天反馈修复、`2.3.13` 等待期追发合并修复和 `2.3.14` 发布展示修复；本版进一步把接管聊天、表情包和第二个快判 LLM 改为用户显式开启。核心情绪、回复后后台评估（post）、`group_atmosphere_state`、`humanlike_state`、`lifelike_learning_state`、`personality_drift_state`、Sylanne 自有记忆和欺骗/操控/逃责类动作阻断默认自动运行；真人即时聊天接管、表情包回应、道德修复、瑕疵模拟、心理筛查等高风险或实验模块仍由配置者显式打开。
 
-发布包会包含根目录 `logo.png`、运行代码、README、CHANGELOG、LICENSE、配置结构（schema）、docs 和 `docs/assets/` 中的聚合图表与吉祥物素材，例如 `docs/assets/sylanne-mascot.gif`、`docs/assets/sylanne-mascot-card.svg` 和 `docs/assets/workflow_and_proactive.svg`；不会包含 `tests/`、`scripts/`、`literature_kb/`、`personality_literature_kb/`、`psychological_literature_kb/`、`humanlike_agent_literature_kb/`、`raw/`、`output/`、`dist/` 等开发、研究、原始样本或缓存目录。
+### 2.3.15 当前版本发布记录
 
-### 2.3.14 当前版本发布记录
-
-`v2.3.14` 合并在 `main` 上，对外安装版本由 `metadata.yaml` 和 `main.py @register(...)` 共同声明为 `2.3.14`。本版按版本规则提升第三位版本号：修复插件管理页发布展示元数据、中文说明、作者显示和发布包预检边界，不改变公共 API 版本；公共 API 版本仍保持 `1.0`，schema 仍保持向后兼容。
+`v2.3.15` 合并在 `main` 上，对外安装版本由 `metadata.yaml` 和 `main.py @register(...)` 共同声明为 `2.3.15`。本版按版本规则提升第三位版本号：收紧高风险默认配置与快判 LLM 选择语义，不改变公共 API 版本；公共 API 版本仍保持 `1.0`，schema 仍保持向后兼容。
 
 当前版本的主要变化：
 
 | 类别 | 结果 |
 | --- | --- |
+| 高风险默认关闭 | 真人即时聊天接管、即时聊天风格提示、默认回复接管、用户碎片 LLM gate、表情包回应、表情包一致性 LLM gate 和用户表情学习全部默认关闭。 |
+| 开启风险提示 | README 和配置 schema 明确提示：这些功能仍需更长时间真实体验和修复，现阶段打开可能导致上下文错乱、重复发送、漏发、旧回复残留、撤回/打断状态判断错误、平台发送异常或表情包语气不匹配。 |
+| 快判 LLM 显式选择 | `fast_assessor_provider_id` 留空时不再回退到 `emotion_provider_id` 或当前会话模型；只有用户选择快判 Provider 并显式开启对应 LLM gate，才启用双 LLM 加速。 |
 | 发布展示 | `metadata.yaml` 与 `@register(...)` 作者统一为 `Aylovelle.S.S`；插件页可见的 LLM 工具、指令和钩子说明改为中文。 |
 | 图标排查 | 发布包包含根目录 `logo.png`；远端仍显示默认图标时，优先检查正式插件目录是否被新 zip 覆盖以及浏览器缓存。 |
 | 包体预检 | zip 结构预检按 AstrBot 插件市场约束收紧到 `16MB`，并确认 `astrbot_plugin_sylanne/logo.png`、`metadata.yaml` 和运行文件都在插件根目录下。 |
@@ -155,11 +156,11 @@
 | Agent 上下文归属 | 对话上下文交给 AstrBot Agent；Sylanne 只补短状态摘要、短记忆召回和投递事实。Gemini 与其他模型走同一条上下文注入路径，不再启用任何模型专属上下文归属模式。 |
 | 即时聊天投递信封 | 主回复被接管时，Agent 历史会看到“已生成但未必已发送”的投递状态；用户插话后会记录已发/未发摘要，避免下一轮误以为旧回复已经完整送达。 |
 | 主动聊天反馈闭环 | 后台调度默认更低频：正常约 15 分钟醒来一次，空闲约 30 分钟，同一会话约 1 小时内不重复复查；每次醒来会先结算上一条主动发言是否无人回应，并把用户可能在忙、休息或不方便聊天作为默认解释。`progress_check` 必须有明确进度证据，证据不足时沉默；如果只是想念用户，只允许低压力短句轻触达。 |
-| 快速判断 LLM | 新增 `fast_assessor_provider_id` 和短上下文预算，用户碎片完整性、表情包一致性等简单 JSON 判断可走低推理快模型；复杂情绪观测和主动话题裁决仍走原判断 LLM。 |
+| 快速判断 LLM | `fast_assessor_provider_id` 和短上下文预算可用于用户碎片完整性、表情包一致性等简单 JSON 判断；留空时不启用第二个快判 LLM，避免不知情用户产生额外 token 消耗。 |
 | 上下文安全预算 | 召回结果只作为 `[sylanne_memory_recall]` 限长摘要注入，并继续受请求预算和官方上下文压缩清洗逻辑约束。 |
 | 模块互斥自检 | 发布前覆盖自有记忆、主动发言、官方上下文压缩、即时聊天、公共 API、配置契约和包体预检，验证模块之间不会互相回灌或重复调用外部 LivingMemory。 |
 | 工作流图 | `docs/assets/workflow_and_proactive.svg` 重绘为 2.3.13 版本，突出即时聊天、追发合并、Agent 工具循环、模型边界和主动聊天反馈；移除误导性的单点 Gemini 诊断节点，并修正中文字体和跨泳道箭头。 |
-| 公开契约 | 插件版本为 `2.3.14`；公共 API 版本仍为 `1.0`，schema 仍保持 `astrbot.emotion_state.v2` 等版本化契约。 |
+| 公开契约 | 插件版本为 `2.3.15`；公共 API 版本仍为 `1.0`，schema 仍保持 `astrbot.emotion_state.v2` 等版本化契约。 |
 
 旧版本发布记录统一放在 `CHANGELOG.md`。README 只展示当前版本，避免插件管理页从历史段落误抓旧版本号。
 
@@ -1583,7 +1584,7 @@ enable_safety_boundary = false
 | `enabled` | bool | `true` | 启用插件。 |
 | `use_llm_assessor` | bool | `true` | 使用 LLM 判断情绪观测值；关闭后只使用启发式回退。 |
 | `emotion_provider_id` | string | `""` | 情绪估计使用的 LLM Provider；留空使用当前会话模型。 |
-| `fast_assessor_provider_id` | string | `""` | 快速判断 LLM Provider；用于用户碎片完整性、轻量一致性等短 JSON 判断。留空时回退到 `emotion_provider_id` 或当前会话模型。 |
+| `fast_assessor_provider_id` | string | `""` | 快速判断 LLM Provider；用于用户碎片完整性、轻量一致性等短 JSON 判断。留空时不启用第二个快判 LLM，避免用户不知情地产生额外 token 消耗。 |
 | `fast_assessor_max_context_chars` | int | `600` | 快速判断 LLM 最多读取的上下文字数；低推理快模型上下文短，建议保持 400-800，复杂长上下文仍交给原判断 LLM。 |
 | `fast_assessor_timeout_seconds` | float | `2.0` | 快速判断 LLM 超时秒数；超时或失败会走本地回退，避免拖慢主回复。 |
 | `fast_assessor_temperature` | float | `0.0` | 快速判断 LLM temperature；简单 JSON 判断建议保持 0。 |
@@ -1598,7 +1599,7 @@ enable_safety_boundary = false
 | `benchmark_time_offset_seconds` | float | `0.0` | 远程性能/生命周期基准测试专用；仅在 `benchmark_enable_simulated_time=true` 时把观测时间视为 `time.time()+offset`。 |
 | `assessor_temperature` | float | `0.1` | 情绪估计模型 temperature。 |
 
-内部判断 LLM 分成两档：`emotion_provider_id` 仍负责情绪观测、主动话题裁决等需要更完整上下文的判断；`fast_assessor_provider_id` 只负责碎片完整性、轻量一致性这类短 JSON 判断。快速判断会使用独立的短上下文预算和更短超时，失败时回退到本地规则或原判断 LLM 路径，不会替代复杂裁决。
+内部判断 LLM 分成两档：`emotion_provider_id` 仍负责情绪观测、主动话题裁决等需要更完整上下文的判断；`fast_assessor_provider_id` 只负责碎片完整性、轻量一致性这类短 JSON 判断。快速判断只有在用户显式选择 Provider，并开启对应 LLM gate 后才会调用；留空时走本地规则回退，不会偷偷使用情绪估计模型或当前会话模型追加一次判断。默认 `post` 评估仍会有一次内部情绪观测；如果要完全避免内部评估 token，需要关闭 `use_llm_assessor`。
 
 内部判断 LLM 的提示词会要求“尽快输出最低完整 JSON”：不写长推导，不输出 Markdown，但必须保留 7 维情绪、置信度、关系决策和冲突分析。这样控制的是输出篇幅，不是削掉建模字段；默认取消硬超时后，慢模型也能自然返回最低可用观测。
 
@@ -1623,24 +1624,27 @@ enable_safety_boundary = false
 
 ### 真人即时聊天与表情包
 
+> [!WARNING]
+> 真人即时聊天接管和表情包回应现阶段默认关闭。它们会接管默认回复发送、拆分消息、等待用户碎片输入、处理打断/撤回、补发表情包，并把已发/未发状态回填给下一轮上下文；这些行为仍需要更长时间的真实聊天体验和修复才能判断是否稳定。现在打开可能造成不可预料的后果，包括上下文错乱、重复发送、漏发、旧回复残留、撤回/打断状态判断错误、平台发送异常或表情包语气不匹配。普通用户建议保持关闭，只在测试环境手动开启并观察日志。
+
 即时聊天层负责“怎么发出去”，不重新替代情绪模型本身。文本仍由主 LLM 生成；插件只在本地做分条、节奏、冷却、表情包候选选择和轻量记忆。这样可以降低 token 消耗，也能让其他插件直接调用计划接口。
 
 即时聊天接管只发生在最终自然语言回复上。若 AstrBot Agent 正在进行工具调用，`LLMResponse` 里带有 `tool_calls`、`function_call`、工具角色、工具调用 ID 或 `finish_reason=tool_calls`，Sylanne 会直接放行：不改写 `completion_text`，不阻断事件传播，不消费会话 epoch。这样工具查询、记忆查询和其他插件工具仍由 AstrBot Agent 原生循环处理；Sylanne 只在最终可发送文本出现后接管投递。
 
 | 配置项 | 类型 | 默认值 | 说明 |
 | --- | --- | --- | --- |
-| `enable_realtime_chat` | bool | `true` | 是否启用真人即时聊天分条发送。 |
-| `realtime_chat_style_prompt_enabled` | bool | `true` | 请求阶段加入短提示，让主模型少用报告腔、Markdown 和编号清单。 |
-| `realtime_chat_intercept_llm_response` | bool | `true` | 是否在 `on_llm_response` 尝试接管默认回复并分条发送；若平台不支持改写响应，可关闭。 |
-| `realtime_input_completion_llm_gate_enabled` | bool | `true` | 疑似用户还没说完时，是否调用内部判断 LLM 判断分段输入是否完整。 |
+| `enable_realtime_chat` | bool | `false` | 是否启用真人即时聊天分条发送；默认关闭，现阶段仍需真实体验验证。 |
+| `realtime_chat_style_prompt_enabled` | bool | `false` | 请求阶段加入短提示，让主模型少用报告腔、Markdown 和编号清单；建议只随真人即时聊天测试一起开启。 |
+| `realtime_chat_intercept_llm_response` | bool | `false` | 是否在 `on_llm_response` 尝试接管默认回复并分条发送；默认关闭，开启可能影响上下文、打断和平台发送链路。 |
+| `realtime_input_completion_llm_gate_enabled` | bool | `false` | 疑似用户还没说完时，是否调用内部判断 LLM 判断分段输入是否完整；默认关闭，避免额外等待和误判。 |
 | `realtime_input_completion_probe_delay_seconds` | float | `0.25` | 首个疑似碎片后的基础探测等待秒数；插件会按碎片数量和窗口状态自动缩放。 |
 | `realtime_input_completion_max_wait_seconds` | float | `4.0` | 判断用户仍未说完时的单轮最长等待时间；运行时带 4 秒硬上限，超过后放行，把主要时间留给 LLM 正常理解合并后的用户意图。 |
 | `realtime_user_typing_hold_seconds` | float | `0.8` | 平台明确上报“正在输入”时，正在分条发送的回复会短暂停顿，不把该通知当作新的用户意图。 |
 | `realtime_empty_input_typing_hold_seconds` | float | `0.35` | 收到无文本、无媒体、无 prompt 的空事件时，只有当前会话正有分条回复在发送才短暂停顿；空闲时只忽略该平台空事件，不推进会话轮次。 |
 | `realtime_chat_dry_run_default` | bool | `false` | 公共 API 未显式传 `dry_run` 时是否只返回计划不发送。 |
 | `realtime_chat_strip_markdown` | bool | `true` | 分条前清理常见 Markdown 标记。 |
-| `enable_sticker_reaction` | bool | `true` | 是否根据情绪和氛围补发表情包。 |
-| `sticker_llm_consistency_check_enabled` | bool | `true` | 表情包发送前做意图一致性检查，避免文件名/标签与本轮回复语气冲突。 |
+| `enable_sticker_reaction` | bool | `false` | 是否根据情绪和氛围补发表情包；默认关闭，表情包功能仍需素材、语气和平台兼容性验证。 |
+| `sticker_llm_consistency_check_enabled` | bool | `false` | 表情包发送前做意图一致性检查；默认关闭，只建议在测试表情包回应时开启。 |
 | `sticker_default_repo_url` | string | `https://github.com/zhaoolee/ChineseBQB.git` | 默认表情包参考仓库，仅供用户自行准备素材；插件不分发该仓库。 |
 | `sticker_local_root` | string | `""` | 本地表情包目录。 |
 | `sticker_allowed_extensions` | string | `.jpg,.jpeg,.png,.gif,.webp` | 允许索引的图片扩展名。 |
@@ -1648,7 +1652,7 @@ enable_safety_boundary = false
 | `sticker_index_limit` | int | `1000` | 本地表情包索引上限。 |
 | `sticker_index_cache_ttl_seconds` | float | `86400.0` | 表情包索引缓存秒数。 |
 | `sticker_max_file_bytes` | int | `5242880` | 单个候选图片最大字节数。 |
-| `sticker_learn_user_images` | bool | `true` | 是否学习用户表情包元数据。 |
+| `sticker_learn_user_images` | bool | `false` | 是否学习用户表情包元数据；默认关闭，表情包功能稳定前不自动学习用户图片/表情来源。 |
 | `sticker_learned_limit` | int | `200` | 每会话保留的用户表情元数据上限。 |
 
 即时聊天的分条数量、单条长度、打字速度、停顿、抖动、同会话接管冷却和表情包发送概率，都由人格模型、当前情绪、群聊氛围和生命化学习状态自动派生。外向、亲近、情绪唤醒高时会更容易分成自然短句；边界敏感、疏离、群聊紧张或打断风险高时会更克制、更少发图、更慢开口。`get_realtime_chat_plan(...)` 会在返回值的 `adaptive.realtime_chat` 和 `adaptive.sticker` 中说明当轮为什么这样计算。
@@ -2950,7 +2954,7 @@ $env:ASTRBOT_EXPECT_PLUGIN = "astrbot_plugin_sylanne"
 脚本会在输出 JSON 里写出 `expectedPluginRuntime`，包含插件列表 API 中返回的 `version`、`displayName`、`activated`、`author`、`astrbotVersion` 等只读字段。若目标插件存在但 `activated=false`，脚本会失败退出。需要把版本和显示名也作为硬断言时，可以额外设置：
 
 ```powershell
-$env:ASTRBOT_EXPECT_PLUGIN_VERSION = "2.3.14"
+$env:ASTRBOT_EXPECT_PLUGIN_VERSION = "2.3.15"
 $env:ASTRBOT_EXPECT_PLUGIN_DISPLAY_NAME = "Sylanne"
 & $node scripts\remote_smoke_playwright.js
 ```
@@ -3260,8 +3264,6 @@ consequences = await emotion.get_emotion_consequences(event)
 ---
 
 ## 独立来源声明
-
-本 README 的信息架构由本项目根据插件实际功能独立整理，未使用、复制或改写外部参考项目的代码、配置、资源、测试、发布脚本、许可证文本或文档表达。
 
 本插件的运行代码、配置 schema、公共 API、测试、公式推导和模型实现均由本项目独立编写。公式和模型不是外部项目的派生实现，而是基于公开文献证据自行总结、抽象、推导并落地为工程状态机；这不改变本项目的 `GPL-3.0-or-later` 授权边界。
 

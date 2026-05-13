@@ -244,7 +244,7 @@ class RemoteSmokeContractTests(unittest.TestCase):
                 self.assertEqual(set(), slugs - {plugin_name})
         readme = (ROOT / "README.md").read_text(encoding="utf-8")
         self.assertIn("独立来源声明", readme)
-        self.assertIn("未使用、复制或改写外部参考项目的代码、配置、资源、测试、发布脚本、许可证文本或文档表达", readme)
+        self.assertNotIn("本 README 的信息架构由本项目根据插件实际功能独立整理", readme)
         self.assertIn("运行代码、配置 schema、公共 API、测试、公式推导和模型实现均由本项目独立编写", readme)
         self.assertIn("公式和模型不是外部项目的派生实现", readme)
 

@@ -6919,6 +6919,7 @@ class AstrBotLifecycleTests(unittest.TestCase):
                 "enable_realtime_chat": True,
                 "enable_sticker_reaction": False,
                 "use_llm_assessor": True,
+                "realtime_input_completion_llm_gate_enabled": True,
                 "fast_assessor_provider_id": "fast-json-provider",
                 "realtime_input_completion_probe_delay_seconds": 0.0,
                 "realtime_input_completion_max_wait_seconds": 0.01,
@@ -6952,7 +6953,7 @@ class AstrBotLifecycleTests(unittest.TestCase):
         self.assertEqual(len(assessment_calls), 1)
         self.assertGreaterEqual(len(saves), 1)
 
-    def test_realtime_input_llm_gate_falls_back_to_assessor_provider_when_fast_unset(self):
+    def test_fast_assessor_provider_is_opt_in_when_fast_unset(self):
         plugin = new_plugin(
             {
                 "assessment_timing": "pre",
@@ -6961,6 +6962,7 @@ class AstrBotLifecycleTests(unittest.TestCase):
                 "enable_sticker_reaction": False,
                 "use_llm_assessor": True,
                 "emotion_provider_id": "judge-provider",
+                "realtime_input_completion_llm_gate_enabled": True,
                 "realtime_input_completion_probe_delay_seconds": 0.0,
                 "realtime_input_completion_max_wait_seconds": 0.01,
             },
@@ -6982,8 +6984,7 @@ class AstrBotLifecycleTests(unittest.TestCase):
         asyncio.run(plugin.on_llm_request(event, request))
 
         self.assertFalse(event.stopped)
-        self.assertEqual(len(calls), 1)
-        self.assertEqual(calls[0][0], "judge-provider")
+        self.assertEqual(calls, [])
 
     def test_realtime_input_fast_assessor_prompt_uses_short_context_budget(self):
         plugin = new_plugin(
@@ -7015,6 +7016,8 @@ class AstrBotLifecycleTests(unittest.TestCase):
                 "enable_realtime_chat": True,
                 "enable_sticker_reaction": False,
                 "use_llm_assessor": True,
+                "realtime_input_completion_llm_gate_enabled": True,
+                "fast_assessor_provider_id": "provider",
                 "realtime_input_completion_probe_delay_seconds": 0.0,
                 "realtime_input_completion_max_wait_seconds": 4.0,
             },
@@ -7055,6 +7058,8 @@ class AstrBotLifecycleTests(unittest.TestCase):
                 "enable_realtime_chat": True,
                 "enable_sticker_reaction": False,
                 "use_llm_assessor": True,
+                "realtime_input_completion_llm_gate_enabled": True,
+                "fast_assessor_provider_id": "provider",
                 "realtime_input_completion_probe_delay_seconds": 0.0,
                 "realtime_input_completion_max_wait_seconds": 0.02,
             },
@@ -7093,6 +7098,8 @@ class AstrBotLifecycleTests(unittest.TestCase):
                 "enable_realtime_chat": True,
                 "enable_sticker_reaction": False,
                 "use_llm_assessor": True,
+                "realtime_input_completion_llm_gate_enabled": True,
+                "fast_assessor_provider_id": "provider",
                 "realtime_input_completion_probe_delay_seconds": 0.05,
                 "realtime_input_completion_max_wait_seconds": 0.2,
             },
@@ -7137,6 +7144,8 @@ class AstrBotLifecycleTests(unittest.TestCase):
                 "enable_realtime_chat": True,
                 "enable_sticker_reaction": False,
                 "use_llm_assessor": True,
+                "realtime_input_completion_llm_gate_enabled": True,
+                "fast_assessor_provider_id": "provider",
                 "realtime_input_completion_probe_delay_seconds": 0.01,
                 "realtime_input_completion_max_wait_seconds": 4.0,
             },
@@ -7206,6 +7215,8 @@ class AstrBotLifecycleTests(unittest.TestCase):
                 "enable_realtime_chat": True,
                 "enable_sticker_reaction": False,
                 "use_llm_assessor": True,
+                "realtime_input_completion_llm_gate_enabled": True,
+                "fast_assessor_provider_id": "provider",
                 "realtime_input_completion_probe_delay_seconds": 0.01,
                 "realtime_input_completion_max_wait_seconds": 4.0,
             },
@@ -7271,6 +7282,8 @@ class AstrBotLifecycleTests(unittest.TestCase):
                 "enable_realtime_chat": True,
                 "enable_sticker_reaction": False,
                 "use_llm_assessor": True,
+                "realtime_input_completion_llm_gate_enabled": True,
+                "fast_assessor_provider_id": "provider",
                 "realtime_input_completion_probe_delay_seconds": 0.0,
                 "realtime_input_completion_max_wait_seconds": 0.12,
             },
@@ -7652,6 +7665,8 @@ class AstrBotLifecycleTests(unittest.TestCase):
                 "enable_realtime_chat": True,
                 "enable_sticker_reaction": False,
                 "use_llm_assessor": True,
+                "realtime_input_completion_llm_gate_enabled": True,
+                "fast_assessor_provider_id": "provider",
                 "realtime_input_completion_probe_delay_seconds": 0.65,
                 "realtime_input_completion_max_wait_seconds": 4.0,
             },

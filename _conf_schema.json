@@ -21,7 +21,7 @@
     "type": "string",
     "default": "",
     "_special": "select_provider",
-    "hint": "用于用户碎片完整性、轻量一致性等短 JSON 判断。建议选择低推理、低延迟、便宜稳定的小模型；留空时自动回退到情绪估计 Provider 或当前会话模型。"
+    "hint": "用于用户碎片完整性、轻量一致性等短 JSON 判断。只有填写本项，并显式开启对应 LLM gate 时，才会启用第二个快判 LLM；留空时不启用双 LLM 加速，避免用户不知情地产生额外 token 消耗。"
   },
   "fast_assessor_max_context_chars": {
     "description": "快速判断 LLM 最多读取的上下文字数",
@@ -79,26 +79,26 @@
   "enable_realtime_chat": {
     "description": "启用真人即时聊天分条发送",
     "type": "bool",
-    "default": true,
-    "hint": "开启后插件会把可接管的回复或主动消息拆成多条短消息，按打字速度顺序发送。"
+    "default": false,
+    "hint": "默认关闭。该链路仍处于体验验证期，需要更多真实聊天场景修复上下文、打断、撤回和平台兼容问题；确认稳定前建议只在测试环境手动开启。"
   },
   "realtime_chat_style_prompt_enabled": {
     "description": "启用即时聊天风格提示",
     "type": "bool",
-    "default": true,
-    "hint": "在请求中加入短提示，要求主模型少用报告腔、Markdown 和编号清单，优先自然聊天短句。"
+    "default": false,
+    "hint": "默认关闭。开启真人即时聊天测试时可一并开启，用短提示要求主模型少用报告腔、Markdown 和编号清单。"
   },
   "realtime_chat_intercept_llm_response": {
     "description": "接管默认 LLM 回复并分条发送",
     "type": "bool",
-    "default": true,
-    "hint": "开启后 on_llm_response 会尝试接管默认回复，用 context.send_message 顺序发送分条消息；为避免上下文断裂，插件会保留一次性 assistant 历史影子供下一轮指代消解使用。若平台不支持响应改写，可关闭此项。"
+    "default": false,
+    "hint": "默认关闭。开启后 on_llm_response 会尝试接管默认回复，用 context.send_message 顺序发送分条消息；该行为会影响上下文、打断和平台发送链路，确认稳定前不建议默认启用。"
   },
   "realtime_input_completion_llm_gate_enabled": {
     "description": "启用用户分段完整性 LLM 判断",
     "type": "bool",
-    "default": true,
-    "hint": "开启后，当同一用户短时间连续发送疑似半句话、铺垫或碎片时，插件会先等一拍，再让内部判断 LLM 判断用户是否已经说完；未说完则继续等待，避免 bot 抢答半句话。"
+    "default": false,
+    "hint": "默认关闭。该判断仍需更多实际体验验证，开启后会让内部判断 LLM 判断用户是否已经说完；未说完则继续等待，避免 bot 抢答半句话。"
   },
   "realtime_input_completion_probe_delay_seconds": {
     "description": "用户分段完整性探测等待秒数",
@@ -139,14 +139,14 @@
   "enable_sticker_reaction": {
     "description": "启用表情包氛围回应",
     "type": "bool",
-    "default": true,
-    "hint": "根据情绪、群聊氛围和文本线索选择是否补发一张表情包。"
+    "default": false,
+    "hint": "默认关闭。表情包回应仍处于体验验证期，需要继续修复素材索引、语气一致性和平台发送兼容问题；确认稳定前建议只在测试环境手动开启。"
   },
   "sticker_llm_consistency_check_enabled": {
     "description": "启用表情包发送前一致性检查",
     "type": "bool",
-    "default": true,
-    "hint": "发送表情包前用内部判断 LLM 或本地回退检查文件名、标签与本轮回复意图是否一致，避免发出与语气冲突的图。"
+    "default": false,
+    "hint": "默认关闭。开启表情包回应测试时可一并开启，用内部判断 LLM 或本地回退检查文件名、标签与本轮回复意图是否一致。"
   },
   "sticker_default_repo_url": {
     "description": "默认表情包参考仓库",
@@ -193,8 +193,8 @@
   "sticker_learn_user_images": {
     "description": "学习用户表情包元数据",
     "type": "bool",
-    "default": true,
-    "hint": "开启后会记录用户发过的图片/表情的轻量来源信息，用于以后选择；不把二进制图片写入发布包。"
+    "default": false,
+    "hint": "默认关闭。表情包功能稳定前不自动学习用户图片/表情元数据；开启后只记录轻量来源信息，不把二进制图片写入发布包。"
   },
   "sticker_learned_limit": {
     "description": "每会话学习表情上限",

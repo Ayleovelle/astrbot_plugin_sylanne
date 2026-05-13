@@ -207,6 +207,13 @@ class ConfigSchemaContractTests(unittest.TestCase):
             "assessment_timing": ("string", "post"),
             "enable_proactive_speech_dispatch": ("bool", False),
             "enable_proactive_speech_scheduler": ("bool", False),
+            "enable_realtime_chat": ("bool", False),
+            "realtime_chat_style_prompt_enabled": ("bool", False),
+            "realtime_chat_intercept_llm_response": ("bool", False),
+            "realtime_input_completion_llm_gate_enabled": ("bool", False),
+            "enable_sticker_reaction": ("bool", False),
+            "sticker_llm_consistency_check_enabled": ("bool", False),
+            "sticker_learn_user_images": ("bool", False),
             "background_post_queue_limit": ("int", 0),
             "enable_dynamic_background_workers": ("bool", False),
             "background_post_queue_checkpoint_enabled": ("bool", True),
@@ -240,7 +247,6 @@ class ConfigSchemaContractTests(unittest.TestCase):
             "block_deception_manipulation_evasion_actions": ("bool", True),
             "low_reasoning_friendly_mode": ("bool", False),
             "low_reasoning_max_context_chars": ("int", 1200),
-            "sticker_llm_consistency_check_enabled": ("bool", True),
             "allow_emotion_reset_backdoor": ("bool", True),
             "enable_shadow_diagnostics": ("bool", False),
             "enable_sylanne_memory": ("bool", True),
@@ -391,6 +397,7 @@ class ConfigSchemaContractTests(unittest.TestCase):
         self.assertEqual(cfg["fast_assessor_provider_id"]["type"], "string")
         self.assertEqual(cfg["fast_assessor_provider_id"]["default"], "")
         self.assertEqual(cfg["fast_assessor_provider_id"].get("_special"), "select_provider")
+        self.assertIn("留空时不启用双 LLM 加速", cfg["fast_assessor_provider_id"].get("hint", ""))
         self.assertEqual(
             cfg["sylanne_memory_embedding_provider_id"].get("_special"),
             "select_provider",
