@@ -415,6 +415,141 @@ class AstrBotLifecycleTests(unittest.TestCase):
         self.assertNotIn("persona-" + "p" * 20, serialized)
         self.assertNotIn("history-" + "h" * 20, serialized)
 
+    def test_recent_user_scene_context_survives_over_budget_history_when_realtime_disabled(self):
+        plugin = new_plugin(
+            {
+                "assessment_timing": "post",
+                "inject_state": False,
+                "enable_realtime_chat": False,
+                "use_llm_assessor": False,
+                "state_injection_request_budget_chars": 1200,
+                "state_injection_reserved_chars": 200,
+            },
+        )
+        self._bind_common_state_hooks(plugin)
+
+        async def run_scene_turns():
+            await plugin.on_llm_request(
+                FakeEvent("s-scene-budget", message="queueing milk tea marker", sender_id="u1"),
+                fake_request(session_id="s-scene-budget", prompt="queueing milk tea marker"),
+            )
+            plugin._conversation_pending_response_epochs.clear()
+            plugin._active_agent_pending_user_turns.clear()
+            await plugin.on_llm_request(
+                FakeEvent("s-scene-budget", message="hot outside marker", sender_id="u1"),
+                fake_request(session_id="s-scene-budget", prompt="hot outside marker"),
+            )
+            plugin._conversation_pending_response_epochs.clear()
+            plugin._active_agent_pending_user_turns.clear()
+            request = fake_request(session_id="s-scene-budget", prompt="outside now")
+            request.contexts = [
+                {"role": "user", "content": "very-long-history-" + ("x" * 5000)},
+            ]
+            await plugin.on_llm_request(
+                FakeEvent("s-scene-budget", message="outside now", sender_id="u1"),
+                request,
+            )
+            return request
+
+        request = asyncio.run(run_scene_turns())
+
+        injected = "\n".join(self._request_text_parts(request))
+        self.assertIn("sylanne_recent_user_scene_context", injected)
+        self.assertIn("queueing milk tea marker", injected)
+        self.assertIn("hot outside marker", injected)
+        self.assertIn("current_user=outside now", injected)
+
+    def test_active_followup_merge_survives_over_budget_tool_request(self):
+        plugin = new_plugin(
+            {
+                "assessment_timing": "post",
+                "inject_state": False,
+                "enable_realtime_chat": False,
+                "enable_sticker_reaction": False,
+                "use_llm_assessor": False,
+                "state_injection_request_budget_chars": 1200,
+                "state_injection_reserved_chars": 200,
+            },
+        )
+        self._bind_common_state_hooks(plugin)
+
+        async def run_followup():
+            await plugin.on_llm_request(
+                FakeEvent(
+                    "s-followup-budget",
+                    message="edit the quoted image face in the same geometric style",
+                    sender_id="u1",
+                ),
+                fake_request(
+                    session_id="s-followup-budget",
+                    prompt="edit the quoted image face in the same geometric style",
+                ),
+            )
+            request = fake_request(session_id="s-followup-budget", prompt="so where is the image")
+            request.contexts = [
+                {"role": "user", "content": "very-long-history-" + ("x" * 5000)},
+            ]
+            request.tools = [
+                {
+                    "type": "function",
+                    "function": {
+                        "name": "aiimg_generate",
+                        "description": "generate or edit images",
+                        "parameters": {"type": "object"},
+                    },
+                },
+            ]
+            await plugin.on_llm_request(
+                FakeEvent("s-followup-budget", message="so where is the image", sender_id="u1"),
+                request,
+            )
+            return request
+
+        request = asyncio.run(run_followup())
+
+        injected = "\n".join(self._request_text_parts(request))
+        self.assertIn("sylanne_active_agent_followup_merge", injected)
+        self.assertIn("edit the quoted image face", injected)
+        self.assertIn("so where is the image", injected)
+        self.assertIn("merged_current_user=", injected)
+
+    def test_realtime_shadow_survives_over_budget_history(self):
+        plugin = new_plugin(
+            {
+                "assessment_timing": "post",
+                "inject_state": False,
+                "enable_realtime_chat": False,
+                "use_llm_assessor": False,
+                "state_injection_request_budget_chars": 1200,
+                "state_injection_reserved_chars": 200,
+            },
+        )
+        self._bind_common_state_hooks(plugin)
+        plugin._record_realtime_assistant_history_shadow(
+            "s-shadow-budget",
+            full_text="assistant shadow marker: keep editing the original quoted image",
+            input_epoch=1,
+            message_parts=[
+                {"text": "assistant shadow marker: keep editing the original quoted image"},
+            ],
+            source="unit_test",
+        )
+        request = fake_request(session_id="s-shadow-budget", prompt="what did you mean")
+        request.contexts = [
+            {"role": "user", "content": "very-long-history-" + ("x" * 5000)},
+        ]
+
+        asyncio.run(
+            plugin.on_llm_request(
+                FakeEvent("s-shadow-budget", message="what did you mean", sender_id="u1"),
+                request,
+            ),
+        )
+
+        injected = "\n".join(self._request_text_parts(request))
+        self.assertIn("sylanne_realtime_assistant_history", injected)
+        self.assertIn("assistant shadow marker", injected)
+
     def test_gemini_requests_use_the_same_context_path_as_other_models(self):
         plugin = new_plugin(
             {
@@ -5077,6 +5212,7 @@ class AstrBotLifecycleTests(unittest.TestCase):
 
         plugin = new_plugin(
             {
+                "enable_realtime_chat": True,
                 "runtime_parameter_debug_override_enabled": True,
                 "enable_sticker_reaction": False,
                 "realtime_chat_min_delay_seconds": 0.0,
@@ -5108,6 +5244,7 @@ class AstrBotLifecycleTests(unittest.TestCase):
 
         plugin = new_plugin(
             {
+                "enable_realtime_chat": True,
                 "runtime_parameter_debug_override_enabled": True,
                 "enable_sticker_reaction": False,
                 "realtime_chat_session_cooldown_seconds": 9999.0,
@@ -8017,7 +8154,7 @@ class AstrBotLifecycleTests(unittest.TestCase):
         async def fake_put(self, key, value):
             stored[key] = value
 
-        plugin = new_plugin()
+        plugin = new_plugin({"sticker_learn_user_images": True})
         bind_async(plugin, "get_kv_data", fake_get)
         bind_async(plugin, "put_kv_data", fake_put)
 

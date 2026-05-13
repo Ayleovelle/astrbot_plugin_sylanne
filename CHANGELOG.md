@@ -2,6 +2,25 @@
 
 本文件用于 AstrBot 插件市场/管理页展示更新内容。更完整的设计说明、公式推导、测试矩阵和维护手册见 `README.md`。
 
+## 2.3.16
+
+发布日期：2026-05-13
+
+### 修复
+
+- 修复长历史下 Sylanne 短状态预算判定 `request_over_budget` 时，短时用户场景、用户追发合并、接管回复 shadow、打断断点、撤回和纠正上下文被一起跳过的问题。
+- 关键连续性上下文现在可以在限长和限条数约束下保底注入；普通状态摘要、长记忆召回和非关键片段仍继续遵守原预算，避免再次把插件变成长上下文重放器。
+- 补充回归测试覆盖：接管关闭时的短时场景、工具请求前的追发合并、接管 shadow 在超长历史下的保留，以及表情学习默认关闭后的显式测试配置。
+- 同步插件版本号、README 当前展示和远程烟测示例版本为 `2.3.16`。
+
+### 验证
+
+- `py -3.13 -m unittest tests.test_astrbot_lifecycle -v`
+- `py -3.13 -m unittest tests.test_remote_smoke_contract tests.test_package_plugin tests.test_config_schema_contract -v`
+- `py -3.13 -m py_compile main.py`
+- `py -3.13 scripts\package_plugin.py --output dist\astrbot_plugin_sylanne.zip`
+- `node scripts\plugin_zip_preflight.js dist\astrbot_plugin_sylanne.zip astrbot_plugin_sylanne`
+
 ## 2.3.15
 
 发布日期：2026-05-13

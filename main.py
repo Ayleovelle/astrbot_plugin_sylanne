@@ -606,7 +606,7 @@ def get_emotional_state_plugin(context: Context) -> Any | None:
     PLUGIN_NAME,
     "Aylovelle.S.S",
     "Soulful Yearning Lifelike AstrBot Neural Narrative Engine：维护情绪、人格、记忆、氛围和表达节奏的 Sylanne",
-    "2.3.15",
+    "2.3.16",
     "",
 )
 class EmotionalStatePlugin(Star):
@@ -15183,6 +15183,7 @@ class EmotionalStatePlugin(Star):
         budget: _StateInjectionBudget | None = None,
         required: bool = False,
     ) -> bool:
+        budget_override = self._temp_context_source_allows_budget_override(source)
         if budget is not None and budget.agent_owned_context:
             budget.skipped.append(
                 {
@@ -15222,6 +15223,7 @@ class EmotionalStatePlugin(Star):
                 budget,
                 text_chars,
                 required=required,
+                allow_over_budget=budget_override,
             )
             if reason:
                 budget.skipped.append(
@@ -15236,13 +15238,32 @@ class EmotionalStatePlugin(Star):
         if budget is not None:
             budget.added_chars += text_chars
             budget.added_parts += 1
+            appended_item = {
+                "source": source,
+                "chars": text_chars,
+            }
+            if budget_override and budget.request_chars_before >= budget.effective_total_budget:
+                appended_item["reason"] = "critical_context_over_budget_override"
             budget.appended.append(
-                {
-                    "source": source,
-                    "chars": text_chars,
-                },
+                appended_item,
             )
         return True
+
+    def _temp_context_source_allows_budget_override(self, source: str) -> bool:
+        """关键连续性上下文允许在长历史场景下保底注入。"""
+        return str(source or "") in {
+            "realtime_chat_active_dispatch",
+            "realtime_assistant_history_shadow",
+            "realtime_assistant_history_usage_guard",
+            "realtime_pending_bot_question",
+            "interrupted_reply_breakpoint",
+            "active_agent_followup_merge",
+            "realtime_input_fragments",
+            "user_correction_context",
+            "recent_user_correction_context",
+            "recent_user_scene_context",
+            "user_message_withdrawal",
+        }
 
     def _format_sylanne_temp_context_for_compression(
         self,
@@ -15266,6 +15287,7 @@ class EmotionalStatePlugin(Star):
             "user_correction_context",
             "recent_user_correction_context",
             "recent_user_scene_context",
+            "user_message_withdrawal",
             "sylanne_memory_recall",
         }
         if source not in important_sources:
@@ -15290,6 +15312,7 @@ class EmotionalStatePlugin(Star):
             "interrupted_reply_breakpoint": "sylanne_interrupted_reply_breakpoint",
             "active_agent_followup_merge": "sylanne_active_agent_followup_merge",
             "realtime_input_fragments": "sylanne_user_message_fragments",
+            "user_message_withdrawal": "sylanne_user_message_withdrawal",
             "user_correction_context": "sylanne_user_correction_context",
             "recent_user_correction_context": "sylanne_recent_user_correction_context",
             "recent_user_scene_context": "sylanne_recent_user_scene_context",
@@ -15307,21 +15330,26 @@ class EmotionalStatePlugin(Star):
         text_chars: int,
         *,
         required: bool,
+        allow_over_budget: bool = False,
     ) -> str:
         if budget.request_budget_chars <= 0:
             return ""
         if budget.max_added_chars <= 0:
             return "max_added_chars_zero"
-        if budget.request_chars_before >= budget.effective_total_budget:
+        if (
+            budget.request_chars_before >= budget.effective_total_budget
+            and not allow_over_budget
+        ):
             return "request_over_budget"
         if budget.added_parts >= budget.max_parts:
             return "max_parts_reached"
         if text_chars > budget.remaining_added_chars:
             return "max_added_chars_exceeded"
-        if text_chars > budget.remaining_total_chars:
+        if text_chars > budget.remaining_total_chars and not allow_over_budget:
             return "request_budget_exceeded"
         if (
             not required
+            and not allow_over_budget
             and text_chars > 0
             and budget.remaining_total_chars - text_chars
             < max(0, budget.reserved_chars // 4)
