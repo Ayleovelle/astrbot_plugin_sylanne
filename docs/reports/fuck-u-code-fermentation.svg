@@ -1,5 +1,5 @@
-<svg xmlns="http://www.w3.org/2000/svg" width="243" height="20" role="img" aria-label="💩 发酵指数 19.8/100 · 😐 微臭青年">
-  <title>💩 发酵指数 19.8/100 · 😐 微臭青年</title>
+<svg xmlns="http://www.w3.org/2000/svg" width="243" height="20" role="img" aria-label="💩 发酵指数 21.8/100 · 😐 微臭青年">
+  <title>💩 发酵指数 21.8/100 · 😐 微臭青年</title>
   <linearGradient id="s" x2="0" y2="100%">
     <stop offset="0" stop-color="#fff" stop-opacity=".08"/>
     <stop offset="1" stop-color="#000" stop-opacity=".08"/>
@@ -7,11 +7,11 @@
   <clipPath id="r"><rect width="243" height="20" rx="3" fill="#fff"/></clipPath>
   <g clip-path="url(#r)">
     <rect width="83" height="20" fill="#555"/>
-    <rect x="83" width="160" height="20" fill="#3fb950"/>
+    <rect x="83" width="160" height="20" fill="#a3be2f"/>
     <rect width="243" height="20" fill="url(#s)"/>
   </g>
   <g fill="#fff" text-anchor="middle" font-family="Verdana, DejaVu Sans, Microsoft YaHei, Segoe UI Emoji, sans-serif" font-size="11">
     <text x="41.5" y="14">💩 发酵指数</text>
-    <text x="163.0" y="14">19.8/100 · 😐 微臭青年</text>
+    <text x="163.0" y="14">21.8/100 · 😐 微臭青年</text>
   </g>
 </svg>
