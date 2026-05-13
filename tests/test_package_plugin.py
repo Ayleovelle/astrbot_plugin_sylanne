@@ -65,6 +65,10 @@ class PackagePluginTests(unittest.TestCase):
         self.assertIn("docs/assets/runtime_overview.svg", files)
         self.assertIn("docs/assets/sylanne-mascot.gif", files)
         self.assertIn("docs/assets/sylanne-mascot-card.svg", files)
+        self.assertIn("docs/assets/theory_feature_matrix_overhead.png", files)
+        self.assertIn("docs/assets/theory_feature_matrix_overhead.svg", files)
+        self.assertIn("docs/assets/theory_lifecycle_fit_explanation.png", files)
+        self.assertIn("docs/assets/theory_lifecycle_fit_explanation.svg", files)
         self.assertIn("docs/assets/workflow_and_proactive.svg", files)
         self.assertIn("pages/memory-settings/index.html", files)
         self.assertIn("pages/memory-settings/app.js", files)
@@ -80,6 +84,10 @@ class PackagePluginTests(unittest.TestCase):
                     "docs/assets/runtime_overview.svg",
                     "docs/assets/sylanne-mascot.gif",
                     "docs/assets/sylanne-mascot-card.svg",
+                    "docs/assets/theory_feature_matrix_overhead.png",
+                    "docs/assets/theory_feature_matrix_overhead.svg",
+                    "docs/assets/theory_lifecycle_fit_explanation.png",
+                    "docs/assets/theory_lifecycle_fit_explanation.svg",
                     "docs/assets/workflow_and_proactive.svg",
                 }
                 for path in files
@@ -166,6 +174,10 @@ class PackagePluginTests(unittest.TestCase):
         self.assertIn(prefix + "docs/assets/runtime_overview.svg", names)
         self.assertIn(prefix + "docs/assets/sylanne-mascot.gif", names)
         self.assertIn(prefix + "docs/assets/sylanne-mascot-card.svg", names)
+        self.assertIn(prefix + "docs/assets/theory_feature_matrix_overhead.png", names)
+        self.assertIn(prefix + "docs/assets/theory_feature_matrix_overhead.svg", names)
+        self.assertIn(prefix + "docs/assets/theory_lifecycle_fit_explanation.png", names)
+        self.assertIn(prefix + "docs/assets/theory_lifecycle_fit_explanation.svg", names)
         self.assertIn(prefix + "docs/assets/workflow_and_proactive.svg", names)
         self.assertIn(prefix + "pages/memory-settings/index.html", names)
         self.assertIn(prefix + "pages/memory-settings/app.js", names)
@@ -181,6 +193,10 @@ class PackagePluginTests(unittest.TestCase):
                     prefix + "docs/assets/runtime_overview.svg",
                     prefix + "docs/assets/sylanne-mascot.gif",
                     prefix + "docs/assets/sylanne-mascot-card.svg",
+                    prefix + "docs/assets/theory_feature_matrix_overhead.png",
+                    prefix + "docs/assets/theory_feature_matrix_overhead.svg",
+                    prefix + "docs/assets/theory_lifecycle_fit_explanation.png",
+                    prefix + "docs/assets/theory_lifecycle_fit_explanation.svg",
                     prefix + "docs/assets/workflow_and_proactive.svg",
                 }
                 for name in names

@@ -46,6 +46,10 @@ ALLOWED_DOC_ASSETS = {
     Path("docs/assets/runtime_overview.svg"),
     Path("docs/assets/sylanne-mascot.gif"),
     Path("docs/assets/sylanne-mascot-card.svg"),
+    Path("docs/assets/theory_feature_matrix_overhead.png"),
+    Path("docs/assets/theory_feature_matrix_overhead.svg"),
+    Path("docs/assets/theory_lifecycle_fit_explanation.png"),
+    Path("docs/assets/theory_lifecycle_fit_explanation.svg"),
     Path("docs/assets/workflow_and_proactive.svg"),
 }
 

@@ -147,15 +147,16 @@ class DocumentMathContractTests(unittest.TestCase):
         self.assertIn("O_t = 2^{-\\Delta t/H^O_t}O_{t-1}", readme)
         self.assertNotIn("personality_drift_apply_strength", readme)
         self.assertNotIn("personality_drift_event_threshold", readme)
-        self.assertIn("## 重点版", theory)
-        self.assertIn(
-            "<summary>展开完整理论论证、公式推导与参考文献</summary>",
-            theory,
-        )
-        self.assertEqual(theory.count("## 2. 从认知评价到维度观测"), 0)
-        self.assertIn("## 2. 输入与建模假设", theory)
-        self.assertIn("PUBLIC_PERSONALITY_PROFILE_SCHEMA_VERSION", theory)
-        self.assertIn("PERS-F001", theory)
+        self.assertIn("## 摘要", theory)
+        self.assertIn("## 关键词", theory)
+        self.assertIn("## 1. 引言", theory)
+        self.assertIn("## 2. 理论基础", theory)
+        self.assertIn("## 3. 系统方法", theory)
+        self.assertIn("## 5. 工程验证与数据图表", theory)
+        self.assertIn("assets/theory_feature_matrix_overhead.svg", theory)
+        self.assertIn("assets/theory_lifecycle_fit_explanation.svg", theory)
+        self.assertIn("计算性叙事状态", theory)
+        self.assertIn("Agent-owned context", theory)
         self.assertIn("10.1146/annurev.ps.41.020190.002221", theory)
         self.assertNotIn("Q_t", readme)
         self.assertNotIn("Q_t", theory)
@@ -178,7 +179,7 @@ class DocumentMathContractTests(unittest.TestCase):
                 self.assertEqual(suspicious_plain_formula_blocks, [])
 
         self.assertGreaterEqual(counts["README.md"], 20)
-        self.assertGreaterEqual(counts["theory.md"], 30)
+        self.assertGreaterEqual(counts["theory.md"], 10)
 
     def test_math_blocks_use_only_github_safe_macro_surface(self):
         violations = []

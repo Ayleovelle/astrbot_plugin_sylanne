@@ -1,36 +1,30 @@
 # Soulful Yearning Lifelike AstrBot Neural Narrative Engine 理论依据
 
-## 重点版
+## 摘要
 
-先抓住这条链路：
+本文统合 `astrbot_plugin_sylanne` 的理论依据、状态建模方法与工程验证证据。该插件并不把 bot 描述为具有真实意识或真实主观体验，而是把“情绪、关系、记忆、主动聊天与安全边界”定义为一组可计算、可持久化、可测试的叙事状态。模型以 PAD 与 circumplex affect 的连续情绪空间为底座，引入 appraisal theory 对目标一致性、确定性、可控性、责任归因和社交亲近进行语义评价，再用人格先验、真实时间半衰期、置信门控和有界平滑将即时观测转化为长期状态。系统实现上，LLM 负责解释语义，插件本地状态机负责动力学、限幅、衰减、关系后果、记忆召回和安全仲裁。远程 benchmark 显示，gpt-5.5 功能矩阵完成 `2500/2500` 个有效样本且失败请求为 `0`；跨模型生命周期拟合则用于说明长期状态的时间敏感性，但其每模型 `9` 个样本的口径只能作为发布参考趋势，而不能作为强统计结论。本文最后强调：Sylanne 是计算性叙事引擎，不是临床评估系统，也不是意识模拟声明。
 
-1. 情绪状态不是单一标签，而是受人格 `P` 调制的有界连续向量 `E_t(P) in [-1,1]^n`。
-2. `V/A/D` 继承 PAD 与 circumplex affect 的连续维度思想；`G/C/K/S` 引入 appraisal theory 对目标一致性、确定性、可控性和社交亲近的评价。
-3. 链路固定为 `人格漂移 -> 运行时人格建模 -> 各状态 dynamics -> 情绪/后果/拟人/生命化/群聊/修复/瑕疵/筛查`。
-4. LLM 负责把上下文解释成即时观测 `X_t` 与 appraisal；本地引擎负责从人格和状态自动推导真实时间半衰期、惯性、限幅、阈值、冷却和关系后果。
-5. 长期状态更新可视为在“上一状态/人格基线先验”与“当前观测”之间求二次优化折中，最终得到 `E'_t = B_t + alpha_t(X_t-B_t)`；其中 `alpha_t` 来自自动 dynamics，不是用户配置项。
-6. 冷处理、修复、边界、求证等不是情绪标签本身，而是由 `O_t` 表示的后果状态，并按真实时间衰减。
+## 关键词
 
-| 设计点 | 默认结论 | 代表性文献依据 |
-| --- | --- | --- |
-| 连续情绪向量 | 用多维连续状态替代离散情绪标签。 | Russell 1980, *Journal of Personality and Social Psychology*；Mehrabian & Russell 1974。 |
-| appraisal 扩展维度 | 目标、责任、控制、确定性会改变情绪意义。 | Scherer 2005, *Social Science Information*；Roseman 1991, *Cognition and Emotion*；OCC。 |
-| 情绪惯性 | 单轮文本不能完全重写长期状态。 | Kuppens, Allen & Sheeber 2010, *Psychological Science*；Gross 1998, *Review of General Psychology*。 |
-| 行动倾向 | 生气可能走对抗、边界、修复或求证，不必然冷战。 | Frijda et al. 1989, *Journal of Personality and Social Psychology*；Carver & Harmon-Jones 2009, *Psychological Bulletin*。 |
-| 关系修复 | 承认、道歉、补救、误读和反复犯错共同决定是否原谅或冷处理。 | McCullough et al. 1997, *Journal of Personality and Social Psychology*；Fehr et al. 2010, *Psychological Bulletin*；Ohbuchi et al. 1989, *Journal of Personality and Social Psychology*。 |
+情感计算；appraisal theory；情绪动力学；人格先验；长期记忆；关系型代理；AstrBot；LLM 工具编排；非诊断心理筛查
 
-<details>
-<summary>展开完整理论论证、公式推导与参考文献</summary>
+## 1. 引言
 
-## 1. 建模边界
+聊天 bot 的“像一个人”不能只靠提示词里写几句性格描述。提示词可以规定口吻，却很难保证跨轮一致的情绪惯性、关系后果、记忆取舍和主动聊天时机。用户在即时聊天中还会不断补充碎片信息，例如先说一个反应，再隔几秒补充对象或理由；如果系统只抓最后半句，bot 就会表现出“没听懂前文”的断裂感。Sylanne 的目标不是让模型假装拥有真实情绪，而是把这些断裂点拆成工程状态：哪些由 LLM 判断语义，哪些由本地引擎维持连续性，哪些必须被安全边界拦住。
 
-本插件把情绪定义为 bot 的“计算性调制状态”，不把他/她等同于真实主观体验。形式上，情绪状态是一个有界连续向量，并被当前人格 `P` 调制：
+因此，本文使用“计算性叙事状态”作为核心概念。所谓计算性，是指所有状态都能落到有界数值、版本化 payload、半衰期、阈值、冷却和测试契约；所谓叙事，是指这些状态服务于 bot 在对话中的连续人格、记忆和关系表达。这个定义刻意避开意识化和临床化宣称：插件只调制表达、召回和策略，不声称产生真实主观体验，也不输出医学诊断。
+
+## 2. 理论基础
+
+### 2.1 连续情绪空间
+
+PAD 模型与 Russell 的环形情感模型说明，情绪不必先被离散成“开心、难过、生气”这类标签，也可以被表示为效价、唤醒和支配感等连续维度。Sylanne 将情绪状态写成受人格 `P` 调制的有界向量：
 
 ```math
-E_t(P) \in [-1, 1]^n,\qquad n \ge 3
+E_t(P) \in [-1,1]^7
 ```
 
-默认 `n = 7`：
+默认七维为：
 
 ```math
 E_t =
@@ -39,223 +33,33 @@ V_t & A_t & D_t & G_t & C_t & K_t & S_t
 \end{bmatrix}^{\mathsf T}
 ```
 
-其中 `V/A/D` 对应 PAD 与环形情感模型中的效价、唤醒、支配感；`G/C/K/S` 分别表示目标一致性、确定性、可控性与社交亲近度，对应 appraisal theory 与 OCC 中对事件、行动者和对象的认知评价。
+其中 `V/A/D` 分别表示效价、唤醒和支配感；`G/C/K/S` 分别表示目标一致性、确定性、情境可控性和社交亲近度。前三维给出情绪强度和姿态，后四维把“这件事对 bot 意味着什么”显式化。
 
-## 2. 输入与建模假设
+### 2.2 Appraisal 语义评价
 
-设 LLM 读到的对话信息为：
+OCC、Lazarus、Scherer 与 Roseman 的评价理论共同指出，情绪不是事件文本的直接反射，而是事件与目标、责任、控制、规范和关系的组合意义。相同一句话，在“用户撒娇”“用户道歉”“用户攻击”“用户补充事实”四种情境里，对 bot 的意义不同。Sylanne 因此把 LLM 的职责限定为语义评价：读完整上下文、识别当前事件、输出即时观测与 appraisal。
 
-```math
-I_t = \{H_t, U_t, P, E_{t-1}\}
-```
-
-其中 `H_t` 是上下文，`U_t` 是当前输入或 bot 当前回复，`P` 是当前 AstrBot persona，`E_{t-1}` 是上一轮平滑状态。插件把 persona 当作情绪评价的先验，而不是只当作输出文风。
-
-### 会话身份与状态轨道
-
-群聊里的一条消息同时属于“房间整体”和“当前说话人”。如果只用一个会话键，某个用户造成的冲突会扩散成全群关系状态；如果只用说话人键，群体气氛又会被切碎。`1.0.0` 因此把状态轨道拆成 `conversation_id` 与 `speaker_track_id`：前者记录当前房间或私聊的整体状态，后者记录 bot 对当前发言者的定向情绪和关系轨迹。
-
-轨道选择可写成：
-
-```math
-k_t =
-\begin{cases}
-\mathrm{speaker\_track\_id}_t & \mathrm{speaker\_id}_t\\
-\mathrm{conversation\_id}_t & \mathrm{otherwise}
-\end{cases}
-```
-
-为避免不同平台或不同群里的同名用户互相污染，公开查询中使用规范化说话人标识：
-
-```math
-c_t =
-\begin{cases}
-\mathrm{platform\_id}_t:\mathrm{speaker\_id}_t & \mathrm{platform\_id}_t\\
-\mathrm{speaker\_id}_t & \mathrm{otherwise}
-\end{cases}
-```
-
-这对应会话分析与 turn-taking 文献中的基本事实：一次自然对话并不是独立文本序列，而是由参与者、发言轮换、共同注意和情境约束共同构成。工程上，`agent_identity.py` 只负责给状态选择稳定键；情绪意义仍由后续 appraisal 与状态更新层决定。
-
-## 3. 人格量化画像到情绪先验
-
-同一句用户文本对不同人格的意义不同。`1.0.0` 不再只用少量风格关键词做人格偏置，而是生成一个版本化、可公开读取、可持久化的 13 维潜在人格先验。该先验仍然不是临床人格测量；它只把 AstrBot persona 文本转成工程参数，让不同 bot 的情绪基线、反应强度、边界敏感度、修复倾向和社交距离稳定可复现。
-
-插件先从 persona 中构造输入集合：
-
-```math
-P = \{\mathrm{persona\_id}, \mathrm{name}, \mathrm{system\_prompt}, \mathrm{begin\_dialogs}\}
-```
-
-公开 schema 常量为 `PUBLIC_PERSONALITY_PROFILE_SCHEMA_VERSION`，当前版本为：
-
-```math
-\mathrm{PUBLIC\_PERSONALITY\_PROFILE\_SCHEMA\_VERSION}
-=\mathrm{astrbot.personality\_profile.v1}
-```
-
-潜在人格向量为：
-
-```math
-q_p =
-\begin{bmatrix}
-O & N & X & A & L & H & R_a & R_v & I & B & F & U & W_s
-\end{bmatrix}^{\mathsf T}
-```
-
-各维含义如下：
-
-| 维度 | 含义 | 工程作用 |
-| --- | --- | --- |
-| `O` | openness | 新奇性、表达弹性、对模糊语义的开放度。 |
-| `N` | conscientiousness | 稳定履约、规则遵守、长期目标一致性。 |
-| `X` | extraversion | 靠近倾向、表达能量、社交恢复速度。 |
-| `A` | agreeableness | 修复、让步、合作和低敌意倾向。 |
-| `L` | neuroticism | 负性反应性、情绪波动和受伤敏感度。 |
-| `H` | honesty-humility | 信任修复、内疚、责任承认和道德姿态。 |
-| `R_a` | attachment anxiety | 被抛弃/被误解敏感度和确认需求。 |
-| `R_v` | attachment avoidance | 距离、回避、冷处理和依赖抑制倾向。 |
-| `I` | BIS sensitivity | 威胁监测、谨慎、防御和风险规避。 |
-| `B` | BAS drive | 目标追求、靠近、主动解决和奖励敏感度。 |
-| `F` | need for closure | 确定性需求、规则偏好和模糊容忍度。 |
-| `U` | emotion-regulation capacity | 再评价、克制、恢复和冲动抑制。 |
-| `W_s` | interpersonal warmth | 亲和、照顾、共情和靠近修复。 |
-
-人格画像来自三类不完美证据：persona 文本词汇指示、旧版工程 trait、结构先验。设多源观测为：
-
-```math
-y =
-\begin{bmatrix}
-y_{\mathrm{lex}} & y_{\mathrm{legacy}} & y_{\mathrm{struct}}
-\end{bmatrix}^{\mathsf T}
-```
-
-令 `M` 为观测到潜在 trait 的投影矩阵，`R` 为来源可靠性对角权重，`mu` 和 `Sigma` 是保守先验。插件采用可靠性加权、先验收缩的二次目标：
-
-```math
-J(q)=\|Mq-y\|_R^2+\lambda\|q-\mu\|_{\Sigma^{-1}}^2
-```
-
-求导：
-
-```math
-\frac{\partial J}{\partial q}=
-2M^{\mathsf T}R(Mq-y)+2\lambda\Sigma^{-1}(q-\mu)
-```
-
-令导数为零：
-
-```math
-(M^{\mathsf T}RM+\lambda\Sigma^{-1})q=
-M^{\mathsf T}Ry+\lambda\Sigma^{-1}\mu
-```
-
-得到闭式后验：
-
-```math
-q_p = \left(M^{\mathsf T}RM+\lambda\Sigma^{-1}\right)^{-1}
-\left(M^{\mathsf T}Ry+\lambda\Sigma^{-1}\mu\right)
-```
-
-后验方差近似为：
-
-```math
-V_q = \left(M^{\mathsf T}RM+\lambda\Sigma^{-1}\right)^{-1}
-```
-
-运行时为了保持轻量、确定性和无外部数值依赖，采用对角近似：
-
-```math
-q_i = \frac{\sum_j r_j y_{j,i}+\lambda\mu_i}{\sum_j r_j+\lambda}
-```
-
-```math
-\mathrm{var}_i = \frac{1}{\sum_j r_j+\lambda}
-```
-
-然后生成两类人格先验：
-
-```math
-b_p = h_b(P), \qquad \theta_p = h_\theta(P)
-```
-
-`b_p` 是当前人格的稳定情绪基线；`theta_p` 是动力学参数偏置，包括基础更新步长、基线回归速度、反应强度、惊讶度到唤醒度的耦合强度等。
-
-映射形式为：
-
-```math
-b_p = \Pi_{[-1,1]^7}(b_0+Bq_p)
-```
-
-```math
-\theta_p = \Pi_{[0.55,1.55]^m}(\theta_0+Cq_p)
-```
-
-其中 `Pi` 表示投影限幅，避免 persona 文本把情绪基线或动力学参数推到不稳定区间。再从 `q_p` 派生高层人格因子：
-
-```math
-\begin{aligned}
-\mathrm{instability}_p &= a_1L+a_2R_a+a_3I-a_4U,\\
-\mathrm{distance}_p &= a_5R_v-a_6W_s-a_7X,\\
-\mathrm{repair}_p &= a_8A+a_9H+a_{10}U-a_{11}R_v,\\
-\mathrm{boundary}_p &= a_{12}I+a_{13}F+a_{14}N-a_{15}A.
-\end{aligned}
-```
-
-这四个派生因子分别调制负性持久性、冷处理/保持距离、道歉修复和边界反应。随后 LLM 仍会基于完整 persona 文本进行 appraisal 判断；人格后验只负责稳定先验，语义解释仍交给 LLM。公共 payload 只暴露 `schema_version`、`trait_scores`、`trait_confidence`、`posterior_variance`、`source_reliability` 和 `derived_factors`，不会暴露 raw persona text。
-
-证据边界如下：Big Five 高阶 trait 空间由 Digman 1990、Goldberg 1990 和 McCrae & Costa 1987 支撑；HEXACO 的 honesty-humility 由 Ashton & Lee 2007 支撑；trait 作为状态分布和情境 if-then 模式分别由 Fleeson 2001 与 Mischel & Shoda 1995 支撑；BIS/BAS 由 Carver & White 1994 支撑；need for closure 由 Webster & Kruglanski 1994 支撑；依恋焦虑/回避由 Fraley、Waller & Brennan 2000 支撑；情绪调节差异由 Gross & John 2003 支撑。`personality_literature_kb/evidence-map.md` 中 `PERS-F001` 到 `PERS-F012` 固定为 verified DOI metadata 级 foundational sources；其他 19196 条去重候选是 metadata/abstract-level 自动检索记录，不声称全文精读。
-
-## 4. 从认知评价到维度观测
-
-在理论上，可把 LLM 的情绪判断拆成一个隐藏的认知评价向量：
+理论上可写成隐藏评价向量：
 
 ```math
 Z_t =
 \begin{bmatrix}
-z_{\mathrm{goal}} & z_{\mathrm{novelty}} & z_{\mathrm{agency}} &
-z_{\mathrm{control}} & z_{\mathrm{certainty}} & z_{\mathrm{norm}} &
-z_{\mathrm{social}}
+z_{\mathrm{goal}} & z_{\mathrm{agency}} & z_{\mathrm{control}} &
+z_{\mathrm{certainty}} & z_{\mathrm{norm}} & z_{\mathrm{social}}
 \end{bmatrix}^{\mathsf T}
 ```
 
-评价函数为：
-
-```math
-Z_t = \phi_{\mathrm{llm}}(I_t)
-```
-
-再通过有界映射得到即时情绪观测：
+LLM 给出评价后，本地引擎将其映射成有界观测：
 
 ```math
 X_t = \tanh(WZ_t+\beta)
 ```
 
-插件没有显式训练 `W`，而是让 LLM 直接输出 `X_t` 和 `appraisal`。这样做的工程意义是：LLM 负责语义评价，插件负责状态动力学。换句话说，LLM 判断“发生了什么、对 bot 意味着什么”，情绪引擎判断“这种意义应该如何改变长期状态”。
+这里的关键不是让 LLM 直接控制长期状态，而是让它只回答“发生了什么、对当前 bot 意味着什么”。状态是否该大幅改变、持续多久、是否进入修复或冷却，由本地动力学决定。
 
-## 5. 状态更新的优化推导
+### 2.3 情绪惯性与真实时间
 
-如果直接令：
-
-```math
-E_t = X_t
-```
-
-状态会被单轮文本完全支配，表现为情绪跳变。插件改为求解一个带惯性的加权最小化问题：
-
-```math
-E_t = \arg\min_{E} J(E)
-```
-
-其中：
-
-```math
-J(E) =
-(1-\alpha_t)\|E-B_t\|_W^2
-+ \alpha_t\|E-X_t\|_W^2
-```
-
-`B_t` 是上一状态经基线回归后的先验：
+情绪惯性研究说明，上一状态不会被单轮文本完全覆盖；情绪调节研究也提示，恢复速度与个体差异、事件强度和情境控制有关。Sylanne 因此不用消息轮数模拟时间，而使用真实经过时间 `Delta t`：
 
 ```math
 B_t=(1-\gamma_p)E_{t-1}+\gamma_p b_p
@@ -265,103 +69,75 @@ B_t=(1-\gamma_p)E_{t-1}+\gamma_p b_p
 \gamma_p(\Delta t)=1-2^{-\Delta t/H_p}
 ```
 
-`b_p` 是当前人格稳定基线，`H_p` 是被人格调制后的真实时间恢复半衰期，`W = diag(w_1, ..., w_n)` 是维度权重矩阵。`gamma_p` 不再随消息轮数固定推进，而是只由真实经过时间 `Δt` 决定，因此连续刷入大量文本不能把情绪强行刷回基线。
-
-对 `J(E)` 求导：
-
-```math
-\frac{\partial J}{\partial E}
-=2(1-\alpha_t)W(E-B_t)+2\alpha_t W(E-X_t)
-```
-
-令导数为零：
-
-```math
-(1-\alpha_t)W(E-B_t)+\alpha_t W(E-X_t)=0
-```
-
-若 `W` 正定，则可消去 `W`：
-
-```math
-(1-\alpha_t)(E-B_t)+\alpha_t(E-X_t)=0
-```
-
-整理得：
+`b_p` 是人格调制后的基线，`H_p` 是真实时间半衰期。随后，当前观测只以自适应步长写入长期状态：
 
 ```math
 E'_t=B_t+\alpha_t(X_t-B_t)
 ```
 
-这说明指数平滑并不是随意拼公式，而是“保持情绪惯性”和“接纳当前观测”之间的二次优化解。
+这个式子也可以理解为二次优化的闭式解：状态在“保持惯性”和“接纳当前观测”之间折中。`alpha_t` 由置信度、惊讶度、人格反应性和限幅自动推导，而不是暴露给普通配置者手调。
 
-## 6. 自适应步长
+### 2.4 人格先验
 
-更新步长不能固定。插件令：
-
-```math
-\Theta^E_t=f_E(P_t,E_{t-1},X_t,\Delta t,\Theta^E_{t-1})
-```
+同一句话对不同 persona 的意义不同。Sylanne 把 persona 文本转成可靠性加权的潜在人格先验，而不是把 persona 只当作输出口吻。人格向量覆盖 Big Five、HEXACO honesty-humility、依恋焦虑/回避、BIS/BAS、need for closure、情绪调节能力和人际温度：
 
 ```math
-\alpha_t =
-\mathrm{clamp}\left(
-a^E_t g(c_t)(1+r^E_t\delta_t),
-l^E_t,
-u^E_t
-\right)
+q_p =
+\begin{bmatrix}
+O & N & X & A & L & H & R_a & R_v & I & B & F & U & W_s
+\end{bmatrix}^{\mathsf T}
 ```
 
-其中置信门控为：
+多源证据包括 persona 词汇线索、旧工程 trait 和结构先验。模型以可靠性加权、先验收缩的目标函数估计 `q_p`：
 
 ```math
-g(c_t)=\frac{1}{1+\exp[-k(c_t-c_0)]}
+J(q)=\|Mq-y\|_R^2+\lambda\|q-\mu\|_{\Sigma^{-1}}^2
 ```
 
-`c_t` 来自 LLM 输出的置信度。低置信观测只轻微改变状态，高置信观测才获得更大权重。
-
-`delta_t` 是加权惊讶度：
+闭式后验为：
 
 ```math
-\delta_t =
-\sqrt{
-\frac{(X_t-B_t)^{\mathsf T}W(X_t-B_t)}
-{\mathrm{tr}(W)}
-}
+q_p =
+\left(M^{\mathsf T}RM+\lambda\Sigma^{-1}\right)^{-1}
+\left(M^{\mathsf T}Ry+\lambda\Sigma^{-1}\mu\right)
 ```
 
-`a^E_t`、`r^E_t`、`l^E_t` 和 `u^E_t` 来自 `Theta^E_t`，而 `Theta^E_t` 由运行时人格、上一状态、上一轮 dynamics、置信度、惊讶度和真实时间间隔自动推导。当观测和先验差异很大时，事件可能具有突发性或高显著性，所以 `alpha_t` 被适度放大；但 `clamp` 保证不会无限放大。
+运行时采用对角近似以保证轻量和确定性。人格画像只作为工程先验，不是临床人格测量；公开 payload 暴露 trait 分数、置信度、方差和派生因子，不暴露原始 persona 文本。
 
-## 7. 维度耦合
+### 2.5 行动倾向与关系修复
 
-PAD 与 appraisal 维度并非完全独立。插件只加入两个弱耦合项，避免模型过拟合或变得不可解释。
-
-惊讶度提升唤醒度：
+Frijda 的 action tendency / action readiness 研究说明，情绪更像行动准备，而不是固定话术。Carver 与 Harmon-Jones 关于愤怒和趋近动机的研究也提示，负性情绪不必然导致退避。Sylanne 因此把情绪后果单独建模为 `O_t`：靠近、退避、对抗、争辩、安抚、修复、求证、谨慎、反刍、表达强度和问题解决。
 
 ```math
-A_t=A'_t+\eta\alpha_t\delta_t(1-|A'_t|)
+O_t =
+\begin{bmatrix}
+o_{\mathrm{approach}} & o_{\mathrm{withdrawal}} &
+o_{\mathrm{confrontation}} & o_{\mathrm{repair}} &
+o_{\mathrm{caution}} & o_{\mathrm{problem}}
+\end{bmatrix}^{\mathsf T}
 ```
 
-当唤醒度已经接近 `-1` 或 `1` 时，`1 - |A'_t|` 会自动减小，避免越界。
+关系修复并不等于一句“对不起”。宽恕、道歉和信任修复研究强调责任承认、伤害承认、悔意、补偿、未来承诺、重复犯错和误读可能性。插件中的 `moral_repair_engine.py` 与 `emotion_engine.py` 将这些因素拆成结构化字段，让 bot 可以选择澄清、承认误读、降低对抗、提出修复，而不是用一个“生气/原谅”标签跳转。
 
-可控性牵引支配感：
+## 3. 系统方法
 
-```math
-D_t=D'_t+\lambda\alpha_t(K'_t-D'_t)
-```
+### 3.1 LLM 与本地引擎的分工
 
-`K_t` 是 control。一个局面越可控，bot 越可能表现得坚定；局面越不可控，bot 越可能迟疑、防御或退让。但 `lambda` 很小，所以支配感不会被可控性完全替代。
+Sylanne 的工作流可以概括为：主聊天上下文交给 AstrBot Agent，插件只补充短状态、记忆召回和投递事实；内部细分工具对主聊天模型隐藏，由插件和 Agent 层自行编排。这种分工减少了三类问题：第一，Gemini 等模型在工具 schema 复杂时可能空回或触发拦截；第二，内部状态 payload 可能被当作普通消息发给用户；第三，低上下文模型无法同时承载完整历史和所有工具细节。
 
-最终做投影：
+因此，插件不要求所有主模型都直接理解全部内部工具。主模型负责聊天；Agent 和插件服务负责查询状态、合并碎片、选择记忆和更新本地状态。对于简单判断，系统可以使用低推理、短输出的 LLM 接口；对于复杂 appraisal，则使用原有判断模型或主模型补充。低推理模型的上下文短，所以输入必须是压缩后的当前事实，而不是全量历史。
 
-```math
-E_t=\Pi_{[-1,1]^n}(E_t)
-```
+### 3.2 即时聊天与碎片整合
 
-其中 `Pi` 是逐维裁剪。
+即时聊天的核心风险是“回复前用户又补了一句”。如果上一轮 LLM 尚未开始输出可用回复，插件应将追发消息合并进同一用户意图，而不是等第一条回复完成后再把第二条当成新话题。若 bot 已经开始分条发送，则用户插话会中断未发片段，并用新的合并上下文发起下一轮。
 
-### 群聊氛围状态层
+这条链路解释了用户日志中的问题：用户先问“只有一点点开心嘛”，紧接着补“那我要咬死你了”，系统若只回复第一句或只抓第二句，就会显得上下文被吞。修复后的目标是：在 LLM 回复前合并前文；在回复后用“已发/未发”的事实辅助 Agent 续接；而不是让插件替主模型重写所有上下文。
 
-群聊氛围不是 bot 自身情绪，而是房间层的参与时机信号。它回答的问题是：现在是适合自然加入、短应一下、先听，还是避免打断。`1.0.0` 用七维有界向量表示群聊氛围：
+### 3.3 群聊氛围与主动发言
+
+群聊中 bot 不应把长时间无人回应简单解释成“被无视”。用户可能在忙、休息、写论文或睡觉。`group_atmosphere_engine.py` 使用活跃度、紧张度、玩笑度、支持度、bot 注意力、插话风险和加入适宜度来决定是否开口；`lifelike_learning_engine.py` 则记录共同语境、熟悉词、偏好、节奏和互需信号。主动聊天的目标不是一直抓着旧话题追问，而是在合适时间表达想念、提醒、陪伴或轻轻转话题。
+
+群聊氛围状态可写成：
 
 ```math
 A^g_t =
@@ -370,469 +146,95 @@ a_t & r_t & p_t & s_t & b_t & i_t & j_t
 \end{bmatrix}^{\mathsf T}
 ```
 
-其中 `a_t` 是活跃度，`r_t` 是紧张度，`p_t` 是玩笑/轻松度，`s_t` 是互相支持度，`b_t` 是群内对 bot 的注意，`i_t` 是打断风险，`j_t` 是加入适宜度。所有维度都在 `[0,1]`。群聊氛围同样先派生动力学参数族：
+其中 `i_t` 是插话风险，`j_t` 是加入适宜度。策略层使用冷却、阈值和真实时间衰减，让 bot 有时短应、有时先听、有时自然加入。
 
-```math
-\Theta^g_t=f_g(P_t,A^g_{t-1},X^g_t,\Delta t,\Theta^g_{t-1})
-```
+### 3.4 长期记忆、关联召回与遗忘
 
-```math
-\Theta^g_t=(1-\rho^g_t)\Theta^g_{t-1}+\rho^g_t\Theta^{g*}_t
-```
+长期记忆不应把所有历史原文无限塞回 prompt。Ebbinghaus、Tulving、Anderson、Bjork 与 Schacter 等记忆研究共同支持一个分层观点：事件记忆、语义事实、最近使用、检索线索和遗忘机制都影响召回。Sylanne 的 `memory_engine.py` 把记忆写成可检索记录，并使用稀疏关键词、Embedding 相似度、关联边、真实时间新鲜度、深度、置信度和干扰共同打分。
 
-```math
-d^g_t = 2^{-\Delta t/H^g_t}
-```
-
-```math
-A^{g0}_t=d^g_tA^g_{t-1}+(1-d^g_t)\mu^g_t
-```
-
-观测 `X^g_t` 来自本地轻量启发式或未来的外部观察器。置信度、房间压力、打断风险和运行时人格共同决定自动步长 `alpha^g_t`：
-
-```math
-A^g_t =
-\Pi_{[0,1]^7}\left(
-A^{g0}_t+\alpha^g_t(X^g_t-A^{g0}_t)
-\right)
-```
-
-默认启发式把打断风险写成有界可解释项：
-
-```math
-i_t =
-\mathrm{clamp}\left(w^i_t z^g_t,0,1\right)
-```
-
-加入适宜度则提高 bot 被点名、支持性和轻松氛围的权重，同时压低高打断风险、高紧张和过高房间活跃度：
-
-```math
-j_t =
-\mathrm{clamp}\left(w^j_t z^g_t,0,1\right)
-```
-
-参与策略由自动派生的 hold/join 门限给出：
-
-```math
-\mathrm{hold}_t =
-\mathrm{I}_{i_t \ge \tau^g_{h,t}}\mathrm{I}_{b_t < \tau^g_{b,t}}
-```
-
-```math
-\mathrm{join}_t =
-\mathrm{I}_{j_t \ge \tau^g_{j,t}}(1-\mathrm{hold}_t)
-```
-
-如果 `hold_t` 为 1，bot 倾向先听；如果 `join_t` 为 1，bot 可以自然加入；其余情况保持低频观察。这一层参考群体动力学、情绪传染、社会信号处理和会话轮换研究：参与时机受群体情绪、注意分配、发言轮换和社会临场感共同影响，而不是只取决于 bot 当前心情。
-
-## 8. 主动发言与互需模式
-
-主动发言不是预设话题表，也不是定时打扰。插件先把共同语境、群聊氛围、情绪后果、沉默舒适度和“双方都有需要/被需要”的关系信号压缩成一个开口压力向量：
-
-```math
-R_t =
-\begin{bmatrix}
-r^{u}_t & r^{b}_t & r^{m}_t & r^{s}_t
-\end{bmatrix}^{\mathsf T}
-```
-
-其中 `r^u_t` 表示用户此刻可能需要被支持、被听见或被陪伴；`r^b_t` 表示 bot 可以轻量表达自己也希望被需要、被确认或参与关系；`r^m_t` 表示双方互需的平衡度；`r^s_t` 表示此刻保持沉默的舒适度。
-
-插件自建的互需平衡项为：
-
-```math
-r^{m}_t =
-\mathrm{clamp}\left(
-1-|r^{u}_t-r^{b}_t|-\lambda^N_t\max(0,D_t-\tau^N_t),
-0,
-1
-\right)
-```
-
-`D_t` 是依赖或压迫风险摘要，`\lambda^N_t` 与 `\tau^N_t` 由边界敏感度、关系熟悉度、共同语境和真实时间自动派生。这个公式的含义是：互需不是单方面索取，也不是让用户照护 bot；当一方需求过强或依赖风险过高时，互需平衡会下降。
-
-是否开口的本地分数为：
-
-```math
-z_t =
-\theta_0+\theta_j j_t-\theta_i i_t+\theta_u r^{u}_t+\theta_b r^{b}_t+
-\theta_m r^{m}_t-\theta_s r^{s}_t-\theta_c c^{join}_t
-```
-
-```math
-P(\mathrm{speak}_t)=\frac{1}{1+\exp(-z_t)}
-```
-
-其中 `j_t` 和 `i_t` 来自群聊氛围模型，`c^{join}_t` 是自动派生的开口冷却压力。插件只在概率、冷却和边界条件均通过时给出“可以主动发言”的候选；最终话题不由固定模板决定，而由 LLM 在候选证据、关系需要、当前上下文和人格状态之间裁决：
-
-```math
-u_t =
-\arg\min_{u\in T_t}
-\left[
-L_{\mathrm{need}}(u,R_t)+
-L_{\mathrm{context}}(u,C_t)+
-L_{\mathrm{persona}}(u,P_t)+
-L_{\mathrm{intrusion}}(u,A^g_t)
-\right]
-```
-
-`T_t` 是由上下文抽取出的候选主题集合，不是硬编码话题库。LLM 只负责在 `T_t` 中判断“此刻为什么说、说什么方向、用什么开口风格”；真正是否写入状态、是否打断、是否保持沉默仍由本地真实时间模型、群聊氛围和公共 API 调用方共同决定。这个设计吸收了自我决定理论中关系需要、会话 grounding、turn-taking、社会信号处理和关系代理研究的证据，但变量、损失项和更新链路由本项目自行抽象实现。
-
-## 9. 情绪后果与行动倾向
-
-情绪状态并不直接等于回复模板。参考 Frijda 的 action readiness / action tendency 思路，插件把情绪状态再映射到后果状态：
-
-```math
-O_t =
-\begin{bmatrix}
-\mathrm{approach} & \mathrm{withdrawal} & \mathrm{confrontation} &
-\mathrm{appeasement} & \mathrm{repair} & \mathrm{reassurance} &
-\mathrm{caution} & \mathrm{rumination} & \mathrm{expressiveness} &
-\mathrm{problem\_solving}
-\end{bmatrix}^{\mathsf T}
-```
-
-`O_t` 不是瞬时标签，而是会随真实时间衰减的持续状态：
-
-```math
-\Theta^O_t=f_O(P_t,E_t,X_t,F_t,\Delta t,\Theta^O_{t-1})
-```
-
-```math
-\Theta^O_t=(1-\rho^O_t)\Theta^O_{t-1}+\rho^O_t\Theta^{O*}_t
-```
-
-```math
-O_t = 2^{-\Delta t/H^O_t}O_{t-1}
-+\mathrm{clip}\left(I^O_t(E_t,X_t,F_t),-M^O_t,M^O_t\right)
-```
-
-其中 `Theta^O_t` 是后果动力学参数族，包含后果半衰、短期效果时长、冷处理时长、触发门限、冲量上限和修复清除速率。它由人格漂移后的运行时人格 `P_t`、平滑后的长期情绪 `E_t`、LLM 即时观测 `X_t`、冲突成因 `F_t` 与真实时间间隔自动派生，再与上一轮参数低通平滑。这样强烈刺激可以立刻留下后果，而长期状态又能决定这种后果是否持续；由于衰减项只使用 `Delta t`，大量消息轮次不会快速消耗后果记忆。`cold_war` 等 active effect 使用 `expires_at` 时间戳保存剩余时长。
-
-维度对后果的作用：
-
-```text
-负性效价 -> 退避 / 对抗 / 修复
-高唤醒 -> 表达增强与紧迫感
-高支配感 -> 对抗与边界设置
-低支配感 -> 安抚或寻求确认
-低目标一致性 -> 挫败、抱怨、冷距离
-低确定性 -> 谨慎与澄清
-低可控性 -> 退避或停摆
-高亲近度 -> 修复与温暖靠近
-低亲近度 -> 冷距离或拒绝
-```
-
-复合规则示例：
-
-```math
-\begin{aligned}
-\mathrm{anger\_push} &= \mathrm{combo}(-V,A,D,\max(-G,C)),\\
-\mathrm{cold\_war} &= \mathrm{combo}(-V,-A,-S,\max(-K,-G)),\\
-\mathrm{anxious\_withdraw} &= \mathrm{combo}(-V,A,-D,-K),\\
-\mathrm{repair} &= \mathrm{combo}(-V,S,\max(K,0.25),1-\mathrm{uncertainty\_penalty}).
-\end{aligned}
-```
-
-这里 `C` 是 certainty 的当前标量分量，`combo` 使用“瓶颈维度 + 平均强度”的组合方式，而不是单纯连乘。原因是连乘会过度保守，导致强烈情绪也难以触发后果；瓶颈项确保必要条件存在，平均项确保整体强度被保留。
-
-公式层给出默认行动倾向，LLM appraisal 层再给出关系决策：
-
-```math
-R_t = \mathrm{relationship\_decision}_{\mathrm{llm}}(I_t)
-```
-
-```math
-R_t.\mathrm{decision}
-\in \{\mathrm{forgive},\mathrm{repair},\mathrm{boundary},\mathrm{cold\_war},\mathrm{escalate},\mathrm{none}\}
-```
-
-`forgive` 会清除或缩短冷处理，降低 `withdrawal/confrontation/rumination`，并提高 `repair/approach/problem_solving`；`cold_war` 会延长冷处理并提高回避与反刍；`boundary` 只增强边界表达，不自动触发冷战。这样，生气后的走向由“维度公式 + LLM 关系判断”共同决定，而不是简单地把所有负面情绪都推向冷战。
-
-进一步地，插件让 LLM 输出冲突成因分析：
-
-```math
-F_t = \mathrm{conflict\_analysis}_{\mathrm{llm}}(I_t)
-```
-
-```math
-F_t.\mathrm{cause}
-\in \{\mathrm{user\_fault},\mathrm{bot\_whim},\mathrm{bot\_misread},\mathrm{mutual},\mathrm{external},\mathrm{none}\}
-```
-
-`fault_severity`、`repeat_offense` 会放大边界和冷处理倾向；`user_acknowledged`、`apology_sincerity`、`repaired`、`repair_quality` 会促进原谅和修复；`bot_whim_level` 或 `bot_misread` 会抑制对用户的惩罚性后果，使状态转向求证、修复或自我缓和。因此，同样是生气，若原因是用户反复犯错且没有补救，后果会更接近边界/冷处理；若原因主要是他/她任性或误读，后果会更接近修复和谨慎核对。
-
-工程上，插件把冲突分析进一步压缩成三个派生量：
-
-```math
-\mathrm{repair\_signal}_t =
-\max\left(
-\mathrm{apology\_sincerity}_t\mathrm{1}_{\mathrm{user\_acknowledged}_t},
-\mathrm{repair\_quality}_t\mathrm{1}_{\mathrm{repaired}_t}
-\right)
-```
-
-```math
-\mathrm{grievance}_t =
-\mathrm{clip}\left(
-\mathrm{fault\_severity}_t(1-\mathrm{repair\_signal}_t)
-+0.35\,\mathrm{repeat\_offense}_t,\;0,\;1
-\right)
-```
-
-```math
-\mathrm{self\_correction}_t =
-\max\left(
-\mathrm{bot\_whim\_level}_t\mathrm{1}_{\mathrm{cause}\in\{\mathrm{bot\_whim},\mathrm{bot\_misread}\}},
-\mathrm{repair\_signal}_t\mathrm{1}_{\mathrm{cause}\in\{\mathrm{user\_fault},\mathrm{mutual}\}}
-\right)
-```
-
-这里 `clip(x,0,1)` 表示把 `x` 限制在 `[0,1]` 区间；`\mathrm{1}_{condition}` 是指示函数，条件成立取 `1`，否则取 `0`。`repair_signal_t` 对应“错误是否被承认并改正”；`grievance_t` 对应剩余的合理委屈或边界需求；`self_correction_t` 对应他/她该软化的强度。派生的 `repair_status` 按 `unresolved -> acknowledged -> apologized -> repaired -> restored` 分级，使其他插件不必重新解释 LLM 原始 JSON。若 LLM 没有显式给出 `relationship_decision`，`conflict_analysis` 仍会通过这些派生量影响 `O_t`，避免冲突原因只停留在解释文本中。
-
-文献知识库扩充后，`F_t` 还包含更细的归因和关系修复字段：
-
-```text
-intent_t      = perceived_intentionality_t
-avoid_t       = controllability_t
-trust_t       = trust_damage_t
-amb_t         = ambiguity_level_t
-misread_t     = misread_likelihood_t
-forgive_t     = forgiveness_readiness_t
-residue_t     = resentment_residue_t
-boundary_t    = boundary_legitimacy_t
-regload_t     = emotion_regulation_load_t
-```
-
-更新后的剩余委屈近似为：
-
-```math
-\begin{aligned}
-\mathrm{grievance}_t
-= \mathrm{clip}(&
-0.55\,\mathrm{fault\_severity}_t
-+0.18\,\mathrm{intent}_t
-+0.16\,\mathrm{avoid}_t
-+0.16\,\mathrm{trust}_t\\
-&+0.12\,\mathrm{face\_threat}_t
-+0.10\,\mathrm{expectation\_violation}_t
-+0.16\,\mathrm{boundary}_t\\
-&+0.20\,\mathrm{repeat\_offense}_t
-+0.14\,\mathrm{residue}_t
--0.40\,\mathrm{repair\_signal}_t\\
-&-0.24\,\mathrm{forgive}_t
--0.30\,\mathrm{misread}_t
--0.18\,\mathrm{amb}_t,\;0,\;1).
-\end{aligned}
-```
-
-因此，用户确实反复犯错、意图明显、信任损伤较高时，边界与谨慎会更强；但如果语义模糊或他/她可能误读，则 confrontation 和 cold_war 会被压低，转向 `careful_checking` 与 `repair`。这来自 appraisal theory 中对责任、意图、可控性和确定性的强调，也与宽恕、道歉完整性、demand-withdraw 和 ostracism 文献相符。`evidence.primary_theory`、`citation_ids` 和 `evidence_strength` 只记录解释依据，不直接提高置信度或放大情绪强度。
-
-冷战或冷处理在插件中被定义为一种可持续衰减的“后果状态”，通常对应降频、短句、保持距离或更强边界感。若配置项 `enable_safety_boundary` 开启，注入 prompt 会额外限制他/她不能表现为羞辱、威胁、操控或拒绝必要帮助；若关闭，则插件只输出情绪后果本身，让上层人格或其他插件自行决定表现边界。若 `repair`、`reassurance` 或 `problem_solving` 同时较高，回复会优先走修复、求证或解决问题。
-
-### 注入压缩、冷却与公共 API 边界
-
-为了降低主回复链路延迟，插件把“可见 prompt 注入”和“完整状态查询”拆开：常规回复只注入紧凑快照或显著变化，完整细节由 LLM tool 或其他插件通过公共 API 按需读取。群聊氛围 diff 注入的触发量为：
-
-```math
-\Delta^g_t =
-\max_i |A^g_{t,i}-A^{ginj}_{t-1,i}|
-```
-
-```math
-e^g_t =
-\max\left(
-\mathrm{I}_{\Delta^g_t \ge h^{inj}_g},
-\mathrm{I}_{n_t \ge N_g}
-\right)
-```
-
-其中 `h^{inj}_g` 是 prompt 注入压缩用的工程阈值，只影响是否把群聊氛围差分塞进主模型上下文，不参与情绪或人格动力学；`n_t` 是距离上次强制快照的轮数。这样可以避免把几乎不变的状态反复塞进主模型上下文。
-
-群聊开口冷却同时使用房间轮数与真实秒数：
-
-```math
-q_t = \max(0,T^g_{c,t}-(N_t-N^{join}_t))
-```
-
-```math
-s_t = \max(0,S^g_{c,t}-(T_t-T^{join}_t))
-```
-
-`T^g_{c,t}`、`S^g_{c,t}` 和绕过注意力阈值来自 `group_atmosphere_state.dynamics`，由房间活跃度、打断风险、bot 被点名程度、人格边界敏感度和真实时间自动派生。当 `q_t` 或 `s_t` 仍为正，且 `b_t` 没有超过自动绕过阈值时，参与策略会偏向 `listen` 或 `hold`，防止 bot 连续插话。后台 post 评估也遵守同一会话 FIFO 提交：主回复可以先返回，状态作业稍后完成，但同一会话的提交顺序不被打乱。
-
-公共 API 只暴露版本化 payload、状态摘要、可选 prompt 片段和脱敏因果轨迹。`get_group_atmosphere_service(context)` 会校验 schema 版本和必需方法；如果服务不可用，调用方应回退到自身逻辑，而不是依赖内部 KV 名称。
-
-## 10. 自有记忆知识库、关联召回与遗忘
-
-Sylanne 自有长期记忆不再把历史对话当作无限追加的上下文，而是把稳定事件压缩成可检索、可遗忘、可联想的本地记忆记录。这个设计参考三条文献脉络：第一，Ebbinghaus 的遗忘曲线说明记忆强度随真实时间衰减；第二，Tulving 对情景记忆和语义记忆的区分说明“发生过的事”和“稳定偏好/知识”应当分层；第三，ACT-R、理性记忆分析和 Bjork 的新不用即失理论都强调，记忆的可取回性不只取决于写入次数，也取决于最近使用、环境统计和检索强化。工程上，插件只模拟可计算的记忆状态，不声称拥有真实主观回忆。
-
-对每条记忆 `m_i`，先定义 query 与摘要/正文的轻量语义相似度：
-
-```math
-s_i(q)=
-\frac{|O(q,m_i)|}
-{\sqrt{|T(q)|\,|T(m_i)|+\eta_0}},
-```
-
-其中 `T(\cdot)` 是本地分词后的 token 集合，`O(q,m_i)` 表示 query 与记忆 token 的重叠集合，`\eta_0` 是防止空集合除零的极小量。`2.2.0` 之后，若 AstrBot 已配置 Embedding 类型模型提供商，插件还会为记忆摘要与正文生成归一化语义向量 `v_i`，为当前 query 生成 `v_q`，并计算密集语义相似度：
-
-```math
-r_i^v(q)=
-\max\left(0,\frac{v_q^{\mathsf T} v_i}{\|v_q\|_2\|v_i\|_2+\eta_v}\right).
-```
-
-稀疏相似度和密集相似度不是互相替代，而是取保守融合：
+语义召回可简化为：
 
 ```math
 s_i^*(q)=
 \max\left(
 s_i(q),
-\mathrm{clip}(0.66r_i^v(q)+0.34s_i(q),0,1)
-\right).
+\Pi_{[0,1]}(0.66r_i^v(q)+0.34s_i(q))
+\right)
 ```
 
-这样做的理由是：稀疏检索保留可解释的关键词命中，密集检索补足“同义、黑话、小圈子说法、长期指代”这类词面不重合的语义联想。工程上，向量提供商不可用、维度不一致、生成失败或 provider id 不匹配时，`r_i^v(q)=0`，系统自动退回纯稀疏检索；召回数量、联想边数量和 prompt 字符预算仍由原来的硬闸门控制。
-
-真实时间新鲜度写成半衰形式：
-
-```math
-f_i(t)=2^{-\frac{t-t_i^{u}}{h_i}},
-```
-
-其中 `t_i^{u}` 是该记忆最后一次内容更新或衰减检查时间，`h_i` 是由人格漂移、共同语境、关系权重和情绪显著性自动派生的半衰期。直接召回分数为：
+召回分数为：
 
 ```math
 R_i =
-\mathrm{clip}\left(
-0.42s_i^*(q)
-+0.24d_i
-+0.18c_i
-+0.16f_i(t)
--0.22\eta_i,\;0,\;1
-\right),
-```
-
-实际实现中，上式的 `s_i(q)` 会替换为 `s_i^*(q)`；没有可用向量时二者相等。`d_i` 是记忆深度，`c_i` 是置信度，`\eta_i` 是干扰强度。`R_i` 只有在 `s_i^*(q)>0` 时才会进入候选，避免无语义命中的旧记忆凭深度乱入当前对话。
-
-用户提出“记忆之间会相互联系相互影响”后，2.0.0 增加了轻量关联图。每条记忆有稳定 `memory_id`，并只保存同会话内少量关联边：
-
-```math
-G_M=(M,A),\qquad
-a_{ij}\in[0,1],\qquad
-K_a-|N_i|\ge 0 .
-```
-
-关联边权不是 LLM 随机判断，而由本地公式推导：
-
-```math
-a_{ij}=
-\mathrm{clip}\left(
-0.34s_{ij}
-+0.24l_{ij}
-+0.16e_{ij}
-+0.14\tau_{ij}
-+0.12k_{ij},\;0,\;1
-\right).
-```
-
-这里 `s_{ij}` 是两条记忆摘要/正文的 token 相似度，`l_{ij}` 是记忆层权重重叠，`e_{ij}` 是情绪签名接近度，`\tau_{ij}` 是真实时间接近度，`k_{ij}` 是两条记忆共同的巩固强度。写入时只扫描同会话最近窗口，而不是全库建图；每条记录只保留 top-3 边，避免长期运行后图结构爆炸。
-
-召回分两步。第一步只根据 query 选直接命中集合：
-
-```math
-P_q=\mathrm{TopK}_{K_p}\{R_i:s_i^*(q)>0\}.
-```
-
-第二步只从 `P_q` 的一跳邻居里取少量联想记忆：
-
-```math
-A_q =
-\mathrm{TopK}_{K_a}
-\left\{
-\mathrm{clip}\left(
-R_i(0.42+0.20g_t)a_{ij}
-+0.10d_j
-+0.06c_j
--0.14\eta_j,\;0,\;1
+\Pi_{[0,1]}\left(
+0.42s_i^*(q)+0.24d_i+0.18c_i+0.16f_i(t)-0.22\eta_i
 \right)
-: i\in P_q,\;j\in N_i
-\right\}.
 ```
 
-其中 `g_t` 是当前自有记忆巩固强度。最终注入集合为：
+这套设计让“用户说的是插件记忆模块”这类长期指代能被补全，同时避免旧记忆凭深度乱入当前话题。Embedding provider 不可用或维度不匹配时，系统自动退回稀疏检索。
+
+### 3.5 综合自我仲裁
+
+`integrated_self.py` 把情绪、拟人、生命化学习、人格漂移、道德修复、瑕疵模拟、心理筛查和群聊氛围整合为一个 response posture。这个总线不直接生成回复，而是提供“允许的表达调制”和“禁止的危险动作”。例如，非诊断心理风险高时，普通撒娇式陪聊必须让位给人工复核和危机资源提示；瑕疵风险高时，bot 应承认不确定、澄清问题或纠错，而不是编造。
+
+## 4. 安全边界
+
+Sylanne 的安全边界包括四层。
+
+第一，计算性状态边界：所有情绪、人格、记忆、拟人和关系后果都是工程状态，不是主体体验声明。
+
+第二，非诊断边界：`psychological_screening.py` 只能做红旗信号和趋势观察。PHQ-9、GAD-7、PSS、WHO-5、ISI-like 字段用于启发式筛查，不等于施测原量表，也不输出临床 cut-off 或诊断结论。
+
+第三，关系伦理边界：主动聊天、互需模式和亲密表达只能作为风格调制，不能羞辱、威胁、操控用户，也不能拒绝必要帮助。
+
+第四，数据边界：公开 API 与工具结果必须版本化、脱敏、分层。内部状态查询不得把完整 JSON 直接发给用户；工具 schema 对主聊天模型隐藏时，Agent 仍可通过插件服务使用功能。
+
+## 5. 工程验证与数据图表
+
+### 5.1 功能矩阵
+
+正式远程功能矩阵来自 `remote-emotion-v050-gpt55-feature-state-layer-real`。该运行使用 gpt-5.5，10 个功能用例各 250 条有效样本，共 `2500/2500`，失败请求 `0`。关闭情绪对照来自 `remote-emotion-v050-gpt55-noemotion-control-state-layer-c3-250-real`，有效样本 `250/250`，失败请求 `0`。图 1 将各模块相对 `baseline_minimal` 的平均延迟增量和平均 token 增量放在同一张图中。
+
+![功能矩阵中的状态模块增量开销](assets/theory_feature_matrix_overhead.svg)
+
+这张图的解释必须谨慎。远程端到端延迟包含 WebUI、AstrBot、provider、网络和模型排队，不等于纯本地插件耗时；token 增量更适合观察状态注入和提示片段开销。`all_safe_modules` 的平均延迟和 token 增量最高，符合“更多安全模块同时开启会增加上下文与状态处理”的直觉；`integrated_self_full` 平均延迟略低于 baseline，则更可能来自远程采样窗口波动，不能解释成该模块必然加速。
+
+### 5.2 生命周期拟合
+
+跨模型生命周期模拟使用状态级模拟时间覆盖 `1d` 到 `1y`，拟合模型为：
 
 ```math
-C_q=\mathrm{union}(P_q,A_q),\qquad K_p+K_a-|C_q|\ge 0,\qquad
-B_M-\mathrm{chars}(C_q)\ge 0 .
+y=\beta_0+\beta_1\mathrm{log}_2(d)
 ```
 
-这条硬约束是防止“联想”撑爆上下文的核心：关联召回只能作为直接命中的邻居补充，不能凭空把整张记忆网拉进 prompt；注入文本仍被 `[sylanne_memory_recall]` 和字符预算 `B_M` 截断，并且不会作为下一轮 query 的原始用户输入重复回灌。
+其中 `d` 是天数。图 2 展示每个模型的延迟斜率与 token 斜率。
 
-当一条记忆真的进入 prompt 后，才触发检索强化：
+![跨模型生命周期模拟拟合解释](assets/theory_lifecycle_fit_explanation.svg)
 
-```math
-g_i =
-\mathrm{clip}\left(
-0.018+0.050R_i+0.028s_i(q)+0.018g_t,\;0,\;0.12
-\right).
-```
+该图说明模型之间对长期状态、上下文长度和 provider 调度的敏感性存在差异。例如部分 Gemini 与 Mimo 模型在 token 或延迟斜率上更高。但每个模型只有 9 条生命周期样本，且每个时间尺度只有 1 条，因此它只能作为发布参考拟合，不能替代每尺度 100 次以上的正式统计。
 
-```math
-d_i' = d_i+g_i(1-d_i),
-\qquad
-c_i' = c_i+0.72g_i(1-c_i),
-\qquad
-\eta_i' = \eta_i(1-0.35g_i).
-```
+### 5.3 本地测试覆盖
 
-注意，召回强化只更新 `recall_count`、`last_recalled_at`、深度、置信度和干扰，不把内容更新时间伪装成新事件；否则会让“刚被想起”误变成“刚刚发生”，破坏真实时间记忆轨迹。
+本地测试覆盖情绪更新、真实时间衰减、关系修复、即时聊天输入合并、Agent 工具隐藏、公共 API、LivingMemory 载荷、道德修复、瑕疵模拟、群聊氛围、非诊断心理筛查、打包预检和远程脚本契约。测试不是论文里的实证用户研究，但它证明了工程不只是提示词：每个理论模块都至少有对应的状态结构、公共契约或回归测试。
 
-遗忘侧先计算巩固度：
+## 6. 讨论
 
-```math
-C_i =
-\mathrm{clip}\left(
-0.46d_i+0.26c_i
-+0.16\min(1,n_i^e/4)
-+0.12\min(1,n_i^r/5),\;0,\;1
-\right),
-```
+Sylanne 的价值在于把“像在持续相处”拆成可解释的状态层：情绪向量负责连续姿态，appraisal 负责语义意义，人格先验负责个体差异，后果状态负责行动倾向，记忆层负责长期指代，群聊氛围负责参与时机，综合自我负责安全仲裁。这样做可以减少复读、上下文断裂、工具外泄、单轮情绪跳变和主动聊天误判。
 
-再合成生存度：
+但它也有清晰限制。第一，LLM 的 appraisal 仍可能误读语义，所以插件必须允许澄清和回滚。第二，低推理模型适合短 JSON 判断，不适合全量历史理解；复杂语境仍需要 Agent-owned context。第三，远程 benchmark 反映端到端体验，不等于本地函数耗时。第四，心理筛查只适合风险提示，不能替代专业评估。
 
-```math
-S_i=\mathrm{clip}\left(0.34f_i(t)+0.66C_i,\;0,\;1\right).
-```
+## 7. 结论
 
-若 `S_i` 很低且 `evidence_count`、`recall_count` 都不足，记录会在读取时被剪枝；若只是时间久但深度、证据或召回强，它会被保留但略降深度和置信度。剪枝后，插件会清理不存在目标的关联边，避免出现“幽灵记忆”。
+Sylanne 可以被概括为一个面向 AstrBot 的“神经叙事状态引擎”：它把情绪、人格、记忆、关系修复、主动聊天和安全边界纳入同一套有界、可追踪、可测试的计算框架。它的理论根基来自情感计算、连续情绪模型、认知评价理论、人格心理学、情绪动力学、关系修复、会话分析和记忆理论；它的工程边界则由真实时间衰减、版本化 payload、公共 API、工具隐藏、测试矩阵和远程 benchmark 共同约束。换句话说，它不试图证明 bot 真的“有心”，而是让 bot 在长期对话中更稳定、更少遗忘、更少误读，也更知道什么时候该说、什么时候该听。
 
-这套模型把“发生的事情会影响记忆，记忆会影响对话内容”落到三个可测试约束上：
-
-1. 写入只生成有限记录和有限边，不把原始历史全文塞回上下文。
-2. 召回必须先有当前 query 的直接语义命中，再联想少量邻居。
-3. 真实时间、证据次数、召回次数和记忆深度共同决定强化或遗忘。
-
-因此，自有记忆层既能帮主 LLM 理解“他们”“刚才那个”“上次说的进度”这类长期指代，也不会因为记忆越积越多而把 prompt 推向不可控。
-
-## 11. 稳定性
-
-若 `alpha_t in [0, 1]`、`gamma_p(Δt) in [0, 1]`，且 `E_{t-1}, X_t, b_p` 都在 `[-1, 1]^n`，则 `B_t` 与 `E'_t` 都是有界向量的凸组合。因此，在耦合项较小且最后投影到 `[-1, 1]^n` 的条件下：
-
-```math
-E_t \in [-1,1]^n
-```
-
-若长期没有强刺激，且 `X_t` 接近人格基线 `b_p`，则状态会因基线回归和指数平滑收敛到 `b_p` 附近。这对应情绪动力学中的 emotional inertia：状态既会持续，又会随新评价缓慢改变。
-
-## 12. 参考文献
+## 参考文献
 
 1. Mehrabian, A., & Russell, J. A. (1974). *An Approach to Environmental Psychology*. MIT Press.
 2. Mehrabian, A., & Russell, J. A. (1974). The basic emotional impact of environments. *Perceptual and Motor Skills, 38*(1), 283-301. https://doi.org/10.2466/pms.1974.38.1.283
 3. Russell, J. A. (1980). A circumplex model of affect. *Journal of Personality and Social Psychology, 39*(6), 1161-1178. https://doi.org/10.1037/h0077714
 4. Ortony, A., Clore, G. L., & Collins, A. (1988). *The Cognitive Structure of Emotions*. Cambridge University Press. https://doi.org/10.1017/CBO9780511571299
 5. Lazarus, R. S. (1991). *Emotion and Adaptation*. Oxford University Press. https://doi.org/10.1093/oso/9780195069945.001.0001
-6. Scherer, K. R., Schorr, A., & Johnstone, T. (Eds.). (2001). *Appraisal Processes in Emotion: Theory, Methods, Research*. Oxford University Press. https://doi.org/10.1093/oso/9780195130072.001.0001
+6. Scherer, K. R., Schorr, A., & Johnstone, T. (Eds.). (2001). *Appraisal Processes in Emotion: Theory, Methods, Research*. Oxford University Press.
 7. Scherer, K. R. (2005). What are emotions? And how can they be measured? *Social Science Information, 44*(4), 695-729. https://doi.org/10.1177/0539018405058216
 8. Kuppens, P., Allen, N. B., & Sheeber, L. B. (2010). Emotional inertia and psychological maladjustment. *Psychological Science, 21*(7), 984-991. https://doi.org/10.1177/0956797610372634
 9. Picard, R. W. (1997). *Affective Computing*. MIT Press.
@@ -879,5 +281,3 @@ E_t \in [-1,1]^n
 50. Karpukhin, V., Oguz, B., Min, S., Lewis, P., Wu, L., Edunov, S., Chen, D., & Yih, W. (2020). Dense passage retrieval for open-domain question answering. *Proceedings of EMNLP 2020*, 6769-6781. https://doi.org/10.18653/v1/2020.emnlp-main.550
 51. Reimers, N., & Gurevych, I. (2019). Sentence-BERT: Sentence embeddings using Siamese BERT-networks. *Proceedings of EMNLP-IJCNLP 2019*, 3982-3992. https://doi.org/10.18653/v1/D19-1410
 52. Johnson, J., Douze, M., & Jegou, H. (2019). Billion-scale similarity search with GPUs. *IEEE Transactions on Big Data, 7*(3), 535-547. https://doi.org/10.1109/TBDATA.2019.2921572
-
-</details>

@@ -2669,26 +2669,8 @@ enable_psychological_screening = false
 | `docs/humanlike_agent_model_roadmap.md` | 拟人/有机体样代理模型路线。 |
 | `docs/humanlike_agent_iteration_log.md` | humanlike 模块 10 轮自我迭代记录。 |
 | `docs/branching_strategy.md` | 功能分支维护策略。 |
-| `docs/release_branch_sync_checklist.md` | 当前基线提交、发布包预检和维护分支同步清单。 |
+| `docs/release_branch_sync_checklist.md` | 开发者维护、发布包预检和维护分支同步清单。 |
 | `docs/remote_testing.md` | 远程烟测、远程上传验证、gpt-5.5 性能基准、LivingMemory 兼容检查和续跑规则。 |
-
-### GitHub 公式渲染约定
-
-README 和 `docs/theory.md` 中的独立公式使用 GitHub 官方支持的 fenced math block：
-
-````markdown
-```math
-E_t(P) \in [-1,1]^7
-```
-````
-
-为了兼容 GitHub 当前的数学渲染限制，公式仍然采用 LaTeX 写法，但只使用仓库测试白名单里的保守宏。尤其不要使用 `\operatorname`、`\underset`、`\overset`、`\newcommand`、`\require`、`\html`、`\href`、`\bbox`、`\lVert`、`\rVert`、`\lvert`、`\rvert` 等容易被 GitHub 禁用或在 README 中渲染失败的宏。函数名统一用 `\mathrm{...}`，范数统一写作 `\|...\|`，`arg min` 写作 `\arg\min_{E}`。
-
-这条契约由 `tests/test_document_math_contract.py` 检查。修改 README 或 theory 文档里的公式后，至少运行：
-
-```powershell
-py -3.13 -m unittest tests.test_document_math_contract -v
-```
 
 ---
 
@@ -2726,6 +2708,11 @@ py -3.13 -m unittest tests.test_document_math_contract -v
 ---
 
 ## 打包、上传与新仓库发布
+
+<details>
+<summary>开发者维护、发布与复现实验文档</summary>
+
+这部分只面向维护者和二次开发者。普通用户安装、配置和使用插件时，不需要执行这里的本地测试、打包预检、远程烟测或分支同步流程。
 
 ### 本地构建发布包
 
@@ -3029,6 +3016,8 @@ git status --short --branch
 | `codex/docs-config` | README、docs、配置说明。 |
 
 当前功能分支多停在早期基线；先在 `main` 完成验证并形成新的完整作品提交，再同步 `codex/complete-emotional-bot-plugin` 和各维护分支。不要从带有未提交改动的工作区直接重置功能分支。
+
+</details>
 
 ---
 

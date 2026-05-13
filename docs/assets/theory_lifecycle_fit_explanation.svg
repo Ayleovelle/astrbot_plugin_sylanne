@@ -1,0 +1,87 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1280" height="820" viewBox="0 0 1280 820">
+<rect width="1280" height="820" fill="#FFFFFF"/>
+<text x="48.0" y="48.0" text-anchor="start" font-family="Microsoft YaHei, Arial, sans-serif" font-size="25" font-weight="700" fill="#111827">Figure 2  跨模型生命周期模拟拟合解释</text>
+<text x="48.0" y="78.0" text-anchor="start" font-family="Microsoft YaHei, Arial, sans-serif" font-size="14" font-weight="400" fill="#6B7280">状态级模拟时间覆盖 1d 到 1y；每个模型 9 个样本，斜率来自 y = beta0 + beta1 log2(天)。</text>
+<text x="320.0" y="104.0" text-anchor="start" font-family="Microsoft YaHei, Arial, sans-serif" font-size="15" font-weight="700" fill="#111827">延迟斜率 ms / log2(天)</text>
+<text x="805.0" y="104.0" text-anchor="start" font-family="Microsoft YaHei, Arial, sans-serif" font-size="15" font-weight="700" fill="#111827">token 斜率 / log2(天)</text>
+<line x1="397.0" y1="94" x2="397.0" y2="626" stroke="#E5E7EB" stroke-width="2"/>
+<line x1="835.7" y1="94" x2="835.7" y2="626" stroke="#E5E7EB" stroke-width="2"/>
+<rect x="32" y="87" width="1216" height="39" rx="8" fill="#F8FAFC"/>
+<text x="52.0" y="113.0" text-anchor="start" font-family="Microsoft YaHei, Arial, sans-serif" font-size="13" font-weight="400" fill="#111827">gpt-5.5</text>
+<text x="210.0" y="113.0" text-anchor="start" font-family="Microsoft YaHei, Arial, sans-serif" font-size="11" font-weight="400" fill="#6B7280">R2 0.136/0.046</text>
+<rect x="380.8" y="100" width="16.1" height="18" rx="4" fill="#4C956C" opacity="0.88"/>
+<text x="372.8" y="113.0" text-anchor="end" font-family="Microsoft YaHei, Arial, sans-serif" font-size="11" font-weight="600" fill="#111827">-143</text>
+<rect x="835.1" y="100" width="3.0" height="18" rx="4" fill="#4C956C" opacity="0.88"/>
+<text x="827.1" y="113.0" text-anchor="end" font-family="Microsoft YaHei, Arial, sans-serif" font-size="11" font-weight="600" fill="#111827">-2</text>
+<rect x="32" y="135" width="1216" height="39" rx="8" fill="#FFFFFF"/>
+<text x="52.0" y="161.0" text-anchor="start" font-family="Microsoft YaHei, Arial, sans-serif" font-size="13" font-weight="400" fill="#111827">gpt-5.4</text>
+<text x="210.0" y="161.0" text-anchor="start" font-family="Microsoft YaHei, Arial, sans-serif" font-size="11" font-weight="400" fill="#6B7280">R2 0.046/0.12</text>
+<rect x="397.0" y="148" width="11.5" height="18" rx="4" fill="#A23B72" opacity="0.88"/>
+<text x="416.5" y="161.0" text-anchor="start" font-family="Microsoft YaHei, Arial, sans-serif" font-size="11" font-weight="600" fill="#111827">+102</text>
+<rect x="835.7" y="148" width="3.0" height="18" rx="4" fill="#C73E1D" opacity="0.88"/>
+<text x="844.9" y="161.0" text-anchor="start" font-family="Microsoft YaHei, Arial, sans-serif" font-size="11" font-weight="600" fill="#111827">+3</text>
+<rect x="32" y="183" width="1216" height="39" rx="8" fill="#F8FAFC"/>
+<text x="52.0" y="209.0" text-anchor="start" font-family="Microsoft YaHei, Arial, sans-serif" font-size="13" font-weight="400" fill="#111827">gpt-5.4-mini</text>
+<text x="210.0" y="209.0" text-anchor="start" font-family="Microsoft YaHei, Arial, sans-serif" font-size="11" font-weight="400" fill="#6B7280">R2 0.0/0.269</text>
+<rect x="396.6" y="196" width="3.0" height="18" rx="4" fill="#4C956C" opacity="0.88"/>
+<text x="388.6" y="209.0" text-anchor="end" font-family="Microsoft YaHei, Arial, sans-serif" font-size="11" font-weight="600" fill="#111827">-3</text>
+<rect x="835.7" y="196" width="3.0" height="18" rx="4" fill="#C73E1D" opacity="0.88"/>
+<text x="844.1" y="209.0" text-anchor="start" font-family="Microsoft YaHei, Arial, sans-serif" font-size="11" font-weight="600" fill="#111827">+1</text>
+<rect x="32" y="231" width="1216" height="39" rx="8" fill="#FFFFFF"/>
+<text x="52.0" y="257.0" text-anchor="start" font-family="Microsoft YaHei, Arial, sans-serif" font-size="13" font-weight="400" fill="#111827">deepseek-v4-flash</text>
+<text x="210.0" y="257.0" text-anchor="start" font-family="Microsoft YaHei, Arial, sans-serif" font-size="11" font-weight="400" fill="#6B7280">R2 0.041/0.066</text>
+<rect x="383.1" y="244" width="13.8" height="18" rx="4" fill="#4C956C" opacity="0.88"/>
+<text x="375.1" y="257.0" text-anchor="end" font-family="Microsoft YaHei, Arial, sans-serif" font-size="11" font-weight="600" fill="#111827">-123</text>
+<rect x="835.7" y="244" width="136.1" height="18" rx="4" fill="#C73E1D" opacity="0.88"/>
+<text x="979.8" y="257.0" text-anchor="start" font-family="Microsoft YaHei, Arial, sans-serif" font-size="11" font-weight="600" fill="#111827">+354</text>
+<rect x="32" y="279" width="1216" height="39" rx="8" fill="#F8FAFC"/>
+<text x="52.0" y="305.0" text-anchor="start" font-family="Microsoft YaHei, Arial, sans-serif" font-size="13" font-weight="400" fill="#111827">deepseek-v4-pro</text>
+<text x="210.0" y="305.0" text-anchor="start" font-family="Microsoft YaHei, Arial, sans-serif" font-size="11" font-weight="400" fill="#6B7280">R2 0.299/0.422</text>
+<rect x="329.5" y="292" width="67.5" height="18" rx="4" fill="#4C956C" opacity="0.88"/>
+<text x="321.5" y="305.0" text-anchor="end" font-family="Microsoft YaHei, Arial, sans-serif" font-size="11" font-weight="600" fill="#111827">-601</text>
+<rect x="827.8" y="292" width="8.0" height="18" rx="4" fill="#4C956C" opacity="0.88"/>
+<text x="819.8" y="305.0" text-anchor="end" font-family="Microsoft YaHei, Arial, sans-serif" font-size="11" font-weight="600" fill="#111827">-21</text>
+<rect x="32" y="327" width="1216" height="39" rx="8" fill="#FFFFFF"/>
+<text x="52.0" y="353.0" text-anchor="start" font-family="Microsoft YaHei, Arial, sans-serif" font-size="13" font-weight="400" fill="#111827">gemini-2.5-flash</text>
+<text x="210.0" y="353.0" text-anchor="start" font-family="Microsoft YaHei, Arial, sans-serif" font-size="11" font-weight="400" fill="#6B7280">R2 0.005/0.019</text>
+<rect x="397.0" y="340" width="3.0" height="18" rx="4" fill="#A23B72" opacity="0.88"/>
+<text x="407.8" y="353.0" text-anchor="start" font-family="Microsoft YaHei, Arial, sans-serif" font-size="11" font-weight="600" fill="#111827">+25</text>
+<rect x="805.0" y="340" width="30.7" height="18" rx="4" fill="#4C956C" opacity="0.88"/>
+<text x="797.0" y="353.0" text-anchor="end" font-family="Microsoft YaHei, Arial, sans-serif" font-size="11" font-weight="600" fill="#111827">-80</text>
+<rect x="32" y="375" width="1216" height="39" rx="8" fill="#F8FAFC"/>
+<text x="52.0" y="401.0" text-anchor="start" font-family="Microsoft YaHei, Arial, sans-serif" font-size="13" font-weight="400" fill="#111827">gemini-flash-lite-latest</text>
+<text x="210.0" y="401.0" text-anchor="start" font-family="Microsoft YaHei, Arial, sans-serif" font-size="11" font-weight="400" fill="#6B7280">R2 0.442/0.32</text>
+<rect x="397.0" y="388" width="253.0" height="18" rx="4" fill="#A23B72" opacity="0.88"/>
+<text x="658.0" y="401.0" text-anchor="start" font-family="Microsoft YaHei, Arial, sans-serif" font-size="11" font-weight="600" fill="#111827">+2251</text>
+<rect x="818.9" y="388" width="16.8" height="18" rx="4" fill="#4C956C" opacity="0.88"/>
+<text x="810.9" y="401.0" text-anchor="end" font-family="Microsoft YaHei, Arial, sans-serif" font-size="11" font-weight="600" fill="#111827">-44</text>
+<rect x="32" y="423" width="1216" height="39" rx="8" fill="#FFFFFF"/>
+<text x="52.0" y="449.0" text-anchor="start" font-family="Microsoft YaHei, Arial, sans-serif" font-size="13" font-weight="400" fill="#111827">gemini-flash-latest</text>
+<text x="210.0" y="449.0" text-anchor="start" font-family="Microsoft YaHei, Arial, sans-serif" font-size="11" font-weight="400" fill="#6B7280">R2 0.213/0.346</text>
+<rect x="397.0" y="436" width="52.3" height="18" rx="4" fill="#A23B72" opacity="0.88"/>
+<text x="457.3" y="449.0" text-anchor="start" font-family="Microsoft YaHei, Arial, sans-serif" font-size="11" font-weight="600" fill="#111827">+466</text>
+<rect x="835.7" y="436" width="216.4" height="18" rx="4" fill="#C73E1D" opacity="0.88"/>
+<text x="1060.1" y="449.0" text-anchor="start" font-family="Microsoft YaHei, Arial, sans-serif" font-size="11" font-weight="600" fill="#111827">+563</text>
+<rect x="32" y="471" width="1216" height="39" rx="8" fill="#F8FAFC"/>
+<text x="52.0" y="497.0" text-anchor="start" font-family="Microsoft YaHei, Arial, sans-serif" font-size="13" font-weight="400" fill="#111827">gemini-pro-latest</text>
+<text x="210.0" y="497.0" text-anchor="start" font-family="Microsoft YaHei, Arial, sans-serif" font-size="11" font-weight="400" fill="#6B7280">R2 0.14/0.166</text>
+<rect x="379.1" y="484" width="17.8" height="18" rx="4" fill="#4C956C" opacity="0.88"/>
+<text x="371.1" y="497.0" text-anchor="end" font-family="Microsoft YaHei, Arial, sans-serif" font-size="11" font-weight="600" fill="#111827">-159</text>
+<rect x="835.7" y="484" width="3.0" height="18" rx="4" fill="#C73E1D" opacity="0.88"/>
+<text x="844.1" y="497.0" text-anchor="start" font-family="Microsoft YaHei, Arial, sans-serif" font-size="11" font-weight="600" fill="#111827">+1</text>
+<rect x="32" y="519" width="1216" height="39" rx="8" fill="#FFFFFF"/>
+<text x="52.0" y="545.0" text-anchor="start" font-family="Microsoft YaHei, Arial, sans-serif" font-size="13" font-weight="400" fill="#111827">mimo-v2.5</text>
+<text x="210.0" y="545.0" text-anchor="start" font-family="Microsoft YaHei, Arial, sans-serif" font-size="11" font-weight="400" fill="#6B7280">R2 0.364/0.142</text>
+<rect x="320.0" y="532" width="77.0" height="18" rx="4" fill="#4C956C" opacity="0.88"/>
+<text x="312.0" y="545.0" text-anchor="end" font-family="Microsoft YaHei, Arial, sans-serif" font-size="11" font-weight="600" fill="#111827">-685</text>
+<rect x="835.7" y="532" width="299.3" height="18" rx="4" fill="#C73E1D" opacity="0.88"/>
+<text x="1143.0" y="545.0" text-anchor="start" font-family="Microsoft YaHei, Arial, sans-serif" font-size="11" font-weight="600" fill="#111827">+779</text>
+<rect x="32" y="567" width="1216" height="39" rx="8" fill="#F8FAFC"/>
+<text x="52.0" y="593.0" text-anchor="start" font-family="Microsoft YaHei, Arial, sans-serif" font-size="13" font-weight="400" fill="#111827">mimo-v2.5-pro</text>
+<text x="210.0" y="593.0" text-anchor="start" font-family="Microsoft YaHei, Arial, sans-serif" font-size="11" font-weight="400" fill="#6B7280">R2 0.014/0.068</text>
+<rect x="397.0" y="580" width="16.6" height="18" rx="4" fill="#A23B72" opacity="0.88"/>
+<text x="421.6" y="593.0" text-anchor="start" font-family="Microsoft YaHei, Arial, sans-serif" font-size="11" font-weight="600" fill="#111827">+148</text>
+<rect x="835.7" y="580" width="119.5" height="18" rx="4" fill="#C73E1D" opacity="0.88"/>
+<text x="963.3" y="593.0" text-anchor="start" font-family="Microsoft YaHei, Arial, sans-serif" font-size="11" font-weight="600" fill="#111827">+311</text>
+<text x="48.0" y="760.0" text-anchor="start" font-family="Microsoft YaHei, Arial, sans-serif" font-size="13" font-weight="400" fill="#6B7280">注：这是发布参考拟合。单模型每尺度 1 条样本，适合解释趋势和模型差异，不用于强因果或显著性结论。</text>
+</svg>
