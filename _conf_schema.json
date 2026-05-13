@@ -112,6 +112,18 @@
     "default": 4.0,
     "hint": "判断 LLM 认为用户仍未说完时，单轮最多等待的时间上限，并带有运行时 4 秒硬上限。用户继续发送会刷新碎片窗口；超过上限仍未继续时会放行，避免把即时聊天时间耗在死等上。"
   },
+  "realtime_user_typing_hold_seconds": {
+    "description": "用户正在输入状态等待秒数",
+    "type": "float",
+    "default": 0.8,
+    "hint": "收到平台正在输入通知后，正在分条发送的回复会短暂停顿；运行时最多 2.5 秒，不会把该通知当作新的用户意图。"
+  },
+  "realtime_empty_input_typing_hold_seconds": {
+    "description": "空输入事件短暂停顿秒数",
+    "type": "float",
+    "default": 0.35,
+    "hint": "收到无文本、无媒体、无 prompt 的空事件时按输入中处理，只让发送稍等一下；运行时最多 1 秒，不推进会话轮次。"
+  },
   "realtime_chat_dry_run_default": {
     "description": "即时聊天发送默认试算",
     "type": "bool",

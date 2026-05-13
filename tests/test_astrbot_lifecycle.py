@@ -5180,6 +5180,71 @@ class AstrBotLifecycleTests(unittest.TestCase):
         self.assertEqual(assessment_calls[0]["current_text"], "第一句。第二句。")
         self.assertEqual(saves[0][0], "s-intercept")
 
+    def test_on_llm_response_repeated_hook_call_sends_realtime_reply_once(self):
+        sent = []
+
+        class FakeContext:
+            async def send_message(self, origin, message):
+                sent.append((origin, str(message)))
+                return {"ok": True}
+
+        plugin = new_plugin(
+            {
+                "assessment_timing": "post",
+                "enable_realtime_chat": True,
+                "realtime_chat_intercept_llm_response": True,
+                "enable_sticker_reaction": False,
+                "runtime_parameter_debug_override_enabled": True,
+                "realtime_chat_min_delay_seconds": 0.0,
+                "realtime_chat_max_delay_seconds": 0.0,
+            },
+        )
+        plugin.context = FakeContext()
+        self._bind_common_state_hooks(plugin)
+        response = SimpleNamespace(completion_text="重复接管第一句。重复接管第二句。")
+
+        async def run_response_twice():
+            first_event = FakeEvent("s-intercept-once", platform_name="aiocqhttp")
+            await plugin.on_llm_response(first_event, response)
+            await self._await_background_tasks(plugin)
+            first_sent_count = len(sent)
+            second_event = FakeEvent("s-intercept-once", platform_name="aiocqhttp")
+            await plugin.on_llm_response(second_event, response)
+            await self._await_background_tasks(plugin)
+            duplicate_response = SimpleNamespace(
+                completion_text="重复接管第一句。重复接管第二句。",
+            )
+            third_event = FakeEvent("s-intercept-once", platform_name="aiocqhttp")
+            await plugin.on_llm_response(third_event, duplicate_response)
+            await self._await_background_tasks(plugin)
+            return first_event, second_event, third_event, duplicate_response, first_sent_count
+
+        (
+            first_event,
+            second_event,
+            third_event,
+            duplicate_response,
+            first_sent_count,
+        ) = asyncio.run(run_response_twice())
+
+        self.assertTrue(first_event.stopped)
+        self.assertTrue(second_event.stopped)
+        self.assertTrue(third_event.stopped)
+        self.assertEqual(len(sent), first_sent_count)
+        self.assertEqual(first_sent_count, 2)
+        sent_text = "\n".join(item[1] for item in sent)
+        self.assertNotIn("sylanne_realtime_delivery_status", sent_text)
+        self.assertEqual(
+            getattr(response, "_sylanne_intercepted_completion_text", ""),
+            "重复接管第一句。重复接管第二句。",
+        )
+        self.assertEqual(
+            getattr(duplicate_response, "_sylanne_intercepted_completion_text", ""),
+            "重复接管第一句。重复接管第二句。",
+        )
+        queue = plugin._realtime_assistant_history_shadow_cache()["s-intercept-once"]
+        self.assertEqual(len(queue), 1)
+
     def test_on_llm_response_does_not_intercept_tool_call_response(self):
         sent = []
 
@@ -5669,6 +5734,174 @@ class AstrBotLifecycleTests(unittest.TestCase):
         self.assertIn("请先读 README", injected)
         self.assertLessEqual(len(injected), 1100)
         self.assertNotIn("sylanne_realtime_assistant_history", duplicate_injected)
+
+    def test_realtime_shadow_recovers_from_kv_after_plugin_reload(self):
+        stored = {}
+        sent = []
+
+        class FakeContext:
+            async def send_message(self, origin, message):
+                sent.append((origin, str(message)))
+                return {"ok": True}
+
+        async def fake_get_kv(self, key, default=None):
+            return stored.get(key, default)
+
+        async def fake_put_kv(self, key, value):
+            stored[key] = value
+
+        plugin = new_plugin(
+            {
+                "assessment_timing": "post",
+                "inject_state": False,
+                "enable_realtime_chat": True,
+                "realtime_chat_intercept_llm_response": True,
+                "enable_sticker_reaction": False,
+                "runtime_parameter_debug_override_enabled": True,
+                "realtime_chat_min_delay_seconds": 0.0,
+                "realtime_chat_max_delay_seconds": 0.0,
+            },
+        )
+        plugin.context = FakeContext()
+        bind_async(plugin, "get_kv_data", fake_get_kv)
+        bind_async(plugin, "put_kv_data", fake_put_kv)
+        self._bind_common_state_hooks(plugin)
+        response = SimpleNamespace(completion_text="更新前接管的回复，平台普通历史里没有。")
+
+        async def run_and_reload():
+            await plugin.on_llm_response(
+                FakeEvent("s-reload-shadow", platform_name="aiocqhttp"),
+                response,
+            )
+            await self._await_background_tasks(plugin)
+            recovered = new_plugin(
+                {
+                    "assessment_timing": "post",
+                    "inject_state": False,
+                    "enable_realtime_chat": True,
+                    "enable_sticker_reaction": False,
+                    "use_llm_assessor": False,
+                    "realtime_input_completion_probe_delay_seconds": 0.0,
+                    "realtime_input_completion_max_wait_seconds": 0.0,
+                },
+            )
+            bind_async(recovered, "get_kv_data", fake_get_kv)
+            bind_async(recovered, "put_kv_data", fake_put_kv)
+            self._bind_common_state_hooks(recovered)
+            request = fake_request(
+                session_id="s-reload-shadow",
+                prompt="刚才你说什么",
+            )
+            await recovered.on_llm_request(
+                FakeEvent("s-reload-shadow", message="刚才你说什么", sender_id="u1"),
+                request,
+            )
+            duplicate_request = fake_request(
+                session_id="s-reload-shadow",
+                prompt="再说一遍",
+            )
+            await recovered.on_llm_request(
+                FakeEvent("s-reload-shadow", message="再说一遍", sender_id="u1"),
+                duplicate_request,
+            )
+            return request, duplicate_request, recovered
+
+        request, duplicate_request, recovered = asyncio.run(run_and_reload())
+
+        saved_key = plugin._realtime_delivery_context_kv_key("s-reload-shadow")
+        injected = "\n".join(self._request_text_parts(request))
+        duplicate_injected = "\n".join(self._request_text_parts(duplicate_request))
+        self.assertIn(saved_key, stored)
+        self.assertIn("sylanne_realtime_assistant_history", injected)
+        self.assertIn("更新前接管的回复", injected)
+        self.assertNotIn("sylanne_realtime_assistant_history", duplicate_injected)
+        recovered_payload = stored[saved_key]
+        self.assertTrue(recovered_payload["shadows"][-1]["consumed"])
+        self.assertIn("s-reload-shadow", recovered._realtime_assistant_history_shadow_cache())
+
+    def test_realtime_shadow_restore_retries_after_transient_kv_failure(self):
+        calls = {"get": 0}
+        stored_key = "realtime_delivery_context:s-retry-shadow"
+        stored = {
+            stored_key: {
+                "schema_version": "astrbot.realtime_delivery_context.v1",
+                "kind": "realtime_delivery_context",
+                "session_key": "s-retry-shadow",
+                "shadows": [
+                    {
+                        "schema_version": "astrbot.realtime_assistant_history_shadow.v1",
+                        "session_key": "s-retry-shadow",
+                        "input_epoch": 1,
+                        "source": "llm_response_intercept",
+                        "delivery_status": "delivered",
+                        "message_count": 1,
+                        "sent_count": 1,
+                        "unsent_count": 0,
+                        "full_text": "第一次 KV 失败后仍应恢复的回复",
+                        "full_text_excerpt": "第一次 KV 失败后仍应恢复的回复",
+                        "excerpt": "第一次 KV 失败后仍应恢复的回复",
+                        "full_text_hash": "retry-shadow",
+                        "consumed": False,
+                    },
+                ],
+                "breakpoints": [],
+            },
+        }
+
+        async def flaky_get_kv(self, key, default=None):
+            calls["get"] += 1
+            if calls["get"] == 1:
+                raise RuntimeError("temporary kv read failure")
+            return stored.get(key, default)
+
+        async def fake_put_kv(self, key, value):
+            stored[key] = value
+
+        plugin = new_plugin(
+            {
+                "assessment_timing": "post",
+                "inject_state": False,
+                "enable_realtime_chat": True,
+                "enable_sticker_reaction": False,
+                "use_llm_assessor": False,
+                "realtime_input_completion_probe_delay_seconds": 0.0,
+                "realtime_input_completion_max_wait_seconds": 0.0,
+            },
+        )
+        bind_async(plugin, "get_kv_data", flaky_get_kv)
+        bind_async(plugin, "put_kv_data", fake_put_kv)
+        self._bind_common_state_hooks(plugin)
+        first = fake_request(session_id="s-retry-shadow", prompt="我先确认一个无关问题")
+        second = fake_request(
+            session_id="s-retry-shadow",
+            prompt="刚才你通过接管发给我的那句完整回复是什么",
+        )
+
+        async def run_retry_restore():
+            await plugin.on_llm_request(
+                FakeEvent("s-retry-shadow", message="我先确认一个无关问题", sender_id="u1"),
+                first,
+            )
+            await plugin.on_llm_request(
+                FakeEvent(
+                    "s-retry-shadow",
+                    message="刚才你通过接管发给我的那句完整回复是什么",
+                    sender_id="u1",
+                ),
+                second,
+            )
+
+        asyncio.run(run_retry_restore())
+
+        self.assertGreaterEqual(calls["get"], 2)
+        self.assertNotIn(
+            "sylanne_realtime_assistant_history",
+            "\n".join(self._request_text_parts(first)),
+        )
+        self.assertIn(
+            "第一次 KV 失败后仍应恢复的回复",
+            "\n".join(self._request_text_parts(second)),
+        )
 
     def test_realtime_intercept_skips_shadow_when_agent_history_keeps_reply(self):
         sent = []
@@ -6261,6 +6494,93 @@ class AstrBotLifecycleTests(unittest.TestCase):
         self.assertIn("sylanne_realtime_active_dispatch", injected)
         self.assertIn("第一条真正发出前", injected)
         self.assertIn("plugin users", injected)
+
+    def test_zero_sent_interrupted_realtime_reply_becomes_next_turn_breakpoint(self):
+        sent = []
+
+        class FakeContext:
+            async def send_message(self, origin, message):
+                sent.append((origin, str(message)))
+                return {"ok": True}
+
+        plugin = new_plugin({"enable_realtime_chat": True, "enable_sticker_reaction": False})
+        plugin.context = FakeContext()
+        self._bind_common_state_hooks(plugin)
+        plugin._conversation_input_epoch = {"s-zero-breakpoint": 1}
+        plan = {
+            "session_key": "s-zero-breakpoint",
+            "input_epoch": 1,
+            "full_text": "unsent intent should survive plugin update",
+            "message_parts": [
+                {
+                    "index": 0,
+                    "text": "unsent intent should survive",
+                    "delay_before_seconds": 30.0,
+                },
+                {
+                    "index": 1,
+                    "text": "plugin update",
+                    "delay_before_seconds": 0.0,
+                },
+            ],
+        }
+
+        async def run_zero_sent_interruption():
+            send_task = asyncio.create_task(
+                plugin._send_realtime_chat_plan(
+                    FakeEvent("s-zero-breakpoint"),
+                    plan,
+                    source="unit_test",
+                ),
+            )
+            await asyncio.sleep(0.05)
+            interrupt_request = fake_request(
+                session_id="s-zero-breakpoint",
+                prompt="new user correction before first chunk",
+            )
+            await plugin.on_llm_request(
+                FakeEvent(
+                    "s-zero-breakpoint",
+                    message="new user correction before first chunk",
+                ),
+                interrupt_request,
+            )
+            result = await asyncio.wait_for(send_task, timeout=0.25)
+            next_request = fake_request(
+                session_id="s-zero-breakpoint",
+                prompt="what did you mean",
+            )
+            await plugin.on_llm_request(
+                FakeEvent("s-zero-breakpoint", message="what did you mean"),
+                next_request,
+            )
+            duplicate_request = fake_request(
+                session_id="s-zero-breakpoint",
+                prompt="again",
+            )
+            await plugin.on_llm_request(
+                FakeEvent("s-zero-breakpoint", message="again"),
+                duplicate_request,
+            )
+            return result, interrupt_request, next_request, duplicate_request
+
+        result, interrupt_request, next_request, duplicate_request = asyncio.run(
+            run_zero_sent_interruption(),
+        )
+
+        interrupt_injected = "\n".join(self._request_text_parts(interrupt_request))
+        injected = "\n".join(self._request_text_parts(next_request))
+        duplicate_injected = "\n".join(self._request_text_parts(duplicate_request))
+        self.assertEqual(sent, [])
+        self.assertEqual(result["message_count"], 0)
+        self.assertEqual(result["interrupted_reason"], "user_interrupted")
+        self.assertIn("sylanne_interrupted_reply_breakpoint", interrupt_injected)
+        self.assertIn("sent_count=0", interrupt_injected)
+        self.assertIn("unsent_count=2", interrupt_injected)
+        self.assertIn("unsent intent should survive", interrupt_injected)
+        self.assertEqual(interrupt_request.prompt, "new user correction before first chunk")
+        self.assertNotIn("sylanne_realtime_assistant_history", injected)
+        self.assertNotIn("sylanne_interrupted_reply_breakpoint", duplicate_injected)
 
     def test_realtime_chat_active_dispatch_is_visible_to_interrupting_request(self):
         sent = []
@@ -7531,6 +7851,87 @@ class AstrBotLifecycleTests(unittest.TestCase):
         self.assertEqual(result["session_key"], "friend_456")
         self.assertEqual(result["message_id"], "20002")
         self.assertEqual(result["reason"], "friend_recall")
+
+    def test_napcat_input_status_is_held_without_creating_user_turn(self):
+        plugin = new_plugin({"enable_realtime_chat": True})
+        event = FakeEvent("s-input-status", message="", platform_name="aiocqhttp")
+        event.raw_message = {
+            "post_type": "notice",
+            "notice_type": "notify",
+            "sub_type": "input_status",
+            "status_text": "对方正在输入",
+            "event_type": "1",
+            "user_id": "u1",
+        }
+        request = fake_request(session_id="s-input-status", prompt="")
+
+        asyncio.run(plugin.on_llm_request(event, request))
+
+        self.assertTrue(event.stopped)
+        self.assertTrue(request._sylanne_control_event)
+        self.assertEqual(
+            request._sylanne_default_response_stop_reason,
+            "user_typing_status",
+        )
+        self.assertNotIn("s-input-status", plugin._conversation_input_epoch)
+        self.assertIn("s-input-status", plugin._realtime_user_typing_until)
+
+    def test_empty_input_event_holds_without_interrupting_realtime_dispatch(self):
+        sent = []
+
+        class FakeContext:
+            async def send_message(self, origin, message):
+                sent.append((origin, str(message)))
+                return {"ok": True}
+
+        plugin = new_plugin(
+            {
+                "enable_realtime_chat": True,
+                "enable_sticker_reaction": False,
+                "realtime_empty_input_typing_hold_seconds": 0.02,
+            },
+        )
+        plugin.context = FakeContext()
+        plugin._conversation_input_epoch = {"s-empty-input": 1}
+        plan = {
+            "session_key": "s-empty-input",
+            "input_epoch": 1,
+            "message_parts": [
+                {
+                    "index": 0,
+                    "text": "still sent after typing pause",
+                    "delay_before_seconds": 0.05,
+                },
+            ],
+        }
+
+        async def run_empty_event_during_dispatch():
+            send_task = asyncio.create_task(
+                plugin._send_realtime_chat_plan(
+                    FakeEvent("s-empty-input"),
+                    plan,
+                    source="unit_test",
+                ),
+            )
+            await asyncio.sleep(0.01)
+            event = FakeEvent("s-empty-input", message="", platform_name="aiocqhttp")
+            request = fake_request(session_id="s-empty-input", prompt="")
+            await plugin.on_llm_request(event, request)
+            result = await asyncio.wait_for(send_task, timeout=1.0)
+            return event, request, result
+
+        event, request, result = asyncio.run(run_empty_event_during_dispatch())
+
+        self.assertTrue(event.stopped)
+        self.assertTrue(request._sylanne_control_event)
+        self.assertEqual(
+            request._sylanne_default_response_stop_reason,
+            "user_typing_empty_event",
+        )
+        self.assertIn("typing_hold_until", request._sylanne_control_event_payload)
+        self.assertEqual(plugin._conversation_input_epoch["s-empty-input"], 1)
+        self.assertEqual(sent, [("s-empty-input", "message:still sent after typing pause")])
+        self.assertNotIn("interrupted_reason", result)
 
     def test_observe_sticker_usage_stores_metadata_only(self):
         stored = {}

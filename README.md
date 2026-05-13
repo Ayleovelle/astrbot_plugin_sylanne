@@ -1630,6 +1630,8 @@ enable_safety_boundary = false
 | `realtime_input_completion_llm_gate_enabled` | bool | `true` | 疑似用户还没说完时，是否调用内部判断 LLM 判断分段输入是否完整。 |
 | `realtime_input_completion_probe_delay_seconds` | float | `0.25` | 首个疑似碎片后的基础探测等待秒数；插件会按碎片数量和窗口状态自动缩放。 |
 | `realtime_input_completion_max_wait_seconds` | float | `4.0` | 判断用户仍未说完时的单轮最长等待时间；运行时带 4 秒硬上限，超过后放行，把主要时间留给 LLM 正常理解合并后的用户意图。 |
+| `realtime_user_typing_hold_seconds` | float | `0.8` | 平台明确上报“正在输入”时，正在分条发送的回复会短暂停顿，不把该通知当作新的用户意图。 |
+| `realtime_empty_input_typing_hold_seconds` | float | `0.35` | 收到无文本、无媒体、无 prompt 的空事件时按输入中处理，只让发送稍等一下，不推进会话轮次。 |
 | `realtime_chat_dry_run_default` | bool | `false` | 公共 API 未显式传 `dry_run` 时是否只返回计划不发送。 |
 | `realtime_chat_strip_markdown` | bool | `true` | 分条前清理常见 Markdown 标记。 |
 | `enable_sticker_reaction` | bool | `true` | 是否根据情绪和氛围补发表情包。 |
