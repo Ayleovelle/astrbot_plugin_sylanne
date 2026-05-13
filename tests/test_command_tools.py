@@ -1133,6 +1133,69 @@ class CommandAndToolSmokeTests(unittest.TestCase):
         self.assertEqual(payload["state"], "group_atmosphere")
         self.assertEqual(payload["runtime"], {"enabled": True})
 
+    def test_legacy_state_tools_delegate_to_unified_state_query(self):
+        plugin = new_plugin()
+        calls = []
+
+        async def fake_query_single(
+            self,
+            state_name,
+            event_or_session,
+            *,
+            request,
+            session_key,
+            detail,
+            track,
+        ):
+            calls.append(
+                {
+                    "state_name": state_name,
+                    "session_key": session_key,
+                    "detail": detail,
+                    "track": track,
+                },
+            )
+            return {
+                "kind": state_name,
+                "session_key": session_key,
+                "detail": detail,
+                "track": track,
+            }
+
+        bind_async(plugin, "_query_single_agent_state", fake_query_single)
+        event = FakeEvent("s-legacy-state-tools", sender_id="u1", sender_name="Alice")
+
+        emotion_raw = asyncio.run(
+            collect_async_generator(
+                plugin.get_bot_emotion_state_tool(
+                    event,
+                    detail="summary",
+                    track="speaker",
+                ),
+            ),
+        )[0]
+        humanlike_raw = asyncio.run(
+            collect_async_generator(
+                plugin.get_bot_humanlike_state_tool(event, detail="full"),
+            ),
+        )[0]
+        integrated_raw = asyncio.run(
+            collect_async_generator(
+                plugin.get_bot_integrated_self_state_tool(event, detail="full"),
+            ),
+        )[0]
+
+        self.assertEqual(
+            [call["state_name"] for call in calls],
+            ["emotion", "humanlike", "integrated"],
+        )
+        self.assertEqual(calls[0]["track"], "speaker")
+        self.assertEqual(calls[1]["detail"], "full")
+        self.assertEqual(calls[2]["detail"], "full")
+        self.assertEqual(json.loads(emotion_raw)["kind"], "emotion")
+        self.assertEqual(json.loads(humanlike_raw)["kind"], "humanlike")
+        self.assertEqual(json.loads(integrated_raw)["kind"], "integrated")
+
     def test_llm_tool_json_result_is_bounded_and_valid_json(self):
         plugin = new_plugin({"llm_tool_response_max_chars": 420})
 

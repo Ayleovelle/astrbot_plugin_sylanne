@@ -11686,6 +11686,32 @@ class EmotionalStatePlugin(Star):
             commit=False,
         )
 
+    async def _legacy_state_tool_snapshot(
+        self,
+        event: AstrMessageEvent,
+        state_name: str,
+        *,
+        detail: str = "summary",
+        track: str = "conversation",
+    ) -> dict[str, Any] | None:
+        detail_mode = "full" if str(detail or "").strip().lower() == "full" else "summary"
+        session_key = self._resolve_public_session_key(event)
+        return await self._query_single_agent_state(
+            state_name,
+            event,
+            request=None,
+            session_key=session_key,
+            detail=detail_mode,
+            track=track,
+        )
+
+    def _plain_tool_json_result(
+        self,
+        event: AstrMessageEvent,
+        payload: dict[str, Any] | None,
+    ) -> Any:
+        return event.plain_result(self._llm_tool_json_result(payload or {}))
+
     async def get_bot_emotion_state_tool(
         self,
         event: AstrMessageEvent,
@@ -11697,38 +11723,13 @@ class EmotionalStatePlugin(Star):
         Args:
             detail(string): 返回粒度，可填 summary 或 full
         """
-        full = str(detail or "").strip().lower() == "full"
-        track_mode = str(track or "conversation").strip().lower()
-        identity = self._agent_identity(event)
-        session_key = identity.conversation_id
-        track_payload: dict[str, Any] = {
-            "kind": "conversation",
-            "conversation_id": identity.conversation_id,
-        }
-        if track_mode in {"speaker", "current_speaker"}:
-            speaker_key = identity.speaker_track_id
-            if speaker_key and self._cfg_bool("agent_speaker_relationship_tracking", True):
-                session_key = speaker_key
-                track_payload = {
-                    "kind": "speaker",
-                    "conversation_id": identity.conversation_id,
-                    "speaker_id": identity.speaker_id,
-                    "speaker_name": identity.speaker_name,
-                }
-            else:
-                track_payload["requested"] = "speaker"
-                track_payload["available"] = False
-        snapshot = await self.get_emotion_snapshot(
+        snapshot = await self._legacy_state_tool_snapshot(
             event,
-            session_key=session_key,
-            include_prompt_fragment=full,
-            prompt_fragment_detail="full" if full else None,
+            "emotion",
+            detail=detail,
+            track=track,
         )
-        snapshot["track"] = track_payload
-        if not full:
-            snapshot.pop("prompt_fragment", None)
-            snapshot["consequences"]["notes"] = snapshot["consequences"]["notes"][:2]
-        yield event.plain_result(self._llm_tool_json_result(snapshot))
+        yield self._plain_tool_json_result(event, snapshot)
 
     async def get_bot_group_atmosphere_state_tool(
         self,
@@ -11736,13 +11737,12 @@ class EmotionalStatePlugin(Star):
         detail: str = "summary",
     ):
         """Get the room mood / group atmosphere state, read-only."""
-        full = str(detail or "").strip().lower() == "full"
-        snapshot = await self.get_group_atmosphere_snapshot(
+        snapshot = await self._legacy_state_tool_snapshot(
             event,
-            exposure="internal" if full else "plugin_safe",
-            include_prompt_fragment=full,
+            "group_atmosphere",
+            detail=detail,
         )
-        yield event.plain_result(self._llm_tool_json_result(snapshot))
+        yield self._plain_tool_json_result(event, snapshot)
 
     @filter.llm_tool(name="query_agent_state")
     async def query_agent_state_tool(
@@ -11783,7 +11783,7 @@ class EmotionalStatePlugin(Star):
             source="llm_tool",
             use_llm=True,
         )
-        yield event.plain_result(self._llm_tool_json_result(snapshot))
+        yield self._plain_tool_json_result(event, snapshot)
 
     async def get_bot_humanlike_state_tool(
         self,
@@ -11791,13 +11791,12 @@ class EmotionalStatePlugin(Star):
         detail: str = "summary",
     ):
         """Get the bot's simulated humanlike state, read-only."""
-        full = str(detail or "").strip().lower() == "full"
-        snapshot = await self.get_humanlike_snapshot(
+        snapshot = await self._legacy_state_tool_snapshot(
             event,
-            exposure="internal" if full else "plugin_safe",
-            include_prompt_fragment=full,
+            "humanlike",
+            detail=detail,
         )
-        yield event.plain_result(self._llm_tool_json_result(snapshot))
+        yield self._plain_tool_json_result(event, snapshot)
 
     async def get_bot_lifelike_learning_state_tool(
         self,
@@ -11805,13 +11804,12 @@ class EmotionalStatePlugin(Star):
         detail: str = "summary",
     ):
         """Get the bot's learned common-ground and initiative state, read-only."""
-        full = str(detail or "").strip().lower() == "full"
-        snapshot = await self.get_lifelike_learning_snapshot(
+        snapshot = await self._legacy_state_tool_snapshot(
             event,
-            exposure="internal" if full else "plugin_safe",
-            include_prompt_fragment=full,
+            "lifelike_learning",
+            detail=detail,
         )
-        yield event.plain_result(self._llm_tool_json_result(snapshot))
+        yield self._plain_tool_json_result(event, snapshot)
 
     async def get_bot_proactive_speech_decision_tool(
         self,
@@ -11825,7 +11823,7 @@ class EmotionalStatePlugin(Star):
             candidate_context=candidate_context,
             use_llm=use_llm,
         )
-        yield event.plain_result(self._llm_tool_json_result(decision))
+        yield self._plain_tool_json_result(event, decision)
 
     async def request_bot_proactive_speech_dispatch_tool(
         self,
@@ -11845,7 +11843,7 @@ class EmotionalStatePlugin(Star):
             force=force,
             message_text=message_text,
         )
-        yield event.plain_result(self._llm_tool_json_result(result))
+        yield self._plain_tool_json_result(event, result)
 
     async def get_bot_personality_drift_state_tool(
         self,
@@ -11853,13 +11851,12 @@ class EmotionalStatePlugin(Star):
         detail: str = "summary",
     ):
         """Get the bot's slow real-time personality drift state, read-only."""
-        full = str(detail or "").strip().lower() == "full"
-        snapshot = await self.get_personality_drift_snapshot(
+        snapshot = await self._legacy_state_tool_snapshot(
             event,
-            exposure="internal" if full else "plugin_safe",
-            include_prompt_fragment=full,
+            "personality_drift",
+            detail=detail,
         )
-        yield event.plain_result(self._llm_tool_json_result(snapshot))
+        yield self._plain_tool_json_result(event, snapshot)
 
     async def get_bot_moral_repair_state_tool(
         self,
@@ -11867,13 +11864,12 @@ class EmotionalStatePlugin(Star):
         detail: str = "summary",
     ):
         """Get the bot's moral repair and trust-repair state, read-only."""
-        full = str(detail or "").strip().lower() == "full"
-        snapshot = await self.get_moral_repair_snapshot(
+        snapshot = await self._legacy_state_tool_snapshot(
             event,
-            exposure="internal" if full else "plugin_safe",
-            include_prompt_fragment=full,
+            "moral_repair",
+            detail=detail,
         )
-        yield event.plain_result(self._llm_tool_json_result(snapshot))
+        yield self._plain_tool_json_result(event, snapshot)
 
     async def get_bot_fallibility_state_tool(
         self,
@@ -11881,13 +11877,12 @@ class EmotionalStatePlugin(Star):
         detail: str = "summary",
     ):
         """Get the bot's optional low-risk fallibility state, read-only."""
-        full = str(detail or "").strip().lower() == "full"
-        snapshot = await self.get_fallibility_snapshot(
+        snapshot = await self._legacy_state_tool_snapshot(
             event,
-            exposure="internal" if full else "plugin_safe",
-            include_prompt_fragment=full,
+            "fallibility",
+            detail=detail,
         )
-        yield event.plain_result(self._llm_tool_json_result(snapshot))
+        yield self._plain_tool_json_result(event, snapshot)
 
     async def get_bot_integrated_self_state_tool(
         self,
@@ -11895,12 +11890,12 @@ class EmotionalStatePlugin(Star):
         detail: str = "summary",
     ):
         """Get the bot's integrated self-state arbitration snapshot, read-only."""
-        full = str(detail or "").strip().lower() == "full"
-        snapshot = await self.get_integrated_self_snapshot(
+        snapshot = await self._legacy_state_tool_snapshot(
             event,
-            include_raw_snapshots=full,
+            "integrated",
+            detail=detail,
         )
-        yield event.plain_result(self._llm_tool_json_result(snapshot))
+        yield self._plain_tool_json_result(event, snapshot)
 
     @filter.command("emotion", alias={"emotion_state", "情绪状态"})
     async def emotion_status(self, event: AstrMessageEvent):
@@ -13455,7 +13450,7 @@ class EmotionalStatePlugin(Star):
             f"control={values.get('control', 0.0):.2f}; "
             f"relationship_decision={decision}; active_effects={active_effects}.\n"
             f"{safety}\n"
-            'For details, call get_bot_emotion_state(detail="full") only when needed.\n'
+            "Detailed state remains internal; rely on this compact state unless the Agent supplies more.\n"
             "</bot_emotion_state>"
         )
 
@@ -13601,7 +13596,7 @@ class EmotionalStatePlugin(Star):
             return (
                 '<bot_emotion_state private="true" detail="diff">\n'
                 "No material emotion-state change since the last injected compact snapshot. "
-                'Call get_bot_emotion_state(detail="full") if this turn needs details.\n'
+                "Detailed state remains internal; rely on the existing compact state unless the Agent supplies more.\n"
                 "</bot_emotion_state>"
             )
         return (
@@ -13611,7 +13606,7 @@ class EmotionalStatePlugin(Star):
             f"relationship_decision={current['relationship_decision']}; "
             f"relationship_decision_changed={decision_changed}; "
             f"changed_values={json.dumps(changed, ensure_ascii=False)}.\n"
-            'For details, call get_bot_emotion_state(detail="full") only when needed.\n'
+            "Detailed state remains internal; rely on these material changes unless the Agent supplies more.\n"
             "</bot_emotion_state>"
         )
 
@@ -13690,7 +13685,7 @@ class EmotionalStatePlugin(Star):
             return (
                 '<bot_group_atmosphere private="true" detail="diff">\n'
                 "No material room-mood change since the last injected compact snapshot. "
-                'Call query_agent_state(state="group_atmosphere", detail="full") if needed.\n'
+                "Detailed room state remains internal; rely on the existing compact state unless the Agent supplies more.\n"
                 "</bot_group_atmosphere>"
             )
         return (
@@ -13700,7 +13695,7 @@ class EmotionalStatePlugin(Star):
             f"cooldown_active={current['cooldown_active']}; "
             f"cooldown_remaining_turns={current['cooldown_remaining_turns']}; "
             f"changed_values={json.dumps(changed, ensure_ascii=False)}.\n"
-            'For details, call query_agent_state(state="group_atmosphere", detail="full") only when needed.\n'
+            "Detailed room state remains internal; rely on these material changes unless the Agent supplies more.\n"
             "</bot_group_atmosphere>"
         )
 
@@ -13856,22 +13851,11 @@ class EmotionalStatePlugin(Star):
         return self._build_compact_auxiliary_state_injection(state_name)
 
     def _build_compact_auxiliary_state_injection(self, state_name: str) -> str:
-        tool_name = self._tool_name_for_auxiliary_state(state_name)
         return (
             f'<bot_auxiliary_state private="true" name="{state_name}" detail="compact">\n'
-            f'{state_name} is enabled. Use {tool_name}(detail="full") only when this turn needs detailed state.\n'
+            f"{state_name} is enabled. Detailed state-tool access is internal; rely on compact state unless the Agent supplies more.\n"
             "</bot_auxiliary_state>"
         )
-
-    def _tool_name_for_auxiliary_state(self, state_name: str) -> str:
-        return {
-            "humanlike": "get_bot_humanlike_state",
-            "lifelike_learning": "get_bot_lifelike_learning_state",
-            "personality_drift": "get_bot_personality_drift_state",
-            "moral_repair": "get_bot_moral_repair_state",
-            "fallibility": "get_bot_fallibility_state",
-            "group_atmosphere": "get_bot_group_atmosphere_state",
-        }.get(state_name, "get_bot_integrated_self_state")
 
     def _ensure_persona_state(
         self,
@@ -14385,6 +14369,29 @@ class EmotionalStatePlugin(Star):
             if name in SYLANNE_LLM_TOOL_NAMES and name not in visible_names:
                 removed.append(name)
                 continue
+            if isinstance(item, dict):
+                pruned_item = dict(item)
+                item_removed: list[str] = []
+                for key in ("function_declarations", "functionDeclarations"):
+                    nested = item.get(key)
+                    if not isinstance(nested, (list, tuple)):
+                        continue
+                    pruned_nested, nested_removed = self._pruned_sylanne_tool_items(
+                        nested,
+                        visible_names=visible_names,
+                    )
+                    if nested_removed:
+                        pruned_item[key] = pruned_nested
+                        item_removed.extend(nested_removed)
+                if item_removed:
+                    removed.extend(item_removed)
+                    if not any(
+                        self._response_field_has_payload(pruned_item.get(key))
+                        for key in ("function_declarations", "functionDeclarations")
+                    ):
+                        continue
+                    kept.append(pruned_item)
+                    continue
             kept.append(item)
         if isinstance(value, tuple):
             return tuple(kept), removed

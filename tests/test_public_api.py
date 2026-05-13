@@ -1403,9 +1403,12 @@ class MemoryPayloadPublicApiTests(unittest.TestCase):
         self.assertIn("bot_emotion_state", texts[0])
         joined = "\n".join(texts[1:])
         self.assertIn("bot_auxiliary_state", joined)
-        self.assertIn("get_bot_humanlike_state", joined)
-        self.assertIn("get_bot_lifelike_learning_state", joined)
-        self.assertIn("get_bot_personality_drift_state", joined)
+        self.assertIn('name="humanlike"', joined)
+        self.assertIn('name="lifelike_learning"', joined)
+        self.assertIn('name="personality_drift"', joined)
+        self.assertIn("Detailed state-tool access is internal", joined)
+        self.assertNotIn("query_agent_state(", joined)
+        self.assertNotIn("get_bot_humanlike_state", joined)
 
     def test_on_llm_request_can_use_full_auxiliary_injection_for_compatibility(self):
         self._install_astrbot_stubs()

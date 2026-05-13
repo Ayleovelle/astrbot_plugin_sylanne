@@ -694,7 +694,7 @@ def build_group_atmosphere_prompt_fragment(state: GroupAtmosphereState) -> str:
         f"activity={values['activity_level']:.2f}; tension={values['tension']:.2f}; "
         f"playfulness={values['playfulness']:.2f}; bot_attention={values['bot_attention']:.2f}; "
         f"interrupt_risk={values['interrupt_risk']:.2f}; joinability={values['joinability']:.2f}.\n"
-        'For details, call query_agent_state(state="group_atmosphere", detail="full") only when needed.\n'
+        "Detailed room state remains internal; rely on this compact signal unless the Agent supplies more.\n"
         "</bot_group_atmosphere>"
     )
 

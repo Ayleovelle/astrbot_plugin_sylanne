@@ -51,6 +51,7 @@ class PackagePluginTests(unittest.TestCase):
         self.assertIn("realtime_chat_engine.py", files)
         self.assertIn("realtime_chat_input.py", files)
         self.assertIn("moral_repair_engine.py", files)
+        self.assertIn("memory_engine.py", files)
         self.assertIn("fallibility_engine.py", files)
         self.assertIn("agent_identity.py", files)
         self.assertIn("group_atmosphere_engine.py", files)
@@ -112,15 +113,47 @@ class PackagePluginTests(unittest.TestCase):
 
     def test_readme_install_tree_matches_release_package_boundaries(self):
         readme = (ROOT / "README.md").read_text(encoding="utf-8")
-        install_tree = readme.split("```text", 1)[1].split("```", 1)[0]
+        install_trees = readme.split("```text")
+        release_tree = install_trees[1].split("```", 1)[0]
+        manual_tree = install_trees[4].split("```", 1)[0]
 
-        self.assertIn("astrbot_plugin_sylanne/", install_tree)
-        self.assertIn("__init__.py", install_tree)
-        self.assertIn("agent_identity.py", install_tree)
-        self.assertIn("group_atmosphere_engine.py", install_tree)
-        self.assertIn("public_api.py", install_tree)
-        self.assertNotIn("tests/", install_tree)
-        self.assertIn("发布 zip 不会包含这些目录", readme)
+        self.assertIn("astrbot_plugin_sylanne/", release_tree)
+        self.assertIn("astrbot_plugin_sylanne/", manual_tree)
+        expected_entries = (
+            "__init__.py",
+            "agent_identity.py",
+            "group_atmosphere_engine.py",
+            "memory_engine.py",
+            "logo.png",
+            "README.md",
+            "CHANGELOG.md",
+            "docs/",
+            "assets/",
+            "lifecycle_model_fit.svg",
+            "lifecycle_model_fit_summary.csv",
+            "lifecycle_model_fit_table.md",
+            "runtime_overview.svg",
+            "sylanne-mascot.gif",
+            "sylanne-mascot-card.svg",
+            "theory_feature_matrix_overhead.png",
+            "theory_feature_matrix_overhead.svg",
+            "theory_lifecycle_fit_explanation.png",
+            "theory_lifecycle_fit_explanation.svg",
+            "workflow_and_proactive.svg",
+            "pages/",
+            "memory-settings/",
+            "index.html",
+            "app.js",
+            "style.css",
+            "public_api.py",
+        )
+        for entry in expected_entries:
+            with self.subTest(entry=entry):
+                self.assertIn(entry, release_tree)
+                self.assertIn(entry, manual_tree)
+        self.assertNotIn("tests/", release_tree)
+        self.assertNotIn("tests/", manual_tree)
+        self.assertIn("发布 zip 包", readme)
 
     def test_package_plugin_name_matches_metadata(self):
         module = load_package_script()
@@ -325,9 +358,16 @@ class PluginZipPreflightTests(unittest.TestCase):
             (prefix + "logo.png", "PNG\n"),
             (prefix + "requirements.txt", "# no dependencies\n"),
             (prefix + "_conf_schema.json", "{}\n"),
+            (prefix + "docs/assets/lifecycle_model_fit.svg", "<svg></svg>\n"),
+            (prefix + "docs/assets/lifecycle_model_fit_summary.csv", "case,count\n"),
+            (prefix + "docs/assets/lifecycle_model_fit_table.md", "| case |\n"),
             (prefix + "docs/assets/runtime_overview.svg", "<svg></svg>\n"),
             (prefix + "docs/assets/sylanne-mascot.gif", "GIF89a\n"),
             (prefix + "docs/assets/sylanne-mascot-card.svg", "<svg></svg>\n"),
+            (prefix + "docs/assets/theory_feature_matrix_overhead.png", "PNG\n"),
+            (prefix + "docs/assets/theory_feature_matrix_overhead.svg", "<svg></svg>\n"),
+            (prefix + "docs/assets/theory_lifecycle_fit_explanation.png", "PNG\n"),
+            (prefix + "docs/assets/theory_lifecycle_fit_explanation.svg", "<svg></svg>\n"),
             (prefix + "docs/assets/workflow_and_proactive.svg", "<svg></svg>\n"),
             (prefix + "pages/memory-settings/index.html", "<!doctype html>\n"),
             (prefix + "pages/memory-settings/app.js", "export {};\n"),
@@ -391,6 +431,21 @@ class PluginZipPreflightTests(unittest.TestCase):
             "CHANGELOG.md",
             "public_api.py",
             "requirements.txt",
+            "logo.png",
+            "docs/assets/lifecycle_model_fit.svg",
+            "docs/assets/lifecycle_model_fit_summary.csv",
+            "docs/assets/lifecycle_model_fit_table.md",
+            "docs/assets/runtime_overview.svg",
+            "docs/assets/sylanne-mascot.gif",
+            "docs/assets/sylanne-mascot-card.svg",
+            "docs/assets/theory_feature_matrix_overhead.png",
+            "docs/assets/theory_feature_matrix_overhead.svg",
+            "docs/assets/theory_lifecycle_fit_explanation.png",
+            "docs/assets/theory_lifecycle_fit_explanation.svg",
+            "docs/assets/workflow_and_proactive.svg",
+            "pages/memory-settings/index.html",
+            "pages/memory-settings/app.js",
+            "pages/memory-settings/style.css",
         )
         for suffix in required_suffixes:
             with self.subTest(suffix=suffix):

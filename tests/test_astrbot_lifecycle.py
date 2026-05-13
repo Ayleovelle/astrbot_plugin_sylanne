@@ -326,7 +326,9 @@ class AstrBotLifecycleTests(unittest.TestCase):
         self.assertEqual(saves, [])
         emotion_text = self._find_text_part(request, "bot_emotion_state")
         self.assertIn('detail="compact"', emotion_text)
-        self.assertIn("get_bot_emotion_state", emotion_text)
+        self.assertIn("Detailed state remains internal", emotion_text)
+        self.assertNotIn("get_bot_emotion_state", emotion_text)
+        self.assertNotIn("query_agent_state(", emotion_text)
         self.assertLess(len(emotion_text), 700)
 
     def test_state_injection_full_mode_keeps_verbose_emotion_fragment(self):
@@ -520,6 +522,84 @@ class AstrBotLifecycleTests(unittest.TestCase):
         self.assertIn("emotion", appended_sources)
         self.assertIn("realtime_chat.style", appended_sources)
         self.assertIn("sylanne_llm_tools", skipped_sources)
+
+    def test_gemini_native_function_declarations_prune_only_sylanne_tools(self):
+        plugin = new_plugin(
+            {
+                "assessment_timing": "post",
+                "state_injection_max_added_chars": 2400,
+                "state_injection_max_parts": 8,
+            },
+        )
+        self._bind_common_state_hooks(plugin)
+
+        async def fake_get_current_chat_provider_id(*, umo):
+            return "哈基米/gemini-3-flash-preview"
+
+        plugin.context = SimpleNamespace(
+            get_current_chat_provider_id=fake_get_current_chat_provider_id,
+        )
+        request = fake_request(session_id="s-gemini-native-tools", prompt="查一下")
+        request.tools = [
+            {
+                "function_declarations": [
+                    {"name": "query_agent_state", "description": "internal state"},
+                    {"name": "get_bot_emotion_state", "description": "legacy state"},
+                    {"name": "aiimg_generate", "description": "foreign image tool"},
+                ],
+            },
+            {
+                "functionDeclarations": [
+                    {"name": "get_bot_integrated_self_state"},
+                    {"name": "search_web"},
+                ],
+            },
+        ]
+        request.params = {
+            "tools": [
+                {
+                    "function_declarations": [
+                        {"name": "get_bot_humanlike_state"},
+                        {"name": "music_search"},
+                    ],
+                },
+            ],
+        }
+
+        asyncio.run(plugin.on_llm_request(FakeEvent("s-gemini-native-tools"), request))
+
+        self.assertEqual(
+            request.tools,
+            [
+                {
+                    "function_declarations": [
+                        {"name": "aiimg_generate", "description": "foreign image tool"},
+                    ],
+                },
+                {
+                    "functionDeclarations": [
+                        {"name": "search_web"},
+                    ],
+                },
+            ],
+        )
+        self.assertEqual(
+            request.params["tools"],
+            [
+                {
+                    "function_declarations": [
+                        {"name": "music_search"},
+                    ],
+                },
+            ],
+        )
+        diagnostics = asyncio.run(
+            plugin.get_agent_runtime_diagnostics("s-gemini-native-tools"),
+        )
+        self.assertIn(
+            "sylanne_llm_tools",
+            {item.get("source") for item in diagnostics["state_injection"]["skipped"]},
+        )
 
     def test_non_gemini_tool_request_hides_all_sylanne_tools_but_keeps_foreign_tools(self):
         plugin = new_plugin(
@@ -2498,9 +2578,9 @@ class AstrBotLifecycleTests(unittest.TestCase):
         self.assertIn("group-room", plugin._agent_identity_profile_cache)
         self.assertIn("group-room::speaker:user-a", plugin._agent_identity_profile_cache)
         self.assertTrue(any('name="group_atmosphere"' in text for text in texts))
-        self.assertTrue(
-            any("get_bot_group_atmosphere_state" in text for text in texts),
-        )
+        joined = "\n".join(texts)
+        self.assertNotIn("query_agent_state(", joined)
+        self.assertNotIn("get_bot_group_atmosphere_state", joined)
         self.assertGreaterEqual(
             group_saves[0][1].values["bot_attention"],
             0.29,
@@ -2841,8 +2921,12 @@ class AstrBotLifecycleTests(unittest.TestCase):
         asyncio.run(plugin.on_llm_request(FakeEvent("s-life-inject"), request))
 
         self._find_text_part(request, "bot_emotion_state")
-        auxiliary_text = self._find_text_part(request, "get_bot_lifelike_learning_state")
+        auxiliary_text = self._find_text_part(
+            request,
+            'name="lifelike_learning"',
+        )
         self.assertIn("bot_auxiliary_state", auxiliary_text)
+        self.assertNotIn("query_agent_state(", auxiliary_text)
 
     def test_fallibility_enabled_with_zero_strength_updates_without_injection(self):
         from fallibility_engine import FallibilityState
@@ -2906,8 +2990,12 @@ class AstrBotLifecycleTests(unittest.TestCase):
         asyncio.run(plugin.on_llm_request(FakeEvent("s-fallibility-inject"), request))
 
         self._find_text_part(request, "bot_emotion_state")
-        auxiliary_text = self._find_text_part(request, "get_bot_fallibility_state")
+        auxiliary_text = self._find_text_part(
+            request,
+            'name="fallibility"',
+        )
         self.assertIn("bot_auxiliary_state", auxiliary_text)
+        self.assertNotIn("query_agent_state(", auxiliary_text)
 
     def test_auxiliary_state_injection_full_mode_keeps_legacy_fragments(self):
         from lifelike_learning_engine import LifelikeLearningState
@@ -3165,8 +3253,12 @@ class AstrBotLifecycleTests(unittest.TestCase):
         asyncio.run(plugin.on_llm_request(FakeEvent("s-drift-inject"), request))
 
         self._find_text_part(request, "bot_emotion_state")
-        auxiliary_text = self._find_text_part(request, "get_bot_personality_drift_state")
+        auxiliary_text = self._find_text_part(
+            request,
+            'name="personality_drift"',
+        )
         self.assertIn("bot_auxiliary_state", auxiliary_text)
+        self.assertNotIn("query_agent_state(", auxiliary_text)
         self._assert_no_text_part_contains(request, "personality drift modulation")
 
     def test_personality_drift_request_reuses_loaded_state_for_runtime_update_and_injection(self):
