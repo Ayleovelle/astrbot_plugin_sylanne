@@ -107,7 +107,7 @@
 | 许可证 | `GPL-3.0-or-later` |
 | 运行时第三方依赖 | 当前无额外依赖，见 `requirements.txt` |
 
-`2.3.13` 保留 Sylanne 自有记忆知识库、`2.1.0` 只读记忆查询入口、`2.1.3` Agent-owned context 即时聊天修复、`2.2.0` AstrBot Embedding 提供商驱动的向量召回、`2.3.0` 可视化记忆设置 Page、`2.3.8` 即时聊天短答锚定修复、`2.3.9` 哈基米/Gemini 空回复规避、`2.3.10` 完整上下文回填、`2.3.11` 内部工具统一隐藏和 `2.3.12` 主动聊天反馈修复，并进一步修复 LLM 等待期用户追发上下文丢失与碎片完整性等待过长问题。核心情绪、回复后后台评估（post）、`group_atmosphere_state`、`humanlike_state`、`lifelike_learning_state`、`personality_drift_state`、Sylanne 自有记忆、即时聊天节奏和欺骗/操控/逃责类动作阻断默认自动运行；道德修复、瑕疵模拟、心理筛查等实验/维护模块仍由配置者显式打开。
+`2.3.13` 保留 Sylanne 自有记忆知识库、`2.1.0` 只读记忆查询入口、`2.1.3` Agent-owned context 即时聊天修复、`2.2.0` AstrBot Embedding 提供商驱动的向量召回、`2.3.0` 可视化记忆设置 Page、`2.3.8` 即时聊天短答锚定修复、`2.3.9` 模型空回复降级经验、`2.3.10` 完整上下文回填、`2.3.11` 内部工具统一隐藏和 `2.3.12` 主动聊天反馈修复，并进一步修复 LLM 等待期用户追发上下文丢失与碎片完整性等待过长问题。核心情绪、回复后后台评估（post）、`group_atmosphere_state`、`humanlike_state`、`lifelike_learning_state`、`personality_drift_state`、Sylanne 自有记忆、即时聊天节奏和欺骗/操控/逃责类动作阻断默认自动运行；道德修复、瑕疵模拟、心理筛查等实验/维护模块仍由配置者显式打开。
 
 发布包会包含运行代码、README、CHANGELOG、LICENSE、配置结构（schema）、docs 和 `docs/assets/` 中的聚合图表与吉祥物素材，例如 `docs/assets/sylanne-mascot.gif`、`docs/assets/sylanne-mascot-card.svg` 和 `docs/assets/workflow_and_proactive.svg`；不会包含 `tests/`、`scripts/`、`literature_kb/`、`personality_literature_kb/`、`psychological_literature_kb/`、`humanlike_agent_literature_kb/`、`raw/`、`output/`、`dist/` 等开发、研究、原始样本或缓存目录。
 
@@ -127,14 +127,14 @@
 | 内部工具统一隐藏 | Sylanne 自己的 LLM Tool schema 对所有主聊天模型隐藏，避免模型在内部状态工具选择阶段空回、外泄工具 JSON 或增加不必要延迟。 |
 | bot/Agent 接管 | 情绪、记忆、碎片整合、即时聊天接管和状态查询入口交给 bot/Agent 路径、命令、公共 API 与设置 Page；主 LLM 不需要直接看到 Sylanne 内部工具。 |
 | 外部工具保留 | `search_web` 等外部插件工具仍按 AstrBot Agent 原生工具循环保留；隐藏范围只限 Sylanne 自己的状态/记忆/诊断工具 schema。 |
-| 可见输出 guard | Gemini 风险模型每轮都会追加一条极短兼容提醒；无工具时要求直接输出可见自然语言，有外部工具时要求返回有效 `tool_calls/function_call` 或可见自然语言，减少“只有不可见推理、用户端空回复”的情况。 |
+| 空回处理归属 | Sylanne 不再对 Gemini 或任意模型追加专用可见输出提醒；所有模型走同一条 prompt 注入路径，空 content 的重试、fallback 和 provider 选择交给 AstrBot 原生 runner 处理。 |
 | 短答锚定修复 | 上一轮 bot 如果问了“喝了杯什么呀？这么神奇，一喝就困？”这类连续问句，用户下一轮只回“咖啡啊”时，Sylanne 会把它视为对上一轮问题的回答，而不是理解成“用户现在又要冲咖啡”。 |
 | 二次澄清 guard | 用户说“我只是想确认嵌入模型记忆模块”这类二次澄清时，会注入复读抑制 guard：上一轮 assistant 原文只用于事实和指代，不允许照抄上一轮比喻、句式和段落结构。 |
 | 问句簇保留 | `realtime_assistant_history_shadow` 抽取未闭合问题时，会保留临近短问句和承接短句，避免只留下最后一个问号导致语义槽位丢失。 |
 | 短答提示增强 | 注入给主 LLM 的 `[sylanne_realtime_pending_bot_question]` 现在明确说明：名词或短答默认是在补全上一轮问题槽位，不要当成用户正在发起新的行动或命令。 |
-| LLM 切换上下文修复 | `on_llm_request` 现在每轮实时读取当前主聊天 provider 来判定上下文归属；`provider_id_cache_ttl_seconds` 仍用于内部评估 provider 获取，但不再决定主回复请求是否进入 Gemini 兼容模式。 |
-| 评估 provider 隔离 | `emotion_provider_id` 只影响内部情绪/碎片判断等评估调用，不再把主聊天请求强行判定为 Gemini；主 LLM 切到 gpt、deepseek、mimo 等模型后会恢复 Sylanne 的短状态、短记忆和即时聊天风格注入。 |
-| Gemini 识别收窄 | `safe-non-gemini-assessor`、`non-gemini-provider` 这类 provider 名不会再因为包含字符串 `gemini` 被误判成高风险 Gemini；明确的 `google/gemini-*`、`gemini-*` 仍会进入兼容保护。 |
+| LLM 切换上下文修复 | `on_llm_request` 现在每轮实时读取当前主聊天 provider 来记录诊断信息；`provider_id_cache_ttl_seconds` 仍用于内部评估 provider 获取，但不再决定主回复请求是否进入模型专用兼容模式。 |
+| 评估 provider 隔离 | `emotion_provider_id` 只影响内部情绪/碎片判断等评估调用，不再把主聊天请求强行归类为某个模型家族；主 LLM 切到 Gemini、gpt、deepseek、mimo 等模型时都会保留 Sylanne 的短状态、短记忆和即时聊天风格注入。 |
+| 模型路径统一 | `safe-non-gemini-assessor`、`non-gemini-provider`、`google/gemini-*`、`gemini-*` 等 provider 名都不会触发额外上下文归属分支；Gemini 与其他主聊天模型使用相同预算和相同注入顺序。 |
 | 工具返回契约 | `query_agent_state_tool` 现在直接 `return` JSON 字符串给 AstrBot 工具循环；不再走 `event.plain_result(...)`，因此不会被 runner 误判为“没有返回值，或者已将结果直接发送给用户”。 |
 | 自有记忆知识库 | 每条长期记忆独立存储，包含稳定 `memory_id`、摘要、情绪签名、关系签名、深度、置信度、证据次数、召回次数、真实时间衰减参数和自动动力学快照。 |
 | 向量语义召回 | 可选择 AstrBot 已配置的 Embedding 类型模型提供商；记忆保存 `semantic_embedding`、`embedding_provider_id`、向量更新时间和文本哈希，召回时融合关键词相似度与余弦相似度。 |
@@ -142,13 +142,13 @@
 | 碎片语义 gate | 当本地规则准备释放碎片窗口时，会先调用判断 LLM 输出极短 JSON，确认用户是否已经说完；命中上一轮 bot 问题的短答会跳过该 gate，减少“咖啡啊”这类回答的延迟。 |
 | 慢速分段修复 | LLM gate 判定未完成后会写入语义等待窗口，后续同一用户在真实时间上限内继续补充时仍会被合并，即使间隔超过本地短窗口。 |
 | 上限释放 | 默认探测等待保持 `0.25s`，语义等待上限降到 `4s` 且有运行时硬上限；如果判断为未完成但用户真的停住，达到上限后会释放合并后的碎片意图，避免把即时聊天时间耗在死等上。 |
-| Gemini 工具轮次保护 | Gemini 系模型仍会追加极短 guard，要求模型返回可见自然语言或有效 `tool_calls/function_call`；Sylanne 内部工具已统一隐藏，外部工具仍保留。 |
+| 工具轮次统一 | 工具请求前同样会注入等待期追发合并事实；Sylanne 内部工具已统一隐藏，外部插件工具仍交给 AstrBot 原生 Agent 工具循环处理，带 `tool_calls/function_call` 的响应不会被即时聊天接管。 |
 | 统一工具归属 | `query_agent_state` 和 11 个细分工具继续作为插件内部兼容方法、命令/API 后端存在，但不再作为主 LLM Tool schema 暴露。 |
 | 工具 JSON 外泄阻断 | 如果兼容层把 `query_agent_state`、情绪快照、运行时诊断等内部工具结果误作为最终 `completion_text` 交给发送阶段，Sylanne 会识别 `astrbot.*` 内部 `schema_version/kind`，清空默认发送内容并阻断用户可见发送；结构化工具调用仍交给 Agent 工具循环。 |
 | 只读记忆查询 | 新增 `/sylanne_memory`、`/记忆查询`、`/查询记忆`、`/灵澜记忆` 和 `query_sylanne_memory(...)`，可检查记忆命中情况；查询不会强化或改写记忆。 |
 | 关联联想召回 | 直接命中的记忆会在硬预算内带出少量相邻记忆；关联边由摘要相似度、层类型重叠、情绪接近度、时间接近度和巩固强度本地计算，不交给 LLM 随机决定。 |
 | 强化与遗忘 | 只有真正注入 prompt 的记忆才会触发召回强化；长期无证据、无召回且深度/置信度很低的弱记忆会按真实时间剪枝，并清理悬空关联边。 |
-| Agent 上下文归属 | 对话上下文交给 AstrBot Agent；Sylanne 只补短状态摘要、短记忆召回和投递事实，Gemini 高风险模型会进入 `gemini_agent_owned_context` 模式并跳过额外 prompt 注入。 |
+| Agent 上下文归属 | 对话上下文交给 AstrBot Agent；Sylanne 只补短状态摘要、短记忆召回和投递事实。Gemini 与其他模型走同一条上下文注入路径，不再启用任何模型专属上下文归属模式。 |
 | 即时聊天投递信封 | 主回复被接管时，Agent 历史会看到“已生成但未必已发送”的投递状态；用户插话后会记录已发/未发摘要，避免下一轮误以为旧回复已经完整送达。 |
 | 主动聊天反馈闭环 | 后台调度默认更低频：正常约 15 分钟醒来一次，空闲约 30 分钟，同一会话约 1 小时内不重复复查；每次醒来会先结算上一条主动发言是否无人回应，并把用户可能在忙、休息或不方便聊天作为默认解释。`progress_check` 必须有明确进度证据，证据不足时沉默；如果只是想念用户，只允许低压力短句轻触达。 |
 | 快速判断 LLM | 新增 `fast_assessor_provider_id` 和短上下文预算，用户碎片完整性、表情包一致性等简单 JSON 判断可走低推理快模型；复杂情绪观测和主动话题裁决仍走原判断 LLM。 |

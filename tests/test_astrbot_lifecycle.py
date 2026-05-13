@@ -413,7 +413,7 @@ class AstrBotLifecycleTests(unittest.TestCase):
         self.assertNotIn("persona-" + "p" * 20, serialized)
         self.assertNotIn("history-" + "h" * 20, serialized)
 
-    def test_on_llm_request_uses_agent_owned_context_for_gemini_risk_models(self):
+    def test_gemini_requests_use_the_same_context_path_as_other_models(self):
         plugin = new_plugin(
             {
                 "assessment_timing": "post",
@@ -442,20 +442,21 @@ class AstrBotLifecycleTests(unittest.TestCase):
         asyncio.run(plugin.on_llm_request(FakeEvent("s-gemini-guard"), request))
 
         injected = "\n".join(self._request_text_parts(request))
-        self.assertIn("sylanne_gemini_visible_output_guard", injected)
-        self.assertIn("可见的自然语言回复", injected)
+        self.assertNotIn("sylanne_gemini_visible_output_guard", injected)
+        self.assertIn("sylanne_realtime_pending_bot_question", injected)
+        self.assertIn("bot_emotion_state", injected)
+        self.assertIn("realtime_chat_style", injected)
         diagnostics = asyncio.run(
             plugin.get_agent_runtime_diagnostics("s-gemini-guard"),
         )
         injection = diagnostics["state_injection"]
-        self.assertEqual(injection["compat_mode"], "gemini_agent_owned_context")
-        self.assertEqual(injection["max_added_chars"], 0)
+        self.assertEqual(injection["compat_mode"], "")
+        self.assertEqual(injection["context_owner"], "sylanne_plugin")
+        self.assertEqual(injection["max_added_chars"], 2400)
         self.assertGreater(injection["added_chars"], 0)
         appended_sources = {item.get("source") for item in injection["appended"]}
-        self.assertIn("gemini_visible_output_guard", appended_sources)
-        skipped_sources = {item.get("source") for item in injection["skipped"]}
-        self.assertIn("emotion", skipped_sources)
-        self.assertIn("realtime_chat.style", skipped_sources)
+        self.assertIn("emotion", appended_sources)
+        self.assertIn("realtime_chat.style", appended_sources)
 
     def test_gemini_tool_request_hides_sylanne_tools_and_keeps_foreign_tools(self):
         plugin = new_plugin(
@@ -508,23 +509,17 @@ class AstrBotLifecycleTests(unittest.TestCase):
             if isinstance(item, dict)
         ]
         self.assertEqual(remaining_names, ["search_web"])
-        injected = "\n".join(self._request_text_parts(request))
-        self.assertIn("sylanne_gemini_visible_output_guard", injected)
-        self.assertIn("tool_calls", injected)
-        self.assertNotIn("sylanne_emotion_state", injected)
-        self.assertNotIn("sylanne_realtime_style", injected)
         diagnostics = asyncio.run(
             plugin.get_agent_runtime_diagnostics("s-gemini-tool-guard"),
         )
         injection = diagnostics["state_injection"]
-        self.assertEqual(injection["compat_mode"], "gemini_agent_owned_context")
-        self.assertEqual(injection["context_owner"], "agent")
+        self.assertEqual(injection["compat_mode"], "")
+        self.assertEqual(injection["context_owner"], "sylanne_plugin")
         appended_sources = {item.get("source") for item in injection["appended"]}
         skipped_sources = {item.get("source") for item in injection["skipped"]}
-        self.assertIn("gemini_visible_output_guard", appended_sources)
+        self.assertIn("emotion", appended_sources)
+        self.assertIn("realtime_chat.style", appended_sources)
         self.assertIn("sylanne_llm_tools", skipped_sources)
-        self.assertIn("emotion", skipped_sources)
-        self.assertIn("realtime_chat.style", skipped_sources)
 
     def test_non_gemini_tool_request_hides_all_sylanne_tools_but_keeps_foreign_tools(self):
         plugin = new_plugin(
@@ -610,14 +605,11 @@ class AstrBotLifecycleTests(unittest.TestCase):
         ]
         self.assertEqual(remaining_names, [])
         self.assertEqual(request.tool_choice, "none")
-        injected = "\n".join(self._request_text_parts(request))
-        self.assertIn("sylanne_gemini_visible_output_guard", injected)
-        self.assertIn("可见的自然语言回复", injected)
         diagnostics = asyncio.run(
             plugin.get_agent_runtime_diagnostics("s-gemini-sylanne-only-tools"),
         )
         injection = diagnostics["state_injection"]
-        self.assertEqual(injection["compat_mode"], "gemini_agent_owned_context")
+        self.assertEqual(injection["compat_mode"], "")
         self.assertIn(
             "sylanne_llm_tools",
             {item.get("source") for item in injection["skipped"]},
@@ -661,7 +653,7 @@ class AstrBotLifecycleTests(unittest.TestCase):
         )
         self.assertEqual(request.tool_choice, "none")
 
-    def test_gemini_chat_provider_guard_is_not_hidden_by_emotion_provider(self):
+    def test_gemini_chat_provider_does_not_change_context_owner(self):
         plugin = new_plugin(
             {
                 "assessment_timing": "post",
@@ -683,14 +675,16 @@ class AstrBotLifecycleTests(unittest.TestCase):
         asyncio.run(plugin.on_llm_request(FakeEvent("s-gemini-chat-provider"), request))
 
         injected = "\n".join(self._request_text_parts(request))
-        self.assertIn("sylanne_gemini_visible_output_guard", injected)
-        self.assertIn("可见的自然语言回复", injected)
+        self.assertNotIn("sylanne_gemini_visible_output_guard", injected)
+        self.assertIn("bot_emotion_state", injected)
+        self.assertIn("realtime_chat_style", injected)
         diagnostics = asyncio.run(
             plugin.get_agent_runtime_diagnostics("s-gemini-chat-provider"),
         )
+        self.assertEqual(diagnostics["state_injection"]["compat_mode"], "")
         self.assertEqual(
-            diagnostics["state_injection"]["compat_mode"],
-            "gemini_agent_owned_context",
+            diagnostics["state_injection"]["context_owner"],
+            "sylanne_plugin",
         )
 
     def test_gemini_emotion_provider_does_not_force_chat_context_owner(self):
@@ -723,20 +717,25 @@ class AstrBotLifecycleTests(unittest.TestCase):
             "sylanne_plugin",
         )
 
-    def test_non_gemini_hint_does_not_trigger_gemini_compat_mode(self):
+    def test_model_hint_keeps_normal_context_budget_for_all_models(self):
         plugin = new_plugin()
 
-        self.assertFalse(
-            plugin._is_gemini_empty_output_risk_model("safe-non-gemini-assessor"),
-        )
-        self.assertFalse(
-            plugin._is_gemini_empty_output_risk_model("openai/gpt-5.5 | non-gemini"),
-        )
-        self.assertTrue(
-            plugin._is_gemini_empty_output_risk_model("google/gemini-3.1-flash-lite"),
-        )
+        for hint in (
+            "safe-non-gemini-assessor",
+            "openai/gpt-5.5 | non-gemini",
+            "google/gemini-3.1-flash-lite",
+        ):
+            with self.subTest(hint=hint):
+                budget = plugin._state_injection_budget_for_request(
+                    "s-model-hint-budget",
+                    fake_request(session_id="s-model-hint-budget", prompt="hello"),
+                    model_hint=hint,
+                )
+                self.assertEqual(budget.compat_mode, "")
+                self.assertEqual(budget.max_added_chars, 2400)
+                self.assertEqual(budget.max_parts, 8)
 
-    def test_gemini_tool_result_context_gets_only_visible_output_guard(self):
+    def test_gemini_tool_result_context_uses_normal_state_budget(self):
         plugin = new_plugin(
             {
                 "assessment_timing": "post",
@@ -761,10 +760,9 @@ class AstrBotLifecycleTests(unittest.TestCase):
         asyncio.run(plugin.on_llm_request(FakeEvent("s-gemini-tool-result"), request))
 
         injected = "\n".join(self._request_text_parts(request))
-        self.assertIn("sylanne_gemini_visible_output_guard", injected)
-        self.assertIn("可见的自然语言回复", injected)
-        self.assertNotIn("sylanne_emotion_state", injected)
-        self.assertNotIn("sylanne_realtime_style", injected)
+        self.assertNotIn("sylanne_gemini_visible_output_guard", injected)
+        self.assertIn("bot_emotion_state", injected)
+        self.assertIn("realtime_chat_style", injected)
 
     def test_non_gemini_request_keeps_normal_state_budget(self):
         plugin = new_plugin(
@@ -782,13 +780,30 @@ class AstrBotLifecycleTests(unittest.TestCase):
             request,
             model_hint=model_hint,
         )
-        appended = plugin._append_gemini_visible_output_guard_if_needed(
+
+        self.assertEqual(budget.compat_mode, "")
+        self.assertEqual(budget.max_added_chars, 2400)
+        self.assertEqual(budget.max_parts, 8)
+        self.assertEqual(request.extra_user_content_parts, [])
+
+    def test_gemini_request_keeps_normal_state_budget(self):
+        plugin = new_plugin(
+            {
+                "state_injection_max_added_chars": 2400,
+                "state_injection_max_parts": 8,
+            },
+        )
+        request = fake_request(session_id="s-gemini-budget", prompt="hello")
+        request.model = "gemini-3-flash-preview"
+
+        model_hint = plugin._request_model_hint_text(request)
+        budget = plugin._state_injection_budget_for_request(
+            "s-gemini-budget",
             request,
-            budget,
             model_hint=model_hint,
         )
 
-        self.assertFalse(appended)
+        self.assertEqual(budget.compat_mode, "")
         self.assertEqual(budget.max_added_chars, 2400)
         self.assertEqual(budget.max_parts, 8)
         self.assertEqual(request.extra_user_content_parts, [])
@@ -937,9 +952,10 @@ class AstrBotLifecycleTests(unittest.TestCase):
         first_diagnostics = asyncio.run(
             plugin.get_agent_runtime_diagnostics("s-context-owner-switch"),
         )
+        self.assertEqual(first_diagnostics["state_injection"]["compat_mode"], "")
         self.assertEqual(
-            first_diagnostics["state_injection"]["compat_mode"],
-            "gemini_agent_owned_context",
+            first_diagnostics["state_injection"]["context_owner"],
+            "sylanne_plugin",
         )
 
         second_request = fake_request(
@@ -5118,6 +5134,63 @@ class AstrBotLifecycleTests(unittest.TestCase):
             [1],
         )
 
+    def test_external_tool_call_response_is_left_to_agent_loop(self):
+        sent = []
+
+        class FakeContext:
+            async def send_message(self, origin, message):
+                sent.append((origin, str(message)))
+                return {"ok": True}
+
+        plugin = new_plugin(
+            {
+                "assessment_timing": "post",
+                "enable_realtime_chat": True,
+                "realtime_chat_intercept_llm_response": True,
+                "enable_sticker_reaction": False,
+                "runtime_parameter_debug_override_enabled": True,
+                "realtime_chat_min_delay_seconds": 0.0,
+                "realtime_chat_max_delay_seconds": 0.0,
+            },
+        )
+        plugin.context = FakeContext()
+        self._bind_common_state_hooks(plugin)
+        response = SimpleNamespace(
+            completion_text="",
+            choices=[
+                {
+                    "finish_reason": "tool_calls",
+                    "message": {
+                        "role": "assistant",
+                        "tool_calls": [
+                            {
+                                "id": "call_img_1",
+                                "type": "function",
+                                "function": {
+                                    "name": "aiimg_generate",
+                                    "arguments": '{"mode":"edit_ref","prompt":"match face style"}',
+                                },
+                            },
+                        ],
+                    },
+                },
+            ],
+        )
+        plugin._conversation_input_epoch = {"s-external-tool-call": 1}
+        plugin._record_conversation_pending_response_epoch("s-external-tool-call", 1)
+        event = FakeEvent("s-external-tool-call", platform_name="aiocqhttp")
+
+        asyncio.run(plugin.on_llm_response(event, response))
+
+        self.assertFalse(event.stopped)
+        self.assertEqual(response.completion_text, "")
+        self.assertFalse(hasattr(response, "_sylanne_intercepted_completion_text"))
+        self.assertEqual(sent, [])
+        self.assertEqual(
+            list(plugin._conversation_pending_response_epochs["s-external-tool-call"]),
+            [1],
+        )
+
     def test_on_llm_response_suppresses_sylanne_tool_json_result(self):
         sent = []
 
@@ -5791,6 +5864,73 @@ class AstrBotLifecycleTests(unittest.TestCase):
         self.assertIn("只有一点点开心嘛", assessment_calls[-1]["current_text"])
         self.assertIn("那我要咬死你了😋", assessment_calls[-1]["current_text"])
 
+    def test_active_agent_followup_merges_pending_user_turn_before_tool_request(self):
+        plugin = new_plugin(
+            {
+                "assessment_timing": "pre",
+                "inject_state": False,
+                "enable_realtime_chat": True,
+                "enable_sticker_reaction": False,
+                "use_llm_assessor": False,
+                "realtime_input_completion_probe_delay_seconds": 0.0,
+                "realtime_input_completion_max_wait_seconds": 0.0,
+            },
+        )
+        saves, assessment_calls = self._bind_common_state_hooks(plugin)
+        first_request = fake_request(
+            session_id="s-active-tool-followup",
+            prompt="[引用消息] 我得意思是这张图的脸也要相同风格处理 脸的细节太多了 整体不统一",
+        )
+        second_request = fake_request(
+            session_id="s-active-tool-followup",
+            prompt="所以图片捏",
+        )
+        second_request.tools = [
+            {
+                "type": "function",
+                "function": {
+                    "name": "aiimg_generate",
+                    "description": "generate or edit images",
+                    "parameters": {"type": "object"},
+                },
+            },
+        ]
+
+        async def run_followup():
+            await plugin.on_llm_request(
+                FakeEvent(
+                    "s-active-tool-followup",
+                    message=(
+                        "[引用消息] 我得意思是这张图的脸也要相同风格处理 "
+                        "脸的细节太多了 整体不统一"
+                    ),
+                    sender_id="u1",
+                ),
+                first_request,
+            )
+            await plugin.on_llm_request(
+                FakeEvent(
+                    "s-active-tool-followup",
+                    message="所以图片捏",
+                    sender_id="u1",
+                ),
+                second_request,
+            )
+
+        asyncio.run(run_followup())
+
+        injected = "\n".join(self._request_text_parts(second_request))
+        self.assertIn("sylanne_active_agent_followup_merge", injected)
+        self.assertIn("这张图的脸也要相同风格处理", injected)
+        self.assertIn("所以图片捏", injected)
+        self.assertIn("merged_current_user=", injected)
+        self.assertIn("这张图", plugin._last_request_text["s-active-tool-followup"])
+        self.assertIn("所以图片捏", plugin._last_request_text["s-active-tool-followup"])
+        self.assertGreaterEqual(len(saves), 2)
+        self.assertEqual(len(assessment_calls), 2)
+        self.assertIn("这张图的脸也要相同风格处理", assessment_calls[-1]["current_text"])
+        self.assertIn("所以图片捏", assessment_calls[-1]["current_text"])
+
     def test_stale_reply_is_kept_as_compact_breakpoint_for_next_turn(self):
         sent = []
 
@@ -6083,6 +6223,78 @@ class AstrBotLifecycleTests(unittest.TestCase):
         self.assertIn("sylanne_realtime_active_dispatch", injected)
         self.assertIn("插件的其他用户", injected)
         self.assertEqual(result["interrupted_reason"], "user_interrupted")
+
+    def test_gemini_followup_tool_request_keeps_prior_image_edit_context(self):
+        plugin = new_plugin(
+            {
+                "assessment_timing": "post",
+                "inject_state": False,
+                "enable_realtime_chat": True,
+                "enable_sticker_reaction": False,
+                "use_llm_assessor": False,
+            },
+        )
+        self._bind_common_state_hooks(plugin)
+        plugin._record_realtime_assistant_history_shadow(
+            "s-image-edit-followup",
+            full_text=(
+                "确实，刚才那张图的脸部渲染太写实，和几何色块整体不统一。"
+                "我这就把脸也处理成相同的几何抽象风格。"
+            ),
+            input_epoch=1,
+            message_parts=[
+                {"text": "刚才那张图的脸部渲染太写实。"},
+                {"text": "我这就把脸也处理成相同的几何抽象风格。"},
+            ],
+            source="unit_test",
+        )
+
+        async def fake_get_current_chat_provider_id(*, umo):
+            return "哈基米/gemini-3-flash-preview"
+
+        plugin.context = SimpleNamespace(
+            get_current_chat_provider_id=fake_get_current_chat_provider_id,
+        )
+        request = fake_request(
+            session_id="s-image-edit-followup",
+            prompt="所以图片捏",
+        )
+        request.tools = [
+            {
+                "type": "function",
+                "function": {
+                    "name": "aiimg_generate",
+                    "description": "generate or edit images",
+                    "parameters": {"type": "object"},
+                },
+            },
+        ]
+        request.contexts = [
+            {
+                "role": "user",
+                "content": (
+                    "[引用消息] 我得意思是这张图的脸也要相同风格处理 "
+                    "脸的细节太多了 你这个整体不统一的"
+                ),
+            },
+        ]
+
+        asyncio.run(
+            plugin.on_llm_request(
+                FakeEvent(
+                    "s-image-edit-followup",
+                    message="所以图片捏",
+                    sender_id="u1",
+                ),
+                request,
+            ),
+        )
+
+        injected = "\n".join(self._request_text_parts(request))
+        self.assertIn("sylanne_realtime_assistant_history", injected)
+        self.assertIn("刚才那张图", injected)
+        self.assertIn("几何抽象风格", injected)
+        self.assertNotIn("sylanne_gemini_visible_output_guard", injected)
 
     def test_realtime_chat_interruption_records_low_token_resume_breakpoint(self):
         sent = []

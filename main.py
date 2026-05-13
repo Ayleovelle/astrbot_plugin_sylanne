@@ -459,7 +459,7 @@ class _StateInjectionBudget:
 
     @property
     def agent_owned_context(self) -> bool:
-        return self.compat_mode == "gemini_agent_owned_context"
+        return False
 
 
 @dataclass
@@ -838,15 +838,13 @@ class EmotionalStatePlugin(Star):
         self._record_conversation_pending_response_epoch(session_key, input_epoch)
         observed_at = self._observed_now()
         current_user_text = self._event_text(event) or str(getattr(request, "prompt", "") or "")
-        active_followup_payload = {}
-        if not self._request_has_tool_context(request):
-            active_followup_payload = self._active_agent_followup_merge_payload(
-                session_key,
-                identity,
-                current_user_text=current_user_text,
-                current_epoch=input_epoch,
-                observed_at=observed_at,
-            )
+        active_followup_payload = self._active_agent_followup_merge_payload(
+            session_key,
+            identity,
+            current_user_text=current_user_text,
+            current_epoch=input_epoch,
+            observed_at=observed_at,
+        )
         model_hint = await self._request_model_hint_for_event(event, request)
         early_injection_budget = self._state_injection_budget_for_request(
             session_key,
@@ -1399,11 +1397,6 @@ class EmotionalStatePlugin(Star):
                 injection_budget,
                 model_hint=model_hint,
             )
-            self._append_gemini_visible_output_guard_if_needed(
-                request,
-                injection_budget,
-                model_hint=model_hint,
-            )
             self._append_realtime_input_fragment_context_if_any(
                 event,
                 request,
@@ -1430,11 +1423,6 @@ class EmotionalStatePlugin(Star):
                 model_hint=model_hint,
             )
             self._prune_hidden_sylanne_llm_tools_if_needed(
-                request,
-                injection_budget,
-                model_hint=model_hint,
-            )
-            self._append_gemini_visible_output_guard_if_needed(
                 request,
                 injection_budget,
                 model_hint=model_hint,
@@ -13995,10 +13983,6 @@ class EmotionalStatePlugin(Star):
         )
         max_parts = max(1, self._cfg_int("state_injection_max_parts", 8))
         compat_mode = ""
-        if self._is_gemini_empty_output_risk_model(model_hint):
-            compat_mode = "gemini_agent_owned_context"
-            max_added_chars = 0
-            max_parts = 1
         return _StateInjectionBudget(
             session_key=session_key,
             request_chars_before=self._estimate_provider_request_chars(request),
@@ -14047,21 +14031,6 @@ class EmotionalStatePlugin(Star):
             compact.append(text)
         return " | ".join(compact)
 
-    def _is_gemini_empty_output_risk_model(self, model_hint: str | None) -> bool:
-        text = str(model_hint or "").lower()
-        if not text:
-            return False
-        for segment in re.split(r"\s*\|\s*", text):
-            tokens = re.findall(r"[a-z0-9]+", segment)
-            for index, token in enumerate(tokens):
-                if token != "gemini" and not token.startswith("gemini"):
-                    continue
-                previous = tokens[index - 1] if index else ""
-                if previous in {"non", "not", "no", "without"}:
-                    continue
-                return True
-        return False
-
     async def _request_model_hint_for_event(
         self,
         event: AstrMessageEvent,
@@ -14075,80 +14044,6 @@ class EmotionalStatePlugin(Star):
                 await self._chat_provider_id(event, use_cache=False) or "",
             ).strip()
         return self._request_model_hint_text(request, provider_id=chat_provider_hint)
-
-    def _append_gemini_visible_output_guard_if_needed(
-        self,
-        request: ProviderRequest,
-        budget: _StateInjectionBudget | None,
-        *,
-        model_hint: str = "",
-    ) -> bool:
-        if not self._is_gemini_empty_output_risk_model(model_hint):
-            return False
-        has_tool_context = self._request_has_tool_context(request)
-        source = "gemini_visible_output_guard"
-        if self._request_has_temp_text_source(request, source):
-            return False
-        text = self._gemini_visible_output_guard_text(has_tool_context=has_tool_context)
-        if budget is not None and budget.agent_owned_context:
-            appended = self._append_temp_text_part(
-                request,
-                text,
-                source=source,
-                budget=None,
-                required=True,
-            )
-            if appended:
-                text_chars = len(
-                    self._format_sylanne_temp_context_for_compression(
-                        text,
-                        source=source,
-                    ),
-                )
-                budget.added_chars += text_chars
-                budget.added_parts += 1
-                budget.appended.append(
-                    {
-                        "source": source,
-                        "chars": text_chars,
-                        "reason": (
-                            "gemini_tool_call_guard"
-                            if has_tool_context
-                            else "gemini_visible_output_guard"
-                        ),
-                    },
-                )
-            return appended
-        effective_budget = budget
-        if (
-            budget is not None
-            and budget.request_budget_chars > 0
-            and budget.request_chars_before >= budget.effective_total_budget
-        ):
-            effective_budget = None
-        return self._append_temp_text_part(
-            request,
-            text,
-            source=source,
-            budget=effective_budget,
-            required=True,
-        )
-
-    def _gemini_visible_output_guard_text(self, *, has_tool_context: bool) -> str:
-        if has_tool_context:
-            return (
-                "[sylanne_gemini_visible_output_guard]\n"
-                "兼容提醒：当前 Gemini/OpenAI 兼容模型可能在内部推理后返回空 content。"
-                "如果本轮需要调用工具，必须返回提供商可解析的有效 tool_calls/function_call；"
-                "如果不需要工具，必须直接输出可见的自然语言回复。"
-                "不要只进行隐藏思考、空白输出或只返回不可见推理。"
-            )
-        return (
-            "[sylanne_gemini_visible_output_guard]\n"
-            "兼容提醒：当前 Gemini/OpenAI 兼容模型可能在内部推理后返回空 content。"
-            "除非本轮确实必须调用工具，否则请直接输出可见的自然语言回复；"
-            "不要只进行隐藏思考、空白输出或只返回不可见推理。"
-        )
 
     def _request_has_tool_context(self, request: ProviderRequest | None) -> bool:
         if request is None:
@@ -14493,7 +14388,6 @@ class EmotionalStatePlugin(Star):
             "user_correction_context": "sylanne_user_correction_context",
             "recent_user_correction_context": "sylanne_recent_user_correction_context",
             "sylanne_memory_recall": "sylanne_memory_recall",
-            "gemini_visible_output_guard": "sylanne_gemini_visible_output_guard",
         }
         marker = source_markers.get(source, f"sylanne_source:{source}")
         for part in getattr(request, "extra_user_content_parts", []) or []:
