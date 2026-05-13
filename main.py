@@ -604,7 +604,7 @@ def get_emotional_state_plugin(context: Context) -> Any | None:
 
 @register(
     PLUGIN_NAME,
-    "pidan",
+    "Aylovelle.S.S",
     "Soulful Yearning Lifelike AstrBot Neural Narrative Engine：维护情绪、人格、记忆、氛围和表达节奏的 Sylanne",
     "2.3.13",
     "",
@@ -821,6 +821,7 @@ class EmotionalStatePlugin(Star):
         event: AstrMessageEvent,
         request: ProviderRequest,
     ) -> None:
+        """LLM 请求前合并上下文、注入状态，并处理撤回/输入等控制事件。"""
         if _INTERNAL_LLM_CALL.get() or not self._cfg_bool("enabled", True):
             return
 
@@ -1808,6 +1809,7 @@ class EmotionalStatePlugin(Star):
         event: AstrMessageEvent,
         response: LLMResponse,
     ) -> None:
+        """LLM 响应后更新状态，接管即时聊天发送，并写入可恢复的影子上下文。"""
         if _INTERNAL_LLM_CALL.get() or not self._cfg_bool("enabled", True):
             return
 
@@ -12422,7 +12424,7 @@ class EmotionalStatePlugin(Star):
         event: AstrMessageEvent,
         detail: str = "summary",
     ):
-        """Get the room mood / group atmosphere state, read-only."""
+        """只读获取当前房间情绪与群聊氛围状态。"""
         snapshot = await self._legacy_state_tool_snapshot(
             event,
             "group_atmosphere",
@@ -12439,7 +12441,7 @@ class EmotionalStatePlugin(Star):
         track: str = "conversation",
         include_runtime: bool = False,
     ):
-        """Unified read-only state query for the emotional agent."""
+        """统一只读查询 Sylanne 情绪代理的状态快照。"""
         payload = await self.query_agent_state(
             event,
             state=state,
@@ -12476,7 +12478,7 @@ class EmotionalStatePlugin(Star):
         event: AstrMessageEvent,
         detail: str = "summary",
     ):
-        """Get the bot's simulated humanlike state, read-only."""
+        """只读获取 bot 的拟人/有机体状态。"""
         snapshot = await self._legacy_state_tool_snapshot(
             event,
             "humanlike",
@@ -12489,7 +12491,7 @@ class EmotionalStatePlugin(Star):
         event: AstrMessageEvent,
         detail: str = "summary",
     ):
-        """Get the bot's learned common-ground and initiative state, read-only."""
+        """只读获取 bot 的生命化学习、共同语境与主动性状态。"""
         snapshot = await self._legacy_state_tool_snapshot(
             event,
             "lifelike_learning",
@@ -12503,7 +12505,7 @@ class EmotionalStatePlugin(Star):
         candidate_context: str = "",
         use_llm: bool = True,
     ):
-        """Decide whether the bot should proactively speak and suggest topics."""
+        """判断 bot 是否应该主动发言，并给出候选话题。"""
         decision = await self.get_proactive_speech_decision(
             event,
             candidate_context=candidate_context,
@@ -12520,7 +12522,7 @@ class EmotionalStatePlugin(Star):
         force: bool = False,
         message_text: str = "",
     ):
-        """Request AstrBot proactive message dispatch with evidence and diagnostics."""
+        """请求 AstrBot 主动发言调度，并返回证据与诊断。"""
         result = await self.request_proactive_speech_dispatch(
             event,
             candidate_context=candidate_context,
@@ -12536,7 +12538,7 @@ class EmotionalStatePlugin(Star):
         event: AstrMessageEvent,
         detail: str = "summary",
     ):
-        """Get the bot's slow real-time personality drift state, read-only."""
+        """只读获取 bot 的慢速实时人格漂移状态。"""
         snapshot = await self._legacy_state_tool_snapshot(
             event,
             "personality_drift",
@@ -12549,7 +12551,7 @@ class EmotionalStatePlugin(Star):
         event: AstrMessageEvent,
         detail: str = "summary",
     ):
-        """Get the bot's moral repair and trust-repair state, read-only."""
+        """只读获取 bot 的道德修复与信任修复状态。"""
         snapshot = await self._legacy_state_tool_snapshot(
             event,
             "moral_repair",
@@ -12562,7 +12564,7 @@ class EmotionalStatePlugin(Star):
         event: AstrMessageEvent,
         detail: str = "summary",
     ):
-        """Get the bot's optional low-risk fallibility state, read-only."""
+        """只读获取 bot 的低风险瑕疵/犯错模拟状态。"""
         snapshot = await self._legacy_state_tool_snapshot(
             event,
             "fallibility",
@@ -12575,7 +12577,7 @@ class EmotionalStatePlugin(Star):
         event: AstrMessageEvent,
         detail: str = "summary",
     ):
-        """Get the bot's integrated self-state arbitration snapshot, read-only."""
+        """只读获取 bot 的综合自我状态仲裁快照。"""
         snapshot = await self._legacy_state_tool_snapshot(
             event,
             "integrated",
@@ -12629,7 +12631,7 @@ class EmotionalStatePlugin(Star):
 
     @filter.command("humanlike_state", alias={"拟人状态", "有机体状态"})
     async def humanlike_status(self, event: AstrMessageEvent):
-        """View the current session's simulated humanlike state."""
+        """查看当前会话的拟人/有机体状态。"""
         if not self._humanlike_modeling_enabled():
             yield event.plain_result("拟人化状态模拟未启用。")
             return
@@ -12638,7 +12640,7 @@ class EmotionalStatePlugin(Star):
 
     @filter.command("humanlike_reset", alias={"拟人状态重置"})
     async def humanlike_reset(self, event: AstrMessageEvent):
-        """Reset the current session's simulated humanlike state."""
+        """重置当前会话的拟人/有机体状态。"""
         if not self._humanlike_reset_allowed():
             yield event.plain_result("配置已关闭手动拟人状态重置。")
             return
@@ -12647,7 +12649,7 @@ class EmotionalStatePlugin(Star):
 
     @filter.command("lifelike_state", alias={"生命化状态", "共同语境"})
     async def lifelike_learning_status(self, event: AstrMessageEvent):
-        """View the current session's learned common-ground state."""
+        """查看当前会话的生命化学习与共同语境状态。"""
         if not self._lifelike_learning_enabled():
             yield event.plain_result("生命化学习状态未启用。")
             return
@@ -12656,7 +12658,7 @@ class EmotionalStatePlugin(Star):
 
     @filter.command("lifelike_reset", alias={"生命化状态重置", "共同语境重置"})
     async def lifelike_learning_reset(self, event: AstrMessageEvent):
-        """Reset the current session's learned common-ground state."""
+        """重置当前会话的生命化学习与共同语境状态。"""
         if not self._lifelike_learning_reset_allowed():
             yield event.plain_result("配置已关闭生命化学习状态重置。")
             return
@@ -12665,7 +12667,7 @@ class EmotionalStatePlugin(Star):
 
     @filter.command("personality_drift_state", alias={"人格漂移状态", "人格适应状态"})
     async def personality_drift_status(self, event: AstrMessageEvent):
-        """View the current session's slow real-time personality drift state."""
+        """查看当前会话的慢速实时人格漂移状态。"""
         if not self._personality_drift_enabled():
             yield event.plain_result("人格漂移状态未启用。")
             return
@@ -12678,7 +12680,7 @@ class EmotionalStatePlugin(Star):
 
     @filter.command("personality_drift_reset", alias={"人格漂移重置", "人格适应重置"})
     async def personality_drift_reset(self, event: AstrMessageEvent):
-        """Reset the current session's slow personality drift state."""
+        """重置当前会话的慢速人格漂移状态。"""
         if not self._personality_drift_reset_allowed():
             yield event.plain_result("配置已关闭人格漂移重置后门。")
             return
@@ -12687,7 +12689,7 @@ class EmotionalStatePlugin(Star):
 
     @filter.command("moral_repair_state", alias={"道德修复状态", "信任修复状态"})
     async def moral_repair_status(self, event: AstrMessageEvent):
-        """View the current session's simulated moral repair state."""
+        """查看当前会话的道德修复/信任修复状态。"""
         if not self._moral_repair_modeling_enabled():
             yield event.plain_result("道德修复状态模拟未启用。")
             return
@@ -12696,7 +12698,7 @@ class EmotionalStatePlugin(Star):
 
     @filter.command("moral_repair_reset", alias={"道德修复重置", "信任修复重置"})
     async def moral_repair_reset(self, event: AstrMessageEvent):
-        """Reset the current session's simulated moral repair state."""
+        """重置当前会话的道德修复/信任修复状态。"""
         if not self._moral_repair_reset_allowed():
             yield event.plain_result("配置已关闭手动道德修复状态重置。")
             return
@@ -12705,19 +12707,19 @@ class EmotionalStatePlugin(Star):
 
     @filter.command("integrated_self", alias={"综合自我状态", "自我状态"})
     async def integrated_self_status(self, event: AstrMessageEvent):
-        """View the current session's integrated self-state arbitration."""
+        """查看当前会话的综合自我状态仲裁。"""
         snapshot = await self.get_integrated_self_snapshot(event)
         yield event.plain_result(format_integrated_self_state_for_user(snapshot))
 
     @filter.command("shadow_diagnostics", alias={"阴影诊断", "阴影状态"})
     async def shadow_diagnostics_status(self, event: AstrMessageEvent):
-        """View config-gated non-executable shadow diagnostics."""
+        """查看配置门控的只读阴影诊断。"""
         snapshot = await self.get_shadow_diagnostics(event)
         yield event.plain_result(json.dumps(snapshot, ensure_ascii=False))
 
     @filter.command("fallibility_state", alias={"瑕疵状态", "犯错模拟状态"})
     async def fallibility_status(self, event: AstrMessageEvent):
-        """View the current session's low-risk fallibility simulation state."""
+        """查看当前会话的低风险瑕疵/犯错模拟状态。"""
         if not self._fallibility_modeling_enabled():
             yield event.plain_result("瑕疵/犯错模拟状态未启用。")
             return
@@ -12726,7 +12728,7 @@ class EmotionalStatePlugin(Star):
 
     @filter.command("fallibility_reset", alias={"瑕疵状态重置", "犯错模拟重置"})
     async def fallibility_reset(self, event: AstrMessageEvent):
-        """Reset the current session's low-risk fallibility simulation state."""
+        """重置当前会话的低风险瑕疵/犯错模拟状态。"""
         if not self._fallibility_reset_allowed():
             yield event.plain_result("配置已关闭手动瑕疵/犯错模拟状态重置。")
             return
@@ -12739,7 +12741,7 @@ class EmotionalStatePlugin(Star):
         event: AstrMessageEvent,
         query: str = "",
     ):
-        """Read-only query for Sylanne's own long-term memory."""
+        """只读查询 Sylanne 自有长期记忆。"""
         payload = await self.query_sylanne_memory(
             event,
             query=query,

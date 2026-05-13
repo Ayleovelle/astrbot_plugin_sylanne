@@ -726,6 +726,8 @@ class PublicApiTests(unittest.TestCase):
 
         self.assertIsInstance(register_call.args[0], ast.Name)
         self.assertEqual("PLUGIN_NAME", register_call.args[0].id)
+        self.assertIsInstance(register_call.args[1], ast.Constant)
+        self.assertEqual(metadata_value("author"), register_call.args[1].value)
         self.assertIsInstance(register_call.args[3], ast.Constant)
         self.assertEqual(metadata_value("version"), register_call.args[3].value)
 

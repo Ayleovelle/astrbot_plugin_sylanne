@@ -264,7 +264,7 @@ class PackagePluginTests(unittest.TestCase):
 
     def test_package_zip_stays_small_enough_for_remote_upload(self):
         _, size = self._zip_names()
-        self.assertLess(size, 40 * 1024 * 1024)
+        self.assertLess(size, 16 * 1024 * 1024)
 
     def test_package_excludes_output_zip_even_inside_included_directory(self):
         module = load_package_script()

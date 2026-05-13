@@ -378,6 +378,8 @@ class RemoteSmokeContractTests(unittest.TestCase):
         self.assertIn("readZipEntryText", preflight)
         self.assertIn("readMetadataName", preflight)
         self.assertIn("0x02014b50", preflight)
+        self.assertIn("16 * 1024 * 1024", preflight)
+        self.assertIn("16 * 1024 * 1024", script)
         for required_entry in (
             "__init__.py",
             "metadata.yaml",

@@ -107,7 +107,7 @@ function assertZipLooksUploadable(zipPath, expectedPlugin, options = {}) {
     throw new Error(`Zip does not exist: ${zipPath}`);
   }
   const size = fs.statSync(zipPath).size;
-  const maxBytes = Number(options.maxBytes || 40 * 1024 * 1024);
+  const maxBytes = Number(options.maxBytes || 16 * 1024 * 1024);
   if (!Number.isFinite(maxBytes) || maxBytes <= 0) {
     throw new Error("maxBytes must be a positive number.");
   }
@@ -231,7 +231,7 @@ if (require.main === module) {
   }
   try {
     const result = assertZipLooksUploadable(zipPath, expectedPlugin, {
-      maxBytes: Number(process.env.ASTRBOT_REMOTE_INSTALL_MAX_BYTES || 40 * 1024 * 1024),
+      maxBytes: Number(process.env.ASTRBOT_REMOTE_INSTALL_MAX_BYTES || 16 * 1024 * 1024),
     });
     console.log(JSON.stringify({ ok: true, size: result.size, entries: result.names.length }));
   } catch (error) {

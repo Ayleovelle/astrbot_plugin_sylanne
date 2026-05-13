@@ -476,6 +476,8 @@ py -3.13 scripts\package_plugin.py --output dist\astrbot_plugin_sylanne.zip
 > **警告**
 > 不要直接上传 GitHub 绿色 Code 按钮下载的源码 zip，除非它经过 `scripts\package_plugin.py` 或等价流程重新打包。AstrBot WebUI 上传安装期望 zip 内有明确顶层目录 `astrbot_plugin_sylanne/`，并且运行文件位于该目录下。
 
+插件图标由插件根目录下的 `logo.png` 提供，官方推荐 1:1 的 `256x256` 图片。本发布包已包含 `astrbot_plugin_sylanne/logo.png`；如果 WebUI 仍显示默认图标，优先检查远端 `data/plugins/astrbot_plugin_sylanne/logo.png` 是否已经被新包覆盖，并刷新浏览器缓存或重载插件页。
+
 发布 zip 包的运行根目录应类似：
 
 ```text
@@ -2774,6 +2776,7 @@ py -3.13 scripts\package_plugin.py --output dist\astrbot_plugin_sylanne.zip
 | 检查项 | 要求 |
 | --- | --- |
 | 顶层目录 | 所有文件都必须在 `astrbot_plugin_sylanne/` 下。 |
+| 包体大小 | 按 AstrBot 插件市场发布约束控制在 `16MB` 以内。 |
 | 必要文件 | 包含 `__init__.py`、`agent_identity.py`、`metadata.yaml`、`main.py`、`emotion_engine.py`、`group_atmosphere_engine.py`、`humanlike_engine.py`、`lifelike_learning_engine.py`、`personality_drift_engine.py`、`realtime_chat_engine.py`、`realtime_chat_input.py`、`integrated_self.py`、`moral_repair_engine.py`、`memory_engine.py`、`fallibility_engine.py`、`psychological_screening.py`、`prompts.py`、`public_api.py`、`logo.png`、`README.md`、`CHANGELOG.md`、`LICENSE`、`requirements.txt`、`_conf_schema.json`、`docs/assets/lifecycle_model_fit.svg`、`docs/assets/lifecycle_model_fit_summary.csv`、`docs/assets/lifecycle_model_fit_table.md`、`docs/assets/runtime_overview.svg`、`docs/assets/sylanne-mascot.gif`、`docs/assets/sylanne-mascot-card.svg`、`docs/assets/theory_feature_matrix_overhead.png`、`docs/assets/theory_feature_matrix_overhead.svg`、`docs/assets/theory_lifecycle_fit_explanation.png`、`docs/assets/theory_lifecycle_fit_explanation.svg`、`docs/assets/workflow_and_proactive.svg`、`pages/memory-settings/index.html`、`pages/memory-settings/app.js`、`pages/memory-settings/style.css`。 |
 | 插件身份 | zip 内 `metadata.yaml name:` 必须等于 `astrbot_plugin_sylanne`。 |
 | 排除目录 | 不应包含 `tests/`、`scripts/`、`output/`、`dist/`、`raw/`、`__pycache__/`、`.git/`，也不应包含四个 `*_literature_kb/` 目录。 |

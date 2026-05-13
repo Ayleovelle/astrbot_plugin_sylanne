@@ -146,7 +146,7 @@ async function main() {
     throw new Error("Set ASTRBOT_REMOTE_INSTALL_CONFIRM=1 to upload and install.");
   }
   const preflight = assertZipLooksUploadable(zipPath, expectedPlugin, {
-    maxBytes: Number(env("ASTRBOT_REMOTE_INSTALL_MAX_BYTES", 40 * 1024 * 1024)),
+    maxBytes: Number(env("ASTRBOT_REMOTE_INSTALL_MAX_BYTES", 16 * 1024 * 1024)),
   });
   const zipSize = preflight.size;
   const artifactDir = env(
