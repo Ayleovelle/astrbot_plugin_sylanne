@@ -607,7 +607,7 @@ def get_emotional_state_plugin(context: Context) -> Any | None:
     PLUGIN_NAME,
     "Aylovelle.S.S",
     "Soulful Yearning Lifelike AstrBot Neural Narrative Engine：维护情绪、人格、记忆、氛围和表达节奏的 Sylanne",
-    "2.3.17",
+    "2.3.19",
     "",
 )
 class EmotionalStatePlugin(Star):
@@ -9281,8 +9281,50 @@ class EmotionalStatePlugin(Star):
             for item in items:
                 item["consumed"] = True
                 item["consumed_at"] = self._observed_now()
+            self._consume_interrupted_realtime_shadows_for_breakpoints(
+                session_key,
+                items,
+            )
             self._mark_realtime_delivery_context_dirty(session_key)
         return appended
+
+    def _consume_interrupted_realtime_shadows_for_breakpoints(
+        self,
+        session_key: str,
+        breakpoints: Sequence[dict[str, Any]],
+    ) -> None:
+        queue = self._realtime_assistant_history_shadow_cache().get(
+            str(session_key or "global"),
+        )
+        if not queue:
+            return
+        epochs = {
+            item.get("input_epoch")
+            for item in breakpoints
+            if isinstance(item, dict) and item.get("input_epoch") is not None
+        }
+        hashes = {
+            str(item.get("full_text_hash") or "")
+            for item in breakpoints
+            if isinstance(item, dict) and str(item.get("full_text_hash") or "")
+        }
+        now = self._observed_now()
+        consumed_any = False
+        for item in queue:
+            if not isinstance(item, dict) or item.get("consumed"):
+                continue
+            if str(item.get("delivery_status") or "") != "interrupted":
+                continue
+            same_epoch = item.get("input_epoch") in epochs if epochs else False
+            same_hash = str(item.get("full_text_hash") or "") in hashes if hashes else False
+            if not (same_epoch or same_hash):
+                continue
+            item["consumed"] = True
+            item["consumed_at"] = now
+            item["consumed_reason"] = "represented_by_interrupted_reply_breakpoint"
+            consumed_any = True
+        if consumed_any:
+            self._mark_realtime_delivery_context_dirty(session_key)
 
     def _append_realtime_continuity_context_if_any(
         self,
@@ -13061,17 +13103,26 @@ class EmotionalStatePlugin(Star):
 
         token = _INTERNAL_LLM_CALL.set(True)
         try:
-            llm_resp = await self._call_internal_assessor_llm(
-                provider_id=provider_id,
-                prompt=prompt,
-                system_prompt=system_prompt,
-            )
-        except asyncio.TimeoutError:
-            self._log_warning(f"{PLUGIN_NAME}: LLM 情绪估计超时，启用回退估计。")
-            return heuristic_observation(current_text, profile=persona_profile)
-        except Exception as exc:
-            self._log_warning(f"{PLUGIN_NAME}: LLM 情绪估计失败，启用回退估计: {exc}")
-            return heuristic_observation(current_text, profile=persona_profile)
+            llm_resp = None
+            for attempt in range(2):
+                try:
+                    llm_resp = await self._call_internal_assessor_llm(
+                        provider_id=provider_id,
+                        prompt=prompt,
+                        system_prompt=system_prompt,
+                    )
+                    break
+                except asyncio.TimeoutError:
+                    self._log_warning(f"{PLUGIN_NAME}: LLM 情绪估计超时，启用回退估计。")
+                    return heuristic_observation(current_text, profile=persona_profile)
+                except Exception as exc:
+                    if attempt == 0 and self._looks_like_empty_model_output_error(exc):
+                        self._log_warning(
+                            f"{PLUGIN_NAME}: LLM 情绪估计空输出，重试一次: {exc}",
+                        )
+                        continue
+                    self._log_warning(f"{PLUGIN_NAME}: LLM 情绪估计失败，启用回退估计: {exc}")
+                    return heuristic_observation(current_text, profile=persona_profile)
         finally:
             _INTERNAL_LLM_CALL.reset(token)
 
@@ -13080,6 +13131,14 @@ class EmotionalStatePlugin(Star):
             self._log_warning(f"{PLUGIN_NAME}: 情绪估计输出不是可解析 JSON，启用回退估计。")
             return heuristic_observation(current_text, profile=persona_profile)
         return observation
+
+    def _looks_like_empty_model_output_error(self, exc: BaseException) -> bool:
+        text = f"{exc.__class__.__name__}: {exc}".lower()
+        return (
+            "emptymodeloutputerror" in text
+            or "completion has no usable output" in text
+            or "no usable output" in text
+        )
 
     async def _provider_id(self, event: AstrMessageEvent) -> str | None:
         configured = str(self._cfg("emotion_provider_id", "") or "").strip()

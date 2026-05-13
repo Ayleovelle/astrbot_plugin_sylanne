@@ -2,6 +2,37 @@
 
 本文件用于 AstrBot 插件市场/管理页展示更新内容。更完整的设计说明、公式推导、测试矩阵和维护手册见 `README.md`。
 
+## 2.3.19
+
+发布日期：2026-05-14
+
+### 修复
+
+- 内部情绪评估 LLM 遇到 `EmptyModelOutputError` / `no usable output` 时会轻量重试一次；若仍失败或超时，继续使用本地启发式估计，避免偶发空输出直接降低一轮状态更新精度。
+- README 当前版本导航锚点同步到 `2.3.19`，避免用户点击当前发布记录时跳回旧版本小节。
+- 同步插件版本号、README 当前展示和远程烟测示例版本为 `2.3.19`。
+
+### 验证
+
+- `py -3.13 -m unittest tests.test_astrbot_lifecycle.AstrBotLifecycleTests.test_assessor_retries_once_after_empty_model_output tests.test_astrbot_lifecycle.AstrBotLifecycleTests.test_assessor_timeout_falls_back_to_heuristic -v`
+- `py -3.13 -m py_compile main.py`
+
+## 2.3.18
+
+发布日期：2026-05-14
+
+### 修复
+
+- 修复插件更新/重载后同时恢复 interrupted shadow 与 interrupted breakpoint 时，旧的被打断接管回复可能在同一轮或下一轮再次以 `sylanne_realtime_assistant_history` 注入的问题。
+- breakpoint 成功注入后会同步消费同一输入轮次或同一全文哈希的 interrupted shadow，避免“已发/未发断点”和“旧回复 shadow”重复进入后续 LLM 请求。
+- 同步插件版本号、README 当前展示和远程烟测示例版本为 `2.3.18`。
+
+### 验证
+
+- `py -3.13 -m unittest tests.test_astrbot_lifecycle.AstrBotLifecycleTests.test_interrupted_shadow_recovered_with_breakpoint_does_not_replay -v`
+- `py -3.13 -m unittest tests.test_astrbot_lifecycle.AstrBotLifecycleTests.test_realtime_shadow_recovers_from_kv_after_plugin_reload tests.test_astrbot_lifecycle.AstrBotLifecycleTests.test_interrupted_breakpoint_recovers_from_kv_after_plugin_reload tests.test_astrbot_lifecycle.AstrBotLifecycleTests.test_interrupted_shadow_recovered_with_breakpoint_does_not_replay tests.test_astrbot_lifecycle.AstrBotLifecycleTests.test_realtime_shadow_restore_retries_after_transient_kv_failure tests.test_astrbot_lifecycle.AstrBotLifecycleTests.test_stale_reply_is_kept_as_compact_breakpoint_for_next_turn tests.test_astrbot_lifecycle.AstrBotLifecycleTests.test_zero_sent_interrupted_realtime_reply_becomes_next_turn_breakpoint -v`
+- `py -3.13 -m py_compile main.py`
+
 ## 2.3.17
 
 发布日期：2026-05-14

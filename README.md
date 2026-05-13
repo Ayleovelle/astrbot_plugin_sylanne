@@ -2,7 +2,7 @@
 
 > <span style="font-size: 1.08em;"><strong>Soulful Yearning Lifelike AstrBot Neural Narrative Engine</strong>。她维护的不只是“情绪标签”，而是情绪、人格、记忆、氛围、主动性和表达节奏交织成的长期状态。</span>
 
-![版本 2.3.17](https://img.shields.io/badge/version-2.3.17-blue)
+![版本 2.3.19](https://img.shields.io/badge/version-2.3.19-blue)
 ![AstrBot >=4.9.2,<5.0.0](https://img.shields.io/badge/AstrBot-%3E%3D4.9.2%2C%3C5.0.0-green)
 ![Python 3.10+](https://img.shields.io/badge/Python-3.10%2B-yellow)
 ![协议 astrbot.emotion_state.v2](https://img.shields.io/badge/schema-astrbot.emotion__state.v2-purple)
@@ -37,7 +37,7 @@
 
 <br clear="right">
 
-`2.3.17` 是接管媒体和快判开关修复版：在长历史关键上下文保底的基础上，接管分段发送会按 `result_chain` 的文本锚点把图片插回正确位置；接管 shadow 和打断 breakpoint 已覆盖插件更新后的 KV 恢复测试；快速判断 LLM 增加独立总开关，只有用户打开 `fast_assessor_enabled` 并选择 `fast_assessor_provider_id` 后才会调用第二个快判模型。真人即时聊天接管、分条接管提示、用户碎片 LLM gate、表情包回应、表情包一致性 LLM gate 和用户表情学习继续默认关闭。
+`2.3.19` 是接管上下文与空输出韧性修复版：在接管媒体和快判开关修复的基础上，修复插件更新/重载后同时恢复 interrupted shadow 与 breakpoint 时，旧的被打断回复可能重复注入的问题；内部情绪评估遇到 `EmptyModelOutputError` / `no usable output` 时会轻量重试一次，仍失败才回退到本地启发式估计。真人即时聊天接管、分条接管提示、用户碎片 LLM gate、表情包回应、表情包一致性 LLM gate 和用户表情学习继续默认关闭。
 
 | 能力 | 作用 |
 | --- | --- |
@@ -73,7 +73,7 @@
 | 主题 | 内容 |
 | --- | --- |
 | [当前版本与兼容范围](#当前版本与兼容范围) | 插件版本、AstrBot 版本、Python 要求、许可证和发布状态。 |
-| [当前版本发布记录](#2317-当前版本发布记录) | 接管媒体按锚点插入、更新后恢复接管上下文、双 LLM 快判有独立总开关。 |
+| [当前版本发布记录](#2319-当前版本发布记录) | 接管媒体按锚点插入、更新后恢复接管上下文、双 LLM 快判有独立总开关、情绪评估空输出轻量重试。 |
 | [项目定位](#项目定位) | 为什么本插件不是普通的提示词人设增强。 |
 | [核心能力](#核心能力总览) | 7 维情绪、人格建模、真实时间记忆、关系修复、公共 API。 |
 | [快速开始](#快速开始) | 发布 zip 包、仓库安装、手动复制、最小配置和检查命令。 |
@@ -101,17 +101,17 @@
 | --- | --- |
 | 插件目录名 | `astrbot_plugin_sylanne` |
 | 显示名 | `Sylanne` |
-| 当前版本 | `2.3.17` |
+| 当前版本 | `2.3.19` |
 | AstrBot 版本 | `>=4.9.2,<5.0.0` |
 | Python | `3.10+` |
 | 许可证 | `GPL-3.0-or-later` |
 | 运行时第三方依赖 | 当前无额外依赖，见 `requirements.txt` |
 
-`2.3.17` 保留 Sylanne 自有记忆知识库、只读记忆查询入口、Agent-owned context 即时聊天修复、AstrBot Embedding 提供商驱动的向量召回、可视化记忆设置 Page、短答锚定、模型空回复降级、完整上下文回填、内部工具统一隐藏、主动聊天反馈、等待期追发合并和长历史关键上下文保底；本版进一步修复接管分段回复里的图片插入顺序、表情包候选为空时的诊断结果、插件更新后的接管上下文恢复，并为快速判断 LLM 增加独立开关。核心情绪、回复后后台评估（post）、`group_atmosphere_state`、`humanlike_state`、`lifelike_learning_state`、`personality_drift_state`、Sylanne 自有记忆和欺骗/操控/逃责类动作阻断默认自动运行；真人即时聊天接管、表情包回应、道德修复、瑕疵模拟、心理筛查等高风险或实验模块仍由配置者显式打开。
+`2.3.19` 保留 Sylanne 自有记忆知识库、只读记忆查询入口、Agent-owned context 即时聊天修复、AstrBot Embedding 提供商驱动的向量召回、可视化记忆设置 Page、短答锚定、模型空回复降级、完整上下文回填、内部工具统一隐藏、主动聊天反馈、等待期追发合并和长历史关键上下文保底；本版进一步修复接管分段回复里的图片插入顺序、表情包候选为空时的诊断结果、插件更新后的接管上下文恢复、interrupted shadow 与 breakpoint 同时恢复后的重复注入边界、情绪评估 LLM 空输出一次重试，并为快速判断 LLM 增加独立开关。核心情绪、回复后后台评估（post）、`group_atmosphere_state`、`humanlike_state`、`lifelike_learning_state`、`personality_drift_state`、Sylanne 自有记忆和欺骗/操控/逃责类动作阻断默认自动运行；真人即时聊天接管、表情包回应、道德修复、瑕疵模拟、心理筛查等高风险或实验模块仍由配置者显式打开。
 
-### 2.3.17 当前版本发布记录
+### 2.3.19 当前版本发布记录
 
-`v2.3.17` 合并在 `main` 上，对外安装版本由 `metadata.yaml` 和 `main.py @register(...)` 共同声明为 `2.3.17`。本版按版本规则提升第三位版本号：修复接管媒体顺序、插件更新后接管上下文恢复验证和快速判断 LLM 配置可见性，不改变公共 API 版本；公共 API 版本仍保持 `1.0`，schema 仍保持向后兼容。
+`v2.3.19` 合并在 `main` 上，对外安装版本由 `metadata.yaml` 和 `main.py @register(...)` 共同声明为 `2.3.19`。本版按版本规则提升第三位版本号：修复插件更新/重载后 interrupted shadow 与 breakpoint 同时恢复时的重复注入边界，并为内部情绪评估 LLM 空输出增加一次轻量重试；不改变公共 API 版本，公共 API 版本仍保持 `1.0`，schema 仍保持向后兼容。
 
 当前版本的主要变化：
 
@@ -121,6 +121,7 @@
 | 接管媒体智能嵌入 | 接管分段发送会读取 `LLMResponse.result_chain/message_chain` 里的图片组件，按文本字符锚点映射到最终分条位置；图片在文本前、中间或结尾都会按相对顺序发送，不再统一拖到最后。 |
 | 表情包发送诊断 | 表情包仍只来自本地表情包目录或已学习的用户表情元数据；如果没有候选素材，`sticker_result.blocked_reason` 会明确返回 `no_sticker_candidates`，方便排查“开关开了但不发”的原因。 |
 | 更新后上下文恢复 | 接管投递 shadow 和打断 breakpoint 会写入轻量 KV 投递上下文；插件更新/重载后的新实例可在下一轮恢复一次，并在注入后标记 consumed，避免反复污染后续提示词。 |
+| 情绪评估空输出韧性 | 内部情绪评估 LLM 若返回 `EmptyModelOutputError` / `no usable output`，插件会仅重试一次；若仍失败或超时，继续使用本地启发式估计，避免主流程崩溃。 |
 | 高风险默认关闭 | 真人即时聊天接管、即时聊天风格提示、默认回复接管、用户碎片 LLM gate、表情包回应、表情包一致性 LLM gate 和用户表情学习全部默认关闭。 |
 | 开启风险提示 | README 和配置 schema 明确提示：这些功能仍需更长时间真实体验和修复，现阶段打开可能导致上下文错乱、重复发送、漏发、旧回复残留、撤回/打断状态判断错误、平台发送异常或表情包语气不匹配。 |
 | 快判 LLM 独立开关 | 新增 `fast_assessor_enabled`。只有同时打开该开关、选择 `fast_assessor_provider_id`，并开启用户碎片或表情包一致性等对应 gate 时，才会调用第二个快判 LLM。 |
@@ -164,7 +165,7 @@
 | 上下文安全预算 | 召回结果只作为 `[sylanne_memory_recall]` 限长摘要注入，并继续受请求预算和官方上下文压缩清洗逻辑约束。 |
 | 模块互斥自检 | 发布前覆盖自有记忆、主动发言、官方上下文压缩、即时聊天、公共 API、配置契约和包体预检，验证模块之间不会互相回灌或重复调用外部 LivingMemory。 |
 | 工作流图 | `docs/assets/workflow_and_proactive.svg` 已重绘，突出即时聊天、追发合并、Agent 工具循环、模型边界和主动聊天反馈；移除误导性的单点 Gemini 诊断节点，并修正中文字体和跨泳道箭头。 |
-| 公开契约 | 插件版本为 `2.3.17`；公共 API 版本仍为 `1.0`，schema 仍保持 `astrbot.emotion_state.v2` 等版本化契约。 |
+| 公开契约 | 插件版本为 `2.3.19`；公共 API 版本仍为 `1.0`，schema 仍保持 `astrbot.emotion_state.v2` 等版本化契约。 |
 
 旧版本发布记录统一放在 `CHANGELOG.md`。README 只展示当前版本，避免插件管理页从历史段落误抓旧版本号。
 
@@ -2961,7 +2962,7 @@ $env:ASTRBOT_EXPECT_PLUGIN = "astrbot_plugin_sylanne"
 脚本会在输出 JSON 里写出 `expectedPluginRuntime`，包含插件列表 API 中返回的 `version`、`displayName`、`activated`、`author`、`astrbotVersion` 等只读字段。若目标插件存在但 `activated=false`，脚本会失败退出。需要把版本和显示名也作为硬断言时，可以额外设置：
 
 ```powershell
-$env:ASTRBOT_EXPECT_PLUGIN_VERSION = "2.3.17"
+$env:ASTRBOT_EXPECT_PLUGIN_VERSION = "2.3.19"
 $env:ASTRBOT_EXPECT_PLUGIN_DISPLAY_NAME = "Sylanne"
 & $node scripts\remote_smoke_playwright.js
 ```

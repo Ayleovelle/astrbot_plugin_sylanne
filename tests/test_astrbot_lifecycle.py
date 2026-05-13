@@ -1220,6 +1220,49 @@ class AstrBotLifecycleTests(unittest.TestCase):
 
         self.assertEqual(observation.source, "heuristic")
 
+    def test_assessor_retries_once_after_empty_model_output(self):
+        from emotion_engine import EmotionState
+
+        plugin = new_plugin({"enable_low_signal_light_assessment": False})
+        attempts = []
+
+        async def fake_provider_id(self, event):
+            return "empty-once-provider"
+
+        async def flaky_call_llm(self, **kwargs):
+            attempts.append(kwargs)
+            if len(attempts) == 1:
+                raise RuntimeError(
+                    "OpenAI completion has no usable output. "
+                    "response_id=resp-empty, finish_reason=stop",
+                )
+            return SimpleNamespace(
+                completion_text=(
+                    '{"label":"calm","dimensions":{"valence":0.1,'
+                    '"arousal":0.0,"dominance":0.0,"affiliation":0.0,'
+                    '"certainty":0.0,"control":0.0,"surprise":0.0},'
+                    '"confidence":0.7,"reason":"retry success"}'
+                ),
+            )
+
+        bind_async(plugin, "_provider_id", fake_provider_id)
+        bind_async(plugin, "_call_internal_assessor_llm", flaky_call_llm)
+
+        observation = asyncio.run(
+            plugin._assess_emotion(
+                event=FakeEvent("s-empty-retry"),
+                phase="pre_response",
+                previous_state=EmotionState.initial(),
+                persona_profile=None,
+                context_text="previous context",
+                current_text="please update the picture style",
+            ),
+        )
+
+        self.assertEqual(len(attempts), 2)
+        self.assertEqual(observation.source, "llm")
+        self.assertEqual(observation.label, "calm")
+
     def test_on_llm_response_updates_for_both_timing(self):
         plugin = new_plugin({"assessment_timing": "both"})
         saves, assessment_calls = self._bind_common_state_hooks(plugin)
@@ -6275,6 +6318,115 @@ class AstrBotLifecycleTests(unittest.TestCase):
         self.assertNotIn("sylanne_interrupted_reply_breakpoint", duplicate_injected)
         recovered_payload = stored[saved_key]
         self.assertTrue(recovered_payload["breakpoints"][-1]["consumed"])
+
+    def test_interrupted_shadow_recovered_with_breakpoint_does_not_replay(self):
+        stored = {}
+        plugin = new_plugin(
+            {
+                "assessment_timing": "post",
+                "inject_state": False,
+                "enable_realtime_chat": True,
+                "enable_sticker_reaction": False,
+                "use_llm_assessor": False,
+                "realtime_input_completion_probe_delay_seconds": 0.0,
+                "realtime_input_completion_max_wait_seconds": 0.0,
+            },
+        )
+        self._bind_common_state_hooks(plugin)
+        stored[plugin._realtime_delivery_context_kv_key("s-reload-interrupted-shadow")] = {
+            "schema_version": "astrbot.realtime_delivery_context.v1",
+            "kind": "realtime_delivery_context",
+            "session_key": "s-reload-interrupted-shadow",
+            "shadows": [
+                {
+                    "schema_version": "astrbot.realtime_assistant_history_shadow.v1",
+                    "kind": "realtime_assistant_history_shadow",
+                    "session_key": "s-reload-interrupted-shadow",
+                    "input_epoch": 1,
+                    "source": "llm_response_intercept",
+                    "delivery_status": "interrupted",
+                    "message_count": 2,
+                    "sent_count": 1,
+                    "unsent_count": 1,
+                    "full_text": "old interrupted full text should not replay",
+                    "full_text_excerpt": "old interrupted full text should not replay",
+                    "excerpt": "old interrupted full text should not replay",
+                    "full_text_hash": "interrupted-shadow-hash",
+                    "consumed": False,
+                },
+            ],
+            "breakpoints": [
+                {
+                    "schema_version": "astrbot.interrupted_reply_breakpoint.v1",
+                    "kind": "interrupted_reply_breakpoint",
+                    "session_key": "s-reload-interrupted-shadow",
+                    "reason": "user_interrupted",
+                    "source": "llm_response_intercept",
+                    "input_epoch": 1,
+                    "sent_count": 1,
+                    "unsent_count": 1,
+                    "full_text_chars": 37,
+                    "sent_text_hash": "sent-hash",
+                    "unsent_text_hash": "unsent-hash",
+                    "full_text_hash": "interrupted-shadow-hash",
+                    "sent_excerpt": "sent part",
+                    "unsent_head": "unsent part",
+                    "full_text": "sent part unsent part",
+                    "consumed": False,
+                },
+            ],
+            "withdrawals": [],
+        }
+
+        async def fake_get_kv(self, key, default=None):
+            return stored.get(key, default)
+
+        async def fake_put_kv(self, key, value):
+            stored[key] = value
+
+        bind_async(plugin, "get_kv_data", fake_get_kv)
+        bind_async(plugin, "put_kv_data", fake_put_kv)
+
+        async def run_requests():
+            first = fake_request(
+                session_id="s-reload-interrupted-shadow",
+                prompt="what was interrupted",
+            )
+            await plugin.on_llm_request(
+                FakeEvent(
+                    "s-reload-interrupted-shadow",
+                    message="what was interrupted",
+                    sender_id="u1",
+                ),
+                first,
+            )
+            second = fake_request(
+                session_id="s-reload-interrupted-shadow",
+                prompt="next turn",
+            )
+            await plugin.on_llm_request(
+                FakeEvent(
+                    "s-reload-interrupted-shadow",
+                    message="next turn",
+                    sender_id="u1",
+                ),
+                second,
+            )
+            return first, second
+
+        first, second = asyncio.run(run_requests())
+
+        first_injected = "\n".join(self._request_text_parts(first))
+        second_injected = "\n".join(self._request_text_parts(second))
+        saved = stored[plugin._realtime_delivery_context_kv_key("s-reload-interrupted-shadow")]
+        self.assertIn("sylanne_interrupted_reply_breakpoint", first_injected)
+        self.assertNotIn("sylanne_realtime_assistant_history", first_injected)
+        self.assertIn("sent_count=1", first_injected)
+        self.assertIn("unsent_count=1", first_injected)
+        self.assertNotIn("sylanne_interrupted_reply_breakpoint", second_injected)
+        self.assertNotIn("sylanne_realtime_assistant_history", second_injected)
+        self.assertTrue(saved["breakpoints"][-1]["consumed"])
+        self.assertTrue(saved["shadows"][-1]["consumed"])
 
     def test_realtime_shadow_restore_retries_after_transient_kv_failure(self):
         calls = {"get": 0}
