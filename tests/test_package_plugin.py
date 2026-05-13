@@ -19,6 +19,23 @@ def metadata_value(name: str) -> str:
 
 PLUGIN_NAME = metadata_value("name")
 PLUGIN_LICENSE = "GPL-3.0-or-later"
+EXPECTED_DOC_ASSETS = {
+    "docs/assets/lifecycle_model_fit.svg",
+    "docs/assets/lifecycle_model_fit_summary.csv",
+    "docs/assets/lifecycle_model_fit_table.md",
+    "docs/assets/runtime_overview.svg",
+    "docs/assets/sylanne-mascot.gif",
+    "docs/assets/sylanne-mascot-card.svg",
+    "docs/assets/theory_feature_matrix_overhead.png",
+    "docs/assets/theory_feature_matrix_overhead.svg",
+    "docs/assets/theory_lifecycle_fit_explanation.png",
+    "docs/assets/theory_lifecycle_fit_explanation.svg",
+    "docs/assets/workflow_and_proactive.svg",
+}
+EXPECTED_DOC_REPORTS = {
+    "docs/reports/fuck-u-code-fermentation.svg",
+    "docs/reports/fuck-u-code-powered.svg",
+}
 
 
 def load_package_script():
@@ -61,17 +78,9 @@ class PackagePluginTests(unittest.TestCase):
         self.assertIn("CHANGELOG.md", files)
         self.assertIn("docs/theory.md", files)
         self.assertIn("docs/remote_testing.md", files)
-        self.assertIn("docs/assets/lifecycle_model_fit.svg", files)
-        self.assertIn("docs/assets/lifecycle_model_fit_summary.csv", files)
-        self.assertIn("docs/assets/lifecycle_model_fit_table.md", files)
-        self.assertIn("docs/assets/runtime_overview.svg", files)
-        self.assertIn("docs/assets/sylanne-mascot.gif", files)
-        self.assertIn("docs/assets/sylanne-mascot-card.svg", files)
-        self.assertIn("docs/assets/theory_feature_matrix_overhead.png", files)
-        self.assertIn("docs/assets/theory_feature_matrix_overhead.svg", files)
-        self.assertIn("docs/assets/theory_lifecycle_fit_explanation.png", files)
-        self.assertIn("docs/assets/theory_lifecycle_fit_explanation.svg", files)
-        self.assertIn("docs/assets/workflow_and_proactive.svg", files)
+        for asset in EXPECTED_DOC_ASSETS | EXPECTED_DOC_REPORTS:
+            with self.subTest(asset=asset):
+                self.assertIn(asset, files)
         self.assertIn("pages/memory-settings/index.html", files)
         self.assertIn("pages/memory-settings/app.js", files)
         self.assertIn("pages/memory-settings/style.css", files)
@@ -79,24 +88,20 @@ class PackagePluginTests(unittest.TestCase):
             any(
                 path.startswith("docs/assets/")
                 and path
-                not in {
-                    "docs/assets/lifecycle_model_fit.svg",
-                    "docs/assets/lifecycle_model_fit_summary.csv",
-                    "docs/assets/lifecycle_model_fit_table.md",
-                    "docs/assets/runtime_overview.svg",
-                    "docs/assets/sylanne-mascot.gif",
-                    "docs/assets/sylanne-mascot-card.svg",
-                    "docs/assets/theory_feature_matrix_overhead.png",
-                    "docs/assets/theory_feature_matrix_overhead.svg",
-                    "docs/assets/theory_lifecycle_fit_explanation.png",
-                    "docs/assets/theory_lifecycle_fit_explanation.svg",
-                    "docs/assets/workflow_and_proactive.svg",
-                }
+                not in EXPECTED_DOC_ASSETS
                 for path in files
             )
         )
         self.assertNotIn("docs/literature_kb.md", files)
         self.assertNotIn("docs/humanlike_agent_literature_kb.md", files)
+        self.assertFalse(
+            any(
+                path.startswith("docs/reports/")
+                and path
+                not in EXPECTED_DOC_REPORTS
+                for path in files
+            )
+        )
         self.assertNotIn("scripts/package_plugin.py", files)
         self.assertNotIn("task_plan.md", files)
         self.assertNotIn("progress.md", files)
@@ -140,6 +145,9 @@ class PackagePluginTests(unittest.TestCase):
             "theory_lifecycle_fit_explanation.png",
             "theory_lifecycle_fit_explanation.svg",
             "workflow_and_proactive.svg",
+            "reports/",
+            "fuck-u-code-fermentation.svg",
+            "fuck-u-code-powered.svg",
             "pages/",
             "memory-settings/",
             "index.html",
@@ -203,17 +211,9 @@ class PackagePluginTests(unittest.TestCase):
         self.assertIn(prefix + "LICENSE", names)
         self.assertIn(prefix + "logo.png", names)
         self.assertIn(prefix + "docs/remote_testing.md", names)
-        self.assertIn(prefix + "docs/assets/lifecycle_model_fit.svg", names)
-        self.assertIn(prefix + "docs/assets/lifecycle_model_fit_summary.csv", names)
-        self.assertIn(prefix + "docs/assets/lifecycle_model_fit_table.md", names)
-        self.assertIn(prefix + "docs/assets/runtime_overview.svg", names)
-        self.assertIn(prefix + "docs/assets/sylanne-mascot.gif", names)
-        self.assertIn(prefix + "docs/assets/sylanne-mascot-card.svg", names)
-        self.assertIn(prefix + "docs/assets/theory_feature_matrix_overhead.png", names)
-        self.assertIn(prefix + "docs/assets/theory_feature_matrix_overhead.svg", names)
-        self.assertIn(prefix + "docs/assets/theory_lifecycle_fit_explanation.png", names)
-        self.assertIn(prefix + "docs/assets/theory_lifecycle_fit_explanation.svg", names)
-        self.assertIn(prefix + "docs/assets/workflow_and_proactive.svg", names)
+        for asset in EXPECTED_DOC_ASSETS | EXPECTED_DOC_REPORTS:
+            with self.subTest(asset=asset):
+                self.assertIn(prefix + asset, names)
         self.assertIn(prefix + "pages/memory-settings/index.html", names)
         self.assertIn(prefix + "pages/memory-settings/app.js", names)
         self.assertIn(prefix + "pages/memory-settings/style.css", names)
@@ -221,24 +221,20 @@ class PackagePluginTests(unittest.TestCase):
             any(
                 name.startswith(prefix + "docs/assets/")
                 and name
-                not in {
-                    prefix + "docs/assets/lifecycle_model_fit.svg",
-                    prefix + "docs/assets/lifecycle_model_fit_summary.csv",
-                    prefix + "docs/assets/lifecycle_model_fit_table.md",
-                    prefix + "docs/assets/runtime_overview.svg",
-                    prefix + "docs/assets/sylanne-mascot.gif",
-                    prefix + "docs/assets/sylanne-mascot-card.svg",
-                    prefix + "docs/assets/theory_feature_matrix_overhead.png",
-                    prefix + "docs/assets/theory_feature_matrix_overhead.svg",
-                    prefix + "docs/assets/theory_lifecycle_fit_explanation.png",
-                    prefix + "docs/assets/theory_lifecycle_fit_explanation.svg",
-                    prefix + "docs/assets/workflow_and_proactive.svg",
-                }
+                not in {prefix + asset for asset in EXPECTED_DOC_ASSETS}
                 for name in names
             )
         )
         self.assertNotIn(prefix + "docs/literature_kb.md", names)
         self.assertNotIn(prefix + "docs/humanlike_agent_literature_kb.md", names)
+        self.assertFalse(
+            any(
+                name.startswith(prefix + "docs/reports/")
+                and name
+                not in {prefix + report for report in EXPECTED_DOC_REPORTS}
+                for name in names
+            )
+        )
         self.assertFalse(any(name.startswith(prefix + "literature_kb/") for name in names))
         self.assertFalse(any(name.startswith(prefix + "personality_literature_kb/") for name in names))
         self.assertFalse(any(name.startswith(prefix + "psychological_literature_kb/") for name in names))
@@ -369,6 +365,8 @@ class PluginZipPreflightTests(unittest.TestCase):
             (prefix + "docs/assets/theory_lifecycle_fit_explanation.png", "PNG\n"),
             (prefix + "docs/assets/theory_lifecycle_fit_explanation.svg", "<svg></svg>\n"),
             (prefix + "docs/assets/workflow_and_proactive.svg", "<svg></svg>\n"),
+            (prefix + "docs/reports/fuck-u-code-fermentation.svg", "<svg></svg>\n"),
+            (prefix + "docs/reports/fuck-u-code-powered.svg", "<svg></svg>\n"),
             (prefix + "pages/memory-settings/index.html", "<!doctype html>\n"),
             (prefix + "pages/memory-settings/app.js", "export {};\n"),
             (prefix + "pages/memory-settings/style.css", "body{}\n"),
@@ -443,6 +441,8 @@ class PluginZipPreflightTests(unittest.TestCase):
             "docs/assets/theory_lifecycle_fit_explanation.png",
             "docs/assets/theory_lifecycle_fit_explanation.svg",
             "docs/assets/workflow_and_proactive.svg",
+            "docs/reports/fuck-u-code-fermentation.svg",
+            "docs/reports/fuck-u-code-powered.svg",
             "pages/memory-settings/index.html",
             "pages/memory-settings/app.js",
             "pages/memory-settings/style.css",

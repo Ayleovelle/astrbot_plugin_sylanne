@@ -21,21 +21,75 @@ function resolveBrowserExecutable() {
   return candidates.find((candidate) => fs.existsSync(candidate)) || "";
 }
 
+function readRemoteSmokeConfig() {
+  const config = {
+    remoteUrl: env("ASTRBOT_REMOTE_URL"),
+    username: env("ASTRBOT_REMOTE_USERNAME"),
+    password: env("ASTRBOT_REMOTE_PASSWORD"),
+    expectedPlugin: env("ASTRBOT_EXPECT_PLUGIN"),
+    expectedPluginVersion: env("ASTRBOT_EXPECT_PLUGIN_VERSION"),
+    expectedPluginDisplayName: env("ASTRBOT_EXPECT_PLUGIN_DISPLAY_NAME"),
+    artifactDir: env(
+      "ASTRBOT_REMOTE_ARTIFACT_DIR",
+      path.join("output", "playwright"),
+    ),
+  };
+  if (!config.remoteUrl || !config.username || !config.password) {
+    throw new Error(
+      "Set ASTRBOT_REMOTE_URL, ASTRBOT_REMOTE_USERNAME and ASTRBOT_REMOTE_PASSWORD before running remote smoke.",
+    );
+  }
+  return config;
+}
+
+function browserLaunchOptions() {
+  const executablePath = resolveBrowserExecutable();
+  const launchOptions = {
+    headless: env("ASTRBOT_REMOTE_HEADED") !== "1",
+    args: ["--no-proxy-server", "--proxy-server=direct://", "--proxy-bypass-list=*"],
+  };
+  if (executablePath) {
+    launchOptions.executablePath = executablePath;
+  }
+  return launchOptions;
+}
+
+function watchFailedRequests(page) {
+  const failedRequests = [];
+  page.on("requestfailed", (request) => {
+    failedRequests.push({
+      url: request.url(),
+      failure: request.failure() && request.failure().errorText,
+    });
+  });
+  return failedRequests;
+}
+
+async function ignoreNetworkIdleTimeout(page) {
+  await page.waitForLoadState("networkidle", { timeout: 30000 }).catch(() => {});
+}
+
 async function getJson(page, url) {
   return await page.evaluate(async (targetUrl) => {
+    const parseJson = (text) => {
+      try {
+        return { json: JSON.parse(text), parse_error: "" };
+      } catch (error) {
+        return {
+          json: null,
+          parse_error: error && error.message ? error.message : String(error),
+        };
+      }
+    };
     const response = await fetch(targetUrl, { credentials: "include" });
     const text = await response.text();
-    let json = null;
-    try {
-      json = JSON.parse(text);
-    } catch {
-      json = null;
-    }
+    const parsed = parseJson(text);
     return {
       status: response.status,
       url: targetUrl,
       text: text.slice(0, 1000),
-      json,
+      json: parsed.json,
+      parse_error: parsed.parse_error,
     };
   }, url);
 }
@@ -166,67 +220,36 @@ async function waitForExtensionUi(page, expected, expectedDisplayName) {
     .catch(() => "best_effort_timeout");
 }
 
-async function main() {
-  const remoteUrl = env("ASTRBOT_REMOTE_URL");
-  const username = env("ASTRBOT_REMOTE_USERNAME");
-  const password = env("ASTRBOT_REMOTE_PASSWORD");
-  const expectedPlugin = env("ASTRBOT_EXPECT_PLUGIN");
-  const expectedPluginVersion = env("ASTRBOT_EXPECT_PLUGIN_VERSION");
-  const expectedPluginDisplayName = env("ASTRBOT_EXPECT_PLUGIN_DISPLAY_NAME");
-  const artifactDir = env(
-    "ASTRBOT_REMOTE_ARTIFACT_DIR",
-    path.join("output", "playwright"),
-  );
-
-  if (!remoteUrl || !username || !password) {
-    throw new Error(
-      "Set ASTRBOT_REMOTE_URL, ASTRBOT_REMOTE_USERNAME and ASTRBOT_REMOTE_PASSWORD before running remote smoke.",
-    );
-  }
-
-  fs.mkdirSync(artifactDir, { recursive: true });
-  const executablePath = resolveBrowserExecutable();
-  const launchOptions = {
-    headless: env("ASTRBOT_REMOTE_HEADED") !== "1",
-    args: ["--no-proxy-server", "--proxy-server=direct://", "--proxy-bypass-list=*"],
-  };
-  if (executablePath) {
-    launchOptions.executablePath = executablePath;
-  }
-
-  const browser = await chromium.launch(launchOptions);
-  const page = await browser.newPage({ viewport: { width: 1440, height: 1100 } });
-  const failedRequests = [];
-  page.on("requestfailed", (request) => {
-    failedRequests.push({
-      url: request.url(),
-      failure: request.failure() && request.failure().errorText,
-    });
+async function loginToDashboard(page, config) {
+  await page.goto(config.remoteUrl, { waitUntil: "domcontentloaded", timeout: 45000 });
+  await ignoreNetworkIdleTimeout(page);
+  await page.screenshot({
+    path: path.join(config.artifactDir, "remote-login-page.png"),
+    fullPage: true,
   });
 
-  try {
-    await page.goto(remoteUrl, { waitUntil: "domcontentloaded", timeout: 45000 });
-    await page.waitForLoadState("networkidle", { timeout: 30000 }).catch(() => {});
-    await page.screenshot({
-      path: path.join(artifactDir, "remote-login-page.png"),
-      fullPage: true,
-    });
+  await page.locator("input").nth(0).fill(config.username);
+  await page.locator("input").nth(1).fill(config.password);
+  await page.locator("button[type=\"submit\"]").click();
+  await page.waitForURL("**/#/dashboard/default", { timeout: 30000 });
+  const authenticatedUrl = page.url();
+  await ignoreNetworkIdleTimeout(page);
+  await page.screenshot({
+    path: path.join(config.artifactDir, "remote-dashboard.png"),
+    fullPage: true,
+  });
+  return authenticatedUrl;
+}
 
-    await page.locator("input").nth(0).fill(username);
-    await page.locator("input").nth(1).fill(password);
-    await page.locator("button[type=\"submit\"]").click();
-    await page.waitForURL("**/#/dashboard/default", { timeout: 30000 });
-    const authenticatedUrl = page.url();
-    await page.waitForLoadState("networkidle", { timeout: 30000 }).catch(() => {});
-    await page.screenshot({
-      path: path.join(artifactDir, "remote-dashboard.png"),
-      fullPage: true,
-    });
-
-    const version = await getJson(page, "/api/stat/version");
-    const pluginPayload = await getJson(page, "/api/plugin/get");
-    const failedPlugins = await getJson(page, "/api/plugin/source/get-failed-plugins");
-    const apiHealth = {
+async function collectApiSnapshot(page) {
+  const version = await getJson(page, "/api/stat/version");
+  const pluginPayload = await getJson(page, "/api/plugin/get");
+  const failedPlugins = await getJson(page, "/api/plugin/source/get-failed-plugins");
+  return {
+    version,
+    pluginPayload,
+    failedPlugins,
+    apiHealth: {
       statVersion: {
         endpoint: "/api/stat/version",
         status: version.status,
@@ -242,216 +265,270 @@ async function main() {
         status: failedPlugins.status,
         ok: failedPlugins.status === 200,
       },
-    };
-    const pluginSummary = summarizePluginPayload(pluginPayload);
-    const expectedPluginRecord = findPluginByName(pluginPayload, expectedPlugin);
-    const containsExpectedPlugin = expectedPlugin
-      ? Boolean(expectedPluginRecord)
-      : null;
-    const expectedPluginRuntime = summarizePluginRuntime(expectedPluginRecord);
-    const expectedPluginVersionMatches = expectedPluginVersion
-      ? expectedPluginRuntime && expectedPluginRuntime.version === expectedPluginVersion
-      : null;
-    const expectedPluginDisplayNameMatches = expectedPluginDisplayName
-      ? expectedPluginRuntime
-        && expectedPluginRuntime.displayName === expectedPluginDisplayName
-      : null;
-    const failedPluginData = failedPlugins.json && failedPlugins.json.data;
-    const expectedFailedPlugin = findFailedPlugin(failedPluginData, expectedPlugin);
-    const failedPluginSummary = summarizeFailedPlugins(
-      failedPluginData,
-      expectedPlugin,
-    );
-    const expectedPluginChecks = expectedPlugin ? {
-      ok: Boolean(
-        containsExpectedPlugin
-        && !expectedFailedPlugin
-        && (!expectedPluginRuntime || expectedPluginRuntime.activated !== false)
-        && (expectedPluginVersion ? Boolean(expectedPluginVersionMatches) : true)
-        && (expectedPluginDisplayName ? Boolean(expectedPluginDisplayNameMatches) : true)
-      ),
-      found: containsExpectedPlugin,
-      notFailed: !expectedFailedPlugin,
-      activated: expectedPluginRuntime
-        ? expectedPluginRuntime.activated !== false
-        : null,
-      versionMatches: expectedPluginVersion ? Boolean(expectedPluginVersionMatches) : null,
-      displayNameMatches: expectedPluginDisplayName
-        ? Boolean(expectedPluginDisplayNameMatches)
-        : null,
-    } : null;
-    const expectedPluginHasDrift = Boolean(
-      (expectedPluginVersion && expectedPluginRuntime && !expectedPluginVersionMatches)
-      || (
-        expectedPluginDisplayName
-        && expectedPluginRuntime
-        && !expectedPluginDisplayNameMatches
-      ),
-    );
-    const expectedPluginDrift = expectedPlugin ? {
-      hasDrift: expectedPluginHasDrift,
-      version: expectedPluginVersion ? {
-        expected: expectedPluginVersion,
-        actual: expectedPluginRuntime ? expectedPluginRuntime.version : null,
-        matches: Boolean(expectedPluginVersionMatches),
-      } : null,
-      displayName: expectedPluginDisplayName ? {
-        expected: expectedPluginDisplayName,
-        actual: expectedPluginRuntime ? expectedPluginRuntime.displayName : null,
-        matches: Boolean(expectedPluginDisplayNameMatches),
-      } : null,
-      reason: expectedPluginHasDrift
-        ? "installed runtime metadata differs from pinned expectations; upload-install does not overwrite an existing formal plugin directory"
-        : null,
-    } : null;
+    },
+  };
+}
 
-    await page.evaluate(() => {
-      location.hash = "#/extension#installed";
-    });
-    await page.waitForLoadState("networkidle", { timeout: 30000 }).catch(() => {});
-    await page.waitForTimeout(2000);
-    if (!page.url().includes("#/extension#installed")) {
-      const clicked = await page.evaluate(() => {
-        const links = [...document.querySelectorAll("a")];
-        const link = links.find((item) => (
-          item.href.includes("#/extension#installed")
-          || item.textContent.includes("AstrBot 插件")
-        ));
-        if (link) {
-          link.click();
-          return true;
-        }
-        return false;
-      });
-      if (clicked) {
-        await page.waitForTimeout(2000);
-        await page.waitForLoadState("networkidle", { timeout: 30000 }).catch(() => {});
-      }
-    }
-    const expectedUiDisplayName = expectedPluginDisplayName
-      || (expectedPluginRuntime && expectedPluginRuntime.displayName)
-      || "";
-    const uiProbeWaitStatus = await waitForExtensionUi(
-      page,
-      expectedPlugin,
-      expectedUiDisplayName,
-    );
-    await page.screenshot({
-      path: path.join(artifactDir, "remote-extension-installed.png"),
-      fullPage: true,
-    });
-
-    const pageData = await page.evaluate(({
-      expected,
-      expectedDisplayName,
-      waitStatus,
-    }) => {
-      const normalize = (value) => (value || "").replace(/\s+/g, " ").trim();
-      const bodyText = normalize(document.body.innerText);
-      const pluginTitles = [...document.querySelectorAll(".extension-title-row")]
-        .map((element) => normalize(element.innerText))
-        .filter(Boolean);
-      const selectorCounts = {
-        extensionTitleRows: document.querySelectorAll(".extension-title-row").length,
-        extensionLikeNodes: document.querySelectorAll("[class*='extension']").length,
-        pluginLikeNodes: document.querySelectorAll("[class*='plugin']").length,
-        cardLikeNodes: document.querySelectorAll(
-          ".ant-card, .semi-card, [class*='card']",
-        ).length,
-      };
-      const hasExpectedPluginId = expected ? bodyText.includes(expected) : null;
-      const hasExpectedPluginDisplayName = expectedDisplayName
-        ? bodyText.includes(expectedDisplayName)
-        : null;
-      const titleHasExpectedPlugin = expected || expectedDisplayName
-        ? pluginTitles.some((title) => (
-          (expected && title.includes(expected))
-          || (expectedDisplayName && title.includes(expectedDisplayName))
-        ))
-        : null;
-      const hasExpectedPluginInUi = expected || expectedDisplayName
-        ? Boolean(hasExpectedPluginId || hasExpectedPluginDisplayName || titleHasExpectedPlugin)
-        : null;
-      return {
-        title: document.title,
-        url: location.href,
-        hasExpectedPlugin: hasExpectedPluginInUi,
-        hasExpectedPluginId,
-        hasExpectedPluginDisplayName,
-        hasExpectedPluginInUi,
-        uiProbeStatus: pluginTitles.length > 0 || hasExpectedPluginId || hasExpectedPluginDisplayName
-          ? "ready"
-          : waitStatus,
-        selectorCounts,
-        bodyTextPreview: bodyText.slice(0, 500),
-        hasLivingMemory: bodyText.includes("astrbot_plugin_livingmemory"),
-        pluginTitles,
-      };
-    }, {
-      expected: expectedPlugin,
-      expectedDisplayName: expectedUiDisplayName,
-      waitStatus: uiProbeWaitStatus,
-    });
-
-    const summary = {
-      ok: true,
-      remoteUrl,
-      loggedIn: authenticatedUrl.includes("#/dashboard/default"),
-      extensionRouteLoaded: page.url().includes("#/extension#installed"),
-      version: version.json && version.json.data,
-      apiHealth,
-      pluginSummary,
-      expectedPlugin: expectedPlugin || null,
-      expectedPluginChecks,
-      expectedPluginDrift,
-      containsExpectedPlugin,
-      expectedPluginRuntime,
-      expectedPluginVersion: expectedPluginVersion || null,
-      expectedPluginVersionMatches,
-      expectedPluginDisplayName: expectedPluginDisplayName || null,
-      expectedPluginDisplayNameMatches,
-      expectedFailedPlugin,
-      failedPluginSummary,
-      failedPlugins: failedPluginData,
-      pageData,
-      failedRequests,
-      artifacts: {
-        login: path.join(artifactDir, "remote-login-page.png"),
-        dashboard: path.join(artifactDir, "remote-dashboard.png"),
-        extension: path.join(artifactDir, "remote-extension-installed.png"),
-      },
-    };
-    console.log(JSON.stringify(summary, null, 2));
-
-    if (version.status !== 200 || pluginPayload.status !== 200) {
-      process.exitCode = 1;
-    }
-    if (failedPlugins.status !== 200) {
-      process.exitCode = 9;
-    }
-    if (expectedPlugin && !containsExpectedPlugin) {
-      process.exitCode = 2;
-    }
-    if (expectedPlugin && expectedFailedPlugin) {
-      process.exitCode = 5;
-    }
-    if (
-      expectedPlugin
-      && expectedPluginRuntime
-      && expectedPluginRuntime.activated === false
-    ) {
-      process.exitCode = 6;
-    }
-    if (expectedPluginVersion && expectedPluginRuntime && !expectedPluginVersionMatches) {
-      process.exitCode = 7;
-    }
-    if (
+function buildExpectedPluginState(api, config) {
+  const { pluginPayload, failedPlugins } = api;
+  const {
+    expectedPlugin,
+    expectedPluginVersion,
+    expectedPluginDisplayName,
+  } = config;
+  const pluginSummary = summarizePluginPayload(pluginPayload);
+  const expectedPluginRecord = findPluginByName(pluginPayload, expectedPlugin);
+  const containsExpectedPlugin = expectedPlugin
+    ? Boolean(expectedPluginRecord)
+    : null;
+  const expectedPluginRuntime = summarizePluginRuntime(expectedPluginRecord);
+  const expectedPluginVersionMatches = expectedPluginVersion
+    ? expectedPluginRuntime && expectedPluginRuntime.version === expectedPluginVersion
+    : null;
+  const expectedPluginDisplayNameMatches = expectedPluginDisplayName
+    ? expectedPluginRuntime
+      && expectedPluginRuntime.displayName === expectedPluginDisplayName
+    : null;
+  const failedPluginData = failedPlugins.json && failedPlugins.json.data;
+  const expectedFailedPlugin = findFailedPlugin(failedPluginData, expectedPlugin);
+  const failedPluginSummary = summarizeFailedPlugins(
+    failedPluginData,
+    expectedPlugin,
+  );
+  const expectedPluginChecks = expectedPlugin ? {
+    ok: Boolean(
+      containsExpectedPlugin
+      && !expectedFailedPlugin
+      && (!expectedPluginRuntime || expectedPluginRuntime.activated !== false)
+      && (expectedPluginVersion ? Boolean(expectedPluginVersionMatches) : true)
+      && (expectedPluginDisplayName ? Boolean(expectedPluginDisplayNameMatches) : true)
+    ),
+    found: containsExpectedPlugin,
+    notFailed: !expectedFailedPlugin,
+    activated: expectedPluginRuntime
+      ? expectedPluginRuntime.activated !== false
+      : null,
+    versionMatches: expectedPluginVersion ? Boolean(expectedPluginVersionMatches) : null,
+    displayNameMatches: expectedPluginDisplayName
+      ? Boolean(expectedPluginDisplayNameMatches)
+      : null,
+  } : null;
+  const expectedPluginHasDrift = Boolean(
+    (expectedPluginVersion && expectedPluginRuntime && !expectedPluginVersionMatches)
+    || (
       expectedPluginDisplayName
       && expectedPluginRuntime
       && !expectedPluginDisplayNameMatches
-    ) {
-      process.exitCode = 8;
+    ),
+  );
+  const expectedPluginDrift = expectedPlugin ? {
+    hasDrift: expectedPluginHasDrift,
+    version: expectedPluginVersion ? {
+      expected: expectedPluginVersion,
+      actual: expectedPluginRuntime ? expectedPluginRuntime.version : null,
+      matches: Boolean(expectedPluginVersionMatches),
+    } : null,
+    displayName: expectedPluginDisplayName ? {
+      expected: expectedPluginDisplayName,
+      actual: expectedPluginRuntime ? expectedPluginRuntime.displayName : null,
+      matches: Boolean(expectedPluginDisplayNameMatches),
+    } : null,
+    reason: expectedPluginHasDrift
+      ? "installed runtime metadata differs from pinned expectations; upload-install does not overwrite an existing formal plugin directory"
+      : null,
+  } : null;
+  return {
+    pluginSummary,
+    expectedPluginChecks,
+    expectedPluginDrift,
+    containsExpectedPlugin,
+    expectedPluginRuntime,
+    expectedPluginVersionMatches,
+    expectedPluginDisplayNameMatches,
+    expectedFailedPlugin,
+    failedPluginSummary,
+    failedPluginData,
+  };
+}
+
+async function openInstalledExtensionPage(page) {
+  await page.evaluate(() => {
+    location.hash = "#/extension#installed";
+  });
+  await ignoreNetworkIdleTimeout(page);
+  await page.waitForTimeout(2000);
+  if (page.url().includes("#/extension#installed")) {
+    return;
+  }
+  const clicked = await page.evaluate(() => {
+    const links = [...document.querySelectorAll("a")];
+    const link = links.find((item) => (
+      item.href.includes("#/extension#installed")
+      || item.textContent.includes("AstrBot 插件")
+    ));
+    if (link) {
+      link.click();
+      return true;
     }
+    return false;
+  });
+  if (clicked) {
+    await page.waitForTimeout(2000);
+    await ignoreNetworkIdleTimeout(page);
+  }
+}
+
+async function collectExtensionPageData(page, config, expectedPluginRuntime) {
+  const expectedUiDisplayName = config.expectedPluginDisplayName
+    || (expectedPluginRuntime && expectedPluginRuntime.displayName)
+    || "";
+  const uiProbeWaitStatus = await waitForExtensionUi(
+    page,
+    config.expectedPlugin,
+    expectedUiDisplayName,
+  );
+  await page.screenshot({
+    path: path.join(config.artifactDir, "remote-extension-installed.png"),
+    fullPage: true,
+  });
+  return await page.evaluate(({
+    expected,
+    expectedDisplayName,
+    waitStatus,
+  }) => {
+    const normalize = (value) => (value || "").replace(/\s+/g, " ").trim();
+    const bodyText = normalize(document.body.innerText);
+    const pluginTitles = [...document.querySelectorAll(".extension-title-row")]
+      .map((element) => normalize(element.innerText))
+      .filter(Boolean);
+    const selectorCounts = {
+      extensionTitleRows: document.querySelectorAll(".extension-title-row").length,
+      extensionLikeNodes: document.querySelectorAll("[class*='extension']").length,
+      pluginLikeNodes: document.querySelectorAll("[class*='plugin']").length,
+      cardLikeNodes: document.querySelectorAll(
+        ".ant-card, .semi-card, [class*='card']",
+      ).length,
+    };
+    const hasExpectedPluginId = expected ? bodyText.includes(expected) : null;
+    const hasExpectedPluginDisplayName = expectedDisplayName
+      ? bodyText.includes(expectedDisplayName)
+      : null;
+    const titleHasExpectedPlugin = expected || expectedDisplayName
+      ? pluginTitles.some((title) => (
+        (expected && title.includes(expected))
+        || (expectedDisplayName && title.includes(expectedDisplayName))
+      ))
+      : null;
+    const hasExpectedPluginInUi = expected || expectedDisplayName
+      ? Boolean(hasExpectedPluginId || hasExpectedPluginDisplayName || titleHasExpectedPlugin)
+      : null;
+    return {
+      title: document.title,
+      url: location.href,
+      hasExpectedPlugin: hasExpectedPluginInUi,
+      hasExpectedPluginId,
+      hasExpectedPluginDisplayName,
+      hasExpectedPluginInUi,
+      uiProbeStatus: pluginTitles.length > 0 || hasExpectedPluginId || hasExpectedPluginDisplayName
+        ? "ready"
+        : waitStatus,
+      selectorCounts,
+      bodyTextPreview: bodyText.slice(0, 500),
+      hasLivingMemory: bodyText.includes("astrbot_plugin_livingmemory"),
+      pluginTitles,
+    };
+  }, {
+    expected: config.expectedPlugin,
+    expectedDisplayName: expectedUiDisplayName,
+    waitStatus: uiProbeWaitStatus,
+  });
+}
+
+function buildSummary(config, authenticatedUrl, api, expectedState, pageData, failedRequests) {
+  return {
+    ok: true,
+    remoteUrl: config.remoteUrl,
+    loggedIn: authenticatedUrl.includes("#/dashboard/default"),
+    extensionRouteLoaded: pageData.url.includes("#/extension#installed"),
+    version: api.version.json && api.version.json.data,
+    apiHealth: api.apiHealth,
+    pluginSummary: expectedState.pluginSummary,
+    expectedPlugin: config.expectedPlugin || null,
+    expectedPluginChecks: expectedState.expectedPluginChecks,
+    expectedPluginDrift: expectedState.expectedPluginDrift,
+    containsExpectedPlugin: expectedState.containsExpectedPlugin,
+    expectedPluginRuntime: expectedState.expectedPluginRuntime,
+    expectedPluginVersion: config.expectedPluginVersion || null,
+    expectedPluginVersionMatches: expectedState.expectedPluginVersionMatches,
+    expectedPluginDisplayName: config.expectedPluginDisplayName || null,
+    expectedPluginDisplayNameMatches: expectedState.expectedPluginDisplayNameMatches,
+    expectedFailedPlugin: expectedState.expectedFailedPlugin,
+    failedPluginSummary: expectedState.failedPluginSummary,
+    failedPlugins: expectedState.failedPluginData,
+    pageData,
+    failedRequests,
+    artifacts: {
+      login: path.join(config.artifactDir, "remote-login-page.png"),
+      dashboard: path.join(config.artifactDir, "remote-dashboard.png"),
+      extension: path.join(config.artifactDir, "remote-extension-installed.png"),
+    },
+  };
+}
+
+function updateExitCode(api, config, expectedState) {
+  const { expectedPlugin, expectedPluginVersion, expectedPluginDisplayName } = config;
+  const { version, pluginPayload, failedPlugins } = api;
+  const runtime = expectedState.expectedPluginRuntime;
+  if (version.status !== 200 || pluginPayload.status !== 200) {
+    process.exitCode = 1;
+  }
+  if (failedPlugins.status !== 200) {
+    process.exitCode = 9;
+  }
+  if (expectedPlugin && !expectedState.containsExpectedPlugin) {
+    process.exitCode = 2;
+  }
+  if (expectedPlugin && expectedState.expectedFailedPlugin) {
+    process.exitCode = 5;
+  }
+  if (expectedPlugin && runtime && runtime.activated === false) {
+    process.exitCode = 6;
+  }
+  if (expectedPluginVersion && runtime && !expectedState.expectedPluginVersionMatches) {
+    process.exitCode = 7;
+  }
+  if (expectedPluginDisplayName && runtime && !expectedState.expectedPluginDisplayNameMatches) {
+    process.exitCode = 8;
+  }
+}
+
+async function main() {
+  const config = readRemoteSmokeConfig();
+  fs.mkdirSync(config.artifactDir, { recursive: true });
+  const browser = await chromium.launch(browserLaunchOptions());
+  const page = await browser.newPage({ viewport: { width: 1440, height: 1100 } });
+  const failedRequests = watchFailedRequests(page);
+
+  try {
+    const authenticatedUrl = await loginToDashboard(page, config);
+    const api = await collectApiSnapshot(page);
+    const expectedState = buildExpectedPluginState(api, config);
+    await openInstalledExtensionPage(page);
+    const pageData = await collectExtensionPageData(
+      page,
+      config,
+      expectedState.expectedPluginRuntime,
+    );
+    const summary = buildSummary(
+      config,
+      authenticatedUrl,
+      api,
+      expectedState,
+      pageData,
+      failedRequests,
+    );
+    console.log(JSON.stringify(summary, null, 2));
+    updateExitCode(api, config, expectedState);
   } finally {
     await browser.close();
   }

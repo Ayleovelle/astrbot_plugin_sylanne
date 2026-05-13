@@ -93,6 +93,88 @@ def _similarity(query: str, text: str) -> float:
     return len(q & t) / math.sqrt(len(q) * len(t))
 
 
+def _record_context_similarity(query: str, record: "MemoryRecord") -> float:
+    return max(
+        _similarity(query, record.summary),
+        0.82 * _similarity(query, record.text),
+    )
+
+
+ASSOCIATED_RECALL_CONTEXT_FLOOR = 0.08
+ASSOCIATED_RECALL_CONTEXT_STOP_TOKENS = {
+    "user",
+    "users",
+    "current",
+    "message",
+    "previous",
+    "previously",
+    "before",
+    "the",
+    "this",
+    "that",
+    "with",
+    "more",
+    "less",
+    "and",
+    "or",
+    "is",
+    "are",
+    "was",
+    "were",
+    "has",
+    "have",
+    "had",
+    "about",
+    "liked",
+    "likes",
+    "like",
+    "need",
+    "needs",
+    "正在",
+    "当前",
+    "消息",
+    "用户",
+    "之前",
+    "喜欢",
+    "需要",
+}
+
+
+def _associated_context_tokens(text: str) -> set[str]:
+    tokens = _tokenize(text)
+    return {
+        token
+        for token in tokens
+        if token not in ASSOCIATED_RECALL_CONTEXT_STOP_TOKENS
+        and not re.fullmatch(r"[\u4e00-\u9fff]", token)
+    }
+
+
+def _associated_context_similarity(query: str, text: str) -> float:
+    q = _associated_context_tokens(query)
+    t = _associated_context_tokens(text)
+    if not q or not t:
+        return 0.0
+    return len(q & t) / math.sqrt(len(q) * len(t))
+
+
+def _record_associated_context_similarity(
+    query: str,
+    record: "MemoryRecord",
+) -> float:
+    return max(
+        _associated_context_similarity(query, record.summary),
+        0.82 * _associated_context_similarity(query, record.text),
+    )
+
+
+def _latin_context_guard_applies(*parts: str) -> bool:
+    text = " ".join(str(part or "") for part in parts)
+    latin_chars = len(re.findall(r"[a-zA-Z]", text))
+    cjk_chars = len(re.findall(r"[\u4e00-\u9fff]", text))
+    return latin_chars > 0 and latin_chars >= cjk_chars
+
+
 def normalize_embedding(raw: Any, *, limit: int = 4096) -> list[float]:
     if not isinstance(raw, (list, tuple)):
         return []
@@ -654,10 +736,7 @@ def recall_memory(
                 state.dynamics.decay_half_life_seconds,
             ),
         )
-        semantic = max(
-            _similarity(query, record.summary),
-            0.82 * _similarity(query, record.text),
-        )
+        semantic = _record_context_similarity(query, record)
         vector_semantic = 0.0
         if (
             normalized_query_embedding
@@ -702,6 +781,7 @@ def recall_memory(
     associated = _associated_recall_items(
         state.records,
         primary,
+        query=query,
         now=timestamp,
         limit=associative_limit,
         state=state,
@@ -833,7 +913,7 @@ def build_memory_prompt_fragment(
         return ""
     lines = [
         "[sylanne_memory_recall]",
-        "以下是 Sylanne 自有记忆模块的限长召回摘要，用来理解指代、偏好、共同经历和相处方式；不要逐字复述，也不要把它当作用户刚刚亲口说的话。",
+        "以下是 Sylanne 自有记忆模块的限长召回摘要，用来理解指代、偏好、共同经历和相处方式；当前连续用户意图、打断断点和正在发生的上下文优先，记忆只作旁注补充，若冲突应忽略记忆。",
         f"session_key={_clip(str(session_key or 'global'), 80)}; result_count={min(len(items), 5)}",
     ]
     for index, item in enumerate(items[:5], 1):
@@ -996,6 +1076,7 @@ def _associated_recall_items(
     records: list[MemoryRecord],
     primary: list[MemoryRecallItem],
     *,
+    query: str,
     now: float,
     limit: int,
     state: SylanneMemoryState,
@@ -1027,13 +1108,26 @@ def _associated_recall_items(
             association = clamp(weight)
             if association < 0.24:
                 continue
-            score = clamp(
-                parent.score
-                * (0.42 + 0.20 * state.dynamics.consolidation_gain)
-                * association
-                + 0.10 * record.depth
-                + 0.06 * record.confidence
-                - 0.14 * record.interference,
+            context_query = _associated_context_query(query, parent.record)
+            context_semantic = _record_context_similarity(context_query, record)
+            filtered_context_semantic = _record_associated_context_similarity(
+                context_query,
+                record,
+            )
+            if context_query and context_semantic < ASSOCIATED_RECALL_CONTEXT_FLOOR:
+                continue
+            if (
+                _latin_context_guard_applies(context_query, record.summary, record.text)
+                and filtered_context_semantic < ASSOCIATED_RECALL_CONTEXT_FLOOR
+            ):
+                continue
+            context_semantic = max(context_semantic, filtered_context_semantic)
+            score = _associated_recall_score(
+                parent=parent,
+                association=association,
+                record=record,
+                dynamics=state.dynamics,
+                context_semantic=context_semantic,
             )
             if score <= 0.08:
                 continue
@@ -1044,11 +1138,43 @@ def _associated_recall_items(
                     score=score,
                     reasons=[
                         "associative_recall",
+                        "context_link",
                         f"linked_from={parent_id}",
                     ],
                 )
     selected = sorted(candidates.values(), key=lambda item: item.score, reverse=True)
     return selected[:limit]
+
+
+def _associated_context_query(query: str, parent: MemoryRecord) -> str:
+    return "\n".join(
+        part
+        for part in (
+            query,
+            parent.summary,
+            parent.text,
+        )
+        if part
+    )
+
+
+def _associated_recall_score(
+    *,
+    parent: MemoryRecallItem,
+    association: float,
+    record: MemoryRecord,
+    dynamics: MemoryDynamics,
+    context_semantic: float,
+) -> float:
+    return clamp(
+        parent.score
+        * (0.42 + 0.20 * dynamics.consolidation_gain)
+        * association
+        + 0.12 * context_semantic
+        + 0.10 * record.depth
+        + 0.06 * record.confidence
+        - 0.14 * record.interference,
+    )
 
 
 def _prune_memory_associations(records: list[MemoryRecord]) -> None:

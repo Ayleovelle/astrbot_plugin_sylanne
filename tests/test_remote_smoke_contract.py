@@ -267,6 +267,8 @@ class RemoteSmokeContractTests(unittest.TestCase):
             f"https://img.shields.io/badge/AstrBot-{encoded_astrbot}-green",
             readme,
         )
+        self.assertIn("![💩 发酵指数](docs/reports/fuck-u-code-fermentation.svg)", readme)
+        self.assertIn("![powered by Fuck-U-Code](docs/reports/fuck-u-code-powered.svg)", readme)
         self.assertIn(f'astrbot_version: "{astrbot_version}"', readme)
 
     def test_readme_records_beta_pr_iterations_in_order(self):

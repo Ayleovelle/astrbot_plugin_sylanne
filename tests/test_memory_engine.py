@@ -239,10 +239,94 @@ class SylanneMemoryEngineTests(unittest.TestCase):
         self.assertLessEqual(len(items), 3)
         self.assertIn("他们指插件的其他用户。", summaries)
         self.assertIn("对插件使用者说话要温和、别炫耀。", summaries)
-        self.assertIn("README 要尽量中文。", summaries)
+        self.assertNotIn("README 要尽量中文。", summaries)
         self.assertNotIn("超过预算的关联记忆。", summaries)
         associative = [item for item in items if "associative_recall" in item.reasons]
-        self.assertEqual(len(associative), 2)
+        self.assertEqual(len(associative), 1)
+
+    def test_associated_recall_must_match_current_context(self):
+        state = SylanneMemoryState.initial(now=0.0)
+        state.dynamics.recall_limit = 1
+        state.dynamics.associative_recall_limit = 1
+        state.records.extend(
+            [
+                MemoryRecord(
+                    memory_id="thesis-night",
+                    text="用户凌晨说论文还没修完，需要继续熬夜奋战。",
+                    summary="用户正在熬夜修论文。",
+                    session_key="s-context-gate",
+                    created_at=10.0,
+                    updated_at=10.0,
+                    depth=0.86,
+                    confidence=0.82,
+                    layers={"episodic": 0.8, "semantic": 0.7},
+                    associations={"drink-order": 0.98},
+                ),
+                MemoryRecord(
+                    memory_id="drink-order",
+                    text="用户之前排队买蜜雪冰城，偏好少冰和甜一点的饮料。",
+                    summary="用户喜欢蜜雪饮料少冰甜一点。",
+                    session_key="s-context-gate",
+                    created_at=11.0,
+                    updated_at=11.0,
+                    depth=0.74,
+                    confidence=0.78,
+                    layers={"episodic": 0.7},
+                ),
+            ],
+        )
+
+        items = recall_memory(
+            state,
+            query="当前用户消息：我论文还没修完捏 / 得 / 熬夜奋战了",
+            now=20.0,
+            limit=1,
+        )
+
+        memory_ids = [item.record.memory_id for item in items]
+        self.assertIn("thesis-night", memory_ids)
+        self.assertNotIn("drink-order", memory_ids)
+
+    def test_associated_recall_ignores_generic_context_overlap(self):
+        state = SylanneMemoryState.initial(now=0.0)
+        state.dynamics.recall_limit = 1
+        state.dynamics.associative_recall_limit = 1
+        state.records.extend(
+            [
+                MemoryRecord(
+                    memory_id="paper-deadline",
+                    text="The user is revising a thesis deadline overnight.",
+                    summary="thesis deadline overnight revision",
+                    session_key="s-generic-context",
+                    created_at=10.0,
+                    updated_at=10.0,
+                    depth=0.86,
+                    confidence=0.82,
+                    associations={"cafeteria-drink": 0.98},
+                ),
+                MemoryRecord(
+                    memory_id="cafeteria-drink",
+                    text="The user previously liked a cafeteria drink with more sugar.",
+                    summary="user previously liked cafeteria drink",
+                    session_key="s-generic-context",
+                    created_at=11.0,
+                    updated_at=11.0,
+                    depth=0.74,
+                    confidence=0.78,
+                ),
+            ],
+        )
+
+        items = recall_memory(
+            state,
+            query="thesis deadline overnight revision",
+            now=20.0,
+            limit=1,
+        )
+
+        memory_ids = [item.record.memory_id for item in items]
+        self.assertIn("paper-deadline", memory_ids)
+        self.assertNotIn("cafeteria-drink", memory_ids)
 
     def test_recall_can_use_embedding_vector_when_sparse_words_do_not_match(self):
         state = SylanneMemoryState.initial(now=0.0)

@@ -657,6 +657,7 @@ class EmotionalStatePlugin(Star):
         self._fallibility_memory_cache: dict[str, FallibilityState] = {}
         self._group_atmosphere_memory_cache: dict[str, GroupAtmosphereState] = {}
         self._sylanne_memory_cache: dict[str, SylanneMemoryState] = {}
+        self._sylanne_memory_recall_worksets: dict[str, deque[MemoryRecallItem]] = {}
         self._agent_identity_profile_cache: dict[str, dict[str, Any]] = {}
         self._agent_trail_cache: dict[str, deque[dict[str, Any]]] = {}
         self._agent_turn_sequence: dict[str, int] = {}
@@ -763,6 +764,8 @@ class EmotionalStatePlugin(Star):
         self._fallibility_memory_cache.clear()
         self._group_atmosphere_memory_cache.clear()
         self._sylanne_memory_cache.clear()
+        if hasattr(self, "_sylanne_memory_recall_worksets"):
+            self._sylanne_memory_recall_worksets.clear()
         self._agent_identity_profile_cache.clear()
         self._agent_trail_cache.clear()
         self._agent_turn_sequence.clear()
@@ -1847,7 +1850,7 @@ class EmotionalStatePlugin(Star):
             )
             return
         identity = self._agent_identity(event)
-        response_epoch = self._consume_conversation_pending_response_epoch(
+        response_epoch = self._peek_conversation_pending_response_epoch(
             identity.conversation_id,
             event,
         )
@@ -1857,6 +1860,10 @@ class EmotionalStatePlugin(Star):
                 reason="late_llm_response_after_user_message",
                 input_epoch=response_epoch,
                 full_text=response_text,
+            )
+            self._discard_conversation_pending_response_epoch_only(
+                identity.conversation_id,
+                response_epoch,
             )
             await self._save_realtime_delivery_context_if_dirty(identity.conversation_id)
             self._preserve_intercepted_completion_text(
@@ -1870,7 +1877,12 @@ class EmotionalStatePlugin(Star):
                 reason="late_llm_response_after_user_message",
             )
             return
+        response_epoch = self._consume_conversation_pending_response_epoch(
+            identity.conversation_id,
+            event,
+        )
         realtime_dispatch_task: asyncio.Task[Any] | None = None
+        realtime_response_intercepted = False
         if self._should_intercept_realtime_chat_response(event, response_text):
             if not self._claim_realtime_response_intercept(
                 identity.conversation_id,
@@ -1888,6 +1900,7 @@ class EmotionalStatePlugin(Star):
                     reason="realtime_chat_response_duplicate_intercept",
                 )
                 return
+            realtime_response_intercepted = True
             plan = await self.get_realtime_chat_plan(
                 event,
                 text=response_text,
@@ -2013,6 +2026,12 @@ class EmotionalStatePlugin(Star):
 
         assessment_timing = self._assessment_timing()
         if assessment_timing not in {"post", "both"}:
+            if not realtime_response_intercepted:
+                self._discard_conversation_pending_response_epochs_through(
+                    identity.conversation_id,
+                    response_epoch,
+                )
+                self._clear_sylanne_memory_recall_workset(identity.conversation_id)
             return
 
         if self._background_post_assessment_enabled():
@@ -2020,9 +2039,21 @@ class EmotionalStatePlugin(Star):
                 event,
                 response_text,
             )
+            if not realtime_response_intercepted:
+                self._discard_conversation_pending_response_epochs_through(
+                    identity.conversation_id,
+                    response_epoch,
+                )
+                self._clear_sylanne_memory_recall_workset(identity.conversation_id)
             return
 
         await self._update_from_llm_response(event, response_text)
+        if not realtime_response_intercepted:
+            self._discard_conversation_pending_response_epochs_through(
+                identity.conversation_id,
+                response_epoch,
+            )
+            self._clear_sylanne_memory_recall_workset(identity.conversation_id)
 
     async def _update_from_llm_response(
         self,
@@ -6307,6 +6338,7 @@ class EmotionalStatePlugin(Star):
             logger.debug(f"{PLUGIN_NAME}: Sylanne memory request recall failed: {exc}")
             return ""
         items = self._filter_mature_sylanne_memory_recall_items(items)
+        items = self._merge_sylanne_memory_recall_workset(session_key, items)
         fragment = build_memory_prompt_fragment(
             items,
             session_key=session_key,
@@ -6320,6 +6352,54 @@ class EmotionalStatePlugin(Star):
                 query=query,
             )
         return fragment
+
+    def _sylanne_memory_recall_workset_cache(
+        self,
+    ) -> dict[str, deque[MemoryRecallItem]]:
+        cache = getattr(self, "_sylanne_memory_recall_worksets", None)
+        if not isinstance(cache, dict):
+            cache = {}
+            self._sylanne_memory_recall_worksets = cache
+        return cache
+
+    def _clear_sylanne_memory_recall_workset(self, session_key: str) -> None:
+        self._sylanne_memory_recall_workset_cache().pop(
+            str(session_key or "global"),
+            None,
+        )
+
+    def _merge_sylanne_memory_recall_workset(
+        self,
+        session_key: str,
+        items: list[MemoryRecallItem],
+    ) -> list[MemoryRecallItem]:
+        key = str(session_key or "global")
+        cache = self._sylanne_memory_recall_workset_cache()
+        previous = list(cache.get(key) or ())
+        combined: list[MemoryRecallItem] = []
+        seen: set[str] = set()
+
+        def append_once(item: MemoryRecallItem) -> None:
+            record = item.record
+            identity = (
+                str(record.memory_id or "").strip()
+                or self._text_hash(record.summary or record.text)
+            )
+            if not identity or identity in seen:
+                return
+            seen.add(identity)
+            combined.append(item)
+
+        for item in items:
+            append_once(item)
+        for item in previous:
+            append_once(item)
+
+        if combined:
+            cache[key] = deque(combined[:5], maxlen=5)
+        else:
+            cache.pop(key, None)
+        return combined[:5]
 
     def _filter_mature_sylanne_memory_recall_items(
         self,
@@ -7728,6 +7808,12 @@ class EmotionalStatePlugin(Star):
                 delivery_status="delivered",
                 sent_parts=[str(item.get("text") or "") for item in parts],
             )
+        if not interrupted_reason:
+            self._discard_conversation_pending_response_epochs_through(
+                session_key,
+                input_epoch,
+            )
+            self._clear_sylanne_memory_recall_workset(session_key)
         await self._save_realtime_delivery_context_if_dirty(session_key)
         self._realtime_chat_last_sent_cache()[session_key] = self._observed_now()
         payload = {
@@ -8808,6 +8894,23 @@ class EmotionalStatePlugin(Star):
         pending = self._conversation_pending_response_epochs.setdefault(key, deque(maxlen=12))
         pending.append(int(input_epoch))
 
+    def _peek_conversation_pending_response_epoch(
+        self,
+        session_key: str,
+        event: AstrMessageEvent | None = None,
+    ) -> int | None:
+        event_epoch = self._optional_int(
+            getattr(event, "_sylanne_input_epoch", None) if event is not None else None,
+        )
+        if event_epoch is not None:
+            return event_epoch
+        self._ensure_conversation_epoch_state()
+        key = str(session_key or "global")
+        pending = self._conversation_pending_response_epochs.get(key)
+        if pending:
+            return int(pending[0])
+        return self._conversation_response_epoch(key, event)
+
     def _discard_conversation_pending_response_epoch(
         self,
         session_key: str,
@@ -8827,6 +8930,25 @@ class EmotionalStatePlugin(Star):
         if not pending:
             self._conversation_pending_response_epochs.pop(key, None)
         self._discard_active_agent_pending_user_turn(key, int(input_epoch))
+
+    def _discard_conversation_pending_response_epoch_only(
+        self,
+        session_key: str,
+        input_epoch: int | None,
+    ) -> None:
+        if input_epoch is None:
+            return
+        self._ensure_conversation_epoch_state()
+        key = str(session_key or "global")
+        pending = self._conversation_pending_response_epochs.get(key)
+        if not pending:
+            return
+        try:
+            pending.remove(int(input_epoch))
+        except ValueError:
+            return
+        if not pending:
+            self._conversation_pending_response_epochs.pop(key, None)
 
     def _consume_conversation_pending_response_epoch(
         self,
@@ -8896,16 +9018,11 @@ class EmotionalStatePlugin(Star):
         if not queue:
             return
         observed_now = self._observed_now() if now is None else float(now)
-        pending_epochs = set(
-            int(epoch)
-            for epoch in self._conversation_pending_response_epochs.get(key, ())
-        )
         ttl = max(0.0, ACTIVE_AGENT_PENDING_USER_TURN_TTL_SECONDS)
         kept = [
             item
             for item in queue
-            if int(item.get("input_epoch") or 0) in pending_epochs
-            and (ttl <= 0 or observed_now - float(item.get("observed_at") or 0.0) <= ttl)
+            if ttl <= 0 or observed_now - float(item.get("observed_at") or 0.0) <= ttl
         ]
         if not kept:
             self._active_agent_pending_user_turn_cache().pop(key, None)
@@ -8975,6 +9092,49 @@ class EmotionalStatePlugin(Star):
             maxlen=ACTIVE_AGENT_PENDING_USER_TURN_LIMIT,
         )
 
+    def _discard_active_agent_pending_user_turns_through(
+        self,
+        session_key: str,
+        input_epoch: int | None,
+    ) -> None:
+        if input_epoch is None:
+            return
+        key = str(session_key or "global")
+        queue = self._active_agent_pending_user_turn_cache().get(key)
+        if not queue:
+            return
+        epoch = int(input_epoch)
+        kept = [item for item in queue if int(item.get("input_epoch") or 0) > epoch]
+        if not kept:
+            self._active_agent_pending_user_turn_cache().pop(key, None)
+            return
+        self._active_agent_pending_user_turn_cache()[key] = deque(
+            kept[-ACTIVE_AGENT_PENDING_USER_TURN_LIMIT:],
+            maxlen=ACTIVE_AGENT_PENDING_USER_TURN_LIMIT,
+        )
+
+    def _discard_conversation_pending_response_epochs_through(
+        self,
+        session_key: str,
+        input_epoch: int | None,
+    ) -> None:
+        if input_epoch is None:
+            return
+        self._ensure_conversation_epoch_state()
+        key = str(session_key or "global")
+        epoch = int(input_epoch)
+        pending = self._conversation_pending_response_epochs.get(key)
+        if pending:
+            kept = [value for value in pending if int(value) > epoch]
+            if kept:
+                self._conversation_pending_response_epochs[key] = deque(
+                    kept[-12:],
+                    maxlen=12,
+                )
+            else:
+                self._conversation_pending_response_epochs.pop(key, None)
+        self._discard_active_agent_pending_user_turns_through(key, epoch)
+
     def _active_agent_followup_merge_payload(
         self,
         session_key: str,
@@ -8992,16 +9152,11 @@ class EmotionalStatePlugin(Star):
         queue = self._active_agent_pending_user_turn_cache().get(key)
         if not queue:
             return {}
-        pending_epochs = set(
-            int(epoch)
-            for epoch in self._conversation_pending_response_epochs.get(key, ())
-        )
         speaker_key = self._active_agent_speaker_key(identity)
         previous = [
             item
             for item in queue
-            if int(item.get("input_epoch") or 0) in pending_epochs
-            and int(item.get("input_epoch") or 0) < int(current_epoch)
+            if int(item.get("input_epoch") or 0) < int(current_epoch)
             and str(item.get("speaker_key") or "") == speaker_key
             and str(item.get("text") or "").strip()
         ]

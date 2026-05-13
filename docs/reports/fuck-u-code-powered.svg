@@ -1,0 +1,17 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="164" height="20" role="img" aria-label="powered by Fuck-U-Code">
+  <title>powered by Fuck-U-Code</title>
+  <linearGradient id="s" x2="0" y2="100%">
+    <stop offset="0" stop-color="#fff" stop-opacity=".08"/>
+    <stop offset="1" stop-color="#000" stop-opacity=".08"/>
+  </linearGradient>
+  <clipPath id="r"><rect width="164" height="20" rx="3" fill="#fff"/></clipPath>
+  <g clip-path="url(#r)">
+    <rect width="77" height="20" fill="#555"/>
+    <rect x="77" width="87" height="20" fill="#111827"/>
+    <rect width="164" height="20" fill="url(#s)"/>
+  </g>
+  <g fill="#fff" text-anchor="middle" font-family="Verdana, DejaVu Sans, Microsoft YaHei, Segoe UI Emoji, sans-serif" font-size="11">
+    <text x="38.5" y="14">powered by</text>
+    <text x="120.5" y="14">Fuck-U-Code</text>
+  </g>
+</svg>

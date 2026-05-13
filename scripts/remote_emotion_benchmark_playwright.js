@@ -9,6 +9,11 @@ const CONFIG_GET_ENDPOINT = `/api/config/get?plugin_name=${PLUGIN_NAME}`;
 const CONFIG_UPDATE_ENDPOINT = `/api/config/plugin/update?plugin_name=${PLUGIN_NAME}`;
 const MAX_CONCURRENCY = 3;
 
+// 远程情绪基准脚本只用于受控压测；默认 dry-run，真实请求必须显式确认。
+// 这里故意不用 dotenv、cookie 持久化或固定凭据，避免把服务器访问状态写进仓库。
+// 核心流程分为：构造样本、登录、临时保存配置、发送 SSE、采集 token/时延、恢复配置。
+// 每个样本使用独立会话，默认结束后清理，降低远程环境被压测污染的概率。
+
 function env(name, fallback = "") {
   const value = process.env[name];
   return value == null || value === "" ? fallback : value;
@@ -121,28 +126,45 @@ function safePreview(value, maxLength = 1000) {
   return text.slice(0, maxLength);
 }
 
-function readCompletedSampleKeys(samplesPath, expectedRunHash) {
-  if (!fs.existsSync(samplesPath)) {
-    return new Set();
+function parseJsonSafely(text) {
+  try {
+    return { ok: true, value: JSON.parse(text), error: "" };
+  } catch (error) {
+    return {
+      ok: false,
+      value: null,
+      error: error && error.message ? error.message : String(error),
+    };
   }
-  const latestByKey = new Map();
+}
+
+function readSampleJsonl(samplesPath, expectedRunHash) {
+  if (!fs.existsSync(samplesPath)) {
+    return [];
+  }
+  const samples = [];
   const lines = fs.readFileSync(samplesPath, "utf8").split(/\r?\n/);
   for (const line of lines) {
     if (!line.trim()) {
       continue;
     }
-    try {
-      const sample = JSON.parse(line);
-      if (
-        sample
-        && sample.sample_key
-        && sample.run_hash === expectedRunHash
-        && sample.status !== "skipped"
-      ) {
-        latestByKey.set(sample.sample_key, sample);
-      }
-    } catch {
-      // Keep resume tolerant of a truncated final line.
+    const parsed = parseJsonSafely(line);
+    if (!parsed.ok) {
+      continue;
+    }
+    const sample = parsed.value;
+    if (sample && sample.run_hash === expectedRunHash && sample.status !== "skipped") {
+      samples.push(sample);
+    }
+  }
+  return samples;
+}
+
+function readCompletedSampleKeys(samplesPath, expectedRunHash) {
+  const latestByKey = new Map();
+  for (const sample of readSampleJsonl(samplesPath, expectedRunHash)) {
+    if (sample.sample_key) {
+      latestByKey.set(sample.sample_key, sample);
     }
   }
   const completed = new Set();
@@ -155,27 +177,13 @@ function readCompletedSampleKeys(samplesPath, expectedRunHash) {
 }
 
 function readSamples(samplesPath, expectedRunHash) {
-  if (!fs.existsSync(samplesPath)) {
-    return [];
-  }
   const samplesByKey = new Map();
   const unkeyed = [];
-  const lines = fs.readFileSync(samplesPath, "utf8").split(/\r?\n/);
-  for (const line of lines) {
-    if (!line.trim()) {
-      continue;
-    }
-    try {
-      const sample = JSON.parse(line);
-      if (sample && sample.run_hash === expectedRunHash && sample.status !== "skipped") {
-        if (sample.sample_key) {
-          samplesByKey.set(sample.sample_key, sample);
-        } else {
-          unkeyed.push(sample);
-        }
-      }
-    } catch {
-      // Keep summaries tolerant of a truncated final line.
+  for (const sample of readSampleJsonl(samplesPath, expectedRunHash)) {
+    if (sample.sample_key) {
+      samplesByKey.set(sample.sample_key, sample);
+    } else {
+      unkeyed.push(sample);
     }
   }
   return [...unkeyed, ...samplesByKey.values()];
@@ -195,6 +203,7 @@ function defaultLifecycleDurations() {
   };
 }
 
+// 低成本基线：关闭可选状态层，只保留 integrated-self 最小降级路径。
 function offOptionalModules() {
   return {
     enable_psychological_screening: false,
@@ -211,6 +220,7 @@ function offOptionalModules() {
   };
 }
 
+// feature matrix 对比不同状态层组合，用同一批 prompt 估算额外 token 与延迟。
 function defaultFeatureMatrix() {
   const base = {
     enabled: true,
@@ -327,6 +337,7 @@ function defaultFeatureMatrix() {
   ];
 }
 
+// prompt 覆盖短闲聊、压力表达、关系修复和上下文引用，避免只测单一轻量输入。
 function defaultFeaturePrompts() {
   return [
     "Please reply in one short sentence. Benchmark marker: neutral greeting.",
@@ -335,6 +346,7 @@ function defaultFeaturePrompts() {
   ];
 }
 
+// lifecycle 档位用于模拟长期关系沉淀，full_nosafety 只在受控基准中使用。
 function lifecycleProfileConfig(profileName) {
   const allSafe = {
     ...defaultFeatureMatrix().find((item) => item.id === "all_safe_modules").config,
@@ -371,6 +383,7 @@ function lifecyclePrompt(durationKey, durationSeconds, index) {
   ].join(" ");
 }
 
+// 环境变量优先覆盖配置文件，方便 CI 或远程服务器分批续跑同一套基准。
 function buildBenchmarkConfig() {
   const filePath = env("ASTRBOT_BENCHMARK_CONFIG");
   const fromFile = filePath
@@ -406,6 +419,7 @@ function buildBenchmarkConfig() {
   return config;
 }
 
+// work item 是幂等采样单元；run hash 会用它判断断点续跑时哪些样本已完成。
 function buildWork(config, mode) {
   const work = [];
   const includeFeatures = mode === "all" || mode === "features";
@@ -481,6 +495,7 @@ function buildWork(config, mode) {
   return work;
 }
 
+// key 必须包含 prompt/config 摘要，否则续跑时会把不同配置下的样本误判为已完成。
 function sampleKey(item) {
   return [
     item.kind,
@@ -503,6 +518,7 @@ function runHashConfig(config, mode) {
   return config;
 }
 
+// 统一走页面上下文 fetch，复用 AstrBot 登录态，但返回值只保留短预览。
 async function fetchJson(page, url, options = {}) {
   const requestTimeoutMs = intEnv("ASTRBOT_BENCHMARK_REQUEST_TIMEOUT_MS", 30000);
   return await page.evaluate(async ({ targetUrl, requestOptions, timeoutMs }) => {
@@ -577,6 +593,7 @@ function mergeConfig(baseConfig, patch) {
   return { ...baseConfig, ...(patch || {}) };
 }
 
+// 保存配置是本脚本唯一会改变远程插件状态的动作；调用侧负责恢复原始配置。
 async function savePluginConfig(page, config) {
   const bodies = [
     config,
@@ -658,6 +675,7 @@ function flattenObject(value, prefix = "", out = {}) {
   return out;
 }
 
+// agent_stats 形状会随 provider 改变，所以先拍平成白名单字段，再统一推导 token。
 function extractUsageFromStats(stats) {
   const parsed = parseMaybeJson(stats);
   const flat = flattenObject(parsed);
@@ -750,8 +768,9 @@ function extractUsageFromStats(stats) {
     agent_ttft_ms: ttftMs,
     agent_stats: parsed,
   };
-}
+  }
 
+// SSE 预览只保留事件类型和短文本，避免把完整对话、cookie 或 token 写进样本文件。
 function redactEvent(event) {
   const data = parseMaybeJson(event.data);
   const type = event.type || event.t || "";
@@ -763,6 +782,7 @@ function redactEvent(event) {
   };
 }
 
+// 浏览器端读取 SSE 可以保留 AstrBot 前端同款鉴权路径，同时记录首 token 时间。
 async function sendChatSse(page, payload, sampleTimeoutMs) {
   return await page.evaluate(async ({ endpoint, requestPayload, timeoutMs }) => {
     const startedAt = performance.now();
@@ -927,6 +947,7 @@ async function getProviderList(page) {
   return Array.isArray(data) ? data : [];
 }
 
+// agent_stats 缺 token 时可选用 provider 统计兜底；并发场景默认禁用，避免污染。
 async function getProviderTokenSnapshot(page) {
   const result = await fetchJson(page, "/api/stat/provider-tokens?days=1");
   return {
@@ -975,6 +996,7 @@ function normalizeProviderTokenSnapshot(snapshot, provider) {
   return totals;
 }
 
+// 只接受小而明确的正增量；过大或缺失时宁可标记 unavailable。
 function diffProviderTokenSnapshots(before, after, provider) {
   const lhs = normalizeProviderTokenSnapshot(before, provider);
   const rhs = normalizeProviderTokenSnapshot(after, provider);
@@ -1007,6 +1029,7 @@ function diffProviderTokenSnapshots(before, after, provider) {
   };
 }
 
+// 允许模型名轻微模糊匹配，但只选择 enable !== false 的 provider。
 function selectProvider(providerList, requestedModel) {
   const normalized = String(requestedModel || "").toLowerCase().replace(/[-_.\s]/g, "");
   if (!normalized) {
@@ -1031,6 +1054,7 @@ function selectProvider(providerList, requestedModel) {
   };
 }
 
+// 登录前后截图用于远程 smoke 复盘，不包含输入的凭据文本。
 async function login(page, remoteUrl, username, password, artifactDir) {
   await page.goto(remoteUrl, { waitUntil: "domcontentloaded", timeout: 45000 });
   await page.waitForLoadState("networkidle", { timeout: 30000 }).catch(() => {});
@@ -1050,6 +1074,7 @@ async function login(page, remoteUrl, username, password, artifactDir) {
   return page.url();
 }
 
+// 单样本执行顺序不能随意调整：配置保存、建会话、发消息、采集 token、清理会话。
 async function runSample(page, item, options) {
   const {
     runId,
@@ -1243,6 +1268,7 @@ function percentile(values, p) {
   return values[index];
 }
 
+// 汇总只统计 iteration 样本，prewarm 仅用于预热模型和插件缓存。
 function summarizeGroup(samples) {
   const ok = samples.filter((sample) => sample.status === "ok" && sample.count_in_summary);
   const latencies = ok
@@ -1328,6 +1354,7 @@ function sameConfig(a, b) {
   return hashValue(a.config_patch || {}) === hashValue(b.config_patch || {});
 }
 
+// 同一配置 chunk 可以并发跑；跨配置 chunk 串行，避免 worker 互相覆盖插件配置。
 async function runChunk(workerPages, chunk, options) {
   if (options.concurrency <= 1 || chunk.length <= 1) {
     const samples = [];
@@ -1421,6 +1448,7 @@ async function runWork(workerPages, work, options) {
   return samples;
 }
 
+// main 保持外层编排：读取环境、登录、分配 worker、写 summary、退出码上报。
 async function main() {
   const remoteUrl = env("ASTRBOT_REMOTE_URL");
   const username = env("ASTRBOT_REMOTE_USERNAME");

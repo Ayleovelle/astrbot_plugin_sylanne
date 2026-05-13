@@ -12,6 +12,71 @@ from types import SimpleNamespace
 
 ROOT = Path(__file__).resolve().parents[1]
 
+PLUGIN_DICT_ATTRIBUTES = (
+    "_memory_cache",
+    "_psychological_memory_cache",
+    "_humanlike_memory_cache",
+    "_lifelike_learning_memory_cache",
+    "_personality_drift_memory_cache",
+    "_moral_repair_memory_cache",
+    "_fallibility_memory_cache",
+    "_group_atmosphere_memory_cache",
+    "_sylanne_memory_cache",
+    "_sylanne_memory_recall_worksets",
+    "_agent_identity_profile_cache",
+    "_agent_trail_cache",
+    "_agent_turn_sequence",
+    "_engine_cache",
+    "_provider_id_cache",
+    "_last_request_text",
+    "_last_state_injection_diagnostics",
+    "_conversation_input_epoch",
+    "_conversation_pending_response_epochs",
+    "_active_agent_pending_user_turns",
+    "_realtime_input_fragment_windows",
+    "_interrupted_reply_breakpoints",
+    "_realtime_assistant_history_shadows",
+    "_realtime_response_intercept_keys",
+    "_realtime_user_typing_until",
+    "_user_message_withdrawals",
+    "_recent_user_corrections",
+    "_recent_user_scene_turns",
+    "_realtime_chat_active_dispatches",
+    "_realtime_chat_dispatch_tasks",
+    "_background_post_tasks",
+    "_background_post_queues",
+    "_background_post_active",
+    "_background_post_sequence",
+    "_background_post_latest_enqueued",
+    "_background_post_last_committed",
+    "_background_post_skipped",
+    "_background_post_dead_letters",
+    "_background_post_checkpoint_generation",
+    "_background_post_checkpoint_locks",
+    "_background_post_worker_state",
+    "_background_post_resource_cache",
+    "_proactive_dispatch_last_sent",
+    "_proactive_dispatch_audit",
+    "_proactive_candidate_sessions",
+    "_proactive_context_windows",
+    "_proactive_scheduler_locks",
+    "_proactive_scheduler_last_checked",
+    "_realtime_chat_last_sent",
+    "_last_realtime_chat_adaptive_settings",
+    "_sticker_index_cache",
+    "_sticker_memory_cache",
+    "_state_injection_snapshot_cache",
+    "_group_atmosphere_injection_snapshot_cache",
+)
+
+PLUGIN_SET_ATTRIBUTES = (
+    "_realtime_delivery_context_dirty",
+    "_realtime_delivery_context_restored",
+    "_background_tasks",
+    "_background_post_recovered_sessions",
+    "_background_post_checkpoint_tasks",
+)
+
 
 def install_astrbot_stubs():
     def passthrough_decorator(*args, **kwargs):
@@ -113,68 +178,14 @@ def new_plugin(config=None):
     plugin.moral_repair_engine = MoralRepairEngine()
     plugin.fallibility_engine = FallibilityEngine()
     plugin.group_atmosphere_engine = GroupAtmosphereEngine()
-    plugin._memory_cache = {}
-    plugin._psychological_memory_cache = {}
-    plugin._humanlike_memory_cache = {}
-    plugin._lifelike_learning_memory_cache = {}
-    plugin._personality_drift_memory_cache = {}
-    plugin._moral_repair_memory_cache = {}
-    plugin._fallibility_memory_cache = {}
-    plugin._group_atmosphere_memory_cache = {}
-    plugin._sylanne_memory_cache = {}
-    plugin._agent_identity_profile_cache = {}
-    plugin._agent_trail_cache = {}
-    plugin._agent_turn_sequence = {}
-    plugin._engine_cache = {}
-    plugin._provider_id_cache = {}
-    plugin._last_request_text = {}
-    plugin._last_state_injection_diagnostics = {}
-    plugin._conversation_input_epoch = {}
-    plugin._conversation_pending_response_epochs = {}
-    plugin._active_agent_pending_user_turns = {}
-    plugin._realtime_input_fragment_windows = {}
-    plugin._interrupted_reply_breakpoints = {}
-    plugin._realtime_assistant_history_shadows = {}
-    plugin._realtime_response_intercept_keys = {}
-    plugin._realtime_delivery_context_dirty = set()
-    plugin._realtime_delivery_context_restored = set()
-    plugin._realtime_user_typing_until = {}
-    plugin._user_message_withdrawals = {}
-    plugin._recent_user_corrections = {}
-    plugin._recent_user_scene_turns = {}
-    plugin._realtime_chat_active_dispatches = {}
-    plugin._realtime_chat_dispatch_tasks = {}
-    plugin._background_tasks = set()
-    plugin._background_post_tasks = {}
-    plugin._background_post_queues = {}
-    plugin._background_post_active = {}
-    plugin._background_post_sequence = {}
-    plugin._background_post_latest_enqueued = {}
-    plugin._background_post_last_committed = {}
-    plugin._background_post_skipped = {}
-    plugin._background_post_dead_letters = {}
-    plugin._background_post_recovered_sessions = set()
-    plugin._background_post_checkpoint_tasks = set()
-    plugin._background_post_checkpoint_generation = {}
-    plugin._background_post_checkpoint_locks = {}
-    plugin._background_post_worker_state = {}
-    plugin._background_post_resource_cache = {}
+    for attr in PLUGIN_DICT_ATTRIBUTES:
+        setattr(plugin, attr, {})
+    for attr in PLUGIN_SET_ATTRIBUTES:
+        setattr(plugin, attr, set())
     plugin._internal_assessor_llm_condition = None
     plugin._internal_assessor_llm_condition_loop = None
     plugin._internal_assessor_llm_inflight = 0
-    plugin._proactive_dispatch_last_sent = {}
-    plugin._proactive_dispatch_audit = {}
-    plugin._proactive_candidate_sessions = {}
-    plugin._proactive_context_windows = {}
-    plugin._proactive_scheduler_locks = {}
-    plugin._proactive_scheduler_last_checked = {}
     plugin._proactive_scheduler_task = None
-    plugin._realtime_chat_last_sent = {}
-    plugin._last_realtime_chat_adaptive_settings = {}
-    plugin._sticker_index_cache = {}
-    plugin._sticker_memory_cache = {}
-    plugin._state_injection_snapshot_cache = {}
-    plugin._group_atmosphere_injection_snapshot_cache = {}
     plugin._terminating = False
     plugin.context = SimpleNamespace()
     return plugin
@@ -184,50 +195,84 @@ def bind_async(instance, name, func):
     setattr(instance, name, types.MethodType(func, instance))
 
 
-def documented_commands_from_main():
+def decorated_async_functions(decorator_name):
     tree = ast.parse((ROOT / "main.py").read_text(encoding="utf-8"))
+    for node in async_function_nodes(tree):
+        yield from matching_decorators(node, decorator_name)
+
+
+def async_function_nodes(tree):
+    return (
+        node
+        for node in ast.walk(tree)
+        if isinstance(node, ast.AsyncFunctionDef)
+    )
+
+
+def matching_decorators(node, decorator_name):
+    return (
+        decorator
+        for decorator in node.decorator_list
+        if decorator_matches_name(decorator, decorator_name)
+    )
+
+
+def decorator_matches_name(decorator, decorator_name):
+    return (
+        isinstance(decorator, ast.Call)
+        and isinstance(decorator.func, ast.Attribute)
+        and decorator.func.attr == decorator_name
+    )
+
+
+def constant_string(value):
+    if isinstance(value, ast.Constant) and isinstance(value.value, str):
+        return value.value
+    return None
+
+
+def constant_strings_from_set(value):
+    if not isinstance(value, ast.Set):
+        return set()
+    return {
+        item
+        for item in (constant_string(element) for element in value.elts)
+        if item
+    }
+
+
+def command_names_from_decorator(decorator):
+    names = set()
+    if decorator.args:
+        command_name = constant_string(decorator.args[0])
+        if command_name:
+            names.add(command_name)
+    for keyword in decorator.keywords:
+        if keyword.arg == "alias":
+            names.update(constant_strings_from_set(keyword.value))
+    return names
+
+
+def llm_tool_name_from_decorator(decorator):
+    for keyword in decorator.keywords:
+        if keyword.arg == "name":
+            return constant_string(keyword.value)
+    return None
+
+
+def documented_commands_from_main():
     commands = set()
-    for node in ast.walk(tree):
-        if not isinstance(node, ast.AsyncFunctionDef):
-            continue
-        for decorator in node.decorator_list:
-            if not (
-                isinstance(decorator, ast.Call)
-                and isinstance(decorator.func, ast.Attribute)
-                and decorator.func.attr == "command"
-            ):
-                continue
-            if decorator.args and isinstance(decorator.args[0], ast.Constant):
-                commands.add(str(decorator.args[0].value))
-            for keyword in decorator.keywords:
-                if keyword.arg != "alias" or not isinstance(keyword.value, ast.Set):
-                    continue
-                for element in keyword.value.elts:
-                    if isinstance(element, ast.Constant) and isinstance(element.value, str):
-                        commands.add(element.value)
+    for decorator in decorated_async_functions("command"):
+        commands.update(command_names_from_decorator(decorator))
     return commands
 
 
 def documented_llm_tools_from_main():
-    tree = ast.parse((ROOT / "main.py").read_text(encoding="utf-8"))
     tools = set()
-    for node in ast.walk(tree):
-        if not isinstance(node, ast.AsyncFunctionDef):
-            continue
-        for decorator in node.decorator_list:
-            if not (
-                isinstance(decorator, ast.Call)
-                and isinstance(decorator.func, ast.Attribute)
-                and decorator.func.attr == "llm_tool"
-            ):
-                continue
-            for keyword in decorator.keywords:
-                if (
-                    keyword.arg == "name"
-                    and isinstance(keyword.value, ast.Constant)
-                    and isinstance(keyword.value.value, str)
-                ):
-                    tools.add(keyword.value.value)
+    for decorator in decorated_async_functions("llm_tool"):
+        tool_name = llm_tool_name_from_decorator(decorator)
+        if tool_name:
+            tools.add(tool_name)
     return tools
 
 
