@@ -1,9 +1,16 @@
 <svg xmlns="http://www.w3.org/2000/svg" width="1560" height="1180" viewBox="0 0 1560 1180" role="img" aria-labelledby="title desc">
-  <title id="title">Sylanne 2.3.12 工作流：Agent 上下文、隐藏内部工具、后台并行与主动发言</title>
-  <desc id="desc">展示 Sylanne 当前工作流。旧版 0.5.0 单线程链路与当前链路对比；当前链路先把用户碎片化输入放入碎片池，由本地规则和快速判断 LLM 用短上下文判断是否说完并合并为完整意图；AstrBot Agent 持有完整上下文和外部工具循环，Sylanne 自有内部工具 schema 在主请求前隐藏，插件能力改由 bot/Agent 路径、命令、公共 API 和设置 Page 使用；最终自然语言由即时聊天投递层接管，按语义和用户说话习惯拆条，模拟打字间隔，记录已发、未发和被插话断点；回复后状态评估和记忆写入进入后台队列，动态 workers 根据 CPU、内存和队列压力自动收放，主动发言支路会先结算上一条反馈，再结合长时间沉默推测、低频公式门控和 LLM 话题裁决共同决定。</desc>
+  <title id="title">Sylanne 2.3.12 工作流：上下文归 Agent，投递与反馈归 Sylanne</title>
+  <desc id="desc">展示 Sylanne 重构后的工作流。输入侧只做碎片聚合和短上下文判断，不保存长期上下文；AstrBot Agent 持有完整对话历史、fallback provider 和外部工具循环；Sylanne 在主 LLM 请求前隐藏自有内部工具 schema，但保留 bot、命令、公共 API 和设置 Page 能力；工具调用中间轮次完全放行，只有最终自然语言回复进入即时聊天投递层；投递层负责拆条、打字停顿、表情一致性、用户插话中断和已发未发信封；回复后的情绪、人格、生命化学习、自有记忆和向量召回进入后台队列；主动聊天支路先结算未回应反馈，再结合时间推测、公式门控和 LLM 话题裁决决定是否低压力触达。</desc>
+
   <defs>
     <marker id="arrowBlue" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="9" markerHeight="9" orient="auto-start-reverse">
       <path d="M0 0 L10 5 L0 10 Z" fill="#2563eb"/>
+    </marker>
+    <marker id="arrowViolet" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="9" markerHeight="9" orient="auto-start-reverse">
+      <path d="M0 0 L10 5 L0 10 Z" fill="#7c3aed"/>
+    </marker>
+    <marker id="arrowPink" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="9" markerHeight="9" orient="auto-start-reverse">
+      <path d="M0 0 L10 5 L0 10 Z" fill="#db2777"/>
     </marker>
     <marker id="arrowGreen" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="9" markerHeight="9" orient="auto-start-reverse">
       <path d="M0 0 L10 5 L0 10 Z" fill="#059669"/>
@@ -11,263 +18,245 @@
     <marker id="arrowOrange" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="9" markerHeight="9" orient="auto-start-reverse">
       <path d="M0 0 L10 5 L0 10 Z" fill="#ea580c"/>
     </marker>
-    <marker id="arrowGray" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse">
-      <path d="M0 0 L10 5 L0 10 Z" fill="#64748b"/>
-    </marker>
     <style>
       .bg { fill: #f8fafc; }
       .title { font-family: "Microsoft YaHei", "Noto Sans CJK SC", Arial, sans-serif; font-size: 34px; font-weight: 800; fill: #0f172a; }
       .subtitle { font-family: "Microsoft YaHei", "Noto Sans CJK SC", Arial, sans-serif; font-size: 18px; fill: #475569; }
-      .laneTitle { font-family: "Microsoft YaHei", "Noto Sans CJK SC", Arial, sans-serif; font-size: 23px; font-weight: 800; fill: #1e293b; }
-      .text { font-family: "Microsoft YaHei", "Noto Sans CJK SC", Arial, sans-serif; font-size: 18px; font-weight: 700; fill: #0f172a; }
+      .laneTitle { font-family: "Microsoft YaHei", "Noto Sans CJK SC", Arial, sans-serif; font-size: 22px; font-weight: 800; fill: #1e293b; }
+      .text { font-family: "Microsoft YaHei", "Noto Sans CJK SC", Arial, sans-serif; font-size: 17px; font-weight: 800; fill: #0f172a; }
       .small { font-family: "Microsoft YaHei", "Noto Sans CJK SC", Arial, sans-serif; font-size: 14px; fill: #334155; }
       .tiny { font-family: "Microsoft YaHei", "Noto Sans CJK SC", Arial, sans-serif; font-size: 12px; fill: #475569; }
-      .laneOld { fill: #f1f5f9; stroke: #cbd5e1; stroke-width: 2; }
-      .laneMain { fill: #eef2ff; stroke: #c7d2fe; stroke-width: 2; }
-      .laneBack { fill: #ecfdf5; stroke: #a7f3d0; stroke-width: 2; }
+      .note { font-family: "Microsoft YaHei", "Noto Sans CJK SC", Arial, sans-serif; font-size: 13px; font-weight: 700; fill: #334155; }
+      .laneInput { fill: #eff6ff; stroke: #bfdbfe; stroke-width: 2; }
+      .laneAgent { fill: #f5f3ff; stroke: #ddd6fe; stroke-width: 2; }
+      .laneOutput { fill: #fdf2f8; stroke: #fbcfe8; stroke-width: 2; }
+      .laneBg { fill: #ecfdf5; stroke: #a7f3d0; stroke-width: 2; }
       .lanePro { fill: #fff7ed; stroke: #fed7aa; stroke-width: 2; }
-      .nodeOld { fill: #ffffff; stroke: #64748b; stroke-width: 2; }
-      .nodeBlue { fill: #ffffff; stroke: #2563eb; stroke-width: 2.5; }
-      .nodeGreen { fill: #ffffff; stroke: #059669; stroke-width: 2.5; }
-      .nodeOrange { fill: #ffffff; stroke: #ea580c; stroke-width: 2.5; }
+      .nodeInput { fill: #ffffff; stroke: #2563eb; stroke-width: 2.4; }
+      .nodeAgent { fill: #ffffff; stroke: #7c3aed; stroke-width: 2.4; }
+      .nodeOutput { fill: #ffffff; stroke: #db2777; stroke-width: 2.4; }
+      .nodeBg { fill: #ffffff; stroke: #059669; stroke-width: 2.4; }
+      .nodePro { fill: #ffffff; stroke: #ea580c; stroke-width: 2.4; }
       .guard { fill: #fef3c7; stroke: #d97706; stroke-width: 2.2; }
-      .danger { fill: #fee2e2; stroke: #ef4444; stroke-width: 2; }
+      .stop { fill: #fee2e2; stroke: #ef4444; stroke-width: 2.2; }
       .badgeBlue { fill: #dbeafe; stroke: #93c5fd; stroke-width: 1.4; }
+      .badgeViolet { fill: #ede9fe; stroke: #c4b5fd; stroke-width: 1.4; }
+      .badgePink { fill: #fce7f3; stroke: #f9a8d4; stroke-width: 1.4; }
       .badgeGreen { fill: #dcfce7; stroke: #86efac; stroke-width: 1.4; }
       .badgeOrange { fill: #ffedd5; stroke: #fdba74; stroke-width: 1.4; }
       .badgeGray { fill: #e2e8f0; stroke: #cbd5e1; stroke-width: 1.4; }
-      .chatBand { fill: #eff6ff; stroke: #60a5fa; stroke-width: 2.4; stroke-dasharray: 8 7; }
-      .chatOutBand { fill: #fdf2f8; stroke: #f472b6; stroke-width: 2.4; stroke-dasharray: 8 7; }
-      .bubble { fill: #ffffff; stroke: #93c5fd; stroke-width: 1.4; }
-      .replyBubble { fill: #ffffff; stroke: #f9a8d4; stroke-width: 1.4; }
-      .chatTitle { font-family: "Microsoft YaHei", "Noto Sans CJK SC", Arial, sans-serif; font-size: 15px; font-weight: 800; fill: #1d4ed8; }
-      .chatOutTitle { font-family: "Microsoft YaHei", "Noto Sans CJK SC", Arial, sans-serif; font-size: 15px; font-weight: 800; fill: #be185d; }
-      .arrowBlue { stroke: #2563eb; stroke-width: 3.2; fill: none; marker-end: url(#arrowBlue); }
-      .arrowGreen { stroke: #059669; stroke-width: 3.2; fill: none; marker-end: url(#arrowGreen); }
-      .arrowOrange { stroke: #ea580c; stroke-width: 3.2; fill: none; marker-end: url(#arrowOrange); }
-      .arrowGray { stroke: #64748b; stroke-width: 2.6; fill: none; marker-end: url(#arrowGray); }
-      .dash { stroke-dasharray: 9 8; }
-      .muted { opacity: 0.58; }
+      .bubble { fill: #ffffff; stroke: #93c5fd; stroke-width: 1.3; }
+      .replyBubble { fill: #ffffff; stroke: #f9a8d4; stroke-width: 1.3; }
+      .arrowBlue { stroke: #2563eb; stroke-width: 3.1; fill: none; marker-end: url(#arrowBlue); }
+      .arrowViolet { stroke: #7c3aed; stroke-width: 3.1; fill: none; marker-end: url(#arrowViolet); }
+      .arrowPink { stroke: #db2777; stroke-width: 3.1; fill: none; marker-end: url(#arrowPink); }
+      .arrowGreen { stroke: #059669; stroke-width: 3.1; fill: none; marker-end: url(#arrowGreen); }
+      .arrowOrange { stroke: #ea580c; stroke-width: 3.1; fill: none; marker-end: url(#arrowOrange); }
+      .dash { stroke-dasharray: 8 7; }
+      .muted { opacity: 0.62; }
     </style>
   </defs>
 
   <rect class="bg" width="1560" height="1180"/>
-  <text class="title" x="58" y="58">Sylanne 2.3.12 工作流：上下文归 Agent，内部工具归 bot</text>
-  <text class="subtitle" x="58" y="88">左侧高亮碎片整合：多段用户输入先合并成完整意图；右侧高亮即时聊天：最终回复按语义拆条、打字停顿、插话断点回写。</text>
+  <text class="title" x="56" y="58">Sylanne 2.3.12 工作流：上下文归 Agent，Sylanne 接管投递与反馈</text>
+  <text class="subtitle" x="56" y="88">主链路不再由插件重放长上下文：输入只做碎片 gate，Agent 负责上下文和工具循环，Sylanne 只在最终回复后接管真实聊天节奏。</text>
 
-  <rect class="laneOld" x="42" y="126" width="300" height="968" rx="20"/>
-  <text class="laneTitle" x="66" y="166">0.5.0 旧版单线程</text>
-  <text class="small" x="66" y="194">状态、回复、记忆、后处理常在同一链路等待</text>
+  <g id="lanes-main">
+    <rect class="laneInput" x="42" y="126" width="312" height="598" rx="18"/>
+    <text class="laneTitle" x="66" y="164">输入侧：轻量 gate</text>
+    <text class="small" x="66" y="190">只判断“用户说完了吗”，不持有长期上下文</text>
 
-  <rect class="laneMain" x="374" y="126" width="422" height="968" rx="20"/>
-  <text class="laneTitle" x="398" y="166">当前主回复链路：碎片整合 + 即时聊天</text>
-  <text class="small" x="398" y="194">先把用户多段话合成完整意图，再把 bot 回复拆成真实聊天节奏</text>
+    <rect class="laneAgent" x="386" y="126" width="360" height="598" rx="18"/>
+    <text class="laneTitle" x="410" y="164">AstrBot Agent：上下文核心</text>
+    <text class="small" x="410" y="190">完整历史、fallback、工具循环都留在 Agent 内</text>
 
-  <rect class="laneBack" x="828" y="126" width="398" height="968" rx="20"/>
-  <text class="laneTitle" x="852" y="166">后台并行与状态落库</text>
-  <text class="small" x="852" y="194">慢评估进后台，同会话仍按顺序提交</text>
+    <rect class="laneOutput" x="778" y="126" width="360" height="598" rx="18"/>
+    <text class="laneTitle" x="802" y="164">Sylanne：即时聊天投递层</text>
+    <text class="small" x="802" y="190">只接管最终自然语言，不截断工具调用</text>
 
-  <rect class="lanePro" x="1258" y="126" width="260" height="968" rx="20"/>
-  <text class="laneTitle" x="1280" y="166">主动发言支路</text>
-  <text class="small" x="1280" y="194">低频醒来，有理由才请求发送</text>
-
-  <g id="old-flow">
-    <rect class="nodeOld" x="76" y="250" width="232" height="64" rx="12"/>
-    <text class="text" x="192" y="286" text-anchor="middle">用户消息</text>
-    <path class="arrowGray" d="M192 314 V352"/>
-
-    <rect class="nodeOld" x="76" y="352" width="232" height="76" rx="12"/>
-    <text class="text" x="192" y="382" text-anchor="middle">顺序读状态</text>
-    <text class="tiny" x="192" y="406" text-anchor="middle">情绪 / 记忆 / 辅助层依次等待</text>
-    <path class="arrowGray" d="M192 428 V466"/>
-
-    <rect class="nodeOld" x="76" y="466" width="232" height="76" rx="12"/>
-    <text class="text" x="192" y="496" text-anchor="middle">请求内评估</text>
-    <text class="tiny" x="192" y="520" text-anchor="middle">慢模型容易拖住主回复</text>
-    <path class="arrowGray" d="M192 542 V580"/>
-
-    <rect class="nodeOld" x="76" y="580" width="232" height="76" rx="12"/>
-    <text class="text" x="192" y="610" text-anchor="middle">大段注入提示词</text>
-    <text class="tiny" x="192" y="634" text-anchor="middle">上下文压力和工具压力都高</text>
-    <path class="arrowGray" d="M192 656 V694"/>
-
-    <rect class="nodeOld" x="76" y="694" width="232" height="76" rx="12"/>
-    <text class="text" x="192" y="724" text-anchor="middle">主模型回复</text>
-    <text class="tiny" x="192" y="748" text-anchor="middle">用户等待整条链路完成</text>
-    <path class="arrowGray" d="M192 770 V808"/>
-
-    <rect class="nodeOld" x="76" y="808" width="232" height="76" rx="12"/>
-    <text class="text" x="192" y="838" text-anchor="middle">写回状态</text>
-    <text class="tiny" x="192" y="862" text-anchor="middle">失败后不易定位是哪一层</text>
-
-    <rect class="badgeGray" x="76" y="934" width="232" height="86" rx="14"/>
-    <text class="small" x="192" y="962" text-anchor="middle">旧版痛点</text>
-    <text class="tiny" x="192" y="986" text-anchor="middle">等待长、上下文重、工具面散</text>
-    <text class="tiny" x="192" y="1008" text-anchor="middle">插话和主动发言边界不清</text>
+    <rect class="laneInput" x="1170" y="126" width="348" height="598" rx="18"/>
+    <text class="laneTitle" x="1194" y="164">模型与工具边界</text>
+    <text class="small" x="1194" y="190">快判断短上下文，复杂判断独立，细分工具隐藏</text>
   </g>
 
-  <g id="main-flow">
-    <rect class="chatBand" x="392" y="214" width="354" height="226" rx="18"/>
-    <text class="chatTitle" x="412" y="230">用户碎片化信息整合层</text>
-    <rect class="chatOutBand" x="392" y="814" width="354" height="232" rx="18"/>
-    <text class="chatOutTitle" x="412" y="828">即时聊天输出层</text>
+  <g id="input-flow">
+    <rect class="nodeInput" x="66" y="232" width="264" height="72" rx="14"/>
+    <text class="text" x="198" y="262" text-anchor="middle">用户事件进入</text>
+    <text class="tiny" x="198" y="286" text-anchor="middle">单聊 / 群聊 / 补充 / 撤回 / 表情</text>
+    <path class="arrowBlue" d="M198 304 V342"/>
 
-    <rect class="nodeBlue" x="410" y="232" width="318" height="70" rx="14"/>
-    <text class="text" x="569" y="260" text-anchor="middle">碎片输入池</text>
-    <text class="tiny" x="569" y="282" text-anchor="middle">单聊多段、群聊插话、撤回事件先进入同一会话缓冲</text>
-    <path class="arrowBlue" d="M569 302 V340"/>
-    <rect class="bubble" x="424" y="310" width="42" height="24" rx="12"/>
-    <text class="tiny" x="445" y="327" text-anchor="middle">我！</text>
-    <rect class="bubble" x="474" y="310" width="42" height="24" rx="12"/>
-    <text class="tiny" x="495" y="327" text-anchor="middle">不！</text>
-    <rect class="bubble" x="524" y="310" width="42" height="24" rx="12"/>
-    <text class="tiny" x="545" y="327" text-anchor="middle">是！</text>
-    <rect class="bubble" x="574" y="310" width="42" height="24" rx="12"/>
-    <text class="tiny" x="595" y="327" text-anchor="middle">老！</text>
-    <rect class="bubble" x="624" y="310" width="76" height="24" rx="12"/>
-    <text class="tiny" x="662" y="327" text-anchor="middle">年人！！！</text>
+    <rect class="nodeInput" x="66" y="342" width="264" height="92" rx="14"/>
+    <text class="text" x="198" y="374" text-anchor="middle">碎片输入池</text>
+    <text class="tiny" x="198" y="398" text-anchor="middle">“我 / 不 / 是 / 老 / 年人”先合并</text>
+    <text class="tiny" x="198" y="416" text-anchor="middle">命中上一轮问句的短答直接锚定</text>
+    <path class="arrowBlue" d="M198 434 V472"/>
 
-    <rect class="nodeBlue" x="410" y="340" width="318" height="82" rx="14"/>
-    <text class="text" x="569" y="370" text-anchor="middle">语义完整度判定</text>
-    <text class="tiny" x="569" y="394" text-anchor="middle">本地规则 + 快速判断 LLM 短上下文 JSON：用户说完了吗？</text>
-    <text class="tiny" x="569" y="414" text-anchor="middle">低推理小模型只看碎片窗口；完整上下文仍交给 Agent</text>
-    <path class="arrowBlue" d="M569 422 V460"/>
-    <text class="chatTitle" x="569" y="438" text-anchor="middle">合并结果：我不是老年人！！！</text>
+    <rect class="nodeInput" x="66" y="472" width="264" height="96" rx="14"/>
+    <text class="text" x="198" y="504" text-anchor="middle">fast assessor</text>
+    <text class="tiny" x="198" y="528" text-anchor="middle">低推理小模型，只看短碎片窗口</text>
+    <text class="tiny" x="198" y="548" text-anchor="middle">超时或失败就走本地回退</text>
+    <path class="arrowBlue" d="M198 568 V606"/>
 
-    <rect class="nodeBlue" x="410" y="460" width="318" height="82" rx="14"/>
-    <text class="text" x="569" y="492" text-anchor="middle">AstrBot Agent 持有完整上下文</text>
-    <text class="tiny" x="569" y="516" text-anchor="middle">Sylanne 不重放整段历史，只补短事实</text>
-    <path class="arrowBlue" d="M569 542 V580"/>
-
-    <rect class="guard" x="410" y="580" width="318" height="92" rx="14"/>
-    <text class="text" x="569" y="612" text-anchor="middle">Sylanne 内部工具隐藏</text>
-    <text class="tiny" x="569" y="636" text-anchor="middle">主 LLM 请求前剪除 Sylanne 自有 tool schema</text>
-    <text class="tiny" x="569" y="656" text-anchor="middle">bot/Agent、命令、API 和设置 Page 仍可使用插件能力</text>
-    <path class="arrowBlue" d="M569 672 V710"/>
-
-    <rect class="nodeBlue" x="410" y="710" width="318" height="82" rx="14"/>
-    <text class="text" x="569" y="742" text-anchor="middle">工具调用循环归 Agent</text>
-    <text class="tiny" x="569" y="766" text-anchor="middle">tool_calls / function_call 完全放行</text>
-    <text class="tiny" x="569" y="784" text-anchor="middle">Sylanne 不改写、不 stop_event、不消费 epoch</text>
-    <path class="arrowBlue" d="M569 792 V830"/>
-
-    <rect class="nodeBlue" x="410" y="830" width="318" height="92" rx="14"/>
-    <text class="text" x="569" y="862" text-anchor="middle">最终回复进入即时聊天层</text>
-    <text class="tiny" x="569" y="886" text-anchor="middle">按语义和用户说话习惯智能拆条，不把主回复截没</text>
-    <text class="tiny" x="569" y="906" text-anchor="middle">表情包先过语气一致性检查，再作为独立媒体发送</text>
-    <path class="arrowBlue" d="M569 922 V960"/>
-    <rect class="replyBubble" x="422" y="932" width="78" height="24" rx="12"/>
-    <text class="tiny" x="461" y="949" text-anchor="middle">第 1 条</text>
-    <rect class="replyBubble" x="510" y="932" width="78" height="24" rx="12"/>
-    <text class="tiny" x="549" y="949" text-anchor="middle">停顿</text>
-    <rect class="replyBubble" x="598" y="932" width="112" height="24" rx="12"/>
-    <text class="tiny" x="654" y="949" text-anchor="middle">第 2 条 / 表情</text>
-
-    <rect class="nodeBlue" x="410" y="960" width="318" height="72" rx="14"/>
-    <text class="text" x="569" y="990" text-anchor="middle">逐条发送给用户</text>
-    <text class="tiny" x="569" y="1012" text-anchor="middle">模拟打字速度；用户插话时记录已发/未发/断点</text>
-    <text class="tiny" x="569" y="1030" text-anchor="middle">下一轮 Agent 会知道 bot 刚才哪些话没说完</text>
+    <rect class="nodeInput" x="66" y="606" width="264" height="74" rx="14"/>
+    <text class="text" x="198" y="636" text-anchor="middle">释放完整用户意图</text>
+    <text class="tiny" x="198" y="660" text-anchor="middle">只把本轮合并结果交给 Agent</text>
   </g>
 
-  <g id="background-flow">
-    <rect class="nodeGreen" x="866" y="232" width="322" height="74" rx="14"/>
-    <text class="text" x="1027" y="262" text-anchor="middle">回复后任务入后台队列</text>
-    <text class="tiny" x="1027" y="286" text-anchor="middle">情绪评估、记忆写入、轨迹注解、诊断留存</text>
+  <g id="agent-flow">
+    <path class="arrowBlue" d="M330 643 C354 643 358 250 386 250"/>
+    <rect class="nodeAgent" x="410" y="232" width="312" height="86" rx="14"/>
+    <text class="text" x="566" y="264" text-anchor="middle">Agent 持有完整对话历史</text>
+    <text class="tiny" x="566" y="288" text-anchor="middle">官方上下文、fallback provider、工具结果都在这里</text>
+    <text class="tiny" x="566" y="306" text-anchor="middle">Sylanne 不把整段历史抢到插件里重放</text>
+    <path class="arrowViolet" d="M566 318 V356"/>
 
-    <path class="arrowGreen dash" d="M728 876 C790 876 790 269 866 269"/>
-    <path class="arrowGreen" d="M1027 306 V346"/>
+    <rect class="guard" x="410" y="356" width="312" height="92" rx="14"/>
+    <text class="text" x="566" y="388" text-anchor="middle">主请求前隐藏内部 schema</text>
+    <text class="tiny" x="566" y="412" text-anchor="middle">query_agent_state 等细分工具不暴露给主 LLM</text>
+    <text class="tiny" x="566" y="432" text-anchor="middle">命令、公共 API、设置 Page 仍可用</text>
+    <path class="arrowViolet" d="M566 448 V486"/>
 
-    <rect class="nodeGreen" x="866" y="346" width="322" height="86" rx="14"/>
-    <text class="text" x="1027" y="378" text-anchor="middle">状态与记忆并行读取</text>
-    <text class="tiny" x="1027" y="402" text-anchor="middle">emotion / humanlike / lifelike / drift / group</text>
-    <text class="tiny" x="1027" y="422" text-anchor="middle">自有记忆：关键词 + 向量 + 关联图召回</text>
-    <path class="arrowGreen" d="M1027 432 V472"/>
+    <rect class="nodeAgent" x="410" y="486" width="312" height="88" rx="14"/>
+    <text class="text" x="566" y="518" text-anchor="middle">Agent 原生工具循环</text>
+    <text class="tiny" x="566" y="542" text-anchor="middle">外部 tool_calls / function_call 完全放行</text>
+    <text class="tiny" x="566" y="560" text-anchor="middle">Sylanne 不改写、不 stop_event、不消费 epoch</text>
+    <path class="arrowViolet" d="M566 574 V612"/>
 
-    <rect class="guard" x="866" y="472" width="322" height="92" rx="14"/>
-    <text class="text" x="1027" y="504" text-anchor="middle">资源守卫与动态 workers</text>
-    <text class="tiny" x="1027" y="528" text-anchor="middle">按队列深度、等待时间、CPU、内存和重试压力决定数量</text>
-    <text class="tiny" x="1027" y="548" text-anchor="middle">全局最大 6，空闲自动关闭，不直接冲满</text>
-    <path class="arrowGreen" d="M1027 564 V604"/>
-
-    <rect class="nodeGreen" x="866" y="604" width="322" height="84" rx="14"/>
-    <text class="text" x="1027" y="636" text-anchor="middle">并行执行，顺序提交</text>
-    <text class="tiny" x="1027" y="660" text-anchor="middle">同一会话按 sequence 落库，防止情绪轨迹乱序</text>
-    <path class="arrowGreen" d="M1027 688 V728"/>
-
-    <g id="worker-pool">
-      <rect class="nodeGreen" x="870" y="728" width="94" height="58" rx="12"/>
-      <text class="small" x="917" y="752" text-anchor="middle">worker 1</text>
-      <text class="tiny" x="917" y="772" text-anchor="middle">活跃</text>
-      <rect class="nodeGreen" x="980" y="728" width="94" height="58" rx="12"/>
-      <text class="small" x="1027" y="752" text-anchor="middle">worker 2</text>
-      <text class="tiny" x="1027" y="772" text-anchor="middle">活跃</text>
-      <rect class="nodeGreen" x="1090" y="728" width="94" height="58" rx="12"/>
-      <text class="small" x="1137" y="752" text-anchor="middle">worker 3</text>
-      <text class="tiny" x="1137" y="772" text-anchor="middle">活跃</text>
-      <rect class="nodeGreen muted" x="870" y="806" width="94" height="58" rx="12"/>
-      <text class="small" x="917" y="830" text-anchor="middle">worker 4</text>
-      <text class="tiny" x="917" y="850" text-anchor="middle">待命</text>
-      <rect class="nodeGreen muted" x="980" y="806" width="94" height="58" rx="12"/>
-      <text class="small" x="1027" y="830" text-anchor="middle">worker 5</text>
-      <text class="tiny" x="1027" y="850" text-anchor="middle">待命</text>
-      <rect class="nodeGreen muted" x="1090" y="806" width="94" height="58" rx="12"/>
-      <text class="small" x="1137" y="830" text-anchor="middle">worker 6</text>
-      <text class="tiny" x="1137" y="850" text-anchor="middle">待命</text>
-    </g>
-    <path class="arrowGreen" d="M1027 688 V728"/>
-    <path class="arrowGreen" d="M1027 864 V904"/>
-
-    <rect class="nodeGreen" x="866" y="904" width="322" height="82" rx="14"/>
-    <text class="text" x="1027" y="936" text-anchor="middle">写入 KV / 自有记忆库 / runtime</text>
-    <text class="tiny" x="1027" y="960" text-anchor="middle">记忆随真实时间强化、遗忘、关联联想</text>
-
-    <path class="arrowGreen dash" d="M866 944 C800 944 796 514 728 514"/>
-    <text class="tiny" x="744" y="540">短摘要回流给后续请求</text>
+    <rect class="nodeAgent" x="410" y="612" width="312" height="76" rx="14"/>
+    <text class="text" x="566" y="642" text-anchor="middle">最终自然语言回复</text>
+    <text class="tiny" x="566" y="666" text-anchor="middle">只有这一步进入 Sylanne 投递层</text>
   </g>
 
-  <g id="proactive-flow">
-    <rect class="nodeOrange" x="1284" y="232" width="208" height="74" rx="14"/>
-    <text class="text" x="1388" y="262" text-anchor="middle">最近可触达会话</text>
-    <text class="tiny" x="1388" y="286" text-anchor="middle">登记来源、冷却、反馈</text>
-    <path class="arrowOrange" d="M1388 306 V346"/>
+  <g id="output-flow">
+    <path class="arrowViolet" d="M722 650 C748 650 752 248 778 248"/>
+    <rect class="stop" x="802" y="232" width="312" height="82" rx="14"/>
+    <text class="text" x="958" y="264" text-anchor="middle">工具轮次检测</text>
+    <text class="tiny" x="958" y="288" text-anchor="middle">若仍是 tool_calls / 工具结果，直接放行</text>
+    <path class="arrowPink" d="M958 314 V352"/>
 
-    <rect class="nodeOrange" x="1284" y="346" width="208" height="86" rx="14"/>
-    <text class="text" x="1388" y="378" text-anchor="middle">低频后台醒来</text>
-    <text class="tiny" x="1388" y="402" text-anchor="middle">先结算未回复反馈，再看安静门和服务器压力</text>
-    <path class="arrowOrange" d="M1388 432 V472"/>
+    <rect class="nodeOutput" x="802" y="352" width="312" height="92" rx="14"/>
+    <text class="text" x="958" y="384" text-anchor="middle">即时聊天规划</text>
+    <text class="tiny" x="958" y="408" text-anchor="middle">按语义、人格、用户说话习惯拆条</text>
+    <text class="tiny" x="958" y="428" text-anchor="middle">表情包走本地一致性 + fast assessor</text>
+    <path class="arrowPink" d="M958 444 V482"/>
 
-    <rect class="nodeOrange" x="1284" y="472" width="208" height="96" rx="14"/>
-    <text class="text" x="1388" y="504" text-anchor="middle">公式门控</text>
-    <text class="tiny" x="1388" y="528" text-anchor="middle">想念、互需、调皮、修复</text>
-    <text class="tiny" x="1388" y="548" text-anchor="middle">冷场、打断风险、群聊氛围</text>
-    <path class="arrowOrange" d="M1388 568 V608"/>
+    <rect class="nodeOutput" x="802" y="482" width="312" height="94" rx="14"/>
+    <text class="text" x="958" y="514" text-anchor="middle">逐条投递</text>
+    <text class="tiny" x="958" y="538" text-anchor="middle">模拟打字速度、停顿和短句节奏</text>
+    <text class="tiny" x="958" y="558" text-anchor="middle">用户插话时停止剩余分条与媒体</text>
+    <path class="arrowPink" d="M958 576 V614"/>
 
-    <rect class="nodeOrange" x="1284" y="608" width="208" height="96" rx="14"/>
-    <text class="text" x="1388" y="640" text-anchor="middle">LLM 裁决理由与话题</text>
-    <text class="tiny" x="1388" y="664" text-anchor="middle">长时间沉默先猜忙/休息，不当成无视</text>
-    <text class="tiny" x="1388" y="684" text-anchor="middle">无新证据就沉默；想念也只能低压短句</text>
-    <path class="arrowOrange" d="M1388 704 V744"/>
+    <rect class="nodeOutput" x="802" y="614" width="312" height="80" rx="14"/>
+    <text class="text" x="958" y="644" text-anchor="middle">投递信封回写</text>
+    <text class="tiny" x="958" y="668" text-anchor="middle">记录已发、未发、被打断和原回复摘要</text>
+    <rect class="replyBubble" x="830" y="704" width="72" height="24" rx="12"/>
+    <text class="tiny" x="866" y="721" text-anchor="middle">已发</text>
+    <rect class="replyBubble" x="914" y="704" width="72" height="24" rx="12"/>
+    <text class="tiny" x="950" y="721" text-anchor="middle">未发</text>
+    <rect class="replyBubble" x="998" y="704" width="90" height="24" rx="12"/>
+    <text class="tiny" x="1043" y="721" text-anchor="middle">插话断点</text>
+  </g>
 
-    <rect class="nodeOrange" x="1284" y="744" width="208" height="82" rx="14"/>
-    <text class="text" x="1388" y="776" text-anchor="middle">请求 AstrBot 发送</text>
-    <text class="tiny" x="1388" y="800" text-anchor="middle">由调度器落到真实消息通道</text>
-    <path class="arrowOrange" d="M1388 826 V866"/>
+  <g id="boundary-flow">
+    <rect class="nodeInput" x="1194" y="232" width="300" height="86" rx="14"/>
+    <text class="text" x="1344" y="264" text-anchor="middle">快判断模型</text>
+    <text class="tiny" x="1344" y="288" text-anchor="middle">碎片完整性、表情一致性</text>
+    <text class="tiny" x="1344" y="306" text-anchor="middle">默认 600 字预算，短超时、低温度</text>
 
-    <rect class="nodeOrange" x="1284" y="866" width="208" height="82" rx="14"/>
-    <text class="text" x="1388" y="898" text-anchor="middle">记录反馈</text>
-    <text class="tiny" x="1388" y="922" text-anchor="middle">未回复、冷场、被打断都会延长冷却</text>
+    <rect class="nodeAgent" x="1194" y="354" width="300" height="86" rx="14"/>
+    <text class="text" x="1344" y="386" text-anchor="middle">复杂判断模型</text>
+    <text class="tiny" x="1344" y="410" text-anchor="middle">情绪观测、主动话题裁决</text>
+    <text class="tiny" x="1344" y="428" text-anchor="middle">需要更多状态，但不替代 Agent 上下文</text>
 
-    <path class="arrowOrange dash" d="M1188 944 C1242 944 1242 269 1284 269"/>
+    <rect class="guard" x="1194" y="476" width="300" height="92" rx="14"/>
+    <text class="text" x="1344" y="508" text-anchor="middle">内部能力归 bot</text>
+    <text class="tiny" x="1344" y="532" text-anchor="middle">细分工具对所有主聊天 LLM 隐藏</text>
+    <text class="tiny" x="1344" y="552" text-anchor="middle">插件功能通过短状态、召回、API、Page 生效</text>
+
+    <rect class="badgeGray" x="1194" y="616" width="300" height="80" rx="14"/>
+    <text class="note" x="1344" y="646" text-anchor="middle">Gemini blocked 不是上下文长度问题</text>
+    <text class="tiny" x="1344" y="670" text-anchor="middle">安全层可能按完整 prompt 拦截</text>
+    <text class="tiny" x="1344" y="688" text-anchor="middle">fallback 由 Agent 主链路接住</text>
+  </g>
+
+  <path class="arrowPink dash" d="M802 654 C740 714 670 714 612 674"/>
+  <text class="tiny" x="702" y="720" text-anchor="middle">已发/未发信封只作为短事实回到下一轮 Agent 请求</text>
+
+  <g id="background-lane">
+    <rect class="laneBg" x="42" y="764" width="704" height="318" rx="18"/>
+    <text class="laneTitle" x="66" y="802">回复后后台：状态、记忆、向量召回</text>
+    <text class="small" x="66" y="828">慢任务离开主回复链路，同会话按 sequence 顺序落库</text>
+
+    <rect class="nodeBg" x="70" y="866" width="156" height="74" rx="14"/>
+    <text class="text" x="148" y="896" text-anchor="middle">post 队列</text>
+    <text class="tiny" x="148" y="920" text-anchor="middle">回复后再评估</text>
+    <path class="arrowGreen" d="M226 903 H270"/>
+
+    <rect class="nodeBg" x="270" y="866" width="186" height="74" rx="14"/>
+    <text class="text" x="363" y="896" text-anchor="middle">动态 workers</text>
+    <text class="tiny" x="363" y="920" text-anchor="middle">CPU / 内存 / 队列压力</text>
+    <path class="arrowGreen" d="M456 903 H500"/>
+
+    <rect class="nodeBg" x="500" y="866" width="206" height="74" rx="14"/>
+    <text class="text" x="603" y="896" text-anchor="middle">状态落库</text>
+    <text class="tiny" x="603" y="920" text-anchor="middle">emotion / lifelike / drift</text>
+
+    <rect class="nodeBg" x="70" y="970" width="196" height="72" rx="14"/>
+    <text class="text" x="168" y="1000" text-anchor="middle">自有记忆写入</text>
+    <text class="tiny" x="168" y="1024" text-anchor="middle">稳定输入与关键摘要</text>
+    <path class="arrowGreen" d="M266 1006 H318"/>
+
+    <rect class="nodeBg" x="318" y="970" width="178" height="72" rx="14"/>
+    <text class="text" x="407" y="1000" text-anchor="middle">混合召回</text>
+    <text class="tiny" x="407" y="1024" text-anchor="middle">关键词 + 向量 + 关联图</text>
+    <path class="arrowGreen dash" d="M496 1006 C590 1006 620 760 566 688"/>
+    <text class="tiny" x="604" y="1024">只回流限长摘要</text>
+  </g>
+
+  <g id="proactive-lane">
+    <rect class="lanePro" x="778" y="764" width="740" height="318" rx="18"/>
+    <text class="laneTitle" x="802" y="802">主动聊天：反馈先行，低频触达</text>
+    <text class="small" x="802" y="828">不是固定话题库，也不是无限关心进度；有理由才轻轻开口</text>
+
+    <rect class="nodePro" x="806" y="866" width="168" height="74" rx="14"/>
+    <text class="text" x="890" y="896" text-anchor="middle">候选会话</text>
+    <text class="tiny" x="890" y="920" text-anchor="middle">最近可触达、未冷却</text>
+    <path class="arrowOrange" d="M974 903 H1016"/>
+
+    <rect class="nodePro" x="1016" y="866" width="188" height="74" rx="14"/>
+    <text class="text" x="1110" y="896" text-anchor="middle">结算上一条反馈</text>
+    <text class="tiny" x="1110" y="920" text-anchor="middle">unanswered / cold_reply / pending</text>
+    <path class="arrowOrange" d="M1204 903 H1246"/>
+
+    <rect class="nodePro" x="1246" y="866" width="228" height="74" rx="14"/>
+    <text class="text" x="1360" y="896" text-anchor="middle">时间推测</text>
+    <text class="tiny" x="1360" y="920" text-anchor="middle">忙、休息、睡觉，不默认被无视</text>
+
+    <rect class="nodePro" x="806" y="970" width="194" height="72" rx="14"/>
+    <text class="text" x="903" y="1000" text-anchor="middle">公式门控</text>
+    <text class="tiny" x="903" y="1024" text-anchor="middle">想念、互需、修复、打扰风险</text>
+    <path class="arrowOrange" d="M1000 1006 H1042"/>
+
+    <rect class="nodePro" x="1042" y="970" width="198" height="72" rx="14"/>
+    <text class="text" x="1141" y="1000" text-anchor="middle">LLM 证据裁决</text>
+    <text class="tiny" x="1141" y="1024" text-anchor="middle">无新证据就沉默</text>
+    <path class="arrowOrange" d="M1240 1006 H1282"/>
+
+    <rect class="nodePro" x="1282" y="970" width="192" height="72" rx="14"/>
+    <text class="text" x="1378" y="1000" text-anchor="middle">低压力发送</text>
+    <text class="tiny" x="1378" y="1024" text-anchor="middle">想念也只短句，不抓旧话题</text>
   </g>
 
   <g id="legend">
-    <rect class="badgeGray" x="58" y="1112" width="252" height="42" rx="14"/>
-    <text class="small" x="184" y="1138" text-anchor="middle">灰色：0.5.0 旧单线程链路</text>
-    <rect class="badgeBlue" x="342" y="1112" width="326" height="42" rx="14"/>
-    <text class="small" x="505" y="1138" text-anchor="middle">蓝色：当前主回复链路，先保证用户可见回复</text>
-    <rect class="badgeGreen" x="700" y="1112" width="376" height="42" rx="14"/>
-    <text class="small" x="888" y="1138" text-anchor="middle">绿色：后台队列与 workers，慢任务并行但顺序落库</text>
-    <rect class="badgeOrange" x="1108" y="1112" width="352" height="42" rx="14"/>
-    <text class="small" x="1284" y="1138" text-anchor="middle">橙色：主动发言，公式门控 + LLM 证据裁决</text>
+    <rect class="badgeBlue" x="56" y="1114" width="250" height="42" rx="14"/>
+    <text class="small" x="181" y="1140" text-anchor="middle">蓝色：输入 gate，只合并本轮碎片</text>
+    <rect class="badgeViolet" x="334" y="1114" width="276" height="42" rx="14"/>
+    <text class="small" x="472" y="1140" text-anchor="middle">紫色：Agent 拥有上下文和工具循环</text>
+    <rect class="badgePink" x="638" y="1114" width="260" height="42" rx="14"/>
+    <text class="small" x="768" y="1140" text-anchor="middle">粉色：Sylanne 只接管最终投递</text>
+    <rect class="badgeGreen" x="926" y="1114" width="260" height="42" rx="14"/>
+    <text class="small" x="1056" y="1140" text-anchor="middle">绿色：后台状态与记忆</text>
+    <rect class="badgeOrange" x="1214" y="1114" width="288" height="42" rx="14"/>
+    <text class="small" x="1358" y="1140" text-anchor="middle">橙色：主动聊天反馈闭环</text>
   </g>
 </svg>
