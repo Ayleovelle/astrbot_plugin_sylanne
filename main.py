@@ -390,6 +390,9 @@ REALTIME_ASSISTANT_HISTORY_EXCERPT_CHARS = 720
 RECENT_USER_CORRECTION_LIMIT = 4
 RECENT_USER_CORRECTION_TTL_SECONDS = 180.0
 RECENT_USER_CORRECTION_INJECTION_MAX_CHARS = 520
+RECENT_USER_SCENE_LIMIT = 4
+RECENT_USER_SCENE_TTL_SECONDS = 300.0
+RECENT_USER_SCENE_INJECTION_MAX_CHARS = 620
 ACTIVE_AGENT_PENDING_USER_TURN_LIMIT = 4
 ACTIVE_AGENT_PENDING_USER_TURN_TTL_SECONDS = 180.0
 ACTIVE_AGENT_FOLLOWUP_INJECTION_MAX_CHARS = 620
@@ -664,6 +667,7 @@ class EmotionalStatePlugin(Star):
         self._interrupted_reply_breakpoints: dict[str, deque[dict[str, Any]]] = {}
         self._realtime_assistant_history_shadows: dict[str, deque[dict[str, Any]]] = {}
         self._recent_user_corrections: dict[str, deque[dict[str, Any]]] = {}
+        self._recent_user_scene_turns: dict[str, deque[dict[str, Any]]] = {}
         self._realtime_chat_active_dispatches: dict[str, dict[str, Any]] = {}
         self._realtime_chat_dispatch_tasks: dict[str, set[asyncio.Task[Any]]] = {}
         self._background_tasks: set[asyncio.Task[Any]] = set()
@@ -776,6 +780,8 @@ class EmotionalStatePlugin(Star):
             self._realtime_assistant_history_shadows.clear()
         if hasattr(self, "_recent_user_corrections"):
             self._recent_user_corrections.clear()
+        if hasattr(self, "_recent_user_scene_turns"):
+            self._recent_user_scene_turns.clear()
         if hasattr(self, "_realtime_chat_active_dispatches"):
             self._realtime_chat_active_dispatches.clear()
         realtime_dispatch_tasks = [
@@ -960,6 +966,14 @@ class EmotionalStatePlugin(Star):
             active_followup_payload,
             budget=early_injection_budget,
         )
+        self._append_recent_user_scene_context_if_any(
+            request,
+            session_key,
+            identity,
+            budget=early_injection_budget,
+            current_user_text=current_user_observation_text,
+            observed_at=observed_at,
+        )
         self._append_realtime_continuity_context_if_any(
             request,
             session_key,
@@ -972,6 +986,12 @@ class EmotionalStatePlugin(Star):
         )
         context_text = self._request_to_text(request)
         self._last_request_text[session_key] = context_text
+        self._record_recent_user_scene_turn(
+            session_key,
+            identity,
+            text=current_user_observation_text,
+            observed_at=observed_at,
+        )
         self._record_active_agent_pending_user_turn(
             session_key,
             identity,
@@ -9309,6 +9329,195 @@ class EmotionalStatePlugin(Star):
             budget=budget,
         )
 
+    def _recent_user_scene_cache(self) -> dict[str, deque[dict[str, Any]]]:
+        cache = getattr(self, "_recent_user_scene_turns", None)
+        if not isinstance(cache, dict):
+            cache = {}
+            self._recent_user_scene_turns = cache
+        return cache
+
+    def _record_recent_user_scene_turn(
+        self,
+        session_key: str,
+        identity: ConversationIdentity,
+        *,
+        text: str,
+        observed_at: float,
+    ) -> None:
+        value = " ".join(str(text or "").split()).strip()
+        if not value:
+            return
+        if self._low_signal_text_profile(value).get("is_low_signal"):
+            return
+        key = str(session_key or "global")
+        speaker_key = self._active_agent_speaker_key(identity)
+        queue = self._recent_user_scene_cache().setdefault(
+            key,
+            deque(maxlen=RECENT_USER_SCENE_LIMIT),
+        )
+        if queue.maxlen != RECENT_USER_SCENE_LIMIT:
+            queue = deque(queue, maxlen=RECENT_USER_SCENE_LIMIT)
+            self._recent_user_scene_cache()[key] = queue
+        queue.append(
+            {
+                "schema_version": "astrbot.recent_user_scene_turn.v1",
+                "kind": "recent_user_scene_turn",
+                "session_key": key,
+                "speaker_key": speaker_key,
+                "text": self._head_one_line(value, 200),
+                "recorded_at": float(observed_at),
+                "hash": self._text_hash(value),
+            },
+        )
+
+    def _append_recent_user_scene_context_if_any(
+        self,
+        request: ProviderRequest,
+        session_key: str,
+        identity: ConversationIdentity,
+        *,
+        budget: _StateInjectionBudget | None,
+        current_user_text: str = "",
+        observed_at: float | None = None,
+    ) -> bool:
+        key = str(session_key or "global")
+        queue = self._recent_user_scene_cache().get(key)
+        if not queue:
+            return False
+        now = self._observed_now() if observed_at is None else float(observed_at)
+        speaker_key = self._active_agent_speaker_key(identity)
+        current_hash = self._text_hash(current_user_text)
+        fresh = [
+            item
+            for item in queue
+            if now - float(item.get("recorded_at") or 0.0)
+            <= RECENT_USER_SCENE_TTL_SECONDS
+        ]
+        if len(fresh) != len(queue):
+            if fresh:
+                self._recent_user_scene_cache()[key] = deque(
+                    fresh[-RECENT_USER_SCENE_LIMIT:],
+                    maxlen=RECENT_USER_SCENE_LIMIT,
+                )
+            else:
+                self._recent_user_scene_cache().pop(key, None)
+        relevant = [
+            item
+            for item in fresh
+            if str(item.get("speaker_key") or "") == speaker_key
+            and str(item.get("text") or "").strip()
+            and str(item.get("hash") or "") != current_hash
+        ][-3:]
+        if not relevant:
+            return False
+        if not self._should_use_recent_user_scene_context(
+            current_user_text,
+            relevant,
+            observed_at=now,
+        ):
+            return False
+        lines = [
+            "[sylanne_recent_user_scene_context]",
+            "用户最近几条短事实描述了当前活动、地点或感受；当前短句要承接这些事实，不要只看最后一句，也不要重新询问已经给出的场景。",
+            "这只是会话内短时上下文，不是长期记忆；如果当前用户明显开启新话题，再自然切换。",
+            "speaker={speaker}; recent_count={count}".format(
+                speaker=self._head_one_line(speaker_key, 96),
+                count=len(relevant),
+            ),
+        ]
+        scene_parts: list[str] = []
+        for index, item in enumerate(relevant, start=1):
+            text = self._head_one_line(str(item.get("text") or ""), 180)
+            scene_parts.append(text)
+            lines.append(
+                "recent_user[{index}]={text}; hash={hash}".format(
+                    index=index,
+                    text=text,
+                    hash=str(item.get("hash") or "")[:16],
+                ),
+            )
+        current = self._head_one_line(str(current_user_text or ""), 160)
+        if current:
+            lines.append("current_user=" + current)
+            scene_parts.append(current)
+        merged = self._head_one_line(" / ".join(scene_parts), 320)
+        if merged:
+            lines.append("merged_recent_scene=" + merged)
+        text = self._head_text(
+            "\n".join(lines),
+            RECENT_USER_SCENE_INJECTION_MAX_CHARS,
+        )
+        return self._append_temp_text_part(
+            request,
+            text,
+            source="recent_user_scene_context",
+            budget=budget,
+        )
+
+    def _should_use_recent_user_scene_context(
+        self,
+        current_user_text: str,
+        recent_items: Sequence[dict[str, Any]],
+        *,
+        observed_at: float,
+    ) -> bool:
+        value = " ".join(str(current_user_text or "").split()).strip()
+        if not value:
+            return False
+        if self._low_signal_text_profile(value).get("is_low_signal"):
+            return False
+        compact = re.sub(r"[\s，。！？!?；;、,.~～…]+", "", value)
+        if len(compact) <= 24:
+            return True
+        continuation_prefixes = (
+            "不过",
+            "但是",
+            "可是",
+            "然后",
+            "而且",
+            "所以",
+            "因为",
+            "我在",
+            "我还",
+            "还在",
+            "正在",
+            "刚刚",
+            "现在",
+            "这边",
+            "那边",
+            "这里",
+            "外面",
+            "里面",
+        )
+        if value.startswith(continuation_prefixes):
+            return True
+        scene_markers = (
+            "外面",
+            "里面",
+            "路上",
+            "排队",
+            "食堂",
+            "宿舍",
+            "教室",
+            "实验室",
+            "热",
+            "冷",
+            "晒",
+            "闷",
+            "下雨",
+            "买",
+            "吃",
+            "喝",
+            "刚到",
+        )
+        if any(marker in value for marker in scene_markers):
+            latest_at = max(
+                float(item.get("recorded_at") or 0.0)
+                for item in recent_items
+            )
+            return observed_at - latest_at <= 120.0
+        return False
+
     def _append_realtime_input_fragment_context_if_any(
         self,
         event: AstrMessageEvent,
@@ -14361,6 +14570,7 @@ class EmotionalStatePlugin(Star):
             "realtime_input_fragments",
             "user_correction_context",
             "recent_user_correction_context",
+            "recent_user_scene_context",
             "sylanne_memory_recall",
         }
         if source not in important_sources:
@@ -14387,6 +14597,7 @@ class EmotionalStatePlugin(Star):
             "realtime_input_fragments": "sylanne_user_message_fragments",
             "user_correction_context": "sylanne_user_correction_context",
             "recent_user_correction_context": "sylanne_recent_user_correction_context",
+            "recent_user_scene_context": "sylanne_recent_user_scene_context",
             "sylanne_memory_recall": "sylanne_memory_recall",
         }
         marker = source_markers.get(source, f"sylanne_source:{source}")

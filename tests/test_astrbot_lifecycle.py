@@ -7149,6 +7149,89 @@ class AstrBotLifecycleTests(unittest.TestCase):
         context_text = "\n".join(str(item) for item in thesis_request.contexts)
         self.assertIn("你今天是准备继续改论文", context_text)
 
+    def test_short_scene_followup_keeps_recent_user_activity_context(self):
+        plugin = new_plugin(
+            {
+                "assessment_timing": "post",
+                "inject_state": False,
+                "enable_realtime_chat": True,
+                "enable_sticker_reaction": False,
+                "use_llm_assessor": False,
+                "realtime_input_completion_probe_delay_seconds": 0.0,
+                "realtime_input_completion_max_wait_seconds": 0.0,
+            },
+        )
+        clock = {"now": 3000.0}
+        plugin._observed_now = lambda: clock["now"]
+        self._bind_common_state_hooks(plugin)
+        first_request = fake_request(
+            session_id="s-user-scene-context",
+            prompt="正在排队买蜜雪捏",
+        )
+        second_request = fake_request(
+            session_id="s-user-scene-context",
+            prompt="不过今天有点热",
+        )
+        third_request = fake_request(
+            session_id="s-user-scene-context",
+            prompt="我在外面",
+        )
+
+        async def run_scene_turns():
+            await plugin.on_llm_request(
+                FakeEvent(
+                    "s-user-scene-context",
+                    message="正在排队买蜜雪捏",
+                    sender_id="u1",
+                ),
+                first_request,
+            )
+            plugin._discard_conversation_pending_response_epoch(
+                "s-user-scene-context",
+                1,
+            )
+            clock["now"] += 12.0
+            await plugin.on_llm_request(
+                FakeEvent(
+                    "s-user-scene-context",
+                    message="不过今天有点热",
+                    sender_id="u1",
+                ),
+                second_request,
+            )
+            plugin._discard_conversation_pending_response_epoch(
+                "s-user-scene-context",
+                2,
+            )
+            plugin._record_realtime_assistant_history_shadow(
+                "s-user-scene-context",
+                full_text="你那边现在是晒得热，还是闷闷的那种热呀？",
+                input_epoch=2,
+                message_parts=[
+                    {"text": "你那边现在是晒得热，还是闷闷的那种热呀？"},
+                ],
+                source="unit_test",
+            )
+            clock["now"] += 20.0
+            await plugin.on_llm_request(
+                FakeEvent(
+                    "s-user-scene-context",
+                    message="我在外面",
+                    sender_id="u1",
+                ),
+                third_request,
+            )
+
+        asyncio.run(run_scene_turns())
+
+        injected = "\n".join(self._request_text_parts(third_request))
+        self.assertIn("sylanne_recent_user_scene_context", injected)
+        self.assertIn("正在排队买蜜雪捏", injected)
+        self.assertIn("不过今天有点热", injected)
+        self.assertIn("current_user=我在外面", injected)
+        self.assertIn("sylanne_realtime_pending_bot_question", injected)
+        self.assertNotIn("sylanne_active_agent_followup_merge", injected)
+
     def test_short_answer_to_pending_question_skips_fragment_completion_gate(self):
         plugin = new_plugin(
             {
