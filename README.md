@@ -2,7 +2,7 @@
 
 > <span style="font-size: 1.08em;"><strong>Soulful Yearning Lifelike AstrBot Neural Narrative Engine</strong>。她维护的不只是“情绪标签”，而是情绪、人格、记忆、氛围、主动性和表达节奏交织成的长期状态。</span>
 
-![版本 2.3.13](https://img.shields.io/badge/version-2.3.13-blue)
+![版本 2.3.14](https://img.shields.io/badge/version-2.3.14-blue)
 ![AstrBot >=4.9.2,<5.0.0](https://img.shields.io/badge/AstrBot-%3E%3D4.9.2%2C%3C5.0.0-green)
 ![Python 3.10+](https://img.shields.io/badge/Python-3.10%2B-yellow)
 ![协议 astrbot.emotion_state.v2](https://img.shields.io/badge/schema-astrbot.emotion__state.v2-purple)
@@ -37,7 +37,7 @@
 
 <br clear="right">
 
-`2.3.13` 是等待期追发合并和即时聊天等待上限修复版：主聊天上下文继续交给 AstrBot Agent，Sylanne 只补充短状态、记忆召回和“已发/未发”的投递事实；如果用户在上一轮 LLM 尚未产出可用回复前继续补充，插件会把前后两条短事实合并进同一个用户意图，避免只抓最后半句；如果用户在已经回复后继续用短句补充当前活动、地点或感受，插件会保留几分钟内的同说话人场景事实，避免“我在外面”这类短答丢掉“正在排队买蜜雪、今天有点热”的前文；碎片完整性等待上限降到 4 秒，把主要时间留给主 LLM 正常理解合并后的消息。工作流图同步重绘，去掉误导性诊断话术，突出即时聊天、追发整合、Agent 工具循环和主动聊天反馈闭环。
+`2.3.14` 是发布展示修复版：基于 `2.3.13` 的等待期追发合并、即时聊天等待上限修复和 Agent-owned context 路径，进一步把插件管理页可见的作者、指令说明、LLM 工具说明和钩子说明同步到新发布包。发布 zip 已重新生成，包内 `main.py` 的可见 docstring 为中文，`metadata.yaml` 作者为 `Aylovelle.S.S`，并按 AstrBot 插件市场约束把包体预检上限收紧到 16MB。若远端仍显示旧英文说明，优先确认正式插件目录是否已经被新包覆盖，而不是只上传到了失败安装临时目录或被浏览器缓存读到旧页面。
 
 | 能力 | 作用 |
 | --- | --- |
@@ -73,7 +73,7 @@
 | 主题 | 内容 |
 | --- | --- |
 | [当前版本与兼容范围](#当前版本与兼容范围) | 插件版本、AstrBot 版本、Python 要求、许可证和发布状态。 |
-| [当前版本发布记录](#2313-当前版本发布记录) | 等待期追发合并、碎片完整性 4 秒上限、Agent-owned context、内部工具 schema 全模型隐藏、短答锚定、向量记忆 provider 选择、主动聊天反馈和包体发布说明。 |
+| [当前版本发布记录](#2314-当前版本发布记录) | 中文化插件页说明、作者显示修复、logo 排查提示、16MB 发布包预检，以及 2.3.13 的等待期追发合并和 Agent-owned context 基线。 |
 | [项目定位](#项目定位) | 为什么本插件不是普通的提示词人设增强。 |
 | [核心能力](#核心能力总览) | 7 维情绪、人格建模、真实时间记忆、关系修复、公共 API。 |
 | [快速开始](#快速开始) | 发布 zip 包、仓库安装、手动复制、最小配置和检查命令。 |
@@ -101,24 +101,27 @@
 | --- | --- |
 | 插件目录名 | `astrbot_plugin_sylanne` |
 | 显示名 | `Sylanne` |
-| 当前版本 | `2.3.13` |
+| 当前版本 | `2.3.14` |
 | AstrBot 版本 | `>=4.9.2,<5.0.0` |
 | Python | `3.10+` |
 | 许可证 | `GPL-3.0-or-later` |
 | 运行时第三方依赖 | 当前无额外依赖，见 `requirements.txt` |
 
-`2.3.13` 保留 Sylanne 自有记忆知识库、`2.1.0` 只读记忆查询入口、`2.1.3` Agent-owned context 即时聊天修复、`2.2.0` AstrBot Embedding 提供商驱动的向量召回、`2.3.0` 可视化记忆设置 Page、`2.3.8` 即时聊天短答锚定修复、`2.3.9` 模型空回复降级经验、`2.3.10` 完整上下文回填、`2.3.11` 内部工具统一隐藏和 `2.3.12` 主动聊天反馈修复，并进一步修复 LLM 等待期用户追发上下文丢失与碎片完整性等待过长问题。核心情绪、回复后后台评估（post）、`group_atmosphere_state`、`humanlike_state`、`lifelike_learning_state`、`personality_drift_state`、Sylanne 自有记忆、即时聊天节奏和欺骗/操控/逃责类动作阻断默认自动运行；道德修复、瑕疵模拟、心理筛查等实验/维护模块仍由配置者显式打开。
+`2.3.14` 保留 Sylanne 自有记忆知识库、`2.1.0` 只读记忆查询入口、`2.1.3` Agent-owned context 即时聊天修复、`2.2.0` AstrBot Embedding 提供商驱动的向量召回、`2.3.0` 可视化记忆设置 Page、`2.3.8` 即时聊天短答锚定修复、`2.3.9` 模型空回复降级经验、`2.3.10` 完整上下文回填、`2.3.11` 内部工具统一隐藏、`2.3.12` 主动聊天反馈修复和 `2.3.13` 等待期追发合并修复；本版进一步修复发布展示元数据、中文说明和包体预检边界。核心情绪、回复后后台评估（post）、`group_atmosphere_state`、`humanlike_state`、`lifelike_learning_state`、`personality_drift_state`、Sylanne 自有记忆、即时聊天节奏和欺骗/操控/逃责类动作阻断默认自动运行；道德修复、瑕疵模拟、心理筛查等实验/维护模块仍由配置者显式打开。
 
 发布包会包含根目录 `logo.png`、运行代码、README、CHANGELOG、LICENSE、配置结构（schema）、docs 和 `docs/assets/` 中的聚合图表与吉祥物素材，例如 `docs/assets/sylanne-mascot.gif`、`docs/assets/sylanne-mascot-card.svg` 和 `docs/assets/workflow_and_proactive.svg`；不会包含 `tests/`、`scripts/`、`literature_kb/`、`personality_literature_kb/`、`psychological_literature_kb/`、`humanlike_agent_literature_kb/`、`raw/`、`output/`、`dist/` 等开发、研究、原始样本或缓存目录。
 
-### 2.3.13 当前版本发布记录
+### 2.3.14 当前版本发布记录
 
-`v2.3.13` 合并在 `main` 上，对外安装版本由 `metadata.yaml` 和 `main.py @register(...)` 共同声明为 `2.3.13`。本版按版本规则提升第三位版本号：修复 LLM 等待期用户追发上下文丢失、碎片完整性等待上限过长和工作流图表达问题，不改变公共 API 版本；公共 API 版本仍保持 `1.0`，schema 仍保持向后兼容。
+`v2.3.14` 合并在 `main` 上，对外安装版本由 `metadata.yaml` 和 `main.py @register(...)` 共同声明为 `2.3.14`。本版按版本规则提升第三位版本号：修复插件管理页发布展示元数据、中文说明、作者显示和发布包预检边界，不改变公共 API 版本；公共 API 版本仍保持 `1.0`，schema 仍保持向后兼容。
 
 当前版本的主要变化：
 
 | 类别 | 结果 |
 | --- | --- |
+| 发布展示 | `metadata.yaml` 与 `@register(...)` 作者统一为 `Aylovelle.S.S`；插件页可见的 LLM 工具、指令和钩子说明改为中文。 |
+| 图标排查 | 发布包包含根目录 `logo.png`；远端仍显示默认图标时，优先检查正式插件目录是否被新 zip 覆盖以及浏览器缓存。 |
+| 包体预检 | zip 结构预检按 AstrBot 插件市场约束收紧到 `16MB`，并确认 `astrbot_plugin_sylanne/logo.png`、`metadata.yaml` 和运行文件都在插件根目录下。 |
 | Agent 上下文归属 | 主聊天上下文仍交给 AstrBot Agent/pipeline；Sylanne 不再重放大段历史，只补短状态摘要、短记忆召回和已发/未发投递事实。 |
 | 等待期追发合并 | 如果用户在上一轮 LLM 尚未产出可用回复前继续补充，Sylanne 会注入 `[sylanne_active_agent_followup_merge]`，把前一条 pending 用户消息和当前消息合并为同一连续意图，避免只回复最后一句。 |
 | 合并落点 | 追发合并发生在 `context_text = _request_to_text(request)` 之前，`_last_request_text`、主 LLM 临时上下文和预响应情绪评估都会看到同一份合并事实；这不是长期上下文重放，只保留同会话、同说话人、短时间内的 pending 用户 turn。 |
@@ -156,7 +159,7 @@
 | 上下文安全预算 | 召回结果只作为 `[sylanne_memory_recall]` 限长摘要注入，并继续受请求预算和官方上下文压缩清洗逻辑约束。 |
 | 模块互斥自检 | 发布前覆盖自有记忆、主动发言、官方上下文压缩、即时聊天、公共 API、配置契约和包体预检，验证模块之间不会互相回灌或重复调用外部 LivingMemory。 |
 | 工作流图 | `docs/assets/workflow_and_proactive.svg` 重绘为 2.3.13 版本，突出即时聊天、追发合并、Agent 工具循环、模型边界和主动聊天反馈；移除误导性的单点 Gemini 诊断节点，并修正中文字体和跨泳道箭头。 |
-| 公开契约 | 插件版本为 `2.3.13`；公共 API 版本仍为 `1.0`，schema 仍保持 `astrbot.emotion_state.v2` 等版本化契约。 |
+| 公开契约 | 插件版本为 `2.3.14`；公共 API 版本仍为 `1.0`，schema 仍保持 `astrbot.emotion_state.v2` 等版本化契约。 |
 
 旧版本发布记录统一放在 `CHANGELOG.md`。README 只展示当前版本，避免插件管理页从历史段落误抓旧版本号。
 
@@ -2947,7 +2950,7 @@ $env:ASTRBOT_EXPECT_PLUGIN = "astrbot_plugin_sylanne"
 脚本会在输出 JSON 里写出 `expectedPluginRuntime`，包含插件列表 API 中返回的 `version`、`displayName`、`activated`、`author`、`astrbotVersion` 等只读字段。若目标插件存在但 `activated=false`，脚本会失败退出。需要把版本和显示名也作为硬断言时，可以额外设置：
 
 ```powershell
-$env:ASTRBOT_EXPECT_PLUGIN_VERSION = "2.3.13"
+$env:ASTRBOT_EXPECT_PLUGIN_VERSION = "2.3.14"
 $env:ASTRBOT_EXPECT_PLUGIN_DISPLAY_NAME = "Sylanne"
 & $node scripts\remote_smoke_playwright.js
 ```

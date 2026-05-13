@@ -2,6 +2,25 @@
 
 本文件用于 AstrBot 插件市场/管理页展示更新内容。更完整的设计说明、公式推导、测试矩阵和维护手册见 `README.md`。
 
+## 2.3.14
+
+发布日期：2026-05-13
+
+### 修复
+
+- 将插件作者显示统一为 `Aylovelle.S.S`，并同步 `metadata.yaml` 与 `main.py @register(...)`。
+- 将插件管理页可见的 LLM 工具、指令和钩子说明改为中文，避免发布页继续显示英文描述或“无描述”。
+- 补充 README 中的 `logo.png` 排查说明：图标应位于插件根目录，远端仍显示默认图标时优先确认正式插件目录是否已被新包覆盖。
+- 将发布 zip 预检上限按 AstrBot 插件市场约束收紧到 `16MB`，并重新生成发布包。
+
+### 验证
+
+- `python -m pytest -q tests/test_package_plugin.py`
+- `python -m pytest -q tests/test_remote_smoke_contract.py`
+- `python -m pytest -q tests/test_command_tools.py -k "readme_documents_registered_commands or readme_documents_registered_llm_tools or query_agent_state_tool"`
+- `python -m pytest -q tests/test_public_api.py -k "main_register_decorator_uses_plugin_name_constant"`
+- `node scripts/plugin_zip_preflight.js dist/astrbot_plugin_sylanne.zip astrbot_plugin_sylanne`
+
 ## 2.3.13
 
 发布日期：2026-05-13
