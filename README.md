@@ -10,7 +10,7 @@
 
 ## 介绍
 
-<img align="right" src="logo.png" width="220" alt="Sylanne plugin logo">
+<img align="right" src="docs/assets/sylanne-mascot.gif" width="220" alt="Sylanne animated mascot">
 
 `astrbot_plugin_sylanne` 是一个面向 AstrBot 的“生命化状态引擎”和“插件公共状态服务”。她不是只在提示词里写几句“你要有喜怒哀乐”，而是把 bot 的情绪、关系后果、人格差异、长期记忆注解、拟人状态、道德修复状态、群聊氛围、后台评估队列和非诊断心理筛查拆成可测试、可持久化、可调用的工程模块。
 
