@@ -16,6 +16,31 @@
     "_special": "select_provider",
     "hint": "建议选择便宜、稳定、支持 JSON 指令的小模型。"
   },
+  "fast_assessor_provider_id": {
+    "description": "快速判断 LLM Provider",
+    "type": "string",
+    "default": "",
+    "_special": "select_provider",
+    "hint": "用于用户碎片完整性、轻量一致性等短 JSON 判断。建议选择低推理、低延迟、便宜稳定的小模型；留空时自动回退到情绪估计 Provider 或当前会话模型。"
+  },
+  "fast_assessor_max_context_chars": {
+    "description": "快速判断 LLM 最多读取的上下文字数",
+    "type": "int",
+    "default": 600,
+    "hint": "低推理快模型上下文通常较短，这里会把简单判断 prompt 裁到很短。建议 400-800；复杂长上下文裁决仍使用原判断 LLM。"
+  },
+  "fast_assessor_timeout_seconds": {
+    "description": "快速判断 LLM 超时秒数",
+    "type": "float",
+    "default": 2.0,
+    "hint": "用于碎片完整度等轻量判断。超时或失败会走本地回退，避免拖慢主回复。"
+  },
+  "fast_assessor_temperature": {
+    "description": "快速判断 LLM 温度",
+    "type": "float",
+    "default": 0.0,
+    "hint": "简单 JSON 判断建议保持 0。"
+  },
   "low_reasoning_friendly_mode": {
     "description": "低推理模型友好模式",
     "type": "bool",

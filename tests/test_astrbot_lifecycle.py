@@ -3799,6 +3799,151 @@ class AstrBotLifecycleTests(unittest.TestCase):
         self.assertIn("最近请求上下文", context)
         self.assertIn("插件的其他用户", context)
 
+    def test_proactive_scheduler_marks_unanswered_before_repeating_topic(self):
+        plugin = new_plugin(
+            {
+                "assessment_timing": "post",
+                "inject_state": False,
+                "enable_proactive_speech_dispatch": True,
+                "enable_proactive_speech_scheduler": True,
+            },
+        )
+        plugin._background_post_resource_pressure = lambda: {
+            "level": "normal",
+            "worker_cap": 6,
+            "reason": "unit_test_normal_pressure",
+        }
+        plugin._observed_now = lambda: 1_000_000.0
+        session_key = "s-proactive-unanswered"
+        plugin._proactive_candidate_sessions[session_key] = {
+            "schema_version": "astrbot.proactive_candidate_session.v1",
+            "session_key": session_key,
+            "unified_msg_origin": session_key,
+            "last_seen_at": 999_000.0,
+            "last_user_text_excerpt": "咖啡啊",
+            "candidate_context_excerpt": "用户刚才说喝了咖啡反而想睡，话题已经被主动发言追问过。",
+            "speaker_id": "u1",
+            "speaker_name": "哀洛芙",
+        }
+        plugin._proactive_dispatch_audit = {
+            session_key: collections.deque(
+                [
+                    {
+                        "sent": True,
+                        "sent_at": 999_100.0,
+                        "feedback_status": "pending",
+                        "feedback_window_seconds": 60.0,
+                        "need_mode": "progress_check",
+                        "topic_text": "咖啡反而变困",
+                        "topic_evidence": "上一次用户聊到咖啡",
+                    },
+                ],
+                maxlen=24,
+            ),
+        }
+        dispatched = []
+        lifelike_observations = []
+        emotion_observations = []
+
+        async def fake_dispatch(self, event_or_session, **kwargs):
+            dispatched.append(kwargs.get("candidate_context", ""))
+            return {
+                "schema_version": "astrbot.proactive_dispatch_result.v1",
+                "kind": "proactive_dispatch_result",
+                "session_key": session_key,
+                "sent": False,
+                "blocked_reason": "unit_test",
+            }
+
+        async def fake_observe_lifelike_text(self, event_or_session=None, text="", **kwargs):
+            lifelike_observations.append({"text": text, **kwargs})
+            return {"ok": True}
+
+        async def fake_observe_emotion_text(self, event_or_session=None, text="", **kwargs):
+            emotion_observations.append({"text": text, **kwargs})
+            return {"ok": True}
+
+        bind_async(plugin, "request_proactive_speech_dispatch", fake_dispatch)
+        bind_async(plugin, "observe_lifelike_text", fake_observe_lifelike_text)
+        bind_async(plugin, "observe_emotion_text", fake_observe_emotion_text)
+
+        result = asyncio.run(plugin._run_proactive_scheduler_once())
+
+        self.assertEqual(result["checked"], 1)
+        audit = plugin._proactive_dispatch_audit[session_key][-1]
+        self.assertEqual(audit["feedback_status"], "unanswered")
+        self.assertEqual(lifelike_observations[0]["source"], "proactive_feedback")
+        self.assertEqual(emotion_observations[0]["source"], "proactive_unanswered_feedback")
+        self.assertFalse(emotion_observations[0]["use_llm"])
+        context = dispatched[0]
+        self.assertIn("上一条主动发言没有得到回应", context)
+        self.assertIn("咖啡反而变困", context)
+        self.assertIn("不要重复同一个话题", context)
+        self.assertIn("可能是在忙、休息或暂时不方便聊天", context)
+        self.assertIn("如果只是想念用户", context)
+
+    def test_proactive_scheduler_settles_unanswered_even_when_recheck_skips_session(self):
+        plugin = new_plugin(
+            {
+                "assessment_timing": "post",
+                "inject_state": False,
+                "enable_proactive_speech_dispatch": True,
+                "enable_proactive_speech_scheduler": True,
+            },
+        )
+        plugin._background_post_resource_pressure = lambda: {
+            "level": "normal",
+            "worker_cap": 6,
+            "reason": "unit_test_normal_pressure",
+        }
+        plugin._observed_now = lambda: 1_000_000.0
+        session_key = "s-proactive-recheck-unanswered"
+        plugin._proactive_candidate_sessions[session_key] = {
+            "schema_version": "astrbot.proactive_candidate_session.v1",
+            "session_key": session_key,
+            "unified_msg_origin": session_key,
+            "last_seen_at": 999_000.0,
+            "last_user_text_excerpt": "coffee",
+            "speaker_id": "u1",
+        }
+        plugin._proactive_scheduler_last_checked[session_key] = 999_999.0
+        plugin._proactive_dispatch_audit = {
+            session_key: collections.deque(
+                [
+                    {
+                        "sent": True,
+                        "sent_at": 999_100.0,
+                        "feedback_status": "pending",
+                        "feedback_window_seconds": 60.0,
+                        "need_mode": "progress_check",
+                        "topic_text": "coffee sleepy",
+                    },
+                ],
+                maxlen=24,
+            ),
+        }
+        lifelike_observations = []
+        emotion_observations = []
+
+        async def fake_observe_lifelike_text(self, event_or_session=None, text="", **kwargs):
+            lifelike_observations.append({"text": text, **kwargs})
+            return {"ok": True}
+
+        async def fake_observe_emotion_text(self, event_or_session=None, text="", **kwargs):
+            emotion_observations.append({"text": text, **kwargs})
+            return {"ok": True}
+
+        bind_async(plugin, "observe_lifelike_text", fake_observe_lifelike_text)
+        bind_async(plugin, "observe_emotion_text", fake_observe_emotion_text)
+
+        result = asyncio.run(plugin._run_proactive_scheduler_once())
+
+        self.assertEqual(result["checked"], 0)
+        audit = plugin._proactive_dispatch_audit[session_key][-1]
+        self.assertEqual(audit["feedback_status"], "unanswered")
+        self.assertEqual(lifelike_observations[0]["source"], "proactive_feedback")
+        self.assertEqual(emotion_observations[0]["source"], "proactive_unanswered_feedback")
+
     def test_on_llm_request_can_include_sylanne_memory_summary(self):
         plugin = new_plugin(
             {
@@ -4700,6 +4845,59 @@ class AstrBotLifecycleTests(unittest.TestCase):
         self.assertEqual(calls, [])
         self.assertTrue(judgement["approved"])
         self.assertEqual(judgement["source"], "local_consistency_gate")
+
+    def test_sticker_consistency_uses_fast_assessor_for_llm_gate(self):
+        plugin = new_plugin(
+            {
+                "use_llm_assessor": True,
+                "sticker_llm_consistency_check_enabled": True,
+                "fast_assessor_provider_id": "fast-json-provider",
+                "fast_assessor_timeout_seconds": 1.25,
+                "fast_assessor_temperature": 0.0,
+            },
+        )
+        calls = []
+
+        async def fake_provider_id(self, event):
+            return "regular-provider"
+
+        async def fake_call_llm(
+            self,
+            *,
+            provider_id,
+            prompt,
+            system_prompt,
+            temperature=None,
+            timeout_seconds=None,
+        ):
+            calls.append((provider_id, prompt, system_prompt, temperature, timeout_seconds))
+            return SimpleNamespace(
+                completion_text='{"approved": true, "reason": "语气一致"}',
+            )
+
+        bind_async(plugin, "_provider_id", fake_provider_id)
+        bind_async(plugin, "_call_internal_assessor_llm", fake_call_llm)
+
+        judgement = asyncio.run(
+            plugin._judge_sticker_consistency(
+                FakeEvent("s-sticker-fast-assessor"),
+                plan={
+                    "message_parts": [
+                        {"text": "我有点生气，不想笑。"},
+                    ],
+                },
+                sticker={"intent": "celebrate"},
+                candidate={
+                    "name": "angry.png",
+                    "tags": ["angry"],
+                },
+            ),
+        )
+
+        self.assertEqual(calls[0][0], "fast-json-provider")
+        self.assertEqual(calls[0][3], 0.0)
+        self.assertEqual(calls[0][4], 1.25)
+        self.assertTrue(judgement["approved"])
 
     def test_proactive_cold_reply_is_recorded_as_lifelike_feedback(self):
         plugin = new_plugin()
@@ -6041,6 +6239,7 @@ class AstrBotLifecycleTests(unittest.TestCase):
                 "enable_realtime_chat": True,
                 "enable_sticker_reaction": False,
                 "use_llm_assessor": True,
+                "fast_assessor_provider_id": "fast-json-provider",
                 "realtime_input_completion_probe_delay_seconds": 0.0,
                 "realtime_input_completion_max_wait_seconds": 0.01,
             },
@@ -6069,8 +6268,64 @@ class AstrBotLifecycleTests(unittest.TestCase):
         self.assertFalse(getattr(request, "_sylanne_realtime_input_hold", False))
         self.assertEqual(plugin._realtime_input_fragment_windows, {})
         self.assertEqual(len(calls), 1)
+        self.assertEqual(calls[0][0], "fast-json-provider")
         self.assertEqual(len(assessment_calls), 1)
         self.assertGreaterEqual(len(saves), 1)
+
+    def test_realtime_input_llm_gate_falls_back_to_assessor_provider_when_fast_unset(self):
+        plugin = new_plugin(
+            {
+                "assessment_timing": "pre",
+                "inject_state": False,
+                "enable_realtime_chat": True,
+                "enable_sticker_reaction": False,
+                "use_llm_assessor": True,
+                "emotion_provider_id": "judge-provider",
+                "realtime_input_completion_probe_delay_seconds": 0.0,
+                "realtime_input_completion_max_wait_seconds": 0.01,
+            },
+        )
+        plugin._observed_now = lambda: 4010.0
+        self._bind_common_state_hooks(plugin)
+        calls = []
+
+        async def fake_call_llm(self, *, provider_id, prompt, system_prompt):
+            calls.append((provider_id, prompt, system_prompt))
+            return SimpleNamespace(
+                completion_text='{"is_complete": true, "confidence": 0.91, "reason": "完整短句"}',
+            )
+
+        bind_async(plugin, "_call_internal_assessor_llm", fake_call_llm)
+        event = FakeEvent("s-llm-release-fallback", message="我！", sender_id="u1")
+        request = fake_request(session_id="s-llm-release-fallback", prompt="我！")
+
+        asyncio.run(plugin.on_llm_request(event, request))
+
+        self.assertFalse(event.stopped)
+        self.assertEqual(len(calls), 1)
+        self.assertEqual(calls[0][0], "judge-provider")
+
+    def test_realtime_input_fast_assessor_prompt_uses_short_context_budget(self):
+        plugin = new_plugin(
+            {
+                "enable_realtime_chat": True,
+                "use_llm_assessor": True,
+                "fast_assessor_provider_id": "fast-json-provider",
+                "fast_assessor_max_context_chars": 260,
+            },
+        )
+        payload = {
+            "fragments": ["我只是想补充一下", "这段特别长" + "x" * 1200],
+            "merged_intent": "我只是想补充一下 " + "y" * 1200,
+        }
+
+        prompt = plugin._build_realtime_input_completion_prompt(
+            payload,
+            max_chars=plugin._fast_assessor_max_context_chars(),
+        )
+
+        self.assertLessEqual(len(prompt), 260)
+        self.assertIn("只输出 JSON", prompt)
 
     def test_realtime_input_complete_llm_gate_skips_remaining_max_wait(self):
         plugin = new_plugin(

@@ -2,6 +2,23 @@
 
 本文件用于 AstrBot 插件市场/管理页展示更新内容。更完整的设计说明、公式推导、测试矩阵和维护手册见 `README.md`。
 
+## 2.3.12
+
+发布日期：2026-05-13
+
+### 修复
+
+- 修复主动聊天后台调度不会自行结算 `pending` 主动发言反馈的问题。调度器每轮醒来会先把过期未回应记录标为 `unanswered`，并写入生命化学习与轻量情绪反馈。
+- 主动聊天候选上下文新增“长时间未聊天”的时间段推测：只能保守猜测用户可能在忙、休息、睡觉或暂时不方便，不能默认被无视，也不能继续施压追问。
+- 主动发言 LLM 裁决增加旧话题去重约束：上一条主动发言无人回应、低信号回应或仍在等待时，不要隔几个小时继续抓同一个话题追问；没有新证据时优先沉默，单纯想念只能用低压力短句。
+- 新增快速判断 LLM Provider 配置：用户碎片完整性和表情包一致性等短 JSON 判断可走低推理快模型，并使用独立短上下文预算、短超时和低温度；复杂情绪观测与主动话题裁决仍走原判断 LLM。
+
+### 验证
+
+- `python -m pytest -q tests/test_astrbot_lifecycle.py -k "marks_unanswered_before_repeating_topic"`
+- `python -m pytest -q tests/test_astrbot_lifecycle.py -k "proactive_scheduler or proactive_cold_reply"`
+- `python -m pytest -q tests/test_astrbot_lifecycle.py -k "fast_assessor or sticker_consistency_uses_fast_assessor"`
+
 ## 2.3.11
 
 发布日期：2026-05-13

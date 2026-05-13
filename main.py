@@ -597,7 +597,7 @@ def get_emotional_state_plugin(context: Context) -> Any | None:
     PLUGIN_NAME,
     "pidan",
     "Soulful Yearning Lifelike AstrBot Neural Narrative Engine：维护情绪、人格、记忆、氛围和表达节奏的 Sylanne",
-    "2.3.11",
+    "2.3.12",
     "",
 )
 class EmotionalStatePlugin(Star):
@@ -2882,6 +2882,8 @@ class EmotionalStatePlugin(Star):
         provider_id: str,
         prompt: str,
         system_prompt: str,
+        temperature: float | None = None,
+        timeout_seconds: float | None = None,
     ) -> Any:
         await self._acquire_internal_assessor_llm_slot()
         try:
@@ -2889,15 +2891,21 @@ class EmotionalStatePlugin(Star):
                 chat_provider_id=provider_id,
                 prompt=prompt,
                 system_prompt=system_prompt,
-                temperature=self._cfg_float("assessor_temperature", 0.1),
+                temperature=(
+                    self._cfg_float("assessor_temperature", 0.1)
+                    if temperature is None
+                    else float(temperature)
+                ),
             )
-            timeout_seconds = max(
+            resolved_timeout = max(
                 0.0,
-                self._cfg_float("assessor_timeout_seconds", 0.0),
+                self._cfg_float("assessor_timeout_seconds", 0.0)
+                if timeout_seconds is None
+                else float(timeout_seconds),
             )
-            if timeout_seconds <= 0:
+            if resolved_timeout <= 0:
                 return await call
-            return await asyncio.wait_for(call, timeout=timeout_seconds)
+            return await asyncio.wait_for(call, timeout=resolved_timeout)
         finally:
             await self._release_internal_assessor_llm_slot()
 
@@ -5478,18 +5486,22 @@ class EmotionalStatePlugin(Star):
             if not session_key or not origin:
                 skipped += 1
                 continue
-            last_checked = self._proactive_scheduler_last_checked.get(session_key)
-            if (
-                last_checked is not None
-                and now - float(last_checked) < PROACTIVE_SCHEDULER_SESSION_RECHECK_SECONDS
-            ):
-                skipped += 1
-                continue
             lock = self._proactive_scheduler_locks.setdefault(session_key, asyncio.Lock())
             if lock.locked():
                 skipped += 1
                 continue
             async with lock:
+                await self._settle_overdue_proactive_feedback(
+                    session_key,
+                    observed_at=now,
+                )
+                last_checked = self._proactive_scheduler_last_checked.get(session_key)
+                if (
+                    last_checked is not None
+                    and now - float(last_checked) < PROACTIVE_SCHEDULER_SESSION_RECHECK_SECONDS
+                ):
+                    skipped += 1
+                    continue
                 self._proactive_scheduler_last_checked[session_key] = now
                 event = self._event_from_proactive_candidate(candidate)
                 candidate_context = await self._build_proactive_scheduler_candidate_context(
@@ -5562,6 +5574,14 @@ class EmotionalStatePlugin(Star):
         )
         if window_summary:
             parts.append(window_summary)
+        absence_summary = self._proactive_user_absence_context_summary(candidate)
+        if absence_summary:
+            parts.append(absence_summary)
+        feedback_summary = self._proactive_feedback_context_summary(
+            str(candidate.get("session_key") or ""),
+        )
+        if feedback_summary:
+            parts.append(feedback_summary)
         if context_excerpt:
             parts.append(f"最近请求上下文：{self._clip(context_excerpt, 1100)}")
         speaker_name = str(candidate.get("speaker_name") or "").strip()
@@ -5617,6 +5637,74 @@ class EmotionalStatePlugin(Star):
             if user_text:
                 lines.append(prefix + user_text)
         return self._clip("\n".join(lines), 1200)
+
+    def _proactive_user_absence_context_summary(self, candidate: dict[str, Any]) -> str:
+        now = self._observed_now()
+        last_seen = self._as_float_value(candidate.get("last_seen_at"), 0.0)
+        if last_seen <= 0:
+            return ""
+        elapsed = max(0.0, now - last_seen)
+        if elapsed < 600.0:
+            return ""
+        minutes = int(round(elapsed / 60.0))
+        duration = f"{minutes} 分钟" if minutes < 120 else f"{round(minutes / 60.0, 1)} 小时"
+        try:
+            hour = time.localtime(now).tm_hour
+        except Exception:
+            hour = -1
+        if 0 <= hour < 6:
+            likely_state = "当前接近深夜/清晨，用户长时间没聊天更可能是在休息或已经睡了。"
+        elif 6 <= hour < 9:
+            likely_state = "当前像清晨时段，用户长时间没聊天可能是在睡觉、洗漱、通勤或准备开始忙。"
+        elif 9 <= hour < 18:
+            likely_state = "当前像白天时段，用户长时间没聊天可能是在学习、工作、改论文或处理现实事务。"
+        elif 18 <= hour < 24:
+            likely_state = "当前像晚上时段，用户长时间没聊天可能是在吃饭、休息、赶任务或暂时离开手机。"
+        else:
+            likely_state = "用户长时间没聊天时，只能保守猜测对方可能正在忙、休息或离开手机。"
+        return self._clip(
+            "\n".join(
+                [
+                    f"距离最近用户消息约 {duration}。",
+                    likely_state,
+                    "可能是在忙、休息或暂时不方便聊天；不要把沉默直接解读成冷淡、无视或需要继续追问。",
+                    "如果没有新的明确证据，优先沉默；如果只是想念用户，只能用轻轻敲门式短句，不要继续抓住旧话题盘问。",
+                ],
+            ),
+            700,
+        )
+
+    def _proactive_feedback_context_summary(self, session_key: str) -> str:
+        audit = getattr(self, "_proactive_dispatch_audit", None)
+        if not isinstance(audit, dict):
+            return ""
+        entries = list(audit.get(str(session_key or "global")) or [])
+        if not entries:
+            return ""
+        for entry in reversed(entries[-6:]):
+            status = str(entry.get("feedback_status") or "")
+            if status not in {"unanswered", "cold_reply", "pending"}:
+                continue
+            topic = str(entry.get("topic_text") or "").strip()
+            evidence = str(entry.get("topic_evidence") or "").strip()
+            need_mode = str(entry.get("need_mode") or "").strip()
+            if status == "unanswered":
+                headline = "上一条主动发言没有得到回应。"
+            elif status == "cold_reply":
+                headline = "上一条主动发言只收到低信号回应。"
+            else:
+                headline = "上一条主动发言仍在等待用户自然回应。"
+            details = []
+            if need_mode:
+                details.append(f"上次主动需求：{need_mode}")
+            if topic:
+                details.append(f"上次主动话题：{topic}")
+            if evidence:
+                details.append(f"上次话题证据：{evidence}")
+            details.append("不要重复同一个话题，也不要把同一个进度/身体状态问题隔几个小时继续追问。")
+            details.append("没有新证据时沉默更自然；如果只是想念用户，使用低压力、短、可不回复的轻触达。")
+            return self._clip("\n".join([headline, *details]), 700)
+        return ""
 
     def _sylanne_memory_vector_retrieval_enabled(self) -> bool:
         return self._cfg_bool("sylanne_memory_vector_retrieval_enabled", True)
@@ -7067,6 +7155,66 @@ class EmotionalStatePlugin(Star):
             },
         )
 
+    async def _settle_overdue_proactive_feedback(
+        self,
+        session_key: str,
+        *,
+        observed_at: float | None = None,
+    ) -> bool:
+        audit = getattr(self, "_proactive_dispatch_audit", None)
+        if not isinstance(audit, dict):
+            return False
+        entries = audit.get(str(session_key or "global"))
+        if not entries:
+            return False
+        now = self._observed_now() if observed_at is None else float(observed_at)
+        for entry in reversed(entries):
+            if entry.get("feedback_status") not in {"pending", "", None}:
+                continue
+            if not entry.get("sent"):
+                continue
+            sent_at = self._as_float_value(entry.get("sent_at"), 0.0)
+            if sent_at <= 0:
+                continue
+            window = max(
+                60.0,
+                self._as_float_value(entry.get("feedback_window_seconds"), 1800.0),
+            )
+            elapsed = max(0.0, now - sent_at)
+            if elapsed <= window:
+                continue
+            entry["feedback_status"] = "unanswered"
+            entry["feedback_observed_at"] = now
+            entry["feedback_elapsed_seconds"] = round(elapsed, 6)
+            topic = str(entry.get("topic_text") or "").strip()
+            topic_part = f" 上一次主动话题是：{topic}。" if topic else ""
+            await self.observe_lifelike_text(
+                session_key=session_key,
+                text=(
+                    "主动发言没有得到回应；以后要先把用户可能在忙、休息或不方便聊天作为默认解释，"
+                    "更谨慎地判断开口时机，降低打扰感，优先等待用户自然接话。"
+                    f"{topic_part}"
+                ),
+                source="proactive_feedback",
+                commit=True,
+                observed_at=now,
+            )
+            await self.observe_emotion_text(
+                session_key=session_key,
+                text=(
+                    "主动开口后没有得到回应，应该轻微失落但不责怪用户；"
+                    "把沉默理解为对方可能在忙或休息，主动退一步，不重复追问同一个话题。"
+                ),
+                source="proactive_unanswered_feedback",
+                phase="proactive_feedback",
+                role="plugin",
+                use_llm=False,
+                commit=True,
+                observed_at=now,
+            )
+            return True
+        return False
+
     async def _observe_proactive_dispatch_feedback(
         self,
         session_key: str,
@@ -7387,7 +7535,7 @@ class EmotionalStatePlugin(Star):
         event = event_or_session if self._looks_like_event(event_or_session) else None
         if event is None or not self._cfg_bool("use_llm_assessor", True):
             return local
-        provider_id = await self._provider_id(event)
+        provider_id = await self._fast_assessor_provider_id(event)
         if not provider_id:
             return local
         prompt = self._build_sticker_consistency_prompt(
@@ -7395,12 +7543,15 @@ class EmotionalStatePlugin(Star):
             sticker=sticker,
             candidate=candidate,
         )
+        prompt = prompt[: self._fast_assessor_max_context_chars()]
         token = _INTERNAL_LLM_CALL.set(True)
         try:
             llm_resp = await self._call_internal_assessor_llm(
                 provider_id=provider_id,
                 prompt=prompt,
                 system_prompt="你是插件内部表情包一致性检查器，只输出 JSON。",
+                temperature=self._cfg_float("fast_assessor_temperature", 0.0),
+                timeout_seconds=self._cfg_float("fast_assessor_timeout_seconds", 2.0),
             )
         except Exception as exc:
             local["reason"] += f"; llm_check_failed={str(exc)[:80]}"
@@ -9305,18 +9456,43 @@ class EmotionalStatePlugin(Star):
         payload: dict[str, Any],
     ) -> dict[str, Any]:
         fallback = self._local_realtime_input_completion_judgement(payload)
-        provider_id = await self._provider_id(event)
+        provider_id = await self._fast_assessor_provider_id(event)
         if not provider_id:
             return fallback
         token = _INTERNAL_LLM_CALL.set(True)
         try:
-            llm_resp = await self._call_internal_assessor_llm(
-                provider_id=provider_id,
-                prompt=self._build_realtime_input_completion_prompt(payload),
-                system_prompt=(
+            assessor_kwargs = {
+                "provider_id": provider_id,
+                "prompt": self._build_realtime_input_completion_prompt(
+                    payload,
+                    max_chars=self._fast_assessor_max_context_chars(),
+                ),
+                "system_prompt": (
                     "你是聊天输入完整度判断器。只输出 JSON，不要解释。"
                     "判断用户是否已经把当前这句话说完，宁可保守等待，也不要让 bot 抢答半句话。"
                 ),
+            }
+            try:
+                signature = inspect.signature(self._call_internal_assessor_llm)
+                parameters = signature.parameters
+                supports_extra = any(
+                    item.kind == inspect.Parameter.VAR_KEYWORD
+                    for item in parameters.values()
+                )
+                if supports_extra or "temperature" in parameters:
+                    assessor_kwargs["temperature"] = self._cfg_float(
+                        "fast_assessor_temperature",
+                        0.0,
+                    )
+                if supports_extra or "timeout_seconds" in parameters:
+                    assessor_kwargs["timeout_seconds"] = self._cfg_float(
+                        "fast_assessor_timeout_seconds",
+                        2.0,
+                    )
+            except (TypeError, ValueError):
+                pass
+            llm_resp = await self._call_internal_assessor_llm(
+                **assessor_kwargs,
             )
         except Exception as exc:
             self._log_warning(f"{PLUGIN_NAME}: 输入分块完整度判断失败，使用本地回退: {exc}")
@@ -9328,9 +9504,14 @@ class EmotionalStatePlugin(Star):
         )
         return parsed or fallback
 
-    def _build_realtime_input_completion_prompt(self, payload: dict[str, Any]) -> str:
+    def _build_realtime_input_completion_prompt(
+        self,
+        payload: dict[str, Any],
+        *,
+        max_chars: int | None = None,
+    ) -> str:
         fragments = [str(item or "") for item in (payload.get("fragments") or [])]
-        return (
+        prompt = (
             "请判断下面同一用户短时间内发出的聊天碎片是否已经表达完整。\n"
             "只输出 JSON：{\"is_complete\": true/false, \"confidence\": 0-1, \"reason\": \"...\"}。\n"
             "规则：如果像半句话、强调铺垫、还在补充主语/谓语/宾语，就 is_complete=false；"
@@ -9338,6 +9519,10 @@ class EmotionalStatePlugin(Star):
             f"碎片序列：{json.dumps(fragments, ensure_ascii=False)}\n"
             f"合并预览：{payload.get('merged_intent') or ''}"
         )
+        if max_chars is None:
+            return prompt
+        limit = max(240, int(max_chars or 0))
+        return prompt[:limit]
 
     def _parse_realtime_input_completion_judgement(
         self,
@@ -11590,6 +11775,15 @@ class EmotionalStatePlugin(Star):
         if configured:
             return configured
         return await self._chat_provider_id(event, use_cache=True)
+
+    async def _fast_assessor_provider_id(self, event: AstrMessageEvent) -> str | None:
+        configured = str(self._cfg("fast_assessor_provider_id", "") or "").strip()
+        if configured:
+            return configured
+        return await self._provider_id(event)
+
+    def _fast_assessor_max_context_chars(self) -> int:
+        return max(240, min(1200, self._cfg_int("fast_assessor_max_context_chars", 600)))
 
     async def _chat_provider_id(
         self,

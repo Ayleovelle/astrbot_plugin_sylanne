@@ -200,6 +200,10 @@ class ConfigSchemaContractTests(unittest.TestCase):
         expected = {
             "enabled": ("bool", True),
             "use_llm_assessor": ("bool", True),
+            "fast_assessor_provider_id": ("string", ""),
+            "fast_assessor_max_context_chars": ("int", 600),
+            "fast_assessor_timeout_seconds": ("float", 2.0),
+            "fast_assessor_temperature": ("float", 0.0),
             "assessment_timing": ("string", "post"),
             "enable_proactive_speech_dispatch": ("bool", False),
             "enable_proactive_speech_scheduler": ("bool", False),
@@ -384,6 +388,9 @@ class ConfigSchemaContractTests(unittest.TestCase):
         self.assertEqual(cfg["emotion_provider_id"]["type"], "string")
         self.assertEqual(cfg["emotion_provider_id"]["default"], "")
         self.assertEqual(cfg["emotion_provider_id"].get("_special"), "select_provider")
+        self.assertEqual(cfg["fast_assessor_provider_id"]["type"], "string")
+        self.assertEqual(cfg["fast_assessor_provider_id"]["default"], "")
+        self.assertEqual(cfg["fast_assessor_provider_id"].get("_special"), "select_provider")
         self.assertEqual(
             cfg["sylanne_memory_embedding_provider_id"].get("_special"),
             "select_provider",

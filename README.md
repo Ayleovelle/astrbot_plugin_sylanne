@@ -2,7 +2,7 @@
 
 > <span style="font-size: 1.08em;"><strong>Soulful Yearning Lifelike AstrBot Neural Narrative Engine</strong>。她维护的不只是“情绪标签”，而是情绪、人格、记忆、氛围、主动性和表达节奏交织成的长期状态。</span>
 
-![版本 2.3.11](https://img.shields.io/badge/version-2.3.11-blue)
+![版本 2.3.12](https://img.shields.io/badge/version-2.3.12-blue)
 ![AstrBot >=4.9.2,<5.0.0](https://img.shields.io/badge/AstrBot-%3E%3D4.9.2%2C%3C5.0.0-green)
 ![Python 3.10+](https://img.shields.io/badge/Python-3.10%2B-yellow)
 ![协议 astrbot.emotion_state.v2](https://img.shields.io/badge/schema-astrbot.emotion__state.v2-purple)
@@ -37,7 +37,7 @@
 
 <br clear="right">
 
-`2.3.11` 是即时聊天上下文、工具归属和记忆设置入口的收口版：主聊天上下文继续交给 AstrBot Agent，Sylanne 只补充短状态、记忆召回和“已发/未发”的投递事实；Sylanne 内部 LLM Tool schema 默认对所有主聊天模型隐藏，避免 Gemini/哈基米在工具轮次空回或把内部 JSON 发给用户；用户短答、二次澄清和碎片输入会被更稳地锚定到上一轮 bot 问题与 Agent 上下文。记忆模块继续使用 AstrBot Embedding provider 做向量召回，并支持原生 provider 选择器和记忆设置 Page 卡片点选。
+`2.3.12` 是主动聊天反馈、时间感和快速判断接口修复版：主聊天上下文继续交给 AstrBot Agent，Sylanne 只补充短状态、记忆召回和“已发/未发”的投递事实；Sylanne 内部 LLM Tool schema 默认对所有主聊天模型隐藏；主动聊天调度器会先结算上一条主动发言是否无人回应，再根据真实时间保守猜测用户可能在忙、休息或暂时不方便，不再隔几个小时反复追问同一个咖啡/困不困/进度话题。简单短 JSON 判断可改用低推理快模型，记忆模块继续使用 AstrBot Embedding provider 做向量召回，并支持原生 provider 选择器和记忆设置 Page 卡片点选。
 
 | 能力 | 作用 |
 | --- | --- |
@@ -73,7 +73,7 @@
 | 主题 | 内容 |
 | --- | --- |
 | [当前版本与兼容范围](#当前版本与兼容范围) | 插件版本、AstrBot 版本、Python 要求、许可证和发布状态。 |
-| [当前版本发布记录](#2311-当前版本发布记录) | Agent-owned context、内部工具 schema 全模型隐藏、哈基米/Gemini 空回复规避、短答锚定、二次澄清复读 guard、碎片等待降延迟、向量记忆 provider 选择、主动聊天低频门控和包体发布说明。 |
+| [当前版本发布记录](#2312-当前版本发布记录) | Agent-owned context、内部工具 schema 全模型隐藏、哈基米/Gemini 空回复规避、短答锚定、向量记忆 provider 选择、主动聊天无人回应反馈、长时间沉默时间推测、快速判断 LLM 接口和包体发布说明。 |
 | [项目定位](#项目定位) | 为什么本插件不是普通的提示词人设增强。 |
 | [核心能力](#核心能力总览) | 7 维情绪、人格建模、真实时间记忆、关系修复、公共 API。 |
 | [快速开始](#快速开始) | 发布 zip 包、仓库安装、手动复制、最小配置和检查命令。 |
@@ -101,19 +101,19 @@
 | --- | --- |
 | 插件目录名 | `astrbot_plugin_sylanne` |
 | 显示名 | `Sylanne` |
-| 当前版本 | `2.3.11` |
+| 当前版本 | `2.3.12` |
 | AstrBot 版本 | `>=4.9.2,<5.0.0` |
 | Python | `3.10+` |
 | 许可证 | `GPL-3.0-or-later` |
 | 运行时第三方依赖 | 当前无额外依赖，见 `requirements.txt` |
 
-`2.3.11` 保留 Sylanne 自有记忆知识库、`2.1.0` 只读记忆查询入口、`2.1.3` Agent-owned context 即时聊天修复、`2.2.0` AstrBot Embedding 提供商驱动的向量召回、`2.3.0` 可视化记忆设置 Page、`2.3.8` 即时聊天短答锚定修复、`2.3.9` 哈基米/Gemini 空回复规避和 `2.3.10` 完整上下文回填，并把 Sylanne 内部 LLM 工具 schema 统一改为主请求前隐藏。核心情绪、回复后后台评估（post）、`group_atmosphere_state`、`humanlike_state`、`lifelike_learning_state`、`personality_drift_state`、Sylanne 自有记忆、即时聊天节奏和欺骗/操控/逃责类动作阻断默认自动运行；道德修复、瑕疵模拟、心理筛查等实验/维护模块仍由配置者显式打开。
+`2.3.12` 保留 Sylanne 自有记忆知识库、`2.1.0` 只读记忆查询入口、`2.1.3` Agent-owned context 即时聊天修复、`2.2.0` AstrBot Embedding 提供商驱动的向量召回、`2.3.0` 可视化记忆设置 Page、`2.3.8` 即时聊天短答锚定修复、`2.3.9` 哈基米/Gemini 空回复规避、`2.3.10` 完整上下文回填和 `2.3.11` 内部工具统一隐藏，并进一步修复主动聊天无人回应反馈、旧话题复读和简单判断 LLM 延迟。核心情绪、回复后后台评估（post）、`group_atmosphere_state`、`humanlike_state`、`lifelike_learning_state`、`personality_drift_state`、Sylanne 自有记忆、即时聊天节奏和欺骗/操控/逃责类动作阻断默认自动运行；道德修复、瑕疵模拟、心理筛查等实验/维护模块仍由配置者显式打开。
 
 发布包会包含运行代码、README、CHANGELOG、LICENSE、配置结构（schema）、docs 和 `docs/assets/` 中的聚合图表与吉祥物素材，例如 `docs/assets/sylanne-mascot.gif`、`docs/assets/sylanne-mascot-card.svg` 和 `docs/assets/workflow_and_proactive.svg`；不会包含 `tests/`、`scripts/`、`literature_kb/`、`personality_literature_kb/`、`psychological_literature_kb/`、`humanlike_agent_literature_kb/`、`raw/`、`output/`、`dist/` 等开发、研究、原始样本或缓存目录。
 
-### 2.3.11 当前版本发布记录
+### 2.3.12 当前版本发布记录
 
-`v2.3.11` 合并在 `main` 上，对外安装版本由 `metadata.yaml` 和 `main.py @register(...)` 共同声明为 `2.3.11`。本版按版本规则提升第三位版本号：修复即时聊天接管后的上下文复读、短答误解、主 LLM 工具 schema 空回风险和记忆 provider 选择入口问题，不改变公共 API 版本；公共 API 版本仍保持 `1.0`，schema 仍保持向后兼容。
+`v2.3.12` 合并在 `main` 上，对外安装版本由 `metadata.yaml` 和 `main.py @register(...)` 共同声明为 `2.3.12`。本版按版本规则提升第三位版本号：修复主动聊天无人回应反馈、长时间沉默时间推测、旧话题复读和简单判断 LLM 延迟问题，不改变公共 API 版本；公共 API 版本仍保持 `1.0`，schema 仍保持向后兼容。
 
 当前版本的主要变化：
 
@@ -148,10 +148,11 @@
 | 强化与遗忘 | 只有真正注入 prompt 的记忆才会触发召回强化；长期无证据、无召回且深度/置信度很低的弱记忆会按真实时间剪枝，并清理悬空关联边。 |
 | Agent 上下文归属 | 对话上下文交给 AstrBot Agent；Sylanne 只补短状态摘要、短记忆召回和投递事实，Gemini 高风险模型会进入 `gemini_agent_owned_context` 模式并跳过额外 prompt 注入。 |
 | 即时聊天投递信封 | 主回复被接管时，Agent 历史会看到“已生成但未必已发送”的投递状态；用户插话后会记录已发/未发摘要，避免下一轮误以为旧回复已经完整送达。 |
-| 主动聊天低频门控 | 后台调度默认更低频：正常约 15 分钟醒来一次，空闲约 30 分钟，同一会话约 1 小时内不重复复查；`progress_check` 仍必须有明确进度证据，证据不足时沉默或低压力调皮打扰。 |
+| 主动聊天反馈闭环 | 后台调度默认更低频：正常约 15 分钟醒来一次，空闲约 30 分钟，同一会话约 1 小时内不重复复查；每次醒来会先结算上一条主动发言是否无人回应，并把用户可能在忙、休息或不方便聊天作为默认解释。`progress_check` 必须有明确进度证据，证据不足时沉默；如果只是想念用户，只允许低压力短句轻触达。 |
+| 快速判断 LLM | 新增 `fast_assessor_provider_id` 和短上下文预算，用户碎片完整性、表情包一致性等简单 JSON 判断可走低推理快模型；复杂情绪观测和主动话题裁决仍走原判断 LLM。 |
 | 上下文安全预算 | 召回结果只作为 `[sylanne_memory_recall]` 限长摘要注入，并继续受请求预算和官方上下文压缩清洗逻辑约束。 |
 | 模块互斥自检 | 发布前覆盖自有记忆、主动发言、官方上下文压缩、即时聊天、公共 API、配置契约和包体预检，验证模块之间不会互相回灌或重复调用外部 LivingMemory。 |
-| 公开契约 | 插件版本为 `2.3.11`；公共 API 版本仍为 `1.0`，schema 仍保持 `astrbot.emotion_state.v2` 等版本化契约。 |
+| 公开契约 | 插件版本为 `2.3.12`；公共 API 版本仍为 `1.0`，schema 仍保持 `astrbot.emotion_state.v2` 等版本化契约。 |
 
 旧版本发布记录统一放在 `CHANGELOG.md`。README 只展示当前版本，避免插件管理页从历史段落误抓旧版本号。
 
@@ -1533,6 +1534,10 @@ enable_safety_boundary = false
 | `enabled` | bool | `true` | 启用插件。 |
 | `use_llm_assessor` | bool | `true` | 使用 LLM 判断情绪观测值；关闭后只使用启发式回退。 |
 | `emotion_provider_id` | string | `""` | 情绪估计使用的 LLM Provider；留空使用当前会话模型。 |
+| `fast_assessor_provider_id` | string | `""` | 快速判断 LLM Provider；用于用户碎片完整性、轻量一致性等短 JSON 判断。留空时回退到 `emotion_provider_id` 或当前会话模型。 |
+| `fast_assessor_max_context_chars` | int | `600` | 快速判断 LLM 最多读取的上下文字数；低推理快模型上下文短，建议保持 400-800，复杂长上下文仍交给原判断 LLM。 |
+| `fast_assessor_timeout_seconds` | float | `2.0` | 快速判断 LLM 超时秒数；超时或失败会走本地回退，避免拖慢主回复。 |
+| `fast_assessor_temperature` | float | `0.0` | 快速判断 LLM temperature；简单 JSON 判断建议保持 0。 |
 | `assessment_timing` | string | `post` | `pre`、`post` 或 `both`。默认 `post` 用一次内部评估降低延迟；`both` 质量更强但更慢。 |
 | `inject_state` | bool | `true` | 是否把当前状态临时注入主 LLM。 |
 | `max_context_chars` | int | `1600` | 情绪估计读取的最大上下文字数。 |
@@ -1543,6 +1548,8 @@ enable_safety_boundary = false
 | `benchmark_enable_simulated_time` | bool | `false` | 远程性能/生命周期基准测试专用；开启后允许测试脚本注入模拟时间偏移。 |
 | `benchmark_time_offset_seconds` | float | `0.0` | 远程性能/生命周期基准测试专用；仅在 `benchmark_enable_simulated_time=true` 时把观测时间视为 `time.time()+offset`。 |
 | `assessor_temperature` | float | `0.1` | 情绪估计模型 temperature。 |
+
+内部判断 LLM 分成两档：`emotion_provider_id` 仍负责情绪观测、主动话题裁决等需要更完整上下文的判断；`fast_assessor_provider_id` 只负责碎片完整性、轻量一致性这类短 JSON 判断。快速判断会使用独立的短上下文预算和更短超时，失败时回退到本地规则或原判断 LLM 路径，不会替代复杂裁决。
 
 内部判断 LLM 的提示词会要求“尽快输出最低完整 JSON”：不写长推导，不输出 Markdown，但必须保留 7 维情绪、置信度、关系决策和冲突分析。这样控制的是输出篇幅，不是削掉建模字段；默认取消硬超时后，慢模型也能自然返回最低可用观测。
 
@@ -2904,7 +2911,7 @@ $env:ASTRBOT_EXPECT_PLUGIN = "astrbot_plugin_sylanne"
 脚本会在输出 JSON 里写出 `expectedPluginRuntime`，包含插件列表 API 中返回的 `version`、`displayName`、`activated`、`author`、`astrbotVersion` 等只读字段。若目标插件存在但 `activated=false`，脚本会失败退出。需要把版本和显示名也作为硬断言时，可以额外设置：
 
 ```powershell
-$env:ASTRBOT_EXPECT_PLUGIN_VERSION = "2.3.11"
+$env:ASTRBOT_EXPECT_PLUGIN_VERSION = "2.3.12"
 $env:ASTRBOT_EXPECT_PLUGIN_DISPLAY_NAME = "Sylanne"
 & $node scripts\remote_smoke_playwright.js
 ```
