@@ -5040,6 +5040,54 @@ class AstrBotLifecycleTests(unittest.TestCase):
         )
         self.assertFalse(any("[表情包]" in text for _, text, _ in sent))
 
+    def test_realtime_chat_plan_reports_missing_sticker_candidates(self):
+        sent = []
+
+        class FakeContext:
+            async def send_message(self, origin, message):
+                sent.append((origin, str(message)))
+                return {"ok": True}
+
+        plugin = new_plugin(
+            {
+                "enable_realtime_chat": True,
+                "enable_sticker_reaction": True,
+                "sticker_local_root": "",
+                "sticker_learn_user_images": False,
+                "runtime_parameter_debug_override_enabled": True,
+                "realtime_chat_min_delay_seconds": 0.0,
+                "realtime_chat_max_delay_seconds": 0.0,
+            },
+        )
+        plugin.context = FakeContext()
+
+        async def no_learned_stickers(self, session_key):
+            return []
+
+        bind_async(plugin, "_load_sticker_memory", no_learned_stickers)
+
+        plan = asyncio.run(
+            plugin.get_realtime_chat_plan(
+                "s-no-sticker-candidates",
+                "好耶，今天进展不错！",
+            ),
+        )
+        result = asyncio.run(
+            plugin._send_realtime_chat_plan(
+                FakeEvent("s-no-sticker-candidates"),
+                plan,
+                source="unit_test",
+            ),
+        )
+
+        self.assertEqual(plan["sticker"]["reason"], "no_sticker_candidates")
+        self.assertEqual(result["sticker_result"]["sent"], False)
+        self.assertEqual(
+            result["sticker_result"]["blocked_reason"],
+            "no_sticker_candidates",
+        )
+        self.assertEqual(len(sent), plan["message_count"])
+
     def test_sticker_consistency_parser_treats_string_false_as_rejected(self):
         plugin = new_plugin()
 
@@ -5094,6 +5142,7 @@ class AstrBotLifecycleTests(unittest.TestCase):
         plugin = new_plugin(
             {
                 "use_llm_assessor": True,
+                "fast_assessor_enabled": True,
                 "sticker_llm_consistency_check_enabled": True,
                 "fast_assessor_provider_id": "fast-json-provider",
                 "fast_assessor_timeout_seconds": 1.25,
@@ -5142,6 +5191,52 @@ class AstrBotLifecycleTests(unittest.TestCase):
         self.assertEqual(calls[0][3], 0.0)
         self.assertEqual(calls[0][4], 1.25)
         self.assertTrue(judgement["approved"])
+
+    def test_fast_assessor_provider_requires_explicit_switch(self):
+        plugin = new_plugin(
+            {
+                "use_llm_assessor": True,
+                "sticker_llm_consistency_check_enabled": True,
+                "fast_assessor_provider_id": "fast-json-provider",
+            },
+        )
+        calls = []
+
+        async def fake_call_llm(
+            self,
+            *,
+            provider_id,
+            prompt,
+            system_prompt,
+            temperature=None,
+            timeout_seconds=None,
+        ):
+            calls.append((provider_id, prompt, system_prompt, temperature, timeout_seconds))
+            return SimpleNamespace(
+                completion_text='{"approved": true, "reason": "should not be called"}',
+            )
+
+        bind_async(plugin, "_call_internal_assessor_llm", fake_call_llm)
+
+        judgement = asyncio.run(
+            plugin._judge_sticker_consistency(
+                FakeEvent("s-sticker-fast-disabled"),
+                plan={
+                    "message_parts": [
+                        {"text": "我有点生气，不想笑。"},
+                    ],
+                },
+                sticker={"intent": "celebrate"},
+                candidate={
+                    "name": "angry.png",
+                    "tags": ["angry"],
+                },
+            ),
+        )
+
+        self.assertEqual(calls, [])
+        self.assertFalse(judgement["approved"])
+        self.assertEqual(judgement["source"], "local_consistency_gate")
 
     def test_proactive_cold_reply_is_recorded_as_lifelike_feedback(self):
         plugin = new_plugin()
@@ -5754,6 +5849,117 @@ class AstrBotLifecycleTests(unittest.TestCase):
             ),
         )
 
+    def test_realtime_chat_inserts_result_chain_image_at_text_anchor(self):
+        from astrbot.api.event import MessageChain
+
+        sent = []
+
+        class FakeContext:
+            async def send_message(self, origin, message):
+                sent.append(list(getattr(message, "parts", [])))
+                return {"ok": True}
+
+        plugin = new_plugin(
+            {
+                "assessment_timing": "post",
+                "enable_realtime_chat": True,
+                "realtime_chat_intercept_llm_response": True,
+                "enable_sticker_reaction": False,
+                "runtime_parameter_debug_override_enabled": True,
+                "realtime_chat_max_part_chars": 18,
+                "realtime_chat_min_delay_seconds": 0.0,
+                "realtime_chat_max_delay_seconds": 0.0,
+            },
+        )
+        plugin.context = FakeContext()
+        self._bind_common_state_hooks(plugin)
+        response = SimpleNamespace(
+            completion_text="alpha sentence! beta sentence!",
+            result_chain=MessageChain()
+            .message("alpha sentence! beta sentence!")
+            .file_image("C:/tmp/anchored-image.png"),
+        )
+
+        async def run_response():
+            await plugin.on_llm_response(
+                FakeEvent("s-intercept-image-anchor", platform_name="aiocqhttp"),
+                response,
+            )
+            await self._await_background_tasks(plugin)
+
+        asyncio.run(run_response())
+
+        sent_order = [
+            f"{kind}:{value}"
+            for parts in sent
+            for kind, value in parts
+        ]
+        self.assertEqual(
+            sent_order,
+            [
+                "message:alpha sentence!",
+                "message:beta sentence!",
+                "file_image:C:/tmp/anchored-image.png",
+            ],
+        )
+
+    def test_realtime_chat_sends_pre_text_result_chain_image_first(self):
+        from astrbot.api.event import MessageChain
+
+        sent = []
+
+        class FakeContext:
+            async def send_message(self, origin, message):
+                sent.append(list(getattr(message, "parts", [])))
+                return {"ok": True}
+
+        plugin = new_plugin(
+            {
+                "enable_realtime_chat": True,
+                "enable_sticker_reaction": False,
+                "runtime_parameter_debug_override_enabled": True,
+                "realtime_chat_min_delay_seconds": 0.0,
+                "realtime_chat_max_delay_seconds": 0.0,
+            },
+        )
+        plugin.context = FakeContext()
+        plan = {
+            "session_key": "s-pre-text-media",
+            "full_text": "after image!",
+            "message_parts": [
+                {"index": 0, "text": "after image!", "delay_before_seconds": 0.0},
+            ],
+            "media_parts": plugin._extract_realtime_response_media_parts(
+                SimpleNamespace(
+                    result_chain=MessageChain()
+                    .file_image("C:/tmp/pre-image.png")
+                    .message("after image!"),
+                ),
+            ),
+            "sticker": {"enabled": False, "should_send": False, "reason": "disabled"},
+        }
+
+        asyncio.run(
+            plugin._send_realtime_chat_plan(
+                FakeEvent("s-pre-text-media", platform_name="aiocqhttp"),
+                plan,
+                source="unit_test",
+            ),
+        )
+
+        sent_order = [
+            f"{kind}:{value}"
+            for parts in sent
+            for kind, value in parts
+        ]
+        self.assertEqual(
+            sent_order,
+            [
+                "file_image:C:/tmp/pre-image.png",
+                "message:after image!",
+            ],
+        )
+
     def test_on_llm_response_intercepts_even_when_realtime_send_cooldown_is_active(self):
         sent = []
 
@@ -5955,6 +6161,120 @@ class AstrBotLifecycleTests(unittest.TestCase):
         recovered_payload = stored[saved_key]
         self.assertTrue(recovered_payload["shadows"][-1]["consumed"])
         self.assertIn("s-reload-shadow", recovered._realtime_assistant_history_shadow_cache())
+
+    def test_interrupted_breakpoint_recovers_from_kv_after_plugin_reload(self):
+        stored = {}
+        sent = []
+
+        class FakeContext:
+            async def send_message(self, origin, message):
+                sent.append((origin, str(message)))
+                return {"ok": True}
+
+        async def fake_get_kv(self, key, default=None):
+            return stored.get(key, default)
+
+        async def fake_put_kv(self, key, value):
+            stored[key] = value
+
+        plugin = new_plugin(
+            {
+                "assessment_timing": "post",
+                "inject_state": False,
+                "enable_realtime_chat": True,
+                "enable_sticker_reaction": False,
+                "use_llm_assessor": False,
+                "realtime_chat_min_delay_seconds": 0.0,
+                "realtime_chat_max_delay_seconds": 0.0,
+                "realtime_input_completion_probe_delay_seconds": 0.0,
+                "realtime_input_completion_max_wait_seconds": 0.0,
+            },
+        )
+        plugin.context = FakeContext()
+        bind_async(plugin, "get_kv_data", fake_get_kv)
+        bind_async(plugin, "put_kv_data", fake_put_kv)
+        self._bind_common_state_hooks(plugin)
+        plugin._conversation_input_epoch = {"s-reload-breakpoint": 1}
+        plan = {
+            "session_key": "s-reload-breakpoint",
+            "input_epoch": 1,
+            "full_text": "更新前已经发出的部分。更新前还没发出的部分。",
+            "message_parts": [
+                {"index": 0, "text": "更新前已经发出的部分。", "delay_before_seconds": 0.0},
+                {"index": 1, "text": "更新前还没发出的部分。", "delay_before_seconds": 0.0},
+            ],
+            "sticker": {"enabled": False, "should_send": False, "reason": "disabled"},
+        }
+
+        original_chain = plugin._build_astrbot_message_chain
+
+        def interrupt_after_first(text):
+            message = original_chain(text)
+            plugin._conversation_input_epoch["s-reload-breakpoint"] = 2
+            return message
+
+        async def run_and_reload():
+            plugin._build_astrbot_message_chain = interrupt_after_first
+            try:
+                result = await plugin._send_realtime_chat_plan(
+                    FakeEvent("s-reload-breakpoint"),
+                    plan,
+                    source="unit_test",
+                )
+            finally:
+                plugin._build_astrbot_message_chain = original_chain
+            recovered = new_plugin(
+                {
+                    "assessment_timing": "post",
+                    "inject_state": False,
+                    "enable_realtime_chat": True,
+                    "enable_sticker_reaction": False,
+                    "use_llm_assessor": False,
+                    "realtime_input_completion_probe_delay_seconds": 0.0,
+                    "realtime_input_completion_max_wait_seconds": 0.0,
+                },
+            )
+            bind_async(recovered, "get_kv_data", fake_get_kv)
+            bind_async(recovered, "put_kv_data", fake_put_kv)
+            self._bind_common_state_hooks(recovered)
+            request = fake_request(
+                session_id="s-reload-breakpoint",
+                prompt="刚才还没说完的是什么",
+            )
+            await recovered.on_llm_request(
+                FakeEvent(
+                    "s-reload-breakpoint",
+                    message="刚才还没说完的是什么",
+                    sender_id="u1",
+                ),
+                request,
+            )
+            duplicate_request = fake_request(
+                session_id="s-reload-breakpoint",
+                prompt="再说一遍",
+            )
+            await recovered.on_llm_request(
+                FakeEvent("s-reload-breakpoint", message="再说一遍", sender_id="u1"),
+                duplicate_request,
+            )
+            return result, request, duplicate_request
+
+        result, request, duplicate_request = asyncio.run(run_and_reload())
+
+        saved_key = plugin._realtime_delivery_context_kv_key("s-reload-breakpoint")
+        injected = "\n".join(self._request_text_parts(request))
+        duplicate_injected = "\n".join(self._request_text_parts(duplicate_request))
+        self.assertIn(saved_key, stored)
+        self.assertEqual(len(sent), 1)
+        self.assertEqual(result["interrupted_reason"], "user_interrupted")
+        self.assertIn("sylanne_interrupted_reply_breakpoint", injected)
+        self.assertIn("sent_count=1", injected)
+        self.assertIn("unsent_count=1", injected)
+        self.assertIn("更新前已经发出的部分", injected)
+        self.assertIn("更新前还没发出的部分", injected)
+        self.assertNotIn("sylanne_interrupted_reply_breakpoint", duplicate_injected)
+        recovered_payload = stored[saved_key]
+        self.assertTrue(recovered_payload["breakpoints"][-1]["consumed"])
 
     def test_realtime_shadow_restore_retries_after_transient_kv_failure(self):
         calls = {"get": 0}
@@ -7057,6 +7377,7 @@ class AstrBotLifecycleTests(unittest.TestCase):
                 "enable_sticker_reaction": False,
                 "use_llm_assessor": True,
                 "realtime_input_completion_llm_gate_enabled": True,
+                "fast_assessor_enabled": True,
                 "fast_assessor_provider_id": "fast-json-provider",
                 "realtime_input_completion_probe_delay_seconds": 0.0,
                 "realtime_input_completion_max_wait_seconds": 0.01,
@@ -7099,6 +7420,7 @@ class AstrBotLifecycleTests(unittest.TestCase):
                 "enable_sticker_reaction": False,
                 "use_llm_assessor": True,
                 "emotion_provider_id": "judge-provider",
+                "fast_assessor_enabled": True,
                 "realtime_input_completion_llm_gate_enabled": True,
                 "realtime_input_completion_probe_delay_seconds": 0.0,
                 "realtime_input_completion_max_wait_seconds": 0.01,
@@ -7128,6 +7450,7 @@ class AstrBotLifecycleTests(unittest.TestCase):
             {
                 "enable_realtime_chat": True,
                 "use_llm_assessor": True,
+                "fast_assessor_enabled": True,
                 "fast_assessor_provider_id": "fast-json-provider",
                 "fast_assessor_max_context_chars": 260,
             },
@@ -7154,6 +7477,7 @@ class AstrBotLifecycleTests(unittest.TestCase):
                 "enable_sticker_reaction": False,
                 "use_llm_assessor": True,
                 "realtime_input_completion_llm_gate_enabled": True,
+                "fast_assessor_enabled": True,
                 "fast_assessor_provider_id": "provider",
                 "realtime_input_completion_probe_delay_seconds": 0.0,
                 "realtime_input_completion_max_wait_seconds": 4.0,
@@ -7196,6 +7520,7 @@ class AstrBotLifecycleTests(unittest.TestCase):
                 "enable_sticker_reaction": False,
                 "use_llm_assessor": True,
                 "realtime_input_completion_llm_gate_enabled": True,
+                "fast_assessor_enabled": True,
                 "fast_assessor_provider_id": "provider",
                 "realtime_input_completion_probe_delay_seconds": 0.0,
                 "realtime_input_completion_max_wait_seconds": 0.02,
@@ -7236,6 +7561,7 @@ class AstrBotLifecycleTests(unittest.TestCase):
                 "enable_sticker_reaction": False,
                 "use_llm_assessor": True,
                 "realtime_input_completion_llm_gate_enabled": True,
+                "fast_assessor_enabled": True,
                 "fast_assessor_provider_id": "provider",
                 "realtime_input_completion_probe_delay_seconds": 0.05,
                 "realtime_input_completion_max_wait_seconds": 0.2,
@@ -7282,6 +7608,7 @@ class AstrBotLifecycleTests(unittest.TestCase):
                 "enable_sticker_reaction": False,
                 "use_llm_assessor": True,
                 "realtime_input_completion_llm_gate_enabled": True,
+                "fast_assessor_enabled": True,
                 "fast_assessor_provider_id": "provider",
                 "realtime_input_completion_probe_delay_seconds": 0.01,
                 "realtime_input_completion_max_wait_seconds": 4.0,
@@ -7353,6 +7680,7 @@ class AstrBotLifecycleTests(unittest.TestCase):
                 "enable_sticker_reaction": False,
                 "use_llm_assessor": True,
                 "realtime_input_completion_llm_gate_enabled": True,
+                "fast_assessor_enabled": True,
                 "fast_assessor_provider_id": "provider",
                 "realtime_input_completion_probe_delay_seconds": 0.01,
                 "realtime_input_completion_max_wait_seconds": 4.0,
@@ -7420,6 +7748,7 @@ class AstrBotLifecycleTests(unittest.TestCase):
                 "enable_sticker_reaction": False,
                 "use_llm_assessor": True,
                 "realtime_input_completion_llm_gate_enabled": True,
+                "fast_assessor_enabled": True,
                 "fast_assessor_provider_id": "provider",
                 "realtime_input_completion_probe_delay_seconds": 0.0,
                 "realtime_input_completion_max_wait_seconds": 0.12,

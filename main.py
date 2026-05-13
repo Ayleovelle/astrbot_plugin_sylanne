@@ -7,6 +7,7 @@ import time
 import os
 import re
 import inspect
+from bisect import bisect_right
 from collections import deque
 from copy import deepcopy
 from dataclasses import dataclass
@@ -606,7 +607,7 @@ def get_emotional_state_plugin(context: Context) -> Any | None:
     PLUGIN_NAME,
     "Aylovelle.S.S",
     "Soulful Yearning Lifelike AstrBot Neural Narrative Engine：维护情绪、人格、记忆、氛围和表达节奏的 Sylanne",
-    "2.3.16",
+    "2.3.17",
     "",
 )
 class EmotionalStatePlugin(Star):
@@ -7511,6 +7512,12 @@ class EmotionalStatePlugin(Star):
                 if str(part.get("text") or "").strip()
             )
         media_parts = self._normalize_realtime_media_parts(plan.get("media_parts"))
+        media_by_after_text_index = self._realtime_media_parts_by_after_text_index(
+            media_parts,
+            parts,
+            full_text=full_text,
+        )
+        media_results: list[dict[str, Any]] = []
         sticker = plan.get("sticker") if isinstance(plan.get("sticker"), dict) else {}
         self._log_info(
             f"{PLUGIN_NAME}: 准备分条发送 "
@@ -7532,7 +7539,25 @@ class EmotionalStatePlugin(Star):
         if current_task is not None:
             self._register_realtime_chat_dispatch_task(session_key, current_task)
         try:
+            pre_text_media = media_by_after_text_index.pop(0, [])
+            for media_part in pre_text_media:
+                await self._wait_for_realtime_user_typing_window(
+                    session_key,
+                    input_epoch=input_epoch,
+                )
+                if self._conversation_reply_is_stale(session_key, input_epoch):
+                    interrupted_reason = "user_interrupted"
+                    break
+                media_result = await self._send_realtime_chat_media_part(
+                    origin,
+                    media_part,
+                    send_message=send_message,
+                    session_key=session_key,
+                )
+                media_results.append(media_result)
             for part in parts:
+                if interrupted_reason:
+                    break
                 await self._wait_for_realtime_user_typing_window(
                     session_key,
                     input_epoch=input_epoch,
@@ -7571,6 +7596,20 @@ class EmotionalStatePlugin(Star):
                     f"chars={len(text)} "
                     f"文本=\"{self._clip_one_line(text, 180)}\"",
                 )
+                inline_media = media_by_after_text_index.pop(len(results), [])
+                for media_part in inline_media:
+                    if self._conversation_reply_is_stale(session_key, input_epoch):
+                        interrupted_reason = "user_interrupted"
+                        break
+                    media_result = await self._send_realtime_chat_media_part(
+                        origin,
+                        media_part,
+                        send_message=send_message,
+                        session_key=session_key,
+                    )
+                    media_results.append(media_result)
+                if interrupted_reason:
+                    break
                 await asyncio.sleep(REALTIME_CHAT_INTERRUPT_GRACE_SECONDS)
                 if self._conversation_reply_is_stale(session_key, input_epoch):
                     interrupted_reason = "user_interrupted"
@@ -7585,40 +7624,26 @@ class EmotionalStatePlugin(Star):
                 self._unregister_realtime_chat_dispatch_task(session_key, current_task)
             if not interrupted_reason:
                 self._finish_realtime_chat_active_dispatch(session_key)
-        media_results: list[dict[str, Any]] = []
         if not interrupted_reason and not self._conversation_reply_is_stale(
             session_key,
             input_epoch,
         ):
-            for media_part in media_parts:
+            remaining_media_parts = [
+                media_part
+                for _, group in sorted(media_by_after_text_index.items())
+                for media_part in group
+            ]
+            for media_part in remaining_media_parts:
                 if self._conversation_reply_is_stale(session_key, input_epoch):
                     interrupted_reason = "user_interrupted"
                     break
-                media_message = self._build_astrbot_media_message(media_part)
-                if media_message is None:
-                    media_results.append(
-                        {
-                            "index": media_part.get("index"),
-                            "sent": False,
-                            "blocked_reason": "unsupported_media_part",
-                        },
-                    )
-                    continue
-                raw_media_result = await send_message(origin, media_message)
                 media_results.append(
-                    {
-                        "index": media_part.get("index"),
-                        "sent": True,
-                        "media_kind": media_part.get("kind"),
-                        "message_type": type(media_message).__name__,
-                        "result": self._bounded_scalar_or_summary(raw_media_result),
-                    },
-                )
-                self._log_info(
-                    f"{PLUGIN_NAME}: 已发送实时聊天媒体 "
-                    f"session={session_key} "
-                    f"index={media_part.get('index')} "
-                    f"kind={media_part.get('kind')}",
+                    await self._send_realtime_chat_media_part(
+                        origin,
+                        media_part,
+                        send_message=send_message,
+                        session_key=session_key,
+                    ),
                 )
         sticker_result = None
         if sticker.get("should_send") and not self._conversation_reply_is_stale(
@@ -7652,6 +7677,12 @@ class EmotionalStatePlugin(Star):
                         "blocked_reason": "llm_rejected",
                         "judgement": judgement,
                     }
+        elif sticker:
+            sticker_result = {
+                "sent": False,
+                "blocked_reason": str(sticker.get("reason") or "not_selected"),
+                "sticker": self._bounded_scalar_or_summary(sticker),
+            }
         if interrupted_reason:
             sent_texts = [str(item.get("text") or "") for item in parts[: len(results)]]
             unsent_texts = [
@@ -7720,6 +7751,90 @@ class EmotionalStatePlugin(Star):
                 f"表情={bool(sticker_result and sticker_result.get('sent'))}",
             )
         return payload
+
+    async def _send_realtime_chat_media_part(
+        self,
+        origin: str,
+        media_part: dict[str, Any],
+        *,
+        send_message: Any,
+        session_key: str,
+    ) -> dict[str, Any]:
+        media_message = self._build_astrbot_media_message(media_part)
+        if media_message is None:
+            return {
+                "index": media_part.get("index"),
+                "sent": False,
+                "blocked_reason": "unsupported_media_part",
+            }
+        raw_media_result = await send_message(origin, media_message)
+        self._log_info(
+            f"{PLUGIN_NAME}: 已发送实时聊天媒体 "
+            f"session={session_key} "
+            f"index={media_part.get('index')} "
+            f"kind={media_part.get('kind')}",
+        )
+        return {
+            "index": media_part.get("index"),
+            "sent": True,
+            "media_kind": media_part.get("kind"),
+            "message_type": type(media_message).__name__,
+            "result": self._bounded_scalar_or_summary(raw_media_result),
+        }
+
+    def _realtime_media_parts_by_after_text_index(
+        self,
+        media_parts: Sequence[dict[str, Any]],
+        text_parts: Sequence[dict[str, Any]],
+        *,
+        full_text: str,
+    ) -> dict[int, list[dict[str, Any]]]:
+        if not media_parts:
+            return {}
+        text_count = len(list(text_parts or []))
+        if text_count <= 0:
+            return {0: [dict(item) for item in media_parts if isinstance(item, dict)]}
+        text_ends = self._realtime_dispatch_text_part_end_offsets(text_parts, full_text)
+        grouped: dict[int, list[dict[str, Any]]] = {}
+        for media_part in media_parts:
+            if not isinstance(media_part, dict):
+                continue
+            anchor_offset = self._optional_int(media_part.get("anchor_offset"))
+            if anchor_offset is not None and text_ends:
+                after_text_index = min(
+                    text_count,
+                    bisect_right(text_ends, max(0, anchor_offset)),
+                )
+            else:
+                after_text_index = self._optional_int(media_part.get("after_text_index"))
+                if after_text_index is None:
+                    after_text_index = text_count
+            after_text_index = max(0, min(text_count, int(after_text_index)))
+            grouped.setdefault(after_text_index, []).append(dict(media_part))
+        return grouped
+
+    def _realtime_dispatch_text_part_end_offsets(
+        self,
+        text_parts: Sequence[dict[str, Any]],
+        full_text: str,
+    ) -> list[int]:
+        source = str(full_text or "")
+        cursor = 0
+        ends: list[int] = []
+        for part in text_parts:
+            text = str(part.get("text") or "").strip() if isinstance(part, dict) else ""
+            if not text:
+                ends.append(cursor)
+                continue
+            position = source.find(text, cursor)
+            if position < 0:
+                position = source.find(text)
+            if position < 0:
+                cursor = min(len(source), cursor + len(text))
+            else:
+                cursor = position + len(text)
+            ends.append(cursor)
+        return ends
 
     async def _judge_sticker_consistency(
         self,
@@ -7899,7 +8014,14 @@ class EmotionalStatePlugin(Star):
 
         media_parts: list[dict[str, Any]] = []
         seen: set[tuple[str, str]] = set()
+        text_seen_chars = 0
+        text_item_count = 0
         for item in raw_items:
+            text_value = self._realtime_text_from_message_part(item)
+            if text_value:
+                text_seen_chars += len(text_value)
+                text_item_count += 1
+                continue
             media = self._realtime_media_part_from_message_part(item)
             if not media:
                 continue
@@ -7908,6 +8030,8 @@ class EmotionalStatePlugin(Star):
                 continue
             seen.add(key)
             media["index"] = len(media_parts)
+            media["anchor_offset"] = text_seen_chars
+            media["after_text_index"] = text_item_count
             media_parts.append(media)
         return media_parts[:8]
 
@@ -7994,6 +8118,39 @@ class EmotionalStatePlugin(Star):
             "value": value_text,
             "name": name,
         }
+
+    def _realtime_text_from_message_part(self, item: Any) -> str:
+        kind = ""
+        value: Any = None
+        if isinstance(item, tuple) and len(item) >= 2:
+            kind = str(item[0] or "")
+            value = item[1]
+        elif isinstance(item, dict):
+            kind = str(
+                item.get("type")
+                or item.get("kind")
+                or item.get("message_type")
+                or "",
+            )
+            value = item.get("text") or item.get("content") or item.get("value")
+        else:
+            kind = str(
+                getattr(item, "type", "")
+                or getattr(item, "kind", "")
+                or getattr(item, "message_type", "")
+                or item.__class__.__name__
+            )
+            value = (
+                getattr(item, "text", None)
+                or getattr(item, "content", None)
+                or getattr(item, "value", None)
+            )
+        lowered = kind.lower()
+        if not any(marker in lowered for marker in ("plain", "text", "message")):
+            if any(marker in lowered for marker in ("image", "sticker", "face", "emoji")):
+                return ""
+        text = str(value or "").strip()
+        return text
 
     def _normalize_realtime_media_parts(self, media_parts: Any) -> list[dict[str, Any]]:
         if not isinstance(media_parts, (list, tuple)):
@@ -12931,6 +13088,8 @@ class EmotionalStatePlugin(Star):
         return await self._chat_provider_id(event, use_cache=True)
 
     async def _fast_assessor_provider_id(self, event: AstrMessageEvent) -> str | None:
+        if not self._cfg_bool("fast_assessor_enabled", False):
+            return None
         configured = str(self._cfg("fast_assessor_provider_id", "") or "").strip()
         if configured:
             return configured

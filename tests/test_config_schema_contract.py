@@ -200,6 +200,7 @@ class ConfigSchemaContractTests(unittest.TestCase):
         expected = {
             "enabled": ("bool", True),
             "use_llm_assessor": ("bool", True),
+            "fast_assessor_enabled": ("bool", False),
             "fast_assessor_provider_id": ("string", ""),
             "fast_assessor_max_context_chars": ("int", 600),
             "fast_assessor_timeout_seconds": ("float", 2.0),
@@ -394,10 +395,14 @@ class ConfigSchemaContractTests(unittest.TestCase):
         self.assertEqual(cfg["emotion_provider_id"]["type"], "string")
         self.assertEqual(cfg["emotion_provider_id"]["default"], "")
         self.assertEqual(cfg["emotion_provider_id"].get("_special"), "select_provider")
+        self.assertEqual(cfg["fast_assessor_enabled"]["type"], "bool")
+        self.assertEqual(cfg["fast_assessor_enabled"]["default"], False)
+        self.assertIn("默认关闭", cfg["fast_assessor_enabled"].get("hint", ""))
         self.assertEqual(cfg["fast_assessor_provider_id"]["type"], "string")
         self.assertEqual(cfg["fast_assessor_provider_id"]["default"], "")
         self.assertEqual(cfg["fast_assessor_provider_id"].get("_special"), "select_provider")
-        self.assertIn("留空时不启用双 LLM 加速", cfg["fast_assessor_provider_id"].get("hint", ""))
+        self.assertIn("低推理", cfg["fast_assessor_provider_id"].get("hint", ""))
+        self.assertIn("主聊天回复仍交给更强的会话模型", cfg["fast_assessor_provider_id"].get("hint", ""))
         self.assertEqual(
             cfg["sylanne_memory_embedding_provider_id"].get("_special"),
             "select_provider",

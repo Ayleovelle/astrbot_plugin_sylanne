@@ -16,12 +16,18 @@
     "_special": "select_provider",
     "hint": "建议选择便宜、稳定、支持 JSON 指令的小模型。"
   },
+  "fast_assessor_enabled": {
+    "description": "启用快速判断 LLM",
+    "type": "bool",
+    "default": false,
+    "hint": "默认关闭。开启后，插件才会调用“快速判断 LLM Provider”做用户分段完整性、表情包一致性等短 JSON 判断；关闭时即使选择了 Provider，也只走本地规则回退，避免不知情用户产生额外 token 消耗。"
+  },
   "fast_assessor_provider_id": {
     "description": "快速判断 LLM Provider",
     "type": "string",
     "default": "",
     "_special": "select_provider",
-    "hint": "用于用户碎片完整性、轻量一致性等短 JSON 判断。只有填写本项，并显式开启对应 LLM gate 时，才会启用第二个快判 LLM；留空时不启用双 LLM 加速，避免用户不知情地产生额外 token 消耗。"
+    "hint": "用于用户碎片完整性、表情包一致性等短 JSON 判断。建议搭配低推理、低温度、响应快、JSON 稳定的小模型；主聊天回复仍交给更强的会话模型。只有同时开启“启用快速判断 LLM”并填写本项，才会启用第二个快判 LLM。"
   },
   "fast_assessor_max_context_chars": {
     "description": "快速判断 LLM 最多读取的上下文字数",
