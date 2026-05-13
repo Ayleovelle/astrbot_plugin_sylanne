@@ -2,7 +2,7 @@
 
 > <span style="font-size: 1.08em;"><strong>Soulful Yearning Lifelike AstrBot Neural Narrative Engine</strong>。她维护的不只是“情绪标签”，而是情绪、人格、记忆、氛围、主动性和表达节奏交织成的长期状态。</span>
 
-![版本 2.3.12](https://img.shields.io/badge/version-2.3.12-blue)
+![版本 2.3.13](https://img.shields.io/badge/version-2.3.13-blue)
 ![AstrBot >=4.9.2,<5.0.0](https://img.shields.io/badge/AstrBot-%3E%3D4.9.2%2C%3C5.0.0-green)
 ![Python 3.10+](https://img.shields.io/badge/Python-3.10%2B-yellow)
 ![协议 astrbot.emotion_state.v2](https://img.shields.io/badge/schema-astrbot.emotion__state.v2-purple)
@@ -37,7 +37,7 @@
 
 <br clear="right">
 
-`2.3.12` 是主动聊天反馈、时间感和快速判断接口修复版：主聊天上下文继续交给 AstrBot Agent，Sylanne 只补充短状态、记忆召回和“已发/未发”的投递事实；Sylanne 内部 LLM Tool schema 默认对所有主聊天模型隐藏；主动聊天调度器会先结算上一条主动发言是否无人回应，再根据真实时间保守猜测用户可能在忙、休息或暂时不方便，不再隔几个小时反复追问同一个咖啡/困不困/进度话题。简单短 JSON 判断可改用低推理快模型，记忆模块继续使用 AstrBot Embedding provider 做向量召回，并支持原生 provider 选择器和记忆设置 Page 卡片点选。
+`2.3.13` 是等待期追发合并和即时聊天等待上限修复版：主聊天上下文继续交给 AstrBot Agent，Sylanne 只补充短状态、记忆召回和“已发/未发”的投递事实；如果用户在上一轮 LLM 尚未产出可用回复前继续补充，插件会把前后两条短事实合并进同一个用户意图，避免只抓最后半句；碎片完整性等待上限降到 4 秒，把主要时间留给主 LLM 正常理解合并后的消息。工作流图同步重绘，去掉误导性诊断话术，突出即时聊天、追发整合、Agent 工具循环和主动聊天反馈闭环。
 
 | 能力 | 作用 |
 | --- | --- |
@@ -73,7 +73,7 @@
 | 主题 | 内容 |
 | --- | --- |
 | [当前版本与兼容范围](#当前版本与兼容范围) | 插件版本、AstrBot 版本、Python 要求、许可证和发布状态。 |
-| [当前版本发布记录](#2312-当前版本发布记录) | Agent-owned context、内部工具 schema 全模型隐藏、哈基米/Gemini 空回复规避、短答锚定、向量记忆 provider 选择、主动聊天无人回应反馈、长时间沉默时间推测、快速判断 LLM 接口和包体发布说明。 |
+| [当前版本发布记录](#2313-当前版本发布记录) | 等待期追发合并、碎片完整性 4 秒上限、Agent-owned context、内部工具 schema 全模型隐藏、短答锚定、向量记忆 provider 选择、主动聊天反馈和包体发布说明。 |
 | [项目定位](#项目定位) | 为什么本插件不是普通的提示词人设增强。 |
 | [核心能力](#核心能力总览) | 7 维情绪、人格建模、真实时间记忆、关系修复、公共 API。 |
 | [快速开始](#快速开始) | 发布 zip 包、仓库安装、手动复制、最小配置和检查命令。 |
@@ -101,25 +101,27 @@
 | --- | --- |
 | 插件目录名 | `astrbot_plugin_sylanne` |
 | 显示名 | `Sylanne` |
-| 当前版本 | `2.3.12` |
+| 当前版本 | `2.3.13` |
 | AstrBot 版本 | `>=4.9.2,<5.0.0` |
 | Python | `3.10+` |
 | 许可证 | `GPL-3.0-or-later` |
 | 运行时第三方依赖 | 当前无额外依赖，见 `requirements.txt` |
 
-`2.3.12` 保留 Sylanne 自有记忆知识库、`2.1.0` 只读记忆查询入口、`2.1.3` Agent-owned context 即时聊天修复、`2.2.0` AstrBot Embedding 提供商驱动的向量召回、`2.3.0` 可视化记忆设置 Page、`2.3.8` 即时聊天短答锚定修复、`2.3.9` 哈基米/Gemini 空回复规避、`2.3.10` 完整上下文回填和 `2.3.11` 内部工具统一隐藏，并进一步修复主动聊天无人回应反馈、旧话题复读和简单判断 LLM 延迟。核心情绪、回复后后台评估（post）、`group_atmosphere_state`、`humanlike_state`、`lifelike_learning_state`、`personality_drift_state`、Sylanne 自有记忆、即时聊天节奏和欺骗/操控/逃责类动作阻断默认自动运行；道德修复、瑕疵模拟、心理筛查等实验/维护模块仍由配置者显式打开。
+`2.3.13` 保留 Sylanne 自有记忆知识库、`2.1.0` 只读记忆查询入口、`2.1.3` Agent-owned context 即时聊天修复、`2.2.0` AstrBot Embedding 提供商驱动的向量召回、`2.3.0` 可视化记忆设置 Page、`2.3.8` 即时聊天短答锚定修复、`2.3.9` 哈基米/Gemini 空回复规避、`2.3.10` 完整上下文回填、`2.3.11` 内部工具统一隐藏和 `2.3.12` 主动聊天反馈修复，并进一步修复 LLM 等待期用户追发上下文丢失与碎片完整性等待过长问题。核心情绪、回复后后台评估（post）、`group_atmosphere_state`、`humanlike_state`、`lifelike_learning_state`、`personality_drift_state`、Sylanne 自有记忆、即时聊天节奏和欺骗/操控/逃责类动作阻断默认自动运行；道德修复、瑕疵模拟、心理筛查等实验/维护模块仍由配置者显式打开。
 
 发布包会包含运行代码、README、CHANGELOG、LICENSE、配置结构（schema）、docs 和 `docs/assets/` 中的聚合图表与吉祥物素材，例如 `docs/assets/sylanne-mascot.gif`、`docs/assets/sylanne-mascot-card.svg` 和 `docs/assets/workflow_and_proactive.svg`；不会包含 `tests/`、`scripts/`、`literature_kb/`、`personality_literature_kb/`、`psychological_literature_kb/`、`humanlike_agent_literature_kb/`、`raw/`、`output/`、`dist/` 等开发、研究、原始样本或缓存目录。
 
-### 2.3.12 当前版本发布记录
+### 2.3.13 当前版本发布记录
 
-`v2.3.12` 合并在 `main` 上，对外安装版本由 `metadata.yaml` 和 `main.py @register(...)` 共同声明为 `2.3.12`。本版按版本规则提升第三位版本号：修复主动聊天无人回应反馈、长时间沉默时间推测、旧话题复读和简单判断 LLM 延迟问题，不改变公共 API 版本；公共 API 版本仍保持 `1.0`，schema 仍保持向后兼容。
+`v2.3.13` 合并在 `main` 上，对外安装版本由 `metadata.yaml` 和 `main.py @register(...)` 共同声明为 `2.3.13`。本版按版本规则提升第三位版本号：修复 LLM 等待期用户追发上下文丢失、碎片完整性等待上限过长和工作流图表达问题，不改变公共 API 版本；公共 API 版本仍保持 `1.0`，schema 仍保持向后兼容。
 
 当前版本的主要变化：
 
 | 类别 | 结果 |
 | --- | --- |
 | Agent 上下文归属 | 主聊天上下文仍交给 AstrBot Agent/pipeline；Sylanne 不再重放大段历史，只补短状态摘要、短记忆召回和已发/未发投递事实。 |
+| 等待期追发合并 | 如果用户在上一轮 LLM 尚未产出可用回复前继续补充，Sylanne 会注入 `[sylanne_active_agent_followup_merge]`，把前一条 pending 用户消息和当前消息合并为同一连续意图，避免只回复最后一句。 |
+| 合并落点 | 追发合并发生在 `context_text = _request_to_text(request)` 之前，`_last_request_text`、主 LLM 临时上下文和预响应情绪评估都会看到同一份合并事实；这不是长期上下文重放，只保留同会话、同说话人、短时间内的 pending 用户 turn。 |
 | 用户纠正保留 | 「我昨晚十点多睡的啦」「没有啊我早早起床啦」这类事实纠正会被识别为高优先级上下文，并短暂作为 user 上下文带到下一轮。 |
 | 旧猜测压制 | 用户已经纠正睡眠/作息事实后，后续回复不应继续追问或暗示“是不是没睡/熬夜/撒谎”，避免关心模板压过用户事实。 |
 | 内部工具统一隐藏 | Sylanne 自己的 LLM Tool schema 对所有主聊天模型隐藏，避免模型在内部状态工具选择阶段空回、外泄工具 JSON 或增加不必要延迟。 |
@@ -139,7 +141,7 @@
 | 记忆设置 Page | 在 AstrBot 插件详情页打开『记忆设置』即可下拉或点击卡片选择 Embedding 提供商；`sylanne_memory_embedding_provider_id` 也声明为 provider 选择项，留空表示自动选择第一个可用提供商。 |
 | 碎片语义 gate | 当本地规则准备释放碎片窗口时，会先调用判断 LLM 输出极短 JSON，确认用户是否已经说完；命中上一轮 bot 问题的短答会跳过该 gate，减少“咖啡啊”这类回答的延迟。 |
 | 慢速分段修复 | LLM gate 判定未完成后会写入语义等待窗口，后续同一用户在真实时间上限内继续补充时仍会被合并，即使间隔超过本地短窗口。 |
-| 上限释放 | 默认探测等待降到 `0.25s`，语义等待上限降到 `6s`；如果判断为未完成但用户真的停住，达到上限后会释放合并后的碎片意图，避免 bot 永久沉默。 |
+| 上限释放 | 默认探测等待保持 `0.25s`，语义等待上限降到 `4s` 且有运行时硬上限；如果判断为未完成但用户真的停住，达到上限后会释放合并后的碎片意图，避免把即时聊天时间耗在死等上。 |
 | Gemini 工具轮次保护 | Gemini 系模型仍会追加极短 guard，要求模型返回可见自然语言或有效 `tool_calls/function_call`；Sylanne 内部工具已统一隐藏，外部工具仍保留。 |
 | 统一工具归属 | `query_agent_state` 和 11 个细分工具继续作为插件内部兼容方法、命令/API 后端存在，但不再作为主 LLM Tool schema 暴露。 |
 | 工具 JSON 外泄阻断 | 如果兼容层把 `query_agent_state`、情绪快照、运行时诊断等内部工具结果误作为最终 `completion_text` 交给发送阶段，Sylanne 会识别 `astrbot.*` 内部 `schema_version/kind`，清空默认发送内容并阻断用户可见发送；结构化工具调用仍交给 Agent 工具循环。 |
@@ -152,7 +154,8 @@
 | 快速判断 LLM | 新增 `fast_assessor_provider_id` 和短上下文预算，用户碎片完整性、表情包一致性等简单 JSON 判断可走低推理快模型；复杂情绪观测和主动话题裁决仍走原判断 LLM。 |
 | 上下文安全预算 | 召回结果只作为 `[sylanne_memory_recall]` 限长摘要注入，并继续受请求预算和官方上下文压缩清洗逻辑约束。 |
 | 模块互斥自检 | 发布前覆盖自有记忆、主动发言、官方上下文压缩、即时聊天、公共 API、配置契约和包体预检，验证模块之间不会互相回灌或重复调用外部 LivingMemory。 |
-| 公开契约 | 插件版本为 `2.3.12`；公共 API 版本仍为 `1.0`，schema 仍保持 `astrbot.emotion_state.v2` 等版本化契约。 |
+| 工作流图 | `docs/assets/workflow_and_proactive.svg` 重绘为 2.3.13 版本，突出即时聊天、追发合并、Agent 工具循环、模型边界和主动聊天反馈；移除误导性的单点 Gemini 诊断节点，并修正中文字体和跨泳道箭头。 |
+| 公开契约 | 插件版本为 `2.3.13`；公共 API 版本仍为 `1.0`，schema 仍保持 `astrbot.emotion_state.v2` 等版本化契约。 |
 
 旧版本发布记录统一放在 `CHANGELOG.md`。README 只展示当前版本，避免插件管理页从历史段落误抓旧版本号。
 
@@ -1585,7 +1588,7 @@ enable_safety_boundary = false
 | `realtime_chat_intercept_llm_response` | bool | `true` | 是否在 `on_llm_response` 尝试接管默认回复并分条发送；若平台不支持改写响应，可关闭。 |
 | `realtime_input_completion_llm_gate_enabled` | bool | `true` | 疑似用户还没说完时，是否调用内部判断 LLM 判断分段输入是否完整。 |
 | `realtime_input_completion_probe_delay_seconds` | float | `0.25` | 首个疑似碎片后的基础探测等待秒数；插件会按碎片数量和窗口状态自动缩放。 |
-| `realtime_input_completion_max_wait_seconds` | float | `6.0` | 判断用户仍未说完时的单轮最长等待时间；超过后放行，避免永久沉默。 |
+| `realtime_input_completion_max_wait_seconds` | float | `4.0` | 判断用户仍未说完时的单轮最长等待时间；运行时带 4 秒硬上限，超过后放行，把主要时间留给 LLM 正常理解合并后的用户意图。 |
 | `realtime_chat_dry_run_default` | bool | `false` | 公共 API 未显式传 `dry_run` 时是否只返回计划不发送。 |
 | `realtime_chat_strip_markdown` | bool | `true` | 分条前清理常见 Markdown 标记。 |
 | `enable_sticker_reaction` | bool | `true` | 是否根据情绪和氛围补发表情包。 |
@@ -1606,7 +1609,7 @@ enable_safety_boundary = false
 
 输入侧也会理解用户分段。若同一会话、同一说话人在很短时间内连续发出短字、表情、疑问收束词、明显续写片段或来源追问铺垫，插件会先在本地维护一个轻量碎片窗口；当窗口形成完整意图时，会临时注入 `[sylanne_user_message_fragments]`，告诉主 LLM 把这些碎片当作同一轮用户话语。例如“你 / 是 / 🐷 / 吗”会被解释成“你 是 🐷 吗”，“我只是很纳闷 / 为啥你要问我 / 是从哪里看来的”会被解释成一段完整的来源追问，而不是只回应最后一句。这个聚合只在同一说话人、短时间窗口内生效；换人、超时或长段文本会重新开窗，避免把群聊里不同人的话硬拼在一起。
 
-当前版本中，疑似没说完的碎片会先暂停默认回复，不立刻跑情绪评估。插件会短暂等待下一条消息；若开启 `realtime_input_completion_llm_gate_enabled`，还会让判断 LLM 只输出最小 JSON，判断用户是否已经把这句话说完。判断为未完成时继续等待，但单轮不超过 `realtime_input_completion_max_wait_seconds`，避免用户真的不说话时 bot 永久沉默。最终放行后，主 LLM 和情绪模型看到的是合并后的完整意图。
+当前版本中，疑似没说完的碎片会先暂停默认回复，不立刻跑情绪评估。插件会短暂等待下一条消息；若开启 `realtime_input_completion_llm_gate_enabled`，还会让判断 LLM 只输出最小 JSON，判断用户是否已经把这句话说完。判断为未完成时继续等待，但单轮不超过 `realtime_input_completion_max_wait_seconds`，且运行时最多 4 秒，避免用户真的不说话时 bot 永久沉默。最终放行后，主 LLM 和情绪模型看到的是合并后的完整意图。
 
 长回复不会再为了满足 `max_parts` 硬上限而把尾部静默截成 `...`。`max_parts` 现在只表示日常偏好的初始分段数量；如果回复太长，分段器会继续按安全长度拆成更多消息，尽量避免平台把单条超长文本折叠成省略显示，也避免丢失正文。若用户在分条发送途中插话，剩余未发部分会被记录成低 token 的断点摘要，下一轮只把它作为“旧回复被打断”的上下文，不会把长文本全文塞回提示词。
 
@@ -2911,7 +2914,7 @@ $env:ASTRBOT_EXPECT_PLUGIN = "astrbot_plugin_sylanne"
 脚本会在输出 JSON 里写出 `expectedPluginRuntime`，包含插件列表 API 中返回的 `version`、`displayName`、`activated`、`author`、`astrbotVersion` 等只读字段。若目标插件存在但 `activated=false`，脚本会失败退出。需要把版本和显示名也作为硬断言时，可以额外设置：
 
 ```powershell
-$env:ASTRBOT_EXPECT_PLUGIN_VERSION = "2.3.12"
+$env:ASTRBOT_EXPECT_PLUGIN_VERSION = "2.3.13"
 $env:ASTRBOT_EXPECT_PLUGIN_DISPLAY_NAME = "Sylanne"
 & $node scripts\remote_smoke_playwright.js
 ```

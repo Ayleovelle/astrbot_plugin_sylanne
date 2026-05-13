@@ -1,6 +1,6 @@
 <svg xmlns="http://www.w3.org/2000/svg" width="1560" height="1180" viewBox="0 0 1560 1180" role="img" aria-labelledby="title desc">
-  <title id="title">Sylanne 2.3.12 工作流：上下文归 Agent，投递与反馈归 Sylanne</title>
-  <desc id="desc">展示 Sylanne 重构后的工作流。输入侧只做碎片聚合和短上下文判断，不保存长期上下文；AstrBot Agent 持有完整对话历史、fallback provider 和外部工具循环；Sylanne 在主 LLM 请求前隐藏自有内部工具 schema，但保留 bot、命令、公共 API 和设置 Page 能力；工具调用中间轮次完全放行，只有最终自然语言回复进入即时聊天投递层；投递层负责拆条、打字停顿、表情一致性、用户插话中断和已发未发信封；回复后的情绪、人格、生命化学习、自有记忆和向量召回进入后台队列；主动聊天支路先结算未回应反馈，再结合时间推测、公式门控和 LLM 话题裁决决定是否低压力触达。</desc>
+  <title id="title">Sylanne 2.3.13 工作流：上下文归 Agent，投递与反馈归 Sylanne</title>
+  <desc id="desc">展示 Sylanne 重构后的工作流。输入侧只做碎片聚合、活跃回复追发合并和短上下文判断，不保存长期上下文；AstrBot Agent 持有完整对话历史、fallback provider 和外部工具循环；Sylanne 在主 LLM 请求前隐藏自有内部工具 schema，但保留 bot、命令、公共 API 和设置 Page 能力；工具调用中间轮次完全放行，只有最终自然语言回复进入即时聊天投递层；投递层负责拆条、打字停顿、表情一致性、用户插话中断和已发未发信封；回复后的情绪、人格、生命化学习、自有记忆和向量召回进入后台队列；主动聊天支路先结算未回应反馈，再结合时间推测、公式门控和 LLM 话题裁决决定是否低压力触达。</desc>
 
   <defs>
     <marker id="arrowBlue" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="9" markerHeight="9" orient="auto-start-reverse">
@@ -20,13 +20,13 @@
     </marker>
     <style>
       .bg { fill: #f8fafc; }
-      .title { font-family: "Microsoft YaHei", "Noto Sans CJK SC", Arial, sans-serif; font-size: 34px; font-weight: 800; fill: #0f172a; }
-      .subtitle { font-family: "Microsoft YaHei", "Noto Sans CJK SC", Arial, sans-serif; font-size: 18px; fill: #475569; }
-      .laneTitle { font-family: "Microsoft YaHei", "Noto Sans CJK SC", Arial, sans-serif; font-size: 22px; font-weight: 800; fill: #1e293b; }
-      .text { font-family: "Microsoft YaHei", "Noto Sans CJK SC", Arial, sans-serif; font-size: 17px; font-weight: 800; fill: #0f172a; }
-      .small { font-family: "Microsoft YaHei", "Noto Sans CJK SC", Arial, sans-serif; font-size: 14px; fill: #334155; }
-      .tiny { font-family: "Microsoft YaHei", "Noto Sans CJK SC", Arial, sans-serif; font-size: 12px; fill: #475569; }
-      .note { font-family: "Microsoft YaHei", "Noto Sans CJK SC", Arial, sans-serif; font-size: 13px; font-weight: 700; fill: #334155; }
+      .title { font-family: "HarmonyOS Sans SC", "MiSans", "Microsoft YaHei UI", "Microsoft YaHei", "Noto Sans CJK SC", "Segoe UI", sans-serif; font-size: 34px; font-weight: 800; fill: #0f172a; text-rendering: geometricPrecision; }
+      .subtitle { font-family: "HarmonyOS Sans SC", "MiSans", "Microsoft YaHei UI", "Microsoft YaHei", "Noto Sans CJK SC", "Segoe UI", sans-serif; font-size: 18px; fill: #475569; text-rendering: geometricPrecision; }
+      .laneTitle { font-family: "HarmonyOS Sans SC", "MiSans", "Microsoft YaHei UI", "Microsoft YaHei", "Noto Sans CJK SC", "Segoe UI", sans-serif; font-size: 22px; font-weight: 800; fill: #1e293b; text-rendering: geometricPrecision; }
+      .text { font-family: "HarmonyOS Sans SC", "MiSans", "Microsoft YaHei UI", "Microsoft YaHei", "Noto Sans CJK SC", "Segoe UI", sans-serif; font-size: 17px; font-weight: 800; fill: #0f172a; text-rendering: geometricPrecision; }
+      .small { font-family: "HarmonyOS Sans SC", "MiSans", "Microsoft YaHei UI", "Microsoft YaHei", "Noto Sans CJK SC", "Segoe UI", sans-serif; font-size: 15px; fill: #334155; text-rendering: geometricPrecision; }
+      .tiny { font-family: "HarmonyOS Sans SC", "MiSans", "Microsoft YaHei UI", "Microsoft YaHei", "Noto Sans CJK SC", "Segoe UI", sans-serif; font-size: 13px; fill: #475569; text-rendering: geometricPrecision; }
+      .note { font-family: "HarmonyOS Sans SC", "MiSans", "Microsoft YaHei UI", "Microsoft YaHei", "Noto Sans CJK SC", "Segoe UI", sans-serif; font-size: 14px; font-weight: 700; fill: #334155; text-rendering: geometricPrecision; }
       .laneInput { fill: #eff6ff; stroke: #bfdbfe; stroke-width: 2; }
       .laneAgent { fill: #f5f3ff; stroke: #ddd6fe; stroke-width: 2; }
       .laneOutput { fill: #fdf2f8; stroke: #fbcfe8; stroke-width: 2; }
@@ -58,13 +58,13 @@
   </defs>
 
   <rect class="bg" width="1560" height="1180"/>
-  <text class="title" x="56" y="58">Sylanne 2.3.12 工作流：上下文归 Agent，Sylanne 接管投递与反馈</text>
-  <text class="subtitle" x="56" y="88">主链路不再由插件重放长上下文：输入只做碎片 gate，Agent 负责上下文和工具循环，Sylanne 只在最终回复后接管真实聊天节奏。</text>
+  <text class="title" x="56" y="58">Sylanne 2.3.13 工作流：上下文归 Agent，Sylanne 接管投递与反馈</text>
+  <text class="subtitle" x="56" y="88">主链路不重放长上下文：输入只合并本轮碎片和等待期追发，Agent 负责上下文与工具循环，Sylanne 只接管最终聊天节奏。</text>
 
   <g id="lanes-main">
     <rect class="laneInput" x="42" y="126" width="312" height="598" rx="18"/>
     <text class="laneTitle" x="66" y="164">输入侧：轻量 gate</text>
-    <text class="small" x="66" y="190">只判断“用户说完了吗”，不持有长期上下文</text>
+    <text class="small" x="66" y="190">只判断“用户说完了吗”，等待期追发直接并入本轮</text>
 
     <rect class="laneAgent" x="386" y="126" width="360" height="598" rx="18"/>
     <text class="laneTitle" x="410" y="164">AstrBot Agent：上下文核心</text>
@@ -88,7 +88,7 @@
     <rect class="nodeInput" x="66" y="342" width="264" height="92" rx="14"/>
     <text class="text" x="198" y="374" text-anchor="middle">碎片输入池</text>
     <text class="tiny" x="198" y="398" text-anchor="middle">“我 / 不 / 是 / 老 / 年人”先合并</text>
-    <text class="tiny" x="198" y="416" text-anchor="middle">命中上一轮问句的短答直接锚定</text>
+    <text class="tiny" x="198" y="416" text-anchor="middle">LLM 未回复时追发直接并入同一用户意图</text>
     <path class="arrowBlue" d="M198 434 V472"/>
 
     <rect class="nodeInput" x="66" y="472" width="264" height="96" rx="14"/>
@@ -99,11 +99,11 @@
 
     <rect class="nodeInput" x="66" y="606" width="264" height="74" rx="14"/>
     <text class="text" x="198" y="636" text-anchor="middle">释放完整用户意图</text>
-    <text class="tiny" x="198" y="660" text-anchor="middle">只把本轮合并结果交给 Agent</text>
+    <text class="tiny" x="198" y="660" text-anchor="middle">碎片与等待期追发都只回填短事实</text>
   </g>
 
   <g id="agent-flow">
-    <path class="arrowBlue" d="M330 643 C354 643 358 250 386 250"/>
+    <path class="arrowBlue" d="M330 643 H366 V275 H410"/>
     <rect class="nodeAgent" x="410" y="232" width="312" height="86" rx="14"/>
     <text class="text" x="566" y="264" text-anchor="middle">Agent 持有完整对话历史</text>
     <text class="tiny" x="566" y="288" text-anchor="middle">官方上下文、fallback provider、工具结果都在这里</text>
@@ -128,7 +128,7 @@
   </g>
 
   <g id="output-flow">
-    <path class="arrowViolet" d="M722 650 C748 650 752 248 778 248"/>
+    <path class="arrowViolet" d="M722 650 H760 V273 H802"/>
     <rect class="stop" x="802" y="232" width="312" height="82" rx="14"/>
     <text class="text" x="958" y="264" text-anchor="middle">工具轮次检测</text>
     <text class="tiny" x="958" y="288" text-anchor="middle">若仍是 tool_calls / 工具结果，直接放行</text>
@@ -174,9 +174,9 @@
     <text class="tiny" x="1344" y="552" text-anchor="middle">插件功能通过短状态、召回、API、Page 生效</text>
 
     <rect class="badgeGray" x="1194" y="616" width="300" height="80" rx="14"/>
-    <text class="note" x="1344" y="646" text-anchor="middle">Gemini blocked 不是上下文长度问题</text>
-    <text class="tiny" x="1344" y="670" text-anchor="middle">安全层可能按完整 prompt 拦截</text>
-    <text class="tiny" x="1344" y="688" text-anchor="middle">fallback 由 Agent 主链路接住</text>
+    <text class="note" x="1344" y="646" text-anchor="middle">模型兼容兜底</text>
+    <text class="tiny" x="1344" y="670" text-anchor="middle">空回、拦截和切换不破坏工具循环</text>
+    <text class="tiny" x="1344" y="688" text-anchor="middle">失败回退仍由 Agent 主链路接住</text>
   </g>
 
   <path class="arrowPink dash" d="M802 654 C740 714 670 714 612 674"/>

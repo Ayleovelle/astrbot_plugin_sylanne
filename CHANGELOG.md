@@ -2,6 +2,24 @@
 
 本文件用于 AstrBot 插件市场/管理页展示更新内容。更完整的设计说明、公式推导、测试矩阵和维护手册见 `README.md`。
 
+## 2.3.13
+
+发布日期：2026-05-13
+
+### 修复
+
+- 修复活跃 Agent 运行期间用户追发消息丢失前文的问题：当上一轮 LLM 尚未产出可用回复时，同会话同说话人的后续消息会注入 `[sylanne_active_agent_followup_merge]`，让主 LLM 把 pending 用户消息和当前消息视为同一个连续意图。
+- 合并发生在 `_request_to_text(request)` 之前，因此 `_last_request_text`、主 LLM 临时上下文和预响应情绪评估都能看到同一份合并事实；这不是长上下文重放，只保留短时间内的 pending 用户 turn。
+- 将用户碎片完整性语义等待默认上限从 `6.0s` 降到 `4.0s`，并把运行时硬上限从 `20.0s` 降到 `4.0s`，避免把即时聊天延迟耗在死等上。
+- 更新 2.3.13 工作流 SVG：加入等待期追发合并，移除误导性的单点模型诊断节点，调整中文字体栈和跨泳道箭头。
+- 同步 `metadata.yaml`、`main.py @register(...)`、README 徽章、当前版本说明和远程烟测示例版本为 `2.3.13`。
+
+### 验证
+
+- `python -m pytest -q tests/test_astrbot_lifecycle.py -k "active_agent_followup or realtime_input or interrupted_reply or short_answer"`
+- `python -m pytest -q tests/test_config_schema_contract.py`
+- `python -m json.tool _conf_schema.json`
+
 ## 2.3.12
 
 发布日期：2026-05-13

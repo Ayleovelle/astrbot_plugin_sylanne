@@ -2118,6 +2118,7 @@ class AstrBotLifecycleTests(unittest.TestCase):
         second = fake_request(session_id="s-diff", prompt="again")
 
         asyncio.run(plugin.on_llm_request(FakeEvent("s-diff"), first))
+        plugin._consume_conversation_pending_response_epoch("s-diff")
         asyncio.run(plugin.on_llm_request(FakeEvent("s-diff"), second))
 
         first_text = first.extra_user_content_parts[0].text
@@ -5736,6 +5737,60 @@ class AstrBotLifecycleTests(unittest.TestCase):
         self.assertEqual(len(saves), 1)
         self.assertEqual(assessment_calls[0]["current_text"], "new answer")
 
+    def test_active_agent_followup_merges_pending_user_turn_before_llm(self):
+        plugin = new_plugin(
+            {
+                "assessment_timing": "pre",
+                "inject_state": False,
+                "enable_realtime_chat": True,
+                "enable_sticker_reaction": False,
+                "use_llm_assessor": False,
+                "realtime_input_completion_probe_delay_seconds": 0.0,
+                "realtime_input_completion_max_wait_seconds": 0.0,
+            },
+        )
+        saves, assessment_calls = self._bind_common_state_hooks(plugin)
+        first_request = fake_request(
+            session_id="s-active-followup",
+            prompt="只有一点点开心嘛",
+        )
+        second_request = fake_request(
+            session_id="s-active-followup",
+            prompt="那我要咬死你了😋",
+        )
+
+        async def run_followup():
+            await plugin.on_llm_request(
+                FakeEvent(
+                    "s-active-followup",
+                    message="只有一点点开心嘛",
+                    sender_id="u1",
+                ),
+                first_request,
+            )
+            await plugin.on_llm_request(
+                FakeEvent(
+                    "s-active-followup",
+                    message="那我要咬死你了😋",
+                    sender_id="u1",
+                ),
+                second_request,
+            )
+
+        asyncio.run(run_followup())
+
+        injected = "\n".join(self._request_text_parts(second_request))
+        self.assertIn("sylanne_active_agent_followup_merge", injected)
+        self.assertIn("只有一点点开心嘛", injected)
+        self.assertIn("那我要咬死你了😋", injected)
+        self.assertIn("merged_current_user=只有一点点开心嘛 / 那我要咬死你了😋", injected)
+        self.assertIn("只有一点点开心嘛", plugin._last_request_text["s-active-followup"])
+        self.assertIn("那我要咬死你了😋", plugin._last_request_text["s-active-followup"])
+        self.assertGreaterEqual(len(saves), 2)
+        self.assertEqual(len(assessment_calls), 2)
+        self.assertIn("只有一点点开心嘛", assessment_calls[-1]["current_text"])
+        self.assertIn("那我要咬死你了😋", assessment_calls[-1]["current_text"])
+
     def test_stale_reply_is_kept_as_compact_breakpoint_for_next_turn(self):
         sent = []
 
@@ -5810,7 +5865,8 @@ class AstrBotLifecycleTests(unittest.TestCase):
         self.assertIn("late_llm_response_after_user_message", injected)
         self.assertIn("unsent_count=1", injected)
         self.assertIn("full_hash=", injected)
-        self.assertLessEqual(len(injected), 720)
+        breakpoint_text = self._find_text_part(next_request, "sylanne_interrupted_reply_breakpoint")
+        self.assertLessEqual(len(breakpoint_text), 900)
         self.assertNotIn("x" * 300, injected)
         self.assertNotIn("...", injected)
         self.assertNotIn("sylanne_interrupted_reply_breakpoint", duplicate_injected)
@@ -6336,7 +6392,7 @@ class AstrBotLifecycleTests(unittest.TestCase):
                 "enable_sticker_reaction": False,
                 "use_llm_assessor": True,
                 "realtime_input_completion_probe_delay_seconds": 0.0,
-                "realtime_input_completion_max_wait_seconds": 20.0,
+                "realtime_input_completion_max_wait_seconds": 4.0,
             },
         )
         plugin._observed_now = lambda: 4050.0
@@ -6458,7 +6514,7 @@ class AstrBotLifecycleTests(unittest.TestCase):
                 "enable_sticker_reaction": False,
                 "use_llm_assessor": True,
                 "realtime_input_completion_probe_delay_seconds": 0.01,
-                "realtime_input_completion_max_wait_seconds": 20.0,
+                "realtime_input_completion_max_wait_seconds": 4.0,
             },
         )
         clock = {"now": 6000.0}
@@ -6495,10 +6551,10 @@ class AstrBotLifecycleTests(unittest.TestCase):
         async def run_fragments():
             first = asyncio.create_task(plugin.on_llm_request(events[0], requests[0]))
             await asyncio.sleep(0.03)
-            clock["now"] += 5.0
+            clock["now"] += 1.5
             second = asyncio.create_task(plugin.on_llm_request(events[1], requests[1]))
             await asyncio.sleep(0.03)
-            clock["now"] += 4.0
+            clock["now"] += 1.2
             third = asyncio.create_task(plugin.on_llm_request(events[2], requests[2]))
             await asyncio.gather(first, second, third)
 
@@ -6527,7 +6583,7 @@ class AstrBotLifecycleTests(unittest.TestCase):
                 "enable_sticker_reaction": False,
                 "use_llm_assessor": True,
                 "realtime_input_completion_probe_delay_seconds": 0.01,
-                "realtime_input_completion_max_wait_seconds": 20.0,
+                "realtime_input_completion_max_wait_seconds": 4.0,
             },
         )
         clock = {"now": 7000.0}
@@ -6873,13 +6929,12 @@ class AstrBotLifecycleTests(unittest.TestCase):
         asyncio.run(run_requests())
 
         injected = "\n".join(self._request_text_parts(thesis_request))
-        self.assertIn("sylanne_recent_user_correction_context", injected)
+        self.assertIn("sylanne_active_agent_followup_merge", injected)
+        self.assertIn("sylanne_user_correction_context", injected)
         self.assertIn("我昨晚十点多睡的啦", injected)
         self.assertIn("不要再追问或暗示用户没睡", injected)
-        self.assertIn("sylanne_realtime_pending_bot_question", injected)
-        self.assertIn("current_user_short_answer=我今天打算改论文", injected)
+        self.assertIn("merged_current_user=我昨晚十点多睡的啦 / 我今天打算改论文", injected)
         context_text = "\n".join(str(item) for item in thesis_request.contexts)
-        self.assertIn("我昨晚十点多睡的啦", context_text)
         self.assertIn("你今天是准备继续改论文", context_text)
 
     def test_short_answer_to_pending_question_skips_fragment_completion_gate(self):
@@ -6891,7 +6946,7 @@ class AstrBotLifecycleTests(unittest.TestCase):
                 "enable_sticker_reaction": False,
                 "use_llm_assessor": True,
                 "realtime_input_completion_probe_delay_seconds": 0.65,
-                "realtime_input_completion_max_wait_seconds": 6.0,
+                "realtime_input_completion_max_wait_seconds": 4.0,
             },
         )
         self._bind_common_state_hooks(plugin)

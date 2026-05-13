@@ -390,9 +390,12 @@ REALTIME_ASSISTANT_HISTORY_EXCERPT_CHARS = 720
 RECENT_USER_CORRECTION_LIMIT = 4
 RECENT_USER_CORRECTION_TTL_SECONDS = 180.0
 RECENT_USER_CORRECTION_INJECTION_MAX_CHARS = 520
+ACTIVE_AGENT_PENDING_USER_TURN_LIMIT = 4
+ACTIVE_AGENT_PENDING_USER_TURN_TTL_SECONDS = 180.0
+ACTIVE_AGENT_FOLLOWUP_INJECTION_MAX_CHARS = 620
 REALTIME_INPUT_FRAGMENT_INJECTION_MAX_CHARS = 520
 REALTIME_INPUT_HOLD_INJECTION_MAX_CHARS = 360
-REALTIME_INPUT_LLM_WAIT_MAX_SECONDS = 20.0
+REALTIME_INPUT_LLM_WAIT_MAX_SECONDS = 4.0
 
 
 @dataclass
@@ -597,7 +600,7 @@ def get_emotional_state_plugin(context: Context) -> Any | None:
     PLUGIN_NAME,
     "pidan",
     "Soulful Yearning Lifelike AstrBot Neural Narrative Engine：维护情绪、人格、记忆、氛围和表达节奏的 Sylanne",
-    "2.3.12",
+    "2.3.13",
     "",
 )
 class EmotionalStatePlugin(Star):
@@ -656,6 +659,7 @@ class EmotionalStatePlugin(Star):
         self._last_state_injection_diagnostics: dict[str, dict[str, Any]] = {}
         self._conversation_input_epoch: dict[str, int] = {}
         self._conversation_pending_response_epochs: dict[str, deque[int]] = {}
+        self._active_agent_pending_user_turns: dict[str, deque[dict[str, Any]]] = {}
         self._realtime_input_fragment_windows: dict[str, dict[str, Any]] = {}
         self._interrupted_reply_breakpoints: dict[str, deque[dict[str, Any]]] = {}
         self._realtime_assistant_history_shadows: dict[str, deque[dict[str, Any]]] = {}
@@ -762,6 +766,8 @@ class EmotionalStatePlugin(Star):
             self._conversation_input_epoch.clear()
         if hasattr(self, "_conversation_pending_response_epochs"):
             self._conversation_pending_response_epochs.clear()
+        if hasattr(self, "_active_agent_pending_user_turns"):
+            self._active_agent_pending_user_turns.clear()
         if hasattr(self, "_realtime_input_fragment_windows"):
             self._realtime_input_fragment_windows.clear()
         if hasattr(self, "_interrupted_reply_breakpoints"):
@@ -832,6 +838,15 @@ class EmotionalStatePlugin(Star):
         self._record_conversation_pending_response_epoch(session_key, input_epoch)
         observed_at = self._observed_now()
         current_user_text = self._event_text(event) or str(getattr(request, "prompt", "") or "")
+        active_followup_payload = {}
+        if not self._request_has_tool_context(request):
+            active_followup_payload = self._active_agent_followup_merge_payload(
+                session_key,
+                identity,
+                current_user_text=current_user_text,
+                current_epoch=input_epoch,
+                observed_at=observed_at,
+            )
         model_hint = await self._request_model_hint_for_event(event, request)
         early_injection_budget = self._state_injection_budget_for_request(
             session_key,
@@ -932,11 +947,26 @@ class EmotionalStatePlugin(Star):
                     fragment_payload,
                     budget=early_injection_budget,
                 )
+        current_user_observation_text = (
+            self._realtime_input_merged_intent_from_payload(fragment_payload)
+            or current_user_text
+            or request.prompt
+            or ""
+        )
+        current_user_observation_text = self._active_agent_followup_current_text(
+            active_followup_payload,
+            current_user_observation_text,
+        )
+        self._append_active_agent_followup_merge_if_any(
+            request,
+            active_followup_payload,
+            budget=early_injection_budget,
+        )
         self._append_realtime_continuity_context_if_any(
             request,
             session_key,
             budget=early_injection_budget,
-            current_user_text=current_user_text,
+            current_user_text=current_user_observation_text,
         )
         self._cancel_realtime_chat_dispatches_for_session(
             session_key,
@@ -944,6 +974,18 @@ class EmotionalStatePlugin(Star):
         )
         context_text = self._request_to_text(request)
         self._last_request_text[session_key] = context_text
+        self._record_active_agent_pending_user_turn(
+            session_key,
+            identity,
+            input_epoch=input_epoch,
+            text=(
+                self._realtime_input_merged_intent_from_payload(fragment_payload)
+                or current_user_text
+                or request.prompt
+                or ""
+            ),
+            observed_at=observed_at,
+        )
         self._register_proactive_candidate_session(
             event,
             request=request,
@@ -985,11 +1027,12 @@ class EmotionalStatePlugin(Star):
                 request,
                 session_key,
                 budget=None,
+                current_user_text=current_user_observation_text,
             )
             await self._append_sylanne_memory_recall_context_if_any(
                 request,
                 session_key,
-                current_user_text=current_user_text,
+                current_user_text=current_user_observation_text,
                 budget=None,
             )
             return
@@ -1013,10 +1056,7 @@ class EmotionalStatePlugin(Star):
         before_state = EmotionState.from_dict(state.to_dict())
         current_text = self._agent_current_text(
             event,
-            self._realtime_input_merged_intent_from_payload(fragment_payload)
-            or self._event_text(event)
-            or request.prompt
-            or "",
+            current_user_observation_text,
         )
         current_text = self._augment_current_text_with_interruption_event(
             session_key,
@@ -8463,6 +8503,7 @@ class EmotionalStatePlugin(Star):
             return
         if not pending:
             self._conversation_pending_response_epochs.pop(key, None)
+        self._discard_active_agent_pending_user_turn(key, int(input_epoch))
 
     def _consume_conversation_pending_response_epoch(
         self,
@@ -8483,11 +8524,13 @@ class EmotionalStatePlugin(Star):
                     pass
                 if not pending:
                     self._conversation_pending_response_epochs.pop(key, None)
+            self._discard_active_agent_pending_user_turn(key, event_epoch)
             return event_epoch
         if pending:
             epoch = pending.popleft()
             if not pending:
                 self._conversation_pending_response_epochs.pop(key, None)
+            self._discard_active_agent_pending_user_turn(key, int(epoch))
             return int(epoch)
         return self._conversation_response_epoch(key, event)
 
@@ -8501,6 +8544,237 @@ class EmotionalStatePlugin(Star):
         self._ensure_conversation_epoch_state()
         current = max(0, int(self._conversation_input_epoch.get(str(session_key or "global")) or 0))
         return current > int(input_epoch)
+
+    def _active_agent_pending_user_turn_cache(
+        self,
+    ) -> dict[str, deque[dict[str, Any]]]:
+        cache = getattr(self, "_active_agent_pending_user_turns", None)
+        if not isinstance(cache, dict):
+            cache = {}
+            self._active_agent_pending_user_turns = cache
+        return cache
+
+    def _active_agent_speaker_key(self, identity: ConversationIdentity) -> str:
+        return str(
+            identity.speaker_track_id
+            or identity.speaker_id
+            or identity.conversation_id
+            or "unknown",
+        )
+
+    def _prune_active_agent_pending_user_turns(
+        self,
+        session_key: str,
+        *,
+        now: float | None = None,
+    ) -> None:
+        key = str(session_key or "global")
+        queue = self._active_agent_pending_user_turn_cache().get(key)
+        if not queue:
+            return
+        observed_now = self._observed_now() if now is None else float(now)
+        pending_epochs = set(
+            int(epoch)
+            for epoch in self._conversation_pending_response_epochs.get(key, ())
+        )
+        ttl = max(0.0, ACTIVE_AGENT_PENDING_USER_TURN_TTL_SECONDS)
+        kept = [
+            item
+            for item in queue
+            if int(item.get("input_epoch") or 0) in pending_epochs
+            and (ttl <= 0 or observed_now - float(item.get("observed_at") or 0.0) <= ttl)
+        ]
+        if not kept:
+            self._active_agent_pending_user_turn_cache().pop(key, None)
+            return
+        self._active_agent_pending_user_turn_cache()[key] = deque(
+            kept[-ACTIVE_AGENT_PENDING_USER_TURN_LIMIT:],
+            maxlen=ACTIVE_AGENT_PENDING_USER_TURN_LIMIT,
+        )
+
+    def _record_active_agent_pending_user_turn(
+        self,
+        session_key: str,
+        identity: ConversationIdentity,
+        *,
+        input_epoch: int | None,
+        text: str,
+        observed_at: float,
+    ) -> None:
+        value = " ".join(str(text or "").split()).strip()
+        if input_epoch is None or not value:
+            return
+        key = str(session_key or "global")
+        self._prune_active_agent_pending_user_turns(key, now=observed_at)
+        queue = self._active_agent_pending_user_turn_cache().setdefault(
+            key,
+            deque(maxlen=ACTIVE_AGENT_PENDING_USER_TURN_LIMIT),
+        )
+        if queue.maxlen != ACTIVE_AGENT_PENDING_USER_TURN_LIMIT:
+            queue = deque(queue, maxlen=ACTIVE_AGENT_PENDING_USER_TURN_LIMIT)
+            self._active_agent_pending_user_turn_cache()[key] = queue
+        epoch = int(input_epoch)
+        kept = [item for item in queue if int(item.get("input_epoch") or 0) != epoch]
+        if len(kept) != len(queue):
+            queue = deque(kept, maxlen=ACTIVE_AGENT_PENDING_USER_TURN_LIMIT)
+            self._active_agent_pending_user_turn_cache()[key] = queue
+        queue.append(
+            {
+                "schema_version": "astrbot.active_agent_pending_user_turn.v1",
+                "kind": "active_agent_pending_user_turn",
+                "session_key": key,
+                "speaker_key": self._active_agent_speaker_key(identity),
+                "input_epoch": epoch,
+                "observed_at": float(observed_at),
+                "text": self._head_one_line(value, 240),
+                "hash": self._text_hash(value),
+            },
+        )
+
+    def _discard_active_agent_pending_user_turn(
+        self,
+        session_key: str,
+        input_epoch: int | None,
+    ) -> None:
+        if input_epoch is None:
+            return
+        key = str(session_key or "global")
+        queue = self._active_agent_pending_user_turn_cache().get(key)
+        if not queue:
+            return
+        epoch = int(input_epoch)
+        kept = [item for item in queue if int(item.get("input_epoch") or 0) != epoch]
+        if not kept:
+            self._active_agent_pending_user_turn_cache().pop(key, None)
+            return
+        self._active_agent_pending_user_turn_cache()[key] = deque(
+            kept[-ACTIVE_AGENT_PENDING_USER_TURN_LIMIT:],
+            maxlen=ACTIVE_AGENT_PENDING_USER_TURN_LIMIT,
+        )
+
+    def _active_agent_followup_merge_payload(
+        self,
+        session_key: str,
+        identity: ConversationIdentity,
+        *,
+        current_user_text: str,
+        current_epoch: int | None,
+        observed_at: float,
+    ) -> dict[str, Any]:
+        current = " ".join(str(current_user_text or "").split()).strip()
+        if not current or current_epoch is None:
+            return {}
+        key = str(session_key or "global")
+        self._prune_active_agent_pending_user_turns(key, now=observed_at)
+        queue = self._active_agent_pending_user_turn_cache().get(key)
+        if not queue:
+            return {}
+        pending_epochs = set(
+            int(epoch)
+            for epoch in self._conversation_pending_response_epochs.get(key, ())
+        )
+        speaker_key = self._active_agent_speaker_key(identity)
+        previous = [
+            item
+            for item in queue
+            if int(item.get("input_epoch") or 0) in pending_epochs
+            and int(item.get("input_epoch") or 0) < int(current_epoch)
+            and str(item.get("speaker_key") or "") == speaker_key
+            and str(item.get("text") or "").strip()
+        ]
+        if not previous:
+            return {}
+        previous = previous[-3:]
+        previous_texts = [str(item.get("text") or "").strip() for item in previous]
+        merged = self._head_one_line(" / ".join([*previous_texts, current]), 420)
+        return {
+            "schema_version": "astrbot.active_agent_followup_merge.v1",
+            "kind": "active_agent_followup_merge",
+            "session_key": key,
+            "speaker_key": speaker_key,
+            "current_epoch": int(current_epoch),
+            "pending_count": len(previous),
+            "previous_turns": previous,
+            "current_user": self._head_one_line(current, 240),
+            "merged_current_user": merged,
+            "observed_at": float(observed_at),
+        }
+
+    def _active_agent_followup_current_text(
+        self,
+        payload: dict[str, Any] | None,
+        current_text: str,
+    ) -> str:
+        if not isinstance(payload, dict):
+            return current_text
+        merged = str(payload.get("merged_current_user") or "").strip()
+        return merged or current_text
+
+    def _append_active_agent_followup_merge_if_any(
+        self,
+        request: ProviderRequest,
+        payload: dict[str, Any] | None,
+        *,
+        budget: _StateInjectionBudget | None,
+    ) -> bool:
+        if not isinstance(payload, dict) or not payload.get("merged_current_user"):
+            return False
+        lines = [
+            "[sylanne_active_agent_followup_merge]",
+            "用户在上一轮 LLM 尚未产出可用回复前继续补充；本轮应把这些消息视为同一个连续用户意图，不要只回复最后一句。",
+            "pending_count={count}; current_epoch={epoch}; speaker={speaker}".format(
+                count=int(payload.get("pending_count") or 0),
+                epoch=payload.get("current_epoch", ""),
+                speaker=self._head_one_line(str(payload.get("speaker_key") or ""), 96),
+            ),
+        ]
+        for index, item in enumerate(payload.get("previous_turns") or [], start=1):
+            lines.append(
+                "previous_user[{index}]={text}; epoch={epoch}; hash={hash}".format(
+                    index=index,
+                    text=self._head_one_line(str(item.get("text") or ""), 180),
+                    epoch=item.get("input_epoch", ""),
+                    hash=str(item.get("hash") or "")[:16],
+                ),
+            )
+        lines.append(
+            "current_user="
+            + self._head_one_line(str(payload.get("current_user") or ""), 180),
+        )
+        lines.append(
+            "merged_current_user="
+            + self._head_one_line(str(payload.get("merged_current_user") or ""), 260),
+        )
+        text = self._head_text(
+            "\n".join(lines),
+            ACTIVE_AGENT_FOLLOWUP_INJECTION_MAX_CHARS,
+        )
+        source = "active_agent_followup_merge"
+        effective_budget = None if budget is not None and budget.agent_owned_context else budget
+        appended = self._append_temp_text_part(
+            request,
+            text,
+            source=source,
+            budget=effective_budget,
+            required=True,
+        )
+        if appended and budget is not None and budget.agent_owned_context:
+            text_chars = len(
+                self._format_sylanne_temp_context_for_compression(
+                    text,
+                    source=source,
+                ),
+            )
+            budget.added_chars += text_chars
+            budget.added_parts += 1
+            budget.appended.append(
+                {
+                    "source": source,
+                    "chars": text_chars,
+                    "reason": "active_followup_agent_owned_context_override",
+                },
+            )
+        return appended
 
     def _interrupted_reply_breakpoint_cache(
         self,
@@ -9419,7 +9693,7 @@ class EmotionalStatePlugin(Star):
     def _realtime_input_completion_max_wait_seconds(self) -> float:
         return min(
             REALTIME_INPUT_LLM_WAIT_MAX_SECONDS,
-            max(0.0, self._cfg_float("realtime_input_completion_max_wait_seconds", 6.0)),
+            max(0.0, self._cfg_float("realtime_input_completion_max_wait_seconds", 4.0)),
         )
 
     def _realtime_input_window_matches_payload(
@@ -14188,6 +14462,7 @@ class EmotionalStatePlugin(Star):
             "realtime_assistant_history_usage_guard",
             "realtime_pending_bot_question",
             "interrupted_reply_breakpoint",
+            "active_agent_followup_merge",
             "realtime_input_fragments",
             "user_correction_context",
             "recent_user_correction_context",
@@ -14213,6 +14488,7 @@ class EmotionalStatePlugin(Star):
             "realtime_assistant_history_usage_guard": "sylanne_history_reuse_guard",
             "realtime_pending_bot_question": "sylanne_realtime_pending_bot_question",
             "interrupted_reply_breakpoint": "sylanne_interrupted_reply_breakpoint",
+            "active_agent_followup_merge": "sylanne_active_agent_followup_merge",
             "realtime_input_fragments": "sylanne_user_message_fragments",
             "user_correction_context": "sylanne_user_correction_context",
             "recent_user_correction_context": "sylanne_recent_user_correction_context",

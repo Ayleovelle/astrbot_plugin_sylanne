@@ -109,8 +109,8 @@
   "realtime_input_completion_max_wait_seconds": {
     "description": "用户分段完整性最长等待秒数",
     "type": "float",
-    "default": 6.0,
-    "hint": "判断 LLM 认为用户仍未说完时，单轮最多等待的时间上限。用户继续发送会刷新碎片窗口；超过上限仍未继续时会放行，避免永久沉默。"
+    "default": 4.0,
+    "hint": "判断 LLM 认为用户仍未说完时，单轮最多等待的时间上限，并带有运行时 4 秒硬上限。用户继续发送会刷新碎片窗口；超过上限仍未继续时会放行，避免把即时聊天时间耗在死等上。"
   },
   "realtime_chat_dry_run_default": {
     "description": "即时聊天发送默认试算",
