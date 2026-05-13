@@ -63,7 +63,6 @@ class FuckUCodeReportTests(unittest.TestCase):
             input_path = base / "raw-report.json"
             markdown_path = base / "fuck-u-code.md"
             fermentation_badge = base / "fuck-u-code-fermentation.svg"
-            powered_badge = base / "fuck-u-code-powered.svg"
             input_path.write_text(json.dumps(report), encoding="utf-8")
             args = type(
                 "Args",
@@ -72,7 +71,6 @@ class FuckUCodeReportTests(unittest.TestCase):
                     "input": input_path,
                     "markdown": markdown_path,
                     "fermentation_badge": fermentation_badge,
-                    "powered_badge": powered_badge,
                 },
             )()
 
@@ -88,7 +86,6 @@ class FuckUCodeReportTests(unittest.TestCase):
 
             markdown = markdown_path.read_text(encoding="utf-8")
             ferment_svg = fermentation_badge.read_text(encoding="utf-8")
-            powered_svg = powered_badge.read_text(encoding="utf-8")
 
         self.assertIn("💩 发酵指数：`28.7/100`，官方评价：`😷 屎气扑鼻`", markdown)
         self.assertIn("官方 JSON overallScore：`71.3/100`", markdown)
@@ -98,8 +95,7 @@ class FuckUCodeReportTests(unittest.TestCase):
         self.assertIn("SCORE", ferment_svg)
         self.assertIn("28.7", ferment_svg)
         self.assertIn("屎气扑鼻", ferment_svg)
-        self.assertIn("POWERED BY", powered_svg)
-        self.assertIn("Fuck-U-Code", powered_svg)
+        self.assertFalse((base / "fuck-u-code-powered.svg").exists())
 
 
 if __name__ == "__main__":

@@ -166,8 +166,6 @@ function assertZipLooksUploadable(zipPath, expectedPlugin, options = {}) {
     `${expectedPlugin}/docs/assets/theory_lifecycle_fit_explanation.png`,
     `${expectedPlugin}/docs/assets/theory_lifecycle_fit_explanation.svg`,
     `${expectedPlugin}/docs/assets/workflow_and_proactive.svg`,
-    `${expectedPlugin}/docs/reports/fuck-u-code-fermentation.svg`,
-    `${expectedPlugin}/docs/reports/fuck-u-code-powered.svg`,
     `${expectedPlugin}/pages/memory-settings/index.html`,
     `${expectedPlugin}/pages/memory-settings/app.js`,
     `${expectedPlugin}/pages/memory-settings/style.css`,
@@ -196,6 +194,9 @@ function assertZipLooksUploadable(zipPath, expectedPlugin, options = {}) {
       throw new Error(`Zip entry must not contain parent traversal: ${name}`);
     }
     const relativeParts = name.slice(expectedDirectory.length).split("/").filter(Boolean);
+    if (relativeParts[0] === "docs" && relativeParts[1] === "reports") {
+      throw new Error(`Zip entry contains repository-only report asset: ${name}`);
+    }
     const unsafePart = relativeParts.find((part) => part === "." || part === "..");
     if (unsafePart) {
       throw new Error(`Zip entry must not contain unsafe path segment ${unsafePart}: ${name}`);

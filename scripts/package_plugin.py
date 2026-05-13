@@ -54,11 +54,6 @@ ALLOWED_DOC_ASSETS = {
     Path("docs/assets/workflow_and_proactive.svg"),
 }
 
-ALLOWED_DOC_REPORTS = {
-    Path("docs/reports/fuck-u-code-fermentation.svg"),
-    Path("docs/reports/fuck-u-code-powered.svg"),
-}
-
 EXCLUDED_FILES = {
     Path("docs/literature_kb.md"),
     Path("docs/humanlike_agent_literature_kb.md"),
@@ -90,7 +85,7 @@ def should_include(path: Path) -> bool:
     if len(relative.parts) >= 2 and relative.parts[:2] == ("docs", "assets"):
         return relative in ALLOWED_DOC_ASSETS
     if len(relative.parts) >= 2 and relative.parts[:2] == ("docs", "reports"):
-        return relative in ALLOWED_DOC_REPORTS
+        return False
     if relative in EXCLUDED_FILES:
         return False
     parts = set(relative.parts)

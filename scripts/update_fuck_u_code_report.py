@@ -15,7 +15,6 @@ DEFAULT_INPUT = ROOT / "output" / "fuck_u_code" / "raw-report.json"
 DEFAULT_OFFICIAL_MARKDOWN = ROOT / "output" / "fuck_u_code" / "raw-report.md"
 DEFAULT_MARKDOWN = ROOT / "docs" / "reports" / "fuck-u-code.md"
 DEFAULT_FERMENTATION_BADGE = ROOT / "docs" / "reports" / "fuck-u-code-fermentation.svg"
-DEFAULT_POWERED_BADGE = ROOT / "docs" / "reports" / "fuck-u-code-powered.svg"
 
 
 @dataclass(frozen=True)
@@ -236,27 +235,6 @@ def render_apple_score_badge(
 """
 
 
-def render_apple_powered_badge() -> str:
-    aria = "powered by Fuck-U-Code"
-    return f"""<svg xmlns="http://www.w3.org/2000/svg" width="178" height="42" viewBox="0 0 178 42" role="img" aria-label="{aria}">
-  <title>{aria}</title>
-  <defs>
-    <linearGradient id="card" x1="0" y1="0" x2="0" y2="1">
-      <stop offset="0" stop-color="#fffaf2"/>
-      <stop offset="1" stop-color="#fffdf9"/>
-    </linearGradient>
-    <filter id="shadow" x="-4%" y="-12%" width="108%" height="130%">
-      <feDropShadow dx="0" dy="1" stdDeviation="0.8" flood-color="#7a4a2e" flood-opacity="0.12"/>
-    </filter>
-  </defs>
-  <rect x="0.5" y="0.5" width="177" height="41" rx="8" fill="url(#card)" stroke="#edc9a7" filter="url(#shadow)"/>
-  <text x="18" y="28" font-family="Apple Color Emoji, Segoe UI Emoji, Noto Color Emoji, sans-serif" font-size="19">💩</text>
-  <text x="48" y="15" font-family="-apple-system, BlinkMacSystemFont, Segoe UI, Microsoft YaHei, sans-serif" font-size="7.5" font-weight="700" letter-spacing="0.7" fill="#805e4c">POWERED BY</text>
-  <text x="48" y="31" font-family="-apple-system, BlinkMacSystemFont, Segoe UI, Microsoft YaHei, sans-serif" font-size="16" font-weight="800" fill="#6f3829">Fuck-U-Code</text>
-</svg>
-"""
-
-
 def render_markdown(summary: FuckUCodeSummary, *, source_path: Path) -> str:
     generated_at = dt.datetime.now(dt.timezone.utc).replace(microsecond=0).isoformat()
     rows = []
@@ -304,8 +282,7 @@ def render_markdown(summary: FuckUCodeSummary, *, source_path: Path) -> str:
 def write_report(summary: FuckUCodeSummary, args: argparse.Namespace) -> None:
     markdown_path = args.markdown
     fermentation_badge_path = args.fermentation_badge
-    powered_badge_path = args.powered_badge
-    for path in (markdown_path, fermentation_badge_path, powered_badge_path):
+    for path in (markdown_path, fermentation_badge_path):
         path.parent.mkdir(parents=True, exist_ok=True)
 
     official_level = summary.official_level or "未识别"
@@ -321,10 +298,6 @@ def write_report(summary: FuckUCodeSummary, args: argparse.Namespace) -> None:
         ),
         encoding="utf-8",
     )
-    powered_badge_path.write_text(
-        render_apple_powered_badge(),
-        encoding="utf-8",
-    )
 
 
 def parse_args() -> argparse.Namespace:
@@ -335,7 +308,6 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--official-markdown", type=Path, default=DEFAULT_OFFICIAL_MARKDOWN)
     parser.add_argument("--markdown", type=Path, default=DEFAULT_MARKDOWN)
     parser.add_argument("--fermentation-badge", type=Path, default=DEFAULT_FERMENTATION_BADGE)
-    parser.add_argument("--powered-badge", type=Path, default=DEFAULT_POWERED_BADGE)
     parser.add_argument("--top", type=int, default=12)
     return parser.parse_args()
 

@@ -7,8 +7,7 @@
 ![Python 3.10+](https://img.shields.io/badge/Python-3.10%2B-yellow)
 ![协议 astrbot.emotion_state.v2](https://img.shields.io/badge/schema-astrbot.emotion__state.v2-purple)
 ![许可证 GPL-3.0-or-later](https://img.shields.io/badge/license-GPL--3.0--or--later-red)
-![💩 发酵指数](docs/reports/fuck-u-code-fermentation.svg)
-![powered by Fuck-U-Code](docs/reports/fuck-u-code-powered.svg)
+![💩 发酵指数](https://raw.githubusercontent.com/Ayleovelle/astrbot_plugin_sylanne/main/docs/reports/fuck-u-code-fermentation.svg)
 
 ## 介绍
 
@@ -530,9 +529,6 @@ astrbot_plugin_sylanne/
 │       ├── theory_lifecycle_fit_explanation.png
 │       ├── theory_lifecycle_fit_explanation.svg
 │       └── workflow_and_proactive.svg
-│   └── reports/
-│       ├── fuck-u-code-fermentation.svg
-│       └── fuck-u-code-powered.svg
 └── pages/
     └── memory-settings/
         ├── index.html
@@ -600,9 +596,6 @@ data/plugins/
     │       ├── theory_lifecycle_fit_explanation.png
     │       ├── theory_lifecycle_fit_explanation.svg
     │       └── workflow_and_proactive.svg
-    │   └── reports/
-    │       ├── fuck-u-code-fermentation.svg
-    │       └── fuck-u-code-powered.svg
     └── pages/
         └── memory-settings/
             ├── index.html
@@ -2800,7 +2793,7 @@ py -3.13 scripts\package_plugin.py --output dist\astrbot_plugin_sylanne.zip
 | --- | --- |
 | 顶层目录 | 所有文件都必须在 `astrbot_plugin_sylanne/` 下。 |
 | 包体大小 | 按 AstrBot 插件市场发布约束控制在 `16MB` 以内。 |
-| 必要文件 | 包含 `__init__.py`、`agent_identity.py`、`metadata.yaml`、`main.py`、`emotion_engine.py`、`group_atmosphere_engine.py`、`humanlike_engine.py`、`lifelike_learning_engine.py`、`personality_drift_engine.py`、`realtime_chat_engine.py`、`realtime_chat_input.py`、`integrated_self.py`、`moral_repair_engine.py`、`memory_engine.py`、`fallibility_engine.py`、`psychological_screening.py`、`prompts.py`、`public_api.py`、`logo.png`、`README.md`、`CHANGELOG.md`、`LICENSE`、`requirements.txt`、`_conf_schema.json`、`docs/assets/lifecycle_model_fit.svg`、`docs/assets/lifecycle_model_fit_summary.csv`、`docs/assets/lifecycle_model_fit_table.md`、`docs/assets/runtime_overview.svg`、`docs/assets/sylanne-mascot.gif`、`docs/assets/sylanne-mascot-card.svg`、`docs/assets/theory_feature_matrix_overhead.png`、`docs/assets/theory_feature_matrix_overhead.svg`、`docs/assets/theory_lifecycle_fit_explanation.png`、`docs/assets/theory_lifecycle_fit_explanation.svg`、`docs/assets/workflow_and_proactive.svg`、`docs/reports/fuck-u-code-fermentation.svg`、`docs/reports/fuck-u-code-powered.svg`、`pages/memory-settings/index.html`、`pages/memory-settings/app.js`、`pages/memory-settings/style.css`。 |
+| 必要文件 | 包含 `__init__.py`、`agent_identity.py`、`metadata.yaml`、`main.py`、`emotion_engine.py`、`group_atmosphere_engine.py`、`humanlike_engine.py`、`lifelike_learning_engine.py`、`personality_drift_engine.py`、`realtime_chat_engine.py`、`realtime_chat_input.py`、`integrated_self.py`、`moral_repair_engine.py`、`memory_engine.py`、`fallibility_engine.py`、`psychological_screening.py`、`prompts.py`、`public_api.py`、`logo.png`、`README.md`、`CHANGELOG.md`、`LICENSE`、`requirements.txt`、`_conf_schema.json`、`docs/assets/lifecycle_model_fit.svg`、`docs/assets/lifecycle_model_fit_summary.csv`、`docs/assets/lifecycle_model_fit_table.md`、`docs/assets/runtime_overview.svg`、`docs/assets/sylanne-mascot.gif`、`docs/assets/sylanne-mascot-card.svg`、`docs/assets/theory_feature_matrix_overhead.png`、`docs/assets/theory_feature_matrix_overhead.svg`、`docs/assets/theory_lifecycle_fit_explanation.png`、`docs/assets/theory_lifecycle_fit_explanation.svg`、`docs/assets/workflow_and_proactive.svg`、`pages/memory-settings/index.html`、`pages/memory-settings/app.js`、`pages/memory-settings/style.css`。 |
 | 插件身份 | zip 内 `metadata.yaml name:` 必须等于 `astrbot_plugin_sylanne`。 |
 | 排除目录 | 不应包含 `tests/`、`scripts/`、`output/`、`dist/`、`raw/`、`__pycache__/`、`.git/`，也不应包含四个 `*_literature_kb/` 目录。 |
 | 许可证 | 发布包必须包含 `LICENSE`，协议为 `GPL-3.0-or-later`。 |
@@ -2937,11 +2930,11 @@ py -3.13 -m json.tool _conf_schema.json
 py -3.13 scripts\package_plugin.py --output dist\astrbot_plugin_sylanne.zip
 ```
 
-发布包会保留插件运行文件、README、CHANGELOG、LICENSE、logo.png、`docs/assets/`、`docs/reports/` 下的 README 徽章 SVG 和 `pages/memory-settings/`。四个文献知识库目录 `literature_kb/`、`personality_literature_kb/`、`psychological_literature_kb/`、`humanlike_agent_literature_kb/` 是仅本地研究资料，不上传到 GitHub，也不进入发布 zip 包；这样可以保留后续研究迭代需要的材料，同时避免远程上传包体积失控。
+发布包会保留插件运行文件、README、CHANGELOG、LICENSE、logo.png、`docs/assets/` 和 `pages/memory-settings/`。仓库健康报告与屎山徽章只保留在 GitHub 仓库里，不进入发布 zip 包。四个文献知识库目录 `literature_kb/`、`personality_literature_kb/`、`psychological_literature_kb/`、`humanlike_agent_literature_kb/` 是仅本地研究资料，不上传到 GitHub，也不进入发布 zip 包；这样可以保留后续研究迭代需要的材料，同时避免远程上传包体积失控。
 
 发布 zip 的第一项会显式写入 `astrbot_plugin_sylanne/` 目录项，以兼容 AstrBot WebUI 的 `install-upload` 解压逻辑。不要手工重新压缩成“缺少顶层目录项”的 zip，否则部分 AstrBot 版本会把第一个文件路径误判成目录。
 
-发布包还会保留插件根目录下的 `__init__.py`、`agent_identity.py`、`main.py`、`emotion_engine.py`、`group_atmosphere_engine.py`、`humanlike_engine.py`、`lifelike_learning_engine.py`、`personality_drift_engine.py`、`realtime_chat_engine.py`、`realtime_chat_input.py`、`integrated_self.py`、`moral_repair_engine.py`、`memory_engine.py`、`fallibility_engine.py`、`psychological_screening.py`、`prompts.py`、`public_api.py`、`logo.png`、`README.md`、`CHANGELOG.md`、`LICENSE`、`requirements.txt` 和 `_conf_schema.json`，并把 `docs/assets/`、`docs/reports/` 下的 README 徽章 SVG 与 `pages/memory-settings/` 一起带上。这样其他插件在安装后可以通过 `from astrbot_plugin_sylanne.public_api import ...` 按包名导入公共 API。
+发布包还会保留插件根目录下的 `__init__.py`、`agent_identity.py`、`main.py`、`emotion_engine.py`、`group_atmosphere_engine.py`、`humanlike_engine.py`、`lifelike_learning_engine.py`、`personality_drift_engine.py`、`realtime_chat_engine.py`、`realtime_chat_input.py`、`integrated_self.py`、`moral_repair_engine.py`、`memory_engine.py`、`fallibility_engine.py`、`psychological_screening.py`、`prompts.py`、`public_api.py`、`logo.png`、`README.md`、`CHANGELOG.md`、`LICENSE`、`requirements.txt` 和 `_conf_schema.json`，并把 `docs/assets/` 与 `pages/memory-settings/` 一起带上。这样其他插件在安装后可以通过 `from astrbot_plugin_sylanne.public_api import ...` 按包名导入公共 API。
 
 远程只读烟测：
 
@@ -3011,7 +3004,7 @@ $env:ASTRBOT_REMOTE_INSTALL_CONFIRM = "1"
 
 上传脚本只允许调用 AstrBot WebUI 的 `install-upload` 安装端点；若 WebUI 留下 `plugin_upload_<插件名>` 失败安装残留，脚本只会调用 `uninstall-failed` 清理这个失败上传目录，并固定 `delete_config=false`、`delete_data=false`。它不会删除正式插件、覆盖正式插件目录、更新插件、重启 AstrBot、保存配置或写入本地 cookie/session。如果远端返回“目录 `<插件名>` 已存在”，脚本会输出 `installOutcome="already_installed_no_overwrite"`、`alreadyInstalled=true`、`overwriteAttempted=false` 和 `formalPluginDirectoryPreserved=true`，表示正式插件目录被保留，后续应通过只读烟测查看实际运行版本。上传成功后，再运行上面的 `ASTRBOT_EXPECT_PLUGIN` 只读烟测作为最终验证。
 
-上传脚本在真正发起安装请求之前会完整读取 zip 中央目录做本地预检：所有条目必须位于 `astrbot_plugin_sylanne/` 下，路径必须是相对 POSIX 路径，且不能包含 `.` / `..` 不安全路径段；必须包含 `__init__.py`、`agent_identity.py`、`metadata.yaml`、`main.py`、`emotion_engine.py`、`group_atmosphere_engine.py`、`humanlike_engine.py`、`lifelike_learning_engine.py`、`personality_drift_engine.py`、`realtime_chat_engine.py`、`realtime_chat_input.py`、`integrated_self.py`、`moral_repair_engine.py`、`memory_engine.py`、`fallibility_engine.py`、`psychological_screening.py`、`prompts.py`、`public_api.py`、`README.md`、`CHANGELOG.md`、`LICENSE`、`requirements.txt`、`_conf_schema.json`、`logo.png`、`docs/assets/lifecycle_model_fit.svg`、`docs/assets/lifecycle_model_fit_summary.csv`、`docs/assets/lifecycle_model_fit_table.md`、`docs/assets/runtime_overview.svg`、`docs/assets/sylanne-mascot.gif`、`docs/assets/sylanne-mascot-card.svg`、`docs/assets/theory_feature_matrix_overhead.png`、`docs/assets/theory_feature_matrix_overhead.svg`、`docs/assets/theory_lifecycle_fit_explanation.png`、`docs/assets/theory_lifecycle_fit_explanation.svg`、`docs/assets/workflow_and_proactive.svg`、`docs/reports/fuck-u-code-fermentation.svg`、`docs/reports/fuck-u-code-powered.svg`、`pages/memory-settings/index.html`、`pages/memory-settings/app.js`、`pages/memory-settings/style.css`，并拒绝 `tests/`、`scripts/`、`output/`、`dist/`、`raw/`、`__pycache__/`、`.git/` 和四个 `*_literature_kb/` 目录。预检还会读取 zip 内的 `metadata.yaml`，确认其中 `name:` 精确等于 CLI 参数或 `ASTRBOT_EXPECT_PLUGIN` 传入的插件目录名。
+上传脚本在真正发起安装请求之前会完整读取 zip 中央目录做本地预检：所有条目必须位于 `astrbot_plugin_sylanne/` 下，路径必须是相对 POSIX 路径，且不能包含 `.` / `..` 不安全路径段；必须包含 `__init__.py`、`agent_identity.py`、`metadata.yaml`、`main.py`、`emotion_engine.py`、`group_atmosphere_engine.py`、`humanlike_engine.py`、`lifelike_learning_engine.py`、`personality_drift_engine.py`、`realtime_chat_engine.py`、`realtime_chat_input.py`、`integrated_self.py`、`moral_repair_engine.py`、`memory_engine.py`、`fallibility_engine.py`、`psychological_screening.py`、`prompts.py`、`public_api.py`、`README.md`、`CHANGELOG.md`、`LICENSE`、`requirements.txt`、`_conf_schema.json`、`logo.png`、`docs/assets/lifecycle_model_fit.svg`、`docs/assets/lifecycle_model_fit_summary.csv`、`docs/assets/lifecycle_model_fit_table.md`、`docs/assets/runtime_overview.svg`、`docs/assets/sylanne-mascot.gif`、`docs/assets/sylanne-mascot-card.svg`、`docs/assets/theory_feature_matrix_overhead.png`、`docs/assets/theory_feature_matrix_overhead.svg`、`docs/assets/theory_lifecycle_fit_explanation.png`、`docs/assets/theory_lifecycle_fit_explanation.svg`、`docs/assets/workflow_and_proactive.svg`、`pages/memory-settings/index.html`、`pages/memory-settings/app.js`、`pages/memory-settings/style.css`，并拒绝 `tests/`、`scripts/`、`output/`、`dist/`、`raw/`、`__pycache__/`、`.git/`、`docs/reports/` 和四个 `*_literature_kb/` 目录。预检还会读取 zip 内的 `metadata.yaml`，确认其中 `name:` 精确等于 CLI 参数或 `ASTRBOT_EXPECT_PLUGIN` 传入的插件目录名。
 
 也可以单独运行预检，不连接远程服务器：
 

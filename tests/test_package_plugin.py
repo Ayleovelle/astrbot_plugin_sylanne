@@ -32,11 +32,6 @@ EXPECTED_DOC_ASSETS = {
     "docs/assets/theory_lifecycle_fit_explanation.svg",
     "docs/assets/workflow_and_proactive.svg",
 }
-EXPECTED_DOC_REPORTS = {
-    "docs/reports/fuck-u-code-fermentation.svg",
-    "docs/reports/fuck-u-code-powered.svg",
-}
-
 
 def load_package_script():
     path = ROOT / "scripts" / "package_plugin.py"
@@ -78,7 +73,7 @@ class PackagePluginTests(unittest.TestCase):
         self.assertIn("CHANGELOG.md", files)
         self.assertIn("docs/theory.md", files)
         self.assertIn("docs/remote_testing.md", files)
-        for asset in EXPECTED_DOC_ASSETS | EXPECTED_DOC_REPORTS:
+        for asset in EXPECTED_DOC_ASSETS:
             with self.subTest(asset=asset):
                 self.assertIn(asset, files)
         self.assertIn("pages/memory-settings/index.html", files)
@@ -94,14 +89,7 @@ class PackagePluginTests(unittest.TestCase):
         )
         self.assertNotIn("docs/literature_kb.md", files)
         self.assertNotIn("docs/humanlike_agent_literature_kb.md", files)
-        self.assertFalse(
-            any(
-                path.startswith("docs/reports/")
-                and path
-                not in EXPECTED_DOC_REPORTS
-                for path in files
-            )
-        )
+        self.assertFalse(any(path.startswith("docs/reports/") for path in files))
         self.assertNotIn("scripts/package_plugin.py", files)
         self.assertNotIn("task_plan.md", files)
         self.assertNotIn("progress.md", files)
@@ -145,9 +133,6 @@ class PackagePluginTests(unittest.TestCase):
             "theory_lifecycle_fit_explanation.png",
             "theory_lifecycle_fit_explanation.svg",
             "workflow_and_proactive.svg",
-            "reports/",
-            "fuck-u-code-fermentation.svg",
-            "fuck-u-code-powered.svg",
             "pages/",
             "memory-settings/",
             "index.html",
@@ -211,7 +196,7 @@ class PackagePluginTests(unittest.TestCase):
         self.assertIn(prefix + "LICENSE", names)
         self.assertIn(prefix + "logo.png", names)
         self.assertIn(prefix + "docs/remote_testing.md", names)
-        for asset in EXPECTED_DOC_ASSETS | EXPECTED_DOC_REPORTS:
+        for asset in EXPECTED_DOC_ASSETS:
             with self.subTest(asset=asset):
                 self.assertIn(prefix + asset, names)
         self.assertIn(prefix + "pages/memory-settings/index.html", names)
@@ -227,14 +212,7 @@ class PackagePluginTests(unittest.TestCase):
         )
         self.assertNotIn(prefix + "docs/literature_kb.md", names)
         self.assertNotIn(prefix + "docs/humanlike_agent_literature_kb.md", names)
-        self.assertFalse(
-            any(
-                name.startswith(prefix + "docs/reports/")
-                and name
-                not in {prefix + report for report in EXPECTED_DOC_REPORTS}
-                for name in names
-            )
-        )
+        self.assertFalse(any(name.startswith(prefix + "docs/reports/") for name in names))
         self.assertFalse(any(name.startswith(prefix + "literature_kb/") for name in names))
         self.assertFalse(any(name.startswith(prefix + "personality_literature_kb/") for name in names))
         self.assertFalse(any(name.startswith(prefix + "psychological_literature_kb/") for name in names))
@@ -365,8 +343,6 @@ class PluginZipPreflightTests(unittest.TestCase):
             (prefix + "docs/assets/theory_lifecycle_fit_explanation.png", "PNG\n"),
             (prefix + "docs/assets/theory_lifecycle_fit_explanation.svg", "<svg></svg>\n"),
             (prefix + "docs/assets/workflow_and_proactive.svg", "<svg></svg>\n"),
-            (prefix + "docs/reports/fuck-u-code-fermentation.svg", "<svg></svg>\n"),
-            (prefix + "docs/reports/fuck-u-code-powered.svg", "<svg></svg>\n"),
             (prefix + "pages/memory-settings/index.html", "<!doctype html>\n"),
             (prefix + "pages/memory-settings/app.js", "export {};\n"),
             (prefix + "pages/memory-settings/style.css", "body{}\n"),
@@ -411,6 +387,19 @@ class PluginZipPreflightTests(unittest.TestCase):
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("excluded path segment", result.stderr)
 
+    def test_zip_preflight_rejects_repository_report_assets(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            output = Path(temp_dir) / f"{PLUGIN_NAME}.zip"
+            entries = self._valid_entries() + [
+                (f"{PLUGIN_NAME}/docs/reports/fuck-u-code-fermentation.svg", "<svg></svg>\n"),
+            ]
+            self._write_zip(output, entries)
+
+            result = self._preflight(output)
+
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("repository-only report asset", result.stderr)
+
     def test_zip_preflight_rejects_missing_required_runtime_file(self):
         required_suffixes = (
             "__init__.py",
@@ -441,8 +430,6 @@ class PluginZipPreflightTests(unittest.TestCase):
             "docs/assets/theory_lifecycle_fit_explanation.png",
             "docs/assets/theory_lifecycle_fit_explanation.svg",
             "docs/assets/workflow_and_proactive.svg",
-            "docs/reports/fuck-u-code-fermentation.svg",
-            "docs/reports/fuck-u-code-powered.svg",
             "pages/memory-settings/index.html",
             "pages/memory-settings/app.js",
             "pages/memory-settings/style.css",
