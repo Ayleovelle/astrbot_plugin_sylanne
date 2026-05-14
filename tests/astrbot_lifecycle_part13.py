@@ -216,6 +216,356 @@ class AstrBotLifecyclePart13(AstrBotLifecycleTests):
         self.assertGreaterEqual(len(saves), 1)
         self.assertIn("感觉 你 骂人 像在 撒娇 宝贝", assessment_calls[0]["current_text"])
 
+    def test_waiting_llm_stage_holds_queued_short_fragments_before_session_lock(self):
+        plugin = new_plugin(
+            {
+                "assessment_timing": "pre",
+                "inject_state": False,
+                "enable_realtime_chat": True,
+                "enable_sticker_reaction": False,
+                "use_llm_assessor": False,
+                "realtime_input_completion_probe_delay_seconds": 0.03,
+                "realtime_input_completion_max_wait_seconds": 0.22,
+            },
+        )
+        clock = {"now": 3500.0}
+        plugin._observed_now = lambda: clock["now"]
+        saves, assessment_calls = self._bind_common_state_hooks(plugin)
+        texts = ["我说", "感觉", "你", "骂人", "像在", "撒娇", "宝贝"]
+        events = [
+            FakeEvent("s-waiting-short-phrase", message=text, sender_id="u1")
+            for text in texts
+        ]
+
+        async def run_waiting_fragments():
+            tasks = []
+            for event in events:
+                tasks.append(asyncio.create_task(plugin.on_waiting_llm_request(event)))
+                await asyncio.sleep(0.08)
+                clock["now"] += 0.5
+            await asyncio.gather(*tasks)
+            final_request = fake_request(
+                session_id="s-waiting-short-phrase",
+                prompt=texts[-1],
+            )
+            await plugin.on_llm_request(events[-1], final_request)
+            return final_request
+
+        final_request = asyncio.run(run_waiting_fragments())
+
+        for event in events[:-1]:
+            self.assertTrue(event.stopped)
+            self.assertEqual(
+                event.stop_reason,
+                "realtime_input_fragment_waiting",
+            )
+        self.assertFalse(events[-1].stopped)
+        injected = "\n".join(self._request_text_parts(final_request))
+        self.assertIn("sylanne_user_message_fragments", injected)
+        self.assertIn("我说 / 感觉 / 你 / 骂人 / 像在 / 撒娇 / 宝贝", injected)
+        self.assertIn("merged_intent=我说 感觉 你 骂人 像在 撒娇 宝贝", injected)
+        self.assertEqual(len(assessment_calls), 1)
+        self.assertGreaterEqual(len(saves), 1)
+        self.assertIn("我说 感觉 你 骂人 像在 撒娇 宝贝", assessment_calls[0]["current_text"])
+
+    def test_active_runner_followups_suppress_half_intent_intercepted_reply(self):
+        plugin = new_plugin(
+            {
+                "assessment_timing": "post",
+                "inject_state": False,
+                "enable_realtime_chat": True,
+                "enable_sticker_reaction": False,
+                "enable_sylanne_memory": False,
+                "realtime_chat_intercept_llm_response": True,
+            },
+        )
+        plugin._observed_now = lambda: 3600.0
+        self._bind_common_state_hooks(plugin)
+
+        async def run_pending_followup_response():
+            await plugin.on_llm_request(
+                FakeEvent(
+                    "s-runner-followup",
+                    message="我说",
+                    sender_id="u1",
+                    platform_name="aiocqhttp",
+                ),
+                fake_request(session_id="s-runner-followup", prompt="我说"),
+            )
+            plugin._astrbot_active_runner_followup_texts = lambda event, **kwargs: ["像在", "撒娇"]
+            response = SimpleNamespace(completion_text="哼，你说？你说啥呀？")
+            response_event = FakeEvent(
+                "s-runner-followup",
+                sender_id="u1",
+                platform_name="aiocqhttp",
+            )
+            await plugin.on_llm_response(response_event, response)
+            return response_event, response
+
+        response_event, response = asyncio.run(run_pending_followup_response())
+
+        self.assertEqual(response.completion_text, "")
+        self.assertTrue(response_event.stopped)
+        self.assertEqual(
+            response_event.stop_reason,
+            "active_agent_followup_pending_before_response",
+        )
+        breakpoints = list(plugin._interrupted_reply_breakpoints["s-runner-followup"])
+        self.assertEqual(breakpoints[-1]["reason"], "active_agent_followup_pending_before_response")
+        self.assertIn("我说", plugin._active_agent_pending_user_turns["s-runner-followup"][0]["text"])
+
+    def test_active_runner_followups_keep_order_for_next_user_turn_merge(self):
+        plugin = new_plugin(
+            {
+                "assessment_timing": "pre",
+                "inject_state": False,
+                "enable_realtime_chat": True,
+                "enable_sticker_reaction": False,
+                "enable_sylanne_memory": False,
+                "realtime_chat_intercept_llm_response": True,
+            },
+        )
+        clock = {"now": 3700.0}
+        plugin._observed_now = lambda: clock["now"]
+        self._bind_common_state_hooks(plugin)
+
+        async def run_active_followup_then_next_turn():
+            await plugin.on_llm_request(
+                FakeEvent(
+                    "s-runner-followup-order",
+                    message="我说",
+                    sender_id="u1",
+                    platform_name="aiocqhttp",
+                ),
+                fake_request(session_id="s-runner-followup-order", prompt="我说"),
+            )
+            plugin._astrbot_active_runner_followup_texts = lambda event, **kwargs: ["像在", "撒娇"]
+            stale = SimpleNamespace(completion_text="哼，你说？")
+            await plugin.on_llm_response(
+                FakeEvent(
+                    "s-runner-followup-order",
+                    sender_id="u1",
+                    platform_name="aiocqhttp",
+                ),
+                stale,
+            )
+            clock["now"] += 1.0
+            next_request = fake_request(
+                session_id="s-runner-followup-order",
+                prompt="宝贝",
+            )
+            await plugin.on_llm_request(
+                FakeEvent(
+                    "s-runner-followup-order",
+                    message="宝贝",
+                    sender_id="u1",
+                    platform_name="aiocqhttp",
+                ),
+                next_request,
+            )
+            return next_request
+
+        next_request = asyncio.run(run_active_followup_then_next_turn())
+
+        injected = "\n".join(self._request_text_parts(next_request))
+        self.assertIn("sylanne_active_agent_followup_merge", injected)
+        self.assertIn("previous_user[1]=我说", injected)
+        self.assertIn("previous_user[2]=像在", injected)
+        self.assertIn("previous_user[3]=撒娇", injected)
+        self.assertIn("merged_current_user=我说 / 像在 / 撒娇 / 宝贝", injected)
+
+    def test_active_agent_followup_merge_orders_previous_turns_by_observed_time(self):
+        plugin = new_plugin(
+            {
+                "assessment_timing": "pre",
+                "inject_state": False,
+                "enable_realtime_chat": False,
+                "enable_sticker_reaction": False,
+                "enable_sylanne_memory": False,
+            },
+        )
+        plugin._observed_now = lambda: 3800.0
+        self._bind_common_state_hooks(plugin)
+
+        async def run_out_of_order_pending_turns():
+            identity = plugin._agent_identity(
+                FakeEvent(
+                    "s-active-time-order",
+                    message="seed",
+                    sender_id="u1",
+                    platform_name="aiocqhttp",
+                ),
+            )
+            plugin._record_active_agent_pending_user_turn(
+                "s-active-time-order",
+                identity,
+                input_epoch=3,
+                text="骂人",
+                observed_at=3797.0,
+            )
+            plugin._record_active_agent_pending_user_turn(
+                "s-active-time-order",
+                identity,
+                input_epoch=1,
+                text="感觉",
+                observed_at=3795.0,
+            )
+            plugin._record_active_agent_pending_user_turn(
+                "s-active-time-order",
+                identity,
+                input_epoch=2,
+                text="你",
+                observed_at=3796.0,
+            )
+            plugin._conversation_input_epoch["s-active-time-order"] = 3
+            request = fake_request(session_id="s-active-time-order", prompt="现在继续说")
+            await plugin.on_llm_request(
+                FakeEvent(
+                    "s-active-time-order",
+                    message="现在继续说",
+                    sender_id="u1",
+                    platform_name="aiocqhttp",
+                ),
+                request,
+            )
+            return request
+
+        request = asyncio.run(run_out_of_order_pending_turns())
+
+        injected = "\n".join(self._request_text_parts(request))
+        self.assertIn("previous_user[1]=感觉", injected)
+        self.assertIn("previous_user[2]=你", injected)
+        self.assertIn("previous_user[3]=骂人", injected)
+        self.assertIn("merged_current_user=感觉 / 你 / 骂人 / 现在继续说", injected)
+
+    def test_active_agent_followup_merge_places_current_turn_by_message_time(self):
+        plugin = new_plugin(
+            {
+                "assessment_timing": "pre",
+                "inject_state": False,
+                "enable_realtime_chat": False,
+                "enable_sticker_reaction": False,
+                "enable_sylanne_memory": False,
+            },
+        )
+        self._bind_common_state_hooks(plugin)
+
+        async def run_current_turn_arrives_before_previous_processed_turn():
+            base_time = 1778700000.0
+            identity = plugin._agent_identity(
+                FakeEvent(
+                    "s-active-current-time-order",
+                    message="seed",
+                    sender_id="u1",
+                    platform_name="aiocqhttp",
+                ),
+            )
+            for epoch, text, timestamp in (
+                (1, "我说", base_time + 0.0),
+                (2, "感觉", base_time + 0.1),
+                (3, "你", base_time + 0.2),
+                (4, "骂人", base_time + 0.3),
+                (5, "像在", base_time + 0.4),
+                (6, "宝贝", base_time + 0.6),
+            ):
+                plugin._record_active_agent_pending_user_turn(
+                    "s-active-current-time-order",
+                    identity,
+                    input_epoch=epoch,
+                    text=text,
+                    observed_at=timestamp,
+                )
+            plugin._conversation_input_epoch["s-active-current-time-order"] = 6
+            request = fake_request(
+                session_id="s-active-current-time-order",
+                prompt="撒娇",
+            )
+            await plugin.on_llm_request(
+                FakeEvent(
+                    "s-active-current-time-order",
+                    message="撒娇",
+                    sender_id="u1",
+                    platform_name="aiocqhttp",
+                    timestamp=base_time + 0.5,
+                ),
+                request,
+            )
+            return request
+
+        request = asyncio.run(run_current_turn_arrives_before_previous_processed_turn())
+
+        injected = "\n".join(self._request_text_parts(request))
+        self.assertIn("sylanne_active_agent_followup_merge", injected)
+        self.assertIn("previous_user[5]=像在", injected)
+        self.assertIn("previous_user[6]=宝贝", injected)
+        self.assertIn(
+            "merged_current_user=我说 / 感觉 / 你 / 骂人 / 像在 / 撒娇 / 宝贝",
+            injected,
+        )
+
+    def test_active_runner_followups_keep_ticket_message_time(self):
+        plugin = new_plugin(
+            {
+                "assessment_timing": "post",
+                "inject_state": False,
+                "enable_realtime_chat": True,
+                "enable_sticker_reaction": False,
+                "enable_sylanne_memory": False,
+            },
+        )
+        self._bind_common_state_hooks(plugin)
+        base_time = 1778700100.0
+        follow_up_module = types.ModuleType("astrbot.core.pipeline.process_stage.follow_up")
+        follow_up_module._ACTIVE_AGENT_RUNNERS = {
+            "s-ticket-time": SimpleNamespace(
+                _pending_follow_ups=[
+                    SimpleNamespace(
+                        text="像在",
+                        consumed=False,
+                        order_seq=0,
+                        event=FakeEvent(
+                            "s-ticket-time",
+                            message="像在",
+                            sender_id="u1",
+                            timestamp=base_time + 0.4,
+                        ),
+                    ),
+                    SimpleNamespace(
+                        text="撒娇",
+                        consumed=False,
+                        order_seq=1,
+                        event=FakeEvent(
+                            "s-ticket-time",
+                            message="撒娇",
+                            sender_id="u1",
+                            timestamp=base_time + 0.5,
+                        ),
+                    ),
+                ],
+            ),
+        }
+        pipeline_module = sys.modules.setdefault(
+            "astrbot.core.pipeline",
+            types.ModuleType("astrbot.core.pipeline"),
+        )
+        process_stage_module = sys.modules.setdefault(
+            "astrbot.core.pipeline.process_stage",
+            types.ModuleType("astrbot.core.pipeline.process_stage"),
+        )
+        setattr(process_stage_module, "follow_up", follow_up_module)
+        setattr(pipeline_module, "process_stage", process_stage_module)
+        sys.modules["astrbot.core.pipeline.process_stage.follow_up"] = follow_up_module
+
+        turns = plugin._astrbot_active_runner_followup_texts(
+            FakeEvent("s-ticket-time", sender_id="u1"),
+        )
+
+        self.assertEqual([turn["text"] for turn in turns], ["像在", "撒娇"])
+        self.assertEqual(
+            [turn["observed_at"] for turn in turns],
+            [base_time + 0.4, base_time + 0.5],
+        )
+
 
     def test_stale_intercepted_reply_keeps_prior_user_turns_for_followup_merge(self):
         plugin = new_plugin(

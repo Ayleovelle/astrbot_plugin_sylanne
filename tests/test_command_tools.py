@@ -88,6 +88,7 @@ def install_astrbot_stubs():
     class FakeFilter:
         on_llm_request = staticmethod(passthrough_decorator)
         on_llm_response = staticmethod(passthrough_decorator)
+        on_waiting_llm_request = staticmethod(passthrough_decorator)
         llm_tool = staticmethod(passthrough_decorator)
         command = staticmethod(passthrough_decorator)
 

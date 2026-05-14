@@ -149,9 +149,11 @@ def observe_realtime_input_fragment(
             return _empty_payload(session, speaker, reason="not_fragment_candidate")
         fragments = list(previous.get("fragments") or [])
         fragments.append(fragment)
+        fragments.sort(key=lambda item: float(getattr(item, "observed_at", 0.0) or 0.0))
         fragments = fragments[-max(2, int(settings.max_fragments)) :]
         previous["fragments"] = fragments
-        previous["updated_at"] = fragment.observed_at
+        previous["started_at"] = fragments[0].observed_at
+        previous["updated_at"] = fragments[-1].observed_at
 
         if not _should_emit_window(fragments, settings):
             sequence = [item.text for item in fragments]

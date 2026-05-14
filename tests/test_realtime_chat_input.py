@@ -118,6 +118,38 @@ class RealtimeChatInputTests(unittest.TestCase):
         self.assertIn("sylanne_user_message_fragments", injection)
         self.assertIn("merged_intent=你 是 🐷 吗", injection)
 
+    def test_short_fragments_are_ordered_by_message_time_not_task_arrival(self):
+        windows = {}
+        settings = RealtimeInputSettings(max_window_seconds=3.2)
+        observe_realtime_input_fragment(
+            windows,
+            session_key="s-out-of-order",
+            speaker_key="u1",
+            text="感觉",
+            now=100.0,
+            settings=settings,
+        )
+        observe_realtime_input_fragment(
+            windows,
+            session_key="s-out-of-order",
+            speaker_key="u1",
+            text="骂人",
+            now=100.4,
+            settings=settings,
+        )
+        payload = observe_realtime_input_fragment(
+            windows,
+            session_key="s-out-of-order",
+            speaker_key="u1",
+            text="你",
+            now=100.2,
+            settings=settings,
+        )
+
+        self.assertTrue(payload["should_hold"])
+        self.assertEqual(payload["display_sequence"], "感觉 / 你 / 骂人")
+        self.assertEqual(payload["merged_intent"], "感觉 你 骂人")
+
     def test_timeout_and_speaker_change_start_new_windows(self):
         windows = {}
         settings = RealtimeInputSettings(max_window_seconds=1.0)

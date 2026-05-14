@@ -27,6 +27,17 @@ from astrbot.api.provider import LLMResponse, ProviderRequest
 from astrbot.api.star import Context, Star, register
 from astrbot.core.agent.message import TextPart
 
+if not hasattr(filter, "on_waiting_llm_request"):
+    def _missing_waiting_llm_request_decorator(*args: Any, **kwargs: Any):
+        del args, kwargs
+
+        def decorate(func: Any) -> Any:
+            return func
+
+        return decorate
+
+    filter.on_waiting_llm_request = _missing_waiting_llm_request_decorator
+
 try:
     from quart import jsonify, request
 except Exception:  # pragma: no cover - local unit tests install lightweight AstrBot stubs only.
@@ -403,9 +414,9 @@ RECENT_USER_CORRECTION_INJECTION_MAX_CHARS = 520
 RECENT_USER_SCENE_LIMIT = 4
 RECENT_USER_SCENE_TTL_SECONDS = 300.0
 RECENT_USER_SCENE_INJECTION_MAX_CHARS = 620
-ACTIVE_AGENT_PENDING_USER_TURN_LIMIT = 4
+ACTIVE_AGENT_PENDING_USER_TURN_LIMIT = 8
 ACTIVE_AGENT_PENDING_USER_TURN_TTL_SECONDS = 180.0
-ACTIVE_AGENT_FOLLOWUP_INJECTION_MAX_CHARS = 620
+ACTIVE_AGENT_FOLLOWUP_INJECTION_MAX_CHARS = 900
 REALTIME_INPUT_FRAGMENT_INJECTION_MAX_CHARS = 520
 REALTIME_INPUT_HOLD_INJECTION_MAX_CHARS = 360
 REALTIME_INPUT_LLM_WAIT_MAX_SECONDS = 4.0
@@ -613,7 +624,7 @@ def get_emotional_state_plugin(context: Context) -> Any | None:
     PLUGIN_NAME,
     "Aylovelle.S.S",
     "Soulful Yearning Lifelike AstrBot Neural Narrative Engine：维护情绪、人格、记忆、氛围和表达节奏的 Sylanne",
-    "2.4.1",
+    "2.4.2",
     "",
 )
 class EmotionalStatePlugin(Star):
@@ -825,6 +836,86 @@ class EmotionalStatePlugin(Star):
         if hasattr(self, "_realtime_chat_dispatch_tasks"):
             self._realtime_chat_dispatch_tasks.clear()
 
+    @filter.on_waiting_llm_request()
+    async def on_waiting_llm_request(self, event: AstrMessageEvent) -> None:
+        """在 AstrBot session lock 前收住连续短碎片，避免旧半句先进 LLM。"""
+        if _INTERNAL_LLM_CALL.get() or not self._cfg_bool("enabled", True):
+            return
+        if not self._realtime_chat_enabled():
+            return
+        if self._napcat_recall_payload(event) or self._napcat_input_status_payload(event):
+            return
+        current_user_text = self._event_text(event)
+        if not current_user_text.strip():
+            return
+        identity = self._agent_identity(event)
+        session_key = identity.conversation_id
+        if self._current_user_text_answers_pending_realtime_question(
+            session_key,
+            current_user_text,
+        ):
+            return
+        observed_at = self._event_observed_at(event)
+        payload = observe_realtime_input_fragment(
+            self._realtime_input_fragment_window_cache(),
+            session_key=session_key,
+            speaker_key=identity.speaker_track_id
+            or identity.speaker_id
+            or identity.conversation_id,
+            text=current_user_text,
+            now=observed_at,
+            settings=self._realtime_input_settings(),
+        )
+        self._set_waiting_realtime_input_payload(event, payload)
+        if self._realtime_input_fragment_should_hold(payload):
+            if await self._realtime_input_fragment_still_waiting_after_gate(
+                event,
+                identity,
+                payload,
+            ):
+                self._mark_realtime_input_fragment_hold(event, None, payload)
+                self._cancel_realtime_chat_dispatches_for_session(
+                    session_key,
+                    reason="realtime_input_fragment_waiting",
+                )
+                return
+            self._release_realtime_input_fragment_window_if_unchanged(
+                session_key,
+                payload,
+            )
+            release_payload = dict(payload)
+            release_payload["should_inject"] = True
+            release_payload["should_hold"] = False
+            release_payload["reason"] = "released_after_waiting_llm_stage"
+            self._set_waiting_realtime_input_payload(event, release_payload)
+            return
+        if payload.get("should_inject"):
+            blocked_payload = await self._realtime_input_release_blocked_by_llm_gate(
+                event,
+                identity,
+                payload,
+            )
+            if blocked_payload is not None:
+                if await self._realtime_input_blocked_release_still_waiting(
+                    identity,
+                    blocked_payload,
+                ):
+                    self._mark_realtime_input_fragment_hold(event, None, blocked_payload)
+                    self._cancel_realtime_chat_dispatches_for_session(
+                        session_key,
+                        reason="realtime_input_fragment_waiting",
+                    )
+                    return
+                self._release_realtime_input_fragment_window_if_unchanged(
+                    session_key,
+                    blocked_payload,
+                )
+                release_payload = dict(blocked_payload)
+                release_payload["should_inject"] = True
+                release_payload["should_hold"] = False
+                release_payload["reason"] = "released_after_waiting_llm_stage"
+                self._set_waiting_realtime_input_payload(event, release_payload)
+
     @filter.on_llm_request()
     async def on_llm_request(
         self,
@@ -870,6 +961,15 @@ class EmotionalStatePlugin(Star):
                 reason=reason,
                 payload=empty_input_status,
             )
+            return
+
+        waiting_fragment_payload = self._take_waiting_realtime_input_payload(event)
+        if (
+            getattr(event, "_sylanne_realtime_input_hold", False)
+            and str(getattr(event, "_sylanne_default_response_stop_reason", "") or "")
+            == "realtime_input_fragment_waiting"
+            and not waiting_fragment_payload.get("should_inject")
+        ):
             return
 
         assessment_timing = self._assessment_timing()
@@ -925,11 +1025,11 @@ class EmotionalStatePlugin(Star):
             model_hint=model_hint,
         )
         await self._observe_agent_identity(identity, now=observed_at)
-        fragment_payload = {}
+        fragment_payload = waiting_fragment_payload if waiting_fragment_payload else {}
         if not self._current_user_text_answers_pending_realtime_question(
             session_key,
             current_user_text,
-        ):
+        ) and not fragment_payload:
             fragment_payload = await self._observe_realtime_input_fragment_context_if_any(
                 event,
                 request,
@@ -1874,6 +1974,50 @@ class EmotionalStatePlugin(Star):
             identity.conversation_id,
             event,
         )
+        active_runner_followups = self._astrbot_active_runner_followup_texts(
+            event,
+            fallback_observed_at=observed_at,
+        )
+        if active_runner_followups:
+            self._record_active_agent_captured_followup_turns(
+                identity.conversation_id,
+                identity,
+                input_epoch=response_epoch,
+                texts=active_runner_followups,
+                observed_at=observed_at,
+            )
+            self._record_interrupted_reply_breakpoint(
+                identity.conversation_id,
+                reason="active_agent_followup_pending_before_response",
+                input_epoch=response_epoch,
+                full_text=response_text,
+                event_time=response_event_time,
+            )
+            self._record_realtime_assistant_history_shadow(
+                identity.conversation_id,
+                full_text=response_text,
+                input_epoch=response_epoch,
+                source="llm_response_intercept",
+                delivery_status="interrupted",
+                unsent_parts=[response_text],
+                event_time=response_event_time,
+            )
+            self._discard_conversation_pending_response_epoch_only(
+                identity.conversation_id,
+                response_epoch,
+            )
+            await self._save_realtime_delivery_context_if_dirty(identity.conversation_id)
+            self._preserve_intercepted_completion_text(
+                response,
+                response_text,
+                reason="active_agent_followup_pending_before_response",
+                clear_completion=True,
+            )
+            self._stop_default_response_send(
+                event,
+                reason="active_agent_followup_pending_before_response",
+            )
+            return
         if self._conversation_reply_is_stale(identity.conversation_id, response_epoch):
             self._record_interrupted_reply_breakpoint(
                 identity.conversation_id,
@@ -8776,6 +8920,14 @@ class EmotionalStatePlugin(Star):
         *,
         reason: str,
     ) -> bool:
+        for name, value in (
+            ("_sylanne_default_response_stopped", True),
+            ("_sylanne_default_response_stop_reason", str(reason or "")),
+        ):
+            try:
+                setattr(event, name, value)
+            except Exception:
+                pass
         stopped = False
         stopper = getattr(event, "stop_event", None)
         if callable(stopper):
@@ -8786,14 +8938,6 @@ class EmotionalStatePlugin(Star):
                 self._log_warning(
                     f"{PLUGIN_NAME}: 阻断 AstrBot 默认发送失败，继续保留主回复文本供上下文使用: {exc}",
                 )
-        for name, value in (
-            ("_sylanne_default_response_stopped", True),
-            ("_sylanne_default_response_stop_reason", str(reason or "")),
-        ):
-            try:
-                setattr(event, name, value)
-            except Exception:
-                pass
         return stopped
 
     def _should_intercept_realtime_chat_response(
@@ -9128,6 +9272,86 @@ class EmotionalStatePlugin(Star):
             },
         )
 
+    def _record_active_agent_captured_followup_turns(
+        self,
+        session_key: str,
+        identity: ConversationIdentity,
+        *,
+        input_epoch: int | None,
+        texts: Sequence[Any],
+        observed_at: float,
+    ) -> None:
+        entries: list[dict[str, Any]] = []
+        for offset, item in enumerate(texts, start=1):
+            if isinstance(item, dict):
+                raw_text = item.get("text")
+                item_observed_at = self._as_float_value(
+                    item.get("observed_at"),
+                    float(observed_at) + offset * 0.0001,
+                )
+                followup_order = int(item.get("followup_order") or item.get("order_seq") or offset)
+            else:
+                raw_text = item
+                item_observed_at = float(observed_at) + offset * 0.0001
+                followup_order = offset
+            text = " ".join(str(raw_text or "").split()).strip()
+            if not text:
+                continue
+            entries.append(
+                {
+                    "text": text,
+                    "observed_at": item_observed_at,
+                    "followup_order": followup_order,
+                },
+            )
+        if input_epoch is None or not entries:
+            return
+        key = str(session_key or "global")
+        self._prune_active_agent_pending_user_turns(key, now=observed_at)
+        queue = self._active_agent_pending_user_turn_cache().setdefault(
+            key,
+            deque(maxlen=ACTIVE_AGENT_PENDING_USER_TURN_LIMIT),
+        )
+        if queue.maxlen != ACTIVE_AGENT_PENDING_USER_TURN_LIMIT:
+            queue = deque(queue, maxlen=ACTIVE_AGENT_PENDING_USER_TURN_LIMIT)
+            self._active_agent_pending_user_turn_cache()[key] = queue
+        speaker_key = self._active_agent_speaker_key(identity)
+        existing_keys = {
+            (
+                str(item.get("source") or ""),
+                int(item.get("input_epoch") or 0),
+                str(item.get("hash") or ""),
+            )
+            for item in queue
+            if isinstance(item, dict)
+        }
+        epoch = int(input_epoch)
+        for offset, entry in enumerate(entries, start=1):
+            text = str(entry.get("text") or "")
+            clipped = self._head_one_line(text, 240)
+            text_hash = self._text_hash(clipped)
+            dedup_key = ("astrbot_active_runner_followup", epoch, text_hash)
+            if dedup_key in existing_keys:
+                continue
+            queue.append(
+                {
+                    "schema_version": "astrbot.active_agent_pending_user_turn.v1",
+                    "kind": "active_agent_pending_user_turn",
+                    "session_key": key,
+                    "speaker_key": speaker_key,
+                    "input_epoch": epoch,
+                    "followup_order": int(entry.get("followup_order") or offset),
+                    "observed_at": self._as_float_value(
+                        entry.get("observed_at"),
+                        float(observed_at) + offset * 0.0001,
+                    ),
+                    "text": clipped,
+                    "hash": text_hash,
+                    "source": "astrbot_active_runner_followup",
+                },
+            )
+            existing_keys.add(dedup_key)
+
     def _discard_active_agent_pending_user_turn(
         self,
         session_key: str,
@@ -9219,9 +9443,44 @@ class EmotionalStatePlugin(Star):
         ]
         if not previous:
             return {}
-        previous = previous[-3:]
+        previous.sort(
+            key=lambda item: (
+                self._as_float_value(item.get("observed_at"), 0.0),
+                int(item.get("input_epoch") or 0),
+                int(item.get("followup_order") or 0),
+            ),
+        )
+        previous = previous[-7:]
         previous_texts = [str(item.get("text") or "").strip() for item in previous]
-        merged = self._head_one_line(" / ".join([*previous_texts, current]), 420)
+        ordered_current_intent = [
+            {
+                "text": text,
+                "observed_at": self._as_float_value(item.get("observed_at"), observed_at),
+                "input_epoch": int(item.get("input_epoch") or 0),
+                "followup_order": int(item.get("followup_order") or 0),
+            }
+            for item, text in zip(previous, previous_texts)
+            if text
+        ]
+        ordered_current_intent.append(
+            {
+                "text": current,
+                "observed_at": float(observed_at),
+                "input_epoch": int(current_epoch),
+                "followup_order": 0,
+            },
+        )
+        ordered_current_intent.sort(
+            key=lambda item: (
+                self._as_float_value(item.get("observed_at"), 0.0),
+                int(item.get("input_epoch") or 0),
+                int(item.get("followup_order") or 0),
+            ),
+        )
+        merged = self._head_one_line(
+            " / ".join(str(item.get("text") or "") for item in ordered_current_intent),
+            420,
+        )
         return {
             "schema_version": "astrbot.active_agent_followup_merge.v1",
             "kind": "active_agent_followup_merge",
@@ -9232,6 +9491,7 @@ class EmotionalStatePlugin(Star):
             "previous_turns": previous,
             "current_user": self._head_one_line(current, 240),
             "merged_current_user": merged,
+            "merged_turn_order": ordered_current_intent,
             "observed_at": float(observed_at),
         }
 
@@ -10207,6 +10467,33 @@ class EmotionalStatePlugin(Star):
         )
         return payload
 
+    def _set_waiting_realtime_input_payload(
+        self,
+        event: AstrMessageEvent,
+        payload: dict[str, Any] | None,
+    ) -> None:
+        if not isinstance(payload, dict) or not (
+            payload.get("should_inject") or payload.get("should_hold")
+        ):
+            return
+        try:
+            setattr(event, "_sylanne_waiting_realtime_input_payload", dict(payload))
+        except Exception:
+            pass
+
+    def _take_waiting_realtime_input_payload(
+        self,
+        event: AstrMessageEvent,
+    ) -> dict[str, Any]:
+        payload = getattr(event, "_sylanne_waiting_realtime_input_payload", None)
+        try:
+            delattr(event, "_sylanne_waiting_realtime_input_payload")
+        except Exception:
+            pass
+        if isinstance(payload, dict):
+            return dict(payload)
+        return {}
+
     def _append_realtime_input_fragment_payload_context(
         self,
         request: ProviderRequest,
@@ -10645,7 +10932,7 @@ class EmotionalStatePlugin(Star):
     def _mark_realtime_input_fragment_hold(
         self,
         event: AstrMessageEvent,
-        request: ProviderRequest,
+        request: ProviderRequest | None,
         payload: dict[str, Any],
     ) -> None:
         hold_text = build_realtime_input_hold_injection(
@@ -10653,6 +10940,8 @@ class EmotionalStatePlugin(Star):
             max_chars=REALTIME_INPUT_HOLD_INJECTION_MAX_CHARS,
         )
         for target in (event, request):
+            if target is None:
+                continue
             for name, value in (
                 ("_sylanne_realtime_input_hold", True),
                 ("_sylanne_realtime_input_hold_payload", payload),
@@ -10663,7 +10952,7 @@ class EmotionalStatePlugin(Star):
                     setattr(target, name, value)
                 except Exception:
                     pass
-        if hold_text:
+        if hold_text and request is not None:
             try:
                 setattr(request, "_sylanne_realtime_input_hold_text", hold_text)
             except Exception:
@@ -10754,6 +11043,143 @@ class EmotionalStatePlugin(Star):
             return True
         text = str(getattr(response, "completion_text", "") or "").lstrip()
         return text.startswith("[sylanne_realtime_delivery_status]")
+
+    def _astrbot_active_runner_followup_texts(
+        self,
+        event: AstrMessageEvent,
+        *,
+        fallback_observed_at: float | None = None,
+    ) -> list[dict[str, Any]]:
+        umo = str(getattr(event, "unified_msg_origin", "") or "").strip()
+        if not umo:
+            return []
+        try:
+            from astrbot.core.pipeline.process_stage import follow_up as follow_up_stage  # type: ignore
+        except Exception:
+            return []
+        runners = getattr(follow_up_stage, "_ACTIVE_AGENT_RUNNERS", None)
+        if not isinstance(runners, dict):
+            return []
+        runner = runners.get(umo)
+        if runner is None:
+            return []
+        tickets = getattr(runner, "_pending_follow_ups", None)
+        if not isinstance(tickets, (list, tuple)):
+            return []
+        fallback_time = (
+            self._event_observed_at(event)
+            if fallback_observed_at is None
+            else float(fallback_observed_at)
+        )
+        turns: list[dict[str, Any]] = []
+        for offset, ticket in enumerate(tickets, start=1):
+            consumed = (
+                bool(ticket.get("consumed", False))
+                if isinstance(ticket, dict)
+                else bool(getattr(ticket, "consumed", False))
+            )
+            if consumed:
+                continue
+            text = self._active_runner_followup_ticket_text(ticket)
+            if not text:
+                continue
+            order_seq = self._active_runner_followup_ticket_order(ticket, offset)
+            turns.append(
+                {
+                    "text": self._head_one_line(text, 180),
+                    "observed_at": self._active_runner_followup_ticket_observed_at(
+                        ticket,
+                        fallback_observed_at=fallback_time,
+                        offset=offset,
+                    ),
+                    "followup_order": order_seq,
+                    "source": "astrbot_active_runner_followup",
+                },
+            )
+        turns.sort(
+            key=lambda item: (
+                self._as_float_value(item.get("observed_at"), fallback_time),
+                int(item.get("followup_order") or 0),
+                str(item.get("text") or ""),
+            ),
+        )
+        return turns
+
+    def _active_runner_followup_ticket_text(self, ticket: Any) -> str:
+        candidates: list[Any] = []
+        text_names = (
+            "text",
+            "message_text",
+            "message_str",
+            "raw_message",
+            "prompt",
+        )
+        if isinstance(ticket, dict):
+            for name in text_names:
+                candidates.append(ticket.get(name))
+        else:
+            for name in text_names:
+                candidates.append(getattr(ticket, name, None))
+        for root in self._active_runner_followup_ticket_nested_events(ticket):
+            if isinstance(root, dict):
+                for name in text_names:
+                    candidates.append(root.get(name))
+                continue
+            candidates.append(getattr(root, "message_str", None))
+            candidates.append(getattr(root, "text", None))
+        for value in candidates:
+            if isinstance(value, (dict, list, tuple, set)):
+                continue
+            text = " ".join(str(value or "").split()).strip()
+            if text:
+                return text
+        return ""
+
+    def _active_runner_followup_ticket_order(
+        self,
+        ticket: Any,
+        fallback_order: int,
+    ) -> int:
+        for name in ("order_seq", "followup_order", "order", "seq", "index"):
+            value = ticket.get(name) if isinstance(ticket, dict) else getattr(ticket, name, None)
+            try:
+                return int(value)
+            except (TypeError, ValueError):
+                continue
+        return int(fallback_order)
+
+    def _active_runner_followup_ticket_observed_at(
+        self,
+        ticket: Any,
+        *,
+        fallback_observed_at: float,
+        offset: int,
+    ) -> float:
+        timestamp = self._extract_event_timestamp(ticket)
+        if timestamp is not None:
+            return timestamp
+        for root in self._active_runner_followup_ticket_nested_events(ticket):
+            timestamp = self._extract_event_timestamp(root)
+            if timestamp is not None:
+                return timestamp
+        return float(fallback_observed_at) + int(offset) * 0.0001
+
+    def _active_runner_followup_ticket_nested_events(self, ticket: Any) -> list[Any]:
+        roots: list[Any] = []
+        for name in (
+            "event",
+            "message_event",
+            "astr_message_event",
+            "source_event",
+            "message_obj",
+            "raw_event",
+            "raw_message",
+            "message",
+        ):
+            value = ticket.get(name) if isinstance(ticket, dict) else getattr(ticket, name, None)
+            if value is not None and value is not ticket:
+                roots.append(value)
+        return roots
 
     def _user_message_withdrawal_context_cache(
         self,
@@ -15336,6 +15762,30 @@ class EmotionalStatePlugin(Star):
             "send_time",
             "message_timestamp",
         )
+        if isinstance(event, dict):
+            for name in direct_names:
+                candidates.append(event.get(name))
+            for name in (
+                "event",
+                "message_event",
+                "astr_message_event",
+                "source_event",
+                "message_obj",
+                "raw_message",
+                "raw_event",
+                "message",
+            ):
+                nested = event.get(name)
+                if isinstance(nested, dict):
+                    for timestamp_name in direct_names:
+                        candidates.append(nested.get(timestamp_name))
+                    sender = nested.get("sender")
+                    if isinstance(sender, dict):
+                        for timestamp_name in direct_names:
+                            candidates.append(sender.get(timestamp_name))
+                elif nested is not None:
+                    for timestamp_name in direct_names:
+                        candidates.append(getattr(nested, timestamp_name, None))
         for name in direct_names:
             candidates.append(getattr(event, name, None))
         nested_roots = (
@@ -17017,7 +17467,7 @@ class EmotionalStatePlugin(Star):
         return RealtimeInputSettings(
             enabled=self._realtime_chat_enabled(),
             max_window_seconds=3.2,
-            max_fragments=6,
+            max_fragments=8,
             max_fragment_chars=18,
             injection_max_chars=REALTIME_INPUT_FRAGMENT_INJECTION_MAX_CHARS,
         )

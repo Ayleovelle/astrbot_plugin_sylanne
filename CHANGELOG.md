@@ -2,6 +2,21 @@
 
 本文件用于 AstrBot 插件市场/管理页展示更新内容。更完整的设计说明、公式推导、测试矩阵和维护手册见 `README.md`。
 
+## 2.4.2
+
+发布日期：2026-05-14
+
+### 修复
+
+- 修复即时聊天接管里 active runner follow-up 与当前用户碎片混合时，按插件处理顺序而不是 AstrBot 消息发送时间排序的问题；像“我说 / 感觉 / 你 / 骂人 / 像在 / 撒娇 / 宝贝”这类连续碎片会按原始时间线合并。
+- AstrBot active runner 捕获的 follow-up 会尽量读取 ticket 或原始事件中的时间戳，缺失时才退回到响应观察时间加稳定偏移。
+- `active_agent_followup_merge` 的 `merged_current_user` 会把当前消息也放进同一个时间轴排序，不再默认把当前处理的消息当作最后一句。
+
+### 验证
+
+- `py -3.13 -m unittest tests.astrbot_lifecycle_part13 tests.test_realtime_chat_input -v`
+- `py -3.13 -m unittest tests.astrbot_lifecycle_part11 tests.astrbot_lifecycle_part12 tests.astrbot_lifecycle_part14 tests.astrbot_lifecycle_part15 -v`
+
 ## 2.4.1
 
 发布日期：2026-05-14
