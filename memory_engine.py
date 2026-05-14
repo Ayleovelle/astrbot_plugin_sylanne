@@ -964,6 +964,7 @@ def build_memory_prompt_fragment(
     *,
     session_key: str,
     max_chars: int = 720,
+    now: float | None = None,
 ) -> str:
     if not items or max_chars <= 0:
         return ""
@@ -979,6 +980,7 @@ def build_memory_prompt_fragment(
             time_bits.append(f"time={record.event_local_time}")
         if record.event_timezone:
             time_bits.append(f"tz={record.event_timezone}")
+        time_bits.extend(_memory_relative_time_bits(record, now))
         time_suffix = (" | " + "; ".join(time_bits)) if time_bits else ""
         lines.append(
             f"{index}. {_clip(record.summary or record.text, 190)}"
@@ -986,6 +988,40 @@ def build_memory_prompt_fragment(
             f"{time_suffix}"
         )
     return _clip("\n".join(lines), max_chars)
+
+
+def _memory_relative_time_bits(record: MemoryRecord, now: float | None) -> list[str]:
+    if now is None:
+        return []
+    try:
+        current = float(now)
+        anchor = float(record.event_epoch or record.updated_at or record.created_at)
+    except (TypeError, ValueError):
+        return []
+    if current <= 0.0 or anchor <= 0.0:
+        return []
+    age = max(0.0, current - anchor)
+    if age < 90.0:
+        return [
+            "relative_time=刚才",
+            "temporal_hint=这是刚刚发生的近距上下文，回应时不要说“那天”，优先说“刚才/刚刚/前面”",
+        ]
+    if age < 3600.0:
+        minutes = max(1, int(round(age / 60.0)))
+        return [
+            f"relative_time={minutes}分钟前",
+            "temporal_hint=这是同一段对话里的近距上下文，回应时不要说“那天”，优先说“刚才/前面”",
+        ]
+    if age < 6 * 3600.0:
+        hours = max(1, int(round(age / 3600.0)))
+        return [f"relative_time={hours}小时前"]
+    if age < 24 * 3600.0:
+        return [
+            "relative_time=今天早些时候",
+            "temporal_hint=这是今天内发生的事，通常不要说成“那天”",
+        ]
+    days = max(1, int(round(age / 86400.0)))
+    return [f"relative_time={days}天前"]
 
 
 def _summarize_memory_text(text: str) -> str:

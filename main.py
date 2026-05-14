@@ -629,7 +629,7 @@ def get_emotional_state_plugin(context: Context) -> Any | None:
     PLUGIN_NAME,
     "Aylovelle.S.S",
     "Soulful Yearning Lifelike AstrBot Neural Narrative Engine：维护情绪、人格、记忆、氛围和表达节奏的 Sylanne",
-    "2.5.0",
+    "2.5.1",
     "",
 )
 class EmotionalStatePlugin(Star):
@@ -6571,6 +6571,7 @@ class EmotionalStatePlugin(Star):
             items,
             session_key=session_key,
             max_chars=SYLANNE_MEMORY_RECALL_INJECTION_MAX_CHARS,
+            now=now,
         )
         if fragment:
             await self._reinforce_sylanne_memory_recall_items(

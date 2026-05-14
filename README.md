@@ -2,7 +2,7 @@
 
 > <span style="font-size: 1.08em;"><strong>Soulful Yearning Lifelike AstrBot Neural Narrative Engine</strong>。她维护的不只是“情绪标签”，而是情绪、人格、记忆、氛围、主动性和表达节奏交织成的长期状态。</span>
 
-![版本 2.5.0](https://img.shields.io/badge/version-2.5.0-blue)
+![版本 2.5.1](https://img.shields.io/badge/version-2.5.1-blue)
 ![AstrBot >=4.9.2,<5.0.0](https://img.shields.io/badge/AstrBot-%3E%3D4.9.2%2C%3C5.0.0-green)
 ![Python 3.10+](https://img.shields.io/badge/Python-3.10%2B-yellow)
 ![协议 astrbot.emotion_state.v2](https://img.shields.io/badge/schema-astrbot.emotion__state.v2-purple)
@@ -38,7 +38,7 @@
 
 <br clear="right">
 
-`2.5.0` 是表情包自动素材准备版：在主动发言调度器轻量唤醒、接管碎片时间线、慢速短碎片等待、接管上下文、事件时间保留、接管媒体、快判开关、更新后断点恢复和空输出韧性修复的基础上，新增显式开启的表情包仓库自动下载能力。真人即时聊天接管、分条接管提示、用户碎片 LLM gate、表情包回应、表情包自动下载、表情包一致性 LLM gate 和用户表情学习继续默认关闭。
+`2.5.1` 是近距记忆时间语义修复版：在表情包仓库自动下载、主动发言调度器轻量唤醒、接管碎片时间线、慢速短碎片等待、接管上下文、事件时间保留、接管媒体、快判开关、更新后断点恢复和空输出韧性修复的基础上，新增 Sylanne 自有记忆召回的相对时间提示，避免几分钟内发生的事被回复成“那天”。真人即时聊天接管、分条接管提示、用户碎片 LLM gate、表情包回应、表情包自动下载、表情包一致性 LLM gate 和用户表情学习继续默认关闭。
 
 | 能力 | 作用 |
 | --- | --- |
@@ -74,7 +74,7 @@
 | 主题 | 内容 |
 | --- | --- |
 | [当前版本与兼容范围](#当前版本与兼容范围) | 插件版本、AstrBot 版本、Python 要求、许可证和发布状态。 |
-| [当前版本发布记录](#250-当前版本发布记录) | 表情包仓库显式自动下载、主动发言调度器候选唤醒、空闲自退、接管碎片按 AstrBot 消息时间排序、慢速短碎片合并修复、接管媒体按锚点插入。 |
+| [当前版本发布记录](#251-当前版本发布记录) | 近距记忆相对时间提示、表情包仓库显式自动下载、主动发言调度器候选唤醒、空闲自退、接管碎片按 AstrBot 消息时间排序、接管媒体按锚点插入。 |
 | [项目定位](#项目定位) | 为什么本插件不是普通的提示词人设增强。 |
 | [核心能力](#核心能力总览) | 7 维情绪、人格建模、真实时间记忆、关系修复、公共 API。 |
 | [快速开始](#快速开始) | 发布 zip 包、仓库安装、手动复制、最小配置和检查命令。 |
@@ -102,22 +102,24 @@
 | --- | --- |
 | 插件目录名 | `astrbot_plugin_sylanne` |
 | 显示名 | `Sylanne` |
-| 当前版本 | `2.5.0` |
+| 当前版本 | `2.5.1` |
 | AstrBot 版本 | `>=4.9.2,<5.0.0` |
 | Python | `3.10+` |
 | 许可证 | `GPL-3.0-or-later` |
 | 运行时第三方依赖 | 当前无额外依赖，见 `requirements.txt` |
 
-`2.5.0` 保留 Sylanne 自有记忆知识库、只读记忆查询入口、Agent-owned context 即时聊天修复、AstrBot Embedding 提供商驱动的向量召回、可视化记忆设置 Page、短答锚定、模型空回复降级、完整上下文回填、内部工具统一隐藏、主动聊天反馈、等待期追发合并、长历史关键上下文保底和 AstrBot 事件时间保留；本版新增表情包仓库自动下载：当表情包回应已开启、本地目录为空且 `sticker_auto_download_enabled=true` 时，会把指定 Git 仓库下载到本机缓存目录后索引。核心情绪、回复后后台评估（post）、`group_atmosphere_state`、`humanlike_state`、`lifelike_learning_state`、`personality_drift_state`、Sylanne 自有记忆和欺骗/操控/逃责类动作阻断默认自动运行；真人即时聊天接管、表情包回应、表情包自动下载、道德修复、瑕疵模拟、心理筛查等高风险或实验模块仍由配置者显式打开。
+`2.5.1` 保留 Sylanne 自有记忆知识库、只读记忆查询入口、Agent-owned context 即时聊天修复、AstrBot Embedding 提供商驱动的向量召回、可视化记忆设置 Page、短答锚定、模型空回复降级、完整上下文回填、内部工具统一隐藏、主动聊天反馈、等待期追发合并、长历史关键上下文保底、AstrBot 事件时间保留和表情包仓库自动下载；本版新增记忆召回的近距相对时间提示：当召回到刚刚或几分钟前的记忆时，提示主模型优先使用“刚才/前面/几分钟前”，不要把近距上下文说成“那天”。核心情绪、回复后后台评估（post）、`group_atmosphere_state`、`humanlike_state`、`lifelike_learning_state`、`personality_drift_state`、Sylanne 自有记忆和欺骗/操控/逃责类动作阻断默认自动运行；真人即时聊天接管、表情包回应、表情包自动下载、道德修复、瑕疵模拟、心理筛查等高风险或实验模块仍由配置者显式打开。
 
-### 2.5.0 当前版本发布记录
+### 2.5.1 当前版本发布记录
 
-`v2.5.0` 合并在 `main` 上，对外安装版本由 `metadata.yaml` 和 `main.py @register(...)` 共同声明为 `2.5.0`。本版按版本规则提升第二位版本号：新增显式开启的表情包仓库自动下载能力；不改变公共 API 版本，公共 API 版本仍保持 `1.0`，schema 仍保持向后兼容。
+`v2.5.1` 合并在 `main` 上，对外安装版本由 `metadata.yaml` 和 `main.py @register(...)` 共同声明为 `2.5.1`。本版按版本规则提升第三位版本号：修复近距记忆只带绝对时间、缺少相对时间语义导致模型把几分钟前的事说成“那天”的问题；不改变公共 API 版本，公共 API 版本仍保持 `1.0`，schema 仍保持向后兼容。
 
 当前版本的主要变化：
 
 | 类别 | 结果 |
 | --- | --- |
+| 近距记忆时间语义 | Sylanne 自有记忆召回摘要会在已有 AstrBot 事件时间旁补充 `relative_time=刚才/几分钟前/今天早些时候`，让主模型直接知道这不是遥远回忆。 |
+| 近距措辞约束 | 对刚刚或同一段对话里的记忆，召回摘要会提示优先说“刚才/刚刚/前面”，不要说成“那天”，避免近距上下文被文学化成遥远回忆。 |
 | 表情包自动下载 | 新增 `sticker_auto_download_enabled`。只有表情包回应已开启、本地表情包目录为空且该开关为 `true` 时，才会下载指定 Git 仓库到本机缓存目录。 |
 | 表情包缓存目录 | 默认使用系统缓存目录下的 `astrbot_plugin_sylanne/stickers`；也可配置 `sticker_auto_download_cache_dir`，但插件会拒绝源码目录、`docs`、`pages`、`dist`、`output` 等容易进入发布包的位置。 |
 | 表情包下载安全 | 自动下载只接受 http/https/git 协议的 Git 仓库地址，使用非 shell 参数调用 `git clone --depth 1 --filter=blob:none`，并带超时；失败时回退为无候选表情，不阻塞主回复。 |
@@ -133,7 +135,7 @@
 | 长历史上下文保底 | 当 AstrBot 官方历史已经超过 Sylanne 的短状态预算时，`recent_user_scene_context`、`active_agent_followup_merge`、`realtime_assistant_history_shadow`、`interrupted_reply_breakpoint`、用户撤回和用户纠正等关键连续性事实仍可在限长、限条数约束下注入。 |
 | AstrBot 事件时间 | 实时接管 plan/envelope/shadow/breakpoint、主动派发、pending question 和 Sylanne 自有记忆都会带入 AstrBot 事件时间、本地时区和 epoch，后续 LLM 读取上下文时能区分真实发言时间与插件处理时间。 |
 | 接管媒体智能嵌入 | 接管分段发送会读取 `LLMResponse.result_chain/message_chain` 里的图片组件，按文本字符锚点映射到最终分条位置；图片在文本前、中间或结尾都会按相对顺序发送，不再统一拖到最后。 |
-| 表情包发送诊断 | 表情包仍只来自本地表情包目录或已学习的用户表情元数据；如果没有候选素材，`sticker_result.blocked_reason` 会明确返回 `no_sticker_candidates`，方便排查“开关开了但不发”的原因。 |
+| 表情包发送诊断 | 表情包候选来自本地表情包目录、显式自动下载缓存或已学习的用户表情元数据；如果没有候选素材，`sticker_result.blocked_reason` 会明确返回 `no_sticker_candidates`，方便排查“开关开了但不发”的原因。 |
 | 更新后上下文恢复 | 接管投递 shadow 和打断 breakpoint 会写入轻量 KV 投递上下文；插件更新/重载后的新实例可在下一轮恢复一次，并在注入后标记 consumed，避免反复污染后续提示词。 |
 | 情绪评估空输出韧性 | 内部情绪评估 LLM 若返回 `EmptyModelOutputError` / `no usable output`，插件会仅重试一次；若仍失败或超时，继续使用本地启发式估计，避免主流程崩溃。 |
 | 高风险默认关闭 | 真人即时聊天接管、即时聊天风格提示、默认回复接管、用户碎片 LLM gate、表情包回应、表情包自动下载、表情包一致性 LLM gate 和用户表情学习全部默认关闭。 |
@@ -179,7 +181,7 @@
 | 上下文安全预算 | 召回结果只作为 `[sylanne_memory_recall]` 限长摘要注入，并继续受请求预算和官方上下文压缩清洗逻辑约束。 |
 | 模块互斥自检 | 发布前覆盖自有记忆、主动发言、官方上下文压缩、即时聊天、公共 API、配置契约和包体预检，验证模块之间不会互相回灌或重复调用外部 LivingMemory。 |
 | 工作流图 | `docs/assets/workflow_and_proactive.svg` 已重绘，突出即时聊天、追发合并、Agent 工具循环、模型边界和主动聊天反馈；移除误导性的单点 Gemini 诊断节点，并修正中文字体和跨泳道箭头。 |
-| 公开契约 | 插件版本为 `2.5.0`；公共 API 版本仍为 `1.0`，schema 仍保持 `astrbot.emotion_state.v2` 等版本化契约。 |
+| 公开契约 | 插件版本为 `2.5.1`；公共 API 版本仍为 `1.0`，schema 仍保持 `astrbot.emotion_state.v2` 等版本化契约。 |
 
 旧版本发布记录统一放在 `CHANGELOG.md`。README 只展示当前版本，避免插件管理页从历史段落误抓旧版本号。
 
@@ -2980,7 +2982,7 @@ $env:ASTRBOT_EXPECT_PLUGIN = "astrbot_plugin_sylanne"
 脚本会在输出 JSON 里写出 `expectedPluginRuntime`，包含插件列表 API 中返回的 `version`、`displayName`、`activated`、`author`、`astrbotVersion` 等只读字段。若目标插件存在但 `activated=false`，脚本会失败退出。需要把版本和显示名也作为硬断言时，可以额外设置：
 
 ```powershell
-$env:ASTRBOT_EXPECT_PLUGIN_VERSION = "2.5.0"
+$env:ASTRBOT_EXPECT_PLUGIN_VERSION = "2.5.1"
 $env:ASTRBOT_EXPECT_PLUGIN_DISPLAY_NAME = "Sylanne"
 & $node scripts\remote_smoke_playwright.js
 ```

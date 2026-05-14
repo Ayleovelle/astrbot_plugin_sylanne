@@ -172,6 +172,35 @@ class SylanneMemoryEngineTests(unittest.TestCase):
         self.assertIn("2026-05-14 03:27:39 +08:00", fragment)
         self.assertIn("Asia/Shanghai", fragment)
 
+    def test_memory_prompt_fragment_marks_very_recent_memory_as_just_now(self):
+        state = SylanneMemoryState.initial(now=0.0)
+        state = observe_memory_event(
+            state,
+            text="assistant said the image should be visible but no image was sent",
+            session_key="s-recent-memory",
+            speaker_id="assistant",
+            now=1778794544.0,
+            event_time={
+                "epoch": 1778794544.0,
+                "local_time": "2026-05-15 05:35:44 +08:00",
+                "timezone": "Asia/Shanghai",
+            },
+        )
+
+        fragment = build_memory_prompt_fragment(
+            recall_memory(
+                state,
+                query="image visible no image sent",
+                now=1778794587.0,
+            ),
+            session_key="s-recent-memory",
+            max_chars=520,
+            now=1778794587.0,
+        )
+
+        self.assertIn("relative_time=刚才", fragment)
+        self.assertIn("不要说“那天”", fragment)
+
     def test_recalled_memory_is_reinforced_after_use(self):
         state = SylanneMemoryState.initial(now=0.0)
         state.records.append(
