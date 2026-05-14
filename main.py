@@ -390,6 +390,8 @@ PROACTIVE_SCHEDULER_CANDIDATE_TTL_SECONDS = 604800.0
 PROACTIVE_SCHEDULER_IDLE_DELAY_SECONDS = 1800.0
 PROACTIVE_SCHEDULER_NORMAL_DELAY_SECONDS = 900.0
 PROACTIVE_SCHEDULER_BUSY_DELAY_SECONDS = 1200.0
+PROACTIVE_SCHEDULER_WAKE_DELAY_SECONDS = 0.25
+PROACTIVE_SCHEDULER_IDLE_EXIT_ROUNDS = 2
 PROACTIVE_SCHEDULER_MAX_CHECKS_PER_ROUND = 1
 PROACTIVE_SCHEDULER_SESSION_RECHECK_SECONDS = 3600.0
 PROACTIVE_CONTEXT_WINDOW_LIMIT = 6
@@ -624,7 +626,7 @@ def get_emotional_state_plugin(context: Context) -> Any | None:
     PLUGIN_NAME,
     "Aylovelle.S.S",
     "Soulful Yearning Lifelike AstrBot Neural Narrative Engine：维护情绪、人格、记忆、氛围和表达节奏的 Sylanne",
-    "2.4.2",
+    "2.4.3",
     "",
 )
 class EmotionalStatePlugin(Star):
@@ -721,6 +723,7 @@ class EmotionalStatePlugin(Star):
         self._proactive_context_windows: dict[str, deque[dict[str, Any]]] = {}
         self._proactive_scheduler_locks: dict[str, asyncio.Lock] = {}
         self._proactive_scheduler_last_checked: dict[str, float] = {}
+        self._proactive_scheduler_idle_rounds = 0
         self._proactive_scheduler_task: asyncio.Task[Any] | None = None
         self._realtime_chat_last_sent: dict[str, float] = {}
         self._last_realtime_chat_adaptive_settings: dict[str, dict[str, Any]] = {}
@@ -772,6 +775,7 @@ class EmotionalStatePlugin(Star):
             self._proactive_scheduler_locks.clear()
         if hasattr(self, "_proactive_scheduler_last_checked"):
             self._proactive_scheduler_last_checked.clear()
+        self._proactive_scheduler_idle_rounds = 0
         self._memory_cache.clear()
         self._psychological_memory_cache.clear()
         self._humanlike_memory_cache.clear()
@@ -5715,6 +5719,8 @@ class EmotionalStatePlugin(Star):
             self._proactive_scheduler_locks = {}
         if not isinstance(getattr(self, "_proactive_scheduler_last_checked", None), dict):
             self._proactive_scheduler_last_checked = {}
+        if not isinstance(getattr(self, "_proactive_scheduler_idle_rounds", None), int):
+            self._proactive_scheduler_idle_rounds = 0
         if not hasattr(self, "_proactive_scheduler_task"):
             self._proactive_scheduler_task = None
 
@@ -5758,6 +5764,7 @@ class EmotionalStatePlugin(Star):
             "platform_id": identity.platform_id or "",
         }
         self._proactive_candidate_sessions[session_key] = candidate
+        self._proactive_scheduler_idle_rounds = 0
         self._prune_proactive_candidate_sessions(now=now)
 
     def _prune_proactive_candidate_sessions(self, *, now: float | None = None) -> None:
@@ -5792,6 +5799,8 @@ class EmotionalStatePlugin(Star):
         self._ensure_proactive_scheduler_state()
         if not self._proactive_scheduler_enabled() or getattr(self, "_terminating", False):
             return
+        if not self._proactive_candidate_sessions:
+            return
         task = self._proactive_scheduler_task
         if task is not None and not task.done():
             return
@@ -5801,14 +5810,54 @@ class EmotionalStatePlugin(Star):
         )
 
     async def _proactive_scheduler_loop(self) -> None:
-        await asyncio.sleep(PROACTIVE_SCHEDULER_NORMAL_DELAY_SECONDS)
+        idle_rounds = 0
+        await asyncio.sleep(PROACTIVE_SCHEDULER_WAKE_DELAY_SECONDS)
         while self._proactive_scheduler_enabled() and not getattr(self, "_terminating", False):
+            self._prune_proactive_candidate_sessions()
+            if not self._proactive_candidate_sessions:
+                break
             result = await self._run_proactive_scheduler_once()
+            if not self._proactive_candidate_sessions:
+                break
+            if self._proactive_scheduler_result_is_idle(result):
+                idle_rounds += 1
+                self._proactive_scheduler_idle_rounds = idle_rounds
+                if self._proactive_scheduler_should_exit_after_idle(idle_rounds):
+                    break
+            else:
+                idle_rounds = 0
+                self._proactive_scheduler_idle_rounds = 0
             await asyncio.sleep(self._proactive_scheduler_next_delay(result))
+        self._proactive_scheduler_idle_rounds = 0
+        current = asyncio.current_task()
+        if self._proactive_scheduler_task is current:
+            self._proactive_scheduler_task = None
+
+    def _proactive_scheduler_result_is_idle(self, result: dict[str, Any]) -> bool:
+        if not isinstance(result, dict):
+            return True
+        if result.get("pressure_blocked"):
+            return False
+        return (
+            int(result.get("checked") or 0) <= 0
+            and int(result.get("dispatched") or 0) <= 0
+        )
+
+    def _proactive_scheduler_should_exit_after_idle(self, idle_rounds: int) -> bool:
+        return int(idle_rounds) >= max(1, int(PROACTIVE_SCHEDULER_IDLE_EXIT_ROUNDS))
 
     def _proactive_scheduler_next_delay(self, result: dict[str, Any]) -> float:
         if result.get("pressure_blocked"):
             return PROACTIVE_SCHEDULER_BUSY_DELAY_SECONDS
+        if self._proactive_scheduler_result_is_idle(result):
+            return PROACTIVE_SCHEDULER_WAKE_DELAY_SECONDS
+        candidate_count = max(0, int(result.get("candidate_count") or 0))
+        touched = max(0, int(result.get("checked") or 0)) + max(
+            0,
+            int(result.get("skipped") or 0),
+        )
+        if candidate_count <= touched:
+            return PROACTIVE_SCHEDULER_WAKE_DELAY_SECONDS
         if int(result.get("checked") or 0) <= 0:
             return PROACTIVE_SCHEDULER_IDLE_DELAY_SECONDS
         return PROACTIVE_SCHEDULER_NORMAL_DELAY_SECONDS
@@ -5822,10 +5871,12 @@ class EmotionalStatePlugin(Star):
                 "checked": 0,
                 "dispatched": 0,
                 "skipped": 0,
+                "candidate_count": 0,
                 "reason": "scheduler_disabled",
             }
         now = self._observed_now()
         self._prune_proactive_candidate_sessions(now=now)
+        candidate_count = len(self._proactive_candidate_sessions)
         pressure = self._background_post_resource_pressure()
         if pressure.get("level") == "critical":
             return {
@@ -5834,6 +5885,7 @@ class EmotionalStatePlugin(Star):
                 "checked": 0,
                 "dispatched": 0,
                 "skipped": len(self._proactive_candidate_sessions),
+                "candidate_count": candidate_count,
                 "pressure": pressure,
                 "pressure_blocked": True,
                 "reason": "environment_pressure_critical",
@@ -5903,6 +5955,7 @@ class EmotionalStatePlugin(Star):
             "checked": checked,
             "dispatched": dispatched,
             "skipped": skipped,
+            "candidate_count": candidate_count,
             "pressure": pressure,
             "diagnostics": diagnostics,
         }

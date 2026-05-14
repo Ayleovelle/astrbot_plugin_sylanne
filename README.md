@@ -2,7 +2,7 @@
 
 > <span style="font-size: 1.08em;"><strong>Soulful Yearning Lifelike AstrBot Neural Narrative Engine</strong>。她维护的不只是“情绪标签”，而是情绪、人格、记忆、氛围、主动性和表达节奏交织成的长期状态。</span>
 
-![版本 2.4.2](https://img.shields.io/badge/version-2.4.2-blue)
+![版本 2.4.3](https://img.shields.io/badge/version-2.4.3-blue)
 ![AstrBot >=4.9.2,<5.0.0](https://img.shields.io/badge/AstrBot-%3E%3D4.9.2%2C%3C5.0.0-green)
 ![Python 3.10+](https://img.shields.io/badge/Python-3.10%2B-yellow)
 ![协议 astrbot.emotion_state.v2](https://img.shields.io/badge/schema-astrbot.emotion__state.v2-purple)
@@ -38,7 +38,7 @@
 
 <br clear="right">
 
-`2.4.2` 是接管碎片时间线修复版：在慢速短碎片等待、接管上下文、事件时间保留、接管媒体、快判开关、更新后断点恢复和空输出韧性修复的基础上，进一步修复 AstrBot active runner 捕获 follow-up 后，用户碎片可能按处理顺序而非发送时间合并的问题。真人即时聊天接管、分条接管提示、用户碎片 LLM gate、表情包回应、表情包一致性 LLM gate 和用户表情学习继续默认关闭。
+`2.4.3` 是主动发言调度器轻量唤醒修复版：在接管碎片时间线、慢速短碎片等待、接管上下文、事件时间保留、接管媒体、快判开关、更新后断点恢复和空输出韧性修复的基础上，进一步让主动发言调度器只在有候选会话时唤醒，并在候选耗尽或连续空闲后自动退出，避免后台子任务长期常驻。真人即时聊天接管、分条接管提示、用户碎片 LLM gate、表情包回应、表情包一致性 LLM gate 和用户表情学习继续默认关闭。
 
 | 能力 | 作用 |
 | --- | --- |
@@ -74,7 +74,7 @@
 | 主题 | 内容 |
 | --- | --- |
 | [当前版本与兼容范围](#当前版本与兼容范围) | 插件版本、AstrBot 版本、Python 要求、许可证和发布状态。 |
-| [当前版本发布记录](#242-当前版本发布记录) | 接管碎片按 AstrBot 消息时间排序、慢速短碎片合并修复、接管媒体按锚点插入、更新后恢复接管上下文、AstrBot 事件时间进入实时接管和记忆链路、双 LLM 快判有独立总开关、情绪评估空输出轻量重试。 |
+| [当前版本发布记录](#243-当前版本发布记录) | 主动发言调度器候选唤醒、空闲自退、接管碎片按 AstrBot 消息时间排序、慢速短碎片合并修复、接管媒体按锚点插入、更新后恢复接管上下文、AstrBot 事件时间进入实时接管和记忆链路。 |
 | [项目定位](#项目定位) | 为什么本插件不是普通的提示词人设增强。 |
 | [核心能力](#核心能力总览) | 7 维情绪、人格建模、真实时间记忆、关系修复、公共 API。 |
 | [快速开始](#快速开始) | 发布 zip 包、仓库安装、手动复制、最小配置和检查命令。 |
@@ -102,22 +102,27 @@
 | --- | --- |
 | 插件目录名 | `astrbot_plugin_sylanne` |
 | 显示名 | `Sylanne` |
-| 当前版本 | `2.4.2` |
+| 当前版本 | `2.4.3` |
 | AstrBot 版本 | `>=4.9.2,<5.0.0` |
 | Python | `3.10+` |
 | 许可证 | `GPL-3.0-or-later` |
 | 运行时第三方依赖 | 当前无额外依赖，见 `requirements.txt` |
 
-`2.4.2` 保留 Sylanne 自有记忆知识库、只读记忆查询入口、Agent-owned context 即时聊天修复、AstrBot Embedding 提供商驱动的向量召回、可视化记忆设置 Page、短答锚定、模型空回复降级、完整上下文回填、内部工具统一隐藏、主动聊天反馈、等待期追发合并、长历史关键上下文保底和 AstrBot 事件时间保留；本版进一步修复接管 active follow-up 与当前用户碎片混合时的时间线错位，合并意图按 AstrBot 消息发送时间排序。核心情绪、回复后后台评估（post）、`group_atmosphere_state`、`humanlike_state`、`lifelike_learning_state`、`personality_drift_state`、Sylanne 自有记忆和欺骗/操控/逃责类动作阻断默认自动运行；真人即时聊天接管、表情包回应、道德修复、瑕疵模拟、心理筛查等高风险或实验模块仍由配置者显式打开。
+`2.4.3` 保留 Sylanne 自有记忆知识库、只读记忆查询入口、Agent-owned context 即时聊天修复、AstrBot Embedding 提供商驱动的向量召回、可视化记忆设置 Page、短答锚定、模型空回复降级、完整上下文回填、内部工具统一隐藏、主动聊天反馈、等待期追发合并、长历史关键上下文保底和 AstrBot 事件时间保留；本版进一步修复主动发言调度器的生命周期：没有候选会话时不启动，有候选时短延迟唤醒，候选耗尽或连续空闲后自动退出。核心情绪、回复后后台评估（post）、`group_atmosphere_state`、`humanlike_state`、`lifelike_learning_state`、`personality_drift_state`、Sylanne 自有记忆和欺骗/操控/逃责类动作阻断默认自动运行；真人即时聊天接管、表情包回应、道德修复、瑕疵模拟、心理筛查等高风险或实验模块仍由配置者显式打开。
 
-### 2.4.2 当前版本发布记录
+### 2.4.3 当前版本发布记录
 
-`v2.4.2` 合并在 `main` 上，对外安装版本由 `metadata.yaml` 和 `main.py @register(...)` 共同声明为 `2.4.2`。本版按版本规则提升第三位版本号：修复接管 active follow-up 与当前碎片合并时按处理顺序错排的问题；不改变公共 API 版本，公共 API 版本仍保持 `1.0`，schema 仍保持向后兼容。
+`v2.4.3` 合并在 `main` 上，对外安装版本由 `metadata.yaml` 和 `main.py @register(...)` 共同声明为 `2.4.3`。本版按版本规则提升第三位版本号：修复主动发言调度器在后台长期常驻的问题，并补充 active runner follow-up 按 AstrBot 消息时间排序的回归覆盖；不改变公共 API 版本，公共 API 版本仍保持 `1.0`，schema 仍保持向后兼容。
 
 当前版本的主要变化：
 
 | 类别 | 结果 |
 | --- | --- |
+| 主动调度器候选唤醒 | 主动发言调度器只有在记录到可触达候选会话时才启动，空列表不会创建后台任务，避免无会话时仍有常驻调度循环。 |
+| 主动调度器空闲自退 | 调度器启动后先短暂等待，再扫描候选；候选耗尽会立即退出，连续空闲达到阈值也会退出，并清理 `_proactive_scheduler_task` 与 idle 计数。 |
+| 主动调度器低消耗预热 | 有候选但本轮已扫完时使用短唤醒延迟承接刚到达的会话；仍有未扫候选时才进入正常低频间隔，压力过高时继续走 busy delay。 |
+| 工作流修复 | Fuck-U-Code 自动报告工作流只提交实际生成的报告与发酵指数徽章，不再 `git add` 已移除的 powered 徽章文件。 |
+| 回归覆盖 | 新增主动调度器唤醒后空闲退出测试，并补充 active runner follow-up 读取 ticket 原始事件时间、嵌套 `message_obj.timestamp` 后按时间排序的用例。 |
 | 慢速短碎片合并 | 本地判断“用户还没说完”时会继续等到短上限或等到窗口变化，不再只等 probe 后就把“感觉”“你”“骂人”等半句话送进主 LLM。 |
 | 三碎片误释放修复 | 本地回退不再把“累计 3 个碎片”直接判为完整；像“感觉 / 你 / 骂人 / 像在 / 撒娇 / 宝贝”会合并为一次用户意图，而不是触发多轮旧碎片回复。 |
 | 接管碎片时间线 | AstrBot active runner 捕获的 follow-up 会尽量读取 ticket / 原始事件里的发送时间；`active_agent_followup_merge` 会把已捕获碎片和当前消息放进同一个时间轴排序，不再默认把当前处理的消息放到最后。 |
@@ -170,7 +175,7 @@
 | 上下文安全预算 | 召回结果只作为 `[sylanne_memory_recall]` 限长摘要注入，并继续受请求预算和官方上下文压缩清洗逻辑约束。 |
 | 模块互斥自检 | 发布前覆盖自有记忆、主动发言、官方上下文压缩、即时聊天、公共 API、配置契约和包体预检，验证模块之间不会互相回灌或重复调用外部 LivingMemory。 |
 | 工作流图 | `docs/assets/workflow_and_proactive.svg` 已重绘，突出即时聊天、追发合并、Agent 工具循环、模型边界和主动聊天反馈；移除误导性的单点 Gemini 诊断节点，并修正中文字体和跨泳道箭头。 |
-| 公开契约 | 插件版本为 `2.4.2`；公共 API 版本仍为 `1.0`，schema 仍保持 `astrbot.emotion_state.v2` 等版本化契约。 |
+| 公开契约 | 插件版本为 `2.4.3`；公共 API 版本仍为 `1.0`，schema 仍保持 `astrbot.emotion_state.v2` 等版本化契约。 |
 
 旧版本发布记录统一放在 `CHANGELOG.md`。README 只展示当前版本，避免插件管理页从历史段落误抓旧版本号。
 
@@ -2967,7 +2972,7 @@ $env:ASTRBOT_EXPECT_PLUGIN = "astrbot_plugin_sylanne"
 脚本会在输出 JSON 里写出 `expectedPluginRuntime`，包含插件列表 API 中返回的 `version`、`displayName`、`activated`、`author`、`astrbotVersion` 等只读字段。若目标插件存在但 `activated=false`，脚本会失败退出。需要把版本和显示名也作为硬断言时，可以额外设置：
 
 ```powershell
-$env:ASTRBOT_EXPECT_PLUGIN_VERSION = "2.4.2"
+$env:ASTRBOT_EXPECT_PLUGIN_VERSION = "2.4.3"
 $env:ASTRBOT_EXPECT_PLUGIN_DISPLAY_NAME = "Sylanne"
 & $node scripts\remote_smoke_playwright.js
 ```

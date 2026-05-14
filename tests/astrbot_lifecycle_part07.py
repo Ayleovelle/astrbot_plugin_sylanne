@@ -82,6 +82,71 @@ class AstrBotLifecyclePart07(AstrBotLifecycleTests):
         self.assertIn("最近用户消息", dispatched[0]["candidate_context"])
 
 
+    def test_proactive_scheduler_wakes_on_candidate_and_exits_when_idle(self):
+        plugin = new_plugin(
+            {
+                "assessment_timing": "post",
+                "inject_state": False,
+                "enable_proactive_speech_dispatch": False,
+                "enable_proactive_speech_scheduler": True,
+            },
+        )
+        plugin._background_post_resource_pressure = lambda: {
+            "level": "normal",
+            "worker_cap": 6,
+            "reason": "unit_test_normal_pressure",
+        }
+        calls = []
+
+        async def fake_run_once(plugin_self):
+            calls.append(len(calls))
+            if len(calls) == 1:
+                plugin_self._proactive_candidate_sessions.clear()
+                return {
+                    "schema_version": "astrbot.proactive_scheduler_result.v1",
+                    "enabled": True,
+                    "checked": 1,
+                    "dispatched": 0,
+                    "skipped": 0,
+                    "candidate_count": 1,
+                }
+            return {
+                "schema_version": "astrbot.proactive_scheduler_result.v1",
+                "enabled": True,
+                "checked": 0,
+                "dispatched": 0,
+                "skipped": 0,
+                "candidate_count": 0,
+            }
+
+        bind_async(plugin, "_run_proactive_scheduler_once", fake_run_once)
+
+        async def run_scheduler_lifecycle():
+            import main
+
+            original_wake = main.PROACTIVE_SCHEDULER_WAKE_DELAY_SECONDS
+            original_idle = main.PROACTIVE_SCHEDULER_IDLE_DELAY_SECONDS
+            try:
+                main.PROACTIVE_SCHEDULER_WAKE_DELAY_SECONDS = 0.0
+                main.PROACTIVE_SCHEDULER_IDLE_DELAY_SECONDS = 0.0
+                await plugin.on_llm_request(
+                    FakeEvent("s-proactive-idle-exit", message="wake scheduler"),
+                    fake_request(session_id="s-proactive-idle-exit", prompt="wake scheduler"),
+                )
+                task = plugin._proactive_scheduler_task
+                if task is not None:
+                    await asyncio.wait_for(task, timeout=1.0)
+            finally:
+                main.PROACTIVE_SCHEDULER_WAKE_DELAY_SECONDS = original_wake
+                main.PROACTIVE_SCHEDULER_IDLE_DELAY_SECONDS = original_idle
+
+        asyncio.run(run_scheduler_lifecycle())
+
+        self.assertGreaterEqual(len(calls), 1)
+        self.assertIsNone(plugin._proactive_scheduler_task)
+        self.assertEqual(plugin._proactive_scheduler_idle_rounds, 0)
+
+
     def test_proactive_scheduler_context_uses_recent_window_not_only_last_message(self):
         plugin = new_plugin(
             {

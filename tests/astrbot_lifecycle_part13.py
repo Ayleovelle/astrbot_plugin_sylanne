@@ -567,6 +567,135 @@ class AstrBotLifecyclePart13(AstrBotLifecycleTests):
         )
 
 
+    def test_active_runner_followups_sort_by_ticket_message_time_not_order_seq(self):
+        plugin = new_plugin(
+            {
+                "assessment_timing": "post",
+                "inject_state": False,
+                "enable_realtime_chat": True,
+                "enable_sticker_reaction": False,
+                "enable_sylanne_memory": False,
+            },
+        )
+        self._bind_common_state_hooks(plugin)
+        base_time = 1778700200.0
+        follow_up_module = types.ModuleType("astrbot.core.pipeline.process_stage.follow_up")
+        follow_up_module._ACTIVE_AGENT_RUNNERS = {
+            "s-ticket-time-out-of-order": SimpleNamespace(
+                _pending_follow_ups=[
+                    SimpleNamespace(
+                        text="宝贝",
+                        consumed=False,
+                        order_seq=1,
+                        event=FakeEvent(
+                            "s-ticket-time-out-of-order",
+                            message="宝贝",
+                            sender_id="u1",
+                            timestamp=base_time + 0.6,
+                        ),
+                    ),
+                    SimpleNamespace(
+                        text="像在",
+                        consumed=False,
+                        order_seq=4,
+                        event=FakeEvent(
+                            "s-ticket-time-out-of-order",
+                            message="像在",
+                            sender_id="u1",
+                            timestamp=base_time + 0.4,
+                        ),
+                    ),
+                    SimpleNamespace(
+                        text="撒娇",
+                        consumed=False,
+                        order_seq=0,
+                        event=FakeEvent(
+                            "s-ticket-time-out-of-order",
+                            message="撒娇",
+                            sender_id="u1",
+                            timestamp=base_time + 0.5,
+                        ),
+                    ),
+                ],
+            ),
+        }
+        pipeline_module = sys.modules.setdefault(
+            "astrbot.core.pipeline",
+            types.ModuleType("astrbot.core.pipeline"),
+        )
+        process_stage_module = sys.modules.setdefault(
+            "astrbot.core.pipeline.process_stage",
+            types.ModuleType("astrbot.core.pipeline.process_stage"),
+        )
+        setattr(process_stage_module, "follow_up", follow_up_module)
+        setattr(pipeline_module, "process_stage", process_stage_module)
+        sys.modules["astrbot.core.pipeline.process_stage.follow_up"] = follow_up_module
+
+        turns = plugin._astrbot_active_runner_followup_texts(
+            FakeEvent("s-ticket-time-out-of-order", sender_id="u1"),
+        )
+
+        self.assertEqual([turn["text"] for turn in turns], ["像在", "撒娇", "宝贝"])
+        self.assertEqual(
+            [turn["observed_at"] for turn in turns],
+            [base_time + 0.4, base_time + 0.5, base_time + 0.6],
+        )
+
+
+    def test_active_runner_followups_read_nested_message_obj_time(self):
+        plugin = new_plugin(
+            {
+                "assessment_timing": "post",
+                "inject_state": False,
+                "enable_realtime_chat": True,
+                "enable_sticker_reaction": False,
+                "enable_sylanne_memory": False,
+            },
+        )
+        self._bind_common_state_hooks(plugin)
+        base_time = 1778700300.0
+        follow_up_module = types.ModuleType("astrbot.core.pipeline.process_stage.follow_up")
+        follow_up_module._ACTIVE_AGENT_RUNNERS = {
+            "s-ticket-nested-time": SimpleNamespace(
+                _pending_follow_ups=[
+                    {
+                        "text": "撒娇",
+                        "consumed": False,
+                        "order_seq": 0,
+                        "message_obj": {"message_str": "撒娇", "timestamp": base_time + 0.5},
+                    },
+                    {
+                        "text": "像在",
+                        "consumed": False,
+                        "order_seq": 1,
+                        "message_obj": {"message_str": "像在", "timestamp": base_time + 0.4},
+                    },
+                ],
+            ),
+        }
+        pipeline_module = sys.modules.setdefault(
+            "astrbot.core.pipeline",
+            types.ModuleType("astrbot.core.pipeline"),
+        )
+        process_stage_module = sys.modules.setdefault(
+            "astrbot.core.pipeline.process_stage",
+            types.ModuleType("astrbot.core.pipeline.process_stage"),
+        )
+        setattr(process_stage_module, "follow_up", follow_up_module)
+        setattr(pipeline_module, "process_stage", process_stage_module)
+        sys.modules["astrbot.core.pipeline.process_stage.follow_up"] = follow_up_module
+
+        turns = plugin._astrbot_active_runner_followup_texts(
+            FakeEvent("s-ticket-nested-time", sender_id="u1"),
+        )
+
+        self.assertEqual([turn["text"] for turn in turns], ["像在", "撒娇"])
+        self.assertEqual(
+            [turn["observed_at"] for turn in turns],
+            [base_time + 0.4, base_time + 0.5],
+        )
+
+
     def test_stale_intercepted_reply_keeps_prior_user_turns_for_followup_merge(self):
         plugin = new_plugin(
             {

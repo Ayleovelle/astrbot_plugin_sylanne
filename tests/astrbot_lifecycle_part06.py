@@ -664,15 +664,30 @@ class AstrBotLifecyclePart06(AstrBotLifecycleTests):
 
         plugin = new_plugin({"enable_proactive_speech_scheduler": True})
 
+        self.assertLessEqual(main.PROACTIVE_SCHEDULER_WAKE_DELAY_SECONDS, 1.0)
         self.assertGreaterEqual(main.PROACTIVE_SCHEDULER_NORMAL_DELAY_SECONDS, 900.0)
         self.assertGreaterEqual(main.PROACTIVE_SCHEDULER_IDLE_DELAY_SECONDS, 1800.0)
+        self.assertGreaterEqual(main.PROACTIVE_SCHEDULER_IDLE_EXIT_ROUNDS, 2)
         self.assertGreaterEqual(main.PROACTIVE_SCHEDULER_SESSION_RECHECK_SECONDS, 3600.0)
         self.assertEqual(main.PROACTIVE_SCHEDULER_MAX_CHECKS_PER_ROUND, 1)
         self.assertEqual(
-            plugin._proactive_scheduler_next_delay({"checked": 0}),
-            main.PROACTIVE_SCHEDULER_IDLE_DELAY_SECONDS,
+            plugin._proactive_scheduler_next_delay({"checked": 0, "candidate_count": 0}),
+            main.PROACTIVE_SCHEDULER_WAKE_DELAY_SECONDS,
         )
         self.assertEqual(
-            plugin._proactive_scheduler_next_delay({"checked": 1}),
+            plugin._proactive_scheduler_next_delay({"checked": 1, "candidate_count": 2}),
             main.PROACTIVE_SCHEDULER_NORMAL_DELAY_SECONDS,
+        )
+
+
+    def test_proactive_scheduler_idle_result_can_exit_loop(self):
+        import main
+
+        plugin = new_plugin({"enable_proactive_speech_scheduler": True})
+
+        self.assertFalse(plugin._proactive_scheduler_should_exit_after_idle(1))
+        self.assertTrue(
+            plugin._proactive_scheduler_should_exit_after_idle(
+                main.PROACTIVE_SCHEDULER_IDLE_EXIT_ROUNDS,
+            ),
         )

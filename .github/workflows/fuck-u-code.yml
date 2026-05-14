@@ -88,6 +88,6 @@ jobs:
 
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add docs/reports/fuck-u-code.md docs/reports/fuck-u-code-fermentation.svg docs/reports/fuck-u-code-powered.svg
+          git add docs/reports/fuck-u-code.md docs/reports/fuck-u-code-fermentation.svg
           git commit -m "chore: update Fuck-U-Code fermentation report [skip ci]"
           git push

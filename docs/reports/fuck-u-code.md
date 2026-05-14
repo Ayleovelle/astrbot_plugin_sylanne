@@ -2,12 +2,12 @@
 
 > powered by Fuck-U-Code；本报告由 `scripts/update_fuck_u_code_report.py` 根据官方 JSON 输出生成。
 
-- 💩 发酵指数：`21.8/100`，官方评价：`😐 微臭青年`（由质量分反向换算，越低越好）
+- 💩 发酵指数：`21.7/100`，官方评价：`😐 微臭青年`（由质量分反向换算，越低越好）
 - 官方 JSON overallScore：`78.3/100`
 - 扫描规模：`72/876` 个文件已分析，`803` 个文件被跳过
-- 问题计数：critical `73`，error `150`，warning `142`
+- 问题计数：critical `74`，error `150`，warning `141`
 - 原始报告：`output/fuck_u_code/raw-report.json`
-- 生成时间：`2026-05-14T03:47:48+00:00`
+- 生成时间：`2026-05-14T05:41:35+00:00`
 
 ## 最需要除味的文件
 
