@@ -2,6 +2,27 @@
 
 本文件用于 AstrBot 插件市场/管理页展示更新内容。更完整的设计说明、公式推导、测试矩阵和维护手册见 `README.md`。
 
+## 2.4.0
+
+发布日期：2026-05-14
+
+### 新增
+
+- 实时接管、投递 shadow、打断 breakpoint、主动派发、pending question 和 Sylanne 自有记忆链路会保留 AstrBot 事件时间、本地时区和 epoch，避免插件处理时间覆盖真实对话时间。
+- 自有记忆召回会展示记忆发生时间，帮助后续 LLM 在长历史和插件更新/重载后恢复时理解事件先后。
+
+### 修复
+
+- 时间注入移动到状态学习之后，避免把格式化时间误当作用户口癖或长期记忆素材学习。
+- 同步插件版本号、README 当前展示和远程烟测示例版本为 `2.4.0`。
+
+### 验证
+
+- `py -3.13 -m unittest discover tests -v`
+- `py -3.13 -m compileall main.py memory_engine.py`
+- `py -3.13 scripts\package_plugin.py --output dist\astrbot_plugin_sylanne.zip`
+- `node scripts\plugin_zip_preflight.js dist\astrbot_plugin_sylanne.zip astrbot_plugin_sylanne`
+
 ## 2.3.19
 
 发布日期：2026-05-14
