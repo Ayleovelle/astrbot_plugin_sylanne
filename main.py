@@ -613,7 +613,7 @@ def get_emotional_state_plugin(context: Context) -> Any | None:
     PLUGIN_NAME,
     "Aylovelle.S.S",
     "Soulful Yearning Lifelike AstrBot Neural Narrative Engine：维护情绪、人格、记忆、氛围和表达节奏的 Sylanne",
-    "2.4.0",
+    "2.4.1",
     "",
 )
 class EmotionalStatePlugin(Star):
@@ -10398,12 +10398,10 @@ class EmotionalStatePlugin(Star):
             payload,
             judgement,
         )
-        remaining = 0.0
-        if strict_gate_wait:
-            remaining = max(
-                0.0,
-                self._realtime_input_completion_max_wait_seconds() - wait_seconds,
-            )
+        remaining = max(
+            0.0,
+            self._realtime_input_completion_max_wait_seconds() - wait_seconds,
+        )
         if not await self._wait_realtime_input_window_unchanged(
             identity.conversation_id,
             payload,
@@ -10634,7 +10632,7 @@ class EmotionalStatePlugin(Star):
         reason = str(payload.get("reason") or "")
         fragments = payload.get("fragments") if isinstance(payload.get("fragments"), list) else []
         text = str(payload.get("merged_intent") or "").strip()
-        is_complete = reason == "waiting_for_more_fragments" and len(fragments) >= 3
+        is_complete = bool(payload.get("should_inject"))
         if "?" in text or "？" in text:
             is_complete = True
         return {

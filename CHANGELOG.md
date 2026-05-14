@@ -2,6 +2,21 @@
 
 本文件用于 AstrBot 插件市场/管理页展示更新内容。更完整的设计说明、公式推导、测试矩阵和维护手册见 `README.md`。
 
+## 2.4.1
+
+发布日期：2026-05-14
+
+### 修复
+
+- 修复慢速连续短碎片输入被过早放行的问题，例如“感觉 / 你 / 骂人 / 像在 / 撒娇 / 宝贝”不再触发多轮旧碎片回复，而是等到窗口完成后作为同一轮用户意图注入。
+- 本地输入完整度回退不再把“累计 3 个碎片”粗暴视为已完成；本地判定未完成时会继续等到短上限或等到窗口变化。
+- 新增回归测试覆盖 probe 之后、max wait 之前继续输入的场景，避免只在极快并发补句时才合并成功。
+
+### 验证
+
+- `py -3.13 -m unittest tests.test_realtime_chat_input tests.astrbot_lifecycle_part13 tests.astrbot_lifecycle_part14 tests.astrbot_lifecycle_part15 -v`
+- `py -3.13 -m compileall main.py realtime_chat_input.py`
+
 ## 2.4.0
 
 发布日期：2026-05-14

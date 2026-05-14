@@ -122,6 +122,101 @@ class AstrBotLifecyclePart13(AstrBotLifecycleTests):
         self.assertIn("merged_intent=我！ 就！ 是！", final_injected)
 
 
+    def test_realtime_input_local_incomplete_waits_beyond_probe_for_continuation(self):
+        plugin = new_plugin(
+            {
+                "assessment_timing": "pre",
+                "inject_state": False,
+                "enable_realtime_chat": True,
+                "enable_sticker_reaction": False,
+                "use_llm_assessor": False,
+                "realtime_input_completion_probe_delay_seconds": 0.03,
+                "realtime_input_completion_max_wait_seconds": 0.18,
+            },
+        )
+        clock = {"now": 3300.0}
+        plugin._observed_now = lambda: clock["now"]
+        saves, assessment_calls = self._bind_common_state_hooks(plugin)
+        first_event = FakeEvent("s-local-slow-fragments", message="感觉", sender_id="u1")
+        second_event = FakeEvent("s-local-slow-fragments", message="你", sender_id="u1")
+        first_request = fake_request(session_id="s-local-slow-fragments", prompt="感觉")
+        second_request = fake_request(session_id="s-local-slow-fragments", prompt="你")
+
+        async def run_two_fragments():
+            first_task = asyncio.create_task(plugin.on_llm_request(first_event, first_request))
+            await asyncio.sleep(0.08)
+            clock["now"] += 0.8
+            second_task = asyncio.create_task(plugin.on_llm_request(second_event, second_request))
+            await asyncio.gather(first_task, second_task)
+
+        asyncio.run(run_two_fragments())
+
+        self.assertTrue(first_event.stopped)
+        self.assertTrue(first_request._sylanne_realtime_input_hold)
+        self.assertEqual(
+            first_request._sylanne_default_response_stop_reason,
+            "realtime_input_fragment_waiting",
+        )
+        self.assertEqual(len(assessment_calls), 1)
+        self.assertGreaterEqual(len(saves), 1)
+        self.assertIn("感觉 你", assessment_calls[0]["current_text"])
+
+
+    def test_realtime_input_slow_short_phrase_releases_once_at_final_fragment(self):
+        plugin = new_plugin(
+            {
+                "assessment_timing": "pre",
+                "inject_state": False,
+                "enable_realtime_chat": True,
+                "enable_sticker_reaction": False,
+                "use_llm_assessor": False,
+                "realtime_input_completion_probe_delay_seconds": 0.03,
+                "realtime_input_completion_max_wait_seconds": 0.22,
+            },
+        )
+        clock = {"now": 3400.0}
+        plugin._observed_now = lambda: clock["now"]
+        saves, assessment_calls = self._bind_common_state_hooks(plugin)
+        texts = ["感觉", "你", "骂人", "像在", "撒娇", "宝贝"]
+        events = [
+            FakeEvent("s-slow-short-phrase", message=text, sender_id="u1")
+            for text in texts
+        ]
+        requests = [
+            fake_request(session_id="s-slow-short-phrase", prompt=text)
+            for text in texts
+        ]
+
+        async def run_fragments():
+            tasks = []
+            for event, request in zip(events, requests):
+                tasks.append(asyncio.create_task(plugin.on_llm_request(event, request)))
+                await asyncio.sleep(0.08)
+                clock["now"] += 0.8
+            await asyncio.gather(*tasks)
+
+        asyncio.run(run_fragments())
+
+        for event in events[:-1]:
+            self.assertTrue(event.stopped)
+        self.assertFalse(events[-1].stopped)
+        for request in requests[:-1]:
+            self.assertTrue(request._sylanne_realtime_input_hold)
+        self.assertFalse(getattr(requests[-1], "_sylanne_realtime_input_hold", False))
+        first_five = "\n".join(
+            "\n".join(self._request_text_parts(request))
+            for request in requests[:-1]
+        )
+        final_injected = "\n".join(self._request_text_parts(requests[-1]))
+        self.assertNotIn("sylanne_user_message_fragments", first_five)
+        self.assertIn("sylanne_user_message_fragments", final_injected)
+        self.assertIn("感觉 / 你 / 骂人 / 像在 / 撒娇 / 宝贝", final_injected)
+        self.assertIn("merged_intent=感觉 你 骂人 像在 撒娇 宝贝", final_injected)
+        self.assertEqual(len(assessment_calls), 1)
+        self.assertGreaterEqual(len(saves), 1)
+        self.assertIn("感觉 你 骂人 像在 撒娇 宝贝", assessment_calls[0]["current_text"])
+
+
     def test_stale_intercepted_reply_keeps_prior_user_turns_for_followup_merge(self):
         plugin = new_plugin(
             {
