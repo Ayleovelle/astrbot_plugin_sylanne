@@ -35,6 +35,44 @@ def _clean_text(text: Any, limit: int = 1200) -> str:
     return raw[:limit]
 
 
+def _clean_event_time_payload(value: Any) -> dict[str, Any]:
+    if not isinstance(value, dict):
+        return {}
+    local_time = _clean_text(
+        value.get("local_time")
+        or value.get("event_local_time")
+        or value.get("trigger_event_local_time")
+        or "",
+        80,
+    )
+    timezone = _clean_text(
+        value.get("timezone")
+        or value.get("event_timezone")
+        or value.get("trigger_timezone")
+        or "",
+        64,
+    )
+    epoch = value.get("epoch")
+    if epoch is None:
+        epoch = value.get("event_epoch")
+    if epoch is None:
+        epoch = value.get("trigger_event_epoch")
+    payload: dict[str, Any] = {}
+    if local_time:
+        payload["local_time"] = local_time
+    if timezone:
+        payload["timezone"] = timezone
+    if epoch not in (None, ""):
+        payload["epoch"] = _as_float(epoch, 0.0)
+    iso = _clean_text(value.get("iso") or "", 80)
+    weekday = _clean_text(value.get("weekday") or "", 32)
+    if iso:
+        payload["iso"] = iso
+    if weekday:
+        payload["weekday"] = weekday
+    return payload
+
+
 def _clip(text: str, limit: int) -> str:
     if limit <= 0:
         return ""
@@ -335,6 +373,9 @@ class MemoryRecord:
     speaker_id: str = ""
     created_at: float = field(default_factory=time.time)
     updated_at: float = field(default_factory=time.time)
+    event_local_time: str = ""
+    event_timezone: str = ""
+    event_epoch: float = 0.0
     depth: float = 0.0
     confidence: float = 0.35
     layers: dict[str, float] = field(default_factory=dict)
@@ -380,6 +421,9 @@ class MemoryRecord:
             speaker_id=str(data.get("speaker_id") or ""),
             created_at=_as_float(data.get("created_at"), time.time()),
             updated_at=_as_float(data.get("updated_at"), time.time()),
+            event_local_time=str(data.get("event_local_time") or ""),
+            event_timezone=str(data.get("event_timezone") or ""),
+            event_epoch=_as_float(data.get("event_epoch"), 0.0),
             depth=clamp(data.get("depth")),
             confidence=clamp(data.get("confidence"), 0.0, 1.0),
             layers=layers,
@@ -417,6 +461,9 @@ class MemoryRecord:
             "speaker_id": self.speaker_id,
             "created_at": self.created_at,
             "updated_at": self.updated_at,
+            "event_local_time": str(self.event_local_time or ""),
+            "event_timezone": str(self.event_timezone or ""),
+            "event_epoch": float(self.event_epoch or 0.0),
             "depth": round(clamp(self.depth), 6),
             "confidence": round(clamp(self.confidence), 6),
             "layers": {k: round(clamp(v), 6) for k, v in self.layers.items()},
@@ -620,6 +667,7 @@ def observe_memory_event(
     lifelike_snapshot: dict[str, Any] | None = None,
     group_atmosphere_snapshot: dict[str, Any] | None = None,
     now: float | None = None,
+    event_time: dict[str, Any] | None = None,
 ) -> SylanneMemoryState:
     timestamp = time.time() if now is None else float(now)
     text = _clean_text(text, 1600)
@@ -652,6 +700,7 @@ def observe_memory_event(
         + 0.18 * (_nested(emotion_snapshot, "emotion", "confidence") or 0.0)
         + 0.12 * len(text) / 280.0,
     )
+    event_time_payload = _clean_event_time_payload(event_time)
     record = MemoryRecord(
         text=text,
         summary=summary,
@@ -665,6 +714,9 @@ def observe_memory_event(
         speaker_id=str(speaker_id or ""),
         created_at=timestamp,
         updated_at=timestamp,
+        event_local_time=str(event_time_payload.get("local_time") or ""),
+        event_timezone=str(event_time_payload.get("timezone") or ""),
+        event_epoch=_as_float(event_time_payload.get("epoch"), 0.0),
         depth=depth,
         confidence=confidence,
         layers=layers,
@@ -692,6 +744,10 @@ def observe_memory_event(
         existing.confidence = clamp(existing.confidence + mix * (confidence - existing.confidence) + 0.05)
         existing.layers = _merge_layer_weights(existing.layers, layers, mix=mix)
         existing.auto_parameters = dynamics.to_dict()
+        if event_time_payload:
+            existing.event_local_time = str(event_time_payload.get("local_time") or "")
+            existing.event_timezone = str(event_time_payload.get("timezone") or "")
+            existing.event_epoch = _as_float(event_time_payload.get("epoch"), 0.0)
         target = existing
     else:
         state.records.append(record)
@@ -918,9 +974,16 @@ def build_memory_prompt_fragment(
     ]
     for index, item in enumerate(items[:5], 1):
         record = item.record
+        time_bits = []
+        if record.event_local_time:
+            time_bits.append(f"time={record.event_local_time}")
+        if record.event_timezone:
+            time_bits.append(f"tz={record.event_timezone}")
+        time_suffix = (" | " + "; ".join(time_bits)) if time_bits else ""
         lines.append(
             f"{index}. {_clip(record.summary or record.text, 190)}"
             f" | depth={record.depth:.2f}, score={item.score:.2f}"
+            f"{time_suffix}"
         )
     return _clip("\n".join(lines), max_chars)
 

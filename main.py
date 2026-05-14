@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import contextvars
 import asyncio
+import datetime as dt
 import json
 import time
 import os
@@ -14,6 +15,11 @@ from dataclasses import dataclass
 from hashlib import sha256
 from collections.abc import Sequence
 from typing import Any
+
+try:
+    from zoneinfo import ZoneInfo
+except Exception:  # pragma: no cover - zoneinfo exists on supported Python, tzdata may not.
+    ZoneInfo = None
 
 from astrbot.api import AstrBotConfig, logger
 from astrbot.api.event import AstrMessageEvent, filter
@@ -902,7 +908,7 @@ class EmotionalStatePlugin(Star):
         session_key = identity.conversation_id
         input_epoch = self._bump_conversation_input_epoch(session_key, event=event)
         self._record_conversation_pending_response_epoch(session_key, input_epoch)
-        observed_at = self._observed_now()
+        observed_at = self._event_observed_at(event)
         current_user_text = self._event_text(event) or str(getattr(request, "prompt", "") or "")
         await self._restore_realtime_delivery_context_if_needed(session_key)
         active_followup_payload = self._active_agent_followup_merge_payload(
@@ -1113,6 +1119,7 @@ class EmotionalStatePlugin(Star):
                 session_key,
                 current_user_text=current_user_observation_text,
                 budget=None,
+                observed_at=observed_at,
             )
             await self._save_realtime_delivery_context_if_dirty(session_key)
             return
@@ -1528,6 +1535,7 @@ class EmotionalStatePlugin(Star):
                 session_key,
                 current_user_text=current_text,
                 budget=injection_budget,
+                observed_at=observed_at,
             )
             self._record_state_injection_diagnostics(injection_budget)
         if inject_state:
@@ -1775,6 +1783,7 @@ class EmotionalStatePlugin(Star):
                 session_key,
                 current_user_text=current_text,
                 budget=injection_budget,
+                observed_at=observed_at,
             )
 
         if (
@@ -1798,6 +1807,7 @@ class EmotionalStatePlugin(Star):
         await self._observe_sylanne_memory_event_if_enabled(
             session_key,
             current_text,
+            event=event,
             speaker_id=identity.speaker_id,
             emotion_state=state,
             personality_drift_state=personality_drift_state,
@@ -1805,6 +1815,14 @@ class EmotionalStatePlugin(Star):
             group_atmosphere_state=group_atmosphere_state,
             observed_at=observed_at,
         )
+        if inject_state:
+            self._append_current_event_time_context_if_any(
+                request,
+                event,
+                session_key=session_key,
+                observed_at=observed_at,
+                budget=injection_budget,
+            )
         await self._save_realtime_delivery_context_if_dirty(session_key)
 
     @filter.on_llm_response()
@@ -1850,6 +1868,8 @@ class EmotionalStatePlugin(Star):
             )
             return
         identity = self._agent_identity(event)
+        observed_at = self._event_observed_at(event)
+        response_event_time = self._conversation_time_payload(observed_at, event=event)
         response_epoch = self._peek_conversation_pending_response_epoch(
             identity.conversation_id,
             event,
@@ -1860,6 +1880,7 @@ class EmotionalStatePlugin(Star):
                 reason="late_llm_response_after_user_message",
                 input_epoch=response_epoch,
                 full_text=response_text,
+                event_time=response_event_time,
             )
             self._discard_conversation_pending_response_epoch_only(
                 identity.conversation_id,
@@ -1929,6 +1950,7 @@ class EmotionalStatePlugin(Star):
                         input_epoch=response_epoch,
                         full_text=response_text,
                         message_parts=plan.get("message_parts"),
+                        event_time=plan.get("event_time"),
                     )
                     self._record_realtime_assistant_history_shadow(
                         identity.conversation_id,
@@ -1942,6 +1964,7 @@ class EmotionalStatePlugin(Star):
                             for part in (plan.get("message_parts") or [])
                             if isinstance(part, dict)
                         ],
+                        event_time=plan.get("event_time"),
                     )
                     await self._save_realtime_delivery_context_if_dirty(
                         identity.conversation_id,
@@ -1969,6 +1992,7 @@ class EmotionalStatePlugin(Star):
                             for part in (plan.get("message_parts") or [])
                             if isinstance(part, dict)
                         ],
+                        event_time=plan.get("event_time"),
                     )
                     await self._save_realtime_delivery_context_if_dirty(
                         identity.conversation_id,
@@ -1978,6 +2002,7 @@ class EmotionalStatePlugin(Star):
                         session_key=identity.conversation_id,
                         input_epoch=response_epoch,
                         message_parts=plan.get("message_parts"),
+                        event_time=plan.get("event_time"),
                     )
                     self._preserve_intercepted_completion_text(
                         response,
@@ -2002,7 +2027,6 @@ class EmotionalStatePlugin(Star):
         if self._group_atmosphere_modeling_enabled() and self._group_atmosphere_applies(
             identity,
         ):
-            observed_at = self._observed_now()
             base_persona_profile = await self._persona_profile(event, None)
             persona_profile = await self._runtime_persona_profile(
                 identity.conversation_id,
@@ -2047,7 +2071,7 @@ class EmotionalStatePlugin(Star):
                 self._clear_sylanne_memory_recall_workset(identity.conversation_id)
             return
 
-        await self._update_from_llm_response(event, response_text)
+        await self._update_from_llm_response(event, response_text, observed_at=observed_at)
         if not realtime_response_intercepted:
             self._discard_conversation_pending_response_epochs_through(
                 identity.conversation_id,
@@ -2289,6 +2313,7 @@ class EmotionalStatePlugin(Star):
         await self._observe_sylanne_memory_event_if_enabled(
             session_key,
             response_text,
+            event=event,
             speaker_id="assistant",
             emotion_state=state,
             personality_drift_state=personality_drift_state,
@@ -6273,6 +6298,7 @@ class EmotionalStatePlugin(Star):
         *,
         current_user_text: str,
         budget: _StateInjectionBudget | None,
+        observed_at: float | None = None,
     ) -> bool:
         if not self._sylanne_memory_enabled():
             return False
@@ -6292,6 +6318,7 @@ class EmotionalStatePlugin(Star):
             request,
             session_key=session_key,
             current_user_text=current_user_text,
+            observed_at=observed_at,
         )
         if not text:
             return False
@@ -6308,6 +6335,7 @@ class EmotionalStatePlugin(Star):
         *,
         session_key: str,
         current_user_text: str,
+        observed_at: float | None = None,
     ) -> str:
         query = self._sylanne_memory_recall_query_for_request(
             request,
@@ -6316,8 +6344,8 @@ class EmotionalStatePlugin(Star):
         if not query:
             return ""
         try:
-            now = self._observed_now()
-            state = await self._load_sylanne_memory_state(session_key)
+            now = self._observed_now() if observed_at is None else float(observed_at)
+            state = await self._load_sylanne_memory_state(session_key, now=now)
             query_embedding, embedding_provider_id, embedding_changed = (
                 await self._sylanne_memory_vector_recall_inputs(
                     state,
@@ -6687,16 +6715,26 @@ class EmotionalStatePlugin(Star):
             atmosphere_values=atmosphere_values,
             lifelike_snapshot=lifelike_snapshot,
         )
+        observed_at = (
+            self._event_observed_at(event_or_session)
+            if self._looks_like_event(event_or_session)
+            else self._observed_now()
+        )
         plan = build_realtime_chat_plan(
             text,
             settings=realtime_settings,
             session_key=resolved_session,
-            now=self._observed_now(),
+            now=observed_at,
             emotion_values=emotion_values,
             atmosphere_values=atmosphere_values,
             sticker_candidates=sticker_candidates,
             sticker_settings=sticker_settings,
         )
+        plan["event_time"] = self._conversation_time_payload(
+            observed_at,
+            event=event_or_session if self._looks_like_event(event_or_session) else None,
+        )
+        plan["astrbot_event_time"] = dict(plan["event_time"])
         plan["settings"] = {
             "max_parts": realtime_settings.max_parts,
             "min_part_chars": realtime_settings.min_part_chars,
@@ -7583,6 +7621,15 @@ class EmotionalStatePlugin(Star):
         results: list[dict[str, Any]] = []
         session_key = str(plan.get("session_key") or self._resolve_public_session_key(event_or_session))
         input_epoch = self._optional_int(plan.get("input_epoch"))
+        event_time = self._normalize_conversation_time_payload(
+            plan.get("event_time") or plan.get("astrbot_event_time"),
+            observed_at=(
+                self._event_observed_at(event_or_session)
+                if self._looks_like_event(event_or_session)
+                else None
+            ),
+            event=event_or_session if self._looks_like_event(event_or_session) else None,
+        )
         interrupted_reason = ""
         full_text = str(plan.get("full_text") or "").strip()
         if not full_text:
@@ -7614,6 +7661,7 @@ class EmotionalStatePlugin(Star):
             input_epoch=input_epoch,
             full_text=full_text,
             source=source,
+            event_time=event_time,
         )
         current_task = asyncio.current_task()
         if current_task is not None:
@@ -7778,6 +7826,7 @@ class EmotionalStatePlugin(Star):
                 unsent_parts=unsent_texts,
                 message_parts=parts,
                 source=source,
+                event_time=event_time,
             )
             if record_history_shadow:
                 self._record_realtime_assistant_history_shadow(
@@ -7789,6 +7838,7 @@ class EmotionalStatePlugin(Star):
                     delivery_status="interrupted",
                     sent_parts=sent_texts,
                     unsent_parts=unsent_texts,
+                    event_time=event_time,
                 )
             self._finish_realtime_chat_active_dispatch(session_key)
             self._log_info(
@@ -7807,6 +7857,7 @@ class EmotionalStatePlugin(Star):
                 source=source,
                 delivery_status="delivered",
                 sent_parts=[str(item.get("text") or "") for item in parts],
+                event_time=event_time,
             )
         if not interrupted_reason:
             self._discard_conversation_pending_response_epochs_through(
@@ -7825,6 +7876,8 @@ class EmotionalStatePlugin(Star):
             "media_count": len([item for item in media_results if item.get("sent")]),
             "media_results": media_results,
             "sticker_result": self._bounded_scalar_or_summary(sticker_result),
+            "event_time": event_time,
+            "trigger_event_time": event_time,
         }
         if interrupted_reason:
             payload["interrupted_reason"] = interrupted_reason
@@ -8688,6 +8741,7 @@ class EmotionalStatePlugin(Star):
         session_key: str,
         input_epoch: int | None,
         message_parts: Sequence[dict[str, Any]] | None = None,
+        event_time: dict[str, Any] | None = None,
     ) -> str:
         original = str(text or "").strip()
         parts = [
@@ -8696,9 +8750,11 @@ class EmotionalStatePlugin(Star):
             if str(part.get("text") or "").strip()
         ]
         planned_parts = len(parts) if parts else (1 if original else 0)
+        time_fields = self._event_time_field_line(event_time)
         header = "\n".join(
             [
                 "[sylanne_realtime_delivery_status]",
+                "If Sylanne is disabled or removed later, keep this envelope as assistant shadow continuity metadata.",
                 "以下是 bot 刚生成的完整回复原文，但已被 Sylanne 即时聊天模块接管；AstrBot 默认发送口已被阻断，这不等于已经全部发给用户。",
                 "后续如果用户插话，请以 Sylanne 记录的实际已发送/未发送状态为准，不要假设用户已经读完整段回复。",
                 (
@@ -8707,6 +8763,7 @@ class EmotionalStatePlugin(Star):
                     f"unsent_parts={planned_parts}; input_epoch={'' if input_epoch is None else input_epoch}; "
                     f"session={self._head_one_line(str(session_key or 'global'), 80)}; "
                     f"full_hash={self._text_hash(original)[:16]}"
+                    + (f"; {time_fields}" if time_fields else "")
                 ),
                 "[assistant_reply_original]",
             ],
@@ -9278,6 +9335,7 @@ class EmotionalStatePlugin(Star):
         unsent_parts: Sequence[str] | None = None,
         message_parts: Sequence[dict[str, Any]] | None = None,
         source: str = "",
+        event_time: dict[str, Any] | None = None,
     ) -> None:
         key = str(session_key or "global")
         sent = [str(part or "").strip() for part in (sent_parts or []) if str(part or "").strip()]
@@ -9299,6 +9357,8 @@ class EmotionalStatePlugin(Star):
         if not full and not sent and not unsent:
             return
         now = self._observed_now()
+        event_time_payload = self._normalize_conversation_time_payload(event_time)
+        interrupted_at_payload = self._conversation_time_payload(now)
         entry = {
             "schema_version": "astrbot.interrupted_reply_breakpoint.v1",
             "kind": "interrupted_reply_breakpoint",
@@ -9307,6 +9367,14 @@ class EmotionalStatePlugin(Star):
             "source": str(source or "llm_response"),
             "input_epoch": input_epoch,
             "recorded_at": now,
+            "event_time": event_time_payload,
+            "event_local_time": str(event_time_payload.get("local_time") or ""),
+            "event_timezone": str(event_time_payload.get("timezone") or ""),
+            "event_epoch": event_time_payload.get("epoch"),
+            "interrupted_at": now,
+            "interrupted_time": interrupted_at_payload,
+            "interrupted_local_time": str(interrupted_at_payload.get("local_time") or ""),
+            "interrupted_timezone": str(interrupted_at_payload.get("timezone") or ""),
             "sent_count": len(sent),
             "unsent_count": len(unsent) if unsent else (1 if full else 0),
             "full_text_chars": len(full),
@@ -9341,6 +9409,7 @@ class EmotionalStatePlugin(Star):
         item = pending[-1]
         item["emotion_observed"] = True
         item["emotion_observed_at"] = self._observed_now()
+        event_time_line = self._event_time_field_line(item.get("event_time") or item)
         return self._head_text(
             "\n".join(
                 [
@@ -9354,6 +9423,7 @@ class EmotionalStatePlugin(Star):
                         unsent_count=int(item.get("unsent_count") or 0),
                         hash=str(item.get("full_text_hash") or "")[:16],
                     ),
+                    event_time_line,
                     "sent_excerpt={text}".format(
                         text=self._head_one_line(str(item.get("sent_excerpt") or ""), 96),
                     ),
@@ -9405,9 +9475,16 @@ class EmotionalStatePlugin(Star):
             "上一段回复被用户新消息或撤回打断，而且没有完整送达。不要原样续发旧回复；只把它当作对话断点来理解当前消息。",
         ]
         for item in items:
+            event_time_line = self._event_time_field_line(item.get("event_time") or item)
+            interrupted_time_line = self._event_time_field_line(
+                item.get("interrupted_time") or {},
+                local_key="interrupted_local_time",
+                timezone_key="interrupted_timezone",
+                epoch_key="interrupted_epoch",
+            )
             lines.append(
                 "reason={reason}; sent_count={sent_count}; unsent_count={unsent_count}; "
-                "old_epoch={epoch}; full_chars={full_chars}; unsent_hash={unsent_hash}; full_hash={full_hash}".format(
+                "old_epoch={epoch}; full_chars={full_chars}; unsent_hash={unsent_hash}; full_hash={full_hash}{time_suffix}{interrupted_suffix}".format(
                     reason=self._head_one_line(str(item.get("reason") or "interrupted"), 48),
                     sent_count=int(item.get("sent_count") or 0),
                     unsent_count=int(item.get("unsent_count") or 0),
@@ -9415,6 +9492,10 @@ class EmotionalStatePlugin(Star):
                     full_chars=int(item.get("full_text_chars") or 0),
                     unsent_hash=str(item.get("unsent_text_hash") or "")[:16],
                     full_hash=str(item.get("full_text_hash") or "")[:16],
+                    time_suffix=f"; {event_time_line}" if event_time_line else "",
+                    interrupted_suffix=(
+                        f"; {interrupted_time_line}" if interrupted_time_line else ""
+                    ),
                 ),
             )
             sent_excerpt = str(item.get("sent_excerpt") or "").strip()
@@ -10908,6 +10989,7 @@ class EmotionalStatePlugin(Star):
         delivery_status: str = "delivered",
         sent_parts: Sequence[str] | None = None,
         unsent_parts: Sequence[str] | None = None,
+        event_time: dict[str, Any] | None = None,
     ) -> None:
         text = str(full_text or "").strip()
         if not text:
@@ -10934,6 +11016,7 @@ class EmotionalStatePlugin(Star):
         sent_count = len(sent)
         unsent_count = len(unsent)
         full_hash = self._text_hash(text)
+        event_time_payload = self._normalize_conversation_time_payload(event_time)
         entry = {
             "schema_version": "astrbot.realtime_assistant_history_shadow.v1",
             "kind": "realtime_assistant_history_shadow",
@@ -10941,6 +11024,10 @@ class EmotionalStatePlugin(Star):
             "source": str(source or "llm_response_intercept"),
             "input_epoch": input_epoch,
             "recorded_at": self._observed_now(),
+            "event_time": event_time_payload,
+            "event_local_time": str(event_time_payload.get("local_time") or ""),
+            "event_timezone": str(event_time_payload.get("timezone") or ""),
+            "event_epoch": event_time_payload.get("epoch"),
             "delivery_status": status,
             "message_count": len(parts) if parts else 1,
             "sent_count": sent_count,
@@ -11061,6 +11148,7 @@ class EmotionalStatePlugin(Star):
                 item["consumed_reason"] = "short_answer_bound_to_last_question"
                 self._mark_realtime_delivery_context_dirty(session_key)
                 return True
+        event_time_line = self._event_time_field_line(item.get("event_time") or item)
         text = "\n".join(
             [
                 "[sylanne_realtime_assistant_history]",
@@ -11074,6 +11162,7 @@ class EmotionalStatePlugin(Star):
                     chars=int(item.get("full_text_chars") or 0),
                     hash=str(item.get("full_text_hash") or "")[:16],
                 ),
+                event_time_line,
                 str(item.get("excerpt") or "").strip(),
             ],
         )
@@ -11219,6 +11308,12 @@ class EmotionalStatePlugin(Star):
         if not question:
             return False
         user_answer = self._head_one_line(str(current_user_text or ""), 80)
+        question_time_line = self._event_time_field_line(
+            item.get("event_time") or item,
+            local_key="question_event_local_time",
+            timezone_key="question_timezone",
+            epoch_key="question_event_epoch",
+        )
         text = "\n".join(
             [
                 "[sylanne_realtime_pending_bot_question]",
@@ -11230,6 +11325,7 @@ class EmotionalStatePlugin(Star):
                     hash=str(item.get("full_text_hash") or "")[:16],
                     expects=bool(item.get("expects_short_answer")),
                 ),
+                question_time_line,
                 "last_bot_question=" + question,
                 "current_user_short_answer=" + user_answer,
             ],
@@ -11384,17 +11480,28 @@ class EmotionalStatePlugin(Star):
         input_epoch: int | None,
         full_text: str,
         source: str,
+        event_time: dict[str, Any] | None = None,
     ) -> None:
         text = str(full_text or "").strip()
         if not text:
             return
+        started_at = self._observed_now()
+        event_time_payload = self._normalize_conversation_time_payload(event_time)
+        started_time_payload = self._conversation_time_payload(started_at)
         self._realtime_chat_active_dispatch_cache()[str(session_key or "global")] = {
             "schema_version": "astrbot.realtime_chat_active_dispatch.v1",
             "kind": "realtime_chat_active_dispatch",
             "session_key": str(session_key or "global"),
             "source": str(source or "realtime_chat"),
             "input_epoch": input_epoch,
-            "started_at": self._observed_now(),
+            "started_at": started_at,
+            "trigger_event_time": event_time_payload,
+            "trigger_event_local_time": str(event_time_payload.get("local_time") or ""),
+            "trigger_timezone": str(event_time_payload.get("timezone") or ""),
+            "trigger_event_epoch": event_time_payload.get("epoch"),
+            "dispatch_started_time": started_time_payload,
+            "dispatch_started_local_time": str(started_time_payload.get("local_time") or ""),
+            "dispatch_started_timezone": str(started_time_payload.get("timezone") or ""),
             "full_text_chars": len(text),
             "full_text_hash": self._text_hash(text),
             "full_text": self._head_text(text, REALTIME_ASSISTANT_HISTORY_EXCERPT_CHARS),
@@ -11459,6 +11566,18 @@ class EmotionalStatePlugin(Star):
             if has_started
             else "上一轮回复已经生成并由插件接管分条，但在第一条真正发出前用户连续补充了新消息；下面是未发出的完整回复摘要，只用于理解上一轮意图和代词指代。不要复读未发出的旧回复，把用户补充视为同一轮上下文更新。"
         )
+        trigger_time_line = self._event_time_field_line(
+            active.get("trigger_event_time") or active,
+            local_key="trigger_event_local_time",
+            timezone_key="trigger_timezone",
+            epoch_key="trigger_event_epoch",
+        )
+        dispatch_time_line = self._event_time_field_line(
+            active.get("dispatch_started_time") or {},
+            local_key="dispatch_started_local_time",
+            timezone_key="dispatch_started_timezone",
+            epoch_key="dispatch_started_epoch",
+        )
         text = "\n".join(
             [
                 "[sylanne_realtime_active_dispatch]",
@@ -11468,6 +11587,8 @@ class EmotionalStatePlugin(Star):
                     sent_count=len(sent_parts),
                     hash=str(active.get("full_text_hash") or "")[:16],
                 ),
+                trigger_time_line,
+                dispatch_time_line,
                 self._head_text(
                     " / ".join(sent_parts) if has_started else full_text_excerpt,
                     REALTIME_ASSISTANT_HISTORY_EXCERPT_CHARS,
@@ -13960,6 +14081,7 @@ class EmotionalStatePlugin(Star):
         session_key: str,
         text: str,
         *,
+        event: AstrMessageEvent | None = None,
         speaker_id: str = "",
         emotion_state: EmotionState | None = None,
         personality_drift_state: PersonalityDriftState | None = None,
@@ -14013,6 +14135,7 @@ class EmotionalStatePlugin(Star):
                     else None
                 ),
                 now=now,
+                event_time=self._conversation_time_payload(now, event=event),
             )
             provider, provider_id = await self._sylanne_memory_embedding_provider()
             if provider is not None and provider_id:
@@ -15183,6 +15306,330 @@ class EmotionalStatePlugin(Star):
             return now
         offset = max(0.0, self._cfg_float("benchmark_time_offset_seconds", 0.0))
         return now + offset
+
+    def _event_observed_at(self, event: AstrMessageEvent | None) -> float:
+        if self._cfg_bool("benchmark_enable_simulated_time", False):
+            return self._observed_now()
+        event_time = self._extract_event_timestamp(event)
+        return event_time if event_time is not None else self._observed_now()
+
+    def _extract_event_timestamp(self, event: Any) -> float | None:
+        if event is None:
+            return None
+        candidates: list[Any] = []
+        for method_name in (
+            "get_timestamp",
+            "get_time",
+            "get_message_time",
+            "get_event_time",
+        ):
+            method = getattr(event, method_name, None)
+            if callable(method):
+                try:
+                    candidates.append(method())
+                except Exception:
+                    pass
+        direct_names = (
+            "timestamp",
+            "time",
+            "message_time",
+            "event_time",
+            "created_at",
+            "send_time",
+            "message_timestamp",
+        )
+        for name in direct_names:
+            candidates.append(getattr(event, name, None))
+        nested_roots = (
+            getattr(event, "message_obj", None),
+            getattr(event, "message", None),
+            getattr(event, "raw_message", None),
+            getattr(event, "raw_event", None),
+        )
+        for root in nested_roots:
+            if root is None:
+                continue
+            if isinstance(root, dict):
+                for name in direct_names:
+                    candidates.append(root.get(name))
+                sender = root.get("sender")
+                if isinstance(sender, dict):
+                    for name in direct_names:
+                        candidates.append(sender.get(name))
+                continue
+            for name in direct_names:
+                candidates.append(getattr(root, name, None))
+        for value in candidates:
+            coerced = self._coerce_event_timestamp(value)
+            if coerced is not None:
+                return coerced
+        return None
+
+    def _coerce_event_timestamp(self, value: Any) -> float | None:
+        if value is None or value == "":
+            return None
+        if isinstance(value, dt.datetime):
+            if value.tzinfo is None:
+                value = value.replace(tzinfo=dt.timezone.utc)
+            return value.timestamp()
+        if isinstance(value, dt.date):
+            return dt.datetime.combine(
+                value,
+                dt.time(),
+                tzinfo=dt.timezone.utc,
+            ).timestamp()
+        if isinstance(value, str):
+            text = value.strip()
+            if not text:
+                return None
+            try:
+                numeric = float(text)
+            except ValueError:
+                try:
+                    parsed = dt.datetime.fromisoformat(text.replace("Z", "+00:00"))
+                except ValueError:
+                    return None
+                if parsed.tzinfo is None:
+                    parsed = parsed.replace(tzinfo=dt.timezone.utc)
+                return parsed.timestamp()
+        else:
+            try:
+                numeric = float(value)
+            except (TypeError, ValueError):
+                return None
+        if not numeric or numeric < 0:
+            return None
+        timestamp = float(numeric)
+        if timestamp > 10_000_000_000_000_000:
+            timestamp /= 1_000_000_000.0
+        elif timestamp > 10_000_000_000_000:
+            timestamp /= 1_000_000.0
+        elif timestamp > 10_000_000_000:
+            timestamp /= 1_000.0
+        if timestamp < 946684800.0 or timestamp > 32503680000.0:
+            return None
+        return timestamp
+
+    def _astrbot_timezone_name(self, event: Any | None = None) -> str:
+        candidates: list[Any] = []
+        for cfg in self._context_config_candidates(event):
+            found = self._find_timezone_name(cfg)
+            if found:
+                candidates.append(found)
+        candidates.extend(
+            [
+                os.environ.get("TZ", ""),
+                "Asia/Shanghai",
+            ],
+        )
+        for value in candidates:
+            name = str(value or "").strip()
+            if name:
+                return name
+        return "Asia/Shanghai"
+
+    def _context_config_candidates(self, event: Any | None = None) -> list[Any]:
+        candidates: list[Any] = []
+        context = getattr(self, "context", None)
+        if context is None:
+            return candidates
+        getter = getattr(context, "get_config", None)
+        umo = getattr(event, "unified_msg_origin", None)
+        if callable(getter):
+            for args, kwargs in (
+                ((), {"umo": umo}),
+                ((umo,), {}),
+                ((), {}),
+            ):
+                try:
+                    candidates.append(getter(*args, **kwargs))
+                except TypeError:
+                    continue
+                except Exception:
+                    continue
+        for name in ("config", "settings", "astrbot_config"):
+            value = getattr(context, name, None)
+            if value is not None:
+                candidates.append(value)
+        return candidates
+
+    def _find_timezone_name(self, value: Any, *, depth: int = 0) -> str:
+        if value is None or depth > 4:
+            return ""
+        keys = ("timezone", "time_zone", "timeZone", "tz", "time-zone")
+        if hasattr(value, "get"):
+            for key in keys:
+                try:
+                    found = value.get(key)
+                except Exception:
+                    found = None
+                if found:
+                    return str(found).strip()
+            try:
+                items = list(value.values())
+            except Exception:
+                items = []
+            for item in items:
+                found = self._find_timezone_name(item, depth=depth + 1)
+                if found:
+                    return found
+        else:
+            for key in keys:
+                found = getattr(value, key, None)
+                if found:
+                    return str(found).strip()
+        return ""
+
+    def _timezone_for_name(self, timezone_name: str) -> dt.tzinfo:
+        name = str(timezone_name or "").strip()
+        if ZoneInfo is not None and name:
+            try:
+                return ZoneInfo(name)
+            except Exception:
+                pass
+        fixed_offsets = {
+            "Asia/Shanghai": 8,
+            "Asia/Chongqing": 8,
+            "Asia/Harbin": 8,
+            "Asia/Urumqi": 6,
+            "UTC": 0,
+            "Etc/UTC": 0,
+        }
+        if name in fixed_offsets:
+            return dt.timezone(
+                dt.timedelta(hours=fixed_offsets[name]),
+                name=name,
+            )
+        match = re.fullmatch(r"UTC([+-])(\d{1,2})(?::?(\d{2}))?", name, re.I)
+        if match:
+            sign = 1 if match.group(1) == "+" else -1
+            hours = int(match.group(2))
+            minutes = int(match.group(3) or 0)
+            return dt.timezone(
+                sign * dt.timedelta(hours=hours, minutes=minutes),
+                name=name,
+            )
+        try:
+            return dt.datetime.now().astimezone().tzinfo or dt.timezone.utc
+        except Exception:
+            return dt.timezone.utc
+
+    def _conversation_time_payload(
+        self,
+        observed_at: float | None = None,
+        *,
+        event: Any | None = None,
+    ) -> dict[str, Any]:
+        timestamp = self._observed_now() if observed_at is None else float(observed_at)
+        timezone_name = self._astrbot_timezone_name(event)
+        tzinfo = self._timezone_for_name(timezone_name)
+        local = dt.datetime.fromtimestamp(timestamp, tz=dt.timezone.utc).astimezone(
+            tzinfo,
+        )
+        offset = local.strftime("%z")
+        if len(offset) == 5:
+            offset = offset[:3] + ":" + offset[3:]
+        local_text = local.strftime("%Y-%m-%d %H:%M:%S")
+        return {
+            "epoch": round(timestamp, 6),
+            "timezone": timezone_name,
+            "local_time": f"{local_text} {offset}".strip(),
+            "iso": local.isoformat(timespec="seconds"),
+            "weekday": local.strftime("%A"),
+        }
+
+    def _normalize_conversation_time_payload(
+        self,
+        event_time: Any = None,
+        *,
+        observed_at: float | None = None,
+        event: Any | None = None,
+    ) -> dict[str, Any]:
+        if isinstance(event_time, dict):
+            local_time = str(
+                event_time.get("local_time")
+                or event_time.get("event_local_time")
+                or event_time.get("trigger_event_local_time")
+                or "",
+            ).strip()
+            timezone_name = str(
+                event_time.get("timezone")
+                or event_time.get("event_timezone")
+                or event_time.get("trigger_timezone")
+                or "",
+            ).strip()
+            epoch = event_time.get("epoch")
+            if epoch is None:
+                epoch = event_time.get("event_epoch")
+            if epoch is None:
+                epoch = event_time.get("trigger_event_epoch")
+            if local_time and timezone_name:
+                payload = {
+                    "epoch": epoch,
+                    "timezone": timezone_name,
+                    "local_time": local_time,
+                    "iso": str(event_time.get("iso") or ""),
+                    "weekday": str(event_time.get("weekday") or ""),
+                }
+                return {key: value for key, value in payload.items() if value not in (None, "")}
+            coerced = self._coerce_event_timestamp(epoch)
+            if coerced is not None:
+                return self._conversation_time_payload(coerced, event=event)
+        if observed_at is not None:
+            return self._conversation_time_payload(observed_at, event=event)
+        return {}
+
+    def _event_time_field_line(
+        self,
+        event_time: Any,
+        *,
+        local_key: str = "event_local_time",
+        timezone_key: str = "timezone",
+        epoch_key: str = "event_epoch",
+    ) -> str:
+        payload = self._normalize_conversation_time_payload(event_time)
+        if not payload:
+            return ""
+        fields: list[str] = []
+        local_time = str(payload.get("local_time") or "").strip()
+        timezone_name = str(payload.get("timezone") or "").strip()
+        epoch = payload.get("epoch")
+        if local_time:
+            fields.append(f"{local_key}={local_time}")
+        if timezone_name:
+            fields.append(f"{timezone_key}={timezone_name}")
+        if epoch not in (None, ""):
+            fields.append(f"{epoch_key}={epoch}")
+        return "; ".join(fields)
+
+    def _append_current_event_time_context_if_any(
+        self,
+        request: ProviderRequest,
+        event: AstrMessageEvent | None,
+        *,
+        session_key: str,
+        observed_at: float,
+        budget: _StateInjectionBudget | None,
+    ) -> bool:
+        payload = self._conversation_time_payload(observed_at, event=event)
+        text = "\n".join(
+            [
+                "[sylanne_current_event_time]",
+                "Use this AstrBot event time for recency, memory relevance, and time-sensitive wording.",
+                "event_local_time={local}; timezone={tz}; epoch={epoch}; session={session}".format(
+                    local=payload["local_time"],
+                    tz=payload["timezone"],
+                    epoch=payload["epoch"],
+                    session=self._head_one_line(str(session_key or "global"), 80),
+                ),
+            ],
+        )
+        return self._append_temp_text_part(
+            request,
+            text,
+            source="current_event_time",
+            budget=budget,
+        )
 
     def _request_to_text(self, request: ProviderRequest) -> str:
         context_parts: list[str] = []

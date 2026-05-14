@@ -455,6 +455,128 @@ class AstrBotLifecyclePart01(AstrBotLifecycleTests):
         self.assertIn("assistant shadow marker", injected)
 
 
+    def test_current_event_time_uses_astrbot_timezone(self):
+        plugin = new_plugin(
+            {
+                "assessment_timing": "post",
+                "inject_state": True,
+                "use_llm_assessor": False,
+                "state_injection_max_added_chars": 2400,
+                "state_injection_max_parts": 8,
+            },
+        )
+        self._bind_common_state_hooks(plugin)
+        plugin.context = SimpleNamespace(
+            get_config=lambda *args, **kwargs: {"timezone": "Asia/Shanghai"},
+        )
+        request = fake_request(session_id="s-event-time", prompt="still editing thesis")
+
+        asyncio.run(
+            plugin.on_llm_request(
+                FakeEvent(
+                    "s-event-time",
+                    message="still editing thesis",
+                    sender_id="u1",
+                    timestamp=1778700459.0,
+                ),
+                request,
+            ),
+        )
+
+        injected = "\n".join(self._request_text_parts(request))
+        self.assertIn("sylanne_current_event_time", injected)
+        self.assertIn("Asia/Shanghai", injected)
+        self.assertIn("2026-05-14 03:27:39 +08:00", injected)
+
+
+    def test_realtime_delivery_context_carries_event_time(self):
+        plugin = new_plugin(
+            {
+                "assessment_timing": "post",
+                "inject_state": True,
+                "use_llm_assessor": False,
+                "state_injection_max_added_chars": 2400,
+                "state_injection_max_parts": 8,
+            },
+        )
+        self._bind_common_state_hooks(plugin)
+        event = FakeEvent(
+            "s-realtime-time",
+            message="still editing thesis",
+            sender_id="u1",
+            timestamp=1778700459.0,
+        )
+        plugin.context = SimpleNamespace(
+            get_config=lambda *args, **kwargs: {"timezone": "Asia/Shanghai"},
+        )
+        event_time = plugin._conversation_time_payload(1778700459.0, event=event)
+
+        envelope = plugin._build_realtime_delivery_envelope_text(
+            "assistant reply about the thesis",
+            session_key="s-realtime-time",
+            input_epoch=3,
+            message_parts=[{"text": "assistant reply about the thesis"}],
+            event_time=event_time,
+        )
+        self.assertIn("event_local_time=2026-05-14 03:27:39 +08:00", envelope)
+        self.assertIn("timezone=Asia/Shanghai", envelope)
+        self.assertIn("disabled or removed", envelope)
+
+        plugin._record_realtime_assistant_history_shadow(
+            "s-realtime-time",
+            full_text="assistant reply about the thesis",
+            input_epoch=3,
+            message_parts=[{"text": "assistant reply about the thesis"}],
+            source="unit_test",
+            event_time=event_time,
+        )
+        shadow_request = fake_request(session_id="s-realtime-time", prompt="what did you mean")
+        plugin._append_realtime_assistant_history_shadow_if_any(
+            shadow_request,
+            "s-realtime-time",
+            budget=None,
+            current_user_text="what did you mean",
+        )
+        shadow_context = "\n".join(self._request_text_parts(shadow_request))
+        self.assertIn("event_local_time=2026-05-14 03:27:39 +08:00", shadow_context)
+        self.assertIn("timezone=Asia/Shanghai", shadow_context)
+
+        plugin._record_interrupted_reply_breakpoint(
+            "s-realtime-time",
+            reason="user_interrupted",
+            input_epoch=4,
+            full_text="interrupted assistant reply",
+            unsent_parts=["interrupted assistant reply"],
+            event_time=event_time,
+        )
+        breakpoint_request = fake_request(session_id="s-realtime-time", prompt="continue")
+        plugin._append_interrupted_reply_breakpoint_if_any(
+            breakpoint_request,
+            "s-realtime-time",
+            budget=None,
+        )
+        breakpoint_context = "\n".join(self._request_text_parts(breakpoint_request))
+        self.assertIn("event_local_time=2026-05-14 03:27:39 +08:00", breakpoint_context)
+        self.assertIn("timezone=Asia/Shanghai", breakpoint_context)
+
+        plugin._start_realtime_chat_active_dispatch(
+            "s-realtime-time",
+            input_epoch=5,
+            full_text="dispatching assistant reply",
+            source="unit_test",
+            event_time=event_time,
+        )
+        active_request = fake_request(session_id="s-realtime-time", prompt="wait")
+        plugin._append_realtime_chat_active_dispatch_if_any(
+            active_request,
+            "s-realtime-time",
+            budget=None,
+        )
+        active_context = "\n".join(self._request_text_parts(active_request))
+        self.assertIn("trigger_event_local_time=2026-05-14 03:27:39 +08:00", active_context)
+        self.assertIn("trigger_timezone=Asia/Shanghai", active_context)
+
+
     def test_gemini_requests_use_the_same_context_path_as_other_models(self):
         plugin = new_plugin(
             {

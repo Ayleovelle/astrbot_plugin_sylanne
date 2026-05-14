@@ -144,6 +144,34 @@ class SylanneMemoryEngineTests(unittest.TestCase):
         self.assertIn("README 要中文", fragment)
         self.assertLessEqual(len(fragment), 220)
 
+    def test_memory_prompt_fragment_includes_astrbot_event_time(self):
+        state = SylanneMemoryState.initial(now=0.0)
+        state = observe_memory_event(
+            state,
+            text="user said the thesis still needs late-night editing",
+            session_key="s-time-memory",
+            speaker_id="u1",
+            now=1778700459.0,
+            event_time={
+                "epoch": 1778700459.0,
+                "local_time": "2026-05-14 03:27:39 +08:00",
+                "timezone": "Asia/Shanghai",
+            },
+        )
+
+        fragment = build_memory_prompt_fragment(
+            recall_memory(
+                state,
+                query="thesis editing",
+                now=1778700460.0,
+            ),
+            session_key="s-time-memory",
+            max_chars=360,
+        )
+
+        self.assertIn("2026-05-14 03:27:39 +08:00", fragment)
+        self.assertIn("Asia/Shanghai", fragment)
+
     def test_recalled_memory_is_reinforced_after_use(self):
         state = SylanneMemoryState.initial(now=0.0)
         state.records.append(

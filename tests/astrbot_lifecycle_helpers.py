@@ -22,6 +22,7 @@ class FakeEvent:
         platform_name="",
         platform_id="",
         group_id="",
+        timestamp=None,
     ):
         self.unified_msg_origin = session_id
         self.message_str = message
@@ -30,6 +31,7 @@ class FakeEvent:
         self._platform_name = platform_name
         self._platform_id = platform_id
         self._group_id = group_id
+        self.timestamp = timestamp
         self.stopped = False
         self.stop_reason = ""
 
