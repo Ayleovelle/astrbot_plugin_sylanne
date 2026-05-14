@@ -5,9 +5,9 @@
 - 💩 发酵指数：`21.7/100`，官方评价：`😐 微臭青年`（由质量分反向换算，越低越好）
 - 官方 JSON overallScore：`78.3/100`
 - 扫描规模：`72/119` 个文件已分析，`46` 个文件被跳过
-- 问题计数：critical `74`，error `150`，warning `141`
+- 问题计数：critical `74`，error `151`，warning `141`
 - 原始报告：`output/fuck_u_code/raw-report.json`
-- 生成时间：`2026-05-14T05:46:59+00:00`
+- 生成时间：`2026-05-14T07:34:34+00:00`
 
 ## 最需要除味的文件
 
@@ -22,7 +22,7 @@
 | 28.0/100 | 71.8/100 | 3 | 2 | 0 | `public_api.py` |
 | 27.0/100 | 73.4/100 | 3 | 3 | 0 | `tests/test_emotion_engine.py` |
 | 26.0/100 | 74.0/100 | 3 | 4 | 1 | `moral_repair_engine.py` |
-| 26.0/100 | 74.3/100 | 3 | 2 | 5 | `realtime_chat_engine.py` |
+| 26.0/100 | 74.2/100 | 3 | 2 | 5 | `realtime_chat_engine.py` |
 | 25.0/100 | 75.3/100 | 2 | 4 | 3 | `psychological_screening.py` |
 | 25.0/100 | 74.6/100 | 2 | 3 | 3 | `humanlike_engine.py` |
 
