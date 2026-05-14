@@ -8,11 +8,14 @@ import time
 import os
 import re
 import inspect
+import shutil
+import subprocess
 from bisect import bisect_right
 from collections import deque
 from copy import deepcopy
 from dataclasses import dataclass
 from hashlib import sha256
+from pathlib import Path
 from collections.abc import Sequence
 from typing import Any
 
@@ -626,7 +629,7 @@ def get_emotional_state_plugin(context: Context) -> Any | None:
     PLUGIN_NAME,
     "Aylovelle.S.S",
     "Soulful Yearning Lifelike AstrBot Neural Narrative Engine：维护情绪、人格、记忆、氛围和表达节奏的 Sylanne",
-    "2.4.3",
+    "2.5.0",
     "",
 )
 class EmotionalStatePlugin(Star):
@@ -17787,6 +17790,21 @@ class EmotionalStatePlugin(Star):
                 )
                 or ""
             ),
+            auto_download_enabled=self._cfg_bool("sticker_auto_download_enabled", False),
+            auto_download_repo_url=str(
+                self._cfg(
+                    "sticker_auto_download_repo_url",
+                    "https://github.com/zhaoolee/ChineseBQB.git",
+                )
+                or ""
+            ),
+            auto_download_cache_dir=str(
+                self._cfg("sticker_auto_download_cache_dir", "") or "",
+            ),
+            auto_download_timeout_seconds=max(
+                1.0,
+                min(300.0, self._cfg_float("sticker_auto_download_timeout_seconds", 30.0)),
+            ),
             allowed_extensions=str(
                 self._cfg("sticker_allowed_extensions", ".jpg,.jpeg,.png,.gif,.webp")
                 or ""
@@ -17814,6 +17832,21 @@ class EmotionalStatePlugin(Star):
                     "https://github.com/zhaoolee/ChineseBQB.git",
                 )
                 or ""
+            ),
+            auto_download_enabled=self._cfg_bool("sticker_auto_download_enabled", False),
+            auto_download_repo_url=str(
+                self._cfg(
+                    "sticker_auto_download_repo_url",
+                    "https://github.com/zhaoolee/ChineseBQB.git",
+                )
+                or ""
+            ),
+            auto_download_cache_dir=str(
+                self._cfg("sticker_auto_download_cache_dir", "") or "",
+            ),
+            auto_download_timeout_seconds=max(
+                1.0,
+                min(300.0, self._cfg_float("sticker_auto_download_timeout_seconds", 30.0)),
             ),
             allowed_extensions=str(
                 self._cfg("sticker_allowed_extensions", ".jpg,.jpeg,.png,.gif,.webp")
@@ -17882,6 +17915,10 @@ class EmotionalStatePlugin(Star):
             enabled=base.enabled,
             local_root=base.local_root,
             default_repo_url=base.default_repo_url,
+            auto_download_enabled=base.auto_download_enabled,
+            auto_download_repo_url=base.auto_download_repo_url,
+            auto_download_cache_dir=base.auto_download_cache_dir,
+            auto_download_timeout_seconds=base.auto_download_timeout_seconds,
             allowed_extensions=base.allowed_extensions,
             selected_packs=base.selected_packs,
             index_limit=base.index_limit,
@@ -17911,7 +17948,193 @@ class EmotionalStatePlugin(Star):
         candidates = self._local_sticker_index(settings)
         if settings.learned_enabled:
             candidates.extend(await self._load_sticker_memory(session_key))
+        if not candidates:
+            auto_root = await asyncio.to_thread(
+                self._ensure_auto_downloaded_sticker_root,
+                settings,
+            )
+            if auto_root is not None:
+                auto_settings = StickerSettings(
+                    enabled=settings.enabled,
+                    local_root=str(auto_root),
+                    default_repo_url=settings.default_repo_url,
+                    auto_download_enabled=settings.auto_download_enabled,
+                    auto_download_repo_url=settings.auto_download_repo_url,
+                    auto_download_cache_dir=settings.auto_download_cache_dir,
+                    auto_download_timeout_seconds=settings.auto_download_timeout_seconds,
+                    allowed_extensions=settings.allowed_extensions,
+                    selected_packs=settings.selected_packs,
+                    index_limit=settings.index_limit,
+                    max_file_bytes=settings.max_file_bytes,
+                    send_probability=settings.send_probability,
+                    learned_enabled=settings.learned_enabled,
+                )
+                candidates = self._local_sticker_index(auto_settings)
         return candidates
+
+    def _ensure_auto_downloaded_sticker_root(self, settings: StickerSettings) -> Path | None:
+        if not settings.enabled or not settings.auto_download_enabled:
+            return None
+        if str(settings.local_root or "").strip():
+            return None
+        repo_url = str(settings.auto_download_repo_url or settings.default_repo_url or "").strip()
+        if not self._sticker_auto_download_repo_allowed(repo_url):
+            self._log_warning(f"{PLUGIN_NAME}: 表情包自动下载跳过，不支持的仓库地址: {self._clip_one_line(repo_url, 120)}")
+            return None
+        cache_root = self._sticker_auto_download_cache_root(settings)
+        if cache_root is None:
+            return None
+        target = cache_root / self._sticker_auto_download_repo_slug(repo_url)
+        if self._sticker_auto_download_repo_is_completed(target):
+            return target
+        if self._sticker_auto_download_root_has_images(target, settings):
+            return target
+        lock_path = target.with_suffix(".lock")
+        try:
+            target.parent.mkdir(parents=True, exist_ok=True)
+            with lock_path.open("x", encoding="utf-8") as lock_file:
+                lock_file.write(str(time.time()))
+        except FileExistsError:
+            if self._sticker_auto_download_repo_is_completed(target):
+                return target
+            if self._sticker_auto_download_root_has_images(target, settings):
+                return target
+            self._log_warning(f"{PLUGIN_NAME}: 表情包自动下载已有进行中的锁，暂时跳过")
+            return None
+        except OSError as exc:
+            self._log_warning(f"{PLUGIN_NAME}: 表情包自动下载无法创建缓存目录: {exc}")
+            return None
+        try:
+            self._download_sticker_repo(repo_url, target, settings)
+        except Exception as exc:
+            self._log_warning(f"{PLUGIN_NAME}: 表情包自动下载失败: {self._clip_one_line(str(exc), 160)}")
+            if target.exists() and not self._sticker_auto_download_root_has_images(target, settings):
+                shutil.rmtree(target, ignore_errors=True)
+            return None
+        finally:
+            try:
+                lock_path.unlink(missing_ok=True)
+            except OSError:
+                pass
+        return target if self._sticker_auto_download_root_has_images(target, settings) else None
+
+    def _sticker_auto_download_repo_allowed(self, repo_url: str) -> bool:
+        lowered = str(repo_url or "").strip().lower()
+        return lowered.startswith(("https://", "http://", "git://")) and not any(
+            marker in lowered
+            for marker in (";", "&&", "||", "`", "$(", "\n", "\r")
+        )
+
+    def _sticker_auto_download_cache_root(self, settings: StickerSettings) -> Path | None:
+        configured = str(settings.auto_download_cache_dir or "").strip()
+        if configured:
+            root = Path(configured).expanduser()
+        else:
+            test_base = getattr(self, "_test_sticker_cache_base", None)
+            if test_base:
+                root = Path(test_base)
+            else:
+                root = Path(os.environ.get("XDG_CACHE_HOME") or Path.home() / ".cache")
+                root = root / PLUGIN_NAME / "stickers"
+        try:
+            resolved = root.resolve()
+        except OSError:
+            return None
+        if self._sticker_auto_download_cache_dir_is_unsafe(resolved):
+            self._log_warning(f"{PLUGIN_NAME}: 表情包自动下载缓存目录不安全，已跳过: {resolved}")
+            return None
+        return resolved
+
+    def _sticker_auto_download_cache_dir_is_unsafe(self, path: Path) -> bool:
+        try:
+            root = Path(__file__).resolve().parent
+            resolved = path.resolve()
+        except OSError:
+            return True
+        unsafe_roots = [
+            root,
+            root / "docs",
+            root / "pages",
+            root / "dist",
+            root / "output",
+        ]
+        return any(resolved == item or item in resolved.parents for item in unsafe_roots)
+
+    def _sticker_auto_download_repo_slug(self, repo_url: str) -> str:
+        cleaned = re.sub(r"\.git$", "", str(repo_url or "").strip().rstrip("/"))
+        tail = cleaned.rsplit("/", 1)[-1] or "stickers"
+        safe = re.sub(r"[^A-Za-z0-9_.-]+", "_", tail).strip("._-")
+        digest = sha256(cleaned.encode("utf-8", errors="ignore")).hexdigest()[:10]
+        return f"{safe or 'stickers'}-{digest}"
+
+    def _sticker_auto_download_repo_is_completed(self, root: Path) -> bool:
+        if not root.exists() or not root.is_dir():
+            return False
+        return (root / ".git").exists() or (root / ".sylanne_sticker_download_complete").exists()
+
+    def _sticker_auto_download_root_has_images(
+        self,
+        root: Path,
+        settings: StickerSettings,
+    ) -> bool:
+        if not root.exists() or not root.is_dir():
+            return False
+        probe_settings = StickerSettings(
+            enabled=settings.enabled,
+            local_root=str(root),
+            default_repo_url=settings.default_repo_url,
+            auto_download_enabled=settings.auto_download_enabled,
+            auto_download_repo_url=settings.auto_download_repo_url,
+            auto_download_cache_dir=settings.auto_download_cache_dir,
+            auto_download_timeout_seconds=settings.auto_download_timeout_seconds,
+            allowed_extensions=settings.allowed_extensions,
+            selected_packs=settings.selected_packs,
+            index_limit=1,
+            max_file_bytes=settings.max_file_bytes,
+            send_probability=settings.send_probability,
+            learned_enabled=settings.learned_enabled,
+        )
+        return bool(index_local_stickers(probe_settings))
+
+    def _download_sticker_repo(
+        self,
+        repo_url: str,
+        target: Path,
+        settings: StickerSettings,
+    ) -> None:
+        git = shutil.which("git")
+        if not git:
+            raise RuntimeError("git executable not found")
+        tmp_target = target.with_name(target.name + ".tmp")
+        if tmp_target.exists():
+            shutil.rmtree(tmp_target, ignore_errors=True)
+        command = [
+            git,
+            "clone",
+            "--depth",
+            "1",
+            "--filter=blob:none",
+            "--",
+            repo_url,
+            str(tmp_target),
+        ]
+        result = subprocess.run(
+            command,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            timeout=max(1.0, float(settings.auto_download_timeout_seconds)),
+            check=False,
+        )
+        if result.returncode != 0:
+            raise RuntimeError((result.stderr or result.stdout or "git clone failed")[:240])
+        (tmp_target / ".sylanne_sticker_download_complete").write_text(
+            "ok\n",
+            encoding="utf-8",
+        )
+        if target.exists():
+            shutil.rmtree(target, ignore_errors=True)
+        tmp_target.replace(target)
 
     def _local_sticker_index(self, settings: StickerSettings) -> list[dict[str, Any]]:
         cache = getattr(self, "_sticker_index_cache", None)

@@ -158,13 +158,37 @@
     "description": "默认表情包参考仓库",
     "type": "string",
     "default": "https://github.com/zhaoolee/ChineseBQB.git",
-    "hint": "仅作为用户自行准备素材的默认来源提示；插件包不会下载、镜像或分发该仓库。"
+    "hint": "仅作为默认来源提示；插件包不会下载、镜像或分发该仓库。自动下载只有在单独开关开启时才会把指定仓库下载到本机缓存目录。"
+  },
+  "sticker_auto_download_enabled": {
+    "description": "自动下载默认表情包仓库",
+    "type": "bool",
+    "default": false,
+    "hint": "默认关闭。开启后，若表情包回应已开启且本地表情包目录为空，插件会把指定仓库下载到本机缓存目录再索引；会消耗网络、磁盘和首次索引时间。"
+  },
+  "sticker_auto_download_repo_url": {
+    "description": "自动下载表情包仓库地址",
+    "type": "string",
+    "default": "https://github.com/zhaoolee/ChineseBQB.git",
+    "hint": "仅支持 http/https/git 协议的 Git 仓库地址。插件只把素材下载到本机缓存目录，不会把外部素材打进发布包。"
+  },
+  "sticker_auto_download_cache_dir": {
+    "description": "自动下载表情包缓存目录",
+    "type": "string",
+    "default": "",
+    "hint": "留空时使用系统缓存目录下的 astrbot_plugin_sylanne/stickers；不要填写插件源码目录、docs、pages、dist 或 output。"
+  },
+  "sticker_auto_download_timeout_seconds": {
+    "description": "自动下载表情包超时秒数",
+    "type": "float",
+    "default": 30.0,
+    "hint": "首次 git clone 的超时时间。下载失败会回退为无候选表情，不阻塞主回复。"
   },
   "sticker_local_root": {
     "description": "本地表情包目录",
     "type": "string",
     "default": "",
-    "hint": "填写本机已准备的表情包目录；留空时只使用已学习的用户表情元数据。"
+    "hint": "填写本机已准备的表情包目录；留空时可配合自动下载开关使用缓存素材，否则只使用已学习的用户表情元数据。"
   },
   "sticker_allowed_extensions": {
     "description": "允许索引的表情包扩展名",

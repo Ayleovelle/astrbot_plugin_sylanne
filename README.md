@@ -2,7 +2,7 @@
 
 > <span style="font-size: 1.08em;"><strong>Soulful Yearning Lifelike AstrBot Neural Narrative Engine</strong>。她维护的不只是“情绪标签”，而是情绪、人格、记忆、氛围、主动性和表达节奏交织成的长期状态。</span>
 
-![版本 2.4.3](https://img.shields.io/badge/version-2.4.3-blue)
+![版本 2.5.0](https://img.shields.io/badge/version-2.5.0-blue)
 ![AstrBot >=4.9.2,<5.0.0](https://img.shields.io/badge/AstrBot-%3E%3D4.9.2%2C%3C5.0.0-green)
 ![Python 3.10+](https://img.shields.io/badge/Python-3.10%2B-yellow)
 ![协议 astrbot.emotion_state.v2](https://img.shields.io/badge/schema-astrbot.emotion__state.v2-purple)
@@ -38,7 +38,7 @@
 
 <br clear="right">
 
-`2.4.3` 是主动发言调度器轻量唤醒修复版：在接管碎片时间线、慢速短碎片等待、接管上下文、事件时间保留、接管媒体、快判开关、更新后断点恢复和空输出韧性修复的基础上，进一步让主动发言调度器只在有候选会话时唤醒，并在候选耗尽或连续空闲后自动退出，避免后台子任务长期常驻。真人即时聊天接管、分条接管提示、用户碎片 LLM gate、表情包回应、表情包一致性 LLM gate 和用户表情学习继续默认关闭。
+`2.5.0` 是表情包自动素材准备版：在主动发言调度器轻量唤醒、接管碎片时间线、慢速短碎片等待、接管上下文、事件时间保留、接管媒体、快判开关、更新后断点恢复和空输出韧性修复的基础上，新增显式开启的表情包仓库自动下载能力。真人即时聊天接管、分条接管提示、用户碎片 LLM gate、表情包回应、表情包自动下载、表情包一致性 LLM gate 和用户表情学习继续默认关闭。
 
 | 能力 | 作用 |
 | --- | --- |
@@ -74,7 +74,7 @@
 | 主题 | 内容 |
 | --- | --- |
 | [当前版本与兼容范围](#当前版本与兼容范围) | 插件版本、AstrBot 版本、Python 要求、许可证和发布状态。 |
-| [当前版本发布记录](#243-当前版本发布记录) | 主动发言调度器候选唤醒、空闲自退、接管碎片按 AstrBot 消息时间排序、慢速短碎片合并修复、接管媒体按锚点插入、更新后恢复接管上下文、AstrBot 事件时间进入实时接管和记忆链路。 |
+| [当前版本发布记录](#250-当前版本发布记录) | 表情包仓库显式自动下载、主动发言调度器候选唤醒、空闲自退、接管碎片按 AstrBot 消息时间排序、慢速短碎片合并修复、接管媒体按锚点插入。 |
 | [项目定位](#项目定位) | 为什么本插件不是普通的提示词人设增强。 |
 | [核心能力](#核心能力总览) | 7 维情绪、人格建模、真实时间记忆、关系修复、公共 API。 |
 | [快速开始](#快速开始) | 发布 zip 包、仓库安装、手动复制、最小配置和检查命令。 |
@@ -102,22 +102,26 @@
 | --- | --- |
 | 插件目录名 | `astrbot_plugin_sylanne` |
 | 显示名 | `Sylanne` |
-| 当前版本 | `2.4.3` |
+| 当前版本 | `2.5.0` |
 | AstrBot 版本 | `>=4.9.2,<5.0.0` |
 | Python | `3.10+` |
 | 许可证 | `GPL-3.0-or-later` |
 | 运行时第三方依赖 | 当前无额外依赖，见 `requirements.txt` |
 
-`2.4.3` 保留 Sylanne 自有记忆知识库、只读记忆查询入口、Agent-owned context 即时聊天修复、AstrBot Embedding 提供商驱动的向量召回、可视化记忆设置 Page、短答锚定、模型空回复降级、完整上下文回填、内部工具统一隐藏、主动聊天反馈、等待期追发合并、长历史关键上下文保底和 AstrBot 事件时间保留；本版进一步修复主动发言调度器的生命周期：没有候选会话时不启动，有候选时短延迟唤醒，候选耗尽或连续空闲后自动退出。核心情绪、回复后后台评估（post）、`group_atmosphere_state`、`humanlike_state`、`lifelike_learning_state`、`personality_drift_state`、Sylanne 自有记忆和欺骗/操控/逃责类动作阻断默认自动运行；真人即时聊天接管、表情包回应、道德修复、瑕疵模拟、心理筛查等高风险或实验模块仍由配置者显式打开。
+`2.5.0` 保留 Sylanne 自有记忆知识库、只读记忆查询入口、Agent-owned context 即时聊天修复、AstrBot Embedding 提供商驱动的向量召回、可视化记忆设置 Page、短答锚定、模型空回复降级、完整上下文回填、内部工具统一隐藏、主动聊天反馈、等待期追发合并、长历史关键上下文保底和 AstrBot 事件时间保留；本版新增表情包仓库自动下载：当表情包回应已开启、本地目录为空且 `sticker_auto_download_enabled=true` 时，会把指定 Git 仓库下载到本机缓存目录后索引。核心情绪、回复后后台评估（post）、`group_atmosphere_state`、`humanlike_state`、`lifelike_learning_state`、`personality_drift_state`、Sylanne 自有记忆和欺骗/操控/逃责类动作阻断默认自动运行；真人即时聊天接管、表情包回应、表情包自动下载、道德修复、瑕疵模拟、心理筛查等高风险或实验模块仍由配置者显式打开。
 
-### 2.4.3 当前版本发布记录
+### 2.5.0 当前版本发布记录
 
-`v2.4.3` 合并在 `main` 上，对外安装版本由 `metadata.yaml` 和 `main.py @register(...)` 共同声明为 `2.4.3`。本版按版本规则提升第三位版本号：修复主动发言调度器在后台长期常驻的问题，并补充 active runner follow-up 按 AstrBot 消息时间排序的回归覆盖；不改变公共 API 版本，公共 API 版本仍保持 `1.0`，schema 仍保持向后兼容。
+`v2.5.0` 合并在 `main` 上，对外安装版本由 `metadata.yaml` 和 `main.py @register(...)` 共同声明为 `2.5.0`。本版按版本规则提升第二位版本号：新增显式开启的表情包仓库自动下载能力；不改变公共 API 版本，公共 API 版本仍保持 `1.0`，schema 仍保持向后兼容。
 
 当前版本的主要变化：
 
 | 类别 | 结果 |
 | --- | --- |
+| 表情包自动下载 | 新增 `sticker_auto_download_enabled`。只有表情包回应已开启、本地表情包目录为空且该开关为 `true` 时，才会下载指定 Git 仓库到本机缓存目录。 |
+| 表情包缓存目录 | 默认使用系统缓存目录下的 `astrbot_plugin_sylanne/stickers`；也可配置 `sticker_auto_download_cache_dir`，但插件会拒绝源码目录、`docs`、`pages`、`dist`、`output` 等容易进入发布包的位置。 |
+| 表情包下载安全 | 自动下载只接受 http/https/git 协议的 Git 仓库地址，使用非 shell 参数调用 `git clone --depth 1 --filter=blob:none`，并带超时；失败时回退为无候选表情，不阻塞主回复。 |
+| 包体边界 | 打包脚本和 zip 预检拒绝 `.cache`、`ChineseBQB`、`auto-stickers`、`stickers` 等外部素材目录，自动下载的素材不会进入发布 zip。 |
 | 主动调度器候选唤醒 | 主动发言调度器只有在记录到可触达候选会话时才启动，空列表不会创建后台任务，避免无会话时仍有常驻调度循环。 |
 | 主动调度器空闲自退 | 调度器启动后先短暂等待，再扫描候选；候选耗尽会立即退出，连续空闲达到阈值也会退出，并清理 `_proactive_scheduler_task` 与 idle 计数。 |
 | 主动调度器低消耗预热 | 有候选但本轮已扫完时使用短唤醒延迟承接刚到达的会话；仍有未扫候选时才进入正常低频间隔，压力过高时继续走 busy delay。 |
@@ -132,7 +136,7 @@
 | 表情包发送诊断 | 表情包仍只来自本地表情包目录或已学习的用户表情元数据；如果没有候选素材，`sticker_result.blocked_reason` 会明确返回 `no_sticker_candidates`，方便排查“开关开了但不发”的原因。 |
 | 更新后上下文恢复 | 接管投递 shadow 和打断 breakpoint 会写入轻量 KV 投递上下文；插件更新/重载后的新实例可在下一轮恢复一次，并在注入后标记 consumed，避免反复污染后续提示词。 |
 | 情绪评估空输出韧性 | 内部情绪评估 LLM 若返回 `EmptyModelOutputError` / `no usable output`，插件会仅重试一次；若仍失败或超时，继续使用本地启发式估计，避免主流程崩溃。 |
-| 高风险默认关闭 | 真人即时聊天接管、即时聊天风格提示、默认回复接管、用户碎片 LLM gate、表情包回应、表情包一致性 LLM gate 和用户表情学习全部默认关闭。 |
+| 高风险默认关闭 | 真人即时聊天接管、即时聊天风格提示、默认回复接管、用户碎片 LLM gate、表情包回应、表情包自动下载、表情包一致性 LLM gate 和用户表情学习全部默认关闭。 |
 | 开启风险提示 | README 和配置 schema 明确提示：这些功能仍需更长时间真实体验和修复，现阶段打开可能导致上下文错乱、重复发送、漏发、旧回复残留、撤回/打断状态判断错误、平台发送异常或表情包语气不匹配。 |
 | 快判 LLM 独立开关 | 新增 `fast_assessor_enabled`。只有同时打开该开关、选择 `fast_assessor_provider_id`，并开启用户碎片或表情包一致性等对应 gate 时，才会调用第二个快判 LLM。 |
 | 发布展示 | `metadata.yaml` 与 `@register(...)` 作者统一为 `Aylovelle.S.S`；插件页可见的 LLM 工具、指令和钩子说明改为中文。 |
@@ -175,7 +179,7 @@
 | 上下文安全预算 | 召回结果只作为 `[sylanne_memory_recall]` 限长摘要注入，并继续受请求预算和官方上下文压缩清洗逻辑约束。 |
 | 模块互斥自检 | 发布前覆盖自有记忆、主动发言、官方上下文压缩、即时聊天、公共 API、配置契约和包体预检，验证模块之间不会互相回灌或重复调用外部 LivingMemory。 |
 | 工作流图 | `docs/assets/workflow_and_proactive.svg` 已重绘，突出即时聊天、追发合并、Agent 工具循环、模型边界和主动聊天反馈；移除误导性的单点 Gemini 诊断节点，并修正中文字体和跨泳道箭头。 |
-| 公开契约 | 插件版本为 `2.4.3`；公共 API 版本仍为 `1.0`，schema 仍保持 `astrbot.emotion_state.v2` 等版本化契约。 |
+| 公开契约 | 插件版本为 `2.5.0`；公共 API 版本仍为 `1.0`，schema 仍保持 `astrbot.emotion_state.v2` 等版本化契约。 |
 
 旧版本发布记录统一放在 `CHANGELOG.md`。README 只展示当前版本，避免插件管理页从历史段落误抓旧版本号。
 
@@ -1647,7 +1651,7 @@ enable_safety_boundary = false
 
 即时聊天接管只发生在最终自然语言回复上。若 AstrBot Agent 正在进行工具调用，`LLMResponse` 里带有 `tool_calls`、`function_call`、工具角色、工具调用 ID 或 `finish_reason=tool_calls`，Sylanne 会直接放行：不改写 `completion_text`，不阻断事件传播，不消费会话 epoch。这样工具查询、记忆查询和其他插件工具仍由 AstrBot Agent 原生循环处理；Sylanne 只在最终可发送文本出现后接管投递。
 
-图片和表情包的“智能嵌入”不是让插件替主模型调用工具。图片来自 AstrBot Agent 已经生成的 `result_chain/message_chain`：如果工具结果链路里是“文字、图片、文字”，接管发送会把图片按文本字符锚点插入到最终分条之间；如果图片在第一段文字前，也会先发图片。表情包则来自 `sticker_local_root` 的本地素材或 `sticker_learn_user_images` 学到的轻量元数据，再由情绪/氛围意图、概率门和可选一致性检查决定是否发送。没有素材候选时不会凭空发送，计划结果会写出 `no_sticker_candidates`。
+图片和表情包的“智能嵌入”不是让插件替主模型调用工具。图片来自 AstrBot Agent 已经生成的 `result_chain/message_chain`：如果工具结果链路里是“文字、图片、文字”，接管发送会把图片按文本字符锚点插入到最终分条之间；如果图片在第一段文字前，也会先发图片。表情包则来自 `sticker_local_root` 的本地素材、显式开启后下载到本机缓存目录的素材，或 `sticker_learn_user_images` 学到的轻量元数据，再由情绪/氛围意图、概率门和可选一致性检查决定是否发送。没有素材候选时不会凭空发送，计划结果会写出 `no_sticker_candidates`。
 
 | 配置项 | 类型 | 默认值 | 说明 |
 | --- | --- | --- | --- |
@@ -1663,8 +1667,12 @@ enable_safety_boundary = false
 | `realtime_chat_strip_markdown` | bool | `true` | 分条前清理常见 Markdown 标记。 |
 | `enable_sticker_reaction` | bool | `false` | 是否根据情绪和氛围补发表情包；默认关闭，表情包功能仍需素材、语气和平台兼容性验证。 |
 | `sticker_llm_consistency_check_enabled` | bool | `false` | 表情包发送前做意图一致性检查；默认关闭，只建议在测试表情包回应时开启。 |
-| `sticker_default_repo_url` | string | `https://github.com/zhaoolee/ChineseBQB.git` | 默认表情包参考仓库，仅供用户自行准备素材；插件不分发该仓库。 |
-| `sticker_local_root` | string | `""` | 本地表情包目录。 |
+| `sticker_default_repo_url` | string | `https://github.com/zhaoolee/ChineseBQB.git` | 默认表情包参考仓库。 |
+| `sticker_auto_download_enabled` | bool | `false` | 是否在表情包回应已开启且本地目录为空时自动下载表情包仓库；默认关闭，避免不知情用户产生网络和磁盘消耗。 |
+| `sticker_auto_download_repo_url` | string | `https://github.com/zhaoolee/ChineseBQB.git` | 自动下载的 Git 仓库地址。 |
+| `sticker_auto_download_cache_dir` | string | `""` | 自动下载缓存目录，留空使用系统缓存目录下的 `astrbot_plugin_sylanne/stickers`。 |
+| `sticker_auto_download_timeout_seconds` | float | `30.0` | 首次下载超时时间；失败时回退为无候选表情。 |
+| `sticker_local_root` | string | `""` | 本地表情包目录；填写后优先使用本地目录，不会自动覆盖。 |
 | `sticker_allowed_extensions` | string | `.jpg,.jpeg,.png,.gif,.webp` | 允许索引的图片扩展名。 |
 | `sticker_selected_packs` | string | `""` | 表情包子包筛选词，留空表示不筛选。 |
 | `sticker_index_limit` | int | `1000` | 本地表情包索引上限。 |
@@ -1691,7 +1699,7 @@ enable_safety_boundary = false
 
 NapCat/OneBot 的撤回事件也可以接入这个机制。NapCat 的撤回属于 OneBot `notice` 事件，私聊撤回为 `notice_type=friend_recall`，群撤回为 `notice_type=group_recall`，常见字段包括 `message_id`、`user_id`、群撤回里的 `group_id` 与 `operator_id`。如果适配器能把原始 notice 放在 `event.message_obj.raw_message`、`event.raw_message` 或同类字段里，插件可解析撤回载荷；其他插件也可以直接调用 `observe_user_message_withdrawal(...)`。撤回后会推进会话 epoch、清空该会话最近主动聊天候选摘要，并让旧回复自然过期。若平台没有把撤回事件交给插件，则只能等用户补发更正消息后按“新消息打断旧回复”处理。
 
-`ChineseBQB` 仓库体积很大且未随本插件重新授权分发，所以本插件只保留默认 URL 和本地目录索引能力。发布 zip 不包含 `ChineseBQB/`、用户偷来的表情包、缓存图片或外部素材库；“偷表情包”只表示记录轻量来源信息，方便以后在同一会话氛围下复用。
+`ChineseBQB` 仓库体积很大且未随本插件重新授权分发，所以发布 zip 不包含 `ChineseBQB/`、用户偷来的表情包、缓存图片或外部素材库。需要插件自动准备素材时，必须显式打开 `sticker_auto_download_enabled`；素材会下载到本机缓存目录，包体预检会拒绝把 `.cache/`、`ChineseBQB/`、`auto-stickers/` 或 `stickers/` 误塞进发布包。“偷表情包”只表示记录轻量来源信息，方便以后在同一会话氛围下复用。
 
 ### 低推理模型友好模式
 
@@ -2972,7 +2980,7 @@ $env:ASTRBOT_EXPECT_PLUGIN = "astrbot_plugin_sylanne"
 脚本会在输出 JSON 里写出 `expectedPluginRuntime`，包含插件列表 API 中返回的 `version`、`displayName`、`activated`、`author`、`astrbotVersion` 等只读字段。若目标插件存在但 `activated=false`，脚本会失败退出。需要把版本和显示名也作为硬断言时，可以额外设置：
 
 ```powershell
-$env:ASTRBOT_EXPECT_PLUGIN_VERSION = "2.4.3"
+$env:ASTRBOT_EXPECT_PLUGIN_VERSION = "2.5.0"
 $env:ASTRBOT_EXPECT_PLUGIN_DISPLAY_NAME = "Sylanne"
 & $node scripts\remote_smoke_playwright.js
 ```

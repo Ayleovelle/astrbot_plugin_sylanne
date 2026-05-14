@@ -2,6 +2,20 @@
 
 本文件用于 AstrBot 插件市场/管理页展示更新内容。更完整的设计说明、公式推导、测试矩阵和维护手册见 `README.md`。
 
+## 2.5.0
+
+发布日期：2026-05-14
+
+### 新增
+
+- 新增显式开启的表情包仓库自动下载：`enable_sticker_reaction=true`、`sticker_local_root` 为空且 `sticker_auto_download_enabled=true` 时，会把 `sticker_auto_download_repo_url` 指向的 Git 仓库下载到本机缓存目录后索引。
+- 新增 `sticker_auto_download_cache_dir` 和 `sticker_auto_download_timeout_seconds`，可控制缓存位置和首次下载超时；下载失败会回退为无候选表情，不阻塞主回复。
+
+### 安全与包体
+
+- 自动下载默认关闭，不会因为表情包功能或默认 URL 存在就偷偷联网。
+- 打包脚本和 zip 预检拒绝 `.cache`、`ChineseBQB`、`auto-stickers`、`stickers` 等外部素材目录，避免把下载素材塞进发布包。
+
 ## 2.4.3
 
 发布日期：2026-05-14

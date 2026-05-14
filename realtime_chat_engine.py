@@ -43,6 +43,10 @@ class StickerSettings:
     enabled: bool = True
     local_root: str = ""
     default_repo_url: str = "https://github.com/zhaoolee/ChineseBQB.git"
+    auto_download_enabled: bool = False
+    auto_download_repo_url: str = "https://github.com/zhaoolee/ChineseBQB.git"
+    auto_download_cache_dir: str = ""
+    auto_download_timeout_seconds: float = 30.0
     allowed_extensions: str = ".jpg,.jpeg,.png,.gif,.webp"
     selected_packs: str = ""
     index_limit: int = 1000

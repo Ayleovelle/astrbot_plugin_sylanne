@@ -374,6 +374,10 @@ class PluginZipPreflightTests(unittest.TestCase):
             output = Path(temp_dir) / f"{PLUGIN_NAME}.zip"
             entries = self._valid_entries() + [
                 (f"{PLUGIN_NAME}/raw/cache.jsonl", "{}\n"),
+                (f"{PLUGIN_NAME}/.cache/stickers/a.png", "PNG\n"),
+                (f"{PLUGIN_NAME}/ChineseBQB/a.png", "PNG\n"),
+                (f"{PLUGIN_NAME}/auto-stickers/a.png", "PNG\n"),
+                (f"{PLUGIN_NAME}/stickers/a.png", "PNG\n"),
                 (f"{PLUGIN_NAME}/tests/test_plugin.py", "\n"),
                 (f"{PLUGIN_NAME}/literature_kb/works.jsonl", "{}\n"),
                 (f"{PLUGIN_NAME}/personality_literature_kb/works.jsonl", "{}\n"),

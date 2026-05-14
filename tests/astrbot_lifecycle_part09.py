@@ -1,8 +1,10 @@
 import asyncio
 import collections
+import tempfile
 import sys
 import time
 import types
+from pathlib import Path
 from types import SimpleNamespace
 
 try:
@@ -159,6 +161,110 @@ class AstrBotLifecyclePart09(AstrBotLifecycleTests):
             "no_sticker_candidates",
         )
         self.assertEqual(len(sent), plan["message_count"])
+
+
+    def test_sticker_auto_download_uses_cache_when_local_root_is_empty(self):
+        plugin = new_plugin(
+            {
+                "enable_sticker_reaction": True,
+                "sticker_local_root": "",
+                "sticker_auto_download_enabled": True,
+                "sticker_auto_download_repo_url": "https://example.test/stickers.git",
+                "sticker_auto_download_cache_dir": "",
+                "sticker_learn_user_images": False,
+            },
+        )
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            base = Path(temp_dir)
+            cached_root = base / "auto-stickers"
+            (cached_root / "pack").mkdir(parents=True)
+            sticker_path = cached_root / "pack" / "happy.png"
+            sticker_path.write_bytes(b"fake image")
+            plugin._test_sticker_cache_base = base
+            calls = []
+
+            def fake_ensure(settings):
+                calls.append(settings.auto_download_repo_url)
+                return cached_root
+
+            plugin._ensure_auto_downloaded_sticker_root = fake_ensure
+
+            candidates = asyncio.run(plugin._sticker_candidates("s-auto-sticker"))
+
+        self.assertEqual(calls, ["https://example.test/stickers.git"])
+        self.assertEqual(len(candidates), 1)
+        self.assertEqual(candidates[0]["name"], "happy")
+        self.assertIn("auto-stickers", candidates[0]["path"])
+
+
+    def test_sticker_auto_download_skips_when_learned_candidates_exist(self):
+        plugin = new_plugin(
+            {
+                "enable_sticker_reaction": True,
+                "sticker_local_root": "",
+                "sticker_auto_download_enabled": True,
+                "sticker_learn_user_images": True,
+            },
+        )
+        calls = []
+
+        async def learned_stickers(self, session_key):
+            return [
+                {
+                    "id": "learned-1",
+                    "origin": "learned_user_image",
+                    "path": "https://example.test/learned.png",
+                    "name": "learned",
+                },
+            ]
+
+        def fail_ensure(settings):
+            calls.append(settings.auto_download_repo_url)
+            raise AssertionError("learned stickers should be used before auto-download")
+
+        bind_async(plugin, "_load_sticker_memory", learned_stickers)
+        plugin._ensure_auto_downloaded_sticker_root = fail_ensure
+
+        candidates = asyncio.run(plugin._sticker_candidates("s-learned-first"))
+
+        self.assertEqual(calls, [])
+        self.assertEqual(len(candidates), 1)
+        self.assertEqual(candidates[0]["origin"], "learned_user_image")
+
+
+    def test_sticker_auto_download_reuses_completed_repo_even_when_pack_filter_misses(self):
+        plugin = new_plugin(
+            {
+                "enable_sticker_reaction": True,
+                "sticker_local_root": "",
+                "sticker_auto_download_enabled": True,
+                "sticker_auto_download_repo_url": "https://example.test/stickers.git",
+                "sticker_selected_packs": "missing-pack",
+                "sticker_learn_user_images": False,
+            },
+        )
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            base = Path(temp_dir)
+            plugin._test_sticker_cache_base = base
+            settings = plugin._sticker_settings()
+            target = base / plugin._sticker_auto_download_repo_slug(settings.auto_download_repo_url)
+            (target / "pack").mkdir(parents=True)
+            (target / "pack" / "happy.png").write_bytes(b"fake image")
+            (target / ".git").mkdir()
+            calls = []
+
+            def fail_download(repo_url, target_root, settings):
+                calls.append(repo_url)
+                raise AssertionError("completed sticker repo should not be cloned again")
+
+            plugin._download_sticker_repo = fail_download
+
+            candidates = asyncio.run(plugin._sticker_candidates("s-filter-miss"))
+
+        self.assertEqual(calls, [])
+        self.assertEqual(candidates, [])
 
 
     def test_sticker_consistency_parser_treats_string_false_as_rejected(self):
