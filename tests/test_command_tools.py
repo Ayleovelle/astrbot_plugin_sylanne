@@ -36,6 +36,7 @@ PLUGIN_DICT_ATTRIBUTES = (
     "_realtime_input_fragment_windows",
     "_interrupted_reply_breakpoints",
     "_realtime_assistant_history_shadows",
+    "_realtime_ordinary_history_backfills",
     "_realtime_response_intercept_keys",
     "_realtime_user_typing_until",
     "_user_message_withdrawals",

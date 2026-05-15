@@ -964,16 +964,18 @@ def build_memory_prompt_fragment(
     *,
     session_key: str,
     max_chars: int = 720,
+    max_items: int = 3,
     now: float | None = None,
 ) -> str:
     if not items or max_chars <= 0:
         return ""
+    display_limit = max(1, min(5, int(max_items or 3)))
     lines = [
         "[sylanne_memory_recall]",
         "以下是 Sylanne 自有记忆模块的限长召回摘要，用来理解指代、偏好、共同经历和相处方式；当前连续用户意图、打断断点和正在发生的上下文优先，记忆只作旁注补充，若冲突应忽略记忆。",
-        f"session_key={_clip(str(session_key or 'global'), 80)}; result_count={min(len(items), 5)}",
+        f"session_key={_clip(str(session_key or 'global'), 80)}; result_count={min(len(items), display_limit)}",
     ]
-    for index, item in enumerate(items[:5], 1):
+    for index, item in enumerate(items[:display_limit], 1):
         record = item.record
         time_bits = []
         if record.event_local_time:

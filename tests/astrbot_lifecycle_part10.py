@@ -518,6 +518,11 @@ class AstrBotLifecyclePart10(AstrBotLifecycleTests):
         next_request, duplicate_request = asyncio.run(run_turns())
 
         injected = "\n".join(self._request_text_parts(next_request))
+        context_text = "\n".join(
+            str(item.get("content") or "")
+            for item in getattr(next_request, "contexts", [])
+            if isinstance(item, dict)
+        )
         duplicate_injected = "\n".join(self._request_text_parts(duplicate_request))
         self.assertIn("sylanne_realtime_delivery_status", response.completion_text)
         self.assertIn("delivery_status=pending_dispatch", response.completion_text)
@@ -526,10 +531,10 @@ class AstrBotLifecyclePart10(AstrBotLifecycleTests):
             getattr(response, "_sylanne_intercepted_completion_text", ""),
         )
         self.assertTrue(sent)
-        self.assertIn("sylanne_realtime_assistant_history", injected)
-        self.assertIn("插件的其他用户", injected)
-        self.assertIn("请先读 README", injected)
-        self.assertLessEqual(len(injected), 1100)
+        self.assertNotIn("sylanne_realtime_assistant_history", injected)
+        self.assertIn("插件的其他用户", context_text)
+        self.assertIn("请先读 README", context_text)
+        self.assertLessEqual(len(context_text), 1100)
         self.assertNotIn("sylanne_realtime_assistant_history", duplicate_injected)
 
 
@@ -608,11 +613,17 @@ class AstrBotLifecyclePart10(AstrBotLifecycleTests):
 
         saved_key = plugin._realtime_delivery_context_kv_key("s-reload-shadow")
         injected = "\n".join(self._request_text_parts(request))
+        context_text = "\n".join(
+            str(item.get("content") or "")
+            for item in getattr(request, "contexts", [])
+            if isinstance(item, dict)
+        )
         duplicate_injected = "\n".join(self._request_text_parts(duplicate_request))
         self.assertIn(saved_key, stored)
-        self.assertIn("sylanne_realtime_assistant_history", injected)
-        self.assertIn("更新前接管的回复", injected)
+        self.assertNotIn("sylanne_realtime_assistant_history", injected)
+        self.assertIn("更新前接管的回复", context_text)
         self.assertNotIn("sylanne_realtime_assistant_history", duplicate_injected)
         recovered_payload = stored[saved_key]
         self.assertTrue(recovered_payload["shadows"][-1]["consumed"])
+        self.assertFalse(recovered_payload["ordinary_backfills"])
         self.assertIn("s-reload-shadow", recovered._realtime_assistant_history_shadow_cache())

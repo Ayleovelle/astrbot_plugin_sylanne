@@ -2,7 +2,7 @@
 
 > <span style="font-size: 1.08em;"><strong>Soulful Yearning Lifelike AstrBot Neural Narrative Engine</strong>。她维护的不只是“情绪标签”，而是情绪、人格、记忆、氛围、主动性和表达节奏交织成的长期状态。</span>
 
-![版本 2.5.2](https://img.shields.io/badge/version-2.5.2-blue)
+![版本 2.5.3](https://img.shields.io/badge/version-2.5.3-blue)
 ![AstrBot >=4.9.2,<5.0.0](https://img.shields.io/badge/AstrBot-%3E%3D4.9.2%2C%3C5.0.0-green)
 ![Python 3.10+](https://img.shields.io/badge/Python-3.10%2B-yellow)
 ![协议 astrbot.emotion_state.v2](https://img.shields.io/badge/schema-astrbot.emotion__state.v2-purple)
@@ -38,7 +38,7 @@
 
 <br clear="right">
 
-`2.5.2` 是表情包识别与记忆写入时机修复版：在表情包仓库自动下载、主动发言调度器轻量唤醒、接管碎片时间线、慢速短碎片等待、接管上下文、事件时间保留、接管媒体、快判开关、更新后断点恢复、空输出韧性和近距记忆时间语义修复的基础上，修复 OneBot/NapCat 嵌套图片元数据被学空、NapCat `mface`/`face` 当前表情缺少稳定上下文、坏表情候选阻塞自动下载、空表情索引缓存不刷新，以及半句话过早写入长期记忆的问题。真人即时聊天接管、分条接管提示、用户碎片 LLM gate、表情包回应、表情包自动下载、表情包一致性 LLM gate 和用户表情学习继续默认关闭。
+`2.5.3` 是即时接管上下文回填与记忆召回降权修复版：在表情包仓库自动下载、主动发言调度器轻量唤醒、接管碎片时间线、慢速短碎片等待、接管媒体、快判开关、更新后断点恢复、空输出韧性和近距记忆时间语义修复的基础上，把已送达的即时接管回复释放回普通 assistant 上下文池；临时 shadow 只作为恢复过渡，后台情绪分析完成、跳过或 dead-letter 后都会被消费并落到受限 ordinary backfill。Sylanne 自有记忆召回继续保留 AstrBot 事件时间，但默认只作为 3 条、520 字内的旁注，避免旧记忆压过当前对话。真人即时聊天接管、分条接管提示、用户碎片 LLM gate、表情包回应、表情包自动下载、表情包一致性 LLM gate 和用户表情学习继续默认关闭。
 
 | 能力 | 作用 |
 | --- | --- |
@@ -74,7 +74,7 @@
 | 主题 | 内容 |
 | --- | --- |
 | [当前版本与兼容范围](#当前版本与兼容范围) | 插件版本、AstrBot 版本、Python 要求、许可证和发布状态。 |
-| [当前版本发布记录](#252-当前版本发布记录) | 表情包识别纠错、坏候选过滤、记忆空闲写入、近距记忆相对时间提示、接管碎片按 AstrBot 消息时间排序、接管媒体按锚点插入。 |
+| [当前版本发布记录](#253-当前版本发布记录) | 接管回复回填普通上下文、临时 shadow 后台释放、记忆召回降权、表情包识别纠错、接管碎片按 AstrBot 消息时间排序。 |
 | [项目定位](#项目定位) | 为什么本插件不是普通的提示词人设增强。 |
 | [核心能力](#核心能力总览) | 7 维情绪、人格建模、真实时间记忆、关系修复、公共 API。 |
 | [快速开始](#快速开始) | 发布 zip 包、仓库安装、手动复制、最小配置和检查命令。 |
@@ -102,22 +102,27 @@
 | --- | --- |
 | 插件目录名 | `astrbot_plugin_sylanne` |
 | 显示名 | `Sylanne` |
-| 当前版本 | `2.5.2` |
+| 当前版本 | `2.5.3` |
 | AstrBot 版本 | `>=4.9.2,<5.0.0` |
 | Python | `3.10+` |
 | 许可证 | `GPL-3.0-or-later` |
 | 运行时第三方依赖 | 当前无额外依赖，见 `requirements.txt` |
 
-`2.5.2` 保留 Sylanne 自有记忆知识库、只读记忆查询入口、Agent-owned context 即时聊天修复、AstrBot Embedding 提供商驱动的向量召回、可视化记忆设置 Page、短答锚定、模型空回复降级、完整上下文回填、内部工具统一隐藏、主动聊天反馈、等待期追发合并、长历史关键上下文保底、AstrBot 事件时间保留、表情包仓库自动下载和近距相对时间提示；本版重点修复表情包识别错误和记忆落库过早：OneBot/NapCat 的嵌套 `data` 图片会被正确解析，NapCat `mface`/`face`/`sticker` 会作为当前用户媒体摘要进入本轮临时上下文，空元数据不会作为可发送候选挡住自动下载，新增文件不会被空索引缓存卡住，用户碎片会等会话空闲后合并写入长期记忆。核心情绪、回复后后台评估（post）、`group_atmosphere_state`、`humanlike_state`、`lifelike_learning_state`、`personality_drift_state`、Sylanne 自有记忆和欺骗/操控/逃责类动作阻断默认自动运行；真人即时聊天接管、表情包回应、表情包自动下载、道德修复、瑕疵模拟、心理筛查等高风险或实验模块仍由配置者显式打开。
+`2.5.3` 保留 Sylanne 自有记忆知识库、只读记忆查询入口、Agent-owned context 即时聊天修复、AstrBot Embedding 提供商驱动的向量召回、可视化记忆设置 Page、短答锚定、模型空回复降级、完整上下文回填、内部工具统一隐藏、主动聊天反馈、等待期追发合并、长历史关键上下文保底、AstrBot 事件时间保留、表情包仓库自动下载和近距相对时间提示；本版重点修复即时接管导致的普通上下文断裂：已送达的接管回复会在后台完成后回填到 ordinary assistant context，临时 shadow 不再长期占据提示词，回填内容每轮最多 2 条、单条最多 1200 字、写入本轮 request 后即从临时池释放。记忆召回默认降为 3 条、520 字内，继续显示真实事件时间和近距语义，但只作为旁注。核心情绪、回复后后台评估（post）、`group_atmosphere_state`、`humanlike_state`、`lifelike_learning_state`、`personality_drift_state`、Sylanne 自有记忆和欺骗/操控/逃责类动作阻断默认自动运行；真人即时聊天接管、表情包回应、表情包自动下载、道德修复、瑕疵模拟、心理筛查等高风险或实验模块仍由配置者显式打开。
 
-### 2.5.2 当前版本发布记录
+### 2.5.3 当前版本发布记录
 
-`v2.5.2` 合并在 `main` 上，对外安装版本由 `metadata.yaml` 和 `main.py @register(...)` 共同声明为 `2.5.2`。本版按版本规则提升第三位版本号：修复表情包元数据识别错误、坏候选阻塞自动下载、空索引缓存过期不及时，以及 Sylanne 自有记忆在碎片输入期间过早写入的问题；不改变公共 API 版本，公共 API 版本仍保持 `1.0`，schema 仍保持向后兼容。
+`v2.5.3` 合并在 `main` 上，对外安装版本由 `metadata.yaml` 和 `main.py @register(...)` 共同声明为 `2.5.3`。本版按版本规则提升第三位版本号：修复即时接管回复没有稳定回到普通上下文池、临时 shadow 与记忆召回挤压当前对话的问题；不改变公共 API 版本，公共 API 版本仍保持 `1.0`，schema 仍保持向后兼容。
 
 当前版本的主要变化：
 
 | 类别 | 结果 |
 | --- | --- |
+| 接管回复回填 | 已完整送达的即时接管回复会在后台情绪分析完成、跳过或 dead-letter 后释放到 ordinary assistant backfill；下一轮请求直接进入 `request.contexts`，不再伪装成 `[sylanne_realtime_assistant_history]` 临时提示。 |
+| 临时池释放 | `realtime_assistant_history_shadow` 只承担更新/重载后的短期恢复职责；成功回填后标记 `consumed=true`，避免同一段已发回复反复污染后续话题。 |
+| 回填预算 | ordinary backfill 每轮最多追加最近 2 条、单条最多 1200 字、保留 15 分钟，并在追加进本轮 request 后从临时回填池清除，防止长接管回复挤压当前用户输入。 |
+| epoch 边界 | 后台释放必须匹配 `input_epoch`；缺失 epoch 的异常路径不会批量释放同会话所有 delivered shadow，降低更新/恢复时串话风险。 |
+| 记忆召回降权 | Sylanne 自有记忆召回从最多 5 条降为 3 条，注入上限从 720 字降到 520 字；提示词明确“当前连续用户意图优先，记忆只作旁注”。 |
 | 表情包嵌套识别 | OneBot/NapCat 常见的 `type=image` + `data.url/file/file_id` 会被递归解析，不再学成空表情元数据。 |
 | 当前表情上下文 | 用户当前发送的 `mface`、`face`、`sticker` 或摘要里明确是表情的图片，会作为 `[sylanne_current_user_media]` 临时上下文进入本轮请求；模型会被提醒不要把文件名、旧记忆或猜测当作真实画面。 |
 | 表情包坏候选过滤 | 只有可通过 URL 或真实本地路径发送的表情候选会进入选择池；旧的空 learned 候选不会再挡住自动下载缓存。 |
@@ -187,7 +192,7 @@
 | 上下文安全预算 | 召回结果只作为 `[sylanne_memory_recall]` 限长摘要注入，并继续受请求预算和官方上下文压缩清洗逻辑约束。 |
 | 模块互斥自检 | 发布前覆盖自有记忆、主动发言、官方上下文压缩、即时聊天、公共 API、配置契约和包体预检，验证模块之间不会互相回灌或重复调用外部 LivingMemory。 |
 | 工作流图 | `docs/assets/workflow_and_proactive.svg` 已重绘，突出即时聊天、追发合并、Agent 工具循环、模型边界和主动聊天反馈；移除误导性的单点 Gemini 诊断节点，并修正中文字体和跨泳道箭头。 |
-| 公开契约 | 插件版本为 `2.5.2`；公共 API 版本仍为 `1.0`，schema 仍保持 `astrbot.emotion_state.v2` 等版本化契约。 |
+| 公开契约 | 插件版本为 `2.5.3`；公共 API 版本仍为 `1.0`，schema 仍保持 `astrbot.emotion_state.v2` 等版本化契约。 |
 
 旧版本发布记录统一放在 `CHANGELOG.md`。README 只展示当前版本，避免插件管理页从历史段落误抓旧版本号。
 
@@ -2989,7 +2994,7 @@ $env:ASTRBOT_EXPECT_PLUGIN = "astrbot_plugin_sylanne"
 脚本会在输出 JSON 里写出 `expectedPluginRuntime`，包含插件列表 API 中返回的 `version`、`displayName`、`activated`、`author`、`astrbotVersion` 等只读字段。若目标插件存在但 `activated=false`，脚本会失败退出。需要把版本和显示名也作为硬断言时，可以额外设置：
 
 ```powershell
-$env:ASTRBOT_EXPECT_PLUGIN_VERSION = "2.5.2"
+$env:ASTRBOT_EXPECT_PLUGIN_VERSION = "2.5.3"
 $env:ASTRBOT_EXPECT_PLUGIN_DISPLAY_NAME = "Sylanne"
 & $node scripts\remote_smoke_playwright.js
 ```

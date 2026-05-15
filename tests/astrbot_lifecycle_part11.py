@@ -399,6 +399,199 @@ class AstrBotLifecyclePart11(AstrBotLifecycleTests):
         self.assertNotIn("sylanne_realtime_pending_bot_question", injected)
 
 
+    def test_background_post_release_moves_realtime_shadow_to_ordinary_context(self):
+        plugin = new_plugin(
+            {
+                "assessment_timing": "post",
+                "inject_state": False,
+                "enable_realtime_chat": True,
+                "enable_sticker_reaction": False,
+                "use_llm_assessor": False,
+                "realtime_input_completion_probe_delay_seconds": 0.0,
+                "realtime_input_completion_max_wait_seconds": 0.0,
+            },
+        )
+        self._bind_common_state_hooks(plugin)
+        plugin._record_realtime_assistant_history_shadow(
+            "s-backfill-release",
+            full_text="assistant delivered through realtime takeover",
+            input_epoch=7,
+            message_parts=[
+                {"text": "assistant delivered through realtime takeover"},
+            ],
+            delivery_status="delivered",
+        )
+
+        async def run_release_and_request():
+            await plugin._release_realtime_temporary_context_after_background_post(
+                "s-backfill-release",
+                input_epoch=7,
+                reason="unit_test_background_done",
+            )
+            request = fake_request(
+                session_id="s-backfill-release",
+                prompt="same topic continues",
+            )
+            await plugin.on_llm_request(
+                FakeEvent(
+                    "s-backfill-release",
+                    message="same topic continues",
+                    sender_id="u1",
+                ),
+                request,
+            )
+            return request
+
+        request = asyncio.run(run_release_and_request())
+
+        contexts = list(getattr(request, "contexts", []) or [])
+        injected = "\n".join(self._request_text_parts(request))
+        shadow = plugin._realtime_assistant_history_shadow_cache()[
+            "s-backfill-release"
+        ][-1]
+        self.assertEqual(contexts[-1]["role"], "assistant")
+        self.assertEqual(
+            contexts[-1]["content"],
+            "assistant delivered through realtime takeover",
+        )
+        self.assertTrue(shadow["consumed"])
+        self.assertEqual(
+            shadow["consumed_reason"],
+            "released_to_ordinary_context_after_background_post",
+        )
+        self.assertNotIn("sylanne_realtime_assistant_history", injected)
+
+
+    def test_realtime_ordinary_backfill_expires_after_agent_history_keeps_reply(self):
+        plugin = new_plugin(
+            {
+                "assessment_timing": "post",
+                "inject_state": False,
+                "enable_realtime_chat": True,
+                "enable_sticker_reaction": False,
+                "use_llm_assessor": False,
+                "realtime_input_completion_probe_delay_seconds": 0.0,
+                "realtime_input_completion_max_wait_seconds": 0.0,
+            },
+        )
+        self._bind_common_state_hooks(plugin)
+        plugin._record_realtime_ordinary_history_backfill(
+            "s-backfill-seen",
+            role="assistant",
+            content="assistant already kept by agent history",
+            input_epoch=3,
+            source="unit_test",
+            delivery_status="delivered",
+        )
+        request = fake_request(session_id="s-backfill-seen", prompt="continue")
+        request.contexts = [
+            {
+                "role": "assistant",
+                "content": "assistant already kept by agent history",
+            },
+        ]
+
+        appended = plugin._append_realtime_ordinary_history_backfills_if_any(
+            request,
+            "s-backfill-seen",
+        )
+
+        self.assertFalse(appended)
+        self.assertNotIn(
+            "s-backfill-seen",
+            plugin._realtime_ordinary_history_backfill_cache(),
+        )
+
+
+    def test_realtime_ordinary_backfill_is_bounded_and_not_replayed_forever(self):
+        import main
+
+        plugin = new_plugin(
+            {
+                "assessment_timing": "post",
+                "inject_state": False,
+                "enable_realtime_chat": True,
+                "enable_sticker_reaction": False,
+                "use_llm_assessor": False,
+            },
+        )
+        self._bind_common_state_hooks(plugin)
+        for index in range(4):
+            plugin._record_realtime_ordinary_history_backfill(
+                "s-backfill-budget",
+                role="assistant",
+                content=f"reply-{index}-" + ("x" * 2400),
+                input_epoch=index,
+                source="unit_test",
+                delivery_status="delivered",
+            )
+        request = fake_request(session_id="s-backfill-budget", prompt="continue")
+
+        appended = plugin._append_realtime_ordinary_history_backfills_if_any(
+            request,
+            "s-backfill-budget",
+        )
+
+        contexts = list(getattr(request, "contexts", []) or [])
+        self.assertTrue(appended)
+        self.assertEqual(
+            len(contexts),
+            main.REALTIME_ORDINARY_HISTORY_BACKFILL_MAX_ITEMS_PER_REQUEST,
+        )
+        self.assertTrue(
+            all(
+                len(str(item.get("content") or ""))
+                <= main.REALTIME_ORDINARY_HISTORY_BACKFILL_MAX_CHARS
+                for item in contexts
+            ),
+        )
+        self.assertNotIn(
+            "s-backfill-budget",
+            plugin._realtime_ordinary_history_backfill_cache(),
+        )
+
+
+    def test_background_post_release_requires_matching_input_epoch(self):
+        plugin = new_plugin(
+            {
+                "assessment_timing": "post",
+                "inject_state": False,
+                "enable_realtime_chat": True,
+                "enable_sticker_reaction": False,
+                "use_llm_assessor": False,
+            },
+        )
+        self._bind_common_state_hooks(plugin)
+        plugin._record_realtime_assistant_history_shadow(
+            "s-release-epoch",
+            full_text="first delivered reply",
+            input_epoch=1,
+            message_parts=[{"text": "first delivered reply"}],
+            delivery_status="delivered",
+        )
+        plugin._record_realtime_assistant_history_shadow(
+            "s-release-epoch",
+            full_text="second delivered reply",
+            input_epoch=2,
+            message_parts=[{"text": "second delivered reply"}],
+            delivery_status="delivered",
+        )
+
+        changed = plugin._release_realtime_temporary_context_after_background_post_in_memory(
+            "s-release-epoch",
+            input_epoch=None,
+            reason="missing_epoch",
+        )
+
+        shadows = list(plugin._realtime_assistant_history_shadow_cache()["s-release-epoch"])
+        self.assertFalse(changed)
+        self.assertFalse(any(item.get("consumed") for item in shadows))
+        self.assertNotIn(
+            "s-release-epoch",
+            plugin._realtime_ordinary_history_backfill_cache(),
+        )
+
+
     def test_unknown_platform_streaming_response_is_not_replayed(self):
         sent = []
 

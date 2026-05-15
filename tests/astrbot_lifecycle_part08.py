@@ -374,6 +374,54 @@ class AstrBotLifecyclePart08(AstrBotLifecycleTests):
         self.assertIn("论文还没修完", second_summary)
 
 
+    def test_sylanne_memory_recall_is_limited_side_note(self):
+        from memory_engine import MemoryRecord, SylanneMemoryState
+        import main
+
+        plugin = new_plugin(
+            {
+                "enable_sylanne_memory": True,
+                "sylanne_memory_vector_retrieval_enabled": False,
+            },
+        )
+        state = SylanneMemoryState.initial(now=0.0)
+        state.dynamics.recall_limit = 5
+        state.dynamics.associative_recall_limit = 0
+        for index in range(5):
+            state.records.append(
+                MemoryRecord(
+                    memory_id=f"annoying-context-{index}",
+                    text=f"用户说备用件很贵并且很烦，这是同一件事的记忆 {index}",
+                    summary=f"备用件很贵导致烦躁 {index}",
+                    session_key="s-memory-side-note",
+                    created_at=10.0 + index,
+                    updated_at=10.0 + index,
+                    depth=0.86,
+                    confidence=0.82,
+                ),
+            )
+        plugin._sylanne_memory_cache["s-memory-side-note"] = state
+
+        async def run_memory_recall():
+            request = fake_request(
+                session_id="s-memory-side-note",
+                prompt="备用件好烦",
+            )
+            return await plugin._sylanne_memory_recall_summary_for_request(
+                request,
+                session_key="s-memory-side-note",
+                current_user_text="备用件好烦",
+            )
+
+        summary = asyncio.run(run_memory_recall())
+
+        self.assertIn("sylanne_memory_recall", summary)
+        self.assertIn("result_count=3", summary)
+        self.assertLessEqual(len(summary), main.SYLANNE_MEMORY_RECALL_INJECTION_MAX_CHARS)
+        self.assertNotIn("备用件很贵导致烦躁 3", summary)
+        self.assertNotIn("备用件很贵导致烦躁 4", summary)
+
+
     def test_sylanne_memory_observe_defers_fragmented_user_turn_until_idle_flush(self):
         from memory_engine import SylanneMemoryState
 

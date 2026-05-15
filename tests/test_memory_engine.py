@@ -144,6 +144,34 @@ class SylanneMemoryEngineTests(unittest.TestCase):
         self.assertIn("README 要中文", fragment)
         self.assertLessEqual(len(fragment), 220)
 
+    def test_prompt_fragment_respects_max_items(self):
+        state = SylanneMemoryState.initial(now=0.0)
+        for index in range(5):
+            state.records.append(
+                MemoryRecord(
+                    text=f"coffee grinder spare part memory item {index}",
+                    summary=f"coffee spare part summary {index}",
+                    session_key="s-max-items",
+                    speaker_id="u1",
+                    created_at=10.0 + index,
+                    updated_at=10.0 + index,
+                    depth=0.82,
+                    confidence=0.74,
+                ),
+            )
+
+        fragment = build_memory_prompt_fragment(
+            recall_memory(state, query="coffee spare part", now=30.0),
+            session_key="s-max-items",
+            max_chars=1000,
+            max_items=2,
+        )
+
+        self.assertIn("result_count=2", fragment)
+        self.assertIn("coffee spare part summary 4", fragment)
+        self.assertIn("coffee spare part summary 3", fragment)
+        self.assertNotIn("coffee spare part summary 2", fragment)
+
     def test_memory_prompt_fragment_includes_astrbot_event_time(self):
         state = SylanneMemoryState.initial(now=0.0)
         state = observe_memory_event(

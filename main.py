@@ -400,14 +400,20 @@ PROACTIVE_SCHEDULER_SESSION_RECHECK_SECONDS = 3600.0
 PROACTIVE_CONTEXT_WINDOW_LIMIT = 6
 PROACTIVE_CONTEXT_SUMMARY_MAX_CHARS = 1800
 PROACTIVE_MEMORY_RECALL_MAX_CHARS = 620
-SYLANNE_MEMORY_RECALL_INJECTION_MAX_CHARS = 720
+SYLANNE_MEMORY_RECALL_INJECTION_MAX_CHARS = 520
 SYLANNE_MEMORY_RECALL_QUERY_MAX_CHARS = 900
+SYLANNE_MEMORY_RECALL_MAX_ITEMS = 3
+SYLANNE_MEMORY_RECALL_WORKSET_LIMIT = 3
 INTERRUPTED_REPLY_BREAKPOINT_LIMIT = 4
 INTERRUPTED_REPLY_INJECTION_MAX_ITEMS = 1
 INTERRUPTED_REPLY_INJECTION_MAX_CHARS = 720
 INTERRUPTED_REPLY_LOCAL_MAX_CHARS = 4000
 REALTIME_CHAT_INTERRUPT_GRACE_SECONDS = 0.05
 REALTIME_ASSISTANT_HISTORY_LIMIT = 3
+REALTIME_ORDINARY_HISTORY_BACKFILL_LIMIT = 4
+REALTIME_ORDINARY_HISTORY_BACKFILL_TTL_SECONDS = 900.0
+REALTIME_ORDINARY_HISTORY_BACKFILL_MAX_CHARS = 1200
+REALTIME_ORDINARY_HISTORY_BACKFILL_MAX_ITEMS_PER_REQUEST = 2
 REALTIME_ASSISTANT_HISTORY_INJECTION_MAX_CHARS = 900
 REALTIME_ASSISTANT_HISTORY_EXCERPT_CHARS = 720
 REALTIME_RESPONSE_INTERCEPT_DEDUP_LIMIT = 32
@@ -629,7 +635,7 @@ def get_emotional_state_plugin(context: Context) -> Any | None:
     PLUGIN_NAME,
     "Aylovelle.S.S",
     "Soulful Yearning Lifelike AstrBot Neural Narrative Engine：维护情绪、人格、记忆、氛围和表达节奏的 Sylanne",
-    "2.5.2",
+    "2.5.3",
     "",
 )
 class EmotionalStatePlugin(Star):
@@ -696,6 +702,7 @@ class EmotionalStatePlugin(Star):
         self._realtime_input_fragment_windows: dict[str, dict[str, Any]] = {}
         self._interrupted_reply_breakpoints: dict[str, deque[dict[str, Any]]] = {}
         self._realtime_assistant_history_shadows: dict[str, deque[dict[str, Any]]] = {}
+        self._realtime_ordinary_history_backfills: dict[str, deque[dict[str, Any]]] = {}
         self._realtime_response_intercept_keys: dict[str, deque[str]] = {}
         self._realtime_delivery_context_dirty: set[str] = set()
         self._realtime_delivery_context_restored: set[str] = set()
@@ -833,6 +840,8 @@ class EmotionalStatePlugin(Star):
             self._interrupted_reply_breakpoints.clear()
         if hasattr(self, "_realtime_assistant_history_shadows"):
             self._realtime_assistant_history_shadows.clear()
+        if hasattr(self, "_realtime_ordinary_history_backfills"):
+            self._realtime_ordinary_history_backfills.clear()
         if hasattr(self, "_realtime_response_intercept_keys"):
             self._realtime_response_intercept_keys.clear()
         if hasattr(self, "_realtime_delivery_context_dirty"):
@@ -1040,6 +1049,10 @@ class EmotionalStatePlugin(Star):
         if not current_user_text.strip() and current_user_media_observation_text:
             current_user_text = current_user_media_observation_text
         await self._restore_realtime_delivery_context_if_needed(session_key)
+        self._append_realtime_ordinary_history_backfills_if_any(
+            request,
+            session_key,
+        )
         active_followup_payload = self._active_agent_followup_merge_payload(
             session_key,
             identity,
@@ -2602,6 +2615,11 @@ class EmotionalStatePlugin(Star):
                     results.append(raw_result)
             for result in sorted(results, key=lambda item: item.job.sequence):
                 if result.skipped:
+                    await self._release_realtime_temporary_context_after_background_post(
+                        session_key,
+                        input_epoch=result.job.input_epoch,
+                        reason="background_post_skipped",
+                    )
                     self._finish_background_post_job(session_key, result.job)
                     continue
                 if result.error is not None:
@@ -2719,6 +2737,15 @@ class EmotionalStatePlugin(Star):
         if int(job.attempts) >= max_attempts:
             job.dead_lettered_at = now
             self._add_background_post_dead_letter(session_key, job)
+            if self._release_realtime_temporary_context_after_background_post_in_memory(
+                session_key,
+                input_epoch=job.input_epoch,
+                reason="background_post_dead_letter",
+            ):
+                self._schedule_background_task(
+                    self._save_realtime_delivery_context_if_dirty(session_key),
+                    label=f"realtime_context_release_after_dead_letter:{session_key}",
+                )
             return False
         delay = self._background_post_retry_delay(job)
         job.next_retry_at = now + delay
@@ -3398,6 +3425,11 @@ class EmotionalStatePlugin(Star):
         self._background_post_last_committed[session_key] = max(
             self._background_post_last_committed.get(session_key, 0),
             result.job.sequence,
+        )
+        await self._release_realtime_temporary_context_after_background_post(
+            session_key,
+            input_epoch=result.job.input_epoch,
+            reason="background_post_committed",
         )
 
     def _schedule_background_post_checkpoint(self, session_key: str) -> None:
@@ -6596,10 +6628,12 @@ class EmotionalStatePlugin(Star):
             return ""
         items = self._filter_mature_sylanne_memory_recall_items(items)
         items = self._merge_sylanne_memory_recall_workset(session_key, items)
+        items = items[:SYLANNE_MEMORY_RECALL_MAX_ITEMS]
         fragment = build_memory_prompt_fragment(
             items,
             session_key=session_key,
             max_chars=SYLANNE_MEMORY_RECALL_INJECTION_MAX_CHARS,
+            max_items=SYLANNE_MEMORY_RECALL_MAX_ITEMS,
             now=now,
         )
         if fragment:
@@ -6654,10 +6688,13 @@ class EmotionalStatePlugin(Star):
             append_once(item)
 
         if combined:
-            cache[key] = deque(combined[:5], maxlen=5)
+            cache[key] = deque(
+                combined[:SYLANNE_MEMORY_RECALL_WORKSET_LIMIT],
+                maxlen=SYLANNE_MEMORY_RECALL_WORKSET_LIMIT,
+            )
         else:
             cache.pop(key, None)
-        return combined[:5]
+        return combined[:SYLANNE_MEMORY_RECALL_WORKSET_LIMIT]
 
     def _filter_mature_sylanne_memory_recall_items(
         self,
@@ -8089,6 +8126,11 @@ class EmotionalStatePlugin(Star):
                 sent_parts=[str(item.get("text") or "") for item in parts],
                 event_time=event_time,
             )
+            await self._release_realtime_temporary_context_after_background_post(
+                session_key,
+                input_epoch=input_epoch,
+                reason="realtime_dispatch_delivered",
+            )
         if not interrupted_reason:
             self._discard_conversation_pending_response_epochs_through(
                 session_key,
@@ -8874,6 +8916,7 @@ class EmotionalStatePlugin(Star):
             "astrbot.proactive_scheduler_result.v1",
             "astrbot.proactive_topic_judgement.v1",
             "astrbot.realtime_assistant_history_shadow.v1",
+            "astrbot.realtime_ordinary_history_backfill.v1",
             "astrbot.realtime_chat_active_dispatch.v1",
             "astrbot.realtime_chat_dispatch_result.v1",
             "astrbot.realtime_input_fragments.v1",
@@ -8916,6 +8959,7 @@ class EmotionalStatePlugin(Star):
             "proactive_scheduler_result",
             "psychological_screening_state",
             "realtime_assistant_history_shadow",
+            "realtime_ordinary_history_backfill",
             "realtime_chat_active_dispatch",
             "realtime_chat_dispatch_result",
             "realtime_chat_plan",
@@ -11372,6 +11416,237 @@ class EmotionalStatePlugin(Star):
             self._mark_realtime_delivery_context_dirty(key)
         return appended
 
+    def _realtime_ordinary_history_backfill_cache(
+        self,
+    ) -> dict[str, deque[dict[str, Any]]]:
+        cache = getattr(self, "_realtime_ordinary_history_backfills", None)
+        if not isinstance(cache, dict):
+            cache = {}
+            self._realtime_ordinary_history_backfills = cache
+        return cache
+
+    def _request_contexts_contain_text(
+        self,
+        request: ProviderRequest,
+        text: str,
+    ) -> bool:
+        normalized = self._normalize_realtime_history_match_text(text)
+        if not normalized:
+            return False
+        for item in self._tail_items(getattr(request, "contexts", []) or [], 20):
+            existing = self._normalize_realtime_history_match_text(
+                self._context_item_to_text(item),
+            )
+            if normalized in existing:
+                return True
+        return False
+
+    def _record_realtime_ordinary_history_backfill(
+        self,
+        session_key: str,
+        *,
+        role: str,
+        content: str,
+        input_epoch: int | None,
+        source: str,
+        delivery_status: str,
+        event_time: dict[str, Any] | None = None,
+    ) -> bool:
+        text = str(content or "").strip()
+        if not text:
+            return False
+        key = str(session_key or "global")
+        now = self._observed_now()
+        content_hash = self._text_hash(text)
+        event_time_payload = self._normalize_conversation_time_payload(event_time)
+        entry = {
+            "schema_version": "astrbot.realtime_ordinary_history_backfill.v1",
+            "kind": "realtime_ordinary_history_backfill",
+            "session_key": key,
+            "role": str(role or "assistant"),
+            "content": self._head_text(
+                text,
+                REALTIME_ORDINARY_HISTORY_BACKFILL_MAX_CHARS,
+            ),
+            "content_truncated": len(text) > REALTIME_ORDINARY_HISTORY_BACKFILL_MAX_CHARS,
+            "content_hash": content_hash,
+            "input_epoch": input_epoch,
+            "source": str(source or "realtime_delivery"),
+            "delivery_status": str(delivery_status or "delivered"),
+            "recorded_at": now,
+            "updated_at": now,
+            "event_time": event_time_payload,
+            "event_local_time": str(event_time_payload.get("local_time") or ""),
+            "event_timezone": str(event_time_payload.get("timezone") or ""),
+            "event_epoch": event_time_payload.get("epoch"),
+            "append_count": 0,
+        }
+        cache = self._realtime_ordinary_history_backfill_cache()
+        queue = cache.setdefault(
+            key,
+            deque(maxlen=REALTIME_ORDINARY_HISTORY_BACKFILL_LIMIT),
+        )
+        if queue.maxlen != REALTIME_ORDINARY_HISTORY_BACKFILL_LIMIT:
+            queue = deque(queue, maxlen=REALTIME_ORDINARY_HISTORY_BACKFILL_LIMIT)
+            cache[key] = queue
+        for existing in reversed(queue):
+            if not isinstance(existing, dict):
+                continue
+            if (
+                str(existing.get("content_hash") or "") == content_hash
+                and existing.get("input_epoch") == input_epoch
+            ):
+                existing.update(entry)
+                self._mark_realtime_delivery_context_dirty(key)
+                return True
+        queue.append(entry)
+        self._mark_realtime_delivery_context_dirty(key)
+        return True
+
+    def _prune_realtime_ordinary_history_backfills(self, session_key: str) -> bool:
+        key = str(session_key or "global")
+        queue = self._realtime_ordinary_history_backfill_cache().get(key)
+        if not queue:
+            return False
+        now = self._observed_now()
+        kept: list[dict[str, Any]] = []
+        for item in queue:
+            if not isinstance(item, dict):
+                continue
+            recorded_at = self._as_float_value(item.get("recorded_at"), now)
+            if now - recorded_at > REALTIME_ORDINARY_HISTORY_BACKFILL_TTL_SECONDS:
+                continue
+            if not str(item.get("content") or "").strip():
+                continue
+            kept.append(item)
+        if len(kept) == len(queue):
+            return False
+        if kept:
+            self._realtime_ordinary_history_backfill_cache()[key] = deque(
+                kept[-REALTIME_ORDINARY_HISTORY_BACKFILL_LIMIT:],
+                maxlen=REALTIME_ORDINARY_HISTORY_BACKFILL_LIMIT,
+            )
+        else:
+            self._realtime_ordinary_history_backfill_cache().pop(key, None)
+        self._mark_realtime_delivery_context_dirty(key)
+        return True
+
+    def _append_realtime_ordinary_history_backfills_if_any(
+        self,
+        request: ProviderRequest,
+        session_key: str,
+    ) -> bool:
+        key = str(session_key or "global")
+        self._prune_realtime_ordinary_history_backfills(key)
+        queue = self._realtime_ordinary_history_backfill_cache().get(key)
+        if not queue:
+            return False
+        appended = False
+        changed = False
+        now = self._observed_now()
+        valid_items: list[dict[str, Any]] = []
+        for item in queue:
+            if not isinstance(item, dict):
+                changed = True
+                continue
+            content = str(item.get("content") or "").strip()
+            if not content:
+                changed = True
+                continue
+            if self._request_contexts_contain_text(request, content):
+                changed = True
+                continue
+            valid_items.append(item)
+        selected = valid_items[-REALTIME_ORDINARY_HISTORY_BACKFILL_MAX_ITEMS_PER_REQUEST:]
+        for item in selected:
+            content = self._head_text(
+                str(item.get("content") or "").strip(),
+                REALTIME_ORDINARY_HISTORY_BACKFILL_MAX_CHARS,
+            )
+            if not content:
+                changed = True
+                continue
+            if self._append_agent_context_message(
+                request,
+                role=str(item.get("role") or "assistant"),
+                content=content,
+            ):
+                item["last_appended_at"] = now
+                item["append_count"] = int(item.get("append_count") or 0) + 1
+                item["updated_at"] = now
+                appended = True
+                changed = True
+        if valid_items or selected:
+            changed = True
+        self._realtime_ordinary_history_backfill_cache().pop(key, None)
+        if changed:
+            self._mark_realtime_delivery_context_dirty(key)
+        return appended
+
+    def _release_realtime_temporary_context_after_background_post_in_memory(
+        self,
+        session_key: str,
+        *,
+        input_epoch: int | None,
+        reason: str,
+    ) -> bool:
+        if input_epoch is None:
+            return False
+        key = str(session_key or "global")
+        queue = self._realtime_assistant_history_shadow_cache().get(key)
+        if not queue:
+            return False
+        changed = False
+        now = self._observed_now()
+        for item in queue:
+            if not isinstance(item, dict):
+                continue
+            if input_epoch is not None and item.get("input_epoch") != input_epoch:
+                continue
+            if str(item.get("delivery_status") or "") != "delivered":
+                continue
+            if str(item.get("consumed_reason") or "") == "agent_history_already_contains_reply":
+                item["released_to_ordinary_context"] = True
+                changed = True
+                continue
+            content = str(item.get("full_text") or item.get("excerpt") or "").strip()
+            if content and not item.get("released_to_ordinary_context"):
+                self._record_realtime_ordinary_history_backfill(
+                    key,
+                    role="assistant",
+                    content=content,
+                    input_epoch=self._optional_int(item.get("input_epoch")),
+                    source=str(item.get("source") or "realtime_delivery"),
+                    delivery_status=str(item.get("delivery_status") or "delivered"),
+                    event_time=item.get("event_time") if isinstance(item.get("event_time"), dict) else item,
+                )
+            item["consumed"] = True
+            item["consumed_at"] = now
+            item["consumed_reason"] = "released_to_ordinary_context_after_background_post"
+            item["released_to_ordinary_context"] = True
+            item["released_reason"] = str(reason or "background_post_done")
+            item["released_at"] = now
+            changed = True
+        if changed:
+            self._mark_realtime_delivery_context_dirty(key)
+        return changed
+
+    async def _release_realtime_temporary_context_after_background_post(
+        self,
+        session_key: str,
+        *,
+        input_epoch: int | None,
+        reason: str,
+    ) -> bool:
+        changed = self._release_realtime_temporary_context_after_background_post_in_memory(
+            session_key,
+            input_epoch=input_epoch,
+            reason=reason,
+        )
+        if changed:
+            await self._save_realtime_delivery_context_if_dirty(session_key)
+        return changed
+
     def _realtime_delivery_context_dirty_cache(self) -> set[str]:
         dirty = getattr(self, "_realtime_delivery_context_dirty", None)
         if not isinstance(dirty, set):
@@ -11408,6 +11683,11 @@ class EmotionalStatePlugin(Star):
             for item in list(self._user_message_withdrawal_context_cache().get(key) or ())
             if isinstance(item, dict)
         ]
+        ordinary_backfills = [
+            dict(item)
+            for item in list(self._realtime_ordinary_history_backfill_cache().get(key) or ())
+            if isinstance(item, dict)
+        ]
         return {
             "schema_version": "astrbot.realtime_delivery_context.v1",
             "kind": "realtime_delivery_context",
@@ -11416,6 +11696,9 @@ class EmotionalStatePlugin(Star):
             "shadows": shadows[-REALTIME_ASSISTANT_HISTORY_LIMIT:],
             "breakpoints": breakpoints[-INTERRUPTED_REPLY_BREAKPOINT_LIMIT:],
             "withdrawals": withdrawals[-USER_MESSAGE_WITHDRAWAL_CONTEXT_LIMIT:],
+            "ordinary_backfills": ordinary_backfills[
+                -REALTIME_ORDINARY_HISTORY_BACKFILL_LIMIT:
+            ],
         }
 
     async def _restore_realtime_delivery_context_if_needed(
@@ -11459,6 +11742,13 @@ class EmotionalStatePlugin(Star):
             for item in list(data.get("withdrawals") or [])[-USER_MESSAGE_WITHDRAWAL_CONTEXT_LIMIT:]
             if isinstance(item, dict)
         ]
+        ordinary_backfills = [
+            dict(item)
+            for item in list(data.get("ordinary_backfills") or [])[
+                -REALTIME_ORDINARY_HISTORY_BACKFILL_LIMIT:
+            ]
+            if isinstance(item, dict)
+        ]
         if shadows:
             self._realtime_assistant_history_shadow_cache()[key] = deque(
                 shadows,
@@ -11473,6 +11763,11 @@ class EmotionalStatePlugin(Star):
             self._user_message_withdrawal_context_cache()[key] = deque(
                 withdrawals,
                 maxlen=USER_MESSAGE_WITHDRAWAL_CONTEXT_LIMIT,
+            )
+        if ordinary_backfills:
+            self._realtime_ordinary_history_backfill_cache()[key] = deque(
+                ordinary_backfills,
+                maxlen=REALTIME_ORDINARY_HISTORY_BACKFILL_LIMIT,
             )
 
     async def _save_realtime_delivery_context_if_dirty(self, session_key: str) -> None:
