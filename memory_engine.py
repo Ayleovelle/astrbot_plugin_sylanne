@@ -138,7 +138,14 @@ def _record_context_similarity(query: str, record: "MemoryRecord") -> float:
     )
 
 
+MEMORY_RECALL_REFERENCE_WEIGHT_MIN = 0.08
+MEMORY_RECALL_REFERENCE_WEIGHT_DEFAULT = 0.12
+MEMORY_RECALL_REFERENCE_WEIGHT_MAX = 0.18
 ASSOCIATED_RECALL_CONTEXT_FLOOR = 0.08
+ASSOCIATED_RECALL_DIRECT_QUERY_FLOOR = 0.12
+ASSOCIATED_RECALL_BRIDGE_FLOOR = 0.18
+ASSOCIATED_RECALL_ASSOCIATION_FLOOR = 0.34
+ASSOCIATED_RECALL_DISTINCTIVE_FLOOR = 0.22
 ASSOCIATED_RECALL_CONTEXT_STOP_TOKENS = {
     "user",
     "users",
@@ -175,7 +182,56 @@ ASSOCIATED_RECALL_CONTEXT_STOP_TOKENS = {
     "之前",
     "喜欢",
     "需要",
+    "感觉",
+    "这样",
+    "一搞",
+    "事情",
+    "东西",
+    "刚才",
+    "现在",
+    "今天",
+    "难受",
+    "好烦",
+    "烦躁",
+    "烦",
 }
+
+ASSOCIATED_RECALL_COREFERENCE_MARKERS = (
+    "他们",
+    "她们",
+    "它们",
+    "这个",
+    "那个",
+    "这些",
+    "那些",
+    "这件事",
+    "那件事",
+    "it",
+    "that",
+    "them",
+    "they",
+    "those",
+)
+
+ASSOCIATED_RECALL_DISTINCTIVE_STOP_FRAGMENTS = (
+    "难受",
+    "很难",
+    "好烦",
+    "烦躁",
+    "感觉",
+    "觉得",
+    "这样",
+    "一搞",
+    "事情",
+    "东西",
+    "当前",
+    "消息",
+    "用户",
+    "之前",
+    "刚才",
+    "现在",
+    "今天",
+)
 
 
 def _associated_context_tokens(text: str) -> set[str]:
@@ -196,6 +252,36 @@ def _associated_context_similarity(query: str, text: str) -> float:
     return len(q & t) / math.sqrt(len(q) * len(t))
 
 
+def _associated_distinctive_tokens(text: str) -> set[str]:
+    tokens = _tokenize(text)
+    distinctive = set()
+    for token in tokens:
+        if token in ASSOCIATED_RECALL_CONTEXT_STOP_TOKENS:
+            continue
+        if re.fullmatch(r"[\u4e00-\u9fff]", token):
+            continue
+        if any(fragment in token for fragment in ASSOCIATED_RECALL_DISTINCTIVE_STOP_FRAGMENTS):
+            continue
+        distinctive.add(token)
+    return distinctive
+
+
+def _associated_distinctive_overlap_strength(query: str, text: str) -> float:
+    q = _associated_distinctive_tokens(query)
+    t = _associated_distinctive_tokens(text)
+    if not q or not t:
+        return 0.0
+    overlap = q & t
+    if not overlap:
+        return 0.0
+    similarity = len(overlap) / math.sqrt(len(q) * len(t))
+    return clamp(
+        ASSOCIATED_RECALL_DISTINCTIVE_FLOOR
+        + 0.04 * min(3, len(overlap))
+        + 0.12 * similarity,
+    )
+
+
 def _record_associated_context_similarity(
     query: str,
     record: "MemoryRecord",
@@ -206,11 +292,29 @@ def _record_associated_context_similarity(
     )
 
 
+def _record_associated_distinctive_strength(
+    query: str,
+    record: "MemoryRecord",
+) -> float:
+    return max(
+        _associated_distinctive_overlap_strength(query, record.summary),
+        0.82 * _associated_distinctive_overlap_strength(query, record.text),
+    )
+
+
 def _latin_context_guard_applies(*parts: str) -> bool:
     text = " ".join(str(part or "") for part in parts)
     latin_chars = len(re.findall(r"[a-zA-Z]", text))
     cjk_chars = len(re.findall(r"[\u4e00-\u9fff]", text))
     return latin_chars > 0 and latin_chars >= cjk_chars
+
+
+def _clamp_recall_reference_weight(value: Any) -> float:
+    return clamp(
+        value,
+        MEMORY_RECALL_REFERENCE_WEIGHT_MIN,
+        MEMORY_RECALL_REFERENCE_WEIGHT_MAX,
+    )
 
 
 def normalize_embedding(raw: Any, *, limit: int = 4096) -> list[float]:
@@ -320,6 +424,7 @@ class MemoryDynamics:
     compression_threshold: float = 0.55
     recall_limit: int = 3
     associative_recall_limit: int = 2
+    recall_reference_weight: float = MEMORY_RECALL_REFERENCE_WEIGHT_DEFAULT
     recall_maturation_seconds: float = 2.0
     notes: list[str] = field(default_factory=lambda: ["auto_derived"])
 
@@ -342,6 +447,12 @@ class MemoryDynamics:
                 0,
                 min(2, int(_as_float(data.get("associative_recall_limit"), 2))),
             ),
+            recall_reference_weight=_clamp_recall_reference_weight(
+                _as_float(
+                    data.get("recall_reference_weight"),
+                    MEMORY_RECALL_REFERENCE_WEIGHT_DEFAULT,
+                ),
+            ),
             recall_maturation_seconds=max(
                 0.0,
                 min(20.0, _as_float(data.get("recall_maturation_seconds"), 2.0)),
@@ -359,6 +470,10 @@ class MemoryDynamics:
             "compression_threshold": round(self.compression_threshold, 6),
             "recall_limit": int(self.recall_limit),
             "associative_recall_limit": int(self.associative_recall_limit),
+            "recall_reference_weight": round(
+                _clamp_recall_reference_weight(self.recall_reference_weight),
+                6,
+            ),
             "recall_maturation_seconds": round(self.recall_maturation_seconds, 6),
             "notes": list(self.notes[:8]),
         }
@@ -539,6 +654,7 @@ class MemoryRecallItem:
     record: MemoryRecord
     score: float
     reasons: list[str] = field(default_factory=list)
+    relevance: float = 0.0
 
 
 def derive_memory_dynamics(
@@ -625,6 +741,13 @@ def derive_memory_dynamics(
     recall_limit = max(2, min(5, recall_limit))
     associative_recall_limit = int(round(2 * clamp(0.50 * common_ground + 0.30 * relationship + 0.20 * consolidation)))
     associative_recall_limit = max(0, min(2, associative_recall_limit))
+    recall_reference_weight = _clamp_recall_reference_weight(
+        0.085
+        + 0.045 * common_ground
+        + 0.025 * relationship
+        + 0.018 * consolidation
+        - 0.018 * interference,
+    )
     recall_maturation_seconds = clamp(
         0.8
         + 3.6 * interference
@@ -645,6 +768,7 @@ def derive_memory_dynamics(
         compression_threshold=compression_threshold,
         recall_limit=recall_limit,
         associative_recall_limit=associative_recall_limit,
+        recall_reference_weight=recall_reference_weight,
         recall_maturation_seconds=recall_maturation_seconds,
         notes=[
             "auto_derived",
@@ -829,9 +953,20 @@ def recall_memory(
             reasons.append("deep_memory")
         if freshness > 0.4:
             reasons.append("real_time_fresh")
-        items.append(MemoryRecallItem(record=record, score=score, reasons=reasons))
+        items.append(
+            MemoryRecallItem(
+                record=record,
+                score=score,
+                reasons=reasons,
+                relevance=max(semantic, vector_semantic),
+            ),
+        )
     items.sort(key=lambda item: item.score, reverse=True)
-    primary = items[:recall_limit]
+    primary = _select_recall_items_with_extraction_difficulty(
+        items,
+        limit=recall_limit,
+        dynamics=state.dynamics,
+    )
     if not primary or associative_limit <= 0:
         return primary
     associated = _associated_recall_items(
@@ -845,6 +980,56 @@ def recall_memory(
     combined = primary + associated
     combined.sort(key=lambda item: item.score, reverse=True)
     return combined[: recall_limit + associative_limit]
+
+
+def _memory_extraction_difficulty(
+    selected_count: int,
+    *,
+    dynamics: MemoryDynamics,
+    associative: bool = False,
+) -> float:
+    count = max(0, int(selected_count))
+    reference_weight = _clamp_recall_reference_weight(
+        getattr(dynamics, "recall_reference_weight", MEMORY_RECALL_REFERENCE_WEIGHT_DEFAULT),
+    )
+    headroom = clamp(
+        (reference_weight - MEMORY_RECALL_REFERENCE_WEIGHT_MIN)
+        / (MEMORY_RECALL_REFERENCE_WEIGHT_MAX - MEMORY_RECALL_REFERENCE_WEIGHT_MIN),
+    )
+    growth = 0.095 - 0.025 * headroom
+    difficulty = 0.09 + growth * (count ** 1.55)
+    if associative:
+        difficulty += 0.04 + 0.02 * (1.0 - headroom)
+    return clamp(difficulty, 0.0, 0.92)
+
+
+def _select_recall_items_with_extraction_difficulty(
+    items: list[MemoryRecallItem],
+    *,
+    limit: int,
+    dynamics: MemoryDynamics,
+    selected_offset: int = 0,
+    associative: bool = False,
+) -> list[MemoryRecallItem]:
+    if limit <= 0:
+        return []
+    selected: list[MemoryRecallItem] = []
+    for item in items:
+        difficulty = _memory_extraction_difficulty(
+            selected_offset + len(selected),
+            dynamics=dynamics,
+            associative=associative,
+        )
+        strength = clamp(
+            0.68 * clamp(getattr(item, "relevance", 0.0))
+            + 0.32 * clamp(item.score),
+        )
+        if strength < difficulty:
+            continue
+        selected.append(item)
+        if len(selected) >= limit:
+            break
+    return selected
 
 
 def reinforce_recalled_memories(
@@ -965,15 +1150,17 @@ def build_memory_prompt_fragment(
     session_key: str,
     max_chars: int = 720,
     max_items: int = 3,
+    reference_weight: float = MEMORY_RECALL_REFERENCE_WEIGHT_DEFAULT,
     now: float | None = None,
 ) -> str:
     if not items or max_chars <= 0:
         return ""
     display_limit = max(1, min(5, int(max_items or 3)))
+    reference_weight = _clamp_recall_reference_weight(reference_weight)
     lines = [
         "[sylanne_memory_recall]",
-        "以下是 Sylanne 自有记忆模块的限长召回摘要，用来理解指代、偏好、共同经历和相处方式；当前连续用户意图、打断断点和正在发生的上下文优先，记忆只作旁注补充，若冲突应忽略记忆。",
-        f"session_key={_clip(str(session_key or 'global'), 80)}; result_count={min(len(items), display_limit)}",
+        f"记忆旁注：参考权重≤{reference_weight:.2f}，只辅助指代、偏好和共同经历；当前对话与 AstrBot 原上下文优先，冲突时不得覆盖当前对话。",
+        f"session_key={_clip(str(session_key or 'global'), 80)}; result_count={min(len(items), display_limit)}; ref_weight={reference_weight:.2f}",
     ]
     for index, item in enumerate(items[:display_limit], 1):
         record = item.record
@@ -1207,7 +1394,7 @@ def _associated_recall_items(
             if record is None or record.session_key != parent.record.session_key:
                 continue
             association = clamp(weight)
-            if association < 0.24:
+            if association < ASSOCIATED_RECALL_ASSOCIATION_FLOOR:
                 continue
             context_query = _associated_context_query(query, parent.record)
             context_semantic = _record_context_similarity(context_query, record)
@@ -1215,6 +1402,28 @@ def _associated_recall_items(
                 context_query,
                 record,
             )
+            direct_query_semantic = _record_associated_context_similarity(query, record)
+            direct_query_evidence = max(
+                direct_query_semantic,
+                _record_associated_distinctive_strength(query, record),
+            )
+            parent_bridge_semantic = _record_associated_context_similarity(
+                _associated_parent_context(parent.record),
+                record,
+            )
+            parent_bridge_evidence = max(
+                parent_bridge_semantic,
+                _record_associated_distinctive_strength(
+                    _associated_parent_context(parent.record),
+                    record,
+                ),
+            )
+            if not _associated_recall_has_current_evidence(
+                query=query,
+                direct_query_evidence=direct_query_evidence,
+                parent_bridge_evidence=parent_bridge_evidence,
+            ):
+                continue
             if context_query and context_semantic < ASSOCIATED_RECALL_CONTEXT_FLOOR:
                 continue
             if (
@@ -1222,7 +1431,12 @@ def _associated_recall_items(
                 and filtered_context_semantic < ASSOCIATED_RECALL_CONTEXT_FLOOR
             ):
                 continue
-            context_semantic = max(context_semantic, filtered_context_semantic)
+            context_semantic = max(
+                context_semantic,
+                filtered_context_semantic,
+                direct_query_evidence,
+                parent_bridge_evidence,
+            )
             score = _associated_recall_score(
                 parent=parent,
                 association=association,
@@ -1242,9 +1456,21 @@ def _associated_recall_items(
                         "context_link",
                         f"linked_from={parent_id}",
                     ],
+                    relevance=max(
+                        direct_query_evidence,
+                        parent_bridge_evidence
+                        if _associated_query_needs_coreference(query)
+                        else 0.0,
+                    ),
                 )
     selected = sorted(candidates.values(), key=lambda item: item.score, reverse=True)
-    return selected[:limit]
+    return _select_recall_items_with_extraction_difficulty(
+        selected,
+        limit=limit,
+        dynamics=state.dynamics,
+        selected_offset=len(primary),
+        associative=True,
+    )
 
 
 def _associated_context_query(query: str, parent: MemoryRecord) -> str:
@@ -1256,6 +1482,36 @@ def _associated_context_query(query: str, parent: MemoryRecord) -> str:
             parent.text,
         )
         if part
+    )
+
+
+def _associated_parent_context(parent: MemoryRecord) -> str:
+    return "\n".join(
+        part
+        for part in (
+            parent.summary,
+            parent.text,
+        )
+        if part
+    )
+
+
+def _associated_query_needs_coreference(query: str) -> bool:
+    lowered = str(query or "").lower()
+    return any(marker in lowered for marker in ASSOCIATED_RECALL_COREFERENCE_MARKERS)
+
+
+def _associated_recall_has_current_evidence(
+    *,
+    query: str,
+    direct_query_evidence: float,
+    parent_bridge_evidence: float,
+) -> bool:
+    if direct_query_evidence >= ASSOCIATED_RECALL_DIRECT_QUERY_FLOOR:
+        return True
+    return (
+        _associated_query_needs_coreference(query)
+        and parent_bridge_evidence >= ASSOCIATED_RECALL_BRIDGE_FLOOR
     )
 
 

@@ -2,12 +2,12 @@
 
 > powered by Fuck-U-Code；本报告由 `scripts/update_fuck_u_code_report.py` 根据官方 JSON 输出生成。
 
-- 💩 发酵指数：`21.8/100`，官方评价：`😐 微臭青年`（由质量分反向换算，越低越好）
-- 官方 JSON overallScore：`78.2/100`
-- 扫描规模：`72/119` 个文件已分析，`46` 个文件被跳过
-- 问题计数：critical `77`，error `152`，warning `140`
+- 💩 发酵指数：`21.9/100`，官方评价：`😐 微臭青年`（由质量分反向换算，越低越好）
+- 官方 JSON overallScore：`78.1/100`
+- 扫描规模：`72/884` 个文件已分析，`811` 个文件被跳过
+- 问题计数：critical `78`，error `151`，warning `140`
 - 原始报告：`output/fuck_u_code/raw-report.json`
-- 生成时间：`2026-05-15T04:42:21+00:00`
+- 生成时间：`2026-05-15T10:51:18+00:00`
 
 ## 最需要除味的文件
 
@@ -16,7 +16,7 @@
 | 45.0/100 | 54.8/100 | 7 | 2 | 1 | `integrated_self.py` |
 | 45.0/100 | 54.7/100 | 6 | 2 | 1 | `emotion_engine.py` |
 | 43.0/100 | 56.6/100 | 5 | 4 | 1 | `lifelike_learning_engine.py` |
-| 39.0/100 | 60.6/100 | 4 | 5 | 1 | `memory_engine.py` |
+| 41.0/100 | 59.0/100 | 5 | 4 | 1 | `memory_engine.py` |
 | 37.0/100 | 63.2/100 | 4 | 4 | 2 | `personality_drift_engine.py` |
 | 28.0/100 | 72.2/100 | 3 | 4 | 1 | `fallibility_engine.py` |
 | 28.0/100 | 71.8/100 | 3 | 2 | 0 | `public_api.py` |

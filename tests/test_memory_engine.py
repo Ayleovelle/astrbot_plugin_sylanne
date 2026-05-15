@@ -142,7 +142,47 @@ class SylanneMemoryEngineTests(unittest.TestCase):
 
         self.assertIn("sylanne_memory_recall", fragment)
         self.assertIn("README 要中文", fragment)
+        self.assertIn("参考权重", fragment)
+        self.assertIn("不得覆盖当前对话", fragment)
         self.assertLessEqual(len(fragment), 220)
+
+    def test_memory_reference_weight_has_theoretical_cap(self):
+        dynamics = derive_memory_dynamics(
+            emotion_snapshot={
+                "emotion": {
+                    "label": "attached",
+                    "confidence": 0.98,
+                    "values": {
+                        "valence": 0.8,
+                        "arousal": 0.5,
+                        "affiliation": 0.9,
+                        "certainty": 0.92,
+                    },
+                },
+            },
+            personality_drift_snapshot={
+                "trait_offsets": {
+                    "neuroticism": 0.4,
+                    "attachment_anxiety": 0.5,
+                },
+                "values": {
+                    "anchor_strength": 0.95,
+                    "relationship_sensitivity": 0.95,
+                },
+            },
+            lifelike_snapshot={
+                "values": {
+                    "rapport": 0.98,
+                    "common_ground": 0.98,
+                    "preference_confidence": 0.95,
+                },
+            },
+            group_atmosphere_snapshot={},
+            now=1000.0,
+        )
+
+        self.assertLessEqual(dynamics.recall_reference_weight, 0.18)
+        self.assertGreaterEqual(dynamics.recall_reference_weight, 0.08)
 
     def test_prompt_fragment_respects_max_items(self):
         state = SylanneMemoryState.initial(now=0.0)
@@ -412,6 +452,93 @@ class SylanneMemoryEngineTests(unittest.TestCase):
         memory_ids = [item.record.memory_id for item in items]
         self.assertIn("paper-deadline", memory_ids)
         self.assertNotIn("cafeteria-drink", memory_ids)
+
+    def test_associated_recall_requires_current_query_evidence(self):
+        state = SylanneMemoryState.initial(now=0.0)
+        state.dynamics.recall_limit = 1
+        state.dynamics.associative_recall_limit = 1
+        state.records.extend(
+            [
+                MemoryRecord(
+                    memory_id="spare-part-cost",
+                    text="用户说花了85买备用件，觉得好贵，很烦。",
+                    summary="备用件花了85，用户觉得好贵。",
+                    session_key="s-current-query-gate",
+                    created_at=10.0,
+                    updated_at=10.0,
+                    depth=0.88,
+                    confidence=0.84,
+                    layers={"episodic": 0.8},
+                    associations={"thesis-pressure": 0.99},
+                ),
+                MemoryRecord(
+                    memory_id="thesis-pressure",
+                    text="用户之前因为论文、导师和大修意见压力很大，觉得很难受很烦。",
+                    summary="论文和导师压力很大，用户很难受。",
+                    session_key="s-current-query-gate",
+                    created_at=11.0,
+                    updated_at=11.0,
+                    depth=0.92,
+                    confidence=0.88,
+                    layers={"episodic": 0.8},
+                ),
+            ],
+        )
+
+        items = recall_memory(
+            state,
+            query="备用件花85好贵，这样一搞就很难受了",
+            now=20.0,
+            limit=1,
+        )
+
+        memory_ids = [item.record.memory_id for item in items]
+        self.assertIn("spare-part-cost", memory_ids)
+        self.assertNotIn("thesis-pressure", memory_ids)
+
+    def test_associated_recall_keeps_direct_current_query_link(self):
+        state = SylanneMemoryState.initial(now=0.0)
+        state.dynamics.recall_limit = 1
+        state.dynamics.associative_recall_limit = 1
+        state.records.extend(
+            [
+                MemoryRecord(
+                    memory_id="plugin-users",
+                    text="用户解释过，他们指插件的其他用户，不是恋爱对象。",
+                    summary="他们指插件的其他用户。",
+                    session_key="s-current-query-link",
+                    created_at=10.0,
+                    updated_at=10.0,
+                    depth=0.88,
+                    confidence=0.84,
+                    layers={"semantic": 0.8},
+                    associations={"plugin-tone": 0.92},
+                ),
+                MemoryRecord(
+                    memory_id="plugin-tone",
+                    text="用户希望 Sylanne 对插件用户说话温和一点，别炫耀。",
+                    summary="对插件用户说话要温和。",
+                    session_key="s-current-query-link",
+                    created_at=11.0,
+                    updated_at=11.0,
+                    depth=0.72,
+                    confidence=0.78,
+                    layers={"semantic": 0.8},
+                    associations={"plugin-users": 0.92},
+                ),
+            ],
+        )
+
+        items = recall_memory(
+            state,
+            query="那你想对插件用户说什么",
+            now=20.0,
+            limit=1,
+        )
+
+        memory_ids = [item.record.memory_id for item in items]
+        self.assertIn("plugin-users", memory_ids)
+        self.assertIn("plugin-tone", memory_ids)
 
     def test_recall_can_use_embedding_vector_when_sparse_words_do_not_match(self):
         state = SylanneMemoryState.initial(now=0.0)

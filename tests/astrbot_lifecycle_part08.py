@@ -416,8 +416,9 @@ class AstrBotLifecyclePart08(AstrBotLifecycleTests):
         summary = asyncio.run(run_memory_recall())
 
         self.assertIn("sylanne_memory_recall", summary)
-        self.assertIn("result_count=3", summary)
+        self.assertIn("result_count=2", summary)
         self.assertLessEqual(len(summary), main.SYLANNE_MEMORY_RECALL_INJECTION_MAX_CHARS)
+        self.assertNotIn("备用件很贵导致烦躁 2", summary)
         self.assertNotIn("备用件很贵导致烦躁 3", summary)
         self.assertNotIn("备用件很贵导致烦躁 4", summary)
 
