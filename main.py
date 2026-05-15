@@ -629,7 +629,7 @@ def get_emotional_state_plugin(context: Context) -> Any | None:
     PLUGIN_NAME,
     "Aylovelle.S.S",
     "Soulful Yearning Lifelike AstrBot Neural Narrative Engine：维护情绪、人格、记忆、氛围和表达节奏的 Sylanne",
-    "2.5.1",
+    "2.5.2",
     "",
 )
 class EmotionalStatePlugin(Star):
@@ -680,6 +680,9 @@ class EmotionalStatePlugin(Star):
         self._group_atmosphere_memory_cache: dict[str, GroupAtmosphereState] = {}
         self._sylanne_memory_cache: dict[str, SylanneMemoryState] = {}
         self._sylanne_memory_recall_worksets: dict[str, deque[MemoryRecallItem]] = {}
+        self._sylanne_memory_pending_observations: dict[str, deque[dict[str, Any]]] = {}
+        self._sylanne_memory_idle_tasks: dict[str, asyncio.Task[Any]] = {}
+        self._sylanne_memory_idle_generation: dict[str, int] = {}
         self._agent_identity_profile_cache: dict[str, dict[str, Any]] = {}
         self._agent_trail_cache: dict[str, deque[dict[str, Any]]] = {}
         self._agent_turn_sequence: dict[str, int] = {}
@@ -787,6 +790,22 @@ class EmotionalStatePlugin(Star):
         self._moral_repair_memory_cache.clear()
         self._fallibility_memory_cache.clear()
         self._group_atmosphere_memory_cache.clear()
+        if hasattr(self, "_sylanne_memory_idle_tasks"):
+            for task in list(self._sylanne_memory_idle_tasks.values()):
+                if task is not None and not task.done():
+                    task.cancel()
+            await asyncio.gather(*self._sylanne_memory_idle_tasks.values(), return_exceptions=True)
+        if hasattr(self, "_sylanne_memory_pending_observations"):
+            for pending_session in list(self._sylanne_memory_pending_observations):
+                await self._flush_sylanne_memory_pending_observations(
+                    pending_session,
+                    force=True,
+                )
+            self._sylanne_memory_pending_observations.clear()
+        if hasattr(self, "_sylanne_memory_idle_tasks"):
+            self._sylanne_memory_idle_tasks.clear()
+        if hasattr(self, "_sylanne_memory_idle_generation"):
+            self._sylanne_memory_idle_generation.clear()
         self._sylanne_memory_cache.clear()
         if hasattr(self, "_sylanne_memory_recall_worksets"):
             self._sylanne_memory_recall_worksets.clear()
@@ -1017,6 +1036,9 @@ class EmotionalStatePlugin(Star):
         self._record_conversation_pending_response_epoch(session_key, input_epoch)
         observed_at = self._event_observed_at(event)
         current_user_text = self._event_text(event) or str(getattr(request, "prompt", "") or "")
+        current_user_media_observation_text = self._current_user_media_observation_text(event)
+        if not current_user_text.strip() and current_user_media_observation_text:
+            current_user_text = current_user_media_observation_text
         await self._restore_realtime_delivery_context_if_needed(session_key)
         active_followup_payload = self._active_agent_followup_merge_payload(
             session_key,
@@ -1030,6 +1052,11 @@ class EmotionalStatePlugin(Star):
             session_key,
             request,
             model_hint=model_hint,
+        )
+        self._append_current_user_media_context_if_any(
+            request,
+            event,
+            budget=early_injection_budget,
         )
         await self._observe_agent_identity(identity, now=observed_at)
         fragment_payload = waiting_fragment_payload if waiting_fragment_payload else {}
@@ -1921,6 +1948,7 @@ class EmotionalStatePlugin(Star):
             lifelike_learning_state=lifelike_learning_state,
             group_atmosphere_state=group_atmosphere_state,
             observed_at=observed_at,
+            defer_until_idle=True,
         )
         if inject_state:
             self._append_current_event_time_context_if_any(
@@ -2469,6 +2497,7 @@ class EmotionalStatePlugin(Star):
             emotion_state=state,
             personality_drift_state=personality_drift_state,
             observed_at=observed_at,
+            defer_until_idle=True,
         )
 
     def _schedule_background_post_assessment(
@@ -8590,6 +8619,9 @@ class EmotionalStatePlugin(Star):
     def _build_astrbot_sticker_message(self, candidate: dict[str, Any]) -> Any:
         path = str(candidate.get("path") or "")
         url = str(candidate.get("url") or "")
+        if not url and path.lower().startswith(("http://", "https://")):
+            url = path
+            path = ""
         fallback = str(candidate.get("name") or candidate.get("relative_path") or "表情包")
         try:
             from astrbot.api.event import MessageChain  # type: ignore
@@ -9151,6 +9183,11 @@ class EmotionalStatePlugin(Star):
         key = str(session_key or "global")
         pending = self._conversation_pending_response_epochs.setdefault(key, deque(maxlen=12))
         pending.append(int(input_epoch))
+
+    def _conversation_has_pending_response_epoch(self, session_key: str) -> bool:
+        self._ensure_conversation_epoch_state()
+        key = str(session_key or "global")
+        return bool(self._conversation_pending_response_epochs.get(key))
 
     def _peek_conversation_pending_response_epoch(
         self,
@@ -14269,6 +14306,12 @@ class EmotionalStatePlugin(Star):
             self._group_atmosphere_memory_cache = {}
         if not hasattr(self, "_sylanne_memory_cache"):
             self._sylanne_memory_cache = {}
+        if not hasattr(self, "_sylanne_memory_pending_observations"):
+            self._sylanne_memory_pending_observations = {}
+        if not hasattr(self, "_sylanne_memory_idle_tasks"):
+            self._sylanne_memory_idle_tasks = {}
+        if not hasattr(self, "_sylanne_memory_idle_generation"):
+            self._sylanne_memory_idle_generation = {}
 
     def _passive_load_is_fresh(self, state: Any, *, now: float | None = None) -> bool:
         updated_at = getattr(state, "updated_at", None)
@@ -14569,6 +14612,7 @@ class EmotionalStatePlugin(Star):
         lifelike_learning_state: LifelikeLearningState | None = None,
         group_atmosphere_state: GroupAtmosphereState | None = None,
         observed_at: float | None = None,
+        defer_until_idle: bool = False,
     ) -> None:
         if not self._sylanne_memory_enabled():
             return
@@ -14576,47 +14620,254 @@ class EmotionalStatePlugin(Star):
         if not text:
             return
         now = self._observed_now() if observed_at is None else float(observed_at)
+        observation = self._sylanne_memory_observation_payload(
+            session_key,
+            text,
+            event=event,
+            speaker_id=speaker_id,
+            emotion_state=emotion_state,
+            personality_drift_state=personality_drift_state,
+            lifelike_learning_state=lifelike_learning_state,
+            group_atmosphere_state=group_atmosphere_state,
+            observed_at=now,
+        )
+        if defer_until_idle:
+            self._queue_sylanne_memory_observation(session_key, observation)
+            return
+        await self._commit_sylanne_memory_observation(session_key, observation)
+
+    def _sylanne_memory_observation_payload(
+        self,
+        session_key: str,
+        text: str,
+        *,
+        event: AstrMessageEvent | None,
+        speaker_id: str,
+        emotion_state: EmotionState | None,
+        personality_drift_state: PersonalityDriftState | None,
+        lifelike_learning_state: LifelikeLearningState | None,
+        group_atmosphere_state: GroupAtmosphereState | None,
+        observed_at: float,
+    ) -> dict[str, Any]:
+        return {
+            "session_key": str(session_key or "global"),
+            "text": str(text or "").strip(),
+            "speaker_id": str(speaker_id or ""),
+            "observed_at": float(observed_at),
+            "emotion_snapshot": (
+                emotion_state.to_public_dict(
+                    session_key=session_key,
+                    include_safety=self._safety_boundary_enabled(),
+                )
+                if emotion_state is not None
+                else None
+            ),
+            "personality_drift_snapshot": (
+                personality_drift_state.to_public_dict(
+                    session_key=session_key,
+                    exposure="plugin_safe",
+                )
+                if personality_drift_state is not None
+                else None
+            ),
+            "lifelike_snapshot": (
+                lifelike_learning_state.to_public_dict(
+                    session_key=session_key,
+                    exposure="plugin_safe",
+                )
+                if lifelike_learning_state is not None
+                else None
+            ),
+            "group_atmosphere_snapshot": (
+                group_atmosphere_state.to_public_dict(
+                    session_key=session_key,
+                    exposure="plugin_safe",
+                )
+                if group_atmosphere_state is not None
+                else None
+            ),
+            "event_time": self._conversation_time_payload(observed_at, event=event),
+        }
+
+    def _queue_sylanne_memory_observation(
+        self,
+        session_key: str,
+        observation: dict[str, Any],
+    ) -> None:
+        self._ensure_runtime_state_containers()
+        key = str(session_key or "global")
+        queue = self._sylanne_memory_pending_observations.setdefault(
+            key,
+            deque(maxlen=24),
+        )
+        queue.append(dict(observation))
+        generation = int(self._sylanne_memory_idle_generation.get(key) or 0) + 1
+        self._sylanne_memory_idle_generation[key] = generation
+        self._schedule_sylanne_memory_idle_commit(key, generation)
+
+    def _schedule_sylanne_memory_idle_commit(
+        self,
+        session_key: str,
+        generation: int,
+    ) -> None:
+        key = str(session_key or "global")
+        task = self._sylanne_memory_idle_tasks.get(key)
+        if task is not None and not task.done():
+            task.cancel()
+        if getattr(self, "_terminating", False):
+            return
+        task = asyncio.create_task(
+            self._sylanne_memory_idle_commit_later(key, generation),
+        )
+        self._sylanne_memory_idle_tasks[key] = task
+
+        def _consume_idle_memory_result(done: asyncio.Task[Any]) -> None:
+            if self._sylanne_memory_idle_tasks.get(key) is done and done.done():
+                self._sylanne_memory_idle_tasks.pop(key, None)
+            try:
+                done.result()
+            except asyncio.CancelledError:
+                return
+            except Exception as exc:
+                self._log_warning(
+                    f"{PLUGIN_NAME}: Sylanne memory idle commit failed: {exc}",
+                )
+
+        task.add_done_callback(_consume_idle_memory_result)
+
+    async def _sylanne_memory_idle_commit_later(
+        self,
+        session_key: str,
+        generation: int,
+    ) -> None:
+        await asyncio.sleep(self._sylanne_memory_idle_commit_delay_seconds())
+        await self._flush_sylanne_memory_pending_observations(
+            session_key,
+            generation=generation,
+        )
+
+    def _sylanne_memory_idle_commit_delay_seconds(self) -> float:
+        return max(
+            0.25,
+            min(20.0, self._cfg_float("sylanne_memory_idle_commit_delay_seconds", 4.0)),
+        )
+
+    async def _flush_sylanne_memory_pending_observations(
+        self,
+        session_key: str,
+        *,
+        generation: int | None = None,
+        force: bool = False,
+    ) -> None:
+        self._ensure_runtime_state_containers()
+        key = str(session_key or "global")
+        if generation is not None and generation != self._sylanne_memory_idle_generation.get(key):
+            return
+        if not force and self._conversation_has_pending_response_epoch(key):
+            self._schedule_sylanne_memory_idle_commit(
+                key,
+                int(self._sylanne_memory_idle_generation.get(key) or 0),
+            )
+            return
+        if not force and key in self._realtime_input_fragment_window_cache():
+            self._schedule_sylanne_memory_idle_commit(
+                key,
+                int(self._sylanne_memory_idle_generation.get(key) or 0),
+            )
+            return
+        current_task = None
+        try:
+            current_task = asyncio.current_task()
+        except RuntimeError:
+            current_task = None
+        task = self._sylanne_memory_idle_tasks.pop(key, None)
+        if force and task is not None and task is not current_task and not task.done():
+            task.cancel()
+        pending = list(self._sylanne_memory_pending_observations.pop(key, deque()))
+        if not pending:
+            self._sylanne_memory_idle_generation.pop(key, None)
+            return
+        for observation in self._coalesce_sylanne_memory_observations(pending):
+            await self._commit_sylanne_memory_observation(key, observation)
+        self._sylanne_memory_idle_generation.pop(key, None)
+
+    def _coalesce_sylanne_memory_observations(
+        self,
+        observations: list[dict[str, Any]],
+    ) -> list[dict[str, Any]]:
+        ordered = sorted(
+            [dict(item) for item in observations if isinstance(item, dict)],
+            key=lambda item: self._as_float_value(item.get("observed_at"), 0.0),
+        )
+        merged: list[dict[str, Any]] = []
+        current: dict[str, Any] | None = None
+        for item in ordered:
+            text = str(item.get("text") or "").strip()
+            if not text:
+                continue
+            speaker = str(item.get("speaker_id") or "")
+            can_merge = bool(
+                current is not None
+                and speaker
+                and speaker == str(current.get("speaker_id") or "")
+                and speaker != "assistant"
+            )
+            if can_merge:
+                current["text"] = self._merge_sylanne_memory_observation_texts(
+                    str(current.get("text") or ""),
+                    text,
+                )
+                current["observed_at"] = item.get("observed_at")
+                current["event_time"] = item.get("event_time")
+                for key in (
+                    "emotion_snapshot",
+                    "personality_drift_snapshot",
+                    "lifelike_snapshot",
+                    "group_atmosphere_snapshot",
+                ):
+                    if item.get(key) is not None:
+                        current[key] = item.get(key)
+                continue
+            if current is not None:
+                merged.append(current)
+            current = item
+        if current is not None:
+            merged.append(current)
+        return merged
+
+    def _merge_sylanne_memory_observation_texts(self, previous: str, current: str) -> str:
+        first = " ".join(str(previous or "").split()).strip()
+        second = " ".join(str(current or "").split()).strip()
+        if not first:
+            return second
+        if not second or second in first:
+            return first
+        if first in second:
+            return second
+        return f"{first} {second}".strip()
+
+    async def _commit_sylanne_memory_observation(
+        self,
+        session_key: str,
+        observation: dict[str, Any],
+    ) -> None:
+        text = str(observation.get("text") or "").strip()
+        if not text:
+            return
+        now = self._as_float_value(observation.get("observed_at"), self._observed_now())
         try:
             state = await self._load_sylanne_memory_state(session_key, now=now)
             state = observe_memory_event(
                 state,
                 text=text,
                 session_key=session_key,
-                speaker_id=speaker_id,
-                emotion_snapshot=(
-                    emotion_state.to_public_dict(
-                        session_key=session_key,
-                        include_safety=self._safety_boundary_enabled(),
-                    )
-                    if emotion_state is not None
-                    else None
-                ),
-                personality_drift_snapshot=(
-                    personality_drift_state.to_public_dict(
-                        session_key=session_key,
-                        exposure="plugin_safe",
-                    )
-                    if personality_drift_state is not None
-                    else None
-                ),
-                lifelike_snapshot=(
-                    lifelike_learning_state.to_public_dict(
-                        session_key=session_key,
-                        exposure="plugin_safe",
-                    )
-                    if lifelike_learning_state is not None
-                    else None
-                ),
-                group_atmosphere_snapshot=(
-                    group_atmosphere_state.to_public_dict(
-                        session_key=session_key,
-                        exposure="plugin_safe",
-                    )
-                    if group_atmosphere_state is not None
-                    else None
-                ),
+                speaker_id=str(observation.get("speaker_id") or ""),
+                emotion_snapshot=observation.get("emotion_snapshot"),
+                personality_drift_snapshot=observation.get("personality_drift_snapshot"),
+                lifelike_snapshot=observation.get("lifelike_snapshot"),
+                group_atmosphere_snapshot=observation.get("group_atmosphere_snapshot"),
                 now=now,
-                event_time=self._conversation_time_payload(now, event=event),
+                event_time=observation.get("event_time"),
             )
             provider, provider_id = await self._sylanne_memory_embedding_provider()
             if provider is not None and provider_id:
@@ -16136,6 +16387,85 @@ class EmotionalStatePlugin(Star):
             budget=budget,
         )
 
+    def _append_current_user_media_context_if_any(
+        self,
+        request: ProviderRequest,
+        event: AstrMessageEvent | None,
+        *,
+        budget: _StateInjectionBudget | None,
+    ) -> bool:
+        text = self._current_user_media_context_text(event)
+        if not text:
+            return False
+        return self._append_temp_text_part(
+            request,
+            text,
+            source="current_user_media_context",
+            budget=budget,
+            required=True,
+        )
+
+    def _current_user_media_observation_text(
+        self,
+        event: AstrMessageEvent | None,
+    ) -> str:
+        observations = self._extract_sticker_observations_from_event(event) if event is not None else []
+        if not observations:
+            return ""
+        labels: list[str] = []
+        for observation in observations[:3]:
+            kind = "表情包" if observation.get("media_kind") == "sticker" else "图片"
+            summary = self._sticker_observation_summary(observation)
+            labels.append(f"{kind}：{summary}" if summary else kind)
+        return "用户发送了" + "、".join(labels)
+
+    def _current_user_media_context_text(
+        self,
+        event: AstrMessageEvent | None,
+    ) -> str:
+        observations = self._extract_sticker_observations_from_event(event) if event is not None else []
+        if not observations:
+            return ""
+        lines = [
+            "[sylanne_current_user_media]",
+            "当前用户消息包含图片或表情包。把它当作本轮用户输入的一部分；如果主模型没有可靠视觉输入或平台摘要很粗略，不要凭空描述画面内容。",
+        ]
+        for index, observation in enumerate(observations[:4], start=1):
+            kind = "表情包" if observation.get("media_kind") == "sticker" else "图片"
+            summary = self._sticker_observation_summary(observation)
+            type_text = self._head_one_line(str(observation.get("type") or ""), 32)
+            fields = [
+                f"kind={kind}",
+                f"platform_type={type_text or 'unknown'}",
+            ]
+            if summary:
+                fields.append(f"summary={self._head_one_line(summary, 80)}")
+            if observation.get("url"):
+                fields.append("has_url=true")
+            if observation.get("path"):
+                fields.append(f"path={self._head_one_line(str(observation.get('path')), 96)}")
+            if observation.get("file_id"):
+                fields.append(f"file_id={self._head_one_line(str(observation.get('file_id')), 64)}")
+            lines.append(f"- item{index}: " + "; ".join(fields))
+        lines.append("回应策略：可以承认收到了表情包/图片；只有在摘要明确时才引用摘要，不要把文件名、旧记忆或猜测当成真实画面。")
+        return "\n".join(lines)
+
+    def _sticker_observation_summary(self, observation: dict[str, Any]) -> str:
+        for key in ("summary", "name", "filename", "file_id"):
+            value = str(observation.get(key) or "").strip()
+            if value:
+                return value
+        path = str(observation.get("path") or "").strip()
+        if path:
+            try:
+                return Path(path).name
+            except OSError:
+                return path.rsplit("/", 1)[-1].rsplit("\\", 1)[-1]
+        url = str(observation.get("url") or "").strip()
+        if url:
+            return url.rstrip("/").rsplit("/", 1)[-1]
+        return ""
+
     def _request_to_text(self, request: ProviderRequest) -> str:
         context_parts: list[str] = []
         max_total_chars = max(300, self._cfg_int("request_context_max_chars", 1600))
@@ -16588,6 +16918,7 @@ class EmotionalStatePlugin(Star):
             "recent_user_correction_context",
             "recent_user_scene_context",
             "user_message_withdrawal",
+            "current_user_media_context",
         }
 
     def _format_sylanne_temp_context_for_compression(
@@ -16614,6 +16945,7 @@ class EmotionalStatePlugin(Star):
             "recent_user_scene_context",
             "user_message_withdrawal",
             "sylanne_memory_recall",
+            "current_user_media_context",
         }
         if source not in important_sources:
             return value
@@ -16642,6 +16974,7 @@ class EmotionalStatePlugin(Star):
             "recent_user_correction_context": "sylanne_recent_user_correction_context",
             "recent_user_scene_context": "sylanne_recent_user_scene_context",
             "sylanne_memory_recall": "sylanne_memory_recall",
+            "current_user_media_context": "sylanne_current_user_media",
         }
         marker = source_markers.get(source, f"sylanne_source:{source}")
         for part in getattr(request, "extra_user_content_parts", []) or []:
@@ -17854,8 +18187,11 @@ class EmotionalStatePlugin(Star):
                 or ""
             ),
             selected_packs=str(self._cfg("sticker_selected_packs", "") or ""),
-            index_limit=1000,
-            max_file_bytes=5 * 1024 * 1024,
+            index_limit=max(0, self._cfg_int("sticker_index_limit", 1000)),
+            max_file_bytes=max(
+                1,
+                self._cfg_int("sticker_max_file_bytes", 5242880),
+            ),
             send_probability=0.18,
             learned_enabled=self._sticker_learning_enabled(),
         )
@@ -17946,9 +18282,13 @@ class EmotionalStatePlugin(Star):
 
     async def _sticker_candidates(self, session_key: str) -> list[dict[str, Any]]:
         settings = self._sticker_settings()
-        candidates = self._local_sticker_index(settings)
+        candidates = self._sendable_sticker_candidates(self._local_sticker_index(settings))
         if settings.learned_enabled:
-            candidates.extend(await self._load_sticker_memory(session_key))
+            candidates.extend(
+                self._sendable_sticker_candidates(
+                    await self._load_sticker_memory(session_key),
+                ),
+            )
         if not candidates:
             auto_root = await asyncio.to_thread(
                 self._ensure_auto_downloaded_sticker_root,
@@ -17970,8 +18310,58 @@ class EmotionalStatePlugin(Star):
                     send_probability=settings.send_probability,
                     learned_enabled=settings.learned_enabled,
                 )
-                candidates = self._local_sticker_index(auto_settings)
+                candidates = self._sendable_sticker_candidates(
+                    self._local_sticker_index(auto_settings),
+                )
         return candidates
+
+    def _sendable_sticker_candidates(
+        self,
+        candidates: list[dict[str, Any]],
+    ) -> list[dict[str, Any]]:
+        sendable: list[dict[str, Any]] = []
+        seen: set[str] = set()
+        for candidate in candidates:
+            if not isinstance(candidate, dict):
+                continue
+            normalized = self._normalize_sendable_sticker_candidate(candidate)
+            if normalized is None:
+                continue
+            identity = str(
+                normalized.get("url")
+                or normalized.get("path")
+                or normalized.get("id")
+                or normalized.get("relative_path")
+                or "",
+            )
+            if identity and identity in seen:
+                continue
+            if identity:
+                seen.add(identity)
+            sendable.append(normalized)
+        return sendable
+
+    def _normalize_sendable_sticker_candidate(
+        self,
+        candidate: dict[str, Any],
+    ) -> dict[str, Any] | None:
+        normalized = dict(candidate)
+        url = str(normalized.get("url") or "").strip()
+        path = str(normalized.get("path") or "").strip()
+        if not url and path.lower().startswith(("http://", "https://")):
+            url = path
+            path = ""
+            normalized["url"] = url
+            normalized["path"] = ""
+        if url.lower().startswith(("http://", "https://")):
+            return normalized
+        if path:
+            try:
+                if Path(path).expanduser().exists():
+                    return normalized
+            except OSError:
+                return None
+        return None
 
     def _ensure_auto_downloaded_sticker_root(self, settings: StickerSettings) -> Path | None:
         if not settings.enabled or not settings.auto_download_enabled:
@@ -18159,7 +18549,10 @@ class EmotionalStatePlugin(Star):
         if cached and (ttl <= 0 or now - float(cached.get("indexed_at", 0.0)) <= ttl):
             return list(cached.get("items") or [])
         items = index_local_stickers(settings)
-        cache[cache_key] = {"indexed_at": now, "items": items}
+        if items or not str(settings.local_root or "").strip():
+            cache[cache_key] = {"indexed_at": now, "items": items}
+        else:
+            cache.pop(cache_key, None)
         return list(items)
 
     async def _load_sticker_memory(self, session_key: str) -> list[dict[str, Any]]:
@@ -18223,28 +18616,106 @@ class EmotionalStatePlugin(Star):
             value = getattr(event, attr, None)
             if value is None:
                 continue
-            if isinstance(value, (list, tuple)):
-                candidates.extend(value)
-            else:
-                candidates.append(value)
+            self._collect_sticker_observation_candidates(value, candidates)
         observations: list[dict[str, Any]] = []
+        seen: set[str] = set()
         for item in candidates:
             observation = self._sticker_observation_from_message_part(item)
             if observation:
+                identity = str(
+                    observation.get("url")
+                    or observation.get("path")
+                    or observation.get("file_id")
+                    or observation.get("name")
+                    or "",
+                )
+                if identity and identity in seen:
+                    continue
+                if identity:
+                    seen.add(identity)
                 observations.append(observation)
         return observations[:8]
 
-    def _sticker_observation_from_message_part(self, item: Any) -> dict[str, Any] | None:
-        if isinstance(item, dict):
-            type_text = str(item.get("type") or item.get("message_type") or "").lower()
-            keys = item
+    def _collect_sticker_observation_candidates(
+        self,
+        value: Any,
+        output: list[Any],
+        *,
+        depth: int = 0,
+    ) -> None:
+        if value is None or depth > 4:
+            return
+        if isinstance(value, (str, bytes)):
+            output.append(value.decode("utf-8", errors="ignore") if isinstance(value, bytes) else value)
+            return
+        if isinstance(value, (list, tuple)):
+            for item in value:
+                self._collect_sticker_observation_candidates(
+                    item,
+                    output,
+                    depth=depth + 1,
+                )
+            return
+        output.append(value)
+        if isinstance(value, dict):
+            nested_values = [
+                value.get(name)
+                for name in (
+                    "data",
+                    "message",
+                    "messages",
+                    "message_chain",
+                    "raw_message",
+                    "chain",
+                )
+            ]
         else:
+            nested_values = [
+                getattr(value, name, None)
+                for name in (
+                    "data",
+                    "message",
+                    "messages",
+                    "message_chain",
+                    "raw_message",
+                    "chain",
+                )
+            ]
+        for nested in nested_values:
+            if nested is value or nested is None:
+                continue
+            self._collect_sticker_observation_candidates(
+                nested,
+                output,
+                depth=depth + 1,
+            )
+
+    def _sticker_observation_from_message_part(self, item: Any) -> dict[str, Any] | None:
+        if isinstance(item, str):
+            return self._sticker_observation_from_cq_text(item)
+        if isinstance(item, dict):
+            data = item.get("data") if isinstance(item.get("data"), dict) else {}
+            type_text = str(
+                item.get("type")
+                or item.get("message_type")
+                or data.get("type")
+                or data.get("message_type")
+                or "",
+            ).lower()
+            keys = dict(data)
+            keys.update({key: value for key, value in item.items() if key != "data"})
+        else:
+            data = getattr(item, "data", None)
+            data = data if isinstance(data, dict) else {}
             type_text = str(
                 getattr(item, "type", "")
                 or getattr(item, "message_type", "")
+                or data.get("type")
+                or data.get("message_type")
                 or item.__class__.__name__,
             ).lower()
-            keys = {
+            keys = dict(data)
+            keys.update({
                 name: getattr(item, name, None)
                 for name in (
                     "url",
@@ -18252,25 +18723,126 @@ class EmotionalStatePlugin(Star):
                     "file_path",
                     "path",
                     "file_id",
+                    "emoji_id",
+                    "emojiId",
                     "id",
                     "name",
                     "filename",
+                    "summary",
+                    "sub_type",
+                    "subType",
                     "mime",
                     "mime_type",
                 )
-            }
-        if not any(marker in type_text for marker in ("image", "sticker", "face", "emoji")):
-            if not any(keys.get(key) for key in ("url", "file", "file_path", "path", "file_id")):
+            })
+        url = keys.get("url")
+        path = keys.get("path") or keys.get("file") or keys.get("file_path")
+        file_id = keys.get("file_id") or keys.get("emoji_id") or keys.get("emojiId") or keys.get("id")
+        name = keys.get("name") or keys.get("filename") or keys.get("summary")
+        media_kind = self._sticker_observation_media_kind(type_text, keys)
+        if media_kind == "unknown":
+            if not any((url, path, file_id)):
                 return None
+            media_kind = "image"
+        if not any((url, path, file_id, name)):
+            return None
         return {
             "type": type_text or "image",
-            "url": keys.get("url"),
-            "path": keys.get("path") or keys.get("file") or keys.get("file_path"),
-            "file_id": keys.get("file_id") or keys.get("id"),
-            "name": keys.get("name") or keys.get("filename"),
+            "media_kind": media_kind,
+            "url": url,
+            "path": path,
+            "file_id": file_id,
+            "name": name,
+            "summary": keys.get("summary"),
             "mime": keys.get("mime") or keys.get("mime_type"),
             "interest_score": 0.55,
         }
+
+    def _sticker_observation_media_kind(
+        self,
+        type_text: str,
+        keys: dict[str, Any],
+    ) -> str:
+        type_text = str(type_text or "").strip().lower()
+        if any(marker in type_text for marker in ("mface", "marketface", "sticker", "emoji", "face")):
+            return "sticker"
+        if "image" in type_text:
+            combined = " ".join(
+                str(keys.get(name) or "")
+                for name in (
+                    "summary",
+                    "name",
+                    "filename",
+                    "sub_type",
+                    "subType",
+                    "emoji_id",
+                    "emojiId",
+                    "file",
+                    "path",
+                    "url",
+                )
+            ).lower()
+            if any(
+                marker in combined
+                for marker in (
+                    "表情",
+                    "动画表情",
+                    "sticker",
+                    "emoji",
+                    "mface",
+                    "marketface",
+                    "bface",
+                    "face",
+                )
+            ):
+                return "sticker"
+            return "image"
+        combined = " ".join(
+            str(keys.get(name) or "")
+            for name in (
+                "summary",
+                "name",
+                "filename",
+                "sub_type",
+                "subType",
+                "emoji_id",
+                "emojiId",
+            )
+        ).lower()
+        if any(
+            marker in combined
+            for marker in (
+                "表情",
+                "动画表情",
+                "sticker",
+                "emoji",
+                "mface",
+                "marketface",
+                "bface",
+            )
+        ):
+            return "sticker"
+        if any(marker in type_text for marker in ("picture", "photo", "pic")):
+            return "image"
+        return "unknown"
+
+    def _sticker_observation_from_cq_text(self, text: str) -> dict[str, Any] | None:
+        value = str(text or "")
+        match = re.search(r"\[CQ:(image|sticker|face|emoji),([^\]]+)\]", value, re.I)
+        if not match:
+            return None
+        attrs: dict[str, str] = {}
+        for chunk in match.group(2).split(","):
+            if "=" not in chunk:
+                continue
+            key, raw = chunk.split("=", 1)
+            attrs[key.strip()] = raw.strip()
+        return self._sticker_observation_from_message_part(
+            {
+                "type": match.group(1).lower(),
+                "data": attrs,
+            },
+        )
 
     def _low_signal_text_profile(self, text: str) -> dict[str, Any]:
         stripped = str(text or "").strip()

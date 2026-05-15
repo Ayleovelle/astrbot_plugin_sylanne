@@ -374,6 +374,92 @@ class AstrBotLifecyclePart08(AstrBotLifecycleTests):
         self.assertIn("论文还没修完", second_summary)
 
 
+    def test_sylanne_memory_observe_defers_fragmented_user_turn_until_idle_flush(self):
+        from memory_engine import SylanneMemoryState
+
+        stored = {}
+
+        async def fake_get(self, key, default=None):
+            return stored.get(key, default)
+
+        async def fake_put(self, key, value):
+            stored[key] = value
+
+        plugin = new_plugin(
+            {
+                "enable_sylanne_memory": True,
+                "sylanne_memory_vector_retrieval_enabled": False,
+            },
+        )
+        bind_async(plugin, "get_kv_data", fake_get)
+        bind_async(plugin, "put_kv_data", fake_put)
+
+        async def run_deferred_memory():
+            await plugin._observe_sylanne_memory_event_if_enabled(
+                "s-idle-memory",
+                "I say",
+                speaker_id="user-1",
+                observed_at=100.0,
+                defer_until_idle=True,
+            )
+            await plugin._observe_sylanne_memory_event_if_enabled(
+                "s-idle-memory",
+                "you sound like teasing",
+                speaker_id="user-1",
+                observed_at=100.4,
+                defer_until_idle=True,
+            )
+            key = plugin._sylanne_memory_kv_key("s-idle-memory")
+            self.assertNotIn(key, stored)
+            await plugin._flush_sylanne_memory_pending_observations(
+                "s-idle-memory",
+                force=True,
+            )
+            return SylanneMemoryState.from_dict(stored[key])
+
+        state = asyncio.run(run_deferred_memory())
+
+        self.assertEqual(len(state.records), 1)
+        self.assertIn("I say", state.records[0].text)
+        self.assertIn("you sound like teasing", state.records[0].text)
+
+
+    def test_sylanne_memory_terminate_flushes_deferred_observations(self):
+        stored = {}
+
+        async def fake_get(self, key, default=None):
+            return stored.get(key, default)
+
+        async def fake_put(self, key, value):
+            stored[key] = value
+
+        plugin = new_plugin(
+            {
+                "enable_sylanne_memory": True,
+                "sylanne_memory_vector_retrieval_enabled": False,
+            },
+        )
+        bind_async(plugin, "get_kv_data", fake_get)
+        bind_async(plugin, "put_kv_data", fake_put)
+
+        async def run_terminate_flush():
+            await plugin._observe_sylanne_memory_event_if_enabled(
+                "s-terminate-memory",
+                "flush me before update",
+                speaker_id="user-1",
+                observed_at=200.0,
+                defer_until_idle=True,
+            )
+            key = plugin._sylanne_memory_kv_key("s-terminate-memory")
+            self.assertNotIn(key, stored)
+            await plugin.terminate()
+            return key
+
+        key = asyncio.run(run_terminate_flush())
+
+        self.assertIn(key, stored)
+
+
     def test_context_compression_summary_prevents_duplicate_realtime_shadow(self):
         plugin = new_plugin({"enable_realtime_chat": True, "enable_sticker_reaction": False})
         plugin._record_realtime_assistant_history_shadow(

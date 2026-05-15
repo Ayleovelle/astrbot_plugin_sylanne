@@ -11,6 +11,7 @@ SYLANNE_MEMORY_OPERATIONAL_SCHEMA_KEYS = {
     "enable_sylanne_memory",
     "sylanne_memory_vector_retrieval_enabled",
     "sylanne_memory_embedding_provider_id",
+    "sylanne_memory_idle_commit_delay_seconds",
     "sylanne_memory_debug_view_enabled",
     "allow_sylanne_memory_reset_backdoor",
 }
@@ -255,6 +256,7 @@ class ConfigSchemaContractTests(unittest.TestCase):
             "allow_emotion_reset_backdoor": ("bool", True),
             "enable_shadow_diagnostics": ("bool", False),
             "enable_sylanne_memory": ("bool", True),
+            "sylanne_memory_idle_commit_delay_seconds": ("float", 4.0),
             "sylanne_memory_debug_view_enabled": ("bool", False),
             "allow_sylanne_memory_reset_backdoor": ("bool", True),
             "humanlike_memory_write_enabled": ("bool", True),

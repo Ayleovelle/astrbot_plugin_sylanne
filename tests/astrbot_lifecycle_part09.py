@@ -233,6 +233,170 @@ class AstrBotLifecyclePart09(AstrBotLifecycleTests):
         self.assertEqual(candidates[0]["origin"], "learned_user_image")
 
 
+    def test_sticker_observation_extracts_onebot_nested_image_data(self):
+        plugin = new_plugin({"sticker_learn_user_images": True})
+        event = FakeEvent("s-onebot-nested")
+        event.message_obj = SimpleNamespace(
+            message=[
+                {
+                    "type": "image",
+                    "data": {
+                        "url": "https://example.test/sticker.png",
+                        "file": "cache/sticker.png",
+                        "file_id": "fid-123",
+                        "summary": "happy",
+                    },
+                },
+            ],
+        )
+
+        observations = plugin._extract_sticker_observations_from_event(event)
+
+        self.assertEqual(len(observations), 1)
+        self.assertEqual(observations[0]["url"], "https://example.test/sticker.png")
+        self.assertEqual(observations[0]["path"], "cache/sticker.png")
+        self.assertEqual(observations[0]["file_id"], "fid-123")
+
+
+    def test_sticker_observation_classifies_napcat_mface_as_sticker(self):
+        plugin = new_plugin({"sticker_learn_user_images": True})
+        event = FakeEvent("s-napcat-mface")
+        event.message_obj = SimpleNamespace(
+            message=[
+                {
+                    "type": "mface",
+                    "data": {
+                        "url": "https://example.test/mface.gif",
+                        "emoji_id": "emoji-123",
+                        "summary": "[动画表情]捂脸",
+                    },
+                },
+            ],
+        )
+
+        observations = plugin._extract_sticker_observations_from_event(event)
+
+        self.assertEqual(len(observations), 1)
+        self.assertEqual(observations[0]["media_kind"], "sticker")
+        self.assertEqual(observations[0]["type"], "mface")
+        self.assertEqual(observations[0]["url"], "https://example.test/mface.gif")
+        self.assertEqual(observations[0]["file_id"], "emoji-123")
+        self.assertIn("捂脸", observations[0]["name"])
+
+
+    def test_current_sticker_payload_is_injected_as_cautious_context(self):
+        plugin = new_plugin(
+            {
+                "inject_state": False,
+                "use_llm_assessor": False,
+                "enable_realtime_chat": False,
+                "enable_sylanne_memory": False,
+                "enable_sticker_reaction": False,
+                "sticker_learn_user_images": False,
+            },
+        )
+        event = FakeEvent("s-current-sticker", message="", platform_name="aiocqhttp")
+        event.message_obj = SimpleNamespace(
+            message=[
+                {
+                    "type": "mface",
+                    "data": {
+                        "url": "https://example.test/current.gif",
+                        "emoji_id": "emoji-456",
+                        "summary": "[动画表情]拍桌",
+                    },
+                },
+            ],
+        )
+        request = fake_request(session_id="s-current-sticker", prompt="")
+
+        asyncio.run(plugin.on_llm_request(event, request))
+
+        injected = "\n".join(self._request_text_parts(request))
+        self.assertFalse(event.stopped)
+        self.assertIn("sylanne_current_user_media", injected)
+        self.assertIn("表情包", injected)
+        self.assertIn("拍桌", injected)
+        self.assertIn("不要凭空描述", injected)
+
+
+    def test_sticker_data_without_outer_type_uses_summary_for_kind(self):
+        plugin = new_plugin({"sticker_learn_user_images": True})
+
+        observation = plugin._sticker_observation_from_message_part(
+            {
+                "url": "https://example.test/raw-data.gif",
+                "emoji_id": "emoji-789",
+                "summary": "[动画表情]疑惑",
+            },
+        )
+
+        self.assertIsNotNone(observation)
+        self.assertEqual(observation["media_kind"], "sticker")
+        self.assertIn("疑惑", observation["name"])
+
+
+    def test_bad_learned_sticker_candidate_does_not_block_auto_download(self):
+        plugin = new_plugin(
+            {
+                "enable_sticker_reaction": True,
+                "sticker_local_root": "",
+                "sticker_auto_download_enabled": True,
+                "sticker_auto_download_repo_url": "https://example.test/stickers.git",
+                "sticker_learn_user_images": True,
+            },
+        )
+
+        async def bad_learned_stickers(self, session_key):
+            return [
+                {
+                    "id": "bad-empty",
+                    "origin": "observed_user_sticker",
+                    "name": "empty metadata only",
+                },
+            ]
+
+        bind_async(plugin, "_load_sticker_memory", bad_learned_stickers)
+        with tempfile.TemporaryDirectory() as temp_dir:
+            base = Path(temp_dir)
+            cached_root = base / "auto-stickers"
+            (cached_root / "pack").mkdir(parents=True)
+            (cached_root / "pack" / "happy.png").write_bytes(b"fake image")
+            calls = []
+
+            def fake_ensure(settings):
+                calls.append(settings.auto_download_repo_url)
+                return cached_root
+
+            plugin._ensure_auto_downloaded_sticker_root = fake_ensure
+
+            candidates = asyncio.run(plugin._sticker_candidates("s-bad-learned"))
+
+        self.assertEqual(calls, ["https://example.test/stickers.git"])
+        self.assertEqual(len(candidates), 1)
+        self.assertEqual(candidates[0]["name"], "happy")
+
+
+    def test_empty_sticker_index_cache_refreshes_when_files_appear(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            plugin = new_plugin(
+                {
+                    "enable_sticker_reaction": True,
+                    "sticker_local_root": str(root),
+                    "sticker_learn_user_images": False,
+                },
+            )
+
+            first = asyncio.run(plugin._sticker_candidates("s-empty-cache"))
+            (root / "late.png").write_bytes(b"fake image")
+            second = asyncio.run(plugin._sticker_candidates("s-empty-cache"))
+
+        self.assertEqual(first, [])
+        self.assertEqual(len(second), 1)
+        self.assertEqual(second[0]["name"], "late")
+
+
     def test_sticker_auto_download_reuses_completed_repo_even_when_pack_filter_misses(self):
         plugin = new_plugin(
             {

@@ -482,6 +482,12 @@
     "default": true,
     "hint": "默认开启。发生的事情会写入自有记忆，后续对话会按限长召回摘要理解指代、偏好和共同经历；记忆深度、遗忘半衰期、召回数量、巩固强度和压缩阈值全部由人格、情绪、关系、群聊氛围和真实时间自动推导，不允许手动调数值。"
   },
+  "sylanne_memory_idle_commit_delay_seconds": {
+    "description": "Sylanne 记忆空闲写入等待秒数",
+    "type": "float",
+    "default": 4.0,
+    "hint": "用户连续分条输入或接管回复尚未稳定时，先把记忆事件放入轻量队列；会话安静达到该秒数后再合并写入，避免半句话和误识别碎片污染长期记忆。插件关闭或更新前会强制落盘。"
+  },
   "sylanne_memory_vector_retrieval_enabled": {
     "description": "启用 Sylanne 记忆向量检索",
     "type": "bool",
