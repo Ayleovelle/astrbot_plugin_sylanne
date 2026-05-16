@@ -5,7 +5,10 @@
   <rect x="22" y="22" width="876" height="376" rx="18" fill="#fff" stroke="#dc2626" stroke-width="3"/>
   <rect x="42" y="42" width="836" height="62" rx="10" fill="#fee2e2"/>
   <text x="64" y="80" fill="#991b1b" font-family="Arial, 'Microsoft YaHei', sans-serif" font-size="26" font-weight="700">严重警示：旧版高频 KV 写入与表情索引扫描可能压满低端云盘 I/O</text>
-  <text x="64" y="128" fill="#7f1d1d" font-family="Arial, 'Microsoft YaHei', sans-serif" font-size="17">2C/2GB 或低 BPS 云服务器上，旧策略极大概率造成磁盘 I/O 饱和，表现为机器人卡死、硬盘假死或队列长时间不恢复。</text>
+  <text x="64" y="128" fill="#7f1d1d" font-family="Arial, 'Microsoft YaHei', sans-serif" font-size="16">
+    <tspan x="64" dy="0">2C/2GB 或低 BPS 云服务器上，旧策略极大概率造成磁盘 I/O 饱和，表现为机器人卡死、</tspan>
+    <tspan x="64" dy="22">硬盘假死或队列长时间不恢复。强烈建议所有用户尽快更新到 v2.5.6。</tspan>
+  </text>
   <line x1="86" y1="330" x2="820" y2="330" stroke="#cbd5e1" stroke-width="2"/>
   <line x1="86" y1="174" x2="86" y2="330" stroke="#cbd5e1" stroke-width="2"/>
   <line x1="86" y1="278" x2="820" y2="278" stroke="#e2e8f0"/>
@@ -25,5 +28,8 @@
   <text x="496" y="263" fill="#334155" font-family="Arial, 'Microsoft YaHei', sans-serif" font-size="14">读 BPS 约 107.434M</text>
   <circle cx="482" cy="281" r="5" fill="#16a34a"/>
   <text x="496" y="286" fill="#334155" font-family="Arial, 'Microsoft YaHei', sans-serif" font-size="14">写 BPS 小写高频抖动</text>
-  <text x="86" y="365" fill="#991b1b" font-family="Arial, 'Microsoft YaHei', sans-serif" font-size="17" font-weight="700">v2.5.6 修复：checkpoint 合并写、表情索引缓存与线程扫描、记忆/表情学习批量单写。</text>
+  <text x="86" y="365" fill="#991b1b" font-family="Arial, 'Microsoft YaHei', sans-serif" font-size="16" font-weight="700">
+    <tspan x="86" dy="0">v2.5.6 修复：checkpoint 合并写、表情索引缓存与线程扫描，</tspan>
+    <tspan x="86" dy="22">记忆/表情学习批量单写，读取与 embedding 热路径降频。</tspan>
+  </text>
 </svg>

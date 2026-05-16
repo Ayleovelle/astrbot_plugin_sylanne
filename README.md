@@ -3344,3 +3344,11 @@ consequences = await emotion.get_emotion_consequences(event)
 ```yaml
 license: GPL-3.0-or-later
 ```
+
+---
+
+## 星星记录表
+
+如果 Sylanne 帮到了你，或者你愿意继续看它慢慢长大，麻烦顺手给项目点一颗 Star。Star 会影响插件市场曝光，也能让我判断哪些功能值得继续认真维护。谢谢你愿意把这一点点光留在这里。
+
+[![Star History Chart](https://api.star-history.com/svg?repos=Ayleovelle/astrbot_plugin_sylanne&type=Date)](https://www.star-history.com/#Ayleovelle/astrbot_plugin_sylanne&Date)
