@@ -423,6 +423,131 @@ class AstrBotLifecyclePart08(AstrBotLifecycleTests):
         self.assertNotIn("备用件很贵导致烦躁 4", summary)
 
 
+    def test_sylanne_memory_vector_recall_does_not_backfill_records_on_hot_path(self):
+        from memory_engine import MemoryRecord, SylanneMemoryState
+
+        plugin = new_plugin(
+            {
+                "enable_sylanne_memory": True,
+                "sylanne_memory_vector_retrieval_enabled": True,
+                "sylanne_memory_embedding_provider_id": "embed-a",
+            },
+        )
+
+        class FakeEmbeddingProvider:
+            provider_config = {"id": "embed-a", "provider_type": "embedding"}
+
+            def __init__(self):
+                self.calls = []
+
+            async def get_embedding(self, text):
+                self.calls.append(text)
+                return [1.0, 0.0, 0.0]
+
+        provider = FakeEmbeddingProvider()
+
+        class FakeContext:
+            def get_provider_by_id(self, provider_id):
+                return provider if provider_id == "embed-a" else None
+
+        plugin.context = FakeContext()
+        state = SylanneMemoryState.initial(now=0.0)
+        state.records.append(
+            MemoryRecord(
+                memory_id="legacy-no-vector",
+                text="alpha beta gamma",
+                summary="alpha beta gamma",
+                session_key="s-vector-no-backfill",
+                created_at=10.0,
+                updated_at=10.0,
+                depth=0.7,
+                confidence=0.7,
+            ),
+        )
+        plugin._sylanne_memory_cache["s-vector-no-backfill"] = state
+
+        async def run_memory_recall():
+            request = fake_request(
+                session_id="s-vector-no-backfill",
+                prompt="needle-query",
+            )
+            return await plugin._sylanne_memory_recall_summary_for_request(
+                request,
+                session_key="s-vector-no-backfill",
+                current_user_text="needle-query",
+            )
+
+        summary = asyncio.run(run_memory_recall())
+
+        self.assertEqual(summary, "")
+        self.assertEqual(provider.calls, [])
+
+    def test_sylanne_memory_query_embedding_is_cached_for_repeated_recall(self):
+        from memory_engine import MemoryRecord, SylanneMemoryState
+
+        plugin = new_plugin(
+            {
+                "enable_sylanne_memory": True,
+                "sylanne_memory_vector_retrieval_enabled": True,
+                "sylanne_memory_embedding_provider_id": "embed-a",
+            },
+        )
+
+        class FakeEmbeddingProvider:
+            provider_config = {"id": "embed-a", "provider_type": "embedding"}
+
+            def __init__(self):
+                self.calls = []
+
+            async def get_embedding(self, text):
+                self.calls.append(text)
+                return [1.0, 0.0, 0.0]
+
+        provider = FakeEmbeddingProvider()
+
+        class FakeContext:
+            def get_provider_by_id(self, provider_id):
+                return provider if provider_id == "embed-a" else None
+
+        plugin.context = FakeContext()
+        state = SylanneMemoryState.initial(now=0.0)
+        state.records.append(
+            MemoryRecord(
+                memory_id="vector-hit",
+                text="alpha beta gamma",
+                summary="alpha beta gamma",
+                session_key="s-vector-query-cache",
+                created_at=10.0,
+                updated_at=10.0,
+                depth=0.72,
+                confidence=0.74,
+                semantic_embedding=[1.0, 0.0, 0.0],
+                embedding_provider_id="embed-a",
+                embedding_updated_at=10.0,
+                embedding_text_hash="vector-hit",
+            ),
+        )
+        plugin._sylanne_memory_cache["s-vector-query-cache"] = state
+
+        async def run_memory_recall_twice():
+            first = await plugin._sylanne_memory_recall_summary_for_request(
+                fake_request(session_id="s-vector-query-cache", prompt="needle-query"),
+                session_key="s-vector-query-cache",
+                current_user_text="needle-query",
+            )
+            second = await plugin._sylanne_memory_recall_summary_for_request(
+                fake_request(session_id="s-vector-query-cache", prompt="needle-query"),
+                session_key="s-vector-query-cache",
+                current_user_text="needle-query",
+            )
+            return first, second
+
+        first_summary, second_summary = asyncio.run(run_memory_recall_twice())
+
+        self.assertIn("alpha beta gamma", first_summary)
+        self.assertIn("alpha beta gamma", second_summary)
+        self.assertEqual(len(provider.calls), 1)
+
     def test_sylanne_memory_observe_defers_fragmented_user_turn_until_idle_flush(self):
         from memory_engine import SylanneMemoryState
 

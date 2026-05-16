@@ -158,6 +158,7 @@ function assertZipLooksUploadable(zipPath, expectedPlugin, options = {}) {
     `${expectedPlugin}/docs/assets/lifecycle_model_fit.svg`,
     `${expectedPlugin}/docs/assets/lifecycle_model_fit_summary.csv`,
     `${expectedPlugin}/docs/assets/lifecycle_model_fit_table.md`,
+    `${expectedPlugin}/docs/assets/io-saturation-warning.svg`,
     `${expectedPlugin}/docs/assets/runtime_overview.svg`,
     `${expectedPlugin}/docs/assets/sylanne-mascot.gif`,
     `${expectedPlugin}/docs/assets/sylanne-mascot-card.svg`,

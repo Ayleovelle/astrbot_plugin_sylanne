@@ -404,6 +404,8 @@ SYLANNE_MEMORY_RECALL_INJECTION_MAX_CHARS = 520
 SYLANNE_MEMORY_RECALL_QUERY_MAX_CHARS = 900
 SYLANNE_MEMORY_RECALL_MAX_ITEMS = 3
 SYLANNE_MEMORY_RECALL_WORKSET_LIMIT = 3
+SYLANNE_MEMORY_QUERY_EMBEDDING_CACHE_TTL_SECONDS = 600.0
+SYLANNE_MEMORY_QUERY_EMBEDDING_CACHE_LIMIT = 96
 INTERRUPTED_REPLY_BREAKPOINT_LIMIT = 4
 INTERRUPTED_REPLY_INJECTION_MAX_ITEMS = 1
 INTERRUPTED_REPLY_INJECTION_MAX_CHARS = 720
@@ -636,7 +638,7 @@ def get_emotional_state_plugin(context: Context) -> Any | None:
     PLUGIN_NAME,
     "Aylovelle.S.S",
     "Soulful Yearning Lifelike AstrBot Neural Narrative Engine：维护情绪、人格、记忆、氛围和表达节奏的 Sylanne",
-    "2.5.5",
+    "2.5.6",
     "",
 )
 class EmotionalStatePlugin(Star):
@@ -687,6 +689,8 @@ class EmotionalStatePlugin(Star):
         self._group_atmosphere_memory_cache: dict[str, GroupAtmosphereState] = {}
         self._sylanne_memory_cache: dict[str, SylanneMemoryState] = {}
         self._sylanne_memory_recall_worksets: dict[str, deque[MemoryRecallItem]] = {}
+        self._sylanne_memory_query_embedding_cache: dict[str, tuple[float, list[float]]] = {}
+        self._sylanne_memory_record_embedding_last_at: dict[str, float] = {}
         self._sylanne_memory_pending_observations: dict[str, deque[dict[str, Any]]] = {}
         self._sylanne_memory_idle_tasks: dict[str, asyncio.Task[Any]] = {}
         self._sylanne_memory_idle_generation: dict[str, int] = {}
@@ -724,6 +728,7 @@ class EmotionalStatePlugin(Star):
         self._background_post_dead_letters: dict[str, deque[_BackgroundPostJob]] = {}
         self._background_post_recovered_sessions: set[str] = set()
         self._background_post_checkpoint_tasks: set[asyncio.Task[Any]] = set()
+        self._background_post_checkpoint_session_tasks: dict[str, asyncio.Task[Any]] = {}
         self._background_post_checkpoint_generation: dict[str, int] = {}
         self._background_post_checkpoint_locks: dict[str, asyncio.Lock] = {}
         self._background_post_worker_state: dict[str, dict[str, Any]] = {}
@@ -776,6 +781,8 @@ class EmotionalStatePlugin(Star):
             self._background_post_checkpoint_generation.clear()
         if hasattr(self, "_background_post_checkpoint_locks"):
             self._background_post_checkpoint_locks.clear()
+        if hasattr(self, "_background_post_checkpoint_session_tasks"):
+            self._background_post_checkpoint_session_tasks.clear()
         scheduler_task = getattr(self, "_proactive_scheduler_task", None)
         if scheduler_task is not None and not scheduler_task.done():
             scheduler_task.cancel()
@@ -817,6 +824,10 @@ class EmotionalStatePlugin(Star):
         self._sylanne_memory_cache.clear()
         if hasattr(self, "_sylanne_memory_recall_worksets"):
             self._sylanne_memory_recall_worksets.clear()
+        if hasattr(self, "_sylanne_memory_query_embedding_cache"):
+            self._sylanne_memory_query_embedding_cache.clear()
+        if hasattr(self, "_sylanne_memory_record_embedding_last_at"):
+            self._sylanne_memory_record_embedding_last_at.clear()
         self._agent_identity_profile_cache.clear()
         self._agent_trail_cache.clear()
         self._agent_turn_sequence.clear()
@@ -2608,6 +2619,7 @@ class EmotionalStatePlugin(Star):
                     self._background_post_active.pop(session_key, None)
                     self._background_post_sequence.pop(session_key, None)
                     self._background_post_skipped.pop(session_key, None)
+                    self._cancel_background_post_checkpoint_task(session_key)
                     await self._save_background_post_checkpoint_serialized(session_key)
                     return
                 await asyncio.sleep(self._background_post_next_sleep(session_key))
@@ -2857,6 +2869,15 @@ class EmotionalStatePlugin(Star):
 
     def _background_post_assessment_enabled(self) -> bool:
         return True
+
+    def _background_post_checkpoint_debounce_seconds(self) -> float:
+        return max(
+            0.0,
+            min(
+                10.0,
+                self._cfg_float("background_post_checkpoint_debounce_seconds", 0.75),
+            ),
+        )
 
     def _dynamic_background_workers_enabled(self) -> bool:
         return self._cfg_bool("enable_dynamic_background_workers", False)
@@ -3452,18 +3473,68 @@ class EmotionalStatePlugin(Star):
         recovered = getattr(self, "_background_post_recovered_sessions", set())
         if session_key not in recovered:
             return
+        key = str(session_key or "global")
+        generations = getattr(self, "_background_post_checkpoint_generation", None)
+        if generations is None:
+            generations = {}
+            self._background_post_checkpoint_generation = generations
+        generations[key] = int(generations.get(key) or 0) + 1
+        session_tasks = getattr(self, "_background_post_checkpoint_session_tasks", None)
+        if not isinstance(session_tasks, dict):
+            session_tasks = {}
+            self._background_post_checkpoint_session_tasks = session_tasks
+        running = session_tasks.get(key)
+        if running is not None and not running.done():
+            return
         try:
             task = asyncio.create_task(
-                self._save_background_post_checkpoint_serialized(session_key),
+                self._save_background_post_checkpoint_debounced(key),
             )
         except RuntimeError:
             return
+        session_tasks[key] = task
         if not hasattr(self, "_background_post_checkpoint_tasks"):
             self._background_post_checkpoint_tasks = set()
         self._background_post_checkpoint_tasks.add(task)
-        task.add_done_callback(
-            lambda done: self._background_post_checkpoint_tasks.discard(done),
-        )
+
+        def _clear_checkpoint_task(done: asyncio.Task[Any]) -> None:
+            self._background_post_checkpoint_tasks.discard(done)
+            if self._background_post_checkpoint_session_tasks.get(key) is done:
+                self._background_post_checkpoint_session_tasks.pop(key, None)
+            try:
+                done.result()
+            except asyncio.CancelledError:
+                return
+            except Exception as exc:
+                logger.debug(f"{PLUGIN_NAME}: background checkpoint task failed: {exc}")
+
+        task.add_done_callback(_clear_checkpoint_task)
+
+    def _cancel_background_post_checkpoint_task(self, session_key: str) -> None:
+        key = str(session_key or "global")
+        session_tasks = getattr(self, "_background_post_checkpoint_session_tasks", None)
+        if not isinstance(session_tasks, dict):
+            return
+        task = session_tasks.pop(key, None)
+        if task is not None and not task.done():
+            task.cancel()
+
+    async def _save_background_post_checkpoint_debounced(
+        self,
+        session_key: str,
+    ) -> None:
+        delay = self._background_post_checkpoint_debounce_seconds()
+        if delay > 0:
+            await asyncio.sleep(delay)
+        generations = getattr(self, "_background_post_checkpoint_generation", {})
+        while True:
+            before_generation = int(generations.get(session_key) or 0)
+            await self._save_background_post_checkpoint_serialized(session_key)
+            if int(generations.get(session_key) or 0) == before_generation:
+                return
+            delay = self._background_post_checkpoint_debounce_seconds()
+            if delay > 0:
+                await asyncio.sleep(delay)
 
     async def _save_all_background_post_checkpoints(self) -> None:
         if not self._cfg_bool("background_post_queue_checkpoint_enabled", True):
@@ -3492,12 +3563,6 @@ class EmotionalStatePlugin(Star):
             await self._save_background_post_checkpoint(session_key)
 
     async def _save_background_post_checkpoint(self, session_key: str) -> None:
-        generations = getattr(self, "_background_post_checkpoint_generation", None)
-        if generations is None:
-            generations = {}
-            self._background_post_checkpoint_generation = generations
-        generation = generations.get(session_key, 0) + 1
-        generations[session_key] = generation
         queue = list(getattr(self, "_background_post_queues", {}).get(session_key) or ())
         active = list(
             getattr(self, "_background_post_active", {})
@@ -3513,10 +3578,8 @@ class EmotionalStatePlugin(Star):
         )
         key = self._background_post_checkpoint_kv_key(session_key)
         if not jobs and not dead_letters:
-            if generations.get(session_key) != generation:
-                return
             try:
-                await self.delete_kv_data(key)
+                await self._kv_delete_data(key, label="background checkpoint delete")
             except Exception as exc:
                 logger.debug(f"{PLUGIN_NAME}: background checkpoint delete failed: {exc}")
             return
@@ -3535,10 +3598,8 @@ class EmotionalStatePlugin(Star):
                 for job in sorted(dead_letters, key=lambda item: item.sequence)
             ],
         }
-        if generations.get(session_key) != generation:
-            return
         try:
-            await self.put_kv_data(key, payload)
+            await self._kv_put_data(key, payload, label="background checkpoint save")
         except Exception as exc:
             logger.debug(f"{PLUGIN_NAME}: background checkpoint save failed: {exc}")
 
@@ -4168,7 +4229,17 @@ class EmotionalStatePlugin(Star):
         query_embedding: list[float] = []
         embedding_provider_id = ""
         embedding_changed = False
-        if clean_query:
+        items = (
+            recall_memory(
+                state,
+                query=clean_query,
+                now=timestamp,
+                limit=min(5, bounded_limit),
+            )
+            if clean_query
+            else []
+        )
+        if clean_query and not items:
             try:
                 query_embedding, embedding_provider_id, embedding_changed = (
                     await self._sylanne_memory_vector_recall_inputs(
@@ -4179,18 +4250,15 @@ class EmotionalStatePlugin(Star):
                 )
             except Exception as exc:
                 logger.debug(f"{PLUGIN_NAME}: Sylanne memory public vector query failed: {exc}")
-        items = (
-            recall_memory(
-                state,
-                query=clean_query,
-                now=timestamp,
-                limit=min(5, bounded_limit),
-                query_embedding=query_embedding,
-                embedding_provider_id=embedding_provider_id,
-            )
-            if clean_query
-            else []
-        )
+            if query_embedding:
+                items = recall_memory(
+                    state,
+                    query=clean_query,
+                    now=timestamp,
+                    limit=min(5, bounded_limit),
+                    query_embedding=query_embedding,
+                    embedding_provider_id=embedding_provider_id,
+                )
         if embedding_changed:
             try:
                 await self._save_sylanne_memory_state(resolved_session_key, state)
@@ -6210,6 +6278,54 @@ class EmotionalStatePlugin(Star):
     def _sylanne_memory_vector_retrieval_enabled(self) -> bool:
         return self._cfg_bool("sylanne_memory_vector_retrieval_enabled", True)
 
+    def _sylanne_memory_record_embedding_min_interval_seconds(self) -> float:
+        return max(
+            0.0,
+            min(
+                3600.0,
+                self._cfg_float("sylanne_memory_record_embedding_min_interval_seconds", 300.0),
+            ),
+        )
+
+    def _sylanne_memory_record_embedding_max_per_flush(self) -> int:
+        return max(
+            0,
+            min(
+                4,
+                self._cfg_int("sylanne_memory_record_embedding_max_per_flush", 1),
+            ),
+        )
+
+    def _sylanne_memory_record_embedding_budget_available(
+        self,
+        session_key: str,
+        *,
+        now: float,
+    ) -> bool:
+        max_records = self._sylanne_memory_record_embedding_max_per_flush()
+        if max_records <= 0:
+            return False
+        key = str(session_key or "global")
+        last_by_session = getattr(self, "_sylanne_memory_record_embedding_last_at", None)
+        if last_by_session is None:
+            last_by_session = {}
+            self._sylanne_memory_record_embedding_last_at = last_by_session
+        last_at = float(last_by_session.get(key) or 0.0)
+        interval = self._sylanne_memory_record_embedding_min_interval_seconds()
+        return interval <= 0.0 or max(0.0, float(now) - last_at) >= interval
+
+    def _mark_sylanne_memory_record_embedding_attempt(
+        self,
+        session_key: str,
+        *,
+        now: float,
+    ) -> None:
+        last_by_session = getattr(self, "_sylanne_memory_record_embedding_last_at", None)
+        if last_by_session is None:
+            last_by_session = {}
+            self._sylanne_memory_record_embedding_last_at = last_by_session
+        last_by_session[str(session_key or "global")] = float(now)
+
     async def _sylanne_memory_embedding_provider(self) -> tuple[Any | None, str]:
         if not self._sylanne_memory_vector_retrieval_enabled():
             return None, ""
@@ -6438,6 +6554,59 @@ class EmotionalStatePlugin(Star):
             logger.debug(f"{PLUGIN_NAME}: Sylanne memory query embedding failed: {exc}")
             return []
 
+    def _sylanne_memory_query_embedding_cache_key(
+        self,
+        provider_id: str,
+        text: str,
+    ) -> str:
+        digest = sha256(str(text or "").encode("utf-8", "ignore")).hexdigest()[:32]
+        return f"{provider_id}:{digest}"
+
+    def _sylanne_memory_vectorized_record_count(
+        self,
+        state: SylanneMemoryState,
+        *,
+        provider_id: str,
+    ) -> int:
+        provider_id = str(provider_id or "").strip()
+        if not provider_id:
+            return 0
+        return sum(
+            1
+            for record in state.records
+            if str(getattr(record, "embedding_provider_id", "") or "") == provider_id
+            and bool(getattr(record, "semantic_embedding", None))
+        )
+
+    async def _sylanne_memory_embedding_for_query_text(
+        self,
+        provider: Any,
+        *,
+        provider_id: str,
+        text: str,
+        now: float,
+    ) -> list[float]:
+        self._ensure_runtime_state_containers()
+        provider_id = str(provider_id or "").strip()
+        if not provider_id:
+            return []
+        key = self._sylanne_memory_query_embedding_cache_key(provider_id, text)
+        cache = self._sylanne_memory_query_embedding_cache
+        cached = cache.get(key)
+        ttl = SYLANNE_MEMORY_QUERY_EMBEDDING_CACHE_TTL_SECONDS
+        if cached is not None:
+            cached_at, vector = cached
+            if max(0.0, float(now) - float(cached_at)) <= ttl:
+                return list(vector)
+            cache.pop(key, None)
+        vector = await self._sylanne_memory_embedding_for_text(provider, text)
+        if vector:
+            cache[key] = (float(now), list(vector))
+            while len(cache) > SYLANNE_MEMORY_QUERY_EMBEDDING_CACHE_LIMIT:
+                first_key = next(iter(cache))
+                cache.pop(first_key, None)
+        return vector
+
     async def _ensure_sylanne_memory_record_embeddings(
         self,
         state: SylanneMemoryState,
@@ -6493,17 +6662,31 @@ class EmotionalStatePlugin(Star):
         *,
         query: str,
         now: float,
+        allow_record_backfill: bool = False,
     ) -> tuple[list[float], str, bool]:
         provider, provider_id = await self._sylanne_memory_embedding_provider()
         if provider is None or not provider_id:
             return [], "", False
-        changed = await self._ensure_sylanne_memory_record_embeddings(
+        changed = False
+        if allow_record_backfill:
+            changed = await self._ensure_sylanne_memory_record_embeddings(
+                state,
+                provider=provider,
+                provider_id=provider_id,
+                now=now,
+                max_records=2,
+            )
+        if self._sylanne_memory_vectorized_record_count(
             state,
-            provider=provider,
             provider_id=provider_id,
+        ) <= 0:
+            return [], provider_id, changed
+        query_embedding = await self._sylanne_memory_embedding_for_query_text(
+            provider,
+            provider_id=provider_id,
+            text=query,
             now=now,
         )
-        query_embedding = await self._sylanne_memory_embedding_for_text(provider, query)
         if not query_embedding:
             return [], "", changed
         return query_embedding, provider_id, changed
@@ -6527,22 +6710,30 @@ class EmotionalStatePlugin(Star):
         try:
             now = self._observed_now()
             state = await self._load_sylanne_memory_state(session_key)
-            query_embedding, embedding_provider_id, embedding_changed = (
-                await self._sylanne_memory_vector_recall_inputs(
-                    state,
-                    query=query,
-                    now=now,
-                )
-            )
             items = recall_memory(
                 state,
                 query=query,
                 now=now,
-                query_embedding=query_embedding,
-                embedding_provider_id=embedding_provider_id,
             )
-            if embedding_changed:
-                await self._save_sylanne_memory_state(session_key, state)
+            embedding_changed = False
+            if not self._filter_mature_sylanne_memory_recall_items(items):
+                query_embedding, embedding_provider_id, embedding_changed = (
+                    await self._sylanne_memory_vector_recall_inputs(
+                        state,
+                        query=query,
+                        now=now,
+                    )
+                )
+                if query_embedding:
+                    items = recall_memory(
+                        state,
+                        query=query,
+                        now=now,
+                        query_embedding=query_embedding,
+                        embedding_provider_id=embedding_provider_id,
+                    )
+                if embedding_changed:
+                    await self._save_sylanne_memory_state(session_key, state)
         except Exception as exc:
             logger.debug(f"{PLUGIN_NAME}: Sylanne memory proactive recall failed: {exc}")
             return ""
@@ -6628,22 +6819,30 @@ class EmotionalStatePlugin(Star):
         try:
             now = self._observed_now() if observed_at is None else float(observed_at)
             state = await self._load_sylanne_memory_state(session_key, now=now)
-            query_embedding, embedding_provider_id, embedding_changed = (
-                await self._sylanne_memory_vector_recall_inputs(
-                    state,
-                    query=query,
-                    now=now,
-                )
-            )
             items = recall_memory(
                 state,
                 query=query,
                 now=now,
-                query_embedding=query_embedding,
-                embedding_provider_id=embedding_provider_id,
             )
-            if embedding_changed:
-                await self._save_sylanne_memory_state(session_key, state)
+            embedding_changed = False
+            if not self._filter_mature_sylanne_memory_recall_items(items):
+                query_embedding, embedding_provider_id, embedding_changed = (
+                    await self._sylanne_memory_vector_recall_inputs(
+                        state,
+                        query=query,
+                        now=now,
+                    )
+                )
+                if query_embedding:
+                    items = recall_memory(
+                        state,
+                        query=query,
+                        now=now,
+                        query_embedding=query_embedding,
+                        embedding_provider_id=embedding_provider_id,
+                    )
+                if embedding_changed:
+                    await self._save_sylanne_memory_state(session_key, state)
         except Exception as exc:
             logger.debug(f"{PLUGIN_NAME}: Sylanne memory request recall failed: {exc}")
             return ""
@@ -11925,9 +12124,10 @@ class EmotionalStatePlugin(Star):
         ):
             return
         try:
-            data = await self.get_kv_data(
+            data = await self._kv_get_data(
                 self._realtime_delivery_context_kv_key(key),
                 None,
+                raise_on_error=True,
             )
         except Exception as exc:
             restored.discard(key)
@@ -11985,7 +12185,7 @@ class EmotionalStatePlugin(Star):
             return
         payload = self._realtime_delivery_context_payload(key)
         try:
-            await self.put_kv_data(self._realtime_delivery_context_kv_key(key), payload)
+            await self._kv_put_data(self._realtime_delivery_context_kv_key(key), payload)
             dirty.discard(key)
         except Exception as exc:
             logger.debug(f"{PLUGIN_NAME}: realtime delivery context KV write failed: {exc}")
@@ -14516,7 +14716,7 @@ class EmotionalStatePlugin(Star):
             return state
         kv_key = self._kv_key(session_key)
         try:
-            data = await self.get_kv_data(kv_key, None)
+            data = await self._kv_get_data(kv_key, None)
         except Exception as exc:
             logger.debug(f"{PLUGIN_NAME}: KV 读取失败，使用内存缓存: {exc}")
             data = None
@@ -14539,14 +14739,18 @@ class EmotionalStatePlugin(Star):
     async def _save_state(self, session_key: str, state: EmotionState) -> None:
         self._memory_cache[session_key] = state
         try:
-            await self.put_kv_data(self._kv_key(session_key), state.to_dict())
+            await self._kv_put_data(
+                self._kv_key(session_key),
+                state.to_dict(),
+                label="emotion state KV write",
+            )
         except Exception as exc:
             logger.debug(f"{PLUGIN_NAME}: KV 写入失败，仅保留内存状态: {exc}")
 
     async def _delete_state(self, session_key: str) -> None:
         self._memory_cache.pop(session_key, None)
         try:
-            await self.delete_kv_data(self._kv_key(session_key))
+            await self._kv_delete_data(self._kv_key(session_key))
         except Exception as exc:
             logger.debug(f"{PLUGIN_NAME}: KV 删除失败: {exc}")
 
@@ -14571,7 +14775,7 @@ class EmotionalStatePlugin(Star):
             self._psychological_memory_cache[session_key] = state
             return state
         try:
-            data = await self.get_kv_data(self._psychological_kv_key(session_key), None)
+            data = await self._kv_get_data(self._psychological_kv_key(session_key), None)
         except Exception as exc:
             logger.debug(f"{PLUGIN_NAME}: 心理筛查 KV 读取失败，使用空状态: {exc}")
             data = None
@@ -14594,14 +14798,14 @@ class EmotionalStatePlugin(Star):
     ) -> None:
         self._psychological_memory_cache[session_key] = state
         try:
-            await self.put_kv_data(self._psychological_kv_key(session_key), state.to_dict())
+            await self._kv_put_data(self._psychological_kv_key(session_key), state.to_dict())
         except Exception as exc:
             logger.debug(f"{PLUGIN_NAME}: 心理筛查 KV 写入失败，仅保留内存状态: {exc}")
 
     async def _delete_psychological_state(self, session_key: str) -> None:
         self._psychological_memory_cache.pop(session_key, None)
         try:
-            await self.delete_kv_data(self._psychological_kv_key(session_key))
+            await self._kv_delete_data(self._psychological_kv_key(session_key))
         except Exception as exc:
             logger.debug(f"{PLUGIN_NAME}: 心理筛查 KV 删除失败: {exc}")
 
@@ -14627,7 +14831,7 @@ class EmotionalStatePlugin(Star):
             self._humanlike_memory_cache[session_key] = state
             return state
         try:
-            data = await self.get_kv_data(self._humanlike_kv_key(session_key), None)
+            data = await self._kv_get_data(self._humanlike_kv_key(session_key), None)
         except Exception as exc:
             logger.debug(f"{PLUGIN_NAME}: humanlike KV read failed, using empty state: {exc}")
             data = None
@@ -14653,7 +14857,7 @@ class EmotionalStatePlugin(Star):
         self._ensure_runtime_state_containers()
         self._humanlike_memory_cache[session_key] = state
         try:
-            await self.put_kv_data(self._humanlike_kv_key(session_key), state.to_dict())
+            await self._kv_put_data(self._humanlike_kv_key(session_key), state.to_dict())
         except Exception as exc:
             logger.debug(f"{PLUGIN_NAME}: humanlike KV write failed, keeping memory only: {exc}")
 
@@ -14661,7 +14865,7 @@ class EmotionalStatePlugin(Star):
         self._ensure_runtime_state_containers()
         self._humanlike_memory_cache.pop(session_key, None)
         try:
-            await self.delete_kv_data(self._humanlike_kv_key(session_key))
+            await self._kv_delete_data(self._humanlike_kv_key(session_key))
         except Exception as exc:
             logger.debug(f"{PLUGIN_NAME}: humanlike KV delete failed: {exc}")
 
@@ -14685,7 +14889,7 @@ class EmotionalStatePlugin(Star):
             self._lifelike_learning_memory_cache[session_key] = state
             return state
         try:
-            data = await self.get_kv_data(
+            data = await self._kv_get_data(
                 self._lifelike_learning_kv_key(session_key),
                 None,
             )
@@ -14710,7 +14914,7 @@ class EmotionalStatePlugin(Star):
         self._ensure_runtime_state_containers()
         self._lifelike_learning_memory_cache[session_key] = state
         try:
-            await self.put_kv_data(
+            await self._kv_put_data(
                 self._lifelike_learning_kv_key(session_key),
                 state.to_dict(),
             )
@@ -14721,7 +14925,7 @@ class EmotionalStatePlugin(Star):
         self._ensure_runtime_state_containers()
         self._lifelike_learning_memory_cache.pop(session_key, None)
         try:
-            await self.delete_kv_data(self._lifelike_learning_kv_key(session_key))
+            await self._kv_delete_data(self._lifelike_learning_kv_key(session_key))
         except Exception as exc:
             logger.debug(f"{PLUGIN_NAME}: lifelike learning KV delete failed: {exc}")
 
@@ -14742,7 +14946,7 @@ class EmotionalStatePlugin(Star):
                 now=now,
             )
         try:
-            data = await self.get_kv_data(
+            data = await self._kv_get_data(
                 self._personality_drift_kv_key(session_key),
                 None,
             )
@@ -14820,6 +15024,10 @@ class EmotionalStatePlugin(Star):
             self._group_atmosphere_memory_cache = {}
         if not hasattr(self, "_sylanne_memory_cache"):
             self._sylanne_memory_cache = {}
+        if not hasattr(self, "_sylanne_memory_query_embedding_cache"):
+            self._sylanne_memory_query_embedding_cache = {}
+        if not hasattr(self, "_sylanne_memory_record_embedding_last_at"):
+            self._sylanne_memory_record_embedding_last_at = {}
         if not hasattr(self, "_sylanne_memory_pending_observations"):
             self._sylanne_memory_pending_observations = {}
         if not hasattr(self, "_sylanne_memory_idle_tasks"):
@@ -14835,6 +15043,85 @@ class EmotionalStatePlugin(Star):
         except (TypeError, ValueError):
             return False
         return elapsed <= max(0.0, self._cfg_float("passive_load_fresh_seconds", 1.0))
+
+    async def _await_kv_operation(self, result: Any, *, label: str) -> Any:
+        del label
+        if not inspect.isawaitable(result):
+            return result
+        return await result
+
+    async def _kv_get_data(
+        self,
+        key: str,
+        default: Any = None,
+        *,
+        label: str = "KV read",
+        raise_on_error: bool = False,
+    ) -> Any:
+        getter = getattr(self, "get_kv_data", None)
+        if not callable(getter):
+            return default
+        try:
+            return await self._await_kv_operation(
+                getter(key, default),
+                label=label,
+            )
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            if raise_on_error:
+                raise
+            logger.debug(f"{PLUGIN_NAME}: {label} failed for {key}: {exc}")
+            return default
+
+    async def _kv_put_data(
+        self,
+        key: str,
+        value: Any,
+        *,
+        label: str = "KV write",
+        raise_on_error: bool = False,
+    ) -> bool:
+        putter = getattr(self, "put_kv_data", None)
+        if not callable(putter):
+            return False
+        try:
+            await self._await_kv_operation(
+                putter(key, value),
+                label=label,
+            )
+            return True
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            if raise_on_error:
+                raise
+            logger.debug(f"{PLUGIN_NAME}: {label} failed for {key}: {exc}")
+            return False
+
+    async def _kv_delete_data(
+        self,
+        key: str,
+        *,
+        label: str = "KV delete",
+        raise_on_error: bool = False,
+    ) -> bool:
+        deleter = getattr(self, "delete_kv_data", None)
+        if not callable(deleter):
+            return False
+        try:
+            await self._await_kv_operation(
+                deleter(key),
+                label=label,
+            )
+            return True
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            if raise_on_error:
+                raise
+            logger.debug(f"{PLUGIN_NAME}: {label} failed for {key}: {exc}")
+            return False
 
     def _passive_update_changed(self, updated: Any, previous: Any) -> bool:
         if updated is not previous:
@@ -14867,7 +15154,7 @@ class EmotionalStatePlugin(Star):
         self._ensure_runtime_state_containers()
         self._personality_drift_memory_cache[session_key] = state
         try:
-            await self.put_kv_data(
+            await self._kv_put_data(
                 self._personality_drift_kv_key(session_key),
                 state.to_dict(),
             )
@@ -14878,7 +15165,7 @@ class EmotionalStatePlugin(Star):
         self._ensure_runtime_state_containers()
         self._personality_drift_memory_cache.pop(session_key, None)
         try:
-            await self.delete_kv_data(self._personality_drift_kv_key(session_key))
+            await self._kv_delete_data(self._personality_drift_kv_key(session_key))
         except Exception as exc:
             logger.debug(f"{PLUGIN_NAME}: personality drift KV delete failed: {exc}")
 
@@ -14903,7 +15190,7 @@ class EmotionalStatePlugin(Star):
             self._moral_repair_memory_cache[session_key] = state
             return state
         try:
-            data = await self.get_kv_data(self._moral_repair_kv_key(session_key), None)
+            data = await self._kv_get_data(self._moral_repair_kv_key(session_key), None)
         except Exception as exc:
             logger.debug(f"{PLUGIN_NAME}: moral repair KV read failed, using empty state: {exc}")
             data = None
@@ -14928,14 +15215,14 @@ class EmotionalStatePlugin(Star):
     ) -> None:
         self._moral_repair_memory_cache[session_key] = state
         try:
-            await self.put_kv_data(self._moral_repair_kv_key(session_key), state.to_dict())
+            await self._kv_put_data(self._moral_repair_kv_key(session_key), state.to_dict())
         except Exception as exc:
             logger.debug(f"{PLUGIN_NAME}: moral repair KV write failed, keeping memory only: {exc}")
 
     async def _delete_moral_repair_state(self, session_key: str) -> None:
         self._moral_repair_memory_cache.pop(session_key, None)
         try:
-            await self.delete_kv_data(self._moral_repair_kv_key(session_key))
+            await self._kv_delete_data(self._moral_repair_kv_key(session_key))
         except Exception as exc:
             logger.debug(f"{PLUGIN_NAME}: moral repair KV delete failed: {exc}")
 
@@ -14960,7 +15247,7 @@ class EmotionalStatePlugin(Star):
             self._fallibility_memory_cache[session_key] = state
             return state
         try:
-            data = await self.get_kv_data(self._fallibility_kv_key(session_key), None)
+            data = await self._kv_get_data(self._fallibility_kv_key(session_key), None)
         except Exception as exc:
             logger.debug(f"{PLUGIN_NAME}: fallibility KV read failed, using empty state: {exc}")
             data = None
@@ -14985,14 +15272,14 @@ class EmotionalStatePlugin(Star):
     ) -> None:
         self._fallibility_memory_cache[session_key] = state
         try:
-            await self.put_kv_data(self._fallibility_kv_key(session_key), state.to_dict())
+            await self._kv_put_data(self._fallibility_kv_key(session_key), state.to_dict())
         except Exception as exc:
             logger.debug(f"{PLUGIN_NAME}: fallibility KV write failed, keeping memory only: {exc}")
 
     async def _delete_fallibility_state(self, session_key: str) -> None:
         self._fallibility_memory_cache.pop(session_key, None)
         try:
-            await self.delete_kv_data(self._fallibility_kv_key(session_key))
+            await self._kv_delete_data(self._fallibility_kv_key(session_key))
         except Exception as exc:
             logger.debug(f"{PLUGIN_NAME}: fallibility KV delete failed: {exc}")
 
@@ -15017,7 +15304,7 @@ class EmotionalStatePlugin(Star):
             self._group_atmosphere_memory_cache[session_key] = state
             return state
         try:
-            data = await self.get_kv_data(
+            data = await self._kv_get_data(
                 self._group_atmosphere_kv_key(session_key),
                 None,
             )
@@ -15045,7 +15332,7 @@ class EmotionalStatePlugin(Star):
     ) -> None:
         self._group_atmosphere_memory_cache[session_key] = state
         try:
-            await self.put_kv_data(
+            await self._kv_put_data(
                 self._group_atmosphere_kv_key(session_key),
                 state.to_dict(),
             )
@@ -15055,7 +15342,7 @@ class EmotionalStatePlugin(Star):
     async def _delete_group_atmosphere_state(self, session_key: str) -> None:
         self._group_atmosphere_memory_cache.pop(session_key, None)
         try:
-            await self.delete_kv_data(self._group_atmosphere_kv_key(session_key))
+            await self._kv_delete_data(self._group_atmosphere_kv_key(session_key))
         except Exception as exc:
             logger.debug(f"{PLUGIN_NAME}: group atmosphere KV delete failed: {exc}")
 
@@ -15064,6 +15351,7 @@ class EmotionalStatePlugin(Star):
         session_key: str,
         *,
         now: float | None = None,
+        save_decay: bool = True,
     ) -> SylanneMemoryState:
         observed_now = self._observed_now() if now is None else float(now)
         self._ensure_runtime_state_containers()
@@ -15072,11 +15360,14 @@ class EmotionalStatePlugin(Star):
             before = state.to_dict()
             decayed_state = apply_memory_time_decay(state, now=observed_now)
             if decayed_state.to_dict() != before:
-                await self._save_sylanne_memory_state(session_key, decayed_state)
+                if save_decay:
+                    await self._save_sylanne_memory_state(session_key, decayed_state)
+                else:
+                    self._sylanne_memory_cache[session_key] = decayed_state
                 return decayed_state
             return state
         try:
-            data = await self.get_kv_data(
+            data = await self._kv_get_data(
                 self._sylanne_memory_kv_key(session_key),
                 None,
             )
@@ -15087,7 +15378,7 @@ class EmotionalStatePlugin(Star):
         before = state.to_dict()
         state = apply_memory_time_decay(state, now=observed_now)
         self._sylanne_memory_cache[session_key] = state
-        if data is not None and state.to_dict() != before:
+        if save_decay and data is not None and state.to_dict() != before:
             await self._save_sylanne_memory_state(session_key, state)
         return state
 
@@ -15099,7 +15390,7 @@ class EmotionalStatePlugin(Star):
         self._ensure_runtime_state_containers()
         self._sylanne_memory_cache[session_key] = state
         try:
-            await self.put_kv_data(
+            await self._kv_put_data(
                 self._sylanne_memory_kv_key(session_key),
                 state.to_dict(),
             )
@@ -15110,7 +15401,7 @@ class EmotionalStatePlugin(Star):
         self._ensure_runtime_state_containers()
         self._sylanne_memory_cache.pop(session_key, None)
         try:
-            await self.delete_kv_data(self._sylanne_memory_kv_key(session_key))
+            await self._kv_delete_data(self._sylanne_memory_kv_key(session_key))
         except Exception as exc:
             logger.debug(f"{PLUGIN_NAME}: Sylanne memory KV delete failed: {exc}")
 
@@ -15301,8 +15592,10 @@ class EmotionalStatePlugin(Star):
         if not pending:
             self._sylanne_memory_idle_generation.pop(key, None)
             return
-        for observation in self._coalesce_sylanne_memory_observations(pending):
-            await self._commit_sylanne_memory_observation(key, observation)
+        await self._commit_sylanne_memory_observations_batch(
+            key,
+            self._coalesce_sylanne_memory_observations(pending),
+        )
         self._sylanne_memory_idle_generation.pop(key, None)
 
     def _coalesce_sylanne_memory_observations(
@@ -15365,33 +15658,76 @@ class EmotionalStatePlugin(Star):
         session_key: str,
         observation: dict[str, Any],
     ) -> None:
-        text = str(observation.get("text") or "").strip()
-        if not text:
+        await self._commit_sylanne_memory_observations_batch(
+            session_key,
+            [observation],
+        )
+
+    async def _commit_sylanne_memory_observations_batch(
+        self,
+        session_key: str,
+        observations: list[dict[str, Any]],
+    ) -> None:
+        cleaned = [dict(item) for item in observations if isinstance(item, dict)]
+        if not cleaned:
             return
-        now = self._as_float_value(observation.get("observed_at"), self._observed_now())
-        try:
-            state = await self._load_sylanne_memory_state(session_key, now=now)
-            state = observe_memory_event(
-                state,
-                text=text,
-                session_key=session_key,
-                speaker_id=str(observation.get("speaker_id") or ""),
-                emotion_snapshot=observation.get("emotion_snapshot"),
-                personality_drift_snapshot=observation.get("personality_drift_snapshot"),
-                lifelike_snapshot=observation.get("lifelike_snapshot"),
-                group_atmosphere_snapshot=observation.get("group_atmosphere_snapshot"),
-                now=now,
-                event_time=observation.get("event_time"),
+        latest_now = self._observed_now()
+        for observation in cleaned:
+            latest_now = max(
+                latest_now,
+                self._as_float_value(observation.get("observed_at"), latest_now),
             )
-            provider, provider_id = await self._sylanne_memory_embedding_provider()
-            if provider is not None and provider_id:
-                await self._ensure_sylanne_memory_record_embeddings(
-                    state,
-                    provider=provider,
-                    provider_id=provider_id,
-                    now=now,
-                    max_records=3,
+        changed = False
+        state: SylanneMemoryState | None = None
+        try:
+            state = await self._load_sylanne_memory_state(
+                session_key,
+                now=latest_now,
+                save_decay=False,
+            )
+            for observation in cleaned:
+                text = str(observation.get("text") or "").strip()
+                if not text:
+                    continue
+                now = self._as_float_value(
+                    observation.get("observed_at"),
+                    latest_now,
                 )
+                state = observe_memory_event(
+                    state,
+                    text=text,
+                    session_key=session_key,
+                    speaker_id=str(observation.get("speaker_id") or ""),
+                    emotion_snapshot=observation.get("emotion_snapshot"),
+                    personality_drift_snapshot=observation.get("personality_drift_snapshot"),
+                    lifelike_snapshot=observation.get("lifelike_snapshot"),
+                    group_atmosphere_snapshot=observation.get("group_atmosphere_snapshot"),
+                    now=now,
+                    event_time=observation.get("event_time"),
+                )
+                changed = True
+            if not changed:
+                return
+            if self._sylanne_memory_record_embedding_budget_available(
+                session_key,
+                now=latest_now,
+            ):
+                self._mark_sylanne_memory_record_embedding_attempt(
+                    session_key,
+                    now=latest_now,
+                )
+                provider, provider_id = await self._sylanne_memory_embedding_provider()
+                if provider is not None and provider_id:
+                    await self._ensure_sylanne_memory_record_embeddings(
+                        state,
+                        provider=provider,
+                        provider_id=provider_id,
+                        now=latest_now,
+                        max_records=min(
+                            self._sylanne_memory_record_embedding_max_per_flush(),
+                            len(cleaned),
+                        ),
+                    )
             await self._save_sylanne_memory_state(session_key, state)
         except Exception as exc:
             logger.debug(f"{PLUGIN_NAME}: Sylanne memory observe failed: {exc}")
@@ -18131,7 +18467,7 @@ class EmotionalStatePlugin(Star):
             cache[session_key] = trail
         trail.append(item)
         try:
-            await self.put_kv_data(self._agent_trail_kv_key(session_key), list(trail))
+            await self._kv_put_data(self._agent_trail_kv_key(session_key), list(trail))
         except Exception as exc:
             logger.debug(f"{PLUGIN_NAME}: agent trail KV write failed, keeping memory only: {exc}")
 
@@ -18799,7 +19135,9 @@ class EmotionalStatePlugin(Star):
 
     async def _sticker_candidates(self, session_key: str) -> list[dict[str, Any]]:
         settings = self._sticker_settings()
-        candidates = self._sendable_sticker_candidates(self._local_sticker_index(settings))
+        candidates = self._sendable_sticker_candidates(
+            await self._local_sticker_index(settings),
+        )
         if settings.learned_enabled:
             candidates.extend(
                 self._sendable_sticker_candidates(
@@ -18828,7 +19166,7 @@ class EmotionalStatePlugin(Star):
                     learned_enabled=settings.learned_enabled,
                 )
                 candidates = self._sendable_sticker_candidates(
-                    self._local_sticker_index(auto_settings),
+                    await self._local_sticker_index(auto_settings),
                 )
         return candidates
 
@@ -19044,7 +19382,24 @@ class EmotionalStatePlugin(Star):
             shutil.rmtree(target, ignore_errors=True)
         tmp_target.replace(target)
 
-    def _local_sticker_index(self, settings: StickerSettings) -> list[dict[str, Any]]:
+    def _sticker_index_root_signature(self, settings: StickerSettings) -> tuple[Any, ...]:
+        root_text = str(settings.local_root or "").strip()
+        if not root_text:
+            return ("empty",)
+        try:
+            root = Path(root_text).expanduser()
+            stat = root.stat()
+        except OSError:
+            return ("missing", root_text)
+        if not root.is_dir():
+            return ("not_dir", root_text, getattr(stat, "st_mtime_ns", 0), stat.st_size)
+        try:
+            resolved = str(root.resolve())
+        except OSError:
+            resolved = str(root)
+        return ("dir", resolved, getattr(stat, "st_mtime_ns", 0), stat.st_size)
+
+    async def _local_sticker_index(self, settings: StickerSettings) -> list[dict[str, Any]]:
         cache = getattr(self, "_sticker_index_cache", None)
         if cache is None:
             cache = {}
@@ -19062,14 +19417,20 @@ class EmotionalStatePlugin(Star):
         )
         now = self._observed_now()
         ttl = max(0.0, self._cfg_float("sticker_index_cache_ttl_seconds", 86400.0))
+        root_signature = self._sticker_index_root_signature(settings)
         cached = cache.get(cache_key)
-        if cached and (ttl <= 0 or now - float(cached.get("indexed_at", 0.0)) <= ttl):
+        if (
+            cached
+            and (ttl <= 0 or now - float(cached.get("indexed_at", 0.0)) <= ttl)
+            and tuple(cached.get("root_signature") or ()) == root_signature
+        ):
             return list(cached.get("items") or [])
-        items = index_local_stickers(settings)
-        if items or not str(settings.local_root or "").strip():
-            cache[cache_key] = {"indexed_at": now, "items": items}
-        else:
-            cache.pop(cache_key, None)
+        items = await asyncio.to_thread(index_local_stickers, settings)
+        cache[cache_key] = {
+            "indexed_at": now,
+            "items": items,
+            "root_signature": root_signature,
+        }
         return list(items)
 
     async def _load_sticker_memory(self, session_key: str) -> list[dict[str, Any]]:
@@ -19080,7 +19441,7 @@ class EmotionalStatePlugin(Star):
         if session_key in cache:
             return [dict(item) for item in cache[session_key]]
         try:
-            data = await self.get_kv_data(self._sticker_memory_kv_key(session_key), [])
+            data = await self._kv_get_data(self._sticker_memory_kv_key(session_key), [])
         except Exception as exc:
             logger.debug(f"{PLUGIN_NAME}: sticker memory KV read failed: {exc}")
             data = []
@@ -19097,7 +19458,7 @@ class EmotionalStatePlugin(Star):
             self._sticker_memory_cache = {}
         self._sticker_memory_cache[session_key] = [dict(item) for item in items]
         try:
-            await self.put_kv_data(self._sticker_memory_kv_key(session_key), items)
+            await self._kv_put_data(self._sticker_memory_kv_key(session_key), items)
         except Exception as exc:
             logger.debug(f"{PLUGIN_NAME}: sticker memory KV write failed: {exc}")
 
@@ -19108,14 +19469,30 @@ class EmotionalStatePlugin(Star):
         *,
         session_key: str,
     ) -> None:
+        if not self._sticker_learning_enabled():
+            return
+        resolved_session = self._resolve_public_session_key(
+            event,
+            session_key=session_key,
+        )
+        current = await self._load_sticker_memory(resolved_session)
+        updated = current
+        changed = False
         for sticker in stickers[:5]:
-            await self.observe_sticker_usage(
-                event,
-                sticker,
-                session_key=session_key,
+            item = build_sticker_memory_item(
+                dict(sticker or {}),
+                session_key=resolved_session,
+                now=self._observed_now(),
                 source="astrbot_event",
-                commit=True,
             )
+            updated = merge_sticker_memory(
+                updated,
+                item,
+                limit=max(1, self._cfg_int("sticker_learned_limit", 200)),
+            )
+            changed = True
+        if changed:
+            await self._save_sticker_memory(resolved_session, updated)
 
     def _extract_sticker_observations_from_event(
         self,

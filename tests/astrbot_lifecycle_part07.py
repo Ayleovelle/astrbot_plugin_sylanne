@@ -622,6 +622,10 @@ class AstrBotLifecyclePart07(AstrBotLifecycleTests):
                     updated_at=10.0,
                     depth=0.52,
                     confidence=0.64,
+                    semantic_embedding=[1.0, 0.0, 0.0],
+                    embedding_provider_id="embed-a",
+                    embedding_updated_at=10.0,
+                    embedding_text_hash="dense-hit",
                 ),
                 MemoryRecord(
                     memory_id="dense-miss",
@@ -632,6 +636,10 @@ class AstrBotLifecyclePart07(AstrBotLifecycleTests):
                     updated_at=11.0,
                     depth=0.92,
                     confidence=0.90,
+                    semantic_embedding=[0.0, 1.0, 0.0],
+                    embedding_provider_id="embed-a",
+                    embedding_updated_at=11.0,
+                    embedding_text_hash="dense-miss",
                 ),
             ],
         )

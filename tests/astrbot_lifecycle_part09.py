@@ -2,6 +2,7 @@ import asyncio
 import collections
 import tempfile
 import sys
+import threading
 import time
 import types
 from pathlib import Path
@@ -395,6 +396,73 @@ class AstrBotLifecyclePart09(AstrBotLifecycleTests):
         self.assertEqual(first, [])
         self.assertEqual(len(second), 1)
         self.assertEqual(second[0]["name"], "late")
+
+
+    def test_empty_sticker_index_uses_cache_instead_of_rescanning_same_directory(self):
+        import main
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            plugin = new_plugin(
+                {
+                    "enable_sticker_reaction": True,
+                    "sticker_local_root": str(root),
+                    "sticker_learn_user_images": False,
+                    "sticker_index_cache_ttl_seconds": 86400.0,
+                },
+            )
+            original = main.index_local_stickers
+            calls = []
+
+            def fake_index(settings):
+                calls.append(settings.local_root)
+                return []
+
+            main.index_local_stickers = fake_index
+            try:
+                first = asyncio.run(plugin._sticker_candidates("s-empty-cache-repeat"))
+                second = asyncio.run(plugin._sticker_candidates("s-empty-cache-repeat"))
+            finally:
+                main.index_local_stickers = original
+
+        self.assertEqual(first, [])
+        self.assertEqual(second, [])
+        self.assertEqual(calls, [str(root)])
+
+
+    def test_sticker_index_scan_runs_off_event_loop_thread(self):
+        import main
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            plugin = new_plugin(
+                {
+                    "enable_sticker_reaction": True,
+                    "sticker_local_root": str(root),
+                    "sticker_learn_user_images": False,
+                },
+            )
+            original = main.index_local_stickers
+            scan_threads = []
+
+            def fake_index(settings):
+                scan_threads.append(threading.get_ident())
+                return []
+
+            async def collect():
+                loop_thread = threading.get_ident()
+                candidates = await plugin._sticker_candidates("s-threaded-index")
+                return loop_thread, candidates
+
+            main.index_local_stickers = fake_index
+            try:
+                loop_thread, candidates = asyncio.run(collect())
+            finally:
+                main.index_local_stickers = original
+
+        self.assertEqual(candidates, [])
+        self.assertEqual(len(scan_threads), 1)
+        self.assertNotEqual(scan_threads[0], loop_thread)
 
 
     def test_sticker_auto_download_reuses_completed_repo_even_when_pack_filter_misses(self):

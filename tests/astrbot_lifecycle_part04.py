@@ -189,6 +189,84 @@ class AstrBotLifecyclePart04(AstrBotLifecycleTests):
         self.assertNotIn("request_context_text", checkpoint["dead_letters"][0])
 
 
+    def test_background_post_checkpoint_schedules_coalesce_burst_writes(self):
+        plugin = new_plugin(
+            {
+                "background_post_queue_checkpoint_enabled": True,
+                "background_post_checkpoint_debounce_seconds": 0.01,
+            },
+        )
+        put_calls = []
+        event = FakeEvent("s-checkpoint-coalesce", message="user", sender_id="u1")
+        identity = plugin._agent_identity(event)
+        from main import _BackgroundPostJob
+
+        plugin._background_post_recovered_sessions.add("s-checkpoint-coalesce")
+        plugin._background_post_queues["s-checkpoint-coalesce"] = collections.deque(
+            [
+                _BackgroundPostJob(
+                    event,
+                    identity,
+                    "reply",
+                    "ctx",
+                    1,
+                    100.0,
+                ),
+            ],
+        )
+        plugin._background_post_sequence["s-checkpoint-coalesce"] = 1
+        plugin._background_post_latest_enqueued["s-checkpoint-coalesce"] = 1
+
+        async def fake_put_kv(self, key, value):
+            put_calls.append((key, value))
+
+        bind_async(plugin, "put_kv_data", fake_put_kv)
+
+        async def run_burst():
+            for _ in range(8):
+                plugin._schedule_background_post_checkpoint("s-checkpoint-coalesce")
+            await asyncio.wait_for(
+                asyncio.gather(
+                    *list(plugin._background_post_checkpoint_tasks),
+                    return_exceptions=False,
+                ),
+                timeout=1.0,
+            )
+
+        asyncio.run(run_burst())
+
+        self.assertEqual(len(put_calls), 1)
+        self.assertEqual(
+            put_calls[0][0],
+            plugin._background_post_checkpoint_kv_key("s-checkpoint-coalesce"),
+        )
+
+
+    def test_cached_emotion_state_does_not_read_kv_again_in_same_hot_window(self):
+        from emotion_engine import EmotionState
+
+        plugin = new_plugin({"passive_load_fresh_seconds": 10.0})
+        cached_state = EmotionState.initial()
+        cached_state.updated_at = 100.0
+        stored = {plugin._kv_key("s-kv-cache"): cached_state.to_dict()}
+        get_calls = []
+
+        async def fake_get_kv(self, key, default=None):
+            get_calls.append(key)
+            return stored.get(key, default)
+
+        bind_async(plugin, "get_kv_data", fake_get_kv)
+
+        async def load_twice():
+            first = await plugin._load_state("s-kv-cache", now=100.0)
+            second = await plugin._load_state("s-kv-cache", now=101.0)
+            return first, second
+
+        first, second = asyncio.run(load_twice())
+        self.assertIs(first, second)
+        self.assertEqual(get_calls, [plugin._kv_key("s-kv-cache")])
+
+
     def test_sylanne_memory_state_uses_dedicated_kv_cache_and_delete(self):
         from memory_engine import MemoryRecord, SylanneMemoryState
 

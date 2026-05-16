@@ -44,6 +44,7 @@ ALLOWED_DOC_ASSETS = {
     Path("docs/assets/lifecycle_model_fit.svg"),
     Path("docs/assets/lifecycle_model_fit_summary.csv"),
     Path("docs/assets/lifecycle_model_fit_table.md"),
+    Path("docs/assets/io-saturation-warning.svg"),
     Path("docs/assets/runtime_overview.svg"),
     Path("docs/assets/sylanne-mascot.gif"),
     Path("docs/assets/sylanne-mascot-card.svg"),

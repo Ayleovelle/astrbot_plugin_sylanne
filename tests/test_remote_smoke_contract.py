@@ -261,7 +261,7 @@ class RemoteSmokeContractTests(unittest.TestCase):
         )
 
         self.assertIn(f"![版本 {version}]", readme)
-        self.assertIn(f"https://img.shields.io/badge/version-{version}-blue", readme)
+        self.assertIn(f"https://img.shields.io/badge/version-{version}-red", readme)
         self.assertIn(f"![AstrBot {astrbot_version}]", readme)
         self.assertIn(
             f"https://img.shields.io/badge/AstrBot-{encoded_astrbot}-green",
@@ -407,6 +407,7 @@ class RemoteSmokeContractTests(unittest.TestCase):
             "LICENSE",
             "requirements.txt",
             "_conf_schema.json",
+            "docs/assets/io-saturation-warning.svg",
             "docs/assets/runtime_overview.svg",
             "docs/assets/sylanne-mascot.gif",
             "docs/assets/sylanne-mascot-card.svg",

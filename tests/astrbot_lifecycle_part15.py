@@ -259,6 +259,168 @@ class AstrBotLifecyclePart15(AstrBotLifecycleTests):
         self.assertNotIn("binary", saved)
 
 
+    def test_observe_stickers_background_batches_single_memory_write(self):
+        stored = {}
+        put_calls = []
+
+        async def fake_get(self, key, default=None):
+            return stored.get(key, default)
+
+        async def fake_put(self, key, value):
+            put_calls.append((key, value))
+            stored[key] = value
+
+        plugin = new_plugin({"sticker_learn_user_images": True})
+        bind_async(plugin, "get_kv_data", fake_get)
+        bind_async(plugin, "put_kv_data", fake_put)
+
+        asyncio.run(
+            plugin._observe_stickers_background(
+                FakeEvent("s-sticker-batch"),
+                [
+                    {"url": "https://example.test/a.gif", "name": "a"},
+                    {"url": "https://example.test/b.gif", "name": "b"},
+                    {"url": "https://example.test/c.gif", "name": "c"},
+                ],
+                session_key="s-sticker-batch",
+            ),
+        )
+
+        self.assertEqual(len(put_calls), 1)
+        self.assertEqual(len(next(iter(stored.values()))), 3)
+
+
+    def test_sylanne_memory_idle_flush_batches_one_state_write(self):
+        from memory_engine import SylanneMemoryState
+
+        plugin = new_plugin({"enable_sylanne_memory": True})
+        save_calls = []
+
+        async def fake_load_memory(self, session_key, *, now=None, save_decay=True):
+            return SylanneMemoryState.initial(now=now or 100.0)
+
+        async def fake_save_memory(self, session_key, state):
+            save_calls.append((session_key, state.to_dict()))
+            self._sylanne_memory_cache[session_key] = state
+
+        async def no_embedding_provider(self):
+            return None, ""
+
+        bind_async(plugin, "_load_sylanne_memory_state", fake_load_memory)
+        bind_async(plugin, "_save_sylanne_memory_state", fake_save_memory)
+        bind_async(plugin, "_sylanne_memory_embedding_provider", no_embedding_provider)
+        plugin._ensure_runtime_state_containers()
+        plugin._sylanne_memory_pending_observations["s-memory-batch"] = collections.deque(
+            [
+                {
+                    "text": "user says the thesis format is still broken",
+                    "speaker_id": "u1",
+                    "observed_at": 100.0,
+                    "event_time": {},
+                },
+                {
+                    "text": "assistant answered with a checklist",
+                    "speaker_id": "assistant",
+                    "observed_at": 101.0,
+                    "event_time": {},
+                },
+            ],
+        )
+        plugin._sylanne_memory_idle_generation["s-memory-batch"] = 1
+
+        asyncio.run(
+            plugin._flush_sylanne_memory_pending_observations(
+                "s-memory-batch",
+                generation=1,
+                force=True,
+            ),
+        )
+
+        self.assertEqual(len(save_calls), 1)
+        self.assertEqual(save_calls[0][0], "s-memory-batch")
+        self.assertEqual(save_calls[0][1]["event_count"], 2)
+
+    def test_sylanne_memory_record_embeddings_are_budgeted_on_idle_commit(self):
+        from memory_engine import SylanneMemoryState
+
+        now_holder = [1000.0]
+        plugin = new_plugin(
+            {
+                "enable_sylanne_memory": True,
+                "sylanne_memory_vector_retrieval_enabled": True,
+                "sylanne_memory_embedding_provider_id": "embed-a",
+                "sylanne_memory_record_embedding_min_interval_seconds": 300.0,
+                "sylanne_memory_record_embedding_max_per_flush": 1,
+            },
+        )
+        plugin._observed_now = types.MethodType(lambda self: now_holder[0], plugin)
+
+        class FakeEmbeddingProvider:
+            provider_config = {"id": "embed-a", "provider_type": "embedding"}
+
+            def __init__(self):
+                self.calls = []
+
+            async def get_embedding(self, text):
+                self.calls.append(text)
+                return [1.0, 0.0, 0.0]
+
+        provider = FakeEmbeddingProvider()
+
+        class FakeContext:
+            def get_provider_by_id(self, provider_id):
+                return provider if provider_id == "embed-a" else None
+
+        plugin.context = FakeContext()
+
+        async def fake_load_memory(self, session_key, *, now=None, save_decay=True):
+            return self._sylanne_memory_cache.get(
+                session_key,
+                SylanneMemoryState.initial(now=now or now_holder[0]),
+            )
+
+        async def fake_save_memory(self, session_key, state):
+            self._sylanne_memory_cache[session_key] = state
+
+        bind_async(plugin, "_load_sylanne_memory_state", fake_load_memory)
+        bind_async(plugin, "_save_sylanne_memory_state", fake_save_memory)
+
+        async def commit_twice():
+            await plugin._commit_sylanne_memory_observations_batch(
+                "s-embedding-budget",
+                [
+                    {
+                        "text": "first memory that may be vectorized",
+                        "speaker_id": "u1",
+                        "observed_at": now_holder[0],
+                    },
+                    {
+                        "text": "second memory should wait for later indexing",
+                        "speaker_id": "assistant",
+                        "observed_at": now_holder[0] + 1.0,
+                    },
+                ],
+            )
+            now_holder[0] += 10.0
+            await plugin._commit_sylanne_memory_observations_batch(
+                "s-embedding-budget",
+                [
+                    {
+                        "text": "third memory is inside the embedding cooldown",
+                        "speaker_id": "u2",
+                        "observed_at": now_holder[0],
+                    },
+                ],
+            )
+
+        asyncio.run(commit_twice())
+
+        state = plugin._sylanne_memory_cache["s-embedding-budget"]
+        vectorized = [record for record in state.records if record.semantic_embedding]
+        self.assertEqual(len(provider.calls), 1)
+        self.assertEqual(len(vectorized), 1)
+
+
     def test_current_event_time_is_injected_before_memory_recall_without_state_injection(self):
         plugin = new_plugin(
             {

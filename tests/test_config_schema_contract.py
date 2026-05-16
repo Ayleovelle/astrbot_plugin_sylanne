@@ -11,6 +11,8 @@ SYLANNE_MEMORY_OPERATIONAL_SCHEMA_KEYS = {
     "enable_sylanne_memory",
     "sylanne_memory_vector_retrieval_enabled",
     "sylanne_memory_embedding_provider_id",
+    "sylanne_memory_record_embedding_min_interval_seconds",
+    "sylanne_memory_record_embedding_max_per_flush",
     "sylanne_memory_idle_commit_delay_seconds",
     "sylanne_memory_debug_view_enabled",
     "allow_sylanne_memory_reset_backdoor",
@@ -223,6 +225,7 @@ class ConfigSchemaContractTests(unittest.TestCase):
             "background_post_queue_limit": ("int", 0),
             "enable_dynamic_background_workers": ("bool", False),
             "background_post_queue_checkpoint_enabled": ("bool", True),
+            "background_post_checkpoint_debounce_seconds": ("float", 0.75),
             "background_post_job_lease_seconds": ("float", 120.0),
             "background_post_job_timeout_seconds": ("float", 0.0),
             "background_post_retry_max_attempts": ("int", 3),
@@ -324,6 +327,14 @@ class ConfigSchemaContractTests(unittest.TestCase):
         self.assertEqual(
             cfg["sylanne_memory_embedding_provider_id"]["default"],
             "",
+        )
+        self.assertEqual(
+            cfg["sylanne_memory_record_embedding_min_interval_seconds"]["default"],
+            300.0,
+        )
+        self.assertEqual(
+            cfg["sylanne_memory_record_embedding_max_per_flush"]["default"],
+            1,
         )
         self.assertEqual(
             cfg["sylanne_memory_debug_view_enabled"]["default"],

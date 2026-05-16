@@ -250,6 +250,12 @@
     "default": true,
     "hint": "把未提交的后台任务写入 KV；插件重启后会尝试恢复队列，避免状态轨迹断裂。"
   },
+  "background_post_checkpoint_debounce_seconds": {
+    "description": "后台检查点合并写入延迟秒数",
+    "type": "float",
+    "default": 0.75,
+    "hint": "合并同一会话短时间内的多次队列变更，降低 AstrBot KV 写入频率，尤其避免低配置云盘被高频写入拖死。"
+  },
   "background_post_job_lease_seconds": {
     "description": "后台任务租约秒数",
     "type": "float",
@@ -492,7 +498,7 @@
     "description": "启用 Sylanne 记忆向量检索",
     "type": "bool",
     "default": true,
-    "hint": "默认开启。若 AstrBot 已配置 Embedding 类型模型提供商，记忆会保存语义向量并在召回时结合余弦相似度；提供商不可用时自动退回关键词/关联图检索。"
+    "hint": "默认开启。若 AstrBot 已配置 Embedding 类型模型提供商，记忆会保存语义向量；普通召回先走关键词/关联图，只有无命中且已有向量记录时才调用 query embedding，并会短时缓存同一 query/provider。提供商不可用时自动退回关键词/关联图检索。"
   },
   "sylanne_memory_embedding_provider_id": {
     "description": "Sylanne 记忆 Embedding 提供商（兼容手填）",
@@ -501,6 +507,18 @@
     "_special": "select_provider",
     "provider_type": "embedding",
     "hint": "推荐在插件详情页的『记忆设置』Page 中下拉选择；这里保留手填 ID 作为兼容入口。留空时自动使用 AstrBot 当前可用的第一个 Embedding 提供商。该项只选择模型来源，不开放记忆动力学数值。"
+  },
+  "sylanne_memory_record_embedding_min_interval_seconds": {
+    "description": "Sylanne 记忆记录补向量最小间隔秒数",
+    "type": "float",
+    "default": 300.0,
+    "hint": "控制写入侧为新记忆生成 semantic_embedding 的最低频率。默认同一会话至少间隔 5 分钟，避免密集聊天时持续调用 Embedding Provider。"
+  },
+  "sylanne_memory_record_embedding_max_per_flush": {
+    "description": "Sylanne 记忆单次空闲写入最多补向量记录数",
+    "type": "int",
+    "default": 1,
+    "hint": "控制一次 idle flush 最多为多少条新记忆生成向量；默认 1。设为 0 可保留向量召回但停止写入侧新建向量。"
   },
   "sylanne_memory_debug_view_enabled": {
     "description": "启用 Sylanne 记忆调试视图",

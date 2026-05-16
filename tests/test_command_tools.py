@@ -23,6 +23,7 @@ PLUGIN_DICT_ATTRIBUTES = (
     "_group_atmosphere_memory_cache",
     "_sylanne_memory_cache",
     "_sylanne_memory_recall_worksets",
+    "_sylanne_memory_query_embedding_cache",
     "_agent_identity_profile_cache",
     "_agent_trail_cache",
     "_agent_turn_sequence",
