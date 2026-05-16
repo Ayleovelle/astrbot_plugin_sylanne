@@ -1160,6 +1160,7 @@ def build_memory_prompt_fragment(
     lines = [
         "[sylanne_memory_recall]",
         f"记忆旁注：参考权重≤{reference_weight:.2f}，只辅助指代、偏好和共同经历；当前对话与 AstrBot 原上下文优先，冲突时不得覆盖当前对话。",
+        "时间说明：relative_time 是记忆片段时间，不是用户上次回复时间；不能推断几天没回。",
         f"session_key={_clip(str(session_key or 'global'), 80)}; result_count={min(len(items), display_limit)}; ref_weight={reference_weight:.2f}",
     ]
     for index, item in enumerate(items[:display_limit], 1):

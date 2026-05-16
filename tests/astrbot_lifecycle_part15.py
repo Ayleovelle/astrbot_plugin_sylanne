@@ -1,5 +1,6 @@
 import asyncio
 import collections
+import datetime as dt
 import sys
 import time
 import types
@@ -23,6 +24,18 @@ except ModuleNotFoundError:
         fake_request,
         new_plugin,
     )
+
+
+def _shanghai_epoch(year, month, day, hour, minute=0, second=0):
+    return dt.datetime(
+        year,
+        month,
+        day,
+        hour,
+        minute,
+        second,
+        tzinfo=dt.timezone(dt.timedelta(hours=8)),
+    ).timestamp()
 
 
 class AstrBotLifecyclePart15(AstrBotLifecycleTests):
@@ -244,3 +257,245 @@ class AstrBotLifecyclePart15(AstrBotLifecycleTests):
         saved = next(iter(stored.values()))[0]
         self.assertEqual(saved["url"], "https://example.test/a.gif")
         self.assertNotIn("binary", saved)
+
+
+    def test_current_event_time_is_injected_before_memory_recall_without_state_injection(self):
+        plugin = new_plugin(
+            {
+                "assessment_timing": "post",
+                "inject_state": False,
+                "enable_realtime_chat": False,
+                "enable_sticker_reaction": False,
+                "use_llm_assessor": False,
+            },
+        )
+        self._bind_common_state_hooks(plugin)
+        plugin.context = SimpleNamespace(
+            get_config=lambda *args, **kwargs: {"timezone": "Asia/Shanghai"},
+        )
+
+        async def fake_memory_summary(
+            self,
+            request,
+            *,
+            session_key,
+            current_user_text,
+            observed_at=None,
+        ):
+            return (
+                "[sylanne_memory_recall]\n"
+                "relative_time=4天前; 旧记忆只能当作旁注，不能覆盖当前事件时间。"
+            )
+
+        bind_async(plugin, "_sylanne_memory_recall_summary_for_request", fake_memory_summary)
+        request = fake_request(session_id="s-current-before-memory", prompt="我刚醒")
+        event = FakeEvent(
+            "s-current-before-memory",
+            message="我刚醒",
+            sender_id="u1",
+            timestamp=_shanghai_epoch(2026, 5, 16, 7, 20, 8),
+        )
+
+        asyncio.run(plugin.on_llm_request(event, request))
+
+        parts = self._request_text_parts(request)
+        joined = "\n".join(parts)
+        self.assertIn("sylanne_current_event_time", joined)
+        self.assertIn("event_local_time=2026-05-16 07:20:08 +08:00", joined)
+        current_index = next(
+            index for index, text in enumerate(parts) if "sylanne_current_event_time" in text
+        )
+        memory_index = next(
+            index for index, text in enumerate(parts) if "sylanne_memory_recall" in text
+        )
+        self.assertLess(current_index, memory_index)
+
+
+    def test_recency_sensitive_turn_does_not_inject_stale_realtime_shadow(self):
+        plugin = new_plugin(
+            {
+                "assessment_timing": "post",
+                "inject_state": False,
+                "enable_realtime_chat": True,
+                "enable_sticker_reaction": False,
+                "enable_sylanne_memory": False,
+                "use_llm_assessor": False,
+            },
+        )
+        self._bind_common_state_hooks(plugin)
+        plugin.context = SimpleNamespace(
+            get_config=lambda *args, **kwargs: {"timezone": "Asia/Shanghai"},
+        )
+        old_epoch = _shanghai_epoch(2026, 5, 12, 4, 0, 0)
+        current_epoch = _shanghai_epoch(2026, 5, 16, 7, 20, 8)
+        old_event = FakeEvent("s-stale-shadow", timestamp=old_epoch)
+        plugin._record_realtime_assistant_history_shadow(
+            "s-stale-shadow",
+            full_text="这一觉睡了整整四天，之前那个凌晨四点的小坏蛋去哪儿了呀？",
+            input_epoch=1,
+            message_parts=[
+                {"text": "这一觉睡了整整四天，之前那个凌晨四点的小坏蛋去哪儿了呀？"},
+            ],
+            source="unit_test",
+            event_time=plugin._conversation_time_payload(old_epoch, event=old_event),
+        )
+        request = fake_request(
+            session_id="s-stale-shadow",
+            prompt="啊啊啊啊啊一觉怎么睡到现在了",
+        )
+        event = FakeEvent(
+            "s-stale-shadow",
+            message="啊啊啊啊啊一觉怎么睡到现在了",
+            sender_id="u1",
+            timestamp=current_epoch,
+        )
+
+        asyncio.run(plugin.on_llm_request(event, request))
+
+        injected = "\n".join(self._request_text_parts(request))
+        self.assertIn("sylanne_current_event_time", injected)
+        self.assertIn("event_local_time=2026-05-16 07:20:08 +08:00", injected)
+        self.assertNotIn("这一觉睡了整整四天", injected)
+        queue = plugin._realtime_assistant_history_shadow_cache()["s-stale-shadow"]
+        self.assertTrue(queue[-1]["consumed"])
+        self.assertEqual(
+            queue[-1]["consumed_reason"],
+            "stale_for_recency_sensitive_turn",
+        )
+
+
+    def test_missing_realtime_media_file_is_blocked_without_aborting_dispatch(self):
+        sent = []
+        missing_path = "/AstrBot/8D0141D4DFECE5CBDFF3F73B94A5D871.png"
+
+        class FakeContext:
+            async def send_message(self, origin, message):
+                text = str(message)
+                if missing_path in text:
+                    raise FileNotFoundError(missing_path)
+                sent.append((origin, text))
+                return {"ok": True}
+
+        plugin = new_plugin(
+            {
+                "enable_realtime_chat": True,
+                "enable_sticker_reaction": False,
+                "realtime_chat_min_delay_seconds": 0.0,
+                "realtime_chat_max_delay_seconds": 0.0,
+            },
+        )
+        plugin.context = FakeContext()
+        plugin._conversation_input_epoch = {"s-missing-media": 1}
+        plan = {
+            "session_key": "s-missing-media",
+            "input_epoch": 1,
+            "full_text": "看到没！",
+            "message_parts": [
+                {"index": 0, "text": "看到没！", "delay_before_seconds": 0.0},
+            ],
+            "media_parts": [
+                {"kind": "file_image", "value": missing_path, "after_text_index": 1},
+            ],
+        }
+
+        result = asyncio.run(
+            plugin._send_realtime_chat_plan(
+                FakeEvent("s-missing-media"),
+                plan,
+                source="unit_test",
+                record_history_shadow=True,
+            ),
+        )
+
+        self.assertEqual(sent, [("s-missing-media", "message:看到没！")])
+        self.assertEqual(result["message_count"], 1)
+        self.assertEqual(result["media_count"], 0)
+        self.assertEqual(
+            result["media_results"][0]["blocked_reason"],
+            "missing_local_media_file",
+        )
+        backfills = plugin._realtime_ordinary_history_backfill_cache()["s-missing-media"]
+        self.assertIn("看到没！", backfills[-1]["content"])
+
+
+    def test_missing_sticker_file_is_blocked_without_aborting_dispatch(self):
+        sent = []
+        missing_path = "/AstrBot/8D0141D4DFECE5CBDFF3F73B94A5D871.png"
+
+        class FakeContext:
+            async def send_message(self, origin, message):
+                text = str(message)
+                if missing_path in text:
+                    raise FileNotFoundError(missing_path)
+                sent.append((origin, text))
+                return {"ok": True}
+
+        plugin = new_plugin(
+            {
+                "enable_realtime_chat": True,
+                "enable_sticker_reaction": True,
+                "sticker_llm_consistency_check_enabled": False,
+            },
+        )
+        plugin.context = FakeContext()
+        plugin._conversation_input_epoch = {"s-missing-sticker": 1}
+        plan = {
+            "session_key": "s-missing-sticker",
+            "input_epoch": 1,
+            "full_text": "我在听呢。",
+            "message_parts": [
+                {"index": 0, "text": "我在听呢。", "delay_before_seconds": 0.0},
+            ],
+            "sticker": {
+                "should_send": True,
+                "intent": "comfort",
+                "candidate": {
+                    "id": "missing-sticker",
+                    "path": missing_path,
+                    "name": "missing",
+                    "tags": ["comfort"],
+                },
+            },
+        }
+
+        result = asyncio.run(
+            plugin._send_realtime_chat_plan(
+                FakeEvent("s-missing-sticker"),
+                plan,
+                source="unit_test",
+            ),
+        )
+
+        self.assertEqual(sent, [("s-missing-sticker", "message:我在听呢。")])
+        self.assertEqual(result["message_count"], 1)
+        self.assertEqual(
+            result["sticker_result"]["blocked_reason"],
+            "missing_local_media_file",
+        )
+
+
+    def test_memory_prompt_declares_relative_time_is_not_last_reply_time(self):
+        from memory_engine import (
+            MemoryRecallItem,
+            MemoryRecord,
+            build_memory_prompt_fragment,
+        )
+
+        now = _shanghai_epoch(2026, 5, 16, 7, 20, 8)
+        old = _shanghai_epoch(2026, 5, 12, 4, 0, 0)
+        record = MemoryRecord(
+            text="四天前聊过凌晨四点的玩笑。",
+            summary="四天前聊过凌晨四点的玩笑。",
+            session_key="s-memory-guard",
+            event_epoch=old,
+            depth=0.8,
+        )
+
+        fragment = build_memory_prompt_fragment(
+            [MemoryRecallItem(record=record, score=0.9)],
+            session_key="s-memory-guard",
+            now=now,
+        )
+
+        self.assertIn("relative_time=4天前", fragment)
+        self.assertIn("不是用户上次回复时间", fragment)

@@ -416,6 +416,7 @@ REALTIME_ORDINARY_HISTORY_BACKFILL_MAX_CHARS = 1200
 REALTIME_ORDINARY_HISTORY_BACKFILL_MAX_ITEMS_PER_REQUEST = 2
 REALTIME_ASSISTANT_HISTORY_INJECTION_MAX_CHARS = 900
 REALTIME_ASSISTANT_HISTORY_EXCERPT_CHARS = 720
+REALTIME_ASSISTANT_HISTORY_RECENCY_SENSITIVE_TTL_SECONDS = 3600.0
 REALTIME_RESPONSE_INTERCEPT_DEDUP_LIMIT = 32
 USER_MESSAGE_WITHDRAWAL_CONTEXT_LIMIT = 4
 USER_MESSAGE_WITHDRAWAL_INJECTION_MAX_CHARS = 700
@@ -635,7 +636,7 @@ def get_emotional_state_plugin(context: Context) -> Any | None:
     PLUGIN_NAME,
     "Aylovelle.S.S",
     "Soulful Yearning Lifelike AstrBot Neural Narrative Engine：维护情绪、人格、记忆、氛围和表达节奏的 Sylanne",
-    "2.5.4",
+    "2.5.5",
     "",
 )
 class EmotionalStatePlugin(Star):
@@ -1193,6 +1194,8 @@ class EmotionalStatePlugin(Star):
             session_key,
             budget=early_injection_budget,
             current_user_text=current_user_observation_text,
+            observed_at=observed_at,
+            event=event,
         )
         self._cancel_realtime_chat_dispatches_for_session(
             session_key,
@@ -1260,6 +1263,8 @@ class EmotionalStatePlugin(Star):
                 session_key,
                 budget=None,
                 current_user_text=current_user_observation_text,
+                observed_at=observed_at,
+                event=event,
             )
             await self._append_sylanne_memory_recall_context_if_any(
                 request,
@@ -1267,6 +1272,7 @@ class EmotionalStatePlugin(Star):
                 current_user_text=current_user_observation_text,
                 budget=None,
                 observed_at=observed_at,
+                event=event,
             )
             await self._save_realtime_delivery_context_if_dirty(session_key)
             return
@@ -1646,6 +1652,8 @@ class EmotionalStatePlugin(Star):
                 session_key,
                 budget=injection_budget,
                 current_user_text=current_text,
+                observed_at=observed_at,
+                event=event,
             )
             injection_decision = self._state_injection_decision(
                 session_key,
@@ -1676,6 +1684,8 @@ class EmotionalStatePlugin(Star):
                 session_key,
                 budget=injection_budget,
                 current_user_text=current_text,
+                observed_at=observed_at,
+                event=event,
             )
             await self._append_sylanne_memory_recall_context_if_any(
                 request,
@@ -1683,6 +1693,7 @@ class EmotionalStatePlugin(Star):
                 current_user_text=current_text,
                 budget=injection_budget,
                 observed_at=observed_at,
+                event=event,
             )
             self._record_state_injection_diagnostics(injection_budget)
         if inject_state:
@@ -1931,6 +1942,7 @@ class EmotionalStatePlugin(Star):
                 current_user_text=current_text,
                 budget=injection_budget,
                 observed_at=observed_at,
+                event=event,
             )
 
         if (
@@ -1969,7 +1981,7 @@ class EmotionalStatePlugin(Star):
                 event,
                 session_key=session_key,
                 observed_at=observed_at,
-                budget=injection_budget,
+                budget=None if injection_budget.added_parts > 0 else injection_budget,
             )
         await self._save_realtime_delivery_context_if_dirty(session_key)
 
@@ -6560,6 +6572,7 @@ class EmotionalStatePlugin(Star):
         current_user_text: str,
         budget: _StateInjectionBudget | None,
         observed_at: float | None = None,
+        event: AstrMessageEvent | None = None,
     ) -> bool:
         if not self._sylanne_memory_enabled():
             return False
@@ -6583,6 +6596,14 @@ class EmotionalStatePlugin(Star):
         )
         if not text:
             return False
+        if observed_at is not None:
+            self._append_current_event_time_context_if_any(
+                request,
+                event,
+                session_key=session_key,
+                observed_at=observed_at,
+                budget=budget,
+            )
         return self._append_temp_text_part(
             request,
             text,
@@ -8056,17 +8077,27 @@ class EmotionalStatePlugin(Star):
                 )
                 if judgement.get("approved"):
                     sticker_message = self._build_astrbot_sticker_message(candidate)
-                    raw_sticker_result = await send_message(origin, sticker_message)
-                    sticker_result = {
-                        "sent": True,
-                        "judgement": judgement,
-                        "result": self._bounded_scalar_or_summary(raw_sticker_result),
-                    }
-                    self._log_info(
-                        f"{PLUGIN_NAME}: 已发送实时聊天表情 "
-                        f"session={session_key} "
-                        f"id={self._clip_one_line(str(candidate.get('id') or candidate.get('path') or candidate.get('url') or ''), 120)}",
-                    )
+                    try:
+                        raw_sticker_result = await send_message(origin, sticker_message)
+                    except (FileNotFoundError, OSError) as exc:
+                        sticker_result = self._realtime_sticker_send_failure_result(
+                            candidate,
+                            judgement,
+                            exc,
+                            session_key=session_key,
+                            sticker_message=sticker_message,
+                        )
+                    else:
+                        sticker_result = {
+                            "sent": True,
+                            "judgement": judgement,
+                            "result": self._bounded_scalar_or_summary(raw_sticker_result),
+                        }
+                        self._log_info(
+                            f"{PLUGIN_NAME}: 已发送实时聊天表情 "
+                            f"session={session_key} "
+                            f"id={self._clip_one_line(str(candidate.get('id') or candidate.get('path') or candidate.get('url') or ''), 120)}",
+                        )
                 else:
                     sticker_result = {
                         "sent": False,
@@ -8179,7 +8210,15 @@ class EmotionalStatePlugin(Star):
                 "sent": False,
                 "blocked_reason": "unsupported_media_part",
             }
-        raw_media_result = await send_message(origin, media_message)
+        try:
+            raw_media_result = await send_message(origin, media_message)
+        except (FileNotFoundError, OSError) as exc:
+            return self._realtime_media_send_failure_result(
+                media_part,
+                exc,
+                session_key=session_key,
+                media_message=media_message,
+            )
         self._log_info(
             f"{PLUGIN_NAME}: 已发送实时聊天媒体 "
             f"session={session_key} "
@@ -8192,6 +8231,68 @@ class EmotionalStatePlugin(Star):
             "media_kind": media_part.get("kind"),
             "message_type": type(media_message).__name__,
             "result": self._bounded_scalar_or_summary(raw_media_result),
+        }
+
+    def _realtime_media_send_failure_result(
+        self,
+        media_part: dict[str, Any],
+        exc: OSError,
+        *,
+        session_key: str,
+        media_message: Any,
+    ) -> dict[str, Any]:
+        missing = isinstance(exc, FileNotFoundError) or getattr(exc, "errno", None) == 2
+        reason = "missing_local_media_file" if missing else "media_send_failed"
+        value = str(
+            media_part.get("value")
+            or media_part.get("path")
+            or media_part.get("url")
+            or "",
+        )
+        self._log_warning(
+            f"{PLUGIN_NAME}: 实时聊天媒体发送被跳过 "
+            f"session={session_key} "
+            f"reason={reason} "
+            f"kind={media_part.get('kind')} "
+            f"value={self._clip_one_line(value, 160)} "
+            f"error={self._clip_one_line(str(exc), 160)}",
+        )
+        return {
+            "index": media_part.get("index"),
+            "sent": False,
+            "blocked_reason": reason,
+            "media_kind": media_part.get("kind"),
+            "message_type": type(media_message).__name__,
+            "value_excerpt": self._clip_one_line(value, 160),
+            "error": self._clip_one_line(str(exc), 160),
+        }
+
+    def _realtime_sticker_send_failure_result(
+        self,
+        candidate: dict[str, Any],
+        judgement: dict[str, Any],
+        exc: OSError,
+        *,
+        session_key: str,
+        sticker_message: Any,
+    ) -> dict[str, Any]:
+        missing = isinstance(exc, FileNotFoundError) or getattr(exc, "errno", None) == 2
+        reason = "missing_local_media_file" if missing else "sticker_send_failed"
+        value = str(candidate.get("path") or candidate.get("url") or candidate.get("id") or "")
+        self._log_warning(
+            f"{PLUGIN_NAME}: 实时聊天表情发送被跳过 "
+            f"session={session_key} "
+            f"reason={reason} "
+            f"id={self._clip_one_line(value, 160)} "
+            f"error={self._clip_one_line(str(exc), 160)}",
+        )
+        return {
+            "sent": False,
+            "blocked_reason": reason,
+            "judgement": judgement,
+            "message_type": type(sticker_message).__name__,
+            "candidate": self._bounded_scalar_or_summary(candidate),
+            "error": self._clip_one_line(str(exc), 160),
         }
 
     def _realtime_media_parts_by_after_text_index(
@@ -9968,12 +10069,31 @@ class EmotionalStatePlugin(Star):
         *,
         budget: _StateInjectionBudget | None,
         current_user_text: str = "",
+        observed_at: float | None = None,
+        event: AstrMessageEvent | None = None,
     ) -> bool:
         appended = self._append_user_message_withdrawal_context_if_any(
             request,
             session_key,
             budget=budget,
         )
+        if (
+            observed_at is not None
+            and self._looks_like_recency_sensitive_turn(current_user_text)
+            and self._realtime_assistant_history_shadow_cache().get(
+                str(session_key or "global"),
+            )
+        ):
+            appended = (
+                self._append_current_event_time_context_if_any(
+                    request,
+                    event,
+                    session_key=session_key,
+                    observed_at=observed_at,
+                    budget=budget,
+                )
+                or appended
+            )
         is_correction = self._looks_like_user_correction_or_source_query(
             current_user_text,
         )
@@ -10019,6 +10139,7 @@ class EmotionalStatePlugin(Star):
                     session_key,
                     budget=budget,
                     current_user_text=current_user_text,
+                    observed_at=observed_at,
                 )
             )
             or appended
@@ -10050,6 +10171,92 @@ class EmotionalStatePlugin(Star):
             pending[-1],
             current_user_text,
         )
+
+    def _looks_like_recency_sensitive_turn(self, text: str) -> bool:
+        value = str(text or "").strip()
+        if not value:
+            return False
+        compact = re.sub(r"\s+", "", value)
+        if not compact:
+            return False
+        direct_markers = (
+            "一觉",
+            "睡到现在",
+            "刚醒",
+            "刚睡醒",
+            "醒到现在",
+            "哪来的",
+            "哪来",
+            "昨天不是",
+            "昨晚不是",
+            "上次",
+            "几天没",
+            "几天不",
+            "多久没",
+            "没人回",
+            "四天",
+            "三天",
+            "两天",
+            "2天",
+            "3天",
+            "4天",
+        )
+        if any(marker in compact for marker in direct_markers):
+            return True
+        sleep_markers = ("睡", "睡觉", "起床", "醒")
+        time_markers = (
+            "昨天",
+            "昨晚",
+            "昨夜",
+            "今天",
+            "早上",
+            "凌晨",
+            "晚上",
+            "现在",
+            "刚才",
+            "刚刚",
+            "点",
+        )
+        return any(marker in compact for marker in sleep_markers) and any(
+            marker in compact for marker in time_markers
+        )
+
+    def _realtime_shadow_anchor_epoch(self, item: dict[str, Any]) -> float:
+        candidates = [
+            item.get("event_epoch"),
+            (item.get("event_time") or {}).get("epoch")
+            if isinstance(item.get("event_time"), dict)
+            else None,
+            item.get("recorded_at"),
+        ]
+        for candidate in candidates:
+            try:
+                value = float(candidate)
+            except (TypeError, ValueError):
+                continue
+            if value > 0.0:
+                return value
+        return 0.0
+
+    def _realtime_shadow_stale_for_recency_sensitive_turn(
+        self,
+        item: dict[str, Any],
+        current_user_text: str,
+        *,
+        observed_at: float | None = None,
+    ) -> bool:
+        if not self._looks_like_recency_sensitive_turn(current_user_text):
+            return False
+        if self._should_anchor_short_answer_to_realtime_question(item, current_user_text):
+            return False
+        anchor = self._realtime_shadow_anchor_epoch(item)
+        if anchor <= 0.0:
+            return False
+        now = self._observed_now() if observed_at is None else float(observed_at)
+        if now <= 0.0:
+            return False
+        age = max(0.0, now - anchor)
+        return age > REALTIME_ASSISTANT_HISTORY_RECENCY_SENSITIVE_TTL_SECONDS
 
     def _append_realtime_assistant_history_usage_guard(
         self,
@@ -11904,6 +12111,7 @@ class EmotionalStatePlugin(Star):
         *,
         budget: _StateInjectionBudget | None,
         current_user_text: str = "",
+        observed_at: float | None = None,
     ) -> bool:
         queue = self._realtime_assistant_history_shadow_cache().get(
             str(session_key or "global"),
@@ -11922,6 +12130,16 @@ class EmotionalStatePlugin(Star):
                 pass
             return False
         item = pending[-1]
+        if self._realtime_shadow_stale_for_recency_sensitive_turn(
+            item,
+            current_user_text,
+            observed_at=observed_at,
+        ):
+            item["consumed"] = True
+            item["consumed_at"] = self._observed_now()
+            item["consumed_reason"] = "stale_for_recency_sensitive_turn"
+            self._mark_realtime_delivery_context_dirty(session_key)
+            return False
         if (
             str(item.get("delivery_status") or "") == "interrupted"
             and self._has_pending_interrupted_reply_breakpoint(session_key)
@@ -16667,7 +16885,8 @@ class EmotionalStatePlugin(Star):
         text = "\n".join(
             [
                 "[sylanne_current_event_time]",
-                "Use this AstrBot event time for recency, memory relevance, and time-sensitive wording.",
+                "Use this AstrBot event time as the authoritative timestamp for the current user message.",
+                "When judging recency, sleep/wake wording, 昨天/刚才/上次聊天, prefer the current AstrBot context and this event time over memory relative_time.",
                 "event_local_time={local}; timezone={tz}; epoch={epoch}; session={session}".format(
                     local=payload["local_time"],
                     tz=payload["timezone"],
@@ -17229,6 +17448,7 @@ class EmotionalStatePlugin(Star):
         if "[sylanne_context_policy]" in value:
             return value
         important_sources = {
+            "current_event_time",
             "realtime_chat_active_dispatch",
             "realtime_assistant_history_shadow",
             "realtime_assistant_history_usage_guard",
@@ -17270,6 +17490,7 @@ class EmotionalStatePlugin(Star):
             "recent_user_correction_context": "sylanne_recent_user_correction_context",
             "recent_user_scene_context": "sylanne_recent_user_scene_context",
             "sylanne_memory_recall": "sylanne_memory_recall",
+            "current_event_time": "sylanne_current_event_time",
             "current_user_media_context": "sylanne_current_user_media",
         }
         marker = source_markers.get(source, f"sylanne_source:{source}")
