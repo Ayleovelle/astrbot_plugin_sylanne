@@ -2,6 +2,29 @@
 
 本文件用于 AstrBot 插件市场/管理页展示更新内容。更完整的设计说明、公式推导、测试矩阵和维护手册见 `README.md`。
 
+## 3.0.0-exp1
+
+发布日期：2026-05-18
+
+### 新增
+
+- 启动 Sylanne 3.0 关系性自我诞生路线，第一阶段发布 Self-Interpretation Engine：关键互动会在插件内部形成只读自我诠释、关系性意义和未来倾向。
+- 新增关系性转折点候选识别：覆盖用户纠正、协作完成、长期偏好、关系修复、依靠信号、沉默节律和共同参照；低信号闲聊不会被提升为关系事实。
+- 新增下一轮短承接片段 `[sylanne_relational_self]`：只有高置信候选才注入，并明确不得覆盖当前用户原文、不得把候选当事实。
+- `understanding_closed_loop` 内部 runtime diagnostics 可查看 `self_interpretation`，便于研究 3.0 第一阶段的关系性自我闭环。
+
+### 安全与边界
+
+- `export_integrated_self_diagnostics(...)` 默认不导出 `self_interpretation`、`relational_turning_point` 或 `turning_point_candidate`，避免 public API 暴露高风险关系/自我推断。
+- 新增 `allow_relational_self_public_export` 高风险公开导出开关；默认关闭，确需公开导出时由配置者手动开启，由此造成的不可预料后果由开启者自行负责。
+- `public_api.py` 不新增任何 self interpretation、turning point 或 relational self 查询方法；这些数据只作为 Sylanne 插件内部运行态和本地研究诊断使用。
+- self interpretation evidence 只保留限长摘要、触发类型、长度和 posture 等结构化证据，不保存完整用户原文或 assistant 原文。
+
+### 验证
+
+- 新增并通过 self interpretation 单元测试、lifecycle prompt 注入测试、runtime diagnostics 测试和 public API 封闭回归测试。
+- 全量测试与发布 zip 预检见本次发布收尾记录。
+
 ## 2.8.0-exp
 
 发布日期：2026-05-17

@@ -147,8 +147,10 @@ try:
         build_integrated_self_experience_review,
         build_integrated_self_memory_annotation,
         build_integrated_self_prompt_fragment,
+        build_relational_self_prompt_fragment,
         build_self_arbitration_intent_plan,
         build_self_arbitration_prompt_fragment,
+        build_self_interpretation,
         build_integrated_self_replay_bundle,
         build_integrated_self_snapshot,
         build_state_annotations_memory_envelope,
@@ -311,8 +313,10 @@ except ImportError:
         build_integrated_self_experience_review,
         build_integrated_self_memory_annotation,
         build_integrated_self_prompt_fragment,
+        build_relational_self_prompt_fragment,
         build_self_arbitration_intent_plan,
         build_self_arbitration_prompt_fragment,
+        build_self_interpretation,
         build_integrated_self_replay_bundle,
         build_integrated_self_snapshot,
         build_state_annotations_memory_envelope,
@@ -665,7 +669,7 @@ def get_emotional_state_plugin(context: Context) -> Any | None:
     PLUGIN_NAME,
     "Aylovelle.S.S",
     "Soulful Yearning Lifelike AstrBot Neural Narrative Engine：维护情绪、人格、记忆、氛围和表达节奏的 Sylanne",
-    "2.8.0-exp",
+    "3.0.0-exp1",
     "",
 )
 class EmotionalStatePlugin(Star):
@@ -1133,6 +1137,7 @@ class EmotionalStatePlugin(Star):
             ] = intent_plan
             if intent_plan.get("primary_goal") not in {"answer", "quiet_or_minimal"}:
                 self._append_self_arbitration_context(request, intent_plan)
+        self._append_relational_self_context_if_any(request, session_key)
         if lifelike_enabled:
             try:
                 relationship_source = dict(lifelike_state_to_public_payload(
@@ -2360,6 +2365,7 @@ class EmotionalStatePlugin(Star):
             return
 
         if self._background_post_assessment_enabled():
+            self._record_self_interpretation(identity.conversation_id, response_text)
             self._schedule_background_post_assessment(
                 event,
                 response_text,
@@ -2374,6 +2380,7 @@ class EmotionalStatePlugin(Star):
 
         await self._update_from_llm_response(event, response_text, observed_at=observed_at)
         self._record_experience_review(identity.conversation_id, response_text)
+        self._record_self_interpretation(identity.conversation_id, response_text)
         if not realtime_response_intercepted:
             self._discard_conversation_pending_response_epochs_through(
                 identity.conversation_id,
@@ -5309,7 +5316,13 @@ class EmotionalStatePlugin(Star):
             session_key=session_key,
             include_raw_snapshots=False,
         )
-        return build_integrated_self_diagnostics(snapshot)
+        return build_integrated_self_diagnostics(
+            snapshot,
+            include_internal_self_interpretation=self._cfg_bool(
+                "allow_relational_self_public_export",
+                False,
+            ),
+        )
 
     async def get_humanlike_snapshot(
         self,
@@ -12269,6 +12282,21 @@ class EmotionalStatePlugin(Star):
             source="self_arbitration",
         )
 
+    def _append_relational_self_context_if_any(
+        self,
+        request: ProviderRequest,
+        session_key: str,
+    ) -> bool:
+        state = self._understanding_closed_loop_state().get(str(session_key or "global")) or {}
+        fragment = build_relational_self_prompt_fragment(dict(state.get("self_interpretation") or {}))
+        if not fragment:
+            return False
+        return self._append_temp_text_part(
+            request,
+            fragment,
+            source="relational_self",
+        )
+
     def _append_lifecycle_audit_context(
         self,
         request: ProviderRequest,
@@ -12314,6 +12342,22 @@ class EmotionalStatePlugin(Star):
         )
         state["experience_review"] = review
 
+    def _record_self_interpretation(
+        self,
+        session_key: str,
+        assistant_text: str,
+    ) -> None:
+        state = self._understanding_closed_loop_state().setdefault(session_key, {})
+        state["self_interpretation"] = build_self_interpretation(
+            current_user_text=str(state.get("current_user_text") or ""),
+            assistant_text=assistant_text,
+            intent_plan=dict(state.get("intent_plan") or {}),
+            expression_policy=dict(state.get("expression_policy") or {}),
+            experience_review=dict(state.get("experience_review") or {}),
+            relationship_candidate_summary=dict(state.get("relationship_candidate_summary") or {}),
+            ledger_tail=list(state.get("ledger_tail") or []),
+        )
+
     def _understanding_closed_loop_diagnostics(self, session_key: str) -> dict[str, Any]:
         key = str(session_key or "global")
         latest = dict(self._understanding_closed_loop_state().get(key) or {})
@@ -12337,6 +12381,7 @@ class EmotionalStatePlugin(Star):
         latest.setdefault("intent_plan", {})
         latest.setdefault("experience_review", {})
         latest.setdefault("relationship_candidate_summary", {})
+        latest.setdefault("self_interpretation", {})
         return latest
 
     def _append_realtime_ordinary_history_backfills_if_any(

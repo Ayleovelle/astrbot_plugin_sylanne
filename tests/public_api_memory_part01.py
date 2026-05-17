@@ -237,7 +237,54 @@ class PublicApiMemoryPart01(MemoryPayloadPublicApiTests):
         self.assertFalse(compat["compatible"])
         self.assertTrue(diagnostics["sanitized"])
         self.assertNotIn("snapshots", diagnostics)
+        self.assertNotIn("self_interpretation", diagnostics)
+        self.assertNotIn("turning_point", diagnostics)
 
+    def test_public_integrated_self_diagnostics_can_explicitly_export_relational_self_at_user_risk(self):
+        self._install_astrbot_stubs()
+        from emotion_engine import EmotionState
+        from main import EmotionalStatePlugin
+
+        async def fake_load_state(self, session_key, persona_profile=None):
+            return EmotionState.initial()
+
+        original_load_state = EmotionalStatePlugin._load_state
+        EmotionalStatePlugin._load_state = fake_load_state
+        try:
+            diagnostics = asyncio.run(
+                self._new_plugin(
+                    {"allow_relational_self_public_export": True},
+                ).export_integrated_self_diagnostics(
+                    session_key="s-public-risk",
+                ),
+            )
+        finally:
+            EmotionalStatePlugin._load_state = original_load_state
+
+        self.assertIn("self_interpretation", diagnostics)
+        self.assertIn("self_interpretation", diagnostics["excluded"])
+        self.assertEqual(
+            diagnostics["self_interpretation"]["kind"],
+            "self_interpretation",
+        )
+
+
+    def test_public_api_contract_does_not_expose_relational_self_inference_methods(self):
+        import public_api
+
+        public_names = set(public_api._EMOTION_SERVICE_REQUIRED_METHODS)
+        forbidden = {
+            "get_self_interpretation",
+            "get_relational_turning_point",
+            "query_relational_turning_points",
+            "export_self_interpretation",
+            "dump_relational_self_state",
+            "list_relational_self_inferences",
+        }
+
+        self.assertTrue(public_names.isdisjoint(forbidden))
+        self.assertFalse(hasattr(public_api.EmotionServiceProtocol, "get_self_interpretation"))
+        self.assertFalse(hasattr(public_api.EmotionServiceProtocol, "get_relational_turning_point"))
 
     def test_state_annotations_envelope_can_be_disabled(self):
         self._install_astrbot_stubs()

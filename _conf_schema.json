@@ -622,6 +622,12 @@
     "default": true,
     "hint": "只读仲裁层，融合情绪、拟人、道德修复、瑕疵模拟和心理筛查快照；自身不写 KV 状态。"
   },
+  "allow_relational_self_public_export": {
+    "description": "允许公开导出关系性自我推断",
+    "type": "bool",
+    "default": false,
+    "hint": "默认关闭。开启后 export_integrated_self_diagnostics 会包含 self_interpretation、relational_turning_point 和 turning_point_candidate 等高风险关系/自我推断数据；由此造成的不可预料后果由开启者自行负责。插件内部判断不受此开关限制。"
+  },
   "integrated_self_memory_write_enabled": {
     "description": "为记忆写入附带综合自我状态标注",
     "type": "bool",

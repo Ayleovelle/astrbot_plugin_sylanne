@@ -8,8 +8,10 @@ from integrated_self import (
     build_integrated_self_prompt_fragment,
     build_integrated_self_replay_bundle,
     build_integrated_self_snapshot,
+    build_relational_self_prompt_fragment,
     build_self_arbitration_intent_plan,
     build_self_arbitration_prompt_fragment,
+    build_self_interpretation,
     build_state_annotations_memory_envelope,
     probe_integrated_self_compatibility,
     replay_integrated_self_bundle,
@@ -17,6 +19,96 @@ from integrated_self import (
 
 
 class IntegratedSelfTests(unittest.TestCase):
+    def test_self_interpretation_detects_correction_turning_point(self):
+        result = build_self_interpretation(
+            current_user_text="不是这样，以后提交说明要中文详细一些",
+            assistant_text="好的，我会按中文详细说明来提交。",
+            intent_plan={"primary_goal": "tool_task"},
+            expression_policy={"posture": "brief_answer"},
+            experience_review={"issue_count": 0},
+            relationship_candidate_summary={"confidence": 0.6},
+        )
+
+        candidate = result["turning_point_candidate"]
+        self.assertEqual(result["schema_version"], "astrbot.self_interpretation.v1")
+        self.assertEqual(result["kind"], "self_interpretation")
+        self.assertTrue(result["read_only"])
+        self.assertFalse(result["prompt_eligible"])
+        self.assertIn(candidate["type"], {"correction", "preference"})
+        self.assertGreaterEqual(candidate["confidence"], 0.7)
+        self.assertIn("self_narrative_shift", result)
+        self.assertTrue(result["evidence"])
+        self.assertTrue(candidate["evidence"])
+
+    def test_self_interpretation_detects_collaboration_turning_point(self):
+        result = build_self_interpretation(
+            current_user_text="测试通过了，提交并发布这个 release",
+            assistant_text="已完成测试、提交和发布。",
+            intent_plan={"primary_goal": "tool_task"},
+            expression_policy={"posture": "brief_answer"},
+        )
+
+        self.assertEqual(result["turning_point_candidate"]["type"], "collaboration")
+        self.assertIn("技术协作", result["relational_meaning"])
+        self.assertGreaterEqual(result["turning_point_candidate"]["confidence"], 0.7)
+
+    def test_self_interpretation_ignores_low_signal_smalltalk(self):
+        result = build_self_interpretation(
+            current_user_text="今天有点热",
+            assistant_text="是呀，记得喝水。",
+        )
+
+        self.assertFalse(result["prompt_eligible"])
+        self.assertLess(result["confidence"], 0.7)
+        self.assertEqual(result["turning_point_candidate"]["type"], "none")
+
+    def test_self_interpretation_evidence_is_bounded(self):
+        long_text = "以后提交说明要中文详细一些。" + "这是一段很长的上下文" * 80
+        result = build_self_interpretation(current_user_text=long_text)
+
+        excerpts = [item["excerpt"] for item in result["evidence"]]
+        self.assertTrue(excerpts)
+        self.assertTrue(all(len(excerpt) <= 96 for excerpt in excerpts))
+        self.assertNotIn(long_text, excerpts)
+
+    def test_relational_self_prompt_fragment_requires_high_confidence_candidate(self):
+        low = build_self_interpretation(current_user_text="今天有点热")
+        self.assertEqual(build_relational_self_prompt_fragment(low), "")
+
+        high = build_self_interpretation(current_user_text="不是这样，以后提交说明要中文详细一些")
+        fragment = build_relational_self_prompt_fragment(high)
+
+        self.assertIn("[sylanne_relational_self]", fragment)
+        self.assertIn("recent_interpretation=", fragment)
+        self.assertIn("future_tendency=", fragment)
+        self.assertNotIn("不是这样，以后提交说明要中文详细一些", fragment)
+
+    def test_integrated_snapshot_exposes_internal_self_interpretation_diagnostics(self):
+        snapshot = build_integrated_self_snapshot(
+            session_key="s-self-interpretation",
+            emotion_snapshot={
+                "schema_version": "astrbot.emotion_state.v2",
+                "kind": "emotion_state",
+                "values": {"valence": 0.2, "affiliation": 0.4},
+            },
+            current_user_text="不是这样，以后提交说明要中文详细一些",
+            assistant_text="我会按这个协作规范继续。",
+            expression_policy={"posture": "brief_answer"},
+            relationship_candidate_summary={"confidence": 0.6},
+            now=100.0,
+        )
+        diagnostics = build_integrated_self_diagnostics(
+            snapshot,
+            include_internal_self_interpretation=True,
+        )
+        self.assertEqual(snapshot["self_interpretation"]["kind"], "self_interpretation")
+        self.assertEqual(
+            diagnostics["self_interpretation"]["turning_point_candidate"]["type"],
+            "correction",
+        )
+        self.assertTrue(diagnostics["sanitized"])
+        self.assertNotIn("不是这样，以后提交说明要中文详细一些", str(diagnostics))
+
     def test_self_arbitration_intent_plan_prioritizes_current_technical_request(self):
         plan = build_self_arbitration_intent_plan(
             current_user_text="帮我跑测试并提交 release",

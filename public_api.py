@@ -398,6 +398,7 @@ class EmotionServiceProtocol(Protocol):
         request: Any = None,
         session_key: str | None = None,
     ) -> dict[str, Any]:
+        """Export sanitized diagnostics; relational self inference appears only if explicitly enabled by host config."""
         ...
 
     async def get_agent_runtime_diagnostics(

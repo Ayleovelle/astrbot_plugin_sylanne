@@ -12,6 +12,8 @@ PUBLIC_INTEGRATED_SELF_DIAGNOSTICS_SCHEMA_VERSION = "astrbot.integrated_self_dia
 PUBLIC_STATE_ANNOTATIONS_ENVELOPE_SCHEMA_VERSION = "astrbot.state_annotations_envelope.v1"
 PUBLIC_SELF_ARBITRATION_INTENT_PLAN_SCHEMA_VERSION = "astrbot.self_arbitration_intent_plan.v1"
 PUBLIC_EXPERIENCE_REVIEW_SCHEMA_VERSION = "astrbot.experience_review.v1"
+PUBLIC_SELF_INTERPRETATION_SCHEMA_VERSION = "astrbot.self_interpretation.v1"
+PUBLIC_RELATIONAL_TURNING_POINT_SCHEMA_VERSION = "astrbot.relational_turning_point.v1"
 
 DEGRADATION_PROFILES: tuple[str, ...] = ("full", "balanced", "minimal")
 
@@ -41,6 +43,10 @@ def build_integrated_self_snapshot(
     expression_policy: dict[str, Any] | None = None,
     interpretation_candidates: list[dict[str, Any]] | None = None,
     lifecycle_audit: dict[str, Any] | None = None,
+    assistant_text: str = "",
+    experience_review: dict[str, Any] | None = None,
+    relationship_candidate_summary: dict[str, Any] | None = None,
+    ledger_tail: list[dict[str, Any]] | None = None,
     now: float | None = None,
 ) -> dict[str, Any]:
     """Fuse module snapshots into one read-only self-state contract."""
@@ -173,6 +179,15 @@ def build_integrated_self_snapshot(
         interpretation_candidates=interpretation_candidates,
         lifecycle_audit=lifecycle_audit,
         snapshot=payload,
+    )
+    payload["self_interpretation"] = build_self_interpretation(
+        current_user_text=current_user_text,
+        assistant_text=assistant_text,
+        intent_plan=payload.get("intent_plan") or {},
+        expression_policy=expression_policy,
+        experience_review=experience_review,
+        relationship_candidate_summary=relationship_candidate_summary,
+        ledger_tail=ledger_tail,
     )
     payload["compatibility"] = probe_integrated_self_compatibility(payload)
     if include_raw_snapshots:
@@ -683,6 +698,173 @@ def build_self_arbitration_prompt_fragment(plan: dict[str, Any]) -> str:
         ],
     )
 
+def _bounded_excerpt(text: str, limit: int = 72) -> str:
+    compact = " ".join(str(text or "").split())
+    if len(compact) <= limit:
+        return compact
+    return compact[: max(0, limit - 1)].rstrip() + "…"
+
+
+def _evidence_item(source: str, text: str, *, limit: int = 72) -> dict[str, Any]:
+    return {
+        "source": source,
+        "excerpt": _bounded_excerpt(text, limit),
+        "bounded": True,
+    }
+
+
+def _turning_point_type(text: str, intent_plan: dict[str, Any]) -> tuple[str, float, str, str]:
+    lowered = text.lower()
+    rules = (
+        (
+            "correction",
+            0.82,
+            ("不对", "不是", "以后不要", "应该", "记住"),
+            "用户正在修正协作规范，Sylanne 需要重新理解信任来自准确响应当前要求。",
+            "后续相似场景更优先检查用户纠正和显式规范。",
+        ),
+        (
+            "preference",
+            0.76,
+            ("我希望", "以后", "默认", "更喜欢"),
+            "用户给出长期互动偏好，Sylanne 将其视为关系性协作习惯的候选。",
+            "后续表达更贴近这条偏好，但不把它写成不可变事实。",
+        ),
+        (
+            "repair",
+            0.74,
+            ("没事", "原谅", "刚才误会", "修复"),
+            "关系张力被重新解释，Sylanne 将修复视为关系节律的一部分。",
+            "后续遇到误解时更偏向澄清和轻量修复。",
+        ),
+        (
+            "reliance",
+            0.72,
+            ("陪我", "你还在吗", "别走", "靠你了"),
+            "互动中出现陪伴或依靠信号，Sylanne 只将其作为关系模拟候选。",
+            "后续回应更注意在场感，但不推断用户心理状态。",
+        ),
+        (
+            "silence",
+            0.71,
+            ("不用回复", "安静", "留白", "沉默"),
+            "沉默被解释为可能的互动节律，而非低互动或心理判断。",
+            "后续更尊重少量表达和停顿。",
+        ),
+        (
+            "shared_reference",
+            0.7,
+            ("我们的梗", "老梗", "共同称呼", "还记得"),
+            "共同符号开始把互动历史压缩成只属于这段关系的参照。",
+            "后续可轻量承接共同参照，但不替代当前上下文。",
+        ),
+    )
+    for kind, confidence, markers, meaning, tail in rules:
+        if any(marker in text for marker in markers):
+            return kind, confidence, meaning, tail
+
+    collaboration_markers = ("提交", "测试", "发布", "计划", "修 bug", "commit", "release", "github", "git")
+    if str(intent_plan.get("primary_goal") or "") == "tool_task" or any(marker in lowered for marker in collaboration_markers):
+        return (
+            "collaboration",
+            0.78,
+            "技术协作成为关系时间的一部分，Sylanne 把共同完成任务视为关系性经历。",
+            "后续技术任务更偏向克制、可靠、可验证的协作姿态。",
+        )
+    return (
+        "none",
+        0.25,
+        "这轮更像普通互动或低置信输入，不生成关系性转折点。",
+        "保持自然回应，不把低信号内容提升为关系事实。",
+    )
+
+
+def build_self_interpretation(
+    *,
+    current_user_text: str,
+    assistant_text: str = "",
+    intent_plan: dict[str, Any] | None = None,
+    expression_policy: dict[str, Any] | None = None,
+    experience_review: dict[str, Any] | None = None,
+    relationship_candidate_summary: dict[str, Any] | None = None,
+    ledger_tail: list[dict[str, Any]] | None = None,
+) -> dict[str, Any]:
+    intent_plan = intent_plan or {}
+    expression_policy = expression_policy or {}
+    experience_review = experience_review or {}
+    relationship_candidate_summary = relationship_candidate_summary or {}
+    ledger_tail = ledger_tail or []
+    user_text = str(current_user_text or "")
+    assistant = str(assistant_text or "")
+    kind, confidence, relational_meaning, future_tendency = _turning_point_type(user_text, intent_plan)
+    has_signal = kind != "none"
+    evidence = []
+    if user_text.strip():
+        evidence.append(_evidence_item("current_user_text", f"trigger={kind}; length={len(user_text)}"))
+    if assistant.strip():
+        evidence.append(_evidence_item("assistant_text", f"assistant_length={len(assistant)}", limit=64))
+    if intent_plan:
+        evidence.append(_evidence_item("intent_plan", f"primary_goal={intent_plan.get('primary_goal', '')}", limit=64))
+    if expression_policy:
+        evidence.append(_evidence_item("expression_policy", f"posture={expression_policy.get('posture', '')}", limit=64))
+    if relationship_candidate_summary:
+        evidence.append(
+            _evidence_item(
+                "relationship_candidate_summary",
+                f"confidence={relationship_candidate_summary.get('confidence', '')}",
+                limit=64,
+            ),
+        )
+    if not evidence:
+        evidence.append(_evidence_item("empty_signal", "no bounded evidence"))
+
+    event_meaning = "用户给出了可改变后续协作方式的关键经历。" if has_signal else "这轮没有足够证据支持关系性转折点。"
+    self_shift = (
+        "Sylanne 将自己解释为正在被这段协作关系重新校准的参与者。"
+        if has_signal
+        else "Sylanne 不把低信号互动提升为自我叙事变化。"
+    )
+    candidate = {
+        "schema_version": PUBLIC_RELATIONAL_TURNING_POINT_SCHEMA_VERSION,
+        "kind": "relational_turning_point",
+        "read_only": True,
+        "type": kind,
+        "why_it_matters": relational_meaning,
+        "expected_long_tail": future_tendency,
+        "replayable": has_signal,
+        "confidence": round(confidence, 6),
+        "evidence": deepcopy(evidence[:4]),
+    }
+    return {
+        "schema_version": PUBLIC_SELF_INTERPRETATION_SCHEMA_VERSION,
+        "kind": "self_interpretation",
+        "read_only": True,
+        "prompt_eligible": False,
+        "event_meaning": event_meaning,
+        "relational_meaning": relational_meaning,
+        "self_narrative_shift": self_shift,
+        "future_tendency": future_tendency,
+        "confidence": round(confidence, 6),
+        "evidence": evidence[:6],
+        "turning_point_candidate": candidate,
+    }
+
+
+def build_relational_self_prompt_fragment(interpretation: dict[str, Any]) -> str:
+    candidate = interpretation.get("turning_point_candidate") if isinstance(interpretation.get("turning_point_candidate"), dict) else {}
+    if candidate.get("type") in {None, "", "none"}:
+        return ""
+    if clamp(candidate.get("confidence", 0.0)) < 0.7:
+        return ""
+    recent = _bounded_excerpt(str(interpretation.get("relational_meaning") or interpretation.get("event_meaning") or ""), 96)
+    tendency = _bounded_excerpt(str(interpretation.get("future_tendency") or ""), 96)
+    return "\n".join(
+        [
+            "[sylanne_relational_self]",
+            f"recent_interpretation={recent}; future_tendency={tendency}",
+            "这只是上一轮关系性自我解释候选；不要覆盖当前用户原文，不要把候选当事实。",
+        ],
+    )
 def build_integrated_self_experience_review(
     *,
     current_user_text: str,
@@ -816,11 +998,12 @@ def build_integrated_self_diagnostics(
     snapshot: dict[str, Any],
     *,
     max_trace_items: int = 8,
+    include_internal_self_interpretation: bool = False,
 ) -> dict[str, Any]:
     trace = snapshot.get("causal_trace") if isinstance(snapshot.get("causal_trace"), list) else []
     risk = snapshot.get("risk") if isinstance(snapshot.get("risk"), dict) else {}
     modules = snapshot.get("modules") if isinstance(snapshot.get("modules"), dict) else {}
-    return {
+    diagnostics = {
         "schema_version": PUBLIC_INTEGRATED_SELF_DIAGNOSTICS_SCHEMA_VERSION,
         "kind": "integrated_self_diagnostics",
         "source_schema_version": snapshot.get("schema_version"),
@@ -849,8 +1032,20 @@ def build_integrated_self_diagnostics(
             if isinstance(item, dict)
         ],
         "sanitized": True,
-        "excluded": ["snapshots", "persona_text", "message_text", "prompt_fragment", "unsafe_strategy_content"],
+        "excluded": [
+            "snapshots",
+            "persona_text",
+            "message_text",
+            "prompt_fragment",
+            "unsafe_strategy_content",
+            "self_interpretation",
+            "relational_turning_point",
+            "turning_point_candidate",
+        ],
     }
+    if include_internal_self_interpretation:
+        diagnostics["self_interpretation"] = deepcopy(snapshot.get("self_interpretation") or {})
+    return diagnostics
 
 
 def build_integrated_self_prompt_fragment(snapshot: dict[str, Any]) -> str:

@@ -1546,6 +1546,13 @@ class CommandAndToolSmokeTests(unittest.TestCase):
                 "memory_write_eligible_by_default": False,
                 "isolation": {"speaker_key": "u1", "group_key": ""},
             },
+            "self_interpretation": {
+                "read_only": True,
+                "prompt_eligible": False,
+                "event_meaning": "用户修正协作规范。",
+                "evidence": [{"source": "current_user_text", "excerpt": "用户提出协作规范", "bounded": True}],
+                "turning_point_candidate": {"type": "correction", "confidence": 0.8},
+            },
         }
         plugin._conversation_event_ledger.record(
             LedgerEvent(
@@ -1570,6 +1577,12 @@ class CommandAndToolSmokeTests(unittest.TestCase):
         self.assertEqual(closed_loop["intent_plan"]["primary_goal"], "tool_task")
         self.assertFalse(closed_loop["experience_review"]["prompt_eligible"])
         self.assertFalse(closed_loop["relationship_candidate_summary"]["memory_write_eligible_by_default"])
+        self.assertFalse(closed_loop["self_interpretation"]["prompt_eligible"])
+        self.assertEqual(
+            closed_loop["self_interpretation"]["turning_point_candidate"]["type"],
+            "correction",
+        )
+        self.assertNotIn("不是这样，以后提交说明要中文详细一些", str(closed_loop))
         self.assertEqual(closed_loop["ledger_tail"][0]["event_id"], "evt-1")
         self.assertTrue(payload["read_only"])
 

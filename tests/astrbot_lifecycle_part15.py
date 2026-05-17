@@ -39,6 +39,103 @@ def _shanghai_epoch(year, month, day, hour, minute=0, second=0):
 
 
 class AstrBotLifecyclePart15(AstrBotLifecycleTests):
+    def test_relational_self_interpretation_recorded_after_response(self):
+        plugin = new_plugin(
+            {
+                "assessment_timing": "post",
+                "inject_state": False,
+                "enable_realtime_chat": False,
+                "background_post_assessment_enabled": False,
+                "use_llm_assessor": False,
+            },
+        )
+        self._bind_common_state_hooks(plugin)
+        request = fake_request(session_id="s-relational-self", prompt="不是这样，以后提交说明要中文详细一些")
+
+        async def run_turn():
+            await plugin.on_llm_request(
+                FakeEvent("s-relational-self", message="不是这样，以后提交说明要中文详细一些", sender_id="u1"),
+                request,
+            )
+            await plugin.on_llm_response(
+                FakeEvent("s-relational-self", message="", sender_id="u1"),
+                SimpleNamespace(completion_text="好的，我会按中文详细说明来提交。"),
+            )
+
+        asyncio.run(run_turn())
+
+        diagnostics = plugin._understanding_closed_loop_diagnostics("s-relational-self")
+        interpretation = diagnostics["self_interpretation"]
+        self.assertEqual(interpretation["kind"], "self_interpretation")
+        self.assertFalse(interpretation["prompt_eligible"])
+        self.assertEqual(interpretation["turning_point_candidate"]["type"], "correction")
+        self.assertNotIn("不是这样，以后提交说明要中文详细一些", str(interpretation["evidence"]))
+
+    def test_relational_self_prompt_fragment_injected_next_request_for_high_confidence_turning_point(self):
+        plugin = new_plugin(
+            {
+                "assessment_timing": "post",
+                "inject_state": False,
+                "enable_realtime_chat": False,
+                "background_post_assessment_enabled": False,
+                "use_llm_assessor": False,
+            },
+        )
+        self._bind_common_state_hooks(plugin)
+        plugin._last_understanding_closed_loop["s-relational-next"] = {
+            "self_interpretation": {
+                "kind": "self_interpretation",
+                "event_meaning": "用户修正协作规范。",
+                "future_tendency": "后续提交说明更偏向中文详细说明。",
+                "turning_point_candidate": {"type": "correction", "confidence": 0.8},
+            },
+        }
+        request = fake_request(session_id="s-relational-next", prompt="继续实现")
+
+        asyncio.run(
+            plugin.on_llm_request(
+                FakeEvent("s-relational-next", message="继续实现", sender_id="u1"),
+                request,
+            ),
+        )
+
+        injected = "\n".join(self._request_text_parts(request))
+        self.assertIn("[sylanne_relational_self]", injected)
+        self.assertIn("recent_interpretation=", injected)
+        self.assertIn("future_tendency=", injected)
+        self.assertEqual(request.prompt, "继续实现")
+
+    def test_relational_self_prompt_fragment_not_injected_for_low_confidence_candidate(self):
+        plugin = new_plugin(
+            {
+                "assessment_timing": "post",
+                "inject_state": False,
+                "enable_realtime_chat": False,
+                "background_post_assessment_enabled": False,
+                "use_llm_assessor": False,
+            },
+        )
+        self._bind_common_state_hooks(plugin)
+        plugin._last_understanding_closed_loop["s-relational-low"] = {
+            "self_interpretation": {
+                "kind": "self_interpretation",
+                "event_meaning": "普通闲聊。",
+                "future_tendency": "保持自然回应。",
+                "turning_point_candidate": {"type": "none", "confidence": 0.2},
+            },
+        }
+        request = fake_request(session_id="s-relational-low", prompt="继续")
+
+        asyncio.run(
+            plugin.on_llm_request(
+                FakeEvent("s-relational-low", message="继续", sender_id="u1"),
+                request,
+            ),
+        )
+
+        injected = "\n".join(self._request_text_parts(request))
+        self.assertNotIn("[sylanne_relational_self]", injected)
+
     def test_request_injects_self_arbitration_without_overriding_raw_text(self):
         plugin = new_plugin(
             {

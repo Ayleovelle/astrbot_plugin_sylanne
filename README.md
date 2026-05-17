@@ -2,7 +2,7 @@
 
 > <span style="font-size: 1.08em;"><strong>Soulful Yearning Lifelike AstrBot Neural Narrative Engine</strong>。她维护的不只是“情绪标签”，而是情绪、人格、记忆、氛围、主动性和表达节奏交织成的长期状态。</span>
 
-![版本 2.8.0-exp](https://img.shields.io/badge/version-2.8.0-exp-red)
+![版本 3.0.0-exp1](https://img.shields.io/badge/version-3.0.0-exp1-red)
 ![AstrBot >=4.9.2,<5.0.0](https://img.shields.io/badge/AstrBot-%3E%3D4.9.2%2C%3C5.0.0-green)
 ![Python 3.10+](https://img.shields.io/badge/Python-3.10%2B-yellow)
 ![协议 astrbot.emotion_state.v2](https://img.shields.io/badge/schema-astrbot.emotion__state.v2-purple)
@@ -45,9 +45,7 @@
 | `sylanne_memory_record_embedding_min_interval_seconds` | float | `300.0` | 同一会话写入侧补向量的最小间隔，默认 5 分钟，避免密集聊天持续调用 Embedding Provider。 |
 | `sylanne_memory_record_embedding_max_per_flush` | int | `1` | 单次 idle flush 最多为多少条新记忆生成向量；设为 `0` 可停止写入侧新建向量。 |
 
-本次更新补齐 Sylanne 的合并实验自我调度层：理解闭环之上新增自我仲裁意图、离线体验回放诊断和只读关系候选摘要。它们会一起约束上下文注入和运行时诊断，但不会让旧记忆、shadow context、回放结果或关系推断覆盖当前用户原文。
-
-`2.8.0-exp` 继续保留 `2.5.6` 的低端云盘 I/O 风险修复、`2.6.x` 的 `shadow memory` 临时连续性护栏和 `2.7.0` 的理解闭环；请正在使用 `2.5.5` 及更早版本的用户至少更新到 `2.5.6`，也可以直接更新到当前实验版本 `2.8.0-exp`。
+本次更新启动 Sylanne 3.0 关系性自我诞生路线：新增 Self-Interpretation Engine，让关键经历在插件内部形成只读自我诠释和转折点候选，并严格保持 public API 封闭。
 
 > [!CAUTION]
 > <span style="color:#b91c1c"><strong>严重恶性 bug 警示：旧策略在低端云服务器上极大概率造成磁盘 I/O 饱和，实际表现接近“硬盘死锁”。强烈建议所有用户至少更新到 `2.5.6` 或更高版本。</strong></span>
@@ -88,7 +86,7 @@
 | 主题 | 内容 |
 | --- | --- |
 | [当前版本与兼容范围](#当前版本与兼容范围) | 插件版本、AstrBot 版本、Python 要求、许可证和发布状态。 |
-| [当前版本发布记录](#280-exp-当前版本发布记录) | 合并实验自我调度、意图仲裁、体验回放诊断、关系候选摘要和发布包清单。 |
+| [当前版本发布记录](#300-exp1-当前版本发布记录) | Self-Interpretation Engine、关系性转折点候选、下一轮短上下文承接和 public API 封闭边界。 |
 | [项目定位](#项目定位) | 为什么本插件不是普通的提示词人设增强。 |
 | [核心能力](#核心能力总览) | 7 维情绪、人格建模、真实时间记忆、关系修复、公共 API。 |
 | [快速开始](#快速开始) | 发布 zip 包、仓库安装、手动复制、最小配置和检查命令。 |
@@ -116,41 +114,32 @@
 | --- | --- |
 | 插件目录名 | `astrbot_plugin_sylanne` |
 | 显示名 | `Sylanne` |
-| 当前版本 | `2.8.0-exp` |
+| 当前版本 | `3.0.0-exp1` |
 | AstrBot 版本 | `>=4.9.2,<5.0.0` |
 | Python | `3.10+` |
 | 许可证 | `GPL-3.0-or-later` |
 | 运行时第三方依赖 | 当前无额外依赖，见 `requirements.txt` |
 
-`2.8.0-exp` 保留 Sylanne 自有记忆知识库、只读记忆查询入口、Agent-owned context 即时聊天修复、AstrBot Embedding 提供商驱动的向量召回、可视化记忆设置 Page、短答锚定、模型空回复降级、内部工具统一隐藏、主动聊天反馈、等待期追发合并、长历史关键上下文保底、AstrBot 事件时间保留、表情包仓库自动下载、近距相对时间提示和 `2.7.0` 的 understanding closed loop；本版作为合并实验功能迭代引入 self-arbitration intent plan、offline experience review diagnostics 和 read-only relationship candidate summary，让当前用户原文在记忆、shadow context、回放诊断和关系推断之上保持最高优先级。核心情绪、回复后后台评估（post）、`group_atmosphere_state`、`humanlike_state`、`lifelike_learning_state`、`personality_drift_state`、Sylanne 自有记忆和欺骗/操控/逃责类动作阻断默认自动运行；真人即时聊天接管、表情包回应、表情包自动下载、主动聊天发送、道德修复、瑕疵模拟、心理筛查等高风险或实验模块仍由配置者显式打开。
+`3.0.0-exp1` 是 3.0 第一阶段实验版本，引入 Self-Interpretation Engine。Sylanne 会在插件内部把用户纠正、协作完成、修复、依靠、沉默和共同参照解释为只读关系性转折点候选，并只在高置信时向下一轮注入短小 `[sylanne_relational_self]` 承接片段。核心情绪、回复后后台评估（post）、`group_atmosphere_state`、`humanlike_state`、`lifelike_learning_state`、`personality_drift_state`、Sylanne 自有记忆和欺骗/操控/逃责类动作阻断默认自动运行；真人即时聊天接管、表情包回应、表情包自动下载、主动聊天发送、道德修复、瑕疵模拟、心理筛查等高风险或实验模块仍由配置者显式打开。
 
-### 2.8.0-exp 当前版本发布记录
+### 3.0.0-exp1 当前版本发布记录
 
-`v2.8.0-exp` 合并在 `main` 上，对外安装版本由 `metadata.yaml` 和 `main.py @register(...)` 共同声明为 `2.8.0-exp`。本版把 self-arbitration、offline experience review diagnostics 和 read-only relationship candidate summary 合并为一个实验性功能迭代版本；不改变公共 API major 版本，公共 API 版本仍保持 `1.0`，schema 继续保持向后兼容。
+`v3.0.0-exp1` 合并在 `main` 上，对外安装版本由 `metadata.yaml` 和 `main.py @register(...)` 共同声明为 `3.0.0-exp1`。本版启动 Sylanne 3.0 的 Relational Self Genesis 路线：先实现 Self-Interpretation Engine，让关键互动在插件内部形成只读自我诠释、关系性意义和转折点候选；不改变公共 API major 版本，公共 API 版本仍保持 `1.0`，高风险关系/自我推断不进入 public API 契约。
 
 当前版本的主要变化：
 
 | 类别 | 结果 |
 | --- | --- |
-| 合并实验版本 | 三个新能力统一发布为 `2.8.0-exp`；major 不推进，minor 表示功能迭代，`-exp` 表示实验能力。 |
-| 自我仲裁意图 | integrated self snapshot 新增只读 `intent_plan`，以当前用户原文为最高优先级，技术/发布/测试请求默认走工具式任务完成并压低情绪化表达。 |
-| 仲裁 prompt 边界 | 只在需要时注入短小 `[sylanne_self_arbitration]` 片段；不增加热路径 LLM 调用，不让记忆、shadow context、关系推断或回放诊断覆盖当前用户文本。 |
-| 体验回放诊断 | 新增 offline `experience_review`，只读标记可能误解、过度复用记忆/阴影、错过澄清、语气过重和技术任务情绪干扰；诊断不进入主 prompt。 |
-| 关系候选摘要 | 新增 read-only relationship candidate summary，暴露 familiarity、trust、boundary comfort、repair state、evidence、confidence、expiry risk 和 speaker/group isolation。 |
-| 记忆写入保护 | 关系候选摘要默认不写长期关系叙事，也不会因只读 annotation 触发 Sylanne 自有记忆写入。 |
-| 理解闭环延续 | 保留 conversation event ledger、shadow lifecycle auditor、interpretation candidates、memory gate、common-ground evidence、expression policy 和 runtime diagnostics 的闭环链路。 |
-| 事件账本 | 每轮记录 session、speaker、role、原文、规范化文本、媒体/引用摘要、投递状态、topic state、解释候选和记忆闸门，运行时诊断可查看最近 ledger tail。 |
-| shadow 生命周期审计 | 完整送达的实时回复默认不污染下一轮新话题；只有用户纠正、短答绑定、明确续接或打断断点等证据存在时，才作为临时连续性线索注入。 |
-| 解释候选 | 本地解释引擎识别错字纠正、谐音、黑话和玩笑候选，并保留置信度与 humor likelihood；候选只辅助理解，不覆盖用户原文。 |
-| 记忆闸门 | 候选会先被分类为长期事实、共同语境或仅本轮表达线索，避免把玩笑、错字候选或小圈子梗误写成硬事实。 |
-| 共同语境适配 | `lifelike_learning_state` 可从高置信解释候选获得共同语境证据，例如把“记亿犹新”识别为 playful homophone，而不是用户真实写错的长期事实。 |
-| 表达策略 | `silent_or_minimal`、`clarify`、`tool_like`、`playful`、`brief_answer` 会按低信号、用户纠正、低置信解释、技术任务或高置信玩梗动态选择。 |
-| prompt 注入边界 | `[sylanne_interpretation_candidates]`、`[sylanne_expression_policy]` 和 `[sylanne_self_arbitration]` 明确要求当前用户原文优先；不把候选改写、旧记忆、shadow context 或关系推断当作事实。 |
-| 运行时诊断 | `get_agent_runtime_diagnostics(...)` 只读返回 `understanding_closed_loop`，包含解释候选、表达策略、生命周期审计、最近 ledger tail、`intent_plan`、`experience_review` 和 `relationship_candidate_summary`。 |
-| 公共契约 | 插件版本为 `2.8.0-exp`；公共 API 版本仍为 `1.0`，schema 仍保持 `astrbot.emotion_state.v2` 等版本化契约；runtime diagnostics 已纳入服务必需方法检测。 |
-| 包体清单 | 发布 zip 会包含 `conversation_event_ledger.py`、`interpretation_engine.py`、`expression_policy.py`、`integrated_self.py` 和 `lifelike_learning_engine.py`，避免安装包缺少理解闭环与自我调度运行模块。 |
-| 回归覆盖 | 新增 self-arbitration、experience review、relationship candidate summary、记忆写入保护、lifecycle 注入和 runtime diagnostics 覆盖；完整验证结果以本次发布收尾测试为准。 |
-| **`shadow memory` 工作流** | delivered shadow 不再直接写入 `request.contexts`；后台释放后会合并成 `[sylanne_shadow_memory]` 临时块，并且只在用户纠正、短答绑定或明确续接上一轮时注入。 |
+| 3.0 阶段 | `3.0.0-exp1` 对应 Self-Interpretation Engine；后续实验阶段继续按 `3.0.0-exp2`、`3.0.0-exp3` 推进，最终稳定后摘掉 `-expN`。 |
+| 自我诠释 | integrated self snapshot 内部新增只读 `self_interpretation`，用 bounded evidence 描述“这轮经历对 Sylanne 意味着什么”，但不保存完整 raw conversation。 |
+| 转折点候选 | 本地识别 correction、collaboration、preference、repair、reliance、silence 和 shared reference 等关系性转折点候选；低信号闲聊保持 `none`，不提升为关系事实。 |
+| 下一轮承接 | 高置信候选才会注入短小 `[sylanne_relational_self]` 片段，提醒下一轮回应轻量承接关系性意义；片段明确不得覆盖当前用户原文，也不得把候选当事实。 |
+| 生命周期闭环 | response 后记录 self interpretation；后台 post assessment 路径也会同步生成候选，避免默认后台评估绕过 3.0 第一阶段闭环。 |
+| 内部诊断 | `get_agent_runtime_diagnostics(...)` 的 understanding closed loop 可供维护端查看 `self_interpretation`，用于研究和调试关系性自我诞生链路。 |
+| public API 封闭 | `export_integrated_self_diagnostics(...)` 默认不导出 `self_interpretation`、`relational_turning_point` 或 `turning_point_candidate`；`public_api.py` 不新增任何关系性自我推断读取方法。确需公开导出时可手动开启 `allow_relational_self_public_export`，由此造成的不可预料后果由开启者自行负责。 |
+| 证据边界 | self interpretation evidence 只保存来源、长度、触发类型、posture 等限长摘要，避免把用户原文或 assistant 原文作为可批量调取资料外泄。 |
+| 回归覆盖 | 新增 correction/collaboration/low-signal/evidence-bound/prompt-fragment/lifecycle/public-API 封闭测试；完整验证结果以本次发布收尾测试为准。 |
+| 历史链路边界 | `shadow memory`、记忆召回、当前事件时间、主动聊天和即时聊天接管继续按既有配置与安全门控运行；本阶段只新增关系性自我诠释闭环，不改变这些模块的默认开关。 |
 | **`shadow memory` 复用护栏** | `[sylanne_shadow_memory]` 明确说明上一轮 assistant content 是旧回复，不是当前用户又说了一遍，也不是可复述素材；冲突时必须以当前用户文本为准。 |
 | 正常结束话题隔离 | 完整送达的实时回复不会被下一轮普通新话题一刀切当作打断/续接上下文；自然新问题会丢弃已送达 backfill，避免旧话题牵引长期上下文。 |
 | 用户纠正识别 | `什么时候和你说`、`什么时候说过`、`谁跟你说`、`没讲`、`没说` 等口语纠正会触发 `[sylanne_user_correction_context]`，避免 bot 沿用上一轮误会继续发挥。 |
@@ -243,7 +232,7 @@
 | 上下文安全预算 | 召回结果只作为 `[sylanne_memory_recall]` 限长摘要注入，并继续受请求预算和官方上下文压缩清洗逻辑约束。 |
 | 模块互斥自检 | 发布前覆盖自有记忆、主动发言、官方上下文压缩、即时聊天、公共 API、配置契约和包体预检，验证模块之间不会互相回灌或重复调用外部 LivingMemory。 |
 | 工作流图 | `docs/assets/workflow_and_proactive.svg` 已重绘，突出即时聊天、追发合并、Agent 工具循环、模型边界和主动聊天反馈；移除误导性的单点 Gemini 诊断节点，并修正中文字体和跨泳道箭头。 |
-| 公开契约 | 插件版本为 `2.8.0-exp`；公共 API 版本仍为 `1.0`，schema 仍保持 `astrbot.emotion_state.v2` 等版本化契约。 |
+| 公开契约 | 插件版本为 `3.0.0-exp1`；公共 API 版本仍为 `1.0`，schema 仍保持 `astrbot.emotion_state.v2` 等版本化契约；关系性自我推断只留在插件内部运行态，不新增 public API 读取入口。 |
 
 旧版本发布记录统一放在 `CHANGELOG.md`。README 只展示当前版本，避免插件管理页从历史段落误抓旧版本号。
 
@@ -1909,6 +1898,7 @@ LLM 在这里只负责给出语义观察：`relationship_decision`、`conflict_a
 | `allow_fallibility_reset_backdoor` | bool | `true` | 是否允许重置瑕疵模拟状态。 |
 | `enable_shadow_diagnostics` | bool | `false` | 启用只读阴影诊断视图；默认关闭，只暴露非执行诊断信号。 |
 | `enable_integrated_self_state` | bool | `true` | 启用只读综合自我状态总线。 |
+| `allow_relational_self_public_export` | bool | `false` | 高风险开关；默认不公开导出关系性自我推断。开启后 `export_integrated_self_diagnostics` 会包含 self interpretation / turning point 相关数据，不可预料后果由开启者自行负责。 |
 | `integrated_self_memory_write_enabled` | bool | `true` | 记忆写入时附带综合自我状态注解。 |
 | `integrated_self_degradation_profile` | string | `balanced` | 综合自我状态成本档位：`full`、`balanced` 或 `minimal`。 |
 
@@ -2702,6 +2692,7 @@ enable_moral_repair_state = false
 | `moral_repair_memory_write_enabled` | bool | `true` | 记忆写入时附带道德修复状态注解。 |
 | `allow_moral_repair_reset_backdoor` | bool | `true` | 是否允许重置道德修复状态。 |
 | `enable_integrated_self_state` | bool | `true` | 启用只读综合自我状态总线。 |
+| `allow_relational_self_public_export` | bool | `false` | 高风险开关；默认不公开导出关系性自我推断。开启后 `export_integrated_self_diagnostics` 会包含 self interpretation / turning point 相关数据，不可预料后果由开启者自行负责。 |
 | `integrated_self_memory_write_enabled` | bool | `true` | 记忆写入时附带综合自我状态注解。 |
 | `integrated_self_degradation_profile` | string | `balanced` | 综合自我状态成本档位：`full`、`balanced` 或 `minimal`。`minimal` 会减少 trace 和提示词预算，但保留 schema、安全优先级、阻断动作和自有记忆注解。 |
 
@@ -3078,7 +3069,7 @@ $env:ASTRBOT_EXPECT_PLUGIN = "astrbot_plugin_sylanne"
 脚本会在输出 JSON 里写出 `expectedPluginRuntime`，包含插件列表 API 中返回的 `version`、`displayName`、`activated`、`author`、`astrbotVersion` 等只读字段。若目标插件存在但 `activated=false`，脚本会失败退出。需要把版本和显示名也作为硬断言时，可以额外设置：
 
 ```powershell
-$env:ASTRBOT_EXPECT_PLUGIN_VERSION = "2.8.0-exp"
+$env:ASTRBOT_EXPECT_PLUGIN_VERSION = "3.0.0-exp1"
 $env:ASTRBOT_EXPECT_PLUGIN_DISPLAY_NAME = "Sylanne"
 & $node scripts\remote_smoke_playwright.js
 ```

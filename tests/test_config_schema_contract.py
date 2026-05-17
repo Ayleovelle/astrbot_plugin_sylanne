@@ -266,6 +266,7 @@ class ConfigSchemaContractTests(unittest.TestCase):
             "allow_humanlike_reset_backdoor": ("bool", True),
             "enable_psychological_screening": ("bool", False),
             "enable_integrated_self_state": ("bool", True),
+            "allow_relational_self_public_export": ("bool", False),
             "integrated_self_memory_write_enabled": ("bool", True),
             "provider_id_cache_ttl_seconds": ("float", 30.0),
             "passive_load_fresh_seconds": ("float", 1.0),
