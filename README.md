@@ -45,12 +45,12 @@
 | `sylanne_memory_record_embedding_min_interval_seconds` | float | `300.0` | 同一会话写入侧补向量的最小间隔，默认 5 分钟，避免密集聊天持续调用 Embedding Provider。 |
 | `sylanne_memory_record_embedding_max_per_flush` | int | `1` | 单次 idle flush 最多为多少条新记忆生成向量；设为 `0` 可停止写入侧新建向量。 |
 
-`2.6.0` 是 `shadow memory` 工作流版：实时接管回复完整送达后不再直接回灌 `request.contexts`，而是释放为 `[sylanne_shadow_memory]` 临时连续性块。AstrBot Agent 继续拥有长期聊天上下文，Sylanne 只补“上一轮已发内容”这类 Agent 可能缺失的短线索；记忆召回查询会剥离这个临时块，避免把投递缓存误当长期记忆。
+本次更新重构了Sylanne的记忆模块的工作流程，避免对长期上下文造成负面影响。
 
-`2.6.0` 继续保留 `2.5.6` 的低端云盘 I/O 风险修复：checkpoint 合并写入、表情索引缓存并在线程中重建、Sylanne 记忆与表情学习批量单写，以及记忆向量召回 Embedding 热路径限流；请正在使用 `2.5.6` 及更早版本的用户尽快更新。
+`2.6.0` 继续保留 `2.5.6` 的低端云盘 I/O 风险修复：checkpoint 合并写入、表情索引缓存并在线程中重建、Sylanne 记忆与表情学习批量单写，以及记忆向量召回 Embedding 热路径限流；请正在使用 `2.5.5` 及更早版本的用户至少更新到 `2.5.6`，也可以直接更新到当前 `2.6.0`。
 
 > [!CAUTION]
-> <span style="color:#b91c1c"><strong>严重恶性 bug 警示：旧策略在低端云服务器上极大概率造成磁盘 I/O 饱和，实际表现接近“硬盘死锁”。强烈建议所有用户立即更新到 `2.6.0` 或更高版本。</strong></span>
+> <span style="color:#b91c1c"><strong>严重恶性 bug 警示：旧策略在低端云服务器上极大概率造成磁盘 I/O 饱和，实际表现接近“硬盘死锁”。强烈建议所有用户至少更新到 `2.5.6` 或更高版本。</strong></span>
 >
 > ![低端云盘 I/O 饱和警示](docs/assets/io-saturation-warning.svg)
 
