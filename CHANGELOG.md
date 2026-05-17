@@ -2,6 +2,28 @@
 
 本文件用于 AstrBot 插件市场/管理页展示更新内容。更完整的设计说明、公式推导、测试矩阵和维护手册见 `README.md`。
 
+## 3.0.0-exp4
+
+发布日期：2026-05-18
+
+### 新增
+
+- 发布 Sylanne 3.0 第四阶段 Turning Point Memory + Replay：把高置信关系性转折点候选合成为插件内部 bounded 记忆/回放信号。
+- `integrated_self.py` 新增 `build_turning_point_memory_replay(...)`，只接受高置信 self interpretation candidate 和内部关系时间层输入。
+- response 后的 self interpretation 记录链路同步生成 `turning_point_memory_replay`，后台 post assessment 路径和普通 response 路径保持一致。
+
+### 安全与边界
+
+- 转折点回放只保存 type、confidence、bounded_summary、future_tendency、phase、turning point types 和 constraints，不保存完整对话文本或 `relationship_time_weight` 明细。
+- replay 信号带 `session:speaker:group` 隔离键，不把 candidate 写成事实，也不进入默认 public API 契约。
+- `public_api.py` 不新增 turning point replay 查询、导出、列表或批量读取方法；默认 diagnostics 不导出 `turning_point_memory_replay`。
+
+### 验证
+
+- 新增高置信生成、低置信拒绝、bundle/replay 二次清洗和 raw 文本零泄漏测试。
+- 新增 public API 禁止方法与默认 diagnostics 封闭断言，覆盖 turning point memory/replay 外泄风险。
+- 全量测试结果以本次发布收尾验证为准。
+
 ## 3.0.0-exp3
 
 发布日期：2026-05-18

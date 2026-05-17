@@ -9,6 +9,7 @@ from integrated_self import (
     build_integrated_self_replay_bundle,
     build_integrated_self_snapshot,
     build_relational_self_prompt_fragment,
+    build_turning_point_memory_replay,
     build_self_arbitration_intent_plan,
     build_self_arbitration_prompt_fragment,
     build_self_interpretation,
@@ -108,6 +109,112 @@ class IntegratedSelfTests(unittest.TestCase):
         )
         self.assertTrue(diagnostics["sanitized"])
         self.assertNotIn("不是这样，以后提交说明要中文详细一些", str(diagnostics))
+
+    def test_turning_point_memory_replay_requires_high_confidence_internal_signal(self):
+        interpretation = build_self_interpretation(
+            current_user_text="不是这样，以后发布说明只写这次更新了什么，不要列很长旧功能。",
+            assistant_text="我会按这次更新聚焦整理。",
+            intent_plan={"primary_goal": "tool_task"},
+            relational_time_layer={
+                "internal_only": True,
+                "public_api_eligible": False,
+                "continuity": {
+                    "phase": "active_continuity",
+                    "relationship_time_weight": 0.78,
+                    "turning_point_types": ["correction", "collaboration"],
+                },
+            },
+        )
+
+        replay = build_turning_point_memory_replay(
+            interpretation,
+            session_key="s-exp4",
+            speaker_key="speaker-a",
+            group_key="group-a",
+            relational_time_layer={
+                "internal_only": True,
+                "public_api_eligible": False,
+                "continuity": {
+                    "phase": "active_continuity",
+                    "relationship_time_weight": 0.78,
+                    "turning_point_types": ["correction", "collaboration"],
+                },
+            },
+            now=200.0,
+        )
+
+        self.assertEqual(replay["schema_version"], "astrbot.turning_point_memory_replay.v1")
+        self.assertEqual(replay["kind"], "turning_point_memory_replay")
+        self.assertTrue(replay["internal_only"])
+        self.assertFalse(replay["public_api_eligible"])
+        self.assertTrue(replay["replayable"])
+        self.assertEqual(replay["isolation_key"], "s-exp4:speaker-a:group-a")
+        self.assertEqual(replay["turning_point"]["type"], "correction")
+        self.assertIn("bounded_summary", replay["turning_point"])
+        self.assertNotIn("不是这样，以后发布说明", str(replay))
+        self.assertNotIn("relationship_time_weight", str(replay))
+
+    def test_turning_point_memory_replay_rejects_low_confidence_candidate(self):
+        interpretation = build_self_interpretation(current_user_text="今天有点热")
+
+        replay = build_turning_point_memory_replay(
+            interpretation,
+            session_key="s-low",
+            speaker_key="speaker-a",
+            group_key="group-a",
+            relational_time_layer={
+                "internal_only": True,
+                "public_api_eligible": False,
+                "continuity": {"phase": "low_signal", "relationship_time_weight": 0.0},
+            },
+            now=200.0,
+        )
+
+        self.assertFalse(replay["replayable"])
+        self.assertFalse(replay["memory_write_eligible"])
+        self.assertFalse(replay["prompt_eligible"])
+        self.assertEqual(replay["turning_point"]["type"], "none")
+
+    def test_replay_bundle_can_carry_sanitized_internal_turning_point_replay(self):
+        snapshot = build_integrated_self_snapshot(
+            session_key="s-replay-turning-point",
+            emotion_snapshot={
+                "schema_version": "astrbot.emotion_state.v2",
+                "kind": "emotion_state",
+                "values": {"valence": 0.2, "affiliation": 0.4},
+            },
+            current_user_text="测试通过了，提交并发布这个 release",
+            assistant_text="已完成测试、提交和发布。",
+            relational_time_layer={
+                "internal_only": True,
+                "public_api_eligible": False,
+                "continuity": {
+                    "phase": "active_continuity",
+                    "relationship_time_weight": 0.88,
+                    "turning_point_types": ["collaboration"],
+                },
+            },
+            now=120.0,
+        )
+        replay_signal = build_turning_point_memory_replay(
+            snapshot["self_interpretation"],
+            session_key="s-replay-turning-point",
+            speaker_key="speaker-a",
+            group_key="group-a",
+            relational_time_layer=snapshot["relational_time_layer"],
+            now=121.0,
+        )
+        snapshot["turning_point_memory_replay"] = replay_signal
+
+        bundle = build_integrated_self_replay_bundle(snapshot, scenario_name="unit", created_at=130.0)
+        replay = replay_integrated_self_bundle(bundle)
+
+        self.assertIn("turning_point_memory_replay", bundle["core"])
+        self.assertTrue(bundle["core"]["turning_point_memory_replay"]["replayable"])
+        self.assertTrue(replay["turning_point_memory_replay"]["replayable"])
+        self.assertNotIn("self_interpretation", str(bundle))
+        self.assertNotIn("relationship_time_weight", str(bundle))
+        self.assertNotIn("测试通过了，提交并发布", str(bundle))
 
     def test_self_arbitration_intent_plan_prioritizes_current_technical_request(self):
         plan = build_self_arbitration_intent_plan(

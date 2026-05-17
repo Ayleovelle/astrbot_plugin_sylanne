@@ -15,6 +15,7 @@ PUBLIC_EXPERIENCE_REVIEW_SCHEMA_VERSION = "astrbot.experience_review.v1"
 PUBLIC_SELF_INTERPRETATION_SCHEMA_VERSION = "astrbot.self_interpretation.v1"
 PUBLIC_RELATIONAL_TURNING_POINT_SCHEMA_VERSION = "astrbot.relational_turning_point.v1"
 PUBLIC_RELATIONAL_TIME_LAYER_SCHEMA_VERSION = "astrbot.relational_time_layer.v1"
+PUBLIC_TURNING_POINT_MEMORY_REPLAY_SCHEMA_VERSION = "astrbot.turning_point_memory_replay.v1"
 
 DEGRADATION_PROFILES: tuple[str, ...] = ("full", "balanced", "minimal")
 
@@ -866,6 +867,74 @@ def build_self_interpretation(
     }
 
 
+def build_turning_point_memory_replay(
+    interpretation: dict[str, Any],
+    *,
+    session_key: str,
+    speaker_key: str = "",
+    group_key: str = "",
+    relational_time_layer: dict[str, Any] | None = None,
+    now: float | None = None,
+) -> dict[str, Any]:
+    now = time.time() if now is None else float(now)
+    candidate = interpretation.get("turning_point_candidate") if isinstance(interpretation.get("turning_point_candidate"), dict) else {}
+    relational_time_layer = relational_time_layer or {}
+    continuity = relational_time_layer.get("continuity") if isinstance(relational_time_layer.get("continuity"), dict) else {}
+    candidate_type = str(candidate.get("type") or "none")[:48]
+    confidence = clamp(candidate.get("confidence"))
+    internal_time = relational_time_layer.get("internal_only") is True and relational_time_layer.get("public_api_eligible") is False
+    phase = str(continuity.get("phase") or "low_signal")[:48]
+    replayable = candidate_type not in {"", "none"} and confidence >= 0.7 and internal_time and phase != "low_signal"
+    isolation_key = ":".join(
+        [
+            str(session_key or "global")[:96],
+            str(speaker_key or "speaker")[:96],
+            str(group_key or "group")[:96],
+        ],
+    )
+    turning_types = [
+        str(value)[:48]
+        for value in continuity.get("turning_point_types") or []
+        if str(value or "").strip()
+    ][:6]
+    bounded_summary = _bounded_excerpt(
+        str(interpretation.get("relational_meaning") or interpretation.get("event_meaning") or ""),
+        96,
+    )
+    future_tendency = _bounded_excerpt(str(interpretation.get("future_tendency") or ""), 96)
+    return {
+        "schema_version": PUBLIC_TURNING_POINT_MEMORY_REPLAY_SCHEMA_VERSION,
+        "kind": "turning_point_memory_replay",
+        "internal_only": True,
+        "read_only": True,
+        "public_api_eligible": False,
+        "replayable": replayable,
+        "memory_write_eligible": replayable,
+        "prompt_eligible": False,
+        "session_key": str(session_key or "global")[:96],
+        "isolation_key": isolation_key,
+        "created_at": now,
+        "turning_point": {
+            "type": candidate_type if candidate_type else "none",
+            "confidence": round(confidence, 6),
+            "bounded_summary": bounded_summary,
+            "future_tendency": future_tendency,
+        },
+        "relational_time": {
+            "phase": phase,
+            "turning_point_types": turning_types,
+        },
+        "constraints": [
+            "internal_research_signal_only",
+            "bounded_summary_only",
+            "speaker_group_isolated",
+            "candidate_not_fact",
+            "no_raw_conversation_text",
+            "not_public_api_eligible",
+        ],
+    }
+
+
 def build_relational_self_prompt_fragment(interpretation: dict[str, Any]) -> str:
     candidate = interpretation.get("turning_point_candidate") if isinstance(interpretation.get("turning_point_candidate"), dict) else {}
     if candidate.get("type") in {None, "", "none"}:
@@ -951,6 +1020,9 @@ def build_integrated_self_replay_bundle(
         "policy_plan": deepcopy(snapshot.get("policy_plan") or {}),
         "summary": snapshot.get("summary"),
     }
+    turning_replay = snapshot.get("turning_point_memory_replay")
+    if isinstance(turning_replay, dict) and turning_replay.get("internal_only") is True:
+        core["turning_point_memory_replay"] = _sanitize_turning_point_memory_replay(turning_replay)
     checksum = _stable_hash(core)
     return {
         "schema_version": PUBLIC_INTEGRATED_SELF_REPLAY_SCHEMA_VERSION,
@@ -965,10 +1037,38 @@ def build_integrated_self_replay_bundle(
     }
 
 
+def _sanitize_turning_point_memory_replay(replay: dict[str, Any]) -> dict[str, Any]:
+    turning_point = replay.get("turning_point") if isinstance(replay.get("turning_point"), dict) else {}
+    relational_time = replay.get("relational_time") if isinstance(replay.get("relational_time"), dict) else {}
+    return {
+        "schema_version": PUBLIC_TURNING_POINT_MEMORY_REPLAY_SCHEMA_VERSION,
+        "kind": "turning_point_memory_replay",
+        "internal_only": True,
+        "public_api_eligible": False,
+        "replayable": bool(replay.get("replayable")),
+        "memory_write_eligible": bool(replay.get("memory_write_eligible")),
+        "prompt_eligible": False,
+        "session_key": str(replay.get("session_key") or "global")[:96],
+        "isolation_key": str(replay.get("isolation_key") or "")[:288],
+        "created_at": replay.get("created_at"),
+        "turning_point": {
+            "type": str(turning_point.get("type") or "none")[:48],
+            "confidence": round(clamp(turning_point.get("confidence")), 6),
+            "bounded_summary": _bounded_excerpt(str(turning_point.get("bounded_summary") or ""), 96),
+            "future_tendency": _bounded_excerpt(str(turning_point.get("future_tendency") or ""), 96),
+        },
+        "relational_time": {
+            "phase": str(relational_time.get("phase") or "low_signal")[:48],
+            "turning_point_types": _string_list(relational_time.get("turning_point_types"), limit=6),
+        },
+        "constraints": _string_list(replay.get("constraints"), limit=8),
+    }
+
+
 def replay_integrated_self_bundle(bundle: dict[str, Any]) -> dict[str, Any]:
     core = deepcopy(bundle.get("core") if isinstance(bundle.get("core"), dict) else {})
     checksum = _stable_hash(core)
-    return {
+    result = {
         "schema_version": PUBLIC_INTEGRATED_SELF_REPLAY_SCHEMA_VERSION,
         "kind": "integrated_self_replay_result",
         "deterministic": True,
@@ -979,6 +1079,9 @@ def replay_integrated_self_bundle(bundle: dict[str, Any]) -> dict[str, Any]:
         "risk": deepcopy(core.get("risk") or {}),
         "state_index": deepcopy(core.get("state_index") or {}),
     }
+    if isinstance(core.get("turning_point_memory_replay"), dict):
+        result["turning_point_memory_replay"] = _sanitize_turning_point_memory_replay(core["turning_point_memory_replay"])
+    return result
 
 
 def probe_integrated_self_compatibility(payload: dict[str, Any]) -> dict[str, Any]:
@@ -1058,6 +1161,7 @@ def build_integrated_self_diagnostics(
             "relational_turning_point",
             "turning_point_candidate",
             "relational_time_layer",
+            "turning_point_memory_replay",
         ],
     }
     if include_internal_self_interpretation:

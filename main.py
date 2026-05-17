@@ -149,6 +149,7 @@ try:
         build_integrated_self_memory_annotation,
         build_integrated_self_prompt_fragment,
         build_relational_self_prompt_fragment,
+        build_turning_point_memory_replay,
         build_self_arbitration_intent_plan,
         build_self_arbitration_prompt_fragment,
         build_self_interpretation,
@@ -317,6 +318,7 @@ except ImportError:
         build_integrated_self_memory_annotation,
         build_integrated_self_prompt_fragment,
         build_relational_self_prompt_fragment,
+        build_turning_point_memory_replay,
         build_self_arbitration_intent_plan,
         build_self_arbitration_prompt_fragment,
         build_self_interpretation,
@@ -673,7 +675,7 @@ def get_emotional_state_plugin(context: Context) -> Any | None:
     PLUGIN_NAME,
     "Aylovelle.S.S",
     "Soulful Yearning Lifelike AstrBot Neural Narrative Engine：维护情绪、人格、记忆、氛围和表达节奏的 Sylanne",
-    "3.0.0-exp3",
+    "3.0.0-exp4",
     "",
 )
 class EmotionalStatePlugin(Star):
@@ -2392,7 +2394,7 @@ class EmotionalStatePlugin(Star):
             return
 
         if self._background_post_assessment_enabled():
-            self._record_self_interpretation(identity.conversation_id, response_text)
+            self._record_self_interpretation(identity.conversation_id, response_text, identity)
             self._schedule_background_post_assessment(
                 event,
                 response_text,
@@ -2407,7 +2409,7 @@ class EmotionalStatePlugin(Star):
 
         await self._update_from_llm_response(event, response_text, observed_at=observed_at)
         self._record_experience_review(identity.conversation_id, response_text)
-        self._record_self_interpretation(identity.conversation_id, response_text)
+        self._record_self_interpretation(identity.conversation_id, response_text, identity)
         if not realtime_response_intercepted:
             self._discard_conversation_pending_response_epochs_through(
                 identity.conversation_id,
@@ -12389,6 +12391,7 @@ class EmotionalStatePlugin(Star):
         self,
         session_key: str,
         assistant_text: str,
+        identity: ConversationIdentity | None = None,
     ) -> None:
         state = self._understanding_closed_loop_state().setdefault(session_key, {})
         state["self_interpretation"] = build_self_interpretation(
@@ -12407,6 +12410,14 @@ class EmotionalStatePlugin(Star):
             session_key=session_key,
             self_interpretation=dict(state.get("self_interpretation") or {}),
             relationship_candidate_summary=dict(state.get("relationship_candidate_summary") or {}),
+            now=self._observed_now(),
+        )
+        state["turning_point_memory_replay"] = build_turning_point_memory_replay(
+            dict(state.get("self_interpretation") or {}),
+            session_key=session_key,
+            speaker_key=(identity.speaker_track_id or identity.speaker_id) if identity is not None else "",
+            group_key=identity.group_id if identity is not None else "",
+            relational_time_layer=dict(state.get("relational_time_layer") or {}),
             now=self._observed_now(),
         )
 
@@ -12434,6 +12445,7 @@ class EmotionalStatePlugin(Star):
         latest.setdefault("relationship_candidate_summary", {})
         latest.setdefault("self_interpretation", {})
         latest.setdefault("relational_time_layer", {})
+        latest.setdefault("turning_point_memory_replay", {})
         return latest
 
     def _append_realtime_ordinary_history_backfills_if_any(

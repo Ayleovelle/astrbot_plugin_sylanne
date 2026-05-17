@@ -240,6 +240,7 @@ class PublicApiMemoryPart01(MemoryPayloadPublicApiTests):
         self.assertNotIn("self_interpretation", diagnostics)
         self.assertNotIn("turning_point", diagnostics)
         self.assertNotIn("relational_time_layer", diagnostics)
+        self.assertNotIn("turning_point_memory_replay", diagnostics)
         self.assertNotIn("internal_coevolution_signal", str(diagnostics))
         self.assertNotIn("relationship_time_weight", str(diagnostics))
 
@@ -291,6 +292,10 @@ class PublicApiMemoryPart01(MemoryPayloadPublicApiTests):
             "query_coevolution_state",
             "export_coevolution_model",
             "list_coevolution_events",
+            "get_turning_point_memory_replay",
+            "query_turning_point_memory_replay",
+            "export_turning_point_memory_replay",
+            "list_turning_point_replay_events",
         }
 
         self.assertTrue(public_names.isdisjoint(forbidden))
