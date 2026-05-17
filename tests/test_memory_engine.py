@@ -11,8 +11,26 @@ from memory_engine import (
     reinforce_recalled_memories,
 )
 
-
 class SylanneMemoryEngineTests(unittest.TestCase):
+    def test_relationship_candidate_summary_is_not_memory_event_by_default(self):
+        state = SylanneMemoryState.initial(now=0.0)
+        summary = {
+            "kind": "relationship_candidate_summary",
+            "read_only": True,
+            "memory_write_eligible_by_default": False,
+            "evidence": [{"source": "lifelike_learning_state", "excerpt": "rapport=0.7"}],
+        }
+        state = observe_memory_event(
+            state,
+            text="",
+            session_key="s-memory",
+            speaker_id="u1",
+            extra_annotations={"relationship_candidate_summary": summary},
+            now=10.0,
+        )
+
+        self.assertEqual(state.records, [])
+
     def test_memory_dynamics_are_derived_without_user_tunable_parameters(self):
         emotion = {
             "emotion": {

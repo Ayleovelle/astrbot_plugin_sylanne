@@ -3,10 +3,13 @@ import unittest
 from integrated_self import (
     PUBLIC_INTEGRATED_SELF_SCHEMA_VERSION,
     build_integrated_self_diagnostics,
+    build_integrated_self_experience_review,
     build_integrated_self_memory_annotation,
     build_integrated_self_prompt_fragment,
     build_integrated_self_replay_bundle,
     build_integrated_self_snapshot,
+    build_self_arbitration_intent_plan,
+    build_self_arbitration_prompt_fragment,
     build_state_annotations_memory_envelope,
     probe_integrated_self_compatibility,
     replay_integrated_self_bundle,
@@ -14,6 +17,44 @@ from integrated_self import (
 
 
 class IntegratedSelfTests(unittest.TestCase):
+    def test_self_arbitration_intent_plan_prioritizes_current_technical_request(self):
+        plan = build_self_arbitration_intent_plan(
+            current_user_text="帮我跑测试并提交 release",
+            expression_policy={"posture": "playful", "verbosity": "short"},
+            interpretation_candidates=[{"kind": "homophone", "confidence": 0.9}],
+            lifecycle_audit={"should_inject_shadow": True, "topic_state": "completed"},
+            snapshot={
+                "response_posture": "steady_presence",
+                "state_index": {"boundary_need": 0.1, "silence_comfort": 0.1},
+                "risk": {"safety_priority": "normal"},
+                "arbitration": {"reasons": ["old memory wants playful continuation"]},
+            },
+        )
+
+        self.assertEqual(plan["schema_version"], "astrbot.self_arbitration_intent_plan.v1")
+        self.assertEqual(plan["primary_goal"], "tool_task")
+        self.assertEqual(plan["current_user_priority"], "highest")
+        self.assertEqual(plan["tone"], "restrained")
+        self.assertEqual(plan["memory_shadow_boundary"], "advisory_only")
+        self.assertIn("technical_request", plan["reasons"])
+        self.assertIn("current_user_text", plan["priority_order"][0])
+
+    def test_self_arbitration_intent_plan_prefers_clarification_for_low_confidence(self):
+        plan = build_self_arbitration_intent_plan(
+            current_user_text="桥隧猫？",
+            expression_policy={"posture": "brief_answer", "verbosity": "normal"},
+            interpretation_candidates=[{"kind": "slang", "confidence": 0.3}],
+            lifecycle_audit={},
+            snapshot={"state_index": {"boundary_need": 0.2, "silence_comfort": 0.2}},
+        )
+
+        self.assertEqual(plan["primary_goal"], "clarify")
+        self.assertLessEqual(plan["initiative_level"], 0.35)
+        prompt = build_self_arbitration_prompt_fragment(plan)
+        self.assertIn("[sylanne_self_arbitration]", prompt)
+        self.assertIn("current_user_priority=highest", prompt)
+        self.assertIn("不要让旧记忆", prompt)
+
     def test_crisis_like_psychological_signal_has_top_priority(self):
         snapshot = build_integrated_self_snapshot(
             session_key="s1",
@@ -157,6 +198,28 @@ class IntegratedSelfTests(unittest.TestCase):
         self.assertNotIn("generate_deception_strategy", snapshot["allowed_actions"])
         self.assertTrue(any("non_executive_shadow_impulse" in item["summary"] for item in snapshot["causal_trace"]))
 
+    def test_integrated_snapshot_exposes_intent_plan_and_diagnostics(self):
+        snapshot = build_integrated_self_snapshot(
+            session_key="s-intent",
+            emotion_snapshot={
+                "schema_version": "astrbot.emotion_state.v2",
+                "kind": "emotion_state",
+                "values": {"valence": 0.2, "affiliation": 0.4},
+            },
+            current_user_text="帮我修复测试报错",
+            expression_policy={"posture": "playful", "verbosity": "short"},
+            interpretation_candidates=[{"kind": "homophone", "confidence": 0.9}],
+            lifecycle_audit={"should_inject_shadow": True},
+            now=100.0,
+        )
+
+        self.assertEqual(snapshot["intent_plan"]["primary_goal"], "tool_task")
+        diagnostics = build_integrated_self_diagnostics(snapshot)
+        self.assertEqual(diagnostics["intent_plan"]["primary_goal"], "tool_task")
+        prompt = build_integrated_self_prompt_fragment(snapshot)
+        self.assertIn("[sylanne_self_arbitration]", prompt)
+        self.assertIn("primary_goal=tool_task", prompt)
+
     def test_memory_annotation_omits_raw_snapshots(self):
         snapshot = build_integrated_self_snapshot(
             session_key="s1",
@@ -299,6 +362,22 @@ class IntegratedSelfTests(unittest.TestCase):
         self.assertIn("acknowledge_possible_overreaction", snapshot["allowed_actions"])
         self.assertIn("repair_if_misread", snapshot["allowed_actions"])
         self.assertTrue(snapshot["risk"]["unfair_argument_risk_active"])
+
+    def test_experience_review_flags_memory_overuse_and_technical_tone(self):
+        review = build_integrated_self_experience_review(
+            current_user_text="帮我修复测试报错",
+            assistant_text="呜呜我记得我们之前很亲近，所以先撒个娇再说代码。",
+            intent_plan={"primary_goal": "tool_task"},
+            expression_policy={"posture": "tool_like"},
+            lifecycle_audit={"should_inject_shadow": True},
+            ledger_tail=[{"role": "user", "raw_text": "新的测试报错", "topic_state": "open"}],
+        )
+
+        self.assertEqual(review["schema_version"], "astrbot.experience_review.v1")
+        self.assertTrue(review["flags"]["overused_memory_or_shadow"])
+        self.assertTrue(review["flags"]["technical_task_emotional_interference"])
+        self.assertTrue(review["read_only"])
+        self.assertFalse(review["prompt_eligible"])
 
     def test_replay_bundle_is_sanitized_and_deterministic(self):
         snapshot = build_integrated_self_snapshot(

@@ -11,6 +11,7 @@ from typing import Any
 
 PUBLIC_LIFELIKE_LEARNING_SCHEMA_VERSION = "astrbot.lifelike_learning_state.v1"
 PUBLIC_COMMON_GROUND_SCHEMA_VERSION = "astrbot.common_ground_lexicon.v1"
+PUBLIC_RELATIONSHIP_CANDIDATE_SCHEMA_VERSION = "astrbot.relationship_candidate_summary.v1"
 
 LIFELIKE_DIMENSIONS: tuple[str, ...] = (
     "familiarity",
@@ -395,6 +396,70 @@ class LifelikeObservation:
     source: str = "heuristic"
     reason: str = ""
     flags: list[str] = field(default_factory=list)
+
+
+def build_relationship_candidate_summary(
+    state: LifelikeLearningState | dict[str, Any],
+    *,
+    session_key: str | None = None,
+    speaker_key: str = "",
+    group_key: str = "",
+    evidence_sources: list[dict[str, Any]] | None = None,
+) -> dict[str, Any]:
+    if isinstance(state, LifelikeLearningState):
+        values = state.values
+        profile = state.user_profile
+        flags = state.flags
+    else:
+        values = _values_from_public_or_state_dict(state)
+        profile = UserProfileEvidence.from_dict(state.get("user_profile") if isinstance(state, dict) else {})
+        flags = _string_list(state.get("flags") if isinstance(state, dict) else [], limit=16)
+    rapport = clamp(values.get("rapport", 0.0))
+    common = clamp(values.get("common_ground", 0.0))
+    boundary = clamp(values.get("boundary_sensitivity", 0.0))
+    trust = clamp(0.36 * rapport + 0.34 * common + 0.18 * values.get("preference_confidence", 0.0) - 0.18 * boundary)
+    familiarity = clamp(0.48 * common + 0.28 * rapport + 0.04 * len(profile.likes) + 0.03 * len(profile.facts))
+    boundary_comfort = clamp(1.0 - boundary)
+    repair_state = "watchful" if "boundary_preference_evidence" in flags or boundary >= 0.55 else "stable"
+    evidence = []
+    for item in (evidence_sources or [])[:6]:
+        if not isinstance(item, dict):
+            continue
+        evidence.append(
+            {
+                "source": str(item.get("source") or "unknown")[:80],
+                "excerpt": str(item.get("excerpt") or "")[:160],
+            },
+        )
+    if not evidence:
+        evidence.append(
+            {
+                "source": "lifelike_learning_state",
+                "excerpt": f"common_ground={common:.2f}; rapport={rapport:.2f}; boundary={boundary:.2f}",
+            },
+        )
+    confidence = clamp(0.28 + 0.28 * common + 0.22 * rapport + 0.04 * min(len(evidence), 4))
+    expiry_risk = clamp(0.55 * boundary + 0.25 * (1.0 - confidence))
+    return {
+        "schema_version": PUBLIC_RELATIONSHIP_CANDIDATE_SCHEMA_VERSION,
+        "kind": "relationship_candidate_summary",
+        "session_key": session_key,
+        "read_only": True,
+        "prompt_eligible_by_default": False,
+        "memory_write_eligible_by_default": False,
+        "familiarity": round(familiarity, 6),
+        "trust": round(trust, 6),
+        "boundary_comfort": round(boundary_comfort, 6),
+        "repair_state": repair_state,
+        "confidence": round(confidence, 6),
+        "expiry_risk": round(expiry_risk, 6),
+        "evidence": evidence,
+        "isolation": {
+            "speaker_key": str(speaker_key or ""),
+            "group_key": str(group_key or ""),
+            "session_scoped": True,
+        },
+    }
 
 
 def common_ground_evidence_from_interpretation(candidate: dict[str, Any]) -> dict[str, Any]:

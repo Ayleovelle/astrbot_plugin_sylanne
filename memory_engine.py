@@ -790,10 +790,12 @@ def observe_memory_event(
     personality_drift_snapshot: dict[str, Any] | None = None,
     lifelike_snapshot: dict[str, Any] | None = None,
     group_atmosphere_snapshot: dict[str, Any] | None = None,
+    extra_annotations: dict[str, Any] | None = None,
     now: float | None = None,
     event_time: dict[str, Any] | None = None,
 ) -> SylanneMemoryState:
     timestamp = time.time() if now is None else float(now)
+    del extra_annotations
     text = _clean_text(text, 1600)
     if not text:
         return state

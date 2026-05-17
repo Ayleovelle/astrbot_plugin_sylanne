@@ -96,6 +96,7 @@ try:
         build_lifelike_memory_annotation,
         build_lifelike_prompt_fragment,
         build_proactive_topic_assessment_prompt,
+        build_relationship_candidate_summary,
         derive_initiative_policy,
         derive_proactive_speech_decision,
         rank_proactive_topics,
@@ -143,8 +144,11 @@ try:
     from .integrated_self import (
         PUBLIC_INTEGRATED_SELF_SCHEMA_VERSION,
         build_integrated_self_diagnostics,
+        build_integrated_self_experience_review,
         build_integrated_self_memory_annotation,
         build_integrated_self_prompt_fragment,
+        build_self_arbitration_intent_plan,
+        build_self_arbitration_prompt_fragment,
         build_integrated_self_replay_bundle,
         build_integrated_self_snapshot,
         build_state_annotations_memory_envelope,
@@ -256,6 +260,7 @@ except ImportError:
         build_lifelike_memory_annotation,
         build_lifelike_prompt_fragment,
         build_proactive_topic_assessment_prompt,
+        build_relationship_candidate_summary,
         derive_initiative_policy,
         derive_proactive_speech_decision,
         rank_proactive_topics,
@@ -303,8 +308,11 @@ except ImportError:
     from integrated_self import (
         PUBLIC_INTEGRATED_SELF_SCHEMA_VERSION,
         build_integrated_self_diagnostics,
+        build_integrated_self_experience_review,
         build_integrated_self_memory_annotation,
         build_integrated_self_prompt_fragment,
+        build_self_arbitration_intent_plan,
+        build_self_arbitration_prompt_fragment,
         build_integrated_self_replay_bundle,
         build_integrated_self_snapshot,
         build_state_annotations_memory_envelope,
@@ -657,7 +665,7 @@ def get_emotional_state_plugin(context: Context) -> Any | None:
     PLUGIN_NAME,
     "Aylovelle.S.S",
     "Soulful Yearning Lifelike AstrBot Neural Narrative Engine：维护情绪、人格、记忆、氛围和表达节奏的 Sylanne",
-    "2.7.0",
+    "2.8.0-exp",
     "",
 )
 class EmotionalStatePlugin(Star):
@@ -1076,6 +1084,10 @@ class EmotionalStatePlugin(Star):
         input_epoch = self._bump_conversation_input_epoch(session_key, event=event)
         self._record_conversation_pending_response_epoch(session_key, input_epoch)
         current_user_text = self._event_text(event) or str(getattr(request, "prompt", "") or "")
+        observed_at = self._event_observed_at(event)
+        self._understanding_closed_loop_state().setdefault(session_key, {})[
+            "current_user_text"
+        ] = current_user_text
         current_user_media_observation_text = self._current_user_media_observation_text(event)
         if not current_user_text.strip() and current_user_media_observation_text:
             current_user_text = current_user_media_observation_text
@@ -1107,7 +1119,38 @@ class EmotionalStatePlugin(Star):
         ] = expression_policy
         if expression_policy.get("posture") != "brief_answer" or expression_policy.get("reasons") != ["default_conversational_turn"]:
             self._append_expression_policy_context(request, expression_policy)
-        observed_at = self._event_observed_at(event)
+        intent_plan = None
+        if self._cfg_bool("enable_integrated_self_state", True):
+            intent_plan = build_self_arbitration_intent_plan(
+                current_user_text=current_user_text,
+                expression_policy=expression_policy,
+                interpretation_candidates=interpretation_candidates,
+                snapshot={},
+            )
+        if intent_plan:
+            self._understanding_closed_loop_state().setdefault(session_key, {})[
+                "intent_plan"
+            ] = intent_plan
+            if intent_plan.get("primary_goal") not in {"answer", "quiet_or_minimal"}:
+                self._append_self_arbitration_context(request, intent_plan)
+        if lifelike_enabled:
+            try:
+                relationship_source = dict(lifelike_state_to_public_payload(
+                    lifelike_learning_state,
+                    session_key=session_key,
+                    exposure="internal",
+                )) if lifelike_learning_state is not None else {}
+                relationship_summary = build_relationship_candidate_summary(
+                    relationship_source,
+                    session_key=session_key,
+                    speaker_key=identity.speaker_track_id,
+                    group_key=identity.conversation_id if identity.is_group else "",
+                )
+                self._understanding_closed_loop_state().setdefault(session_key, {})[
+                    "relationship_candidate_summary"
+                ] = relationship_summary
+            except Exception as exc:
+                self._log_warning(f"Sylanne relationship candidate summary skipped: {exc}")
         active_followup_payload = self._active_agent_followup_merge_payload(
             session_key,
             identity,
@@ -2330,6 +2373,7 @@ class EmotionalStatePlugin(Star):
             return
 
         await self._update_from_llm_response(event, response_text, observed_at=observed_at)
+        self._record_experience_review(identity.conversation_id, response_text)
         if not realtime_response_intercepted:
             self._discard_conversation_pending_response_epochs_through(
                 identity.conversation_id,
@@ -4393,6 +4437,10 @@ class EmotionalStatePlugin(Star):
         include_fallibility: bool = True,
         include_psychological: bool = True,
         degradation_profile: str | None = None,
+        current_user_text: str = "",
+        expression_policy: dict[str, Any] | None = None,
+        interpretation_candidates: list[dict[str, Any]] | None = None,
+        lifecycle_audit: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         """Public API: return the read-only integrated self-state bus."""
         resolved_session_key = self._resolve_public_session_key(
@@ -4475,6 +4523,10 @@ class EmotionalStatePlugin(Star):
                 degradation_profile or self._integrated_self_degradation_profile()
             ),
             action_blocking=self._shadow_action_blocking_enabled(),
+            current_user_text=current_user_text or (str(getattr(request, "prompt", "") or "") if request is not None else ""),
+            expression_policy=expression_policy,
+            interpretation_candidates=interpretation_candidates,
+            lifecycle_audit=lifecycle_audit,
         )
 
     async def get_integrated_self_prompt_fragment(
@@ -12206,6 +12258,17 @@ class EmotionalStatePlugin(Star):
             source="expression_policy",
         )
 
+    def _append_self_arbitration_context(
+        self,
+        request: ProviderRequest,
+        intent_plan: dict[str, Any],
+    ) -> bool:
+        return self._append_temp_text_part(
+            request,
+            build_self_arbitration_prompt_fragment(intent_plan),
+            source="self_arbitration",
+        )
+
     def _append_lifecycle_audit_context(
         self,
         request: ProviderRequest,
@@ -12235,6 +12298,22 @@ class EmotionalStatePlugin(Star):
             self._last_understanding_closed_loop = state
         return state
 
+    def _record_experience_review(
+        self,
+        session_key: str,
+        assistant_text: str,
+    ) -> None:
+        state = self._understanding_closed_loop_state().setdefault(session_key, {})
+        review = build_integrated_self_experience_review(
+            current_user_text=str(state.get("current_user_text") or ""),
+            assistant_text=assistant_text,
+            intent_plan=dict(state.get("intent_plan") or {}),
+            expression_policy=dict(state.get("expression_policy") or {}),
+            lifecycle_audit=dict(state.get("lifecycle_audit") or {}),
+            ledger_tail=list(state.get("ledger_tail") or []),
+        )
+        state["experience_review"] = review
+
     def _understanding_closed_loop_diagnostics(self, session_key: str) -> dict[str, Any]:
         key = str(session_key or "global")
         latest = dict(self._understanding_closed_loop_state().get(key) or {})
@@ -12255,6 +12334,9 @@ class EmotionalStatePlugin(Star):
         latest.setdefault("interpretation_candidates", [])
         latest.setdefault("expression_policy", {})
         latest.setdefault("lifecycle_audit", {})
+        latest.setdefault("intent_plan", {})
+        latest.setdefault("experience_review", {})
+        latest.setdefault("relationship_candidate_summary", {})
         return latest
 
     def _append_realtime_ordinary_history_backfills_if_any(

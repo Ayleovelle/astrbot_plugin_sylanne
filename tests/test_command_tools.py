@@ -1532,6 +1532,20 @@ class CommandAndToolSmokeTests(unittest.TestCase):
                 "should_inject_shadow": False,
                 "topic_state": "completed",
             },
+            "intent_plan": {
+                "primary_goal": "tool_task",
+                "current_user_priority": "highest",
+            },
+            "experience_review": {
+                "read_only": True,
+                "prompt_eligible": False,
+                "flags": {"technical_task_emotional_interference": False},
+            },
+            "relationship_candidate_summary": {
+                "read_only": True,
+                "memory_write_eligible_by_default": False,
+                "isolation": {"speaker_key": "u1", "group_key": ""},
+            },
         }
         plugin._conversation_event_ledger.record(
             LedgerEvent(
@@ -1553,6 +1567,9 @@ class CommandAndToolSmokeTests(unittest.TestCase):
             "记忆犹新",
         )
         self.assertEqual(closed_loop["lifecycle_audit"]["topic_state"], "completed")
+        self.assertEqual(closed_loop["intent_plan"]["primary_goal"], "tool_task")
+        self.assertFalse(closed_loop["experience_review"]["prompt_eligible"])
+        self.assertFalse(closed_loop["relationship_candidate_summary"]["memory_write_eligible_by_default"])
         self.assertEqual(closed_loop["ledger_tail"][0]["event_id"], "evt-1")
         self.assertTrue(payload["read_only"])
 

@@ -39,6 +39,34 @@ def _shanghai_epoch(year, month, day, hour, minute=0, second=0):
 
 
 class AstrBotLifecyclePart15(AstrBotLifecycleTests):
+    def test_request_injects_self_arbitration_without_overriding_raw_text(self):
+        plugin = new_plugin(
+            {
+                "assessment_timing": "post",
+                "inject_state": False,
+                "enable_realtime_chat": True,
+                "enable_sticker_reaction": False,
+                "use_llm_assessor": False,
+            },
+        )
+        self._bind_common_state_hooks(plugin)
+        request = fake_request(session_id="s-self-arbitration", prompt="帮我修复测试报错")
+
+        asyncio.run(
+            plugin.on_llm_request(
+                FakeEvent("s-self-arbitration", message="帮我修复测试报错", sender_id="u1"),
+                request,
+            ),
+        )
+
+        injected = "\n".join(self._request_text_parts(request))
+        self.assertIn("[sylanne_self_arbitration]", injected)
+        self.assertIn("primary_goal=tool_task", injected)
+        self.assertIn("当前用户原文优先", injected)
+        self.assertEqual(request.prompt, "帮我修复测试报错")
+        diagnostics = plugin._understanding_closed_loop_diagnostics("s-self-arbitration")
+        self.assertEqual(diagnostics["intent_plan"]["primary_goal"], "tool_task")
+
     def test_napcat_recall_payload_is_parsed_from_raw_notice(self):
         plugin = new_plugin()
         event = SimpleNamespace(

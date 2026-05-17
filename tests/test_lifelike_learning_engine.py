@@ -7,6 +7,7 @@ from lifelike_learning_engine import (
     LifelikeLearningState,
     common_ground_evidence_from_interpretation,
     build_lifelike_memory_annotation,
+    build_relationship_candidate_summary,
     build_lifelike_prompt_fragment,
     derive_initiative_policy,
     derive_proactive_speech_decision,
@@ -271,11 +272,33 @@ class LifelikeLearningEngineTests(unittest.TestCase):
 
         self.assertNotIn("progress_check", kinds)
         self.assertIn("playful_ping", kinds)
+    def test_relationship_candidate_summary_is_read_only_and_evidence_bound(self):
+        state = LifelikeLearningState.initial()
+        state.values.update(
+            {
+                "rapport": 0.72,
+                "common_ground": 0.68,
+                "boundary_sensitivity": 0.22,
+            },
+        )
+        state.user_profile.likes.append("短句自然聊天")
+        state.user_profile.boundary_notes.append("不要外传私聊内容")
+        summary = build_relationship_candidate_summary(
+            state,
+            session_key="group-1:u1",
+            speaker_key="u1",
+            group_key="group-1",
+            evidence_sources=[{"source": "explicit_user_text", "excerpt": "我喜欢你短一点自然聊"}],
+        )
 
-
-if __name__ == "__main__":
-    unittest.main()
-
+        self.assertEqual(summary["schema_version"], "astrbot.relationship_candidate_summary.v1")
+        self.assertTrue(summary["read_only"])
+        self.assertFalse(summary["memory_write_eligible_by_default"])
+        self.assertEqual(summary["isolation"]["speaker_key"], "u1")
+        self.assertEqual(summary["isolation"]["group_key"], "group-1")
+        self.assertGreater(summary["confidence"], 0.0)
+        self.assertGreaterEqual(summary["expiry_risk"], 0.0)
+        self.assertIn("explicit_user_text", summary["evidence"][0]["source"])
     def test_common_ground_evidence_from_interpretation_marks_playful(self):
         evidence = common_ground_evidence_from_interpretation(
             {
@@ -291,3 +314,7 @@ if __name__ == "__main__":
         self.assertEqual(evidence["meaning"], "记忆犹新")
         self.assertTrue(evidence["is_playful"])
         self.assertEqual(evidence["source"], "interpretation_candidate")
+
+
+if __name__ == "__main__":
+    unittest.main()

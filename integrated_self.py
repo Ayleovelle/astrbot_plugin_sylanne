@@ -10,6 +10,8 @@ PUBLIC_INTEGRATED_SELF_SCHEMA_VERSION = "astrbot.integrated_self_state.v1"
 PUBLIC_INTEGRATED_SELF_REPLAY_SCHEMA_VERSION = "astrbot.integrated_self_replay.v1"
 PUBLIC_INTEGRATED_SELF_DIAGNOSTICS_SCHEMA_VERSION = "astrbot.integrated_self_diagnostics.v1"
 PUBLIC_STATE_ANNOTATIONS_ENVELOPE_SCHEMA_VERSION = "astrbot.state_annotations_envelope.v1"
+PUBLIC_SELF_ARBITRATION_INTENT_PLAN_SCHEMA_VERSION = "astrbot.self_arbitration_intent_plan.v1"
+PUBLIC_EXPERIENCE_REVIEW_SCHEMA_VERSION = "astrbot.experience_review.v1"
 
 DEGRADATION_PROFILES: tuple[str, ...] = ("full", "balanced", "minimal")
 
@@ -35,6 +37,10 @@ def build_integrated_self_snapshot(
     include_raw_snapshots: bool = False,
     degradation_profile: str = "balanced",
     action_blocking: bool = False,
+    current_user_text: str = "",
+    expression_policy: dict[str, Any] | None = None,
+    interpretation_candidates: list[dict[str, Any]] | None = None,
+    lifecycle_audit: dict[str, Any] | None = None,
     now: float | None = None,
 ) -> dict[str, Any]:
     """Fuse module snapshots into one read-only self-state contract."""
@@ -160,6 +166,13 @@ def build_integrated_self_snapshot(
     payload["policy_plan"] = build_integrated_self_policy_plan(
         payload,
         degradation_profile=degradation_profile,
+    )
+    payload["intent_plan"] = build_self_arbitration_intent_plan(
+        current_user_text=current_user_text,
+        expression_policy=expression_policy,
+        interpretation_candidates=interpretation_candidates,
+        lifecycle_audit=lifecycle_audit,
+        snapshot=payload,
     )
     payload["compatibility"] = probe_integrated_self_compatibility(payload)
     if include_raw_snapshots:
@@ -583,6 +596,144 @@ def build_integrated_self_policy_plan(
     }
 
 
+def build_self_arbitration_intent_plan(
+    *,
+    current_user_text: str,
+    expression_policy: dict[str, Any] | None = None,
+    interpretation_candidates: list[dict[str, Any]] | None = None,
+    lifecycle_audit: dict[str, Any] | None = None,
+    snapshot: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    expression_policy = expression_policy or {}
+    interpretation_candidates = interpretation_candidates or []
+    lifecycle_audit = lifecycle_audit or {}
+    snapshot = snapshot or {}
+    state_index = snapshot.get("state_index") if isinstance(snapshot.get("state_index"), dict) else {}
+    text = str(current_user_text or "")
+    lowered = text.lower()
+    technical_markers = ("提交", "commit", "release", "版本", "测试", "报错", "修复", "文件", "代码", "打包", "github", "git")
+    technical = any(marker in lowered for marker in technical_markers)
+    low_confidence = any(clamp(item.get("confidence", 0.0)) < 0.55 for item in interpretation_candidates)
+    expression_posture = str(expression_policy.get("posture") or "brief_answer")
+    boundary_need = clamp(state_index.get("boundary_need", 0.0))
+    silence_comfort = clamp(state_index.get("silence_comfort", 0.0))
+    reasons: list[str] = []
+
+    if technical:
+        primary_goal = "tool_task"
+        tone = "restrained"
+        initiative = 0.45
+        reasons.append("technical_request")
+    elif expression_posture in {"silent_or_minimal"} or boundary_need >= 0.75 or silence_comfort >= 0.75:
+        primary_goal = "quiet_or_minimal"
+        tone = "restrained"
+        initiative = 0.2
+        reasons.append("boundary_or_low_signal")
+    elif expression_posture == "clarify" or low_confidence:
+        primary_goal = "clarify"
+        tone = "light"
+        initiative = 0.35
+        reasons.append("uncertain_interpretation")
+    else:
+        primary_goal = "answer"
+        tone = "natural"
+        initiative = 0.5
+        reasons.append("default_current_turn")
+
+    if lifecycle_audit.get("should_inject_shadow"):
+        reasons.append("shadow_context_advisory")
+
+    return {
+        "schema_version": PUBLIC_SELF_ARBITRATION_INTENT_PLAN_SCHEMA_VERSION,
+        "kind": "self_arbitration_intent_plan",
+        "current_user_priority": "highest",
+        "primary_goal": primary_goal,
+        "tone": tone,
+        "initiative_level": round(initiative, 6),
+        "memory_shadow_boundary": "advisory_only",
+        "expression_policy_posture": expression_posture,
+        "priority_order": [
+            "current_user_text",
+            "safety_and_boundary",
+            "explicit_user_correction",
+            "interpretation_confidence",
+            "expression_policy",
+            "memory_and_shadow_context",
+            "relationship_inference",
+        ],
+        "constraints": [
+            "do_not_override_current_user_text",
+            "do_not_treat_memory_or_shadow_as_fact",
+            "no_extra_hot_path_llm_call",
+        ],
+        "reasons": reasons[:6],
+        "read_only": True,
+    }
+
+
+def build_self_arbitration_prompt_fragment(plan: dict[str, Any]) -> str:
+    primary_goal = str(plan.get("primary_goal") or "answer")
+    tone = str(plan.get("tone") or "natural")
+    reasons = ",".join(str(item) for item in plan.get("reasons") or [])
+    return "\n".join(
+        [
+            "[sylanne_self_arbitration]",
+            f"current_user_priority={plan.get('current_user_priority', 'highest')}; primary_goal={primary_goal}; tone={tone}; reasons={reasons}",
+            "当前用户原文优先；不要让旧记忆、shadow context、关系推断或回放诊断覆盖本轮原文。",
+        ],
+    )
+
+def build_integrated_self_experience_review(
+    *,
+    current_user_text: str,
+    assistant_text: str = "",
+    intent_plan: dict[str, Any] | None = None,
+    expression_policy: dict[str, Any] | None = None,
+    lifecycle_audit: dict[str, Any] | None = None,
+    ledger_tail: list[dict[str, Any]] | None = None,
+) -> dict[str, Any]:
+    intent_plan = intent_plan or {}
+    expression_policy = expression_policy or {}
+    lifecycle_audit = lifecycle_audit or {}
+    ledger_tail = ledger_tail or []
+    user_text = str(current_user_text or "")
+    assistant = str(assistant_text or "")
+    technical_markers = ("提交", "commit", "release", "版本", "测试", "报错", "修复", "文件", "代码", "打包", "github", "git")
+    emotional_markers = ("呜", "撒娇", "亲近", "抱抱", "哭", "喜欢你", "文学")
+    overused_shadow = bool(lifecycle_audit.get("should_inject_shadow")) and not any(
+        marker in user_text for marker in ("刚才", "继续", "接着", "上一")
+    )
+    technical = str(intent_plan.get("primary_goal") or "") == "tool_task" or any(
+        marker in user_text.lower() for marker in technical_markers
+    )
+    emotional_interference = technical and any(marker in assistant for marker in emotional_markers)
+    missed_clarification = (
+        str(intent_plan.get("primary_goal") or "") == "clarify"
+        and str(expression_policy.get("posture") or "") != "clarify"
+    )
+    flags = {
+        "possible_user_misunderstanding": missed_clarification,
+        "overused_memory_or_shadow": overused_shadow,
+        "missed_clarification": missed_clarification,
+        "overactive_or_heavy_tone": emotional_interference,
+        "technical_task_emotional_interference": emotional_interference,
+    }
+    return {
+        "schema_version": PUBLIC_EXPERIENCE_REVIEW_SCHEMA_VERSION,
+        "kind": "experience_review",
+        "read_only": True,
+        "prompt_eligible": False,
+        "flags": flags,
+        "issue_count": sum(1 for value in flags.values() if value),
+        "evidence": {
+            "intent_goal": intent_plan.get("primary_goal"),
+            "expression_posture": expression_policy.get("posture"),
+            "lifecycle_release_reason": lifecycle_audit.get("release_reason"),
+            "ledger_tail_size": len(ledger_tail),
+        },
+    }
+
+
 def build_integrated_self_replay_bundle(
     snapshot: dict[str, Any],
     *,
@@ -684,6 +835,7 @@ def build_integrated_self_diagnostics(
             "relationship_boundary_active": bool(risk.get("relationship_boundary_active")),
         },
         "response_posture": snapshot.get("response_posture"),
+        "intent_plan": deepcopy(snapshot.get("intent_plan") or {}),
         "state_index": deepcopy(snapshot.get("state_index") or {}),
         "trace_summary": [
             {
@@ -723,6 +875,9 @@ def build_integrated_self_prompt_fragment(snapshot: dict[str, Any]) -> str:
     reasons = _string_list((snapshot.get("arbitration") or {}).get("reasons"))
     if reasons:
         lines.append(f"- reasons: {'; '.join(reasons[:4])}")
+    intent_fragment = build_self_arbitration_prompt_fragment(snapshot.get("intent_plan") or {})
+    if intent_fragment:
+        lines.append(intent_fragment)
     return "\n".join(lines)
 
 

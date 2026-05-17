@@ -2,6 +2,29 @@
 
 本文件用于 AstrBot 插件市场/管理页展示更新内容。更完整的设计说明、公式推导、测试矩阵和维护手册见 `README.md`。
 
+## 2.8.0-exp
+
+发布日期：2026-05-17
+
+### 新增
+
+- 新增合并实验自我调度版本：self-arbitration、offline experience review diagnostics 和 read-only relationship candidate summary 统一作为 `2.8.0-exp` 发布；major 不推进，minor 表示功能迭代，`-exp` 表示实验能力。
+- 新增自我仲裁意图计划：`integrated_self_state` 只读暴露 `intent_plan`，让当前用户原文高于记忆、shadow context、回放诊断和关系推断；技术/测试/发布请求默认选择工具式完成并压低情绪化表达。
+- 新增短边界 prompt 片段 `[sylanne_self_arbitration]`：仅在有必要时进入主 prompt，不增加热路径 LLM 调用，也不替换 raw user text。
+- 新增离线体验回放诊断 `experience_review`：只读标记可能误解、过度复用记忆/阴影、错过澄清、语气过重和技术任务情绪干扰；该诊断只通过 runtime diagnostics/API 暴露，不注入主 prompt。
+- 新增只读关系候选摘要 `relationship_candidate_summary`：包含 familiarity、trust、boundary comfort、repair state、evidence、confidence、expiry risk 和 speaker/group isolation，默认不写长期关系叙事。
+
+### 修复
+
+- 关系候选摘要作为只读 annotation 传入 Sylanne 自有记忆观察时不会触发默认长期记忆写入，避免把推断性关系叙事落库。
+- `understanding_closed_loop` runtime diagnostics 补齐 `intent_plan`、`experience_review` 和 `relationship_candidate_summary` 默认字段，便于维护端稳定读取。
+- 保留 `2.7.0` 的理解闭环边界：解释候选、表达策略、shadow 生命周期审计和共同语境证据仍不得覆盖当前用户原文。
+
+### 验证
+
+- 新增回归测试覆盖 self-arbitration intent plan、lifecycle prompt 注入边界、experience review flags、relationship candidate summary、记忆写入保护和 runtime diagnostics 暴露。
+- 聚焦测试已通过；全量测试与发布 zip 预检见本次发布收尾记录。
+
 ## 2.7.0
 
 发布日期：2026-05-17
