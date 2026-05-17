@@ -40,6 +40,8 @@ def test_ledger_keeps_bounded_recent_events_per_session():
     assert [event.event_id for event in recent] == ["e2", "e3"]
 
     summary = build_ledger_summary(recent)
+    assert summary.startswith("[sylanne_event_ledger_summary]")
+    assert "bounded recent events" in summary
     assert "assistant; status=delivered; topic=completed" in summary
     assert "third text" in summary
     assert "first text" not in summary

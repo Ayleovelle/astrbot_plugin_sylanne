@@ -57,7 +57,7 @@ def build_ledger_summary(events, limit: int = 5) -> str:
     selected = list(events)[-limit:]
     lines = [
         "[sylanne_event_ledger_summary]",
-        "audit-only ledger; does not override AstrBot native context.",
+        "audit-only bounded recent events ledger; does not override AstrBot native context.",
     ]
     for event in selected:
         parts = [f"{event.role}"]
