@@ -2,21 +2,21 @@
 
 > powered by Fuck-U-Code；本报告由 `scripts/update_fuck_u_code_report.py` 根据官方 JSON 输出生成。
 
-- 💩 发酵指数：`21.7/100`，官方评价：`😐 微臭青年`（由质量分反向换算，越低越好）
-- 官方 JSON overallScore：`78.3/100`
-- 扫描规模：`78/128` 个文件已分析，`49` 个文件被跳过
+- 💩 发酵指数：`21.9/100`，官方评价：`😐 微臭青年`（由质量分反向换算，越低越好）
+- 官方 JSON overallScore：`78.1/100`
+- 扫描规模：`78/130` 个文件已分析，`51` 个文件被跳过
 - 问题计数：critical `80`，error `165`，warning `147`
 - 原始报告：`output/fuck_u_code/raw-report.json`
-- 生成时间：`2026-05-17T13:28:01+00:00`
+- 生成时间：`2026-05-17T14:44:44+00:00`
 
 ## 最需要除味的文件
 
 | 💩 发酵 | 质量分 | critical | error | warning | 文件 |
 | --- | --- | ---: | ---: | ---: | --- |
-| 45.0/100 | 54.8/100 | 7 | 2 | 1 | `integrated_self.py` |
+| 48.0/100 | 52.3/100 | 7 | 2 | 1 | `integrated_self.py` |
 | 45.0/100 | 54.7/100 | 6 | 2 | 1 | `emotion_engine.py` |
-| 43.0/100 | 56.7/100 | 5 | 4 | 1 | `lifelike_learning_engine.py` |
-| 41.0/100 | 59.0/100 | 5 | 4 | 1 | `memory_engine.py` |
+| 43.0/100 | 56.6/100 | 5 | 4 | 1 | `lifelike_learning_engine.py` |
+| 41.0/100 | 58.6/100 | 5 | 4 | 1 | `memory_engine.py` |
 | 37.0/100 | 63.2/100 | 4 | 4 | 2 | `personality_drift_engine.py` |
 | 28.0/100 | 72.2/100 | 3 | 4 | 1 | `fallibility_engine.py` |
 | 28.0/100 | 71.7/100 | 3 | 2 | 0 | `public_api.py` |
