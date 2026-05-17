@@ -226,6 +226,45 @@ class AstrBotLifecyclePart15(AstrBotLifecycleTests):
         self.assertNotIn("s-empty-idle", plugin._realtime_user_typing_until)
         self.assertNotIn("s-empty-idle", plugin._conversation_input_epoch)
 
+    def test_reply_only_payload_does_not_consume_shadow_memory_backfill(self):
+        plugin = new_plugin(
+            {
+                "assessment_timing": "post",
+                "inject_state": False,
+                "enable_realtime_chat": True,
+                "enable_sticker_reaction": False,
+                "use_llm_assessor": False,
+            },
+        )
+        self._bind_common_state_hooks(plugin)
+        plugin._record_realtime_ordinary_history_backfill(
+            "s-reply-only-backfill",
+            role="assistant",
+            content="上一轮已经送达，但仅引用事件不该消费这段 shadow memory。",
+            input_epoch=2,
+            source="unit_test",
+            delivery_status="delivered",
+        )
+        event = FakeEvent("s-reply-only-backfill", message="", platform_name="aiocqhttp")
+        event.message_obj = SimpleNamespace(
+            message=[
+                {
+                    "type": "reply",
+                    "data": {"id": "12345"},
+                },
+            ],
+        )
+        request = fake_request(session_id="s-reply-only-backfill", prompt="")
+
+        asyncio.run(plugin.on_llm_request(event, request))
+
+        injected = "\n".join(self._request_text_parts(request))
+        self.assertNotIn("sylanne_shadow_memory", injected)
+        self.assertIn(
+            "s-reply-only-backfill",
+            plugin._realtime_ordinary_history_backfill_cache(),
+        )
+
 
     def test_observe_sticker_usage_stores_metadata_only(self):
         stored = {}

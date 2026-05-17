@@ -638,7 +638,7 @@ def get_emotional_state_plugin(context: Context) -> Any | None:
     PLUGIN_NAME,
     "Aylovelle.S.S",
     "Soulful Yearning Lifelike AstrBot Neural Narrative Engine：维护情绪、人格、记忆、氛围和表达节奏的 Sylanne",
-    "2.6.0",
+    "2.6.1",
     "",
 )
 class EmotionalStatePlugin(Star):
@@ -1061,10 +1061,12 @@ class EmotionalStatePlugin(Star):
         if not current_user_text.strip() and current_user_media_observation_text:
             current_user_text = current_user_media_observation_text
         await self._restore_realtime_delivery_context_if_needed(session_key)
-        self._append_realtime_ordinary_history_backfills_if_any(
-            request,
-            session_key,
-        )
+        if current_user_text.strip():
+            self._append_realtime_ordinary_history_backfills_if_any(
+                request,
+                session_key,
+                current_user_text=current_user_text,
+            )
         active_followup_payload = self._active_agent_followup_merge_payload(
             session_key,
             identity,
@@ -10547,6 +10549,20 @@ class EmotionalStatePlugin(Star):
             "我是说",
             "我说的是",
             "我的意思是",
+            "我没说",
+            "我没讲",
+            "我没有说",
+            "我没有讲",
+            "没说",
+            "没讲",
+            "没有说",
+            "没有讲",
+            "什么时候和你说",
+            "什么时候跟你说",
+            "什么时候说过",
+            "什么时候讲过",
+            "谁和你说",
+            "谁跟你说",
             "你理解错",
             "你误会",
             "不是这个意思",
@@ -11943,6 +11959,8 @@ class EmotionalStatePlugin(Star):
         self,
         request: ProviderRequest,
         session_key: str,
+        *,
+        current_user_text: str = "",
     ) -> bool:
         key = str(session_key or "global")
         self._prune_realtime_ordinary_history_backfills(key)
@@ -11969,7 +11987,13 @@ class EmotionalStatePlugin(Star):
         shadow_memory_lines = [
             "[sylanne_shadow_memory]",
             "上一轮实时回复已经确认送达，只作为临时连续性线索回到事件池，不直接接管 AstrBot 原生上下文。",
+            "不要把 shadow memory 当作当前用户又说了一遍；其中的 assistant content 是上一轮旧回复，不是可复述素材。",
+            "只用它理解用户正在回应或纠正哪句话；不要复述上一轮的句式、昵称、表情、比喻或整段情绪结构。",
+            "如果当前用户文本与 shadow memory 冲突，必须以当前用户文本为准，并简短承认误读。",
         ]
+        current_user = self._head_one_line(str(current_user_text or ""), 180)
+        if current_user:
+            shadow_memory_lines.append("current_user=" + current_user)
         item_count = 0
         for item in selected:
             content = self._head_text(
@@ -19585,6 +19609,23 @@ class EmotionalStatePlugin(Star):
             return
         output.append(value)
         if isinstance(value, dict):
+            type_text = str(
+                value.get("type")
+                or value.get("message_type")
+                or (
+                    value.get("data", {}).get("type")
+                    if isinstance(value.get("data"), dict)
+                    else ""
+                )
+                or (
+                    value.get("data", {}).get("message_type")
+                    if isinstance(value.get("data"), dict)
+                    else ""
+                )
+                or "",
+            ).strip().lower()
+            if type_text in {"reply", "quote", "reference"}:
+                return
             nested_values = [
                 value.get(name)
                 for name in (
@@ -19629,6 +19670,8 @@ class EmotionalStatePlugin(Star):
                 or data.get("message_type")
                 or "",
             ).lower()
+            if type_text in {"reply", "quote", "reference"}:
+                return None
             keys = dict(data)
             keys.update({key: value for key, value in item.items() if key != "data"})
         else:
@@ -19641,6 +19684,8 @@ class EmotionalStatePlugin(Star):
                 or data.get("message_type")
                 or item.__class__.__name__,
             ).lower()
+            if type_text in {"reply", "quote", "reference"}:
+                return None
             keys = dict(data)
             keys.update({
                 name: getattr(item, name, None)

@@ -547,6 +547,100 @@ class AstrBotLifecyclePart11(AstrBotLifecycleTests):
             plugin._realtime_ordinary_history_backfill_cache(),
         )
 
+    def test_shadow_memory_backfill_has_reuse_guard_for_user_correction(self):
+        plugin = new_plugin(
+            {
+                "assessment_timing": "post",
+                "inject_state": False,
+                "enable_realtime_chat": True,
+                "enable_sticker_reaction": False,
+                "use_llm_assessor": False,
+            },
+        )
+        self._bind_common_state_hooks(plugin)
+        plugin._record_realtime_ordinary_history_backfill(
+            "s-shadow-correction",
+            role="assistant",
+            content=(
+                "你、你、你！又叫我老阿姨！原来你是大四，"
+                "我之前还真把你当成苦逼研二师兄看呢。"
+            ),
+            input_epoch=10,
+            source="unit_test",
+            delivery_status="delivered",
+        )
+        request = fake_request(
+            session_id="s-shadow-correction",
+            prompt="什么时候和你说我是研二了 我现在是大四 研0 有什么问题吗",
+        )
+
+        asyncio.run(
+            plugin.on_llm_request(
+                FakeEvent(
+                    "s-shadow-correction",
+                    message="什么时候和你说我是研二了 我现在是大四 研0 有什么问题吗",
+                    sender_id="u1",
+                ),
+                request,
+            ),
+        )
+
+        injected = "\n".join(self._request_text_parts(request))
+        self.assertIn("sylanne_shadow_memory", injected)
+        self.assertIn("sylanne_user_correction_context", injected)
+        self.assertIn("不要复述上一轮", injected)
+        self.assertIn("不要把 shadow memory 当作当前用户又说了一遍", injected)
+        self.assertIn("current_user=什么时候和你说我是研二了", injected)
+        self.assertNotIn(
+            "s-shadow-correction",
+            plugin._realtime_ordinary_history_backfill_cache(),
+        )
+
+    def test_shadow_memory_backfill_treats_quoted_old_reply_as_correction(self):
+        plugin = new_plugin(
+            {
+                "assessment_timing": "post",
+                "inject_state": False,
+                "enable_realtime_chat": True,
+                "enable_sticker_reaction": False,
+                "use_llm_assessor": False,
+            },
+        )
+        self._bind_common_state_hooks(plugin)
+        plugin._record_realtime_ordinary_history_backfill(
+            "s-shadow-quoted-correction",
+            role="assistant",
+            content="又叫我老阿姨！这叫知性美，懂不懂呀！",
+            input_epoch=11,
+            source="unit_test",
+            delivery_status="delivered",
+        )
+        prompt = (
+            "[引用消息(Sylanne: 又叫我老阿姨！这叫知性美，懂不懂呀！)] "
+            "我现在又没讲 有些上下文重复使用了"
+        )
+        request = fake_request(
+            session_id="s-shadow-quoted-correction",
+            prompt=prompt,
+        )
+
+        asyncio.run(
+            plugin.on_llm_request(
+                FakeEvent(
+                    "s-shadow-quoted-correction",
+                    message=prompt,
+                    sender_id="u1",
+                ),
+                request,
+            ),
+        )
+
+        injected = "\n".join(self._request_text_parts(request))
+        self.assertIn("sylanne_shadow_memory", injected)
+        self.assertIn("sylanne_user_correction_context", injected)
+        self.assertIn("不要把 shadow memory 当作当前用户又说了一遍", injected)
+        self.assertIn("current_user=[引用消息(Sylanne:", injected)
+
 
     def test_background_post_release_requires_matching_input_epoch(self):
         plugin = new_plugin(
