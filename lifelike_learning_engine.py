@@ -397,6 +397,24 @@ class LifelikeObservation:
     flags: list[str] = field(default_factory=list)
 
 
+def common_ground_evidence_from_interpretation(candidate: dict[str, Any]) -> dict[str, Any]:
+    raw_text = str(candidate.get("raw_text") or "")
+    meaning = str(candidate.get("candidate") or "")
+    kind = str(candidate.get("kind") or "")
+    humor_likelihood = clamp(candidate.get("humor_likelihood"))
+    confidence = clamp(candidate.get("confidence"))
+    playful = kind in {"homophone", "joke", "slang"} and (humor_likelihood >= 0.5 or confidence >= 0.7)
+    return {
+        "expression": raw_text,
+        "meaning": meaning,
+        "kind": kind,
+        "confidence": round(confidence, 6),
+        "humor_likelihood": round(humor_likelihood, 6),
+        "is_playful": bool(playful),
+        "source": "interpretation_candidate",
+    }
+
+
 def derive_lifelike_learning_dynamics(
     parameters: LifelikeLearningParameters,
     previous: LifelikeLearningState,

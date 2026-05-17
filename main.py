@@ -198,6 +198,15 @@ try:
         build_realtime_input_fragment_injection,
         observe_realtime_input_fragment,
     )
+    from .conversation_event_ledger import (
+        ConversationEventLedger,
+        LedgerEvent,
+        audit_shadow_lifecycle,
+        build_ledger_summary,
+        stable_event_id,
+    )
+    from .expression_policy import build_expression_policy_prompt, choose_expression_policy
+    from .interpretation_engine import classify_memory_gate, interpret_user_text
 except ImportError:
     from emotion_engine import (
         EmotionEngine,
@@ -349,6 +358,15 @@ except ImportError:
         build_realtime_input_fragment_injection,
         observe_realtime_input_fragment,
     )
+    from conversation_event_ledger import (
+        ConversationEventLedger,
+        LedgerEvent,
+        audit_shadow_lifecycle,
+        build_ledger_summary,
+        stable_event_id,
+    )
+    from expression_policy import build_expression_policy_prompt, choose_expression_policy
+    from interpretation_engine import classify_memory_gate, interpret_user_text
 
 
 PLUGIN_NAME = "astrbot_plugin_sylanne"
@@ -566,6 +584,7 @@ _REQUIRED_EMOTION_SERVICE_METHODS: tuple[str, ...] = (
     "replay_integrated_self_bundle",
     "probe_integrated_self_compatibility",
     "export_integrated_self_diagnostics",
+    "get_agent_runtime_diagnostics",
     "get_lifelike_learning_snapshot",
     "get_lifelike_initiative_policy",
     "get_proactive_speech_decision",
@@ -638,7 +657,7 @@ def get_emotional_state_plugin(context: Context) -> Any | None:
     PLUGIN_NAME,
     "Aylovelle.S.S",
     "Soulful Yearning Lifelike AstrBot Neural Narrative Engine：维护情绪、人格、记忆、氛围和表达节奏的 Sylanne",
-    "2.6.2",
+    "2.7.0",
     "",
 )
 class EmotionalStatePlugin(Star):
@@ -687,6 +706,7 @@ class EmotionalStatePlugin(Star):
         self._moral_repair_memory_cache: dict[str, MoralRepairState] = {}
         self._fallibility_memory_cache: dict[str, FallibilityState] = {}
         self._group_atmosphere_memory_cache: dict[str, GroupAtmosphereState] = {}
+        self._conversation_event_ledger = ConversationEventLedger(max_events_per_session=24)
         self._sylanne_memory_cache: dict[str, SylanneMemoryState] = {}
         self._sylanne_memory_recall_worksets: dict[str, deque[MemoryRecallItem]] = {}
         self._sylanne_memory_query_embedding_cache: dict[str, tuple[float, list[float]]] = {}
@@ -700,7 +720,7 @@ class EmotionalStatePlugin(Star):
         self._engine_cache: dict[str, EmotionEngine] = {}
         self._provider_id_cache: dict[str, tuple[float, str | None]] = {}
         self._last_request_text: dict[str, str] = {}
-        self._last_state_injection_diagnostics: dict[str, dict[str, Any]] = {}
+        self._last_understanding_closed_loop: dict[str, dict[str, Any]] = {}
         self._conversation_input_epoch: dict[str, int] = {}
         self._conversation_pending_response_epochs: dict[str, deque[int]] = {}
         self._active_agent_pending_user_turns: dict[str, deque[dict[str, Any]]] = {}
@@ -1055,7 +1075,6 @@ class EmotionalStatePlugin(Star):
         session_key = identity.conversation_id
         input_epoch = self._bump_conversation_input_epoch(session_key, event=event)
         self._record_conversation_pending_response_epoch(session_key, input_epoch)
-        observed_at = self._event_observed_at(event)
         current_user_text = self._event_text(event) or str(getattr(request, "prompt", "") or "")
         current_user_media_observation_text = self._current_user_media_observation_text(event)
         if not current_user_text.strip() and current_user_media_observation_text:
@@ -1067,6 +1086,28 @@ class EmotionalStatePlugin(Star):
                 session_key,
                 current_user_text=current_user_text,
             )
+        interpretation_payload = interpret_user_text(current_user_text)
+        interpretation_candidates = list(interpretation_payload.get("candidates") or [])
+        if interpretation_candidates:
+            self._understanding_closed_loop_state().setdefault(session_key, {})[
+                "interpretation_candidates"
+            ] = interpretation_candidates[:3]
+            self._append_interpretation_candidates_context(
+                request,
+                interpretation_candidates,
+            )
+        expression_policy = choose_expression_policy(
+            current_user_text=current_user_text,
+            interpretation_candidates=interpretation_candidates,
+            is_user_correction=self._looks_like_user_correction_or_source_query(current_user_text),
+            is_low_signal=self._should_defer_realtime_shadow_for_low_signal(current_user_text),
+        )
+        self._understanding_closed_loop_state().setdefault(session_key, {})[
+            "expression_policy"
+        ] = expression_policy
+        if expression_policy.get("posture") != "brief_answer" or expression_policy.get("reasons") != ["default_conversational_turn"]:
+            self._append_expression_policy_context(request, expression_policy)
+        observed_at = self._event_observed_at(event)
         active_followup_payload = self._active_agent_followup_merge_payload(
             session_key,
             identity,
@@ -4516,6 +4557,9 @@ class EmotionalStatePlugin(Star):
                 session_key=resolved_session_key,
             ),
         }
+        payload["understanding_closed_loop"] = self._understanding_closed_loop_diagnostics(
+            resolved_session_key,
+        )
         if include_sessions:
             sessions = set(getattr(self, "_background_post_queues", {}).keys())
             sessions.update(getattr(self, "_background_post_tasks", {}).keys())
@@ -12126,6 +12170,93 @@ class EmotionalStatePlugin(Star):
         )
         return any(marker in compact for marker in continuity_markers)
 
+    def _append_interpretation_candidates_context(
+        self,
+        request: ProviderRequest,
+        candidates: list[dict[str, Any]],
+    ) -> bool:
+        if not candidates:
+            return False
+        lines = [
+            "[sylanne_interpretation_candidates]",
+            "以下是错别字、谐音、黑话或昵称的候选解释；不覆盖用户原文，不确定时应轻轻确认。",
+        ]
+        for item in candidates[:3]:
+            gate = classify_memory_gate(item)
+            lines.append(
+                "raw_text={raw}; candidate={candidate}; kind={kind}; confidence={confidence}; humor={humor}; memory_layer={layer}".format(
+                    raw=self._head_one_line(str(item.get("raw_text") or ""), 60),
+                    candidate=self._head_one_line(str(item.get("candidate") or ""), 60),
+                    kind=str(item.get("kind") or "uncertain"),
+                    confidence=item.get("confidence"),
+                    humor=item.get("humor_likelihood"),
+                    layer=str(gate.get("layer") or "uncertain_interpretation"),
+                ),
+            )
+        return self._append_temp_text_part(request, "\n".join(lines), source="interpretation_candidates")
+
+    def _append_expression_policy_context(
+        self,
+        request: ProviderRequest,
+        policy: dict[str, Any],
+    ) -> bool:
+        return self._append_temp_text_part(
+            request,
+            build_expression_policy_prompt(policy),
+            source="expression_policy",
+        )
+
+    def _append_lifecycle_audit_context(
+        self,
+        request: ProviderRequest,
+        *,
+        decision: Any,
+        current_user_text: str,
+    ) -> bool:
+        if isinstance(decision, dict):
+            topic_state = decision.get("topic_state", "")
+            should_inject_shadow = decision.get("should_inject_shadow", False)
+            release_reason = decision.get("release_reason", "")
+        else:
+            topic_state = getattr(decision, "topic_state", "")
+            should_inject_shadow = getattr(decision, "should_inject_shadow", False)
+            release_reason = getattr(decision, "release_reason", "")
+        text = (
+            "[sylanne_lifecycle_audit]\n"
+            f"topic_state={topic_state}; should_inject_shadow={should_inject_shadow}; release_reason={release_reason}\n"
+            f"current_user={self._head_one_line(str(current_user_text or ''), 180)}"
+        )
+        return self._append_temp_text_part(request, text, source="lifecycle_audit")
+
+    def _understanding_closed_loop_state(self) -> dict[str, dict[str, Any]]:
+        state = getattr(self, "_last_understanding_closed_loop", None)
+        if not isinstance(state, dict):
+            state = {}
+            self._last_understanding_closed_loop = state
+        return state
+
+    def _understanding_closed_loop_diagnostics(self, session_key: str) -> dict[str, Any]:
+        key = str(session_key or "global")
+        latest = dict(self._understanding_closed_loop_state().get(key) or {})
+        ledger = getattr(self, "_conversation_event_ledger", None)
+        ledger_tail = []
+        if ledger is not None:
+            for event in ledger.recent(key, limit=5):
+                ledger_tail.append(
+                    {
+                        "event_id": event.event_id,
+                        "role": event.role,
+                        "topic_state": event.topic_state,
+                        "delivery_status": event.delivery_status,
+                        "raw_text": self._head_one_line(event.raw_text, 120),
+                    },
+                )
+        latest["ledger_tail"] = ledger_tail
+        latest.setdefault("interpretation_candidates", [])
+        latest.setdefault("expression_policy", {})
+        latest.setdefault("lifecycle_audit", {})
+        return latest
+
     def _append_realtime_ordinary_history_backfills_if_any(
         self,
         request: ProviderRequest,
@@ -12137,10 +12268,6 @@ class EmotionalStatePlugin(Star):
         self._prune_realtime_ordinary_history_backfills(key)
         queue = self._realtime_ordinary_history_backfill_cache().get(key)
         if not queue:
-            return False
-        if not self._shadow_memory_backfill_relevant_to_current_turn(current_user_text):
-            self._realtime_ordinary_history_backfill_cache().pop(key, None)
-            self._mark_realtime_delivery_context_dirty(key)
             return False
         appended = False
         changed = False
@@ -12158,6 +12285,41 @@ class EmotionalStatePlugin(Star):
                 changed = True
                 continue
             valid_items.append(item)
+        latest = valid_items[-1] if valid_items else None
+        if latest is not None:
+            decision = audit_shadow_lifecycle(
+                previous_assistant_text=str(latest.get("content") or ""),
+                current_user_text=current_user_text,
+                delivery_status=str(latest.get("delivery_status") or "delivered"),
+                has_interrupted_breakpoint=self._has_pending_interrupted_reply_breakpoint(key),
+            )
+            if self._looks_like_user_correction_or_source_query(current_user_text):
+                decision = {
+                    **decision,
+                    "topic_state": "corrected",
+                    "should_inject_shadow": True,
+                    "release_reason": "user_correction_or_source_query",
+                }
+            elif self._looks_like_short_answer_to_pending_question(current_user_text):
+                decision = {
+                    **decision,
+                    "topic_state": "needs_followup",
+                    "should_inject_shadow": True,
+                    "release_reason": "short_answer_to_pending_question",
+                }
+            if self._append_lifecycle_audit_context(
+                request,
+                decision=decision,
+                current_user_text=current_user_text,
+            ):
+                changed = True
+            self._understanding_closed_loop_state().setdefault(key, {})[
+                "lifecycle_audit"
+            ] = dict(decision)
+            if not decision.get("should_inject_shadow"):
+                self._realtime_ordinary_history_backfill_cache().pop(key, None)
+                self._mark_realtime_delivery_context_dirty(key)
+                return False
         selected = valid_items[-REALTIME_ORDINARY_HISTORY_BACKFILL_MAX_ITEMS_PER_REQUEST:]
         shadow_memory_lines = [
             "[sylanne_shadow_memory]",

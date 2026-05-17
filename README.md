@@ -2,7 +2,7 @@
 
 > <span style="font-size: 1.08em;"><strong>Soulful Yearning Lifelike AstrBot Neural Narrative Engine</strong>。她维护的不只是“情绪标签”，而是情绪、人格、记忆、氛围、主动性和表达节奏交织成的长期状态。</span>
 
-![版本 2.6.2](https://img.shields.io/badge/version-2.6.2-red)
+![版本 2.7.0](https://img.shields.io/badge/version-2.7.0-red)
 ![AstrBot >=4.9.2,<5.0.0](https://img.shields.io/badge/AstrBot-%3E%3D4.9.2%2C%3C5.0.0-green)
 ![Python 3.10+](https://img.shields.io/badge/Python-3.10%2B-yellow)
 ![协议 astrbot.emotion_state.v2](https://img.shields.io/badge/schema-astrbot.emotion__state.v2-purple)
@@ -45,9 +45,9 @@
 | `sylanne_memory_record_embedding_min_interval_seconds` | float | `300.0` | 同一会话写入侧补向量的最小间隔，默认 5 分钟，避免密集聊天持续调用 Embedding Provider。 |
 | `sylanne_memory_record_embedding_max_per_flush` | int | `1` | 单次 idle flush 最多为多少条新记忆生成向量；设为 `0` 可停止写入侧新建向量。 |
 
-本次更新重构了Sylanne的记忆模块的工作流程，避免对长期上下文造成负面影响。
+本次更新补齐 Sylanne 的理解闭环：会话事件账本、shadow 生命周期审计、解释候选、记忆闸门、表达策略和运行时诊断会一起约束上下文注入。
 
-`2.6.2` 继续保留 `2.5.6` 的低端云盘 I/O 风险修复：checkpoint 合并写入、表情索引缓存并在线程中重建、Sylanne 记忆与表情学习批量单写，以及记忆向量召回 Embedding 热路径限流；请正在使用 `2.5.5` 及更早版本的用户至少更新到 `2.5.6`，也可以直接更新到当前 `2.6.2`。
+`2.7.0` 继续保留 `2.5.6` 的低端云盘 I/O 风险修复和 `2.6.x` 的 `shadow memory` 临时连续性护栏；请正在使用 `2.5.5` 及更早版本的用户至少更新到 `2.5.6`，也可以直接更新到当前 `2.7.0`。
 
 > [!CAUTION]
 > <span style="color:#b91c1c"><strong>严重恶性 bug 警示：旧策略在低端云服务器上极大概率造成磁盘 I/O 饱和，实际表现接近“硬盘死锁”。强烈建议所有用户至少更新到 `2.5.6` 或更高版本。</strong></span>
@@ -88,7 +88,7 @@
 | 主题 | 内容 |
 | --- | --- |
 | [当前版本与兼容范围](#当前版本与兼容范围) | 插件版本、AstrBot 版本、Python 要求、许可证和发布状态。 |
-| [当前版本发布记录](#262-当前版本发布记录) | `shadow memory` 临时连续性链路复用护栏、旧 ordinary context 回灌拆分、记忆召回污染隔离和当前事件时间优先。 |
+| [当前版本发布记录](#270-当前版本发布记录) | 理解闭环、解释候选、表达策略、shadow 生命周期审计、运行时诊断和发布包清单。 |
 | [项目定位](#项目定位) | 为什么本插件不是普通的提示词人设增强。 |
 | [核心能力](#核心能力总览) | 7 维情绪、人格建模、真实时间记忆、关系修复、公共 API。 |
 | [快速开始](#快速开始) | 发布 zip 包、仓库安装、手动复制、最小配置和检查命令。 |
@@ -116,22 +116,34 @@
 | --- | --- |
 | 插件目录名 | `astrbot_plugin_sylanne` |
 | 显示名 | `Sylanne` |
-| 当前版本 | `2.6.2` |
+| 当前版本 | `2.7.0` |
 | AstrBot 版本 | `>=4.9.2,<5.0.0` |
 | Python | `3.10+` |
 | 许可证 | `GPL-3.0-or-later` |
 | 运行时第三方依赖 | 当前无额外依赖，见 `requirements.txt` |
 
-`2.6.2` 保留 Sylanne 自有记忆知识库、只读记忆查询入口、Agent-owned context 即时聊天修复、AstrBot Embedding 提供商驱动的向量召回、可视化记忆设置 Page、短答锚定、模型空回复降级、内部工具统一隐藏、主动聊天反馈、等待期追发合并、长历史关键上下文保底、AstrBot 事件时间保留、表情包仓库自动下载和近距相对时间提示；本版继续使用 `shadow memory` 临时连续性块，并进一步修复完整送达的上一轮回复被一刀切当作下一轮续接/打断上下文的问题。核心情绪、回复后后台评估（post）、`group_atmosphere_state`、`humanlike_state`、`lifelike_learning_state`、`personality_drift_state`、Sylanne 自有记忆和欺骗/操控/逃责类动作阻断默认自动运行；真人即时聊天接管、表情包回应、表情包自动下载、主动聊天发送、道德修复、瑕疵模拟、心理筛查等高风险或实验模块仍由配置者显式打开。
+`2.7.0` 保留 Sylanne 自有记忆知识库、只读记忆查询入口、Agent-owned context 即时聊天修复、AstrBot Embedding 提供商驱动的向量召回、可视化记忆设置 Page、短答锚定、模型空回复降级、内部工具统一隐藏、主动聊天反馈、等待期追发合并、长历史关键上下文保底、AstrBot 事件时间保留、表情包仓库自动下载和近距相对时间提示；本版新增 understanding closed loop，把会话事件账本、shadow 生命周期审计、解释候选、记忆闸门、共同语境证据、表达策略和运行时诊断串成闭环，确保“用户原文”“可能的错字/谐音/梗”和“可进入长期记忆的事实”不会互相覆盖。核心情绪、回复后后台评估（post）、`group_atmosphere_state`、`humanlike_state`、`lifelike_learning_state`、`personality_drift_state`、Sylanne 自有记忆和欺骗/操控/逃责类动作阻断默认自动运行；真人即时聊天接管、表情包回应、表情包自动下载、主动聊天发送、道德修复、瑕疵模拟、心理筛查等高风险或实验模块仍由配置者显式打开。
 
-### 2.6.2 当前版本发布记录
+### 2.7.0 当前版本发布记录
 
-`v2.6.2` 合并在 `main` 上，对外安装版本由 `metadata.yaml` 和 `main.py @register(...)` 共同声明为 `2.6.2`。本版是 `2.6.1` 的 `shadow memory` 热修：不改变公共 API 版本，公共 API 版本仍保持 `1.0`，schema 仍保持向后兼容。
+`v2.7.0` 合并在 `main` 上，对外安装版本由 `metadata.yaml` 和 `main.py @register(...)` 共同声明为 `2.7.0`。本版完成 understanding closed loop 迭代：不改变公共 API 版本，公共 API 版本仍保持 `1.0`，schema 仍保持向后兼容。
 
 当前版本的主要变化：
 
 | 类别 | 结果 |
 | --- | --- |
+| 理解闭环 | 新增 conversation event ledger、shadow lifecycle auditor、interpretation candidates、memory gate、common-ground evidence、expression policy 和 runtime diagnostics 的闭环链路。 |
+| 事件账本 | 每轮记录 session、speaker、role、原文、规范化文本、媒体/引用摘要、投递状态、topic state、解释候选和记忆闸门，运行时诊断可查看最近 ledger tail。 |
+| shadow 生命周期审计 | 完整送达的实时回复默认不污染下一轮新话题；只有用户纠正、短答绑定、明确续接或打断断点等证据存在时，才作为临时连续性线索注入。 |
+| 解释候选 | 本地解释引擎识别错字纠正、谐音、黑话和玩笑候选，并保留置信度与 humor likelihood；候选只辅助理解，不覆盖用户原文。 |
+| 记忆闸门 | 候选会先被分类为长期事实、共同语境或仅本轮表达线索，避免把玩笑、错字候选或小圈子梗误写成硬事实。 |
+| 共同语境适配 | `lifelike_learning_state` 可从高置信解释候选获得共同语境证据，例如把“记亿犹新”识别为 playful homophone，而不是用户真实写错的长期事实。 |
+| 表达策略 | `silent_or_minimal`、`clarify`、`tool_like`、`playful`、`brief_answer` 会按低信号、用户纠正、低置信解释、技术任务或高置信玩梗动态选择。 |
+| prompt 注入边界 | `[sylanne_interpretation_candidates]` 和 `[sylanne_expression_policy]` 明确要求当前用户原文优先；不把候选改写当作事实，也不强行每轮浓烈、撒娇或文学化。 |
+| 运行时诊断 | `get_agent_runtime_diagnostics(...)` 只读返回 `understanding_closed_loop`，包含解释候选、表达策略、生命周期审计和最近 ledger tail，便于排查上下文来源。 |
+| 公共契约 | 插件版本为 `2.7.0`；公共 API 版本仍为 `1.0`，schema 仍保持 `astrbot.emotion_state.v2` 等版本化契约；runtime diagnostics 已纳入服务必需方法检测。 |
+| 包体清单 | 发布 zip 会包含 `conversation_event_ledger.py`、`interpretation_engine.py` 和 `expression_policy.py`，避免安装包缺少理解闭环运行模块。 |
+| 回归覆盖 | 新增解释候选注入、表达策略、共同语境适配和 runtime diagnostics 覆盖；完整验证结果以本次发布收尾测试为准。 |
 | **`shadow memory` 工作流** | delivered shadow 不再直接写入 `request.contexts`；后台释放后会合并成 `[sylanne_shadow_memory]` 临时块，并且只在用户纠正、短答绑定或明确续接上一轮时注入。 |
 | **`shadow memory` 复用护栏** | `[sylanne_shadow_memory]` 明确说明上一轮 assistant content 是旧回复，不是当前用户又说了一遍，也不是可复述素材；冲突时必须以当前用户文本为准。 |
 | 正常结束话题隔离 | 完整送达的实时回复不会被下一轮普通新话题一刀切当作打断/续接上下文；自然新问题会丢弃已送达 backfill，避免旧话题牵引长期上下文。 |
@@ -225,7 +237,7 @@
 | 上下文安全预算 | 召回结果只作为 `[sylanne_memory_recall]` 限长摘要注入，并继续受请求预算和官方上下文压缩清洗逻辑约束。 |
 | 模块互斥自检 | 发布前覆盖自有记忆、主动发言、官方上下文压缩、即时聊天、公共 API、配置契约和包体预检，验证模块之间不会互相回灌或重复调用外部 LivingMemory。 |
 | 工作流图 | `docs/assets/workflow_and_proactive.svg` 已重绘，突出即时聊天、追发合并、Agent 工具循环、模型边界和主动聊天反馈；移除误导性的单点 Gemini 诊断节点，并修正中文字体和跨泳道箭头。 |
-| 公开契约 | 插件版本为 `2.6.2`；公共 API 版本仍为 `1.0`，schema 仍保持 `astrbot.emotion_state.v2` 等版本化契约。 |
+| 公开契约 | 插件版本为 `2.7.0`；公共 API 版本仍为 `1.0`，schema 仍保持 `astrbot.emotion_state.v2` 等版本化契约。 |
 
 旧版本发布记录统一放在 `CHANGELOG.md`。README 只展示当前版本，避免插件管理页从历史段落误抓旧版本号。
 
@@ -3060,7 +3072,7 @@ $env:ASTRBOT_EXPECT_PLUGIN = "astrbot_plugin_sylanne"
 脚本会在输出 JSON 里写出 `expectedPluginRuntime`，包含插件列表 API 中返回的 `version`、`displayName`、`activated`、`author`、`astrbotVersion` 等只读字段。若目标插件存在但 `activated=false`，脚本会失败退出。需要把版本和显示名也作为硬断言时，可以额外设置：
 
 ```powershell
-$env:ASTRBOT_EXPECT_PLUGIN_VERSION = "2.6.2"
+$env:ASTRBOT_EXPECT_PLUGIN_VERSION = "2.7.0"
 $env:ASTRBOT_EXPECT_PLUGIN_DISPLAY_NAME = "Sylanne"
 & $node scripts\remote_smoke_playwright.js
 ```

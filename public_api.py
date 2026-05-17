@@ -52,6 +52,7 @@ _EMOTION_SERVICE_REQUIRED_METHODS = (
     "replay_integrated_self_bundle",
     "probe_integrated_self_compatibility",
     "export_integrated_self_diagnostics",
+    "get_agent_runtime_diagnostics",
     "get_lifelike_learning_snapshot",
     "get_lifelike_initiative_policy",
     "get_proactive_speech_decision",
@@ -396,6 +397,16 @@ class EmotionServiceProtocol(Protocol):
         *,
         request: Any = None,
         session_key: str | None = None,
+    ) -> dict[str, Any]:
+        ...
+
+    async def get_agent_runtime_diagnostics(
+        self,
+        event_or_session: Any = None,
+        *,
+        request: Any = None,
+        session_key: str | None = None,
+        include_sessions: bool = False,
     ) -> dict[str, Any]:
         ...
 

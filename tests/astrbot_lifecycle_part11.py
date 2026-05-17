@@ -637,6 +637,8 @@ class AstrBotLifecyclePart11(AstrBotLifecycleTests):
 
         injected = "\n".join(self._request_text_parts(request))
         self.assertNotIn("sylanne_shadow_memory", injected)
+        self.assertIn("sylanne_lifecycle_audit", injected)
+        self.assertIn("topic_state=completed", injected)
         self.assertNotIn("请先读 README", injected)
         self.assertNotIn(
             "s-shadow-completed-continuity-word",

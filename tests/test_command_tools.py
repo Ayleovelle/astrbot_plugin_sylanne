@@ -31,6 +31,7 @@ PLUGIN_DICT_ATTRIBUTES = (
     "_provider_id_cache",
     "_last_request_text",
     "_last_state_injection_diagnostics",
+    "_last_understanding_closed_loop",
     "_conversation_input_epoch",
     "_conversation_pending_response_epochs",
     "_active_agent_pending_user_turns",
@@ -1507,19 +1508,54 @@ class CommandAndToolSmokeTests(unittest.TestCase):
         self.assertNotIn("secret dead", serialized)
         self.assertNotIn("secret ctx", serialized)
 
-    def test_runtime_diagnostics_with_event_does_not_write_identity_cache(self):
+    def test_runtime_diagnostics_exposes_understanding_closed_loop(self):
+        from conversation_event_ledger import ConversationEventLedger, LedgerEvent
+
         plugin = new_plugin()
-        event = FakeEvent(
-            "s-readonly-runtime",
-            message="hello",
-            sender_id="user-a",
-            sender_name="Alice",
+        plugin._conversation_event_ledger = ConversationEventLedger(max_events_per_session=24)
+        session_key = "s-understanding-diag"
+        plugin._last_understanding_closed_loop[session_key] = {
+            "interpretation_candidates": [
+                {
+                    "raw_text": "记亿犹新",
+                    "candidate": "记忆犹新",
+                    "kind": "homophone",
+                    "confidence": 0.78,
+                },
+            ],
+            "expression_policy": {
+                "posture": "playful",
+                "verbosity": "short",
+                "reasons": ["high_confidence_playful_interpretation"],
+            },
+            "lifecycle_audit": {
+                "should_inject_shadow": False,
+                "topic_state": "completed",
+            },
+        }
+        plugin._conversation_event_ledger.record(
+            LedgerEvent(
+                event_id="evt-1",
+                session_key=session_key,
+                role="user",
+                raw_text="这个插件真是记亿犹新，谐音梗啦",
+                topic_state="open",
+                delivery_status="delivered",
+            ),
         )
 
-        payload = asyncio.run(plugin.get_agent_runtime_diagnostics(event))
+        payload = asyncio.run(plugin.get_agent_runtime_diagnostics(session_key))
+        closed_loop = payload["understanding_closed_loop"]
 
-        self.assertEqual(payload["identity"]["speaker_track_id"], "s-readonly-runtime::speaker:user-a")
-        self.assertEqual(plugin._agent_identity_profile_cache, {})
+        self.assertEqual(closed_loop["expression_policy"]["posture"], "playful")
+        self.assertEqual(
+            closed_loop["interpretation_candidates"][0]["candidate"],
+            "记忆犹新",
+        )
+        self.assertEqual(closed_loop["lifecycle_audit"]["topic_state"], "completed")
+        self.assertEqual(closed_loop["ledger_tail"][0]["event_id"], "evt-1")
+        self.assertTrue(payload["read_only"])
+
 
     def test_llm_tool_simulate_bot_emotion_update_is_read_only(self):
         from emotion_engine import EmotionState

@@ -281,6 +281,9 @@ class FakeEmotionService:
     async def export_integrated_self_diagnostics(self, *args, **kwargs):
         return {}
 
+    async def get_agent_runtime_diagnostics(self, *args, **kwargs):
+        return {}
+
     async def get_lifelike_learning_snapshot(self, *args, **kwargs):
         return {}
 

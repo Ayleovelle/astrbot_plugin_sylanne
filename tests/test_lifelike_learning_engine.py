@@ -5,6 +5,7 @@ from lifelike_learning_engine import (
     LifelikeLearningEngine,
     LifelikeLearningParameters,
     LifelikeLearningState,
+    common_ground_evidence_from_interpretation,
     build_lifelike_memory_annotation,
     build_lifelike_prompt_fragment,
     derive_initiative_policy,
@@ -274,3 +275,19 @@ class LifelikeLearningEngineTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+    def test_common_ground_evidence_from_interpretation_marks_playful(self):
+        evidence = common_ground_evidence_from_interpretation(
+            {
+                "raw_text": "记亿犹新",
+                "candidate": "记忆犹新",
+                "kind": "homophone",
+                "confidence": 0.78,
+                "humor_likelihood": 0.72,
+            },
+        )
+
+        self.assertEqual(evidence["expression"], "记亿犹新")
+        self.assertEqual(evidence["meaning"], "记忆犹新")
+        self.assertTrue(evidence["is_playful"])
+        self.assertEqual(evidence["source"], "interpretation_candidate")
