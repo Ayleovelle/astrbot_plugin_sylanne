@@ -2,18 +2,18 @@
 
 > powered by Fuck-U-Code；本报告由 `scripts/update_fuck_u_code_report.py` 根据官方 JSON 输出生成。
 
-- 💩 发酵指数：`22.2/100`，官方评价：`😐 微臭青年`（由质量分反向换算，越低越好）
-- 官方 JSON overallScore：`77.8/100`
+- 💩 发酵指数：`22.3/100`，官方评价：`😐 微臭青年`（由质量分反向换算，越低越好）
+- 官方 JSON overallScore：`77.7/100`
 - 扫描规模：`78/133` 个文件已分析，`54` 个文件被跳过
 - 问题计数：critical `81`，error `169`，warning `147`
 - 原始报告：`output/fuck_u_code/raw-report.json`
-- 生成时间：`2026-05-17T17:52:43+00:00`
+- 生成时间：`2026-05-17T18:15:04+00:00`
 
 ## 最需要除味的文件
 
 | 💩 发酵 | 质量分 | critical | error | warning | 文件 |
 | --- | --- | ---: | ---: | ---: | --- |
-| 50.0/100 | 49.7/100 | 7 | 3 | 0 | `integrated_self.py` |
+| 51.0/100 | 49.4/100 | 7 | 3 | 0 | `integrated_self.py` |
 | 45.0/100 | 54.7/100 | 6 | 2 | 1 | `emotion_engine.py` |
 | 43.0/100 | 56.6/100 | 5 | 4 | 1 | `lifelike_learning_engine.py` |
 | 41.0/100 | 58.6/100 | 5 | 4 | 1 | `memory_engine.py` |
