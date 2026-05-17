@@ -53,6 +53,86 @@ class ConversationEventLedger:
             self._events_by_session.pop(session_key, None)
 
 
+def _head_text(text: str, limit: int = 160) -> str:
+    value = " ".join(str(text or "").split())
+    if len(value) <= limit:
+        return value
+    return value[: max(0, limit - 1)] + "…"
+
+
+def looks_like_user_correction(text: str) -> bool:
+    markers = ("不是", "不对", "我没说", "我没讲", "没有说", "没有讲", "你理解错", "你误会")
+    return any(marker in text for marker in markers) or "什么时候和你说" in text or "谁跟你说" in text
+
+
+def looks_like_explicit_prior_reference(text: str) -> bool:
+    markers = (
+        "刚才你说",
+        "刚刚你说",
+        "你刚才说",
+        "你刚刚说",
+        "上一句",
+        "上一段",
+        "上一轮",
+        "再说一遍",
+        "重复一遍",
+        "接着说",
+        "接上",
+        "续上",
+        "说完",
+        "没说完",
+        "那句话",
+        "这句话",
+        "那段话",
+        "这段话",
+        "刚才的话",
+        "刚刚的话",
+        "what did you say",
+        "say that again",
+        "repeat that",
+    )
+    return any(marker in text.lower() for marker in markers)
+
+
+def audit_shadow_lifecycle(
+    previous_assistant_text: str,
+    current_user_text: str,
+    delivery_status: str,
+    has_interrupted_breakpoint: bool,
+) -> dict[str, Any]:
+    previous_excerpt = _head_text(previous_assistant_text)
+    if has_interrupted_breakpoint or delivery_status == "interrupted":
+        return {
+            "topic_state": "needs_followup",
+            "should_inject_shadow": True,
+            "release_reason": "interrupted_reply_breakpoint",
+            "previous_assistant_excerpt": previous_excerpt,
+        }
+
+    if looks_like_user_correction(current_user_text):
+        return {
+            "topic_state": "corrected",
+            "should_inject_shadow": True,
+            "release_reason": "user_correction_or_source_query",
+            "previous_assistant_excerpt": previous_excerpt,
+        }
+
+    if looks_like_explicit_prior_reference(current_user_text):
+        return {
+            "topic_state": "needs_followup",
+            "should_inject_shadow": True,
+            "release_reason": "explicit_prior_reference",
+            "previous_assistant_excerpt": previous_excerpt,
+        }
+
+    return {
+        "topic_state": "completed",
+        "should_inject_shadow": False,
+        "release_reason": "delivered_topic_completed",
+        "previous_assistant_excerpt": previous_excerpt,
+    }
+
+
 def build_ledger_summary(events, limit: int = 5) -> str:
     selected = list(events)[-limit:]
     lines = [
