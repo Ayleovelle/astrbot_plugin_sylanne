@@ -2,6 +2,28 @@
 
 本文件用于 AstrBot 插件市场/管理页展示更新内容。更完整的设计说明、公式推导、测试矩阵和维护手册见 `README.md`。
 
+## 3.0.0-exp2
+
+发布日期：2026-05-18
+
+### 新增
+
+- 发布 Sylanne 3.0 第二阶段 Relational Time Layer：把近期会话事件、关系性转折点候选和关系候选摘要合成为插件内部只读关系时间信号。
+- `ConversationEventLedger` 新增 `build_relational_time_layer(...)`，输出 bounded recent events、时间跨度、关系时间权重、连续性阶段和约束标记；事件证据只记录长度、角色、主题状态和时间字段，不保存完整对话内容。
+- integrated self snapshot 和 `understanding_closed_loop` 内部诊断接入 `relational_time_layer`，让 self interpretation 可以参考关系时间的形成、延续或低信号状态。
+
+### 安全与边界
+
+- Relational Time Layer 标记为 `internal_only` 且 `public_api_eligible=false`，默认不进入 public API 契约。
+- `export_integrated_self_diagnostics(...)` 默认继续排除 `relational_time_layer`、`self_interpretation`、`relational_turning_point` 和 `turning_point_candidate`。
+- `public_api.py` 不新增 relational time 查询、导出、列表或批量读取方法，避免外部插件调取关系时间链。
+
+### 验证
+
+- 新增关系时间层单元测试，覆盖 bounded internal continuity、跨 session 隔离和低信号不升级。
+- 新增 public API 封闭回归断言，确保 relational time 不通过默认 diagnostics 暴露。
+- 全量测试通过：`642 passed`。
+
 ## 3.0.0-exp1
 
 发布日期：2026-05-18

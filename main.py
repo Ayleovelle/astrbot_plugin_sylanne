@@ -209,6 +209,7 @@ try:
         LedgerEvent,
         audit_shadow_lifecycle,
         build_ledger_summary,
+        build_relational_time_layer,
         stable_event_id,
     )
     from .expression_policy import build_expression_policy_prompt, choose_expression_policy
@@ -375,6 +376,7 @@ except ImportError:
         LedgerEvent,
         audit_shadow_lifecycle,
         build_ledger_summary,
+        build_relational_time_layer,
         stable_event_id,
     )
     from expression_policy import build_expression_policy_prompt, choose_expression_policy
@@ -669,7 +671,7 @@ def get_emotional_state_plugin(context: Context) -> Any | None:
     PLUGIN_NAME,
     "Aylovelle.S.S",
     "Soulful Yearning Lifelike AstrBot Neural Narrative Engine：维护情绪、人格、记忆、氛围和表达节奏的 Sylanne",
-    "3.0.0-exp1",
+    "3.0.0-exp2",
     "",
 )
 class EmotionalStatePlugin(Star):
@@ -1104,6 +1106,20 @@ class EmotionalStatePlugin(Star):
             )
         interpretation_payload = interpret_user_text(current_user_text)
         interpretation_candidates = list(interpretation_payload.get("candidates") or [])
+        if current_user_text.strip():
+            self._conversation_ledger().record(
+                LedgerEvent(
+                    event_id=stable_event_id(session_key, "user", current_user_text, input_epoch),
+                    session_key=session_key,
+                    speaker_key=identity.speaker_track_id or identity.speaker_id or session_key,
+                    role="user",
+                    raw_text=current_user_text,
+                    normalized_text=self._head_one_line(current_user_text, 240),
+                    event_time=self._conversation_time_payload(observed_at, event=event),
+                    topic_state="open",
+                    interpretations=interpretation_candidates[:3],
+                ),
+            )
         if interpretation_candidates:
             self._understanding_closed_loop_state().setdefault(session_key, {})[
                 "interpretation_candidates"
@@ -12326,6 +12342,13 @@ class EmotionalStatePlugin(Star):
             self._last_understanding_closed_loop = state
         return state
 
+    def _conversation_ledger(self) -> ConversationEventLedger:
+        ledger = getattr(self, "_conversation_event_ledger", None)
+        if ledger is None:
+            ledger = ConversationEventLedger(max_events_per_session=24)
+            self._conversation_event_ledger = ledger
+        return ledger
+
     def _record_experience_review(
         self,
         session_key: str,
@@ -12355,25 +12378,33 @@ class EmotionalStatePlugin(Star):
             expression_policy=dict(state.get("expression_policy") or {}),
             experience_review=dict(state.get("experience_review") or {}),
             relationship_candidate_summary=dict(state.get("relationship_candidate_summary") or {}),
+            relational_time_layer=dict(state.get("relational_time_layer") or {}),
             ledger_tail=list(state.get("ledger_tail") or []),
+        )
+        ledger = self._conversation_ledger()
+        state["relational_time_layer"] = build_relational_time_layer(
+            ledger.recent(session_key, limit=8),
+            session_key=session_key,
+            self_interpretation=dict(state.get("self_interpretation") or {}),
+            relationship_candidate_summary=dict(state.get("relationship_candidate_summary") or {}),
+            now=self._observed_now(),
         )
 
     def _understanding_closed_loop_diagnostics(self, session_key: str) -> dict[str, Any]:
         key = str(session_key or "global")
         latest = dict(self._understanding_closed_loop_state().get(key) or {})
-        ledger = getattr(self, "_conversation_event_ledger", None)
+        ledger = self._conversation_ledger()
         ledger_tail = []
-        if ledger is not None:
-            for event in ledger.recent(key, limit=5):
-                ledger_tail.append(
-                    {
-                        "event_id": event.event_id,
-                        "role": event.role,
-                        "topic_state": event.topic_state,
-                        "delivery_status": event.delivery_status,
-                        "raw_text": self._head_one_line(event.raw_text, 120),
-                    },
-                )
+        for event in ledger.recent(key, limit=5):
+            ledger_tail.append(
+                {
+                    "event_id": event.event_id,
+                    "role": event.role,
+                    "topic_state": event.topic_state,
+                    "delivery_status": event.delivery_status,
+                    "raw_text": self._head_one_line(event.raw_text, 120),
+                },
+            )
         latest["ledger_tail"] = ledger_tail
         latest.setdefault("interpretation_candidates", [])
         latest.setdefault("expression_policy", {})
@@ -12382,6 +12413,7 @@ class EmotionalStatePlugin(Star):
         latest.setdefault("experience_review", {})
         latest.setdefault("relationship_candidate_summary", {})
         latest.setdefault("self_interpretation", {})
+        latest.setdefault("relational_time_layer", {})
         return latest
 
     def _append_realtime_ordinary_history_backfills_if_any(

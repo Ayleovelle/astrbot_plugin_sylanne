@@ -239,6 +239,7 @@ class PublicApiMemoryPart01(MemoryPayloadPublicApiTests):
         self.assertNotIn("snapshots", diagnostics)
         self.assertNotIn("self_interpretation", diagnostics)
         self.assertNotIn("turning_point", diagnostics)
+        self.assertNotIn("relational_time_layer", diagnostics)
 
     def test_public_integrated_self_diagnostics_can_explicitly_export_relational_self_at_user_risk(self):
         self._install_astrbot_stubs()
@@ -280,6 +281,10 @@ class PublicApiMemoryPart01(MemoryPayloadPublicApiTests):
             "export_self_interpretation",
             "dump_relational_self_state",
             "list_relational_self_inferences",
+            "get_relational_time_layer",
+            "query_relational_time_layer",
+            "export_relational_time_layer",
+            "list_relational_time_events",
         }
 
         self.assertTrue(public_names.isdisjoint(forbidden))

@@ -14,6 +14,7 @@ PUBLIC_SELF_ARBITRATION_INTENT_PLAN_SCHEMA_VERSION = "astrbot.self_arbitration_i
 PUBLIC_EXPERIENCE_REVIEW_SCHEMA_VERSION = "astrbot.experience_review.v1"
 PUBLIC_SELF_INTERPRETATION_SCHEMA_VERSION = "astrbot.self_interpretation.v1"
 PUBLIC_RELATIONAL_TURNING_POINT_SCHEMA_VERSION = "astrbot.relational_turning_point.v1"
+PUBLIC_RELATIONAL_TIME_LAYER_SCHEMA_VERSION = "astrbot.relational_time_layer.v1"
 
 DEGRADATION_PROFILES: tuple[str, ...] = ("full", "balanced", "minimal")
 
@@ -46,6 +47,7 @@ def build_integrated_self_snapshot(
     assistant_text: str = "",
     experience_review: dict[str, Any] | None = None,
     relationship_candidate_summary: dict[str, Any] | None = None,
+    relational_time_layer: dict[str, Any] | None = None,
     ledger_tail: list[dict[str, Any]] | None = None,
     now: float | None = None,
 ) -> dict[str, Any]:
@@ -187,8 +189,11 @@ def build_integrated_self_snapshot(
         expression_policy=expression_policy,
         experience_review=experience_review,
         relationship_candidate_summary=relationship_candidate_summary,
+        relational_time_layer=relational_time_layer,
         ledger_tail=ledger_tail,
     )
+    if relational_time_layer:
+        payload["relational_time_layer"] = deepcopy(relational_time_layer)
     payload["compatibility"] = probe_integrated_self_compatibility(payload)
     if include_raw_snapshots:
         payload["snapshots"] = {
@@ -787,12 +792,14 @@ def build_self_interpretation(
     expression_policy: dict[str, Any] | None = None,
     experience_review: dict[str, Any] | None = None,
     relationship_candidate_summary: dict[str, Any] | None = None,
+    relational_time_layer: dict[str, Any] | None = None,
     ledger_tail: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     intent_plan = intent_plan or {}
     expression_policy = expression_policy or {}
     experience_review = experience_review or {}
     relationship_candidate_summary = relationship_candidate_summary or {}
+    relational_time_layer = relational_time_layer or {}
     ledger_tail = ledger_tail or []
     user_text = str(current_user_text or "")
     assistant = str(assistant_text or "")
@@ -812,6 +819,15 @@ def build_self_interpretation(
             _evidence_item(
                 "relationship_candidate_summary",
                 f"confidence={relationship_candidate_summary.get('confidence', '')}",
+                limit=64,
+            ),
+        )
+    if relational_time_layer:
+        continuity = relational_time_layer.get("continuity") if isinstance(relational_time_layer.get("continuity"), dict) else {}
+        evidence.append(
+            _evidence_item(
+                "relational_time_layer",
+                f"phase={continuity.get('phase', '')}; weight={continuity.get('relationship_time_weight', '')}",
                 limit=64,
             ),
         )
@@ -1041,6 +1057,7 @@ def build_integrated_self_diagnostics(
             "self_interpretation",
             "relational_turning_point",
             "turning_point_candidate",
+            "relational_time_layer",
         ],
     }
     if include_internal_self_interpretation:
