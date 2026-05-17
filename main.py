@@ -113,6 +113,7 @@ try:
         PersonalityDriftParameters,
         PersonalityDriftState,
         apply_personality_drift_to_profile,
+        build_coevolution_personality_drift_observation,
         build_personality_drift_memory_annotation,
         build_personality_drift_prompt_fragment,
         format_personality_drift_state_for_user,
@@ -280,6 +281,7 @@ except ImportError:
         PersonalityDriftParameters,
         PersonalityDriftState,
         apply_personality_drift_to_profile,
+        build_coevolution_personality_drift_observation,
         build_personality_drift_memory_annotation,
         build_personality_drift_prompt_fragment,
         format_personality_drift_state_for_user,
@@ -671,7 +673,7 @@ def get_emotional_state_plugin(context: Context) -> Any | None:
     PLUGIN_NAME,
     "Aylovelle.S.S",
     "Soulful Yearning Lifelike AstrBot Neural Narrative Engine：维护情绪、人格、记忆、氛围和表达节奏的 Sylanne",
-    "3.0.0-exp2",
+    "3.0.0-exp3",
     "",
 )
 class EmotionalStatePlugin(Star):
@@ -1720,6 +1722,15 @@ class EmotionalStatePlugin(Star):
                 lifelike_snapshot=lifelike_snapshot,
                 moral_repair_snapshot=moral_snapshot,
             )
+            observation = build_coevolution_personality_drift_observation(
+                observation,
+                dict(
+                    self._understanding_closed_loop_state()
+                    .get(session_key, {})
+                    .get("relational_time_layer")
+                    or {},
+                ),
+            )
             personality_drift_state = self.personality_drift_engine.update(
                 previous_personality_drift_state,
                 observation,
@@ -2619,6 +2630,15 @@ class EmotionalStatePlugin(Star):
                 emotion_snapshot=state.to_public_dict(
                     session_key=session_key,
                     include_safety=safety_boundary,
+                ),
+            )
+            observation = build_coevolution_personality_drift_observation(
+                observation,
+                dict(
+                    self._understanding_closed_loop_state()
+                    .get(session_key, {})
+                    .get("relational_time_layer")
+                    or {},
                 ),
             )
             personality_drift_state = self.personality_drift_engine.update(

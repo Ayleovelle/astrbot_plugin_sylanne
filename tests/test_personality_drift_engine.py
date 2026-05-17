@@ -10,6 +10,7 @@ from personality_drift_engine import (
     apply_personality_drift_to_profile,
     build_personality_drift_memory_annotation,
     build_personality_drift_prompt_fragment,
+    build_coevolution_personality_drift_observation,
     heuristic_personality_drift_observation,
     personality_drift_state_to_public_payload,
 )
@@ -210,6 +211,115 @@ class PersonalityDriftEngineTests(unittest.TestCase):
         self.assertIn("Real elapsed time matters", prompt)
         self.assertIn("state_age_seconds", prompt)
         self.assertIn("not a linear message-count weight", prompt)
+
+    def test_coevolution_observation_uses_internal_relational_time_weight(self):
+        observation = build_coevolution_personality_drift_observation(
+            PersonalityDriftObservation(
+                trait_impulses={"interpersonal_warmth": 0.4},
+                intensity=0.35,
+                reliability=0.5,
+                relationship_importance=0.2,
+                flags=["shared_learning_event"],
+                reason="shared-learning",
+            ),
+            {
+                "schema_version": "astrbot.relational_time_layer.v1",
+                "internal_only": True,
+                "public_api_eligible": False,
+                "continuity": {
+                    "phase": "active_continuity",
+                    "relationship_time_weight": 0.82,
+                    "turning_point_types": ["collaboration", "repair"],
+                },
+            },
+        )
+
+        self.assertGreater(observation.relationship_importance, 0.2)
+        self.assertGreater(observation.intensity, 0.35)
+        self.assertGreater(observation.reliability, 0.5)
+        self.assertIn("internal_coevolution_signal", observation.flags)
+        self.assertIn("relational_time_phase=active_continuity", observation.flags)
+        self.assertIn("relational-time", observation.reason)
+        self.assertNotIn("relationship_time_weight", observation.to_dict())
+
+    def test_low_signal_coevolution_does_not_amplify_drift(self):
+        base = PersonalityDriftObservation(
+            trait_impulses={"attachment_anxiety": 0.6},
+            intensity=0.6,
+            reliability=0.7,
+            relationship_importance=0.1,
+            flags=["conflict_or_hurt_event"],
+            reason="conflict/hurt",
+        )
+
+        observation = build_coevolution_personality_drift_observation(
+            base,
+            {
+                "schema_version": "astrbot.relational_time_layer.v1",
+                "internal_only": True,
+                "public_api_eligible": False,
+                "continuity": {
+                    "phase": "low_signal",
+                    "relationship_time_weight": 0.0,
+                    "turning_point_types": [],
+                },
+            },
+        )
+
+        self.assertEqual(observation.relationship_importance, base.relationship_importance)
+        self.assertEqual(observation.intensity, base.intensity)
+        self.assertEqual(observation.reliability, base.reliability)
+        self.assertEqual(observation.trait_impulses, base.trait_impulses)
+        self.assertNotIn("internal_coevolution_signal", observation.flags)
+
+    def test_coevolution_state_public_payload_stays_sanitized(self):
+        engine = PersonalityDriftEngine(
+            PersonalityDriftParameters(
+                rapid_update_half_life_seconds=1.0,
+                min_update_interval_seconds=1.0,
+                learning_rate=1.0,
+                max_impulse_per_update=0.05,
+                event_threshold=0.01,
+            ),
+        )
+        state = PersonalityDriftState.initial(persona_fingerprint="p", now=0.0)
+        observation = build_coevolution_personality_drift_observation(
+            PersonalityDriftObservation(
+                trait_impulses={"interpersonal_warmth": 0.8},
+                intensity=0.8,
+                reliability=0.8,
+                relationship_importance=0.2,
+                flags=["warmth_or_trust_event"],
+                reason="warmth/trust",
+            ),
+            {
+                "internal_only": True,
+                "public_api_eligible": False,
+                "continuity": {
+                    "phase": "active_continuity",
+                    "relationship_time_weight": 0.9,
+                    "turning_point_types": ["collaboration"],
+                },
+                "events": [
+                    {"event_id": "private-event", "evidence": {"message_length": 128}},
+                ],
+            },
+        )
+
+        updated = engine.update(state, observation, persona_fingerprint="p", now=10.0)
+        payload = personality_drift_state_to_public_payload(
+            updated,
+            session_key="s1",
+            exposure="plugin_safe",
+        )
+        annotation = build_personality_drift_memory_annotation(payload, written_at=12.0)
+
+        rendered = str(payload) + str(annotation)
+        self.assertIn("internal_coevolution_signal", updated.flags)
+        self.assertNotIn("relational_time_layer", payload)
+        self.assertNotIn("private-event", rendered)
+        self.assertNotIn("relationship_time_weight", rendered)
+        self.assertTrue(payload["privacy"]["raw_message_text_excluded"])
 
     def test_prompt_fragment_reports_real_state_age(self):
         state = PersonalityDriftState.initial(persona_fingerprint="p", now=100.0)

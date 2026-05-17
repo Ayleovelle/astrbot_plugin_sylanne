@@ -2,6 +2,28 @@
 
 本文件用于 AstrBot 插件市场/管理页展示更新内容。更完整的设计说明、公式推导、测试矩阵和维护手册见 `README.md`。
 
+## 3.0.0-exp3
+
+发布日期：2026-05-18
+
+### 新增
+
+- 发布 Sylanne 3.0 第三阶段 Co-Evolution Model：把关系时间层转换为插件内部共演化信号，用于调制人格漂移观测。
+- `personality_drift_engine.py` 新增 `build_coevolution_personality_drift_observation(...)`，只接受 `internal_only=true` 且 `public_api_eligible=false` 的关系时间层输入。
+- LLM request 和 response 阶段的人格漂移观测接入当前会话的内部 `relational_time_layer`，让连续互动可以在真实时间门控和静态 persona 锚点内缓慢影响表达倾向。
+
+### 安全与边界
+
+- 低信号关系时间层不会放大人格漂移；共演化调制仍受最小更新时间间隔、学习率、单次 impulse cap、trait offset cap 和 persona fingerprint 约束。
+- public payload、memory annotation 和 `export_integrated_self_diagnostics(...)` 默认不暴露关系时间链、event id 或 `relationship_time_weight`。
+- `public_api.py` 不新增 co-evolution 查询、导出、列表或批量读取方法，避免外部插件调取共演化推断链。
+
+### 验证
+
+- 新增共演化观测单元测试，覆盖内部关系时间权重调制和低信号不放大。
+- 新增公开边界回归断言，确保共演化信号不通过默认 public diagnostics、public payload 或记忆注解泄漏。
+- 全量测试结果以本次发布收尾验证为准。
+
 ## 3.0.0-exp2
 
 发布日期：2026-05-18

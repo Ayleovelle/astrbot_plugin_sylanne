@@ -522,6 +522,53 @@ def derive_personality_drift_dynamics(
     )
 
 
+def build_coevolution_personality_drift_observation(
+    observation: PersonalityDriftObservation,
+    relational_time_layer: dict[str, Any] | None,
+) -> PersonalityDriftObservation:
+    if not isinstance(relational_time_layer, dict):
+        return observation
+    if relational_time_layer.get("internal_only") is not True:
+        return observation
+    if relational_time_layer.get("public_api_eligible") is not False:
+        return observation
+    continuity = relational_time_layer.get("continuity")
+    if not isinstance(continuity, dict):
+        return observation
+    weight = clamp(continuity.get("relationship_time_weight"))
+    phase = str(continuity.get("phase") or "low_signal")[:48]
+    if weight <= 0.0 or phase == "low_signal":
+        return observation
+    turning_types = [
+        str(value)[:48]
+        for value in continuity.get("turning_point_types") or []
+        if str(value or "").strip()
+    ][:4]
+    multiplier = clamp(0.18 * weight, 0.0, 0.18)
+    return PersonalityDriftObservation(
+        text=observation.text,
+        trait_impulses=dict(observation.trait_impulses),
+        intensity=clamp(observation.intensity + multiplier * (1.0 - observation.intensity)),
+        reliability=clamp(observation.reliability + 0.12 * weight * (1.0 - observation.reliability)),
+        relationship_importance=clamp(max(observation.relationship_importance, weight)),
+        event_type=observation.event_type,
+        source=observation.source,
+        reason=(
+            observation.reason
+            + ("; " if observation.reason else "")
+            + f"relational-time:{phase}"
+        )[:240],
+        flags=_dedupe(
+            list(observation.flags)
+            + [
+                "internal_coevolution_signal",
+                f"relational_time_phase={phase}",
+            ]
+            + [f"turning_point_type={value}" for value in turning_types],
+        )[:12],
+    )
+
+
 class PersonalityDriftEngine:
     def __init__(self, parameters: PersonalityDriftParameters | None = None) -> None:
         self.parameters = parameters or PersonalityDriftParameters()
