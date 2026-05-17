@@ -9,6 +9,7 @@ from integrated_self import (
     build_integrated_self_replay_bundle,
     build_integrated_self_snapshot,
     build_relational_self_prompt_fragment,
+    build_turning_point_lineage_observatory,
     build_turning_point_memory_replay,
     build_self_arbitration_intent_plan,
     build_self_arbitration_prompt_fragment,
@@ -174,6 +175,106 @@ class IntegratedSelfTests(unittest.TestCase):
         self.assertFalse(replay["memory_write_eligible"])
         self.assertFalse(replay["prompt_eligible"])
         self.assertEqual(replay["turning_point"]["type"], "none")
+
+    def test_lineage_observatory_tracks_branching_without_raw_or_weight_leakage(self):
+        correction = build_turning_point_memory_replay(
+            build_self_interpretation(
+                current_user_text="不是这样，以后发布说明只写这次更新。",
+                assistant_text="我会只写本次更新。",
+            ),
+            session_key="s-lineage",
+            speaker_key="speaker-a",
+            group_key="group-a",
+            relational_time_layer={
+                "internal_only": True,
+                "public_api_eligible": False,
+                "continuity": {
+                    "phase": "active_continuity",
+                    "relationship_time_weight": 0.9,
+                    "turning_point_types": ["correction"],
+                },
+            },
+            now=300.0,
+        )
+        collaboration = build_turning_point_memory_replay(
+            build_self_interpretation(
+                current_user_text="测试通过了，提交并发布这个 release。",
+                assistant_text="已完成测试、提交和发布。",
+            ),
+            session_key="s-lineage",
+            speaker_key="speaker-a",
+            group_key="group-a",
+            relational_time_layer={
+                "internal_only": True,
+                "public_api_eligible": False,
+                "continuity": {
+                    "phase": "active_continuity",
+                    "relationship_time_weight": 0.82,
+                    "turning_point_types": ["collaboration"],
+                },
+            },
+            now=360.0,
+        )
+
+        observatory = build_turning_point_lineage_observatory(
+            [correction, collaboration],
+            session_key="s-lineage",
+            speaker_key="speaker-a",
+            group_key="group-a",
+            now=400.0,
+        )
+
+        self.assertEqual(observatory["schema_version"], "astrbot.turning_point_lineage_observatory.v1")
+        self.assertEqual(observatory["kind"], "turning_point_lineage_observatory")
+        self.assertTrue(observatory["internal_only"])
+        self.assertFalse(observatory["public_api_eligible"])
+        self.assertEqual(observatory["isolation_key"], "s-lineage:speaker-a:group-a")
+        self.assertEqual([branch["type"] for branch in observatory["branches"]], ["correction", "collaboration"])
+        self.assertEqual(observatory["lineage"]["branch_count"], 2)
+        self.assertEqual(observatory["lineage"]["dominant_branch"], "correction")
+        self.assertNotIn("不是这样，以后发布说明", str(observatory))
+        self.assertNotIn("测试通过了，提交并发布", str(observatory))
+        self.assertNotIn("relationship_time_weight", str(observatory))
+
+    def test_lineage_observatory_filters_cross_speaker_and_low_signal_branches(self):
+        own = build_turning_point_memory_replay(
+            build_self_interpretation(current_user_text="以后默认中文详细提交。"),
+            session_key="s-lineage",
+            speaker_key="speaker-a",
+            group_key="group-a",
+            relational_time_layer={
+                "internal_only": True,
+                "public_api_eligible": False,
+                "continuity": {"phase": "active_continuity", "relationship_time_weight": 0.75},
+            },
+            now=410.0,
+        )
+        cross_speaker = dict(own)
+        cross_speaker["isolation_key"] = "s-lineage:speaker-b:group-a"
+        low_signal = build_turning_point_memory_replay(
+            build_self_interpretation(current_user_text="今天很热"),
+            session_key="s-lineage",
+            speaker_key="speaker-a",
+            group_key="group-a",
+            relational_time_layer={
+                "internal_only": True,
+                "public_api_eligible": False,
+                "continuity": {"phase": "low_signal", "relationship_time_weight": 0.0},
+            },
+            now=420.0,
+        )
+
+        observatory = build_turning_point_lineage_observatory(
+            [own, cross_speaker, low_signal],
+            session_key="s-lineage",
+            speaker_key="speaker-a",
+            group_key="group-a",
+            now=430.0,
+        )
+
+        self.assertEqual(observatory["lineage"]["branch_count"], 1)
+        self.assertEqual(observatory["branches"][0]["isolation_key"], "s-lineage:speaker-a:group-a")
+        self.assertEqual(observatory["branches"][0]["type"], "preference")
 
     def test_replay_bundle_can_carry_sanitized_internal_turning_point_replay(self):
         snapshot = build_integrated_self_snapshot(

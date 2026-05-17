@@ -16,6 +16,7 @@ PUBLIC_SELF_INTERPRETATION_SCHEMA_VERSION = "astrbot.self_interpretation.v1"
 PUBLIC_RELATIONAL_TURNING_POINT_SCHEMA_VERSION = "astrbot.relational_turning_point.v1"
 PUBLIC_RELATIONAL_TIME_LAYER_SCHEMA_VERSION = "astrbot.relational_time_layer.v1"
 PUBLIC_TURNING_POINT_MEMORY_REPLAY_SCHEMA_VERSION = "astrbot.turning_point_memory_replay.v1"
+PUBLIC_TURNING_POINT_LINEAGE_OBSERVATORY_SCHEMA_VERSION = "astrbot.turning_point_lineage_observatory.v1"
 
 DEGRADATION_PROFILES: tuple[str, ...] = ("full", "balanced", "minimal")
 
@@ -931,6 +932,93 @@ def build_turning_point_memory_replay(
             "candidate_not_fact",
             "no_raw_conversation_text",
             "not_public_api_eligible",
+        ],
+    }
+
+
+def build_turning_point_lineage_observatory(
+    replays: list[dict[str, Any]] | tuple[dict[str, Any], ...],
+    *,
+    session_key: str,
+    speaker_key: str = "",
+    group_key: str = "",
+    now: float | None = None,
+    limit: int = 8,
+) -> dict[str, Any]:
+    now = time.time() if now is None else float(now)
+    isolation_key = ":".join(
+        [
+            str(session_key or "global")[:96],
+            str(speaker_key or "speaker")[:96],
+            str(group_key or "group")[:96],
+        ],
+    )
+    branches: list[dict[str, Any]] = []
+    type_scores: dict[str, float] = {}
+    for replay in list(replays or [])[-max(1, int(limit)) :]:
+        if not isinstance(replay, dict):
+            continue
+        if replay.get("internal_only") is not True or replay.get("public_api_eligible") is not False:
+            continue
+        if replay.get("replayable") is not True or replay.get("memory_write_eligible") is not True:
+            continue
+        if str(replay.get("isolation_key") or "") != isolation_key:
+            continue
+        turning_point = replay.get("turning_point") if isinstance(replay.get("turning_point"), dict) else {}
+        branch_type = str(turning_point.get("type") or "none")[:48]
+        confidence = round(clamp(turning_point.get("confidence")), 6)
+        if branch_type in {"", "none"} or confidence < 0.7:
+            continue
+        relational_time = replay.get("relational_time") if isinstance(replay.get("relational_time"), dict) else {}
+        phase = str(relational_time.get("phase") or "low_signal")[:48]
+        if phase == "low_signal":
+            continue
+        branch = {
+            "branch_id": _stable_hash(
+                {
+                    "isolation_key": isolation_key,
+                    "type": branch_type,
+                    "created_at": replay.get("created_at"),
+                    "confidence": confidence,
+                },
+            )[:16],
+            "type": branch_type,
+            "confidence": confidence,
+            "phase": phase,
+            "isolation_key": isolation_key,
+            "bounded_summary": _bounded_excerpt(str(turning_point.get("bounded_summary") or ""), 80),
+            "future_tendency": _bounded_excerpt(str(turning_point.get("future_tendency") or ""), 80),
+            "created_at": replay.get("created_at"),
+        }
+        branches.append(branch)
+        type_scores[branch_type] = type_scores.get(branch_type, 0.0) + confidence
+    dominant_branch = "none"
+    if type_scores:
+        dominant_branch = sorted(type_scores.items(), key=lambda item: (-item[1], item[0]))[0][0]
+    return {
+        "schema_version": PUBLIC_TURNING_POINT_LINEAGE_OBSERVATORY_SCHEMA_VERSION,
+        "kind": "turning_point_lineage_observatory",
+        "internal_only": True,
+        "read_only": True,
+        "public_api_eligible": False,
+        "prompt_eligible": False,
+        "session_key": str(session_key or "global")[:96],
+        "isolation_key": isolation_key,
+        "observed_at": now,
+        "lineage": {
+            "branch_count": len(branches),
+            "dominant_branch": dominant_branch,
+            "branch_types": [branch["type"] for branch in branches[: max(1, int(limit))]],
+        },
+        "branches": branches[: max(1, int(limit))],
+        "constraints": [
+            "internal_research_signal_only",
+            "bounded_summary_only",
+            "speaker_group_isolated",
+            "candidate_not_fact",
+            "no_raw_conversation_text",
+            "not_public_api_eligible",
+            "webui_observatory_read_only",
         ],
     }
 

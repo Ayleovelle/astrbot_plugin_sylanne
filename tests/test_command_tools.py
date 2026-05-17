@@ -324,6 +324,57 @@ class CommandAndToolSmokeTests(unittest.TestCase):
         registered = {(route, tuple(methods)) for route, _, methods, _ in context.registered}
         self.assertIn((f"/{PLUGIN_NAME}/memory-settings", ("GET",)), registered)
         self.assertIn((f"/{PLUGIN_NAME}/memory-settings", ("POST",)), registered)
+        self.assertIn((f"/{PLUGIN_NAME}/lineage-observatory", ("GET",)), registered)
+
+    def test_lineage_observatory_page_is_read_only_and_sanitized(self):
+        plugin = new_plugin()
+        plugin._last_understanding_closed_loop["s-lineage-page"] = {
+            "turning_point_lineage_observatory": {
+                "observed_at": 500.0,
+                "lineage": {
+                    "branch_count": 1,
+                    "dominant_branch": "correction",
+                    "branch_types": ["correction"],
+                },
+                "branches": [
+                    {
+                        "branch_id": "branch-1",
+                        "type": "correction",
+                        "confidence": 0.91,
+                        "phase": "active_continuity",
+                        "isolation_key": "s-lineage-page:speaker-a:group-a",
+                        "bounded_summary": "发布说明只写本次更新",
+                        "future_tendency": "后续发布聚焦当前变化",
+                        "created_at": 490.0,
+                        "relationship_time_weight": 0.99,
+                    },
+                ],
+            },
+        }
+
+        payload = plugin._sylanne_lineage_observatory_page_payload("s-lineage-page")
+
+        self.assertTrue(payload["read_only"])
+        self.assertTrue(payload["internal_only"])
+        self.assertFalse(payload["public_api_eligible"])
+        self.assertEqual(payload["lineage"]["branch_count"], 1)
+        self.assertEqual(payload["branches"][0]["type"], "correction")
+        self.assertNotIn("relationship_time_weight", str(payload))
+        self.assertNotIn("isolation_key", str(payload))
+
+    def test_runtime_diagnostics_default_hides_turning_point_lineage(self):
+        plugin = new_plugin()
+        plugin._last_understanding_closed_loop["s-lineage-hidden"] = {
+            "turning_point_memory_replay": {"kind": "turning_point_memory_replay"},
+            "turning_point_lineage_observatory": {"kind": "turning_point_lineage_observatory"},
+            "turning_point_memory_replay_history": [{"kind": "turning_point_memory_replay"}],
+        }
+
+        payload = plugin._understanding_closed_loop_diagnostics("s-lineage-hidden")
+
+        self.assertEqual(payload["turning_point_memory_replay"], {})
+        self.assertEqual(payload["turning_point_lineage_observatory"], {})
+        self.assertEqual(payload["turning_point_memory_replay_history"], [])
 
     def test_memory_settings_page_lists_and_saves_embedding_provider_choice(self):
         plugin = new_plugin({"sylanne_memory_embedding_provider_id": ""})

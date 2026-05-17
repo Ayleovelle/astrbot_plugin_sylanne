@@ -149,6 +149,7 @@ try:
         build_integrated_self_memory_annotation,
         build_integrated_self_prompt_fragment,
         build_relational_self_prompt_fragment,
+        build_turning_point_lineage_observatory,
         build_turning_point_memory_replay,
         build_self_arbitration_intent_plan,
         build_self_arbitration_prompt_fragment,
@@ -318,6 +319,7 @@ except ImportError:
         build_integrated_self_memory_annotation,
         build_integrated_self_prompt_fragment,
         build_relational_self_prompt_fragment,
+        build_turning_point_lineage_observatory,
         build_turning_point_memory_replay,
         build_self_arbitration_intent_plan,
         build_self_arbitration_prompt_fragment,
@@ -675,7 +677,7 @@ def get_emotional_state_plugin(context: Context) -> Any | None:
     PLUGIN_NAME,
     "Aylovelle.S.S",
     "Soulful Yearning Lifelike AstrBot Neural Narrative Engine：维护情绪、人格、记忆、氛围和表达节奏的 Sylanne",
-    "3.0.0-exp4",
+    "3.0.0-exp5",
     "",
 )
 class EmotionalStatePlugin(Star):
@@ -790,6 +792,7 @@ class EmotionalStatePlugin(Star):
         self._group_atmosphere_injection_snapshot_cache: dict[str, dict[str, Any]] = {}
         self._terminating = False
         self._register_sylanne_memory_settings_page_apis()
+        self._register_sylanne_lineage_observatory_page_apis()
 
     async def terminate(self):
         self._terminating = True
@@ -6546,6 +6549,79 @@ class EmotionalStatePlugin(Star):
             ["POST"],
             "Sylanne 记忆设置页：保存 Embedding 提供商选择",
         )
+
+    def _register_sylanne_lineage_observatory_page_apis(self) -> None:
+        registrar = getattr(getattr(self, "context", None), "register_web_api", None)
+        if not callable(registrar):
+            return
+        registrar(
+            f"/{PLUGIN_NAME}/lineage-observatory",
+            self._sylanne_lineage_observatory_page_get,
+            ["GET"],
+            "Sylanne 3.0 谱系分支观察舱：只读查看内部 turning point lineage",
+        )
+
+    async def _sylanne_lineage_observatory_page_get(self) -> Any:
+        session_key = "global"
+        if request is not None:
+            args = getattr(request, "args", None)
+            getter = getattr(args, "get", None)
+            if callable(getter):
+                session_key = str(getter("session_key", "global") or "global")[:96]
+        payload = self._sylanne_lineage_observatory_page_payload(session_key)
+        if callable(jsonify):
+            return jsonify(payload)
+        return payload
+
+    def _sylanne_lineage_observatory_page_payload(self, session_key: str = "global") -> dict[str, Any]:
+        key = str(session_key or "global")[:96]
+        latest = dict(self._understanding_closed_loop_state().get(key) or {})
+        observatory = latest.get("turning_point_lineage_observatory")
+        if not isinstance(observatory, dict):
+            observatory = build_turning_point_lineage_observatory(
+                [],
+                session_key=key,
+                now=self._observed_now(),
+            )
+        branches = []
+        for branch in observatory.get("branches") or []:
+            if not isinstance(branch, dict):
+                continue
+            branches.append(
+                {
+                    "branch_id": str(branch.get("branch_id") or "")[:32],
+                    "type": str(branch.get("type") or "none")[:48],
+                    "confidence": round(max(0.0, min(1.0, float(branch.get("confidence") or 0.0))), 6),
+                    "phase": str(branch.get("phase") or "low_signal")[:48],
+                    "bounded_summary": str(branch.get("bounded_summary") or "")[:80],
+                    "future_tendency": str(branch.get("future_tendency") or "")[:80],
+                    "created_at": branch.get("created_at"),
+                },
+            )
+        lineage = observatory.get("lineage") if isinstance(observatory.get("lineage"), dict) else {}
+        return {
+            "schema_version": "astrbot.sylanne_lineage_observatory_page.v1",
+            "plugin_name": PLUGIN_NAME,
+            "read_only": True,
+            "internal_only": True,
+            "public_api_eligible": False,
+            "session_key": key,
+            "observed_at": observatory.get("observed_at"),
+            "lineage": {
+                "branch_count": int(lineage.get("branch_count") or 0),
+                "dominant_branch": str(lineage.get("dominant_branch") or "none")[:48],
+                "branch_types": [str(value or "")[:48] for value in lineage.get("branch_types") or []][:8],
+            },
+            "branches": branches[:8],
+            "constraints": [
+                "plugin_internal_read_only_diagnostics",
+                "bounded_summary_only",
+                "speaker_group_isolated",
+                "candidate_not_fact",
+                "no_raw_conversation_text",
+                "not_public_api_contract",
+            ],
+        }
 
     async def _sylanne_memory_settings_page_get(self) -> Any:
         payload = await self._sylanne_memory_settings_page_payload()
@@ -12420,6 +12496,21 @@ class EmotionalStatePlugin(Star):
             relational_time_layer=dict(state.get("relational_time_layer") or {}),
             now=self._observed_now(),
         )
+        replay_history = state.setdefault("turning_point_memory_replay_history", [])
+        if not isinstance(replay_history, list):
+            replay_history = []
+            state["turning_point_memory_replay_history"] = replay_history
+        replay = state.get("turning_point_memory_replay")
+        if isinstance(replay, dict) and replay.get("replayable") is True:
+            replay_history.append(dict(replay))
+            del replay_history[:-8]
+        state["turning_point_lineage_observatory"] = build_turning_point_lineage_observatory(
+            replay_history,
+            session_key=session_key,
+            speaker_key=(identity.speaker_track_id or identity.speaker_id) if identity is not None else "",
+            group_key=identity.group_id if identity is not None else "",
+            now=self._observed_now(),
+        )
 
     def _understanding_closed_loop_diagnostics(self, session_key: str) -> dict[str, Any]:
         key = str(session_key or "global")
@@ -12446,6 +12537,11 @@ class EmotionalStatePlugin(Star):
         latest.setdefault("self_interpretation", {})
         latest.setdefault("relational_time_layer", {})
         latest.setdefault("turning_point_memory_replay", {})
+        latest.setdefault("turning_point_lineage_observatory", {})
+        latest.setdefault("turning_point_memory_replay_history", [])
+        latest["turning_point_memory_replay"] = {}
+        latest["turning_point_lineage_observatory"] = {}
+        latest["turning_point_memory_replay_history"] = []
         return latest
 
     def _append_realtime_ordinary_history_backfills_if_any(

@@ -296,6 +296,10 @@ class PublicApiMemoryPart01(MemoryPayloadPublicApiTests):
             "query_turning_point_memory_replay",
             "export_turning_point_memory_replay",
             "list_turning_point_replay_events",
+            "get_turning_point_lineage_observatory",
+            "query_turning_point_lineage_observatory",
+            "export_turning_point_lineage_observatory",
+            "list_turning_point_lineage_branches",
         }
 
         self.assertTrue(public_names.isdisjoint(forbidden))

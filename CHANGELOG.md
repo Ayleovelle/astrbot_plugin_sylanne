@@ -2,6 +2,29 @@
 
 本文件用于 AstrBot 插件市场/管理页展示更新内容。更完整的设计说明、公式推导、测试矩阵和维护手册见 `README.md`。
 
+## 3.0.0-exp5
+
+发布日期：2026-05-18
+
+### 新增
+
+- 发布 Sylanne 3.0 第五阶段 Lineage / Branching / WebUI 观察舱：把内部 turning point replay 组织成只读谱系分支观察信号。
+- `integrated_self.py` 新增 `build_turning_point_lineage_observatory(...)`，从高置信、可回放、内部限定的转折点 replay 中生成 lineage 与 branches。
+- response 后的 self interpretation 记录链路维护近期 replay 队列，并同步生成 `turning_point_lineage_observatory`，用于观察近期关键互动的分支延续和主导方向。
+- 注册只读 WebUI 观察舱入口，返回裁剪后的 lineage payload，便于本地维护端查看 exp5 内部闭环。
+
+### 安全与边界
+
+- 谱系分支观察继续使用 `session:speaker:group` 隔离键，只保留 branch type、confidence、phase、bounded_summary、future_tendency 和 branch id。
+- 观察舱 payload 不返回 raw conversation、`relationship_time_weight`、`isolation_key` 明细或跨 speaker/group 的分支数据。
+- `public_api.py` 不新增 lineage observatory 查询、导出、列表或批量读取方法；默认 runtime diagnostics 会清空 lineage/replay 细节。
+
+### 验证
+
+- 新增 lineage/branching 单元测试，覆盖分支追踪、主导分支计算、跨 speaker 过滤和低信号拒绝。
+- 新增 WebUI 观察舱只读裁剪、默认 runtime diagnostics 封闭和 public API 禁止方法断言。
+- 全量测试结果以本次发布收尾验证为准。
+
 ## 3.0.0-exp4
 
 发布日期：2026-05-18
