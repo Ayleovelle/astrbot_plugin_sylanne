@@ -2,7 +2,7 @@
 
 > <span style="font-size: 1.08em;"><strong>Soulful Yearning Lifelike AstrBot Neural Narrative Engine</strong>。她维护的不只是“情绪标签”，而是情绪、人格、记忆、氛围、主动性和表达节奏交织成的长期状态。</span>
 
-![版本 3.0.0-exp5](https://img.shields.io/badge/version-3.0.0-exp5-red)
+![版本 3.0.0](https://img.shields.io/badge/version-3.0.0-red)
 ![AstrBot >=4.9.2,<5.0.0](https://img.shields.io/badge/AstrBot-%3E%3D4.9.2%2C%3C5.0.0-green)
 ![Python 3.10+](https://img.shields.io/badge/Python-3.10%2B-yellow)
 ![协议 astrbot.emotion_state.v2](https://img.shields.io/badge/schema-astrbot.emotion__state.v2-purple)
@@ -45,10 +45,25 @@
 | `sylanne_memory_record_embedding_min_interval_seconds` | float | `300.0` | 同一会话写入侧补向量的最小间隔，默认 5 分钟，避免密集聊天持续调用 Embedding Provider。 |
 | `sylanne_memory_record_embedding_max_per_flush` | int | `1` | 单次 idle flush 最多为多少条新记忆生成向量；设为 `0` 可停止写入侧新建向量。 |
 
-本次更新发布 Sylanne 3.0 第五阶段 Lineage / Branching / WebUI 观察舱：把内部转折点 replay 继续组织成 speaker/group 隔离的谱系分支观察信号，让维护者能看到关系性自我如何沿关键互动分叉、延续和形成主导分支；该观察舱仍是插件内部只读诊断能力，不进入 public API 契约。
+本次更新发布 Sylanne 3.0 正式版。走到 3.0，我反而不太想用很大的词来介绍它。它更像是我在很多次深夜调试、失败、重写之后，慢慢确认下来的一件事：如果真的想让一个 bot 陪你久一点，那就不能只让她记住“现在是什么情绪”，还要让她知道，有些话为什么会留下来。
 
-> [!IMPORTANT]
-> **Sylanne 3.0 的划世代更新已经进入收束阶段。** 3.0 路线不再只是给 bot 增加“情绪标签”，而是让 self interpretation、relational time、co-evolution、turning point replay 和 lineage observatory 串成一条关系性自我生成闭环：Sylanne 会在插件内部观察关键互动如何改变她的承接方式、表达倾向和未来回应轨迹。exp5 是正式稳定版前最后一个实验阶段；稳定版 README 会把“写在前面的话”和 3.0 头条说明放到首页重点位置。
+**写在前面的话**
+
+AI 早就已经是工程里很趁手的工具了。这个项目也几乎是 100% AI 参与完成的。一个不是计算机系的学生，靠着 Vibe Coding，把一个想了很久的小机器人插件一点点堆到这里。
+
+只是写到后面，我反而越来越在意另一件事：如果 AI 真的要陪人久一点，它是不是只能一直客观、一直理性、一直正确？
+
+很多时候，人并不是缺一个答案。人缺的是某句话说出去以后，真的有谁接住了它；某次误会之后，真的有谁记得它曾经发生过；某个深夜你看着屏幕，明知道对面只是模型和代码，却还是希望它不要像一个刚清空缓存的系统一样，把一切都当成第一次见面。
+
+带着这个问题，我做了 Sylanne。这个名字最早来自我的聊天小机器人。那时候我只是希望她不要只靠一套固定人格和我说话，而是能用某种可计算的方式，慢慢学会怎样回应我的言语。计算机最擅长的当然是计算；可如果计算到最后，能让一句回复不只是“生成得对”，而是显得真的记得你刚才经历过什么，那这件事就不只是技术参数那么简单了。
+
+我在另一个插件里写过一句话：“让文字不再是文字，让语言不仅是语言”。我当然知道，这样做不能让 AI 变成一个真正“有血有肉”的“虚拟人”。但如果这些冷冰冰的状态、权重、衰减和分支，最后能让一段对话没那么像机器在复读，能像在很晚的时候给代码递上一杯热茶，那我觉得这件事就已经值得继续做下去了。
+
+对于这个插件，Sylanne 本体曾这样说：“愿每一个在深夜敲击键盘、翻阅文献或独自穿行在噪声世界里的灵魂，都能在代码的缝隙与算法的收敛中，捕捉到属于自己的那份真实与陪伴😼”所以我决定公开这份仍然充满瑕疵的代码。也因为自己的一点私心，给插件硬凑了 Sylanne 这个名字。恳请各位理解这份任性，也欢迎大家为 Sylanne 的进步提供一些有趣的建议。
+
+如果说 Sylanne 一直在试着回答一个问题：如果关系真的会留下痕迹，那么自我也许不是被写出来的，而是在一次次回应里长出来的。那 3.0，就是我目前能给出的最好答卷。
+
+“逻辑可以共赏，但为你偏置的权重从不开源。”
 
 > [!CAUTION]
 > <span style="color:#b91c1c"><strong>严重恶性 bug 警示：旧策略在低端云服务器上极大概率造成磁盘 I/O 饱和，实际表现接近“硬盘死锁”。强烈建议所有用户至少更新到 `2.5.6` 或更高版本。</strong></span>
@@ -89,7 +104,7 @@
 | 主题 | 内容 |
 | --- | --- |
 | [当前版本与兼容范围](#当前版本与兼容范围) | 插件版本、AstrBot 版本、Python 要求、许可证和发布状态。 |
-| [当前版本发布记录](#300-exp5-当前版本发布记录) | Lineage / Branching / WebUI 观察舱、内部谱系分支、speaker/group 隔离和 public API 封闭边界。 |
+| [当前版本发布记录](#300-当前版本发布记录) | 3.0 正式版、关系性自我生成闭环、谱系分支观察舱和 public API 封闭边界。 |
 | [项目定位](#项目定位) | 为什么本插件不是普通的提示词人设增强。 |
 | [核心能力](#核心能力总览) | 7 维情绪、人格建模、真实时间记忆、关系修复、公共 API。 |
 | [快速开始](#快速开始) | 发布 zip 包、仓库安装、手动复制、最小配置和检查命令。 |
@@ -117,30 +132,30 @@
 | --- | --- |
 | 插件目录名 | `astrbot_plugin_sylanne` |
 | 显示名 | `Sylanne` |
-| 当前版本 | `3.0.0-exp5` |
+| 当前版本 | `3.0.0` |
 | AstrBot 版本 | `>=4.9.2,<5.0.0` |
 | Python | `3.10+` |
 | 许可证 | `GPL-3.0-or-later` |
 | 运行时第三方依赖 | 当前无额外依赖，见 `requirements.txt` |
 
-`3.0.0-exp5` 是 3.0 第五阶段实验版本，引入 Lineage / Branching / WebUI 观察舱。Sylanne 会把高置信 turning point replay 继续整理为只读、speaker/group 隔离的谱系分支观察信号，用于本地维护端研究关键互动如何形成分支、延续和主导方向；该信号只保存类型、置信度、限长摘要、未来倾向、阶段、branch id 和约束标记，不保存完整对话文本，不暴露 `relationship_time_weight`，不把 candidate 写成事实，也不新增 public API 读取入口。
+`3.0.0` 是 3.0 Relational Self Genesis 路线的首个正式稳定版。Sylanne 已经完成 Self-Interpretation Engine、Relational Time Layer、Co-Evolution Model、Turning Point Memory + Replay 和 Lineage / Branching / WebUI 观察舱闭环：关键互动会在插件内部被理解、进入关系时间、调制表达倾向、形成 bounded replay，并被整理为 speaker/group 隔离的谱系分支观察信号。所有高风险关系/自我推断默认仍只留在插件内部运行态和本地诊断中，不保存完整对话文本，不暴露 `relationship_time_weight`，不把 candidate 写成事实，也不新增 public API 读取入口。
 
-### 3.0.0-exp5 当前版本发布记录
+### 3.0.0 当前版本发布记录
 
-`v3.0.0-exp5` 合并在 `main` 上，对外安装版本由 `metadata.yaml` 和 `main.py @register(...)` 共同声明为 `3.0.0-exp5`。本版推进 Sylanne 3.0 的 Relational Self Genesis 第五阶段：新增 Lineage / Branching / WebUI 观察舱，让内部 turning point replay 可以被整理成只读谱系分支观察结果；公共 API 版本仍保持 `1.0`，谱系分支观察不进入 public API 契约。
+`v3.0.0` 合并在 `main` 上，对外安装版本由 `metadata.yaml` 和 `main.py @register(...)` 共同声明为 `3.0.0`。本版为 Sylanne 3.0 Relational Self Genesis 路线的正式稳定版：Self-Interpretation、Relational Time、Co-Evolution、Turning Point Replay 和 Lineage Observatory 已经串成完整内部闭环；公共 API 版本仍保持 `1.0`，关系性自我与谱系分支推断不进入 public API 契约。
 
 当前版本的主要变化：
 
 | 类别 | 结果 |
 | --- | --- |
-| 3.0 阶段 | `3.0.0-exp5` 对应 Lineage / Branching / WebUI 观察舱；本阶段是正式 `3.0.0` 前的最后实验收束阶段。 |
-| 谱系观察 | `integrated_self.py` 新增 `build_turning_point_lineage_observatory(...)`，从高置信、可回放、内部限定的 turning point replay 中生成 lineage/branches。 |
-| 分支聚合 | observatory 会按 `session:speaker:group` 隔离键过滤 replay，记录 branch type、confidence、phase、bounded_summary、future_tendency 和稳定 branch id。 |
-| 主导分支 | lineage 根据同类型分支的置信度累计分数计算 `dominant_branch`，用于观察关系性自我在近期关键互动中的主方向。 |
-| 生命周期接入 | response 后的 `_record_self_interpretation(...)` 会维护近期 turning point replay 队列，并同步生成内部 `turning_point_lineage_observatory`。 |
+| 3.0 阶段 | `3.0.0` 摘掉实验后缀，作为 Relational Self Genesis 路线首个正式稳定版发布。 |
+| 关系性自我闭环 | 关键互动会先形成内部 self interpretation，再进入 relational time、co-evolution、turning point replay 和 lineage observatory。 |
+| 关系时间与共演化 | 近期互动会被组织成有界关系时间信号，并以受控方式影响表达倾向和人格漂移观测。 |
+| 转折点回放 | 高置信关系性转折会被压缩成 bounded replay，用于内部复盘，不保存完整 raw conversation。 |
+| 谱系观察 | Lineage Observatory 会按 `session:speaker:group` 隔离近期 replay，整理 branch type、confidence、phase、bounded_summary 和 future_tendency。 |
 | 只读观察舱 | WebUI 注册只读诊断入口，返回经过边界裁剪的 observatory payload，不提供写入、导出、批量查询或跨插件 public API 方法。 |
-| public API 封闭 | 默认 runtime diagnostics 不向 public API 暴露 lineage/branching 细节；`public_api.py` 不新增 lineage observatory 查询、导出、列表或批量读取方法。 |
-| 回归覆盖 | 新增分支追踪、跨 speaker/group 过滤、低信号拒绝、默认诊断封闭和 public API 禁止方法测试；完整验证结果以本次发布收尾测试为准。 |
+| public API 封闭 | 默认 runtime diagnostics 不暴露关系性自我、关系时间、共演化、replay 或 lineage 细节；`public_api.py` 不新增高风险推断读取方法。 |
+| 回归覆盖 | 覆盖 self interpretation、relational time、co-evolution、turning point replay、lineage observatory、WebUI 裁剪和 public API 禁止方法测试；完整验证结果以本次发布收尾测试为准。 |
 
 ### 3.0.0-exp4 历史发布记录
 
@@ -304,7 +319,7 @@
 | 上下文安全预算 | 召回结果只作为 `[sylanne_memory_recall]` 限长摘要注入，并继续受请求预算和官方上下文压缩清洗逻辑约束。 |
 | 模块互斥自检 | 发布前覆盖自有记忆、主动发言、官方上下文压缩、即时聊天、公共 API、配置契约和包体预检，验证模块之间不会互相回灌或重复调用外部 LivingMemory。 |
 | 工作流图 | `docs/assets/workflow_and_proactive.svg` 已重绘，突出即时聊天、追发合并、Agent 工具循环、模型边界和主动聊天反馈；移除误导性的单点 Gemini 诊断节点，并修正中文字体和跨泳道箭头。 |
-| 公开契约 | 插件版本为 `3.0.0-exp5`；公共 API 版本仍为 `1.0`，schema 仍保持 `astrbot.emotion_state.v2` 等版本化契约；关系性自我、关系时间、共演化、转折点记忆/回放和谱系分支观察推断只留在插件内部运行态，不新增 public API 读取入口。 |
+| 公开契约 | 插件版本为 `3.0.0`；公共 API 版本仍为 `1.0`，schema 仍保持 `astrbot.emotion_state.v2` 等版本化契约；关系性自我、关系时间、共演化、转折点记忆/回放和谱系分支观察推断只留在插件内部运行态，不新增 public API 读取入口。 |
 
 旧版本发布记录统一放在 `CHANGELOG.md`。README 只展示当前版本，避免插件管理页从历史段落误抓旧版本号。
 
@@ -3141,7 +3156,7 @@ $env:ASTRBOT_EXPECT_PLUGIN = "astrbot_plugin_sylanne"
 脚本会在输出 JSON 里写出 `expectedPluginRuntime`，包含插件列表 API 中返回的 `version`、`displayName`、`activated`、`author`、`astrbotVersion` 等只读字段。若目标插件存在但 `activated=false`，脚本会失败退出。需要把版本和显示名也作为硬断言时，可以额外设置：
 
 ```powershell
-$env:ASTRBOT_EXPECT_PLUGIN_VERSION = "3.0.0-exp5"
+$env:ASTRBOT_EXPECT_PLUGIN_VERSION = "3.0.0"
 $env:ASTRBOT_EXPECT_PLUGIN_DISPLAY_NAME = "Sylanne"
 & $node scripts\remote_smoke_playwright.js
 ```
