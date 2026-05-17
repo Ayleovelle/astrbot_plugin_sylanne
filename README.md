@@ -3485,4 +3485,4 @@ license: GPL-3.0-or-later
 
 如果 Sylanne 帮到了你，或者你愿意继续看她慢慢长大，给孩子点一颗⭐吧，孩子什么都会做的（）
 
-[![Star History Chart](https://api.star-history.com/svg?repos=Ayleovelle/astrbot_plugin_sylanne&type=Date)](https://www.star-history.com/#Ayleovelle/astrbot_plugin_sylanne&Date)
+[![Star History Chart](https://api.star-history.com/svg?repos=Ayleovelle/astrbot_plugin_sylanne&type=Timeline&theme=light&variant=adaptive)](https://www.star-history.com/#Ayleovelle/astrbot_plugin_sylanne&Timeline)
