@@ -638,7 +638,7 @@ def get_emotional_state_plugin(context: Context) -> Any | None:
     PLUGIN_NAME,
     "Aylovelle.S.S",
     "Soulful Yearning Lifelike AstrBot Neural Narrative Engine：维护情绪、人格、记忆、氛围和表达节奏的 Sylanne",
-    "2.6.1",
+    "2.6.2",
     "",
 )
 class EmotionalStatePlugin(Star):
@@ -12007,6 +12007,119 @@ class EmotionalStatePlugin(Star):
             "same topic continues",
             "continue",
             "continues",
+            "what did you say",
+            "say that again",
+            "repeat that",
+        )
+        return any(marker in compact for marker in continuity_markers)
+
+    def _shadow_memory_backfill_relevant_to_current_turn(
+        self,
+        current_user_text: str,
+    ) -> bool:
+        value = " ".join(str(current_user_text or "").split()).strip()
+        if not value:
+            return False
+        compact = re.sub(r"\s+", "", value.lower())
+        if self._looks_like_user_correction_or_source_query(value):
+            return True
+        if self._looks_like_short_answer_to_pending_question(value):
+            return True
+        continuity_markers = (
+            "刚才",
+            "刚刚",
+            "上一句",
+            "上一段",
+            "上一轮",
+            "前面",
+            "上面",
+            "你刚说",
+            "你刚才说",
+            "你刚刚说",
+            "刚才你说",
+            "刚刚你说",
+            "你说什么",
+            "你刚才讲",
+            "你刚刚讲",
+            "再说一遍",
+            "重复一遍",
+            "继续说",
+            "接着说",
+            "接上",
+            "续上",
+            "说完",
+            "没说完",
+            "打断",
+            "继续刚才",
+            "继续上面",
+            "刚才的话",
+            "刚刚的话",
+            "这句话",
+            "那句话",
+            "这段话",
+            "那段话",
+            "他们",
+            "她们",
+            "它们",
+            "ta们",
+            "same topic continues",
+            "continue",
+            "continues",
+            "what did you say",
+            "say that again",
+            "repeat that",
+        )
+        return any(marker in compact for marker in continuity_markers)
+
+    def _shadow_memory_backfill_relevant_to_current_turn(
+        self,
+        current_user_text: str,
+    ) -> bool:
+        value = " ".join(str(current_user_text or "").split()).strip()
+        if not value:
+            return False
+        compact = re.sub(r"\s+", "", value.lower())
+        if self._looks_like_user_correction_or_source_query(value):
+            return True
+        if self._looks_like_short_answer_to_pending_question(value):
+            return True
+        continuity_markers = (
+            "刚才",
+            "刚刚",
+            "上一句",
+            "上一段",
+            "上一轮",
+            "前面",
+            "上面",
+            "你刚说",
+            "你刚才说",
+            "你刚刚说",
+            "刚才你说",
+            "刚刚你说",
+            "你说什么",
+            "你刚才讲",
+            "你刚刚讲",
+            "再说一遍",
+            "重复一遍",
+            "接着说",
+            "接上",
+            "续上",
+            "说完",
+            "没说完",
+            "打断",
+            "继续刚才",
+            "继续上面",
+            "刚才的话",
+            "刚刚的话",
+            "这句话",
+            "那句话",
+            "这段话",
+            "那段话",
+            "他们",
+            "她们",
+            "它们",
+            "ta们",
+            "same topic continues",
             "what did you say",
             "say that again",
             "repeat that",

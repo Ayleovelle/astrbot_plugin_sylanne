@@ -2,7 +2,7 @@
 
 > <span style="font-size: 1.08em;"><strong>Soulful Yearning Lifelike AstrBot Neural Narrative Engine</strong>。她维护的不只是“情绪标签”，而是情绪、人格、记忆、氛围、主动性和表达节奏交织成的长期状态。</span>
 
-![版本 2.6.1](https://img.shields.io/badge/version-2.6.1-red)
+![版本 2.6.2](https://img.shields.io/badge/version-2.6.2-red)
 ![AstrBot >=4.9.2,<5.0.0](https://img.shields.io/badge/AstrBot-%3E%3D4.9.2%2C%3C5.0.0-green)
 ![Python 3.10+](https://img.shields.io/badge/Python-3.10%2B-yellow)
 ![协议 astrbot.emotion_state.v2](https://img.shields.io/badge/schema-astrbot.emotion__state.v2-purple)
@@ -47,7 +47,7 @@
 
 本次更新重构了Sylanne的记忆模块的工作流程，避免对长期上下文造成负面影响。
 
-`2.6.1` 继续保留 `2.5.6` 的低端云盘 I/O 风险修复：checkpoint 合并写入、表情索引缓存并在线程中重建、Sylanne 记忆与表情学习批量单写，以及记忆向量召回 Embedding 热路径限流；请正在使用 `2.5.5` 及更早版本的用户至少更新到 `2.5.6`，也可以直接更新到当前 `2.6.1`。
+`2.6.2` 继续保留 `2.5.6` 的低端云盘 I/O 风险修复：checkpoint 合并写入、表情索引缓存并在线程中重建、Sylanne 记忆与表情学习批量单写，以及记忆向量召回 Embedding 热路径限流；请正在使用 `2.5.5` 及更早版本的用户至少更新到 `2.5.6`，也可以直接更新到当前 `2.6.2`。
 
 > [!CAUTION]
 > <span style="color:#b91c1c"><strong>严重恶性 bug 警示：旧策略在低端云服务器上极大概率造成磁盘 I/O 饱和，实际表现接近“硬盘死锁”。强烈建议所有用户至少更新到 `2.5.6` 或更高版本。</strong></span>
@@ -88,7 +88,7 @@
 | 主题 | 内容 |
 | --- | --- |
 | [当前版本与兼容范围](#当前版本与兼容范围) | 插件版本、AstrBot 版本、Python 要求、许可证和发布状态。 |
-| [当前版本发布记录](#261-当前版本发布记录) | `shadow memory` 临时连续性链路复用护栏、旧 ordinary context 回灌拆分、记忆召回污染隔离和当前事件时间优先。 |
+| [当前版本发布记录](#262-当前版本发布记录) | `shadow memory` 临时连续性链路复用护栏、旧 ordinary context 回灌拆分、记忆召回污染隔离和当前事件时间优先。 |
 | [项目定位](#项目定位) | 为什么本插件不是普通的提示词人设增强。 |
 | [核心能力](#核心能力总览) | 7 维情绪、人格建模、真实时间记忆、关系修复、公共 API。 |
 | [快速开始](#快速开始) | 发布 zip 包、仓库安装、手动复制、最小配置和检查命令。 |
@@ -116,24 +116,25 @@
 | --- | --- |
 | 插件目录名 | `astrbot_plugin_sylanne` |
 | 显示名 | `Sylanne` |
-| 当前版本 | `2.6.1` |
+| 当前版本 | `2.6.2` |
 | AstrBot 版本 | `>=4.9.2,<5.0.0` |
 | Python | `3.10+` |
 | 许可证 | `GPL-3.0-or-later` |
 | 运行时第三方依赖 | 当前无额外依赖，见 `requirements.txt` |
 
-`2.6.1` 保留 Sylanne 自有记忆知识库、只读记忆查询入口、Agent-owned context 即时聊天修复、AstrBot Embedding 提供商驱动的向量召回、可视化记忆设置 Page、短答锚定、模型空回复降级、内部工具统一隐藏、主动聊天反馈、等待期追发合并、长历史关键上下文保底、AstrBot 事件时间保留、表情包仓库自动下载和近距相对时间提示；本版继续使用 `shadow memory` 临时连续性块，并修复上一轮已送达回复被模型当成可复述素材的问题。核心情绪、回复后后台评估（post）、`group_atmosphere_state`、`humanlike_state`、`lifelike_learning_state`、`personality_drift_state`、Sylanne 自有记忆和欺骗/操控/逃责类动作阻断默认自动运行；真人即时聊天接管、表情包回应、表情包自动下载、主动聊天发送、道德修复、瑕疵模拟、心理筛查等高风险或实验模块仍由配置者显式打开。
+`2.6.2` 保留 Sylanne 自有记忆知识库、只读记忆查询入口、Agent-owned context 即时聊天修复、AstrBot Embedding 提供商驱动的向量召回、可视化记忆设置 Page、短答锚定、模型空回复降级、内部工具统一隐藏、主动聊天反馈、等待期追发合并、长历史关键上下文保底、AstrBot 事件时间保留、表情包仓库自动下载和近距相对时间提示；本版继续使用 `shadow memory` 临时连续性块，并进一步修复完整送达的上一轮回复被一刀切当作下一轮续接/打断上下文的问题。核心情绪、回复后后台评估（post）、`group_atmosphere_state`、`humanlike_state`、`lifelike_learning_state`、`personality_drift_state`、Sylanne 自有记忆和欺骗/操控/逃责类动作阻断默认自动运行；真人即时聊天接管、表情包回应、表情包自动下载、主动聊天发送、道德修复、瑕疵模拟、心理筛查等高风险或实验模块仍由配置者显式打开。
 
-### 2.6.1 当前版本发布记录
+### 2.6.2 当前版本发布记录
 
-`v2.6.1` 合并在 `main` 上，对外安装版本由 `metadata.yaml` 和 `main.py @register(...)` 共同声明为 `2.6.1`。本版是 `2.6.0` 的 `shadow memory` 热修：不改变公共 API 版本，公共 API 版本仍保持 `1.0`，schema 仍保持向后兼容。
+`v2.6.2` 合并在 `main` 上，对外安装版本由 `metadata.yaml` 和 `main.py @register(...)` 共同声明为 `2.6.2`。本版是 `2.6.1` 的 `shadow memory` 热修：不改变公共 API 版本，公共 API 版本仍保持 `1.0`，schema 仍保持向后兼容。
 
 当前版本的主要变化：
 
 | 类别 | 结果 |
 | --- | --- |
-| **`shadow memory` 工作流** | delivered shadow 不再直接写入 `request.contexts`；后台释放后会合并成 `[sylanne_shadow_memory]` 临时块，只作为下一轮回复的短连续性线索。 |
+| **`shadow memory` 工作流** | delivered shadow 不再直接写入 `request.contexts`；后台释放后会合并成 `[sylanne_shadow_memory]` 临时块，并且只在用户纠正、短答绑定或明确续接上一轮时注入。 |
 | **`shadow memory` 复用护栏** | `[sylanne_shadow_memory]` 明确说明上一轮 assistant content 是旧回复，不是当前用户又说了一遍，也不是可复述素材；冲突时必须以当前用户文本为准。 |
+| 正常结束话题隔离 | 完整送达的实时回复不会被下一轮普通新话题一刀切当作打断/续接上下文；自然新问题会丢弃已送达 backfill，避免旧话题牵引长期上下文。 |
 | 用户纠正识别 | `什么时候和你说`、`什么时候说过`、`谁跟你说`、`没讲`、`没说` 等口语纠正会触发 `[sylanne_user_correction_context]`，避免 bot 沿用上一轮误会继续发挥。 |
 | 引用事件隔离 | OneBot/NapCat `reply` / `quote` / `reference` 段不会再被误当成图片或表情；仅引用旧消息、没有真实当前文本时，不消费唯一一次 `shadow memory`。 |
 | 旧链路对比 | 旧链路把实时接管回复回填进 ordinary backfill，再塞入 AstrBot 请求上下文；新链路把“已送达但 Agent 未必知道”的事实单独放进临时块，AstrBot Agent 原生上下文仍是长期历史来源。 |
@@ -224,7 +225,7 @@
 | 上下文安全预算 | 召回结果只作为 `[sylanne_memory_recall]` 限长摘要注入，并继续受请求预算和官方上下文压缩清洗逻辑约束。 |
 | 模块互斥自检 | 发布前覆盖自有记忆、主动发言、官方上下文压缩、即时聊天、公共 API、配置契约和包体预检，验证模块之间不会互相回灌或重复调用外部 LivingMemory。 |
 | 工作流图 | `docs/assets/workflow_and_proactive.svg` 已重绘，突出即时聊天、追发合并、Agent 工具循环、模型边界和主动聊天反馈；移除误导性的单点 Gemini 诊断节点，并修正中文字体和跨泳道箭头。 |
-| 公开契约 | 插件版本为 `2.6.1`；公共 API 版本仍为 `1.0`，schema 仍保持 `astrbot.emotion_state.v2` 等版本化契约。 |
+| 公开契约 | 插件版本为 `2.6.2`；公共 API 版本仍为 `1.0`，schema 仍保持 `astrbot.emotion_state.v2` 等版本化契约。 |
 
 旧版本发布记录统一放在 `CHANGELOG.md`。README 只展示当前版本，避免插件管理页从历史段落误抓旧版本号。
 
@@ -3059,7 +3060,7 @@ $env:ASTRBOT_EXPECT_PLUGIN = "astrbot_plugin_sylanne"
 脚本会在输出 JSON 里写出 `expectedPluginRuntime`，包含插件列表 API 中返回的 `version`、`displayName`、`activated`、`author`、`astrbotVersion` 等只读字段。若目标插件存在但 `activated=false`，脚本会失败退出。需要把版本和显示名也作为硬断言时，可以额外设置：
 
 ```powershell
-$env:ASTRBOT_EXPECT_PLUGIN_VERSION = "2.6.1"
+$env:ASTRBOT_EXPECT_PLUGIN_VERSION = "2.6.2"
 $env:ASTRBOT_EXPECT_PLUGIN_DISPLAY_NAME = "Sylanne"
 & $node scripts\remote_smoke_playwright.js
 ```

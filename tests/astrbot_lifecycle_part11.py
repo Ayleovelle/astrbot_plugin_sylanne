@@ -430,12 +430,12 @@ class AstrBotLifecyclePart11(AstrBotLifecycleTests):
             )
             request = fake_request(
                 session_id="s-backfill-release",
-                prompt="same topic continues",
+                prompt="刚才那个 same topic continues",
             )
             await plugin.on_llm_request(
                 FakeEvent(
                     "s-backfill-release",
-                    message="same topic continues",
+                    message="刚才那个 same topic continues",
                     sender_id="u1",
                 ),
                 request,
@@ -595,6 +595,51 @@ class AstrBotLifecyclePart11(AstrBotLifecycleTests):
         self.assertNotIn("两周前我只是", injected)
         self.assertNotIn(
             "s-shadow-normal-new-turn",
+            plugin._realtime_ordinary_history_backfill_cache(),
+        )
+
+
+    def test_shadow_memory_backfill_drops_completed_topic_despite_continuity_word(self):
+        plugin = new_plugin(
+            {
+                "assessment_timing": "post",
+                "inject_state": False,
+                "enable_realtime_chat": True,
+                "enable_sticker_reaction": False,
+                "use_llm_assessor": False,
+            },
+        )
+        self._bind_common_state_hooks(plugin)
+        plugin._record_realtime_ordinary_history_backfill(
+            "s-shadow-completed-continuity-word",
+            role="assistant",
+            content="我想对他们说：请先读 README，再按步骤安装。",
+            input_epoch=13,
+            source="unit_test",
+            delivery_status="delivered",
+        )
+        prompt = "继续说一下 shadow 模块，判断话题完成度来自动释放"
+        request = fake_request(
+            session_id="s-shadow-completed-continuity-word",
+            prompt=prompt,
+        )
+
+        asyncio.run(
+            plugin.on_llm_request(
+                FakeEvent(
+                    "s-shadow-completed-continuity-word",
+                    message=prompt,
+                    sender_id="u1",
+                ),
+                request,
+            ),
+        )
+
+        injected = "\n".join(self._request_text_parts(request))
+        self.assertNotIn("sylanne_shadow_memory", injected)
+        self.assertNotIn("请先读 README", injected)
+        self.assertNotIn(
+            "s-shadow-completed-continuity-word",
             plugin._realtime_ordinary_history_backfill_cache(),
         )
 
