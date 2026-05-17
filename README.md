@@ -2,7 +2,7 @@
 
 > <span style="font-size: 1.08em;"><strong>Soulful Yearning Lifelike AstrBot Neural Narrative Engine</strong>。她维护的不只是“情绪标签”，而是情绪、人格、记忆、氛围、主动性和表达节奏交织成的长期状态。</span>
 
-![版本 2.5.6](https://img.shields.io/badge/version-2.5.6-red)
+![版本 2.6.0](https://img.shields.io/badge/version-2.6.0-red)
 ![AstrBot >=4.9.2,<5.0.0](https://img.shields.io/badge/AstrBot-%3E%3D4.9.2%2C%3C5.0.0-green)
 ![Python 3.10+](https://img.shields.io/badge/Python-3.10%2B-yellow)
 ![协议 astrbot.emotion_state.v2](https://img.shields.io/badge/schema-astrbot.emotion__state.v2-purple)
@@ -25,6 +25,8 @@
 
 - 🧠 <span style="font-size: 1.04em;"><strong>不只是情绪：</strong>同时维护 7 维情绪、人格漂移、拟人状态、生命化学习、道德修复、瑕疵模拟和非诊断心理筛查。</span><br>
   <sub><em>「先把状态做成会互相牵动的东西。7 维情绪只是入口，人格漂移和长期记忆才让她有前后文。」</em></sub>
+- 🕯️ <span style="font-size: 1.04em;"><strong>不抢上下文：</strong>`shadow memory` 只把已送达的实时接管回复作为临时连续性线索交回下一轮，不接管 AstrBot Agent 的长期上下文池。</span><br>
+  <sub><em>「她只是把刚才确实说出口的话放回桌面上，不把整本聊天记录抢走。」</em></sub>
 - 📝 <span style="font-size: 1.04em;"><strong>会记住相处方式：</strong>Sylanne 自有记忆会记录事件、情绪、人格漂移和相处气氛，后续按真实时间与记忆深度限长召回。</span><br>
   <sub><em>「记忆不能只存事实。那天是别扭、开心、委屈还是想靠近，都应该一起留下来。」</em></sub>
 - 💬 <span style="font-size: 1.04em;"><strong>懂得什么时候说话：</strong>结合群聊氛围、打断风险、双方需要和主动发言反馈，判断该开口、短应、先听还是保持距离。</span><br>
@@ -43,12 +45,12 @@
 | `sylanne_memory_record_embedding_min_interval_seconds` | float | `300.0` | 同一会话写入侧补向量的最小间隔，默认 5 分钟，避免密集聊天持续调用 Embedding Provider。 |
 | `sylanne_memory_record_embedding_max_per_flush` | int | `1` | 单次 idle flush 最多为多少条新记忆生成向量；设为 `0` 可停止写入侧新建向量。 |
 
-`2.5.6` 同时收紧 Sylanne 记忆的 Embedding 消耗：写入侧按会话做低频预算，默认 5 分钟内最多为 1 条新记忆补向量；召回侧 query embedding 缓存延长到 10 分钟，避免密集聊天时持续烧嵌入模型。
+`2.6.0` 是 `shadow memory` 工作流版：实时接管回复完整送达后不再直接回灌 `request.contexts`，而是释放为 `[sylanne_shadow_memory]` 临时连续性块。AstrBot Agent 继续拥有长期聊天上下文，Sylanne 只补“上一轮已发内容”这类 Agent 可能缺失的短线索；记忆召回查询会剥离这个临时块，避免把投递缓存误当长期记忆。
 
-`2.5.6` 是 Sylanne 低端云盘 I/O 恶性风险修复版：旧版后台 post checkpoint、表情包本地索引和记忆/表情学习写入在 2C/2GB、低 BPS 云盘或大表情目录上可能形成高频 KV 读写与同步目录扫描，极大概率把磁盘 I/O 打满，表现为硬盘假死、类似硬盘死锁、机器人长时间卡住或后台队列恢复缓慢。本版改为 checkpoint 合并写入、表情索引缓存并在线程中重建、Sylanne 记忆与表情学习批量单写，并收紧记忆向量召回的 Embedding 调用；请正在使用 `2.5.5` 及更早版本的用户尽快更新。
+`2.6.0` 继续保留 `2.5.6` 的低端云盘 I/O 风险修复：checkpoint 合并写入、表情索引缓存并在线程中重建、Sylanne 记忆与表情学习批量单写，以及记忆向量召回 Embedding 热路径限流；请正在使用 `2.5.6` 及更早版本的用户尽快更新。
 
 > [!CAUTION]
-> <span style="color:#b91c1c"><strong>严重恶性 bug 警示：旧策略在低端云服务器上极大概率造成磁盘 I/O 饱和，实际表现接近“硬盘死锁”。强烈建议所有用户立即更新到 `2.5.6` 或更高版本。</strong></span>
+> <span style="color:#b91c1c"><strong>严重恶性 bug 警示：旧策略在低端云服务器上极大概率造成磁盘 I/O 饱和，实际表现接近“硬盘死锁”。强烈建议所有用户立即更新到 `2.6.0` 或更高版本。</strong></span>
 >
 > ![低端云盘 I/O 饱和警示](docs/assets/io-saturation-warning.svg)
 
@@ -86,7 +88,7 @@
 | 主题 | 内容 |
 | --- | --- |
 | [当前版本与兼容范围](#当前版本与兼容范围) | 插件版本、AstrBot 版本、Python 要求、许可证和发布状态。 |
-| [当前版本发布记录](#256-当前版本发布记录) | 低端云盘 I/O 饱和恶性风险修复、checkpoint 合并写、表情索引缓存与线程扫描、记忆/表情学习批量单写、Embedding 热路径限流。 |
+| [当前版本发布记录](#260-当前版本发布记录) | `shadow memory` 临时连续性链路、旧 ordinary context 回灌拆分、记忆召回污染隔离和当前事件时间优先。 |
 | [项目定位](#项目定位) | 为什么本插件不是普通的提示词人设增强。 |
 | [核心能力](#核心能力总览) | 7 维情绪、人格建模、真实时间记忆、关系修复、公共 API。 |
 | [快速开始](#快速开始) | 发布 zip 包、仓库安装、手动复制、最小配置和检查命令。 |
@@ -114,29 +116,33 @@
 | --- | --- |
 | 插件目录名 | `astrbot_plugin_sylanne` |
 | 显示名 | `Sylanne` |
-| 当前版本 | `2.5.6` |
+| 当前版本 | `2.6.0` |
 | AstrBot 版本 | `>=4.9.2,<5.0.0` |
 | Python | `3.10+` |
 | 许可证 | `GPL-3.0-or-later` |
 | 运行时第三方依赖 | 当前无额外依赖，见 `requirements.txt` |
 
-`2.5.6` 保留 Sylanne 自有记忆知识库、只读记忆查询入口、Agent-owned context 即时聊天修复、AstrBot Embedding 提供商驱动的向量召回、可视化记忆设置 Page、短答锚定、模型空回复降级、完整上下文回填、内部工具统一隐藏、主动聊天反馈、等待期追发合并、长历史关键上下文保底、AstrBot 事件时间保留、表情包仓库自动下载和近距相对时间提示；本版重点修复低端云服务器上高频 KV 读写、同步表情目录扫描和过度 Embedding 热路径调用造成的磁盘/模型资源饱和风险。核心情绪、回复后后台评估（post）、`group_atmosphere_state`、`humanlike_state`、`lifelike_learning_state`、`personality_drift_state`、Sylanne 自有记忆和欺骗/操控/逃责类动作阻断默认自动运行；真人即时聊天接管、表情包回应、表情包自动下载、主动聊天发送、道德修复、瑕疵模拟、心理筛查等高风险或实验模块仍由配置者显式打开。
+`2.6.0` 保留 Sylanne 自有记忆知识库、只读记忆查询入口、Agent-owned context 即时聊天修复、AstrBot Embedding 提供商驱动的向量召回、可视化记忆设置 Page、短答锚定、模型空回复降级、内部工具统一隐藏、主动聊天反馈、等待期追发合并、长历史关键上下文保底、AstrBot 事件时间保留、表情包仓库自动下载和近距相对时间提示；本版重点把实时接管 delivered shadow 的恢复链路升级为 `shadow memory` 临时连续性块，不再让 Sylanne 直接接管 AstrBot 原生上下文池。核心情绪、回复后后台评估（post）、`group_atmosphere_state`、`humanlike_state`、`lifelike_learning_state`、`personality_drift_state`、Sylanne 自有记忆和欺骗/操控/逃责类动作阻断默认自动运行；真人即时聊天接管、表情包回应、表情包自动下载、主动聊天发送、道德修复、瑕疵模拟、心理筛查等高风险或实验模块仍由配置者显式打开。
 
-### 2.5.6 当前版本发布记录
+### 2.6.0 当前版本发布记录
 
-`v2.5.6` 合并在 `main` 上，对外安装版本由 `metadata.yaml` 和 `main.py @register(...)` 共同声明为 `2.5.6`。本版按版本规则提升第三位版本号：修复低端云服务器上旧 checkpoint、表情索引和记忆/表情学习写入策略可能造成磁盘 I/O 饱和、机器人卡死或类似硬盘死锁的问题；不改变公共 API 版本，公共 API 版本仍保持 `1.0`，schema 仍保持向后兼容。
+`v2.6.0` 合并在 `main` 上，对外安装版本由 `metadata.yaml` 和 `main.py @register(...)` 共同声明为 `2.6.0`。本版按版本规则提升第二位版本号：新增并整合 `shadow memory` 工作流，把实时接管 delivered shadow 从“回灌 ordinary context”改为“临时连续性块”，避免插件把短期投递缓存误当作 AstrBot 长期上下文；不改变公共 API 版本，公共 API 版本仍保持 `1.0`，schema 仍保持向后兼容。
 
 当前版本的主要变化：
 
 | 类别 | 结果 |
 | --- | --- |
-| **严重恶性 bug 修复** | 旧版高频 checkpoint 写入、表情索引同步扫描和记忆/表情学习逐条写 KV，在低端云盘上可能让磁盘 I/O 长时间打满；本版强烈建议所有用户尽快更新。 |
+| **`shadow memory` 工作流** | delivered shadow 不再直接写入 `request.contexts`；后台释放后会合并成 `[sylanne_shadow_memory]` 临时块，只作为下一轮回复的短连续性线索。 |
+| 旧链路对比 | 旧链路把实时接管回复回填进 ordinary backfill，再塞入 AstrBot 请求上下文；新链路把“已送达但 Agent 未必知道”的事实单独放进临时块，AstrBot Agent 原生上下文仍是长期历史来源。 |
+| 记忆污染隔离 | 记忆召回查询会剥离 `[sylanne_shadow_memory]`，避免上一轮投递缓存进入 Sylanne 自有记忆检索 query。 |
+| **严重恶性 bug 修复延续** | 继续保留 `2.5.6` 的 checkpoint 合并写、表情索引缓存/线程化、记忆/表情学习批量单写和 Embedding 热路径限流。 |
 | checkpoint 合并写 | 同一会话短时间内多次后台队列变更只保留一个延迟 checkpoint 任务，避免每个入队、领取、完成、失败节点都打一次 KV。 |
 | 表情索引缓存 | 本地表情包目录索引会缓存空结果与非空结果；缓存命中不再重新 `rglob/stat`，目录顶层变化或 TTL 到期后才重建。 |
 | 表情索引线程化 | cache miss 时把本地目录扫描移到后台线程，不再在 async 事件循环里同步扫大目录。 |
 | 记忆/表情批量单写 | Sylanne idle memory flush 和用户表情学习改为一批只读/写一次 KV，降低小文件高频写入。 |
 | Embedding 热路径限流 | 普通聊天先用关键词和关联图召回；只有无命中且已有向量记录时才调用 query embedding，并缓存同一 query/provider，旧记录向量回填不再发生在聊天热路径。 |
 | 当前事件时间优先 | `[sylanne_current_event_time]` 会在记忆召回前注入，即使 `inject_state=false` 也保留当前 AstrBot 事件时间，避免“昨晚刚聊过”被旧回忆改写成“四天没回”。 |
+| `shadow memory` 对比图 | 下方“工作流对比（与 0.5.0）”新增 Mermaid 图，直接对比旧 ordinary context 回灌和新 `shadow memory` 临时连续性链路。 |
 | 旧接管 shadow 门控 | 睡醒、昨天、上次聊天、几天没回等时间敏感发言会跳过超过短 TTL 的旧实时接管 shadow，并标记 `stale_for_recency_sensitive_turn`，不再把过期影子当作上一轮事实。 |
 | 记忆时间语义保护 | `[sylanne_memory_recall]` 明确说明 `relative_time` 是记忆片段发生/更新时间，不是用户上次回复时间，主模型不得据此推断用户几天没回。 |
 | 缺失媒体降级 | 实时接管媒体或表情包发送遇到 `FileNotFoundError`/本地路径缺失时，会返回 `missing_local_media_file` blocked 结果；文本分条、已发 shadow 释放和普通上下文回填继续完成。 |
@@ -215,7 +221,7 @@
 | 上下文安全预算 | 召回结果只作为 `[sylanne_memory_recall]` 限长摘要注入，并继续受请求预算和官方上下文压缩清洗逻辑约束。 |
 | 模块互斥自检 | 发布前覆盖自有记忆、主动发言、官方上下文压缩、即时聊天、公共 API、配置契约和包体预检，验证模块之间不会互相回灌或重复调用外部 LivingMemory。 |
 | 工作流图 | `docs/assets/workflow_and_proactive.svg` 已重绘，突出即时聊天、追发合并、Agent 工具循环、模型边界和主动聊天反馈；移除误导性的单点 Gemini 诊断节点，并修正中文字体和跨泳道箭头。 |
-| 公开契约 | 插件版本为 `2.5.6`；公共 API 版本仍为 `1.0`，schema 仍保持 `astrbot.emotion_state.v2` 等版本化契约。 |
+| 公开契约 | 插件版本为 `2.6.0`；公共 API 版本仍为 `1.0`，schema 仍保持 `astrbot.emotion_state.v2` 等版本化契约。 |
 
 旧版本发布记录统一放在 `CHANGELOG.md`。README 只展示当前版本，避免插件管理页从历史段落误抓旧版本号。
 
@@ -948,9 +954,39 @@ low_reasoning_max_context_chars = 1200
 
 0.5.0 之前的主链路更接近“单线程状态增强”：收到消息后，插件在请求内按顺序读取状态、做情绪评估、注入提示词，再等待主回复，最后把结果写回。这个结构容易理解，但慢状态、评估模型、记忆注解和主回复会相互等待，群聊和主动发言也很难自然插进去。
 
-当前版本把链路拆成“Agent 上下文 + Sylanne 投递层 + 回复后后台队列 + 主动发言支路 + 自有记忆召回”。主 LLM 的长期上下文仍交给 AstrBot Agent 持有；Sylanne 不再把大段临时历史塞进 prompt，只在必要时补充短状态事实、短记忆召回和“这段回复已生成但未必完整送达”的投递信封。主回复尽量先返回；回复后的内部评估进入后台队列，按会话顺序提交；主动发言由公式先判定开口时机，再让大模型裁决理由和话题；动态后台工作器会参考队列、CPU、内存和全局预算自动收放。下面这张图里，蓝色是主回复，绿色是后台工作器池，橙色是主动发言支路。
+当前版本把链路拆成“Agent 上下文 + Sylanne 投递层 + 回复后后台队列 + 主动发言支路 + 自有记忆召回”。主 LLM 的长期上下文仍交给 AstrBot Agent 持有；Sylanne 不再把大段临时历史塞进 prompt，只在必要时补充短状态事实、短记忆召回和“这段回复已生成但未必完整送达”的投递信封。主回复尽量先返回；回复后的内部评估进入后台队列，按会话顺序提交；主动发言由公式先判定开口时机，再让大模型裁决理由和话题；动态后台工作器会参考队列、CPU、内存和全局预算自动收放。下面这张图里，蓝色是主回复，绿色是后台工作器池，橙色是主动发言支路，`shadow memory` 是投递完成后的临时连续性层。
 
 ![工作流与主动发言支路](docs/assets/workflow_and_proactive.svg)
+
+### `shadow memory` 工作流对比
+
+```mermaid
+flowchart TD
+    A["LLM 回复生成"] --> B["实时聊天接管 on_llm_response"]
+    B --> C["记录 shadow: pending_dispatch"]
+    C --> D["后台分条发送"]
+    D --> E{"发送结果"}
+
+    E -->|完整送达| F["记录 shadow: delivered"]
+    F --> G["释放为 shadow memory"]
+    G --> H["写入临时连续性块"]
+    H --> I["下一轮 on_llm_request"]
+    I --> J["作为临时上下文注入"]
+
+    E -->|被用户打断| K["记录 breakpoint"]
+    K --> L["记录 shadow: interrupted"]
+    L --> M["下一轮注入断点摘要"]
+
+    H --> N["记忆召回剥离临时块"]
+    M --> N
+```
+
+| 维度 | 旧链路 | `shadow memory` 链路 |
+| --- | --- | --- |
+| 释放去向 | 直接写进 ordinary backfill，再塞入 `request.contexts`。 | 先变成 `shadow memory` 临时块，再作为临时上下文注入。 |
+| 事实归属 | 容易让临时投递像正式历史。 | AstrBot 原生上下文仍是主历史，Sylanne 只做连续性补位。 |
+| 记忆污染 | 临时回灌容易混进记忆召回查询。 | 记忆召回会剥离 `shadow memory` 块。 |
+| 恢复能力 | 有 KV 恢复，但语义偏回灌。 | 仍保留 KV 恢复，但只恢复 shadow / breakpoint / 临时连续性。 |
 
 几个关键点：
 
@@ -980,7 +1016,7 @@ low_reasoning_max_context_chars = 1200
 | 主动频率 | 缺少“刚聊完就别打扰”的真实时间门控。 | 同一会话近期活跃、未回复、冷回复、打断风险和反馈压力会共同提高冷却；非紧急开口需要更长真实时间间隔。 |
 | 即时聊天 | 主大模型一次性吐出整段回复。 | 可拆成多条短消息，模拟打字停顿，并在表情包发送前做语气一致性检查。 |
 | 工具调用 | 回复接管和工具调用边界不够清晰。 | 只接管最终自然语言回复；工具调用中间响应完全交还 AstrBot Agent，避免工具链被分条模块截断。 |
-| 上下文归属 | 插件容易把临时摘要当成长上下文来源。 | 长期上下文归 AstrBot Agent；Sylanne 只补投递事实、短记忆召回和必要状态摘要。 |
+| 上下文归属 | 插件容易把临时摘要当成长上下文来源。 | 长期上下文归 AstrBot Agent；`shadow memory` 只补临时连续性线索、短记忆召回和必要状态摘要。 |
 | 记忆写入 | 长期记忆更偏事实文本。 | Sylanne 自有记忆会冻结当时情绪、拟人状态、生命化学习和人格漂移，让记忆带着当时气氛。 |
 
 </details>
@@ -3020,7 +3056,7 @@ $env:ASTRBOT_EXPECT_PLUGIN = "astrbot_plugin_sylanne"
 脚本会在输出 JSON 里写出 `expectedPluginRuntime`，包含插件列表 API 中返回的 `version`、`displayName`、`activated`、`author`、`astrbotVersion` 等只读字段。若目标插件存在但 `activated=false`，脚本会失败退出。需要把版本和显示名也作为硬断言时，可以额外设置：
 
 ```powershell
-$env:ASTRBOT_EXPECT_PLUGIN_VERSION = "2.5.6"
+$env:ASTRBOT_EXPECT_PLUGIN_VERSION = "2.6.0"
 $env:ASTRBOT_EXPECT_PLUGIN_DISPLAY_NAME = "Sylanne"
 & $node scripts\remote_smoke_playwright.js
 ```

@@ -465,7 +465,7 @@ class AstrBotLifecyclePart10(AstrBotLifecycleTests):
         self.assertGreaterEqual(len(sent), 2)
 
 
-    def test_realtime_intercept_preserves_assistant_context_for_next_turn(self):
+    def test_realtime_intercept_preserves_assistant_shadow_memory_for_next_turn(self):
         sent = []
 
         class FakeContext:
@@ -532,10 +532,12 @@ class AstrBotLifecyclePart10(AstrBotLifecycleTests):
         )
         self.assertTrue(sent)
         self.assertNotIn("sylanne_realtime_assistant_history", injected)
-        self.assertIn("插件的其他用户", context_text)
-        self.assertIn("请先读 README", context_text)
-        self.assertLessEqual(len(context_text), 1100)
+        self.assertIn("sylanne_shadow_memory", injected)
+        self.assertIn("插件的其他用户", injected)
+        self.assertIn("请先读 README", injected)
+        self.assertNotIn("插件的其他用户", context_text)
         self.assertNotIn("sylanne_realtime_assistant_history", duplicate_injected)
+        self.assertNotIn("sylanne_shadow_memory", duplicate_injected)
 
 
     def test_realtime_shadow_recovers_from_kv_after_plugin_reload(self):
@@ -621,8 +623,11 @@ class AstrBotLifecyclePart10(AstrBotLifecycleTests):
         duplicate_injected = "\n".join(self._request_text_parts(duplicate_request))
         self.assertIn(saved_key, stored)
         self.assertNotIn("sylanne_realtime_assistant_history", injected)
-        self.assertIn("更新前接管的回复", context_text)
+        self.assertIn("sylanne_shadow_memory", injected)
+        self.assertIn("更新前接管的回复", injected)
+        self.assertNotIn("更新前接管的回复", context_text)
         self.assertNotIn("sylanne_realtime_assistant_history", duplicate_injected)
+        self.assertNotIn("sylanne_shadow_memory", duplicate_injected)
         recovered_payload = stored[saved_key]
         self.assertTrue(recovered_payload["shadows"][-1]["consumed"])
         self.assertFalse(recovered_payload["ordinary_backfills"])

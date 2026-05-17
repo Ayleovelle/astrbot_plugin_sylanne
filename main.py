@@ -638,7 +638,7 @@ def get_emotional_state_plugin(context: Context) -> Any | None:
     PLUGIN_NAME,
     "Aylovelle.S.S",
     "Soulful Yearning Lifelike AstrBot Neural Narrative Engine：维护情绪、人格、记忆、氛围和表达节奏的 Sylanne",
-    "2.5.6",
+    "2.6.0",
     "",
 )
 class EmotionalStatePlugin(Star):
@@ -6793,7 +6793,7 @@ class EmotionalStatePlugin(Star):
                 event,
                 session_key=session_key,
                 observed_at=observed_at,
-                budget=budget,
+                budget=None,
             )
         return self._append_temp_text_part(
             request,
@@ -7108,6 +7108,7 @@ class EmotionalStatePlugin(Star):
             return value.strip()
         internal_markers = (
             "[sylanne_memory_recall]",
+            "[sylanne_shadow_memory]",
             "[sylanne_realtime_assistant_history]",
             "[sylanne_realtime_active_dispatch]",
             "[sylanne_interrupted_reply_breakpoint]",
@@ -7125,7 +7126,7 @@ class EmotionalStatePlugin(Star):
             if stripped == "[assistant_reply_original]":
                 skipping = False
                 continue
-            if any(stripped.startswith(marker) for marker in internal_markers):
+            if any(marker in stripped for marker in internal_markers):
                 skipping = True
                 continue
             if skipping and stripped.startswith("[") and stripped.endswith("]"):
@@ -11965,6 +11966,11 @@ class EmotionalStatePlugin(Star):
                 continue
             valid_items.append(item)
         selected = valid_items[-REALTIME_ORDINARY_HISTORY_BACKFILL_MAX_ITEMS_PER_REQUEST:]
+        shadow_memory_lines = [
+            "[sylanne_shadow_memory]",
+            "上一轮实时回复已经确认送达，只作为临时连续性线索回到事件池，不直接接管 AstrBot 原生上下文。",
+        ]
+        item_count = 0
         for item in selected:
             content = self._head_text(
                 str(item.get("content") or "").strip(),
@@ -11973,22 +11979,46 @@ class EmotionalStatePlugin(Star):
             if not content:
                 changed = True
                 continue
-            if self._append_agent_context_message(
+            shadow_memory_lines.extend(
+                [
+                    "source={source}; delivery_status={status}; input_epoch={epoch}; role={role}; content_hash={hash}".format(
+                        source=self._head_one_line(str(item.get("source") or ""), 48),
+                        status=self._head_one_line(
+                            str(item.get("delivery_status") or "delivered"),
+                            32,
+                        ),
+                        epoch="" if item.get("input_epoch") is None else item.get("input_epoch"),
+                        role=self._head_one_line(str(item.get("role") or "assistant"), 24),
+                        hash=str(item.get("content_hash") or "")[:16],
+                    ),
+                    self._event_time_field_line(item.get("event_time") or item),
+                    content,
+                    "",
+                ],
+            )
+            item["last_appended_at"] = now
+            item["append_count"] = int(item.get("append_count") or 0) + 1
+            item["updated_at"] = now
+            appended = True
+            changed = True
+            item_count += 1
+        if item_count:
+            shadow_memory_text = self._head_text(
+                "\n".join(shadow_memory_lines).strip(),
+                REALTIME_ORDINARY_HISTORY_BACKFILL_MAX_CHARS,
+            )
+            if self._append_temp_text_part(
                 request,
-                role=str(item.get("role") or "assistant"),
-                content=content,
+                shadow_memory_text,
+                source="shadow_memory",
             ):
-                item["last_appended_at"] = now
-                item["append_count"] = int(item.get("append_count") or 0) + 1
-                item["updated_at"] = now
-                appended = True
                 changed = True
         if valid_items or selected:
             changed = True
         self._realtime_ordinary_history_backfill_cache().pop(key, None)
         if changed:
             self._mark_realtime_delivery_context_dirty(key)
-        return appended
+        return appended and item_count > 0
 
     def _release_realtime_temporary_context_after_background_post_in_memory(
         self,
@@ -17760,6 +17790,7 @@ class EmotionalStatePlugin(Star):
         return str(source or "") in {
             "realtime_chat_active_dispatch",
             "realtime_assistant_history_shadow",
+            "shadow_memory",
             "realtime_assistant_history_usage_guard",
             "realtime_pending_bot_question",
             "interrupted_reply_breakpoint",
@@ -17787,6 +17818,7 @@ class EmotionalStatePlugin(Star):
             "current_event_time",
             "realtime_chat_active_dispatch",
             "realtime_assistant_history_shadow",
+            "shadow_memory",
             "realtime_assistant_history_usage_guard",
             "realtime_pending_bot_question",
             "interrupted_reply_breakpoint",
@@ -17816,6 +17848,7 @@ class EmotionalStatePlugin(Star):
         source_markers = {
             "realtime_chat_active_dispatch": "sylanne_realtime_active_dispatch",
             "realtime_assistant_history_shadow": "sylanne_realtime_assistant_history",
+            "shadow_memory": "sylanne_shadow_memory",
             "realtime_assistant_history_usage_guard": "sylanne_history_reuse_guard",
             "realtime_pending_bot_question": "sylanne_realtime_pending_bot_question",
             "interrupted_reply_breakpoint": "sylanne_interrupted_reply_breakpoint",

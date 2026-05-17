@@ -399,7 +399,7 @@ class AstrBotLifecyclePart11(AstrBotLifecycleTests):
         self.assertNotIn("sylanne_realtime_pending_bot_question", injected)
 
 
-    def test_background_post_release_moves_realtime_shadow_to_ordinary_context(self):
+    def test_background_post_release_moves_realtime_shadow_to_shadow_memory(self):
         plugin = new_plugin(
             {
                 "assessment_timing": "post",
@@ -444,16 +444,12 @@ class AstrBotLifecyclePart11(AstrBotLifecycleTests):
 
         request = asyncio.run(run_release_and_request())
 
-        contexts = list(getattr(request, "contexts", []) or [])
         injected = "\n".join(self._request_text_parts(request))
         shadow = plugin._realtime_assistant_history_shadow_cache()[
             "s-backfill-release"
         ][-1]
-        self.assertEqual(contexts[-1]["role"], "assistant")
-        self.assertEqual(
-            contexts[-1]["content"],
-            "assistant delivered through realtime takeover",
-        )
+        self.assertIn("sylanne_shadow_memory", injected)
+        self.assertIn("assistant delivered through realtime takeover", injected)
         self.assertTrue(shadow["consumed"])
         self.assertEqual(
             shadow["consumed_reason"],
@@ -532,18 +528,19 @@ class AstrBotLifecyclePart11(AstrBotLifecycleTests):
             "s-backfill-budget",
         )
 
-        contexts = list(getattr(request, "contexts", []) or [])
+        injected = "\n".join(self._request_text_parts(request))
         self.assertTrue(appended)
-        self.assertEqual(
-            len(contexts),
-            main.REALTIME_ORDINARY_HISTORY_BACKFILL_MAX_ITEMS_PER_REQUEST,
+        self.assertIn("[sylanne_shadow_memory]", injected)
+        self.assertIn("reply-2", injected)
+        self.assertNotIn("reply-0", injected)
+        shadow_block = next(
+            part.text
+            for part in getattr(request, "extra_user_content_parts", []) or []
+            if "[sylanne_shadow_memory]" in str(getattr(part, "text", "") or "")
         )
-        self.assertTrue(
-            all(
-                len(str(item.get("content") or ""))
-                <= main.REALTIME_ORDINARY_HISTORY_BACKFILL_MAX_CHARS
-                for item in contexts
-            ),
+        self.assertLessEqual(
+            len(str(shadow_block).splitlines()[-1]),
+            main.REALTIME_ORDINARY_HISTORY_BACKFILL_MAX_CHARS,
         )
         self.assertNotIn(
             "s-backfill-budget",

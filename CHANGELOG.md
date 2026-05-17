@@ -2,6 +2,27 @@
 
 本文件用于 AstrBot 插件市场/管理页展示更新内容。更完整的设计说明、公式推导、测试矩阵和维护手册见 `README.md`。
 
+## 2.6.0
+
+发布日期：2026-05-17
+
+### 新增
+
+- 新增 `shadow memory` 临时连续性工作流：实时接管回复确认完整送达后，不再直接回灌 `request.contexts`，而是合并释放为 `[sylanne_shadow_memory]` 临时块，用于下一轮主回复理解“上一轮已经说出口的内容”。
+- README 当前版本提示和“工作流对比（与 0.5.0）”加入 `shadow memory` 新旧链路对比：旧链路是 delivered shadow -> ordinary backfill -> `request.contexts`，新链路是 delivered shadow -> `shadow memory` 临时块 -> 下一轮临时上下文注入。
+
+### 修复
+
+- 记忆召回查询会剥离 `[sylanne_shadow_memory]`，避免实时投递缓存污染 Sylanne 自有长期记忆检索。
+- `inject_state=true` 时也会保证 `[sylanne_current_event_time]` 排在 `[sylanne_memory_recall]` 前面，避免状态预算挤压导致旧记忆时间先出现。
+- 更新即时聊天接管和 KV 恢复回归测试：验证已送达回复进入 `shadow memory`，不会再被当作 AstrBot 原生长期上下文回填。
+
+### 验证
+
+- 本地通过全量测试：`610 passed, 635 subtests passed`。
+- 发布 zip 预检通过，包内 README 与 `main.py` 均包含 `shadow memory` 更新。
+- 远程 AstrBot `4.24.2` 烟测通过：Sylanne `2.6.0` 已启用，失败插件列表为空。
+
 ## 2.5.6
 
 - 补充收紧 Embedding 消耗：Sylanne 自有记忆写入侧不再每次 idle flush 批量点火嵌入模型，改为每会话低频预算（默认 5 分钟冷却、每批最多 1 条记录），query embedding 缓存延长到 10 分钟，避免密集聊天时把 Embedding Provider 当作热路径持续燃烧。

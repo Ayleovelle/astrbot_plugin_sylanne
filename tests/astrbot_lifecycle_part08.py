@@ -326,6 +326,41 @@ class AstrBotLifecyclePart08(AstrBotLifecycleTests):
         self.assertNotIn("sylanne_memory_recall", query)
 
 
+    def test_shadow_memory_block_is_stripped_from_memory_recall_query(self):
+        plugin = new_plugin()
+        request = fake_request(
+            session_id="s-shadow-memory-strip",
+            prompt="continue",
+        )
+        request.contexts = [
+            {
+                "role": "user",
+                "content": "recent user context",
+            },
+        ]
+        request.extra_user_content_parts.extend(
+            [
+                SimpleNamespace(
+                    text=(
+                        "[sylanne_shadow_memory]\n"
+                        "上一轮实时回复已经作为临时连续性线索回到事件池。\n"
+                        "assistant delivered through realtime takeover"
+                    ),
+                ),
+                SimpleNamespace(text="new temporary context can join query"),
+            ],
+        )
+
+        query = plugin._sylanne_memory_recall_query_for_request(
+            request,
+            current_user_text="continue",
+        )
+
+        self.assertIn("new temporary context", query)
+        self.assertNotIn("assistant delivered through realtime takeover", query)
+        self.assertNotIn("sylanne_shadow_memory", query)
+
+
     def test_sylanne_memory_recall_accumulates_within_active_round(self):
         from memory_engine import MemoryRecord, SylanneMemoryState
 

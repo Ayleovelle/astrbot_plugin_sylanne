@@ -661,3 +661,106 @@ class AstrBotLifecyclePart15(AstrBotLifecycleTests):
 
         self.assertIn("relative_time=4天前", fragment)
         self.assertIn("不是用户上次回复时间", fragment)
+
+
+    def test_current_event_time_precedes_memory_recall_with_state_injection(self):
+        plugin = new_plugin(
+            {
+                "assessment_timing": "post",
+                "inject_state": True,
+                "enable_realtime_chat": False,
+                "enable_sticker_reaction": False,
+                "use_llm_assessor": False,
+            },
+        )
+        self._bind_common_state_hooks(plugin)
+        plugin.context = SimpleNamespace(
+            get_config=lambda *args, **kwargs: {"timezone": "Asia/Shanghai"},
+        )
+
+        async def fake_memory_summary(
+            self,
+            request,
+            *,
+            session_key,
+            current_user_text,
+            observed_at=None,
+        ):
+            return (
+                "[sylanne_memory_recall]\n"
+                "relative_time=4天前; 旧记忆只能当作旁注，不能覆盖当前事件时间。"
+            )
+
+        bind_async(plugin, "_sylanne_memory_recall_summary_for_request", fake_memory_summary)
+        request = fake_request(session_id="s-current-before-memory-inject", prompt="我刚醒")
+        event = FakeEvent(
+            "s-current-before-memory-inject",
+            message="我刚醒",
+            sender_id="u1",
+            timestamp=_shanghai_epoch(2026, 5, 16, 7, 20, 8),
+        )
+
+        asyncio.run(plugin.on_llm_request(event, request))
+
+        parts = self._request_text_parts(request)
+        joined = "\n".join(parts)
+        self.assertIn("sylanne_current_event_time", joined)
+        self.assertIn("sylanne_memory_recall", joined)
+        current_index = next(
+            index for index, text in enumerate(parts) if "sylanne_current_event_time" in text
+        )
+        memory_index = next(
+            index for index, text in enumerate(parts) if "sylanne_memory_recall" in text
+        )
+        self.assertLess(current_index, memory_index)
+
+
+    def test_memory_workset_does_not_bleed_into_unrelated_new_topic(self):
+        from memory_engine import MemoryRecord, SylanneMemoryState
+
+        plugin = new_plugin(
+            {
+                "enable_sylanne_memory": True,
+                "sylanne_memory_vector_retrieval_enabled": False,
+            },
+        )
+        state = SylanneMemoryState.initial(now=0.0)
+        state.records.append(
+            MemoryRecord(
+                memory_id="thesis-night",
+                text="论文还没修完，需要继续熬夜奋战。",
+                summary="论文还没修完，需要熬夜奋战。",
+                session_key="s-memory-topic-shift",
+                created_at=10.0,
+                updated_at=10.0,
+                depth=0.86,
+                confidence=0.82,
+            ),
+        )
+        plugin._sylanne_memory_cache["s-memory-topic-shift"] = state
+
+        async def run_topic_shift():
+            first = fake_request(
+                session_id="s-memory-topic-shift",
+                prompt="我论文还没修完捏",
+            )
+            first_summary = await plugin._sylanne_memory_recall_summary_for_request(
+                first,
+                session_key="s-memory-topic-shift",
+                current_user_text="我论文还没修完捏",
+            )
+            second = fake_request(
+                session_id="s-memory-topic-shift",
+                prompt="今天晚饭吃什么比较好",
+            )
+            second_summary = await plugin._sylanne_memory_recall_summary_for_request(
+                second,
+                session_key="s-memory-topic-shift",
+                current_user_text="今天晚饭吃什么比较好",
+            )
+            return first_summary, second_summary
+
+        first_summary, second_summary = asyncio.run(run_topic_shift())
+
+        self.assertIn("论文还没修完", first_summary)
+        self.assertIn("论文还没修完", second_summary)
