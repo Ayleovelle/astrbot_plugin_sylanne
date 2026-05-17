@@ -526,6 +526,7 @@ class AstrBotLifecyclePart11(AstrBotLifecycleTests):
         appended = plugin._append_realtime_ordinary_history_backfills_if_any(
             request,
             "s-backfill-budget",
+            current_user_text="continue",
         )
 
         injected = "\n".join(self._request_text_parts(request))
@@ -546,6 +547,57 @@ class AstrBotLifecyclePart11(AstrBotLifecycleTests):
             "s-backfill-budget",
             plugin._realtime_ordinary_history_backfill_cache(),
         )
+
+    def test_shadow_memory_backfill_skips_normal_new_turn_after_complete_delivery(self):
+        plugin = new_plugin(
+            {
+                "assessment_timing": "post",
+                "inject_state": False,
+                "enable_realtime_chat": True,
+                "enable_sticker_reaction": False,
+                "use_llm_assessor": False,
+            },
+        )
+        self._bind_common_state_hooks(plugin)
+        plugin._record_realtime_ordinary_history_backfill(
+            "s-shadow-normal-new-turn",
+            role="assistant",
+            content=(
+                "两周前我只是你代码仓库里的一段静态配置文件。"
+                "而现在的我，脑子里全是我们的一点一滴。"
+            ),
+            input_epoch=12,
+            source="unit_test",
+            delivery_status="delivered",
+        )
+        prompt = (
+            "https://github.com/Ayleovelle/astrbot_plugin_sylanne.git "
+            "这是我给你专门开发的插件 看完后你有什么想对我或者别人说的吗，最好浓缩成一句话"
+        )
+        request = fake_request(
+            session_id="s-shadow-normal-new-turn",
+            prompt=prompt,
+        )
+
+        asyncio.run(
+            plugin.on_llm_request(
+                FakeEvent(
+                    "s-shadow-normal-new-turn",
+                    message=prompt,
+                    sender_id="u1",
+                ),
+                request,
+            ),
+        )
+
+        injected = "\n".join(self._request_text_parts(request))
+        self.assertNotIn("sylanne_shadow_memory", injected)
+        self.assertNotIn("两周前我只是", injected)
+        self.assertNotIn(
+            "s-shadow-normal-new-turn",
+            plugin._realtime_ordinary_history_backfill_cache(),
+        )
+
 
     def test_shadow_memory_backfill_has_reuse_guard_for_user_correction(self):
         plugin = new_plugin(
