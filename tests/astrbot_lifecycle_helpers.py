@@ -111,6 +111,7 @@ class AstrBotLifecycleTests(unittest.TestCase):
         worker_cap=6,
         cpu=0.12,
         memory=0.22,
+        disk=0.18,
         now=1000.0,
     ):
         plugin._test_now = float(now)
@@ -119,21 +120,34 @@ class AstrBotLifecycleTests(unittest.TestCase):
             return float(getattr(self, "_test_now", now))
 
         def fake_resource_pressure(self):
-            unknown = level == "unknown" or (cpu is None and memory is None)
+            unknown = level == "unknown" or (
+                cpu is None and memory is None and disk is None
+            )
             combined = max(
                 [
                     ratio
-                    for ratio in (cpu, memory)
+                    for ratio in (cpu, memory, disk)
                     if isinstance(ratio, (int, float))
                 ],
                 default=0.0,
             )
-            reason = "environment_pressure_unknown" if unknown else f"environment_pressure_{level}"
+            if unknown:
+                reason = "environment_pressure_unknown"
+            elif (
+                level in {"critical", "high", "elevated"}
+                and isinstance(disk, (int, float))
+                and disk >= 0.90
+            ):
+                reason = f"environment_disk_pressure_{level}"
+            else:
+                reason = f"environment_pressure_{level}"
             return {
                 "cpu_load_ratio": cpu,
                 "cpu_source": "unit_test",
                 "memory_load_ratio": memory,
                 "memory_source": "unit_test",
+                "disk_load_ratio": disk,
+                "disk_source": "unit_test",
                 "combined_load_ratio": combined,
                 "unknown": unknown,
                 "level": level,

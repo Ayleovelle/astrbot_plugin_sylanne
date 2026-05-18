@@ -1485,6 +1485,8 @@ class CommandAndToolSmokeTests(unittest.TestCase):
         self.assertIn("environment_pressure_reason", bg)
         self.assertIn("environment_cpu_load_ratio", bg)
         self.assertIn("environment_memory_load_ratio", bg)
+        self.assertIn("environment_disk_load_ratio", bg)
+        self.assertIn("environment_disk_source", bg)
         self.assertIn("worker_dispatch_slots", bg)
         self.assertTrue(bg["idle_workers_close_automatically"])
         self.assertEqual(

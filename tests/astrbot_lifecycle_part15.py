@@ -519,6 +519,19 @@ class AstrBotLifecyclePart15(AstrBotLifecycleTests):
         )
         plugin._observed_now = types.MethodType(lambda self: now_holder[0], plugin)
 
+        def normal_pressure(self):
+            return {
+                "level": "normal",
+                "reason": "environment_pressure_normal",
+                "worker_cap": 6,
+                "unknown": False,
+                "disk_load_ratio": 0.12,
+                "disk_source": "unit_test",
+                "combined_load_ratio": 0.12,
+            }
+
+        plugin._background_post_resource_pressure = types.MethodType(normal_pressure, plugin)
+
         class FakeEmbeddingProvider:
             provider_config = {"id": "embed-a", "provider_type": "embedding"}
 

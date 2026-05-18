@@ -2,6 +2,23 @@
 
 本文件用于 AstrBot 插件市场/管理页展示更新内容。更完整的设计说明、公式推导、测试矩阵和维护手册见 `README.md`。
 
+## 3.0.3
+
+发布日期：2026-05-18
+
+### 修复
+
+- 后台 post worker 的全局资源压力加入磁盘占用采样，高磁盘压力时自动降低 worker cap，critical 磁盘压力下收敛到单通道，避免后台评估继续放大磁盘死锁。
+- 实时聊天和主动发言在 critical 资源压力下停止非强制派发，避免服务器已经接近磁盘锁死时继续启动新的发送链路。
+- 本地表情索引在 high/critical 磁盘压力下优先复用有效缓存；没有缓存时跳过递归扫盘，避免回复热路径触发大量 `stat`/遍历。
+- Sylanne 自有记忆的 embedding backfill 在 high/critical/unknown 压力下跳过，只保留必要状态写入。
+- 被用户打断的实时回复仍同步保存断点 delivery context，保证插件重载后下一轮能恢复 `sylanne_interrupted_reply_breakpoint`，不因后台保存延后丢失断点。
+
+### 验证
+
+- 新增磁盘压力 worker 单通道、表情索引高压跳过/复用缓存、runtime diagnostics 磁盘字段和 memory embedding 高压节流回归测试。
+- 全量生命周期测试 `258 tests` 通过，命令工具测试 `46 tests` 通过，发布 zip 重新打包并通过 preflight。
+
 ## 3.0.2
 
 发布日期：2026-05-18

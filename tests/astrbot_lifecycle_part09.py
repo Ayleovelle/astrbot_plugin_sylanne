@@ -185,6 +185,19 @@ class AstrBotLifecyclePart09(AstrBotLifecycleTests):
             plugin._test_sticker_cache_base = base
             calls = []
 
+            def normal_pressure(self):
+                return {
+                    "level": "normal",
+                    "reason": "environment_pressure_normal",
+                    "worker_cap": 6,
+                    "unknown": False,
+                    "disk_load_ratio": 0.12,
+                    "disk_source": "unit_test",
+                    "combined_load_ratio": 0.12,
+                }
+
+            plugin._background_post_resource_pressure = types.MethodType(normal_pressure, plugin)
+
             def fake_ensure(settings):
                 calls.append(settings.auto_download_repo_url)
                 return cached_root
@@ -348,6 +361,19 @@ class AstrBotLifecyclePart09(AstrBotLifecycleTests):
             },
         )
 
+        def normal_pressure(self):
+            return {
+                "level": "normal",
+                "reason": "environment_pressure_normal",
+                "worker_cap": 6,
+                "unknown": False,
+                "disk_load_ratio": 0.12,
+                "disk_source": "unit_test",
+                "combined_load_ratio": 0.12,
+            }
+
+        plugin._background_post_resource_pressure = types.MethodType(normal_pressure, plugin)
+
         async def bad_learned_stickers(self, session_key):
             return [
                 {
@@ -389,6 +415,19 @@ class AstrBotLifecyclePart09(AstrBotLifecycleTests):
                 },
             )
 
+            def normal_pressure(self):
+                return {
+                    "level": "normal",
+                    "reason": "environment_pressure_normal",
+                    "worker_cap": 6,
+                    "unknown": False,
+                    "disk_load_ratio": 0.12,
+                    "disk_source": "unit_test",
+                    "combined_load_ratio": 0.12,
+                }
+
+            plugin._background_post_resource_pressure = types.MethodType(normal_pressure, plugin)
+
             first = asyncio.run(plugin._sticker_candidates("s-empty-cache"))
             (root / "late.png").write_bytes(b"fake image")
             second = asyncio.run(plugin._sticker_candidates("s-empty-cache"))
@@ -414,6 +453,19 @@ class AstrBotLifecyclePart09(AstrBotLifecycleTests):
             original = main.index_local_stickers
             calls = []
 
+            def normal_pressure(self):
+                return {
+                    "level": "normal",
+                    "reason": "environment_pressure_normal",
+                    "worker_cap": 6,
+                    "unknown": False,
+                    "disk_load_ratio": 0.12,
+                    "disk_source": "unit_test",
+                    "combined_load_ratio": 0.12,
+                }
+
+            plugin._background_post_resource_pressure = types.MethodType(normal_pressure, plugin)
+
             def fake_index(settings):
                 calls.append(settings.local_root)
                 return []
@@ -430,6 +482,96 @@ class AstrBotLifecyclePart09(AstrBotLifecycleTests):
         self.assertEqual(calls, [str(root)])
 
 
+    def test_sticker_index_reuses_cache_under_high_disk_pressure(self):
+        import types
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            cached_path = root / "cached.png"
+            cached_path.write_bytes(b"fake image")
+            plugin = new_plugin(
+                {
+                    "enable_sticker_reaction": True,
+                    "sticker_local_root": str(root),
+                    "sticker_learn_user_images": False,
+                    "sticker_index_cache_ttl_seconds": 86400.0,
+                },
+            )
+
+            def normal_pressure(self):
+                return {
+                    "level": "normal",
+                    "reason": "environment_pressure_normal",
+                    "worker_cap": 6,
+                    "unknown": False,
+                    "disk_load_ratio": 0.12,
+                    "disk_source": "unit_test",
+                    "combined_load_ratio": 0.12,
+                }
+
+            plugin._background_post_resource_pressure = types.MethodType(normal_pressure, plugin)
+            first = asyncio.run(plugin._sticker_candidates("s-cached-high-disk"))
+
+            def high_pressure(self):
+                return {
+                    "level": "high",
+                    "reason": "environment_disk_pressure_high",
+                    "worker_cap": 2,
+                    "unknown": False,
+                    "disk_load_ratio": 0.96,
+                    "disk_source": "unit_test",
+                    "combined_load_ratio": 0.96,
+                }
+
+            plugin._background_post_resource_pressure = types.MethodType(high_pressure, plugin)
+            cached = asyncio.run(plugin._sticker_candidates("s-cached-high-disk"))
+
+        self.assertEqual(len(first), 1)
+        self.assertEqual(cached, first)
+
+
+    def test_sticker_index_skips_scan_under_high_disk_pressure_without_cache(self):
+        import main
+        import types
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            plugin = new_plugin(
+                {
+                    "enable_sticker_reaction": True,
+                    "sticker_local_root": str(root),
+                    "sticker_learn_user_images": False,
+                },
+            )
+            original = main.index_local_stickers
+            calls = []
+
+            def fake_pressure(self):
+                return {
+                    "level": "high",
+                    "reason": "environment_disk_pressure_high",
+                    "worker_cap": 2,
+                    "unknown": False,
+                    "disk_load_ratio": 0.96,
+                    "disk_source": "unit_test",
+                    "combined_load_ratio": 0.96,
+                }
+
+            def fake_index(settings):
+                calls.append(settings.local_root)
+                return [{"name": "late", "path": str(root / "late.png")}]
+
+            plugin._background_post_resource_pressure = types.MethodType(fake_pressure, plugin)
+            main.index_local_stickers = fake_index
+            try:
+                candidates = asyncio.run(plugin._sticker_candidates("s-high-disk-index"))
+            finally:
+                main.index_local_stickers = original
+
+        self.assertEqual(candidates, [])
+        self.assertEqual(calls, [])
+
+
     def test_sticker_index_scan_runs_off_event_loop_thread(self):
         import main
 
@@ -442,6 +584,19 @@ class AstrBotLifecyclePart09(AstrBotLifecycleTests):
                     "sticker_learn_user_images": False,
                 },
             )
+
+            def normal_pressure(self):
+                return {
+                    "level": "normal",
+                    "reason": "environment_pressure_normal",
+                    "worker_cap": 6,
+                    "unknown": False,
+                    "disk_load_ratio": 0.12,
+                    "disk_source": "unit_test",
+                    "combined_load_ratio": 0.12,
+                }
+
+            plugin._background_post_resource_pressure = types.MethodType(normal_pressure, plugin)
             original = main.index_local_stickers
             scan_threads = []
 

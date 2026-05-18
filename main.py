@@ -677,7 +677,7 @@ def get_emotional_state_plugin(context: Context) -> Any | None:
     PLUGIN_NAME,
     "Aylovelle.S.S",
     "Soulful Yearning Lifelike AstrBot Neural Narrative Engine：维护情绪、人格、记忆、氛围和表达节奏的 Sylanne",
-    "3.0.2",
+    "3.0.3",
     "",
 )
 class EmotionalStatePlugin(Star):
@@ -3134,6 +3134,51 @@ class EmotionalStatePlugin(Star):
         except Exception:
             return None, "unavailable"
 
+    def _disk_pressure_ratio(self) -> tuple[float | None, str]:
+        paths: list[tuple[str, Path]] = []
+        try:
+            paths.append(("cwd", Path.cwd()))
+        except Exception:
+            pass
+        try:
+            paths.append(("plugin", Path(__file__).resolve().parent))
+        except Exception:
+            pass
+
+        best_ratio: float | None = None
+        best_source = "unsupported"
+        seen: set[str] = set()
+        try:
+            for label, raw_path in paths:
+                try:
+                    path = raw_path
+                    while not path.exists() and path != path.parent:
+                        path = path.parent
+                    resolved = str(path.resolve())
+                    if resolved in seen:
+                        continue
+                    seen.add(resolved)
+                    usage = shutil.disk_usage(path)
+                    total = float(usage.total or 0)
+                    if total <= 0:
+                        continue
+                    ratio = min(1.0, max(0.0, 1.0 - (float(usage.free) / total)))
+                    source = f"disk_usage:{label}"
+                    if usage.free <= 512 * 1024 * 1024:
+                        ratio = max(ratio, 0.98)
+                    elif usage.free <= 1024 * 1024 * 1024:
+                        ratio = max(ratio, 0.95)
+                    if best_ratio is None or ratio > best_ratio:
+                        best_ratio = ratio
+                        best_source = source
+                except Exception:
+                    continue
+            if best_ratio is None:
+                return None, "unavailable"
+            return best_ratio, best_source
+        except Exception:
+            return None, "unavailable"
+
     def _background_post_resource_pressure(self) -> dict[str, Any]:
         now = self._observed_now()
         cache = getattr(self, "_background_post_resource_cache", None)
@@ -3148,9 +3193,10 @@ class EmotionalStatePlugin(Star):
 
         cpu_ratio, cpu_source = self._cpu_pressure_ratio()
         memory_ratio, memory_source = self._memory_pressure_ratio()
+        disk_ratio, disk_source = self._disk_pressure_ratio()
         known_ratios = [
             ratio
-            for ratio in (cpu_ratio, memory_ratio)
+            for ratio in (cpu_ratio, memory_ratio, disk_ratio)
             if isinstance(ratio, (int, float))
         ]
         unknown = not known_ratios
@@ -3159,14 +3205,26 @@ class EmotionalStatePlugin(Star):
             level = "unknown"
             cap = 2
             reason = "environment_pressure_unknown_conservative"
+        elif isinstance(disk_ratio, (int, float)) and disk_ratio >= 0.98:
+            level = "critical"
+            cap = 1
+            reason = "environment_disk_pressure_critical"
         elif combined >= 0.95:
             level = "critical"
             cap = 1
             reason = "environment_pressure_critical"
+        elif isinstance(disk_ratio, (int, float)) and disk_ratio >= 0.95:
+            level = "high"
+            cap = 2
+            reason = "environment_disk_pressure_high"
         elif combined >= 0.85:
             level = "high"
             cap = 2
             reason = "environment_pressure_high"
+        elif isinstance(disk_ratio, (int, float)) and disk_ratio >= 0.90:
+            level = "elevated"
+            cap = 3
+            reason = "environment_disk_pressure_elevated"
         elif combined >= 0.75:
             level = "elevated"
             cap = 3
@@ -3180,6 +3238,8 @@ class EmotionalStatePlugin(Star):
             "cpu_source": cpu_source,
             "memory_load_ratio": memory_ratio,
             "memory_source": memory_source,
+            "disk_load_ratio": disk_ratio,
+            "disk_source": disk_source,
             "combined_load_ratio": combined,
             "unknown": unknown,
             "level": level,
@@ -4807,11 +4867,15 @@ class EmotionalStatePlugin(Star):
             "environment_memory_load_ratio": self._round_optional_ratio(
                 resource_pressure.get("memory_load_ratio"),
             ),
+            "environment_disk_load_ratio": self._round_optional_ratio(
+                resource_pressure.get("disk_load_ratio"),
+            ),
             "environment_combined_load_ratio": self._round_optional_ratio(
                 resource_pressure.get("combined_load_ratio"),
             ),
             "environment_cpu_source": resource_pressure.get("cpu_source", ""),
             "environment_memory_source": resource_pressure.get("memory_source", ""),
+            "environment_disk_source": resource_pressure.get("disk_source", ""),
             "worker_ready_count": worker_pressure["ready_count"],
             "worker_oldest_ready_age_seconds": round(
                 worker_pressure["oldest_ready_age_seconds"],
@@ -8111,6 +8175,10 @@ class EmotionalStatePlugin(Star):
             )
             if quiet_reason:
                 return quiet_reason
+        if not force:
+            pressure = self._background_post_resource_pressure()
+            if pressure.get("level") == "critical":
+                return str(pressure.get("reason") or "environment_pressure_critical")
         if self._proactive_dispatch_on_cooldown(
             str(dispatch.get("session_key") or ""),
             cooldown_seconds=self._as_float_value(
@@ -8599,6 +8667,8 @@ class EmotionalStatePlugin(Star):
             )
             self._clear_sylanne_memory_recall_workset(session_key)
         self._schedule_realtime_delivery_context_save(session_key)
+        if interrupted_reason:
+            await self._save_realtime_delivery_context_if_dirty(session_key)
         self._realtime_chat_last_sent_cache()[session_key] = self._observed_now()
         payload = {
             "api": "context.send_message",
@@ -9239,6 +9309,10 @@ class EmotionalStatePlugin(Star):
         session_key = str(plan.get("session_key") or self._resolve_public_session_key(event_or_session))
         if not force and self._realtime_chat_on_cooldown(session_key):
             return "cooldown_active"
+        if not force:
+            pressure = self._background_post_resource_pressure()
+            if pressure.get("level") == "critical":
+                return str(pressure.get("reason") or "environment_pressure_critical")
         if not hasattr(getattr(self, "context", None), "send_message"):
             return "missing_send_message_api"
         return ""
@@ -10533,6 +10607,11 @@ class EmotionalStatePlugin(Star):
                 budget=budget,
                 current_user_text=current_user_text,
             )
+            breakpoint_appended = self._append_interrupted_reply_breakpoint_if_any(
+                request,
+                session_key,
+                budget=budget,
+            )
             correction_appended = self._append_user_correction_context(
                 request,
                 current_user_text,
@@ -10540,7 +10619,7 @@ class EmotionalStatePlugin(Star):
             )
             if correction_appended:
                 self._record_recent_user_correction(session_key, current_user_text)
-            appended = correction_appended or appended
+            appended = breakpoint_appended or correction_appended or appended
         else:
             appended = (
                 self._append_recent_user_correction_context_if_any(
@@ -16399,9 +16478,13 @@ class EmotionalStatePlugin(Star):
                 changed = True
             if not changed:
                 return
-            if self._sylanne_memory_record_embedding_budget_available(
-                session_key,
-                now=latest_now,
+            pressure = self._background_post_resource_pressure()
+            if (
+                pressure.get("level") not in {"high", "critical", "unknown"}
+                and self._sylanne_memory_record_embedding_budget_available(
+                    session_key,
+                    now=latest_now,
+                )
             ):
                 self._mark_sylanne_memory_record_embedding_attempt(
                     session_key,
@@ -20113,12 +20196,15 @@ class EmotionalStatePlugin(Star):
         ttl = max(0.0, self._cfg_float("sticker_index_cache_ttl_seconds", 86400.0))
         root_signature = self._sticker_index_root_signature(settings)
         cached = cache.get(cache_key)
+        pressure = self._background_post_resource_pressure()
         if (
             cached
             and (ttl <= 0 or now - float(cached.get("indexed_at", 0.0)) <= ttl)
             and tuple(cached.get("root_signature") or ()) == root_signature
         ):
             return list(cached.get("items") or [])
+        if pressure.get("level") in {"critical", "high"}:
+            return []
         items = await asyncio.to_thread(index_local_stickers, settings)
         cache[cache_key] = {
             "indexed_at": now,

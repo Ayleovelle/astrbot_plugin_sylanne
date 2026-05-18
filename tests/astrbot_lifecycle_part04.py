@@ -652,6 +652,75 @@ class AstrBotLifecyclePart04(AstrBotLifecycleTests):
         self.assertEqual(bg["last_committed"], 50)
 
 
+    def test_background_post_disk_pressure_caps_workers_to_single_lane(self):
+        plugin = new_plugin(
+            {
+                "assessment_timing": "post",
+                "background_post_assessment": True,
+                "enable_dynamic_background_workers": True,
+                "background_post_queue_checkpoint_enabled": False,
+            },
+        )
+        self._bind_background_worker_environment(
+            plugin,
+            level="critical",
+            worker_cap=1,
+            cpu=0.12,
+            memory=0.22,
+            disk=0.99,
+            now=1000.0,
+        )
+        saves, _ = self._bind_common_state_hooks(plugin)
+        active = 0
+        max_active = 0
+        assessment_calls = []
+
+        async def tracked_assess(self, **kwargs):
+            nonlocal active, max_active
+            active += 1
+            max_active = max(max_active, active)
+            assessment_calls.append(kwargs["current_text"])
+            await asyncio.sleep(0)
+            active -= 1
+            return fake_observation(kwargs["current_text"])
+
+        bind_async(plugin, "_assess_emotion", tracked_assess)
+
+        async def run_burst():
+            for index in range(24):
+                plugin._last_request_text["s-disk-pressure"] = f"ctx-{index}"
+                await plugin.on_llm_response(
+                    FakeEvent("s-disk-pressure"),
+                    SimpleNamespace(completion_text=f"reply-{index:02d}"),
+                )
+            diagnostics = await plugin.get_agent_runtime_diagnostics("s-disk-pressure")
+            bg = diagnostics["background_post_assessment"]
+            self.assertEqual(bg["worker_policy"], "adaptive_resource_guarded_pressure")
+            self.assertEqual(bg["environment_pressure_level"], "critical")
+            self.assertEqual(bg["environment_worker_cap"], 1)
+            self.assertEqual(bg["worker_global_cap"], 1)
+            self.assertEqual(bg["max_workers"], 1)
+            self.assertEqual(bg["environment_disk_load_ratio"], 0.99)
+            self.assertEqual(bg["environment_disk_source"], "unit_test")
+            self.assertIn("environment_disk_pressure_critical", bg["worker_scale_reasons"])
+            await asyncio.wait_for(next(iter(plugin._background_tasks)), timeout=2.0)
+
+        asyncio.run(run_burst())
+
+        self.assertEqual(max_active, 1)
+        self.assertEqual(len(assessment_calls), 24)
+        self.assertEqual(
+            [state.label for _, state in saves],
+            [f"reply-{index:02d}" for index in range(24)],
+        )
+        diagnostics = asyncio.run(plugin.get_agent_runtime_diagnostics("s-disk-pressure"))
+        bg = diagnostics["background_post_assessment"]
+        self.assertEqual(bg["lag_count"], 0)
+        self.assertEqual(bg["state_lag_count"], 0)
+        self.assertEqual(bg["latest_enqueued"], 24)
+        self.assertEqual(bg["last_committed"], 24)
+
+
     def test_background_post_checkpoint_recovers_uncommitted_queue(self):
         plugin = new_plugin(
             {
