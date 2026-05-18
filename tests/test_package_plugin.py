@@ -91,6 +91,7 @@ class PackagePluginTests(unittest.TestCase):
         body_genesis_files = {
             "sylanne_body/__init__.py",
             "sylanne_body/host_boundary.py",
+            "sylanne_body/host_context.py",
             "sylanne_body/event/__init__.py",
             "sylanne_body/event/source.py",
             "sylanne_body/event/normalize.py",
@@ -268,6 +269,7 @@ class PackagePluginTests(unittest.TestCase):
         body_genesis_files = {
             "sylanne_body/__init__.py",
             "sylanne_body/host_boundary.py",
+            "sylanne_body/host_context.py",
             "sylanne_body/event/__init__.py",
             "sylanne_body/event/source.py",
             "sylanne_body/event/normalize.py",
@@ -448,6 +450,7 @@ class PluginZipPreflightTests(unittest.TestCase):
             (prefix + "sylanne/body_runtime/sovereignty.py", "# runtime\n"),
             (prefix + "sylanne_body/__init__.py", "# body genesis\n"),
             (prefix + "sylanne_body/host_boundary.py", "# host boundary\n"),
+            (prefix + "sylanne_body/host_context.py", "# host context\n"),
             (prefix + "sylanne_body/event/__init__.py", "# body genesis\n"),
             (prefix + "sylanne_body/event/source.py", "# body genesis\n"),
             (prefix + "sylanne_body/event/normalize.py", "# body genesis\n"),
@@ -573,6 +576,7 @@ class PluginZipPreflightTests(unittest.TestCase):
             "sylanne/body_runtime/sovereignty.py",
             "sylanne_body/__init__.py",
             "sylanne_body/host_boundary.py",
+            "sylanne_body/host_context.py",
             "sylanne_body/event/__init__.py",
             "sylanne_body/event/source.py",
             "sylanne_body/event/normalize.py",

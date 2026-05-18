@@ -219,6 +219,7 @@ try:
     from .interpretation_engine import classify_memory_gate, interpret_user_text
     from .sylanne_body.adapter import KernelAdapter
     from .sylanne_body.host_boundary import append_auxiliary_state
+    from .sylanne_body.host_context import build_interpretation_candidates_context
     from .sylanne_body.organ.library import LegacyBodyOrgan
 except ImportError:
     from emotion_engine import (
@@ -392,6 +393,7 @@ except ImportError:
     from interpretation_engine import classify_memory_gate, interpret_user_text
     from sylanne_body.adapter import KernelAdapter
     from sylanne_body.host_boundary import append_auxiliary_state
+    from sylanne_body.host_context import build_interpretation_candidates_context
     from sylanne_body.organ.library import LegacyBodyOrgan
 
 
@@ -12273,25 +12275,14 @@ class EmotionalStatePlugin(Star):
         request: ProviderRequest,
         candidates: list[dict[str, Any]],
     ) -> bool:
-        if not candidates:
+        context = build_interpretation_candidates_context(
+            candidates,
+            memory_gate_classifier=classify_memory_gate,
+            head_one_line=self._head_one_line,
+        )
+        if not context:
             return False
-        lines = [
-            "[sylanne_interpretation_candidates]",
-            "以下是错别字、谐音、黑话或昵称的候选解释；不覆盖用户原文，不确定时应轻轻确认。",
-        ]
-        for item in candidates[:3]:
-            gate = classify_memory_gate(item)
-            lines.append(
-                "raw_text={raw}; candidate={candidate}; kind={kind}; confidence={confidence}; humor={humor}; memory_layer={layer}".format(
-                    raw=self._head_one_line(str(item.get("raw_text") or ""), 60),
-                    candidate=self._head_one_line(str(item.get("candidate") or ""), 60),
-                    kind=str(item.get("kind") or "uncertain"),
-                    confidence=item.get("confidence"),
-                    humor=item.get("humor_likelihood"),
-                    layer=str(gate.get("layer") or "uncertain_interpretation"),
-                ),
-            )
-        return self._append_temp_text_part(request, "\n".join(lines), source="interpretation_candidates")
+        return self._append_temp_text_part(request, context, source="interpretation_candidates")
 
     def _append_expression_policy_context(
         self,

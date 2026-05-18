@@ -556,6 +556,7 @@ astrbot_plugin_sylanne/
 ├── sylanne_body/
 │   ├── __init__.py (`sylanne_body/__init__.py`)
 │   ├── host_boundary.py (`sylanne_body/host_boundary.py`)
+│   ├── host_context.py (`sylanne_body/host_context.py`)
 │   ├── event/
 │   │   ├── __init__.py (`sylanne_body/event/__init__.py`)
 │   │   ├── source.py (`sylanne_body/event/source.py`)
