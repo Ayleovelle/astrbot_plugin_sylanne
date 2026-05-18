@@ -169,6 +169,8 @@ function assertZipLooksUploadable(zipPath, expectedPlugin, options = {}) {
     `${expectedPlugin}/sylanne_body/event/source.py`,
     `${expectedPlugin}/sylanne_body/law/__init__.py`,
     `${expectedPlugin}/sylanne_body/law/sovereignty.py`,
+    `${expectedPlugin}/sylanne_body/kernel/__init__.py`,
+    `${expectedPlugin}/sylanne_body/kernel/spine.py`,
     `${expectedPlugin}/sylanne_body/soma/__init__.py`,
     `${expectedPlugin}/sylanne_body/soma/affect.py`,
     `${expectedPlugin}/sylanne_body/soma/crying.py`,

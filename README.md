@@ -561,6 +561,9 @@ astrbot_plugin_sylanne/
 │   ├── law/
 │   │   ├── __init__.py (`sylanne_body/law/__init__.py`)
 │   │   └── sovereignty.py (`sylanne_body/law/sovereignty.py`)
+│   ├── kernel/
+│   │   ├── __init__.py (`sylanne_body/kernel/__init__.py`)
+│   │   └── spine.py (`sylanne_body/kernel/spine.py`)
 │   ├── soma/
 │   │   ├── __init__.py (`sylanne_body/soma/__init__.py`)
 │   │   ├── affect.py (`sylanne_body/soma/affect.py`)
@@ -640,6 +643,9 @@ data/plugins/
     │   ├── law/
     │   │   ├── __init__.py (`sylanne_body/law/__init__.py`)
     │   │   └── sovereignty.py (`sylanne_body/law/sovereignty.py`)
+    │   ├── kernel/
+    │   │   ├── __init__.py (`sylanne_body/kernel/__init__.py`)
+    │   │   └── spine.py (`sylanne_body/kernel/spine.py`)
     │   ├── soma/
     │   │   ├── __init__.py (`sylanne_body/soma/__init__.py`)
     │   │   ├── affect.py (`sylanne_body/soma/affect.py`)
