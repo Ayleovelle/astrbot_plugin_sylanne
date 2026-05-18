@@ -569,6 +569,9 @@ astrbot_plugin_sylanne/
 │   ├── nerve/
 │   │   ├── __init__.py (`sylanne_body/nerve/__init__.py`)
 │   │   └── timeline.py (`sylanne_body/nerve/timeline.py`)
+│   ├── organ/
+│   │   ├── __init__.py (`sylanne_body/organ/__init__.py`)
+│   │   └── library.py (`sylanne_body/organ/library.py`)
 │   ├── kernel/
 │   │   ├── __init__.py (`sylanne_body/kernel/__init__.py`)
 │   │   └── spine.py (`sylanne_body/kernel/spine.py`)
@@ -661,6 +664,9 @@ data/plugins/
     │   ├── nerve/
     │   │   ├── __init__.py (`sylanne_body/nerve/__init__.py`)
     │   │   └── timeline.py (`sylanne_body/nerve/timeline.py`)
+    │   ├── organ/
+    │   │   ├── __init__.py (`sylanne_body/organ/__init__.py`)
+    │   │   └── library.py (`sylanne_body/organ/library.py`)
     │   ├── kernel/
     │   │   ├── __init__.py (`sylanne_body/kernel/__init__.py`)
     │   │   └── spine.py (`sylanne_body/kernel/spine.py`)
