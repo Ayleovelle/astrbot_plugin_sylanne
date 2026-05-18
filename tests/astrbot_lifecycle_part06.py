@@ -305,6 +305,65 @@ class AstrBotLifecyclePart06(AstrBotLifecycleTests):
 
         self.assertEqual(loads, ["s-drift-reuse"])
 
+    def test_personality_drift_injection_goes_through_kernel_host_boundary(self):
+        from personality_drift_engine import PersonalityDriftState
+
+        plugin = new_plugin(
+            {
+                "assessment_timing": "post",
+                "enable_personality_drift": True,
+                "personality_drift_injection_strength": 0.22,
+            },
+        )
+        self._bind_common_state_hooks(plugin)
+        calls = []
+
+        async def fake_load_personality_drift_state(
+            self,
+            session_key,
+            profile=None,
+            **kwargs,
+        ):
+            return PersonalityDriftState.initial(
+                persona_fingerprint=profile.fingerprint if profile else "default",
+                now=0.0,
+            )
+
+        async def fake_save_personality_drift_state(self, session_key, state):
+            pass
+
+        def fake_append_personality_drift_auxiliary_state(
+            self,
+            request,
+            personality_drift_state,
+            *,
+            injection_decision,
+            injection_budget,
+        ):
+            calls.append(
+                {
+                    "state": personality_drift_state,
+                    "decision": injection_decision,
+                    "budget": injection_budget,
+                },
+            )
+            return self._append_temp_text_part(
+                request,
+                '<bot_auxiliary_state private="true" name="personality_drift" detail="host-boundary">hosted</bot_auxiliary_state>',
+                source="personality_drift",
+                budget=injection_budget,
+            )
+
+        bind_async(plugin, "_load_personality_drift_state", fake_load_personality_drift_state)
+        bind_async(plugin, "_save_personality_drift_state", fake_save_personality_drift_state)
+        plugin._append_personality_drift_auxiliary_state = fake_append_personality_drift_auxiliary_state.__get__(plugin)
+        request = fake_request(session_id="s-drift-host-boundary", prompt="thank you")
+
+        asyncio.run(plugin.on_llm_request(FakeEvent("s-drift-host-boundary"), request))
+
+        self.assertEqual(1, len(calls))
+        self._find_text_part(request, 'name="personality_drift" detail="host-boundary"')
+
 
     def test_realtime_chat_plan_splits_reply_and_bounds_delay(self):
         plugin = new_plugin(

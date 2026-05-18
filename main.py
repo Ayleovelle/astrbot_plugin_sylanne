@@ -1946,25 +1946,12 @@ class EmotionalStatePlugin(Star):
                         now=observed_at,
                     )
                 )
-                appended = self._append_temp_text_part(
+                self._append_personality_drift_auxiliary_state(
                     request,
-                    self._build_auxiliary_state_injection(
-                        "personality_drift",
-                        lambda: build_personality_drift_prompt_fragment(
-                            personality_drift_state,
-                        ),
-                        decision=injection_decision,
-                    ),
-                    source="personality_drift",
-                    budget=injection_budget,
+                    personality_drift_state,
+                    injection_decision=injection_decision,
+                    injection_budget=injection_budget,
                 )
-                if not appended and injection_decision.auxiliary_detail == "full":
-                    self._append_temp_text_part(
-                        request,
-                        self._build_compact_auxiliary_state_injection("personality_drift"),
-                        source="personality_drift.compact_fallback",
-                        budget=injection_budget,
-                    )
             if moral_repair_injection_enabled:
                 moral_repair_state = (
                     moral_repair_state
@@ -17325,6 +17312,35 @@ class EmotionalStatePlugin(Star):
                 request,
                 self._build_compact_auxiliary_state_injection("fallibility"),
                 source="fallibility.compact_fallback",
+                budget=injection_budget,
+            )
+        return appended
+
+    def _append_personality_drift_auxiliary_state(
+        self,
+        request: ProviderRequest,
+        personality_drift_state: PersonalityDriftState,
+        *,
+        injection_decision: _StateInjectionDecision,
+        injection_budget: _StateInjectionBudget,
+    ) -> bool:
+        appended = self._append_temp_text_part(
+            request,
+            self._build_auxiliary_state_injection(
+                "personality_drift",
+                lambda: build_personality_drift_prompt_fragment(
+                    personality_drift_state,
+                ),
+                decision=injection_decision,
+            ),
+            source="personality_drift",
+            budget=injection_budget,
+        )
+        if not appended and injection_decision.auxiliary_detail == "full":
+            self._append_temp_text_part(
+                request,
+                self._build_compact_auxiliary_state_injection("personality_drift"),
+                source="personality_drift.compact_fallback",
                 budget=injection_budget,
             )
         return appended
