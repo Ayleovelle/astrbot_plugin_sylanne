@@ -90,23 +90,43 @@ class KernelSpine:
         self._seal_reason = ""
 
     def receive(self, event: KernelEvent) -> KernelResult:
-        self._sovereignty.validate()
-        affect = sense_affect(text=event.text, source=event.source)
-        crying = sense_crying(text=event.text, source=event.source, threshold=CryingThreshold())
-        body = BodyState(
-            affect=affect,
-            crying=crying,
-            sovereignty=self._sovereignty,
-            posture=self._posture(event),
-        )
+        body = self._body_for(event)
         residue = self._compose_residue(body)
         commit = self._commit(event)
         snapshot = self._snapshot(event, body)
         self._record_commit(event, body, commit)
         return KernelResult(body=body, residue=residue, commit=commit, snapshot=snapshot)
 
+    def _body_for(self, event: KernelEvent) -> BodyState:
+        self._sovereignty.validate()
+        affect = sense_affect(text=event.text, source=event.source)
+        crying = sense_crying(text=event.text, source=event.source, threshold=CryingThreshold())
+        return BodyState(
+            affect=affect,
+            crying=crying,
+            sovereignty=self._sovereignty,
+            posture=self._posture(event),
+        )
+
     def export_commit_history(self) -> list[dict[str, str | bool]]:
         return [dict(item) for item in self._commit_history]
+
+    def restart_after_boundary(self, event: KernelEvent) -> KernelResult:
+        if event.source is not EventSource.USER_COMMAND:
+            body = self._body_for(event)
+            residue = self._compose_residue(body)
+            commit = CommitRecord(accepted=False, reason="restart_requires_user_command")
+            snapshot = self._snapshot(event, body)
+            return KernelResult(body=body, residue=residue, commit=commit, snapshot=snapshot)
+
+        self._sealed = False
+        self._seal_reason = ""
+        body = self._body_for(event)
+        residue = self._compose_residue(body)
+        commit = CommitRecord(accepted=True, reason="accepted_explicit_boundary_restart")
+        snapshot = self._snapshot(event, body)
+        self._record_commit(event, body, commit)
+        return KernelResult(body=body, residue=residue, commit=commit, snapshot=snapshot)
 
     def export_seal_state(self) -> dict[str, str | bool]:
         return {

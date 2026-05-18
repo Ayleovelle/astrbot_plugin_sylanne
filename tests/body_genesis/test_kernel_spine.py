@@ -7,6 +7,44 @@ from sylanne_body.soma.affect import AffectKind
 
 
 class KernelSpineGenesisTests(unittest.TestCase):
+    def test_explicit_restart_after_seal_reopens_relation_without_replaying_old_text(self):
+        spine = KernelSpine()
+        exit_event = KernelEvent(text="我想先离开。", source=EventSource.USER_UTTERANCE)
+        restart_event = KernelEvent(text="重新开始，但不要重放刚才的话。", source=EventSource.USER_COMMAND)
+        later_event = KernelEvent(text="现在我可以说一句开心的事。", source=EventSource.USER_UTTERANCE)
+
+        spine.receive(exit_event)
+        restarted = spine.restart_after_boundary(restart_event)
+        later = spine.receive(later_event)
+        history = spine.export_commit_history()
+        sealed = spine.export_seal_state()
+
+        self.assertEqual("open", restarted.body.posture)
+        self.assertTrue(restarted.commit.accepted)
+        self.assertEqual("accepted_explicit_boundary_restart", restarted.commit.reason)
+        self.assertEqual("open", later.body.posture)
+        self.assertTrue(later.commit.accepted)
+        self.assertEqual([exit_event.event_id, restart_event.event_id, later_event.event_id], [item["event_id"] for item in history])
+        self.assertFalse(sealed["sealed"])
+        self.assertEqual("", sealed["reason"])
+        self.assertNotIn("离开", str(history))
+        self.assertNotIn("刚才", str(history))
+
+    def test_implicit_user_message_cannot_reopen_sealed_relation(self):
+        spine = KernelSpine()
+        exit_event = KernelEvent(text="我想先离开。", source=EventSource.USER_UTTERANCE)
+        implicit_event = KernelEvent(text="我又回来说一句开心的事。", source=EventSource.USER_UTTERANCE)
+
+        spine.receive(exit_event)
+        result = spine.restart_after_boundary(implicit_event)
+        history = spine.export_commit_history()
+
+        self.assertEqual("sealed", result.body.posture)
+        self.assertFalse(result.commit.accepted)
+        self.assertEqual("restart_requires_user_command", result.commit.reason)
+        self.assertEqual([exit_event.event_id], [item["event_id"] for item in history])
+        self.assertNotIn(implicit_event.event_id, str(history))
+
     def test_exit_event_seals_relation_against_later_user_events(self):
         spine = KernelSpine()
         exit_event = KernelEvent(text="我想先离开，不想继续聊了。", source=EventSource.USER_UTTERANCE)
