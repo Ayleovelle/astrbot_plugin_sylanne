@@ -29,3 +29,12 @@ def build_interpretation_candidates_context(
             ),
         )
     return "\n".join(lines)
+
+
+def build_expression_policy_context(
+    policy: dict[str, Any],
+    *,
+    expression_policy_builder: Callable[[dict[str, Any]], str],
+) -> str:
+    text = expression_policy_builder(policy)
+    return text or ""

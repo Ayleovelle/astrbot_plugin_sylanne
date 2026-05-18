@@ -219,7 +219,7 @@ try:
     from .interpretation_engine import classify_memory_gate, interpret_user_text
     from .sylanne_body.adapter import KernelAdapter
     from .sylanne_body.host_boundary import append_auxiliary_state
-    from .sylanne_body.host_context import build_interpretation_candidates_context
+    from .sylanne_body.host_context import build_expression_policy_context, build_interpretation_candidates_context
     from .sylanne_body.organ.library import LegacyBodyOrgan
 except ImportError:
     from emotion_engine import (
@@ -393,7 +393,7 @@ except ImportError:
     from interpretation_engine import classify_memory_gate, interpret_user_text
     from sylanne_body.adapter import KernelAdapter
     from sylanne_body.host_boundary import append_auxiliary_state
-    from sylanne_body.host_context import build_interpretation_candidates_context
+    from sylanne_body.host_context import build_expression_policy_context, build_interpretation_candidates_context
     from sylanne_body.organ.library import LegacyBodyOrgan
 
 
@@ -12289,9 +12289,15 @@ class EmotionalStatePlugin(Star):
         request: ProviderRequest,
         policy: dict[str, Any],
     ) -> bool:
+        context = build_expression_policy_context(
+            policy,
+            expression_policy_builder=build_expression_policy_prompt,
+        )
+        if not context:
+            return False
         return self._append_temp_text_part(
             request,
-            build_expression_policy_prompt(policy),
+            context,
             source="expression_policy",
         )
 

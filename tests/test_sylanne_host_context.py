@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import unittest
 
-from sylanne_body.host_context import build_interpretation_candidates_context
+from sylanne_body.host_context import build_expression_policy_context, build_interpretation_candidates_context
 
 
 class HostContextModuleTests(unittest.TestCase):
@@ -45,6 +45,21 @@ class HostContextModuleTests(unittest.TestCase):
                 [],
                 memory_gate_classifier=lambda item: {"layer": "unused"},
                 head_one_line=lambda value, limit: value[:limit],
+            ),
+        )
+    def test_build_expression_policy_context_delegates_and_normalizes_empty_text(self):
+        self.assertEqual(
+            "policy:brief_answer",
+            build_expression_policy_context(
+                {"posture": "brief_answer"},
+                expression_policy_builder=lambda policy: f"policy:{policy.get('posture')}",
+            ),
+        )
+        self.assertEqual(
+            "",
+            build_expression_policy_context(
+                {},
+                expression_policy_builder=lambda policy: "",
             ),
         )
 
