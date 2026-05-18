@@ -217,6 +217,7 @@ try:
     )
     from .expression_policy import build_expression_policy_prompt, choose_expression_policy
     from .interpretation_engine import classify_memory_gate, interpret_user_text
+    from .sylanne_body.adapter import KernelAdapter
 except ImportError:
     from emotion_engine import (
         EmotionEngine,
@@ -387,6 +388,7 @@ except ImportError:
     )
     from expression_policy import build_expression_policy_prompt, choose_expression_policy
     from interpretation_engine import classify_memory_gate, interpret_user_text
+    from sylanne_body.adapter import KernelAdapter
 
 
 PLUGIN_NAME = "astrbot_plugin_sylanne"
@@ -727,6 +729,7 @@ class EmotionalStatePlugin(Star):
         self._fallibility_memory_cache: dict[str, FallibilityState] = {}
         self._group_atmosphere_memory_cache: dict[str, GroupAtmosphereState] = {}
         self._conversation_event_ledger = ConversationEventLedger(max_events_per_session=24)
+        self._sylanne_kernel_adapter = KernelAdapter()
         self._sylanne_memory_cache: dict[str, SylanneMemoryState] = {}
         self._sylanne_memory_recall_worksets: dict[str, deque[MemoryRecallItem]] = {}
         self._sylanne_memory_query_embedding_cache: dict[str, tuple[float, list[float]]] = {}
@@ -1097,6 +1100,7 @@ class EmotionalStatePlugin(Star):
         input_epoch = self._bump_conversation_input_epoch(session_key, event=event)
         self._record_conversation_pending_response_epoch(session_key, input_epoch)
         current_user_text = self._event_text(event) or str(getattr(request, "prompt", "") or "")
+        self._observe_sylanne_kernel_request(current_user_text)
         observed_at = self._event_observed_at(event)
         self._understanding_closed_loop_state().setdefault(session_key, {})[
             "current_user_text"
@@ -2147,6 +2151,7 @@ class EmotionalStatePlugin(Star):
 
         if not response_text.strip():
             return
+        self._observe_sylanne_kernel_response(response_text)
         if self._response_already_realtime_intercepted(response):
             original_text = str(
                 getattr(response, "_sylanne_intercepted_completion_text", "") or response_text,
@@ -18357,6 +18362,26 @@ class EmotionalStatePlugin(Star):
             if self._response_field_has_payload(getattr(value, key, None)):
                 return True
         return False
+
+    def _observe_sylanne_kernel_request(self, text: str) -> None:
+        adapter = getattr(self, "_sylanne_kernel_adapter", None)
+        if adapter is None:
+            adapter = KernelAdapter()
+            self._sylanne_kernel_adapter = adapter
+        try:
+            adapter.receive(text=str(text or ""), source="user")
+        except Exception as exc:
+            self._log_warning(f"Sylanne kernel request observation skipped: {exc}")
+
+    def _observe_sylanne_kernel_response(self, text: str) -> None:
+        adapter = getattr(self, "_sylanne_kernel_adapter", None)
+        if adapter is None:
+            adapter = KernelAdapter()
+            self._sylanne_kernel_adapter = adapter
+        try:
+            adapter.receive(text=str(text or ""), source="internal")
+        except Exception as exc:
+            self._log_warning(f"Sylanne kernel response observation skipped: {exc}")
 
     def _append_temp_text_part(
         self,

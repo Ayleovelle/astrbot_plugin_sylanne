@@ -170,6 +170,7 @@ def new_plugin(config=None):
     from moral_repair_engine import MoralRepairEngine
     from personality_drift_engine import PersonalityDriftEngine
     from psychological_screening import PsychologicalScreeningEngine
+    from sylanne_body.adapter import KernelAdapter
 
     plugin = EmotionalStatePlugin.__new__(EmotionalStatePlugin)
     plugin.config = dict(config or {})
@@ -182,6 +183,7 @@ def new_plugin(config=None):
     plugin.moral_repair_engine = MoralRepairEngine()
     plugin.fallibility_engine = FallibilityEngine()
     plugin.group_atmosphere_engine = GroupAtmosphereEngine()
+    plugin._sylanne_kernel_adapter = KernelAdapter()
     for attr in PLUGIN_DICT_ATTRIBUTES:
         setattr(plugin, attr, {})
     for attr in PLUGIN_SET_ATTRIBUTES:

@@ -557,10 +557,18 @@ astrbot_plugin_sylanne/
 │   ├── __init__.py (`sylanne_body/__init__.py`)
 │   ├── event/
 │   │   ├── __init__.py (`sylanne_body/event/__init__.py`)
-│   │   └── source.py (`sylanne_body/event/source.py`)
+│   │   ├── source.py (`sylanne_body/event/source.py`)
+│   │   └── normalize.py (`sylanne_body/event/normalize.py`)
 │   ├── law/
 │   │   ├── __init__.py (`sylanne_body/law/__init__.py`)
-│   │   └── sovereignty.py (`sylanne_body/law/sovereignty.py`)
+│   │   ├── sovereignty.py (`sylanne_body/law/sovereignty.py`)
+│   │   └── immunity.py (`sylanne_body/law/immunity.py`)
+│   ├── memory/
+│   │   ├── __init__.py (`sylanne_body/memory/__init__.py`)
+│   │   └── blood.py (`sylanne_body/memory/blood.py`)
+│   ├── nerve/
+│   │   ├── __init__.py (`sylanne_body/nerve/__init__.py`)
+│   │   └── timeline.py (`sylanne_body/nerve/timeline.py`)
 │   ├── kernel/
 │   │   ├── __init__.py (`sylanne_body/kernel/__init__.py`)
 │   │   └── spine.py (`sylanne_body/kernel/spine.py`)
@@ -571,7 +579,9 @@ astrbot_plugin_sylanne/
 │   └── speech/
 │       ├── __init__.py (`sylanne_body/speech/__init__.py`)
 │       ├── affect.py (`sylanne_body/speech/affect.py`)
-│       └── crying.py (`sylanne_body/speech/crying.py`)
+│       ├── crying.py (`sylanne_body/speech/crying.py`)
+│       └── gate.py (`sylanne_body/speech/gate.py`)
+├── sylanne_body/adapter.py (`sylanne_body/adapter.py`)
 ├── LICENSE
 ├── README.md
 ├── CHANGELOG.md
@@ -639,10 +649,18 @@ data/plugins/
     │   ├── __init__.py (`sylanne_body/__init__.py`)
     │   ├── event/
     │   │   ├── __init__.py (`sylanne_body/event/__init__.py`)
-    │   │   └── source.py (`sylanne_body/event/source.py`)
+    │   │   ├── source.py (`sylanne_body/event/source.py`)
+    │   │   └── normalize.py (`sylanne_body/event/normalize.py`)
     │   ├── law/
     │   │   ├── __init__.py (`sylanne_body/law/__init__.py`)
-    │   │   └── sovereignty.py (`sylanne_body/law/sovereignty.py`)
+    │   │   ├── sovereignty.py (`sylanne_body/law/sovereignty.py`)
+    │   │   └── immunity.py (`sylanne_body/law/immunity.py`)
+    │   ├── memory/
+    │   │   ├── __init__.py (`sylanne_body/memory/__init__.py`)
+    │   │   └── blood.py (`sylanne_body/memory/blood.py`)
+    │   ├── nerve/
+    │   │   ├── __init__.py (`sylanne_body/nerve/__init__.py`)
+    │   │   └── timeline.py (`sylanne_body/nerve/timeline.py`)
     │   ├── kernel/
     │   │   ├── __init__.py (`sylanne_body/kernel/__init__.py`)
     │   │   └── spine.py (`sylanne_body/kernel/spine.py`)
@@ -653,7 +671,9 @@ data/plugins/
     │   └── speech/
     │       ├── __init__.py (`sylanne_body/speech/__init__.py`)
     │       ├── affect.py (`sylanne_body/speech/affect.py`)
-    │       └── crying.py (`sylanne_body/speech/crying.py`)
+    │       ├── crying.py (`sylanne_body/speech/crying.py`)
+    │       └── gate.py (`sylanne_body/speech/gate.py`)
+    ├── sylanne_body/adapter.py (`sylanne_body/adapter.py`)
     ├── LICENSE
     ├── README.md
     ├── CHANGELOG.md
