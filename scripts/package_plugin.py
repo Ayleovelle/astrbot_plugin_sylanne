@@ -25,6 +25,7 @@ INCLUDE_ROOT_FILES = {
     "integrated_self.py",
     "moral_repair_engine.py",
     "memory_engine.py",
+    "project_life_engine.py",
     "fallibility_engine.py",
     "psychological_screening.py",
     "prompts.py",
@@ -41,6 +42,8 @@ INCLUDE_ROOT_FILES = {
 INCLUDE_DIRS = {
     "docs",
     "pages",
+    "sylanne",
+    "sylanne_body",
 }
 
 ALLOWED_DOC_ASSETS = {

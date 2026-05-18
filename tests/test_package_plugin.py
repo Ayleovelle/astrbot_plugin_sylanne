@@ -65,6 +65,7 @@ class PackagePluginTests(unittest.TestCase):
         self.assertIn("realtime_chat_input.py", files)
         self.assertIn("moral_repair_engine.py", files)
         self.assertIn("memory_engine.py", files)
+        self.assertIn("project_life_engine.py", files)
         self.assertIn("fallibility_engine.py", files)
         self.assertIn("agent_identity.py", files)
         self.assertIn("group_atmosphere_engine.py", files)
@@ -74,6 +75,35 @@ class PackagePluginTests(unittest.TestCase):
         self.assertIn("CHANGELOG.md", files)
         self.assertIn("docs/theory.md", files)
         self.assertIn("docs/remote_testing.md", files)
+        body_runtime_files = {
+            "sylanne/__init__.py",
+            "sylanne/body_runtime/__init__.py",
+            "sylanne/body_runtime/adapter.py",
+            "sylanne/body_runtime/body.py",
+            "sylanne/body_runtime/contracts.py",
+            "sylanne/body_runtime/organs.py",
+            "sylanne/body_runtime/prompt_surface.py",
+            "sylanne/body_runtime/sovereignty.py",
+        }
+        for runtime_file in body_runtime_files:
+            with self.subTest(runtime_file=runtime_file):
+                self.assertIn(runtime_file, files)
+        body_genesis_files = {
+            "sylanne_body/__init__.py",
+            "sylanne_body/event/__init__.py",
+            "sylanne_body/event/source.py",
+            "sylanne_body/law/__init__.py",
+            "sylanne_body/law/sovereignty.py",
+            "sylanne_body/soma/__init__.py",
+            "sylanne_body/soma/affect.py",
+            "sylanne_body/soma/crying.py",
+            "sylanne_body/speech/__init__.py",
+            "sylanne_body/speech/affect.py",
+            "sylanne_body/speech/crying.py",
+        }
+        for body_file in body_genesis_files:
+            with self.subTest(body_file=body_file):
+                self.assertIn(body_file, files)
         for asset in EXPECTED_DOC_ASSETS:
             with self.subTest(asset=asset):
                 self.assertIn(asset, files)
@@ -108,7 +138,7 @@ class PackagePluginTests(unittest.TestCase):
     def test_readme_install_tree_matches_release_package_boundaries(self):
         readme = (ROOT / "README.md").read_text(encoding="utf-8")
         install_trees = readme.split("```text")
-        release_tree = install_trees[1].split("```", 1)[0]
+        release_tree = install_trees[3].split("```", 1)[0]
         manual_tree = install_trees[4].split("```", 1)[0]
 
         self.assertIn("astrbot_plugin_sylanne/", release_tree)
@@ -118,6 +148,18 @@ class PackagePluginTests(unittest.TestCase):
             "agent_identity.py",
             "group_atmosphere_engine.py",
             "memory_engine.py",
+            "sylanne/",
+            "body_runtime/",
+            "sylanne_body/",
+            "soma/",
+            "crying.py",
+            "affect.py",
+            "contracts.py",
+            "sovereignty.py",
+            "prompt_surface.py",
+            "body.py",
+            "organs.py",
+            "adapter.py",
             "logo.png",
             "README.md",
             "CHANGELOG.md",
@@ -183,12 +225,42 @@ class PackagePluginTests(unittest.TestCase):
             "integrated_self.py",
             "moral_repair_engine.py",
             "memory_engine.py",
+            "project_life_engine.py",
             "fallibility_engine.py",
             "psychological_screening.py",
             "prompts.py",
             "public_api.py",
         }
         for filename in runtime_root_files:
+            with self.subTest(filename=filename):
+                self.assertIn(prefix + filename, names)
+        body_runtime_files = {
+            "sylanne/__init__.py",
+            "sylanne/body_runtime/__init__.py",
+            "sylanne/body_runtime/adapter.py",
+            "sylanne/body_runtime/body.py",
+            "sylanne/body_runtime/contracts.py",
+            "sylanne/body_runtime/organs.py",
+            "sylanne/body_runtime/prompt_surface.py",
+            "sylanne/body_runtime/sovereignty.py",
+        }
+        for filename in body_runtime_files:
+            with self.subTest(filename=filename):
+                self.assertIn(prefix + filename, names)
+        body_genesis_files = {
+            "sylanne_body/__init__.py",
+            "sylanne_body/event/__init__.py",
+            "sylanne_body/event/source.py",
+            "sylanne_body/law/__init__.py",
+            "sylanne_body/law/sovereignty.py",
+            "sylanne_body/soma/__init__.py",
+            "sylanne_body/soma/affect.py",
+            "sylanne_body/soma/crying.py",
+            "sylanne_body/speech/__init__.py",
+            "sylanne_body/speech/affect.py",
+            "sylanne_body/speech/crying.py",
+        }
+        for filename in body_genesis_files:
             with self.subTest(filename=filename):
                 self.assertIn(prefix + filename, names)
         self.assertIn(prefix + "metadata.yaml", names)
@@ -324,6 +396,7 @@ class PluginZipPreflightTests(unittest.TestCase):
             (prefix + "integrated_self.py", "# runtime\n"),
             (prefix + "moral_repair_engine.py", "# runtime\n"),
             (prefix + "memory_engine.py", "# runtime\n"),
+            (prefix + "project_life_engine.py", "# runtime\n"),
             (prefix + "fallibility_engine.py", "# runtime\n"),
             (prefix + "psychological_screening.py", "# runtime\n"),
             (prefix + "prompts.py", "# runtime\n"),
@@ -334,6 +407,25 @@ class PluginZipPreflightTests(unittest.TestCase):
             (prefix + "logo.png", "PNG\n"),
             (prefix + "requirements.txt", "# no dependencies\n"),
             (prefix + "_conf_schema.json", "{}\n"),
+            (prefix + "sylanne/__init__.py", "# package\n"),
+            (prefix + "sylanne/body_runtime/__init__.py", "# runtime package\n"),
+            (prefix + "sylanne/body_runtime/adapter.py", "# runtime\n"),
+            (prefix + "sylanne/body_runtime/body.py", "# runtime\n"),
+            (prefix + "sylanne/body_runtime/contracts.py", "# runtime\n"),
+            (prefix + "sylanne/body_runtime/organs.py", "# runtime\n"),
+            (prefix + "sylanne/body_runtime/prompt_surface.py", "# runtime\n"),
+            (prefix + "sylanne/body_runtime/sovereignty.py", "# runtime\n"),
+            (prefix + "sylanne_body/__init__.py", "# body genesis\n"),
+            (prefix + "sylanne_body/event/__init__.py", "# body genesis\n"),
+            (prefix + "sylanne_body/event/source.py", "# body genesis\n"),
+            (prefix + "sylanne_body/law/__init__.py", "# body genesis\n"),
+            (prefix + "sylanne_body/law/sovereignty.py", "# body genesis\n"),
+            (prefix + "sylanne_body/soma/__init__.py", "# body genesis\n"),
+            (prefix + "sylanne_body/soma/affect.py", "# body genesis\n"),
+            (prefix + "sylanne_body/soma/crying.py", "# body genesis\n"),
+            (prefix + "sylanne_body/speech/__init__.py", "# body genesis\n"),
+            (prefix + "sylanne_body/speech/affect.py", "# body genesis\n"),
+            (prefix + "sylanne_body/speech/crying.py", "# body genesis\n"),
             (prefix + "docs/assets/lifecycle_model_fit.svg", "<svg></svg>\n"),
             (prefix + "docs/assets/lifecycle_model_fit_summary.csv", "case,count\n"),
             (prefix + "docs/assets/lifecycle_model_fit_table.md", "| case |\n"),
@@ -421,11 +513,31 @@ class PluginZipPreflightTests(unittest.TestCase):
             "LICENSE",
             "moral_repair_engine.py",
             "memory_engine.py",
+            "project_life_engine.py",
             "fallibility_engine.py",
             "CHANGELOG.md",
             "public_api.py",
             "requirements.txt",
             "logo.png",
+            "sylanne/__init__.py",
+            "sylanne/body_runtime/__init__.py",
+            "sylanne/body_runtime/adapter.py",
+            "sylanne/body_runtime/body.py",
+            "sylanne/body_runtime/contracts.py",
+            "sylanne/body_runtime/organs.py",
+            "sylanne/body_runtime/prompt_surface.py",
+            "sylanne/body_runtime/sovereignty.py",
+            "sylanne_body/__init__.py",
+            "sylanne_body/event/__init__.py",
+            "sylanne_body/event/source.py",
+            "sylanne_body/law/__init__.py",
+            "sylanne_body/law/sovereignty.py",
+            "sylanne_body/soma/__init__.py",
+            "sylanne_body/soma/affect.py",
+            "sylanne_body/soma/crying.py",
+            "sylanne_body/speech/__init__.py",
+            "sylanne_body/speech/affect.py",
+            "sylanne_body/speech/crying.py",
             "docs/assets/lifecycle_model_fit.svg",
             "docs/assets/lifecycle_model_fit_summary.csv",
             "docs/assets/lifecycle_model_fit_table.md",

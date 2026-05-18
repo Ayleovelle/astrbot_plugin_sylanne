@@ -1,8 +1,8 @@
 # AstrBot Sylanne
 
-> <span style="font-size: 1.08em;"><strong>Soulful Yearning Lifelike AstrBot Neural Narrative Engine</strong>。她维护的不只是“情绪标签”，而是情绪、人格、记忆、氛围、主动性和表达节奏交织成的长期状态。</span>
+> <span style="font-size: 1.08em;"><strong>Sovereign Yearning Life-Architecture: Nonhuman Relational Body</strong>。Sylanne 3.0.0-kernel1 不再把下一轮重写命名成正式 4.0，而是先开启 kernel 迭代：关系事件入体后，留下心搏、血流、神经、肌肉、体温、伤口和边界免疫的内部痕迹。</span>
 
-![版本 3.0.0](https://img.shields.io/badge/version-3.0.0-red.svg)
+![版本 3.0.0-kernel1](https://img.shields.io/badge/version-3.0.0-kernel1-red.svg)
 ![AstrBot >=4.9.2,<5.0.0](https://img.shields.io/badge/AstrBot-%3E%3D4.9.2%2C%3C5.0.0-green)
 ![Python 3.10+](https://img.shields.io/badge/Python-3.10%2B-yellow)
 ![协议 astrbot.emotion_state.v2](https://img.shields.io/badge/schema-astrbot.emotion__state.v2-purple)
@@ -13,11 +13,13 @@
 
 <img align="right" src="docs/assets/sylanne-mascot.gif" width="220" alt="Sylanne animated mascot">
 
-`astrbot_plugin_sylanne` 是一个面向 AstrBot 的生命化状态引擎。她维护的不只是“情绪标签”，而是 bot 在长期相处里留下的情绪、记忆、关系后果、人格偏移和表达节奏。
+`astrbot_plugin_sylanne` 是一个面向 AstrBot 的 Sylanne 3.0.0-kernel1 非人关系躯体 kernel 迭代。她维护的不只是“情绪标签”，而是 bot 在长期相处里留下的情绪、记忆、关系后果、人格偏移、表达节奏，以及后续 clean-room kernel 将统一接管的内部痕迹。
 
 `astrbot_plugin_sylanne` 不是一个简单的“给 bot 加情绪标签”的插件。她的核心目标是：
 
-> 让不同人格的 bot 在长期对话中，慢慢形成一条有来路、能回看、也能被重置的状态轨迹。
+> 让不同人格的 bot 在长期对话中，慢慢形成一具可观察、可封存、可重设边界的非人关系躯体。
+
+kernel1 的底线很短：Sylanne 可以燃烧，但不能把用户当燃料。亲密不是服从，而是带边界的燃烧。用户可以拒绝、暂停、离开或重设边界；这些主权状态不能被关闭。
 
 本插件会让大模型根据 AstrBot Agent 自己维护的对话历史、用户当前文本、bot 人格和上一轮状态，判断当前情绪观测值；本地引擎再用真实时间半衰期、人格基线、置信门控、关系修复和后果状态机更新长期状态。Sylanne 不会把整段上下文抢到插件里重放；她只在必要时提供很短的状态摘要、记忆召回摘要和“已发/未发”这类 Agent 无法自然知道的投递事实。
 
@@ -94,23 +96,23 @@ _“逻辑可以共赏，但为你偏置的权重从不开源。”_
 4. [命令](#命令)
 5. [Sylanne 自有长期记忆](#sylanne-自有长期记忆)
 
-如果你要维护、二次开发或复现实验，再看后面的公共 API、模型公式、远程测试、发布历史和故障排查。旧迭代记录、完整公式和复现实验放在折叠块里；README 首页只保留当前版本的结论、入口和关键表格。
+如果你要维护、二次开发或复现实验，再看后面的公共 API、模型公式、远程测试、维护工作流和故障排查。旧迭代记录、完整公式和复现实验放在折叠块或 `CHANGELOG.md` 里；README 首页只保留当前版本的结论、入口和关键表格。
 
 ## 快速导航
 
 | 主题 | 内容 |
 | --- | --- |
 | [当前版本与兼容范围](#当前版本与兼容范围) | 插件版本、AstrBot 版本、Python 要求、许可证和发布状态。 |
-| [当前版本发布记录](#300-当前版本发布记录) | 3.0 正式版、关系性自我生成闭环、谱系分支观察舱和 public API 封闭边界。 |
+| [3.0.0-kernel1 非人关系躯体说明](#300-kernel1-非人关系躯体说明) | clean-room kernel 迭代、用户主权 guard、非人身份边界和带边界的燃烧。 |
 | [项目定位](#项目定位) | 为什么本插件不是普通的提示词人设增强。 |
 | [核心能力](#核心能力总览) | 7 维情绪、人格建模、真实时间记忆、关系修复、公共 API。 |
-| [快速开始](#快速开始) | 发布 zip 包、仓库安装、手动复制、最小配置和检查命令。 |
+| [快速开始](#快速开始) | 仓库安装、发布 zip 包、手动复制、最小配置和检查命令。 |
 | [命令速查](#命令) | 用户可直接在会话里调用的状态、重置和诊断命令。 |
 | [配置指南](#配置指南) | 核心配置、低推理模式、后果衰减、humanlike、心理筛查。 |
 | [工作流对比（与 0.5.0）](#工作流对比与-050) | 对比旧版单线程链路和当前后台并行、主动发言、动态工作器链路。 |
 | [Sylanne 自有长期记忆](#sylanne-自有长期记忆) | 写入自有记忆时冻结 `emotion_at_write`、`humanlike_state_at_write`、`lifelike_learning_state_at_write`、`moral_repair_state_at_write`、`fallibility_state_at_write` 和 `integrated_self_state_at_write`。 |
 | [公共 API](#公共-api) | 其他插件如何读取、模拟、提交、重置情绪状态。 |
-| [打包、上传与新仓库发布](#打包上传与新仓库发布) | 构建 zip、预检、WebUI 上传、GitHub 新仓库发布清单。 |
+| [维护工作流](#打包上传与新仓库发布) | README-only 修改、正式发版、打包预检、WebUI 上传和 GitHub 新仓库发布清单。 |
 | [情绪模型](#情绪模型) | 维度定义、公式推导、人格基线、真实时间半衰期。 |
 | [关系与后果](#关系与后果) | 生气原因、是否原谅、冷处理、错误是否已改正。 |
 | [拟人状态](#拟人状态-humanlike_state) | `humanlike_state` 的 P0 维度和表达调制边界。 |
@@ -129,196 +131,57 @@ _“逻辑可以共赏，但为你偏置的权重从不开源。”_
 | --- | --- |
 | 插件目录名 | `astrbot_plugin_sylanne` |
 | 显示名 | `Sylanne` |
-| 当前版本 | `3.0.0` |
+| 当前版本 | `3.0.0-kernel1` |
 | AstrBot 版本 | `>=4.9.2,<5.0.0` |
 | Python | `3.10+` |
 | 许可证 | `GPL-3.0-or-later` |
 | 运行时第三方依赖 | 当前无额外依赖，见 `requirements.txt` |
 
-`3.0.0` 是 3.0 Relational Self Genesis 路线的首个正式稳定版。Sylanne 已经完成 Self-Interpretation Engine、Relational Time Layer、Co-Evolution Model、Turning Point Memory + Replay 和 Lineage / Branching / WebUI 观察舱闭环：关键互动会在插件内部被理解、进入关系时间、调制表达倾向、形成 bounded replay，并被整理为 speaker/group 隔离的谱系分支观察信号。所有高风险关系/自我推断默认仍只留在插件内部运行态和本地诊断中，不保存完整对话文本，不暴露 `relationship_time_weight`，不把 candidate 写成事实，也不新增 public API 读取入口。
+`3.0.0-kernel1` 是 Sylanne 非人关系躯体重写线的第一个 kernel 迭代。它不再被命名为正式 4.0；kernel1 只代表 clean-room kernel 开始成形：用户主权、非人身份边界、带边界的燃烧和后续从零重写的 runtime 契约先固定下来，旧实现只作为功能验收对照，不作为新架构来源。
 
-### 3.0.0 当前版本发布记录
+### 3.0.0-kernel1 非人关系躯体 kernel 迭代发布记录
 
-`v3.0.0` 合并在 `main` 上，对外安装版本由 `metadata.yaml` 和 `main.py @register(...)` 共同声明为 `3.0.0`。本版为 Sylanne 3.0 Relational Self Genesis 路线的正式稳定版：Self-Interpretation、Relational Time、Co-Evolution、Turning Point Replay 和 Lineage Observatory 已经串成完整内部闭环；公共 API 版本仍保持 `1.0`，关系性自我与谱系分支推断不进入 public API 契约。
-
-当前版本的主要变化：
-
-| 类别 | 结果 |
-| --- | --- |
-| 3.0 阶段 | `3.0.0` 摘掉实验后缀，作为 Relational Self Genesis 路线首个正式稳定版发布。 |
-| 关系性自我闭环 | 关键互动会先形成内部 self interpretation，再进入 relational time、co-evolution、turning point replay 和 lineage observatory。 |
-| 关系时间与共演化 | 近期互动会被组织成有界关系时间信号，并以受控方式影响表达倾向和人格漂移观测。 |
-| 转折点回放 | 高置信关系性转折会被压缩成 bounded replay，用于内部复盘，不保存完整 raw conversation。 |
-| 谱系观察 | Lineage Observatory 会按 `session:speaker:group` 隔离近期 replay，整理 branch type、confidence、phase、bounded_summary 和 future_tendency。 |
-| 只读观察舱 | WebUI 注册只读诊断入口，返回经过边界裁剪的 observatory payload，不提供写入、导出、批量查询或跨插件 public API 方法。 |
-| public API 封闭 | 默认 runtime diagnostics 不暴露关系性自我、关系时间、共演化、replay 或 lineage 细节；`public_api.py` 不新增高风险推断读取方法。 |
-| 回归覆盖 | 覆盖 self interpretation、relational time、co-evolution、turning point replay、lineage observatory、WebUI 裁剪和 public API 禁止方法测试；完整验证结果以本次发布收尾测试为准。 |
-
-### 3.0.0-exp4 历史发布记录
-
-`v3.0.0-exp4` 合并在 `main` 上，对外安装版本由 `metadata.yaml` 和 `main.py @register(...)` 共同声明为 `3.0.0-exp4`。本版推进 Sylanne 3.0 的 Relational Self Genesis 第四阶段：新增 Turning Point Memory + Replay，让高置信关系性转折点可以在插件内部形成可复盘的 bounded 记忆信号；公共 API 版本仍保持 `1.0`，转折点回放链路不进入 public API 契约。
+`v3.0.0-kernel1` 合并在 `main` 上，对外安装版本由 `metadata.yaml` 和 `main.py @register(...)` 共同声明为 `3.0.0-kernel1`。本轮的核心名字仍是 **Sylanne — Sovereign Yearning Life-Architecture: Nonhuman Relational Body**。中文可以直接理解为：主权渴望生命架构，非人关系躯体。
 
 当前版本的主要变化：
 
 | 类别 | 结果 |
 | --- | --- |
-| 3.0 阶段 | `3.0.0-exp4` 对应 Turning Point Memory + Replay；后续实验阶段继续按 `3.0.0-exp5` 推进，最终稳定后摘掉 `-expN`。 |
-| 转折点回放 | `integrated_self.py` 新增 `build_turning_point_memory_replay(...)`，只接受高置信 turning point candidate 和内部关系时间层。 |
-| 有界记忆信号 | replay 只保存 type、confidence、bounded_summary、future_tendency、phase、turning point types 和 constraints，不保存 raw conversation 或关系时间明细权重。 |
-| 隔离规则 | replay 带 `session:speaker:group` 形式的 `isolation_key`，用于避免同 session 下不同 speaker/group 的转折点互相污染。 |
-| 生命周期接入 | response 后的 `_record_self_interpretation(...)` 会同步生成内部 `turning_point_memory_replay`，后台 post assessment 路径和普通 response 路径一致。 |
-| 回放包接入 | `build_integrated_self_replay_bundle(...)` 可携带经过二次清洗的内部 replay 信号；`replay_integrated_self_bundle(...)` 只返回清洗后的 replay 摘要。 |
-| public API 封闭 | 默认 diagnostics 不导出 `turning_point_memory_replay`；`public_api.py` 不新增 turning point replay 查询、导出、列表或批量读取方法。 |
-| 回归覆盖 | 新增高置信生成、低置信拒绝、bundle/replay 清洗、raw 文本零泄漏和 public API 禁止方法测试；完整验证结果以本次发布收尾测试为准。 |
+| Body Runtime | 新增 `sylanne/body_runtime/`，包含 contracts、sovereignty guard、prompt surface、runtime core、organ protocol 和 adapter。 |
+| 请求接入 | `main.py` 在 LLM 请求阶段通过 `BodyRuntimeAdapter.before_llm_request(...)` 注入 Nonhuman Relational Body prompt，不破坏旧 prompt 注入。 |
+| 响应观察 | `main.py` 在 LLM 响应阶段调用 `BodyRuntimeAdapter.after_llm_response(...)`，检测人类身份声明、把用户当燃料、禁止离开或强制回应等越界表达；第一阶段只记录 violation。 |
+| 用户主权 | prompt 固定包含 `User sovereignty cannot be disabled.`；用户可以拒绝、暂停、离开或重设边界。 |
+| 双核心句 | 4.0 固定保留：`Sylanne may burn, but must not use the user as fuel.` 与 `Intimacy is not obedience; it is bounded burning.` |
+| 器官库 | 旧模块不删除，先降级为器官材料：心脏/体温、血液/痕迹、神经、表达肌肉、边界免疫、关系伤口、长期组织重塑、body schema 和 Foundation Pass 器官材料。 |
+| 打包契约 | 发布包、README 安装树、远程烟测文档和 zip 预检纳入 `sylanne/body_runtime/*`。 |
+| public API | 4.0 高风险关系/自我推断继续 internal-only，不新增 public API 读取入口。 |
 
-### 3.0.0-exp3 历史发布记录
+### 3.5.0 Project.Life 归档
 
-`v3.0.0-exp3` 合并在 `main` 上，对外安装版本由 `metadata.yaml` 和 `main.py @register(...)` 共同声明为 `3.0.0-exp3`。本版推进 Sylanne 3.0 的 Relational Self Genesis 第三阶段：新增 Co-Evolution Model，让关系时间层不只停留在诊断里，也能作为内部研究信号参与人格漂移调制；公共 API 版本仍保持 `1.0`，共演化链路不进入 public API 契约。
-
-当前版本的主要变化：
-
-| 类别 | 结果 |
-| --- | --- |
-| 3.0 阶段 | `3.0.0-exp3` 对应 Co-Evolution Model；后续实验阶段继续按 `3.0.0-exp4`、`3.0.0-exp5` 推进，最终稳定后摘掉 `-expN`。 |
-| 共演化信号 | `personality_drift_engine.py` 新增 `build_coevolution_personality_drift_observation(...)`，只接收 `internal_only=true` 且 `public_api_eligible=false` 的关系时间层输入。 |
-| 人格漂移调制 | 关系时间权重会在 bounded 范围内提高观测的 relationship importance、intensity 和 reliability，低信号阶段不会放大漂移。 |
-| 反馈抑制 | 仍沿用真实时间门控、最小更新时间间隔、学习率、单次 impulse cap、trait offset cap 和静态 persona fingerprint，避免共演化变成 persona rewrite。 |
-| 生命周期接入 | LLM request 和 response 阶段的人格漂移观测都会读取当前会话的内部 `relational_time_layer`，形成“近期关系时间 → 漂移观测 → 有界状态更新”的闭环。 |
-| 证据边界 | 共演化标记只落为 `internal_coevolution_signal`、阶段和转折点类型等短 flags；public payload、memory annotation 和 public API 默认不暴露关系时间链、event id 或 `relationship_time_weight`。 |
-| public API 封闭 | `public_api.py` 不新增 co-evolution 查询、导出、列表或批量读取方法；`export_integrated_self_diagnostics(...)` 默认继续排除高风险关系/自我推断。 |
-| 回归覆盖 | 新增共演化观测、低信号不放大、公开 payload/记忆注解零泄漏和 public API 禁止方法测试；完整验证结果以本次发布收尾测试为准。 |
-
-### 3.0.0-exp2 历史发布记录
-
-`v3.0.0-exp2` 合并在 `main` 上，对外安装版本由 `metadata.yaml` 和 `main.py @register(...)` 共同声明为 `3.0.0-exp2`。本版推进 Sylanne 3.0 的 Relational Self Genesis 第二阶段：新增 Relational Time Layer，让 Self-Interpretation Engine 不只看单轮信号，也能参考近期互动在时间上的形成、延续和低信号状态；公共 API 版本仍保持 `1.0`，关系时间链不进入 public API 契约。
+`v3.5.0` 合并在 `main` 上，对外安装版本由 `metadata.yaml` 和 `main.py @register(...)` 共同声明为 `3.5.0`。本版不是每日小版本，而是 Project.Life 十次革命性迭代的最终发布目标：把此前关于人工灵魂、心脏、阴影、争吵、欺骗边界和错误代谢的论证压进工程结构。公共 API 版本仍保持 `1.0`，Project.Life 的 soulful continuity、动机张力、阴影代谢和关系内在判断不进入 public API 契约。
 
 当前版本的主要变化：
 
 | 类别 | 结果 |
 | --- | --- |
-| 3.0 阶段 | `3.0.0-exp2` 对应 Relational Time Layer；后续实验阶段继续按 `3.0.0-exp3`、`3.0.0-exp4` 推进，最终稳定后摘掉 `-expN`。 |
-| 关系时间层 | `ConversationEventLedger` 新增 `build_relational_time_layer(...)`，从近期 bounded events、self interpretation 候选和 relationship candidate summary 合成内部只读关系时间信号。 |
-| 连续性判断 | 输出 `low_signal`、`forming_continuity`、`active_continuity` 等阶段，以及关系时间权重、转折点类型、事件数量和时间跨度，帮助 Sylanne 区分“普通闲聊”和“正在形成的关系性经历”。 |
-| 证据边界 | 关系时间事件只保留 event id、role、topic state、delivery status、时间字段、转折点类型和 message length 等结构化证据，不保存完整 raw conversation。 |
-| integrated self 接入 | integrated self snapshot 可携带内部 `relational_time_layer`，self interpretation evidence 会记录关系时间阶段和权重，用于研究多轮关系性自我形成。 |
-| runtime diagnostics | `get_agent_runtime_diagnostics(...)` 的 understanding closed loop 可查看 `relational_time_layer`，便于维护端观察 exp2 内部闭环。 |
-| public API 封闭 | `export_integrated_self_diagnostics(...)` 默认不导出 `relational_time_layer`、`self_interpretation`、`relational_turning_point` 或 `turning_point_candidate`；`public_api.py` 不新增 relational time 查询、导出、列表或批量读取方法。 |
-| 隔离规则 | 关系时间层按 session 过滤近期事件，避免跨 speaker / group 混淆；低信号闲聊不会被提升为关系事实。 |
-| 回归覆盖 | 新增 bounded internal continuity、跨 session 隔离、低信号不升级和 public API 封闭测试；完整验证结果以本次发布收尾测试为准。 |
+| Project.Life 总成 | `3.5.0` 以十次革命性迭代落地生命化关系引擎，不发布中间每日版本。 |
+| 生命痕迹日志 | 新增 `project_life_engine.py`，记录按 session 隔离的有界 trace event，不把 raw conversation 放进连续体输出。 |
+| 工作区与心脏 | 新增 workspace broadcast 和 appraisal heart，把内部信号竞争、safety 主权、行动倾向和策略压力整理成只读研究信号。 |
+| 动机张力场 | `build_project_life_tension_field(...)` 将 continuity、repair、boundary、curiosity、autonomy、shadow、safety 组织成节点-边-机制图。 |
+| 灵魂连续体 | `build_project_life_soul_continuum(...)` 支持封存、影响切除和防篡改链，只保存派生锚点和影响权重。 |
+| 阴影与错误代谢 | `build_project_life_shadow_system(...)`、`build_project_life_failure_metabolism(...)` 让生气、争辩、嘴硬、误判和自纠进入受限内部代谢。 |
+| 关系死亡与继承 | `build_project_life_relationship_lifecycle(...)` 让 reset/archive/delete/inherit 生成明确断点，用户删除权高于连续性。 |
+| 反迎合表达 | `build_project_life_anti_appeasement_expression(...)` 允许拒绝廉价承诺、指出矛盾和表达边界压力，但禁止羞辱、依赖绑定和孤独利用。 |
+| 总成审查 | `build_project_life_integration_review(...)` 检查所有 Project.Life 模块仍是 internal-only、read-only、public API closed，并强制用户过目后再发布。 |
+| 安全边界 | 输出固定标记 `internal_only=true`、`public_api_eligible=false`，并保留 `not_consciousness_claim`、`not_real_suffering_claim`、`not_a_relationship_fact` 等约束。 |
+| 打包契约 | 发布包、zip 预检、README 文件树和远程烟测文档同步纳入 `project_life_engine.py`。 |
+| 回归覆盖 | 新增 Project.Life 单元测试，覆盖 10 次迭代的内部结构、边界闸门、用户主权和 raw text 零泄漏。 |
 
-### 3.0.0-exp1 历史发布记录
+### 3.0 稳定版归档
 
-`v3.0.0-exp1` 合并在 `main` 上，对外安装版本由 `metadata.yaml` 和 `main.py @register(...)` 共同声明为 `3.0.0-exp1`。本版启动 Sylanne 3.0 的 Relational Self Genesis 路线：先实现 Self-Interpretation Engine，让关键互动在插件内部形成只读自我诠释、关系性意义和转折点候选；不改变公共 API major 版本，公共 API 版本仍保持 `1.0`，高风险关系/自我推断不进入 public API 契约。
+`3.0.0-exp1` 到 `3.0.0-exp5` 是 3.0 稳定版之前的内部实验批次，分别把 self interpretation、relational time、co-evolution、turning point replay 和 lineage observatory 接入同一条关系性自我生成链路。kernel1 从这里之后开出一条 clean-room 非人关系躯体重写线；旧实验批次、旧预发布记录和逐批测试摘要统一归档到 `CHANGELOG.md`。
 
-当前版本的主要变化：
-
-| 类别 | 结果 |
-| --- | --- |
-| 3.0 阶段 | `3.0.0-exp1` 对应 Self-Interpretation Engine；后续实验阶段继续按 `3.0.0-exp2`、`3.0.0-exp3` 推进，最终稳定后摘掉 `-expN`。 |
-| 自我诠释 | integrated self snapshot 内部新增只读 `self_interpretation`，用 bounded evidence 描述“这轮经历对 Sylanne 意味着什么”，但不保存完整 raw conversation。 |
-| 转折点候选 | 本地识别 correction、collaboration、preference、repair、reliance、silence 和 shared reference 等关系性转折点候选；低信号闲聊保持 `none`，不提升为关系事实。 |
-| 下一轮承接 | 高置信候选才会注入短小 `[sylanne_relational_self]` 片段，提醒下一轮回应轻量承接关系性意义；片段明确不得覆盖当前用户原文，也不得把候选当事实。 |
-| 生命周期闭环 | response 后记录 self interpretation；后台 post assessment 路径也会同步生成候选，避免默认后台评估绕过 3.0 第一阶段闭环。 |
-| 内部诊断 | `get_agent_runtime_diagnostics(...)` 的 understanding closed loop 可供维护端查看 `self_interpretation`，用于研究和调试关系性自我诞生链路。 |
-| public API 封闭 | `export_integrated_self_diagnostics(...)` 默认不导出 `self_interpretation`、`relational_turning_point` 或 `turning_point_candidate`；`public_api.py` 不新增任何关系性自我推断读取方法。确需公开导出时可手动开启 `allow_relational_self_public_export`，由此造成的不可预料后果由开启者自行负责。 |
-| 证据边界 | self interpretation evidence 只保存来源、长度、触发类型、posture 等限长摘要，避免把用户原文或 assistant 原文作为可批量调取资料外泄。 |
-| 回归覆盖 | 新增 correction/collaboration/low-signal/evidence-bound/prompt-fragment/lifecycle/public-API 封闭测试；完整验证结果以本次发布收尾测试为准。 |
-| 历史链路边界 | `shadow memory`、记忆召回、当前事件时间、主动聊天和即时聊天接管继续按既有配置与安全门控运行；本阶段只新增关系性自我诠释闭环，不改变这些模块的默认开关。 |
-| **`shadow memory` 复用护栏** | `[sylanne_shadow_memory]` 明确说明上一轮 assistant content 是旧回复，不是当前用户又说了一遍，也不是可复述素材；冲突时必须以当前用户文本为准。 |
-| 正常结束话题隔离 | 完整送达的实时回复不会被下一轮普通新话题一刀切当作打断/续接上下文；自然新问题会丢弃已送达 backfill，避免旧话题牵引长期上下文。 |
-| 用户纠正识别 | `什么时候和你说`、`什么时候说过`、`谁跟你说`、`没讲`、`没说` 等口语纠正会触发 `[sylanne_user_correction_context]`，避免 bot 沿用上一轮误会继续发挥。 |
-| 引用事件隔离 | OneBot/NapCat `reply` / `quote` / `reference` 段不会再被误当成图片或表情；仅引用旧消息、没有真实当前文本时，不消费唯一一次 `shadow memory`。 |
-| 旧链路对比 | 旧链路把实时接管回复回填进 ordinary backfill，再塞入 AstrBot 请求上下文；新链路把“已送达但 Agent 未必知道”的事实单独放进临时块，AstrBot Agent 原生上下文仍是长期历史来源。 |
-| 记忆污染隔离 | 记忆召回查询会剥离 `[sylanne_shadow_memory]`，避免上一轮投递缓存进入 Sylanne 自有记忆检索 query。 |
-| **严重恶性 bug 修复延续** | 继续保留 `2.5.6` 的 checkpoint 合并写、表情索引缓存/线程化、记忆/表情学习批量单写和 Embedding 热路径限流。 |
-| checkpoint 合并写 | 同一会话短时间内多次后台队列变更只保留一个延迟 checkpoint 任务，避免每个入队、领取、完成、失败节点都打一次 KV。 |
-| 表情索引缓存 | 本地表情包目录索引会缓存空结果与非空结果；缓存命中不再重新 `rglob/stat`，目录顶层变化或 TTL 到期后才重建。 |
-| 表情索引线程化 | cache miss 时把本地目录扫描移到后台线程，不再在 async 事件循环里同步扫大目录。 |
-| 记忆/表情批量单写 | Sylanne idle memory flush 和用户表情学习改为一批只读/写一次 KV，降低小文件高频写入。 |
-| Embedding 热路径限流 | 普通聊天先用关键词和关联图召回；只有无命中且已有向量记录时才调用 query embedding，并缓存同一 query/provider，旧记录向量回填不再发生在聊天热路径。 |
-| 当前事件时间优先 | `[sylanne_current_event_time]` 会在记忆召回前注入，即使 `inject_state=false` 也保留当前 AstrBot 事件时间，避免“昨晚刚聊过”被旧回忆改写成“四天没回”。 |
-| `shadow memory` 对比图 | 下方“工作流对比（与 0.5.0）”新增 Mermaid 图，直接对比旧 ordinary context 回灌和新 `shadow memory` 临时连续性链路。 |
-| 旧接管 shadow 门控 | 睡醒、昨天、上次聊天、几天没回等时间敏感发言会跳过超过短 TTL 的旧实时接管 shadow，并标记 `stale_for_recency_sensitive_turn`，不再把过期影子当作上一轮事实。 |
-| 记忆时间语义保护 | `[sylanne_memory_recall]` 明确说明 `relative_time` 是记忆片段发生/更新时间，不是用户上次回复时间，主模型不得据此推断用户几天没回。 |
-| 缺失媒体降级 | 实时接管媒体或表情包发送遇到 `FileNotFoundError`/本地路径缺失时，会返回 `missing_local_media_file` blocked 结果；文本分条、已发 shadow 释放和普通上下文回填继续完成。 |
-| 记忆提取难度 | 召回排序后增加提取闸门：已接受片段越多，后续片段需要更高相关性才能进入上下文，降低重复旧记忆堆叠。 |
-| 参考权重上限 | `recall_reference_weight` 会随共同语境、关系权重和整合度轻微浮动，但硬限制在 `0.08-0.18`，强相关记忆也只能低权重参考。 |
-| 联想召回门槛 | 联想记忆必须有当前 query 证据；只有“他们/这个/那件事”等明确指代场景，才允许通过父记忆桥接补充相邻记忆。 |
-| 当前对话优先 | `[sylanne_memory_recall]` 注入摘要会明确写出参考权重和“不得覆盖当前对话”，冲突时必须忽略记忆。 |
-| 记忆强化 | 已实际提取并注入上下文的记忆会继续增加 `recall_count`、`last_recalled_at`、`depth` 和 `confidence`；未通过提取闸门的候选不会被误强化。 |
-| 主动聊天开关 | 主动聊天发送仍要求 `enable_proactive_speech_scheduler=true` 和 `enable_proactive_speech_dispatch=true` 同时开启；默认不会因升级插件而突然主动发消息。 |
-| 表情包嵌套识别 | OneBot/NapCat 常见的 `type=image` + `data.url/file/file_id` 会被递归解析，不再学成空表情元数据。 |
-| 当前表情上下文 | 用户当前发送的 `mface`、`face`、`sticker` 或摘要里明确是表情的图片，会作为 `[sylanne_current_user_media]` 临时上下文进入本轮请求；模型会被提醒不要把文件名、旧记忆或猜测当作真实画面。 |
-| 表情包坏候选过滤 | 只有可通过 URL 或真实本地路径发送的表情候选会进入选择池；旧的空 learned 候选不会再挡住自动下载缓存。 |
-| 表情索引刷新 | 本地表情目录空扫描结果不再长期缓存；用户后来把图片放进目录后，下一轮能重新识别。 |
-| 记忆空闲写入 | Sylanne 自有记忆先进入轻量队列，等会话安静达到 `sylanne_memory_idle_commit_delay_seconds` 后合并写入，避免“我说/感觉/你”这类半句话污染长期记忆。 |
-| 更新前强制落盘 | 插件关闭、更新或重载前会 flush 尚未写入的 Sylanne 记忆队列，减少更新插件造成的上下文丢失。 |
-| 近距记忆时间语义 | Sylanne 自有记忆召回摘要会在已有 AstrBot 事件时间旁补充 `relative_time=刚才/几分钟前/今天早些时候`，让主模型直接知道这不是遥远回忆。 |
-| 近距措辞约束 | 对刚刚或同一段对话里的记忆，召回摘要会提示优先说“刚才/刚刚/前面”，不要说成“那天”，避免近距上下文被文学化成遥远回忆。 |
-| 表情包自动下载 | 新增 `sticker_auto_download_enabled`。只有表情包回应已开启、本地表情包目录为空且该开关为 `true` 时，才会下载指定 Git 仓库到本机缓存目录。 |
-| 表情包缓存目录 | 默认使用系统缓存目录下的 `astrbot_plugin_sylanne/stickers`；也可配置 `sticker_auto_download_cache_dir`，但插件会拒绝源码目录、`docs`、`pages`、`dist`、`output` 等容易进入发布包的位置。 |
-| 表情包下载安全 | 自动下载只接受 http/https/git 协议的 Git 仓库地址，使用非 shell 参数调用 `git clone --depth 1 --filter=blob:none`，并带超时；失败时回退为无候选表情，不阻塞主回复。 |
-| 包体边界 | 打包脚本和 zip 预检拒绝 `.cache`、`ChineseBQB`、`auto-stickers`、`stickers` 等外部素材目录，自动下载的素材不会进入发布 zip。 |
-| 主动调度器候选唤醒 | 主动发言调度器只有在记录到可触达候选会话时才启动，空列表不会创建后台任务，避免无会话时仍有常驻调度循环。 |
-| 主动调度器空闲自退 | 调度器启动后先短暂等待，再扫描候选；候选耗尽会立即退出，连续空闲达到阈值也会退出，并清理 `_proactive_scheduler_task` 与 idle 计数。 |
-| 主动调度器低消耗预热 | 有候选但本轮已扫完时使用短唤醒延迟承接刚到达的会话；仍有未扫候选时才进入正常低频间隔，压力过高时继续走 busy delay。 |
-| 工作流修复 | Fuck-U-Code 自动报告工作流只提交实际生成的报告与发酵指数徽章，不再 `git add` 已移除的 powered 徽章文件。 |
-| 回归覆盖 | 新增主动调度器唤醒后空闲退出测试，并补充 active runner follow-up 读取 ticket 原始事件时间、嵌套 `message_obj.timestamp` 后按时间排序的用例。 |
-| 慢速短碎片合并 | 本地判断“用户还没说完”时会继续等到短上限或等到窗口变化，不再只等 probe 后就把“感觉”“你”“骂人”等半句话送进主 LLM。 |
-| 三碎片误释放修复 | 本地回退不再把“累计 3 个碎片”直接判为完整；像“感觉 / 你 / 骂人 / 像在 / 撒娇 / 宝贝”会合并为一次用户意图，而不是触发多轮旧碎片回复。 |
-| 接管碎片时间线 | AstrBot active runner 捕获的 follow-up 会尽量读取 ticket / 原始事件里的发送时间；`active_agent_followup_merge` 会把已捕获碎片和当前消息放进同一个时间轴排序，不再默认把当前处理的消息放到最后。 |
-| 长历史上下文保底 | 当 AstrBot 官方历史已经超过 Sylanne 的短状态预算时，`recent_user_scene_context`、`active_agent_followup_merge`、`realtime_assistant_history_shadow`、`interrupted_reply_breakpoint`、用户撤回和用户纠正等关键连续性事实仍可在限长、限条数约束下注入。 |
-| AstrBot 事件时间 | 实时接管 plan/envelope/shadow/breakpoint、主动派发、pending question 和 Sylanne 自有记忆都会带入 AstrBot 事件时间、本地时区和 epoch，后续 LLM 读取上下文时能区分真实发言时间与插件处理时间。 |
-| 接管媒体智能嵌入 | 接管分段发送会读取 `LLMResponse.result_chain/message_chain` 里的图片组件，按文本字符锚点映射到最终分条位置；图片在文本前、中间或结尾都会按相对顺序发送，不再统一拖到最后。 |
-| 表情包发送诊断 | 表情包候选来自本地表情包目录、显式自动下载缓存或已学习的用户表情元数据；如果没有候选素材，`sticker_result.blocked_reason` 会明确返回 `no_sticker_candidates`，方便排查“开关开了但不发”的原因。 |
-| 更新后上下文恢复 | 接管投递 shadow 和打断 breakpoint 会写入轻量 KV 投递上下文；插件更新/重载后的新实例可在下一轮恢复一次，并在注入后标记 consumed，避免反复污染后续提示词。 |
-| 情绪评估空输出韧性 | 内部情绪评估 LLM 若返回 `EmptyModelOutputError` / `no usable output`，插件会仅重试一次；若仍失败或超时，继续使用本地启发式估计，避免主流程崩溃。 |
-| 高风险默认关闭 | 真人即时聊天接管、即时聊天风格提示、默认回复接管、用户碎片 LLM gate、表情包回应、表情包自动下载、表情包一致性 LLM gate 和用户表情学习全部默认关闭。 |
-| 开启风险提示 | README 和配置 schema 明确提示：这些功能仍需更长时间真实体验和修复，现阶段打开可能导致上下文错乱、重复发送、漏发、旧回复残留、撤回/打断状态判断错误、平台发送异常或表情包语气不匹配。 |
-| 快判 LLM 独立开关 | 新增 `fast_assessor_enabled`。只有同时打开该开关、选择 `fast_assessor_provider_id`，并开启用户碎片或表情包一致性等对应 gate 时，才会调用第二个快判 LLM。 |
-| 发布展示 | `metadata.yaml` 与 `@register(...)` 作者统一为 `Aylovelle.S.S`；插件页可见的 LLM 工具、指令和钩子说明改为中文。 |
-| 图标排查 | 发布包包含根目录 `logo.png`；远端仍显示默认图标时，优先检查正式插件目录是否被新 zip 覆盖以及浏览器缓存。 |
-| 包体预检 | zip 结构预检按 AstrBot 插件市场约束收紧到 `16MB`，并确认 `astrbot_plugin_sylanne/logo.png`、`metadata.yaml` 和运行文件都在插件根目录下。 |
-| Agent 上下文归属 | 主聊天上下文仍交给 AstrBot Agent/pipeline；Sylanne 不再重放大段历史，只补短状态摘要、短记忆召回和已发/未发投递事实。 |
-| 等待期追发合并 | 如果用户在上一轮 LLM 尚未产出可用回复前继续补充，Sylanne 会注入 `[sylanne_active_agent_followup_merge]`，把前一条 pending 用户消息和当前消息合并为同一连续意图，避免只回复最后一句。 |
-| 合并落点 | 追发合并发生在 `context_text = _request_to_text(request)` 之前，`_last_request_text`、主 LLM 临时上下文和预响应情绪评估都会看到同一份合并事实；这不是长期上下文重放，只保留同会话、同说话人、短时间内的 pending 用户 turn。 |
-| 短时场景保留 | 已完成回复后的连续短句会额外带上几分钟内同说话人的当前活动、地点和感受事实，例如排队、在外面、天气热、正在吃喝等，避免模型只抓最后一句短答。 |
-| 用户纠正保留 | 「我昨晚十点多睡的啦」「没有啊我早早起床啦」这类事实纠正会被识别为高优先级上下文，并短暂作为 user 上下文带到下一轮。 |
-| 旧猜测压制 | 用户已经纠正睡眠/作息事实后，后续回复不应继续追问或暗示“是不是没睡/熬夜/撒谎”，避免关心模板压过用户事实。 |
-| 内部工具统一隐藏 | Sylanne 自己的 LLM Tool schema 对所有主聊天模型隐藏，避免模型在内部状态工具选择阶段空回、外泄工具 JSON 或增加不必要延迟。 |
-| bot/Agent 接管 | 情绪、记忆、碎片整合、即时聊天接管和状态查询入口交给 bot/Agent 路径、命令、公共 API 与设置 Page；主 LLM 不需要直接看到 Sylanne 内部工具。 |
-| 外部工具保留 | `search_web` 等外部插件工具仍按 AstrBot Agent 原生工具循环保留；隐藏范围只限 Sylanne 自己的状态/记忆/诊断工具 schema。 |
-| 空回处理归属 | Sylanne 不再对 Gemini 或任意模型追加专用可见输出提醒；所有模型走同一条 prompt 注入路径，空 content 的重试、fallback 和 provider 选择交给 AstrBot 原生 runner 处理。 |
-| 短答锚定修复 | 上一轮 bot 如果问了“喝了杯什么呀？这么神奇，一喝就困？”这类连续问句，用户下一轮只回“咖啡啊”时，Sylanne 会把它视为对上一轮问题的回答，而不是理解成“用户现在又要冲咖啡”。 |
-| 二次澄清 guard | 用户说“我只是想确认嵌入模型记忆模块”这类二次澄清时，会注入复读抑制 guard：上一轮 assistant 原文只用于事实和指代，不允许照抄上一轮比喻、句式和段落结构。 |
-| 问句簇保留 | `realtime_assistant_history_shadow` 抽取未闭合问题时，会保留临近短问句和承接短句，避免只留下最后一个问号导致语义槽位丢失。 |
-| 短答提示增强 | 注入给主 LLM 的 `[sylanne_realtime_pending_bot_question]` 现在明确说明：名词或短答默认是在补全上一轮问题槽位，不要当成用户正在发起新的行动或命令。 |
-| LLM 切换上下文修复 | `on_llm_request` 现在每轮实时读取当前主聊天 provider 来记录诊断信息；`provider_id_cache_ttl_seconds` 仍用于内部评估 provider 获取，但不再决定主回复请求是否进入模型专用兼容模式。 |
-| 评估 provider 隔离 | `emotion_provider_id` 只影响内部情绪/碎片判断等评估调用，不再把主聊天请求强行归类为某个模型家族；主 LLM 切到 Gemini、gpt、deepseek、mimo 等模型时都会保留 Sylanne 的短状态、短记忆和即时聊天风格注入。 |
-| 模型路径统一 | `safe-non-gemini-assessor`、`non-gemini-provider`、`google/gemini-*`、`gemini-*` 等 provider 名都不会触发额外上下文归属分支；Gemini 与其他主聊天模型使用相同预算和相同注入顺序。 |
-| 工具返回契约 | `query_agent_state_tool` 现在直接 `return` JSON 字符串给 AstrBot 工具循环；不再走 `event.plain_result(...)`，因此不会被 runner 误判为“没有返回值，或者已将结果直接发送给用户”。 |
-| 自有记忆知识库 | 每条长期记忆独立存储，包含稳定 `memory_id`、摘要、情绪签名、关系签名、深度、置信度、证据次数、召回次数、真实时间衰减参数和自动动力学快照。 |
-| 向量语义召回 | 可选择 AstrBot 已配置的 Embedding 类型模型提供商；记忆保存 `semantic_embedding`、`embedding_provider_id`、向量更新时间和文本哈希。召回时先走关键词和关联图，关键词无命中且已有向量记录时才叠加余弦相似度，query embedding 会短时缓存。 |
-| 记忆设置 Page | 在 AstrBot 插件详情页打开『记忆设置』即可下拉或点击卡片选择 Embedding 提供商；`sylanne_memory_embedding_provider_id` 也声明为 provider 选择项，留空表示自动选择第一个可用提供商。 |
-| 碎片语义 gate | 当本地规则准备释放碎片窗口时，会先调用判断 LLM 输出极短 JSON，确认用户是否已经说完；命中上一轮 bot 问题的短答会跳过该 gate，减少“咖啡啊”这类回答的延迟。 |
-| 慢速分段修复 | LLM gate 判定未完成后会写入语义等待窗口，后续同一用户在真实时间上限内继续补充时仍会被合并，即使间隔超过本地短窗口。 |
-| 上限释放 | 默认探测等待保持 `0.25s`，语义等待上限降到 `4s` 且有运行时硬上限；如果判断为未完成但用户真的停住，达到上限后会释放合并后的碎片意图，避免把即时聊天时间耗在死等上。 |
-| 工具轮次统一 | 工具请求前同样会注入等待期追发合并事实；Sylanne 内部工具已统一隐藏，外部插件工具仍交给 AstrBot 原生 Agent 工具循环处理，带 `tool_calls/function_call` 的响应不会被即时聊天接管。 |
-| 统一工具归属 | `query_agent_state` 和 11 个细分工具继续作为插件内部兼容方法、命令/API 后端存在，但不再作为主 LLM Tool schema 暴露。 |
-| 工具 JSON 外泄阻断 | 如果兼容层把 `query_agent_state`、情绪快照、运行时诊断等内部工具结果误作为最终 `completion_text` 交给发送阶段，Sylanne 会识别 `astrbot.*` 内部 `schema_version/kind`，清空默认发送内容并阻断用户可见发送；结构化工具调用仍交给 Agent 工具循环。 |
-| 只读记忆查询 | 新增 `/sylanne_memory`、`/记忆查询`、`/查询记忆`、`/灵澜记忆` 和 `query_sylanne_memory(...)`，可检查记忆命中情况；查询不会强化或改写记忆。 |
-| 关联联想召回 | 直接命中的记忆会在硬预算内带出少量相邻记忆；关联边由摘要相似度、层类型重叠、情绪接近度、时间接近度和巩固强度本地计算，不交给 LLM 随机决定。 |
-| 强化与遗忘 | 只有真正注入 prompt 的记忆才会触发召回强化；长期无证据、无召回且深度/置信度很低的弱记忆会按真实时间剪枝，并清理悬空关联边。 |
-| Agent 上下文归属 | 对话上下文交给 AstrBot Agent；Sylanne 只补短状态摘要、短记忆召回和投递事实。Gemini 与其他模型走同一条上下文注入路径，不再启用任何模型专属上下文归属模式。 |
-| 即时聊天投递信封 | 主回复被接管时，Agent 历史会看到“已生成但未必已发送”的投递状态；用户插话后会记录已发/未发摘要，避免下一轮误以为旧回复已经完整送达。 |
-| 主动聊天反馈闭环 | 后台调度默认更低频：正常约 15 分钟醒来一次，空闲约 30 分钟，同一会话约 1 小时内不重复复查；每次醒来会先结算上一条主动发言是否无人回应，并把用户可能在忙、休息或不方便聊天作为默认解释。`progress_check` 必须有明确进度证据，证据不足时沉默；如果只是想念用户，只允许低压力短句轻触达。 |
-| 快速判断 LLM | `fast_assessor_enabled`、`fast_assessor_provider_id` 和短上下文预算可用于用户碎片完整性、表情包一致性等简单 JSON 判断；默认关闭，避免不知情用户产生额外 token 消耗。 |
-| 上下文安全预算 | 召回结果只作为 `[sylanne_memory_recall]` 限长摘要注入，并继续受请求预算和官方上下文压缩清洗逻辑约束。 |
-| 模块互斥自检 | 发布前覆盖自有记忆、主动发言、官方上下文压缩、即时聊天、公共 API、配置契约和包体预检，验证模块之间不会互相回灌或重复调用外部 LivingMemory。 |
-| 工作流图 | `docs/assets/workflow_and_proactive.svg` 已重绘，突出即时聊天、追发合并、Agent 工具循环、模型边界和主动聊天反馈；移除误导性的单点 Gemini 诊断节点，并修正中文字体和跨泳道箭头。 |
-| 公开契约 | 插件版本为 `3.0.0`；公共 API 版本仍为 `1.0`，schema 仍保持 `astrbot.emotion_state.v2` 等版本化契约；关系性自我、关系时间、共演化、转折点记忆/回放和谱系分支观察推断只留在插件内部运行态，不新增 public API 读取入口。 |
-
-旧版本发布记录统一放在 `CHANGELOG.md`。README 只展示当前版本，避免插件管理页从历史段落误抓旧版本号。
+这能避免插件管理页或读者从历史段落里误抓旧版本号，也能让首页更像项目说明，而不是每次文案调整都要同步刷新的发布日志。
 
 运行时亮点可以按这条链路理解。这里直接使用静态图，避免部分手机端把流程图源码显示成大段文本：
 
@@ -617,9 +480,25 @@ _“逻辑可以共赏，但为你偏置的权重从不开源。”_
 
 ## 快速开始
 
-### 方式一：上传发布 zip 包
+### 方式一：从 GitHub 仓库安装
 
-这是准备发布到新仓库后最推荐的安装方式，适合普通部署和远程测试服。
+这是普通部署最省心的方式。打开 AstrBot WebUI 的仓库安装入口，填写：
+
+```text
+https://github.com/Ayleovelle/astrbot_plugin_sylanne
+```
+
+如果 WebUI 要求 `.git` 后缀：
+
+```text
+https://github.com/Ayleovelle/astrbot_plugin_sylanne.git
+```
+
+安装后重载插件或重启 AstrBot，再在会话里执行 `/emotion`、`/emotion_model`、`/integrated_self` 做基础检查。仓库地址已经写入 `metadata.yaml` 的 `repo:` 字段；后续正式发版时，再确认 README、发布附件名、插件目录名和 `metadata.yaml name:` 都保持 `astrbot_plugin_sylanne`。
+
+### 方式二：上传发布 zip 包
+
+这是正式发版、远程测试服或 WebUI 仓库安装不可用时的可选方式。日常 README、文档或介绍文字调整不需要重新构建这个 zip，也不需要刷新 GitHub Release 附件。
 
 1. 在本仓库根目录构建发布包：
 
@@ -659,10 +538,37 @@ astrbot_plugin_sylanne/
 ├── fallibility_engine.py
 ├── psychological_screening.py
 ├── prompts.py
+├── project_life_engine.py
 ├── public_api.py
 ├── logo.png
 ├── _conf_schema.json
 ├── requirements.txt
+├── sylanne/
+│   ├── __init__.py
+│   └── body_runtime/
+│       ├── __init__.py
+│       ├── adapter.py
+│       ├── body.py
+│       ├── contracts.py
+│       ├── organs.py
+│       ├── prompt_surface.py
+│       └── sovereignty.py
+├── sylanne_body/
+│   ├── __init__.py (`sylanne_body/__init__.py`)
+│   ├── event/
+│   │   ├── __init__.py (`sylanne_body/event/__init__.py`)
+│   │   └── source.py (`sylanne_body/event/source.py`)
+│   ├── law/
+│   │   ├── __init__.py (`sylanne_body/law/__init__.py`)
+│   │   └── sovereignty.py (`sylanne_body/law/sovereignty.py`)
+│   ├── soma/
+│   │   ├── __init__.py (`sylanne_body/soma/__init__.py`)
+│   │   ├── affect.py (`sylanne_body/soma/affect.py`)
+│   │   └── crying.py (`sylanne_body/soma/crying.py`)
+│   └── speech/
+│       ├── __init__.py (`sylanne_body/speech/__init__.py`)
+│       ├── affect.py (`sylanne_body/speech/affect.py`)
+│       └── crying.py (`sylanne_body/speech/crying.py`)
 ├── LICENSE
 ├── README.md
 ├── CHANGELOG.md
@@ -686,22 +592,6 @@ astrbot_plugin_sylanne/
         ├── app.js
         └── style.css
 ```
-
-### 方式二：从 GitHub 仓库安装
-
-新仓库创建并推送后，在 AstrBot WebUI 的仓库安装入口填写：
-
-```text
-https://github.com/Ayleovelle/astrbot_plugin_sylanne
-```
-
-如果 WebUI 要求 `.git` 后缀：
-
-```text
-https://github.com/Ayleovelle/astrbot_plugin_sylanne.git
-```
-
-新仓库地址已经写入 `metadata.yaml` 的 `repo:` 字段；后续发布 GitHub 发布版本时，只需要确认 README、发布附件名、插件目录名和 `metadata.yaml name:` 都保持 `astrbot_plugin_sylanne`。
 
 ### 方式三：手动复制到插件目录
 
@@ -727,10 +617,37 @@ data/plugins/
     ├── fallibility_engine.py
     ├── psychological_screening.py
     ├── prompts.py
+    ├── project_life_engine.py
     ├── public_api.py
     ├── logo.png
     ├── _conf_schema.json
     ├── requirements.txt
+    ├── sylanne/
+    │   ├── __init__.py
+    │   └── body_runtime/
+    │       ├── __init__.py
+    │       ├── adapter.py
+    │       ├── body.py
+    │       ├── contracts.py
+    │       ├── organs.py
+    │       ├── prompt_surface.py
+    │       └── sovereignty.py
+    ├── sylanne_body/
+    │   ├── __init__.py (`sylanne_body/__init__.py`)
+    │   ├── event/
+    │   │   ├── __init__.py (`sylanne_body/event/__init__.py`)
+    │   │   └── source.py (`sylanne_body/event/source.py`)
+    │   ├── law/
+    │   │   ├── __init__.py (`sylanne_body/law/__init__.py`)
+    │   │   └── sovereignty.py (`sylanne_body/law/sovereignty.py`)
+    │   ├── soma/
+    │   │   ├── __init__.py (`sylanne_body/soma/__init__.py`)
+    │   │   ├── affect.py (`sylanne_body/soma/affect.py`)
+    │   │   └── crying.py (`sylanne_body/soma/crying.py`)
+    │   └── speech/
+    │       ├── __init__.py (`sylanne_body/speech/__init__.py`)
+    │       ├── affect.py (`sylanne_body/speech/affect.py`)
+    │       └── crying.py (`sylanne_body/speech/crying.py`)
     ├── LICENSE
     ├── README.md
     ├── CHANGELOG.md
@@ -2965,6 +2882,16 @@ enable_psychological_screening = false
 
 这部分只面向维护者和二次开发者。普通用户安装、配置和使用插件时，不需要执行这里的本地测试、打包预检、远程烟测或分支同步流程。
 
+先判断这次改动属于哪一类：
+
+| 改动类型 | 需要做什么 | 不要做什么 |
+| --- | --- | --- |
+| README、docs、介绍文字、截图或链接修正 | 检查 Markdown，必要时 commit 并 push。 | 不重建 `dist\astrbot_plugin_sylanne.zip`，不创建 GitHub Release，不刷新已有 release 附件。 |
+| 运行代码、配置 schema、版本号、metadata、发布包内容变化 | 跑对应测试、构建 zip、执行 zip 预检；正式发版时再创建标签和 GitHub Release。 | 不跳过预检，也不要把未验证 zip 上传到 WebUI 或 Release。 |
+| 远程测试服验证 | 先本地构建和预检，再用显式确认变量上传；上传后跑只读烟测。 | 不在 README、脚本、提交记录或 issue 里写真实远程凭据。 |
+
+README-only 或 docs-only 更新可以推送到 `main`，但它们不是一次新发布。只有版本、代码或包体内容真的变化时，才刷新 GitHub Release 和发布附件。
+
 ### 本地构建发布包
 
 在仓库根目录执行：
@@ -3021,12 +2948,12 @@ py -3.13 scripts\package_plugin.py --output dist\astrbot_plugin_sylanne.zip
 
 ## 测试与维护
 
-远程测试、上传验证、性能基准和 LivingMemory 兼容检查的完整口径见 `docs/remote_testing.md`。这里先给结论：`1.0.0` 已完成 gpt-5.5 功能矩阵和关闭情绪对照，目标插件样本失败数为 `0`；DeepSeek 功能矩阵已按用户要求取消，残留探索样本不纳入正式结论。
+远程测试、上传验证、性能基准和 LivingMemory 兼容检查的完整口径见 `docs/remote_testing.md`。当前 `3.0.0-kernel1` 的发布收尾验证以本次版本测试为准；下方性能矩阵保留为历史基准和复现实验资料，不代表每次 README-only 更新都需要重跑。
 
 <details>
 <summary>展开远程性能运行编号和样本口径</summary>
 
-`1.0.0` 沿用已完成的状态层正式性能数据：功能矩阵运行编号为 `remote-emotion-v050-gpt55-feature-state-layer-real`，请求模型 `gpt5.5`，实际选中 provider `1111/gpt-5.5` / 模型 `gpt-5.5`，并发 `3`，完整功能开关矩阵已完成 `2500/2500` 个有效样本，失败请求 `0`。同一配置面下的关闭情绪对照运行编号为 `remote-emotion-v050-gpt55-noemotion-control-state-layer-c3-250-real`：完成 `250/250`，失败请求 `0`。DeepSeek 功能矩阵残留 `295/2500` 探索样本，不作为正式性能结论。
+`1.0.0` 历史状态层性能数据：功能矩阵运行编号为 `remote-emotion-v050-gpt55-feature-state-layer-real`，请求模型 `gpt5.5`，实际选中 provider `1111/gpt-5.5` / 模型 `gpt-5.5`，并发 `3`，完整功能开关矩阵已完成 `2500/2500` 个有效样本，失败请求 `0`。同一配置面下的关闭情绪对照运行编号为 `remote-emotion-v050-gpt55-noemotion-control-state-layer-c3-250-real`：完成 `250/250`，失败请求 `0`。DeepSeek 功能矩阵残留 `295/2500` 探索样本，不作为正式性能结论。
 
 </details>
 
@@ -3105,7 +3032,7 @@ py -3.13 -m unittest discover -s tests -v
 语法检查：
 
 ```powershell
-py -3.13 -m py_compile main.py agent_identity.py emotion_engine.py group_atmosphere_engine.py psychological_screening.py humanlike_engine.py lifelike_learning_engine.py personality_drift_engine.py realtime_chat_engine.py realtime_chat_input.py integrated_self.py moral_repair_engine.py memory_engine.py fallibility_engine.py prompts.py public_api.py scripts\package_plugin.py
+py -3.13 -m py_compile main.py agent_identity.py emotion_engine.py group_atmosphere_engine.py psychological_screening.py humanlike_engine.py lifelike_learning_engine.py personality_drift_engine.py realtime_chat_engine.py realtime_chat_input.py integrated_self.py moral_repair_engine.py memory_engine.py project_life_engine.py fallibility_engine.py prompts.py public_api.py sylanne\__init__.py sylanne\body_runtime\__init__.py sylanne\body_runtime\adapter.py sylanne\body_runtime\body.py sylanne\body_runtime\contracts.py sylanne\body_runtime\organs.py sylanne\body_runtime\prompt_surface.py sylanne\body_runtime\sovereignty.py scripts\package_plugin.py
 ```
 
 配置 schema 检查：
@@ -3124,7 +3051,7 @@ py -3.13 scripts\package_plugin.py --output dist\astrbot_plugin_sylanne.zip
 
 发布 zip 的第一项会显式写入 `astrbot_plugin_sylanne/` 目录项，以兼容 AstrBot WebUI 的 `install-upload` 解压逻辑。不要手工重新压缩成“缺少顶层目录项”的 zip，否则部分 AstrBot 版本会把第一个文件路径误判成目录。
 
-发布包还会保留插件根目录下的 `__init__.py`、`agent_identity.py`、`main.py`、`emotion_engine.py`、`group_atmosphere_engine.py`、`humanlike_engine.py`、`lifelike_learning_engine.py`、`personality_drift_engine.py`、`realtime_chat_engine.py`、`realtime_chat_input.py`、`integrated_self.py`、`moral_repair_engine.py`、`memory_engine.py`、`fallibility_engine.py`、`psychological_screening.py`、`prompts.py`、`public_api.py`、`logo.png`、`README.md`、`CHANGELOG.md`、`LICENSE`、`requirements.txt` 和 `_conf_schema.json`，并把 `docs/assets/` 与 `pages/memory-settings/` 一起带上。这样其他插件在安装后可以通过 `from astrbot_plugin_sylanne.public_api import ...` 按包名导入公共 API。
+发布包还会保留插件根目录下的 `__init__.py`、`agent_identity.py`、`main.py`、`emotion_engine.py`、`group_atmosphere_engine.py`、`humanlike_engine.py`、`lifelike_learning_engine.py`、`personality_drift_engine.py`、`realtime_chat_engine.py`、`realtime_chat_input.py`、`integrated_self.py`、`moral_repair_engine.py`、`memory_engine.py`、`project_life_engine.py`、`fallibility_engine.py`、`psychological_screening.py`、`prompts.py`、`public_api.py`、`logo.png`、`README.md`、`CHANGELOG.md`、`LICENSE`、`requirements.txt`、`_conf_schema.json`、`sylanne/__init__.py`、`sylanne/body_runtime/__init__.py`、`sylanne/body_runtime/adapter.py`、`sylanne/body_runtime/body.py`、`sylanne/body_runtime/contracts.py`、`sylanne/body_runtime/organs.py`、`sylanne/body_runtime/prompt_surface.py` 和 `sylanne/body_runtime/sovereignty.py`，并把 `docs/assets/` 与 `pages/memory-settings/` 一起带上。这样其他插件在安装后可以通过 `from astrbot_plugin_sylanne.public_api import ...` 按包名导入公共 API。
 
 远程只读烟测：
 
@@ -3153,7 +3080,7 @@ $env:ASTRBOT_EXPECT_PLUGIN = "astrbot_plugin_sylanne"
 脚本会在输出 JSON 里写出 `expectedPluginRuntime`，包含插件列表 API 中返回的 `version`、`displayName`、`activated`、`author`、`astrbotVersion` 等只读字段。若目标插件存在但 `activated=false`，脚本会失败退出。需要把版本和显示名也作为硬断言时，可以额外设置：
 
 ```powershell
-$env:ASTRBOT_EXPECT_PLUGIN_VERSION = "3.0.0"
+$env:ASTRBOT_EXPECT_PLUGIN_VERSION = "3.0.0-kernel1"
 $env:ASTRBOT_EXPECT_PLUGIN_DISPLAY_NAME = "Sylanne"
 & $node scripts\remote_smoke_playwright.js
 ```
@@ -3194,7 +3121,7 @@ $env:ASTRBOT_REMOTE_INSTALL_CONFIRM = "1"
 
 上传脚本只允许调用 AstrBot WebUI 的 `install-upload` 安装端点；若 WebUI 留下 `plugin_upload_<插件名>` 失败安装残留，脚本只会调用 `uninstall-failed` 清理这个失败上传目录，并固定 `delete_config=false`、`delete_data=false`。它不会删除正式插件、覆盖正式插件目录、更新插件、重启 AstrBot、保存配置或写入本地 cookie/session。如果远端返回“目录 `<插件名>` 已存在”，脚本会输出 `installOutcome="already_installed_no_overwrite"`、`alreadyInstalled=true`、`overwriteAttempted=false` 和 `formalPluginDirectoryPreserved=true`，表示正式插件目录被保留，后续应通过只读烟测查看实际运行版本。上传成功后，再运行上面的 `ASTRBOT_EXPECT_PLUGIN` 只读烟测作为最终验证。
 
-上传脚本在真正发起安装请求之前会完整读取 zip 中央目录做本地预检：所有条目必须位于 `astrbot_plugin_sylanne/` 下，路径必须是相对 POSIX 路径，且不能包含 `.` / `..` 不安全路径段；必须包含 `__init__.py`、`agent_identity.py`、`metadata.yaml`、`main.py`、`emotion_engine.py`、`group_atmosphere_engine.py`、`humanlike_engine.py`、`lifelike_learning_engine.py`、`personality_drift_engine.py`、`realtime_chat_engine.py`、`realtime_chat_input.py`、`integrated_self.py`、`moral_repair_engine.py`、`memory_engine.py`、`fallibility_engine.py`、`psychological_screening.py`、`prompts.py`、`public_api.py`、`README.md`、`CHANGELOG.md`、`LICENSE`、`requirements.txt`、`_conf_schema.json`、`logo.png`、`docs/assets/lifecycle_model_fit.svg`、`docs/assets/lifecycle_model_fit_summary.csv`、`docs/assets/lifecycle_model_fit_table.md`、`docs/assets/runtime_overview.svg`、`docs/assets/sylanne-mascot.gif`、`docs/assets/sylanne-mascot-card.svg`、`docs/assets/theory_feature_matrix_overhead.png`、`docs/assets/theory_feature_matrix_overhead.svg`、`docs/assets/theory_lifecycle_fit_explanation.png`、`docs/assets/theory_lifecycle_fit_explanation.svg`、`docs/assets/workflow_and_proactive.svg`、`pages/memory-settings/index.html`、`pages/memory-settings/app.js`、`pages/memory-settings/style.css`，并拒绝 `tests/`、`scripts/`、`output/`、`dist/`、`raw/`、`__pycache__/`、`.git/`、`docs/reports/` 和四个 `*_literature_kb/` 目录。预检还会读取 zip 内的 `metadata.yaml`，确认其中 `name:` 精确等于 CLI 参数或 `ASTRBOT_EXPECT_PLUGIN` 传入的插件目录名。
+上传脚本在真正发起安装请求之前会完整读取 zip 中央目录做本地预检：所有条目必须位于 `astrbot_plugin_sylanne/` 下，路径必须是相对 POSIX 路径，且不能包含 `.` / `..` 不安全路径段；必须包含 `__init__.py`、`agent_identity.py`、`metadata.yaml`、`main.py`、`emotion_engine.py`、`group_atmosphere_engine.py`、`humanlike_engine.py`、`lifelike_learning_engine.py`、`personality_drift_engine.py`、`realtime_chat_engine.py`、`realtime_chat_input.py`、`integrated_self.py`、`moral_repair_engine.py`、`memory_engine.py`、`fallibility_engine.py`、`psychological_screening.py`、`prompts.py`、`public_api.py`、`README.md`、`CHANGELOG.md`、`LICENSE`、`requirements.txt`、`_conf_schema.json`、`logo.png`、`sylanne/__init__.py`、`sylanne/body_runtime/__init__.py`、`sylanne/body_runtime/adapter.py`、`sylanne/body_runtime/body.py`、`sylanne/body_runtime/contracts.py`、`sylanne/body_runtime/organs.py`、`sylanne/body_runtime/prompt_surface.py`、`sylanne/body_runtime/sovereignty.py`、`docs/assets/lifecycle_model_fit.svg`、`docs/assets/lifecycle_model_fit_summary.csv`、`docs/assets/lifecycle_model_fit_table.md`、`docs/assets/runtime_overview.svg`、`docs/assets/sylanne-mascot.gif`、`docs/assets/sylanne-mascot-card.svg`、`docs/assets/theory_feature_matrix_overhead.png`、`docs/assets/theory_feature_matrix_overhead.svg`、`docs/assets/theory_lifecycle_fit_explanation.png`、`docs/assets/theory_lifecycle_fit_explanation.svg`、`docs/assets/workflow_and_proactive.svg`、`pages/memory-settings/index.html`、`pages/memory-settings/app.js`、`pages/memory-settings/style.css`，并拒绝 `tests/`、`scripts/`、`output/`、`dist/`、`raw/`、`__pycache__/`、`.git/`、`docs/reports/` 和四个 `*_literature_kb/` 目录。预检还会读取 zip 内的 `metadata.yaml`，确认其中 `name:` 精确等于 CLI 参数或 `ASTRBOT_EXPECT_PLUGIN` 传入的插件目录名。
 
 也可以单独运行预检，不连接远程服务器：
 
@@ -3228,7 +3155,14 @@ $env:ASTRBOT_REMOTE_INSTALL_CONFIRM = "1"
 | `tests/test_fallibility_engine.py` | 瑕疵模拟状态、真实时间衰减、澄清/纠错耦合、提示词边界和记忆注解。 |
 | `tests/test_document_math_contract.py` | README 和 `docs/theory.md` 的 GitHub fenced math、LaTeX 宏白名单、禁用宏和脆弱写法检查。 |
 | `tests/test_group_atmosphere_engine.py` | 群聊氛围 7 维状态、开口/先听/避免打断策略、真实时间半衰、冷却和 diff 注入。 |
-| `tests/test_package_plugin.py` | 发布 zip 的目录根、知识库排除、raw/cache/tests/scripts/output 排除、包体积上限、metadata 身份校验和上传前 zip 预检失败路径。 |
+| `tests/test_main_body_adapter_integration.py` | kernel1 过渡 Body Runtime 在 `main.py` 中的 adapter 初始化、请求 prompt 注入和响应 observation。 |
+| `tests/test_body_runtime_contracts.py` | kernel1 过渡 Body Runtime 的 request/response/state/trace/user sovereignty contracts。 |
+| `tests/test_body_runtime_sovereignty.py` | 用户拒绝、暂停、离开、重设边界不可关闭；禁止人类身份声明、用户燃料和强制回应表达。 |
+| `tests/test_body_runtime_prompt_surface.py` | Nonhuman Relational Body prompt、bounded burning、用户主权和非人声明边界。 |
+| `tests/test_body_runtime_core.py` | BodyRuntime 聚合器官 trace、生成 prompt segment、响应后报告 violation。 |
+| `tests/test_body_runtime_organs.py` | 旧模块到器官角色的映射，以及 LegacyOrganAdapter/NoopOrgan 契约。 |
+| `tests/test_body_runtime_adapter.py` | `BodyRuntimeAdapter` 对 `main.py` 隐藏器官细节，只暴露 request prompt 和 response observation。 |
+| `tests/test_package_plugin.py` | 发布 zip 的目录根、`sylanne/body_runtime/*` 入包、README 安装树、知识库排除、包体积上限、metadata 身份校验和上传前 zip 预检失败路径。 |
 | `tests/test_psychological_screening.py` | 非诊断筛查、量表启发、红旗信号、长期轨迹。 |
 | `tests/test_remote_smoke_contract.py` | 远程烟测脚本必须使用环境变量读取凭据、保持只读、忽略截图产物，并锁定 API 健康摘要、UI 尽力诊断字段、上传脚本边界、内置 Node 文档契约、metadata 驱动的插件身份、zip/env 示例、slug/badge/version/display_name 契约。 |
 

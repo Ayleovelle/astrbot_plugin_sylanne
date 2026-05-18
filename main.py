@@ -676,8 +676,8 @@ def get_emotional_state_plugin(context: Context) -> Any | None:
 @register(
     PLUGIN_NAME,
     "Aylovelle.S.S",
-    "Soulful Yearning Lifelike AstrBot Neural Narrative Engine：维护情绪、人格、记忆、氛围和表达节奏的 Sylanne",
-    "3.0.0",
+    "Sovereign Yearning Life-Architecture: Nonhuman Relational Body：Sylanne 3.0.0-kernel1 非人关系躯体 kernel 迭代，维护用户主权与带边界的燃烧",
+    "3.0.0-kernel1",
     "",
 )
 class EmotionalStatePlugin(Star):
