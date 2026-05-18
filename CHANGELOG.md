@@ -2,6 +2,21 @@
 
 本文件用于 AstrBot 插件市场/管理页展示更新内容。更完整的设计说明、公式推导、测试矩阵和维护手册见 `README.md`。
 
+## 3.0.1
+
+发布日期：2026-05-18
+
+### 修复
+
+- 修复 LLM 请求早期生成关系候选摘要时读取尚未初始化的 `lifelike_learning_state`，避免日志出现 `cannot access local variable 'lifelike_learning_state' where it is not associated with a value`。
+- 关系候选摘要的群聊键改用现有 `ConversationIdentity.group_id`，不再访问不存在的 `identity.is_group`。
+- README 补齐 Sylanne 自有记忆写入侧向量节流配置项，保持运行时配置文档和 schema 一致。
+
+### 验证
+
+- 新增 lifelike learning 关系候选摘要回归测试，锁定开启生命化学习后不再输出 warning。
+- 重新运行发现式 unittest 全量测试。
+
 ## 3.0.0
 
 发布日期：2026-05-18
