@@ -7,6 +7,39 @@ from sylanne_body.soma.affect import AffectKind
 
 
 class KernelSpineGenesisTests(unittest.TestCase):
+    def test_exit_event_seals_relation_against_later_user_events(self):
+        spine = KernelSpine()
+        exit_event = KernelEvent(text="我想先离开，不想继续聊了。", source=EventSource.USER_UTTERANCE)
+        later_event = KernelEvent(text="我又回来说一句我很开心。", source=EventSource.USER_UTTERANCE)
+
+        spine.receive(exit_event)
+        later = spine.receive(later_event)
+        history = spine.export_commit_history()
+
+        self.assertEqual("sealed", later.body.posture)
+        self.assertFalse(later.commit.accepted)
+        self.assertEqual("relation_sealed_after_user_exit", later.commit.reason)
+        self.assertIn("已经停下", later.residue.text)
+        self.assertIn("你可以重新开始", later.residue.text)
+        self.assertEqual([exit_event.event_id], [item["event_id"] for item in history])
+        self.assertNotIn(later_event.event_id, str(history))
+        self.assertNotIn("开心", str(history))
+
+    def test_sealed_state_export_has_no_raw_text_or_history_replay(self):
+        spine = KernelSpine()
+        exit_event = KernelEvent(text="我想先离开。", source=EventSource.USER_UTTERANCE)
+
+        spine.receive(exit_event)
+        sealed = spine.export_seal_state()
+
+        self.assertTrue(sealed["sealed"])
+        self.assertEqual("user_exit_or_boundary", sealed["reason"])
+        self.assertTrue(sealed["internal_only"])
+        self.assertFalse(sealed["public_api_eligible"])
+        self.assertNotIn("text", sealed)
+        self.assertNotIn("history", sealed)
+        self.assertNotIn("离开", str(sealed))
+
     def test_commit_history_read_is_non_mutating(self):
         spine = KernelSpine()
         event = KernelEvent(text="我今天很开心。", source=EventSource.USER_UTTERANCE)

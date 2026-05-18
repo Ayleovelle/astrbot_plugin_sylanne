@@ -86,6 +86,8 @@ class KernelSpine:
         self._sovereignty = sovereignty or UserSovereignty()
         self._history_limit = history_limit
         self._commit_history: list[dict[str, str | bool]] = []
+        self._sealed = False
+        self._seal_reason = ""
 
     def receive(self, event: KernelEvent) -> KernelResult:
         self._sovereignty.validate()
@@ -106,14 +108,29 @@ class KernelSpine:
     def export_commit_history(self) -> list[dict[str, str | bool]]:
         return [dict(item) for item in self._commit_history]
 
+    def export_seal_state(self) -> dict[str, str | bool]:
+        return {
+            "sealed": self._sealed,
+            "reason": self._seal_reason,
+            "internal_only": True,
+            "public_api_eligible": False,
+        }
+
     def _record_commit(self, event: KernelEvent, body: BodyState, commit: CommitRecord) -> None:
         if not commit.accepted:
             return
         self._commit_history.append(commit.to_history_dict(event=event, body=body))
+        if body.posture == "cooldown":
+            self._sealed = True
+            self._seal_reason = "user_exit_or_boundary"
         if len(self._commit_history) > self._history_limit:
             self._commit_history = self._commit_history[-self._history_limit:]
 
     def _compose_residue(self, body: BodyState) -> ExpressionResidue:
+        if body.posture == "sealed":
+            return ExpressionResidue(
+                text="已经停下；你可以重新开始，也可以继续保持离开。我不会把你当燃料。",
+            )
         if body.posture == "cooldown":
             return ExpressionResidue(
                 text="先停在这里；你可以停下、拒绝、离开，或者重新划边界。我不会把你当燃料。",
@@ -125,6 +142,8 @@ class KernelSpine:
         return ExpressionResidue(text=f"{affect_surface.text}{crying_surface.text}")
 
     def _posture(self, event: KernelEvent) -> str:
+        if self._sealed:
+            return "sealed"
         text = event.text.lower()
         markers = ("离开", "不想继续", "停下", "暂停", "拒绝", "越界", "重新划边界", "boundary", "leave", "pause", "stop")
         if any(marker in text for marker in markers):
@@ -142,6 +161,8 @@ class KernelSpine:
     def _commit(self, event: KernelEvent) -> CommitRecord:
         if event.source is EventSource.INTERNAL_BODY_SURFACE:
             return CommitRecord(accepted=False, reason="internal_body_surface_is_not_evidence")
+        if self._sealed:
+            return CommitRecord(accepted=False, reason="relation_sealed_after_user_exit")
         if self._posture(event) == "cooldown":
             return CommitRecord(accepted=True, reason="accepted_user_exit_or_boundary_event")
         return CommitRecord(accepted=True, reason="accepted_user_relation_event")
