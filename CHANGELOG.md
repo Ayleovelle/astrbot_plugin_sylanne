@@ -2,6 +2,22 @@
 
 本文件用于 AstrBot 插件市场/管理页展示更新内容。更完整的设计说明、公式推导、测试矩阵和维护手册见 `README.md`。
 
+## 3.0.4
+
+发布日期：2026-05-18
+
+### 修复
+
+- 资源压力采样新增 cgroup v1/v2 CPU 与内存限额识别，低端容器内不再只按宿主机 CPU 数和 `/proc/meminfo` 粗估。
+- 后台 post worker 根据 `standard/container/low_container/tiny_container` 容器档位收紧 worker cap，低配容器默认更保守，避免队列、内存和磁盘压力互相放大。
+- 实时派发、本地表情索引和 Sylanne 自有记忆 embedding backfill 拆成分功能低配预算：实时派发优先保留，表情索引缓存优先，embedding backfill 在低配/高压下优先暂停。
+- runtime diagnostics 暴露容器 profile、cgroup 限额和分功能预算，便于线上确认降载原因。
+
+### 验证
+
+- 新增 cgroup 限额、low container 和 tiny container 资源预算回归测试。
+- 重新运行后台 worker、实时聊天、表情索引、记忆 backfill 和命令工具相关测试，并重新打包发布 zip 通过 preflight。
+
 ## 3.0.3
 
 发布日期：2026-05-18

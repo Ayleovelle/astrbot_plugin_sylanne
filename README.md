@@ -2,7 +2,7 @@
 
 > <span style="font-size: 1.08em;"><strong>Soulful Yearning Lifelike AstrBot Neural Narrative Engine</strong>。她维护的不只是“情绪标签”，而是情绪、人格、记忆、氛围、主动性和表达节奏交织成的长期状态。</span>
 
-![版本 3.0.3](https://img.shields.io/badge/version-3.0.3-red.svg)
+![版本 3.0.4](https://img.shields.io/badge/version-3.0.4-red.svg)
 ![AstrBot >=4.9.2,<5.0.0](https://img.shields.io/badge/AstrBot-%3E%3D4.9.2%2C%3C5.0.0-green)
 ![Python 3.10+](https://img.shields.io/badge/Python-3.10%2B-yellow)
 ![协议 astrbot.emotion_state.v2](https://img.shields.io/badge/schema-astrbot.emotion__state.v2-purple)
@@ -101,7 +101,7 @@ _“逻辑可以共赏，但为你偏置的权重从不开源。”_
 | 主题 | 内容 |
 | --- | --- |
 | [当前版本与兼容范围](#当前版本与兼容范围) | 插件版本、AstrBot 版本、Python 要求、许可证和发布状态。 |
-| [当前版本发布记录](#303-当前版本发布记录) | 3.0.3 bugfix、实时媒体发送后 KV 持久化延后和包体同步。 |
+| [当前版本发布记录](#304-当前版本发布记录) | 3.0.4 bugfix、低端容器 cgroup 感知资源预算和包体同步。 |
 | [项目定位](#项目定位) | 为什么本插件不是普通的提示词人设增强。 |
 | [核心能力](#核心能力总览) | 7 维情绪、人格建模、真实时间记忆、关系修复、公共 API。 |
 | [快速开始](#快速开始) | 发布 zip 包、仓库安装、手动复制、最小配置和检查命令。 |
@@ -129,7 +129,7 @@ _“逻辑可以共赏，但为你偏置的权重从不开源。”_
 | --- | --- |
 | 插件目录名 | `astrbot_plugin_sylanne` |
 | 显示名 | `Sylanne` |
-| 当前版本 | `3.0.3` |
+| 当前版本 | `3.0.4` |
 | AstrBot 版本 | `>=4.9.2,<5.0.0` |
 | Python | `3.10+` |
 | 许可证 | `AGPL-3.0-or-later` |
@@ -137,15 +137,15 @@ _“逻辑可以共赏，但为你偏置的权重从不开源。”_
 
 `3.0.0` 是 3.0 Relational Self Genesis 路线的首个正式稳定版。Sylanne 已经完成 Self-Interpretation Engine、Relational Time Layer、Co-Evolution Model、Turning Point Memory + Replay 和 Lineage / Branching / WebUI 观察舱闭环：关键互动会在插件内部被理解、进入关系时间、调制表达倾向、形成 bounded replay，并被整理为 speaker/group 隔离的谱系分支观察信号。所有高风险关系/自我推断默认仍只留在插件内部运行态和本地诊断中，不保存完整对话文本，不暴露 `relationship_time_weight`，不把 candidate 写成事实，也不新增 public API 读取入口。
 
-### 3.0.3 当前版本发布记录
+### 3.0.4 当前版本发布记录
 
-`v3.0.3` 合并在 `main` 上，对外安装版本由 `metadata.yaml` 和 `main.py @register(...)` 共同声明为 `3.0.3`。本版为 Sylanne 3.0 正式版的 bugfix 版本：把后台 worker 调度、实时/主动派发、本地表情索引和 memory embedding backfill 纳入磁盘压力保护，并保留打断回复断点的同步持久化，降低服务器磁盘死锁时继续放大 I/O 的风险；公共 API 版本仍保持 `1.0`，关系性自我与谱系分支推断不进入 public API 契约。
+`v3.0.4` 合并在 `main` 上，对外安装版本由 `metadata.yaml` 和 `main.py @register(...)` 共同声明为 `3.0.4`。本版为 Sylanne 3.0 正式版的 bugfix 版本：在 3.0.3 磁盘压力保护之上新增低端容器适配，资源压力采样会识别 cgroup CPU/内存限额，并把后台 worker、实时派发、本地表情索引和 Sylanne 自有记忆 embedding backfill 拆成分功能低配预算。公共 API 版本仍保持 `1.0`，关系性自我与谱系分支推断不进入 public API 契约。
 
 | 项目 | 状态 |
 | --- | --- |
-| 3.0 修复 | `3.0.3` 保持 Relational Self Genesis 稳定版能力不变，新增磁盘压力采样、critical 单通道 worker cap、高压跳过扫盘和打断断点同步保存。 |
+| 3.0 修复 | `3.0.4` 保持 Relational Self Genesis 稳定版能力不变，新增 cgroup 感知容器档位、low/tiny container worker cap、表情索引缓存优先和 embedding backfill 低配暂停。 |
 | 公共 API | 仍保持 `1.0`；不新增高风险关系/自我推断读取方法。 |
-| 安装包 | `metadata.yaml`、README 版本徽章、`main.py @register(...)` 和发布 zip 均同步到 `3.0.3`。 |
+| 安装包 | `metadata.yaml`、README 版本徽章、`main.py @register(...)` 和发布 zip 均同步到 `3.0.4`。 |
 
 ### 3.0.1 历史发布记录
 
