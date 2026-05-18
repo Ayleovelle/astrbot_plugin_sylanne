@@ -2,7 +2,7 @@
 
 > <span style="font-size: 1.08em;"><strong>Soulful Yearning Lifelike AstrBot Neural Narrative Engine</strong>。她维护的不只是“情绪标签”，而是情绪、人格、记忆、氛围、主动性和表达节奏交织成的长期状态。</span>
 
-![版本 3.0.1](https://img.shields.io/badge/version-3.0.1-red.svg)
+![版本 3.0.2](https://img.shields.io/badge/version-3.0.2-red.svg)
 ![AstrBot >=4.9.2,<5.0.0](https://img.shields.io/badge/AstrBot-%3E%3D4.9.2%2C%3C5.0.0-green)
 ![Python 3.10+](https://img.shields.io/badge/Python-3.10%2B-yellow)
 ![协议 astrbot.emotion_state.v2](https://img.shields.io/badge/schema-astrbot.emotion__state.v2-purple)
@@ -101,7 +101,7 @@ _“逻辑可以共赏，但为你偏置的权重从不开源。”_
 | 主题 | 内容 |
 | --- | --- |
 | [当前版本与兼容范围](#当前版本与兼容范围) | 插件版本、AstrBot 版本、Python 要求、许可证和发布状态。 |
-| [当前版本发布记录](#300-当前版本发布记录) | 3.0 正式版、关系性自我生成闭环、谱系分支观察舱和 public API 封闭边界。 |
+| [当前版本发布记录](#302-当前版本发布记录) | 3.0.2 bugfix、实时媒体发送后 KV 持久化延后和包体同步。 |
 | [项目定位](#项目定位) | 为什么本插件不是普通的提示词人设增强。 |
 | [核心能力](#核心能力总览) | 7 维情绪、人格建模、真实时间记忆、关系修复、公共 API。 |
 | [快速开始](#快速开始) | 发布 zip 包、仓库安装、手动复制、最小配置和检查命令。 |
@@ -129,7 +129,7 @@ _“逻辑可以共赏，但为你偏置的权重从不开源。”_
 | --- | --- |
 | 插件目录名 | `astrbot_plugin_sylanne` |
 | 显示名 | `Sylanne` |
-| 当前版本 | `3.0.1` |
+| 当前版本 | `3.0.2` |
 | AstrBot 版本 | `>=4.9.2,<5.0.0` |
 | Python | `3.10+` |
 | 许可证 | `GPL-3.0-or-later` |
@@ -137,7 +137,17 @@ _“逻辑可以共赏，但为你偏置的权重从不开源。”_
 
 `3.0.0` 是 3.0 Relational Self Genesis 路线的首个正式稳定版。Sylanne 已经完成 Self-Interpretation Engine、Relational Time Layer、Co-Evolution Model、Turning Point Memory + Replay 和 Lineage / Branching / WebUI 观察舱闭环：关键互动会在插件内部被理解、进入关系时间、调制表达倾向、形成 bounded replay，并被整理为 speaker/group 隔离的谱系分支观察信号。所有高风险关系/自我推断默认仍只留在插件内部运行态和本地诊断中，不保存完整对话文本，不暴露 `relationship_time_weight`，不把 candidate 写成事实，也不新增 public API 读取入口。
 
-### 3.0.1 当前版本发布记录
+### 3.0.2 当前版本发布记录
+
+`v3.0.2` 合并在 `main` 上，对外安装版本由 `metadata.yaml` 和 `main.py @register(...)` 共同声明为 `3.0.2`。本版为 Sylanne 3.0 正式版的 bugfix 版本：修复实时聊天接管生图结果时，媒体发送完成后同步等待 delivery context KV 持久化可能放大磁盘 I/O 卡顿的问题；公共 API 版本仍保持 `1.0`，关系性自我与谱系分支推断不进入 public API 契约。
+
+| 项目 | 状态 |
+| --- | --- |
+| 3.0 修复 | `3.0.2` 保持 Relational Self Genesis 稳定版能力不变，只把实时媒体发送后的 delivery context 持久化延后到后台任务。 |
+| 公共 API | 仍保持 `1.0`；不新增高风险关系/自我推断读取方法。 |
+| 安装包 | `metadata.yaml`、README 版本徽章、`main.py @register(...)` 和发布 zip 均同步到 `3.0.2`。 |
+
+### 3.0.1 历史发布记录
 
 `v3.0.1` 合并在 `main` 上，对外安装版本由 `metadata.yaml` 和 `main.py @register(...)` 共同声明为 `3.0.1`。本版为 Sylanne 3.0 正式版的 bugfix 版本：修复 lifelike learning 开启时，LLM 请求早期关系候选摘要读取尚未初始化 `lifelike_learning_state` 导致 warning 的问题；公共 API 版本仍保持 `1.0`，关系性自我与谱系分支推断不进入 public API 契约。
 
@@ -326,7 +336,7 @@ _“逻辑可以共赏，但为你偏置的权重从不开源。”_
 | 上下文安全预算 | 召回结果只作为 `[sylanne_memory_recall]` 限长摘要注入，并继续受请求预算和官方上下文压缩清洗逻辑约束。 |
 | 模块互斥自检 | 发布前覆盖自有记忆、主动发言、官方上下文压缩、即时聊天、公共 API、配置契约和包体预检，验证模块之间不会互相回灌或重复调用外部 LivingMemory。 |
 | 工作流图 | `docs/assets/workflow_and_proactive.svg` 已重绘，突出即时聊天、追发合并、Agent 工具循环、模型边界和主动聊天反馈；移除误导性的单点 Gemini 诊断节点，并修正中文字体和跨泳道箭头。 |
-| 公开契约 | 插件版本为 `3.0.1`；公共 API 版本仍为 `1.0`，schema 仍保持 `astrbot.emotion_state.v2` 等版本化契约；关系性自我、关系时间、共演化、转折点记忆/回放和谱系分支观察推断只留在插件内部运行态，不新增 public API 读取入口。 |
+| 公开契约 | 插件版本为 `3.0.2`；公共 API 版本仍为 `1.0`，schema 仍保持 `astrbot.emotion_state.v2` 等版本化契约；关系性自我、关系时间、共演化、转折点记忆/回放和谱系分支观察推断只留在插件内部运行态，不新增 public API 读取入口。 |
 
 旧版本发布记录统一放在 `CHANGELOG.md`。README 只展示当前版本，避免插件管理页从历史段落误抓旧版本号。
 
@@ -3165,7 +3175,7 @@ $env:ASTRBOT_EXPECT_PLUGIN = "astrbot_plugin_sylanne"
 脚本会在输出 JSON 里写出 `expectedPluginRuntime`，包含插件列表 API 中返回的 `version`、`displayName`、`activated`、`author`、`astrbotVersion` 等只读字段。若目标插件存在但 `activated=false`，脚本会失败退出。需要把版本和显示名也作为硬断言时，可以额外设置：
 
 ```powershell
-$env:ASTRBOT_EXPECT_PLUGIN_VERSION = "3.0.1"
+$env:ASTRBOT_EXPECT_PLUGIN_VERSION = "3.0.2"
 $env:ASTRBOT_EXPECT_PLUGIN_DISPLAY_NAME = "Sylanne"
 & $node scripts\remote_smoke_playwright.js
 ```

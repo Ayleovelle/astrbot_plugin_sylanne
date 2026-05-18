@@ -677,7 +677,7 @@ def get_emotional_state_plugin(context: Context) -> Any | None:
     PLUGIN_NAME,
     "Aylovelle.S.S",
     "Soulful Yearning Lifelike AstrBot Neural Narrative Engine：维护情绪、人格、记忆、氛围和表达节奏的 Sylanne",
-    "3.0.1",
+    "3.0.2",
     "",
 )
 class EmotionalStatePlugin(Star):
@@ -8587,7 +8587,7 @@ class EmotionalStatePlugin(Star):
                 sent_parts=[str(item.get("text") or "") for item in parts],
                 event_time=event_time,
             )
-            await self._release_realtime_temporary_context_after_background_post(
+            self._release_realtime_temporary_context_after_background_post_in_memory(
                 session_key,
                 input_epoch=input_epoch,
                 reason="realtime_dispatch_delivered",
@@ -8598,7 +8598,7 @@ class EmotionalStatePlugin(Star):
                 input_epoch,
             )
             self._clear_sylanne_memory_recall_workset(session_key)
-        await self._save_realtime_delivery_context_if_dirty(session_key)
+        self._schedule_realtime_delivery_context_save(session_key)
         self._realtime_chat_last_sent_cache()[session_key] = self._observed_now()
         payload = {
             "api": "context.send_message",
@@ -12745,6 +12745,15 @@ class EmotionalStatePlugin(Star):
 
     def _mark_realtime_delivery_context_dirty(self, session_key: str) -> None:
         self._realtime_delivery_context_dirty_cache().add(str(session_key or "global"))
+
+    def _schedule_realtime_delivery_context_save(self, session_key: str) -> None:
+        key = str(session_key or "global")
+        if key not in self._realtime_delivery_context_dirty_cache():
+            return
+        self._schedule_background_task(
+            self._save_realtime_delivery_context_if_dirty(key),
+            label=f"realtime_delivery_context_save:{key}",
+        )
 
     def _realtime_delivery_context_restored_cache(self) -> set[str]:
         restored = getattr(self, "_realtime_delivery_context_restored", None)

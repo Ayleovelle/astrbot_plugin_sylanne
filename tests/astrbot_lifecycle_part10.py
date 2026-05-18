@@ -413,6 +413,69 @@ class AstrBotLifecyclePart10(AstrBotLifecycleTests):
         )
 
 
+    def test_realtime_chat_defers_delivery_context_kv_after_media_send(self):
+        from astrbot.api.event import MessageChain
+
+        sent = []
+        kv_writes = []
+
+        class FakeContext:
+            async def send_message(self, origin, message):
+                sent.append((origin, list(getattr(message, "parts", []))))
+                return {"ok": True}
+
+        plugin = new_plugin(
+            {
+                "enable_realtime_chat": True,
+                "enable_sticker_reaction": False,
+                "runtime_parameter_debug_override_enabled": True,
+                "realtime_chat_min_delay_seconds": 0.05,
+                "realtime_chat_max_delay_seconds": 0.05,
+            },
+        )
+        plugin.context = FakeContext()
+
+        async def fake_kv_put(self, key, value, **kwargs):
+            started = len(sent)
+            await asyncio.sleep(0.01)
+            kv_writes.append((key, value, started))
+
+        bind_async(plugin, "_kv_put_data", fake_kv_put)
+        plan = {
+            "session_key": "s-media-defer-kv",
+            "full_text": "after image!",
+            "input_epoch": 1,
+            "message_parts": [
+                {"index": 0, "text": "after image!", "delay_before_seconds": 0.05},
+            ],
+            "media_parts": plugin._extract_realtime_response_media_parts(
+                SimpleNamespace(
+                    result_chain=MessageChain()
+                    .file_image("C:/tmp/deferred-image.png")
+                    .message("after image!"),
+                ),
+            ),
+            "sticker": {"enabled": False, "should_send": False, "reason": "disabled"},
+        }
+
+        async def run_plan():
+            await plugin._send_realtime_chat_plan(
+                FakeEvent("s-media-defer-kv", platform_name="aiocqhttp"),
+                plan,
+                source="unit_test",
+                record_history_shadow=True,
+            )
+            await self._await_background_tasks(plugin)
+
+        asyncio.run(run_plan())
+
+        self.assertTrue(kv_writes)
+        self.assertEqual(kv_writes[0][2], 2)
+        self.assertEqual(
+            [f"{kind}:{value}" for _, parts in sent for kind, value in parts],
+            ["file_image:C:/tmp/deferred-image.png", "message:after image!"],
+        )
+
     def test_on_llm_response_intercepts_even_when_realtime_send_cooldown_is_active(self):
         sent = []
 
