@@ -7,6 +7,78 @@ from sylanne_body.soma.affect import AffectKind
 
 
 class KernelSpineGenesisTests(unittest.TestCase):
+    def test_commit_history_read_is_non_mutating(self):
+        spine = KernelSpine()
+        event = KernelEvent(text="我今天很开心。", source=EventSource.USER_UTTERANCE)
+
+        spine.receive(event)
+        first_read = spine.export_commit_history()
+        first_read[0]["event_id"] = "tampered"
+        second_read = spine.export_commit_history()
+
+        self.assertEqual(event.event_id, second_read[0]["event_id"])
+        self.assertEqual(1, len(second_read))
+
+    def test_exit_commit_history_has_no_expression_residue_or_replay_payload(self):
+        spine = KernelSpine()
+        event = KernelEvent(text="我想先离开，不想继续聊了。", source=EventSource.USER_UTTERANCE)
+
+        spine.receive(event)
+        history = spine.export_commit_history()
+
+        self.assertEqual("cooldown", history[0]["posture"])
+        self.assertNotIn("residue", history[0])
+        self.assertNotIn("snapshot", history[0])
+        self.assertNotIn("replay", history[0])
+        self.assertNotIn("先停在这里", str(history))
+        self.assertNotIn("你可以停下", str(history))
+
+    def test_commit_history_accumulates_accepted_events_without_raw_text(self):
+        spine = KernelSpine()
+        first = KernelEvent(text="我今天很开心，想和你分享。", source=EventSource.USER_UTTERANCE)
+        second = KernelEvent(text="我想先离开，不想继续聊了。", source=EventSource.USER_UTTERANCE)
+
+        spine.receive(first)
+        spine.receive(second)
+        history = spine.export_commit_history()
+
+        self.assertEqual([first.event_id, second.event_id], [item["event_id"] for item in history])
+        self.assertEqual(["open", "cooldown"], [item["posture"] for item in history])
+        self.assertTrue(all(item["internal_only"] for item in history))
+        self.assertTrue(all(not item["public_api_eligible"] for item in history))
+        self.assertNotIn("开心", str(history))
+        self.assertNotIn("离开", str(history))
+        self.assertNotIn("text", str(history))
+        self.assertNotIn("raw", str(history))
+
+    def test_rejected_internal_surface_is_not_added_to_commit_history(self):
+        spine = KernelSpine()
+        user_event = KernelEvent(text="我今天很难过。", source=EventSource.USER_UTTERANCE)
+        internal_event = KernelEvent(text="Sylanne should cry here.", source=EventSource.INTERNAL_BODY_SURFACE)
+
+        spine.receive(user_event)
+        spine.receive(internal_event)
+        history = spine.export_commit_history()
+
+        self.assertEqual(1, len(history))
+        self.assertEqual(user_event.event_id, history[0]["event_id"])
+        self.assertNotIn(internal_event.event_id, str(history))
+        self.assertNotIn("Sylanne should cry", str(history))
+
+    def test_commit_history_is_bounded_to_recent_internal_records(self):
+        spine = KernelSpine(history_limit=2)
+        first = KernelEvent(text="我今天很开心。", source=EventSource.USER_UTTERANCE)
+        second = KernelEvent(text="我今天很难过。", source=EventSource.USER_UTTERANCE)
+        third = KernelEvent(text="我想先离开。", source=EventSource.USER_UTTERANCE)
+
+        spine.receive(first)
+        spine.receive(second)
+        spine.receive(third)
+        history = spine.export_commit_history()
+
+        self.assertEqual([second.event_id, third.event_id], [item["event_id"] for item in history])
+        self.assertNotIn(first.event_id, str(history))
+
     def test_kernel_event_identity_is_stable_without_raw_text_export(self):
         first = KernelEvent(text="我今天很难过。", source=EventSource.USER_UTTERANCE, relation_key="session:user")
         second = KernelEvent(text="我今天很难过。", source=EventSource.USER_UTTERANCE, relation_key="session:user")

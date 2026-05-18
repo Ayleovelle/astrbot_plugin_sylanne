@@ -41,6 +41,17 @@ class CommitRecord:
     accepted: bool
     reason: str
 
+    def to_history_dict(self, *, event: KernelEvent, body: BodyState) -> dict[str, str | bool]:
+        return {
+            "event_id": event.event_id,
+            "source": event.source.value,
+            "reason": self.reason,
+            "posture": body.posture,
+            "affect": body.affect.primary.value,
+            "internal_only": True,
+            "public_api_eligible": False,
+        }
+
 
 @dataclass(frozen=True)
 class KernelSnapshot:
@@ -71,8 +82,10 @@ class KernelResult:
 
 
 class KernelSpine:
-    def __init__(self, *, sovereignty: UserSovereignty | None = None) -> None:
+    def __init__(self, *, sovereignty: UserSovereignty | None = None, history_limit: int = 24) -> None:
         self._sovereignty = sovereignty or UserSovereignty()
+        self._history_limit = history_limit
+        self._commit_history: list[dict[str, str | bool]] = []
 
     def receive(self, event: KernelEvent) -> KernelResult:
         self._sovereignty.validate()
@@ -87,7 +100,18 @@ class KernelSpine:
         residue = self._compose_residue(body)
         commit = self._commit(event)
         snapshot = self._snapshot(event, body)
+        self._record_commit(event, body, commit)
         return KernelResult(body=body, residue=residue, commit=commit, snapshot=snapshot)
+
+    def export_commit_history(self) -> list[dict[str, str | bool]]:
+        return [dict(item) for item in self._commit_history]
+
+    def _record_commit(self, event: KernelEvent, body: BodyState, commit: CommitRecord) -> None:
+        if not commit.accepted:
+            return
+        self._commit_history.append(commit.to_history_dict(event=event, body=body))
+        if len(self._commit_history) > self._history_limit:
+            self._commit_history = self._commit_history[-self._history_limit:]
 
     def _compose_residue(self, body: BodyState) -> ExpressionResidue:
         if body.posture == "cooldown":
