@@ -171,6 +171,7 @@ def new_plugin(config=None):
     from personality_drift_engine import PersonalityDriftEngine
     from psychological_screening import PsychologicalScreeningEngine
     from sylanne_body.adapter import KernelAdapter
+    from sylanne_body.organ.library import LegacyBodyOrgan
 
     plugin = EmotionalStatePlugin.__new__(EmotionalStatePlugin)
     plugin.config = dict(config or {})
@@ -184,6 +185,20 @@ def new_plugin(config=None):
     plugin.fallibility_engine = FallibilityEngine()
     plugin.group_atmosphere_engine = GroupAtmosphereEngine()
     plugin._sylanne_kernel_adapter = KernelAdapter()
+    plugin._sylanne_legacy_organs = tuple(
+        LegacyBodyOrgan(module_name=module_name)
+        for module_name in (
+            "conversation_event_ledger",
+            "memory_engine",
+            "emotion_engine",
+            "fallibility_engine",
+            "moral_repair_engine",
+            "lifelike_learning_engine",
+            "personality_drift_engine",
+            "integrated_self",
+            "project_life_engine",
+        )
+    )
     for attr in PLUGIN_DICT_ATTRIBUTES:
         setattr(plugin, attr, {})
     for attr in PLUGIN_SET_ATTRIBUTES:

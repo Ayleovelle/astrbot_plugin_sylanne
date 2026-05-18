@@ -218,6 +218,7 @@ try:
     from .expression_policy import build_expression_policy_prompt, choose_expression_policy
     from .interpretation_engine import classify_memory_gate, interpret_user_text
     from .sylanne_body.adapter import KernelAdapter
+    from .sylanne_body.organ.library import LegacyBodyOrgan
 except ImportError:
     from emotion_engine import (
         EmotionEngine,
@@ -389,6 +390,7 @@ except ImportError:
     from expression_policy import build_expression_policy_prompt, choose_expression_policy
     from interpretation_engine import classify_memory_gate, interpret_user_text
     from sylanne_body.adapter import KernelAdapter
+    from sylanne_body.organ.library import LegacyBodyOrgan
 
 
 PLUGIN_NAME = "astrbot_plugin_sylanne"
@@ -730,6 +732,7 @@ class EmotionalStatePlugin(Star):
         self._group_atmosphere_memory_cache: dict[str, GroupAtmosphereState] = {}
         self._conversation_event_ledger = ConversationEventLedger(max_events_per_session=24)
         self._sylanne_kernel_adapter = KernelAdapter()
+        self._sylanne_legacy_organs = self._build_sylanne_legacy_organs()
         self._sylanne_memory_cache: dict[str, SylanneMemoryState] = {}
         self._sylanne_memory_recall_worksets: dict[str, deque[MemoryRecallItem]] = {}
         self._sylanne_memory_query_embedding_cache: dict[str, tuple[float, list[float]]] = {}
@@ -18362,6 +18365,22 @@ class EmotionalStatePlugin(Star):
             if self._response_field_has_payload(getattr(value, key, None)):
                 return True
         return False
+
+    def _build_sylanne_legacy_organs(self) -> tuple[LegacyBodyOrgan, ...]:
+        return tuple(
+            LegacyBodyOrgan(module_name=module_name)
+            for module_name in (
+                "conversation_event_ledger",
+                "memory_engine",
+                "emotion_engine",
+                "fallibility_engine",
+                "moral_repair_engine",
+                "lifelike_learning_engine",
+                "personality_drift_engine",
+                "integrated_self",
+                "project_life_engine",
+            )
+        )
 
     def _observe_sylanne_kernel_request(self, text: str) -> None:
         adapter = getattr(self, "_sylanne_kernel_adapter", None)
