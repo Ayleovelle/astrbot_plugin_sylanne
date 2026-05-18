@@ -132,6 +132,61 @@ class AstrBotLifecyclePart06(AstrBotLifecycleTests):
             ],
         )
 
+    def test_moral_repair_injection_goes_through_kernel_host_boundary(self):
+        from moral_repair_engine import MoralRepairState
+
+        plugin = new_plugin(
+            {
+                "assessment_timing": "post",
+                "enable_moral_repair_state": True,
+                "moral_repair_injection_strength": 0.3,
+            },
+        )
+        self._bind_common_state_hooks(plugin)
+        calls = []
+
+        async def fake_load_moral_repair_state(self, session_key, **kwargs):
+            return MoralRepairState.initial()
+
+        async def fake_save_moral_repair_state(self, session_key, state):
+            pass
+
+        def fake_append_moral_repair_auxiliary_state(
+            self,
+            request,
+            moral_repair_state,
+            *,
+            safety_boundary,
+            action_blocking,
+            injection_decision,
+            injection_budget,
+        ):
+            calls.append(
+                {
+                    "state": moral_repair_state,
+                    "safety_boundary": safety_boundary,
+                    "action_blocking": action_blocking,
+                    "decision": injection_decision,
+                    "budget": injection_budget,
+                },
+            )
+            return self._append_temp_text_part(
+                request,
+                '<bot_auxiliary_state private="true" name="moral_repair" detail="host-boundary">hosted</bot_auxiliary_state>',
+                source="moral_repair",
+                budget=injection_budget,
+            )
+
+        bind_async(plugin, "_load_moral_repair_state", fake_load_moral_repair_state)
+        bind_async(plugin, "_save_moral_repair_state", fake_save_moral_repair_state)
+        plugin._append_moral_repair_auxiliary_state = fake_append_moral_repair_auxiliary_state.__get__(plugin)
+        request = fake_request(session_id="s-moral-host-boundary", prompt="I am sorry and will repair it.")
+
+        asyncio.run(plugin.on_llm_request(FakeEvent("s-moral-host-boundary"), request))
+
+        self.assertEqual(1, len(calls))
+        self._find_text_part(request, 'name="moral_repair" detail="host-boundary"')
+
 
     def test_personality_drift_enabled_uses_real_time_state_without_forcing_prompt(self):
         from personality_drift_engine import (

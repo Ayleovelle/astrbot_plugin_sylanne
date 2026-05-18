@@ -149,6 +149,69 @@ class AstrBotLifecyclePart05(AstrBotLifecycleTests):
             any("Alice(user-a)" in text for text in injected_texts),
         )
 
+    def test_group_agent_speaker_track_goes_through_kernel_host_boundary(self):
+        from emotion_engine import EmotionState
+
+        plugin = new_plugin(
+            {
+                "assessment_timing": "post",
+                "inject_state": True,
+                "agent_speaker_relationship_tracking": True,
+            },
+        )
+        calls = []
+
+        async def fake_persona(self, event, request):
+            return None
+
+        async def fake_load_speaker_state(self, identity, persona_profile=None, **kwargs):
+            return EmotionState.initial()
+
+        def fake_append_speaker_auxiliary_state(
+            self,
+            request,
+            identity,
+            speaker_state,
+            *,
+            safety_boundary,
+            injection_budget,
+        ):
+            calls.append(
+                {
+                    "identity": identity,
+                    "state": speaker_state,
+                    "safety_boundary": safety_boundary,
+                    "budget": injection_budget,
+                },
+            )
+            return self._append_temp_text_part(
+                request,
+                '<bot_emotion_speaker_track private="true" detail="host-boundary">hosted</bot_emotion_speaker_track>',
+                source="emotion.speaker",
+                budget=injection_budget,
+            )
+
+        bind_async(plugin, "_persona_profile", fake_persona)
+        bind_async(plugin, "_load_speaker_state", fake_load_speaker_state)
+        plugin._append_speaker_auxiliary_state = fake_append_speaker_auxiliary_state.__get__(plugin)
+        request = fake_request(session_id="group-speaker-host-boundary", prompt="hello")
+
+        asyncio.run(
+            plugin.on_llm_request(
+                FakeEvent(
+                    "group-speaker-host-boundary",
+                    message="hello",
+                    sender_id="user-a",
+                    sender_name="Alice",
+                ),
+                request,
+            ),
+        )
+
+        self.assertEqual(1, len(calls))
+        self.assertEqual("group-speaker-host-boundary::speaker:user-a", calls[0]["identity"].speaker_track_id)
+        self._find_text_part(request, 'detail="host-boundary"')
+
 
     def test_group_atmosphere_updates_and_injects_compact_state_for_group_turn(self):
         plugin = new_plugin(
@@ -195,6 +258,69 @@ class AstrBotLifecyclePart05(AstrBotLifecycleTests):
             group_saves[0][1].values["bot_attention"],
             0.29,
         )
+
+    def test_group_atmosphere_injection_goes_through_kernel_host_boundary(self):
+        plugin = new_plugin(
+            {
+                "assessment_timing": "post",
+                "inject_state": True,
+            },
+        )
+        group_saves = []
+        calls = []
+
+        async def fake_persona(self, event, request):
+            return None
+
+        async def fake_save_group(self, session_key, state):
+            group_saves.append((session_key, state))
+            self._group_atmosphere_memory_cache[session_key] = state
+
+        def fake_append_group_atmosphere_auxiliary_state(
+            self,
+            request,
+            session_key,
+            group_atmosphere_state,
+            *,
+            injection_decision,
+            injection_budget,
+        ):
+            calls.append(
+                {
+                    "session_key": session_key,
+                    "state": group_atmosphere_state,
+                    "decision": injection_decision,
+                    "budget": injection_budget,
+                },
+            )
+            return self._append_temp_text_part(
+                request,
+                '<bot_auxiliary_state private="true" name="group_atmosphere" detail="host-boundary">hosted</bot_auxiliary_state>',
+                source="group_atmosphere",
+                budget=injection_budget,
+            )
+
+        bind_async(plugin, "_persona_profile", fake_persona)
+        bind_async(plugin, "_save_group_atmosphere_state", fake_save_group)
+        plugin._append_group_atmosphere_auxiliary_state = fake_append_group_atmosphere_auxiliary_state.__get__(plugin)
+        request = fake_request(session_id="group-host-boundary", prompt="@bot 哈哈 来看看")
+
+        asyncio.run(
+            plugin.on_llm_request(
+                FakeEvent(
+                    "group-host-boundary",
+                    message="@bot 哈哈 来看看",
+                    sender_id="user-a",
+                    sender_name="Alice",
+                ),
+                request,
+            ),
+        )
+
+        self.assertEqual(1, len(group_saves))
+        self.assertEqual(1, len(calls))
+        self.assertEqual("group-host-boundary", calls[0]["session_key"])
+        self._find_text_part(request, 'name="group_atmosphere" detail="host-boundary"')
 
 
     def test_group_atmosphere_join_cooldown_persists_even_in_pre_timing(self):
@@ -477,6 +603,59 @@ class AstrBotLifecyclePart05(AstrBotLifecycleTests):
         self._find_text_part(request, "bot_emotion_state")
         self._assert_no_text_part_contains(request, "simulated humanlike-state")
 
+    def test_humanlike_injection_goes_through_kernel_host_boundary(self):
+        from humanlike_engine import HumanlikeState
+
+        plugin = new_plugin(
+            {
+                "assessment_timing": "post",
+                "enable_humanlike_state": True,
+                "humanlike_injection_strength": 0.3,
+            },
+        )
+        self._bind_common_state_hooks(plugin)
+        calls = []
+
+        async def fake_load_humanlike_state(self, session_key, **kwargs):
+            return HumanlikeState.initial()
+
+        async def fake_save_humanlike_state(self, session_key, state):
+            pass
+
+        def fake_append_humanlike_auxiliary_state(
+            self,
+            request,
+            humanlike_state,
+            *,
+            safety_boundary,
+            injection_decision,
+            injection_budget,
+        ):
+            calls.append(
+                {
+                    "state": humanlike_state,
+                    "safety_boundary": safety_boundary,
+                    "decision": injection_decision,
+                    "budget": injection_budget,
+                },
+            )
+            return self._append_temp_text_part(
+                request,
+                '<bot_auxiliary_state private="true" name="humanlike" detail="host-boundary">hosted</bot_auxiliary_state>',
+                source="humanlike",
+                budget=injection_budget,
+            )
+
+        bind_async(plugin, "_load_humanlike_state", fake_load_humanlike_state)
+        bind_async(plugin, "_save_humanlike_state", fake_save_humanlike_state)
+        plugin._append_humanlike_auxiliary_state = fake_append_humanlike_auxiliary_state.__get__(plugin)
+        request = fake_request(session_id="s-humanlike-host-boundary", prompt="only you forever")
+
+        asyncio.run(plugin.on_llm_request(FakeEvent("s-humanlike-host-boundary"), request))
+
+        self.assertEqual(1, len(calls))
+        self._find_text_part(request, 'name="humanlike" detail="host-boundary"')
+
 
     def test_lifelike_learning_enabled_with_zero_strength_updates_without_injection(self):
         from lifelike_learning_engine import LifelikeLearningState
@@ -547,6 +726,60 @@ class AstrBotLifecyclePart05(AstrBotLifecycleTests):
         )
         self.assertIn("bot_auxiliary_state", auxiliary_text)
         self.assertNotIn("query_agent_state(", auxiliary_text)
+
+    def test_lifelike_learning_injection_goes_through_kernel_host_boundary(self):
+        from lifelike_learning_engine import LifelikeLearningState
+
+        plugin = new_plugin(
+            {
+                "assessment_timing": "post",
+                "enable_lifelike_learning": True,
+                "lifelike_learning_injection_strength": 0.3,
+            },
+        )
+        self._bind_common_state_hooks(plugin)
+        calls = []
+
+        async def fake_load_lifelike_state(self, session_key, **kwargs):
+            return LifelikeLearningState.initial()
+
+        async def fake_save_lifelike_state(self, session_key, state):
+            pass
+
+        def fake_append_lifelike_learning_auxiliary_state(
+            self,
+            request,
+            lifelike_learning_state,
+            *,
+            injection_decision,
+            injection_budget,
+        ):
+            calls.append(
+                {
+                    "state": lifelike_learning_state,
+                    "decision": injection_decision,
+                    "budget": injection_budget,
+                },
+            )
+            return self._append_temp_text_part(
+                request,
+                '<bot_auxiliary_state private="true" name="lifelike_learning" detail="host-boundary">hosted</bot_auxiliary_state>',
+                source="lifelike_learning",
+                budget=injection_budget,
+            )
+
+        bind_async(plugin, "_load_lifelike_learning_state", fake_load_lifelike_state)
+        bind_async(plugin, "_save_lifelike_learning_state", fake_save_lifelike_state)
+        plugin._append_lifelike_learning_auxiliary_state = fake_append_lifelike_learning_auxiliary_state.__get__(plugin)
+        request = fake_request(
+            session_id="s-life-host-boundary",
+            prompt="桥隧猫就是会熬夜改模型的人。",
+        )
+
+        asyncio.run(plugin.on_llm_request(FakeEvent("s-life-host-boundary"), request))
+
+        self.assertEqual(1, len(calls))
+        self._find_text_part(request, 'name="lifelike_learning" detail="host-boundary"')
 
 
     def test_fallibility_enabled_with_zero_strength_updates_without_injection(self):

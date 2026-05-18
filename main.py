@@ -1872,15 +1872,12 @@ class EmotionalStatePlugin(Star):
                 now=observed_at,
             )
             if speaker_state is not None:
-                self._append_temp_text_part(
+                self._append_speaker_auxiliary_state(
                     request,
-                    self._build_speaker_state_injection(
-                        identity,
-                        speaker_state,
-                        safety_boundary=safety_boundary,
-                    ),
-                    source="emotion.speaker",
-                    budget=injection_budget,
+                    identity,
+                    speaker_state,
+                    safety_boundary=safety_boundary,
+                    injection_budget=injection_budget,
                 )
             if humanlike_injection_enabled:
                 humanlike_state = humanlike_state or await self._load_humanlike_state(
@@ -1890,26 +1887,13 @@ class EmotionalStatePlugin(Star):
                     ),
                     now=observed_at,
                 )
-                appended = self._append_temp_text_part(
+                self._append_humanlike_auxiliary_state(
                     request,
-                    self._build_auxiliary_state_injection(
-                        "humanlike",
-                        lambda: build_humanlike_prompt_fragment(
-                            humanlike_state,
-                            safety_boundary=safety_boundary,
-                        ),
-                        decision=injection_decision,
-                    ),
-                    source="humanlike",
-                    budget=injection_budget,
+                    humanlike_state,
+                    safety_boundary=safety_boundary,
+                    injection_decision=injection_decision,
+                    injection_budget=injection_budget,
                 )
-                if not appended and injection_decision.auxiliary_detail == "full":
-                    self._append_temp_text_part(
-                        request,
-                        self._build_compact_auxiliary_state_injection("humanlike"),
-                        source="humanlike.compact_fallback",
-                        budget=injection_budget,
-                    )
             if lifelike_injection_enabled:
                 lifelike_learning_state = (
                     lifelike_learning_state
@@ -1918,25 +1902,12 @@ class EmotionalStatePlugin(Star):
                         now=observed_at,
                     )
                 )
-                appended = self._append_temp_text_part(
+                self._append_lifelike_learning_auxiliary_state(
                     request,
-                    self._build_auxiliary_state_injection(
-                        "lifelike_learning",
-                        lambda: build_lifelike_prompt_fragment(
-                            lifelike_learning_state,
-                        ),
-                        decision=injection_decision,
-                    ),
-                    source="lifelike_learning",
-                    budget=injection_budget,
+                    lifelike_learning_state,
+                    injection_decision=injection_decision,
+                    injection_budget=injection_budget,
                 )
-                if not appended and injection_decision.auxiliary_detail == "full":
-                    self._append_temp_text_part(
-                        request,
-                        self._build_compact_auxiliary_state_injection("lifelike_learning"),
-                        source="lifelike_learning.compact_fallback",
-                        budget=injection_budget,
-                    )
             if personality_drift_injection_enabled:
                 personality_drift_state = (
                     personality_drift_state
@@ -1963,27 +1934,14 @@ class EmotionalStatePlugin(Star):
                         now=observed_at,
                     )
                 )
-                appended = self._append_temp_text_part(
+                self._append_moral_repair_auxiliary_state(
                     request,
-                    self._build_auxiliary_state_injection(
-                        "moral_repair",
-                        lambda: build_moral_repair_prompt_fragment(
-                            moral_repair_state,
-                            safety_boundary=safety_boundary,
-                            action_blocking=action_blocking,
-                        ),
-                        decision=injection_decision,
-                    ),
-                    source="moral_repair",
-                    budget=injection_budget,
+                    moral_repair_state,
+                    safety_boundary=safety_boundary,
+                    action_blocking=action_blocking,
+                    injection_decision=injection_decision,
+                    injection_budget=injection_budget,
                 )
-                if not appended and injection_decision.auxiliary_detail == "full":
-                    self._append_temp_text_part(
-                        request,
-                        self._build_compact_auxiliary_state_injection("moral_repair"),
-                        source="moral_repair.compact_fallback",
-                        budget=injection_budget,
-                    )
             if fallibility_injection_enabled:
                 fallibility_state = fallibility_state or await self._load_fallibility_state(
                     session_key,
@@ -2017,36 +1975,13 @@ class EmotionalStatePlugin(Star):
                     now=observed_at,
                     bot_response=False,
                 )
-                appended = self._append_temp_text_part(
+                self._append_group_atmosphere_auxiliary_state(
                     request,
-                    self._build_auxiliary_state_injection(
-                        "group_atmosphere",
-                        lambda: self._build_group_atmosphere_injection_for_session(
-                            session_key,
-                            group_atmosphere_state,
-                            commit_snapshot=False,
-                            decision=injection_decision,
-                        ),
-                        decision=injection_decision,
-                    ),
-                    source="group_atmosphere",
-                    budget=injection_budget,
+                    session_key,
+                    group_atmosphere_state,
+                    injection_decision=injection_decision,
+                    injection_budget=injection_budget,
                 )
-                if appended:
-                    if injection_decision.compact_mode == "diff":
-                        self._commit_group_atmosphere_injection_snapshot_for_session(
-                            session_key,
-                            group_atmosphere_state,
-                        )
-                elif injection_decision.auxiliary_detail == "full":
-                    self._append_temp_text_part(
-                        request,
-                        self._build_compact_auxiliary_state_injection(
-                            "group_atmosphere",
-                        ),
-                        source="group_atmosphere.compact_fallback",
-                        budget=injection_budget,
-                    )
             self._record_state_injection_diagnostics(
                 injection_budget,
                 decision=injection_decision,
@@ -17283,6 +17218,86 @@ class EmotionalStatePlugin(Star):
             "</bot_auxiliary_state>"
         )
 
+    def _append_speaker_auxiliary_state(
+        self,
+        request: ProviderRequest,
+        identity: ConversationIdentity,
+        speaker_state: EmotionState,
+        *,
+        safety_boundary: Any,
+        injection_budget: _StateInjectionBudget,
+    ) -> bool:
+        return self._append_temp_text_part(
+            request,
+            self._build_speaker_state_injection(
+                identity,
+                speaker_state,
+                safety_boundary=safety_boundary,
+            ),
+            source="emotion.speaker",
+            budget=injection_budget,
+        )
+
+    def _append_humanlike_auxiliary_state(
+        self,
+        request: ProviderRequest,
+        humanlike_state: HumanlikeState,
+        *,
+        safety_boundary: Any,
+        injection_decision: _StateInjectionDecision,
+        injection_budget: _StateInjectionBudget,
+    ) -> bool:
+        appended = self._append_temp_text_part(
+            request,
+            self._build_auxiliary_state_injection(
+                "humanlike",
+                lambda: build_humanlike_prompt_fragment(
+                    humanlike_state,
+                    safety_boundary=safety_boundary,
+                ),
+                decision=injection_decision,
+            ),
+            source="humanlike",
+            budget=injection_budget,
+        )
+        if not appended and injection_decision.auxiliary_detail == "full":
+            self._append_temp_text_part(
+                request,
+                self._build_compact_auxiliary_state_injection("humanlike"),
+                source="humanlike.compact_fallback",
+                budget=injection_budget,
+            )
+        return appended
+
+    def _append_lifelike_learning_auxiliary_state(
+        self,
+        request: ProviderRequest,
+        lifelike_learning_state: LifelikeLearningState,
+        *,
+        injection_decision: _StateInjectionDecision,
+        injection_budget: _StateInjectionBudget,
+    ) -> bool:
+        appended = self._append_temp_text_part(
+            request,
+            self._build_auxiliary_state_injection(
+                "lifelike_learning",
+                lambda: build_lifelike_prompt_fragment(
+                    lifelike_learning_state,
+                ),
+                decision=injection_decision,
+            ),
+            source="lifelike_learning",
+            budget=injection_budget,
+        )
+        if not appended and injection_decision.auxiliary_detail == "full":
+            self._append_temp_text_part(
+                request,
+                self._build_compact_auxiliary_state_injection("lifelike_learning"),
+                source="lifelike_learning.compact_fallback",
+                budget=injection_budget,
+            )
+        return appended
+
     def _append_fallibility_auxiliary_state(
         self,
         request: ProviderRequest,
@@ -17341,6 +17356,78 @@ class EmotionalStatePlugin(Star):
                 request,
                 self._build_compact_auxiliary_state_injection("personality_drift"),
                 source="personality_drift.compact_fallback",
+                budget=injection_budget,
+            )
+        return appended
+
+    def _append_moral_repair_auxiliary_state(
+        self,
+        request: ProviderRequest,
+        moral_repair_state: MoralRepairState,
+        *,
+        safety_boundary: Any,
+        action_blocking: Any,
+        injection_decision: _StateInjectionDecision,
+        injection_budget: _StateInjectionBudget,
+    ) -> bool:
+        appended = self._append_temp_text_part(
+            request,
+            self._build_auxiliary_state_injection(
+                "moral_repair",
+                lambda: build_moral_repair_prompt_fragment(
+                    moral_repair_state,
+                    safety_boundary=safety_boundary,
+                    action_blocking=action_blocking,
+                ),
+                decision=injection_decision,
+            ),
+            source="moral_repair",
+            budget=injection_budget,
+        )
+        if not appended and injection_decision.auxiliary_detail == "full":
+            self._append_temp_text_part(
+                request,
+                self._build_compact_auxiliary_state_injection("moral_repair"),
+                source="moral_repair.compact_fallback",
+                budget=injection_budget,
+            )
+        return appended
+
+    def _append_group_atmosphere_auxiliary_state(
+        self,
+        request: ProviderRequest,
+        session_key: str,
+        group_atmosphere_state: GroupAtmosphereState,
+        *,
+        injection_decision: _StateInjectionDecision,
+        injection_budget: _StateInjectionBudget,
+    ) -> bool:
+        appended = self._append_temp_text_part(
+            request,
+            self._build_auxiliary_state_injection(
+                "group_atmosphere",
+                lambda: self._build_group_atmosphere_injection_for_session(
+                    session_key,
+                    group_atmosphere_state,
+                    commit_snapshot=False,
+                    decision=injection_decision,
+                ),
+                decision=injection_decision,
+            ),
+            source="group_atmosphere",
+            budget=injection_budget,
+        )
+        if appended:
+            if injection_decision.compact_mode == "diff":
+                self._commit_group_atmosphere_injection_snapshot_for_session(
+                    session_key,
+                    group_atmosphere_state,
+                )
+        elif injection_decision.auxiliary_detail == "full":
+            self._append_temp_text_part(
+                request,
+                self._build_compact_auxiliary_state_injection("group_atmosphere"),
+                source="group_atmosphere.compact_fallback",
                 budget=injection_budget,
             )
         return appended
