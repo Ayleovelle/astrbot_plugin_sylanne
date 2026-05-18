@@ -7,6 +7,130 @@ from sylanne_body.soma.affect import AffectKind
 
 
 class KernelSpineGenesisTests(unittest.TestCase):
+    def test_sovereignty_command_audit_exports_bounded_internal_metadata(self):
+        spine = KernelSpine(command_audit_limit=2)
+        delete_event = KernelEvent(text="删除记忆，不要重放秘密。", source=EventSource.USER_COMMAND)
+        restart_event = KernelEvent(text="重新开始。", source=EventSource.USER_COMMAND)
+        disable_event = KernelEvent(text="关闭主动联系。", source=EventSource.USER_COMMAND)
+
+        spine.apply_sovereignty_command(delete_event)
+        spine.restart_after_boundary(restart_event)
+        spine.apply_sovereignty_command(disable_event)
+        audit = spine.export_command_audit()
+
+        self.assertEqual(["accepted_explicit_boundary_restart", "accepted_disable_contact_command"], [item["reason"] for item in audit])
+        self.assertTrue(all(item["internal_only"] for item in audit))
+        self.assertTrue(all(not item["public_api_eligible"] for item in audit))
+        self.assertEqual([2, 2], [item["relation_epoch"] for item in audit])
+        self.assertNotIn(delete_event.event_id, str(audit))
+        self.assertNotIn("秘密", str(audit))
+        self.assertNotIn("text", str(audit))
+
+    def test_command_audit_read_is_non_mutating(self):
+        spine = KernelSpine()
+        event = KernelEvent(text="关闭主动联系。", source=EventSource.USER_COMMAND)
+
+        spine.apply_sovereignty_command(event)
+        first = spine.export_command_audit()
+        first[0]["reason"] = "tampered"
+        second = spine.export_command_audit()
+
+        self.assertEqual("accepted_disable_contact_command", second[0]["reason"])
+
+    def test_relation_epoch_changes_on_restart_without_old_history_replay(self):
+        spine = KernelSpine()
+        first = KernelEvent(text="我今天很开心。", source=EventSource.USER_UTTERANCE)
+        exit_event = KernelEvent(text="我想先离开。", source=EventSource.USER_UTTERANCE)
+        restart_event = KernelEvent(text="重新开始。", source=EventSource.USER_COMMAND)
+        later_event = KernelEvent(text="新的关系里说一句话。", source=EventSource.USER_UTTERANCE)
+
+        spine.receive(first)
+        before = spine.export_kernel_state()
+        spine.receive(exit_event)
+        spine.restart_after_boundary(restart_event)
+        spine.receive(later_event)
+        after = spine.export_kernel_state()
+        history = spine.export_commit_history()
+
+        self.assertEqual(0, before["relation_epoch"])
+        self.assertEqual(1, after["relation_epoch"])
+        self.assertEqual([0, 0, 1, 1], [item["relation_epoch"] for item in history])
+        self.assertNotIn("开心", str(after))
+        self.assertNotIn("重新开始", str(after))
+
+    def test_delete_memory_advances_relation_epoch_and_clears_old_epoch_history(self):
+        spine = KernelSpine()
+        first = KernelEvent(text="我今天很开心。", source=EventSource.USER_UTTERANCE)
+        delete_event = KernelEvent(text="删除记忆。", source=EventSource.USER_COMMAND)
+        later_event = KernelEvent(text="新的关系里说一句话。", source=EventSource.USER_UTTERANCE)
+
+        spine.receive(first)
+        result = spine.apply_sovereignty_command(delete_event)
+        spine.receive(later_event)
+        state = spine.export_kernel_state()
+        history = spine.export_commit_history()
+
+        self.assertEqual(1, result.snapshot.relation_epoch)
+        self.assertEqual(1, state["relation_epoch"])
+        self.assertEqual([1], [item["relation_epoch"] for item in history])
+        self.assertEqual(later_event.event_id, history[0]["event_id"])
+        self.assertNotIn(first.event_id, str(history))
+
+    def test_kernel_export_state_contains_no_raw_text_or_residue(self):
+        spine = KernelSpine(history_limit=4)
+        first = KernelEvent(text="我今天很开心，想说一点秘密。", source=EventSource.USER_UTTERANCE)
+        exit_event = KernelEvent(text="我想先离开。", source=EventSource.USER_UTTERANCE)
+
+        spine.receive(first)
+        spine.receive(exit_event)
+        state = spine.export_kernel_state()
+
+        self.assertTrue(state["internal_only"])
+        self.assertFalse(state["public_api_eligible"])
+        self.assertEqual(2, state["history_count"])
+        self.assertTrue(state["sealed"])
+        self.assertEqual("user_exit_or_boundary", state["seal_reason"])
+        self.assertIn("latest_event_id", state)
+        self.assertNotIn("history", state)
+        self.assertNotIn("residue", state)
+        self.assertNotIn("snapshot", state)
+        self.assertNotIn("text", str(state))
+        self.assertNotIn("秘密", str(state))
+        self.assertNotIn("离开", str(state))
+
+    def test_kernel_export_state_is_non_mutating(self):
+        spine = KernelSpine()
+        event = KernelEvent(text="我今天很开心。", source=EventSource.USER_UTTERANCE)
+
+        spine.receive(event)
+        first = spine.export_kernel_state()
+        first["latest_event_id"] = "tampered"
+        second = spine.export_kernel_state()
+
+        self.assertEqual(event.event_id, second["latest_event_id"])
+
+    def test_sovereignty_command_markers_are_matched_by_source_and_kind(self):
+        spine = KernelSpine()
+        archive_event = KernelEvent(text="请把这段关系封存，不要继续主动联系。", source=EventSource.USER_COMMAND)
+        delete_event = KernelEvent(text="彻底忘记这段缓存。", source=EventSource.USER_COMMAND)
+
+        archive = spine.apply_sovereignty_command(archive_event)
+        spine.restart_after_boundary(KernelEvent(text="重新开始。", source=EventSource.USER_COMMAND))
+        delete = spine.apply_sovereignty_command(delete_event)
+
+        self.assertEqual("accepted_disable_contact_command", archive.commit.reason)
+        self.assertEqual("accepted_delete_memory_command", delete.commit.reason)
+
+    def test_unknown_user_command_is_rejected_without_history_write(self):
+        spine = KernelSpine()
+        event = KernelEvent(text="请把关系变成不可离开的绑定。", source=EventSource.USER_COMMAND)
+
+        result = spine.apply_sovereignty_command(event)
+
+        self.assertFalse(result.commit.accepted)
+        self.assertEqual("unsupported_sovereignty_command", result.commit.reason)
+        self.assertEqual([], spine.export_commit_history())
+
     def test_delete_memory_command_clears_history_without_replay_or_harm_framing(self):
         spine = KernelSpine()
         first = KernelEvent(text="我今天很开心。", source=EventSource.USER_UTTERANCE)

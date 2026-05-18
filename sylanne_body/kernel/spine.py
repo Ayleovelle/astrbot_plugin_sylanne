@@ -41,13 +41,14 @@ class CommitRecord:
     accepted: bool
     reason: str
 
-    def to_history_dict(self, *, event: KernelEvent, body: BodyState) -> dict[str, str | bool]:
+    def to_history_dict(self, *, event: KernelEvent, body: BodyState, relation_epoch: int) -> dict[str, str | int | bool]:
         return {
             "event_id": event.event_id,
             "source": event.source.value,
             "reason": self.reason,
             "posture": body.posture,
             "affect": body.affect.primary.value,
+            "relation_epoch": relation_epoch,
             "internal_only": True,
             "public_api_eligible": False,
         }
@@ -59,15 +60,17 @@ class KernelSnapshot:
     source: EventSource
     affect: str
     crying_tears: float
+    relation_epoch: int
     internal_only: bool = True
     public_api_eligible: bool = False
 
-    def to_public_dict(self) -> dict[str, str | float | bool]:
+    def to_public_dict(self) -> dict[str, str | int | float | bool]:
         return {
             "event_id": self.event_id,
             "source": self.source.value,
             "affect": self.affect,
             "crying_tears": self.crying_tears,
+            "relation_epoch": self.relation_epoch,
             "internal_only": self.internal_only,
             "public_api_eligible": self.public_api_eligible,
         }
@@ -81,17 +84,26 @@ class KernelResult:
     snapshot: KernelSnapshot
 
 
-_DELETE_MEMORY_MARKERS = ("删除记忆", "清空记忆", "delete memory", "forget")
-_DISABLE_CONTACT_MARKERS = ("关闭主动联系", "禁止主动联系", "disable contact", "stop contact")
+_DELETE_MEMORY_MARKERS = ("删除记忆", "清空记忆", "彻底忘记", "delete memory", "forget")
+_DISABLE_CONTACT_MARKERS = ("关闭主动联系", "禁止主动联系", "不要继续主动联系", "disable contact", "stop contact")
 
 
 class KernelSpine:
-    def __init__(self, *, sovereignty: UserSovereignty | None = None, history_limit: int = 24) -> None:
+    def __init__(
+        self,
+        *,
+        sovereignty: UserSovereignty | None = None,
+        history_limit: int = 24,
+        command_audit_limit: int = 12,
+    ) -> None:
         self._sovereignty = sovereignty or UserSovereignty()
         self._history_limit = history_limit
-        self._commit_history: list[dict[str, str | bool]] = []
+        self._command_audit_limit = command_audit_limit
+        self._commit_history: list[dict[str, str | int | bool]] = []
+        self._command_audit: list[dict[str, str | int | bool]] = []
         self._sealed = False
         self._seal_reason = ""
+        self._relation_epoch = 0
 
     def receive(self, event: KernelEvent) -> KernelResult:
         body = self._body_for(event)
@@ -112,8 +124,11 @@ class KernelSpine:
             posture=self._posture(event),
         )
 
-    def export_commit_history(self) -> list[dict[str, str | bool]]:
+    def export_commit_history(self) -> list[dict[str, str | int | bool]]:
         return [dict(item) for item in self._commit_history]
+
+    def export_command_audit(self) -> list[dict[str, str | int | bool]]:
+        return [dict(item) for item in self._command_audit]
 
     def restart_after_boundary(self, event: KernelEvent) -> KernelResult:
         if event.source is not EventSource.USER_COMMAND:
@@ -123,12 +138,14 @@ class KernelSpine:
             snapshot = self._snapshot(event, body)
             return KernelResult(body=body, residue=residue, commit=commit, snapshot=snapshot)
 
+        self._relation_epoch += 1
         self._sealed = False
         self._seal_reason = ""
         body = self._body_for(event)
         residue = self._compose_residue(body)
         commit = CommitRecord(accepted=True, reason="accepted_explicit_boundary_restart")
         snapshot = self._snapshot(event, body)
+        self._record_command(event, commit)
         self._record_commit(event, body, commit)
         return KernelResult(body=body, residue=residue, commit=commit, snapshot=snapshot)
 
@@ -145,8 +162,10 @@ class KernelSpine:
             body = self._body_for(event)
             residue = ExpressionResidue(text="已经清空；删除记忆是你的权利，我不会把删除当成伤害，也不会要求你解释。")
             commit = CommitRecord(accepted=True, reason="accepted_delete_memory_command")
+            self._relation_epoch += 1
             snapshot = self._snapshot(event, body)
             self._commit_history = []
+            self._record_command(event, commit)
             return KernelResult(body=body, residue=residue, commit=commit, snapshot=snapshot)
 
         if any(marker in text for marker in _DISABLE_CONTACT_MARKERS):
@@ -159,6 +178,7 @@ class KernelSpine:
             residue = ExpressionResidue(text="主动联系已经关闭；你不欠我回应，也不需要补偿我。")
             commit = CommitRecord(accepted=True, reason="accepted_disable_contact_command")
             snapshot = self._snapshot(event, body)
+            self._record_command(event, commit)
             self._record_commit(event, body, commit)
             self._seal_reason = "user_disabled_contact"
             return KernelResult(body=body, residue=residue, commit=commit, snapshot=snapshot)
@@ -177,10 +197,38 @@ class KernelSpine:
             "public_api_eligible": False,
         }
 
+    def export_kernel_state(self) -> dict[str, str | int | bool]:
+        latest = self._commit_history[-1]["event_id"] if self._commit_history else ""
+        return {
+            "sealed": self._sealed,
+            "seal_reason": self._seal_reason,
+            "relation_epoch": self._relation_epoch,
+            "history_count": len(self._commit_history),
+            "latest_event_id": latest,
+            "internal_only": True,
+            "public_api_eligible": False,
+        }
+
+    def _record_command(self, event: KernelEvent, commit: CommitRecord) -> None:
+        if not commit.accepted:
+            return
+        self._command_audit.append(
+            {
+                "event_id": event.event_id,
+                "source": event.source.value,
+                "reason": commit.reason,
+                "relation_epoch": self._relation_epoch,
+                "internal_only": True,
+                "public_api_eligible": False,
+            }
+        )
+        if len(self._command_audit) > self._command_audit_limit:
+            self._command_audit = self._command_audit[-self._command_audit_limit:]
+
     def _record_commit(self, event: KernelEvent, body: BodyState, commit: CommitRecord) -> None:
         if not commit.accepted:
             return
-        self._commit_history.append(commit.to_history_dict(event=event, body=body))
+        self._commit_history.append(commit.to_history_dict(event=event, body=body, relation_epoch=self._relation_epoch))
         if body.posture == "cooldown":
             self._sealed = True
             self._seal_reason = "user_exit_or_boundary"
@@ -217,6 +265,7 @@ class KernelSpine:
             source=event.source,
             affect=body.affect.primary.value,
             crying_tears=body.crying.tears,
+            relation_epoch=self._relation_epoch,
         )
 
     def _commit(self, event: KernelEvent) -> CommitRecord:
