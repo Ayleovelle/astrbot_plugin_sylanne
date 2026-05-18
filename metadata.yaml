@@ -4,7 +4,7 @@ desc: Sovereign Yearning Life-Architecture: Nonhuman Relational Body; starts the
 short_desc: Sylanne 3.0.0-kernel1 kernel iteration.
 version: 3.0.0-kernel1
 author: Aylovelle.S.S
-license: GPL-3.0-or-later
+license: AGPL-3.0-or-later
 repo: "https://github.com/Ayleovelle/astrbot_plugin_sylanne"
 support_platforms: []
 astrbot_version: ">=4.9.2,<5.0.0"

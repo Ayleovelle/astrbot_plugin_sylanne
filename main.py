@@ -2005,27 +2005,14 @@ class EmotionalStatePlugin(Star):
                     ),
                     now=observed_at,
                 )
-                appended = self._append_temp_text_part(
+                self._append_fallibility_auxiliary_state(
                     request,
-                    self._build_auxiliary_state_injection(
-                        "fallibility",
-                        lambda: build_fallibility_prompt_fragment(
-                            fallibility_state,
-                            safety_boundary=safety_boundary,
-                            action_blocking=action_blocking,
-                        ),
-                        decision=injection_decision,
-                    ),
-                    source="fallibility",
-                    budget=injection_budget,
+                    fallibility_state,
+                    safety_boundary=safety_boundary,
+                    action_blocking=action_blocking,
+                    injection_decision=injection_decision,
+                    injection_budget=injection_budget,
                 )
-                if not appended and injection_decision.auxiliary_detail == "full":
-                    self._append_temp_text_part(
-                        request,
-                        self._build_compact_auxiliary_state_injection("fallibility"),
-                        source="fallibility.compact_fallback",
-                        budget=injection_budget,
-                    )
             if group_atmosphere_injection_enabled:
                 group_atmosphere_state = (
                     group_atmosphere_state
@@ -17308,6 +17295,39 @@ class EmotionalStatePlugin(Star):
             f"{state_name} is enabled. Detailed state-tool access is internal; rely on compact state unless the Agent supplies more.\n"
             "</bot_auxiliary_state>"
         )
+
+    def _append_fallibility_auxiliary_state(
+        self,
+        request: ProviderRequest,
+        fallibility_state: FallibilityState,
+        *,
+        safety_boundary: Any,
+        action_blocking: Any,
+        injection_decision: _StateInjectionDecision,
+        injection_budget: _StateInjectionBudget,
+    ) -> bool:
+        appended = self._append_temp_text_part(
+            request,
+            self._build_auxiliary_state_injection(
+                "fallibility",
+                lambda: build_fallibility_prompt_fragment(
+                    fallibility_state,
+                    safety_boundary=safety_boundary,
+                    action_blocking=action_blocking,
+                ),
+                decision=injection_decision,
+            ),
+            source="fallibility",
+            budget=injection_budget,
+        )
+        if not appended and injection_decision.auxiliary_detail == "full":
+            self._append_temp_text_part(
+                request,
+                self._build_compact_auxiliary_state_injection("fallibility"),
+                source="fallibility.compact_fallback",
+                budget=injection_budget,
+            )
+        return appended
 
     def _ensure_persona_state(
         self,

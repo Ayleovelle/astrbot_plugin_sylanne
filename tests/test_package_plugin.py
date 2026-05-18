@@ -18,7 +18,7 @@ def metadata_value(name: str) -> str:
 
 
 PLUGIN_NAME = metadata_value("name")
-PLUGIN_LICENSE = "GPL-3.0-or-later"
+PLUGIN_LICENSE = "AGPL-3.0-or-later"
 EXPECTED_DOC_ASSETS = {
     "docs/assets/lifecycle_model_fit.svg",
     "docs/assets/lifecycle_model_fit_summary.csv",
@@ -215,13 +215,13 @@ class PackagePluginTests(unittest.TestCase):
         self.assertEqual(PLUGIN_NAME, metadata_value("name"))
         self.assertEqual(module.PLUGIN_NAME, metadata_value("name"))
 
-    def test_license_contract_is_gpl_and_documented(self):
+    def test_license_contract_is_agpl_and_documented(self):
         readme = (ROOT / "README.md").read_text(encoding="utf-8")
         license_text = (ROOT / "LICENSE").read_text(encoding="ascii")
 
         self.assertEqual(PLUGIN_LICENSE, metadata_value("license"))
         self.assertIn(PLUGIN_LICENSE, readme)
-        self.assertIn("GNU GENERAL PUBLIC LICENSE", license_text)
+        self.assertIn("GNU AFFERO GENERAL PUBLIC LICENSE", license_text)
         self.assertIn("Version 3", license_text)
 
     def test_package_zip_has_astrbot_plugin_root(self):
@@ -432,7 +432,7 @@ class PluginZipPreflightTests(unittest.TestCase):
             (prefix + "public_api.py", "# public API\n"),
             (prefix + "README.md", "# docs\n"),
             (prefix + "CHANGELOG.md", "# changelog\n"),
-            (prefix + "LICENSE", "GNU GENERAL PUBLIC LICENSE\n"),
+            (prefix + "LICENSE", "GNU AFFERO GENERAL PUBLIC LICENSE\n"),
             (prefix + "logo.png", "PNG\n"),
             (prefix + "requirements.txt", "# no dependencies\n"),
             (prefix + "_conf_schema.json", "{}\n"),

@@ -619,6 +619,63 @@ class AstrBotLifecyclePart05(AstrBotLifecycleTests):
         self.assertIn("bot_auxiliary_state", auxiliary_text)
         self.assertNotIn("query_agent_state(", auxiliary_text)
 
+    def test_fallibility_injection_goes_through_kernel_host_boundary(self):
+        from fallibility_engine import FallibilityState
+
+        plugin = new_plugin(
+            {
+                "assessment_timing": "post",
+                "enable_fallibility_state": True,
+                "fallibility_injection_strength": 0.3,
+            },
+        )
+        self._bind_common_state_hooks(plugin)
+        calls = []
+
+        async def fake_load_fallibility_state(self, session_key, **kwargs):
+            return FallibilityState.initial()
+
+        async def fake_save_fallibility_state(self, session_key, state):
+            pass
+
+        def fake_append_fallibility_auxiliary_state(
+            self,
+            request,
+            fallibility_state,
+            *,
+            safety_boundary,
+            action_blocking,
+            injection_decision,
+            injection_budget,
+        ):
+            calls.append(
+                {
+                    "state": fallibility_state,
+                    "safety_boundary": safety_boundary,
+                    "action_blocking": action_blocking,
+                    "decision": injection_decision,
+                    "budget": injection_budget,
+                },
+            )
+            return self._append_temp_text_part(
+                request,
+                '<bot_auxiliary_state private="true" name="fallibility" detail="host-boundary">hosted</bot_auxiliary_state>',
+                source="fallibility",
+                budget=injection_budget,
+            )
+
+        bind_async(plugin, "_load_fallibility_state", fake_load_fallibility_state)
+        bind_async(plugin, "_save_fallibility_state", fake_save_fallibility_state)
+        plugin._append_fallibility_auxiliary_state = fake_append_fallibility_auxiliary_state.__get__(plugin)
+        request = fake_request(
+            session_id="s-fallibility-host-boundary",
+            prompt="I may have misread that.",
+        )
+
+        asyncio.run(plugin.on_llm_request(FakeEvent("s-fallibility-host-boundary"), request))
+
+        self.assertEqual(1, len(calls))
+        self._find_text_part(request, 'name="fallibility" detail="host-boundary"')
 
     def test_auxiliary_state_injection_full_mode_keeps_legacy_fragments(self):
         from lifelike_learning_engine import LifelikeLearningState
