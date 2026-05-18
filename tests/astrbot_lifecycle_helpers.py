@@ -113,6 +113,10 @@ class AstrBotLifecycleTests(unittest.TestCase):
         memory=0.22,
         disk=0.18,
         now=1000.0,
+        container_profile="standard",
+        container_constrained=False,
+        container_memory_limit_bytes=None,
+        container_cpu_quota=None,
     ):
         plugin._test_now = float(now)
 
@@ -154,6 +158,11 @@ class AstrBotLifecycleTests(unittest.TestCase):
                 "worker_cap": worker_cap,
                 "reason": reason,
                 "sampled_at": self._observed_now(),
+                "container_profile": container_profile,
+                "container_constrained": container_constrained,
+                "container_memory_limit_bytes": container_memory_limit_bytes,
+                "container_cpu_quota": container_cpu_quota,
+                "container_cpu_source": "unit_test",
             }
 
         plugin._observed_now = types.MethodType(fake_now, plugin)

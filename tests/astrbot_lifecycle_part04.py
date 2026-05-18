@@ -1,5 +1,6 @@
 import asyncio
 import collections
+import os
 import sys
 import time
 import types
@@ -719,6 +720,115 @@ class AstrBotLifecyclePart04(AstrBotLifecycleTests):
         self.assertEqual(bg["state_lag_count"], 0)
         self.assertEqual(bg["latest_enqueued"], 24)
         self.assertEqual(bg["last_committed"], 24)
+
+
+    def test_cgroup_limits_drive_container_resource_pressure(self):
+        plugin = new_plugin(
+            {
+                "assessment_timing": "post",
+                "background_post_assessment": True,
+                "enable_dynamic_background_workers": True,
+            },
+        )
+        values = {
+            "/sys/fs/cgroup/memory.max": str(512 * 1024 * 1024),
+            "/sys/fs/cgroup/memory.current": str(384 * 1024 * 1024),
+            "/sys/fs/cgroup/cpu.max": "50000 100000",
+        }
+
+        plugin._observed_now = lambda: 1000.0
+        plugin._read_first_existing_text = lambda paths: next(
+            (values[path] for path in paths if path in values),
+            "",
+        )
+        plugin._disk_pressure_ratio = lambda: (0.20, "unit_test")
+        plugin._cpu_pressure_ratio = lambda: (0.40, "cgroup_cpu_max")
+        if os.name == "nt":
+            plugin._memory_pressure_ratio = lambda: (0.75, "cgroup_memory")
+
+        pressure = plugin._background_post_resource_pressure()
+
+        self.assertEqual(pressure["memory_source"], "cgroup_memory")
+        self.assertEqual(pressure["cpu_source"], "cgroup_cpu_max")
+        self.assertEqual(pressure["container_profile"], "tiny_container")
+        self.assertTrue(pressure["container_constrained"])
+        self.assertEqual(pressure["container_memory_limit_bytes"], 512 * 1024 * 1024)
+        self.assertEqual(pressure["container_cpu_quota"], 0.5)
+        self.assertEqual(pressure["worker_cap"], 1)
+
+
+    def test_low_container_budget_caps_workers_and_exposes_feature_budgets(self):
+        plugin = new_plugin(
+            {
+                "assessment_timing": "post",
+                "background_post_assessment": True,
+                "enable_dynamic_background_workers": True,
+                "background_post_queue_checkpoint_enabled": False,
+            },
+        )
+        self._bind_background_worker_environment(
+            plugin,
+            level="elevated",
+            worker_cap=2,
+            cpu=0.34,
+            memory=0.58,
+            disk=0.42,
+            now=1000.0,
+            container_profile="low_container",
+            container_constrained=True,
+            container_memory_limit_bytes=512 * 1024 * 1024,
+            container_cpu_quota=1.0,
+        )
+
+        diagnostics = asyncio.run(plugin.get_agent_runtime_diagnostics("s-low-container"))
+        bg = diagnostics["background_post_assessment"]
+
+        self.assertEqual(bg["environment_pressure_level"], "elevated")
+        self.assertEqual(bg["environment_worker_cap"], 2)
+        self.assertEqual(bg["environment_container_profile"], "low_container")
+        self.assertTrue(bg["environment_container_constrained"])
+        self.assertEqual(bg["environment_container_memory_limit_bytes"], 512 * 1024 * 1024)
+        self.assertEqual(bg["environment_container_cpu_quota"], 1.0)
+        budgets = bg["environment_feature_budgets"]
+        self.assertTrue(budgets["realtime_dispatch"]["allowed"])
+        self.assertFalse(budgets["memory_embedding_backfill"]["allowed"])
+        self.assertTrue(budgets["sticker_index"]["allowed"])
+        self.assertEqual(
+            budgets["sticker_index"]["reason"],
+            "low_container_sticker_index_cache_only",
+        )
+
+    def test_tiny_container_budget_blocks_sticker_scan_and_embedding_backfill(self):
+        plugin = new_plugin(
+            {
+                "assessment_timing": "post",
+                "background_post_assessment": True,
+                "enable_dynamic_background_workers": True,
+                "background_post_queue_checkpoint_enabled": False,
+            },
+        )
+        self._bind_background_worker_environment(
+            plugin,
+            level="elevated",
+            worker_cap=1,
+            cpu=0.40,
+            memory=0.60,
+            disk=0.45,
+            now=1000.0,
+            container_profile="tiny_container",
+            container_constrained=True,
+            container_memory_limit_bytes=256 * 1024 * 1024,
+            container_cpu_quota=0.5,
+        )
+
+        self.assertTrue(plugin._low_resource_feature_budget("realtime_dispatch")["allowed"])
+        self.assertFalse(plugin._low_resource_feature_budget("sticker_index")["allowed"])
+        self.assertFalse(plugin._low_resource_feature_budget("memory_embedding_backfill")["allowed"])
+
+        diagnostics = asyncio.run(plugin.get_agent_runtime_diagnostics("s-tiny-container"))
+        bg = diagnostics["background_post_assessment"]
+        self.assertEqual(bg["environment_container_profile"], "tiny_container")
+        self.assertEqual(bg["environment_worker_cap"], 1)
 
 
     def test_background_post_checkpoint_recovers_uncommitted_queue(self):

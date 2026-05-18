@@ -3076,6 +3076,112 @@ class EmotionalStatePlugin(Star):
             total += len(active or {})
         return total
 
+
+    def _read_first_existing_text(self, paths: Sequence[str]) -> str:
+        for raw_path in paths:
+            try:
+                path = Path(raw_path)
+                if path.exists():
+                    return path.read_text(encoding="utf-8", errors="ignore").strip()
+            except Exception:
+                continue
+        return ""
+
+    def _parse_cgroup_memory_limit_bytes(self, raw_value: str) -> int | None:
+        value = str(raw_value or "").strip().lower()
+        if not value or value == "max":
+            return None
+        try:
+            parsed = int(value)
+        except ValueError:
+            return None
+        if parsed <= 0 or parsed >= (1 << 60):
+            return None
+        return parsed
+
+    def _cgroup_memory_pressure_ratio(self) -> tuple[float | None, str]:
+        limit = self._parse_cgroup_memory_limit_bytes(
+            self._read_first_existing_text(
+                (
+                    "/sys/fs/cgroup/memory.max",
+                    "/sys/fs/cgroup/memory/memory.limit_in_bytes",
+                ),
+            ),
+        )
+        if limit is None:
+            return None, "cgroup_memory_unlimited"
+        usage_raw = self._read_first_existing_text(
+            (
+                "/sys/fs/cgroup/memory.current",
+                "/sys/fs/cgroup/memory/memory.usage_in_bytes",
+            ),
+        )
+        try:
+            usage = int(str(usage_raw or "").strip())
+        except ValueError:
+            return None, "cgroup_memory_usage_unavailable"
+        return min(1.0, max(0.0, float(usage) / float(limit))), "cgroup_memory"
+
+    def _parse_cgroup_cpu_quota(self, raw_value: str) -> float | None:
+        parts = str(raw_value or "").strip().split()
+        if len(parts) != 2 or parts[0].lower() == "max":
+            return None
+        try:
+            quota = float(parts[0])
+            period = float(parts[1])
+        except ValueError:
+            return None
+        if quota <= 0 or period <= 0:
+            return None
+        return max(0.01, quota / period)
+
+    def _cgroup_cpu_quota(self) -> tuple[float | None, str]:
+        quota = self._parse_cgroup_cpu_quota(
+            self._read_first_existing_text(("/sys/fs/cgroup/cpu.max",)),
+        )
+        if quota is not None:
+            return quota, "cgroup_cpu_max"
+        try:
+            raw_quota = self._read_first_existing_text(("/sys/fs/cgroup/cpu/cpu.cfs_quota_us",))
+            raw_period = self._read_first_existing_text(("/sys/fs/cgroup/cpu/cpu.cfs_period_us",))
+            quota_value = float(raw_quota)
+            period_value = float(raw_period)
+        except ValueError:
+            return None, "cgroup_cpu_unlimited"
+        if quota_value <= 0 or period_value <= 0:
+            return None, "cgroup_cpu_unlimited"
+        return max(0.01, quota_value / period_value), "cgroup_cpu_cfs"
+
+    def _container_resource_profile(self) -> dict[str, Any]:
+        memory_limit = self._parse_cgroup_memory_limit_bytes(
+            self._read_first_existing_text(
+                (
+                    "/sys/fs/cgroup/memory.max",
+                    "/sys/fs/cgroup/memory/memory.limit_in_bytes",
+                ),
+            ),
+        )
+        cpu_quota, cpu_source = self._cgroup_cpu_quota()
+        constrained = memory_limit is not None or cpu_quota is not None
+        low_memory = memory_limit is not None and memory_limit <= 768 * 1024 * 1024
+        low_cpu = cpu_quota is not None and cpu_quota <= 1.0
+        very_low_memory = memory_limit is not None and memory_limit <= 384 * 1024 * 1024
+        very_low_cpu = cpu_quota is not None and cpu_quota <= 0.5
+        profile = "standard"
+        if very_low_memory or very_low_cpu:
+            profile = "tiny_container"
+        elif low_memory or low_cpu:
+            profile = "low_container"
+        elif constrained:
+            profile = "container"
+        return {
+            "container_constrained": constrained,
+            "container_profile": profile,
+            "container_memory_limit_bytes": memory_limit,
+            "container_cpu_quota": cpu_quota,
+            "container_cpu_source": cpu_source,
+        }
+
     def _memory_pressure_ratio(self) -> tuple[float | None, str]:
         try:
             if os.name == "nt":
@@ -3099,6 +3205,9 @@ class EmotionalStatePlugin(Star):
                 if ctypes.windll.kernel32.GlobalMemoryStatusEx(ctypes.byref(status)):
                     return min(1.0, max(0.0, status.dwMemoryLoad / 100.0)), "windows"
                 return None, "windows_unavailable"
+            cgroup_ratio, cgroup_source = self._cgroup_memory_pressure_ratio()
+            if cgroup_ratio is not None:
+                return cgroup_ratio, cgroup_source
             meminfo_path = "/proc/meminfo"
             if os.path.exists(meminfo_path):
                 values: dict[str, float] = {}
@@ -3126,10 +3235,12 @@ class EmotionalStatePlugin(Star):
     def _cpu_pressure_ratio(self) -> tuple[float | None, str]:
         try:
             getloadavg = getattr(os, "getloadavg", None)
-            cpu_count = os.cpu_count() or 1
+            cpu_quota, cpu_quota_source = self._cgroup_cpu_quota()
+            cpu_count = cpu_quota if cpu_quota is not None else float(os.cpu_count() or 1)
             if callable(getloadavg):
                 load_1m, _, _ = getloadavg()
-                return min(1.0, max(0.0, float(load_1m) / max(1, cpu_count))), "loadavg"
+                source = cpu_quota_source if cpu_quota is not None else "loadavg"
+                return min(1.0, max(0.0, float(load_1m) / max(0.01, cpu_count))), source
             return None, "unsupported"
         except Exception:
             return None, "unavailable"
@@ -3194,6 +3305,7 @@ class EmotionalStatePlugin(Star):
         cpu_ratio, cpu_source = self._cpu_pressure_ratio()
         memory_ratio, memory_source = self._memory_pressure_ratio()
         disk_ratio, disk_source = self._disk_pressure_ratio()
+        container_profile = self._container_resource_profile()
         known_ratios = [
             ratio
             for ratio in (cpu_ratio, memory_ratio, disk_ratio)
@@ -3233,6 +3345,16 @@ class EmotionalStatePlugin(Star):
             level = "normal"
             cap = BACKGROUND_POST_TOTAL_WORKER_CAP
             reason = "environment_pressure_normal"
+        if container_profile.get("container_profile") == "tiny_container":
+            cap = min(cap, 1)
+            if level == "normal":
+                level = "elevated"
+                reason = "environment_tiny_container_budget"
+        elif container_profile.get("container_profile") == "low_container":
+            cap = min(cap, 2)
+            if level == "normal":
+                level = "elevated"
+                reason = "environment_low_container_budget"
         pressure = {
             "cpu_load_ratio": cpu_ratio,
             "cpu_source": cpu_source,
@@ -3246,10 +3368,42 @@ class EmotionalStatePlugin(Star):
             "worker_cap": max(1, min(BACKGROUND_POST_TOTAL_WORKER_CAP, cap)),
             "reason": reason,
             "sampled_at": now,
+            **container_profile,
         }
         cache["sampled_at"] = now
         cache["value"] = dict(pressure)
         return pressure
+
+    def _low_resource_feature_budget(self, feature: str) -> dict[str, Any]:
+        pressure = self._background_post_resource_pressure()
+        level = str(pressure.get("level") or "normal")
+        profile = str(pressure.get("container_profile") or "standard")
+        constrained = bool(pressure.get("container_constrained"))
+        budget = {
+            "feature": str(feature or "general"),
+            "allowed": True,
+            "level": level,
+            "container_profile": profile,
+            "container_constrained": constrained,
+            "reason": str(pressure.get("reason") or "environment_pressure_normal"),
+        }
+        if feature == "realtime_dispatch":
+            if level == "critical":
+                budget["allowed"] = False
+            elif profile in {"tiny_container", "low_container"}:
+                budget["reason"] = f"{profile}_realtime_conservative"
+        elif feature == "sticker_index":
+            if level in {"critical", "high"} or profile == "tiny_container":
+                budget["allowed"] = False
+            elif profile == "low_container":
+                budget["reason"] = "low_container_sticker_index_cache_only"
+        elif feature == "memory_embedding_backfill":
+            if level in {"critical", "high", "unknown"} or profile in {"tiny_container", "low_container"}:
+                budget["allowed"] = False
+            elif constrained and level == "elevated":
+                budget["allowed"] = False
+                budget["reason"] = "container_elevated_embedding_backfill_paused"
+        return budget
 
     def _background_post_scale_interval(self, pressure: dict[str, Any]) -> float:
         ready_count = max(0, int(pressure.get("ready_count") or 0))
@@ -4876,6 +5030,19 @@ class EmotionalStatePlugin(Star):
             "environment_cpu_source": resource_pressure.get("cpu_source", ""),
             "environment_memory_source": resource_pressure.get("memory_source", ""),
             "environment_disk_source": resource_pressure.get("disk_source", ""),
+            "environment_container_profile": resource_pressure.get("container_profile", "standard"),
+            "environment_container_constrained": bool(resource_pressure.get("container_constrained")),
+            "environment_container_memory_limit_bytes": resource_pressure.get("container_memory_limit_bytes"),
+            "environment_container_cpu_quota": resource_pressure.get("container_cpu_quota"),
+            "environment_container_cpu_source": resource_pressure.get("container_cpu_source", ""),
+            "environment_feature_budgets": {
+                name: self._low_resource_feature_budget(name)
+                for name in (
+                    "realtime_dispatch",
+                    "sticker_index",
+                    "memory_embedding_backfill",
+                )
+            },
             "worker_ready_count": worker_pressure["ready_count"],
             "worker_oldest_ready_age_seconds": round(
                 worker_pressure["oldest_ready_age_seconds"],
@@ -8176,6 +8343,9 @@ class EmotionalStatePlugin(Star):
             if quiet_reason:
                 return quiet_reason
         if not force:
+            budget = self._low_resource_feature_budget("proactive_dispatch")
+            if not budget.get("allowed", True):
+                return str(budget.get("reason") or "environment_pressure_critical")
             pressure = self._background_post_resource_pressure()
             if pressure.get("level") == "critical":
                 return str(pressure.get("reason") or "environment_pressure_critical")
@@ -9310,6 +9480,9 @@ class EmotionalStatePlugin(Star):
         if not force and self._realtime_chat_on_cooldown(session_key):
             return "cooldown_active"
         if not force:
+            budget = self._low_resource_feature_budget("realtime_dispatch")
+            if not budget.get("allowed", True):
+                return str(budget.get("reason") or "environment_pressure_critical")
             pressure = self._background_post_resource_pressure()
             if pressure.get("level") == "critical":
                 return str(pressure.get("reason") or "environment_pressure_critical")
@@ -16479,8 +16652,10 @@ class EmotionalStatePlugin(Star):
             if not changed:
                 return
             pressure = self._background_post_resource_pressure()
+            budget = self._low_resource_feature_budget("memory_embedding_backfill")
             if (
                 pressure.get("level") not in {"high", "critical", "unknown"}
+                and budget.get("allowed", True)
                 and self._sylanne_memory_record_embedding_budget_available(
                     session_key,
                     now=latest_now,
@@ -20197,13 +20372,14 @@ class EmotionalStatePlugin(Star):
         root_signature = self._sticker_index_root_signature(settings)
         cached = cache.get(cache_key)
         pressure = self._background_post_resource_pressure()
+        budget = self._low_resource_feature_budget("sticker_index")
         if (
             cached
             and (ttl <= 0 or now - float(cached.get("indexed_at", 0.0)) <= ttl)
             and tuple(cached.get("root_signature") or ()) == root_signature
         ):
             return list(cached.get("items") or [])
-        if pressure.get("level") in {"critical", "high"}:
+        if pressure.get("level") in {"critical", "high"} or not budget.get("allowed", True):
             return []
         items = await asyncio.to_thread(index_local_stickers, settings)
         cache[cache_key] = {
