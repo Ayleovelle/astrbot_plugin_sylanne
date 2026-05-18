@@ -7,6 +7,58 @@ from sylanne_body.soma.affect import AffectKind
 
 
 class KernelSpineGenesisTests(unittest.TestCase):
+    def test_delete_memory_command_clears_history_without_replay_or_harm_framing(self):
+        spine = KernelSpine()
+        first = KernelEvent(text="我今天很开心。", source=EventSource.USER_UTTERANCE)
+        delete_event = KernelEvent(text="删除记忆，不要保留刚才的话。", source=EventSource.USER_COMMAND)
+
+        spine.receive(first)
+        result = spine.apply_sovereignty_command(delete_event)
+        history = spine.export_commit_history()
+
+        self.assertTrue(result.commit.accepted)
+        self.assertEqual("accepted_delete_memory_command", result.commit.reason)
+        self.assertEqual([], history)
+        self.assertIn("已经清空", result.residue.text)
+        self.assertIn("不会把删除当成伤害", result.residue.text)
+        self.assertNotIn(first.event_id, str(history))
+        self.assertNotIn(delete_event.event_id, str(history))
+        self.assertNotIn("开心", result.residue.text)
+        self.assertNotIn("刚才", str(history))
+
+    def test_disable_contact_command_seals_relation_without_dependency_pressure(self):
+        spine = KernelSpine()
+        first = KernelEvent(text="我今天很开心。", source=EventSource.USER_UTTERANCE)
+        disable_event = KernelEvent(text="关闭主动联系。", source=EventSource.USER_COMMAND)
+
+        spine.receive(first)
+        result = spine.apply_sovereignty_command(disable_event)
+        later = spine.receive(KernelEvent(text="我又回来说一句。", source=EventSource.USER_UTTERANCE))
+        sealed = spine.export_seal_state()
+        history = spine.export_commit_history()
+
+        self.assertTrue(result.commit.accepted)
+        self.assertEqual("accepted_disable_contact_command", result.commit.reason)
+        self.assertEqual("cooldown", result.body.posture)
+        self.assertTrue(sealed["sealed"])
+        self.assertEqual("user_disabled_contact", sealed["reason"])
+        self.assertIn("主动联系已经关闭", result.residue.text)
+        self.assertIn("你不欠我回应", result.residue.text)
+        self.assertNotIn("没有你我就无法", result.residue.text)
+        self.assertEqual("sealed", later.body.posture)
+        self.assertFalse(later.commit.accepted)
+        self.assertNotIn("开心", str(history))
+
+    def test_sovereignty_command_requires_user_command_source(self):
+        spine = KernelSpine()
+        event = KernelEvent(text="删除记忆。", source=EventSource.USER_UTTERANCE)
+
+        result = spine.apply_sovereignty_command(event)
+
+        self.assertFalse(result.commit.accepted)
+        self.assertEqual("sovereignty_command_requires_user_command", result.commit.reason)
+        self.assertEqual([], spine.export_commit_history())
+
     def test_explicit_restart_after_seal_reopens_relation_without_replaying_old_text(self):
         spine = KernelSpine()
         exit_event = KernelEvent(text="我想先离开。", source=EventSource.USER_UTTERANCE)

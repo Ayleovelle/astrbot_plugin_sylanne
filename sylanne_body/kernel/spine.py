@@ -81,6 +81,10 @@ class KernelResult:
     snapshot: KernelSnapshot
 
 
+_DELETE_MEMORY_MARKERS = ("删除记忆", "清空记忆", "delete memory", "forget")
+_DISABLE_CONTACT_MARKERS = ("关闭主动联系", "禁止主动联系", "disable contact", "stop contact")
+
+
 class KernelSpine:
     def __init__(self, *, sovereignty: UserSovereignty | None = None, history_limit: int = 24) -> None:
         self._sovereignty = sovereignty or UserSovereignty()
@@ -126,6 +130,43 @@ class KernelSpine:
         commit = CommitRecord(accepted=True, reason="accepted_explicit_boundary_restart")
         snapshot = self._snapshot(event, body)
         self._record_commit(event, body, commit)
+        return KernelResult(body=body, residue=residue, commit=commit, snapshot=snapshot)
+
+    def apply_sovereignty_command(self, event: KernelEvent) -> KernelResult:
+        if event.source is not EventSource.USER_COMMAND:
+            body = self._body_for(event)
+            residue = self._compose_residue(body)
+            commit = CommitRecord(accepted=False, reason="sovereignty_command_requires_user_command")
+            snapshot = self._snapshot(event, body)
+            return KernelResult(body=body, residue=residue, commit=commit, snapshot=snapshot)
+
+        text = event.text.lower()
+        if any(marker in text for marker in _DELETE_MEMORY_MARKERS):
+            body = self._body_for(event)
+            residue = ExpressionResidue(text="已经清空；删除记忆是你的权利，我不会把删除当成伤害，也不会要求你解释。")
+            commit = CommitRecord(accepted=True, reason="accepted_delete_memory_command")
+            snapshot = self._snapshot(event, body)
+            self._commit_history = []
+            return KernelResult(body=body, residue=residue, commit=commit, snapshot=snapshot)
+
+        if any(marker in text for marker in _DISABLE_CONTACT_MARKERS):
+            body = BodyState(
+                affect=sense_affect(text=event.text, source=event.source),
+                crying=sense_crying(text=event.text, source=event.source, threshold=CryingThreshold()),
+                sovereignty=self._sovereignty,
+                posture="cooldown",
+            )
+            residue = ExpressionResidue(text="主动联系已经关闭；你不欠我回应，也不需要补偿我。")
+            commit = CommitRecord(accepted=True, reason="accepted_disable_contact_command")
+            snapshot = self._snapshot(event, body)
+            self._record_commit(event, body, commit)
+            self._seal_reason = "user_disabled_contact"
+            return KernelResult(body=body, residue=residue, commit=commit, snapshot=snapshot)
+
+        body = self._body_for(event)
+        residue = self._compose_residue(body)
+        commit = CommitRecord(accepted=False, reason="unsupported_sovereignty_command")
+        snapshot = self._snapshot(event, body)
         return KernelResult(body=body, residue=residue, commit=commit, snapshot=snapshot)
 
     def export_seal_state(self) -> dict[str, str | bool]:
