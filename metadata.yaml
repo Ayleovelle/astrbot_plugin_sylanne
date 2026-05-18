@@ -4,7 +4,7 @@ desc: Soulful Yearning Lifelike AstrBot Neural Narrative Engine; maintains emoti
 short_desc: Soulful Yearning Lifelike AstrBot Neural Narrative Engine; Sylanne.
 version: 3.0.2
 author: Aylovelle.S.S
-license: GPL-3.0-or-later
+license: AGPL-3.0-or-later
 repo: "https://github.com/Ayleovelle/astrbot_plugin_sylanne"
 support_platforms: []
 astrbot_version: ">=4.9.2,<5.0.0"

@@ -59,7 +59,7 @@ $env:ASTRBOT_EXPECT_PLUGIN_DISPLAY_NAME = "Sylanne"
 - 脚本，
 - 文档，
 - `CHANGELOG.md`，
-- `LICENSE` 和 GPL 元数据，
+- `LICENSE` 和 AGPL 元数据，
 - 持久化计划文件。
 
 不要提交生成的 `dist/` 或 `output/` 产物。
@@ -90,7 +90,7 @@ $env:ASTRBOT_EXPECT_PLUGIN_DISPLAY_NAME = "Sylanne"
 - 预检确认 zip 内包含运行时根文件 `__init__.py`、`main.py`、`emotion_engine.py`、`humanlike_engine.py`、`lifelike_learning_engine.py`、`personality_drift_engine.py`、`realtime_chat_engine.py`、`realtime_chat_input.py`、`integrated_self.py`、`moral_repair_engine.py`、`fallibility_engine.py`、`psychological_screening.py`、`prompts.py` 和 `public_api.py`；
 - 预检确认 zip 内包含依赖声明 `requirements.txt`；
 - 预检确认 zip 内包含 `CHANGELOG.md`，避免 AstrBot 更新日志页显示空状态；
-- 预检确认 zip 内包含 `LICENSE`，且 `metadata.yaml` 声明 `license: GPL-3.0-or-later`；
+- 预检确认 zip 内包含 `LICENSE`，且 `metadata.yaml` 声明 `license: AGPL-3.0-or-later`；
 - 预检确认 zip 内 `metadata.yaml` 的 `name:` 与 `ASTRBOT_EXPECT_PLUGIN` 匹配；
 - zip 使用相对 POSIX 路径，且不包含不安全的 `.` / `..` 路径段；
 - 任何 `uninstall-failed` 调用都只针对临时的 `plugin_upload_<plugin>` 失败上传目录，并且使用 `delete_config=false`、`delete_data=false`；

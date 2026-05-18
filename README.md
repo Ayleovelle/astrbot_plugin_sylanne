@@ -6,7 +6,7 @@
 ![AstrBot >=4.9.2,<5.0.0](https://img.shields.io/badge/AstrBot-%3E%3D4.9.2%2C%3C5.0.0-green)
 ![Python 3.10+](https://img.shields.io/badge/Python-3.10%2B-yellow)
 ![协议 astrbot.emotion_state.v2](https://img.shields.io/badge/schema-astrbot.emotion__state.v2-purple)
-![许可证 GPL-3.0-or-later](https://img.shields.io/badge/license-GPL--3.0--or--later-red)
+![许可证 AGPL-3.0-or-later](https://img.shields.io/badge/license-AGPL--3.0--or--later-red)
 ![💩 发酵指数](https://raw.githubusercontent.com/Ayleovelle/astrbot_plugin_sylanne/main/docs/reports/fuck-u-code-fermentation.svg)
 
 ## 介绍
@@ -132,7 +132,7 @@ _“逻辑可以共赏，但为你偏置的权重从不开源。”_
 | 当前版本 | `3.0.2` |
 | AstrBot 版本 | `>=4.9.2,<5.0.0` |
 | Python | `3.10+` |
-| 许可证 | `GPL-3.0-or-later` |
+| 许可证 | `AGPL-3.0-or-later` |
 | 运行时第三方依赖 | 当前无额外依赖，见 `requirements.txt` |
 
 `3.0.0` 是 3.0 Relational Self Genesis 路线的首个正式稳定版。Sylanne 已经完成 Self-Interpretation Engine、Relational Time Layer、Co-Evolution Model、Turning Point Memory + Replay 和 Lineage / Branching / WebUI 观察舱闭环：关键互动会在插件内部被理解、进入关系时间、调制表达倾向、形成 bounded replay，并被整理为 speaker/group 隔离的谱系分支观察信号。所有高风险关系/自我推断默认仍只留在插件内部运行态和本地诊断中，不保存完整对话文本，不暴露 `relationship_time_weight`，不把 candidate 写成事实，也不新增 public API 读取入口。
@@ -425,7 +425,7 @@ _“逻辑可以共赏，但为你偏置的权重从不开源。”_
 | 57 | 已完成 | 要求上传预检和发布清单包含依赖声明 | 172 个单元测试、py_compile、打包构建、打包预检、Node 语法检查、git diff 检查、泄漏扫描 |
 | 58 | 已完成 | 锁定 README 中的 `py_compile` 命令和失败上传清理文档到当前发布包契约 | 172 个单元测试、py_compile、打包构建、打包预检、Node 语法检查、git diff 检查、泄漏扫描 |
 | 59 | 已完成 | 新增道德修复状态模块，作为欺骗/作恶模拟的安全替代方案 | 193 个单元测试、py_compile、json.tool、打包构建、打包预检、Node 语法检查、git diff 检查、泄漏扫描 |
-| 60 | 已完成 | 声明 GPL-3.0-or-later 许可证，并把 LICENSE 纳入发布包契约 | 194 个单元测试、py_compile、json.tool、打包构建、打包预检、Node 语法检查、git diff 检查、泄漏扫描 |
+| 60 | 已完成 | 声明 AGPL-3.0-or-later 许可证，并把 LICENSE 纳入发布包契约 | 194 个单元测试、py_compile、json.tool、打包构建、打包预检、Node 语法检查、git diff 检查、泄漏扫描 |
 | 61 | 已完成 | 构建综合自我状态总线，融合情绪、拟人、道德修复和心理快照为统一公共契约 | 116 个定向测试、py_compile、json.tool |
 | 62 | 已完成 | 增加基于证据权重的因果轨迹摘要，使各模块状态变化可解释 | `tests/test_integrated_self.py`、`tests/test_public_api.py` |
 | 63 | 已完成 | 增加确定性回放/模拟包，用于不触碰 KV 存储地测试状态演化 | 确定性回放包校验和测试 |
@@ -3008,7 +3008,7 @@ py -3.13 scripts\package_plugin.py --output dist\astrbot_plugin_sylanne.zip
 | 必要文件 | 包含 `__init__.py`、`agent_identity.py`、`metadata.yaml`、`main.py`、`emotion_engine.py`、`group_atmosphere_engine.py`、`humanlike_engine.py`、`lifelike_learning_engine.py`、`personality_drift_engine.py`、`realtime_chat_engine.py`、`realtime_chat_input.py`、`integrated_self.py`、`moral_repair_engine.py`、`memory_engine.py`、`fallibility_engine.py`、`psychological_screening.py`、`prompts.py`、`public_api.py`、`logo.png`、`README.md`、`CHANGELOG.md`、`LICENSE`、`requirements.txt`、`_conf_schema.json`、`docs/assets/lifecycle_model_fit.svg`、`docs/assets/lifecycle_model_fit_summary.csv`、`docs/assets/lifecycle_model_fit_table.md`、`docs/assets/runtime_overview.svg`、`docs/assets/sylanne-mascot.gif`、`docs/assets/sylanne-mascot-card.svg`、`docs/assets/theory_feature_matrix_overhead.png`、`docs/assets/theory_feature_matrix_overhead.svg`、`docs/assets/theory_lifecycle_fit_explanation.png`、`docs/assets/theory_lifecycle_fit_explanation.svg`、`docs/assets/workflow_and_proactive.svg`、`pages/memory-settings/index.html`、`pages/memory-settings/app.js`、`pages/memory-settings/style.css`。 |
 | 插件身份 | zip 内 `metadata.yaml name:` 必须等于 `astrbot_plugin_sylanne`。 |
 | 排除目录 | 不应包含 `tests/`、`scripts/`、`output/`、`dist/`、`raw/`、`__pycache__/`、`.git/`，也不应包含四个 `*_literature_kb/` 目录。 |
-| 许可证 | 发布包必须包含 `LICENSE`，协议为 `GPL-3.0-or-later`。 |
+| 许可证 | 发布包必须包含 `LICENSE`，协议为 `AGPL-3.0-or-later`。 |
 
 ### AstrBot WebUI 上传验证
 
@@ -3486,18 +3486,18 @@ consequences = await emotion.get_emotion_consequences(event)
 
 ## 独立来源声明
 
-本插件的运行代码、配置 schema、公共 API、测试、公式推导和模型实现均由本项目独立编写。公式和模型不是外部项目的派生实现，而是基于公开文献证据自行总结、抽象、推导并落地为工程状态机；这不改变本项目的 `GPL-3.0-or-later` 授权边界。
+本插件的运行代码、配置 schema、公共 API、测试、公式推导和模型实现均由本项目独立编写。公式和模型不是外部项目的派生实现，而是基于公开文献证据自行总结、抽象、推导并落地为工程状态机；这不改变本项目的 `AGPL-3.0-or-later` 授权边界。
 
 ---
 
 ## 许可证
 
-本仓库采用 `GPL-3.0-or-later` 开源协议。完整条款见仓库根目录的 `LICENSE`；发布包也会包含该文件。
+本仓库采用 `AGPL-3.0-or-later` 开源协议。完整条款见仓库根目录的 `LICENSE`；发布包也会包含该文件。若你修改 Sylanne 并通过网络服务让用户交互使用，也必须按 AGPL 向这些用户提供对应修改版源码。
 
 `metadata.yaml` 中同步声明：
 
 ```yaml
-license: GPL-3.0-or-later
+license: AGPL-3.0-or-later
 ```
 
 ## 星星记录表
