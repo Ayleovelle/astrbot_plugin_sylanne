@@ -549,6 +549,45 @@ class AstrBotLifecyclePart05(AstrBotLifecycleTests):
         self.assertNotIn("query_agent_state(", auxiliary_text)
 
 
+    def test_lifelike_learning_enabled_builds_relationship_candidate_without_warning(self):
+        from lifelike_learning_engine import JargonEntry, LifelikeLearningState
+
+        plugin = new_plugin(
+            {
+                "assessment_timing": "post",
+                "enable_lifelike_learning": True,
+                "lifelike_learning_injection_strength": 0.0,
+            },
+        )
+        self._bind_common_state_hooks(plugin)
+        warnings = []
+
+        async def fake_load_lifelike_state(self, session_key, **kwargs):
+            state = LifelikeLearningState.initial()
+            state.lexicon["桥隧猫"] = JargonEntry(
+                term="桥隧猫",
+                candidate_meanings=["熬夜改模型的人"],
+                confidence=0.8,
+                evidence_count=2,
+            )
+            return state
+
+        async def fake_save_lifelike_state(self, session_key, state):
+            pass
+
+        bind_async(plugin, "_load_lifelike_learning_state", fake_load_lifelike_state)
+        bind_async(plugin, "_save_lifelike_learning_state", fake_save_lifelike_state)
+        plugin._log_warning = warnings.append
+        request = fake_request(session_id="s-life-summary", prompt="桥隧猫今天在吗？")
+
+        event = FakeEvent("s-life-summary", message="桥隧猫今天在吗？")
+        asyncio.run(plugin.on_llm_request(event, request))
+
+        closed_loop = plugin._understanding_closed_loop_state()["s-life-summary"]
+        self.assertIn("relationship_candidate_summary", closed_loop)
+        self.assertEqual(warnings, [])
+
+
     def test_fallibility_enabled_with_zero_strength_updates_without_injection(self):
         from fallibility_engine import FallibilityState
 

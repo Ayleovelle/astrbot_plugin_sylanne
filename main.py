@@ -1163,16 +1163,20 @@ class EmotionalStatePlugin(Star):
         self._append_relational_self_context_if_any(request, session_key)
         if lifelike_enabled:
             try:
+                previous_lifelike_state = await self._load_lifelike_learning_state(
+                    session_key,
+                    now=observed_at,
+                )
                 relationship_source = dict(lifelike_state_to_public_payload(
-                    lifelike_learning_state,
+                    previous_lifelike_state,
                     session_key=session_key,
                     exposure="internal",
-                )) if lifelike_learning_state is not None else {}
+                ))
                 relationship_summary = build_relationship_candidate_summary(
                     relationship_source,
                     session_key=session_key,
                     speaker_key=identity.speaker_track_id,
-                    group_key=identity.conversation_id if identity.is_group else "",
+                    group_key=identity.group_id or "",
                 )
                 self._understanding_closed_loop_state().setdefault(session_key, {})[
                     "relationship_candidate_summary"

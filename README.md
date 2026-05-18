@@ -2032,6 +2032,8 @@ Sylanne 不再依赖外部长期记忆插件。每次稳定用户输入、主动
 | `sylanne_memory_idle_commit_delay_seconds` | float | `4.0` | 用户分条输入或接管回复尚未稳定时，先把记忆事件排队；会话安静达到该秒数后再合并写入，避免半句话污染长期记忆。 |
 | `sylanne_memory_vector_retrieval_enabled` | bool | `true` | 启用语义向量召回；AstrBot 中有 Embedding 提供商时会在关键词/关联图无命中且已有向量记录时叠加余弦相似度，query embedding 会短时缓存，失败时回退关键词和关联图检索。 |
 | `sylanne_memory_embedding_provider_id` | string | `""` | 原生配置中声明为 provider 选择项；也推荐在插件详情页的『记忆设置』Page 中下拉或点击卡片选择。留空时自动使用第一个可用 Embedding 提供商。 |
+| `sylanne_memory_record_embedding_min_interval_seconds` | float | `300.0` | 写入侧为新记忆生成 `semantic_embedding` 的最低间隔；默认同一会话至少间隔 5 分钟，避免密集聊天持续调用 Embedding Provider。 |
+| `sylanne_memory_record_embedding_max_per_flush` | int | `1` | 单次 idle flush 最多为多少条新记忆补向量；设为 `0` 可保留向量召回但停止写入侧新建向量。 |
 | `sylanne_memory_debug_view_enabled` | bool | `false` | 允许查看记忆摘要、深度、召回评分和自动推导 dynamics；只用于排障，不提供参数覆盖。 |
 | `allow_sylanne_memory_reset_backdoor` | bool | `true` | 是否允许在严重误记、上下文污染或异常状态时重置当前会话自有记忆。 |
 
