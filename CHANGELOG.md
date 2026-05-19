@@ -2,6 +2,21 @@
 
 本文件用于 AstrBot 插件市场/管理页展示更新内容。更完整的设计说明、公式推导、测试矩阵和维护手册见 `README.md`。
 
+## 3.0.6
+
+发布日期：2026-05-20
+
+### 修复
+
+- 新增 Claude/Anthropic model hint 识别；当 Claude 请求已处在 tool-use/tool-result 链路中时，Sylanne 将上下文归属交还给 AstrBot Agent，不再追加临时状态上下文打断工具协议。
+- Claude 普通聊天仍沿用 Sylanne 状态注入，避免把 Claude/Anthropic provider 粗暴整体降级或厂商锁定。
+- LLM 响应拦截新增 Anthropic `stop_reason=tool_use` 与 content block `type=tool_use/tool_result` 识别，工具调用中间响应会继续放行，不被实时聊天接管。
+
+### 验证
+
+- 新增 Claude tool-use 请求、普通 Claude 请求和 Claude tool-use 响应回归测试。
+- 保留现有 Gemini/OpenAI 工具裁剪与状态注入契约测试。
+
 ## 3.0.5
 
 发布日期：2026-05-19

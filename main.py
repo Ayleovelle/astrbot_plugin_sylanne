@@ -535,7 +535,7 @@ class _StateInjectionBudget:
 
     @property
     def agent_owned_context(self) -> bool:
-        return False
+        return self.compat_mode in {"claude_tool_use"}
 
 
 @dataclass
@@ -677,7 +677,7 @@ def get_emotional_state_plugin(context: Context) -> Any | None:
     PLUGIN_NAME,
     "Aylovelle.S.S",
     "Soulful Yearning Lifelike AstrBot Neural Narrative Engine：维护情绪、人格、记忆、氛围和表达节奏的 Sylanne",
-    "3.0.5",
+    "3.0.6",
     "",
 )
 class EmotionalStatePlugin(Star):
@@ -9655,8 +9655,16 @@ class EmotionalStatePlugin(Star):
             finish_reason = str(
                 self._read_response_field(node, "finish_reason") or "",
             ).strip().lower()
-            if finish_reason in {"tool_calls", "function_call"}:
+            stop_reason = str(
+                self._read_response_field(node, "stop_reason") or "",
+            ).strip().lower()
+            if finish_reason in {"tool_calls", "function_call"} or stop_reason in {"tool_use", "tool_calls", "function_call"}:
                 return True
+            content = self._read_response_field(node, "content")
+            if isinstance(content, (list, tuple)):
+                for item in content:
+                    if isinstance(item, dict) and str(item.get("type") or "").strip().lower() in {"tool_use", "tool_result"}:
+                        return True
             for field in (
                 "tool_calls",
                 "function_call",
@@ -18342,6 +18350,8 @@ class EmotionalStatePlugin(Star):
         )
         max_parts = max(1, self._cfg_int("state_injection_max_parts", 8))
         compat_mode = ""
+        if self._request_model_hint_is_claude(model_hint) and self._request_has_tool_context(request):
+            compat_mode = "claude_tool_use"
         return _StateInjectionBudget(
             session_key=session_key,
             request_chars_before=self._estimate_provider_request_chars(request),
@@ -18389,6 +18399,11 @@ class EmotionalStatePlugin(Star):
             seen.add(text)
             compact.append(text)
         return " | ".join(compact)
+
+    def _request_model_hint_is_claude(self, model_hint: str) -> bool:
+        normalized = re.sub(r"[^a-z0-9]+", " ", str(model_hint or "").lower())
+        terms = set(normalized.split())
+        return "claude" in terms or "anthropic" in terms
 
     async def _request_model_hint_for_event(
         self,
@@ -18624,6 +18639,14 @@ class EmotionalStatePlugin(Star):
             role = str(value.get("role") or "").strip().lower()
             if role in {"tool", "function"}:
                 return True
+            stop_reason = str(value.get("stop_reason") or "").strip().lower()
+            if stop_reason in {"tool_use", "tool_calls", "function_call"}:
+                return True
+            content = value.get("content")
+            if isinstance(content, (list, tuple)):
+                for item in content:
+                    if isinstance(item, dict) and str(item.get("type") or "").strip().lower() in {"tool_use", "tool_result"}:
+                        return True
             for key in (
                 "tool_calls",
                 "function_call",
@@ -18640,6 +18663,14 @@ class EmotionalStatePlugin(Star):
         role = getattr(value, "role", None)
         if str(role or "").strip().lower() in {"tool", "function"}:
             return True
+        stop_reason = getattr(value, "stop_reason", None)
+        if str(stop_reason or "").strip().lower() in {"tool_use", "tool_calls", "function_call"}:
+            return True
+        content = getattr(value, "content", None)
+        if isinstance(content, (list, tuple)):
+            for item in content:
+                if isinstance(item, dict) and str(item.get("type") or "").strip().lower() in {"tool_use", "tool_result"}:
+                    return True
         for key in (
             "tool_calls",
             "function_call",

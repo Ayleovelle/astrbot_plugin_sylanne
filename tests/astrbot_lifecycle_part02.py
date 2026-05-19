@@ -75,6 +75,108 @@ class AstrBotLifecyclePart02(AstrBotLifecycleTests):
             {item.get("source") for item in injection["skipped"]},
         )
 
+    def test_claude_tool_use_request_yields_agent_owned_context(self):
+        plugin = new_plugin(
+            {
+                "assessment_timing": "post",
+                "enable_realtime_chat": True,
+                "realtime_chat_style_prompt_enabled": True,
+            },
+        )
+        self._bind_common_state_hooks(plugin)
+
+        async def fake_get_current_chat_provider_id(*, umo):
+            return "anthropic/claude-sonnet-4-6"
+
+        plugin.context = SimpleNamespace(
+            get_current_chat_provider_id=fake_get_current_chat_provider_id,
+        )
+        request = fake_request(session_id="s-claude-tool-use", prompt="继续工具结果")
+        request.contexts = [
+            {
+                "role": "assistant",
+                "content": [
+                    {
+                        "type": "tool_use",
+                        "id": "toolu_1",
+                        "name": "search_web",
+                        "input": {"query": "Sylanne"},
+                    },
+                ],
+            },
+            {
+                "role": "user",
+                "content": [
+                    {
+                        "type": "tool_result",
+                        "tool_use_id": "toolu_1",
+                        "content": "ok",
+                    },
+                ],
+            },
+        ]
+
+        asyncio.run(plugin.on_llm_request(FakeEvent("s-claude-tool-use"), request))
+
+        self.assertEqual(request.extra_user_content_parts, [])
+        diagnostics = asyncio.run(
+            plugin.get_agent_runtime_diagnostics("s-claude-tool-use"),
+        )
+        injection = diagnostics["state_injection"]
+        self.assertEqual(injection["compat_mode"], "claude_tool_use")
+        self.assertEqual(injection["context_owner"], "agent")
+        self.assertIn("agent_owned_context", injection["warnings"])
+
+
+    def test_claude_without_tool_context_keeps_sylanne_injection(self):
+        plugin = new_plugin(
+            {
+                "assessment_timing": "post",
+                "enable_realtime_chat": True,
+                "realtime_chat_style_prompt_enabled": True,
+            },
+        )
+        self._bind_common_state_hooks(plugin)
+
+        async def fake_get_current_chat_provider_id(*, umo):
+            return "claude-opus-4-7"
+
+        plugin.context = SimpleNamespace(
+            get_current_chat_provider_id=fake_get_current_chat_provider_id,
+        )
+        request = fake_request(session_id="s-claude-normal", prompt="hello")
+
+        asyncio.run(plugin.on_llm_request(FakeEvent("s-claude-normal"), request))
+
+        injected = "\n".join(self._request_text_parts(request))
+        self.assertIn("bot_emotion_state", injected)
+        diagnostics = asyncio.run(
+            plugin.get_agent_runtime_diagnostics("s-claude-normal"),
+        )
+        self.assertEqual(diagnostics["state_injection"]["compat_mode"], "")
+        self.assertEqual(
+            diagnostics["state_injection"]["context_owner"],
+            "sylanne_plugin",
+        )
+
+
+    def test_claude_tool_use_response_is_not_intercepted(self):
+        plugin = new_plugin()
+        response = SimpleNamespace(
+            completion_text="",
+            stop_reason="tool_use",
+            content=[
+                {
+                    "type": "tool_use",
+                    "id": "toolu_2",
+                    "name": "search_web",
+                    "input": {"query": "Sylanne"},
+                },
+            ],
+        )
+
+        self.assertTrue(plugin._response_has_tool_call_payload(response))
+
 
     def test_gemini_request_with_only_sylanne_tools_removes_tools_and_disables_tool_choice(self):
         plugin = new_plugin(
