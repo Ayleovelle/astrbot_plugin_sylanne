@@ -677,7 +677,7 @@ def get_emotional_state_plugin(context: Context) -> Any | None:
     PLUGIN_NAME,
     "Aylovelle.S.S",
     "Soulful Yearning Lifelike AstrBot Neural Narrative Engine：维护情绪、人格、记忆、氛围和表达节奏的 Sylanne",
-    "3.0.4",
+    "3.0.5",
     "",
 )
 class EmotionalStatePlugin(Star):
@@ -3087,6 +3087,26 @@ class EmotionalStatePlugin(Star):
                 continue
         return ""
 
+    def _cgroup_memory_working_set_bytes(self, usage: int) -> int:
+        stat_text = self._read_first_existing_text(
+            (
+                "/sys/fs/cgroup/memory.stat",
+                "/sys/fs/cgroup/memory/memory.stat",
+            ),
+        )
+        if not stat_text:
+            return max(0, usage)
+        inactive_file = 0
+        for line in stat_text.splitlines():
+            parts = line.strip().split()
+            if len(parts) != 2 or parts[0] not in {"inactive_file", "total_inactive_file"}:
+                continue
+            try:
+                inactive_file = max(inactive_file, int(parts[1]))
+            except ValueError:
+                continue
+        return max(0, usage - inactive_file)
+
     def _parse_cgroup_memory_limit_bytes(self, raw_value: str) -> int | None:
         value = str(raw_value or "").strip().lower()
         if not value or value == "max":
@@ -3120,7 +3140,8 @@ class EmotionalStatePlugin(Star):
             usage = int(str(usage_raw or "").strip())
         except ValueError:
             return None, "cgroup_memory_usage_unavailable"
-        return min(1.0, max(0.0, float(usage) / float(limit))), "cgroup_memory"
+        working_set = self._cgroup_memory_working_set_bytes(usage)
+        return min(1.0, max(0.0, float(working_set) / float(limit))), "cgroup_memory_working_set"
 
     def _parse_cgroup_cpu_quota(self, raw_value: str) -> float | None:
         parts = str(raw_value or "").strip().split()
@@ -3184,6 +3205,9 @@ class EmotionalStatePlugin(Star):
 
     def _memory_pressure_ratio(self) -> tuple[float | None, str]:
         try:
+            cgroup_ratio, cgroup_source = self._cgroup_memory_pressure_ratio()
+            if cgroup_ratio is not None:
+                return cgroup_ratio, cgroup_source
             if os.name == "nt":
                 import ctypes
 
@@ -3205,9 +3229,6 @@ class EmotionalStatePlugin(Star):
                 if ctypes.windll.kernel32.GlobalMemoryStatusEx(ctypes.byref(status)):
                     return min(1.0, max(0.0, status.dwMemoryLoad / 100.0)), "windows"
                 return None, "windows_unavailable"
-            cgroup_ratio, cgroup_source = self._cgroup_memory_pressure_ratio()
-            if cgroup_ratio is not None:
-                return cgroup_ratio, cgroup_source
             meminfo_path = "/proc/meminfo"
             if os.path.exists(meminfo_path):
                 values: dict[str, float] = {}
@@ -3375,29 +3396,30 @@ class EmotionalStatePlugin(Star):
         return pressure
 
     def _low_resource_feature_budget(self, feature: str) -> dict[str, Any]:
+        feature_name = str(feature or "general")
         pressure = self._background_post_resource_pressure()
         level = str(pressure.get("level") or "normal")
         profile = str(pressure.get("container_profile") or "standard")
         constrained = bool(pressure.get("container_constrained"))
         budget = {
-            "feature": str(feature or "general"),
+            "feature": feature_name,
             "allowed": True,
             "level": level,
             "container_profile": profile,
             "container_constrained": constrained,
             "reason": str(pressure.get("reason") or "environment_pressure_normal"),
         }
-        if feature == "realtime_dispatch":
+        if feature_name in {"realtime_dispatch", "proactive_dispatch"}:
             if level == "critical":
                 budget["allowed"] = False
             elif profile in {"tiny_container", "low_container"}:
-                budget["reason"] = f"{profile}_realtime_conservative"
-        elif feature == "sticker_index":
+                budget["reason"] = f"{profile}_{feature_name}_conservative"
+        elif feature_name == "sticker_index":
             if level in {"critical", "high"} or profile == "tiny_container":
                 budget["allowed"] = False
             elif profile == "low_container":
                 budget["reason"] = "low_container_sticker_index_cache_only"
-        elif feature == "memory_embedding_backfill":
+        elif feature_name == "memory_embedding_backfill":
             if level in {"critical", "high", "unknown"} or profile in {"tiny_container", "low_container"}:
                 budget["allowed"] = False
             elif constrained and level == "elevated":
@@ -5039,6 +5061,7 @@ class EmotionalStatePlugin(Star):
                 name: self._low_resource_feature_budget(name)
                 for name in (
                     "realtime_dispatch",
+                    "proactive_dispatch",
                     "sticker_index",
                     "memory_embedding_backfill",
                 )

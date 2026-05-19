@@ -744,11 +744,11 @@ class AstrBotLifecyclePart04(AstrBotLifecycleTests):
         plugin._disk_pressure_ratio = lambda: (0.20, "unit_test")
         plugin._cpu_pressure_ratio = lambda: (0.40, "cgroup_cpu_max")
         if os.name == "nt":
-            plugin._memory_pressure_ratio = lambda: (0.75, "cgroup_memory")
+            plugin._memory_pressure_ratio = lambda: (0.75, "cgroup_memory_working_set")
 
         pressure = plugin._background_post_resource_pressure()
 
-        self.assertEqual(pressure["memory_source"], "cgroup_memory")
+        self.assertEqual(pressure["memory_source"], "cgroup_memory_working_set")
         self.assertEqual(pressure["cpu_source"], "cgroup_cpu_max")
         self.assertEqual(pressure["container_profile"], "tiny_container")
         self.assertTrue(pressure["container_constrained"])
@@ -756,6 +756,39 @@ class AstrBotLifecyclePart04(AstrBotLifecycleTests):
         self.assertEqual(pressure["container_cpu_quota"], 0.5)
         self.assertEqual(pressure["worker_cap"], 1)
 
+
+    def test_cgroup_memory_pressure_uses_working_set_not_page_cache(self):
+        plugin = new_plugin(
+            {
+                "assessment_timing": "post",
+                "background_post_assessment": True,
+                "enable_dynamic_background_workers": True,
+            },
+        )
+        values = {
+            "/sys/fs/cgroup/memory.max": str(512 * 1024 * 1024),
+            "/sys/fs/cgroup/memory.current": str(500 * 1024 * 1024),
+            "/sys/fs/cgroup/memory.stat": f"inactive_file {300 * 1024 * 1024}\n",
+            "/sys/fs/cgroup/cpu.max": "max 100000",
+        }
+
+        plugin._observed_now = lambda: 1000.0
+        plugin._read_first_existing_text = lambda paths: next(
+            (values[path] for path in paths if path in values),
+            "",
+        )
+        plugin._disk_pressure_ratio = lambda: (0.20, "unit_test")
+        plugin._cpu_pressure_ratio = lambda: (0.20, "unit_test")
+
+        pressure = plugin._background_post_resource_pressure()
+
+        self.assertEqual(pressure["memory_source"], "cgroup_memory_working_set")
+        self.assertLess(pressure["memory_load_ratio"], 0.40)
+        self.assertAlmostEqual(pressure["memory_load_ratio"], 200 / 512)
+        self.assertEqual(pressure["level"], "elevated")
+        self.assertEqual(pressure["reason"], "environment_low_container_budget")
+        self.assertEqual(pressure["container_profile"], "low_container")
+        self.assertEqual(pressure["worker_cap"], 2)
 
     def test_low_container_budget_caps_workers_and_exposes_feature_budgets(self):
         plugin = new_plugin(
@@ -791,6 +824,11 @@ class AstrBotLifecyclePart04(AstrBotLifecycleTests):
         self.assertEqual(bg["environment_container_cpu_quota"], 1.0)
         budgets = bg["environment_feature_budgets"]
         self.assertTrue(budgets["realtime_dispatch"]["allowed"])
+        self.assertTrue(budgets["proactive_dispatch"]["allowed"])
+        self.assertEqual(
+            budgets["proactive_dispatch"]["reason"],
+            "low_container_proactive_dispatch_conservative",
+        )
         self.assertFalse(budgets["memory_embedding_backfill"]["allowed"])
         self.assertTrue(budgets["sticker_index"]["allowed"])
         self.assertEqual(
@@ -822,6 +860,7 @@ class AstrBotLifecyclePart04(AstrBotLifecycleTests):
         )
 
         self.assertTrue(plugin._low_resource_feature_budget("realtime_dispatch")["allowed"])
+        self.assertTrue(plugin._low_resource_feature_budget("proactive_dispatch")["allowed"])
         self.assertFalse(plugin._low_resource_feature_budget("sticker_index")["allowed"])
         self.assertFalse(plugin._low_resource_feature_budget("memory_embedding_backfill")["allowed"])
 

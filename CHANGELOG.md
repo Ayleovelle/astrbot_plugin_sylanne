@@ -2,6 +2,21 @@
 
 本文件用于 AstrBot 插件市场/管理页展示更新内容。更完整的设计说明、公式推导、测试矩阵和维护手册见 `README.md`。
 
+## 3.0.5
+
+发布日期：2026-05-19
+
+### 优化
+
+- cgroup 内存压力改用 working set 口径，扣除 `inactive_file` 页缓存后再计算低端容器压力，避免可回收 page cache 把容器误判成 high/critical。
+- 资源采样在 Windows/测试环境下同样优先使用可注入的 cgroup 读数，保持低端容器回归与线上 Linux 行为一致。
+- proactive dispatch 纳入 runtime diagnostics 的分功能低配预算，和 realtime dispatch 一样在 low/tiny container 下标记保守派发原因。
+
+### 验证
+
+- 新增 cgroup page cache working set 回归测试。
+- 补齐 proactive dispatch 低端容器预算诊断断言。
+
 ## 3.0.4
 
 发布日期：2026-05-18
