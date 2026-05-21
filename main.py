@@ -522,7 +522,7 @@ def get_emotional_state_plugin(context: Context) -> Any | None:
     PLUGIN_NAME,
     "Aylovelle.S.S",
     "Soulful Yearning Lifelike AstrBot Neural Narrative Engine：维护情绪、人格、记忆、氛围和表达节奏的 Sylanne",
-    "3.0.7",
+    "3.0.8",
     "https://github.com/Ayleovelle/astrbot_plugin_sylanne",
 )
 class EmotionalStatePlugin(Star):
@@ -15585,37 +15585,16 @@ class EmotionalStatePlugin(Star):
         now: float | None = None,
     ) -> HumanlikeState:
         self._ensure_runtime_state_containers()
-        if session_key in self._humanlike_memory_cache:
-            state = self._humanlike_memory_cache[session_key]
-            if self._passive_load_is_fresh(state, now=now):
-                return state
-            decayed_state = self.humanlike_engine.passive_update(
-                state,
-                personality_model=personality_model,
-                now=now,
-            )
-            if self._passive_update_changed(decayed_state, state):
-                state = decayed_state
-            self._humanlike_memory_cache[session_key] = state
-            return state
-        try:
-            data = await self._kv_get_data(self._humanlike_kv_key(session_key), None)
-        except Exception as exc:
-            logger.debug(f"{PLUGIN_NAME}: humanlike KV read failed, using empty state: {exc}")
-            data = None
-        state = HumanlikeState.from_dict(data)
-        if self._passive_load_is_fresh(state, now=now):
-            self._humanlike_memory_cache[session_key] = state
-            return state
-        decayed_state = self.humanlike_engine.passive_update(
-            state,
+        return await self._load_auxiliary_state(
+            session_key,
+            cache=self._humanlike_memory_cache,
+            engine=self.humanlike_engine,
+            state_class=HumanlikeState,
+            kv_key_fn=self._humanlike_kv_key,
+            label="humanlike",
             personality_model=personality_model,
             now=now,
         )
-        if self._passive_update_changed(decayed_state, state):
-            state = decayed_state
-        self._humanlike_memory_cache[session_key] = state
-        return state
 
     async def _save_humanlike_state(
         self,
@@ -15623,19 +15602,21 @@ class EmotionalStatePlugin(Star):
         state: HumanlikeState,
     ) -> None:
         self._ensure_runtime_state_containers()
-        self._humanlike_memory_cache[session_key] = state
-        try:
-            await self._kv_put_data(self._humanlike_kv_key(session_key), state.to_dict())
-        except Exception as exc:
-            logger.debug(f"{PLUGIN_NAME}: humanlike KV write failed, keeping memory only: {exc}")
+        await self._save_auxiliary_state(
+            session_key, state,
+            cache=self._humanlike_memory_cache,
+            kv_key_fn=self._humanlike_kv_key,
+            label="humanlike",
+        )
 
     async def _delete_humanlike_state(self, session_key: str) -> None:
         self._ensure_runtime_state_containers()
-        self._humanlike_memory_cache.pop(session_key, None)
-        try:
-            await self._kv_delete_data(self._humanlike_kv_key(session_key))
-        except Exception as exc:
-            logger.debug(f"{PLUGIN_NAME}: humanlike KV delete failed: {exc}")
+        await self._delete_auxiliary_state(
+            session_key,
+            cache=self._humanlike_memory_cache,
+            kv_key_fn=self._humanlike_kv_key,
+            label="humanlike",
+        )
 
     async def _load_lifelike_learning_state(
         self,
@@ -15644,35 +15625,15 @@ class EmotionalStatePlugin(Star):
         now: float | None = None,
     ) -> LifelikeLearningState:
         self._ensure_runtime_state_containers()
-        if session_key in self._lifelike_learning_memory_cache:
-            state = self._lifelike_learning_memory_cache[session_key]
-            if self._passive_load_is_fresh(state, now=now):
-                return state
-            decayed_state = self.lifelike_learning_engine.passive_update(
-                state,
-                now=now,
-            )
-            if self._passive_update_changed(decayed_state, state):
-                state = decayed_state
-            self._lifelike_learning_memory_cache[session_key] = state
-            return state
-        try:
-            data = await self._kv_get_data(
-                self._lifelike_learning_kv_key(session_key),
-                None,
-            )
-        except Exception as exc:
-            logger.debug(f"{PLUGIN_NAME}: lifelike learning KV read failed, using empty state: {exc}")
-            data = None
-        state = LifelikeLearningState.from_dict(data)
-        if self._passive_load_is_fresh(state, now=now):
-            self._lifelike_learning_memory_cache[session_key] = state
-            return state
-        decayed_state = self.lifelike_learning_engine.passive_update(state, now=now)
-        if self._passive_update_changed(decayed_state, state):
-            state = decayed_state
-        self._lifelike_learning_memory_cache[session_key] = state
-        return state
+        return await self._load_auxiliary_state(
+            session_key,
+            cache=self._lifelike_learning_memory_cache,
+            engine=self.lifelike_learning_engine,
+            state_class=LifelikeLearningState,
+            kv_key_fn=self._lifelike_learning_kv_key,
+            label="lifelike learning",
+            now=now,
+        )
 
     async def _save_lifelike_learning_state(
         self,
@@ -15680,22 +15641,21 @@ class EmotionalStatePlugin(Star):
         state: LifelikeLearningState,
     ) -> None:
         self._ensure_runtime_state_containers()
-        self._lifelike_learning_memory_cache[session_key] = state
-        try:
-            await self._kv_put_data(
-                self._lifelike_learning_kv_key(session_key),
-                state.to_dict(),
-            )
-        except Exception as exc:
-            logger.debug(f"{PLUGIN_NAME}: lifelike learning KV write failed, keeping memory only: {exc}")
+        await self._save_auxiliary_state(
+            session_key, state,
+            cache=self._lifelike_learning_memory_cache,
+            kv_key_fn=self._lifelike_learning_kv_key,
+            label="lifelike learning",
+        )
 
     async def _delete_lifelike_learning_state(self, session_key: str) -> None:
         self._ensure_runtime_state_containers()
-        self._lifelike_learning_memory_cache.pop(session_key, None)
-        try:
-            await self._kv_delete_data(self._lifelike_learning_kv_key(session_key))
-        except Exception as exc:
-            logger.debug(f"{PLUGIN_NAME}: lifelike learning KV delete failed: {exc}")
+        await self._delete_auxiliary_state(
+            session_key,
+            cache=self._lifelike_learning_memory_cache,
+            kv_key_fn=self._lifelike_learning_kv_key,
+            label="lifelike learning",
+        )
 
     async def _load_personality_drift_state(
         self,
@@ -15802,6 +15762,75 @@ class EmotionalStatePlugin(Star):
             self._sylanne_memory_idle_tasks = {}
         if not hasattr(self, "_sylanne_memory_idle_generation"):
             self._sylanne_memory_idle_generation = {}
+
+    async def _load_auxiliary_state(
+        self,
+        session_key: str,
+        *,
+        cache: dict,
+        engine: Any,
+        state_class: type,
+        kv_key_fn,
+        label: str,
+        personality_model: dict[str, Any] | None = None,
+        now: float | None = None,
+    ):
+        if session_key in cache:
+            state = cache[session_key]
+            if self._passive_load_is_fresh(state, now=now):
+                return state
+            decayed_state = engine.passive_update(
+                state, personality_model=personality_model, now=now,
+            )
+            if self._passive_update_changed(decayed_state, state):
+                state = decayed_state
+            cache[session_key] = state
+            return state
+        try:
+            data = await self._kv_get_data(kv_key_fn(session_key), None)
+        except Exception as exc:
+            logger.debug(f"{PLUGIN_NAME}: {label} KV read failed, using empty state: {exc}")
+            data = None
+        state = state_class.from_dict(data)
+        if self._passive_load_is_fresh(state, now=now):
+            cache[session_key] = state
+            return state
+        decayed_state = engine.passive_update(
+            state, personality_model=personality_model, now=now,
+        )
+        if self._passive_update_changed(decayed_state, state):
+            state = decayed_state
+        cache[session_key] = state
+        return state
+
+    async def _save_auxiliary_state(
+        self,
+        session_key: str,
+        state: Any,
+        *,
+        cache: dict,
+        kv_key_fn,
+        label: str,
+    ) -> None:
+        cache[session_key] = state
+        try:
+            await self._kv_put_data(kv_key_fn(session_key), state.to_dict())
+        except Exception as exc:
+            logger.debug(f"{PLUGIN_NAME}: {label} KV write failed, keeping memory only: {exc}")
+
+    async def _delete_auxiliary_state(
+        self,
+        session_key: str,
+        *,
+        cache: dict,
+        kv_key_fn,
+        label: str,
+    ) -> None:
+        cache.pop(session_key, None)
+        try:
+            await self._kv_delete_data(kv_key_fn(session_key))
+        except Exception as exc:
+            logger.debug(f"{PLUGIN_NAME}: {label} KV delete failed: {exc}")
 
     def _passive_load_is_fresh(self, state: Any, *, now: float | None = None) -> bool:
         updated_at = getattr(state, "updated_at", None)
@@ -15944,55 +15973,36 @@ class EmotionalStatePlugin(Star):
         personality_model: dict[str, Any] | None = None,
         now: float | None = None,
     ) -> MoralRepairState:
-        if session_key in self._moral_repair_memory_cache:
-            state = self._moral_repair_memory_cache[session_key]
-            if self._passive_load_is_fresh(state, now=now):
-                return state
-            decayed_state = self.moral_repair_engine.passive_update(
-                state,
-                personality_model=personality_model,
-                now=now,
-            )
-            if self._passive_update_changed(decayed_state, state):
-                state = decayed_state
-            self._moral_repair_memory_cache[session_key] = state
-            return state
-        try:
-            data = await self._kv_get_data(self._moral_repair_kv_key(session_key), None)
-        except Exception as exc:
-            logger.debug(f"{PLUGIN_NAME}: moral repair KV read failed, using empty state: {exc}")
-            data = None
-        state = MoralRepairState.from_dict(data)
-        if self._passive_load_is_fresh(state, now=now):
-            self._moral_repair_memory_cache[session_key] = state
-            return state
-        decayed_state = self.moral_repair_engine.passive_update(
-            state,
+        return await self._load_auxiliary_state(
+            session_key,
+            cache=self._moral_repair_memory_cache,
+            engine=self.moral_repair_engine,
+            state_class=MoralRepairState,
+            kv_key_fn=self._moral_repair_kv_key,
+            label="moral repair",
             personality_model=personality_model,
             now=now,
         )
-        if self._passive_update_changed(decayed_state, state):
-            state = decayed_state
-        self._moral_repair_memory_cache[session_key] = state
-        return state
 
     async def _save_moral_repair_state(
         self,
         session_key: str,
         state: MoralRepairState,
     ) -> None:
-        self._moral_repair_memory_cache[session_key] = state
-        try:
-            await self._kv_put_data(self._moral_repair_kv_key(session_key), state.to_dict())
-        except Exception as exc:
-            logger.debug(f"{PLUGIN_NAME}: moral repair KV write failed, keeping memory only: {exc}")
+        await self._save_auxiliary_state(
+            session_key, state,
+            cache=self._moral_repair_memory_cache,
+            kv_key_fn=self._moral_repair_kv_key,
+            label="moral repair",
+        )
 
     async def _delete_moral_repair_state(self, session_key: str) -> None:
-        self._moral_repair_memory_cache.pop(session_key, None)
-        try:
-            await self._kv_delete_data(self._moral_repair_kv_key(session_key))
-        except Exception as exc:
-            logger.debug(f"{PLUGIN_NAME}: moral repair KV delete failed: {exc}")
+        await self._delete_auxiliary_state(
+            session_key,
+            cache=self._moral_repair_memory_cache,
+            kv_key_fn=self._moral_repair_kv_key,
+            label="moral repair",
+        )
 
     async def _load_fallibility_state(
         self,
@@ -16001,55 +16011,36 @@ class EmotionalStatePlugin(Star):
         personality_model: dict[str, Any] | None = None,
         now: float | None = None,
     ) -> FallibilityState:
-        if session_key in self._fallibility_memory_cache:
-            state = self._fallibility_memory_cache[session_key]
-            if self._passive_load_is_fresh(state, now=now):
-                return state
-            decayed_state = self.fallibility_engine.passive_update(
-                state,
-                personality_model=personality_model,
-                now=now,
-            )
-            if self._passive_update_changed(decayed_state, state):
-                state = decayed_state
-            self._fallibility_memory_cache[session_key] = state
-            return state
-        try:
-            data = await self._kv_get_data(self._fallibility_kv_key(session_key), None)
-        except Exception as exc:
-            logger.debug(f"{PLUGIN_NAME}: fallibility KV read failed, using empty state: {exc}")
-            data = None
-        state = FallibilityState.from_dict(data)
-        if self._passive_load_is_fresh(state, now=now):
-            self._fallibility_memory_cache[session_key] = state
-            return state
-        decayed_state = self.fallibility_engine.passive_update(
-            state,
+        return await self._load_auxiliary_state(
+            session_key,
+            cache=self._fallibility_memory_cache,
+            engine=self.fallibility_engine,
+            state_class=FallibilityState,
+            kv_key_fn=self._fallibility_kv_key,
+            label="fallibility",
             personality_model=personality_model,
             now=now,
         )
-        if self._passive_update_changed(decayed_state, state):
-            state = decayed_state
-        self._fallibility_memory_cache[session_key] = state
-        return state
 
     async def _save_fallibility_state(
         self,
         session_key: str,
         state: FallibilityState,
     ) -> None:
-        self._fallibility_memory_cache[session_key] = state
-        try:
-            await self._kv_put_data(self._fallibility_kv_key(session_key), state.to_dict())
-        except Exception as exc:
-            logger.debug(f"{PLUGIN_NAME}: fallibility KV write failed, keeping memory only: {exc}")
+        await self._save_auxiliary_state(
+            session_key, state,
+            cache=self._fallibility_memory_cache,
+            kv_key_fn=self._fallibility_kv_key,
+            label="fallibility",
+        )
 
     async def _delete_fallibility_state(self, session_key: str) -> None:
-        self._fallibility_memory_cache.pop(session_key, None)
-        try:
-            await self._kv_delete_data(self._fallibility_kv_key(session_key))
-        except Exception as exc:
-            logger.debug(f"{PLUGIN_NAME}: fallibility KV delete failed: {exc}")
+        await self._delete_auxiliary_state(
+            session_key,
+            cache=self._fallibility_memory_cache,
+            kv_key_fn=self._fallibility_kv_key,
+            label="fallibility",
+        )
 
     async def _load_group_atmosphere_state(
         self,
@@ -16058,61 +16049,36 @@ class EmotionalStatePlugin(Star):
         personality_model: dict[str, Any] | None = None,
         now: float | None = None,
     ) -> GroupAtmosphereState:
-        if session_key in self._group_atmosphere_memory_cache:
-            state = self._group_atmosphere_memory_cache[session_key]
-            if self._passive_load_is_fresh(state, now=now):
-                return state
-            decayed_state = self.group_atmosphere_engine.passive_update(
-                state,
-                personality_model=personality_model,
-                now=now,
-            )
-            if self._passive_update_changed(decayed_state, state):
-                state = decayed_state
-            self._group_atmosphere_memory_cache[session_key] = state
-            return state
-        try:
-            data = await self._kv_get_data(
-                self._group_atmosphere_kv_key(session_key),
-                None,
-            )
-        except Exception as exc:
-            logger.debug(f"{PLUGIN_NAME}: group atmosphere KV read failed, using empty state: {exc}")
-            data = None
-        state = GroupAtmosphereState.from_dict(data)
-        if self._passive_load_is_fresh(state, now=now):
-            self._group_atmosphere_memory_cache[session_key] = state
-            return state
-        decayed_state = self.group_atmosphere_engine.passive_update(
-            state,
+        return await self._load_auxiliary_state(
+            session_key,
+            cache=self._group_atmosphere_memory_cache,
+            engine=self.group_atmosphere_engine,
+            state_class=GroupAtmosphereState,
+            kv_key_fn=self._group_atmosphere_kv_key,
+            label="group atmosphere",
             personality_model=personality_model,
             now=now,
         )
-        if self._passive_update_changed(decayed_state, state):
-            state = decayed_state
-        self._group_atmosphere_memory_cache[session_key] = state
-        return state
 
     async def _save_group_atmosphere_state(
         self,
         session_key: str,
         state: GroupAtmosphereState,
     ) -> None:
-        self._group_atmosphere_memory_cache[session_key] = state
-        try:
-            await self._kv_put_data(
-                self._group_atmosphere_kv_key(session_key),
-                state.to_dict(),
-            )
-        except Exception as exc:
-            logger.debug(f"{PLUGIN_NAME}: group atmosphere KV write failed, keeping memory only: {exc}")
+        await self._save_auxiliary_state(
+            session_key, state,
+            cache=self._group_atmosphere_memory_cache,
+            kv_key_fn=self._group_atmosphere_kv_key,
+            label="group atmosphere",
+        )
 
     async def _delete_group_atmosphere_state(self, session_key: str) -> None:
-        self._group_atmosphere_memory_cache.pop(session_key, None)
-        try:
-            await self._kv_delete_data(self._group_atmosphere_kv_key(session_key))
-        except Exception as exc:
-            logger.debug(f"{PLUGIN_NAME}: group atmosphere KV delete failed: {exc}")
+        await self._delete_auxiliary_state(
+            session_key,
+            cache=self._group_atmosphere_memory_cache,
+            kv_key_fn=self._group_atmosphere_kv_key,
+            label="group atmosphere",
+        )
 
     async def _load_sylanne_memory_state(
         self,

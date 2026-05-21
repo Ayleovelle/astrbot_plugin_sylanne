@@ -2,6 +2,21 @@
 
 本文件用于 AstrBot 插件市场/管理页展示更新内容。更完整的设计说明、公式推导、测试矩阵和维护手册见 `README.md`。
 
+## 3.0.8
+
+发布日期：2026-05-21
+
+### 优化
+
+- 五个辅助引擎（humanlike、lifelike_learning、moral_repair、fallibility、group_atmosphere）的 load/save/delete 方法泛型化为 `_load_auxiliary_state` / `_save_auxiliary_state` / `_delete_auxiliary_state`，消除约 240 行重复模板代码。
+- 新增引擎时只需一行委托调用，不再需要复制粘贴完整的 cache → KV → passive_update 流程。
+
+### 验证
+
+- 191 项 focused regression tests 全部通过。
+- py_compile 通过。
+- zip preflight 通过。
+
 ## 3.0.7
 
 发布日期：2026-05-21
