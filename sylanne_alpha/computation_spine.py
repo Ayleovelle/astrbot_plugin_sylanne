@@ -1,8 +1,8 @@
 """Sylanne-Embodiment computation layer: Unified Computation Spine.
 
-Integrates all computation modules into a single pipeline:
+Integrates all computation modules into a single 7-layer pipeline:
   Perception(HDC) → Gate(PredictiveCoding) → VoidScarEngine →
-  Boundary(Autopoiesis) → Express(PhaseTransition)
+  RelationalSheaf → HGT → Boundary(Autopoiesis) → Express(PhaseTransition)
 """
 from __future__ import annotations
 
@@ -14,6 +14,7 @@ from .hdc import HDCEncoder
 from .hgt import HeterogeneousGraphTransformer
 from .predictive_coding import PredictiveCodingGate
 from .void_scar_engine import VoidScarEngine
+from .relational_sheaf import ScarSheaf
 from .autopoiesis import AutopoieticBoundary
 from .phase_transition import PhaseTransitionExpression
 
@@ -24,7 +25,7 @@ class ComputationSpine:
     """Unified computation pipeline for Sylanne-Embodiment."""
 
     __slots__ = (
-        "encoder", "gate", "engine", "boundary", "expression", "hgt",
+        "encoder", "gate", "engine", "sheaf", "boundary", "expression", "hgt",
         "_tick_count", "_last_route", "_last_expression_time", "_timings",
         "_last_process_time", "_personality", "_last_assessment",
     )
@@ -33,6 +34,7 @@ class ComputationSpine:
         self.encoder = HDCEncoder(dim=2048)
         self.gate = PredictiveCodingGate(dim=2048)
         self.engine = VoidScarEngine(n_dims=8, similarity_fn=self._hdc_similarity)
+        self.sheaf = ScarSheaf(n0=8)
         self.boundary = AutopoieticBoundary(identity_dim=32)
         self.expression = PhaseTransitionExpression()
         self.hgt = HeterogeneousGraphTransformer(d_model=16, n_heads=4, d_output=4)
@@ -49,6 +51,7 @@ class ComputationSpine:
             "perception": deque(maxlen=_TIMING_WINDOW),
             "gate": deque(maxlen=_TIMING_WINDOW),
             "void_scar": deque(maxlen=_TIMING_WINDOW),
+            "sheaf": deque(maxlen=_TIMING_WINDOW),
             "hgt": deque(maxlen=_TIMING_WINDOW),
             "boundary": deque(maxlen=_TIMING_WINDOW),
             "expression": deque(maxlen=_TIMING_WINDOW),
@@ -99,6 +102,9 @@ class ComputationSpine:
 
         # HGT: derive all transformer parameters from personality
         self.hgt.derive_params(personality)
+
+        # Relational Sheaf: derive presentation matrices from personality
+        self.sheaf.derive_params(personality)
 
     def apply_assessment(self, assessment: dict[str, Any]) -> None:
         """Apply LLM assessment result to modulate Void-Scar state.
@@ -217,7 +223,12 @@ class ComputationSpine:
             # Re-observe after assessment modulation
             emotion = self.engine.observe()
 
-        # Layer 4.5: Heterogeneous Graph Transformer — decision fusion
+        # Layer 4: Relational Sheaf — cross-relational propagation
+        t0 = time.perf_counter_ns()
+        sheaf_result = self.sheaf.tick(0, ssm_input, timestamp=timestamp)
+        self._timings["sheaf"].append(time.perf_counter_ns() - t0)
+
+        # Layer 5: Heterogeneous Graph Transformer — decision fusion
         t0 = time.perf_counter_ns()
         hdc_features = self._hdc_to_ssm_input(h, surprise)  # Reuse 8-dim compression
         hgt_tokens = self.hgt.build_tokens_from_spine(
@@ -285,6 +296,7 @@ class ComputationSpine:
         result = self._build_result(text, timestamp, surprise, route, emotion, recalled, holes, should_express)
         result["hgt_decision"] = hgt_decision
         result["assessment_source"] = assessment_source
+        result["sheaf"] = sheaf_result
         return result
 
     def express(self, now: float = 0.0) -> dict[str, Any]:

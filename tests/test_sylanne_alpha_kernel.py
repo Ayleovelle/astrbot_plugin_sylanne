@@ -39,6 +39,7 @@ class SylanneAlphaKernelTests(unittest.TestCase):
                 "phase_transition.py",
                 "predictive_coding.py",
                 "prompt_surface.py",
+                "relational_sheaf.py",
                 "rhythm_learner.py",
                 "runtime.py",
                 "scar_algebra.py",

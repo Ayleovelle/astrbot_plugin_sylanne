@@ -2,7 +2,7 @@
 
 > <span style="font-size: 1.08em;"><strong>Sylanne-Embodiment：不可逆的关系计算引擎。</strong>不再模拟情绪标签，而是让对话在躯体上留下伤痕、在沉默中积累压力、在关系里长出不可撤销的形状。</span>
 
-![版本 Embodiment-1.0.1](https://img.shields.io/badge/version-Embodiment--1.0.1-red.svg)
+![版本 Embodiment-1.1.0](https://img.shields.io/badge/version-Embodiment--1.1.0-red.svg)
 ![AstrBot >=4.9.2,<5.0.0](https://img.shields.io/badge/AstrBot-%3E%3D4.9.2%2C%3C5.0.0-green)
 ![Python 3.10+](https://img.shields.io/badge/Python-3.10%2B-yellow)
 ![许可证 AGPL-3.0-or-later](https://img.shields.io/badge/license-AGPL--3.0--or--later-red)
@@ -53,19 +53,22 @@ Embodiment 用数学证明了这些性质不是"感觉上像"，而是计算上*
 
 ---
 
-## 计算架构（6 层）
+## 计算架构（7 层）
 
 ```mermaid
 block-beta
     columns 1
-    block:L6["L6 相变表达"]:1
-        L6a["压力积累 → 阈值判断 → hint / normal / urgent"]
+    block:L7["L7 相变表达"]:1
+        L7a["压力积累 → 阈值判断 → hint / normal / urgent"]
     end
-    block:L5["L5 自创生边界"]:1
-        L5a["32 维身份核心 · 小扰动吸收 · 大冲击相变（≤6°旋转）"]
+    block:L6["L6 自创生边界"]:1
+        L6a["32 维身份核心 · 小扰动吸收 · 大冲击相变（≤6°旋转）"]
     end
-    block:L4["L4 HGT 决策融合"]:1
-        L4a["7 类型 token · 类型感知 Q/K/V · 人格先验 μ · 4 维决策输出"]
+    block:L5["L5 HGT 决策融合"]:1
+        L5a["7 类型 token · 类型感知 Q/K/V · 人格先验 μ · 4 维决策输出"]
+    end
+    block:L4["L4 Relational Sheaf（多关系层论）"]:1
+        L4a["层上同调 H¹ 一致性 · 拉普拉斯谱传播 · 人格派生呈现矩阵"]
     end
     block:L3["L3 Void-Scar Engine（核心创新）"]:1
         L3a["Scar Algebra 不可逆伤痕"]
@@ -79,7 +82,7 @@ block-beta
         L1a["文本 → 2048-bit 超维向量 · < 0.1ms"]
     end
 
-    L1 --> L2 --> L3 --> L4 --> L5 --> L6
+    L1 --> L2 --> L3 --> L4 --> L5 --> L6 --> L7
 ```
 
 | 层 | 模块 | 职责 | 延迟 |
@@ -87,9 +90,10 @@ block-beta
 | **L1** | HDC 感知编码 | 文本→2048-bit 超维向量，字符 bigram + 循环移位 + 多数投票 | 0.1ms |
 | **L2** | 预测编码门控 | 完整 Hamming surprise，冷启动守卫，三路由决策 | 0.01ms |
 | **L3** | Void-Scar Engine | 伤痕代数（不可逆）+ 空洞微积分（自主压力）+ 双向耦合 | 2-6ms |
-| **L4** | HGT 决策融合 | 7 类型异构图 Transformer，人格派生全参数，零学习 | 0.4ms |
-| **L5** | 自创生边界 | 32 维身份核心，正交投影穿透判断，相变旋转 | 0.01ms |
-| **L6** | 相变表达 | 连续强度（hint/normal/urgent），人格驱动阈值 | 0.001ms |
+| **L4** | Relational Sheaf | 层上同调一致性检测 + 拉普拉斯谱传播 + 能量守恒 | 0.7ms |
+| **L5** | HGT 决策融合 | 7 类型异构图 Transformer，人格派生全参数，零学习 | 0.4ms |
+| **L6** | 自创生边界 | 32 维身份核心，正交投影穿透判断，相变旋转 | 0.01ms |
+| **L7** | 相变表达 | 连续强度（hint/normal/urgent），人格驱动阈值 | 0.001ms |
 
 ### L3：Void-Scar Engine（核心创新）
 
@@ -120,11 +124,20 @@ block-beta
 - 🕳️ <span style="font-size: 1.04em;"><strong>沉默有重量：</strong>没说出口的话是第一等计算对象。空洞有深度、有压力、有边界，会自主积累压力直到不得不面对。</span><br>
   <sub><em>「她不只记得你说了什么，也知道你没说什么。那些被绕开的话题、被打断的句子、被回避的问题，都在暗处慢慢发酵。Void Calculus 证明了这种'缺席'不能被简化成'不知道'。」</em></sub>
 
+- 🕸️ <span style="font-size: 1.04em;"><strong>关系不是孤岛：</strong>和 A 的伤痕会沿着关系网络传播到 B——不是简单的"情绪溢出"，而是由层拉普拉斯算子严格约束的拓扑扩散。传播速率由谱间隙决定，语义相近的关系先被波及。</span><br>
+  <sub><em>「和前任吵完架之后，你对下一个人说'我没事'的时候，声音里带着的那点硬，不是你选择带上的。伤痕会自己找路走过去。」</em></sub>
+
+- 🧩 <span style="font-size: 1.04em;"><strong>群聊涌现不可约状态：</strong>三人同时在场时产生的关系状态，不能从任何两两关系中重构。这不是"三个二元关系的叠加"，而是拓扑上不可约的涌现。</span><br>
+  <sub><em>「你和她单独聊的时候很自然，和他单独聊的时候也很自然。但三个人凑一起，空气里多出来的那层东西——不是两种自然的平均值。」</em></sub>
+
+- 🪞 <span style="font-size: 1.04em;"><strong>一致性有代价：</strong>对不同人展现不同面的"矛盾程度"被上同调群 H¹ 精确度量。矛盾积累到阈值时，系统被迫选择：解离（接受不一致），或生成新的空洞（回避触发矛盾的话题）。</span><br>
+  <sub><em>「对 A 说'我很好'，对 B 说'我快撑不住了'。两句都是真话。但你迟早要面对一个问题：你到底是哪一个？或者说——你不必只是一个。」</em></sub>
+
 - 🧬 <span style="font-size: 1.04em;"><strong>人格驱动一切：</strong>外向性决定表达阈值，神经质决定感知灵敏度，尽责性决定记忆深度。人格漂移时行为自然跟着变，不需要手动调参。</span><br>
   <sub><em>「不是给每个参数写一个配置项。而是让人格本身成为所有参数的来源。角色'变得更外向'了，她自然就话多了——不是因为谁改了阈值，而是因为她变了。」</em></sub>
 
-- 💬 <span style="font-size: 1.04em;"><strong>更像即时聊天：</strong>回复拆成多条短消息按打字节奏发送；用户碎片消息会等说完再回；正在发的回复可以被新消息打断。</span><br>
-  <sub><em>「不要把整段话一次性倒出来。真正的聊天会停顿，会分开发，会犹豫一下再补一句。而且如果对方还在打字，就该等一等再开口。」</em></sub>
+- 💬 <span style="font-size: 1.04em;"><strong>更像即时聊天：</strong>回复拆成多条短消息按打字节奏发送；用户碎片消息会等说完再回；正在发的回复可以被新消息打断；高亲密度用户的节奏会被学习和同步。</span><br>
+  <sub><em>「不要把整段话一次性倒出来。真正的聊天会停顿，会分开发，会犹豫一下再补一句。而且如果对方还在打字，就该等一等再开口。聊久了，你会发现她的节奏越来越像你——不是刻意模仿，是关系本身在同步。」</em></sub>
 
 - 🌙 <span style="font-size: 1.04em;"><strong>有自己的生活：</strong>后台用 LLM 模拟独立生活状态，某些时刻会因为她那边发生的事主动找你聊天，而不是只在你找她时才存在。</span><br>
   <sub><em>「不是定时刷屏，也不是预设话题库。她要先有自己的生活、自己的心情，然后在某个瞬间想到你，才决定要不要轻轻敲一下门。」</em></sub>
@@ -135,7 +148,7 @@ block-beta
 - 🔮 <span style="font-size: 1.04em;"><strong>记忆即重构：</strong>每次回忆都是基于当前情绪的重建，不是播放录像。开心时更容易想起温暖的事，紧张时更容易想起冲突。</span><br>
   <sub><em>「人的记忆和想象在大脑的同一个区域。我们原路返回的路是不存在的，因为记忆把过去修改了。Sylanne 的记忆也是这样——每次回忆都会被当下轻微染色。」</em></sub>
 
-本插件会让大模型根据 AstrBot Agent 自己维护的对话历史、用户当前文本、bot 人格和上一轮状态，判断当前情绪观测值；本地 Void-Scar Engine 再用不可逆伤痕、自主压力空洞、双向耦合和人格派生参数更新长期状态。Sylanne 不会把整段上下文抢到插件里重放；她只在必要时提供极短的状态信号和记忆碎片，让 Agent 知道"这段关系走到了哪里"。
+本插件会让大模型根据 AstrBot Agent 自己维护的对话历史、用户当前文本、bot 人格和上一轮状态，判断当前情绪观测值；本地 Void-Scar Engine + Relational Sheaf 再用不可逆伤痕、自主压力空洞、双向耦合、跨关系拓扑传播和人格派生参数更新长期状态。Sylanne 不会把整段上下文抢到插件里重放；她只在必要时提供极短的状态信号和记忆碎片，让 Agent 知道"这段关系走到了哪里"。
 
 ---
 
