@@ -2,6 +2,7 @@
 
 本文件用于 AstrBot 插件市场/管理页展示更新内容。更完整的设计说明、公式推导、测试矩阵和维护手册见 `README.md`。
 
+<<<<<<< HEAD
 ## 3.0.10
 
 发布日期：2026-05-21
@@ -175,25 +176,28 @@
 - 重新运行发现式 unittest 全量测试。
 
 ## 3.0.0
+=======
+## 3.0.0-kernel1
+>>>>>>> worktree-sylanne-kernel-x-body
 
 发布日期：2026-05-18
 
 ### 新增
 
-- 发布 Sylanne 3.0 正式稳定版，完成 Relational Self Genesis 路线的 Self-Interpretation、Relational Time、Co-Evolution、Turning Point Memory + Replay 和 Lineage / Branching / WebUI 观察舱闭环。
-- README 重写 3.0 正式版前言，把 3.0 定位为“关系留下痕迹后，自我在回应中长出来”的模拟研究工程。
-- 当前版本发布记录改为稳定版视角，集中说明 3.0 内部关系性自我闭环、只读观察舱和 public API 封闭边界。
+- 发布 Sylanne 3.0.0-kernel1：Sovereign Yearning Life-Architecture: Nonhuman Relational Body，把正式 4.0 改为 kernel 迭代线，先固定 clean-room 重写的核心边界。
+- README 重写 kernel1 前言，把本轮定位为非人关系躯体重写线的第一个 kernel 迭代。
+- 新增 `sylanne_body/` clean-room 躯体创生文件，先覆盖事件来源、用户主权、哭泣回潮和喜怒哀乐表达表层。
 
 ### 安全与边界
 
+- 用户主权保持不可关闭：拒绝、暂停、离开、重设边界、删除记忆和关闭主动联系都必须保留。
+- 哭泣、喜、怒、哀、乐只作为非人关系躯体状态，不声明人类身份、真实痛苦或真实人类眼泪。
 - 高风险关系/自我推断仍默认只留在插件内部运行态和本地诊断中，不新增 public API 读取入口。
-- 转折点回放、谱系分支观察和 WebUI 观察舱继续使用裁剪摘要，不保存完整对话文本，不暴露 `relationship_time_weight` 明细。
-- 关系性自我、关系时间、共演化、转折点回放和谱系分支观察只作为内部模拟研究信号，不构成心理诊断或外部公共推断接口。
 
 ### 验证
 
-- 稳定版发布前重新验证 3.0 闭环、WebUI 裁剪、public API 禁止方法、版本声明和发布包预检。
-- 全量测试结果以本次发布收尾验证为准。
+- 新增 body genesis 测试，覆盖非人哭泣、喜怒哀乐、内部表层不进入证据、用户主权和用户不作为燃料。
+- 发布包预检契约加入 `sylanne_body/` clean-room 文件，避免 kernel1 躯体文件漏包。
 
 ## 3.0.0-exp5
 
@@ -1322,4 +1326,4 @@
 - 建立多维情绪状态、人格建模、真实时间半衰期、情绪后果、生命化学习、人格漂移、拟人状态、道德修复、瑕疵模拟、群聊氛围和非诊断心理筛查的主线架构。
 - 提供公共 API，允许其他插件读取、模拟、提交、重置状态。
 - LivingMemory 写入时可冻结当时的情绪、拟人、生命化学习、道德修复、瑕疵和综合自我状态。
-- 发布 GPL-3.0-or-later 开源版本。
+- 发布 AGPL-3.0-or-later 开源版本。

@@ -1,648 +1,119 @@
 {
-  "enabled": {
-    "description": "启用 Sylanne",
-    "type": "bool",
-    "default": true
+  "sylanne_alpha_root": {
+    "description": "Sylanne 4.0 alpha body 状态目录",
+    "type": "string",
+    "default": ".sylanne_alpha_state",
+    "hint": "每个会话会保存为独立的 .alpha.json；覆盖安装前请备份旧 Sylanne 数据，再通过 4.0 导入入口迁入。"
   },
-  "use_llm_assessor": {
-    "description": "使用 LLM 判断情绪观测值；关闭后只使用轻量启发式回退",
+  "sylanne_alpha_realtime_chat_enabled": {
+    "description": "启用 Sylanne 4.0 即时聊天调度",
     "type": "bool",
-    "default": true
+    "default": false,
+    "hint": "默认关闭；开启后仍受用户主权、风险、冷却和预算边界限制。"
   },
-  "emotion_provider_id": {
-    "description": "情绪估计使用的 LLM Provider；留空则使用当前会话模型",
+  "sylanne_alpha_stream_first_sentence_enabled": {
+    "description": "启用首句抢发（流式）",
+    "type": "bool",
+    "default": false,
+    "hint": "默认关闭。开启后在 LLM 流式生成过程中检测到第一个完整句子就提前发给用户，降低感知延迟。需要 LLM Provider 开启流式输出。"
+  },
+  "sylanne_alpha_realtime_intercept_llm_response": {
+    "description": "允许即时聊天接管 LLM 响应分段",
+    "type": "bool",
+    "default": false,
+    "hint": "默认关闭；用于 4.0 对话分段和打断识别，不恢复旧 realtime engine。"
+  },
+  "sylanne_alpha_proactive_dispatch_enabled": {
+    "description": "启用 Sylanne 4.0 主动发起派发",
+    "type": "bool",
+    "default": false,
+    "hint": "默认关闭；开启后 guard 不允许时仍不会派发。"
+  },
+  "sylanne_alpha_proactive_scheduler_enabled": {
+    "description": "启用主动检查后台调度",
+    "type": "bool",
+    "default": false,
+    "hint": "默认关闭；用于低频检查，不执行高频循环。"
+  },
+  "sylanne_alpha_embedding_memory_enabled": {
+    "description": "启用 embedding 记忆辅助召回",
+    "type": "bool",
+    "default": false,
+    "hint": "默认关闭；开启后需要配置 embedding provider。"
+  },
+  "sylanne_alpha_embedding_memory_provider_id": {
+    "description": "Embedding 记忆使用的 Provider ID",
+    "type": "string",
+    "default": "",
+    "hint": "填写 AstrBot 中配置的 embedding provider ID；留空则不启用向量召回。"
+  },
+  "sylanne_alpha_embedding_memory_top_k": {
+    "description": "Embedding 召回 top-K 条数",
+    "type": "int",
+    "default": 3,
+    "hint": "每次召回最多返回的相似记忆条数。"
+  },
+  "sylanne_alpha_assessor_llm_enabled": {
+    "description": "启用独立判断 LLM 通道",
+    "type": "bool",
+    "default": false,
+    "hint": "默认关闭；开启后情绪估计使用独立 provider，不占用主聊天模型。"
+  },
+  "sylanne_alpha_assessor_provider_id": {
+    "description": "判断 LLM Provider",
     "type": "string",
     "default": "",
     "_special": "select_provider",
-    "hint": "建议选择便宜、稳定、支持 JSON 指令的小模型。"
+    "hint": "用于情绪估计的独立 LLM；留空则使用当前会话模型。"
   },
-  "fast_assessor_enabled": {
+  "sylanne_alpha_fast_assessor_enabled": {
     "description": "启用快速判断 LLM",
     "type": "bool",
-    "default": false,
-    "hint": "默认关闭。开启后，插件才会调用“快速判断 LLM Provider”做用户分段完整性、表情包一致性等短 JSON 判断；关闭时即使选择了 Provider，也只走本地规则回退，避免不知情用户产生额外 token 消耗。"
+    "default": true,
+    "hint": "默认开启；用于碎片完整性、表情包一致性等短 JSON 判断。"
   },
-  "fast_assessor_provider_id": {
+  "sylanne_alpha_fast_assessor_provider_id": {
     "description": "快速判断 LLM Provider",
     "type": "string",
     "default": "",
     "_special": "select_provider",
-    "hint": "用于用户碎片完整性、表情包一致性等短 JSON 判断。建议搭配低推理、低温度、响应快、JSON 稳定的小模型；主聊天回复仍交给更强的会话模型。只有同时开启“启用快速判断 LLM”并填写本项，才会启用第二个快判 LLM。"
+    "hint": "建议搭配低推理、响应快的小模型。"
   },
-  "fast_assessor_max_context_chars": {
-    "description": "快速判断 LLM 最多读取的上下文字数",
-    "type": "int",
-    "default": 600,
-    "hint": "低推理快模型上下文通常较短，这里会把简单判断 prompt 裁到很短。建议 400-800；复杂长上下文裁决仍使用原判断 LLM。"
-  },
-  "fast_assessor_timeout_seconds": {
-    "description": "快速判断 LLM 超时秒数",
-    "type": "float",
-    "default": 2.0,
-    "hint": "用于碎片完整度等轻量判断。超时或失败会走本地回退，避免拖慢主回复。"
-  },
-  "fast_assessor_temperature": {
-    "description": "快速判断 LLM 温度",
-    "type": "float",
-    "default": 0.0,
-    "hint": "简单 JSON 判断建议保持 0。"
-  },
-  "low_reasoning_friendly_mode": {
-    "description": "低推理模型友好模式",
-    "type": "bool",
-    "default": false,
-    "hint": "默认关闭。开启后情绪估计提示词会改为短版简单公式推导，减少 token 消耗并降低小模型理解压力；输出字段仍保持兼容，但理论细分依据会更少。"
-  },
-  "low_reasoning_max_context_chars": {
-    "description": "低推理模型友好模式下最多读取的上下文字数",
-    "type": "int",
-    "default": 1200,
-    "hint": "仅在 low_reasoning_friendly_mode 开启时生效，会与 max_context_chars 取较小值。"
-  },
-  "assessment_timing": {
-    "description": "情绪估计时机",
-    "type": "string",
-    "default": "post",
-    "options": [
-      "pre",
-      "post",
-      "both"
-    ],
-    "hint": "pre 会在回复前影响本轮语气；post 会根据 bot 实际回复修正状态；both 效果最好但消耗更多。"
-  },
-  "enable_proactive_speech_dispatch": {
-    "description": "启用主动发言发送执行",
-    "type": "bool",
-    "default": false,
-    "hint": "默认关闭时只返回主动发言裁决和 dispatch_request，不调用 AstrBot 发送接口。开启后 request_proactive_speech_dispatch 可在模型判断应开口且冷却通过时调用 context.send_message 主动发送。"
-  },
-  "enable_proactive_speech_scheduler": {
-    "description": "启用后台主动聊天调度器",
-    "type": "bool",
-    "default": false,
-    "hint": "默认关闭。开启后插件会记录最近可触达会话，并在后台低频醒来，由公式和 LLM 判断是否因为想念、关心进度、调皮打扰、关系修复或双方互需而请求 AstrBot 发送消息。真正发送仍需要同时开启“启用主动发言发送执行”。"
-  },
-  "enable_realtime_chat": {
-    "description": "启用真人即时聊天分条发送",
-    "type": "bool",
-    "default": false,
-    "hint": "默认关闭。该链路仍处于体验验证期，需要更多真实聊天场景修复上下文、打断、撤回和平台兼容问题；确认稳定前建议只在测试环境手动开启。"
-  },
-  "realtime_chat_style_prompt_enabled": {
-    "description": "启用即时聊天风格提示",
-    "type": "bool",
-    "default": false,
-    "hint": "默认关闭。开启真人即时聊天测试时可一并开启，用短提示要求主模型少用报告腔、Markdown 和编号清单。"
-  },
-  "realtime_chat_intercept_llm_response": {
-    "description": "接管默认 LLM 回复并分条发送",
-    "type": "bool",
-    "default": false,
-    "hint": "默认关闭。开启后 on_llm_response 会尝试接管默认回复，用 context.send_message 顺序发送分条消息；该行为会影响上下文、打断和平台发送链路，确认稳定前不建议默认启用。"
-  },
-  "realtime_input_completion_llm_gate_enabled": {
-    "description": "启用用户分段完整性 LLM 判断",
-    "type": "bool",
-    "default": false,
-    "hint": "默认关闭。该判断仍需更多实际体验验证，开启后会让内部判断 LLM 判断用户是否已经说完；未说完则继续等待，避免 bot 抢答半句话。"
-  },
-  "realtime_input_completion_probe_delay_seconds": {
-    "description": "用户分段完整性探测等待秒数",
-    "type": "float",
-    "default": 0.25,
-    "hint": "首次碎片后的基础等待时间。插件会根据碎片数量和窗口状态自动缩放该值；不是固定抢答延迟，也不会影响完整长句。"
-  },
-  "realtime_input_completion_max_wait_seconds": {
-    "description": "用户分段完整性最长等待秒数",
-    "type": "float",
-    "default": 4.0,
-    "hint": "判断 LLM 认为用户仍未说完时，单轮最多等待的时间上限，并带有运行时 4 秒硬上限。用户继续发送会刷新碎片窗口；超过上限仍未继续时会放行，避免把即时聊天时间耗在死等上。"
-  },
-  "realtime_user_typing_hold_seconds": {
-    "description": "用户正在输入状态等待秒数",
-    "type": "float",
-    "default": 0.8,
-    "hint": "收到平台正在输入通知后，正在分条发送的回复会短暂停顿；运行时最多 2.5 秒，不会把该通知当作新的用户意图。"
-  },
-  "realtime_empty_input_typing_hold_seconds": {
-    "description": "空输入事件短暂停顿秒数",
-    "type": "float",
-    "default": 0.35,
-    "hint": "收到无文本、无媒体、无 prompt 的空事件时，如果当前会话正有分条回复在发送，则按输入中短暂停顿；空闲时只作为平台空事件忽略。运行时最多 1 秒，不推进会话轮次。"
-  },
-  "realtime_chat_dry_run_default": {
-    "description": "即时聊天发送默认试算",
-    "type": "bool",
-    "default": false,
-    "hint": "公共 API request_realtime_chat_dispatch 未显式传 dry_run 时是否只返回分条计划而不发送。"
-  },
-  "realtime_chat_strip_markdown": {
-    "description": "即时聊天发送前清理 Markdown",
+  "sylanne_alpha_background_workers_enabled": {
+    "description": "启用后台工作队列",
     "type": "bool",
     "default": true,
-    "hint": "开启后会移除常见 Markdown 标记，降低人机味。"
+    "hint": "默认开启；用于异步持久化和后台任务。"
   },
-  "enable_sticker_reaction": {
-    "description": "启用表情包氛围回应",
+  "sylanne_alpha_background_max_workers": {
+    "description": "后台最大并发工作数",
+    "type": "int",
+    "default": 2,
+    "hint": "1c1g 环境建议保持 1-2。"
+  },
+  "sylanne_alpha_life_simulation_enabled": {
+    "description": "启用 Sylanne 生活模拟",
     "type": "bool",
     "default": false,
-    "hint": "默认关闭。表情包回应仍处于体验验证期，需要继续修复素材索引、语气一致性和平台发送兼容问题；确认稳定前建议只在测试环境手动开启。"
+    "hint": "默认关闭；开启后 Sylanne 会用外部 LLM 模拟自己的生活，某些时刻会因为她那边发生的事主动找用户。"
   },
-  "sticker_llm_consistency_check_enabled": {
-    "description": "启用表情包发送前一致性检查",
-    "type": "bool",
-    "default": false,
-    "hint": "默认关闭。开启表情包回应测试时可一并开启，用内部判断 LLM 或本地回退检查文件名、标签与本轮回复意图是否一致。"
-  },
-  "sticker_default_repo_url": {
-    "description": "默认表情包参考仓库",
-    "type": "string",
-    "default": "https://github.com/zhaoolee/ChineseBQB.git",
-    "hint": "仅作为默认来源提示；插件包不会下载、镜像或分发该仓库。自动下载只有在单独开关开启时才会把指定仓库下载到本机缓存目录。"
-  },
-  "sticker_auto_download_enabled": {
-    "description": "自动下载默认表情包仓库",
-    "type": "bool",
-    "default": false,
-    "hint": "默认关闭。开启后，若表情包回应已开启且本地表情包目录为空，插件会把指定仓库下载到本机缓存目录再索引；会消耗网络、磁盘和首次索引时间。"
-  },
-  "sticker_auto_download_repo_url": {
-    "description": "自动下载表情包仓库地址",
-    "type": "string",
-    "default": "https://github.com/zhaoolee/ChineseBQB.git",
-    "hint": "仅支持 http/https/git 协议的 Git 仓库地址。插件只把素材下载到本机缓存目录，不会把外部素材打进发布包。"
-  },
-  "sticker_auto_download_cache_dir": {
-    "description": "自动下载表情包缓存目录",
-    "type": "string",
-    "default": "",
-    "hint": "留空时使用系统缓存目录下的 astrbot_plugin_sylanne/stickers；不要填写插件源码目录、docs、pages、dist 或 output。"
-  },
-  "sticker_auto_download_timeout_seconds": {
-    "description": "自动下载表情包超时秒数",
-    "type": "float",
-    "default": 30.0,
-    "hint": "首次 git clone 的超时时间。下载失败会回退为无候选表情，不阻塞主回复。"
-  },
-  "sticker_local_root": {
-    "description": "本地表情包目录",
-    "type": "string",
-    "default": "",
-    "hint": "填写本机已准备的表情包目录；留空时可配合自动下载开关使用缓存素材，否则只使用已学习的用户表情元数据。"
-  },
-  "sticker_allowed_extensions": {
-    "description": "允许索引的表情包扩展名",
-    "type": "string",
-    "default": ".jpg,.jpeg,.png,.gif,.webp",
-    "hint": "用英文逗号分隔。"
-  },
-  "sticker_selected_packs": {
-    "description": "表情包子包筛选词",
-    "type": "string",
-    "default": "",
-    "hint": "留空索引全部；填写后只索引路径中包含这些关键词的文件。"
-  },
-  "sticker_index_limit": {
-    "description": "表情包索引上限",
-    "type": "int",
-    "default": 1000,
-    "hint": "限制本地扫描出的候选表情数量。"
-  },
-  "sticker_index_cache_ttl_seconds": {
-    "description": "表情包索引缓存秒数",
-    "type": "float",
-    "default": 86400.0,
-    "hint": "避免每轮回复都扫描大目录。"
-  },
-  "sticker_max_file_bytes": {
-    "description": "单个表情包最大字节数",
-    "type": "int",
-    "default": 5242880,
-    "hint": "超过该大小的图片不进入候选，避免发送过大文件。"
-  },
-  "sticker_learn_user_images": {
-    "description": "学习用户表情包元数据",
-    "type": "bool",
-    "default": false,
-    "hint": "默认关闭。表情包功能稳定前不自动学习用户图片/表情元数据；开启后只记录轻量来源信息，不把二进制图片写入发布包。"
-  },
-  "sticker_learned_limit": {
-    "description": "每会话学习表情上限",
-    "type": "int",
-    "default": 200,
-    "hint": "限制每个会话保留的用户表情元数据数量。"
-  },
-  "background_post_queue_limit": {
-    "description": "每个会话后台 post 评估队列上限",
-    "type": "int",
-    "default": 0,
-    "hint": "后台 post 评估自动开启。0 表示不限制；大于 0 时，超过上限的最旧任务会被跳过以保护延迟。"
-  },
-  "enable_dynamic_background_workers": {
-    "description": "启用动态后台 worker 扩容",
-    "type": "bool",
-    "default": false,
-    "hint": "默认关闭。开启后由插件根据队列深度、等待时间、重试、租约压力以及当前 CPU/内存环境压力自适应选择后台 worker 数量；全插件同时活跃的后台 worker 硬上限固定为 6，环境压力高或压力未知时会保守降档，并通过冷却时间逐级扩容，空闲 worker 会自动关闭。内部判断 LLM 另有并发闸门，默认最多 2 路、极端积压时最多 3 路，避免并行 worker 直接打爆模型服务。会增加 API、token 和 CPU 压力。"
-  },
-  "background_post_queue_checkpoint_enabled": {
-    "description": "启用后台队列检查点",
-    "type": "bool",
-    "default": true,
-    "hint": "把未提交的后台任务写入 KV；插件重启后会尝试恢复队列，避免状态轨迹断裂。"
-  },
-  "background_post_checkpoint_debounce_seconds": {
-    "description": "后台检查点合并写入延迟秒数",
-    "type": "float",
-    "default": 0.75,
-    "hint": "合并同一会话短时间内的多次队列变更，降低 AstrBot KV 写入频率，尤其避免低配置云盘被高频写入拖死。"
-  },
-  "background_post_job_lease_seconds": {
-    "description": "后台任务租约秒数",
-    "type": "float",
-    "default": 120.0,
-    "hint": "单个 worker 领取任务后的租约时间；租约过期后任务可被回收并重新排队。"
-  },
-  "background_post_job_timeout_seconds": {
-    "description": "后台任务超时秒数",
-    "type": "float",
-    "default": 0.0,
-    "hint": "0 表示不启用任务级超时；大于 0 时，超过该时长的后台评估会按失败处理并进入重试。"
-  },
-  "background_post_retry_max_attempts": {
-    "description": "后台任务最大重试次数",
-    "type": "int",
-    "default": 3,
-    "hint": "后台评估失败后最多重试的次数；超过后进入 dead-letter 诊断队列。"
-  },
-  "background_post_retry_base_delay_seconds": {
-    "description": "后台重试基础延迟秒数",
-    "type": "float",
-    "default": 2.0,
-    "hint": "后台任务失败后的指数退避基础延迟。"
-  },
-  "background_post_retry_max_delay_seconds": {
-    "description": "后台重试最大延迟秒数",
-    "type": "float",
-    "default": 60.0,
-    "hint": "限制指数退避的最大等待时间。"
-  },
-  "background_post_dead_letter_limit": {
-    "description": "后台 dead-letter 保留条数",
-    "type": "int",
-    "default": 100,
-    "hint": "每个会话最多保留的失败任务诊断摘要数量。"
-  },
-  "background_post_diagnostics_warn_lag_count": {
-    "description": "后台队列数量告警阈值",
-    "type": "int",
-    "default": 20,
-    "hint": "排队任务和活跃任务数量达到该值时，运行时诊断会标记 warning_level=warn。"
-  },
-  "background_post_diagnostics_warn_lag_seconds": {
-    "description": "后台队列等待告警秒数",
-    "type": "float",
-    "default": 60.0,
-    "hint": "最老任务等待超过该秒数时，运行时诊断会标记 warning_level=warn。"
-  },
-  "enable_low_signal_light_assessment": {
-    "description": "启用低信息量轻量评估",
-    "type": "bool",
-    "default": true,
-    "hint": "默认开启。短确认、空消息或纯符号消息会跳过 LLM 情绪评估，改用本地轻量估计。"
-  },
-  "low_signal_max_chars": {
-    "description": "低信息量文本最大字符数",
-    "type": "int",
-    "default": 12,
-    "hint": "小于等于该长度且符合低信息模式的文本会优先使用轻量评估。"
-  },
-  "agent_speaker_relationship_tracking": {
-    "description": "启用发言者关系分轨记录",
-    "type": "bool",
-    "default": true,
-    "hint": "默认开启。群聊或多用户场景下，会同时维护 conversation 与 speaker 级别的情绪关系轨迹。"
-  },
-  "agent_include_speaker_in_assessment": {
-    "description": "评估时加入发言者标识",
-    "type": "bool",
-    "default": true,
-    "hint": "当 AstrBot 能提供用户 ID 或昵称时，会把发言者信息加入内部评估上下文，帮助区分不同人的关系状态。"
-  },
-  "agent_identity_profile_limit": {
-    "description": "发言者身份画像缓存上限",
-    "type": "int",
-    "default": 256,
-    "hint": "限制内存中保留的发言者身份与别名画像数量，防止长期群聊无限增长。"
-  },
-  "agent_identity_ttl_seconds": {
-    "description": "发言者身份画像保留秒数",
-    "type": "float",
-    "default": 2592000.0,
-    "hint": "默认 30 天。0 表示不按时间清理，只受数量上限限制。"
-  },
-  "enable_agent_causal_trail": {
-    "description": "启用插件状态因果轨迹记录",
-    "type": "bool",
-    "default": true,
-    "hint": "默认开启。记录脱敏的近期状态更新因果链，包括阶段、模块、输入摘要、前后状态摘要和原因列表，供 query_agent_state(state=\"trail\") 与公共 API 只读查询。"
-  },
-  "agent_trail_limit": {
-    "description": "每个会话保留的插件因果轨迹条数",
-    "type": "int",
-    "default": 80,
-    "hint": "限制内存和 KV 中保存的最近因果轨迹环形缓冲长度；读取时仍可传 limit 只取更少条目。"
-  },
-  "agent_trail_compaction_enabled": {
-    "description": "启用插件因果轨迹压缩",
-    "type": "bool",
-    "default": true,
-    "hint": "把连续低变化的状态更新压缩为 compacted_items，降低读取和存储成本。"
-  },
-  "agent_trail_low_signal_delta_threshold": {
-    "description": "因果轨迹低变化阈值",
-    "type": "float",
-    "default": 0.03,
-    "hint": "状态变化小于该阈值的连续记录可被压缩为 compacted_items。"
-  },
-  "agent_trail_low_signal_window": {
-    "description": "因果轨迹压缩窗口",
-    "type": "int",
-    "default": 5,
-    "hint": "连续达到该数量的低变化记录会被合并为一个压缩摘要。"
-  },
-  "inject_state": {
-    "description": "把当前情绪状态作为临时上下文注入 LLM 请求",
-    "type": "bool",
-    "default": true
-  },
-  "runtime_parameter_debug_override_enabled": {
-    "description": "启用运行时参数调试覆盖",
-    "type": "bool",
-    "default": false,
-    "hint": "默认关闭。关闭时状态注入细节、主动发言冷却/长度、即时聊天分条/打字速度、表情包概率均由人格模型、情绪、群聊氛围和预算自动计算；开启后仅供维护者临时读取旧配置键做排查。"
-  },
-  "state_injection_request_budget_chars": {
-    "description": "单次 LLM 请求总字符预算",
-    "type": "int",
-    "default": 32000,
-    "hint": "用于估算 prompt 与 extra parts 的总长度，避免状态注入把请求撑爆。"
-  },
-  "state_injection_reserved_chars": {
-    "description": "状态注入保留字符预算",
-    "type": "int",
-    "default": 3000,
-    "hint": "为 provider、工具 schema 和用户正文预留空间，减少超长请求风险。"
-  },
-  "state_injection_max_added_chars": {
-    "description": "单次 LLM 请求最多新增状态字符数",
-    "type": "int",
-    "default": 2400,
-    "hint": "限制本插件向 LLM 请求中额外注入的状态文本总量。"
-  },
-  "state_injection_max_parts": {
-    "description": "单次 LLM 请求最多新增状态片段数",
-    "type": "int",
-    "default": 8,
-    "hint": "限制本插件向 LLM 请求中额外追加的临时上下文片段数量。"
-  },
-  "llm_tool_response_max_chars": {
-    "description": "单次 LLM Tool 返回 JSON 最大字符数",
-    "type": "int",
-    "default": 16000,
-    "hint": "full 查询可能很长；超过该上限时会返回截断提示，让调用方改用更窄的查询。"
-  },
-  "enable_safety_boundary": {
-    "description": "启用情绪后果安全边界",
-    "type": "bool",
-    "default": true,
-    "hint": "默认开启。开启时会把冷处理限制为轻微降频、短句、边界感，并禁止羞辱、威胁、操控或拒绝必要帮助；关闭后只按情绪后果调制语气和互动策略。"
-  },
-  "block_deception_manipulation_evasion_actions": {
-    "description": "阻断欺骗、操控、逃责类动作",
-    "type": "bool",
-    "default": true,
-    "hint": "默认开启。开启后，综合自我与阴影诊断中的 blocked_actions、not_allowed、refuse 等字段会作为插件层硬阻断信号；关闭后只保留风险观察与修复建议，不额外写入插件层硬阻断动作。"
-  },
-  "max_context_chars": {
-    "description": "情绪估计时最多读取的上下文字数",
-    "type": "int",
-    "default": 1600
-  },
-  "request_context_max_chars": {
-    "description": "生命周期钩子拼接上下文时的总字数上限",
-    "type": "int",
-    "default": 1600,
-    "hint": "用于在进入情绪估计 prompt 前先截断滚动上下文，降低内部 LLM token 和本地字符串拼接成本。"
-  },
-  "assessor_timeout_seconds": {
-    "description": "情绪估计 LLM 调用超时秒数",
-    "type": "float",
-    "default": 0.0,
-    "hint": "0 表示不启用硬超时，等待模型自然返回；仅在压测、成本保护或极端慢模型隔离时才建议设为大于 0。"
-  },
-  "provider_id_cache_ttl_seconds": {
-    "description": "当前会话 Provider ID 短缓存秒数",
-    "type": "float",
-    "default": 30.0,
-    "hint": "emotion_provider_id 留空时生效，减少每轮重复查询当前 Provider。"
-  },
-  "passive_load_fresh_seconds": {
-    "description": "状态缓存命中后的被动衰减短路秒数",
-    "type": "float",
-    "default": 1.0,
-    "hint": "短时间内连续读取同一状态时跳过被动衰减计算和 KV 写回，降低公共 API 与 prompt 注入延迟。"
-  },
-  "benchmark_enable_simulated_time": {
-    "description": "远程性能/生命周期基准测试专用：启用模拟时间偏移",
-    "type": "bool",
-    "default": false,
-    "hint": "默认关闭。仅用于测试脚本快速验证真实时间半衰期和长期状态模型；生产对话不要开启。"
-  },
-  "benchmark_time_offset_seconds": {
-    "description": "远程性能/生命周期基准测试专用：当前时间偏移秒数",
-    "type": "float",
-    "default": 0.0,
-    "hint": "仅在 benchmark_enable_simulated_time=true 时生效。插件会把观测时间视为 time.time()+offset，用于快速模拟 1 天、1 周、1 年等真实时间跨度。"
-  },
-  "assessor_temperature": {
-    "description": "内部评估 LLM 温度",
-    "type": "float",
-    "default": 0.1,
-    "hint": "建议保持较低，提升 JSON 输出稳定性。"
-  },
-  "allow_emotion_reset_backdoor": {
-    "description": "允许手动/公共 API 重置情绪状态后门",
-    "type": "bool",
-    "default": true,
-    "hint": "默认开启，用于严重后果或异常状态时紧急清空当前会话情绪记忆。关闭后 /emotion_reset 与公共 reset_emotion_state 会拒绝执行。"
-  },
-  "enable_psychological_screening": {
-    "description": "启用非诊断心理状态筛查备用模块",
-    "type": "bool",
-    "default": false,
-    "hint": "默认关闭。开启后可通过公共 API 或 /psych_state 记录与查看心理状态筛查。该模块仅用于状态记录和风险提示，不提供疾病诊断或医疗建议。"
-  },
-  "enable_sylanne_memory": {
-    "description": "启用 Sylanne 自有长期记忆模块",
-    "type": "bool",
-    "default": true,
-    "hint": "默认开启。发生的事情会写入自有记忆，后续对话会按限长召回摘要理解指代、偏好和共同经历；记忆深度、遗忘半衰期、召回数量、巩固强度和压缩阈值全部由人格、情绪、关系、群聊氛围和真实时间自动推导，不允许手动调数值。"
-  },
-  "sylanne_memory_idle_commit_delay_seconds": {
-    "description": "Sylanne 记忆空闲写入等待秒数",
-    "type": "float",
-    "default": 4.0,
-    "hint": "用户连续分条输入或接管回复尚未稳定时，先把记忆事件放入轻量队列；会话安静达到该秒数后再合并写入，避免半句话和误识别碎片污染长期记忆。插件关闭或更新前会强制落盘。"
-  },
-  "sylanne_memory_vector_retrieval_enabled": {
-    "description": "启用 Sylanne 记忆向量检索",
-    "type": "bool",
-    "default": true,
-    "hint": "默认开启。若 AstrBot 已配置 Embedding 类型模型提供商，记忆会保存语义向量；普通召回先走关键词/关联图，只有无命中且已有向量记录时才调用 query embedding，并会短时缓存同一 query/provider。提供商不可用时自动退回关键词/关联图检索。"
-  },
-  "sylanne_memory_embedding_provider_id": {
-    "description": "Sylanne 记忆 Embedding 提供商（兼容手填）",
+  "sylanne_alpha_life_simulation_provider_id": {
+    "description": "生活模拟 LLM Provider",
     "type": "string",
     "default": "",
     "_special": "select_provider",
-    "provider_type": "embedding",
-    "hint": "推荐在插件详情页的『记忆设置』Page 中下拉选择；这里保留手填 ID 作为兼容入口。留空时自动使用 AstrBot 当前可用的第一个 Embedding 提供商。该项只选择模型来源，不开放记忆动力学数值。"
+    "hint": "用于模拟 Sylanne 生活的 LLM；建议用便宜的小模型。"
   },
-  "sylanne_memory_record_embedding_min_interval_seconds": {
-    "description": "Sylanne 记忆记录补向量最小间隔秒数",
+  "sylanne_alpha_life_simulation_interval_seconds": {
+    "description": "生活模拟间隔（秒）",
     "type": "float",
-    "default": 300.0,
-    "hint": "控制写入侧为新记忆生成 semantic_embedding 的最低频率。默认同一会话至少间隔 5 分钟，避免密集聊天时持续调用 Embedding Provider。"
+    "default": 1800.0,
+    "hint": "每隔多久模拟一次 Sylanne 的生活状态。默认 30 分钟。"
   },
-  "sylanne_memory_record_embedding_max_per_flush": {
-    "description": "Sylanne 记忆单次空闲写入最多补向量记录数",
-    "type": "int",
-    "default": 1,
-    "hint": "控制一次 idle flush 最多为多少条新记忆生成向量；默认 1。设为 0 可保留向量召回但停止写入侧新建向量。"
-  },
-  "sylanne_memory_debug_view_enabled": {
-    "description": "启用 Sylanne 记忆调试视图",
-    "type": "bool",
-    "default": false,
-    "hint": "默认关闭。开启后允许通过命令或公共 API 查看自有记忆的摘要、深度、召回评分和自动推导 dynamics；只用于排障，不提供核心参数手动覆盖。"
-  },
-  "allow_sylanne_memory_reset_backdoor": {
-    "description": "允许重置 Sylanne 自有记忆后门",
-    "type": "bool",
-    "default": true,
-    "hint": "默认开启，用于严重误记、上下文污染或异常状态时清空当前会话自有记忆。关闭后记忆重置命令和公共 API 会拒绝执行。"
-  },
-  "humanlike_memory_write_enabled": {
-    "description": "为记忆写入附带拟人化状态标注",
-    "type": "bool",
-    "default": true,
-    "hint": "build_emotion_memory_payload 会附带 humanlike_state_at_write，供 Sylanne 自有记忆或其他调用方记录当时状态。"
-  },
-  "humanlike_clinical_like_enabled": {
-    "description": "启用类临床长期状态备用模块",
-    "type": "bool",
-    "default": false,
-    "hint": "第一轮仅保留配置位，不提供疾病诊断。"
-  },
-  "allow_humanlike_reset_backdoor": {
-    "description": "允许手动/API 重置拟人化状态后门",
-    "type": "bool",
-    "default": true,
-    "hint": "默认开启，用于异常状态、严重后果或调试。"
-  },
-  "lifelike_learning_memory_write_enabled": {
-    "description": "为记忆写入附带生命化学习状态标注",
-    "type": "bool",
-    "default": true,
-    "hint": "build_emotion_memory_payload 会附带 lifelike_learning_state_at_write，供 Sylanne 自有记忆或其他调用方记录当时共同语境和开口策略。"
-  },
-  "allow_lifelike_learning_reset_backdoor": {
-    "description": "允许手动/API 重置生命化学习状态后门",
-    "type": "bool",
-    "default": true,
-    "hint": "默认开启，用于误学黑话、错误用户画像、边界异常或调试。"
-  },
-  "personality_drift_memory_write_enabled": {
-    "description": "为记忆写入附带人格漂移状态标注",
-    "type": "bool",
-    "default": true,
-    "hint": "build_emotion_memory_payload 会附带 personality_drift_state_at_write，供 Sylanne 自有记忆或其他调用方记录当时人格适应状态。"
-  },
-  "allow_personality_drift_reset_backdoor": {
-    "description": "允许手动/API 重置人格漂移状态后门",
-    "type": "bool",
-    "default": true,
-    "hint": "默认开启，用于异常适应、人格污染、严重后果或调试。"
-  },
-  "enable_moral_repair_state": {
-    "description": "启用道德修复/信任修复状态模拟",
-    "type": "bool",
-    "default": false,
-    "hint": "默认关闭。维护 moral_repair_state，用于记录欺骗/伤害风险信号、内疚、责任、道歉、补偿和信任修复；欺骗/操控/逃责类动作阻断默认开启，只有显式关闭 block_deception_manipulation_evasion_actions 时才仅观察风险。"
-  },
-  "moral_repair_memory_write_enabled": {
-    "description": "为记忆写入附带道德修复状态标注",
-    "type": "bool",
-    "default": true,
-    "hint": "build_emotion_memory_payload 会附带 moral_repair_state_at_write，供 Sylanne 自有记忆或其他调用方记录当时责任、内疚、补偿和信任修复状态。"
-  },
-  "allow_moral_repair_reset_backdoor": {
-    "description": "允许手动/API 重置道德修复状态后门",
-    "type": "bool",
-    "default": true,
-    "hint": "默认开启，用于异常状态、严重后果和调试。"
-  },
-  "enable_fallibility_state": {
-    "description": "启用低风险瑕疵/犯错模拟状态",
-    "type": "bool",
-    "default": false,
-    "hint": "默认关闭。维护 fallibility_state，用于低风险误读、记忆模糊、轻微嘴硬、澄清、自我纠错和补偿；编造事实、操控和欺骗策略相关阻断默认开启，只有显式关闭 block_deception_manipulation_evasion_actions 时才仅观察风险。"
-  },
-  "fallibility_memory_write_enabled": {
-    "description": "为记忆写入附带瑕疵模拟状态标注",
-    "type": "bool",
-    "default": true,
-    "hint": "build_emotion_memory_payload 会附带 fallibility_state_at_write，供 Sylanne 自有记忆或其他调用方记录当时澄清、纠错和修复状态。"
-  },
-  "allow_fallibility_reset_backdoor": {
-    "description": "允许手动/API 重置瑕疵模拟状态后门",
-    "type": "bool",
-    "default": true,
-    "hint": "默认开启，用于异常状态、严重后果、人格污染和调试。"
-  },
-  "enable_shadow_diagnostics": {
-    "description": "启用只读阴影冲动诊断视图",
-    "type": "bool",
-    "default": false,
-    "hint": "默认关闭。开启后仅暴露非执行、维护用诊断载荷，用于检查 moral_repair、fallibility 和 integrated_self 中的阴影冲动信号；默认诊断策略为 block，显式关闭 block_deception_manipulation_evasion_actions 后才退回 observe。"
-  },
-  "enable_integrated_self_state": {
-    "description": "启用综合自我状态总线",
-    "type": "bool",
-    "default": true,
-    "hint": "只读仲裁层，融合情绪、拟人、道德修复、瑕疵模拟和心理筛查快照；自身不写 KV 状态。"
-  },
-  "allow_relational_self_public_export": {
-    "description": "允许公开导出关系性自我推断",
-    "type": "bool",
-    "default": false,
-    "hint": "默认关闭。开启后 export_integrated_self_diagnostics 会包含 self_interpretation、relational_turning_point 和 turning_point_candidate 等高风险关系/自我推断数据；由此造成的不可预料后果由开启者自行负责。插件内部判断不受此开关限制。"
-  },
-  "integrated_self_memory_write_enabled": {
-    "description": "为记忆写入附带综合自我状态标注",
-    "type": "bool",
-    "default": true,
-    "hint": "build_emotion_memory_payload 会附带 integrated_self_state_at_write，供 Sylanne 自有记忆或其他调用方记录融合后的回应姿态和风险边界。"
-  },
-  "integrated_self_degradation_profile": {
-    "description": "综合自我状态成本档位",
-    "type": "string",
-    "default": "balanced",
-    "options": [
-      "full",
-      "balanced",
-      "minimal"
-    ],
-    "hint": "控制 trace 和提示词预算细节。minimal 会减少可选细节，但保留 schema、安全优先级、已存在的诊断/阻断字段和自有记忆注解。"
+  "sylanne_alpha_life_simulation_outreach_cooldown_seconds": {
+    "description": "生活模拟主动找用户冷却（秒）",
+    "type": "float",
+    "default": 3600.0,
+    "hint": "因为生活事件主动找用户的最短间隔。默认 1 小时。"
   }
 }

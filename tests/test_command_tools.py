@@ -80,9 +80,12 @@ PLUGIN_DICT_ATTRIBUTES = (
 PLUGIN_SET_ATTRIBUTES = (
     "_realtime_delivery_context_dirty",
     "_realtime_delivery_context_restored",
-    "_background_tasks",
     "_background_post_recovered_sessions",
     "_background_post_checkpoint_tasks",
+)
+
+PLUGIN_LIST_ATTRIBUTES = (
+    "_background_tasks",
 )
 
 
@@ -175,6 +178,8 @@ def new_plugin(config=None):
     from moral_repair_engine import MoralRepairEngine
     from personality_drift_engine import PersonalityDriftEngine
     from psychological_screening import PsychologicalScreeningEngine
+    from sylanne_body.adapter import KernelAdapter
+    from sylanne_body.organ.library import LegacyBodyOrgan
 
     plugin = EmotionalStatePlugin.__new__(EmotionalStatePlugin)
     plugin.config = dict(config or {})
@@ -187,10 +192,27 @@ def new_plugin(config=None):
     plugin.moral_repair_engine = MoralRepairEngine()
     plugin.fallibility_engine = FallibilityEngine()
     plugin.group_atmosphere_engine = GroupAtmosphereEngine()
+    plugin._sylanne_kernel_adapter = KernelAdapter()
+    plugin._sylanne_legacy_organs = tuple(
+        LegacyBodyOrgan(module_name=module_name)
+        for module_name in (
+            "conversation_event_ledger",
+            "memory_engine",
+            "emotion_engine",
+            "fallibility_engine",
+            "moral_repair_engine",
+            "lifelike_learning_engine",
+            "personality_drift_engine",
+            "integrated_self",
+            "project_life_engine",
+        )
+    )
     for attr in PLUGIN_DICT_ATTRIBUTES:
         setattr(plugin, attr, {})
     for attr in PLUGIN_SET_ATTRIBUTES:
         setattr(plugin, attr, set())
+    for attr in PLUGIN_LIST_ATTRIBUTES:
+        setattr(plugin, attr, [])
     plugin._internal_assessor_llm_condition = None
     plugin._internal_assessor_llm_condition_loop = None
     plugin._internal_assessor_llm_inflight = 0

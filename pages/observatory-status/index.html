@@ -1,0 +1,59 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Sylanne 观察舱</title>
+  <link rel="stylesheet" href="./style.css">
+</head>
+<body>
+  <main class="observatory-shell">
+    <section class="hero">
+      <p class="eyebrow">Sylanne 4.0 alpha</p>
+      <h1>观察舱</h1>
+      <p>只读展示身体感、记忆、人格漂移、神经网络空间感和配置状态。</p>
+    </section>
+    <section class="space-field" aria-label="神经网络空间感">
+      <article class="status-card body-card" data-card="body">
+        <span class="orb"></span>
+        <h2>身体感</h2>
+        <p data-summary="body">等待状态数据。</p>
+      </article>
+      <article class="status-card memory-card" data-card="memory">
+        <span class="orb"></span>
+        <h2>记忆</h2>
+        <p data-summary="memory">等待状态数据。</p>
+      </article>
+      <article class="status-card drift-card" data-card="drift">
+        <span class="orb"></span>
+        <h2>人格漂移</h2>
+        <p data-summary="drift">等待状态数据。</p>
+      </article>
+      <article class="status-card space-card" data-card="space">
+        <span class="orb"></span>
+        <h2>神经网络空间感</h2>
+        <p data-summary="space">等待状态数据。</p>
+      </article>
+    </section>
+    <section class="panel-grid">
+      <article class="data-panel" data-token-flow>
+        <h2>Token 分段使用</h2>
+        <div class="token-stream" data-token-list></div>
+      </article>
+      <article class="data-panel" data-memory-space>
+        <h2>记忆空间</h2>
+        <div class="memory-space" data-memory-nodes></div>
+      </article>
+      <article class="data-panel" data-persona-model>
+        <h2>人格建模与漂移</h2>
+        <dl class="persona-grid" data-persona-traits></dl>
+      </article>
+      <article class="data-panel" data-config-controls>
+        <h2>插件配置状态</h2>
+        <div class="config-list" data-config-list></div>
+      </article>
+    </section>
+  </main>
+  <script src="./app.js"></script>
+</body>
+</html>

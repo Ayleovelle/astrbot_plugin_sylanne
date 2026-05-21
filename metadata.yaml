@@ -1,8 +1,8 @@
 name: astrbot_plugin_sylanne
 display_name: Sylanne
-desc: Soulful Yearning Lifelike AstrBot Neural Narrative Engine; maintains emotional dynamics, personality drift, lifelike learning, group atmosphere, memory, and background state scheduling.
-short_desc: Soulful Yearning Lifelike AstrBot Neural Narrative Engine; Sylanne.
-version: 3.0.10
+desc: "Sylanne-Embodiment: sovereign emotional body runtime with Void-Scar computation engine."
+short_desc: "Sylanne-Embodiment 1.0.0"
+version: Embodiment-1.0.0
 author: Aylovelle.S.S
 license: AGPL-3.0-or-later
 repo: "https://github.com/Ayleovelle/astrbot_plugin_sylanne"
