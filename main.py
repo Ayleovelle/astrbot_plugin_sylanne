@@ -522,7 +522,7 @@ def get_emotional_state_plugin(context: Context) -> Any | None:
     PLUGIN_NAME,
     "Aylovelle.S.S",
     "Soulful Yearning Lifelike AstrBot Neural Narrative Engine：维护情绪、人格、记忆、氛围和表达节奏的 Sylanne",
-    "3.0.8",
+    "3.0.9",
     "https://github.com/Ayleovelle/astrbot_plugin_sylanne",
 )
 class EmotionalStatePlugin(Star):
@@ -1581,65 +1581,39 @@ class EmotionalStatePlugin(Star):
                 engine = self._engine_for_persona(persona_profile)
                 await self._save_state(session_key, state)
 
+        injection_budget = self._state_injection_budget_for_request(
+            session_key,
+            request,
+            model_hint=model_hint,
+        )
+        self._prune_hidden_sylanne_llm_tools_if_needed(
+            request,
+            injection_budget,
+            model_hint=model_hint,
+        )
+        self._append_realtime_input_fragment_context_if_any(
+            event,
+            request,
+            identity,
+            current_user_text=current_text,
+            observed_at=observed_at,
+            budget=injection_budget,
+        )
+        self._append_realtime_continuity_context_if_any(
+            request,
+            session_key,
+            budget=injection_budget,
+            current_user_text=current_text,
+            observed_at=observed_at,
+            event=event,
+        )
         if inject_state:
-            injection_budget = self._state_injection_budget_for_request(
-                session_key,
-                request,
-                model_hint=model_hint,
-            )
-            self._prune_hidden_sylanne_llm_tools_if_needed(
-                request,
-                injection_budget,
-                model_hint=model_hint,
-            )
-            self._append_realtime_input_fragment_context_if_any(
-                event,
-                request,
-                identity,
-                current_user_text=current_text,
-                observed_at=observed_at,
-                budget=injection_budget,
-            )
-            self._append_realtime_continuity_context_if_any(
-                request,
-                session_key,
-                budget=injection_budget,
-                current_user_text=current_text,
-                observed_at=observed_at,
-                event=event,
-            )
             injection_decision = self._state_injection_decision(
                 session_key,
                 state,
                 budget=injection_budget,
             )
         else:
-            injection_budget = self._state_injection_budget_for_request(
-                session_key,
-                request,
-                model_hint=model_hint,
-            )
-            self._prune_hidden_sylanne_llm_tools_if_needed(
-                request,
-                injection_budget,
-                model_hint=model_hint,
-            )
-            self._append_realtime_input_fragment_context_if_any(
-                event,
-                request,
-                identity,
-                current_user_text=current_text,
-                observed_at=observed_at,
-                budget=injection_budget,
-            )
-            self._append_realtime_continuity_context_if_any(
-                request,
-                session_key,
-                budget=injection_budget,
-                current_user_text=current_text,
-                observed_at=observed_at,
-                event=event,
-            )
             await self._append_sylanne_memory_recall_context_if_any(
                 request,
                 session_key,
@@ -15710,58 +15684,7 @@ class EmotionalStatePlugin(Star):
         )
 
     def _ensure_runtime_state_containers(self) -> None:
-        if not hasattr(self, "humanlike_engine"):
-            self.humanlike_engine = HumanlikeEngine(
-                self._build_humanlike_parameters(),
-            )
-        if not hasattr(self, "lifelike_learning_engine"):
-            self.lifelike_learning_engine = LifelikeLearningEngine(
-                self._build_lifelike_learning_parameters(),
-            )
-        if not hasattr(self, "personality_drift_engine"):
-            self.personality_drift_engine = PersonalityDriftEngine(
-                self._build_personality_drift_parameters(),
-            )
-        if not hasattr(self, "moral_repair_engine"):
-            self.moral_repair_engine = MoralRepairEngine(
-                self._build_moral_repair_parameters(),
-            )
-        if not hasattr(self, "fallibility_engine"):
-            self.fallibility_engine = FallibilityEngine(
-                self._build_fallibility_parameters(),
-            )
-        if not hasattr(self, "group_atmosphere_engine"):
-            self.group_atmosphere_engine = GroupAtmosphereEngine(
-                self._build_group_atmosphere_parameters(),
-            )
-        if not hasattr(self, "_memory_cache"):
-            self._memory_cache = {}
-        if not hasattr(self, "_psychological_memory_cache"):
-            self._psychological_memory_cache = {}
-        if not hasattr(self, "_humanlike_memory_cache"):
-            self._humanlike_memory_cache = {}
-        if not hasattr(self, "_lifelike_learning_memory_cache"):
-            self._lifelike_learning_memory_cache = {}
-        if not hasattr(self, "_personality_drift_memory_cache"):
-            self._personality_drift_memory_cache = {}
-        if not hasattr(self, "_moral_repair_memory_cache"):
-            self._moral_repair_memory_cache = {}
-        if not hasattr(self, "_fallibility_memory_cache"):
-            self._fallibility_memory_cache = {}
-        if not hasattr(self, "_group_atmosphere_memory_cache"):
-            self._group_atmosphere_memory_cache = {}
-        if not hasattr(self, "_sylanne_memory_cache"):
-            self._sylanne_memory_cache = {}
-        if not hasattr(self, "_sylanne_memory_query_embedding_cache"):
-            self._sylanne_memory_query_embedding_cache = {}
-        if not hasattr(self, "_sylanne_memory_record_embedding_last_at"):
-            self._sylanne_memory_record_embedding_last_at = {}
-        if not hasattr(self, "_sylanne_memory_pending_observations"):
-            self._sylanne_memory_pending_observations = {}
-        if not hasattr(self, "_sylanne_memory_idle_tasks"):
-            self._sylanne_memory_idle_tasks = {}
-        if not hasattr(self, "_sylanne_memory_idle_generation"):
-            self._sylanne_memory_idle_generation = {}
+        pass
 
     async def _load_auxiliary_state(
         self,

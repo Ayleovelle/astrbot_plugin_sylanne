@@ -2,6 +2,21 @@
 
 本文件用于 AstrBot 插件市场/管理页展示更新内容。更完整的设计说明、公式推导、测试矩阵和维护手册见 `README.md`。
 
+## 3.0.9
+
+发布日期：2026-05-21
+
+### 优化
+
+- `on_llm_request` 中 `inject_state` if/else 分支的公共前四步操作（budget 计算、tool pruning、realtime input/continuity context）提到分支外，消除约 30 行重复。
+- `_ensure_runtime_state_containers` 清空为 pass——所有属性已在 `__init__` 中保证初始化，该方法的 53 行 hasattr 检查全部冗余。
+
+### 验证
+
+- 191 项 focused regression tests 全部通过。
+- py_compile 通过。
+- zip preflight 通过。
+
 ## 3.0.8
 
 发布日期：2026-05-21
