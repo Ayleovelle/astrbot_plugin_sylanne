@@ -47,346 +47,191 @@ except Exception:  # pragma: no cover - local unit tests install lightweight Ast
     jsonify = None
     request = None
 
-try:
-    from .emotion_engine import (
-        EmotionEngine,
-        EmotionObservation,
-        EmotionParameters,
-        EmotionState,
-        PersonaProfile,
-        PUBLIC_API_VERSION,
-        PUBLIC_MEMORY_SCHEMA_VERSION,
-        PUBLIC_PERSONALITY_PROFILE_SCHEMA_VERSION,
-        PUBLIC_SCHEMA_VERSION,
-        apply_persona_to_parameters,
-        build_emotion_memory_payload as build_memory_payload,
-        build_persona_profile,
-        emotion_state_to_public_payload,
-        format_consequence_for_user,
-        format_state_for_user,
-        heuristic_observation,
-        observation_from_llm_text,
-        relationship_state_to_public_payload,
-    )
-    from .psychological_screening import (
-        PUBLIC_SCREENING_SCHEMA_VERSION,
-        PsychologicalScreeningEngine,
-        PsychologicalScreeningParameters,
-        PsychologicalScreeningState,
-        format_psychological_state_for_user,
-        heuristic_psychological_observation,
-        psychological_state_to_public_payload,
-    )
-    from .humanlike_engine import (
-        PUBLIC_HUMANLIKE_SCHEMA_VERSION,
-        HumanlikeEngine,
-        HumanlikeParameters,
-        HumanlikeState,
-        build_humanlike_memory_annotation,
-        build_humanlike_prompt_fragment,
-        format_humanlike_state_for_user,
-        heuristic_humanlike_observation,
-        humanlike_state_to_public_payload,
-    )
-    from .lifelike_learning_engine import (
-        PUBLIC_LIFELIKE_LEARNING_SCHEMA_VERSION,
-        LifelikeLearningEngine,
-        LifelikeLearningParameters,
-        LifelikeLearningState,
-        build_lifelike_memory_annotation,
-        build_lifelike_prompt_fragment,
-        build_proactive_topic_assessment_prompt,
-        build_relationship_candidate_summary,
-        derive_initiative_policy,
-        derive_proactive_speech_decision,
-        rank_proactive_topics,
-        local_proactive_topic_judgement,
-        normalize_proactive_topic_judgement,
-        format_lifelike_state_for_user,
-        heuristic_lifelike_observation,
-        lifelike_state_to_public_payload,
-    )
-    from .personality_drift_engine import (
-        PUBLIC_PERSONALITY_DRIFT_SCHEMA_VERSION,
-        PersonalityDriftEngine,
-        PersonalityDriftObservation,
-        PersonalityDriftParameters,
-        PersonalityDriftState,
-        apply_personality_drift_to_profile,
-        build_coevolution_personality_drift_observation,
-        build_personality_drift_memory_annotation,
-        build_personality_drift_prompt_fragment,
-        format_personality_drift_state_for_user,
-        heuristic_personality_drift_observation,
-        personality_drift_state_to_public_payload,
-    )
-    from .moral_repair_engine import (
-        PUBLIC_MORAL_REPAIR_SCHEMA_VERSION,
-        MoralRepairEngine,
-        MoralRepairParameters,
-        MoralRepairState,
-        build_moral_repair_memory_annotation,
-        build_moral_repair_prompt_fragment,
-        format_moral_repair_state_for_user,
-        heuristic_moral_repair_observation,
-        moral_repair_state_to_public_payload,
-    )
-    from .fallibility_engine import (
-        PUBLIC_FALLIBILITY_SCHEMA_VERSION,
-        FallibilityEngine,
-        FallibilityParameters,
-        FallibilityState,
-        build_fallibility_memory_annotation,
-        build_fallibility_prompt_fragment,
-        fallibility_state_to_public_payload,
-        format_fallibility_state_for_user,
-        heuristic_fallibility_observation,
-    )
-    from .integrated_self import (
-        PUBLIC_INTEGRATED_SELF_SCHEMA_VERSION,
-        build_integrated_self_diagnostics,
-        build_integrated_self_experience_review,
-        build_integrated_self_memory_annotation,
-        build_integrated_self_prompt_fragment,
-        build_relational_self_prompt_fragment,
-        build_turning_point_lineage_observatory,
-        build_turning_point_memory_replay,
-        build_self_arbitration_intent_plan,
-        build_self_arbitration_prompt_fragment,
-        build_self_interpretation,
-        build_integrated_self_replay_bundle,
-        build_integrated_self_snapshot,
-        build_state_annotations_memory_envelope,
-        format_integrated_self_state_for_user,
-        probe_integrated_self_compatibility,
-        replay_integrated_self_bundle,
-    )
-    from .group_atmosphere_engine import (
-        PUBLIC_GROUP_ATMOSPHERE_SCHEMA_VERSION,
-        GroupAtmosphereEngine,
-        GroupAtmosphereParameters,
-        GroupAtmosphereState,
-        build_group_atmosphere_prompt_fragment,
-        group_atmosphere_state_to_public_payload,
-        heuristic_group_atmosphere_observation,
-    )
-    from .memory_engine import (
-        MemoryRecallItem,
-        PUBLIC_MEMORY_STORE_SCHEMA_VERSION,
-        SylanneMemoryState,
-        apply_memory_record_embedding,
-        apply_memory_time_decay,
-        build_memory_prompt_fragment,
-        memory_embedding_text,
-        memory_record_needs_embedding,
-        normalize_embedding,
-        observe_memory_event,
-        recall_memory,
-        reinforce_recalled_memories,
-    )
-    from .prompts import (
-        ASSESSOR_SYSTEM_PROMPT,
-        LOW_REASONING_ASSESSOR_SYSTEM_PROMPT,
-        build_assessment_prompt,
-        build_state_injection,
-    )
-    from .agent_identity import ConversationIdentity, conversation_identity_from_event
-    from .realtime_chat_engine import (
-        RealtimeChatSettings,
-        StickerSettings,
-        build_realtime_chat_plan,
-        build_sticker_memory_item,
-        index_local_stickers,
-        merge_sticker_memory,
-        realtime_style_prompt_fragment,
-    )
-    from .realtime_chat_input import (
-        RealtimeInputFragment,
-        RealtimeInputSettings,
-        build_realtime_input_hold_injection,
-        build_realtime_input_fragment_injection,
-        observe_realtime_input_fragment,
-    )
-    from .conversation_event_ledger import (
-        ConversationEventLedger,
-        LedgerEvent,
-        audit_shadow_lifecycle,
-        build_ledger_summary,
-        build_relational_time_layer,
-        stable_event_id,
-    )
-    from .expression_policy import build_expression_policy_prompt, choose_expression_policy
-    from .interpretation_engine import classify_memory_gate, interpret_user_text
-except ImportError:
-    from emotion_engine import (
-        EmotionEngine,
-        EmotionObservation,
-        EmotionParameters,
-        EmotionState,
-        PersonaProfile,
-        PUBLIC_API_VERSION,
-        PUBLIC_MEMORY_SCHEMA_VERSION,
-        PUBLIC_PERSONALITY_PROFILE_SCHEMA_VERSION,
-        PUBLIC_SCHEMA_VERSION,
-        apply_persona_to_parameters,
-        build_emotion_memory_payload as build_memory_payload,
-        build_persona_profile,
-        emotion_state_to_public_payload,
-        format_consequence_for_user,
-        format_state_for_user,
-        heuristic_observation,
-        observation_from_llm_text,
-        relationship_state_to_public_payload,
-    )
-    from psychological_screening import (
-        PUBLIC_SCREENING_SCHEMA_VERSION,
-        PsychologicalScreeningEngine,
-        PsychologicalScreeningParameters,
-        PsychologicalScreeningState,
-        format_psychological_state_for_user,
-        heuristic_psychological_observation,
-        psychological_state_to_public_payload,
-    )
-    from humanlike_engine import (
-        PUBLIC_HUMANLIKE_SCHEMA_VERSION,
-        HumanlikeEngine,
-        HumanlikeParameters,
-        HumanlikeState,
-        build_humanlike_memory_annotation,
-        build_humanlike_prompt_fragment,
-        format_humanlike_state_for_user,
-        heuristic_humanlike_observation,
-        humanlike_state_to_public_payload,
-    )
-    from lifelike_learning_engine import (
-        PUBLIC_LIFELIKE_LEARNING_SCHEMA_VERSION,
-        LifelikeLearningEngine,
-        LifelikeLearningParameters,
-        LifelikeLearningState,
-        build_lifelike_memory_annotation,
-        build_lifelike_prompt_fragment,
-        build_proactive_topic_assessment_prompt,
-        build_relationship_candidate_summary,
-        derive_initiative_policy,
-        derive_proactive_speech_decision,
-        rank_proactive_topics,
-        local_proactive_topic_judgement,
-        normalize_proactive_topic_judgement,
-        format_lifelike_state_for_user,
-        heuristic_lifelike_observation,
-        lifelike_state_to_public_payload,
-    )
-    from personality_drift_engine import (
-        PUBLIC_PERSONALITY_DRIFT_SCHEMA_VERSION,
-        PersonalityDriftEngine,
-        PersonalityDriftObservation,
-        PersonalityDriftParameters,
-        PersonalityDriftState,
-        apply_personality_drift_to_profile,
-        build_coevolution_personality_drift_observation,
-        build_personality_drift_memory_annotation,
-        build_personality_drift_prompt_fragment,
-        format_personality_drift_state_for_user,
-        heuristic_personality_drift_observation,
-        personality_drift_state_to_public_payload,
-    )
-    from moral_repair_engine import (
-        PUBLIC_MORAL_REPAIR_SCHEMA_VERSION,
-        MoralRepairEngine,
-        MoralRepairParameters,
-        MoralRepairState,
-        build_moral_repair_memory_annotation,
-        build_moral_repair_prompt_fragment,
-        format_moral_repair_state_for_user,
-        heuristic_moral_repair_observation,
-        moral_repair_state_to_public_payload,
-    )
-    from fallibility_engine import (
-        PUBLIC_FALLIBILITY_SCHEMA_VERSION,
-        FallibilityEngine,
-        FallibilityParameters,
-        FallibilityState,
-        build_fallibility_memory_annotation,
-        build_fallibility_prompt_fragment,
-        fallibility_state_to_public_payload,
-        format_fallibility_state_for_user,
-        heuristic_fallibility_observation,
-    )
-    from integrated_self import (
-        PUBLIC_INTEGRATED_SELF_SCHEMA_VERSION,
-        build_integrated_self_diagnostics,
-        build_integrated_self_experience_review,
-        build_integrated_self_memory_annotation,
-        build_integrated_self_prompt_fragment,
-        build_relational_self_prompt_fragment,
-        build_turning_point_lineage_observatory,
-        build_turning_point_memory_replay,
-        build_self_arbitration_intent_plan,
-        build_self_arbitration_prompt_fragment,
-        build_self_interpretation,
-        build_integrated_self_replay_bundle,
-        build_integrated_self_snapshot,
-        build_state_annotations_memory_envelope,
-        format_integrated_self_state_for_user,
-        probe_integrated_self_compatibility,
-        replay_integrated_self_bundle,
-    )
-    from group_atmosphere_engine import (
-        PUBLIC_GROUP_ATMOSPHERE_SCHEMA_VERSION,
-        GroupAtmosphereEngine,
-        GroupAtmosphereParameters,
-        GroupAtmosphereState,
-        build_group_atmosphere_prompt_fragment,
-        group_atmosphere_state_to_public_payload,
-        heuristic_group_atmosphere_observation,
-    )
-    from memory_engine import (
-        MemoryRecallItem,
-        PUBLIC_MEMORY_STORE_SCHEMA_VERSION,
-        SylanneMemoryState,
-        apply_memory_record_embedding,
-        apply_memory_time_decay,
-        build_memory_prompt_fragment,
-        memory_embedding_text,
-        memory_record_needs_embedding,
-        normalize_embedding,
-        observe_memory_event,
-        recall_memory,
-        reinforce_recalled_memories,
-    )
-    from prompts import (
-        ASSESSOR_SYSTEM_PROMPT,
-        LOW_REASONING_ASSESSOR_SYSTEM_PROMPT,
-        build_assessment_prompt,
-        build_state_injection,
-    )
-    from agent_identity import ConversationIdentity, conversation_identity_from_event
-    from realtime_chat_engine import (
-        RealtimeChatSettings,
-        StickerSettings,
-        build_realtime_chat_plan,
-        build_sticker_memory_item,
-        index_local_stickers,
-        merge_sticker_memory,
-        realtime_style_prompt_fragment,
-    )
-    from realtime_chat_input import (
-        RealtimeInputFragment,
-        RealtimeInputSettings,
-        build_realtime_input_hold_injection,
-        build_realtime_input_fragment_injection,
-        observe_realtime_input_fragment,
-    )
-    from conversation_event_ledger import (
-        ConversationEventLedger,
-        LedgerEvent,
-        audit_shadow_lifecycle,
-        build_ledger_summary,
-        build_relational_time_layer,
-        stable_event_id,
-    )
-    from expression_policy import build_expression_policy_prompt, choose_expression_policy
-    from interpretation_engine import classify_memory_gate, interpret_user_text
+def _sibling(name: str):
+    """Import a sibling module: try relative first, fall back to absolute."""
+    import importlib
+    try:
+        return importlib.import_module(f".{name}", __package__)
+    except (ImportError, TypeError):
+        return importlib.import_module(name)
+
+_m = _sibling("emotion_engine")
+EmotionEngine = _m.EmotionEngine
+EmotionObservation = _m.EmotionObservation
+EmotionParameters = _m.EmotionParameters
+EmotionState = _m.EmotionState
+PersonaProfile = _m.PersonaProfile
+PUBLIC_API_VERSION = _m.PUBLIC_API_VERSION
+PUBLIC_MEMORY_SCHEMA_VERSION = _m.PUBLIC_MEMORY_SCHEMA_VERSION
+PUBLIC_PERSONALITY_PROFILE_SCHEMA_VERSION = _m.PUBLIC_PERSONALITY_PROFILE_SCHEMA_VERSION
+PUBLIC_SCHEMA_VERSION = _m.PUBLIC_SCHEMA_VERSION
+apply_persona_to_parameters = _m.apply_persona_to_parameters
+build_memory_payload = _m.build_emotion_memory_payload
+build_persona_profile = _m.build_persona_profile
+emotion_state_to_public_payload = _m.emotion_state_to_public_payload
+format_consequence_for_user = _m.format_consequence_for_user
+format_state_for_user = _m.format_state_for_user
+heuristic_observation = _m.heuristic_observation
+observation_from_llm_text = _m.observation_from_llm_text
+relationship_state_to_public_payload = _m.relationship_state_to_public_payload
+_m = _sibling("psychological_screening")
+PUBLIC_SCREENING_SCHEMA_VERSION = _m.PUBLIC_SCREENING_SCHEMA_VERSION
+PsychologicalScreeningEngine = _m.PsychologicalScreeningEngine
+PsychologicalScreeningParameters = _m.PsychologicalScreeningParameters
+PsychologicalScreeningState = _m.PsychologicalScreeningState
+format_psychological_state_for_user = _m.format_psychological_state_for_user
+heuristic_psychological_observation = _m.heuristic_psychological_observation
+psychological_state_to_public_payload = _m.psychological_state_to_public_payload
+
+_m = _sibling("humanlike_engine")
+PUBLIC_HUMANLIKE_SCHEMA_VERSION = _m.PUBLIC_HUMANLIKE_SCHEMA_VERSION
+HumanlikeEngine = _m.HumanlikeEngine
+HumanlikeParameters = _m.HumanlikeParameters
+HumanlikeState = _m.HumanlikeState
+build_humanlike_memory_annotation = _m.build_humanlike_memory_annotation
+build_humanlike_prompt_fragment = _m.build_humanlike_prompt_fragment
+format_humanlike_state_for_user = _m.format_humanlike_state_for_user
+heuristic_humanlike_observation = _m.heuristic_humanlike_observation
+humanlike_state_to_public_payload = _m.humanlike_state_to_public_payload
+
+_m = _sibling("lifelike_learning_engine")
+PUBLIC_LIFELIKE_LEARNING_SCHEMA_VERSION = _m.PUBLIC_LIFELIKE_LEARNING_SCHEMA_VERSION
+LifelikeLearningEngine = _m.LifelikeLearningEngine
+LifelikeLearningParameters = _m.LifelikeLearningParameters
+LifelikeLearningState = _m.LifelikeLearningState
+build_lifelike_memory_annotation = _m.build_lifelike_memory_annotation
+build_lifelike_prompt_fragment = _m.build_lifelike_prompt_fragment
+build_proactive_topic_assessment_prompt = _m.build_proactive_topic_assessment_prompt
+build_relationship_candidate_summary = _m.build_relationship_candidate_summary
+derive_initiative_policy = _m.derive_initiative_policy
+derive_proactive_speech_decision = _m.derive_proactive_speech_decision
+rank_proactive_topics = _m.rank_proactive_topics
+local_proactive_topic_judgement = _m.local_proactive_topic_judgement
+normalize_proactive_topic_judgement = _m.normalize_proactive_topic_judgement
+format_lifelike_state_for_user = _m.format_lifelike_state_for_user
+heuristic_lifelike_observation = _m.heuristic_lifelike_observation
+lifelike_state_to_public_payload = _m.lifelike_state_to_public_payload
+
+_m = _sibling("personality_drift_engine")
+PUBLIC_PERSONALITY_DRIFT_SCHEMA_VERSION = _m.PUBLIC_PERSONALITY_DRIFT_SCHEMA_VERSION
+PersonalityDriftEngine = _m.PersonalityDriftEngine
+PersonalityDriftObservation = _m.PersonalityDriftObservation
+PersonalityDriftParameters = _m.PersonalityDriftParameters
+PersonalityDriftState = _m.PersonalityDriftState
+apply_personality_drift_to_profile = _m.apply_personality_drift_to_profile
+build_coevolution_personality_drift_observation = _m.build_coevolution_personality_drift_observation
+build_personality_drift_memory_annotation = _m.build_personality_drift_memory_annotation
+build_personality_drift_prompt_fragment = _m.build_personality_drift_prompt_fragment
+format_personality_drift_state_for_user = _m.format_personality_drift_state_for_user
+heuristic_personality_drift_observation = _m.heuristic_personality_drift_observation
+personality_drift_state_to_public_payload = _m.personality_drift_state_to_public_payload
+
+_m = _sibling("moral_repair_engine")
+PUBLIC_MORAL_REPAIR_SCHEMA_VERSION = _m.PUBLIC_MORAL_REPAIR_SCHEMA_VERSION
+MoralRepairEngine = _m.MoralRepairEngine
+MoralRepairParameters = _m.MoralRepairParameters
+MoralRepairState = _m.MoralRepairState
+build_moral_repair_memory_annotation = _m.build_moral_repair_memory_annotation
+build_moral_repair_prompt_fragment = _m.build_moral_repair_prompt_fragment
+format_moral_repair_state_for_user = _m.format_moral_repair_state_for_user
+heuristic_moral_repair_observation = _m.heuristic_moral_repair_observation
+moral_repair_state_to_public_payload = _m.moral_repair_state_to_public_payload
+
+_m = _sibling("fallibility_engine")
+PUBLIC_FALLIBILITY_SCHEMA_VERSION = _m.PUBLIC_FALLIBILITY_SCHEMA_VERSION
+FallibilityEngine = _m.FallibilityEngine
+FallibilityParameters = _m.FallibilityParameters
+FallibilityState = _m.FallibilityState
+build_fallibility_memory_annotation = _m.build_fallibility_memory_annotation
+build_fallibility_prompt_fragment = _m.build_fallibility_prompt_fragment
+fallibility_state_to_public_payload = _m.fallibility_state_to_public_payload
+format_fallibility_state_for_user = _m.format_fallibility_state_for_user
+heuristic_fallibility_observation = _m.heuristic_fallibility_observation
+
+_m = _sibling("integrated_self")
+PUBLIC_INTEGRATED_SELF_SCHEMA_VERSION = _m.PUBLIC_INTEGRATED_SELF_SCHEMA_VERSION
+build_integrated_self_diagnostics = _m.build_integrated_self_diagnostics
+build_integrated_self_experience_review = _m.build_integrated_self_experience_review
+build_integrated_self_memory_annotation = _m.build_integrated_self_memory_annotation
+build_integrated_self_prompt_fragment = _m.build_integrated_self_prompt_fragment
+build_relational_self_prompt_fragment = _m.build_relational_self_prompt_fragment
+build_turning_point_lineage_observatory = _m.build_turning_point_lineage_observatory
+build_turning_point_memory_replay = _m.build_turning_point_memory_replay
+build_self_arbitration_intent_plan = _m.build_self_arbitration_intent_plan
+build_self_arbitration_prompt_fragment = _m.build_self_arbitration_prompt_fragment
+build_self_interpretation = _m.build_self_interpretation
+build_integrated_self_replay_bundle = _m.build_integrated_self_replay_bundle
+build_integrated_self_snapshot = _m.build_integrated_self_snapshot
+build_state_annotations_memory_envelope = _m.build_state_annotations_memory_envelope
+format_integrated_self_state_for_user = _m.format_integrated_self_state_for_user
+probe_integrated_self_compatibility = _m.probe_integrated_self_compatibility
+replay_integrated_self_bundle = _m.replay_integrated_self_bundle
+
+_m = _sibling("group_atmosphere_engine")
+PUBLIC_GROUP_ATMOSPHERE_SCHEMA_VERSION = _m.PUBLIC_GROUP_ATMOSPHERE_SCHEMA_VERSION
+GroupAtmosphereEngine = _m.GroupAtmosphereEngine
+GroupAtmosphereParameters = _m.GroupAtmosphereParameters
+GroupAtmosphereState = _m.GroupAtmosphereState
+build_group_atmosphere_prompt_fragment = _m.build_group_atmosphere_prompt_fragment
+group_atmosphere_state_to_public_payload = _m.group_atmosphere_state_to_public_payload
+heuristic_group_atmosphere_observation = _m.heuristic_group_atmosphere_observation
+
+_m = _sibling("memory_engine")
+MemoryRecallItem = _m.MemoryRecallItem
+PUBLIC_MEMORY_STORE_SCHEMA_VERSION = _m.PUBLIC_MEMORY_STORE_SCHEMA_VERSION
+SylanneMemoryState = _m.SylanneMemoryState
+apply_memory_record_embedding = _m.apply_memory_record_embedding
+apply_memory_time_decay = _m.apply_memory_time_decay
+build_memory_prompt_fragment = _m.build_memory_prompt_fragment
+memory_embedding_text = _m.memory_embedding_text
+memory_record_needs_embedding = _m.memory_record_needs_embedding
+normalize_embedding = _m.normalize_embedding
+observe_memory_event = _m.observe_memory_event
+recall_memory = _m.recall_memory
+reinforce_recalled_memories = _m.reinforce_recalled_memories
+
+_m = _sibling("prompts")
+ASSESSOR_SYSTEM_PROMPT = _m.ASSESSOR_SYSTEM_PROMPT
+LOW_REASONING_ASSESSOR_SYSTEM_PROMPT = _m.LOW_REASONING_ASSESSOR_SYSTEM_PROMPT
+build_assessment_prompt = _m.build_assessment_prompt
+build_state_injection = _m.build_state_injection
+
+_m = _sibling("agent_identity")
+ConversationIdentity = _m.ConversationIdentity
+conversation_identity_from_event = _m.conversation_identity_from_event
+
+_m = _sibling("realtime_chat_engine")
+RealtimeChatSettings = _m.RealtimeChatSettings
+StickerSettings = _m.StickerSettings
+build_realtime_chat_plan = _m.build_realtime_chat_plan
+build_sticker_memory_item = _m.build_sticker_memory_item
+index_local_stickers = _m.index_local_stickers
+merge_sticker_memory = _m.merge_sticker_memory
+realtime_style_prompt_fragment = _m.realtime_style_prompt_fragment
+
+_m = _sibling("realtime_chat_input")
+RealtimeInputFragment = _m.RealtimeInputFragment
+RealtimeInputSettings = _m.RealtimeInputSettings
+build_realtime_input_hold_injection = _m.build_realtime_input_hold_injection
+build_realtime_input_fragment_injection = _m.build_realtime_input_fragment_injection
+observe_realtime_input_fragment = _m.observe_realtime_input_fragment
+
+_m = _sibling("conversation_event_ledger")
+ConversationEventLedger = _m.ConversationEventLedger
+LedgerEvent = _m.LedgerEvent
+audit_shadow_lifecycle = _m.audit_shadow_lifecycle
+build_ledger_summary = _m.build_ledger_summary
+build_relational_time_layer = _m.build_relational_time_layer
+stable_event_id = _m.stable_event_id
+
+_m = _sibling("expression_policy")
+build_expression_policy_prompt = _m.build_expression_policy_prompt
+choose_expression_policy = _m.choose_expression_policy
+
+_m = _sibling("interpretation_engine")
+classify_memory_gate = _m.classify_memory_gate
+interpret_user_text = _m.interpret_user_text
+del _m
 
 
 PLUGIN_NAME = "astrbot_plugin_sylanne"
@@ -677,8 +522,8 @@ def get_emotional_state_plugin(context: Context) -> Any | None:
     PLUGIN_NAME,
     "Aylovelle.S.S",
     "Soulful Yearning Lifelike AstrBot Neural Narrative Engine：维护情绪、人格、记忆、氛围和表达节奏的 Sylanne",
-    "3.0.6",
-    "",
+    "3.0.7",
+    "https://github.com/Ayleovelle/astrbot_plugin_sylanne",
 )
 class EmotionalStatePlugin(Star):
     emotion_api_version = PUBLIC_API_VERSION
@@ -818,25 +663,18 @@ class EmotionalStatePlugin(Star):
         self._background_post_skipped.clear()
         self._background_post_dead_letters.clear()
         self._background_post_recovered_sessions.clear()
-        if hasattr(self, "_background_post_checkpoint_generation"):
-            self._background_post_checkpoint_generation.clear()
-        if hasattr(self, "_background_post_checkpoint_locks"):
-            self._background_post_checkpoint_locks.clear()
-        if hasattr(self, "_background_post_checkpoint_session_tasks"):
-            self._background_post_checkpoint_session_tasks.clear()
+        self._background_post_checkpoint_generation.clear()
+        self._background_post_checkpoint_locks.clear()
+        self._background_post_checkpoint_session_tasks.clear()
         scheduler_task = getattr(self, "_proactive_scheduler_task", None)
         if scheduler_task is not None and not scheduler_task.done():
             scheduler_task.cancel()
             await asyncio.gather(scheduler_task, return_exceptions=True)
         self._proactive_scheduler_task = None
-        if hasattr(self, "_proactive_candidate_sessions"):
-            self._proactive_candidate_sessions.clear()
-        if hasattr(self, "_proactive_context_windows"):
-            self._proactive_context_windows.clear()
-        if hasattr(self, "_proactive_scheduler_locks"):
-            self._proactive_scheduler_locks.clear()
-        if hasattr(self, "_proactive_scheduler_last_checked"):
-            self._proactive_scheduler_last_checked.clear()
+        self._proactive_candidate_sessions.clear()
+        self._proactive_context_windows.clear()
+        self._proactive_scheduler_locks.clear()
+        self._proactive_scheduler_last_checked.clear()
         self._proactive_scheduler_idle_rounds = 0
         self._memory_cache.clear()
         self._psychological_memory_cache.clear()
@@ -846,29 +684,22 @@ class EmotionalStatePlugin(Star):
         self._moral_repair_memory_cache.clear()
         self._fallibility_memory_cache.clear()
         self._group_atmosphere_memory_cache.clear()
-        if hasattr(self, "_sylanne_memory_idle_tasks"):
-            for task in list(self._sylanne_memory_idle_tasks.values()):
-                if task is not None and not task.done():
-                    task.cancel()
-            await asyncio.gather(*self._sylanne_memory_idle_tasks.values(), return_exceptions=True)
-        if hasattr(self, "_sylanne_memory_pending_observations"):
-            for pending_session in list(self._sylanne_memory_pending_observations):
-                await self._flush_sylanne_memory_pending_observations(
-                    pending_session,
-                    force=True,
-                )
-            self._sylanne_memory_pending_observations.clear()
-        if hasattr(self, "_sylanne_memory_idle_tasks"):
-            self._sylanne_memory_idle_tasks.clear()
-        if hasattr(self, "_sylanne_memory_idle_generation"):
-            self._sylanne_memory_idle_generation.clear()
+        for task in list(self._sylanne_memory_idle_tasks.values()):
+            if task is not None and not task.done():
+                task.cancel()
+        await asyncio.gather(*self._sylanne_memory_idle_tasks.values(), return_exceptions=True)
+        for pending_session in list(self._sylanne_memory_pending_observations):
+            await self._flush_sylanne_memory_pending_observations(
+                pending_session,
+                force=True,
+            )
+        self._sylanne_memory_pending_observations.clear()
+        self._sylanne_memory_idle_tasks.clear()
+        self._sylanne_memory_idle_generation.clear()
         self._sylanne_memory_cache.clear()
-        if hasattr(self, "_sylanne_memory_recall_worksets"):
-            self._sylanne_memory_recall_worksets.clear()
-        if hasattr(self, "_sylanne_memory_query_embedding_cache"):
-            self._sylanne_memory_query_embedding_cache.clear()
-        if hasattr(self, "_sylanne_memory_record_embedding_last_at"):
-            self._sylanne_memory_record_embedding_last_at.clear()
+        self._sylanne_memory_recall_worksets.clear()
+        self._sylanne_memory_query_embedding_cache.clear()
+        self._sylanne_memory_record_embedding_last_at.clear()
         self._agent_identity_profile_cache.clear()
         self._agent_trail_cache.clear()
         self._agent_turn_sequence.clear()
@@ -881,39 +712,24 @@ class EmotionalStatePlugin(Star):
         self._provider_id_cache.clear()
         self._last_request_text.clear()
         self._last_state_injection_diagnostics.clear()
-        if hasattr(self, "_conversation_input_epoch"):
-            self._conversation_input_epoch.clear()
-        if hasattr(self, "_conversation_pending_response_epochs"):
-            self._conversation_pending_response_epochs.clear()
-        if hasattr(self, "_active_agent_pending_user_turns"):
-            self._active_agent_pending_user_turns.clear()
-        if hasattr(self, "_realtime_input_fragment_windows"):
-            self._realtime_input_fragment_windows.clear()
-        if hasattr(self, "_interrupted_reply_breakpoints"):
-            self._interrupted_reply_breakpoints.clear()
-        if hasattr(self, "_realtime_assistant_history_shadows"):
-            self._realtime_assistant_history_shadows.clear()
-        if hasattr(self, "_realtime_ordinary_history_backfills"):
-            self._realtime_ordinary_history_backfills.clear()
-        if hasattr(self, "_realtime_response_intercept_keys"):
-            self._realtime_response_intercept_keys.clear()
-        if hasattr(self, "_realtime_delivery_context_dirty"):
-            self._realtime_delivery_context_dirty.clear()
-        if hasattr(self, "_realtime_delivery_context_restored"):
-            self._realtime_delivery_context_restored.clear()
-        if hasattr(self, "_realtime_user_typing_until"):
-            self._realtime_user_typing_until.clear()
-        if hasattr(self, "_user_message_withdrawals"):
-            self._user_message_withdrawals.clear()
-        if hasattr(self, "_recent_user_corrections"):
-            self._recent_user_corrections.clear()
-        if hasattr(self, "_recent_user_scene_turns"):
-            self._recent_user_scene_turns.clear()
-        if hasattr(self, "_realtime_chat_active_dispatches"):
-            self._realtime_chat_active_dispatches.clear()
+        self._conversation_input_epoch.clear()
+        self._conversation_pending_response_epochs.clear()
+        self._active_agent_pending_user_turns.clear()
+        self._realtime_input_fragment_windows.clear()
+        self._interrupted_reply_breakpoints.clear()
+        self._realtime_assistant_history_shadows.clear()
+        self._realtime_ordinary_history_backfills.clear()
+        self._realtime_response_intercept_keys.clear()
+        self._realtime_delivery_context_dirty.clear()
+        self._realtime_delivery_context_restored.clear()
+        self._realtime_user_typing_until.clear()
+        self._user_message_withdrawals.clear()
+        self._recent_user_corrections.clear()
+        self._recent_user_scene_turns.clear()
+        self._realtime_chat_active_dispatches.clear()
         realtime_dispatch_tasks = [
             task
-            for tasks in getattr(self, "_realtime_chat_dispatch_tasks", {}).values()
+            for tasks in self._realtime_chat_dispatch_tasks.values()
             for task in list(tasks)
             if not task.done()
         ]
@@ -921,8 +737,7 @@ class EmotionalStatePlugin(Star):
             for task in realtime_dispatch_tasks:
                 task.cancel()
             await asyncio.gather(*realtime_dispatch_tasks, return_exceptions=True)
-        if hasattr(self, "_realtime_chat_dispatch_tasks"):
-            self._realtime_chat_dispatch_tasks.clear()
+        self._realtime_chat_dispatch_tasks.clear()
 
     @filter.on_waiting_llm_request()
     async def on_waiting_llm_request(self, event: AstrMessageEvent) -> None:
@@ -2680,27 +2495,6 @@ class EmotionalStatePlugin(Star):
         event: AstrMessageEvent,
         response_text: str,
     ) -> None:
-        if not hasattr(self, "_background_post_tasks"):
-            self._background_post_tasks = {}
-        if not hasattr(self, "_background_post_queues"):
-            self._background_post_queues = {}
-        if not hasattr(self, "_background_post_active"):
-            self._background_post_active = {}
-        if not hasattr(self, "_background_post_sequence"):
-            self._background_post_sequence = {}
-        if not hasattr(self, "_background_post_latest_enqueued"):
-            self._background_post_latest_enqueued = {}
-        if not hasattr(self, "_background_post_last_committed"):
-            self._background_post_last_committed = {}
-        if not hasattr(self, "_background_post_skipped"):
-            self._background_post_skipped = {}
-        if not hasattr(self, "_background_post_dead_letters"):
-            self._background_post_dead_letters = {}
-        if not hasattr(self, "_background_post_recovered_sessions"):
-            self._background_post_recovered_sessions = set()
-        if not hasattr(self, "_background_post_checkpoint_tasks"):
-            self._background_post_checkpoint_tasks = set()
-
         identity = self._agent_identity(event)
         session_key = identity.conversation_id
         if getattr(self, "_terminating", False):

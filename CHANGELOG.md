@@ -2,6 +2,23 @@
 
 本文件用于 AstrBot 插件市场/管理页展示更新内容。更完整的设计说明、公式推导、测试矩阵和维护手册见 `README.md`。
 
+## 3.0.7
+
+发布日期：2026-05-21
+
+### 优化
+
+- 消除 import 块的 try/except 完整复制冗余，改用 `_sibling()` 辅助函数统一处理相对/绝对导入回退，减少约 170 行纯重复代码。
+- 清理 `terminate()` 和 `_schedule_background_post_assessment` 中多余的 `hasattr` 防御检查——这些属性已在 `__init__` 中保证初始化。
+- `@register(...)` 补全 `repo_url` 字段，AstrBot 插件市场可正确展示仓库链接。
+- 收窄 Claude tool context 判定：从 generic payload keys 中移除 `"content"` 和 `"stop_reason"`，避免普通多轮消息被误识别为工具链路。
+
+### 验证
+
+- 191 项 focused regression tests 全部通过。
+- py_compile 通过。
+- zip preflight 通过。
+
 ## 3.0.6
 
 发布日期：2026-05-20
