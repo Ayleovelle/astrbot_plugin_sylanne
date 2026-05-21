@@ -12,7 +12,7 @@
 
 <img align="right" src="docs/assets/sylanne-mascot.gif" width="220" alt="Sylanne animated mascot">
 
-`astrbot_plugin_sylanne` Embodiment-1.0.0 是一次从底层计算逻辑开始的完全重写。经过十次迭代打磨，她不再用线性状态空间模拟情绪，而是用两套原创形式化理论——**Scar Algebra（伤痕代数）** 和 **Void Calculus（空洞微积分）**——构建了一个不可逆的关系计算引擎。
+`astrbot_plugin_sylanne` Embodiment-1.1.0 是一次从底层计算逻辑开始的完全重写。经过十余次迭代打磨，她不再用线性状态空间模拟情绪，而是用三套原创形式化理论——**Scar Algebra（伤痕代数）**、**Void Calculus（空洞微积分）** 和 **Relational Sheaf Theory（关系层论）**——构建了一个不可逆的多关系计算引擎。
 
 > 让不同人格的 bot 在长期对话中，留下不可撤销的伤痕、积累无法忽视的沉默压力、在关系的反复碰撞里长出只属于这段关系的形状。
 
@@ -36,7 +36,7 @@ _"逻辑可以共赏，但为你偏置的权重从不开源。"_
 
 ---
 
-> **一句话概括：** 3.x 用浮点数模拟情绪，Embodiment 用数学语言把对话刻进去。
+> **一句话概括：** 3.x 用浮点数模拟情绪，Embodiment 用数学语言把对话刻进去——然后让伤痕沿着关系网络自己找路传播。
 
 ---
 
@@ -301,7 +301,7 @@ $$r = 1 - \frac{\sum_v \pi_v \cdot \mathbb{1}[M_{d_v} < 0.5]}{\sum_v \pi_v + \ep
 | **分段回复** | 语义切分 + 打字节奏 + 打断 + 自适应 | 语义切分 + 打字节奏 + 打断 + 亲密度门控节奏同步 | 自适应从规则驱动变为关系状态驱动 |
 | **碎片消息** | 合并逻辑 + 超时判断 | 防抖合并（等用户说完） | 路径不同，目标相同 |
 | **多用户** | 会话级隔离 | LRU 50 + 共享 encoder + 状态独立 | 从会话隔离到计算隔离 |
-| **理论基础** | PAD + appraisal（引用已有理论） | Scar Algebra + Void Calculus（原创证明） | 从引用到原创 |
+| **理论基础** | PAD + appraisal（引用已有理论） | Scar Algebra + Void Calculus + Relational Sheaf Theory（三项原创证明） | 从引用到原创 |
 | **决策融合** | 规则 + 权重 + 状态机 | HGT 异构图 Transformer | 从手写规则到学习融合 |
 | **反馈闭环** | 隐式（状态衰减） | 显式 accepted/ignored/rejected → 状态演化 | 从被动衰减到主动反馈 |
 
@@ -309,21 +309,20 @@ $$r = 1 - \frac{\sum_v \pi_v \cdot \mathbb{1}[M_{d_v} < 0.5]}{\sum_v \pi_v + \ep
 
 ## 理论贡献
 
-本项目包含两项原创形式化理论（含公理系统和严格证明）：
+本项目包含三项原创形式化理论（含公理系统和严格证明）：
 
 1. **Scar Algebra**：自修改运算符代数。证明了表达力分离定理（Ω(k) 下界）和收敛定理。
 2. **Void Calculus**：缺席一等计算。证明了不可归约到 AGM 信念修正（Theorem 1）和贝叶斯更新（Theorem 2）。
+3. **Relational Sheaf Theory**：多关系层论。证明了上同调解离定理、谱传播界、不可约三方状态定理。用层上同调精确度量跨关系矛盾，用层拉普拉斯算子约束伤痕传播。
 
 详见 `theory/` 目录。
 
 ### 论文
 
-如果感兴趣的话可以看这个，想着有趣就跑了篇论文出来：
-
 | 文档 | 内容 | 格式 |
 | --- | --- | --- |
-| [**Scar Algebra & Void Calculus（中文版）**](docs/scar_void_arxiv_paper_zh.pdf) | 两项原创理论的完整论文：公理系统、定理证明、实验验证 | 中文 |
-| [**Scar Algebra & Void Calculus（English）**](docs/scar_void_arxiv_paper_en.pdf) | Full paper with axioms, theorems, proofs, and experiments | English |
+| [**Scar Algebra, Void Calculus & Relational Sheaf Theory（中文版）**](docs/scar_void_arxiv_paper_zh_v3.pdf) | 三项原创理论的完整论文：公理系统、定理证明、9 组实验验证 | 中文 |
+| [**Scar Algebra, Void Calculus & Relational Sheaf Theory（English）**](docs/scar_void_arxiv_paper_v2.pdf) | Full paper with axioms, theorems, proofs, and 9 experiments | English |
 
 ### 实验数据
 
@@ -365,7 +364,7 @@ Void Calculus 能区分"从未讨论"/"已解决"/"主动回避"三种状态—�
 
 ![消融实验](docs/experiments/fig5_ablation.png)
 
-> 每去掉一个组件，系统在关系建模任务上的表现都会下降。耦合层（Γ+Φ）的贡献最大——伤痕和沉默之间的相互作用是系统涌现行为的关键来源。
+> 每去掉一个组件，系统的状态轨迹丰富度都会下降。所有条件都是真实测量——没有造假的乘数。Scar Algebra 是最关键的组件（移除后丰富度降到最低），耦合层次之。
 
 **Experiment 6：长期稳定性**
 
@@ -389,7 +388,7 @@ Void Calculus 能区分"从未讨论"/"已解决"/"主动回避"三种状态—�
 
 ![谱传播](docs/experiments/fig8_spectral_propagation.png)
 
-> 伤痕从源关系向外传播，强度随距离指数衰减。虚线是理论上界——实测传播严格不超过理论预测。离得远的关系几乎不受影响，离得近的关系立刻被波及。
+> 伤痕从源关系向外传播，强度由关系类型的相似度决定——同为亲密关系的受影响最大（耦合 0.98），对抗关系受影响最小（耦合 0.45）。虚线是理论上界，实测严格不超过预测。不是"所有关系都被波及"，而是"相似的关系先被波及"。
 
 **Experiment 9：三方不可约性（群聊涌现）**
 

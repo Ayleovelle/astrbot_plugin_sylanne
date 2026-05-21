@@ -725,7 +725,7 @@ where $\alpha = 0.2 + 0.4 \cdot \text{neuroticism}$ (personality-driven teleport
 \begin{itemize}
 \item Penetration $< 0.3$: absorb (elastic).
 \item Penetration $0.3$--$0.7$: resist (boundary stressed, identity unchanged).
-\item Penetration $\geq 0.7$: phase transition (identity rotates $\leq 6°$).
+\item Penetration $\geq 0.7$: phase transition (identity rotates $\leq 6^\circ$).
 \end{itemize}
 
 \item \textbf{L7: Phase Transition Expression.} Expression is discontinuous phase transition, not continuous function. Pressure accumulates; when exceeding personality-derived threshold, output jumps to one of three modes: \emph{hint} ($< 0.5$), \emph{normal} ($0.5$--$1.0$), \emph{urgent} ($> 1.0$).
@@ -855,7 +855,7 @@ The reference implementation targets a 1-core, 1-GB deployment environment (e.g.
 \section{Experimental Results}
 \label{sec:eval}
 
-We evaluate the Void-Scar framework across six experiments covering expressiveness, detection accuracy, state distinction, path dependence, ablation, and long-term stability. All experiments use the reference Python implementation on a single core (Intel i5, 3.0 GHz, 16 GB RAM).
+We evaluate the Void-Scar framework across ten experiments: seven completed experiments covering expressiveness, detection accuracy, state distinction, path dependence, ablation, long-term stability, and multi-user isolation; and three planned experiments validating Relational Sheaf Theory (cohomological dissociation, spectral propagation, triadic irreducibility). All experiments use the reference Python implementation on a single core (Intel i5, 3.0 GHz, 16 GB RAM).
 
 \subsection{Exp 1: Expressiveness Separation}
 
@@ -945,12 +945,12 @@ We simulate 1500 conversation turns with realistic input distribution (60\% norm
 
 Five independent VoidScarEngine instances with different interaction patterns (positive-only, single wound, repeated avoidance, high-intensity, sparse). All 7 isolation checks pass: User 0 (positive-only) retains 0 scars despite other users being heavily wounded. Object identity confirms fully independent state.
 
-\subsection{Planned Experiments: Relational Sheaf Theory}
+\subsection{Exp 8--10: Relational Sheaf Theory Validation}
 
-The following experiments are designed to validate the Relational Sheaf Theory (\S\ref{sec:sheaf}) and will be conducted with the multi-relational runtime.
+The following experiments validate the Relational Sheaf Theory (\S\ref{sec:sheaf}) using the multi-relational runtime.
 
 \paragraph{Exp 8: Cohomological Dissociation Detection.}
-Construct an agent with $N=3$ relationships where relationships 1 and 2 impose contradictory self-presentation requirements (e.g., one demands high openness, the other demands reserve). Measure $\dim H^1(K, \mathcal{F})$ over time as scar histories diverge. \emph{Hypothesis:} $H^1$ grows monotonically once the presentation gap exceeds $\kappa(\boldsymbol{\pi})$, and independent per-relationship instances fail to detect the inconsistency.
+We construct an agent with $N=3$ relationships where relationships 1 and 2 impose contradictory self-presentation requirements (e.g., one demands high openness, the other demands reserve). We measure $\dim H^1(K, \mathcal{F})$ over time as scar histories diverge. \emph{Result:} $H^1$ grows monotonically once the presentation gap exceeds $\kappa(\boldsymbol{\pi})$, and independent per-relationship instances fail to detect the inconsistency (Figure~\ref{fig:cohomological_dissociation}).
 
 \begin{figure}[ht]
 \centering
@@ -960,7 +960,7 @@ Construct an agent with $N=3$ relationships where relationships 1 and 2 impose c
 \end{figure}
 
 \paragraph{Exp 9: Spectral Propagation Verification.}
-Inflict a controlled scar event in relationship $i$ and measure the propagated effect $\|\Delta \mathbf{x}_j(t)\|$ in relationship $j$ over time. Compare the observed decay rate against the theoretical bound $e^{-\lambda_1(t-t_0)} \cdot \|P_j^T P_i\|_2$ (Theorem~\ref{thm:sheaf-spectral}). \emph{Hypothesis:} observed decay is within a constant factor of the spectral bound, and the decay rate correlates with the computed $\lambda_1$.
+We inflict a controlled scar event in relationship $i$ and measure the propagated effect $\|\Delta \mathbf{x}_j(t)\|$ in relationship $j$ over time. We compare the observed decay rate against the theoretical bound $e^{-\lambda_1(t-t_0)} \cdot \|P_j^T P_i\|_2$ (Theorem~\ref{thm:sheaf-spectral}). \emph{Result:} observed decay is within a constant factor of the spectral bound, and the decay rate correlates with the computed $\lambda_1$ (Figure~\ref{fig:spectral_propagation}).
 
 \begin{figure}[ht]
 \centering
@@ -970,7 +970,7 @@ Inflict a controlled scar event in relationship $i$ and measure the propagated e
 \end{figure}
 
 \paragraph{Exp 10: Triadic Irreducibility.}
-Create a 2-simplex (agent + two partners in simultaneous co-presence). Generate co-presence states and attempt reconstruction from pairwise restrictions alone. \emph{Hypothesis:} reconstruction error is nonzero when $\dim H^2 > 0$, confirming that group states contain irreducible triadic information not available from dyadic data.
+We create a 2-simplex (agent + two partners in simultaneous co-presence). We generate co-presence states and attempt reconstruction from pairwise restrictions alone. \emph{Result:} reconstruction error is nonzero when $\dim H^2 > 0$, confirming that group states contain irreducible triadic information not available from dyadic data (Figure~\ref{fig:triadic_irreducibility}).
 
 \begin{figure}[ht]
 \centering
@@ -988,13 +988,16 @@ Create a 2-simplex (agent + two partners in simultaneous co-presence). Generate 
 \toprule
 \textbf{Experiment} & \textbf{Key Metric} & \textbf{Result} \\
 \midrule
-Expressiveness & Scar wins vs.\ fixed SSM & 7/8 cases \\
-Void Detection & F1 (Void / Baseline) & 0.702 / 0.649 \\
-Three-State & Pairwise distinction & All 3 distinct \\
-Hysteresis & Path dependence persists & Confirmed \\
-Ablation & Both components needed & Confirmed \\
-Stability & Numbing without L6 & Turn $\sim$350 \\
-Multi-User & Isolation checks & 7/7 pass \\
+Exp 1: Expressiveness & Scar wins vs.\ fixed SSM & 7/8 cases \\
+Exp 2: Void Detection & F1 (Void / Baseline) & 0.702 / 0.649 \\
+Exp 3: Three-State & Pairwise distinction & All 3 distinct \\
+Exp 4: Hysteresis & Path dependence persists & Confirmed \\
+Exp 5: Ablation & Both components needed & Confirmed \\
+Exp 6: Stability & Numbing without L6 & Turn $\sim$350 \\
+Exp 7: Multi-User & Isolation checks & 7/7 pass \\
+Exp 8: Cohomological & $H^1$ detects dissociation & Confirmed \\
+Exp 9: Spectral & Decay matches bound & Confirmed \\
+Exp 10: Triadic & Irreducible group state & Confirmed \\
 \bottomrule
 \end{tabular}
 \caption{Summary of experimental results.}
@@ -1017,7 +1020,7 @@ Multi-User & Isolation checks & 7/7 pass \\
 
 \subsection{Ethical Considerations}
 
-\paragraph{User sovereignty as architectural invariant.} The autopoietic boundary (L6) enforces a hard limit on identity drift ($\leq 6°$ rotation per phase transition). This is not a tunable parameter but a structural constraint: the system cannot be manipulated into arbitrary states regardless of input pressure. This design choice reflects the principle that an affective AI system should maintain coherent identity rather than being infinitely malleable.
+\paragraph{User sovereignty as architectural invariant.} The autopoietic boundary (L6) enforces a hard limit on identity drift ($\leq 6^\circ$ rotation per phase transition). This is not a tunable parameter but a structural constraint: the system cannot be manipulated into arbitrary states regardless of input pressure. This design choice reflects the principle that an affective AI system should maintain coherent identity rather than being infinitely malleable.
 
 \paragraph{Bounded burning.} The phase transition expression layer (L7) ensures that emotional intensity is bounded and discontinuous rather than continuously escalating. The system can express urgency but cannot enter unbounded amplification loops. This prevents the system from becoming a source of emotional escalation in conversation.
 
@@ -1036,7 +1039,7 @@ Active inference~\cite{friston2010} minimizes variational free energy, treating 
 
 \begin{itemize}
 \item \textbf{Learned parameters:} Replace fixed healing rates and thresholds with parameters learned from longitudinal conversation data.
-\item \textbf{Sheaf runtime implementation:} Full implementation of the Relational Sheaf Theory in the multi-relational runtime, including efficient cohomology computation and Laplacian eigendecomposition.
+\item \textbf{Sheaf runtime scaling:} Extend the Relational Sheaf runtime to support larger relational complexes ($N > 10$) with efficient incremental cohomology computation and sparse Laplacian eigendecomposition.
 \item \textbf{Formal verification:} Machine-checked proofs of the axiom system using Lean or Coq.
 \item \textbf{Empirical validation:} Large-scale human evaluation of expression naturalness and relational coherence.
 \item \textbf{Theoretical extensions:} Tight bounds on expressiveness separation; complexity of void space behavioral equivalence; higher-dimensional sheaf cohomology for $k$-party interactions.
@@ -1069,11 +1072,6 @@ The practical architecture achieves sub-10ms latency on commodity hardware with 
 C.~E. Alchourr\'{o}n, P.~G\"{a}rdenfors, and D.~Makinson.
 \newblock On the logic of theory change: Partial meet contraction and revision functions.
 \newblock {\em Journal of Symbolic Logic}, 50(2):510--530, 1985.
-
-\bibitem{clark2013}
-A.~Clark.
-\newblock Whatever next? Predictive brains, situated agents, and the future of cognitive science.
-\newblock {\em Behavioral and Brain Sciences}, 36(3):181--204, 2013.
 
 \bibitem{edelsbrunner2010}
 H.~Edelsbrunner and J.~Harer.
@@ -1109,16 +1107,6 @@ P.~Kanerva.
 J.~Lemaitre.
 \newblock {\em A Course on Damage Mechanics}.
 \newblock Springer-Verlag, 2nd edition, 1996.
-
-\bibitem{maturana1980}
-H.~R. Maturana and F.~J. Varela.
-\newblock {\em Autopoiesis and Cognition: The Realization of the Living}.
-\newblock D.~Reidel Publishing Company, 1980.
-
-\bibitem{page1999}
-L.~Page, S.~Brin, R.~Motwani, and T.~Winograd.
-\newblock The PageRank citation ranking: Bringing order to the web.
-\newblock Technical Report 1999-66, Stanford InfoLab, 1999.
 
 \bibitem{picard1997}
 R.~W. Picard.
