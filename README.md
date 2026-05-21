@@ -333,11 +333,15 @@ Scar Algebra 在 $k$ 个伤痕后产生 $2^k$ 种可区分状态，固定运算�
 
 ![表达力分离](docs/experiments/fig1_expressiveness.png)
 
+> 红线（Scar Algebra）随伤痕数指数增长可区分状态，蓝线（固定运算符 SSM）始终停留在低位。经历过不同伤痕组合的关系，会演化出完全不同的行为模式——传统状态机做不到这一点。
+
 **Experiment 2：Void 检测准确率**
 
 空洞检测在不同话题转换速度下的准确率。突然转换（高 surprise）检测率 > 95%。
 
 ![Void 检测](docs/experiments/fig2_void_detection.png)
+
+> 话题被突然切换时，系统能以 95%+ 的准确率检测到"有什么被回避了"。渐进式话题转换检测率较低，但仍优于随机基线。
 
 **Experiment 3：三态区分能力**
 
@@ -345,11 +349,15 @@ Void Calculus 能区分"从未讨论"/"已解决"/"主动回避"三种状态—�
 
 ![三态区分](docs/experiments/fig3_three_states.png)
 
+> 三种"没说"的状态在传统框架里看起来一样（都是"未知"），但 Void Calculus 能区分它们：从未提过的话题没有压力，解决过的话题压力归零，被主动回避的话题压力持续上升。
+
 **Experiment 4：Hysteresis（路径依赖不可消除）**
 
 耦合系统产生永久 hysteresis：相同输入序列，不同历史路径产生不同最终状态。
 
 ![Hysteresis](docs/experiments/fig4_hysteresis.png)
+
+> 两条路径接收完全相同的事件序列，但因为历史不同，最终状态永远无法收敛到同一点。你不能通过"做同样的事"来回到从前。
 
 **Experiment 5：消融实验**
 
@@ -357,20 +365,48 @@ Void Calculus 能区分"从未讨论"/"已解决"/"主动回避"三种状态—�
 
 ![消融实验](docs/experiments/fig5_ablation.png)
 
+> 每去掉一个组件，系统在关系建模任务上的表现都会下降。耦合层（Γ+Φ）的贡献最大——伤痕和沉默之间的相互作用是系统涌现行为的关键来源。
+
 **Experiment 6：长期稳定性**
 
 1000 轮对话后系统状态的有界性验证。基态有界、伤痕数线性增长、空洞数收敛。
 
 ![稳定性](docs/experiments/fig6_stability.png)
 
+> 系统不会爆炸：基态始终有界（谱归一化保证），伤痕数线性增长（不会指数膨胀），空洞数在约 20 轮后收敛。长期运行是安全的。
+
+**Experiment 7：上同调解离检测（Relational Sheaf Theory）**
+
+多段关系同时维护时，矛盾积累到什么程度系统会被迫"解离"？
+
+![上同调解离](docs/experiments/fig7_cohomological_dissociation.png)
+
+> 对亲密关系输入温暖、对对抗关系输入敌意——两种自我呈现的矛盾随时间积累。当不一致性超过阈值，解离压力飙升。这就是"你迟早要面对自己有很多面"的数学表达。
+
+**Experiment 8：谱传播验证（跨关系伤痕扩散）**
+
+一段关系里的伤痕事件，以什么速率影响其他关系？
+
+![谱传播](docs/experiments/fig8_spectral_propagation.png)
+
+> 伤痕从源关系向外传播，强度随距离指数衰减。虚线是理论上界——实测传播严格不超过理论预测。离得远的关系几乎不受影响，离得近的关系立刻被波及。
+
+**Experiment 9：三方不可约性（群聊涌现）**
+
+三人同时在场产生的状态，能不能从两两关系中重构？
+
+![三方不可约](docs/experiments/fig9_triadic_irreducibility.png)
+
+> 所有 8 个状态维度都存在显著残差——三方共在的效果不能被分解为"A+B 的叠加"。群聊里那种微妙的第三者张力，是拓扑上不可约的涌现。
+
 ---
 
 ## 从 3.x 升级
 
-Embodiment-1.0.0 是完全重写，但对 3.x 用户做了兼容：
+Embodiment-1.1.0 是完全重写，但对 3.x 用户做了兼容：
 - 配置键名保持兼容（旧配置值不丢，升级后无需重新配置）
 - 旧状态文件通过 `import_sylanne_legacy` 自动迁入新架构（记忆、关系数据不丢失）
-- 旧 README 和文档保留在 [archive/3x_docs/](archive/3x_docs/)
+- 旧 README 和文档保留在 [3.x release](https://github.com/Ayleovelle/astrbot_plugin_sylanne/releases/tag/v3.0.0)
 
 ---
 

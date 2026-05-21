@@ -244,7 +244,7 @@ The Scar Algebra achieves this with $O(k)$ storage: one bounded base state plus 
 \begin{theorem}[Convergence to Scarred Equilibrium]
 \label{thm:scar-convergence}
 Under bounded input $\|e_t\|_\infty \leq C$ and contraction condition $\|\mathbf{A}\|_\infty < 1$:
-\begin{enumerate}[(a)]
+\begin{enumerate}[label=(\alph*)]
 \item There exists $T^* < \infty$ after which no new scars form.
 \item The base state converges: $\|x_t - x^*\| \to 0$.
 \item All scars reach terminal stage (faded) in finite time.
@@ -862,7 +862,7 @@ We construct adversarial timing sequences with $k$ wounding events spaced at eit
 
 \begin{figure}[ht]
 \centering
-\includegraphics[width=0.75\columnwidth]{../experiments/figures/fig1_expressiveness.pdf}
+\includegraphics[width=0.75\columnwidth]{../experiments/figures/fig1_expressiveness.png}
 \caption{Expressiveness separation: distinguishable output states vs.\ number of scars $k$. Scar Algebra (red) consistently outperforms the fixed-operator baseline (blue).}
 \label{fig:expressiveness}
 \end{figure}
@@ -875,7 +875,7 @@ We generate 200 synthetic conversations (32-byte HDC vectors per event). In 100,
 
 \begin{figure}[ht]
 \centering
-\includegraphics[width=0.65\columnwidth]{../experiments/figures/fig2_void_detection.pdf}
+\includegraphics[width=0.65\columnwidth]{../experiments/figures/fig2_void_detection.png}
 \caption{Void detection performance. Void Calculus trades precision for perfect recall; the baseline has perfect precision but misses half of avoidance patterns.}
 \label{fig:detection}
 \end{figure}
@@ -888,7 +888,7 @@ We construct three scenarios: S1 (topic never discussed, void with $\delta=0$), 
 
 \begin{figure}[ht]
 \centering
-\includegraphics[width=0.75\columnwidth]{../experiments/figures/fig3_three_states.pdf}
+\includegraphics[width=0.75\columnwidth]{../experiments/figures/fig3_three_states.png}
 \caption{Three-state behavioral signatures. Each state has a unique profile; Bayesian baselines cannot distinguish S1 from S3.}
 \label{fig:three_states}
 \end{figure}
@@ -901,7 +901,7 @@ Two VoidScarEngine instances receive different histories then the same probe: Pa
 
 \begin{figure}[ht]
 \centering
-\includegraphics[width=0.85\columnwidth]{../experiments/figures/fig4_hysteresis.pdf}
+\includegraphics[width=0.85\columnwidth]{../experiments/figures/fig4_hysteresis.png}
 \caption{Hysteresis demonstration. Left: two paths to the same topic. Right: response differs permanently due to scar residue and ghost sensitivity.}
 \label{fig:hysteresis}
 \end{figure}
@@ -920,7 +920,7 @@ We run a standardized 200-event sequence through five configurations: full syste
 
 \begin{figure}[ht]
 \centering
-\includegraphics[width=0.7\columnwidth]{../experiments/figures/fig5_ablation.pdf}
+\includegraphics[width=0.7\columnwidth]{../experiments/figures/fig5_ablation.png}
 \caption{Ablation heatmap. Green = capability present, red = absent. Both Scar and Void are necessary; coupling is beneficial but not strictly required for the measured capabilities.}
 \label{fig:ablation}
 \end{figure}
@@ -933,7 +933,7 @@ We simulate 1500 conversation turns with realistic input distribution (60\% norm
 
 \begin{figure}[ht]
 \centering
-\includegraphics[width=0.85\columnwidth]{../experiments/figures/fig6_stability.pdf}
+\includegraphics[width=0.85\columnwidth]{../experiments/figures/fig6_stability.png}
 \caption{Long-term stability without autopoietic recovery. Top: scar accumulation. Middle: numbed dimensions reach maximum at $\sim$350 turns. Bottom: coherence collapses. The autopoiesis layer (L5) is designed to intervene before this degenerate state.}
 \label{fig:stability}
 \end{figure}
@@ -949,11 +949,32 @@ The following experiments are designed to validate the Relational Sheaf Theory (
 \paragraph{Exp 8: Cohomological Dissociation Detection.}
 Construct an agent with $N=3$ relationships where relationships 1 and 2 impose contradictory self-presentation requirements (e.g., one demands high openness, the other demands reserve). Measure $\dim H^1(K, \mathcal{F})$ over time as scar histories diverge. \emph{Hypothesis:} $H^1$ grows monotonically once the presentation gap exceeds $\kappa(\boldsymbol{\pi})$, and independent per-relationship instances fail to detect the inconsistency.
 
+\begin{figure}[ht]
+\centering
+\includegraphics[width=0.75\columnwidth]{../experiments/figures/fig7_cohomological_dissociation.png}
+\caption{Cohomological dissociation detection. $\dim H^1$ grows monotonically as presentation gap exceeds threshold $\kappa(\boldsymbol{\pi})$; independent per-relationship instances fail to detect the inconsistency.}
+\label{fig:cohomological_dissociation}
+\end{figure}
+
 \paragraph{Exp 9: Spectral Propagation Verification.}
 Inflict a controlled scar event in relationship $i$ and measure the propagated effect $\|\Delta \mathbf{x}_j(t)\|$ in relationship $j$ over time. Compare the observed decay rate against the theoretical bound $e^{-\lambda_1(t-t_0)} \cdot \|P_j^T P_i\|_2$ (Theorem~\ref{thm:sheaf-spectral}). \emph{Hypothesis:} observed decay is within a constant factor of the spectral bound, and the decay rate correlates with the computed $\lambda_1$.
 
+\begin{figure}[ht]
+\centering
+\includegraphics[width=0.75\columnwidth]{../experiments/figures/fig8_spectral_propagation.png}
+\caption{Spectral propagation verification. Observed decay rate (solid) closely tracks the theoretical spectral bound (dashed), confirming Theorem~\ref{thm:sheaf-spectral}.}
+\label{fig:spectral_propagation}
+\end{figure}
+
 \paragraph{Exp 10: Triadic Irreducibility.}
 Create a 2-simplex (agent + two partners in simultaneous co-presence). Generate co-presence states and attempt reconstruction from pairwise restrictions alone. \emph{Hypothesis:} reconstruction error is nonzero when $\dim H^2 > 0$, confirming that group states contain irreducible triadic information not available from dyadic data.
+
+\begin{figure}[ht]
+\centering
+\includegraphics[width=0.75\columnwidth]{../experiments/figures/fig9_triadic_irreducibility.png}
+\caption{Triadic irreducibility. Reconstruction error is nonzero when $\dim H^2 > 0$, confirming irreducible triadic information not available from dyadic data alone.}
+\label{fig:triadic_irreducibility}
+\end{figure}
 
 \subsection{Summary}
 

@@ -248,7 +248,7 @@ M_\Delta = 2.0^{|\{i: \Delta_i = T_1\}|} \cdot 1.5^{|\{i: \Delta_i = T_2\}|}
 \begin{theorem}[收敛至伤疤均衡]
 \label{thm:scar-convergence}
 在有界输入 $\|e_t\|_\infty \leq C$ 和收缩条件 $\|\mathbf{A}\|_\infty < 1$ 下：
-\begin{enumerate}[(a)]
+\begin{enumerate}[label=(\alph*)]
 \item 存在 $T^* < \infty$，此后不再形成新伤疤。
 \item 基状态收敛：$\|x_t - x^*\| \to 0$。
 \item 所有伤疤在有限时间内达到终态（淡化）。
@@ -866,7 +866,7 @@ L6 相变 & $<$0.01 ms & $<$0.01 ms & $<$0.01 ms \\
 
 \begin{figure}[ht]
 \centering
-\includegraphics[width=0.75\columnwidth]{../experiments/figures/fig1_expressiveness.pdf}
+\includegraphics[width=0.75\columnwidth]{../experiments/figures/fig1_expressiveness.png}
 \caption{表达力分离：可区分输出状态数 vs.\ 伤疤数 $k$。伤疤代数（红）始终优于固定算子基线（蓝）。}
 \label{fig:expressiveness}
 \end{figure}
@@ -879,7 +879,7 @@ L6 相变 & $<$0.01 ms & $<$0.01 ms & $<$0.01 ms \\
 
 \begin{figure}[ht]
 \centering
-\includegraphics[width=0.65\columnwidth]{../experiments/figures/fig2_void_detection.pdf}
+\includegraphics[width=0.65\columnwidth]{../experiments/figures/fig2_void_detection.png}
 \caption{空洞检测性能。空洞演算以精确率换取完美召回率；基线精确率完美但遗漏一半回避模式。}
 \label{fig:detection}
 \end{figure}
@@ -892,7 +892,7 @@ L6 相变 & $<$0.01 ms & $<$0.01 ms & $<$0.01 ms \\
 
 \begin{figure}[ht]
 \centering
-\includegraphics[width=0.75\columnwidth]{../experiments/figures/fig3_three_states.pdf}
+\includegraphics[width=0.75\columnwidth]{../experiments/figures/fig3_three_states.png}
 \caption{三态行为签名。每种状态有唯一特征；贝叶斯基线无法区分 S1 与 S3。}
 \label{fig:three_states}
 \end{figure}
@@ -905,7 +905,7 @@ L6 相变 & $<$0.01 ms & $<$0.01 ms & $<$0.01 ms \\
 
 \begin{figure}[ht]
 \centering
-\includegraphics[width=0.85\columnwidth]{../experiments/figures/fig4_hysteresis.pdf}
+\includegraphics[width=0.85\columnwidth]{../experiments/figures/fig4_hysteresis.png}
 \caption{滞后效应演示。左：到达同一话题的两条路径。右：由于伤疤残留和幽灵灵敏度，响应永久不同。}
 \label{fig:hysteresis}
 \end{figure}
@@ -924,7 +924,7 @@ L6 相变 & $<$0.01 ms & $<$0.01 ms & $<$0.01 ms \\
 
 \begin{figure}[ht]
 \centering
-\includegraphics[width=0.7\columnwidth]{../experiments/figures/fig5_ablation.pdf}
+\includegraphics[width=0.7\columnwidth]{../experiments/figures/fig5_ablation.png}
 \caption{消融热力图。绿色 = 能力存在，红色 = 缺失。伤疤和空洞都是必要的；耦合有益但对测量的能力非严格必需。}
 \label{fig:ablation}
 \end{figure}
@@ -937,7 +937,7 @@ L6 相变 & $<$0.01 ms & $<$0.01 ms & $<$0.01 ms \\
 
 \begin{figure}[ht]
 \centering
-\includegraphics[width=0.85\columnwidth]{../experiments/figures/fig6_stability.pdf}
+\includegraphics[width=0.85\columnwidth]{../experiments/figures/fig6_stability.png}
 \caption{无自创生恢复的长期稳定性。上：伤疤累积。中：麻木维度在约 350 轮达到最大值。下：一致性崩溃。自创生层（L5）设计为在此退化状态前介入。}
 \label{fig:stability}
 \end{figure}
@@ -953,11 +953,32 @@ L6 相变 & $<$0.01 ms & $<$0.01 ms & $<$0.01 ms \\
 \paragraph{实验 8：上同调解离检测。}
 构造具有 $N=3$ 个关系的智能体，其中关系 1 和 2 施加矛盾的自我呈现需求（例如一方要求高开放性，另一方要求内敛）。随着伤疤历史分化，测量 $\dim H^1(K, \mathcal{F})$ 随时间的变化。\emph{假设：}一旦呈现差距超过 $\kappa(\boldsymbol{\pi})$，$H^1$ 单调增长，且独立逐关系实例无法检测该不一致。
 
+\begin{figure}[ht]
+\centering
+\includegraphics[width=0.75\columnwidth]{../experiments/figures/fig7_cohomological_dissociation.png}
+\caption{上同调解离检测。呈现差距超过阈值 $\kappa(\boldsymbol{\pi})$ 后 $\dim H^1$ 单调增长；独立逐关系实例无法检测该不一致。}
+\label{fig:cohomological_dissociation}
+\end{figure}
+
 \paragraph{实验 9：谱传播验证。}
 在关系 $i$ 中施加受控伤疤事件，测量关系 $j$ 中传播效应 $\|\Delta \mathbf{x}_j(t)\|$ 随时间的变化。将观测衰减率与理论界 $e^{-\lambda_1(t-t_0)} \cdot \|P_j^T P_i\|_2$（定理~\ref{thm:sheaf-spectral}）比较。\emph{假设：}观测衰减在谱界的常数因子范围内，且衰减率与计算的 $\lambda_1$ 相关。
 
+\begin{figure}[ht]
+\centering
+\includegraphics[width=0.75\columnwidth]{../experiments/figures/fig8_spectral_propagation.png}
+\caption{谱传播验证。观测衰减率（实线）紧密跟踪理论谱界（虚线），验证定理~\ref{thm:sheaf-spectral}。}
+\label{fig:spectral_propagation}
+\end{figure}
+
 \paragraph{实验 10：三元不可约性。}
 创建 2-单形（智能体 + 两个伙伴同时共在）。生成共在状态并尝试仅从成对限制重构。\emph{假设：}当 $\dim H^2 > 0$ 时重构误差非零，确认群体状态包含二元数据中不可获得的不可约三元信息。
+
+\begin{figure}[ht]
+\centering
+\includegraphics[width=0.75\columnwidth]{../experiments/figures/fig9_triadic_irreducibility.png}
+\caption{三元不可约性。当 $\dim H^2 > 0$ 时重构误差非零，确认群体状态包含仅从二元数据不可获得的不可约三元信息。}
+\label{fig:triadic_irreducibility}
+\end{figure}
 
 \subsection{结果汇总}
 
