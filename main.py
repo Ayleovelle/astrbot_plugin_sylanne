@@ -88,6 +88,7 @@ except ImportError:
 # Sylanne alpha imports
 # ---------------------------------------------------------------------------
 from sylanne_alpha.host import SylanneAlphaHost, SylanneAlphaHostEvent
+from sylanne_alpha.assessor_async import AsyncAssessor
 from sylanne_alpha.compat import (
     build_memory_payload,
     command_surface,
@@ -102,6 +103,7 @@ from sylanne_alpha.compat import (
 from sylanne_alpha.compat import strip_draft_blocks
 from sylanne_alpha.embedding_memory import recall_with_embedding_assist
 from sylanne_alpha.life_simulation import LifeSimulator
+from sylanne_alpha.rhythm_learner import RhythmLearner
 from sylanne_alpha.webui import WEBUI_HTML
 from sylanne_alpha.webui_server import start_webui_background
 
@@ -307,9 +309,11 @@ class EmotionalStatePlugin(Star):
         self._last_request_budgets: dict[str, _StateInjectionBudget] = {}
         self._last_understanding_closed_loop: dict[str, Any] = {}
         self._last_bot_expression_time: dict[str, float] = {}
+        self._rhythm_learner = RhythmLearner(intimacy_threshold=0.6)
         self.logger = logger
         self._life_simulator = LifeSimulator(config=self._config)
         self._life_simulator_started = False
+        self._async_assessor = AsyncAssessor(config=self._config)
         if hasattr(context, "register_web_api"):
             context.register_web_api(
                 f"/{PLUGIN_NAME}/observatory-status",
@@ -443,6 +447,13 @@ class EmotionalStatePlugin(Star):
         self._cfg_float("background_post_diagnostics_warn_lag_seconds", 60.0)
         self._cfg_bool("enable_low_signal_light_assessment", True)
         self._cfg_int("low_signal_max_chars", 12)
+        self._cfg_bool("sylanne_alpha_assessor_llm_enabled", False)
+        self._cfg("sylanne_alpha_assessor_provider_id", "")
+        self._cfg_float("sylanne_alpha_assessor_timeout_seconds", 2.0)
+        self._cfg_float("sylanne_alpha_fast_assessor_timeout_seconds", 1.5)
+        self._cfg_bool("sylanne_alpha_main_assessor_enabled", False)
+        self._cfg("sylanne_alpha_main_assessor_provider_id", "")
+        self._cfg_float("sylanne_alpha_main_assessor_timeout_seconds", 3.0)
         self._cfg_bool("agent_speaker_relationship_tracking", True)
         self._cfg_bool("agent_include_speaker_in_assessment", True)
         self._cfg_int("agent_identity_profile_limit", 256)
@@ -1021,11 +1032,7 @@ class EmotionalStatePlugin(Star):
         memory_result = await self.query_sylanne_memory(session_key=sk, query=query_hint, limit=3)
         fragment = self._memory_prompt_fragment(memory_result)
         self._append_request_prompt_fragment(request, fragment)
-        # Cap prompt
-        prompt = str(getattr(request, "prompt", "") or "")
-        if len(prompt) > MAX_LLM_REQUEST_PROMPT_CHARS:
-            request.prompt = prompt[:MAX_LLM_REQUEST_PROMPT_CHARS - 50] + "\n[sylanne_prompt_context_trimmed]"
-        return {"prompt": request.prompt}
+        return {"prompt": str(getattr(request, "prompt", "") or "")}
 
     async def simulate_emotion_update(self, *, session_key: str, text: str = "", flags: list[str] | None = None, confidence: float = 0.5, role: str = "user", source: str = "", observed_at: float = 0.0, **kwargs: Any) -> dict[str, Any]:
         host = self._host(session_key)
@@ -1294,8 +1301,6 @@ class EmotionalStatePlugin(Star):
 
         # Structure: [original prompt] [background as parenthetical] [user's current message last]
         new_prompt = current_prompt
-        if len(new_prompt) > MAX_LLM_REQUEST_PROMPT_CHARS - 2000:
-            new_prompt = new_prompt[:3000] + "\n[trimmed]"
 
         if background:
             new_prompt = f"{new_prompt}\n（{background}）"
@@ -1303,8 +1308,6 @@ class EmotionalStatePlugin(Star):
             new_prompt = f"{new_prompt}\n{user_anchor}"
 
         new_prompt = new_prompt.strip()
-        if len(new_prompt) > MAX_LLM_REQUEST_PROMPT_CHARS:
-            new_prompt = new_prompt[:MAX_LLM_REQUEST_PROMPT_CHARS - 50] + "\n[trimmed]"
 
         request.prompt = new_prompt
 
@@ -1336,10 +1339,148 @@ class EmotionalStatePlugin(Star):
         return ""
 
     async def _background_observe_request(self, session_key: str, text: str) -> None:
+        """Observe user message with two-level LLM assessment (bounded timeouts).
+
+        Level 1 (fast): runs on every message, small model, 1.5s timeout.
+        Level 2 (main): runs only when gate routes to "full", strong model, 3s timeout.
+
+        Results are merged (main overrides fast) and passed to the computation
+        spine to modulate Void-Scar state precisely. If both time out, the
+        spine uses HDC coarse judgment only.
+        """
         try:
-            await self.observe_request(session_key, text=text, confidence=0.7, flags=["safe"], now=time.time())
+            fast_result: dict = {}
+            main_result: dict = {}
+
+            # Fast assessor (always runs if enabled)
+            fast_enabled = self._cfg_bool("sylanne_alpha_assessor_llm_enabled")
+            if fast_enabled and text:
+                fast_result = await self._async_assessor.assess_fast(
+                    text, self._assessor_llm_call,
+                )
+
+            # Determine if main assessor should run (full path heuristic)
+            # We check the gate's last route -- if it was "full", run main assessor
+            host = self._host(session_key)
+            last_route = host.kernel.computation._last_route
+            main_enabled = self._cfg_bool("sylanne_alpha_main_assessor_enabled")
+            if main_enabled and text and last_route == "full":
+                # Gather recent context lines for richer assessment
+                context_lines = self._recent_context_lines(session_key)
+                main_result = await self._async_assessor.assess_main(
+                    text, context_lines, self._main_assessor_llm_call,
+                )
+
+            # Merge: main overrides fast
+            assessment = {**fast_result, **main_result}
+            # Remove internal metadata
+            assessment.pop("_level", None)
+            assessment.pop("assessed_at", None)
+
+            # Feed into computation spine with assessment
+            now = time.time()
+            event = SylanneAlphaHostEvent(
+                text=text, confidence=0.7, flags=["safe"],
+                now=now, event_time=self._event_time(now),
+            )
+            host.on_request(event, assessment=assessment if assessment else None)
+
+            # Rhythm learning: observe user message timing for adaptive segmentation
+            engine_obs = host.kernel.computation.engine.observe()
+            self._rhythm_learner.observe_user_message(session_key, text, now, engine_obs)
         except Exception:
-            pass
+            # Fallback: observe without assessment
+            try:
+                await self.observe_request(
+                    session_key, text=text, confidence=0.7,
+                    flags=["safe"], now=time.time(),
+                )
+            except Exception:
+                pass
+
+    def _recent_context_lines(self, session_key: str) -> list[str]:
+        """Get recent conversation lines for main assessor context."""
+        host = self._host(session_key)
+        traces = host.kernel.body.memory.get("traces", [])
+        lines: list[str] = []
+        for trace in traces[-3:]:
+            text = str(trace.get("text") or "")[:100]
+            if text:
+                lines.append(text)
+        return lines
+
+    # ------------------------------------------------------------------
+    # Assessor LLM callback
+    # ------------------------------------------------------------------
+    async def _assessor_llm_call(self, prompt: str) -> str:
+        """Call configured LLM provider for fast semantic assessment.
+
+        Uses max_tokens=50 and temperature=0 for fast, deterministic output.
+        """
+        provider_id = str(
+            self._config.get("sylanne_alpha_assessor_provider_id")
+            or self._config.get("emotion_provider_id")
+            or ""
+        )
+        if not provider_id:
+            return ""
+        context = self.context
+        if not hasattr(context, "get_provider_by_id"):
+            return ""
+        provider = context.get_provider_by_id(provider_id)
+        if provider is None:
+            return ""
+        try:
+            resp = await provider.text_chat(
+                prompt=prompt,
+                max_tokens=50,
+                temperature=0.0,
+            )
+            return str(getattr(resp, "completion_text", "") or "")
+        except TypeError:
+            # Provider doesn't support max_tokens/temperature kwargs -- retry without
+            try:
+                resp = await provider.text_chat(prompt=prompt)
+                return str(getattr(resp, "completion_text", "") or "")
+            except Exception:
+                return ""
+        except Exception:
+            return ""
+
+    async def _main_assessor_llm_call(self, prompt: str) -> str:
+        """Call configured LLM provider for main (deep) semantic assessment.
+
+        Uses a stronger model with slightly more tokens allowed.
+        """
+        provider_id = str(
+            self._config.get("sylanne_alpha_main_assessor_provider_id")
+            or self._config.get("sylanne_alpha_assessor_provider_id")
+            or self._config.get("emotion_provider_id")
+            or ""
+        )
+        if not provider_id:
+            return ""
+        context = self.context
+        if not hasattr(context, "get_provider_by_id"):
+            return ""
+        provider = context.get_provider_by_id(provider_id)
+        if provider is None:
+            return ""
+        try:
+            resp = await provider.text_chat(
+                prompt=prompt,
+                max_tokens=100,
+                temperature=0.0,
+            )
+            return str(getattr(resp, "completion_text", "") or "")
+        except TypeError:
+            try:
+                resp = await provider.text_chat(prompt=prompt)
+                return str(getattr(resp, "completion_text", "") or "")
+            except Exception:
+                return ""
+        except Exception:
+            return ""
 
     # ------------------------------------------------------------------
     # Life Simulator callbacks
@@ -1523,18 +1664,27 @@ class EmotionalStatePlugin(Star):
 
         # Segment and dispatch
         origin = str(getattr(event, "unified_msg_origin", "") or "")
-        plan = realtime_plan(session_key, cleaned)
+        cfg = self._config or {}
+        default_max_part = int(cfg.get("realtime_chat_max_part_chars", 48))
+        default_cps = 7.5
+        max_part_chars, cps = self._rhythm_learner.get_rhythm_params(
+            session_key, default_max_part=default_max_part, default_cps=default_cps,
+        )
+        plan = realtime_plan(session_key, cleaned, max_part_chars=max_part_chars, chars_per_second=cps)
         parts = plan.get("message_parts", [])
 
         if not parts:
             response.completion_text = cleaned
             return
 
-        # Keep completion_text for AstrBot's context history recording,
-        # but stop the default send (we handle sending via segmented dispatch)
+        # Keep completion_text intact for AstrBot's context history recording.
+        # Clear result_chain to prevent AstrBot from sending the full message
+        # (we handle sending via segmented dispatch instead).
         response.completion_text = cleaned
-        if hasattr(event, "stop_event") and callable(event.stop_event):
-            event.stop_event()
+        if hasattr(response, "result_chain"):
+            response.result_chain = None
+        if hasattr(response, "chain"):
+            response.chain = None
 
         # Store unfinished for next round if multi-part
         if len(parts) > 1:

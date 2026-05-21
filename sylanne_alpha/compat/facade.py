@@ -97,7 +97,8 @@ def strip_draft_blocks(text: str) -> str:
     return "\n".join(visible).strip()
 
 
-def realtime_plan(session_key: str, text: str, *, max_part_chars: int = 48) -> dict[str, Any]:
+def realtime_plan(session_key: str, text: str, *, max_part_chars: int = 48,
+                   chars_per_second: float = 7.5) -> dict[str, Any]:
     raw = str(text or "")
     visible = strip_draft_blocks(raw)
     parts = _split_text(visible, max_part_chars=max_part_chars)
@@ -107,13 +108,13 @@ def realtime_plan(session_key: str, text: str, *, max_part_chars: int = 48) -> d
         "session_key": session_key,
         "enabled": True,
         "message_count": len(parts),
-        "message_parts": _message_parts(parts),
+        "message_parts": _message_parts(parts, chars_per_second=chars_per_second),
         "source_text_chars": len(raw),
     }
 
 
-def _message_parts(parts: list[str]) -> list[dict[str, Any]]:
-    raw_delays = [_typing_delay(previous) for previous, _ in _previous_and_current(parts)]
+def _message_parts(parts: list[str], *, chars_per_second: float = 7.5) -> list[dict[str, Any]]:
+    raw_delays = [_typing_delay(previous, chars_per_second=chars_per_second) for previous, _ in _previous_and_current(parts)]
     budget = min(36.0, max(0.0, (len(parts) - 1) * 3.2))
     total = sum(raw_delays)
     scale = 1.0 if total <= budget or total <= 0 else budget / total
@@ -127,12 +128,12 @@ def _previous_and_current(parts: list[str]) -> list[tuple[str, str]]:
     return [(parts[index - 1] if index > 0 else "", part) for index, part in enumerate(parts)]
 
 
-def _typing_delay(previous_text: str) -> float:
+def _typing_delay(previous_text: str, *, chars_per_second: float = 7.5) -> float:
     if not previous_text:
         return 0.0
     visible_chars = sum(1 for char in str(previous_text) if not char.isspace())
     punctuation_pause = 0.75 if str(previous_text).rstrip().endswith(("。", "！", "？", ".", "!", "?")) else 0.35
-    return round(min(4.2, max(0.8, visible_chars / 7.5 + punctuation_pause)), 3)
+    return round(min(4.2, max(0.8, visible_chars / chars_per_second + punctuation_pause)), 3)
 
 
 def realtime_dispatch(session_key: str, text: str) -> dict[str, Any]:
