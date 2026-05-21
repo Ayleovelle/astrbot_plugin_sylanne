@@ -522,7 +522,7 @@ def get_emotional_state_plugin(context: Context) -> Any | None:
     PLUGIN_NAME,
     "Aylovelle.S.S",
     "Soulful Yearning Lifelike AstrBot Neural Narrative Engine：维护情绪、人格、记忆、氛围和表达节奏的 Sylanne",
-    "3.0.9",
+    "3.0.10",
     "https://github.com/Ayleovelle/astrbot_plugin_sylanne",
 )
 class EmotionalStatePlugin(Star):
@@ -585,6 +585,7 @@ class EmotionalStatePlugin(Star):
         self._engine_cache: dict[str, EmotionEngine] = {}
         self._provider_id_cache: dict[str, tuple[float, str | None]] = {}
         self._last_request_text: dict[str, str] = {}
+        self._last_state_injection_diagnostics: dict[str, dict[str, Any]] = {}
         self._last_understanding_closed_loop: dict[str, dict[str, Any]] = {}
         self._conversation_input_epoch: dict[str, int] = {}
         self._conversation_pending_response_epochs: dict[str, deque[int]] = {}
@@ -727,6 +728,12 @@ class EmotionalStatePlugin(Star):
         self._recent_user_corrections.clear()
         self._recent_user_scene_turns.clear()
         self._realtime_chat_active_dispatches.clear()
+        self._proactive_dispatch_last_sent.clear()
+        self._proactive_dispatch_audit.clear()
+        self._last_realtime_chat_adaptive_settings.clear()
+        self._last_understanding_closed_loop.clear()
+        self._background_post_worker_state.clear()
+        self._background_post_resource_cache.clear()
         realtime_dispatch_tasks = [
             task
             for tasks in self._realtime_chat_dispatch_tasks.values()
@@ -6942,6 +6949,34 @@ class EmotionalStatePlugin(Star):
             return [], "", changed
         return query_embedding, provider_id, changed
 
+    async def _sylanne_memory_recall_items(
+        self,
+        session_key: str,
+        query: str,
+        *,
+        now: float | None = None,
+    ) -> tuple[list[MemoryRecallItem], SylanneMemoryState]:
+        resolved_now = self._observed_now() if now is None else float(now)
+        state = await self._load_sylanne_memory_state(session_key, now=resolved_now)
+        items = recall_memory(state, query=query, now=resolved_now)
+        embedding_changed = False
+        if not self._filter_mature_sylanne_memory_recall_items(items):
+            query_embedding, embedding_provider_id, embedding_changed = (
+                await self._sylanne_memory_vector_recall_inputs(
+                    state, query=query, now=resolved_now,
+                )
+            )
+            if query_embedding:
+                items = recall_memory(
+                    state, query=query, now=resolved_now,
+                    query_embedding=query_embedding,
+                    embedding_provider_id=embedding_provider_id,
+                )
+            if embedding_changed:
+                await self._save_sylanne_memory_state(session_key, state)
+        items = self._filter_mature_sylanne_memory_recall_items(items)
+        return items, state
+
     async def _sylanne_memory_recall_summary_for_proactive_candidate(
         self,
         candidate: dict[str, Any],
@@ -6959,45 +6994,14 @@ class EmotionalStatePlugin(Star):
             900,
         )
         try:
-            now = self._observed_now()
-            state = await self._load_sylanne_memory_state(session_key)
-            items = recall_memory(
-                state,
-                query=query,
-                now=now,
-            )
-            embedding_changed = False
-            if not self._filter_mature_sylanne_memory_recall_items(items):
-                query_embedding, embedding_provider_id, embedding_changed = (
-                    await self._sylanne_memory_vector_recall_inputs(
-                        state,
-                        query=query,
-                        now=now,
-                    )
-                )
-                if query_embedding:
-                    items = recall_memory(
-                        state,
-                        query=query,
-                        now=now,
-                        query_embedding=query_embedding,
-                        embedding_provider_id=embedding_provider_id,
-                    )
-                if embedding_changed:
-                    await self._save_sylanne_memory_state(session_key, state)
+            items, state = await self._sylanne_memory_recall_items(session_key, query)
         except Exception as exc:
             logger.debug(f"{PLUGIN_NAME}: Sylanne memory proactive recall failed: {exc}")
             return ""
         if not items:
             return ""
-        items = self._filter_mature_sylanne_memory_recall_items(items)
-        if not items:
-            return ""
         await self._reinforce_sylanne_memory_recall_items(
-            session_key,
-            state,
-            items,
-            query=query,
+            session_key, state, items, query=query,
         )
         lines = ["Sylanne 自有记忆召回摘要："]
         for index, item in enumerate(items[:3], 1):
@@ -7069,35 +7073,10 @@ class EmotionalStatePlugin(Star):
             return ""
         try:
             now = self._observed_now() if observed_at is None else float(observed_at)
-            state = await self._load_sylanne_memory_state(session_key, now=now)
-            items = recall_memory(
-                state,
-                query=query,
-                now=now,
-            )
-            embedding_changed = False
-            if not self._filter_mature_sylanne_memory_recall_items(items):
-                query_embedding, embedding_provider_id, embedding_changed = (
-                    await self._sylanne_memory_vector_recall_inputs(
-                        state,
-                        query=query,
-                        now=now,
-                    )
-                )
-                if query_embedding:
-                    items = recall_memory(
-                        state,
-                        query=query,
-                        now=now,
-                        query_embedding=query_embedding,
-                        embedding_provider_id=embedding_provider_id,
-                    )
-                if embedding_changed:
-                    await self._save_sylanne_memory_state(session_key, state)
+            items, state = await self._sylanne_memory_recall_items(session_key, query, now=now)
         except Exception as exc:
             logger.debug(f"{PLUGIN_NAME}: Sylanne memory request recall failed: {exc}")
             return ""
-        items = self._filter_mature_sylanne_memory_recall_items(items)
         items = self._merge_sylanne_memory_recall_workset(session_key, items)
         items = items[:SYLANNE_MEMORY_RECALL_MAX_ITEMS]
         fragment = build_memory_prompt_fragment(
@@ -7110,10 +7089,7 @@ class EmotionalStatePlugin(Star):
         )
         if fragment:
             await self._reinforce_sylanne_memory_recall_items(
-                session_key,
-                state,
-                items,
-                query=query,
+                session_key, state, items, query=query,
             )
         return fragment
 
@@ -9831,6 +9807,8 @@ class EmotionalStatePlugin(Star):
         self,
         session_key: str,
         input_epoch: int | None,
+        *,
+        discard_active_turns: bool = True,
     ) -> None:
         if input_epoch is None:
             return
@@ -9845,26 +9823,17 @@ class EmotionalStatePlugin(Star):
             return
         if not pending:
             self._conversation_pending_response_epochs.pop(key, None)
-        self._discard_active_agent_pending_user_turn(key, int(input_epoch))
+        if discard_active_turns:
+            self._discard_active_agent_pending_user_turn(key, int(input_epoch))
 
     def _discard_conversation_pending_response_epoch_only(
         self,
         session_key: str,
         input_epoch: int | None,
     ) -> None:
-        if input_epoch is None:
-            return
-        self._ensure_conversation_epoch_state()
-        key = str(session_key or "global")
-        pending = self._conversation_pending_response_epochs.get(key)
-        if not pending:
-            return
-        try:
-            pending.remove(int(input_epoch))
-        except ValueError:
-            return
-        if not pending:
-            self._conversation_pending_response_epochs.pop(key, None)
+        self._discard_conversation_pending_response_epoch(
+            session_key, input_epoch, discard_active_turns=False,
+        )
 
     def _consume_conversation_pending_response_epoch(
         self,
@@ -15440,6 +15409,7 @@ class EmotionalStatePlugin(Star):
         *,
         now: float | None = None,
     ) -> EmotionState:
+        self._evict_session_cache_if_needed(self._memory_cache)
         if session_key in self._memory_cache:
             state = self._memory_cache[session_key]
             state = self._ensure_persona_state(state, persona_profile)
@@ -15686,6 +15656,18 @@ class EmotionalStatePlugin(Star):
     def _ensure_runtime_state_containers(self) -> None:
         pass
 
+    def _evict_session_cache_if_needed(self, cache: dict, cap: int | None = None) -> None:
+        limit = cap if cap is not None else max(1, self._cfg_int("session_cache_max_sessions", 256))
+        if len(cache) <= limit:
+            return
+        evict_count = len(cache) - limit + max(1, limit // 8)
+        sorted_keys = sorted(
+            cache.keys(),
+            key=lambda k: getattr(cache.get(k), "updated_at", 0) or 0,
+        )
+        for key in sorted_keys[:evict_count]:
+            cache.pop(key, None)
+
     async def _load_auxiliary_state(
         self,
         session_key: str,
@@ -15698,6 +15680,7 @@ class EmotionalStatePlugin(Star):
         personality_model: dict[str, Any] | None = None,
         now: float | None = None,
     ):
+        self._evict_session_cache_if_needed(cache)
         if session_key in cache:
             state = cache[session_key]
             if self._passive_load_is_fresh(state, now=now):
@@ -16571,6 +16554,27 @@ class EmotionalStatePlugin(Star):
             return profile
         return "balanced"
 
+    def _build_disabled_payload(
+        self,
+        state: Any,
+        to_payload_fn,
+        *,
+        session_key: str,
+        exposure: str = "plugin_safe",
+        reason: str,
+        pop_keys: tuple[str, ...],
+        include_prompt_fragment: bool = False,
+        payload_kwargs: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        payload = to_payload_fn(state, session_key=session_key, exposure=exposure, **(payload_kwargs or {}))
+        payload["enabled"] = False
+        payload["reason"] = reason
+        for key in pop_keys:
+            payload.pop(key, None)
+        if include_prompt_fragment:
+            payload["prompt_fragment"] = ""
+        return payload
+
     def _moral_repair_disabled_payload(
         self,
         session_key: str,
@@ -16578,27 +16582,16 @@ class EmotionalStatePlugin(Star):
         exposure: str = "plugin_safe",
         include_prompt_fragment: bool = False,
     ) -> dict[str, Any]:
-        state = MoralRepairState.initial()
-        payload = moral_repair_state_to_public_payload(
-            state,
+        return self._build_disabled_payload(
+            MoralRepairState.initial(),
+            moral_repair_state_to_public_payload,
             session_key=session_key,
             exposure=exposure,
-            safety_boundary=self._safety_boundary_enabled(),
-            action_blocking=self._shadow_action_blocking_enabled(),
+            reason="enable_moral_repair_state is false",
+            pop_keys=("values", "dimensions", "trajectory", "confidence", "last_reason"),
+            include_prompt_fragment=include_prompt_fragment,
+            payload_kwargs={"safety_boundary": self._safety_boundary_enabled(), "action_blocking": self._shadow_action_blocking_enabled()},
         )
-        payload["enabled"] = False
-        payload["reason"] = "enable_moral_repair_state is false"
-        for internal_key in (
-            "values",
-            "dimensions",
-            "trajectory",
-            "confidence",
-            "last_reason",
-        ):
-            payload.pop(internal_key, None)
-        if include_prompt_fragment:
-            payload["prompt_fragment"] = ""
-        return payload
 
     def _lifelike_learning_disabled_payload(
         self,
@@ -16607,14 +16600,15 @@ class EmotionalStatePlugin(Star):
         exposure: str = "plugin_safe",
         include_prompt_fragment: bool = False,
     ) -> dict[str, Any]:
-        state = LifelikeLearningState.initial()
-        payload = lifelike_state_to_public_payload(
-            state,
+        payload = self._build_disabled_payload(
+            LifelikeLearningState.initial(),
+            lifelike_state_to_public_payload,
             session_key=session_key,
             exposure=exposure,
+            reason="enable_lifelike_learning is false",
+            pop_keys=("values", "dimensions", "trajectory", "lexicon", "user_profile", "last_observation"),
+            include_prompt_fragment=include_prompt_fragment,
         )
-        payload["enabled"] = False
-        payload["reason"] = "enable_lifelike_learning is false"
         payload["initiative_policy"] = {
             "schema_version": "astrbot.lifelike_initiative_policy.v1",
             "kind": "lifelike_initiative_policy",
@@ -16627,17 +16621,6 @@ class EmotionalStatePlugin(Star):
             "flags": ["lifelike_learning_disabled"],
             "allowed_actions": ["brief_acknowledgement", "follow_user_lead"],
         }
-        for internal_key in (
-            "values",
-            "dimensions",
-            "trajectory",
-            "lexicon",
-            "user_profile",
-            "last_observation",
-        ):
-            payload.pop(internal_key, None)
-        if include_prompt_fragment:
-            payload["prompt_fragment"] = ""
         return payload
 
     def _personality_drift_disabled_payload(
@@ -16648,27 +16631,15 @@ class EmotionalStatePlugin(Star):
         exposure: str = "plugin_safe",
         include_prompt_fragment: bool = False,
     ) -> dict[str, Any]:
-        state = PersonalityDriftState.initial(
-            persona_fingerprint=profile.fingerprint if profile is not None else "default",
-        )
-        payload = personality_drift_state_to_public_payload(
-            state,
+        return self._build_disabled_payload(
+            PersonalityDriftState.initial(persona_fingerprint=profile.fingerprint if profile is not None else "default"),
+            personality_drift_state_to_public_payload,
             session_key=session_key,
             exposure=exposure,
+            reason="enable_personality_drift is false",
+            pop_keys=("trait_offsets", "trait_confidence", "trajectory", "last_event_summary", "created_at"),
+            include_prompt_fragment=include_prompt_fragment,
         )
-        payload["enabled"] = False
-        payload["reason"] = "enable_personality_drift is false"
-        for internal_key in (
-            "trait_offsets",
-            "trait_confidence",
-            "trajectory",
-            "last_event_summary",
-            "created_at",
-        ):
-            payload.pop(internal_key, None)
-        if include_prompt_fragment:
-            payload["prompt_fragment"] = ""
-        return payload
 
     def _fallibility_disabled_payload(
         self,
@@ -16677,27 +16648,16 @@ class EmotionalStatePlugin(Star):
         exposure: str = "plugin_safe",
         include_prompt_fragment: bool = False,
     ) -> dict[str, Any]:
-        state = FallibilityState.initial()
-        payload = fallibility_state_to_public_payload(
-            state,
+        return self._build_disabled_payload(
+            FallibilityState.initial(),
+            fallibility_state_to_public_payload,
             session_key=session_key,
             exposure=exposure,
-            safety_boundary=self._safety_boundary_enabled(),
-            action_blocking=self._shadow_action_blocking_enabled(),
+            reason="enable_fallibility_state is false",
+            pop_keys=("values", "dimensions", "trajectory", "confidence", "last_reason"),
+            include_prompt_fragment=include_prompt_fragment,
+            payload_kwargs={"safety_boundary": self._safety_boundary_enabled(), "action_blocking": self._shadow_action_blocking_enabled()},
         )
-        payload["enabled"] = False
-        payload["reason"] = "enable_fallibility_state is false"
-        for internal_key in (
-            "values",
-            "dimensions",
-            "trajectory",
-            "confidence",
-            "last_reason",
-        ):
-            payload.pop(internal_key, None)
-        if include_prompt_fragment:
-            payload["prompt_fragment"] = ""
-        return payload
 
     def _group_atmosphere_disabled_payload(
         self,
@@ -16706,25 +16666,15 @@ class EmotionalStatePlugin(Star):
         exposure: str = "plugin_safe",
         include_prompt_fragment: bool = False,
     ) -> dict[str, Any]:
-        state = GroupAtmosphereState.initial()
-        payload = group_atmosphere_state_to_public_payload(
-            state,
+        return self._build_disabled_payload(
+            GroupAtmosphereState.initial(),
+            group_atmosphere_state_to_public_payload,
             session_key=session_key,
             exposure=exposure,
+            reason="enable_group_atmosphere_state is false",
+            pop_keys=("values", "dimensions", "trajectory", "confidence", "last_reason"),
+            include_prompt_fragment=include_prompt_fragment,
         )
-        payload["enabled"] = False
-        payload["reason"] = "enable_group_atmosphere_state is false"
-        for internal_key in (
-            "values",
-            "dimensions",
-            "trajectory",
-            "confidence",
-            "last_reason",
-        ):
-            payload.pop(internal_key, None)
-        if include_prompt_fragment:
-            payload["prompt_fragment"] = ""
-        return payload
 
     def _humanlike_disabled_payload(
         self,
@@ -16733,26 +16683,16 @@ class EmotionalStatePlugin(Star):
         exposure: str = "plugin_safe",
         include_prompt_fragment: bool = False,
     ) -> dict[str, Any]:
-        state = HumanlikeState.initial()
-        payload = humanlike_state_to_public_payload(
-            state,
+        return self._build_disabled_payload(
+            HumanlikeState.initial(),
+            humanlike_state_to_public_payload,
             session_key=session_key,
             exposure=exposure,
-            safety_boundary=self._safety_boundary_enabled(),
+            reason="enable_humanlike_state is false",
+            pop_keys=("values", "dimensions", "trajectory", "confidence", "last_reason"),
+            include_prompt_fragment=include_prompt_fragment,
+            payload_kwargs={"safety_boundary": self._safety_boundary_enabled()},
         )
-        payload["enabled"] = False
-        payload["reason"] = "enable_humanlike_state is false"
-        for internal_key in (
-            "values",
-            "dimensions",
-            "trajectory",
-            "confidence",
-            "last_reason",
-        ):
-            payload.pop(internal_key, None)
-        if include_prompt_fragment:
-            payload["prompt_fragment"] = ""
-        return payload
 
     def _build_state_injection(
         self,
@@ -18614,8 +18554,6 @@ class EmotionalStatePlugin(Star):
                 },
             ),
         }
-        if not hasattr(self, "_last_state_injection_diagnostics"):
-            self._last_state_injection_diagnostics = {}
         self._last_state_injection_diagnostics[budget.session_key] = diagnostics
 
     def _state_injection_runtime_summary(self, session_key: str) -> dict[str, Any]:
@@ -19405,30 +19343,31 @@ class EmotionalStatePlugin(Star):
         )
 
     def _realtime_chat_settings(self) -> RealtimeChatSettings:
+        base = self._base_realtime_chat_settings()
         if not self._runtime_parameter_debug_override_enabled():
-            return self._base_realtime_chat_settings()
+            return base
         return RealtimeChatSettings(
-            enabled=self._realtime_chat_enabled(),
-            max_parts=max(1, self._debug_cfg_int("realtime_chat_max_parts", 5)),
-            min_part_chars=max(1, self._debug_cfg_int("realtime_chat_min_part_chars", 3)),
-            max_part_chars=max(12, self._debug_cfg_int("realtime_chat_max_part_chars", 72)),
+            enabled=base.enabled,
+            max_parts=max(1, self._debug_cfg_int("realtime_chat_max_parts", base.max_parts)),
+            min_part_chars=max(1, self._debug_cfg_int("realtime_chat_min_part_chars", base.min_part_chars)),
+            max_part_chars=max(12, self._debug_cfg_int("realtime_chat_max_part_chars", base.max_part_chars)),
             chars_per_second=max(
                 1.0,
-                self._debug_cfg_float("realtime_chat_chars_per_second", 7.0),
+                self._debug_cfg_float("realtime_chat_chars_per_second", base.chars_per_second),
             ),
             min_delay_seconds=max(
                 0.0,
-                self._debug_cfg_float("realtime_chat_min_delay_seconds", 0.35),
+                self._debug_cfg_float("realtime_chat_min_delay_seconds", base.min_delay_seconds),
             ),
             max_delay_seconds=max(
                 0.0,
-                self._debug_cfg_float("realtime_chat_max_delay_seconds", 4.0),
+                self._debug_cfg_float("realtime_chat_max_delay_seconds", base.max_delay_seconds),
             ),
             jitter_ratio=max(
                 0.0,
-                self._debug_cfg_float("realtime_chat_jitter_ratio", 0.22),
+                self._debug_cfg_float("realtime_chat_jitter_ratio", base.jitter_ratio),
             ),
-            strip_markdown=self._cfg_bool("realtime_chat_strip_markdown", True),
+            strip_markdown=base.strip_markdown,
         )
 
     def _base_realtime_chat_settings(self) -> RealtimeChatSettings:
@@ -19654,48 +19593,26 @@ class EmotionalStatePlugin(Star):
         return self._cfg_bool("sticker_learn_user_images", False)
 
     def _sticker_settings(self) -> StickerSettings:
+        base = self._base_sticker_settings()
         if not self._runtime_parameter_debug_override_enabled():
-            return self._base_sticker_settings()
+            return base
         return StickerSettings(
-            enabled=self._sticker_reaction_enabled(),
-            local_root=str(self._cfg("sticker_local_root", "") or ""),
-            default_repo_url=str(
-                self._cfg(
-                    "sticker_default_repo_url",
-                    "https://github.com/zhaoolee/ChineseBQB.git",
-                )
-                or ""
-            ),
-            auto_download_enabled=self._cfg_bool("sticker_auto_download_enabled", False),
-            auto_download_repo_url=str(
-                self._cfg(
-                    "sticker_auto_download_repo_url",
-                    "https://github.com/zhaoolee/ChineseBQB.git",
-                )
-                or ""
-            ),
-            auto_download_cache_dir=str(
-                self._cfg("sticker_auto_download_cache_dir", "") or "",
-            ),
-            auto_download_timeout_seconds=max(
-                1.0,
-                min(300.0, self._cfg_float("sticker_auto_download_timeout_seconds", 30.0)),
-            ),
-            allowed_extensions=str(
-                self._cfg("sticker_allowed_extensions", ".jpg,.jpeg,.png,.gif,.webp")
-                or ""
-            ),
-            selected_packs=str(self._cfg("sticker_selected_packs", "") or ""),
-            index_limit=max(0, self._cfg_int("sticker_index_limit", 1000)),
-            max_file_bytes=max(
-                1,
-                self._cfg_int("sticker_max_file_bytes", 5242880),
-            ),
+            enabled=base.enabled,
+            local_root=base.local_root,
+            default_repo_url=base.default_repo_url,
+            auto_download_enabled=base.auto_download_enabled,
+            auto_download_repo_url=base.auto_download_repo_url,
+            auto_download_cache_dir=base.auto_download_cache_dir,
+            auto_download_timeout_seconds=base.auto_download_timeout_seconds,
+            allowed_extensions=base.allowed_extensions,
+            selected_packs=base.selected_packs,
+            index_limit=base.index_limit,
+            max_file_bytes=base.max_file_bytes,
             send_probability=max(
                 0.0,
-                min(1.0, self._debug_cfg_float("sticker_send_probability", 0.18)),
+                min(1.0, self._debug_cfg_float("sticker_send_probability", base.send_probability)),
             ),
-            learned_enabled=self._sticker_learning_enabled(),
+            learned_enabled=base.learned_enabled,
         )
 
     def _base_sticker_settings(self) -> StickerSettings:
@@ -20638,14 +20555,14 @@ class EmotionalStatePlugin(Star):
             return default
 
     def _log_warning(self, message: str) -> None:
-        writer = getattr(logger, "warning", None) or getattr(logger, "debug", None)
-        if callable(writer):
-            writer(message)
+        fn = getattr(logger, "warning", None) or getattr(logger, "debug", None)
+        if fn:
+            fn(message)
 
     def _log_info(self, message: str) -> None:
-        writer = getattr(logger, "info", None) or getattr(logger, "debug", None)
-        if callable(writer):
-            writer(message)
+        fn = getattr(logger, "info", None) or getattr(logger, "debug", None)
+        if fn:
+            fn(message)
 
     def _clip_one_line(self, text: str, limit: int) -> str:
         cleaned = " ".join(str(text or "").split())

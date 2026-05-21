@@ -2,6 +2,35 @@
 
 本文件用于 AstrBot 插件市场/管理页展示更新内容。更完整的设计说明、公式推导、测试矩阵和维护手册见 `README.md`。
 
+## 3.0.10
+
+发布日期：2026-05-21
+
+### 优化
+
+- 消除 import 块 try/except 完整复制冗余，改用 `_sibling()` 辅助函数（-170 行）。
+- 清理 `terminate()`、`_schedule_background_post_assessment`、`_ensure_runtime_state_containers` 中全部多余 hasattr 防御检查（-80+ 行）。
+- `@register(...)` 补全 `repo_url` 字段。
+- 收窄 Claude tool context 判定，移除 `"content"`/`"stop_reason"` 的 generic payload 检测。
+- 五个辅助引擎 load/save/delete 泛型化为 `_load_auxiliary_state` / `_save_auxiliary_state` / `_delete_auxiliary_state`（-240 行）。
+- `on_llm_request` 中 inject_state if/else 分支公共操作提到分支外（-30 行）。
+- `_discard_conversation_pending_response_epoch_only` 合并为委托调用。
+- 六个 `_*_disabled_payload` 方法合并为 `_build_disabled_payload` 泛型方法（-60 行）。
+- `_sticker_settings` / `_realtime_chat_settings` debug override 改为基于 base 覆盖，消除默认值重复。
+- `_sylanne_memory_recall_summary` 核心 recall 逻辑提取为 `_sylanne_memory_recall_items`（-30 行）。
+
+### 修复
+
+- `_last_state_injection_diagnostics` 在 `__init__` 中初始化，修复冷终止时 `AttributeError`。
+- `terminate()` 补全 `_proactive_dispatch_last_sent`、`_proactive_dispatch_audit`、`_last_realtime_chat_adaptive_settings`、`_last_understanding_closed_loop`、`_background_post_worker_state`、`_background_post_resource_cache` 六个遗漏缓存清理。
+- 新增 `_evict_session_cache_if_needed` session 缓存 LRU 淘汰，防止长期运行大量不同用户时内存无界增长（默认上限 256 sessions）。
+
+### 验证
+
+- 191 项 focused regression tests 全部通过。
+- 六项专项验证（冷终止、LRU 淘汰、import、disabled_payload、_discard、sticker settings）通过。
+- 全链路审查确认无断线。
+
 ## 3.0.9
 
 发布日期：2026-05-21
