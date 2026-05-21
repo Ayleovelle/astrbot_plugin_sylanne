@@ -174,46 +174,88 @@ def experiment_7_cohomological_dissociation():
 # ===========================================================================
 
 def experiment_8_spectral_propagation():
-    """Single large scar event on relationship 0, observe propagation to 1-4.
+    """Scar event on Rel 0, observe propagation governed by presentation similarity.
 
-    Prediction: Perturbation decays exponentially with combinatorial distance,
-    rate governed by spectral gap lambda_1.
+    Key insight: In a star topology (all edges connect to central vertex 0),
+    combinatorial distance is always 2 for all non-source edges. The EFFECTIVE
+    distance is determined by presentation matrix similarity ||P_j^T P_0||_2,
+    which encodes how much of the source's perturbation can couple into each
+    target relationship.
+
+    Design:
+      - Rel 0 (source): intimate, maturity=0.9
+      - Rel 1: intimate, maturity=0.7 (similar to source -> strong coupling)
+      - Rel 2: friendly, maturity=0.5 (moderate similarity)
+      - Rel 3: formal, maturity=0.3 (different type -> weak coupling)
+      - Rel 4: adversarial, maturity=0.1 (very different -> weakest coupling)
+
+    Prediction: Perturbation magnitude at each relationship is proportional to
+    ||P_j^T P_0||_2 / ||P_0^T P_0||_2, NOT graph distance.
     """
+    from sylanne_alpha.relational_sheaf import (
+        _mat_mul, _mat_transpose, _mat_frobenius,
+    )
+
     print("\n" + "=" * 60)
-    print("Experiment 8: Spectral Propagation Verification")
+    print("Experiment 8: Spectral Propagation — Relational Similarity")
     print("=" * 60)
 
-    # 5 relationships in a chain with triangles connecting adjacent pairs
     sheaf = ScarSheaf(n0=8, max_energy=100.0, propagation_rate=0.15)
     sheaf.derive_params(PERSONALITY)
 
-    # Add 5 relationships (partners 1..5)
-    for i in range(1, 6):
-        sheaf.add_relationship(i, rel_type="friendly", maturity=0.3)
+    # 5 relationships with DIFFERENT types and maturities
+    rel_configs = [
+        (1, "intimate", 0.9),      # source
+        (2, "intimate", 0.7),      # similar to source -> strong coupling
+        (3, "friendly", 0.5),      # moderate similarity
+        (4, "formal", 0.3),        # different type -> weak coupling
+        (5, "adversarial", 0.1),   # very different -> weakest coupling
+    ]
+    rel_labels = [
+        "Rel 0: intimate, m=0.9 (source)",
+        "Rel 1: intimate, m=0.7",
+        "Rel 2: friendly, m=0.5",
+        "Rel 3: formal, m=0.3",
+        "Rel 4: adversarial, m=0.1",
+    ]
 
-    # Add triangles between adjacent pairs: (0,1,2), (0,2,3), (0,3,4), (0,4,5)
-    for i in range(1, 5):
-        sheaf.complex.add_triangle(i, i + 1)
-    # Ensure triangle stalks are sized
-    while len(sheaf._triangle_stalks) < sheaf.complex.n_triangles:
-        sheaf._triangle_stalks.append([0.0] * 4)
+    for partner_idx, rtype, maturity in rel_configs:
+        sheaf.add_relationship(partner_idx, rel_type=rtype, maturity=maturity)
+
+    # Compute presentation matrix similarity: ||P_j^T P_0||_F / ||P_0^T P_0||_F
+    P0 = sheaf._presentation_matrices[0]
+    P0T = _mat_transpose(P0)
+    P0TP0 = _mat_mul(P0T, P0)
+    norm_P0TP0 = _mat_frobenius(P0TP0)
+
+    coupling_strengths = []
+    for j in range(5):
+        Pj = sheaf._presentation_matrices[j]
+        PjT = _mat_transpose(Pj)
+        PjTP0 = _mat_mul(PjT, P0)
+        norm_PjTP0 = _mat_frobenius(PjTP0)
+        coupling = norm_PjTP0 / max(norm_P0TP0, 1e-12)
+        coupling_strengths.append(coupling)
+
+    print(f"  Coupling strengths (||P_j^T P_0|| / ||P_0^T P_0||):")
+    for j in range(5):
+        print(f"    {rel_labels[j]}: {coupling_strengths[j]:.4f}")
 
     # Record baseline edge stalks
     baseline_stalks = [list(s) for s in sheaf._edge_stalks]
 
-    # Inject a large scar event on relationship 0 (edge index 0)
+    # Large scar event on Rel 0 at t=0
     scar_event = [0.8, 0.6, -0.5, 0.7, 0.3, -0.4, 0.2, 0.5]
 
     n_ticks = 50
-    # Track perturbation magnitude at each relationship over time
-    perturbations = {i: [] for i in range(5)}  # edge indices 0..4
+    perturbations = {i: [] for i in range(5)}
+
     for t in range(n_ticks):
         timestamp = 1000.0 + t * 1.0
         if t == 0:
-            # First tick: inject the scar event on edge 0
             sheaf.tick(0, scar_event, timestamp=timestamp)
         else:
-            # Subsequent ticks: neutral events on edge 0 to allow propagation
+            # Neutral events to allow propagation dynamics to continue
             sheaf.tick(0, [0.0] * 8, timestamp=timestamp)
 
         # Measure perturbation at each edge relative to baseline
@@ -224,10 +266,21 @@ def experiment_8_spectral_propagation():
             else:
                 perturbations[edge_idx].append(0.0)
 
-    # Compute spectral gap for theoretical bound
+    # Compute spectral gap and propagation rate for theoretical bound
     gap = sheaf.spectral_gap()
     alpha = sheaf._propagation_rate
+    # Approximate lambda_1 from the Laplacian eigenvalues
+    L = sheaf.sheaf_laplacian_matrix()
+    from sylanne_alpha.relational_sheaf import _eigenvalues_symmetric
+    eigenvalues = _eigenvalues_symmetric(L)
+    lambda_1 = 0.0
+    for ev in eigenvalues:
+        if ev > 1e-8:
+            lambda_1 = ev
+            break
+
     print(f"  Spectral gap (lambda_1/lambda_max): {gap:.6f}")
+    print(f"  lambda_1: {lambda_1:.6f}")
     print(f"  Propagation rate alpha: {alpha:.4f}")
     for i in range(5):
         print(f"  Edge {i} final perturbation: {perturbations[i][-1]:.6f}")
@@ -237,42 +290,86 @@ def experiment_8_spectral_propagation():
     fig, ax = plt.subplots(figsize=(10, 6))
 
     colors = ["#E74C3C", "#E67E22", "#F1C40F", "#27AE60", "#2980B9"]
-    labels = ["Rel 0 (source)", "Rel 1 (dist=2)", "Rel 2 (dist=4)",
-              "Rel 3 (dist=6)", "Rel 4 (dist=8)"]
 
     for i in range(5):
         ax.plot(range(n_ticks), perturbations[i], color=colors[i],
-                linewidth=2.0, label=labels[i])
+                linewidth=2.0, label=rel_labels[i])
 
-    # Theoretical exponential decay bound: A * exp(-lambda_1 * distance * t)
-    # distance is combinatorial: 2 hops per edge separation
-    if gap > 0:
-        t_range = list(range(n_ticks))
-        peak_perturbation = max(perturbations[0]) if perturbations[0] else 1.0
-        for dist_idx in range(1, 5):
-            distance = dist_idx * 2  # combinatorial distance
+    # Theoretical bound: ||delta_j|| <= ||delta_0|| * coupling_j * exp(-alpha * lambda_1 * t)
+    peak_perturbation = max(perturbations[0]) if perturbations[0] else 1.0
+    t_range = list(range(n_ticks))
+    if lambda_1 > 0:
+        for j in range(1, 5):
             theoretical = [
-                peak_perturbation * math.exp(-gap * alpha * distance * (t + 1))
+                peak_perturbation * coupling_strengths[j]
+                * math.exp(-alpha * lambda_1 * (t + 1))
                 for t in t_range
             ]
-            ax.plot(t_range, theoretical, color=colors[dist_idx],
-                    linestyle=":", linewidth=1.0, alpha=0.6)
-        # Add one dashed line to legend
-        ax.plot([], [], color="gray", linestyle=":", linewidth=1.0,
-                label="Theoretical bound (exp decay)")
+            ax.plot(t_range, theoretical, color=colors[j],
+                    linestyle="--", linewidth=1.2, alpha=0.6)
+        # Legend entry for theoretical bounds
+        ax.plot([], [], color="gray", linestyle="--", linewidth=1.2,
+                label="Theoretical bound")
 
-    ax.set_xlabel("Tick")
+    ax.set_xlabel("Tick (time)")
     ax.set_ylabel("Perturbation Magnitude (L2 norm)")
-    ax.set_title("Experiment 8: Spectral Propagation Verification\n"
-                 "(Single scar event propagating through relationship chain)")
-    ax.legend(loc="upper right")
+    ax.set_title("Spectral Propagation: Scar Influence Decay by Relational Similarity")
+    ax.legend(loc="upper right", fontsize=8)
     ax.set_ylim(bottom=0)
 
+    # Annotate coupling strengths
+    annotation_text = "Coupling ||P_j$^T$P_0|| / ||P_0$^T$P_0||:\n"
+    for j in range(1, 5):
+        annotation_text += f"  Rel {j}: {coupling_strengths[j]:.3f}\n"
+    ax.text(0.02, 0.55, annotation_text.strip(),
+            transform=ax.transAxes, ha="left", va="top",
+            fontsize=8, family="monospace",
+            bbox=dict(boxstyle="round,pad=0.3", facecolor="lightyellow", alpha=0.8))
+
+    plt.tight_layout()
     fig_path = os.path.join(OUTPUT_DIR, "fig8_spectral_propagation.png")
     plt.savefig(fig_path, dpi=300, bbox_inches="tight")
     plt.close()
     print(f"  Figure saved: {fig_path}")
-    return perturbations, gap
+
+    # Also save to experiments/figures/ for consistency
+    exp_fig_dir = os.path.join(
+        os.path.dirname(os.path.abspath(__file__)), "figures"
+    )
+    os.makedirs(exp_fig_dir, exist_ok=True)
+    exp_fig_path = os.path.join(exp_fig_dir, "fig8_spectral_propagation.png")
+    plt_copy = setup_matplotlib()
+    # Re-render for the second save (matplotlib closes figures)
+    fig2, ax2 = plt_copy.subplots(figsize=(10, 6))
+    for i in range(5):
+        ax2.plot(range(n_ticks), perturbations[i], color=colors[i],
+                 linewidth=2.0, label=rel_labels[i])
+    if lambda_1 > 0:
+        for j in range(1, 5):
+            theoretical = [
+                peak_perturbation * coupling_strengths[j]
+                * math.exp(-alpha * lambda_1 * (t + 1))
+                for t in t_range
+            ]
+            ax2.plot(t_range, theoretical, color=colors[j],
+                     linestyle="--", linewidth=1.2, alpha=0.6)
+        ax2.plot([], [], color="gray", linestyle="--", linewidth=1.2,
+                 label="Theoretical bound")
+    ax2.set_xlabel("Tick (time)")
+    ax2.set_ylabel("Perturbation Magnitude (L2 norm)")
+    ax2.set_title("Spectral Propagation: Scar Influence Decay by Relational Similarity")
+    ax2.legend(loc="upper right", fontsize=8)
+    ax2.set_ylim(bottom=0)
+    ax2.text(0.02, 0.55, annotation_text.strip(),
+             transform=ax2.transAxes, ha="left", va="top",
+             fontsize=8, family="monospace",
+             bbox=dict(boxstyle="round,pad=0.3", facecolor="lightyellow", alpha=0.8))
+    plt_copy.tight_layout()
+    plt_copy.savefig(exp_fig_path, dpi=300, bbox_inches="tight")
+    plt_copy.close()
+    print(f"  Figure also saved: {exp_fig_path}")
+
+    return perturbations, coupling_strengths
 
 
 # ===========================================================================

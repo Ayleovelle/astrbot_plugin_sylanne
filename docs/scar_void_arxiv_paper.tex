@@ -41,7 +41,7 @@
 % ABSTRACT
 % ============================================================
 \begin{abstract}
-Current affective computing treats emotion as a classification problem over discrete labels, discarding temporal continuity, relational dynamics, and the computational significance of absence. We present three novel formal frameworks that address these limitations. \textbf{Scar Algebra} defines a self-modifying operator algebra in which past operations irreversibly change the semantics of future operations through accumulated ``scars'' with stage-dependent modifiers. \textbf{Void Calculus} elevates absence to a first-class computational primitive with autonomous pressure dynamics, boundary-incomplete representations, and irreversible depth accumulation. \textbf{Relational Sheaf Theory} extends both frameworks to multi-relational settings via cellular sheaves on simplicial complexes, where sheaf cohomology measures irreducible relational contradictions and the sheaf Laplacian governs cross-relational scar propagation. We prove an $\Omega(k)$ expressiveness separation between Scar Algebra and any fixed-operator dynamical system (Theorem~\ref{thm:scar-expressiveness}), demonstrate irreducibility of Void Calculus to both AGM belief revision (Theorem~\ref{thm:void-agm}) and Bayesian updating (Theorem~\ref{thm:void-bayes}), establish a three-way expressiveness distinction unavailable to existing frameworks (Theorem~\ref{thm:void-three-way}), and prove that sheaf cohomology detects dissociative states unreachable by independent per-relationship copies (Theorem~\ref{thm:sheaf-dissociation}). The first two theories are coupled through bidirectional operators $\Gamma$ and $\Phi$, producing emergent hysteresis; the third theory provides the global consistency substrate via presentation matrices derived from personality parameters. We present a six-layer architecture with a Heterogeneous Graph Transformer for typed decision fusion, achieving sub-10ms latency on commodity hardware with pure Python and NumPy.
+Current affective computing treats emotion as a classification problem over discrete labels, discarding temporal continuity, relational dynamics, and the computational significance of absence. We present three novel formal frameworks that address these limitations. \textbf{Scar Algebra} defines a self-modifying operator algebra in which past operations irreversibly change the semantics of future operations through accumulated ``scars'' with stage-dependent modifiers. \textbf{Void Calculus} elevates absence to a first-class computational primitive with autonomous pressure dynamics, boundary-incomplete representations, and irreversible depth accumulation. \textbf{Relational Sheaf Theory} extends both frameworks to multi-relational settings via cellular sheaves on simplicial complexes, where sheaf cohomology measures irreducible relational contradictions and the sheaf Laplacian governs cross-relational scar propagation. We prove an $\Omega(k)$ expressiveness separation between Scar Algebra and any fixed-operator dynamical system (Theorem~\ref{thm:scar-expressiveness}), demonstrate irreducibility of Void Calculus to both AGM belief revision (Theorem~\ref{thm:void-agm}) and Bayesian updating (Theorem~\ref{thm:void-bayes}), establish a three-way expressiveness distinction unavailable to existing frameworks (Theorem~\ref{thm:void-three-way}), and prove that sheaf cohomology detects dissociative states unreachable by independent per-relationship copies (Theorem~\ref{thm:sheaf-dissociation}). The first two theories are coupled through bidirectional operators $\Gamma$ and $\Phi$, producing emergent hysteresis; the third theory provides the global consistency substrate via presentation matrices derived from personality parameters. We present a seven-layer architecture with a Relational Sheaf consistency layer and a Heterogeneous Graph Transformer for typed decision fusion, achieving sub-10ms latency on commodity hardware with pure Python and NumPy.
 \end{abstract}
 
 % ============================================================
@@ -70,7 +70,7 @@ We address these limitations with three novel formal frameworks:
 \item \textbf{Relational Sheaf Theory} (\S\ref{sec:sheaf}): A multi-relational extension using cellular sheaves on simplicial complexes, where each edge stalk carries a full Scar Algebra instance, restriction maps encode self-presentation, and sheaf cohomology detects irreducible relational contradictions that independent per-relationship copies cannot capture.
 \end{itemize}
 
-The first two frameworks are coupled (\S\ref{sec:coupled}) through bidirectional operators that produce emergent coherence and hysteresis. The third framework (\S\ref{sec:sheaf}) provides the global substrate for multi-relational consistency. We embed the full system in a six-layer computation architecture (\S\ref{sec:architecture}) with a Heterogeneous Graph Transformer for typed decision fusion, achieving sub-10ms end-to-end latency.
+The first two frameworks are coupled (\S\ref{sec:coupled}) through bidirectional operators that produce emergent coherence and hysteresis. The third framework (\S\ref{sec:sheaf}) provides the global substrate for multi-relational consistency. We embed the full system in a seven-layer computation architecture (\S\ref{sec:architecture}) with a Relational Sheaf consistency layer and a Heterogeneous Graph Transformer for typed decision fusion, achieving sub-10ms end-to-end latency.
 
 \paragraph{Contributions.}
 \begin{enumerate}[leftmargin=*]
@@ -696,9 +696,9 @@ Full proofs are provided in the supplementary theory directory (\texttt{theory/r
 \section{System Architecture}
 \label{sec:architecture}
 
-The coupled Void-Scar system is embedded in a six-layer computation stack designed for sub-10ms end-to-end latency on commodity hardware.
+The coupled Void-Scar system is embedded in a seven-layer computation stack designed for sub-10ms end-to-end latency on commodity hardware.
 
-\subsection{Six-Layer Stack}
+\subsection{Seven-Layer Stack}
 
 \begin{enumerate}[leftmargin=*]
 \item \textbf{L1: HDC Perception.} Input text is projected to 2048-dimensional binary hypervectors via character bigram encoding with cyclic shift and majority-vote bundling~\cite{kanerva2009}. Matching uses Hamming distance ($< 0.01$ms).
@@ -717,16 +717,18 @@ Cold-start guard: first 15 messages capped at normal path.
 \end{equation}
 where $\alpha = 0.2 + 0.4 \cdot \text{neuroticism}$ (personality-driven teleportation rate).
 
-\item \textbf{L4: Heterogeneous Graph Transformer (HGT).} Type-aware decision fusion with 7 token types: \{scar, void, boundary, personality, surprise, expression, context\}. Type-specific projections $W_Q^\tau, W_K^\tau, W_V^\tau$ with personality-derived attention prior $\mu^{(\tau_s, \tau_t)}$ and intra-type masking.
+\item \textbf{L4: Relational Sheaf.} Multi-relational consistency layer (Section~\ref{sec:sheaf}). Sheaf cohomology ($H^1$) detects irreducible relational contradictions; the sheaf Laplacian governs cross-relational scar propagation with exponential spectral decay. Personality-derived presentation matrices $P_i$ bound inconsistency via $\kappa(\boldsymbol{\pi})$.
 
-\item \textbf{L5: Autopoietic Boundary.} 32-dimensional identity core vector. Incoming perturbations are assessed via orthogonal projection:
+\item \textbf{L5: Heterogeneous Graph Transformer (HGT).} Type-aware decision fusion with 7 token types: \{scar, void, boundary, personality, surprise, expression, context\}. Type-specific projections $W_Q^\tau, W_K^\tau, W_V^\tau$ with personality-derived attention prior $\mu^{(\tau_s, \tau_t)}$ and intra-type masking.
+
+\item \textbf{L6: Autopoietic Boundary.} 32-dimensional identity core vector. Incoming perturbations are assessed via orthogonal projection:
 \begin{itemize}
 \item Penetration $< 0.3$: absorb (elastic).
 \item Penetration $0.3$--$0.7$: resist (boundary stressed, identity unchanged).
 \item Penetration $\geq 0.7$: phase transition (identity rotates $\leq 6°$).
 \end{itemize}
 
-\item \textbf{L6: Phase Transition Expression.} Expression is discontinuous phase transition, not continuous function. Pressure accumulates; when exceeding personality-derived threshold, output jumps to one of three modes: \emph{hint} ($< 0.5$), \emph{normal} ($0.5$--$1.0$), \emph{urgent} ($> 1.0$).
+\item \textbf{L7: Phase Transition Expression.} Expression is discontinuous phase transition, not continuous function. Pressure accumulates; when exceeding personality-derived threshold, output jumps to one of three modes: \emph{hint} ($< 0.5$), \emph{normal} ($0.5$--$1.0$), \emph{urgent} ($> 1.0$).
 \end{enumerate}
 
 \subsection{Heterogeneous Graph Transformer Details}
@@ -767,16 +769,17 @@ Layer & Fast Path & Normal Path & Full Path \\
 L1 HDC Perception & 0.10 ms & 0.10 ms & 0.10 ms \\
 L2 Predictive Coding & 0.01 ms & 0.01 ms & 0.01 ms \\
 L3 Void-Scar + Graph & 0.05 ms & 2.50 ms & 6.00 ms \\
-L4 HGT & skip & 0.40 ms & 0.40 ms \\
-L5 Autopoiesis & 0.01 ms & 0.01 ms & 0.10 ms \\
-L6 Phase Transition & $<$0.01 ms & $<$0.01 ms & $<$0.01 ms \\
+L4 Relational Sheaf & skip & skip & 0.80 ms \\
+L5 HGT & skip & 0.40 ms & 0.40 ms \\
+L6 Autopoiesis & 0.01 ms & 0.01 ms & 0.10 ms \\
+L7 Phase Transition & $<$0.01 ms & $<$0.01 ms & $<$0.01 ms \\
 \midrule
-\textbf{Total} & \textbf{0.17 ms} & \textbf{3.0 ms} & \textbf{6.6 ms} \\
+\textbf{Total} & \textbf{0.17 ms} & \textbf{3.0 ms} & \textbf{7.4 ms} \\
 \bottomrule
 \end{tabular}
 \end{table}
 
-Approximately 90\% of messages take the fast path (0.17ms); 10\% take the full path (6.6ms). All within the 10ms budget.
+Approximately 90\% of messages take the fast path (0.17ms); 10\% take the full path (7.4ms). All within the 10ms budget.
 
 % ============================================================
 % 8. IMPLEMENTATION
@@ -929,12 +932,12 @@ We run a standardized 200-event sequence through five configurations: full syste
 
 We simulate 1500 conversation turns with realistic input distribution (60\% normal, 20\% emotional, 10\% wounding, 5\% avoidance, 5\% resolution).
 
-\paragraph{Result.} Without autopoietic intervention, the system enters a fully-numbed state (all 8 dimensions with modifier $< 0.5$) by turn $\sim$350 due to cumulative faded-scar attenuation ($0.7^k \to 0$). This confirms Theorem~\ref{thm:scar-convergence}: the system converges to a ``scarred equilibrium.'' In the full architecture, the autopoietic boundary (L5) would trigger a phase transition to reset critical dimensions before full numbing occurs (Figure~\ref{fig:stability}).
+\paragraph{Result.} Without autopoietic intervention, the system enters a fully-numbed state (all 8 dimensions with modifier $< 0.5$) by turn $\sim$350 due to cumulative faded-scar attenuation ($0.7^k \to 0$). This confirms Theorem~\ref{thm:scar-convergence}: the system converges to a ``scarred equilibrium.'' In the full architecture, the autopoietic boundary (L6) would trigger a phase transition to reset critical dimensions before full numbing occurs (Figure~\ref{fig:stability}).
 
 \begin{figure}[ht]
 \centering
 \includegraphics[width=0.85\columnwidth]{../experiments/figures/fig6_stability.png}
-\caption{Long-term stability without autopoietic recovery. Top: scar accumulation. Middle: numbed dimensions reach maximum at $\sim$350 turns. Bottom: coherence collapses. The autopoiesis layer (L5) is designed to intervene before this degenerate state.}
+\caption{Long-term stability without autopoietic recovery. Top: scar accumulation. Middle: numbed dimensions reach maximum at $\sim$350 turns. Bottom: coherence collapses. The autopoiesis layer (L6) is designed to intervene before this degenerate state.}
 \label{fig:stability}
 \end{figure}
 
@@ -990,7 +993,7 @@ Void Detection & F1 (Void / Baseline) & 0.702 / 0.649 \\
 Three-State & Pairwise distinction & All 3 distinct \\
 Hysteresis & Path dependence persists & Confirmed \\
 Ablation & Both components needed & Confirmed \\
-Stability & Numbing without L5 & Turn $\sim$350 \\
+Stability & Numbing without L6 & Turn $\sim$350 \\
 Multi-User & Isolation checks & 7/7 pass \\
 \bottomrule
 \end{tabular}
@@ -1014,9 +1017,9 @@ Multi-User & Isolation checks & 7/7 pass \\
 
 \subsection{Ethical Considerations}
 
-\paragraph{User sovereignty as architectural invariant.} The autopoietic boundary (L5) enforces a hard limit on identity drift ($\leq 6°$ rotation per phase transition). This is not a tunable parameter but a structural constraint: the system cannot be manipulated into arbitrary states regardless of input pressure. This design choice reflects the principle that an affective AI system should maintain coherent identity rather than being infinitely malleable.
+\paragraph{User sovereignty as architectural invariant.} The autopoietic boundary (L6) enforces a hard limit on identity drift ($\leq 6°$ rotation per phase transition). This is not a tunable parameter but a structural constraint: the system cannot be manipulated into arbitrary states regardless of input pressure. This design choice reflects the principle that an affective AI system should maintain coherent identity rather than being infinitely malleable.
 
-\paragraph{Bounded burning.} The phase transition expression layer (L6) ensures that emotional intensity is bounded and discontinuous rather than continuously escalating. The system can express urgency but cannot enter unbounded amplification loops. This prevents the system from becoming a source of emotional escalation in conversation.
+\paragraph{Bounded burning.} The phase transition expression layer (L7) ensures that emotional intensity is bounded and discontinuous rather than continuously escalating. The system can express urgency but cannot enter unbounded amplification loops. This prevents the system from becoming a source of emotional escalation in conversation.
 
 \paragraph{Transparency of internal state.} The coherence measure $r$ (Eq.~\ref{eq:coherence}) provides a legible signal of internal consistency. When $r$ drops below a threshold, the system can signal that its internal dynamics are becoming incoherent---providing a form of ``emotional transparency'' that supports informed interaction.
 
@@ -1026,7 +1029,7 @@ Active inference~\cite{friston2010} minimizes variational free energy, treating 
 \begin{enumerate}
 \item \textbf{Not all errors should be minimized.} Void pressure represents prediction errors (``something is missing'') that should \emph{accumulate} rather than be minimized. The system's response to absence is to track it, not resolve it.
 \item \textbf{Irreversibility is a feature.} Active inference operates on beliefs that can be revised in any direction. Scar Algebra's irreversibility captures the asymmetry of emotional experience: being hurt changes future processing permanently.
-\item \textbf{Sovereignty over optimization.} Active inference optimizes a single objective (free energy). Our architecture includes a sovereignty layer (L5) that can \emph{reject} optimization pressure when it threatens identity coherence.
+\item \textbf{Sovereignty over optimization.} Active inference optimizes a single objective (free energy). Our architecture includes a sovereignty layer (L6) that can \emph{reject} optimization pressure when it threatens identity coherence.
 \end{enumerate}
 
 \subsection{Future Work}

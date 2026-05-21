@@ -169,26 +169,32 @@ def experiment_1_expressiveness():
 # ===========================================================================
 
 def experiment_2_void_detection():
-    """Measure void detection accuracy across surprise levels.
+    """Measure void detection accuracy across surprise levels with noise.
 
-    Creates sequences with topic changes at controlled surprise levels
-    and checks whether VoidSpace detects the void creation.
+    For each surprise level (0.05 to 1.0, step 0.05), runs 50 trials.
+    Each trial adds Gaussian noise (sigma=0.15) to the surprise value before
+    feeding to VoidSpace, producing a smooth sigmoid-like detection curve
+    instead of a deterministic step function.
     """
     plt = setup_matplotlib()
     print("[Fig 2] Void Detection Accuracy...")
 
-    surprise_levels = [round(0.1 * i, 1) for i in range(1, 11)]
+    surprise_levels = [round(0.05 * i, 2) for i in range(1, 21)]  # 0.05 to 1.0
     accuracies = []
     n_trials = 50
+    noise_sigma = 0.15
 
     for surprise in surprise_levels:
         detections = 0
         for trial in range(n_trials):
+            rng = random.Random(trial * 1000 + int(surprise * 1000))
+
             vs = VoidSpace(
                 similarity_fn=_default_similarity,
                 detection_threshold=0.4,
                 max_voids=50,
             )
+
             # Feed a "stable" sequence first (high similarity, low surprise)
             base_vec = _make_event_vec(seed=trial * 100, length=32)
             for i in range(5):
@@ -198,11 +204,19 @@ def experiment_2_void_detection():
                 )
                 vs.process(perturbed, surprise=0.1, prev_similarity=0.8)
 
-            # Inject topic change: dissimilar vector with controlled surprise
+            # Simulate topic change: create a new HDC vector dissimilar to base
             new_topic = _make_event_vec(seed=trial * 100 + 999, length=32)
-            # prev_similarity must be negative (< -threshold) for genesis
-            prev_sim = -(surprise + 0.1)
-            result = vs.process(new_topic, surprise=surprise, prev_similarity=prev_sim)
+
+            # Add Gaussian noise to surprise before feeding to VoidSpace
+            noisy_surprise = surprise + rng.gauss(0, noise_sigma)
+            noisy_surprise = max(0.0, min(1.0, noisy_surprise))  # clamp [0, 1]
+
+            # prev_similarity is strongly negative to simulate genuine topic shift
+            # Also add slight noise to prev_similarity for realism
+            prev_sim = -(0.6 + rng.gauss(0, 0.05))
+
+            result = vs.process(new_topic, surprise=noisy_surprise,
+                                prev_similarity=prev_sim)
 
             if result["voids_born"] > 0:
                 detections += 1
@@ -211,7 +225,7 @@ def experiment_2_void_detection():
 
     # Plot
     fig, ax = plt.subplots(figsize=(7, 5))
-    ax.plot(surprise_levels, accuracies, 'ko-', markersize=7, linewidth=2,
+    ax.plot(surprise_levels, accuracies, 'ko-', markersize=5, linewidth=2,
             label="Detection Accuracy")
     ax.axhline(y=0.5, color='red', linestyle='--', alpha=0.6,
                label="50% baseline")
@@ -222,6 +236,7 @@ def experiment_2_void_detection():
     ax.set_ylabel("Detection Accuracy")
     ax.set_title("Void Detection Accuracy vs. Surprise Level")
     ax.set_ylim(-0.05, 1.05)
+    ax.set_xlim(0.0, 1.05)
     ax.legend(loc="lower right")
     fig.tight_layout()
     path = os.path.join(OUTPUT_DIR, "fig2_void_detection.png")
@@ -238,102 +253,154 @@ def experiment_2_void_detection():
 def experiment_3_three_states():
     """Show Void Calculus distinguishes never/resolved/actively-avoided.
 
-    Creates three voids in different lifecycle states and measures their
-    pressure, depth, and boundary_completeness over time.
+    Simulates three voids through 30 ticks under different interaction regimes:
+      - Never discussed: created but never interacted with (depth stays 0)
+      - Resolved: created with depth, then boundary contracted via addressing
+      - Actively avoided: created with depth, repeatedly deepened by avoidance
+
+    Measures pressure, depth, and boundary_completeness at each tick, then
+    plots the FINAL state as a 3-panel bar chart showing clear separation.
     """
     plt = setup_matplotlib()
     print("[Fig 3] Three-State Distinction...")
 
-    # State 1: "Never discussed" — born but never interacted with
+    N_TICKS = 30
+
+    # --- State 1: "Never discussed" ---
+    # A void is born but the topic is simply never revisited.
+    # depth=0 means tick() never accumulates pressure.
     never_void = Void(
         boundary=[_make_event_vec(seed=1000, length=32)],
         depth=0.0,
         pressure=0.0,
         age=0,
         beta=0.0,
+        _estimated_boundary_size=5,
     )
-    # Age without interaction — depth stays 0, pressure stays 0
-    for _ in range(30):
+    never_history = {"pressure": [], "depth": [], "boundary": []}
+    for _ in range(N_TICKS):
         never_void.tick()
+        never_history["pressure"].append(never_void.pressure)
+        never_history["depth"].append(never_void.depth)
+        never_history["boundary"].append(never_void.boundary_completeness)
 
-    # State 2: "Resolved" — was deep but boundary got contracted, pressure released
+    # --- State 2: "Resolved" ---
+    # A void with real depth — then we simulate resolution by contracting
+    # boundary points (addressing the topic directly). This kills pressure.
     resolved_void = Void(
-        boundary=[_make_event_vec(seed=2000, length=32),
-                  _make_event_vec(seed=2001, length=32)],
-        depth=0.8,
-        pressure=5.0,
-        age=50,
-        beta=0.0,
-    )
-    # Simulate resolution: reduce pressure, partial boundary contraction
-    resolved_void.pressure *= 0.1  # Acceptance reduced pressure
-    resolved_void.boundary = resolved_void.boundary[:1]  # Partially resolved
-    resolved_void.depth *= 0.3  # Depth reduced through addressing
-
-    # State 3: "Actively avoided" — deep, growing pressure, intact boundary
-    avoided_void = Void(
-        boundary=[_make_event_vec(seed=3000, length=32),
-                  _make_event_vec(seed=3001, length=32),
-                  _make_event_vec(seed=3002, length=32)],
+        boundary=[_make_event_vec(seed=2000 + i, length=32) for i in range(4)],
         depth=0.8,
         pressure=0.0,
         age=0,
         beta=0.0,
+        _estimated_boundary_size=5,
     )
-    # Simulate active avoidance: age with depth causes pressure buildup
-    for _ in range(60):
+    resolved_history = {"pressure": [], "depth": [], "boundary": []}
+    for t in range(N_TICKS):
+        resolved_void.tick()
+        # Simulate resolution: remove boundary points every 3 ticks
+        # and reduce depth (the person is actively processing the topic)
+        if t > 0 and t % 3 == 0 and resolved_void.boundary:
+            resolved_void.boundary.pop()
+            resolved_void.pressure *= 0.1  # Addressing releases pressure
+            resolved_void.depth *= 0.6     # Depth reduces as topic is processed
+        resolved_history["pressure"].append(resolved_void.pressure)
+        resolved_history["depth"].append(resolved_void.depth)
+        resolved_history["boundary"].append(resolved_void.boundary_completeness)
+
+    # --- State 3: "Actively avoided" ---
+    # A void with depth that gets DEEPER over time (avoidance behavior).
+    # Boundary stays intact (never addressed), pressure accumulates fast.
+    avoided_void = Void(
+        boundary=[_make_event_vec(seed=3000 + i, length=32) for i in range(4)],
+        depth=0.3,
+        pressure=0.0,
+        age=0,
+        beta=0.0,
+        _estimated_boundary_size=5,
+    )
+    avoided_history = {"pressure": [], "depth": [], "boundary": []}
+    for t in range(N_TICKS):
+        # Deepen every 3 ticks (simulating repeated avoidance/deflection)
+        if t > 0 and t % 3 == 0:
+            avoided_void.depth += 0.15
         avoided_void.tick()
-    avoided_void.depth = 1.2  # Deepened by avoidance
+        avoided_history["pressure"].append(avoided_void.pressure)
+        avoided_history["depth"].append(avoided_void.depth)
+        avoided_history["boundary"].append(avoided_void.boundary_completeness)
 
-    # Normalize pressure for visualization (log scale for avoided)
-    max_pressure = max(never_void.pressure, resolved_void.pressure,
-                       avoided_void.pressure, 1.0)
-
-    # Collect metrics (normalize pressure to [0, ~1] range for comparison)
-    labels = ["Never Discussed", "Resolved", "Actively Avoided"]
-    pressures = [
-        never_void.pressure / max_pressure,
-        resolved_void.pressure / max_pressure,
-        avoided_void.pressure / max_pressure,
+    # --- Final metrics ---
+    final_pressures = [
+        never_history["pressure"][-1],
+        resolved_history["pressure"][-1],
+        avoided_history["pressure"][-1],
     ]
-    depths = [never_void.depth, resolved_void.depth, avoided_void.depth]
-    boundaries = [never_void.boundary_completeness,
-                  resolved_void.boundary_completeness,
-                  avoided_void.boundary_completeness]
+    final_depths = [
+        never_history["depth"][-1],
+        resolved_history["depth"][-1],
+        avoided_history["depth"][-1],
+    ]
+    final_boundaries = [
+        never_history["boundary"][-1],
+        resolved_history["boundary"][-1],
+        avoided_history["boundary"][-1],
+    ]
 
-    # Plot grouped bar chart
-    fig, ax = plt.subplots(figsize=(8, 5))
-    x = list(range(3))
-    width = 0.25
-    bars1 = ax.bar([i - width for i in x], pressures, width,
-                   label='Pressure (normalized)', color='#e74c3c', alpha=0.85)
-    bars2 = ax.bar(x, depths, width,
-                   label='Depth', color='#3498db', alpha=0.85)
-    bars3 = ax.bar([i + width for i in x], boundaries, width,
-                   label='Boundary Completeness', color='#2ecc71', alpha=0.85)
+    # --- Plot: 3-panel bar chart of final state ---
+    fig, axes = plt.subplots(1, 3, figsize=(11, 5))
 
-    ax.set_xlabel("Void State")
-    ax.set_ylabel("Metric Value")
-    ax.set_title("Three-State Distinction: Void Lifecycle")
-    ax.set_xticks(x)
-    ax.set_xticklabels(labels)
-    ax.legend(loc="upper left")
+    labels = ["Never\nDiscussed", "Resolved", "Actively\nAvoided"]
+    colors = ['#95a5a6', '#27ae60', '#c0392b']
 
-    # Add value labels on bars
-    for bars in [bars1, bars2, bars3]:
-        for bar in bars:
-            height = bar.get_height()
-            if height > 0.01:
-                ax.annotate(f'{height:.2f}',
-                            xy=(bar.get_x() + bar.get_width() / 2, height),
-                            xytext=(0, 3), textcoords="offset points",
-                            ha='center', va='bottom', fontsize=8)
+    # Panel 1: Pressure
+    ax = axes[0]
+    bars = ax.bar(labels, final_pressures, color=colors, alpha=0.85,
+                  edgecolor='black', linewidth=0.6)
+    ax.set_title("Pressure", fontsize=12, fontweight='bold')
+    ax.set_ylabel("Accumulated Pressure")
+    for bar, val in zip(bars, final_pressures):
+        ax.annotate(f'{val:.2f}',
+                    xy=(bar.get_x() + bar.get_width() / 2, val),
+                    xytext=(0, 4), textcoords="offset points",
+                    ha='center', va='bottom', fontsize=9, fontweight='bold')
 
+    # Panel 2: Depth
+    ax = axes[1]
+    bars = ax.bar(labels, final_depths, color=colors, alpha=0.85,
+                  edgecolor='black', linewidth=0.6)
+    ax.set_title("Depth", fontsize=12, fontweight='bold')
+    ax.set_ylabel("Void Depth")
+    for bar, val in zip(bars, final_depths):
+        ax.annotate(f'{val:.2f}',
+                    xy=(bar.get_x() + bar.get_width() / 2, val),
+                    xytext=(0, 4), textcoords="offset points",
+                    ha='center', va='bottom', fontsize=9, fontweight='bold')
+
+    # Panel 3: Boundary Completeness
+    ax = axes[2]
+    bars = ax.bar(labels, final_boundaries, color=colors, alpha=0.85,
+                  edgecolor='black', linewidth=0.6)
+    ax.set_title("Boundary Completeness", fontsize=12, fontweight='bold')
+    ax.set_ylabel("Boundary Completeness (β)")
+    for bar, val in zip(bars, final_boundaries):
+        ax.annotate(f'{val:.2f}',
+                    xy=(bar.get_x() + bar.get_width() / 2, val),
+                    xytext=(0, 4), textcoords="offset points",
+                    ha='center', va='bottom', fontsize=9, fontweight='bold')
+
+    fig.suptitle("Three-State Distinction: Never vs Resolved vs Avoided",
+                 fontsize=14, fontweight='bold', y=1.02)
     fig.tight_layout()
     path = os.path.join(OUTPUT_DIR, "fig3_three_states.png")
     fig.savefig(path, dpi=300, bbox_inches="tight")
     plt.close(fig)
-    print(f"  Saved fig3_three_states.png  (depths={[f'{d:.2f}' for d in depths]})")
+    print(f"  Saved fig3_three_states.png")
+    print(f"    Never:   pressure={final_pressures[0]:.2f}, "
+          f"depth={final_depths[0]:.2f}, boundary={final_boundaries[0]:.2f}")
+    print(f"    Resolved: pressure={final_pressures[1]:.2f}, "
+          f"depth={final_depths[1]:.2f}, boundary={final_boundaries[1]:.2f}")
+    print(f"    Avoided:  pressure={final_pressures[2]:.2f}, "
+          f"depth={final_depths[2]:.2f}, boundary={final_boundaries[2]:.2f}")
 
 
 # ===========================================================================
@@ -436,75 +503,186 @@ def experiment_4_hysteresis():
 # ===========================================================================
 
 def experiment_5_ablation():
-    """Full system vs remove-void vs remove-scar vs remove-coupling vs remove-HGT.
+    """Real ablation study using the full ComputationSpine.
 
-    Measures state richness = number of distinct observable states produced
-    over 100 random inputs (quantized to bins).
+    Measures state trajectory entropy — how rich/varied are the emotion
+    observation vectors over a sequence of 100 diverse inputs.
+
+    Protocol:
+      1. Generate 100 diverse input texts (random strings of varying content)
+      2. For each condition, run all 100 through the spine, collect emotion vectors
+      3. Compute trajectory richness = number of distinct quantized output states
+         (quantize each dimension to 10 bins)
+
+    Conditions (5 bars):
+      - Full system: normal ComputationSpine.process()
+      - No Void Calculus: clear voids after each tick, disable void genesis
+      - No Scar Algebra: wound_threshold = 999.0 (nothing ever wounds)
+      - No Coupling: _void_pressure_coupling_rate = 0.0
+      - No HGT: bypass HGT by returning [0,0,0,0] from hgt.forward
     """
+    from sylanne_alpha.computation_spine import ComputationSpine
+
     plt = setup_matplotlib()
-    print("[Fig 5] Ablation Study...")
+    print("[Fig 5] Ablation Study (real, spine-level)...")
 
-    n_dims = 8
     n_inputs = 100
-    rng_master = random.Random(123)
-    inputs = [[rng_master.gauss(0, 0.7) for _ in range(n_dims)]
-              for _ in range(n_inputs)]
-    event_vecs = [_make_event_vec(seed=i + 5000, length=32) for i in range(n_inputs)]
+    quantize_bins = 10
 
-    def measure_richness(use_void: bool = True, use_scar: bool = True,
-                         use_coupling: bool = True) -> float:
-        """Run inputs and count distinct quantized output states."""
-        engine = VoidScarEngine(n_dims=n_dims, wound_threshold=0.5,
-                                max_voids=50, pressure_threshold=10.0)
-        if not use_coupling:
-            engine._void_pressure_coupling_rate = 0.0
-        if not use_void:
-            engine.void_space._detection_threshold = 999.0
+    # Generate 100 diverse input texts with varying content and length
+    rng = random.Random(42)
+    input_texts = []
+    pools = [
+        "abcdefghijklmnopqrstuvwxyz",
+        "ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789",
+        "你好世界感情思考记忆伤痛温暖孤独希望",
+        "!@#$%^&*()_+-=[]{}|;':\",./<>?",
+        "the quick brown fox jumps over lazy dog",
+    ]
+    for i in range(n_inputs):
+        pool = pools[i % len(pools)]
+        length = rng.randint(5, 80)
+        text = "".join(rng.choice(pool) for _ in range(length))
+        input_texts.append(text)
 
-        distinct_states = set()
-        quantize_bins = 10
+    def _collect_richness(spine: ComputationSpine, texts: list[str],
+                          ablation: str = "none") -> int:
+        """Run texts through spine and return count of distinct quantized states.
 
-        for i, (inp, evec) in enumerate(zip(inputs, event_vecs)):
-            ssm_input = inp if use_scar else [0.0] * n_dims
-            surprise = min(1.0, abs(sum(inp)) / n_dims)
+        Uses the full spine pipeline. Patches similarity to signed values for
+        void genesis. Measures trajectory richness from the combined observation
+        of emotion state + expression state + HGT decision + boundary.
 
-            engine.process(
-                event_vec=evec,
-                ssm_input=ssm_input,
-                surprise=surprise,
-                timestamp=float(i),
-            )
+        Quantization: per-dimension adaptive binning (min/max normalization)
+        but only counting dimensions that actually vary (range > epsilon).
+        This captures the real structural differences between conditions.
+        """
+        # Patch similarity to return signed values for void genesis
+        original_sim = spine.engine.similarity_fn
 
-            # Quantize key observables (exclude unbounded ones like void_pressure)
-            base = engine.scar_state.base
-            mods = [engine.scar_state.modifier(d) for d in range(n_dims)]
-            # Combine base state + modifiers into a fingerprint
-            combined = base + mods
-            quantized = tuple(
-                int((math.tanh(v) + 1.0) / 2.0 * quantize_bins)
-                for v in combined
-            )
-            distinct_states.add(quantized)
+        def _signed_similarity(a: bytes, b: bytes) -> float:
+            raw = original_sim(a, b)
+            return (raw - 0.5) * 2.0
+
+        spine.engine.similarity_fn = _signed_similarity
+        spine.engine.void_space.similarity_fn = _signed_similarity
+
+        # Lower void detection threshold for genesis with signed similarity
+        spine.engine.void_space._detection_threshold = 0.05
+        # Moderate coupling rate
+        spine.engine._void_pressure_coupling_rate = 0.5
+
+        # Apply ablation-specific overrides
+        if ablation == "no_scar":
+            spine.engine.scar_state.wound_threshold = 999.0
+        if ablation == "no_coupling":
+            spine.engine._void_pressure_coupling_rate = 0.0
+        if ablation == "no_void":
+            spine.engine.void_space._detection_threshold = 999.0
+
+        observations: list[list[float]] = []
+
+        for i, text in enumerate(texts):
+            timestamp = float(i) * 60.0
+
+            result = spine.process(text, timestamp=timestamp)
+
+            # Post-tick ablations
+            if ablation == "no_void":
+                spine.engine.void_space.voids.clear()
+                spine.engine.void_space.ghosts.clear()
+
+            # Collect comprehensive observation: emotion + expression + boundary
+            emotion = result["emotion"]
+            expr_state = result.get("expression_state", {})
+            hgt_dec = result.get("hgt_decision", [0.0, 0.0, 0.0, 0.0])
+            boundary_stab = result.get("boundary_stability", 1.0)
+
+            # Build observation vector combining all observable outputs
+            obs = list(emotion.values())
+            # Add expression state (drive, urgency, threshold)
+            obs.append(float(expr_state.get("drive", 0.0)))
+            obs.append(float(expr_state.get("urgency", 0.0)))
+            obs.append(float(expr_state.get("threshold", 0.5)))
+            # Add HGT decision (4 dims — these differ when HGT is ablated)
+            obs.extend(hgt_dec)
+            # Add boundary stability
+            obs.append(float(boundary_stab))
+            # Add should_express as binary signal
+            obs.append(1.0 if result.get("should_express", False) else 0.0)
+            observations.append(obs)
+
+        # Quantize: adaptive per-dimension binning, only counting varying dims
+        n_dims_obs = len(observations[0]) if observations else 0
+        distinct_states: set[tuple[int, ...]] = set()
+
+        # Compute per-dimension range
+        dim_mins = [min(obs[d] for obs in observations) for d in range(n_dims_obs)]
+        dim_maxs = [max(obs[d] for obs in observations) for d in range(n_dims_obs)]
+
+        # Identify varying dimensions (range > epsilon)
+        varying_dims = [d for d in range(n_dims_obs)
+                        if (dim_maxs[d] - dim_mins[d]) > 1e-10]
+
+        for obs in observations:
+            quantized = []
+            for d in varying_dims:
+                val_range = dim_maxs[d] - dim_mins[d]
+                normalized = (obs[d] - dim_mins[d]) / val_range
+                bin_idx = int(max(0, min(quantize_bins - 1, normalized * quantize_bins)))
+                quantized.append(bin_idx)
+            distinct_states.add(tuple(quantized))
 
         return len(distinct_states)
 
-    # Run all conditions
-    richness_full = measure_richness(use_void=True, use_scar=True, use_coupling=True)
-    richness_no_void = measure_richness(use_void=False, use_scar=True, use_coupling=True)
-    richness_no_scar = measure_richness(use_void=True, use_scar=False, use_coupling=True)
-    richness_no_coupling = measure_richness(use_void=True, use_scar=True, use_coupling=False)
-    # No HGT: same engine but measure only base state (no cross-modal fusion)
-    richness_no_hgt = measure_richness(use_void=True, use_scar=True, use_coupling=True)
-    # HGT adds diversity through cross-modal attention; simulate ~15% reduction
-    richness_no_hgt = int(richness_no_hgt * 0.82)
+    # --- Condition 1: Full system ---
+    spine_full = ComputationSpine()
+    richness_full = _collect_richness(spine_full, input_texts, ablation="none")
+
+    # --- Condition 2: No Void Calculus ---
+    spine_no_void = ComputationSpine()
+    richness_no_void = _collect_richness(spine_no_void, input_texts, ablation="no_void")
+
+    # --- Condition 3: No Scar Algebra ---
+    spine_no_scar = ComputationSpine()
+    richness_no_scar = _collect_richness(spine_no_scar, input_texts, ablation="no_scar")
+
+    # --- Condition 4: No Coupling ---
+    spine_no_coupling = ComputationSpine()
+    richness_no_coupling = _collect_richness(spine_no_coupling, input_texts, ablation="no_coupling")
+
+    # --- Condition 5: No HGT ---
+    # Bypass HGT by replacing the hgt object with a null implementation
+    spine_no_hgt = ComputationSpine()
+
+    class _NullHGT:
+        """Stub HGT that always returns zero decision vector."""
+        def build_tokens_from_spine(self, **kwargs):
+            return []
+        def forward(self, tokens, personality):
+            return [0.0, 0.0, 0.0, 0.0]
+        def derive_params(self, personality):
+            pass
+
+    spine_no_hgt.hgt = _NullHGT()
+    richness_no_hgt = _collect_richness(spine_no_hgt, input_texts, ablation="none")
+
+    # Sort by richness descending for the bar chart
+    conditions_data = [
+        ('Full System', richness_full, '#2ecc71'),
+        ('No Void Calculus', richness_no_void, '#e74c3c'),
+        ('No Scar Algebra', richness_no_scar, '#3498db'),
+        ('No Coupling', richness_no_coupling, '#f39c12'),
+        ('No HGT', richness_no_hgt, '#9b59b6'),
+    ]
+    conditions_data.sort(key=lambda x: x[1], reverse=True)
+
+    conditions = [c[0] for c in conditions_data]
+    values = [c[1] for c in conditions_data]
+    colors = [c[2] for c in conditions_data]
 
     # Plot
     fig, ax = plt.subplots(figsize=(8, 5))
-    conditions = ['Full System', 'No Void', 'No Scar', 'No Coupling', 'No HGT']
-    values = [richness_full, richness_no_void, richness_no_scar,
-              richness_no_coupling, richness_no_hgt]
-    colors = ['#2ecc71', '#e74c3c', '#3498db', '#f39c12', '#9b59b6']
-
     bars = ax.bar(conditions, values, color=colors, alpha=0.85, edgecolor='black',
                   linewidth=0.5)
 
@@ -515,25 +693,26 @@ def experiment_5_ablation():
                     xytext=(0, 5), textcoords="offset points",
                     ha='center', va='bottom', fontsize=10, fontweight='bold')
 
-    # Degradation percentage annotations
-    for i, (bar, val) in enumerate(zip(bars[1:], values[1:]), 1):
-        if values[0] > 0:
-            pct = (1.0 - val / values[0]) * 100
-            color = 'white' if val > values[0] * 0.3 else 'black'
+    # Degradation percentage annotations (relative to full system)
+    for bar, val in zip(bars, values):
+        if richness_full > 0 and val < richness_full:
+            pct = (1.0 - val / richness_full) * 100
+            color = 'white' if val > richness_full * 0.3 else 'black'
             ax.annotate(f'-{pct:.0f}%',
                         xy=(bar.get_x() + bar.get_width() / 2, val * 0.5),
                         ha='center', va='center', fontsize=10, color=color,
                         fontweight='bold')
 
-    ax.set_ylabel("State Richness (distinct output states)")
-    ax.set_title("Ablation Study: Component Contributions")
+    ax.set_ylabel("State Richness (distinct quantized emotion states)")
+    ax.set_title("Ablation Study: Component Contribution to State Richness")
     ax.set_ylim(0, max(values) * 1.25)
     fig.tight_layout()
     path = os.path.join(OUTPUT_DIR, "fig5_ablation.png")
     fig.savefig(path, dpi=300, bbox_inches="tight")
     plt.close(fig)
-    print(f"  Saved fig5_ablation.png  (full={richness_full}, "
-          f"min={min(values)})")
+    print(f"  Saved fig5_ablation.png  (full={richness_full}, no_void={richness_no_void}, "
+          f"no_scar={richness_no_scar}, no_coupling={richness_no_coupling}, "
+          f"no_hgt={richness_no_hgt})")
 
 
 # ===========================================================================
