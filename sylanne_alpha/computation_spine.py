@@ -26,7 +26,7 @@ class ComputationSpine:
     __slots__ = (
         "encoder", "gate", "engine", "boundary", "expression", "hgt",
         "_tick_count", "_last_route", "_last_expression_time", "_timings",
-        "_last_process_time", "_personality",
+        "_last_process_time", "_personality", "_last_assessment",
     )
 
     def __init__(self):
@@ -44,6 +44,7 @@ class ComputationSpine:
             "extraversion": 0.5, "neuroticism": 0.5,
             "conscientiousness": 0.5, "openness": 0.5, "agreeableness": 0.5,
         }
+        self._last_assessment: dict[str, Any] | None = None
         self._timings: dict[str, deque] = {
             "perception": deque(maxlen=_TIMING_WINDOW),
             "gate": deque(maxlen=_TIMING_WINDOW),
@@ -63,6 +64,7 @@ class ComputationSpine:
         Maps semantic personality dimensions to internal thresholds:
         - extraversion → scar wound threshold (extraverts wound less easily)
         - neuroticism → void detection threshold (neurotic = detects absence easily)
+        - neuroticism → healing rates (high neuroticism = slower healing)
         - conscientiousness → expression threshold
         """
         self._personality = dict(personality)
@@ -84,17 +86,86 @@ class ComputationSpine:
         # Gate sensitivity: neurotic = lower thresholds (everything feels surprising)
         self.gate.precision = 0.3 + neuroticism * 0.5
 
+        # Healing rates derived from personality:
+        # High neuroticism → slower healing (T values larger)
+        # T_raw = 10 + neuroticism * 20 → range [10, 30]
+        # T_closing = 40 + neuroticism * 60 → range [40, 100]
+        # T_scarred = 150 + neuroticism * 100 → range [150, 250]
+        # (resilience = 1 - neuroticism; high resilience → fast healing)
+        t_raw = int(10 + neuroticism * 20)
+        t_closing = int(40 + neuroticism * 60)
+        t_scarred = int(150 + neuroticism * 100)
+        self.engine.scar_state.set_healing_rates(t_raw, t_closing, t_scarred)
+
         # HGT: derive all transformer parameters from personality
         self.hgt.derive_params(personality)
 
-    def process(self, text: str, timestamp: float = 0.0) -> dict[str, Any]:
-        """Main entry point: process one message through the full stack."""
+    def apply_assessment(self, assessment: dict[str, Any]) -> None:
+        """Apply LLM assessment result to modulate Void-Scar state.
+
+        Called when the LLM assessor returns within the timeout window,
+        providing precise semantic judgment to refine the HDC coarse path.
+
+        Args:
+            assessment: Dict with keys like valence, arousal, intent, wound_risk.
+        """
+        self._last_assessment = assessment
+        wound_risk = float(assessment.get("wound_risk", 0.0))
+        valence = float(assessment.get("valence", 0.0))
+        arousal = float(assessment.get("arousal", 0.0))
+        intent = str(assessment.get("intent", ""))
+
+        # High wound risk → inject a wound event into scar state
+        if wound_risk > 0.7:
+            wound_vec = [0.0] * self.engine.scar_state.n_dims
+            # Wound on dimension 3 (tension-related) and 5 (repair pressure)
+            wound_vec[3] = wound_risk * 0.8
+            wound_vec[5] = wound_risk * 0.5
+            self.engine.scar_state.step(wound_vec, 0.0)
+
+        # Negative valence → deepen active voids (increase pressure)
+        if valence < -0.5:
+            for void in self.engine.void_space.voids[:2]:
+                void.pressure = min(1.0, void.pressure + abs(valence) * 0.2)
+
+        # Positive valence → reduce void pressure (healing effect)
+        if valence > 0.5:
+            for void in self.engine.void_space.voids[:3]:
+                void.pressure *= max(0.5, 1.0 - valence * 0.3)
+
+        # Intent-specific adjustments via scar base vector modulation
+        if intent == "撒娇":
+            # Coquettish intent → soften base state (reduce tension dims)
+            if len(self.engine.scar_state.base) > 3:
+                self.engine.scar_state.base[3] *= 0.85  # tension dim
+            if len(self.engine.scar_state.base) > 0:
+                self.engine.scar_state.base[0] = min(1.0, self.engine.scar_state.base[0] + 0.1)  # warmth dim
+        elif intent == "生气":
+            # Anger → raise tension in base state
+            if len(self.engine.scar_state.base) > 3:
+                self.engine.scar_state.base[3] = min(1.0, self.engine.scar_state.base[3] + 0.2)
+
+        # Arousal modulates expression drive accumulation rate
+        if arousal > 0.7:
+            self.expression.accumulate(arousal * 0.2, dt=0.5)
+
+    def process(self, text: str, timestamp: float = 0.0, assessment: dict[str, Any] | None = None) -> dict[str, Any]:
+        """Main entry point: process one message through the full stack.
+
+        Args:
+            text: Input message text.
+            timestamp: Event timestamp (epoch seconds).
+            assessment: Optional LLM assessment result. If provided, used to
+                        modulate Void-Scar state for precise semantic judgment.
+                        If None, only HDC coarse path is used.
+        """
         # Empty string handling: skip computation, self-repair only
         if not text or not text.strip():
             self.boundary.self_repair()
             self.expression.silence_lowers_threshold(dt=1.0)
             result = self._build_result("", timestamp, 0.0, "skip", self.engine.observe(), [], [], False)
             result["hgt_decision"] = [0.0, 0.0, 0.0, 0.0]
+            result["assessment_source"] = "none"
             return result
 
         self._tick_count += 1
@@ -138,6 +209,14 @@ class ComputationSpine:
         ]
         self._timings["void_scar"].append(time.perf_counter_ns() - t0)
 
+        # Layer 3.5: LLM Assessment modulation (if available this tick)
+        assessment_source = "hdc_only"
+        if assessment:
+            self.apply_assessment(assessment)
+            assessment_source = "llm_assessed"
+            # Re-observe after assessment modulation
+            emotion = self.engine.observe()
+
         # Layer 4.5: Heterogeneous Graph Transformer — decision fusion
         t0 = time.perf_counter_ns()
         hdc_features = self._hdc_to_ssm_input(h, surprise)  # Reuse 8-dim compression
@@ -168,6 +247,7 @@ class ComputationSpine:
                 self._last_expression_time = timestamp
             result = self._build_result(text, timestamp, surprise, route, emotion, [], [], should_express_fast)
             result["hgt_decision"] = hgt_decision
+            result["assessment_source"] = assessment_source
             return result
 
         # Normal/Full path: boundary + expression
@@ -204,6 +284,7 @@ class ComputationSpine:
 
         result = self._build_result(text, timestamp, surprise, route, emotion, recalled, holes, should_express)
         result["hgt_decision"] = hgt_decision
+        result["assessment_source"] = assessment_source
         return result
 
     def express(self, now: float = 0.0) -> dict[str, Any]:

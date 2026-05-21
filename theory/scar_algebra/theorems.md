@@ -76,7 +76,7 @@ $\square$
 
 ## Theorem 2: Convergence to Scarred Equilibrium
 
-**Statement.** Let $\mathcal{S}$ be a Scar Algebra instance with $n$ dimensions, wounding threshold $\theta_w$, bounded input $\|e_t\|_\infty \leq C$ for all $t$, and $g = \tanh(\mathbf{A}x + \mathbf{B}\tilde{e})$ with $\|\mathbf{A}\|_\infty < 1$. Then:
+**Statement.** Let $\mathcal{S}$ be a Scar Algebra instance with $n$ dimensions, wounding threshold $\theta_w$, bounded input $\|e_t\|_\infty \leq C$ for all $t$, and base state evolution $g = \sigma_L \circ W_L \circ \cdots \circ \sigma_1 \circ W_1$ where each $\sigma_i$ is 1-Lipschitz (e.g., $\tanh$) and each $W_i$ satisfies $\|W_i\|_2 \leq c_i$ with $\prod c_i < 1$. Then:
 
 (a) There exists $T^* < \infty$ such that for all $t > T^*$, no new scars form.
 
@@ -111,19 +111,15 @@ $$T^* \leq k_d^{total} + 200 \cdot k_d^{total} < \infty$$
 **(b) Base state convergence.**
 
 For $t > T^*$, all modifiers are $0.7^{k_d}$ (all scars faded, no new scars). The system becomes:
-$$x_{t+1} = \tanh(\mathbf{A} x_t + \mathbf{B} \mathbf{D} e_t)$$
+$$x_{t+1} = g(x_t, \mathbf{D} e_t) = \sigma_L(W_L \cdots \sigma_1(W_1 [x_t; \mathbf{D} e_t]))$$
 
 where $\mathbf{D} = \text{diag}(0.7^{k_1}, \ldots, 0.7^{k_n})$ is a fixed diagonal attenuation matrix.
 
-Since $\|\mathbf{A}\|_\infty < 1$ and $\tanh$ is a contraction (Lipschitz constant 1), the map $x \mapsto \tanh(\mathbf{A}x + \mathbf{B}\mathbf{D}e)$ is a contraction with constant $\|\mathbf{A}\|_\infty < 1$ for any fixed $e$.
+Since each $\sigma_i$ is 1-Lipschitz and each $\|W_i\|_2 \leq c_i$ with $\prod c_i < 1$, the composition $g$ is $(\prod c_i)$-Lipschitz by the chain rule for Lipschitz maps. In our 2-layer MLP implementation, $c_1 = c_2 = 0.7$, giving $\prod c_i = 0.49 < 1$.
 
-For time-varying but bounded inputs, the system is an *input-to-state stable* (ISS) system. The base state converges to a neighborhood of the zero-input fixed point, with radius proportional to $\|\mathbf{B}\mathbf{D}\|_\infty \cdot C$. As $k_d \to k_d^{total}$, this radius shrinks (stronger attenuation), and the state converges.
+Therefore $g$ is a contraction mapping. By the Banach fixed-point theorem, there exists a unique $x^*$ such that $x_t \to x^*$.
 
-More precisely, define $V(x) = \|x\|_\infty$. Then:
-$$V(x_{t+1}) = \|\tanh(\mathbf{A}x_t + \mathbf{B}\mathbf{D}e_t)\|_\infty \leq \|\mathbf{A}\|_\infty V(x_t) + \|\mathbf{B}\mathbf{D}\|_\infty C$$
-
-This is a linear recursion with contraction rate $\|\mathbf{A}\|_\infty < 1$, converging to:
-$$V^* = \frac{\|\mathbf{B}\mathbf{D}\|_\infty C}{1 - \|\mathbf{A}\|_\infty}$$
+For time-varying but bounded inputs, the system is an *input-to-state stable* (ISS) system. The base state converges to a neighborhood of the zero-input fixed point, with radius proportional to $\prod c_i / (1 - \prod c_i) \cdot \|\mathbf{D}\|_2 \cdot C$. As $k_d \to k_d^{total}$, this radius shrinks (stronger attenuation), and the state converges.
 
 **(c) Healing termination.**
 
@@ -258,6 +254,68 @@ $\square$
 | "Does there exist an input that causes wounding on dim $d$?" | $O(k_d)$ — check if $C \cdot M_d > \theta_w$ |
 
 All problems are polynomial in the scar count, confirming that Scar Algebra is computationally tractable despite its expressiveness.
+
+---
+
+## Theorem 3.6' (Convergence under Spectral-Normalized MLP)
+
+**Statement.** Let $g = \sigma_L \circ W_L \circ \cdots \circ \sigma_1 \circ W_1$ where each $\sigma_i$ is 1-Lipschitz (e.g., $\tanh$) and each $W_i$ satisfies $\|W_i\|_2 \leq c_i$ with $\prod c_i < 1$. Then the scarred state system converges to a unique equilibrium under bounded input.
+
+### Proof
+
+By composition of Lipschitz maps, $g$ is $(\prod c_i)$-Lipschitz $< 1$-Lipschitz, hence a contraction. By the Banach fixed-point theorem, $\exists! x^*$ such that $x_t \to x^*$.
+
+**Detailed argument.** For the 2-layer MLP case ($L = 2$):
+- Layer 1: $h = \tanh(W_1 [x; \tilde{e}])$. Since $\tanh$ is 1-Lipschitz and $\|W_1\|_2 \leq c_1$, this layer is $c_1$-Lipschitz in its input.
+- Layer 2: $y = \tanh(W_2 h)$. Similarly $c_2$-Lipschitz.
+- Composition: $\|g(a) - g(b)\| \leq c_1 c_2 \|a - b\|$ for all $a, b$.
+
+With spectral normalization enforcing $c_1 = c_2 = 0.7$:
+$$\|g(a) - g(b)\| \leq 0.49 \|a - b\|$$
+
+This is a strict contraction with rate $0.49$. Convergence is geometric with rate $0.49^t$.
+
+**Comparison with linear case.** The original $\tanh(\mathbf{A}x + \mathbf{B}\tilde{e})$ required $\|\mathbf{A}\|_\infty < 1$, which is a weaker condition (only constrains the linear part w.r.t. $x$). The MLP formulation provides a stronger guarantee: the *entire* map (including the input-dependent part) is contractive, not just the autonomous part.
+
+$\square$
+
+---
+
+## Theorem 3.7 (Adaptive Healing Preserves Convergence)
+
+**Statement.** If healing rates $T(\varphi)$ are bounded functions of personality vector $\mathbf{p} \in [0,1]^k$, the convergence result of Theorem 3.6' still holds. Healing rates affect transient behavior but not the existence of equilibrium.
+
+### Proof
+
+The convergence of Theorem 3.6' depends on two properties:
+1. The base state evolution map $g$ is a contraction (guaranteed by spectral normalization, independent of healing rates).
+2. Scar formation eventually ceases (Theorem 2a).
+
+**Healing rates affect only the transient.** The healing rate $T(\varphi)$ determines how quickly scars transition through stages $raw \to closing \to scarred \to faded$. This affects:
+- The *duration* of the amplifying phase (how long $\alpha > 1$)
+- The *time* until the system enters the numbed regime
+- The *total number* of cascade scars formed during amplification
+
+But it does *not* affect:
+- The contraction rate of $g$ (determined solely by $\prod c_i$)
+- The existence of the equilibrium $x^*$
+- The eventual cessation of scar formation (which depends on $\alpha(faded) = 0.7 < 1$)
+
+**Formal bound.** Let $T_{max} = \max_{\mathbf{p}} T(\mathbf{p})$ be the maximum healing duration across all personality configurations. The time to equilibrium satisfies:
+$$T^*(\mathbf{p}) \leq k_d^{total}(\mathbf{p}) \cdot (T_{raw}(\mathbf{p}) + T_{closing}(\mathbf{p}) + T_{scarred}(\mathbf{p}))$$
+
+For our implementation with $T_{raw} = 10 + 20p_{neuroticism}$:
+- Fastest healing ($p_{neuroticism} = 0$): $T^* \propto k \cdot 200$
+- Slowest healing ($p_{neuroticism} = 1$): $T^* \propto k \cdot 380$
+
+In both cases, $T^* < \infty$, and after $T^*$ the system converges at rate $0.49^t$ regardless of personality.
+
+**Repeated wounding slowdown.** The per-dimension multiplier (×1.5 for $scar\_count > 3$) further slows healing on heavily scarred dimensions. This is bounded:
+$$T_{effective}(d) \leq 1.5 \cdot T_{max}$$
+
+which remains finite, preserving the convergence guarantee.
+
+$\square$
 
 ---
 

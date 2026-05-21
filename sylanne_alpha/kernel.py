@@ -76,7 +76,7 @@ class AlphaKernel:
             kernel.computation.from_dict(snapshot["computation"])
         return kernel
 
-    def tick(self, event: AlphaKernelEvent | dict[str, Any] | None = None) -> dict[str, Any]:
+    def tick(self, event: AlphaKernelEvent | dict[str, Any] | None = None, assessment: dict[str, Any] | None = None) -> dict[str, Any]:
         event = self._event(event)
         self.body.apply(text=event.text, flags=event.flags, confidence=event.confidence, now=event.now)
         # Derive computation parameters from current personality
@@ -84,7 +84,7 @@ class AlphaKernel:
         if personality:
             self.computation.apply_personality(personality)
         # Run computation spine for emotion/expression state
-        self._last_computation_result = self.computation.process(event.text, event.now)
+        self._last_computation_result = self.computation.process(event.text, event.now, assessment=assessment)
         self._evolve_alpha_layers(event)
         self.turns += 1
         previous = dict(self.last_event)

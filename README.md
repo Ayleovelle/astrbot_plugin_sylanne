@@ -2,7 +2,7 @@
 
 > <span style="font-size: 1.08em;"><strong>Sylanne-Embodiment：不可逆的关系计算引擎。</strong>不再模拟情绪标签，而是让对话在躯体上留下伤痕、在沉默中积累压力、在关系里长出不可撤销的形状。</span>
 
-![版本 Embodiment-1.0.0](https://img.shields.io/badge/version-Embodiment--1.0.0-red.svg)
+![版本 Embodiment-1.0.1](https://img.shields.io/badge/version-Embodiment--1.0.1-red.svg)
 ![AstrBot >=4.9.2,<5.0.0](https://img.shields.io/badge/AstrBot-%3E%3D4.9.2%2C%3C5.0.0-green)
 ![Python 3.10+](https://img.shields.io/badge/Python-3.10%2B-yellow)
 ![许可证 AGPL-3.0-or-later](https://img.shields.io/badge/license-AGPL--3.0--or--later-red)
@@ -285,7 +285,7 @@ $$r = 1 - \frac{\sum_v \pi_v \cdot \mathbb{1}[M_{d_v} < 0.5]}{\sum_v \pi_v + \ep
 | **记忆** | 关键词匹配 + 伪知识库 | HDC 编码 + 情绪染色重构 | 从精确检索到模糊重建 |
 | **人格影响** | 静态基线 + 漂移系统 | 实时驱动全层参数（零配置） | 从独立子系统到统一驱动源 |
 | **主动发言** | 公式判断 + 冷却 + 话题库 | 独立生活模拟 + LLM 推断 | 从规则触发到生活驱动 |
-| **分段回复** | 语义切分 + 打字节奏 | 语义切分 + 打字节奏 + 打断 + 自适应学习 | 新增打断和用户节奏学习 |
+| **分段回复** | 语义切分 + 打字节奏 + 打断 + 自适应 | 语义切分 + 打字节奏 + 打断 + 亲密度门控节奏同步 | 自适应从规则驱动变为关系状态驱动 |
 | **碎片消息** | 合并逻辑 + 超时判断 | 防抖合并（等用户说完） | 路径不同，目标相同 |
 | **多用户** | 会话级隔离 | LRU 50 + 共享 encoder + 状态独立 | 从会话隔离到计算隔离 |
 | **理论基础** | PAD + appraisal（引用已有理论） | Scar Algebra + Void Calculus（原创证明） | 从引用到原创 |

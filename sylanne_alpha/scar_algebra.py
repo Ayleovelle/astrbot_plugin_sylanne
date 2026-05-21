@@ -77,7 +77,11 @@ class Scar:
 class ScarredState:
     """The core Scar Algebra state: base vector + irreversible scar sequence."""
 
-    __slots__ = ("base", "scars", "n_dims", "wound_threshold", "_tick")
+    __slots__ = (
+        "base", "scars", "n_dims", "wound_threshold", "_tick",
+        "_t_raw", "_t_closing", "_t_scarred",
+        "_mlp_w1", "_mlp_w2", "_mlp_hidden_dim",
+    )
 
     def __init__(self, n_dims: int = 8, wound_threshold: float = 0.6):
         self.n_dims = n_dims
@@ -85,6 +89,135 @@ class ScarredState:
         self.base = [0.0] * n_dims
         self.scars: list[Scar] = []
         self._tick = 0
+        # Configurable healing rates (defaults match original _STAGE_DURATION)
+        self._t_raw: int = 10
+        self._t_closing: int = 40
+        self._t_scarred: int = 150
+        # MLP parameters for base state evolution (initialized lazily)
+        self._mlp_hidden_dim: int = 12
+        self._mlp_w1: list[list[float]] | None = None
+        self._mlp_w2: list[list[float]] | None = None
+
+    def set_healing_rates(self, t_raw: int, t_closing: int, t_scarred: int) -> None:
+        """Set configurable healing durations for each stage.
+
+        Args:
+            t_raw: Ticks to stay in RAW stage before advancing to CLOSING.
+            t_closing: Ticks to stay in CLOSING stage before advancing to SCARRED.
+            t_scarred: Ticks to stay in SCARRED stage before advancing to FADED.
+        """
+        self._t_raw = max(1, int(t_raw))
+        self._t_closing = max(1, int(t_closing))
+        self._t_scarred = max(1, int(t_scarred))
+
+    def healing_duration(self, stage: "HealingStage", dim: int | None = None) -> int:
+        """Get healing duration for a stage, optionally adjusted per-dimension.
+
+        If a dimension has scar_count > 3, its healing is 1.5x slower.
+        """
+        base_duration = {
+            HealingStage.RAW: self._t_raw,
+            HealingStage.CLOSING: self._t_closing,
+            HealingStage.SCARRED: self._t_scarred,
+        }.get(stage, 0)
+        if dim is not None and self.scar_count(dim) > 3:
+            base_duration = int(base_duration * 1.5)
+        return base_duration
+
+    def scar_count(self, dim: int) -> int:
+        """Count total scars on a given dimension."""
+        return sum(1 for s in self.scars if s.dimension == dim)
+
+    def _init_mlp_weights(self, seed: int = 42) -> None:
+        """Initialize MLP weights from a deterministic seed with spectral normalization."""
+        import random
+        rng = random.Random(seed)
+        input_dim = self.n_dims * 2  # [x; e_tilde] concatenated
+        hidden_dim = self._mlp_hidden_dim
+
+        # Layer 1: hidden_dim x input_dim
+        self._mlp_w1 = [
+            [rng.gauss(0, 0.5) for _ in range(input_dim)]
+            for _ in range(hidden_dim)
+        ]
+        # Layer 2: n_dims x hidden_dim
+        self._mlp_w2 = [
+            [rng.gauss(0, 0.5) for _ in range(hidden_dim)]
+            for _ in range(self.n_dims)
+        ]
+        # Apply spectral normalization to both weight matrices
+        self._mlp_w1 = self._spectral_normalize(self._mlp_w1, max_sigma=0.7)
+        self._mlp_w2 = self._spectral_normalize(self._mlp_w2, max_sigma=0.7)
+
+    def _spectral_normalize(self, W: list[list[float]], max_sigma: float = 0.7) -> list[list[float]]:
+        """Spectral normalization via power iteration.
+
+        Estimates the largest singular value of W and scales W down
+        if sigma > max_sigma. This ensures ||W||_2 <= max_sigma.
+        """
+        rows = len(W)
+        cols = len(W[0]) if rows > 0 else 0
+        if rows == 0 or cols == 0:
+            return W
+
+        # Power iteration (10 iterations is sufficient for convergence)
+        # Initialize u as unit vector
+        u = [1.0 / math.sqrt(rows)] * rows
+        v = [0.0] * cols
+
+        for _ in range(10):
+            # v = W^T u / ||W^T u||
+            for j in range(cols):
+                v[j] = sum(W[i][j] * u[i] for i in range(rows))
+            v_norm = math.sqrt(sum(x * x for x in v)) + 1e-12
+            v = [x / v_norm for x in v]
+
+            # u = W v / ||W v||
+            for i in range(rows):
+                u[i] = sum(W[i][j] * v[j] for j in range(cols))
+            u_norm = math.sqrt(sum(x * x for x in u)) + 1e-12
+            u = [x / u_norm for x in u]
+
+        # Estimate sigma = u^T W v
+        sigma = 0.0
+        for i in range(rows):
+            sigma += u[i] * sum(W[i][j] * v[j] for j in range(cols))
+
+        # Scale if needed
+        if sigma > max_sigma:
+            scale = max_sigma / sigma
+            return [[W[i][j] * scale for j in range(cols)] for i in range(rows)]
+        return W
+
+    def _evolve_base(self, x: list[float], e_tilde: list[float]) -> list[float]:
+        """Evolve base state using 2-layer MLP with spectral normalization.
+
+        Layer 1: hidden = tanh(W1 * [x; e_tilde])
+        Layer 2: output = tanh(W2 * hidden)
+
+        Convergence guarantee: ||W1||_2 * ||W2||_2 < 0.7 * 0.7 = 0.49 < 1
+        """
+        if self._mlp_w1 is None or self._mlp_w2 is None:
+            self._init_mlp_weights()
+
+        # Concatenate input: [x; e_tilde]
+        inp = list(x) + list(e_tilde)
+        hidden_dim = len(self._mlp_w1)
+        out_dim = len(self._mlp_w2)
+
+        # Layer 1: hidden = tanh(W1 * inp)
+        hidden = [0.0] * hidden_dim
+        for i in range(hidden_dim):
+            val = sum(self._mlp_w1[i][j] * inp[j] for j in range(len(inp)))
+            hidden[i] = math.tanh(val)
+
+        # Layer 2: output = tanh(W2 * hidden)
+        output = [0.0] * out_dim
+        for i in range(out_dim):
+            val = sum(self._mlp_w2[i][j] * hidden[j] for j in range(hidden_dim))
+            output[i] = math.tanh(val)
+
+        return output
 
     def modifier(self, dim: int) -> float:
         """Compute the cumulative scar modifier for a dimension."""
@@ -112,10 +245,8 @@ class ScarredState:
         # Step 1: Scar-modulated input
         modulated = self.modulate(event)
 
-        # Step 2: Base state evolution (bounded nonlinear map)
-        for d in range(self.n_dims):
-            raw = self.base[d] + modulated[d] * 0.3
-            self.base[d] = math.tanh(raw)
+        # Step 2: Base state evolution (2-layer MLP with spectral normalization)
+        self.base = self._evolve_base(self.base, modulated)
 
         # Step 3: Scar formation (conditional)
         new_scars = []
@@ -125,10 +256,16 @@ class ScarredState:
                 self.scars.append(scar)
                 new_scars.append(d)
 
-        # Step 4: Healing
+        # Step 4: Healing (using configurable per-dimension rates)
         healed = []
         for scar in self.scars:
-            if scar.heal_tick():
+            if scar.stage == HealingStage.FADED:
+                continue
+            scar.ticks_in_stage += 1
+            threshold = self.healing_duration(scar.stage, dim=scar.dimension)
+            if threshold > 0 and scar.ticks_in_stage >= threshold:
+                scar.stage = HealingStage(scar.stage + 1)
+                scar.ticks_in_stage = 0
                 healed.append(scar.dimension)
 
         return {
@@ -168,6 +305,9 @@ class ScarredState:
             "n_dims": self.n_dims,
             "wound_threshold": self.wound_threshold,
             "tick": self._tick,
+            "t_raw": self._t_raw,
+            "t_closing": self._t_closing,
+            "t_scarred": self._t_scarred,
         }
 
     @classmethod
@@ -176,4 +316,7 @@ class ScarredState:
         state.base = list(data["base"])
         state.scars = [Scar.from_dict(s) for s in data.get("scars", [])]
         state._tick = data.get("tick", 0)
+        state._t_raw = data.get("t_raw", 10)
+        state._t_closing = data.get("t_closing", 40)
+        state._t_scarred = data.get("t_scarred", 150)
         return state

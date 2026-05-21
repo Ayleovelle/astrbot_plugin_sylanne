@@ -40,8 +40,8 @@ class SylanneAlphaHost:
         self.runtime = AlphaRuntime(Path(self.root))
         self.kernel = self.runtime.load(self.session_key, legacy=self.legacy)
 
-    def on_request(self, event: SylanneAlphaHostEvent | dict[str, Any] | None = None) -> dict[str, Any]:
-        return self._tick(event, phase="request")
+    def on_request(self, event: SylanneAlphaHostEvent | dict[str, Any] | None = None, assessment: dict[str, Any] | None = None) -> dict[str, Any]:
+        return self._tick(event, phase="request", assessment=assessment)
 
     def on_response(self, event: SylanneAlphaHostEvent | dict[str, Any] | None = None) -> dict[str, Any]:
         return self._tick(event, phase="response")
@@ -86,7 +86,7 @@ class SylanneAlphaHost:
     def snapshot(self) -> dict[str, Any]:
         return self.kernel.snapshot()
 
-    def _tick(self, event: SylanneAlphaHostEvent | dict[str, Any] | None, *, phase: str) -> dict[str, Any]:
+    def _tick(self, event: SylanneAlphaHostEvent | dict[str, Any] | None, *, phase: str, assessment: dict[str, Any] | None = None) -> dict[str, Any]:
         host_event = self._event(event)
         flags = list(dict.fromkeys([phase, *host_event.flags]))
         surface = self.kernel.tick(
@@ -98,6 +98,7 @@ class SylanneAlphaHost:
                 now=host_event.now,
                 event_time=dict(host_event.event_time),
             ),
+            assessment=assessment,
         )["surface"]
         self.runtime.save(self.kernel)
         return surface
