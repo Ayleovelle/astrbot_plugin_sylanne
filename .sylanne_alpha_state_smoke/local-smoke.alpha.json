@@ -1,0 +1,96 @@
+{
+  "audit": {},
+  "body": {
+    "bloodflow": {
+      "circulation": 0.21,
+      "memory_flow": 0.23,
+      "warmth": 0.52
+    },
+    "immunity": {
+      "boundary_pressure": 0.0,
+      "cooldown": 0.0,
+      "interruption_budget": 1.0,
+      "paused": false,
+      "sovereignty": 1.0
+    },
+    "memory": {
+      "traces": [
+        {
+          "id": "trace-1",
+          "temperature": 0.5,
+          "text": "smoke request",
+          "weight": 0.43
+        },
+        {
+          "id": "trace-2",
+          "temperature": 0.55,
+          "text": "smoke response",
+          "weight": 0.43
+        }
+      ]
+    },
+    "mortality": {
+      "exhaustion": 0.0,
+      "load": 0.0,
+      "recovery_debt": 0.0
+    },
+    "muscle": {
+      "fatigue": 0.0,
+      "readiness": 0.56,
+      "trained_reach": 0.12
+    },
+    "needs": {
+      "need_contact": 0.0,
+      "need_expression": 0.24,
+      "need_quiet": 0.0,
+      "need_repair": 0.0
+    },
+    "nerve": {
+      "plasticity": 0.2,
+      "repetition": 1,
+      "sensitivity": 0.0,
+      "threshold_drift": 0.02
+    },
+    "pulse": {
+      "beat": 13.0,
+      "last_tick": 1779117746.10103,
+      "rhythm": 0.63,
+      "strain": 0.0
+    },
+    "temperature": {
+      "repair_heat": 0.0,
+      "volatility": 0.0,
+      "warmth": 0.55
+    },
+    "wound": {
+      "open": 0.0,
+      "repair": 0.0,
+      "scar": 0.0,
+      "sensitivity": 0.0
+    }
+  },
+  "last_decision": {
+    "action": "express",
+    "confidence": 0.55,
+    "reason": "expression need is alive",
+    "reason_code": "expression_need"
+  },
+  "last_event": {
+    "confidence": 0.5,
+    "flags": [
+      "response",
+      "safe"
+    ],
+    "now": 1779117746.1010299,
+    "text": "smoke response"
+  },
+  "last_guard": {
+    "allowed": true,
+    "flags": [],
+    "reason": "expression need is alive",
+    "risk_score": 0.0
+  },
+  "schema_version": "sylanne.alpha.body.v1",
+  "session_key": "local-smoke",
+  "turns": 2
+}

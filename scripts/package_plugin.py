@@ -9,62 +9,23 @@ ROOT = Path(__file__).resolve().parents[1]
 PLUGIN_NAME = "astrbot_plugin_sylanne"
 
 INCLUDE_ROOT_FILES = {
-    "__init__.py",
-    "agent_identity.py",
     "main.py",
-    "conversation_event_ledger.py",
-    "emotion_engine.py",
-    "expression_policy.py",
-    "group_atmosphere_engine.py",
-    "humanlike_engine.py",
-    "interpretation_engine.py",
-    "lifelike_learning_engine.py",
-    "personality_drift_engine.py",
-    "realtime_chat_engine.py",
-    "realtime_chat_input.py",
-    "integrated_self.py",
-    "moral_repair_engine.py",
-    "memory_engine.py",
-    "project_life_engine.py",
-    "fallibility_engine.py",
-    "psychological_screening.py",
-    "prompts.py",
-    "public_api.py",
-    "logo.png",
     "metadata.yaml",
     "_conf_schema.json",
     "README.md",
     "CHANGELOG.md",
     "LICENSE",
-    "requirements.txt",
+    "logo.png",
 }
 
 INCLUDE_DIRS = {
-    "docs",
+    "sylanne_alpha",
     "pages",
-    "sylanne",
-    "sylanne_body",
 }
 
-ALLOWED_DOC_ASSETS = {
-    Path("docs/assets/lifecycle_model_fit.svg"),
-    Path("docs/assets/lifecycle_model_fit_summary.csv"),
-    Path("docs/assets/lifecycle_model_fit_table.md"),
-    Path("docs/assets/io-saturation-warning.svg"),
-    Path("docs/assets/runtime_overview.svg"),
-    Path("docs/assets/sylanne-mascot.gif"),
-    Path("docs/assets/sylanne-mascot-card.svg"),
-    Path("docs/assets/theory_feature_matrix_overhead.png"),
-    Path("docs/assets/theory_feature_matrix_overhead.svg"),
-    Path("docs/assets/theory_lifecycle_fit_explanation.png"),
-    Path("docs/assets/theory_lifecycle_fit_explanation.svg"),
-    Path("docs/assets/workflow_and_proactive.svg"),
-}
+ALLOWED_DOC_ASSETS: set[Path] = set()
 
-EXCLUDED_FILES = {
-    Path("docs/literature_kb.md"),
-    Path("docs/humanlike_agent_literature_kb.md"),
-}
+EXCLUDED_FILES: set[Path] = set()
 
 EXCLUDED_PARTS = {
     ".git",

@@ -75,9 +75,12 @@ PLUGIN_DICT_ATTRIBUTES = (
 PLUGIN_SET_ATTRIBUTES = (
     "_realtime_delivery_context_dirty",
     "_realtime_delivery_context_restored",
-    "_background_tasks",
     "_background_post_recovered_sessions",
     "_background_post_checkpoint_tasks",
+)
+
+PLUGIN_LIST_ATTRIBUTES = (
+    "_background_tasks",
 )
 
 
@@ -203,6 +206,8 @@ def new_plugin(config=None):
         setattr(plugin, attr, {})
     for attr in PLUGIN_SET_ATTRIBUTES:
         setattr(plugin, attr, set())
+    for attr in PLUGIN_LIST_ATTRIBUTES:
+        setattr(plugin, attr, [])
     plugin._internal_assessor_llm_condition = None
     plugin._internal_assessor_llm_condition_loop = None
     plugin._internal_assessor_llm_inflight = 0

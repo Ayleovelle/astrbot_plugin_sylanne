@@ -1,0 +1,229 @@
+{
+  "audit": {},
+  "body": {
+    "bloodflow": {
+      "circulation": 1.0,
+      "memory_flow": 1.0,
+      "warmth": 0.6016
+    },
+    "immunity": {
+      "boundary_pressure": 0.0,
+      "cooldown": 0.0,
+      "interruption_budget": 1.0,
+      "paused": false,
+      "sovereignty": 1.0
+    },
+    "memory": {
+      "relationship": {
+        "signals": {}
+      },
+      "shadow": {
+        "events": []
+      },
+      "traces": [
+        {
+          "id": "trace-1",
+          "temperature": 0.45,
+          "text": "hello",
+          "weight": 0.43
+        },
+        {
+          "id": "trace-2",
+          "temperature": 0.45,
+          "text": "hello",
+          "weight": 0.51
+        },
+        {
+          "id": "trace-3",
+          "temperature": 0.45,
+          "text": "hello",
+          "weight": 0.59
+        },
+        {
+          "id": "trace-4",
+          "temperature": 0.45,
+          "text": "hello",
+          "weight": 0.67
+        },
+        {
+          "id": "trace-5",
+          "temperature": 0.45,
+          "text": "hello",
+          "weight": 0.75
+        },
+        {
+          "id": "trace-6",
+          "temperature": 0.45,
+          "text": "hello",
+          "weight": 0.83
+        },
+        {
+          "id": "trace-7",
+          "temperature": 0.45,
+          "text": "hello",
+          "weight": 0.91
+        },
+        {
+          "id": "trace-8",
+          "temperature": 0.45,
+          "text": "hello",
+          "weight": 0.99
+        }
+      ]
+    },
+    "mortality": {
+      "exhaustion": 0.0,
+      "load": 0.0,
+      "recovery_debt": 0.0
+    },
+    "muscle": {
+      "fatigue": 0.0,
+      "readiness": 1.0,
+      "trained_reach": 1.0
+    },
+    "needs": {
+      "need_contact": 0.352,
+      "need_expression": 1.0,
+      "need_quiet": 0.0,
+      "need_repair": 0.0
+    },
+    "nerve": {
+      "plasticity": 1.0,
+      "repetition": 8,
+      "sensitivity": 0.16,
+      "threshold_drift": 0.72
+    },
+    "pulse": {
+      "beat": 52.0,
+      "last_tick": 1779208132.626039,
+      "rhythm": 1.0,
+      "strain": 0.0
+    },
+    "temperature": {
+      "repair_heat": 0.0,
+      "volatility": 0.0,
+      "warmth": 0.45
+    },
+    "wound": {
+      "open": 0.0,
+      "repair": 0.0,
+      "scar": 0.0,
+      "sensitivity": 0.0
+    }
+  },
+  "fallibility": {
+    "claim_caution": 0.4,
+    "constraints": [
+      "admit_uncertainty",
+      "correct_once",
+      "no_performative_self_blame"
+    ],
+    "events": 0,
+    "internal_only": true,
+    "kind": "fallibility_state",
+    "read_only": true,
+    "schema_version": "sylanne.alpha.fallibility.v1"
+  },
+  "last_decision": {
+    "action": "reach_out",
+    "confidence": 1.0,
+    "reason": "contact need has accumulated",
+    "reason_code": "contact_need"
+  },
+  "last_event": {
+    "confidence": 0.6,
+    "event_time": {
+      "epoch": 1779208132.626039,
+      "local_datetime": "2026-05-20T00:28:52.626039+08:00",
+      "timezone": "中国标准时间"
+    },
+    "flags": [
+      "request",
+      "llm_request"
+    ],
+    "now": 1779208132.626039,
+    "text": "hello",
+    "values": {}
+  },
+  "last_guard": {
+    "allowed": true,
+    "flags": [],
+    "reason": "contact need has accumulated",
+    "risk_score": 0.0
+  },
+  "moral_repair": {
+    "constraints": [
+      "brief_repair_only",
+      "no_guilt_loop",
+      "current_user_text_priority"
+    ],
+    "events": 0,
+    "internal_only": true,
+    "kind": "moral_repair_state",
+    "read_only": true,
+    "repair_need": 0.0,
+    "schema_version": "sylanne.alpha.moral_repair.v1",
+    "state": "stable"
+  },
+  "personality": {
+    "drift": {
+      "events": 8,
+      "mode": "slow_plasticity",
+      "plasticity": 0.096
+    },
+    "schema_version": "sylanne.alpha.personality.v1",
+    "signature": "d9663e045a2b23e06ac3ea18",
+    "traits": {
+      "curiosity": 0.597176,
+      "edge": 0.408,
+      "intimacy_gravity": 0.482353,
+      "patience": 0.461882,
+      "sovereignty_guard": 0.640235,
+      "warmth_bias": 0.602118
+    },
+    "voice": {
+      "boundary": "strong",
+      "cadence": "quick_cut",
+      "temperature": 0.505059
+    }
+  },
+  "previous_event": {
+    "confidence": 0.6,
+    "event_time": {
+      "epoch": 1779208132.618672,
+      "local_datetime": "2026-05-20T00:28:52.618672+08:00",
+      "timezone": "中国标准时间"
+    },
+    "flags": [
+      "request",
+      "llm_request"
+    ],
+    "now": 1779208132.618672,
+    "text": "hello",
+    "values": {}
+  },
+  "relational_time": {
+    "constraints": [
+      "internal_prompt_context_only",
+      "no_raw_text",
+      "does_not_override_current_user_text"
+    ],
+    "current_time": {
+      "epoch": 1779208132.626039,
+      "local_datetime": "2026-05-20T00:28:52.626039+08:00",
+      "timezone": "中国标准时间"
+    },
+    "day_relation": "same_day",
+    "internal_only": true,
+    "kind": "relational_time_layer",
+    "read_only": true,
+    "schema_version": "sylanne.alpha.relational_time.v1",
+    "time_gap": {
+      "label": "刚刚",
+      "seconds": 0.007367
+    }
+  },
+  "schema_version": "sylanne.alpha.body.v1",
+  "session_key": "s-context-owner-switch",
+  "turns": 8
+}

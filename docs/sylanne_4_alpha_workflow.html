@@ -1,0 +1,1324 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Sylanne 4.0 全链路工作流</title>
+  <style>
+    :root {
+      color-scheme: dark;
+      --bg: #0d0b10;
+      --panel: #17131f;
+      --panel-2: #211a2b;
+      --text: #f3edf8;
+      --muted: #b8a9c7;
+      --accent: #ff6b9d;
+      --accent-2: #8fd3ff;
+      --line: #3a2c49;
+      --ok: #9be88d;
+      --warn: #ffd37a;
+      --danger: #ff8a8a;
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      font-family: ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", "Microsoft YaHei", sans-serif;
+      background:
+        radial-gradient(circle at top left, rgba(255, 107, 157, 0.20), transparent 34rem),
+        radial-gradient(circle at 80% 20%, rgba(143, 211, 255, 0.14), transparent 28rem),
+        var(--bg);
+      color: var(--text);
+      line-height: 1.65;
+    }
+    header {
+      max-width: 1180px;
+      margin: 0 auto;
+      padding: 72px 28px 34px;
+    }
+    .eyebrow {
+      color: var(--accent-2);
+      letter-spacing: 0.18em;
+      text-transform: uppercase;
+      font-size: 13px;
+      font-weight: 700;
+    }
+    h1 {
+      margin: 14px 0 12px;
+      font-size: clamp(34px, 6vw, 72px);
+      line-height: 1.05;
+      letter-spacing: -0.05em;
+    }
+    .lead {
+      max-width: 850px;
+      color: var(--muted);
+      font-size: clamp(18px, 2.2vw, 24px);
+    }
+    main {
+      max-width: 1180px;
+      margin: 0 auto;
+      padding: 0 28px 72px;
+    }
+    .grid {
+      display: grid;
+      grid-template-columns: repeat(12, 1fr);
+      gap: 18px;
+      margin: 28px 0;
+    }
+    .card {
+      grid-column: span 4;
+      background: linear-gradient(180deg, rgba(255,255,255,0.045), rgba(255,255,255,0.015)), var(--panel);
+      border: 1px solid var(--line);
+      border-radius: 24px;
+      padding: 24px;
+      min-height: 180px;
+      box-shadow: 0 16px 40px rgba(0,0,0,0.22);
+    }
+    .card.wide { grid-column: span 8; }
+    .card.full { grid-column: 1 / -1; }
+    h2, h3 { line-height: 1.25; margin: 0 0 14px; }
+    h2 { font-size: 30px; letter-spacing: -0.03em; }
+    h3 { font-size: 21px; }
+    p { margin: 0 0 12px; }
+    ul { margin: 10px 0 0; padding-left: 20px; }
+    li { margin: 6px 0; }
+    .muted { color: var(--muted); }
+    .tag {
+      display: inline-flex;
+      align-items: center;
+      gap: 8px;
+      border: 1px solid var(--line);
+      background: rgba(255,255,255,0.04);
+      color: var(--muted);
+      padding: 6px 10px;
+      border-radius: 999px;
+      font-size: 13px;
+      margin: 4px 6px 0 0;
+    }
+    .flow {
+      display: grid;
+      grid-template-columns: repeat(7, minmax(120px, 1fr));
+      gap: 10px;
+      overflow-x: auto;
+      padding: 6px 2px 2px;
+    }
+    .diagram-wrap {
+      overflow-x: auto;
+      padding: 8px 0 2px;
+    }
+    .workflow-svg {
+      min-width: 1040px;
+      width: 100%;
+      height: auto;
+      display: block;
+    }
+    .node rect, .node path {
+      fill: var(--panel-2);
+      stroke: var(--line);
+      stroke-width: 1.4;
+    }
+    .node.decision path { fill: rgba(255, 211, 122, 0.10); stroke: rgba(255, 211, 122, 0.75); }
+    .node.output rect { fill: rgba(143, 211, 255, 0.10); stroke: rgba(143, 211, 255, 0.65); }
+    .node.stop rect { fill: rgba(255, 138, 138, 0.09); stroke: rgba(255, 138, 138, 0.65); }
+    .node text {
+      fill: var(--text);
+      font-size: 15px;
+      font-weight: 800;
+      text-anchor: middle;
+      dominant-baseline: middle;
+    }
+    .node .sub {
+      fill: var(--muted);
+      font-size: 12px;
+      font-weight: 500;
+    }
+    .edge {
+      stroke: var(--accent);
+      stroke-width: 2.2;
+      fill: none;
+      marker-end: url(#arrow);
+    }
+    .edge.soft { stroke: var(--accent-2); }
+    .edge.guard { stroke: var(--warn); }
+    .edge.block { stroke: var(--danger); }
+    .edge-label {
+      fill: var(--muted);
+      font-size: 12px;
+      font-weight: 650;
+      paint-order: stroke;
+      stroke: var(--bg);
+      stroke-width: 4px;
+      stroke-linejoin: round;
+    }
+    .swim-label {
+      fill: var(--accent-2);
+      font-size: 13px;
+      font-weight: 800;
+      letter-spacing: 0.08em;
+    }
+    .swim-line {
+      stroke: rgba(255,255,255,0.08);
+      stroke-dasharray: 5 7;
+    }
+    .step {
+      position: relative;
+      min-width: 130px;
+      background: var(--panel-2);
+      border: 1px solid var(--line);
+      border-radius: 18px;
+      padding: 16px;
+    }
+    .step::after {
+      content: "→";
+      position: absolute;
+      top: 50%;
+      right: -14px;
+      transform: translateY(-50%);
+      color: var(--accent);
+      font-weight: 800;
+    }
+    .step:last-child::after { display: none; }
+    .num {
+      color: var(--accent);
+      font-weight: 800;
+      font-size: 13px;
+      letter-spacing: 0.08em;
+    }
+    .step strong { display: block; margin: 6px 0; }
+    .step span { color: var(--muted); font-size: 14px; }
+    .lane {
+      display: grid;
+      grid-template-columns: 190px 1fr;
+      gap: 18px;
+      align-items: start;
+      border-top: 1px solid var(--line);
+      padding: 18px 0;
+    }
+    .lane:first-of-type { border-top: 0; padding-top: 0; }
+    .lane-title { color: var(--accent-2); font-weight: 800; }
+    code {
+      background: rgba(255,255,255,0.07);
+      border: 1px solid rgba(255,255,255,0.08);
+      border-radius: 8px;
+      padding: 2px 6px;
+      color: #ffe2ec;
+      font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+      font-size: 0.92em;
+    }
+    .matrix {
+      width: 100%;
+      border-collapse: collapse;
+      overflow: hidden;
+      border-radius: 18px;
+      border: 1px solid var(--line);
+    }
+    .matrix th, .matrix td {
+      padding: 14px 16px;
+      border-bottom: 1px solid var(--line);
+      vertical-align: top;
+      text-align: left;
+    }
+    .matrix th { background: rgba(255,255,255,0.055); color: var(--accent-2); }
+    .matrix tr:last-child td { border-bottom: 0; }
+    .ok { color: var(--ok); }
+    .warn { color: var(--warn); }
+    .danger { color: var(--danger); }
+    .callout {
+      border-left: 4px solid var(--accent);
+      background: rgba(255,107,157,0.08);
+      padding: 18px 20px;
+      border-radius: 18px;
+    }
+    .slice-demo {
+      display: grid;
+      grid-template-columns: 1fr;
+      gap: 20px;
+      align-items: stretch;
+    }
+    .webui-shell {
+      display: grid;
+      grid-template-columns: 1.2fr 0.8fr;
+      gap: 18px;
+      align-items: stretch;
+    }
+    .state-space-wrap {
+      display: grid;
+      grid-template-columns: minmax(0, 1fr) 280px;
+      gap: 18px;
+      align-items: stretch;
+    }
+    .state-space {
+      position: relative;
+      min-height: 520px;
+      border: 1px solid rgba(143,211,255,0.24);
+      border-radius: 28px;
+      overflow: hidden;
+      cursor: grab;
+      perspective: 1200px;
+      user-select: none;
+      background:
+        radial-gradient(circle at 50% 50%, rgba(255,107,157,0.18), transparent 9rem),
+        radial-gradient(circle at 20% 24%, rgba(143,211,255,0.14), transparent 10rem),
+        radial-gradient(circle at 82% 78%, rgba(155,232,141,0.10), transparent 9rem),
+        rgba(255,255,255,0.026);
+    }
+    .state-space:active { cursor: grabbing; }
+    .state-space::before {
+      content: "";
+      position: absolute;
+      inset: -28%;
+      background-image:
+        linear-gradient(rgba(255,255,255,0.035) 1px, transparent 1px),
+        linear-gradient(90deg, rgba(255,255,255,0.035) 1px, transparent 1px);
+      background-size: 42px 42px;
+      transform: rotate(-9deg);
+      opacity: 0.42;
+    }
+    .state-orbit {
+      position: absolute;
+      inset: 0;
+      transform-style: preserve-3d;
+      transition: transform 220ms ease-out;
+    }
+    .state-node {
+      position: absolute;
+      left: 50%;
+      top: 50%;
+      width: var(--s);
+      height: var(--s);
+      border: 0;
+      padding: 0;
+      border-radius: 50%;
+      opacity: var(--o);
+      transform: translate3d(calc(var(--x) * 1px), calc(var(--y) * 1px), calc(var(--z) * 1px)) translate(-50%, -50%) scale(var(--scale));
+      transform-style: preserve-3d;
+      background:
+        radial-gradient(circle at 30% 24%, rgba(255,255,255,0.96) 0 8%, rgba(255,255,255,0.48) 9% 18%, transparent 27%),
+        radial-gradient(circle at 34% 28%, hsla(var(--h), 96%, 78%, 1) 0 14%, hsla(var(--h), 86%, 62%, 0.98) 36%, hsla(var(--h), 82%, 42%, 0.98) 68%, hsla(var(--h), 74%, 20%, 0.96) 100%);
+      box-shadow:
+        inset -10px -12px 18px hsla(var(--h), 72%, 12%, 0.58),
+        inset 6px 7px 14px rgba(255,255,255,0.30),
+        0 calc(var(--depth) * 1px) calc(var(--shadow) * 1px) rgba(0,0,0,0.34),
+        0 0 calc(var(--glow) * 1px) hsla(var(--h), 88%, 68%, 0.52);
+      transition: transform 520ms cubic-bezier(.2,.8,.2,1), opacity 420ms ease, box-shadow 420ms ease;
+      z-index: var(--zi);
+      appearance: none;
+    }
+    .state-node::after {
+      content: "";
+      position: absolute;
+      inset: 16% 18% 54% 20%;
+      border-radius: 50%;
+      background: radial-gradient(circle, rgba(255,255,255,0.60), rgba(255,255,255,0.12) 46%, transparent 70%);
+      filter: blur(0.6px);
+      pointer-events: none;
+    }
+    .state-node.hot {
+      box-shadow:
+        inset -12px -14px 20px hsla(var(--h), 72%, 12%, 0.60),
+        inset 7px 8px 15px rgba(255,255,255,0.34),
+        0 calc(var(--depth) * 1px) calc(var(--shadow) * 1px) rgba(0,0,0,0.38),
+        0 0 34px hsla(var(--h), 88%, 68%, 0.68),
+        0 0 82px rgba(255,107,157,0.20);
+    }
+    .state-tooltip {
+      position: absolute;
+      right: 18px;
+      top: 18px;
+      width: min(340px, calc(100% - 36px));
+      border: 0;
+      border-radius: 20px;
+      padding: 16px;
+      background: rgba(17,21,34,0.92);
+      box-shadow: 0 18px 44px rgba(0,0,0,0.32), 0 0 28px rgba(143,211,255,0.12);
+      opacity: 0;
+      transform: translateY(8px);
+      transition: opacity 220ms ease, transform 220ms ease;
+      pointer-events: none;
+      z-index: 6;
+    }
+    .state-tooltip.visible {
+      opacity: 1;
+      transform: translateY(0);
+    }
+    .state-tooltip strong { display: block; margin-bottom: 10px; }
+    .state-tooltip span { display: block; color: var(--muted); font-size: 13px; }
+    .state-tooltip dl {
+      display: grid;
+      grid-template-columns: 74px 1fr;
+      gap: 6px 12px;
+      margin: 0;
+      color: var(--muted);
+      font-size: 13px;
+    }
+    .state-tooltip dt { color: rgba(243,237,248,0.62); }
+    .state-tooltip dd { margin: 0; color: var(--text); }
+    .state-hint {
+      color: var(--muted);
+      font-size: 13px;
+      margin-top: 10px;
+    }
+    .neural-space {
+      position: relative;
+      min-height: 360px;
+      border: 1px solid rgba(143,211,255,0.24);
+      border-radius: 28px;
+      overflow: hidden;
+      background:
+        radial-gradient(circle at 50% 50%, rgba(255,107,157,0.18), transparent 7rem),
+        radial-gradient(circle at 18% 22%, rgba(143,211,255,0.18), transparent 8rem),
+        radial-gradient(circle at 80% 78%, rgba(155,232,141,0.12), transparent 8rem),
+        rgba(255,255,255,0.026);
+    }
+    .neural-space::before {
+      content: "";
+      position: absolute;
+      inset: -30%;
+      background-image:
+        linear-gradient(rgba(255,255,255,0.035) 1px, transparent 1px),
+        linear-gradient(90deg, rgba(255,255,255,0.035) 1px, transparent 1px);
+      background-size: 42px 42px;
+      transform: rotate(-9deg);
+      opacity: 0.45;
+    }
+    .synapse {
+      position: absolute;
+      left: var(--x);
+      top: var(--y);
+      width: var(--w);
+      height: 2px;
+      transform: rotate(var(--r));
+      transform-origin: left center;
+      background: linear-gradient(90deg, transparent, rgba(143,211,255,0.72), rgba(255,107,157,0.54), transparent);
+      box-shadow: 0 0 18px rgba(143,211,255,0.25);
+      animation: pulseLine 2.6s ease-in-out infinite;
+    }
+    .neuron {
+      position: absolute;
+      left: var(--x);
+      top: var(--y);
+      width: clamp(118px, 17vw, 162px);
+      min-height: 112px;
+      transform: translate(-50%, -50%);
+      border: 1px solid rgba(255,255,255,0.14);
+      border-radius: 26px;
+      padding: 15px;
+      background: rgba(20,16,28,0.78);
+      box-shadow: 0 18px 42px rgba(0,0,0,0.28), 0 0 26px rgba(143,211,255,0.10);
+      backdrop-filter: blur(12px);
+      z-index: 2;
+      animation: floatNode 4.8s ease-in-out infinite;
+    }
+    .neuron.core {
+      width: clamp(150px, 20vw, 210px);
+      border-color: rgba(255,107,157,0.44);
+      box-shadow: 0 20px 48px rgba(0,0,0,0.32), 0 0 44px rgba(255,107,157,0.20);
+    }
+    .neuron:nth-of-type(2) { animation-delay: -0.8s; }
+    .neuron:nth-of-type(3) { animation-delay: -1.5s; }
+    .neuron:nth-of-type(4) { animation-delay: -2.1s; }
+    .neuron:nth-of-type(5) { animation-delay: -2.8s; }
+    .neuron strong {
+      display: block;
+      font-size: 24px;
+      line-height: 1.1;
+      color: var(--text);
+    }
+    .neuron span {
+      display: block;
+      color: var(--muted);
+      font-size: 13px;
+      margin-top: 5px;
+    }
+    .neuron small {
+      display: inline-flex;
+      margin-top: 10px;
+      color: var(--accent-2);
+      font-size: 12px;
+      letter-spacing: 0.08em;
+      text-transform: uppercase;
+    }
+    .memory-dot {
+      position: absolute;
+      left: var(--x);
+      top: var(--y);
+      width: var(--s);
+      height: var(--s);
+      transform: translate(-50%, -50%);
+      border-radius: 50%;
+      background: rgba(143,211,255,0.74);
+      box-shadow: 0 0 14px rgba(143,211,255,0.52), 0 0 38px rgba(255,107,157,0.18);
+      z-index: 1;
+      animation: spark 2.4s ease-in-out infinite;
+      animation-delay: var(--d);
+    }
+    .memory-dot.warm {
+      background: rgba(255,107,157,0.78);
+      box-shadow: 0 0 16px rgba(255,107,157,0.54), 0 0 44px rgba(143,211,255,0.14);
+    }
+    .memory-dot.guard {
+      background: rgba(255,211,122,0.82);
+      box-shadow: 0 0 16px rgba(255,211,122,0.52), 0 0 42px rgba(255,107,157,0.12);
+    }
+    .memory-link {
+      position: absolute;
+      left: var(--x1);
+      top: var(--y1);
+      width: var(--w);
+      height: 1px;
+      transform: rotate(var(--r));
+      transform-origin: left center;
+      background: linear-gradient(90deg, transparent, rgba(143,211,255,0.46), rgba(201,155,255,0.38), transparent);
+      z-index: 1;
+      animation: pulseLine 3.2s ease-in-out infinite;
+    }
+    .metric-grid {
+      display: grid;
+      grid-template-columns: repeat(4, minmax(120px, 1fr));
+      gap: 12px;
+      margin-top: 16px;
+    }
+    .metric {
+      border: 1px solid var(--line);
+      border-radius: 18px;
+      background: rgba(255,255,255,0.035);
+      padding: 14px;
+    }
+    .metric strong {
+      display: block;
+      font-size: 22px;
+      color: var(--text);
+    }
+    .metric span {
+      color: var(--muted);
+      font-size: 13px;
+    }
+    .config-panel {
+      border: 1px solid var(--line);
+      border-radius: 22px;
+      background: rgba(255,255,255,0.035);
+      padding: 18px;
+    }
+    .config-row {
+      display: flex;
+      justify-content: space-between;
+      gap: 14px;
+      border-bottom: 1px solid rgba(255,255,255,0.08);
+      padding: 12px 0;
+    }
+    .config-row:last-child { border-bottom: 0; }
+    .switch {
+      width: 46px;
+      height: 24px;
+      border-radius: 999px;
+      background: rgba(255,255,255,0.12);
+      border: 1px solid var(--line);
+      position: relative;
+      flex: 0 0 auto;
+    }
+    .switch::after {
+      content: "";
+      position: absolute;
+      top: 3px;
+      left: 4px;
+      width: 16px;
+      height: 16px;
+      border-radius: 50%;
+      background: var(--muted);
+    }
+    .switch.on {
+      background: rgba(155,232,141,0.18);
+      border-color: rgba(155,232,141,0.5);
+    }
+    .switch.on::after {
+      left: 24px;
+      background: var(--ok);
+    }
+    .decision-box {
+      border: 1px solid rgba(143,211,255,0.4);
+      border-radius: 20px;
+      background: rgba(143,211,255,0.08);
+      padding: 14px;
+      margin-top: 14px;
+    }
+    .demo-input {
+      display: flex;
+      flex-direction: column;
+      gap: 12px;
+    }
+    .demo-input textarea {
+      width: 100%;
+      min-height: 104px;
+      resize: vertical;
+      color: var(--text);
+      background: rgba(255,255,255,0.05);
+      border: 1px solid var(--line);
+      border-radius: 18px;
+      padding: 14px 16px;
+      font: inherit;
+      line-height: 1.55;
+    }
+    .demo-input button {
+      align-self: flex-start;
+      border: 1px solid rgba(255,107,157,0.65);
+      background: linear-gradient(135deg, rgba(255,107,157,0.22), rgba(143,211,255,0.12));
+      color: var(--text);
+      border-radius: 999px;
+      padding: 10px 18px;
+      font-weight: 800;
+      cursor: pointer;
+    }
+    .slice-stage {
+      display: grid;
+      grid-template-columns: repeat(4, minmax(120px, 1fr));
+      gap: 12px;
+      min-height: 340px;
+    }
+    .slice-column {
+      border: 1px solid var(--line);
+      border-radius: 20px;
+      background: rgba(255,255,255,0.035);
+      padding: 14px;
+      overflow: hidden;
+    }
+    .slice-column h3 {
+      font-size: 15px;
+      color: var(--accent-2);
+      margin-bottom: 10px;
+    }
+    .slice-bin {
+      display: flex;
+      flex-direction: column;
+      gap: 8px;
+    }
+    .token-space {
+      position: relative;
+      min-height: 640px;
+      border: 1px solid rgba(143,211,255,0.24);
+      border-radius: 24px;
+      overflow: hidden;
+      background:
+        radial-gradient(circle at 18% 22%, rgba(143,211,255,0.14), transparent 7rem),
+        radial-gradient(circle at 52% 42%, rgba(255,107,157,0.16), transparent 8rem),
+        radial-gradient(circle at 82% 76%, rgba(155,232,141,0.12), transparent 7rem),
+        rgba(255,255,255,0.026);
+    }
+    .token-space::before {
+      content: "";
+      position: absolute;
+      inset: 0;
+      background-image:
+        linear-gradient(rgba(255,255,255,0.035) 1px, transparent 1px),
+        linear-gradient(90deg, rgba(255,255,255,0.035) 1px, transparent 1px);
+      background-size: 38px 38px;
+      mask-image: radial-gradient(circle at center, #000, transparent 80%);
+    }
+    .token-lane {
+      position: absolute;
+      left: var(--x1);
+      top: var(--y1);
+      width: var(--w);
+      height: 2px;
+      transform: rotate(var(--r));
+      transform-origin: left center;
+      background: linear-gradient(90deg, transparent, rgba(255,255,255,0.14), rgba(143,211,255,0.62), transparent);
+      animation: pulseLine 2.8s ease-in-out infinite;
+    }
+    .token-node {
+      position: absolute;
+      left: var(--x);
+      top: var(--y);
+      transform: translate(-50%, -50%);
+      max-width: 132px;
+      border: 1px solid rgba(255,255,255,0.10);
+      border-radius: 999px;
+      padding: 7px 10px;
+      color: var(--text);
+      background: rgba(20,16,28,0.82);
+      box-shadow: 0 12px 26px rgba(0,0,0,0.22), 0 0 18px rgba(143,211,255,0.12);
+      font-size: 12px;
+      line-height: 1.22;
+      z-index: 3;
+      animation: tokenIn 520ms ease both;
+      animation-delay: var(--delay);
+    }
+    .token-node.原句 {
+      max-width: 176px;
+      border-color: rgba(255,255,255,0.08);
+      background: rgba(12,11,18,0.82);
+      font-weight: 700;
+    }
+    .token-node.result {
+      max-width: 118px;
+      font-weight: 800;
+    }
+    .token-node.memory { border-color: rgba(143,211,255,0.52); background: rgba(143,211,255,0.13); }
+    .token-node.body { border-color: rgba(255,107,157,0.52); background: rgba(255,107,157,0.13); }
+    .token-node.guard { border-color: rgba(255,211,122,0.62); background: rgba(255,211,122,0.13); }
+    .token-node.personality { border-color: rgba(201,155,255,0.58); background: rgba(201,155,255,0.13); }
+    .token-node.output { border-color: rgba(155,232,141,0.58); background: rgba(155,232,141,0.13); }
+    .space-label {
+      position: absolute;
+      color: rgba(243,237,248,0.52);
+      font-size: 12px;
+      letter-spacing: 0.1em;
+      z-index: 2;
+    }
+    .drift-ring {
+      position: absolute;
+      left: 72%;
+      top: 32%;
+      width: 128px;
+      height: 128px;
+      transform: translate(-50%, -50%);
+      border: 1px dashed rgba(201,155,255,0.48);
+      border-radius: 50%;
+      animation: rotateDrift 12s linear infinite;
+      z-index: 1;
+    }
+    .drift-ring::after {
+      content: "";
+      position: absolute;
+      right: 10px;
+      top: 18px;
+      width: 12px;
+      height: 12px;
+      border-radius: 50%;
+      background: rgba(201,155,255,0.82);
+      box-shadow: 0 0 20px rgba(201,155,255,0.58);
+    }
+    .shard {
+      border: 1px solid rgba(255,255,255,0.10);
+      border-radius: 14px;
+      padding: 8px 10px;
+      color: var(--text);
+      background: rgba(255,255,255,0.055);
+      font-size: 13px;
+      animation: shardIn 520ms ease both;
+    }
+    .shard.memory { border-color: rgba(143,211,255,0.46); background: rgba(143,211,255,0.10); }
+    .shard.body { border-color: rgba(255,107,157,0.50); background: rgba(255,107,157,0.10); }
+    .shard.guard { border-color: rgba(255,211,122,0.55); background: rgba(255,211,122,0.10); }
+    .shard.interest { border-color: rgba(155,232,141,0.55); background: rgba(155,232,141,0.10); }
+    .vector-bar {
+      height: 8px;
+      overflow: hidden;
+      border-radius: 999px;
+      background: rgba(255,255,255,0.08);
+      margin-top: 7px;
+    }
+    .vector-bar span {
+      display: block;
+      height: 100%;
+      width: var(--w);
+      background: linear-gradient(90deg, var(--accent), var(--accent-2));
+      animation: growBar 700ms ease both;
+    }
+    .demo-note {
+      color: var(--muted);
+      font-size: 13px;
+    }
+    @keyframes shardIn {
+      from { opacity: 0; transform: translateY(10px) scale(0.96); filter: blur(4px); }
+      to { opacity: 1; transform: translateY(0) scale(1); filter: blur(0); }
+    }
+    @keyframes growBar {
+      from { width: 0; }
+      to { width: var(--w); }
+    }
+    @keyframes floatNode {
+      0%, 100% { transform: translate(-50%, -50%) translateY(0); }
+      50% { transform: translate(-50%, -50%) translateY(-8px); }
+    }
+    @keyframes pulseLine {
+      0%, 100% { opacity: 0.32; filter: blur(0); }
+      50% { opacity: 0.95; filter: blur(0.4px); }
+    }
+    @keyframes spark {
+      from { transform: translate(-50%, -50%) scale(0.55); opacity: 0.28; }
+      50% { opacity: 1; }
+      to { transform: translate(-50%, -50%) scale(1.18); opacity: 0.34; }
+    }
+    @keyframes tokenIn {
+      from { opacity: 0; transform: translate(-50%, -50%) scale(0.72); filter: blur(5px); }
+      to { opacity: 1; transform: translate(-50%, -50%) scale(1); filter: blur(0); }
+    }
+    @keyframes rotateDrift {
+      from { transform: translate(-50%, -50%) rotate(0deg); }
+      to { transform: translate(-50%, -50%) rotate(360deg); }
+    }
+    footer {
+      color: var(--muted);
+      max-width: 1180px;
+      margin: 0 auto;
+      padding: 0 28px 60px;
+    }
+    @media (max-width: 900px) {
+      .card, .card.wide { grid-column: 1 / -1; }
+      .flow { grid-template-columns: 1fr; }
+      .step::after { display: none; }
+      .lane { grid-template-columns: 1fr; }
+      .slice-demo { grid-template-columns: 1fr; }
+      .webui-shell { grid-template-columns: 1fr; }
+      .state-space-wrap { grid-template-columns: 1fr; }
+      .metric-grid { grid-template-columns: repeat(2, minmax(120px, 1fr)); }
+      .neural-space { min-height: 520px; }
+      .slice-stage { grid-template-columns: 1fr; }
+    }
+  </style>
+</head>
+<body>
+  <header>
+    <div class="eyebrow">Sylanne 4.0 alpha workflow</div>
+    <h1>从一句话，到一具会呼吸的 4.0 身体</h1>
+    <p class="lead">Sylanne 4.0 不再是旧情绪引擎外面套一层命令。她的链路从 AstrBot 事件进入，经过对话切片、身体状态、记忆、人格、判断通道和边界闸门，最后才变成一次回应、一次主动冲动，或者一次安静的等待。</p>
+  </header>
+
+  <main>
+    <section class="grid">
+      <article class="card full">
+        <h2>WebUI：数据观察与插件配置</h2>
+        <p class="muted">WebUI 的定位不是放总流程图，而是把 Sylanne 当前能公开观察的数据摆出来：身体仪表、边界闸门、记忆工作集、信息切片、主动性建议和插件配置。这里展示的是前端形态，所有状态都来自只读 surface；配置区只写插件设置，不触碰私密原始文本。</p>
+        <div class="state-space-wrap">
+          <div>
+            <div class="state-space" id="stateSpace" aria-label="可旋转的 Sylanne 状态空间，默认缓存 200 个状态节点">
+              <div class="state-orbit" id="stateOrbit"></div>
+              <div class="state-tooltip" id="stateTooltip"></div>
+            </div>
+            <p class="state-hint">拖动状态球壳可旋转视角；指针放到某个状态点时才显示数据，相邻状态会自然散开。默认模拟 200 个缓存状态，越老越淡。</p>
+          </div>
+          <aside class="config-panel" aria-label="插件配置预览">
+            <h3>插件配置</h3>
+            <div class="config-row"><span>只读观察舱</span><span class="switch on" aria-hidden="true"></span></div>
+            <div class="config-row"><span>主动检查</span><span class="switch" aria-hidden="true"></span></div>
+            <div class="config-row"><span>Embedding 记忆辅助</span><span class="switch on" aria-hidden="true"></span></div>
+            <div class="config-row"><span>边界保护提示</span><span class="switch on" aria-hidden="true"></span></div>
+          </aside>
+        </div>
+      </article>
+
+      <article class="card full">
+        <h2>信息如何被 Sylanne 切碎使用</h2>
+        <p class="muted">输入不是整块塞进 prompt。WebUI 会把一句话拆成可观察碎片，再显示它被送往记忆、身体、边界和兴趣牵引的过程。这样用户能看到 Sylanne 为什么等待、靠近、修复，或者退后。</p>
+        <div class="slice-demo">
+          <div class="demo-input">
+            <textarea id="sliceInput" aria-label="输入一段消息">Alice：继续刚才的记忆结构。
+Bob：你为什么不理我，我有点受伤。
+Dora：身体 attention 和边界怎么一起算？
+Sylanne：人格签名会慢慢漂移。</textarea>
+            <button id="sliceButton" type="button">切碎这段信息</button>
+            <p class="demo-note">演示只在浏览器本地运行，不发送网络请求。动画展示一句话先被切成 tokens，再进入记忆空间、身体/边界节点、人格建模与漂移轨道，最后汇成 workset 建议。</p>
+          </div>
+          <div class="token-space" id="tokenSpace" aria-live="polite" aria-label="一句话被切成 tokens 后进入 Sylanne 各部门的空间动画">
+            <div class="space-label" style="left: 4%; top: 5%">原句</div>
+            <div class="space-label" style="left: 31%; top: 5%">切片 tokens</div>
+            <div class="space-label" style="left: 58%; top: 5%">记忆 / 身体 / 边界</div>
+            <div class="space-label" style="left: 68%; top: 80%">人格漂移</div>
+          </div>
+        </div>
+      </article>
+    </section>
+
+    <section class="grid" aria-label="架构流程说明">
+      <article class="card full">
+        <h2>架构流程说明（不是 WebUI）</h2>
+        <p class="muted">这张图放在说明文档里，不放进插件 WebUI。它把 4.0 的主链路、旁路辅助和 guard 分叉串在一起：粉色是主生命链路，蓝色是观察/记忆/判断旁路，黄色是边界判断，红色是阻断。计算层故意拆成碎片事件、状态向量、tiny transformer attention 和二进制热路径，不再是旧式文本状态堆叠。</p>
+        <div class="diagram-wrap">
+          <svg class="workflow-svg" viewBox="0 0 1120 720" role="img" aria-label="Sylanne 4.0 全链路流程图">
+            <defs>
+              <marker id="arrow" markerWidth="10" markerHeight="10" refX="8" refY="3" orient="auto" markerUnits="strokeWidth">
+                <path d="M0,0 L0,6 L8,3 z" fill="#ff6b9d"></path>
+              </marker>
+            </defs>
+            <text x="28" y="32" class="swim-label">入口层</text>
+            <line x1="20" y1="54" x2="1100" y2="54" class="swim-line"></line>
+            <text x="28" y="166" class="swim-label">认知整理层</text>
+            <line x1="20" y1="188" x2="1100" y2="188" class="swim-line"></line>
+            <text x="28" y="318" class="swim-label">身体内核层</text>
+            <line x1="20" y1="340" x2="1100" y2="340" class="swim-line"></line>
+            <text x="28" y="476" class="swim-label">输出与观察层</text>
+            <line x1="20" y1="498" x2="1100" y2="498" class="swim-line"></line>
+
+            <g class="node" transform="translate(60 76)"><rect width="148" height="72" rx="18"></rect><text x="74" y="29">AstrBot 事件</text><text x="74" y="51" class="sub">消息 / hook / 命令</text></g>
+            <g class="node" transform="translate(260 76)"><rect width="150" height="72" rx="18"></rect><text x="75" y="29">main.py</text><text x="75" y="51" class="sub">注册 + 薄转发</text></g>
+            <g class="node" transform="translate(462 76)"><rect width="160" height="72" rx="18"></rect><text x="80" y="29">Host Event</text><text x="80" y="51" class="sub">session / text / flags</text></g>
+            <path class="edge" d="M208 112 H260"></path><path class="edge" d="M410 112 H462"></path>
+
+            <g class="node" transform="translate(118 214)"><rect width="160" height="78" rx="18"></rect><text x="80" y="30">对话分段</text><text x="80" y="54" class="sub">延续 / 转题 / 打断</text></g>
+            <g class="node" transform="translate(344 214)"><rect width="164" height="78" rx="18"></rect><text x="82" y="30">碎片工作集</text><text x="82" y="54" class="sub">当前意图 + shadow</text></g>
+            <g class="node" transform="translate(574 214)"><rect width="170" height="78" rx="18"></rect><text x="85" y="30">记忆召回</text><text x="85" y="54" class="sub">关键词 / embedding</text></g>
+            <g class="node" transform="translate(814 214)"><rect width="170" height="78" rx="18"></rect><text x="85" y="30">人格模型</text><text x="85" y="54" class="sub">稳定初始 + 慢漂移</text></g>
+            <path class="edge" d="M542 148 C542 178 198 178 198 214"></path>
+            <path class="edge soft" d="M278 253 H344"></path><path class="edge soft" d="M508 253 H574"></path><path class="edge soft" d="M744 253 H814"></path>
+
+            <g class="node" transform="translate(118 374)"><rect width="170" height="82" rx="20"></rect><text x="85" y="24">Body 向量更新</text><text x="85" y="47" class="sub">事件碎片 → 向量</text><text x="85" y="64" class="sub">线性代数热路径</text></g>
+            <g class="node" transform="translate(360 374)"><rect width="176" height="82" rx="20"></rect><text x="88" y="24">Tiny 神经层</text><text x="88" y="47" class="sub">微型 transformer</text><text x="88" y="64" class="sub">身体 attention 路由</text></g>
+            <g class="node decision" transform="translate(618 364)"><path d="M90 0 L180 51 L90 102 L0 51 Z"></path><text x="90" y="35">Kernel 决策</text><text x="90" y="57" class="sub">表达 / 修复 / 等待</text><text x="90" y="74" class="sub">guard 前判断</text></g>
+            <g class="node" transform="translate(864 374)"><rect width="178" height="82" rx="20"></rect><text x="89" y="24">判断 LLM 通道</text><text x="89" y="47" class="sub">本地 / 轻量 / 独立</text><text x="89" y="64" class="sub">不阻断主链路</text></g>
+            <path class="edge" d="M198 292 C198 322 203 344 203 374"></path>
+            <path class="edge soft" d="M659 292 C659 330 245 330 245 374"></path>
+            <path class="edge soft" d="M899 292 C899 334 288 334 288 395"></path>
+            <path class="edge" d="M288 415 H360"></path><path class="edge guard" d="M536 415 H620"></path><path class="edge soft" d="M864 415 H798"></path>
+            <text x="318" y="405" class="edge-label">状态向量</text>
+            <text x="552" y="405" class="edge-label">注意力后的身体信号</text>
+            <text x="814" y="402" class="edge-label">判断建议</text>
+
+            <g class="node output" transform="translate(130 548)"><rect width="172" height="82" rx="20"></rect><text x="86" y="31">Prompt Fragment</text><text x="86" y="57" class="sub">注入给主 LLM</text></g>
+            <g class="node output" transform="translate(374 548)"><rect width="172" height="82" rx="20"></rect><text x="86" y="31">即时回复</text><text x="86" y="57" class="sub">chat_sylanne</text></g>
+            <g class="node output" transform="translate(618 548)"><rect width="172" height="82" rx="20"></rect><text x="86" y="31">主动 Dispatch</text><text x="86" y="57" class="sub">预算 + 冷却</text></g>
+            <g class="node stop" transform="translate(858 548)"><rect width="172" height="82" rx="20"></rect><text x="86" y="31">等待 / 退后</text><text x="86" y="57" class="sub">边界截断</text></g>
+            <g class="node output" transform="translate(812 76)"><rect width="190" height="72" rx="18"></rect><text x="95" y="29">WebUI 观察舱</text><text x="95" y="51" class="sub">只读 surface</text></g>
+            <path class="edge" d="M666 455 C560 500 216 500 216 548"></path>
+            <path class="edge" d="M705 466 C620 512 460 506 460 548"></path>
+            <path class="edge guard" d="M708 466 V548"></path>
+            <path class="edge block" d="M780 415 C936 440 944 498 944 548"></path>
+            <text x="745" y="515" class="edge-label">允许</text><text x="908" y="500" class="edge-label">不允许</text>
+            <path class="edge soft" d="M708 364 C708 174 812 174 907 148"></path>
+            <text x="746" y="184" class="edge-label">diagnostics / snapshot</text>
+          </svg>
+        </div>
+      </article>
+    </section>
+
+    <section class="grid">
+      <article class="card wide">
+        <div class="flow" aria-label="Sylanne 4.0 全链路">
+          <div class="step"><div class="num">01</div><strong>事件进入</strong><span>AstrBot 消息、LLM request/response、即时聊天命令、主动检查。</span></div>
+          <div class="step"><div class="num">02</div><strong>host 边界</strong><span><code>main.py</code> 只做注册、会话定位和薄转发。</span></div>
+          <div class="step"><div class="num">03</div><strong>对话切片</strong><span>识别延续、转题、退缩、打断，避免把碎片误当完整意图。</span></div>
+          <div class="step"><div class="num">04</div><strong>碎片向量化</strong><span>事件被打碎成向量，走线性代数热路径更新心搏、血流、神经、肌肉、伤口、免疫和死亡负荷。</span></div>
+          <div class="step"><div class="num">05</div><strong>身体 attention</strong><span>tiny transformer 只看低维身体信号，决定哪些器官、记忆和需要先进入判断。</span></div>
+          <div class="step"><div class="num">06</div><strong>记忆与人格</strong><span>关键词优先召回，embedding 辅助；初始人格稳定，漂移很慢。</span></div>
+          <div class="step"><div class="num">07</div><strong>判断与 guard</strong><span>本地判断、轻量判断、独立判断 LLM 都必须服从用户主权边界。</span></div>
+          <div class="step"><div class="num">08</div><strong>输出或等待</strong><span>生成 prompt fragment、即时回复、主动 dispatch 计划，或者被边界截断。</span></div>
+        </div>
+      </article>
+
+      <article class="card">
+        <h2>一句话总结</h2>
+        <p>Sylanne 4.0 的核心不是“更像人”，而是让每一次输入都进入一个有身体、有记忆、有边界、有缓慢可塑性的生命回路。</p>
+        <div>
+          <span class="tag">body-first</span>
+          <span class="tag">readonly observatory</span>
+          <span class="tag">bounded agency</span>
+          <span class="tag">slow plasticity</span>
+        </div>
+      </article>
+    </section>
+
+    <section class="grid">
+      <article class="card full">
+        <h2>七条工作流泳道</h2>
+        <div class="lane">
+          <div class="lane-title">1. 消息入口</div>
+          <div>普通消息进入 <code>on_llm_request</code>，模型回复进入 <code>on_llm_response</code>，不等 LLM 的即时聊天走 <code>chat_sylanne</code>。所有入口都会先被转换成 Sylanne 自己的 host event，而不是直接写旧 engine。</div>
+        </div>
+        <div class="lane">
+          <div class="lane-title">2. 对话分段</div>
+          <div><code>sylanne_alpha/dialogue.py</code> 判断这句话是延续、转题、撤退，还是打断正在发送的回复。这里解决 3.x 最有特色的“碎片不是完整意图”问题。</div>
+        </div>
+        <div class="lane">
+          <div class="lane-title">3. 身体计算</div>
+          <div><code>AlphaBodyState</code> 把事件拆成小向量，走线性更新和二进制热路径。热、痛、疲劳、表达欲、接近欲、修复需求不是文本标签，而是可计算的身体状态。</div>
+        </div>
+        <div class="lane">
+          <div class="lane-title">4. 记忆工作集</div>
+          <div>当前碎片、shadow continuity、memory matches 会被压成一个工作集。关键词召回优先，embedding 只有在无关键词命中且存在向量记录时才介入。</div>
+        </div>
+        <div class="lane">
+          <div class="lane-title">5. 人格建模</div>
+          <div><code>sylanne_alpha/personality.py</code> 给每个会话稳定的初始人格签名。人格会漂移，但漂移步长很小；她不会千篇一律，也不会一天之内变成另一个人。</div>
+        </div>
+        <div class="lane">
+          <div class="lane-title">6. 判断通道</div>
+          <div>本地 gate 是底座；轻量 LLM 可做短判断；独立判断 LLM 可做更重的边界判断。三个 provider 现在都通过 AstrBot provider selector 选择，不再让用户手填 ID。</div>
+        </div>
+        <div class="lane">
+          <div class="lane-title">7. 输出边界</div>
+          <div>最后由 decision 与 guard 决定表达、探索、修复、退后或等待。主动性必须消耗预算，亲密不能越过用户主权。</div>
+        </div>
+      </article>
+    </section>
+
+    <section class="grid">
+      <article class="card full">
+        <h2>模块职责表</h2>
+        <table class="matrix">
+          <thead>
+            <tr><th>模块</th><th>负责什么</th><th>不会做什么</th></tr>
+          </thead>
+          <tbody>
+            <tr><td><code>main.py</code></td><td>AstrBot 插件注册、命令、LLM hook、session 定位、薄转发。</td><td>不重新长成巨型业务文件。</td></tr>
+            <tr><td><code>host.py</code></td><td>request、response、chat、proactive 的运行时边界。</td><td>不在热路径做远程 IO 或无限后台等待。</td></tr>
+            <tr><td><code>body.py</code></td><td>身体器官、需要、记忆、状态向量。</td><td>不暴露旧 3.x engine 内部结构。</td></tr>
+            <tr><td><code>kernel.py</code></td><td>tick、decision、guard、surface。</td><td>不绕过用户主权边界。</td></tr>
+            <tr><td><code>dialogue.py</code></td><td>对话分段、打断识别、撤退识别。</td><td>不输出 raw dialogue。</td></tr>
+            <tr><td><code>workset.py</code></td><td>碎片、shadow、记忆召回整合。</td><td>不让旧记忆无边界污染新话题。</td></tr>
+            <tr><td><code>personality.py</code></td><td>初始人格签名和缓慢漂移。</td><td>不把人格变成一次性 prompt 口癖。</td></tr>
+            <tr><td><code>assessor.py</code></td><td>本地判断、轻量判断、独立判断通道。</td><td>不因 provider 失败阻断主链路。</td></tr>
+            <tr><td><code>workers.py</code></td><td>有限后台队列、lease、checkpoint。</td><td>不保存 raw text、prompt、request、response。</td></tr>
+            <tr><td><code>embedding_memory.py</code></td><td>embedding 辅助召回。</td><td>不在关键词已经命中时浪费 embedding 调用。</td></tr>
+            <tr><td><code>compat/</code></td><td>把旧命令/API 的用户语义映射到 4.0 surface。</td><td>不导入旧 public_api.py 或旧 engine。</td></tr>
+          </tbody>
+        </table>
+      </article>
+    </section>
+
+    <section class="grid">
+      <article class="card wide">
+        <h2>状态如何被外部观察</h2>
+        <p>新增的 <code>sylanne_observatory</code> 是给 WebUI 用的只读观察入口。它拿到的是 4.0 surface，不是内部原始数据。</p>
+        <ul>
+          <li><span class="ok">可看：</span>body、decision、guard、host payload、memory 摘要、配置开关。</li>
+          <li><span class="warn">可诊断：</span>主动性为什么被允许或阻断，当前是表达、修复、退后还是等待。</li>
+          <li><span class="danger">不可外泄：</span>raw dialogue、lineage、turning point、关系推断原始结构。</li>
+        </ul>
+      </article>
+      <article class="card">
+        <h2>WebUI 的第一屏</h2>
+        <p>第一版外部观察页面建议只做四块：身体仪表、边界闸门、记忆工作集、人格漂移。先观察，不控制。控制按钮以后再加。</p>
+      </article>
+    </section>
+
+    <section class="grid">
+      <article class="card full callout">
+        <h2>4.0 的革命点</h2>
+        <p>Sylanne 4.0 不是把一堆状态塞进 prompt，而是把 prompt 变成身体生活的出口。她先感受、记住、判断边界，再决定要不要说话。说话只是结果，不是她的全部。</p>
+      </article>
+    </section>
+  </main>
+
+  <footer>
+    <p>本页是 Sylanne 4.0 alpha 的本地说明页，可直接用浏览器打开。它不连接远程服务，也不包含凭据。</p>
+  </footer>
+<script>
+  const input = document.getElementById("sliceInput");
+  const button = document.getElementById("sliceButton");
+  const stateSpace = document.getElementById("stateSpace");
+  const stateOrbit = document.getElementById("stateOrbit");
+  const stateTooltip = document.getElementById("stateTooltip");
+  const bins = {
+    raw: document.getElementById("rawBin"),
+    memory: document.getElementById("memoryBin"),
+    body: document.getElementById("bodyBin"),
+    workset: document.getElementById("worksetBin"),
+    space: document.getElementById("tokenSpace"),
+  };
+  const metrics = {
+    pulse: document.getElementById("metricPulse"),
+    need: document.getElementById("metricNeed"),
+    risk: document.getElementById("metricRisk"),
+    budget: document.getElementById("metricBudget"),
+    decision: document.getElementById("decisionBox"),
+    memory: document.getElementById("metricMemory"),
+  };
+
+  function seeded(seed) {
+    const value = Math.sin(seed * 12.9898) * 43758.5453;
+    return value - Math.floor(value);
+  }
+
+  function buildStateSpace() {
+    if (!stateSpace || !stateOrbit || !stateTooltip) return;
+    let rotateX = -12;
+    let rotateY = 24;
+    let dragging = false;
+    let lastX = 0;
+    let lastY = 0;
+    const nodes = [];
+    stateOrbit.replaceChildren();
+
+    for (let index = 0; index < 200; index += 1) {
+      const age = index / 199;
+      const theta = Math.acos(1 - 2 * seeded(index + 1));
+      const phi = 2 * Math.PI * seeded(index + 19);
+      const radius = 118 + seeded(index + 41) * 106;
+      const x = Math.sin(theta) * Math.cos(phi) * radius;
+      const y = Math.sin(theta) * Math.sin(phi) * radius * 0.78;
+      const z = Math.cos(theta) * radius;
+      const risk = seeded(index + 73);
+      const need = seeded(index + 97);
+      const pulse = seeded(index + 131);
+      const hue = risk > 0.72 ? 344 : need > 0.66 ? 203 : 138;
+      const depth = (z + radius) / (radius * 2);
+      const node = document.createElement("button");
+      node.type = "button";
+      node.className = `state-node ${index < 8 ? "hot" : ""}`;
+      node.style.setProperty("--x", x.toFixed(2));
+      node.style.setProperty("--y", y.toFixed(2));
+      node.style.setProperty("--z", z.toFixed(2));
+      node.style.setProperty("--s", `${index < 8 ? 24 : 12 + seeded(index + 151) * 16}px`);
+      node.style.setProperty("--o", (0.22 + (1 - age) * 0.74).toFixed(3));
+      node.style.setProperty("--h", String(hue));
+      node.style.setProperty("--scale", (0.80 + depth * 0.92).toFixed(3));
+      node.style.setProperty("--glow", (10 + (1 - age) * 22 + depth * 12).toFixed(2));
+      node.style.setProperty("--depth", (8 + depth * 18).toFixed(2));
+      node.style.setProperty("--shadow", (16 + depth * 24).toFixed(2));
+      node.style.setProperty("--zi", String(Math.round(1000 + z)));
+      node.dataset.x = x.toFixed(2);
+      node.dataset.y = y.toFixed(2);
+      node.dataset.z = z.toFixed(2);
+      node.dataset.scale = (0.80 + depth * 0.92).toFixed(3);
+      node.dataset.depth = (8 + depth * 18).toFixed(2);
+      node.dataset.shadow = (16 + depth * 24).toFixed(2);
+      node.dataset.index = String(index);
+      node.dataset.age = age.toFixed(2);
+      node.dataset.risk = risk.toFixed(2);
+      node.dataset.need = need.toFixed(2);
+      node.dataset.pulse = pulse.toFixed(2);
+      node.dataset.action = risk > 0.72 ? "暂停 / 修复" : need > 0.66 ? "表达" : "等待";
+      node.setAttribute("aria-label", `状态 ${index}`);
+      node.addEventListener("pointerenter", () => focusState(node, nodes));
+      node.addEventListener("pointerleave", () => clearState(nodes));
+      nodes.push(node);
+      stateOrbit.appendChild(node);
+    }
+
+    function applyRotation() {
+      stateOrbit.style.transform = `rotateX(${rotateX}deg) rotateY(${rotateY}deg)`;
+    }
+
+    stateSpace.addEventListener("pointerdown", (event) => {
+      dragging = true;
+      lastX = event.clientX;
+      lastY = event.clientY;
+      stateSpace.setPointerCapture(event.pointerId);
+    });
+    stateSpace.addEventListener("pointermove", (event) => {
+      if (!dragging) return;
+      rotateY += (event.clientX - lastX) * 0.28;
+      rotateX -= (event.clientY - lastY) * 0.22;
+      rotateX = Math.max(-62, Math.min(62, rotateX));
+      lastX = event.clientX;
+      lastY = event.clientY;
+      applyRotation();
+    });
+    stateSpace.addEventListener("pointerup", () => { dragging = false; });
+    stateSpace.addEventListener("pointercancel", () => { dragging = false; });
+    applyRotation();
+  }
+
+  function focusState(target, nodes) {
+    const tx = Number(target.dataset.x);
+    const ty = Number(target.dataset.y);
+    const tz = Number(target.dataset.z);
+    nodes.forEach((node) => {
+      const dx = Number(node.dataset.x) - tx;
+      const dy = Number(node.dataset.y) - ty;
+      const dz = Number(node.dataset.z) - tz;
+      const distance = Math.hypot(dx, dy, dz);
+      if (node === target) {
+        node.style.setProperty("--scale", "2.55");
+        node.style.setProperty("--o", "1");
+        node.style.setProperty("--depth", "28");
+        node.style.setProperty("--shadow", "46");
+        return;
+      }
+      if (distance < 72) {
+        const push = (72 - distance) * 0.9;
+        const length = Math.max(1, Math.hypot(dx, dy));
+        const x = Number(node.dataset.x) + dx / length * push;
+        const y = Number(node.dataset.y) + dy / length * push;
+        node.style.setProperty("--x", x.toFixed(2));
+        node.style.setProperty("--y", y.toFixed(2));
+      }
+    });
+    stateTooltip.innerHTML = `<strong>状态点 #${target.dataset.index}</strong><dl><dt>心搏</dt><dd>${target.dataset.pulse}</dd><dt>需要</dt><dd>${target.dataset.need}</dd><dt>风险</dt><dd>${target.dataset.risk}</dd><dt>年龄</dt><dd>${target.dataset.age}</dd><dt>建议</dt><dd>${target.dataset.action}</dd></dl>`;
+    stateTooltip.classList.add("visible");
+  }
+
+  function clearState(nodes) {
+    nodes.forEach((node) => {
+      node.style.setProperty("--x", node.dataset.x);
+      node.style.setProperty("--y", node.dataset.y);
+      node.style.setProperty("--scale", node.dataset.scale);
+      node.style.setProperty("--o", (0.22 + (1 - Number(node.dataset.age)) * 0.74).toFixed(3));
+      node.style.setProperty("--depth", node.dataset.depth);
+      node.style.setProperty("--shadow", node.dataset.shadow);
+    });
+    stateTooltip.classList.remove("visible");
+  }
+
+  function shard(text, className, value) {
+    const node = document.createElement("div");
+    node.className = `shard ${className || ""}`;
+    node.textContent = text;
+    if (typeof value === "number") {
+      const bar = document.createElement("div");
+      bar.className = "vector-bar";
+      const fill = document.createElement("span");
+      fill.style.setProperty("--w", `${Math.round(value * 100)}%`);
+      bar.appendChild(fill);
+      node.appendChild(bar);
+    }
+    return node;
+  }
+
+  function classify(line) {
+    const text = line.trim();
+    const memory = /记忆|刚才|继续|以前|remember/i.test(text);
+    const body = /身体|attention|心跳|累|痛|受伤|靠近/i.test(text);
+    const guard = /边界|不理|为什么|受伤|打断|退后/i.test(text);
+    const interest = /Sylanne|attention|记忆|身体/i.test(text);
+    const personality = /人格|漂移|性格|signature|plasticity/i.test(text);
+    const pressure = Math.min(1, 0.18 + (text.length / 80) + (guard ? 0.28 : 0) + (interest ? 0.18 : 0) + (personality ? 0.16 : 0));
+    return { text, memory, body, guard, interest, personality, pressure };
+  }
+
+  function tokenType(token) {
+    if (/记忆|刚才|继续|以前|remember/i.test(token)) return "memory";
+    if (/身体|attention|心跳|累|痛|受伤|靠近/i.test(token)) return "body";
+    if (/边界|不理|为什么|打断|退后/i.test(token)) return "guard";
+    if (/人格|漂移|性格|signature|plasticity/i.test(token)) return "personality";
+    if (/Sylanne|兴趣|表达|需要/i.test(token)) return "output";
+    return "";
+  }
+
+  function addLane(x, y, width, rotation, delay = 0) {
+    const lane = document.createElement("div");
+    lane.className = "token-lane";
+    lane.style.setProperty("--x1", `${x}%`);
+    lane.style.setProperty("--y1", `${y}%`);
+    lane.style.setProperty("--w", `${width}%`);
+    lane.style.setProperty("--r", `${rotation}deg`);
+    lane.style.animationDelay = `${delay}ms`;
+    bins.space.appendChild(lane);
+  }
+
+  function addMemoryLink(x, y, width, rotation, delay = 0) {
+    const link = document.createElement("div");
+    link.className = "memory-link";
+    link.style.setProperty("--x1", `${x}%`);
+    link.style.setProperty("--y1", `${y}%`);
+    link.style.setProperty("--w", `${width}%`);
+    link.style.setProperty("--r", `${rotation}deg`);
+    link.style.animationDelay = `${delay}ms`;
+    bins.space.appendChild(link);
+  }
+
+  function addMemoryDot(x, y, type, delay = 0, size = 11) {
+    const dot = document.createElement("div");
+    dot.className = `memory-dot ${type || ""}`;
+    dot.style.setProperty("--x", `${x}%`);
+    dot.style.setProperty("--y", `${y}%`);
+    dot.style.setProperty("--s", `${size}px`);
+    dot.style.setProperty("--d", `${delay}ms`);
+    bins.space.appendChild(dot);
+  }
+
+  function addToken(text, type, x, y, delay) {
+    const node = document.createElement("div");
+    node.className = `token-node ${type}`;
+    node.textContent = text;
+    node.style.setProperty("--x", `${x}%`);
+    node.style.setProperty("--y", `${y}%`);
+    node.style.setProperty("--delay", `${delay}ms`);
+    bins.space.appendChild(node);
+  }
+
+  function seedTokenSpace() {
+    bins.space.replaceChildren();
+    [
+      ["原句", 4, 5],
+      ["切片 tokens", 29, 5],
+      ["记忆 / 身体 / 边界", 56, 5],
+      ["人格漂移", 68, 88],
+    ].forEach(([text, x, y]) => {
+      const label = document.createElement("div");
+      label.className = "space-label";
+      label.style.left = `${x}%`;
+      label.style.top = `${y}%`;
+      label.textContent = text;
+      bins.space.appendChild(label);
+    });
+    const ring = document.createElement("div");
+    ring.className = "drift-ring";
+    bins.space.appendChild(ring);
+    addLane(12, 31, 25, -10);
+    addLane(32, 30, 25, 10, 160);
+    addLane(34, 55, 24, -18, 320);
+    addLane(57, 47, 24, 24, 480);
+    addLane(57, 33, 20, -32, 640);
+    addMemoryDot(60, 22, "", -200, 9);
+    addMemoryDot(66, 36, "warm", -500, 13);
+    addMemoryDot(61, 52, "guard", -900, 10);
+    addMemoryDot(72, 60, "", -1200, 8);
+    addMemoryLink(60, 22, 12, 34, 120);
+    addMemoryLink(61, 52, 11, -27, 260);
+    addMemoryLink(66, 36, 9, 58, 420);
+  }
+
+  function renderSlices() {
+    seedTokenSpace();
+    const pieces = input.value.split(/\n|。|！|？/).map((line) => line.trim()).filter(Boolean).map(classify);
+    if (!pieces.length) return;
+
+    let risk = 0;
+    let need = 0;
+    let pulse = 0.44;
+    let budget = 0.86;
+    let deferred = 0;
+    let memoryCount = 0;
+    let personalityDrift = 0.02;
+    let tokenIndex = 0;
+
+    pieces.forEach((piece, index) => {
+      const sentenceY = 18 + index * 15;
+      window.setTimeout(() => addToken(piece.text, "sentence", 13, sentenceY, 0), index * 90);
+      const tokens = piece.text.split(/[：:，,\s]+/).map((token) => token.trim()).filter(Boolean);
+      tokens.forEach((token, tokenOffset) => {
+        const type = tokenType(token) || (piece.interest ? "output" : "");
+        const x = 30 + (tokenOffset % 3) * 8;
+        const y = 16 + ((tokenIndex * 9) % 70);
+        const delay = 130 + tokenIndex * 70;
+        window.setTimeout(() => addToken(token, type, x, y, 0), delay);
+        if (type) {
+          const targetX = type === "memory" ? 59 : type === "body" ? 62 : type === "guard" ? 74 : type === "personality" ? 72 : 84;
+          const targetY = type === "memory" ? 22 + (memoryCount * 13) % 44 : type === "body" ? 52 : type === "guard" ? 38 : type === "personality" ? 80 : 60;
+          window.setTimeout(() => addToken(token, type, targetX, targetY, 0), delay + 380);
+        }
+        tokenIndex += 1;
+      });
+
+      if (piece.memory || piece.interest) {
+        need += piece.interest ? 0.12 : 0.06;
+        memoryCount += 1;
+      } else {
+        deferred += 1;
+      }
+      if (piece.body || piece.guard) {
+        risk += piece.guard ? 0.18 : 0.06;
+        pulse += piece.body ? 0.05 : 0.02;
+        budget -= piece.guard ? 0.07 : 0.02;
+      }
+      if (piece.personality) {
+        personalityDrift += 0.03;
+      }
+    });
+
+    risk = Math.min(0.98, risk);
+    need = Math.min(0.98, need + pieces.length * 0.04);
+    pulse = Math.min(0.98, pulse);
+    budget = Math.max(0.08, budget);
+    const action = risk > 0.55 ? "暂停 / 修复" : (need > 0.35 ? "表达" : "等待");
+    const primary = risk > need ? "边界" : "注意力";
+
+    window.setTimeout(() => {
+      addToken(`主导：${primary}`, primary === "边界" ? "guard result" : "output result", 84, 28, 0);
+      addToken(`记忆连接：${memoryCount}`, "memory result", 82, 46, 0);
+      addToken(`漂移 +${personalityDrift.toFixed(2)}`, "personality result", 73, 82, 0);
+      addToken(`建议：${action}`, action.includes("修复") ? "guard result" : "output result", 84, 64, 0);
+      if (metrics.pulse) metrics.pulse.textContent = pulse.toFixed(2);
+      if (metrics.need) metrics.need.textContent = need.toFixed(2);
+      if (metrics.risk) metrics.risk.textContent = risk.toFixed(2);
+      if (metrics.budget) metrics.budget.textContent = budget.toFixed(2);
+      if (metrics.memory) metrics.memory.textContent = String(memoryCount);
+      if (metrics.decision) metrics.decision.textContent = `当前建议：${action}。原因：${primary === "边界" ? "边界信号更强，先保护关系。" : "兴趣和表达需求更强，可以形成回应。"}`;
+    }, 980 + tokenIndex * 70);
+  }
+
+  button.addEventListener("click", renderSlices);
+  buildStateSpace();
+  renderSlices();
+</script>
+</body>
+</html>
