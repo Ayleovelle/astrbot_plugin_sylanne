@@ -1313,6 +1313,7 @@ class EmotionalStatePlugin(Star):
         new_prompt = new_prompt.strip()
 
         request.prompt = new_prompt
+        logger.info(f"Sylanne injected prompt ({len(new_prompt)} chars): {new_prompt[:300]}")
 
         # Start life simulator once (lazy init on first LLM request)
         if not getattr(self, "_life_simulator_started", False):
