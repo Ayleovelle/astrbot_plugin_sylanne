@@ -1709,7 +1709,7 @@ class EmotionalStatePlugin(Star):
 
         # Dispatch segments in background
         self.logger.info(f"Sylanne segmented reply queued: session={session_key} parts={len(parts)}")
-        task = asyncio.ensure_future(self._dispatch_segmented_parts(origin, parts))
+        task = asyncio.ensure_future(self._dispatch_segmented_parts(origin, parts, session_key=session_key))
         self._background_tasks.append(task)
         task.add_done_callback(lambda t: self._background_tasks.remove(t) if t in self._background_tasks else None)
         self._segmented_tasks[session_key] = task
@@ -1773,7 +1773,7 @@ class EmotionalStatePlugin(Star):
     # ------------------------------------------------------------------
     # Segmented dispatch
     # ------------------------------------------------------------------
-    async def _dispatch_segmented_parts(self, origin: str, parts: list[dict[str, Any]]) -> None:
+    async def _dispatch_segmented_parts(self, origin: str, parts: list[dict[str, Any]], session_key: str = "") -> None:
         context = self.context
         if not hasattr(context, "send_message"):
             return
@@ -1788,6 +1788,9 @@ class EmotionalStatePlugin(Star):
             self.logger.info(f"Sylanne segmented reply part {idx}/{total}: {text[:60]}")
             message = self._astrbot_message(text)
             await context.send_message(origin, message)
+        # All parts sent successfully — clear unfinished marker
+        if session_key:
+            self._unfinished_replies.pop(session_key, None)
 
     # ------------------------------------------------------------------
     # Memory prompt fragment
