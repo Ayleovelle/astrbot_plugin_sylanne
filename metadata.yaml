@@ -1,8 +1,8 @@
 name: astrbot_plugin_sylanne
 display_name: Sylanne
-desc: "Sylanne-Embodiment: sovereign emotional body runtime with Void-Scar engine and Relational Sheaf Theory."
-short_desc: "Sylanne-Embodiment 1.1.0"
-version: Embodiment-1.1.0
+desc: "Sylanne-Embodiment：不可逆的多关系计算引擎。伤痕代数 + 空洞微积分 + 关系层论。"
+short_desc: "Sylanne-Embodiment 1.1.1"
+version: Embodiment-1.1.1
 author: Aylovelle.S.S
 license: AGPL-3.0-or-later
 repo: "https://github.com/Ayleovelle/astrbot_plugin_sylanne"
