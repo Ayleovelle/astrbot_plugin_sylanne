@@ -205,6 +205,7 @@ flowchart TD
     L4 --> L5["L5 HGT 决策融合<br/>7 类型 token → 类型感知 attention<br/>→ 4 维决策向量<br/>⏱ 0.4ms"]
     L5 --> L6["L6 自创生边界<br/>外力投影 → 穿透判断<br/>吸收 or 相变（≤6°旋转）<br/>⏱ 0.01ms"]
     L6 --> L7["L7 相变表达<br/>压力积累 → 超过阈值<br/>hint / normal / urgent<br/>⏱ 0.001ms"]
+    FAST --> L7
 ```
 
 ### 反馈闭环
@@ -252,6 +253,14 @@ $$\Phi:\; |\{i: d_i = d\}| > \theta_{void} \implies \text{genesis}(v_{new}) \qua
 **Coherence（涌现共振）：**
 
 $$r = 1 - \frac{\sum_v \pi_v \cdot \mathbb{1}[M_{d_v} < 0.5]}{\sum_v \pi_v + \epsilon}$$
+
+**Relational Sheaf 传播（层拉普拉斯扩散）：**
+
+$$\frac{\partial \mathbf{x}_0}{\partial t} = -\alpha \cdot L_\mathcal{F}(\mathbf{x}_0) + \mathbf{f}_{local}(t), \quad L_\mathcal{F} = \sum_i P_i^T P_i \cdot \mathbf{x}_0 - P_i^T \cdot \rho_0^i(s_i)$$
+
+**上同调不一致性：**
+
+$$\dim H^1(K, \mathcal{F}) > 0 \iff \text{存在不可调和的跨关系矛盾}$$
 
 ---
 
