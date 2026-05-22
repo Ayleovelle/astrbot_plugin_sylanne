@@ -17,7 +17,7 @@ from typing import Any
 
 ASSESSOR_ASYNC_SCHEMA_VERSION = "sylanne.alpha.assessor_async.v1"
 
-_FAST_TIMEOUT = 1.0
+_FAST_TIMEOUT = 2.0
 _MAIN_TIMEOUT = 15.0  # Main runs in background, no rush
 
 

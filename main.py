@@ -1295,8 +1295,20 @@ class EmotionalStatePlugin(Star):
             emotion = host.kernel.computation.engine.observe()
             sheaf_obs = host.kernel.computation.sheaf.observe()
             expr_state = host.kernel.computation.expression.state()
-            # Instant assessment from last LLM assessor (if available)
+            # Run fast assessor SYNCHRONOUSLY (front-stage, 2s timeout)
+            # This gives us instant emotion for the CURRENT message
+            fast_assessment = {}
+            fast_enabled = self._cfg_bool("sylanne_alpha_assessor_llm_enabled")
+            if fast_enabled and message_text:
+                try:
+                    fast_assessment = await self._async_assessor.assess_fast(
+                        message_text, self._assessor_llm_call
+                    )
+                except Exception:
+                    pass
+            # Merge: fast (current) + last_assessment (previous round's main)
             last_assessment = host.kernel.computation._last_assessment or {}
+            current_assessment = {**last_assessment, **fast_assessment} if fast_assessment else last_assessment
             # Compact state signal — just the key dimensions LLM needs
             warmth = emotion.get("warmth", 0.0)
             tension = emotion.get("tension", 0.0)
@@ -1304,20 +1316,20 @@ class EmotionalStatePlugin(Star):
             void_pressure = emotion.get("void_pressure", 0.0)
             drive = expr_state.get("intensity", 0.0)
             dissociation = sheaf_obs.get("dissociation_pressure", 0.0)
-            # Assessor result is from PREVIOUS round (async, not ready for current)
-            valence = float(last_assessment.get("valence", 0.0))
-            arousal = float(last_assessment.get("arousal", 0.0))
-            intent = str(last_assessment.get("intent", ""))
+            # Current assessment: fast (this round) merged with main (previous round)
+            valence = float(current_assessment.get("valence", 0.0))
+            arousal = float(current_assessment.get("arousal", 0.0))
+            intent = str(current_assessment.get("intent", ""))
             signals = []
-            # Previous-round mood hint (low weight, just reference)
+            # Instant mood from fast assessor (reacts to THIS message)
             if valence > 0.5:
-                signals.append("上一轮对方似乎心情不错")
+                signals.append("对方心情不错")
             elif valence < -0.5:
-                signals.append("上一轮对方似乎心情不太好")
+                signals.append("对方心情不太好")
             if arousal > 0.7:
-                signals.append("上一轮对方情绪比较激动")
+                signals.append("对方情绪比较激动")
             if intent and intent not in ("", "neutral", "中性"):
-                signals.append(f"上一轮感觉对方在{intent}")
+                signals.append(f"感觉对方在{intent}")
             # Long-term state (accumulated over many messages)
             if warmth > 0.3:
                 signals.append(f"亲近感{'高' if warmth > 0.6 else '中'}")
