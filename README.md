@@ -350,8 +350,8 @@ $$\dim H^1(K, \mathcal{F}) > 0 \iff \text{存在不可调和的跨关系矛盾}$
 
 | 文档 | 内容 | 格式 |
 | --- | --- | --- |
-| [**Scar Algebra, Void Calculus & Relational Sheaf Theory（中文版）**](docs/scar_void_arxiv_paper_zh_v3.pdf) | 三项原创理论的完整论文：公理系统、定理证明、9 组实验验证 | 中文 |
-| [**Scar Algebra, Void Calculus & Relational Sheaf Theory（English）**](docs/scar_void_arxiv_paper_v2.pdf) | Full paper with axioms, theorems, proofs, and 9 experiments | English |
+| [**Scar Algebra, Void Calculus & Relational Sheaf Theory（中文版）**](docs/scar_void_arxiv_paper_zh_v3.pdf) | 三项原创理论 + 人格闭环：公理系统、定理证明、11 组实验 | 中文 |
+| [**Scar Algebra, Void Calculus & Relational Sheaf Theory（English）**](docs/scar_void_arxiv_paper_v2.pdf) | Full paper with axioms, theorems, proofs, and 11 experiments | English |
 
 ### 实验数据
 
