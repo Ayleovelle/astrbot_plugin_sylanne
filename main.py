@@ -1134,7 +1134,10 @@ class EmotionalStatePlugin(Star):
         intercept = bool((self.config or {}).get("sylanne_alpha_realtime_intercept_llm_response"))
 
         # Fragment debounce: wait for user to finish typing
-        if realtime_enabled and message_text:
+        # Skip debounce if this is a follow-up message (AstrBot already handled merging)
+        is_follow_up = bool(getattr(event, "_is_follow_up", False) or getattr(event, "order_seq", None) is not None)
+        active_reply = session_key in self._segmented_tasks and not self._segmented_tasks[session_key].done()
+        if realtime_enabled and message_text and not is_follow_up and not active_reply:
             probe_delay = float((self.config or {}).get("realtime_input_completion_probe_delay_seconds", 1.5))
             max_wait = float((self.config or {}).get("realtime_input_completion_max_wait_seconds", 4.0))
 
