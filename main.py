@@ -1288,9 +1288,44 @@ class EmotionalStatePlugin(Star):
         if message_text and realtime_enabled:
             user_anchor = f"当前：{message_text}"
 
+        # Build emotion/relationship state signal from computation spine
+        state_fragment = ""
+        if realtime_enabled:
+            host = self._host(session_key)
+            emotion = host.kernel.computation.engine.observe()
+            sheaf_obs = host.kernel.computation.sheaf.observe()
+            expr_state = host.kernel.computation.expression.state()
+            # Compact state signal — just the key dimensions LLM needs
+            warmth = emotion.get("warmth", 0.0)
+            tension = emotion.get("tension", 0.0)
+            coherence = emotion.get("coherence", 1.0)
+            void_pressure = emotion.get("void_pressure", 0.0)
+            drive = expr_state.get("intensity", 0.0)
+            dissociation = sheaf_obs.get("dissociation_pressure", 0.0)
+            # Only inject if there's something meaningful to say
+            signals = []
+            if warmth > 0.3:
+                signals.append(f"亲近感{'高' if warmth > 0.6 else '中'}")
+            if tension > 0.3:
+                signals.append(f"紧张感{'高' if tension > 0.6 else '中'}")
+            if coherence < 0.7:
+                signals.append("内心矛盾")
+            if void_pressure > 5.0:
+                signals.append("有话想说但在忍")
+            if dissociation > 0.3:
+                signals.append("跨关系压力")
+            if drive > 0.6:
+                signals.append("表达欲强")
+            elif drive < 0.2:
+                signals.append("不太想说话")
+            if signals:
+                state_fragment = f"[当前状态：{'，'.join(signals)}]"
+
         # Assemble final prompt: background context FIRST, user message LAST
         # LLM recency bias ensures current message gets highest attention
         bg_parts = []
+        if state_fragment:
+            bg_parts.append(state_fragment)
         if time_fragment:
             bg_parts.append(time_fragment)
         if outreach_fragment:
@@ -1709,7 +1744,7 @@ class EmotionalStatePlugin(Star):
 
         # Dispatch segments in background
         self.logger.info(f"Sylanne segmented reply queued: session={session_key} parts={len(parts)}")
-        task = asyncio.ensure_future(self._dispatch_segmented_parts(origin, parts))
+        task = asyncio.ensure_future(self._dispatch_segmented_parts(origin, parts, session_key=session_key))
         self._background_tasks.append(task)
         task.add_done_callback(lambda t: self._background_tasks.remove(t) if t in self._background_tasks else None)
         self._segmented_tasks[session_key] = task
@@ -1773,7 +1808,7 @@ class EmotionalStatePlugin(Star):
     # ------------------------------------------------------------------
     # Segmented dispatch
     # ------------------------------------------------------------------
-    async def _dispatch_segmented_parts(self, origin: str, parts: list[dict[str, Any]]) -> None:
+    async def _dispatch_segmented_parts(self, origin: str, parts: list[dict[str, Any]], session_key: str = "") -> None:
         context = self.context
         if not hasattr(context, "send_message"):
             return
@@ -1788,6 +1823,9 @@ class EmotionalStatePlugin(Star):
             self.logger.info(f"Sylanne segmented reply part {idx}/{total}: {text[:60]}")
             message = self._astrbot_message(text)
             await context.send_message(origin, message)
+        # All parts sent successfully — clear unfinished marker
+        if session_key:
+            self._unfinished_replies.pop(session_key, None)
 
     # ------------------------------------------------------------------
     # Memory prompt fragment
