@@ -1,11 +1,18 @@
-"""Adaptive rhythm learning: observe high-intimacy users' messaging patterns.
+"""Adaptive rhythm synchronization: deliberate mutual pacing adjustment.
 
-The bot gradually mirrors the segmentation rhythm of users it's close to,
-creating a "same wavelength" feeling in conversation pacing.
+Real relationships don't passively mirror — both sides deliberately adjust.
+The higher-frequency side feels loss when ignored, deliberately slows down
+(with tone degrading too), and pressure accumulates silently until eruption.
+
+Key insight from user research:
+- Synchronization is DELIBERATE, not unconscious
+- The faster side slows down when ignored AND tone gets worse
+- Frequency change accompanies tone change (coupled, not decoupled)
+- Long-term frequency mismatch accumulates into void pressure
 """
 from __future__ import annotations
 
-import time
+import math
 from collections import deque
 from typing import Any
 
@@ -146,12 +153,41 @@ class RhythmLearner:
         self._profiles[session_key].observe(text, timestamp)
 
     def get_rhythm_params(self, session_key: str, default_max_part: int = 48,
-                          default_cps: float = 7.5, blend: float = 0.6) -> tuple[int, float]:
-        """Get modulated segmentation params for this session."""
+                          default_cps: float = 7.5, blend: float = 0.6,
+                          expression_drive: float = 0.5,
+                          recent_ignored_rate: float = 0.0) -> tuple[int, float]:
+        """Get modulated segmentation params — deliberate synchronization.
+
+        Unlike passive learning, this is a conscious decision:
+        - High expression_drive → actively speed up toward user rhythm
+        - High ignored_rate → deliberately slow down (pull back)
+        - The blend is modulated by drive (wanting to sync) vs withdrawal (being ignored)
+        """
         profile = self._profiles.get(session_key)
         if profile is None or profile.confidence < 0.1:
             return default_max_part, default_cps
-        return profile.modulate(default_max_part, default_cps, blend)
+
+        # Deliberate adjustment: drive pushes toward sync, ignored pulls back
+        # When ignored a lot, bot deliberately reduces its own frequency
+        drive_factor = min(1.0, expression_drive * 1.5)
+        withdrawal_factor = min(0.8, recent_ignored_rate * 2.0)
+
+        # Net sync intent: positive = want to sync, negative = pulling back
+        sync_intent = drive_factor - withdrawal_factor
+        effective_blend = max(0.0, blend * profile.confidence * max(0.1, sync_intent))
+
+        if effective_blend < 0.05:
+            # Pulling back: use slower-than-default rhythm
+            slowdown = 1.0 + withdrawal_factor * 0.5
+            return int(default_max_part * slowdown), default_cps / slowdown
+
+        learned_part = max(12, min(120, int(profile.avg_part_chars)))
+        learned_cps = profile.chars_per_second
+
+        blended_part = int(default_max_part * (1 - effective_blend) + learned_part * effective_blend)
+        blended_cps = default_cps * (1 - effective_blend) + learned_cps * effective_blend
+
+        return max(12, min(120, blended_part)), max(2.0, min(20.0, blended_cps))
 
     def profile(self, session_key: str) -> RhythmProfile | None:
         return self._profiles.get(session_key)

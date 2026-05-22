@@ -1670,8 +1670,17 @@ class EmotionalStatePlugin(Star):
         cfg = self._config or {}
         default_max_part = int(cfg.get("realtime_chat_max_part_chars", 48))
         default_cps = 7.5
+        host = self._host(session_key)
+        expr_drive = host.kernel.computation.engine.expression_drive()
+        last_times = [t for t in self._last_bot_expression_time.values() if t > 0]
+        recent_ignored = 0.0
+        if len(last_times) > 3:
+            now = time.time()
+            ignored_count = sum(1 for t in last_times[-10:] if now - t > 300)
+            recent_ignored = ignored_count / min(10, len(last_times))
         max_part_chars, cps = self._rhythm_learner.get_rhythm_params(
             session_key, default_max_part=default_max_part, default_cps=default_cps,
+            expression_drive=expr_drive, recent_ignored_rate=recent_ignored,
         )
         plan = realtime_plan(session_key, cleaned, max_part_chars=max_part_chars, chars_per_second=cps)
         parts = plan.get("message_parts", [])
