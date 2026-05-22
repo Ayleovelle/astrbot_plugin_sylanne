@@ -1471,6 +1471,26 @@ class EmotionalStatePlugin(Star):
             # Rhythm learning: observe user message timing for adaptive segmentation
             engine_obs = host.kernel.computation.engine.observe()
             self._rhythm_learner.observe_user_message(session_key, text, now, engine_obs)
+
+            # Memory maintenance: decay old memories, store embedding for current message
+            body = host.kernel.body
+            body.decay_memory(0.98)  # Slight decay each message
+            if len(body.memory.get("traces", [])) > 50:
+                body.compress_memory(limit=50)
+            # Store embedding vector in the latest trace (for future recall)
+            embedding_enabled = bool(self._config.get("sylanne_alpha_embedding_memory_enabled"))
+            embedding_provider_id = str(self._config.get("sylanne_alpha_embedding_memory_provider_id") or "")
+            if embedding_enabled and embedding_provider_id and text:
+                try:
+                    provider = self._get_embedding_provider(embedding_provider_id)
+                    if provider:
+                        vec = await provider.get_embedding(text[:100])
+                        if vec:
+                            traces = body.memory.get("traces", [])
+                            if traces:
+                                traces[-1]["embedding"] = vec
+                except Exception:
+                    pass
         except Exception:
             # Fallback: observe without assessment
             try:
