@@ -1295,6 +1295,8 @@ class EmotionalStatePlugin(Star):
             emotion = host.kernel.computation.engine.observe()
             sheaf_obs = host.kernel.computation.sheaf.observe()
             expr_state = host.kernel.computation.expression.state()
+            # Instant assessment from last LLM assessor (if available)
+            last_assessment = host.kernel.computation._last_assessment or {}
             # Compact state signal — just the key dimensions LLM needs
             warmth = emotion.get("warmth", 0.0)
             tension = emotion.get("tension", 0.0)
@@ -1302,8 +1304,21 @@ class EmotionalStatePlugin(Star):
             void_pressure = emotion.get("void_pressure", 0.0)
             drive = expr_state.get("intensity", 0.0)
             dissociation = sheaf_obs.get("dissociation_pressure", 0.0)
-            # Only inject if there's something meaningful to say
+            # Assessor result is from PREVIOUS round (async, not ready for current)
+            valence = float(last_assessment.get("valence", 0.0))
+            arousal = float(last_assessment.get("arousal", 0.0))
+            intent = str(last_assessment.get("intent", ""))
             signals = []
+            # Previous-round mood hint (low weight, just reference)
+            if valence > 0.5:
+                signals.append("上一轮对方似乎心情不错")
+            elif valence < -0.5:
+                signals.append("上一轮对方似乎心情不太好")
+            if arousal > 0.7:
+                signals.append("上一轮对方情绪比较激动")
+            if intent and intent not in ("", "neutral", "中性"):
+                signals.append(f"上一轮感觉对方在{intent}")
+            # Long-term state (accumulated over many messages)
             if warmth > 0.3:
                 signals.append(f"亲近感{'高' if warmth > 0.6 else '中'}")
             if tension > 0.3:
@@ -1316,7 +1331,8 @@ class EmotionalStatePlugin(Star):
                 signals.append("跨关系压力")
             if drive > 0.6:
                 signals.append("表达欲强")
-            elif drive < 0.2:
+            elif drive < 0.2 and void_pressure > 1.0:
+                # Only signal low drive when there's actual suppression (not just empty state)
                 signals.append("不太想说话")
             if signals:
                 state_fragment = f"[当前状态：{'，'.join(signals)}]"
