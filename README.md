@@ -2,7 +2,7 @@
 
 > <span style="font-size: 1.08em;"><strong>Sylanne-Embodiment：不可逆的关系计算引擎。</strong>不再模拟情绪标签，而是让对话在躯体上留下伤痕、在沉默中积累压力、在关系里长出不可撤销的形状。</span>
 
-![版本 Embodiment-1.1.0](https://img.shields.io/badge/version-Embodiment--1.1.0-red.svg)
+![版本 Embodiment-1.1.2](https://img.shields.io/badge/version-Embodiment--1.1.2-red.svg)
 ![AstrBot >=4.9.2,<5.0.0](https://img.shields.io/badge/AstrBot-%3E%3D4.9.2%2C%3C5.0.0-green)
 ![Python 3.10+](https://img.shields.io/badge/Python-3.10%2B-yellow)
 ![许可证 AGPL-3.0-or-later](https://img.shields.io/badge/license-AGPL--3.0--or--later-red)
@@ -12,7 +12,7 @@
 
 <img align="right" src="docs/assets/sylanne-mascot.gif" width="220" alt="Sylanne animated mascot">
 
-`astrbot_plugin_sylanne` Embodiment-1.1.0 是一次从底层计算逻辑开始的完全重写。经过十余次迭代打磨，她不再用线性状态空间模拟情绪，而是用三套原创形式化理论——**Scar Algebra（伤痕代数）**、**Void Calculus（空洞微积分）** 和 **Relational Sheaf Theory（关系层论）**——构建了一个不可逆的多关系计算引擎。
+`astrbot_plugin_sylanne` Embodiment-1.1.2 是一次从底层计算逻辑开始的完全重写。经过十余次迭代打磨，她不再用线性状态空间模拟情绪，而是用三套原创形式化理论——**Scar Algebra（伤痕代数）**、**Void Calculus（空洞微积分）** 和 **Relational Sheaf Theory（关系层论）**——构建了一个不可逆的多关系计算引擎。
 
 > 让不同人格的 bot 在长期对话中，留下不可撤销的伤痕、积累无法忽视的沉默压力、在关系的反复碰撞里长出只属于这段关系的形状。
 
@@ -298,15 +298,20 @@ $$\dim H^1(K, \mathcal{F}) > 0 \iff \text{存在不可调和的跨关系矛盾}$
 
 ## 与 3.0 对比
 
-本版本功能更强，架构更干净。实机延迟测试（1c2g，GPT-5.5，250 次/组，0 失败）：
+本版本功能更强，架构更干净。实机延迟测试（1c2g，GPT-5.5，250 对 ABAB 交替，504 次成功，0 失败）：
 
 | 指标 | 关插件 baseline | 开 Sylanne 全功能 | 增量 |
 | --- | --- | --- | --- |
-| **mean** | 3351.1ms | 3980.4ms | **+629.3ms** |
-| **p50** | 3130.7ms | 3433.0ms | **+302.3ms** |
-| **p95** | 5210.7ms | 7166.3ms | +1955.6ms |
-| **TTFT mean** | — | — | **+549.1ms** |
-| **TTFT p50** | — | — | **+321.6ms** |
+| **mean** | 3959.2ms | 3838.3ms | **-120.9ms** |
+| **p50** | 3554.7ms | 3425.2ms | **-129.5ms** |
+| **p95** | 7250.4ms | 6082.7ms | **-1167.7ms** |
+| **TTFT mean** | 3003.4ms | 2858.1ms | **-145.2ms** |
+
+配对差分：Sylanne 更快 138 对 / 更慢 112 对，平均配对增量 **-120.9ms**。
+
+结论：7 层计算栈 + Relational Sheaf + 异步 assessor 的架构下，**没有可见延迟增量**。远端波动范围内 Sylanne 组甚至略快。
+
+对比 3.x 全功能增量 +4469ms，Embodiment 实现了**零可见延迟**。
 
 对比 3.x 全功能增量 +4469ms，Embodiment 的 p50 增量仅 +302ms——**快了 15 倍**。
 
@@ -426,7 +431,7 @@ Void Calculus 能区分"从未讨论"/"已解决"/"主动回避"三种状态—�
 
 ## 从 3.x 升级
 
-Embodiment-1.1.0 是完全重写，但对 3.x 用户做了兼容：
+Embodiment 是完全重写，但对 3.x 用户做了兼容：
 - 配置键名保持兼容（旧配置值不丢，升级后无需重新配置）
 - 旧状态文件通过 `import_sylanne_legacy` 自动迁入新架构（记忆、关系数据不丢失）
 - 旧 README 和文档保留在 [3.x release](https://github.com/Ayleovelle/astrbot_plugin_sylanne/releases/tag/v3.0.0)
