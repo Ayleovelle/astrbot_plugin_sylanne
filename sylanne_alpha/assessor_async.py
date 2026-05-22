@@ -17,8 +17,8 @@ from typing import Any
 
 ASSESSOR_ASYNC_SCHEMA_VERSION = "sylanne.alpha.assessor_async.v1"
 
-_FAST_TIMEOUT = 1.5
-_MAIN_TIMEOUT = 3.0
+_FAST_TIMEOUT = 1.0
+_MAIN_TIMEOUT = 15.0  # Main runs in background, no rush
 
 
 class AsyncAssessor:
@@ -137,11 +137,8 @@ class AsyncAssessor:
 
     def _build_fast_prompt(self, text: str) -> str:
         """Minimal prompt for fast assessor -- single-line JSON output."""
-        preview = text[:100]
-        return (
-            f'[情绪判断] "{preview}"\n'
-            'JSON: {"v":效价-1~1,"a":唤醒0~1,"i":"意图","w":伤害风险0~1}'
-        )
+        preview = text[:60]
+        return f'"{preview}"\n{{"v":?,"a":?,"i":"?","w":?}}'
 
     # ------------------------------------------------------------------
     # Internal: main assessment
@@ -163,13 +160,12 @@ class AsyncAssessor:
         """Richer prompt for main assessor with conversation context."""
         ctx = ""
         if context_lines:
-            ctx = "\n".join(f"  {line}" for line in context_lines[-3:])
-            ctx = f"最近对话：\n{ctx}\n"
-        preview = text[:200]
+            ctx = "\n".join(context_lines[-2:])
+            ctx = f"{ctx}\n"
+        preview = text[:120]
         return (
-            f'{ctx}[深度语义判断] "{preview}"\n'
-            'JSON: {"v":效价-1~1,"a":唤醒0~1,"i":"意图","w":伤害风险0~1,'
-            '"subtext":"潜台词","avoidance":"在回避什么"}'
+            f'{ctx}"{preview}"\n'
+            '{"v":?,"a":?,"i":"?","w":?,"subtext":"?","avoidance":"?"}'
         )
 
     # ------------------------------------------------------------------
