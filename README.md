@@ -168,11 +168,13 @@ block-beta
 
 ```mermaid
 flowchart TD
-    A["用户发消息：你怎么不理我了"] --> B["碎片防抖（1.5s）"]
+    A["用户发消息：你怎么不理我了"] --> FU{"AstrBot follow-up?"}
+    FU -->|"是（agent run 进行中）"| C["on_llm_request（跳过防抖）"]
+    FU -->|"否"| B["碎片防抖（1.5s）"]
     B -->|"1.5s 内又来一条"| B
-    B -->|"超时或 max 4s"| C["on_llm_request"]
+    B -->|"超时或 max 4s"| C
     C --> C1["取消正在发送的旧分段回复（打断）"]
-    C1 --> C2["kernel.tick() → 计算层 6 层全跑"]
+    C1 --> C2["kernel.tick() → 计算层 7 层"]
     C2 --> C3{"距上次 bot 说话多久？"}
     C3 -->|"< 30s"| C3a["feedback(accepted)"]
     C3 -->|"30-300s"| C3b["中性，不触发"]
@@ -188,7 +190,7 @@ flowchart TD
     F --> G["on_llm_response"]
     G --> G1["过滤 thinking/draft_notes"]
     G1 --> G2["保留 completion_text（记录到历史）"]
-    G2 --> G3["realtime_plan 拆成多段"]
+    G2 --> G3["realtime_plan 拆成多段（节奏学习）"]
     G3 --> G4["后台按打字节奏逐段发送"]
 ```
 
@@ -199,9 +201,10 @@ flowchart TD
     L1["L1 HDC 感知<br/>文本 → 2048-bit 向量<br/>⏱ 0.1ms"] --> L2["L2 预测编码门控<br/>惊讶度 → 路由决策<br/>⏱ 0.01ms"]
     L2 -->|"低惊讶 90%"| FAST["Fast Path<br/>基态演化 + 年龄递增<br/>⏱ 0.05ms"]
     L2 -->|"中/高惊讶 10%"| L3["L3 Void-Scar Engine<br/>伤痕调制 → 状态演化 → 空洞检测<br/>耦合：压力→伤害 / 麻木→降低检测<br/>⏱ 2-6ms"]
-    L3 --> L4["L4 HGT 决策融合<br/>7 类型 token → 类型感知 attention<br/>→ 4 维决策向量<br/>⏱ 0.4ms"]
-    L4 --> L5["L5 自创生边界<br/>外力投影 → 穿透判断<br/>吸收 or 相变（≤6°旋转）<br/>⏱ 0.01ms"]
-    L5 --> L6["L6 相变表达<br/>压力积累 → 超过阈值<br/>hint / normal / urgent<br/>⏱ 0.001ms"]
+    L3 --> L4["L4 Relational Sheaf<br/>跨关系传播 · H¹ 一致性检测<br/>⏱ 0.7ms"]
+    L4 --> L5["L5 HGT 决策融合<br/>7 类型 token → 类型感知 attention<br/>→ 4 维决策向量<br/>⏱ 0.4ms"]
+    L5 --> L6["L6 自创生边界<br/>外力投影 → 穿透判断<br/>吸收 or 相变（≤6°旋转）<br/>⏱ 0.01ms"]
+    L6 --> L7["L7 相变表达<br/>压力积累 → 超过阈值<br/>hint / normal / urgent<br/>⏱ 0.001ms"]
 ```
 
 ### 反馈闭环
