@@ -1271,7 +1271,7 @@ class EmotionalStatePlugin(Star):
                 f"请自然地在回复中提及或表达这件事，用你自己的语气。"
             )
 
-        # Recall relevant memories using embedding similarity
+        # Recall relevant memories using embedding similarity + emotion-tinted reconstruction
         memory_fragment = ""
         if realtime_enabled and message_text:
             host = self._host(session_key)
@@ -1285,15 +1285,38 @@ class EmotionalStatePlugin(Star):
                         if provider:
                             query_vec = await provider.get_embedding(message_text[:100])
                             if query_vec:
-                                from sylanne_alpha.embedding_memory import recall_with_embedding_assist
-                                matches = recall_with_embedding_assist(
-                                    query=message_text[:100],
-                                    records=traces,
-                                    enabled=True,
-                                    embed_query=lambda t: query_vec,
-                                    limit=3,
-                                )
-                                mem_texts = [str(m.get("text", ""))[:100] for m in matches.get("matches", []) if m.get("text")]
+                                # Emotion-tinted recall: current mood biases which memories surface
+                                current_warmth = host.kernel.computation.engine.observe().get("warmth", 0.0)
+                                current_tension = host.kernel.computation.engine.observe().get("tension", 0.0)
+                                from sylanne_alpha.embedding_memory import recall_with_embedding_assist, _cosine
+                                # Score each trace: 0.7 * embedding_sim + 0.3 * emotion_alignment
+                                scored = []
+                                for trace in traces:
+                                    trace_vec = trace.get("embedding")
+                                    if isinstance(trace_vec, list) and trace_vec:
+                                        embed_sim = _cosine(query_vec, [float(v) for v in trace_vec])
+                                    else:
+                                        # Keyword fallback
+                                        embed_sim = 0.3 if message_text[:10] in str(trace.get("text", "")) else 0.0
+                                    # Emotion alignment: memories stored in similar mood surface easier
+                                    trace_temp = float(trace.get("temperature", 0.5))
+                                    mood_sim = 1.0 - abs(current_warmth - trace_temp)
+                                    # Tension bias: when tense, conflict memories surface
+                                    tension_boost = current_tension * 0.2 if trace_temp < 0.3 else 0.0
+                                    final_score = 0.7 * embed_sim + 0.2 * mood_sim + 0.1 * tension_boost
+                                    if final_score > 0.1:
+                                        scored.append((final_score, trace))
+                                scored.sort(key=lambda x: x[0], reverse=True)
+                                top_traces = scored[:3]
+                                # Reconsolidation: recalled memories get tinted by current mood
+                                # Each recall slightly shifts the memory's temperature toward current state
+                                for _, trace in top_traces:
+                                    old_temp = float(trace.get("temperature", 0.5))
+                                    # 95% old + 5% current = slow drift per recall
+                                    trace["temperature"] = round(old_temp * 0.95 + current_warmth * 0.05, 4)
+                                    # Boost weight (recalled = important)
+                                    trace["weight"] = min(1.0, float(trace.get("weight", 0.3)) + 0.02)
+                                mem_texts = [str(t.get("text", ""))[:100] for _, t in top_traces if t.get("text")]
                                 if mem_texts:
                                     memory_fragment = "[相关记忆]\n" + "\n".join(f">{t}" for t in mem_texts)
                 except Exception:
@@ -1478,19 +1501,26 @@ class EmotionalStatePlugin(Star):
             if len(body.memory.get("traces", [])) > 50:
                 body.compress_memory(limit=50)
             # Store embedding vector in the latest trace (for future recall)
+            # Throttled: skip short messages, respect min interval
             embedding_enabled = bool(self._config.get("sylanne_alpha_embedding_memory_enabled"))
             embedding_provider_id = str(self._config.get("sylanne_alpha_embedding_memory_provider_id") or "")
-            if embedding_enabled and embedding_provider_id and text:
-                try:
-                    provider = self._get_embedding_provider(embedding_provider_id)
-                    if provider:
-                        vec = await provider.get_embedding(text[:100])
-                        if vec:
-                            traces = body.memory.get("traces", [])
-                            if traces:
-                                traces[-1]["embedding"] = vec
-                except Exception:
-                    pass
+            min_interval = float(self._config.get("sylanne_memory_record_embedding_min_interval_seconds", 60.0))
+            if embedding_enabled and embedding_provider_id and text and len(text.strip()) >= 5:
+                last_embed_time = getattr(self, "_last_embedding_time", {}).get(session_key, 0.0)
+                if now - last_embed_time >= min_interval:
+                    try:
+                        provider = self._get_embedding_provider(embedding_provider_id)
+                        if provider:
+                            vec = await provider.get_embedding(text[:100])
+                            if vec:
+                                traces = body.memory.get("traces", [])
+                                if traces:
+                                    traces[-1]["embedding"] = vec
+                                if not hasattr(self, "_last_embedding_time"):
+                                    self._last_embedding_time = {}
+                                self._last_embedding_time[session_key] = now
+                    except Exception:
+                        pass
         except Exception:
             # Fallback: observe without assessment
             try:
