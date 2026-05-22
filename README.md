@@ -10,9 +10,9 @@
 
 ## 介绍
 
-<img align="right" src="docs/assets/sylanne-mascot.gif" width="220" alt="Sylanne animated mascot">
+<img align="right" src="docs/assets/sylanne-mascot.gif" width="220" alt="Sylanne animated mascot"><br><sub align="right"><em>Sylanne向大家问好~~</em></sub>
 
-`astrbot_plugin_sylanne` Embodiment-1.1.2 是一次从底层计算逻辑开始的完全重写。经过十余次迭代打磨，她不再用线性状态空间模拟情绪，而是用三套原创形式化理论——**Scar Algebra（伤痕代数）**、**Void Calculus（空洞微积分）** 和 **Relational Sheaf Theory（关系层论）**——构建了一个不可逆的多关系计算引擎。
+`astrbot_plugin_sylanne` Embodiment-1.1.2 是一次从底层计算逻辑开始的完全重写。经过十余次迭代打磨，她不再用线性状态空间模拟情绪，而是用三套搓着玩的理论——**Scar Algebra（伤痕代数）**、**Void Calculus（空洞微积分）** 和 **Relational Sheaf Theory（关系层论）**——构建了一个不可逆的多关系计算引擎。
 
 > 让不同人格的 bot 在长期对话中，留下不可撤销的伤痕、积累无法忽视的沉默压力、在关系的反复碰撞里长出只属于这段关系的形状。
 
@@ -311,36 +311,35 @@ $$\dim H^1(K, \mathcal{F}) > 0 \iff \text{存在不可调和的跨关系矛盾}$
 
 结论：7 层计算栈 + Relational Sheaf + 异步 assessor 的架构下，**没有可见延迟增量**。远端波动范围内 Sylanne 组甚至略快。
 
-对比 3.x 全功能增量 +4469ms，Embodiment 实现了**零可见延迟**。
+对比 3.x 全功能增量 +4469ms，Embodiment 没有可见延迟增量。
 
-对比 3.x 全功能增量 +4469ms，Embodiment 的 p50 增量仅 +302ms——**快了 15 倍**。
-
-| 维度 | 3.0 | Embodiment | 变化本质 |
-| --- | --- | --- | --- |
-| **代码量** | ~20,000 行（单体） | ~4,300 行（薄宿主）+ 31 模块 | 拆分为独立计算模块 |
-| **本地计算延迟** | 8.7ms/msg | 37.1ms/msg（6 层全跑） | 做的事更多，但不阻塞 LLM |
-| **含 LLM assessor（实机 250 次）** | +4469ms/msg（同步阻塞） | +629ms mean / +302ms p50（异步超时兜底） | 从阻塞到非阻塞 |
-| **状态可逆性** | 可重置回原点 | 不可逆（数学证明） | 从"可撤销"到"不可逆" |
-| **情绪建模** | 7 维浮点 + 衰减 + 后果状态机 | Scar Algebra + Void Calculus 耦合 | 从线性衰减到代数结构 |
-| **记忆** | 关键词匹配 + 伪知识库 | HDC 编码 + 情绪染色重构 | 从精确检索到模糊重建 |
-| **人格影响** | 静态基线 + 漂移系统 | 实时驱动全层参数（零配置） | 从独立子系统到统一驱动源 |
-| **主动发言** | 公式判断 + 冷却 + 话题库 | 独立生活模拟 + LLM 推断 | 从规则触发到生活驱动 |
-| **分段回复** | 语义切分 + 打字节奏 + 打断 + 自适应 | 语义切分 + 打字节奏 + 打断 + 亲密度门控节奏同步 | 自适应从规则驱动变为关系状态驱动 |
-| **碎片消息** | 合并逻辑 + 超时判断 | 防抖合并（等用户说完） | 路径不同，目标相同 |
-| **多用户** | 会话级隔离 | LRU 50 + 共享 encoder + 状态独立 | 从会话隔离到计算隔离 |
-| **理论基础** | PAD + appraisal（引用已有理论） | Scar Algebra + Void Calculus + Relational Sheaf Theory（三项原创证明） | 从引用到原创 |
-| **决策融合** | 规则 + 权重 + 状态机 | HGT 异构图 Transformer | 从手写规则到学习融合 |
-| **反馈闭环** | 隐式（状态衰减） | 显式 accepted/ignored/rejected → 状态演化 | 从被动衰减到主动反馈 |
+| 维度 | 3.0 | Embodiment |
+| --- | --- | --- |
+| **代码量** | ~20,000 行单体 | ~4,300 行薄宿主 + 31 独立模块 |
+| **本地计算** | 8.7ms/msg | 37.1ms/msg（7 层，做的事更多） |
+| **实机延迟** | +4469ms（同步阻塞 LLM） | 无可见增量（异步，不阻塞） |
+| **状态可逆性** | 可重置回原点 | 不可逆 |
+| **情绪建模** | 7 维浮点加减衰减 | 伤痕代数 + 空洞微积分 + 双向耦合 |
+| **多关系** | 无 | 层上同调 + 拉普拉斯谱传播 |
+| **记忆** | 关键词匹配 + 伪知识库 | HDC 编码 + 情绪染色重构 |
+| **人格** | 静态基线 + 独立漂移系统 | 人格驱动全层参数 + 反馈闭环 |
+| **主动发言** | 公式 + 冷却 + 话题库 | 独立生活模拟 + LLM 推断 |
+| **分段回复** | 语义切分 + 打字节奏 + 打断 | 同左 + 亲密度门控节奏学习 |
+| **碎片消息** | 合并 + 超时 | 防抖合并 + follow-up 兼容 |
+| **多用户** | 会话级隔离 | LRU 50 + 共享 encoder |
+| **理论** | 引用 PAD / appraisal | 伤痕代数 / 空洞微积分 / 关系层论 |
+| **决策** | 规则 + 权重 + 状态机 | HGT 异构图 Transformer |
+| **反馈** | 隐式衰减 | 显式 accepted/ignored/rejected |
 
 ---
 
 ## 理论贡献
 
-本项目包含三项原创形式化理论：
+本项目尝试用三套自己搓的理论来描述关系动力学：
 
-1. **Scar Algebra**：自修改运算符代数。证明了表达力分离定理（Ω(k) 下界）和收敛定理。
-2. **Void Calculus**：缺席一等计算。证明了不可归约到 AGM 信念修正（Theorem 1）和贝叶斯更新（Theorem 2）。
-3. **Relational Sheaf Theory**：多关系层论。证明了上同调解离定理、谱传播界、不可约三方状态定理。用层上同调精确度量跨关系矛盾，用层拉普拉斯算子约束伤痕传播。
+1. **Scar Algebra**：自修改运算符代数。试着证了表达力分离定理和收敛定理。
+2. **Void Calculus**：把"没说出口的东西"当作计算对象。试着证了不可归约到 AGM 信念修正和贝叶斯更新。
+3. **Relational Sheaf Theory**：用层论描述多关系之间的相互影响。试着证了上同调解离、谱传播界、三方不可约。
 
 详见 `theory/` 目录。
 
@@ -350,7 +349,7 @@ $$\dim H^1(K, \mathcal{F}) > 0 \iff \text{存在不可调和的跨关系矛盾}$
 
 | 文档 | 内容 | 格式 |
 | --- | --- | --- |
-| [**Scar Algebra, Void Calculus & Relational Sheaf Theory（中文版）**](docs/scar_void_arxiv_paper_zh_v3.pdf) | 三项原创理论 + 人格闭环：公理系统、定理证明、11 组实验 | 中文 |
+| [**Scar Algebra, Void Calculus & Relational Sheaf Theory（中文版）**](docs/scar_void_arxiv_paper_zh_v3.pdf) | 三套理论 + 人格闭环，11 组实验 | 中文 |
 | [**Scar Algebra, Void Calculus & Relational Sheaf Theory（English）**](docs/scar_void_arxiv_paper_v2.pdf) | Full paper with axioms, theorems, proofs, and 11 experiments | English |
 
 ### 实验数据

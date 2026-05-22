@@ -916,7 +916,7 @@ L7 相变 & $<$0.01 ms & $<$0.01 ms & $<$0.01 ms \\
 
 \paragraph{结果。}伤疤代数产生 $4^k$ 种不同状态——从 $k=1$ 时的 4 种增长到 $k=8$ 时的 512 种（在 $k=8$ 时采样 512 种随机配置）——而固定算子基线对任何单一输入始终只产生 1 种输出。可区分状态的指数增长证明了定理~\ref{thm:scar-expressiveness}预测的 $\Omega(k)$ 表达力分离：自修改算子语义创造了比固定矩阵指数级更丰富的状态空间（图~\ref{fig:expressiveness}）。
 
-\begin{figure}[ht]
+\begin{figure}[H]
 \centering
 \includegraphics[width=0.75\columnwidth]{../experiments/figures/fig1_expressiveness.png}
 \caption{表达力分离：可区分输出状态数 vs.\ 伤疤数 $k$。伤疤代数（红，$4^k$ 增长）对单一固定输入产生指数级多的不同输出；固定算子基线（蓝）始终只产生 1 种。}
@@ -929,7 +929,7 @@ L7 相变 & $<$0.01 ms & $<$0.01 ms & $<$0.01 ms \\
 
 \paragraph{结果。}检测率呈现平滑的 sigmoid 曲线：低惊奇度时接近 0\%，在惊奇度 $\approx 0.35$--$0.50$ 附近通过 50\%，高惊奇度时达到 100\%。过渡区域宽度由噪声参数 $\sigma = 0.15$ 控制。这表明空洞检测表现为具有良好表征灵敏度的软分类器，而非脆弱的硬阈值（图~\ref{fig:detection}）。
 
-\begin{figure}[ht]
+\begin{figure}[H]
 \centering
 \includegraphics[width=0.65\columnwidth]{../experiments/figures/fig2_void_detection.png}
 \caption{空洞检测率 vs.\ 惊奇度水平。从 $\sim$0\% 到 100\% 的平滑 sigmoid 过渡，每个水平 50 次试验，高斯噪声 $\sigma = 0.15$。阴影区域显示检测阈值附近的过渡带。}
@@ -942,7 +942,7 @@ L7 相变 & $<$0.01 ms & $<$0.01 ms & $<$0.01 ms \\
 
 \paragraph{结果。}三种状态在全部 30 tick 中产生明显不同的时间签名（图~\ref{fig:three_states}）。S1（从未）：所有指标始终为零。S2（已解决）：压力稳定在 $\approx 5.6$，深度 $\approx 0.10$，边界 $= 0$（幽灵状态）。S3（回避中）：压力增长至 $\approx 47$，深度累积至 $\approx 1.65$，边界完备度稳定在 $\approx 0.44$。三种状态在每个时间点都两两可区分，确认了定理~\ref{thm:void-three-way}的三路表达力区分。
 
-\begin{figure}[ht]
+\begin{figure}[H]
 \centering
 \includegraphics[width=0.75\columnwidth]{../experiments/figures/fig3_three_states.png}
 \caption{三态时间签名（3 面板：压力、深度、边界）30 tick。从未（平坦零值）、已解决（低稳定值）和回避中（增长的压力/深度与非零边界）在所有时间点两两可区分。}
@@ -955,7 +955,7 @@ L7 相变 & $<$0.01 ms & $<$0.01 ms & $<$0.01 ms \\
 
 \paragraph{结果。}尽管在分歧点之后接收相同的共享事件，两条路径在整个模拟过程中保持约 20 个伤疤的永久分离（图~\ref{fig:hysteresis}）。先伤害路径由于早期原始伤疤的放大灵敏度而累积更多伤疤，且该差距永不闭合。这确认了定理~\ref{thm:void-hysteresis}：耦合系统表现出任何有限未来输入序列都无法消除的永久路径依赖。
 
-\begin{figure}[ht]
+\begin{figure}[H]
 \centering
 \includegraphics[width=0.85\columnwidth]{../experiments/figures/fig4_hysteresis.png}
 \caption{滞后效应演示。两条路径（先伤害 vs.\ 先安慰）在分歧后接收相同共享事件，却保持 $\sim$20 个伤疤的永久分离。路径依赖不可逆。}
@@ -975,7 +975,7 @@ L7 相变 & $<$0.01 ms & $<$0.01 ms & $<$0.01 ms \\
 \item 移除 HGT 降低决策融合质量但保留核心动态。
 \end{itemize}
 
-\begin{figure}[ht]
+\begin{figure}[H]
 \centering
 \includegraphics[width=0.7\columnwidth]{../experiments/figures/fig5_ablation.png}
 \caption{消融：100 个多样化输入下 5 种条件（完整、无空洞、无伤疤、无耦合、无 HGT）的状态轨迹丰富度。所有组件都对完整系统的表达力有贡献。}
@@ -994,7 +994,7 @@ L7 相变 & $<$0.01 ms & $<$0.01 ms & $<$0.01 ms \\
 \end{itemize}
 在完整 1000 tick 范围内未观察到失控发散或崩溃。
 
-\begin{figure}[ht]
+\begin{figure}[H]
 \centering
 \includegraphics[width=0.85\columnwidth]{../experiments/figures/fig6_stability.png}
 \caption{1000 tick 长期稳定性。上：平均伤疤调制因子收敛至 0。中：伤疤计数线性增长（$\sim$3.14/tick）。下：空洞计数收敛于 $\sim$29。系统达到稳定均衡而无发散。}
@@ -1012,7 +1012,7 @@ L7 相变 & $<$0.01 ms & $<$0.01 ms & $<$0.01 ms \\
 \paragraph{实验 8：上同调解离检测。}
 构造具有高神经质人格（$\kappa$ 大）和 $N=3$ 个关系的智能体。呈现矩阵 $P_i$ 被冻结以诱导矛盾的自我呈现需求。智能体在 200 tick 内接收跨关系的矛盾事件。追踪不一致性能量（$\|\delta^0 \mathbf{x}\|^2$）、解离压力和 $\dim H^1(K, \mathcal{F})$。\emph{结果：}不一致性能量呈 S 曲线从 0 增长至 $\approx 65$；解离压力从 0.19 增长至 0.59。然而 $\dim H^1$ 始终保持为 0，因为呈现矩阵保持满秩（系统通过内部状态调整而非产生真正的上同调阻碍来解决矛盾）。这表明高不一致性能量和解离压力是 $H^1 > 0$ 的必要但非充分条件（图~\ref{fig:cohomological_dissociation}）。
 
-\begin{figure}[ht]
+\begin{figure}[H]
 \centering
 \includegraphics[width=0.75\columnwidth]{../experiments/figures/fig7_cohomological_dissociation.png}
 \caption{200 tick 上同调解离检测。不一致性能量（S 曲线，$0 \to 65$）和解离压力（$0.19 \to 0.59$）在矛盾事件下增长，而 $H^1$ 保持为 0（满秩呈现矩阵阻止了真正的上同调阻碍）。}
@@ -1022,7 +1022,7 @@ L7 相变 & $<$0.01 ms & $<$0.01 ms & $<$0.01 ms \\
 \paragraph{实验 9：谱传播验证。}
 构造 5 个具有不同类型和成熟度的关系（亲密、友好、正式、对抗和控制组）。在源关系（$v_0$）中施加伤疤事件，通过 Frobenius 范数 $\|P_j^T P_0\|_F$ 测量到每个目标关系的传播强度。\emph{结果：}传播强度由呈现矩阵耦合控制：亲密 = 0.543，友好 = 0.405，正式 = 0.314，对抗 = 0.215。更亲近的关系类型（更高的 $\|P_j^T P_0\|_F$）接收更强的传播，确认层拉普拉斯算子的谱结构根据关系亲和度正确调节跨关系影响（图~\ref{fig:spectral_propagation}）。
 
-\begin{figure}[ht]
+\begin{figure}[H]
 \centering
 \includegraphics[width=0.75\columnwidth]{../experiments/figures/fig8_spectral_propagation.png}
 \caption{5 种关系类型的谱传播。传播强度（$\|P_j^T P_0\|_F$）随关系距离递减：亲密（0.543）$>$ 友好（0.405）$>$ 正式（0.314）$>$ 对抗（0.215），验证定理~\ref{thm:sheaf-spectral}。}
@@ -1032,7 +1032,7 @@ L7 相变 & $<$0.01 ms & $<$0.01 ms & $<$0.01 ms \\
 \paragraph{实验 10：三元不可约性。}
 创建 2-单形（智能体 + 两个伙伴同时共在），在 8 个维度上生成共在状态，使用 10 个随机种子。对每个维度，尝试仅从成对限制重构并测量残差（丢失的信息）。\emph{结果：}所有 8 个维度都显示显著残差（每维度均值 0.62--0.79），10 个种子的总残差 = 5.79。这确认群体状态包含二元数据中不可获得的不可约三元信息，验证了定理~\ref{thm:sheaf-triadic}（图~\ref{fig:triadic_irreducibility}）。
 
-\begin{figure}[ht]
+\begin{figure}[H]
 \centering
 \includegraphics[width=0.75\columnwidth]{../experiments/figures/fig9_triadic_irreducibility.png}
 \caption{8 个维度（10 个种子）的三元不可约性。所有维度显示显著重构残差（均值 0.62--0.79）；总残差 = 5.79，确认仅从成对数据不可获得的不可约三元信息。}
@@ -1042,7 +1042,7 @@ L7 相变 & $<$0.01 ms & $<$0.01 ms & $<$0.01 ms \\
 \paragraph{实验 11：人格反馈闭环验证。}
 验证人格漂移闭环是否按预期工作。从中性人格 $\boldsymbol{\pi}_0 = (0.5, 0.5, 0.5, 0.5, 0.5)$ 出发，模拟三种场景各 500 tick：(A) 反复受伤事件，(B) 持续正反馈（表达被接受），(C) 3 段矛盾关系的跨关系矛盾 200 tick。\emph{结果：}场景 A 中 $N$ 上升、$O$ 下降，符合伤疤$\to$神经质和空洞压力$\to$开放性机制的预测。场景 B 中 $E$ 和 $A$ 上升，由正向表达反馈和一致性提升驱动。场景 C 中 $C$ 下降，由 $H^1$ 不一致性产生的解离压力驱动。所有漂移率保持在 $\eta_0 \leq 10^{-4}$ 界内，确认反馈闭环的有阻尼特性（图~\ref{fig:personality_feedback}）。
 
-\begin{figure}[ht]
+\begin{figure}[H]
 \centering
 \includegraphics[width=0.85\columnwidth]{experiments/fig10_personality_feedback.png}
 \caption{人格反馈闭环验证。三种条件下人格向量的漂移轨迹：(A) 反复受伤（$N\!\uparrow$，$O\!\downarrow$），(B) 持续接纳（$E\!\uparrow$，$A\!\uparrow$），(C) 跨关系矛盾（$C\!\downarrow$）。漂移有界且由计算状态因果驱动。}

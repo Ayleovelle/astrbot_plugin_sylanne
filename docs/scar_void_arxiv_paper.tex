@@ -944,7 +944,7 @@ We apply a single fixed input event to the Scar Algebra under all possible scar 
 
 \paragraph{Result.} Scar Algebra produces $4^k$ distinct states---growing from 4 at $k=1$ to 512 at $k=8$ (we sample 512 random configurations at $k=8$)---while the Fixed Operator baseline produces exactly 1 output for any single input. The exponential growth in distinguishable states demonstrates the $\Omega(k)$ expressiveness separation predicted by Theorem~\ref{thm:scar-expressiveness}: self-modifying operator semantics create an exponentially richer state space than fixed matrices (Figure~\ref{fig:expressiveness}).
 
-\begin{figure}[ht]
+\begin{figure}[H]
 \centering
 \includegraphics[width=0.75\columnwidth]{../experiments/figures/fig1_expressiveness.png}
 \caption{Expressiveness separation: distinguishable output states vs.\ number of scars $k$. Scar Algebra (red, $4^k$ growth) produces exponentially many distinct outputs for a single fixed input; the Fixed Operator baseline (blue) always produces exactly 1.}
@@ -957,7 +957,7 @@ We sweep surprise levels from 0.0 to 1.0 and measure the void detection rate at 
 
 \paragraph{Result.} The detection rate follows a smooth sigmoid curve: near 0\% at low surprise levels, transitioning through 50\% around surprise $\approx 0.35$--$0.50$, and reaching 100\% at high surprise. The transition region width is governed by the noise parameter $\sigma = 0.15$. This demonstrates that void detection behaves as a soft classifier with well-characterized sensitivity, rather than a brittle hard threshold (Figure~\ref{fig:detection}).
 
-\begin{figure}[ht]
+\begin{figure}[H]
 \centering
 \includegraphics[width=0.65\columnwidth]{../experiments/figures/fig2_void_detection.png}
 \caption{Void detection rate vs.\ surprise level. Smooth sigmoid transition from $\sim$0\% to 100\% detection, with 50 trials per level and Gaussian noise $\sigma = 0.15$. The shaded region shows the transition band around the detection threshold.}
@@ -970,7 +970,7 @@ We construct three void scenarios and simulate 30 ticks of autonomous dynamics f
 
 \paragraph{Result.} The three states produce clearly distinct temporal signatures across all 30 ticks (Figure~\ref{fig:three_states}). S1 (Never): all metrics remain at zero throughout. S2 (Resolved): pressure stabilizes at $\approx 5.6$, depth at $\approx 0.10$, boundary $= 0$ (ghost state). S3 (Avoided): pressure grows to $\approx 47$, depth accumulates to $\approx 1.65$, boundary completeness settles at $\approx 0.44$. The three states are pairwise distinguishable at every time point, confirming the three-way expressiveness distinction of Theorem~\ref{thm:void-three-way}.
 
-\begin{figure}[ht]
+\begin{figure}[H]
 \centering
 \includegraphics[width=0.75\columnwidth]{../experiments/figures/fig3_three_states.png}
 \caption{Three-state temporal signatures (3 panels: pressure, depth, boundary) over 30 ticks. Never (flat zero), Resolved (low stable values), and Avoided (growing pressure/depth with nonzero boundary) are pairwise distinct at all times.}
@@ -983,7 +983,7 @@ Two VoidScarEngine instances (``hurt-first'' and ``comfort-first'') receive oppo
 
 \paragraph{Result.} Despite receiving identical shared events after the divergence point, the two paths maintain a permanent separation of approximately 20 scars throughout the remainder of the simulation (Figure~\ref{fig:hysteresis}). The hurt-first path accumulates more scars due to its amplified sensitivity from early raw scars, and this gap never closes. This confirms Theorem~\ref{thm:void-hysteresis}: the coupled system exhibits permanent path dependence that no finite future input sequence can erase.
 
-\begin{figure}[ht]
+\begin{figure}[H]
 \centering
 \includegraphics[width=0.85\columnwidth]{../experiments/figures/fig4_hysteresis.png}
 \caption{Hysteresis demonstration. Two paths (hurt-first vs.\ comfort-first) receive identical shared events after divergence, yet maintain a permanent $\sim$20-scar separation. Path dependence is irreversible.}
@@ -1003,7 +1003,7 @@ We instantiate a ComputationSpine with 100 diverse input events and measure stat
 \item Removing HGT reduces decision fusion quality but preserves core dynamics.
 \end{itemize}
 
-\begin{figure}[ht]
+\begin{figure}[H]
 \centering
 \includegraphics[width=0.7\columnwidth]{../experiments/figures/fig5_ablation.png}
 \caption{Ablation: state trajectory richness across 100 diverse inputs under 5 conditions (Full, No Void, No Scar, No Coupling, No HGT). All components contribute to the full system's expressiveness.}
@@ -1022,7 +1022,7 @@ We simulate 1000 ticks of continuous operation and track three stability metrics
 \end{itemize}
 No runaway divergence or collapse is observed over the full 1000-tick horizon.
 
-\begin{figure}[ht]
+\begin{figure}[H]
 \centering
 \includegraphics[width=0.85\columnwidth]{../experiments/figures/fig6_stability.png}
 \caption{Long-term stability over 1000 ticks. Top: mean scar modifier converges to 0. Middle: scar count grows linearly ($\sim$3.14/tick). Bottom: void count converges at $\sim$29. The system reaches stable equilibrium without divergence.}
@@ -1040,7 +1040,7 @@ The following experiments validate the Relational Sheaf Theory (\S\ref{sec:sheaf
 \paragraph{Exp 8: Cohomological Dissociation Detection.}
 We construct an agent with high neuroticism personality ($\kappa$ large) and $N=3$ relationships. The presentation matrices $P_i$ are frozen to induce contradictory self-presentation requirements. The agent receives contradictory events across relationships over 200 ticks. We track inconsistency energy ($\|\delta^0 \mathbf{x}\|^2$), dissociation pressure, and $\dim H^1(K, \mathcal{F})$. \emph{Result:} Inconsistency energy follows an S-curve from 0 to $\approx 65$; dissociation pressure grows from 0.19 to 0.59. However, $\dim H^1$ remains 0 throughout because the presentation matrices remain full-rank (the system resolves contradictions through internal state adjustment rather than developing true cohomological obstruction). This demonstrates that high inconsistency energy and dissociation pressure are necessary but not sufficient conditions for $H^1 > 0$ (Figure~\ref{fig:cohomological_dissociation}).
 
-\begin{figure}[ht]
+\begin{figure}[H]
 \centering
 \includegraphics[width=0.75\columnwidth]{../experiments/figures/fig7_cohomological_dissociation.png}
 \caption{Cohomological dissociation detection over 200 ticks. Inconsistency energy (S-curve, $0 \to 65$) and dissociation pressure ($0.19 \to 0.59$) grow under contradictory events, while $H^1$ stays 0 (full-rank presentation matrices prevent true cohomological obstruction).}
@@ -1050,7 +1050,7 @@ We construct an agent with high neuroticism personality ($\kappa$ large) and $N=
 \paragraph{Exp 9: Spectral Propagation Verification.}
 We construct 5 relationships with different types and maturities (intimate, friendly, formal, adversarial, and a control). A scar event is inflicted in the source relationship ($v_0$), and we measure the propagation strength to each target relationship via the Frobenius norm $\|P_j^T P_0\|_F$ of the cross-presentation coupling. \emph{Result:} Propagation strength is governed by the presentation matrix coupling: intimate = 0.543, friendly = 0.405, formal = 0.314, adversarial = 0.215. Closer relationship types (higher $\|P_j^T P_0\|_F$) receive stronger propagation, confirming that the sheaf Laplacian's spectral structure correctly mediates cross-relational influence according to relationship affinity (Figure~\ref{fig:spectral_propagation}).
 
-\begin{figure}[ht]
+\begin{figure}[H]
 \centering
 \includegraphics[width=0.75\columnwidth]{../experiments/figures/fig8_spectral_propagation.png}
 \caption{Spectral propagation across 5 relationship types. Propagation strength ($\|P_j^T P_0\|_F$) decreases with relational distance: intimate (0.543) $>$ friendly (0.405) $>$ formal (0.314) $>$ adversarial (0.215), confirming Theorem~\ref{thm:sheaf-spectral}.}
@@ -1060,7 +1060,7 @@ We construct 5 relationships with different types and maturities (intimate, frie
 \paragraph{Exp 10: Triadic Irreducibility.}
 We create a 2-simplex (agent + two partners in simultaneous co-presence) and generate co-presence states across 8 dimensions over 10 random seeds. For each dimension, we attempt reconstruction from pairwise restrictions alone and measure the residual (information lost). \emph{Result:} All 8 dimensions show significant residual (mean 0.62--0.79 per dimension), with total residual = 5.79 across 10 seeds. This confirms that group states contain irreducible triadic information not available from dyadic data, validating Theorem~\ref{thm:sheaf-triadic} (Figure~\ref{fig:triadic_irreducibility}).
 
-\begin{figure}[ht]
+\begin{figure}[H]
 \centering
 \includegraphics[width=0.75\columnwidth]{../experiments/figures/fig9_triadic_irreducibility.png}
 \caption{Triadic irreducibility across 8 dimensions (10 seeds). All dimensions show significant reconstruction residual (mean 0.62--0.79); total residual = 5.79, confirming irreducible triadic information not available from pairwise data.}
@@ -1070,7 +1070,7 @@ We create a 2-simplex (agent + two partners in simultaneous co-presence) and gen
 \paragraph{Exp 11: Personality Feedback Loop.}
 We verify that the personality drift closed loop operates as designed. Starting from a neutral personality $\boldsymbol{\pi}_0 = (0.5, 0.5, 0.5, 0.5, 0.5)$, we simulate three scenarios over 500 ticks each: (A) repeated wounding events, (B) sustained positive feedback (expression accepted), and (C) cross-relational contradictions with 3 conflicting relationships over 200 ticks. \emph{Result:} Scenario A shows $N$ rising and $O$ falling as predicted by the scar$\to$neuroticism and void-pressure$\to$openness mechanisms. Scenario B shows $E$ and $A$ rising due to positive expression feedback and coherence increase. Scenario C shows $C$ falling due to dissociation pressure from $H^1$ inconsistency. All drift rates remain within the $\eta_0 \leq 10^{-4}$ bound, confirming the damped nature of the feedback loop (Figure~\ref{fig:personality_feedback}).
 
-\begin{figure}[ht]
+\begin{figure}[H]
 \centering
 \includegraphics[width=0.85\columnwidth]{experiments/fig10_personality_feedback.png}
 \caption{Personality feedback loop verification. Three conditions: (A) repeated wounding ($N\!\uparrow$, $O\!\downarrow$), (B) sustained acceptance ($E\!\uparrow$, $A\!\uparrow$), (C) cross-relational contradiction ($C\!\downarrow$). Drift is bounded and causally driven by computation state.}
