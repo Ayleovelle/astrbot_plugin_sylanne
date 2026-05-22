@@ -1271,17 +1271,33 @@ class EmotionalStatePlugin(Star):
                 f"请自然地在回复中提及或表达这件事，用你自己的语气。"
             )
 
-        # Use computation spine's recall result (already computed in kernel.tick)
-        # instead of calling embedding provider again — avoids duplicate work
+        # Recall relevant memories using embedding similarity
         memory_fragment = ""
         if realtime_enabled and message_text:
             host = self._host(session_key)
-            comp_result = getattr(host.kernel, "_last_computation_result", None) or {}
-            recalled = comp_result.get("recalled", [])
-            if recalled:
-                mem_lines = [f">{str(r.get('text',''))[:120]}" for r in recalled[:3] if r.get("text")]
-                if mem_lines:
-                    memory_fragment = "\n".join(mem_lines)
+            enabled = bool(self._config.get("sylanne_alpha_embedding_memory_enabled"))
+            provider_id = str(self._config.get("sylanne_alpha_embedding_memory_provider_id") or "")
+            if enabled and provider_id:
+                try:
+                    traces = host.kernel.body.memory.get("traces", [])
+                    if traces:
+                        provider = self._get_embedding_provider(provider_id)
+                        if provider:
+                            query_vec = await provider.get_embedding(message_text[:100])
+                            if query_vec:
+                                from sylanne_alpha.embedding_memory import recall_with_embedding_assist
+                                matches = recall_with_embedding_assist(
+                                    query=message_text[:100],
+                                    records=traces,
+                                    enabled=True,
+                                    embed_query=lambda t: query_vec,
+                                    limit=3,
+                                )
+                                mem_texts = [str(m.get("text", ""))[:100] for m in matches.get("matches", []) if m.get("text")]
+                                if mem_texts:
+                                    memory_fragment = "[相关记忆]\n" + "\n".join(f">{t}" for t in mem_texts)
+                except Exception:
+                    pass
 
         # User's current message — always last for recency priority
         user_anchor = ""
