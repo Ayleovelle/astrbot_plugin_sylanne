@@ -60,24 +60,24 @@
     "hint": "默认关闭；开启后情绪估计使用独立 provider，不占用主聊天模型。"
   },
   "sylanne_alpha_assessor_provider_id": {
-    "description": "判断 LLM Provider",
+    "description": "深度判断 LLM Provider（后台异步）",
     "type": "string",
     "default": "",
     "_special": "select_provider",
-    "hint": "用于情绪估计的独立 LLM；留空则使用当前会话模型。"
+    "hint": "后台深度语义分析，结果喂给长期状态引擎。不阻塞回复，可用强模型。推荐设置：温度 0，top-p 0.1。"
   },
   "sylanne_alpha_fast_assessor_enabled": {
-    "description": "启用快速判断 LLM",
+    "description": "启用即时判断 LLM",
     "type": "bool",
     "default": true,
-    "hint": "默认开启；用于碎片完整性、表情包一致性等短 JSON 判断。"
+    "hint": "默认开启；前台同步等待（2s），即时情绪直接注入当前轮回复。"
   },
   "sylanne_alpha_fast_assessor_provider_id": {
-    "description": "快速判断 LLM Provider",
+    "description": "即时判断 LLM Provider（前台同步）",
     "type": "string",
     "default": "",
     "_special": "select_provider",
-    "hint": "建议搭配低推理、响应快的小模型。推荐设置：温度 0，top-p 0.1，Max Tokens 无需设置（插件已接管）。"
+    "hint": "前台同步等待 2s，需要响应快的小模型。即时情绪直接影响当前轮回复语气。推荐设置：温度 0，top-p 0.1，Max Tokens 无需设置（插件已接管）。"
   },
   "sylanne_alpha_background_workers_enabled": {
     "description": "启用后台工作队列",
