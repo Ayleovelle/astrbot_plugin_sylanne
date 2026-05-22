@@ -1,5 +1,7 @@
 output/
 dist/
+data/
+.sylanne_alpha_state*/
 __pycache__/
 *.py[cod]
 .pytest_cache/
@@ -15,3 +17,8 @@ scripts/build_psychological_literature_kb.py
 scripts/build_humanlike_agent_literature_kb.py
 tests/test_literature_kb_scripts.py
 texput.log
+*.aux
+*.log
+*.out
+*.synctex.gz
+experiments/figures/

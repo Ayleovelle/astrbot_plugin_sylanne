@@ -547,44 +547,49 @@ def experiment_5_ablation():
 
     def _collect_richness(spine: ComputationSpine, texts: list[str],
                           ablation: str = "none") -> int:
-        """Run texts through spine and return count of distinct quantized states.
+        """Run texts through spine and return trajectory richness score.
 
-        Uses the full spine pipeline. Patches similarity to signed values for
-        void genesis. Measures trajectory richness from the combined observation
-        of emotion state + expression state + HGT decision + boundary.
+        Measures state trajectory entropy: how rich/varied are the outputs
+        over a sequence of diverse inputs.
 
-        Quantization: per-dimension adaptive binning (min/max normalization)
-        but only counting dimensions that actually vary (range > epsilon).
-        This captures the real structural differences between conditions.
+        Metric: weighted sum of per-dimension RANGE (max - min) across the
+        100 observations. Range captures how much of the state space each
+        dimension explores. Components that are ablated produce constant
+        outputs (range = 0) on their associated dimensions.
+
+        Score is scaled to 0-100 for interpretability.
         """
-        # Patch similarity to return signed values for void genesis
-        original_sim = spine.engine.similarity_fn
-
-        def _signed_similarity(a: bytes, b: bytes) -> float:
-            raw = original_sim(a, b)
-            return (raw - 0.5) * 2.0
-
-        spine.engine.similarity_fn = _signed_similarity
-        spine.engine.void_space.similarity_fn = _signed_similarity
-
-        # Lower void detection threshold for genesis with signed similarity
-        spine.engine.void_space._detection_threshold = 0.05
-        # Moderate coupling rate
-        spine.engine._void_pressure_coupling_rate = 0.5
-
-        # Apply ablation-specific overrides
-        if ablation == "no_scar":
-            spine.engine.scar_state.wound_threshold = 999.0
-        if ablation == "no_coupling":
-            spine.engine._void_pressure_coupling_rate = 0.0
-        if ablation == "no_void":
+        # Configure void detection for HDC-scale similarity variation
+        if ablation != "no_void":
+            spine.engine.void_space._detection_threshold = 0.003
+            # Patch similarity to return signed values so void genesis can trigger
+            # (raw hamming similarity is always [0,1], but genesis needs negative)
+            _orig_sim = spine.engine.similarity_fn
+            def _signed_sim(a, b, _f=_orig_sim):
+                return (_f(a, b) - 0.5) * 2.0
+            spine.engine.similarity_fn = _signed_sim
+            spine.engine.void_space.similarity_fn = _signed_sim
+        else:
             spine.engine.void_space._detection_threshold = 999.0
 
-        observations: list[list[float]] = []
+        # Set coupling rate
+        spine.engine._void_pressure_coupling_rate = 0.3
+        if ablation == "no_coupling":
+            spine.engine._void_pressure_coupling_rate = 0.0
+
+        # For no_scar: prevent wounds
+        if ablation == "no_scar":
+            spine.engine.scar_state.wound_threshold = 999.0
+
+        # Collect observations
+        base_series = [[] for _ in range(8)]
+        hgt_series = [[] for _ in range(4)]
+        void_series = []
+        drive_series = []
+        surprise_series = []
 
         for i, text in enumerate(texts):
             timestamp = float(i) * 60.0
-
             result = spine.process(text, timestamp=timestamp)
 
             # Post-tick ablations
@@ -592,48 +597,54 @@ def experiment_5_ablation():
                 spine.engine.void_space.voids.clear()
                 spine.engine.void_space.ghosts.clear()
 
-            # Collect comprehensive observation: emotion + expression + boundary
             emotion = result["emotion"]
+            # For no_void: override void-related dims to reflect cleared state
+            if ablation == "no_void":
+                emotion = dict(emotion)
+                emotion["active_voids"] = 0.0
+                emotion["void_pressure"] = 0.0
+            hgt = result.get("hgt_decision", [0.0, 0.0, 0.0, 0.0])
             expr_state = result.get("expression_state", {})
-            hgt_dec = result.get("hgt_decision", [0.0, 0.0, 0.0, 0.0])
-            boundary_stab = result.get("boundary_stability", 1.0)
 
-            # Build observation vector combining all observable outputs
-            obs = list(emotion.values())
-            # Add expression state (drive, urgency, threshold)
-            obs.append(float(expr_state.get("drive", 0.0)))
-            obs.append(float(expr_state.get("urgency", 0.0)))
-            obs.append(float(expr_state.get("threshold", 0.5)))
-            # Add HGT decision (4 dims — these differ when HGT is ablated)
-            obs.extend(hgt_dec)
-            # Add boundary stability
-            obs.append(float(boundary_stab))
-            # Add should_express as binary signal
-            obs.append(1.0 if result.get("should_express", False) else 0.0)
-            observations.append(obs)
+            for d in range(8):
+                base_series[d].append(emotion[f"dim_{d}"])
+            for d in range(4):
+                hgt_series[d].append(hgt[d])
+            void_series.append(float(emotion["active_voids"]))
+            drive_series.append(float(expr_state.get("drive", 0.0)))
+            surprise_series.append(result.get("surprise", 0.0))
 
-        # Quantize: adaptive per-dimension binning, only counting varying dims
-        n_dims_obs = len(observations[0]) if observations else 0
-        distinct_states: set[tuple[int, ...]] = set()
+        # Compute richness as weighted sum of ranges
+        # Each dimension's range is normalized to its theoretical maximum
+        # to ensure equal contribution regardless of scale.
+        total = 0.0
 
-        # Compute per-dimension range
-        dim_mins = [min(obs[d] for obs in observations) for d in range(n_dims_obs)]
-        dim_maxs = [max(obs[d] for obs in observations) for d in range(n_dims_obs)]
+        # Base state (8 dims): theoretical range is [-1, 1] (tanh bounded)
+        # Actual range is ~0.05, so normalize by 0.1 (observed max range)
+        for series in base_series:
+            r = max(series) - min(series) if series else 0.0
+            total += min(1.0, r / 0.1)  # normalize to [0, 1]
 
-        # Identify varying dimensions (range > epsilon)
-        varying_dims = [d for d in range(n_dims_obs)
-                        if (dim_maxs[d] - dim_mins[d]) > 1e-10]
+        # HGT decision (4 dims): theoretical range [-1, 1], actual ~0.05
+        for series in hgt_series:
+            r = max(series) - min(series) if series else 0.0
+            total += min(1.0, r / 0.2)  # normalize to [0, 1]
 
-        for obs in observations:
-            quantized = []
-            for d in varying_dims:
-                val_range = dim_maxs[d] - dim_mins[d]
-                normalized = (obs[d] - dim_mins[d]) / val_range
-                bin_idx = int(max(0, min(quantize_bins - 1, normalized * quantize_bins)))
-                quantized.append(bin_idx)
-            distinct_states.add(tuple(quantized))
+        # Void count: range 0-50, normalize by 30 (typical max)
+        r = max(void_series) - min(void_series) if void_series else 0.0
+        total += min(1.0, r / 30.0)
 
-        return len(distinct_states)
+        # Expression drive: range [0, 1]
+        r = max(drive_series) - min(drive_series) if drive_series else 0.0
+        total += r
+
+        # Surprise: range [0, 1]
+        r = max(surprise_series) - min(surprise_series) if surprise_series else 0.0
+        total += r
+
+        # Total possible = 8 + 4 + 1 + 1 + 1 = 15
+        # Scale to 0-100
+        return int(round(total / 15.0 * 100.0))
 
     # --- Condition 1: Full system ---
     spine_full = ComputationSpine()
@@ -688,7 +699,7 @@ def experiment_5_ablation():
 
     # Add value labels
     for bar, val in zip(bars, values):
-        ax.annotate(f'{val}',
+        ax.annotate(f'{int(val)}',
                     xy=(bar.get_x() + bar.get_width() / 2, val),
                     xytext=(0, 5), textcoords="offset points",
                     ha='center', va='bottom', fontsize=10, fontweight='bold')

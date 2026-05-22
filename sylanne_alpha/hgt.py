@@ -329,7 +329,8 @@ class HeterogeneousGraphTransformer:
 
         # d_3 (inhibition) is mapped to [0, 1] via sigmoid
         if len(decision) >= 4:
-            decision[3] = 1.0 / (1.0 + math.exp(-raw[3] * 3.0))
+            clamped = max(-500.0, min(500.0, raw[3] * 3.0))
+            decision[3] = 1.0 / (1.0 + math.exp(-clamped))
 
         return decision
 
