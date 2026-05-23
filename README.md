@@ -55,6 +55,40 @@ Embodiment 的底线不变：Sylanne 可以燃烧，但不能把用户当燃料�
 
 ---
 
+## 版本预告：Embodiment-1.2.0
+
+> 🚧 **即将推出**
+
+Embodiment-1.2.0 将带来全新的 **WebUI 可视化控制台**，让计算层不再是黑箱。
+
+> 默认端口 `2718` — 自然常数 *e* 的前四位。小巧思这一块 😋
+
+**七层神经脊实时可视化** — 每一层的计算流实时呈现，包括 L1 HDC 超空间编码网格动画、编码指标（激活密度、本征翻转率、预测相似度），直观看到消息如何被感知和编码。
+
+<p align="center">
+<img src="docs/assets/preview-1.2.0/webui-spine.png" width="100%" alt="WebUI - 七层计算神经脊演化与 HDC 编码可视化">
+</p>
+
+**实时计算日志** — 每条消息经过 7 层计算栈的完整过程记录，路由分布（Fast/Normal/Full）、各层输出参数、总耗时一目了然，方便调试和观察系统行为。
+
+<p align="center">
+<img src="docs/assets/preview-1.2.0/webui-compute-log.png" width="100%" alt="WebUI - 实时计算日志">
+</p>
+
+**插件参数配置面板** — 在 WebUI 中直接管理所有插件配置项，即时聊天、流式分段、主动发起、后台调度等开关一键切换，无需手动编辑配置文件。
+
+<p align="center">
+<img src="docs/assets/preview-1.2.0/webui-config-panel.png" width="100%" alt="WebUI - 参数配置面板">
+</p>
+
+**记忆池观测与策略优化** — 三级记忆架构全景展示：L1 Hot Pool（deque 驻留层）、L2 Warm Pool（向量召回层）、L3 Cold Graph（实体图谱层）。支持按印象深度检索，并优化了记忆沉降策略——防止重要记忆在尚未完成向量化时，被大量上下文打穿 L1 池而过早沉入 L2，确保关键记忆不丢失。
+
+<p align="center">
+<img src="docs/assets/preview-1.2.0/webui-memory-pool.png" width="100%" alt="WebUI - 记忆池三级架构观测">
+</p>
+
+---
+
 ## 为什么重写
 
 3.x 的情绪引擎本质上是一组浮点数的加减衰减——事件进来加一点，时间过去减一点，状态永远可以回到原点。但真实的关系不是这样的：
