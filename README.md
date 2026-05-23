@@ -10,9 +10,10 @@
 
 ## 介绍
 
-<img align="right" src="docs/assets/sylanne-mascot.gif" width="200" alt="Sylanne animated mascot">
-
-_Sylanne向大家问好~~_
+<table align="right"><tr><td align="center">
+<img src="docs/assets/sylanne-mascot.gif" width="200" alt="Sylanne animated mascot"><br>
+<em>Sylanne向大家问好~~</em>
+</td></tr></table>
 
 `astrbot_plugin_sylanne` Embodiment-1.1.2 是一次从底层计算逻辑开始的完全重写。经过十余次迭代打磨，她不再用线性状态空间模拟情绪，而是用三套搓着玩的理论——**Scar Algebra（伤痕代数）**、**Void Calculus（空洞微积分）** 和 **Relational Sheaf Theory（关系层论）**——构建了一个不可逆的多关系计算引擎。
 
