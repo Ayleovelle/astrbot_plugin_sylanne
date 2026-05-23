@@ -10,7 +10,7 @@
 
 ## 介绍
 
-<table align="right"><tr><td align="center">
+<table align="right" border="0" cellspacing="0" cellpadding="0"><tr><td align="center">
 <img src="docs/assets/sylanne-mascot.gif" width="200" alt="Sylanne animated mascot"><br>
 <em>Sylanne向大家问好~~</em>
 </td></tr></table>
