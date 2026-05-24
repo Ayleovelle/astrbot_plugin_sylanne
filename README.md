@@ -103,10 +103,7 @@ Embodiment-1.2.0 将带来全新的 **WebUI 可视化控制台**，让计算层�
 |------|:----:|------|
 | L5 MoE-HGT 决策融合 | ✅ 已完成 | 三阶段架构 + Hebbian 适应，测试通过 |
 | 群聊 Social Field 适配 | ✅ 已完成 | 信号收集器 + 记忆 gating + SocialVoid |
-| WebUI 七层神经脊可视化 | 🚧 开发中 | 前端 bug 修复中 |
-| WebUI 实时计算日志 | 🚧 开发中 | 前端 bug 修复中 |
-| WebUI 参数配置面板 | 🚧 开发中 | 前端 bug 修复中 |
-| WebUI 记忆池观测 | 🚧 开发中 | 前端 bug 修复中 |
+| WebUI 可视化控制台 | 🚧 开发中 | 前端 bug 修复中 |
 
 ---
 
