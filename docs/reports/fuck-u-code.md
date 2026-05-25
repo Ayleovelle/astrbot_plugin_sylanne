@@ -2,12 +2,12 @@
 
 > powered by Fuck-U-Code；本报告由 `scripts/update_fuck_u_code_report.py` 根据官方 JSON 输出生成。
 
-- 💩 发酵指数：`23.7/100`，官方评价：`😐 微臭青年`（由质量分反向换算，越低越好）
-- 官方 JSON overallScore：`76.3/100`
-- 扫描规模：`203/590` 个文件已分析，`387` 个文件被跳过
-- 问题计数：critical `148`，error `384`，warning `286`
+- 💩 发酵指数：`23.6/100`，官方评价：`😐 微臭青年`（由质量分反向换算，越低越好）
+- 官方 JSON overallScore：`76.4/100`
+- 扫描规模：`199/318` 个文件已分析，`119` 个文件被跳过
+- 问题计数：critical `142`，error `373`，warning `278`
 - 原始报告：`output/fuck_u_code/raw-report.json`
-- 生成时间：`2026-05-25T10:46:13+00:00`
+- 生成时间：`2026-05-25T11:16:37+00:00`
 
 ## 最需要除味的文件
 
@@ -22,9 +22,9 @@
 | 38.0/100 | 62.0/100 | 3 | 6 | 2 | `archive/3x_engines/project_life_engine.py` |
 | 37.0/100 | 63.1/100 | 4 | 4 | 2 | `archive/3x_engines/personality_drift_engine.py` |
 | 33.0/100 | 67.5/100 | 4 | 3 | 1 | `sylanne_alpha/computation_spine.py` |
-| 33.0/100 | 67.0/100 | 3 | 4 | 2 | `knowledge-base/scripts/build_mega_paper_kb.py` |
 | 30.0/100 | 70.2/100 | 3 | 3 | 1 | `sylanne_alpha/workset.py` |
 | 30.0/100 | 70.3/100 | 1 | 7 | 1 | `experiments/void_scar_experiments.py` |
+| 29.0/100 | 71.0/100 | 3 | 4 | 3 | `sylanne_alpha/kernel.py` |
 
 ## 读数说明
 
