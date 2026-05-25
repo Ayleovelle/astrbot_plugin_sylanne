@@ -21,6 +21,14 @@ texput.log
 *.log
 *.out
 *.synctex.gz
+*.fdb_latexmk
+*.fls
+*.xdv
+*.toc
+*.bbl
+*.blg
 Sylanne-embodiment.zip
-dist/
-__pycache__/
+test_output.txt
+knowledge-base/
+.claude/
+.vscode/

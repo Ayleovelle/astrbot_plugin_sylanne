@@ -1,9 +1,0 @@
-{
-  "filter": "title_and_abstract.search.exact:finite element analysis,type:article,primary_location.source.type:journal,is_retracted:false,has_doi:true",
-  "per_page": 100,
-  "cursor": "IlsxNTIsIDEwMC4wLCAxNTIsICdodHRwczovL29wZW5hbGV4Lm9yZy9XMjM0NzQwNzY1MSddIg==",
-  "count": 3100,
-  "pages": 31,
-  "api_reported_count": 253434,
-  "updated_at": "2026-05-10T16:56:54.871775+00:00"
-}
