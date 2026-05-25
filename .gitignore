@@ -38,5 +38,10 @@ docs/scar_void_arxiv_paper_zh.tex
 docs/sylanne_4_alpha_computation_model.tex
 review/
 docs/frontend_spine_visualization_design.md
-docs/scar_void_arxiv_paper_v3.*
-docs/scar_void_arxiv_paper_zh_v4.*
+docs/scar_void_arxiv_paper*
+docs/sylanne_tac_paper.*
+docs/sylanne_4_alpha_computation_model.pdf
+docs/sylanne_embodiment_computation_architecture.pdf
+docs/sylanne_embodiment_computation_architecture.tex
+docs/personality_system_design.md
+docs/embodiment-*-handoff.md
