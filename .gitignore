@@ -42,6 +42,7 @@ review/
 # Internal docs (local only)
 docs/astrbot_dev_handbook.md
 docs/embodiment-*-handoff.md
+docs/COMMIT_CHECKLIST.md
 docs/personality_system_design.md
 docs/frontend_spine_visualization_design.md
 docs/memory_system_v2_design.md
