@@ -157,10 +157,16 @@ HGT~\cite{hu2020}为异构图引入了类型特定的投影和注意力偏置。
 \begin{equation}
 \alpha(\phi) = \begin{cases} 2.0 & \phi = raw \\ 1.5 & \phi = closing \\ 1.0 & \phi = scarred \\ 0.7 & \phi = faded \end{cases}
 \end{equation}
-对于维度 $d$ 上的多个伤疤，调制因子乘性组合：
+对于维度 $d$ 上的多个伤疤，原始乘积 $\Pi_d = \prod_{i:\, d_i = d} \alpha(\phi_i)$ 经对数压缩以防止无界放大：
 \begin{equation}
-M_d = \prod_{i:\, d_i = d} \alpha(\phi_i)
+M_d = \begin{cases}
+\Pi_d & \text{若 } \Pi_d \leq 1 \\[4pt]
+1 + (M_{\max} - 1)\left(1 - \dfrac{1}{\Pi_d}\right) & \text{否则}
+\end{cases}
 \end{equation}
+其中 $M_{\max} = 2 + \pi_{\text{acuity}} \cdot 3$ 为人格导出的上限（范围 $[2, 5]$）。
+
+对数压缩在保持序关系的同时防止无界放大——伤疤更多的维度仍具有更高的调制因子，但增长渐近饱和于 $M_{\max}$。
 \end{definition}
 
 \begin{definition}[状态转移算子 $\triangleright$]
@@ -172,10 +178,11 @@ M_d = \prod_{i:\, d_i = d} \alpha(\phi_i)
 \tilde{e}_d = e_d \cdot M_d \quad \forall d \in \{1, \ldots, n\}
 \end{equation}
 
-\textbf{步骤 2（演化）：}通过有界非线性映射更新基状态：
+\textbf{步骤 2（演化）：}通过带谱归一化的两层收缩映射更新基状态：
 \begin{equation}
-x'_d = \tanh(x_d + 0.3 \cdot \tilde{e}_d) \quad \forall d
+\mathbf{x}' = \tanh(W_2 \cdot \tanh(W_1 \cdot [\mathbf{x};\, \tilde{\mathbf{e}}]))
 \end{equation}
+其中 $W_1 \in \mathbb{R}^{n \times 2n}$，$W_2 \in \mathbb{R}^{n \times n}$，谱归一化确保 $\|W_1\|_2 \cdot \|W_2\|_2 < 0.49$（保证收缩性）。
 
 \textbf{步骤 3（伤疤形成）：}若某维度 $d^*$ 满足 $|\tilde{e}_{d^*}| > \theta_w$：
 \begin{equation}
@@ -218,7 +225,7 @@ $\phi_i(t_1) \leq \phi_i(t_2)$ 对所有 $t_1 < t_2$ 成立。愈合阶段只向
 
 \begin{axiom}[维度饱和]
 \label{ax:scar-sat}
-$\lim_{k \to \infty} \prod_{j=1}^k \alpha(faded) = \lim_{k \to \infty} 0.7^k = 0$。累积的淡化伤疤将灵敏度驱动至零。
+$\lim_{k \to \infty} \prod_{j=1}^k \alpha(faded) = \lim_{k \to \infty} 0.7^k = 0$。累积的淡化伤疤将灵敏度驱动至零。在放大方向（$\alpha > 1$），调制因子因对数压缩而饱和于 $M_{\max}$。在麻木方向（$\alpha < 1$），使用原始乘积，饱和至零仍然成立。
 \end{axiom}
 
 \subsection{主要定理}
@@ -247,7 +254,7 @@ M_\Delta = 2.0^{|\{i: \Delta_i = T_1\}|} \cdot 1.5^{|\{i: \Delta_i = T_2\}|}
 
 \begin{theorem}[收敛至伤疤均衡]
 \label{thm:scar-convergence}
-在有界输入 $\|e_t\|_\infty \leq C$ 和收缩条件 $\|\mathbf{A}\|_\infty < 1$ 下：
+在有界输入 $\|e_t\|_\infty \leq C$ 和谱归一化约束 $\|W_1\|_2 \cdot \|W_2\|_2 < 0.49$ 下：
 \begin{enumerate}[label=(\alph*)]
 \item 存在 $T^* < \infty$，此后不再形成新伤疤。
 \item 基状态收敛：$\|x_t - x^*\| \to 0$。
@@ -256,21 +263,22 @@ M_\Delta = 2.0^{|\{i: \Delta_i = T_1\}|} \cdot 1.5^{|\{i: \Delta_i = T_2\}|}
 \end{theorem}
 
 \begin{proof}
-\textbf{(a)} 维度 $d$ 上形成新伤疤需要 $|e_d \cdot M_d| > \theta_w$。当 $k_d$ 个淡化伤疤累积后：$C \cdot 0.7^{k_d} \leq \theta_w$，当 $k_d \geq \lceil \ln(C/\theta_w) / \ln(10/7) \rceil =: k_d^*$ 时成立。放大阶段的级联伤疤受每个伤疤 $T(raw) + T(closing) = 50$ 的限制，给出有限总数 $k_d^{total} \leq k_d^* \cdot 51$。
+\textbf{(a)} 维度 $d$ 上形成新伤疤需要 $|e_d \cdot M_d| > \theta_w$。由于对数压缩使 $M_d$ 上界为 $M_{\max}$，最大调制输入为 $C \cdot M_{\max}$。当 $k_d$ 个淡化伤疤在麻木方向累积后：$C \cdot 0.7^{k_d} \leq \theta_w$，当 $k_d \geq \lceil \ln(C/\theta_w) / \ln(10/7) \rceil =: k_d^*$ 时成立。放大阶段的级联伤疤受每个伤疤 $T(raw) + T(closing) = 50$ 的限制，给出有限总数 $k_d^{total} \leq k_d^* \cdot 51$。
 
-\textbf{(b)} 对于 $t > T^*$，系统变为 $x_{t+1} = \tanh(\mathbf{A}x_t + \mathbf{B}\mathbf{D}e_t)$，其中固定对角矩阵 $\mathbf{D} = \text{diag}(0.7^{k_1}, \ldots, 0.7^{k_n})$。由于 $\|\mathbf{A}\|_\infty < 1$ 且 $\tanh$ 的 Lipschitz 常数为 1，这是一个压缩映射。状态收敛到半径为 $\|\mathbf{B}\mathbf{D}\|_\infty C / (1 - \|\mathbf{A}\|_\infty)$ 的球内。
+\textbf{(b)} 对于 $t > T^*$，系统变为 $\mathbf{x}_{t+1} = \tanh(W_2 \cdot \tanh(W_1 \cdot [\mathbf{x}_t;\, \mathbf{D}\mathbf{e}_t]))$，其中固定对角矩阵 $\mathbf{D} = \text{diag}(M_1, \ldots, M_n)$。映射关于 $\mathbf{x}$ 的雅可比矩阵满足 $\|J\|_2 \leq \|W_2\|_2 \cdot \|W_1[:, 1{:}n]\|_2 \leq \|W_2\|_2 \cdot \|W_1\|_2 < 0.49$（因为 $\tanh' \leq 1$ 且谱归一化约束权重乘积）。这使映射成为压缩映射，由 Banach 不动点定理保证收敛到唯一不动点。
 
 \textbf{(c)} 每个伤疤最多在 $T(raw) + T(closing) + T(scarred) = 200$ 个时间步内愈合。有限总伤疤数意味着有限总愈合时间。
 \end{proof}
 
 \begin{theorem}[临界伤疤密度处的相变]
 \label{thm:scar-phase}
-定义有效增益 $G_d = \prod_{i:d_i=d} \alpha(\phi_i)$。存在临界增益 $G_c = \theta_w / C$ 使得：
+定义有效增益 $G_d = M_d$（对数压缩后的调制因子）。存在临界增益 $G_c = \theta_w / C$ 使得：
 \begin{itemize}
 \item 当 $G_d > G_c$ 时：系统处于\emph{创伤态}（正伤疤形成率）。
 \item 当 $G_d < G_c$ 时：系统处于\emph{麻木态}（零伤疤形成率）。
 \item 转变呈现宽度为 $\Delta G = G_c \cdot (\alpha(raw) - 1) = G_c$ 的滞后效应。
 \end{itemize}
+注：由于对数压缩使 $G_d \leq M_{\max}$，相变具有上限——创伤态增益受 $M_{\max}$ 约束。定性行为（阈值穿越和滞后）保持不变，但动态不会产生无界放大级联。
 \end{theorem}
 
 \begin{proof}
@@ -372,6 +380,13 @@ contract(v, \mathbf{h}) = (B_v \setminus \{b \in B_v : sim(\mathbf{h}, b) > \the
 \label{eq:pressure}
 \end{equation}
 更深的空洞产生更多压力；更老的空洞产生更多压力（对数增长）；定义越不完整的空洞（$\beta_v$ 低）产生更多压力。
+
+空洞创生还受以下机制门控：
+\begin{enumerate}
+\item \textbf{冷却期：}创建空洞后，需经过 $\tau_c = 2 + \pi_{\text{perm}} \cdot 3$ 个 tick 的冷却期才能创建下一个。
+\item \textbf{抵抗力：}有效检测阈值随现有空洞数量递增：$\theta'_{\text{detect}} = \theta_{\text{detect}} + 0.02 \cdot |\mathcal{V}|$。
+\item \textbf{压力上限：}$\pi_v(t) \leq \Pi_{\max}$，其中 $\Pi_{\max} = 60 + \pi_{\text{sovereignty}} \cdot 60$（人格导出，范围 $[60, 120]$）。
+\end{enumerate}
 \end{definition}
 
 \begin{definition}[空洞幽灵]
@@ -423,7 +438,7 @@ $death(v) \implies \hat{v} = (\emptyset, \delta_v, 0, a_v, 0) \in V$。死亡的
 
 \textbf{AGM 恢复违反：}每个 AGM 收缩 $K \div \phi$ 满足恢复公设：$(K \div \phi) + \phi = K$。这要求存在特定的 $\phi$，其添加可解决缺席。但 $v$ 的 $\beta_v = 0$：无法命名特定命题作为"缺失之物"。
 
-\textbf{自主动态：}定义性质 $\mathcal{P}_{autonomous}$："缺席的表示在无外部输入时产生单调递增的影响。"AGM 收缩满足 $\neg\mathcal{P}_{autonomous}$（收缩后的信念集在新信息到达前是静态的）。空洞 $v$ 通过方程~\eqref{eq:pressure}满足 $\mathcal{P}_{autonomous}$：$\pi_v(t) \to \infty$ 当 $t \to \infty$。
+\textbf{自主动态：}定义性质 $\mathcal{P}_{autonomous}$："缺席的表示在无外部输入时产生单调递增的影响。"AGM 收缩满足 $\neg\mathcal{P}_{autonomous}$（收缩后的信念集在新信息到达前是静态的）。空洞 $v$ 通过方程~\eqref{eq:pressure}满足 $\mathcal{P}_{autonomous}$：$\pi_v(t)$ 单调增长直至达到 $\Pi_{\max}$。\footnote{在实现中，压力受 $\Pi_{\max}$ 约束。不可归约性结论仍然成立，因为三态区分（从未讨论/已解决/主动回避）依赖于压力动态的\emph{存在性}，而非无界增长。}
 
 由于 $v$ 满足任何 AGM 可表示缺席都不能满足的性质，$v$ 不是 AGM 可表示的。
 \end{proof}
@@ -615,11 +630,11 @@ H^2(K, \mathcal{F}) &= C^2 / \operatorname{im}(\delta^1)
 
 \begin{definition}[人格导出的呈现矩阵]
 \label{def:presentation-matrices}
-呈现矩阵 $P_i$ 由智能体人格 $\boldsymbol{\pi} \in \mathbb{R}^5$（大五人格）、关系类型 $\tau_i$ 和成熟度 $m_i \in [0,1]$ 导出：
+呈现矩阵 $P_i$ 由智能体人格 $\boldsymbol{\pi} \in \mathbb{R}^5$（Embodiment 五维）、关系类型 $\tau_i$ 和成熟度 $m_i \in [0,1]$ 导出：
 \begin{equation}
 P_i = P_{base}(\boldsymbol{\pi}) + \Delta P(\tau_i) + m_i \cdot \Delta P_{mature}(\boldsymbol{\pi}, \tau_i)
 \end{equation}
-受人格一致性约束：$\|P_i - P_j\|_F \leq \kappa(\boldsymbol{\pi}) \cdot (1 + d(\tau_i, \tau_j))$，其中 $\kappa(\boldsymbol{\pi})$ 是人格依赖的（高宜人性 $\to$ 低 $\kappa$；高神经质 $\to$ 高 $\kappa$）。
+受人格一致性约束：$\|P_i - P_j\|_F \leq \kappa(\boldsymbol{\pi}) \cdot (1 + d(\tau_i, \tau_j))$，其中 $\kappa(\boldsymbol{\pi})$ 是人格依赖的（高关系引力 $\to$ 低 $\kappa$；高感知锐度 $\to$ 高 $\kappa$）。
 \end{definition}
 
 \subsection{公理系统}
@@ -689,7 +704,7 @@ P_i(t+1) = P_i(t) + \eta \cdot \nabla_{P_i} \mathcal{L}_{consistency}
 \begin{equation}
 \|\delta^0 \mathbf{x}\|^2 \leq N \cdot \kappa(\boldsymbol{\pi})^2 \cdot (1 + D_{max})^2 \cdot \|\mathbf{x}_0\|^2
 \end{equation}
-其中 $N$ 是关系数，$D_{max} = \max_{i,j} d(\tau_i, \tau_j)$ 是最大类型距离。高宜人性智能体（低 $\kappa$）具有更紧的不一致性界；高神经质智能体（高 $\kappa$）在上同调阻碍出现前容忍更多跨关系矛盾。
+其中 $N$ 是关系数，$D_{max} = \max_{i,j} d(\tau_i, \tau_j)$ 是最大类型距离。高关系引力智能体（低 $\kappa$）具有更紧的不一致性界；高感知锐度智能体（高 $\kappa$）在上同调阻碍出现前容忍更多跨关系矛盾。
 \end{theorem}
 
 完整证明见补充理论目录（\texttt{theory/relational\_sheaf/}）。
@@ -719,11 +734,11 @@ P_i(t+1) = P_i(t) + \eta \cdot \nabla_{P_i} \mathcal{L}_{consistency}
 \begin{equation}
 \mathbf{h}_i^{(l+1)} = (1-\alpha) \cdot \text{Aggregate}(\{\mathbf{h}_j^{(l)} : j \in \mathcal{N}(i)\}) + \alpha \cdot \mathbf{h}_i^{(0)}
 \end{equation}
-其中 $\alpha = 0.2 + 0.4 \cdot \text{neuroticism}$（人格驱动的传送率）。
+其中 $\alpha = 0.2 + 0.4 \cdot \pi_{\text{acuity}}$（人格驱动的传送率）。
 
 \item \textbf{L4：关系层（Relational Sheaf）。}多关系一致性层（第~\ref{sec:sheaf}节）。层上同调（$H^1$）检测不可约关系矛盾；层拉普拉斯算子以谱间隙决定的指数衰减率控制跨关系伤疤传播。人格导出的呈现矩阵 $P_i$ 通过 $\kappa(\boldsymbol{\pi})$ 约束不一致性。
 
-\item \textbf{L5：异构图 Transformer（HGT）。}类型感知的决策融合，具有 7 种 token 类型：\{scar, void, boundary, personality, surprise, expression, context\}。类型特定投影 $W_Q^\tau, W_K^\tau, W_V^\tau$，人格导出的注意力先验 $\mu^{(\tau_s, \tau_t)}$ 和类型内掩码。
+\item \textbf{L5：MoE-HGT。}三阶段决策融合：(1) 带 RMSNorm 的类型专家 FFN，(2) 4 头交叉注意力与 Hebbian 注意力先验，(3) top-2 情境专家 MoE 与休眠专家重激活。七种 token 类型：\{scar, void, boundary, personality, surprise, expression, context\}。约 14.3K 参数，全部人格导出。
 
 \item \textbf{L6：自创生边界。}32 维身份核心向量。通过正交投影评估传入扰动：
 \begin{itemize}
@@ -735,30 +750,70 @@ P_i(t+1) = P_i(t) + \eta \cdot \nabla_{P_i} \mathcal{L}_{consistency}
 \item \textbf{L7：相变表达。}表达是不连续相变，而非连续函数。压力累积；当超过人格导出的阈值时，输出跳跃到三种模式之一：\emph{暗示}（$< 0.5$）、\emph{正常}（$0.5$--$1.0$）、\emph{紧急}（$> 1.0$）。
 \end{enumerate}
 
-\subsection{异构图 Transformer 细节}
+\subsection{MoE-HGT：三阶段决策融合}
 
-HGT 层执行类型化非线性决策融合。带人格先验的注意力：
+决策融合层将原始单遍 HGT 替换为三阶段混合专家异构图 Transformer（MoE-HGT）。每个阶段引入逐步更丰富的跨 token 交互。
+
+\paragraph{阶段 1：类型专家 FFN。}
+七种 token 类型参与决策图：\emph{scar}、\emph{void}、\emph{boundary}、\emph{personality}、\emph{surprise}、\emph{expression} 和 \emph{context}。每种类型 $\tau$ 维护独立的前馈专家：
 \begin{equation}
-a_{ij} = \frac{(W_Q^{\tau(i)} z_i) \cdot (W_K^{\tau(j)} z_j)^\top}{\sqrt{d_k}} + \mu^{(\tau(i), \tau(j))}
+\mathbf{z}_i^{(1)} = \mathbf{z}_i + \text{RMSNorm}\bigl(\text{FFN}_\tau(\mathbf{z}_i)\bigr), \quad \text{FFN}_\tau: \mathbb{R}^{16} \to \mathbb{R}^{16}
 \end{equation}
+其中 $\text{FFN}_\tau(\mathbf{x}) = W_2^\tau \cdot \text{GELU}(W_1^\tau \mathbf{x})$，$W_1^\tau, W_2^\tau \in \mathbb{R}^{16 \times 16}$。伤疤 token 值在注入前经对数压缩：
 \begin{equation}
-\text{Attn}(i) = \text{softmax}_j(a_{ij} + \text{mask}(i,j)) \cdot W_V^{\tau(j)} z_j
+z_{\text{scar}} = \frac{\log_2(M_d)}{\log_2(M_{\max})}
+\end{equation}
+其中 $M_d$ 为逐维度调制因子乘积，$M_{\max}$ 为最大可能调制因子。
+
+\paragraph{阶段 2：多头交叉注意力。}
+四个注意力头使用逐类型逐头投影。对于头 $h$、源类型 $\tau_s$、目标类型 $\tau_t$：
+\begin{align}
+Q_i^{(h)} &= W_Q^{(\tau_s, h)} \mathbf{z}_i^{(1)}, \quad K_j^{(h)} = W_K^{(\tau_t, h)} \mathbf{z}_j^{(1)}, \quad V_j^{(h)} = W_V^{(\tau_t, h)} \mathbf{z}_j^{(1)} \\
+a_{ij}^{(h)} &= \frac{Q_i^{(h)} \cdot (K_j^{(h)})^\top}{\sqrt{d_k}} + \mu^{(\tau_s, \tau_t)} + \text{mask}(i,j)
+\end{align}
+其中 $W_Q, W_K, W_V \in \mathbb{R}^{4 \times 16}$（头维度 $d_k = 4$）。注意力先验 $\mu^{(\tau_s, \tau_t)} \in \mathbb{R}^{7 \times 7}$ 通过 Hebbian 慢规则（Oja 规则）自适应：
+\begin{equation}
+\Delta\mu^{(\tau_s, \tau_t)} = \eta_\mu \cdot \bar{a}^{(\tau_s, \tau_t)} \cdot \bigl(\bar{a}^{(\tau_s, \tau_t)} - \mu^{(\tau_s, \tau_t)}\bigr)
+\end{equation}
+自注意力被掩码（对角线 $= -\infty$）。注意力输出使用残差连接和 RMSNorm：
+\begin{equation}
+\mathbf{z}_i^{(2)} = \mathbf{z}_i^{(1)} + \text{RMSNorm}\Bigl(\text{Concat}\bigl[\text{softmax}_j(a_{ij}^{(h)}) V_j^{(h)}\bigr]_{h=1}^4\Bigr)
 \end{equation}
 
-类型内掩码阻止同类型注意力：
+\paragraph{阶段 3：情境专家 MoE。}
+五个情境专家——\emph{防御}、\emph{好奇}、\emph{社交}、\emph{沉默}和\emph{修复}——接收均值池化后的注意力 token $\bar{\mathbf{z}} = \text{mean}(\mathbf{z}^{(2)})$。softmax 路由器选择 top-2 专家：
+\begin{align}
+g_e &= \mathbf{w}_e^\top \bar{\mathbf{z}} + b_e + \text{bonus}(e), \quad e \in \{1,\ldots,5\} \\
+\text{bonus}(e) &= \begin{cases} 0.15 & \text{若专家 } e \text{ 休眠} > 50 \text{ tick} \\ 0 & \text{否则} \end{cases}
+\end{align}
+其中 $\mathbf{w}_e \in \mathbb{R}^{16}$ 为专家 $e$ 的路由权重。路由偏置 $b_e$ 通过类 BCM 的 Hebbian 规则自适应，衰减 $\lambda = 0.998$/tick。Top-2 门控：
 \begin{equation}
-\text{mask}(i,j) = \begin{cases} -\infty & \tau(i) = \tau(j) \wedge i \neq j \\ 0 & \text{otherwise} \end{cases}
+\mathbf{o} = \sum_{e \in \text{top-2}} \frac{\exp(g_e)}{\sum_{e' \in \text{top-2}} \exp(g_{e'})} \cdot \text{Expert}_e(\bar{\mathbf{z}})
 \end{equation}
+每个专家为两层 FFN：$\text{Expert}_e: \mathbb{R}^{16} \xrightarrow{W_1^e \in \mathbb{R}^{32 \times 16}} \mathbb{R}^{32} \xrightarrow{W_2^e \in \mathbb{R}^{16 \times 32}} \mathbb{R}^{16}$。
 
-输出是 4 维决策向量 $\mathbf{d} = W_{proj} \cdot \text{mean}(\text{Attn}(\mathbf{Z}))$：
+\paragraph{决策头。}
+线性投影将 MoE 输出映射为 4 维决策向量并截断至 $[-1, 1]$：
+\begin{equation}
+\mathbf{d} = \text{clamp}\bigl(W_{\text{dec}} \cdot \mathbf{o},\; -1,\; 1\bigr), \quad W_{\text{dec}} \in \mathbb{R}^{4 \times 16}
+\end{equation}
 \begin{itemize}
-\item $d_0$：表达驱动调制因子（加到空洞-伤疤驱动上），
+\item $d_0$：表达驱动修正（加到空洞-伤疤驱动上），
 \item $d_1$：边界灵敏度调制因子（输入自创生层），
 \item $d_2$：紧急信号（调制相变阈值），
 \item $d_3$：抑制信号（$> 0.5$ 否决表达）。
 \end{itemize}
 
-总参数量：约 21.9K 浮点数（87.6 KB）。全部从人格语义导出，零学习。
+\paragraph{参数量。}
+\begin{itemize}
+\item 7 个类型专家 FFN：$7 \times (16 \times 16 + 16 \times 16) = 3{,}584$
+\item 4 头注意力（每类型每头 Q/K/V）：$7 \times 4 \times 3 \times (16 \times 4) = 5{,}376$
+\item 5 个 MoE 专家：$5 \times (16 \times 32 + 32 \times 16) = 5{,}120$
+\item 路由权重：$5 \times 16 = 80$
+\item 决策头：$16 \times 4 = 64$
+\item 注意力先验：$7 \times 7 = 49$
+\end{itemize}
+总计：约 14.3K 浮点数（约 57.2 KB）。全部从人格语义导出，零学习。
 
 \subsection{性能预算}
 
@@ -788,51 +843,133 @@ L7 相变 & $<$0.01 ms & $<$0.01 ms & $<$0.01 ms \\
 \subsection{人格建模（Personality Modeling）}
 \label{subsec:personality-modeling}
 
-人格向量 $\boldsymbol{\pi} \in [0,1]^5$ 基于大五人格模型（OCEAN）：开放性（O）、尽责性（C）、外向性（E）、宜人性（A）、神经质（N）。
+人格向量 $\boldsymbol{\pi} \in [0,1]^5$ 基于 Embodiment 五维模型：边界通透（$\pi_{\text{perm}}$）、内在秩序（$\pi_{\text{order}}$）、表达驱力（$\pi_{\text{expr}}$）、关系引力（$\pi_{\text{grav}}$）、感知锐度（$\pi_{\text{acuity}}$）。人格状态通过三种机制初始化和演化：
 
-人格向量来源：
 \begin{enumerate}[label=(\alph*)]
-\item \textbf{初始化}：由角色设定映射到 $[0,1]^5$。
-\item \textbf{漂移}：长期交互中由伤痕历史和空洞模式驱动缓慢漂移。
-\item \textbf{约束}：漂移速率受自创生边界（L6）保护，上界 $\eta \leq 10^{-4}$。
+\item \textbf{初始化}：由角色设定通过确定性提取函数映射到 $[0,1]^5$：
+\begin{equation}
+\boldsymbol{\pi}_0 = \text{init}(\text{desc}) \in [0,1]^5
+\end{equation}
+
+\item \textbf{漂移}：长期交互中由伤痕历史和空洞模式驱动缓慢漂移。漂移非随机，而是由系统计算经验因果决定。
+
+\item \textbf{约束}：漂移速率受自创生边界（L6）保护：
+\begin{equation}
+\|\boldsymbol{\pi}(t+1) - \boldsymbol{\pi}(t)\|_\infty \leq \eta, \quad \eta \leq 10^{-4}
+\end{equation}
+这确保人格稳定性：即使在持续压力下，人格向量每 tick 最多变化 $10^{-4}$，需要 $\geq 10{,}000$ tick 才能遍历任一维度的全范围。
 \end{enumerate}
 
 \subsection{人格派生参数化（Personality-Derived Parameterization）}
 \label{subsec:personality-parameterization}
 
-所有计算层参数由 $\boldsymbol{\pi}$ 统一派生：
-\begin{equation}
-\theta_i = f_i(\boldsymbol{\pi}), \quad f_i: [0,1]^5 \to \mathbb{R}
-\end{equation}
+所有计算层关键参数由人格向量 $\boldsymbol{\pi} = (\pi_{\text{perm}}, \pi_{\text{order}}, \pi_{\text{expr}}, \pi_{\text{grav}}, \pi_{\text{acuity}}) \in [0,1]^5$（Embodiment 五维）实时导出，无需手动配置或训练数据：
 
-具体映射：
-\begin{itemize}
-\item $E$ $\to$ 表达阈值、伤痕阈值
-\item $N$ $\to$ 愈合速率、门控灵敏度、空洞检测阈值
-\item $A$ $\to$ 呈现矩阵一致性界 $\kappa$
-\item $O$ $\to$ HGT 注意力先验
-\item $C$ $\to$ 记忆深度、边界修复速率
+\begin{itemize}[leftmargin=*]
+\item \textbf{表达驱力（$\pi_{\text{expr}}$）：}表达阈值（高 $\pi_{\text{expr}}$ $\to$ 低阈值，更易表达）；伤疤形成阈值 $\theta_w$（高 $\pi_{\text{expr}}$ $\to$ 高阈值，更难受伤）。
+\item \textbf{感知锐度（$\pi_{\text{acuity}}$）：}愈合速率（高 $\pi_{\text{acuity}}$ $\to$ 愈合更慢）；预测编码门灵敏度（高 $\pi_{\text{acuity}}$ $\to$ 惊奇阈值更低）；空洞检测阈值 $\theta_d$（高 $\pi_{\text{acuity}}$ $\to$ 阈值更低，更易感知缺席）。
+\item \textbf{关系引力（$\pi_{\text{grav}}$）：}呈现矩阵一致性界 $\kappa(\boldsymbol{\pi})$（高 $\pi_{\text{grav}}$ $\to$ 低 $\kappa$，跨关系自我呈现更一致）。
+\item \textbf{边界通透（$\pi_{\text{perm}}$）：}HGT 注意力先验分布（高 $\pi_{\text{perm}}$ $\to$ 更均匀的先验，对多样信号类型更具接受性）。
+\item \textbf{内在秩序（$\pi_{\text{order}}$）：}记忆深度（高 $\pi_{\text{order}}$ $\to$ 更长时间上下文）；边界修复速率（高 $\pi_{\text{order}}$ $\to$ 自创生恢复更快）。
 \end{itemize}
 
-\subsection{人格反馈闭环（Personality Feedback Loop）}
+形式化地，每个参数 $\theta_i$ 通过以下方式导出：
+\begin{equation}
+\theta_i = \text{clamp}\bigl(f_i(\boldsymbol{\pi}),\; \theta_i^{min},\; \theta_i^{max}\bigr), \quad f_i: \mathbb{R}^5 \to \mathbb{R}
+\end{equation}
+其中每个 $f_i$ 为带截断的仿射映射，确保参数始终在有效范围内。此设计确保当人格漂移（通过 L6 相变）时，所有计算参数自动协同演化——无需重新配置。
+
+\subsection{人格反馈闭环：双重 EMA 系统（Personality Feedback Loop: Dual-EMA System）}
 \label{subsec:personality-feedback}
 
-计算输出反向驱动人格漂移，形成闭环：
-\begin{equation}
-\boldsymbol{\pi}(t+1) = \Pi_{[0,1]^5}\!\left(\boldsymbol{\pi}(t) + \eta \cdot \mathbf{g}\bigl(s(t), v(t), r(t), H^1(t)\bigr)\right)
-\end{equation}
-其中 $\eta = \eta_0 \cdot (1 - \text{boundary\_stability})$。
+每个 Embodiment 特质 $\pi_k$ 维护双重指数移动平均，以噪声抵抗方式控制人格漂移。
 
-具体驱动：
-\begin{enumerate}
-\item 伤痕密度 $\to$ $N\!\uparrow$
-\item 空洞压力 $\to$ $O\!\downarrow$
-\item coherence $\to$ $A$（正相关）
-\item 表达反馈 $\to$ $E$（accepted$\uparrow$, ignored$\downarrow$）
-\item $H^1$ 不一致性 $\to$ $C\!\downarrow$
+\paragraph{双重 EMA 追踪。}
+对每个特质 $k \in \{\text{perm}, \text{order}, \text{expr}, \text{grav}, \text{acuity}\}$，快速和慢速 EMA 追踪漂移目标：
+\begin{align}
+f_k(t) &= (1 - \alpha_f)\, f_k(t-1) + \alpha_f \cdot \text{target}_k(t), \quad \alpha_f = 0.039 \;\;(\tau_f \approx 50) \\
+s_k(t) &= (1 - \alpha_s)\, s_k(t-1) + \alpha_s \cdot \text{target}_k(t), \quad \alpha_s = 0.004 \;\;(\tau_s \approx 500)
+\end{align}
+
+\paragraph{漂移共识规则。}
+双重 EMA 系统实现共识门控，区分持续信号与瞬态噪声：
+\begin{equation}
+\Delta\pi_k = \begin{cases}
+\text{向 } s_k \text{ 全速漂移} & \text{若 } \text{sign}(f_k - \pi_k) = \text{sign}(s_k - \pi_k) \\
+0.5 \cdot (s_k - \pi_k) & \text{否则（抵抗短期噪声）}
+\end{cases}
+\end{equation}
+仅当快速和慢速平均值在方向上一致时才进行全速漂移——即信号在两个时间尺度上持续存在。
+
+\paragraph{稳态回拉。}
+每个特质受到向其人格设定点 $\pi_k^{(0)}$ 的恢复力：
+\begin{equation}
+\Delta_{\text{home},k} = 0.005 \cdot (\pi_k^{(0)} - \pi_k)
+\end{equation}
+
+\paragraph{惯性衰减。}
+漂移幅度随系统生命周期递减，建模人格结晶化：
+\begin{equation}
+I(t) = \frac{1}{1 + \ln(1 + t/500)}
+\end{equation}
+
+\paragraph{非对称阻力。}
+当特质接近极端值时漂移减半，防止人格坍缩：
+\begin{equation}
+R_k = \begin{cases} 0.5 & \text{若 } \pi_k < 0.3 \text{ 或 } \pi_k > 0.7 \\ 1.0 & \text{否则} \end{cases}
+\end{equation}
+
+\paragraph{振荡检测。}
+若特质 $k$ 在最近 10 tick 内出现 $\geq 6$ 次方向反转，则冻结 20 tick：
+\begin{equation}
+\text{frozen}_k = \begin{cases} \text{true (20 tick)} & \text{若 } |\{t' \in [t-10, t] : \text{sign}(\Delta\pi_k(t')) \neq \text{sign}(\Delta\pi_k(t'-1))\}| \geq 6 \\ \text{false} & \text{否则} \end{cases}
+\end{equation}
+
+\paragraph{组合更新。}
+每 tick 的有效人格更新为：
+\begin{equation}
+\pi_k(t+1) = \Pi_{[0,1]}\bigl(\pi_k(t) + I(t) \cdot R_k \cdot (\Delta\pi_k + \Delta_{\text{home},k}) \cdot \mathbb{1}[\neg\text{frozen}_k]\bigr)
+\end{equation}
+
+\begin{remark}[双重 EMA 系统的稳定性]
+双重 EMA 共识规则确保人格变化需要两个时间尺度（$\tau \approx 50$ 和 $\tau \approx 500$）的一致。结合稳态回拉、惯性衰减、非对称阻力和振荡检测，系统具有内在稳定性：瞬态扰动被过滤，持续压力产生有界漂移，病理性振荡被主动抑制。
+\end{remark}
+
+\subsection{安全机制}
+\label{subsec:safety}
+
+七种机制防止耦合空洞-伤疤系统中的病理动态：
+
+\begin{enumerate}[leftmargin=*]
+\item \textbf{主权免疫系统。}每会话伤疤形成上限为：
+\begin{equation}
+C_s = \max\bigl(2,\; 3 + (1 - \pi_{\text{sovereignty}}) \cdot 5\bigr)
+\end{equation}
+达到上限后，有效创伤阈值升至 $0.95$，使会话内进一步伤疤形成几乎不可能。
+
+\item \textbf{保护性解离（断路器）。}若 10 tick 内形成 $\geq 5$ 个伤疤，系统进入 30 tick 的保护模式，期间有效创伤阈值升至 $0.95$。这防止持续攻击下的级联伤疤形成。
+
+\item \textbf{时间感知愈合。}伤疤在真实时间沉默期间以每 5 分钟壁钟不活跃 1 个奖励 tick 的速率愈合，每处理步上限 10 个奖励 tick：
+\begin{equation}
+\Delta t_{\text{heal}} = \min\!\left(10,\; \left\lfloor \frac{t_{\text{silence}}}{300\text{s}} \right\rfloor\right)
+\end{equation}
+
+\item \textbf{空洞创建抵抗。}有效空洞检测阈值每存在一个空洞增加 $0.02$，防止 $\Phi$ 耦合下的空洞泛滥：
+\begin{equation}
+\theta_d^{\text{eff}} = \theta_d + 0.02 \cdot |V|
+\end{equation}
+
+\item \textbf{麻木计数下限。}$\Phi$ 耦合路径（伤疤 $\to$ 空洞灵敏度）不能将检测阈值降至人格导出的下限 $\theta_d^{\min}(\boldsymbol{\pi})$ 以下，确保即使严重受伤的系统仍保持最低空洞检测标准。
+
+\item \textbf{振荡检测。}在 10 tick 内出现 $\geq 6$ 次方向反转的人格特质被冻结 20 tick（见 \S\ref{subsec:personality-feedback}），防止对人格向量的对抗性振荡攻击。
+
+\item \textbf{漂移速率限制。}人格漂移事件之间强制最少 30 秒壁钟间隔，防止消息轰炸操纵人格反馈闭环：
+\begin{equation}
+\Delta\pi_k(t) = 0 \quad \text{若 } t_{\text{wall}} - t_{\text{last\_drift}} < 30\text{s}
+\end{equation}
 \end{enumerate}
 
-关键性质：有阻尼的非线性反馈环。边界稳定时漂移近零，相变时漂移率暂时升高。
+这些机制共同确保系统即使在对抗性输入模式下仍保持在安全运行范围内，同时在正常交互下保留空洞-伤疤动态的完整表达力。
 
 % ============================================================
 % 8. 实现
@@ -858,7 +995,7 @@ L7 相变 & $<$0.01 ms & $<$0.01 ms & $<$0.01 ms \\
 
 \paragraph{空洞演算。}空洞是 dataclass 对象，边界存储为 \texttt{bytes} 列表（HDC 向量）。压力累积使用闭合形式方程（方程~\ref{eq:pressure}）。最大 50 个活跃空洞（可配置）。
 
-\paragraph{HGT。}32 token、2 头的 Transformer 实现为直接 NumPy 矩阵运算。约 22K 参数在初始化时从人格向量预计算并缓存，直到人格漂移发生。
+\paragraph{MoE-HGT。}三阶段 MoE-HGT（7 个类型专家 FFN、4 头交叉注意力、5 个情境专家 top-2 门控）实现为直接 NumPy 矩阵运算。约 14.3K 参数在初始化时从人格向量预计算并缓存，直到人格漂移发生。
 
 \subsection{算法：主计算管线}
 
@@ -891,7 +1028,7 @@ L7 相变 & $<$0.01 ms & $<$0.01 ms & $<$0.01 ms \\
 \ENDFOR
 \STATE \textbf{// 伤疤代数步骤}
 \STATE $\tilde{\mathbf{e}} \leftarrow \text{modulate}(\mathbf{e}, \sigma)$ \COMMENT{步骤 1}
-\STATE $\mathbf{x} \leftarrow \tanh(\mathbf{x} + 0.3\tilde{\mathbf{e}})$ \COMMENT{步骤 2}
+\STATE $\mathbf{x} \leftarrow \tanh(W_2 \cdot \tanh(W_1 \cdot [\mathbf{x};\, \tilde{\mathbf{e}}]))$ \COMMENT{步骤 2}
 \IF{$\exists d: |\tilde{e}_d| > \theta_w$}
   \STATE 追加伤疤 $(d, t, raw)$ 到 $\sigma$ \COMMENT{步骤 3}
 \ENDIF
@@ -1010,7 +1147,7 @@ L7 相变 & $<$0.01 ms & $<$0.01 ms & $<$0.01 ms \\
 以下实验验证关系层论（\S\ref{sec:sheaf}）的核心预测，在多关系模拟环境中进行。
 
 \paragraph{实验 8：上同调解离检测。}
-构造具有高神经质人格（$\kappa$ 大）和 $N=3$ 个关系的智能体。呈现矩阵 $P_i$ 被冻结以诱导矛盾的自我呈现需求。智能体在 200 tick 内接收跨关系的矛盾事件。追踪不一致性能量（$\|\delta^0 \mathbf{x}\|^2$）、解离压力和 $\dim H^1(K, \mathcal{F})$。\emph{结果：}不一致性能量呈 S 曲线从 0 增长至 $\approx 65$；解离压力从 0.19 增长至 0.59。然而 $\dim H^1$ 始终保持为 0，因为呈现矩阵保持满秩（系统通过内部状态调整而非产生真正的上同调阻碍来解决矛盾）。这表明高不一致性能量和解离压力是 $H^1 > 0$ 的必要但非充分条件（图~\ref{fig:cohomological_dissociation}）。
+构造具有高感知锐度人格（$\kappa$ 大）和 $N=3$ 个关系的智能体。呈现矩阵 $P_i$ 被冻结以诱导矛盾的自我呈现需求。智能体在 200 tick 内接收跨关系的矛盾事件。追踪不一致性能量（$\|\delta^0 \mathbf{x}\|^2$）、解离压力和 $\dim H^1(K, \mathcal{F})$。\emph{结果：}不一致性能量呈 S 曲线从 0 增长至 $\approx 65$；解离压力从 0.19 增长至 0.59。然而 $\dim H^1$ 始终保持为 0，因为呈现矩阵保持满秩（系统通过内部状态调整而非产生真正的上同调阻碍来解决矛盾）。这表明高不一致性能量和解离压力是 $H^1 > 0$ 的必要但非充分条件（图~\ref{fig:cohomological_dissociation}）。
 
 \begin{figure}[H]
 \centering
@@ -1040,12 +1177,12 @@ L7 相变 & $<$0.01 ms & $<$0.01 ms & $<$0.01 ms \\
 \end{figure}
 
 \paragraph{实验 11：人格反馈闭环验证。}
-验证人格漂移闭环是否按预期工作。从中性人格 $\boldsymbol{\pi}_0 = (0.5, 0.5, 0.5, 0.5, 0.5)$ 出发，模拟三种场景各 500 tick：(A) 反复受伤事件，(B) 持续正反馈（表达被接受），(C) 3 段矛盾关系的跨关系矛盾 200 tick。\emph{结果：}场景 A 中 $N$ 上升、$O$ 下降，符合伤疤$\to$神经质和空洞压力$\to$开放性机制的预测。场景 B 中 $E$ 和 $A$ 上升，由正向表达反馈和一致性提升驱动。场景 C 中 $C$ 下降，由 $H^1$ 不一致性产生的解离压力驱动。所有漂移率保持在 $\eta_0 \leq 10^{-4}$ 界内，确认反馈闭环的有阻尼特性（图~\ref{fig:personality_feedback}）。
+验证人格漂移闭环是否按预期工作。从中性人格 $\boldsymbol{\pi}_0 = (0.5, 0.5, 0.5, 0.5, 0.5)$ 出发，模拟三种场景各 500 tick：(A) 反复受伤事件，(B) 持续正反馈（表达被接受），(C) 3 段矛盾关系的跨关系矛盾 200 tick。\emph{结果：}场景 A 中 $\pi_{\text{acuity}}$ 上升、$\pi_{\text{perm}}$ 下降，符合伤疤$\to$感知锐度和空洞压力$\to$边界通透机制的预测。场景 B 中 $\pi_{\text{expr}}$ 和 $\pi_{\text{grav}}$ 上升，由正向表达反馈和一致性提升驱动。场景 C 中 $\pi_{\text{order}}$ 下降，由 $H^1$ 不一致性产生的解离压力驱动。所有漂移率保持在 $\eta_0 \leq 10^{-4}$ 界内，确认反馈闭环的有阻尼特性（图~\ref{fig:personality_feedback}）。
 
 \begin{figure}[H]
 \centering
 \includegraphics[width=0.85\columnwidth]{experiments/fig10_personality_feedback.png}
-\caption{人格反馈闭环验证。三种条件下人格向量的漂移轨迹：(A) 反复受伤（$N\!\uparrow$，$O\!\downarrow$），(B) 持续接纳（$E\!\uparrow$，$A\!\uparrow$），(C) 跨关系矛盾（$C\!\downarrow$）。漂移有界且由计算状态因果驱动。}
+\caption{人格反馈闭环验证。三种条件下人格向量的漂移轨迹：(A) 反复受伤（$\pi_{\text{acuity}}\!\uparrow$，$\pi_{\text{perm}}\!\downarrow$），(B) 持续接纳（$\pi_{\text{expr}}\!\uparrow$，$\pi_{\text{grav}}\!\uparrow$），(C) 跨关系矛盾（$\pi_{\text{order}}\!\downarrow$）。漂移有界且由计算状态因果驱动。}
 \label{fig:personality_feedback}
 \end{figure}
 
@@ -1083,11 +1220,11 @@ L7 相变 & $<$0.01 ms & $<$0.01 ms & $<$0.01 ms \\
 
 \subsection{局限性}
 
-\paragraph{线性基状态演化。}当前的 $\tanh(\mathbf{x} + 0.3\tilde{\mathbf{e}})$ 更新是刻意简化的。更丰富的动态（如学习的非线性映射）可以增加表达力，但会使收敛证明（定理~\ref{thm:scar-convergence}）复杂化，并可能在不仔细设计的情况下违反有界状态公理。
+\paragraph{两层基状态演化。}当前带谱归一化的两层收缩映射 $\tanh(W_2 \cdot \tanh(W_1 \cdot [\mathbf{x};\, \tilde{\mathbf{e}}]))$ 在表达力和可证明收敛性之间取得平衡。更深的架构可以增加表示能力，但需要更复杂的谱范数约束来维持收缩性，且额外参数会增加人格导出的表面积。
 
 \paragraph{HDC 分辨率。}2048 位 HDC 编码提供约 11 位有效分辨率用于相似度计算。这限制了空洞边界匹配的粒度，可能导致语义相似但不同话题的错误合并。更高维编码（4096、8192 位）以内存换取分辨率。
 
-\paragraph{愈合速率假设。}愈合持续时间（$T(raw)=10$，$T(closing)=40$，$T(scarred)=150$）由人格向量实时派生（神经质 $\to$ 愈合速率，外向性 $\to$ 伤疤阈值，宜人性 $\to$ 一致性界），通过仿射映射加截断实现。虽然这消除了对训练数据的需求，但派生函数本身是设计的而非经纵向人类数据实证验证的。
+\paragraph{愈合速率假设。}愈合持续时间（$T(raw)=10$，$T(closing)=40$，$T(scarred)=150$）由人格向量实时派生（感知锐度 $\to$ 愈合速率，表达驱力 $\to$ 伤疤阈值，关系引力 $\to$ 一致性界），通过仿射映射加截断实现。虽然这消除了对训练数据的需求，但派生函数本身是设计的而非经纵向人类数据实证验证的。
 
 \subsection{伦理考量}
 
@@ -1109,8 +1246,8 @@ L7 相变 & $<$0.01 ms & $<$0.01 ms & $<$0.01 ms \\
 \subsection{未来工作}
 
 \begin{itemize}
-\item \textbf{人格派生参数：}所有愈合速率和阈值当前由人格向量实时派生（神经质 $\to$ 愈合速率，外向性 $\to$ 伤疤阈值，宜人性 $\to$ 一致性界），通过 \texttt{derive\_params()} 实现，无需训练数据。未来工作可探索从纵向交互数据微调这些派生函数是否能提高生态效度。
-\item \textbf{层运行时实现：}在多关系运行时中完整实现关系层论，包括高效的上同调计算和拉普拉斯特征分解。
+\item \textbf{人格派生参数：}所有愈合速率和阈值当前由人格向量实时派生（感知锐度 $\to$ 愈合速率，表达驱力 $\to$ 伤疤阈值，关系引力 $\to$ 一致性界），通过 \texttt{derive\_params()} 实现，无需训练数据。未来工作可探索从纵向交互数据微调这些派生函数是否能提高生态效度。
+\item \textbf{层运行时扩展：}将关系层论运行时扩展至支持更大关系复形（$N > 10$），包含高效增量上同调计算和稀疏拉普拉斯特征分解。
 \item \textbf{形式验证：}使用 Lean 或 Coq 对公理系统进行机器检验证明。
 \item \textbf{实证验证：}大规模人类评估表达自然度和关系一致性。
 \item \textbf{理论扩展：}表达力分离的紧界；空洞空间行为等价的复杂度；$k$-方交互的高维层上同调。
