@@ -620,7 +620,16 @@ class ScarSheaf:
     # ------------------------------------------------------------------
 
     def _sheaf_laplacian_at_vertex(self) -> list[float]:
-        """Compute L_F(x_0) = sum_i P_i^T P_i x_0 - P_i^T rho_0^i(s_i).
+        """Compute L_F(x_0) = sum_i P_i P_i^T x_0 - P_i P_i^T (P_i^T)^{-1} s_i.
+
+        The presentation matrix P_i has shape (n0 x ne).  The restriction map
+        (vertex -> edge) is P_i^T (ne x n0).  The vertex-space sheaf Laplacian
+        is L_F = sum_e delta_e^T delta_e = sum_i (P_i^T)^T (P_i^T) = P_i P_i^T
+        (shape n0 x n0), which is the correct quadratic form on the vertex stalk.
+
+        For the affine term we keep P_i^T s_i (projecting the edge signal back
+        to vertex space via the adjoint), matching the standard formula
+        L_F x - delta^T s.
 
         Returns the Laplacian applied to the vertex stalk.
         """
@@ -632,24 +641,28 @@ class ScarSheaf:
                 break
             P_i = self._presentation_matrices[i]
             P_iT = _mat_transpose(P_i)
-            # P_i^T P_i x_0
-            PtP = _mat_mul(P_iT, P_i)
-            PtP_x = _mat_vec(PtP, self._vertex_stalk)
-            # P_i^T * edge_stalk_i (the restriction rho_0^i(s_i) = edge stalk)
+            # P_i P_i^T x_0  (vertex Laplacian: n0 x n0)
+            PPt = _mat_mul(P_i, P_iT)
+            PPt_x = _mat_vec(PPt, self._vertex_stalk)
+            # P_i * edge_stalk_i (project edge signal back to vertex space)
             edge_stalk = (
                 self._edge_stalks[i]
                 if i < len(self._edge_stalks)
                 else [0.0] * _EDGE_STALK_DIM
             )
-            Pt_s = _mat_vec(P_iT, edge_stalk)
+            P_s = _mat_vec(P_i, edge_stalk)
             # Accumulate
             for d in range(n0):
-                result[d] += PtP_x[d] - Pt_s[d]
+                result[d] += PPt_x[d] - P_s[d]
 
         return result
 
     def sheaf_laplacian_matrix(self) -> list[list[float]]:
-        """Build the full sheaf Laplacian matrix L_F = sum_i P_i^T P_i.
+        """Build the full sheaf Laplacian matrix L_F = sum_i P_i P_i^T.
+
+        P_i is (n0 x ne) and P_i^T is the restriction map (ne x n0).
+        The vertex-space Laplacian is L_F = sum_e delta_e^T delta_e
+        = sum_i P_i P_i^T (shape n0 x n0).
 
         Returns an n0 x n0 matrix (the quadratic form part).
         """
@@ -660,8 +673,8 @@ class ScarSheaf:
                 break
             P_i = self._presentation_matrices[i]
             P_iT = _mat_transpose(P_i)
-            PtP = _mat_mul(P_iT, P_i)
-            L = _mat_add(L, PtP)
+            PPt = _mat_mul(P_i, P_iT)
+            L = _mat_add(L, PPt)
         return L
 
     def spectral_gap(self) -> float:

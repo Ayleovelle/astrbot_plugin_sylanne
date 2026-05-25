@@ -512,6 +512,10 @@ class EmotionalStatePlugin(Star):
                 "Sylanne WebUI Dashboard",
             )
 
+        # AstrBot ConversationManager / PersonaManager integration
+        self._conv_mgr = self._init_conversation_manager()
+        self._persona_mgr = self._init_persona_manager()
+
         self._load_config_defaults()
         self._publish_webui_active_plugin()
         self._start_webui_if_enabled()
@@ -2234,7 +2238,11 @@ class EmotionalStatePlugin(Star):
                 dt = max(0.1, min(10.0, gap / 60.0))
                 host.kernel.computation.feedback("ignored", dt=dt)
             # 30-300s: neutral, no feedback triggered
-        return host.on_request(event)
+        result = host.on_request(event)
+        # Sync personality drift to AstrBot PersonaManager
+        if self._has_persona_manager():
+            self._sync_personality_to_persona_mgr(session_key)
+        return result
 
     async def observe_response(
         self,
@@ -2258,7 +2266,11 @@ class EmotionalStatePlugin(Star):
         if not hasattr(self, "_last_bot_expression_time"):
             self._last_bot_expression_time = {}
         self._last_bot_expression_time[session_key] = effective_now
-        return host.on_response(event)
+        result = host.on_response(event)
+        # Sync personality drift to AstrBot PersonaManager
+        if self._has_persona_manager():
+            self._sync_personality_to_persona_mgr(session_key)
+        return result
 
     # ------------------------------------------------------------------
     # Immediate chat
@@ -3272,6 +3284,10 @@ class EmotionalStatePlugin(Star):
             )
             host.on_request(event, assessment=assessment if assessment else None)
 
+            # Sync personality drift to AstrBot PersonaManager after computation
+            if self._has_persona_manager():
+                self._sync_personality_to_persona_mgr(session_key)
+
             # Capture computation log for WebUI real-time display
             try:
                 comp_result = (
@@ -3381,6 +3397,13 @@ class EmotionalStatePlugin(Star):
             buf.append("user", text)
             self._last_user_texts[session_key] = text[:120]
             self._schedule_buffer_persist(session_key)
+
+            # Parallel sync to AstrBot ConversationManager
+            if self._has_conversation_manager():
+                _safe_ensure_future(
+                    self._sync_message_to_conv_mgr(session_key, "user", text),
+                    name="conv_mgr_sync_user",
+                )
 
             # Tick decay still runs per-message
             memory_system.tick_decay()
@@ -4132,6 +4155,12 @@ class EmotionalStatePlugin(Star):
             buf.append("bot", text)
             self._last_bot_texts[session_key] = text[:120]
             self._schedule_buffer_persist(session_key)
+            # Parallel sync to AstrBot ConversationManager
+            if self._has_conversation_manager():
+                _safe_ensure_future(
+                    self._sync_message_to_conv_mgr(session_key, "bot", text),
+                    name="conv_mgr_sync_bot",
+                )
             # Notify social field collector that bot replied
             if hasattr(
                 self, "_social_field"
@@ -5343,6 +5372,155 @@ class EmotionalStatePlugin(Star):
     def _has_kv_api(self) -> bool:
         """Check if AstrBot KV storage API is available."""
         return hasattr(self, "put_kv_data") and callable(self.put_kv_data)
+
+    # ------------------------------------------------------------------
+    # AstrBot ConversationManager integration
+    # ------------------------------------------------------------------
+
+    def _init_conversation_manager(self) -> Any:
+        """Initialize AstrBot ConversationManager if available."""
+        context = getattr(self, "context", None)
+        if context is None:
+            return None
+        conv_mgr = getattr(context, "conversation_manager", None)
+        if conv_mgr is not None:
+            logger.info(
+                "Sylanne: AstrBot ConversationManager detected, parallel sync enabled"
+            )
+        return conv_mgr
+
+    def _has_conversation_manager(self) -> bool:
+        """Check if AstrBot ConversationManager is available."""
+        return getattr(self, "_conv_mgr", None) is not None
+
+    async def _sync_message_to_conv_mgr(
+        self, session_key: str, role: str, text: str
+    ) -> None:
+        """Sync a message to AstrBot's ConversationManager (parallel path).
+
+        This keeps AstrBot's conversation system in sync without replacing
+        Sylanne's own ConversationBuffer (which is still needed for flush/
+        consolidation logic).
+        """
+        conv_mgr = getattr(self, "_conv_mgr", None)
+        if conv_mgr is None:
+            return
+        try:
+            # Get or create conversation for this session
+            curr_cid = await conv_mgr.get_curr_conversation_id(session_key)
+            if not curr_cid:
+                curr_cid = await conv_mgr.new_conversation(session_key)
+
+            # Try to use AstrBot message types; fall back to plain dicts
+            try:
+                from astrbot.core.agent.message import (
+                    AssistantMessageSegment,
+                    TextPart,
+                    UserMessageSegment,
+                )
+
+                if role == "user":
+                    msg = UserMessageSegment(content=[TextPart(text=text)])
+                else:
+                    msg = AssistantMessageSegment(content=[TextPart(text=text)])
+            except ImportError:
+                # Older AstrBot or test environment: use plain dict
+                msg = {"role": role, "content": text}
+
+            conversation = await conv_mgr.get_conversation(session_key, curr_cid)
+            history = list(
+                getattr(conversation, "history", None) or [] if conversation else []
+            )
+            history.append(msg)
+            await conv_mgr.update_conversation(session_key, curr_cid, history=history)
+        except Exception as e:
+            logger.debug(f"Sylanne: ConversationManager sync failed: {e}")
+
+    # ------------------------------------------------------------------
+    # AstrBot PersonaManager integration
+    # ------------------------------------------------------------------
+
+    def _init_persona_manager(self) -> Any:
+        """Initialize AstrBot PersonaManager if available."""
+        context = getattr(self, "context", None)
+        if context is None:
+            return None
+        persona_mgr = getattr(context, "persona_manager", None)
+        if persona_mgr is not None:
+            logger.info(
+                "Sylanne: AstrBot PersonaManager detected, personality sync enabled"
+            )
+        return persona_mgr
+
+    def _has_persona_manager(self) -> bool:
+        """Check if AstrBot PersonaManager is available."""
+        return getattr(self, "_persona_mgr", None) is not None
+
+    def _sync_personality_to_persona_mgr(self, session_key: str) -> None:
+        """Sync Sylanne personality state to AstrBot's PersonaManager.
+
+        Called after personality drift updates. Creates or updates a
+        Sylanne persona entry so AstrBot's persona system is aware of
+        the current personality state.
+        """
+        persona_mgr = getattr(self, "_persona_mgr", None)
+        if persona_mgr is None:
+            return
+        try:
+            host = self._hosts.get(session_key)
+            if not host:
+                return
+            # Extract personality data from kernel
+            personality = (
+                host.kernel._personality()
+                if hasattr(host.kernel, "_personality")
+                else {}
+            )
+            if not personality or not isinstance(personality, dict):
+                return
+
+            traits = personality.get("traits", {})
+            voice = personality.get("voice", {})
+
+            # Build system prompt fragment from personality state
+            trait_lines = []
+            for k, v in traits.items():
+                if isinstance(v, (int, float)):
+                    trait_lines.append(f"{k}={v:.3f}")
+                elif isinstance(v, dict) and "value" in v:
+                    trait_lines.append(f"{k}={v['value']:.3f}")
+            trait_summary = ", ".join(trait_lines) if trait_lines else "default"
+
+            persona_id = f"sylanne_embodiment_{self._safe_session_key(session_key)}"
+            system_prompt = (
+                f"[Sylanne Personality State]\n"
+                f"Traits: {trait_summary}\n"
+                f"Voice: {voice if voice else 'default'}"
+            )
+
+            # Try update first, create if not exists
+            try:
+                existing = persona_mgr.get_persona(persona_id)
+                if existing:
+                    persona_mgr.update_persona(persona_id, system_prompt=system_prompt)
+                else:
+                    persona_mgr.create_persona(
+                        persona_id=persona_id,
+                        system_prompt=system_prompt,
+                        begin_dialogs=[],
+                        tools=None,
+                    )
+            except Exception:
+                # create_persona may not accept all args in older versions
+                try:
+                    persona_mgr.create_persona(
+                        persona_id=persona_id,
+                        system_prompt=system_prompt,
+                    )
+                except Exception:
+                    pass
+        except Exception as e:
+            logger.debug(f"Sylanne: PersonaManager sync failed: {e}")
 
     async def _persist_kernel(self, session_key: str, host: SylanneAlphaHost) -> None:
         """Save kernel state: KV storage (primary) with file I/O fallback."""

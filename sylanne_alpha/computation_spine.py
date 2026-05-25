@@ -62,6 +62,7 @@ class ComputationSpine:
         "_last_embodiment_apply",
         "_last_drift_time",
         "_drift_min_interval",
+        "_relationship_deltas",
     )
 
     def __init__(self):
@@ -119,6 +120,9 @@ class ComputationSpine:
         # Drift rate limiting
         self._last_drift_time: float = 0.0
         self._drift_min_interval: float = 30.0  # seconds
+
+        # Per-relationship personality deltas (session_key -> {trait: delta})
+        self._relationship_deltas: dict[str, dict[str, float]] = {}
 
     def replace_encoder(self, encoder: HDCEncoder) -> None:
         """Replace the HDC encoder."""
@@ -255,6 +259,21 @@ class ComputationSpine:
         # ComputationSpine. Their set_personality_params() should be called
         # from the host level (main.py) when personality is available.
 
+    def effective_personality(self, session_key: str = "") -> dict[str, float]:
+        """Get personality with per-relationship overlay applied.
+
+        Each relationship can shift personality by at most +/-0.1 per dimension.
+        If session_key is empty or unknown, returns the base personality.
+        """
+        base = dict(self._personality)
+        if not session_key or session_key not in self._relationship_deltas:
+            return base
+        delta = self._relationship_deltas[session_key]
+        for trait, d in delta.items():
+            if trait in base:
+                base[trait] = max(0.05, min(0.95, base[trait] + d))
+        return base
+
     def apply_assessment(self, assessment: dict[str, Any]) -> None:
         """Apply LLM assessment result to modulate Void-Scar state.
 
@@ -320,6 +339,8 @@ class ComputationSpine:
         text: str,
         timestamp: float = 0.0,
         assessment: dict[str, Any] | None = None,
+        *,
+        session_key: str = "",
     ) -> dict[str, Any]:
         """Main entry point: process one message through the full stack.
 
@@ -329,7 +350,18 @@ class ComputationSpine:
             assessment: Optional LLM assessment result. If provided, used to
                         modulate Void-Scar state for precise semantic judgment.
                         If None, only HDC coarse path is used.
+            session_key: Optional relationship identifier. When provided, applies
+                         per-relationship personality overlay for this tick.
         """
+        # Apply per-relationship personality overlay if session_key provided
+        _personality_restored = False
+        _saved_personality: dict[str, float] | None = None
+        if session_key:
+            effective = self.effective_personality(session_key)
+            if effective != self._personality:
+                _saved_personality = dict(self._personality)
+                _personality_restored = True
+                self.apply_personality(effective)
         # Empty string handling: skip computation, self-repair only
         if not text or not text.strip():
             self.boundary.self_repair()
@@ -339,6 +371,8 @@ class ComputationSpine:
             )
             result["hgt_decision"] = [0.0, 0.0, 0.0, 0.0]
             result["assessment_source"] = "none"
+            if _personality_restored and _saved_personality is not None:
+                self.apply_personality(_saved_personality)
             return result
 
         self._tick_count += 1
@@ -456,6 +490,8 @@ class ComputationSpine:
                 "L7_Expression": self.expression.state(),
             }
             self._drift_embodiment(result)
+            if _personality_restored and _saved_personality is not None:
+                self.apply_personality(_saved_personality)
             return result
 
         # Normal/Full path: boundary + expression
@@ -511,6 +547,8 @@ class ComputationSpine:
             "L7_Expression": self.expression.state(),
         }
         self._drift_embodiment(result)
+        if _personality_restored and _saved_personality is not None:
+            self.apply_personality(_saved_personality)
         return result
 
     def _drift_embodiment(self, result: dict[str, Any]) -> None:
@@ -587,12 +625,15 @@ class ComputationSpine:
             return self.expression.express(now=now)
         return {"intensity": 0.0, "urgency": 0.0, "mode": "hint", "ready": False}
 
-    def feedback(self, outcome: str, dt: float = 1.0) -> dict[str, float]:
+    def feedback(
+        self, outcome: str, dt: float = 1.0, session_key: str = ""
+    ) -> dict[str, float]:
         """Inject expression outcome back into the Void-Scar engine.
 
         Args:
             outcome: "accepted" | "ignored" | "rejected"
             dt: time delta
+            session_key: Optional relationship identifier for per-relationship delta update.
 
         Returns:
             The updated observation after feedback injection.
@@ -612,7 +653,34 @@ class ComputationSpine:
                 oscillation_detector=self._oscillation_detector,
             )
 
+        # Update per-relationship personality delta
+        if session_key:
+            self._update_relationship_delta(session_key, outcome)
+
         return self.engine.feedback(outcome, dt)
+
+    def _update_relationship_delta(self, session_key: str, outcome: str) -> None:
+        """Update per-relationship personality delta based on feedback outcome.
+
+        Deltas evolve slowly (rate=0.005) and are capped at +/-0.1 per dimension.
+        - accepted: slightly more extraverted and agreeable with this person
+        - rejected: less extraverted, more neurotic with this person
+        - ignored: slightly less extraverted with this person
+        """
+        if session_key not in self._relationship_deltas:
+            self._relationship_deltas[session_key] = {
+                name: 0.0 for name in self._personality
+            }
+        delta = self._relationship_deltas[session_key]
+        rate = 0.005  # very slow evolution
+        if outcome == "accepted":
+            delta["extraversion"] = min(0.1, delta.get("extraversion", 0.0) + rate)
+            delta["agreeableness"] = min(0.1, delta.get("agreeableness", 0.0) + rate)
+        elif outcome == "rejected":
+            delta["extraversion"] = max(-0.1, delta.get("extraversion", 0.0) - rate * 2)
+            delta["neuroticism"] = min(0.1, delta.get("neuroticism", 0.0) + rate)
+        elif outcome == "ignored":
+            delta["extraversion"] = max(-0.1, delta.get("extraversion", 0.0) - rate)
 
     def diagnostics(self) -> dict[str, Any]:
         """Full diagnostic snapshot."""
@@ -667,6 +735,7 @@ class ComputationSpine:
             "drift_tick": self._drift_tick,
             "last_drift_time": self._last_drift_time,
             "drift_min_interval": self._drift_min_interval,
+            "relationship_deltas": dict(self._relationship_deltas),
         }
 
     def from_dict(self, data: dict[str, Any]):
@@ -717,6 +786,8 @@ class ComputationSpine:
             self._drift_tick = int(data["drift_tick"])
         self._last_drift_time = float(data.get("last_drift_time", 0.0))
         self._drift_min_interval = float(data.get("drift_min_interval", 30.0))
+        if "relationship_deltas" in data:
+            self._relationship_deltas = data["relationship_deltas"]
         # Note: personality-derived parameters (thresholds, rates, etc.) are NOT
         # re-applied here. They will be re-derived on the next kernel.tick() call
         # when apply_personality() runs. This avoids overwriting restored state.
