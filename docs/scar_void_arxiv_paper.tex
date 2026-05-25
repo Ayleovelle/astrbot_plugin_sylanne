@@ -153,10 +153,16 @@ Each healing stage determines a multiplicative modifier:
 \begin{equation}
 \alpha(\phi) = \begin{cases} 2.0 & \phi = raw \\ 1.5 & \phi = closing \\ 1.0 & \phi = scarred \\ 0.7 & \phi = faded \end{cases}
 \end{equation}
-For multiple scars on dimension $d$, modifiers compose multiplicatively:
+For multiple scars on dimension $d$, the raw product $\Pi_d = \prod_{i:\, d_i = d} \alpha(\phi_i)$ is log-compressed to prevent unbounded amplification:
 \begin{equation}
-M_d = \prod_{i:\, d_i = d} \alpha(\phi_i)
+M_d = \begin{cases}
+\Pi_d & \text{if } \Pi_d \leq 1 \\[4pt]
+1 + (M_{\max} - 1)\left(1 - \dfrac{1}{\Pi_d}\right) & \text{otherwise}
+\end{cases}
 \end{equation}
+where $M_{\max} = 2 + \pi_{\text{acuity}} \cdot 3$ is a personality-derived cap (range $[2, 5]$).
+
+The logarithmic compression prevents unbounded amplification while preserving ordering---dimensions with more scars still have higher modifiers, but the growth saturates asymptotically at $M_{\max}$.
 \end{definition}
 
 \begin{definition}[State Transition Operator $\triangleright$]
@@ -168,10 +174,11 @@ Given state $s = (\mathbf{x}, \sigma)$ and event $\mathbf{e} \in E$, the transit
 \tilde{e}_d = e_d \cdot M_d \quad \forall d \in \{1, \ldots, n\}
 \end{equation}
 
-\textbf{Step 2 (Evolve):} Update base state via bounded nonlinear map:
+\textbf{Step 2 (Evolve):} Update base state via a two-layer contractive map with spectral normalization:
 \begin{equation}
-x'_d = \tanh(x_d + 0.3 \cdot \tilde{e}_d) \quad \forall d
+\mathbf{x}' = \tanh(W_2 \cdot \tanh(W_1 \cdot [\mathbf{x};\, \tilde{\mathbf{e}}]))
 \end{equation}
+where $W_1 \in \mathbb{R}^{n \times 2n}$, $W_2 \in \mathbb{R}^{n \times n}$, with spectral normalization ensuring $\|W_1\|_2 \cdot \|W_2\|_2 < 0.49$ (guaranteeing contractivity).
 
 \textbf{Step 3 (Scar Formation):} If $|\tilde{e}_{d^*}| > \theta_w$ for some dimension $d^*$:
 \begin{equation}
@@ -214,7 +221,7 @@ $\phi_i(t_1) \leq \phi_i(t_2)$ for all $t_1 < t_2$. Healing stages only advance 
 
 \begin{axiom}[Dimensional Saturation]
 \label{ax:scar-sat}
-$\lim_{k \to \infty} \prod_{j=1}^k \alpha(faded) = \lim_{k \to \infty} 0.7^k = 0$. Accumulated faded scars drive sensitivity to zero.
+$\lim_{k \to \infty} \prod_{j=1}^k \alpha(faded) = \lim_{k \to \infty} 0.7^k = 0$. Accumulated faded scars drive sensitivity to zero. In the amplification direction ($\alpha > 1$), the modifier saturates at $M_{\max}$ due to logarithmic compression. In the numbing direction ($\alpha < 1$), the raw product is used and saturation to zero still holds.
 \end{axiom}
 
 \subsection{Main Theorems}
@@ -243,7 +250,7 @@ The Scar Algebra achieves this with $O(k)$ storage: one bounded base state plus 
 
 \begin{theorem}[Convergence to Scarred Equilibrium]
 \label{thm:scar-convergence}
-Under bounded input $\|e_t\|_\infty \leq C$ and contraction condition $\|\mathbf{A}\|_\infty < 1$:
+Under bounded input $\|e_t\|_\infty \leq C$ and spectral normalization constraint $\|W_1\|_2 \cdot \|W_2\|_2 < 0.49$:
 \begin{enumerate}[label=(\alph*)]
 \item There exists $T^* < \infty$ after which no new scars form.
 \item The base state converges: $\|x_t - x^*\| \to 0$.
@@ -252,21 +259,22 @@ Under bounded input $\|e_t\|_\infty \leq C$ and contraction condition $\|\mathbf
 \end{theorem}
 
 \begin{proof}
-\textbf{(a)} A new scar on dimension $d$ requires $|e_d \cdot M_d| > \theta_w$. Once $k_d$ faded scars accumulate: $C \cdot 0.7^{k_d} \leq \theta_w$ when $k_d \geq \lceil \ln(C/\theta_w) / \ln(10/7) \rceil =: k_d^*$. Cascade scars during amplifying phases are bounded by $T(raw) + T(closing) = 50$ per scar, giving finite total $k_d^{total} \leq k_d^* \cdot 51$.
+\textbf{(a)} A new scar on dimension $d$ requires $|e_d \cdot M_d| > \theta_w$. Since $M_d$ is now bounded above by $M_{\max}$ (log-compression), the maximum modulated input is $C \cdot M_{\max}$. Once $k_d$ faded scars accumulate in the numbing direction: $C \cdot 0.7^{k_d} \leq \theta_w$ when $k_d \geq \lceil \ln(C/\theta_w) / \ln(10/7) \rceil =: k_d^*$. Cascade scars during amplifying phases are bounded by $T(raw) + T(closing) = 50$ per scar, giving finite total $k_d^{total} \leq k_d^* \cdot 51$.
 
-\textbf{(b)} For $t > T^*$, the system becomes $x_{t+1} = \tanh(\mathbf{A}x_t + \mathbf{B}\mathbf{D}e_t)$ with fixed diagonal $\mathbf{D} = \text{diag}(0.7^{k_1}, \ldots, 0.7^{k_n})$. Since $\|\mathbf{A}\|_\infty < 1$ and $\tanh$ has Lipschitz constant 1, this is a contraction mapping. The state converges to a ball of radius $\|\mathbf{B}\mathbf{D}\|_\infty C / (1 - \|\mathbf{A}\|_\infty)$.
+\textbf{(b)} For $t > T^*$, the system becomes $\mathbf{x}_{t+1} = \tanh(W_2 \cdot \tanh(W_1 \cdot [\mathbf{x}_t;\, \mathbf{D}\mathbf{e}_t]))$ with fixed diagonal $\mathbf{D} = \text{diag}(M_1, \ldots, M_n)$. The Jacobian of the map with respect to $\mathbf{x}$ satisfies $\|J\|_2 \leq \|W_2\|_2 \cdot \|W_1[:, 1{:}n]\|_2 \leq \|W_2\|_2 \cdot \|W_1\|_2 < 0.49$ (since $\tanh' \leq 1$ and spectral normalization constrains the weight product). This makes the map a contraction, guaranteeing convergence to a unique fixed point by the Banach fixed-point theorem.
 
 \textbf{(c)} Each scar heals in at most $T(raw) + T(closing) + T(scarred) = 200$ ticks. Finite total scars implies finite total healing time.
 \end{proof}
 
 \begin{theorem}[Phase Transition at Critical Scar Density]
 \label{thm:scar-phase}
-Define the effective gain $G_d = \prod_{i:d_i=d} \alpha(\phi_i)$. There exists a critical gain $G_c = \theta_w / C$ such that:
+Define the effective gain $G_d = M_d$ (the log-compressed modifier). There exists a critical gain $G_c = \theta_w / C$ such that:
 \begin{itemize}
 \item For $G_d > G_c$: the system is in a \emph{wounding regime} (positive scar formation rate).
 \item For $G_d < G_c$: the system is in a \emph{numbed regime} (zero scar formation rate).
 \item The transition exhibits hysteresis with width $\Delta G = G_c \cdot (\alpha(raw) - 1) = G_c$.
 \end{itemize}
+Note: Since $G_d \leq M_{\max}$ due to log-compression, the phase transition has a ceiling---the wounding regime gain is bounded by $M_{\max}$. The qualitative behavior (threshold crossing and hysteresis) remains the same, but the dynamics cannot produce unbounded amplification cascades.
 \end{theorem}
 
 \begin{proof}
@@ -368,6 +376,13 @@ Void pressure evolves autonomously each tick:
 \label{eq:pressure}
 \end{equation}
 Deeper voids generate more pressure; older voids generate more pressure (logarithmically); less-defined voids ($\beta_v$ low) generate more pressure.
+
+Genesis is further gated by:
+\begin{enumerate}
+\item \textbf{Cooldown:} After creating a void, a cooldown period of $\tau_c = 2 + \pi_{\text{perm}} \cdot 3$ ticks must elapse before the next creation.
+\item \textbf{Resistance:} The effective detection threshold increases with existing void count: $\theta'_{\text{detect}} = \theta_{\text{detect}} + 0.02 \cdot |\mathcal{V}|$.
+\item \textbf{Pressure cap:} $\pi_v(t) \leq \Pi_{\max}$ where $\Pi_{\max} = 60 + \pi_{\text{sovereignty}} \cdot 60$ (personality-derived, range $[60, 120]$).
+\end{enumerate}
 \end{definition}
 
 \begin{definition}[Void Ghost]
@@ -419,7 +434,7 @@ Construct void $v$ with $\beta_v = 0$, $\delta_v = 0.8$, $|B_v| = 0$ (detected f
 
 \textbf{AGM recovery violation:} Every AGM contraction $K \div \phi$ satisfies the recovery postulate: $(K \div \phi) + \phi = K$. This requires a specific $\phi$ whose addition resolves the absence. But $v$ has $\beta_v = 0$: no specific proposition can be named as ``what's missing.''
 
-\textbf{Autonomous dynamics:} Define property $\mathcal{P}_{autonomous}$: ``the representation of absence generates monotonically increasing influence without external input.'' AGM contractions satisfy $\neg\mathcal{P}_{autonomous}$ (a contracted belief set is static until new information arrives). Void $v$ satisfies $\mathcal{P}_{autonomous}$ via Eq.~\eqref{eq:pressure}: $\pi_v(t) \to \infty$ as $t \to \infty$.
+\textbf{Autonomous dynamics:} Define property $\mathcal{P}_{autonomous}$: ``the representation of absence generates monotonically increasing influence without external input.'' AGM contractions satisfy $\neg\mathcal{P}_{autonomous}$ (a contracted belief set is static until new information arrives). Void $v$ satisfies $\mathcal{P}_{autonomous}$ via Eq.~\eqref{eq:pressure}: $\pi_v(t)$ grows monotonically until reaching $\Pi_{\max}$.\footnote{In the implementation, pressure is bounded by $\Pi_{\max}$. The irreducibility result still holds because the three-state distinction (never-discussed / resolved / actively-avoided) depends on the existence of pressure dynamics, not on unbounded growth.}
 
 Since $v$ satisfies a property that no AGM-representable absence can satisfy, $v$ is not AGM-representable.
 \end{proof}
@@ -611,11 +626,11 @@ H^2(K, \mathcal{F}) &= C^2 / \operatorname{im}(\delta^1)
 
 \begin{definition}[Personality-Derived Presentation Matrices]
 \label{def:presentation-matrices}
-The presentation matrices $P_i$ are derived from agent personality $\boldsymbol{\pi} \in \mathbb{R}^5$ (Big Five), relationship type $\tau_i$, and maturity $m_i \in [0,1]$:
+The presentation matrices $P_i$ are derived from agent personality $\boldsymbol{\pi} \in \mathbb{R}^5$ (Embodiment Five), relationship type $\tau_i$, and maturity $m_i \in [0,1]$:
 \begin{equation}
 P_i = P_{base}(\boldsymbol{\pi}) + \Delta P(\tau_i) + m_i \cdot \Delta P_{mature}(\boldsymbol{\pi}, \tau_i)
 \end{equation}
-subject to the personality consistency constraint: $\|P_i - P_j\|_F \leq \kappa(\boldsymbol{\pi}) \cdot (1 + d(\tau_i, \tau_j))$, where $\kappa(\boldsymbol{\pi})$ is personality-dependent (high agreeableness $\to$ low $\kappa$; high neuroticism $\to$ high $\kappa$).
+subject to the personality consistency constraint: $\|P_i - P_j\|_F \leq \kappa(\boldsymbol{\pi}) \cdot (1 + d(\tau_i, \tau_j))$, where $\kappa(\boldsymbol{\pi})$ is personality-dependent (high Relational Gravity $\to$ low $\kappa$; high Perception Acuity $\to$ high $\kappa$).
 \end{definition}
 
 \subsection{Axiom System}
@@ -685,7 +700,7 @@ For a Scar Sheaf with personality-derived presentation matrices, the total incon
 \begin{equation}
 \|\delta^0 \mathbf{x}\|^2 \leq N \cdot \kappa(\boldsymbol{\pi})^2 \cdot (1 + D_{max})^2 \cdot \|\mathbf{x}_0\|^2
 \end{equation}
-where $N$ is the number of relationships and $D_{max} = \max_{i,j} d(\tau_i, \tau_j)$ is the maximum type distance. High-agreeableness agents (low $\kappa$) have tighter inconsistency bounds; high-neuroticism agents (high $\kappa$) tolerate more cross-relational contradiction before cohomological obstruction arises.
+where $N$ is the number of relationships and $D_{max} = \max_{i,j} d(\tau_i, \tau_j)$ is the maximum type distance. High relational gravity agents (low $\kappa$) have tighter inconsistency bounds; high perception acuity agents (high $\kappa$) tolerate more cross-relational contradiction before cohomological obstruction arises.
 \end{theorem}
 
 Full proofs are provided in the supplementary theory directory (\texttt{theory/relational\_sheaf/}).
@@ -715,11 +730,11 @@ Cold-start guard: first 15 messages capped at normal path.
 \begin{equation}
 \mathbf{h}_i^{(l+1)} = (1-\alpha) \cdot \text{Aggregate}(\{\mathbf{h}_j^{(l)} : j \in \mathcal{N}(i)\}) + \alpha \cdot \mathbf{h}_i^{(0)}
 \end{equation}
-where $\alpha = 0.2 + 0.4 \cdot \text{neuroticism}$ (personality-driven teleportation rate).
+where $\alpha = 0.2 + 0.4 \cdot \pi_{\text{acuity}}$ (personality-driven teleportation rate).
 
 \item \textbf{L4: Relational Sheaf.} Multi-relational consistency layer (Section~\ref{sec:sheaf}). Sheaf cohomology ($H^1$) detects irreducible relational contradictions; the sheaf Laplacian governs cross-relational scar propagation with exponential spectral decay. Personality-derived presentation matrices $P_i$ bound inconsistency via $\kappa(\boldsymbol{\pi})$.
 
-\item \textbf{L5: Heterogeneous Graph Transformer (HGT).} Type-aware decision fusion with 7 token types: \{scar, void, boundary, personality, surprise, expression, context\}. Type-specific projections $W_Q^\tau, W_K^\tau, W_V^\tau$ with personality-derived attention prior $\mu^{(\tau_s, \tau_t)}$ and intra-type masking.
+\item \textbf{L5: MoE-HGT.} Three-stage decision fusion: (1) type-expert FFNs with RMSNorm, (2) 4-head cross-attention with Hebbian attention priors, (3) top-2 situation-expert MoE with dormant-expert reactivation. Seven token types: \{scar, void, boundary, personality, surprise, expression, context\}. $\sim$14.3K parameters, all personality-derived.
 
 \item \textbf{L6: Autopoietic Boundary.} 32-dimensional identity core vector. Incoming perturbations are assessed via orthogonal projection:
 \begin{itemize}
@@ -731,30 +746,70 @@ where $\alpha = 0.2 + 0.4 \cdot \text{neuroticism}$ (personality-driven teleport
 \item \textbf{L7: Phase Transition Expression.} Expression is discontinuous phase transition, not continuous function. Pressure accumulates; when exceeding personality-derived threshold, output jumps to one of three modes: \emph{hint} ($< 0.5$), \emph{normal} ($0.5$--$1.0$), \emph{urgent} ($> 1.0$).
 \end{enumerate}
 
-\subsection{Heterogeneous Graph Transformer Details}
+\subsection{MoE-HGT: Three-Stage Decision Fusion}
 
-The HGT layer performs typed non-linear decision fusion. Attention with personality prior:
+The decision fusion layer replaces the original single-pass HGT with a three-stage Mixture-of-Experts Heterogeneous Graph Transformer (MoE-HGT). Each stage introduces progressively richer cross-token interactions.
+
+\paragraph{Stage 1: Type-Expert FFN.}
+Seven token types participate in the decision graph: \emph{scar}, \emph{void}, \emph{boundary}, \emph{personality}, \emph{surprise}, \emph{expression}, and \emph{context}. Each type $\tau$ maintains its own feed-forward expert:
 \begin{equation}
-a_{ij} = \frac{(W_Q^{\tau(i)} z_i) \cdot (W_K^{\tau(j)} z_j)^\top}{\sqrt{d_k}} + \mu^{(\tau(i), \tau(j))}
+\mathbf{z}_i^{(1)} = \mathbf{z}_i + \text{RMSNorm}\bigl(\text{FFN}_\tau(\mathbf{z}_i)\bigr), \quad \text{FFN}_\tau: \mathbb{R}^{16} \to \mathbb{R}^{16}
 \end{equation}
+where $\text{FFN}_\tau(\mathbf{x}) = W_2^\tau \cdot \text{GELU}(W_1^\tau \mathbf{x})$ with $W_1^\tau, W_2^\tau \in \mathbb{R}^{16 \times 16}$. Scar token values are log-compressed before injection:
 \begin{equation}
-\text{Attn}(i) = \text{softmax}_j(a_{ij} + \text{mask}(i,j)) \cdot W_V^{\tau(j)} z_j
+z_{\text{scar}} = \frac{\log_2(M_d)}{\log_2(M_{\max})}
+\end{equation}
+where $M_d$ is the per-dimension modifier product and $M_{\max}$ is the maximum possible modifier.
+
+\paragraph{Stage 2: Multi-Head Cross-Attention.}
+Four attention heads operate with per-type per-head projections. For head $h$ and source type $\tau_s$, target type $\tau_t$:
+\begin{align}
+Q_i^{(h)} &= W_Q^{(\tau_s, h)} \mathbf{z}_i^{(1)}, \quad K_j^{(h)} = W_K^{(\tau_t, h)} \mathbf{z}_j^{(1)}, \quad V_j^{(h)} = W_V^{(\tau_t, h)} \mathbf{z}_j^{(1)} \\
+a_{ij}^{(h)} &= \frac{Q_i^{(h)} \cdot (K_j^{(h)})^\top}{\sqrt{d_k}} + \mu^{(\tau_s, \tau_t)} + \text{mask}(i,j)
+\end{align}
+where $W_Q, W_K, W_V \in \mathbb{R}^{4 \times 16}$ (head dimension $d_k = 4$). The attention prior $\mu^{(\tau_s, \tau_t)} \in \mathbb{R}^{7 \times 7}$ adapts via a Hebbian slow rule (Oja's rule):
+\begin{equation}
+\Delta\mu^{(\tau_s, \tau_t)} = \eta_\mu \cdot \bar{a}^{(\tau_s, \tau_t)} \cdot \bigl(\bar{a}^{(\tau_s, \tau_t)} - \mu^{(\tau_s, \tau_t)}\bigr)
+\end{equation}
+Self-attention is masked (diagonal $= -\infty$). The attended output uses residual connection and RMSNorm:
+\begin{equation}
+\mathbf{z}_i^{(2)} = \mathbf{z}_i^{(1)} + \text{RMSNorm}\Bigl(\text{Concat}\bigl[\text{softmax}_j(a_{ij}^{(h)}) V_j^{(h)}\bigr]_{h=1}^4\Bigr)
 \end{equation}
 
-The intra-type mask blocks same-type attention:
+\paragraph{Stage 3: Situation-Expert MoE.}
+Five situation experts---\emph{defense}, \emph{curiosity}, \emph{social}, \emph{silence}, and \emph{repair}---receive the mean-pooled attended tokens $\bar{\mathbf{z}} = \text{mean}(\mathbf{z}^{(2)})$. A softmax router selects the top-2 experts:
+\begin{align}
+g_e &= \mathbf{w}_e^\top \bar{\mathbf{z}} + b_e + \text{bonus}(e), \quad e \in \{1,\ldots,5\} \\
+\text{bonus}(e) &= \begin{cases} 0.15 & \text{if expert } e \text{ dormant} > 50 \text{ ticks} \\ 0 & \text{otherwise} \end{cases}
+\end{align}
+where $\mathbf{w}_e \in \mathbb{R}^{16}$ is the router weight for expert $e$. The router bias $b_e$ adapts via a BCM-like Hebbian rule with decay $\lambda = 0.998$ per tick. Top-2 gating:
 \begin{equation}
-\text{mask}(i,j) = \begin{cases} -\infty & \tau(i) = \tau(j) \wedge i \neq j \\ 0 & \text{otherwise} \end{cases}
+\mathbf{o} = \sum_{e \in \text{top-2}} \frac{\exp(g_e)}{\sum_{e' \in \text{top-2}} \exp(g_{e'})} \cdot \text{Expert}_e(\bar{\mathbf{z}})
 \end{equation}
+Each expert is a two-layer FFN: $\text{Expert}_e: \mathbb{R}^{16} \xrightarrow{W_1^e \in \mathbb{R}^{32 \times 16}} \mathbb{R}^{32} \xrightarrow{W_2^e \in \mathbb{R}^{16 \times 32}} \mathbb{R}^{16}$.
 
-Output is a 4-dimensional decision vector $\mathbf{d} = W_{proj} \cdot \text{mean}(\text{Attn}(\mathbf{Z}))$:
+\paragraph{Decision Head.}
+A linear projection maps the MoE output to a 4-dimensional decision vector clamped to $[-1, 1]$:
+\begin{equation}
+\mathbf{d} = \text{clamp}\bigl(W_{\text{dec}} \cdot \mathbf{o},\; -1,\; 1\bigr), \quad W_{\text{dec}} \in \mathbb{R}^{4 \times 16}
+\end{equation}
 \begin{itemize}
-\item $d_0$: expression drive modifier (added to Void-Scar drive),
-\item $d_1$: boundary sensitivity modifier (fed to autopoiesis),
+\item $d_0$: expression drive correction (added to Void-Scar drive),
+\item $d_1$: boundary sensitivity modulation (fed to autopoiesis),
 \item $d_2$: urgency signal (modulates phase transition threshold),
-\item $d_3$: suppress signal ($> 0.5$ vetoes expression).
+\item $d_3$: expression inhibition ($> 0.5$ vetoes expression).
 \end{itemize}
 
-Total parameters: $\sim$21.9K floats (87.6 KB). All derived from personality semantics, zero learning.
+\paragraph{Parameter Count.}
+\begin{itemize}
+\item 7 Type-Expert FFNs: $7 \times (16 \times 16 + 16 \times 16) = 3{,}584$
+\item 4-head attention (Q/K/V per type per head): $7 \times 4 \times 3 \times (16 \times 4) = 5{,}376$
+\item 5 MoE experts: $5 \times (16 \times 32 + 32 \times 16) = 5{,}120$
+\item Router weights: $5 \times 16 = 80$
+\item Decision head: $16 \times 4 = 64$
+\item Attention prior: $7 \times 7 = 49$
+\end{itemize}
+Total: $\sim$14.3K floats ($\sim$57.2 KB). All derived from personality semantics, zero learning.
 
 \subsection{Performance Budget}
 
@@ -770,7 +825,7 @@ L1 HDC Perception & 0.10 ms & 0.10 ms & 0.10 ms \\
 L2 Predictive Coding & 0.01 ms & 0.01 ms & 0.01 ms \\
 L3 Void-Scar + Graph & 0.05 ms & 2.50 ms & 6.00 ms \\
 L4 Relational Sheaf & skip & skip & 0.80 ms \\
-L5 HGT & skip & 0.40 ms & 0.40 ms \\
+L5 MoE-HGT & skip & 0.40 ms & 0.40 ms \\
 L6 Autopoiesis & 0.01 ms & 0.01 ms & 0.10 ms \\
 L7 Phase Transition & $<$0.01 ms & $<$0.01 ms & $<$0.01 ms \\
 \midrule
@@ -783,14 +838,14 @@ Approximately 90\% of messages take the fast path (0.17ms); 10\% take the full p
 
 \subsection{Personality-Derived Parameterization}
 
-All key parameters across computation layers are derived in real-time from the personality vector $\boldsymbol{\pi} = (O, C, E, A, N) \in [0,1]^5$ (Big Five), requiring no manual configuration or training data:
+All key parameters across computation layers are derived in real-time from the personality vector $\boldsymbol{\pi} = (\pi_{\text{perm}}, \pi_{\text{order}}, \pi_{\text{expr}}, \pi_{\text{grav}}, \pi_{\text{acuity}}) \in [0,1]^5$ (Embodiment Five), requiring no manual configuration or training data:
 
 \begin{itemize}[leftmargin=*]
-\item \textbf{Extraversion ($E$):} Expression threshold (high $E$ $\to$ lower threshold, easier expression); scar formation threshold $\theta_w$ (high $E$ $\to$ higher threshold, harder to wound).
-\item \textbf{Neuroticism ($N$):} Healing rate (high $N$ $\to$ slower healing); predictive coding gate sensitivity (high $N$ $\to$ lower surprise threshold); void detection threshold $\theta_d$ (high $N$ $\to$ lower threshold, easier to sense absence).
-\item \textbf{Agreeableness ($A$):} Presentation matrix consistency bound $\kappa(\boldsymbol{\pi})$ (high $A$ $\to$ low $\kappa$, more consistent self-presentation across relationships).
-\item \textbf{Openness ($O$):} HGT attention prior distribution (high $O$ $\to$ more uniform priors, receptive to diverse signal types).
-\item \textbf{Conscientiousness ($C$):} Memory depth (high $C$ $\to$ longer temporal context); boundary repair rate (high $C$ $\to$ faster autopoietic recovery).
+\item \textbf{Expression Drive ($\pi_{\text{expr}}$):} Expression threshold (high $\pi_{\text{expr}}$ $\to$ lower threshold, easier expression); scar formation threshold $\theta_w$ (high $\pi_{\text{expr}}$ $\to$ higher threshold, harder to wound).
+\item \textbf{Perception Acuity ($\pi_{\text{acuity}}$):} Healing rate (high $\pi_{\text{acuity}}$ $\to$ slower healing); predictive coding gate sensitivity (high $\pi_{\text{acuity}}$ $\to$ lower surprise threshold); void detection threshold $\theta_d$ (high $\pi_{\text{acuity}}$ $\to$ lower threshold, easier to sense absence).
+\item \textbf{Relational Gravity ($\pi_{\text{grav}}$):} Presentation matrix consistency bound $\kappa(\boldsymbol{\pi})$ (high $\pi_{\text{grav}}$ $\to$ low $\kappa$, more consistent self-presentation across relationships).
+\item \textbf{Boundary Permeability ($\pi_{\text{perm}}$):} HGT attention prior distribution (high $\pi_{\text{perm}}$ $\to$ more uniform priors, receptive to diverse signal types).
+\item \textbf{Inner Order ($\pi_{\text{order}}$):} Memory depth (high $\pi_{\text{order}}$ $\to$ longer temporal context); boundary repair rate (high $\pi_{\text{order}}$ $\to$ faster autopoietic recovery).
 \end{itemize}
 
 Formally, each parameter $\theta_i$ is derived via:
@@ -802,7 +857,7 @@ where each $f_i$ is an affine map with clamping to ensure parameters remain in v
 \subsection{Personality Modeling}
 \label{sec:personality-modeling}
 
-The personality vector $\boldsymbol{\pi} \in [0,1]^5$ follows the Big Five (OCEAN) model~\cite{goldberg1990}: Openness ($O$), Conscientiousness ($C$), Extraversion ($E$), Agreeableness ($A$), Neuroticism ($N$). The personality state is initialized and evolves through three mechanisms:
+The personality vector $\boldsymbol{\pi} \in [0,1]^5$ follows the Embodiment Five model: Boundary Permeability ($\pi_{\text{perm}}$), Inner Order ($\pi_{\text{order}}$), Expression Drive ($\pi_{\text{expr}}$), Relational Gravity ($\pi_{\text{grav}}$), Perception Acuity ($\pi_{\text{acuity}}$). The personality state is initialized and evolves through three mechanisms:
 
 \begin{enumerate}[label=(\alph*),leftmargin=*]
 \item \textbf{Initialization.} A character description is mapped to $[0,1]^5$ via a deterministic extraction function:
@@ -829,38 +884,104 @@ All computation layer parameters are derived from $\boldsymbol{\pi}$. Each param
 
 The specific mappings from personality dimensions to computation parameters are:
 \begin{itemize}[leftmargin=*]
-\item $E \to$ expression threshold, wound threshold $\theta_w$: higher extraversion lowers expression barriers and raises wounding resistance.
-\item $N \to$ healing rates, gate sensitivity, void detection threshold $\theta_d$: higher neuroticism slows healing and increases sensitivity to absence.
-\item $A \to$ presentation matrix consistency bound $\kappa$: higher agreeableness enforces tighter cross-relational consistency.
-\item $O \to$ HGT attention prior: higher openness produces more uniform attention distributions, increasing receptivity to diverse signal types.
-\item $C \to$ memory depth, boundary repair rate: higher conscientiousness extends temporal context and accelerates autopoietic recovery.
+\item $\pi_{\text{expr}} \to$ expression threshold, wound threshold $\theta_w$: higher expression drive lowers expression barriers and raises wounding resistance.
+\item $\pi_{\text{acuity}} \to$ healing rates, gate sensitivity, void detection threshold $\theta_d$: higher perception acuity slows healing and increases sensitivity to absence.
+\item $\pi_{\text{grav}} \to$ presentation matrix consistency bound $\kappa$: higher relational gravity enforces tighter cross-relational consistency.
+\item $\pi_{\text{perm}} \to$ HGT attention prior: higher boundary permeability produces more uniform attention distributions, increasing receptivity to diverse signal types.
+\item $\pi_{\text{order}} \to$ memory depth, boundary repair rate: higher inner order extends temporal context and accelerates autopoietic recovery.
 \end{itemize}
 
-\subsection{Personality Feedback Loop}
+\subsection{Personality Feedback Loop: Dual-EMA System}
 \label{sec:personality-feedback}
 
-Computation outputs drive personality drift, forming a closed feedback loop. The update rule is:
+Each Embodiment trait $\pi_k$ maintains dual exponential moving averages that govern personality drift with noise resistance.
+
+\paragraph{Dual-EMA Tracking.}
+For each trait $k \in \{O, C, E, A, N\}$, a fast and slow EMA track the drift target:
+\begin{align}
+f_k(t) &= (1 - \alpha_f)\, f_k(t-1) + \alpha_f \cdot \text{target}_k(t), \quad \alpha_f = 0.039 \;\;(\tau_f \approx 50) \\
+s_k(t) &= (1 - \alpha_s)\, s_k(t-1) + \alpha_s \cdot \text{target}_k(t), \quad \alpha_s = 0.004 \;\;(\tau_s \approx 500)
+\end{align}
+
+\paragraph{Drift Consensus Rule.}
+The dual-EMA system implements a consensus gate that distinguishes sustained signals from transient noise:
 \begin{equation}
-\boldsymbol{\pi}(t+1) = \Pi_{[0,1]^5}\!\left(\boldsymbol{\pi}(t) + \eta \cdot \mathbf{g}\bigl(s(t),\, v(t),\, r(t),\, H^1(t)\bigr)\right)
-\label{eq:personality-feedback}
+\Delta\pi_k = \begin{cases}
+\text{full drift toward } s_k & \text{if } \text{sign}(f_k - \pi_k) = \text{sign}(s_k - \pi_k) \\
+0.5 \cdot (s_k - \pi_k) & \text{otherwise (resist short-term noise)}
+\end{cases}
 \end{equation}
-where $\Pi_{[0,1]^5}$ denotes projection onto the unit hypercube, and the effective drift rate is modulated by boundary stability:
+Full drift occurs only when both fast and slow averages agree on direction---a sustained signal that has persisted across both timescales.
+
+\paragraph{Homeostatic Pull.}
+Each trait experiences a restoring force toward its personality set-point $\pi_k^{(0)}$:
 \begin{equation}
-\eta = \eta_0 \cdot (1 - \text{boundary\_stability})
+\Delta_{\text{home},k} = 0.005 \cdot (\pi_k^{(0)} - \pi_k)
 \end{equation}
 
-The gradient function $\mathbf{g}$ aggregates five causal drivers:
+\paragraph{Inertia Decay.}
+Drift magnitude decreases over the system's lifetime, modeling personality crystallization:
+\begin{equation}
+I(t) = \frac{1}{1 + \ln(1 + t/500)}
+\end{equation}
+
+\paragraph{Asymmetric Resistance.}
+Drift is halved when a trait approaches extremes, preventing personality collapse:
+\begin{equation}
+R_k = \begin{cases} 0.5 & \text{if } \pi_k < 0.3 \text{ or } \pi_k > 0.7 \\ 1.0 & \text{otherwise} \end{cases}
+\end{equation}
+
+\paragraph{Oscillation Detection.}
+If trait $k$ exhibits $\geq 6$ direction reversals within the last 10 ticks, the trait is frozen for 20 ticks:
+\begin{equation}
+\text{frozen}_k = \begin{cases} \text{true (20 ticks)} & \text{if } |\{t' \in [t-10, t] : \text{sign}(\Delta\pi_k(t')) \neq \text{sign}(\Delta\pi_k(t'-1))\}| \geq 6 \\ \text{false} & \text{otherwise} \end{cases}
+\end{equation}
+
+\paragraph{Combined Update.}
+The effective personality update per tick is:
+\begin{equation}
+\pi_k(t+1) = \Pi_{[0,1]}\bigl(\pi_k(t) + I(t) \cdot R_k \cdot (\Delta\pi_k + \Delta_{\text{home},k}) \cdot \mathbb{1}[\neg\text{frozen}_k]\bigr)
+\end{equation}
+
+\begin{remark}[Stability of the Dual-EMA System]
+The dual-EMA consensus rule ensures that personality change requires agreement across two timescales ($\tau \approx 50$ and $\tau \approx 500$). Combined with homeostatic pull, inertia decay, asymmetric resistance, and oscillation detection, the system is inherently stable: transient perturbations are filtered, sustained pressure produces bounded drift, and pathological oscillation is actively suppressed.
+\end{remark}
+
+\subsection{Safety Mechanisms}
+\label{sec:safety}
+
+Seven mechanisms prevent pathological dynamics in the coupled Void-Scar system:
+
 \begin{enumerate}[leftmargin=*]
-\item \textbf{Scar density $\to$ $N\!\uparrow$}: Repeated wounding increases neuroticism (heightened sensitivity to future events).
-\item \textbf{Void pressure $\to$ $O\!\downarrow$}: Sustained avoidance reduces openness (the system becomes less receptive to novel stimuli near avoided regions).
-\item \textbf{Coherence $r$ $\to$ $A$}: High relational coherence reinforces agreeableness; low coherence erodes it.
-\item \textbf{Expression feedback $\to$ $E$}: Positive reception of expression increases extraversion; sustained ignoring decreases it.
-\item \textbf{$H^1$ inconsistency $\to$ $C\!\downarrow$}: Non-trivial sheaf cohomology (irreducible relational contradictions) erodes conscientiousness.
+\item \textbf{Sovereignty Immune System.} Per-session scar formation is capped at:
+\begin{equation}
+C_s = \max\bigl(2,\; 3 + (1 - \pi_{\text{sovereignty}}) \cdot 5\bigr)
+\end{equation}
+Once the cap is reached, the effective wound threshold rises to $0.95$, making further scar formation nearly impossible within the session.
+
+\item \textbf{Protective Dissociation (Circuit Breaker).} If $\geq 5$ scars form within 10 ticks, the system enters a protective mode for 30 ticks during which the effective wound threshold is elevated to $0.95$. This prevents cascading scar formation under sustained attack.
+
+\item \textbf{Time-Aware Healing.} Scars heal during real-time silence at a rate of 1 bonus tick per 5 minutes of wall-clock inactivity, capped at 10 bonus ticks per processing step:
+\begin{equation}
+\Delta t_{\text{heal}} = \min\!\left(10,\; \left\lfloor \frac{t_{\text{silence}}}{300\text{s}} \right\rfloor\right)
+\end{equation}
+
+\item \textbf{Void Creation Resistance.} The effective void detection threshold increases by $0.02$ per existing void, preventing void flooding under $\Phi$ coupling:
+\begin{equation}
+\theta_d^{\text{eff}} = \theta_d + 0.02 \cdot |V|
+\end{equation}
+
+\item \textbf{Numbed-Count Floor.} The $\Phi$ coupling path (scar $\to$ void sensitivity) cannot lower the detection threshold below the personality-derived floor $\theta_d^{\min}(\boldsymbol{\pi})$, ensuring that even heavily scarred systems retain minimum void detection standards.
+
+\item \textbf{Oscillation Detection.} Personality traits exhibiting $\geq 6$ direction reversals in 10 ticks are frozen for 20 ticks (see \S\ref{sec:personality-feedback}), preventing adversarial oscillation attacks on the personality vector.
+
+\item \textbf{Drift Rate Limiting.} A minimum 30-second wall-clock interval is enforced between personality drift events, preventing message-spam manipulation of the personality feedback loop:
+\begin{equation}
+\Delta\pi_k(t) = 0 \quad \text{if } t_{\text{wall}} - t_{\text{last\_drift}} < 30\text{s}
+\end{equation}
 \end{enumerate}
 
-\begin{remark}[Stability of the Feedback Loop]
-The personality feedback loop is a \emph{damped nonlinear} system. When the autopoietic boundary is stable ($\text{boundary\_stability} \approx 1$), the effective drift rate $\eta \approx 0$ and personality is effectively frozen. During phase transitions ($\text{boundary\_stability} < 1$), the drift rate is temporarily elevated, permitting personality adaptation. This ensures that personality change is concentrated at moments of genuine identity renegotiation rather than accumulating from routine interactions.
-\end{remark}
+Together, these mechanisms ensure that the system remains within safe operating bounds even under adversarial input patterns, while preserving the full expressiveness of the Void-Scar dynamics under normal interaction.
 
 % ============================================================
 % 8. IMPLEMENTATION
@@ -886,7 +1007,7 @@ The reference implementation targets a 1-core, 1-GB deployment environment (e.g.
 
 \paragraph{Void Calculus.} Voids are dataclass objects with boundary stored as a list of \texttt{bytes} (HDC vectors). Pressure accumulation uses the closed-form equation (Eq.~\ref{eq:pressure}). Maximum 50 active voids (configurable).
 
-\paragraph{HGT.} The 32-token, 2-head transformer is implemented as direct NumPy matrix operations. The $\sim$22K parameters are pre-computed from personality vectors at initialization and cached until personality drift occurs.
+\paragraph{MoE-HGT.} The three-stage MoE-HGT (7 type-expert FFNs, 4-head cross-attention, 5 situation experts with top-2 gating) is implemented as direct NumPy matrix operations. The $\sim$14.3K parameters are pre-computed from personality vectors at initialization and cached until personality drift occurs.
 
 \subsection{Algorithm: Main Computation Pipeline}
 
@@ -919,7 +1040,7 @@ The reference implementation targets a 1-core, 1-GB deployment environment (e.g.
 \ENDFOR
 \STATE \textbf{// Scar Algebra step}
 \STATE $\tilde{\mathbf{e}} \leftarrow \text{modulate}(\mathbf{e}, \sigma)$ \COMMENT{Step 1}
-\STATE $\mathbf{x} \leftarrow \tanh(\mathbf{x} + 0.3\tilde{\mathbf{e}})$ \COMMENT{Step 2}
+\STATE $\mathbf{x} \leftarrow \tanh(W_2 \cdot \tanh(W_1 \cdot [\mathbf{x};\, \tilde{\mathbf{e}}]))$ \COMMENT{Step 2}
 \IF{$\exists d: |\tilde{e}_d| > \theta_w$}
   \STATE Append scar $(d, t, raw)$ to $\sigma$ \COMMENT{Step 3}
 \ENDIF
@@ -1038,7 +1159,7 @@ Five independent VoidScarEngine instances with different interaction patterns (p
 The following experiments validate the Relational Sheaf Theory (\S\ref{sec:sheaf}) using the multi-relational runtime.
 
 \paragraph{Exp 8: Cohomological Dissociation Detection.}
-We construct an agent with high neuroticism personality ($\kappa$ large) and $N=3$ relationships. The presentation matrices $P_i$ are frozen to induce contradictory self-presentation requirements. The agent receives contradictory events across relationships over 200 ticks. We track inconsistency energy ($\|\delta^0 \mathbf{x}\|^2$), dissociation pressure, and $\dim H^1(K, \mathcal{F})$. \emph{Result:} Inconsistency energy follows an S-curve from 0 to $\approx 65$; dissociation pressure grows from 0.19 to 0.59. However, $\dim H^1$ remains 0 throughout because the presentation matrices remain full-rank (the system resolves contradictions through internal state adjustment rather than developing true cohomological obstruction). This demonstrates that high inconsistency energy and dissociation pressure are necessary but not sufficient conditions for $H^1 > 0$ (Figure~\ref{fig:cohomological_dissociation}).
+We construct an agent with high perception acuity personality ($\kappa$ large) and $N=3$ relationships. The presentation matrices $P_i$ are frozen to induce contradictory self-presentation requirements. The agent receives contradictory events across relationships over 200 ticks. We track inconsistency energy ($\|\delta^0 \mathbf{x}\|^2$), dissociation pressure, and $\dim H^1(K, \mathcal{F})$. \emph{Result:} Inconsistency energy follows an S-curve from 0 to $\approx 65$; dissociation pressure grows from 0.19 to 0.59. However, $\dim H^1$ remains 0 throughout because the presentation matrices remain full-rank (the system resolves contradictions through internal state adjustment rather than developing true cohomological obstruction). This demonstrates that high inconsistency energy and dissociation pressure are necessary but not sufficient conditions for $H^1 > 0$ (Figure~\ref{fig:cohomological_dissociation}).
 
 \begin{figure}[H]
 \centering
@@ -1068,12 +1189,12 @@ We create a 2-simplex (agent + two partners in simultaneous co-presence) and gen
 \end{figure}
 
 \paragraph{Exp 11: Personality Feedback Loop.}
-We verify that the personality drift closed loop operates as designed. Starting from a neutral personality $\boldsymbol{\pi}_0 = (0.5, 0.5, 0.5, 0.5, 0.5)$, we simulate three scenarios over 500 ticks each: (A) repeated wounding events, (B) sustained positive feedback (expression accepted), and (C) cross-relational contradictions with 3 conflicting relationships over 200 ticks. \emph{Result:} Scenario A shows $N$ rising and $O$ falling as predicted by the scar$\to$neuroticism and void-pressure$\to$openness mechanisms. Scenario B shows $E$ and $A$ rising due to positive expression feedback and coherence increase. Scenario C shows $C$ falling due to dissociation pressure from $H^1$ inconsistency. All drift rates remain within the $\eta_0 \leq 10^{-4}$ bound, confirming the damped nature of the feedback loop (Figure~\ref{fig:personality_feedback}).
+We verify that the personality drift closed loop operates as designed. Starting from a neutral personality $\boldsymbol{\pi}_0 = (0.5, 0.5, 0.5, 0.5, 0.5)$, we simulate three scenarios over 500 ticks each: (A) repeated wounding events, (B) sustained positive feedback (expression accepted), and (C) cross-relational contradictions with 3 conflicting relationships over 200 ticks. \emph{Result:} Scenario A shows $\pi_{\text{acuity}}$ rising and $\pi_{\text{perm}}$ falling as predicted by the scar$\to$acuity and void-pressure$\to$permeability mechanisms. Scenario B shows $\pi_{\text{expr}}$ and $\pi_{\text{grav}}$ rising due to positive expression feedback and coherence increase. Scenario C shows $\pi_{\text{order}}$ falling due to dissociation pressure from $H^1$ inconsistency. All drift rates remain within the $\eta_0 \leq 10^{-4}$ bound, confirming the damped nature of the feedback loop (Figure~\ref{fig:personality_feedback}).
 
 \begin{figure}[H]
 \centering
 \includegraphics[width=0.85\columnwidth]{experiments/fig10_personality_feedback.png}
-\caption{Personality feedback loop verification. Three conditions: (A) repeated wounding ($N\!\uparrow$, $O\!\downarrow$), (B) sustained acceptance ($E\!\uparrow$, $A\!\uparrow$), (C) cross-relational contradiction ($C\!\downarrow$). Drift is bounded and causally driven by computation state.}
+\caption{Personality feedback loop verification. Three conditions: (A) repeated wounding ($\pi_{\text{acuity}}\!\uparrow$, $\pi_{\text{perm}}\!\downarrow$), (B) sustained acceptance ($\pi_{\text{expr}}\!\uparrow$, $\pi_{\text{grav}}\!\uparrow$), (C) cross-relational contradiction ($\pi_{\text{order}}\!\downarrow$). Drift is bounded and causally driven by computation state.}
 \label{fig:personality_feedback}
 \end{figure}
 
@@ -1111,11 +1232,11 @@ Exp 11: Feedback Loop & Personality drift direction & All 5 correct \\
 
 \subsection{Limitations}
 
-\paragraph{Linear base state evolution.} The current $\tanh(\mathbf{x} + 0.3\tilde{\mathbf{e}})$ update is deliberately simple. Richer dynamics (e.g., learned nonlinear maps) could increase expressiveness but would complicate the convergence proof (Theorem~\ref{thm:scar-convergence}) and potentially violate the bounded-state axiom without careful design.
+\paragraph{Two-layer base state evolution.} The current two-layer contractive map $\tanh(W_2 \cdot \tanh(W_1 \cdot [\mathbf{x};\, \tilde{\mathbf{e}}]))$ with spectral normalization provides a balance between expressiveness and provable convergence. Deeper architectures could increase representational capacity but would require more complex spectral norm constraints to maintain contractivity, and the additional parameters would increase the personality-derivation surface.
 
 \paragraph{HDC resolution.} The 2048-bit HDC encoding provides $\sim$11 bits of effective resolution for similarity computation. This limits the granularity of void boundary matching and may cause false merges for semantically similar but distinct topics. Higher-dimensional encodings (4096, 8192 bits) trade memory for resolution.
 
-\paragraph{Healing rate assumptions.} The healing durations ($T(raw)=10$, $T(closing)=40$, $T(scarred)=150$) are derived from the personality vector in real-time (neuroticism $\to$ healing rate, extraversion $\to$ scar threshold, agreeableness $\to$ consistency bound) via affine mappings with clamping. While this eliminates the need for training data, the derivation functions themselves are designed rather than empirically validated against longitudinal human data.
+\paragraph{Healing rate assumptions.} The healing durations ($T(raw)=10$, $T(closing)=40$, $T(scarred)=150$) are derived from the personality vector in real-time ($\pi_{\text{acuity}}$ $\to$ healing rate, $\pi_{\text{expr}}$ $\to$ scar threshold, $\pi_{\text{grav}}$ $\to$ consistency bound) via affine mappings with clamping. While this eliminates the need for training data, the derivation functions themselves are designed rather than empirically validated against longitudinal human data.
 
 \subsection{Ethical Considerations}
 
@@ -1137,7 +1258,7 @@ Active inference~\cite{friston2010} minimizes variational free energy, treating 
 \subsection{Future Work}
 
 \begin{itemize}
-\item \textbf{Personality-derived parameters:} All healing rates and thresholds are currently derived in real-time from the personality vector (neuroticism $\to$ healing rate, extraversion $\to$ scar threshold, agreeableness $\to$ consistency bound) via \texttt{derive\_params()}, requiring no training data. Future work may explore whether fine-tuning these derivation functions from longitudinal interaction data improves ecological validity.
+\item \textbf{Personality-derived parameters:} All healing rates and thresholds are currently derived in real-time from the personality vector ($\pi_{\text{acuity}}$ $\to$ healing rate, $\pi_{\text{expr}}$ $\to$ scar threshold, $\pi_{\text{grav}}$ $\to$ consistency bound) via \texttt{derive\_params()}, requiring no training data. Future work may explore whether fine-tuning these derivation functions from longitudinal interaction data improves ecological validity.
 \item \textbf{Sheaf runtime scaling:} Extend the Relational Sheaf runtime to support larger relational complexes ($N > 10$) with efficient incremental cohomology computation and sparse Laplacian eigendecomposition.
 \item \textbf{Formal verification:} Machine-checked proofs of the axiom system using Lean or Coq.
 \item \textbf{Empirical validation:} Large-scale human evaluation of expression naturalness and relational coherence.

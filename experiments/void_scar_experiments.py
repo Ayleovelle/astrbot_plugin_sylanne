@@ -582,6 +582,11 @@ def experiment_5_ablation():
             spine.engine.scar_state.wound_threshold = 999.0
 
         # Collect observations
+        # Embodiment 1.2.0: personality uses named dimensions instead of dim_0..7
+        _BASE_DIM_NAMES = [
+            "warmth", "arousal", "valence", "tension",
+            "curiosity", "expression_drive", "boundary_firmness", "coherence",
+        ]
         base_series = [[] for _ in range(8)]
         hgt_series = [[] for _ in range(4)]
         void_series = []
@@ -606,8 +611,8 @@ def experiment_5_ablation():
             hgt = result.get("hgt_decision", [0.0, 0.0, 0.0, 0.0])
             expr_state = result.get("expression_state", {})
 
-            for d in range(8):
-                base_series[d].append(emotion[f"dim_{d}"])
+            for d, name in enumerate(_BASE_DIM_NAMES):
+                base_series[d].append(emotion.get(name, 0.0))
             for d in range(4):
                 hgt_series[d].append(hgt[d])
             void_series.append(float(emotion["active_voids"]))
@@ -668,6 +673,10 @@ def experiment_5_ablation():
 
     class _NullHGT:
         """Stub HGT that always returns zero decision vector."""
+        _last_attention_weights = None
+        _last_active_experts = None
+        _last_gate_values = None
+
         def build_tokens_from_spine(self, **kwargs):
             return []
         def forward(self, tokens, personality):
