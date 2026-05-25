@@ -131,7 +131,7 @@ def focus_information_flood(
     max_events: int = 6,
     interests: dict[str, float] | None = None,
 ) -> dict[str, Any]:
-    clean_events = [_flood_event(event, interests=interests) for event in events if _flood_event(event, interests=interests)["text"] or _flood_event(event, interests=interests)["flags"]]
+    clean_events = [processed for event in events if (processed := _flood_event(event, interests=interests))["text"] or processed["flags"]]
     pressure = min(1.0, len(clean_events) / max(1, int(max_events)))
     speakers: dict[str, dict[str, Any]] = {}
     for event in clean_events:

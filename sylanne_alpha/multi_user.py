@@ -98,7 +98,8 @@ class MultiUserSpine:
 
     def _evicted_path(self, user_id: str) -> Path:
         """Return the file path for an evicted user's state."""
-        return Path(self._root) / "evicted" / f"{user_id}.json"
+        safe = "".join(ch if ch.isalnum() or ch in ("-", "_", ".") else "_" for ch in user_id) or "default"
+        return Path(self._root) / "evicted" / f"{safe}.json"
 
     def _persist_spine(self, user_id: str, spine: ComputationSpine):
         """Serialize and write spine state to disk."""

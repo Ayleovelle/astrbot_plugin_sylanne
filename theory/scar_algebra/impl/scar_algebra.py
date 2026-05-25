@@ -77,7 +77,7 @@ class Scar:
 class ScarredState:
     """The core Scar Algebra state: base vector + irreversible scar sequence."""
 
-    __slots__ = ("base", "scars", "n_dims", "wound_threshold", "_tick")
+    __slots__ = ("base", "scars", "n_dims", "wound_threshold", "_tick", "_neuroticism")
 
     def __init__(self, n_dims: int = 8, wound_threshold: float = 0.6):
         self.n_dims = n_dims
@@ -85,14 +85,22 @@ class ScarredState:
         self.base = [0.0] * n_dims
         self.scars: list[Scar] = []
         self._tick = 0
+        self._neuroticism: float = 0.5
 
     def modifier(self, dim: int) -> float:
-        """Compute the cumulative scar modifier for a dimension."""
+        """Compute the cumulative scar modifier for a dimension.
+
+        Uses logarithmic compression with personality-driven cap to prevent
+        unbounded exponential growth from product of scar alphas.
+        """
         product = 1.0
         for scar in self.scars:
             if scar.dimension == dim:
                 product *= scar.alpha
-        return product
+        if product <= 1.0:
+            return product
+        max_mod = 2.0 + self._neuroticism * 3.0
+        return 1.0 + (max_mod - 1.0) * (1.0 - 1.0 / product)
 
     def modulate(self, event: list[float]) -> list[float]:
         """Apply scar modulation to an input event (Step 1 of ⊳)."""

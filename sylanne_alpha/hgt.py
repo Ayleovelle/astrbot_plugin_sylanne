@@ -1,18 +1,18 @@
-"""Heterogeneous Graph Transformer (HGT) — L4 Decision Fusion.
+"""MoE-HGT: Mixture-of-Experts Heterogeneous Graph Transformer — L5 Decision Fusion.
 
-Type-aware transformer for multi-source signal fusion. Each token type
-(scar, void, boundary, personality, surprise, expression, context) has
-independent projection matrices. Attention priors are derived from
-personality semantics. Intra-type masking prevents local over-smoothing.
+Three-layer architecture:
+  Stage 1: Type-Expert FFN encoding (7 type-specific experts)
+  Stage 2: True Multi-Head Cross-Attention (4 heads, per-type per-head Q/K/V)
+  Stage 3: Situation-Expert MoE FFN (top-2 gating, 5 experts, pooled input)
+  + Decision Head (16 → 4-dim output)
+  + Hebbian slow adaptation (BCM router bias + Oja attention prior)
 
-Output: 4-dim decision vector (expression drive correction, boundary
-sensitivity correction, urgency signal, inhibition signal).
-
-All ~21.9K parameters are deterministically derived from personality —
-zero learning required.
+All base parameters deterministically derived from personality SHA-256.
+Adaptation is incremental delta only — base params never change at runtime.
 """
 from __future__ import annotations
 
+import array
 import hashlib
 import math
 import struct
@@ -22,317 +22,632 @@ from typing import Any
 TOKEN_TYPES = ("scar", "void", "boundary", "personality", "surprise", "expression", "context")
 _TYPE_INDEX = {t: i for i, t in enumerate(TOKEN_TYPES)}
 _NUM_TYPES = len(TOKEN_TYPES)
+_N_EXPERTS = 5
+_EXPERT_NAMES = ("defense", "curiosity", "social", "silence", "repair")
+
+_exp = math.exp
+_sqrt = math.sqrt
+_tanh = math.tanh
 
 
 def _deterministic_floats(seed: bytes, count: int) -> list[float]:
-    """Generate deterministic pseudo-random floats in [-1, 1] from a seed."""
     result: list[float] = []
     block = 0
     while len(result) < count:
         h = hashlib.sha256(seed + struct.pack("<I", block)).digest()
-        # Each 4 bytes → one float
         for i in range(0, len(h) - 3, 4):
             if len(result) >= count:
                 break
             val = struct.unpack("<I", h[i:i+4])[0]
-            # Map to [-1, 1]
             result.append((val / 0xFFFFFFFF) * 2.0 - 1.0)
         block += 1
     return result
 
 
-def _make_matrix(seed: bytes, rows: int, cols: int, scale: float = 1.0) -> list[list[float]]:
-    """Create a deterministic matrix from seed with Xavier-like scaling."""
+def _make_flat(seed: bytes, rows: int, cols: int, scale: float = 1.0) -> array.array:
     floats = _deterministic_floats(seed, rows * cols)
-    xavier = scale * math.sqrt(2.0 / (rows + cols))
-    mat: list[list[float]] = []
-    idx = 0
-    for _ in range(rows):
-        row = [floats[idx + c] * xavier for c in range(cols)]
-        mat.append(row)
-        idx += cols
-    return mat
+    xavier = scale * _sqrt(2.0 / (rows + cols))
+    return array.array('d', (f * xavier for f in floats))
 
 
-def _matmul_vec(mat: list[list[float]], vec: list[float]) -> list[float]:
-    """Matrix-vector multiply: mat @ vec."""
-    return [sum(row[j] * vec[j] for j in range(len(vec))) for row in mat]
-
-
-def _matmul_vec_flat(mat_flat: list[float], vec: list[float], rows: int, cols: int) -> list[float]:
-    """Matrix-vector multiply with flat matrix storage."""
+def _matmul_vec_flat(mat: list[float], vec: list[float], rows: int, cols: int) -> list[float]:
     result = [0.0] * rows
     idx = 0
     for r in range(rows):
         s = 0.0
         for c in range(cols):
-            s += mat_flat[idx] * vec[c]
+            s += mat[idx] * vec[c]
             idx += 1
         result[r] = s
     return result
 
 
+def _silu(x: float) -> float:
+    if x < -80.0:
+        return 0.0
+    return x / (1.0 + _exp(-x))
+
+
 def _softmax(values: list[float]) -> list[float]:
-    """Numerically stable softmax."""
     if not values:
         return []
     max_v = max(values)
-    exps = [math.exp(v - max_v) for v in values]
+    exps = [_exp(v - max_v) for v in values]
     total = sum(exps) + 1e-12
     return [e / total for e in exps]
 
 
-def _dot(a: list[float], b: list[float]) -> float:
-    """Dot product."""
-    return sum(x * y for x, y in zip(a, b))
+def _rmsnorm_inplace(vec: list[float], gamma: list[float], n: int) -> None:
+    ss = 0.0
+    for i in range(n):
+        ss += vec[i] * vec[i]
+    inv_rms = 1.0 / _sqrt(ss / n + 1e-6)
+    for i in range(n):
+        vec[i] = vec[i] * inv_rms * gamma[i]
 
 
-class HGTLayer:
-    """Single-layer Heterogeneous Graph Transformer.
+def _rmsnorm(vec: list[float], gamma: list[float]) -> list[float]:
+    n = len(vec)
+    ss = sum(v * v for v in vec) / n
+    inv_rms = 1.0 / _sqrt(ss + 1e-6)
+    return [vec[i] * inv_rms * gamma[i] for i in range(n)]
 
-    Per-type W_Q, W_K, W_V projections with personality-derived attention prior
-    and intra-type masking. Optimized for pure-Python performance with flat arrays.
-    """
+
+def _vec_add(a: list[float], b: list[float]) -> list[float]:
+    return [a[i] + b[i] for i in range(len(a))]
+
+
+# === Stage 1: Type-Expert FFN ===
+
+class TypeExpertFFN:
+    __slots__ = ("w1_flat", "w2_flat", "d_in", "d_hidden", "gamma")
+
+    def __init__(self, d_in: int = 16, d_hidden: int = 24):
+        self.d_in = d_in
+        self.d_hidden = d_hidden
+        self.w1_flat: list[float] = []
+        self.w2_flat: list[float] = []
+        self.gamma: list[float] = [1.0] * d_in
+
+    def derive(self, seed: bytes) -> None:
+        self.w1_flat = _make_flat(seed + b"W1", self.d_hidden, self.d_in)
+        self.w2_flat = _make_flat(seed + b"W2", self.d_in, self.d_hidden)
+        g_floats = _deterministic_floats(seed + b"GAMMA", self.d_in)
+        self.gamma = [0.8 + 0.4 * (f * 0.5 + 0.5) for f in g_floats]
+
+    def forward(self, x: list[float]) -> list[float]:
+        hidden = _matmul_vec_flat(self.w1_flat, x, self.d_hidden, self.d_in)
+        activated = [_silu(h) for h in hidden]
+        out = _matmul_vec_flat(self.w2_flat, activated, self.d_in, self.d_hidden)
+        result = [x[i] + out[i] for i in range(self.d_in)]
+        _rmsnorm_inplace(result, self.gamma, self.d_in)
+        return result
+
+
+# === Stage 2: Multi-Head Cross-Attention (per-head d_head×d_head projections) ===
+
+class MultiHeadCrossAttention:
+    """True multi-head attention with per-type, per-head Q/K/V of size d_head×d_head."""
 
     __slots__ = (
         "d_model", "n_heads", "d_head",
-        "_w_q_flat", "_w_k_flat", "_w_v_flat",
-        "_attention_prior", "_output_proj_flat",
+        "_wq", "_wk", "_wv",
+        "_attention_prior", "_gamma",
     )
 
     def __init__(self, d_model: int = 16, n_heads: int = 4):
         self.d_model = d_model
         self.n_heads = n_heads
         self.d_head = d_model // n_heads
-        # Flat storage for speed
-        self._w_q_flat: dict[int, list[float]] = {}
-        self._w_k_flat: dict[int, list[float]] = {}
-        self._w_v_flat: dict[int, list[float]] = {}
+        self._wq: list[list[list[float]]] = []
+        self._wk: list[list[list[float]]] = []
+        self._wv: list[list[list[float]]] = []
         self._attention_prior: list[list[float]] = [[0.0] * _NUM_TYPES for _ in range(_NUM_TYPES)]
-        self._output_proj_flat: list[float] = []
+        self._gamma: list[float] = [1.0] * d_model
 
-    def derive_params(self, personality: dict[str, float]) -> None:
-        """Deterministically derive all parameters from personality vector."""
-        p_keys = sorted(personality.keys())
-        seed_str = "|".join(f"{k}:{float(personality[k]):.6f}" for k in p_keys
-                           if isinstance(personality[k], (int, float)))
-        base_seed = hashlib.sha256(seed_str.encode()).digest()
-
-        d = self.d_model
-        d_head = self.d_head
-        n_heads = self.n_heads
-        # Per-type projection matrices: Q/K project to d_head per head (total d_model),
-        # V projects to d_model. Stored flat for fast matmul.
+    def derive(self, base_seed: bytes, personality: dict[str, float]) -> None:
+        d_h = self.d_head
+        n_h = self.n_heads
+        self._wq = []
+        self._wk = []
+        self._wv = []
         for t_idx, t_name in enumerate(TOKEN_TYPES):
             t_seed = base_seed + t_name.encode()
-            q_mat = _make_matrix(t_seed + b"Q", d, d)
-            k_mat = _make_matrix(t_seed + b"K", d, d)
-            v_mat = _make_matrix(t_seed + b"V", d, d)
-            self._w_q_flat[t_idx] = [x for row in q_mat for x in row]
-            self._w_k_flat[t_idx] = [x for row in k_mat for x in row]
-            self._w_v_flat[t_idx] = [x for row in v_mat for x in row]
-
-        # Output projection flat
-        out_mat = _make_matrix(base_seed + b"OUT", d, d)
-        self._output_proj_flat = [x for row in out_mat for x in row]
-
+            q_heads = []
+            k_heads = []
+            v_heads = []
+            for h in range(n_h):
+                hs = struct.pack("<I", h)
+                q_heads.append(_make_flat(t_seed + b"Q" + hs, d_h, d_h))
+                k_heads.append(_make_flat(t_seed + b"K" + hs, d_h, d_h))
+                v_heads.append(_make_flat(t_seed + b"V" + hs, d_h, d_h))
+            self._wq.append(q_heads)
+            self._wk.append(k_heads)
+            self._wv.append(v_heads)
+        g_floats = _deterministic_floats(base_seed + b"GAMMA2", self.d_model)
+        self._gamma = [0.8 + 0.4 * (f * 0.5 + 0.5) for f in g_floats]
         self._derive_attention_prior(personality)
 
     def _derive_attention_prior(self, personality: dict[str, float]) -> None:
-        """Build the 7×7 attention prior from personality semantics."""
-        neuroticism = float(personality.get("neuroticism", 0.5))
-        extraversion = float(personality.get("extraversion", 0.5))
-        conscientiousness = float(personality.get("conscientiousness", 0.5))
-        openness = float(personality.get("openness", 0.5))
-        agreeableness = float(personality.get("agreeableness", 0.5))
-
-        # Start with uniform prior
+        N = float(personality.get("neuroticism", personality.get("perception_acuity", 0.5)))
+        E = float(personality.get("extraversion", personality.get("expression_drive_trait", 0.5)))
+        C = float(personality.get("conscientiousness", personality.get("inner_order", 0.5)))
+        O = float(personality.get("openness", personality.get("boundary_permeability", 0.5)))
+        A = float(personality.get("agreeableness", personality.get("relational_gravity", 0.5)))
         mu = [[1.0] * _NUM_TYPES for _ in range(_NUM_TYPES)]
-
-        si, vi, bi, pi, sui, ei, ci = (
-            _TYPE_INDEX["scar"], _TYPE_INDEX["void"], _TYPE_INDEX["boundary"],
-            _TYPE_INDEX["personality"], _TYPE_INDEX["surprise"],
-            _TYPE_INDEX["expression"], _TYPE_INDEX["context"],
-        )
-
-        # High neuroticism → scar-void coupling stronger
-        mu[si][vi] += neuroticism * 1.5
-        mu[vi][si] += neuroticism * 1.5
-        # Neuroticism also amplifies surprise → scar
-        mu[sui][si] += neuroticism * 1.0
-        mu[si][sui] += neuroticism * 1.0
-
-        # High extraversion → expression gets more attention from all
+        si, vi, bi, pi, sui, ei, ci = range(_NUM_TYPES)
+        mu[si][vi] += N * 1.5
+        mu[vi][si] += N * 1.5
+        mu[sui][si] += N * 1.0
+        mu[si][sui] += N * 1.0
         for i in range(_NUM_TYPES):
-            mu[i][ei] += extraversion * 1.2
-            mu[ei][i] += extraversion * 0.8
-
-        # High conscientiousness → context type weighted higher
+            mu[i][ei] += E * 1.2
+            mu[ei][i] += E * 0.8
+            mu[i][ci] += C * 1.0
+            mu[ci][i] += C * 0.6
+            mu[i][sui] += O * 0.8
+        mu[bi][bi] = max(0.1, 1.0 - A * 0.5)
         for i in range(_NUM_TYPES):
-            mu[i][ci] += conscientiousness * 1.0
-            mu[ci][i] += conscientiousness * 0.6
-
-        # Openness → surprise gets more weight
-        for i in range(_NUM_TYPES):
-            mu[i][sui] += openness * 0.8
-
-        # Agreeableness → boundary is more permeable (less self-attention)
-        mu[bi][bi] = max(0.1, 1.0 - agreeableness * 0.5)
-
-        # Zero out diagonal (intra-type mask)
-        for i in range(_NUM_TYPES):
-            mu[i][i] = 0.0
-
+            if i != bi:
+                mu[i][i] = 0.0
         self._attention_prior = mu
 
-    def forward(self, tokens: list[tuple[str, list[float]]]) -> list[float]:
-        """Run one HGT layer over typed tokens. Optimized for pure-Python speed.
 
-        Uses type-aware attention with personality prior and intra-type mask.
-        Q is projected per-type; K and V use raw input for speed.
-        """
+    def forward(
+        self, tokens: list[list[float]], types: list[int],
+        prior_drift: list[list[float]] | None = None,
+    ) -> tuple[list[list[float]], list[list[float]]]:
+        """Multi-head attention with inlined per-head 4x4 projections."""
         n = len(tokens)
-        if n == 0:
-            return [0.0] * self.d_model
-
         d = self.d_model
-
-        # Prepare tokens: pad/truncate and resolve types
-        types: list[int] = []
-        vecs: list[list[float]] = []
-        projected_q: list[list[float]] = []
-
-        for t_name, vec in tokens:
-            if len(vec) < d:
-                v = vec + [0.0] * (d - len(vec))
-            else:
-                v = vec[:d]
-            t_idx = _TYPE_INDEX.get(t_name, 0)
-            types.append(t_idx)
-            vecs.append(v)
-            # Only Q projection (K = raw input for efficiency)
-            projected_q.append(_matmul_vec_flat(self._w_q_flat[t_idx], v, d, d))
-
-        # Attention: Q_i · K_j (K_j = raw vec_j) with type prior + intra-type mask
-        scale = 1.0 / math.sqrt(float(d))
+        n_h = self.n_heads
+        d_h = self.d_head
+        scale = 1.0 / _sqrt(float(d_h))
         prior = self._attention_prior
-        aggregated = [0.0] * d
+        wq = self._wq
+        wk = self._wk
+        wv = self._wv
 
+        attn_weights = [[0.0] * n for _ in range(n)]
+        head_outputs = [[0.0] * d for _ in range(n)]
+        inv_nh = 1.0 / n_h
+
+        for h in range(n_h):
+            h_off = h * d_h
+            # Inline 4x4 Q/K/V projections (unrolled for d_head=4)
+            q_vecs = [None] * n
+            k_vecs = [None] * n
+            v_vecs = [None] * n
+            for i in range(n):
+                ti = types[i]
+                x0 = tokens[i][h_off]
+                x1 = tokens[i][h_off + 1]
+                x2 = tokens[i][h_off + 2]
+                x3 = tokens[i][h_off + 3]
+                wqi = wq[ti][h]
+                wki = wk[ti][h]
+                wvi = wv[ti][h]
+                q_vecs[i] = (
+                    wqi[0]*x0 + wqi[1]*x1 + wqi[2]*x2 + wqi[3]*x3,
+                    wqi[4]*x0 + wqi[5]*x1 + wqi[6]*x2 + wqi[7]*x3,
+                    wqi[8]*x0 + wqi[9]*x1 + wqi[10]*x2 + wqi[11]*x3,
+                    wqi[12]*x0 + wqi[13]*x1 + wqi[14]*x2 + wqi[15]*x3,
+                )
+                k_vecs[i] = (
+                    wki[0]*x0 + wki[1]*x1 + wki[2]*x2 + wki[3]*x3,
+                    wki[4]*x0 + wki[5]*x1 + wki[6]*x2 + wki[7]*x3,
+                    wki[8]*x0 + wki[9]*x1 + wki[10]*x2 + wki[11]*x3,
+                    wki[12]*x0 + wki[13]*x1 + wki[14]*x2 + wki[15]*x3,
+                )
+                v_vecs[i] = (
+                    wvi[0]*x0 + wvi[1]*x1 + wvi[2]*x2 + wvi[3]*x3,
+                    wvi[4]*x0 + wvi[5]*x1 + wvi[6]*x2 + wvi[7]*x3,
+                    wvi[8]*x0 + wvi[9]*x1 + wvi[10]*x2 + wvi[11]*x3,
+                    wvi[12]*x0 + wvi[13]*x1 + wvi[14]*x2 + wvi[15]*x3,
+                )
+
+            for i in range(n):
+                ti = types[i]
+                qi = q_vecs[i]
+                scores = [0.0] * n
+                max_s = -1e30
+                for j in range(n):
+                    tj = types[j]
+                    if ti == tj:
+                        scores[j] = -1e9
+                    else:
+                        kj = k_vecs[j]
+                        s = (qi[0]*kj[0] + qi[1]*kj[1] + qi[2]*kj[2] + qi[3]*kj[3]) * scale
+                        bias = prior[ti][tj]
+                        if prior_drift is not None:
+                            bias += prior_drift[ti][tj]
+                        scores[j] = s + bias
+                    if scores[j] > max_s:
+                        max_s = scores[j]
+
+                exp_sum = 0.0
+                for j in range(n):
+                    scores[j] = _exp(scores[j] - max_s)
+                    exp_sum += scores[j]
+                inv_sum = 1.0 / (exp_sum + 1e-12)
+
+                ho = head_outputs[i]
+                for j in range(n):
+                    w = scores[j] * inv_sum
+                    attn_weights[i][j] += w * inv_nh
+                    if w > 1e-9:
+                        vj = v_vecs[j]
+                        ho[h_off] += w * vj[0]
+                        ho[h_off + 1] += w * vj[1]
+                        ho[h_off + 2] += w * vj[2]
+                        ho[h_off + 3] += w * vj[3]
+
+        # Residual + RMSNorm
+        outputs: list[list[float]] = []
+        gamma = self._gamma
         for i in range(n):
-            ti = types[i]
-            qi = projected_q[i]
-            # Compute scores
-            max_s = -1e30
-            scores = [0.0] * n
+            ho = head_outputs[i]
+            out = [tokens[i][dd] + ho[dd] for dd in range(d)]
+            _rmsnorm_inplace(out, gamma, d)
+            outputs.append(out)
+
+        return outputs, attn_weights
+
+
+# === Stage 3: Situation-Expert MoE FFN (operates on pooled representation) ===
+
+class SituationExpert:
+    __slots__ = ("w1_flat", "w2_flat", "d_in", "d_hidden")
+
+    def __init__(self, d_in: int = 16, d_hidden: int = 24):
+        self.d_in = d_in
+        self.d_hidden = d_hidden
+        self.w1_flat: list[float] = []
+        self.w2_flat: list[float] = []
+
+    def derive(self, seed: bytes) -> None:
+        self.w1_flat = _make_flat(seed + b"W1", self.d_hidden, self.d_in)
+        self.w2_flat = _make_flat(seed + b"W2", self.d_in, self.d_hidden)
+
+    def forward(self, x: list[float]) -> list[float]:
+        d_h = self.d_hidden
+        d_in = self.d_in
+        w1 = self.w1_flat
+        w2 = self.w2_flat
+        # Inline matmul + SiLU + matmul
+        hidden = [0.0] * d_h
+        idx = 0
+        for r in range(d_h):
+            s = 0.0
+            for c in range(d_in):
+                s += w1[idx] * x[c]
+                idx += 1
+            if s < -80.0:
+                hidden[r] = 0.0
+            else:
+                hidden[r] = s / (1.0 + _exp(-s))
+        result = [0.0] * d_in
+        idx = 0
+        for r in range(d_in):
+            s = 0.0
+            for c in range(d_h):
+                s += w2[idx] * hidden[c]
+                idx += 1
+            result[r] = s
+        return result
+
+
+class MoELayer:
+    __slots__ = ("experts", "router_flat", "d_model", "n_experts", "gamma",
+                 "_expert_last_active", "_dormancy_threshold", "_tick")
+
+    def __init__(self, d_model: int = 16, n_experts: int = _N_EXPERTS):
+        self.d_model = d_model
+        self.n_experts = n_experts
+        self.experts: list[SituationExpert] = [
+            SituationExpert(d_model, 24) for _ in range(n_experts)
+        ]
+        self.router_flat: list[float] = []
+        self.gamma: list[float] = [1.0] * d_model
+        self._expert_last_active: list[int] = [0] * n_experts
+        self._dormancy_threshold: int = 50
+        self._tick: int = 0
+
+    def derive(self, base_seed: bytes) -> None:
+        for i, name in enumerate(_EXPERT_NAMES):
+            self.experts[i].derive(base_seed + name.encode())
+        self.router_flat = _make_flat(base_seed + b"ROUTER", self.n_experts, self.d_model)
+        g_floats = _deterministic_floats(base_seed + b"GAMMA3", self.d_model)
+        self.gamma = [0.8 + 0.4 * (f * 0.5 + 0.5) for f in g_floats]
+
+    def forward(
+        self, pooled: list[float], router_bias: list[float] | None = None,
+    ) -> tuple[list[float], list[int], list[float]]:
+        """MoE forward on pooled input with top-2 gating.
+        Returns (output_vec_16d, active_expert_indices, gate_values).
+        """
+        d = self.d_model
+        n_e = self.n_experts
+        self._tick += 1
+
+        logits = _matmul_vec_flat(self.router_flat, pooled, n_e, d)
+        if router_bias is not None:
+            for i in range(n_e):
+                logits[i] += router_bias[i]
+
+        # Load balancing: bonus for dormant experts
+        tick = self._tick
+        for i in range(n_e):
+            if tick - self._expert_last_active[i] > self._dormancy_threshold:
+                logits[i] += 0.15
+
+        gate_probs = _softmax(logits)
+
+        # Top-2 selection
+        top1 = 0
+        top2 = 1
+        if gate_probs[1] > gate_probs[0]:
+            top1, top2 = 1, 0
+        for i in range(2, n_e):
+            if gate_probs[i] > gate_probs[top1]:
+                top2 = top1
+                top1 = i
+            elif gate_probs[i] > gate_probs[top2]:
+                top2 = i
+
+        # Update last active for selected experts
+        self._expert_last_active[top1] = tick
+        self._expert_last_active[top2] = tick
+
+        g1 = gate_probs[top1]
+        g2 = gate_probs[top2]
+        norm = g1 + g2 + 1e-12
+        g1 /= norm
+        g2 /= norm
+
+        e1_out = self.experts[top1].forward(pooled)
+        e2_out = self.experts[top2].forward(pooled)
+
+        # Combine + residual + RMSNorm
+        result = [pooled[dd] + g1 * e1_out[dd] + g2 * e2_out[dd] for dd in range(d)]
+        _rmsnorm_inplace(result, self.gamma, d)
+
+        return result, [top1, top2], gate_probs
+
+
+# === Hebbian Adaptation ===
+
+class RouterAdaptation:
+    """BCM-inspired router bias adaptation."""
+
+    def __init__(self, n_experts: int = _N_EXPERTS):
+        self.n_experts = n_experts
+        self.bias: list[float] = [0.0] * n_experts
+        self.activity_ema: list[float] = [0.2] * n_experts
+        self.plasticity: float = 0.5
+
+    def adapt(self, outcome: str, active_experts: list[int], gate_values: list[float]) -> None:
+        eta = 0.008 * self.plasticity
+        for idx in active_experts:
+            y = gate_values[idx]
+            theta = self.activity_ema[idx]
+            if outcome == "accepted":
+                delta = eta * max(y, 0.05) * (y - theta)
+            elif outcome == "rejected":
+                delta = -eta * max(y, 0.05) * max(0.1, y)
+            else:
+                delta = -eta * 0.3 * max(y, 0.05)
+            self.bias[idx] = max(-1.0, min(1.0, self.bias[idx] + delta))
+            self.activity_ema[idx] = 0.99 * theta + 0.01 * (y * y)
+        for i in range(self.n_experts):
+            self.bias[i] *= 0.998
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "bias": list(self.bias),
+            "activity_ema": list(self.activity_ema),
+            "plasticity": self.plasticity,
+        }
+
+    def from_dict(self, data: dict[str, Any]) -> None:
+        self.bias = list(data.get("bias", [0.0] * self.n_experts))
+        self.activity_ema = list(data.get("activity_ema", [0.2] * self.n_experts))
+        self.plasticity = float(data.get("plasticity", 0.5))
+
+
+class AttentionPriorAdaptation:
+    """Oja-inspired attention prior adaptation."""
+
+    def __init__(self, n_types: int = _NUM_TYPES):
+        self.n_types = n_types
+        self.drift: list[list[float]] = [[0.0] * n_types for _ in range(n_types)]
+        self.plasticity: float = 0.5
+
+    def adapt(self, outcome: str, attention_weights: list[list[float]]) -> None:
+        eta = 0.005 * self.plasticity
+        n = self.n_types
+        drift = self.drift
+        for i in range(n):
             for j in range(n):
-                if ti == types[j]:
-                    scores[j] = -1e9
+                if i == j:
+                    continue
+                w = drift[i][j]
+                y = attention_weights[i][j]
+                if outcome == "accepted":
+                    x = 1.0 if y > 0.15 else 0.0
+                    delta = eta * y * (x - y * w)
+                elif outcome == "rejected":
+                    delta = -eta * y * 0.5
                 else:
-                    s = 0.0
-                    kj = vecs[j]
-                    for dd in range(d):
-                        s += qi[dd] * kj[dd]
-                    scores[j] = s * scale + prior[ti][types[j]]
-                if scores[j] > max_s:
-                    max_s = scores[j]
-
-            # Softmax + weighted value accumulation
-            exp_sum = 0.0
+                    delta = 0.0
+                drift[i][j] = max(-0.3, min(0.3, w + delta))
+        for i in range(n):
             for j in range(n):
-                scores[j] = math.exp(scores[j] - max_s)
-                exp_sum += scores[j]
-            inv_sum = 1.0 / (exp_sum + 1e-12)
+                drift[i][j] *= 0.999
 
-            for j in range(n):
-                w = scores[j] * inv_sum
-                if w > 1e-9:
-                    vj = vecs[j]
-                    for dd in range(d):
-                        aggregated[dd] += w * vj[dd]
+    def to_dict(self) -> dict[str, Any]:
+        return {"drift": [list(row) for row in self.drift], "plasticity": self.plasticity}
 
-        # Mean pool
-        inv_n = 1.0 / n
-        for dd in range(d):
-            aggregated[dd] *= inv_n
+    def from_dict(self, data: dict[str, Any]) -> None:
+        drift = data.get("drift")
+        if drift and len(drift) == self.n_types:
+            self.drift = [list(row) for row in drift]
+        self.plasticity = float(data.get("plasticity", 0.5))
 
-        # Output projection
-        return _matmul_vec_flat(self._output_proj_flat, aggregated, d, d)
 
+def _derive_plasticity(personality: dict[str, float]) -> float:
+    O = float(personality.get("openness", personality.get("boundary_permeability", 0.5)))
+    C = float(personality.get("conscientiousness", personality.get("inner_order", 0.5)))
+    base = 0.3 + O * 0.5 - C * 0.3
+    return max(0.05, min(0.85, base))
+
+
+# === Main Class ===
 
 class HeterogeneousGraphTransformer:
-    """Complete HGT module for Sylanne decision fusion.
-
-    Accepts typed tokens from the computation spine's various subsystems,
-    runs them through a single HGT layer, and produces a 4-dim decision vector:
-      d_0: expression drive correction
-      d_1: boundary sensitivity correction
-      d_2: urgency signal
-      d_3: inhibition signal (> 0.5 vetoes expression)
-
-    All parameters are deterministically derived from personality — no training.
-    """
+    """MoE-HGT: Complete decision fusion module for Sylanne."""
 
     TOKEN_TYPES = TOKEN_TYPES
 
-    __slots__ = ("d_model", "n_heads", "d_output", "_layer", "_decision_proj_flat", "_personality_cache")
+    __slots__ = (
+        "d_model", "n_heads", "d_output",
+        "_type_experts", "_attention", "_moe",
+        "_decision_flat", "_personality_cache",
+        "_router_adapt", "_attn_adapt",
+        "_last_attention_weights", "_last_active_experts", "_last_gate_values",
+    )
 
     def __init__(self, d_model: int = 16, n_heads: int = 4, d_output: int = 4):
         self.d_model = d_model
         self.n_heads = n_heads
         self.d_output = d_output
-        self._layer = HGTLayer(d_model=d_model, n_heads=n_heads)
-        self._decision_proj_flat: list[float] = []
+        self._type_experts: list[TypeExpertFFN] = [
+            TypeExpertFFN(d_model, 20) for _ in range(_NUM_TYPES)
+        ]
+        self._attention = MultiHeadCrossAttention(d_model, n_heads)
+        self._moe = MoELayer(d_model, _N_EXPERTS)
+        self._decision_flat: list[float] = []
         self._personality_cache: str = ""
+        self._router_adapt = RouterAdaptation(_N_EXPERTS)
+        self._attn_adapt = AttentionPriorAdaptation(_NUM_TYPES)
+        self._last_attention_weights: list[list[float]] = []
+        self._last_active_experts: list[int] = []
+        self._last_gate_values: list[float] = []
 
     def derive_params(self, personality: dict[str, float]) -> None:
-        """Derive all HGT parameters from personality (called once or on change)."""
-        # Cache check — avoid redundant re-derivation
         cache_key = str(sorted(personality.items()))
         if cache_key == self._personality_cache:
             return
         self._personality_cache = cache_key
 
-        self._layer.derive_params(personality)
-
-        # Decision projection: d_model → d_output (4), stored flat
         p_keys = sorted(personality.keys())
-        seed_str = "|".join(f"{k}:{float(personality[k]):.6f}" for k in p_keys
-                           if isinstance(personality[k], (int, float)))
+        seed_str = "|".join(
+            f"{k}:{float(personality[k]):.6f}" for k in p_keys
+            if isinstance(personality[k], (int, float))
+        )
         base_seed = hashlib.sha256(seed_str.encode()).digest()
-        dec_mat = _make_matrix(base_seed + b"DECISION", self.d_output, self.d_model, scale=0.5)
-        self._decision_proj_flat = [x for row in dec_mat for x in row]
 
-    def forward(self, tokens: list[tuple[str, list[float]]], personality: dict[str, float]) -> list[float]:
-        """Run HGT forward pass.
+        for t_idx, t_name in enumerate(TOKEN_TYPES):
+            self._type_experts[t_idx].derive(base_seed + t_name.encode() + b"TE")
 
-        Args:
-            tokens: list of (type_name, feature_vector) pairs
-            personality: personality dict (used for param derivation if needed)
+        self._attention.derive(base_seed, personality)
+        self._moe.derive(base_seed + b"MOE")
 
-        Returns:
-            4-dim decision vector [d_0, d_1, d_2, d_3]
-        """
-        # Ensure params are derived
-        self.derive_params(personality)
+        self._decision_flat = _make_flat(base_seed + b"DECISION", self.d_output, self.d_model, scale=0.5)
+
+        plasticity = _derive_plasticity(personality)
+        self._router_adapt.plasticity = plasticity
+        self._attn_adapt.plasticity = plasticity
+
+
+    def forward(
+        self, tokens: list[tuple[str, list[float]]], personality: dict[str, float] | None = None,
+    ) -> list[float]:
+        if personality is not None:
+            self.derive_params(personality)
 
         if not tokens:
             return [0.0] * self.d_output
 
-        # Run HGT layer
-        hidden = self._layer.forward(tokens)
+        d = self.d_model
+        n = len(tokens)
+        types: list[int] = []
+        vecs: list[list[float]] = []
+        for t_name, vec in tokens:
+            t_idx = _TYPE_INDEX.get(t_name, 0)
+            types.append(t_idx)
+            if len(vec) < d:
+                vecs.append(vec + [0.0] * (d - len(vec)))
+            else:
+                vecs.append(vec[:d])
 
-        # Project to decision space (flat matmul)
-        raw = _matmul_vec_flat(self._decision_proj_flat, hidden, self.d_output, self.d_model)
+        # Stage 1: Type-Expert FFN
+        te = self._type_experts
+        encoded: list[list[float]] = [te[types[i]].forward(vecs[i]) for i in range(n)]
 
-        # Apply tanh to bound outputs to [-1, 1]
-        decision = [math.tanh(v) for v in raw]
+        # Stage 2: Multi-Head Cross-Attention
+        attended, attn_weights = self._attention.forward(
+            encoded, types, prior_drift=self._attn_adapt.drift,
+        )
+        self._last_attention_weights = attn_weights
 
-        # d_3 (inhibition) is mapped to [0, 1] via sigmoid
+        # Mean-pool attended tokens for Stage 3
+        pooled = [0.0] * d
+        for tok in attended:
+            for dd in range(d):
+                pooled[dd] += tok[dd]
+        inv_n = 1.0 / n
+        for dd in range(d):
+            pooled[dd] *= inv_n
+
+        # Stage 3: Situation-Expert MoE (on pooled representation)
+        moe_out, active_experts, gate_values = self._moe.forward(
+            pooled, router_bias=self._router_adapt.bias,
+        )
+        self._last_active_experts = active_experts
+        self._last_gate_values = list(gate_values)
+
+        # Decision Head: project → activate
+        raw = _matmul_vec_flat(self._decision_flat, moe_out, self.d_output, d)
+        decision = [_tanh(v) for v in raw]
         if len(decision) >= 4:
             clamped = max(-500.0, min(500.0, raw[3] * 3.0))
-            decision[3] = 1.0 / (1.0 + math.exp(-clamped))
-
+            decision[3] = 1.0 / (1.0 + _exp(-clamped))
+        # Final clamp to [-1, 1]
+        decision = [max(-1.0, min(1.0, d)) for d in decision]
         return decision
+
+    def adapt(self, outcome: str, attention_snapshot: list[list[float]] | None = None) -> None:
+        if outcome not in ("accepted", "ignored", "rejected"):
+            return
+        if self._last_active_experts and self._last_gate_values:
+            self._router_adapt.adapt(outcome, self._last_active_experts, self._last_gate_values)
+        weights = attention_snapshot if attention_snapshot else self._last_attention_weights
+        if weights and len(weights) == _NUM_TYPES:
+            self._attn_adapt.adapt(outcome, weights)
+
+    def adaptation_state(self) -> dict[str, Any]:
+        return {
+            "router_bias": list(self._router_adapt.bias),
+            "router_activity_ema": list(self._router_adapt.activity_ema),
+            "attention_drift": [list(row) for row in self._attn_adapt.drift],
+            "plasticity": self._router_adapt.plasticity,
+            "last_active_experts": list(self._last_active_experts),
+            "last_gate_values": list(self._last_gate_values),
+        }
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "router_adapt": self._router_adapt.to_dict(),
+            "attn_adapt": self._attn_adapt.to_dict(),
+        }
+
+    def from_dict(self, data: dict[str, Any]) -> None:
+        if "router_adapt" in data:
+            self._router_adapt.from_dict(data["router_adapt"])
+        if "attn_adapt" in data:
+            self._attn_adapt.from_dict(data["attn_adapt"])
+
 
     def build_tokens_from_spine(
         self,
@@ -344,26 +659,19 @@ class HeterogeneousGraphTransformer:
         expression: Any,
         hdc_features: list[float],
     ) -> list[tuple[str, list[float]]]:
-        """Build typed token list from spine subsystem states.
-
-        Produces one token per type (7 tokens max) for efficient attention.
-        Scar dimensions are aggregated into a single scar token;
-        void states are aggregated into a single void token.
-        """
+        """Build typed token list from spine subsystem states."""
         tokens: list[tuple[str, list[float]]] = []
         d = self.d_model
 
-        # Scar token: aggregate all dimensions into one d_model vector
-        # Pack sensitivity and base values across dimensions
         scar_vec = [0.0] * d
         n_dims = min(scar_state.n_dims, d // 2)
         for dim_i in range(n_dims):
-            scar_vec[dim_i] = scar_state.modifier(dim_i)  # sensitivity
+            raw_mod = scar_state.modifier(dim_i)
+            scar_vec[dim_i] = min(1.0, math.log2(max(1.0, raw_mod)) / 2.5)
             if dim_i + n_dims < d:
                 scar_vec[dim_i + n_dims] = scar_state.base[dim_i] if dim_i < len(scar_state.base) else 0.0
         tokens.append(("scar", scar_vec))
 
-        # Void token: aggregate active voids into one vector
         void_vec = [0.0] * d
         voids = void_space.voids[:4]
         if voids:
@@ -376,35 +684,38 @@ class HeterogeneousGraphTransformer:
                 void_vec[(base + 3) % d] += v.beta / n_v
         tokens.append(("void", void_vec))
 
-        # Boundary token
         bnd_vec = [0.0] * d
         bnd_vec[0] = boundary.boundary_integrity
         bnd_vec[1] = boundary.internal_entropy
         bnd_vec[2] = boundary.repair_rate
         tokens.append(("boundary", bnd_vec))
 
-        # Personality token
         p_keys = ["extraversion", "neuroticism", "conscientiousness", "openness", "agreeableness"]
         p_vec = [0.0] * d
         for i, k in enumerate(p_keys):
             if i < d:
-                p_vec[i] = personality.get(k, 0.5)
+                # Accept both legacy and new names
+                alt_keys = {
+                    "extraversion": "expression_drive_trait",
+                    "neuroticism": "perception_acuity",
+                    "conscientiousness": "inner_order",
+                    "openness": "boundary_permeability",
+                    "agreeableness": "relational_gravity",
+                }
+                p_vec[i] = personality.get(k, personality.get(alt_keys.get(k, ""), 0.5))
         tokens.append(("personality", p_vec))
 
-        # Surprise token
         s_vec = [0.0] * d
         s_vec[0] = surprise
         s_vec[1] = surprise * surprise
         tokens.append(("surprise", s_vec))
 
-        # Expression token
         e_vec = [0.0] * d
         e_vec[0] = expression.pressure / max(0.01, expression.threshold)
         e_vec[1] = expression.threshold
         e_vec[2] = expression.expression_intensity()
         tokens.append(("expression", e_vec))
 
-        # Context token (from HDC features)
         c_vec = (hdc_features + [0.0] * d)[:d]
         tokens.append(("context", c_vec))
 

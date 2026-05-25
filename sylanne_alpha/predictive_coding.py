@@ -9,7 +9,8 @@ from typing import Any
 
 
 class PredictiveCodingGate:
-    __slots__ = ("dim", "_byte_dim", "_prediction", "precision", "decay", "_surprise_history")
+    __slots__ = ("dim", "_byte_dim", "_prediction", "precision", "decay", "_surprise_history",
+                 "_fast_threshold", "_full_threshold")
 
     def __init__(self, dim: int = 1024, decay: float = 0.92):
         self.dim = dim
@@ -18,6 +19,8 @@ class PredictiveCodingGate:
         self.precision = 0.5
         self.decay = decay
         self._surprise_history: list[float] = []
+        self._fast_threshold = 0.15
+        self._full_threshold = 0.45
 
     def surprise(self, input_vec: bytearray | list[int]) -> float:
         """Compute surprise as Hamming distance between prediction and input."""
@@ -84,9 +87,9 @@ class PredictiveCodingGate:
         uncalibrated so surprise values are unreliable. Cap routing at
         "normal" to avoid wasting full-path computation on noise.
         """
-        if surprise_value < 0.15:
+        if surprise_value < self._fast_threshold:
             return "fast"    # SSM only, skip heavy computation
-        if surprise_value < 0.45:
+        if surprise_value < self._full_threshold:
             return "normal"  # SSM + tiny attention
         # Cold start guard: prediction model needs ~15 samples to calibrate
         if len(self._surprise_history) < 15:
@@ -99,10 +102,15 @@ class PredictiveCodingGate:
             return 0.5
         return sum(self._surprise_history) / len(self._surprise_history)
 
+    def set_route_thresholds(self, fast_threshold: float, full_threshold: float):
+        self._fast_threshold = fast_threshold
+        self._full_threshold = full_threshold
+
     def to_dict(self) -> dict[str, Any]:
         """Serialize for persistence."""
         import base64
         return {
+            "decay": self.decay,
             "precision": self.precision,
             "prediction": base64.b64encode(bytes(self._prediction)).decode("ascii"),
             "surprise_history": list(self._surprise_history),
@@ -113,6 +121,7 @@ class PredictiveCodingGate:
     def from_dict(self, data: dict[str, Any]):
         """Restore from persisted state."""
         import base64
+        self.decay = float(data.get("decay", self.decay))
         self.precision = float(data.get("precision", 0.5))
         # Support new format (full prediction vector)
         if "prediction" in data:

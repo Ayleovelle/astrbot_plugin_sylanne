@@ -81,6 +81,14 @@ class ScarredState:
         "base", "scars", "n_dims", "wound_threshold", "_tick",
         "_t_raw", "_t_closing", "_t_scarred",
         "_mlp_w1", "_mlp_w2", "_mlp_hidden_dim",
+        "_neuroticism",
+        # Session scar cap (sovereignty immune system)
+        "_session_scar_count", "_session_scar_cap",
+        # Circuit breaker (protective dissociation)
+        "_circuit_breaker_active", "_circuit_breaker_remaining",
+        "_recent_scar_ticks",
+        # Time-aware healing
+        "_last_step_time",
     )
 
     def __init__(self, n_dims: int = 8, wound_threshold: float = 0.6):
@@ -89,6 +97,7 @@ class ScarredState:
         self.base = [0.0] * n_dims
         self.scars: list[Scar] = []
         self._tick = 0
+        self._neuroticism: float = 0.5
         # Configurable healing rates (defaults match original _STAGE_DURATION)
         self._t_raw: int = 10
         self._t_closing: int = 40
@@ -97,18 +106,29 @@ class ScarredState:
         self._mlp_hidden_dim: int = 12
         self._mlp_w1: list[list[float]] | None = None
         self._mlp_w2: list[list[float]] | None = None
+        # Session scar cap (sovereignty immune system)
+        self._session_scar_count: int = 0
+        self._session_scar_cap: int = 3
+        # Circuit breaker (protective dissociation)
+        self._circuit_breaker_active: bool = False
+        self._circuit_breaker_remaining: int = 0
+        self._recent_scar_ticks: list[int] = []
+        # Time-aware healing
+        self._last_step_time: float = 0.0
 
-    def set_healing_rates(self, t_raw: int, t_closing: int, t_scarred: int) -> None:
+    def set_healing_rates(self, t_raw: int, t_closing: int, t_scarred: int, neuroticism: float = 0.5) -> None:
         """Set configurable healing durations for each stage.
 
         Args:
             t_raw: Ticks to stay in RAW stage before advancing to CLOSING.
             t_closing: Ticks to stay in CLOSING stage before advancing to SCARRED.
             t_scarred: Ticks to stay in SCARRED stage before advancing to FADED.
+            neuroticism: Personality neuroticism value for modifier cap.
         """
         self._t_raw = max(1, int(t_raw))
         self._t_closing = max(1, int(t_closing))
         self._t_scarred = max(1, int(t_scarred))
+        self._neuroticism = float(neuroticism)
 
     def healing_duration(self, stage: "HealingStage", dim: int | None = None) -> int:
         """Get healing duration for a stage, optionally adjusted per-dimension.
@@ -220,12 +240,19 @@ class ScarredState:
         return output
 
     def modifier(self, dim: int) -> float:
-        """Compute the cumulative scar modifier for a dimension."""
+        """Compute the cumulative scar modifier for a dimension.
+
+        Uses logarithmic compression with personality-driven cap to prevent
+        unbounded exponential growth from product of scar alphas.
+        """
         product = 1.0
         for scar in self.scars:
             if scar.dimension == dim:
                 product *= scar.alpha
-        return product
+        if product <= 1.0:
+            return product
+        max_mod = 2.0 + self._neuroticism * 3.0
+        return 1.0 + (max_mod - 1.0) * (1.0 - 1.0 / product)
 
     def modulate(self, event: list[float]) -> list[float]:
         """Apply scar modulation to an input event (Step 1 of ⊳)."""
@@ -235,12 +262,22 @@ class ScarredState:
             result.append(e_d * self.modifier(d))
         return result
 
-    def step(self, event: list[float], timestamp: float = 0.0) -> dict[str, Any]:
+    def step(self, event: list[float], timestamp: float = 0.0, *, heal: bool = True) -> dict[str, Any]:
         """Apply the ⊳ operator: full state transition.
 
         Returns a diagnostic dict describing what happened.
         """
-        self._tick += 1
+        if heal:
+            self._tick += 1
+
+        # --- Circuit breaker: protective dissociation ---
+        if self._circuit_breaker_active:
+            self._circuit_breaker_remaining -= 1
+            if self._circuit_breaker_remaining <= 0:
+                self._circuit_breaker_active = False
+            effective_threshold = 0.95
+        else:
+            effective_threshold = self.wound_threshold
 
         # Step 1: Scar-modulated input
         modulated = self.modulate(event)
@@ -248,17 +285,67 @@ class ScarredState:
         # Step 2: Base state evolution (2-layer MLP with spectral normalization)
         self.base = self._evolve_base(self.base, modulated)
 
-        # Step 3: Scar formation (conditional)
+        # Step 3: Scar formation (conditional, with session cap)
+        existing_count = len(self.scars)
         new_scars = []
         for d in range(self.n_dims):
-            if abs(modulated[d]) > self.wound_threshold:
+            if abs(modulated[d]) > effective_threshold:
+                # Session scar cap check
+                if self._session_scar_count >= self._session_scar_cap:
+                    # Skip scar creation when cap reached
+                    continue
                 scar = Scar(dimension=d, timestamp=timestamp)
                 self.scars.append(scar)
                 new_scars.append(d)
+                self._session_scar_count += 1
+
+        # Circuit breaker trigger: check for rapid scar formation
+        if new_scars:
+            self._recent_scar_ticks.append(self._tick)
+            self._recent_scar_ticks = [t for t in self._recent_scar_ticks if self._tick - t <= 10]
+            if len(self._recent_scar_ticks) >= 5 and not self._circuit_breaker_active:
+                self._circuit_breaker_active = True
+                self._circuit_breaker_remaining = 30
 
         # Step 4: Healing (using configurable per-dimension rates)
+        # Only heal pre-existing scars; newly formed scars skip their birth tick.
         healed = []
-        for scar in self.scars:
+        if heal:
+            # Time-aware healing: grant bonus ticks for real-time silence
+            if timestamp > 0 and self._last_step_time > 0:
+                elapsed_minutes = (timestamp - self._last_step_time) / 60.0
+                bonus_ticks = int(elapsed_minutes / 5.0)  # 1 bonus tick per 5 min silence
+                bonus_ticks = min(bonus_ticks, 10)  # cap at 10 bonus ticks
+                for _ in range(bonus_ticks):
+                    self._heal_one_tick(existing_count, healed)
+            self._last_step_time = timestamp
+
+            for scar in self.scars[:existing_count]:
+                if scar.stage == HealingStage.FADED:
+                    continue
+                scar.ticks_in_stage += 1
+                threshold = self.healing_duration(scar.stage, dim=scar.dimension)
+                if threshold > 0 and scar.ticks_in_stage >= threshold:
+                    scar.stage = HealingStage(scar.stage + 1)
+                    scar.ticks_in_stage = 0
+                    healed.append(scar.dimension)
+
+            # Prune excess FADED scars to prevent unbounded growth
+            faded = [s for s in self.scars if s.stage == HealingStage.FADED]
+            if len(faded) > 50:
+                self.scars = [s for s in self.scars if s.stage != HealingStage.FADED] + faded[-50:]
+
+        return {
+            "modulated": modulated,
+            "new_scars": new_scars,
+            "healed_dimensions": healed,
+            "total_scars": len(self.scars),
+            "base": list(self.base),
+        }
+
+    def _heal_one_tick(self, existing_count: int, healed: list[int]) -> None:
+        """Perform one healing tick on pre-existing scars (for bonus time-aware healing)."""
+        for scar in self.scars[:existing_count]:
             if scar.stage == HealingStage.FADED:
                 continue
             scar.ticks_in_stage += 1
@@ -268,13 +355,16 @@ class ScarredState:
                 scar.ticks_in_stage = 0
                 healed.append(scar.dimension)
 
-        return {
-            "modulated": modulated,
-            "new_scars": new_scars,
-            "healed_dimensions": healed,
-            "total_scars": len(self.scars),
-            "base": list(self.base),
-        }
+    def reset_session(self) -> None:
+        """Reset session scar counter (call at session boundaries)."""
+        self._session_scar_count = 0
+
+    def set_session_cap(self, sovereignty: float) -> None:
+        """Set session scar cap based on sovereignty level.
+
+        High sovereignty = lower cap (more protected): range 2-8.
+        """
+        self._session_scar_cap = max(2, int(3 + (1 - sovereignty) * 5))
 
     def observe(self) -> dict[str, float]:
         """Observable output: base state + per-dimension sensitivity."""
@@ -308,6 +398,14 @@ class ScarredState:
             "t_raw": self._t_raw,
             "t_closing": self._t_closing,
             "t_scarred": self._t_scarred,
+            # Session scar cap
+            "session_scar_count": self._session_scar_count,
+            "session_scar_cap": self._session_scar_cap,
+            # Circuit breaker
+            "circuit_breaker_active": self._circuit_breaker_active,
+            "circuit_breaker_remaining": self._circuit_breaker_remaining,
+            # Time-aware healing
+            "last_step_time": self._last_step_time,
         }
 
     @classmethod
@@ -319,4 +417,12 @@ class ScarredState:
         state._t_raw = data.get("t_raw", 10)
         state._t_closing = data.get("t_closing", 40)
         state._t_scarred = data.get("t_scarred", 150)
+        # Session scar cap
+        state._session_scar_count = data.get("session_scar_count", 0)
+        state._session_scar_cap = data.get("session_scar_cap", 3)
+        # Circuit breaker
+        state._circuit_breaker_active = data.get("circuit_breaker_active", False)
+        state._circuit_breaker_remaining = data.get("circuit_breaker_remaining", 0)
+        # Time-aware healing
+        state._last_step_time = data.get("last_step_time", 0.0)
         return state

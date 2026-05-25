@@ -21,3 +21,6 @@ texput.log
 *.log
 *.out
 *.synctex.gz
+Sylanne-embodiment.zip
+dist/
+__pycache__/

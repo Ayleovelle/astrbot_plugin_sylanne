@@ -1,0 +1,17 @@
+{
+  "name": "computer-science_full",
+  "subject": "计算机科学",
+  "subject_en": "Computer Science",
+  "subject_group": "AI/计算机",
+  "records": 20000,
+  "target": 20000,
+  "source": "https://api.openalex.org/works",
+  "filter": "primary_topic.field.id:17,type:article,primary_location.source.type:journal,is_retracted:false,has_doi:true",
+  "sort": "cited_by_count:desc",
+  "per_page": 100,
+  "api_reported_count": 4555430,
+  "retrieved_at": "2026-05-10T16:05:46.940891+00:00",
+  "output": "G:\\pet\\astrbot_migration\\mega-paper-kb\\raw\\computer-science\\computer-science_full.jsonl.gz",
+  "license_note": "OpenAlex metadata only; no copyrighted full-text PDFs are stored.",
+  "note": "OpenAlex Computer Science field."
+}

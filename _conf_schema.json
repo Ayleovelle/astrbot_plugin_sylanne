@@ -1,12 +1,48 @@
 {
+  "sylanne_persona_name": {
+    "description": "人格名称（显示在 WebUI 和日志中）",
+    "type": "string",
+    "default": "Sylanne",
+    "hint": "填写当前会话中使用的人格/角色名字。"
+  },
+  "sylanne_persona_version": {
+    "description": "人格版本标识",
+    "type": "string",
+    "default": "",
+    "hint": "版本号，仅用于显示。"
+  },
+  "sylanne_webui_enabled": {
+    "description": "启用 WebUI 管理面板",
+    "type": "bool",
+    "default": false,
+    "hint": "启用后可通过浏览器访问记忆管理面板。"
+  },
+  "sylanne_group_attention_trigger_names": {
+    "description": "群聊触发名字（逗号分隔）",
+    "type": "string",
+    "default": "",
+    "hint": "除人格名字外，额外的触发关键词。如：小希,希希,Sylanne"
+  },
+  "sylanne_webui_host": {
+    "description": "WebUI 监听地址",
+    "type": "string",
+    "default": "0.0.0.0",
+    "hint": "127.0.0.1 仅本机访问；0.0.0.0 允许局域网访问。"
+  },
+  "sylanne_webui_port": {
+    "description": "WebUI 监听端口",
+    "type": "int",
+    "default": 2718,
+    "hint": "WebUI 服务端口，确保不与 AstrBot 主端口冲突。"
+  },
   "sylanne_alpha_root": {
-    "description": "Sylanne 4.0 alpha body 状态目录",
+    "description": "Sylanne alpha body 状态目录",
     "type": "string",
     "default": ".sylanne_alpha_state",
-    "hint": "每个会话会保存为独立的 .alpha.json；覆盖安装前请备份旧 Sylanne 数据，再通过 4.0 导入入口迁入。"
+    "hint": "每个会话会保存为独立的 .alpha.json；覆盖安装前请备份旧 Sylanne 数据，再通过导入入口迁入。"
   },
   "sylanne_alpha_realtime_chat_enabled": {
-    "description": "启用 Sylanne 4.0 即时聊天调度",
+    "description": "启用 Sylanne 即时聊天调度",
     "type": "bool",
     "default": false,
     "hint": "默认关闭；开启后仍受用户主权、风险、冷却和预算边界限制。"
@@ -21,10 +57,10 @@
     "description": "允许即时聊天接管 LLM 响应分段",
     "type": "bool",
     "default": false,
-    "hint": "默认关闭；用于 4.0 对话分段和打断识别，不恢复旧 realtime engine。"
+    "hint": "默认关闭；用于对话分段和打断识别，不恢复旧 realtime engine。"
   },
   "sylanne_alpha_proactive_dispatch_enabled": {
-    "description": "启用 Sylanne 4.0 主动发起派发",
+    "description": "启用 Sylanne 主动发起派发",
     "type": "bool",
     "default": false,
     "hint": "默认关闭；开启后 guard 不允许时仍不会派发。"

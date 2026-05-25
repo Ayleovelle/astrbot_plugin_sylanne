@@ -1,0 +1,9 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(python -c \"from sylanne_alpha.social_field import SocialFieldCollector, SocialSignals; print\\('social_field OK'\\)\")",
+      "Bash(python -c \"from sylanne_alpha.computation_spine import ComputationSpine; print\\('computation_spine OK'\\)\")",
+      "Bash(python -c \"from sylanne_alpha.phase_transition import PhaseTransitionExpression; print\\('phase_transition OK'\\)\")"
+    ]
+  }
+}

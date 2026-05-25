@@ -165,7 +165,8 @@ class AsyncAssessor:
         preview = text[:120]
         return (
             f'{ctx}"{preview}"\n'
-            '{"v":?,"a":?,"i":"?","w":?,"subtext":"?","avoidance":"?"}'
+            '{"v":?,"a":?,"i":"?","w":?,"m":?,"subtext":"?","avoidance":"?"}\n'
+            'm=1 if contains facts/preferences/events/boundaries worth remembering long-term, else 0'
         )
 
     # ------------------------------------------------------------------
@@ -206,6 +207,12 @@ class AsyncAssessor:
         avoidance = data.get("avoidance")
         if avoidance is not None:
             result["avoidance"] = str(avoidance)[:60]
+        memorable = data.get("m") if "m" in data else data.get("memorable")
+        if memorable is not None:
+            try:
+                result["memorable"] = bool(int(memorable))
+            except (ValueError, TypeError):
+                result["memorable"] = str(memorable).lower() in ("1", "true", "yes")
         return result
 
 

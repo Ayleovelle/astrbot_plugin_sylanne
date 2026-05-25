@@ -47,6 +47,7 @@ def command_surface(host: Any, slice_name: str) -> dict[str, Any]:
 
 def reset_surface(host: Any, slice_name: str) -> dict[str, Any]:
     host.kernel.body = type(host.kernel.body)()
+    host.kernel.computation.from_dict({})
     host.kernel.last_decision = host.kernel._decide()
     host.kernel.last_guard = host.kernel._guard(host.kernel.last_decision)
     host.runtime.save(host.kernel)

@@ -129,11 +129,16 @@ class RhythmProfile:
 class RhythmLearner:
     """Per-session rhythm learner with intimacy gating."""
 
-    __slots__ = ("_profiles", "_intimacy_threshold")
+    __slots__ = ("_profiles", "_intimacy_threshold", "_default_blend")
 
     def __init__(self, intimacy_threshold: float = 0.6):
         self._profiles: dict[str, RhythmProfile] = {}
         self._intimacy_threshold = intimacy_threshold
+        self._default_blend = 0.6
+
+    def set_personality_params(self, intimacy_threshold: float, blend_rate: float):
+        self._intimacy_threshold = intimacy_threshold
+        self._default_blend = blend_rate
 
     def is_intimate(self, engine_observation: dict[str, float]) -> bool:
         """Determine if current relationship state qualifies as high-intimacy."""
@@ -149,6 +154,9 @@ class RhythmLearner:
         if not self.is_intimate(engine_observation):
             return
         if session_key not in self._profiles:
+            if len(self._profiles) >= 200:
+                oldest_key = next(iter(self._profiles))
+                del self._profiles[oldest_key]
             self._profiles[session_key] = RhythmProfile()
         self._profiles[session_key].observe(text, timestamp)
 
@@ -193,11 +201,19 @@ class RhythmLearner:
         return self._profiles.get(session_key)
 
     def to_dict(self) -> dict[str, Any]:
-        return {k: v.to_dict() for k, v in self._profiles.items()}
+        return {
+            "intimacy_threshold": self._intimacy_threshold,
+            "profiles": {k: v.to_dict() for k, v in self._profiles.items()},
+        }
 
     @classmethod
     def from_dict(cls, data: dict[str, Any], intimacy_threshold: float = 0.6) -> "RhythmLearner":
-        learner = cls(intimacy_threshold=intimacy_threshold)
-        for k, v in data.items():
-            learner._profiles[k] = RhythmProfile.from_dict(v)
+        threshold = float(data.get("intimacy_threshold", intimacy_threshold))
+        learner = cls(intimacy_threshold=threshold)
+        profiles = data.get("profiles", data)
+        for k, v in profiles.items():
+            if k == "intimacy_threshold":
+                continue
+            if isinstance(v, dict):
+                learner._profiles[k] = RhythmProfile.from_dict(v)
         return learner

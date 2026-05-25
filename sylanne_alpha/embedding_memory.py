@@ -1,3 +1,4 @@
+# Legacy: being replaced by memory_system.py. Kept for backward-compatible public API methods.
 from __future__ import annotations
 
 import math

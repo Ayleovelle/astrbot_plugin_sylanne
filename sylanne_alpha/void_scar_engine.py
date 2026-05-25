@@ -7,10 +7,51 @@ Integrates Scar Algebra (irreversible state dynamics) with Void Calculus
 """
 from __future__ import annotations
 
+import math
 from typing import Any, Callable
 
 from .scar_algebra import ScarredState
 from .void_calculus import VoidSpace
+
+
+class SocialVoid:
+    """Group chat silence void — pressure accumulates when agent is silent in active group."""
+    __slots__ = ("pressure", "silence_ticks", "group_activity", "topic_boundary")
+
+    def __init__(self):
+        self.pressure = 0.0
+        self.silence_ticks = 0
+        self.group_activity = 0.0
+        self.topic_boundary = 0.5
+
+    def tick(self, group_active: bool = True):
+        if not group_active:
+            self.pressure *= 0.95
+            return
+        self.silence_ticks += 1
+        depth = self.group_activity
+        beta = self.topic_boundary
+        if depth > 0 and self.silence_ticks > 0:
+            self.pressure += depth * math.log(self.silence_ticks + 1) * (1.0 - beta) * 0.1
+        self.pressure = min(5.0, self.pressure)
+
+    def reset(self):
+        self.silence_ticks = 0
+        self.pressure *= 0.3
+
+    def to_dict(self) -> dict:
+        return {
+            "pressure": self.pressure,
+            "silence_ticks": self.silence_ticks,
+            "group_activity": self.group_activity,
+            "topic_boundary": self.topic_boundary,
+        }
+
+    def from_dict(self, data: dict):
+        self.pressure = float(data.get("pressure", 0.0))
+        self.silence_ticks = int(data.get("silence_ticks", 0))
+        self.group_activity = float(data.get("group_activity", 0.0))
+        self.topic_boundary = float(data.get("topic_boundary", 0.5))
 
 
 class VoidScarEngine:
@@ -20,9 +61,12 @@ class VoidScarEngine:
     """
 
     __slots__ = (
-        "scar_state", "void_space", "similarity_fn",
+        "scar_state", "void_space", "social_void", "similarity_fn",
         "_coherence", "_last_event_vec", "_tick",
         "_void_pressure_coupling_rate",
+        "_void_drive_weight", "_social_drive_weight",
+        "_accepted_decay", "_ignored_deepening",
+        "_personality_detection_floor",
     )
 
     def __init__(
@@ -40,10 +84,16 @@ class VoidScarEngine:
             max_voids=max_voids,
             pressure_threshold=pressure_threshold,
         )
+        self.social_void = SocialVoid()
         self._coherence = 1.0
         self._last_event_vec: bytes | None = None
         self._tick = 0
         self._void_pressure_coupling_rate = 0.3
+        self._void_drive_weight = 0.5
+        self._social_drive_weight = 0.3
+        self._accepted_decay = 0.7
+        self._ignored_deepening = 0.05
+        self._personality_detection_floor: float = 0.1
 
     def process(
         self,
@@ -72,15 +122,17 @@ class VoidScarEngine:
         self._last_event_vec = event_vec
 
         # --- Coupling Φ: Scars → Void sensitivity ---
-        # Numbed dimensions lower void detection threshold
+        # Numbed dimensions lower void detection threshold, but respect personality floor
         numbed_count = sum(
             1 for d in range(self.scar_state.n_dims)
             if self.scar_state.is_numbed(d)
         )
         if numbed_count > 0:
-            self.void_space._detection_threshold = max(
-                0.1, 0.4 - numbed_count * 0.05
-            )
+            # Phi coupling: numbed dims lower detection threshold, but respect floor
+            personality_base = self.void_space._detection_threshold
+            phi_floor = self._personality_detection_floor
+            phi_adjusted = max(phi_floor, personality_base - numbed_count * 0.03)
+            self.void_space._detection_threshold = phi_adjusted
 
         # --- Void Calculus step ---
         void_result = self.void_space.process(event_vec, surprise, prev_sim)
@@ -91,7 +143,7 @@ class VoidScarEngine:
             wound_event = [0.0] * self.scar_state.n_dims
             dim_hint = int(coupling.get("dim_hint", 0)) % self.scar_state.n_dims
             wound_event[dim_hint] = coupling["pressure"] * self._void_pressure_coupling_rate
-            wound_result = self.scar_state.step(wound_event, timestamp)
+            wound_result = self.scar_state.step(wound_event, timestamp, heal=False)
             coupling_wounds.append(wound_result)
 
         # --- Scar Algebra step (main event) ---
@@ -108,9 +160,29 @@ class VoidScarEngine:
             "observation": self.observe(),
         }
 
+    # Canonical dimension names for the 8-dim emotion space
+    _DIM_NAMES: tuple[str, ...] = (
+        "warmth", "arousal", "valence", "tension",
+        "curiosity", "repair_pressure", "expression_drive", "boundary_firmness",
+    )
+
     def observe(self) -> dict[str, float]:
-        """Observable output for downstream layers."""
-        obs = self.scar_state.observe()
+        """Observable output for downstream layers.
+
+        Returns named emotion dimensions (warmth, arousal, valence, tension,
+        curiosity, repair_pressure, expression_drive, boundary_firmness) plus
+        coherence, void_pressure, active_voids, ghost_count.
+        """
+        raw = self.scar_state.observe()
+        obs: dict[str, float] = {}
+        # Map dim_N → named dimensions
+        for i, name in enumerate(self._DIM_NAMES):
+            obs[name] = raw.get(f"dim_{i}", 0.0)
+        # Keep sensitivity values under named keys
+        for i, name in enumerate(self._DIM_NAMES):
+            obs[f"sensitivity_{name}"] = raw.get(f"sensitivity_{i}", 1.0)
+        obs["total_scars"] = raw.get("total_scars", 0.0)
+        obs["numbed_dimensions"] = raw.get("numbed_dimensions", 0.0)
         obs["coherence"] = self._coherence
         obs["void_pressure"] = self.void_space.total_pressure()
         obs["active_voids"] = float(len(self.void_space.voids))
@@ -121,7 +193,8 @@ class VoidScarEngine:
         """Combined drive for the phase transition expression layer."""
         scar_drive = abs(self.scar_state.base[6]) if len(self.scar_state.base) > 6 else 0.0
         void_drive = min(1.0, self.void_space.total_pressure() / 50.0)
-        return min(1.0, scar_drive + void_drive * 0.5)
+        social_drive = min(1.0, self.social_void.pressure / 3.0)
+        return min(1.0, scar_drive + void_drive * self._void_drive_weight + social_drive * self._social_drive_weight)
 
     def _compute_coherence(self) -> float:
         """Global coherence: alignment between what hurts and what's avoided.
@@ -151,11 +224,11 @@ class VoidScarEngine:
         """
         if outcome == "accepted":
             for v in self.void_space.voids:
-                v.pressure *= 0.7
+                v.pressure *= self._accepted_decay
             feedback_vec = [0.3, 0.0, 0.2, -0.2, 0.1, -0.3, 0.0, 0.0]
         elif outcome == "ignored":
             for v in self.void_space.voids:
-                v.depth += 0.05
+                v.depth = min(5.0, v.depth + self._ignored_deepening)
             feedback_vec = [0.0, -0.1, -0.1, 0.2, -0.1, 0.0, -0.3, 0.0]
         elif outcome == "rejected":
             feedback_vec = [-0.3, 0.1, -0.3, 0.3, -0.1, 0.4, -0.2, 0.3]
@@ -169,6 +242,7 @@ class VoidScarEngine:
         return {
             "scar": self.scar_state.to_dict(),
             "void": self.void_space.to_dict(),
+            "social_void": self.social_void.to_dict(),
             "coherence": self._coherence,
             "tick": self._tick,
         }
@@ -181,6 +255,16 @@ class VoidScarEngine:
             "expression_drive": self.expression_drive(),
             "tick": self._tick,
         }
+
+    def set_personality_params(self, coupling_rate: float, pressure_threshold: float,
+                               void_drive_weight: float, social_drive_weight: float,
+                               accepted_decay: float, ignored_deepening: float):
+        self._void_pressure_coupling_rate = coupling_rate
+        self.void_space._pressure_threshold = pressure_threshold
+        self._void_drive_weight = void_drive_weight
+        self._social_drive_weight = social_drive_weight
+        self._accepted_decay = accepted_decay
+        self._ignored_deepening = ignored_deepening
 
 
 def _default_similarity(a: bytes, b: bytes) -> float:

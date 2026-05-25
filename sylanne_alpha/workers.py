@@ -16,15 +16,17 @@ class BackgroundQueue:
         self.path = self.root / f"{self.session_key}.workers.json"
         self._pending: list[dict[str, Any]] = []
         self._inflight: list[dict[str, Any]] = []
+        self._next_job_id: int = 1
         self._load()
 
     def enqueue(self, kind: str, payload: dict[str, Any] | None = None) -> dict[str, Any]:
         job = {
-            "id": f"job-{len(self._pending) + len(self._inflight) + 1}",
+            "id": f"job-{self._next_job_id}",
             "kind": str(kind),
             "payload": _strip_sensitive_fields(payload or {}),
             "attempts": 0,
         }
+        self._next_job_id += 1
         self._pending.append(job)
         return job
 
@@ -36,6 +38,14 @@ class BackgroundQueue:
             job["attempts"] = int(job.get("attempts") or 0) + 1
             self._inflight.append(job)
         return list(leased)
+
+    def complete(self, job_id: str) -> bool:
+        """Remove a completed job from _inflight. Returns True if found and removed."""
+        for i, job in enumerate(self._inflight):
+            if job.get("id") == job_id:
+                self._inflight.pop(i)
+                return True
+        return False
 
     def checkpoint(self) -> None:
         self.path.write_text(json.dumps(self.snapshot(), ensure_ascii=False, indent=2, sort_keys=True), encoding="utf-8")
@@ -63,6 +73,14 @@ class BackgroundQueue:
         jobs = list(data.get("jobs") or [])
         self._pending = jobs
         self._inflight = []
+        for job in jobs:
+            job_id = str(job.get("id", ""))
+            if job_id.startswith("job-"):
+                try:
+                    num = int(job_id[4:])
+                    self._next_job_id = max(self._next_job_id, num + 1)
+                except ValueError:
+                    pass
 
 
 def _strip_sensitive_fields(payload: dict[str, Any]) -> dict[str, Any]:

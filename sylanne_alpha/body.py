@@ -141,15 +141,19 @@ class AlphaBodyState:
         if isinstance(data.get("needs"), dict):
             body.needs.update({str(key): _clamp(float(value)) for key, value in data["needs"].items()})
         if isinstance(data.get("memory"), dict):
-            traces = data["memory"].get("traces", [])
-            relationship = data["memory"].get("relationship") if isinstance(data["memory"].get("relationship"), dict) else {}
-            shadow = data["memory"].get("shadow") if isinstance(data["memory"].get("shadow"), dict) else {}
+            memory_data = data["memory"]
+            traces = memory_data.get("traces", [])
+            relationship = memory_data.get("relationship") if isinstance(memory_data.get("relationship"), dict) else {}
+            shadow = memory_data.get("shadow") if isinstance(memory_data.get("shadow"), dict) else {}
             events = shadow.get("events", []) if isinstance(shadow.get("events"), list) else []
             body.memory = {
                 "traces": [dict(item) for item in traces if isinstance(item, dict)][-50:],
                 "relationship": dict(relationship),
                 "shadow": {"events": [dict(item) for item in events if isinstance(item, dict)][-24:]},
             }
+            memory_system = memory_data.get("_memory_system")
+            if isinstance(memory_system, dict):
+                body.memory["_memory_system"] = dict(memory_system)
         return body
 
     def state_vector(self) -> dict[str, float]:
@@ -234,9 +238,12 @@ class AlphaBodyState:
         self.wound.scar = _clamp(self.wound.scar + delta.get("wound.scar", 0.0))
         self.wound.sensitivity = _clamp(self.wound.sensitivity + delta.get("wound.sensitivity", 0.0))
         self.immunity.boundary_pressure = _clamp(self.immunity.boundary_pressure + delta.get("immunity.boundary_pressure", 0.0))
+        self.immunity.sovereignty = _clamp(self.immunity.sovereignty + delta.get("immunity.sovereignty", 0.0))
         self.immunity.cooldown = _clamp(self.immunity.cooldown + delta.get("immunity.cooldown", 0.0))
         self.immunity.interruption_budget = _clamp(self.immunity.interruption_budget + delta.get("immunity.interruption_budget", 0.0))
         self.mortality.load = _clamp(self.mortality.load + delta.get("mortality.load", 0.0))
+        self.mortality.exhaustion = _clamp(self.mortality.exhaustion + delta.get("mortality.exhaustion", 0.0))
+        self.mortality.recovery_debt = _clamp(self.mortality.recovery_debt + delta.get("mortality.recovery_debt", 0.0))
     def simulate_vectors(self, events: list[dict[str, float]]) -> dict[str, float]:
         clone = AlphaBodyState.from_dict(self.to_dict())
         now = clone.pulse.last_tick
@@ -257,11 +264,13 @@ class AlphaBodyState:
         scored.sort(key=lambda item: item[0], reverse=True)
         return [dict(trace) for _, trace in scored[: max(0, limit)]]
 
+    # Legacy: superseded by MemorySystem
     def decay_memory(self, factor: float = 0.95) -> None:
         factor = _clamp(factor)
         for trace in self.memory.get("traces", []):
             trace["weight"] = round(_clamp(float(trace.get("weight") or 0.0) * factor), 6)
 
+    # Legacy: superseded by MemorySystem
     def compress_memory(self, *, limit: int = 50) -> None:
         traces = [dict(trace) for trace in self.memory.get("traces", [])]
         traces.sort(key=lambda trace: float(trace.get("weight") or 0.0), reverse=True)
@@ -323,6 +332,14 @@ class AlphaBodyState:
 
     def to_dict(self) -> dict[str, Any]:
         shadow = self.memory.get("shadow") if isinstance(self.memory.get("shadow"), dict) else {}
+        memory_payload = {
+            "traces": list(self.memory.get("traces", []))[-50:],
+            "relationship": dict(self.memory.get("relationship") or {}),
+            "shadow": {"events": [dict(item) for item in shadow.get("events", []) if isinstance(item, dict)][-24:]},
+        }
+        memory_system = self.memory.get("_memory_system")
+        if isinstance(memory_system, dict):
+            memory_payload["_memory_system"] = dict(memory_system)
         return {
             "pulse": self.pulse.to_dict(),
             "bloodflow": self.bloodflow.to_dict(),
@@ -333,7 +350,7 @@ class AlphaBodyState:
             "immunity": self.immunity.to_dict(),
             "mortality": self.mortality.to_dict(),
             "needs": {key: round(value, 6) for key, value in self.needs.items()},
-            "memory": {"traces": list(self.memory.get("traces", []))[-50:], "relationship": dict(self.memory.get("relationship") or {}), "shadow": {"events": [dict(item) for item in shadow.get("events", []) if isinstance(item, dict)][-24:]}},
+            "memory": memory_payload,
         }
 
     def apply(self, *, text: str = "", flags: list[str] | None = None, confidence: float = 0.0, now: float = 0.0) -> None:
@@ -357,7 +374,8 @@ class AlphaBodyState:
             self.immunity.interruption_budget = 1.0
             self.immunity.cooldown = 0.0
             self.immunity.paused = False
-        self.bloodflow.memory_flow = _clamp(self.bloodflow.memory_flow + len(self.memory.get("traces", [])) / 20.0 + self.nerve.plasticity * 0.2)
+        target_flow = _clamp(len(self.memory.get("traces", [])) / 50.0 + self.nerve.plasticity * 0.2)
+        self.bloodflow.memory_flow = _clamp(self.bloodflow.memory_flow * 0.9 + target_flow * 0.1)
 
         if text:
             self.memory.setdefault("traces", []).append({"id": f"trace-{len(self.memory.get('traces', [])) + 1}", "text": text[:500], "weight": round(_clamp(0.35 + repetition * 0.08), 6), "temperature": self.temperature.to_dict()["warmth"]})

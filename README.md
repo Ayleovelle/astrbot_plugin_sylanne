@@ -2,7 +2,7 @@
 
 > <span style="font-size: 1.08em;"><strong>Sylanne-Embodiment：不可逆的关系计算引擎。</strong>不再模拟情绪标签，而是让对话在躯体上留下伤痕、在沉默中积累压力、在关系里长出不可撤销的形状。</span>
 
-![版本 Embodiment-1.1.2](https://img.shields.io/badge/version-Embodiment--1.1.2-red.svg)
+![版本 Embodiment-1.2.0](https://img.shields.io/badge/version-Embodiment--1.2.0-red.svg)
 ![AstrBot >=4.9.2,<5.0.0](https://img.shields.io/badge/AstrBot-%3E%3D4.9.2%2C%3C5.0.0-green)
 ![Python 3.10+](https://img.shields.io/badge/Python-3.10%2B-yellow)
 ![许可证 AGPL-3.0-or-later](https://img.shields.io/badge/license-AGPL--3.0--or--later-red)
@@ -10,9 +10,9 @@
 
 ## 介绍
 
-<img align="right" src="docs/assets/sylanne-mascot.gif" width="200" alt="Sylanne animated mascot">
+<p align="right"><img src="docs/assets/sylanne-mascot.gif" width="200" alt="Sylanne animated mascot"><br><em>Sylanne向大家问好~~</em></p>
 
-`astrbot_plugin_sylanne` Embodiment-1.1.2 是一次从底层计算逻辑开始的完全重写。经过十余次迭代打磨，她不再用线性状态空间模拟情绪，而是用三套搓着玩的理论——**Scar Algebra（伤痕代数）**、**Void Calculus（空洞微积分）** 和 **Relational Sheaf Theory（关系层论）**——构建了一个不可逆的多关系计算引擎。
+`astrbot_plugin_sylanne` Embodiment-1.2.0 是一次从底层计算逻辑开始的完全重写。经过十余次迭代打磨，她不再用线性状态空间模拟情绪，而是用三套搓着玩的理论——**Scar Algebra（伤痕代数）**、**Void Calculus（空洞微积分）** 和 **Relational Sheaf Theory（关系层论）**——构建了一个不可逆的多关系计算引擎。
 
 > 让不同人格的 bot 在长期对话中，留下不可撤销的伤痕、积累无法忽视的沉默压力、在关系的反复碰撞里长出只属于这段关系的形状。
 
@@ -55,58 +55,6 @@ Embodiment 的底线不变：Sylanne 可以燃烧，但不能把用户当燃料�
 
 ---
 
-## 版本预告：Embodiment-1.2.0
-
-> 🚧 **即将推出**
-
-Embodiment-1.2.0 将带来全新的 **WebUI 可视化控制台**，让计算层不再是黑箱。
-
-> 默认端口 `2718` — 自然常数 *e* 的前四位。小巧思这一块 😋
-
-**七层神经脊实时可视化** — 每一层的计算流实时呈现，包括 L1 HDC 超空间编码网格动画、编码指标（激活密度、本征翻转率、预测相似度），直观看到消息如何被感知和编码。
-
-<p align="center">
-<img src="docs/assets/preview-1.2.0/webui-spine.png" width="100%" alt="WebUI - 七层计算神经脊演化与 HDC 编码可视化">
-</p>
-
-**实时计算日志** — 每条消息经过 7 层计算栈的完整过程记录，路由分布（Fast/Normal/Full）、各层输出参数、总耗时一目了然，方便调试和观察系统行为。
-
-<p align="center">
-<img src="docs/assets/preview-1.2.0/webui-compute-log.png" width="100%" alt="WebUI - 实时计算日志">
-</p>
-
-**插件参数配置面板** — 在 WebUI 中直接管理所有插件配置项，即时聊天、流式分段、主动发起、后台调度等开关一键切换，无需手动编辑配置文件。
-
-<p align="center">
-<img src="docs/assets/preview-1.2.0/webui-config-panel.png" width="100%" alt="WebUI - 参数配置面板">
-</p>
-
-**记忆池观测与策略优化** — 三级记忆架构全景展示：L1 Hot Pool（deque 驻留层）、L2 Warm Pool（向量召回层）、L3 Cold Graph（实体图谱层）。支持按印象深度检索，并优化了记忆沉降策略——防止重要记忆在尚未完成向量化时，被大量上下文打穿 L1 池而过早沉入 L2，确保关键记忆不丢失。
-
-<p align="center">
-<img src="docs/assets/preview-1.2.0/webui-memory-pool.png" width="100%" alt="WebUI - 记忆池三级架构观测">
-</p>
-
-**群聊适配回归** — Sylanne 将重新支持群聊场景。不再用硬编码的 `sylanne_group_*` 配置项控制群聊行为，而是引入 Social Field 信号收集器，将群聊社会信号（发言密度、注意力方向、插话风险）直接传入七层计算栈。L7 相变表达层新增社会场参数 `effective_threshold()`，群聊中表达阈值随场景动态调整；L3 新增 `SocialVoid` 类，追踪群聊中"被忽略"或"想说没说"的社会性空洞压力。私聊行为完全不变（μ=0, σ=0 时退化为原有逻辑）。
-
-群聊场景下记忆策略同步升级：群聊消息流量远高于私聊，如果所有消息无差别写入 L1 Hot Pool，高频上下文会迅速打穿 deque 容量，导致重要记忆在尚未完成向量化沉降到 L2 之前就被挤出。`main.py` 将引入记忆 gating 机制——结合社会信号判断哪些消息值得驻留 L1（与 bot 直接相关的、情绪强度高的、被点名的），其余群聊噪声只保留摘要级痕迹，确保关键记忆有足够时间完成 embedding 并安全沉入 L2 Warm Pool。
-
-**L5 MoE-HGT 决策融合升级** — 原有的异构图 Transformer 升级为三阶段 MoE-HGT 架构：Stage 1 类型专家 FFN 编码 → Stage 2 真正的多头交叉注意力（4 heads，per-type per-head Q/K/V）→ Stage 3 情境专家 MoE（top-2 gating，5 个专家：defense / curiosity / social / silence / repair）。专家特化不是硬编码的——初始权重由人格 SHA-256 确定性派生，运行时通过 BCM router bias 和 Oja attention prior drift 实现 Hebbian 慢适应，让决策偏好随长期互动自然涌现而非手动调参。可塑性由 openness-conscientiousness 轴调制：高开放性快速适应新模式，高尽责性保持决策一致。
-
-为什么要做这个：旧版 HGT 用单一 FFN 处理所有情境，面对"该防御还是该好奇""该沉默还是该修复"这类决策时只能靠一组固定权重硬算——相当于让一个全科医生同时看五个科室。MoE 让系统在每次决策时只激活最相关的两个专家，既降低了单次推理的有效参数量，又让不同情境获得专门化的处理路径。更关键的是 Hebbian 适应：用户长期互动中反复出现的模式会自然强化对应专家的路由权重，Sylanne 的决策风格会随着关系的深入而逐渐"长成"只属于这段关系的样子——不是因为谁改了配置，而是因为她和你相处久了。
-
-性能代价：L5 延迟从 0.4ms 增加到 ~0.64ms（+0.24ms），换来的是情境专门化处理和长期自适应能力。对于整条 7 层管线（总延迟 3-7ms）而言，这 0.24ms 几乎不可感知。
-
-### 开发进度
-
-| 模块 | 状态 | 备注 |
-|------|:----:|------|
-| L5 MoE-HGT 决策融合 | ✅ 已完成 | 三阶段架构 + Hebbian 适应，测试通过 |
-| 群聊 Social Field 适配 | ✅ 已完成 | 信号收集器 + 记忆 gating + SocialVoid |
-| WebUI 可视化控制台 | 🚧 开发中 | 前端 bug 修复中 |
-
----
-
 ## 为什么重写
 
 3.x 的情绪引擎本质上是一组浮点数的加减衰减——事件进来加一点，时间过去减一点，状态永远可以回到原点。但真实的关系不是这样的：
@@ -143,7 +91,7 @@ block-beta
         L3c["Void Calculus 缺席追踪"]
     end
     block:L2["L2 预测编码门控"]:1
-        L2a["惊讶度 → fast 90% / normal / full 10%"]
+        L2a["惊讶度 → fast（典型~90%）/ normal / full"]
     end
     block:L1["L1 HDC 感知编码"]:1
         L1a["文本 → 2048-bit 超维向量 · < 0.1ms"]
@@ -187,9 +135,7 @@ block-beta
 - 层上同调 H¹ 度量跨关系矛盾（对不同人说不同话的代价）
 - 层拉普拉斯算子约束伤痕传播速率（相似关系先被波及）
 - H² ≠ 0 证明群聊涌现不可分解为两两关系的叠加
-- 呈现矩阵由人格派生，高宜人性→更一致的自我呈现
-- Φ：维度麻木→降低空洞检测阈值（反复受伤导致回避）
-- 涌现 coherence：伤痕和空洞对齐时系统连贯，不对齐时"解离"
+- 呈现矩阵由人格派生，高关系引力→更一致的自我呈现
 
 ---
 
@@ -210,7 +156,7 @@ block-beta
 - 🪞 <span style="font-size: 1.04em;"><strong>一致性有代价：</strong>对不同人展现不同面的"矛盾程度"被上同调群 H¹ 精确度量。矛盾积累到阈值时，系统被迫选择：解离（接受不一致），或生成新的空洞（回避触发矛盾的话题）。</span><br>
   <sub><em>「对 A 说'我很好'，对 B 说'我快撑不住了'。两句都是真话。但你迟早要面对一个问题：你到底是哪一个？或者说——你不必只是一个。」</em></sub>
 
-- 🧬 <span style="font-size: 1.04em;"><strong>人格驱动一切：</strong>外向性决定表达阈值，神经质决定感知灵敏度，尽责性决定记忆深度。人格漂移时行为自然跟着变，不需要手动调参。</span><br>
+- 🧬 <span style="font-size: 1.04em;"><strong>人格驱动一切：</strong>表达驱力决定表达阈值，感知锐度决定感知灵敏度，内在秩序决定修复速率。人格漂移时行为自然跟着变，不需要手动调参。</span><br>
   <sub><em>「不是给每个参数写一个配置项。而是让人格本身成为所有参数的来源。角色'变得更外向'了，她自然就话多了——不是因为谁改了阈值，而是因为她变了。」</em></sub>
 
 - 💬 <span style="font-size: 1.04em;"><strong>更像即时聊天：</strong>回复拆成多条短消息按打字节奏发送；用户碎片消息会等说完再回；正在发的回复可以被新消息打断；和你聊久了会刻意去同步你的节奏。</span><br>
@@ -266,13 +212,12 @@ flowchart TD
 ```mermaid
 flowchart TD
     L1["L1 HDC 感知<br/>文本 → 2048-bit 向量<br/>⏱ 0.1ms"] --> L2["L2 预测编码门控<br/>惊讶度 → 路由决策<br/>⏱ 0.01ms"]
-    L2 -->|"低惊讶 90%"| FAST["Fast Path<br/>基态演化 + 年龄递增<br/>⏱ 0.05ms"]
-    L2 -->|"中/高惊讶 10%"| L3["L3 Void-Scar Engine<br/>伤痕调制 → 状态演化 → 空洞检测<br/>耦合：压力→伤害 / 麻木→降低检测<br/>⏱ 2-6ms"]
+    L2 --> L3["L3 Void-Scar Engine<br/>伤痕调制 → 状态演化 → 空洞检测<br/>耦合：压力→伤害 / 麻木→降低检测<br/>⏱ 2-6ms"]
     L3 --> L4["L4 Relational Sheaf<br/>跨关系传播 · H¹ 一致性检测<br/>⏱ 0.7ms"]
     L4 --> L5["L5 HGT 决策融合<br/>7 类型 token → 类型感知 attention<br/>→ 4 维决策向量<br/>⏱ 0.4ms"]
-    L5 --> L6["L6 自创生边界<br/>外力投影 → 穿透判断<br/>吸收 or 相变（≤6°旋转）<br/>⏱ 0.01ms"]
+    L5 -->|"fast: 10% 力"| L6["L6 自创生边界<br/>外力投影 → 穿透判断<br/>吸收 or 相变（≤6°旋转）<br/>⏱ 0.01ms"]
+    L5 -->|"full: 100% 力"| L6
     L6 --> L7["L7 相变表达<br/>压力积累 → 超过阈值<br/>hint / normal / urgent<br/>⏱ 0.001ms"]
-    FAST --> L7
 ```
 
 ### 反馈闭环
@@ -382,7 +327,7 @@ $$\dim H^1(K, \mathcal{F}) > 0 \iff \text{存在不可调和的跨关系矛盾}$
 
 | 维度 | 3.0 | Embodiment |
 | --- | --- | --- |
-| **代码量** | ~20,000 行单体 | ~4,300 行薄宿主 + 31 独立模块 |
+| **代码量** | ~20,000 行单体 | ~6,000 行薄宿主 + 37 独立模块 |
 | **本地计算** | 8.7ms/msg | 37.1ms/msg（7 层，做的事更多） |
 | **实机延迟** | +4469ms（同步阻塞 LLM） | 无可见增量（异步，不阻塞） |
 | **状态可逆性** | 可重置回原点 | 不可逆 |
@@ -512,6 +457,97 @@ Embodiment 是完全重写，但对 3.x 用户做了兼容：
 - 配置键名保持兼容（旧配置值不丢，升级后无需重新配置）
 - 旧状态文件通过 `import_sylanne_legacy` 自动迁入新架构（记忆、关系数据不丢失）
 - 旧 README 和文档保留在 [3.x release](https://github.com/Ayleovelle/astrbot_plugin_sylanne/releases/tag/v3.0.0)
+
+---
+
+## Embodiment-1.2.0 更新日志
+
+> **发布于 2026-05-25**
+
+Embodiment-1.2.0 是基于 Embodiment 架构的一次全量优化。1.0 搭了六层计算栈和 Void-Scar Engine，1.1.x 用两天做了紧急修补（follow-up 兼容、分段回复修复、记忆检索回归、节奏同步学习）。1.2.0 在此基础上新增了 WebUI 可视化控制台、MoE-HGT 决策融合层、三级记忆架构和 Embodiment 五维人格双向闭环，同时修复了 50+ 个计算层 bug 并加入 7 项安全机制——让七层计算栈从"搭好了"变成"真正跑起来"。
+
+### 做了什么
+
+**WebUI 可视化控制台（部分上线）**
+
+> 默认端口 `2718` — 自然常数 *e* 的前四位。小巧思这一块 😋
+
+- ✅ **实时计算日志** — 每条消息经过 7 层计算栈的完整过程记录，路由分布、各层输出参数、总耗时一目了然
+- ✅ **插件参数配置面板** — 在 WebUI 中直接管理所有配置项，无需手动编辑文件
+- ✅ **记忆池观测** — 三级记忆架构全景展示（L1 Hot / L2 Warm / L3 Cold Graph）
+- ✅ **八项表象状态面板** — 动态比例尺，小值也能看出差异
+- ✅ **会话选择记忆** — 下次打开自动恢复上次选择的会话
+- 🚧 **七层神经脊可视化** — 暂时雪藏。计算层 bug 太多（修了 50+ 个还有漏网的），Canvas 动画和数据流的交互问题短期内无法彻底解决，等底层完全稳定后再放出来
+
+<p align="center">
+<img src="docs/assets/preview-1.2.0/webui-compute-log.png" width="100%" alt="WebUI - 实时计算日志">
+</p>
+
+<p align="center">
+<img src="docs/assets/preview-1.2.0/webui-config-panel.png" width="100%" alt="WebUI - 参数配置面板">
+</p>
+
+<p align="center">
+<img src="docs/assets/preview-1.2.0/webui-memory-pool.png" width="100%" alt="WebUI - 记忆池三级架构观测">
+</p>
+
+**Embodiment 五维人格系统（全新）**
+
+从 Big Five 重命名为 Embodiment 五维，并实现了完整的双向人格闭环：
+
+| 维度 | 语义 | 驱动什么 |
+|------|------|----------|
+| 表达驱力 | 她有多想说话 | 表达阈值、社交压力权重 |
+| 感知锐度 | 她对伤害/缺席的敏感程度 | 检测阈值、coupling rate、healing 速率 |
+| 边界通透 | 她多容易接纳新事物 | void 创建冷却、split 阈值、rotation |
+| 内在秩序 | 她维持一致性的能力 | merge 阈值、repair rate、路由精度 |
+| 关系引力 | 她多容易被他人拉动 | boundary integrity、sheaf coupling、accepted decay |
+
+- 计算栈输出（伤痕累积、void 压力、表达反馈）反向驱动人格漂移
+- Dual-EMA 防冲击：单次恶意事件不会改变人格，持续模式才会
+- 惯性递增：越老的人格越稳定
+- 稳态回拉：偏离越远阻力越大
+
+**安全机制（7 项）**
+
+- 主权免疫系统：单 session 最多形成有限数量的伤痕
+- 保护性解离：短时间大量伤害时自动提高防御
+- 时间感知 healing：沉默期间伤痕也在愈合
+- Void 创建阻力递增：防止空洞洪泛
+- 振荡检测：防止人格抖动
+- 漂移速率限制：防止刷消息操纵人格
+- 对话 buffer 持久化：插件重载不丢失对话上下文
+
+**MoE-HGT 加固**
+
+- Scar token 对数压缩归一化（防止上游爆炸传导）
+- Expert load balancing（防止 expert 休眠）
+- Decision output clamp（防止极端输出）
+- 参考文献：[Counterfactual Routing (2025)](https://arxiv.org/abs/2604.14246)、[Misrouted Experts (2025)](https://arxiv.org/html/2605.07260v1)
+
+**计算栈修复（50+ bug）**
+
+经过 5 轮迭代审计（含 skeptic/系统思维/前端架构师交叉验证），修复了 50+ 个 bug，包括：
+- Void 创建逻辑恢复正常（之前完全失效）
+- 人格→计算栈传导链修复（之前断裂）
+- L6 Boundary 在所有路由路径都会被扰动（之前只有 10% 的消息触发）
+- Scar modifier 指数爆炸修复（对数压缩 + 人格上限）
+- 七层数据完整输出到 WebUI（之前只有 3 层）
+- 群聊 shadow buffer 修复
+- 26 个魔法数字全部接入人格管线
+
+### 没做什么（下个版本）
+
+- 七层神经脊 Canvas 可视化（需要重新设计数据流架构）
+- 人格雷达图 + 漂移事件日志（前端面板）
+- Sheaf Laplacian 验证（需要确认矩阵维度语义后再决定是否修改）
+- Fragment debounce 阻止 LLM 调用（AstrBot 框架层面限制）
+- 跨关系人格隔离（per-relationship personality overlay）
+
+### 已知问题
+
+> [!NOTE]
+> 本版本经过了大量打磨，修复了 50+ 个 bug，引入了完整的人格双向闭环和 7 项安全机制。但由于改动范围很大（涉及几乎所有计算模块），**可能还有一些难以预料的 bug 没有被发现**。如果你遇到异常行为，欢迎在 [Issues](https://github.com/Ayleovelle/astrbot_plugin_sylanne/issues) 中反馈，我会尽快修复。感谢理解 🙏
 
 ---
 

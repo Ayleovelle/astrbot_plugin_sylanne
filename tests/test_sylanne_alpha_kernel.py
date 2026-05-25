@@ -3,10 +3,13 @@ from __future__ import annotations
 import tempfile
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
 
 from sylanne_alpha import AlphaKernel, AlphaKernelEvent
 from sylanne_alpha.body import AlphaBodyState
+from sylanne_alpha.host import SylanneAlphaHost
 from sylanne_alpha.runtime import AlphaRuntime
+from sylanne_alpha.webui_server import _build_state
 
 
 class SylanneAlphaKernelTests(unittest.TestCase):
@@ -28,12 +31,14 @@ class SylanneAlphaKernelTests(unittest.TestCase):
                 "config.py",
                 "dialogue.py",
                 "embedding_memory.py",
+                "social_field.py",
                 "hdc.py",
                 "hgt.py",
                 "host.py",
                 "importer.py",
                 "kernel.py",
                 "life_simulation.py",
+                "memory_system.py",
                 "multi_user.py",
                 "personality.py",
                 "phase_transition.py",
@@ -65,6 +70,41 @@ class SylanneAlphaKernelTests(unittest.TestCase):
         self.assertGreater(after["pulse.beat"], before["pulse.beat"])
         self.assertAlmostEqual(after["nerve.plasticity"], body.to_dict()["nerve"]["plasticity"])
         self.assertAlmostEqual(after["needs.need_expression"], body.to_dict()["needs"]["need_expression"])
+
+    def test_kernel_computation_result_exposes_real_layer_payloads(self):
+        kernel = AlphaKernel.boot(session_key="layers")
+
+        kernel.tick(AlphaKernelEvent(text="layer diagnostics", flags=["safe"], confidence=0.7, now=1.0))
+
+        layers = kernel._last_computation_result["layers"]
+        l1 = layers["L1_HDC"]
+        self.assertEqual(l1["vector_dim"], 2048)
+        self.assertGreaterEqual(l1["density"], 0.0)
+        self.assertLessEqual(l1["density"], 1.0)
+        self.assertTrue(l1["sample_bits"])
+        self.assertIn("L3_VoidScar", layers)
+        self.assertIn("L4_Sheaf", layers)
+        self.assertIn("sheaf", kernel._last_computation_result)
+
+    def test_webui_state_and_logs_include_live_layer_payloads(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            host = SylanneAlphaHost(root=tmp, session_key="web")
+            host.on_request({"text": "state layer diagnostics", "confidence": 0.7, "now": 2.0})
+            comp_result = host.kernel._last_computation_result
+            plugin = SimpleNamespace(
+                _hosts={"web": host},
+                _computation_logs=[{"layers": comp_result["layers"]}],
+                _life_simulator=None,
+                _persona_profile=lambda _event: {"name": "Sylanne", "version": "test"},
+            )
+
+            state = _build_state(plugin, session="web")
+
+            self.assertIn("layers", state)
+            self.assertIn("L1_HDC", state["layers"])
+            self.assertIn("layers", state["spine"])
+            self.assertEqual(state["layers"]["L1_HDC"]["vector_dim"], 2048)
+            self.assertTrue(plugin._computation_logs[-1]["layers"]["L1_HDC"]["sample_bits"])
 
     def test_body_vector_event_drives_batchable_linear_update(self):
         body = AlphaBodyState()
@@ -208,7 +248,7 @@ class SylanneAlphaKernelTests(unittest.TestCase):
         fragment = host_payload["prompt_fragment"]
         self.assertEqual(host_payload["affect_dynamics"]["schema_version"], "sylanne.alpha.affect_dynamics.v1")
         self.assertGreater(host_payload["affect_dynamics"]["body_coupling"]["repair_drive"], 0.0)
-        self.assertEqual(host_payload["personality"]["schema_version"], "sylanne.alpha.personality.v1")
+        self.assertEqual(host_payload["personality"]["schema_version"], "sylanne.alpha.personality.embodiment.v1")
         self.assertGreaterEqual(host_payload["personality"]["drift"]["events"], 2)
         self.assertEqual(host_payload["moral_repair"]["schema_version"], "sylanne.alpha.moral_repair.v1")
         self.assertEqual(host_payload["moral_repair"]["state"], "repairing")

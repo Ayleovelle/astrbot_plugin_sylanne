@@ -1,0 +1,53 @@
+# 数学建模（Mathematical Modeling）OpenAlex 文献元数据索引
+
+- 记录数：20000
+- 目标记录数：20000
+- 语料类型：full
+- 分组：工程数值与建模
+- 检索口径：Exact title/abstract search for mathematical modeling; cross-disciplinary by nature.
+- 分卷大小：每卷 500 条
+- 分卷数：40
+- 边界：只含文献元数据与链接，不含受版权保护的论文全文；正式引用前必须核对 DOI、作者、年份、期刊。
+
+## 分卷
+
+- `mathematical-modeling_full_part_01_00001-00500.md`：第 1-500 条
+- `mathematical-modeling_full_part_02_00501-01000.md`：第 501-1000 条
+- `mathematical-modeling_full_part_03_01001-01500.md`：第 1001-1500 条
+- `mathematical-modeling_full_part_04_01501-02000.md`：第 1501-2000 条
+- `mathematical-modeling_full_part_05_02001-02500.md`：第 2001-2500 条
+- `mathematical-modeling_full_part_06_02501-03000.md`：第 2501-3000 条
+- `mathematical-modeling_full_part_07_03001-03500.md`：第 3001-3500 条
+- `mathematical-modeling_full_part_08_03501-04000.md`：第 3501-4000 条
+- `mathematical-modeling_full_part_09_04001-04500.md`：第 4001-4500 条
+- `mathematical-modeling_full_part_10_04501-05000.md`：第 4501-5000 条
+- `mathematical-modeling_full_part_11_05001-05500.md`：第 5001-5500 条
+- `mathematical-modeling_full_part_12_05501-06000.md`：第 5501-6000 条
+- `mathematical-modeling_full_part_13_06001-06500.md`：第 6001-6500 条
+- `mathematical-modeling_full_part_14_06501-07000.md`：第 6501-7000 条
+- `mathematical-modeling_full_part_15_07001-07500.md`：第 7001-7500 条
+- `mathematical-modeling_full_part_16_07501-08000.md`：第 7501-8000 条
+- `mathematical-modeling_full_part_17_08001-08500.md`：第 8001-8500 条
+- `mathematical-modeling_full_part_18_08501-09000.md`：第 8501-9000 条
+- `mathematical-modeling_full_part_19_09001-09500.md`：第 9001-9500 条
+- `mathematical-modeling_full_part_20_09501-10000.md`：第 9501-10000 条
+- `mathematical-modeling_full_part_21_10001-10500.md`：第 10001-10500 条
+- `mathematical-modeling_full_part_22_10501-11000.md`：第 10501-11000 条
+- `mathematical-modeling_full_part_23_11001-11500.md`：第 11001-11500 条
+- `mathematical-modeling_full_part_24_11501-12000.md`：第 11501-12000 条
+- `mathematical-modeling_full_part_25_12001-12500.md`：第 12001-12500 条
+- `mathematical-modeling_full_part_26_12501-13000.md`：第 12501-13000 条
+- `mathematical-modeling_full_part_27_13001-13500.md`：第 13001-13500 条
+- `mathematical-modeling_full_part_28_13501-14000.md`：第 13501-14000 条
+- `mathematical-modeling_full_part_29_14001-14500.md`：第 14001-14500 条
+- `mathematical-modeling_full_part_30_14501-15000.md`：第 14501-15000 条
+- `mathematical-modeling_full_part_31_15001-15500.md`：第 15001-15500 条
+- `mathematical-modeling_full_part_32_15501-16000.md`：第 15501-16000 条
+- `mathematical-modeling_full_part_33_16001-16500.md`：第 16001-16500 条
+- `mathematical-modeling_full_part_34_16501-17000.md`：第 16501-17000 条
+- `mathematical-modeling_full_part_35_17001-17500.md`：第 17001-17500 条
+- `mathematical-modeling_full_part_36_17501-18000.md`：第 17501-18000 条
+- `mathematical-modeling_full_part_37_18001-18500.md`：第 18001-18500 条
+- `mathematical-modeling_full_part_38_18501-19000.md`：第 18501-19000 条
+- `mathematical-modeling_full_part_39_19001-19500.md`：第 19001-19500 条
+- `mathematical-modeling_full_part_40_19501-20000.md`：第 19501-20000 条

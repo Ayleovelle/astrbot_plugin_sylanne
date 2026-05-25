@@ -13,7 +13,7 @@ class SylanneAlphaPersonalityTests(unittest.TestCase):
 
         self.assertEqual(first, second)
         self.assertNotEqual(first["signature"], other["signature"])
-        self.assertEqual(first["schema_version"], "sylanne.alpha.personality.v1")
+        self.assertEqual(first["schema_version"], "sylanne.alpha.personality.embodiment.v1")
         self.assertGreater(first["traits"]["warmth_bias"], 0.0)
         self.assertIn("voice", first)
 
@@ -21,7 +21,7 @@ class SylanneAlphaPersonalityTests(unittest.TestCase):
         base = initial_personality("room:drift", seed_text="Sylanne Soulful")
         drifted = drift_personality(base, event={"text": "我想让你更锋利一点", "confidence": 0.9}, rate=0.05)
 
-        self.assertEqual(drifted["schema_version"], "sylanne.alpha.personality.v1")
+        self.assertEqual(drifted["schema_version"], "sylanne.alpha.personality.embodiment.v1")
         self.assertNotEqual(drifted["traits"], base["traits"])
         for name, value in drifted["traits"].items():
             self.assertLessEqual(abs(value - base["traits"][name]), 0.05)

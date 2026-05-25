@@ -34,7 +34,11 @@ class AlphaRuntime:
         path = self._path(kernel.session_key)
         tmp = path.with_suffix(path.suffix + ".tmp")
         tmp.write_text(json.dumps(kernel.snapshot(), ensure_ascii=False, sort_keys=True, indent=2), encoding="utf-8")
-        os.replace(tmp, path)
+        try:
+            os.replace(tmp, path)
+        except OSError:
+            tmp.unlink(missing_ok=True)
+            raise
 
     def reset(self, session_key: str) -> AlphaKernel:
         kernel = AlphaKernel.boot(session_key=session_key)
@@ -61,3 +65,26 @@ class AlphaRuntime:
     def _path(self, session_key: str) -> Path:
         safe = "".join(ch if ch.isalnum() or ch in {"-", "_", "."} else "_" for ch in session_key) or "default"
         return self.root / f"{safe}.alpha.json"
+
+    def save_buffer(self, session_key: str, buffer_data: dict[str, Any]) -> None:
+        self.root.mkdir(parents=True, exist_ok=True)
+        path = self._buffer_path(session_key)
+        tmp = path.with_suffix(path.suffix + ".tmp")
+        tmp.write_text(json.dumps(buffer_data, ensure_ascii=False), encoding="utf-8")
+        try:
+            os.replace(tmp, path)
+        except OSError:
+            tmp.unlink(missing_ok=True)
+
+    def load_buffer(self, session_key: str) -> dict[str, Any] | None:
+        path = self._buffer_path(session_key)
+        if path.exists():
+            try:
+                return json.loads(path.read_text(encoding="utf-8"))
+            except (json.JSONDecodeError, OSError):
+                return None
+        return None
+
+    def _buffer_path(self, session_key: str) -> Path:
+        safe = "".join(ch if ch.isalnum() or ch in {"-", "_", "."} else "_" for ch in session_key) or "default"
+        return self.root / f"{safe}.buffer.json"

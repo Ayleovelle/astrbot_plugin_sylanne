@@ -77,7 +77,6 @@ class SylanneAlphaHost:
             self.kernel.body.immunity.interruption_budget = max(0.0, self.kernel.body.immunity.interruption_budget - 0.2)
             self.kernel.body.immunity.cooldown = max(self.kernel.body.immunity.cooldown, 0.35)
             self.runtime.save(self.kernel)
-            return self.kernel.surface()
         return surface
 
     def diagnostics(self) -> dict[str, Any]:

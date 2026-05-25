@@ -128,7 +128,11 @@ class LifeSimulator:
         if not self.enabled or self._running:
             return
         self._running = True
-        self._task = asyncio.ensure_future(self._loop())
+        try:
+            loop = asyncio.get_running_loop()
+            self._task = loop.create_task(self._loop())
+        except RuntimeError:
+            pass
 
     def stop(self):
         """Stop the simulation loop."""
@@ -151,7 +155,9 @@ class LifeSimulator:
                 await self._simulate_tick()
             except asyncio.CancelledError:
                 break
-            except Exception:
+            except Exception as _exc:
+                import logging
+                logging.getLogger(__name__).debug("life_simulation tick error: %s", _exc)
                 await asyncio.sleep(60.0)
 
     async def _simulate_tick(self):

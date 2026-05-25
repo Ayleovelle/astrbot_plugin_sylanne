@@ -414,21 +414,22 @@ class ScarSheaf:
     # ------------------------------------------------------------------
 
     def derive_params(self, personality: dict[str, float]) -> None:
-        """Initialize sheaf parameters from Big Five personality vector.
+        """Initialize sheaf parameters from personality vector.
 
+        Accepts both legacy Big Five names and new Embodiment Five names.
         Maps:
-          - extraversion → baseline exposure rank (more dims exposed)
-          - agreeableness → lower kappa (more consistent across relationships)
-          - neuroticism → higher kappa (more variable self-presentation)
-          - openness → broader triangle stalk coupling
-          - conscientiousness → tighter energy management
+          - extraversion/expression_drive_trait → baseline exposure rank
+          - agreeableness/relational_gravity → lower kappa (more consistent)
+          - neuroticism/perception_acuity → higher kappa (more variable)
+          - openness/boundary_permeability → broader triangle stalk coupling
+          - conscientiousness/inner_order → tighter energy management
         """
         self._personality = dict(personality)
-        e = float(personality.get("extraversion", 0.5))
-        a = float(personality.get("agreeableness", 0.5))
-        n = float(personality.get("neuroticism", 0.5))
-        o = float(personality.get("openness", 0.5))
-        c = float(personality.get("conscientiousness", 0.5))
+        e = float(personality.get("extraversion", personality.get("expression_drive_trait", 0.5)))
+        a = float(personality.get("agreeableness", personality.get("relational_gravity", 0.5)))
+        n = float(personality.get("neuroticism", personality.get("perception_acuity", 0.5)))
+        o = float(personality.get("openness", personality.get("boundary_permeability", 0.5)))
+        c = float(personality.get("conscientiousness", personality.get("inner_order", 0.5)))
 
         # Consistency bound: kappa(pi) — Axiom (Personality Consistency)
         # High agreeableness → low kappa; high neuroticism → high kappa
@@ -856,9 +857,9 @@ class ScarSheaf:
             if propagated:
                 propagated_to.append(i)
 
-        # Update propagation state (for observation)
+        # Update propagation state (for observation) with decay to prevent unbounded growth
         self._propagation_state = [
-            self._propagation_state[d] + abs(dt * (-alpha * L_x[d] + f_local[d]))
+            self._propagation_state[d] * 0.95 + abs(dt * (-alpha * L_x[d] + f_local[d]))
             for d in range(n0)
         ]
 

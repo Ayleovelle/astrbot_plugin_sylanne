@@ -9,9 +9,11 @@ ROOT = Path(__file__).resolve().parents[1]
 PLUGIN_NAME = "astrbot_plugin_sylanne"
 
 INCLUDE_ROOT_FILES = {
+    "__init__.py",
     "main.py",
     "metadata.yaml",
     "_conf_schema.json",
+    "requirements.txt",
     "README.md",
     "CHANGELOG.md",
     "LICENSE",

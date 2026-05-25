@@ -8,7 +8,7 @@ from .attention import focus_information_flood
 from .body import SCHEMA_VERSION, AlphaBodyState
 from .computation_spine import ComputationSpine
 from .importer import import_legacy_body
-from .personality import drift_personality, initial_personality
+from .personality import drift_personality, drift_sylanne_traits, initial_personality
 from .prompt_surface import render_diagnostics, render_host_payload, render_prompt_context_bus, render_prompt_fragment
 from .workset import build_fragment_workset
 
@@ -74,6 +74,8 @@ class AlphaKernel:
         )
         if "computation" in snapshot and isinstance(snapshot["computation"], dict):
             kernel.computation.from_dict(snapshot["computation"])
+        if "_last_computation_result" in snapshot and isinstance(snapshot["_last_computation_result"], dict):
+            kernel._last_computation_result = snapshot["_last_computation_result"]
         return kernel
 
     def tick(self, event: AlphaKernelEvent | dict[str, Any] | None = None, assessment: dict[str, Any] | None = None) -> dict[str, Any]:
@@ -82,7 +84,7 @@ class AlphaKernel:
         # Derive computation parameters from current personality
         personality = self._personality()
         if personality:
-            self.computation.apply_personality(personality)
+            self.computation.apply_personality(personality.get("traits", personality))
         # Run computation spine for emotion/expression state
         self._last_computation_result = self.computation.process(event.text, event.now, assessment=assessment)
         self._evolve_alpha_layers(event)
@@ -134,6 +136,7 @@ class AlphaKernel:
             "moral_repair": self._moral_repair_state(),
             "fallibility": self._fallibility_state(),
             "computation": self.computation.to_dict(),
+            "_last_computation_result": self._last_computation_result,
         }
 
     def _diagnostics(self, decision: dict[str, Any], guard: dict[str, Any], workset: dict[str, Any] | None = None) -> dict[str, Any]:
@@ -178,7 +181,13 @@ class AlphaKernel:
         }
 
     def _evolve_alpha_layers(self, event: AlphaKernelEvent) -> None:
-        self.personality = drift_personality(self._personality(), event={"text": event.text, "confidence": event.confidence}, rate=0.02)
+        # Drift Sylanne traits (fast, text-based) with Embodiment bounds from computation spine
+        embodiment = self.computation._embodiment_traits if hasattr(self.computation, '_embodiment_traits') else None
+        self.personality = drift_sylanne_traits(
+            self._personality(),
+            event={"text": event.text, "confidence": event.confidence},
+            embodiment=embodiment,
+        )
         flags = set(event.flags)
         repair_events = int(self.moral_repair.get("events") or 0)
         if "repair" in flags:
@@ -476,7 +485,7 @@ class AlphaKernel:
             action = "withdraw"
             reason = "boundary asks for distance"
             reason_code = "boundary_pressure"
-        elif proactive and needs["need_contact"] >= 0.0 and self.body.muscle.fatigue < 0.8:
+        elif proactive and needs["need_contact"] >= 0.1 and self.body.muscle.fatigue < 0.8:
             action = "reach_out"
             reason = "contact need has accumulated"
             reason_code = "contact_need"
@@ -540,9 +549,9 @@ class AlphaKernel:
         return {"allowed": allowed, "reason": reason, "flags": flags, "risk_score": risk_score}
 
     def _has_sovereignty_opt_in(self) -> bool:
-        for trace in reversed(self.body.memory.get("traces", [])):
+        for trace in reversed(self.body.memory.get("traces", [])[-10:]):
             text = str(trace.get("text") or "")
-            if text:
+            if text and float(trace.get("weight", 0)) > 0.3:
                 return True
         return False
 

@@ -1,0 +1,17 @@
+{
+  "name": "mathematical-modeling_top-journal",
+  "subject": "数学建模",
+  "subject_en": "Mathematical Modeling",
+  "subject_group": "工程数值与建模",
+  "records": 500,
+  "target": 500,
+  "source": "https://api.openalex.org/works",
+  "filter": "title_and_abstract.search.exact:mathematical modeling,type:article,primary_location.source.type:journal,is_retracted:false,has_doi:true",
+  "sort": "cited_by_count:desc",
+  "per_page": 100,
+  "api_reported_count": 100059,
+  "retrieved_at": "2026-05-10T16:51:54.460118+00:00",
+  "output": "G:\\pet\\astrbot_migration\\mega-paper-kb\\raw\\mathematical-modeling\\mathematical-modeling_top-journal.jsonl.gz",
+  "license_note": "OpenAlex metadata only; no copyrighted full-text PDFs are stored.",
+  "note": "Exact title/abstract search for mathematical modeling; cross-disciplinary by nature."
+}

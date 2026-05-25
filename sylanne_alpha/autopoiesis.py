@@ -14,18 +14,21 @@ class AutopoieticBoundary:
     __slots__ = (
         "identity_dim", "identity_kernel", "boundary_integrity",
         "internal_entropy", "repair_rate", "_phase_transitions",
-        "_last_penetration",
+        "_last_penetration", "_phase_threshold", "_rotation_angle",
     )
 
-    def __init__(self, identity_dim: int = 32):
+    def __init__(self, identity_dim: int = 32, agreeableness: float = 0.5):
         self.identity_dim = identity_dim
         # Identity kernel: self-referential constraint vector
         self.identity_kernel = self._init_kernel(identity_dim)
-        self.boundary_integrity = 1.0
+        # Initial integrity derived from personality: agreeable = more permeable
+        self.boundary_integrity = 1.0 - agreeableness * 0.08
         self.internal_entropy = 0.0
         self.repair_rate = 0.05
         self._phase_transitions: list[dict[str, Any]] = []
         self._last_penetration: float = 0.0
+        self._phase_threshold = 0.7
+        self._rotation_angle = 0.1
 
     def perturb(self, force: list[float]) -> dict[str, Any]:
         """External perturbation acts on the boundary."""
@@ -41,7 +44,7 @@ class AutopoieticBoundary:
         # Penetration = orthogonal magnitude × (1 - integrity)
         penetration = orth_norm * (1.0 - self.boundary_integrity)
         self._last_penetration = penetration
-        phase_transition = penetration > 0.7
+        phase_transition = penetration > self._phase_threshold
 
         if phase_transition:
             self._reorganize(orthogonal, orth_norm)
@@ -75,8 +78,8 @@ class AutopoieticBoundary:
             self._last_penetration *= 0.8  # Gradually decay penetration memory
             self.internal_entropy = max(0.0, self.internal_entropy - self.repair_rate * 0.2)
             return
-        # Normal repair
-        self.boundary_integrity = min(1.0, self.boundary_integrity + self.repair_rate)
+        # Normal repair — floor at 0.3 to prevent positive feedback collapse
+        self.boundary_integrity = max(0.3, min(1.0, self.boundary_integrity + self.repair_rate))
         self.internal_entropy = max(0.0, self.internal_entropy - self.repair_rate * 0.5)
         # Re-normalize identity kernel
         norm = math.sqrt(sum(x * x for x in self.identity_kernel) + 1e-12)
@@ -94,19 +97,26 @@ class AutopoieticBoundary:
             "boundary_integrity": self.boundary_integrity,
             "internal_entropy": self.internal_entropy,
             "stability": self.stability(),
+            "repair_rate": self.repair_rate,
             "phase_transitions": len(self._phase_transitions),
+            "phase_transition_log": self._phase_transitions[-10:],
+            "last_penetration": self._last_penetration,
             "identity_kernel": self.identity_kernel,
         }
 
     def from_dict(self, data: dict[str, Any]):
         self.boundary_integrity = float(data.get("boundary_integrity", 1.0))
         self.internal_entropy = float(data.get("internal_entropy", 0.0))
+        self.repair_rate = float(data.get("repair_rate", 0.05))
+        self._last_penetration = float(data.get("last_penetration", 0.0))
+        if "phase_transition_log" in data and isinstance(data["phase_transition_log"], list):
+            self._phase_transitions = data["phase_transition_log"]
         if "identity_kernel" in data and isinstance(data["identity_kernel"], list):
             self.identity_kernel = [float(x) for x in data["identity_kernel"]]
 
     def _reorganize(self, force: list[float], force_norm: float):
         """Self-directed reorganization: rotate identity kernel slightly toward force."""
-        angle = 0.1  # Max ~6° rotation per phase transition
+        angle = self._rotation_angle  # Max rotation per phase transition
         unit_force = [f / force_norm for f in force]
         cos_a = math.cos(angle)
         sin_a = math.sin(angle)
@@ -126,6 +136,12 @@ class AutopoieticBoundary:
     def set_identity_kernel(self, kernel: list[float]) -> None:
         """Replace the identity kernel with a shared one."""
         self.identity_kernel = list(kernel)
+
+    def set_personality_params(self, repair_rate: float, phase_threshold: float,
+                               rotation_angle: float):
+        self.repair_rate = repair_rate
+        self._phase_threshold = phase_threshold
+        self._rotation_angle = rotation_angle
 
     @staticmethod
     def _init_kernel(dim: int) -> list[float]:
