@@ -85,29 +85,7 @@ scripts/build_*_literature_kb.py
 # Duplicate/generated figures
 experiments/figures/
 
-# Dead tests (3.x engines / body_draft / legacy)
-tests/body_genesis/
-tests/test_literature_kb_scripts.py
-tests/test_emotion_engine.py
-tests/test_expression_policy.py
-tests/test_fallibility_engine.py
-tests/test_group_atmosphere_engine.py
-tests/test_humanlike_engine.py
-tests/test_integrated_self.py
-tests/test_interpretation_engine.py
-tests/test_lifelike_learning_engine.py
-tests/test_memory_engine.py
-tests/test_moral_repair_engine.py
-tests/test_personality_drift_engine.py
-tests/test_psychological_screening.py
-tests/test_realtime_chat_input.py
-tests/test_conversation_event_ledger.py
-tests/test_main_legacy_organ_host.py
-tests/test_main_kernel_host_integration.py
-tests/test_sylanne_host_boundary.py
-tests/test_sylanne_host_boundary_module.py
-tests/test_sylanne_host_context.py
-tests/test_fuck_u_code_report.py
-tests/test_remote_smoke_contract.py
+# Tests (local only)
+tests/
 docs/literature_kb.md
 docs/humanlike_agent_literature_kb.md
