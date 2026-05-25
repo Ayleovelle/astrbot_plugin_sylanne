@@ -1,21 +1,19 @@
+# Build artifacts
 output/
 dist/
+Sylanne-embodiment.zip
+test_output.txt
+
+# Runtime data
 data/
 .sylanne_alpha_state*/
+
+# Python
 __pycache__/
 *.py[cod]
 .pytest_cache/
-literature_kb/
-personality_literature_kb/
-psychological_literature_kb/
-humanlike_agent_literature_kb/
-docs/literature_kb.md
-docs/humanlike_agent_literature_kb.md
-scripts/build_literature_kb.py
-scripts/build_personality_literature_kb.py
-scripts/build_psychological_literature_kb.py
-scripts/build_humanlike_agent_literature_kb.py
-tests/test_literature_kb_scripts.py
+
+# LaTeX
 texput.log
 *.aux
 *.log
@@ -27,21 +25,89 @@ texput.log
 *.toc
 *.bbl
 *.blg
-Sylanne-embodiment.zip
-test_output.txt
-knowledge-base/
+
+# IDE / local settings
 .claude/
 .vscode/
-docs/astrbot_dev_handbook.md
-docs/scar_void_arxiv_paper.tex
-docs/scar_void_arxiv_paper_zh.tex
-docs/sylanne_4_alpha_computation_model.tex
+.github/
+
+# Knowledge bases (local only)
+knowledge-base/
+literature_kb/
+personality_literature_kb/
+psychological_literature_kb/
+humanlike_agent_literature_kb/
 review/
+
+# Internal docs (local only)
+docs/astrbot_dev_handbook.md
+docs/embodiment-*-handoff.md
+docs/personality_system_design.md
 docs/frontend_spine_visualization_design.md
+docs/memory_system_v2_design.md
+docs/branching_strategy.md
+docs/release_branch_sync_checklist.md
+docs/remote_testing.md
+docs/README_3x_legacy.md
+docs/sylanne_4_alpha_tiny_body_attention.md
+docs/sylanne_4_alpha_workflow.html
+docs/sylanne_embodiment_computation_architecture.md
+docs/theory.md
+docs/webui_memory_backend_handoff.md
+docs/webui_preview.html
+docs/reports/
+docs/superpowers/
+
+# Papers (local only)
 docs/scar_void_arxiv_paper*
 docs/sylanne_tac_paper.*
-docs/sylanne_4_alpha_computation_model.pdf
+docs/sylanne_4_alpha_computation_model.*
 docs/sylanne_embodiment_computation_architecture.pdf
 docs/sylanne_embodiment_computation_architecture.tex
-docs/personality_system_design.md
-docs/embodiment-*-handoff.md
+
+# Unused assets (not referenced by README)
+docs/assets/*.svg
+docs/assets/*.csv
+docs/assets/*.md
+docs/assets/theory_*
+docs/assets/lifecycle_*
+docs/assets/preview-1.2.0/webui-spine.png
+
+# Dev scripts (local only)
+scripts/benchmark_plugin_hot_path.py
+scripts/plugin_zip_preflight.js
+scripts/remote_*.js
+scripts/run_remote_*.js
+scripts/update_fuck_u_code_report.py
+scripts/remote_state_layer_ab_config.json
+scripts/build_*_literature_kb.py
+
+# Duplicate/generated figures
+experiments/figures/
+
+# Dead tests (3.x engines / body_draft / legacy)
+tests/body_genesis/
+tests/test_literature_kb_scripts.py
+tests/test_emotion_engine.py
+tests/test_expression_policy.py
+tests/test_fallibility_engine.py
+tests/test_group_atmosphere_engine.py
+tests/test_humanlike_engine.py
+tests/test_integrated_self.py
+tests/test_interpretation_engine.py
+tests/test_lifelike_learning_engine.py
+tests/test_memory_engine.py
+tests/test_moral_repair_engine.py
+tests/test_personality_drift_engine.py
+tests/test_psychological_screening.py
+tests/test_realtime_chat_input.py
+tests/test_conversation_event_ledger.py
+tests/test_main_legacy_organ_host.py
+tests/test_main_kernel_host_integration.py
+tests/test_sylanne_host_boundary.py
+tests/test_sylanne_host_boundary_module.py
+tests/test_sylanne_host_context.py
+tests/test_fuck_u_code_report.py
+tests/test_remote_smoke_contract.py
+docs/literature_kb.md
+docs/humanlike_agent_literature_kb.md

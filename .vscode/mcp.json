@@ -1,9 +1,0 @@
-{
-  "servers": {
-    "CodeGraph": {
-      "type": "stdio",
-      "command": "codegraph",
-      "args": ["serve", "--mcp"]
-    }
-  }
-}
