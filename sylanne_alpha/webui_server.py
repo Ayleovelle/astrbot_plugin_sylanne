@@ -502,7 +502,12 @@ def start_webui_thread_server(
             else:
                 self.send_error(404)
 
-    _httpd = ThreadingHTTPServer((host, port), SylanneWebUIHandler)
+    try:
+        _httpd = ThreadingHTTPServer((host, port), SylanneWebUIHandler)
+    except OSError as e:
+        logger.warning(f"Sylanne WebUI stdlib server failed to bind {host}:{port}: {e}")
+        _httpd = None
+        return
     _httpd_thread = threading.Thread(
         target=_httpd.serve_forever, name="SylanneWebUI", daemon=True
     )

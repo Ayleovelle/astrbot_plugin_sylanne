@@ -21,8 +21,8 @@ from sylanne_alpha.computation_spine import ComputationSpine
 # SocialFieldCollector
 # ===========================================================================
 
-class TestSocialFieldCollectorGroupDetection(unittest.TestCase):
 
+class TestSocialFieldCollectorGroupDetection(unittest.TestCase):
     def test_unified_msg_origin_with_group(self):
         collector = SocialFieldCollector()
         event = MagicMock()
@@ -62,7 +62,6 @@ class TestSocialFieldCollectorGroupDetection(unittest.TestCase):
 
 
 class TestSocialFieldCollectorCollect(unittest.TestCase):
-
     def _make_collector(self, **config_overrides):
         config = {
             "sylanne_persona_name": "Sylanne",
@@ -79,12 +78,16 @@ class TestSocialFieldCollectorCollect(unittest.TestCase):
 
     def test_collect_detects_name_mention(self):
         c = self._make_collector()
-        signals = c.collect(group_id="g1", sender_id="u1", text="Sylanne你好", now=1000.0)
+        signals = c.collect(
+            group_id="g1", sender_id="u1", text="Sylanne你好", now=1000.0
+        )
         self.assertTrue(signals.name_mentioned)
 
     def test_collect_detects_chinese_trigger_name(self):
         c = self._make_collector()
-        signals = c.collect(group_id="g1", sender_id="u1", text="小希来聊天", now=1000.0)
+        signals = c.collect(
+            group_id="g1", sender_id="u1", text="小希来聊天", now=1000.0
+        )
         self.assertTrue(signals.name_mentioned)
 
     def test_collect_no_name_mention(self):
@@ -94,7 +97,9 @@ class TestSocialFieldCollectorCollect(unittest.TestCase):
 
     def test_collect_at_bot(self):
         c = self._make_collector()
-        signals = c.collect(group_id="g1", sender_id="u1", text="@bot", is_at_bot=True, now=1000.0)
+        signals = c.collect(
+            group_id="g1", sender_id="u1", text="@bot", is_at_bot=True, now=1000.0
+        )
         self.assertTrue(signals.is_at_bot)
 
     def test_topic_relevance_with_overlap(self):
@@ -102,12 +107,16 @@ class TestSocialFieldCollectorCollect(unittest.TestCase):
         # First, simulate bot having replied about a topic
         c.notify_bot_replied("g1", "我喜欢猫咪和狗狗")
         # Now incoming message about same topic
-        signals = c.collect(group_id="g1", sender_id="u1", text="猫咪真可爱", now=time.time())
+        signals = c.collect(
+            group_id="g1", sender_id="u1", text="猫咪真可爱", now=time.time()
+        )
         self.assertGreater(signals.topic_relevance, 0.0)
 
     def test_topic_relevance_no_history(self):
         c = self._make_collector()
-        signals = c.collect(group_id="g1", sender_id="u1", text="猫咪真可爱", now=1000.0)
+        signals = c.collect(
+            group_id="g1", sender_id="u1", text="猫咪真可爱", now=1000.0
+        )
         self.assertAlmostEqual(signals.topic_relevance, 0.0)
 
     def test_continuation_strength_recent_reply(self):
@@ -152,8 +161,8 @@ class TestSocialFieldCollectorCollect(unittest.TestCase):
 # PhaseTransitionExpression social extension
 # ===========================================================================
 
-class TestPhaseTransitionSocial(unittest.TestCase):
 
+class TestPhaseTransitionSocial(unittest.TestCase):
     def test_effective_threshold_private_unchanged(self):
         expr = PhaseTransitionExpression(initial_threshold=0.6)
         # No social signals → private mode
@@ -187,7 +196,9 @@ class TestPhaseTransitionSocial(unittest.TestCase):
 
     def test_name_mentioned_reduces_threshold(self):
         expr = PhaseTransitionExpression(initial_threshold=0.6)
-        expr.set_social_params({"group_threshold_boost": 0.5, "sheaf_coupling": 0.3, "void_coupling": 0.3})
+        expr.set_social_params(
+            {"group_threshold_boost": 0.5, "sheaf_coupling": 0.3, "void_coupling": 0.3}
+        )
         signals_no_name = SocialSignals(is_group=True, name_mentioned=False)
         signals_name = SocialSignals(is_group=True, name_mentioned=True)
         expr.apply_social_signals(signals_no_name)
@@ -246,8 +257,8 @@ class TestPhaseTransitionSocial(unittest.TestCase):
 # SocialVoid
 # ===========================================================================
 
-class TestSocialVoid(unittest.TestCase):
 
+class TestSocialVoid(unittest.TestCase):
     def test_tick_accumulates_pressure(self):
         sv = SocialVoid()
         sv.group_activity = 0.5
@@ -316,8 +327,8 @@ class TestSocialVoid(unittest.TestCase):
 # VoidScarEngine.expression_drive() with social void
 # ===========================================================================
 
-class TestVoidScarEngineExpressionDrive(unittest.TestCase):
 
+class TestVoidScarEngineExpressionDrive(unittest.TestCase):
     def test_social_void_contributes_to_drive(self):
         engine = VoidScarEngine(n_dims=8)
         # Zero social void → baseline drive
@@ -350,8 +361,8 @@ class TestVoidScarEngineExpressionDrive(unittest.TestCase):
 # ComputationSpine social field params
 # ===========================================================================
 
-class TestComputationSpineSocialField(unittest.TestCase):
 
+class TestComputationSpineSocialField(unittest.TestCase):
     def test_apply_personality_sets_social_field_params(self):
         spine = ComputationSpine()
         personality = {
@@ -374,11 +385,25 @@ class TestComputationSpineSocialField(unittest.TestCase):
     def test_apply_personality_extraversion_lowers_group_boost(self):
         spine = ComputationSpine()
         # High extraversion → lower group_threshold_boost
-        spine.apply_personality({"extraversion": 0.9, "neuroticism": 0.5,
-                                 "conscientiousness": 0.5, "openness": 0.5, "agreeableness": 0.5})
+        spine.apply_personality(
+            {
+                "extraversion": 0.9,
+                "neuroticism": 0.5,
+                "conscientiousness": 0.5,
+                "openness": 0.5,
+                "agreeableness": 0.5,
+            }
+        )
         high_e_boost = spine._social_field_params["group_threshold_boost"]
-        spine.apply_personality({"extraversion": 0.1, "neuroticism": 0.5,
-                                 "conscientiousness": 0.5, "openness": 0.5, "agreeableness": 0.5})
+        spine.apply_personality(
+            {
+                "extraversion": 0.1,
+                "neuroticism": 0.5,
+                "conscientiousness": 0.5,
+                "openness": 0.5,
+                "agreeableness": 0.5,
+            }
+        )
         low_e_boost = spine._social_field_params["group_threshold_boost"]
         self.assertLess(high_e_boost, low_e_boost)
 
@@ -391,8 +416,15 @@ class TestComputationSpineSocialField(unittest.TestCase):
 
     def test_private_chat_no_social_modulation(self):
         spine = ComputationSpine()
-        spine.apply_personality({"extraversion": 0.5, "neuroticism": 0.5,
-                                 "conscientiousness": 0.5, "openness": 0.5, "agreeableness": 0.5})
+        spine.apply_personality(
+            {
+                "extraversion": 0.5,
+                "neuroticism": 0.5,
+                "conscientiousness": 0.5,
+                "openness": 0.5,
+                "agreeableness": 0.5,
+            }
+        )
         base_threshold = spine.expression.threshold
         # Apply non-group signals
         signals = SocialSignals(is_group=False)
@@ -401,8 +433,15 @@ class TestComputationSpineSocialField(unittest.TestCase):
 
     def test_private_chat_none_signals(self):
         spine = ComputationSpine()
-        spine.apply_personality({"extraversion": 0.5, "neuroticism": 0.5,
-                                 "conscientiousness": 0.5, "openness": 0.5, "agreeableness": 0.5})
+        spine.apply_personality(
+            {
+                "extraversion": 0.5,
+                "neuroticism": 0.5,
+                "conscientiousness": 0.5,
+                "openness": 0.5,
+                "agreeableness": 0.5,
+            }
+        )
         base_threshold = spine.expression.threshold
         spine.apply_social_signals(None)
         self.assertAlmostEqual(spine.expression.effective_threshold(), base_threshold)
@@ -412,8 +451,8 @@ class TestComputationSpineSocialField(unittest.TestCase):
 # Integration scenarios
 # ===========================================================================
 
-class TestIntegrationScenarios(unittest.TestCase):
 
+class TestIntegrationScenarios(unittest.TestCase):
     def test_silent_ticks_build_social_void_eventually_express(self):
         """10 silent ticks → social void builds → eventually should_express."""
         engine = VoidScarEngine(n_dims=8)
@@ -432,7 +471,9 @@ class TestIntegrationScenarios(unittest.TestCase):
                 expressed = True
                 break
 
-        self.assertTrue(expressed, "Social void should eventually push expression past threshold")
+        self.assertTrue(
+            expressed, "Social void should eventually push expression past threshold"
+        )
 
     def test_at_mention_immediate_express(self):
         """@mention in group → immediate should_express."""
@@ -448,16 +489,26 @@ class TestIntegrationScenarios(unittest.TestCase):
     def test_high_extraversion_lower_group_threshold(self):
         """High extraversion personality → lower group threshold → easier participation."""
         spine_extraverted = ComputationSpine()
-        spine_extraverted.apply_personality({
-            "extraversion": 0.9, "neuroticism": 0.3,
-            "conscientiousness": 0.5, "openness": 0.5, "agreeableness": 0.5,
-        })
+        spine_extraverted.apply_personality(
+            {
+                "extraversion": 0.9,
+                "neuroticism": 0.3,
+                "conscientiousness": 0.5,
+                "openness": 0.5,
+                "agreeableness": 0.5,
+            }
+        )
 
         spine_introverted = ComputationSpine()
-        spine_introverted.apply_personality({
-            "extraversion": 0.1, "neuroticism": 0.3,
-            "conscientiousness": 0.5, "openness": 0.5, "agreeableness": 0.5,
-        })
+        spine_introverted.apply_personality(
+            {
+                "extraversion": 0.1,
+                "neuroticism": 0.3,
+                "conscientiousness": 0.5,
+                "openness": 0.5,
+                "agreeableness": 0.5,
+            }
+        )
 
         # Apply group signals to both
         signals = SocialSignals(is_group=True)
@@ -473,10 +524,15 @@ class TestIntegrationScenarios(unittest.TestCase):
     def test_private_chat_invariance_full(self):
         """Private chat: SFPD reduces to standard L7 behavior."""
         spine = ComputationSpine()
-        spine.apply_personality({
-            "extraversion": 0.7, "neuroticism": 0.4,
-            "conscientiousness": 0.5, "openness": 0.5, "agreeableness": 0.5,
-        })
+        spine.apply_personality(
+            {
+                "extraversion": 0.7,
+                "neuroticism": 0.4,
+                "conscientiousness": 0.5,
+                "openness": 0.5,
+                "agreeableness": 0.5,
+            }
+        )
         base_threshold = spine.expression.threshold
 
         # No signals (private)
@@ -504,8 +560,8 @@ class TestIntegrationScenarios(unittest.TestCase):
 # Shadow Buffer
 # ===========================================================================
 
-class TestShadowBuffer(unittest.TestCase):
 
+class TestShadowBuffer(unittest.TestCase):
     def _make_collector(self, **config_overrides):
         config = {
             "sylanne_persona_name": "Sylanne",
@@ -582,9 +638,9 @@ class TestShadowBuffer(unittest.TestCase):
 
 
 class TestConversationBufferInjectContext(unittest.TestCase):
-
     def test_inject_context_prepends_messages(self):
         from sylanne_alpha.memory_system import ConversationBuffer
+
         buf = ConversationBuffer(session_key="test")
         buf.append("user", "current message")
         entries = [
@@ -601,6 +657,7 @@ class TestConversationBufferInjectContext(unittest.TestCase):
 
     def test_inject_context_empty_list(self):
         from sylanne_alpha.memory_system import ConversationBuffer
+
         buf = ConversationBuffer(session_key="test")
         buf.append("user", "msg")
         buf.inject_context([])
@@ -608,10 +665,104 @@ class TestConversationBufferInjectContext(unittest.TestCase):
 
     def test_inject_context_preserves_sender_id(self):
         from sylanne_alpha.memory_system import ConversationBuffer
+
         buf = ConversationBuffer(session_key="test")
         entries = [{"sender_id": "alice", "text": "hi", "ts": 1.0}]
         buf.inject_context(entries)
         self.assertEqual(buf.messages[0]["sender_id"], "alice")
+
+
+# ===========================================================================
+# AstrBot Group Context Detection
+# ===========================================================================
+
+
+class TestAstrBotGroupContextDetection(unittest.TestCase):
+    """Tests for _detect_astrbot_group_context adaptation logic."""
+
+    def _make_plugin(self, config=None):
+        import main
+
+        ctx = MagicMock()
+        ctx.register_web_api = MagicMock()
+        plugin = main.EmotionalStatePlugin(
+            context=ctx,
+            config=config or {},
+        )
+        return plugin
+
+    def test_detection_disabled_by_config(self):
+        plugin = self._make_plugin(
+            config={"sylanne_alpha_auto_detect_group_context": False}
+        )
+        # Even if context has the flag, detection should return False
+        plugin.context.get_config = MagicMock(
+            return_value={"enable_group_context": True}
+        )
+        self.assertFalse(plugin._detect_astrbot_group_context())
+
+    def test_detection_via_get_config(self):
+        plugin = self._make_plugin(
+            config={"sylanne_alpha_auto_detect_group_context": True}
+        )
+        plugin.context.get_config = MagicMock(
+            return_value={"enable_group_context": True}
+        )
+        self.assertTrue(plugin._detect_astrbot_group_context())
+
+    def test_detection_via_get_config_alt_key(self):
+        plugin = self._make_plugin(
+            config={"sylanne_alpha_auto_detect_group_context": True}
+        )
+        plugin.context.get_config = MagicMock(
+            return_value={"group_context_enabled": True}
+        )
+        self.assertTrue(plugin._detect_astrbot_group_context())
+
+    def test_detection_via_platform_settings(self):
+        plugin = self._make_plugin(
+            config={"sylanne_alpha_auto_detect_group_context": True}
+        )
+        # No get_config method
+        del plugin.context.get_config
+        plugin.context.platform_settings = {"group_context_enabled": True}
+        self.assertTrue(plugin._detect_astrbot_group_context())
+
+    def test_detection_via_config_manager(self):
+        plugin = self._make_plugin(
+            config={"sylanne_alpha_auto_detect_group_context": True}
+        )
+        del plugin.context.get_config
+        plugin.context.platform_settings = {}
+        config_mgr = MagicMock()
+        config_mgr.config = {"enable_group_context": True}
+        plugin.context.config_manager = config_mgr
+        self.assertTrue(plugin._detect_astrbot_group_context())
+
+    def test_detection_returns_false_when_not_enabled(self):
+        plugin = self._make_plugin(
+            config={"sylanne_alpha_auto_detect_group_context": True}
+        )
+        plugin.context.get_config = MagicMock(
+            return_value={"enable_group_context": False}
+        )
+        del plugin.context.platform_settings
+        del plugin.context.config_manager
+        self.assertFalse(plugin._detect_astrbot_group_context())
+
+    def test_detection_handles_exception_gracefully(self):
+        plugin = self._make_plugin(
+            config={"sylanne_alpha_auto_detect_group_context": True}
+        )
+        plugin.context.get_config = MagicMock(side_effect=RuntimeError("boom"))
+        self.assertFalse(plugin._detect_astrbot_group_context())
+
+    def test_detection_default_config_is_true(self):
+        """Default config enables auto-detection."""
+        plugin = self._make_plugin(config={})
+        # No AstrBot group context configured
+        plugin.context.get_config = MagicMock(return_value={})
+        self.assertFalse(plugin._detect_astrbot_group_context())
 
 
 if __name__ == "__main__":

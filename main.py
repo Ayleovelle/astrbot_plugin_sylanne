@@ -145,6 +145,23 @@ PROACTIVE_SCHEDULER_WAKE_DELAY_SECONDS = 30.0
 PROACTIVE_SCHEDULER_IDLE_DELAY_SECONDS = 1800.0
 
 
+def _safe_ensure_future(coro: Any, name: str = "task") -> "asyncio.Task[Any]":
+    """Wrap a coroutine in ensure_future with exception logging.
+
+    Prevents fire-and-forget tasks from silently dropping exceptions.
+    """
+
+    async def _wrapper() -> None:
+        try:
+            await coro
+        except asyncio.CancelledError:
+            pass
+        except Exception as e:
+            logger.error(f"Background task '{name}' failed: {e}", exc_info=True)
+
+    return asyncio.ensure_future(_wrapper())
+
+
 class _BackgroundPostJob:
     __slots__ = (
         "event",
@@ -543,6 +560,52 @@ class EmotionalStatePlugin(Star):
         except (TypeError, ValueError):
             return default
 
+    # ------------------------------------------------------------------
+    # AstrBot group context awareness detection
+    # ------------------------------------------------------------------
+    def _detect_astrbot_group_context(self) -> bool:
+        """Detect if AstrBot's built-in group chat context awareness is enabled.
+
+        When AstrBot handles group context injection itself, Sylanne should skip
+        its own shadow buffer injection to avoid duplicate context in the prompt.
+        Social field computation still runs regardless.
+        """
+        if not self._cfg_bool("sylanne_alpha_auto_detect_group_context", True):
+            return False
+        try:
+            context = getattr(self, "context", None)
+            if context is None:
+                return False
+            # Method 1: AstrBot Context.get_config() — returns global AstrBot config
+            get_config_fn = getattr(context, "get_config", None)
+            if callable(get_config_fn):
+                cfg = get_config_fn()
+                if isinstance(cfg, dict):
+                    # AstrBot uses "enable_group_context" or similar keys
+                    if cfg.get("enable_group_context") or cfg.get(
+                        "group_context_enabled"
+                    ):
+                        return True
+            # Method 2: Check platform_settings on context
+            platform_settings = getattr(context, "platform_settings", None)
+            if isinstance(platform_settings, dict):
+                if platform_settings.get(
+                    "group_context_enabled"
+                ) or platform_settings.get("enable_group_context"):
+                    return True
+            # Method 3: Check context._config or context.config_manager
+            config_mgr = getattr(context, "config_manager", None)
+            if config_mgr is not None:
+                global_cfg = getattr(config_mgr, "config", None)
+                if isinstance(global_cfg, dict):
+                    if global_cfg.get("enable_group_context") or global_cfg.get(
+                        "group_context_enabled"
+                    ):
+                        return True
+        except Exception:
+            pass
+        return False
+
     def _load_config_defaults(self) -> None:
         self._cfg_bool("sylanne_webui_enabled", False)
         self._cfg("sylanne_webui_host", "0.0.0.0")
@@ -643,6 +706,7 @@ class EmotionalStatePlugin(Star):
         self._cfg_bool("allow_relational_self_public_export", False)
         self._cfg_bool("integrated_self_memory_write_enabled", True)
         self._cfg("integrated_self_degradation_profile", "balanced")
+        self._cfg_bool("sylanne_alpha_auto_detect_group_context", True)
 
     def _start_webui_if_enabled(self) -> None:
         """Start the standalone WebUI server when enabled.
@@ -1954,10 +2018,7 @@ class EmotionalStatePlugin(Star):
             if len(self._hosts) >= self._MAX_HOSTS:
                 oldest_key = next(iter(self._hosts))
                 old_host = self._hosts.pop(oldest_key)
-                try:
-                    old_host.runtime.save(old_host.kernel)
-                except Exception:
-                    pass
+                self._persist_kernel_sync(oldest_key, old_host)
             cfg = (
                 self.config
                 if hasattr(self, "_config")
@@ -1993,12 +2054,9 @@ class EmotionalStatePlugin(Star):
                 )
                 if self._memory_system_has_content(memory_system):
                     host.kernel.body.memory["_memory_system"] = memory_system.to_dict()
-                    try:
-                        host.runtime.save(host.kernel)
-                    except Exception:
-                        pass
+                    self._persist_kernel_sync(session_key, host)
             self._hosts[session_key] = host
-            # Restore conversation buffer from disk if available
+            # Restore conversation buffer (file fallback; KV kept in sync via _persist_buffer)
             if session_key not in self._conversation_buffers:
                 buf_data = host.runtime.load_buffer(session_key)
                 if buf_data and isinstance(buf_data, dict):
@@ -2552,13 +2610,13 @@ class EmotionalStatePlugin(Star):
     async def pause_sylanne(self, *, session_key: str) -> dict[str, Any]:
         host = self._host(session_key)
         host.kernel.body.immunity.paused = True
-        host.runtime.save(host.kernel)
+        await self._persist_kernel(session_key, host)
         return host.diagnostics()
 
     async def resume_sylanne(self, *, session_key: str) -> dict[str, Any]:
         host = self._host(session_key)
         host.kernel.body.immunity.paused = False
-        host.runtime.save(host.kernel)
+        await self._persist_kernel(session_key, host)
         return host.diagnostics()
 
     async def cooldown_sylanne(self, *, session_key: str) -> dict[str, Any]:
@@ -2566,12 +2624,20 @@ class EmotionalStatePlugin(Star):
         host.kernel.body.immunity.cooldown = max(
             host.kernel.body.immunity.cooldown, 0.5
         )
-        host.runtime.save(host.kernel)
+        await self._persist_kernel(session_key, host)
         return host.diagnostics()
 
     async def reset_sylanne(self, *, session_key: str) -> dict[str, Any]:
         host = self._host(session_key)
         host.kernel = host.runtime.reset(session_key)
+        # Also persist the fresh kernel to KV
+        if self._has_kv_api():
+            try:
+                await self.put_kv_data(
+                    self._kernel_kv_key(session_key), host.kernel.snapshot()
+                )
+            except Exception:
+                pass
         return host.diagnostics()
 
     async def proactive_sylanne(
@@ -2609,7 +2675,7 @@ class EmotionalStatePlugin(Star):
         try:
             await self._on_llm_request_inner(event, request)
         except Exception as e:
-            logger.warning(f"Sylanne on_llm_request error: {e}")
+            logger.error(f"Sylanne on_llm_request error: {e}", exc_info=True)
             return
 
     def _session_lock(self, session_key: str) -> asyncio.Lock:
@@ -2769,7 +2835,9 @@ class EmotionalStatePlugin(Star):
                             intercept,
                         )
 
-                timer = asyncio.ensure_future(_process_after_delay())
+                timer = _safe_ensure_future(
+                    _process_after_delay(), name="fragment_debounce"
+                )
                 self._fragment_timers[session_key] = timer
                 self._background_tasks.append(timer)
                 timer.add_done_callback(
@@ -2815,7 +2883,7 @@ class EmotionalStatePlugin(Star):
                 async with self._session_lock(sk):
                     await self._background_observe_request(sk, txt)
 
-            task = asyncio.ensure_future(_locked_observe())
+            task = _safe_ensure_future(_locked_observe(), name="locked_observe")
             self._background_tasks.append(task)
             task.add_done_callback(
                 lambda t: (
@@ -2853,8 +2921,9 @@ class EmotionalStatePlugin(Star):
                             if first_sentence:
                                 first_sent = True
                                 plugin._stream_first_sent[session_key] = first_sentence
-                                t = asyncio.ensure_future(
-                                    plugin._send_first_sentence(origin, first_sentence)
+                                t = _safe_ensure_future(
+                                    plugin._send_first_sentence(origin, first_sentence),
+                                    name="stream_send_first_sentence",
                                 )
                                 plugin._background_tasks.append(t)
                                 t.add_done_callback(
@@ -2901,7 +2970,7 @@ class EmotionalStatePlugin(Star):
             host.kernel.body.observe_shadow_signal(
                 text="", flags=["unfinished_reply"], kind="interruption"
             )
-            host.runtime.save(host.kernel)
+            await self._persist_kernel(session_key, host)
             capped = unfinished[:_MAX_UNFINISHED_CONTEXT_CHARS]
             if len(unfinished) > _MAX_UNFINISHED_CONTEXT_CHARS:
                 capped += "\n[sylanne_trimmed_fragment]"
@@ -2955,8 +3024,9 @@ class EmotionalStatePlugin(Star):
                         results, max_items=3
                     )
                 # Trigger reconsolidation rewrite in background (non-blocking)
-                asyncio.ensure_future(
-                    self._reconsolidation_rewrite(session_key, memory_system)
+                _safe_ensure_future(
+                    self._reconsolidation_rewrite(session_key, memory_system),
+                    name="reconsolidation_rewrite",
                 )
 
         # User's current message — always last for recency priority
@@ -3117,15 +3187,15 @@ class EmotionalStatePlugin(Star):
             loop = asyncio.get_running_loop()
             timers[session_key] = loop.call_later(
                 5.0,
-                lambda sk=session_key: asyncio.ensure_future(
-                    self._do_buffer_persist(sk)
+                lambda sk=session_key: _safe_ensure_future(
+                    self._do_buffer_persist(sk), name="buffer_persist"
                 ),
             )
         except RuntimeError:
             pass
 
     async def _do_buffer_persist(self, session_key: str) -> None:
-        """Actually write buffer to disk (async-safe)."""
+        """Actually write buffer: KV storage (primary) with file I/O fallback."""
         self._buffer_persist_timers.pop(session_key, None)
         buf = self._conversation_buffers.get(session_key)
         if not buf:
@@ -3133,15 +3203,16 @@ class EmotionalStatePlugin(Star):
         host = self._hosts.get(session_key)
         if not host or not hasattr(host, "runtime"):
             return
-        try:
-            await asyncio.get_running_loop().run_in_executor(
-                None, host.runtime.save_buffer, session_key, buf.to_dict()
-            )
-        except Exception:
-            pass
+        buf_dict = buf.to_dict()
+        await self._persist_buffer(session_key, host, buf_dict)
 
     def _restore_buffers_on_boot(self) -> None:
-        """Restore conversation buffers from disk on plugin load."""
+        """Restore conversation buffers from file on plugin load (sync fallback).
+
+        KV-based buffer data is always kept in sync via _persist_buffer,
+        so file I/O here is equivalent. Async KV load is not possible in
+        this sync context.
+        """
         for sk, host in list(self._hosts.items()):
             if not hasattr(host, "runtime"):
                 continue
@@ -3285,6 +3356,7 @@ class EmotionalStatePlugin(Star):
                 session_key, ConversationBuffer(session_key=session_key)
             )
             # Group chat: inject shadow buffer (observed context) before user message
+            # Skip injection if AstrBot's built-in group context awareness handles it
             _is_group = self._social_field.is_group_context_by_key(session_key)
             _group_id = (
                 self._social_field.extract_group_id_from_key(session_key)
@@ -3292,11 +3364,20 @@ class EmotionalStatePlugin(Star):
                 else ""
             )
             if _is_group and _group_id:
+                _astrbot_group_context_active = self._detect_astrbot_group_context()
                 shadow_entries = self._social_field.drain_shadow_buffer(_group_id)
                 if shadow_entries and shadow_entries[-1]["text"][:200] == text[:200]:
                     shadow_entries = shadow_entries[:-1]
                 if shadow_entries:
-                    buf.inject_context(shadow_entries)
+                    if _astrbot_group_context_active:
+                        # AstrBot handles group context injection — skip shadow buffer
+                        # Social field computation still ran via collect() earlier
+                        logger.info(
+                            "Sylanne: AstrBot group context detected, "
+                            "skipping shadow buffer injection"
+                        )
+                    else:
+                        buf.inject_context(shadow_entries)
             buf.append("user", text)
             self._last_user_texts[session_key] = text[:120]
             self._schedule_buffer_persist(session_key)
@@ -3307,11 +3388,14 @@ class EmotionalStatePlugin(Star):
             # 30-day L2→L3 compression check (runs on flush path items already in L2)
             to_compress = memory_system.compress_check()
             if to_compress:
-                asyncio.ensure_future(self._compress_memories(session_key, to_compress))
+                _safe_ensure_future(
+                    self._compress_memories(session_key, to_compress),
+                    name="compress_memories",
+                )
 
             # Persist memory state periodically (every 10 ticks)
             host.kernel.body.memory["_memory_system"] = memory_system.to_dict()
-            host.runtime.save(host.kernel)
+            await self._persist_kernel(session_key, host)
             if memory_system._tick % 10 == 0:
                 await self._save_sylanne_memory_state(session_key, memory_system)
         except Exception:
@@ -3357,12 +3441,14 @@ class EmotionalStatePlugin(Star):
                         host.kernel.body.memory["_memory_system"] = (
                             memory_system.to_dict()
                         )
-                        host.runtime.save(host.kernel)
+                        await self._persist_kernel(session_key, host)
                         await self._save_sylanne_memory_state(
                             session_key, memory_system
                         )
-        except Exception:
-            pass
+        except Exception as e:
+            logger.error(
+                f"Memory compression failed for {session_key}: {e}", exc_info=True
+            )
 
     # ------------------------------------------------------------------
     # Memory v2: conversation buffer flush + consolidation + reconsolidation
@@ -3460,7 +3546,7 @@ class EmotionalStatePlugin(Star):
                     pass
 
             host.kernel.body.memory["_memory_system"] = memory_system.to_dict()
-            host.runtime.save(host.kernel)
+            await self._persist_kernel(session_key, host)
             await self._save_sylanne_memory_state(session_key, memory_system)
         except Exception:
             pass
@@ -3475,12 +3561,16 @@ class EmotionalStatePlugin(Star):
                         reason = buf.should_flush()
                         if reason:
                             await self._flush_conversation_to_l1(session_key)
-                except Exception:
-                    pass
+                except Exception as e:
+                    logger.error(
+                        f"Session idle check iteration error: {e}", exc_info=True
+                    )
         except asyncio.CancelledError:
             pass
-        except Exception:
-            pass
+        except Exception as e:
+            logger.error(
+                f"Session idle check loop terminated unexpectedly: {e}", exc_info=True
+            )
 
     async def _consolidation_loop(self) -> None:
         """每5分钟检查是否需要执行整理（6:00/18:00 或 L1 满 60 条）。"""
@@ -3495,12 +3585,16 @@ class EmotionalStatePlugin(Star):
                             continue
                         await self._run_consolidation(session_key, memory_system)
                         memory_system.mark_consolidation_done()
-                except Exception:
-                    pass
+                except Exception as e:
+                    logger.error(
+                        f"Consolidation loop iteration error: {e}", exc_info=True
+                    )
         except asyncio.CancelledError:
             pass
-        except Exception:
-            pass
+        except Exception as e:
+            logger.error(
+                f"Consolidation loop terminated unexpectedly: {e}", exc_info=True
+            )
 
     async def _run_consolidation(
         self, session_key: str, memory_system: MemorySystem
@@ -3571,10 +3665,12 @@ class EmotionalStatePlugin(Star):
             # Persist
             host = self._host(session_key)
             host.kernel.body.memory["_memory_system"] = memory_system.to_dict()
-            host.runtime.save(host.kernel)
+            await self._persist_kernel(session_key, host)
             await self._save_sylanne_memory_state(session_key, memory_system)
-        except Exception:
-            pass
+        except Exception as e:
+            logger.error(
+                f"Consolidation run failed for {session_key}: {e}", exc_info=True
+            )
 
     async def _reconsolidation_rewrite(
         self, session_key: str, memory_system: MemorySystem
@@ -3608,9 +3704,11 @@ class EmotionalStatePlugin(Star):
                     memory_system.rewrite_item(item.id, new_text.strip())
 
             host.kernel.body.memory["_memory_system"] = memory_system.to_dict()
-            host.runtime.save(host.kernel)
-        except Exception:
-            pass
+            await self._persist_kernel(session_key, host)
+        except Exception as e:
+            logger.error(
+                f"Reconsolidation rewrite failed for {session_key}: {e}", exc_info=True
+            )
 
     def _recent_context_lines(self, session_key: str) -> list[str]:
         """Get recent conversation lines for main assessor context."""
@@ -3816,7 +3914,10 @@ class EmotionalStatePlugin(Star):
                         "Sylanne life_sim_outreach fallback: context.send_message not available"
                     )
 
-        task = asyncio.ensure_future(_fallback_direct_send(best_key, reason, mood))
+        task = _safe_ensure_future(
+            _fallback_direct_send(best_key, reason, mood),
+            name="life_sim_outreach_fallback",
+        )
         self._background_tasks.append(task)
         task.add_done_callback(
             lambda t: (
@@ -3876,6 +3977,13 @@ class EmotionalStatePlugin(Star):
     # ------------------------------------------------------------------
     @filter.on_llm_response()
     async def on_llm_response(self, event: Any, response: Any) -> None:
+        try:
+            await self._on_llm_response_inner(event, response)
+        except Exception as e:
+            logger.error(f"Sylanne on_llm_response error: {e}", exc_info=True)
+            return
+
+    async def _on_llm_response_inner(self, event: Any, response: Any) -> None:
         if not hasattr(self, "_stream_first_sent"):
             self._stream_first_sent = {}
         if not hasattr(self, "_unfinished_replies"):
@@ -3987,8 +4095,9 @@ class EmotionalStatePlugin(Star):
         self.logger.info(
             f"Sylanne segmented reply queued: session={session_key} parts={len(parts)}"
         )
-        task = asyncio.ensure_future(
-            self._dispatch_segmented_parts(origin, parts, session_key=session_key)
+        task = _safe_ensure_future(
+            self._dispatch_segmented_parts(origin, parts, session_key=session_key),
+            name="dispatch_segmented_parts",
         )
         self._background_tasks.append(task)
         task.add_done_callback(
@@ -4001,8 +4110,9 @@ class EmotionalStatePlugin(Star):
         self._segmented_tasks[session_key] = task
 
         # Schedule observation off the hot path
-        obs_task = asyncio.ensure_future(
-            self._background_observe_response(session_key, cleaned)
+        obs_task = _safe_ensure_future(
+            self._background_observe_response(session_key, cleaned),
+            name="background_observe_response",
         )
         self._background_tasks.append(obs_task)
         obs_task.add_done_callback(
@@ -4068,8 +4178,9 @@ class EmotionalStatePlugin(Star):
             self._stream_first_sent[session_key] = first_sentence
             self._stream_buffers.pop(session_key, None)
             origin = str(getattr(event, "unified_msg_origin", "") or "")
-            task = asyncio.ensure_future(
-                self._send_first_sentence(origin, first_sentence)
+            task = _safe_ensure_future(
+                self._send_first_sentence(origin, first_sentence),
+                name="send_first_sentence",
             )
             self._background_tasks.append(task)
             task.add_done_callback(
@@ -5217,6 +5328,74 @@ class EmotionalStatePlugin(Star):
         safe = session_key.replace("/", "_").replace("\\", "_")
         return f"sylanne:bg_post_checkpoint:{safe}"
 
+    # ------------------------------------------------------------------
+    # KV-first persistence helpers (AstrBot official API migration)
+    # ------------------------------------------------------------------
+
+    def _kernel_kv_key(self, session_key: str) -> str:
+        safe = self._safe_session_key(session_key)
+        return f"sylanne_kernel_{safe}"
+
+    def _buffer_kv_key(self, session_key: str) -> str:
+        safe = self._safe_session_key(session_key)
+        return f"sylanne_buffer_{safe}"
+
+    def _has_kv_api(self) -> bool:
+        """Check if AstrBot KV storage API is available."""
+        return hasattr(self, "put_kv_data") and callable(self.put_kv_data)
+
+    async def _persist_kernel(self, session_key: str, host: SylanneAlphaHost) -> None:
+        """Save kernel state: KV storage (primary) with file I/O fallback."""
+        snapshot = host.kernel.snapshot()
+        if self._has_kv_api():
+            try:
+                await self.put_kv_data(self._kernel_kv_key(session_key), snapshot)
+            except Exception:
+                pass
+        # Always write to file as well (backwards compat / fallback)
+        try:
+            host.runtime.save(host.kernel)
+        except Exception:
+            pass
+
+    def _persist_kernel_sync(self, session_key: str, host: SylanneAlphaHost) -> None:
+        """Sync-only kernel save (for LRU eviction in non-async context)."""
+        try:
+            host.runtime.save(host.kernel)
+        except Exception:
+            pass
+
+    async def _persist_buffer(
+        self, session_key: str, host: SylanneAlphaHost, buf_dict: dict[str, Any]
+    ) -> None:
+        """Save conversation buffer: KV storage (primary) with file I/O fallback."""
+        if self._has_kv_api():
+            try:
+                await self.put_kv_data(self._buffer_kv_key(session_key), buf_dict)
+            except Exception:
+                pass
+        # Always write to file as well (backwards compat / fallback)
+        try:
+            host.runtime.save_buffer(session_key, buf_dict)
+        except Exception:
+            pass
+
+    async def _load_buffer_data(
+        self, session_key: str, host: SylanneAlphaHost
+    ) -> dict[str, Any] | None:
+        """Load conversation buffer: KV storage (primary) with file I/O fallback."""
+        if self._has_kv_api():
+            try:
+                data = await self.get_kv_data(self._buffer_kv_key(session_key), None)
+                if data and isinstance(data, dict):
+                    return data
+            except Exception:
+                pass
+        # Fallback to file I/O
+        return host.runtime.load_buffer(session_key)
+
+    # ------------------------------------------------------------------
+
     async def _load_state(
         self, session_key: str, persona_profile: Any = None, *, now: float = 0.0
     ) -> Any:
@@ -5530,7 +5709,7 @@ class EmotionalStatePlugin(Star):
         pass
 
     def _schedule_background_task(self, coro: Any, *, label: str = "") -> Any:
-        task = asyncio.ensure_future(coro)
+        task = _safe_ensure_future(coro, name=label or "background_task")
         self._background_tasks.append(task)
         task.add_done_callback(
             lambda t: (
@@ -6080,7 +6259,7 @@ class EmotionalStatePlugin(Star):
             await asyncio.sleep(debounce)
             await self._save_background_post_checkpoint(session_key)
 
-        task = asyncio.ensure_future(_debounced_save())
+        task = _safe_ensure_future(_debounced_save(), name="checkpoint_debounced_save")
         task._checkpoint_session = session_key
         checkpoint_tasks.add(task)
         task.add_done_callback(lambda t: checkpoint_tasks.discard(t))

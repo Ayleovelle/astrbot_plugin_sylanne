@@ -151,5 +151,11 @@
     "type": "float",
     "default": 3600.0,
     "hint": "因为生活事件主动找用户的最短间隔。默认 1 小时。"
+  },
+  "sylanne_alpha_auto_detect_group_context": {
+    "description": "自动检测 AstrBot 群聊上下文感知",
+    "type": "bool",
+    "default": true,
+    "hint": "默认开启。当 AstrBot 自带的群聊上下文感知功能已启用时，自动跳过 Sylanne 的 shadow buffer 注入以避免重复上下文。社交场计算不受影响。"
   }
 }
