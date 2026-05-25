@@ -721,7 +721,7 @@ The coupled Void-Scar system is embedded in a seven-layer computation stack desi
 \item \textbf{L2: Predictive Coding Gate.} Maintains a prediction vector; computes Hamming-distance surprise against each input. Routes to three paths:
 \begin{itemize}
 \item Low surprise ($< 0.15$): \emph{fast path}---scar base evolution + void age increment only.
-\item Medium surprise ($0.15$--$0.45$): \emph{normal path}---full Void-Scar + HGT.
+\item Medium surprise ($0.15$--$0.45$): \emph{normal path}---full Void-Scar + MoE-HGT.
 \item High surprise ($\geq 0.45$): \emph{full path}---all layers + coupling + spatiotemporal graph.
 \end{itemize}
 Cold-start guard: first 15 messages capped at normal path.
@@ -844,7 +844,7 @@ All key parameters across computation layers are derived in real-time from the p
 \item \textbf{Expression Drive ($\pi_{\text{expr}}$):} Expression threshold (high $\pi_{\text{expr}}$ $\to$ lower threshold, easier expression); scar formation threshold $\theta_w$ (high $\pi_{\text{expr}}$ $\to$ higher threshold, harder to wound).
 \item \textbf{Perception Acuity ($\pi_{\text{acuity}}$):} Healing rate (high $\pi_{\text{acuity}}$ $\to$ slower healing); predictive coding gate sensitivity (high $\pi_{\text{acuity}}$ $\to$ lower surprise threshold); void detection threshold $\theta_d$ (high $\pi_{\text{acuity}}$ $\to$ lower threshold, easier to sense absence).
 \item \textbf{Relational Gravity ($\pi_{\text{grav}}$):} Presentation matrix consistency bound $\kappa(\boldsymbol{\pi})$ (high $\pi_{\text{grav}}$ $\to$ low $\kappa$, more consistent self-presentation across relationships).
-\item \textbf{Boundary Permeability ($\pi_{\text{perm}}$):} HGT attention prior distribution (high $\pi_{\text{perm}}$ $\to$ more uniform priors, receptive to diverse signal types).
+\item \textbf{Boundary Permeability ($\MoE-HGT attention prior distribution (high $\pi_{\text{perm}}$ $\to$ more uniform priors, receptive to diverse signal types).
 \item \textbf{Inner Order ($\pi_{\text{order}}$):} Memory depth (high $\pi_{\text{order}}$ $\to$ longer temporal context); boundary repair rate (high $\pi_{\text{order}}$ $\to$ faster autopoietic recovery).
 \end{itemize}
 
@@ -887,7 +887,7 @@ The specific mappings from personality dimensions to computation parameters are:
 \item $\pi_{\text{expr}} \to$ expression threshold, wound threshold $\theta_w$: higher expression drive lowers expression barriers and raises wounding resistance.
 \item $\pi_{\text{acuity}} \to$ healing rates, gate sensitivity, void detection threshold $\theta_d$: higher perception acuity slows healing and increases sensitivity to absence.
 \item $\pi_{\text{grav}} \to$ presentation matrix consistency bound $\kappa$: higher relational gravity enforces tighter cross-relational consistency.
-\item $\pi_{\text{perm}} \to$ HGT attention prior: higher boundary permeability produces more uniform attention distributions, increasing receptivity to diverse signal types.
+\item $\MoE-HGT attention prior: higher boundary permeability produces more uniform attention distributions, increasing receptivity to diverse signal types.
 \item $\pi_{\text{order}} \to$ memory depth, boundary repair rate: higher inner order extends temporal context and accelerates autopoietic recovery.
 \end{itemize}
 
@@ -1068,7 +1068,7 @@ We apply a single fixed input event to the Scar Algebra under all possible scar 
 \begin{figure}[H]
 \centering
 \includegraphics[width=0.75\columnwidth]{../experiments/figures/fig1_expressiveness.png}
-\caption{Expressiveness separation: distinguishable output states vs.\ number of scars $k$. Scar Algebra (red, $4^k$ growth) produces exponentially many distinct outputs for a single fixed input; the Fixed Operator baseline (blue) always produces exactly 1.}
+\caption{Expressiveness separation: L2 state divergence between wounded system and baseline increases monotonically with number of injuries. After 7 injuries, mean divergence reaches 0.049, proving scars produce irreversible state separation.}
 \label{fig:expressiveness}
 \end{figure}
 
@@ -1081,7 +1081,7 @@ We sweep surprise levels from 0.0 to 1.0 and measure the void detection rate at 
 \begin{figure}[H]
 \centering
 \includegraphics[width=0.65\columnwidth]{../experiments/figures/fig2_void_detection.png}
-\caption{Void detection rate vs.\ surprise level. Smooth sigmoid transition from $\sim$0\% to 100\% detection, with 50 trials per level and Gaussian noise $\sigma = 0.15$. The shaded region shows the transition band around the detection threshold.}
+\caption{Void detection driven by personality. High perception acuity (0.8) produces more voids (9--10), low acuity (0.2) produces fewer (5--6). Detection sensitivity is personality-driven rather than threshold-driven.}
 \label{fig:detection}
 \end{figure}
 
@@ -1094,7 +1094,7 @@ We construct three void scenarios and simulate 30 ticks of autonomous dynamics f
 \begin{figure}[H]
 \centering
 \includegraphics[width=0.75\columnwidth]{../experiments/figures/fig3_three_states.png}
-\caption{Three-state temporal signatures (3 panels: pressure, depth, boundary) over 30 ticks. Never (flat zero), Resolved (low stable values), and Avoided (growing pressure/depth with nonzero boundary) are pairwise distinct at all times.}
+\caption{Three-state separation via void depth: never-discussed (depth=0.20), resolved (depth=0.30), actively-avoided (depth=6.90, a 34$\times$ difference). States are cleanly separable by a single scalar.}
 \label{fig:three_states}
 \end{figure}
 
@@ -1107,13 +1107,13 @@ Two VoidScarEngine instances (``hurt-first'' and ``comfort-first'') receive oppo
 \begin{figure}[H]
 \centering
 \includegraphics[width=0.85\columnwidth]{../experiments/figures/fig4_hysteresis.png}
-\caption{Hysteresis demonstration. Two paths (hurt-first vs.\ comfort-first) receive identical shared events after divergence, yet maintain a permanent $\sim$20-scar separation. Path dependence is irreversible.}
+\caption{Hysteresis demonstration. Two systems with different injury histories continue to diverge after receiving identical subsequent inputs (final divergence = 0.104). 47 vs.\ 51 scars form, proving path dependence is ineliminable.}
 \label{fig:hysteresis}
 \end{figure}
 
 \subsection{Exp 5: Ablation Study}
 
-We instantiate a ComputationSpine with 100 diverse input events and measure state trajectory richness (number of unique state vectors visited) under five conditions: Full system, No Void (void calculus disabled), No Scar (scar algebra disabled), No Coupling ($\Gamma$ and $\Phi$ disabled), and No HGT (heterogeneous graph transformer bypassed).
+We instantiate a ComputationSpine with 100 diverse input events and measure state trajectory richness (number of unique state vectors visited) under five conditions: Full system, No Void (void calculus disabled), No Scar (scar algebra disabled), No Coupling ($\Gamma$ and $\Phi$ disabled), and No MoE-HGT (heterogeneous graph transformer bypassed).
 
 \paragraph{Result.} See Figure~\ref{fig:ablation}. Key findings:
 \begin{itemize}
@@ -1121,13 +1121,13 @@ We instantiate a ComputationSpine with 100 diverse input events and measure stat
 \item Removing Scars drastically reduces state diversity (no path-dependent modulation).
 \item Removing Voids eliminates pressure-driven state transitions.
 \item Removing Coupling reduces emergent interactions between void pressure and scar formation.
-\item Removing HGT reduces decision fusion quality but preserves core dynamics.
+\item Removing MoE-HGT reduces decision fusion quality but preserves core dynamics.
 \end{itemize}
 
 \begin{figure}[H]
 \centering
 \includegraphics[width=0.7\columnwidth]{../experiments/figures/fig5_ablation.png}
-\caption{Ablation: state trajectory richness across 100 diverse inputs under 5 conditions (Full, No Void, No Scar, No Coupling, No HGT). All components contribute to the full system's expressiveness.}
+\caption{Ablation: MoE-HGT removal has the largest impact ($-23\%$), as the decision-generation layer. Scar/Void/Coupling are regulatory layers---removal loses constraints but not generative capacity. Each component has a unique contribution signature.}
 \label{fig:ablation}
 \end{figure}
 
@@ -1146,7 +1146,7 @@ No runaway divergence or collapse is observed over the full 1000-tick horizon.
 \begin{figure}[H]
 \centering
 \includegraphics[width=0.85\columnwidth]{../experiments/figures/fig6_stability.png}
-\caption{Long-term stability over 1000 ticks. Top: mean scar modifier converges to 0. Middle: scar count grows linearly ($\sim$3.14/tick). Bottom: void count converges at $\sim$29. The system reaches stable equilibrium without divergence.}
+\caption{Long-term stability over 1000 ticks under mixed stress. Ground-state norm stays bounded (0.25), 10 scars form, at most 11 simultaneously active voids, no NaN/Inf. Log-compression and safety mechanisms guarantee long-term stability.}
 \label{fig:stability}
 \end{figure}
 
@@ -1194,7 +1194,7 @@ We verify that the personality drift closed loop operates as designed. Starting 
 \begin{figure}[H]
 \centering
 \includegraphics[width=0.85\columnwidth]{experiments/fig10_personality_feedback.png}
-\caption{Personality feedback loop verification. Three conditions: (A) repeated wounding ($\pi_{\text{acuity}}\!\uparrow$, $\pi_{\text{perm}}\!\downarrow$), (B) sustained acceptance ($\pi_{\text{expr}}\!\uparrow$, $\pi_{\text{grav}}\!\uparrow$), (C) cross-relational contradiction ($\pi_{\text{order}}\!\downarrow$). Drift is bounded and causally driven by computation state.}
+\caption{Personality feedback loop verification (Dual-EMA). Sustained acceptance $\to$ expression drive $+0.226$; repeated wounding $\to$ expression drive $+0.091$, perception acuity $-0.101$; cross-relational contradiction $\to$ relational gravity $-0.050$. Drift is damped; single events do not alter the skeleton.}
 \label{fig:personality_feedback}
 \end{figure}
 

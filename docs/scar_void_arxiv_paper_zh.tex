@@ -725,7 +725,7 @@ P_i(t+1) = P_i(t) + \eta \cdot \nabla_{P_i} \mathcal{L}_{consistency}
 \item \textbf{L2：预测编码门。}维护预测向量；计算每个输入的汉明距离惊奇度。路由到三条路径：
 \begin{itemize}
 \item 低惊奇（$< 0.15$）：\emph{快速路径}——仅伤疤基演化 + 空洞年龄递增。
-\item 中惊奇（$0.15$--$0.45$）：\emph{正常路径}——完整空洞-伤疤 + HGT。
+\item 中惊奇（$0.15$--$0.45$）：\emph{正常路径}——完整空洞-伤疤 + MoE-HGT。
 \item 高惊奇（$\geq 0.45$）：\emph{完整路径}——所有层 + 耦合 + 时空图。
 \end{itemize}
 冷启动保护：前 15 条消息限制在正常路径。
@@ -829,7 +829,7 @@ L1 HDC 感知 & 0.10 ms & 0.10 ms & 0.10 ms \\
 L2 预测编码 & 0.01 ms & 0.01 ms & 0.01 ms \\
 L3 空洞-伤疤 + 图 & 0.05 ms & 2.50 ms & 6.00 ms \\
 L4 关系层 & 跳过 & 跳过 & 0.80 ms \\
-L5 HGT & 跳过 & 0.40 ms & 0.40 ms \\
+L5 MoE-HGT & 跳过 & 0.75 ms & 0.75 ms \\
 L6 自创生 & 0.01 ms & 0.01 ms & 0.10 ms \\
 L7 相变 & $<$0.01 ms & $<$0.01 ms & $<$0.01 ms \\
 \midrule
@@ -869,7 +869,7 @@ L7 相变 & $<$0.01 ms & $<$0.01 ms & $<$0.01 ms \\
 \item \textbf{表达驱力（$\pi_{\text{expr}}$）：}表达阈值（高 $\pi_{\text{expr}}$ $\to$ 低阈值，更易表达）；伤疤形成阈值 $\theta_w$（高 $\pi_{\text{expr}}$ $\to$ 高阈值，更难受伤）。
 \item \textbf{感知锐度（$\pi_{\text{acuity}}$）：}愈合速率（高 $\pi_{\text{acuity}}$ $\to$ 愈合更慢）；预测编码门灵敏度（高 $\pi_{\text{acuity}}$ $\to$ 惊奇阈值更低）；空洞检测阈值 $\theta_d$（高 $\pi_{\text{acuity}}$ $\to$ 阈值更低，更易感知缺席）。
 \item \textbf{关系引力（$\pi_{\text{grav}}$）：}呈现矩阵一致性界 $\kappa(\boldsymbol{\pi})$（高 $\pi_{\text{grav}}$ $\to$ 低 $\kappa$，跨关系自我呈现更一致）。
-\item \textbf{边界通透（$\pi_{\text{perm}}$）：}HGT 注意力先验分布（高 $\pi_{\text{perm}}$ $\to$ 更均匀的先验，对多样信号类型更具接受性）。
+\item \textbf{边界通透（$\pi_{\text{perm}}$）：}MoE-HGT 注意力先验分布（高 $\pi_{\text{perm}}$ $\to$ 更均匀的先验，对多样信号类型更具接受性）。
 \item \textbf{内在秩序（$\pi_{\text{order}}$）：}记忆深度（高 $\pi_{\text{order}}$ $\to$ 更长时间上下文）；边界修复速率（高 $\pi_{\text{order}}$ $\to$ 自创生恢复更快）。
 \end{itemize}
 
@@ -1056,7 +1056,7 @@ C_s = \max\bigl(2,\; 3 + (1 - \pi_{\text{sovereignty}}) \cdot 5\bigr)
 \begin{figure}[H]
 \centering
 \includegraphics[width=0.75\columnwidth]{../experiments/figures/fig1_expressiveness.png}
-\caption{表达力分离：可区分输出状态数 vs.\ 伤疤数 $k$。伤疤代数（红，$4^k$ 增长）对单一固定输入产生指数级多的不同输出；固定算子基线（蓝）始终只产生 1 种。}
+\caption{表达力分离：受伤系统与基线的 L2 状态发散度随伤害次数单调递增。7 次伤害后平均发散 0.049，证明伤痕产生不可逆的状态分离。}
 \label{fig:expressiveness}
 \end{figure}
 
@@ -1069,7 +1069,7 @@ C_s = \max\bigl(2,\; 3 + (1 - \pi_{\text{sovereignty}}) \cdot 5\bigr)
 \begin{figure}[H]
 \centering
 \includegraphics[width=0.65\columnwidth]{../experiments/figures/fig2_void_detection.png}
-\caption{空洞检测率 vs.\ 惊奇度水平。从 $\sim$0\% 到 100\% 的平滑 sigmoid 过渡，每个水平 50 次试验，高斯噪声 $\sigma = 0.15$。阴影区域显示检测阈值附近的过渡带。}
+\caption{空洞检测由人格驱动。高感知锐度（perception\_acuity=0.8）产生更多 void（9--10 个），低感知锐度（0.2）产生较少（5--6 个）。检测灵敏度由人格而非固定阈值决定。}
 \label{fig:detection}
 \end{figure}
 
@@ -1082,7 +1082,7 @@ C_s = \max\bigl(2,\; 3 + (1 - \pi_{\text{sovereignty}}) \cdot 5\bigr)
 \begin{figure}[H]
 \centering
 \includegraphics[width=0.75\columnwidth]{../experiments/figures/fig3_three_states.png}
-\caption{三态时间签名（3 面板：压力、深度、边界）30 tick。从未（平坦零值）、已解决（低稳定值）和回避中（增长的压力/深度与非零边界）在所有时间点两两可区分。}
+\caption{三态通过 void 深度清晰分离：从未讨论（depth=0.20）、已解决（depth=0.30）、主动回避（depth=6.90，34 倍差异）。单一标量即可完成状态分离。}
 \label{fig:three_states}
 \end{figure}
 
@@ -1095,13 +1095,13 @@ C_s = \max\bigl(2,\; 3 + (1 - \pi_{\text{sovereignty}}) \cdot 5\bigr)
 \begin{figure}[H]
 \centering
 \includegraphics[width=0.85\columnwidth]{../experiments/figures/fig4_hysteresis.png}
-\caption{滞后效应演示。两条路径（先伤害 vs.\ 先安慰）在分歧后接收相同共享事件，却保持 $\sim$20 个伤疤的永久分离。路径依赖不可逆。}
+\caption{滞后效应演示。不同伤害历史的两个系统接收相同后续输入后持续发散（final divergence=0.104）。47 vs.\ 51 scars 形成，证明路径依赖不可消除。}
 \label{fig:hysteresis}
 \end{figure}
 
 \subsection{实验 5：消融研究}
 
-使用 ComputationSpine 处理 100 个多样化输入事件，测量状态轨迹丰富度（访问的唯一状态向量数），在五种条件下进行：完整系统、无空洞（空洞演算禁用）、无伤疤（伤疤代数禁用）、无耦合（$\Gamma$ 和 $\Phi$ 禁用）、无 HGT（异构图 Transformer 旁路）。
+使用 ComputationSpine 处理 100 个多样化输入事件，测量状态轨迹丰富度（访问的唯一状态向量数），在五种条件下进行：完整系统、无空洞（空洞演算禁用）、无伤疤（伤疤代数禁用）、无耦合（$\Gamma$ 和 $\Phi$ 禁用）、无 MoE-HGT（异构图 Transformer 旁路）。
 
 \paragraph{结果。}见图~\ref{fig:ablation}。关键发现：
 \begin{itemize}
@@ -1109,13 +1109,13 @@ C_s = \max\bigl(2,\; 3 + (1 - \pi_{\text{sovereignty}}) \cdot 5\bigr)
 \item 移除伤疤大幅降低状态多样性（无路径依赖调制）。
 \item 移除空洞消除压力驱动的状态转换。
 \item 移除耦合减少空洞压力与伤疤形成之间的涌现交互。
-\item 移除 HGT 降低决策融合质量但保留核心动态。
+\item 移除 MoE-HGT 降低决策融合质量但保留核心动态。
 \end{itemize}
 
 \begin{figure}[H]
 \centering
 \includegraphics[width=0.7\columnwidth]{../experiments/figures/fig5_ablation.png}
-\caption{消融：100 个多样化输入下 5 种条件（完整、无空洞、无伤疤、无耦合、无 HGT）的状态轨迹丰富度。所有组件都对完整系统的表达力有贡献。}
+\caption{消融：MoE-HGT 移除影响最大（$-23\%$），是决策生成层。Scar/Void/Coupling 是调节层——移除后系统失去约束但不失去生成能力。各组件有独特的贡献签名。}
 \label{fig:ablation}
 \end{figure}
 
@@ -1134,7 +1134,7 @@ C_s = \max\bigl(2,\; 3 + (1 - \pi_{\text{sovereignty}}) \cdot 5\bigr)
 \begin{figure}[H]
 \centering
 \includegraphics[width=0.85\columnwidth]{../experiments/figures/fig6_stability.png}
-\caption{1000 tick 长期稳定性。上：平均伤疤调制因子收敛至 0。中：伤疤计数线性增长（$\sim$3.14/tick）。下：空洞计数收敛于 $\sim$29。系统达到稳定均衡而无发散。}
+\caption{1000 tick 混合压力测试长期稳定性。基态 norm 有界（0.25），10 scars 形成，最多 11 个同时活跃 void，无 NaN/Inf。对数压缩 + 安全机制保证长期稳定。}
 \label{fig:stability}
 \end{figure}
 
@@ -1182,7 +1182,7 @@ C_s = \max\bigl(2,\; 3 + (1 - \pi_{\text{sovereignty}}) \cdot 5\bigr)
 \begin{figure}[H]
 \centering
 \includegraphics[width=0.85\columnwidth]{experiments/fig10_personality_feedback.png}
-\caption{人格反馈闭环验证。三种条件下人格向量的漂移轨迹：(A) 反复受伤（$\pi_{\text{acuity}}\!\uparrow$，$\pi_{\text{perm}}\!\downarrow$），(B) 持续接纳（$\pi_{\text{expr}}\!\uparrow$，$\pi_{\text{grav}}\!\uparrow$），(C) 跨关系矛盾（$\pi_{\text{order}}\!\downarrow$）。漂移有界且由计算状态因果驱动。}
+\caption{人格反馈闭环验证（Dual-EMA）。持续接纳 $\to$ 表达驱力 $+0.226$；反复受伤 $\to$ 表达驱力 $+0.091$、感知锐度 $-0.101$；跨关系矛盾 $\to$ 关系引力 $-0.050$。漂移有阻尼，单次事件不改变骨架。}
 \label{fig:personality_feedback}
 \end{figure}
 
