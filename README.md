@@ -343,6 +343,23 @@ $$\dim H^1(K, \mathcal{F}) > 0 \iff \text{存在不可调和的跨关系矛盾}$
 | **决策** | 规则 + 权重 + 状态机 | MoE-HGT（多专家混合 + 异构图 Transformer） |
 | **反馈** | 隐式衰减 | 显式 accepted/ignored/rejected |
 
+### 与 Embodiment-1.0.0 相比
+
+| 维度 | 1.0.0 | 1.2.0 |
+| --- | --- | --- |
+| **计算层** | 6 层（无 MoE） | 7 层 + MoE-HGT 三阶段决策融合 |
+| **人格系统** | Big Five 静态，单向传导 | Embodiment 五维 + Dual-EMA 双向闭环 |
+| **安全机制** | 无 | 7 项（主权免疫/保护性解离/时间感知healing/void限流/numbed下限/振荡检测/漂移限速） |
+| **Scar modifier** | 无界乘积（指数爆炸） | 对数压缩 + 人格上限 |
+| **Void 创建** | 逻辑失效（阈值 bug） | 修复 + 冷却期 + 阻力递增 |
+| **Boundary L6** | 只在 full path 扰动（10% 消息） | 全路径扰动（fast 10%/normal 30%/full 100%） |
+| **MoE 加固** | 无 | scar token 对数压缩 + load balance + decision clamp |
+| **参数人格化** | 部分（~5 个） | 全部（26+ 个参数由人格驱动） |
+| **WebUI** | 无 | 计算日志 + 配置面板 + 记忆池观测 |
+| **对话持久化** | 无 | buffer 防抖异步写入，重载不丢上下文 |
+| **本地延迟** | ~3ms（6 层，部分跳过） | ~10ms（7 层全跑，瓶颈 L1 HDC） |
+| **Bug 修复** | — | 50+ 个计算层 bug |
+
 ---
 
 ## 理论贡献
