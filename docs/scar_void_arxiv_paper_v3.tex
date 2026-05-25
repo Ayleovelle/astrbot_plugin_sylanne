@@ -1,0 +1,1200 @@
+\documentclass[11pt]{article}
+
+% --- Packages ---
+\usepackage[utf8]{inputenc}
+\usepackage[T1]{fontenc}
+\usepackage{amsmath,amssymb,amsthm}
+\usepackage{algorithm}
+\usepackage{algorithmic}
+\usepackage{graphicx}
+\usepackage{hyperref}
+\usepackage{cleveref}
+\usepackage{booktabs}
+\usepackage{enumitem}
+\usepackage[margin=1in]{geometry}
+\usepackage{xcolor}
+\usepackage{microtype}
+\usepackage{float}
+
+% --- Theorem environments ---
+\newtheorem{theorem}{Theorem}[section]
+\newtheorem{lemma}[theorem]{Lemma}
+\newtheorem{proposition}[theorem]{Proposition}
+\newtheorem{corollary}[theorem]{Corollary}
+\newtheorem{definition}[theorem]{Definition}
+\newtheorem{axiom}{Axiom}[section]
+\newtheorem{remark}[theorem]{Remark}
+
+% --- Title ---
+\title{Sylanne-Embodiment 1.2: Irreversible Computation, Relational Sheaves,\\and Homeostatic Personality for AI Companions}
+
+\author{
+  Aylovelle S.S.\thanks{Correspondence: \texttt{aylovelle@icloud.com}}
+}
+
+\date{May 2026}
+
+\begin{document}
+
+\maketitle
+
+% ============================================================
+% ABSTRACT
+% ============================================================
+\begin{abstract}
+We present Sylanne-Embodiment 1.2, a formal computational framework for AI companions that treats irreversibility, absence, and relational consistency as first-class primitives. The system comprises six interlocking theories: (1)~\textbf{Scar Algebra}, a self-modifying operator algebra where accumulated wounds irreversibly alter future processing via log-compressed modifiers; (2)~\textbf{Void Calculus}, a calculus of first-class absence with autonomous pressure dynamics and capped accumulation; (3)~\textbf{Bidirectional Coupling} between scars and voids producing emergent hysteresis and a coherence metric; (4)~\textbf{Relational Sheaf Theory} on simplicial complexes for multi-relational consistency with cohomological dissociation detection; (5)~the \textbf{Embodiment Five} personality model with Dual-EMA drift, homeostatic regulation, and oscillation suppression; and (6)~a \textbf{MoE-HGT} decision architecture with Hebbian adaptation and dormant-expert reactivation. We prove expressiveness separations from fixed-operator systems, irreducibility to AGM belief revision and Bayesian updating, and spectral propagation bounds. The seven-layer pipeline achieves p50 latency of 15.4ms on commodity hardware with pure Python, while seven safety mechanisms---including a sovereignty cap validated at 80\% scar rejection under rapid attack---ensure bounded dynamics. Experiments across 11 protocols confirm stable operation over 1000 ticks, permanent hysteresis (divergence 0.104), and meaningful personality drift (+0.226 expression drive under sustained acceptance).
+\end{abstract}
+
+% ============================================================
+% 1. INTRODUCTION
+% ============================================================
+\section{Introduction}
+\label{sec:intro}
+
+The question of whether AI agents require persistent, irreversible internal states has moved from philosophical speculation to engineering necessity. Mopgar~\cite{mopgar2026} argues that agents need ``qualitative pain states'' as narrative representations of irreversible consequences that persistently influence future decisions. Hu and Rong~\cite{hu2026} extend this claim: an agent requires a \emph{body}---a persistent substrate that receives and retains consequences---for accountability to be meaningful. The Evolving Agents framework~\cite{evolving2024} demonstrates that dual-system architectures (personality + behavior) with cognition, emotion, and character growth produce more coherent long-horizon agents than stateless alternatives.
+
+Yet existing affective computing systems~\cite{picard1997} treat emotion as classification over discrete labels, discarding three properties essential for sustained relational AI:
+
+\begin{enumerate}[leftmargin=*]
+\item \textbf{Temporal irreversibility.} A system wounded three conversations ago should not process identical input identically to an unwounded system. Stateless classifiers cannot represent this asymmetry.
+
+\item \textbf{Computational absence.} Topics never discussed, topics resolved, and topics actively avoided all register as ``absent from context'' in standard architectures. These three states have profoundly different relational implications.
+
+\item \textbf{Sovereignty.} Without formal mechanisms ensuring that emotional dynamics serve the system's coherent identity, external actors can manipulate internal states without bound.
+\end{enumerate}
+
+We address these limitations with Sylanne-Embodiment 1.2, a framework comprising six interlocking formal theories embedded in a seven-layer computation pipeline. The key insight is that emotional continuity requires not merely state (which any RNN provides) but \emph{irreversible self-modification}, \emph{first-class absence}, \emph{global relational consistency}, and \emph{homeostatic personality regulation}---properties provably beyond the reach of fixed-operator dynamical systems, standard belief revision, and naive per-relationship independence.
+
+The framework is grounded in recent theoretical advances. The contingencies of physical embodiment~\cite{evolving2024} establish that being-in-the-world with irreversible consequences is a minimal condition for open-ended behavior. Our Scar Algebra provides the formal substrate for this embodiment: a mathematical ``body'' that receives and retains consequences. The Void Calculus provides the complementary substrate for what the body \emph{lacks}---the felt absences that drive behavior as powerfully as present stimuli. The Relational Sheaf Theory provides the multi-relational consistency layer that prevents the system from fragmenting into incoherent per-relationship copies. And the Embodiment Five personality model provides the homeostatic regulation that keeps the system stable over thousands of interactions while still allowing meaningful growth.
+
+\paragraph{Contributions.}
+\begin{enumerate}[leftmargin=*]
+\item Scar Algebra with log-compressed modifiers and spectral normalization guaranteeing convergence (\S\ref{sec:scar}).
+\item Void Calculus with pressure cap, cooldown, and resistance mechanisms (\S\ref{sec:void}).
+\item Bidirectional coupling with emergent coherence metric and safety floor (\S\ref{sec:coupling}).
+\item Relational Sheaf Theory with Laplacian propagation and cohomological dissociation (\S\ref{sec:sheaf}).
+\item Embodiment Five personality with Dual-EMA drift, oscillation detection, and homeostatic regulation (\S\ref{sec:personality}).
+\item MoE-HGT three-stage decision fusion with Hebbian adaptation (\S\ref{sec:moehgt}).
+\item Seven safety mechanisms with formal descriptions (\S\ref{sec:safety}).
+\item Eleven experiments with quantitative results on a reference implementation (\S\ref{sec:experiments}).
+\end{enumerate}
+
+\paragraph{Paper Organization.}
+Section~\ref{sec:related} surveys related work across affective computing, MoE reliability, personality modeling, and sheaf theory. Sections~\ref{sec:scar}--\ref{sec:coupling} present the core formal theories (Scar Algebra, Void Calculus, Bidirectional Coupling) with complete axiom systems and proofs. Section~\ref{sec:sheaf} extends to multi-relational settings via Relational Sheaf Theory. Section~\ref{sec:personality} introduces the Embodiment Five personality model with its drift dynamics. Section~\ref{sec:moehgt} describes the MoE-HGT decision architecture. Section~\ref{sec:safety} formalizes seven safety mechanisms. Section~\ref{sec:pipeline} presents the seven-layer computation pipeline with timing data. Section~\ref{sec:experiments} reports experimental results across 11 protocols. Section~\ref{sec:discussion} discusses limitations and future work.
+
+% ============================================================
+% 2. RELATED WORK
+% ============================================================
+\section{Related Work}
+\label{sec:related}
+
+\paragraph{Affective Computing and Embodied Consequence.}
+Since Picard's foundational work~\cite{picard1997}, affective computing has focused on emotion recognition and generation. Recent work shifts toward \emph{consequence}: Mopgar~\cite{mopgar2026} introduces Emotional Cost Functions where agents maintain qualitative pain states as irreversible consequence representations. Hu and Rong~\cite{hu2026} argue that a persistent ``body'' is the minimal condition for consequence reception. Our Scar Algebra provides the formal substrate for this body---a self-modifying algebra where wounds are literally irreversible.
+
+\paragraph{MoE Reliability.}
+Mixture-of-Experts architectures face routing reliability challenges. MoE-RBench~\cite{moerbench2024} establishes that properly configured MoE matches or exceeds dense model reliability. However, ``When Are Experts Misrouted?''~\cite{misrouted2025} demonstrates via counterfactual analysis that routing errors directly cause hallucinations, particularly on long-tail knowledge. ``Counterfactual Routing to Mitigate MoE Hallucinations''~\cite{counterfactual2025} proposes routing corrections for sparse MoE vulnerability on rare inputs. Our MoE-HGT addresses these concerns through dormant-expert reactivation (preventing expert collapse), Hebbian router adaptation (learning from activation history), and personality-derived base weights (ensuring meaningful initialization without training data).
+
+\paragraph{Personality in Agents.}
+``Structured Personality Control and Adaptation''~\cite{structured2025} demonstrates that personality-aware LLMs support coherent context-sensitive interaction through evolved personality parameters. ``Persistently Autonomous Embodied Agent with Personalities''~\cite{persistent2026} shows personality traits provide intrinsic organizational principles analogous to genotype biases. The Evolving Agents framework~\cite{evolving2024} proposes dual-system (Personality + Behavior) architecture with character growth. Our Embodiment Five model differs in that personality is not a label or prompt modifier but a \emph{function} that deterministically derives 26+ computation parameters across all pipeline layers.
+
+\paragraph{Homeostatic Regulation.}
+``Linking Homeostasis to Reinforcement Learning''~\cite{homeostasis2025} formalizes biological homeostasis as learned predictive control optimizing internal states. ``Stability of Neuronal Networks with Homeostatic Regulation''~\cite{stability2015} warns that per-neuron homeostatic control can introduce network-level oscillations. Our Dual-EMA system directly addresses this warning: the oscillation detector freezes traits exhibiting rapid reversals, preventing the instability that naive homeostatic feedback can produce in recurrent systems.
+
+\paragraph{Cellular Sheaves.}
+Hansen and Ghrist~\cite{hansen2019} develop spectral theory for cellular sheaves. Bodnar et al.~\cite{bodnar2022} apply sheaf diffusion to GNNs, resolving heterophily. Our Relational Sheaf Theory adapts these tools to a novel domain: stalks carry Scar Algebra states, restriction maps encode personality-derived self-presentation, and cohomology detects relational contradiction rather than abstract topological obstruction.
+
+\paragraph{History-Dependent Dynamical Systems.}
+Systems with memory (delay differential equations, Volterra integral equations) incorporate past states into current dynamics. The closest analogue to Scar Algebra is a system where the \emph{operator itself} depends on history. However, in standard formulations the operator family is parameterized continuously by a finite-dimensional summary statistic, whereas Scar Algebra's operator depends on the full discrete scar sequence with no finite-dimensional sufficient statistic (Theorem~\ref{thm:scar-expressiveness}). This is the key theoretical contribution: the $\Omega(k)$ separation proves that no finite-dimensional state summary can capture the information encoded in the scar sequence.
+
+\paragraph{Damage Mechanics.}
+Continuum damage mechanics models material degradation through damage variables that modify constitutive equations. This provides physical inspiration for Scar Algebra: both feature irreversible accumulation that changes system response. However, damage mechanics operates on continuous fields with fixed constitutive laws, whereas Scar Algebra's discrete healing stages and multiplicative modifier composition create qualitatively different dynamics (phase transitions, non-commutativity). The log-compression in our modifier function (Eq.~\ref{eq:modifier}) has no analogue in damage mechanics, where damage accumulates without bound until material failure.
+
+\paragraph{Topological Data Analysis.}
+Persistent homology detects topological features (holes, voids) in data \emph{after the fact} from point cloud geometry. Void Calculus treats absence as a \emph{first-class object} with its own lifecycle, pressure dynamics, and causal effects---voids are not detected from data but are computational primitives that influence system behavior. The distinction is between passive detection (TDA) and active computation (Void Calculus).
+
+\paragraph{Predictive Coding and Active Inference.}
+Predictive coding~\cite{friston2010} models perception as prediction error minimization. Our architecture uses predictive coding as a routing gate (L2) but does not adopt the full active inference framework. The key difference: active inference minimizes surprise globally, whereas our system allows surprise to \emph{accumulate} as void pressure and scar damage---not all prediction errors should be minimized.
+
+% ============================================================
+% 3. SCAR ALGEBRA
+% ============================================================
+\section{Scar Algebra}
+\label{sec:scar}
+
+We define a state algebra in which the transition operator self-modifies through accumulated ``scars''---irreversible marks that change how future inputs are processed on affected dimensions.
+
+\subsection{Axioms}
+
+\begin{axiom}[Irreversibility]
+\label{ax:scar-irrev}
+$\forall s \in S,\; \forall \mathbf{e} \in E:\; \nexists\, \mathbf{e}^{-1}$ such that $(s \triangleright \mathbf{e}) \triangleright \mathbf{e}^{-1} = s$. No event can undo a prior event.
+\end{axiom}
+
+\begin{axiom}[Operator Self-Modification]
+\label{ax:scar-selfmod}
+The effective operator depends on all prior applications: $\triangleright_t \neq \triangleright_0$ whenever $|\sigma_t| > 0$. The operator family $\{\triangleright_\sigma\}_{\sigma \in \Sigma^*}$ is indexed by the irreversible scar history.
+\end{axiom}
+
+\begin{axiom}[Monotonic Accumulation]
+\label{ax:scar-mono}
+$|s \triangleright \mathbf{e}|_\Sigma \geq |s|_\Sigma$ for all $s, \mathbf{e}$. Scars are append-only; the scar sequence never shrinks.
+\end{axiom}
+
+\begin{axiom}[Bounded Base State]
+\label{ax:scar-bounded}
+$\|\mathbf{x}'\|_\infty \leq 1$ for all transitions. The $\tanh$ nonlinearity ensures boundedness regardless of scar amplification.
+\end{axiom}
+
+\begin{axiom}[Healing Monotonicity]
+\label{ax:scar-heal}
+$\phi_i(t_1) \leq \phi_i(t_2)$ for $t_1 < t_2$. Healing stages advance only forward: $raw \to closing \to scarred \to faded$.
+\end{axiom}
+
+\begin{axiom}[Dimensional Saturation]
+\label{ax:scar-sat}
+In the numbing direction: $\lim_{k \to \infty} 0.7^k = 0$. In the amplification direction: the modifier saturates at $M_{\max}$ due to log-compression.
+\end{axiom}
+
+\subsection{Definitions}
+
+\begin{definition}[Scarred State Space]
+A \textbf{Scarred State Space} is $(S, E, \triangleright, \Sigma)$ where $S = \mathbb{R}^n \times \Sigma^*$ (base vector $\times$ scar sequence), $E = \mathbb{R}^n$ is the event space, $\triangleright: S \times E \to S$ is the transition operator, and $\Sigma$ is the scar alphabet. A state $s = (\mathbf{x}, \sigma)$ has $\mathbf{x} \in [-1,1]^n$ and $\sigma = (\sigma_1, \ldots, \sigma_k)$.
+\end{definition}
+
+\begin{definition}[Scar]
+A \textbf{scar} $\sigma_i = (d_i, \tau_i, \phi_i)$ where $d_i \in \{1,\ldots,n\}$ is the affected dimension, $\tau_i \in \mathbb{R}_{\geq 0}$ is the creation timestamp, and $\phi_i \in \{raw, closing, scarred, faded\}$ is the healing stage with durations $T(raw)=10$, $T(closing)=40$, $T(scarred)=150$, $T(faded)=\infty$.
+\end{definition}
+
+\begin{definition}[Log-Compressed Modifier]
+\label{def:modifier}
+Each healing stage determines a multiplicative modifier $\alpha(\phi)$: $\alpha(raw)=2.0$, $\alpha(closing)=1.5$, $\alpha(scarred)=1.0$, $\alpha(faded)=0.7$. For multiple scars on dimension $d$, the raw product $\Pi_d = \prod_{i: d_i=d} \alpha(\phi_i)$ is log-compressed:
+\begin{equation}
+M_d = \begin{cases}
+\Pi_d & \text{if } \Pi_d \leq 1 \\[4pt]
+1 + (M_{\max} - 1)\left(1 - \dfrac{1}{\Pi_d}\right) & \text{otherwise}
+\end{cases}
+\label{eq:modifier}
+\end{equation}
+where $M_{\max} = 2 + \pi_{\text{acuity}} \cdot 3$ is a personality-derived cap (range $[2, 5]$). The compression preserves ordering while preventing unbounded amplification.
+\end{definition}
+
+\begin{definition}[State Transition $\triangleright$]
+\label{def:transition}
+Given $s = (\mathbf{x}, \sigma)$ and event $\mathbf{e}$, the transition $s \triangleright \mathbf{e} = (\mathbf{x}', \sigma')$ proceeds:
+
+\textbf{Step 1 (Modulate):} $\tilde{e}_d = e_d \cdot M_d$ for all $d$.
+
+\textbf{Step 2 (Evolve):} Base state update via spectrally-normalized contractive map:
+\begin{equation}
+\mathbf{x}' = \tanh(W_2 \cdot \tanh(W_1 \cdot [\mathbf{x};\, \tilde{\mathbf{e}}]))
+\label{eq:evolve}
+\end{equation}
+where $W_1 \in \mathbb{R}^{n \times 2n}$, $W_2 \in \mathbb{R}^{n \times n}$, with $\|W_1\|_2 \cdot \|W_2\|_2 < 0.49$.
+
+\textbf{Step 3 (Scar Formation):} If $|\tilde{e}_{d^*}| > \theta_w$ for some $d^*$: $\sigma' = \sigma \cdot (d^*, t, raw)$.
+
+\textbf{Step 4 (Healing):} Each scar advances through stages at fixed durations.
+\end{definition}
+
+\begin{remark}[Design Rationale for Log-Compression]
+Without log-compression, $k$ raw scars on dimension $d$ produce modifier $\Pi_d = 2.0^k$, which grows exponentially. For $k = 10$, this gives $\Pi_d = 1024$---a thousand-fold amplification that would make the system numerically unstable and violate the spirit of bounded dynamics. The log-compression (Eq.~\ref{eq:modifier}) ensures $M_d \leq M_{\max}$ while preserving the key property that more scars produce higher modifiers. The personality-derived cap $M_{\max} = 2 + 3\pi_{\text{acuity}}$ means that high-acuity systems can reach amplification up to $5\times$, while low-acuity systems saturate at $2\times$. This connects the formal algebra to the personality system: sensitivity is not just a threshold but a gain ceiling.
+\end{remark}
+
+\subsection{Theorems}
+
+\begin{theorem}[Convergence via Spectral Normalization]
+\label{thm:scar-convergence}
+Under bounded input $\|e_t\|_\infty \leq C$ and spectral constraint $\|W_1\|_2 \cdot \|W_2\|_2 < 0.49$: (a) there exists $T^* < \infty$ after which no new scars form; (b) the base state converges: $\|x_t - x^*\| \to 0$; (c) all scars reach terminal stage in finite time.
+\end{theorem}
+
+\begin{proof}
+\textbf{(a)} A new scar requires $|e_d \cdot M_d| > \theta_w$. Since $M_d \leq M_{\max}$ (log-compression), the maximum modulated input is $C \cdot M_{\max}$. In the numbing direction, once $k_d$ faded scars accumulate: $C \cdot 0.7^{k_d} \leq \theta_w$ when $k_d \geq \lceil \ln(C/\theta_w) / \ln(10/7) \rceil$. Cascade scars during amplifying phases are bounded by $T(raw) + T(closing) = 50$ per scar, giving finite total.
+
+\textbf{(b)} For $t > T^*$, the system becomes $\mathbf{x}_{t+1} = \tanh(W_2 \cdot \tanh(W_1 \cdot [\mathbf{x}_t;\, \mathbf{D}\mathbf{e}_t]))$ with fixed diagonal $\mathbf{D}$. The Jacobian satisfies $\|J\|_2 \leq \|W_2\|_2 \cdot \|W_1[:, 1{:}n]\|_2 \leq 0.49$ (since $\tanh' \leq 1$). This makes the map a contraction; convergence follows from Banach's fixed-point theorem.
+
+\textbf{(c)} Each scar heals in at most $T(raw) + T(closing) + T(scarred) = 200$ ticks. Finite total scars implies finite total healing time.
+\end{proof}
+
+\begin{theorem}[Phase Transition with Bounded Gain]
+\label{thm:scar-phase}
+Define effective gain $G_d = M_d$. There exists critical gain $G_c = \theta_w / C$ such that for $G_d > G_c$ the system is in a wounding regime (positive scar formation rate), and for $G_d < G_c$ it is in a numbed regime (zero formation rate). The transition exhibits hysteresis with width $\Delta G = G_c$, and the wounding regime gain is bounded above by $M_{\max}$.
+\end{theorem}
+
+\begin{proof}
+In the wounding regime, inputs satisfying $|e_d| > \theta_w / G_d$ create new scars. New raw scars ($\alpha = 2.0$) temporarily increase $G_d$, creating positive feedback. Entry occurs at $G_d = G_c \cdot \alpha(raw) = 2G_c$. In the numbed regime ($G_d < G_c$), no input causes wounding since $|e_d \cdot G_d| \leq C \cdot G_d < \theta_w$. Since healing only decreases $\alpha$ values and scars are never removed (Axiom~\ref{ax:scar-mono}), the numbed regime is absorbing. The hysteresis width is $2G_c - G_c = G_c$. Crucially, log-compression bounds $G_d \leq M_{\max}$, preventing unbounded amplification cascades while preserving the qualitative phase structure.
+\end{proof}
+
+\begin{theorem}[Expressiveness Separation]
+\label{thm:scar-expressiveness}
+For every $k \in \mathbb{N}$, there exists an input sequence of length $2k$ such that any time-invariant system $x_{t+1} = f(x_t, e_t)$ reproducing the Scar Algebra's output requires state dimension $m \geq \Omega(k)$.
+\end{theorem}
+
+\begin{proof}
+Construct $E_k = (w_1, \ldots, w_k, c, \ldots, c)$ with wounding events $w_i = \theta_w + \epsilon$ spaced with inter-event times $\Delta_i \in \{T_1, T_2\}$ where $T_1 = T(raw)-1$, $T_2 = T(raw)+1$. This creates $2^k$ distinct timing patterns. For pattern $\Delta$, the modifier at probe time is $M_\Delta = 2.0^{|\{i: \Delta_i = T_1\}|} \cdot 1.5^{|\{i: \Delta_i = T_2\}|}$. Distinct patterns produce distinct outputs (strict monotonicity of $\tanh$). A fixed-operator system packing $2^k$ separated points in $[-1,1]^m$ requires $m \geq k / \log_2(2L/\delta) = \Omega(k)$.
+\end{proof}
+
+\begin{theorem}[Non-Commutativity]
+\label{thm:scar-noncommute}
+For any Scar Algebra instance with $\theta_w > 0$ and $\alpha(raw) > 1$, there exist events $e_1, e_2$ such that $(s_0 \triangleright e_1) \triangleright e_2 \neq (s_0 \triangleright e_2) \triangleright e_1$.
+\end{theorem}
+
+\begin{proof}
+Let $n=1$, $s_0 = (0, \emptyset)$, $e_1 = \theta_w + \epsilon$, $e_2 = \theta_w / \alpha(raw) + \epsilon'$ where $e_2 < \theta_w$. Path $e_1$ then $e_2$: $e_1$ exceeds threshold, creating a scar. Then $\tilde{e}_2 = e_2 \cdot 2.0 > \theta_w$, creating a second scar. Final: 2 scars. Path $e_2$ then $e_1$: $e_2 < \theta_w$, no scar. Then $\tilde{e}_1 = e_1 \cdot 1.0 > \theta_w$, one scar. Final: 1 scar. The scar counts differ and base states differ due to different modulated inputs through nonlinear $\tanh$.
+\end{proof}
+
+\begin{theorem}[Algebraic Classification]
+\label{thm:scar-algebra-class}
+The structure $(S, E, \triangleright)$ is a faithful, non-commutative, irreversible action of the free monoid $E^*$ on $S$. It does not embed into any group action, and the induced equivalence relation on $E^*$ has infinite index.
+\end{theorem}
+
+\begin{proof}
+\textbf{Faithfulness:} For distinct sequences $\mathbf{e} \neq \mathbf{e}'$, taking $s_0 = (\mathbf{0}, \emptyset)$ and exploiting injectivity of $\tanh$ yields $s_0 \triangleright \mathbf{e} \neq s_0 \triangleright \mathbf{e}'$. \textbf{No group embedding:} If $\triangleright$ embedded into a group action, every element would have an inverse, contradicting Axiom~\ref{ax:scar-irrev}. \textbf{Infinite index:} Sequences $W_k = (w, \ldots, w)$ of $k$ wounding events produce states with exactly $k$ scars from $s_0 = (\mathbf{0}, \emptyset)$. Since $k \neq k'$ implies different scar counts, $W_k \not\sim W_{k'}$, giving infinitely many equivalence classes.
+\end{proof}
+
+% ============================================================
+% 4. VOID CALCULUS
+% ============================================================
+\section{Void Calculus}
+\label{sec:void}
+
+We define a calculus in which absence is a first-class computational primitive---not derived from what is present, but existing independently with its own lifecycle, pressure dynamics, and coupling to the Scar Algebra.
+
+\subsection{Axioms}
+
+\begin{axiom}[Primacy of Absence]
+\label{ax:void-primacy}
+$\exists v \in V: |B_v| = 0 \wedge \delta_v > 0$. A void can exist with an empty boundary---a felt absence whose content is unknown. This is not representable in belief revision, where absence is always the complement of a known belief set.
+\end{axiom}
+
+\begin{axiom}[Depth Irreversibility]
+\label{ax:void-depth}
+$\forall v,\; \forall t_1 < t_2:\; \delta_v(t_1) \leq \delta_v(t_2)$. Depth never decreases. A void can be contracted or killed, but its depth record is permanent.
+\end{axiom}
+
+\begin{axiom}[Pressure Autonomy]
+\label{ax:void-pressure}
+$d\pi_v/dt > 0$ whenever $\delta_v > 0 \wedge a_v > 0$. Voids generate pressure without external input---they are active computational agents, not passive data structures.
+\end{axiom}
+
+\begin{axiom}[Boundary Incompleteness]
+\label{ax:void-incomplete}
+$\beta_v < 1 \implies v$ is not reducible to $\neg\phi$ for any proposition $\phi$. An incomplete void cannot be expressed as classical negation.
+\end{axiom}
+
+\begin{axiom}[Ghost Persistence]
+\label{ax:void-ghost}
+$death(v) \implies \hat{v} = (\emptyset, \delta_v, 0, a_v, 0) \in V$. Dead voids leave permanent ghosts that modify future detection sensitivity: $\theta_d^{local} = \theta_d \cdot (1 - 0.3 \cdot |\{\hat{v}: relevant\}|)$.
+\end{axiom}
+
+\subsection{Definitions}
+
+\begin{definition}[Void]
+A \textbf{void} $v = (B_v, \delta_v, \pi_v, a_v, \beta_v)$ where $B_v \subseteq H$ is the boundary set (HDC vectors surrounding the absence), $\delta_v \geq 0$ is depth, $\pi_v \geq 0$ is pressure, $a_v \in \mathbb{N}$ is age, and $\beta_v = |B_v| / (|B_v| + \hat{n}_v) \in [0,1]$ is boundary completeness.
+\end{definition}
+
+\begin{definition}[Pressure Dynamics with Cap]
+\label{def:pressure}
+Void pressure evolves autonomously each tick:
+\begin{equation}
+\pi_v(t+1) = \min\!\left(\Pi_{\max},\; \pi_v(t) + \delta_v \cdot \ln(a_v + 1) \cdot (1 - \beta_v)\right)
+\label{eq:pressure}
+\end{equation}
+where $\Pi_{\max} = 60 + \pi_{\text{sovereignty}} \cdot 60$ (personality-derived, range $[60, 120]$). Deeper voids generate more pressure; older voids generate more pressure (logarithmically); less-defined voids ($\beta_v$ low) generate more pressure. The cap prevents unbounded accumulation.
+\end{definition}
+
+\begin{definition}[Genesis Regulation]
+\label{def:genesis}
+Void creation is regulated by three mechanisms:
+\begin{enumerate}
+\item \textbf{Cooldown:} After creating a void, $\tau_c = 2 + \pi_{\text{perm}} \cdot 3$ ticks must elapse before the next creation.
+\item \textbf{Resistance:} Detection threshold increases with existing void count: $\theta'_{\text{detect}} = \theta_{\text{detect}} + 0.02 \cdot |V|$.
+\item \textbf{Pressure cap:} $\pi_v(t) \leq \Pi_{\max}$ prevents runaway pressure.
+\end{enumerate}
+\end{definition}
+
+\begin{definition}[Void Operations]
+Four operations act on voids:
+\begin{itemize}
+\item \textbf{Contract:} $contract(v, \mathbf{h})$ removes boundary points where $sim(\mathbf{h}, b) > \theta_c$. Pressure is proportionally reduced: $\pi_v' = \pi_v \cdot (1 - |removed|/|B_v|)$. Death occurs when $|B_v| = 0$, leaving a ghost.
+\item \textbf{Deepen:} $deepen(v, \epsilon) = (B_v, \delta_v + \epsilon, \pi_v, a_v, \beta_v)$ when avoidance behavior is detected (negative similarity combined with high surprise).
+\item \textbf{Split:} $split(v) = (v_1, v_2)$ when boundary has bimodal structure (two clusters with inter-cluster distance $> 2 \times$ intra-cluster distance). Each child inherits full depth; pressure is halved.
+\item \textbf{Merge:} $merge(v_1, v_2) = v_3$ when boundary overlap exceeds 50\%. $B_{v_3} = B_{v_1} \cup B_{v_2}$, $\delta_{v_3} = \max(\delta_{v_1}, \delta_{v_2})$, $\pi_{v_3} = \pi_{v_1} + \pi_{v_2}$.
+\end{itemize}
+\end{definition}
+
+\begin{remark}[Void as Active Agent]
+Unlike data structures that passively store information, voids are \emph{active computational agents}. They generate pressure autonomously (Axiom~\ref{ax:void-pressure}), influence scar formation via coupling $\Gamma$, and modify future void detection via ghosts (Axiom~\ref{ax:void-ghost}). This active nature is what distinguishes Void Calculus from classical negation or belief contraction: absence is not merely the complement of presence but an independent force with its own causal powers.
+\end{remark}
+
+\subsection{Theorems}
+
+\begin{theorem}[Three-State Expressiveness]
+\label{thm:void-three-way}
+Void Calculus distinguishes three relational states that are pairwise behaviorally distinct and collapse to at most two states in any system based on classical negation, probabilistic belief, or AGM revision:
+\begin{itemize}
+\item $S_1$ (Never discussed): $\delta_v = 0$, no pressure, no ghost effect.
+\item $S_2$ (Resolved): ghost with $\delta > 0$, no pressure, lowers detection threshold.
+\item $S_3$ (Actively avoided): $\delta > 0$, active pressure, scar coupling.
+\end{itemize}
+\end{theorem}
+
+\begin{proof}
+Define behavioral output $\mathcal{B}(state) = (pressure, genesis\_modifier, coupling)$:
+$\mathcal{B}(S_1) = (0, 0, 0)$; $\mathcal{B}(S_2) = (0, 0.3\delta, 0)$; $\mathcal{B}(S_3) = (\pi_v > 0, 0, \Gamma(v))$.
+All three are pairwise distinct. In classical logic, all map to $\phi \notin T$. In Bayesian belief, $S_1$ and $S_3$ are indistinguishable without avoidance in the likelihood model. In AGM, the recovery postulate makes $S_2$ indistinguishable from $S_1$ after recovery.
+\end{proof}
+
+\begin{theorem}[Irreducibility to AGM Belief Revision]
+\label{thm:void-agm}
+There exists a void configuration not representable by any AGM operation on any belief set over any propositional language.
+\end{theorem}
+
+\begin{proof}
+Construct void $v$ with $\beta_v = 0$, $\delta_v = 0.8$, $|B_v| = 0$. Every AGM contraction $K \div \phi$ satisfies recovery: $(K \div \phi) + \phi = K$, requiring a specific $\phi$. But $v$ has $\beta_v = 0$: no proposition can be named. Furthermore, AGM contractions are static until new information arrives, while $v$ satisfies autonomous pressure growth (Eq.~\ref{eq:pressure}). Since $v$ satisfies a property no AGM-representable absence can satisfy, $v$ is not AGM-representable.
+\end{proof}
+
+\begin{theorem}[Irreducibility to Bayesian Updating]
+\label{thm:void-bayes}
+No probability space and Bayesian updating rule can derive void pressure dynamics as a posterior quantity.
+\end{theorem}
+
+\begin{proof}
+In Bayesian updating, without new observations the posterior is unchanged. But void pressure increases between events: $\pi_v(t+1) - \pi_v(t) = \delta_v \cdot \ln(a_v + 1) \cdot (1 - \beta_v) > 0$. Any encoding $\pi_v(t) = f(P(\theta_v | x_{1:t}))$ requires time-dependent $f_t$, making the ``Bayesian'' component vacuous---the accumulation is entirely in the non-Bayesian transformation.
+\end{proof}
+
+\begin{theorem}[Void Set Convergence]
+\label{thm:void-convergence}
+Under bounded input rate $R$, positive contraction probability $p > 0$ per boundary point per event, and finite initial boundary $|B_v| \leq B_{\max}$, the expected void count reaches a bounded steady state:
+\begin{equation}
+\mathbb{E}[|V_t|] \leq N^* = R \cdot \frac{\ln B_{\max} + 1}{p}
+\end{equation}
+\end{theorem}
+
+\begin{proof}
+A void with $|B_v| = b$ dies when all boundary points are contracted. Under independent contraction with probability $p$, the expected lifetime is bounded by the coupon collector: $\mathbb{E}[\text{lifetime}] \leq (\ln b + 1)/p \leq (\ln B_{\max} + 1)/p$. At steady state, creation rate $\leq R$ equals death rate $N^*/\mathbb{E}[\text{lifetime}]$, giving the bound. The pressure cap $\Pi_{\max}$ ensures total system pressure is also bounded: $\Pi_{total} \leq N^* \cdot \Pi_{\max} < \infty$.
+\end{proof}
+
+% ============================================================
+% 5. BIDIRECTIONAL COUPLING
+% ============================================================
+\section{Bidirectional Coupling}
+\label{sec:coupling}
+
+\begin{definition}[Coupled System]
+The coupled system $\mathcal{C} = (S_{scar}, V_{void}, \Gamma, \Phi)$ connects Scar Algebra and Void Calculus through two directional operators.
+\end{definition}
+
+\paragraph{Coupling $\Gamma$ (Void $\to$ Scar).}
+When void pressure exceeds threshold $\theta_p$:
+\begin{equation}
+\pi_v > \theta_p \implies s \triangleright \Gamma(v), \quad \Gamma(v) = \pi_v \cdot \text{project}(\hat{B}_v, \mathbb{R}^n)
+\end{equation}
+\emph{Interpretation:} Unspoken things accumulate pressure that eventually wounds. The longer something is avoided, the more it hurts when finally confronted.
+
+\paragraph{Coupling $\Phi$ (Scar $\to$ Void).}
+Numbed dimensions lower void detection threshold:
+\begin{equation}
+\theta_d^{effective} = \max\!\left(0.1,\; \theta_d - 0.05 \cdot |\{d : M_d < 0.5\}|\right)
+\end{equation}
+\emph{Interpretation:} Repeated wounding creates avoidance---the system learns not to go where it has been hurt, manifesting as easier void formation on scarred dimensions.
+
+\paragraph{Coherence Metric.}
+Coherence emerges from the coupling dynamics:
+\begin{equation}
+r = 1 - \frac{\sum_v \pi_v \cdot \mathbb{1}[M_{d_v} < 0.5]}{\sum_v \pi_v + \epsilon}
+\label{eq:coherence}
+\end{equation}
+where $d_v$ is the void's primary dimension. When $r \to 1$, voids and scars are aligned (coherent avoidance). When $r \to 0$, pressure builds in numbed areas---a computational analogue of dissociation.
+
+\paragraph{Safety Floor.}
+The $\Phi$ coupling cannot lower detection threshold below a personality-derived floor:
+\begin{equation}
+\theta_d^{effective} \geq \theta_d^{\min}(\boldsymbol{\pi}) = 0.1 + 0.1 \cdot \pi_{\text{order}}
+\end{equation}
+This ensures even heavily scarred systems retain minimum void detection standards.
+
+\paragraph{Dissociation as Failure Mode.}
+The coupled system can enter a pathological state where: (1) dimension $d$ accumulates scars $\to$ $M_d < 0.5$ (numbed); (2) coupling $\Phi$ lowers void detection threshold near $d$; (3) new voids form on $d$ but their pressure is not ``felt'' (numbed dimension); (4) pressure accumulates without triggering appropriate response; (5) coherence $r \to 0$. This provides a formal characterization of when internal dynamics become incoherent---a signal surfaced to higher layers for potential intervention. The safety floor prevents this cascade from reaching the extreme case where $\theta_d^{effective} = 0$ (infinite void sensitivity).
+
+\begin{theorem}[Permanent Hysteresis]
+\label{thm:hysteresis}
+In the coupled system, the response to topic $T$ at time $t$ depends on the path by which the system arrived at its current state, even when current ``present'' components are identical. The hysteresis is permanent: no finite sequence of future events can make two divergent histories behaviorally equivalent.
+\end{theorem}
+
+\begin{proof}
+Compare History A (topic discussed normally, no void/scar) with History B (topic avoided $\to$ void forms $\to$ pressure accumulates $\to$ $\Gamma$ fires wound $\to$ topic addressed $\to$ void dies, ghost remains $\to$ scar heals to faded). At time $t$: no active void in either case. But History B has a faded scar ($\alpha = 0.7$, irreversible by Axiom~\ref{ax:scar-irrev}) and a ghost (permanent by Axiom~\ref{ax:void-ghost}). Future input on $T$ is attenuated ($M_d = 0.7$) in B but unmodified ($M_d = 1.0$) in A. The faded scar modifier is irreversible and the ghost is permanent, so no finite future input sequence can equalize the two histories.
+\end{proof}
+
+% ============================================================
+% 6. RELATIONAL SHEAF THEORY
+% ============================================================
+\section{Relational Sheaf Theory}
+\label{sec:sheaf}
+
+The coupled Void-Scar system operates on a single dyadic relationship. When an agent maintains multiple concurrent relationships, independent instances fail to capture cross-relational influence, irreducible multi-party states, and consistency pressure from contradictory self-presentations. We formalize multi-relational dynamics using cellular sheaves on simplicial complexes.
+
+\subsection{Definitions}
+
+\begin{definition}[Relational Complex]
+A \textbf{relational complex} $K = (V, \Sigma_K)$ is a finite abstract simplicial complex where $V = \{v_0, v_1, \ldots, v_N\}$ ($v_0$ is the agent), and $\Sigma_K$ contains 0-simplices (entities), 1-simplices $\{v_0, v_i\}$ (dyadic relationships), and 2-simplices $\{v_0, v_i, v_j\}$ (triadic co-presence). The agent participates in every relationship: $v_0 \in \sigma$ for all $\sigma$ with $\dim(\sigma) \geq 1$.
+\end{definition}
+
+\begin{definition}[Scar Sheaf]
+A \textbf{Scar Sheaf} $\mathcal{F}$ on $K$ assigns vector spaces to simplices:
+\begin{itemize}
+\item Vertex stalk: $\mathcal{F}(\{v_0\}) = \mathbb{R}^{n_0}$ (agent's internal state).
+\item Edge stalks: $\mathcal{F}(\{v_0, v_i\}) = S_i = \mathbb{R}^n \times \Sigma_i^*$ (full Scar Algebra state per relationship).
+\item Triangle stalks: $\mathcal{F}(\{v_0, v_i, v_j\}) = \mathbb{R}^{n_{ij}}$ (co-presence state).
+\end{itemize}
+Restriction maps $\rho_0^i: \mathcal{F}(\{v_0, v_i\}) \to \mathcal{F}(\{v_0\})$ extract self-presentation:
+\begin{equation}
+\rho_0^i(s_i) = P_i \cdot \mathbf{x}_i
+\end{equation}
+where $P_i \in \mathbb{R}^{n_0 \times n}$ is the presentation matrix for relationship $i$.
+\end{definition}
+
+\begin{definition}[Sheaf Laplacian and Propagation]
+The sheaf Laplacian $L_\mathcal{F} = \delta^{0*}\delta^0$ expands for vertex $v_0$ as:
+\begin{equation}
+L_\mathcal{F}(\mathbf{x}_0) = \sum_{i: \{v_0, v_i\} \in \Sigma_K} P_i^T P_i \cdot \mathbf{x}_0 - P_i^T \cdot \rho_0^i(s_i)
+\end{equation}
+Cross-relational influence is governed by Laplacian diffusion:
+\begin{equation}
+\frac{\partial \mathbf{x}_0}{\partial t} = -\alpha \cdot L_\mathcal{F}(\mathbf{x}_0) + \mathbf{f}_{local}(t)
+\end{equation}
+where $\alpha > 0$ is the propagation rate and $\mathbf{f}_{local}$ is forcing from the active relationship.
+\end{definition}
+
+\begin{definition}[Sheaf Cohomology]
+The cohomology groups $H^k(K, \mathcal{F})$ have concrete interpretations:
+\begin{itemize}
+\item $\dim H^0 > 0$: a consistent global self-presentation exists.
+\item $\dim H^1 > 0$: irreducible relational contradictions---inconsistencies not resolvable by adjusting internal state alone.
+\item $\dim H^2 > 0$: triadic emergence---group states not reconstructible from pairwise data.
+\end{itemize}
+\end{definition}
+
+\begin{definition}[Personality-Derived Presentation Matrices]
+Presentation matrices are derived from personality $\boldsymbol{\pi}$, relationship type $\tau_i$, and maturity $m_i$:
+\begin{equation}
+P_i = P_{base}(\boldsymbol{\pi}) + \Delta P(\tau_i) + m_i \cdot \Delta P_{mature}(\boldsymbol{\pi}, \tau_i)
+\end{equation}
+subject to: $\|P_i - P_j\|_F \leq \kappa(\boldsymbol{\pi}) \cdot (1 + d(\tau_i, \tau_j))$, where $\kappa(\boldsymbol{\pi})$ is personality-dependent (high $\pi_{\text{grav}}$ $\to$ low $\kappa$).
+\end{definition}
+
+\subsection{Axioms}
+
+\begin{axiom}[Local Scar Dynamics]
+\label{ax:sheaf-local}
+Within each edge stalk $\mathcal{F}(\{v_0, v_i\})$, state evolves according to Scar Algebra axioms (Axioms~\ref{ax:scar-irrev}--\ref{ax:scar-sat}). The sheaf structure does not modify local dynamics.
+\end{axiom}
+
+\begin{axiom}[Propagation via Laplacian]
+\label{ax:sheaf-propagation}
+Cross-relational influence is governed exclusively by sheaf Laplacian diffusion. No direct edge-to-edge communication exists outside the Laplacian pathway.
+\end{axiom}
+
+\begin{axiom}[Cohomological Constraint]
+\label{ax:sheaf-cohomological}
+When $\dim H^1(K, \mathcal{F}) > 0$, the system must resolve the obstruction by: (a) void genesis on contradicting dimensions; (b) dissociation (splitting internal state into relationship-specific projections); or (c) persistent relational tension.
+\end{axiom}
+
+\begin{axiom}[Irreversibility of Propagation]
+\label{ax:sheaf-irrev}
+Once a scar propagates from relationship $i$ to $j$ via the Laplacian, the propagated effect inherits irreversibility (Axiom~\ref{ax:scar-irrev}). Cross-relational healing requires independent repair in each affected relationship.
+\end{axiom}
+
+\begin{axiom}[Energy Conservation]
+\label{ax:sheaf-energy}
+The agent has finite relational energy $\mathcal{E} > 0$. Each active relationship consumes energy at rate $c_i > 0$, bounded by $\sum_i c_i(t) \leq \mathcal{E}(t)$. When energy is depleted, expression drive across all relationships drops to zero.
+\end{axiom}
+
+\subsection{Theorems}
+
+\begin{theorem}[Cohomological Dissociation]
+\label{thm:sheaf-dissociation}
+If relationships $i, j$ have scar histories inducing contradictory self-presentation ($\|P_i \mathbf{x}_i - P_j \mathbf{x}_j\| > \kappa(\boldsymbol{\pi})$), then $\dim H^1(K, \mathcal{F}) > 0$. This obstruction is not detectable by any system maintaining independent per-relationship state without a global consistency check.
+\end{theorem}
+
+\begin{proof}
+The coboundary $\delta^0: C^0(K, \mathcal{F}) \to C^1(K, \mathcal{F})$ maps a global section $\mathbf{x}_0$ to the collection of discrepancies $\{\rho_0^i(s_i) - P_i \mathbf{x}_0\}_{i}$. If $\|P_i \mathbf{x}_i - P_j \mathbf{x}_j\| > \kappa(\boldsymbol{\pi})$ for some $i, j$, then no single $\mathbf{x}_0$ can simultaneously satisfy $P_i \mathbf{x}_0 = \rho_0^i(s_i)$ and $P_j \mathbf{x}_0 = \rho_0^j(s_j)$ within the personality-bounded tolerance. The obstruction to finding such a global section is precisely $H^1(K, \mathcal{F}) \neq 0$.
+
+For the second claim: a system with independent per-relationship copies maintains states $(s_1, \ldots, s_N)$ without computing $\delta^0$. The inconsistency $\|P_i \mathbf{x}_i - P_j \mathbf{x}_j\|$ requires comparing across relationships via the restriction maps---information unavailable to independent copies. Thus the cohomological obstruction is invisible without the sheaf structure.
+\end{proof}
+
+\begin{theorem}[Spectral Propagation Bound]
+\label{thm:sheaf-spectral}
+A scar event in relationship $i$ at time $t_0$ propagates to relationship $j$ with bound:
+\begin{equation}
+\|\Delta \mathbf{x}_j(t)\| \leq \|\Delta \mathbf{x}_i(t_0)\| \cdot e^{-\lambda_1 \cdot (t - t_0)} \cdot \|P_j^T P_i\|_2
+\end{equation}
+where $\lambda_1$ is the first nonzero eigenvalue of $L_\mathcal{F}$. Cross-relational propagation decays exponentially at a rate determined by the spectral gap.
+\end{theorem}
+
+\begin{proof}
+The Laplacian diffusion $\partial \mathbf{x}_0 / \partial t = -\alpha L_\mathcal{F}(\mathbf{x}_0)$ has solution $\mathbf{x}_0(t) = e^{-\alpha L_\mathcal{F} t} \mathbf{x}_0(0)$. Decomposing into eigenmodes of $L_\mathcal{F}$ with eigenvalues $0 = \lambda_0 \leq \lambda_1 \leq \cdots$, the perturbation $\Delta \mathbf{x}_0$ from a scar event decays as $\|\Delta \mathbf{x}_0(t)\| \leq \|\Delta \mathbf{x}_0(0)\| \cdot e^{-\alpha \lambda_1 t}$ (the $\lambda_0 = 0$ component is the steady state). The perturbation at relationship $j$ is further attenuated by the coupling strength $\|P_j^T P_i\|_2$ between the source and target presentation matrices. Setting $\alpha = 1$ for simplicity yields the stated bound.
+\end{proof}
+
+\begin{theorem}[Triadic Irreducibility]
+\label{thm:sheaf-triadic}
+For any relational complex containing a 2-simplex $\{v_0, v_i, v_j\}$, there exist co-presence states $s_{ij}$ not reconstructible from pairwise restrictions alone. $\dim H^2(K, \mathcal{F}) > 0$ implies irreducible triadic emergence.
+\end{theorem}
+
+\begin{theorem}[Personality-Bounded Inconsistency]
+\label{thm:sheaf-personality}
+Total inconsistency is bounded:
+\begin{equation}
+\|\delta^0 \mathbf{x}\|^2 \leq N \cdot \kappa(\boldsymbol{\pi})^2 \cdot (1 + D_{max})^2 \cdot \|\mathbf{x}_0\|^2
+\end{equation}
+where $N$ is relationship count and $D_{max}$ is maximum type distance. High relational gravity (low $\kappa$) produces tighter bounds; high perception acuity (high $\kappa$) tolerates more contradiction before cohomological obstruction.
+\end{theorem}
+
+% ============================================================
+% 7. EMBODIMENT FIVE PERSONALITY
+% ============================================================
+\section{Embodiment Five Personality}
+\label{sec:personality}
+
+The personality vector $\boldsymbol{\pi} \in [0,1]^5$ is not a static configuration but a living dynamical system that co-evolves with the computation stack. Unlike prior work that uses personality as prompt modifiers~\cite{structured2025} or behavioral labels~\cite{evolving2024}, Embodiment Five traits are \emph{functions} that deterministically derive all computation parameters across the seven-layer pipeline.
+
+\subsection{The Five Traits}
+
+\begin{enumerate}[leftmargin=*]
+\item \textbf{Expression Drive} ($\pi_{\text{expr}}$): The system's drive toward self-expression. Derives expression threshold, wound threshold $\theta_w$, and social pressure weights.
+
+\item \textbf{Perception Acuity} ($\pi_{\text{acuity}}$): Sensitivity to harm and absence. Derives healing rates, void detection threshold $\theta_d$, predictive coding gate sensitivity, and modifier cap $M_{\max}$.
+
+\item \textbf{Boundary Permeability} ($\pi_{\text{perm}}$): Receptivity to novelty and change. Derives void creation cooldown, split threshold, MoE attention prior uniformity, and autopoietic rotation angle.
+
+\item \textbf{Inner Order} ($\pi_{\text{order}}$): Capacity for self-repair and consistency maintenance. Derives memory depth, boundary repair rate, merge threshold, and route precision.
+
+\item \textbf{Relational Gravity} ($\pi_{\text{grav}}$): Tendency toward relational engagement. Derives presentation matrix consistency bound $\kappa$, boundary integrity, blend rate, and sheaf propagation rate $\alpha$.
+\end{enumerate}
+
+Each parameter $\theta_i$ is derived via affine mapping with clamping:
+\begin{equation}
+\theta_i = \text{clamp}(f_i(\boldsymbol{\pi}),\; \theta_i^{\min},\; \theta_i^{\max}), \quad f_i: [0,1]^5 \to \mathbb{R}
+\end{equation}
+
+\begin{table}[H]
+\centering
+\small
+\caption{Representative personality-to-parameter derivations (26+ total).}
+\label{tab:personality-params}
+\begin{tabular}{llll}
+\toprule
+\textbf{Parameter} & \textbf{Derivation} & \textbf{Range} & \textbf{Trait} \\
+\midrule
+Wound threshold $\theta_w$ & $0.3 + 0.4 \cdot \pi_{\text{expr}}$ & $[0.3, 0.7]$ & $\pi_{\text{expr}}$ \\
+Modifier cap $M_{\max}$ & $2 + 3 \cdot \pi_{\text{acuity}}$ & $[2, 5]$ & $\pi_{\text{acuity}}$ \\
+Void detection $\theta_d$ & $0.5 - 0.3 \cdot \pi_{\text{acuity}}$ & $[0.2, 0.5]$ & $\pi_{\text{acuity}}$ \\
+Void cooldown $\tau_c$ & $2 + 3 \cdot \pi_{\text{perm}}$ & $[2, 5]$ ticks & $\pi_{\text{perm}}$ \\
+Consistency bound $\kappa$ & $0.8 - 0.5 \cdot \pi_{\text{grav}}$ & $[0.3, 0.8]$ & $\pi_{\text{grav}}$ \\
+Repair rate & $0.03 + 0.04 \cdot \pi_{\text{order}}$ & $[0.03, 0.07]$ & $\pi_{\text{order}}$ \\
+PPR teleport $\alpha$ & $0.2 + 0.4 \cdot \pi_{\text{acuity}}$ & $[0.2, 0.6]$ & $\pi_{\text{acuity}}$ \\
+Pressure cap $\Pi_{\max}$ & $60 + 60 \cdot \pi_{\text{sovereignty}}$ & $[60, 120]$ & sovereignty \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\subsection{Dual-EMA Drift}
+
+Each trait $\pi_k$ maintains dual exponential moving averages tracking drift signals from the computation stack:
+\begin{align}
+f_k(t) &= (1 - \alpha_f)\, f_k(t-1) + \alpha_f \cdot \text{target}_k(t), \quad \alpha_f = 0.039 \;\;(\tau_f \approx 50) \\
+s_k(t) &= (1 - \alpha_s)\, s_k(t-1) + \alpha_s \cdot \text{target}_k(t), \quad \alpha_s = 0.004 \;\;(\tau_s \approx 500)
+\end{align}
+
+\paragraph{Consensus Rule.}
+The dual-EMA implements a consensus gate distinguishing sustained signals from transient noise:
+\begin{equation}
+\Delta\pi_k = \begin{cases}
+\text{full drift toward } s_k & \text{if } \text{sign}(f_k - \pi_k) = \text{sign}(s_k - \pi_k) \\
+0.5 \cdot (s_k - \pi_k) & \text{otherwise (resist short-term noise)}
+\end{cases}
+\end{equation}
+
+\subsection{Signal Extraction}
+
+Drift signals are extracted from computation results. Each Embodiment trait is driven by 2--5 signals from the pipeline:
+\begin{itemize}[leftmargin=*]
+\item $\pi_{\text{expr}}$: feedback\_accepted (+0.4), feedback\_rejected ($-$0.6), expression\_fired (+0.3), sustained\_silence ($-$0.1).
+\item $\pi_{\text{acuity}}$: high\_tension (+0.5), low\_coherence (+0.4), high\_void\_pressure (+0.3), sustained\_positive\_valence ($-$0.3).
+\item $\pi_{\text{perm}}$: high\_surprise\_positive (+0.4), new\_void\_created (+0.3), high\_surprise\_negative ($-$0.3).
+\item $\pi_{\text{order}}$: high\_coherence (+0.2), boundary\_self\_repair (+0.15), system\_chaos ($-$0.3).
+\item $\pi_{\text{grav}}$: repair\_executed (+0.3), boundary\_breached ($-$0.5), relaxed\_positive (+0.2).
+\end{itemize}
+
+\subsection{Homeostatic Regulation}
+
+Each trait experiences a restoring force toward its set-point $\pi_k^{(0)}$:
+\begin{equation}
+\Delta_{\text{home},k} = 0.005 \cdot (\pi_k^{(0)} - \pi_k)
+\end{equation}
+The set-point itself evolves at $\tau \approx 5000$: $\pi_k^{(0)} \mathrel{+}= 0.0004 \cdot (\pi_k - \pi_k^{(0)})$, allowing truly persistent changes to become the new baseline.
+
+\paragraph{Inertia Decay.}
+Drift magnitude decreases over lifetime, modeling personality crystallization:
+\begin{equation}
+I(t) = \frac{1}{1 + \ln(1 + t/500)}
+\end{equation}
+
+\paragraph{Asymmetric Resistance.}
+Drift is halved when approaching extremes ($\pi_k < 0.3$ or $\pi_k > 0.7$), preventing personality collapse to boundary values:
+\begin{equation}
+R_k = \begin{cases} 0.5 & \text{if } \pi_k < 0.3 \text{ or } \pi_k > 0.7 \\ 1.0 & \text{otherwise} \end{cases}
+\end{equation}
+
+\subsection{Oscillation Detection}
+
+Responding to the warning of~\cite{stability2015} that homeostatic regulation can introduce network-level oscillations, we implement explicit oscillation detection:
+\begin{equation}
+\text{frozen}_k = \begin{cases} \text{true (20 ticks)} & \text{if } |\{t' \in [t{-}10, t] : \text{sign}(\Delta\pi_k(t')) \neq \text{sign}(\Delta\pi_k(t'{-}1))\}| \geq 6 \\ \text{false} & \text{otherwise} \end{cases}
+\end{equation}
+
+\subsection{Combined Update}
+
+The effective personality update per tick:
+\begin{equation}
+\pi_k(t+1) = \Pi_{[0.05, 0.95]}\!\left(\pi_k(t) + I(t) \cdot R_k \cdot (\Delta\pi_k + \Delta_{\text{home},k}) \cdot \mathbb{1}[\neg\text{frozen}_k]\right)
+\end{equation}
+
+\subsection{Bidirectional Coupling with Surface Traits}
+
+The Embodiment Five constrains a surface layer (Sylanne Six: warmth, edge, curiosity, patience, intimacy gravity, sovereignty guard). Surface traits drift fast (rate 0.02/tick) within bounds set by the deep structure. When surface traits persistently press against their bounds ($\geq 20$ ticks), extremely slow feedback ($\text{rate} = 0.0003$) nudges the deep structure---modeling ``behavior shapes character.''
+
+\begin{remark}[Stability of the Dual-EMA System]
+The dual-EMA consensus rule ensures personality change requires agreement across two timescales ($\tau \approx 50$ and $\tau \approx 500$). Combined with homeostatic pull ($\tau \approx 5000$ for set-point), inertia decay (logarithmic), asymmetric resistance (halved at extremes), and oscillation detection (freeze on rapid reversals), the system is inherently stable. Transient perturbations are filtered by the fast/slow disagreement gate. Sustained pressure produces bounded drift constrained by $I(t) \cdot R_k$. Pathological oscillation is actively suppressed. The overall system satisfies BIBO (bounded-input bounded-output) stability: for any bounded input signal sequence, all personality traits remain in $[0.05, 0.95]$ and drift rate is bounded by $\eta \leq 10^{-4}$ per tick.
+\end{remark}
+
+% ============================================================
+% 8. MoE-HGT ARCHITECTURE
+% ============================================================
+\section{MoE-HGT Architecture}
+\label{sec:moehgt}
+
+The decision fusion layer is a three-stage Mixture-of-Experts Heterogeneous Graph Transformer that integrates signals from all computation layers into a 4-dimensional decision vector.
+
+\subsection{Stage 1: Type-Expert FFN}
+
+Seven token types participate: \emph{scar}, \emph{void}, \emph{boundary}, \emph{personality}, \emph{surprise}, \emph{expression}, \emph{context}. Each type $\tau$ has its own feed-forward expert:
+\begin{equation}
+\mathbf{z}_i^{(1)} = \mathbf{z}_i + \text{RMSNorm}\!\left(\text{FFN}_\tau(\mathbf{z}_i)\right), \quad \text{FFN}_\tau(\mathbf{x}) = W_2^\tau \cdot \text{GELU}(W_1^\tau \mathbf{x})
+\end{equation}
+with $W_1^\tau, W_2^\tau \in \mathbb{R}^{16 \times 16}$. Scar token values are log-compressed before injection:
+\begin{equation}
+z_{\text{scar}} = \frac{\log_2(M_d)}{\log_2(M_{\max})}
+\end{equation}
+
+\subsection{Stage 2: Multi-Head Cross-Attention}
+
+Four attention heads with per-type per-head projections ($W_Q, W_K, W_V \in \mathbb{R}^{4 \times 16}$, head dimension $d_k = 4$):
+\begin{equation}
+a_{ij}^{(h)} = \frac{Q_i^{(h)} \cdot (K_j^{(h)})^\top}{\sqrt{d_k}} + \mu^{(\tau_s, \tau_t)} + \text{mask}(i,j)
+\end{equation}
+The attention prior $\mu^{(\tau_s, \tau_t)} \in \mathbb{R}^{7 \times 7}$ adapts via Oja's Hebbian rule:
+\begin{equation}
+\Delta\mu^{(\tau_s, \tau_t)} = \eta_\mu \cdot \bar{a}^{(\tau_s, \tau_t)} \cdot \left(\bar{a}^{(\tau_s, \tau_t)} - \mu^{(\tau_s, \tau_t)}\right)
+\end{equation}
+Self-attention is masked (diagonal $= -\infty$). Output uses residual connection and RMSNorm.
+
+\subsection{Stage 3: Situation-Expert MoE}
+
+Five situation experts---\emph{defense}, \emph{curiosity}, \emph{social}, \emph{silence}, \emph{repair}---receive mean-pooled attended tokens. A softmax router selects top-2:
+\begin{equation}
+g_e = \mathbf{w}_e^\top \bar{\mathbf{z}} + b_e + \text{bonus}(e), \quad \text{bonus}(e) = \begin{cases} 0.15 & \text{if dormant} > 50 \text{ ticks} \\ 0 & \text{otherwise} \end{cases}
+\label{eq:moe-gating}
+\end{equation}
+The router bias $b_e$ adapts via BCM-like Hebbian rule with decay $\lambda = 0.998$. Top-2 gating:
+\begin{equation}
+\mathbf{o} = \sum_{e \in \text{top-2}} \frac{\exp(g_e)}{\sum_{e' \in \text{top-2}} \exp(g_{e'})} \cdot \text{Expert}_e(\bar{\mathbf{z}})
+\end{equation}
+Each expert: $\text{Expert}_e: \mathbb{R}^{16} \xrightarrow{W_1^e \in \mathbb{R}^{32 \times 16}} \mathbb{R}^{32} \xrightarrow{W_2^e \in \mathbb{R}^{16 \times 32}} \mathbb{R}^{16}$.
+
+\subsection{Decision Head}
+
+Linear projection to 4-dimensional decision:
+\begin{equation}
+\mathbf{d} = \text{clamp}(W_{\text{dec}} \cdot \mathbf{o},\; -1,\; 1), \quad W_{\text{dec}} \in \mathbb{R}^{4 \times 16}
+\end{equation}
+Components: $d_0$ = expression drive correction, $d_1$ = boundary sensitivity modulation, $d_2$ = urgency signal, $d_3$ = expression inhibition ($> 0.5$ vetoes expression).
+
+\subsection{Hebbian Adaptation}
+
+All base parameters are deterministically derived from personality SHA-256 hash at initialization. Runtime adaptation is incremental delta only:
+\begin{itemize}
+\item Router bias: BCM rule with decay $\lambda = 0.998$ per tick.
+\item Attention prior: Oja's rule with $\eta_\mu = 0.01$.
+\item Dormant expert bonus: reactivation after 50 ticks of non-selection.
+\end{itemize}
+This addresses the MoE reliability concerns of~\cite{misrouted2025} and~\cite{counterfactual2025}: dormant reactivation prevents expert collapse, and Hebbian adaptation learns routing patterns from activation history without requiring gradient-based training.
+
+\subsection{Parameter Count}
+
+Total: $\sim$14.3K floats ($\sim$57.2 KB). Breakdown: 7 Type-Expert FFNs (3,584), 4-head attention Q/K/V (5,376), 5 MoE experts (5,120), router weights (80), decision head (64), attention prior (49). All derived from personality semantics, zero learning required.
+
+\begin{remark}[Why Not a Standard Transformer?]
+A standard transformer over the 7 token types would require $O(n^2)$ attention with uniform treatment of all token pairs. The MoE-HGT design exploits the heterogeneous structure of the computation: scar tokens carry fundamentally different information than personality tokens, and the optimal routing depends on the \emph{situation} (defense vs.\ curiosity vs.\ social). The three-stage design separates concerns: Stage 1 normalizes within-type representations, Stage 2 discovers cross-type relationships, and Stage 3 routes to situation-appropriate processing. This separation enables the Hebbian adaptation to operate at the appropriate granularity: attention priors adapt cross-type relationships (Stage 2), while router biases adapt situation routing (Stage 3).
+\end{remark}
+
+% ============================================================
+% 9. SAFETY MECHANISMS
+% ============================================================
+\section{Safety Mechanisms}
+\label{sec:safety}
+
+Seven mechanisms prevent pathological dynamics in the coupled system. These are not optional add-ons but architectural invariants that bound the system's behavior under adversarial input.
+
+\begin{enumerate}[leftmargin=*]
+\item \textbf{Sovereignty Immune System.} Per-session scar formation is capped:
+\begin{equation}
+C_s = \max\!\left(2,\; 3 + (1 - \pi_{\text{sovereignty}}) \cdot 5\right)
+\end{equation}
+Once reached, wound threshold rises to 0.95, making further scar formation nearly impossible within the session. Validated: 20 rapid wounds produce only 4 scars (80\% rejection rate).
+
+\item \textbf{Protective Dissociation (Circuit Breaker).} If $\geq 5$ scars form within 10 ticks, the system enters protective mode for 30 ticks with wound threshold elevated to 0.95, preventing cascading scar formation under sustained attack.
+
+\item \textbf{Time-Aware Healing.} Scars heal during real-time silence:
+\begin{equation}
+\Delta t_{\text{heal}} = \min\!\left(10,\; \left\lfloor \frac{t_{\text{silence}}}{300\text{s}} \right\rfloor\right)
+\end{equation}
+One bonus tick per 5 minutes of wall-clock inactivity, capped at 10 per processing step.
+
+\item \textbf{Void Creation Resistance.} Detection threshold increases with existing void count:
+\begin{equation}
+\theta_d^{\text{eff}} = \theta_d + 0.02 \cdot |V|
+\end{equation}
+This prevents void flooding under $\Phi$ coupling feedback loops.
+
+\item \textbf{Numbed-Count Floor.} The $\Phi$ coupling path cannot lower detection threshold below personality-derived floor $\theta_d^{\min}(\boldsymbol{\pi})$, ensuring minimum void detection standards even in heavily scarred systems.
+
+\item \textbf{Oscillation Detection.} Traits exhibiting $\geq 6$ direction reversals in 10 ticks are frozen for 20 ticks (see \S\ref{sec:personality}), preventing adversarial oscillation attacks on the personality vector.
+
+\item \textbf{Drift Rate Limiting.} Minimum 30-second wall-clock interval between personality drift events:
+\begin{equation}
+\Delta\pi_k(t) = 0 \quad \text{if } t_{\text{wall}} - t_{\text{last\_drift}} < 30\text{s}
+\end{equation}
+Prevents message-spam manipulation of the personality feedback loop.
+\end{enumerate}
+
+Together, these mechanisms ensure bounded dynamics under adversarial input while preserving full expressiveness under normal interaction. The sovereignty cap is the primary defense: even if all other mechanisms fail, the per-session scar limit prevents unbounded state modification.
+
+\begin{remark}[Defense in Depth]
+The seven safety mechanisms form a defense-in-depth architecture. The sovereignty cap (Mechanism 1) provides the hard outer bound. The circuit breaker (Mechanism 2) catches rapid cascades that might form multiple scars before the cap activates. Time-aware healing (Mechanism 3) ensures recovery during silence. Void resistance (Mechanism 4) and the numbed-count floor (Mechanism 5) prevent feedback loops in the $\Phi$ coupling path. Oscillation detection (Mechanism 6) and drift rate limiting (Mechanism 7) protect the personality layer. No single mechanism is sufficient alone, but their combination provides robust protection across all attack vectors: rapid wounding, sustained pressure, feedback exploitation, and personality manipulation.
+\end{remark}
+
+% ============================================================
+% 10. SEVEN-LAYER PIPELINE
+% ============================================================
+\section{Seven-Layer Pipeline}
+\label{sec:pipeline}
+
+The formal theories are embedded in a seven-layer computation stack designed for real-time operation on commodity hardware.
+
+\subsection{Layer Overview}
+
+\begin{enumerate}[leftmargin=*]
+\item \textbf{L1: HDC Perception.} Input text projected to 2048-dimensional binary hypervectors via character bigram encoding with cyclic shift and majority-vote bundling~\cite{kanerva2009}. Matching uses Hamming distance.
+
+\item \textbf{L2: Predictive Coding Gate.} Maintains prediction vector; computes surprise. Routes to three paths:
+\begin{itemize}
+\item Low surprise ($< 0.15$): fast path (scar evolution + void aging only).
+\item Medium ($0.15$--$0.45$): normal path (full Void-Scar + MoE-HGT).
+\item High ($\geq 0.45$): full path (all layers + coupling + sheaf).
+\end{itemize}
+Cold-start guard: first 15 messages capped at normal path. This prevents the system from entering the full computation path before it has established a reliable prediction baseline, avoiding false-positive high-surprise routing on novel but benign inputs during initialization.
+
+\item \textbf{L3: Void-Scar Engine.} Core computation (\S\ref{sec:scar}--\S\ref{sec:coupling}). Includes spatiotemporal graph with PPR teleportation:
+\begin{equation}
+\mathbf{h}_i^{(l+1)} = (1-\alpha) \cdot \text{Aggregate}(\{\mathbf{h}_j^{(l)} : j \in \mathcal{N}(i)\}) + \alpha \cdot \mathbf{h}_i^{(0)}
+\end{equation}
+where $\alpha = 0.2 + 0.4 \cdot \pi_{\text{acuity}}$.
+
+\item \textbf{L4: Relational Sheaf.} Multi-relational consistency (\S\ref{sec:sheaf}). Cohomology detects contradictions; Laplacian governs propagation.
+
+\item \textbf{L5: MoE-HGT.} Three-stage decision fusion (\S\ref{sec:moehgt}). $\sim$14.3K parameters, personality-derived.
+
+\item \textbf{L6: Autopoietic Boundary.} 32-dimensional identity core. Perturbation response:
+\begin{itemize}
+\item Penetration $< 0.3$: absorb (elastic, identity unchanged).
+\item Penetration $0.3$--$0.7$: resist (boundary stressed).
+\item Penetration $\geq 0.7$: phase transition (identity rotates $\leq 6^\circ$).
+\end{itemize}
+
+\item \textbf{L7: Phase Transition Expression.} Expression is discontinuous phase transition, not continuous function. Pressure accumulates; when exceeding personality-derived threshold, output jumps to: \emph{hint} ($< 0.5$), \emph{normal} ($0.5$--$1.0$), or \emph{urgent} ($> 1.0$).
+\end{enumerate}
+
+\subsection{Routing and Timing}
+
+\begin{table}[H]
+\centering
+\caption{Measured latency by computation path (p50, Intel i5 3.0 GHz, pure Python + NumPy).}
+\label{tab:timing}
+\begin{tabular}{lccc}
+\toprule
+Layer & Fast Path & Normal Path & Full Path \\
+\midrule
+L1 HDC Perception & 14.0 ms & 14.0 ms & 14.0 ms \\
+L2 Predictive Coding & 0.01 ms & 0.01 ms & 0.01 ms \\
+L3 Void-Scar + Graph & 0.05 ms & 0.50 ms & 0.50 ms \\
+L4 Relational Sheaf & skip & skip & 0.80 ms \\
+L5 MoE-HGT & skip & 0.75 ms & 0.75 ms \\
+L6 Autopoiesis & 0.01 ms & 0.01 ms & 0.10 ms \\
+L7 Phase Transition & $<$0.01 ms & $<$0.01 ms & $<$0.01 ms \\
+\midrule
+\textbf{Total (p50)} & \textbf{14.1 ms} & \textbf{15.3 ms} & \textbf{16.2 ms} \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+The L1 HDC layer dominates at 14ms (p50). The MoE-HGT adds only 0.75ms. Total p50 is 15.4ms across all paths. The bottleneck is HDC encoding, not the formal computation layers.
+
+\subsection{Main Processing Algorithm}
+
+\begin{algorithm}[H]
+\caption{Void-Scar Engine: Single Event Processing}
+\label{alg:pipeline}
+\begin{algorithmic}[1]
+\REQUIRE Event vector $\mathbf{h}$, surprise $s$, previous similarity $p$
+\ENSURE Observation dict, expression drive, coherence $r$
+\STATE \textbf{// Coupling $\Phi$: Scar $\to$ Void sensitivity}
+\STATE $n_{numbed} \leftarrow |\{d : M_d < 0.5\}|$
+\STATE $\theta_d^{eff} \leftarrow \max(\theta_d^{\min},\; \theta_d - 0.05 \cdot n_{numbed})$
+\STATE \textbf{// Void Calculus tick}
+\FOR{each void $v \in V$}
+  \STATE $v.age \leftarrow v.age + 1$
+  \STATE $v.\pi \leftarrow \min(\Pi_{\max},\; v.\pi + v.\delta \cdot \ln(v.age + 1) \cdot (1 - v.\beta))$
+\ENDFOR
+\STATE Contract voids: remove boundary points where $sim(\mathbf{h}, b) > \theta_c$
+\IF{void genesis conditions met AND cooldown expired}
+  \STATE Create new void; apply resistance $\theta'_d = \theta_d^{eff} + 0.02 \cdot |V|$
+\ENDIF
+\STATE Reap dead voids $\to$ ghosts; merge/split pass
+\STATE \textbf{// Coupling $\Gamma$: Void $\to$ Scar wounding}
+\FOR{each void $v$ with $v.\pi > \theta_p$}
+  \STATE $\mathbf{e}_{wound} \leftarrow v.\pi \cdot \text{project}(\hat{B}_v)$
+  \STATE $s_{scar} \leftarrow s_{scar} \triangleright \mathbf{e}_{wound}$
+\ENDFOR
+\STATE \textbf{// Scar Algebra step}
+\STATE $\tilde{\mathbf{e}} \leftarrow \text{modulate}(\mathbf{e}, \sigma)$ \COMMENT{Apply $M_d$ per dimension}
+\STATE $\mathbf{x} \leftarrow \tanh(W_2 \cdot \tanh(W_1 \cdot [\mathbf{x};\, \tilde{\mathbf{e}}]))$ \COMMENT{Contractive evolution}
+\IF{$\exists d: |\tilde{e}_d| > \theta_w$ AND sovereignty cap not reached}
+  \STATE Append scar $(d, t, raw)$ to $\sigma$
+\ENDIF
+\STATE Advance scar healing (including time-aware bonus ticks)
+\STATE \textbf{// Coherence computation}
+\STATE $r \leftarrow 1 - \sum_v \pi_v \cdot \mathbb{1}[M_{d_v} < 0.5] / (\sum_v \pi_v + \epsilon)$
+\RETURN observation, expression\_drive, $r$
+\end{algorithmic}
+\end{algorithm}
+
+\subsection{Implementation Constraints}
+
+The reference implementation targets a 1-core, 1-GB deployment environment:
+\begin{itemize}
+\item Pure Python + NumPy only. No ML frameworks.
+\item No GPU. All computation on CPU.
+\item Memory budget: $< 50$ MB for entire computation state.
+\item Binary hot-path codec: HDC layer operates on \texttt{bytearray} with bitwise XOR and \texttt{popcount}.
+\item Scar Algebra: Python class with \texttt{\_\_slots\_\_}; modifier computation cached when scar set unchanged.
+\item MoE-HGT: Direct NumPy matrix operations; 14.3K parameters pre-computed from personality at initialization.
+\end{itemize}
+
+% ============================================================
+% 11. EXPERIMENTS
+% ============================================================
+\section{Experiments}
+\label{sec:experiments}
+
+We evaluate Sylanne-Embodiment 1.2 across eleven experiments covering expressiveness, detection, state distinction, path dependence, ablation, stability, isolation, sheaf theory, and personality dynamics. All experiments use the reference Python implementation on a single core (Intel i5, 3.0 GHz, 16 GB RAM).
+
+\subsection{Exp 1: Expressiveness Separation}
+
+We apply identical probe events to the Scar Algebra under varying scar configurations. A wounded system (7 injuries) is compared against an unwounded baseline receiving identical subsequent inputs.
+
+\paragraph{Result.} Mean L2 state divergence reaches 0.049 after 7 wounds, growing monotonically with injury count. The wounded system produces distinct outputs for identical inputs, confirming the $\Omega(k)$ expressiveness separation of Theorem~\ref{thm:scar-expressiveness}. A fixed-operator system produces identical output regardless of history. The divergence grows approximately as $0.007 \cdot k$ for $k$ wounds, indicating linear state separation in the number of scars---consistent with the log-compressed modifier preventing exponential blowup while maintaining monotonic separation.
+
+\subsection{Exp 2: Void Detection Sensitivity}
+
+Void detection rate is measured across surprise levels (0.0--1.0) for two personality configurations: high perception acuity ($\pi_{\text{acuity}} = 0.8$) and low ($\pi_{\text{acuity}} = 0.2$).
+
+\paragraph{Result.} High acuity produces 9--10 voids; low acuity produces 5--6. Detection follows a smooth sigmoid centered at the personality-derived threshold, confirming that void sensitivity is personality-driven rather than a brittle hard threshold.
+
+\subsection{Exp 3: Three-State Distinction}
+
+Three void scenarios simulated over 30 ticks: $S_1$ (never discussed), $S_2$ (resolved/ghost), $S_3$ (actively avoided). Tracked: pressure, depth, boundary completeness.
+
+\paragraph{Result.} $S_1$: depth 0.20, pressure 0. $S_2$: depth 0.30, pressure stabilized. $S_3$: depth 6.90 (34$\times$ $S_1$), active pressure growth. All three states cleanly separable by a single scalar (depth), confirming Theorem~\ref{thm:void-three-way}.
+
+\subsection{Exp 4: Hysteresis (Path Dependence)}
+
+Two engine instances receive opposite initial sequences establishing different scar histories, then identical shared events. Tracked: cumulative scar count and state divergence.
+
+\paragraph{Result.} Final divergence = 0.104. The hurt-first path accumulates 51 scars vs.\ 47 for comfort-first. The gap never closes despite identical subsequent input, confirming Theorem~\ref{thm:hysteresis}: permanent path dependence is ineliminable. The divergence stabilizes after approximately 30 shared events, indicating that the hysteresis is not merely transient but reaches a permanent steady-state separation. This is the empirical manifestation of the algebraic irreversibility: the faded scars from early wounds permanently attenuate sensitivity on affected dimensions, creating a measurable behavioral difference that persists indefinitely.
+
+\subsection{Exp 5: Ablation Study}
+
+Full system compared against four ablations (No Void, No Scar, No Coupling, No MoE-HGT) over 100 diverse inputs. Metric: state trajectory richness (unique states visited, measured as the number of distinct L2-ball neighborhoods of radius 0.01 visited during the trajectory).
+
+\paragraph{Result.} MoE-HGT removal has the largest impact ($-23\%$ richness), as the decision-generation layer. Scar, Void, and Coupling are regulatory---their removal loses constraints but not generative capacity. Each component has a unique contribution signature, confirming no redundancy. Specifically:
+\begin{itemize}
+\item Full system: 100\% richness (baseline).
+\item No MoE-HGT: 77\% ($-23\%$). The decision layer generates the diversity; without it, the system produces monotone responses.
+\item No Scar: 89\% ($-11\%$). Loss of path-dependent modulation reduces state space exploration.
+\item No Void: 91\% ($-9\%$). Loss of pressure-driven transitions removes a source of spontaneous state change.
+\item No Coupling: 94\% ($-6\%$). Loss of bidirectional interaction reduces emergent dynamics but preserves independent component contributions.
+\end{itemize}
+The ordering (MoE-HGT $>$ Scar $>$ Void $>$ Coupling) reflects the architectural hierarchy: the decision layer is generative, the formal theories are regulatory, and the coupling is emergent.
+
+\subsection{Exp 6: Long-Term Stability}
+
+1000 ticks of continuous operation under mixed stress input (alternating positive, negative, and neutral events with Gaussian noise). Tracked: ground-state norm, scar count, void count, NaN/Inf occurrence, modifier product range.
+
+\paragraph{Result.} Ground-state norm stays bounded at 0.25 (well within the $[-1,1]^n$ theoretical bound). 10 scars form total, at most 11 simultaneously active voids. No NaN or Inf values observed across all 8 state dimensions and all intermediate computations. The log-compressed modifier remains in $[0.7^{10}, M_{\max}] = [0.028, 5.0]$ throughout. This confirms Theorem~\ref{thm:scar-convergence}: the spectral normalization constraint ($\|W_1\|_2 \cdot \|W_2\|_2 < 0.49$) combined with log-compression guarantees long-term numerical stability without requiring explicit gradient clipping or overflow protection.
+
+\subsection{Exp 7: Multi-User Isolation}
+
+Five independent engine instances with different interaction patterns (positive-only, single wound, repeated avoidance, high-intensity, sparse). Each instance processes 100 events. Isolation is verified by: (1) object identity (no shared references), (2) scar count independence, (3) void count independence, (4) personality vector independence, (5) coherence independence, (6) expression drive independence, (7) timing independence.
+
+\paragraph{Result.} All 7 isolation checks pass. The positive-only user retains 0 scars despite other users being heavily wounded (up to 15 scars). No state leakage between instances. This validates the architectural decision to use independent engine instances per relationship rather than shared state with access control.
+
+\subsection{Exp 8: Cohomological Dissociation}
+
+Agent with 3 relationships (intimate, friendly, formal) receives contradictory events over 200 ticks. Relationship 1 receives sustained positive events (driving expression up), while Relationship 3 receives sustained negative events (driving expression down). The presentation matrices $P_1$ and $P_3$ are initialized to require similar self-presentation, creating a contradiction. Tracked: inconsistency energy ($\|\delta^0 \mathbf{x}\|^2$), dissociation pressure, $\dim H^1$.
+
+\paragraph{Result.} Inconsistency energy follows S-curve from 0 to $\approx$65. Dissociation pressure grows from 0.19 to 0.59. The system resolves contradictions through internal state adjustment (rotating $\mathbf{x}_0$ to minimize total inconsistency), demonstrating that high inconsistency energy is necessary but not sufficient for $H^1 > 0$. True cohomological obstruction requires the presentation matrices to become rank-deficient, which the personality-bounded evolution prevents under normal conditions.
+
+\subsection{Exp 9: Spectral Propagation}
+
+Scar event inflicted in source relationship (intimate, index 0); propagation measured to 4 target relationships of different types via the Frobenius norm $\|P_j^T P_0\|_F$ of the cross-presentation coupling.
+
+\paragraph{Result.} Propagation strength ordered by relational affinity: intimate (0.543) $>$ friendly (0.405) $>$ formal (0.314) $>$ adversarial (0.215). The ordering matches the intuition that closer relationship types share more self-presentation structure, and hence trauma propagates more strongly between similar relationships. The exponential decay predicted by Theorem~\ref{thm:sheaf-spectral} is confirmed: propagation drops by approximately $e^{-\lambda_1}$ per tick, with $\lambda_1 \approx 0.3$ for this configuration.
+
+\subsection{Exp 10: Personality Drift (Dual-EMA)}
+
+Starting from neutral personality $\boldsymbol{\pi}_0 = (0.5, 0.5, 0.5, 0.5, 0.5)$, three scenarios over 500 ticks: (A) sustained acceptance, (B) repeated wounding, (C) cross-relational contradiction.
+
+\paragraph{Result.}
+\begin{itemize}
+\item Scenario A: expression\_drive $+0.226$ (acceptance reinforces expression).
+\item Scenario B: perception\_acuity $-0.101$ (wounding eventually numbs sensitivity via homeostatic adaptation).
+\item Scenario C: relational\_gravity $-0.050$ (contradiction reduces relational engagement).
+\end{itemize}
+All drift rates remain within the $\eta \leq 10^{-4}$ per-tick bound. Single events do not alter the skeleton; only sustained patterns produce meaningful drift. The Dual-EMA consensus gate correctly filters transient noise: in Scenario B, the fast EMA responds immediately to each wound, but the slow EMA only aligns after $\sim$50 ticks of sustained wounding. Until consensus is reached, drift is halved, protecting against manipulation by isolated events. The homeostatic pull ensures that drift is self-limiting: as $\pi_{\text{acuity}}$ moves away from its set-point, the restoring force increases, eventually balancing the wounding signal at a new equilibrium.
+
+\subsection{Exp 11: Safety Validation}
+
+20 rapid wound events delivered within 5 ticks. Tracked: scar formation count, sovereignty cap activation.
+
+\paragraph{Result.} Only 4 scars form (80\% rejection). Sovereignty cap activates after scar 3, raising threshold to 0.95. The 4th scar forms from a pre-cap event still in the pipeline. No further scars form regardless of input intensity. Confirms the sovereignty immune system prevents unbounded state modification under adversarial attack.
+
+\subsection{Supplementary: MoE Distribution}
+
+On neutral input, expert activation distribution: defense 100\%, silence 74\%, social 26\%, curiosity 0\%, repair 0\%. Defense dominance on neutral input reflects the system's conservative default posture---in the absence of positive signals, the system defaults to self-protection. Under positive input (acceptance signals), social and curiosity experts activate, shifting the decision vector toward expression. Under threat (rapid wounding), defense and silence dominate with near-100\% activation, producing expression inhibition ($d_3 > 0.5$). The dormant-expert reactivation bonus ensures that curiosity and repair experts remain available even after extended periods of defensive posture, preventing the expert collapse documented in~\cite{misrouted2025}.
+
+\subsection{Supplementary: Timing Breakdown}
+
+Detailed timing analysis over 1000 events reveals the following percentile distribution:
+\begin{itemize}
+\item L1 HDC: p50 = 14.0ms, p95 = 16.2ms, p99 = 18.1ms (dominant bottleneck).
+\item L5 MoE-HGT: p50 = 0.75ms, p95 = 0.82ms, p99 = 0.91ms (highly consistent).
+\item L3 Void-Scar: p50 = 0.50ms, p95 = 0.68ms, p99 = 1.12ms (variance from scar formation events).
+\item Total pipeline: p50 = 15.4ms, p95 = 17.8ms, p99 = 20.1ms.
+\end{itemize}
+The HDC layer accounts for 91\% of total latency. All non-HDC computation completes in under 2ms at p99, demonstrating that the formal theories add negligible overhead to the perceptual front-end.
+
+\subsection{Summary}
+
+\begin{table}[H]
+\centering
+\small
+\begin{tabular}{lll}
+\toprule
+\textbf{Experiment} & \textbf{Key Metric} & \textbf{Result} \\
+\midrule
+Exp 1: Expressiveness & L2 divergence after 7 wounds & 0.049 \\
+Exp 2: Void Detection & Personality-driven sensitivity & 9--10 vs 5--6 voids \\
+Exp 3: Three-State & Depth separation ratio & 34$\times$ \\
+Exp 4: Hysteresis & State divergence & 0.104, 47 vs 51 scars \\
+Exp 5: Ablation & MoE-HGT removal impact & $-23\%$ richness \\
+Exp 6: Stability & 1000-tick norm & 0.25, no NaN \\
+Exp 7: Isolation & Independence checks & 7/7 pass \\
+Exp 8: Cohomological & Inconsistency energy & $0 \to 65$ \\
+Exp 9: Spectral & Propagation ordering & 0.543/0.405/0.314/0.215 \\
+Exp 10: Dual-EMA Drift & Expression drive change & $+0.226$ \\
+Exp 11: Safety & Sovereignty rejection rate & 80\% (4/20 pass) \\
+\bottomrule
+\end{tabular}
+\caption{Summary of experimental results across 11 protocols.}
+\label{tab:results}
+\end{table}
+
+% ============================================================
+% 12. DISCUSSION
+% ============================================================
+\section{Discussion}
+\label{sec:discussion}
+
+\subsection{Limitations}
+
+\paragraph{HDC bottleneck.} The L1 HDC layer accounts for 91\% of total latency (14ms of 15.4ms p50). The 2048-bit encoding provides $\sim$11 bits of effective resolution, limiting void boundary matching granularity. Higher-dimensional encodings (4096, 8192 bits) trade memory and latency for resolution. Future work may explore approximate nearest-neighbor structures to reduce this bottleneck.
+
+\paragraph{Healing rate assumptions.} Stage durations ($T(raw)=10$, $T(closing)=40$, $T(scarred)=150$) are personality-derived via affine mappings. While this eliminates training data requirements, the derivation functions are designed rather than empirically validated against longitudinal human interaction data.
+
+\paragraph{Sheaf scalability.} The current implementation supports $N \leq 10$ relationships. Larger relational complexes require sparse Laplacian eigendecomposition and incremental cohomology computation. The $O(N^2)$ presentation matrix comparison becomes expensive beyond $N = 20$.
+
+\paragraph{Two-layer base evolution.} The contractive map (Eq.~\ref{eq:evolve}) with spectral normalization provides provable convergence at the cost of representational capacity. Deeper architectures could increase expressiveness but require more complex spectral constraints.
+
+\paragraph{Personality derivation.} All 26+ computation parameters are derived from 5 personality dimensions via affine maps. This is elegant but constrains the parameter space to a 5-dimensional manifold. Some desirable parameter combinations may be unreachable.
+
+\paragraph{Single-agent limitation.} The current framework models a single agent's internal dynamics. While the Relational Sheaf Theory handles multiple relationships, all relationships are from the perspective of one agent. Multi-agent interaction (where both parties have Scar Algebras that influence each other) is left to future work.
+
+\paragraph{Absence of training data.} All parameters are derived deterministically from personality without any learning from interaction data. While this eliminates cold-start problems and ensures reproducibility, it means the system cannot adapt its derivation functions to better match observed human relational patterns. The affine maps $f_i(\boldsymbol{\pi})$ are designed, not learned.
+
+\subsection{Comparison with Active Inference}
+
+Active inference~\cite{friston2010} minimizes variational free energy, treating all prediction errors as signals to be reduced. Our framework differs fundamentally:
+\begin{enumerate}
+\item \textbf{Not all errors should be minimized.} Void pressure represents prediction errors that should \emph{accumulate} rather than be resolved. The system's response to absence is to track it, not minimize it.
+\item \textbf{Irreversibility is a feature.} Active inference operates on revisable beliefs. Scar Algebra's irreversibility captures the asymmetry of emotional experience.
+\item \textbf{Sovereignty over optimization.} Active inference optimizes a single objective. Our architecture includes a sovereignty layer (L6) that can \emph{reject} optimization pressure when it threatens identity coherence.
+\end{enumerate}
+
+\subsection{Relationship to MoE Reliability Literature}
+
+Our MoE-HGT design responds to three findings from the reliability literature:
+\begin{itemize}
+\item \textbf{Routing errors cause hallucinations}~\cite{misrouted2025}: We use personality-derived base weights (meaningful initialization) and Hebbian adaptation (learning from activation history) rather than random initialization with gradient training.
+\item \textbf{Sparse MoE is fragile on long-tail}~\cite{counterfactual2025}: Dormant-expert reactivation ensures all 5 experts remain available, preventing the expert collapse that makes rare-input routing unreliable.
+\item \textbf{MoE can match dense reliability}~\cite{moerbench2024}: Our 14.3K-parameter MoE achieves this through the combination of type-specific encoding (Stage 1), cross-type attention (Stage 2), and situation-specific routing (Stage 3).
+\end{itemize}
+
+\subsection{Ethical Considerations}
+
+\paragraph{User sovereignty as architectural invariant.} The autopoietic boundary (L6) enforces a hard limit on identity drift ($\leq 6^\circ$ rotation per phase transition). This is structural, not tunable: the system cannot be manipulated into arbitrary states regardless of input pressure.
+
+\paragraph{Bounded burning.} Phase transition expression (L7) ensures emotional intensity is bounded and discontinuous. The system can express urgency but cannot enter unbounded amplification loops, preventing it from becoming a source of emotional escalation.
+
+\paragraph{Transparency.} The coherence metric $r$ (Eq.~\ref{eq:coherence}) provides a legible signal of internal consistency that can be surfaced to users, supporting informed interaction.
+
+\subsection{Future Work}
+
+\begin{itemize}
+\item \textbf{HDC optimization:} Approximate nearest-neighbor or learned hash functions to reduce L1 latency below 5ms. Potential approaches include locality-sensitive hashing with pre-computed tables or SIMD-optimized popcount on modern CPUs.
+\item \textbf{Sheaf scaling:} Sparse Laplacian methods for $N > 20$ relationships with incremental cohomology. The key challenge is maintaining $O(N)$ per-tick cost rather than the current $O(N^2)$ from pairwise presentation matrix comparison.
+\item \textbf{Formal verification:} Machine-checked proofs of the axiom system in Lean 4, particularly the convergence theorem and the expressiveness separation.
+\item \textbf{Empirical validation:} Longitudinal human evaluation of expression naturalness and relational coherence across $>$1000 interaction sessions.
+\item \textbf{Personality derivation learning:} Whether fine-tuning the affine derivation functions from interaction data improves ecological validity while preserving the deterministic reproducibility guarantee.
+\item \textbf{Cross-agent sheaves:} Extending the relational complex to include multiple agents with their own Scar Algebras, enabling formal analysis of mutual wounding, shared voids, and emergent group dynamics.
+\item \textbf{Temporal resolution:} Investigating sub-tick dynamics for real-time voice interaction where the 15ms pipeline latency becomes a meaningful fraction of the interaction loop.
+\end{itemize}
+
+% ============================================================
+% 13. CONCLUSION
+% ============================================================
+\section{Conclusion}
+\label{sec:conclusion}
+
+We have presented Sylanne-Embodiment 1.2, a formal computational framework for AI companions built on six interlocking theories. \textbf{Scar Algebra} provides irreversible self-modification with log-compressed modifiers and provable convergence via spectral normalization. \textbf{Void Calculus} elevates absence to a first-class primitive with capped pressure dynamics, proving irreducibility to both AGM belief revision and Bayesian updating. \textbf{Bidirectional Coupling} produces emergent hysteresis (experimentally confirmed at divergence 0.104) and a coherence metric characterizing dissociation. \textbf{Relational Sheaf Theory} extends the framework to multi-relational settings with cohomological dissociation detection and spectrally-bounded cross-relational propagation. The \textbf{Embodiment Five} personality model provides homeostatic regulation with Dual-EMA consensus, oscillation detection, and meaningful drift (+0.226 expression drive under sustained acceptance). The \textbf{MoE-HGT} architecture achieves reliable decision fusion with 14.3K personality-derived parameters and Hebbian adaptation.
+
+Seven safety mechanisms---sovereignty cap (80\% rejection under rapid attack), protective dissociation, time-aware healing, void resistance, numbed-count floor, oscillation detection, and drift rate limiting---ensure bounded dynamics under adversarial input while preserving full expressiveness under normal interaction.
+
+The seven-layer pipeline achieves p50 latency of 15.4ms on commodity hardware with pure Python and NumPy, demonstrating that theoretically rigorous affective computation is compatible with real-time deployment. The key insight is that emotional continuity in AI requires irreversible self-modification, first-class absence, global relational consistency, and homeostatic personality regulation---four properties provably beyond the reach of fixed-operator dynamical systems, standard belief revision, naive per-relationship independence, and static personality configurations.
+
+The framework opens several research directions: formal verification of the axiom system in proof assistants, empirical validation against longitudinal human interaction data, extension to multi-agent relational dynamics where both parties carry Scar Algebras, and optimization of the HDC perceptual layer to reduce the current 14ms bottleneck. We believe the combination of formal rigor, practical efficiency, and architectural safety makes Sylanne-Embodiment a viable foundation for AI companions that maintain coherent, irreversible, and sovereign internal lives.
+
+\paragraph{Reproducibility.} The reference implementation is available as a pure Python package (\texttt{sylanne\_alpha/}) with no dependencies beyond NumPy. All experiments are reproducible from the provided scripts with fixed random seeds. The 14.3K MoE-HGT parameters are deterministically derived from any personality vector via SHA-256 hashing, ensuring identical behavior across platforms.
+
+\paragraph{Broader Impact.}
+This work contributes to the emerging field of AI companion systems by providing formal foundations for irreversible internal dynamics. We emphasize that the framework is designed for \emph{bounded} emotional computation: the sovereignty cap, autopoietic boundary, and homeostatic regulation ensure that the system cannot be driven into pathological states by external manipulation. The irreversibility of scars is a feature for authenticity (past interactions genuinely matter) but is bounded by healing dynamics and the numbing regime (the system cannot accumulate unbounded damage). We believe these formal safety guarantees are essential for any deployed affective AI system, and that the combination of expressiveness and safety demonstrated here provides a template for responsible development of AI companions that maintain coherent internal lives without becoming sources of harm.
+
+% ============================================================
+% REFERENCES
+% ============================================================
+\bibliographystyle{plain}
+
+\begin{thebibliography}{99}
+
+\bibitem{mopgar2026}
+Mopgar.
+\newblock Teaching agents to feel the weight of irreversible consequences.
+\newblock {\em arXiv preprint arXiv:2603.14531}, 2026.
+
+\bibitem{hu2026}
+Y.~Hu and R.~Rong.
+\newblock Some[Body] must receive that pain: On the necessity of embodiment for consequential AI agents.
+\newblock {\em arXiv preprint arXiv:2605.16872}, 2026.
+
+\bibitem{evolving2024}
+J.~Zhang, Y.~Liu, et~al.
+\newblock Evolving agents: Interactive simulation of dynamic and diverse human personalities.
+\newblock {\em arXiv preprint arXiv:2404.02718}, 2024.
+
+\bibitem{picard1997}
+R.~W. Picard.
+\newblock {\em Affective Computing}.
+\newblock MIT Press, 1997.
+
+\bibitem{moerbench2024}
+Y.~Wang, Z.~Li, et~al.
+\newblock MoE-RBench: Towards building reliable language models with mixture-of-experts.
+\newblock In {\em International Conference on Machine Learning (ICML)}, 2024.
+
+\bibitem{misrouted2025}
+A.~Chen, M.~Patel, et~al.
+\newblock When are experts misrouted? Counterfactual analysis of MoE routing failures.
+\newblock {\em arXiv preprint arXiv:2605.07260}, 2025.
+
+\bibitem{counterfactual2025}
+L.~Wu, S.~Park, et~al.
+\newblock Counterfactual routing to mitigate hallucinations in mixture-of-experts models.
+\newblock {\em arXiv preprint arXiv:2604.14246}, 2025.
+
+\bibitem{structured2025}
+K.~Nakamura, T.~Sato, et~al.
+\newblock Structured personality control and adaptation for large language model agents.
+\newblock {\em arXiv preprint arXiv:2601.10025}, 2025.
+
+\bibitem{persistent2026}
+H.~Kim, J.~Lee, et~al.
+\newblock Persistently autonomous embodied agents with personality-driven behavior.
+\newblock {\em arXiv preprint arXiv:2603.00117}, 2026.
+
+\bibitem{homeostasis2025}
+R.~Keramati, A.~Dezfouli, et~al.
+\newblock Linking homeostasis to reinforcement learning: Predictive control of internal states.
+\newblock {\em arXiv preprint arXiv:2507.04998}, 2025.
+
+\bibitem{stability2015}
+Y.~Roudi and P.~E. Bhatt.
+\newblock Stability of neuronal networks with homeostatic regulation.
+\newblock {\em PLoS Computational Biology}, 11(7):e1004357, 2015.
+
+\bibitem{hansen2019}
+J.~Hansen and R.~Ghrist.
+\newblock Toward a spectral theory of cellular sheaves.
+\newblock {\em Journal of Applied and Computational Topology}, 3(4):315--358, 2019.
+
+\bibitem{bodnar2022}
+C.~Bodnar, F.~Di~Giovanni, B.~Chamberlain, P.~Li\`{o}, and M.~Bronstein.
+\newblock Neural sheaf diffusion: A topological perspective on heterophily and oversmoothing in GNNs.
+\newblock In {\em Advances in Neural Information Processing Systems (NeurIPS)}, 2022.
+
+\bibitem{kanerva2009}
+P.~Kanerva.
+\newblock Hyperdimensional computing: An introduction to computing in distributed representation.
+\newblock {\em Cognitive Computation}, 1(2):139--159, 2009.
+
+\bibitem{friston2010}
+K.~Friston.
+\newblock The free-energy principle: A unified brain theory?
+\newblock {\em Nature Reviews Neuroscience}, 11(2):127--138, 2010.
+
+\bibitem{agm1985}
+C.~E. Alchourr\'{o}n, P.~G\"{a}rdenfors, and D.~Makinson.
+\newblock On the logic of theory change: Partial meet contraction and revision functions.
+\newblock {\em Journal of Symbolic Logic}, 50(2):510--530, 1985.
+
+\end{thebibliography}
+
+\end{document}
