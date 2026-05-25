@@ -2,29 +2,29 @@
 
 > powered by Fuck-U-Code；本报告由 `scripts/update_fuck_u_code_report.py` 根据官方 JSON 输出生成。
 
-- 💩 发酵指数：`23.6/100`，官方评价：`😐 微臭青年`（由质量分反向换算，越低越好）
-- 官方 JSON overallScore：`76.4/100`
-- 扫描规模：`199/320` 个文件已分析，`121` 个文件被跳过
-- 问题计数：critical `142`，error `373`，warning `278`
+- 💩 发酵指数：`24.8/100`，官方评价：`😐 微臭青年`（由质量分反向换算，越低越好）
+- 官方 JSON overallScore：`75.2/100`
+- 扫描规模：`199/319` 个文件已分析，`120` 个文件被跳过
+- 问题计数：critical `154`，error `372`，warning `276`
 - 原始报告：`output/fuck_u_code/raw-report.json`
-- 生成时间：`2026-05-25T12:07:06+00:00`
+- 生成时间：`2026-05-25T12:40:01+00:00`
 
 ## 最需要除味的文件
 
 | 💩 发酵 | 质量分 | critical | error | warning | 文件 |
 | --- | --- | ---: | ---: | ---: | --- |
-| 62.0/100 | 37.8/100 | 8 | 2 | 1 | `main.py` |
+| 64.0/100 | 36.5/100 | 9 | 2 | 0 | `main.py` |
 | 51.0/100 | 49.4/100 | 7 | 3 | 0 | `archive/3x_engines/integrated_self.py` |
+| 47.0/100 | 53.4/100 | 6 | 3 | 2 | `sylanne_alpha/webui_server.py` |
 | 45.0/100 | 54.7/100 | 6 | 2 | 1 | `archive/3x_engines/emotion_engine.py` |
 | 43.0/100 | 56.6/100 | 5 | 4 | 1 | `archive/3x_engines/lifelike_learning_engine.py` |
-| 43.0/100 | 57.3/100 | 3 | 6 | 2 | `sylanne_alpha/webui_server.py` |
 | 41.0/100 | 58.6/100 | 5 | 4 | 1 | `archive/3x_engines/memory_engine.py` |
 | 38.0/100 | 62.0/100 | 3 | 6 | 2 | `archive/3x_engines/project_life_engine.py` |
 | 37.0/100 | 63.1/100 | 4 | 4 | 2 | `archive/3x_engines/personality_drift_engine.py` |
-| 33.0/100 | 67.5/100 | 4 | 3 | 1 | `sylanne_alpha/computation_spine.py` |
-| 30.0/100 | 70.2/100 | 3 | 3 | 1 | `sylanne_alpha/workset.py` |
-| 30.0/100 | 70.3/100 | 1 | 7 | 1 | `experiments/void_scar_experiments.py` |
-| 29.0/100 | 71.0/100 | 3 | 4 | 3 | `sylanne_alpha/kernel.py` |
+| 35.0/100 | 65.0/100 | 4 | 4 | 2 | `sylanne_alpha/kernel.py` |
+| 34.0/100 | 66.2/100 | 4 | 3 | 1 | `sylanne_alpha/computation_spine.py` |
+| 31.0/100 | 68.9/100 | 3 | 3 | 2 | `sylanne_alpha/workset.py` |
+| 31.0/100 | 68.6/100 | 2 | 7 | 2 | `sylanne_alpha/hgt.py` |
 
 ## 读数说明
 
