@@ -2,12 +2,12 @@
 
 > powered by Fuck-U-Code；本报告由 `scripts/update_fuck_u_code_report.py` 根据官方 JSON 输出生成。
 
-- 💩 发酵指数：`23.6/100`，官方评价：`😐 微臭青年`（由质量分反向换算，越低越好）
-- 官方 JSON overallScore：`76.4/100`
+- 💩 发酵指数：`23.7/100`，官方评价：`😐 微臭青年`（由质量分反向换算，越低越好）
+- 官方 JSON overallScore：`76.3/100`
 - 扫描规模：`203/590` 个文件已分析，`387` 个文件被跳过
-- 问题计数：critical `149`，error `379`，warning `287`
+- 问题计数：critical `148`，error `384`，warning `286`
 - 原始报告：`output/fuck_u_code/raw-report.json`
-- 生成时间：`2026-05-25T09:22:29+00:00`
+- 生成时间：`2026-05-25T10:11:33+00:00`
 
 ## 最需要除味的文件
 
@@ -24,7 +24,7 @@
 | 33.0/100 | 67.5/100 | 4 | 3 | 1 | `sylanne_alpha/computation_spine.py` |
 | 33.0/100 | 67.0/100 | 3 | 4 | 2 | `knowledge-base/scripts/build_mega_paper_kb.py` |
 | 30.0/100 | 70.2/100 | 3 | 3 | 1 | `sylanne_alpha/workset.py` |
-| 29.0/100 | 71.0/100 | 3 | 4 | 3 | `sylanne_alpha/kernel.py` |
+| 30.0/100 | 70.3/100 | 1 | 7 | 1 | `experiments/void_scar_experiments.py` |
 
 ## 读数说明
 
