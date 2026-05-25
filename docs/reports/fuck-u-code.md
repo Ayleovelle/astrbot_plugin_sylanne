@@ -5,15 +5,15 @@
 - 💩 发酵指数：`24.8/100`，官方评价：`😐 微臭青年`（由质量分反向换算，越低越好）
 - 官方 JSON overallScore：`75.2/100`
 - 扫描规模：`199/319` 个文件已分析，`120` 个文件被跳过
-- 问题计数：critical `154`，error `372`，warning `276`
+- 问题计数：critical `154`，error `373`，warning `275`
 - 原始报告：`output/fuck_u_code/raw-report.json`
-- 生成时间：`2026-05-25T12:40:01+00:00`
+- 生成时间：`2026-05-25T13:28:00+00:00`
 
 ## 最需要除味的文件
 
 | 💩 发酵 | 质量分 | critical | error | warning | 文件 |
 | --- | --- | ---: | ---: | ---: | --- |
-| 64.0/100 | 36.5/100 | 9 | 2 | 0 | `main.py` |
+| 63.0/100 | 36.7/100 | 9 | 2 | 0 | `main.py` |
 | 51.0/100 | 49.4/100 | 7 | 3 | 0 | `archive/3x_engines/integrated_self.py` |
 | 47.0/100 | 53.4/100 | 6 | 3 | 2 | `sylanne_alpha/webui_server.py` |
 | 45.0/100 | 54.7/100 | 6 | 2 | 1 | `archive/3x_engines/emotion_engine.py` |
