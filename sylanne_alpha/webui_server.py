@@ -7,10 +7,14 @@ Not behind AstrBot's auth - direct access to the dashboard.
 from __future__ import annotations
 
 import asyncio
+import gc
 import json
 import logging
+import secrets
+import sys
 import threading
 import time
+from types import ModuleType
 from typing import TYPE_CHECKING, Any
 from urllib.parse import parse_qs, urlparse
 
@@ -23,6 +27,19 @@ _server_task: asyncio.Task | None = globals().get("_server_task")
 _httpd: Any = globals().get("_httpd")
 _httpd_thread: threading.Thread | None = globals().get("_httpd_thread")
 _active_plugin: Any = globals().get("_active_plugin")
+_active_token: str = ""
+_meltdown_nonces: dict[str, str] = {}
+
+
+def _ensure_token(config: dict[str, Any]) -> str:
+    """Generate or retrieve the WebUI bearer token."""
+    global _active_token
+    token = str(config.get("sylanne_webui_token", "") or "")
+    if not token:
+        token = secrets.token_urlsafe(32)
+        config["sylanne_webui_token"] = token
+    _active_token = token
+    return token
 
 
 def _set_active_plugin(plugin: Any) -> None:
@@ -46,7 +63,7 @@ def _runtime_info(plugin: Any) -> dict[str, Any]:
     }
 
 
-async def start_webui_server(plugin: Any, host: str = "0.0.0.0", port: int = 2718):
+async def start_webui_server(plugin: Any, host: str = "127.0.0.1", port: int = 2718):
     """Start standalone WebUI server in background."""
     _set_active_plugin(plugin)
     try:
@@ -60,6 +77,15 @@ async def start_webui_server(plugin: Any, host: str = "0.0.0.0", port: int = 271
 
     from pathlib import Path
 
+    @web.middleware
+    async def auth_middleware(request: web.Request, handler: Any) -> web.Response:
+        if request.path in ("/", "/logo.png", "/assets/logo.png"):
+            return await handler(request)
+        auth = request.headers.get("Authorization", "")
+        if not auth.startswith("Bearer ") or auth[7:] != _active_token:
+            return web.json_response({"error": "unauthorized"}, status=401)
+        return await handler(request)
+
     # Serve the dashboard HTML from pages/dashboard/index.html
     plugin_root = Path(__file__).resolve().parent.parent
     dashboard_path = plugin_root / "pages" / "dashboard" / "index.html"
@@ -69,11 +95,11 @@ async def start_webui_server(plugin: Any, host: str = "0.0.0.0", port: int = 271
             f"Sylanne WebUI: loaded dashboard from {dashboard_path} ({len(dashboard_html)} bytes)"
         )
     else:
-        from .webui import WEBUI_HTML
+        dashboard_html = (
+            "<html><body><h1>Sylanne Dashboard unavailable</h1></body></html>"
+        )
 
-        dashboard_html = WEBUI_HTML
-
-    app = web.Application()
+    app = web.Application(middlewares=[auth_middleware])
 
     async def handle_page(request: web.Request) -> web.Response:
         return web.Response(
@@ -200,10 +226,12 @@ async def start_webui_server(plugin: Any, host: str = "0.0.0.0", port: int = 271
         if not isinstance(body, dict):
             return web.json_response({"ok": False, "error": "invalid_body"})
         session = str(body.get("session", "")).strip()
-        token = str(body.get("token", "")).strip()
-        expected_token = str(body.get("expected_token", "")).strip()
-        if not token or not expected_token or token != expected_token:
-            return web.json_response({"ok": False, "error": "token_mismatch"})
+        nonce = str(body.get("nonce", "")).strip()
+        expected = _meltdown_nonces.pop(session, None)
+        if not nonce or nonce != expected:
+            return web.json_response(
+                {"ok": False, "error": "invalid_nonce"}, status=403
+            )
         current_plugin = _plugin(plugin)
         mem_getter = getattr(current_plugin, "_memory_system_for_session", None)
         if callable(mem_getter):
@@ -221,12 +249,19 @@ async def start_webui_server(plugin: Any, host: str = "0.0.0.0", port: int = 271
         logger.info(f"Sylanne MEMORY MELTDOWN (standalone): session={session}")
         return web.json_response({"ok": True, "session": session, "cleared": True})
 
+    async def handle_meltdown_nonce(request: web.Request) -> web.Response:
+        session = str(request.query.get("session", "") or "").strip()
+        nonce = secrets.token_urlsafe(16)
+        _meltdown_nonces[session] = nonce
+        return web.json_response({"nonce": nonce})
+
     app.router.add_get("/", handle_page)
     app.router.add_get("/api/state", handle_state)
     app.router.add_get("/api/settings", handle_settings_get)
     app.router.add_post("/api/settings", handle_settings_post)
     app.router.add_get("/api/computation_logs", handle_computation_logs)
     app.router.add_get("/api/memory_pools", handle_memory_pools)
+    app.router.add_get("/api/meltdown_nonce", handle_meltdown_nonce)
     app.router.add_post("/api/memory_meltdown", handle_memory_meltdown)
     app.router.add_get("/assets/logo.png", handle_logo)
     app.router.add_get("/logo.png", handle_logo)
@@ -250,7 +285,7 @@ async def start_webui_server(plugin: Any, host: str = "0.0.0.0", port: int = 271
         await runner.cleanup()
 
 
-def start_webui_background(plugin: Any, host: str = "0.0.0.0", port: int = 2718):
+def start_webui_background(plugin: Any, host: str = "127.0.0.1", port: int = 2718):
     """Launch the WebUI server as a background task."""
     global _server_task
     _set_active_plugin(plugin)
@@ -298,7 +333,7 @@ async def stop_webui_server() -> None:
 
 
 def start_webui_thread_server(
-    plugin: Any, host: str = "0.0.0.0", port: int = 2718
+    plugin: Any, host: str = "127.0.0.1", port: int = 2718
 ) -> None:
     """Launch a no-dependency HTTP server for environments without aiohttp."""
     global _httpd, _httpd_thread
@@ -314,9 +349,9 @@ def start_webui_thread_server(
     if dashboard_path.exists():
         dashboard_html = dashboard_path.read_text(encoding="utf-8")
     else:
-        from .webui import WEBUI_HTML
-
-        dashboard_html = WEBUI_HTML
+        dashboard_html = (
+            "<html><body><h1>Sylanne Dashboard unavailable</h1></body></html>"
+        )
 
     class SylanneWebUIHandler(BaseHTTPRequestHandler):
         server_version = "SylanneWebUI/1.0"
@@ -329,7 +364,7 @@ def start_webui_thread_server(
             self.send_response(status)
             self.send_header("Content-Type", "application/json; charset=utf-8")
             self.send_header("Content-Length", str(len(data)))
-            self.send_header("Access-Control-Allow-Origin", "*")
+            self.send_header("Access-Control-Allow-Origin", f"http://127.0.0.1:{port}")
             self.end_headers()
             self.wfile.write(data)
 
@@ -365,14 +400,24 @@ def start_webui_thread_server(
 
         def do_OPTIONS(self) -> None:
             self.send_response(204)
-            self.send_header("Access-Control-Allow-Origin", "*")
+            self.send_header(
+                "Access-Control-Allow-Origin",
+                f"http://127.0.0.1:{port}",
+            )
             self.send_header("Access-Control-Allow-Methods", "GET,POST,OPTIONS")
-            self.send_header("Access-Control-Allow-Headers", "Content-Type")
+            self.send_header(
+                "Access-Control-Allow-Headers", "Content-Type,Authorization"
+            )
             self.end_headers()
 
         def do_GET(self) -> None:
             parsed = urlparse(self.path)
             path = parsed.path.rstrip("/") or "/"
+            if path not in ("/", "/logo.png", "/assets/logo.png"):
+                auth = self.headers.get("Authorization", "")
+                if not auth.startswith("Bearer ") or auth[7:] != _active_token:
+                    self._send_json({"error": "unauthorized"}, status=401)
+                    return
             query = self._query()
             try:
                 if path == "/":
@@ -422,6 +467,11 @@ def start_webui_thread_server(
                         _plugin(plugin), session=session, limit=limit
                     )
                     self._send_json(data)
+                elif path == "/api/meltdown_nonce":
+                    session = query.get("session", "")
+                    nonce = secrets.token_urlsafe(16)
+                    _meltdown_nonces[session] = nonce
+                    self._send_json({"nonce": nonce})
                 elif path in {"/assets/logo.png", "/logo.png"}:
                     self._send_logo()
                 else:
@@ -432,6 +482,11 @@ def start_webui_thread_server(
         def do_POST(self) -> None:
             parsed = urlparse(self.path)
             path = parsed.path.rstrip("/") or "/"
+            if path not in ("/", "/logo.png", "/assets/logo.png"):
+                auth = self.headers.get("Authorization", "")
+                if not auth.startswith("Bearer ") or auth[7:] != _active_token:
+                    self._send_json({"error": "unauthorized"}, status=401)
+                    return
             try:
                 length = int(self.headers.get("Content-Length", "0") or "0")
                 raw = self.rfile.read(length) if length > 0 else b"{}"
@@ -474,10 +529,12 @@ def start_webui_thread_server(
             elif path == "/api/memory_meltdown":
                 try:
                     session = str(body.get("session", "")).strip()
-                    token = str(body.get("token", "")).strip()
-                    expected_token = str(body.get("expected_token", "")).strip()
-                    if not token or not expected_token or token != expected_token:
-                        self._send_json({"ok": False, "error": "token_mismatch"})
+                    nonce = str(body.get("nonce", "")).strip()
+                    expected = _meltdown_nonces.pop(session, None)
+                    if not nonce or nonce != expected:
+                        self._send_json(
+                            {"ok": False, "error": "invalid_nonce"}, status=403
+                        )
                         return
                     current_plugin = _plugin(plugin)
                     mem_getter = getattr(
@@ -1321,3 +1378,329 @@ def _load_schema(plugin: Any) -> dict[str, Any]:
             return json.load(f)
     except Exception:
         return {}
+
+
+# ---------------------------------------------------------------------------
+# WebUILifecycle: server lifecycle management extracted from main.py
+# ---------------------------------------------------------------------------
+
+
+class WebUILifecycle:
+    """Manages WebUI server lifecycle (start/stop/takeover) on behalf of the plugin."""
+
+    def __init__(self, plugin: Any) -> None:
+        self._p = plugin
+
+    def start_if_enabled(self) -> None:
+        """Start the standalone WebUI server when enabled.
+
+        This is intentionally idempotent. The WebUI can be enabled from the
+        AstrBot config page after the plugin has already handled requests, so
+        startup cannot live only in the first-request lazy-init branch.
+        """
+        if not self._p._cfg_bool("sylanne_webui_enabled", False):
+            return
+        self.publish_active_plugin()
+        webui_mod = self._current_webui_module_ref()
+        if (
+            getattr(webui_mod, "_server_task", None)
+            and not webui_mod._server_task.done()
+        ) or (
+            getattr(webui_mod, "_httpd_thread", None)
+            and webui_mod._httpd_thread.is_alive()
+        ):
+            return
+        webui_host = str(self._p._cfg("sylanne_webui_host", "127.0.0.1") or "127.0.0.1")
+        webui_port = self._p._cfg_int("sylanne_webui_port", 2718)
+        token = _ensure_token(self._p._config or {})
+        self._p.logger.info(f"Sylanne WebUI token: {token}")
+        try:
+            start_webui_background(self._p, host=webui_host, port=webui_port)
+            self._p.logger.info(
+                f"Sylanne WebUI server start requested: http://{webui_host}:{webui_port}"
+            )
+        except RuntimeError as exc:
+            self._p.logger.debug(
+                f"Sylanne WebUI server deferred until event loop is running: {exc}"
+            )
+        except Exception as exc:
+            self._p.logger.warning(f"Sylanne WebUI server failed: {exc}")
+
+    def runtime_info(self) -> dict[str, Any]:
+        return {
+            "plugin_name": "astrbot_plugin_sylanne",
+            "runtime_id": str(getattr(self._p, "_webui_runtime_id", "") or ""),
+            "instance_id": hex(id(self._p)),
+            "module": self._p.__class__.__module__,
+        }
+
+    def iter_loaded_server_modules(self) -> list[tuple[str, Any]]:
+        modules: list[tuple[str, Any]] = []
+        seen: set[int] = set()
+
+        def add_module(name: str, module: Any) -> None:
+            if module is None or id(module) in seen:
+                return
+            module_file = str(getattr(module, "__file__", "") or "").replace("\\", "/")
+            if not module_file.endswith("/sylanne_alpha/webui_server.py"):
+                return
+            if not any(
+                hasattr(module, attr)
+                for attr in (
+                    "_set_active_plugin",
+                    "stop_webui_server",
+                    "start_webui_background",
+                    "_server_task",
+                    "_httpd",
+                    "_httpd_thread",
+                )
+            ):
+                return
+            seen.add(id(module))
+            modules.append((name, module))
+
+        def add_namespace(name: str, namespace: Any) -> None:
+            if not isinstance(namespace, dict) or id(namespace) in seen:
+                return
+            module_file = str(namespace.get("__file__", "") or "").replace("\\", "/")
+            if not module_file.endswith("/sylanne_alpha/webui_server.py"):
+                return
+            if not any(
+                attr in namespace
+                for attr in (
+                    "_set_active_plugin",
+                    "stop_webui_server",
+                    "start_webui_background",
+                    "_server_task",
+                    "_httpd",
+                    "_httpd_thread",
+                )
+            ):
+                return
+            seen.add(id(namespace))
+            modules.append((name, namespace))
+
+        for name, module in list(sys.modules.items()):
+            add_module(name, module)
+        try:
+            for obj in gc.get_objects():
+                if isinstance(obj, ModuleType):
+                    add_module(str(getattr(obj, "__name__", "gc.module")), obj)
+                elif isinstance(obj, dict):
+                    add_namespace(str(obj.get("__name__", "gc.globals")), obj)
+        except Exception:
+            pass  # cleanup: gc introspection failure acceptable
+        return modules
+
+    def module_get(self, module: Any, attr: str, default: Any = None) -> Any:
+        if isinstance(module, dict):
+            return module.get(attr, default)
+        return getattr(module, attr, default)
+
+    def module_set(self, module: Any, attr: str, value: Any) -> None:
+        if isinstance(module, dict):
+            module[attr] = value
+        else:
+            setattr(module, attr, value)
+
+    def is_current_module(self, module: Any) -> bool:
+        webui_mod = self._current_webui_module_ref()
+        return module is webui_mod or module is getattr(webui_mod, "__dict__", None)
+
+    def is_server_task(self, task: asyncio.Task) -> bool:
+        try:
+            stack = list(task.get_stack(limit=8))
+        except Exception:
+            stack = []
+        for frame in stack:
+            filename = str(
+                getattr(getattr(frame, "f_code", None), "co_filename", "") or ""
+            ).replace("\\", "/")
+            if filename.endswith("/sylanne_alpha/webui_server.py"):
+                return True
+
+        coro: Any = None
+        try:
+            coro = task.get_coro()
+        except Exception:
+            return False
+        seen: set[int] = set()
+        while coro is not None and id(coro) not in seen:
+            seen.add(id(coro))
+            code = (
+                getattr(coro, "cr_code", None)
+                or getattr(coro, "gi_code", None)
+                or getattr(coro, "ag_code", None)
+            )
+            filename = str(getattr(code, "co_filename", "") or "").replace("\\", "/")
+            if filename.endswith("/sylanne_alpha/webui_server.py"):
+                return True
+
+            frame = (
+                getattr(coro, "cr_frame", None)
+                or getattr(coro, "gi_frame", None)
+                or getattr(coro, "ag_frame", None)
+            )
+            globals_dict = getattr(frame, "f_globals", {}) if frame is not None else {}
+            module_file = str((globals_dict or {}).get("__file__", "") or "").replace(
+                "\\", "/"
+            )
+            if module_file.endswith("/sylanne_alpha/webui_server.py"):
+                return True
+            coro = (
+                getattr(coro, "cr_await", None)
+                or getattr(coro, "gi_yieldfrom", None)
+                or getattr(coro, "ag_await", None)
+            )
+        return False
+
+    async def stop_server_tasks(self) -> list[str]:
+        stopped: list[str] = []
+        try:
+            tasks = [
+                task
+                for task in asyncio.all_tasks()
+                if task is not asyncio.current_task()
+            ]
+        except Exception:
+            return stopped
+        webui_tasks = [
+            task for task in tasks if not task.done() and self.is_server_task(task)
+        ]
+        for task in webui_tasks:
+            try:
+                task.cancel()
+                coro = task.get_coro()
+                name = (
+                    getattr(coro, "__qualname__", "")
+                    or getattr(coro, "__name__", "")
+                    or repr(coro)
+                )
+                stopped.append(f"task:{name}")
+            except Exception:
+                continue
+        if webui_tasks:
+            try:
+                await asyncio.wait(webui_tasks, timeout=2.0)
+            except Exception:
+                pass  # cleanup: task wait failure acceptable
+        return stopped
+
+    def publish_active_plugin(self) -> list[str]:
+        """Point every loaded Sylanne WebUI listener module at this plugin instance."""
+        updated: list[str] = []
+        for name, module in self.iter_loaded_server_modules():
+            setter = self.module_get(module, "_set_active_plugin")
+            if not callable(setter):
+                continue
+            try:
+                setter(self._p)
+                updated.append(name)
+            except Exception:
+                continue
+        return updated
+
+    async def stop_stale_server_modules(
+        self, *, include_current: bool = False
+    ) -> list[str]:
+        """Stop hot-upload WebUI modules that can keep port 2718 bound or serve stale HTML."""
+        stopped: list[str] = []
+        for name, module in self.iter_loaded_server_modules():
+            if self.is_current_module(module) and not include_current:
+                continue
+            try:
+                if await self.stop_server_module(module):
+                    stopped.append(name)
+            except Exception:
+                continue
+        if include_current:
+            try:
+                stopped.extend(await self.stop_server_tasks())
+            except Exception:
+                pass  # cleanup: failure acceptable
+        self.publish_active_plugin()
+        return stopped
+
+    async def stop_server_module(self, module: Any) -> bool:
+        """Best-effort shutdown for both current and legacy WebUI modules."""
+        stopper = self.module_get(module, "stop_webui_server")
+        if callable(stopper):
+            result = stopper()
+            if hasattr(result, "__await__"):
+                await result
+            return True
+
+        stopped = False
+        task = self.module_get(module, "_server_task")
+        if task is not None:
+            try:
+                if not task.done():
+                    task.cancel()
+
+                    try:
+                        await asyncio.wait_for(task, timeout=2.0)
+                    except (
+                        asyncio.CancelledError,
+                        asyncio.TimeoutError,
+                        RuntimeError,
+                        ValueError,
+                    ):
+                        pass
+                stopped = True
+            except Exception:
+                pass  # cleanup: task cancel failure acceptable
+
+        httpd = self.module_get(module, "_httpd")
+        if httpd is not None:
+            for method_name in ("shutdown", "server_close"):
+                method = getattr(httpd, method_name, None)
+                if callable(method):
+                    try:
+                        method()
+                    except Exception:
+                        pass  # cleanup: failure acceptable
+            stopped = True
+
+        thread = self.module_get(module, "_httpd_thread")
+        if thread is not None and callable(getattr(thread, "is_alive", None)):
+            try:
+                if thread.is_alive():
+                    thread.join(timeout=2.0)
+            except Exception:
+                pass  # cleanup: failure acceptable
+            stopped = True
+
+        for attr in ("_server_task", "_httpd", "_httpd_thread", "_active_plugin"):
+            exists = (
+                attr in module if isinstance(module, dict) else hasattr(module, attr)
+            )
+            if exists:
+                try:
+                    self.module_set(module, attr, None)
+                except Exception:
+                    pass  # cleanup: failure acceptable
+        return stopped
+
+    def schedule_listener_takeover(self) -> None:
+        if not self._p._cfg_bool("sylanne_webui_enabled", False):
+            return
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            return
+
+        async def _takeover() -> None:
+            await asyncio.sleep(0.3)
+            stopped = await self.stop_stale_server_modules(include_current=True)
+            if stopped:
+                self._p.logger.info(
+                    f"Sylanne WebUI stopped stale listener modules: {stopped}"
+                )
+            self.start_if_enabled()
+
+        task = loop.create_task(_takeover())
+        self._p._background_tasks.append(task)
+
+    def _current_webui_module_ref(self) -> Any:
+        """Return the current webui_server module reference from sys.modules."""
+        return sys.modules.get("sylanne_alpha.webui_server", sys.modules[__name__])

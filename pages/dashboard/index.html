@@ -2957,6 +2957,12 @@
       }
     }
     lastTransportMode = window.location.protocol === "file:" ? "preview" : "http";
+    // Inject Bearer token for HTTP transport
+    const token = localStorage.getItem('sylanne_webui_token') || new URLSearchParams(location.search).get('token') || '';
+    if (token) {
+      if (!options.headers) options.headers = {};
+      options.headers['Authorization'] = 'Bearer ' + token;
+    }
     return fetch(apiPath(path), options);
   }
 
@@ -5425,10 +5431,15 @@
       confirmBtn.disabled = true;
       confirmBtn.innerHTML = '<span style="display:inline-flex;align-items:center;gap:6px;"><svg width="14" height="14" viewBox="0 0 24 24" style="animation:spin 0.8s linear infinite;"><circle cx="12" cy="12" r="10" stroke="currentColor" stroke-width="3" fill="none" stroke-dasharray="31 31" stroke-linecap="round"/></svg>执行中...</span>';
       try {
+        // Get server-side nonce first
+        const nonceRes = await apiFetch(`/api/meltdown_nonce?session=${encodeURIComponent(currentSession)}`, { cache: 'no-store' });
+        if (!nonceRes.ok) throw new Error('Failed to get meltdown nonce');
+        const nonceData = await nonceRes.json();
+        const nonce = nonceData.nonce;
         const res = await apiFetch('/api/memory_meltdown', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ session: currentSession, token: userInput, expected_token: currentToken })
+          body: JSON.stringify({ session: currentSession, nonce: nonce })
         });
         if (!res.ok) {
           const errData = await res.json().catch(() => ({}));
@@ -5574,10 +5585,125 @@
     closeSessionPicker();
   });
 
+  // Token authentication UI
+  function showTokenInput() {
+    if (document.getElementById('token-auth-overlay')) return;
+    const overlay = document.createElement('div');
+    overlay.id = 'token-auth-overlay';
+    overlay.style.cssText = `
+      position:fixed;inset:0;z-index:99999;
+      background:var(--bg-primary);
+      display:flex;align-items:center;justify-content:center;flex-direction:column;
+      opacity:0;transition:opacity 0.4s ease;
+    `;
+    overlay.innerHTML = `
+      <style>
+        @keyframes loginFadeIn { from { opacity:0; transform:translateY(24px) scale(0.96); } to { opacity:1; transform:translateY(0) scale(1); } }
+        @keyframes loginPulse { 0%,100% { box-shadow: 0 0 0 0 var(--primary-glow); } 50% { box-shadow: 0 0 32px 8px var(--primary-glow); } }
+        @keyframes loginShake { 0%,100% { transform:translateX(0); } 20%,60% { transform:translateX(-6px); } 40%,80% { transform:translateX(6px); } }
+        #token-auth-card { animation: loginFadeIn 0.6s cubic-bezier(0.16,1,0.3,1) forwards; }
+        #token-auth-card:focus-within { animation: loginPulse 2.4s ease-in-out infinite; }
+        #token-auth-input:focus { border-color: var(--primary); box-shadow: 0 0 0 3px var(--primary-glow); }
+        #token-auth-submit { transition: all 0.2s ease; }
+        #token-auth-submit:hover { transform: translateY(-1px); box-shadow: 0 4px 16px var(--primary-glow); }
+        #token-auth-submit:active { transform: translateY(0) scale(0.97); }
+        .login-shake { animation: loginShake 0.4s ease !important; }
+      </style>
+      <div id="token-auth-card" style="
+        background:var(--card-bg);
+        backdrop-filter:var(--panel-blur);
+        border:1px solid var(--card-border);
+        border-radius:24px;
+        padding:48px 40px 40px;
+        max-width:380px;width:88%;
+        text-align:center;
+        box-shadow: 0 24px 80px rgba(0,0,0,0.3), 0 0 0 1px var(--card-border);
+      ">
+        <div style="
+          width:56px;height:56px;margin:0 auto 20px;
+          border-radius:16px;
+          background:linear-gradient(135deg, var(--primary), var(--mood-secondary));
+          display:flex;align-items:center;justify-content:center;
+          font-size:24px;
+          box-shadow: 0 8px 24px var(--primary-glow);
+        ">&#10047;</div>
+        <div style="font-size:1.2rem;font-weight:800;color:var(--text-primary);margin-bottom:6px;letter-spacing:-0.02em;">Sylanne-Embodiment</div>
+        <div style="font-size:0.82rem;color:var(--text-muted);margin-bottom:28px;line-height:1.5;">输入 WebUI Token 以继续<br><span style="opacity:0.7">启动日志或配置面板中可找到</span></div>
+        <input id="token-auth-input" type="text" placeholder="粘贴 Token..." autocomplete="off" spellcheck="false" style="
+          width:100%;padding:14px 18px;
+          font-size:0.92rem;font-family:'SF Mono',SFMono-Regular,Consolas,monospace;
+          text-align:center;letter-spacing:0.5px;
+          background:var(--input-bg);
+          border:1.5px solid var(--card-border);
+          border-radius:12px;
+          color:var(--text-primary);
+          outline:none;
+          transition:border-color 0.2s, box-shadow 0.2s;
+        ">
+        <button id="token-auth-submit" style="
+          margin-top:20px;padding:12px 36px;
+          border-radius:12px;font-weight:700;font-size:0.88rem;
+          background:linear-gradient(135deg, var(--primary), var(--mood-secondary));
+          border:none;color:var(--text-inverse);
+          cursor:pointer;
+          letter-spacing:0.02em;
+        ">进入 Dashboard</button>
+        <div id="token-auth-error" style="font-size:0.78rem;color:var(--red);margin-top:14px;display:none;opacity:0;transition:opacity 0.3s;"></div>
+      </div>
+      <div style="margin-top:24px;font-size:0.72rem;color:var(--text-muted);opacity:0.5;">Soulful Sylanne &middot; Embodiment</div>
+    `;
+    document.body.appendChild(overlay);
+    requestAnimationFrame(() => { overlay.style.opacity = '1'; });
+    const input = document.getElementById('token-auth-input');
+    const btn = document.getElementById('token-auth-submit');
+    setTimeout(() => input.focus(), 400);
+    async function submitToken() {
+      const val = input.value.trim();
+      if (!val) { input.focus(); return; }
+      btn.textContent = '验证中...';
+      btn.style.opacity = '0.7';
+      btn.disabled = true;
+      localStorage.setItem('sylanne_webui_token', val);
+      const testRes = await apiFetch('/api/state?session=default', { cache: 'no-store' });
+      if (testRes.status === 401) {
+        const errEl = document.getElementById('token-auth-error');
+        errEl.textContent = 'Token 无效，请检查后重试';
+        errEl.style.display = 'block';
+        requestAnimationFrame(() => { errEl.style.opacity = '1'; });
+        localStorage.removeItem('sylanne_webui_token');
+        const card = document.getElementById('token-auth-card');
+        card.classList.add('login-shake');
+        setTimeout(() => card.classList.remove('login-shake'), 500);
+        btn.textContent = '进入 Dashboard';
+        btn.style.opacity = '1';
+        btn.disabled = false;
+        input.select();
+      } else {
+        hideTokenInput();
+      }
+    }
+    btn.addEventListener('click', submitToken);
+    input.addEventListener('keydown', (e) => { if (e.key === 'Enter') submitToken(); });
+  }
+
+  function hideTokenInput() {
+    const overlay = document.getElementById('token-auth-overlay');
+    if (overlay) {
+      overlay.style.opacity = '0';
+      overlay.style.transition = 'opacity 0.35s ease';
+      setTimeout(() => overlay.remove(), 360);
+    }
+  }
+
   // Sync state with server API fallbacks
   async function syncServerState() {
     try {
       const res = await apiFetch(`/api/state?session=${encodeURIComponent(currentSession)}`, { cache: 'no-store' });
+      if (res.status === 401) {
+        showTokenInput();
+        return;
+      }
+      hideTokenInput();
       if (!res.ok) throw new Error("Offline");
       const data = await res.json();
       hasLiveState = true;

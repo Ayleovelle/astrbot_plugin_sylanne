@@ -2,7 +2,7 @@
 
 > <span style="font-size: 1.08em;"><strong>Sylanne-Embodiment：不可逆的关系计算引擎。</strong>不再模拟情绪标签，而是让对话在躯体上留下伤痕、在沉默中积累压力、在关系里长出不可撤销的形状。</span>
 
-![版本 Embodiment-1.2.1](https://img.shields.io/badge/version-Embodiment--1.2.1-red.svg)
+![版本 Embodiment-1.2.5](https://img.shields.io/badge/version-Embodiment--1.2.5-red.svg)
 ![AstrBot >=4.9.2,<5.0.0](https://img.shields.io/badge/AstrBot-%3E%3D4.9.2%2C%3C5.0.0-green)
 ![Python 3.10+](https://img.shields.io/badge/Python-3.10%2B-yellow)
 ![许可证 AGPL-3.0-or-later](https://img.shields.io/badge/license-AGPL--3.0--or--later-red)
@@ -327,7 +327,7 @@ $$\dim H^1(K, \mathcal{F}) > 0 \iff \text{存在不可调和的跨关系矛盾}$
 
 | 维度 | 3.0 | Embodiment |
 | --- | --- | --- |
-| **代码量** | ~20,000 行单体 | ~6,000 行薄宿主 + 37 独立模块 |
+| **代码量** | ~20,000 行单体 | ~2,100 行薄宿主 + 10 委托模块 + 37 独立计算模块 |
 | **本地计算** | 8.7ms/msg | 10ms/msg（7 层全跑，瓶颈在 L1 HDC 纯 Python 编码） |
 | **实机延迟** | +4469ms（同步阻塞 LLM） | 无可见增量（异步，不阻塞） |
 | **状态可逆性** | 可重置回原点 | 不可逆 |
@@ -345,20 +345,22 @@ $$\dim H^1(K, \mathcal{F}) > 0 \iff \text{存在不可调和的跨关系矛盾}$
 
 ### 与 Embodiment-1.0.0 相比
 
-| 维度 | 1.0.0 | 1.2.0 |
-| --- | --- | --- |
-| **计算层** | 6 层（无 MoE） | 7 层 + MoE-HGT 三阶段决策融合 |
-| **人格系统** | Big Five 静态，单向传导 | Embodiment 五维 + Dual-EMA 双向闭环 |
-| **安全机制** | 无 | 7 项（主权免疫/保护性解离/时间感知healing/void限流/numbed下限/振荡检测/漂移限速） |
-| **Scar modifier** | 无界乘积（指数爆炸） | 对数压缩 + 人格上限 |
-| **Void 创建** | 逻辑失效（阈值 bug） | 修复 + 冷却期 + 阻力递增 |
-| **Boundary L6** | 只在 full path 扰动（10% 消息） | 全路径扰动（fast 10%/normal 30%/full 100%） |
-| **MoE 加固** | 无 | scar token 对数压缩 + load balance + decision clamp |
-| **参数人格化** | 部分（~5 个） | 全部（26+ 个参数由人格驱动） |
-| **WebUI** | 无 | 计算日志 + 配置面板 + 记忆池观测 |
-| **对话持久化** | 无 | buffer 防抖异步写入，重载不丢上下文 |
-| **本地延迟** | ~3ms（6 层，部分跳过） | ~10ms（7 层全跑，瓶颈 L1 HDC） |
-| **Bug 修复** | — | 50+ 个计算层 bug |
+| 维度 | 1.0.0 | 1.2.0 | 1.2.5 |
+| --- | --- | --- | --- |
+| **代码架构** | 单体 main.py | 单体 8009 行 | 2140 行宿主 + 10 委托模块 |
+| **计算层** | 6 层（无 MoE） | 7 层 + MoE-HGT 三阶段决策融合 | 同 1.2.0 |
+| **人格系统** | Big Five 静态，单向传导 | Embodiment 五维 + Dual-EMA 双向闭环 | 同 1.2.0 |
+| **安全机制** | 无 | 7 项（主权免疫/保护性解离/时间感知healing/void限流/numbed下限/振荡检测/漂移限速） | 同 1.2.0 + WebUI 安全加固 |
+| **Scar modifier** | 无界乘积（指数爆炸） | 对数压缩 + 人格上限 | 同 1.2.0 |
+| **Void 创建** | 逻辑失效（阈值 bug） | 修复 + 冷却期 + 阻力递增 | 同 1.2.0 |
+| **Boundary L6** | 只在 full path 扰动（10% 消息） | 全路径扰动（fast 10%/normal 30%/full 100%） | 同 1.2.0 |
+| **MoE 加固** | 无 | scar token 对数压缩 + load balance + decision clamp | 同 1.2.0 |
+| **参数人格化** | 部分（~5 个） | 全部（26+ 个参数由人格驱动） | 同 1.2.0 |
+| **WebUI** | 无 | 计算日志 + 配置面板 + 记忆池观测 | + 安全加固 + 登录页 |
+| **对话持久化** | 无 | buffer 防抖异步写入，重载不丢上下文 | 同 1.2.0 |
+| **内存管理** | 无限增长 | 无限增长 | BoundedDict LRU 驱逐 |
+| **本地延迟** | ~3ms（6 层，部分跳过） | ~10ms（7 层全跑，瓶颈 L1 HDC） | 同 1.2.0 |
+| **Bug 修复** | — | 50+ 个计算层 bug | + 静默异常清理 |
 
 ---
 
@@ -474,6 +476,67 @@ Embodiment 是完全重写，但对 3.x 用户做了兼容：
 - 配置键名保持兼容（旧配置值不丢，升级后无需重新配置）
 - 旧状态文件通过 `import_sylanne_legacy` 自动迁入新架构（记忆、关系数据不丢失）
 - 旧 README 和文档保留在 [3.x release](https://github.com/Ayleovelle/astrbot_plugin_sylanne/releases/tag/v3.0.0)
+
+---
+
+## Embodiment-1.2.5 更新日志
+
+> **发布于 2026-05-26**
+
+Embodiment-1.2.5 是一次架构治理版本。1.2.0 让七层计算栈"真正跑起来"之后，main.py 膨胀到了 8009 行的 God Class——所有逻辑塞在一个文件里，改一行要读八千行。1.2.5 把它拆成 10 个职责单一的委托模块，同时补上了 WebUI 安全加固、内存泄漏防护和静默异常清理。
+
+### 做了什么
+
+**God Class 拆分：main.py 8009 → 2140 行**
+
+抽出 10 个委托模块（全部在 `sylanne_alpha/` 下），每个模块通过 `self._p = plugin` 访问插件实例，职责单一：
+
+| 模块 | 职责 |
+|------|------|
+| `session_context.py` | 会话 key 派生、host 创建、memory system |
+| `llm_request_pipeline.py` | on_llm_request 全流程、memory timer、assessor LLM 调用 |
+| `llm_response_pipeline.py` | on_llm_response、流式分段、payload cap、prompt 注入 |
+| `proactive_scheduler.py` | 主动发言决策、调度、cooldown |
+| `public_api.py` | observatory、agent identity、LLM tools、commands |
+| `state_persistence.py` | KV key、load/save/delete state、ConvMgr/PersonaMgr 集成 |
+| `realtime_dispatch.py` | 实时分段发送、history shadow、continuity context |
+| `background_queue.py` | 后台评估队列、adaptive worker、checkpoint |
+| `webui_routes.py` | 所有 WebUI HTTP 路由处理器 |
+| `webui_server.py` | WebUI server 生命周期管理 |
+
+main.py 保留为薄委托层——一行 stub 转发到对应模块，模块间无循环依赖。
+
+**WebUI 安全加固**
+
+- 默认绑定 `127.0.0.1`（不再暴露到公网）
+- Bearer Token 认证（`auth_middleware` 拦截所有 API 请求）
+- CORS 收紧为 `http://127.0.0.1:{port}`
+- Meltdown nonce 防重放
+- 全新登录页：品牌动画 + 输入聚焦脉冲 + 错误抖动 + 淡出过渡
+
+**BoundedDict LRU 驱逐**
+
+- 新增 `sylanne_alpha/bounded_dict.py`，提供带 `maxsize` + `TTL` 的 OrderedDict
+- 所有 session-keyed 字典替换为 BoundedDict，防止长期运行内存无限增长
+- 默认 50 会话上限，超出时 LRU 驱逐最久未访问的会话
+
+**静默异常清理**
+
+- 消除所有无注释的裸 `except Exception: pass`
+- cleanup 场景标注 `# cleanup: failure acceptable`
+- 转换异常收窄为 `except (ValueError, TypeError)`
+
+**清理**
+
+- 删除 `archive/` 目录（旧 3.x 引擎代码、开发笔记、论文草稿）
+- 删除冗余 `sylanne_alpha/webui.py`
+
+### 没做什么（下个版本）
+
+- 七层神经脊 Canvas 可视化（等底层完全稳定）
+- 人格雷达图 + 漂移事件日志
+- `_StateInjectionBudget` 移出 main.py（目前 llm_response_pipeline 仍 import 它）
+- Fragment debounce 阻止 LLM 调用（AstrBot 框架层面限制）
 
 ---
 

@@ -26,7 +26,7 @@
   "sylanne_webui_host": {
     "description": "WebUI 监听地址",
     "type": "string",
-    "default": "0.0.0.0",
+    "default": "127.0.0.1",
     "hint": "127.0.0.1 仅本机访问；0.0.0.0 允许局域网访问。"
   },
   "sylanne_webui_port": {
@@ -34,6 +34,12 @@
     "type": "int",
     "default": 2718,
     "hint": "WebUI 服务端口，确保不与 AstrBot 主端口冲突。"
+  },
+  "sylanne_webui_token": {
+    "description": "WebUI 访问令牌（留空自动生成）",
+    "type": "string",
+    "default": "",
+    "hint": "首次启动自动生成。复制此 token 到浏览器访问 WebUI。"
   },
   "sylanne_alpha_root": {
     "description": "Sylanne alpha body 状态目录",
