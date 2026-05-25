@@ -4,16 +4,18 @@ Absence as a first-class computational primitive. Voids are not derived
 from what exists — they are independent objects with their own lifecycle,
 pressure dynamics, and coupling to the Scar Algebra.
 """
+
 from __future__ import annotations
 
 import math
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Any, Callable
 
 
 @dataclass(slots=True)
 class Void:
     """A first-class absence object."""
+
     boundary: list[bytes]
     depth: float = 0.0
     pressure: float = 0.0
@@ -58,6 +60,7 @@ class Void:
 @dataclass(slots=True)
 class VoidGhost:
     """Residue of a dead void — permanent, no pressure, affects future detection."""
+
     depth: float
     age_at_death: int
     last_boundary_hash: int = 0
@@ -73,11 +76,18 @@ class VoidSpace:
     """The Void Calculus engine: manages active voids, ghosts, and operations."""
 
     __slots__ = (
-        "voids", "ghosts", "similarity_fn",
-        "_contract_threshold", "_split_threshold", "_merge_threshold",
-        "_detection_threshold", "_pressure_threshold",
-        "_max_voids", "_tick",
-        "_creation_cooldown", "_cooldown_duration",
+        "voids",
+        "ghosts",
+        "similarity_fn",
+        "_contract_threshold",
+        "_split_threshold",
+        "_merge_threshold",
+        "_detection_threshold",
+        "_pressure_threshold",
+        "_max_voids",
+        "_tick",
+        "_creation_cooldown",
+        "_cooldown_duration",
         "_pressure_cap",
     )
 
@@ -105,7 +115,9 @@ class VoidSpace:
         self._cooldown_duration = 3
         self._pressure_cap = 100.0
 
-    def process(self, event_vec: bytes, surprise: float, prev_similarity: float) -> dict[str, Any]:
+    def process(
+        self, event_vec: bytes, surprise: float, prev_similarity: float
+    ) -> dict[str, Any]:
         """Main entry: process one event through the void space.
 
         Args:
@@ -135,7 +147,10 @@ class VoidSpace:
         result["voids_contracted"] = self._contract_all(event_vec)
 
         # Deepen: detect avoidance (sudden topic shift + high surprise)
-        if prev_similarity < (1.0 - self._detection_threshold) and surprise > self._detection_threshold:
+        if (
+            prev_similarity < (1.0 - self._detection_threshold)
+            and surprise > self._detection_threshold
+        ):
             result["voids_deepened"] = self._deepen_nearby(event_vec)
 
         # Genesis: detect new void formation
@@ -155,12 +170,14 @@ class VoidSpace:
         # Compute coupling events (voids that exceed pressure threshold)
         for v in self.voids:
             if v.pressure > self._pressure_threshold:
-                result["coupling_events"].append({
-                    "pressure": v.pressure,
-                    "depth": v.depth,
-                    "boundary_size": len(v.boundary),
-                    "dim_hint": len(v.boundary) % 8,
-                })
+                result["coupling_events"].append(
+                    {
+                        "pressure": v.pressure,
+                        "depth": v.depth,
+                        "boundary_size": len(v.boundary),
+                        "dim_hint": len(v.boundary) % 8,
+                    }
+                )
 
         result["total_pressure"] = sum(v.pressure for v in self.voids)
         result["active_voids"] = len(self.voids)
@@ -173,13 +190,14 @@ class VoidSpace:
         for v in self.voids:
             before = len(v.boundary)
             v.boundary = [
-                b for b in v.boundary
+                b
+                for b in v.boundary
                 if self.similarity_fn(event_vec, b) < self._contract_threshold
             ]
             if len(v.boundary) < before:
                 contracted += 1
                 removed = before - len(v.boundary)
-                v.pressure *= (1.0 - removed / max(1, before))
+                v.pressure *= 1.0 - removed / max(1, before)
         return contracted
 
     def _deepen_nearby(self, event_vec: bytes) -> int:
@@ -193,7 +211,9 @@ class VoidSpace:
                     break
         return deepened
 
-    def _should_create_void(self, event_vec: bytes, surprise: float, prev_sim: float) -> bool:
+    def _should_create_void(
+        self, event_vec: bytes, surprise: float, prev_sim: float
+    ) -> bool:
         """Void genesis: sudden deflection from a topic."""
         if self._creation_cooldown > 0:
             self._creation_cooldown -= 1
@@ -205,9 +225,7 @@ class VoidSpace:
         if prev_sim > (1.0 - self._detection_threshold):
             return False
         # Ghost sensitivity: lower threshold near previous voids
-        ghost_bonus = sum(
-            0.1 for g in self.ghosts if g.depth > 0.5
-        )
+        ghost_bonus = sum(0.1 for g in self.ghosts if g.depth > 0.5)
         effective_threshold = max(0.1, self._detection_threshold - ghost_bonus)
         # Resistance increases with existing void count
         if len(self.voids) > 0:
@@ -293,14 +311,24 @@ class VoidSpace:
                 continue
             cluster_a, cluster_b = self._try_split(v)
             if cluster_a is not None:
-                new_voids.append(Void(
-                    boundary=cluster_a, depth=v.depth,
-                    pressure=v.pressure / 2, age=0, beta=0.0,
-                ))
-                new_voids.append(Void(
-                    boundary=cluster_b, depth=v.depth,
-                    pressure=v.pressure / 2, age=0, beta=0.0,
-                ))
+                new_voids.append(
+                    Void(
+                        boundary=cluster_a,
+                        depth=v.depth,
+                        pressure=v.pressure / 2,
+                        age=0,
+                        beta=0.0,
+                    )
+                )
+                new_voids.append(
+                    Void(
+                        boundary=cluster_b,
+                        depth=v.depth,
+                        pressure=v.pressure / 2,
+                        age=0,
+                        beta=0.0,
+                    )
+                )
             else:
                 new_voids.append(v)
         self.voids = new_voids
@@ -328,7 +356,8 @@ class VoidSpace:
         """Voids exceeding pressure threshold — ready to wound the scar state."""
         return [
             {"pressure": v.pressure, "depth": v.depth, "dim_hint": len(v.boundary) % 8}
-            for v in self.voids if v.pressure > self._pressure_threshold
+            for v in self.voids
+            if v.pressure > self._pressure_threshold
         ]
 
     def to_dict(self) -> dict[str, Any]:
@@ -352,10 +381,12 @@ class VoidSpace:
             self.voids.append(v)
         self.ghosts = []
         for gd in data.get("ghosts", []):
-            self.ghosts.append(VoidGhost(
-                depth=float(gd.get("depth", 0.0)),
-                age_at_death=int(gd.get("age_at_death", 0)),
-            ))
+            self.ghosts.append(
+                VoidGhost(
+                    depth=float(gd.get("depth", 0.0)),
+                    age_at_death=int(gd.get("age_at_death", 0)),
+                )
+            )
 
     def diagnostics(self) -> dict[str, Any]:
         return {
@@ -366,8 +397,13 @@ class VoidSpace:
             "tick": self._tick,
         }
 
-    def set_personality_params(self, contract_threshold: float, split_threshold: float,
-                               merge_threshold: float, pressure_cap: float):
+    def set_personality_params(
+        self,
+        contract_threshold: float,
+        split_threshold: float,
+        merge_threshold: float,
+        pressure_cap: float,
+    ):
         self._contract_threshold = contract_threshold
         self._split_threshold = split_threshold
         self._merge_threshold = merge_threshold

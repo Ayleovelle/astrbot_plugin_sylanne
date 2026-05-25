@@ -7,6 +7,7 @@ Two-level assessment architecture:
 If the LLM responds within the timeout, its result modulates Void-Scar state
 in the same tick. If it times out, the system falls back to HDC coarse judgment.
 """
+
 from __future__ import annotations
 
 import asyncio
@@ -49,9 +50,11 @@ class AsyncAssessor:
         Runs on every message for basic emotion classification.
         """
         if timeout is None:
-            timeout = float(self._config.get(
-                "sylanne_alpha_fast_assessor_timeout_seconds", _FAST_TIMEOUT
-            ))
+            timeout = float(
+                self._config.get(
+                    "sylanne_alpha_fast_assessor_timeout_seconds", _FAST_TIMEOUT
+                )
+            )
         self._stats["fast_attempts"] += 1
         try:
             result = await asyncio.wait_for(
@@ -80,9 +83,11 @@ class AsyncAssessor:
         Runs only on full-path messages for deep semantic analysis.
         """
         if timeout is None:
-            timeout = float(self._config.get(
-                "sylanne_alpha_main_assessor_timeout_seconds", _MAIN_TIMEOUT
-            ))
+            timeout = float(
+                self._config.get(
+                    "sylanne_alpha_main_assessor_timeout_seconds", _MAIN_TIMEOUT
+                )
+            )
         self._stats["main_attempts"] += 1
         try:
             result = await asyncio.wait_for(
@@ -166,7 +171,7 @@ class AsyncAssessor:
         return (
             f'{ctx}"{preview}"\n'
             '{"v":?,"a":?,"i":"?","w":?,"m":?,"subtext":"?","avoidance":"?"}\n'
-            'm=1 if contains facts/preferences/events/boundaries worth remembering long-term, else 0'
+            "m=1 if contains facts/preferences/events/boundaries worth remembering long-term, else 0"
         )
 
     # ------------------------------------------------------------------

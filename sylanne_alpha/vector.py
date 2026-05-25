@@ -7,6 +7,7 @@ def clamp(value: float, lo: float = 0.0, hi: float = 1.0) -> float:
     """Clamp *value* between *lo* and *hi* (inclusive)."""
     return max(lo, min(hi, float(value)))
 
+
 STATE_AXES = (
     "pulse.beat",
     "pulse.rhythm",
@@ -88,7 +89,12 @@ WEIGHTS: dict[str, dict[str, float]] = {
 
 
 WEIGHT_TERMS: tuple[tuple[int, tuple[tuple[int, float], ...]], ...] = tuple(
-    (STATE_INDEX[axis], tuple((EVENT_INDEX[event_axis], weight) for event_axis, weight in weights.items()))
+    (
+        STATE_INDEX[axis],
+        tuple(
+            (EVENT_INDEX[event_axis], weight) for event_axis, weight in weights.items()
+        ),
+    )
     for axis, weights in WEIGHTS.items()
 )
 
@@ -97,5 +103,7 @@ def linear_delta(event: Mapping[str, float]) -> dict[str, float]:
     event_values = tuple(float(event.get(axis, 0.0)) for axis in EVENT_AXES)
     delta_values = [0.0] * len(STATE_AXES)
     for state_index, terms in WEIGHT_TERMS:
-        delta_values[state_index] = sum(event_values[event_index] * weight for event_index, weight in terms)
+        delta_values[state_index] = sum(
+            event_values[event_index] * weight for event_index, weight in terms
+        )
     return {axis: delta_values[index] for index, axis in enumerate(STATE_AXES)}

@@ -35,10 +35,26 @@ def inject_context(host: Any, request: Any) -> Any:
 def _safe_prompt_fragment(host: Any) -> str:
     diagnostics = host.diagnostics()
     payload = diagnostics["host_payload"]
-    relationship = payload.get("relationship_memory", {}) if isinstance(payload.get("relationship_memory"), dict) else {}
-    continuity = relationship.get("continuity", {}) if isinstance(relationship.get("continuity"), dict) else {}
-    personality = payload.get("personality", {}) if isinstance(payload.get("personality"), dict) else {}
-    voice = personality.get("voice", {}) if isinstance(personality.get("voice"), dict) else {}
+    relationship = (
+        payload.get("relationship_memory", {})
+        if isinstance(payload.get("relationship_memory"), dict)
+        else {}
+    )
+    continuity = (
+        relationship.get("continuity", {})
+        if isinstance(relationship.get("continuity"), dict)
+        else {}
+    )
+    personality = (
+        payload.get("personality", {})
+        if isinstance(payload.get("personality"), dict)
+        else {}
+    )
+    voice = (
+        personality.get("voice", {})
+        if isinstance(personality.get("voice"), dict)
+        else {}
+    )
     return "\n".join(
         [
             "[retrieved_conversation_context]",
@@ -57,12 +73,22 @@ def _relationship_summary(phase: str, weight: float) -> str:
 
 
 def _voice_summary(cadence: str, boundary: str) -> str:
-    style = "语速放慢一点，短句之间保留停顿感" if cadence in {"slow_burn", "slow", "gentle"} else "表达保持清楚，不要堆太多设定"
+    style = (
+        "语速放慢一点，短句之间保留停顿感"
+        if cadence in {"slow_burn", "slow", "gentle"}
+        else "表达保持清楚，不要堆太多设定"
+    )
     guard = "，边界感要清楚" if boundary in {"strong", "clear"} else ""
     return f"{style}{guard}。"
 
 
-def simulate_update(host: Any, *, text: str = "", flags: list[str] | None = None, confidence: float = 0.5) -> dict[str, Any]:
+def simulate_update(
+    host: Any,
+    *,
+    text: str = "",
+    flags: list[str] | None = None,
+    confidence: float = 0.5,
+) -> dict[str, Any]:
     body = host.kernel.body
     event = body.event_vector(text=text, flags=list(flags or []), confidence=confidence)
     simulated = body.simulate_vectors([event])
@@ -97,8 +123,13 @@ def strip_draft_blocks(text: str) -> str:
     return "\n".join(visible).strip()
 
 
-def realtime_plan(session_key: str, text: str, *, max_part_chars: int = 48,
-                   chars_per_second: float = 7.5) -> dict[str, Any]:
+def realtime_plan(
+    session_key: str,
+    text: str,
+    *,
+    max_part_chars: int = 48,
+    chars_per_second: float = 7.5,
+) -> dict[str, Any]:
     raw = str(text or "")
     visible = strip_draft_blocks(raw)
     parts = _split_text(visible, max_part_chars=max_part_chars)
@@ -113,27 +144,45 @@ def realtime_plan(session_key: str, text: str, *, max_part_chars: int = 48,
     }
 
 
-def _message_parts(parts: list[str], *, chars_per_second: float = 7.5) -> list[dict[str, Any]]:
-    raw_delays = [_typing_delay(previous, chars_per_second=chars_per_second) for previous, _ in _previous_and_current(parts)]
+def _message_parts(
+    parts: list[str], *, chars_per_second: float = 7.5
+) -> list[dict[str, Any]]:
+    raw_delays = [
+        _typing_delay(previous, chars_per_second=chars_per_second)
+        for previous, _ in _previous_and_current(parts)
+    ]
     budget = min(36.0, max(0.0, (len(parts) - 1) * 3.2))
     total = sum(raw_delays)
     scale = 1.0 if total <= budget or total <= 0 else budget / total
     return [
-        {"index": index, "text": part, "delay_before_seconds": round(min(4.2, delay * scale), 3)}
+        {
+            "index": index,
+            "text": part,
+            "delay_before_seconds": round(min(4.2, delay * scale), 3),
+        }
         for index, (part, delay) in enumerate(zip(parts, raw_delays, strict=True))
     ]
 
 
 def _previous_and_current(parts: list[str]) -> list[tuple[str, str]]:
-    return [(parts[index - 1] if index > 0 else "", part) for index, part in enumerate(parts)]
+    return [
+        (parts[index - 1] if index > 0 else "", part)
+        for index, part in enumerate(parts)
+    ]
 
 
 def _typing_delay(previous_text: str, *, chars_per_second: float = 7.5) -> float:
     if not previous_text:
         return 0.0
     visible_chars = sum(1 for char in str(previous_text) if not char.isspace())
-    punctuation_pause = 0.75 if str(previous_text).rstrip().endswith(("。", "！", "？", ".", "!", "?")) else 0.35
-    return round(min(4.2, max(0.8, visible_chars / chars_per_second + punctuation_pause)), 3)
+    punctuation_pause = (
+        0.75
+        if str(previous_text).rstrip().endswith(("。", "！", "？", ".", "!", "?"))
+        else 0.35
+    )
+    return round(
+        min(4.2, max(0.8, visible_chars / chars_per_second + punctuation_pause)), 3
+    )
 
 
 def realtime_dispatch(session_key: str, text: str) -> dict[str, Any]:
@@ -161,12 +210,19 @@ def proactive_decision(surface: dict[str, Any]) -> dict[str, Any]:
 def _split_text(text: str, *, max_part_chars: int) -> list[str]:
     if not text:
         return []
-    fragments = [part.strip() for part in text.replace("\r\n", "\n").split("\n") if part.strip()]
+    fragments = [
+        part.strip() for part in text.replace("\r\n", "\n").split("\n") if part.strip()
+    ]
     if not fragments:
         fragments = [text.strip()]
     parts: list[str] = []
     for fragment in fragments:
-        parts.extend(_merge_short_parts(_split_fragment(fragment, max_part_chars=max_part_chars), max_part_chars=max_part_chars))
+        parts.extend(
+            _merge_short_parts(
+                _split_fragment(fragment, max_part_chars=max_part_chars),
+                max_part_chars=max_part_chars,
+            )
+        )
     return parts
 
 
@@ -191,17 +247,23 @@ def _merge_short_parts(parts: list[str], *, max_part_chars: int) -> list[str]:
     for part in parts:
         if not part:
             continue
-        if merged and _should_merge_with_previous(merged[-1], part, max_part_chars=max_part_chars):
+        if merged and _should_merge_with_previous(
+            merged[-1], part, max_part_chars=max_part_chars
+        ):
             merged[-1] = f"{merged[-1]}{part}"
         else:
             merged.append(part)
     return merged
 
 
-def _should_merge_with_previous(previous: str, current: str, *, max_part_chars: int) -> bool:
+def _should_merge_with_previous(
+    previous: str, current: str, *, max_part_chars: int
+) -> bool:
     if len(previous) + len(current) > max_part_chars:
         return False
-    return _is_too_short_part(current) or len(previous) + len(current) <= max(14, max_part_chars // 2)
+    return _is_too_short_part(current) or len(previous) + len(current) <= max(
+        14, max_part_chars // 2
+    )
 
 
 def _is_too_short_part(text: str) -> bool:
@@ -258,7 +320,9 @@ def _ascii_token_crosses_boundary(text: str, index: int) -> bool:
 
 
 def _is_ascii_token_char(char: str) -> bool:
-    return bool(char) and (char.isascii() and (char.isalnum() or char in ":/_?&=.-#%+_"))
+    return bool(char) and (
+        char.isascii() and (char.isalnum() or char in ":/_?&=.-#%+_")
+    )
 
 
 def _protected_ascii_prefix_length(text: str) -> int:
@@ -271,7 +335,9 @@ def _protected_ascii_prefix_length(text: str) -> int:
 def _would_split_protected_ascii_token(text: str, split_at: int) -> bool:
     if split_at <= 0 or split_at >= len(text):
         return False
-    return _is_ascii_token_char(text[split_at - 1]) and _is_ascii_token_char(text[split_at])
+    return _is_ascii_token_char(text[split_at - 1]) and _is_ascii_token_char(
+        text[split_at]
+    )
 
 
 __all__ = [

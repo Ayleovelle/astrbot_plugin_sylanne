@@ -10,6 +10,7 @@ Three-layer architecture:
 All base parameters deterministically derived from personality SHA-256.
 Adaptation is incremental delta only — base params never change at runtime.
 """
+
 from __future__ import annotations
 
 import array
@@ -18,8 +19,15 @@ import math
 import struct
 from typing import Any
 
-
-TOKEN_TYPES = ("scar", "void", "boundary", "personality", "surprise", "expression", "context")
+TOKEN_TYPES = (
+    "scar",
+    "void",
+    "boundary",
+    "personality",
+    "surprise",
+    "expression",
+    "context",
+)
 _TYPE_INDEX = {t: i for i, t in enumerate(TOKEN_TYPES)}
 _NUM_TYPES = len(TOKEN_TYPES)
 _N_EXPERTS = 5
@@ -38,7 +46,7 @@ def _deterministic_floats(seed: bytes, count: int) -> list[float]:
         for i in range(0, len(h) - 3, 4):
             if len(result) >= count:
                 break
-            val = struct.unpack("<I", h[i:i+4])[0]
+            val = struct.unpack("<I", h[i : i + 4])[0]
             result.append((val / 0xFFFFFFFF) * 2.0 - 1.0)
         block += 1
     return result
@@ -47,10 +55,12 @@ def _deterministic_floats(seed: bytes, count: int) -> list[float]:
 def _make_flat(seed: bytes, rows: int, cols: int, scale: float = 1.0) -> array.array:
     floats = _deterministic_floats(seed, rows * cols)
     xavier = scale * _sqrt(2.0 / (rows + cols))
-    return array.array('d', (f * xavier for f in floats))
+    return array.array("d", (f * xavier for f in floats))
 
 
-def _matmul_vec_flat(mat: list[float], vec: list[float], rows: int, cols: int) -> list[float]:
+def _matmul_vec_flat(
+    mat: list[float], vec: list[float], rows: int, cols: int
+) -> list[float]:
     result = [0.0] * rows
     idx = 0
     for r in range(rows):
@@ -99,6 +109,7 @@ def _vec_add(a: list[float], b: list[float]) -> list[float]:
 
 # === Stage 1: Type-Expert FFN ===
 
+
 class TypeExpertFFN:
     __slots__ = ("w1_flat", "w2_flat", "d_in", "d_hidden", "gamma")
 
@@ -126,13 +137,19 @@ class TypeExpertFFN:
 
 # === Stage 2: Multi-Head Cross-Attention (per-head d_head×d_head projections) ===
 
+
 class MultiHeadCrossAttention:
     """True multi-head attention with per-type, per-head Q/K/V of size d_head×d_head."""
 
     __slots__ = (
-        "d_model", "n_heads", "d_head",
-        "_wq", "_wk", "_wv",
-        "_attention_prior", "_gamma",
+        "d_model",
+        "n_heads",
+        "d_head",
+        "_wq",
+        "_wk",
+        "_wv",
+        "_attention_prior",
+        "_gamma",
     )
 
     def __init__(self, d_model: int = 16, n_heads: int = 4):
@@ -142,7 +159,9 @@ class MultiHeadCrossAttention:
         self._wq: list[list[list[float]]] = []
         self._wk: list[list[list[float]]] = []
         self._wv: list[list[list[float]]] = []
-        self._attention_prior: list[list[float]] = [[0.0] * _NUM_TYPES for _ in range(_NUM_TYPES)]
+        self._attention_prior: list[list[float]] = [
+            [0.0] * _NUM_TYPES for _ in range(_NUM_TYPES)
+        ]
         self._gamma: list[float] = [1.0] * d_model
 
     def derive(self, base_seed: bytes, personality: dict[str, float]) -> None:
@@ -169,11 +188,23 @@ class MultiHeadCrossAttention:
         self._derive_attention_prior(personality)
 
     def _derive_attention_prior(self, personality: dict[str, float]) -> None:
-        N = float(personality.get("neuroticism", personality.get("perception_acuity", 0.5)))
-        E = float(personality.get("extraversion", personality.get("expression_drive_trait", 0.5)))
-        C = float(personality.get("conscientiousness", personality.get("inner_order", 0.5)))
-        O = float(personality.get("openness", personality.get("boundary_permeability", 0.5)))
-        A = float(personality.get("agreeableness", personality.get("relational_gravity", 0.5)))
+        N = float(
+            personality.get("neuroticism", personality.get("perception_acuity", 0.5))
+        )
+        E = float(
+            personality.get(
+                "extraversion", personality.get("expression_drive_trait", 0.5)
+            )
+        )
+        C = float(
+            personality.get("conscientiousness", personality.get("inner_order", 0.5))
+        )
+        openness_val = float(
+            personality.get("openness", personality.get("boundary_permeability", 0.5))
+        )
+        A = float(
+            personality.get("agreeableness", personality.get("relational_gravity", 0.5))
+        )
         mu = [[1.0] * _NUM_TYPES for _ in range(_NUM_TYPES)]
         si, vi, bi, pi, sui, ei, ci = range(_NUM_TYPES)
         mu[si][vi] += N * 1.5
@@ -185,16 +216,17 @@ class MultiHeadCrossAttention:
             mu[ei][i] += E * 0.8
             mu[i][ci] += C * 1.0
             mu[ci][i] += C * 0.6
-            mu[i][sui] += O * 0.8
+            mu[i][sui] += openness_val * 0.8
         mu[bi][bi] = max(0.1, 1.0 - A * 0.5)
         for i in range(_NUM_TYPES):
             if i != bi:
                 mu[i][i] = 0.0
         self._attention_prior = mu
 
-
     def forward(
-        self, tokens: list[list[float]], types: list[int],
+        self,
+        tokens: list[list[float]],
+        types: list[int],
         prior_drift: list[list[float]] | None = None,
     ) -> tuple[list[list[float]], list[list[float]]]:
         """Multi-head attention with inlined per-head 4x4 projections."""
@@ -228,22 +260,22 @@ class MultiHeadCrossAttention:
                 wki = wk[ti][h]
                 wvi = wv[ti][h]
                 q_vecs[i] = (
-                    wqi[0]*x0 + wqi[1]*x1 + wqi[2]*x2 + wqi[3]*x3,
-                    wqi[4]*x0 + wqi[5]*x1 + wqi[6]*x2 + wqi[7]*x3,
-                    wqi[8]*x0 + wqi[9]*x1 + wqi[10]*x2 + wqi[11]*x3,
-                    wqi[12]*x0 + wqi[13]*x1 + wqi[14]*x2 + wqi[15]*x3,
+                    wqi[0] * x0 + wqi[1] * x1 + wqi[2] * x2 + wqi[3] * x3,
+                    wqi[4] * x0 + wqi[5] * x1 + wqi[6] * x2 + wqi[7] * x3,
+                    wqi[8] * x0 + wqi[9] * x1 + wqi[10] * x2 + wqi[11] * x3,
+                    wqi[12] * x0 + wqi[13] * x1 + wqi[14] * x2 + wqi[15] * x3,
                 )
                 k_vecs[i] = (
-                    wki[0]*x0 + wki[1]*x1 + wki[2]*x2 + wki[3]*x3,
-                    wki[4]*x0 + wki[5]*x1 + wki[6]*x2 + wki[7]*x3,
-                    wki[8]*x0 + wki[9]*x1 + wki[10]*x2 + wki[11]*x3,
-                    wki[12]*x0 + wki[13]*x1 + wki[14]*x2 + wki[15]*x3,
+                    wki[0] * x0 + wki[1] * x1 + wki[2] * x2 + wki[3] * x3,
+                    wki[4] * x0 + wki[5] * x1 + wki[6] * x2 + wki[7] * x3,
+                    wki[8] * x0 + wki[9] * x1 + wki[10] * x2 + wki[11] * x3,
+                    wki[12] * x0 + wki[13] * x1 + wki[14] * x2 + wki[15] * x3,
                 )
                 v_vecs[i] = (
-                    wvi[0]*x0 + wvi[1]*x1 + wvi[2]*x2 + wvi[3]*x3,
-                    wvi[4]*x0 + wvi[5]*x1 + wvi[6]*x2 + wvi[7]*x3,
-                    wvi[8]*x0 + wvi[9]*x1 + wvi[10]*x2 + wvi[11]*x3,
-                    wvi[12]*x0 + wvi[13]*x1 + wvi[14]*x2 + wvi[15]*x3,
+                    wvi[0] * x0 + wvi[1] * x1 + wvi[2] * x2 + wvi[3] * x3,
+                    wvi[4] * x0 + wvi[5] * x1 + wvi[6] * x2 + wvi[7] * x3,
+                    wvi[8] * x0 + wvi[9] * x1 + wvi[10] * x2 + wvi[11] * x3,
+                    wvi[12] * x0 + wvi[13] * x1 + wvi[14] * x2 + wvi[15] * x3,
                 )
 
             for i in range(n):
@@ -257,7 +289,12 @@ class MultiHeadCrossAttention:
                         scores[j] = -1e9
                     else:
                         kj = k_vecs[j]
-                        s = (qi[0]*kj[0] + qi[1]*kj[1] + qi[2]*kj[2] + qi[3]*kj[3]) * scale
+                        s = (
+                            qi[0] * kj[0]
+                            + qi[1] * kj[1]
+                            + qi[2] * kj[2]
+                            + qi[3] * kj[3]
+                        ) * scale
                         bias = prior[ti][tj]
                         if prior_drift is not None:
                             bias += prior_drift[ti][tj]
@@ -295,6 +332,7 @@ class MultiHeadCrossAttention:
 
 
 # === Stage 3: Situation-Expert MoE FFN (operates on pooled representation) ===
+
 
 class SituationExpert:
     __slots__ = ("w1_flat", "w2_flat", "d_in", "d_hidden")
@@ -338,8 +376,16 @@ class SituationExpert:
 
 
 class MoELayer:
-    __slots__ = ("experts", "router_flat", "d_model", "n_experts", "gamma",
-                 "_expert_last_active", "_dormancy_threshold", "_tick")
+    __slots__ = (
+        "experts",
+        "router_flat",
+        "d_model",
+        "n_experts",
+        "gamma",
+        "_expert_last_active",
+        "_dormancy_threshold",
+        "_tick",
+    )
 
     def __init__(self, d_model: int = 16, n_experts: int = _N_EXPERTS):
         self.d_model = d_model
@@ -356,12 +402,16 @@ class MoELayer:
     def derive(self, base_seed: bytes) -> None:
         for i, name in enumerate(_EXPERT_NAMES):
             self.experts[i].derive(base_seed + name.encode())
-        self.router_flat = _make_flat(base_seed + b"ROUTER", self.n_experts, self.d_model)
+        self.router_flat = _make_flat(
+            base_seed + b"ROUTER", self.n_experts, self.d_model
+        )
         g_floats = _deterministic_floats(base_seed + b"GAMMA3", self.d_model)
         self.gamma = [0.8 + 0.4 * (f * 0.5 + 0.5) for f in g_floats]
 
     def forward(
-        self, pooled: list[float], router_bias: list[float] | None = None,
+        self,
+        pooled: list[float],
+        router_bias: list[float] | None = None,
     ) -> tuple[list[float], list[int], list[float]]:
         """MoE forward on pooled input with top-2 gating.
         Returns (output_vec_16d, active_expert_indices, gate_values).
@@ -417,6 +467,7 @@ class MoELayer:
 
 # === Hebbian Adaptation ===
 
+
 class RouterAdaptation:
     """BCM-inspired router bias adaptation."""
 
@@ -426,7 +477,9 @@ class RouterAdaptation:
         self.activity_ema: list[float] = [0.2] * n_experts
         self.plasticity: float = 0.5
 
-    def adapt(self, outcome: str, active_experts: list[int], gate_values: list[float]) -> None:
+    def adapt(
+        self, outcome: str, active_experts: list[int], gate_values: list[float]
+    ) -> None:
         eta = 0.008 * self.plasticity
         for idx in active_experts:
             y = gate_values[idx]
@@ -486,7 +539,10 @@ class AttentionPriorAdaptation:
                 drift[i][j] *= 0.999
 
     def to_dict(self) -> dict[str, Any]:
-        return {"drift": [list(row) for row in self.drift], "plasticity": self.plasticity}
+        return {
+            "drift": [list(row) for row in self.drift],
+            "plasticity": self.plasticity,
+        }
 
     def from_dict(self, data: dict[str, Any]) -> None:
         drift = data.get("drift")
@@ -496,13 +552,16 @@ class AttentionPriorAdaptation:
 
 
 def _derive_plasticity(personality: dict[str, float]) -> float:
-    O = float(personality.get("openness", personality.get("boundary_permeability", 0.5)))
+    openness_val = float(
+        personality.get("openness", personality.get("boundary_permeability", 0.5))
+    )
     C = float(personality.get("conscientiousness", personality.get("inner_order", 0.5)))
-    base = 0.3 + O * 0.5 - C * 0.3
+    base = 0.3 + openness_val * 0.5 - C * 0.3
     return max(0.05, min(0.85, base))
 
 
 # === Main Class ===
+
 
 class HeterogeneousGraphTransformer:
     """MoE-HGT: Complete decision fusion module for Sylanne."""
@@ -510,11 +569,19 @@ class HeterogeneousGraphTransformer:
     TOKEN_TYPES = TOKEN_TYPES
 
     __slots__ = (
-        "d_model", "n_heads", "d_output",
-        "_type_experts", "_attention", "_moe",
-        "_decision_flat", "_personality_cache",
-        "_router_adapt", "_attn_adapt",
-        "_last_attention_weights", "_last_active_experts", "_last_gate_values",
+        "d_model",
+        "n_heads",
+        "d_output",
+        "_type_experts",
+        "_attention",
+        "_moe",
+        "_decision_flat",
+        "_personality_cache",
+        "_router_adapt",
+        "_attn_adapt",
+        "_last_attention_weights",
+        "_last_active_experts",
+        "_last_gate_values",
     )
 
     def __init__(self, d_model: int = 16, n_heads: int = 4, d_output: int = 4):
@@ -542,7 +609,8 @@ class HeterogeneousGraphTransformer:
 
         p_keys = sorted(personality.keys())
         seed_str = "|".join(
-            f"{k}:{float(personality[k]):.6f}" for k in p_keys
+            f"{k}:{float(personality[k]):.6f}"
+            for k in p_keys
             if isinstance(personality[k], (int, float))
         )
         base_seed = hashlib.sha256(seed_str.encode()).digest()
@@ -553,15 +621,18 @@ class HeterogeneousGraphTransformer:
         self._attention.derive(base_seed, personality)
         self._moe.derive(base_seed + b"MOE")
 
-        self._decision_flat = _make_flat(base_seed + b"DECISION", self.d_output, self.d_model, scale=0.5)
+        self._decision_flat = _make_flat(
+            base_seed + b"DECISION", self.d_output, self.d_model, scale=0.5
+        )
 
         plasticity = _derive_plasticity(personality)
         self._router_adapt.plasticity = plasticity
         self._attn_adapt.plasticity = plasticity
 
-
     def forward(
-        self, tokens: list[tuple[str, list[float]]], personality: dict[str, float] | None = None,
+        self,
+        tokens: list[tuple[str, list[float]]],
+        personality: dict[str, float] | None = None,
     ) -> list[float]:
         if personality is not None:
             self.derive_params(personality)
@@ -587,7 +658,9 @@ class HeterogeneousGraphTransformer:
 
         # Stage 2: Multi-Head Cross-Attention
         attended, attn_weights = self._attention.forward(
-            encoded, types, prior_drift=self._attn_adapt.drift,
+            encoded,
+            types,
+            prior_drift=self._attn_adapt.drift,
         )
         self._last_attention_weights = attn_weights
 
@@ -602,7 +675,8 @@ class HeterogeneousGraphTransformer:
 
         # Stage 3: Situation-Expert MoE (on pooled representation)
         moe_out, active_experts, gate_values = self._moe.forward(
-            pooled, router_bias=self._router_adapt.bias,
+            pooled,
+            router_bias=self._router_adapt.bias,
         )
         self._last_active_experts = active_experts
         self._last_gate_values = list(gate_values)
@@ -617,12 +691,18 @@ class HeterogeneousGraphTransformer:
         decision = [max(-1.0, min(1.0, d)) for d in decision]
         return decision
 
-    def adapt(self, outcome: str, attention_snapshot: list[list[float]] | None = None) -> None:
+    def adapt(
+        self, outcome: str, attention_snapshot: list[list[float]] | None = None
+    ) -> None:
         if outcome not in ("accepted", "ignored", "rejected"):
             return
         if self._last_active_experts and self._last_gate_values:
-            self._router_adapt.adapt(outcome, self._last_active_experts, self._last_gate_values)
-        weights = attention_snapshot if attention_snapshot else self._last_attention_weights
+            self._router_adapt.adapt(
+                outcome, self._last_active_experts, self._last_gate_values
+            )
+        weights = (
+            attention_snapshot if attention_snapshot else self._last_attention_weights
+        )
         if weights and len(weights) == _NUM_TYPES:
             self._attn_adapt.adapt(outcome, weights)
 
@@ -648,7 +728,6 @@ class HeterogeneousGraphTransformer:
         if "attn_adapt" in data:
             self._attn_adapt.from_dict(data["attn_adapt"])
 
-
     def build_tokens_from_spine(
         self,
         scar_state: Any,
@@ -669,7 +748,9 @@ class HeterogeneousGraphTransformer:
             raw_mod = scar_state.modifier(dim_i)
             scar_vec[dim_i] = min(1.0, math.log2(max(1.0, raw_mod)) / 2.5)
             if dim_i + n_dims < d:
-                scar_vec[dim_i + n_dims] = scar_state.base[dim_i] if dim_i < len(scar_state.base) else 0.0
+                scar_vec[dim_i + n_dims] = (
+                    scar_state.base[dim_i] if dim_i < len(scar_state.base) else 0.0
+                )
         tokens.append(("scar", scar_vec))
 
         void_vec = [0.0] * d
@@ -690,7 +771,13 @@ class HeterogeneousGraphTransformer:
         bnd_vec[2] = boundary.repair_rate
         tokens.append(("boundary", bnd_vec))
 
-        p_keys = ["extraversion", "neuroticism", "conscientiousness", "openness", "agreeableness"]
+        p_keys = [
+            "extraversion",
+            "neuroticism",
+            "conscientiousness",
+            "openness",
+            "agreeableness",
+        ]
         p_vec = [0.0] * d
         for i, k in enumerate(p_keys):
             if i < d:

@@ -4,18 +4,23 @@ Extracted from kernel.py to keep the kernel focused on tick/decide/guard.
 Contains prompt fragment generation, context bus assembly, host payload
 construction, and diagnostics rendering.
 """
+
 from __future__ import annotations
 
-from typing import Any, TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
     from .kernel import AlphaKernel
 
 
-def render_prompt_fragment(kernel: "AlphaKernel", decision: dict[str, Any], guard: dict[str, Any]) -> str:
+def render_prompt_fragment(
+    kernel: "AlphaKernel", decision: dict[str, Any], guard: dict[str, Any]
+) -> str:
     """Render the full prompt fragment string for host injection."""
     reason = guard["reason"] if not guard["allowed"] else decision["reason"]
-    relational_time = kernel.relational_time or kernel._relational_time_layer(current=kernel.last_event, previous=kernel.previous_event)
+    relational_time = kernel.relational_time or kernel._relational_time_layer(
+        current=kernel.last_event, previous=kernel.previous_event
+    )
     current_time = relational_time["current_time"]
     time_gap = relational_time["time_gap"]
     relational_fragment = (
@@ -64,7 +69,9 @@ def render_prompt_fragment(kernel: "AlphaKernel", decision: dict[str, Any], guar
         arbitrated_expression_drive = comp_expression_drive
     else:
         # Small divergence: average
-        arbitrated_expression_drive = (comp_expression_drive + body_expression_drive) / 2.0
+        arbitrated_expression_drive = (
+            comp_expression_drive + body_expression_drive
+        ) / 2.0
     # Expression intensity signal: modulates LLM reply tone
     expr_intensity = kernel.computation.expression.expression_intensity()
     if expr_intensity > 0.8:
@@ -83,7 +90,10 @@ def render_prompt_fragment(kernel: "AlphaKernel", decision: dict[str, Any], guar
         f"[sylanne_proactive_source] decision={proactive['decision']}; body_need={proactive['drivers']['body_need']}; relationship_continuity={proactive['drivers']['relationship_continuity']}; constraints=current_user_sovereignty_first,no_private_memory_recall",
         f"[sylanne_prompt_context_bus] primary={bus['primary']}; posture={bus['posture']}; fragments={','.join(bus['fragments'])}; policy={bus['policy']}",
     ]
-    base = f"Sylanne 4.0 body: action={decision['action']}; reason={reason}; keep user sovereignty first.\n{relational_fragment}\n{memory_fragment}\n{self_fragment}\n" + "\n".join(extra_fragments)
+    base = (
+        f"Sylanne 4.0 body: action={decision['action']}; reason={reason}; keep user sovereignty first.\n{relational_fragment}\n{memory_fragment}\n{self_fragment}\n"
+        + "\n".join(extra_fragments)
+    )
     if expression_tendency:
         base = f"{expression_tendency}\n{base}"
     return base
@@ -92,9 +102,21 @@ def render_prompt_fragment(kernel: "AlphaKernel", decision: dict[str, Any], guar
 SCHEMA_PROMPT_CONTEXT_BUS_VERSION = "sylanne.alpha.prompt_context_bus.v1"
 
 
-def render_prompt_context_bus(kernel: "AlphaKernel", *, integrated_self: dict[str, Any]) -> dict[str, Any]:
+def render_prompt_context_bus(
+    kernel: "AlphaKernel", *, integrated_self: dict[str, Any]
+) -> dict[str, Any]:
     """Assemble the prompt context bus payload."""
-    fragments = ["relational_time", "relationship_memory", "integrated_self", "affect_dynamics", "personality", "moral_repair", "fallibility", "group_atmosphere", "proactive_source"]
+    fragments = [
+        "relational_time",
+        "relationship_memory",
+        "integrated_self",
+        "affect_dynamics",
+        "personality",
+        "moral_repair",
+        "fallibility",
+        "group_atmosphere",
+        "proactive_source",
+    ]
     return {
         "schema_version": SCHEMA_PROMPT_CONTEXT_BUS_VERSION,
         "kind": "prompt_context_bus",
@@ -104,13 +126,21 @@ def render_prompt_context_bus(kernel: "AlphaKernel", *, integrated_self: dict[st
         "primary": "integrated_self",
         "posture": integrated_self["response_posture"],
         "policy": "safety_first_single_arbitration",
-        "constraints": ["current_user_text_priority", "derived_fields_only", "drop_to_minimal_prompt_on_conflict"],
+        "constraints": [
+            "current_user_text_priority",
+            "derived_fields_only",
+            "drop_to_minimal_prompt_on_conflict",
+        ],
     }
 
 
-def render_host_payload(kernel: "AlphaKernel", decision: dict[str, Any], guard: dict[str, Any]) -> dict[str, Any]:
+def render_host_payload(
+    kernel: "AlphaKernel", decision: dict[str, Any], guard: dict[str, Any]
+) -> dict[str, Any]:
     """Build the full host payload dict."""
-    should_send = bool(guard["allowed"] and decision["action"] in {"express", "reach_out", "repair"})
+    should_send = bool(
+        guard["allowed"] and decision["action"] in {"express", "reach_out", "repair"}
+    )
     advice = "send" if should_send else "wait"
     if decision["action"] == "withdraw":
         advice = "withdraw"
@@ -132,7 +162,9 @@ def render_host_payload(kernel: "AlphaKernel", decision: dict[str, Any], guard: 
     # Include computation recalled/holes from last tick
     comp_result = getattr(kernel, "_last_computation_result", None) or {}
     return {
-        "kind": "proactive_dispatch" if decision["action"] in {"express", "reach_out", "repair"} else "body_surface",
+        "kind": "proactive_dispatch"
+        if decision["action"] in {"express", "reach_out", "repair"}
+        else "body_surface",
         "action": decision["action"],
         "advice": advice,
         "should_send": should_send,
@@ -142,7 +174,10 @@ def render_host_payload(kernel: "AlphaKernel", decision: dict[str, Any], guard: 
         "reason": guard["reason"] if not guard["allowed"] else decision["reason"],
         "reason_code": decision.get("reason_code", "life_rhythm"),
         "next_check_seconds": kernel._next_check_seconds(decision, guard),
-        "relational_time": kernel.relational_time or kernel._relational_time_layer(current=kernel.last_event, previous=kernel.previous_event),
+        "relational_time": kernel.relational_time
+        or kernel._relational_time_layer(
+            current=kernel.last_event, previous=kernel.previous_event
+        ),
         "relationship_memory": kernel.body.relationship_memory(),
         "integrated_self": integrated_self,
         "affect_dynamics": affect_dynamics,
@@ -159,7 +194,12 @@ def render_host_payload(kernel: "AlphaKernel", decision: dict[str, Any], guard: 
     }
 
 
-def render_diagnostics(kernel: "AlphaKernel", decision: dict[str, Any], guard: dict[str, Any], workset: dict[str, Any] | None = None) -> dict[str, Any]:
+def render_diagnostics(
+    kernel: "AlphaKernel",
+    decision: dict[str, Any],
+    guard: dict[str, Any],
+    workset: dict[str, Any] | None = None,
+) -> dict[str, Any]:
     """Build the diagnostics payload."""
     vector_summary = kernel._vector_summary()
     body = kernel.body.to_dict()
@@ -171,7 +211,9 @@ def render_diagnostics(kernel: "AlphaKernel", decision: dict[str, Any], guard: d
         "vector_summary": vector_summary,
         "workset": {
             "mode": (workset or {}).get("mode", "fragment"),
-            "primary_department": (workset or {}).get("coordination", {}).get("primary_department", "none"),
+            "primary_department": (workset or {})
+            .get("coordination", {})
+            .get("primary_department", "none"),
             "fast_path": (workset or {}).get("coordination", {}).get("fast_path", []),
             "slow_path": (workset or {}).get("coordination", {}).get("slow_path", []),
         },

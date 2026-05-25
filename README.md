@@ -2,7 +2,7 @@
 
 > <span style="font-size: 1.08em;"><strong>Sylanne-Embodiment：不可逆的关系计算引擎。</strong>不再模拟情绪标签，而是让对话在躯体上留下伤痕、在沉默中积累压力、在关系里长出不可撤销的形状。</span>
 
-![版本 Embodiment-1.2.0](https://img.shields.io/badge/version-Embodiment--1.2.0-red.svg)
+![版本 Embodiment-1.2.1](https://img.shields.io/badge/version-Embodiment--1.2.1-red.svg)
 ![AstrBot >=4.9.2,<5.0.0](https://img.shields.io/badge/AstrBot-%3E%3D4.9.2%2C%3C5.0.0-green)
 ![Python 3.10+](https://img.shields.io/badge/Python-3.10%2B-yellow)
 ![许可证 AGPL-3.0-or-later](https://img.shields.io/badge/license-AGPL--3.0--or--later-red)

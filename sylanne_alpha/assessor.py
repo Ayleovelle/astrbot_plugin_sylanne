@@ -17,7 +17,10 @@ def assess_with_lanes(
     if fast.get("enabled") and fast.get("provider_id") and fast_provider is not None:
         try:
             payload = fast_provider(_fast_prompt(text))
-            decision = str(payload.get("decision") or ("release" if payload.get("complete") else "hold"))
+            decision = str(
+                payload.get("decision")
+                or ("release" if payload.get("complete") else "hold")
+            )
             return {
                 "schema_version": ASSESSOR_SCHEMA_VERSION,
                 "source": "fast_assessor",
@@ -34,7 +37,9 @@ def assess_with_lanes(
 
 def _local_gate(text: str) -> dict[str, Any]:
     normalized = " ".join(str(text or "").split())
-    complete = normalized.endswith(("。", "！", "？", ".", "!", "?")) or len(normalized) >= 18
+    complete = (
+        normalized.endswith(("。", "！", "？", ".", "!", "?")) or len(normalized) >= 18
+    )
     return {
         "schema_version": ASSESSOR_SCHEMA_VERSION,
         "source": "local_gate",

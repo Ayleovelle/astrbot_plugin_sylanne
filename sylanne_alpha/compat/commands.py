@@ -38,7 +38,9 @@ def command_surface(host: Any, slice_name: str) -> dict[str, Any]:
             "allowed": guard["allowed"],
         },
         "prompt_fragment": surface["host_payload"]["prompt_fragment"],
-        "visibility": "diagnostic_readonly" if slice_name in {"integrated_self", "shadow_diagnostics"} else "public_surface",
+        "visibility": "diagnostic_readonly"
+        if slice_name in {"integrated_self", "shadow_diagnostics"}
+        else "public_surface",
     }
     if slice_name == "shadow_diagnostics":
         payload.pop("prompt_fragment", None)
@@ -58,7 +60,11 @@ def reset_surface(host: Any, slice_name: str) -> dict[str, Any]:
 
 def memory_surface(host: Any, query: str = "", limit: int = 5) -> dict[str, Any]:
     surface = host.diagnostics()
-    matches = host.kernel.body.recall_memory(query, limit=limit) if query else list(surface["body"]["memory"]["traces"])[-limit:]
+    matches = (
+        host.kernel.body.recall_memory(query, limit=limit)
+        if query
+        else list(surface["body"]["memory"]["traces"])[-limit:]
+    )
     return {
         "schema_version": MEMORY_SCHEMA_VERSION,
         "session_key": surface["session_key"],
@@ -71,7 +77,9 @@ def memory_surface(host: Any, query: str = "", limit: int = 5) -> dict[str, Any]
     }
 
 
-def _slice_values(slice_name: str, body: dict[str, Any], surface: dict[str, Any]) -> dict[str, Any]:
+def _slice_values(
+    slice_name: str, body: dict[str, Any], surface: dict[str, Any]
+) -> dict[str, Any]:
     needs = body["needs"]
     diagnostics = surface["diagnostics"]
     if slice_name in {"emotion", "emotion_model", "emotion_effects"}:
@@ -93,23 +101,49 @@ def _slice_values(slice_name: str, body: dict[str, Any], surface: dict[str, Any]
             "mortality": body["mortality"],
         }
     if slice_name == "humanlike_state":
-        return {"muscle": body["muscle"], "temperature": body["temperature"], "expression": needs["need_expression"]}
+        return {
+            "muscle": body["muscle"],
+            "temperature": body["temperature"],
+            "expression": needs["need_expression"],
+        }
     if slice_name == "lifelike_state":
         return {"pulse": body["pulse"], "needs": needs, "agency": diagnostics["agency"]}
     if slice_name == "personality_drift_state":
-        return {"nerve": body["nerve"], "plasticity": diagnostics["vector_summary"]["plasticity"]}
+        return {
+            "nerve": body["nerve"],
+            "plasticity": diagnostics["vector_summary"]["plasticity"],
+        }
     if slice_name == "moral_repair_state":
         return {"wound": body["wound"], "repair_need": needs["need_repair"]}
     if slice_name == "fallibility_state":
-        return {"mortality": body["mortality"], "wound": body["wound"], "recovery": body["mortality"]["recovery_debt"]}
+        return {
+            "mortality": body["mortality"],
+            "wound": body["wound"],
+            "recovery": body["mortality"]["recovery_debt"],
+        }
     if slice_name == "integrated_self":
-        return {"summary_state": diagnostics["vector_summary"], "agency": diagnostics["agency"], "boundary": diagnostics["boundary"]}
+        return {
+            "summary_state": diagnostics["vector_summary"],
+            "agency": diagnostics["agency"],
+            "boundary": diagnostics["boundary"],
+        }
     if slice_name == "shadow_diagnostics":
         shadow = surface["host_payload"].get("shadow_memory", {})
-        return {"signals": shadow.get("signals", {}), "state_index": shadow.get("state_index", {}), "memory_gate": shadow.get("memory_gate", {}), "risk": diagnostics["risk"], "guard_flags": diagnostics["boundary"]["guard_flags"]}
+        return {
+            "signals": shadow.get("signals", {}),
+            "state_index": shadow.get("state_index", {}),
+            "memory_gate": shadow.get("memory_gate", {}),
+            "risk": diagnostics["risk"],
+            "guard_flags": diagnostics["boundary"]["guard_flags"],
+        }
     return {"body": body}
 
 
-def _summary(slice_name: str, body: dict[str, Any], decision: dict[str, Any], guard: dict[str, Any]) -> str:
+def _summary(
+    slice_name: str,
+    body: dict[str, Any],
+    decision: dict[str, Any],
+    guard: dict[str, Any],
+) -> str:
     label = SLICE_LABELS.get(slice_name, slice_name)
     return f"{label}: action={decision['action']}; allowed={guard['allowed']}; warmth={body['temperature']['warmth']:.2f}."

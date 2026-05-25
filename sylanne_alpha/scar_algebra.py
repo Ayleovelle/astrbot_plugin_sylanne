@@ -4,10 +4,11 @@ A self-modifying operator algebra where past operations change
 the semantics of future operations. Scars are irreversible marks
 that modulate how the system processes future inputs.
 """
+
 from __future__ import annotations
 
 import math
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from enum import IntEnum
 from typing import Any
 
@@ -78,14 +79,24 @@ class ScarredState:
     """The core Scar Algebra state: base vector + irreversible scar sequence."""
 
     __slots__ = (
-        "base", "scars", "n_dims", "wound_threshold", "_tick",
-        "_t_raw", "_t_closing", "_t_scarred",
-        "_mlp_w1", "_mlp_w2", "_mlp_hidden_dim",
+        "base",
+        "scars",
+        "n_dims",
+        "wound_threshold",
+        "_tick",
+        "_t_raw",
+        "_t_closing",
+        "_t_scarred",
+        "_mlp_w1",
+        "_mlp_w2",
+        "_mlp_hidden_dim",
         "_neuroticism",
         # Session scar cap (sovereignty immune system)
-        "_session_scar_count", "_session_scar_cap",
+        "_session_scar_count",
+        "_session_scar_cap",
         # Circuit breaker (protective dissociation)
-        "_circuit_breaker_active", "_circuit_breaker_remaining",
+        "_circuit_breaker_active",
+        "_circuit_breaker_remaining",
         "_recent_scar_ticks",
         # Time-aware healing
         "_last_step_time",
@@ -116,7 +127,9 @@ class ScarredState:
         # Time-aware healing
         self._last_step_time: float = 0.0
 
-    def set_healing_rates(self, t_raw: int, t_closing: int, t_scarred: int, neuroticism: float = 0.5) -> None:
+    def set_healing_rates(
+        self, t_raw: int, t_closing: int, t_scarred: int, neuroticism: float = 0.5
+    ) -> None:
         """Set configurable healing durations for each stage.
 
         Args:
@@ -151,25 +164,26 @@ class ScarredState:
     def _init_mlp_weights(self, seed: int = 42) -> None:
         """Initialize MLP weights from a deterministic seed with spectral normalization."""
         import random
+
         rng = random.Random(seed)
         input_dim = self.n_dims * 2  # [x; e_tilde] concatenated
         hidden_dim = self._mlp_hidden_dim
 
         # Layer 1: hidden_dim x input_dim
         self._mlp_w1 = [
-            [rng.gauss(0, 0.5) for _ in range(input_dim)]
-            for _ in range(hidden_dim)
+            [rng.gauss(0, 0.5) for _ in range(input_dim)] for _ in range(hidden_dim)
         ]
         # Layer 2: n_dims x hidden_dim
         self._mlp_w2 = [
-            [rng.gauss(0, 0.5) for _ in range(hidden_dim)]
-            for _ in range(self.n_dims)
+            [rng.gauss(0, 0.5) for _ in range(hidden_dim)] for _ in range(self.n_dims)
         ]
         # Apply spectral normalization to both weight matrices
         self._mlp_w1 = self._spectral_normalize(self._mlp_w1, max_sigma=0.7)
         self._mlp_w2 = self._spectral_normalize(self._mlp_w2, max_sigma=0.7)
 
-    def _spectral_normalize(self, W: list[list[float]], max_sigma: float = 0.7) -> list[list[float]]:
+    def _spectral_normalize(
+        self, W: list[list[float]], max_sigma: float = 0.7
+    ) -> list[list[float]]:
         """Spectral normalization via power iteration.
 
         Estimates the largest singular value of W and scales W down
@@ -262,7 +276,9 @@ class ScarredState:
             result.append(e_d * self.modifier(d))
         return result
 
-    def step(self, event: list[float], timestamp: float = 0.0, *, heal: bool = True) -> dict[str, Any]:
+    def step(
+        self, event: list[float], timestamp: float = 0.0, *, heal: bool = True
+    ) -> dict[str, Any]:
         """Apply the ⊳ operator: full state transition.
 
         Returns a diagnostic dict describing what happened.
@@ -302,7 +318,9 @@ class ScarredState:
         # Circuit breaker trigger: check for rapid scar formation
         if new_scars:
             self._recent_scar_ticks.append(self._tick)
-            self._recent_scar_ticks = [t for t in self._recent_scar_ticks if self._tick - t <= 10]
+            self._recent_scar_ticks = [
+                t for t in self._recent_scar_ticks if self._tick - t <= 10
+            ]
             if len(self._recent_scar_ticks) >= 5 and not self._circuit_breaker_active:
                 self._circuit_breaker_active = True
                 self._circuit_breaker_remaining = 30
@@ -314,7 +332,9 @@ class ScarredState:
             # Time-aware healing: grant bonus ticks for real-time silence
             if timestamp > 0 and self._last_step_time > 0:
                 elapsed_minutes = (timestamp - self._last_step_time) / 60.0
-                bonus_ticks = int(elapsed_minutes / 5.0)  # 1 bonus tick per 5 min silence
+                bonus_ticks = int(
+                    elapsed_minutes / 5.0
+                )  # 1 bonus tick per 5 min silence
                 bonus_ticks = min(bonus_ticks, 10)  # cap at 10 bonus ticks
                 for _ in range(bonus_ticks):
                     self._heal_one_tick(existing_count, healed)
@@ -333,7 +353,9 @@ class ScarredState:
             # Prune excess FADED scars to prevent unbounded growth
             faded = [s for s in self.scars if s.stage == HealingStage.FADED]
             if len(faded) > 50:
-                self.scars = [s for s in self.scars if s.stage != HealingStage.FADED] + faded[-50:]
+                self.scars = [
+                    s for s in self.scars if s.stage != HealingStage.FADED
+                ] + faded[-50:]
 
         return {
             "modulated": modulated,
@@ -373,9 +395,9 @@ class ScarredState:
             obs[f"dim_{d}"] = self.base[d]
             obs[f"sensitivity_{d}"] = self.modifier(d)
         obs["total_scars"] = float(len(self.scars))
-        obs["numbed_dimensions"] = float(sum(
-            1 for d in range(self.n_dims) if self.modifier(d) < 0.5
-        ))
+        obs["numbed_dimensions"] = float(
+            sum(1 for d in range(self.n_dims) if self.modifier(d) < 0.5)
+        )
         return obs
 
     def is_numbed(self, dim: int) -> bool:
@@ -384,8 +406,12 @@ class ScarredState:
 
     def scar_density(self, dim: int) -> float:
         """Weighted scar density on a dimension."""
-        weights = {HealingStage.RAW: 1.0, HealingStage.CLOSING: 0.8,
-                   HealingStage.SCARRED: 0.5, HealingStage.FADED: 0.3}
+        weights = {
+            HealingStage.RAW: 1.0,
+            HealingStage.CLOSING: 0.8,
+            HealingStage.SCARRED: 0.5,
+            HealingStage.FADED: 0.3,
+        }
         return sum(weights[s.stage] for s in self.scars if s.dimension == dim)
 
     def to_dict(self) -> dict[str, Any]:

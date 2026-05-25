@@ -3,14 +3,23 @@
 Maintains a prediction of the next input and routes messages based on
 surprise (prediction error). Low surprise → fast path, high surprise → full path.
 """
+
 from __future__ import annotations
 
 from typing import Any
 
 
 class PredictiveCodingGate:
-    __slots__ = ("dim", "_byte_dim", "_prediction", "precision", "decay", "_surprise_history",
-                 "_fast_threshold", "_full_threshold")
+    __slots__ = (
+        "dim",
+        "_byte_dim",
+        "_prediction",
+        "precision",
+        "decay",
+        "_surprise_history",
+        "_fast_threshold",
+        "_full_threshold",
+    )
 
     def __init__(self, dim: int = 1024, decay: float = 0.92):
         self.dim = dim
@@ -29,14 +38,13 @@ class PredictiveCodingGate:
         if isinstance(input_vec, bytearray):
             # Hamming distance between prediction and input
             xor_count = sum(
-                bin(a ^ b).count('1')
-                for a, b in zip(input_vec, self._prediction)
+                bin(a ^ b).count("1") for a, b in zip(input_vec, self._prediction)
             )
             raw = xor_count / self.dim
         else:
             # Fallback for list[int] inputs: use density difference
             density = sum(input_vec) / len(input_vec)
-            pred_ones = sum(bin(b).count('1') for b in self._prediction)
+            pred_ones = sum(bin(b).count("1") for b in self._prediction)
             pred_density = pred_ones / self.dim
             raw = abs(density - pred_density)
         return min(1.0, raw * self.precision * 2.0)
@@ -44,6 +52,7 @@ class PredictiveCodingGate:
     def update(self, input_vec: bytearray | list[int], surprise_value: float):
         """Update prediction vector toward input using probabilistic bit flipping."""
         import random
+
         lr = min(0.3, max(0.01, surprise_value * 0.5))
         if isinstance(input_vec, bytearray):
             # Blend prediction toward input: flip differing bits with probability lr
@@ -54,27 +63,34 @@ class PredictiveCodingGate:
                     for bit in range(8):
                         if (diff >> bit) & 1:
                             if random.random() < lr:
-                                mask |= (1 << bit)
+                                mask |= 1 << bit
                     self._prediction[i] ^= mask
         else:
             # Fallback for list[int]: update prediction density-wise
             density = sum(input_vec) / max(1, len(input_vec))
             # Set prediction bits to match target density probabilistically
             target_ones = int(density * self.dim)
-            current_ones = sum(bin(b).count('1') for b in self._prediction)
+            current_ones = sum(bin(b).count("1") for b in self._prediction)
             # Nudge toward target by flipping random bits
             if current_ones < target_ones:
                 for i in range(self._byte_dim):
                     for bit in range(8):
-                        if not (self._prediction[i] & (1 << bit)) and random.random() < lr * 0.1:
-                            self._prediction[i] |= (1 << bit)
+                        if (
+                            not (self._prediction[i] & (1 << bit))
+                            and random.random() < lr * 0.1
+                        ):
+                            self._prediction[i] |= 1 << bit
             elif current_ones > target_ones:
                 for i in range(self._byte_dim):
                     for bit in range(8):
-                        if (self._prediction[i] & (1 << bit)) and random.random() < lr * 0.1:
+                        if (
+                            self._prediction[i] & (1 << bit)
+                        ) and random.random() < lr * 0.1:
                             self._prediction[i] &= ~(1 << bit)
         # Update precision
-        self.precision = self.decay * self.precision + (1 - self.decay) * (1.0 - surprise_value)
+        self.precision = self.decay * self.precision + (1 - self.decay) * (
+            1.0 - surprise_value
+        )
         self.precision = max(0.1, min(1.0, self.precision))
         self._surprise_history.append(surprise_value)
         if len(self._surprise_history) > 50:
@@ -88,13 +104,13 @@ class PredictiveCodingGate:
         "normal" to avoid wasting full-path computation on noise.
         """
         if surprise_value < self._fast_threshold:
-            return "fast"    # SSM only, skip heavy computation
+            return "fast"  # SSM only, skip heavy computation
         if surprise_value < self._full_threshold:
             return "normal"  # SSM + tiny attention
         # Cold start guard: prediction model needs ~15 samples to calibrate
         if len(self._surprise_history) < 15:
             return "normal"
-        return "full"        # Full stack: SSM + TDA + HDC recall + autopoiesis check
+        return "full"  # Full stack: SSM + TDA + HDC recall + autopoiesis check
 
     def mean_surprise(self) -> float:
         """Running average surprise (useful for diagnostics)."""
@@ -109,6 +125,7 @@ class PredictiveCodingGate:
     def to_dict(self) -> dict[str, Any]:
         """Serialize for persistence."""
         import base64
+
         return {
             "decay": self.decay,
             "precision": self.precision,
@@ -121,6 +138,7 @@ class PredictiveCodingGate:
     def from_dict(self, data: dict[str, Any]):
         """Restore from persisted state."""
         import base64
+
         self.decay = float(data.get("decay", self.decay))
         self.precision = float(data.get("precision", 0.5))
         # Support new format (full prediction vector)
@@ -136,7 +154,7 @@ class PredictiveCodingGate:
             for i in range(self._byte_dim):
                 for bit in range(8):
                     if bits_set < target_ones:
-                        self._prediction[i] |= (1 << bit)
+                        self._prediction[i] |= 1 << bit
                         bits_set += 1
         history = data.get("surprise_history")
         if isinstance(history, list):

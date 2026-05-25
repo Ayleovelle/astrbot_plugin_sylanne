@@ -5,6 +5,7 @@ Integrates Scar Algebra (irreversible state dynamics) with Void Calculus
   Γ: Void pressure → Scar wounding events
   Φ: Scar numbing → Void genesis sensitivity
 """
+
 from __future__ import annotations
 
 import math
@@ -16,6 +17,7 @@ from .void_calculus import VoidSpace
 
 class SocialVoid:
     """Group chat silence void — pressure accumulates when agent is silent in active group."""
+
     __slots__ = ("pressure", "silence_ticks", "group_activity", "topic_boundary")
 
     def __init__(self):
@@ -32,7 +34,9 @@ class SocialVoid:
         depth = self.group_activity
         beta = self.topic_boundary
         if depth > 0 and self.silence_ticks > 0:
-            self.pressure += depth * math.log(self.silence_ticks + 1) * (1.0 - beta) * 0.1
+            self.pressure += (
+                depth * math.log(self.silence_ticks + 1) * (1.0 - beta) * 0.1
+            )
         self.pressure = min(5.0, self.pressure)
 
     def reset(self):
@@ -61,11 +65,18 @@ class VoidScarEngine:
     """
 
     __slots__ = (
-        "scar_state", "void_space", "social_void", "similarity_fn",
-        "_coherence", "_last_event_vec", "_tick",
+        "scar_state",
+        "void_space",
+        "social_void",
+        "similarity_fn",
+        "_coherence",
+        "_last_event_vec",
+        "_tick",
         "_void_pressure_coupling_rate",
-        "_void_drive_weight", "_social_drive_weight",
-        "_accepted_decay", "_ignored_deepening",
+        "_void_drive_weight",
+        "_social_drive_weight",
+        "_accepted_decay",
+        "_ignored_deepening",
         "_personality_detection_floor",
     )
 
@@ -124,8 +135,7 @@ class VoidScarEngine:
         # --- Coupling Φ: Scars → Void sensitivity ---
         # Numbed dimensions lower void detection threshold, but respect personality floor
         numbed_count = sum(
-            1 for d in range(self.scar_state.n_dims)
-            if self.scar_state.is_numbed(d)
+            1 for d in range(self.scar_state.n_dims) if self.scar_state.is_numbed(d)
         )
         if numbed_count > 0:
             # Phi coupling: numbed dims lower detection threshold, but respect floor
@@ -142,7 +152,9 @@ class VoidScarEngine:
         for coupling in void_result["coupling_events"]:
             wound_event = [0.0] * self.scar_state.n_dims
             dim_hint = int(coupling.get("dim_hint", 0)) % self.scar_state.n_dims
-            wound_event[dim_hint] = coupling["pressure"] * self._void_pressure_coupling_rate
+            wound_event[dim_hint] = (
+                coupling["pressure"] * self._void_pressure_coupling_rate
+            )
             wound_result = self.scar_state.step(wound_event, timestamp, heal=False)
             coupling_wounds.append(wound_result)
 
@@ -162,8 +174,14 @@ class VoidScarEngine:
 
     # Canonical dimension names for the 8-dim emotion space
     _DIM_NAMES: tuple[str, ...] = (
-        "warmth", "arousal", "valence", "tension",
-        "curiosity", "repair_pressure", "expression_drive", "boundary_firmness",
+        "warmth",
+        "arousal",
+        "valence",
+        "tension",
+        "curiosity",
+        "repair_pressure",
+        "expression_drive",
+        "boundary_firmness",
     )
 
     def observe(self) -> dict[str, float]:
@@ -191,10 +209,17 @@ class VoidScarEngine:
 
     def expression_drive(self) -> float:
         """Combined drive for the phase transition expression layer."""
-        scar_drive = abs(self.scar_state.base[6]) if len(self.scar_state.base) > 6 else 0.0
+        scar_drive = (
+            abs(self.scar_state.base[6]) if len(self.scar_state.base) > 6 else 0.0
+        )
         void_drive = min(1.0, self.void_space.total_pressure() / 50.0)
         social_drive = min(1.0, self.social_void.pressure / 3.0)
-        return min(1.0, scar_drive + void_drive * self._void_drive_weight + social_drive * self._social_drive_weight)
+        return min(
+            1.0,
+            scar_drive
+            + void_drive * self._void_drive_weight
+            + social_drive * self._social_drive_weight,
+        )
 
     def _compute_coherence(self) -> float:
         """Global coherence: alignment between what hurts and what's avoided.
@@ -256,9 +281,15 @@ class VoidScarEngine:
             "tick": self._tick,
         }
 
-    def set_personality_params(self, coupling_rate: float, pressure_threshold: float,
-                               void_drive_weight: float, social_drive_weight: float,
-                               accepted_decay: float, ignored_deepening: float):
+    def set_personality_params(
+        self,
+        coupling_rate: float,
+        pressure_threshold: float,
+        void_drive_weight: float,
+        social_drive_weight: float,
+        accepted_decay: float,
+        ignored_deepening: float,
+    ):
         self._void_pressure_coupling_rate = coupling_rate
         self.void_space._pressure_threshold = pressure_threshold
         self._void_drive_weight = void_drive_weight
@@ -272,6 +303,6 @@ def _default_similarity(a: bytes, b: bytes) -> float:
     if not a or not b:
         return 0.0
     min_len = min(len(a), len(b))
-    xor_bits = sum(bin(a[i] ^ b[i]).count('1') for i in range(min_len))
+    xor_bits = sum(bin(a[i] ^ b[i]).count("1") for i in range(min_len))
     total_bits = min_len * 8
     return 1.0 - (xor_bits / total_bits) if total_bits > 0 else 0.0

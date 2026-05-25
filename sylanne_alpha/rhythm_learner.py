@@ -10,9 +10,9 @@ Key insight from user research:
 - Frequency change accompanies tone change (coupled, not decoupled)
 - Long-term frequency mismatch accumulates into void pressure
 """
+
 from __future__ import annotations
 
-import math
 from collections import deque
 from typing import Any
 
@@ -26,8 +26,12 @@ class RhythmProfile:
     """Learned rhythm characteristics from a single user."""
 
     __slots__ = (
-        "_msg_lengths", "_inter_msg_gaps", "_last_msg_time",
-        "_chars_per_second", "_avg_part_chars", "_confidence",
+        "_msg_lengths",
+        "_inter_msg_gaps",
+        "_last_msg_time",
+        "_chars_per_second",
+        "_avg_part_chars",
+        "_confidence",
     )
 
     def __init__(self):
@@ -59,7 +63,10 @@ class RhythmProfile:
             self._confidence = 0.0
             return
 
-        self._confidence = min(1.0, (n - _MIN_SAMPLES_FOR_PROFILE) / (_MAX_SAMPLES - _MIN_SAMPLES_FOR_PROFILE))
+        self._confidence = min(
+            1.0,
+            (n - _MIN_SAMPLES_FOR_PROFILE) / (_MAX_SAMPLES - _MIN_SAMPLES_FOR_PROFILE),
+        )
 
         sorted_lengths = sorted(self._msg_lengths)
         p50_idx = len(sorted_lengths) // 2
@@ -84,7 +91,9 @@ class RhythmProfile:
     def chars_per_second(self) -> float:
         return self._chars_per_second
 
-    def modulate(self, default_max_part: int, default_cps: float, blend: float) -> tuple[int, float]:
+    def modulate(
+        self, default_max_part: int, default_cps: float, blend: float
+    ) -> tuple[int, float]:
         """Return (max_part_chars, chars_per_second) blended toward user rhythm.
 
         blend: 0.0 = pure default, 1.0 = pure user rhythm.
@@ -97,8 +106,12 @@ class RhythmProfile:
         learned_part = max(12, min(120, int(self._avg_part_chars)))
         learned_cps = self._chars_per_second
 
-        blended_part = int(default_max_part * (1 - effective_blend) + learned_part * effective_blend)
-        blended_cps = default_cps * (1 - effective_blend) + learned_cps * effective_blend
+        blended_part = int(
+            default_max_part * (1 - effective_blend) + learned_part * effective_blend
+        )
+        blended_cps = (
+            default_cps * (1 - effective_blend) + learned_cps * effective_blend
+        )
 
         return max(12, min(120, blended_part)), max(2.0, min(20.0, blended_cps))
 
@@ -120,7 +133,9 @@ class RhythmProfile:
         for v in data.get("inter_msg_gaps", []):
             p._inter_msg_gaps.append(float(v))
         p._last_msg_time = float(data.get("last_msg_time", 0.0))
-        p._chars_per_second = float(data.get("chars_per_second", _DEFAULT_CHARS_PER_SECOND))
+        p._chars_per_second = float(
+            data.get("chars_per_second", _DEFAULT_CHARS_PER_SECOND)
+        )
         p._avg_part_chars = float(data.get("avg_part_chars", _DEFAULT_MAX_PART_CHARS))
         p._confidence = float(data.get("confidence", 0.0))
         return p
@@ -145,11 +160,16 @@ class RhythmLearner:
         warmth = engine_observation.get("warmth", 0.0)
         coherence = engine_observation.get("coherence", 1.0)
         tension = engine_observation.get("tension", 0.0)
-        combined = (warmth * 0.5 + coherence * 0.3 + (1.0 - tension) * 0.2)
+        combined = warmth * 0.5 + coherence * 0.3 + (1.0 - tension) * 0.2
         return combined >= self._intimacy_threshold
 
-    def observe_user_message(self, session_key: str, text: str, timestamp: float,
-                             engine_observation: dict[str, float]) -> None:
+    def observe_user_message(
+        self,
+        session_key: str,
+        text: str,
+        timestamp: float,
+        engine_observation: dict[str, float],
+    ) -> None:
         """Observe a user message. Only learns if intimacy is high enough."""
         if not self.is_intimate(engine_observation):
             return
@@ -160,10 +180,15 @@ class RhythmLearner:
             self._profiles[session_key] = RhythmProfile()
         self._profiles[session_key].observe(text, timestamp)
 
-    def get_rhythm_params(self, session_key: str, default_max_part: int = 48,
-                          default_cps: float = 7.5, blend: float = 0.6,
-                          expression_drive: float = 0.5,
-                          recent_ignored_rate: float = 0.0) -> tuple[int, float]:
+    def get_rhythm_params(
+        self,
+        session_key: str,
+        default_max_part: int = 48,
+        default_cps: float = 7.5,
+        blend: float = 0.6,
+        expression_drive: float = 0.5,
+        recent_ignored_rate: float = 0.0,
+    ) -> tuple[int, float]:
         """Get modulated segmentation params — deliberate synchronization.
 
         Unlike passive learning, this is a conscious decision:
@@ -192,8 +217,12 @@ class RhythmLearner:
         learned_part = max(12, min(120, int(profile.avg_part_chars)))
         learned_cps = profile.chars_per_second
 
-        blended_part = int(default_max_part * (1 - effective_blend) + learned_part * effective_blend)
-        blended_cps = default_cps * (1 - effective_blend) + learned_cps * effective_blend
+        blended_part = int(
+            default_max_part * (1 - effective_blend) + learned_part * effective_blend
+        )
+        blended_cps = (
+            default_cps * (1 - effective_blend) + learned_cps * effective_blend
+        )
 
         return max(12, min(120, blended_part)), max(2.0, min(20.0, blended_cps))
 
@@ -207,7 +236,9 @@ class RhythmLearner:
         }
 
     @classmethod
-    def from_dict(cls, data: dict[str, Any], intimacy_threshold: float = 0.6) -> "RhythmLearner":
+    def from_dict(
+        cls, data: dict[str, Any], intimacy_threshold: float = 0.6
+    ) -> "RhythmLearner":
         threshold = float(data.get("intimacy_threshold", intimacy_threshold))
         learner = cls(intimacy_threshold=threshold)
         profiles = data.get("profiles", data)

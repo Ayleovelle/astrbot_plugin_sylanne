@@ -40,13 +40,21 @@ class SylanneAlphaHost:
         self.runtime = AlphaRuntime(Path(self.root))
         self.kernel = self.runtime.load(self.session_key, legacy=self.legacy)
 
-    def on_request(self, event: SylanneAlphaHostEvent | dict[str, Any] | None = None, assessment: dict[str, Any] | None = None) -> dict[str, Any]:
+    def on_request(
+        self,
+        event: SylanneAlphaHostEvent | dict[str, Any] | None = None,
+        assessment: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
         return self._tick(event, phase="request", assessment=assessment)
 
-    def on_response(self, event: SylanneAlphaHostEvent | dict[str, Any] | None = None) -> dict[str, Any]:
+    def on_response(
+        self, event: SylanneAlphaHostEvent | dict[str, Any] | None = None
+    ) -> dict[str, Any]:
         return self._tick(event, phase="response")
 
-    def on_chat(self, event: SylanneAlphaHostEvent | dict[str, Any] | None = None) -> dict[str, Any]:
+    def on_chat(
+        self, event: SylanneAlphaHostEvent | dict[str, Any] | None = None
+    ) -> dict[str, Any]:
         request_surface = self._tick(event, phase="chat_request")
         reply_text = self._reply_text(request_surface)
         response_event = self._event(event)
@@ -71,11 +79,17 @@ class SylanneAlphaHost:
             "surface": response_surface,
         }
 
-    def on_proactive_check(self, event: SylanneAlphaHostEvent | dict[str, Any] | None = None) -> dict[str, Any]:
+    def on_proactive_check(
+        self, event: SylanneAlphaHostEvent | dict[str, Any] | None = None
+    ) -> dict[str, Any]:
         surface = self._tick(event, phase="proactive")
         if surface["host_payload"].get("should_send"):
-            self.kernel.body.immunity.interruption_budget = max(0.0, self.kernel.body.immunity.interruption_budget - 0.2)
-            self.kernel.body.immunity.cooldown = max(self.kernel.body.immunity.cooldown, 0.35)
+            self.kernel.body.immunity.interruption_budget = max(
+                0.0, self.kernel.body.immunity.interruption_budget - 0.2
+            )
+            self.kernel.body.immunity.cooldown = max(
+                self.kernel.body.immunity.cooldown, 0.35
+            )
             self.runtime.save(self.kernel)
         return surface
 
@@ -85,7 +99,13 @@ class SylanneAlphaHost:
     def snapshot(self) -> dict[str, Any]:
         return self.kernel.snapshot()
 
-    def _tick(self, event: SylanneAlphaHostEvent | dict[str, Any] | None, *, phase: str, assessment: dict[str, Any] | None = None) -> dict[str, Any]:
+    def _tick(
+        self,
+        event: SylanneAlphaHostEvent | dict[str, Any] | None,
+        *,
+        phase: str,
+        assessment: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
         host_event = self._event(event)
         flags = list(dict.fromkeys([phase, *host_event.flags]))
         surface = self.kernel.tick(
@@ -115,7 +135,9 @@ class SylanneAlphaHost:
             return "我在听，你继续说。"
         return "嗯，我记下了。"
 
-    def _event(self, event: SylanneAlphaHostEvent | dict[str, Any] | None) -> SylanneAlphaHostEvent:
+    def _event(
+        self, event: SylanneAlphaHostEvent | dict[str, Any] | None
+    ) -> SylanneAlphaHostEvent:
         if isinstance(event, SylanneAlphaHostEvent):
             return event
         payload = event or {}
@@ -125,5 +147,9 @@ class SylanneAlphaHost:
             flags=list(payload.get("flags") or []),
             now=float(payload.get("now") or 0.0),
             values=dict(payload.get("values") or {}),
-            event_time=dict(payload.get("event_time") if isinstance(payload.get("event_time"), dict) else {}),
+            event_time=dict(
+                payload.get("event_time")
+                if isinstance(payload.get("event_time"), dict)
+                else {}
+            ),
         )

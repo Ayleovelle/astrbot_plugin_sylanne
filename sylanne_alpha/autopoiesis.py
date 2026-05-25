@@ -4,6 +4,7 @@ Personality as a self-maintaining computational process.
 Not defined by external parameters, but by an ongoing self-repair loop.
 Small perturbations are absorbed; large shocks may trigger phase transitions.
 """
+
 from __future__ import annotations
 
 import math
@@ -12,9 +13,15 @@ from typing import Any
 
 class AutopoieticBoundary:
     __slots__ = (
-        "identity_dim", "identity_kernel", "boundary_integrity",
-        "internal_entropy", "repair_rate", "_phase_transitions",
-        "_last_penetration", "_phase_threshold", "_rotation_angle",
+        "identity_dim",
+        "identity_kernel",
+        "boundary_integrity",
+        "internal_entropy",
+        "repair_rate",
+        "_phase_transitions",
+        "_last_penetration",
+        "_phase_threshold",
+        "_rotation_angle",
     )
 
     def __init__(self, identity_dim: int = 32, agreeableness: float = 0.5):
@@ -34,7 +41,7 @@ class AutopoieticBoundary:
         """External perturbation acts on the boundary."""
         if len(force) < self.identity_dim:
             force = force + [0.0] * (self.identity_dim - len(force))
-        force = force[:self.identity_dim]
+        force = force[: self.identity_dim]
 
         # Project force onto identity kernel's orthogonal complement
         dot = sum(f * k for f, k in zip(force, self.identity_kernel))
@@ -49,14 +56,18 @@ class AutopoieticBoundary:
         if phase_transition:
             self._reorganize(orthogonal, orth_norm)
             self.internal_entropy = min(1.0, self.internal_entropy + 0.3)
-            self._phase_transitions.append({
-                "penetration": penetration,
-                "entropy_after": self.internal_entropy,
-            })
+            self._phase_transitions.append(
+                {
+                    "penetration": penetration,
+                    "entropy_after": self.internal_entropy,
+                }
+            )
             if len(self._phase_transitions) > 20:
                 self._phase_transitions = self._phase_transitions[-20:]
         else:
-            self.boundary_integrity = max(0.0, self.boundary_integrity - penetration * 0.1)
+            self.boundary_integrity = max(
+                0.0, self.boundary_integrity - penetration * 0.1
+            )
             self.internal_entropy = min(1.0, self.internal_entropy + penetration * 0.05)
 
         return {
@@ -76,10 +87,14 @@ class AutopoieticBoundary:
         if self._last_penetration > 0.4:
             # Wound still open: slow healing, don't restore integrity yet
             self._last_penetration *= 0.8  # Gradually decay penetration memory
-            self.internal_entropy = max(0.0, self.internal_entropy - self.repair_rate * 0.2)
+            self.internal_entropy = max(
+                0.0, self.internal_entropy - self.repair_rate * 0.2
+            )
             return
         # Normal repair — floor at 0.3 to prevent positive feedback collapse
-        self.boundary_integrity = max(0.3, min(1.0, self.boundary_integrity + self.repair_rate))
+        self.boundary_integrity = max(
+            0.3, min(1.0, self.boundary_integrity + self.repair_rate)
+        )
         self.internal_entropy = max(0.0, self.internal_entropy - self.repair_rate * 0.5)
         # Re-normalize identity kernel
         norm = math.sqrt(sum(x * x for x in self.identity_kernel) + 1e-12)
@@ -109,7 +124,9 @@ class AutopoieticBoundary:
         self.internal_entropy = float(data.get("internal_entropy", 0.0))
         self.repair_rate = float(data.get("repair_rate", 0.05))
         self._last_penetration = float(data.get("last_penetration", 0.0))
-        if "phase_transition_log" in data and isinstance(data["phase_transition_log"], list):
+        if "phase_transition_log" in data and isinstance(
+            data["phase_transition_log"], list
+        ):
             self._phase_transitions = data["phase_transition_log"]
         if "identity_kernel" in data and isinstance(data["identity_kernel"], list):
             self.identity_kernel = [float(x) for x in data["identity_kernel"]]
@@ -121,8 +138,7 @@ class AutopoieticBoundary:
         cos_a = math.cos(angle)
         sin_a = math.sin(angle)
         self.identity_kernel = [
-            cos_a * k + sin_a * f
-            for k, f in zip(self.identity_kernel, unit_force)
+            cos_a * k + sin_a * f for k, f in zip(self.identity_kernel, unit_force)
         ]
         # Re-normalize
         norm = math.sqrt(sum(x * x for x in self.identity_kernel) + 1e-12)
@@ -137,8 +153,9 @@ class AutopoieticBoundary:
         """Replace the identity kernel with a shared one."""
         self.identity_kernel = list(kernel)
 
-    def set_personality_params(self, repair_rate: float, phase_threshold: float,
-                               rotation_angle: float):
+    def set_personality_params(
+        self, repair_rate: float, phase_threshold: float, rotation_angle: float
+    ):
         self.repair_rate = repair_rate
         self._phase_threshold = phase_threshold
         self._rotation_angle = rotation_angle

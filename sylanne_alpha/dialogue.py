@@ -22,9 +22,17 @@ def segment_dialogue(
     normalized = " ".join(str(text or "").split())
     previous_id = str((previous or {}).get("segment_id") or "")
     relation = _relation(normalized, previous=previous, flags=flags)
-    segment_id = previous_id if previous_id and relation == "continuation" else _segment_id(session_key, normalized, now)
+    segment_id = (
+        previous_id
+        if previous_id and relation == "continuation"
+        else _segment_id(session_key, normalized, now)
+    )
     interruption = _interruption(relation, reply_in_progress=reply_in_progress)
-    actions = ["cancel_realtime_dispatch"] if interruption["detected"] and reply_in_progress else []
+    actions = (
+        ["cancel_realtime_dispatch"]
+        if interruption["detected"] and reply_in_progress
+        else []
+    )
     return {
         "schema_version": DIALOGUE_SCHEMA_VERSION,
         "session_key": session_key,
@@ -48,7 +56,9 @@ def _relation(text: str, *, previous: dict[str, Any] | None, flags: list[str]) -
         return "withdrawal"
     if any(marker in text for marker in _TOPIC_SHIFT_MARKERS):
         return "topic_shift"
-    if previous and (len(text) <= 24 or any(marker in text for marker in _CONTINUATION_MARKERS)):
+    if previous and (
+        len(text) <= 24 or any(marker in text for marker in _CONTINUATION_MARKERS)
+    ):
         return "continuation"
     return "new_segment"
 

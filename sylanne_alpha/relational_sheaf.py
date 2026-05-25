@@ -10,11 +10,11 @@ to N concurrent relationships with:
 
 Reference: theory/relational_sheaf/axioms.md
 """
+
 from __future__ import annotations
 
 import math
 from typing import Any
-
 
 # ---------------------------------------------------------------------------
 # Relationship type enum (lightweight, no import needed)
@@ -39,6 +39,7 @@ def _rel_type_from_str(s: str) -> int:
 # ---------------------------------------------------------------------------
 # Linear algebra helpers (pure Python, no numpy)
 # ---------------------------------------------------------------------------
+
 
 def _mat_zeros(rows: int, cols: int) -> list[list[float]]:
     return [[0.0] * cols for _ in range(rows)]
@@ -207,6 +208,7 @@ def _kernel_dim(M: list[list[float]], tol: float = 1e-8) -> int:
 # RelationalComplex — simplicial complex management
 # ---------------------------------------------------------------------------
 
+
 class RelationalComplex:
     """Finite abstract simplicial complex for multi-relational topology.
 
@@ -259,10 +261,7 @@ class RelationalComplex:
             return
         self._vertices.remove(partner_idx)
         self._edges = [e for e in self._edges if e[1] != partner_idx]
-        self._triangles = [
-            t for t in self._triangles
-            if partner_idx not in t
-        ]
+        self._triangles = [t for t in self._triangles if partner_idx not in t]
 
     def edge_index(self, partner_idx: int) -> int:
         """Get the index of edge (0, partner_idx) in the edge list."""
@@ -294,8 +293,8 @@ class RelationalComplex:
 # ---------------------------------------------------------------------------
 
 # Stalk dimensions
-_VERTEX_STALK_DIM = 8   # agent internal state (matches scar n_dims)
-_EDGE_STALK_DIM = 8     # per-relationship scar state reference
+_VERTEX_STALK_DIM = 8  # agent internal state (matches scar n_dims)
+_EDGE_STALK_DIM = 8  # per-relationship scar state reference
 _TRIANGLE_STALK_DIM = 4  # co-presence state (reduced)
 
 
@@ -310,12 +309,25 @@ class ScarSheaf:
     """
 
     __slots__ = (
-        "complex", "_vertex_stalk", "_edge_stalks", "_triangle_stalks",
-        "_presentation_matrices", "_rel_types", "_maturities",
-        "_personality", "_kappa", "_energy", "_max_energy",
-        "_propagation_rate", "_tick", "_last_timestamp",
-        "_propagation_state", "_energy_costs",
-        "_cached_h1", "_cached_dissoc", "_cache_tick",
+        "complex",
+        "_vertex_stalk",
+        "_edge_stalks",
+        "_triangle_stalks",
+        "_presentation_matrices",
+        "_rel_types",
+        "_maturities",
+        "_personality",
+        "_kappa",
+        "_energy",
+        "_max_energy",
+        "_propagation_rate",
+        "_tick",
+        "_last_timestamp",
+        "_propagation_state",
+        "_energy_costs",
+        "_cached_h1",
+        "_cached_dissoc",
+        "_cache_tick",
     )
 
     def __init__(
@@ -397,8 +409,7 @@ class ScarSheaf:
             self._presentation_matrices.pop(edge_idx)
         # Rebuild triangle stalks
         self._triangle_stalks = [
-            [0.0] * _TRIANGLE_STALK_DIM
-            for _ in range(self.complex.n_triangles)
+            [0.0] * _TRIANGLE_STALK_DIM for _ in range(self.complex.n_triangles)
         ]
 
     def set_maturity(self, partner_idx: int, maturity: float) -> None:
@@ -425,11 +436,23 @@ class ScarSheaf:
           - conscientiousness/inner_order → tighter energy management
         """
         self._personality = dict(personality)
-        e = float(personality.get("extraversion", personality.get("expression_drive_trait", 0.5)))
-        a = float(personality.get("agreeableness", personality.get("relational_gravity", 0.5)))
-        n = float(personality.get("neuroticism", personality.get("perception_acuity", 0.5)))
-        o = float(personality.get("openness", personality.get("boundary_permeability", 0.5)))
-        c = float(personality.get("conscientiousness", personality.get("inner_order", 0.5)))
+        e = float(
+            personality.get(
+                "extraversion", personality.get("expression_drive_trait", 0.5)
+            )
+        )
+        a = float(
+            personality.get("agreeableness", personality.get("relational_gravity", 0.5))
+        )
+        n = float(
+            personality.get("neuroticism", personality.get("perception_acuity", 0.5))
+        )
+        o = float(
+            personality.get("openness", personality.get("boundary_permeability", 0.5))
+        )
+        c = float(
+            personality.get("conscientiousness", personality.get("inner_order", 0.5))
+        )
 
         # Consistency bound: kappa(pi) — Axiom (Personality Consistency)
         # High agreeableness → low kappa; high neuroticism → high kappa
@@ -460,8 +483,12 @@ class ScarSheaf:
         o = float(self._personality.get("openness", 0.5))
         n = float(self._personality.get("neuroticism", 0.5))
 
-        rel_type = self._rel_types[edge_idx] if edge_idx < len(self._rel_types) else FRIENDLY
-        maturity = self._maturities[edge_idx] if edge_idx < len(self._maturities) else 0.0
+        rel_type = (
+            self._rel_types[edge_idx] if edge_idx < len(self._rel_types) else FRIENDLY
+        )
+        maturity = (
+            self._maturities[edge_idx] if edge_idx < len(self._maturities) else 0.0
+        )
 
         # P_base: personality determines baseline rank
         # Extraversion → more dimensions exposed (higher diagonal values)
@@ -532,7 +559,11 @@ class ScarSheaf:
         P_iT = _mat_transpose(P_i)
         # P_i is (n0 x ne), P_iT is (ne x n0)
         projected = _mat_vec(P_iT, self._vertex_stalk)
-        ext = self._edge_stalks[edge_idx] if edge_idx < len(self._edge_stalks) else [0.0] * _EDGE_STALK_DIM
+        ext = (
+            self._edge_stalks[edge_idx]
+            if edge_idx < len(self._edge_stalks)
+            else [0.0] * _EDGE_STALK_DIM
+        )
         return _vec_sub(projected, ext)
 
     def coboundary_0(self) -> list[list[float]]:
@@ -559,7 +590,11 @@ class ScarSheaf:
         # Project edge stalks to triangle dimension (take first _TRIANGLE_STALK_DIM dims)
         si = self._edge_stalks[edge_i_idx][:_TRIANGLE_STALK_DIM]
         sj = self._edge_stalks[edge_j_idx][:_TRIANGLE_STALK_DIM]
-        tri_stalk = self._triangle_stalks[tri_idx] if tri_idx < len(self._triangle_stalks) else [0.0] * _TRIANGLE_STALK_DIM
+        tri_stalk = (
+            self._triangle_stalks[tri_idx]
+            if tri_idx < len(self._triangle_stalks)
+            else [0.0] * _TRIANGLE_STALK_DIM
+        )
 
         # Pad if needed
         while len(si) < _TRIANGLE_STALK_DIM:
@@ -576,7 +611,9 @@ class ScarSheaf:
 
     def coboundary_1(self) -> list[list[float]]:
         """Full delta^1: returns list of coboundary vectors, one per triangle."""
-        return [self._coboundary_1_at_triangle(i) for i in range(self.complex.n_triangles)]
+        return [
+            self._coboundary_1_at_triangle(i) for i in range(self.complex.n_triangles)
+        ]
 
     # ------------------------------------------------------------------
     # Sheaf Laplacian (Definition 4)
@@ -599,7 +636,11 @@ class ScarSheaf:
             PtP = _mat_mul(P_iT, P_i)
             PtP_x = _mat_vec(PtP, self._vertex_stalk)
             # P_i^T * edge_stalk_i (the restriction rho_0^i(s_i) = edge stalk)
-            edge_stalk = self._edge_stalks[i] if i < len(self._edge_stalks) else [0.0] * _EDGE_STALK_DIM
+            edge_stalk = (
+                self._edge_stalks[i]
+                if i < len(self._edge_stalks)
+                else [0.0] * _EDGE_STALK_DIM
+            )
             Pt_s = _mat_vec(P_iT, edge_stalk)
             # Accumulate
             for d in range(n0):
@@ -793,7 +834,11 @@ class ScarSheaf:
             return {"propagated": False, "reason": "invalid_source"}
 
         # Energy check (Axiom S5)
-        cost = self._energy_costs[source_idx] if source_idx < len(self._energy_costs) else 0.1
+        cost = (
+            self._energy_costs[source_idx]
+            if source_idx < len(self._energy_costs)
+            else 0.1
+        )
         if self._energy < cost * dt:
             return {"propagated": False, "reason": "energy_depleted"}
 
@@ -815,7 +860,11 @@ class ScarSheaf:
         if source_idx < len(self._presentation_matrices):
             P_s = self._presentation_matrices[source_idx]
             # P_s is (n0 x ne), we want P_s @ scar_event → n0-dim
-            f_local = _mat_vec(P_s, scar_event[:_EDGE_STALK_DIM] + [0.0] * max(0, _EDGE_STALK_DIM - len(scar_event)))
+            f_local = _mat_vec(
+                P_s,
+                scar_event[:_EDGE_STALK_DIM]
+                + [0.0] * max(0, _EDGE_STALK_DIM - len(scar_event)),
+            )
         else:
             f_local = [0.0] * len(self._vertex_stalk)
 
@@ -852,7 +901,9 @@ class ScarSheaf:
                 contribution = edge_delta[d] * decay if d < len(edge_delta) else 0.0
                 if abs(contribution) > 1e-8:
                     self._edge_stalks[i][d] += contribution
-                    self._edge_stalks[i][d] = max(-2.0, min(2.0, self._edge_stalks[i][d]))
+                    self._edge_stalks[i][d] = max(
+                        -2.0, min(2.0, self._edge_stalks[i][d])
+                    )
                     propagated = True
             if propagated:
                 propagated_to.append(i)
@@ -1081,8 +1132,7 @@ class ScarSheaf:
         sheaf._edge_stalks = [list(s) for s in data.get("edge_stalks", [])]
         sheaf._triangle_stalks = [list(s) for s in data.get("triangle_stalks", [])]
         sheaf._presentation_matrices = [
-            [list(row) for row in P]
-            for P in data.get("presentation_matrices", [])
+            [list(row) for row in P] for P in data.get("presentation_matrices", [])
         ]
         sheaf._rel_types = list(data.get("rel_types", []))
         sheaf._maturities = list(data.get("maturities", []))
@@ -1092,7 +1142,9 @@ class ScarSheaf:
         sheaf._max_energy = float(data.get("max_energy", 1.0))
         sheaf._energy_costs = list(data.get("energy_costs", []))
         sheaf._propagation_rate = float(data.get("propagation_rate", 0.15))
-        sheaf._propagation_state = list(data.get("propagation_state", [0.0] * _VERTEX_STALK_DIM))
+        sheaf._propagation_state = list(
+            data.get("propagation_state", [0.0] * _VERTEX_STALK_DIM)
+        )
         sheaf._tick = int(data.get("tick", 0))
         sheaf._last_timestamp = float(data.get("last_timestamp", 0.0))
         sheaf._cached_h1 = 0

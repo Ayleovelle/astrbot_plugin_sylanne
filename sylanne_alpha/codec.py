@@ -2,8 +2,8 @@ from __future__ import annotations
 
 from collections.abc import Mapping
 
-from .vector import EVENT_AXES, STATE_AXES, clamp as _clamp
-
+from .vector import EVENT_AXES, STATE_AXES
+from .vector import clamp as _clamp
 
 CODEC_SCHEMA_VERSION = 1
 EVENT_FLAG_BITS = {
@@ -39,15 +39,17 @@ def encode_event_packet(event: Mapping[str, float]) -> bytes:
             flags |= 1 << bit
     elapsed = max(0, min(65535, int(round(float(event.get("elapsed", 0.0))))))
     repetition = max(0, min(255, int(round(float(event.get("repetition", 0.0))))))
-    return bytes((
-        CODEC_SCHEMA_VERSION,
-        flags & 0xff,
-        (flags >> 8) & 0xff,
-        _u8(float(event.get("confidence", 0.0))),
-        elapsed & 0xff,
-        (elapsed >> 8) & 0xff,
-        repetition,
-    ))
+    return bytes(
+        (
+            CODEC_SCHEMA_VERSION,
+            flags & 0xFF,
+            (flags >> 8) & 0xFF,
+            _u8(float(event.get("confidence", 0.0))),
+            elapsed & 0xFF,
+            (elapsed >> 8) & 0xFF,
+            repetition,
+        )
+    )
 
 
 def decode_event_packet(packet: bytes) -> dict[str, float]:
@@ -64,7 +66,12 @@ def decode_event_packet(packet: bytes) -> dict[str, float]:
 
 
 def encode_state_packet(state: Mapping[str, float]) -> bytes:
-    return bytes([CODEC_SCHEMA_VERSION, *(_u8(float(state.get(axis, 0.0))) for axis in STATE_AXES)])
+    return bytes(
+        [
+            CODEC_SCHEMA_VERSION,
+            *(_u8(float(state.get(axis, 0.0))) for axis in STATE_AXES),
+        ]
+    )
 
 
 def decode_state_packet(packet: bytes) -> dict[str, float]:
@@ -81,7 +88,7 @@ def encode_delta_packet(delta: Mapping[str, float]) -> bytes:
         quantized = int(round(value / DELTA_LIMIT * 127))
         if quantized == 0:
             continue
-        pairs.extend((axis_index, quantized & 0xff))
+        pairs.extend((axis_index, quantized & 0xFF))
     if len(pairs) // 2 > 255:
         raise ValueError("Delta packet contains too many axes.")
     return bytes([CODEC_SCHEMA_VERSION, len(pairs) // 2, *pairs])

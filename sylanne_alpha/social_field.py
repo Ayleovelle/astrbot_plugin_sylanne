@@ -6,6 +6,7 @@ for the computation spine's L7 phase transition layer.
 The decision to speak is NOT made here — it's made by L7's should_express()
 with social field signals modulating the threshold and drive.
 """
+
 from __future__ import annotations
 
 import math
@@ -18,6 +19,7 @@ from typing import Any
 @dataclass
 class SocialSignals:
     """Packaged social field signals for L7 modulation."""
+
     is_group: bool = False
     is_at_bot: bool = False
     name_mentioned: bool = False
@@ -30,9 +32,14 @@ class SocialSignals:
 
 class _GroupState:
     """Per-group tracking state."""
+
     __slots__ = (
-        "last_bot_reply_ts", "recent_bot_topics", "silence_ticks",
-        "message_timestamps", "ema_rate", "social_void_pressure",
+        "last_bot_reply_ts",
+        "recent_bot_topics",
+        "silence_ticks",
+        "message_timestamps",
+        "ema_rate",
+        "social_void_pressure",
         "shadow_buffer",
     )
 
@@ -126,11 +133,13 @@ class SocialFieldCollector:
         gs.social_void_pressure = min(5.0, gs.social_void_pressure)
 
         # Record to shadow buffer for context lookback
-        gs.shadow_buffer.append({
-            "sender_id": sender_id,
-            "text": text[:300],
-            "ts": now,
-        })
+        gs.shadow_buffer.append(
+            {
+                "sender_id": sender_id,
+                "text": text[:300],
+                "ts": now,
+            }
+        )
 
         return SocialSignals(
             is_group=True,
@@ -153,6 +162,7 @@ class SocialFieldCollector:
 
         # Track bot topics for relevance computation
         from .memory_system import _tokenize
+
         tokens = _tokenize(reply_text)
         if tokens:
             gs.recent_bot_topics.append(tokens)
@@ -226,6 +236,7 @@ class SocialFieldCollector:
         if not gs.recent_bot_topics:
             return 0.0
         from .memory_system import _tokenize
+
         incoming = _tokenize(text)
         if not incoming:
             return 0.0
@@ -246,9 +257,14 @@ class SocialFieldCollector:
             return session_key.rsplit(":", 1)[0]
         return session_key
 
-    def set_personality_params(self, pressure_rate: float, pressure_cap: float,
-                               post_reply_decay: float, inactive_decay: float,
-                               ema_alpha: float):
+    def set_personality_params(
+        self,
+        pressure_rate: float,
+        pressure_cap: float,
+        post_reply_decay: float,
+        inactive_decay: float,
+        ema_alpha: float,
+    ):
         """Set personality-derived social field dynamics.
 
         Args:

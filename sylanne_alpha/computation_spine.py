@@ -4,23 +4,28 @@ Integrates all computation modules into a single 7-layer pipeline:
   Perception(HDC) → Gate(PredictiveCoding) → VoidScarEngine →
   RelationalSheaf → HGT → Boundary(Autopoiesis) → Express(PhaseTransition)
 """
+
 from __future__ import annotations
 
 import time
 from collections import deque
 from typing import TYPE_CHECKING, Any
 
+from .autopoiesis import AutopoieticBoundary
 from .hdc import HDCEncoder
 from .hgt import HeterogeneousGraphTransformer
 from .personality import (
-    EMBODIMENT_TRAITS, DriftSignalExtractor, OscillationDetector,
-    TraitMemory, compute_embodiment_drift, normalize_personality,
+    EMBODIMENT_TRAITS,
+    DriftSignalExtractor,
+    OscillationDetector,
+    TraitMemory,
+    compute_embodiment_drift,
+    normalize_personality,
 )
-from .predictive_coding import PredictiveCodingGate
-from .void_scar_engine import VoidScarEngine
-from .relational_sheaf import ScarSheaf
-from .autopoiesis import AutopoieticBoundary
 from .phase_transition import PhaseTransitionExpression
+from .predictive_coding import PredictiveCodingGate
+from .relational_sheaf import ScarSheaf
+from .void_scar_engine import VoidScarEngine
 
 if TYPE_CHECKING:
     from .social_field import SocialSignals
@@ -32,13 +37,31 @@ class ComputationSpine:
     """Unified computation pipeline for Sylanne-Embodiment."""
 
     __slots__ = (
-        "encoder", "gate", "engine", "sheaf", "boundary", "expression", "hgt",
-        "_tick_count", "_last_route", "_last_expression_time", "_timings",
-        "_last_process_time", "_personality", "_last_assessment", "_last_hdc_vec",
-        "_social_field_params", "_route_counts", "_feedback_counts",
-        "_signal_extractor", "_embodiment_traits", "_oscillation_detector",
-        "_drift_tick", "_last_embodiment_apply",
-        "_last_drift_time", "_drift_min_interval",
+        "encoder",
+        "gate",
+        "engine",
+        "sheaf",
+        "boundary",
+        "expression",
+        "hgt",
+        "_tick_count",
+        "_last_route",
+        "_last_expression_time",
+        "_timings",
+        "_last_process_time",
+        "_personality",
+        "_last_assessment",
+        "_last_hdc_vec",
+        "_social_field_params",
+        "_route_counts",
+        "_feedback_counts",
+        "_signal_extractor",
+        "_embodiment_traits",
+        "_oscillation_detector",
+        "_drift_tick",
+        "_last_embodiment_apply",
+        "_last_drift_time",
+        "_drift_min_interval",
     )
 
     def __init__(self):
@@ -54,14 +77,26 @@ class ComputationSpine:
         self._last_expression_time = 0.0
         self._last_process_time = 0.0
         self._personality: dict[str, float] = {
-            "extraversion": 0.5, "neuroticism": 0.5,
-            "conscientiousness": 0.5, "openness": 0.5, "agreeableness": 0.5,
+            "extraversion": 0.5,
+            "neuroticism": 0.5,
+            "conscientiousness": 0.5,
+            "openness": 0.5,
+            "agreeableness": 0.5,
         }
         self._last_assessment: dict[str, Any] | None = None
         self._last_hdc_vec: bytearray | None = None
         self._social_field_params: dict[str, float] = {}
-        self._route_counts: dict[str, int] = {"fast": 0, "normal": 0, "full": 0, "skip": 0}
-        self._feedback_counts: dict[str, int] = {"accepted": 0, "ignored": 0, "rejected": 0}
+        self._route_counts: dict[str, int] = {
+            "fast": 0,
+            "normal": 0,
+            "full": 0,
+            "skip": 0,
+        }
+        self._feedback_counts: dict[str, int] = {
+            "accepted": 0,
+            "ignored": 0,
+            "rejected": 0,
+        }
         self._timings: dict[str, deque] = {
             "perception": deque(maxlen=_TIMING_WINDOW),
             "gate": deque(maxlen=_TIMING_WINDOW),
@@ -131,7 +166,9 @@ class ComputationSpine:
         t_raw = int(10 + neuroticism * 20)
         t_closing = int(40 + neuroticism * 60)
         t_scarred = int(150 + neuroticism * 100)
-        self.engine.scar_state.set_healing_rates(t_raw, t_closing, t_scarred, neuroticism)
+        self.engine.scar_state.set_healing_rates(
+            t_raw, t_closing, t_scarred, neuroticism
+        )
 
         # HGT: derive all transformer parameters from personality
         self.hgt.derive_params(personality)
@@ -228,9 +265,9 @@ class ComputationSpine:
             assessment: Dict with keys like valence, arousal, intent, wound_risk.
         """
         self._last_assessment = assessment
-        wound_risk = float(assessment.get("wound_risk", 0.0))
-        valence = float(assessment.get("valence", 0.0))
-        arousal = float(assessment.get("arousal", 0.0))
+        wound_risk = float(assessment.get("wound_risk") or 0.0)
+        valence = float(assessment.get("valence") or 0.0)
+        arousal = float(assessment.get("arousal") or 0.0)
         intent = str(assessment.get("intent", ""))
 
         # High wound risk → inject a wound event into scar state
@@ -257,11 +294,15 @@ class ComputationSpine:
             if len(self.engine.scar_state.base) > 3:
                 self.engine.scar_state.base[3] *= 0.85  # tension dim
             if len(self.engine.scar_state.base) > 0:
-                self.engine.scar_state.base[0] = min(1.0, self.engine.scar_state.base[0] + 0.1)  # warmth dim
+                self.engine.scar_state.base[0] = min(
+                    1.0, self.engine.scar_state.base[0] + 0.1
+                )  # warmth dim
         elif intent == "生气":
             # Anger → raise tension in base state
             if len(self.engine.scar_state.base) > 3:
-                self.engine.scar_state.base[3] = min(1.0, self.engine.scar_state.base[3] + 0.2)
+                self.engine.scar_state.base[3] = min(
+                    1.0, self.engine.scar_state.base[3] + 0.2
+                )
 
         # Arousal modulates expression drive accumulation rate
         if arousal > 0.7:
@@ -274,7 +315,12 @@ class ComputationSpine:
             self.engine.social_void.group_activity = signals.group_noise_level
             self.engine.social_void.topic_boundary = 1.0 - signals.topic_relevance
 
-    def process(self, text: str, timestamp: float = 0.0, assessment: dict[str, Any] | None = None) -> dict[str, Any]:
+    def process(
+        self,
+        text: str,
+        timestamp: float = 0.0,
+        assessment: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
         """Main entry point: process one message through the full stack.
 
         Args:
@@ -288,7 +334,9 @@ class ComputationSpine:
         if not text or not text.strip():
             self.boundary.self_repair()
             self.expression.silence_lowers_threshold(dt=1.0)
-            result = self._build_result("", timestamp, 0.0, "skip", self.engine.observe(), [], [], False)
+            result = self._build_result(
+                "", timestamp, 0.0, "skip", self.engine.observe(), [], [], False
+            )
             result["hgt_decision"] = [0.0, 0.0, 0.0, 0.0]
             result["assessment_source"] = "none"
             return result
@@ -323,8 +371,10 @@ class ComputationSpine:
         t0 = time.perf_counter_ns()
         ssm_input = self._hdc_to_ssm_input(h, surprise)
         self.engine.process(
-            event_vec=bytes(h), ssm_input=ssm_input,
-            surprise=surprise, timestamp=timestamp,
+            event_vec=bytes(h),
+            ssm_input=ssm_input,
+            surprise=surprise,
+            timestamp=timestamp,
         )
         emotion = self.engine.observe()
         # Void boundaries serve as "recalled" context (related memory)
@@ -381,16 +431,24 @@ class ComputationSpine:
             self.boundary.perturb([f * 0.1 for f in fast_force])
             self.boundary.self_repair()
             # HGT d_3 inhibition can veto expression
-            should_express_fast = self.expression.should_express() and hgt_decision[3] < 0.5
+            should_express_fast = (
+                self.expression.should_express() and hgt_decision[3] < 0.5
+            )
             if should_express_fast:
                 self._last_expression_time = timestamp
-            result = self._build_result(text, timestamp, surprise, route, emotion, [], [], should_express_fast)
+            result = self._build_result(
+                text, timestamp, surprise, route, emotion, [], [], should_express_fast
+            )
             result["hgt_decision"] = hgt_decision
             result["assessment_source"] = assessment_source
             result["sheaf"] = sheaf_result
             result["layers"] = {
                 "L1_HDC": l1_payload,
-                "L2_Gate": {"surprise": surprise, "route": route, "mean_surprise": self.gate.mean_surprise()},
+                "L2_Gate": {
+                    "surprise": surprise,
+                    "route": route,
+                    "mean_surprise": self.gate.mean_surprise(),
+                },
                 "L3_VoidScar": l3_payload,
                 "L4_Sheaf": l4_payload,
                 "L5_HGT": self._l5_payload(hgt_decision),
@@ -433,13 +491,19 @@ class ComputationSpine:
             self._last_expression_time = timestamp
         self._timings["expression"].append(time.perf_counter_ns() - t0)
 
-        result = self._build_result(text, timestamp, surprise, route, emotion, recalled, holes, should_express)
+        result = self._build_result(
+            text, timestamp, surprise, route, emotion, recalled, holes, should_express
+        )
         result["hgt_decision"] = hgt_decision
         result["assessment_source"] = assessment_source
         result["sheaf"] = sheaf_result
         result["layers"] = {
             "L1_HDC": l1_payload,
-            "L2_Gate": {"surprise": surprise, "route": route, "mean_surprise": self.gate.mean_surprise()},
+            "L2_Gate": {
+                "surprise": surprise,
+                "route": route,
+                "mean_surprise": self.gate.mean_surprise(),
+            },
             "L3_VoidScar": l3_payload,
             "L4_Sheaf": l4_payload,
             "L5_HGT": self._l5_payload(hgt_decision),
@@ -467,7 +531,9 @@ class ComputationSpine:
             self._drift_tick += 1
             return
         compute_embodiment_drift(
-            self._embodiment_traits, signals, self._drift_tick,
+            self._embodiment_traits,
+            signals,
+            self._drift_tick,
             oscillation_detector=self._oscillation_detector,
         )
         self._drift_tick += 1
@@ -479,9 +545,12 @@ class ComputationSpine:
                 needs_reapply = True
                 break
         if needs_reapply:
-            self._last_embodiment_apply = {n: t.value for n, t in self._embodiment_traits.items()}
+            self._last_embodiment_apply = {
+                n: t.value for n, t in self._embodiment_traits.items()
+            }
             # Rebuild personality dict with new embodiment values mapped to legacy names
             from .personality import _REVERSE_LEGACY_MAP
+
             updated = dict(self._personality)
             for emb_name, tm in self._embodiment_traits.items():
                 legacy_name = _REVERSE_LEGACY_MAP.get(emb_name)
@@ -503,7 +572,9 @@ class ComputationSpine:
             },
             "decision": list(hgt_decision),
             "adaptation": {
-                "router_bias": list(self.hgt._router_adapt.bias) if hasattr(self.hgt, "_router_adapt") else [],
+                "router_bias": list(self.hgt._router_adapt.bias)
+                if hasattr(self.hgt, "_router_adapt")
+                else [],
                 "attention_drift": [],
                 "plasticity": getattr(self.hgt, "_plasticity", 0.5),
             },
@@ -535,7 +606,9 @@ class ComputationSpine:
         if signal_key in ("feedback_accepted", "feedback_ignored", "feedback_rejected"):
             signals = {signal_key: 1.0}
             compute_embodiment_drift(
-                self._embodiment_traits, signals, self._drift_tick,
+                self._embodiment_traits,
+                signals,
+                self._drift_tick,
                 oscillation_detector=self._oscillation_detector,
             )
 
@@ -604,6 +677,7 @@ class ComputationSpine:
             # Rebuild engine from persisted scar/void state
             engine_data = data["engine"]
             from .scar_algebra import ScarredState
+
             if "scar" in engine_data:
                 self.engine.scar_state = ScarredState.from_dict(engine_data["scar"])
             if "void" in engine_data:
@@ -643,6 +717,9 @@ class ComputationSpine:
             self._drift_tick = int(data["drift_tick"])
         self._last_drift_time = float(data.get("last_drift_time", 0.0))
         self._drift_min_interval = float(data.get("drift_min_interval", 30.0))
+        # Note: personality-derived parameters (thresholds, rates, etc.) are NOT
+        # re-applied here. They will be re-derived on the next kernel.tick() call
+        # when apply_personality() runs. This avoids overwriting restored state.
 
     @property
     def last_hdc_sample(self) -> list[int]:
@@ -666,14 +743,16 @@ class ComputationSpine:
         chunk_size = max(1, byte_dim // 8)
         result = []
         for i in range(8):
-            chunk = h[i * chunk_size:(i + 1) * chunk_size]
-            ones = sum(bin(b).count('1') for b in chunk)
+            chunk = h[i * chunk_size : (i + 1) * chunk_size]
+            ones = sum(bin(b).count("1") for b in chunk)
             total_bits = len(chunk) * 8
             density = ones / max(1, total_bits)
             result.append((density - 0.5) * 2.0 * surprise)
         return result
 
-    def _l1_hdc_payload(self, text: str, h: bytearray, surprise: float) -> dict[str, Any]:
+    def _l1_hdc_payload(
+        self, text: str, h: bytearray, surprise: float
+    ) -> dict[str, Any]:
         """Serializable Layer 1 diagnostics backed by the actual HDC vector."""
         ones = sum(bin(byte).count("1") for byte in h)
         total_bits = max(1, len(h) * 8)
@@ -682,10 +761,7 @@ class ComputationSpine:
         prediction_similarity = max(0.0, min(1.0, 1.0 - float(surprise)))
         if isinstance(prediction, (bytearray, bytes)):
             compared_bits = max(1, min(len(prediction), len(h)) * 8)
-            xor_count = sum(
-                bin(a ^ b).count("1")
-                for a, b in zip(prediction, h)
-            )
+            xor_count = sum(bin(a ^ b).count("1") for a, b in zip(prediction, h))
             flip_ratio = xor_count / compared_bits
             prediction_similarity = 1.0 - flip_ratio
         sample_bits: list[int] = []
@@ -699,7 +775,9 @@ class ComputationSpine:
             "byte_len": len(h),
             "density": round(ones / total_bits, 4),
             "flip_ratio": round(max(0.0, min(1.0, flip_ratio)), 4),
-            "prediction_similarity": round(max(0.0, min(1.0, prediction_similarity)), 4),
+            "prediction_similarity": round(
+                max(0.0, min(1.0, prediction_similarity)), 4
+            ),
             "sample_bits": sample_bits[:1024],
             "sample_rows": 16,
             "sample_cols": 64,
@@ -721,11 +799,20 @@ class ComputationSpine:
         for idx, void in enumerate(void_objects[:8]):
             item = void.to_dict() if hasattr(void, "to_dict") else {}
             item["concept"] = f"void_{idx}"
-            item["boundary_count"] = int(item.get("boundary_count", len(getattr(void, "boundary", []) or [])) or 0)
-            item["depth"] = round(float(item.get("depth", getattr(void, "depth", 0.0)) or 0.0), 4)
-            item["pressure"] = round(float(item.get("pressure", getattr(void, "pressure", 0.0)) or 0.0), 4)
+            item["boundary_count"] = int(
+                item.get("boundary_count", len(getattr(void, "boundary", []) or []))
+                or 0
+            )
+            item["depth"] = round(
+                float(item.get("depth", getattr(void, "depth", 0.0)) or 0.0), 4
+            )
+            item["pressure"] = round(
+                float(item.get("pressure", getattr(void, "pressure", 0.0)) or 0.0), 4
+            )
             item["age"] = int(item.get("age", getattr(void, "age", 0)) or 0)
-            item["beta"] = round(float(item.get("beta", getattr(void, "beta", 0.0)) or 0.0), 4)
+            item["beta"] = round(
+                float(item.get("beta", getattr(void, "beta", 0.0)) or 0.0), 4
+            )
             voids.append(item)
         return {
             "source": "void_scar_engine",
@@ -753,7 +840,9 @@ class ComputationSpine:
             "affected_dims": list(prop.get("affected_dims", []) or [])[:16],
             "propagated_to": list(prop.get("propagated_to", []) or [])[:16],
             "energy": round(float(sheaf_result.get("energy", 0.0) or 0.0), 4),
-            "dissociation_pressure": round(float(sheaf_result.get("dissociation_pressure", 0.0) or 0.0), 4),
+            "dissociation_pressure": round(
+                float(sheaf_result.get("dissociation_pressure", 0.0) or 0.0), 4
+            ),
             "decay_factor": round(float(prop.get("decay_factor", 0.0) or 0.0), 4),
         }
 
@@ -776,8 +865,14 @@ class ComputationSpine:
         return force
 
     def _build_result(
-        self, text: str, timestamp: float, surprise: float, route: str,
-        emotion: dict[str, float], recalled: list[dict], holes: list[dict],
+        self,
+        text: str,
+        timestamp: float,
+        surprise: float,
+        route: str,
+        emotion: dict[str, float],
+        recalled: list[dict],
+        holes: list[dict],
         should_express: bool,
     ) -> dict[str, Any]:
         return {

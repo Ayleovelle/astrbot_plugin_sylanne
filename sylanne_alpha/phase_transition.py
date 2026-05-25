@@ -4,6 +4,7 @@ Expression is not a "decision to speak" but a phase transition --
 internal pressure accumulates until a critical point, then erupts.
 Like water boiling at 100°C: not gradual, but sudden.
 """
+
 from __future__ import annotations
 
 from typing import TYPE_CHECKING, Any
@@ -14,10 +15,17 @@ if TYPE_CHECKING:
 
 class PhaseTransitionExpression:
     __slots__ = (
-        "pressure", "threshold", "decay_rate",
-        "silence_duration", "_last_expression_time", "_expression_count",
-        "_social_context", "_social_signals",
-        "_silence_urgency_divisor", "_refractory", "_silence_drop_rate",
+        "pressure",
+        "threshold",
+        "decay_rate",
+        "silence_duration",
+        "_last_expression_time",
+        "_expression_count",
+        "_social_context",
+        "_social_signals",
+        "_silence_urgency_divisor",
+        "_refractory",
+        "_silence_drop_rate",
         "_min_threshold_floor",
     )
 
@@ -50,9 +58,14 @@ class PhaseTransitionExpression:
         """Apply social signals before accumulate() is called."""
         self._social_signals = signals
 
-    def set_personality_params(self, decay_rate: float, silence_urgency_divisor: float,
-                               refractory: float, silence_drop_rate: float,
-                               min_threshold_floor: float):
+    def set_personality_params(
+        self,
+        decay_rate: float,
+        silence_urgency_divisor: float,
+        refractory: float,
+        silence_drop_rate: float,
+        min_threshold_floor: float,
+    ):
         self.decay_rate = decay_rate
         self._silence_urgency_divisor = silence_urgency_divisor
         self._refractory = refractory
@@ -115,7 +128,9 @@ class PhaseTransitionExpression:
     def express(self, now: float = 0.0) -> dict[str, Any]:
         """Trigger expression -- release pressure, return intensity and mode."""
         intensity = self.expression_intensity()
-        urgency = min(1.0, self.silence_duration / self._silence_urgency_divisor)  # Longer silence → more urgent
+        urgency = min(
+            1.0, self.silence_duration / self._silence_urgency_divisor
+        )  # Longer silence → more urgent
 
         # Determine expression mode from intensity
         if intensity < 0.5:
@@ -146,7 +161,9 @@ class PhaseTransitionExpression:
 
     def silence_lowers_threshold(self, dt: float = 1.0):
         """Prolonged silence makes it easier to speak (threshold drops)."""
-        self.threshold = max(self._min_threshold_floor, self.threshold - self._silence_drop_rate * dt)
+        self.threshold = max(
+            self._min_threshold_floor, self.threshold - self._silence_drop_rate * dt
+        )
 
     def _current_mode(self) -> str:
         """Derive current expression mode from intensity."""

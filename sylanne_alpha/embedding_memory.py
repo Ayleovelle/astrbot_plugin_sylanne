@@ -21,7 +21,9 @@ def recall_with_embedding_assist(
         return _payload("keyword", keyword_matches[:limit])
     if not enabled or embed_query is None:
         return _payload("keyword", [])
-    vector_records = [record for record in records if isinstance(record.get("embedding"), list)]
+    vector_records = [
+        record for record in records if isinstance(record.get("embedding"), list)
+    ]
     if not vector_records:
         return _payload("keyword", [])
     try:
@@ -30,7 +32,13 @@ def recall_with_embedding_assist(
         return _payload("keyword", [])
     ranked = sorted(
         (
-            (_cosine(query_vector, [float(value) for value in record.get("embedding", [])]), record)
+            (
+                _cosine(
+                    query_vector,
+                    [float(value) for value in record.get("embedding", [])],
+                ),
+                record,
+            )
             for record in vector_records
         ),
         key=lambda pair: pair[0],

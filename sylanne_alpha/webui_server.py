@@ -3,6 +3,7 @@
 Runs an independent HTTP server on a configurable port (default 2718).
 Not behind AstrBot's auth - direct access to the dashboard.
 """
+
 from __future__ import annotations
 
 import asyncio
@@ -10,7 +11,7 @@ import json
 import logging
 import threading
 import time
-from typing import Any, TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 from urllib.parse import parse_qs, urlparse
 
 if TYPE_CHECKING:
@@ -39,7 +40,9 @@ def _runtime_info(plugin: Any) -> dict[str, Any]:
         "plugin_name": "astrbot_plugin_sylanne",
         "runtime_id": str(getattr(plugin, "_webui_runtime_id", "") or ""),
         "instance_id": hex(id(plugin)) if plugin is not None else "",
-        "module": str(getattr(plugin.__class__, "__module__", "") if plugin is not None else ""),
+        "module": str(
+            getattr(plugin.__class__, "__module__", "") if plugin is not None else ""
+        ),
     }
 
 
@@ -49,7 +52,9 @@ async def start_webui_server(plugin: Any, host: str = "0.0.0.0", port: int = 271
     try:
         from aiohttp import web
     except ImportError:
-        logger.warning("Sylanne WebUI: aiohttp not installed, falling back to stdlib HTTP server")
+        logger.warning(
+            "Sylanne WebUI: aiohttp not installed, falling back to stdlib HTTP server"
+        )
         start_webui_thread_server(plugin, host=host, port=port)
         return
 
@@ -60,18 +65,25 @@ async def start_webui_server(plugin: Any, host: str = "0.0.0.0", port: int = 271
     dashboard_path = plugin_root / "pages" / "dashboard" / "index.html"
     if dashboard_path.exists():
         dashboard_html = dashboard_path.read_text(encoding="utf-8")
-        logger.info(f"Sylanne WebUI: loaded dashboard from {dashboard_path} ({len(dashboard_html)} bytes)")
+        logger.info(
+            f"Sylanne WebUI: loaded dashboard from {dashboard_path} ({len(dashboard_html)} bytes)"
+        )
     else:
         from .webui import WEBUI_HTML
+
         dashboard_html = WEBUI_HTML
 
     app = web.Application()
 
     async def handle_page(request: web.Request) -> web.Response:
-        return web.Response(text=dashboard_html, content_type="text/html", charset="utf-8")
+        return web.Response(
+            text=dashboard_html, content_type="text/html", charset="utf-8"
+        )
 
     async def handle_state(request: web.Request) -> web.Response:
-        data = _build_state(_plugin(plugin), session=str(request.query.get("session", "") or ""))
+        data = _build_state(
+            _plugin(plugin), session=str(request.query.get("session", "") or "")
+        )
         return web.json_response(data)
 
     async def handle_settings_get(request: web.Request) -> web.Response:
@@ -82,7 +94,13 @@ async def start_webui_server(plugin: Any, host: str = "0.0.0.0", port: int = 271
         values = {}
         for key, meta in schema.items():
             values[key] = config.get(key, meta.get("default"))
-        return web.json_response({"schema": schema, "values": values, "providers": await _provider_items(current_plugin)})
+        return web.json_response(
+            {
+                "schema": schema,
+                "values": values,
+                "providers": await _provider_items(current_plugin),
+            }
+        )
 
     async def handle_settings_post(request: web.Request) -> web.Response:
         try:
@@ -117,7 +135,9 @@ async def start_webui_server(plugin: Any, host: str = "0.0.0.0", port: int = 271
                 value = str(value)
             config[key] = value
             updated.append(key)
-        if hasattr(current_plugin, "config") and isinstance(current_plugin.config, dict):
+        if hasattr(current_plugin, "config") and isinstance(
+            current_plugin.config, dict
+        ):
             for key in updated:
                 current_plugin.config[key] = config[key]
             if hasattr(current_plugin.config, "save_config"):
@@ -132,11 +152,24 @@ async def start_webui_server(plugin: Any, host: str = "0.0.0.0", port: int = 271
         session = str(request.query.get("session", "") or "").strip()
         logs = getattr(_plugin(plugin), "_computation_logs", None)
         if logs is None:
-            return web.json_response({"logs": [], "total": 0, "total_for_session": 0, "session": session})
+            return web.json_response(
+                {"logs": [], "total": 0, "total_for_session": 0, "session": session}
+            )
         all_entries = list(logs)
-        session_entries = [entry for entry in all_entries if str(entry.get("session", "")) == session] if session else all_entries
+        session_entries = (
+            [entry for entry in all_entries if str(entry.get("session", "")) == session]
+            if session
+            else all_entries
+        )
         entries = session_entries[-limit:]
-        return web.json_response({"logs": entries, "total": len(logs), "total_for_session": len(session_entries), "session": session})
+        return web.json_response(
+            {
+                "logs": entries,
+                "total": len(logs),
+                "total_for_session": len(session_entries),
+                "session": session,
+            }
+        )
 
     async def handle_memory_pools(request: web.Request) -> web.Response:
         try:
@@ -149,7 +182,10 @@ async def start_webui_server(plugin: Any, host: str = "0.0.0.0", port: int = 271
 
     async def handle_logo(request: web.Request) -> web.Response:
         import os
-        logo_path = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "logo.png")
+
+        logo_path = os.path.join(
+            os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "logo.png"
+        )
         if not os.path.exists(logo_path):
             return web.Response(text="Not Found", status=404)
         with open(logo_path, "rb") as f:
@@ -261,7 +297,9 @@ async def stop_webui_server() -> None:
     _active_plugin = None
 
 
-def start_webui_thread_server(plugin: Any, host: str = "0.0.0.0", port: int = 2718) -> None:
+def start_webui_thread_server(
+    plugin: Any, host: str = "0.0.0.0", port: int = 2718
+) -> None:
     """Launch a no-dependency HTTP server for environments without aiohttp."""
     global _httpd, _httpd_thread
     _set_active_plugin(plugin)
@@ -277,6 +315,7 @@ def start_webui_thread_server(plugin: Any, host: str = "0.0.0.0", port: int = 27
         dashboard_html = dashboard_path.read_text(encoding="utf-8")
     else:
         from .webui import WEBUI_HTML
+
         dashboard_html = WEBUI_HTML
 
     class SylanneWebUIHandler(BaseHTTPRequestHandler):
@@ -294,7 +333,9 @@ def start_webui_thread_server(plugin: Any, host: str = "0.0.0.0", port: int = 27
             self.end_headers()
             self.wfile.write(data)
 
-        def _send_text(self, text: str, content_type: str = "text/html; charset=utf-8") -> None:
+        def _send_text(
+            self, text: str, content_type: str = "text/html; charset=utf-8"
+        ) -> None:
             data = text.encode("utf-8")
             self.send_response(200)
             self.send_header("Content-Type", content_type)
@@ -316,7 +357,11 @@ def start_webui_thread_server(plugin: Any, host: str = "0.0.0.0", port: int = 27
 
         def _query(self) -> dict[str, str]:
             parsed = urlparse(self.path)
-            return {key: values[-1] for key, values in parse_qs(parsed.query).items() if values}
+            return {
+                key: values[-1]
+                for key, values in parse_qs(parsed.query).items()
+                if values
+            }
 
         def do_OPTIONS(self) -> None:
             self.send_response(204)
@@ -333,25 +378,49 @@ def start_webui_thread_server(plugin: Any, host: str = "0.0.0.0", port: int = 27
                 if path == "/":
                     self._send_text(dashboard_html)
                 elif path == "/api/state":
-                    self._send_json(_build_state(_plugin(plugin), session=query.get("session", "")))
+                    self._send_json(
+                        _build_state(_plugin(plugin), session=query.get("session", ""))
+                    )
                 elif path == "/api/settings":
                     current_plugin = _plugin(plugin)
                     schema = _load_schema(current_plugin)
                     config = dict(getattr(current_plugin, "_config", {}) or {})
-                    values = {key: config.get(key, meta.get("default")) for key, meta in schema.items()}
-                    self._send_json({"schema": schema, "values": values, "providers": []})
+                    values = {
+                        key: config.get(key, meta.get("default"))
+                        for key, meta in schema.items()
+                    }
+                    self._send_json(
+                        {"schema": schema, "values": values, "providers": []}
+                    )
                 elif path == "/api/computation_logs":
                     limit = max(1, min(200, int(query.get("limit", "50"))))
                     session = str(query.get("session", "") or "").strip()
                     logs = getattr(_plugin(plugin), "_computation_logs", None)
                     all_entries = list(logs) if logs is not None else []
-                    session_entries = [entry for entry in all_entries if str(entry.get("session", "")) == session] if session else all_entries
+                    session_entries = (
+                        [
+                            entry
+                            for entry in all_entries
+                            if str(entry.get("session", "")) == session
+                        ]
+                        if session
+                        else all_entries
+                    )
                     entries = session_entries[-limit:]
-                    self._send_json({"logs": entries, "total": len(all_entries), "total_for_session": len(session_entries), "session": session})
+                    self._send_json(
+                        {
+                            "logs": entries,
+                            "total": len(all_entries),
+                            "total_for_session": len(session_entries),
+                            "session": session,
+                        }
+                    )
                 elif path == "/api/memory_pools":
                     limit = max(1, min(100, int(query.get("limit", "50"))))
                     session = query.get("session", "")
-                    data = _build_memory_pools_sync(_plugin(plugin), session=session, limit=limit)
+                    data = _build_memory_pools_sync(
+                        _plugin(plugin), session=session, limit=limit
+                    )
                     self._send_json(data)
                 elif path in {"/assets/logo.png", "/logo.png"}:
                     self._send_logo()
@@ -411,7 +480,9 @@ def start_webui_thread_server(plugin: Any, host: str = "0.0.0.0", port: int = 27
                         self._send_json({"ok": False, "error": "token_mismatch"})
                         return
                     current_plugin = _plugin(plugin)
-                    mem_getter = getattr(current_plugin, "_memory_system_for_session", None)
+                    mem_getter = getattr(
+                        current_plugin, "_memory_system_for_session", None
+                    )
                     if callable(mem_getter):
                         mem_sys = mem_getter(session)
                         if mem_sys:
@@ -432,7 +503,9 @@ def start_webui_thread_server(plugin: Any, host: str = "0.0.0.0", port: int = 27
                 self.send_error(404)
 
     _httpd = ThreadingHTTPServer((host, port), SylanneWebUIHandler)
-    _httpd_thread = threading.Thread(target=_httpd.serve_forever, name="SylanneWebUI", daemon=True)
+    _httpd_thread = threading.Thread(
+        target=_httpd.serve_forever, name="SylanneWebUI", daemon=True
+    )
     _httpd_thread.start()
     logger.info(f"Sylanne WebUI stdlib server started at http://{host}:{port}")
 
@@ -457,11 +530,23 @@ async def _provider_items(plugin: Any) -> list[dict[str, Any]]:
         if not provider_id or provider_id in seen:
             return
         seen.add(provider_id)
-        items.append({
-            "id": provider_id,
-            "name": str(config.get("name") or config.get("display_name") or getattr(provider, "name", "") or provider_id),
-            "type": str(provider_type or config.get("provider_type") or getattr(provider, "provider_type", "") or ""),
-        })
+        items.append(
+            {
+                "id": provider_id,
+                "name": str(
+                    config.get("name")
+                    or config.get("display_name")
+                    or getattr(provider, "name", "")
+                    or provider_id
+                ),
+                "type": str(
+                    provider_type
+                    or config.get("provider_type")
+                    or getattr(provider, "provider_type", "")
+                    or ""
+                ),
+            }
+        )
 
     for method_name, provider_type in (
         ("get_all_providers", "llm"),
@@ -477,7 +562,9 @@ async def _provider_items(plugin: Any) -> list[dict[str, Any]]:
                 providers = await providers
         except Exception:
             continue
-        iterable = providers.values() if isinstance(providers, dict) else (providers or [])
+        iterable = (
+            providers.values() if isinstance(providers, dict) else (providers or [])
+        )
         for provider in iterable:
             add(provider, provider_type)
     return items
@@ -520,8 +607,11 @@ def _known_sessions(plugin: Any, *, requested: str = "") -> list[str]:
                 add(key)
     try:
         from pathlib import Path
+
         config = getattr(plugin, "_config", {}) or getattr(plugin, "config", {}) or {}
-        root = Path(str(config.get("sylanne_alpha_root") or Path.home() / ".sylanne_alpha"))
+        root = Path(
+            str(config.get("sylanne_alpha_root") or Path.home() / ".sylanne_alpha")
+        )
         if root.exists():
             for path in root.glob("*.alpha.json"):
                 add(path.name[: -len(".alpha.json")])
@@ -593,7 +683,24 @@ def _build_state(plugin: Any, *, session: str = "") -> dict[str, Any]:
     hosts = getattr(plugin, "_hosts", {}) or {}
     all_sessions = _known_sessions(plugin, requested=session)
     if not all_sessions:
-        return {"schema_version": "sylanne.webui.state.v1", "runtime": _runtime_info(plugin), "current_session": "default", "emotion": {}, "gate": {}, "route_stats": {"fast": 0, "normal": 0, "full": 0, "skip": 0}, "boundary": {}, "expression": {}, "timing": {}, "layers": {}, "spine": {"layers": {}}, "persona": {}, "theme": {"base": "#F3A7C8", "source": "emotion", "mode": "soft"}, "feedback": {"accepted": 0, "ignored": 0, "rejected": 0}, "sessions": [], "life_simulation": {}}
+        return {
+            "schema_version": "sylanne.webui.state.v1",
+            "runtime": _runtime_info(plugin),
+            "current_session": "default",
+            "emotion": {},
+            "gate": {},
+            "route_stats": {"fast": 0, "normal": 0, "full": 0, "skip": 0},
+            "boundary": {},
+            "expression": {},
+            "timing": {},
+            "layers": {},
+            "spine": {"layers": {}},
+            "persona": {},
+            "theme": {"base": "#F3A7C8", "source": "emotion", "mode": "soft"},
+            "feedback": {"accepted": 0, "ignored": 0, "rejected": 0},
+            "sessions": [],
+            "life_simulation": {},
+        }
 
     session_key = session if session in all_sessions else all_sessions[0]
     try:
@@ -609,7 +716,9 @@ def _build_state(plugin: Any, *, session: str = "") -> dict[str, Any]:
         gate = comp.gate.to_dict()
         # Route stats from computation spine counters
         comp_diag = comp.diagnostics() if hasattr(comp, "diagnostics") else {}
-        route_counts = comp_diag.get("route_counts", {}) if isinstance(comp_diag, dict) else {}
+        route_counts = (
+            comp_diag.get("route_counts", {}) if isinstance(comp_diag, dict) else {}
+        )
         route_stats = {
             "fast": int(route_counts.get("fast", 0)),
             "normal": int(route_counts.get("normal", 0)),
@@ -632,9 +741,15 @@ def _build_state(plugin: Any, *, session: str = "") -> dict[str, Any]:
         expression = comp.expression.state()
         # Ensure all 9 emotion dimensions are present for the frontend
         _EMOTION_DEFAULTS = {
-            "warmth": 0.0, "arousal": 0.0, "valence": 0.0, "tension": 0.0,
-            "curiosity": 0.0, "repair_pressure": 0.0, "expression_drive": 0.0,
-            "boundary_firmness": 0.0, "coherence": 1.0,
+            "warmth": 0.0,
+            "arousal": 0.0,
+            "valence": 0.0,
+            "tension": 0.0,
+            "curiosity": 0.0,
+            "repair_pressure": 0.0,
+            "expression_drive": 0.0,
+            "boundary_firmness": 0.0,
+            "coherence": 1.0,
         }
         # Timing: convert ns to ms
         timing_raw = comp.timing_stats()
@@ -653,7 +768,10 @@ def _build_state(plugin: Any, *, session: str = "") -> dict[str, Any]:
         layers.setdefault("L1_HDC", {})
         layers["L1_HDC"].setdefault("sample_bits", sample_bits)
         layers["L1_HDC"].setdefault("vector_dim", 2048)
-        layers["L1_HDC"].setdefault("density", sum(sample_bits) / max(len(sample_bits), 1) if sample_bits else 0.0)
+        layers["L1_HDC"].setdefault(
+            "density",
+            sum(sample_bits) / max(len(sample_bits), 1) if sample_bits else 0.0,
+        )
         # L5 MoE-HGT rich diagnostics
         hgt = comp.hgt
         _hgt_attn = getattr(hgt, "_last_attention_weights", [])
@@ -665,20 +783,30 @@ def _build_state(plugin: Any, *, session: str = "") -> dict[str, Any]:
             "attention": [list(row) for row in _hgt_attn] if _hgt_attn else [],
             "experts": {
                 "active": list(_hgt_experts) if _hgt_experts else [],
-                "gates": [round(g, 4) for g in _hgt_gates] if _hgt_gates else [0]*5,
+                "gates": [round(g, 4) for g in _hgt_gates] if _hgt_gates else [0] * 5,
                 "names": ["defense", "curiosity", "social", "silence", "repair"],
             },
-            "adaptation": hgt.adaptation_state() if hasattr(hgt, "adaptation_state") else {},
+            "adaptation": hgt.adaptation_state()
+            if hasattr(hgt, "adaptation_state")
+            else {},
         }
         # Feedback stats (comp_diag already computed above for route_counts)
-        feedback_raw = comp_diag.get("feedback", {}) if isinstance(comp_diag, dict) else {}
+        feedback_raw = (
+            comp_diag.get("feedback", {}) if isinstance(comp_diag, dict) else {}
+        )
         feedback = {
             "accepted": int(feedback_raw.get("accepted", 0)),
             "ignored": int(feedback_raw.get("ignored", 0)),
             "rejected": int(feedback_raw.get("rejected", 0)),
         }
-        personality = host.kernel._personality() if hasattr(host.kernel, "_personality") else {}
-        persona_profile = plugin._persona_profile(None) if hasattr(plugin, "_persona_profile") else {"name": "", "version": ""}
+        personality = (
+            host.kernel._personality() if hasattr(host.kernel, "_personality") else {}
+        )
+        persona_profile = (
+            plugin._persona_profile(None)
+            if hasattr(plugin, "_persona_profile")
+            else {"name": "", "version": ""}
+        )
         # Social field state
         social_field_state = {}
         try:
@@ -698,7 +826,11 @@ def _build_state(plugin: Any, *, session: str = "") -> dict[str, Any]:
             "tick_count": comp._tick_count,
             "runtime": _runtime_info(plugin),
             "current_session": session_key,
-            "emotion": {**_EMOTION_DEFAULTS, **comp.engine.observe(), **_assessment_overlay(comp._last_assessment)},
+            "emotion": {
+                **_EMOTION_DEFAULTS,
+                **comp.engine.observe(),
+                **_assessment_overlay(comp._last_assessment),
+            },
             "gate": {**gate, "history": gate.get("surprise_history", [])[-60:]},
             "route_stats": route_stats,
             "boundary": boundary,
@@ -718,18 +850,43 @@ def _build_state(plugin: Any, *, session: str = "") -> dict[str, Any]:
             },
             "persona": {
                 "profile": persona_profile,
-                "traits": personality.get("traits", personality if isinstance(personality, dict) else {}),
-                "voice": personality.get("voice", {}) if isinstance(personality, dict) else {},
-                "drift": personality.get("drift", {}) if isinstance(personality, dict) else {},
+                "traits": personality.get(
+                    "traits", personality if isinstance(personality, dict) else {}
+                ),
+                "voice": personality.get("voice", {})
+                if isinstance(personality, dict)
+                else {},
+                "drift": personality.get("drift", {})
+                if isinstance(personality, dict)
+                else {},
             },
             "theme": {"base": "#F3A7C8", "source": "emotion", "mode": "soft"},
             "feedback": feedback,
             "sessions": all_sessions,
             "social_field": social_field_state,
-            "life_simulation": getattr(plugin, "_life_simulator", None) and plugin._life_simulator.to_dict() or {},
+            "life_simulation": getattr(plugin, "_life_simulator", None)
+            and plugin._life_simulator.to_dict()
+            or {},
         }
     except Exception:
-        return {"schema_version": "sylanne.webui.state.v1", "runtime": _runtime_info(plugin), "current_session": session_key, "emotion": {}, "gate": {}, "route_stats": {"fast": 0, "normal": 0, "full": 0, "skip": 0}, "boundary": {}, "expression": {}, "timing": {}, "layers": {}, "spine": {"layers": {}}, "persona": {}, "theme": {"base": "#F3A7C8", "source": "emotion", "mode": "soft"}, "feedback": {"accepted": 0, "ignored": 0, "rejected": 0}, "sessions": all_sessions, "life_simulation": {}}
+        return {
+            "schema_version": "sylanne.webui.state.v1",
+            "runtime": _runtime_info(plugin),
+            "current_session": session_key,
+            "emotion": {},
+            "gate": {},
+            "route_stats": {"fast": 0, "normal": 0, "full": 0, "skip": 0},
+            "boundary": {},
+            "expression": {},
+            "timing": {},
+            "layers": {},
+            "spine": {"layers": {}},
+            "persona": {},
+            "theme": {"base": "#F3A7C8", "source": "emotion", "mode": "soft"},
+            "feedback": {"accepted": 0, "ignored": 0, "rejected": 0},
+            "sessions": all_sessions,
+            "life_simulation": {},
+        }
 
 
 def _memory_state_has_content(state: Any) -> bool:
@@ -753,8 +910,14 @@ def _legacy_trace_payload(trace: Any, session_key: str) -> dict[str, Any]:
     data["source"] = data.get("source") or "body.memory.traces"
     data["weight"] = round(max(0.0, min(1.0, weight)), 4)
     data["temperature"] = round(max(0.0, min(1.0, temperature)), 4)
-    data["created_at"] = float(data.get("created_at", data.get("updated_at", 0.0)) or 0.0)
-    data["has_embedding"] = bool(data.get("embedding") or data.get("semantic_embedding") or data.get("embedding_provider_id"))
+    data["created_at"] = float(
+        data.get("created_at", data.get("updated_at", 0.0)) or 0.0
+    )
+    data["has_embedding"] = bool(
+        data.get("embedding")
+        or data.get("semantic_embedding")
+        or data.get("embedding_provider_id")
+    )
     data.pop("embedding", None)
     data.pop("semantic_embedding", None)
     return data
@@ -763,11 +926,19 @@ def _legacy_trace_payload(trace: Any, session_key: str) -> dict[str, Any]:
 def _body_traces_for_session(plugin: Any, session_key: str) -> list[dict[str, Any]]:
     try:
         host_getter = getattr(plugin, "_host", None)
-        host = host_getter(session_key) if callable(host_getter) else (getattr(plugin, "_hosts", {}) or {}).get(session_key)
-        raw_traces = host.kernel.body.memory.get("traces", []) if host is not None else []
+        host = (
+            host_getter(session_key)
+            if callable(host_getter)
+            else (getattr(plugin, "_hosts", {}) or {}).get(session_key)
+        )
+        raw_traces = (
+            host.kernel.body.memory.get("traces", []) if host is not None else []
+        )
     except Exception:
         raw_traces = []
-    return [_legacy_trace_payload(trace, session_key) for trace in list(raw_traces or [])]
+    return [
+        _legacy_trace_payload(trace, session_key) for trace in list(raw_traces or [])
+    ]
 
 
 def _memory_response_from_sources(
@@ -790,17 +961,32 @@ def _memory_response_from_sources(
 
     for source_session in source_sessions:
         state = states.get(source_session)
-        if state is not None and (hasattr(state, "_l1") or hasattr(state, "_l2") or hasattr(state, "_l3_nodes")):
-            source_l1 = [_memory_system_item_payload(item) for item in list(getattr(state, "_l1", []) or [])]
-            source_l2 = [_memory_system_item_payload(item) for item in list(getattr(state, "_l2", []) or [])]
+        if state is not None and (
+            hasattr(state, "_l1")
+            or hasattr(state, "_l2")
+            or hasattr(state, "_l3_nodes")
+        ):
+            source_l1 = [
+                _memory_system_item_payload(item)
+                for item in list(getattr(state, "_l1", []) or [])
+            ]
+            source_l2 = [
+                _memory_system_item_payload(item)
+                for item in list(getattr(state, "_l2", []) or [])
+            ]
             for item in source_l1 + source_l2:
                 item.setdefault("session", source_session)
             nodes_raw = getattr(state, "_l3_nodes", {}) or {}
             edges_raw = getattr(state, "_l3_edges", []) or []
-            source_nodes = [_memory_graph_node_payload(node) for node in list(nodes_raw.values())]
+            source_nodes = [
+                _memory_graph_node_payload(node) for node in list(nodes_raw.values())
+            ]
             for node in source_nodes:
                 node.setdefault("session", source_session)
-            source_edges = [edge.to_dict() if hasattr(edge, "to_dict") else dict(edge or {}) for edge in list(edges_raw)]
+            source_edges = [
+                edge.to_dict() if hasattr(edge, "to_dict") else dict(edge or {})
+                for edge in list(edges_raw)
+            ]
             for edge in source_edges:
                 edge.setdefault("session", source_session)
             l1_items.extend(source_l1)
@@ -812,7 +998,10 @@ def _memory_response_from_sources(
             raw_l3_node_count += len(nodes_raw)
             raw_l3_edge_count += len(edges_raw)
         elif state is not None:
-            records = [_memory_record_payload(record) for record in list(getattr(state, "records", []) or [])]
+            records = [
+                _memory_record_payload(record)
+                for record in list(getattr(state, "records", []) or [])
+            ]
             for record in records:
                 record.setdefault("session", source_session)
             legacy_records.extend(records)
@@ -820,13 +1009,27 @@ def _memory_response_from_sources(
         if not _memory_state_has_content(state):
             traces = legacy_traces.get(source_session, [])
             legacy_hot.extend(traces)
-            legacy_warm.extend(item for item in traces if float(item.get("weight", 0.0) or 0.0) >= 0.5)
+            legacy_warm.extend(
+                item for item in traces if float(item.get("weight", 0.0) or 0.0) >= 0.5
+            )
 
     if legacy_records and not (l1_items or l2_items or l3_nodes or legacy_hot):
-        hot = sorted(legacy_records, key=lambda item: float(item.get("created_at", 0.0) or 0.0), reverse=True)[:limit]
+        hot = sorted(
+            legacy_records,
+            key=lambda item: float(item.get("created_at", 0.0) or 0.0),
+            reverse=True,
+        )[:limit]
         warm = sorted(
-            (item for item in legacy_records if float(item.get("weight", 0.0) or 0.0) >= 0.5 or int(item.get("recall_count", 0) or 0) > 0),
-            key=lambda item: (float(item.get("weight", 0.0) or 0.0), float(item.get("updated_at", 0.0) or 0.0)),
+            (
+                item
+                for item in legacy_records
+                if float(item.get("weight", 0.0) or 0.0) >= 0.5
+                or int(item.get("recall_count", 0) or 0) > 0
+            ),
+            key=lambda item: (
+                float(item.get("weight", 0.0) or 0.0),
+                float(item.get("updated_at", 0.0) or 0.0),
+            ),
             reverse=True,
         )[:limit]
         payloads = hot + warm
@@ -838,8 +1041,19 @@ def _memory_response_from_sources(
             "l3_node_count": 0,
             "l3_edge_count": 0,
             "embedded": sum(1 for item in payloads if item.get("has_embedding")),
-            "avg_weight": round(sum(float(item.get("weight", 0.0) or 0.0) for item in payloads) / total, 4) if total else 0.0,
-            "avg_temperature": round(sum(float(item.get("temperature", 0.0) or 0.0) for item in payloads) / total, 4) if total else 0.5,
+            "avg_weight": round(
+                sum(float(item.get("weight", 0.0) or 0.0) for item in payloads) / total,
+                4,
+            )
+            if total
+            else 0.0,
+            "avg_temperature": round(
+                sum(float(item.get("temperature", 0.0) or 0.0) for item in payloads)
+                / total,
+                4,
+            )
+            if total
+            else 0.5,
         }
         return {
             "schema_version": "sylanne.webui.memory.v1",
@@ -848,9 +1062,20 @@ def _memory_response_from_sources(
             "mode": "overview" if overview else "session",
             "sessions": source_sessions,
             "layers": {
-                "l1_hot": {"label": "L1 Hot Pool", "count": len(hot), "capacity": 50, "items": hot},
+                "l1_hot": {
+                    "label": "L1 Hot Pool",
+                    "count": len(hot),
+                    "capacity": 50,
+                    "items": hot,
+                },
                 "l2_warm": {"label": "L2 Warm Pool", "count": len(warm), "items": warm},
-                "l3_cold": {"label": "L3 Cold Graph", "count": 0, "edge_count": 0, "nodes": [], "edges": []},
+                "l3_cold": {
+                    "label": "L3 Cold Graph",
+                    "count": 0,
+                    "edge_count": 0,
+                    "nodes": [],
+                    "edges": [],
+                },
             },
             "hot": hot,
             "warm": warm,
@@ -864,9 +1089,22 @@ def _memory_response_from_sources(
         l2_items.extend(legacy_warm)
         raw_l1_count += len(legacy_hot)
         raw_l2_count += len(legacy_warm)
-    l1_items = sorted(l1_items, key=lambda item: float(item.get("created_at", 0.0) or 0.0), reverse=True)[:limit]
-    l2_items = sorted(l2_items, key=lambda item: (float(item.get("weight", 0.0) or 0.0), float(item.get("created_at", 0.0) or 0.0)), reverse=True)[:limit]
-    l3_nodes = sorted(l3_nodes, key=lambda item: float(item.get("weight", 0.0) or 0.0), reverse=True)[:limit]
+    l1_items = sorted(
+        l1_items,
+        key=lambda item: float(item.get("created_at", 0.0) or 0.0),
+        reverse=True,
+    )[:limit]
+    l2_items = sorted(
+        l2_items,
+        key=lambda item: (
+            float(item.get("weight", 0.0) or 0.0),
+            float(item.get("created_at", 0.0) or 0.0),
+        ),
+        reverse=True,
+    )[:limit]
+    l3_nodes = sorted(
+        l3_nodes, key=lambda item: float(item.get("weight", 0.0) or 0.0), reverse=True
+    )[:limit]
     l3_edges = l3_edges[:limit]
     payloads = l1_items + l2_items + l3_nodes
     total = len(payloads)
@@ -878,8 +1116,18 @@ def _memory_response_from_sources(
         "l3_edge_count": raw_l3_edge_count,
         "legacy_trace_count": len(legacy_hot),
         "embedded": sum(1 for item in l1_items + l2_items if item.get("has_embedding")),
-        "avg_weight": round(sum(float(item.get("weight", 0.0) or 0.0) for item in payloads) / total, 4) if total else 0.0,
-        "avg_temperature": round(sum(float(item.get("temperature", 0.0) or 0.0) for item in payloads) / total, 4) if total else 0.5,
+        "avg_weight": round(
+            sum(float(item.get("weight", 0.0) or 0.0) for item in payloads) / total, 4
+        )
+        if total
+        else 0.0,
+        "avg_temperature": round(
+            sum(float(item.get("temperature", 0.0) or 0.0) for item in payloads)
+            / total,
+            4,
+        )
+        if total
+        else 0.5,
     }
     return {
         "schema_version": "sylanne.webui.memory.v1",
@@ -888,9 +1136,24 @@ def _memory_response_from_sources(
         "mode": "overview" if overview else "session",
         "sessions": source_sessions,
         "layers": {
-            "l1_hot": {"label": "L1 Hot Pool", "count": summary["l1_count"], "capacity": 50, "items": l1_items},
-            "l2_warm": {"label": "L2 Warm Pool", "count": summary["l2_count"], "items": l2_items},
-            "l3_cold": {"label": "L3 Cold Graph", "count": summary["l3_node_count"], "edge_count": summary["l3_edge_count"], "nodes": l3_nodes, "edges": l3_edges},
+            "l1_hot": {
+                "label": "L1 Hot Pool",
+                "count": summary["l1_count"],
+                "capacity": 50,
+                "items": l1_items,
+            },
+            "l2_warm": {
+                "label": "L2 Warm Pool",
+                "count": summary["l2_count"],
+                "items": l2_items,
+            },
+            "l3_cold": {
+                "label": "L3 Cold Graph",
+                "count": summary["l3_node_count"],
+                "edge_count": summary["l3_edge_count"],
+                "nodes": l3_nodes,
+                "edges": l3_edges,
+            },
         },
         "hot": l1_items,
         "warm": l2_items,
@@ -899,11 +1162,15 @@ def _memory_response_from_sources(
     }
 
 
-async def _build_memory_pools(plugin: Any, *, session: str = "", limit: int = 50) -> dict[str, Any]:
+async def _build_memory_pools(
+    plugin: Any, *, session: str = "", limit: int = 50
+) -> dict[str, Any]:
     """Build hot and long-term memory pool payloads for the WebUI."""
     sessions = _known_sessions(plugin, requested=session)
     overview = not session or session == "default"
-    session_key = session if session in sessions else (sessions[0] if sessions else "default")
+    session_key = (
+        session if session in sessions else (sessions[0] if sessions else "default")
+    )
     source_sessions = [item for item in sessions if item] if overview else [session_key]
     if not source_sessions:
         source_sessions = [session_key or "default"]
@@ -937,11 +1204,15 @@ async def _build_memory_pools(plugin: Any, *, session: str = "", limit: int = 50
     )
 
 
-def _build_memory_pools_sync(plugin: Any, *, session: str = "", limit: int = 50) -> dict[str, Any]:
+def _build_memory_pools_sync(
+    plugin: Any, *, session: str = "", limit: int = 50
+) -> dict[str, Any]:
     """Build memory payload without awaiting, for the stdlib fallback server."""
     sessions = _known_sessions(plugin, requested=session)
     overview = not session or session == "default"
-    session_key = session if session in sessions else (sessions[0] if sessions else "default")
+    session_key = (
+        session if session in sessions else (sessions[0] if sessions else "default")
+    )
     source_sessions = [item for item in sessions if item] if overview else [session_key]
     if not source_sessions:
         source_sessions = [session_key or "default"]
@@ -972,17 +1243,29 @@ def _memory_record_payload(record: Any) -> dict[str, Any]:
     signature = data.get("emotional_signature") or {}
     if not isinstance(signature, dict):
         signature = {}
-    arousal = abs(float(signature.get("arousal", signature.get("tension", 0.35)) or 0.35))
+    arousal = abs(
+        float(signature.get("arousal", signature.get("tension", 0.35)) or 0.35)
+    )
     warmth = abs(float(signature.get("warmth", signature.get("valence", 0.45)) or 0.45))
     depth = float(data.get("depth", 0.0) or 0.0)
     confidence = float(data.get("confidence", 0.35) or 0.35)
     recall = min(1.0, float(data.get("recall_count", 0) or 0) / 5.0)
     evidence = min(1.0, float(data.get("evidence_count", 1) or 1) / 4.0)
     interference = float(data.get("interference", 0.0) or 0.0)
-    weight = depth * 0.45 + confidence * 0.25 + recall * 0.20 + evidence * 0.10 - interference * 0.15
+    weight = (
+        depth * 0.45
+        + confidence * 0.25
+        + recall * 0.20
+        + evidence * 0.10
+        - interference * 0.15
+    )
     data["weight"] = round(max(0.0, min(1.0, weight)), 4)
     data["temperature"] = round(max(0.0, min(1.0, (arousal + warmth) / 2.0)), 4)
-    data["has_embedding"] = bool(data.get("embedding") or data.get("semantic_embedding") or data.get("embedding_provider_id"))
+    data["has_embedding"] = bool(
+        data.get("embedding")
+        or data.get("semantic_embedding")
+        or data.get("embedding_provider_id")
+    )
     data.pop("embedding", None)
     data.pop("semantic_embedding", None)
     return data
@@ -991,8 +1274,14 @@ def _memory_record_payload(record: Any) -> dict[str, Any]:
 def _memory_system_item_payload(item: Any) -> dict[str, Any]:
     data = item.to_dict() if hasattr(item, "to_dict") else dict(item or {})
     data["weight"] = round(max(0.0, min(1.0, float(data.get("weight", 0.0) or 0.0))), 4)
-    data["temperature"] = round(max(0.0, min(1.0, float(data.get("temperature", 0.5) or 0.5))), 4)
-    data["has_embedding"] = bool(data.get("embedding") or data.get("semantic_embedding") or data.get("embedding_provider_id"))
+    data["temperature"] = round(
+        max(0.0, min(1.0, float(data.get("temperature", 0.5) or 0.5))), 4
+    )
+    data["has_embedding"] = bool(
+        data.get("embedding")
+        or data.get("semantic_embedding")
+        or data.get("embedding_provider_id")
+    )
     data.pop("embedding", None)
     data.pop("semantic_embedding", None)
     return data
@@ -1001,9 +1290,14 @@ def _memory_system_item_payload(item: Any) -> dict[str, Any]:
 def _memory_graph_node_payload(node: Any) -> dict[str, Any]:
     data = node.to_dict() if hasattr(node, "to_dict") else dict(node or {})
     clarity = float(data.get("clarity", data.get("weight", 0.0)) or 0.0)
-    emotion_weight = float(data.get("emotion_weight", data.get("temperature", 0.0)) or 0.0)
+    emotion_weight = float(
+        data.get("emotion_weight", data.get("temperature", 0.0)) or 0.0
+    )
     data["summary"] = data.get("label", data.get("summary", data.get("text", "")))
-    data["text"] = data.get("text") or f"{data.get('type', 'node')} / {data.get('temporal_type', 'episodic')}"
+    data["text"] = (
+        data.get("text")
+        or f"{data.get('type', 'node')} / {data.get('temporal_type', 'episodic')}"
+    )
     data["weight"] = round(max(0.0, min(1.0, clarity)), 4)
     data["temperature"] = round(max(0.0, min(1.0, (emotion_weight + 1.0) / 2.0)), 4)
     data["has_embedding"] = False
@@ -1013,7 +1307,10 @@ def _memory_graph_node_payload(node: Any) -> dict[str, Any]:
 def _load_schema(plugin: Any) -> dict[str, Any]:
     """Load config schema."""
     import os
-    schema_path = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "_conf_schema.json")
+
+    schema_path = os.path.join(
+        os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "_conf_schema.json"
+    )
     try:
         with open(schema_path, "r", encoding="utf-8") as f:
             return json.load(f)

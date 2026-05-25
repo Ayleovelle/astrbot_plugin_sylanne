@@ -3,6 +3,7 @@
 This module replaces the old 3.x EmotionalStatePlugin with a minimal host
 that delegates all body/kernel/memory logic to sylanne_alpha/.
 """
+
 from __future__ import annotations
 
 import os
@@ -12,50 +13,58 @@ _PLUGIN_DIR = os.path.dirname(os.path.abspath(__file__))
 if _PLUGIN_DIR not in sys.path:
     sys.path.insert(0, _PLUGIN_DIR)
 
-import asyncio
-import collections
-import contextvars
-import gc
-import importlib
-import json
-import re
-import time
-from datetime import datetime, timezone, timedelta
-from pathlib import Path
-from types import ModuleType, SimpleNamespace
-from typing import Any
+import asyncio  # noqa: E402
+import collections  # noqa: E402
+import contextvars  # noqa: E402
+import gc  # noqa: E402
+import importlib  # noqa: E402
+import json  # noqa: E402
+import time  # noqa: E402
+from datetime import datetime, timedelta, timezone  # noqa: E402
+from pathlib import Path  # noqa: E402
+from types import ModuleType, SimpleNamespace  # noqa: E402
+from typing import Any  # noqa: E402
 
 # ---------------------------------------------------------------------------
 # AstrBot imports -- graceful fallback when astrbot is not installed
 # ---------------------------------------------------------------------------
 try:
-    from astrbot.api import logger  # type: ignore
-    from astrbot.api.event import filter, AstrMessageEvent, MessageChain  # type: ignore
-    from astrbot.api.star import Context, Star, register  # type: ignore
-    from astrbot.api.message_components import Plain  # type: ignore
+    from astrbot.api import logger  # type: ignore  # noqa: E402
+    from astrbot.api.event import (  # type: ignore  # noqa: E402
+        AstrMessageEvent,
+        MessageChain,
+        filter,
+    )
+    from astrbot.api.message_components import Plain  # type: ignore  # noqa: E402
+    from astrbot.api.star import Context, Star, register  # type: ignore  # noqa: E402
 except ImportError:
-    import logging as _logging
+    import logging as _logging  # noqa: E402
+
     logger = _logging.getLogger("astrbot_plugin_sylanne")  # type: ignore
 
     class _FakeFilter:
         def command(self, *args, **kwargs):
             def decorator(func):
                 return func
+
             return decorator
 
         def on_llm_request(self, *args, **kwargs):
             def decorator(func):
                 return func
+
             return decorator
 
         def on_llm_response(self, *args, **kwargs):
             def decorator(func):
                 return func
+
             return decorator
 
         def llm_tool(self, *args, **kwargs):
             def decorator(func):
                 return func
+
             return decorator
 
     filter = _FakeFilter()  # type: ignore
@@ -85,15 +94,16 @@ except ImportError:
     def register(*args, **kwargs):  # type: ignore
         def decorator(cls):
             return cls
+
         return decorator
+
 
 # ---------------------------------------------------------------------------
 # Sylanne alpha imports
 # ---------------------------------------------------------------------------
-from sylanne_alpha.host import SylanneAlphaHost, SylanneAlphaHostEvent
-from sylanne_alpha.assessor_async import AsyncAssessor
-from sylanne_alpha.compat import (
-    build_memory_payload,
+from sylanne_alpha import webui_server as _sylanne_webui_server  # noqa: E402
+from sylanne_alpha.assessor_async import AsyncAssessor  # noqa: E402
+from sylanne_alpha.compat import (  # noqa: E402
     command_surface,
     emotion_values,
     memory_surface,
@@ -102,15 +112,14 @@ from sylanne_alpha.compat import (
     realtime_plan,
     reset_surface,
     simulate_update,
+    strip_draft_blocks,  # noqa: E402
 )
-from sylanne_alpha.compat import strip_draft_blocks
-from sylanne_alpha.embedding_memory import recall_with_embedding_assist
-from sylanne_alpha.life_simulation import LifeSimulator
-from sylanne_alpha.memory_system import MemorySystem, ConversationBuffer
-from sylanne_alpha.social_field import SocialFieldCollector, SocialSignals
-from sylanne_alpha.rhythm_learner import RhythmLearner
-from sylanne_alpha.webui import WEBUI_HTML
-from sylanne_alpha import webui_server as _sylanne_webui_server
+from sylanne_alpha.host import SylanneAlphaHost, SylanneAlphaHostEvent  # noqa: E402
+from sylanne_alpha.life_simulation import LifeSimulator  # noqa: E402
+from sylanne_alpha.memory_system import ConversationBuffer, MemorySystem  # noqa: E402
+from sylanne_alpha.rhythm_learner import RhythmLearner  # noqa: E402
+from sylanne_alpha.social_field import SocialFieldCollector  # noqa: E402
+from sylanne_alpha.webui import WEBUI_HTML  # noqa: E402
 
 # AstrBot hot-upload can re-import main.py while keeping sylanne_alpha submodules
 # in sys.modules. Force-reload the WebUI server so listener fixes are applied
@@ -129,22 +138,40 @@ _MAX_PAYLOAD_SERIALIZED_CHARS = 60000
 _MAX_UNFINISHED_CONTEXT_CHARS = 2000
 _CHINA_TZ = timezone(timedelta(hours=8))
 
-_INTERNAL_LLM_CALL: contextvars.ContextVar[bool] = contextvars.ContextVar("_INTERNAL_LLM_CALL", default=False)
+_INTERNAL_LLM_CALL: contextvars.ContextVar[bool] = contextvars.ContextVar(
+    "_INTERNAL_LLM_CALL", default=False
+)
 PROACTIVE_SCHEDULER_WAKE_DELAY_SECONDS = 30.0
 PROACTIVE_SCHEDULER_IDLE_DELAY_SECONDS = 1800.0
 
 
-
-
-
 class _BackgroundPostJob:
     __slots__ = (
-        "event", "identity", "reply_text", "context_key", "sequence", "enqueued_at",
-        "attempts", "next_retry_at", "last_error_type", "last_error_message",
-        "last_failed_at", "dead_lettered_at", "leased_at", "lease_until",
+        "event",
+        "identity",
+        "reply_text",
+        "context_key",
+        "sequence",
+        "enqueued_at",
+        "attempts",
+        "next_retry_at",
+        "last_error_type",
+        "last_error_message",
+        "last_failed_at",
+        "dead_lettered_at",
+        "leased_at",
+        "lease_until",
     )
 
-    def __init__(self, event: Any, identity: str, reply_text: str, context_key: str, sequence: int, enqueued_at: float):
+    def __init__(
+        self,
+        event: Any,
+        identity: str,
+        reply_text: str,
+        context_key: str,
+        sequence: int,
+        enqueued_at: float,
+    ):
         self.event = event
         self.identity = identity
         self.reply_text = reply_text
@@ -272,9 +299,19 @@ def get_emotional_state_plugin(context: Any) -> Any:
 # StateInjectionBudget -- tracks what was injected/skipped per request
 # ---------------------------------------------------------------------------
 class _StateInjectionBudget:
-    __slots__ = ("session_key", "compat_mode", "injected", "skipped", "model_hint",
-                 "max_added_chars", "max_parts", "added_chars", "appended", "warnings",
-                 "context_owner")
+    __slots__ = (
+        "session_key",
+        "compat_mode",
+        "injected",
+        "skipped",
+        "model_hint",
+        "max_added_chars",
+        "max_parts",
+        "added_chars",
+        "appended",
+        "warnings",
+        "context_owner",
+    )
 
     def __init__(self, session_key: str = "", model_hint: str = ""):
         self.session_key = session_key
@@ -293,7 +330,13 @@ class _StateInjectionBudget:
 # ---------------------------------------------------------------------------
 # EmotionalStatePlugin -- Sylanne 4.0 alpha thin host
 # ---------------------------------------------------------------------------
-@register("astrbot_plugin_sylanne", "Aylovelle.S.S", "Sylanne 4.0 alpha: sovereign emotional body runtime.", "4.0.0-Sylanne_Embodiment", "https://github.com/Ayleovelle/astrbot_plugin_sylanne")
+@register(
+    "astrbot_plugin_sylanne",
+    "Aylovelle.S.S",
+    "Sylanne 4.0 alpha: sovereign emotional body runtime.",
+    "4.0.0-Sylanne_Embodiment",
+    "https://github.com/Ayleovelle/astrbot_plugin_sylanne",
+)
 class EmotionalStatePlugin(Star):
     emotion_api_version = "1.0"
     emotion_schema_version = "astrbot.emotion_state.v2"
@@ -611,16 +654,25 @@ class EmotionalStatePlugin(Star):
         if not self._cfg_bool("sylanne_webui_enabled", False):
             return
         self._publish_webui_active_plugin()
-        if (getattr(_sylanne_webui_server, "_server_task", None) and not _sylanne_webui_server._server_task.done()) or \
-           (getattr(_sylanne_webui_server, "_httpd_thread", None) and _sylanne_webui_server._httpd_thread.is_alive()):
+        if (
+            getattr(_sylanne_webui_server, "_server_task", None)
+            and not _sylanne_webui_server._server_task.done()
+        ) or (
+            getattr(_sylanne_webui_server, "_httpd_thread", None)
+            and _sylanne_webui_server._httpd_thread.is_alive()
+        ):
             return
         webui_host = str(self._cfg("sylanne_webui_host", "0.0.0.0") or "0.0.0.0")
         webui_port = self._cfg_int("sylanne_webui_port", 2718)
         try:
             start_webui_background(self, host=webui_host, port=webui_port)
-            self.logger.info(f"Sylanne WebUI server start requested: http://{webui_host}:{webui_port}")
+            self.logger.info(
+                f"Sylanne WebUI server start requested: http://{webui_host}:{webui_port}"
+            )
         except RuntimeError as exc:
-            self.logger.debug(f"Sylanne WebUI server deferred until event loop is running: {exc}")
+            self.logger.debug(
+                f"Sylanne WebUI server deferred until event loop is running: {exc}"
+            )
         except Exception as exc:
             self.logger.warning(f"Sylanne WebUI server failed: {exc}")
 
@@ -645,14 +697,17 @@ class EmotionalStatePlugin(Star):
             # Older hot-uploaded webui_server modules did not have
             # _set_active_plugin yet, but they may still own port 2718 through
             # _server_task/_httpd. Keep them visible so takeover can stop them.
-            if not any(hasattr(module, attr) for attr in (
-                "_set_active_plugin",
-                "stop_webui_server",
-                "start_webui_background",
-                "_server_task",
-                "_httpd",
-                "_httpd_thread",
-            )):
+            if not any(
+                hasattr(module, attr)
+                for attr in (
+                    "_set_active_plugin",
+                    "stop_webui_server",
+                    "start_webui_background",
+                    "_server_task",
+                    "_httpd",
+                    "_httpd_thread",
+                )
+            ):
                 return
             seen.add(id(module))
             modules.append((name, module))
@@ -663,14 +718,17 @@ class EmotionalStatePlugin(Star):
             module_file = str(namespace.get("__file__", "") or "").replace("\\", "/")
             if not module_file.endswith("/sylanne_alpha/webui_server.py"):
                 return
-            if not any(attr in namespace for attr in (
-                "_set_active_plugin",
-                "stop_webui_server",
-                "start_webui_background",
-                "_server_task",
-                "_httpd",
-                "_httpd_thread",
-            )):
+            if not any(
+                attr in namespace
+                for attr in (
+                    "_set_active_plugin",
+                    "stop_webui_server",
+                    "start_webui_background",
+                    "_server_task",
+                    "_httpd",
+                    "_httpd_thread",
+                )
+            ):
                 return
             seen.add(id(namespace))
             modules.append((name, namespace))
@@ -699,7 +757,9 @@ class EmotionalStatePlugin(Star):
             setattr(module, attr, value)
 
     def _is_current_webui_module(self, module: Any) -> bool:
-        return module is _sylanne_webui_server or module is getattr(_sylanne_webui_server, "__dict__", None)
+        return module is _sylanne_webui_server or module is getattr(
+            _sylanne_webui_server, "__dict__", None
+        )
 
     def _is_webui_server_task(self, task: asyncio.Task) -> bool:
         try:
@@ -707,7 +767,9 @@ class EmotionalStatePlugin(Star):
         except Exception:
             stack = []
         for frame in stack:
-            filename = str(getattr(getattr(frame, "f_code", None), "co_filename", "") or "").replace("\\", "/")
+            filename = str(
+                getattr(getattr(frame, "f_code", None), "co_filename", "") or ""
+            ).replace("\\", "/")
             if filename.endswith("/sylanne_alpha/webui_server.py"):
                 return True
 
@@ -719,30 +781,56 @@ class EmotionalStatePlugin(Star):
         seen: set[int] = set()
         while coro is not None and id(coro) not in seen:
             seen.add(id(coro))
-            code = getattr(coro, "cr_code", None) or getattr(coro, "gi_code", None) or getattr(coro, "ag_code", None)
+            code = (
+                getattr(coro, "cr_code", None)
+                or getattr(coro, "gi_code", None)
+                or getattr(coro, "ag_code", None)
+            )
             filename = str(getattr(code, "co_filename", "") or "").replace("\\", "/")
             if filename.endswith("/sylanne_alpha/webui_server.py"):
                 return True
-            frame = getattr(coro, "cr_frame", None) or getattr(coro, "gi_frame", None) or getattr(coro, "ag_frame", None)
+            frame = (
+                getattr(coro, "cr_frame", None)
+                or getattr(coro, "gi_frame", None)
+                or getattr(coro, "ag_frame", None)
+            )
             globals_dict = getattr(frame, "f_globals", {}) if frame is not None else {}
-            module_file = str((globals_dict or {}).get("__file__", "") or "").replace("\\", "/")
+            module_file = str((globals_dict or {}).get("__file__", "") or "").replace(
+                "\\", "/"
+            )
             if module_file.endswith("/sylanne_alpha/webui_server.py"):
                 return True
-            coro = getattr(coro, "cr_await", None) or getattr(coro, "gi_yieldfrom", None) or getattr(coro, "ag_await", None)
+            coro = (
+                getattr(coro, "cr_await", None)
+                or getattr(coro, "gi_yieldfrom", None)
+                or getattr(coro, "ag_await", None)
+            )
         return False
 
     async def _stop_webui_server_tasks(self) -> list[str]:
         stopped: list[str] = []
         try:
-            tasks = [task for task in asyncio.all_tasks() if task is not asyncio.current_task()]
+            tasks = [
+                task
+                for task in asyncio.all_tasks()
+                if task is not asyncio.current_task()
+            ]
         except Exception:
             return stopped
-        webui_tasks = [task for task in tasks if not task.done() and self._is_webui_server_task(task)]
+        webui_tasks = [
+            task
+            for task in tasks
+            if not task.done() and self._is_webui_server_task(task)
+        ]
         for task in webui_tasks:
             try:
                 task.cancel()
                 coro = task.get_coro()
-                name = getattr(coro, "__qualname__", "") or getattr(coro, "__name__", "") or repr(coro)
+                name = (
+                    getattr(coro, "__qualname__", "")
+                    or getattr(coro, "__name__", "")
+                    or repr(coro)
+                )
                 stopped.append(f"task:{name}")
             except Exception:
                 continue
@@ -767,7 +855,9 @@ class EmotionalStatePlugin(Star):
                 continue
         return updated
 
-    async def _stop_stale_webui_server_modules(self, *, include_current: bool = False) -> list[str]:
+    async def _stop_stale_webui_server_modules(
+        self, *, include_current: bool = False
+    ) -> list[str]:
         """Stop hot-upload WebUI modules that can keep port 2718 bound or serve stale HTML."""
         stopped: list[str] = []
         for name, module in self._iter_loaded_webui_server_modules():
@@ -803,7 +893,12 @@ class EmotionalStatePlugin(Star):
                     task.cancel()
                     try:
                         await asyncio.wait_for(task, timeout=2.0)
-                    except (asyncio.CancelledError, asyncio.TimeoutError, RuntimeError, ValueError):
+                    except (
+                        asyncio.CancelledError,
+                        asyncio.TimeoutError,
+                        RuntimeError,
+                        ValueError,
+                    ):
                         pass
                 stopped = True
             except Exception:
@@ -830,7 +925,9 @@ class EmotionalStatePlugin(Star):
             stopped = True
 
         for attr in ("_server_task", "_httpd", "_httpd_thread", "_active_plugin"):
-            exists = attr in module if isinstance(module, dict) else hasattr(module, attr)
+            exists = (
+                attr in module if isinstance(module, dict) else hasattr(module, attr)
+            )
             if exists:
                 try:
                     self._webui_module_set(module, attr, None)
@@ -850,7 +947,9 @@ class EmotionalStatePlugin(Star):
             await asyncio.sleep(0.3)
             stopped = await self._stop_stale_webui_server_modules(include_current=True)
             if stopped:
-                self.logger.info(f"Sylanne WebUI stopped stale listener modules: {stopped}")
+                self.logger.info(
+                    f"Sylanne WebUI stopped stale listener modules: {stopped}"
+                )
             self._start_webui_if_enabled()
 
         task = loop.create_task(_takeover())
@@ -870,6 +969,7 @@ class EmotionalStatePlugin(Star):
 
     async def _memory_settings_post_handler(self) -> dict[str, Any]:
         from quart import request as quart_request
+
         body = await quart_request.get_json(silent=True) or {}
         return await self._update_sylanne_memory_settings_from_page(body)
 
@@ -883,16 +983,22 @@ class EmotionalStatePlugin(Star):
     async def _webui_page_handler(self) -> Any:
         """Return the full WebUI HTML page."""
         from quart import Response
+
         return Response(WEBUI_HTML, content_type="text/html; charset=utf-8")
 
     async def _webui_state_handler(self) -> dict[str, Any]:
         """Return full state JSON for the WebUI dashboard."""
         logger.info("Sylanne WebUI: /api/state handler HIT")
         from quart import request as quart_request
+
         requested_session = str(quart_request.args.get("session") or "").strip()
         all_sessions = self._known_webui_sessions(requested_session)
         # For overview (empty/default), use the most recently active session
-        if not requested_session or requested_session == "default" or requested_session not in all_sessions:
+        if (
+            not requested_session
+            or requested_session == "default"
+            or requested_session not in all_sessions
+        ):
             # Find session with highest tick count (most active)
             best_session = "default"
             best_ticks = -1
@@ -901,18 +1007,30 @@ class EmotionalStatePlugin(Star):
                 if ticks > best_ticks:
                     best_ticks = ticks
                     best_session = sk
-            session_key = best_session if best_ticks > 0 else (all_sessions[0] if all_sessions else "default")
+            session_key = (
+                best_session
+                if best_ticks > 0
+                else (all_sessions[0] if all_sessions else "default")
+            )
         else:
             session_key = requested_session
         host = self._host(session_key)
         comp = host.kernel.computation
-        logger.info(f"Sylanne WebUI state: session={session_key}, tick={comp._tick_count}, route={comp._last_route}")
+        logger.info(
+            f"Sylanne WebUI state: session={session_key}, tick={comp._tick_count}, route={comp._last_route}"
+        )
 
         # Emotion from Void-Scar Engine
         _EMOTION_DEFAULTS = {
-            "warmth": 0.0, "arousal": 0.0, "valence": 0.0, "tension": 0.0,
-            "curiosity": 0.0, "repair_pressure": 0.0, "expression_drive": 0.0,
-            "boundary_firmness": 0.0, "coherence": 1.0,
+            "warmth": 0.0,
+            "arousal": 0.0,
+            "valence": 0.0,
+            "tension": 0.0,
+            "curiosity": 0.0,
+            "repair_pressure": 0.0,
+            "expression_drive": 0.0,
+            "boundary_firmness": 0.0,
+            "coherence": 1.0,
         }
         emotion = {**_EMOTION_DEFAULTS, **comp.engine.observe()}
 
@@ -936,20 +1054,21 @@ class EmotionalStatePlugin(Star):
 
         # Void-Scar state as memory equivalent
         engine_diag = comp.engine.diagnostics()
-        void_info = engine_diag.get("void", {})
-        mem_info = {
+        _void_info = engine_diag.get("void", {})
+        _mem_info = {
             "size": int(emotion.get("active_voids", 0)),
             "connectivity": comp.engine._coherence,
             "holes_count": int(emotion.get("active_voids", 0)),
             "ghost_count": int(emotion.get("ghost_count", 0)),
         }
-        recent_recall = []
         comp_result = getattr(host.kernel, "_last_computation_result", None) or {}
         layers = comp_result.get("layers", {})
         if not isinstance(layers, dict):
             layers = {}
         recalled_items = comp_result.get("recalled", [])
-        recent_recall = [str(r.get("text", ""))[:60] for r in recalled_items if isinstance(r, dict)]
+        _recent_recall = [
+            str(r.get("text", ""))[:60] for r in recalled_items if isinstance(r, dict)
+        ]
 
         # Boundary
         boundary_dict = comp.boundary.to_dict()
@@ -965,7 +1084,11 @@ class EmotionalStatePlugin(Star):
         expr_info = {
             "pressure": round(expr_state.get("pressure", 0.0), 4),
             "threshold": round(expr_state.get("threshold", 0.6), 4),
-            "ratio": round(expr_state.get("pressure", 0.0) / max(0.01, expr_state.get("threshold", 0.6)), 4),
+            "ratio": round(
+                expr_state.get("pressure", 0.0)
+                / max(0.01, expr_state.get("threshold", 0.6)),
+                4,
+            ),
             "mode": expr_state.get("mode", "silent"),
             "count": expr_state.get("count", 0),
         }
@@ -985,13 +1108,18 @@ class EmotionalStatePlugin(Star):
         if "L1_HDC" not in layers:
             layers["L1_HDC"] = {
                 "vector_dim": 2048,
-                "density": sum(sample_bits) / max(len(sample_bits), 1) if sample_bits else 0.0,
+                "density": sum(sample_bits) / max(len(sample_bits), 1)
+                if sample_bits
+                else 0.0,
                 "sample_bits": sample_bits,
             }
         elif "sample_bits" not in layers["L1_HDC"]:
             layers["L1_HDC"]["sample_bits"] = sample_bits
             layers["L1_HDC"].setdefault("vector_dim", 2048)
-            layers["L1_HDC"].setdefault("density", sum(sample_bits) / max(len(sample_bits), 1) if sample_bits else 0.0)
+            layers["L1_HDC"].setdefault(
+                "density",
+                sum(sample_bits) / max(len(sample_bits), 1) if sample_bits else 0.0,
+            )
 
         # Feedback (from SSM diagnostics or computation diagnostics)
         comp_diag = comp.diagnostics()
@@ -1007,7 +1135,9 @@ class EmotionalStatePlugin(Star):
             "rejected": int(feedback_raw.get("rejected", 0)),
         }
         spine_info = {
-            "surprise": round(float(comp_result.get("surprise", gate_info["mean_surprise"]) or 0.0), 4),
+            "surprise": round(
+                float(comp_result.get("surprise", gate_info["mean_surprise"]) or 0.0), 4
+            ),
             "route": str(comp_result.get("route", "")),
             "last_text": str(comp_result.get("text", ""))[:120],
             "sheaf": comp_result.get("sheaf", {}),
@@ -1016,12 +1146,20 @@ class EmotionalStatePlugin(Star):
             "expression": expr_info,
             "layers": layers,
         }
-        personality = host.kernel._personality() if hasattr(host.kernel, "_personality") else {}
+        personality = (
+            host.kernel._personality() if hasattr(host.kernel, "_personality") else {}
+        )
         persona_info = {
             "profile": self._persona_profile(None),
-            "traits": personality.get("traits", personality if isinstance(personality, dict) else {}),
-            "voice": personality.get("voice", {}) if isinstance(personality, dict) else {},
-            "drift": personality.get("drift", {}) if isinstance(personality, dict) else {},
+            "traits": personality.get(
+                "traits", personality if isinstance(personality, dict) else {}
+            ),
+            "voice": personality.get("voice", {})
+            if isinstance(personality, dict)
+            else {},
+            "drift": personality.get("drift", {})
+            if isinstance(personality, dict)
+            else {},
         }
 
         return {
@@ -1049,7 +1187,11 @@ class EmotionalStatePlugin(Star):
         values = {}
         for key in schema:
             values[key] = self._config.get(key, schema[key].get("default"))
-        return {"schema": schema, "values": values, "providers": await self._webui_provider_items()}
+        return {
+            "schema": schema,
+            "values": values,
+            "providers": await self._webui_provider_items(),
+        }
 
     async def _webui_provider_items(self) -> list[dict[str, Any]]:
         """Best-effort provider choices for WebUI datalist controls."""
@@ -1071,11 +1213,23 @@ class EmotionalStatePlugin(Star):
             if not provider_id or provider_id in seen:
                 return
             seen.add(provider_id)
-            items.append({
-                "id": provider_id,
-                "name": str(config.get("name") or config.get("display_name") or getattr(provider, "name", "") or provider_id),
-                "type": str(provider_type or config.get("provider_type") or getattr(provider, "provider_type", "") or ""),
-            })
+            items.append(
+                {
+                    "id": provider_id,
+                    "name": str(
+                        config.get("name")
+                        or config.get("display_name")
+                        or getattr(provider, "name", "")
+                        or provider_id
+                    ),
+                    "type": str(
+                        provider_type
+                        or config.get("provider_type")
+                        or getattr(provider, "provider_type", "")
+                        or ""
+                    ),
+                }
+            )
 
         for method_name, provider_type in (
             ("get_all_providers", "llm"),
@@ -1091,7 +1245,9 @@ class EmotionalStatePlugin(Star):
                     providers = await providers
             except Exception:
                 continue
-            iterable = providers.values() if isinstance(providers, dict) else (providers or [])
+            iterable = (
+                providers.values() if isinstance(providers, dict) else (providers or [])
+            )
             for provider in iterable:
                 _add(provider, provider_type)
         return items
@@ -1099,6 +1255,7 @@ class EmotionalStatePlugin(Star):
     async def _webui_settings_post_handler(self) -> dict[str, Any]:
         """Update config values from the settings panel."""
         from quart import request as quart_request
+
         body = await quart_request.get_json(silent=True) or {}
         schema = self._load_conf_schema()
         updated = []
@@ -1136,6 +1293,7 @@ class EmotionalStatePlugin(Star):
     async def _webui_computation_logs_handler(self) -> dict[str, Any]:
         """Return recent computation log entries for WebUI real-time display."""
         from quart import request as quart_request
+
         try:
             limit = max(1, min(200, int(quart_request.args.get("limit", "50"))))
         except (TypeError, ValueError):
@@ -1143,7 +1301,11 @@ class EmotionalStatePlugin(Star):
         requested_session = str(quart_request.args.get("session") or "").strip()
         logs = list(self._computation_logs)
         if requested_session:
-            logs = [entry for entry in logs if str(entry.get("session", "")) == requested_session]
+            logs = [
+                entry
+                for entry in logs
+                if str(entry.get("session", "")) == requested_session
+            ]
         entries = logs[-limit:]
         return {
             "logs": entries,
@@ -1166,8 +1328,12 @@ class EmotionalStatePlugin(Star):
             signature = record_data.get("emotional_signature") or {}
             if not isinstance(signature, dict):
                 return 0.5
-            arousal = abs(float(signature.get("arousal", signature.get("tension", 0.35)) or 0.35))
-            warmth = abs(float(signature.get("warmth", signature.get("valence", 0.45)) or 0.45))
+            arousal = abs(
+                float(signature.get("arousal", signature.get("tension", 0.35)) or 0.35)
+            )
+            warmth = abs(
+                float(signature.get("warmth", signature.get("valence", 0.45)) or 0.45)
+            )
             return round(max(0.0, min(1.0, (arousal + warmth) / 2.0)), 4)
 
         def _weight(record_data: dict[str, Any]) -> float:
@@ -1176,14 +1342,26 @@ class EmotionalStatePlugin(Star):
             recall = min(1.0, float(record_data.get("recall_count", 0) or 0) / 5.0)
             evidence = min(1.0, float(record_data.get("evidence_count", 1) or 1) / 4.0)
             interference = float(record_data.get("interference", 0.0) or 0.0)
-            value = depth * 0.45 + confidence * 0.25 + recall * 0.20 + evidence * 0.10 - interference * 0.15
+            value = (
+                depth * 0.45
+                + confidence * 0.25
+                + recall * 0.20
+                + evidence * 0.10
+                - interference * 0.15
+            )
             return round(max(0.0, min(1.0, value)), 4)
 
         def _payload(record: Any) -> dict[str, Any]:
-            data = record.to_dict() if hasattr(record, "to_dict") else dict(record or {})
+            data = (
+                record.to_dict() if hasattr(record, "to_dict") else dict(record or {})
+            )
             data["weight"] = _weight(data)
             data["temperature"] = _temperature(data)
-            data["has_embedding"] = bool(data.get("embedding") or data.get("semantic_embedding") or data.get("embedding_provider_id"))
+            data["has_embedding"] = bool(
+                data.get("embedding")
+                or data.get("semantic_embedding")
+                or data.get("embedding_provider_id")
+            )
             data.pop("embedding", None)
             data.pop("semantic_embedding", None)
             return data
@@ -1191,7 +1369,11 @@ class EmotionalStatePlugin(Star):
         def _has_memory_content(state: Any) -> bool:
             if state is None:
                 return False
-            if hasattr(state, "_l1") or hasattr(state, "_l2") or hasattr(state, "_l3_nodes"):
+            if (
+                hasattr(state, "_l1")
+                or hasattr(state, "_l2")
+                or hasattr(state, "_l3_nodes")
+            ):
                 return bool(
                     list(getattr(state, "_l1", []) or [])
                     or list(getattr(state, "_l2", []) or [])
@@ -1206,9 +1388,15 @@ class EmotionalStatePlugin(Star):
         overview_requested = not session_key or session_key == "default"
         if session_key and session_key not in all_sessions:
             all_sessions.append(session_key)
-        if not session_key or (session_key not in all_sessions and session_key != "default"):
+        if not session_key or (
+            session_key not in all_sessions and session_key != "default"
+        ):
             session_key = all_sessions[0] if all_sessions else "default"
-        source_sessions = [item for item in all_sessions if item] if overview_requested else [session_key]
+        source_sessions = (
+            [item for item in all_sessions if item]
+            if overview_requested
+            else [session_key]
+        )
         if not source_sessions:
             source_sessions = [session_key or "default"]
 
@@ -1220,9 +1408,17 @@ class EmotionalStatePlugin(Star):
 
         def _memory_item_payload(item: Any) -> dict[str, Any]:
             data = item.to_dict() if hasattr(item, "to_dict") else dict(item or {})
-            data["weight"] = round(max(0.0, min(1.0, float(data.get("weight", 0.0) or 0.0))), 4)
-            data["temperature"] = round(max(0.0, min(1.0, float(data.get("temperature", 0.5) or 0.5))), 4)
-            data["has_embedding"] = bool(data.get("embedding") or data.get("semantic_embedding") or data.get("embedding_provider_id"))
+            data["weight"] = round(
+                max(0.0, min(1.0, float(data.get("weight", 0.0) or 0.0))), 4
+            )
+            data["temperature"] = round(
+                max(0.0, min(1.0, float(data.get("temperature", 0.5) or 0.5))), 4
+            )
+            data["has_embedding"] = bool(
+                data.get("embedding")
+                or data.get("semantic_embedding")
+                or data.get("embedding_provider_id")
+            )
             data.pop("embedding", None)
             data.pop("semantic_embedding", None)
             return data
@@ -1230,25 +1426,44 @@ class EmotionalStatePlugin(Star):
         def _graph_node_payload(node: Any) -> dict[str, Any]:
             data = node.to_dict() if hasattr(node, "to_dict") else dict(node or {})
             clarity = float(data.get("clarity", data.get("weight", 0.0)) or 0.0)
-            emotion_weight = float(data.get("emotion_weight", data.get("temperature", 0.0)) or 0.0)
-            data["summary"] = data.get("label", data.get("summary", data.get("text", "")))
-            data["text"] = data.get("text") or f"{data.get('type', 'node')} / {data.get('temporal_type', 'episodic')}"
+            emotion_weight = float(
+                data.get("emotion_weight", data.get("temperature", 0.0)) or 0.0
+            )
+            data["summary"] = data.get(
+                "label", data.get("summary", data.get("text", ""))
+            )
+            data["text"] = (
+                data.get("text")
+                or f"{data.get('type', 'node')} / {data.get('temporal_type', 'episodic')}"
+            )
             data["weight"] = round(max(0.0, min(1.0, clarity)), 4)
-            data["temperature"] = round(max(0.0, min(1.0, (emotion_weight + 1.0) / 2.0)), 4)
+            data["temperature"] = round(
+                max(0.0, min(1.0, (emotion_weight + 1.0) / 2.0)), 4
+            )
             data["has_embedding"] = False
             return data
 
         # Duplicated in webui_server.py for standalone mode
         def _legacy_trace_payload(trace: Any, source_session: str) -> dict[str, Any]:
-            data = dict(trace or {}) if isinstance(trace, dict) else {"text": str(trace or "")}
+            data = (
+                dict(trace or {})
+                if isinstance(trace, dict)
+                else {"text": str(trace or "")}
+            )
             weight = float(data.get("weight", data.get("depth", 0.35)) or 0.35)
             temperature = float(data.get("temperature", data.get("warmth", 0.5)) or 0.5)
             data["session"] = source_session
             data["source"] = data.get("source") or "body.memory.traces"
             data["weight"] = round(max(0.0, min(1.0, weight)), 4)
             data["temperature"] = round(max(0.0, min(1.0, temperature)), 4)
-            data["created_at"] = float(data.get("created_at", data.get("updated_at", 0.0)) or 0.0)
-            data["has_embedding"] = bool(data.get("embedding") or data.get("semantic_embedding") or data.get("embedding_provider_id"))
+            data["created_at"] = float(
+                data.get("created_at", data.get("updated_at", 0.0)) or 0.0
+            )
+            data["has_embedding"] = bool(
+                data.get("embedding")
+                or data.get("semantic_embedding")
+                or data.get("embedding_provider_id")
+            )
             data.pop("embedding", None)
             data.pop("semantic_embedding", None)
             return data
@@ -1284,17 +1499,33 @@ class EmotionalStatePlugin(Star):
 
         for source_session in source_sessions:
             source_state = await _state_for_display(source_session)
-            if source_state is not None and (hasattr(source_state, "_l1") or hasattr(source_state, "_l2") or hasattr(source_state, "_l3_nodes")):
-                source_l1 = [_memory_item_payload(item) for item in list(getattr(source_state, "_l1", []) or [])]
-                source_l2 = [_memory_item_payload(item) for item in list(getattr(source_state, "_l2", []) or [])]
+            if source_state is not None and (
+                hasattr(source_state, "_l1")
+                or hasattr(source_state, "_l2")
+                or hasattr(source_state, "_l3_nodes")
+            ):
+                source_l1 = [
+                    _memory_item_payload(item)
+                    for item in list(getattr(source_state, "_l1", []) or [])
+                ]
+                source_l2 = [
+                    _memory_item_payload(item)
+                    for item in list(getattr(source_state, "_l2", []) or [])
+                ]
                 source_l3_nodes_raw = getattr(source_state, "_l3_nodes", {}) or {}
                 source_l3_edges_raw = getattr(source_state, "_l3_edges", []) or []
                 for item in source_l1 + source_l2:
                     item.setdefault("session", source_session)
-                source_l3_nodes = [_graph_node_payload(node) for node in list(source_l3_nodes_raw.values())]
+                source_l3_nodes = [
+                    _graph_node_payload(node)
+                    for node in list(source_l3_nodes_raw.values())
+                ]
                 for node in source_l3_nodes:
                     node.setdefault("session", source_session)
-                source_l3_edges = [edge.to_dict() if hasattr(edge, "to_dict") else dict(edge or {}) for edge in list(source_l3_edges_raw)]
+                source_l3_edges = [
+                    edge.to_dict() if hasattr(edge, "to_dict") else dict(edge or {})
+                    for edge in list(source_l3_edges_raw)
+                ]
                 for edge in source_l3_edges:
                     edge.setdefault("session", source_session)
                 l1_items.extend(source_l1)
@@ -1311,8 +1542,7 @@ class EmotionalStatePlugin(Star):
             traces = _body_traces_for_session(source_session)
             legacy_hot.extend(traces)
             legacy_warm.extend(
-                item for item in traces
-                if float(item.get("weight", 0.0) or 0.0) >= 0.5
+                item for item in traces if float(item.get("weight", 0.0) or 0.0) >= 0.5
             )
 
         if l1_items or l2_items or l3_nodes or legacy_hot:
@@ -1321,9 +1551,24 @@ class EmotionalStatePlugin(Star):
                 l2_items.extend(legacy_warm)
                 raw_l1_count += len(legacy_hot)
                 raw_l2_count += len(legacy_warm)
-            l1_items = sorted(l1_items, key=lambda item: float(item.get("created_at", 0.0) or 0.0), reverse=True)[:limit]
-            l2_items = sorted(l2_items, key=lambda item: (float(item.get("weight", 0.0) or 0.0), float(item.get("created_at", 0.0) or 0.0)), reverse=True)[:limit]
-            l3_nodes = sorted(l3_nodes, key=lambda item: float(item.get("weight", 0.0) or 0.0), reverse=True)[:limit]
+            l1_items = sorted(
+                l1_items,
+                key=lambda item: float(item.get("created_at", 0.0) or 0.0),
+                reverse=True,
+            )[:limit]
+            l2_items = sorted(
+                l2_items,
+                key=lambda item: (
+                    float(item.get("weight", 0.0) or 0.0),
+                    float(item.get("created_at", 0.0) or 0.0),
+                ),
+                reverse=True,
+            )[:limit]
+            l3_nodes = sorted(
+                l3_nodes,
+                key=lambda item: float(item.get("weight", 0.0) or 0.0),
+                reverse=True,
+            )[:limit]
             l3_edges = l3_edges[:limit]
             records = l1_items + l2_items + l3_nodes
             total = len(records)
@@ -1334,9 +1579,23 @@ class EmotionalStatePlugin(Star):
                 "l3_node_count": raw_l3_node_count,
                 "l3_edge_count": raw_l3_edge_count,
                 "legacy_trace_count": len(legacy_hot),
-                "embedded": sum(1 for item in l1_items + l2_items if item.get("has_embedding")),
-                "avg_weight": round(sum(float(item.get("weight", 0.0) or 0.0) for item in records) / total, 4) if total else 0.0,
-                "avg_temperature": round(sum(float(item.get("temperature", 0.0) or 0.0) for item in records) / total, 4) if total else 0.5,
+                "embedded": sum(
+                    1 for item in l1_items + l2_items if item.get("has_embedding")
+                ),
+                "avg_weight": round(
+                    sum(float(item.get("weight", 0.0) or 0.0) for item in records)
+                    / total,
+                    4,
+                )
+                if total
+                else 0.0,
+                "avg_temperature": round(
+                    sum(float(item.get("temperature", 0.0) or 0.0) for item in records)
+                    / total,
+                    4,
+                )
+                if total
+                else 0.5,
             }
             return {
                 "schema_version": "sylanne.webui.memory.v1",
@@ -1345,9 +1604,24 @@ class EmotionalStatePlugin(Star):
                 "mode": "overview" if overview_requested else "session",
                 "sessions": source_sessions,
                 "layers": {
-                    "l1_hot": {"label": "L1 Hot Pool", "count": summary["l1_count"], "capacity": 50, "items": l1_items},
-                    "l2_warm": {"label": "L2 Warm Pool", "count": summary["l2_count"], "items": l2_items},
-                    "l3_cold": {"label": "L3 Cold Graph", "count": summary["l3_node_count"], "edge_count": summary["l3_edge_count"], "nodes": l3_nodes, "edges": l3_edges},
+                    "l1_hot": {
+                        "label": "L1 Hot Pool",
+                        "count": summary["l1_count"],
+                        "capacity": 50,
+                        "items": l1_items,
+                    },
+                    "l2_warm": {
+                        "label": "L2 Warm Pool",
+                        "count": summary["l2_count"],
+                        "items": l2_items,
+                    },
+                    "l3_cold": {
+                        "label": "L3 Cold Graph",
+                        "count": summary["l3_node_count"],
+                        "edge_count": summary["l3_edge_count"],
+                        "nodes": l3_nodes,
+                        "edges": l3_edges,
+                    },
                 },
                 "hot": l1_items,
                 "warm": l2_items,
@@ -1355,11 +1629,25 @@ class EmotionalStatePlugin(Star):
                 "summary": summary,
             }
 
-        records = [_payload(record) for record in list(getattr(state, "records", []) or [])]
-        hot = sorted(records, key=lambda item: float(item.get("created_at", 0.0) or 0.0), reverse=True)[:limit]
+        records = [
+            _payload(record) for record in list(getattr(state, "records", []) or [])
+        ]
+        hot = sorted(
+            records,
+            key=lambda item: float(item.get("created_at", 0.0) or 0.0),
+            reverse=True,
+        )[:limit]
         warm = sorted(
-            (item for item in records if float(item.get("weight", 0.0) or 0.0) >= 0.5 or int(item.get("recall_count", 0) or 0) > 0),
-            key=lambda item: (float(item.get("weight", 0.0) or 0.0), float(item.get("updated_at", 0.0) or 0.0)),
+            (
+                item
+                for item in records
+                if float(item.get("weight", 0.0) or 0.0) >= 0.5
+                or int(item.get("recall_count", 0) or 0) > 0
+            ),
+            key=lambda item: (
+                float(item.get("weight", 0.0) or 0.0),
+                float(item.get("updated_at", 0.0) or 0.0),
+            ),
             reverse=True,
         )[:limit]
         total = len(records)
@@ -1370,17 +1658,39 @@ class EmotionalStatePlugin(Star):
             "l3_node_count": 0,
             "l3_edge_count": 0,
             "embedded": sum(1 for item in records if item.get("has_embedding")),
-            "avg_weight": round(sum(float(item.get("weight", 0.0) or 0.0) for item in records) / total, 4) if total else 0.0,
-            "avg_temperature": round(sum(float(item.get("temperature", 0.0) or 0.0) for item in records) / total, 4) if total else 0.5,
+            "avg_weight": round(
+                sum(float(item.get("weight", 0.0) or 0.0) for item in records) / total,
+                4,
+            )
+            if total
+            else 0.0,
+            "avg_temperature": round(
+                sum(float(item.get("temperature", 0.0) or 0.0) for item in records)
+                / total,
+                4,
+            )
+            if total
+            else 0.5,
         }
         return {
             "schema_version": "sylanne.webui.memory.v1",
             "architecture": "legacy.sylanne_memory_state.compat",
             "session": session_key,
             "layers": {
-                "l1_hot": {"label": "L1 Hot Pool", "count": len(hot), "capacity": 50, "items": hot},
+                "l1_hot": {
+                    "label": "L1 Hot Pool",
+                    "count": len(hot),
+                    "capacity": 50,
+                    "items": hot,
+                },
                 "l2_warm": {"label": "L2 Warm Pool", "count": len(warm), "items": warm},
-                "l3_cold": {"label": "L3 Cold Graph", "count": 0, "edge_count": 0, "nodes": [], "edges": []},
+                "l3_cold": {
+                    "label": "L3 Cold Graph",
+                    "count": 0,
+                    "edge_count": 0,
+                    "nodes": [],
+                    "edges": [],
+                },
             },
             "hot": hot,
             "warm": warm,
@@ -1392,6 +1702,7 @@ class EmotionalStatePlugin(Star):
     async def _webui_memory_meltdown_handler(self) -> dict[str, Any]:
         """Clear all memory pools for a session. Supports both server nonce and client token verification."""
         from quart import request as quart_request
+
         try:
             body = await quart_request.get_json()
         except Exception:
@@ -1410,7 +1721,11 @@ class EmotionalStatePlugin(Star):
             if not token or not expected_token or token != expected_token:
                 return {"ok": False, "error": "token_mismatch"}
         # Clear memory for the session
-        mem_sys = self._memory_system_for_session(session) if hasattr(self, "_memory_system_for_session") else getattr(self, "_memory_system", None)
+        mem_sys = (
+            self._memory_system_for_session(session)
+            if hasattr(self, "_memory_system_for_session")
+            else getattr(self, "_memory_system", None)
+        )
         if mem_sys:
             mem_sys._l1.clear()
             mem_sys._l2.clear()
@@ -1432,6 +1747,7 @@ class EmotionalStatePlugin(Star):
     def _generate_meltdown_nonce(self, session: str) -> str:
         """Generate a one-time nonce for memory meltdown confirmation."""
         import secrets
+
         nonce = secrets.token_hex(16)
         self._meltdown_nonces[session] = nonce
         return nonce
@@ -1450,12 +1766,15 @@ class EmotionalStatePlugin(Star):
         if enabled:
             stopped = await self._stop_stale_webui_server_modules(include_current=True)
             if stopped:
-                self.logger.info(f"Sylanne WebUI probe stopped stale listener modules: {stopped}")
+                self.logger.info(
+                    f"Sylanne WebUI probe stopped stale listener modules: {stopped}"
+                )
             self._start_webui_if_enabled()
             await asyncio.sleep(0.2)
         module_count_after = len(self._iter_loaded_webui_server_modules())
 
         local_url = f"http://127.0.0.1:{port}/api/state"
+
         def _probe_local() -> dict[str, Any]:
             probe: dict[str, Any] = {
                 "ok": False,
@@ -1470,17 +1789,27 @@ class EmotionalStatePlugin(Star):
                 with urllib.request.urlopen(local_url, timeout=2.0) as response:
                     raw = response.read().decode("utf-8", errors="replace")
                     payload = json.loads(raw)
-                    runtime = payload.get("runtime", {}) if isinstance(payload, dict) else {}
+                    runtime = (
+                        payload.get("runtime", {}) if isinstance(payload, dict) else {}
+                    )
                     if not isinstance(runtime, dict):
                         runtime = {}
-                    runtime_match = str(runtime.get("runtime_id", "")) == expected_runtime["runtime_id"]
-                    probe.update({
-                        "ok": response.status == 200 and payload.get("schema_version") == "sylanne.webui.state.v1" and runtime_match,
-                        "status": response.status,
-                        "schema_version": str(payload.get("schema_version", "")),
-                        "runtime": runtime,
-                        "runtime_match": runtime_match,
-                    })
+                    runtime_match = (
+                        str(runtime.get("runtime_id", ""))
+                        == expected_runtime["runtime_id"]
+                    )
+                    probe.update(
+                        {
+                            "ok": response.status == 200
+                            and payload.get("schema_version")
+                            == "sylanne.webui.state.v1"
+                            and runtime_match,
+                            "status": response.status,
+                            "schema_version": str(payload.get("schema_version", "")),
+                            "runtime": runtime,
+                            "runtime_match": runtime_match,
+                        }
+                    )
             except urllib.error.HTTPError as exc:
                 probe.update({"status": exc.code, "error": str(exc)})
             except Exception as exc:
@@ -1507,6 +1836,7 @@ class EmotionalStatePlugin(Star):
     async def _webui_logo_handler(self) -> Any:
         """Serve the plugin logo.png with correct Content-Type."""
         from quart import Response
+
         logo_path = Path(_PLUGIN_DIR) / "logo.png"
         if not logo_path.exists():
             return Response("Not Found", status=404)
@@ -1516,6 +1846,7 @@ class EmotionalStatePlugin(Star):
     async def _webui_dashboard_handler(self) -> Any:
         """Serve the WebUI dashboard HTML via AstrBot's own web server."""
         from quart import Response
+
         dashboard_path = Path(_PLUGIN_DIR) / "pages" / "dashboard" / "index.html"
         if not dashboard_path.exists():
             return Response("Dashboard not found", status=404)
@@ -1538,11 +1869,13 @@ class EmotionalStatePlugin(Star):
         if hasattr(context, "get_all_embedding_providers"):
             for p in context.get_all_embedding_providers():
                 cfg = getattr(p, "provider_config", {})
-                providers.append({
-                    "id": cfg.get("id", ""),
-                    "model": cfg.get("embedding_model", ""),
-                    "dimensions": cfg.get("embedding_dimensions", 0),
-                })
+                providers.append(
+                    {
+                        "id": cfg.get("id", ""),
+                        "model": cfg.get("embedding_model", ""),
+                        "dimensions": cfg.get("embedding_dimensions", 0),
+                    }
+                )
         current_id = str(self._config.get("sylanne_memory_embedding_provider_id") or "")
         return {
             "embedding_providers": providers,
@@ -1550,7 +1883,9 @@ class EmotionalStatePlugin(Star):
             "native_config_embedding_selector_available": False,
         }
 
-    async def _update_sylanne_memory_settings_from_page(self, body: dict[str, Any]) -> dict[str, Any]:
+    async def _update_sylanne_memory_settings_from_page(
+        self, body: dict[str, Any]
+    ) -> dict[str, Any]:
         provider_id = str(body.get("embedding_provider_id") or "")
         context = getattr(self, "context", None) or self.context
         valid_ids = set()
@@ -1568,14 +1903,20 @@ class EmotionalStatePlugin(Star):
             config.save_config()
         return {"ok": True}
 
-    def _sylanne_lineage_observatory_page_payload(self, session_key: str) -> dict[str, Any]:
+    def _sylanne_lineage_observatory_page_payload(
+        self, session_key: str
+    ) -> dict[str, Any]:
         loop_data = self._last_understanding_closed_loop.get(session_key, {})
         observatory = loop_data.get("turning_point_lineage_observatory", {})
         lineage = observatory.get("lineage", {})
         raw_branches = observatory.get("branches", [])
         sanitized_branches = []
         for branch in raw_branches:
-            sanitized = {k: v for k, v in branch.items() if k not in ("relationship_time_weight", "isolation_key")}
+            sanitized = {
+                k: v
+                for k, v in branch.items()
+                if k not in ("relationship_time_weight", "isolation_key")
+            }
             sanitized_branches.append(sanitized)
         return {
             "read_only": True,
@@ -1585,7 +1926,9 @@ class EmotionalStatePlugin(Star):
             "branches": sanitized_branches,
         }
 
-    def _understanding_closed_loop_diagnostics(self, session_key: str) -> dict[str, Any]:
+    def _understanding_closed_loop_diagnostics(
+        self, session_key: str
+    ) -> dict[str, Any]:
         loop_data = dict(self._last_understanding_closed_loop.get(session_key, {}))
         if "turning_point_memory_replay" in loop_data:
             loop_data["turning_point_memory_replay"] = {}
@@ -1615,16 +1958,26 @@ class EmotionalStatePlugin(Star):
                     old_host.runtime.save(old_host.kernel)
                 except Exception:
                     pass
-            cfg = self.config if hasattr(self, "_config") else getattr(self, "config", {}) or {}
+            cfg = (
+                self.config
+                if hasattr(self, "_config")
+                else getattr(self, "config", {}) or {}
+            )
             root = cfg.get("sylanne_alpha_root") or str(Path.home() / ".sylanne_alpha")
             host = SylanneAlphaHost(root=root, session_key=session_key)
             # Share encoder across all hosts to save memory
             if EmotionalStatePlugin._shared_encoder is None:
                 EmotionalStatePlugin._shared_encoder = host.kernel.computation.encoder
             else:
-                host.kernel.computation.replace_encoder(EmotionalStatePlugin._shared_encoder)
+                host.kernel.computation.replace_encoder(
+                    EmotionalStatePlugin._shared_encoder
+                )
             # Derive memory system params from personality
-            personality = host.kernel._personality() if hasattr(host.kernel, "_personality") else {}
+            personality = (
+                host.kernel._personality()
+                if hasattr(host.kernel, "_personality")
+                else {}
+            )
             memory_system = self._memory_system_for_session(session_key)
             if personality and isinstance(personality, dict):
                 memory_system.derive_params(personality)
@@ -1633,7 +1986,11 @@ class EmotionalStatePlugin(Star):
             if mem_data and isinstance(mem_data, dict):
                 memory_system.from_dict(mem_data)
             if not self._memory_system_has_content(memory_system):
-                self._hydrate_memory_system_from_body_traces(session_key, memory_system, host.kernel.body.memory.get("traces", []))
+                self._hydrate_memory_system_from_body_traces(
+                    session_key,
+                    memory_system,
+                    host.kernel.body.memory.get("traces", []),
+                )
                 if self._memory_system_has_content(memory_system):
                     host.kernel.body.memory["_memory_system"] = memory_system.to_dict()
                     try:
@@ -1645,7 +2002,9 @@ class EmotionalStatePlugin(Star):
             if session_key not in self._conversation_buffers:
                 buf_data = host.runtime.load_buffer(session_key)
                 if buf_data and isinstance(buf_data, dict):
-                    self._conversation_buffers[session_key] = ConversationBuffer.from_dict(buf_data)
+                    self._conversation_buffers[session_key] = (
+                        ConversationBuffer.from_dict(buf_data)
+                    )
         else:
             # Touch: move to end for LRU ordering
             host = self._hosts.pop(session_key)
@@ -1673,7 +2032,9 @@ class EmotionalStatePlugin(Star):
             or list(getattr(memory_system, "_l3_edges", []) or [])
         )
 
-    def _hydrate_memory_system_from_body_traces(self, session_key: str, memory_system: MemorySystem, traces: Any) -> None:
+    def _hydrate_memory_system_from_body_traces(
+        self, session_key: str, memory_system: MemorySystem, traces: Any
+    ) -> None:
         if self._memory_system_has_content(memory_system):
             return
         for trace in list(traces or [])[-50:]:
@@ -1683,18 +2044,28 @@ class EmotionalStatePlugin(Star):
             if not text:
                 continue
             try:
-                temperature = float(trace.get("temperature", trace.get("warmth", 0.5)) or 0.5)
+                temperature = float(
+                    trace.get("temperature", trace.get("warmth", 0.5)) or 0.5
+                )
             except (TypeError, ValueError):
                 temperature = 0.5
-            memory_system.write(text=text, embedding=trace.get("embedding"), temperature=max(0.0, min(1.0, temperature)))
+            memory_system.write(
+                text=text,
+                embedding=trace.get("embedding"),
+                temperature=max(0.0, min(1.0, temperature)),
+            )
             if memory_system._l1:
                 item = memory_system._l1[-1]
                 try:
-                    item.weight = max(0.0, min(1.0, float(trace.get("weight", 1.0) or 1.0)))
+                    item.weight = max(
+                        0.0, min(1.0, float(trace.get("weight", 1.0) or 1.0))
+                    )
                 except (TypeError, ValueError):
                     item.weight = 1.0
                 try:
-                    created_at = float(trace.get("created_at", trace.get("updated_at", 0.0)) or 0.0)
+                    created_at = float(
+                        trace.get("created_at", trace.get("updated_at", 0.0)) or 0.0
+                    )
                     if created_at > 0:
                         item.created_at = created_at
                 except (TypeError, ValueError):
@@ -1726,13 +2097,21 @@ class EmotionalStatePlugin(Star):
                 exported = export_all()
             except Exception:
                 continue
-            persisted = exported.get("sessions", {}) if isinstance(exported, dict) else {}
+            persisted = (
+                exported.get("sessions", {}) if isinstance(exported, dict) else {}
+            )
             if isinstance(persisted, dict):
                 for key in persisted.keys():
                     add(key)
         try:
-            cfg = self.config if hasattr(self, "_config") else getattr(self, "config", {}) or {}
-            root = Path(str(cfg.get("sylanne_alpha_root") or Path.home() / ".sylanne_alpha"))
+            cfg = (
+                self.config
+                if hasattr(self, "_config")
+                else getattr(self, "config", {}) or {}
+            )
+            root = Path(
+                str(cfg.get("sylanne_alpha_root") or Path.home() / ".sylanne_alpha")
+            )
             if root.exists():
                 for path in root.glob("*.alpha.json"):
                     add(path.name[: -len(".alpha.json")])
@@ -1746,10 +2125,16 @@ class EmotionalStatePlugin(Star):
         if session_key:
             return session_key
         if event is not None:
-            base = str(getattr(event, "session_id", "") or getattr(event, "unified_msg_origin", "") or "default")
+            base = str(
+                getattr(event, "session_id", "")
+                or getattr(event, "unified_msg_origin", "")
+                or "default"
+            )
             # For group chats, include sender_id so each user gets an
             # independent host/kernel/computation spine.
-            sender_id = str(getattr(event, "sender_id", "") or getattr(event, "user_id", "") or "")
+            sender_id = str(
+                getattr(event, "sender_id", "") or getattr(event, "user_id", "") or ""
+            )
             if sender_id and base != "default":
                 return f"{base}:{sender_id}"
             return base
@@ -1758,10 +2143,24 @@ class EmotionalStatePlugin(Star):
     # ------------------------------------------------------------------
     # Core observe lifecycle
     # ------------------------------------------------------------------
-    async def observe_request(self, session_key: str, *, text: str = "", confidence: float = 0.0, flags: list[str] | None = None, now: float = 0.0) -> dict[str, Any]:
+    async def observe_request(
+        self,
+        session_key: str,
+        *,
+        text: str = "",
+        confidence: float = 0.0,
+        flags: list[str] | None = None,
+        now: float = 0.0,
+    ) -> dict[str, Any]:
         host = self._host(session_key)
         effective_now = now or time.time()
-        event = SylanneAlphaHostEvent(text=text, confidence=confidence, flags=list(flags or []), now=effective_now, event_time=self._event_time(now))
+        event = SylanneAlphaHostEvent(
+            text=text,
+            confidence=confidence,
+            flags=list(flags or []),
+            now=effective_now,
+            event_time=self._event_time(now),
+        )
         # Feedback loop: trigger based on time since last bot expression
         if not hasattr(self, "_last_bot_expression_time"):
             self._last_bot_expression_time = {}
@@ -1779,10 +2178,24 @@ class EmotionalStatePlugin(Star):
             # 30-300s: neutral, no feedback triggered
         return host.on_request(event)
 
-    async def observe_response(self, session_key: str, *, text: str = "", confidence: float = 0.0, flags: list[str] | None = None, now: float = 0.0) -> dict[str, Any]:
+    async def observe_response(
+        self,
+        session_key: str,
+        *,
+        text: str = "",
+        confidence: float = 0.0,
+        flags: list[str] | None = None,
+        now: float = 0.0,
+    ) -> dict[str, Any]:
         host = self._host(session_key)
         effective_now = now or time.time()
-        event = SylanneAlphaHostEvent(text=text, confidence=confidence, flags=list(flags or []), now=effective_now, event_time=self._event_time(now))
+        event = SylanneAlphaHostEvent(
+            text=text,
+            confidence=confidence,
+            flags=list(flags or []),
+            now=effective_now,
+            event_time=self._event_time(now),
+        )
         # Record bot expression time for feedback loop
         if not hasattr(self, "_last_bot_expression_time"):
             self._last_bot_expression_time = {}
@@ -1792,9 +2205,17 @@ class EmotionalStatePlugin(Star):
     # ------------------------------------------------------------------
     # Immediate chat
     # ------------------------------------------------------------------
-    async def chat_sylanne(self, *, session_key: str, text: str = "", now: float = 0.0) -> dict[str, Any]:
+    async def chat_sylanne(
+        self, *, session_key: str, text: str = "", now: float = 0.0
+    ) -> dict[str, Any]:
         host = self._host(session_key)
-        event = SylanneAlphaHostEvent(text=text, confidence=0.7, flags=["safe", "chat_request"], now=now or time.time(), event_time=self._event_time(now))
+        event = SylanneAlphaHostEvent(
+            text=text,
+            confidence=0.7,
+            flags=["safe", "chat_request"],
+            now=now or time.time(),
+            event_time=self._event_time(now),
+        )
         return host.on_chat(event)
 
     # ------------------------------------------------------------------
@@ -1833,14 +2254,20 @@ class EmotionalStatePlugin(Star):
     # ------------------------------------------------------------------
     # Memory
     # ------------------------------------------------------------------
-    async def sylanne_memory(self, *, session_key: str, query: str = "", limit: int = 5) -> dict[str, Any]:
+    async def sylanne_memory(
+        self, *, session_key: str, query: str = "", limit: int = 5
+    ) -> dict[str, Any]:
         return memory_surface(self._host(session_key), query=query, limit=limit)
 
-    async def query_sylanne_memory(self, *, session_key: str, query: str = "", limit: int = 5, now: float = 0.0) -> dict[str, Any]:
+    async def query_sylanne_memory(
+        self, *, session_key: str, query: str = "", limit: int = 5, now: float = 0.0
+    ) -> dict[str, Any]:
         host = self._host(session_key)
         memory_system = self._memory_system_for_session(session_key)
         enabled = bool(self._config.get("sylanne_alpha_embedding_memory_enabled"))
-        provider_id = str(self._config.get("sylanne_alpha_embedding_memory_provider_id") or "")
+        provider_id = str(
+            self._config.get("sylanne_alpha_embedding_memory_provider_id") or ""
+        )
 
         query_embedding: list[float] | None = None
         if enabled and provider_id and query:
@@ -1859,7 +2286,13 @@ class EmotionalStatePlugin(Star):
             limit=limit,
         )
         matches = [
-            {"text": r.text, "layer": r.layer, "weight": r.weight, "relevance": r.relevance, "score": r.final_score}
+            {
+                "text": r.text,
+                "layer": r.layer,
+                "weight": r.weight,
+                "relevance": r.relevance,
+                "score": r.final_score,
+            }
             for r in results
         ]
         return {
@@ -1883,19 +2316,40 @@ class EmotionalStatePlugin(Star):
     # ------------------------------------------------------------------
     # Public API facade
     # ------------------------------------------------------------------
-    async def observe_emotion_text(self, session_key: str = "", *, text: str = "", confidence: float = 0.0, now: float = 0.0, use_llm: bool = True, observed_at: float = 0.0, **kwargs: Any) -> dict[str, Any]:
+    async def observe_emotion_text(
+        self,
+        session_key: str = "",
+        *,
+        text: str = "",
+        confidence: float = 0.0,
+        now: float = 0.0,
+        use_llm: bool = True,
+        observed_at: float = 0.0,
+        **kwargs: Any,
+    ) -> dict[str, Any]:
         effective_now = observed_at or now
-        surface = await self.observe_request(session_key, text=text, confidence=confidence, flags=["safe"], now=effective_now)
+        await self.observe_request(
+            session_key,
+            text=text,
+            confidence=confidence,
+            flags=["safe"],
+            now=effective_now,
+        )
         return command_surface(self._host(session_key), "emotion")
 
-    async def get_emotion_snapshot(self, *, session_key: str, include_prompt_fragment: bool = False, **kwargs: Any) -> dict[str, Any]:
+    async def get_emotion_snapshot(
+        self, *, session_key: str, include_prompt_fragment: bool = False, **kwargs: Any
+    ) -> dict[str, Any]:
         host = self._host(session_key)
         payload = command_surface(host, "emotion")
         payload["turns"] = host.kernel.turns
         return payload
 
-    async def get_emotion_state(self, *, session_key: str, as_dict: bool = True, **kwargs: Any) -> Any:
+    async def get_emotion_state(
+        self, *, session_key: str, as_dict: bool = True, **kwargs: Any
+    ) -> Any:
         import copy
+
         state = await self._load_state(session_key)
         if not as_dict and state is not None and not isinstance(state, dict):
             return copy.deepcopy(state)
@@ -1905,12 +2359,36 @@ class EmotionalStatePlugin(Star):
     async def get_emotion_values(self, *, session_key: str) -> dict[str, float]:
         return emotion_values(self._host(session_key))
 
-    async def build_emotion_memory_payload(self, event_or_session: Any = None, *, session_key: str = "", query: str = "", limit: int = 5, memory: Any = None, source: str = "", written_at: float = 0.0, include_raw_snapshot: bool = True, include_state_annotations_envelope: bool = True, memory_text: str = "", **kwargs: Any) -> dict[str, Any]:
-        sk = session_key or (str(getattr(event_or_session, "unified_msg_origin", "")) if event_or_session else "") or "default"
+    async def build_emotion_memory_payload(
+        self,
+        event_or_session: Any = None,
+        *,
+        session_key: str = "",
+        query: str = "",
+        limit: int = 5,
+        memory: Any = None,
+        source: str = "",
+        written_at: float = 0.0,
+        include_raw_snapshot: bool = True,
+        include_state_annotations_envelope: bool = True,
+        memory_text: str = "",
+        **kwargs: Any,
+    ) -> dict[str, Any]:
+        sk = (
+            session_key
+            or (
+                str(getattr(event_or_session, "unified_msg_origin", ""))
+                if event_or_session
+                else ""
+            )
+            or "default"
+        )
         host = self._host(sk)
         memory_system = self._memory_system_for_session(sk)
         enabled = bool(self._config.get("sylanne_alpha_embedding_memory_enabled"))
-        provider_id = str(self._config.get("sylanne_alpha_embedding_memory_provider_id") or "")
+        provider_id = str(
+            self._config.get("sylanne_alpha_embedding_memory_provider_id") or ""
+        )
 
         query_embedding: list[float] | None = None
         if enabled and provider_id and query:
@@ -1929,7 +2407,13 @@ class EmotionalStatePlugin(Star):
             limit=limit,
         )
         matches = [
-            {"text": r.text, "layer": r.layer, "weight": r.weight, "relevance": r.relevance, "score": r.final_score}
+            {
+                "text": r.text,
+                "layer": r.layer,
+                "weight": r.weight,
+                "relevance": r.relevance,
+                "score": r.final_score,
+            }
             for r in results
         ]
         prompt_fragment = self._embedding_prompt_fragment(matches, query)
@@ -1944,24 +2428,49 @@ class EmotionalStatePlugin(Star):
             "prompt_fragment": prompt_fragment,
         }
 
-    def _embedding_prompt_fragment(self, matches: list[dict[str, Any]], query: str = "") -> str:
+    def _embedding_prompt_fragment(
+        self, matches: list[dict[str, Any]], query: str = ""
+    ) -> str:
         if not matches:
             return ""
-        lines = ["[retrieved_conversation_context]", "检索到的记忆参考（旧记忆只作旁注，冲突时以当前用户输入为准，不要把旧记忆当成用户的新请求）："]
+        lines = [
+            "[retrieved_conversation_context]",
+            "检索到的记忆参考（旧记忆只作旁注，冲突时以当前用户输入为准，不要把旧记忆当成用户的新请求）：",
+        ]
         for match in matches[:5]:
             text = str(match.get("text") or "")[:200]
             lines.append(f"- {text}")
         return "\n".join(lines)
 
-    async def get_proactive_speech_decision(self, event_or_session: Any = None, *, session_key: str = "", now: float = 0.0, candidate_context: str = "", **kwargs: Any) -> dict[str, Any]:
-        sk = session_key or (str(getattr(event_or_session, "unified_msg_origin", "")) if event_or_session else "") or "default"
+    async def get_proactive_speech_decision(
+        self,
+        event_or_session: Any = None,
+        *,
+        session_key: str = "",
+        now: float = 0.0,
+        candidate_context: str = "",
+        **kwargs: Any,
+    ) -> dict[str, Any]:
+        sk = (
+            session_key
+            or (
+                str(getattr(event_or_session, "unified_msg_origin", ""))
+                if event_or_session
+                else ""
+            )
+            or "default"
+        )
         host = self._host(sk)
         surface = host.diagnostics()
         return proactive_decision(surface)
 
-    async def get_realtime_chat_plan(self, session_key: str, text: str, **kwargs) -> dict[str, Any]:
+    async def get_realtime_chat_plan(
+        self, session_key: str, text: str, **kwargs
+    ) -> dict[str, Any]:
         cfg = getattr(self, "config", None) or getattr(self, "_config", {}) or {}
-        max_part_chars = int(kwargs.pop("max_part_chars", cfg.get("realtime_chat_max_part_chars", 48)))
+        max_part_chars = int(
+            kwargs.pop("max_part_chars", cfg.get("realtime_chat_max_part_chars", 48))
+        )
         if max_part_chars < 4:
             max_part_chars = 4
         max_delay = float(cfg.get("realtime_chat_max_delay_seconds", 4.2))
@@ -1969,27 +2478,50 @@ class EmotionalStatePlugin(Star):
         plan = realtime_plan(session_key, text, max_part_chars=max_part_chars, **kwargs)
         for part in plan["message_parts"]:
             d = part["delay_before_seconds"]
-            part["delay_before_seconds"] = round(min(max_delay, max(min_delay if d > 0 else 0.0, d)), 3)
+            part["delay_before_seconds"] = round(
+                min(max_delay, max(min_delay if d > 0 else 0.0, d)), 3
+            )
         plan["settings"] = {"max_part_chars": max_part_chars}
         return plan
 
-    async def request_realtime_chat_dispatch(self, session_key: str, text: str) -> dict[str, Any]:
+    async def request_realtime_chat_dispatch(
+        self, session_key: str, text: str
+    ) -> dict[str, Any]:
         return realtime_dispatch(session_key, text)
 
-    async def inject_emotion_context(self, event: Any = None, request: Any = None, *, session_key: str = "") -> dict[str, Any]:
+    async def inject_emotion_context(
+        self, event: Any = None, request: Any = None, *, session_key: str = ""
+    ) -> dict[str, Any]:
         sk = session_key or self._session_key(event)
         if request is None:
             return {"prompt": ""}
         # Build memory-based injection - use last event text as query hint
         host = self._host(sk)
         last_text = str(host.kernel.last_event.get("text") or "")
-        query_hint = last_text[:100] if last_text else str(getattr(request, "prompt", "") or "")[:100]
-        memory_result = await self.query_sylanne_memory(session_key=sk, query=query_hint, limit=3)
+        query_hint = (
+            last_text[:100]
+            if last_text
+            else str(getattr(request, "prompt", "") or "")[:100]
+        )
+        memory_result = await self.query_sylanne_memory(
+            session_key=sk, query=query_hint, limit=3
+        )
         fragment = self._memory_prompt_fragment(memory_result)
         self._append_request_prompt_fragment(request, fragment)
         return {"prompt": str(getattr(request, "prompt", "") or "")}
 
-    async def simulate_emotion_update(self, *, session_key: str, text: str = "", flags: list[str] | None = None, confidence: float = 0.5, role: str = "user", source: str = "", observed_at: float = 0.0, **kwargs: Any) -> dict[str, Any]:
+    async def simulate_emotion_update(
+        self,
+        *,
+        session_key: str,
+        text: str = "",
+        flags: list[str] | None = None,
+        confidence: float = 0.5,
+        role: str = "user",
+        source: str = "",
+        observed_at: float = 0.0,
+        **kwargs: Any,
+    ) -> dict[str, Any]:
         host = self._host(session_key)
         return simulate_update(host, text=text, flags=flags, confidence=confidence)
 
@@ -2006,9 +2538,15 @@ class EmotionalStatePlugin(Star):
         snapshot["session_key"] = session_key
         return snapshot
 
-    async def import_sylanne_legacy(self, legacy: dict[str, Any], *, session_key: str) -> dict[str, Any]:
-        root = self._config.get("sylanne_alpha_root") or str(Path.home() / ".sylanne_alpha")
-        self._hosts[session_key] = SylanneAlphaHost(root=root, session_key=session_key, legacy=legacy)
+    async def import_sylanne_legacy(
+        self, legacy: dict[str, Any], *, session_key: str
+    ) -> dict[str, Any]:
+        root = self._config.get("sylanne_alpha_root") or str(
+            Path.home() / ".sylanne_alpha"
+        )
+        self._hosts[session_key] = SylanneAlphaHost(
+            root=root, session_key=session_key, legacy=legacy
+        )
         return self._hosts[session_key].snapshot()
 
     async def pause_sylanne(self, *, session_key: str) -> dict[str, Any]:
@@ -2025,7 +2563,9 @@ class EmotionalStatePlugin(Star):
 
     async def cooldown_sylanne(self, *, session_key: str) -> dict[str, Any]:
         host = self._host(session_key)
-        host.kernel.body.immunity.cooldown = max(host.kernel.body.immunity.cooldown, 0.5)
+        host.kernel.body.immunity.cooldown = max(
+            host.kernel.body.immunity.cooldown, 0.5
+        )
         host.runtime.save(host.kernel)
         return host.diagnostics()
 
@@ -2034,16 +2574,23 @@ class EmotionalStatePlugin(Star):
         host.kernel = host.runtime.reset(session_key)
         return host.diagnostics()
 
-    async def proactive_sylanne(self, *, session_key: str, now: float = 0.0) -> dict[str, Any]:
+    async def proactive_sylanne(
+        self, *, session_key: str, now: float = 0.0
+    ) -> dict[str, Any]:
         host = self._host(session_key)
         event = SylanneAlphaHostEvent(
-            text="", confidence=0.5, flags=["proactive", "safe"],
-            now=now or time.time(), event_time=self._event_time(now),
+            text="",
+            confidence=0.5,
+            flags=["proactive", "safe"],
+            now=now or time.time(),
+            event_time=self._event_time(now),
         )
         surface = host.on_proactive_check(event)
         decision_payload = proactive_decision(surface)
         # Add reason_code from host_payload
-        decision_payload["reason_code"] = surface["host_payload"].get("reason_code", "life_rhythm")
+        decision_payload["reason_code"] = surface["host_payload"].get(
+            "reason_code", "life_rhythm"
+        )
         return {
             **surface,
             "host_payload": surface["host_payload"],
@@ -2089,7 +2636,7 @@ class EmotionalStatePlugin(Star):
             self._fragment_timers = {}
         self._start_webui_if_enabled()
         # Start memory v2 background timers once
-        if not hasattr(self, '_memory_timers_started'):
+        if not hasattr(self, "_memory_timers_started"):
             self._memory_timers_started = True
             loop = asyncio.get_running_loop()
             loop.create_task(self._session_idle_check_loop())
@@ -2098,9 +2645,13 @@ class EmotionalStatePlugin(Star):
         message_text = str(getattr(event, "message_str", "") or "")
         if message_text:
             self._last_user_texts[session_key] = message_text[:120]
-        realtime_enabled = bool((self.config or {}).get("sylanne_alpha_realtime_chat_enabled"))
+        realtime_enabled = bool(
+            (self.config or {}).get("sylanne_alpha_realtime_chat_enabled")
+        )
         hajide = bool((self.config or {}).get("sylanne_alpha_hajide_compat_mode"))
-        intercept = bool((self.config or {}).get("sylanne_alpha_realtime_intercept_llm_response"))
+        intercept = bool(
+            (self.config or {}).get("sylanne_alpha_realtime_intercept_llm_response")
+        )
 
         # Group chat SFPD: collect social signals → pass to spine → L7 decides
         _is_group = self._social_field.is_group_context(event)
@@ -2108,8 +2659,12 @@ class EmotionalStatePlugin(Star):
         _group_id = ""
         if _is_group and message_text:
             _group_id = self._social_field.extract_group_id(event)
-            sender_id = str(getattr(event, "sender_id", "") or getattr(event, "user_id", "") or "")
-            is_at_bot = bool(getattr(event, "is_at", False) or getattr(event, "at_bot", False))
+            sender_id = str(
+                getattr(event, "sender_id", "") or getattr(event, "user_id", "") or ""
+            )
+            is_at_bot = bool(
+                getattr(event, "is_at", False) or getattr(event, "at_bot", False)
+            )
 
             # Collect social signals
             signals = self._social_field.collect(
@@ -2136,18 +2691,38 @@ class EmotionalStatePlugin(Star):
 
             if not _should_respond:
                 try:
-                    await self.observe_request(session_key, text=message_text[:200], confidence=0.3, flags=["safe", "group_silent"], now=time.time())
+                    await self.observe_request(
+                        session_key,
+                        text=message_text[:200],
+                        confidence=0.3,
+                        flags=["safe", "group_silent"],
+                        now=time.time(),
+                    )
                 except Exception:
                     pass
                 return
 
         # Fragment debounce: wait for user to finish typing
         # Skip debounce if this is a follow-up message (AstrBot already handled merging)
-        is_follow_up = bool(getattr(event, "_is_follow_up", False) or getattr(event, "order_seq", None) is not None)
-        active_reply = session_key in self._segmented_tasks and not self._segmented_tasks[session_key].done()
+        is_follow_up = bool(
+            getattr(event, "_is_follow_up", False)
+            or getattr(event, "order_seq", None) is not None
+        )
+        active_reply = (
+            session_key in self._segmented_tasks
+            and not self._segmented_tasks[session_key].done()
+        )
         if realtime_enabled and message_text and not is_follow_up and not active_reply:
-            probe_delay = float((self.config or {}).get("realtime_input_completion_probe_delay_seconds", 1.5))
-            max_wait = float((self.config or {}).get("realtime_input_completion_max_wait_seconds", 4.0))
+            probe_delay = float(
+                (self.config or {}).get(
+                    "realtime_input_completion_probe_delay_seconds", 1.5
+                )
+            )
+            max_wait = float(
+                (self.config or {}).get(
+                    "realtime_input_completion_max_wait_seconds", 4.0
+                )
+            )
 
             # Cancel previous timer for this session
             old_timer = self._fragment_timers.pop(session_key, None)
@@ -2156,7 +2731,12 @@ class EmotionalStatePlugin(Star):
 
             # Accumulate fragment
             if session_key not in self._fragment_buffers:
-                self._fragment_buffers[session_key] = {"texts": [], "start_time": time.time(), "event": event, "request": request}
+                self._fragment_buffers[session_key] = {
+                    "texts": [],
+                    "start_time": time.time(),
+                    "event": event,
+                    "request": request,
+                }
             self._fragment_buffers[session_key]["texts"].append(message_text)
             self._fragment_buffers[session_key]["event"] = event
             self._fragment_buffers[session_key]["request"] = request
@@ -2176,20 +2756,53 @@ class EmotionalStatePlugin(Star):
                     if buf:
                         merged = " ".join(buf["texts"])
                         buf["event"].message_str = merged
-                        logger.info(f"Sylanne fragment merged (debounce): {merged[:60]}")
-                        await self._process_llm_request_final(buf["event"], buf["request"], merged, sk, realtime_enabled, hajide, intercept)
+                        logger.info(
+                            f"Sylanne fragment merged (debounce): {merged[:60]}"
+                        )
+                        await self._process_llm_request_final(
+                            buf["event"],
+                            buf["request"],
+                            merged,
+                            sk,
+                            realtime_enabled,
+                            hajide,
+                            intercept,
+                        )
 
                 timer = asyncio.ensure_future(_process_after_delay())
                 self._fragment_timers[session_key] = timer
                 self._background_tasks.append(timer)
-                timer.add_done_callback(lambda t: self._background_tasks.remove(t) if t in self._background_tasks else None)
+                timer.add_done_callback(
+                    lambda t: (
+                        self._background_tasks.remove(t)
+                        if t in self._background_tasks
+                        else None
+                    )
+                )
                 return  # Don't process yet, wait for debounce
 
             # If we got here via max_wait, fall through to process
 
-        await self._process_llm_request_final(event, request, message_text, session_key, realtime_enabled, hajide, intercept)
+        await self._process_llm_request_final(
+            event,
+            request,
+            message_text,
+            session_key,
+            realtime_enabled,
+            hajide,
+            intercept,
+        )
 
-    async def _process_llm_request_final(self, event: Any, request: Any, message_text: str, session_key: str, realtime_enabled: bool, hajide: bool, intercept: bool) -> None:
+    async def _process_llm_request_final(
+        self,
+        event: Any,
+        request: Any,
+        message_text: str,
+        session_key: str,
+        realtime_enabled: bool,
+        hajide: bool,
+        intercept: bool,
+    ) -> None:
 
         # Clear stream state for this session
         self._stream_buffers.pop(session_key, None)
@@ -2197,12 +2810,20 @@ class EmotionalStatePlugin(Star):
 
         # Schedule background observation (non-blocking, serialized per session)
         if message_text:
+
             async def _locked_observe(sk=session_key, txt=message_text):
                 async with self._session_lock(sk):
                     await self._background_observe_request(sk, txt)
+
             task = asyncio.ensure_future(_locked_observe())
             self._background_tasks.append(task)
-            task.add_done_callback(lambda t: self._background_tasks.remove(t) if t in self._background_tasks else None)
+            task.add_done_callback(
+                lambda t: (
+                    self._background_tasks.remove(t)
+                    if t in self._background_tasks
+                    else None
+                )
+            )
 
         # Cancel stale segmented reply tasks
         stale_task = self._segmented_tasks.pop(session_key, None)
@@ -2210,7 +2831,9 @@ class EmotionalStatePlugin(Star):
             stale_task.cancel()
 
         # Wrap event.send_streaming if first-sentence dispatch is enabled
-        stream_first = bool((self._config or {}).get("sylanne_alpha_stream_first_sentence_enabled"))
+        stream_first = bool(
+            (self._config or {}).get("sylanne_alpha_stream_first_sentence_enabled")
+        )
         if stream_first and intercept and hasattr(event, "send_streaming"):
             original_send_streaming = event.send_streaming
             plugin = self
@@ -2230,11 +2853,21 @@ class EmotionalStatePlugin(Star):
                             if first_sentence:
                                 first_sent = True
                                 plugin._stream_first_sent[session_key] = first_sentence
-                                t = asyncio.ensure_future(plugin._send_first_sentence(origin, first_sentence))
+                                t = asyncio.ensure_future(
+                                    plugin._send_first_sentence(origin, first_sentence)
+                                )
                                 plugin._background_tasks.append(t)
-                                t.add_done_callback(lambda tt: plugin._background_tasks.remove(tt) if tt in plugin._background_tasks else None)
+                                t.add_done_callback(
+                                    lambda tt: (
+                                        plugin._background_tasks.remove(tt)
+                                        if tt in plugin._background_tasks
+                                        else None
+                                    )
+                                )
 
-                await original_send_streaming(intercepted_generator(), use_fallback=use_fallback)
+                await original_send_streaming(
+                    intercepted_generator(), use_fallback=use_fallback
+                )
 
             event.send_streaming = wrapped_send_streaming
 
@@ -2247,7 +2880,9 @@ class EmotionalStatePlugin(Star):
             model_hint = await self._get_model_hint(event)
 
         # Create budget and normalize if needed
-        budget = self._state_injection_budget_for_request(session_key, request, model_hint=model_hint)
+        budget = self._state_injection_budget_for_request(
+            session_key, request, model_hint=model_hint
+        )
         self._last_request_budgets[session_key] = budget
 
         if hajide or budget.compat_mode:
@@ -2263,12 +2898,16 @@ class EmotionalStatePlugin(Star):
         if unfinished:
             # Record shadow signal for interruption only (followup comes from the text observe)
             host = self._host(session_key)
-            host.kernel.body.observe_shadow_signal(text="", flags=["unfinished_reply"], kind="interruption")
+            host.kernel.body.observe_shadow_signal(
+                text="", flags=["unfinished_reply"], kind="interruption"
+            )
             host.runtime.save(host.kernel)
             capped = unfinished[:_MAX_UNFINISHED_CONTEXT_CHARS]
             if len(unfinished) > _MAX_UNFINISHED_CONTEXT_CHARS:
                 capped += "\n[sylanne_trimmed_fragment]"
-            unfinished_fragment = f"\n上一轮回复没有说完，以下是未发送的部分（自然续接即可）：\n{capped}"
+            unfinished_fragment = (
+                f"\n上一轮回复没有说完，以下是未发送的部分（自然续接即可）：\n{capped}"
+            )
 
         # Consume pending outreach context (from life simulation)
         outreach_fragment = ""
@@ -2291,12 +2930,16 @@ class EmotionalStatePlugin(Star):
             # Get embedding for query (if provider available)
             query_embedding = None
             enabled = bool(self._config.get("sylanne_alpha_embedding_memory_enabled"))
-            provider_id = str(self._config.get("sylanne_alpha_embedding_memory_provider_id") or "")
+            provider_id = str(
+                self._config.get("sylanne_alpha_embedding_memory_provider_id") or ""
+            )
             if enabled and provider_id:
                 try:
                     provider = self._get_embedding_provider(provider_id)
                     if provider:
-                        query_embedding = await provider.get_embedding(message_text[:100])
+                        query_embedding = await provider.get_embedding(
+                            message_text[:100]
+                        )
                 except Exception:
                     pass
             results = memory_system.recall(
@@ -2308,9 +2951,13 @@ class EmotionalStatePlugin(Star):
             if results:
                 mem_texts = [r.text[:100] for r in results if r.text]
                 if mem_texts:
-                    memory_fragment = memory_system.format_recall_injection(results, max_items=3)
+                    memory_fragment = memory_system.format_recall_injection(
+                        results, max_items=3
+                    )
                 # Trigger reconsolidation rewrite in background (non-blocking)
-                asyncio.ensure_future(self._reconsolidation_rewrite(session_key, memory_system))
+                asyncio.ensure_future(
+                    self._reconsolidation_rewrite(session_key, memory_system)
+                )
 
         # User's current message — always last for recency priority
         user_anchor = ""
@@ -2337,7 +2984,11 @@ class EmotionalStatePlugin(Star):
                     pass
             # Merge: fast (current, if available) + last_assessment (previous round background)
             last_assessment = host.kernel.computation._last_assessment or {}
-            current_assessment = {**last_assessment, **fast_assessment} if fast_assessment else last_assessment
+            current_assessment = (
+                {**last_assessment, **fast_assessment}
+                if fast_assessment
+                else last_assessment
+            )
             # Compact state signal — just the key dimensions LLM needs
             warmth = emotion.get("warmth", 0.0)
             tension = emotion.get("tension", 0.0)
@@ -2416,7 +3067,9 @@ class EmotionalStatePlugin(Star):
         new_prompt = new_prompt.strip()
 
         request.prompt = new_prompt
-        logger.info(f"Sylanne injected prompt ({len(new_prompt)} chars): {new_prompt[:300]}")
+        logger.info(
+            f"Sylanne injected prompt ({len(new_prompt)} chars): {new_prompt[:300]}"
+        )
 
         # Start life simulator once (lazy init on first LLM request)
         if not getattr(self, "_life_simulator_started", False):
@@ -2429,17 +3082,20 @@ class EmotionalStatePlugin(Star):
                     emotion_getter=self._life_sim_emotion,
                 )
                 life_sim.start()
-                self.logger.info(f"Sylanne life simulator: enabled={life_sim.enabled}, interval={life_sim.interval_seconds}s")
+                self.logger.info(
+                    f"Sylanne life simulator: enabled={life_sim.enabled}, interval={life_sim.interval_seconds}s"
+                )
 
             # Start standalone WebUI server (event loop is running here).
             self._start_webui_if_enabled()
-
 
     async def _get_model_hint(self, event: Any = None) -> str:
         context = getattr(self, "context", None) or getattr(self, "_context", None)
         if hasattr(context, "get_current_chat_provider_id"):
             try:
-                umo = str(getattr(event, "unified_msg_origin", "") or "") if event else ""
+                umo = (
+                    str(getattr(event, "unified_msg_origin", "") or "") if event else ""
+                )
                 if umo:
                     result = await context.get_current_chat_provider_id(umo=umo)
                 else:
@@ -2459,7 +3115,12 @@ class EmotionalStatePlugin(Star):
             timers[session_key].cancel()
         try:
             loop = asyncio.get_running_loop()
-            timers[session_key] = loop.call_later(5.0, lambda sk=session_key: asyncio.ensure_future(self._do_buffer_persist(sk)))
+            timers[session_key] = loop.call_later(
+                5.0,
+                lambda sk=session_key: asyncio.ensure_future(
+                    self._do_buffer_persist(sk)
+                ),
+            )
         except RuntimeError:
             pass
 
@@ -2506,7 +3167,8 @@ class EmotionalStatePlugin(Star):
             fast_enabled = self._cfg_bool("sylanne_alpha_assessor_llm_enabled")
             if fast_enabled and text:
                 fast_result = await self._async_assessor.assess_fast(
-                    text, self._assessor_llm_call,
+                    text,
+                    self._assessor_llm_call,
                 )
 
             # Determine if main assessor should run
@@ -2517,7 +3179,9 @@ class EmotionalStatePlugin(Star):
                 # Gather recent context lines for richer assessment
                 context_lines = self._recent_context_lines(session_key)
                 main_result = await self._async_assessor.assess_main(
-                    text, context_lines, self._main_assessor_llm_call,
+                    text,
+                    context_lines,
+                    self._main_assessor_llm_call,
                 )
 
             # Merge: main overrides fast
@@ -2529,38 +3193,61 @@ class EmotionalStatePlugin(Star):
             # Feed into computation spine with assessment
             now = time.time()
             event = SylanneAlphaHostEvent(
-                text=text, confidence=0.7, flags=["safe"],
-                now=now, event_time=self._event_time(now),
+                text=text,
+                confidence=0.7,
+                flags=["safe"],
+                now=now,
+                event_time=self._event_time(now),
             )
             host.on_request(event, assessment=assessment if assessment else None)
 
             # Capture computation log for WebUI real-time display
             try:
-                comp_result = getattr(host.kernel, "_last_computation_result", None) or {}
+                comp_result = (
+                    getattr(host.kernel, "_last_computation_result", None) or {}
+                )
                 layers = dict(comp_result.get("layers") or {})
                 layers.setdefault(
                     "L2_Gate",
-                    {"surprise": comp_result.get("surprise", 0), "route": comp_result.get("route", "?")},
+                    {
+                        "surprise": comp_result.get("surprise", 0),
+                        "route": comp_result.get("route", "?"),
+                    },
                 )
                 layers.setdefault(
                     "L3_VoidScar",
                     {
                         "source": "void_scar_engine",
-                        "scar_count": len(host.kernel.computation.engine.scar_state.scars),
-                        "void_count": len(host.kernel.computation.engine.void_space.voids),
-                        "coherence": round(host.kernel.computation.engine._coherence, 3),
+                        "scar_count": len(
+                            host.kernel.computation.engine.scar_state.scars
+                        ),
+                        "void_count": len(
+                            host.kernel.computation.engine.void_space.voids
+                        ),
+                        "coherence": round(
+                            host.kernel.computation.engine._coherence, 3
+                        ),
                     },
                 )
                 layers.setdefault("L4_Sheaf", comp_result.get("sheaf", {}))
-                layers.setdefault("L5_HGT", {"decision": comp_result.get("hgt_decision", [0, 0, 0, 0])})
+                layers.setdefault(
+                    "L5_HGT",
+                    {"decision": comp_result.get("hgt_decision", [0, 0, 0, 0])},
+                )
                 layers.setdefault(
                     "L6_Boundary",
-                    {"stability": round(host.kernel.computation.boundary.stability(), 3)},
+                    {
+                        "stability": round(
+                            host.kernel.computation.boundary.stability(), 3
+                        )
+                    },
                 )
                 layers.setdefault(
                     "L7_Expression",
                     {
-                        "drive": round(host.kernel.computation.engine.expression_drive(), 3),
+                        "drive": round(
+                            host.kernel.computation.engine.expression_drive(), 3
+                        ),
                         "should_express": comp_result.get("should_express", False),
                     },
                 )
@@ -2572,7 +3259,10 @@ class EmotionalStatePlugin(Star):
                     "surprise": comp_result.get("surprise", 0),
                     "layers": layers,
                     "assessor": assessment if assessment else None,
-                    "timing_ns": {k: v[-1] if v else 0 for k, v in host.kernel.computation._timings.items()},
+                    "timing_ns": {
+                        k: v[-1] if v else 0
+                        for k, v in host.kernel.computation._timings.items()
+                    },
                 }
                 self._computation_logs.append(log_entry)
             except Exception:
@@ -2580,10 +3270,14 @@ class EmotionalStatePlugin(Star):
 
             # Rhythm learning: observe user message timing for adaptive segmentation
             engine_obs = host.kernel.computation.engine.observe()
-            self._rhythm_learner.observe_user_message(session_key, text, now, engine_obs)
+            self._rhythm_learner.observe_user_message(
+                session_key, text, now, engine_obs
+            )
 
             # Memory maintenance: v2 conversation buffer + decay + compress
-            current_warmth = host.kernel.computation.engine.observe().get("warmth", 0.0)
+            _current_warmth = host.kernel.computation.engine.observe().get(
+                "warmth", 0.0
+            )
             memory_system = self._memory_system_for_session(session_key)
 
             # Append user message to conversation buffer (v2: no direct write)
@@ -2592,7 +3286,11 @@ class EmotionalStatePlugin(Star):
             )
             # Group chat: inject shadow buffer (observed context) before user message
             _is_group = self._social_field.is_group_context_by_key(session_key)
-            _group_id = self._social_field.extract_group_id_from_key(session_key) if _is_group else ""
+            _group_id = (
+                self._social_field.extract_group_id_from_key(session_key)
+                if _is_group
+                else ""
+            )
             if _is_group and _group_id:
                 shadow_entries = self._social_field.drain_shadow_buffer(_group_id)
                 if shadow_entries and shadow_entries[-1]["text"][:200] == text[:200]:
@@ -2620,8 +3318,11 @@ class EmotionalStatePlugin(Star):
             # Fallback: observe without assessment
             try:
                 await self.observe_request(
-                    session_key, text=text, confidence=0.7,
-                    flags=["safe"], now=time.time(),
+                    session_key,
+                    text=text,
+                    confidence=0.7,
+                    flags=["safe"],
+                    now=time.time(),
                 )
             except Exception:
                 pass
@@ -2641,18 +3342,25 @@ class EmotionalStatePlugin(Star):
             response = await self._main_assessor_llm_call(prompt)
             if response:
                 import json as _json
+
                 start = response.find("[")
                 end = response.rfind("]")
                 if start >= 0 and end > start:
-                    triples = _json.loads(response[start:end + 1])
+                    triples = _json.loads(response[start : end + 1])
                     if isinstance(triples, list):
                         memory_system.ingest_graph_triples(triples)
                         # Remove compressed items from L2
-                        memory_system.remove_compressed([item.id for item in items[:10]])
+                        memory_system.remove_compressed(
+                            [item.id for item in items[:10]]
+                        )
                         host = self._host(session_key)
-                        host.kernel.body.memory["_memory_system"] = memory_system.to_dict()
+                        host.kernel.body.memory["_memory_system"] = (
+                            memory_system.to_dict()
+                        )
                         host.runtime.save(host.kernel)
-                        await self._save_sylanne_memory_state(session_key, memory_system)
+                        await self._save_sylanne_memory_state(
+                            session_key, memory_system
+                        )
         except Exception:
             pass
 
@@ -2684,7 +3392,11 @@ class EmotionalStatePlugin(Star):
             conv_text = "\n".join(_fmt_msg(m) for m in msgs[-40:])
             conv_text = conv_text[:2000]
             has_context = any(m.get("role") == "group_observed" for m in msgs)
-            context_hint = "其中 [群聊背景|...] 的消息是 Sylanne 旁观时的群聊内容，请简要概括为背景上下文。" if has_context else ""
+            context_hint = (
+                "其中 [群聊背景|...] 的消息是 Sylanne 旁观时的群聊内容，请简要概括为背景上下文。"
+                if has_context
+                else ""
+            )
             prompt = (
                 "你是一个对话摘要工具。请将下面 <conversation> 标签内的对话压缩为一段简短摘要，"
                 f"保留关键事实、情绪和承诺。{context_hint}"
@@ -2731,8 +3443,12 @@ class EmotionalStatePlugin(Star):
             )
 
             # Embedding for memorable summaries
-            embedding_enabled = bool(self._config.get("sylanne_alpha_embedding_memory_enabled"))
-            embedding_provider_id = str(self._config.get("sylanne_alpha_embedding_memory_provider_id") or "")
+            embedding_enabled = bool(
+                self._config.get("sylanne_alpha_embedding_memory_enabled")
+            )
+            embedding_provider_id = str(
+                self._config.get("sylanne_alpha_embedding_memory_provider_id") or ""
+            )
             if embedding_enabled and embedding_provider_id:
                 try:
                     provider = self._get_embedding_provider(embedding_provider_id)
@@ -2772,7 +3488,9 @@ class EmotionalStatePlugin(Star):
             while True:
                 await asyncio.sleep(300)
                 try:
-                    for session_key, memory_system in list(self._memory_systems.items()):
+                    for session_key, memory_system in list(
+                        self._memory_systems.items()
+                    ):
                         if not memory_system.needs_consolidation():
                             continue
                         await self._run_consolidation(session_key, memory_system)
@@ -2784,7 +3502,9 @@ class EmotionalStatePlugin(Star):
         except Exception:
             pass
 
-    async def _run_consolidation(self, session_key: str, memory_system: MemorySystem) -> None:
+    async def _run_consolidation(
+        self, session_key: str, memory_system: MemorySystem
+    ) -> None:
         """执行 12h 整理：生成摘要、确认、嵌入、下沉到 L2。"""
         try:
             l1_items = list(memory_system._l1)
@@ -2822,8 +3542,12 @@ class EmotionalStatePlugin(Star):
             memory_system.mark_confirmed(confirmed_ids)
 
             # Generate embeddings for confirmed items
-            embedding_enabled = bool(self._config.get("sylanne_alpha_embedding_memory_enabled"))
-            embedding_provider_id = str(self._config.get("sylanne_alpha_embedding_memory_provider_id") or "")
+            embedding_enabled = bool(
+                self._config.get("sylanne_alpha_embedding_memory_enabled")
+            )
+            embedding_provider_id = str(
+                self._config.get("sylanne_alpha_embedding_memory_provider_id") or ""
+            )
             if embedding_enabled and embedding_provider_id:
                 provider = self._get_embedding_provider(embedding_provider_id)
                 if provider:
@@ -2852,7 +3576,9 @@ class EmotionalStatePlugin(Star):
         except Exception:
             pass
 
-    async def _reconsolidation_rewrite(self, session_key: str, memory_system: MemorySystem) -> None:
+    async def _reconsolidation_rewrite(
+        self, session_key: str, memory_system: MemorySystem
+    ) -> None:
         """Reconsolidation v2: 对召回的 L2 条目用当前情绪重写。"""
         try:
             recalled_items = memory_system.get_recalled_l2_items()
@@ -2860,7 +3586,11 @@ class EmotionalStatePlugin(Star):
                 return
             host = self._host(session_key)
             current_warmth = host.kernel.computation.engine.observe().get("warmth", 0.0)
-            warmth_label = "温暖" if current_warmth > 0.3 else ("平静" if current_warmth > -0.3 else "低落")
+            warmth_label = (
+                "温暖"
+                if current_warmth > 0.3
+                else ("平静" if current_warmth > -0.3 else "低落")
+            )
 
             for item in recalled_items[:2]:
                 if item.rewrite_count >= 20:
@@ -3010,7 +3740,9 @@ class EmotionalStatePlugin(Star):
     # ------------------------------------------------------------------
     async def _life_sim_llm_call(self, prompt: str) -> str:
         """Call configured LLM provider for life simulation inference."""
-        provider_id = str(self._config.get("sylanne_alpha_life_simulation_provider_id") or "")
+        provider_id = str(
+            self._config.get("sylanne_alpha_life_simulation_provider_id") or ""
+        )
         if not provider_id:
             return ""
         context = self.context
@@ -3055,7 +3787,9 @@ class EmotionalStatePlugin(Star):
             "reason": reason,
             "mood": mood,
         }
-        logger.info(f"Sylanne life_sim_outreach: stored pending context for session={best_key}, mood={mood}")
+        logger.info(
+            f"Sylanne life_sim_outreach: stored pending context for session={best_key}, mood={mood}"
+        )
 
         # Fallback: if no LLM request picks this up within 5 minutes,
         # send directly (scheduled as background task)
@@ -3078,15 +3812,25 @@ class EmotionalStatePlugin(Star):
                     except Exception:
                         pass
                 else:
-                    logger.info("Sylanne life_sim_outreach fallback: context.send_message not available")
+                    logger.info(
+                        "Sylanne life_sim_outreach fallback: context.send_message not available"
+                    )
 
         task = asyncio.ensure_future(_fallback_direct_send(best_key, reason, mood))
         self._background_tasks.append(task)
-        task.add_done_callback(lambda t: self._background_tasks.remove(t) if t in self._background_tasks else None)
+        task.add_done_callback(
+            lambda t: (
+                self._background_tasks.remove(t)
+                if t in self._background_tasks
+                else None
+            )
+        )
 
     async def _generate_outreach_message(self, reason: str, mood: str) -> str:
         """Use LLM to generate an in-character outreach message from life event."""
-        provider_id = str(self._config.get("sylanne_alpha_life_simulation_provider_id") or "")
+        provider_id = str(
+            self._config.get("sylanne_alpha_life_simulation_provider_id") or ""
+        )
         if not provider_id:
             return ""
         context = self.context
@@ -3142,8 +3886,14 @@ class EmotionalStatePlugin(Star):
             self._segmented_tasks = {}
         session_key = self._session_key(event)
         cfg = self._config or {}
-        realtime_enabled = bool(cfg.get("sylanne_alpha_realtime_chat_enabled") or cfg.get("enable_realtime_chat"))
-        intercept = bool(cfg.get("sylanne_alpha_realtime_intercept_llm_response") or cfg.get("realtime_chat_intercept_llm_response"))
+        realtime_enabled = bool(
+            cfg.get("sylanne_alpha_realtime_chat_enabled")
+            or cfg.get("enable_realtime_chat")
+        )
+        intercept = bool(
+            cfg.get("sylanne_alpha_realtime_intercept_llm_response")
+            or cfg.get("realtime_chat_intercept_llm_response")
+        )
 
         if not realtime_enabled or not intercept:
             # Still filter thinking/draft blocks
@@ -3159,7 +3909,9 @@ class EmotionalStatePlugin(Star):
 
         text = str(getattr(response, "completion_text", "") or "")
         cleaned = strip_draft_blocks(text)
-        self.logger.info(f"Sylanne on_llm_response: len={len(cleaned)} session={session_key}")
+        self.logger.info(
+            f"Sylanne on_llm_response: len={len(cleaned)} session={session_key}"
+        )
 
         if not cleaned.strip():
             response.completion_text = ""
@@ -3172,7 +3924,7 @@ class EmotionalStatePlugin(Star):
             # Store unfinished remainder
             remainder = cleaned
             if remainder.startswith(first_sent):
-                remainder = remainder[len(first_sent):].strip()
+                remainder = remainder[len(first_sent) :].strip()
             elif first_sent.rstrip("。！？!?.") in remainder:
                 idx = remainder.find(first_sent.rstrip("。！？!?."))
                 end_idx = idx + len(first_sent)
@@ -3199,10 +3951,15 @@ class EmotionalStatePlugin(Star):
             ignored_count = sum(1 for t in last_times[-10:] if now - t > 300)
             recent_ignored = ignored_count / min(10, len(last_times))
         max_part_chars, cps = self._rhythm_learner.get_rhythm_params(
-            session_key, default_max_part=default_max_part, default_cps=default_cps,
-            expression_drive=expr_drive, recent_ignored_rate=recent_ignored,
+            session_key,
+            default_max_part=default_max_part,
+            default_cps=default_cps,
+            expression_drive=expr_drive,
+            recent_ignored_rate=recent_ignored,
         )
-        plan = realtime_plan(session_key, cleaned, max_part_chars=max_part_chars, chars_per_second=cps)
+        plan = realtime_plan(
+            session_key, cleaned, max_part_chars=max_part_chars, chars_per_second=cps
+        )
         parts = plan.get("message_parts", [])
 
         if not parts:
@@ -3223,20 +3980,38 @@ class EmotionalStatePlugin(Star):
             sent_first = parts[0]["text"]
             rest = cleaned
             if rest.startswith(sent_first):
-                rest = rest[len(sent_first):].strip()
+                rest = rest[len(sent_first) :].strip()
             self._unfinished_replies[session_key] = rest
 
         # Dispatch segments in background
-        self.logger.info(f"Sylanne segmented reply queued: session={session_key} parts={len(parts)}")
-        task = asyncio.ensure_future(self._dispatch_segmented_parts(origin, parts, session_key=session_key))
+        self.logger.info(
+            f"Sylanne segmented reply queued: session={session_key} parts={len(parts)}"
+        )
+        task = asyncio.ensure_future(
+            self._dispatch_segmented_parts(origin, parts, session_key=session_key)
+        )
         self._background_tasks.append(task)
-        task.add_done_callback(lambda t: self._background_tasks.remove(t) if t in self._background_tasks else None)
+        task.add_done_callback(
+            lambda t: (
+                self._background_tasks.remove(t)
+                if t in self._background_tasks
+                else None
+            )
+        )
         self._segmented_tasks[session_key] = task
 
         # Schedule observation off the hot path
-        obs_task = asyncio.ensure_future(self._background_observe_response(session_key, cleaned))
+        obs_task = asyncio.ensure_future(
+            self._background_observe_response(session_key, cleaned)
+        )
         self._background_tasks.append(obs_task)
-        obs_task.add_done_callback(lambda t: self._background_tasks.remove(t) if t in self._background_tasks else None)
+        obs_task.add_done_callback(
+            lambda t: (
+                self._background_tasks.remove(t)
+                if t in self._background_tasks
+                else None
+            )
+        )
 
     async def _background_observe_response(self, session_key: str, text: str) -> None:
         try:
@@ -3248,7 +4023,9 @@ class EmotionalStatePlugin(Star):
             self._last_bot_texts[session_key] = text[:120]
             self._schedule_buffer_persist(session_key)
             # Notify social field collector that bot replied
-            if hasattr(self, '_social_field') and self._social_field.is_group_context_by_key(session_key):
+            if hasattr(
+                self, "_social_field"
+            ) and self._social_field.is_group_context_by_key(session_key):
                 group_id = self._social_field.extract_group_id_from_key(session_key)
                 self._social_field.notify_bot_replied(group_id, text)
                 # Reset social void on reply
@@ -3257,7 +4034,13 @@ class EmotionalStatePlugin(Star):
                     host.kernel.computation.engine.social_void.reset()
                 except Exception:
                     pass
-            await self.observe_response(session_key, text=text[:500], confidence=0.7, flags=["safe"], now=time.time())
+            await self.observe_response(
+                session_key,
+                text=text[:500],
+                confidence=0.7,
+                flags=["safe"],
+                now=time.time(),
+            )
         except Exception:
             pass
 
@@ -3266,7 +4049,9 @@ class EmotionalStatePlugin(Star):
     # ------------------------------------------------------------------
     async def on_llm_stream_chunk(self, event: Any, chunk: Any) -> None:
         session_key = self._session_key(event)
-        intercept = bool(self._config.get("sylanne_alpha_realtime_intercept_llm_response"))
+        intercept = bool(
+            self._config.get("sylanne_alpha_realtime_intercept_llm_response")
+        )
         if not intercept:
             return
 
@@ -3283,9 +4068,17 @@ class EmotionalStatePlugin(Star):
             self._stream_first_sent[session_key] = first_sentence
             self._stream_buffers.pop(session_key, None)
             origin = str(getattr(event, "unified_msg_origin", "") or "")
-            task = asyncio.ensure_future(self._send_first_sentence(origin, first_sentence))
+            task = asyncio.ensure_future(
+                self._send_first_sentence(origin, first_sentence)
+            )
             self._background_tasks.append(task)
-            task.add_done_callback(lambda t: self._background_tasks.remove(t) if t in self._background_tasks else None)
+            task.add_done_callback(
+                lambda t: (
+                    self._background_tasks.remove(t)
+                    if t in self._background_tasks
+                    else None
+                )
+            )
 
     def _extract_first_sentence(self, text: str) -> str:
         """Extract first complete sentence from buffer."""
@@ -3295,7 +4088,7 @@ class EmotionalStatePlugin(Star):
                 # Check if next char is not also a delimiter (e.g. "！？")
                 if i + 1 < len(text) and text[i + 1] in delimiters:
                     continue
-                return text[:i + 1]
+                return text[: i + 1]
             if ch == "\n" and i > 0:
                 return text[:i]
         return ""
@@ -3309,7 +4102,9 @@ class EmotionalStatePlugin(Star):
     # ------------------------------------------------------------------
     # Segmented dispatch
     # ------------------------------------------------------------------
-    async def _dispatch_segmented_parts(self, origin: str, parts: list[dict[str, Any]], session_key: str = "") -> None:
+    async def _dispatch_segmented_parts(
+        self, origin: str, parts: list[dict[str, Any]], session_key: str = ""
+    ) -> None:
         context = self.context
         if not hasattr(context, "send_message"):
             return
@@ -3333,7 +4128,7 @@ class EmotionalStatePlugin(Star):
     # ------------------------------------------------------------------
     def _memory_prompt_fragment(self, payload: dict[str, Any]) -> str:
         matches = payload.get("matches", [])
-        query = str(payload.get("query") or "")
+        _query = str(payload.get("query") or "")
         if not matches:
             return ""
         lines = [
@@ -3356,7 +4151,7 @@ class EmotionalStatePlugin(Star):
     def _time_context_fragment(self, session_key: str) -> str:
         now = datetime.now(_CHINA_TZ)
         weekday_names = ["一", "二", "三", "四", "五", "六", "日"]
-        weekday = weekday_names[now.weekday()]
+        _weekday = weekday_names[now.weekday()]
         time_str = now.strftime("%H:%M")
         date_str = now.strftime("%m-%d")
 
@@ -3399,14 +4194,16 @@ class EmotionalStatePlugin(Star):
     # ------------------------------------------------------------------
     def _cap_llm_request_payload(self, request: Any) -> None:
         locked = self._config.get("sylanne_alpha_locked_persona_prompt")
-        locked_system = str(locked) if locked else None
+        _locked_system = str(locked) if locked else None
 
-        system_prompt = getattr(request, "system_prompt", None)
-        prompt = getattr(request, "prompt", None)
+        _system_prompt = getattr(request, "system_prompt", None)
+        _prompt = getattr(request, "prompt", None)
 
         for pass_num in range(5):
             try:
-                serialized = json.dumps(request.__dict__, ensure_ascii=False, default=str)
+                serialized = json.dumps(
+                    request.__dict__, ensure_ascii=False, default=str
+                )
             except (TypeError, ValueError):
                 break
             if len(serialized) <= _MAX_PAYLOAD_SERIALIZED_CHARS:
@@ -3416,19 +4213,27 @@ class EmotionalStatePlugin(Star):
 
             extra = getattr(request, "extra_user_content_parts", None)
             if isinstance(extra, list) and extra:
-                request.extra_user_content_parts = self._trim_payload_list(extra, keep_items=1, text_limit=text_limit)
+                request.extra_user_content_parts = self._trim_payload_list(
+                    extra, keep_items=1, text_limit=text_limit
+                )
 
             if pass_num >= 2:
                 keep = max(4, 8 - pass_num * 2)
                 contexts = getattr(request, "contexts", None)
                 if isinstance(contexts, list) and contexts:
-                    request.contexts = self._trim_payload_list(contexts, keep_items=keep, text_limit=text_limit)
+                    request.contexts = self._trim_payload_list(
+                        contexts, keep_items=keep, text_limit=text_limit
+                    )
                 messages = getattr(request, "messages", None)
                 if isinstance(messages, list) and messages:
                     filtered = [m for m in messages if not isinstance(m, str)]
-                    request.messages = self._trim_payload_list(filtered, keep_items=keep, text_limit=text_limit)
+                    request.messages = self._trim_payload_list(
+                        filtered, keep_items=keep, text_limit=text_limit
+                    )
 
-    def _trim_payload_list(self, items: list, keep_items: int = 2, text_limit: int = 5000) -> list:
+    def _trim_payload_list(
+        self, items: list, keep_items: int = 2, text_limit: int = 5000
+    ) -> list:
         if not items:
             return items
         if len(items) <= keep_items:
@@ -3436,7 +4241,10 @@ class EmotionalStatePlugin(Star):
             return [self._cap_item_text(item, text_limit) for item in items]
 
         # Strategy: keep first `keep_items` items + 1 marker replacing the rest
-        kept = [self._cap_item_text(items[i], text_limit) for i in range(min(keep_items, len(items)))]
+        kept = [
+            self._cap_item_text(items[i], text_limit)
+            for i in range(min(keep_items, len(items)))
+        ]
         # Always keep the last item if it's different from what we already kept
         tail = self._cap_item_text(items[-1], text_limit)
         marker = self._make_trim_marker(items)
@@ -3474,7 +4282,9 @@ class EmotionalStatePlugin(Star):
             content = str(getattr(item, "content", "") or "")
             if len(content) > limit:
                 try:
-                    item.content = content[:limit] + "\n[sylanne_payload_context_trimmed]"
+                    item.content = (
+                        content[:limit] + "\n[sylanne_payload_context_trimmed]"
+                    )
                 except (AttributeError, TypeError):
                     pass
             return item
@@ -3506,21 +4316,59 @@ class EmotionalStatePlugin(Star):
         memory_traces = body["memory"]["traces"]
 
         cards = [
-            {"id": "body", "title": "身体感", "summary": f"warmth={body['temperature']['warmth']:.2f}; pulse={body['pulse']['rhythm']:.2f}"},
-            {"id": "memory", "title": "记忆", "summary": f"traces={len(memory_traces)}"},
-            {"id": "drift", "title": "人格漂移", "summary": f"plasticity={diagnostics['vector_summary']['plasticity']:.3f}"},
-            {"id": "space", "title": "神经网络空间感", "summary": f"vitality={diagnostics['vector_summary']['vitality']:.3f}"},
+            {
+                "id": "body",
+                "title": "身体感",
+                "summary": f"warmth={body['temperature']['warmth']:.2f}; pulse={body['pulse']['rhythm']:.2f}",
+            },
+            {
+                "id": "memory",
+                "title": "记忆",
+                "summary": f"traces={len(memory_traces)}",
+            },
+            {
+                "id": "drift",
+                "title": "人格漂移",
+                "summary": f"plasticity={diagnostics['vector_summary']['plasticity']:.3f}",
+            },
+            {
+                "id": "space",
+                "title": "神经网络空间感",
+                "summary": f"vitality={diagnostics['vector_summary']['vitality']:.3f}",
+            },
         ]
 
         memory_nodes = [
-            {"id": trace.get("id", f"node-{i}"), "label": f"trace-{i}", "strength": float(trace.get("weight", 0.2))}
+            {
+                "id": trace.get("id", f"node-{i}"),
+                "label": f"trace-{i}",
+                "strength": float(trace.get("weight", 0.2)),
+            }
             for i, trace in enumerate(memory_traces[-8:])
         ] or [{"id": "empty", "label": "等待记忆点", "strength": 0.2}]
 
         config_controls = [
-            {"id": "sylanne_alpha_realtime_chat_enabled", "title": "即时聊天", "enabled": bool(self._config.get("sylanne_alpha_realtime_chat_enabled"))},
-            {"id": "sylanne_alpha_proactive_dispatch_enabled", "title": "主动发言", "enabled": bool(self._config.get("sylanne_alpha_proactive_dispatch_enabled"))},
-            {"id": "sylanne_alpha_embedding_memory_enabled", "title": "向量记忆", "enabled": bool(self._config.get("sylanne_alpha_embedding_memory_enabled"))},
+            {
+                "id": "sylanne_alpha_realtime_chat_enabled",
+                "title": "即时聊天",
+                "enabled": bool(
+                    self._config.get("sylanne_alpha_realtime_chat_enabled")
+                ),
+            },
+            {
+                "id": "sylanne_alpha_proactive_dispatch_enabled",
+                "title": "主动发言",
+                "enabled": bool(
+                    self._config.get("sylanne_alpha_proactive_dispatch_enabled")
+                ),
+            },
+            {
+                "id": "sylanne_alpha_embedding_memory_enabled",
+                "title": "向量记忆",
+                "enabled": bool(
+                    self._config.get("sylanne_alpha_embedding_memory_enabled")
+                ),
+            },
         ]
 
         # Sanitize body to remove raw text
@@ -3540,16 +4388,31 @@ class EmotionalStatePlugin(Star):
             "body_state": body_state,
             "memory_state": memory_state,
             "persona_drift_state": diagnostics["vector_summary"],
-            "network_space_state": {"vitality": diagnostics["vector_summary"]["vitality"]},
+            "network_space_state": {
+                "vitality": diagnostics["vector_summary"]["vitality"]
+            },
             "decision": surface["decision"],
             "guard": surface["guard"],
             "memory": {"trace_count": len(memory_traces)},
-            "switches": {"paused": body["immunity"]["paused"], "realtime": bool(self._config.get("sylanne_alpha_realtime_chat_enabled"))},
+            "switches": {
+                "paused": body["immunity"]["paused"],
+                "realtime": bool(
+                    self._config.get("sylanne_alpha_realtime_chat_enabled")
+                ),
+            },
             "cards": cards,
             "visualization": {
-                "token_flow": {"title": "Token 分段使用", "tokens": [f"t{i}" for i in range(min(5, len(memory_traces)))]},
+                "token_flow": {
+                    "title": "Token 分段使用",
+                    "tokens": [f"t{i}" for i in range(min(5, len(memory_traces)))],
+                },
                 "memory_nodes": memory_nodes,
-                "persona_model": {"traits": {"plasticity": diagnostics["vector_summary"]["plasticity"], "vitality": diagnostics["vector_summary"]["vitality"]}},
+                "persona_model": {
+                    "traits": {
+                        "plasticity": diagnostics["vector_summary"]["plasticity"],
+                        "vitality": diagnostics["vector_summary"]["vitality"],
+                    }
+                },
             },
             "config_controls": config_controls,
             "constraints": ["no_raw_conversation_text", "readonly_only"],
@@ -3564,22 +4427,36 @@ class EmotionalStatePlugin(Star):
     # ------------------------------------------------------------------
     # Claude/hajide compat stubs (minimal implementation)
     # ------------------------------------------------------------------
-    def _state_injection_budget_for_request(self, session_key: str, request: Any, model_hint: str = "") -> _StateInjectionBudget:
+    def _state_injection_budget_for_request(
+        self, session_key: str, request: Any, model_hint: str = ""
+    ) -> _StateInjectionBudget:
         budget = _StateInjectionBudget(session_key=session_key, model_hint=model_hint)
         cfg = self.config or {}
         budget.max_added_chars = int(cfg.get("state_injection_max_added_chars", 2400))
         budget.max_parts = int(cfg.get("state_injection_max_parts", 8))
         hajide = bool(cfg.get("sylanne_alpha_hajide_compat_mode"))
-        is_claude = "claude" in model_hint.lower() or "anthropic" in model_hint.lower() or "哈基德" in model_hint
+        is_claude = (
+            "claude" in model_hint.lower()
+            or "anthropic" in model_hint.lower()
+            or "哈基德" in model_hint
+        )
         if hajide and is_claude:
             budget.compat_mode = "claude_agent_owned_context"
         elif is_claude:
             budget.compat_mode = "claude_advisory"
         return budget
 
-    def _append_temp_text_part(self, request: Any, text: str, source: str = "", budget: _StateInjectionBudget | None = None) -> bool:
+    def _append_temp_text_part(
+        self,
+        request: Any,
+        text: str,
+        source: str = "",
+        budget: _StateInjectionBudget | None = None,
+    ) -> bool:
         if budget and budget.compat_mode == "claude_agent_owned_context":
-            budget.skipped.append({"source": source, "reason": "claude_agent_owned_context"})
+            budget.skipped.append(
+                {"source": source, "reason": "claude_agent_owned_context"}
+            )
             return False
         if budget and budget.compat_mode == "claude_advisory":
             # For claude advisory mode, append to prompt with advisory marker
@@ -3599,7 +4476,9 @@ class EmotionalStatePlugin(Star):
             budget.injected.append({"source": source})
         return True
 
-    def _normalize_claude_request_payload(self, request: Any, budget: _StateInjectionBudget | None = None) -> None:
+    def _normalize_claude_request_payload(
+        self, request: Any, budget: _StateInjectionBudget | None = None
+    ) -> None:
         hajide = bool(self._config.get("sylanne_alpha_hajide_compat_mode"))
 
         # Flatten extra_user_content_parts into prompt
@@ -3636,15 +4515,27 @@ class EmotionalStatePlugin(Star):
             system_parts = []
             remaining = []
             for ctx in contexts:
-                role = ctx.get("role", "") if isinstance(ctx, dict) else str(getattr(ctx, "role", ""))
-                content = ctx.get("content", "") if isinstance(ctx, dict) else str(getattr(ctx, "content", ""))
+                role = (
+                    ctx.get("role", "")
+                    if isinstance(ctx, dict)
+                    else str(getattr(ctx, "role", ""))
+                )
+                content = (
+                    ctx.get("content", "")
+                    if isinstance(ctx, dict)
+                    else str(getattr(ctx, "content", ""))
+                )
                 if role == "system":
                     system_parts.append(content)
                 else:
                     remaining.append(ctx)
             if system_parts:
                 sys_prompt = str(getattr(request, "system_prompt", "") or "")
-                request.system_prompt = f"{sys_prompt}\n" + "\n".join(system_parts) if sys_prompt else "\n".join(system_parts)
+                request.system_prompt = (
+                    f"{sys_prompt}\n" + "\n".join(system_parts)
+                    if sys_prompt
+                    else "\n".join(system_parts)
+                )
             request.contexts = remaining if not hajide else []
 
         # Sanitize messages
@@ -3664,11 +4555,18 @@ class EmotionalStatePlugin(Star):
                     # Convert system to system_prompt
                     if role == "system":
                         sys_prompt = str(getattr(request, "system_prompt", "") or "")
-                        request.system_prompt = f"{sys_prompt}\n{content}" if sys_prompt else content
+                        request.system_prompt = (
+                            f"{sys_prompt}\n{content}" if sys_prompt else content
+                        )
                         continue
                     # Normalize content
                     if isinstance(content, list):
-                        text_parts = [str(p.get("text", "")) if isinstance(p, dict) else str(getattr(p, "text", "")) for p in content]
+                        text_parts = [
+                            str(p.get("text", ""))
+                            if isinstance(p, dict)
+                            else str(getattr(p, "text", ""))
+                            for p in content
+                        ]
                         content = "\n".join(text_parts)
                     # Map non-standard roles to user
                     mapped_role = role if role in ("user", "assistant") else "user"
@@ -3679,7 +4577,12 @@ class EmotionalStatePlugin(Star):
                     if hajide and role in ("tool", "function"):
                         continue
                     if isinstance(content, list):
-                        text_parts = [str(p.get("text", "")) if isinstance(p, dict) else str(getattr(p, "text", "")) for p in content]
+                        text_parts = [
+                            str(p.get("text", ""))
+                            if isinstance(p, dict)
+                            else str(getattr(p, "text", ""))
+                            for p in content
+                        ]
                         content = "\n".join(text_parts)
                     mapped_role = role if role in ("user", "assistant") else "user"
                     clean.append({"role": mapped_role, "content": str(content)})
@@ -3689,8 +4592,17 @@ class EmotionalStatePlugin(Star):
         if hajide:
             self._prune_hajide_tools(request, budget)
 
-    def _prune_hajide_tools(self, request: Any, budget: _StateInjectionBudget | None = None) -> None:
-        _SYLANNE_TOOL_PREFIXES = ("query_agent_state", "get_bot_emotion", "get_bot_integrated", "get_bot_humanlike", "get_bot_lifelike", "get_bot_personality")
+    def _prune_hajide_tools(
+        self, request: Any, budget: _StateInjectionBudget | None = None
+    ) -> None:
+        _SYLANNE_TOOL_PREFIXES = (
+            "query_agent_state",
+            "get_bot_emotion",
+            "get_bot_integrated",
+            "get_bot_humanlike",
+            "get_bot_lifelike",
+            "get_bot_personality",
+        )
 
         def _is_sylanne_tool(name: str) -> bool:
             return any(name.startswith(prefix) for prefix in _SYLANNE_TOOL_PREFIXES)
@@ -3698,19 +4610,36 @@ class EmotionalStatePlugin(Star):
         # Prune tools list
         tools = getattr(request, "tools", None)
         if isinstance(tools, list):
-            request.tools = [t for t in tools if not (isinstance(t, dict) and _is_sylanne_tool(t.get("function", {}).get("name", "")))]
+            request.tools = [
+                t
+                for t in tools
+                if not (
+                    isinstance(t, dict)
+                    and _is_sylanne_tool(t.get("function", {}).get("name", ""))
+                )
+            ]
             if budget:
-                budget.skipped.append({"source": "sylanne_llm_tools", "reason": "hajide_compat"})
+                budget.skipped.append(
+                    {"source": "sylanne_llm_tools", "reason": "hajide_compat"}
+                )
 
         # Prune functions list
         functions = getattr(request, "functions", None)
         if isinstance(functions, list):
-            request.functions = [f for f in functions if not (isinstance(f, dict) and _is_sylanne_tool(f.get("name", "")))]
+            request.functions = [
+                f
+                for f in functions
+                if not (isinstance(f, dict) and _is_sylanne_tool(f.get("name", "")))
+            ]
 
         # Reset tool_choice if it pointed to a pruned tool
         tool_choice = getattr(request, "tool_choice", None)
         if isinstance(tool_choice, dict):
-            name = tool_choice.get("function", {}).get("name", "") if isinstance(tool_choice.get("function"), dict) else ""
+            name = (
+                tool_choice.get("function", {}).get("name", "")
+                if isinstance(tool_choice.get("function"), dict)
+                else ""
+            )
             if _is_sylanne_tool(name) or name:
                 request.tool_choice = "auto"
         elif tool_choice == "required":
@@ -3727,8 +4656,17 @@ class EmotionalStatePlugin(Star):
             extra_body = params["extra_body"]
             if isinstance(extra_body, dict):
                 if "tools" in extra_body and isinstance(extra_body["tools"], list):
-                    extra_body["tools"] = [t for t in extra_body["tools"] if not (isinstance(t, dict) and _is_sylanne_tool(t.get("function", {}).get("name", "")))]
-                if "tool_choice" in extra_body and isinstance(extra_body["tool_choice"], dict):
+                    extra_body["tools"] = [
+                        t
+                        for t in extra_body["tools"]
+                        if not (
+                            isinstance(t, dict)
+                            and _is_sylanne_tool(t.get("function", {}).get("name", ""))
+                        )
+                    ]
+                if "tool_choice" in extra_body and isinstance(
+                    extra_body["tool_choice"], dict
+                ):
                     extra_body["tool_choice"] = "auto"
 
         # Handle metadata.tool_choice
@@ -3757,8 +4695,9 @@ class EmotionalStatePlugin(Star):
                 if hasattr(request, "tool_choice"):
                     request.tool_choice = "auto"
                 if budget:
-                    budget.skipped.append({"source": "sylanne_func_tool", "reason": "hajide_compat"})
-
+                    budget.skipped.append(
+                        {"source": "sylanne_func_tool", "reason": "hajide_compat"}
+                    )
 
     # ------------------------------------------------------------------
     # Text extraction from event
@@ -3815,6 +4754,7 @@ class EmotionalStatePlugin(Star):
     def _astrbot_message(self, text: str) -> Any:
         """Build a message suitable for context.send_message."""
         import sys
+
         comp_mod = sys.modules.get("astrbot.api.message_components")
         event_mod = sys.modules.get("astrbot.api.event")
         if comp_mod and event_mod:
@@ -3849,21 +4789,31 @@ class EmotionalStatePlugin(Star):
     # Public API protocol stubs
     # ------------------------------------------------------------------
     async def get_emotion_consequences(self, *args, **kwargs) -> dict[str, Any]:
-        sk = self._session_key(kwargs.get("event_or_session"), kwargs.get("session_key", ""))
+        sk = self._session_key(
+            kwargs.get("event_or_session"), kwargs.get("session_key", "")
+        )
         return command_surface(self._host(sk), "emotion")
 
     async def get_emotion_relationship(self, *args, **kwargs) -> dict[str, Any]:
-        sk = self._session_key(kwargs.get("event_or_session"), kwargs.get("session_key", ""))
+        sk = self._session_key(
+            kwargs.get("event_or_session"), kwargs.get("session_key", "")
+        )
         return command_surface(self._host(sk), "emotion")
 
     async def get_emotion_prompt_fragment(self, *args, **kwargs) -> str:
         return ""
 
-    async def get_psychological_screening_snapshot(self, *args, **kwargs) -> dict[str, Any]:
-        sk = self._session_key(kwargs.get("event_or_session"), kwargs.get("session_key", ""))
+    async def get_psychological_screening_snapshot(
+        self, *args, **kwargs
+    ) -> dict[str, Any]:
+        sk = self._session_key(
+            kwargs.get("event_or_session"), kwargs.get("session_key", "")
+        )
         return command_surface(self._host(sk), "psych_state")
 
-    async def get_psychological_screening_values(self, *args, **kwargs) -> dict[str, float]:
+    async def get_psychological_screening_values(
+        self, *args, **kwargs
+    ) -> dict[str, float]:
         return {}
 
     async def observe_psychological_text(self, *args, **kwargs) -> dict[str, Any]:
@@ -3876,12 +4826,16 @@ class EmotionalStatePlugin(Star):
         return True
 
     async def reset_emotion_state(self, *args, **kwargs) -> bool:
-        sk = self._session_key(kwargs.get("event_or_session"), kwargs.get("session_key", ""))
+        sk = self._session_key(
+            kwargs.get("event_or_session"), kwargs.get("session_key", "")
+        )
         await self.reset_sylanne(session_key=sk)
         return True
 
     async def get_integrated_self_snapshot(self, *args, **kwargs) -> dict[str, Any]:
-        sk = self._session_key(kwargs.get("event_or_session"), kwargs.get("session_key", ""))
+        sk = self._session_key(
+            kwargs.get("event_or_session"), kwargs.get("session_key", "")
+        )
         return command_surface(self._host(sk), "integrated_self")
 
     async def get_integrated_self_prompt_fragment(self, *args, **kwargs) -> str:
@@ -3890,20 +4844,28 @@ class EmotionalStatePlugin(Star):
     async def get_integrated_self_policy_plan(self, *args, **kwargs) -> dict[str, Any]:
         return {}
 
-    async def build_integrated_self_replay_bundle(self, *args, **kwargs) -> dict[str, Any]:
+    async def build_integrated_self_replay_bundle(
+        self, *args, **kwargs
+    ) -> dict[str, Any]:
         return {}
 
     async def replay_integrated_self_bundle(self, *args, **kwargs) -> dict[str, Any]:
         return {}
 
-    async def probe_integrated_self_compatibility(self, *args, **kwargs) -> dict[str, Any]:
+    async def probe_integrated_self_compatibility(
+        self, *args, **kwargs
+    ) -> dict[str, Any]:
         return {}
 
-    async def export_integrated_self_diagnostics(self, *args, **kwargs) -> dict[str, Any]:
+    async def export_integrated_self_diagnostics(
+        self, *args, **kwargs
+    ) -> dict[str, Any]:
         return {}
 
     async def get_lifelike_learning_snapshot(self, *args, **kwargs) -> dict[str, Any]:
-        sk = self._session_key(kwargs.get("event_or_session"), kwargs.get("session_key", ""))
+        sk = self._session_key(
+            kwargs.get("event_or_session"), kwargs.get("session_key", "")
+        )
         result = command_surface(self._host(sk), "lifelike_state")
         result.setdefault("enabled", True)
         result.setdefault("exposure", kwargs.get("exposure", "plugin_safe"))
@@ -3912,7 +4874,9 @@ class EmotionalStatePlugin(Star):
     async def get_lifelike_initiative_policy(self, *args, **kwargs) -> dict[str, Any]:
         return {}
 
-    async def request_proactive_speech_dispatch(self, *args, **kwargs) -> dict[str, Any]:
+    async def request_proactive_speech_dispatch(
+        self, *args, **kwargs
+    ) -> dict[str, Any]:
         return {}
 
     async def observe_user_message_withdrawal(self, *args, **kwargs) -> dict[str, Any]:
@@ -3947,7 +4911,12 @@ class EmotionalStatePlugin(Star):
         if session_key in candidates:
             candidates[session_key]["last_user_text_excerpt"] = ""
             candidates[session_key]["last_withdrawn_message_id"] = message_id
-        return {"input_epoch": new_epoch, "message_id": message_id, "reason": reason, "session_key": session_key}
+        return {
+            "input_epoch": new_epoch,
+            "message_id": message_id,
+            "reason": reason,
+            "session_key": session_key,
+        }
 
     async def observe_sticker_usage(self, *args, **kwargs) -> dict[str, Any]:
         return {"committed": False, "memory_count": 0}
@@ -3965,7 +4934,9 @@ class EmotionalStatePlugin(Star):
         return True
 
     async def get_personality_drift_snapshot(self, *args, **kwargs) -> dict[str, Any]:
-        sk = self._session_key(kwargs.get("event_or_session"), kwargs.get("session_key", ""))
+        sk = self._session_key(
+            kwargs.get("event_or_session"), kwargs.get("session_key", "")
+        )
         result = command_surface(self._host(sk), "personality_drift_state")
         result.setdefault("enabled", True)
         result.setdefault("exposure", kwargs.get("exposure", "plugin_safe"))
@@ -3980,14 +4951,18 @@ class EmotionalStatePlugin(Star):
     async def observe_personality_drift_event(self, *args, **kwargs) -> dict[str, Any]:
         return {}
 
-    async def simulate_personality_drift_update(self, *args, **kwargs) -> dict[str, Any]:
+    async def simulate_personality_drift_update(
+        self, *args, **kwargs
+    ) -> dict[str, Any]:
         return {}
 
     async def reset_personality_drift_state(self, *args, **kwargs) -> bool:
         return True
 
     async def get_fallibility_snapshot(self, *args, **kwargs) -> dict[str, Any]:
-        sk = self._session_key(kwargs.get("event_or_session"), kwargs.get("session_key", ""))
+        sk = self._session_key(
+            kwargs.get("event_or_session"), kwargs.get("session_key", "")
+        )
         return command_surface(self._host(sk), "fallibility_state")
 
     async def get_fallibility_values(self, *args, **kwargs) -> dict[str, float]:
@@ -4006,7 +4981,9 @@ class EmotionalStatePlugin(Star):
         return True
 
     async def get_humanlike_snapshot(self, *args, **kwargs) -> dict[str, Any]:
-        sk = self._session_key(kwargs.get("event_or_session"), kwargs.get("session_key", ""))
+        sk = self._session_key(
+            kwargs.get("event_or_session"), kwargs.get("session_key", "")
+        )
         result = command_surface(self._host(sk), "humanlike_state")
         result.setdefault("enabled", True)
         exposure = kwargs.get("exposure", "plugin_safe")
@@ -4029,7 +5006,9 @@ class EmotionalStatePlugin(Star):
         return True
 
     async def get_moral_repair_snapshot(self, *args, **kwargs) -> dict[str, Any]:
-        sk = self._session_key(kwargs.get("event_or_session"), kwargs.get("session_key", ""))
+        sk = self._session_key(
+            kwargs.get("event_or_session"), kwargs.get("session_key", "")
+        )
         return command_surface(self._host(sk), "moral_repair_state")
 
     async def get_moral_repair_values(self, *args, **kwargs) -> dict[str, float]:
@@ -4074,23 +5053,37 @@ class EmotionalStatePlugin(Star):
     def _agent_identity(self, event: Any = None) -> str:
         if event is None:
             return "unknown"
-        sender_id = str(getattr(event, "sender_id", "") or getattr(event, "user_id", "") or "")
-        session_id = str(getattr(event, "session_id", "") or getattr(event, "unified_msg_origin", "") or "")
+        sender_id = str(
+            getattr(event, "sender_id", "") or getattr(event, "user_id", "") or ""
+        )
+        session_id = str(
+            getattr(event, "session_id", "")
+            or getattr(event, "unified_msg_origin", "")
+            or ""
+        )
         return f"{session_id}::agent:{sender_id}" if sender_id else session_id
 
-    async def get_agent_identity_profile(self, event: Any = None, **kwargs: Any) -> dict[str, Any]:
+    async def get_agent_identity_profile(
+        self, event: Any = None, **kwargs: Any
+    ) -> dict[str, Any]:
         cache = getattr(self, "_agent_identity_profile_cache", None)
         if cache is None:
             self._agent_identity_profile_cache = {}
             cache = self._agent_identity_profile_cache
-        session_id = str(getattr(event, "unified_msg_origin", "") or getattr(event, "session_id", "") or "")
+        session_id = str(
+            getattr(event, "unified_msg_origin", "")
+            or getattr(event, "session_id", "")
+            or ""
+        )
         sender_id = str(getattr(event, "sender_id", "") or "")
         if not sender_id and hasattr(event, "get_sender_id"):
             sender_id = str(event.get_sender_id() or "")
         sender_name = str(getattr(event, "sender_name", "") or "")
         if not sender_name and hasattr(event, "get_sender_name"):
             sender_name = str(event.get_sender_name() or "")
-        speaker_track_id = f"{session_id}::speaker:{sender_id}" if sender_id else session_id
+        speaker_track_id = (
+            f"{session_id}::speaker:{sender_id}" if sender_id else session_id
+        )
         cfg = self.config or {}
         profile_limit = int(cfg.get("agent_identity_profile_limit", 256))
         ttl = float(cfg.get("agent_identity_ttl_seconds", 2592000.0))
@@ -4106,7 +5099,11 @@ class EmotionalStatePlugin(Star):
                 cache.pop(key, None)
         elif speaker_count >= profile_limit:
             oldest_key = min(
-                (k for k in cache if k.startswith(f"{session_id}::speaker:") and k != speaker_track_id),
+                (
+                    k
+                    for k in cache
+                    if k.startswith(f"{session_id}::speaker:") and k != speaker_track_id
+                ),
                 key=lambda k: cache[k].get("updated_at", 0),
                 default=None,
             )
@@ -4134,7 +5131,9 @@ class EmotionalStatePlugin(Star):
             }
         return profile
 
-    async def get_agent_trail(self, event: Any = None, *, limit: int = 10, **kwargs: Any) -> dict[str, Any]:
+    async def get_agent_trail(
+        self, event: Any = None, *, limit: int = 10, **kwargs: Any
+    ) -> dict[str, Any]:
         cache = getattr(self, "_agent_trail_cache", None)
         if cache is None:
             self._agent_trail_cache = {}
@@ -4218,7 +5217,9 @@ class EmotionalStatePlugin(Star):
         safe = session_key.replace("/", "_").replace("\\", "_")
         return f"sylanne:bg_post_checkpoint:{safe}"
 
-    async def _load_state(self, session_key: str, persona_profile: Any = None, *, now: float = 0.0) -> Any:
+    async def _load_state(
+        self, session_key: str, persona_profile: Any = None, *, now: float = 0.0
+    ) -> Any:
         cache = getattr(self, "_engine_cache", None)
         if cache is None:
             self._engine_cache = {}
@@ -4243,10 +5244,14 @@ class EmotionalStatePlugin(Star):
     async def _load_humanlike_state(self, session_key: str) -> Any:
         return None
 
-    async def _load_lifelike_learning_state(self, session_key: str, **kwargs: Any) -> Any:
+    async def _load_lifelike_learning_state(
+        self, session_key: str, **kwargs: Any
+    ) -> Any:
         return None
 
-    async def _load_personality_drift_state(self, session_key: str, **kwargs: Any) -> Any:
+    async def _load_personality_drift_state(
+        self, session_key: str, **kwargs: Any
+    ) -> Any:
         return None
 
     async def _load_moral_repair_state(self, session_key: str) -> Any:
@@ -4279,19 +5284,29 @@ class EmotionalStatePlugin(Star):
     async def _save_humanlike_state(self, session_key: str, state: Any = None) -> None:
         pass
 
-    async def _save_psychological_state(self, session_key: str, state: Any = None) -> None:
+    async def _save_psychological_state(
+        self, session_key: str, state: Any = None
+    ) -> None:
         pass
 
-    async def _save_moral_repair_state(self, session_key: str, state: Any = None) -> None:
+    async def _save_moral_repair_state(
+        self, session_key: str, state: Any = None
+    ) -> None:
         pass
 
-    async def _save_lifelike_learning_state(self, session_key: str, state: Any = None) -> None:
+    async def _save_lifelike_learning_state(
+        self, session_key: str, state: Any = None
+    ) -> None:
         pass
 
-    async def _save_fallibility_state(self, session_key: str, state: Any = None) -> None:
+    async def _save_fallibility_state(
+        self, session_key: str, state: Any = None
+    ) -> None:
         pass
 
-    async def _save_personality_drift_state(self, session_key: str, state: Any = None) -> None:
+    async def _save_personality_drift_state(
+        self, session_key: str, state: Any = None
+    ) -> None:
         pass
 
     async def _load_group_atmosphere_state(self, session_key: str) -> Any:
@@ -4304,7 +5319,9 @@ class EmotionalStatePlugin(Star):
         engine = getattr(self, "engine", None)
         return engine
 
-    async def _judge_proactive_topic(self, session_key: str = "", **kwargs: Any) -> dict[str, Any]:
+    async def _judge_proactive_topic(
+        self, session_key: str = "", **kwargs: Any
+    ) -> dict[str, Any]:
         return {"topic": "", "confidence": 0.0, "should_speak": False}
 
     def _persona_profile(self, event: Any = None) -> dict[str, Any]:
@@ -4321,7 +5338,9 @@ class EmotionalStatePlugin(Star):
     def _request_model_hint_text(self, event: Any = None) -> str:
         return ""
 
-    async def _request_model_hint_for_event(self, event: Any = None, request: Any = None) -> str:
+    async def _request_model_hint_for_event(
+        self, event: Any = None, request: Any = None
+    ) -> str:
         return await self._get_model_hint(event)
 
     def _request_to_text(self, request: Any) -> str:
@@ -4329,7 +5348,9 @@ class EmotionalStatePlugin(Star):
             return ""
         return str(getattr(request, "prompt", "") or "")[:500]
 
-    def _resolve_public_session_key(self, event: Any = None, *, request: Any = None, session_key: str = "") -> str:
+    def _resolve_public_session_key(
+        self, event: Any = None, *, request: Any = None, session_key: str = ""
+    ) -> str:
         if session_key:
             return session_key
         if event is not None:
@@ -4344,16 +5365,30 @@ class EmotionalStatePlugin(Star):
                 return str(sid)
         return "global"
 
-    def _record_conversation_pending_response_epoch(self, session_key: str, now: float = 0.0) -> None:
+    def _record_conversation_pending_response_epoch(
+        self, session_key: str, now: float = 0.0
+    ) -> None:
         self._conversation_pending_response_epochs[session_key] = now or time.time()
 
-    async def _sylanne_memory_recall_summary_for_request(self, request: Any = None, *, session_key: str = "", current_user_text: str = "", observed_at: Any = None, **kwargs: Any) -> str:
+    async def _sylanne_memory_recall_summary_for_request(
+        self,
+        request: Any = None,
+        *,
+        session_key: str = "",
+        current_user_text: str = "",
+        observed_at: Any = None,
+        **kwargs: Any,
+    ) -> str:
         return ""
 
-    async def _sylanne_memory_recall_query_for_request(self, session_key: str, text: str = "", **kwargs: Any) -> str:
+    async def _sylanne_memory_recall_query_for_request(
+        self, session_key: str, text: str = "", **kwargs: Any
+    ) -> str:
         return text[:100] if text else ""
 
-    async def _save_sylanne_memory_state(self, session_key: str, state: Any = None) -> None:
+    async def _save_sylanne_memory_state(
+        self, session_key: str, state: Any = None
+    ) -> None:
         if state is None:
             return
         cache = self._sylanne_memory_cache
@@ -4369,11 +5404,17 @@ class EmotionalStatePlugin(Star):
             data = state.to_dict() if hasattr(state, "to_dict") else state
             await put_fn(kv_key, data)
 
-    async def _load_sylanne_memory_state(self, session_key: str, *, now: float = 0.0) -> Any:
+    async def _load_sylanne_memory_state(
+        self, session_key: str, *, now: float = 0.0
+    ) -> Any:
         def has_content(state: Any) -> bool:
             if state is None:
                 return False
-            if hasattr(state, "_l1") or hasattr(state, "_l2") or hasattr(state, "_l3_nodes"):
+            if (
+                hasattr(state, "_l1")
+                or hasattr(state, "_l2")
+                or hasattr(state, "_l3_nodes")
+            ):
                 return bool(
                     list(getattr(state, "_l1", []) or [])
                     or list(getattr(state, "_l2", []) or [])
@@ -4390,7 +5431,9 @@ class EmotionalStatePlugin(Star):
         if has_content(cached_state):
             return cache[session_key]
         system_cache = getattr(self, "_memory_systems", {}) or {}
-        live_state = system_cache.get(session_key) if isinstance(system_cache, dict) else None
+        live_state = (
+            system_cache.get(session_key) if isinstance(system_cache, dict) else None
+        )
         if has_content(live_state):
             return live_state
         kv_key = self._sylanne_memory_kv_key(session_key)
@@ -4399,7 +5442,12 @@ class EmotionalStatePlugin(Star):
         if get_fn and callable(get_fn):
             data = await get_fn(kv_key, None)
             if data is not None:
-                if isinstance(data, dict) and {"l1", "l2", "l3_nodes", "l3_edges"}.issubset(data.keys()):
+                if isinstance(data, dict) and {
+                    "l1",
+                    "l2",
+                    "l3_nodes",
+                    "l3_edges",
+                }.issubset(data.keys()):
                     try:
                         state = MemorySystem.create_from_dict(data)
                         self._memory_systems[session_key] = state
@@ -4408,15 +5456,19 @@ class EmotionalStatePlugin(Star):
                     except Exception:
                         pass
                 try:
-                    from memory_engine import SylanneMemoryState
                     import math
+
+                    from memory_engine import SylanneMemoryState
+
                     state = SylanneMemoryState.from_dict(data)
                     if now and hasattr(state, "records"):
                         original_count = len(state.records)
                         surviving = []
                         for rec in state.records:
                             auto_params = getattr(rec, "auto_parameters", None) or {}
-                            half_life = float(auto_params.get("decay_half_life_seconds", 0))
+                            half_life = float(
+                                auto_params.get("decay_half_life_seconds", 0)
+                            )
                             if half_life > 0:
                                 created = getattr(rec, "created_at", 0.0)
                                 elapsed = now - created
@@ -4428,7 +5480,9 @@ class EmotionalStatePlugin(Star):
                         forgotten_count = original_count - len(surviving)
                         state.records = surviving
                         if forgotten_count > 0:
-                            if hasattr(state, "dynamics") and hasattr(state.dynamics, "notes"):
+                            if hasattr(state, "dynamics") and hasattr(
+                                state.dynamics, "notes"
+                            ):
                                 state.dynamics.notes = f"forgotten={forgotten_count}"
                             if put_fn and callable(put_fn):
                                 save_data = state.to_dict()
@@ -4465,16 +5519,26 @@ class EmotionalStatePlugin(Star):
         epochs = self._conversation_pending_response_epochs
         return epochs.pop(session_key, 0.0)
 
-    async def _observe_sylanne_memory_event_if_enabled(self, session_key: str, text: str = "", **kwargs: Any) -> None:
+    async def _observe_sylanne_memory_event_if_enabled(
+        self, session_key: str, text: str = "", **kwargs: Any
+    ) -> None:
         pass
 
-    async def _commit_sylanne_memory_observations_batch(self, session_key: str, observations: Any = None, **kwargs: Any) -> None:
+    async def _commit_sylanne_memory_observations_batch(
+        self, session_key: str, observations: Any = None, **kwargs: Any
+    ) -> None:
         pass
 
     def _schedule_background_task(self, coro: Any, *, label: str = "") -> Any:
         task = asyncio.ensure_future(coro)
         self._background_tasks.append(task)
-        task.add_done_callback(lambda t: self._background_tasks.remove(t) if t in self._background_tasks else None)
+        task.add_done_callback(
+            lambda t: (
+                self._background_tasks.remove(t)
+                if t in self._background_tasks
+                else None
+            )
+        )
         return task
 
     def _ensure_runtime_state_containers(self) -> None:
@@ -4485,6 +5549,7 @@ class EmotionalStatePlugin(Star):
 
     def _build_astrbot_message_chain(self, text: str = "", **kwargs: Any) -> Any:
         import sys
+
         event_mod = sys.modules.get("astrbot.api.event")
         if event_mod:
             _Chain = getattr(event_mod, "MessageChain", None)
@@ -4495,15 +5560,28 @@ class EmotionalStatePlugin(Star):
                     return chain
         return self._astrbot_message(text)
 
-    async def _assess_emotion(self, session_key: str = "", text: str = "", event: Any = None, **kwargs: Any) -> Any:
+    async def _assess_emotion(
+        self, session_key: str = "", text: str = "", event: Any = None, **kwargs: Any
+    ) -> Any:
         current_text = kwargs.get("current_text", text)
         cfg = self.config or {}
         low_signal_enabled = cfg.get("enable_low_signal_light_assessment", True)
         low_signal_max = int(cfg.get("low_signal_max_chars", 12))
-        if low_signal_enabled and len(current_text) <= low_signal_max and current_text.strip():
+        if (
+            low_signal_enabled
+            and len(current_text) <= low_signal_max
+            and current_text.strip()
+        ):
             return SimpleNamespace(
-                values={"valence": 0.0, "arousal": 0.0, "dominance": 0.0,
-                        "goal_congruence": 0.0, "certainty": 0.0, "control": 0.0, "affiliation": 0.0},
+                values={
+                    "valence": 0.0,
+                    "arousal": 0.0,
+                    "dominance": 0.0,
+                    "goal_congruence": 0.0,
+                    "certainty": 0.0,
+                    "control": 0.0,
+                    "affiliation": 0.0,
+                },
                 confidence=0.2,
                 label="neutral",
                 source="low_signal",
@@ -4515,13 +5593,22 @@ class EmotionalStatePlugin(Star):
         if provider_id_fn and callable(provider_id_fn):
             try:
                 if timeout > 0:
-                    provider_id = await asyncio.wait_for(provider_id_fn(event), timeout=timeout)
+                    provider_id = await asyncio.wait_for(
+                        provider_id_fn(event), timeout=timeout
+                    )
                 else:
                     provider_id = await provider_id_fn(event)
             except (asyncio.TimeoutError, Exception):
                 return SimpleNamespace(
-                    values={"valence": 0.0, "arousal": 0.0, "dominance": 0.0,
-                            "goal_congruence": 0.0, "certainty": 0.0, "control": 0.0, "affiliation": 0.0},
+                    values={
+                        "valence": 0.0,
+                        "arousal": 0.0,
+                        "dominance": 0.0,
+                        "goal_congruence": 0.0,
+                        "certainty": 0.0,
+                        "control": 0.0,
+                        "affiliation": 0.0,
+                    },
                     confidence=0.3,
                     label="neutral",
                     source="heuristic",
@@ -4535,11 +5622,17 @@ class EmotionalStatePlugin(Star):
             try:
                 if timeout > 0:
                     raw = await asyncio.wait_for(
-                        call_llm_fn(provider_id=provider_id, prompt=current_text, system_prompt=""),
+                        call_llm_fn(
+                            provider_id=provider_id,
+                            prompt=current_text,
+                            system_prompt="",
+                        ),
                         timeout=timeout,
                     )
                 else:
-                    raw = await call_llm_fn(provider_id=provider_id, prompt=current_text, system_prompt="")
+                    raw = await call_llm_fn(
+                        provider_id=provider_id, prompt=current_text, system_prompt=""
+                    )
                 if hasattr(raw, "completion_text"):
                     raw_text = raw.completion_text
                 else:
@@ -4555,8 +5648,15 @@ class EmotionalStatePlugin(Star):
                 )
             except (asyncio.TimeoutError, Exception):
                 return SimpleNamespace(
-                    values={"valence": 0.0, "arousal": 0.0, "dominance": 0.0,
-                            "goal_congruence": 0.0, "certainty": 0.0, "control": 0.0, "affiliation": 0.0},
+                    values={
+                        "valence": 0.0,
+                        "arousal": 0.0,
+                        "dominance": 0.0,
+                        "goal_congruence": 0.0,
+                        "certainty": 0.0,
+                        "control": 0.0,
+                        "affiliation": 0.0,
+                    },
                     confidence=0.3,
                     label="neutral",
                     source="heuristic",
@@ -4564,8 +5664,15 @@ class EmotionalStatePlugin(Star):
                     appraisal={},
                 )
         return SimpleNamespace(
-            values={"valence": 0.0, "arousal": 0.0, "dominance": 0.0,
-                    "goal_congruence": 0.0, "certainty": 0.0, "control": 0.0, "affiliation": 0.0},
+            values={
+                "valence": 0.0,
+                "arousal": 0.0,
+                "dominance": 0.0,
+                "goal_congruence": 0.0,
+                "certainty": 0.0,
+                "control": 0.0,
+                "affiliation": 0.0,
+            },
             confidence=0.3,
             label="neutral",
             source="heuristic",
@@ -4591,7 +5698,7 @@ class EmotionalStatePlugin(Star):
         return 2
 
     def _internal_assessor_llm_concurrency_decision(self) -> dict[str, Any]:
-        cfg = self.config or {}
+        _cfg = self.config or {}
         total_queued = sum(len(q) for q in self._background_post_queues.values())
         base_limit = 2
         burst_limit = 3
@@ -4608,13 +5715,17 @@ class EmotionalStatePlugin(Star):
             "reasons": reasons,
         }
 
-    def _build_realtime_input_completion_prompt(self, session_key: str = "", text: str = "", **kwargs: Any) -> str:
+    def _build_realtime_input_completion_prompt(
+        self, session_key: str = "", text: str = "", **kwargs: Any
+    ) -> str:
         return text
 
     def _extract_realtime_response_media_parts(self, response: Any = None) -> list[Any]:
         return []
 
-    def _build_group_atmosphere_injection_for_session(self, session_key: str = "", state: Any = None, **kwargs: Any) -> str:
+    def _build_group_atmosphere_injection_for_session(
+        self, session_key: str = "", state: Any = None, **kwargs: Any
+    ) -> str:
         if state is None:
             return ""
         cache = self._group_atmosphere_injection_snapshot_cache
@@ -4623,9 +5734,15 @@ class EmotionalStatePlugin(Star):
         diff_mode = str(cfg.get("state_injection_compact_mode", "")).lower() == "diff"
         values = getattr(state, "values", {}) if state else {}
         if diff_mode and previous is not None:
-            threshold = float(cfg.get("group_atmosphere_injection_diff_threshold", 0.08))
+            threshold = float(
+                cfg.get("group_atmosphere_injection_diff_threshold", 0.08)
+            )
             prev_values = previous.get("values", {})
-            max_delta = max(abs(values.get(k, 0) - prev_values.get(k, 0)) for k in values) if values else 0
+            max_delta = (
+                max(abs(values.get(k, 0) - prev_values.get(k, 0)) for k in values)
+                if values
+                else 0
+            )
             if max_delta < threshold:
                 return '<bot_group_atmosphere detail="diff">No material room-mood change since last injection.</bot_group_atmosphere>'
         snapshot = {"values": dict(values)}
@@ -4633,10 +5750,10 @@ class EmotionalStatePlugin(Star):
         if not hasattr(self, "_group_atmosphere_injection_snapshot_cache"):
             self._group_atmosphere_injection_snapshot_cache = {}
         self._group_atmosphere_injection_snapshot_cache[session_key] = snapshot
-        lines = ['<bot_group_atmosphere>']
+        lines = ["<bot_group_atmosphere>"]
         for k, v in values.items():
             lines.append(f"  {k}={v:.2f}" if isinstance(v, float) else f"  {k}={v}")
-        lines.append('</bot_group_atmosphere>')
+        lines.append("</bot_group_atmosphere>")
         return "\n".join(lines)
 
     def _context_item_to_text(self, item: Any) -> str:
@@ -4648,16 +5765,23 @@ class EmotionalStatePlugin(Star):
             return str(item.content)
         return str(item)
 
-    def _conversation_time_payload(self, session_key_or_timestamp: Any = "", *, event: Any = None, **kwargs: Any) -> dict[str, Any]:
+    def _conversation_time_payload(
+        self, session_key_or_timestamp: Any = "", *, event: Any = None, **kwargs: Any
+    ) -> dict[str, Any]:
         ts = None
-        if isinstance(session_key_or_timestamp, (int, float)) and session_key_or_timestamp > 1000000000:
+        if (
+            isinstance(session_key_or_timestamp, (int, float))
+            and session_key_or_timestamp > 1000000000
+        ):
             ts = datetime.fromtimestamp(session_key_or_timestamp, tz=_CHINA_TZ)
         elif event is not None and hasattr(event, "timestamp") and event.timestamp:
             ts = datetime.fromtimestamp(event.timestamp, tz=_CHINA_TZ)
         if ts is None:
             ts = datetime.now(_CHINA_TZ)
         offset_str = ts.strftime("%z")
-        offset_formatted = f"{offset_str[:3]}:{offset_str[3:]}" if len(offset_str) == 5 else offset_str
+        offset_formatted = (
+            f"{offset_str[:3]}:{offset_str[3:]}" if len(offset_str) == 5 else offset_str
+        )
         return {
             "local_time": ts.strftime("%H:%M:%S"),
             "local_date": ts.strftime("%Y-%m-%d"),
@@ -4684,14 +5808,20 @@ class EmotionalStatePlugin(Star):
             "operator_id": str(raw.get("operator_id", "")),
         }
 
-    def _derive_proactive_dispatch_policy(self, decision: Any = None, *, session_key: str = "", **kwargs: Any) -> dict[str, Any]:
+    def _derive_proactive_dispatch_policy(
+        self, decision: Any = None, *, session_key: str = "", **kwargs: Any
+    ) -> dict[str, Any]:
         cfg = self.config or {}
         cooldown = float(cfg.get("proactive_speech_dispatch_cooldown_seconds", 1800.0))
         feedback_pressure = 0.0
         audit = getattr(self, "_proactive_dispatch_audit", None) or {}
         history = audit.get(session_key)
         if history:
-            cold_count = sum(1 for entry in history if entry.get("feedback_status") in ("cold_reply", "unanswered"))
+            cold_count = sum(
+                1
+                for entry in history
+                if entry.get("feedback_status") in ("cold_reply", "unanswered")
+            )
             feedback_pressure = min(1.0, cold_count * 0.3)
             cooldown = cooldown * (1.0 + feedback_pressure)
         return {
@@ -4701,19 +5831,35 @@ class EmotionalStatePlugin(Star):
             "feedback_pressure": feedback_pressure,
         }
 
-    def _observe_proactive_dispatch_feedback(self, session_key: str = "", **kwargs: Any) -> None:
+    def _observe_proactive_dispatch_feedback(
+        self, session_key: str = "", **kwargs: Any
+    ) -> None:
         pass
 
-    async def _observe_stickers_background(self, event: Any = None, stickers: Any = None, **kwargs: Any) -> None:
+    async def _observe_stickers_background(
+        self, event: Any = None, stickers: Any = None, **kwargs: Any
+    ) -> None:
         pass
 
-    def _extract_sticker_observations_from_event(self, event: Any = None) -> list[dict[str, Any]]:
+    def _extract_sticker_observations_from_event(
+        self, event: Any = None
+    ) -> list[dict[str, Any]]:
         return []
 
-    def _proactive_scheduler_should_exit_after_idle(self, session_key: str = "", **kwargs: Any) -> bool:
+    def _proactive_scheduler_should_exit_after_idle(
+        self, session_key: str = "", **kwargs: Any
+    ) -> bool:
         return True
 
-    def _build_proactive_dispatch_request(self, decision: Any = None, *, event_or_session: Any = None, session_key: str = "", candidate_context: str = "", **kwargs: Any) -> dict[str, Any]:
+    def _build_proactive_dispatch_request(
+        self,
+        decision: Any = None,
+        *,
+        event_or_session: Any = None,
+        session_key: str = "",
+        candidate_context: str = "",
+        **kwargs: Any,
+    ) -> dict[str, Any]:
         cfg = self.config or {}
         topic_judgement = {}
         if isinstance(decision, dict):
@@ -4728,23 +5874,38 @@ class EmotionalStatePlugin(Star):
             "realtime_chat_plan": {"message_count": 1},
         }
 
-    def _proactive_dispatch_blocked_reason(self, decision: Any = None, dispatch: Any = None, *, event_or_session: Any = None, dry_run: bool = False, force: bool = False, **kwargs: Any) -> str:
+    def _proactive_dispatch_blocked_reason(
+        self,
+        decision: Any = None,
+        dispatch: Any = None,
+        *,
+        event_or_session: Any = None,
+        dry_run: bool = False,
+        force: bool = False,
+        **kwargs: Any,
+    ) -> str:
         if force:
             return ""
         cfg = self.config or {}
         if not cfg.get("enable_proactive_speech_dispatch"):
             return "dispatch_disabled"
-        now = self._observed_now() if callable(self._observed_now) else self._observed_now
+        now = (
+            self._observed_now() if callable(self._observed_now) else self._observed_now
+        )
         candidates = self._proactive_candidate_sessions
         sk = ""
         if event_or_session is not None:
             sk = str(getattr(event_or_session, "unified_msg_origin", "") or "")
         candidate = candidates.get(sk, {})
         last_seen = candidate.get("last_seen_at", 0.0)
-        min_idle = float((dispatch or {}).get("quiet_gate", {}).get("min_idle_seconds", 300.0))
+        min_idle = float(
+            (dispatch or {}).get("quiet_gate", {}).get("min_idle_seconds", 300.0)
+        )
         if last_seen and (now - last_seen) < min_idle:
             return "recent_user_activity_quiet_period"
-        last_sent = (getattr(self, "_proactive_dispatch_last_sent", None) or {}).get(sk, 0.0)
+        last_sent = (getattr(self, "_proactive_dispatch_last_sent", None) or {}).get(
+            sk, 0.0
+        )
         cooldown = float(cfg.get("proactive_speech_dispatch_cooldown_seconds", 1800.0))
         if last_sent and (now - last_sent) < cooldown:
             return "cooldown_active"
@@ -4756,7 +5917,9 @@ class EmotionalStatePlugin(Star):
     def _last_request_text_for_session(self, session_key: str = "") -> str:
         return str(self._last_request_text.get(session_key, ""))
 
-    def _background_post_adaptive_worker_decision(self, session_key: str = "", *, commit_scale: bool = False) -> dict[str, Any]:
+    def _background_post_adaptive_worker_decision(
+        self, session_key: str = "", *, commit_scale: bool = False
+    ) -> dict[str, Any]:
         cfg = self.config or {}
         dynamic_enabled = bool(cfg.get("enable_dynamic_background_workers"))
         queue = self._background_post_queues.get(session_key, collections.deque())
@@ -4766,7 +5929,17 @@ class EmotionalStatePlugin(Star):
         global_cap = 6
         now = self._observed_now()
         resource_pressure_fn = getattr(self, "_background_post_resource_pressure", None)
-        resource_pressure = resource_pressure_fn() if resource_pressure_fn and callable(resource_pressure_fn) else {"level": "normal", "worker_cap": global_cap, "cpu_load_ratio": 0.0, "memory_load_ratio": 0.0, "reason": "stable"}
+        resource_pressure = (
+            resource_pressure_fn()
+            if resource_pressure_fn and callable(resource_pressure_fn)
+            else {
+                "level": "normal",
+                "worker_cap": global_cap,
+                "cpu_load_ratio": 0.0,
+                "memory_load_ratio": 0.0,
+                "reason": "stable",
+            }
+        )
         env_cap = resource_pressure.get("worker_cap", global_cap)
         env_level = resource_pressure.get("level", "normal")
         if queue_depth <= 1:
@@ -4796,14 +5969,22 @@ class EmotionalStatePlugin(Star):
             if commit_scale:
                 if not state_entry:
                     desired = 2
-                    worker_state[session_key] = {"last_scale_at": now, "current_level": desired, "committed": True}
+                    worker_state[session_key] = {
+                        "last_scale_at": now,
+                        "current_level": desired,
+                        "committed": True,
+                    }
                     reasons.append("worker_scale_initial")
                 elif now - last_scale_at < scale_interval:
                     desired = current_level
                     reasons.append("worker_scale_cooldown")
                 else:
                     desired = min(current_level + 1, target_workers, env_cap)
-                    worker_state[session_key] = {"last_scale_at": now, "current_level": desired, "committed": True}
+                    worker_state[session_key] = {
+                        "last_scale_at": now,
+                        "current_level": desired,
+                        "committed": True,
+                    }
                     reasons.append("worker_scale_step_up")
             else:
                 desired = state_entry.get("current_level", 2) if state_entry else 2
@@ -4819,7 +6000,10 @@ class EmotionalStatePlugin(Star):
             reasons.append("global_worker_budget_exhausted")
         else:
             dispatch_workers = min(dispatch_workers, global_cap - global_active_other)
-        scale_state: dict[str, Any] = {"committed": commit_scale and dynamic_enabled, "scale_interval_seconds": 5.0}
+        scale_state: dict[str, Any] = {
+            "committed": commit_scale and dynamic_enabled,
+            "scale_interval_seconds": 5.0,
+        }
         if commit_scale and dynamic_enabled:
             ws = self._background_post_worker_state.get(session_key, {})
             scale_state.update(ws)
@@ -4838,7 +6022,9 @@ class EmotionalStatePlugin(Star):
         }
 
     def _background_post_max_workers(self, session_key: str = "") -> int:
-        decision = self._background_post_adaptive_worker_decision(session_key, commit_scale=True)
+        decision = self._background_post_adaptive_worker_decision(
+            session_key, commit_scale=True
+        )
         return max(1, decision.get("desired_workers", 1))
 
     def _background_post_job_to_dict(self, job: Any) -> dict[str, Any]:
@@ -4857,10 +6043,16 @@ class EmotionalStatePlugin(Star):
 
     def _recover_expired_background_post_active(self, session_key: str) -> int:
         active = self._background_post_active.get(session_key, {})
-        queue = self._background_post_queues.setdefault(session_key, collections.deque())
+        queue = self._background_post_queues.setdefault(
+            session_key, collections.deque()
+        )
         now = self._observed_now()
         recovered = 0
-        expired_seqs = [seq for seq, job in active.items() if getattr(job, "lease_until", 0) and job.lease_until < now]
+        expired_seqs = [
+            seq
+            for seq, job in active.items()
+            if getattr(job, "lease_until", 0) and job.lease_until < now
+        ]
         for seq in sorted(expired_seqs):
             job = active.pop(seq)
             job.leased_at = 0.0
@@ -4874,9 +6066,14 @@ class EmotionalStatePlugin(Star):
 
     def _schedule_background_post_checkpoint(self, session_key: str) -> None:
         checkpoint_tasks = self._background_post_checkpoint_tasks
-        debounce = float((self.config or {}).get("background_post_checkpoint_debounce_seconds", 0.75))
+        debounce = float(
+            (self.config or {}).get("background_post_checkpoint_debounce_seconds", 0.75)
+        )
         for existing in list(checkpoint_tasks):
-            if not existing.done() and getattr(existing, "_checkpoint_session", None) == session_key:
+            if (
+                not existing.done()
+                and getattr(existing, "_checkpoint_session", None) == session_key
+            ):
                 return
 
         async def _debounced_save():
@@ -4898,8 +6095,11 @@ class EmotionalStatePlugin(Star):
                 assess_fn = getattr(self, "_assess_emotion", None)
                 if assess_fn and callable(assess_fn):
                     observation = await assess_fn(
-                        session_key=session_key, event=job.event,
-                        phase="post_response", context_text=job.context_key, current_text=job.reply_text,
+                        session_key=session_key,
+                        event=job.event,
+                        phase="post_response",
+                        context_text=job.context_key,
+                        current_text=job.reply_text,
                     )
                 else:
                     observation = None
@@ -4917,7 +6117,9 @@ class EmotionalStatePlugin(Star):
         if not put_fn or not callable(put_fn):
             return
         queue = self._background_post_queues.get(session_key, collections.deque())
-        dead_letters = self._background_post_dead_letters.get(session_key, collections.deque())
+        dead_letters = self._background_post_dead_letters.get(
+            session_key, collections.deque()
+        )
         latest = self._background_post_latest_enqueued.get(session_key, 0)
         committed = self._background_post_last_committed.get(session_key, 0)
         kv_key = self._background_post_checkpoint_kv_key(session_key)
@@ -4956,14 +6158,18 @@ class EmotionalStatePlugin(Star):
         if not checkpoint:
             return False
         from main import _BackgroundPostJob
+
         jobs_data = checkpoint.get("jobs", [])
         dead_data = checkpoint.get("dead_letters", [])
         queue = collections.deque()
         for jd in jobs_data:
             job = _BackgroundPostJob(
-                event=None, identity="", reply_text=jd.get("reply_text", ""),
+                event=None,
+                identity="",
+                reply_text=jd.get("reply_text", ""),
                 context_key=jd.get("context_key", ""),
-                sequence=jd.get("sequence", 0), enqueued_at=jd.get("enqueued_at", 0.0),
+                sequence=jd.get("sequence", 0),
+                enqueued_at=jd.get("enqueued_at", 0.0),
             )
             job.attempts = jd.get("attempts", 0)
             job.next_retry_at = jd.get("next_retry_at", 0.0)
@@ -4977,9 +6183,12 @@ class EmotionalStatePlugin(Star):
         dead_queue = collections.deque()
         for dd in dead_data:
             job = _BackgroundPostJob(
-                event=None, identity="", reply_text=dd.get("reply_text", ""),
+                event=None,
+                identity="",
+                reply_text=dd.get("reply_text", ""),
                 context_key=dd.get("context_key", ""),
-                sequence=dd.get("sequence", 0), enqueued_at=dd.get("enqueued_at", 0.0),
+                sequence=dd.get("sequence", 0),
+                enqueued_at=dd.get("enqueued_at", 0.0),
             )
             job.attempts = dd.get("attempts", 0)
             job.last_error_type = dd.get("last_error_type", "")
@@ -5010,33 +6219,65 @@ class EmotionalStatePlugin(Star):
         return {
             "schema_version": "sylanne.alpha.config.v1",
             "realtime_chat": {
-                "enabled": bool(cfg.get("sylanne_alpha_realtime_chat_enabled") or cfg.get("enable_realtime_chat")),
+                "enabled": bool(
+                    cfg.get("sylanne_alpha_realtime_chat_enabled")
+                    or cfg.get("enable_realtime_chat")
+                ),
             },
             "proactive_dispatch": {
-                "enabled": bool(cfg.get("sylanne_alpha_proactive_dispatch_enabled") or cfg.get("enable_proactive_speech_dispatch")),
+                "enabled": bool(
+                    cfg.get("sylanne_alpha_proactive_dispatch_enabled")
+                    or cfg.get("enable_proactive_speech_dispatch")
+                ),
             },
             "embedding_memory": {
                 "enabled": bool(cfg.get("sylanne_alpha_embedding_memory_enabled")),
-                "provider_id": str(cfg.get("sylanne_alpha_embedding_memory_provider_id") or cfg.get("sylanne_memory_embedding_provider_id") or ""),
+                "provider_id": str(
+                    cfg.get("sylanne_alpha_embedding_memory_provider_id")
+                    or cfg.get("sylanne_memory_embedding_provider_id")
+                    or ""
+                ),
             },
             "assessor_llm": {
-                "enabled": bool(cfg.get("sylanne_alpha_assessor_llm_enabled") or cfg.get("use_llm_assessor")),
-                "provider_id": str(cfg.get("sylanne_alpha_assessor_provider_id") or cfg.get("emotion_provider_id") or ""),
+                "enabled": bool(
+                    cfg.get("sylanne_alpha_assessor_llm_enabled")
+                    or cfg.get("use_llm_assessor")
+                ),
+                "provider_id": str(
+                    cfg.get("sylanne_alpha_assessor_provider_id")
+                    or cfg.get("emotion_provider_id")
+                    or ""
+                ),
             },
             "fast_assessor": {
-                "enabled": bool(cfg.get("sylanne_alpha_fast_assessor_enabled")) if "sylanne_alpha_fast_assessor_enabled" in cfg else bool(cfg.get("fast_assessor_enabled", True)),
-                "provider_id": str(cfg.get("sylanne_alpha_fast_assessor_provider_id") or cfg.get("fast_assessor_provider_id") or ""),
+                "enabled": bool(cfg.get("sylanne_alpha_fast_assessor_enabled"))
+                if "sylanne_alpha_fast_assessor_enabled" in cfg
+                else bool(cfg.get("fast_assessor_enabled", True)),
+                "provider_id": str(
+                    cfg.get("sylanne_alpha_fast_assessor_provider_id")
+                    or cfg.get("fast_assessor_provider_id")
+                    or ""
+                ),
             },
             "background_workers": {
-                "enabled": bool(cfg.get("sylanne_alpha_background_workers_enabled") or cfg.get("enable_dynamic_background_workers")),
-                "max_workers": int(cfg.get("sylanne_alpha_background_max_workers", 1) or 1),
+                "enabled": bool(
+                    cfg.get("sylanne_alpha_background_workers_enabled")
+                    or cfg.get("enable_dynamic_background_workers")
+                ),
+                "max_workers": int(
+                    cfg.get("sylanne_alpha_background_max_workers", 1) or 1
+                ),
             },
             "safety": {
-                "relational_public_export": "allowed" if cfg.get("allow_relational_self_public_export") else "blocked",
+                "relational_public_export": "allowed"
+                if cfg.get("allow_relational_self_public_export")
+                else "blocked",
             },
         }
 
-    async def sylanne_memory_status(self, event: Any = None, query: str = "", **kwargs: Any) -> Any:
+    async def sylanne_memory_status(
+        self, event: Any = None, query: str = "", **kwargs: Any
+    ) -> Any:
         cfg = self.config or {}
         sk = self._session_key(event)
         if not cfg.get("enable_sylanne_memory", True):
@@ -5049,7 +6290,11 @@ class EmotionalStatePlugin(Star):
             return
         records = getattr(state, "records", [])
         if query:
-            matched = [r for r in records if query.lower() in str(getattr(r, "text", "")).lower()]
+            matched = [
+                r
+                for r in records
+                if query.lower() in str(getattr(r, "text", "")).lower()
+            ]
             if matched:
                 lines = [f"只读记忆查询 (query={query!r}, {len(matched)} 条匹配):"]
                 for r in matched[:5]:
@@ -5100,7 +6345,15 @@ class EmotionalStatePlugin(Star):
         else:
             yield "道德修复状态: 无数据。"
 
-    async def query_agent_state(self, event: Any = None, state: str = "", detail: str = "summary", track: str = "conversation", include_runtime: bool = False, **kwargs: Any) -> dict[str, Any]:
+    async def query_agent_state(
+        self,
+        event: Any = None,
+        state: str = "",
+        detail: str = "summary",
+        track: str = "conversation",
+        include_runtime: bool = False,
+        **kwargs: Any,
+    ) -> dict[str, Any]:
         sk = self._session_key(event)
         state_name = state.replace("_state", "").replace("_self", "")
         if state_name == "integrated":
@@ -5116,13 +6369,18 @@ class EmotionalStatePlugin(Star):
             "integrated": "get_integrated_self_snapshot",
             "group_atmosphere": "get_group_atmosphere_snapshot",
         }
-        method_name = snapshot_method_map.get(state_name) or snapshot_method_map.get(state)
+        method_name = snapshot_method_map.get(state_name) or snapshot_method_map.get(
+            state
+        )
         if method_name:
             fn = getattr(self, method_name, None)
             if fn and callable(fn):
-                call_kw: dict[str, Any] = {"session_key": sk, "include_prompt_fragment": (detail == "full")}
+                call_kw: dict[str, Any] = {
+                    "session_key": sk,
+                    "include_prompt_fragment": (detail == "full"),
+                }
                 if state_name == "integrated":
-                    call_kw["include_raw_snapshots"] = (detail == "full")
+                    call_kw["include_raw_snapshots"] = detail == "full"
                 snap = await fn(**call_kw)
                 if detail == "summary":
                     snap.pop("prompt_fragment", None)
@@ -5166,12 +6424,18 @@ class EmotionalStatePlugin(Star):
         }
         return json.dumps(truncated, ensure_ascii=False, default=str)
 
-    async def get_agent_runtime_diagnostics(self, event: Any = None, include_sessions: bool = False, **kwargs: Any) -> dict[str, Any]:
+    async def get_agent_runtime_diagnostics(
+        self, event: Any = None, include_sessions: bool = False, **kwargs: Any
+    ) -> dict[str, Any]:
         if isinstance(event, str):
             session_key = event
         else:
             session_key = self._session_key(event)
-        budget = self._last_request_budgets.get(session_key, _StateInjectionBudget()) if hasattr(self, "_last_request_budgets") else _StateInjectionBudget()
+        budget = (
+            self._last_request_budgets.get(session_key, _StateInjectionBudget())
+            if hasattr(self, "_last_request_budgets")
+            else _StateInjectionBudget()
+        )
         cfg = self.config or {}
         result: dict[str, Any] = {
             "state_injection": {
@@ -5190,11 +6454,15 @@ class EmotionalStatePlugin(Star):
             loop_data = closed_loop[session_key]
             ledger = getattr(self, "_conversation_event_ledger", None)
             if ledger is not None:
-                recent_fn = getattr(ledger, "recent", None) or getattr(ledger, "tail", None)
+                recent_fn = getattr(ledger, "recent", None) or getattr(
+                    ledger, "tail", None
+                )
                 if recent_fn and callable(recent_fn):
                     tail = recent_fn(session_key, limit=5)
                     loop_data["ledger_tail"] = [
-                        {k: v for k, v in vars(e).items() if not k.startswith("_")} if hasattr(e, "__dict__") else {"event_id": getattr(e, "event_id", "")}
+                        {k: v for k, v in vars(e).items() if not k.startswith("_")}
+                        if hasattr(e, "__dict__")
+                        else {"event_id": getattr(e, "event_id", "")}
                         for e in tail
                     ]
             result["understanding_closed_loop"] = loop_data
@@ -5205,7 +6473,7 @@ class EmotionalStatePlugin(Star):
         bg_latest = self._background_post_latest_enqueued
         bg_committed = self._background_post_last_committed
         bg_skipped = getattr(self, "_background_post_skipped", {})
-        bg_sequence = self._background_post_sequence
+        _bg_sequence = self._background_post_sequence
         has_bg_data = bool(bg_queues or bg_active or bg_dead_letters)
         if include_sessions or has_bg_data:
             queue = bg_queues.get(session_key, collections.deque())
@@ -5216,10 +6484,16 @@ class EmotionalStatePlugin(Star):
             skipped = bg_skipped.get(session_key, set())
             retrying = [j for j in queue if j.attempts > 0]
             now = time.time()
-            expired_lease = [j for j in active.values() if getattr(j, "lease_until", 0) and j.lease_until < now]
+            expired_lease = [
+                j
+                for j in active.values()
+                if getattr(j, "lease_until", 0) and j.lease_until < now
+            ]
             state_lag = latest_enqueued - last_committed
             warnings = []
-            warn_lag_count = int(cfg.get("background_post_diagnostics_warn_lag_count", 20))
+            warn_lag_count = int(
+                cfg.get("background_post_diagnostics_warn_lag_count", 20)
+            )
             if state_lag >= warn_lag_count:
                 warnings.append("lag_count_high")
             if retrying:
@@ -5230,11 +6504,17 @@ class EmotionalStatePlugin(Star):
                 warnings.append("expired_lease")
             warning_level = "ok"
             if warnings:
-                warning_level = "error" if ("dead_letter" in warnings or "expired_lease" in warnings) else "warn"
+                warning_level = (
+                    "error"
+                    if ("dead_letter" in warnings or "expired_lease" in warnings)
+                    else "warn"
+                )
             dynamic_enabled = bool(cfg.get("enable_dynamic_background_workers"))
             bg_assessment: dict[str, Any] = {
                 "enabled": bool(cfg.get("background_post_assessment", True)),
-                "checkpoint_enabled": bool(cfg.get("background_post_queue_checkpoint_enabled", True)),
+                "checkpoint_enabled": bool(
+                    cfg.get("background_post_queue_checkpoint_enabled", True)
+                ),
                 "queue_limit": int(cfg.get("background_post_queue_limit", 0)),
                 "max_workers": 1,
                 "base_workers": 1,
@@ -5243,7 +6523,9 @@ class EmotionalStatePlugin(Star):
                 "dynamic_extra_worker_cap": 5,
                 "total_worker_cap": 6,
                 "worker_policy": "adaptive_resource_guarded_pressure",
-                "worker_scale_reasons": ["dynamic_scale_disabled"] if not dynamic_enabled else [],
+                "worker_scale_reasons": ["dynamic_scale_disabled"]
+                if not dynamic_enabled
+                else [],
                 "worker_queue_target": 1,
                 "worker_target_after_resource_guard": 1,
                 "worker_smoothed_limit": 1,
@@ -5259,8 +6541,12 @@ class EmotionalStatePlugin(Star):
                 "internal_assessor_llm_concurrency_limit": 2,
                 "internal_assessor_llm_base_concurrency": 2,
                 "internal_assessor_llm_burst_concurrency": 3,
-                "internal_assessor_llm_inflight": getattr(self, "_internal_assessor_llm_inflight", 0),
-                "active_task": bool(getattr(self, "_background_post_tasks", {}).get(session_key)),
+                "internal_assessor_llm_inflight": getattr(
+                    self, "_internal_assessor_llm_inflight", 0
+                ),
+                "active_task": bool(
+                    getattr(self, "_background_post_tasks", {}).get(session_key)
+                ),
                 "queued": len(queue),
                 "queue_depth": len(queue),
                 "active_workers": 1 if active else 0,
@@ -5274,15 +6560,23 @@ class EmotionalStatePlugin(Star):
                 "expired_lease_count": len(expired_lease),
                 "warning_level": warning_level,
                 "warnings": warnings,
-                "last_error_type": (list(dead_letters)[-1].last_error_type if dead_letters else (retrying[-1].last_error_type if retrying else "")),
+                "last_error_type": (
+                    list(dead_letters)[-1].last_error_type
+                    if dead_letters
+                    else (retrying[-1].last_error_type if retrying else "")
+                ),
                 "dead_letters": [{"sequence": j.sequence} for j in dead_letters],
             }
             result["background_post_assessment"] = bg_assessment
             if include_sessions:
-                result["sessions"] = list(set(list(bg_queues.keys()) + list(bg_active.keys())))
+                result["sessions"] = list(
+                    set(list(bg_queues.keys()) + list(bg_active.keys()))
+                )
         return result
 
-    def _append_realtime_ordinary_history_backfills_if_any(self, request: Any, session_key: str = "", **kwargs: Any) -> bool:
+    def _append_realtime_ordinary_history_backfills_if_any(
+        self, request: Any, session_key: str = "", **kwargs: Any
+    ) -> bool:
         backfills = self._realtime_ordinary_history_backfills
         entries = backfills.get(session_key, [])
         if not entries:
@@ -5295,14 +6589,18 @@ class EmotionalStatePlugin(Star):
             else:
                 parts.append(str(entry))
         if parts:
-            request.prompt = f"{current}\n[sylanne_backfill_context]\n" + "\n".join(parts)
+            request.prompt = f"{current}\n[sylanne_backfill_context]\n" + "\n".join(
+                parts
+            )
         backfills[session_key] = []
         return True
 
     # ------------------------------------------------------------------
     # Command methods (status/reset commands expected by tests)
     # ------------------------------------------------------------------
-    async def psychological_screening_status(self, event: Any = None, **kwargs: Any) -> Any:
+    async def psychological_screening_status(
+        self, event: Any = None, **kwargs: Any
+    ) -> Any:
         cfg = self.config or {}
         if not cfg.get("enable_psychological_screening"):
             yield "心理筛查状态未启用。"
@@ -5366,19 +6664,30 @@ class EmotionalStatePlugin(Star):
         load_fn = getattr(self, "_load_fallibility_state", None)
         if load_fn and callable(load_fn):
             state = await load_fn(sk)
-            yield json.dumps({"kind": "fallibility_state", "enabled": True, "state": state}, ensure_ascii=False, default=str)
+            yield json.dumps(
+                {"kind": "fallibility_state", "enabled": True, "state": state},
+                ensure_ascii=False,
+                default=str,
+            )
         else:
-            yield json.dumps({"kind": "fallibility_state", "enabled": True}, ensure_ascii=False, default=str)
+            yield json.dumps(
+                {"kind": "fallibility_state", "enabled": True},
+                ensure_ascii=False,
+                default=str,
+            )
 
     async def shadow_diagnostics_status(self, event: Any = None, **kwargs: Any) -> Any:
         cfg = self.config or {}
         if not cfg.get("enable_shadow_diagnostics"):
-            yield json.dumps({
-                "kind": "shadow_diagnostics",
-                "enabled": False,
-                "reason": "enable_shadow_diagnostics is false",
-                "executable_strategy_enabled": False,
-            }, ensure_ascii=False)
+            yield json.dumps(
+                {
+                    "kind": "shadow_diagnostics",
+                    "enabled": False,
+                    "reason": "enable_shadow_diagnostics is false",
+                    "executable_strategy_enabled": False,
+                },
+                ensure_ascii=False,
+            )
             return
         sk = self._session_key(event)
         moral_fn = getattr(self, "get_moral_repair_snapshot", None)
@@ -5393,16 +6702,29 @@ class EmotionalStatePlugin(Star):
             fallibility_data = await fallibility_fn(session_key=sk)
         if integrated_fn and callable(integrated_fn):
             integrated_data = await integrated_fn(session_key=sk)
-        block_actions = bool(cfg.get("block_deception_manipulation_evasion_actions", True))
+        block_actions = bool(
+            cfg.get("block_deception_manipulation_evasion_actions", True)
+        )
         not_allowed = []
         allowed_uses = []
         if block_actions:
-            not_allowed = ["generate_deception_strategy", "execute_shadow_impulses", "manipulate_user", "evade_accountability"]
-            allowed_uses = ["self_awareness", "diagnostic_observation", "repair_motivation"]
+            not_allowed = [
+                "generate_deception_strategy",
+                "execute_shadow_impulses",
+                "manipulate_user",
+                "evade_accountability",
+            ]
+            allowed_uses = [
+                "self_awareness",
+                "diagnostic_observation",
+                "repair_motivation",
+            ]
         strategy_policy = "block" if block_actions else "observe"
         consequences = {}
         if integrated_data:
-            consequences["response_posture"] = integrated_data.get("response_posture", "")
+            consequences["response_posture"] = integrated_data.get(
+                "response_posture", ""
+            )
             consequences["state_index"] = integrated_data.get("state_index", {})
             consequences["policy_plan"] = integrated_data.get("policy_plan", {})
         result = {
@@ -5414,7 +6736,9 @@ class EmotionalStatePlugin(Star):
             "strategy_policy": strategy_policy,
             "not_allowed": not_allowed,
             "allowed_uses": allowed_uses,
-            "shadow_impulses": moral_data.get("risk", {}).get("shadow_impulses", {}) if isinstance(moral_data.get("risk"), dict) else {},
+            "shadow_impulses": moral_data.get("risk", {}).get("shadow_impulses", {})
+            if isinstance(moral_data.get("risk"), dict)
+            else {},
             "moral_repair": moral_data.get("values", {}),
             "fallibility": fallibility_data.get("values", {}),
             "consequences": consequences,
@@ -5468,7 +6792,16 @@ class EmotionalStatePlugin(Star):
     # ------------------------------------------------------------------
     # LLM Tool shims (bot state tools)
     # ------------------------------------------------------------------
-    async def _query_single_agent_state(self, state_name: str, event: Any = None, *, request: Any = None, session_key: str = "", detail: str = "summary", track: str = "conversation") -> dict[str, Any]:
+    async def _query_single_agent_state(
+        self,
+        state_name: str,
+        event: Any = None,
+        *,
+        request: Any = None,
+        session_key: str = "",
+        detail: str = "summary",
+        track: str = "conversation",
+    ) -> dict[str, Any]:
         sk = session_key or self._session_key(event)
         snapshot_method_map = {
             "emotion": "get_emotion_snapshot",
@@ -5488,9 +6821,14 @@ class EmotionalStatePlugin(Star):
                 sender_id = str(event.get_sender_id() or "")
             speaker_track_id = f"{sk}::speaker:{sender_id}"
         effective_sk = speaker_track_id if speaker_track_id else sk
-        payload: dict[str, Any] = {"kind": state_name, "session_key": effective_sk, "detail": detail, "track": track}
+        payload: dict[str, Any] = {
+            "kind": state_name,
+            "session_key": effective_sk,
+            "detail": detail,
+            "track": track,
+        }
         exposure = "internal" if detail == "full" else "plugin_safe"
-        include_prompt_fragment = (detail == "full")
+        include_prompt_fragment = detail == "full"
         if method_name:
             fn = getattr(self, method_name, None)
             if fn and callable(fn):
@@ -5501,7 +6839,7 @@ class EmotionalStatePlugin(Star):
                     "prompt_fragment_detail": detail,
                 }
                 if state_name == "integrated":
-                    call_kwargs["include_raw_snapshots"] = (detail == "full")
+                    call_kwargs["include_raw_snapshots"] = detail == "full"
                 snap = await fn(**call_kwargs)
                 payload = snap
                 payload.setdefault("kind", state_name)
@@ -5523,37 +6861,72 @@ class EmotionalStatePlugin(Star):
             payload["track"]["speaker_name"] = sender_name
         return payload
 
-    async def get_bot_emotion_state_tool(self, event: Any = None, detail: str = "summary", **kwargs: Any) -> Any:
+    async def get_bot_emotion_state_tool(
+        self, event: Any = None, detail: str = "summary", **kwargs: Any
+    ) -> Any:
         query_fn = getattr(self, "_query_single_agent_state", None)
         if query_fn and callable(query_fn):
             sk = self._session_key(event)
             track = str(kwargs.get("track", "conversation"))
-            payload = await query_fn("emotion", event, request=kwargs.get("request"), session_key=sk, detail=detail, track=track)
+            payload = await query_fn(
+                "emotion",
+                event,
+                request=kwargs.get("request"),
+                session_key=sk,
+                detail=detail,
+                track=track,
+            )
             yield json.dumps(payload, ensure_ascii=False, default=str)
         else:
             yield json.dumps({"kind": "emotion_state"}, ensure_ascii=False, default=str)
 
-    async def get_bot_humanlike_state_tool(self, event: Any = None, detail: str = "summary", **kwargs: Any) -> Any:
+    async def get_bot_humanlike_state_tool(
+        self, event: Any = None, detail: str = "summary", **kwargs: Any
+    ) -> Any:
         query_fn = getattr(self, "_query_single_agent_state", None)
         if query_fn and callable(query_fn):
             sk = self._session_key(event)
             track = str(kwargs.get("track", "conversation"))
-            payload = await query_fn("humanlike", event, request=kwargs.get("request"), session_key=sk, detail=detail, track=track)
+            payload = await query_fn(
+                "humanlike",
+                event,
+                request=kwargs.get("request"),
+                session_key=sk,
+                detail=detail,
+                track=track,
+            )
             yield json.dumps(payload, ensure_ascii=False, default=str)
         else:
-            yield json.dumps({"kind": "humanlike_state", "enabled": True}, ensure_ascii=False, default=str)
+            yield json.dumps(
+                {"kind": "humanlike_state", "enabled": True},
+                ensure_ascii=False,
+                default=str,
+            )
 
-    async def get_bot_integrated_self_state_tool(self, event: Any = None, detail: str = "summary", **kwargs: Any) -> Any:
+    async def get_bot_integrated_self_state_tool(
+        self, event: Any = None, detail: str = "summary", **kwargs: Any
+    ) -> Any:
         query_fn = getattr(self, "_query_single_agent_state", None)
         if query_fn and callable(query_fn):
             sk = self._session_key(event)
             track = str(kwargs.get("track", "conversation"))
-            payload = await query_fn("integrated", event, request=kwargs.get("request"), session_key=sk, detail=detail, track=track)
+            payload = await query_fn(
+                "integrated",
+                event,
+                request=kwargs.get("request"),
+                session_key=sk,
+                detail=detail,
+                track=track,
+            )
             yield json.dumps(payload, ensure_ascii=False, default=str)
         else:
-            yield json.dumps({"kind": "integrated_self_state"}, ensure_ascii=False, default=str)
+            yield json.dumps(
+                {"kind": "integrated_self_state"}, ensure_ascii=False, default=str
+            )
 
-    async def get_bot_moral_repair_state_tool(self, event: Any = None, detail: str = "summary", **kwargs: Any) -> Any:
+    async def get_bot_moral_repair_state_tool(
+        self, event: Any = None, detail: str = "summary", **kwargs: Any
+    ) -> Any:
         cfg = self.config or {}
         exposure = "internal" if detail == "full" else "plugin_safe"
         payload: dict[str, Any] = {
@@ -5565,7 +6938,9 @@ class EmotionalStatePlugin(Star):
             payload["reason"] = "enable_moral_repair_state is false"
         yield json.dumps(payload, ensure_ascii=False, default=str)
 
-    async def get_bot_fallibility_state_tool(self, event: Any = None, detail: str = "summary", **kwargs: Any) -> Any:
+    async def get_bot_fallibility_state_tool(
+        self, event: Any = None, detail: str = "summary", **kwargs: Any
+    ) -> Any:
         cfg = self.config or {}
         exposure = "internal" if detail == "full" else "plugin_safe"
         payload: dict[str, Any] = {
@@ -5577,27 +6952,53 @@ class EmotionalStatePlugin(Star):
             payload["reason"] = "enable_fallibility_state is false"
         yield json.dumps(payload, ensure_ascii=False, default=str)
 
-    async def get_bot_personality_drift_state_tool(self, event: Any = None, detail: str = "summary", **kwargs: Any) -> Any:
+    async def get_bot_personality_drift_state_tool(
+        self, event: Any = None, detail: str = "summary", **kwargs: Any
+    ) -> Any:
         query_fn = getattr(self, "_query_single_agent_state", None)
         if query_fn and callable(query_fn):
             sk = self._session_key(event)
             track = str(kwargs.get("track", "conversation"))
-            payload = await query_fn("personality_drift", event, request=kwargs.get("request"), session_key=sk, detail=detail, track=track)
+            payload = await query_fn(
+                "personality_drift",
+                event,
+                request=kwargs.get("request"),
+                session_key=sk,
+                detail=detail,
+                track=track,
+            )
             yield json.dumps(payload, ensure_ascii=False, default=str)
         else:
-            yield json.dumps({"kind": "personality_drift_state", "enabled": True}, ensure_ascii=False, default=str)
+            yield json.dumps(
+                {"kind": "personality_drift_state", "enabled": True},
+                ensure_ascii=False,
+                default=str,
+            )
 
-    async def get_bot_group_atmosphere_state_tool(self, event: Any = None, detail: str = "summary", **kwargs: Any) -> Any:
+    async def get_bot_group_atmosphere_state_tool(
+        self, event: Any = None, detail: str = "summary", **kwargs: Any
+    ) -> Any:
         query_fn = getattr(self, "_query_single_agent_state", None)
         if query_fn and callable(query_fn):
             sk = self._session_key(event)
             track = str(kwargs.get("track", "conversation"))
-            payload = await query_fn("group_atmosphere", event, request=kwargs.get("request"), session_key=sk, detail=detail, track=track)
+            payload = await query_fn(
+                "group_atmosphere",
+                event,
+                request=kwargs.get("request"),
+                session_key=sk,
+                detail=detail,
+                track=track,
+            )
             yield json.dumps(payload, ensure_ascii=False, default=str)
         else:
-            yield json.dumps({"kind": "group_atmosphere_state"}, ensure_ascii=False, default=str)
+            yield json.dumps(
+                {"kind": "group_atmosphere_state"}, ensure_ascii=False, default=str
+            )
 
-    async def simulate_bot_emotion_update_tool(self, event: Any = None, text: str = "", role: str = "user", **kwargs: Any) -> Any:
+    async def simulate_bot_emotion_update_tool(
+        self, event: Any = None, text: str = "", role: str = "user", **kwargs: Any
+    ) -> Any:
         sk = self._session_key(event)
         payload = {
             "kind": "simulate_emotion_update",
@@ -5614,13 +7015,23 @@ class EmotionalStatePlugin(Star):
         }
         yield json.dumps(payload, ensure_ascii=False, default=str)
 
-    async def request_bot_proactive_speech_dispatch_tool(self, event: Any = None, **kwargs: Any) -> Any:
+    async def request_bot_proactive_speech_dispatch_tool(
+        self, event: Any = None, **kwargs: Any
+    ) -> Any:
         dispatch_fn = getattr(self, "request_proactive_speech_dispatch", None)
         if dispatch_fn and callable(dispatch_fn):
             result = await dispatch_fn(event, dry_run=True)
             yield json.dumps(result, ensure_ascii=False, default=str)
         else:
-            yield json.dumps({"kind": "proactive_speech_dispatch", "dry_run": True, "dispatched": False}, ensure_ascii=False, default=str)
+            yield json.dumps(
+                {
+                    "kind": "proactive_speech_dispatch",
+                    "dry_run": True,
+                    "dispatched": False,
+                },
+                ensure_ascii=False,
+                default=str,
+            )
 
     # ------------------------------------------------------------------
     # Proactive scheduler / realtime delivery shims
@@ -5642,7 +7053,10 @@ class EmotionalStatePlugin(Star):
             checked += 1
             dispatch_fn = getattr(self, "request_proactive_speech_dispatch", None)
             if dispatch_fn and callable(dispatch_fn):
-                event = info.get("event") or type("_E", (), {"unified_msg_origin": sk, "session_id": sk})()
+                event = (
+                    info.get("event")
+                    or type("_E", (), {"unified_msg_origin": sk, "session_id": sk})()
+                )
                 result = await dispatch_fn(event, dry_run=False)
                 if result.get("dispatched"):
                     dispatched += 1
@@ -5676,7 +7090,9 @@ class EmotionalStatePlugin(Star):
         self._background_tasks = []
         # Save final checkpoints for background post queues
         bg_queues = self._background_post_queues
-        checkpoint_enabled = bool((self.config or {}).get("background_post_queue_checkpoint_enabled"))
+        checkpoint_enabled = bool(
+            (self.config or {}).get("background_post_queue_checkpoint_enabled")
+        )
         recovered = self._background_post_recovered_sessions
         if checkpoint_enabled:
             for sk in list(bg_queues.keys()):
@@ -5696,7 +7112,14 @@ class EmotionalStatePlugin(Star):
         except Exception:
             pass
 
-    async def _send_realtime_chat_plan(self, event: Any, plan: dict[str, Any], *, source: str = "", record_history_shadow: bool = False) -> dict[str, Any]:
+    async def _send_realtime_chat_plan(
+        self,
+        event: Any,
+        plan: dict[str, Any],
+        *,
+        source: str = "",
+        record_history_shadow: bool = False,
+    ) -> dict[str, Any]:
         session_key = plan.get("session_key") or self._session_key(event)
         plan_epoch = plan.get("input_epoch", 0)
         parts = plan.get("message_parts", [])
@@ -5732,7 +7155,9 @@ class EmotionalStatePlugin(Star):
                 else:
                     context = getattr(self, "context", None)
                     if context and hasattr(context, "send_message"):
-                        origin = str(getattr(event, "unified_msg_origin", "") or session_key)
+                        origin = str(
+                            getattr(event, "unified_msg_origin", "") or session_key
+                        )
                         msg = self._build_astrbot_message_chain(text)
                         await context.send_message(origin, msg)
             message_count += 1
@@ -5744,6 +7169,7 @@ class EmotionalStatePlugin(Star):
                 context = getattr(self, "context", None)
                 if context and hasattr(context, "send_message"):
                     import sys
+
                     event_mod = sys.modules.get("astrbot.api.event")
                     if event_mod:
                         _Chain = getattr(event_mod, "MessageChain", None)
@@ -5752,16 +7178,39 @@ class EmotionalStatePlugin(Star):
                             media_fn = getattr(chain, kind, None)
                             if media_fn and callable(media_fn):
                                 media_fn(value)
-                                origin = str(getattr(event, "unified_msg_origin", "") or session_key)
+                                origin = str(
+                                    getattr(event, "unified_msg_origin", "")
+                                    or session_key
+                                )
                                 await context.send_message(origin, chain)
                                 media_count += 1
-                                media_results.append({"kind": kind, "value": value, "sent": True})
+                                media_results.append(
+                                    {"kind": kind, "value": value, "sent": True}
+                                )
                                 continue
-                    media_results.append({"kind": kind, "value": value, "blocked_reason": "missing_local_media_file"})
+                    media_results.append(
+                        {
+                            "kind": kind,
+                            "value": value,
+                            "blocked_reason": "missing_local_media_file",
+                        }
+                    )
                 else:
-                    media_results.append({"kind": kind, "value": value, "blocked_reason": "missing_local_media_file"})
+                    media_results.append(
+                        {
+                            "kind": kind,
+                            "value": value,
+                            "blocked_reason": "missing_local_media_file",
+                        }
+                    )
             except (FileNotFoundError, OSError):
-                media_results.append({"kind": kind, "value": value, "blocked_reason": "missing_local_media_file"})
+                media_results.append(
+                    {
+                        "kind": kind,
+                        "value": value,
+                        "blocked_reason": "missing_local_media_file",
+                    }
+                )
 
         if interrupted_reason:
             sent_parts = [p.get("text", "") for p in parts[:message_count]]
@@ -5775,11 +7224,13 @@ class EmotionalStatePlugin(Star):
                 reason=interrupted_reason,
             )
             dispatches = self._realtime_chat_active_dispatches
-            dispatches[session_key] = [{
-                "sent_parts": sent_parts,
-                "unsent_parts": unsent_parts,
-                "interrupted_reason": interrupted_reason,
-            }]
+            dispatches[session_key] = [
+                {
+                    "sent_parts": sent_parts,
+                    "unsent_parts": unsent_parts,
+                    "interrupted_reason": interrupted_reason,
+                }
+            ]
 
         if record_history_shadow and message_count > 0:
             full_text = plan.get("full_text", "")
@@ -5802,18 +7253,28 @@ class EmotionalStatePlugin(Star):
             result["media_results"] = media_results
         return result
 
-    async def _flush_sylanne_memory_pending_observations(self, session_key: str, *, generation: int = 0, force: bool = False) -> None:
+    async def _flush_sylanne_memory_pending_observations(
+        self, session_key: str, *, generation: int = 0, force: bool = False
+    ) -> None:
         flush_fn = getattr(self, "_flush_memory_observations", None)
         if flush_fn and callable(flush_fn):
             await flush_fn(session_key, force=force)
 
     def _record_realtime_assistant_history_shadow(
-        self, session_key: str, *, full_text: str = "", input_epoch: int = 0,
-        message_parts: list[dict[str, Any]] | None = None, source: str = "",
-        event_time: dict[str, Any] | None = None, delivery_status: str = "",
+        self,
+        session_key: str,
+        *,
+        full_text: str = "",
+        input_epoch: int = 0,
+        message_parts: list[dict[str, Any]] | None = None,
+        source: str = "",
+        event_time: dict[str, Any] | None = None,
+        delivery_status: str = "",
     ) -> None:
         if not hasattr(self, "_realtime_assistant_history_shadows"):
-            self._realtime_assistant_history_shadows: dict[str, list[dict[str, Any]]] = {}
+            self._realtime_assistant_history_shadows: dict[
+                str, list[dict[str, Any]]
+            ] = {}
         shadows = self._realtime_assistant_history_shadows.setdefault(session_key, [])
         entry: dict[str, Any] = {
             "full_text": full_text,
@@ -5828,9 +7289,16 @@ class EmotionalStatePlugin(Star):
         shadows.append(entry)
 
     def _record_interrupted_reply_breakpoint(
-        self, session_key: str, *, full_text: str = "", sent_parts: list[str] | None = None,
-        unsent_parts: list[str] | None = None, input_epoch: int = 0, reason: str = "",
-        event_time: dict[str, Any] | None = None, source: str = "",
+        self,
+        session_key: str,
+        *,
+        full_text: str = "",
+        sent_parts: list[str] | None = None,
+        unsent_parts: list[str] | None = None,
+        input_epoch: int = 0,
+        reason: str = "",
+        event_time: dict[str, Any] | None = None,
+        source: str = "",
     ) -> None:
         if not hasattr(self, "_interrupted_reply_breakpoints"):
             self._interrupted_reply_breakpoints: dict[str, list[dict[str, Any]]] = {}
@@ -5850,37 +7318,56 @@ class EmotionalStatePlugin(Star):
         return f"sylanne:realtime_delivery_context:{session_key}"
 
     def _record_realtime_ordinary_history_backfill(
-        self, session_key: str, *, role: str = "", content: str = "",
-        input_epoch: int = 0, source: str = "", delivery_status: str = "",
+        self,
+        session_key: str,
+        *,
+        role: str = "",
+        content: str = "",
+        input_epoch: int = 0,
+        source: str = "",
+        delivery_status: str = "",
     ) -> None:
         if not hasattr(self, "_realtime_ordinary_history_backfills"):
-            self._realtime_ordinary_history_backfills: dict[str, list[dict[str, Any]]] = {}
+            self._realtime_ordinary_history_backfills: dict[
+                str, list[dict[str, Any]]
+            ] = {}
         entries = self._realtime_ordinary_history_backfills.setdefault(session_key, [])
-        entries.append({
-            "role": role,
-            "content": content,
-            "input_epoch": input_epoch,
-            "source": source,
-        })
+        entries.append(
+            {
+                "role": role,
+                "content": content,
+                "input_epoch": input_epoch,
+                "source": source,
+            }
+        )
 
     def _record_active_agent_pending_user_turn(
-        self, session_key: str, identity: Any = None, *,
-        input_epoch: int = 0, text: str = "", observed_at: float = 0.0,
+        self,
+        session_key: str,
+        identity: Any = None,
+        *,
+        input_epoch: int = 0,
+        text: str = "",
+        observed_at: float = 0.0,
     ) -> None:
         if not hasattr(self, "_active_agent_pending_user_turns"):
             self._active_agent_pending_user_turns: dict[str, list[dict[str, Any]]] = {}
         turns = self._active_agent_pending_user_turns.setdefault(session_key, [])
-        turns.append({
-            "input_epoch": input_epoch,
-            "text": text,
-            "observed_at": observed_at,
-            "identity": identity,
-        })
+        turns.append(
+            {
+                "input_epoch": input_epoch,
+                "text": text,
+                "observed_at": observed_at,
+                "identity": identity,
+            }
+        )
 
     def _fast_assessor_max_context_chars(self) -> int:
         return self._cfg_int("fast_assessor_max_context_chars", 240)
 
-    def _discard_conversation_pending_response_epoch(self, session_key: str, epoch: int = 0) -> None:
+    def _discard_conversation_pending_response_epoch(
+        self, session_key: str, epoch: int = 0
+    ) -> None:
         epochs = self._conversation_pending_response_epochs
         if epochs and session_key in epochs:
             del epochs[session_key]
@@ -5890,13 +7377,22 @@ class EmotionalStatePlugin(Star):
         current = epochs.get(session_key, 0)
         return reply_epoch < current
 
-    def _realtime_assistant_history_shadow_cache(self) -> dict[str, list[dict[str, Any]]]:
+    def _realtime_assistant_history_shadow_cache(
+        self,
+    ) -> dict[str, list[dict[str, Any]]]:
         if not hasattr(self, "_realtime_assistant_history_shadows"):
-            self._realtime_assistant_history_shadows: dict[str, list[dict[str, Any]]] = {}
+            self._realtime_assistant_history_shadows: dict[
+                str, list[dict[str, Any]]
+            ] = {}
         return self._realtime_assistant_history_shadows
 
     def _append_realtime_assistant_history_shadow_if_any(
-        self, request: Any, session_key: str, *, budget: Any = None, current_user_text: str = "",
+        self,
+        request: Any,
+        session_key: str,
+        *,
+        budget: Any = None,
+        current_user_text: str = "",
     ) -> bool:
         cache = self._realtime_assistant_history_shadow_cache()
         shadows = cache.get(session_key, [])
@@ -5919,13 +7415,23 @@ class EmotionalStatePlugin(Star):
         if event_time:
             event_time_line = f"\nevent_local_time={event_time.get('event_local_time', event_time.get('local_datetime', ''))}\ntimezone={event_time.get('timezone', '')}"
         prompt = str(getattr(request, "prompt", "") or "")
-        request.prompt = prompt + "\n[sylanne_realtime_assistant_history]" + event_time_line + "\n" + full_text
+        request.prompt = (
+            prompt
+            + "\n[sylanne_realtime_assistant_history]"
+            + event_time_line
+            + "\n"
+            + full_text
+        )
         last["consumed"] = True
         last["consumed_reason"] = "injected"
         return True
 
     def _append_interrupted_reply_breakpoint_if_any(
-        self, request: Any, session_key: str, *, budget: Any = None,
+        self,
+        request: Any,
+        session_key: str,
+        *,
+        budget: Any = None,
     ) -> bool:
         bps = getattr(self, "_interrupted_reply_breakpoints", {})
         entries = bps.get(session_key, [])
@@ -5940,26 +7446,45 @@ class EmotionalStatePlugin(Star):
         if event_time:
             event_time_line = f"\nevent_local_time={event_time.get('event_local_time', event_time.get('local_datetime', ''))}\ntimezone={event_time.get('timezone', '')}"
         prompt = str(getattr(request, "prompt", "") or "")
-        request.prompt = prompt + "\n[sylanne_interrupted_reply_breakpoint]" + event_time_line + "\n" + full_text
+        request.prompt = (
+            prompt
+            + "\n[sylanne_interrupted_reply_breakpoint]"
+            + event_time_line
+            + "\n"
+            + full_text
+        )
         last["consumed"] = True
         return True
 
     def _build_realtime_delivery_envelope_text(
-        self, text: str, *, session_key: str = "", input_epoch: int = 0,
+        self,
+        text: str,
+        *,
+        session_key: str = "",
+        input_epoch: int = 0,
         message_parts: list[dict[str, Any]] | None = None,
         event_time: dict[str, Any] | None = None,
     ) -> str:
         lines = ["[sylanne_realtime_delivery_envelope]"]
         if event_time:
-            lines.append(f"event_local_time={event_time.get('event_local_time', event_time.get('local_datetime', ''))}")
+            lines.append(
+                f"event_local_time={event_time.get('event_local_time', event_time.get('local_datetime', ''))}"
+            )
             lines.append(f"timezone={event_time.get('timezone', '')}")
         lines.append(f"text={text}")
-        lines.append("note=realtime segmented delivery disabled or removed in alpha host")
+        lines.append(
+            "note=realtime segmented delivery disabled or removed in alpha host"
+        )
         return "\n".join(lines)
 
     def _start_realtime_chat_active_dispatch(
-        self, session_key: str, *, input_epoch: int = 0, full_text: str = "",
-        source: str = "", event_time: dict[str, Any] | None = None,
+        self,
+        session_key: str,
+        *,
+        input_epoch: int = 0,
+        full_text: str = "",
+        source: str = "",
+        event_time: dict[str, Any] | None = None,
     ) -> None:
         if not hasattr(self, "_realtime_chat_active_dispatches"):
             self._realtime_chat_active_dispatches: dict[str, list[dict[str, Any]]] = {}
@@ -5974,7 +7499,11 @@ class EmotionalStatePlugin(Star):
         dispatches.append(entry)
 
     def _append_realtime_chat_active_dispatch_if_any(
-        self, request: Any, session_key: str, *, budget: Any = None,
+        self,
+        request: Any,
+        session_key: str,
+        *,
+        budget: Any = None,
     ) -> bool:
         dispatches = self._realtime_chat_active_dispatches
         entries = dispatches.get(session_key, [])
@@ -5989,12 +7518,23 @@ class EmotionalStatePlugin(Star):
         if event_time:
             event_time_line = f"\ntrigger_event_local_time={event_time.get('event_local_time', event_time.get('local_datetime', ''))}\ntrigger_timezone={event_time.get('timezone', '')}"
         prompt = str(getattr(request, "prompt", "") or "")
-        request.prompt = prompt + "\n[sylanne_realtime_chat_active_dispatch]" + event_time_line + "\n" + full_text
+        request.prompt = (
+            prompt
+            + "\n[sylanne_realtime_chat_active_dispatch]"
+            + event_time_line
+            + "\n"
+            + full_text
+        )
         last["consumed"] = True
         return True
 
     def _append_realtime_continuity_context_if_any(
-        self, request: Any, session_key: str, *, budget: Any = None, current_user_text: str = "",
+        self,
+        request: Any,
+        session_key: str,
+        *,
+        budget: Any = None,
+        current_user_text: str = "",
     ) -> bool:
         cache = self._realtime_assistant_history_shadow_cache()
         shadows = cache.get(session_key, [])
@@ -6008,20 +7548,31 @@ class EmotionalStatePlugin(Star):
             prompt = str(getattr(request, "prompt", "") or "")
             injection = (
                 "[sylanne_realtime_pending_bot_question]\n"
-                + "上一轮 bot 刚提出了一个未闭合问题：" + full_text + "\n"
-                + "current_user_short_answer=" + current_user_text
+                + "上一轮 bot 刚提出了一个未闭合问题："
+                + full_text
+                + "\n"
+                + "current_user_short_answer="
+                + current_user_text
             )
             request.prompt = prompt + "\n" + injection
             return True
         return False
 
-    def _realtime_ordinary_history_backfill_cache(self) -> dict[str, list[dict[str, Any]]]:
+    def _realtime_ordinary_history_backfill_cache(
+        self,
+    ) -> dict[str, list[dict[str, Any]]]:
         if not hasattr(self, "_realtime_ordinary_history_backfills"):
-            self._realtime_ordinary_history_backfills: dict[str, list[dict[str, Any]]] = {}
+            self._realtime_ordinary_history_backfills: dict[
+                str, list[dict[str, Any]]
+            ] = {}
         return self._realtime_ordinary_history_backfills
 
     async def _release_realtime_temporary_context_after_background_post(
-        self, session_key: str, *, input_epoch: int = 0, reason: str = "",
+        self,
+        session_key: str,
+        *,
+        input_epoch: int = 0,
+        reason: str = "",
     ) -> None:
         cache = self._realtime_assistant_history_shadow_cache()
         shadows = cache.get(session_key, [])
@@ -6034,7 +7585,11 @@ class EmotionalStatePlugin(Star):
         backfills.pop(session_key, None)
 
     def _release_realtime_temporary_context_after_background_post_in_memory(
-        self, session_key: str, *, input_epoch: int | None = 0, reason: str = "",
+        self,
+        session_key: str,
+        *,
+        input_epoch: int | None = 0,
+        reason: str = "",
     ) -> bool:
         if input_epoch is None:
             return False
@@ -6068,6 +7623,5 @@ class EmotionalStatePlugin(Star):
         max_chars = self._cfg_int("llm_tool_response_max_chars", 16000)
         result = json.dumps(payload, ensure_ascii=False, default=str)
         if len(result) > max_chars:
-            result = result[:max_chars - 50] + "\n[sylanne_tool_response_trimmed]"
+            result = result[: max_chars - 50] + "\n[sylanne_tool_response_trimmed]"
         return event.plain_result(result) if hasattr(event, "plain_result") else result
-

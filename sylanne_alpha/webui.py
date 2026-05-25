@@ -1,4 +1,4 @@
-﻿"""Embedded Sylanne WebUI HTML fallback."""
+"""Embedded Sylanne WebUI HTML fallback."""
 
 WEBUI_HTML = r"""<!DOCTYPE html>
 <html lang="zh-CN" data-theme="light">
@@ -5103,4 +5103,3 @@ WEBUI_HTML = r"""<!DOCTYPE html>
 
 
 """
-

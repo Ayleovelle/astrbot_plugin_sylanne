@@ -7,6 +7,7 @@ identity_kernel from AutopoieticBoundary (personality core is shared).
 LRU eviction ensures bounded memory when user count exceeds max_users.
 Evicted states are persisted to disk and restored on next access.
 """
+
 from __future__ import annotations
 
 import json
@@ -14,17 +15,21 @@ import os
 from pathlib import Path
 from typing import Any
 
+from .autopoiesis import AutopoieticBoundary
 from .computation_spine import ComputationSpine
 from .hdc import HDCEncoder
-from .autopoiesis import AutopoieticBoundary
 
 
 class MultiUserSpine:
     """Manages per-user ComputationSpine instances with shared components."""
 
     __slots__ = (
-        "_shared_encoder", "_shared_identity_kernel", "_spines",
-        "_access_order", "max_users", "_root",
+        "_shared_encoder",
+        "_shared_identity_kernel",
+        "_spines",
+        "_access_order",
+        "max_users",
+        "_root",
     )
 
     def __init__(self, max_users: int = 50, root: str = ".sylanne_alpha_state"):
@@ -39,7 +44,9 @@ class MultiUserSpine:
         # LRU tracking: list of user_ids, most-recent at end
         self._access_order: list[str] = []
 
-    def process(self, user_id: str, text: str, timestamp: float = 0.0) -> dict[str, Any]:
+    def process(
+        self, user_id: str, text: str, timestamp: float = 0.0
+    ) -> dict[str, Any]:
         """Process a message for a specific user."""
         spine = self._get_or_create(user_id)
         self._touch(user_id)
@@ -98,7 +105,12 @@ class MultiUserSpine:
 
     def _evicted_path(self, user_id: str) -> Path:
         """Return the file path for an evicted user's state."""
-        safe = "".join(ch if ch.isalnum() or ch in ("-", "_", ".") else "_" for ch in user_id) or "default"
+        safe = (
+            "".join(
+                ch if ch.isalnum() or ch in ("-", "_", ".") else "_" for ch in user_id
+            )
+            or "default"
+        )
         return Path(self._root) / "evicted" / f"{safe}.json"
 
     def _persist_spine(self, user_id: str, spine: ComputationSpine):

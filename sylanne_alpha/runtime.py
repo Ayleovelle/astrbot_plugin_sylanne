@@ -13,7 +13,9 @@ class AlphaRuntime:
     def __init__(self, root: str | Path):
         self.root = Path(root)
 
-    def load(self, session_key: str, legacy: dict[str, Any] | None = None) -> AlphaKernel:
+    def load(
+        self, session_key: str, legacy: dict[str, Any] | None = None
+    ) -> AlphaKernel:
         path = self._path(session_key)
         if path.exists():
             try:
@@ -33,7 +35,10 @@ class AlphaRuntime:
         self.root.mkdir(parents=True, exist_ok=True)
         path = self._path(kernel.session_key)
         tmp = path.with_suffix(path.suffix + ".tmp")
-        tmp.write_text(json.dumps(kernel.snapshot(), ensure_ascii=False, sort_keys=True, indent=2), encoding="utf-8")
+        tmp.write_text(
+            json.dumps(kernel.snapshot(), ensure_ascii=False, sort_keys=True, indent=2),
+            encoding="utf-8",
+        )
         try:
             os.replace(tmp, path)
         except OSError:
@@ -49,7 +54,11 @@ class AlphaRuntime:
         sessions: dict[str, Any] = {}
         recovered: list[str] = []
         if not self.root.exists():
-            return {"schema_version": SCHEMA_VERSION, "sessions": sessions, "recovered": recovered}
+            return {
+                "schema_version": SCHEMA_VERSION,
+                "sessions": sessions,
+                "recovered": recovered,
+            }
         for path in self.root.glob("*.alpha.json"):
             session_key = path.name[: -len(".alpha.json")]
             try:
@@ -60,10 +69,20 @@ class AlphaRuntime:
             sessions[session_key] = data
         for path in self.root.glob("*.alpha.json.damaged"):
             recovered.append(path.name[: -len(".alpha.json.damaged")])
-        return {"schema_version": SCHEMA_VERSION, "sessions": sessions, "recovered": sorted(set(recovered))}
+        return {
+            "schema_version": SCHEMA_VERSION,
+            "sessions": sessions,
+            "recovered": sorted(set(recovered)),
+        }
 
     def _path(self, session_key: str) -> Path:
-        safe = "".join(ch if ch.isalnum() or ch in {"-", "_", "."} else "_" for ch in session_key) or "default"
+        safe = (
+            "".join(
+                ch if ch.isalnum() or ch in {"-", "_", "."} else "_"
+                for ch in session_key
+            )
+            or "default"
+        )
         return self.root / f"{safe}.alpha.json"
 
     def save_buffer(self, session_key: str, buffer_data: dict[str, Any]) -> None:
@@ -86,5 +105,11 @@ class AlphaRuntime:
         return None
 
     def _buffer_path(self, session_key: str) -> Path:
-        safe = "".join(ch if ch.isalnum() or ch in {"-", "_", "."} else "_" for ch in session_key) or "default"
+        safe = (
+            "".join(
+                ch if ch.isalnum() or ch in {"-", "_", "."} else "_"
+                for ch in session_key
+            )
+            or "default"
+        )
         return self.root / f"{safe}.buffer.json"

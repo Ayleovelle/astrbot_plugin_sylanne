@@ -12,7 +12,14 @@ def bool_setting(config: dict[str, Any], name: str, default: bool = False) -> bo
     return bool(value)
 
 
-def int_setting(config: dict[str, Any], name: str, default: int, *, minimum: int = 0, maximum: int = 32) -> int:
+def int_setting(
+    config: dict[str, Any],
+    name: str,
+    default: int,
+    *,
+    minimum: int = 0,
+    maximum: int = 32,
+) -> int:
     try:
         value = int(config.get(name, default))
     except (TypeError, ValueError):
@@ -26,29 +33,45 @@ def alpha_switches(config: dict[str, Any] | None = None) -> dict[str, Any]:
         "schema_version": CONFIG_SCHEMA_VERSION,
         "realtime_chat": {
             "enabled": bool_setting(config, "sylanne_alpha_realtime_chat_enabled"),
-            "intercept_llm_response": bool_setting(config, "sylanne_alpha_realtime_intercept_llm_response"),
+            "intercept_llm_response": bool_setting(
+                config, "sylanne_alpha_realtime_intercept_llm_response"
+            ),
         },
         "proactive_dispatch": {
             "enabled": bool_setting(config, "sylanne_alpha_proactive_dispatch_enabled"),
-            "scheduler_enabled": bool_setting(config, "sylanne_alpha_proactive_scheduler_enabled"),
+            "scheduler_enabled": bool_setting(
+                config, "sylanne_alpha_proactive_scheduler_enabled"
+            ),
         },
         "embedding_memory": {
             "enabled": bool_setting(config, "sylanne_alpha_embedding_memory_enabled"),
-            "provider_id": str(config.get("sylanne_alpha_embedding_memory_provider_id") or ""),
-            "top_k": int_setting(config, "sylanne_alpha_embedding_memory_top_k", 5, minimum=1, maximum=20),
+            "provider_id": str(
+                config.get("sylanne_alpha_embedding_memory_provider_id") or ""
+            ),
+            "top_k": int_setting(
+                config, "sylanne_alpha_embedding_memory_top_k", 5, minimum=1, maximum=20
+            ),
         },
         "assessor_llm": {
             "enabled": bool_setting(config, "sylanne_alpha_assessor_llm_enabled"),
             "provider_id": str(config.get("sylanne_alpha_assessor_provider_id") or ""),
         },
         "fast_assessor": {
-            "enabled": bool_setting(config, "sylanne_alpha_fast_assessor_enabled", True),
-            "provider_id": str(config.get("sylanne_alpha_fast_assessor_provider_id") or ""),
+            "enabled": bool_setting(
+                config, "sylanne_alpha_fast_assessor_enabled", True
+            ),
+            "provider_id": str(
+                config.get("sylanne_alpha_fast_assessor_provider_id") or ""
+            ),
         },
         "background_workers": {
             "enabled": bool_setting(config, "sylanne_alpha_background_workers_enabled"),
-            "max_workers": int_setting(config, "sylanne_alpha_background_max_workers", 1, minimum=1, maximum=8),
-            "checkpoint_enabled": bool_setting(config, "sylanne_alpha_background_checkpoint_enabled", True),
+            "max_workers": int_setting(
+                config, "sylanne_alpha_background_max_workers", 1, minimum=1, maximum=8
+            ),
+            "checkpoint_enabled": bool_setting(
+                config, "sylanne_alpha_background_checkpoint_enabled", True
+            ),
         },
         "safety": {
             "relational_public_export": "blocked",

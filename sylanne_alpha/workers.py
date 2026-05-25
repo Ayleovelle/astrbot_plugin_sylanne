@@ -8,7 +8,9 @@ WORKERS_SCHEMA_VERSION = "sylanne.alpha.workers.v1"
 
 
 class BackgroundQueue:
-    def __init__(self, root: Path | str, *, session_key: str, max_workers: int = 1) -> None:
+    def __init__(
+        self, root: Path | str, *, session_key: str, max_workers: int = 1
+    ) -> None:
         self.root = Path(root)
         self.session_key = session_key
         self.max_workers = max(1, min(8, int(max_workers)))
@@ -19,7 +21,9 @@ class BackgroundQueue:
         self._next_job_id: int = 1
         self._load()
 
-    def enqueue(self, kind: str, payload: dict[str, Any] | None = None) -> dict[str, Any]:
+    def enqueue(
+        self, kind: str, payload: dict[str, Any] | None = None
+    ) -> dict[str, Any]:
         job = {
             "id": f"job-{self._next_job_id}",
             "kind": str(kind),
@@ -48,7 +52,10 @@ class BackgroundQueue:
         return False
 
     def checkpoint(self) -> None:
-        self.path.write_text(json.dumps(self.snapshot(), ensure_ascii=False, indent=2, sort_keys=True), encoding="utf-8")
+        self.path.write_text(
+            json.dumps(self.snapshot(), ensure_ascii=False, indent=2, sort_keys=True),
+            encoding="utf-8",
+        )
 
     def snapshot(self) -> dict[str, Any]:
         return {

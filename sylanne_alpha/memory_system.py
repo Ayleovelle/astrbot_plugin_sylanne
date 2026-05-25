@@ -24,16 +24,17 @@ import uuid
 from collections import deque
 from dataclasses import dataclass, field
 from datetime import date
-from typing import Any, Callable, Coroutine
-
+from typing import Any
 
 # ---------------------------------------------------------------------------
 # Data classes
 # ---------------------------------------------------------------------------
 
+
 @dataclass
 class MemoryItem:
     """单条记忆条目，驻留于 L1 或 L2。"""
+
     id: str
     text: str
     weight: float
@@ -62,6 +63,7 @@ class MemoryItem:
             "last_recalled_tick": self.last_recalled_tick,
             "rewrite_count": self.rewrite_count,
         }
+
     @classmethod
     def from_dict(cls, d: dict) -> "MemoryItem":
         return cls(
@@ -79,9 +81,11 @@ class MemoryItem:
             rewrite_count=d.get("rewrite_count", 0),
         )
 
+
 @dataclass
 class MemoryResult:
     """召回结果，包含最终评分和来源层信息。"""
+
     text: str
     layer: str  # "L1" | "L2" | "L3"
     weight: float
@@ -94,6 +98,7 @@ class MemoryResult:
 @dataclass
 class GraphNode:
     """L3 知识图谱节点。"""
+
     id: str
     label: str
     type: str  # person/topic/event/preference/boundary
@@ -131,9 +136,11 @@ class GraphNode:
             staleness_threshold=d.get("staleness_threshold", 180),
         )
 
+
 @dataclass
 class GraphEdge:
     """L3 知识图谱边。"""
+
     source: str
     target: str
     relation: str
@@ -166,6 +173,7 @@ class GraphEdge:
 @dataclass
 class ConversationBuffer:
     """会话暂存区，对话进行中暂存原文，不写入 MemorySystem。"""
+
     session_key: str
     messages: list[dict[str, Any]] = field(default_factory=list)
     last_activity: float = 0.0
@@ -204,12 +212,15 @@ class ConversationBuffer:
     def inject_context(self, entries: list[dict]) -> None:
         """注入群聊旁观消息作为背景上下文（插入到头部）。"""
         for i, entry in enumerate(entries):
-            self.messages.insert(i, {
-                "role": "group_observed",
-                "text": entry["text"],
-                "ts": entry["ts"],
-                "sender_id": entry.get("sender_id", ""),
-            })
+            self.messages.insert(
+                i,
+                {
+                    "role": "group_observed",
+                    "text": entry["text"],
+                    "ts": entry["ts"],
+                    "sender_id": entry.get("sender_id", ""),
+                },
+            )
 
     def to_dict(self) -> dict:
         return {
@@ -234,6 +245,7 @@ class ConversationBuffer:
 # Utility functions
 # ---------------------------------------------------------------------------
 
+
 def _cosine(a: list[float], b: list[float]) -> float:
     """Inline cosine similarity. Returns -1.0 sentinel for degenerate inputs."""
     if not a or not b or len(a) != len(b):
@@ -253,7 +265,12 @@ def _tokenize(text: str) -> set[str]:
         return set()
     try:
         import jieba
-        return set(w for w in jieba.cut(text) if len(w.strip()) >= 1 and w.strip() not in _STOPWORDS)
+
+        return set(
+            w
+            for w in jieba.cut(text)
+            if len(w.strip()) >= 1 and w.strip() not in _STOPWORDS
+        )
     except ImportError:
         pass
     # Fallback: 空格分词（英文）+ 字符 bigram（中文）
@@ -262,7 +279,7 @@ def _tokenize(text: str) -> set[str]:
         if len(word) >= 2:
             tokens.add(word)
     # 中文字符 bigram
-    chars = [c for c in text if '一' <= c <= '鿿']
+    chars = [c for c in text if "一" <= c <= "鿿"]
     for i in range(len(chars) - 1):
         tokens.add(chars[i] + chars[i + 1])
     # 单字也加入（短查询时有用）
@@ -331,10 +348,18 @@ class MemorySystem:
             "neuroticism": 0.5,
         }
 
-        personality_keys = {"openness", "conscientiousness", "extraversion",
-                           "agreeableness", "neuroticism",
-                           "expression_drive_trait", "perception_acuity",
-                           "boundary_permeability", "inner_order", "relational_gravity"}
+        personality_keys = {
+            "openness",
+            "conscientiousness",
+            "extraversion",
+            "agreeableness",
+            "neuroticism",
+            "expression_drive_trait",
+            "perception_acuity",
+            "boundary_permeability",
+            "inner_order",
+            "relational_gravity",
+        }
         personality = {k: v for k, v in kwargs.items() if k in personality_keys}
         if personality:
             self.derive_params(personality)
@@ -345,17 +370,21 @@ class MemorySystem:
 
     def derive_params(self, personality: dict[str, float]) -> None:
         """从人格向量推导记忆系统参数。接受 Big Five 或 Embodiment Five 名称。"""
-        O = personality.get("openness", personality.get("boundary_permeability", 0.5))
+        openness_val = personality.get(
+            "openness", personality.get("boundary_permeability", 0.5)
+        )
         C = personality.get("conscientiousness", personality.get("inner_order", 0.5))
-        _E = personality.get("extraversion", personality.get("expression_drive_trait", 0.5))  # noqa: F841
+        _E = personality.get(
+            "extraversion", personality.get("expression_drive_trait", 0.5)
+        )  # noqa: F841
         A = personality.get("agreeableness", personality.get("relational_gravity", 0.5))
         N = personality.get("neuroticism", personality.get("perception_acuity", 0.5))
 
         self._params["base_decay"] = 0.01 + (1 - C) * 0.03
         self._params["age_coeff"] = 0.1 + N * 0.1
-        self._params["reconsolidation_rate"] = 0.03 + O * 0.04
+        self._params["reconsolidation_rate"] = 0.03 + openness_val * 0.04
         self._params["mood_weight"] = 0.1 + N * 0.2
-        self._params["compression_threshold"] = 0.15 + O * 0.10
+        self._params["compression_threshold"] = 0.15 + openness_val * 0.10
         self._params["positive_recall_bias"] = 1.0 + A * 0.3
         self._params["negative_decay_mult"] = 1.0 - N * 0.5
         self._params["neuroticism"] = N
@@ -374,7 +403,7 @@ class MemorySystem:
         temperature: float = 0.0,
     ) -> MemoryItem:
         """v2 写入：将对话摘要写入 L1。由会话结束/20轮保底触发。"""
-        text = text[:self._MAX_SUMMARY_CHARS]
+        text = text[: self._MAX_SUMMARY_CHARS]
         # L1 满时，把最老的已确认项下沉到 L2（防止静默丢失）
         if len(self._l1) >= self._L1_CAPACITY:
             self._overflow_rescue()
@@ -413,7 +442,9 @@ class MemorySystem:
         temperature: float = 0.0,
     ) -> None:
         """v1 兼容接口：直接写入 L1。v2 中仅用于迁移/测试。"""
-        self.write_summary(text=text, source_turns=1, embedding=embedding, temperature=temperature)
+        self.write_summary(
+            text=text, source_turns=1, embedding=embedding, temperature=temperature
+        )
 
     # ------------------------------------------------------------------
     # 12h Consolidation (v2)
@@ -445,7 +476,9 @@ class MemorySystem:
             maxlen=self._L1_CAPACITY,
         )
 
-    def clear_unconfirmed(self, keep_recent_hours: float = CONSOLIDATION_KEEP_RECENT_HOURS) -> int:
+    def clear_unconfirmed(
+        self, keep_recent_hours: float = CONSOLIDATION_KEEP_RECENT_HOURS
+    ) -> int:
         """清除 L1 中未确认的条目。
 
         规则：
@@ -462,12 +495,17 @@ class MemorySystem:
         )
         # 如果清除后仍然满了，丢弃最早的未确认条目
         if len(kept) >= self._L1_CAPACITY:
-            unconfirmed = [(i, item) for i, item in enumerate(kept) if not item.confirmed]
+            unconfirmed = [
+                (i, item) for i, item in enumerate(kept) if not item.confirmed
+            ]
             if unconfirmed:
                 # 按时间排序，丢弃最早的
                 unconfirmed.sort(key=lambda x: x[1].created_at)
                 drop_count = len(kept) - self._L1_CAPACITY + 5  # 腾出 5 个位置
-                drop_ids = {unconfirmed[i][1].id for i in range(min(drop_count, len(unconfirmed)))}
+                drop_ids = {
+                    unconfirmed[i][1].id
+                    for i in range(min(drop_count, len(unconfirmed)))
+                }
                 kept = deque(
                     (item for item in kept if item.id not in drop_ids),
                     maxlen=self._L1_CAPACITY,
@@ -482,6 +520,7 @@ class MemorySystem:
             return True
         # 定时：每天 6:00 和 18:00（基于系统时区）
         from datetime import datetime
+
         now = datetime.now()
         # 计算上次整理后是否跨过了 6:00 或 18:00
         if self._last_consolidation_ts == 0.0:
@@ -517,7 +556,7 @@ class MemorySystem:
             item.age_ticks += 1
             if item.temperature < 0.3 and neuroticism > 0.6:
                 decay_rate *= neg_decay_mult
-            item.weight *= (1 - decay_rate)
+            item.weight *= 1 - decay_rate
             if item.weight < 1e-10:
                 item.weight = 0.0
 
@@ -535,7 +574,7 @@ class MemorySystem:
                     staleness = 1 + 0.5 * math.log(
                         (days_since - node.staleness_threshold) / 30 + 1
                     )
-                    node.clarity *= (0.998 / staleness)
+                    node.clarity *= 0.998 / staleness
                 else:
                     node.clarity *= 0.998
             else:
@@ -550,15 +589,15 @@ class MemorySystem:
         """Remove L3 nodes and edges below clarity threshold, enforce node limit."""
         gc_threshold = 0.1
         dead_nodes = [
-            nid for nid, node in self._l3_nodes.items()
-            if node.clarity < gc_threshold
+            nid for nid, node in self._l3_nodes.items() if node.clarity < gc_threshold
         ]
         for nid in dead_nodes:
             del self._l3_nodes[nid]
 
         if len(self._l3_nodes) > self._L3_NODE_LIMIT:
             removable = [
-                (nid, node) for nid, node in self._l3_nodes.items()
+                (nid, node)
+                for nid, node in self._l3_nodes.items()
                 if node.temporal_type != "permanent"
             ]
             removable.sort(key=lambda x: x[1].clarity)
@@ -569,7 +608,8 @@ class MemorySystem:
 
         dead_node_set = set(dead_nodes)
         self._l3_edges = [
-            e for e in self._l3_edges
+            e
+            for e in self._l3_edges
             if e.clarity >= gc_threshold
             and e.source not in dead_node_set
             and e.target not in dead_node_set
@@ -600,22 +640,21 @@ class MemorySystem:
                 continue
             emotion_bias = 1.0 - abs(item.temperature - current_warmth) * mood_weight
             final_score = (
-                self._LAYER_WEIGHTS["L1"]
-                * item.weight
-                * relevance
-                * emotion_bias
+                self._LAYER_WEIGHTS["L1"] * item.weight * relevance * emotion_bias
             )
             if item.temperature > 0:
                 final_score += (positive_recall_bias - 1.0) * relevance
-            candidates.append(MemoryResult(
-                text=item.text,
-                layer="L1",
-                weight=item.weight,
-                relevance=relevance,
-                clarity=1.0,
-                temperature=item.temperature,
-                final_score=final_score,
-            ))
+            candidates.append(
+                MemoryResult(
+                    text=item.text,
+                    layer="L1",
+                    weight=item.weight,
+                    relevance=relevance,
+                    clarity=1.0,
+                    temperature=item.temperature,
+                    final_score=final_score,
+                )
+            )
 
         # --- L2 recall ---
         self._recalled_l2_items: list[MemoryItem] = []
@@ -627,22 +666,21 @@ class MemorySystem:
                 continue
             emotion_bias = 1.0 - abs(item.temperature - current_warmth) * mood_weight
             final_score = (
-                self._LAYER_WEIGHTS["L2"]
-                * item.weight
-                * relevance
-                * emotion_bias
+                self._LAYER_WEIGHTS["L2"] * item.weight * relevance * emotion_bias
             )
             if item.temperature > 0:
                 final_score += (positive_recall_bias - 1.0) * relevance
-            candidates.append(MemoryResult(
-                text=item.text,
-                layer="L2",
-                weight=item.weight,
-                relevance=relevance,
-                clarity=1.0,
-                temperature=item.temperature,
-                final_score=final_score,
-            ))
+            candidates.append(
+                MemoryResult(
+                    text=item.text,
+                    layer="L2",
+                    weight=item.weight,
+                    relevance=relevance,
+                    clarity=1.0,
+                    temperature=item.temperature,
+                    final_score=final_score,
+                )
+            )
             self._reinforce_l2(item, current_warmth)
             self._recalled_l2_items.append(item)
 
@@ -692,9 +730,7 @@ class MemorySystem:
         beta = self._params["reconsolidation_rate"]
         item.temperature = item.temperature * (1 - beta) + current_warmth * beta
 
-    def _recall_l3(
-        self, query: str, current_warmth: float
-    ) -> list[MemoryResult]:
+    def _recall_l3(self, query: str, current_warmth: float) -> list[MemoryResult]:
         """Recall from L3 graph via keyword matching on node labels."""
         results: list[MemoryResult] = []
         query_lower = query.lower()
@@ -719,7 +755,9 @@ class MemorySystem:
                     src_label = self._l3_nodes.get(edge.source)
                     tgt_label = self._l3_nodes.get(edge.target)
                     if src_label and tgt_label:
-                        fragment = f"{src_label.label} {edge.relation} {tgt_label.label}"
+                        fragment = (
+                            f"{src_label.label} {edge.relation} {tgt_label.label}"
+                        )
                         connected_texts.append(fragment)
 
             text = node.label
@@ -733,24 +771,23 @@ class MemorySystem:
 
             emotion_bias = 1.0 - abs(node.emotion_weight - current_warmth) * mood_weight
             final_score = (
-                self._LAYER_WEIGHTS["L3"]
-                * node.clarity
-                * relevance
-                * emotion_bias
+                self._LAYER_WEIGHTS["L3"] * node.clarity * relevance * emotion_bias
             )
 
             node.recall_count += 1
             node.clarity = min(node.clarity + 0.05, 1.0)
 
-            results.append(MemoryResult(
-                text=text,
-                layer="L3",
-                weight=node.clarity,
-                relevance=relevance,
-                clarity=node.clarity,
-                temperature=node.emotion_weight,
-                final_score=final_score,
-            ))
+            results.append(
+                MemoryResult(
+                    text=text,
+                    layer="L3",
+                    weight=node.clarity,
+                    relevance=relevance,
+                    clarity=node.clarity,
+                    temperature=node.emotion_weight,
+                    final_score=final_score,
+                )
+            )
 
         return results
 
@@ -787,8 +824,7 @@ class MemorySystem:
     def compress_check(self) -> list[MemoryItem]:
         """v2: 返回 L2 中 30 天未被召回的条目（按 age_ticks 判断）。"""
         return [
-            item for item in self._l2
-            if item.age_ticks >= L2_COMPRESSION_AGE_TICKS
+            item for item in self._l2 if item.age_ticks >= L2_COMPRESSION_AGE_TICKS
         ][:10]
 
     def remove_compressed(self, item_ids: list[str]) -> None:
@@ -825,26 +861,39 @@ class MemorySystem:
                 obj_type = triple.get("object_type", "topic")
 
             subj_node = self._find_or_create_node(
-                label=subj_label, node_type=subj_type,
-                emotion_weight=emotion, clarity=clarity,
-                temporal_type=temporal_type, valid_from=valid_from,
+                label=subj_label,
+                node_type=subj_type,
+                emotion_weight=emotion,
+                clarity=clarity,
+                temporal_type=temporal_type,
+                valid_from=valid_from,
             )
             obj_node = self._find_or_create_node(
-                label=obj_label, node_type=obj_type,
-                emotion_weight=emotion, clarity=clarity,
-                temporal_type=temporal_type, valid_from=valid_from,
+                label=obj_label,
+                node_type=obj_type,
+                emotion_weight=emotion,
+                clarity=clarity,
+                temporal_type=temporal_type,
+                valid_from=valid_from,
             )
             self._find_or_create_edge(
-                source=subj_node.id, target=obj_node.id,
-                relation=relation, emotion_weight=emotion, clarity=clarity,
+                source=subj_node.id,
+                target=obj_node.id,
+                relation=relation,
+                emotion_weight=emotion,
+                clarity=clarity,
             )
 
         if len(self._l3_nodes) > self._L3_NODE_LIMIT:
             self._gc_l3()
 
     def _find_or_create_node(
-        self, label: str, node_type: str, emotion_weight: float,
-        clarity: float, temporal_type: str = "episodic",
+        self,
+        label: str,
+        node_type: str,
+        emotion_weight: float,
+        clarity: float,
+        temporal_type: str = "episodic",
         valid_from: str | None = None,
     ) -> GraphNode:
         for node in self._l3_nodes.values():
@@ -853,27 +902,42 @@ class MemorySystem:
                 node.emotion_weight = (node.emotion_weight + emotion_weight) / 2
                 return node
         node = GraphNode(
-            id=uuid.uuid4().hex[:12], label=label, type=node_type,
-            temporal_type=temporal_type, emotion_weight=emotion_weight,
-            clarity=clarity, recall_count=0, valid_from=valid_from,
+            id=uuid.uuid4().hex[:12],
+            label=label,
+            type=node_type,
+            temporal_type=temporal_type,
+            emotion_weight=emotion_weight,
+            clarity=clarity,
+            recall_count=0,
+            valid_from=valid_from,
             staleness_threshold=180,
         )
         self._l3_nodes[node.id] = node
         return node
 
     def _find_or_create_edge(
-        self, source: str, target: str, relation: str,
-        emotion_weight: float, clarity: float,
+        self,
+        source: str,
+        target: str,
+        relation: str,
+        emotion_weight: float,
+        clarity: float,
     ) -> GraphEdge:
         for edge in self._l3_edges:
-            if (edge.source == source and edge.target == target
-                    and edge.relation == relation):
+            if (
+                edge.source == source
+                and edge.target == target
+                and edge.relation == relation
+            ):
                 edge.emotion_weight = (edge.emotion_weight + emotion_weight) / 2
                 edge.clarity = max(edge.clarity, clarity)
                 return edge
         edge = GraphEdge(
-            source=source, target=target, relation=relation,
-            emotion_weight=emotion_weight, clarity=clarity,
+            source=source,
+            target=target,
+            relation=relation,
+            emotion_weight=emotion_weight,
+            clarity=clarity,
             last_recalled=self._tick,
         )
         self._l3_edges.append(edge)
@@ -921,12 +985,9 @@ class MemorySystem:
         self._l1 = deque(l1_items, maxlen=self._L1_CAPACITY)
         self._l2 = [MemoryItem.from_dict(d) for d in data.get("l2", [])]
         self._l3_nodes = {
-            nid: GraphNode.from_dict(nd)
-            for nid, nd in data.get("l3_nodes", {}).items()
+            nid: GraphNode.from_dict(nd) for nid, nd in data.get("l3_nodes", {}).items()
         }
-        self._l3_edges = [
-            GraphEdge.from_dict(ed) for ed in data.get("l3_edges", [])
-        ]
+        self._l3_edges = [GraphEdge.from_dict(ed) for ed in data.get("l3_edges", [])]
 
 
 # ---------------------------------------------------------------------------
@@ -935,15 +996,29 @@ class MemorySystem:
 
 if __name__ == "__main__":
     mem = MemorySystem()
-    mem.derive_params({
-        "openness": 0.7, "conscientiousness": 0.5,
-        "extraversion": 0.6, "agreeableness": 0.8, "neuroticism": 0.4,
-    })
+    mem.derive_params(
+        {
+            "openness": 0.7,
+            "conscientiousness": 0.5,
+            "extraversion": 0.6,
+            "agreeableness": 0.8,
+            "neuroticism": 0.4,
+        }
+    )
 
     # v2: write summaries
-    mem.write_summary("聊了关于猫的话题，用户说家里有两只猫", source_turns=5, temperature=0.6)
-    mem.write_summary("讨论了期末考试压力，用户说下周有三门考试", source_turns=8, temperature=0.3)
-    mem.write_summary("用户提到喜欢开放世界游戏，特别是地平线系列", source_turns=3, embedding=[0.1]*8, temperature=0.7)
+    mem.write_summary(
+        "聊了关于猫的话题，用户说家里有两只猫", source_turns=5, temperature=0.6
+    )
+    mem.write_summary(
+        "讨论了期末考试压力，用户说下周有三门考试", source_turns=8, temperature=0.3
+    )
+    mem.write_summary(
+        "用户提到喜欢开放世界游戏，特别是地平线系列",
+        source_turns=3,
+        embedding=[0.1] * 8,
+        temperature=0.7,
+    )
 
     # Mark confirmed and sink
     ids = [item.id for item in mem._l1]
@@ -970,14 +1045,25 @@ if __name__ == "__main__":
     # Serialization roundtrip
     data = mem.to_dict()
     mem2 = MemorySystem.create_from_dict(data)
-    print(f"Restored: L1={len(mem2._l1)}, L2={len(mem2._l2)}, version={data['version']}")
+    print(
+        f"Restored: L1={len(mem2._l1)}, L2={len(mem2._l2)}, version={data['version']}"
+    )
 
     # Graph ingestion
-    mem.ingest_graph_triples([
-        {"subject": "用户", "relation": "喜欢", "object": "猫",
-         "subject_type": "person", "object_type": "preference",
-         "emotion_weight": 0.8, "clarity": 0.9, "temporal_type": "permanent"},
-    ])
+    mem.ingest_graph_triples(
+        [
+            {
+                "subject": "用户",
+                "relation": "喜欢",
+                "object": "猫",
+                "subject_type": "person",
+                "object_type": "preference",
+                "emotion_weight": 0.8,
+                "clarity": 0.9,
+                "temporal_type": "permanent",
+            },
+        ]
+    )
     print(f"L3 nodes={len(mem._l3_nodes)}, edges={len(mem._l3_edges)}")
 
     # ConversationBuffer test
@@ -986,10 +1072,11 @@ if __name__ == "__main__":
     buf.append("bot", "你好呀")
     assert buf.turn_count == 1
     assert buf.should_flush(idle_seconds=0.001, max_turns=20) == ""
-    import time as _t; _t.sleep(0.01)
+    import time as _t
+
+    _t.sleep(0.01)
     assert buf.should_flush(idle_seconds=0.001, max_turns=20) == "idle"
     msgs = buf.drain()
     assert len(msgs) == 2 and buf.turn_count == 0
 
     print("ALL OK")
-

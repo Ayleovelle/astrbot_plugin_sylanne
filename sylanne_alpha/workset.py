@@ -19,18 +19,41 @@ def build_fragment_workset(
     guard: dict[str, Any] | None = None,
     attention: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
-    clean_fragments = [" ".join(str(fragment).split()) for fragment in fragments or [] if str(fragment).strip()]
+    clean_fragments = [
+        " ".join(str(fragment).split())
+        for fragment in fragments or []
+        if str(fragment).strip()
+    ]
     current_intent = " ".join(clean_fragments).strip()
     shadow = dict(shadow or {})
     items: list[dict[str, Any]] = []
     if current_intent:
-        items.append({"kind": "current_intent", "text": current_intent[:500], "weight": 1.0})
+        items.append(
+            {"kind": "current_intent", "text": current_intent[:500], "weight": 1.0}
+        )
     if shadow.get("summary"):
-        items.append({"kind": "shadow_continuity", "text": str(shadow["summary"])[:500], "weight": 0.85})
-    for match in sorted(memory_matches or [], key=lambda item: float(item.get("weight") or 0.0), reverse=True):
+        items.append(
+            {
+                "kind": "shadow_continuity",
+                "text": str(shadow["summary"])[:500],
+                "weight": 0.85,
+            }
+        )
+    for match in sorted(
+        memory_matches or [],
+        key=lambda item: float(item.get("weight") or 0.0),
+        reverse=True,
+    ):
         text = str(match.get("text") or "").strip()
         if text:
-            items.append({"kind": "memory_match", "id": str(match.get("id") or ""), "text": text[:500], "weight": float(match.get("weight") or 0.0)})
+            items.append(
+                {
+                    "kind": "memory_match",
+                    "id": str(match.get("id") or ""),
+                    "text": text[:500],
+                    "weight": float(match.get("weight") or 0.0),
+                }
+            )
     items = _dedupe(items)[: max(1, int(max_items))]
     consume_shadow = bool(shadow.get("consume") and shadow.get("summary"))
     evidence = _evidence(
@@ -51,8 +74,14 @@ def build_fragment_workset(
         "items": items,
         "evidence": evidence,
         "coordination": coordination,
-        "shadow": {"available": bool(shadow.get("summary")), "consumed": consume_shadow, "policy": "consume_once" if consume_shadow else "preserve"},
-        "prompt_fragment": _render_blackboard(evidence, coordination) if evidence else _render(items),
+        "shadow": {
+            "available": bool(shadow.get("summary")),
+            "consumed": consume_shadow,
+            "policy": "consume_once" if consume_shadow else "preserve",
+        },
+        "prompt_fragment": _render_blackboard(evidence, coordination)
+        if evidence
+        else _render(items),
     }
 
 
@@ -69,7 +98,13 @@ def _evidence(
     evidence: list[dict[str, Any]] = []
     for department, payload, path in (
         ("dialogue", dialogue, "fast"),
-        ("memory", {"matches": memory_matches, "count": len(memory_matches)} if memory_matches else None, "fast"),
+        (
+            "memory",
+            {"matches": memory_matches, "count": len(memory_matches)}
+            if memory_matches
+            else None,
+            "fast",
+        ),
         ("personality", personality, "slow"),
         ("body", body, "fast"),
         ("assessor", assessor, "slow"),
@@ -77,19 +112,38 @@ def _evidence(
         ("attention", attention, "fast"),
     ):
         if payload:
-            evidence.append({"department": department, "path": path, "summary": _truncate_payload_values(payload)})
+            evidence.append(
+                {
+                    "department": department,
+                    "path": path,
+                    "summary": _truncate_payload_values(payload),
+                }
+            )
     return evidence
 
 
-def _coordination(evidence: list[dict[str, Any]], *, attention: dict[str, Any] | None, guard: dict[str, Any] | None) -> dict[str, Any]:
+def _coordination(
+    evidence: list[dict[str, Any]],
+    *,
+    attention: dict[str, Any] | None,
+    guard: dict[str, Any] | None,
+) -> dict[str, Any]:
     departments = [item["department"] for item in evidence]
     primary = str((attention or {}).get("primary") or "")
     if primary not in departments:
-        primary = "guard" if guard and "guard" in departments else (departments[0] if departments else "none")
+        primary = (
+            "guard"
+            if guard and "guard" in departments
+            else (departments[0] if departments else "none")
+        )
     return {
         "primary_department": primary,
-        "fast_path": [item["department"] for item in evidence if item["path"] == "fast"],
-        "slow_path": [item["department"] for item in evidence if item["path"] == "slow"],
+        "fast_path": [
+            item["department"] for item in evidence if item["path"] == "fast"
+        ],
+        "slow_path": [
+            item["department"] for item in evidence if item["path"] == "slow"
+        ],
         "policy": "fast_path_never_waits_for_slow_path",
     }
 
@@ -104,13 +158,18 @@ def _truncate_payload_values(payload: dict[str, Any]) -> dict[str, Any]:
         elif isinstance(value, dict):
             clean[key] = _truncate_payload_values(value)
         elif isinstance(value, list):
-            clean[key] = [_truncate_payload_values(item) if isinstance(item, dict) else item for item in value[:5]]
+            clean[key] = [
+                _truncate_payload_values(item) if isinstance(item, dict) else item
+                for item in value[:5]
+            ]
         else:
             clean[key] = value
     return clean
 
 
-def _render_blackboard(evidence: list[dict[str, Any]], coordination: dict[str, Any]) -> str:
+def _render_blackboard(
+    evidence: list[dict[str, Any]], coordination: dict[str, Any]
+) -> str:
     if not evidence:
         return "Sylanne blackboard: empty."
     lines = [f"Sylanne blackboard: primary={coordination['primary_department']}"]

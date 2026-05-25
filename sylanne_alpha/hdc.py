@@ -4,6 +4,7 @@ Encodes text into sparse binary hypervectors for ultra-fast
 similarity matching and compositional representation.
 Uses bytearray for compact storage and fast bitwise operations.
 """
+
 from __future__ import annotations
 
 import hashlib
@@ -72,7 +73,7 @@ class HDCEncoder:
         result = bytearray(self._byte_dim)
         for i in range(self.dim):
             if counts[i] > threshold:
-                result[i // 8] |= (1 << (i % 8))
+                result[i // 8] |= 1 << (i % 8)
         return result
 
     def encode_text(self, text: str) -> bytearray:
@@ -88,7 +89,7 @@ class HDCEncoder:
             return 0.5
         xor_count = 0
         for x, y in zip(a, b):
-            xor_count += bin(x ^ y).count('1')
+            xor_count += bin(x ^ y).count("1")
         return 1.0 - xor_count / self.dim
 
     def bind(self, a: bytearray, b: bytearray) -> bytearray:
@@ -111,7 +112,7 @@ class HDCEncoder:
         result = bytearray(self._byte_dim)
         for i in range(self.dim):
             if counts[i] > threshold:
-                result[i // 8] |= (1 << (i % 8))
+                result[i // 8] |= 1 << (i % 8)
         return result
 
     def _tokenize(self, text: str) -> list[str]:
@@ -119,4 +120,4 @@ class HDCEncoder:
         text = text.strip()
         if len(text) <= 1:
             return [text] if text else []
-        return [text[i:i+2] for i in range(len(text) - 1)]
+        return [text[i : i + 2] for i in range(len(text) - 1)]

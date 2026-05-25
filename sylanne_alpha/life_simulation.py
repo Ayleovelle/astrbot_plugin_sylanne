@@ -3,13 +3,14 @@
 Simulates Sylanne's independent "life" using an external LLM.
 Periodically generates life events that may trigger proactive outreach.
 """
+
 from __future__ import annotations
 
 import asyncio
 import json
 import time
 from dataclasses import dataclass, field
-from typing import Any, Callable, Awaitable
+from typing import Any, Awaitable, Callable
 
 
 @dataclass
@@ -35,8 +36,14 @@ class LifeSimulationState:
     def to_dict(self) -> dict[str, Any]:
         return {
             "events": [
-                {"text": e.text, "mood": e.mood, "urgency": e.urgency,
-                 "timestamp": e.timestamp, "wants_to_share": e.wants_to_share, "shared": e.shared}
+                {
+                    "text": e.text,
+                    "mood": e.mood,
+                    "urgency": e.urgency,
+                    "timestamp": e.timestamp,
+                    "wants_to_share": e.wants_to_share,
+                    "shared": e.shared,
+                }
                 for e in self.events[-20:]
             ],
             "current_activity": self.current_activity,
@@ -55,14 +62,16 @@ class LifeSimulationState:
         state.simulation_count = data.get("simulation_count", 0)
         state.outreach_count = data.get("outreach_count", 0)
         for e in data.get("events", []):
-            state.events.append(LifeEvent(
-                text=e.get("text", ""),
-                mood=e.get("mood", "neutral"),
-                urgency=float(e.get("urgency", 0.0)),
-                timestamp=float(e.get("timestamp", 0.0)),
-                wants_to_share=e.get("wants_to_share", False),
-                shared=e.get("shared", False),
-            ))
+            state.events.append(
+                LifeEvent(
+                    text=e.get("text", ""),
+                    mood=e.get("mood", "neutral"),
+                    urgency=float(e.get("urgency", 0.0)),
+                    timestamp=float(e.get("timestamp", 0.0)),
+                    wants_to_share=e.get("wants_to_share", False),
+                    shared=e.get("shared", False),
+                )
+            )
         return state
 
 
@@ -102,11 +111,25 @@ class LifeSimulator:
 
     @property
     def interval_seconds(self) -> float:
-        return max(60.0, float(self._config.get("sylanne_alpha_life_simulation_interval_seconds", 1800.0)))
+        return max(
+            60.0,
+            float(
+                self._config.get(
+                    "sylanne_alpha_life_simulation_interval_seconds", 1800.0
+                )
+            ),
+        )
 
     @property
     def outreach_cooldown_seconds(self) -> float:
-        return max(300.0, float(self._config.get("sylanne_alpha_life_simulation_outreach_cooldown_seconds", 3600.0)))
+        return max(
+            300.0,
+            float(
+                self._config.get(
+                    "sylanne_alpha_life_simulation_outreach_cooldown_seconds", 3600.0
+                )
+            ),
+        )
 
     def configure(
         self,
@@ -144,6 +167,7 @@ class LifeSimulator:
     async def _loop(self):
         """Background loop: simulate life events at random intervals."""
         import random
+
         while self._running and self.enabled:
             try:
                 base = self.interval_seconds
@@ -157,7 +181,10 @@ class LifeSimulator:
                 break
             except Exception as _exc:
                 import logging
-                logging.getLogger(__name__).debug("life_simulation tick error: %s", _exc)
+
+                logging.getLogger(__name__).debug(
+                    "life_simulation tick error: %s", _exc
+                )
                 await asyncio.sleep(60.0)
 
     async def _simulate_tick(self):
@@ -188,6 +215,7 @@ class LifeSimulator:
     def _build_prompt(self, now: float) -> str:
         """Build the LLM prompt for life simulation."""
         import datetime
+
         dt = datetime.datetime.fromtimestamp(now)
         time_desc = dt.strftime("%H:%M, %A")
 
@@ -206,7 +234,11 @@ class LifeSimulator:
             except Exception:
                 pass
 
-        gap = now - self.state.last_outreach_time if self.state.last_outreach_time > 0 else 99999
+        gap = (
+            now - self.state.last_outreach_time
+            if self.state.last_outreach_time > 0
+            else 99999
+        )
         if gap < 3600:
             last_chat_desc = "just now"
         elif gap < 86400:
@@ -234,13 +266,16 @@ class LifeSimulator:
             except Exception:
                 pass
 
-        return LIFE_SIMULATION_PROMPT.format(
-            persona_desc=persona_desc,
-            time_desc=time_desc,
-            emotion_desc=emotion_desc,
-            last_chat_desc=last_chat_desc,
-            recent_activity=recent,
-        ) + memory_summary
+        return (
+            LIFE_SIMULATION_PROMPT.format(
+                persona_desc=persona_desc,
+                time_desc=time_desc,
+                emotion_desc=emotion_desc,
+                last_chat_desc=last_chat_desc,
+                recent_activity=recent,
+            )
+            + memory_summary
+        )
 
     def _parse_response(self, response: str, now: float) -> LifeEvent | None:
         """Parse LLM response into a LifeEvent."""
@@ -296,7 +331,11 @@ class LifeSimulator:
         recent = [e for e in self.state.events[-10:] if e.text]
         if not recent:
             return ""
-        lines = [f"（Sylanne 最近的生活：{self.state.current_activity}）"] if self.state.current_activity else []
+        lines = (
+            [f"（Sylanne 最近的生活：{self.state.current_activity}）"]
+            if self.state.current_activity
+            else []
+        )
         for e in recent[-limit:]:
             lines.append(f"（{e.mood}：{e.text}）")
         return "\n".join(lines)
