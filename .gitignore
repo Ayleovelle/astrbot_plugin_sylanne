@@ -33,3 +33,6 @@ knowledge-base/
 .claude/
 .vscode/
 docs/astrbot_dev_handbook.md
+docs/scar_void_arxiv_paper.tex
+docs/scar_void_arxiv_paper_zh.tex
+docs/sylanne_4_alpha_computation_model.tex
