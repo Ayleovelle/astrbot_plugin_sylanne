@@ -484,13 +484,19 @@ Embodiment 是完全重写，但对 3.x 用户做了兼容：
 
 > **发布于 2026-05-28**
 
-### 独立观察舱 WebUI
+Embodiment-1.3.0 是一次 WebUI 的完全重新设计。从依赖 AstrBot Pages 框架的 bridge 模式，重写为独立 HTTP 服务器 + 单文件 SPA。登录页以实验体观察为主题，用 canvas 粒子引力系统、伤痕生成/残痕积累、空洞挣扎动画构建了一套完整的视觉语言。同时顺手做了计算层性能优化和记忆系统增强。
 
-Sylanne 拥有了独立的实验体观察界面，不再依赖 AstrBot Pages 框架。独立 HTTP 服务器（端口 2718）+ 单文件 SPA，包含：登录页实验体观察主题（canvas 粒子引力系统 + 伤痕闪烁）、Void 吞噬/收缩过渡动画、脊柱摇杆导航、会话选择器、熔毁弹窗、配置页折叠联动、中英文切换。
+### WebUI 重新设计
+
+- 独立 HTTP 服务器（端口 2718）+ 单文件 SPA（`UI/index.html`），零外部依赖
+- 登录页实验体观察主题：canvas 粒子引力系统 + 伤痕/残痕 + 空洞挣扎 + 扫描线
+- Void 吞噬/收缩过渡动画（登录时空洞扩张吞噬面板，登出时收缩回原点）
+- 脊柱线与空洞扩张同步出现，脊柱摇杆导航（阻尼吸附、键盘 W/S）
+- 加载页（SYSTEM INIT）确保资源就绪后无缝进入
+- 会话选择器、熔毁弹窗（10s 倒计时）、配置页折叠联动、中英文切换
 
 ### 性能优化
 
-- HDC 编码 numpy 双路径（长文本自动启用向量化）
 - `int.bit_count()` 替换全部 popcount（提速 2.4×）
 - Scar modifier 缓存（命中提速 6.8×）
 - Per-relationship personality 缓存
@@ -500,6 +506,10 @@ Sylanne 拥有了独立的实验体观察界面，不再依赖 AstrBot Pages 框
 
 - 时间感知回忆标签（刚才/N分钟前/N小时前/昨天/N天前）
 - LLM 整合触发器（手动或定时 12h）
+
+### 插件兼容
+
+- 生活模拟模块适配了 [astrbot_plugin_proactive_chat](https://github.com/DBJD-CR/astrbot_plugin_proactive_chat)，两个插件的主动发言逻辑不再冲突
 
 ### 迁移说明
 
