@@ -1,8 +1,11 @@
-"""Sylanne-Embodiment computation layer: Autopoietic Boundary.
+"""Sylanne-Embodiment 计算核心层：自创生边界（Autopoietic Boundary）。
 
-Personality as a self-maintaining computational process.
-Not defined by external parameters, but by an ongoing self-repair loop.
-Small perturbations are absorbed; large shocks may trigger phase transitions.
+在 7 层计算栈中的位置：L6 边界层。
+职责：将人格建模为一个自我维持的计算过程——不由外部参数定义，而是通过持续的
+自修复循环来维持。小扰动被吸收（边界完整性微降），大冲击可能触发相变
+（identity kernel 旋转重组）。
+
+核心思想来自 Maturana & Varela 的自创生理论：系统通过自身的运作来维持自身的组织。
 """
 
 from __future__ import annotations
@@ -12,6 +15,27 @@ from typing import Any
 
 
 class AutopoieticBoundary:
+    """自创生边界：人格的自我维持计算过程。
+
+    核心概念：
+      - identity_kernel: 身份核心向量（自参照约束），定义"我是谁"
+      - boundary_integrity: 边界完整性 [0, 1]，高 = 抗干扰能力强
+      - internal_entropy: 内部熵 [0, 1]，高 = 系统混乱度大
+      - repair_rate: 自修复速率，每 tick 恢复的完整性量
+
+    扰动机制：
+      - 外力投影到 identity_kernel 的正交补空间（平行分量被吸收）
+      - 穿透量 = 正交分量大小 × (1 - 完整性)
+      - 穿透超过阈值 → 相变（identity_kernel 旋转重组）
+      - 穿透未超阈值 → 完整性微降 + 熵微升
+
+    与其他组件的关系：
+      - 被 ComputationSpine 在 L6 层调用
+      - 接收 L3 情感状态转换为的力向量
+      - stability() 输出给结果诊断
+      - 相变事件影响 L7 表达驱动力
+    """
+
     __slots__ = (
         "identity_dim",
         "identity_kernel",
@@ -38,7 +62,20 @@ class AutopoieticBoundary:
         self._rotation_angle = 0.1
 
     def perturb(self, force: list[float]) -> dict[str, Any]:
-        """External perturbation acts on the boundary."""
+        """外部扰动作用于边界。
+
+        将力向量分解为平行于 identity_kernel 的分量（被吸收）和正交分量（可能穿透）。
+        穿透量 = 正交分量范数 × (1 - boundary_integrity)。
+
+        如果穿透超过相变阈值：触发 identity_kernel 旋转重组（系统适应性改变）。
+        否则：边界完整性微降，内部熵微升。
+
+        Args:
+            force: 外力向量（32 维，由情感状态映射而来）
+
+        Returns:
+            包含穿透量、是否相变、边界完整性、内部熵的诊断字典
+        """
         if len(force) < self.identity_dim:
             force = force + [0.0] * (self.identity_dim - len(force))
         force = force[: self.identity_dim]
@@ -78,11 +115,13 @@ class AutopoieticBoundary:
         }
 
     def self_repair(self):
-        """Self-repair loop -- runs every tick.
+        """自修复循环——每 tick 运行。
 
-        When under active stress (recent high penetration), only reduce
-        entropy slowly without restoring boundary integrity -- the wound
-        is still open and needs time to heal.
+        当处于活跃压力下（最近有高穿透）时，只缓慢降低熵而不恢复完整性——
+        伤口仍然开放，需要时间愈合。这防止了"被打一下立刻满血"的不真实行为。
+
+        正常修复时，完整性有 0.3 的下限，防止正反馈崩溃
+        （完整性越低 → 穿透越大 → 完整性更低 → 死循环）。
         """
         if self._last_penetration > 0.4:
             # Wound still open: slow healing, don't restore integrity yet
@@ -101,7 +140,7 @@ class AutopoieticBoundary:
         self.identity_kernel = [x / norm for x in self.identity_kernel]
 
     def stability(self) -> float:
-        """Overall stability score: high = resistant to change."""
+        """整体稳定性评分：高 = 抗变化能力强。公式：完整性 × (1 - 熵)。"""
         return self.boundary_integrity * (1.0 - self.internal_entropy)
 
     def phase_transition_count(self) -> int:
@@ -132,7 +171,11 @@ class AutopoieticBoundary:
             self.identity_kernel = [float(x) for x in data["identity_kernel"]]
 
     def _reorganize(self, force: list[float], force_norm: float):
-        """Self-directed reorganization: rotate identity kernel slightly toward force."""
+        """自主重组：将 identity_kernel 向力的方向微旋转。
+
+        这是相变的核心——系统在大冲击下不是崩溃，而是适应性地改变自身。
+        旋转角度由 _rotation_angle 控制（人格开放性越高，旋转越大）。
+        """
         angle = self._rotation_angle  # Max rotation per phase transition
         unit_force = [f / force_norm for f in force]
         cos_a = math.cos(angle)
@@ -146,11 +189,11 @@ class AutopoieticBoundary:
 
     @classmethod
     def create_shared_kernel(cls, dim: int) -> list[float]:
-        """Create a deterministic identity kernel for sharing across instances."""
+        """创建确定性身份核心向量（用于跨实例共享）。"""
         return cls._init_kernel(dim)
 
     def set_identity_kernel(self, kernel: list[float]) -> None:
-        """Replace the identity kernel with a shared one."""
+        """替换身份核心向量为共享的版本。"""
         self.identity_kernel = list(kernel)
 
     def set_personality_params(
@@ -162,7 +205,7 @@ class AutopoieticBoundary:
 
     @staticmethod
     def _init_kernel(dim: int) -> list[float]:
-        """Deterministic initial identity kernel."""
+        """确定性初始化身份核心向量（使用素数种子的线性同余生成器）。"""
         kernel = []
         state = 7919  # prime seed
         for i in range(dim):

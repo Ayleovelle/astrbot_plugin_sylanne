@@ -1,6 +1,13 @@
-"""LLM request pipeline methods extracted from main.py.
+"""LLM 请求管线 —— 拦截 on_llm_request 事件的核心处理模块。
 
-All methods delegate attribute access to the plugin instance via ``self._p``.
+职责：
+  1. 在 LLM 请求发出前注入人格 prompt、记忆上下文、计算栈结果
+  2. 处理群聊社交场域信号（SFPD）决定是否响应
+  3. 实现消息碎片防抖（fragment debounce），等待用户输入完成
+  4. 管理记忆 v2 生命周期：对话缓冲 flush、整理、再巩固
+  5. 驱动生命模拟器（Life Simulator）的 LLM 回调
+
+所有方法通过 ``self._p`` 委托访问插件实例属性。
 """
 
 from __future__ import annotations
@@ -9,6 +16,8 @@ import asyncio
 import time
 from typing import Any
 
+from sylanne_alpha.utils import safe_ensure_future
+
 try:
     from astrbot.api import logger  # type: ignore
 except ImportError:
@@ -16,35 +25,194 @@ except ImportError:
 
     logger = _logging.getLogger("astrbot_plugin_sylanne")  # type: ignore
 
+# 单次未完成回复注入的最大字符数，防止 prompt 过长
 _MAX_UNFINISHED_CONTEXT_CHARS = 2000
 
 
-def _safe_ensure_future(coro: Any, name: str = "task") -> "asyncio.Task[Any]":
-    """Local re-export of the module-level helper."""
-
-    async def _wrapper() -> None:
-        try:
-            await coro
-        except asyncio.CancelledError:
-            pass
-        except Exception as e:
-            logger.error(f"Background task '{name}' failed: {e}", exc_info=True)
-
-    return asyncio.ensure_future(_wrapper())
-
-
 class LLMRequestPipeline:
-    """Encapsulates the LLM request processing pipeline for the Sylanne plugin."""
+    """LLM 请求处理管线，封装 Sylanne 插件的请求拦截逻辑。
+
+    核心流程：
+      event 到达 → 群聊 SFPD 过滤 → 碎片防抖 → 状态注入 → prompt 组装 → 发出请求
+
+    与其他组件的关系：
+      - 持有插件实例引用 (self._p)，通过它访问 host/kernel/memory 等子系统
+      - 调用 AsyncAssessor 做前台快速评估
+      - 调用 MemorySystem 做记忆召回和写入
+      - 驱动 LifeSimulator 的 LLM 回调
+    """
 
     def __init__(self, plugin: Any) -> None:
         self._p = plugin
 
     # ------------------------------------------------------------------
-    # _on_llm_request_inner
+    # 非文本消息转述（图片/语音/文件 → 文本描述）
     # ------------------------------------------------------------------
 
-    async def _on_llm_request_inner(self, event: Any, request: Any) -> None:
+    async def _transcribe_non_text(self, event: Any, message_text: str) -> str:
+        """当消息包含非文本内容时，尝试获取文本描述。
+
+        策略：
+        1. 如果 message_text 已有内容，直接返回（文本消息无需转述）
+        2. 如果配置了转述 LLM，调用它将图片转为文本描述
+        3. 未配置则返回占位符（spine 至少知道有消息来了）
+
+        Args:
+            event: AstrBot 事件对象。
+            message_text: 已提取的纯文本（可能为空）。
+
+        Returns:
+            转述后的文本描述，或原始 message_text。
+        """
+        if message_text.strip():
+            return message_text
+
         p = self._p
+        config = p.config or {}
+
+        # 检查消息是否包含非文本内容
+        msg_obj = getattr(event, "message_obj", None)
+        if msg_obj is None:
+            return message_text
+
+        # 提取图片 URL（AstrBot 消息段格式）
+        image_urls = []
+        chain = getattr(msg_obj, "message", None) or []
+        for seg in chain:
+            if hasattr(seg, "type") and seg.type == "image":
+                url = getattr(seg, "url", None) or getattr(seg, "file", None) or ""
+                if url:
+                    image_urls.append(str(url))
+            elif isinstance(seg, dict) and seg.get("type") == "image":
+                url = seg.get("url") or seg.get("file") or ""
+                if url:
+                    image_urls.append(str(url))
+
+        if not image_urls:
+            return message_text
+
+        # 转述功能未启用时返回占位符
+        if not config.get("sylanne_alpha_transcription_enabled"):
+            return f"[用户发送了{len(image_urls)}张图片]"
+
+        # 自动检测可用的多模态 provider
+        provider_id = await self._detect_multimodal_provider()
+        if not provider_id:
+            return f"[用户发送了{len(image_urls)}张图片]"
+
+        # 调用多模态 LLM 转述
+        try:
+            context = getattr(p, "context", None)
+            if context is None or not hasattr(context, "llm_generate"):
+                return f"[用户发送了{len(image_urls)}张图片]"
+
+            prompt = "请用一句简短的中文描述这张图片的内容和情绪氛围，不超过50字。"
+            resp = await context.llm_generate(
+                prompt=prompt,
+                image_urls=image_urls[:1],
+                provider_id=provider_id,
+            )
+            desc = str(getattr(resp, "completion_text", "") or "").strip()
+            if desc:
+                return f"[用户发送图片：{desc}]"
+        except Exception as e:
+            logger.debug(f"Sylanne transcription failed: {e}")
+
+        return f"[用户发送了{len(image_urls)}张图片]"
+
+    async def _detect_multimodal_provider(self) -> str:
+        """自动检测可用的多模态 provider。
+
+        优先使用用户指定的 transcription_provider_id，
+        否则遍历所有已注册 provider，按模型名匹配多模态能力。
+
+        Returns:
+            多模态 provider 的 ID，未找到返回空字符串。
+        """
+        p = self._p
+        config = p.config or {}
+
+        # 用户显式指定了 provider 则直接用
+        explicit = str(config.get("sylanne_alpha_transcription_provider_id") or "")
+        if explicit:
+            return explicit
+
+        # 缓存检测结果，避免每条消息都遍历
+        cached = getattr(p, "_multimodal_provider_cache", None)
+        if cached is not None:
+            ts, pid = cached
+            if time.time() - ts < 300:
+                return pid
+
+        # 已知支持多模态的模型名模式
+        _MULTIMODAL_PATTERNS = (
+            "gpt-4o",
+            "gpt-4-turbo",
+            "gpt-4-vision",
+            "claude-3",
+            "claude-4",
+            "gemini",
+            "qwen-vl",
+            "glm-4v",
+            "yi-vision",
+            "internvl",
+            "cogvlm",
+            "minicpm-v",
+        )
+
+        context = getattr(p, "context", None)
+        if context is None:
+            return ""
+
+        # 遍历所有 LLM provider 查找多模态的
+        for method_name in ("get_all_providers", "get_all_llm_providers"):
+            getter = getattr(context, method_name, None)
+            if not callable(getter):
+                continue
+            try:
+                providers = getter()
+                if hasattr(providers, "__await__"):
+                    providers = await providers
+            except Exception:
+                continue
+            iterable = (
+                providers.values() if isinstance(providers, dict) else (providers or [])
+            )
+            for prov in iterable:
+                model = str(
+                    getattr(prov, "model_name", "")
+                    or getattr(prov, "model", "")
+                    or getattr(prov, "id", "")
+                ).lower()
+                if any(pat in model for pat in _MULTIMODAL_PATTERNS):
+                    pid = str(
+                        getattr(prov, "id", "")
+                        or getattr(prov, "provider_id", "")
+                        or ""
+                    )
+                    if pid:
+                        p._multimodal_provider_cache = (time.time(), pid)
+                        return pid
+
+        p._multimodal_provider_cache = (time.time(), "")
+        return ""
+
+    async def _on_llm_request_inner(self, event: Any, request: Any) -> None:
+        """LLM 请求拦截的主入口。
+
+        处理流程：
+          1. 初始化运行时容器（stream buffer、碎片缓冲等）
+          2. 启动记忆 v2 后台定时器（首次）
+          3. 群聊 SFPD：收集社交信号 → 计算栈判断是否应答
+          4. 碎片防抖：等待用户输入完成后再处理
+          5. 委托 _process_llm_request_final 完成 prompt 注入
+
+        Args:
+            event: AstrBot 事件对象，包含消息内容和会话信息。
+            request: LLM 请求对象，可修改其 prompt 字段注入上下文。
+        """
+        p = self._p
+        # 懒初始化运行时状态容器——这些属性在插件首次收到请求时创建
         if not hasattr(p, "_stream_buffers"):
             p._stream_buffers = {}
         if not hasattr(p, "_stream_first_sent"):
@@ -62,14 +230,18 @@ class LLMRequestPipeline:
         if not hasattr(p, "_fragment_timers"):
             p._fragment_timers = {}
         p._start_webui_if_enabled()
-        # Start memory v2 background timers once
+        # 首次请求时启动记忆 v2 后台定时器（会话空闲检查 + 整理循环）
         if not hasattr(p, "_memory_timers_started"):
             p._memory_timers_started = True
             loop = asyncio.get_running_loop()
-            loop.create_task(self._session_idle_check_loop())
-            loop.create_task(self._consolidation_loop())
+            t1 = loop.create_task(self._session_idle_check_loop())
+            t2 = loop.create_task(self._consolidation_loop())
+            p._background_tasks.extend([t1, t2])
         session_key = p._session_key(event)
         message_text = str(getattr(event, "message_str", "") or "")
+        # 非文本消息转述：图片/语音等内容转为文本描述
+        if not message_text.strip():
+            message_text = await self._transcribe_non_text(event, message_text)
         if message_text:
             p._last_user_texts[session_key] = message_text[:120]
         realtime_enabled = bool(
@@ -80,7 +252,8 @@ class LLMRequestPipeline:
             (p.config or {}).get("sylanne_alpha_realtime_intercept_llm_response")
         )
 
-        # Group chat SFPD: collect social signals -> pass to spine -> L7 decides
+        # ---- 群聊 SFPD（社交场域感知调度）----
+        # 收集社交信号 → 传入计算栈 → L7 表达层决定是否响应
         _is_group = p._social_field.is_group_context(event)
         _should_respond = True
         _group_id = ""
@@ -93,7 +266,7 @@ class LLMRequestPipeline:
                 getattr(event, "is_at", False) or getattr(event, "at_bot", False)
             )
 
-            # Collect social signals
+            # 收集社交信号（发言频率、@bot、提及名字等）
             signals = p._social_field.collect(
                 group_id=_group_id,
                 sender_id=sender_id,
@@ -101,16 +274,16 @@ class LLMRequestPipeline:
                 is_at_bot=is_at_bot,
             )
 
-            # Pass signals to computation spine -> L7 uses them for threshold modulation
+            # 将社交信号注入计算栈，L7 用它们调制表达阈值
             try:
                 host = p._host(session_key)
                 host.kernel.computation.apply_social_signals(signals)
-                # Tick social void (silence accumulation)
+                # 累积社交沉默（群聊活跃但 bot 未发言的时间）
                 host.kernel.computation.engine.social_void.tick(group_active=True)
             except Exception as e:
                 logger.warning(f"Sylanne social signal apply: {e}", exc_info=True)
 
-            # L7 decides via should_express() with social-modulated threshold
+            # L7 表达层通过 should_express() 决定是否回复（考虑社交调制后的阈值）
             try:
                 _should_respond = host.kernel.computation.expression.should_express()
             except Exception:
@@ -129,8 +302,8 @@ class LLMRequestPipeline:
                     logger.debug(f"Sylanne skip: {e}")
                 return
 
-        # Fragment debounce: wait for user to finish typing
-        # Skip debounce if this is a follow-up message (AstrBot already handled merging)
+        # ---- 碎片防抖：等待用户输入完成 ----
+        # 跳过防抖的情况：follow-up 消息（AstrBot 已合并）或正在活跃回复中
         is_follow_up = bool(
             getattr(event, "_is_follow_up", False)
             or getattr(event, "order_seq", None) is not None
@@ -149,12 +322,12 @@ class LLMRequestPipeline:
                 (p.config or {}).get("realtime_input_completion_max_wait_seconds", 4.0)
             )
 
-            # Cancel previous timer for this session
+            # 取消该会话之前的防抖定时器
             old_timer = p._fragment_timers.pop(session_key, None)
             if old_timer and not old_timer.done():
                 old_timer.cancel()
 
-            # Accumulate fragment
+            # 累积碎片到缓冲区
             if session_key not in p._fragment_buffers:
                 p._fragment_buffers[session_key] = {
                     "texts": [],
@@ -168,13 +341,13 @@ class LLMRequestPipeline:
 
             elapsed = time.time() - p._fragment_buffers[session_key]["start_time"]
             if elapsed >= max_wait:
-                # Max wait exceeded, process now
+                # 超过最大等待时间，立即合并处理
                 merged = " ".join(p._fragment_buffers.pop(session_key)["texts"])
                 event.message_str = merged
                 message_text = merged
                 logger.info(f"Sylanne fragment merged (max_wait): {merged[:60]}")
             else:
-                # Set timer to wait for more fragments
+                # 设置延迟定时器，等待更多碎片到达
                 async def _process_after_delay(sk=session_key):
                     await asyncio.sleep(probe_delay)
                     buf = p._fragment_buffers.pop(sk, None)
@@ -194,7 +367,7 @@ class LLMRequestPipeline:
                             intercept,
                         )
 
-                timer = _safe_ensure_future(
+                timer = safe_ensure_future(
                     _process_after_delay(), name="fragment_debounce"
                 )
                 p._fragment_timers[session_key] = timer
@@ -206,9 +379,9 @@ class LLMRequestPipeline:
                         else None
                     )
                 )
-                return  # Don't process yet, wait for debounce
+                return  # 暂不处理，等待防抖定时器触发
 
-            # If we got here via max_wait, fall through to process
+            # 若通过 max_wait 到达此处，继续执行后续处理
 
         await self._process_llm_request_final(
             event,
@@ -234,20 +407,39 @@ class LLMRequestPipeline:
         hajide: bool,
         intercept: bool,
     ) -> None:
+        """请求处理的最终阶段：注入所有上下文并组装 prompt。
+
+        处理流程：
+          1. 清理流式状态，启动后台观测任务
+          2. 检测模型类型，创建注入预算（budget）
+          3. 注入时间上下文、未完成回复、生命事件、记忆召回
+          4. 构建情感/关系状态信号
+          5. 组装最终 prompt（背景上下文在前，用户消息在后）
+          6. 启动生命模拟器（首次）
+
+        Args:
+            event: AstrBot 事件对象。
+            request: LLM 请求对象（可能为 None）。
+            message_text: 用户消息文本（可能已合并碎片）。
+            session_key: 会话标识。
+            realtime_enabled: 是否启用即时聊天模式。
+            hajide: 是否启用哈基德兼容模式。
+            intercept: 是否拦截 LLM 响应做分段发送。
+        """
         p = self._p
 
-        # Clear stream state for this session
+        # 清理该会话的流式状态，为新一轮请求做准备
         p._stream_buffers.pop(session_key, None)
         p._stream_first_sent.pop(session_key, None)
 
-        # Schedule background observation (non-blocking, serialized per session)
+        # 启动后台观测任务（非阻塞，按会话串行化避免竞态）
         if message_text:
 
             async def _locked_observe(sk=session_key, txt=message_text):
                 async with p._session_lock(sk):
                     await self._background_observe_request(sk, txt)
 
-            task = _safe_ensure_future(_locked_observe(), name="locked_observe")
+            task = safe_ensure_future(_locked_observe(), name="locked_observe")
             p._background_tasks.append(task)
             task.add_done_callback(
                 lambda t: (
@@ -255,12 +447,12 @@ class LLMRequestPipeline:
                 )
             )
 
-        # Cancel stale segmented reply tasks
+        # 取消该会话过期的分段回复任务
         stale_task = p._segmented_tasks.pop(session_key, None)
         if stale_task and not stale_task.done():
             stale_task.cancel()
 
-        # Wrap event.send_streaming if first-sentence dispatch is enabled
+        # 包装 event.send_streaming：启用首句快速发送时拦截流式输出
         stream_first = bool(
             (p._config or {}).get("sylanne_alpha_stream_first_sentence_enabled")
         )
@@ -282,7 +474,7 @@ class LLMRequestPipeline:
                             if first_sentence:
                                 first_sent = True
                                 p._stream_first_sent[session_key] = first_sentence
-                                t = _safe_ensure_future(
+                                t = safe_ensure_future(
                                     p._send_first_sentence(origin, first_sentence),
                                     name="stream_send_first_sentence",
                                 )
@@ -304,12 +496,12 @@ class LLMRequestPipeline:
         if request is None:
             return
 
-        # Detect model hint for Claude compat
+        # 检测模型类型（用于 Claude 兼容性处理）
         model_hint = ""
         if hajide:
             model_hint = await self._get_model_hint(event)
 
-        # Create budget and normalize if needed
+        # 创建注入预算并在需要时规范化请求格式
         budget = p._state_injection_budget_for_request(
             session_key, request, model_hint=model_hint
         )
@@ -318,15 +510,15 @@ class LLMRequestPipeline:
         if hajide or budget.compat_mode:
             p._normalize_claude_request_payload(request, budget=budget)
 
-        # Inject time context
+        # 注入时间上下文（当前时间 + 距上次对话的间隔）
         time_fragment = p._time_context_fragment(session_key)
         current_prompt = str(getattr(request, "prompt", "") or "")
 
-        # Inject unfinished reply context
+        # 注入未完成回复上下文（上一轮被打断的回复内容）
         unfinished = p._unfinished_replies.pop(session_key, "")
         unfinished_fragment = ""
         if unfinished:
-            # Record shadow signal for interruption only
+            # 记录打断信号到身体层（仅标记，不改变情感状态）
             host = p._host(session_key)
             host.kernel.body.observe_shadow_signal(
                 text="", flags=["unfinished_reply"], kind="interruption"
@@ -340,7 +532,7 @@ class LLMRequestPipeline:
             )
         # PLACEHOLDER_PROCESS_LLM_REQUEST_FINAL_PART2
 
-        # Consume pending outreach context (from life simulation)
+        # 消费待发送的生命事件上下文（来自 Life Simulator）
         outreach_fragment = ""
         pending_outreach = p._pending_outreach_context
         outreach_ctx = pending_outreach.pop(session_key, None)
@@ -352,7 +544,7 @@ class LLMRequestPipeline:
                 f"请自然地在回复中提及或表达这件事，用你自己的语气。"
             )
 
-        # Recall relevant memories using 3-layer MemorySystem
+        # 使用三层记忆系统召回相关记忆
         memory_fragment = ""
         if realtime_enabled and message_text:
             host = p._host(session_key)
@@ -385,25 +577,25 @@ class LLMRequestPipeline:
                     memory_fragment = memory_system.format_recall_injection(
                         results, max_items=3
                     )
-                # Trigger reconsolidation rewrite in background (non-blocking)
-                _safe_ensure_future(
+                # 在后台触发再巩固重写（用当前情绪微调已召回的 L2 记忆）
+                safe_ensure_future(
                     self._reconsolidation_rewrite(session_key, memory_system),
                     name="reconsolidation_rewrite",
                 )
 
-        # User's current message -- always last for recency priority
+        # 用户当前消息——始终放在最后，确保 LLM 优先关注最新输入
         user_anchor = ""
         if message_text and realtime_enabled:
             user_anchor = f"当前：{message_text}"
 
-        # Build emotion/relationship state signal from computation spine
+        # 从计算栈构建情感/关系状态信号片段
         state_fragment = ""
         if realtime_enabled:
             host = p._host(session_key)
             emotion = host.kernel.computation.engine.observe()
             sheaf_obs = host.kernel.computation.sheaf.observe()
             expr_state = host.kernel.computation.expression.state()
-            # Try front-stage fast assessor
+            # 尝试前台快速评估器（在请求阶段同步获取当前消息的情感判断）
             fast_assessment = {}
             fast_enabled = p._cfg_bool("sylanne_alpha_assessor_llm_enabled")
             if fast_enabled and message_text:
@@ -413,7 +605,7 @@ class LLMRequestPipeline:
                     )
                 except Exception as e:
                     logger.warning(f"Sylanne fast assessment: {e}", exc_info=True)
-            # Merge: fast (current, if available) + last_assessment (previous round background)
+            # 合并评估结果：fast（当前轮）+ last_assessment（上一轮后台结果）
             last_assessment = host.kernel.computation._last_assessment or {}
             current_assessment = (
                 {**last_assessment, **fast_assessment}
@@ -430,6 +622,7 @@ class LLMRequestPipeline:
             valence = float(current_assessment.get("valence", 0.0))
             arousal = float(current_assessment.get("arousal", 0.0))
             intent = str(current_assessment.get("intent", ""))
+            # 将状态信号压缩为自然语言描述，供 LLM 参考
             signals = []
             if valence > 0.5:
                 signals.append("对方心情不错")
@@ -457,10 +650,10 @@ class LLMRequestPipeline:
                 state_fragment = f"[当前状态：{'，'.join(signals)}]"
         # PLACEHOLDER_PROCESS_LLM_REQUEST_FINAL_PART3
 
-        # Assemble final prompt: background context FIRST, user message LAST
+        # ---- 组装最终 prompt：背景上下文在前，用户消息在后 ----
         bg_parts = []
 
-        # Amnesia injection: if memory was just wiped, express disorientation
+        # 记忆抹除注入：若刚执行了记忆清除，表达迷失感
         amnesia_sessions = p._amnesia_sessions
         if session_key in amnesia_sessions:
             amnesia_sessions.discard(session_key)
@@ -483,7 +676,7 @@ class LLMRequestPipeline:
 
         background = "\n".join(bg_parts) if bg_parts else ""
 
-        # Structure: [original prompt] [background as parenthetical] [user's current message last]
+        # 结构：[原始 prompt] [背景上下文作为括注] [用户当前消息放最后]
         new_prompt = current_prompt
 
         if background:
@@ -498,7 +691,7 @@ class LLMRequestPipeline:
             f"Sylanne injected prompt ({len(new_prompt)} chars): {new_prompt[:300]}"
         )
 
-        # Start life simulator once (lazy init on first LLM request)
+        # 首次请求时启动生命模拟器（懒初始化）
         if not getattr(p, "_life_simulator_started", False):
             p._life_simulator_started = True
             life_sim = getattr(p, "_life_simulator", None)
@@ -521,6 +714,14 @@ class LLMRequestPipeline:
     # ------------------------------------------------------------------
 
     async def _get_model_hint(self, event: Any = None) -> str:
+        """获取当前聊天使用的模型标识，用于 Claude 兼容性判断。
+
+        Args:
+            event: 可选的事件对象，用于获取 unified_msg_origin。
+
+        Returns:
+            模型标识字符串（如 "claude-3-opus"），获取失败返回空字符串。
+        """
         p = self._p
         context = getattr(p, "context", None) or getattr(p, "_context", None)
         if hasattr(context, "get_current_chat_provider_id"):
@@ -542,14 +743,17 @@ class LLMRequestPipeline:
     # ------------------------------------------------------------------
 
     async def _background_observe_request(self, session_key: str, text: str) -> None:
-        """Observe user message with two-level LLM assessment (bounded timeouts).
+        """后台观测用户消息：双层 LLM 评估 + 计算栈更新 + 记忆维护。
 
-        Level 1 (fast): runs on every message, small model, 1.5s timeout.
-        Level 2 (main): runs only when gate routes to "full", strong model, 3s timeout.
+        Level 1（快速）：每条消息都运行，小模型，1.5s 超时。
+        Level 2（主评估）：仅在门控路由到 "full" 时运行，强模型，3s 超时。
 
-        Results are merged (main overrides fast) and passed to the computation
-        spine to modulate Void-Scar state precisely. If both time out, the
-        spine uses HDC coarse judgment only.
+        结果合并后（主评估覆盖快速评估）传入计算栈，精确调制 Void-Scar 状态。
+        若两者都超时，计算栈使用 HDC 粗粒度判断。
+
+        Args:
+            session_key: 会话标识。
+            text: 用户消息文本。
         """
         p = self._p
         from sylanne_alpha.host import SylanneAlphaHostEvent
@@ -558,7 +762,7 @@ class LLMRequestPipeline:
             fast_result: dict = {}
             main_result: dict = {}
 
-            # Fast assessor (always runs if enabled)
+            # 快速评估器（始终运行，若启用）
             fast_enabled = p._cfg_bool("sylanne_alpha_assessor_llm_enabled")
             if fast_enabled and text:
                 fast_result = await p._async_assessor.assess_fast(
@@ -566,7 +770,7 @@ class LLMRequestPipeline:
                     self._assessor_llm_call,
                 )
 
-            # Determine if main assessor should run
+            # 判断是否需要运行主评估器
             host = p._host(session_key)
             main_enabled = p._cfg_bool("sylanne_alpha_main_assessor_enabled")
             if main_enabled and text:
@@ -578,13 +782,13 @@ class LLMRequestPipeline:
                     self._main_assessor_llm_call,
                 )
 
-            # Merge: main overrides fast
+            # 合并结果：主评估覆盖快速评估
             assessment = {**fast_result, **main_result}
-            # Remove internal metadata
+            # 移除内部元数据
             assessment.pop("_level", None)
             assessment.pop("assessed_at", None)
 
-            # Feed into computation spine with assessment
+            # 将评估结果注入计算栈
             now = time.time()
             event = SylanneAlphaHostEvent(
                 text=text,
@@ -595,12 +799,12 @@ class LLMRequestPipeline:
             )
             host.on_request(event, assessment=assessment if assessment else None)
 
-            # Sync personality drift to AstrBot PersonaManager after computation
+            # 将人格漂移同步到 AstrBot PersonaManager
             if p._has_persona_manager():
                 p._sync_personality_to_persona_mgr(session_key)
             # PLACEHOLDER_BACKGROUND_OBSERVE_PART2
 
-            # Capture computation log for WebUI real-time display
+            # 捕获计算日志供 WebUI 实时展示
             try:
                 comp_result = (
                     getattr(host.kernel, "_last_computation_result", None) or {}
@@ -668,23 +872,23 @@ class LLMRequestPipeline:
                 pass  # Never let logging break the main path
             # PLACEHOLDER_BACKGROUND_OBSERVE_PART3
 
-            # Rhythm learning: observe user message timing for adaptive segmentation
+            # 节奏学习：观测用户消息时间间隔，用于自适应分段参数
             engine_obs = host.kernel.computation.engine.observe()
             p._rhythm_learner.observe_user_message(session_key, text, now, engine_obs)
 
-            # Memory maintenance: v2 conversation buffer + decay + compress
+            # 记忆维护：v2 对话缓冲 + 衰减 + 压缩
             _current_warmth = host.kernel.computation.engine.observe().get(
                 "warmth", 0.0
             )
             memory_system = p._memory_system_for_session(session_key)
 
-            # Append user message to conversation buffer (v2: no direct write)
+            # 将用户消息追加到对话缓冲区（v2：不直接写入记忆层）
             from sylanne_alpha.memory_system import ConversationBuffer
 
             buf = p._conversation_buffers.setdefault(
                 session_key, ConversationBuffer(session_key=session_key)
             )
-            # Group chat: inject shadow buffer (observed context) before user message
+            # 群聊：在用户消息前注入影子缓冲区（旁观到的群聊上下文）
             _is_group = p._social_field.is_group_context_by_key(session_key)
             _group_id = (
                 p._social_field.extract_group_id_from_key(session_key)
@@ -708,31 +912,31 @@ class LLMRequestPipeline:
             p._last_user_texts[session_key] = text[:120]
             p._schedule_buffer_persist(session_key)
 
-            # Parallel sync to AstrBot ConversationManager
+            # 并行同步到 AstrBot ConversationManager
             if p._has_conversation_manager():
-                _safe_ensure_future(
+                safe_ensure_future(
                     p._sync_message_to_conv_mgr(session_key, "user", text),
                     name="conv_mgr_sync_user",
                 )
 
-            # Tick decay still runs per-message
+            # 每条消息都执行衰减 tick
             memory_system.tick_decay()
 
-            # 30-day L2->L3 compression check
+            # 30 天 L2→L3 压缩检查（将过期记忆提取为知识图谱三元组）
             to_compress = memory_system.compress_check()
             if to_compress:
-                _safe_ensure_future(
+                safe_ensure_future(
                     self._compress_memories(session_key, to_compress),
                     name="compress_memories",
                 )
 
-            # Persist memory state periodically (every 10 ticks)
+            # 定期持久化记忆状态（每 10 个 tick）
             host.kernel.body.memory["_memory_system"] = memory_system.to_dict()
             await p._persist_kernel(session_key, host)
             if memory_system._tick % 10 == 0:
                 await p._save_sylanne_memory_state(session_key, memory_system)
         except Exception as e:
-            # Fallback: observe without assessment
+            # 兜底：评估失败时仍然执行基本观测
             logger.warning(f"Sylanne memory maintenance: {e}", exc_info=True)
             try:
                 await p.observe_request(
@@ -750,7 +954,12 @@ class LLMRequestPipeline:
     # ------------------------------------------------------------------
 
     async def _compress_memories(self, session_key: str, items: list) -> None:
-        """Background: use LLM to extract entities from decayed memories into L3 graph."""
+        """后台任务：使用 LLM 从衰减记忆中提取实体三元组，写入 L3 知识图谱。
+
+        Args:
+            session_key: 会话标识。
+            items: 待压缩的 L2 记忆条目列表。
+        """
         p = self._p
         try:
             memory_system = p._memory_system_for_session(session_key)
@@ -792,7 +1001,17 @@ class LLMRequestPipeline:
     # ------------------------------------------------------------------
 
     async def _flush_conversation_to_l1(self, session_key: str) -> None:
-        """Drain conversation buffer, summarize via LLM, write summary to L1."""
+        """排空对话缓冲区，通过 LLM 生成摘要，写入 L1 短期记忆层。
+
+        流程：
+          1. 从缓冲区取出所有消息
+          2. 调用 LLM 生成对话摘要（不超过 200 字）
+          3. 若摘要过长，迭代压缩（最多 3 轮）
+          4. 写入 L1 并可选生成 embedding
+
+        Args:
+            session_key: 会话标识。
+        """
         p = self._p
 
         try:
@@ -950,7 +1169,12 @@ class LLMRequestPipeline:
     # ------------------------------------------------------------------
 
     async def _run_consolidation(self, session_key: str, memory_system: Any) -> None:
-        """执行 12h 整理：生成摘要、确认、嵌入、下沉到 L2。"""
+        """执行 12 小时整理周期：生成摘要 → 确认重要条目 → 嵌入 → 下沉到 L2。
+
+        Args:
+            session_key: 会话标识。
+            memory_system: 该会话的记忆系统实例。
+        """
         p = self._p
         try:
             l1_items = list(memory_system._l1)
@@ -1033,7 +1257,15 @@ class LLMRequestPipeline:
     async def _reconsolidation_rewrite(
         self, session_key: str, memory_system: Any
     ) -> None:
-        """Reconsolidation v2: 对召回的 L2 条目用当前情绪重写。"""
+        """再巩固 v2：用当前情绪基调轻微改写已召回的 L2 记忆条目。
+
+        模拟人类记忆的再巩固效应——每次回忆都会被当前情绪微调。
+        每条记忆最多改写 20 次，防止过度漂移。
+
+        Args:
+            session_key: 会话标识。
+            memory_system: 该会话的记忆系统实例。
+        """
         p = self._p
         try:
             recalled_items = memory_system.get_recalled_l2_items()
@@ -1074,7 +1306,14 @@ class LLMRequestPipeline:
     # ------------------------------------------------------------------
 
     def _recent_context_lines(self, session_key: str) -> list[str]:
-        """Get recent conversation lines for main assessor context."""
+        """获取最近的对话上下文行，供主评估器参考。
+
+        Args:
+            session_key: 会话标识。
+
+        Returns:
+            最近 3 条记忆痕迹的文本列表。
+        """
         p = self._p
         host = p._host(session_key)
         traces = host.kernel.body.memory.get("traces", [])
@@ -1090,9 +1329,15 @@ class LLMRequestPipeline:
     # ------------------------------------------------------------------
 
     async def _assessor_llm_call(self, prompt: str) -> str:
-        """Call configured LLM provider for fast semantic assessment.
+        """调用配置的 LLM provider 执行快速语义评估。
 
-        Uses max_tokens=50 and temperature=0 for fast, deterministic output.
+        使用 max_tokens=50、temperature=0 确保输出快速且确定性。
+
+        Args:
+            prompt: 评估 prompt 文本。
+
+        Returns:
+            LLM 返回的文本，失败返回空字符串。
         """
         p = self._p
         provider_id = str(
@@ -1128,9 +1373,15 @@ class LLMRequestPipeline:
             return ""
 
     async def _main_assessor_llm_call(self, prompt: str) -> str:
-        """Call configured LLM provider for main (deep) semantic assessment.
+        """调用配置的 LLM provider 执行主（深度）语义评估。
 
-        Uses a stronger model with slightly more tokens allowed.
+        使用更强的模型，允许更多 token 输出。
+
+        Args:
+            prompt: 评估 prompt 文本。
+
+        Returns:
+            LLM 返回的文本，失败返回空字符串。
         """
         p = self._p
         provider_id = str(
@@ -1170,7 +1421,16 @@ class LLMRequestPipeline:
     # ------------------------------------------------------------------
 
     async def _summarizer_llm_call(self, prompt: str) -> str:
-        """Call LLM for summarization. No token limit -- let the model generate freely."""
+        """调用 LLM 执行摘要生成，不限制 token 数量。
+
+        带重试机制（最多 2 次），确保摘要质量。
+
+        Args:
+            prompt: 摘要 prompt 文本。
+
+        Returns:
+            LLM 生成的摘要文本，失败返回空字符串。
+        """
         p = self._p
         provider_id = str(
             p._config.get("sylanne_alpha_main_assessor_provider_id")
@@ -1214,7 +1474,7 @@ class LLMRequestPipeline:
     # ------------------------------------------------------------------
 
     async def _life_sim_llm_call(self, prompt: str) -> str:
-        """Call configured LLM provider for life simulation inference."""
+        """生命模拟器的 LLM 回调：调用配置的 provider 进行生命事件推理。"""
         p = self._p
         provider_id = str(
             p._config.get("sylanne_alpha_life_simulation_provider_id") or ""
@@ -1236,14 +1496,16 @@ class LLMRequestPipeline:
     # PLACEHOLDER_LIFE_SIM_OUTREACH
 
     async def _life_sim_outreach(self, reason: str, mood: str) -> None:
-        """Store life event as pending outreach context for next LLM call.
+        """将生命事件存储为待注入上下文，等待下次 LLM 请求时自然表达。
 
-        Instead of sending raw life event text directly, we store it so the
-        next on_llm_request injects it as context -- letting the main chat
-        model express it in Sylanne's voice.
+        设计思路：
+          - 不直接发送生命事件文本，而是存储为 pending context
+          - 下次 on_llm_request 时注入到 prompt 中，让主聊天模型用 Sylanne 的语气表达
+          - 若 5 分钟内无 LLM 请求，回退到直接发送（通过 context.send_message）
 
-        If no LLM request comes within a reasonable window, fall back to
-        direct send via context.send_message (if available).
+        Args:
+            reason: 生命事件描述。
+            mood: 当前心情标签。
         """
         p = self._p
         if not p._hosts:
@@ -1297,7 +1559,7 @@ class LLMRequestPipeline:
                         "Sylanne life_sim_outreach fallback: context.send_message not available"
                     )
 
-        task = _safe_ensure_future(
+        task = safe_ensure_future(
             _fallback_direct_send(best_key, reason, mood),
             name="life_sim_outreach_fallback",
         )
@@ -1311,7 +1573,15 @@ class LLMRequestPipeline:
     # PLACEHOLDER_GENERATE_OUTREACH
 
     async def _generate_outreach_message(self, reason: str, mood: str) -> str:
-        """Use LLM to generate an in-character outreach message from life event."""
+        """使用 LLM 生成角色内的主动联系消息。
+
+        Args:
+            reason: 生命事件描述。
+            mood: 当前心情标签。
+
+        Returns:
+            生成的消息文本（最多 200 字），失败返回空字符串。
+        """
         p = self._p
         provider_id = str(
             p._config.get("sylanne_alpha_life_simulation_provider_id") or ""
@@ -1338,7 +1608,11 @@ class LLMRequestPipeline:
             return ""
 
     def _life_sim_emotion(self) -> dict[str, float]:
-        """Get emotion state from the most recently active host's computation spine."""
+        """获取最近活跃 host 的情感状态，供生命模拟器参考。
+
+        Returns:
+            情感状态字典（warmth/tension/coherence 等），无活跃 host 返回空字典。
+        """
         p = self._p
         if not p._hosts:
             return {}

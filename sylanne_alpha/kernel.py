@@ -1,3 +1,27 @@
+"""计算核心调度器模块。
+
+AlphaKernel 是 Sylanne-Embodiment 的中枢调度器，驱动 7 层计算管线：
+1. 身体状态演化（body.apply）
+2. 人格漂移（personality drift）
+3. 道德修复层（moral repair）
+4. 可错性层（fallibility）
+5. 关系时间层（relational time）
+6. 决策层（_decide）
+7. 守卫层（_guard）
+
+核心职责：
+- tick(): 接收事件，驱动完整管线，返回 surface（对外可见的状态快照）
+- surface(): 生成当前状态的完整对外表示
+- snapshot(): 生成可持久化的完整内部状态
+- _integrated_self(): 生成自我整合仲裁结果（决定 response posture/allowed actions）
+
+与其他组件的关系：
+- SylanneAlphaHost 持有一个 AlphaKernel 实例
+- ComputationSpine 负责 Void-Scar Engine / HDC / HGT 等底层计算
+- prompt_surface 模块负责将 kernel 状态渲染为 prompt fragment
+- personality 模块负责人格特质的初始化和漂移
+"""
+
 from __future__ import annotations
 
 from dataclasses import dataclass, field
@@ -17,6 +41,7 @@ from .prompt_surface import (
 )
 from .workset import build_fragment_workset
 
+# 各 alpha 层的 schema 版本标识，用于前向兼容检查
 SCHEMA_RELATIONAL_TIME_VERSION = "sylanne.alpha.relational_time.v1"
 SCHEMA_INTEGRATED_SELF_VERSION = "sylanne.alpha.integrated_self.v1"
 SCHEMA_AFFECT_DYNAMICS_VERSION = "sylanne.alpha.affect_dynamics.v1"
@@ -28,6 +53,12 @@ SCHEMA_PROACTIVE_SOURCE_VERSION = "sylanne.alpha.proactive_source.v1"
 
 @dataclass(slots=True)
 class AlphaKernelEvent:
+    """Kernel 层事件数据类。
+
+    由 host 层的 SylanneAlphaHostEvent 转换而来，
+    包含 kernel tick 所需的全部输入信息。
+    """
+
     text: str = ""
     values: dict[str, float] = field(default_factory=dict)
     confidence: float = 0.0
@@ -38,6 +69,18 @@ class AlphaKernelEvent:
 
 @dataclass(slots=True)
 class AlphaKernel:
+    """Sylanne-Embodiment 计算核心调度器。
+
+    持有身体状态、人格、道德修复、可错性等全部内部状态，
+    通过 tick() 方法驱动完整的 7 层计算管线。
+
+    生命周期：
+    - boot(): 从零或旧版数据创建新 kernel
+    - restore(): 从持久化快照恢复 kernel
+    - tick(): 接收事件，驱动管线，返回 surface
+    - snapshot(): 导出可持久化的完整状态
+    """
+
     session_key: str
     body: AlphaBodyState = field(default_factory=AlphaBodyState)
     audit: dict[str, Any] = field(default_factory=dict)
@@ -57,6 +100,7 @@ class AlphaKernel:
     def boot(
         cls, session_key: str, legacy: dict[str, Any] | None = None
     ) -> "AlphaKernel":
+        """从零创建或从旧版数据迁移创建 kernel。"""
         if legacy is None:
             return cls(session_key=session_key)
         body, audit, turns = import_legacy_body(legacy)
@@ -64,6 +108,7 @@ class AlphaKernel:
 
     @classmethod
     def restore(cls, snapshot: dict[str, Any]) -> "AlphaKernel":
+        """从持久化快照恢复 kernel，对每个字段做类型安全的反序列化。"""
         kernel = cls(
             session_key=str(snapshot.get("session_key") or "default"),
             body=AlphaBodyState.from_dict(
@@ -127,6 +172,24 @@ class AlphaKernel:
         event: AlphaKernelEvent | dict[str, Any] | None = None,
         assessment: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
+        """驱动完整的 7 层计算管线。
+
+        执行顺序：
+        1. body.apply() — 身体状态向量演化
+        2. computation.process() — Void-Scar Engine / HDC / HGT 计算
+        3. _evolve_alpha_layers() — 人格漂移 + 道德修复 + 可错性
+        4. 更新 relational_time — 关系时间层
+        5. _decide() — 基于需求的行动决策
+        6. _guard() — 安全守卫（主权/预算/风险检查）
+        7. surface() — 生成对外可见的状态快照
+
+        Args:
+            event: 输入事件（AlphaKernelEvent 或原始字典）
+            assessment: 可选的 LLM assessor 评估结果
+
+        Returns:
+            包含 state/decision/guard/surface 的结果字典
+        """
         event = self._event(event)
         self.body.apply(
             text=event.text,
@@ -167,6 +230,7 @@ class AlphaKernel:
         }
 
     def surface(self) -> dict[str, Any]:
+        """生成当前状态的完整对外表示（供 WebUI / prompt injection 使用）。"""
         decision = self.last_decision or self._decide()
         guard = self.last_guard or self._guard(decision)
         workset = self._workset(decision, guard)
@@ -183,6 +247,7 @@ class AlphaKernel:
         }
 
     def snapshot(self) -> dict[str, Any]:
+        """导出可持久化的完整内部状态（供 AlphaRuntime 序列化到磁盘）。"""
         return {
             "schema_version": SCHEMA_VERSION,
             "session_key": self.session_key,
@@ -287,6 +352,11 @@ class AlphaKernel:
         }
 
     def _evolve_alpha_layers(self, event: AlphaKernelEvent) -> None:
+        """演化 alpha 层：人格漂移 + 道德修复状态 + 可错性状态。
+
+        人格漂移受 Embodiment 计算脊柱的约束（如果可用）。
+        道德修复和可错性根据事件标志和置信度更新计数器和约束。
+        """
         # Drift Sylanne traits (fast, text-based) with Embodiment bounds from computation spine
         embodiment = (
             self.computation._embodiment_traits
@@ -500,6 +570,12 @@ class AlphaKernel:
     def _integrated_self(
         self, decision: dict[str, Any], guard: dict[str, Any]
     ) -> dict[str, Any]:
+        """生成自我整合仲裁结果。
+
+        综合 body 状态、guard 结果、关系记忆、影子记忆，
+        决定当前的 response_posture（姿态）、allowed_actions、blocked_actions、
+        intent_plan（意图计划）等，供 prompt injection 使用。
+        """
         vector = self._vector_summary()
         risk_score = max(float(guard.get("risk_score") or 0.0), vector["risk"])
         flags = set(self.last_event.get("flags", []))
@@ -635,6 +711,11 @@ class AlphaKernel:
     def _relational_time_layer(
         self, *, current: dict[str, Any], previous: dict[str, Any]
     ) -> dict[str, Any]:
+        """关系时间层：计算两次事件之间的时间间隔和日期关系。
+
+        生成人类可读的时间标签（刚刚/刚才/隔了一阵/隔天/隔了很久）
+        和跨天判断，供 prompt context 使用。
+        """
         current_time = self._event_time_payload(current)
         previous_time = self._event_time_payload(previous) if previous else {}
         gap_seconds = self._gap_seconds(current_time, previous_time)
@@ -715,6 +796,13 @@ class AlphaKernel:
             return value[:10] if len(value) >= 10 else ""
 
     def _vector_summary(self) -> dict[str, float]:
+        """从 29 维状态向量中提取 4 个关键摘要指标。
+
+        - vitality: 生命力（节律 + 循环）
+        - need: 最大需求强度
+        - risk: 最大风险指标（边界压力/耗竭/开放伤口）
+        - plasticity: 可塑性
+        """
         vector = self.body.state_vector()
         return {
             "vitality": round(
@@ -743,6 +831,11 @@ class AlphaKernel:
         }
 
     def _decide(self) -> dict[str, Any]:
+        """基于身体需求的行动决策。
+
+        优先级从高到低：
+        repair > withdraw > reach_out > express > explore > wait
+        """
         needs = self.body.needs
         proactive = "proactive" in self.last_event.get("flags", [])
         action = "wait"
@@ -796,6 +889,18 @@ class AlphaKernel:
         )
 
     def _guard(self, decision: dict[str, Any]) -> dict[str, Any]:
+        """安全守卫层：检查是否允许执行 decision 中的行动。
+
+        阻止条件（任一满足即 allowed=False）：
+        - 用户暂停 (paused)
+        - 主权过低 (sovereignty < 0.5)
+        - 主动发言未获 opt-in
+        - 冷却中
+        - 中断预算耗尽
+        - 风险过高 (risk > 0.85)
+        - 边界免疫过高 (boundary_pressure > 0.85)
+        - 耗竭过高 (exhaustion > 0.8)
+        """
         flags: list[str] = []
         allowed = True
         reason = decision["reason"]

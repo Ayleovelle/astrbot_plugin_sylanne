@@ -1,7 +1,16 @@
-"""Sylanne-Embodiment 4.0 alpha -- thin host layer for AstrBot plugin.
+"""Sylanne-Embodiment -- AstrBot 插件主入口模块。
 
-This module replaces the old 3.x EmotionalStatePlugin with a minimal host
-that delegates all body/kernel/memory logic to sylanne_alpha/.
+本模块是 Sylanne 情感身体运行时的 AstrBot 插件薄宿主层，职责：
+1. 继承 AstrBot Star 基类，注册为 AstrBot 插件
+2. 初始化所有子系统（kernel/host/memory/assessor/scheduler/webui 等）
+3. 注册 LLM 请求/响应事件钩子，在 LLM 管线中注入情感状态
+4. 注册 WebUI 路由，提供 dashboard/API 访问
+5. 通过委托模式将大量公共 API 方法分发到子对象
+
+架构说明：
+- 实际计算逻辑在 sylanne_alpha/ 子包中
+- 本模块主要是胶水代码：事件钩子 → 子系统调用 → 状态持久化
+- 大量方法是一行 return 委托到子对象的 stub（不需要注释）
 """
 
 from __future__ import annotations
@@ -24,7 +33,7 @@ from pathlib import Path  # noqa: E402
 from typing import Any  # noqa: E402
 
 # ---------------------------------------------------------------------------
-# AstrBot imports -- graceful fallback when astrbot is not installed
+# AstrBot imports -- 优雅降级：当 astrbot 未安装时提供 stub 实现
 # ---------------------------------------------------------------------------
 try:
     from astrbot.api import logger  # type: ignore  # noqa: E402
@@ -35,6 +44,7 @@ try:
     )
     from astrbot.api.message_components import Plain  # type: ignore  # noqa: E402
     from astrbot.api.star import Context, Star, register  # type: ignore  # noqa: E402
+    from astrbot.core.utils.astrbot_path import get_astrbot_data_path  # type: ignore  # noqa: E402
 except ImportError:
     import logging as _logging  # noqa: E402
 
@@ -64,6 +74,17 @@ except ImportError:
                 return func
 
             return decorator
+
+        def event_message_type(self, *args, **kwargs):
+            def decorator(func):
+                return func
+
+            return decorator
+
+        class EventMessageType:
+            ALL = "all"
+            PRIVATE_MESSAGE = "private"
+            GROUP_MESSAGE = "group"
 
     filter = _FakeFilter()  # type: ignore
 
@@ -95,9 +116,12 @@ except ImportError:
 
         return decorator
 
+    def get_astrbot_data_path() -> Path:  # type: ignore
+        return Path.home()
+
 
 # ---------------------------------------------------------------------------
-# Sylanne alpha imports
+# Sylanne alpha 子包导入
 # ---------------------------------------------------------------------------
 from sylanne_alpha import webui_server as _sylanne_webui_server  # noqa: E402
 from sylanne_alpha.assessor_async import AsyncAssessor  # noqa: E402
@@ -123,22 +147,21 @@ from sylanne_alpha.realtime_dispatch import RealtimeDispatch  # noqa: E402
 from sylanne_alpha.background_queue import BackgroundPostQueue  # noqa: E402
 from sylanne_alpha.webui_routes import WebUIRoutes  # noqa: E402
 
-# Load WebUI HTML from pages/dashboard or inline fallback
-_webui_dashboard_path = Path(_PLUGIN_DIR) / "pages" / "dashboard" / "index.html"
+# 加载 WebUI dashboard HTML（从 UI/index.html）
+_webui_dashboard_path = Path(_PLUGIN_DIR) / "UI" / "index.html"
 if _webui_dashboard_path.exists():
     WEBUI_HTML = _webui_dashboard_path.read_text(encoding="utf-8")
 else:
     WEBUI_HTML = "<html><body><h1>Sylanne Dashboard unavailable</h1></body></html>"
 
-# AstrBot hot-upload can re-import main.py while keeping sylanne_alpha submodules
-# in sys.modules. Force-reload the WebUI server so listener fixes are applied
-# without needing shell access to restart the whole AstrBot process.
+# AstrBot 热重载时可能重新 import main.py 但保留 sylanne_alpha 子模块，
+# 强制 reload WebUI server 模块以确保监听器修复被应用
 _sylanne_webui_server = importlib.reload(_sylanne_webui_server)
 start_webui_background = _sylanne_webui_server.start_webui_background
 stop_webui_server = _sylanne_webui_server.stop_webui_server
 
 # ---------------------------------------------------------------------------
-# Constants
+# 常量定义
 # ---------------------------------------------------------------------------
 PLUGIN_NAME = "astrbot_plugin_sylanne"
 PUBLIC_API_VERSION = "1.0"
@@ -153,22 +176,7 @@ _INTERNAL_LLM_CALL: contextvars.ContextVar[bool] = contextvars.ContextVar(
 PROACTIVE_SCHEDULER_WAKE_DELAY_SECONDS = 30.0
 PROACTIVE_SCHEDULER_IDLE_DELAY_SECONDS = 1800.0
 
-
-def _safe_ensure_future(coro: Any, name: str = "task") -> "asyncio.Task[Any]":
-    """Wrap a coroutine in ensure_future with exception logging.
-
-    Prevents fire-and-forget tasks from silently dropping exceptions.
-    """
-
-    async def _wrapper() -> None:
-        try:
-            await coro
-        except asyncio.CancelledError:
-            pass
-        except Exception as e:
-            logger.error(f"Background task '{name}' failed: {e}", exc_info=True)
-
-    return asyncio.ensure_future(_wrapper())
+from sylanne_alpha.utils import safe_ensure_future  # noqa: E402, F401
 
 
 _REQUIRED_EMOTION_SERVICE_METHODS = (
@@ -237,7 +245,10 @@ _EMOTION_SERVICE_EXPECTED_VERSIONS = {
 
 
 def get_emotional_state_plugin(context: Any) -> Any:
-    """Retrieve the registered plugin instance from AstrBot context."""
+    """从 AstrBot context 中获取已注册的 Sylanne 插件实例。
+
+    验证插件的 API 版本和必需方法是否完整，不完整则返回 None。
+    """
     star_context = getattr(context, "star_context", None)
     if isinstance(star_context, dict) and PLUGIN_NAME in star_context:
         return star_context[PLUGIN_NAME]
@@ -264,7 +275,7 @@ def get_emotional_state_plugin(context: Any) -> Any:
 
 
 # ---------------------------------------------------------------------------
-# StateInjectionBudget -- tracks what was injected/skipped per request
+# StateInjectionBudget -- 跟踪每次 LLM 请求中注入/跳过了哪些状态片段
 # ---------------------------------------------------------------------------
 class _StateInjectionBudget:
     __slots__ = (
@@ -296,16 +307,36 @@ class _StateInjectionBudget:
 
 
 # ---------------------------------------------------------------------------
-# EmotionalStatePlugin -- Sylanne 4.0 alpha thin host
+# EmotionalStatePlugin -- Sylanne-Embodiment 薄宿主层
 # ---------------------------------------------------------------------------
 @register(
     "astrbot_plugin_sylanne",
     "Aylovelle.S.S",
-    "Sylanne 4.0 alpha: sovereign emotional body runtime.",
-    "4.0.0-Sylanne_Embodiment",
+    "Sylanne-Embodiment: sovereign emotional body runtime.",
+    "1.3.0",
     "https://github.com/Ayleovelle/astrbot_plugin_sylanne",
 )
 class EmotionalStatePlugin(Star):
+    """Sylanne-Embodiment 情感身体运行时插件。
+
+    继承 AstrBot Star 基类，作为 AstrBot 插件运行。
+    通过事件钩子（on_llm_request/on_llm_response）在 LLM 管线中
+    注入情感状态上下文，实现「有身体感的 AI」。
+
+    核心子系统（在 __init__ 中初始化）：
+    - _hosts: 会话→宿主映射（每个会话一个 SylanneAlphaHost）
+    - _async_assessor: 异步 LLM 评估器（评估用户文本的情感维度）
+    - _llm_request_pipeline: LLM 请求管线（注入状态到 prompt）
+    - _llm_response_pipeline: LLM 响应管线（从回复中提取信号）
+    - _proactive_scheduler: 主动发言调度器
+    - _social_field: 社交场收集器（群聊氛围感知）
+    - _life_simulator: 生命模拟器（idle 时的自主状态演化）
+    - _webui_routes: WebUI 路由处理器
+    - _webui_lifecycle: WebUI 服务器生命周期管理
+    - _memory_systems: 会话→三层记忆系统映射
+    - _public_api: 对外公共 API 门面
+    """
+
     emotion_api_version = "1.0"
     emotion_schema_version = "astrbot.emotion_state.v2"
     emotion_memory_schema_version = "astrbot.emotion_memory.v1"
@@ -323,30 +354,41 @@ class EmotionalStatePlugin(Star):
         super().__init__(context)
         self.config = config or {}
         self._config = self.config
+        # 会话管理：session_key → SylanneAlphaHost 映射
         self._hosts: BoundedDict = BoundedDict(maxsize=200)
         self._background_tasks: list[asyncio.Task] = []
+        # 流式回复相关缓冲区
         self._unfinished_replies: BoundedDict = BoundedDict(maxsize=200)
         self._stream_buffers: BoundedDict = BoundedDict(maxsize=200)
         self._stream_first_sent: BoundedDict = BoundedDict(maxsize=200)
         self._segmented_tasks: BoundedDict = BoundedDict(maxsize=200)
+        # 请求/响应诊断缓存
         self._last_request_budgets: BoundedDict = BoundedDict(maxsize=200)
         self._last_understanding_closed_loop: BoundedDict = BoundedDict(maxsize=200)
         self._last_bot_expression_time: BoundedDict = BoundedDict(maxsize=200)
+        # 计算日志环形缓冲区（供 WebUI 实时显示）
         self._computation_logs: collections.deque = collections.deque(maxlen=200)
+        # WebUI 运行时标识（用于探针验证实例一致性）
         self._webui_runtime_id = f"{int(time.time() * 1000)}-{id(self):x}"
+        # 节律学习器：学习用户的交互节奏
         self._rhythm_learner = RhythmLearner(intimacy_threshold=0.6)
         self.logger = logger
+        # 生命模拟器：idle 时自主演化身体状态
         self._life_simulator = LifeSimulator(config=self._config)
         self._life_simulator_started = False
+        # 三层记忆系统：session_key → MemorySystem 映射
         self._memory_systems: BoundedDict = BoundedDict(maxsize=100)
+        # 对话缓冲区：用于 flush 到 L1 记忆池
         self._conversation_buffers: BoundedDict = BoundedDict(maxsize=100)
         self._meltdown_nonces: BoundedDict = BoundedDict(maxsize=50, ttl=300)
         self._last_user_texts: BoundedDict = BoundedDict(maxsize=200)
         self._last_bot_texts: BoundedDict = BoundedDict(maxsize=200)
+        # 社交场收集器：群聊氛围感知
         self._social_field = SocialFieldCollector(config=self._config)
         self._conversation_input_epoch: BoundedDict = BoundedDict(maxsize=200)
         self._last_request_text: BoundedDict = BoundedDict(maxsize=200)
         self._user_message_withdrawals: BoundedDict = BoundedDict(maxsize=200)
+        # 后台投递队列：异步发送主动消息/分段回复
         self._background_post_queues: BoundedDict = BoundedDict(maxsize=200)
         self._background_post_dead_letters: BoundedDict = BoundedDict(maxsize=200)
         self._background_post_sequence: BoundedDict = BoundedDict(maxsize=200)
@@ -360,6 +402,7 @@ class EmotionalStatePlugin(Star):
         self._pending_outreach_context: BoundedDict = BoundedDict(maxsize=50)
         self._amnesia_sessions: set[str] = set()
         self._proactive_candidate_sessions: BoundedDict = BoundedDict(maxsize=100)
+        self._last_user_message_time: BoundedDict = BoundedDict(maxsize=200)
         self._sylanne_memory_cache: BoundedDict = BoundedDict(maxsize=200)
         self._conversation_pending_response_epochs: BoundedDict = BoundedDict(
             maxsize=200
@@ -371,31 +414,51 @@ class EmotionalStatePlugin(Star):
             maxsize=200
         )
         self._realtime_chat_active_dispatches: BoundedDict = BoundedDict(maxsize=200)
-        self._session_locks: BoundedDict = BoundedDict(maxsize=200)
+        self._session_locks: dict[str, asyncio.Lock] = {}
+        # 子系统初始化：各子系统持有 self 引用，通过委托模式分工
         self._session_ctx = SessionContext(self)
         self._state_persistence = StatePersistence(self)
         self._realtime_dispatch = RealtimeDispatch(self)
         self._background_queue = BackgroundPostQueue(self)
         self._webui_routes = WebUIRoutes(self)
         self._memory_system = self._memory_system_for_session("default")
+        # 异步评估器：调用 LLM 评估用户文本的情感维度
         self._async_assessor = AsyncAssessor(config=self._config)
         self._llm_response_pipeline = LLMResponsePipeline(self)
         self._llm_request_pipeline = LLMRequestPipeline(self)
         self._public_api = PublicAPI(self)
+        # 主动发言调度器：基于身体需求和节律决定是否主动发言
         self._proactive_scheduler = ProactiveScheduler(self)
         self._register_web_apis(context)
 
-        # AstrBot ConversationManager / PersonaManager integration
+        # AstrBot ConversationManager / PersonaManager 集成
         self._conv_mgr = self._init_conversation_manager()
         self._persona_mgr = self._init_persona_manager()
 
         self._load_config_defaults()
+        # WebUI 生命周期管理：先强杀旧监听器（解决热更新时旧实例残留问题），再启动新的
+        # 这确保用户热更新插件时不会出现 'object has no attribute' 错误
+        try:
+            import asyncio as _aio
+            loop = _aio.get_event_loop()
+            if loop.is_running():
+                loop.create_task(stop_webui_server())
+            else:
+                loop.run_until_complete(stop_webui_server())
+        except Exception:
+            pass
         self._webui_lifecycle = _sylanne_webui_server.WebUILifecycle(self)
         self._webui_lifecycle.publish_active_plugin()
         self._webui_lifecycle.start_if_enabled()
         self._webui_lifecycle.schedule_listener_takeover()
 
     def _register_web_apis(self, context: Any) -> None:
+        """向 AstrBot 注册所有 WebUI HTTP 路由。
+
+        路由包括：observatory 状态、记忆设置、lineage 观测台、
+        dashboard 页面、状态 API、设置 API、计算日志、记忆池、
+        记忆清除、WebUI 探针、logo 资源等。
+        """
         if not hasattr(context, "register_web_api"):
             return
         P = PLUGIN_NAME
@@ -466,6 +529,24 @@ class EmotionalStatePlugin(Star):
                 wr.memory_meltdown_handler,
                 ["POST"],
                 "Sylanne-Embodiment memory meltdown (clear all)",
+            ),
+            (
+                f"/{P}/api/meltdown_nonce",
+                wr.meltdown_nonce_handler,
+                ["GET"],
+                "Sylanne-Embodiment meltdown nonce generator",
+            ),
+            (
+                f"/{P}/api/memory_sink",
+                wr.memory_sink_handler,
+                ["GET"],
+                "Sylanne memory L1→L2 manual sink",
+            ),
+            (
+                f"/{P}/api/memory_consolidate",
+                wr.memory_consolidate_handler,
+                ["POST"],
+                "Trigger memory consolidation evaluation",
             ),
             (
                 f"/{P}/api/webui_probe",
@@ -882,7 +963,7 @@ class EmotionalStatePlugin(Star):
         self, legacy: dict[str, Any], *, session_key: str
     ) -> dict[str, Any]:
         root = self._config.get("sylanne_alpha_root") or str(
-            Path.home() / ".sylanne_alpha"
+            get_astrbot_data_path() / "sylanne_alpha"
         )
         self._hosts[session_key] = SylanneAlphaHost(
             root=root, session_key=session_key, legacy=legacy
@@ -933,8 +1014,30 @@ class EmotionalStatePlugin(Star):
         host = self._host(session_key)
         return {"ok": True, "session_key": session_key, "turns": host.kernel.turns}
 
-    # on_llm_request hook
-    @filter.on_llm_request()
+    # -----------------------------------------------------------------------
+    # 消息事件监听：捕获所有消息（含未经 LLM 的），更新时间戳和节奏
+    # -----------------------------------------------------------------------
+
+    @filter.event_message_type(filter.EventMessageType.ALL)
+    async def on_message(self, event: Any):
+        """监听所有消息事件，更新 proactive scheduler 时间戳和节奏学习器。"""
+        try:
+            session_key = self._session_ctx.session_key(event)
+            now = time.time()
+            # 更新最后消息时间，供 proactive scheduler 计算沉默时长
+            self._last_user_message_time[session_key] = now
+            # 喂给节奏学习器（如果 host 已存在则更新，不触发懒创建）
+            if session_key in self._hosts:
+                host = self._hosts[session_key]
+                if hasattr(host, "kernel") and hasattr(host.kernel, "_rhythm_learner"):
+                    learner = host.kernel._rhythm_learner
+                    if learner is not None:
+                        learner.observe(now)
+        except Exception:
+            pass
+
+    # on_llm_request 钩子：在 LLM 请求发出前注入情感状态上下文
+    @filter.on_llm_request(desc="注入 Sylanne 情感计算上下文到 LLM prompt")
     async def on_llm_request(self, event: Any, request: Any) -> None:
         try:
             await self._on_llm_request_inner(event, request)
@@ -999,6 +1102,16 @@ class EmotionalStatePlugin(Star):
     async def _consolidation_loop(self) -> None:
         return await self._llm_request_pipeline._consolidation_loop()
 
+    async def _trigger_consolidation(self, session_key: str) -> None:
+        """手动触发一次 consolidation 评估（WebUI 按钮调用）。"""
+        mem_sys = self._memory_system_for_session(session_key)
+        if not mem_sys or not list(mem_sys._l1):
+            return
+        try:
+            await self._llm_request_pipeline._run_consolidation(session_key, mem_sys)
+        except Exception as e:
+            logger.warning(f"Manual consolidation failed: {e}")
+
     async def _run_consolidation(
         self, session_key: str, memory_system: MemorySystem
     ) -> None:
@@ -1039,8 +1152,8 @@ class EmotionalStatePlugin(Star):
     def _life_sim_emotion(self) -> dict[str, float]:
         return self._llm_request_pipeline._life_sim_emotion()
 
-    # on_llm_response hook -- segmented reply dispatch
-    @filter.on_llm_response()
+    # on_llm_response 钩子：在 LLM 回复后提取信号、更新状态、触发分段回复
+    @filter.on_llm_response(desc="处理 LLM 回复，更新情感状态和记忆")
     async def on_llm_response(self, event: Any, response: Any) -> None:
         try:
             await self._on_llm_response_inner(event, response)
@@ -1578,8 +1691,19 @@ class EmotionalStatePlugin(Star):
         )
 
     def _persona_profile(self, event: Any = None) -> dict[str, Any]:
-        name = str(self._config.get("sylanne_persona_name") or "")
-        version = str(self._config.get("sylanne_persona_version") or "")
+        name = str(self._config.get("sylanne_persona_name") or "Sylanne")
+        # 版本号从 metadata.yaml 读取，不依赖配置项
+        try:
+            import yaml
+            meta_path = Path(_PLUGIN_DIR) / "metadata.yaml"
+            if meta_path.exists():
+                with open(meta_path, "r", encoding="utf-8") as f:
+                    meta = yaml.safe_load(f) or {}
+                version = str(meta.get("version", ""))
+            else:
+                version = ""
+        except Exception:
+            version = ""
         return {"name": name, "version": version}
 
     def _observed_now(self) -> float:
@@ -2003,6 +2127,18 @@ class EmotionalStatePlugin(Star):
         return await self._proactive_scheduler.run_once()
 
     async def terminate(self) -> None:
+        """插件卸载/更新前的清理：必须先关闭 WebUI 独立服务器，再持久化状态。
+
+        不关闭 WebUI 会导致旧监听器继续用过期的路由对象处理请求，
+        更新插件后出现 'object has no attribute' 错误。
+        """
+        # 先停止独立 WebUI 服务器（释放端口、清除内存中的旧 HTML 缓存）
+        try:
+            await stop_webui_server()
+            logger.info("Sylanne WebUI: 独立服务器已在插件卸载前关闭")
+        except Exception as e:
+            logger.warning(f"Sylanne WebUI: 关闭服务器时出错: {e}")
+        # 再持久化运行时状态
         await self._state_persistence.terminate()
 
     async def _send_realtime_chat_plan(
@@ -2137,4 +2273,5 @@ class EmotionalStatePlugin(Star):
     # LLM Tool: query_agent_state
     @filter.llm_tool(name="query_agent_state")
     async def _llm_tool_query_agent_state(self, event: Any) -> Any:
+        """查询 Sylanne 当前情感状态和计算脊柱摘要。"""
         return await self._public_api._llm_tool_query_agent_state(event)

@@ -1,7 +1,18 @@
-"""Sylanne-Embodiment: Standalone WebUI Server.
+"""Sylanne-Embodiment: 独立 WebUI HTTP 服务器模块。
 
-Runs an independent HTTP server on a configurable port (default 2718).
-Not behind AstrBot's auth - direct access to the dashboard.
+在可配置端口（默认 2718）上运行独立的 HTTP 服务器，
+不依赖 AstrBot 的认证体系，通过 Bearer token 自行鉴权。
+
+架构设计：
+- 优先使用 aiohttp（异步，性能好）
+- 若 aiohttp 不可用，回退到 stdlib http.server（线程模式）
+- 通过 _plugin_access_lock 保证线程安全（stdlib 模式下多线程访问插件状态）
+- 支持热重载：AstrBot hot-upload 时自动接管旧监听器
+
+生命周期管理：
+- start_webui_background(): 启动后台任务
+- stop_webui_server(): 停止监听器
+- WebUILifecycle: 封装启动/停止/接管的完整生命周期逻辑
 """
 
 from __future__ import annotations
@@ -18,21 +29,53 @@ from types import ModuleType
 from typing import TYPE_CHECKING, Any
 from urllib.parse import parse_qs, urlparse
 
+from pathlib import Path
+
+try:
+    from astrbot.core.utils.astrbot_path import get_astrbot_data_path  # type: ignore
+except ImportError:
+
+    def get_astrbot_data_path() -> Path:  # type: ignore
+        return Path.home()
+
+
 if TYPE_CHECKING:
     pass
 
 logger = logging.getLogger(__name__)
 
+# 模块级全局状态：跨热重载保持监听器引用
+# 使用 globals().get() 是为了在 AstrBot hot-upload 重新 import 时保留已有值
 _server_task: asyncio.Task | None = globals().get("_server_task")
 _httpd: Any = globals().get("_httpd")
 _httpd_thread: threading.Thread | None = globals().get("_httpd_thread")
 _active_plugin: Any = globals().get("_active_plugin")
 _active_token: str = ""
 _meltdown_nonces: dict[str, str] = {}
+# 线程安全锁：stdlib HTTP server 的多线程 handler 访问插件状态时使用
+_plugin_access_lock = threading.Lock()
+
+# diagnostics 自动联动：有 /api/computation_logs 请求时开启，30s 无请求后关闭
+_last_diag_request: float = 0
+
+
+def _set_spine_diagnostics(plugin: Any, enabled: bool) -> None:
+    """安全地对所有活跃 host 的 computation spine 设置 diagnostics 开关。"""
+    hosts = getattr(plugin, "_hosts", None)
+    if hosts is None:
+        return
+    try:
+        values = hosts.values() if hasattr(hosts, "values") else []
+        for host in values:
+            spine = getattr(getattr(host, "kernel", None), "computation", None)
+            if spine is not None and hasattr(spine, "set_diagnostics"):
+                spine.set_diagnostics(enabled)
+    except Exception:
+        pass
 
 
 def _ensure_token(config: dict[str, Any]) -> str:
-    """Generate or retrieve the WebUI bearer token."""
+    """生成或获取 WebUI Bearer token，用于 API 鉴权。"""
     global _active_token
     token = str(config.get("sylanne_webui_token", "") or "")
     if not token:
@@ -43,7 +86,7 @@ def _ensure_token(config: dict[str, Any]) -> str:
 
 
 def _set_active_plugin(plugin: Any) -> None:
-    """Keep the standalone listener pointed at the newest plugin instance."""
+    """将独立监听器指向最新的插件实例（热重载时调用）。"""
     global _active_plugin
     _active_plugin = plugin
 
@@ -64,7 +107,11 @@ def _runtime_info(plugin: Any) -> dict[str, Any]:
 
 
 async def start_webui_server(plugin: Any, host: str = "127.0.0.1", port: int = 2718):
-    """Start standalone WebUI server in background."""
+    """启动独立 WebUI 服务器（aiohttp 版本）。
+
+    注册所有 API 路由，配置 Bearer token 中间件，
+    加载 dashboard HTML，然后无限循环直到被取消。
+    """
     _set_active_plugin(plugin)
     try:
         from aiohttp import web
@@ -86,9 +133,9 @@ async def start_webui_server(plugin: Any, host: str = "127.0.0.1", port: int = 2
             return web.json_response({"error": "unauthorized"}, status=401)
         return await handler(request)
 
-    # Serve the dashboard HTML from pages/dashboard/index.html
+    # Serve the dashboard HTML from UI/index.html
     plugin_root = Path(__file__).resolve().parent.parent
-    dashboard_path = plugin_root / "pages" / "dashboard" / "index.html"
+    dashboard_path = plugin_root / "UI" / "index.html"
     if dashboard_path.exists():
         dashboard_html = dashboard_path.read_text(encoding="utf-8")
         logger.info(
@@ -107,6 +154,11 @@ async def start_webui_server(plugin: Any, host: str = "127.0.0.1", port: int = 2
         )
 
     async def handle_state(request: web.Request) -> web.Response:
+        # 自动关闭 diagnostics：超过 30s 无 computation_logs 请求
+        if _last_diag_request and time.time() - _last_diag_request > 30:
+            current = _plugin(plugin)
+            if current is not None:
+                _set_spine_diagnostics(current, False)
         data = _build_state(
             _plugin(plugin), session=str(request.query.get("session", "") or "")
         )
@@ -171,6 +223,11 @@ async def start_webui_server(plugin: Any, host: str = "127.0.0.1", port: int = 2
         return web.json_response({"ok": True, "updated": updated})
 
     async def handle_computation_logs(request: web.Request) -> web.Response:
+        global _last_diag_request
+        _last_diag_request = time.time()
+        current = _plugin(plugin)
+        if current is not None:
+            _set_spine_diagnostics(current, True)
         try:
             limit = max(1, min(200, int(request.query.get("limit", "50"))))
         except (TypeError, ValueError):
@@ -255,6 +312,44 @@ async def start_webui_server(plugin: Any, host: str = "127.0.0.1", port: int = 2
         _meltdown_nonces[session] = nonce
         return web.json_response({"nonce": nonce})
 
+    async def handle_memory_sink(request: web.Request) -> web.Response:
+        """手动触发 L1→L2 记忆下沉（独立服务器版本）。"""
+        session = str(request.query.get("session", "") or "").strip()
+        if not session:
+            return web.json_response({"ok": False, "error": "missing session param"})
+        current_plugin = _plugin(plugin)
+        mem_getter = getattr(current_plugin, "_memory_system_for_session", None)
+        mem_sys = mem_getter(session) if callable(mem_getter) else getattr(current_plugin, "_memory_system", None)
+        if mem_sys is None:
+            return web.json_response({"ok": False, "error": "memory system unavailable"})
+        candidates = mem_sys.consolidation_candidates()
+        if not candidates:
+            return web.json_response({"ok": False, "error": "no_confirmed_items", "sunk": 0})
+        item_ids = [item.id for item in candidates]
+        mem_sys.sink_to_l2(item_ids)
+        logger.info(f"Sylanne MEMORY SINK (standalone): session={session}, sunk={len(item_ids)}")
+        return web.json_response({"ok": True, "sunk": len(item_ids)})
+
+    async def handle_memory_consolidate(request: web.Request) -> web.Response:
+        """POST /api/memory_consolidate — 触发后台 consolidation 评估。"""
+        try:
+            body = await request.json()
+        except Exception:
+            body = {}
+        session = str((body or {}).get("session", "")).strip()
+        if not session:
+            return web.json_response({"ok": False, "error": "missing session param"})
+        current_plugin = _plugin(plugin)
+        mem_getter = getattr(current_plugin, "_memory_system_for_session", None)
+        mem_sys = mem_getter(session) if callable(mem_getter) else getattr(current_plugin, "_memory_system", None)
+        if mem_sys is None or not list(mem_sys._l1):
+            return web.json_response({"ok": True, "estimated_seconds": 0})
+        try:
+            asyncio.ensure_future(current_plugin._trigger_consolidation(session))
+        except Exception as e:
+            return web.json_response({"ok": False, "error": str(e)})
+        return web.json_response({"ok": True, "estimated_seconds": 30})
+
     app.router.add_get("/", handle_page)
     app.router.add_get("/api/state", handle_state)
     app.router.add_get("/api/settings", handle_settings_get)
@@ -262,6 +357,8 @@ async def start_webui_server(plugin: Any, host: str = "127.0.0.1", port: int = 2
     app.router.add_get("/api/computation_logs", handle_computation_logs)
     app.router.add_get("/api/memory_pools", handle_memory_pools)
     app.router.add_get("/api/meltdown_nonce", handle_meltdown_nonce)
+    app.router.add_get("/api/memory_sink", handle_memory_sink)
+    app.router.add_post("/api/memory_consolidate", handle_memory_consolidate)
     app.router.add_post("/api/memory_meltdown", handle_memory_meltdown)
     app.router.add_get("/assets/logo.png", handle_logo)
     app.router.add_get("/logo.png", handle_logo)
@@ -286,7 +383,7 @@ async def start_webui_server(plugin: Any, host: str = "127.0.0.1", port: int = 2
 
 
 def start_webui_background(plugin: Any, host: str = "127.0.0.1", port: int = 2718):
-    """Launch the WebUI server as a background task."""
+    """将 WebUI 服务器作为后台 asyncio task 启动。若无事件循环则回退到线程模式。"""
     global _server_task
     _set_active_plugin(plugin)
     if _server_task and not _server_task.done():
@@ -303,7 +400,7 @@ def start_webui_background(plugin: Any, host: str = "127.0.0.1", port: int = 271
 
 
 async def stop_webui_server() -> None:
-    """Stop the standalone listener during plugin unload/reload."""
+    """停止独立监听器（插件卸载/重载时调用）。清理 task、httpd、thread。"""
     global _server_task, _httpd, _httpd_thread, _active_plugin
     task = _server_task
     _server_task = None
@@ -335,7 +432,11 @@ async def stop_webui_server() -> None:
 def start_webui_thread_server(
     plugin: Any, host: str = "127.0.0.1", port: int = 2718
 ) -> None:
-    """Launch a no-dependency HTTP server for environments without aiohttp."""
+    """启动无依赖的 stdlib HTTP 服务器（aiohttp 不可用时的回退方案）。
+
+    使用 ThreadingHTTPServer 在守护线程中运行，
+    包含速率限制、请求体大小限制、Bearer token 鉴权。
+    """
     global _httpd, _httpd_thread
     _set_active_plugin(plugin)
     if _httpd_thread and _httpd_thread.is_alive():
@@ -345,7 +446,7 @@ def start_webui_thread_server(
     from pathlib import Path
 
     plugin_root = Path(__file__).resolve().parent.parent
-    dashboard_path = plugin_root / "pages" / "dashboard" / "index.html"
+    dashboard_path = plugin_root / "UI" / "index.html"
     if dashboard_path.exists():
         dashboard_html = dashboard_path.read_text(encoding="utf-8")
     else:
@@ -355,9 +456,25 @@ def start_webui_thread_server(
 
     class SylanneWebUIHandler(BaseHTTPRequestHandler):
         server_version = "SylanneWebUI/1.0"
+        _MAX_BODY_SIZE = 1024 * 1024  # 1MB max request body
+        _rate_limit_window: dict[str, list[float]] = {}
+        _RATE_LIMIT_MAX = 60  # max requests per window
+        _RATE_LIMIT_WINDOW_SEC = 60.0
 
         def log_message(self, fmt: str, *args: Any) -> None:
             logger.debug("Sylanne WebUI: " + fmt, *args)
+
+        def _check_rate_limit(self) -> bool:
+            """Return True if request should be rejected (rate limited)."""
+            client_ip = self.client_address[0]
+            now = time.time()
+            window = self._rate_limit_window.setdefault(client_ip, [])
+            cutoff = now - self._RATE_LIMIT_WINDOW_SEC
+            self._rate_limit_window[client_ip] = [t for t in window if t > cutoff]
+            if len(self._rate_limit_window[client_ip]) >= self._RATE_LIMIT_MAX:
+                return True
+            self._rate_limit_window[client_ip].append(now)
+            return False
 
         def _send_json(self, payload: Any, status: int = 200) -> None:
             data = json.dumps(payload, ensure_ascii=False, default=str).encode("utf-8")
@@ -411,6 +528,9 @@ def start_webui_thread_server(
             self.end_headers()
 
         def do_GET(self) -> None:
+            if self._check_rate_limit():
+                self._send_json({"error": "rate_limited"}, status=429)
+                return
             parsed = urlparse(self.path)
             path = parsed.path.rstrip("/") or "/"
             if path not in ("/", "/logo.png", "/assets/logo.png"):
@@ -423,25 +543,41 @@ def start_webui_thread_server(
                 if path == "/":
                     self._send_text(dashboard_html)
                 elif path == "/api/state":
-                    self._send_json(
-                        _build_state(_plugin(plugin), session=query.get("session", ""))
-                    )
+                    # 自动关闭 diagnostics：超过 30s 无 computation_logs 请求
+                    if _last_diag_request and time.time() - _last_diag_request > 30:
+                        with _plugin_access_lock:
+                            current = _plugin(plugin)
+                            if current is not None:
+                                _set_spine_diagnostics(current, False)
+                    with _plugin_access_lock:
+                        state = _build_state(
+                            _plugin(plugin), session=query.get("session", "")
+                        )
+                    self._send_json(state)
                 elif path == "/api/settings":
-                    current_plugin = _plugin(plugin)
-                    schema = _load_schema(current_plugin)
-                    config = dict(getattr(current_plugin, "_config", {}) or {})
-                    values = {
-                        key: config.get(key, meta.get("default"))
-                        for key, meta in schema.items()
-                    }
+                    with _plugin_access_lock:
+                        current_plugin = _plugin(plugin)
+                        schema = _load_schema(current_plugin)
+                        config = dict(getattr(current_plugin, "_config", {}) or {})
+                        values = {
+                            key: config.get(key, meta.get("default"))
+                            for key, meta in schema.items()
+                        }
                     self._send_json(
                         {"schema": schema, "values": values, "providers": []}
                     )
                 elif path == "/api/computation_logs":
+                    global _last_diag_request
+                    _last_diag_request = time.time()
+                    with _plugin_access_lock:
+                        current = _plugin(plugin)
+                        if current is not None:
+                            _set_spine_diagnostics(current, True)
                     limit = max(1, min(200, int(query.get("limit", "50"))))
                     session = str(query.get("session", "") or "").strip()
-                    logs = getattr(_plugin(plugin), "_computation_logs", None)
-                    all_entries = list(logs) if logs is not None else []
+                    with _plugin_access_lock:
+                        logs = getattr(_plugin(plugin), "_computation_logs", None)
+                        all_entries = list(logs) if logs is not None else []
                     session_entries = (
                         [
                             entry
@@ -463,23 +599,48 @@ def start_webui_thread_server(
                 elif path == "/api/memory_pools":
                     limit = max(1, min(100, int(query.get("limit", "50"))))
                     session = query.get("session", "")
-                    data = _build_memory_pools_sync(
-                        _plugin(plugin), session=session, limit=limit
-                    )
+                    with _plugin_access_lock:
+                        data = _build_memory_pools_sync(
+                            _plugin(plugin), session=session, limit=limit
+                        )
                     self._send_json(data)
                 elif path == "/api/meltdown_nonce":
                     session = query.get("session", "")
                     nonce = secrets.token_urlsafe(16)
                     _meltdown_nonces[session] = nonce
                     self._send_json({"nonce": nonce})
+                elif path == "/api/memory_sink":
+                    session = query.get("session", "")
+                    if not session:
+                        self._send_json({"ok": False, "error": "missing session param"})
+                    else:
+                        with _plugin_access_lock:
+                            current_plugin = _plugin(plugin)
+                            mem_getter = getattr(current_plugin, "_memory_system_for_session", None)
+                            mem_sys = mem_getter(session) if callable(mem_getter) else getattr(current_plugin, "_memory_system", None)
+                        if mem_sys is None:
+                            self._send_json({"ok": False, "error": "memory system unavailable"})
+                        else:
+                            candidates = mem_sys.consolidation_candidates()
+                            if not candidates:
+                                self._send_json({"ok": False, "error": "no_confirmed_items", "sunk": 0})
+                            else:
+                                item_ids = [item.id for item in candidates]
+                                mem_sys.sink_to_l2(item_ids)
+                                logger.info(f"Sylanne MEMORY SINK (stdlib): session={session}, sunk={len(item_ids)}")
+                                self._send_json({"ok": True, "sunk": len(item_ids)})
                 elif path in {"/assets/logo.png", "/logo.png"}:
                     self._send_logo()
                 else:
                     self.send_error(404)
             except Exception as exc:
-                self._send_json({"ok": False, "error": str(exc)}, status=500)
+                logger.warning(f"Sylanne WebUI GET error: {exc}", exc_info=True)
+                self._send_json({"ok": False, "error": "internal_error"}, status=500)
 
         def do_POST(self) -> None:
+            if self._check_rate_limit():
+                self._send_json({"error": "rate_limited"}, status=429)
+                return
             parsed = urlparse(self.path)
             path = parsed.path.rstrip("/") or "/"
             if path not in ("/", "/logo.png", "/assets/logo.png"):
@@ -489,6 +650,9 @@ def start_webui_thread_server(
                     return
             try:
                 length = int(self.headers.get("Content-Length", "0") or "0")
+                if length > self._MAX_BODY_SIZE:
+                    self._send_json({"error": "payload_too_large"}, status=413)
+                    return
                 raw = self.rfile.read(length) if length > 0 else b"{}"
                 body = json.loads(raw.decode("utf-8") or "{}")
                 if not isinstance(body, dict):
@@ -498,32 +662,54 @@ def start_webui_thread_server(
 
             if path == "/api/settings":
                 try:
-                    current_plugin = _plugin(plugin)
-                    schema = _load_schema(current_plugin)
-                    config = getattr(current_plugin, "_config", {})
-                    updated = []
-                    for key, value in body.items():
-                        if key not in schema:
-                            continue
-                        meta = schema[key]
-                        field_type = meta.get("type", "string")
-                        if field_type == "bool":
-                            value = bool(value)
-                        elif field_type == "int":
-                            try:
-                                value = int(value)
-                            except (ValueError, TypeError):
+                    with _plugin_access_lock:
+                        current_plugin = _plugin(plugin)
+                        schema = _load_schema(current_plugin)
+                        config = getattr(current_plugin, "_config", {})
+                        updated = []
+                        for key, value in body.items():
+                            if key not in schema:
                                 continue
-                        elif field_type == "float":
-                            try:
-                                value = float(value)
-                            except (ValueError, TypeError):
-                                continue
-                        else:
-                            value = str(value)
-                        config[key] = value
-                        updated.append(key)
+                            meta = schema[key]
+                            field_type = meta.get("type", "string")
+                            if field_type == "bool":
+                                value = bool(value)
+                            elif field_type == "int":
+                                try:
+                                    value = int(value)
+                                except (ValueError, TypeError):
+                                    continue
+                            elif field_type == "float":
+                                try:
+                                    value = float(value)
+                                except (ValueError, TypeError):
+                                    continue
+                            else:
+                                value = str(value)
+                            config[key] = value
+                            updated.append(key)
                     self._send_json({"ok": True, "updated": updated})
+                except Exception as exc:
+                    self._send_json({"ok": False, "error": str(exc)}, status=500)
+            elif path == "/api/memory_consolidate":
+                try:
+                    session = str(body.get("session", "")).strip()
+                    if not session:
+                        self._send_json({"ok": False, "error": "missing session param"})
+                        return
+                    with _plugin_access_lock:
+                        current_plugin = _plugin(plugin)
+                        mem_getter = getattr(current_plugin, "_memory_system_for_session", None)
+                        mem_sys = mem_getter(session) if callable(mem_getter) else getattr(current_plugin, "_memory_system", None)
+                    if mem_sys is None or not list(mem_sys._l1):
+                        self._send_json({"ok": True, "estimated_seconds": 0})
+                        return
+                    loop = asyncio.get_event_loop()
+                    loop.call_soon_threadsafe(
+                        asyncio.ensure_future,
+                        current_plugin._trigger_consolidation(session),
+                    )
+                    self._send_json({"ok": True, "estimated_seconds": 30})
                 except Exception as exc:
                     self._send_json({"ok": False, "error": str(exc)}, status=500)
             elif path == "/api/memory_meltdown":
@@ -536,22 +722,25 @@ def start_webui_thread_server(
                             {"ok": False, "error": "invalid_nonce"}, status=403
                         )
                         return
-                    current_plugin = _plugin(plugin)
-                    mem_getter = getattr(
-                        current_plugin, "_memory_system_for_session", None
-                    )
-                    if callable(mem_getter):
-                        mem_sys = mem_getter(session)
-                        if mem_sys:
-                            mem_sys._l1.clear()
-                            mem_sys._l2.clear()
-                            mem_sys._l3_nodes.clear()
-                            mem_sys._l3_edges.clear()
-                            mem_sys._tick = 0
-                    hosts = getattr(current_plugin, "_hosts", {}) or {}
-                    if session in hosts:
-                        hosts[session].kernel.body.memory["traces"] = []
-                        hosts[session].kernel.body.memory.pop("_memory_system", None)
+                    with _plugin_access_lock:
+                        current_plugin = _plugin(plugin)
+                        mem_getter = getattr(
+                            current_plugin, "_memory_system_for_session", None
+                        )
+                        if callable(mem_getter):
+                            mem_sys = mem_getter(session)
+                            if mem_sys:
+                                mem_sys._l1.clear()
+                                mem_sys._l2.clear()
+                                mem_sys._l3_nodes.clear()
+                                mem_sys._l3_edges.clear()
+                                mem_sys._tick = 0
+                        hosts = getattr(current_plugin, "_hosts", {}) or {}
+                        if session in hosts:
+                            hosts[session].kernel.body.memory["traces"] = []
+                            hosts[session].kernel.body.memory.pop(
+                                "_memory_system", None
+                            )
                     logger.info(f"Sylanne MEMORY MELTDOWN (stdlib): session={session}")
                     self._send_json({"ok": True, "session": session, "cleared": True})
                 except Exception as exc:
@@ -573,7 +762,7 @@ def start_webui_thread_server(
 
 
 async def _provider_items(plugin: Any) -> list[dict[str, Any]]:
-    """Best-effort provider choices for WebUI datalist controls."""
+    """尽力获取 AstrBot 已注册的 provider 列表，供设置面板下拉选择。"""
     context = getattr(plugin, "context", None)
     items: list[dict[str, Any]] = []
     seen: set[str] = set()
@@ -633,7 +822,10 @@ async def _provider_items(plugin: Any) -> list[dict[str, Any]]:
 
 
 def _known_sessions(plugin: Any, *, requested: str = "") -> list[str]:
-    """Collect sessions known by live hosts, memory cache, runtime snapshots and the request."""
+    """收集所有已知会话标识符。
+
+    来源：活跃 hosts、内存缓存、运行时快照、磁盘文件。
+    """
     sessions: list[str] = []
 
     def add(value: Any) -> None:
@@ -672,7 +864,10 @@ def _known_sessions(plugin: Any, *, requested: str = "") -> list[str]:
 
         config = getattr(plugin, "_config", {}) or getattr(plugin, "config", {}) or {}
         root = Path(
-            str(config.get("sylanne_alpha_root") or Path.home() / ".sylanne_alpha")
+            str(
+                config.get("sylanne_alpha_root")
+                or get_astrbot_data_path() / "sylanne_alpha"
+            )
         )
         if root.exists():
             for path in root.glob("*.alpha.json"):
@@ -685,7 +880,7 @@ def _known_sessions(plugin: Any, *, requested: str = "") -> list[str]:
 
 
 def _last_bot_text(plugin: Any, session_key: str) -> str:
-    """Get the last bot reply text from the conversation buffer."""
+    """获取指定会话的最后一条 bot 回复文本（截断到 120 字符）。"""
     buffers = getattr(plugin, "_conversation_buffers", {})
     buf = buffers.get(session_key)
     if buf is not None:
@@ -699,7 +894,7 @@ def _last_bot_text(plugin: Any, session_key: str) -> str:
 
 
 def _last_user_text(plugin: Any, session_key: str) -> str:
-    """Get the last user input text from the conversation buffer."""
+    """获取指定会话的最后一条用户输入文本（截断到 120 字符）。"""
     buffers = getattr(plugin, "_conversation_buffers", {})
     buf = buffers.get(session_key)
     if buf is not None:
@@ -713,11 +908,9 @@ def _last_user_text(plugin: Any, session_key: str) -> str:
 
 
 def _assessment_overlay(assessment: dict | None) -> dict[str, float]:
-    """Convert last LLM assessment into emotion-compatible overlay values.
+    """将 LLM assessor 的评估结果转换为情感兼容的覆盖值。
 
-    Keeps emotion bars alive between messages by using assessor's judgment
-    as a 'hold' value until the next computation tick updates them.
-    Expires after 120 seconds to avoid stale data dominating.
+    在两次计算 tick 之间保持情感条活跃，120 秒后过期避免陈旧数据主导。
     """
     if not assessment:
         return {}
@@ -740,8 +933,105 @@ def _assessment_overlay(assessment: dict | None) -> dict[str, float]:
     return overlay
 
 
+def _frontend_personality(personality: dict) -> dict[str, Any]:
+    """将内部人格数据转换为新前端期望的格式。"""
+    traits = personality.get(
+        "traits", personality if isinstance(personality, dict) else {}
+    )
+    five = {
+        "openness": traits.get("openness", traits.get("curiosity", 0.5)),
+        "warmth": traits.get("warmth", 0.5),
+        "intensity": traits.get("intensity", traits.get("arousal", 0.5)),
+        "autonomy": traits.get("autonomy", traits.get("sovereignty", 0.5)),
+        "resilience": traits.get("resilience", traits.get("repair", 0.5)),
+    }
+    six_names = [
+        "Curiosity",
+        "Empathy",
+        "Precision",
+        "Playfulness",
+        "Defiance",
+        "Melancholy",
+    ]
+    six_keys = [
+        "curiosity",
+        "warmth",
+        "coherence",
+        "playfulness",
+        "sovereignty",
+        "melancholy",
+    ]
+    six_colors = ["#B88A9E", "#00b4d8", "#ffaa00", "#4caf50", "#ff4444", "#9c27b0"]
+    six = [
+        {"name": n, "value": float(traits.get(k, 0.5)), "color": c}
+        for n, k, c in zip(six_names, six_keys, six_colors)
+    ]
+    drift_raw = personality.get("drift", {}) if isinstance(personality, dict) else {}
+    drift_history = drift_raw.get("history", []) if isinstance(drift_raw, dict) else []
+    drift = [
+        {
+            "time": str(d.get("time", "")),
+            "text": str(d.get("text", d.get("signal", ""))),
+        }
+        for d in drift_history[-10:]
+    ]
+    return {"five": five, "six": six, "drift": drift}
+
+
+def _frontend_spine_layers(timing_raw: dict, comp_diag: dict) -> list[dict[str, Any]]:
+    """将内部计时数据转换为新前端期望的 spine_layers 数组。
+
+    timing_raw 的 key 是内部名（perception/gate/void_scar/sheaf/hgt/boundary/expression），
+    需要映射到前端的 L1-L7 标识。
+    """
+    # (前端ID, 内部timing key, 显示名, 描述)
+    layer_meta = [
+        ("L1", "perception", "HDC Perception",
+         "Hyperdimensional binary encoding. Converts text to 2048-bit vectors."),
+        ("L2", "gate", "Predictive Coding Gate",
+         "Computes Hamming surprise against prediction. Routes processing path."),
+        ("L3", "void_scar", "Void-Scar Engine",
+         "Irreversible scar state tracking. Wounds heal through stages."),
+        ("L4", "sheaf", "Relational Sheaf",
+         "Cross-relationship propagation via sheaf Laplacian."),
+        ("L5", "hgt", "MoE-HGT",
+         "Mixture-of-Experts + Heterogeneous Graph Transformer."),
+        ("L6", "boundary", "Autopoietic Boundary",
+         "32-dim identity kernel with orthogonal projection."),
+        ("L7", "expression", "Phase Transition",
+         "Pressure accumulation to threshold. Expression modes."),
+    ]
+    result = []
+    for lid, internal_key, name, desc in layer_meta:
+        # 按内部 key 查找，兼容旧格式（L1/L2/...）
+        stats = timing_raw.get(internal_key, timing_raw.get(lid, {}))
+        if not isinstance(stats, dict):
+            stats = {}
+        avg_ms = round(stats.get("mean_ns", stats.get("p50_ns", 0)) / 1_000_000, 1)
+        p50_ms = round(stats.get("p50_ns", 0) / 1_000_000, 1)
+        p99_ms = round(stats.get("p99_ns", stats.get("p95_ns", 0)) / 1_000_000, 1)
+        count = int(stats.get("count", 0))
+        result.append(
+            {
+                "id": lid,
+                "name": name,
+                "status": "active" if count > 0 else "idle",
+                "avg": avg_ms,
+                "p50": p50_ms,
+                "p99": p99_ms,
+                "count": count,
+                "desc": desc,
+            }
+        )
+    return result
+
+
 def _build_state(plugin: Any, *, session: str = "") -> dict[str, Any]:
-    """Build full state dict for the WebUI."""
+    """构建完整的 WebUI 状态字典。
+
+    聚合情感向量、门控统计、路由统计、边界/表达/计时/层诊断、
+    人格信息、社交场信息、生命模拟等，供前端 dashboard 渲染。
+    """
     hosts = getattr(plugin, "_hosts", {}) or {}
     all_sessions = _known_sessions(plugin, requested=session)
     if not all_sessions:
@@ -765,6 +1055,21 @@ def _build_state(plugin: Any, *, session: str = "") -> dict[str, Any]:
         }
 
     session_key = session if session in all_sessions else all_sessions[0]
+
+    # 如果没有指定 session，自动选择最活跃的（tick_count 最高的 host）
+    # 避免选到从未处理过消息的 "default" 空 host
+    if not session or session not in all_sessions:
+        best_key = all_sessions[0]
+        best_ticks = -1
+        for sk in all_sessions:
+            h = hosts.get(sk)
+            if h is None:
+                continue
+            ticks = getattr(h.kernel.computation, "_tick_count", 0) if hasattr(h, "kernel") else 0
+            if ticks > best_ticks:
+                best_ticks = ticks
+                best_key = sk
+        session_key = best_key
     try:
         host = hosts.get(session_key)
         if host is None:
@@ -799,6 +1104,7 @@ def _build_state(plugin: Any, *, session: str = "") -> dict[str, Any]:
             "stability": boundary_raw.get("stability", 1.0),
             "rotation": boundary_raw.get("phase_transitions", 0) * 6.0,
             "phase_transitions": boundary_raw.get("phase_transitions", 0),
+            "self_repair_rate": boundary_raw.get("stability", 1.0),
         }
         expression = comp.expression.state()
         # Ensure all 9 emotion dimensions are present for the frontend
@@ -822,6 +1128,19 @@ def _build_state(plugin: Any, *, session: str = "") -> dict[str, Any]:
             timing[f"{layer_name}_ms"] = ms_val
             total_ms += ms_val
         timing["total_ms"] = round(total_ms, 3)
+        # 新前端期望 timing 为数组格式
+        timing_array = []
+        for layer_name, layer_stats in timing_raw.items():
+            if not isinstance(layer_stats, dict):
+                continue
+            timing_array.append(
+                {
+                    "layer": layer_name,
+                    "avg": f"{round(layer_stats.get('mean_ns', layer_stats.get('p50_ns', 0)) / 1_000_000, 1)}ms",
+                    "p95": f"{round(layer_stats.get('p95_ns', layer_stats.get('p99_ns', 0)) / 1_000_000, 1)}ms",
+                    "count": int(layer_stats.get("count", 0)),
+                }
+            )
         # Ensure L1_HDC layer has all fields from computation result + sample_bits
         sample_bits = comp.last_hdc_sample if hasattr(comp, "last_hdc_sample") else []
         comp_l1 = comp_result.get("layers", {}).get("L1_HDC", {})
@@ -860,6 +1179,9 @@ def _build_state(plugin: Any, *, session: str = "") -> dict[str, Any]:
             "accepted": int(feedback_raw.get("accepted", 0)),
             "ignored": int(feedback_raw.get("ignored", 0)),
             "rejected": int(feedback_raw.get("rejected", 0)),
+            "positive": int(feedback_raw.get("accepted", 0)),
+            "negative": int(feedback_raw.get("rejected", 0)),
+            "neutral": int(feedback_raw.get("ignored", 0)),
         }
         personality = (
             host.kernel._personality() if hasattr(host.kernel, "_personality") else {}
@@ -893,11 +1215,15 @@ def _build_state(plugin: Any, *, session: str = "") -> dict[str, Any]:
                 **comp.engine.observe(),
                 **_assessment_overlay(comp._last_assessment),
             },
-            "gate": {**gate, "history": gate.get("surprise_history", [])[-60:]},
+            "gate": {
+                **gate,
+                "history": gate.get("surprise_history", [])[-60:],
+                "route": comp_result.get("route", "NORMAL"),
+            },
             "route_stats": route_stats,
             "boundary": boundary,
             "expression": expression,
-            "timing": timing,
+            "timing": timing_array if timing_array else timing,
             "layers": layers,
             "spine": {
                 "surprise": comp_result.get("surprise", gate.get("mean_surprise", 0.0)),
@@ -929,6 +1255,16 @@ def _build_state(plugin: Any, *, session: str = "") -> dict[str, Any]:
             "life_simulation": getattr(plugin, "_life_simulator", None)
             and plugin._life_simulator.to_dict()
             or {},
+            # --- 新前端兼容字段 ---
+            "session_id": session_key,
+            "route_distribution": {
+                "FAST": route_stats["fast"],
+                "NORMAL": route_stats["normal"],
+                "FULL": route_stats["full"],
+                "SKIP": route_stats["skip"],
+            },
+            "personality": _frontend_personality(personality),
+            "spine_layers": _frontend_spine_layers(timing_raw, comp_diag),
         }
     except Exception:
         return {
@@ -1227,7 +1563,7 @@ def _memory_response_from_sources(
 async def _build_memory_pools(
     plugin: Any, *, session: str = "", limit: int = 50
 ) -> dict[str, Any]:
-    """Build hot and long-term memory pool payloads for the WebUI."""
+    """构建三层记忆池数据（异步版本，支持 KV 存储加载）。"""
     sessions = _known_sessions(plugin, requested=session)
     overview = not session or session == "default"
     session_key = (
@@ -1269,7 +1605,7 @@ async def _build_memory_pools(
 def _build_memory_pools_sync(
     plugin: Any, *, session: str = "", limit: int = 50
 ) -> dict[str, Any]:
-    """Build memory payload without awaiting, for the stdlib fallback server."""
+    """构建三层记忆池数据（同步版本，供 stdlib HTTP server 使用）。"""
     sessions = _known_sessions(plugin, requested=session)
     overview = not session or session == "default"
     session_key = (
@@ -1367,7 +1703,7 @@ def _memory_graph_node_payload(node: Any) -> dict[str, Any]:
 
 
 def _load_schema(plugin: Any) -> dict[str, Any]:
-    """Load config schema."""
+    """加载配置 schema（_conf_schema.json）。"""
     import os
 
     schema_path = os.path.join(
@@ -1386,17 +1722,25 @@ def _load_schema(plugin: Any) -> dict[str, Any]:
 
 
 class WebUILifecycle:
-    """Manages WebUI server lifecycle (start/stop/takeover) on behalf of the plugin."""
+    """WebUI 服务器生命周期管理器。
+
+    封装启动/停止/接管的完整逻辑，处理 AstrBot 热重载场景下的
+    旧监听器清理和新监听器启动。
+
+    关键能力：
+    - start_if_enabled(): 幂等启动
+    - publish_active_plugin(): 将所有已加载的 WebUI 模块指向当前插件实例
+    - stop_stale_server_modules(): 清理热重载遗留的旧监听器
+    - schedule_listener_takeover(): 延迟接管（等待旧模块完全卸载）
+    """
 
     def __init__(self, plugin: Any) -> None:
         self._p = plugin
 
     def start_if_enabled(self) -> None:
-        """Start the standalone WebUI server when enabled.
+        """当配置启用 WebUI 时启动独立服务器。
 
-        This is intentionally idempotent. The WebUI can be enabled from the
-        AstrBot config page after the plugin has already handled requests, so
-        startup cannot live only in the first-request lazy-init branch.
+        幂等设计：若已有活跃的 task 或 thread 则跳过。
         """
         if not self._p._cfg_bool("sylanne_webui_enabled", False):
             return
@@ -1587,7 +1931,7 @@ class WebUILifecycle:
         return stopped
 
     def publish_active_plugin(self) -> list[str]:
-        """Point every loaded Sylanne WebUI listener module at this plugin instance."""
+        """将所有已加载的 Sylanne WebUI 监听器模块指向当前插件实例。"""
         updated: list[str] = []
         for name, module in self.iter_loaded_server_modules():
             setter = self.module_get(module, "_set_active_plugin")
@@ -1603,7 +1947,7 @@ class WebUILifecycle:
     async def stop_stale_server_modules(
         self, *, include_current: bool = False
     ) -> list[str]:
-        """Stop hot-upload WebUI modules that can keep port 2718 bound or serve stale HTML."""
+        """停止热重载遗留的旧 WebUI 模块，释放端口占用。"""
         stopped: list[str] = []
         for name, module in self.iter_loaded_server_modules():
             if self.is_current_module(module) and not include_current:
@@ -1622,7 +1966,7 @@ class WebUILifecycle:
         return stopped
 
     async def stop_server_module(self, module: Any) -> bool:
-        """Best-effort shutdown for both current and legacy WebUI modules."""
+        """尽力关闭一个 WebUI 模块（支持新旧两种模块格式）。"""
         stopper = self.module_get(module, "stop_webui_server")
         if callable(stopper):
             result = stopper()

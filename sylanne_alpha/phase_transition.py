@@ -1,8 +1,13 @@
-"""Sylanne-Embodiment computation layer: Phase Transition Expression Trigger.
+"""Sylanne-Embodiment 计算核心层：相变表达触发器（Phase Transition Expression Trigger）。
 
-Expression is not a "decision to speak" but a phase transition --
-internal pressure accumulates until a critical point, then erupts.
-Like water boiling at 100°C: not gradual, but sudden.
+在 7 层计算栈中的位置：L7 表达层。
+职责：表达不是一个"决定说话"的离散决策，而是一个相变过程——
+内部压力持续积累，直到临界点突然爆发。如同水在 100°C 沸腾：不是渐进的，而是突变的。
+
+核心机制：
+  - pressure（压力）：由情感驱动力持续注入
+  - threshold（阈值）：由人格和社交场调制，沉默会降低阈值（更容易说话）
+  - 表达后阈值上升（不应期），防止连续输出
 """
 
 from __future__ import annotations
@@ -14,6 +19,21 @@ if TYPE_CHECKING:
 
 
 class PhaseTransitionExpression:
+    """相变表达触发器。
+
+    模拟表达行为的物理相变模型：
+      - pressure（压力）：由情感驱动力持续注入，自然衰减
+      - threshold（阈值）：表达的临界点，受人格和社交场调制
+      - 当 pressure > threshold * 0.5 时开始有表达倾向
+      - 表达后阈值上升（不应期），沉默会逐渐降低阈值
+
+    与其他组件的关系：
+      - 被 ComputationSpine 在 L7 层调用
+      - 接收 VoidScarEngine.expression_drive() 作为驱动力
+      - 接收 SocialSignals 调制群聊中的有效阈值
+      - should_express() 输出给 ComputationSpine 决定是否表达
+    """
+
     __slots__ = (
         "pressure",
         "threshold",
@@ -44,18 +64,23 @@ class PhaseTransitionExpression:
         self._min_threshold_floor = 0.25
 
     def accumulate(self, drive: float, dt: float = 1.0):
-        """Accumulate expression pressure from emotional drive."""
+        """积累表达压力。
+
+        Args:
+            drive: 情感驱动力（来自 VoidScarEngine.expression_drive()）
+            dt: 时间步长
+        """
         self.pressure += drive * dt
         # Natural decay (pressure dissipates even without expression)
         self.pressure = max(0.0, self.pressure * (1.0 - self.decay_rate))
         self.silence_duration += dt
 
     def set_social_params(self, params: dict) -> None:
-        """Set personality-derived social field parameters."""
+        """设置人格派生的社交场参数（由 ComputationSpine.apply_personality 调用）。"""
         self._social_context = params
 
     def apply_social_signals(self, signals: SocialSignals | None) -> None:
-        """Apply social signals before accumulate() is called."""
+        """应用社交信号（在 accumulate() 之前调用，影响有效阈值计算）。"""
         self._social_signals = signals
 
     def set_personality_params(
@@ -73,10 +98,14 @@ class PhaseTransitionExpression:
         self._min_threshold_floor = min_threshold_floor
 
     def effective_threshold(self) -> float:
-        """Compute effective threshold with social field modulation.
+        """计算有效阈值（含社交场调制）。
 
-        Private chat: returns self.threshold (unchanged)
-        Group chat: theta_eff = theta_base * (1 + mu) - sigma_call - sigma_sheaf - sigma_void
+        私聊：直接返回 self.threshold
+        群聊：theta_eff = theta_base * (1 + mu) - sigma_call - sigma_sheaf - sigma_void
+          - mu: 群聊基础提升（内向者更高）
+          - sigma_call: 被 @/点名时大幅降低阈值
+          - sigma_sheaf: 关系层析耦合降低阈值
+          - sigma_void: 社交虚空压力降低阈值
         """
         if not self._social_signals or not self._social_signals.is_group:
             return self.threshold
@@ -105,14 +134,14 @@ class PhaseTransitionExpression:
         return max(0.0, theta_eff)
 
     def expression_intensity(self) -> float:
-        """Continuous expression intensity: 0.0 (silent) to 1.0+ (urgent).
+        """连续表达强度：0.0（沉默）到 1.0+（紧急）。
 
-        - pressure < threshold * 0.5 → 0.0 (no expression)
-        - pressure = threshold → 1.0 (normal expression)
-        - pressure > threshold → >1.0 (urgent expression)
+        - pressure < threshold * 0.5 → 0.0（无表达倾向）
+        - pressure = threshold → 1.0（正常表达）
+        - pressure > threshold → >1.0（紧急表达）
         """
         threshold = self.effective_threshold()
-        if threshold < 0.01:
+        if threshold < 1e-6:
             return 1.0 if self.pressure > 0 else 0.0
         half_threshold = threshold * 0.5
         if self.pressure < half_threshold:
@@ -120,13 +149,23 @@ class PhaseTransitionExpression:
         return (self.pressure - half_threshold) / threshold
 
     def should_express(self) -> bool:
-        """Phase transition check (compat): intensity above hint threshold."""
+        """相变检查：强度是否超过 hint 阈值（pressure > threshold * 0.5）。"""
         threshold = self.effective_threshold()
         half = threshold * 0.5
         return self.pressure > half
 
     def express(self, now: float = 0.0) -> dict[str, Any]:
-        """Trigger expression -- release pressure, return intensity and mode."""
+        """触发表达——释放压力，返回强度和模式。
+
+        表达后：
+          - 压力归零
+          - 沉默时长归零
+          - 阈值上升（不应期，防止连续输出）
+          - 群聊中不应期额外增加
+
+        Returns:
+            包含 intensity, urgency, mode, threshold_after, expression_count 的字典
+        """
         intensity = self.expression_intensity()
         urgency = min(
             1.0, self.silence_duration / self._silence_urgency_divisor
@@ -160,13 +199,13 @@ class PhaseTransitionExpression:
         }
 
     def silence_lowers_threshold(self, dt: float = 1.0):
-        """Prolonged silence makes it easier to speak (threshold drops)."""
+        """持续沉默降低表达阈值（越久不说话，越容易开口）。"""
         self.threshold = max(
             self._min_threshold_floor, self.threshold - self._silence_drop_rate * dt
         )
 
     def _current_mode(self) -> str:
-        """Derive current expression mode from intensity."""
+        """从当前强度推导表达模式：silent / hint / normal / urgent。"""
         intensity = self.expression_intensity()
         if intensity < 0.3:
             return "silent"
@@ -177,7 +216,7 @@ class PhaseTransitionExpression:
         return "urgent"
 
     def state(self) -> dict[str, Any]:
-        """Current state for diagnostics."""
+        """当前状态快照（用于诊断和 UI 展示）。"""
         eff_threshold = self.effective_threshold()
         is_group = bool(self._social_signals and self._social_signals.is_group)
         result = {

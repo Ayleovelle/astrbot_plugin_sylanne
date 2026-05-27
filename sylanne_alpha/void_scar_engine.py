@@ -1,9 +1,12 @@
-"""Void-Scar Coupled Engine — Unified replacement for SSM + TDA layers.
+"""Sylanne-Embodiment 计算核心层：虚空-伤痕耦合引擎（Void-Scar Coupled Engine）。
 
-Integrates Scar Algebra (irreversible state dynamics) with Void Calculus
-(first-class absence computation) through bidirectional coupling:
-  Γ: Void pressure → Scar wounding events
-  Φ: Scar numbing → Void genesis sensitivity
+在 7 层计算栈中的位置：L3 层的统一入口，替代了原始架构中的 SSM + TDA 层。
+职责：将伤痕代数（不可逆状态动力学）与虚空微积分（一等缺席计算）通过双向耦合整合：
+  Γ 耦合：虚空压力 → 伤痕创伤事件（压力积累到阈值时触发创伤）
+  Φ 耦合：伤痕麻木 → 虚空检测灵敏度（麻木维度降低虚空检测阈值）
+
+输出 8 维情感空间：warmth, arousal, valence, tension, curiosity,
+repair_pressure, expression_drive, boundary_firmness。
 """
 
 from __future__ import annotations
@@ -16,7 +19,11 @@ from .void_calculus import VoidSpace
 
 
 class SocialVoid:
-    """Group chat silence void — pressure accumulates when agent is silent in active group."""
+    """群聊沉默虚空——当 agent 在活跃群聊中保持沉默时，压力持续积累。
+
+    模拟"群里大家都在聊，我却没说话"的社交压力。
+    与 VoidSpace 中的个人虚空不同，这是纯社交层面的压力源。
+    """
 
     __slots__ = ("pressure", "silence_ticks", "group_activity", "topic_boundary")
 
@@ -59,9 +66,18 @@ class SocialVoid:
 
 
 class VoidScarEngine:
-    """Coupled Void-Scar computation engine.
+    """虚空-伤痕耦合计算引擎。
 
-    Replaces the SSM (Layer 3) and TDA (Layer 4) in the computation spine.
+    替代计算脊柱中原始的 SSM（L3）和 TDA（L4）层。
+    通过双向耦合将两个独立的数学系统整合为统一的情感计算引擎：
+      - Γ 耦合（虚空→伤痕）：虚空压力超过阈值时，向伤痕状态注入创伤事件
+      - Φ 耦合（伤痕→虚空）：伤痕麻木的维度降低虚空检测阈值（更容易感知缺席）
+
+    与其他组件的关系：
+      - 被 ComputationSpine.process() 在 L3 层调用
+      - 接收 L1 HDC 编码和 L2 惊讶度
+      - 输出 8 维情感观测给 L5 HGT 和 L7 表达层
+      - expression_drive() 输出给 L7 PhaseTransitionExpression
     """
 
     __slots__ = (
@@ -113,16 +129,23 @@ class VoidScarEngine:
         surprise: float,
         timestamp: float = 0.0,
     ) -> dict[str, Any]:
-        """Process one event through the coupled Void-Scar engine.
+        """处理一个事件通过耦合的虚空-伤痕引擎。
+
+        执行顺序：
+          1. Φ 耦合：伤痕麻木 → 降低虚空检测阈值
+          2. 虚空微积分步进
+          3. Γ 耦合：虚空压力超阈值 → 向伤痕注入创伤
+          4. 伤痕代数步进（主事件）
+          5. 计算全局一致性
 
         Args:
-            event_vec: HDC-encoded event (for void boundary operations)
-            ssm_input: 8-dim input vector (for scar state evolution)
-            surprise: surprise from predictive coding gate
-            timestamp: event timestamp
+            event_vec: HDC 编码的事件向量（用于虚空边界操作）
+            ssm_input: 8 维输入向量（用于伤痕状态演化）
+            surprise: 来自预测编码门控的惊讶度
+            timestamp: 事件时间戳
 
         Returns:
-            Combined result with scar state, void state, and coupling info.
+            包含伤痕状态、虚空状态、耦合信息和一致性的综合结果
         """
         self._tick += 1
 
@@ -185,11 +208,11 @@ class VoidScarEngine:
     )
 
     def observe(self) -> dict[str, float]:
-        """Observable output for downstream layers.
+        """可观测输出：供下游层使用的命名情感维度。
 
-        Returns named emotion dimensions (warmth, arousal, valence, tension,
-        curiosity, repair_pressure, expression_drive, boundary_firmness) plus
-        coherence, void_pressure, active_voids, ghost_count.
+        返回 8 个命名情感维度（warmth, arousal, valence, tension,
+        curiosity, repair_pressure, expression_drive, boundary_firmness）
+        加上 coherence, void_pressure, active_voids, ghost_count 等元信息。
         """
         raw = self.scar_state.observe()
         obs: dict[str, float] = {}
@@ -208,7 +231,13 @@ class VoidScarEngine:
         return obs
 
     def expression_drive(self) -> float:
-        """Combined drive for the phase transition expression layer."""
+        """计算综合表达驱动力（供 L7 相变表达层使用）。
+
+        三个来源加权求和：
+          - scar_drive: 伤痕基向量第 6 维（expression_drive 维度）的绝对值
+          - void_drive: 虚空总压力归一化后乘以权重
+          - social_drive: 社交虚空压力归一化后乘以权重
+        """
         scar_drive = (
             abs(self.scar_state.base[6]) if len(self.scar_state.base) > 6 else 0.0
         )
@@ -222,10 +251,12 @@ class VoidScarEngine:
         )
 
     def _compute_coherence(self) -> float:
-        """Global coherence: alignment between what hurts and what's avoided.
+        """计算全局一致性：虚空与伤痕的对齐程度。
 
-        r → 1: voids and scars are aligned (system is coherent)
-        r → 0: pressure builds in numbed areas (dissociation)
+        r → 1: 虚空和伤痕对齐（系统一致——痛的地方也在回避）
+        r → 0: 压力积累在麻木区域（解离状态——回避的不是真正痛的地方）
+
+        这是系统健康度的重要指标：低一致性暗示需要干预。
         """
         if not self.void_space.voids:
             return 1.0
@@ -241,11 +272,11 @@ class VoidScarEngine:
         return 1.0 - (numbed_pressure / total_pressure)
 
     def feedback(self, outcome: str, dt: float = 1.0) -> dict[str, float]:
-        """Inject expression outcome as feedback.
+        """注入表达结果作为反馈。
 
-        'accepted' → reduce void pressure, positive scar input
-        'ignored' → increase void depth, neutral scar input
-        'rejected' → wound event on scar state
+        'accepted' → 减少虚空压力，正向伤痕输入（温暖、修复）
+        'ignored' → 增加虚空深度，负向伤痕输入（退缩）
+        'rejected' → 创伤事件注入伤痕状态（伤害）
         """
         if outcome == "accepted":
             for v in self.void_space.voids:
@@ -299,10 +330,10 @@ class VoidScarEngine:
 
 
 def _default_similarity(a: bytes, b: bytes) -> float:
-    """Hamming similarity for binary vectors."""
+    """默认相似度函数：基于 Hamming 距离的二进制向量相似度。"""
     if not a or not b:
         return 0.0
     min_len = min(len(a), len(b))
-    xor_bits = sum(bin(a[i] ^ b[i]).count("1") for i in range(min_len))
+    xor_bits = sum((a[i] ^ b[i]).bit_count() for i in range(min_len))
     total_bits = min_len * 8
     return 1.0 - (xor_bits / total_bits) if total_bits > 0 else 0.0

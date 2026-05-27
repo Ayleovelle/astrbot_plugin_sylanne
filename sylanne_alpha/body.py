@@ -1,3 +1,22 @@
+"""身体状态模型模块。
+
+定义 Sylanne-Embodiment 的完整身体状态数据结构，包含 8 个子系统：
+- 脉搏 (Pulse): 心跳计数、节律稳定性、应激负荷
+- 血流 (Bloodflow): 温暖感、循环活力、记忆流动
+- 神经 (Nerve): 可塑性、敏感度、阈值漂移
+- 肌肉 (Muscle): 准备度、疲劳、训练延伸
+- 温度 (Temperature): 温暖、波动性、修复热
+- 伤口 (Wound): 开放伤口、修复进度、疤痕、敏感度
+- 免疫 (Immunity): 边界压力、主权、中断预算、冷却、暂停
+- 死亡率 (Mortality): 负荷、耗竭、恢复债务
+
+核心职责：
+- 维护 29 维状态向量的读写
+- 通过 apply() 方法接收事件并演化状态
+- 管理记忆 traces（短期记忆池）
+- 提供关系记忆和影子记忆的观测接口
+"""
+
 from __future__ import annotations
 
 from dataclasses import dataclass, field
@@ -16,6 +35,15 @@ RELATIONSHIP_MEMORY_SCHEMA_VERSION = "sylanne.alpha.relationship_memory.v1"
 
 @dataclass(slots=True)
 class AlphaPulseState:
+    """脉搏子系统状态。
+
+    模拟心跳节律，反映交互频率和应激水平。
+    - beat: 累计心跳数（单调递增，代表交互历史长度）
+    - rhythm: 节律稳定性 [0,1]，hurt 事件会降低
+    - strain: 应激负荷 [0,1]，边界/伤害事件会升高
+    - last_tick: 上次状态更新的时间戳
+    """
+
     beat: float = 0.0
     rhythm: float = 0.5
     strain: float = 0.0
@@ -32,6 +60,14 @@ class AlphaPulseState:
 
 @dataclass(slots=True)
 class AlphaBloodflowState:
+    """血流子系统状态。
+
+    模拟情感温度和记忆循环。
+    - warmth: 关系温暖感 [0,1]，safe 事件升高，hurt 降低
+    - circulation: 循环活力 [0,1]，有文本交互时升高
+    - memory_flow: 记忆流动强度 [0,1]，随 traces 数量和可塑性增长
+    """
+
     warmth: float = 0.4
     circulation: float = 0.0
     memory_flow: float = 0.0
@@ -46,6 +82,15 @@ class AlphaBloodflowState:
 
 @dataclass(slots=True)
 class AlphaNerveState:
+    """神经子系统状态。
+
+    模拟学习能力和感知阈值。
+    - plasticity: 可塑性 [0,1]，交互越多越高，决定探索倾向
+    - sensitivity: 敏感度 [0,1]，hurt 事件升高
+    - repetition: 当前文本的重复次数（整数）
+    - threshold_drift: 阈值漂移 [0,1]，重复刺激导致脱敏
+    """
+
     plasticity: float = 0.0
     sensitivity: float = 0.0
     repetition: int = 0
@@ -62,6 +107,14 @@ class AlphaNerveState:
 
 @dataclass(slots=True)
 class AlphaMuscleState:
+    """肌肉子系统状态。
+
+    模拟行动准备度和疲劳。
+    - readiness: 行动准备度 [0,1]，有文本时升高，空闲时降低
+    - fatigue: 疲劳度 [0,1]，高接触需求时累积
+    - trained_reach: 训练延伸 [0,1]，重复交互逐渐增长
+    """
+
     readiness: float = 0.2
     fatigue: float = 0.0
     trained_reach: float = 0.0
@@ -76,6 +129,14 @@ class AlphaMuscleState:
 
 @dataclass(slots=True)
 class AlphaTemperatureState:
+    """温度子系统状态。
+
+    模拟情感温度和修复热量。
+    - warmth: 情感温暖 [0,1]，safe 升高，hurt 降低
+    - volatility: 波动性 [0,1]，boundary 事件升高
+    - repair_heat: 修复热 [0,1]，repair 事件升高
+    """
+
     warmth: float = 0.45
     volatility: float = 0.0
     repair_heat: float = 0.0
@@ -90,6 +151,15 @@ class AlphaTemperatureState:
 
 @dataclass(slots=True)
 class AlphaWoundState:
+    """伤口子系统状态。
+
+    模拟情感创伤和修复过程。
+    - open: 开放伤口程度 [0,1]，hurt 事件大幅升高
+    - scar: 疤痕累积 [0,1]，未修复的伤口缓慢转化为疤痕
+    - sensitivity: 伤口敏感度 [0,1]，疤痕越多越敏感
+    - repair: 修复进度 [0,1]，repair 事件升高
+    """
+
     open: float = 0.0
     scar: float = 0.0
     sensitivity: float = 0.0
@@ -106,6 +176,16 @@ class AlphaWoundState:
 
 @dataclass(slots=True)
 class AlphaImmunityState:
+    """免疫子系统状态。
+
+    模拟边界防御和主权保护机制。
+    - boundary_pressure: 边界压力 [0,1]，boundary/hurt 事件升高
+    - sovereignty: 用户主权 [0,1]，低于 0.5 时阻止外向行动
+    - interruption_budget: 中断预算 [0,1]，主动发言消耗预算
+    - cooldown: 冷却计时器 [0,1]，主动发言后进入冷却
+    - paused: 用户暂停标志，暂停时阻止所有外向行动
+    """
+
     boundary_pressure: float = 0.0
     sovereignty: float = 1.0
     interruption_budget: float = 1.0
@@ -124,6 +204,14 @@ class AlphaImmunityState:
 
 @dataclass(slots=True)
 class AlphaMortalityState:
+    """死亡率子系统状态。
+
+    模拟系统极限负荷，高耗竭时强制进入恢复模式。
+    - load: 负荷 [0,1]，boundary/hurt 升高，safe 降低
+    - exhaustion: 耗竭 [0,1]，超过 0.8 时 guard 阻止外向行动
+    - recovery_debt: 恢复债务 [0,1]，idle 升高，repair 降低
+    """
+
     load: float = 0.0
     exhaustion: float = 0.0
     recovery_debt: float = 0.0
@@ -138,6 +226,18 @@ class AlphaMortalityState:
 
 @dataclass(slots=True)
 class AlphaBodyState:
+    """Sylanne-Embodiment 完整身体状态模型。
+
+    聚合 8 个子系统 + 需求字典 + 记忆存储，构成 Sylanne 的「身体」。
+    是 kernel 的核心数据载体，所有状态演化最终都反映在这里。
+
+    与其他组件的关系：
+    - AlphaKernel 持有一个 AlphaBodyState 实例，通过 tick() 驱动演化
+    - vector.py 定义权重矩阵，body.apply() 调用 linear_delta 计算增量
+    - codec.py 可将 state_vector() 编码为紧凑二进制
+    - ShadowMemory 通过 observe_shadow_signal() 记录隐性信号
+    """
+
     pulse: AlphaPulseState = field(default_factory=AlphaPulseState)
     bloodflow: AlphaBloodflowState = field(default_factory=AlphaBloodflowState)
     nerve: AlphaNerveState = field(default_factory=AlphaNerveState)
@@ -158,6 +258,10 @@ class AlphaBodyState:
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> "AlphaBodyState":
+        """从字典反序列化为 AlphaBodyState 实例。
+
+        对每个子系统，只取 dataclass 声明的字段，忽略多余键。
+        """
         body = cls()
         for name, state_type in (
             ("pulse", AlphaPulseState),
@@ -221,6 +325,11 @@ class AlphaBodyState:
         return body
 
     def state_vector(self) -> dict[str, float]:
+        """将当前身体状态展平为 29 维状态向量字典。
+
+        键为 STATE_AXES 中定义的轴名，值为对应的浮点数。
+        用于 kernel 的决策计算和 codec 的二进制编码。
+        """
         vector = {
             "pulse.beat": self.pulse.beat,
             "pulse.rhythm": self.pulse.rhythm,
@@ -263,6 +372,18 @@ class AlphaBodyState:
         elapsed: float = 1.0,
         repetition: int = 0,
     ) -> dict[str, float]:
+        """将一次交互事件编码为 9 维事件向量。
+
+        Args:
+            text: 用户输入文本
+            flags: 事件标志列表（idle/safe/hurt/boundary/repair）
+            confidence: 置信度 [0,1]
+            elapsed: 距上次事件的时间间隔（秒，截断到 [1,12]）
+            repetition: 该文本的历史重复次数
+
+        Returns:
+            9 维事件向量字典，键为 EVENT_AXES 中的轴名
+        """
         flags = list(flags or [])
         clean_text = text.strip()
         vector = {
@@ -279,12 +400,22 @@ class AlphaBodyState:
         return {axis: vector[axis] for axis in EVENT_AXES}
 
     def vector_delta(self, event: dict[str, float]) -> dict[str, float]:
+        """计算事件向量对状态向量的增量。
+
+        组合线性权重矩阵投影 + 注意力机制的非线性修正。
+        """
         delta = linear_delta(event)
         for axis, value in attention_delta(self.state_vector(), event).items():
             delta[axis] = delta.get(axis, 0.0) + value
         return delta
 
     def apply_vector_delta(self, delta: dict[str, float], *, now: float = 0.0) -> None:
+        """将状态增量应用到身体各轴，所有值 clamp 到 [0,1]。
+
+        Args:
+            delta: 状态增量字典，键为 STATE_AXES 轴名
+            now: 当前时间戳，用于更新 pulse.last_tick
+        """
         self.pulse.beat = max(0.0, self.pulse.beat + delta.get("pulse.beat", 0.0))
         self.pulse.rhythm = _clamp(self.pulse.rhythm + delta.get("pulse.rhythm", 0.0))
         self.pulse.strain = _clamp(self.pulse.strain + delta.get("pulse.strain", 0.0))
@@ -368,6 +499,7 @@ class AlphaBodyState:
         )
 
     def simulate_vectors(self, events: list[dict[str, float]]) -> dict[str, float]:
+        """在克隆体上模拟一系列事件，返回最终状态向量（不修改自身）。"""
         clone = AlphaBodyState.from_dict(self.to_dict())
         now = clone.pulse.last_tick
         for event in events:
@@ -376,6 +508,10 @@ class AlphaBodyState:
         return clone.state_vector()
 
     def recall_memory(self, query: str, *, limit: int = 5) -> list[dict[str, Any]]:
+        """基于关键词匹配从 traces 中召回相关记忆。
+
+        评分规则：精确匹配 +1，词重叠 +1/词，权重加成。
+        """
         terms = {part for part in query.strip().split() if part}
         scored = []
         for trace in self.memory.get("traces", []):
@@ -402,6 +538,13 @@ class AlphaBodyState:
         self.memory["traces"] = traces[: max(0, limit)]
 
     def relationship_memory(self) -> dict[str, Any]:
+        """返回关系记忆的结构化摘要。
+
+        基于显式信号计数（偏好/边界/进展/修复）判断关系阶段：
+        - low_signal: 信号不足，不参与 prompt
+        - forming_continuity: 正在形成连续性
+        - active_continuity: 活跃的关系连续性
+        """
         relationship = self.memory.setdefault("relationship", {})
         signals = relationship.setdefault("signals", {})
         preference_count = int(signals.get("preference_count") or 0)
@@ -507,6 +650,21 @@ class AlphaBodyState:
         confidence: float = 0.0,
         now: float = 0.0,
     ) -> None:
+        """接收一次交互事件，驱动身体状态完整演化。
+
+        这是身体状态的主入口方法，执行以下步骤：
+        1. 构建 9 维事件向量
+        2. 计算并应用状态增量（线性投影 + 注意力修正）
+        3. 执行非线性后处理（疲劳累积、伤口自愈、疤痕形成等）
+        4. 处理免疫系统控制信号（pause/resume/reset）
+        5. 更新记忆流动和 traces
+
+        Args:
+            text: 用户输入文本
+            flags: 事件标志列表
+            confidence: 置信度
+            now: 当前时间戳
+        """
         flags = list(flags or [])
         text = text.strip()
         elapsed = max(0.0, now - self.pulse.last_tick) if now else 1.0

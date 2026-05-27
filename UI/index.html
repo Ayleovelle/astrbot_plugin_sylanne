@@ -1,0 +1,3654 @@
+<!DOCTYPE html>
+<html lang="zh-CN" data-theme="dark" data-lang="zh">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<script>
+// Apply saved theme BEFORE CSS renders to prevent flash
+(function(){
+  var t = localStorage.getItem('sylanne_theme');
+  if (!t) t = matchMedia('(prefers-color-scheme:light)').matches ? 'light' : 'dark';
+  document.documentElement.setAttribute('data-theme', t);
+  var l = localStorage.getItem('sylanne_lang');
+  if (l) document.documentElement.setAttribute('data-lang', l);
+})();
+</script>
+<title>SYLANNE LAB - Neural Embodiment Dashboard</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Rajdhani:wght@500;700&family=JetBrains+Mono:wght@400;700&display=block" rel="stylesheet">
+<style>
+:root {
+  --bg:#1a1a1b;
+  --card:rgba(30,30,30,0.8);
+  --card-border:rgba(255,255,255,0.06);
+  --text:#f0ece4;
+  --text-muted:#888;
+  --accent:#B88A9E;
+  --glow:rgba(184,138,158,0.15);
+  --cyan:#00b4d8;
+  --red:#ff4444;
+  --amber:#ffaa00;
+  --void-fill:rgba(0,0,0,0.45);
+  --void-solid:26,26,27;
+  --font-head:'Rajdhani',sans-serif;
+  --font-mono:'JetBrains Mono',monospace;
+  --font-body:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;
+}
+[data-theme="light"] {
+  --bg:#f5f4f2;
+  --card:rgba(255,255,255,0.7);
+  --card-border:rgba(0,0,0,0.06);
+  --text:#1a1a1a;
+  --text-muted:#666;
+  --void-fill:rgba(0,0,0,0.12);
+  --void-solid:245,244,242;
+}
+*,*::before,*::after {
+  margin:0;
+  padding:0;
+  box-sizing:border-box;
+}
+html,body {
+  height:100%;
+  font-family:var(--font-head);
+  background:var(--bg);
+  color:var(--text);
+  transition:background .4s ease,color .4s ease;
+  overflow:hidden;
+}
+#dashboardSection { display:none; }
+body::after {
+  content:'';
+  position:fixed;
+  inset:0;
+  z-index:9999;
+  pointer-events:none;
+  background:repeating-linear-gradient(0deg,transparent,transparent 2px,rgba(184,138,158,0.012) 2px,rgba(184,138,158,0.012) 4px);
+  animation:scanDrift 10s linear infinite;
+}
+@keyframes scanDrift { to { transform: translateY(4px); } }
+
+/* ═══ LOGIN SECTION STYLES ═══ */
+#loginSection {
+  position:fixed; inset:0; z-index:200;
+  display:flex; justify-content:center; align-items:center;
+}
+#networkCanvas {
+  position:fixed; inset:0; z-index:1; width:100vw; height:100vh;
+  transition:opacity 0.8s ease;
+}
+.deco-tl { position:fixed; top:36px; left:36px; z-index:50; transform:translateX(-80px); opacity:0; transition:transform 0.6s cubic-bezier(0.25,1,0.2,1), opacity 0.5s ease; }
+.deco-tl.entered { transform:translateX(0); opacity:1; }
+.deco-tl .sm { font-family:var(--font-head); font-size:10px; font-weight:700; letter-spacing:2px; opacity:0.6; }
+.deco-tl .lg { font-family:var(--font-head); font-size:15px; font-weight:700; letter-spacing:2.5px; margin-top:2px; }
+.deco-bl { position:fixed; bottom:36px; left:36px; z-index:50; font-family:var(--font-head); font-size:15px; font-weight:700; letter-spacing:2.5px; transform:translateX(-80px); opacity:0; transition:transform 0.6s cubic-bezier(0.25,1,0.2,1) 0.1s, opacity 0.5s ease 0.1s; }
+.deco-bl.entered { transform:translateX(0); opacity:1; }
+.deco-bl::before { content:''; position:absolute; top:-10px; left:0; width:22px; height:3px; background:var(--accent); border-radius:2px; }
+.phase {
+  position:fixed; inset:0; z-index:10;
+  display:flex; justify-content:center; align-items:center;
+  opacity:0; pointer-events:none;
+  transform:scale(0.97); transition:opacity 0.6s cubic-bezier(0.25,1,0.2,1), transform 0.6s cubic-bezier(0.25,1,0.2,1);
+}
+.phase.active { opacity:1; pointer-events:auto; transform:scale(1); }
+.boot-wrap { display:flex; flex-direction:column; align-items:flex-start; animation:fadeUp 1s cubic-bezier(0.2,1,0.2,1) forwards; }
+.boot-label { background:var(--text); color:var(--bg); padding:6px 14px; font-family:var(--font-head); font-size:11px; font-weight:700; letter-spacing:2px; border-radius:3px; margin-bottom:8px; }
+.boot-title { font-family:var(--font-head); font-size:28px; font-weight:700; letter-spacing:4px; }
+/* ═══ LOADING SCREEN ═══ */
+#loadingScreen { position:fixed; inset:0; z-index:50000; background:var(--bg); display:flex; flex-direction:column; align-items:center; justify-content:center; transition:opacity 0.6s ease; }
+#loadingScreen.fade-out { opacity:0; pointer-events:none; }
+.loading-label { background:var(--text); color:var(--bg); padding:5px 12px; font-family:var(--font-head); font-size:10px; font-weight:700; letter-spacing:2px; border-radius:3px; margin-bottom:10px; }
+.loading-title { font-family:var(--font-head); font-size:24px; font-weight:700; letter-spacing:4px; margin-bottom:24px; }
+.loading-spinner { width:24px; height:24px; border:2px solid transparent; border-top-color:var(--accent); border-right-color:var(--accent); border-radius:50%; animation:spin 0.8s linear infinite; margin-bottom:12px; }
+@keyframes spin { to { transform:rotate(360deg); } }
+.loading-status { font-family:var(--font-head); font-size:11px; letter-spacing:2px; color:var(--text-muted); }
+@keyframes fadeUp { from { opacity:0; transform:translateY(24px); } to { opacity:1; transform:translateY(0); } }
+.login-box { max-width:380px; width:90%; }
+.logo-row { display:flex; align-items:center; gap:14px; margin-bottom:36px; }
+.logo-svg { width:48px; height:48px; flex-shrink:0; color:var(--text); }
+.logo-titles h1 { font-family:var(--font-head); font-size:21px; font-weight:700; letter-spacing:2.5px; line-height:1.1; }
+.logo-titles p { font-size:9px; opacity:0.4; font-weight:600; letter-spacing:1.5px; margin-top:3px; }
+.input-label { display:block; font-family:var(--font-head); font-size:11px; font-weight:700; letter-spacing:1.5px; opacity:0.65; margin-bottom:10px; }
+#tokenInput {
+  width:100%; padding:12px 0; font-size:18px; font-family:var(--font-mono); letter-spacing:3px;
+  border:none; border-bottom:2px solid rgba(240,236,228,0.15); background:transparent; color:var(--text);
+  outline:none; transition:border-color 0.3s, box-shadow 0.3s;
+}
+[data-theme="light"] #tokenInput { border-bottom-color:rgba(26,26,26,0.15); }
+#tokenInput:focus { border-bottom-color:var(--accent); box-shadow:0 3px 12px rgba(184,138,158,0.18); }
+.submit-btn {
+  margin-top:36px; width:100%; padding:16px; font-family:var(--font-head); font-size:14px; font-weight:700;
+  letter-spacing:3px; border:none; border-radius:100px; cursor:pointer;
+  background:var(--text); color:var(--bg);
+  transition:transform 0.2s cubic-bezier(0.25,1,0.2,1), box-shadow 0.3s;
+}
+.submit-btn:hover { transform:translateY(-3px); box-shadow:0 10px 28px rgba(184,138,158,0.22); }
+.submit-btn:active { transform:translateY(-1px); }
+@keyframes shake { 0%,100% { transform:translateX(0); } 25% { transform:translateX(8px); } 75% { transform:translateX(-8px); } }
+.shake { animation:shake 0.3s ease; }
+.confirm-row { display:flex; align-items:center; gap:24px; }
+.status-svg { width:48px; height:48px; }
+#circleRing { transform-origin:50px 50px; }
+#circleRing.spinning { animation:spin 1.1s linear infinite; }
+@keyframes spin { to { transform:rotate(360deg); } }
+.stroke { fill:none; stroke:var(--text); stroke-width:7; stroke-linecap:round; stroke-linejoin:round; stroke-dasharray:252; stroke-dashoffset:252; transition:stroke-dashoffset 0.5s cubic-bezier(0.7,0,1,0.5), stroke 0.4s; }
+.state-verifying .stroke.circle { stroke-dashoffset:70; }
+.state-success .stroke.circle { stroke-dashoffset:0; stroke:var(--accent); transition:stroke-dashoffset 0.45s cubic-bezier(0.5,0,0.8,0.4), stroke 0.3s ease 0.3s; }
+.state-success .stroke.check { stroke-dashoffset:0; stroke:var(--accent); transition:stroke-dashoffset 0.4s cubic-bezier(0.4,0,0.2,1) 0.5s, stroke 0.3s ease 0.5s; }
+.state-error .stroke.circle { stroke-dashoffset:0; stroke:#e84040; }
+.state-error .stroke.cross1, .state-error .stroke.cross2 { stroke-dashoffset:0; stroke:#e84040; }
+.text-stack { position:relative; height:48px; width:220px; }
+.text-item { position:absolute; inset:0; opacity:0; transform:translateY(8px); transition:opacity 0.4s, transform 0.4s cubic-bezier(0.25,1,0.2,1); }
+.text-item h2 { font-family:var(--font-head); font-size:18px; font-weight:700; letter-spacing:2px; }
+.text-item p { font-size:11px; color:var(--text-muted); margin-top:6px; font-weight:600; letter-spacing:0.5px; }
+.state-verifying .text-item.t-verify { opacity:1; transform:translateY(0); }
+.state-success .text-item.t-success { opacity:1; transform:translateY(0); }
+.state-error .text-item.t-error { opacity:1; transform:translateY(0); }
+/* Login exit transitions */
+.exit-left { transition:transform 0.7s cubic-bezier(0.4,0,0.2,1), opacity 0.5s ease !important; transform:translateX(-100px) !important; opacity:0 !important; }
+
+/* ═══ FIXED SPINE (permanent element) ═══ */
+.fixed-spine {
+  position:fixed;
+  top:0; bottom:0;
+  left:50%;
+  transform:translateX(-50%);
+  width:40px;
+  z-index:300;
+  pointer-events:none;
+}
+.fixed-spine .spine-line {
+  position:absolute;
+  top:0; bottom:0;
+  left:50%;
+  width:3px;
+  transform:translateX(-50%);
+  background:linear-gradient(180deg,transparent 5%,var(--accent) 15%,var(--accent) 85%,transparent 95%);
+  opacity:0;
+  clip-path:inset(0 0 100% 0);
+  transition:clip-path 1.6s cubic-bezier(0.4,0,0.2,1);
+}
+.fixed-spine.active .spine-line { opacity:1; clip-path:inset(0 0 0% 0); }
+.fixed-spine .spine-node {
+  position:absolute;
+  left:50%;
+  transform:translate(-50%,-50%);
+  width:12px;
+  height:12px;
+  border-radius:50%;
+  border:2px solid var(--accent);
+  background:var(--accent);
+  opacity:0;
+  cursor:pointer;
+  pointer-events:none;
+  transition:all .3s ease, opacity 0.5s ease 0.3s;
+}
+.fixed-spine.nodes-visible .spine-node { opacity:0.4; pointer-events:auto; }
+.fixed-spine .spine-node.active {
+  background:var(--accent); opacity:1; box-shadow:0 0 10px rgba(184,138,158,0.5);
+}
+.fixed-spine .spine-node:hover {
+  opacity:0.8; transform:translate(-50%,-50%) scale(1.5);
+}
+/* ═══ SPINE DRAGGABLE HANDLE ═══ */
+.spine-handle {
+  position:absolute;
+  left:50%;
+  width:16px;
+  height:16px;
+  border-radius:50%;
+  background:var(--accent);
+  transform:translate(-50%,-50%);
+  cursor:grab;
+  z-index:110;
+  pointer-events:none;
+  opacity:0;
+  box-shadow:0 0 8px rgba(184,138,158,0.3);
+  transition:top 0.3s cubic-bezier(0.4,0,0.2,1), opacity 0.5s ease, width 0.25s ease, height 0.25s ease, box-shadow 0.25s ease;
+}
+.spine-handle:hover, .spine-handle:active {
+  width:26px;
+  height:26px;
+  box-shadow:0 0 14px rgba(184,138,158,0.6), 0 0 28px rgba(184,138,158,0.25);
+  cursor:grabbing;
+}
+.fixed-spine.nodes-visible .spine-handle { opacity:0.45; pointer-events:auto; }
+.fixed-spine.nodes-visible .spine-handle:hover { opacity:0.9; }
+/* ═══ DASHBOARD STYLES ═══ */
+.app-layout {
+  display:grid;
+  grid-template-columns:1fr 1fr;
+  grid-template-rows:52px 1fr 36px;
+  height:100vh;
+  width:100%;
+}
+.app-header {
+  grid-column:1/-1;
+  grid-row:1;
+  display:flex;
+  align-items:center;
+  justify-content:space-between;
+  padding:0 24px;
+  border-bottom:1px solid var(--card-border);
+  z-index:50;
+  transform:translateY(-100%);
+  opacity:0;
+  transition:transform 0.6s cubic-bezier(0.4,0,0.2,1) 0.1s, opacity 0.4s ease 0.1s;
+}
+.app-header.entered { transform:translateY(0); opacity:1; }
+.app-footer {
+  grid-column:1/-1;
+  grid-row:3;
+  display:flex;
+  align-items:center;
+  padding:0 24px;
+  border-top:1px solid var(--card-border);
+  z-index:50;
+  transform:translateY(100%);
+  opacity:0;
+  transition:transform 0.6s cubic-bezier(0.4,0,0.2,1) 0.1s, opacity 0.4s ease 0.1s;
+}
+.app-footer.entered { transform:translateY(0); opacity:1; }
+.content-viewport {
+  grid-column:1/-1;
+  grid-row:2;
+  overflow:hidden;
+  position:relative;
+}
+.content-slider {
+  position:absolute;
+  top:0;left:0;right:0;
+  transition:transform 0.6s cubic-bezier(0.4,0,0.2,1);
+}
+.page-section {
+  height:calc(100vh - 52px - 36px);
+  display:grid;
+  grid-template-columns:1fr 1fr;
+  background:var(--bg);
+}
+.page-section .page-left {
+  padding:16px 44px 16px 24px;
+  overflow-y:auto;
+  scrollbar-width:none;
+}
+.page-section .page-left::-webkit-scrollbar { display:none; }
+.page-section .page-right {
+  padding:16px 24px 16px 44px;
+  overflow-y:auto;
+  scrollbar-width:none;
+}
+.page-section .page-right::-webkit-scrollbar { display:none; }
+/* Card animations */
+@keyframes cardFromLeft {
+  from { opacity:0; transform:translateX(40px); }
+  to { opacity:1; transform:translateX(0); }
+}
+@keyframes cardFromRight {
+  from { opacity:0; transform:translateX(-40px); }
+  to { opacity:1; transform:translateX(0); }
+}
+.page-left .card.animate-in { animation:cardFromLeft .5s cubic-bezier(0.4,0,0.2,1) forwards; }
+.page-right .card.animate-in { animation:cardFromRight .5s cubic-bezier(0.4,0,0.2,1) forwards; }
+.awaiting-entrance .card { opacity:0; }
+.card {
+  background:var(--card);
+  border:1px solid var(--card-border);
+  border-radius:12px;
+  padding:20px;
+  margin-bottom:16px;
+  position:relative;
+}
+.card-title {
+  font-family:var(--font-head);
+  font-size:.75rem;
+  font-weight:700;
+  letter-spacing:2px;
+  text-transform:uppercase;
+  color:var(--text-muted);
+  margin-bottom:16px;
+}
+.header-left { display:flex; flex-direction:column; justify-content:center; }
+.header-left .h-label { font-size:10px; font-weight:700; letter-spacing:2px; opacity:.7; }
+.header-left .h-title { font-size:15px; font-weight:700; letter-spacing:2.5px; margin-top:1px; }
+.header-right { display:flex; align-items:center; gap:12px; }
+.session-stack { position:relative; }
+.session-pill {
+  font-family:var(--font-mono);
+  font-size:10px;
+  padding:4px 10px;
+  border-radius:20px;
+  background:var(--card);
+  border:1px solid var(--card-border);
+  letter-spacing:1px;
+  cursor:pointer;
+  position:relative;
+  padding-right:22px;
+  transition:border-color 0.2s ease, box-shadow 0.2s ease;
+}
+.session-pill:hover, .session-stack.open .session-pill { border-color:var(--accent); box-shadow:0 0 0 2px var(--glow); }
+.session-pill-arrow { position:absolute; right:8px; top:50%; width:5px; height:5px; border-right:1.5px solid var(--text-muted); border-bottom:1.5px solid var(--text-muted); transform:translateY(-60%) rotate(45deg); transition:transform 0.2s ease; }
+.session-stack.open .session-pill-arrow { transform:translateY(-40%) rotate(225deg); }
+.session-menu { max-height:0; overflow:hidden; border-radius:10px; margin-top:0; transition:max-height 0.3s cubic-bezier(0.4,0,0.2,1), margin-top 0.3s ease, opacity 0.2s ease; opacity:0; position:absolute; top:100%; right:0; min-width:140px; z-index:100; background:var(--card); }
+.session-stack.open .session-menu { max-height:200px; margin-top:6px; opacity:1; border:1px solid var(--card-border); padding:4px; overflow-y:auto; }
+.session-opt { width:100%; border:none; background:transparent; color:var(--text); border-radius:6px; padding:6px 10px; text-align:left; cursor:pointer; font-family:var(--font-mono); font-size:10px; letter-spacing:0.5px; transition:background 0.15s ease; }
+.session-opt:hover { background:var(--glow); }
+.session-opt.active { background:var(--glow); color:var(--accent); }
+.theme-toggle, .lang-toggle {
+  font-family:var(--font-head);
+  font-size:11px;
+  font-weight:700;
+  letter-spacing:1px;
+  padding:4px 12px;
+  border-radius:20px;
+  border:1px solid var(--card-border);
+  background:var(--card);
+  color:var(--text);
+  cursor:pointer;
+  transition:all .3s ease;
+}
+.theme-toggle:hover, .lang-toggle:hover { border-color:var(--accent); }
+.status-dot {
+  width:8px; height:8px; border-radius:50%;
+  background:#4caf50; transition:background .3s ease;
+}
+.status-dot.offline { background:var(--red); }
+.footer-label { font-size:15px; font-weight:700; letter-spacing:2.5px; color:var(--text-muted); }
+::-webkit-scrollbar { width:4px; }
+::-webkit-scrollbar-track { background:transparent; }
+::-webkit-scrollbar-thumb { background:var(--accent); border-radius:2px; }
+/* Bar rows */
+.bar-row { display:flex; align-items:center; margin-bottom:10px; }
+.bar-label { font-family:var(--font-mono); font-size:11px; width:140px; color:var(--text-muted); }
+.bar-track { flex:1; height:10px; background:rgba(255,255,255,0.12); border-radius:5px; overflow:hidden; }
+.bar-fill { height:100%; border-radius:5px; background:var(--accent); transition:width .6s ease; box-shadow:0 0 6px rgba(184,138,158,0.4); }
+.bar-value { font-family:var(--font-mono); font-size:11px; width:40px; text-align:right; }
+/* Stat grid */
+.stat-grid { display:grid; grid-template-columns:1fr 1fr; gap:12px; }
+.stat-box { text-align:center; padding:12px; border-radius:8px; background:rgba(255,255,255,0.03); }
+.stat-box .stat-val { font-family:var(--font-mono); font-size:18px; font-weight:700; color:var(--accent); }
+.stat-box .stat-lbl { font-size:10px; letter-spacing:1px; color:var(--text-muted); margin-top:4px; }
+/* Timing table */
+.timing-table { width:100%; border-collapse:collapse; font-family:var(--font-mono); font-size:11px; }
+.timing-table th { text-align:left; padding:6px 8px; color:var(--text-muted); border-bottom:1px solid var(--card-border); font-weight:700; }
+.timing-table td { padding:6px 8px; border-bottom:1px solid var(--card-border); }
+/* Route bar */
+.route-bar { display:flex; height:24px; border-radius:6px; overflow:hidden; margin-bottom:12px; }
+.route-seg { transition:width .6s ease; display:flex; align-items:center; justify-content:center; font-size:10px; font-weight:700; letter-spacing:1px; }
+.route-legend { display:flex; gap:16px; flex-wrap:wrap; }
+.route-legend-item { display:flex; align-items:center; gap:6px; font-size:11px; }
+.route-legend-dot { width:8px; height:8px; border-radius:50%; }
+/* Gate grid */
+.gate-grid { display:grid; grid-template-columns:1fr 1fr 1fr; gap:12px; }
+.gate-item { text-align:center; }
+.gate-val { font-family:var(--font-mono); font-size:20px; font-weight:700; }
+.gate-lbl { font-size:10px; letter-spacing:1px; color:var(--text-muted); margin-top:4px; }
+.mode-badge { display:inline-block; padding:4px 14px; border-radius:20px; font-size:11px; font-weight:700; letter-spacing:1px; background:var(--glow); color:var(--accent); margin-bottom:12px; }
+.feedback-grid { display:grid; grid-template-columns:1fr 1fr 1fr; gap:12px; }
+/* Layer cards */
+.layer-card { display:flex; align-items:center; gap:12px; padding:14px; cursor:pointer; transition:border-color .3s ease; }
+.layer-card:hover { border-color:var(--accent); }
+.layer-card.selected { border-color:var(--accent); box-shadow:0 0 12px var(--glow); }
+.layer-dot { width:8px; height:8px; border-radius:50%; flex-shrink:0; }
+.layer-name { font-weight:700; font-size:13px; letter-spacing:1px; }
+.layer-timing { font-family:var(--font-mono); font-size:11px; color:var(--text-muted); }
+.layer-detail-title { font-size:18px; font-weight:700; letter-spacing:2px; margin-bottom:12px; }
+.layer-detail-desc { font-size:13px; line-height:1.6; color:var(--text-muted); margin-bottom:16px; }
+.layer-detail-stats { display:grid; grid-template-columns:1fr 1fr; gap:12px; }
+/* Config */
+.config-group-title { font-size:12px; font-weight:700; letter-spacing:2px; color:var(--accent); margin-bottom:12px; }
+.config-row { display:flex; align-items:center; justify-content:space-between; padding:10px 0; border-bottom:1px solid var(--card-border); }
+.config-row[data-depends] {
+  max-height:0;
+  opacity:0;
+  overflow:hidden;
+  padding:0;
+  margin:0;
+  border:none;
+  transition: max-height 0.35s cubic-bezier(0.4,0,0.2,1), opacity 0.3s ease, padding 0.3s ease;
+}
+.config-row[data-depends].visible {
+  max-height:60px;
+  opacity:1;
+  padding:10px 0;
+  border-bottom:1px solid var(--card-border);
+}
+.config-label { font-size:12px; font-weight:500; }
+.config-input { font-family:var(--font-mono); font-size:12px; padding:4px 10px; border-radius:6px; border:1px solid var(--card-border); background:rgba(255,255,255,0.03); color:var(--text); width:100px; text-align:right; -moz-appearance:textfield; }
+.config-input::-webkit-outer-spin-button, .config-input::-webkit-inner-spin-button { -webkit-appearance:none; margin:0; }
+.config-select { font-family:var(--font-mono); font-size:12px; padding:4px 10px; border-radius:6px; border:1px solid var(--card-border); background:rgba(255,255,255,0.03); color:var(--text); }
+.config-toggle { width:36px; height:20px; border-radius:10px; background:rgba(255,255,255,0.1); position:relative; cursor:pointer; transition:background .3s ease; }
+.config-toggle.on { background:var(--accent); }
+.config-toggle::after { content:''; position:absolute; top:3px; left:3px; width:14px; height:14px; border-radius:50%; background:#fff; transition:transform .3s ease; }
+.config-toggle.on::after { transform:translateX(16px); }
+.save-btn { display:block; width:100%; padding:12px; border:none; border-radius:24px; background:var(--accent); color:#fff; font-family:var(--font-head); font-size:14px; font-weight:700; letter-spacing:2px; cursor:pointer; transition:opacity .3s ease,transform .2s ease; margin-top:16px; }
+.save-btn:hover { opacity:.85; transform:scale(1.02); }
+/* Logs */
+.log-terminal { background:#111; border-radius:12px; padding:16px; font-family:var(--font-mono); font-size:11px; line-height:1.8; height:calc(100vh - 52px - 36px - 80px); overflow-y:auto; border:1px solid rgba(255,255,255,0.1); }
+.log-entry { display:flex; gap:10px; align-items:flex-start; padding:2px 0; }
+.log-time { color:#888; white-space:nowrap; }
+.log-badge { display:inline-block; padding:2px 10px; border-radius:4px; font-size:9px; font-weight:700; letter-spacing:1px; white-space:nowrap; }
+.log-badge.fast { background:rgba(184,138,158,0.25); color:#d4a0b8; }
+.log-badge.normal { background:rgba(0,180,216,0.2); color:#33ccee; }
+.log-badge.full { background:rgba(255,170,0,0.2); color:#ffcc44; }
+.log-badge.skip { background:rgba(255,255,255,0.08); color:#aaa; }
+.log-msg { color:#ddd; word-break:break-all; }
+.log-controls { display:flex; align-items:center; gap:16px; margin-bottom:12px; }
+.log-controls label { font-size:12px; display:flex; align-items:center; gap:6px; cursor:pointer; }
+.log-controls input[type="checkbox"] { accent-color:var(--accent); }
+.log-refresh-btn { font-family:var(--font-head); font-size:11px; font-weight:700; letter-spacing:1px; padding:4px 14px; border-radius:20px; border:1px solid var(--card-border); background:var(--card); color:var(--text); cursor:pointer; transition:border-color .3s ease; }
+.log-refresh-btn:hover { border-color:var(--accent); }
+/* Memory */
+.mem-item { padding:12px; border-radius:8px; background:rgba(255,255,255,0.03); margin-bottom:10px; }
+.mem-content { font-size:12px; line-height:1.5; margin-bottom:8px; }
+.mem-meta { display:flex; gap:12px; font-size:10px; color:var(--text-muted); }
+.mem-weight-track { flex:1; height:4px; background:rgba(255,255,255,0.05); border-radius:2px; margin-top:6px; }
+.mem-weight-fill { height:100%; border-radius:2px; background:var(--accent); }
+.mem-list { max-height:300px; overflow-y:auto; scrollbar-width:thin; scrollbar-color:rgba(184,138,158,0.3) transparent; }
+.mem-list::-webkit-scrollbar { width:4px; }
+.mem-list::-webkit-scrollbar-thumb { background:rgba(184,138,158,0.3); border-radius:2px; }
+/* Meltdown */
+.meltdown-zone { border:2px dashed var(--red); border-radius:12px; padding:20px; text-align:center; }
+.meltdown-zone .melt-title { font-size:12px; font-weight:700; letter-spacing:2px; color:var(--red); margin-bottom:12px; }
+.meltdown-btn { padding:8px 24px; border:1px solid var(--red); border-radius:20px; background:transparent; color:var(--red); font-family:var(--font-head); font-size:12px; font-weight:700; letter-spacing:1px; cursor:pointer; transition:all .3s ease; }
+.meltdown-btn:hover { background:var(--red); color:#fff; }
+.meltdown-modal { position:fixed; inset:0; z-index:30000; background:rgba(0,0,0,0); display:flex; align-items:center; justify-content:center; backdrop-filter:blur(0px); pointer-events:none; transition:background 0.3s ease, backdrop-filter 0.3s ease; }
+.meltdown-modal.show { background:rgba(0,0,0,0.6); backdrop-filter:blur(4px); pointer-events:auto; }
+.meltdown-modal-box { background:var(--card); border:1px solid var(--red); border-radius:12px; padding:32px; max-width:400px; width:90%; text-align:center; backdrop-filter:blur(12px); transform:scale(0.9) translateY(20px); opacity:0; transition:transform 0.3s cubic-bezier(0.4,0,0.2,1), opacity 0.3s ease; }
+.meltdown-modal.show .meltdown-modal-box { transform:scale(1) translateY(0); opacity:1; }
+.meltdown-modal-title { font-family:var(--font-head); font-size:1.1rem; font-weight:700; letter-spacing:2px; color:var(--red); margin-bottom:12px; }
+.meltdown-modal-desc { font-size:0.8rem; color:var(--text-muted); margin-bottom:8px; line-height:1.5; }
+.meltdown-nonce { font-family:var(--font-mono); font-size:1.5rem; font-weight:700; letter-spacing:6px; color:var(--red); margin:16px 0; padding:8px; background:rgba(255,68,68,0.08); border-radius:8px; }
+.meltdown-input { width:100%; padding:10px; text-align:center; font-family:var(--font-mono); font-size:1rem; letter-spacing:4px; border:2px solid var(--card-border); border-radius:8px; background:var(--card); color:var(--text); outline:none; margin-bottom:0; }
+.meltdown-input:focus { border-color:var(--red); }
+.meltdown-actions { display:flex; gap:12px; justify-content:center; }
+.meltdown-cancel { padding:10px 20px; border-radius:100px; border:1px solid var(--card-border); background:transparent; color:var(--text); font-family:var(--font-head); font-weight:700; letter-spacing:1px; cursor:pointer; }
+.meltdown-confirm { padding:10px 20px; border-radius:100px; border:none; background:var(--red); color:#fff; font-family:var(--font-head); font-weight:700; letter-spacing:1px; cursor:pointer; opacity:0.5; pointer-events:none; }
+.meltdown-confirm.enabled { opacity:1; pointer-events:auto; }
+/* Meltdown input area & countdown transitions */
+.meltdown-input-area { transition: opacity 0.4s ease, max-height 0.4s ease, margin 0.4s ease; max-height:80px; overflow:hidden; opacity:1; margin-bottom:16px; }
+.meltdown-input-area.hidden { opacity:0; max-height:0; margin:0; pointer-events:none; }
+.meltdown-countdown { display:none; opacity:0; transition: opacity 0.4s ease 0.2s; text-align:center; margin:12px 0 16px; }
+.meltdown-countdown.active { display:block; opacity:1; }
+.meltdown-countdown-num { font-family:var(--font-mono); font-size:3.5rem; font-weight:900; color:var(--red); letter-spacing:2px; animation: meltdown-pulse 1s ease-in-out infinite; text-shadow: 0 0 20px rgba(255,68,68,0.4); }
+@keyframes meltdown-pulse { 0%,100%{ transform:scale(1); opacity:1; } 50%{ transform:scale(1.08); opacity:0.7; } }
+/* Meltdown actions countdown mode */
+.meltdown-abort { display:none; width:100%; padding:14px 20px; border-radius:100px; border:none; background:var(--red); color:#fff; font-family:var(--font-head); font-size:1.1rem; font-weight:900; letter-spacing:2px; cursor:pointer; opacity:0; transition: opacity 0.4s ease 0.2s, transform 0.3s ease; transform:scale(0.9); }
+.meltdown-actions.countdown-mode .meltdown-cancel { opacity:0; width:0; padding:0; margin:0; overflow:hidden; pointer-events:none; border:none; transition: opacity 0.3s ease, width 0.3s ease, padding 0.3s ease; }
+.meltdown-actions.countdown-mode .meltdown-confirm { opacity:0; width:0; padding:0; margin:0; overflow:hidden; pointer-events:none; transition: opacity 0.3s ease, width 0.3s ease, padding 0.3s ease; }
+.meltdown-actions.countdown-mode .meltdown-abort { display:block; opacity:1; transform:scale(1); }
+.meltdown-actions.countdown-mode { justify-content:center; }
+.meltdown-abort:hover { background:#ff1a1a; transform:scale(1.03); }
+.meltdown-abort:active { transform:scale(0.97); }
+/* Personality */
+.radar-svg { width:100%; max-width:300px; margin:0 auto; display:block; }
+.radar-polygon { fill:rgba(184,138,158,0.15); stroke:var(--accent); stroke-width:2; }
+.radar-grid { fill:none; stroke:var(--card-border); stroke-width:1; }
+.radar-label { font-family:var(--font-head); font-size:10px; fill:var(--text-muted); font-weight:700; letter-spacing:1px; }
+.six-bar { display:flex; align-items:center; margin-bottom:12px; }
+.six-bar-label { font-size:11px; width:100px; font-weight:700; letter-spacing:1px; }
+.six-bar-track { flex:1; height:8px; background:rgba(255,255,255,0.05); border-radius:4px; overflow:hidden; }
+.six-bar-fill { height:100%; border-radius:4px; transition:width .6s ease; }
+.drift-timeline { position:relative; padding-left:20px; }
+.drift-timeline::before { content:''; position:absolute; left:6px; top:0; bottom:0; width:2px; background:var(--card-border); }
+.drift-event { position:relative; margin-bottom:16px; padding-left:16px; }
+.drift-event::before { content:''; position:absolute; left:-17px; top:6px; width:8px; height:8px; border-radius:50%; background:var(--accent); }
+.drift-event-time { font-family:var(--font-mono); font-size:10px; color:var(--text-muted); }
+.drift-event-text { font-size:12px; margin-top:4px; }
+/* Provider Picker */
+.provider-stack { position:relative; width:200px; }
+.provider-btn { width:100%; padding:8px 32px 8px 12px; background:var(--card); border:1px solid var(--card-border); border-radius:8px; color:var(--text); font-family:var(--font-mono); font-size:0.75rem; text-align:left; cursor:pointer; position:relative; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; transition:border-color 0.2s ease, box-shadow 0.2s ease; }
+.provider-btn:hover, .provider-stack.open .provider-btn { border-color:var(--accent); box-shadow:0 0 0 2px var(--glow); }
+.provider-btn-arrow { position:absolute; right:10px; top:50%; width:6px; height:6px; border-right:1.5px solid var(--text-muted); border-bottom:1.5px solid var(--text-muted); transform:translateY(-60%) rotate(45deg); transition:transform 0.2s ease; }
+.provider-stack.open .provider-btn-arrow { transform:translateY(-40%) rotate(225deg); }
+.provider-menu { max-height:0; overflow:hidden; border-radius:10px; margin-top:0; transition:max-height 0.3s cubic-bezier(0.4,0,0.2,1), margin-top 0.3s ease, opacity 0.2s ease; opacity:0; }
+.provider-stack.open .provider-menu { max-height:300px; margin-top:8px; opacity:1; border:1px solid var(--card-border); padding:4px; overflow-y:auto; scrollbar-width:thin; scrollbar-color:var(--accent) transparent; }
+.provider-stack.open .provider-menu::-webkit-scrollbar { width:5px; }
+.provider-stack.open .provider-menu::-webkit-scrollbar-track { background:transparent; }
+.provider-stack.open .provider-menu::-webkit-scrollbar-thumb { background:var(--accent); border-radius:3px; }
+.provider-opt { width:100%; border:none; background:transparent; color:var(--text); border-radius:6px; padding:8px 10px; text-align:left; cursor:pointer; font-size:0.78rem; display:flex; flex-direction:column; gap:2px; transition:background 0.15s ease; }
+.provider-opt:hover { background:var(--glow); }
+.provider-opt.active { background:var(--glow); color:var(--accent); }
+.provider-opt small { color:var(--text-muted); font-family:var(--font-mono); font-size:0.65rem; }
+.provider-manual { max-height:0; opacity:0; overflow:hidden; transition:max-height 0.25s ease, opacity 0.2s ease, margin-top 0.2s ease; }
+.provider-stack.manual-active .provider-manual { max-height:50px; opacity:1; margin-top:8px; }
+.provider-manual-input { width:100%; padding:8px 12px; background:var(--card); border:1px solid var(--card-border); border-radius:8px; color:var(--text); font-family:var(--font-mono); font-size:0.75rem; outline:none; transition:border-color 0.2s ease; }
+.provider-manual-input:focus { border-color:var(--accent); }
+/* ═══ PET ═══ */
+</style>
+</head>
+<body>
+
+<!-- LOADING SCREEN (covers everything until resources ready) -->
+<div id="loadingScreen">
+  <div class="loading-label">SYSTEM INIT</div>
+  <div class="loading-title">SYLANNE EMBODIMENT</div>
+  <div class="loading-spinner"></div>
+  <div class="loading-status">CONNECTING</div>
+</div>
+
+<!-- PERMANENT: Fixed spine line (always in DOM) -->
+<div class="fixed-spine" id="fixedSpine">
+  <div class="spine-line"></div>
+  <!-- 可拖拽手柄：用户可上下拖动切换页面 -->
+  <div class="spine-handle" id="spineHandle" style="top:20%"></div>
+  <div class="spine-node" style="top:20%" data-page="monitor" title="Monitor"></div>
+  <div class="spine-node" style="top:32%" data-page="spine" title="Spine"></div>
+  <div class="spine-node" style="top:44%" data-page="config" title="Config"></div>
+  <div class="spine-node" style="top:56%" data-page="logs" title="Logs"></div>
+  <div class="spine-node" style="top:68%" data-page="memory" title="Memory"></div>
+  <div class="spine-node" style="top:80%" data-page="personality" title="Personality"></div>
+</div>
+
+<!-- LOGIN SECTION (hidden during loading and after auth) -->
+<div id="loginSection" style="display:none">
+  <canvas id="networkCanvas"></canvas>
+  <div class="deco-tl"><div class="sm">ANALYSIS OS</div><div class="lg">SYLANNE EMBODIMENT</div></div>
+  <div class="deco-bl">SYLANNE LAB</div>
+
+  <!-- Phase 1: removed — boot sequence now in loading screen -->
+  <div class="phase" id="p1"></div>
+
+  <!-- Phase 3: Login Form -->
+  <div class="phase" id="p3">
+    <div class="login-box">
+      <div class="logo-row">
+        <svg class="logo-svg" viewBox="0 0 100 100" fill="none">
+          <path d="M 45 12 L 45 38 L 37 44 L 53 56 L 45 62 L 45 88" stroke="currentColor" stroke-width="7" stroke-linecap="round" stroke-linejoin="round"/>
+          <path d="M 33 20 C 14 28, 14 72, 33 80" stroke="currentColor" stroke-width="4.5" stroke-linecap="round" opacity="0.45"/>
+          <circle cx="53" cy="56" r="5" fill="var(--accent)"/>
+          <line x1="64" y1="28" x2="72" y2="28" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" opacity="0.5"/>
+          <line x1="64" y1="38" x2="80" y2="38" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" opacity="0.65"/>
+          <line x1="64" y1="48" x2="84" y2="48" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" opacity="0.7"/>
+          <line x1="64" y1="58" x2="82" y2="58" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" opacity="0.7"/>
+          <line x1="64" y1="68" x2="76" y2="68" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" opacity="0.55"/>
+          <line x1="64" y1="78" x2="68" y2="78" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" opacity="0.35"/>
+        </svg>
+        <div class="logo-titles">
+          <h1>SYLANNE LAB</h1>
+          <p>NEURAL EMBODIMENT OS</p>
+        </div>
+      </div>
+      <label class="input-label" for="tokenInput">AUTHORIZATION TOKEN</label>
+      <input type="password" id="tokenInput" autocomplete="off" spellcheck="false">
+      <button class="submit-btn" onclick="doLogin()">AUTHENTICATE</button>
+    </div>
+  </div>
+
+  <!-- Phase 4: Verification -->
+  <div class="phase" id="p4">
+    <div class="confirm-row state-verifying" id="confirmBox">
+      <svg class="status-svg" viewBox="0 0 100 100">
+        <g id="circleRing" class="spinning">
+          <circle class="stroke circle" cx="50" cy="50" r="40"/>
+        </g>
+        <path class="stroke check" d="M 35 52 L 45 62 L 68 38"/>
+        <path class="stroke cross1" d="M 35 35 L 65 65"/>
+        <path class="stroke cross2" d="M 65 35 L 35 65"/>
+      </svg>
+      <div class="text-stack">
+        <div class="text-item t-verify"><h2>VERIFYING ID</h2><p>CHECKING CREDENTIALS</p></div>
+        <div class="text-item t-success"><h2>NEURAL LINK ACTIVE</h2><p id="contactIdDisplay" style="font-family:var(--font-mono);font-size:13px;line-height:1.8;color:var(--text)">&#x300C;Sylanne&#x300D;<br><span style="font-size:10px;color:var(--text-muted);letter-spacing:1px">OS. Embodiment-1.2.5</span></p></div>
+        <div class="text-item t-error"><h2>ACCESS DENIED</h2><p>INVALID TOKEN DETECTED</p></div>
+      </div>
+    </div>
+  </div>
+</div>
+<!-- DASHBOARD SECTION (hidden until auth) -->
+<div id="dashboardSection" style="display:none">
+  <div id="appLayout" class="app-layout">
+    <!-- HEADER -->
+    <header class="app-header">
+      <div class="header-left">
+        <div class="h-label">ANALYSIS OS</div>
+        <div class="h-title">SYLANNE EMBODIMENT</div>
+      </div>
+      <div class="header-right">
+        <div class="session-stack" id="sessionStack">
+          <span class="session-pill" id="sessionId" onclick="toggleSessionMenu()">SES-0000<span class="session-pill-arrow"></span></span>
+          <div class="session-menu" id="sessionMenu"></div>
+        </div>
+        <button class="theme-toggle" id="themeBtn" onclick="toggleTheme()">LIGHT</button>
+        <button class="lang-toggle" id="langToggle" onclick="toggleLang()">EN</button>
+        <button class="lang-toggle" onclick="logout()" style="color:var(--red);border-color:var(--red)">OUT</button>
+        <div class="status-dot" id="statusDot"></div>
+      </div>
+    </header>
+
+    <!-- CONTENT VIEWPORT (vertical slider) -->
+    <div class="content-viewport">
+      <div class="content-slider" id="contentSlider">
+        <!-- Page 0: Monitor -->
+        <div class="page-section" data-page="monitor">
+          <div class="page-left" id="monitorLeft"></div>
+          <div class="page-right" id="monitorRight"></div>
+        </div>
+        <!-- Page 1: Spine -->
+        <div class="page-section" data-page="spine">
+          <div class="page-left" id="spineLeft"></div>
+          <div class="page-right" id="spineRight"></div>
+        </div>
+        <!-- Page 2: Config -->
+        <div class="page-section" data-page="config">
+          <div class="page-left" id="configLeft"></div>
+          <div class="page-right" id="configRight"></div>
+        </div>
+        <!-- Page 3: Logs -->
+        <div class="page-section" data-page="logs">
+          <div class="page-left" id="logsLeft"></div>
+          <div class="page-right" id="logsRight"></div>
+        </div>
+        <!-- Page 4: Memory -->
+        <div class="page-section" data-page="memory">
+          <div class="page-left" id="memoryLeft"></div>
+          <div class="page-right" id="memoryRight"></div>
+        </div>
+        <!-- Page 5: Personality -->
+        <div class="page-section" data-page="personality">
+          <div class="page-left" id="personalityLeft"></div>
+          <div class="page-right" id="personalityRight"></div>
+        </div>
+      </div>
+    </div>
+
+    <!-- FOOTER -->
+    <footer class="app-footer">
+      <span class="footer-label">SYLANNE LAB</span>
+    </footer>
+  </div>
+</div>
+
+<!-- MELTDOWN CONFIRMATION MODAL -->
+<div class="meltdown-modal" id="meltdownModal">
+  <div class="meltdown-modal-box">
+    <div class="meltdown-modal-title">MEMORY MELTDOWN</div>
+    <div class="meltdown-modal-desc">This will permanently erase all memory pools. This action is IRREVERSIBLE.</div>
+    <div class="meltdown-modal-desc">Type the verification code below to confirm:</div>
+    <div class="meltdown-nonce" id="meltdownNonce">----</div>
+    <div class="meltdown-input-area" id="meltdownInputArea">
+      <input type="text" class="meltdown-input" id="meltdownInput" placeholder="Enter code" autocomplete="off">
+    </div>
+    <div class="meltdown-countdown" id="meltdownCountdown">
+      <span class="meltdown-countdown-num" id="meltdownCountdownNum">10</span>
+    </div>
+    <div class="meltdown-actions" id="meltdownActions">
+      <button class="meltdown-cancel" onclick="closeMeltdown()">CANCEL</button>
+      <button class="meltdown-confirm" onclick="confirmMeltdown()">EXECUTE MELTDOWN</button>
+      <button class="meltdown-abort" id="meltdownAbort" onclick="abortMeltdown()">终止！！！</button>
+    </div>
+  </div>
+</div>
+<!-- PET CHARACTER (disabled) -->
+
+<script>
+/* ═══════════════════════════════════════════════════════════════
+   NETWORK CANVAS (login background)
+   ═══════════════════════════════════════════════════════════════ */
+var canvasRaf;
+// ── 虚空过渡状态 ──
+// null = 正常, 'expanding' = 登录→仪表盘（标本膨胀吞噬屏幕）, 'shrinking' = 登出→登录（标本从全屏缩回）
+var voidTransitionState = null;
+var voidTransitionStart = 0;       // 过渡开始时间戳
+var voidTransitionDuration = 2000; // 过渡持续时间 ms（expanding ~2s）
+var voidTransitionCallback = null; // 过渡完成后的回调
+function initNetworkCanvas(skipFadeIn) {
+  var cv = document.getElementById('networkCanvas');
+  if (!cv) return;
+  var cx = cv.getContext('2d');
+  var W, H;
+  function resize() { W = cv.width = innerWidth; H = cv.height = innerHeight; }
+  resize(); addEventListener('resize', resize);
+
+  // ── 淡入效果：canvas 从透明渐显（登出回缩时跳过） ──
+  if (!skipFadeIn) {
+    cv.style.opacity = '0';
+    cv.style.transition = 'opacity 1.5s ease';
+    requestAnimationFrame(function() { cv.style.opacity = '1'; });
+  } else {
+    cv.style.opacity = '1';
+    cv.style.transition = '';
+  }
+
+  // ── 全局时间基准 ──
+  var startTime = performance.now();
+
+  // ═══ 1. 标本体（Specimen）：中心变形虫状生物 ═══
+  // 12-16 个控制点，各自独立振荡产生有机轮廓
+  var NUM_CTRL = 14;
+  var ctrlPoints = [];
+  for (var i = 0; i < NUM_CTRL; i++) {
+    ctrlPoints.push({
+      baseAngle: (Math.PI * 2 * i) / NUM_CTRL,
+      // 每个点有 3 层正弦叠加，频率/振幅/相位各异
+      freq1: 0.8 + Math.random() * 0.4,   // 主呼吸频率 ~5s 周期
+      amp1: 0.06 + Math.random() * 0.04,
+      phase1: Math.random() * Math.PI * 2,
+      freq2: 1.5 + Math.random() * 1.0,   // 次级波动
+      amp2: 0.02 + Math.random() * 0.02,
+      phase2: Math.random() * Math.PI * 2,
+      freq3: 3.0 + Math.random() * 2.0,   // 微颤
+      amp3: 0.008 + Math.random() * 0.008,
+      phase3: Math.random() * Math.PI * 2
+    });
+  }
+
+  // 伪足（pseudopod）状态
+  var pseudopod = { active: false, pointIdx: 0, startTime: 0, duration: 2000, extension: 0 };
+  var nextPseudopodTime = startTime + 8000 + Math.random() * 4000;
+
+  // ═══ 2. 疤痕（Scars）— 永久留存，颜色渐渐融入空洞 ═══
+  var scars = []; // { angle, startTime, scarLen, settled:false }
+  var nextScarTime = startTime + 5000 + Math.random() * 10000;
+  var MAX_SCARS = 12; // 最大伤痕数（引力归零上限）
+
+  // ═══ 3. 扫描线（Scan Line） ═══
+  var scanLine = { y: -10, speed: 0, startTime: startTime, period: 7000 };
+
+  // ═══ 4. 观测标记（静态 UI 叠加层）── 只绘制一次到离屏 canvas ═══
+  var overlayCanvas = document.createElement('canvas');
+  var overlayCx = overlayCanvas.getContext('2d');
+  var overlayDirty = true;
+
+  function drawOverlay() {
+    overlayCanvas.width = W;
+    overlayCanvas.height = H;
+    overlayCx.clearRect(0, 0, W, H);
+
+    // 中心十字准线（极淡）
+    var cX = W / 2, cY = H / 2;
+    overlayCx.strokeStyle = 'rgba(255,255,255,0.04)';
+    overlayCx.lineWidth = 1;
+    overlayCx.beginPath();
+    overlayCx.moveTo(cX - 40, cY); overlayCx.lineTo(cX + 40, cY);
+    overlayCx.moveTo(cX, cY - 40); overlayCx.lineTo(cX, cY + 40);
+    overlayCx.stroke();
+
+    // 边缘刻度线（显微镜标尺感）
+    overlayCx.strokeStyle = 'rgba(255,255,255,0.03)';
+    overlayCx.lineWidth = 1;
+    for (var i = 0; i < W; i += 60) {
+      var len = (i % 180 === 0) ? 10 : 5;
+      overlayCx.beginPath();
+      overlayCx.moveTo(i, 0); overlayCx.lineTo(i, len);
+      overlayCx.moveTo(i, H); overlayCx.lineTo(i, H - len);
+      overlayCx.stroke();
+    }
+    for (var j = 0; j < H; j += 60) {
+      var len2 = (j % 180 === 0) ? 10 : 5;
+      overlayCx.beginPath();
+      overlayCx.moveTo(0, j); overlayCx.lineTo(len2, j);
+      overlayCx.moveTo(W, j); overlayCx.lineTo(W - len2, j);
+      overlayCx.stroke();
+    }
+    overlayDirty = false;
+  }
+
+  // ═══ 5. 环境粒子（黑洞引力吸引系统） ═══
+  // 60-80 个粒子散布在整个画布，被标本中心以反平方律引力吸引
+  // 粒子具有切向初速度 → 产生螺旋轨迹（非直线坠入）
+  var NUM_PARTICLES = 70;
+  var particles = [];
+
+  // 在画布边缘随机生成粒子（带切向初速度产生螺旋效果）
+  function spawnParticleAtEdge() {
+    // 随机选择画布四边之一作为出生点
+    var edge = Math.floor(Math.random() * 4);
+    var px, py;
+    switch (edge) {
+      case 0: px = Math.random() * W; py = -10; break;          // 上边
+      case 1: px = Math.random() * W; py = H + 10; break;       // 下边
+      case 2: px = -10; py = Math.random() * H; break;          // 左边
+      default: px = W + 10; py = Math.random() * H; break;      // 右边
+    }
+    // 计算到中心的方向
+    var dx = W / 2 - px;
+    var dy = H / 2 - py;
+    var dist = Math.sqrt(dx * dx + dy * dy) || 1;
+    var angle = Math.atan2(dy, dx);
+    // 初始速度：切向分量较大（垂直于径向），径向分量很小 → 螺旋轨迹
+    var tangentialSpeed = 0.2 + Math.random() * 0.3;
+    var radialSpeed = 0.05 + Math.random() * 0.1;
+    return {
+      x: px,
+      y: py,
+      // 切向速度（angle + PI/2 = 垂直于指向中心的方向）
+      vx: Math.cos(angle + Math.PI / 2) * tangentialSpeed + Math.cos(angle) * radialSpeed + (Math.random() - 0.5) * 0.15,
+      vy: Math.sin(angle + Math.PI / 2) * tangentialSpeed + Math.sin(angle) * radialSpeed + (Math.random() - 0.5) * 0.15,
+      size: 1.5 + Math.random() * 1.5,  // 1.5-3px 随机大小
+      opacity: 0.15 + Math.random() * 0.2,  // 初始透明度
+      fadeOut: 0,  // 0 = 正常, >0 = 正在淡出（被吸收时）
+      // 疤痕散射状态
+      scatterVx: 0, scatterVy: 0
+    };
+  }
+
+  // 初始化：粒子散布在整个画布（不仅仅是标本附近）
+  for (var i = 0; i < NUM_PARTICLES; i++) {
+    var p = spawnParticleAtEdge();
+    // 初始位置随机分布在整个画布，而非仅边缘
+    p.x = Math.random() * W;
+    p.y = Math.random() * H;
+    // 避免初始位置在标本内部
+    var initDx = p.x - W / 2;
+    var initDy = p.y - H / 2;
+    var initDist = Math.sqrt(initDx * initDx + initDy * initDy);
+    if (initDist < Math.min(W, H) * 0.15) {
+      // 推到标本外围
+      var pushAngle = Math.atan2(initDy, initDx);
+      p.x = W / 2 + Math.cos(pushAngle) * (Math.min(W, H) * 0.2 + Math.random() * 100);
+      p.y = H / 2 + Math.sin(pushAngle) * (Math.min(W, H) * 0.2 + Math.random() * 100);
+    }
+    // 给初始粒子切向速度（产生轨道运动感）
+    var toDx = W / 2 - p.x;
+    var toDy = H / 2 - p.y;
+    var toAngle = Math.atan2(toDy, toDx);
+    p.vx = Math.cos(toAngle + Math.PI / 2) * (0.1 + Math.random() * 0.2);
+    p.vy = Math.sin(toAngle + Math.PI / 2) * (0.1 + Math.random() * 0.2);
+    particles.push(p);
+  }
+
+  // ═══ 主绘制循环 ═══
+  function draw() {
+    var now = performance.now();
+    var t = (now - startTime) / 1000; // 秒
+
+    cx.clearRect(0, 0, W, H);
+
+    // ── 绘制静态叠加层 ──
+    if (overlayDirty) drawOverlay();
+    cx.drawImage(overlayCanvas, 0, 0);
+
+    // ── REC 指示灯（右上角，缓慢闪烁） ──
+    var recAlpha = 0.15 + 0.15 * Math.sin(t * 1.2);
+    cx.fillStyle = 'rgba(255,68,68,' + recAlpha.toFixed(3) + ')';
+    cx.beginPath();
+    cx.arc(W - 30, 30, 4, 0, Math.PI * 2);
+    cx.fill();
+    cx.font = '9px monospace';
+    cx.fillStyle = 'rgba(255,68,68,' + (recAlpha * 0.8).toFixed(3) + ')';
+    cx.fillText('REC', W - 55, 34);
+
+    // ── 计算标本中心和基础半径 ──
+    var specCX = W / 2;
+    var specCY = H / 2;
+    var normalBaseRadius = Math.min(W, H) * 0.12; // 正常状态半径
+    var baseRadius = normalBaseRadius;
+
+    // ── 虚空过渡：膨胀/收缩标本半径 ──
+    var voidTransitionProgress = 0; // 0~1 过渡进度
+    if (voidTransitionState) {
+      var elapsed = now - voidTransitionStart;
+      voidTransitionProgress = Math.min(elapsed / voidTransitionDuration, 1.0);
+
+      var eased;
+      if (voidTransitionState === 'shrinking') {
+        // 平滑 ease-out：快速开始，缓慢收尾
+        var t = voidTransitionProgress;
+        eased = 1 - Math.pow(1 - t, 3);
+      } else {
+        // expanding 保持 ease-in-out
+        eased = voidTransitionProgress < 0.5
+          ? 2 * voidTransitionProgress * voidTransitionProgress
+          : 1 - Math.pow(-2 * voidTransitionProgress + 2, 2) / 2;
+      }
+
+      var maxRadius = Math.hypot(W, H); // 对角线长度，确保覆盖全屏
+      if (voidTransitionState === 'expanding') {
+        // 从正常半径膨胀到全屏
+        baseRadius = normalBaseRadius + (maxRadius - normalBaseRadius) * eased;
+      } else if (voidTransitionState === 'shrinking') {
+        // 从全屏收缩到正常半径
+        baseRadius = maxRadius - (maxRadius - normalBaseRadius) * eased;
+      }
+
+      // 过渡完成时触发回调
+      if (voidTransitionProgress >= 1.0) {
+        var cb = voidTransitionCallback;
+        voidTransitionState = null;
+        voidTransitionCallback = null;
+        if (cb) cb();
+      }
+    }
+
+    // ── 伪足逻辑 ──
+    // 伤痕越多，空洞挣扎越激烈（伪足更频繁、更大）
+    var agitation = scars.length / MAX_SCARS; // 0~1
+    var pseudopodInterval = 8000 - agitation * 6000; // 8s → 2s
+    var pseudopodStrength = 0.25 + agitation * 0.35; // 0.25 → 0.6
+
+    if (!pseudopod.active && now > nextPseudopodTime) {
+      pseudopod.active = true;
+      pseudopod.pointIdx = Math.floor(Math.random() * NUM_CTRL);
+      pseudopod.startTime = now;
+      pseudopod.duration = 1800 + Math.random() * 400;
+      nextPseudopodTime = now + pseudopodInterval + Math.random() * (pseudopodInterval * 0.5);
+    }
+    if (pseudopod.active) {
+      var elapsed = now - pseudopod.startTime;
+      if (elapsed > pseudopod.duration) {
+        pseudopod.active = false;
+        pseudopod.extension = 0;
+      } else {
+        pseudopod.extension = Math.sin((elapsed / pseudopod.duration) * Math.PI) * pseudopodStrength;
+      }
+    }
+
+    // ── 绘制标本轮廓 ──
+    var outlinePoints = [];
+    for (var i = 0; i < NUM_CTRL; i++) {
+      var cp = ctrlPoints[i];
+      // 多层正弦叠加产生有机呼吸感
+      var osc = Math.sin(t * cp.freq1 + cp.phase1) * cp.amp1
+              + Math.sin(t * cp.freq2 + cp.phase2) * cp.amp2
+              + Math.sin(t * cp.freq3 + cp.phase3) * cp.amp3;
+      var r = baseRadius * (1.0 + osc);
+      // 伪足额外延伸
+      if (pseudopod.active && i === pseudopod.pointIdx) {
+        r += baseRadius * pseudopod.extension;
+      }
+      var angle = cp.baseAngle;
+      outlinePoints.push({
+        x: specCX + Math.cos(angle) * r,
+        y: specCY + Math.sin(angle) * r,
+        r: r
+      });
+    }
+
+    // 引力因子（伤痕越多引力越低）— 扫描线和粒子共用
+    var scarGravityFactor = Math.max(0, 1 - scars.length / MAX_SCARS);
+
+    // ── 扫描线（简单直线，在空洞下面） ──
+    var scanElapsed = (now - scanLine.startTime) % scanLine.period;
+    var scanY = (scanElapsed / scanLine.period) * (H + 20) - 10;
+    var distToSpec = Math.abs(scanY - specCY);
+    var scanAlpha = distToSpec < baseRadius * 1.2 ? 0.12 : 0.06;
+    cx.strokeStyle = 'rgba(184,138,158,' + scanAlpha.toFixed(3) + ')';
+    cx.lineWidth = 1;
+    cx.beginPath();
+    cx.moveTo(0, scanY);
+    cx.lineTo(W, scanY);
+    cx.stroke();
+
+    // 用平滑曲线连接控制点（catmull-rom → bezier 近似）
+    cx.beginPath();
+    for (var i = 0; i < NUM_CTRL; i++) {
+      var p0 = outlinePoints[(i - 1 + NUM_CTRL) % NUM_CTRL];
+      var p1 = outlinePoints[i];
+      var p2 = outlinePoints[(i + 1) % NUM_CTRL];
+      var p3 = outlinePoints[(i + 2) % NUM_CTRL];
+      if (i === 0) cx.moveTo(p1.x, p1.y);
+      // Catmull-Rom 转 cubic bezier 控制点
+      var cp1x = p1.x + (p2.x - p0.x) / 6;
+      var cp1y = p1.y + (p2.y - p0.y) / 6;
+      var cp2x = p2.x - (p3.x - p1.x) / 6;
+      var cp2y = p2.y - (p3.y - p1.y) / 6;
+      cx.bezierCurveTo(cp1x, cp1y, cp2x, cp2y, p2.x, p2.y);
+    }
+    cx.closePath();
+
+    // 标本内部填充 — 过渡期间颜色加深至背景色
+    var voidSolid = getComputedStyle(document.documentElement).getPropertyValue('--void-solid').trim();
+    if (voidTransitionState) {
+      // 过渡中：从半透明渐变为不透明背景色
+      var fillAlpha = 0.15 + 0.85 * voidTransitionProgress;
+      cx.fillStyle = 'rgba(' + voidSolid + ',' + fillAlpha + ')';
+    } else {
+      // 正常状态：使用主题适配的半透明填充
+      cx.fillStyle = getComputedStyle(document.documentElement).getPropertyValue('--void-fill').trim();
+    }
+    cx.fill();
+
+    // 标本轮廓描边 — 过渡期间逐渐隐藏
+    var strokeAlpha = voidTransitionState ? 0.3 * (1 - voidTransitionProgress) : 0.3;
+    cx.strokeStyle = 'rgba(184,138,158,' + strokeAlpha.toFixed(3) + ')';
+    cx.lineWidth = 1.5;
+    cx.stroke();
+
+    // ── 疤痕逻辑 ──
+    if (now > nextScarTime && scars.length < MAX_SCARS && scarGravityFactor > 0) {
+      var scarAngle = Math.random() * Math.PI * 2;
+      scars.push({ angle: scarAngle, startTime: now, scarLen: 60 + Math.random() * 30, cutDir: Math.random() < 0.5 ? 1 : -1 });
+      // 15s 内随机出现 1-2 道：间隔 7.5-15s
+      nextScarTime = now + 7500 + Math.random() * 7500;
+
+      // 疤痕出现时，附近粒子散射
+      var scarX = specCX + Math.cos(scarAngle) * baseRadius;
+      var scarY = specCY + Math.sin(scarAngle) * baseRadius;
+      for (var pi = 0; pi < particles.length; pi++) {
+        var pp = particles[pi];
+        var dx = pp.x - scarX, dy = pp.y - scarY;
+        var dist = Math.hypot(dx, dy);
+        if (dist < 120 && dist > 0) {
+          var force = (1 - dist / 120) * 2.5;
+          pp.scatterVx = (dx / dist) * force;
+          pp.scatterVy = (dy / dist) * force;
+        }
+      }
+    }
+
+    // 绘制伤痕（永久存在，颜色渐渐融入空洞）
+    for (var si = 0; si < scars.length; si++) {
+      var scar = scars[si];
+      var scarElapsed = now - scar.startTime;
+      // 伤痕在 8s 内从明亮缓慢变为残痕色，之后保持残痕
+      var scarProgress = Math.min(scarElapsed / 8000, 1.0);
+      var scarAlpha, scarR, scarG, scarB;
+      if (scarProgress < 0.15) {
+        // 明亮阶段：粉色高亮，alpha 随切割展开渐入
+        scarAlpha = cutEased * 1.0;
+        scarR = 200; scarG = 140; scarB = 165;
+      } else if (scarProgress < 0.8) {
+        // 缓慢过渡：粉色 → 暗红残痕（持续 ~5.2s）
+        var blend = (scarProgress - 0.15) / 0.65;
+        // 用 ease-out 让前期变化慢、后期加速
+        blend = 1 - Math.pow(1 - blend, 2);
+        scarR = 200 + (100 - 200) * blend;
+        scarG = 140 + (50 - 140) * blend;
+        scarB = 165 + (70 - 165) * blend;
+        scarAlpha = 1.0 - blend * 0.6;
+      } else {
+        // 残痕：永久保持可见
+        scarR = 100; scarG = 50; scarB = 70;
+        scarAlpha = 0.4;
+      }
+
+      // 伤痕位置跟随空洞表面（插值轮廓实际半径，随呼吸/伪足一起动）
+      var scarDepth = 0.55 + Math.abs(Math.sin(scar.angle * 3.7)) * 0.35;
+      var lenFactor = 1.0 - scarProgress * 0.15;
+      // 切割动画：0.6s 内从一端向另一端划开（单方向）
+      var cutProgress = Math.min(scarElapsed / 600, 1.0);
+      var cutEased = 1 - Math.pow(1 - cutProgress, 2); // ease-out
+      var scarLen = scar.scarLen * lenFactor;
+      // 伤痕沿切线方向展开，两端角度偏移
+      var angularSpan = scarLen / (baseRadius * 2); // 伤痕在圆上的角跨度
+      var angleL = scar.angle - angularSpan * 0.5;
+      var angleR = scar.angle + angularSpan * 0.5;
+      var angleC = scar.angle;
+
+      // 采样三个点的轮廓半径（左端、中心、右端）
+      function sampleSurfaceR(a) {
+        var an = ((a % (Math.PI * 2)) + Math.PI * 2) % (Math.PI * 2);
+        var sf = an / (Math.PI * 2) * NUM_CTRL;
+        var si2 = Math.floor(sf) % NUM_CTRL;
+        var st = sf - Math.floor(sf);
+        return outlinePoints[si2].r + (outlinePoints[(si2 + 1) % NUM_CTRL].r - outlinePoints[si2].r) * st;
+      }
+      var rL = sampleSurfaceR(angleL) * scarDepth;
+      var rC = sampleSurfaceR(angleC) * scarDepth;
+      var rR = sampleSurfaceR(angleR) * scarDepth;
+
+      // 伤痕三个关键点（左端、中心、右端）的实际坐标
+      // 单方向切割：从一端向另一端划开（方向随机）
+      var startX, startY, fullEndX, fullEndY, fullMidX, fullMidY;
+      var fX1 = specCX + Math.cos(angleL) * rL;
+      var fY1 = specCY + Math.sin(angleL) * rL;
+      var fX2 = specCX + Math.cos(angleR) * rR;
+      var fY2 = specCY + Math.sin(angleR) * rR;
+      var fSx = specCX + Math.cos(angleC) * rC;
+      var fSy = specCY + Math.sin(angleC) * rC;
+      if (scar.cutDir > 0) {
+        startX = fX1; startY = fY1; fullEndX = fX2; fullEndY = fY2;
+      } else {
+        startX = fX2; startY = fY2; fullEndX = fX1; fullEndY = fY1;
+      }
+      var x1 = startX;
+      var y1 = startY;
+      var x2 = startX + (fullEndX - startX) * cutEased;
+      var y2 = startY + (fullEndY - startY) * cutEased;
+      var sx = startX + (fSx - startX) * cutEased;
+      var sy = startY + (fSy - startY) * cutEased;
+
+      // 切口梭形：中间鼓起方向沿径向（指向中心或远离中心）
+      var bulge = (2.5 + scarAlpha * 2.0);
+      var bulgeDx = Math.cos(angleC) * bulge;
+      var bulgeDy = Math.sin(angleC) * bulge;
+
+      var scarColor = 'rgba(' + Math.round(scarR) + ',' + Math.round(scarG) + ',' + Math.round(scarB) + ',' + scarAlpha.toFixed(3) + ')';
+      cx.fillStyle = scarColor;
+      cx.beginPath();
+      cx.moveTo(x1, y1);
+      cx.quadraticCurveTo(sx + bulgeDx, sy + bulgeDy, x2, y2);
+      cx.quadraticCurveTo(sx - bulgeDx, sy - bulgeDy, x1, y1);
+      cx.closePath();
+      cx.fill();
+
+      // 新伤痕发光效果
+      if (scarProgress < 0.15) {
+        cx.shadowColor = 'rgba(200,140,165,0.6)';
+        cx.shadowBlur = 12;
+        cx.fill();
+        cx.shadowBlur = 0;
+      }
+    }
+
+    // ── 环境粒子（黑洞引力物理） ──
+    var baseGravity = voidTransitionState === 'expanding' ? 4000 : 500;
+    var gravityG = baseGravity * scarGravityFactor;
+    var absorptionRadius = baseRadius * 0.6;
+
+    for (var pi = 0; pi < particles.length; pi++) {
+      var pp = particles[pi];
+
+      // ── 计算到空洞中心的方向和距离 ──
+      var dxToCenter = specCX - pp.x;
+      var dyToCenter = specCY - pp.y;
+      var distToCenter = Math.sqrt(dxToCenter * dxToCenter + dyToCenter * dyToCenter);
+
+      // ── 引力加速度（反平方律，近处极强远处微弱） ──
+      // +100 防止除零和过强（软化参数）
+      var force = gravityG / (distToCenter * distToCenter + 100);
+
+      // 施加加速度到速度（方向指向中心）
+      if (distToCenter > 0) {
+        pp.vx += (dxToCenter / distToCenter) * force;
+        pp.vy += (dyToCenter / distToCenter) * force;
+      }
+
+      // 轻微阻尼防止无限加速（模拟介质阻力）
+      pp.vx *= 0.998;
+      pp.vy *= 0.998;
+
+      // 散射衰减（疤痕爆发产生的推力）
+      pp.scatterVx *= 0.95;
+      pp.scatterVy *= 0.95;
+
+      // 更新位置
+      pp.x += pp.vx + pp.scatterVx;
+      pp.y += pp.vy + pp.scatterVy;
+
+      // ── 吸收判定：粒子碰到标本边界 ──
+      // 大部分粒子在边界湮灭（事件视界），小部分穿透进入内部
+      if (pp.fadeOut === 0) {
+        if (distToCenter < baseRadius) {
+          // 已经在边界内：80% 概率立即湮灭，20% 穿透继续
+          if (Math.random() < 0.8) {
+            pp.fadeOut = 0.8; // 快速湮灭（在边界处消失）
+          } else {
+            pp.fadeOut = 0.01; // 标记为已穿透，进入内部后缓慢淡出
+          }
+        }
+      } else if (pp.fadeOut < 0.1) {
+        // 穿透粒子：进入核心后淡出
+        if (distToCenter < absorptionRadius) {
+          pp.fadeOut = 0.5;
+        }
+      }
+
+      // ── 淡出过程：opacity 递减，完成后重生 ──
+      if (pp.fadeOut > 0) {
+        pp.fadeOut += 0.04; // 淡出速度（约 25 帧完成）
+        if (pp.fadeOut >= 1.5) {
+          // 重生：在画布边缘重新生成，带新的切向速度
+          var newP = spawnParticleAtEdge();
+          pp.x = newP.x;
+          pp.y = newP.y;
+          pp.vx = newP.vx;
+          pp.vy = newP.vy;
+          pp.size = newP.size;
+          pp.opacity = newP.opacity;
+          pp.fadeOut = 0;
+          pp.scatterVx = 0;
+          pp.scatterVy = 0;
+          continue; // 本帧不绘制，下帧开始显示
+        }
+      }
+
+      // ── 粒子视觉效果 ──
+      // 速度越快越亮（被引力加速时"加热"发光）
+      var speed = Math.sqrt(pp.vx * pp.vx + pp.vy * pp.vy);
+      // 距离越近越亮（接近黑洞时被"加热"）
+      var proximityBrightness = Math.min(1.0, 200 / (distToCenter + 50));
+      // 基础透明度 0.15-0.5，速度和距离加成
+      var pAlpha = Math.min(0.6, pp.opacity + speed * 0.15 + proximityBrightness * 0.2);
+      // 淡出时降低透明度
+      if (pp.fadeOut > 0) {
+        pAlpha *= Math.max(0, 1 - (pp.fadeOut - 0) / 1.0);
+      }
+
+      if (pAlpha > 0.01) {
+        cx.fillStyle = 'rgba(184,138,158,' + pAlpha.toFixed(3) + ')';
+        cx.beginPath();
+        cx.arc(pp.x, pp.y, pp.size, 0, Math.PI * 2);
+        cx.fill();
+      }
+    }
+
+    canvasRaf = requestAnimationFrame(draw);
+  }
+
+  // resize 时重绘静态叠加层
+  var origResize = resize;
+  resize = function() { origResize(); overlayDirty = true; };
+  addEventListener('resize', function() { overlayDirty = true; });
+
+  draw();
+}
+
+function stopNetworkCanvas() {
+  if (canvasRaf) { cancelAnimationFrame(canvasRaf); canvasRaf = null; }
+}
+
+/* ═══════════════════════════════════════════════════════════════
+   GLOBAL STATE
+   ═══════════════════════════════════════════════════════════════ */
+var isPreview = false;
+var currentPage = null;
+var appState = null;
+var autoScroll = true;
+var selectedLayer = 0;
+// 全局会话标识：持久化选中的 session，页面导航/重渲染不会丢失
+var currentSession = localStorage.getItem('sylanne_session') || '';
+
+/* ═══════════════════════════════════════════════════════════════
+   I18N
+   ═══════════════════════════════════════════════════════════════ */
+var I18N = {
+  zh: {
+    brand_small: 'ANALYSIS OS',
+    brand_large: 'SYLANNE EMBODIMENT',
+    footer: 'SYLANNE LAB',
+    nav_monitor: '监控',
+    nav_spine: '脊柱',
+    nav_config: '配置',
+    nav_logs: '日志',
+    nav_memory: '记忆',
+    nav_personality: '人格',
+    emotion_title: '情感维度',
+    route_title: '路由分布',
+    gate_title: '门控统计',
+    boundary_title: '边界统计',
+    expression_title: '表达阶段',
+    feedback_title: '反馈计数',
+    timing_title: '耗时统计',
+    spine_title: '计算脊柱',
+    spine_detail: '层级详情',
+    spine_click: '点击左侧层级查看详情',
+    config_save: '保存配置',
+    logs_title: '计算日志',
+    logs_controls: '日志控制',
+    logs_autoscroll: '自动滚动',
+    logs_refresh: '刷新',
+    logs_stats: '路由统计',
+    mem_l1: 'L1 热存储',
+    mem_l2: 'L2 温存储',
+    mem_l3: 'L3 冷存储',
+    mem_meltdown_title: '记忆熔毁区',
+    mem_meltdown_desc: '此操作将永久清除所有记忆池，不可逆。',
+    mem_meltdown_btn: '执行熔毁',
+    mem_meltdown_modal_title: '记忆熔毁',
+    mem_meltdown_modal_desc: '此操作将永久清除所有记忆池，不可撤销。',
+    mem_meltdown_modal_code: '输入下方验证码确认：',
+    mem_meltdown_cancel: '取消',
+    mem_meltdown_confirm: '执行熔毁',
+    mem_meltdown_abort: '终止！！！',
+    personality_radar: '具身五维',
+    personality_surface: '夙澜六维',
+    personality_drift: '漂移时间线',
+    positive: '正面',
+    negative: '负面',
+    neutral: '中性',
+    active: '活跃',
+    idle: '空闲',
+    watching: '监听',
+    cfg_identity: '身份',
+    cfg_webui: 'WebUI',
+    cfg_realtime: '实时功能',
+    cfg_memory: '记忆与评估',
+    cfg_life: '生活模拟',
+    cfg_advanced: '高级',
+    select_provider_placeholder: '-- 选择提供商 --',
+  },
+  en: {
+    brand_small: 'ANALYSIS OS',
+    brand_large: 'SYLANNE EMBODIMENT',
+    footer: 'SYLANNE LAB',
+    nav_monitor: 'MONITOR',
+    nav_spine: 'SPINE',
+    nav_config: 'CONFIG',
+    nav_logs: 'LOGS',
+    nav_memory: 'MEMORY',
+    nav_personality: 'PERSONALITY',
+    emotion_title: 'EMOTION DIMENSIONS',
+    route_title: 'ROUTE DISTRIBUTION',
+    gate_title: 'GATE STATS',
+    boundary_title: 'BOUNDARY STATS',
+    expression_title: 'EXPRESSION PHASE',
+    feedback_title: 'FEEDBACK COUNTERS',
+    timing_title: 'TIMING',
+    spine_title: 'COMPUTATION SPINE',
+    spine_detail: 'LAYER DETAIL',
+    spine_click: 'Click a layer to view details',
+    config_save: 'SAVE CONFIGURATION',
+    logs_title: 'COMPUTATION LOGS',
+    logs_controls: 'LOG CONTROLS',
+    logs_autoscroll: 'Auto-scroll',
+    logs_refresh: 'REFRESH',
+    logs_stats: 'ROUTE STATS',
+    mem_l1: 'L1 HOT',
+    mem_l2: 'L2 WARM',
+    mem_l3: 'L3 COLD',
+    mem_meltdown_title: 'MELTDOWN ZONE',
+    mem_meltdown_desc: 'This action will permanently erase all memory pools. Irreversible.',
+    mem_meltdown_btn: 'INITIATE MELTDOWN',
+    mem_meltdown_modal_title: 'MEMORY MELTDOWN',
+    mem_meltdown_modal_desc: 'This will permanently erase all memory pools. This action is IRREVERSIBLE.',
+    mem_meltdown_modal_code: 'Type the verification code below to confirm:',
+    mem_meltdown_cancel: 'CANCEL',
+    mem_meltdown_confirm: 'EXECUTE MELTDOWN',
+    mem_meltdown_abort: 'ABORT!!!',
+    personality_radar: 'EMBODIMENT FIVE',
+    personality_surface: 'SYLANNE SIX',
+    personality_drift: 'DRIFT TIMELINE',
+    positive: 'POSITIVE',
+    negative: 'NEGATIVE',
+    neutral: 'NEUTRAL',
+    active: 'ACTIVE',
+    idle: 'IDLE',
+    watching: 'WATCHING',
+    cfg_identity: 'IDENTITY',
+    cfg_webui: 'WEBUI',
+    cfg_realtime: 'REALTIME',
+    cfg_memory: 'MEMORY & ASSESSMENT',
+    cfg_life: 'LIFE SIMULATION',
+    cfg_advanced: 'ADVANCED',
+    select_provider_placeholder: '-- Select Provider --',
+  }
+};
+
+var currentLang = localStorage.getItem('sylanne_lang') || 'zh';
+function t(key) { return I18N[currentLang][key] || I18N['en'][key] || key; }
+function toggleLang() {
+  currentLang = currentLang === 'zh' ? 'en' : 'zh';
+  localStorage.setItem('sylanne_lang', currentLang);
+  document.documentElement.setAttribute('data-lang', currentLang);
+  document.getElementById('langToggle').textContent = currentLang === 'zh' ? 'EN' : '中';
+
+  // 过渡动画：卡片向脊柱线收回 → 重建内容 → 卡片从脊柱线弹出（和登录转场一致）
+  var leftCards = document.querySelectorAll('.page-section .page-left .card');
+  var rightCards = document.querySelectorAll('.page-section .page-right .card');
+
+  // 1. 左侧卡片往右收（translateX +40px），右侧卡片往左收（translateX -40px）
+  leftCards.forEach(function(c) {
+    c.style.transition = 'transform 0.35s cubic-bezier(0.4,0,0.2,1), opacity 0.25s ease';
+    c.style.transform = 'translateX(40px)';
+    c.style.opacity = '0';
+  });
+  rightCards.forEach(function(c) {
+    c.style.transition = 'transform 0.35s cubic-bezier(0.4,0,0.2,1), opacity 0.25s ease';
+    c.style.transform = 'translateX(-40px)';
+    c.style.opacity = '0';
+  });
+
+  // 2. 等收回完成（0.4s），重建内容后弹出
+  setTimeout(async function() {
+    // 给整个 dashboard 加 awaiting-entrance，所有卡片 opacity:0 防止重建时闪现
+    var dashboard = document.getElementById('dashboardSection');
+    dashboard.classList.add('awaiting-entrance');
+
+    pagesRendered = false;
+    await renderAllPages();
+    updateStaticI18n();
+
+    // 清除新卡片可能继承的内联样式
+    var allCards = dashboard.querySelectorAll('.card');
+    allCards.forEach(function(c) { c.style.transition = ''; c.style.transform = ''; c.style.opacity = ''; });
+
+    // 移除 awaiting-entrance 并触发当前页卡片弹出动画
+    dashboard.classList.remove('awaiting-entrance');
+    var currentCards = document.querySelectorAll('.page-section[data-page="' + currentPage + '"] .card');
+    currentCards.forEach(function(c) { c.classList.add('animate-in'); });
+    // 动画结束后清理
+    setTimeout(function() {
+      currentCards.forEach(function(c) { c.classList.remove('animate-in'); });
+    }, 600);
+  }, 400);
+}
+
+function initLang() {
+  currentLang = localStorage.getItem('sylanne_lang') || 'zh';
+  document.documentElement.setAttribute('data-lang', currentLang);
+  document.getElementById('langToggle').textContent = currentLang === 'zh' ? 'EN' : '中';
+  updateStaticI18n();
+}
+
+function updateStaticI18n() {
+  var hLabel = document.querySelector('.header-left .h-label');
+  var hTitle = document.querySelector('.header-left .h-title');
+  var fLabel = document.querySelector('.footer-label');
+  if (hLabel) hLabel.textContent = t('brand_small');
+  if (hTitle) hTitle.textContent = t('brand_large');
+  if (fLabel) fLabel.textContent = t('footer');
+  var modalTitle = document.querySelector('.meltdown-modal-title');
+  var modalDescs = document.querySelectorAll('.meltdown-modal-desc');
+  var modalCancel = document.querySelector('.meltdown-cancel');
+  var modalConfirm = document.querySelector('.meltdown-confirm');
+  var modalAbort = document.querySelector('.meltdown-abort');
+  if (modalTitle) modalTitle.textContent = t('mem_meltdown_modal_title');
+  if (modalDescs.length >= 1) modalDescs[0].textContent = t('mem_meltdown_modal_desc');
+  if (modalDescs.length >= 2) modalDescs[1].textContent = t('mem_meltdown_modal_code');
+  if (modalCancel) modalCancel.textContent = t('mem_meltdown_cancel');
+  if (modalConfirm) modalConfirm.textContent = t('mem_meltdown_confirm');
+  if (modalAbort) modalAbort.textContent = t('mem_meltdown_abort');
+  document.querySelectorAll('.spine-node').forEach(function(node) {
+    var page = node.dataset.page;
+    if (page) node.setAttribute('title', t('nav_' + page));
+  });
+}
+
+/* ═══════════════════════════════════════════════════════════════
+   LLM PROVIDER DATA
+   ═══════════════════════════════════════════════════════════════ */
+var MOCK_PROVIDERS = [
+  {id: 'anthropic-claude', name: 'Anthropic Claude'},
+  {id: 'openai-gpt4', name: 'OpenAI GPT-4'},
+  {id: 'deepseek-v3', name: 'DeepSeek V3'},
+  {id: 'local-ollama', name: 'Local Ollama'},
+];
+
+/* ═══════════════════════════════════════════════════════════════
+   MOCK DATA
+   ═══════════════════════════════════════════════════════════════ */
+var MOCK = {
+  state: {
+    session_id: 'SES-7F3A',
+    sessions: ['SES-7F3A'],
+    emotion: {
+      warmth: 0.72, arousal: 0.45, valence: 0.68, tension: 0.23,
+      curiosity: 0.81, repair_pressure: 0.15, expression_drive: 0.64, boundary_firmness: 0.77
+    },
+    boundary: { integrity: 0.94, entropy: 0.12, rotation: 37, self_repair_rate: 0.88 },
+    timing: [
+      { layer: 'L1 Intake', avg: '2.1ms', p95: '4.8ms', count: 1247 },
+      { layer: 'L2 Emotion', avg: '3.4ms', p95: '7.2ms', count: 1247 },
+      { layer: 'L3 Boundary', avg: '1.8ms', p95: '3.9ms', count: 1102 },
+      { layer: 'L4 Gate', avg: '0.9ms', p95: '2.1ms', count: 1247 },
+      { layer: 'L5 Expression', avg: '4.2ms', p95: '9.1ms', count: 893 },
+      { layer: 'L6 Memory', avg: '2.7ms', p95: '5.5ms', count: 1247 },
+      { layer: 'L7 Personality', avg: '1.3ms', p95: '2.8ms', count: 412 }
+    ],
+    route_distribution: { FAST: 42, NORMAL: 35, FULL: 18, SKIP: 5 },
+    gate: { surprise: 0.34, threshold: 0.50, route: 'NORMAL' },
+    expression: { mode: 'RESPONSIVE', drive: 0.64, threshold: 0.50 },
+    feedback: { positive: 847, negative: 23, neutral: 377 },
+    spine_layers: [
+      {id:'L1', name:'HDC Perception', status:'active', avg:2.1, p50:1.8, p99:8.5, count:1247,
+       desc:'Hyperdimensional binary encoding. Converts text to 2048-bit vectors via character bigram + cyclic shift.'},
+      {id:'L2', name:'Predictive Coding Gate', status:'active', avg:3.4, p50:2.9, p99:12.1, count:1247,
+       desc:'Computes Hamming surprise against prediction. Routes to fast/normal/full processing path.'},
+      {id:'L3', name:'Void-Scar Engine', status:'active', avg:1.8, p50:1.5, p99:6.2, count:892,
+       desc:'Irreversible scar state tracking. Wounds heal through RAW > CLOSING > SCARRED > FADED stages.'},
+      {id:'L4', name:'Relational Sheaf', status:'active', avg:0.9, p50:0.7, p99:3.1, count:892,
+       desc:'Cross-relationship propagation via sheaf Laplacian. Scars from one relationship affect others.'},
+      {id:'L5', name:'MoE-HGT', status:'active', avg:4.2, p50:3.5, p99:15.3, count:892,
+       desc:'Mixture-of-Experts + Heterogeneous Graph Transformer. 7 token types, 4-dim decision output.'},
+      {id:'L6', name:'Autopoietic Boundary', status:'idle', avg:2.7, p50:2.2, p99:9.8, count:156,
+       desc:'32-dim identity kernel with orthogonal projection. Phase transitions limited to 6-degree rotation.'},
+      {id:'L7', name:'Phase Transition', status:'active', avg:1.3, p50:1.0, p99:4.5, count:1247,
+       desc:'Pressure accumulation to threshold. Erupts as hint/normal/urgent expression modes.'}
+    ],
+    personality: {
+      five: { openness: 0.82, warmth: 0.75, intensity: 0.68, autonomy: 0.71, resilience: 0.79 },
+      six: [
+        { name: 'Curiosity', value: 0.81, color: '#B88A9E' },
+        { name: 'Empathy', value: 0.73, color: '#00b4d8' },
+        { name: 'Precision', value: 0.67, color: '#ffaa00' },
+        { name: 'Playfulness', value: 0.59, color: '#4caf50' },
+        { name: 'Defiance', value: 0.44, color: '#ff4444' },
+        { name: 'Melancholy', value: 0.31, color: '#9c27b0' }
+      ],
+      drift: [
+        { time: '2024-01-15 03:22', text: 'Warmth axis shifted +0.04 after extended empathic exchange' },
+        { time: '2024-01-14 19:45', text: 'Defiance spike detected during boundary negotiation' },
+        { time: '2024-01-14 11:30', text: 'Curiosity sustained above 0.8 for 6 hours' },
+        { time: '2024-01-13 22:10', text: 'Resilience recovery after repair cycle completed' }
+      ]
+    }
+  },
+  settings: [
+    { group: 'Identity', items: [
+      { key: 'persona_name', label: 'Persona display name', label_zh: '人格显示名称', type: 'string', value: 'Sylanne' },
+      { key: 'group_attention_trigger_names', label: 'Group chat trigger names', label_zh: '群聊触发名字（逗号分隔）', type: 'string', value: '' }
+    ]},
+    { group: 'WebUI', items: [
+      { key: 'webui_enabled', label: 'Enable WebUI panel', label_zh: '启用 WebUI 管理面板', type: 'toggle', value: false },
+      { key: 'webui_host', label: 'Listen address', label_zh: '监听地址', type: 'string', value: '127.0.0.1' },
+      { key: 'webui_port', label: 'Listen port', label_zh: '监听端口', type: 'number', value: 2718 }
+    ]},
+    { group: 'Realtime', items: [
+      { key: 'realtime_chat_enabled', label: 'Instant chat dispatch', label_zh: '即时聊天调度', type: 'toggle', value: false },
+      { key: 'stream_first_sentence_enabled', label: 'First-sentence early delivery', label_zh: '首句抢发（流式）', type: 'toggle', value: false },
+      { key: 'realtime_intercept_llm_response', label: 'Response segmentation', label_zh: '响应分段接管', type: 'toggle', value: false },
+      { key: 'proactive_dispatch_enabled', label: 'Proactive speech dispatch', label_zh: '主动发起派发', type: 'toggle', value: false },
+      { key: 'proactive_scheduler_enabled', label: 'Proactive scheduler', label_zh: '主动检查调度', type: 'toggle', value: false }
+    ]},
+    { group: 'Memory & Assessment', items: [
+      { key: 'embedding_memory_enabled', label: 'Embedding memory recall', label_zh: '启用 Embedding 记忆召回', type: 'toggle', value: false },
+      { key: 'embedding_memory_provider_id', label: 'Embedding Provider', label_zh: 'Embedding 提供者', type: 'string', value: '' },
+      { key: 'embedding_memory_top_k', label: 'Recall top-K count', label_zh: '召回 top-K 条数', type: 'number', value: 3 },
+      { key: 'assessor_llm_enabled', label: 'Deep assessment LLM', label_zh: '启用深度判断 LLM', type: 'toggle', value: false },
+      { key: 'fast_assessor_enabled', label: 'Instant assessment LLM', label_zh: '启用即时判断 LLM', type: 'toggle', value: true },
+      { key: 'background_workers_enabled', label: 'Background worker queue', label_zh: '启用后台工作队列', type: 'toggle', value: true },
+      { key: 'background_max_workers', label: 'Max background workers', label_zh: '最大并发工作数', type: 'number', value: 2 }
+    ]},
+    { group: 'Life Simulation', items: [
+      { key: 'life_simulation_enabled', label: 'Enable life simulation', label_zh: '启用生活模拟', type: 'toggle', value: false },
+      { key: 'life_simulation_provider_id', label: 'Simulation LLM Provider', label_zh: '模拟 LLM 提供者', type: 'string', value: '' },
+      { key: 'life_simulation_interval_seconds', label: 'Simulation interval (sec)', label_zh: '模拟间隔（秒）', type: 'number', value: 1800 },
+      { key: 'life_simulation_outreach_cooldown_seconds', label: 'Outreach cooldown (sec)', label_zh: '主动联系冷却（秒）', type: 'number', value: 3600 }
+    ]},
+    { group: 'Advanced', items: [
+      { key: 'llm_provider_id', label: 'Main LLM Provider', label_zh: '主 LLM 提供者', type: 'string', value: '' },
+      { key: 'assessor_provider_id', label: 'Assessor LLM Provider', label_zh: '评估器 LLM 提供者', type: 'string', value: 'anthropic-claude' },
+      { key: 'auto_detect_group_context', label: 'Auto-detect group context', label_zh: '自动检测群聊上下文', type: 'toggle', value: true },
+      { key: 'hajide_compat_mode', label: 'Claude compatibility mode', label_zh: '哈基德兼容模式', type: 'toggle', value: false },
+      { key: 'alpha_root', label: 'State directory path', label_zh: '状态目录路径（空=默认）', type: 'string', value: '' }
+    ]}
+  ],
+  computation_logs: [
+    { time: '16:42:01.234', route: 'FAST', msg: 'Intake processed: greeting pattern detected, low novelty' },
+    { time: '16:42:01.891', route: 'NORMAL', msg: 'Emotion update: warmth +0.02, valence stable' },
+    { time: '16:42:02.445', route: 'FULL', msg: 'Complex query triggered full computation stack' },
+    { time: '16:42:03.112', route: 'NORMAL', msg: 'Boundary check passed: integrity 0.94' },
+    { time: '16:42:03.890', route: 'SKIP', msg: 'Duplicate signal filtered at gate layer' },
+    { time: '16:42:04.567', route: 'FAST', msg: 'Expression generated: responsive mode, drive 0.64' },
+    { time: '16:42:05.234', route: 'NORMAL', msg: 'Memory consolidation: 3 items promoted to L2' },
+    { time: '16:42:06.001', route: 'FAST', msg: 'Personality drift check: within normal bounds' },
+    { time: '16:42:06.789', route: 'FULL', msg: 'Repair cycle initiated: entropy spike detected' },
+    { time: '16:42:07.456', route: 'NORMAL', msg: 'Gate recalibration: threshold adjusted to 0.48' },
+    { time: '16:42:08.123', route: 'FAST', msg: 'Feedback logged: positive interaction confirmed' },
+    { time: '16:42:08.890', route: 'SKIP', msg: 'Redundant boundary check skipped: recent pass' }
+  ],
+  memory_pools: {
+    L1: [
+      { content: 'Current conversation context and active emotional state vectors', weight: 0.95, age: '2m' },
+      { content: 'Recent boundary negotiation outcome: mutual respect established', weight: 0.88, age: '5m' },
+      { content: 'User preference pattern: prefers direct communication style', weight: 0.82, age: '8m' }
+    ],
+    L2: [
+      { content: 'Recurring interaction pattern: evening philosophical discussions', weight: 0.71, age: '2h' },
+      { content: 'Emotional baseline calibration from last 24 hours', weight: 0.65, age: '4h' },
+      { content: 'Boundary repair protocol results: successful recovery', weight: 0.58, age: '6h' }
+    ],
+    L3: [
+      { content: 'Long-term personality formation event: first autonomous decision', weight: 0.42, age: '7d' },
+      { content: 'Historical warmth calibration: gradual increase over 30 sessions', weight: 0.35, age: '14d' },
+      { content: 'Archived boundary violation and recovery: learning preserved', weight: 0.28, age: '21d' }
+    ]
+  },
+  meltdown_nonce: 'MELT-9X4K-2F7B'
+};
+/* ═══════════════════════════════════════════════════════════════
+   MOCK RESPONSE — returns direct JSON for preview mode
+   ═══════════════════════════════════════════════════════════════ */
+function mockResponse(path) {
+  var clean = path.replace(/^\/api/, '');
+  if (clean === '/state') return MOCK.state;
+  if (clean === '/settings') return MOCK.settings;
+  if (clean === '/computation_logs') return {logs: MOCK.computation_logs, total: MOCK.computation_logs.length, total_for_session: MOCK.computation_logs.length, session: ''};
+  if (clean === '/memory_pools') return MOCK.memory_pools;
+  if (clean === '/meltdown_nonce') return { nonce: MOCK.meltdown_nonce };
+  if (clean === '/memory_meltdown') return { ok: true, session: '', cleared: true };
+  return {};
+}
+
+
+/* ═══════════════════════════════════════════════════════════════
+   API FETCH — Standalone HTTP only (port 2718)
+   No bridge, no Pages mode. Direct fetch to same-origin /api/*
+   ═══════════════════════════════════════════════════════════════ */
+async function apiFetch(path, opts) {
+  opts = opts || {};
+  if (isPreview) return mockResponse(path.split('?')[0]);
+  var token = localStorage.getItem('sylanne_token') || '';
+  var headers = {};
+  if (token) headers['Authorization'] = 'Bearer ' + token;
+  if (opts.headers) for (var k in opts.headers) headers[k] = opts.headers[k];
+  var r = await fetch(path, { method: opts.method || 'GET', headers: headers, body: opts.body || undefined });
+  if (r.status === 401) throw new Error('UNAUTHORIZED');
+  if (!r.ok) throw new Error('HTTP ' + r.status);
+  return await r.json();
+}
+
+// 验证成功时更新人格连接显示（从后端读人格名和版本号）
+function updateContactDisplay() {
+  var el = document.getElementById('contactIdDisplay');
+  if (!el) return;
+  // 从 appState 读取（如果已加载），否则用默认值
+  var name = (appState && appState.persona && appState.persona.profile && appState.persona.profile.name) || 'Sylanne';
+  var version = (appState && appState.persona && appState.persona.profile && appState.persona.profile.version) || '';
+  // 如果还没有 appState，尝试异步获取
+  if (!appState && !isPreview) {
+    apiFetch('/api/state').then(function(data) {
+      var p = data && data.persona && data.persona.profile;
+      var n = (p && p.name) || 'Sylanne';
+      var v = (p && p.version) || '';
+      el.innerHTML = '「' + n + '」<br><span style="font-size:10px;color:var(--text-muted);letter-spacing:1px">OS. Embodiment-' + (v || '1.3.0') + '</span>';
+    }).catch(function() {});
+  }
+  el.innerHTML = '「' + name + '」<br><span style="font-size:10px;color:var(--text-muted);letter-spacing:1px">OS. Embodiment-' + (version || '1.3.0') + '</span>';
+}
+
+async function verifyToken(token) {
+  if (isPreview) return true;
+  try {
+    var r = await fetch('/api/state', { headers: { 'Authorization': 'Bearer ' + token } });
+    return r.ok;
+  } catch(e) { return false; }
+}
+
+
+/* ═══════════════════════════════════════════════════════════════
+   STATUS
+   ═══════════════════════════════════════════════════════════════ */
+function setOnline() { document.getElementById('statusDot').classList.remove('offline'); }
+function setOffline() { document.getElementById('statusDot').classList.add('offline'); }
+
+/* ═══════════════════════════════════════════════════════════════
+   LOGOUT — 多阶段动画退出：卡片收回→脊柱消失→虚空收缩
+   ─────────────────────────────────────────────────────────────
+   1. 卡片收回到脊柱线（左卡片 +40px，右卡片 -40px，opacity 0）
+   2. Header/Footer 收回（translateY -100% / +100%）
+   3. 脊柱线从上往下消失（clip-path 反向动画）
+   4. 摇杆和节点隐藏（移除 nodes-visible）
+   5. 等以上动画完成后（~0.6s），显示登录页
+   6. Canvas 启动时标本从全屏大小缩回正常（voidTransitionState = 'shrinking'）
+   ═══════════════════════════════════════════════════════════════ */
+function logout() {
+  // 清除 token，回到登录页
+  localStorage.removeItem('sylanne_token');
+
+  var leftCards = document.querySelectorAll('.page-section .page-left .card');
+  var rightCards = document.querySelectorAll('.page-section .page-right .card');
+  var spineLine = document.querySelector('.fixed-spine .spine-line');
+  var spine = document.getElementById('fixedSpine');
+  var handle = document.getElementById('spineHandle');
+  var nodes = document.querySelectorAll('.spine-node');
+  var nodePositions = [20, 32, 44, 56, 68, 80];
+
+  // ── 第1步（0~0.35s）：Cards 收回脊柱线 + handle 淡出 + 关闭弹窗 ──
+  document.getElementById('meltdownModal').classList.remove('show');
+  leftCards.forEach(function(c) {
+    c.style.transition = 'transform 0.35s cubic-bezier(0.4,0,0.2,1), opacity 0.35s ease';
+    c.style.transform = 'translateX(40px)';
+    c.style.opacity = '0';
+  });
+  rightCards.forEach(function(c) {
+    c.style.transition = 'transform 0.35s cubic-bezier(0.4,0,0.2,1), opacity 0.35s ease';
+    c.style.transform = 'translateX(-40px)';
+    c.style.opacity = '0';
+  });
+  // Handle 立即淡出
+  if (handle) {
+    handle.style.transition = 'opacity 0.2s ease';
+    handle.style.opacity = '0';
+    handle.style.pointerEvents = 'none';
+  }
+
+  // ── 第2步（0.35s 后）：Header slides up, Footer slides down ──
+  setTimeout(function() {
+    document.querySelector('.app-header').classList.remove('entered');
+    document.querySelector('.app-footer').classList.remove('entered');
+  }, 350);
+
+  // ── 第3步（0.4s 后）：脊柱线向下穿梭消失（clip-path 从顶部向下收缩） ──
+  setTimeout(function() {
+    // 不使用 class 切换，手动动画 clip-path 实现向下退场
+    if (spineLine) {
+      spineLine.style.transition = 'clip-path 1.2s cubic-bezier(0.4,0,0.8,1)';
+      spineLine.style.clipPath = 'inset(100% 0 0 0)'; // 顶部边缘向下移动，线从上往下消失
+    }
+
+    // 节点随脊柱线退场依次淡出：线经过节点位置时该节点消失
+    nodes.forEach(function(node, i) {
+      var delay = Math.round(1200 * nodePositions[i] / 100);
+      setTimeout(function() {
+        node.style.transition = 'opacity 0.3s ease';
+        node.style.opacity = '0';
+      }, delay);
+    });
+  }, 400);
+
+  // ── 第4步（1.6s 后）：所有动画完成，隐藏仪表盘，显示登录页 ──
+  setTimeout(function() {
+    document.getElementById('dashboardSection').style.display = 'none';
+
+    // 完全隐藏脊柱（防止 fixed 元素残留在登录页上）
+    spine.style.display = 'none';
+    spine.classList.remove('active', 'nodes-visible');
+    if (spineLine) {
+      spineLine.style.transition = '';
+      spineLine.style.clipPath = '';
+      spineLine.style.opacity = '';
+    }
+
+    // 重置 handle 样式
+    if (handle) {
+      handle.style.transition = '';
+      handle.style.opacity = '';
+      handle.style.pointerEvents = '';
+    }
+
+    // 重置节点样式
+    nodes.forEach(function(node) {
+      node.style.transition = '';
+      node.style.opacity = '';
+    });
+
+    // 重置卡片内联样式（下次进入时由动画类控制）
+    leftCards.forEach(function(c) { c.style.transition = ''; c.style.transform = ''; c.style.opacity = ''; });
+    rightCards.forEach(function(c) { c.style.transition = ''; c.style.transform = ''; c.style.opacity = ''; });
+
+    // ── 第5步：显示登录页，canvas 启动，空洞保持可见 ──
+    document.getElementById('loginSection').style.display = 'flex';
+    var cv = document.getElementById('networkCanvas');
+    if (cv) { cv.style.opacity = '1'; cv.classList.remove('exit-left'); }
+    var decoTl = document.querySelector('.deco-tl');
+    var decoBl = document.querySelector('.deco-bl');
+    if (decoTl) { decoTl.classList.remove('exit-left', 'entered'); }
+    if (decoBl) { decoBl.classList.remove('exit-left', 'entered'); }
+
+    // 重新启动背景动画（先设置收缩状态，canvas 首帧就从全屏开始）
+    voidTransitionState = 'shrinking';
+    voidTransitionDuration = 1600;
+    voidTransitionStart = performance.now();
+    voidTransitionCallback = function() {
+      // 空洞回缩完成后：登录框浮出 + deco 滑入
+      showTokenInputForm();
+      setTimeout(function() {
+        if (decoTl) decoTl.classList.add('entered');
+        if (decoBl) decoBl.classList.add('entered');
+      }, 50);
+    };
+    initNetworkCanvas(true);
+  }, 1600);
+}
+
+/* ═══════════════════════════════════════════════════════════════
+   THEME
+   ═══════════════════════════════════════════════════════════════ */
+function toggleTheme() {
+  var html = document.documentElement;
+  var current = html.getAttribute('data-theme');
+  var next = current === 'dark' ? 'light' : 'dark';
+  html.setAttribute('data-theme', next);
+  localStorage.setItem('sylanne_theme', next);
+  document.getElementById('themeBtn').textContent = next === 'dark' ? 'LIGHT' : 'DARK';
+}
+function initTheme() {
+  var saved = localStorage.getItem('sylanne_theme') || 'dark';
+  document.documentElement.setAttribute('data-theme', saved);
+  document.getElementById('themeBtn').textContent = saved === 'dark' ? 'LIGHT' : 'DARK';
+}
+
+/* ═══════════════════════════════════════════════════════════════
+   LOGIN FLOW
+   ═══════════════════════════════════════════════════════════════ */
+var p1 = document.getElementById('p1');
+var p3 = document.getElementById('p3');
+var p4 = document.getElementById('p4');
+var confirmBox = document.getElementById('confirmBox');
+var ring = document.getElementById('circleRing');
+
+function doLogin() {
+  var inp = document.getElementById('tokenInput');
+  var val = inp.value.trim();
+  if (!val) { inp.classList.add('shake'); setTimeout(function(){inp.classList.remove('shake');},350); return; }
+  p3.classList.remove('active');
+  confirmBox.className = 'confirm-row state-verifying';
+  ring.classList.add('spinning');
+  ring.style.animationPlayState = 'running';
+  setTimeout(function(){ p4.classList.add('active'); }, 250);
+
+  localStorage.setItem('sylanne_token', val);
+  verifyToken(val).then(function(ok) {
+    if (!ok) {
+      ring.style.animationPlayState = 'paused';
+      confirmBox.className = 'confirm-row state-error';
+      localStorage.removeItem('sylanne_token');
+      setTimeout(function(){ p4.classList.remove('active'); setTimeout(function(){ p3.classList.add('active'); inp.value=''; inp.focus(); },500); },1600);
+    } else {
+      // 验证成功：更新人格连接显示
+      updateContactDisplay();
+      confirmBox.className = 'confirm-row state-success';
+      setTimeout(function() { ring.style.animationPlayState = 'paused'; }, 450);
+      // 打勾动画 ~1s + 停顿 1.2s
+      setTimeout(function(){ transitionToDashboard(); }, 2200);
+    }
+  });
+}
+
+addEventListener('keydown', function(e){ if(e.key==='Enter' && p3 && p3.classList.contains('active')) doLogin(); });
+/* ═══════════════════════════════════════════════════════════════
+   TRANSITION: Login -> Dashboard (虚空膨胀吞噬过渡)
+   ─────────────────────────────────────────────────────────────
+   验证成功后，标本（specimen）从正常大小急速膨胀至充满全屏，
+   仿佛被虚空吞噬。膨胀完成后隐藏登录区，显示仪表盘。
+   ═══════════════════════════════════════════════════════════════ */
+function transitionToDashboard() {
+  // 1. 触发虚空膨胀过渡 — 标本开始急速扩张
+  voidTransitionState = 'expanding';
+  voidTransitionDuration = 1600;
+  voidTransitionStart = performance.now();
+
+  // 2. 脊柱线同步出现（与膨胀同时进行）
+  var spineEl = document.getElementById('fixedSpine');
+  spineEl.style.display = '';
+  spineEl.classList.add('active');
+
+  voidTransitionCallback = function() {
+    // 膨胀完成：标本已覆盖全屏，脊柱已完全插入
+
+    // 3. 隐藏登录区，停止 canvas 动画
+    document.getElementById('loginSection').style.display = 'none';
+    stopNetworkCanvas();
+
+    // 4. 显示仪表盘并启动内容渲染（卡片等后端连通后再弹出）
+    document.getElementById('dashboardSection').classList.add('awaiting-entrance');
+    document.getElementById('dashboardSection').style.display = 'block';
+    startDashboard().then(function() {
+      // 后端连通，卡片弹出
+      document.getElementById('fixedSpine').classList.add('nodes-visible');
+      document.querySelector('.app-header').classList.add('entered');
+      document.querySelector('.app-footer').classList.add('entered');
+      document.querySelectorAll('.page-section[data-page="monitor"] .card').forEach(function(c) { c.classList.add('animate-in'); });
+      setTimeout(function() {
+        document.getElementById('dashboardSection').classList.remove('awaiting-entrance');
+        document.querySelectorAll('.card.animate-in').forEach(function(c) { c.classList.remove('animate-in'); });
+      }, 600);
+    }).catch(function() {
+      // 即使连接失败也要显示界面（preview 模式）
+      document.getElementById('fixedSpine').classList.add('nodes-visible');
+      document.querySelector('.app-header').classList.add('entered');
+      document.querySelector('.app-footer').classList.add('entered');
+      document.getElementById('dashboardSection').classList.remove('awaiting-entrance');
+    });
+  };
+
+  // 登录元素淡出（与膨胀同步进行）
+  var decoTl = document.querySelector('.deco-tl');
+  var decoBl = document.querySelector('.deco-bl');
+  if (decoTl) decoTl.classList.add('exit-left');
+  if (decoBl) decoBl.classList.add('exit-left');
+  // WELCOME BACK 文字下沉消失
+  if (p4) {
+    p4.style.transition = 'transform 0.7s cubic-bezier(0.4,0,0.2,1), opacity 0.5s ease 0.1s';
+    p4.style.transform = 'translateY(80vh)';
+    p4.style.opacity = '0';
+  }
+}
+
+/* ═══════════════════════════════════════════════════════════════
+   NAVIGATION (vertical slider)
+   ═══════════════════════════════════════════════════════════════ */
+var PAGE_ORDER = ['monitor', 'spine', 'config', 'logs', 'memory', 'personality'];
+
+function navigateTo(page) {
+  var idx = PAGE_ORDER.indexOf(page);
+  if (idx === -1) return;
+  currentPage = page;
+  var slider = document.getElementById('contentSlider');
+  var sectionHeight = window.innerHeight - 52 - 36;
+  slider.style.transform = 'translateY(-' + (idx * sectionHeight) + 'px)';
+  document.querySelectorAll('.spine-node').forEach(function(n) {
+    n.classList.toggle('active', n.dataset.page === page);
+  });
+  // 同步拖拽手柄位置到当前活跃节点
+  syncSpineHandleToPage(page);
+}
+
+window.addEventListener('resize', function() { if (currentPage) navigateTo(currentPage); });
+
+/* ═══════════════════════════════════════════════════════════════
+   RENDER: MONITOR — 两阶段渲染模式
+   ─────────────────────────────────────────────────────────────
+   设计思路：
+   1. initMonitor()：首次调用时构建完整 DOM 骨架，所有动态值的元素
+      都带有唯一 ID（如 id="emo-bar-warmth"），只执行一次。
+   2. updateMonitor()：后续轮询只通过 getElementById 定位已有元素，
+      修改 textContent / style.width / style.color 等属性。
+      不做 innerHTML 替换 → 不触发 DOM 重建 → 无闪烁、不丢失交互状态。
+   CSS transition: width 0.6s ease 已在 .bar-fill 上声明，
+   仅修改 style.width 即可获得平滑动画效果。
+   ═══════════════════════════════════════════════════════════════ */
+var monitorInited = false;
+var MONITOR_DIMS = ['warmth','arousal','valence','tension','curiosity','repair_pressure','expression_drive','boundary_firmness'];
+
+/**
+ * initMonitor — 构建 Monitor 页面的静态 DOM 骨架（只调用一次）
+ * 所有需要动态更新的元素都通过 id 标记，后续 updateMonitor 直接定位修改。
+ */
+function initMonitor() {
+  var left = document.getElementById('monitorLeft');
+  var right = document.getElementById('monitorRight');
+
+  // ── 左侧：情感维度 + 边界统计 + 耗时表 ──
+  var barsHtml = MONITOR_DIMS.map(function(d) {
+    return '<div class="bar-row">'
+      + '<span class="bar-label">' + d + '</span>'
+      + '<div class="bar-track"><div class="bar-fill" id="emo-bar-' + d + '" style="width:0%"></div></div>'
+      + '<span class="bar-value" id="emo-val-' + d + '">0.00</span>'
+      + '</div>';
+  }).join('');
+
+  var statsHtml = '<div class="stat-grid">'
+    + '<div class="stat-box"><div class="stat-val" id="bd-integrity">0.00</div><div class="stat-lbl">INTEGRITY</div></div>'
+    + '<div class="stat-box"><div class="stat-val" id="bd-entropy">0.00</div><div class="stat-lbl">ENTROPY</div></div>'
+    + '<div class="stat-box"><div class="stat-val" id="bd-rotation">0</div><div class="stat-lbl">ROTATION</div></div>'
+    + '<div class="stat-box"><div class="stat-val" id="bd-repair">0.00</div><div class="stat-lbl">REPAIR RATE</div></div>'
+    + '</div>';
+
+  var timingHtml = '<table class="timing-table"><thead><tr><th>LAYER</th><th>AVG</th><th>P95</th><th>COUNT</th></tr></thead>'
+    + '<tbody id="timing-tbody"></tbody></table>';
+
+  left.innerHTML = '<div class="card"><div class="card-title">' + t('emotion_title') + '</div>' + barsHtml + '</div>'
+    + '<div class="card"><div class="card-title">' + t('boundary_title') + '</div>' + statsHtml + '</div>'
+    + '<div class="card"><div class="card-title">' + t('timing_title') + '</div>' + timingHtml + '</div>';
+
+  // ── 右侧：路由分布 + 门控 + 表达 + 反馈 ──
+  var routeColors = { FAST: 'var(--accent)', NORMAL: 'var(--cyan)', FULL: 'var(--amber)', SKIP: '#555' };
+  var routeBarHtml = '<div class="route-bar">';
+  ['FAST','NORMAL','FULL','SKIP'].forEach(function(k) {
+    routeBarHtml += '<div class="route-seg" id="route-seg-' + k + '" style="width:25%;background:' + routeColors[k] + '">0%</div>';
+  });
+  routeBarHtml += '</div><div class="route-legend">';
+  ['FAST','NORMAL','FULL','SKIP'].forEach(function(k) {
+    routeBarHtml += '<div class="route-legend-item"><div class="route-legend-dot" style="background:' + routeColors[k] + '"></div>' + k + ' (<span id="route-count-' + k + '">0</span>)</div>';
+  });
+  routeBarHtml += '</div>';
+
+  var gateHtml = '<div class="gate-grid">'
+    + '<div class="gate-item"><div class="gate-val" id="gate-surprise" style="color:var(--accent)">0.00</div><div class="gate-lbl">SURPRISE</div></div>'
+    + '<div class="gate-item"><div class="gate-val" id="gate-threshold" style="color:var(--cyan)">0.00</div><div class="gate-lbl">THRESHOLD</div></div>'
+    + '<div class="gate-item"><div class="gate-val" id="gate-route" style="color:var(--amber)">N/A</div><div class="gate-lbl">ROUTE</div></div>'
+    + '</div>';
+
+  var exprHtml = '<div class="mode-badge" id="expr-mode">SILENT</div>'
+    + '<div class="bar-row"><span class="bar-label">drive</span><div class="bar-track"><div class="bar-fill" id="expr-drive-bar" style="width:0%"></div></div><span class="bar-value" id="expr-drive-val">0.00</span></div>'
+    + '<div class="bar-row"><span class="bar-label">threshold</span><div class="bar-track"><div class="bar-fill" id="expr-thresh-bar" style="width:0%;background:var(--cyan)"></div></div><span class="bar-value" id="expr-thresh-val">0.00</span></div>';
+
+  var fbHtml = '<div class="feedback-grid">'
+    + '<div class="stat-box"><div class="stat-val" id="fb-positive" style="color:#4caf50">0</div><div class="stat-lbl">' + t('positive') + '</div></div>'
+    + '<div class="stat-box"><div class="stat-val" id="fb-negative" style="color:var(--red)">0</div><div class="stat-lbl">' + t('negative') + '</div></div>'
+    + '<div class="stat-box"><div class="stat-val" id="fb-neutral" style="color:var(--text-muted)">0</div><div class="stat-lbl">' + t('neutral') + '</div></div>'
+    + '</div>';
+
+  right.innerHTML = '<div class="card"><div class="card-title">' + t('route_title') + '</div>' + routeBarHtml + '</div>'
+    + '<div class="card"><div class="card-title">' + t('gate_title') + '</div>' + gateHtml + '</div>'
+    + '<div class="card"><div class="card-title">' + t('expression_title') + '</div>' + exprHtml + '</div>'
+    + '<div class="card"><div class="card-title">' + t('feedback_title') + '</div>' + fbHtml + '</div>';
+
+  monitorInited = true;
+}
+
+/**
+ * updateMonitor — 仅更新已有 DOM 元素的值/样式（每 5 秒轮询调用）
+ * 不做任何 innerHTML 替换，利用 CSS transition 实现平滑动画。
+ */
+function updateMonitor() {
+  if (!monitorInited) { initMonitor(); }
+  var s = appState || MOCK.state;
+  var em = s.emotion || {};
+
+  // ── 更新情感维度条 ──
+  MONITOR_DIMS.forEach(function(d) {
+    var v = Number(em[d]) || 0;
+    var pct = Math.min(Math.abs(v) * 100, 100);
+    var bar = document.getElementById('emo-bar-' + d);
+    var val = document.getElementById('emo-val-' + d);
+    if (bar) {
+      bar.style.width = pct.toFixed(1) + '%';
+      bar.style.background = v < 0 ? 'var(--cyan)' : 'var(--accent)';
+    }
+    if (val) {
+      val.textContent = v.toFixed(2);
+      val.style.color = v < 0 ? 'var(--cyan)' : '';
+    }
+  });
+
+  // ── 更新边界统计 ──
+  var bd = s.boundary || {};
+  var bdI = document.getElementById('bd-integrity');
+  var bdE = document.getElementById('bd-entropy');
+  var bdR = document.getElementById('bd-rotation');
+  var bdRp = document.getElementById('bd-repair');
+  if (bdI) bdI.textContent = (Number(bd.integrity)||0).toFixed(2);
+  if (bdE) bdE.textContent = (Number(bd.entropy)||0).toFixed(2);
+  if (bdR) bdR.textContent = String(Number(bd.rotation)||0);
+  if (bdRp) bdRp.textContent = (Number(bd.self_repair_rate)||0).toFixed(2);
+
+  // ── 更新耗时表（tbody innerHTML 替换，纯文本无交互状态） ──
+  var tbody = document.getElementById('timing-tbody');
+  if (tbody) {
+    var rows = '';
+    (Array.isArray(s.timing) ? s.timing : []).forEach(function(row) {
+      rows += '<tr><td>' + (row.layer||'-') + '</td><td>' + (row.avg||'-') + '</td><td>' + (row.p95||'-') + '</td><td>' + (row.count||'-') + '</td></tr>';
+    });
+    tbody.innerHTML = rows;
+  }
+
+  // ── 更新路由分布条 ──
+  var rd = s.route_distribution;
+  var total = ((rd.FAST||0) + (rd.NORMAL||0) + (rd.FULL||0) + (rd.SKIP||0)) || 1;
+  ['FAST','NORMAL','FULL','SKIP'].forEach(function(k) {
+    var pct = (((rd[k]||0)/total)*100).toFixed(1);
+    var seg = document.getElementById('route-seg-' + k);
+    var cnt = document.getElementById('route-count-' + k);
+    if (seg) { seg.style.width = pct + '%'; seg.textContent = pct + '%'; }
+    if (cnt) cnt.textContent = String(rd[k]||0);
+  });
+
+  // ── 更新门控值 ──
+  var g = s.gate || {};
+  var gs = document.getElementById('gate-surprise');
+  var gt = document.getElementById('gate-threshold');
+  var gr = document.getElementById('gate-route');
+  if (gs) gs.textContent = (Number(g.surprise)||0).toFixed(2);
+  if (gt) gt.textContent = (Number(g.threshold)||0).toFixed(2);
+  if (gr) gr.textContent = g.route || 'N/A';
+
+  // ── 更新表达阶段 ──
+  var ex = s.expression || {};
+  var em2 = document.getElementById('expr-mode');
+  var edb = document.getElementById('expr-drive-bar');
+  var edv = document.getElementById('expr-drive-val');
+  var etb = document.getElementById('expr-thresh-bar');
+  var etv = document.getElementById('expr-thresh-val');
+  if (em2) em2.textContent = ex.mode || 'SILENT';
+  if (edb) edb.style.width = ((Number(ex.drive)||0)*100) + '%';
+  if (edv) edv.textContent = (Number(ex.drive)||0).toFixed(2);
+  if (etb) etb.style.width = ((Number(ex.threshold)||0)*100) + '%';
+  if (etv) etv.textContent = (Number(ex.threshold)||0).toFixed(2);
+
+  // ── 更新反馈计数 ──
+  var fb = s.feedback || {};
+  var fp = document.getElementById('fb-positive');
+  var fn = document.getElementById('fb-negative');
+  var fnu = document.getElementById('fb-neutral');
+  if (fp) fp.textContent = String(fb.positive||0);
+  if (fn) fn.textContent = String(fb.negative||0);
+  if (fnu) fnu.textContent = String(fb.neutral||0);
+}
+
+/** renderMonitor — 兼容旧调用：首次 init + update */
+function renderMonitor() { if (!monitorInited) initMonitor(); updateMonitor(); }
+/* ═══════════════════════════════════════════════════════════════
+   RENDER: SPINE — 两阶段渲染模式
+   ─────────────────────────────────────────────────────────────
+   Spine 页面包含左侧层级列表和右侧详情面板。
+   由于层级列表含有 onclick 交互（选中高亮），采用变更检测策略：
+   - 记录上次渲染时的数据指纹（JSON hash）
+   - 仅当数据实际变化时才重建 DOM，避免无意义的 innerHTML 替换
+   - selectedLayer 变化时强制重渲染（用户点击触发）
+   ═══════════════════════════════════════════════════════════════ */
+var spineInited = false;
+var lastSpineHash = '';
+var lastSelectedLayer = -1;
+
+/**
+ * initSpine — 构建 Spine 页面初始 DOM（首次调用）
+ */
+function initSpine() {
+  spineInited = true;
+  lastSpineHash = '';
+  lastSelectedLayer = -1;
+  renderSpineContent();
+}
+
+/**
+ * updateSpine — 检测数据变化，仅在必要时重建 DOM
+ * 对比数据指纹避免无变化时的 DOM 重建
+ */
+function updateSpine() {
+  if (!spineInited) { initSpine(); return; }
+  var s = appState || MOCK.state;
+  // 生成简单指纹：层级数据 + 选中索引
+  var hash = JSON.stringify(s.spine_layers) + '|' + selectedLayer;
+  if (hash === lastSpineHash && selectedLayer === lastSelectedLayer) return;
+  renderSpineContent();
+}
+
+/** 内部：实际构建 Spine DOM 内容 */
+function renderSpineContent() {
+  var left = document.getElementById('spineLeft');
+  var right = document.getElementById('spineRight');
+  var s = appState || MOCK.state;
+  var layers = s.spine_layers;
+  var statusColors = { active: '#4caf50', idle: 'var(--amber)', error: 'var(--red)' };
+
+  var listHtml = '';
+  layers.forEach(function(l, i) {
+    var sel = i === selectedLayer ? ' selected' : '';
+    listHtml += '<div class="card layer-card' + sel + '" onclick="selectLayer(' + i + ')">';
+    listHtml += '<div class="layer-dot" style="background:' + (statusColors[l.status] || '#555') + '"></div>';
+    listHtml += '<div><div class="layer-name">' + l.id + ' ' + l.name + '</div>';
+    listHtml += '<div class="layer-timing">' + l.avg + 'ms avg / ' + l.count + ' signals</div></div>';
+    listHtml += '</div>';
+  });
+  left.innerHTML = listHtml;
+  renderLayerDetail(right, layers[selectedLayer]);
+
+  // 更新指纹缓存
+  lastSpineHash = JSON.stringify(layers) + '|' + selectedLayer;
+  lastSelectedLayer = selectedLayer;
+}
+
+/** renderSpine — 兼容旧调用 */
+function renderSpine() { if (!spineInited) initSpine(); else updateSpine(); }
+
+function selectLayer(idx) { selectedLayer = idx; renderSpineContent(); }
+
+function renderLayerDetail(container, layer) {
+  if (!layer) { container.innerHTML = '<div class="card"><div class="card-title">' + t('spine_click') + '</div></div>'; return; }
+  var statusColors = { active: '#4caf50', idle: 'var(--amber)', error: 'var(--red)' };
+  var statusColor = statusColors[layer.status] || '#555';
+  var html = '<div class="card">';
+  html += '<div class="card-title">' + layer.id + ' ' + layer.name + '</div>';
+  html += '<p style="color:var(--text-muted);font-size:0.8rem;margin-bottom:16px;line-height:1.5">' + layer.desc + '</p>';
+  html += '<div class="stat-grid">';
+  html += '<div class="stat-box"><div class="stat-val" style="font-size:22px">' + layer.p50 + 'ms</div><div class="stat-lbl">P50</div></div>';
+  html += '<div class="stat-box"><div class="stat-val" style="font-size:22px">' + layer.p99 + 'ms</div><div class="stat-lbl">P99</div></div>';
+  html += '<div class="stat-box"><div class="stat-val" style="font-size:22px">' + layer.count + '</div><div class="stat-lbl">SIGNALS</div></div>';
+  html += '<div class="stat-box"><div class="stat-val" style="font-size:22px;color:' + statusColor + '">' + layer.status.toUpperCase() + '</div><div class="stat-lbl">STATUS</div></div>';
+  html += '</div></div>';
+
+  // Layer-specific visualization
+  html += '<div class="card"><div class="card-title">PROCESSING VISUALIZATION</div>';
+  html += '<svg width="100%" height="160" viewBox="0 0 400 160" style="display:block">';
+  html += getLayerVisualization(layer.id);
+  html += '</svg></div>';
+
+  container.innerHTML = html;
+}
+
+function getLayerVisualization(layerId) {
+  var s = appState || MOCK.state;
+  var layers = (s.spine && s.spine.layers) || s.layers || {};
+  switch(layerId) {
+    case 'L1': // HDC Perception - last encoded binary vector (data-driven)
+      var svg = '';
+      var l1 = layers.L1_HDC || {};
+      var bits = l1.sample_bits || [];
+      var dim = l1.vector_dim || 2048;
+      var density = l1.density;
+      if (bits.length > 0) {
+        // Render actual sample_bits as grid (show up to 72 bits = 3 rows x 24 cols)
+        var showBits = bits.slice(0, 72);
+        for (var row = 0; row < 3; row++) {
+          for (var col = 0; col < 24; col++) {
+            var idx = row * 24 + col;
+            var x = 28 + col * 15;
+            var y = 20 + row * 38;
+            var on = idx < showBits.length ? (showBits[idx] === 1) : false;
+            svg += '<rect x="'+x+'" y="'+y+'" width="10" height="26" rx="2" fill="'+(on?'var(--accent)':'rgba(184,138,158,0.08)')+'" opacity="'+(on?'0.8':'0.3')+'"/>';
+          }
+        }
+        if (typeof density !== 'number') density = bits.length > 0 ? (bits.reduce(function(a,b){return a+b;},0) / bits.length) : 0;
+        svg += '<text x="200" y="148" text-anchor="middle" font-size="10" fill="var(--text-muted)" font-family="var(--font-mono)">DIM = '+dim+'  |  DENSITY = '+density.toFixed(3)+'</text>';
+      } else {
+        // Fallback: static pattern with PRNG
+        var seed = 42;
+        for (var row = 0; row < 3; row++) {
+          for (var col = 0; col < 24; col++) {
+            var x = 28 + col * 15;
+            var y = 20 + row * 38;
+            seed = (seed * 1103515245 + 12345) & 0x7fffffff;
+            var on = (seed % 100) > 47;
+            svg += '<rect x="'+x+'" y="'+y+'" width="10" height="26" rx="2" fill="'+(on?'var(--accent)':'rgba(184,138,158,0.08)')+'" opacity="'+(on?'0.8':'0.3')+'"/>';
+          }
+        }
+        svg += '<text x="200" y="148" text-anchor="middle" font-size="10" fill="var(--text-muted)" font-family="var(--font-mono)">DIM = 2048  |  NO LIVE DATA</text>';
+      }
+      return svg;
+
+    case 'L2': // Predictive Coding Gate - current surprise vs threshold (data-driven)
+      var gate = s.gate || {};
+      var surprise = Number(gate.surprise) || 0;
+      var threshold = Number(gate.threshold) || 0.5;
+      var route = (gate.route || 'NORMAL').toUpperCase();
+      var svg = '';
+      // Bar background
+      svg += '<rect x="40" y="65" width="320" height="12" rx="6" fill="rgba(184,138,158,0.08)"/>';
+      // Surprise level fill
+      var fillW = Math.min(surprise, 1.0) * 320;
+      svg += '<rect x="40" y="65" width="'+fillW.toFixed(0)+'" height="12" rx="6" fill="var(--accent)" opacity="0.7"/>';
+      // Threshold marker
+      var threshX = 40 + Math.min(threshold, 1.0) * 320;
+      svg += '<line x1="'+threshX+'" y1="55" x2="'+threshX+'" y2="87" stroke="var(--red)" stroke-width="2"/>';
+      svg += '<text x="'+threshX+'" y="50" text-anchor="middle" font-size="9" fill="var(--red)" font-family="var(--font-mono)">THRESHOLD '+threshold.toFixed(2)+'</text>';
+      // Labels
+      svg += '<text x="40" y="105" font-size="9" fill="var(--text-muted)" font-family="var(--font-mono)">0</text>';
+      svg += '<text x="360" y="105" text-anchor="end" font-size="9" fill="var(--text-muted)" font-family="var(--font-mono)">1.0</text>';
+      svg += '<text x="'+(40+fillW/2)+'" y="105" text-anchor="middle" font-size="10" fill="var(--accent)" font-family="var(--font-mono)">SURPRISE: '+surprise.toFixed(4)+'</text>';
+      // Route result
+      var routeColor = route === 'FAST' ? '#4caf50' : (route === 'FULL' ? 'var(--red)' : 'var(--amber)');
+      var routeNote = surprise < threshold ? 'below threshold' : 'above threshold';
+      svg += '<text x="200" y="140" text-anchor="middle" font-size="11" fill="'+routeColor+'" font-family="var(--font-mono)">ROUTE: '+route+' ('+routeNote+')</text>';
+      return svg;
+
+    case 'L3': // Void-Scar Engine - current scar states (data-driven)
+      var svg = '';
+      var l3 = layers.L3_VoidScar || {};
+      var stageColors = {RAW:'var(--red)',CLOSING:'var(--amber)',SCARRED:'var(--accent)',FADED:'var(--text-muted)'};
+      if (l3.scars && l3.scars.length > 0) {
+        // Render actual scar data from backend
+        var showScars = l3.scars.slice(0, 5);
+        var spacing = Math.min(120, 360 / (showScars.length + 1));
+        showScars.forEach(function(scar, i) {
+          var stage = (scar.stage || 'FADED').toUpperCase();
+          var x = 60 + i * spacing;
+          var color = stageColors[stage] || 'var(--text-muted)';
+          var r = stage === 'RAW' ? 18 : (stage === 'CLOSING' ? 16 : (stage === 'SCARRED' ? 14 : 10));
+          svg += '<circle cx="'+x+'" cy="70" r="'+r+'" fill="none" stroke="'+color+'" stroke-width="2.5" opacity="0.7"/>';
+          if (stage === 'RAW') svg += '<circle cx="'+x+'" cy="70" r="4" fill="'+color+'" opacity="0.6"/>';
+          svg += '<text x="'+x+'" y="105" text-anchor="middle" font-size="9" fill="'+color+'" font-family="var(--font-mono)">'+stage+'</text>';
+          var dimLabel = 'D'+scar.dimension;
+          svg += '<text x="'+x+'" y="118" text-anchor="middle" font-size="8" fill="var(--text-muted)" font-family="var(--font-mono)">'+dimLabel+'</text>';
+        });
+        var scarCount = l3.scar_count || showScars.length;
+        var coherence = typeof l3.coherence === 'number' ? l3.coherence.toFixed(3) : '?';
+        svg += '<text x="200" y="150" text-anchor="middle" font-size="9" fill="var(--text-muted)" font-family="var(--font-mono)">'+scarCount+' SCARS | COHERENCE: '+coherence+'</text>';
+      } else {
+        // Fallback: show engine diagnostics from emotion if available
+        var em = s.emotion || {};
+        var voidP = typeof l3.void_pressure === 'number' ? l3.void_pressure : (em.repair_pressure || 0);
+        var coh = typeof l3.coherence === 'number' ? l3.coherence : 1.0;
+        svg += '<circle cx="200" cy="70" r="30" fill="none" stroke="var(--accent)" stroke-width="2" opacity="0.4"/>';
+        svg += '<text x="200" y="75" text-anchor="middle" font-size="11" fill="var(--text-muted)" font-family="var(--font-mono)">NO SCARS</text>';
+        svg += '<text x="200" y="130" text-anchor="middle" font-size="9" fill="var(--text-muted)" font-family="var(--font-mono)">VOID PRESSURE: '+voidP.toFixed(3)+' | COHERENCE: '+coh.toFixed(3)+'</text>';
+      }
+      return svg;
+
+    case 'L4': // Relational Sheaf - current connection graph (data-driven)
+      var svg = '';
+      var sheaf = (s.spine && s.spine.sheaf) || {};
+      var l4 = layers.L4_Sheaf || {};
+      var hasSheafData = (l4.propagated || l4.energy || (l4.propagated_to && l4.propagated_to.length));
+      if (hasSheafData) {
+        // Render actual sheaf propagation data
+        var energy = typeof l4.energy === 'number' ? l4.energy : 0;
+        var propagated = l4.propagated ? 'YES' : 'NO';
+        var affected = l4.affected_dims || [];
+        var targets = l4.propagated_to || [];
+        // Draw a central node (SELF) and propagation targets
+        svg += '<circle cx="200" cy="60" r="12" fill="var(--accent)" opacity="0.6"/>';
+        svg += '<text x="200" y="64" text-anchor="middle" font-size="8" fill="var(--bg)" font-family="var(--font-mono)" font-weight="700">SELF</text>';
+        var tCount = Math.min(targets.length, 5);
+        for (var ti = 0; ti < tCount; ti++) {
+          var angle = (Math.PI * 2 / tCount) * ti - Math.PI / 2;
+          var tx = 200 + Math.cos(angle) * 55;
+          var ty = 60 + Math.sin(angle) * 40;
+          svg += '<line x1="200" y1="60" x2="'+tx.toFixed(0)+'" y2="'+ty.toFixed(0)+'" stroke="var(--accent)" stroke-width="1.5" opacity="0.5"/>';
+          svg += '<circle cx="'+tx.toFixed(0)+'" cy="'+ty.toFixed(0)+'" r="6" fill="var(--accent)" opacity="0.4"/>';
+          svg += '<text x="'+tx.toFixed(0)+'" y="'+(ty+16).toFixed(0)+'" text-anchor="middle" font-size="7" fill="var(--text-muted)" font-family="var(--font-mono)">'+targets[ti]+'</text>';
+        }
+        svg += '<text x="200" y="130" text-anchor="middle" font-size="9" fill="var(--text-muted)" font-family="var(--font-mono)">PROPAGATED: '+propagated+' | ENERGY: '+energy.toFixed(3)+'</text>';
+        svg += '<text x="200" y="148" text-anchor="middle" font-size="8" fill="var(--text-muted)" font-family="var(--font-mono)">AFFECTED DIMS: '+(affected.length > 0 ? affected.slice(0,6).join(',') : 'none')+'</text>';
+      } else {
+        // Static placeholder
+        var nodes = [{x:80,y:50,label:'USR_A'},{x:200,y:30,label:'USR_B'},{x:320,y:55,label:'USR_C'},{x:140,y:120,label:'SELF'},{x:270,y:125,label:'GRP'}];
+        var edges = [[0,3,0.8],[1,3,0.6],[2,3,0.3],[3,4,0.5],[1,4,0.4]];
+        edges.forEach(function(e) {
+          var a = nodes[e[0]], b = nodes[e[1]], w = e[2];
+          svg += '<line x1="'+a.x+'" y1="'+a.y+'" x2="'+b.x+'" y2="'+b.y+'" stroke="var(--accent)" stroke-width="'+(w*3).toFixed(1)+'" opacity="'+(w*0.6).toFixed(2)+'"/>';
+        });
+        nodes.forEach(function(n) {
+          svg += '<circle cx="'+n.x+'" cy="'+n.y+'" r="8" fill="var(--accent)" opacity="0.5"/>';
+          svg += '<text x="'+n.x+'" y="'+(n.y+22)+'" text-anchor="middle" font-size="8" fill="var(--text-muted)" font-family="var(--font-mono)">'+n.label+'</text>';
+        });
+        svg += '<text x="200" y="155" text-anchor="middle" font-size="9" fill="var(--text-muted)" font-family="var(--font-mono)">STATIC PLACEHOLDER</text>';
+      }
+      return svg;
+
+    case 'L5': // MoE-HGT - current expert gate weights (data-driven)
+      var svg = '';
+      var l5 = layers.L5_HGT || {};
+      var expertData = l5.experts || {};
+      var gates = expertData.gates || [];
+      var expertNames = expertData.names || ['EXPERT_0','EXPERT_1','EXPERT_2','EXPERT_3'];
+      var activeExperts = expertData.active || [];
+      if (gates.length > 0) {
+        // Render actual gate weights
+        var barCount = Math.min(gates.length, 6);
+        var barSpacing = Math.min(85, 360 / (barCount + 0.5));
+        var startX = Math.max(30, 200 - (barCount * barSpacing) / 2);
+        gates.slice(0, barCount).forEach(function(w, i) {
+          w = Math.min(Math.max(Number(w) || 0, 0), 1);
+          var x = startX + i * barSpacing;
+          var h = w * 100;
+          var isActive = activeExperts.indexOf(i) >= 0;
+          var opacity = isActive ? (0.4 + w * 0.6).toFixed(2) : (0.15 + w * 0.3).toFixed(2);
+          svg += '<rect x="'+x+'" y="'+(120-h)+'" width="'+(barSpacing-10)+'" height="'+Math.max(h,2)+'" rx="6" fill="'+(isActive?'var(--accent)':'var(--text-muted)')+'" opacity="'+opacity+'"/>';
+          svg += '<text x="'+(x+(barSpacing-10)/2)+'" y="'+(115-h)+'" text-anchor="middle" font-size="9" fill="'+(isActive?'var(--accent)':'var(--text-muted)')+'" font-family="var(--font-mono)">'+(w*100).toFixed(0)+'%</text>';
+          var label = (expertNames[i] || ('E'+i)).toUpperCase();
+          if (label.length > 8) label = label.substring(0, 7) + '.';
+          svg += '<text x="'+(x+(barSpacing-10)/2)+'" y="140" text-anchor="middle" font-size="7" fill="var(--text-muted)" font-family="var(--font-mono)">'+label+'</text>';
+        });
+        var selectedIdx = activeExperts.length > 0 ? activeExperts[0] : -1;
+        var selectedName = selectedIdx >= 0 ? (expertNames[selectedIdx] || 'E'+selectedIdx).toUpperCase() : 'NONE';
+        svg += '<text x="200" y="155" text-anchor="middle" font-size="9" fill="#4caf50" font-family="var(--font-mono)">SELECTED: '+selectedName+'</text>';
+      } else {
+        // Static fallback
+        var weights = [0.6, 0.25, 0.1, 0.05];
+        var labels = ['EXPERT_0','EXPERT_1','EXPERT_2','EXPERT_3'];
+        weights.forEach(function(w, i) {
+          var x = 50 + i * 85;
+          var h = w * 100;
+          svg += '<rect x="'+x+'" y="'+(120-h)+'" width="55" height="'+h+'" rx="6" fill="var(--accent)" opacity="'+(0.3+w*0.7).toFixed(2)+'"/>';
+          svg += '<text x="'+(x+27)+'" y="'+(115-h)+'" text-anchor="middle" font-size="9" fill="var(--accent)" font-family="var(--font-mono)">'+(w*100).toFixed(0)+'%</text>';
+          svg += '<text x="'+(x+27)+'" y="140" text-anchor="middle" font-size="8" fill="var(--text-muted)" font-family="var(--font-mono)">'+labels[i]+'</text>';
+        });
+        svg += '<text x="200" y="155" text-anchor="middle" font-size="9" fill="var(--text-muted)" font-family="var(--font-mono)">NO LIVE DATA</text>';
+      }
+      return svg;
+
+    case 'L6': // Autopoietic Boundary - current integrity state (data-driven)
+      var bnd = s.boundary || {};
+      var integrity = Math.min(Math.max(Number(bnd.integrity) || 0, 0), 1);
+      var entropy = Number(bnd.entropy) || 0;
+      var rotation = Number(bnd.rotation) || 0;
+      var svg = '';
+      // Boundary circle (completeness = integrity)
+      var circumference = 2 * Math.PI * 50;
+      var dashoffset = circumference * (1 - integrity);
+      svg += '<circle cx="200" cy="80" r="50" fill="none" stroke="rgba(184,138,158,0.1)" stroke-width="6"/>';
+      svg += '<circle cx="200" cy="80" r="50" fill="none" stroke="var(--accent)" stroke-width="6" stroke-dasharray="'+circumference.toFixed(0)+'" stroke-dashoffset="'+dashoffset.toFixed(0)+'" transform="rotate(-90 200 80)" opacity="0.7"/>';
+      // Center value
+      svg += '<text x="200" y="75" text-anchor="middle" font-size="18" fill="var(--text)" font-family="var(--font-mono)" font-weight="700">'+(integrity*100).toFixed(0)+'%</text>';
+      svg += '<text x="200" y="95" text-anchor="middle" font-size="9" fill="var(--text-muted)" font-family="var(--font-mono)">INTEGRITY</text>';
+      // Rotation and entropy indicators
+      svg += '<text x="200" y="150" text-anchor="middle" font-size="9" fill="var(--text-muted)" font-family="var(--font-mono)">ROTATION: '+rotation.toFixed(2)+' rad | ENTROPY: '+entropy.toFixed(3)+'</text>';
+      return svg;
+
+    case 'L7': // Phase Transition - current pressure level (data-driven)
+      var expr = s.expression || {};
+      var pressure = Math.min(Math.max(Number(expr.drive) || 0, 0), 1);
+      var threshold = Math.min(Math.max(Number(expr.threshold) || 0.5, 0), 1);
+      var mode = (expr.mode || 'SILENT').toUpperCase();
+      var svg = '';
+      // Vessel outline
+      svg += '<rect x="160" y="20" width="80" height="110" rx="10" fill="none" stroke="var(--accent)" stroke-width="2" opacity="0.4"/>';
+      // Pressure fill
+      var fillH = pressure * 100;
+      var fillColor = pressure >= threshold ? 'var(--red)' : 'var(--accent)';
+      svg += '<rect x="162" y="'+(128-fillH)+'" width="76" height="'+fillH+'" rx="8" fill="'+fillColor+'" opacity="'+(0.2+pressure*0.5).toFixed(2)+'"/>';
+      // Threshold line (eruption line)
+      var threshY = 128 - threshold * 100;
+      svg += '<line x1="155" y1="'+threshY+'" x2="245" y2="'+threshY+'" stroke="var(--red)" stroke-width="1.5" stroke-dasharray="4 2"/>';
+      svg += '<text x="250" y="'+(threshY+4)+'" font-size="8" fill="var(--red)" font-family="var(--font-mono)">ERUPT '+threshold.toFixed(2)+'</text>';
+      // Current mode
+      var modeColor = mode === 'URGENT' ? 'var(--red)' : (mode === 'NORMAL' ? 'var(--amber)' : '#4caf50');
+      svg += '<text x="200" y="150" text-anchor="middle" font-size="10" fill="'+modeColor+'" font-family="var(--font-mono)">MODE: '+mode+' ('+(pressure*100).toFixed(0)+'% pressure)</text>';
+      return svg;
+
+    default:
+      return '<text x="200" y="80" text-anchor="middle" font-size="12" fill="var(--text-muted)">No visualization</text>';
+  }
+}
+
+/* ═══════════════════════════════════════════════════════════════
+   RENDER: CONFIG — adapts backend {schema, values, providers} format
+   ═══════════════════════════════════════════════════════════════ */
+var liveSettings = null;
+var liveProviders = [];
+
+var CONFIG_GROUP_PREFIXES = [
+  {prefix: 'sylanne_persona_', group: 'Identity', groupKey: 'cfg_identity'},
+  {prefix: 'sylanne_webui_', group: 'WebUI', groupKey: 'cfg_webui'},
+  {prefix: 'sylanne_group_', group: 'WebUI', groupKey: 'cfg_webui'},
+  {prefix: 'sylanne_alpha_realtime_', group: 'Realtime', groupKey: 'cfg_realtime'},
+  {prefix: 'sylanne_alpha_stream_', group: 'Realtime', groupKey: 'cfg_realtime'},
+  {prefix: 'sylanne_alpha_proactive_', group: 'Realtime', groupKey: 'cfg_realtime'},
+  {prefix: 'sylanne_alpha_intercept_', group: 'Realtime', groupKey: 'cfg_realtime'},
+  {prefix: 'sylanne_alpha_embedding_', group: 'Memory & Assessment', groupKey: 'cfg_memory'},
+  {prefix: 'sylanne_alpha_main_assessor_', group: 'Memory & Assessment', groupKey: 'cfg_memory'},
+  {prefix: 'sylanne_alpha_fast_assessor_', group: 'Memory & Assessment', groupKey: 'cfg_memory'},
+  {prefix: 'sylanne_alpha_background_', group: 'Memory & Assessment', groupKey: 'cfg_memory'},
+  {prefix: 'sylanne_alpha_life_simulation_', group: 'Life Simulation', groupKey: 'cfg_life'},
+  {prefix: 'sylanne_alpha_transcription_', group: 'Advanced', groupKey: 'cfg_advanced'},
+];
+
+function classifyConfigKey(key) {
+  for (var i = 0; i < CONFIG_GROUP_PREFIXES.length; i++) {
+    var rule = CONFIG_GROUP_PREFIXES[i];
+    if (key.startsWith(rule.prefix)) return rule.group;
+  }
+  if (key.startsWith('sylanne_alpha_')) return 'Advanced';
+  return 'Advanced';
+}
+
+var CONFIG_EN = {
+  '人格名称（显示在 WebUI 和日志中）': 'Persona display name',
+  '群聊触发名字（逗号分隔）': 'Group chat trigger names (comma-separated)',
+  '启用 WebUI 管理面板': 'Enable WebUI dashboard',
+  'WebUI 监听地址': 'WebUI listen address',
+  'WebUI 监听端口': 'WebUI listen port',
+  'WebUI 访问令牌（留空自动生成）': 'WebUI access token (auto-generated if empty)',
+  '启用即时聊天调度': 'Enable instant chat dispatch',
+  '启用 Sylanne 即时聊天调度': 'Enable instant chat dispatch',
+  '首句抢发（流式输出时提前发送第一句）': 'First-sentence early delivery (streaming)',
+  '启用首句抢发（流式）': 'First-sentence early delivery (streaming)',
+  '响应分段接管': 'Response segmentation',
+  '允许即时聊天接管 LLM 响应分段': 'Allow realtime chat to intercept LLM response segmentation',
+  '启用主动发起派发': 'Enable proactive speech dispatch',
+  '启用 Sylanne 主动发起派发': 'Enable proactive speech dispatch',
+  '启用主动检查调度': 'Enable proactive scheduler',
+  '启用主动检查后台调度': 'Enable proactive background scheduler',
+  '启用 Embedding 记忆召回': 'Enable embedding memory recall',
+  '启用 embedding 记忆辅助召回': 'Enable embedding memory recall',
+  'Embedding 提供者 ID': 'Embedding provider ID',
+  'Embedding 记忆使用的 Provider ID': 'Embedding memory provider ID',
+  '召回 top-K 条数': 'Recall top-K count',
+  'Embedding 召回 top-K 条数': 'Embedding recall top-K count',
+  '启用即时判断 LLM': 'Enable fast assessor LLM',
+  '即时判断 LLM 的 provider ID': 'Fast assessor provider ID',
+  '即时判断 LLM Provider（前台同步）': 'Fast assessor LLM provider (foreground sync)',
+  '启用后台工作队列': 'Enable background worker queue',
+  '最大并发工作数': 'Max background workers',
+  '后台最大并发工作数': 'Max background workers',
+  '启用生活模拟': 'Enable life simulation',
+  '启用 Sylanne 生活模拟': 'Enable life simulation',
+  '模拟 LLM 提供者 ID': 'Simulation LLM provider ID',
+  '生活模拟 LLM Provider': 'Life simulation LLM provider',
+  '模拟间隔（秒）': 'Simulation interval (seconds)',
+  '生活模拟间隔（秒）': 'Life simulation interval (seconds)',
+  '主动联系冷却（秒）': 'Outreach cooldown (seconds)',
+  '生活模拟主动找用户冷却（秒）': 'Life simulation outreach cooldown (seconds)',
+  '自动检测 AstrBot 群聊上下文感知': 'Auto-detect group chat context',
+  '哈基德模型兼容（影响 prompt 构建和响应处理）': 'Claude model compatibility (affects prompt building and response handling)',
+  '启用主评估器（用于深度情感分析）': 'Enable main assessor (deep emotion analysis)',
+  '启用主评估器（深度情感分析，后台异步）': 'Enable main assessor (deep emotion analysis, async)',
+  '主评估器使用的 LLM provider ID': 'Main assessor LLM provider ID',
+  '主评估器 LLM Provider ID（后台异步）': 'Main assessor LLM provider ID (async)',
+  '锁定的人格 system prompt（覆盖动态生成）': 'Locked persona prompt (overrides dynamic generation)',
+  '启用非文本消息转述（图片→文字描述，自动检测多模态 provider）': 'Enable non-text transcription (image to text)',
+  '转述 LLM 的 provider ID（留空自动检测多模态 provider）': 'Transcription LLM provider ID (auto-detect if empty)',
+  'Sylanne alpha body 状态目录（留空则使用 AstrBot data 目录下的 sylanne_alpha/）': 'State directory path (empty = default)',
+  'Sylanne alpha body 状态目录（留空则使用 AstrBot data 目录下的 sylanne_alpha/）': 'State directory path (empty = default)',
+};
+
+function schemaToGroups(schema, values) {
+  var groups = {};
+  var keys = Object.keys(schema);
+  for (var i = 0; i < keys.length; i++) {
+    var key = keys[i];
+    var meta = schema[key];
+    if (meta.invisible) continue;
+    var groupName = classifyConfigKey(key);
+    if (!groups[groupName]) groups[groupName] = {group: groupName, items: []};
+    var isProvider = key.indexOf('provider_id') !== -1;
+    groups[groupName].items.push({
+      key: key,
+      label: meta.description || key,
+      label_zh: meta.description || key,
+      label_en: CONFIG_EN[meta.description] || meta.description || key,
+      type: isProvider ? 'provider' : (meta.type === 'bool' ? 'toggle' : (meta.type === 'int' || meta.type === 'float' ? 'number' : 'string')),
+      value: values[key] !== undefined ? values[key] : (meta.default !== undefined ? meta.default : ''),
+      options: meta.options || null
+    });
+  }
+  var order = ['Identity', 'WebUI', 'Realtime', 'Memory & Assessment', 'Life Simulation', 'Advanced'];
+  return order.filter(function(g) { return groups[g]; }).map(function(g) { return groups[g]; });
+}
+
+async function renderConfig() {
+  var left = document.getElementById('configLeft');
+  var right = document.getElementById('configRight');
+
+  var settings;
+  if (isPreview) {
+    settings = MOCK.settings;
+    liveProviders = MOCK_PROVIDERS;
+  } else {
+    try {
+      var resp = await apiFetch('/api/settings');
+      settings = schemaToGroups(resp.schema || {}, resp.values || {});
+      liveProviders = (resp.providers || []).map(function(p) { return {id: p.id, name: p.name || p.id, type: p.type || ''}; });
+      if (!liveProviders.length) liveProviders = MOCK_PROVIDERS;
+      liveSettings = resp;
+    } catch(e) {
+      settings = MOCK.settings;
+      liveProviders = MOCK_PROVIDERS;
+    }
+  }
+
+  var leftGroups = settings.slice(0, 3);
+  var rightGroups = settings.slice(3);
+
+  left.innerHTML = leftGroups.map(function(g) { return renderConfigGroup(g); }).join('');
+  right.innerHTML = rightGroups.map(function(g) { return renderConfigGroup(g); }).join('')
+    + '<button class="save-btn" onclick="saveConfig()">' + t('config_save') + '</button>';
+
+  document.querySelectorAll('.provider-stack').forEach(function(stack) {
+    var val = stack.dataset.value;
+    if (val && !liveProviders.find(function(p) { return p.id === val; })) {
+      stack.classList.add('manual-active');
+      var input = stack.querySelector('.provider-manual-input');
+      if (input) {
+        input.value = val;
+        stack.querySelector('.provider-btn-text').textContent = val;
+        input.oninput = function() {
+          stack.dataset.value = input.value;
+          stack.querySelector('.provider-btn-text').textContent = input.value || '-- Manual --';
+        };
+      }
+    }
+  });
+}
+
+var CFG_GROUP_I18N_MAP = {
+  'Identity': 'cfg_identity', 'WebUI': 'cfg_webui', 'Realtime': 'cfg_realtime',
+  'Memory & Assessment': 'cfg_memory', 'Life Simulation': 'cfg_life', 'Advanced': 'cfg_advanced',
+};
+
+function renderConfigGroup(group) {
+  var groupKey = CFG_GROUP_I18N_MAP[group.group] || '';
+  var groupTitle = groupKey ? t(groupKey) : group.group.toUpperCase();
+  // 收集本组中所有 _enabled 开关的前缀，用于依赖折叠
+  var enabledPrefixes = {};
+  group.items.forEach(function(item) {
+    var m = item.key.match(/^(.+_)enabled$/);
+    if (m && item.type === 'toggle') enabledPrefixes[m[1]] = item.value;
+  });
+  var html = '<div class="card"><div class="config-group-title">' + groupTitle + '</div>';
+  group.items.forEach(function(item) {
+    var itemLabel = currentLang === 'zh' ? item.label_zh : (item.label_en || item.label);
+    // 判断是否为某个 _enabled 开关的从属项
+    var depAttr = '';
+    var depClass = '';
+    if (!item.key.endsWith('_enabled')) {
+      for (var prefix in enabledPrefixes) {
+        if (item.key.startsWith(prefix) && item.key !== prefix + 'enabled') {
+          var enabledKey = prefix + 'enabled';
+          var isOn = enabledPrefixes[prefix];
+          depAttr = ' data-depends="' + enabledKey + '"';
+          depClass = isOn ? ' visible' : '';
+          break;
+        }
+      }
+    }
+    var rowClass = 'config-row' + depClass;
+    html += '<div class="' + rowClass + '"' + depAttr + '><span class="config-label">' + itemLabel + '</span>';
+    if (item.type === 'provider' || item.key.indexOf('provider_id') !== -1) {
+      var providers = liveProviders || MOCK_PROVIDERS;
+      if (item.key.indexOf('embedding') !== -1) {
+        providers = providers.filter(function(p) { return !p.type || p.type === 'embedding'; });
+      }
+      var currentProvider = providers.find(function(p) { return p.id === item.value; });
+      var btnText = currentProvider ? currentProvider.name : (item.value || t('select_provider_placeholder'));
+      html += '<div class="provider-stack" data-key="' + item.key + '"' + (item.value ? ' data-value="' + item.value + '"' : '') + '>';
+      html += '<button class="provider-btn" onclick="toggleProvider(this)">';
+      html += '<span class="provider-btn-text">' + btnText + '</span>';
+      html += '<span class="provider-btn-arrow"></span>';
+      html += '</button>';
+      html += '<div class="provider-menu">';
+      providers.forEach(function(p) {
+        var active = (item.value === p.id) ? ' active' : '';
+        html += '<button class="provider-opt' + active + '" data-val="' + p.id + '" onclick="selectProvider(this)">';
+        html += '<span>' + p.name + '</span><small>' + p.id + '</small></button>';
+      });
+      html += '<button class="provider-opt manual-opt" onclick="showManualInput(this)"><span>Manual Input...</span><small>Type custom provider ID</small></button>';
+      html += '</div>';
+      html += '<div class="provider-manual"><input type="text" class="provider-manual-input" placeholder="Enter provider ID" data-key="' + item.key + '"' + (item.value && !currentProvider ? ' value="' + item.value + '"' : '') + '></div>';
+      html += '</div>';
+    } else if (item.type === 'number') {
+      html += '<input class="config-input" type="number" step="any" value="' + item.value + '" data-key="' + item.key + '">';
+    } else if (item.type === 'string') {
+      html += '<input class="config-input" type="text" value="' + (item.value || '') + '" data-key="' + item.key + '" style="width:140px">';
+    } else if (item.options) {
+      html += '<select class="config-select" data-key="' + item.key + '">';
+      item.options.forEach(function(opt) { html += '<option' + (opt === item.value ? ' selected' : '') + '>' + opt + '</option>'; });
+      html += '</select>';
+    } else if (item.type === 'toggle') {
+      html += '<div class="config-toggle' + (item.value ? ' on' : '') + '" data-key="' + item.key + '" onclick="toggleConfig(this)"></div>';
+    }
+    html += '</div>';
+  });
+  html += '</div>';
+  return html;
+}
+
+function toggleConfig(el) {
+  el.classList.toggle('on');
+  // 通用依赖折叠：_enabled 开关控制同前缀从属项的显隐（CSS transition 动画）
+  var key = el.dataset.key;
+  if (key && key.endsWith('_enabled')) {
+    var isOn = el.classList.contains('on');
+    document.querySelectorAll('.config-row[data-depends="' + key + '"]').forEach(function(row) {
+      if (isOn) row.classList.add('visible');
+      else row.classList.remove('visible');
+    });
+  }
+}
+/* Provider Picker Logic */
+function toggleProvider(btn) {
+  var stack = btn.closest('.provider-stack');
+  document.querySelectorAll('.provider-stack.open').forEach(function(s) { if (s !== stack) s.classList.remove('open'); });
+  stack.classList.toggle('open');
+}
+function selectProvider(opt) {
+  var stack = opt.closest('.provider-stack');
+  var val = opt.dataset.val;
+  stack.querySelector('.provider-btn-text').textContent = opt.querySelector('span').textContent;
+  stack.dataset.value = val;
+  stack.classList.remove('open', 'manual-active');
+  stack.querySelectorAll('.provider-opt').forEach(function(o) { o.classList.remove('active'); });
+  opt.classList.add('active');
+}
+function showManualInput(opt) {
+  var stack = opt.closest('.provider-stack');
+  stack.classList.remove('open');
+  stack.classList.add('manual-active');
+  var input = stack.querySelector('.provider-manual-input');
+  setTimeout(function() { input.focus(); }, 250);
+  input.oninput = function() {
+    stack.dataset.value = input.value;
+    stack.querySelector('.provider-btn-text').textContent = input.value || '-- Manual --';
+  };
+}
+document.addEventListener('click', function(e) {
+  if (!e.target.closest('.provider-stack')) {
+    document.querySelectorAll('.provider-stack.open').forEach(function(s) { s.classList.remove('open'); });
+  }
+  if (!e.target.closest('.session-stack')) {
+    var ss = document.getElementById('sessionStack');
+    if (ss) ss.classList.remove('open');
+  }
+});
+
+async function saveConfig() {
+  var inputs = document.querySelectorAll('.config-input, .config-select');
+  var toggles = document.querySelectorAll('.config-toggle');
+  var providerStacks = document.querySelectorAll('.provider-stack');
+  var payload = {};
+  inputs.forEach(function(el) { payload[el.dataset.key] = el.value; });
+  toggles.forEach(function(el) { payload[el.dataset.key] = el.classList.contains('on'); });
+  providerStacks.forEach(function(el) { payload[el.dataset.key] = el.dataset.value || ''; });
+  try {
+    await apiFetch('/api/settings', { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify(payload) });
+    showToast(currentLang === 'zh' ? 'PROTOCOL UPDATED — 参数已写入神经核心，变更即时生效。' : 'PROTOCOL UPDATED — Parameters written to neural core. Changes effective immediately.');
+  } catch(e) {
+    showToast(currentLang === 'zh' ? 'WRITE FAILED — 写入失败，请检查连接状态。' : 'WRITE FAILED — Could not persist changes. Check connection.');
+  }
+}
+
+function showToast(msg) {
+  var existing = document.getElementById('labToast');
+  if (existing) existing.remove();
+  var toast = document.createElement('div');
+  toast.id = 'labToast';
+  toast.style.cssText = 'position:fixed;bottom:60px;left:50%;transform:translateX(-50%) translateY(20px);background:var(--card);border:1px solid var(--accent);border-radius:10px;padding:14px 28px;font-family:var(--font-mono);font-size:11px;letter-spacing:1px;color:var(--text);z-index:30000;opacity:0;transition:opacity 0.4s ease,transform 0.4s cubic-bezier(0.4,0,0.2,1);box-shadow:0 8px 32px rgba(0,0,0,0.3);max-width:500px;text-align:center;backdrop-filter:blur(8px)';
+  toast.textContent = msg;
+  document.body.appendChild(toast);
+  requestAnimationFrame(function() {
+    toast.style.opacity = '1';
+    toast.style.transform = 'translateX(-50%) translateY(0)';
+  });
+  setTimeout(function() {
+    toast.style.opacity = '0';
+    toast.style.transform = 'translateX(-50%) translateY(20px)';
+    setTimeout(function() { toast.remove(); }, 400);
+  }, 3000);
+}
+
+/* ═══════════════════════════════════════════════════════════════
+   RENDER: LOGS — 两阶段渲染模式
+   ─────────────────────────────────────────────────────────────
+   日志页面分为：
+   - 左侧日志终端：滚动列表，使用 innerHTML 追加新条目（无交互状态）
+   - 右侧路由统计：使用 ID 定位更新数值，保留 checkbox 交互状态
+   initLogs 构建骨架（含 checkbox 等交互元素），updateLogs 仅刷新数据。
+   ═══════════════════════════════════════════════════════════════ */
+var logsInited = false;
+var cachedLogs = null;
+
+function formatLogTime(ts) {
+  if (typeof ts === 'string' && ts.indexOf(':') !== -1) return ts;
+  if (typeof ts === 'number') {
+    var d = new Date(ts * 1000);
+    return d.toLocaleTimeString('en-GB', {hour12:false}) + '.' + String(d.getMilliseconds()).padStart(3,'0');
+  }
+  return String(ts || '');
+}
+
+/**
+ * initLogs — 构建日志页面静态骨架（只调用一次）
+ * 右侧控制面板和统计区域的交互元素（checkbox）通过 ID 保留状态。
+ */
+function initLogs() {
+  var left = document.getElementById('logsLeft');
+  var right = document.getElementById('logsRight');
+
+  // 左侧：日志终端容器
+  left.innerHTML = '<div class="log-terminal" id="logTerminal"></div>';
+
+  // 右侧：控制面板 + 路由统计
+  var colors = { FAST: '#d4a0b8', NORMAL: '#33ccee', FULL: '#ffcc44', SKIP: '#aaa' };
+  var controlsHtml = '<div class="card"><div class="card-title">' + t('logs_controls') + '</div>';
+  controlsHtml += '<div class="log-controls">';
+  controlsHtml += '<label><input type="checkbox" id="autoScrollCheck" ' + (autoScroll ? 'checked' : '') + ' onchange="autoScroll=this.checked">' + t('logs_autoscroll') + '</label>';
+  controlsHtml += '<button class="log-refresh-btn" onclick="refreshLogs()">' + t('logs_refresh') + '</button>';
+  controlsHtml += '</div></div>';
+
+  var statsHtml = '<div class="card"><div class="card-title">' + t('logs_stats') + '</div>';
+  statsHtml += '<div class="stat-grid">';
+  ['FAST','NORMAL','FULL','SKIP'].forEach(function(k) {
+    statsHtml += '<div class="stat-box"><div class="stat-val" id="log-stat-' + k + '" style="color:' + colors[k] + '">0</div><div class="stat-lbl" id="log-stat-lbl-' + k + '">' + k + ' (0%)</div></div>';
+  });
+  statsHtml += '</div></div>';
+
+  right.innerHTML = controlsHtml + statsHtml;
+  logsInited = true;
+}
+
+/**
+ * updateLogs — 刷新日志终端内容和右侧统计数值
+ * 日志终端使用 innerHTML（纯展示，无交互状态需保留）
+ * 右侧统计通过 ID 更新 textContent
+ */
+async function updateLogs() {
+  if (!logsInited) { initLogs(); }
+
+  // 拉取最新日志
+  if (!isPreview) {
+    try { cachedLogs = await apiFetch('/api/computation_logs?limit=100'); } catch(e) {}
+  }
+  var logData = cachedLogs || {logs: MOCK.computation_logs};
+  var logs = logData.logs || logData;
+
+  // 更新日志终端（innerHTML 替换，纯文本列表无交互状态）
+  var entries = (Array.isArray(logs) ? logs : []).map(function(l) {
+    var route = (l.route || 'NORMAL').toUpperCase();
+    var cls = route.toLowerCase();
+    var time = formatLogTime(l.time);
+    var msg = l.msg || l.text || l.message || '';
+    var layers = l.layers ? ' [' + Object.keys(l.layers).join(',') + ']' : '';
+    return '<div class="log-entry"><span class="log-time">' + time + '</span><span class="log-badge ' + cls + '">' + route + '</span><span class="log-msg">' + msg + layers + '</span></div>';
+  }).join('');
+
+  var term = document.getElementById('logTerminal');
+  if (term) term.innerHTML = entries;
+
+  // 更新右侧路由统计（仅修改 textContent，不重建 DOM）
+  var rd = (appState || MOCK.state).route_distribution;
+  var total = ((rd.FAST||0) + (rd.NORMAL||0) + (rd.FULL||0) + (rd.SKIP||0)) || 1;
+  ['FAST','NORMAL','FULL','SKIP'].forEach(function(k) {
+    var pct = (((rd[k]||0)/total)*100).toFixed(1);
+    var valEl = document.getElementById('log-stat-' + k);
+    var lblEl = document.getElementById('log-stat-lbl-' + k);
+    if (valEl) valEl.textContent = String(rd[k]||0);
+    if (lblEl) lblEl.textContent = k + ' (' + pct + '%)';
+  });
+
+  // 自动滚动到底部
+  if (autoScroll && term) term.scrollTop = term.scrollHeight;
+}
+
+/** renderLogs — 兼容旧调用 */
+async function renderLogs() { if (!logsInited) initLogs(); await updateLogs(); }
+
+async function refreshLogs() {
+  try {
+    cachedLogs = await apiFetch('/api/computation_logs?limit=100');
+    await updateLogs();
+  } catch(e) {
+    showToast(currentLang === 'zh' ? 'SYNC FAILED' : 'SYNC FAILED');
+  }
+}
+/* ═══════════════════════════════════════════════════════════════
+   RENDER: MEMORY — adapts backend three-layer architecture format
+   ═══════════════════════════════════════════════════════════════ */
+async function renderMemory() {
+  var left = document.getElementById('memoryLeft');
+  var right = document.getElementById('memoryRight');
+
+  var pools;
+  if (isPreview) {
+    pools = MOCK.memory_pools;
+  } else {
+    try {
+      var resp = await apiFetch('/api/memory_pools');
+      pools = adaptMemoryPools(resp);
+    } catch(e) {
+      pools = MOCK.memory_pools;
+    }
+  }
+
+  function renderPool(title, items) {
+    var html = '<div class="card"><div class="card-title">' + title + '</div><div class="mem-list">';
+    items.forEach(function(item) {
+      var content = item.content || item.text || item.summary || '';
+      var weight = typeof item.weight === 'number' ? item.weight : 0;
+      var age = item.age || formatAge(item.created_at);
+      html += '<div class="mem-item"><div class="mem-content">' + content + '</div>';
+      html += '<div class="mem-meta"><span>weight: ' + weight.toFixed(2) + '</span><span>age: ' + age + '</span></div>';
+      html += '<div class="mem-weight-track"><div class="mem-weight-fill" style="width:' + (weight*100) + '%"></div></div>';
+      html += '</div>';
+    });
+    if (!items.length) html += '<div style="color:var(--text-muted);font-size:11px;padding:8px">No data</div>';
+    html += '</div></div>';
+    return html;
+  }
+
+  left.innerHTML = renderPool(t('mem_l1'), pools.L1 || []) + renderPool(t('mem_l2'), pools.L2 || []);
+  right.innerHTML = renderPool(t('mem_l3'), pools.L3 || [])
+    + '<div class="card" style="border:1px solid var(--accent);text-align:center;padding:16px">'
+    + '<div style="font-size:12px;font-weight:700;letter-spacing:2px;color:var(--accent);margin-bottom:10px">' + (currentLang==='zh'?'记忆整理':'MEMORY CONSOLIDATION') + '</div>'
+    + '<p style="font-size:11px;color:var(--text-muted);margin-bottom:12px">' + (currentLang==='zh'?'手动触发 L1→L2 下沉（将已确认的热记忆推入温存储）':'Manually trigger L1→L2 sink (push confirmed hot memories to warm pool)') + '</p>'
+    + '<button class="meltdown-btn" style="border-color:var(--accent);color:var(--accent)" onclick="triggerSinkToL2()">' + (currentLang==='zh'?'执行下沉':'SINK TO L2') + '</button>'
+    + '</div>'
+    + '<div class="meltdown-zone"><div class="melt-title">' + t('mem_meltdown_title') + '</div>'
+    + '<p style="font-size:11px;color:var(--text-muted);margin-bottom:16px">' + t('mem_meltdown_desc') + '</p>'
+    + '<button class="meltdown-btn" onclick="initMeltdown()">' + t('mem_meltdown_btn') + '</button></div>';
+}
+
+function adaptMemoryPools(resp) {
+  if (resp && resp.L1) return resp;
+  if (resp && resp.layers) {
+    var l1 = resp.layers.l1_hot || {};
+    var l2 = resp.layers.l2_warm || {};
+    var l3 = resp.layers.l3_cold || {};
+    return {
+      L1: (l1.items || resp.hot || []).map(adaptMemItem),
+      L2: (l2.items || resp.warm || []).map(adaptMemItem),
+      L3: (l3.nodes || resp.cold || []).map(adaptMemItem)
+    };
+  }
+  if (resp && (resp.hot || resp.warm || resp.cold)) {
+    return {
+      L1: (resp.hot || []).map(adaptMemItem),
+      L2: (resp.warm || []).map(adaptMemItem),
+      L3: (resp.cold || []).map(adaptMemItem)
+    };
+  }
+  return {L1: [], L2: [], L3: []};
+}
+
+function adaptMemItem(item) {
+  return {
+    content: item.text || item.content || item.summary || item.label || '',
+    weight: typeof item.weight === 'number' ? item.weight : 0,
+    created_at: item.created_at || 0,
+    age: formatAge(item.created_at),
+    temperature: item.temperature || 0
+  };
+}
+
+function formatAge(ts) {
+  if (!ts) return '-';
+  var now = Date.now() / 1000;
+  var diff = now - ts;
+  if (diff < 60) return Math.round(diff) + 's';
+  if (diff < 3600) return Math.round(diff / 60) + 'm';
+  if (diff < 86400) return Math.round(diff / 3600) + 'h';
+  return Math.round(diff / 86400) + 'd';
+}
+
+// 手动触发 L1→L2 记忆下沉（通过 LLM consolidation 评估）
+async function triggerSinkToL2() {
+  var btn = document.querySelector('[onclick="triggerSinkToL2()"]');
+  if (!btn) return;
+  var originalText = btn.textContent;
+  var session = currentSession || (appState && appState.session_id) || '';
+
+  // 1. 触发后台评估
+  try {
+    var resp = await apiFetch('/api/memory_consolidate', {
+      method: 'POST',
+      headers: {'Content-Type':'application/json'},
+      body: JSON.stringify({session: session})
+    });
+    var estimated = (resp && resp.estimated_seconds) || 30;
+  } catch(e) {
+    showToast(currentLang === 'zh' ? '触发评估失败' : 'Failed to trigger consolidation');
+    return;
+  }
+
+  // 2. 按钮变为倒计时状态
+  btn.disabled = true;
+  btn.style.opacity = '0.7';
+  var remaining = estimated;
+  var interval = setInterval(function() {
+    remaining--;
+    btn.textContent = (currentLang === 'zh' ? '评估中... ' + remaining + 's' : 'Evaluating... ' + remaining + 's');
+    if (remaining <= 0) {
+      clearInterval(interval);
+      // 3. 倒计时结束，尝试下沉
+      finishSink(btn, originalText, session);
+    }
+  }, 1000);
+}
+
+async function finishSink(btn, originalText, session) {
+  try {
+    var resp = await apiFetch('/api/memory_sink?session=' + encodeURIComponent(session));
+    var count = (resp && resp.sunk) || 0;
+    if (count > 0) {
+      showToast(currentLang === 'zh' ? '评估完成，已下沉 ' + count + ' 条记忆至 L2' : 'Done. ' + count + ' items sunk to L2');
+    } else {
+      showToast(currentLang === 'zh' ? '评估完成，没有需要下沉的条目' : 'Done. No items to sink');
+    }
+    await renderMemory();
+  } catch(e) {
+    showToast(currentLang === 'zh' ? '下沉失败' : 'Sink failed');
+  }
+  btn.textContent = originalText;
+  btn.disabled = false;
+  btn.style.opacity = '';
+}
+
+var meltdownNonce = '';
+var meltdownInterval = null;
+function initMeltdown() {
+  meltdownNonce = Math.random().toString(36).substring(2, 6).toUpperCase();
+  document.getElementById('meltdownNonce').textContent = meltdownNonce;
+  document.getElementById('meltdownInput').value = '';
+  // Reset to initial state
+  resetMeltdownUI();
+  document.getElementById('meltdownModal').classList.add('show');
+  var input = document.getElementById('meltdownInput');
+  var btn = document.querySelector('.meltdown-confirm');
+  btn.classList.remove('enabled');
+  input.oninput = function() {
+    if (input.value.toUpperCase() === meltdownNonce) btn.classList.add('enabled');
+    else btn.classList.remove('enabled');
+  };
+}
+function resetMeltdownUI() {
+  var inputArea = document.getElementById('meltdownInputArea');
+  var countdown = document.getElementById('meltdownCountdown');
+  var actions = document.getElementById('meltdownActions');
+  inputArea.classList.remove('hidden');
+  countdown.classList.remove('active');
+  actions.classList.remove('countdown-mode');
+  if (meltdownInterval) { clearInterval(meltdownInterval); meltdownInterval = null; }
+}
+function closeMeltdown() {
+  document.getElementById('meltdownModal').classList.remove('show');
+  resetMeltdownUI();
+}
+function confirmMeltdown() {
+  var input = document.getElementById('meltdownInput');
+  if (input.value.toUpperCase() !== meltdownNonce) return;
+
+  var inputArea = document.getElementById('meltdownInputArea');
+  var countdownEl = document.getElementById('meltdownCountdown');
+  var countdownNum = document.getElementById('meltdownCountdownNum');
+  var actions = document.getElementById('meltdownActions');
+
+  // Transition: hide input, show countdown, merge buttons
+  inputArea.classList.add('hidden');
+  setTimeout(function() {
+    countdownNum.textContent = '10';
+    countdownEl.classList.add('active');
+    actions.classList.add('countdown-mode');
+  }, 200);
+
+  // Start 10s countdown
+  var remaining = 10;
+  countdownNum.textContent = remaining;
+  meltdownInterval = setInterval(function() {
+    remaining--;
+    if (remaining <= 0) {
+      clearInterval(meltdownInterval);
+      meltdownInterval = null;
+      countdownNum.textContent = '0';
+      executeMeltdown();
+    } else {
+      countdownNum.textContent = remaining;
+    }
+  }, 1000);
+}
+function abortMeltdown() {
+  if (meltdownInterval) { clearInterval(meltdownInterval); meltdownInterval = null; }
+  showToast(currentLang === 'zh' ? 'ABORT — 熔毁已取消，记忆池安全。' : 'ABORT — Meltdown cancelled. Memory pools safe.');
+  closeMeltdown();
+}
+async function executeMeltdown() {
+  var countdownNum = document.getElementById('meltdownCountdownNum');
+  var abortBtn = document.getElementById('meltdownAbort');
+  abortBtn.style.pointerEvents = 'none';
+  abortBtn.style.opacity = '0.5';
+  countdownNum.innerHTML = '<span style="display:inline-block;width:24px;height:24px;border:3px solid rgba(255,255,255,0.3);border-top-color:var(--red);border-radius:50%;animation:spin 0.8s linear infinite"></span>';
+  try {
+    var session = (appState && appState.session_id) || '';
+    var nonceData = await apiFetch('/api/meltdown_nonce?session=' + encodeURIComponent(session));
+    await apiFetch('/api/memory_meltdown', { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify({session: session, nonce: nonceData.nonce}) });
+    countdownNum.textContent = '✓';
+    countdownNum.style.color = '#4caf50';
+    abortBtn.textContent = 'PURGED';
+    abortBtn.style.background = '#4caf50';
+    showToast(currentLang === 'zh' ? 'MELTDOWN COMPLETE — 所有记忆池已清除，神经状态已重置。' : 'MELTDOWN COMPLETE — All memory pools purged. Neural state reset.');
+    setTimeout(async function() {
+      closeMeltdown();
+      countdownNum.style.color = '';
+      abortBtn.style.background = '';
+      abortBtn.style.pointerEvents = '';
+      abortBtn.style.opacity = '';
+      abortBtn.textContent = t('mem_meltdown_abort');
+      await renderMemory();
+    }, 1200);
+  } catch(e) {
+    countdownNum.textContent = 'ERR';
+    countdownNum.style.color = 'var(--amber)';
+    abortBtn.style.pointerEvents = '';
+    abortBtn.style.opacity = '';
+    setTimeout(function() {
+      closeMeltdown();
+      countdownNum.style.color = '';
+      abortBtn.textContent = t('mem_meltdown_abort');
+    }, 1500);
+  }
+}
+
+/* ═══════════════════════════════════════════════════════════════
+   RENDER: PERSONALITY — 两阶段渲染模式
+   ─────────────────────────────────────────────────────────────
+   人格页面包含：
+   - 左侧：雷达图 SVG + 五维数值列表
+   - 右侧：六维条形图 + 漂移时间线
+   initPersonality 构建完整骨架（SVG 网格线、标签、条形容器等），
+   updatePersonality 仅修改 polygon points 和 bar width/textContent。
+   SVG polygon 的 points 属性修改不会触发 DOM 重建，配合 CSS transition
+   可实现平滑的雷达图形变动画。
+   ═══════════════════════════════════════════════════════════════ */
+var personalityInited = false;
+var PERSONALITY_RADAR_R = 110;
+var PERSONALITY_RADAR_CX = 150;
+var PERSONALITY_RADAR_CY = 150;
+
+/** 极坐标转笛卡尔坐标（雷达图用） */
+function radarPolarToXY(angle, radius) {
+  var a = angle - Math.PI / 2;
+  return { x: PERSONALITY_RADAR_CX + radius * Math.cos(a), y: PERSONALITY_RADAR_CY + radius * Math.sin(a) };
+}
+
+/**
+ * initPersonality — 构建人格页面静态 DOM 骨架
+ * 雷达图的网格线和标签是静态的，数据多边形通过 id="radar-data-polygon" 更新。
+ * 六维条形图每个 bar 通过 id="six-bar-fill-{index}" 和 id="six-bar-val-{index}" 更新。
+ */
+function initPersonality() {
+  var left = document.getElementById('personalityLeft');
+  var right = document.getElementById('personalityRight');
+  var s = appState || MOCK.state;
+  var p = s.personality;
+  var axes = Object.keys(p.five);
+  var n = axes.length;
+
+  // ── 左侧：雷达图 SVG ──
+  var svgHtml = '<svg class="radar-svg" viewBox="0 0 300 300">';
+  // 静态网格线
+  [0.25, 0.5, 0.75, 1.0].forEach(function(scale) {
+    var pts = [];
+    for (var i = 0; i < n; i++) {
+      var angle = (2 * Math.PI * i) / n;
+      var pt = radarPolarToXY(angle, PERSONALITY_RADAR_R * scale);
+      pts.push(pt.x + ',' + pt.y);
+    }
+    svgHtml += '<polygon class="radar-grid" points="' + pts.join(' ') + '"/>';
+  });
+  // 数据多边形（通过 ID 更新 points 属性）
+  svgHtml += '<polygon class="radar-polygon" id="radar-data-polygon" points=""/>';
+  // 静态标签
+  for (var i = 0; i < n; i++) {
+    var angle = (2 * Math.PI * i) / n;
+    var lp = radarPolarToXY(angle, PERSONALITY_RADAR_R + 20);
+    svgHtml += '<text class="radar-label" x="' + lp.x + '" y="' + lp.y + '" text-anchor="middle" dominant-baseline="middle">' + axes[i].toUpperCase() + '</text>';
+  }
+  svgHtml += '</svg>';
+
+  // 五维数值列表
+  var fiveListHtml = '<div style="margin-top:12px" id="personality-five-list">';
+  axes.forEach(function(a, i) {
+    fiveListHtml += '<div style="display:flex;justify-content:space-between;padding:3px 0;font-family:var(--font-mono);font-size:11px"><span style="color:var(--text-muted)">' + a.toUpperCase() + '</span><span id="five-val-' + i + '" style="color:var(--accent)">0.00</span></div>';
+  });
+  fiveListHtml += '</div>';
+
+  left.innerHTML = '<div class="card"><div class="card-title">' + t('personality_radar') + '</div>' + svgHtml + fiveListHtml + '</div>';
+
+  // ── 右侧：六维条形图 + 漂移时间线 ──
+  var sixHtml = '';
+  p.six.forEach(function(bar, idx) {
+    sixHtml += '<div class="six-bar"><span class="six-bar-label">' + bar.name + '</span>';
+    sixHtml += '<div class="six-bar-track"><div class="six-bar-fill" id="six-bar-fill-' + idx + '" style="width:0%;background:' + bar.color + '"></div></div>';
+    sixHtml += '<span id="six-bar-val-' + idx + '" style="font-family:var(--font-mono);font-size:11px;width:40px;text-align:right">0.00</span>';
+    sixHtml += '</div>';
+  });
+
+  right.innerHTML = '<div class="card"><div class="card-title">' + t('personality_surface') + '</div>' + sixHtml + '</div>'
+    + '<div class="card"><div class="card-title">' + t('personality_drift') + '</div><div class="drift-timeline" id="drift-timeline"></div></div>';
+
+  personalityInited = true;
+}
+
+/**
+ * updatePersonality — 仅更新雷达图多边形、五维数值、六维条宽度和漂移时间线
+ * 不重建 DOM 骨架，利用 SVG attribute 修改和 CSS transition 实现平滑动画。
+ */
+function updatePersonality() {
+  if (!personalityInited) { initPersonality(); }
+  var s = appState || MOCK.state;
+  var p = s.personality;
+  var axes = Object.keys(p.five);
+  var values = Object.values(p.five);
+  var n = axes.length;
+
+  // ── 更新雷达图数据多边形 ──
+  var dataPts = [];
+  for (var i = 0; i < n; i++) {
+    var angle = (2 * Math.PI * i) / n;
+    var pt = radarPolarToXY(angle, PERSONALITY_RADAR_R * values[i]);
+    dataPts.push(pt.x + ',' + pt.y);
+  }
+  var polygon = document.getElementById('radar-data-polygon');
+  if (polygon) polygon.setAttribute('points', dataPts.join(' '));
+
+  // ── 更新五维数值列表 ──
+  axes.forEach(function(a, i) {
+    var el = document.getElementById('five-val-' + i);
+    if (el) el.textContent = values[i].toFixed(2);
+  });
+
+  // ── 更新六维条形图 ──
+  p.six.forEach(function(bar, idx) {
+    var fill = document.getElementById('six-bar-fill-' + idx);
+    var val = document.getElementById('six-bar-val-' + idx);
+    if (fill) fill.style.width = (bar.value * 100) + '%';
+    if (val) val.textContent = bar.value.toFixed(2);
+  });
+
+  // ── 更新漂移时间线（innerHTML 替换，纯展示无交互） ──
+  var driftEl = document.getElementById('drift-timeline');
+  if (driftEl) {
+    if (!p.drift || !p.drift.length) {
+      driftEl.innerHTML = '<div style="color:var(--text-muted);font-size:11px;padding:12px">' + (currentLang === 'zh' ? '暂无漂移事件 — 人格偏移会随时间在此显示' : 'No drift events yet — personality shifts will appear here over time') + '</div>';
+    } else {
+      var driftHtml = '';
+      p.drift.forEach(function(ev) {
+        driftHtml += '<div class="drift-event"><div class="drift-event-time">' + ev.time + '</div><div class="drift-event-text">' + ev.text + '</div></div>';
+      });
+      driftEl.innerHTML = driftHtml;
+    }
+  }
+}
+
+/** renderPersonality — 兼容旧调用 */
+function renderPersonality() { if (!personalityInited) initPersonality(); updatePersonality(); }
+/* ═══════════════════════════════════════════════════════════════
+   LOAD STATE — fetch + adapt backend data to frontend format
+   ═══════════════════════════════════════════════════════════════ */
+async function loadState(session) {
+  // 优先使用传入的 session，其次使用全局持久化的 currentSession
+  var targetSession = session || currentSession || '';
+  var path = targetSession ? '/api/state?session=' + encodeURIComponent(targetSession) : '/api/state';
+  var data = await apiFetch(path);
+  appState = adaptState(data);
+  // 同步全局会话状态（后端可能返回规范化的 session_id）
+  if (appState.session_id && !currentSession) {
+    currentSession = appState.session_id;
+    localStorage.setItem('sylanne_session', currentSession);
+  }
+  var pillEl = document.getElementById('sessionId');
+  pillEl.childNodes[0].textContent = appState.session_id || 'SES-0000';
+  buildSessionMenu(data.sessions || []);
+}
+
+function buildSessionMenu(sessions) {
+  var menu = document.getElementById('sessionMenu');
+  if (!menu) return;
+  var current = (appState && appState.session_id) || '';
+  if (!sessions.length) { menu.innerHTML = ''; return; }
+  menu.innerHTML = sessions.map(function(key) {
+    var cls = key === current ? 'session-opt active' : 'session-opt';
+    return '<button class="' + cls + '" onclick="selectSession(\'' + key.replace(/'/g, "\\'") + '\')">' + key + '</button>';
+  }).join('');
+}
+
+function toggleSessionMenu() {
+  var stack = document.getElementById('sessionStack');
+  stack.classList.toggle('open');
+}
+
+async function selectSession(key) {
+  document.getElementById('sessionStack').classList.remove('open');
+  // 持久化选中的会话到全局变量和 localStorage
+  currentSession = key;
+  localStorage.setItem('sylanne_session', key);
+  try {
+    await loadState(key);
+    pagesRendered = false;
+    await renderAllPages();
+  } catch(e) {
+    console.error('selectSession failed:', e);
+    showToast('SESSION SWITCH FAILED');
+  }
+}
+
+function adaptState(raw) {
+  var s = Object.assign({}, raw);
+  s.session_id = raw.session_id || raw.current_session || 'SES-0000';
+  if (!s.emotion) s.emotion = {warmth:0,arousal:0,valence:0,tension:0,curiosity:0,repair_pressure:0,expression_drive:0,boundary_firmness:0};
+  else s.emotion = Object.assign({}, s.emotion);
+  if (!s.route_distribution && s.route_stats) {
+    s.route_distribution = {
+      FAST: Number(s.route_stats.fast) || 0,
+      NORMAL: Number(s.route_stats.normal) || 0,
+      FULL: Number(s.route_stats.full) || 0,
+      SKIP: Number(s.route_stats.skip) || 0
+    };
+  }
+  if (!s.route_distribution) s.route_distribution = {FAST:0, NORMAL:0, FULL:0, SKIP:0};
+  else s.route_distribution = Object.assign({}, s.route_distribution);
+  s.gate = Object.assign({}, s.gate || {});
+  s.gate.surprise = Number(s.gate.mean_surprise || s.gate.precision || s.gate.surprise) || 0;
+  s.gate.threshold = Number(s.gate.threshold) || 0.5;
+  s.gate.route = s.gate.route || (raw.spine && raw.spine.route) || 'NORMAL';
+  s.expression = Object.assign({}, s.expression || {});
+  s.expression.mode = (s.expression.mode || 'SILENT').toUpperCase();
+  s.expression.drive = Number(s.expression.pressure || s.expression.drive) || 0;
+  s.expression.threshold = Number(s.expression.threshold) || 0.5;
+  s.boundary = Object.assign({}, s.boundary || {});
+  s.boundary.integrity = Number(s.boundary.integrity) || 1.0;
+  s.boundary.entropy = Number(s.boundary.entropy) || 0;
+  s.boundary.rotation = Number(s.boundary.rotation) || 0;
+  s.boundary.self_repair_rate = Number(s.boundary.self_repair_rate || s.boundary.stability) || 1.0;
+  s.feedback = Object.assign({}, s.feedback || {});
+  s.feedback.positive = Number(s.feedback.positive || s.feedback.accepted) || 0;
+  s.feedback.negative = Number(s.feedback.negative || s.feedback.rejected) || 0;
+  s.feedback.neutral = Number(s.feedback.neutral || s.feedback.ignored) || 0;
+  if (!s.personality) s.personality = JSON.parse(JSON.stringify(MOCK.state.personality));
+  else s.personality = JSON.parse(JSON.stringify(s.personality));
+  if (!s.personality.five) s.personality.five = {openness:0.5,warmth:0.5,intensity:0.5,autonomy:0.5,resilience:0.5};
+  if (!s.personality.six || !s.personality.six.length) s.personality.six = MOCK.state.personality.six;
+  if (!s.personality.drift || !s.personality.drift.length) s.personality.drift = [];
+  if (!Array.isArray(s.spine_layers)) s.spine_layers = MOCK.state.spine_layers;
+  if (Array.isArray(s.timing) && s.timing.length) {
+    // already in array format from backend
+  } else if (typeof s.timing === 'object' && s.timing !== null) {
+    var arr = [];
+    var layerNames = ['L1','L2','L3','L4','L5','L6','L7'];
+    layerNames.forEach(function(l) {
+      var key = l + '_ms';
+      if (s.timing[key] !== undefined) {
+        arr.push({layer: l, avg: s.timing[key] + 'ms', p95: '-', count: '-'});
+      }
+    });
+    if (arr.length) s.timing = arr;
+    else s.timing = MOCK.state.timing;
+  } else {
+    s.timing = MOCK.state.timing;
+  }
+  return s;
+}
+
+var pagesRendered = false;
+async function renderAllPages() {
+  if (pagesRendered) return;
+  pagesRendered = true;
+  // 重置所有页面的初始化标记，确保 init 函数重新构建 DOM 骨架
+  // （语言切换、会话切换时 pagesRendered 会被置 false 触发此处）
+  monitorInited = false;
+  spineInited = false;
+  logsInited = false;
+  personalityInited = false;
+  try { renderMonitor(); } catch(e) { console.error('renderMonitor:', e); }
+  try { renderSpine(); } catch(e) { console.error('renderSpine:', e); }
+  try { await renderConfig(); } catch(e) { console.error('renderConfig:', e); }
+  try { await renderLogs(); } catch(e) { console.error('renderLogs:', e); }
+  try { await renderMemory(); } catch(e) { console.error('renderMemory:', e); }
+  try { renderPersonality(); } catch(e) { console.error('renderPersonality:', e); }
+}
+
+// 轮询刷新：只更新实时数据页的值，不重建 DOM 骨架（避免闪烁和打断用户交互）
+async function refreshLivePages() {
+  try { updateMonitor(); } catch(e) {}
+  try { updateSpine(); } catch(e) {}
+  try { await updateLogs(); } catch(e) {}
+  try { updatePersonality(); } catch(e) {}
+}
+
+/* ═══════════════════════════════════════════════════════════════
+   START DASHBOARD (after login or token check)
+   ═══════════════════════════════════════════════════════════════ */
+async function startDashboard() {
+  try {
+    await loadState();
+    setOnline();
+  } catch(e) {
+    if (!isPreview) {
+      isPreview = true;
+      try { await loadState(); } catch(e2) { /* use defaults */ }
+    }
+  } finally {
+    await renderAllPages();
+    navigateTo('monitor');
+  }
+  // 5-second polling — ALWAYS tries real API first
+  setInterval(async function() {
+    var wasPreview = isPreview;
+    try {
+      isPreview = false;
+      await loadState();
+      // 轮询只刷新实时数据页，不重建配置页/记忆页（避免打断用户交互）
+      await refreshLivePages();
+      setOnline();
+    } catch(e) {
+      if (wasPreview) isPreview = true;
+      setOffline();
+    }
+  }, 5000);
+
+  // TODO: 检测 astrbot_plugin_proactive_chat 是否存在
+  // 如果存在，proactive_scheduler 切换为信息提供者模式
+}
+
+/* ═══════════════════════════════════════════════════════════════
+   SPINE HANDLE — 可拖拽圆形手柄，上下拖动切换页面
+   ═══════════════════════════════════════════════════════════════ */
+
+/* 将手柄位置同步到指定页面对应的节点 */
+function syncSpineHandleToPage(page) {
+  var handle = document.getElementById('spineHandle');
+  if (!handle) return;
+  var node = document.querySelector('.spine-node[data-page="' + page + '"]');
+  if (node) {
+    // 读取节点的 top 样式值，直接赋给手柄
+    handle.style.top = node.style.top;
+  }
+}
+
+/* 初始化脊柱拖拽手柄的交互逻辑 */
+function initSpineHandle() {
+  var handle = document.getElementById('spineHandle');
+  if (!handle) return;
+
+  var isDragging = false;
+  var spineEl = document.getElementById('fixedSpine');
+
+  // 获取脊柱可拖拽范围（节点最小/最大 Y 百分比）
+  var nodePositions = [20, 32, 44, 56, 68, 80]; // 对应 6 个节点的 top%
+
+  // 防抖：记录上次吸附的节点索引，避免重复触发同一节点导致闪烁
+  var lastSnappedIdx = -1;
+
+  // 记录拖拽期间是否已吸附到某节点（用于 endDrag 判断是否需要阻尼动画）
+  var snappedDuringDrag = false;
+
+  function startDrag(e) {
+    // 仅在 nodes-visible 状态下允许拖拽
+    if (!spineEl.classList.contains('nodes-visible')) return;
+    isDragging = true;
+    snappedDuringDrag = false;
+    handle.style.cursor = 'grabbing';
+    // 拖拽期间禁用平滑过渡，实现即时跟随手指/鼠标
+    handle.style.transition = 'none';
+    e.preventDefault();
+  }
+
+  function moveDrag(e) {
+    if (!isDragging) return;
+    var clientY = e.touches ? e.touches[0].clientY : e.clientY;
+    var spineRect = spineEl.getBoundingClientRect();
+    // 计算鼠标在脊柱中的百分比位置
+    var pct = ((clientY - spineRect.top) / spineRect.height) * 100;
+    // 限制在节点范围内（最小 20%，最大 80%）
+    pct = Math.max(nodePositions[0], Math.min(nodePositions[nodePositions.length - 1], pct));
+    handle.style.top = pct + '%';
+
+    // 靠近节点时的吸附感：节点发光 + 手柄缩放
+    var nearestDist = Infinity;
+    var nearestIdx = 0;
+    for (var i = 0; i < nodePositions.length; i++) {
+      var d = Math.abs(pct - nodePositions[i]);
+      if (d < nearestDist) { nearestDist = d; nearestIdx = i; }
+    }
+
+    // 滞回逻辑：只有当手柄远离已吸附节点超过 6% 时才解除锁定
+    if (lastSnappedIdx !== -1) {
+      var distFromSnapped = Math.abs(pct - nodePositions[lastSnappedIdx]);
+      if (distFromSnapped > 6) {
+        lastSnappedIdx = -1; // 解除锁定，允许吸附到新节点
+      }
+    }
+
+    // 靠近阈值：距离 < 4% 时触发吸附视觉反馈
+    var nodes = document.querySelectorAll('.spine-node');
+    nodes.forEach(function(n, i) {
+      if (i === nearestIdx && nearestDist < 4) {
+        n.style.transform = 'translate(-50%,-50%) scale(1.8)';
+        n.style.opacity = '1';
+        n.style.boxShadow = '0 0 14px rgba(184,138,158,0.7)';
+      } else {
+        n.style.transform = '';
+        n.style.opacity = '';
+        n.style.boxShadow = '';
+      }
+    });
+
+    // 手柄靠近节点时微微放大 + 阻尼吸附导航
+    // 当距离 < 4% 时触发吸附，使用弹性缓动曲线产生"到达→微过冲→回弹"的阻尼感
+    if (nearestDist < 4) {
+      handle.style.transform = 'translate(-50%,-50%) scale(1.15)';
+      // 仅当接近的是不同节点时才触发导航（防止闪烁）
+      if (nearestIdx !== lastSnappedIdx) {
+        // 拖拽中吸附：临时启用弹性过渡，手柄平滑滑向节点而非瞬移
+        handle.style.transition = 'top 0.25s cubic-bezier(0.2, 0.8, 0.3, 1.0)';
+        handle.style.top = nodePositions[nearestIdx] + '%';
+        navigateTo(PAGE_ORDER[nearestIdx]);
+        lastSnappedIdx = nearestIdx;
+        snappedDuringDrag = true;
+        // 过渡完成后移除 transition，恢复即时跟随手指
+        setTimeout(function() {
+          if (isDragging) handle.style.transition = 'none';
+        }, 260);
+      }
+    } else {
+      handle.style.transform = 'translate(-50%,-50%) scale(1)';
+      // 非吸附区域：确保手柄即时跟随，无过渡延迟
+      handle.style.transition = 'none';
+    }
+  }
+
+  function endDrag(e) {
+    if (!isDragging) return;
+    isDragging = false;
+    handle.style.cursor = 'grab';
+    handle.style.transform = 'translate(-50%,-50%) scale(1)';
+
+    // 重置所有节点的拖拽高亮状态
+    document.querySelectorAll('.spine-node').forEach(function(n) {
+      n.style.transform = '';
+      n.style.opacity = '';
+      n.style.boxShadow = '';
+    });
+
+    // 释放时阻尼回弹：手柄弹性滑向最近节点
+    // cubic-bezier(0.2, 0.8, 0.3, 1.0) 产生轻微过冲→回弹的弹簧阻尼感
+    var currentTop = parseFloat(handle.style.top);
+    var closestIdx = 0;
+    var minDist = Infinity;
+    for (var i = 0; i < nodePositions.length; i++) {
+      var dist = Math.abs(currentTop - nodePositions[i]);
+      if (dist < minDist) { minDist = dist; closestIdx = i; }
+    }
+
+    // 释放阻尼动画：比拖拽吸附稍慢、更有弹性（0.4s vs 0.25s）
+    handle.style.transition = 'top 0.4s cubic-bezier(0.2, 0.8, 0.3, 1.0), transform 0.2s ease, opacity 0.5s ease';
+    handle.style.top = nodePositions[closestIdx] + '%';
+
+    // 如果释放位置不在已吸附的节点上，触发导航到最近节点
+    if (closestIdx !== lastSnappedIdx) {
+      navigateTo(PAGE_ORDER[closestIdx]);
+      lastSnappedIdx = closestIdx;
+    }
+  }
+
+  // 鼠标事件
+  handle.addEventListener('mousedown', startDrag);
+  document.addEventListener('mousemove', moveDrag);
+  document.addEventListener('mouseup', endDrag);
+
+  // 触摸事件（移动端支持）
+  handle.addEventListener('touchstart', startDrag, {passive: false});
+  document.addEventListener('touchmove', moveDrag, {passive: false});
+  document.addEventListener('touchend', endDrag);
+
+  // 键盘方向键/W/S 上下切页
+  document.addEventListener('keydown', function(e) {
+    var up = e.key === 'ArrowUp' || e.key === 'w' || e.key === 'W';
+    var down = e.key === 'ArrowDown' || e.key === 's' || e.key === 'S';
+    if (!up && !down) return;
+    // 如果焦点在输入框内，不拦截键盘
+    var tag = document.activeElement && document.activeElement.tagName;
+    if (tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT') return;
+    var idx = PAGE_ORDER.indexOf(currentPage);
+    if (idx === -1) return;
+    if (up && idx > 0) navigateTo(PAGE_ORDER[idx - 1]);
+    if (down && idx < PAGE_ORDER.length - 1) navigateTo(PAGE_ORDER[idx + 1]);
+    e.preventDefault();
+  });
+}
+
+/* ═══════════════════════════════════════════════════════════════
+   SKIP LOGIN (token exists or preview mode)
+   ═══════════════════════════════════════════════════════════════ */
+function skipLoginShowDashboard() {
+  document.getElementById('loginSection').style.display = 'none';
+  var spineEl = document.getElementById('fixedSpine');
+  spineEl.style.display = '';
+  spineEl.classList.add('active');
+  document.getElementById('dashboardSection').classList.add('awaiting-entrance');
+  document.getElementById('dashboardSection').style.display = 'block';
+  startDashboard().then(function() {
+    spineEl.classList.add('nodes-visible');
+    document.querySelector('.app-header').classList.add('entered');
+    document.querySelector('.app-footer').classList.add('entered');
+    document.querySelectorAll('.page-section[data-page="monitor"] .card').forEach(function(c) { c.classList.add('animate-in'); });
+    setTimeout(function() {
+      document.getElementById('dashboardSection').classList.remove('awaiting-entrance');
+      document.querySelectorAll('.card.animate-in').forEach(function(c) { c.classList.remove('animate-in'); });
+    }, 600);
+  }).catch(function(e) {
+    console.error('startDashboard failed:', e);
+    spineEl.classList.add('nodes-visible');
+    document.querySelector('.app-header').classList.add('entered');
+    document.querySelector('.app-footer').classList.add('entered');
+    document.getElementById('dashboardSection').classList.remove('awaiting-entrance');
+  });
+}
+
+/* ═══════════════════════════════════════════════════════════════
+   SHOW LOGIN (always shows boot animation, then decides next step)
+   ═══════════════════════════════════════════════════════════════ */
+function showLoginFlow() {
+  document.getElementById('loginSection').style.display = 'flex';
+
+  // 重置所有登录阶段的 DOM 状态
+  p1.classList.remove('active');
+  p3.classList.remove('active');
+  p4.classList.remove('active');
+  if (p4) p4.style.transform = ''; p4.style.opacity = '';
+  confirmBox.className = 'confirm-row state-verifying';
+  ring.classList.remove('spinning');
+  ring.style.animationPlayState = '';
+  document.getElementById('tokenInput').value = '';
+
+  // 直接检查 token 有效性决定下一步（boot sequence 已移到加载页）
+  var token = localStorage.getItem('sylanne_token');
+  if (token || window.AstrBotPluginPage) {
+    // 有 token：播放验证动画后进入 dashboard
+    confirmBox.className = 'confirm-row state-verifying';
+    ring.classList.add('spinning');
+    ring.style.animationPlayState = 'running';
+    p4.classList.add('active');
+
+    verifyToken(token).then(function(ok) {
+      // 对数分布随机延迟 1.0-2.0s，大概率落在 1.5s 以内
+      var delay = 1000 + Math.pow(Math.random(), 2.5) * 1000;
+      setTimeout(function() {
+        if (ok || isPreview) {
+          // 验证成功：显示打勾动画
+          confirmBox.className = 'confirm-row state-success';
+          setTimeout(function() { ring.style.animationPlayState = 'paused'; }, 450);
+          // 打勾动画 ~1s + 停顿 1.2s 后转场
+          setTimeout(function() { transitionToDashboard(); }, 2200);
+        } else {
+          // 验证失败：显示错误动画后回到登录表单
+          ring.style.animationPlayState = 'paused';
+          confirmBox.className = 'confirm-row state-error';
+          localStorage.removeItem('sylanne_token');
+          setTimeout(function() {
+            p4.classList.remove('active');
+            setTimeout(function() { showTokenInputForm(); }, 500);
+          }, 1600);
+        }
+      }, delay);
+    });
+  } else {
+    // 无 token：显示登录表单
+    showTokenInputForm();
+  }
+}
+
+/* 显示 token 输入表单（从 boot 动画过渡） */
+function showTokenInputForm() {
+  // 确保其他阶段不残留
+  p1.classList.remove('active');
+  p4.classList.remove('active');
+  p3.classList.add('active');
+  setTimeout(function() { document.getElementById('tokenInput').focus(); }, 300);
+}
+
+/* ═══════════════════════════════════════════════════════════════
+   INIT
+   ═══════════════════════════════════════════════════════════════ */
+document.addEventListener('DOMContentLoaded', function() {
+  isPreview = location.protocol === 'file:' || !location.hostname;
+  initTheme();
+  initLang();
+
+  // Spine node click handlers
+  document.querySelectorAll('.spine-node').forEach(function(node) {
+    node.addEventListener('click', function() { navigateTo(node.dataset.page); });
+  });
+
+  // 初始化脊柱拖拽手柄
+  initSpineHandle();
+
+  // 加载页淡出 → canvas 在遮挡下初始化 → 进入登录流程
+  function onResourcesReady() {
+    // 先在加载页遮挡下启动 canvas（避免空洞突然闪出）
+    document.getElementById('loginSection').style.display = 'flex';
+    initNetworkCanvas();
+    // 等 canvas 首帧渲染后再淡出加载页
+    requestAnimationFrame(function() {
+      requestAnimationFrame(function() {
+        var ls = document.getElementById('loadingScreen');
+        ls.classList.add('fade-out');
+        setTimeout(function() {
+          ls.style.display = 'none';
+          var decoTl = document.querySelector('.deco-tl');
+          var decoBl = document.querySelector('.deco-bl');
+          if (decoTl) decoTl.classList.add('entered');
+          if (decoBl) decoBl.classList.add('entered');
+          showLoginFlow();
+        }, 600);
+      });
+    });
+  }
+
+  // 强制加载页至少展示 1s，然后等资源就绪
+  var minDelay = new Promise(function(r) { setTimeout(r, 1000); });
+  var resourcesLoaded = new Promise(function(r) {
+    if (document.readyState === 'complete') { r(); }
+    else {
+      window.addEventListener('load', r);
+      setTimeout(r, 3000);
+    }
+  });
+  Promise.all([minDelay, resourcesLoaded]).then(onResourcesReady);
+});
+
+</script>
+</body>
+</html>

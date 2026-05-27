@@ -1,14 +1,18 @@
-"""MoE-HGT: Mixture-of-Experts Heterogeneous Graph Transformer — L5 Decision Fusion.
+"""Sylanne-Embodiment 计算核心层：MoE-HGT 异构图 Transformer（L5 决策融合层）。
 
-Three-layer architecture:
-  Stage 1: Type-Expert FFN encoding (7 type-specific experts)
-  Stage 2: True Multi-Head Cross-Attention (4 heads, per-type per-head Q/K/V)
-  Stage 3: Situation-Expert MoE FFN (top-2 gating, 5 experts, pooled input)
-  + Decision Head (16 → 4-dim output)
-  + Hebbian slow adaptation (BCM router bias + Oja attention prior)
+在 7 层计算栈中的位置：L5 决策融合层。
+职责：将来自 L1-L4 各子系统的异构信号（伤痕、虚空、边界、人格、惊讶、表达、上下文）
+融合为统一的 4 维决策向量，指导 L6/L7 的表达行为。
 
-All base parameters deterministically derived from personality SHA-256.
-Adaptation is incremental delta only — base params never change at runtime.
+三阶段架构：
+  Stage 1: 类型专家 FFN 编码（7 个类型各有独立的 FFN 专家）
+  Stage 2: 真正的多头交叉注意力（4 头，每类型每头独立 Q/K/V 投影）
+  Stage 3: 情境专家 MoE FFN（top-2 门控，5 个专家，池化输入）
+  + 决策头（16 → 4 维输出）
+  + Hebbian 慢适应（BCM 路由偏置 + Oja 注意力先验）
+
+所有基础参数由人格 SHA-256 确定性派生。
+运行时适应仅为增量 delta——基础参数永不在运行时改变。
 """
 
 from __future__ import annotations
@@ -19,18 +23,20 @@ import math
 import struct
 from typing import Any
 
+# 7 种异构 token 类型，对应计算栈各子系统的输出
 TOKEN_TYPES = (
-    "scar",
-    "void",
-    "boundary",
-    "personality",
-    "surprise",
-    "expression",
-    "context",
+    "scar",  # 伤痕状态
+    "void",  # 虚空状态
+    "boundary",  # 自创生边界状态
+    "personality",  # 人格向量
+    "surprise",  # 惊讶度
+    "expression",  # 表达状态
+    "context",  # HDC 上下文特征
 )
 _TYPE_INDEX = {t: i for i, t in enumerate(TOKEN_TYPES)}
 _NUM_TYPES = len(TOKEN_TYPES)
 _N_EXPERTS = 5
+# 5 个情境专家，对应不同的行为策略
 _EXPERT_NAMES = ("defense", "curiosity", "social", "silence", "repair")
 
 _exp = math.exp
@@ -39,6 +45,7 @@ _tanh = math.tanh
 
 
 def _deterministic_floats(seed: bytes, count: int) -> list[float]:
+    """从种子确定性生成 [-1, 1] 范围的浮点数序列（用于权重初始化）。"""
     result: list[float] = []
     block = 0
     while len(result) < count:
@@ -53,6 +60,7 @@ def _deterministic_floats(seed: bytes, count: int) -> list[float]:
 
 
 def _make_flat(seed: bytes, rows: int, cols: int, scale: float = 1.0) -> array.array:
+    """生成扁平化权重矩阵（Xavier 初始化 + 确定性种子）。"""
     floats = _deterministic_floats(seed, rows * cols)
     xavier = scale * _sqrt(2.0 / (rows + cols))
     return array.array("d", (f * xavier for f in floats))
@@ -61,6 +69,7 @@ def _make_flat(seed: bytes, rows: int, cols: int, scale: float = 1.0) -> array.a
 def _matmul_vec_flat(
     mat: list[float], vec: list[float], rows: int, cols: int
 ) -> list[float]:
+    """扁平化矩阵与向量的乘法：mat[rows×cols] × vec[cols] → result[rows]。"""
     result = [0.0] * rows
     idx = 0
     for r in range(rows):
@@ -73,12 +82,14 @@ def _matmul_vec_flat(
 
 
 def _silu(x: float) -> float:
+    """SiLU 激活函数（x * sigmoid(x)），带下溢保护。"""
     if x < -80.0:
         return 0.0
     return x / (1.0 + _exp(-x))
 
 
 def _softmax(values: list[float]) -> list[float]:
+    """数值稳定的 softmax（减去最大值防止溢出）。"""
     if not values:
         return []
     max_v = max(values)
@@ -88,6 +99,7 @@ def _softmax(values: list[float]) -> list[float]:
 
 
 def _rmsnorm_inplace(vec: list[float], gamma: list[float], n: int) -> None:
+    """原地 RMSNorm：vec[i] = vec[i] / rms * gamma[i]（用于层归一化）。"""
     ss = 0.0
     for i in range(n):
         ss += vec[i] * vec[i]
@@ -107,10 +119,17 @@ def _vec_add(a: list[float], b: list[float]) -> list[float]:
     return [a[i] + b[i] for i in range(len(a))]
 
 
-# === Stage 1: Type-Expert FFN ===
+# === Stage 1: 类型专家 FFN（每种 token 类型有独立的 FFN） ===
 
 
 class TypeExpertFFN:
+    """类型专家前馈网络。
+
+    每种 token 类型（scar/void/boundary/...）有独立的 2 层 FFN，
+    用于将该类型的原始特征编码为统一的 d_model 维表示。
+    结构：x → W1 → SiLU → W2 → 残差连接 → RMSNorm。
+    """
+
     __slots__ = ("w1_flat", "w2_flat", "d_in", "d_hidden", "gamma")
 
     def __init__(self, d_in: int = 16, d_hidden: int = 24):
@@ -135,11 +154,18 @@ class TypeExpertFFN:
         return result
 
 
-# === Stage 2: Multi-Head Cross-Attention (per-head d_head×d_head projections) ===
+# === Stage 2: 多头交叉注意力（每类型每头独立 d_head×d_head 投影） ===
 
 
 class MultiHeadCrossAttention:
-    """True multi-head attention with per-type, per-head Q/K/V of size d_head×d_head."""
+    """真正的多头交叉注意力，每种类型、每个头有独立的 Q/K/V 投影矩阵。
+
+    关键设计：同类型 token 之间不做注意力（scores[j] = -inf when ti == tj），
+    强制不同子系统之间的信息交换。
+
+    注意力先验（attention_prior）由人格参数派生，表示不同类型之间的
+    "天然亲和力"——例如高神经质使 scar↔void 的注意力更强。
+    """
 
     __slots__ = (
         "d_model",
@@ -229,7 +255,16 @@ class MultiHeadCrossAttention:
         types: list[int],
         prior_drift: list[list[float]] | None = None,
     ) -> tuple[list[list[float]], list[list[float]]]:
-        """Multi-head attention with inlined per-head 4x4 projections."""
+        """多头注意力前向传播（内联 4×4 逐头投影，手动展开以提高性能）。
+
+        Args:
+            tokens: 编码后的 token 列表，每个 [d_model] 维
+            types: 每个 token 的类型索引
+            prior_drift: Oja 适应产生的注意力先验漂移（可选）
+
+        Returns:
+            (输出 token 列表, 注意力权重矩阵)
+        """
         n = len(tokens)
         d = self.d_model
         n_h = self.n_heads
@@ -286,7 +321,7 @@ class MultiHeadCrossAttention:
                 for j in range(n):
                     tj = types[j]
                     if ti == tj:
-                        scores[j] = -1e9
+                        scores[j] = float("-inf")
                     else:
                         kj = k_vecs[j]
                         s = (
@@ -331,10 +366,16 @@ class MultiHeadCrossAttention:
         return outputs, attn_weights
 
 
-# === Stage 3: Situation-Expert MoE FFN (operates on pooled representation) ===
+# === Stage 3: 情境专家 MoE FFN（在池化表示上操作） ===
 
 
 class SituationExpert:
+    """单个情境专家：2 层 FFN（SiLU 激活），对应一种行为策略。
+
+    5 个专家分别对应：defense（防御）、curiosity（好奇）、
+    social（社交）、silence（沉默）、repair（修复）。
+    """
+
     __slots__ = ("w1_flat", "w2_flat", "d_in", "d_hidden")
 
     def __init__(self, d_in: int = 16, d_hidden: int = 24):
@@ -376,6 +417,16 @@ class SituationExpert:
 
 
 class MoELayer:
+    """混合专家层：top-2 门控选择 + 负载均衡 + 休眠专家唤醒。
+
+    门控机制：
+      1. 路由器计算每个专家的 logit
+      2. 加入 BCM 适应偏置和休眠奖励
+      3. softmax 后选择 top-2 专家
+      4. 两个专家的输出按归一化门控值加权求和
+      5. 残差连接 + RMSNorm
+    """
+
     __slots__ = (
         "experts",
         "router_flat",
@@ -413,8 +464,14 @@ class MoELayer:
         pooled: list[float],
         router_bias: list[float] | None = None,
     ) -> tuple[list[float], list[int], list[float]]:
-        """MoE forward on pooled input with top-2 gating.
-        Returns (output_vec_16d, active_expert_indices, gate_values).
+        """MoE 前向传播：top-2 门控选择专家。
+
+        Args:
+            pooled: 池化后的 16 维输入
+            router_bias: BCM 适应产生的路由偏置（可选）
+
+        Returns:
+            (16 维输出, 激活的专家索引列表, 门控概率列表)
         """
         d = self.d_model
         n_e = self.n_experts
@@ -465,11 +522,20 @@ class MoELayer:
         return result, [top1, top2], gate_probs
 
 
-# === Hebbian Adaptation ===
+# === Hebbian 慢适应机制 ===
 
 
 class RouterAdaptation:
-    """BCM-inspired router bias adaptation."""
+    """BCM 启发的路由器偏置适应。
+
+    根据表达结果（accepted/ignored/rejected）调整路由器偏置：
+      - accepted: 强化当前激活的专家（正向 BCM 更新）
+      - rejected: 抑制当前激活的专家
+      - ignored: 轻微抑制
+
+    BCM 规则：delta = eta * y * (y - theta)，其中 theta 是活动度 EMA。
+    全局衰减 0.998 防止偏置无限增长。
+    """
 
     def __init__(self, n_experts: int = _N_EXPERTS):
         self.n_experts = n_experts
@@ -509,7 +575,15 @@ class RouterAdaptation:
 
 
 class AttentionPriorAdaptation:
-    """Oja-inspired attention prior adaptation."""
+    """Oja 启发的注意力先验适应。
+
+    根据表达结果调整类型间的注意力先验漂移：
+      - accepted: 强化高注意力权重的类型对（Oja 规则）
+      - rejected: 抑制所有注意力连接
+      - ignored: 不更新
+
+    漂移值 clamp 在 [-0.3, 0.3]，全局衰减 0.999 防止累积过大。
+    """
 
     def __init__(self, n_types: int = _NUM_TYPES):
         self.n_types = n_types
@@ -552,6 +626,7 @@ class AttentionPriorAdaptation:
 
 
 def _derive_plasticity(personality: dict[str, float]) -> float:
+    """从人格参数派生可塑性：开放性↑ → 可塑性↑，尽责性↑ → 可塑性↓。"""
     openness_val = float(
         personality.get("openness", personality.get("boundary_permeability", 0.5))
     )
@@ -560,11 +635,27 @@ def _derive_plasticity(personality: dict[str, float]) -> float:
     return max(0.05, min(0.85, base))
 
 
-# === Main Class ===
+# === 主类 ===
 
 
 class HeterogeneousGraphTransformer:
-    """MoE-HGT: Complete decision fusion module for Sylanne."""
+    """MoE-HGT：Sylanne 的完整决策融合模块。
+
+    将 7 种异构 token（来自计算栈各层）融合为 4 维决策向量：
+      d[0]: 表达驱动力修正（正值 = 鼓励表达）
+      d[1]: 边界灵敏度修正（正值 = 更敏感）
+      d[2]: 紧急度修正（保留）
+      d[3]: 表达抑制信号（> 0.5 时否决表达）
+
+    三阶段处理：
+      1. TypeExpertFFN: 每种类型独立编码
+      2. MultiHeadCrossAttention: 跨类型信息交换
+      3. MoELayer: 情境专家决策 + 决策头投影
+
+    适应机制：
+      - RouterAdaptation: BCM 路由偏置（慢速学习哪些专家更有效）
+      - AttentionPriorAdaptation: Oja 注意力先验（慢速学习哪些类型对更重要）
+    """
 
     TOKEN_TYPES = TOKEN_TYPES
 
@@ -738,7 +829,11 @@ class HeterogeneousGraphTransformer:
         expression: Any,
         hdc_features: list[float],
     ) -> list[tuple[str, list[float]]]:
-        """Build typed token list from spine subsystem states."""
+        """从计算脊柱各子系统状态构建类型化 token 列表。
+
+        将各子系统的内部状态提取为统一的 16 维向量，附上类型标签，
+        供 forward() 方法处理。
+        """
         tokens: list[tuple[str, list[float]]] = []
         d = self.d_model
 

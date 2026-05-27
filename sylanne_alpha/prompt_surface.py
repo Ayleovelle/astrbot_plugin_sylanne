@@ -1,8 +1,19 @@
-"""Sylanne-Embodiment: Prompt surface rendering.
+"""Prompt 表面层 —— 将计算栈结果格式化为 LLM 可读的 prompt 片段。
 
-Extracted from kernel.py to keep the kernel focused on tick/decide/guard.
-Contains prompt fragment generation, context bus assembly, host payload
-construction, and diagnostics rendering.
+职责：
+  1. render_prompt_fragment: 将内核决策/守卫/情感/人格等状态渲染为结构化 prompt 注入文本
+  2. render_prompt_context_bus: 组装 prompt 上下文总线（列出所有活跃的上下文片段）
+  3. render_host_payload: 构建完整的 host 载荷字典（供主动发言/诊断使用）
+  4. render_diagnostics: 构建诊断面板数据（供 WebUI/Observatory 展示）
+
+设计原则：
+  - 从 kernel.py 抽离，让内核专注于 tick/decide/guard 逻辑
+  - 所有输出均为只读派生数据，不修改内核状态
+  - prompt 片段使用 [sylanne_xxx] 标签格式，便于 LLM 识别和遵循
+
+与其他组件的关系：
+  - 被 kernel.py 的 diagnostics() / on_request() / on_proactive_check() 调用
+  - 输出的 prompt_fragment 最终注入到 llm_request_pipeline 的请求中
 """
 
 from __future__ import annotations
@@ -16,7 +27,25 @@ if TYPE_CHECKING:
 def render_prompt_fragment(
     kernel: "AlphaKernel", decision: dict[str, Any], guard: dict[str, Any]
 ) -> str:
-    """Render the full prompt fragment string for host injection."""
+    """渲染完整的 prompt 注入片段，供 host 注入到 LLM 请求中。
+
+    组装内容（按顺序）：
+      - 表达倾向标签（急切/正常）
+      - 基础行动指令（action + reason）
+      - 关系时间层（当前时间 + 间隔 + 日期关系）
+      - 关系记忆层（偏好/边界/进展/修复计数）
+      - 整合自我层（姿态 + 意图 + 安全优先级）
+      - 情感动力学、计算情感、人格、道德修复、可错性
+      - 群聊氛围、主动来源、上下文总线
+
+    Args:
+        kernel: AlphaKernel 实例。
+        decision: 决策字典（action/reason/reason_code）。
+        guard: 守卫字典（allowed/reason/flags）。
+
+    Returns:
+        格式化的 prompt 片段字符串。
+    """
     reason = guard["reason"] if not guard["allowed"] else decision["reason"]
     relational_time = kernel.relational_time or kernel._relational_time_layer(
         current=kernel.last_event, previous=kernel.previous_event
@@ -61,18 +90,18 @@ def render_prompt_fragment(
     proactive = kernel._proactive_source(decision, guard)
     bus = render_prompt_context_bus(kernel, integrated_self=integrated_self)
     comp_emotion = kernel._computation_emotion_overlay()
-    # Arbitrate between two emotion signals: SSM continuous dynamics vs body affect
+    # 仲裁两个情感信号：SSM 连续动力学 vs 身体情感
     comp_expression_drive = comp_emotion.get("expression_drive", 0.0)
     body_expression_drive = affect["body_coupling"]["expression_drive"]
     if abs(comp_expression_drive - body_expression_drive) > 0.3:
-        # Large divergence: trust SSM continuous dynamics
+        # 大分歧：信任 SSM 连续动力学（更精确）
         arbitrated_expression_drive = comp_expression_drive
     else:
-        # Small divergence: average
+        # 小分歧：取平均
         arbitrated_expression_drive = (
             comp_expression_drive + body_expression_drive
         ) / 2.0
-    # Expression intensity signal: modulates LLM reply tone
+    # 表达强度信号：调制 LLM 回复语气
     expr_intensity = kernel.computation.expression.expression_intensity()
     if expr_intensity > 0.8:
         expression_tendency = "[表达倾向:急切]"
@@ -91,7 +120,7 @@ def render_prompt_fragment(
         f"[sylanne_prompt_context_bus] primary={bus['primary']}; posture={bus['posture']}; fragments={','.join(bus['fragments'])}; policy={bus['policy']}",
     ]
     base = (
-        f"Sylanne 4.0 body: action={decision['action']}; reason={reason}; keep user sovereignty first.\n{relational_fragment}\n{memory_fragment}\n{self_fragment}\n"
+        f"Sylanne body: action={decision['action']}; reason={reason}; keep user sovereignty first.\n{relational_fragment}\n{memory_fragment}\n{self_fragment}\n"
         + "\n".join(extra_fragments)
     )
     if expression_tendency:
@@ -105,7 +134,17 @@ SCHEMA_PROMPT_CONTEXT_BUS_VERSION = "sylanne.alpha.prompt_context_bus.v1"
 def render_prompt_context_bus(
     kernel: "AlphaKernel", *, integrated_self: dict[str, Any]
 ) -> dict[str, Any]:
-    """Assemble the prompt context bus payload."""
+    """组装 prompt 上下文总线载荷。
+
+    列出所有活跃的上下文片段名称，指定主片段和仲裁策略。
+
+    Args:
+        kernel: AlphaKernel 实例。
+        integrated_self: 整合自我状态字典。
+
+    Returns:
+        上下文总线载荷字典。
+    """
     fragments = [
         "relational_time",
         "relationship_memory",
@@ -137,7 +176,19 @@ def render_prompt_context_bus(
 def render_host_payload(
     kernel: "AlphaKernel", decision: dict[str, Any], guard: dict[str, Any]
 ) -> dict[str, Any]:
-    """Build the full host payload dict."""
+    """构建完整的 host 载荷字典。
+
+    包含所有子系统状态：决策、守卫、情感、人格、记忆、群聊氛围等。
+    用于主动发言调度和 WebUI 诊断展示。
+
+    Args:
+        kernel: AlphaKernel 实例。
+        decision: 决策字典。
+        guard: 守卫字典。
+
+    Returns:
+        完整的 host 载荷字典。
+    """
     should_send = bool(
         guard["allowed"] and decision["action"] in {"express", "reach_out", "repair"}
     )
@@ -155,11 +206,11 @@ def render_host_payload(
     group_atmosphere = kernel._group_atmosphere()
     proactive_source = kernel._proactive_source(decision, guard)
     prompt_bus = render_prompt_context_bus(kernel, integrated_self=integrated_self)
-    # Overlay computation-layer emotion onto affect_dynamics
+    # 叠加计算层情感到 affect_dynamics
     computation_emotion = kernel._computation_emotion_overlay()
     if computation_emotion:
         affect_dynamics["computation_emotion"] = computation_emotion
-    # Include computation recalled/holes from last tick
+    # 包含上一 tick 的计算召回/空洞信息
     comp_result = getattr(kernel, "_last_computation_result", None) or {}
     return {
         "kind": "proactive_dispatch"
@@ -200,7 +251,19 @@ def render_diagnostics(
     guard: dict[str, Any],
     workset: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
-    """Build the diagnostics payload."""
+    """构建诊断面板数据，供 WebUI/Observatory 展示。
+
+    包含：负载、中断预算、向量摘要、身体状态、需求、记忆、边界、代理决策、风险。
+
+    Args:
+        kernel: AlphaKernel 实例。
+        decision: 决策字典。
+        guard: 守卫字典。
+        workset: 可选的工作集配置。
+
+    Returns:
+        诊断数据字典。
+    """
     vector_summary = kernel._vector_summary()
     body = kernel.body.to_dict()
     risk_score = kernel._risk_score()

@@ -33,7 +33,16 @@ from typing import Any
 
 @dataclass
 class MemoryItem:
-    """单条记忆条目，驻留于 L1 或 L2。"""
+    """单条记忆条目，驻留于 L1 或 L2。
+
+    字段说明：
+    - weight: 记忆权重 [0,1]，衰减到 0 时被回收
+    - temperature: 情绪温度，正值=温暖记忆，负值=冷淡记忆
+    - age_ticks: 年龄计数器，每次 tick_decay 递增
+    - confirmed: 是否经过 12h 整理确认（确认后才能下沉到 L2）
+    - recall_count: 被召回次数（召回会强化权重）
+    - rewrite_count: 被重写次数（reconsolidation，上限 20 次）
+    """
 
     id: str
     text: str
@@ -84,7 +93,10 @@ class MemoryItem:
 
 @dataclass
 class MemoryResult:
-    """召回结果，包含最终评分和来源层信息。"""
+    """召回结果，包含最终评分和来源层信息。
+
+    final_score 是综合评分，由层权重、记忆权重、相关度、情绪偏差共同决定。
+    """
 
     text: str
     layer: str  # "L1" | "L2" | "L3"
@@ -93,11 +105,18 @@ class MemoryResult:
     clarity: float
     temperature: float
     final_score: float
+    created_at: float  # 记忆创建时间戳，用于生成相对时间标签
 
 
 @dataclass
 class GraphNode:
-    """L3 知识图谱节点。"""
+    """L3 知识图谱节点。
+
+    temporal_type 决定衰减行为：
+    - permanent: 永不衰减（如"用户喜欢猫"）
+    - evolving: 有时效性，超过 staleness_threshold 天后加速衰减
+    - episodic: 普通衰减（默认）
+    """
 
     id: str
     label: str
@@ -172,7 +191,12 @@ class GraphEdge:
 
 @dataclass
 class ConversationBuffer:
-    """会话暂存区，对话进行中暂存原文，不写入 MemorySystem。"""
+    """会话暂存区，对话进行中暂存原文，不写入 MemorySystem。
+
+    v2 设计：对话进行中不直接写入记忆系统，
+    而是在会话结束（idle 超时或达到 20 轮）时生成摘要再写入 L1。
+    这避免了"每条消息都写入"导致的噪声问题。
+    """
 
     session_key: str
     messages: list[dict[str, Any]] = field(default_factory=list)
@@ -245,9 +269,15 @@ class ConversationBuffer:
 # Utility functions
 # ---------------------------------------------------------------------------
 
+# 模块级 jieba 导入（避免每次 _tokenize 调用都尝试 import）
+try:
+    import jieba as _jieba
+except ImportError:
+    _jieba = None
+
 
 def _cosine(a: list[float], b: list[float]) -> float:
-    """Inline cosine similarity. Returns -1.0 sentinel for degenerate inputs."""
+    """内联余弦相似度计算。输入退化时返回 -1.0 哨兵值。"""
     if not a or not b or len(a) != len(b):
         return -1.0
     dot = sum(x * y for x, y in zip(a, b))
@@ -263,16 +293,12 @@ def _tokenize(text: str) -> set[str]:
     text = text.lower().strip()
     if not text:
         return set()
-    try:
-        import jieba
-
+    if _jieba is not None:
         return set(
             w
-            for w in jieba.cut(text)
+            for w in _jieba.cut(text)
             if len(w.strip()) >= 1 and w.strip() not in _STOPWORDS
         )
-    except ImportError:
-        pass
     # Fallback: 空格分词（英文）+ 字符 bigram（中文）
     tokens: set[str] = set()
     for word in text.split():
@@ -292,7 +318,7 @@ _STOPWORDS = frozenset("的了是在我你他她它们这那有不会就都也�
 
 
 def _keyword_overlap(query: str, text: str) -> float:
-    """Keyword overlap with Chinese support (jieba or bigram fallback)."""
+    """关键词重叠度计算，支持中文（jieba 或 bigram 回退）。"""
     q_words = _tokenize(query)
     t_words = _tokenize(text)
     if not q_words or not t_words:
@@ -305,22 +331,33 @@ def _keyword_overlap(query: str, text: str) -> float:
 # MemorySystem
 # ---------------------------------------------------------------------------
 
-# v2 constants
-IDLE_FLUSH_SECONDS = 60.0
-MAX_TURNS_BEFORE_FLUSH = 20
-CONSOLIDATION_INTERVAL_HOURS = 12
-CONSOLIDATION_KEEP_RECENT_HOURS = 2
-L2_COMPRESSION_AGE_TICKS = 3000  # ~30 days at 100 msgs/day
-REWRITE_FREEZE_AFTER = 20
+# v2 常量
+IDLE_FLUSH_SECONDS = 60.0  # 空闲多久触发 flush
+MAX_TURNS_BEFORE_FLUSH = 20  # 最多多少轮触发 flush
+CONSOLIDATION_INTERVAL_HOURS = 12  # 整理间隔（小时）
+CONSOLIDATION_KEEP_RECENT_HOURS = 2  # 整理时保护最近 N 小时的未确认条目
+L2_COMPRESSION_AGE_TICKS = 3000  # L2→L3 压缩阈值（约 30 天，按 100 条/天计）
+REWRITE_FREEZE_AFTER = 20  # 单条记忆最多重写次数（防止无限 reconsolidation）
 
 
 class MemorySystem:
-    """
-    三层记忆系统 v2 主接口。
+    """三层记忆系统 v2 主接口。
 
-    L1: Hot Pool (deque, maxlen=50) - 近期对话摘要
-    L2: Warm Pool (list) - 已确认的重要记忆, 向量相似度召回
-    L3: Cold Pool (graph) - 实体-关系图, clarity 衰减
+    L1: Hot Pool (deque, maxlen=60) - 近期对话摘要，未确认的可能被丢弃
+    L2: Warm Pool (list) - 已确认的重要记忆，支持向量相似度召回和 reconsolidation
+    L3: Cold Pool (graph) - 实体-关系图，clarity 缓慢衰减
+
+    核心流程：
+    1. 对话中：消息暂存在 ConversationBuffer
+    2. 会话结束：摘要写入 L1（write_summary）
+    3. 12h 整理：确认重要条目，下沉到 L2（sink_to_l2）
+    4. 30 天未召回：L2 条目压缩为 L3 图谱节点
+    5. 召回时：三层并行查询，加权合并返回 top-k
+
+    人格驱动参数：
+    - base_decay: 基础衰减率（尽责性低→衰减快）
+    - reconsolidation_rate: 召回时情绪温度的更新率（开放性高→更新快）
+    - positive_recall_bias: 正向记忆的召回偏好（宜人性高→偏好正向）
     """
 
     _LAYER_WEIGHTS = {"L1": 1.0, "L2": 0.7, "L3": 0.4}
@@ -365,11 +402,19 @@ class MemorySystem:
             self.derive_params(personality)
 
     # ------------------------------------------------------------------
-    # Personality derivation
+    # 人格参数推导
     # ------------------------------------------------------------------
 
     def derive_params(self, personality: dict[str, float]) -> None:
-        """从人格向量推导记忆系统参数。接受 Big Five 或 Embodiment Five 名称。"""
+        """从人格向量推导记忆系统参数。
+
+        接受 Big Five 或 Embodiment Five 名称。
+        人格如何影响记忆：
+        - 高尽责性(C) → 低衰减率（记忆保持更久）
+        - 高神经质(N) → 高年龄系数（旧记忆衰减更快）+ 情绪权重更大
+        - 高开放性(O) → 高 reconsolidation 率（记忆更容易被重写）
+        - 高宜人性(A) → 正向记忆召回偏好更强
+        """
         openness_val = personality.get(
             "openness", personality.get("boundary_permeability", 0.5)
         )
@@ -390,7 +435,7 @@ class MemorySystem:
         self._params["neuroticism"] = N
 
     # ------------------------------------------------------------------
-    # Write (v2: summary-based)
+    # 写入（v2：基于摘要）
     # ------------------------------------------------------------------
 
     _MAX_SUMMARY_CHARS = 500
@@ -447,7 +492,7 @@ class MemorySystem:
         )
 
     # ------------------------------------------------------------------
-    # 12h Consolidation (v2)
+    # 12h 整理（v2）
     # ------------------------------------------------------------------
 
     def consolidation_candidates(self) -> list[MemoryItem]:
@@ -540,7 +585,7 @@ class MemorySystem:
         self._last_consolidation_ts = time.time()
 
     # ------------------------------------------------------------------
-    # Tick decay
+    # Tick 衰减
     # ------------------------------------------------------------------
 
     def tick_decay(self) -> None:
@@ -586,7 +631,7 @@ class MemorySystem:
         self._gc_l3()
 
     def _gc_l3(self) -> None:
-        """Remove L3 nodes and edges below clarity threshold, enforce node limit."""
+        """回收 L3 中 clarity 低于阈值的节点和边，强制节点数上限。"""
         gc_threshold = 0.1
         dead_nodes = [
             nid for nid, node in self._l3_nodes.items() if node.clarity < gc_threshold
@@ -616,7 +661,7 @@ class MemorySystem:
         ]
 
     # ------------------------------------------------------------------
-    # Recall (v2: three-layer parallel with reconsolidation hook)
+    # 召回（v2：三层并行 + reconsolidation 钩子）
     # ------------------------------------------------------------------
 
     def recall(
@@ -653,6 +698,7 @@ class MemorySystem:
                     clarity=1.0,
                     temperature=item.temperature,
                     final_score=final_score,
+                    created_at=item.created_at,
                 )
             )
 
@@ -679,6 +725,7 @@ class MemorySystem:
                     clarity=1.0,
                     temperature=item.temperature,
                     final_score=final_score,
+                    created_at=item.created_at,
                 )
             )
             self._reinforce_l2(item, current_warmth)
@@ -721,7 +768,7 @@ class MemorySystem:
         return _keyword_overlap(query, text)
 
     def _reinforce_l2(self, item: MemoryItem, current_warmth: float) -> None:
-        """Apply recall reinforcement to an L2 item."""
+        """对被召回的 L2 条目施加强化：增加权重、重置年龄、更新情绪温度。"""
         item.weight += self._params["recall_boost"]
         item.weight = min(item.weight, 1.0)
         item.age_ticks = int(item.age_ticks * self._params["age_reset_factor"])
@@ -731,7 +778,7 @@ class MemorySystem:
         item.temperature = item.temperature * (1 - beta) + current_warmth * beta
 
     def _recall_l3(self, query: str, current_warmth: float) -> list[MemoryResult]:
-        """Recall from L3 graph via keyword matching on node labels."""
+        """从 L3 图谱中通过关键词匹配节点标签进行召回。"""
         results: list[MemoryResult] = []
         query_lower = query.lower()
         query_words = set(query_lower.split())
@@ -786,13 +833,14 @@ class MemorySystem:
                     clarity=node.clarity,
                     temperature=node.emotion_weight,
                     final_score=final_score,
+                    created_at=getattr(node, 'created_at', 0.0),
                 )
             )
 
         return results
 
     # ------------------------------------------------------------------
-    # Recall formatting (v2: layered injection)
+    # 召回格式化（v2：分层注入）
     # ------------------------------------------------------------------
 
     def format_recall_injection(
@@ -800,25 +848,60 @@ class MemorySystem:
         results: list[MemoryResult],
         max_items: int = 3,
     ) -> str:
-        """格式化召回结果为 prompt 注入文本。"""
+        """格式化召回结果为 prompt 注入文本。
+
+        使用具体相对时间标签（如"3小时前"、"昨天"、"5天前"）替代笼统的"近期"，
+        让 LLM 对记忆的时间距离有准确感知。
+        """
         if not results:
             return ""
         lines = ["[记忆参考]"]
+        now = time.time()
         for r in results[:max_items]:
-            if r.layer == "L1":
-                prefix = "近期"
-            elif r.layer == "L2":
-                prefix = "相关"
+            # 根据记忆创建时间计算相对时间标签
+            time_label = self._relative_time_label(now, r.created_at)
+            # 根据来源层添加可信度/模糊度前缀
+            if r.layer == "L3" and r.clarity < 0.7:
+                prefix = f"{time_label}/模糊印象"
+            elif r.layer == "L3":
+                prefix = f"{time_label}/长期认知"
             else:
-                if r.clarity < 0.7:
-                    prefix = "好像提过"
-                else:
-                    prefix = "认知"
+                prefix = time_label
             lines.append(f"{prefix}：{r.text}")
         return "\n".join(lines)
 
+    @staticmethod
+    def _relative_time_label(now: float, created_at: float) -> str:
+        """将时间戳差值转换为自然语言相对时间标签。
+
+        设计原则：给 LLM 足够的时间感知粒度，
+        让它能区分"刚才说的"和"几天前聊过的"。
+        """
+        if not created_at or created_at <= 0:
+            return "较早前"
+        diff = now - created_at
+        if diff < 60:
+            return "刚才"
+        elif diff < 3600:
+            minutes = int(diff / 60)
+            return f"{minutes}分钟前"
+        elif diff < 86400:
+            hours = int(diff / 3600)
+            return f"{hours}小时前"
+        elif diff < 172800:
+            return "昨天"
+        elif diff < 604800:
+            days = int(diff / 86400)
+            return f"{days}天前"
+        elif diff < 2592000:
+            weeks = int(diff / 604800)
+            return f"{weeks}周前"
+        else:
+            months = int(diff / 2592000)
+            return f"{months}个月前"
+
     # ------------------------------------------------------------------
-    # 30-day L2→L3 compression (v2)
+    # 30 天 L2→L3 压缩（v2）
     # ------------------------------------------------------------------
 
     def compress_check(self) -> list[MemoryItem]:
@@ -833,7 +916,7 @@ class MemorySystem:
         self._l2 = [item for item in self._l2 if item.id not in id_set]
 
     # ------------------------------------------------------------------
-    # L3 graph ingestion
+    # L3 图谱摄入
     # ------------------------------------------------------------------
 
     def ingest_graph_triples(self, triples: list) -> None:
@@ -947,7 +1030,7 @@ class MemorySystem:
         return edge
 
     # ------------------------------------------------------------------
-    # Serialization
+    # 序列化
     # ------------------------------------------------------------------
 
     def to_dict(self) -> dict:

@@ -1,7 +1,21 @@
-"""Sylanne-Embodiment: Realtime chat dispatch logic.
+"""即时聊天调度 —— 处理分段回复、实时上下文注入和中断恢复。
 
-Extracted from main.py to isolate realtime delivery, history shadow,
-interrupted-reply breakpoints, and active dispatch context injection.
+职责：
+  1. 分段发送：将长回复拆分为多条消息，按延迟逐条发送
+  2. 中断处理：用户打断时记录断点，下轮可续接
+  3. 历史影子：记录已发送的实时回复，供后续请求参考
+  4. 上下文注入：将实时聊天状态注入到 LLM 请求的 prompt 中
+  5. 群聊氛围注入：将群聊情绪状态格式化为 prompt 片段
+
+设计原则：
+  - 模拟人类对话节奏：分段发送 + 打字延迟
+  - 中断友好：用户随时可以打断，未发送部分被保存
+  - 上下文连续性：通过 shadow/backfill 机制保持对话连贯
+
+与其他组件的关系：
+  - 被 llm_response_pipeline 调用执行分段发送
+  - 被 llm_request_pipeline 调用注入实时上下文
+  - 与 rhythm_learner 配合调整发送节奏
 """
 
 from __future__ import annotations
@@ -17,7 +31,16 @@ _CHINA_TZ = timezone(timedelta(hours=8))
 
 
 class RealtimeDispatch:
-    """Handles realtime chat delivery, segmented dispatch, and context injection."""
+    """即时聊天调度器，处理分段发送、中断恢复和上下文注入。
+
+    核心流程：
+      LLM 回复 → 分段规划 → 逐段发送（带延迟）→ 中断检测 → 断点记录
+
+    与其他组件的关系：
+      - 持有插件实例引用 (self._p)
+      - 被 llm_response_pipeline 调用执行发送
+      - 被 llm_request_pipeline 调用注入上下文
+    """
 
     def __init__(self, plugin: Any) -> None:
         self._p = plugin
@@ -27,7 +50,10 @@ class RealtimeDispatch:
     # ------------------------------------------------------------------
 
     def extract_first_sentence(self, text: str) -> str:
-        """Extract first complete sentence from buffer."""
+        """从文本中提取第一个完整句子。
+
+        以中英文句末标点或换行符为分隔。连续标点视为同一句。
+        """
         delimiters = "。！？!?；;"
         for i, ch in enumerate(text):
             if ch in delimiters and i > 0:
@@ -39,6 +65,7 @@ class RealtimeDispatch:
         return ""
 
     async def send_first_sentence(self, origin: str, text: str) -> None:
+        """发送首句文本到指定会话。"""
         context = self._p.context
         if hasattr(context, "send_message"):
             message = self._p._astrbot_message(text)
@@ -47,6 +74,13 @@ class RealtimeDispatch:
     async def dispatch_segmented_parts(
         self, origin: str, parts: list[dict[str, Any]], session_key: str = ""
     ) -> None:
+        """逐段发送分段回复，每段之间按计划延迟。
+
+        Args:
+            origin: 消息发送目标。
+            parts: 分段列表，每段包含 text 和 delay_before_seconds。
+            session_key: 会话标识，发送完成后清除 unfinished 标记。
+        """
         context = self._p.context
         if not hasattr(context, "send_message"):
             return
@@ -79,6 +113,20 @@ class RealtimeDispatch:
         source: str = "",
         record_history_shadow: bool = False,
     ) -> dict[str, Any]:
+        """执行实时聊天计划：逐段发送消息，处理中断和媒体。
+
+        支持用户中断检测：每段发送前检查 input_epoch 是否已更新。
+        中断时记录断点，未发送部分可在下轮续接。
+
+        Args:
+            event: AstrBot 事件对象。
+            plan: 聊天计划字典，包含 message_parts、media_parts 等。
+            source: 来源标识（如 "proactive"、"response"）。
+            record_history_shadow: 是否记录历史影子供后续参考。
+
+        Returns:
+            执行结果字典，包含 message_count、interrupted_reason 等。
+        """
         p = self._p
         session_key = plan.get("session_key") or p._session_key(event)
         plan_epoch = plan.get("input_epoch", 0)
@@ -228,6 +276,7 @@ class RealtimeDispatch:
         event_time: dict[str, Any] | None = None,
         delivery_status: str = "",
     ) -> None:
+        """记录实时助手回复的历史影子，供后续请求注入上下文。"""
         p = self._p
         if not hasattr(p, "_realtime_assistant_history_shadows"):
             p._realtime_assistant_history_shadows: dict[str, list[dict[str, Any]]] = {}
@@ -256,6 +305,7 @@ class RealtimeDispatch:
         event_time: dict[str, Any] | None = None,
         source: str = "",
     ) -> None:
+        """记录被中断的回复断点，包含已发送和未发送部分。"""
         p = self._p
         if not hasattr(p, "_interrupted_reply_breakpoints"):
             p._interrupted_reply_breakpoints: dict[str, list[dict[str, Any]]] = {}
@@ -351,6 +401,11 @@ class RealtimeDispatch:
         budget: Any = None,
         current_user_text: str = "",
     ) -> bool:
+        """若有未消费的历史影子，注入到请求 prompt 中。
+
+        Returns:
+            是否成功注入。
+        """
         cache = self.realtime_assistant_history_shadow_cache()
         shadows = cache.get(session_key, [])
         if not shadows:
@@ -394,6 +449,7 @@ class RealtimeDispatch:
         *,
         budget: Any = None,
     ) -> bool:
+        """若有未消费的中断断点，注入到请求 prompt 中。"""
         bps = getattr(self._p, "_interrupted_reply_breakpoints", {})
         entries = bps.get(session_key, [])
         if not entries:
@@ -592,9 +648,11 @@ class RealtimeDispatch:
         if changed:
             backfills = self.realtime_ordinary_history_backfill_cache()
             if session_key in backfills:
-                backfills[session_key] = {
-                    k: v for k, v in backfills[session_key].items() if k > input_epoch
-                }
+                backfills[session_key] = [
+                    e
+                    for e in backfills[session_key]
+                    if e.get("input_epoch", 0) > input_epoch
+                ]
                 if not backfills[session_key]:
                     del backfills[session_key]
         return changed
@@ -614,6 +672,10 @@ class RealtimeDispatch:
     def build_group_atmosphere_injection_for_session(
         self, session_key: str = "", state: Any = None, **kwargs: Any
     ) -> str:
+        """将群聊氛围状态格式化为 XML 标签注入文本。
+
+        支持 diff 模式：若状态变化小于阈值，返回简短的 "无变化" 标记。
+        """
         p = self._p
         if state is None:
             return ""
@@ -657,6 +719,7 @@ class RealtimeDispatch:
     def conversation_time_payload(
         self, session_key_or_timestamp: Any = "", *, event: Any = None, **kwargs: Any
     ) -> dict[str, Any]:
+        """构建对话时间载荷：本地时间、日期、时区信息。"""
         ts = None
         if (
             isinstance(session_key_or_timestamp, (int, float))
@@ -680,6 +743,7 @@ class RealtimeDispatch:
         }
 
     def napcat_recall_payload(self, event: Any = None) -> dict[str, Any]:
+        """从 NapCat 消息撤回事件中提取载荷信息。"""
         raw = None
         if event:
             msg_obj = getattr(event, "message_obj", None)
@@ -720,6 +784,7 @@ class RealtimeDispatch:
             del epochs[session_key]
 
     def conversation_reply_is_stale(self, session_key: str, reply_epoch: int) -> bool:
+        """判断回复是否已过期（用户在回复生成期间发送了新消息）。"""
         p = self._p
         epochs = p._conversation_input_epoch
         current = epochs.get(session_key, 0)
@@ -730,6 +795,15 @@ class RealtimeDispatch:
     # ------------------------------------------------------------------
 
     def schedule_background_task(self, coro: Any, *, label: str = "") -> Any:
+        """调度后台异步任务，自动处理异常和清理。
+
+        Args:
+            coro: 要执行的协程。
+            label: 任务标签（用于错误日志）。
+
+        Returns:
+            创建的 asyncio.Task 对象。
+        """
         p = self._p
 
         async def _wrapper() -> None:
@@ -755,6 +829,7 @@ class RealtimeDispatch:
         return task
 
     def ensure_runtime_state_containers(self) -> None:
+        """确保运行时状态容器已初始化。"""
         p = self._p
         if not hasattr(p, "_sylanne_memory_pending_observations"):
             p._sylanne_memory_pending_observations: dict[str, Any] = {}
@@ -762,6 +837,7 @@ class RealtimeDispatch:
             p._sylanne_memory_idle_generation: dict[str, int] = {}
 
     def build_astrbot_message_chain(self, text: str = "", **kwargs: Any) -> Any:
+        """构建 AstrBot MessageChain 消息对象。"""
         import sys
 
         p = self._p

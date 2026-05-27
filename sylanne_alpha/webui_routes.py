@@ -1,6 +1,20 @@
-"""WebUI route handlers extracted from main.py.
+"""WebUI 路由处理器模块（AstrBot register_web_api 版本）。
 
-All methods delegate attribute access to the plugin instance via ``self._p``.
+封装所有通过 AstrBot 内置 Web 服务器注册的 HTTP 路由处理函数。
+这些路由运行在 AstrBot 的 Quart 应用内，受 AstrBot 自身的认证保护。
+
+与 webui_server.py 的区别：
+- 本模块的路由注册在 AstrBot 的 Web 服务器上（共享端口）
+- webui_server.py 是独立的 HTTP 服务器（独占端口 2718）
+- 两者提供相同的 API 功能，但认证机制不同
+
+路由功能：
+- /api/state: 完整状态 JSON（情感/门控/路由/边界/表达/计时/层/脊柱/人格）
+- /api/settings: 配置读写
+- /api/computation_logs: 计算日志
+- /api/memory_pools: 三层记忆池数据
+- /api/memory_meltdown: 记忆清除（需 token 验证）
+- /api/webui_probe: 独立 WebUI 探针
 """
 
 from __future__ import annotations
@@ -20,7 +34,11 @@ except ImportError:
 
 
 class WebUIRoutes:
-    """Encapsulates all WebUI HTTP route handlers for the Sylanne plugin."""
+    """封装所有 WebUI HTTP 路由处理器。
+
+    通过 self._p 引用插件实例，访问 hosts/config/memory 等资源。
+    所有 handler 方法都是 async，返回 dict 由 Quart 自动序列化为 JSON。
+    """
 
     def __init__(self, plugin: Any) -> None:
         self._p = plugin
@@ -57,7 +75,12 @@ class WebUIRoutes:
         return Response(html, content_type="text/html; charset=utf-8")
 
     async def state_handler(self) -> dict[str, Any]:
-        """Return full state JSON for the WebUI dashboard."""
+        """返回完整状态 JSON，供 WebUI dashboard 渲染。
+
+        包含：情感向量、门控统计、路由统计、边界状态、表达状态、
+        计时数据、各层诊断、计算脊柱信息、人格信息、反馈统计等。
+        支持 ?session= 参数指定会话，默认选择最活跃的会话。
+        """
         logger.info("Sylanne WebUI: /api/state handler HIT")
         from quart import request as quart_request
 
@@ -236,15 +259,24 @@ class WebUIRoutes:
             "schema_version": "sylanne.webui.state.v1",
             "runtime": self._p._webui_runtime_info(),
             "current_session": session_key,
+            "session_id": session_key,
             "emotion": {k: round(v, 4) for k, v in emotion.items()},
             "gate": gate_info,
             "route_stats": route_stats,
+            "route_distribution": {
+                "FAST": route_stats.get("fast", 0),
+                "NORMAL": route_stats.get("normal", 0),
+                "FULL": route_stats.get("full", 0),
+                "SKIP": route_stats.get("skip", 0),
+            },
             "boundary": boundary_info,
             "expression": expr_info,
             "timing": timing,
             "layers": layers,
             "spine": spine_info,
             "persona": persona_info,
+            "personality": self._frontend_personality(personality),
+            "spine_layers": self._frontend_spine_layers(comp),
             "theme": {"base": "#F3A7C8", "source": "emotion", "mode": "soft"},
             "feedback": feedback,
             "sessions": all_sessions,
@@ -256,7 +288,7 @@ class WebUIRoutes:
     # ------------------------------------------------------------------
 
     async def settings_get_handler(self) -> dict[str, Any]:
-        """Return current config values and schema for the settings panel."""
+        """返回当前配置值和 schema，供设置面板渲染表单控件。"""
         schema = self._p._load_conf_schema()
         values = {}
         for key in schema:
@@ -268,7 +300,7 @@ class WebUIRoutes:
         }
 
     async def provider_items(self) -> list[dict[str, Any]]:
-        """Best-effort provider choices for WebUI datalist controls."""
+        """尽力获取 AstrBot 已注册的 LLM/Embedding provider 列表，供设置面板下拉选择。"""
         context = getattr(self._p, "context", None)
         items: list[dict[str, Any]] = []
         seen: set[str] = set()
@@ -327,7 +359,7 @@ class WebUIRoutes:
         return items
 
     async def settings_post_handler(self) -> dict[str, Any]:
-        """Update config values from the settings panel."""
+        """接收设置面板提交的配置更新，按 schema 做类型强转后持久化。"""
         from quart import request as quart_request
 
         body = await quart_request.get_json(silent=True) or {}
@@ -369,7 +401,7 @@ class WebUIRoutes:
     # ------------------------------------------------------------------
 
     async def computation_logs_handler(self) -> dict[str, Any]:
-        """Return recent computation log entries for WebUI real-time display."""
+        """返回最近的计算日志条目，支持 ?limit= 和 ?session= 过滤。"""
         from quart import request as quart_request
 
         try:
@@ -397,7 +429,11 @@ class WebUIRoutes:
     # ------------------------------------------------------------------
 
     async def memory_pools_handler(self) -> dict[str, Any]:
-        """Return hot and long-term Sylanne memory pools for the WebUI."""
+        """返回三层记忆池数据（L1 Hot / L2 Warm / L3 Cold Graph）。
+
+        支持跨会话聚合（overview 模式）或单会话查看。
+        自动适配新版 MemorySystem 三层架构和旧版 body.memory.traces。
+        """
         from quart import request as quart_request
 
         def _bounded_limit(raw: Any) -> int:
@@ -786,7 +822,7 @@ class WebUIRoutes:
     # ------------------------------------------------------------------
 
     async def memory_meltdown_handler(self) -> dict[str, Any]:
-        """Clear all memory pools for a session. Supports both server nonce and client token verification."""
+        """清除指定会话的所有记忆池。需要 token 验证（服务端 nonce 或客户端双 token）。"""
         from quart import request as quart_request
 
         try:
@@ -796,15 +832,15 @@ class WebUIRoutes:
         if not isinstance(body, dict):
             return {"ok": False, "error": "invalid_body"}
         session = str(body.get("session", "")).strip()
-        token = str(body.get("token", "")).strip()
+        nonce = str(body.get("nonce", "") or body.get("token", "")).strip()
         # Try server-side nonce first
         server_nonce = getattr(self._p, "_meltdown_nonces", {}).get(session, "")
-        if server_nonce and token == server_nonce:
+        if server_nonce and nonce == server_nonce:
             self._p._meltdown_nonces.pop(session, None)
         else:
             # Fallback: client-side token verification (frontend generates + sends both)
             expected_token = str(body.get("expected_token", "")).strip()
-            if not token or not expected_token or token != expected_token:
+            if not nonce or not expected_token or nonce != expected_token:
                 return {"ok": False, "error": "token_mismatch"}
         # Clear memory for the session
         mem_sys = (
@@ -831,22 +867,161 @@ class WebUIRoutes:
         return {"ok": True, "session": session, "cleared": True}
 
     def generate_meltdown_nonce(self, session: str) -> str:
-        """Generate a one-time nonce for memory meltdown confirmation."""
+        """生成一次性 nonce 用于记忆清除确认，防止 CSRF。"""
         nonce = secrets.token_hex(16)
         self._p._meltdown_nonces[session] = nonce
         return nonce
 
+    async def meltdown_nonce_handler(self) -> dict[str, Any]:
+        """GET /api/meltdown_nonce — 生成并返回一次性 nonce。"""
+        from quart import request as quart_request
+
+        session = str(quart_request.args.get("session") or "").strip()
+        nonce = self.generate_meltdown_nonce(session)
+        return {"nonce": nonce}
+
     # ------------------------------------------------------------------
-    # Probe handler
+    # Memory sink (L1→L2 手动下沉)
     # ------------------------------------------------------------------
 
+    async def memory_consolidate_handler(self) -> dict[str, Any]:
+        """POST /api/memory_consolidate — 触发一次后台 consolidation 评估。
+
+        异步启动 LLM 评估流程，立即返回预估时间。
+        评估完成后 consolidation_candidates() 会有已确认条目可供下沉。
+        """
+        from quart import request as quart_request
+
+        body = await quart_request.get_json(silent=True) or {}
+        session = str(body.get("session", "")).strip()
+        if not session:
+            return {"ok": False, "error": "missing session param"}
+        try:
+            plugin = self._p
+            mem_sys = (
+                plugin._memory_system_for_session(session)
+                if hasattr(plugin, "_memory_system_for_session")
+                else getattr(plugin, "_memory_system", None)
+            )
+            if mem_sys is None or not list(mem_sys._l1):
+                return {"ok": True, "estimated_seconds": 0}
+            asyncio.ensure_future(plugin._trigger_consolidation(session))
+        except Exception as e:
+            return {"ok": False, "error": str(e)}
+        return {"ok": True, "estimated_seconds": 30}
+
+    async def memory_sink_handler(self) -> dict[str, Any]:
+        """GET /api/memory_sink — 手动触发 L1→L2 记忆下沉。
+
+        将 L1 中已确认（confirmed）的条目批量下沉到 L2 温池。
+        前端可通过此接口在不等待 12h 定时整理的情况下立即执行下沉操作。
+
+        Query params:
+            session: 目标会话 ID
+
+        Returns:
+            {"ok": true, "sunk": <下沉条目数>}
+            {"ok": false, "error": "..."}  — 无可下沉条目或会话无效时
+        """
+        from quart import request as quart_request
+
+        session = str(quart_request.args.get("session") or "").strip()
+        if not session:
+            return {"ok": False, "error": "missing session param"}
+
+        # 获取该会话的记忆系统实例
+        mem_sys = (
+            self._p._memory_system_for_session(session)
+            if hasattr(self._p, "_memory_system_for_session")
+            else getattr(self._p, "_memory_system", None)
+        )
+        if mem_sys is None:
+            return {"ok": False, "error": "memory system unavailable"}
+
+        # 只下沉已确认的条目（不再强制下沉全部 L1）
+        candidates = mem_sys.consolidation_candidates()
+        if not candidates:
+            return {"ok": False, "error": "no_confirmed_items", "sunk": 0}
+
+        # 执行下沉：将条目从 L1 移入 L2
+        item_ids = [item.id for item in candidates]
+        mem_sys.sink_to_l2(item_ids)
+
+        logger.info(
+            f"Sylanne MEMORY SINK: session={session}, sunk={len(item_ids)} items L1→L2"
+        )
+        return {"ok": True, "sunk": len(item_ids)}
+
+    # ------------------------------------------------------------------
+    # Frontend data format helpers
+    # ------------------------------------------------------------------
+
+    def _frontend_personality(self, personality: dict) -> dict[str, Any]:
+        """将内部人格数据转换为前端期望的 {five, six, drift} 格式。"""
+        traits = personality.get(
+            "traits", personality if isinstance(personality, dict) else {}
+        )
+        five = {
+            "openness": float(traits.get("openness", traits.get("curiosity", 0.5)) or 0.5),
+            "warmth": float(traits.get("warmth", 0.5) or 0.5),
+            "intensity": float(traits.get("intensity", traits.get("arousal", 0.5)) or 0.5),
+            "autonomy": float(traits.get("autonomy", traits.get("sovereignty", 0.5)) or 0.5),
+            "resilience": float(traits.get("resilience", traits.get("repair", 0.5)) or 0.5),
+        }
+        six_names = ["Curiosity", "Empathy", "Precision", "Playfulness", "Defiance", "Melancholy"]
+        six_keys = ["curiosity", "warmth", "coherence", "playfulness", "sovereignty", "melancholy"]
+        six_colors = ["#B88A9E", "#00b4d8", "#ffaa00", "#4caf50", "#ff4444", "#9c27b0"]
+        six = [
+            {"name": n, "value": float(traits.get(k, 0.5) or 0.5), "color": c}
+            for n, k, c in zip(six_names, six_keys, six_colors)
+        ]
+        drift_raw = personality.get("drift", {}) if isinstance(personality, dict) else {}
+        drift_history = drift_raw.get("history", []) if isinstance(drift_raw, dict) else []
+        drift = [
+            {"time": str(d.get("time", "")), "text": str(d.get("text", d.get("signal", "")))}
+            for d in drift_history[-10:]
+        ]
+        return {"five": five, "six": six, "drift": drift}
+
+    def _frontend_spine_layers(self, comp: Any) -> list[dict[str, Any]]:
+        """将计时数据转换为前端期望的 spine_layers 数组。"""
+        layer_meta = [
+            ("L1", "HDC Perception", "Hyperdimensional binary encoding. Converts text to 2048-bit vectors."),
+            ("L2", "Predictive Coding Gate", "Computes Hamming surprise against prediction. Routes processing path."),
+            ("L3", "Void-Scar Engine", "Irreversible scar state tracking. Wounds heal through stages."),
+            ("L4", "Relational Sheaf", "Cross-relationship propagation via sheaf Laplacian."),
+            ("L5", "MoE-HGT", "Mixture-of-Experts + Heterogeneous Graph Transformer."),
+            ("L6", "Autopoietic Boundary", "32-dim identity kernel with orthogonal projection."),
+            ("L7", "Phase Transition", "Pressure accumulation to threshold. Expression modes."),
+        ]
+        timing_raw = comp.timing_stats() if hasattr(comp, "timing_stats") else {}
+        result = []
+        for lid, name, desc in layer_meta:
+            stats = timing_raw.get(lid, timing_raw.get(lid.replace("L", "layer_"), {}))
+            if not isinstance(stats, dict):
+                stats = {}
+            avg_ms = round(stats.get("mean_ns", stats.get("p50_ns", 0)) / 1_000_000, 1)
+            p50_ms = round(stats.get("p50_ns", 0) / 1_000_000, 1)
+            p99_ms = round(stats.get("p99_ns", stats.get("p95_ns", 0)) / 1_000_000, 1)
+            count = int(stats.get("count", 0))
+            result.append({
+                "id": lid, "name": name, "status": "active" if count > 0 else "idle",
+                "avg": avg_ms, "p50": p50_ms, "p99": p99_ms, "count": count, "desc": desc,
+            })
+        return result
+
     async def probe_handler(self) -> dict[str, Any]:
-        """Probe the standalone WebUI listener from inside the plugin process."""
+        """探测独立 WebUI 监听器的健康状态。
+
+        从插件进程内部向 localhost:port 发起 HTTP 请求，
+        验证 schema_version 和 runtime_id 是否匹配当前实例。
+        同时处理过期模块的清理和重启。
+        """
         import urllib.error
         import urllib.request
 
         enabled = self._p._cfg_bool("sylanne_webui_enabled", False)
-        host = str(self._p._cfg("sylanne_webui_host", "0.0.0.0") or "0.0.0.0")
+        host = str(self._p._cfg("sylanne_webui_host", "127.0.0.1") or "127.0.0.1")
         port = self._p._cfg_int("sylanne_webui_port", 2718)
         expected_runtime = self._p._webui_runtime_info()
         stopped: list[str] = []
@@ -928,7 +1103,7 @@ class WebUIRoutes:
     # ------------------------------------------------------------------
 
     async def logo_handler(self) -> Any:
-        """Serve the plugin logo.png with correct Content-Type."""
+        """返回插件 logo.png，设置正确的 Content-Type。"""
         from quart import Response
 
         logo_path = Path(self._plugin_dir) / "logo.png"
@@ -938,10 +1113,10 @@ class WebUIRoutes:
         return Response(data, content_type="image/png")
 
     async def dashboard_handler(self) -> Any:
-        """Serve the WebUI dashboard HTML via AstrBot's own web server."""
+        """通过 AstrBot 内置 Web 服务器提供 WebUI dashboard HTML 页面。"""
         from quart import Response
 
-        dashboard_path = Path(self._plugin_dir) / "pages" / "dashboard" / "index.html"
+        dashboard_path = Path(self._plugin_dir) / "UI" / "index.html"
         if not dashboard_path.exists():
             return Response("Dashboard not found", status=404)
         html = dashboard_path.read_text(encoding="utf-8")
@@ -953,7 +1128,7 @@ class WebUIRoutes:
 
     @property
     def _plugin_dir(self) -> str:
-        """Resolve plugin directory from the plugin instance or module-level constant."""
+        """解析插件目录路径（从插件实例或模块级常量获取）。"""
         import main as _main_mod
 
         return getattr(_main_mod, "_PLUGIN_DIR", ".")

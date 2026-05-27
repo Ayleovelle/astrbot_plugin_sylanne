@@ -1,7 +1,18 @@
-"""Sylanne-Embodiment: Life Simulation Module.
+"""Sylanne-Embodiment: 生命模拟模块。
 
-Simulates Sylanne's independent "life" using an external LLM.
-Periodically generates life events that may trigger proactive outreach.
+模拟 Sylanne 的独立"生活"——使用外部 LLM 定期生成生活事件，
+这些事件可能触发主动联系用户（proactive outreach）。
+
+设计理念：
+- Sylanne 不是"等待被召唤的工具"，而是有自己生活节奏的存在
+- 生活事件影响情绪状态，情绪状态影响对话风格
+- 主动联系是"想分享"的自然结果，不是机械的定时推送
+
+与其他组件的关系：
+- 依赖外部 LLM 调用（通过 _llm_caller 回调）
+- 通过 _emotion_getter 获取当前情绪状态
+- 通过 _outreach_callback 触发主动消息发送
+- recent_context_for_prompt() 输出供对话生成时注入上下文
 """
 
 from __future__ import annotations
@@ -15,25 +26,30 @@ from typing import Any, Awaitable, Callable
 
 @dataclass
 class LifeEvent:
-    text: str
-    mood: str
-    urgency: float
-    timestamp: float
-    wants_to_share: bool = False
-    shared: bool = False
+    """一个生活事件。"""
+
+    text: str  # 事件描述
+    mood: str  # 当前心情
+    urgency: float  # 紧迫度 [0,1]
+    timestamp: float  # 发生时间
+    wants_to_share: bool = False  # 是否想分享给朋友
+    shared: bool = False  # 是否已经分享过
 
 
 @dataclass
 class LifeSimulationState:
-    events: list[LifeEvent] = field(default_factory=list)
-    current_activity: str = ""
-    last_simulation_time: float = 0.0
-    last_outreach_time: float = 0.0
-    simulation_count: int = 0
-    outreach_count: int = 0
-    enabled: bool = False
+    """生命模拟的持久化状态。"""
+
+    events: list[LifeEvent] = field(default_factory=list)  # 历史事件列表
+    current_activity: str = ""  # 当前正在做的事
+    last_simulation_time: float = 0.0  # 上次模拟时间
+    last_outreach_time: float = 0.0  # 上次主动联系时间
+    simulation_count: int = 0  # 总模拟次数
+    outreach_count: int = 0  # 总主动联系次数
+    enabled: bool = False  # 是否启用
 
     def to_dict(self) -> dict[str, Any]:
+        """序列化状态（只保留最近 20 个事件）。"""
         return {
             "events": [
                 {
@@ -55,6 +71,7 @@ class LifeSimulationState:
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> "LifeSimulationState":
+        """从字典恢复状态。"""
         state = cls()
         state.current_activity = data.get("current_activity", "")
         state.last_simulation_time = data.get("last_simulation_time", 0.0)
@@ -92,18 +109,33 @@ LIFE_SIMULATION_PROMPT = """你是一个创意写作助手。请为以下虚构�
 
 
 class LifeSimulator:
-    """Manages Sylanne's simulated independent life."""
+    """管理 Sylanne 的模拟独立生活。
+
+    通过后台异步循环定期调用 LLM 生成生活片段，
+    当生成的事件标记为"想分享"时，触发主动联系。
+
+    生命周期：
+    1. configure() 注入外部依赖（LLM、回调等）
+    2. start() 启动后台循环
+    3. 循环中：_simulate_tick() → _build_prompt() → LLM → _parse_response()
+    4. 如果事件 wants_to_share 且冷却期已过 → _do_outreach()
+    5. stop() 停止循环
+    """
 
     def __init__(self, config: dict[str, Any] | None = None):
         self._config = config or {}
         self.state = LifeSimulationState()
         self._running = False
         self._task: asyncio.Task | None = None
-        self._llm_caller: Callable[..., Awaitable[str]] | None = None
-        self._outreach_callback: Callable[[str, str], Awaitable[None]] | None = None
-        self._emotion_getter: Callable[[], dict[str, float]] | None = None
-        self._persona_getter: Callable[[], str] | None = None
-        self._memory_summary_getter: Callable[[], str] | None = None
+        self._llm_caller: Callable[..., Awaitable[str]] | None = None  # LLM 调用回调
+        self._outreach_callback: Callable[[str, str], Awaitable[None]] | None = (
+            None  # 主动联系回调
+        )
+        self._emotion_getter: Callable[[], dict[str, float]] | None = (
+            None  # 情绪状态获取
+        )
+        self._persona_getter: Callable[[], str] | None = None  # 角色描述获取
+        self._memory_summary_getter: Callable[[], str] | None = None  # 记忆摘要获取
 
     @property
     def enabled(self) -> bool:
@@ -139,7 +171,7 @@ class LifeSimulator:
         persona_getter: Callable[[], str] | None = None,
         memory_summary_getter: Callable[[], str] | None = None,
     ):
-        """Wire up external dependencies."""
+        """注入外部依赖。所有回调都是可选的。"""
         self._llm_caller = llm_caller
         self._outreach_callback = outreach_callback
         self._emotion_getter = emotion_getter
@@ -147,7 +179,7 @@ class LifeSimulator:
         self._memory_summary_getter = memory_summary_getter
 
     def start(self):
-        """Start the background simulation loop."""
+        """启动后台模拟循环。"""
         if not self.enabled or self._running:
             return
         self._running = True
@@ -158,14 +190,14 @@ class LifeSimulator:
             pass
 
     def stop(self):
-        """Stop the simulation loop."""
+        """停止模拟循环。"""
         self._running = False
         if self._task and not self._task.done():
             self._task.cancel()
             self._task = None
 
     async def _loop(self):
-        """Background loop: simulate life events at random intervals."""
+        """后台循环：以随机间隔模拟生活事件。"""
         import random
 
         while self._running and self.enabled:
@@ -188,7 +220,7 @@ class LifeSimulator:
                 await asyncio.sleep(60.0)
 
     async def _simulate_tick(self):
-        """Run one simulation cycle."""
+        """执行一次模拟周期。"""
         if not self._llm_caller:
             return
 
@@ -213,7 +245,7 @@ class LifeSimulator:
                 await self._do_outreach(event, now)
 
     def _build_prompt(self, now: float) -> str:
-        """Build the LLM prompt for life simulation."""
+        """构建 LLM 提示词，包含角色设定、时间、情绪、记忆等上下文。"""
         import datetime
 
         dt = datetime.datetime.fromtimestamp(now)
@@ -278,7 +310,7 @@ class LifeSimulator:
         )
 
     def _parse_response(self, response: str, now: float) -> LifeEvent | None:
-        """Parse LLM response into a LifeEvent."""
+        """解析 LLM 响应为 LifeEvent。容错处理 JSON 格式。"""
         try:
             text = response.strip()
             start = text.find("{")
@@ -300,7 +332,7 @@ class LifeSimulator:
             return None
 
     def _should_outreach(self, now: float) -> bool:
-        """Check if outreach is allowed (cooldown, callback exists)."""
+        """检查是否允许主动联系（冷却期、回调是否存在）。"""
         if not self._outreach_callback:
             return False
         if self.state.last_outreach_time > 0:
@@ -310,7 +342,7 @@ class LifeSimulator:
         return True
 
     async def _do_outreach(self, event: LifeEvent, now: float):
-        """Trigger proactive outreach based on life event."""
+        """基于生活事件触发主动联系。"""
         if not self._outreach_callback:
             return
         try:
@@ -323,11 +355,11 @@ class LifeSimulator:
             pass
 
     def pending_share_events(self) -> list[LifeEvent]:
-        """Get events that want to be shared but haven't been yet."""
+        """获取想分享但尚未分享的事件列表。"""
         return [e for e in self.state.events if e.wants_to_share and not e.shared]
 
     def recent_context_for_prompt(self, limit: int = 3) -> str:
-        """Get recent life events as context for LLM prompt injection."""
+        """获取近期生活事件作为 LLM 提示词注入的上下文。"""
         recent = [e for e in self.state.events[-10:] if e.text]
         if not recent:
             return ""

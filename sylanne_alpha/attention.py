@@ -1,3 +1,16 @@
+"""Sylanne-Embodiment 计算核心层：身体注意力机制（Body Attention）。
+
+在 7 层计算栈中的位置：L2 门控层的辅助模块。
+职责：
+  1. TinyBodyAttention：基于事件类型的稀疏注意力路由，将外部事件（安全/伤害/边界/修复/空闲/有文本）
+     映射到身体器官状态的增量变化（血流、温度、神经、肌肉、免疫等）。
+  2. focus_information_flood：群聊信息洪流过滤器，按说话者紧急度和兴趣匹配度
+     筛选最重要的事件，防止信息过载。
+
+设计理念：注意力不是全连接的 softmax，而是基于事件语义的稀疏路由——
+只有特定事件类型才会激活特定器官通道，模拟生物体的选择性注意。
+"""
+
 from __future__ import annotations
 
 from dataclasses import dataclass
@@ -19,6 +32,13 @@ SPARSE_ATTENTION_ROUTES = {
 
 @dataclass(frozen=True, slots=True)
 class BodyToken:
+    """身体 token：表示一个器官/需求/事件的状态切片。
+
+    name: 唯一标识（如 "organ.pulse", "need.contact", "event.hurt"）
+    family: 所属族群（用于注意力路由匹配）
+    values: 最多 4 个浮点值，表示该 token 的多维状态
+    """
+
     name: str
     family: str
     values: tuple[float, ...]
@@ -31,6 +51,11 @@ def _token(name: str, family: str, *values: float) -> BodyToken:
 
 
 def body_tokens(state: dict[str, float], event: dict[str, float]) -> list[BodyToken]:
+    """从身体状态和事件构建 token 列表（最多 32 个）。
+
+    包含 8 个器官 token + 4 个需求 token + 若干事件 token。
+    这些 token 是注意力路由的输入单元。
+    """
     tokens = [
         _token(
             "organ.pulse",
@@ -111,6 +136,15 @@ def body_tokens(state: dict[str, float], event: dict[str, float]) -> list[BodyTo
 
 
 class TinyBodyAttention:
+    """轻量身体注意力模块。
+
+    不使用传统的 softmax 全连接注意力，而是基于事件类型的稀疏路由：
+    只有特定事件类型才会激活特定器官通道（SPARSE_ATTENTION_ROUTES 定义）。
+
+    _project() 方法将事件强度映射为各器官状态的增量变化，
+    系数经过精心调校以保持生理合理性（每个增量 clamp 在 [-0.08, 0.08]）。
+    """
+
     def __init__(
         self, *, hidden_dim: int = 32, heads: int = 2, layers: int = 1
     ) -> None:
@@ -218,6 +252,23 @@ def focus_information_flood(
     max_events: int = 6,
     interests: dict[str, float] | None = None,
 ) -> dict[str, Any]:
+    """群聊信息洪流过滤器：从大量事件中筛选最重要的子集。
+
+    策略：focus_urgent_speakers_defer_overflow
+      1. 按紧急度和兴趣匹配度评分每个事件
+      2. 按说话者聚合，选择 top-N 最紧急的说话者
+      3. 从选中说话者的事件中选择 top-M 最紧急的事件
+      4. 其余事件被延迟（deferred），不丢弃
+
+    Args:
+        events: 原始事件列表
+        max_speakers: 最多关注的说话者数
+        max_events: 最多选择的事件数
+        interests: 兴趣关键词及其权重（匹配时提升紧急度）
+
+    Returns:
+        包含 pressure, speakers, selected_events, deferred_count 的结果字典
+    """
     clean_events = [
         processed
         for event in events

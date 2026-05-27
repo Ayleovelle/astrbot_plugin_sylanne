@@ -1,10 +1,12 @@
-"""State persistence helpers extracted from main.py.
+"""状态持久化委托层模块。
 
-Handles kernel and conversation-buffer persistence via AstrBot KV storage
-(primary) with file I/O fallback.  Also provides all engine-state KV key
-helpers and load/save/delete wrappers for emotion, humanlike, psychological,
-lifelike-learning, personality-drift, moral-repair, fallibility, group-
-atmosphere, and Sylanne memory states.
+处理 kernel 和对话缓冲区的持久化，采用 AstrBot KV 存储（主路径）+
+文件 IO（回退路径）的双写策略。同时提供所有引擎状态的 KV 键生成辅助方法
+和 load/save/delete 包装器，覆盖：情感、类人、心理筛查、类生命学习、
+人格漂移、道德修复、易错性、群体氛围、Sylanne 记忆等子系统状态。
+
+此外集成 AstrBot 的 ConversationManager 和 PersonaManager，
+实现对话历史和人格状态的平行同步。
 """
 
 from __future__ import annotations
@@ -14,91 +16,99 @@ import logging
 import math
 from typing import TYPE_CHECKING, Any
 
+from sylanne_alpha.utils import safe_ensure_future
+
 if TYPE_CHECKING:
     from .host import SylanneAlphaHost
 
 logger = logging.getLogger("astrbot_plugin_sylanne")
 
 
-def _safe_ensure_future(coro: Any, name: str = "task") -> "asyncio.Task[Any]":
-    """Wrap a coroutine in ensure_future with exception logging."""
-
-    async def _wrapper() -> None:
-        try:
-            await coro
-        except asyncio.CancelledError:
-            pass
-        except Exception as e:
-            logger.error(f"Background task '{name}' failed: {e}", exc_info=True)
-
-    return asyncio.ensure_future(_wrapper())
-
-
 class StatePersistence:
-    """Encapsulates kernel/buffer persistence logic delegated from the plugin."""
+    """封装从插件委托出来的 kernel/buffer 持久化逻辑。
+
+    采用双写策略：KV 存储为主路径（支持分布式/快速查询），
+    文件 IO 为回退路径（向后兼容/离线可用）。
+    通过 self._p 委托访问插件实例。
+    """
 
     def __init__(self, plugin: Any) -> None:
+        """初始化持久化层。
+
+        Args:
+            plugin: Sylanne 插件实例。
+        """
         self._p = plugin
         self._buffer_persist_timers: dict[str, asyncio.TimerHandle] = {}
 
     # ------------------------------------------------------------------
-    # KV key helpers
+    # KV 键生成辅助方法
     # ------------------------------------------------------------------
 
     def kernel_kv_key(self, session_key: str) -> str:
+        """生成 kernel 状态的 KV 存储键。"""
         safe = self._safe_session_key(session_key)
         return f"sylanne_kernel_{safe}"
 
     def buffer_kv_key(self, session_key: str) -> str:
+        """生成对话缓冲区的 KV 存储键。"""
         safe = self._safe_session_key(session_key)
         return f"sylanne_buffer_{safe}"
 
     def has_kv_api(self) -> bool:
-        """Check if AstrBot KV storage API is available."""
+        """检查 AstrBot KV 存储 API 是否可用。"""
         return hasattr(self._p, "put_kv_data") and callable(self._p.put_kv_data)
 
     # ------------------------------------------------------------------
-    # Engine-state KV key helpers
+    # 各引擎子系统的 KV 键生成
     # ------------------------------------------------------------------
 
     def kv_key(self, session_key: str) -> str:
+        """情感状态 KV 键。"""
         safe = self._safe_session_key(session_key)
         return f"emotion_state:{safe}"
 
     def humanlike_kv_key(self, session_key: str) -> str:
+        """类人状态 KV 键。"""
         safe = self._safe_session_key(session_key)
         return f"humanlike_state:{safe}"
 
     def lifelike_learning_kv_key(self, session_key: str) -> str:
+        """类生命学习状态 KV 键。"""
         safe = self._safe_session_key(session_key)
         return f"lifelike_learning:{safe}"
 
     def personality_drift_kv_key(self, session_key: str) -> str:
+        """人格漂移状态 KV 键。"""
         safe = self._safe_session_key(session_key)
         return f"personality_drift:{safe}"
 
     def moral_repair_kv_key(self, session_key: str) -> str:
+        """道德修复状态 KV 键。"""
         safe = self._safe_session_key(session_key)
         return f"moral_repair_state:{safe}"
 
     def fallibility_kv_key(self, session_key: str) -> str:
+        """易错性状态 KV 键。"""
         safe = self._safe_session_key(session_key)
         return f"fallibility_state:{safe}"
 
     def psychological_kv_key(self, session_key: str) -> str:
+        """心理筛查状态 KV 键。"""
         safe = self._safe_session_key(session_key)
         return f"psychological_screening:{safe}"
 
     def sylanne_memory_kv_key(self, session_key: str) -> str:
+        """Sylanne 记忆状态 KV 键。"""
         safe = session_key.replace("/", "_").replace("\\", "_")
         return f"sylanne_memory_state:{safe}"
 
     # ------------------------------------------------------------------
-    # Internal helpers
+    # 内部辅助方法
     # ------------------------------------------------------------------
 
     def _safe_session_key(self, session_key: str) -> str:
-        """Sanitize session key for use in KV keys (delegates to plugin cache)."""
+        """将 session_key 转换为 KV 键安全的字符串（带缓存）。"""
         cache = getattr(self._p, "_safe_session_key_cache", None)
         if cache is None:
             self._p._safe_session_key_cache = {}
@@ -110,44 +120,62 @@ class StatePersistence:
         return safe
 
     # ------------------------------------------------------------------
-    # Kernel persistence
+    # Kernel 持久化
     # ------------------------------------------------------------------
 
     async def persist_kernel(self, session_key: str, host: SylanneAlphaHost) -> None:
-        """Save kernel state: KV storage (primary) with file I/O fallback."""
+        """保存 kernel 状态：KV 存储（主路径）+ 文件 IO（回退路径）。
+
+        双写确保：KV 存储提供快速查询，文件提供向后兼容和离线恢复能力。
+
+        Args:
+            session_key: 会话标识。
+            host: 包含 kernel 和 runtime 的 Host 实例。
+        """
         snapshot = host.kernel.snapshot()
         if self.has_kv_api():
             try:
                 await self._p.put_kv_data(self.kernel_kv_key(session_key), snapshot)
             except Exception as e:
                 logger.warning(f"Sylanne kernel KV persist: {e}", exc_info=True)
-        # Always write to file as well (backwards compat / fallback)
+        # 始终写文件（向后兼容/回退）
         try:
             host.runtime.save(host.kernel)
         except Exception as e:
             logger.warning(f"Sylanne kernel file persist: {e}", exc_info=True)
 
     def persist_kernel_sync(self, session_key: str, host: SylanneAlphaHost) -> None:
-        """Sync-only kernel save (for LRU eviction in non-async context)."""
+        """同步写入 kernel 状态（仅文件 IO，用于 LRU 驱逐等非异步上下文）。
+
+        Args:
+            session_key: 会话标识。
+            host: Host 实例。
+        """
         try:
             host.runtime.save(host.kernel)
         except Exception as e:
             logger.warning(f"Sylanne kernel sync persist: {e}", exc_info=True)
 
     # ------------------------------------------------------------------
-    # Buffer persistence
+    # Buffer 持久化
     # ------------------------------------------------------------------
 
     async def persist_buffer(
         self, session_key: str, host: SylanneAlphaHost, buf_dict: dict[str, Any]
     ) -> None:
-        """Save conversation buffer: KV storage (primary) with file I/O fallback."""
+        """保存对话缓冲区：KV 存储（主路径）+ 文件 IO（回退路径）。
+
+        Args:
+            session_key: 会话标识。
+            host: Host 实例。
+            buf_dict: 缓冲区序列化字典。
+        """
         if self.has_kv_api():
             try:
                 await self._p.put_kv_data(self.buffer_kv_key(session_key), buf_dict)
             except Exception as e:
                 logger.warning(f"Sylanne buffer KV persist: {e}", exc_info=True)
-        # Always write to file as well (backwards compat / fallback)
+        # 始终写文件（向后兼容/回退）
         try:
             host.runtime.save_buffer(session_key, buf_dict)
         except Exception as e:
@@ -156,7 +184,15 @@ class StatePersistence:
     async def load_buffer_data(
         self, session_key: str, host: SylanneAlphaHost
     ) -> dict[str, Any] | None:
-        """Load conversation buffer: KV storage (primary) with file I/O fallback."""
+        """加载对话缓冲区：KV 存储（主路径）+ 文件 IO（回退路径）。
+
+        Args:
+            session_key: 会话标识。
+            host: Host 实例。
+
+        Returns:
+            缓冲区字典，无数据时返回 None。
+        """
         if self.has_kv_api():
             try:
                 data = await self._p.get_kv_data(self.buffer_kv_key(session_key), None)
@@ -164,30 +200,37 @@ class StatePersistence:
                     return data
             except Exception as e:
                 logger.debug(f"Sylanne skip: {e}")
-        # Fallback to file I/O
+        # 回退到文件 IO
         return host.runtime.load_buffer(session_key)
 
     # ------------------------------------------------------------------
-    # Debounced buffer persist scheduling
+    # 防抖 Buffer 持久化调度
     # ------------------------------------------------------------------
 
     def schedule_buffer_persist(self, session_key: str) -> None:
-        """Debounced buffer persist -- waits 5s, coalesces multiple writes."""
+        """调度防抖的 buffer 持久化——等待 5 秒，合并多次写入为一次。
+
+        高频对话场景下避免每条消息都触发 IO，通过 call_later 延迟执行，
+        新的调度会取消前一个未执行的定时器。
+
+        Args:
+            session_key: 会话标识。
+        """
         if session_key in self._buffer_persist_timers:
             self._buffer_persist_timers[session_key].cancel()
         try:
             loop = asyncio.get_running_loop()
             self._buffer_persist_timers[session_key] = loop.call_later(
                 5.0,
-                lambda sk=session_key: _safe_ensure_future(
+                lambda sk=session_key: safe_ensure_future(
                     self._do_buffer_persist(sk), name="buffer_persist"
                 ),
             )
         except RuntimeError:
-            pass
+            pass  # 无事件循环时静默跳过（如测试环境）
 
     async def _do_buffer_persist(self, session_key: str) -> None:
-        """Actually write buffer: KV storage (primary) with file I/O fallback."""
+        """实际执行 buffer 持久化（由 schedule_buffer_persist 延迟触发）。"""
         self._buffer_persist_timers.pop(session_key, None)
         buf = self._p._conversation_buffers.get(session_key)
         if not buf:
@@ -199,15 +242,14 @@ class StatePersistence:
         await self.persist_buffer(session_key, host, buf_dict)
 
     # ------------------------------------------------------------------
-    # Boot-time buffer restoration
+    # 启动时 Buffer 恢复
     # ------------------------------------------------------------------
 
     def restore_buffers_on_boot(self) -> None:
-        """Restore conversation buffers from file on plugin load (sync fallback).
+        """插件启动时从文件恢复对话缓冲区（同步回退路径）。
 
-        KV-based buffer data is always kept in sync via persist_buffer,
-        so file I/O here is equivalent. Async KV load is not possible in
-        this sync context.
+        KV 数据通过 persist_buffer 保持同步，此处文件 IO 等效。
+        异步 KV 加载在同步上下文中不可用，故使用文件回退。
         """
         from .memory_system import ConversationBuffer
 
@@ -219,12 +261,24 @@ class StatePersistence:
                 self._p._conversation_buffers[sk] = ConversationBuffer.from_dict(data)
 
     # ------------------------------------------------------------------
-    # Engine state: load / save / delete (emotion core)
+    # 引擎状态：加载/保存/删除（情感核心）
     # ------------------------------------------------------------------
 
     async def load_state(
         self, session_key: str, persona_profile: Any = None, *, now: float = 0.0
     ) -> Any:
+        """加载情感引擎状态（带内存缓存）。
+
+        优先从内存缓存读取，缓存未命中时查询 KV 存储。
+
+        Args:
+            session_key: 会话标识。
+            persona_profile: 人格配置（预留参数）。
+            now: 当前时间戳（预留参数）。
+
+        Returns:
+            情感状态数据，无数据时返回 None。
+        """
         cache = getattr(self._p, "_engine_cache", None)
         if cache is None:
             self._p._engine_cache = {}
@@ -244,115 +298,144 @@ class StatePersistence:
         return data
 
     async def save_state(self, session_key: str, state: Any = None) -> None:
+        """保存情感引擎状态（占位，当前为空实现）。"""
         pass
 
     async def delete_state(self, session_key: str) -> None:
+        """删除情感引擎状态（占位，当前为空实现）。"""
         pass
 
     # ------------------------------------------------------------------
-    # Humanlike state
+    # 类人状态（占位接口）
     # ------------------------------------------------------------------
 
     async def load_humanlike_state(self, session_key: str) -> Any:
+        """加载类人状态。"""
         return None
 
     async def save_humanlike_state(self, session_key: str, state: Any = None) -> None:
+        """保存类人状态。"""
         pass
 
     async def delete_humanlike_state(self, session_key: str) -> None:
+        """删除类人状态。"""
         pass
 
     # ------------------------------------------------------------------
-    # Psychological state
+    # 心理筛查状态（占位接口）
     # ------------------------------------------------------------------
 
     async def load_psychological_state(self, session_key: str) -> Any:
+        """加载心理筛查状态。"""
         return None
 
     async def save_psychological_state(
         self, session_key: str, state: Any = None
     ) -> None:
+        """保存心理筛查状态。"""
         pass
 
     async def delete_psychological_state(self, session_key: str) -> None:
+        """删除心理筛查状态。"""
         pass
 
     # ------------------------------------------------------------------
-    # Lifelike learning state
+    # 类生命学习状态（占位接口）
     # ------------------------------------------------------------------
 
     async def load_lifelike_learning_state(
         self, session_key: str, **kwargs: Any
     ) -> Any:
+        """加载类生命学习状态。"""
         return None
 
     async def save_lifelike_learning_state(
         self, session_key: str, state: Any = None
     ) -> None:
+        """保存类生命学习状态。"""
         pass
 
     async def delete_lifelike_learning_state(self, session_key: str) -> None:
+        """删除类生命学习状态。"""
         pass
 
     # ------------------------------------------------------------------
-    # Personality drift state
+    # 人格漂移状态（占位接口）
     # ------------------------------------------------------------------
 
     async def load_personality_drift_state(
         self, session_key: str, **kwargs: Any
     ) -> Any:
+        """加载人格漂移状态。"""
         return None
 
     async def save_personality_drift_state(
         self, session_key: str, state: Any = None
     ) -> None:
+        """保存人格漂移状态。"""
         pass
 
     async def delete_personality_drift_state(self, session_key: str) -> None:
+        """删除人格漂移状态。"""
         pass
 
     # ------------------------------------------------------------------
-    # Moral repair state
+    # 道德修复状态（占位接口）
     # ------------------------------------------------------------------
 
     async def load_moral_repair_state(self, session_key: str) -> Any:
+        """加载道德修复状态。"""
         return None
 
     async def save_moral_repair_state(
         self, session_key: str, state: Any = None
     ) -> None:
+        """保存道德修复状态。"""
         pass
 
     async def delete_moral_repair_state(self, session_key: str) -> None:
+        """删除道德修复状态。"""
         pass
 
     # ------------------------------------------------------------------
-    # Fallibility state
+    # 易错性状态（占位接口）
     # ------------------------------------------------------------------
 
     async def load_fallibility_state(self, session_key: str) -> Any:
+        """加载易错性状态。"""
         return None
 
     async def save_fallibility_state(self, session_key: str, state: Any = None) -> None:
+        """保存易错性状态。"""
         pass
 
     async def delete_fallibility_state(self, session_key: str) -> None:
+        """删除易错性状态。"""
         pass
 
     # ------------------------------------------------------------------
-    # Group atmosphere state
+    # 群体氛围状态（占位接口）
     # ------------------------------------------------------------------
 
     async def load_group_atmosphere_state(self, session_key: str) -> Any:
+        """加载群体氛围状态。"""
         return None
 
     # ------------------------------------------------------------------
-    # Sylanne memory state
+    # Sylanne 记忆状态
     # ------------------------------------------------------------------
 
     async def save_sylanne_memory_state(
         self, session_key: str, state: Any = None
     ) -> None:
+        """保存 Sylanne 记忆状态到缓存和 KV 存储。
+
+        同时更新内存缓存和 _memory_systems 引用，确保后续读取一致。
+
+        Args:
+            session_key: 会话标识。
+            state: MemorySystem 实例或可序列化的状态对象。
+        """
         if state is None:
             return
         from .memory_system import MemorySystem
@@ -373,9 +456,27 @@ class StatePersistence:
     async def load_sylanne_memory_state(
         self, session_key: str, *, now: float = 0.0
     ) -> Any:
+        """加载 Sylanne 记忆状态，支持多级回退和衰减遗忘。
+
+        查找顺序：
+        1. 内存缓存 (_sylanne_memory_cache)
+        2. 活跃记忆系统 (_memory_systems)
+        3. KV 存储（支持 MemorySystem 和旧版 SylanneMemoryState 两种格式）
+        4. kernel body.memory 中的持久化数据
+
+        当提供 now 参数时，对旧版格式执行半衰期衰减遗忘。
+
+        Args:
+            session_key: 会话标识。
+            now: 当前时间戳，用于衰减计算（0 表示不执行衰减）。
+
+        Returns:
+            记忆状态对象，无数据时返回 None。
+        """
         from .memory_system import MemorySystem
 
         def has_content(state: Any) -> bool:
+            """检查状态对象是否包含有效内容。"""
             if state is None:
                 return False
             if (
@@ -398,18 +499,21 @@ class StatePersistence:
         cached_state = cache.get(session_key) if isinstance(cache, dict) else None
         if has_content(cached_state):
             return cache[session_key]
+        # 检查活跃记忆系统
         system_cache = getattr(self._p, "_memory_systems", {}) or {}
         live_state = (
             system_cache.get(session_key) if isinstance(system_cache, dict) else None
         )
         if has_content(live_state):
             return live_state
+        # 从 KV 存储加载
         kv_key = self.sylanne_memory_kv_key(session_key)
         get_fn = getattr(self._p, "get_kv_data", None)
         put_fn = getattr(self._p, "put_kv_data", None)
         if get_fn and callable(get_fn):
             data = await get_fn(kv_key, None)
             if data is not None:
+                # 尝试作为新版 MemorySystem 格式解析
                 if isinstance(data, dict) and {
                     "l1",
                     "l2",
@@ -423,10 +527,12 @@ class StatePersistence:
                         return state
                     except Exception as e:
                         logger.debug(f"Sylanne skip: {e}")
+                # 尝试作为旧版 SylanneMemoryState 格式解析
                 try:
                     from memory_engine import SylanneMemoryState
 
                     state = SylanneMemoryState.from_dict(data)
+                    # 执行半衰期衰减遗忘
                     if now and hasattr(state, "records"):
                         original_count = len(state.records)
                         surviving = []
@@ -438,13 +544,15 @@ class StatePersistence:
                             if half_life > 0:
                                 created = getattr(rec, "created_at", 0.0)
                                 elapsed = now - created
+                                # 指数衰减：exp(-ln2 * elapsed / half_life)
                                 decay = math.exp(-0.693 * elapsed / half_life)
                                 effective_depth = getattr(rec, "depth", 0.5) * decay
                                 if effective_depth < 0.01:
-                                    continue
+                                    continue  # 衰减到阈值以下，遗忘
                             surviving.append(rec)
                         forgotten_count = original_count - len(surviving)
                         state.records = surviving
+                        # 记录遗忘数量并回写 KV
                         if forgotten_count > 0:
                             if hasattr(state, "dynamics") and hasattr(
                                 state.dynamics, "notes"
@@ -457,6 +565,7 @@ class StatePersistence:
                     return state
                 except Exception as e:
                     logger.debug(f"Sylanne skip: {e}")
+        # 最后回退：从 kernel body.memory 中加载
         try:
             host = self._p._host(session_key)
             data = host.kernel.body.memory.get("_memory_system")
@@ -467,6 +576,7 @@ class StatePersistence:
                 return state
         except Exception as e:
             logger.debug(f"Sylanne skip: {e}")
+        # 返回任何可用的缓存状态（即使为空）
         if cached_state is not None:
             return cached_state
         if live_state is not None:
@@ -474,6 +584,11 @@ class StatePersistence:
         return None
 
     async def delete_sylanne_memory_state(self, session_key: str) -> None:
+        """删除 Sylanne 记忆状态（缓存 + KV 存储）。
+
+        Args:
+            session_key: 会话标识。
+        """
         cache = self._p._sylanne_memory_cache
         cache.pop(session_key, None)
         kv_key = self.sylanne_memory_kv_key(session_key)
@@ -482,11 +597,18 @@ class StatePersistence:
             await delete_fn(kv_key)
 
     # ------------------------------------------------------------------
-    # AstrBot ConversationManager integration
+    # AstrBot ConversationManager 集成
     # ------------------------------------------------------------------
 
     def init_conversation_manager(self) -> Any:
-        """Initialize AstrBot ConversationManager if available."""
+        """初始化 AstrBot ConversationManager（如果可用）。
+
+        检测 AstrBot 上下文中是否存在 conversation_manager，
+        存在则启用对话历史的平行同步。
+
+        Returns:
+            ConversationManager 实例，不可用时返回 None。
+        """
         p = self._p
         context = getattr(p, "context", None)
         if context is None:
@@ -499,29 +621,33 @@ class StatePersistence:
         return conv_mgr
 
     def has_conversation_manager(self) -> bool:
-        """Check if AstrBot ConversationManager is available."""
+        """检查 AstrBot ConversationManager 是否可用。"""
         return getattr(self._p, "_conv_mgr", None) is not None
 
     async def sync_message_to_conv_mgr(
         self, session_key: str, role: str, text: str
     ) -> None:
-        """Sync a message to AstrBot's ConversationManager (parallel path).
+        """将消息同步到 AstrBot 的 ConversationManager（平行路径）。
 
-        This keeps AstrBot's conversation system in sync without replacing
-        Sylanne's own ConversationBuffer (which is still needed for flush/
-        consolidation logic).
+        保持 AstrBot 对话系统同步，但不替代 Sylanne 自身的 ConversationBuffer
+        （后者仍用于 flush/consolidation 逻辑）。
+
+        Args:
+            session_key: 会话标识。
+            role: 消息角色（"user" 或 "assistant"）。
+            text: 消息文本内容。
         """
         p = self._p
         conv_mgr = getattr(p, "_conv_mgr", None)
         if conv_mgr is None:
             return
         try:
-            # Get or create conversation for this session
+            # 获取或创建当前会话
             curr_cid = await conv_mgr.get_curr_conversation_id(session_key)
             if not curr_cid:
                 curr_cid = await conv_mgr.new_conversation(session_key)
 
-            # Try to use AstrBot message types; fall back to plain dicts
+            # 尝试使用 AstrBot 消息类型；不可用时回退到普通字典
             try:
                 from astrbot.core.agent.message import (
                     AssistantMessageSegment,
@@ -534,7 +660,7 @@ class StatePersistence:
                 else:
                     msg = AssistantMessageSegment(content=[TextPart(text=text)])
             except ImportError:
-                # Older AstrBot or test environment: use plain dict
+                # 旧版 AstrBot 或测试环境：使用普通字典
                 msg = {"role": role, "content": text}
 
             conversation = await conv_mgr.get_conversation(session_key, curr_cid)
@@ -547,11 +673,18 @@ class StatePersistence:
             logger.debug(f"Sylanne: ConversationManager sync failed: {e}")
 
     # ------------------------------------------------------------------
-    # AstrBot PersonaManager integration
+    # AstrBot PersonaManager 集成
     # ------------------------------------------------------------------
 
     def init_persona_manager(self) -> Any:
-        """Initialize AstrBot PersonaManager if available."""
+        """初始化 AstrBot PersonaManager（如果可用）。
+
+        检测 AstrBot 上下文中是否存在 persona_manager，
+        存在则启用人格状态的同步。
+
+        Returns:
+            PersonaManager 实例，不可用时返回 None。
+        """
         p = self._p
         context = getattr(p, "context", None)
         if context is None:
@@ -564,15 +697,17 @@ class StatePersistence:
         return persona_mgr
 
     def has_persona_manager(self) -> bool:
-        """Check if AstrBot PersonaManager is available."""
+        """检查 AstrBot PersonaManager 是否可用。"""
         return getattr(self._p, "_persona_mgr", None) is not None
 
     def sync_personality_to_persona_mgr(self, session_key: str) -> None:
-        """Sync Sylanne personality state to AstrBot's PersonaManager.
+        """将 Sylanne 人格状态同步到 AstrBot 的 PersonaManager。
 
-        Called after personality drift updates. Creates or updates a
-        Sylanne persona entry so AstrBot's persona system is aware of
-        the current personality state.
+        在人格漂移更新后调用，创建或更新 Sylanne persona 条目，
+        使 AstrBot 的 persona 系统感知当前人格状态。
+
+        Args:
+            session_key: 会话标识。
         """
         p = self._p
         persona_mgr = getattr(p, "_persona_mgr", None)
@@ -582,7 +717,7 @@ class StatePersistence:
             host = p._hosts.get(session_key)
             if not host:
                 return
-            # Extract personality data from kernel
+            # 从 kernel 提取人格数据
             personality = (
                 host.kernel._personality()
                 if hasattr(host.kernel, "_personality")
@@ -594,7 +729,7 @@ class StatePersistence:
             traits = personality.get("traits", {})
             voice = personality.get("voice", {})
 
-            # Build system prompt fragment from personality state
+            # 从人格状态构建 system prompt 片段
             trait_lines = []
             for k, v in traits.items():
                 if isinstance(v, (int, float)):
@@ -611,7 +746,7 @@ class StatePersistence:
                 f"Voice: {voice if voice else 'default'}"
             )
 
-            # Try update first, create if not exists
+            # 先尝试更新，不存在则创建
             try:
                 existing = persona_mgr.get_persona(persona_id)
                 if existing:
@@ -624,22 +759,33 @@ class StatePersistence:
                         tools=None,
                     )
             except Exception:
-                # create_persona may not accept all args in older versions
+                # 旧版 API 可能不接受所有参数
                 try:
                     persona_mgr.create_persona(
                         persona_id=persona_id,
                         system_prompt=system_prompt,
                     )
                 except Exception:
-                    pass  # cleanup: persona sync failure acceptable
+                    pass  # persona 同步失败可接受
         except Exception as e:
             logger.debug(f"Sylanne: PersonaManager sync failed: {e}")
 
     # ------------------------------------------------------------------
-    # Provider ID resolution
+    # Provider ID 解析
     # ------------------------------------------------------------------
 
     async def provider_id(self, event: Any = None) -> str:
+        """解析当前聊天的 LLM provider ID（带 TTL 缓存）。
+
+        通过 AstrBot 上下文的 get_current_chat_provider_id 获取，
+        结果缓存 30 秒（可配置）避免频繁查询。
+
+        Args:
+            event: 当前事件对象。
+
+        Returns:
+            Provider ID 字符串，不可用时返回空字符串。
+        """
         import time
 
         p = self._p
@@ -667,14 +813,19 @@ class StatePersistence:
         return ""
 
     # ------------------------------------------------------------------
-    # Config defaults initialization
+    # 配置默认值初始化
     # ------------------------------------------------------------------
 
     def load_config_defaults(self) -> None:
-        """Initialize all config keys with their default values."""
+        """初始化所有配置键的默认值。
+
+        在插件启动时调用，确保所有配置项都有合理的默认值，
+        避免运行时因缺失配置而出错。覆盖 WebUI、评估器、实时聊天、
+        后台队列、安全边界、记忆系统等全部子系统的配置。
+        """
         p = self._p
         p._cfg_bool("sylanne_webui_enabled", False)
-        p._cfg("sylanne_webui_host", "0.0.0.0")
+        p._cfg("sylanne_webui_host", "127.0.0.1")
         p._cfg_int("sylanne_webui_port", 2718)
         p._cfg_bool("enabled", True)
         p._cfg_bool("use_llm_assessor", True)
@@ -775,11 +926,20 @@ class StatePersistence:
         p._cfg_bool("sylanne_alpha_auto_detect_group_context", True)
 
     # ------------------------------------------------------------------
-    # AstrBot group context detection
+    # AstrBot 群聊上下文检测
     # ------------------------------------------------------------------
 
     def detect_astrbot_group_context(self) -> bool:
-        """Detect if AstrBot's built-in group chat context awareness is enabled."""
+        """检测 AstrBot 内置的群聊上下文感知是否已启用。
+
+        通过多种方式探测 AstrBot 配置：
+        1. Context.get_config() 方法
+        2. context.platform_settings 属性
+        3. context.config_manager.config 字典
+
+        Returns:
+            True 表示 AstrBot 已启用群聊上下文感知。
+        """
         p = self._p
         if not p._cfg_bool("sylanne_alpha_auto_detect_group_context", True):
             return False
@@ -817,11 +977,19 @@ class StatePersistence:
         return False
 
     # ------------------------------------------------------------------
-    # Terminate / cleanup
+    # 终止/清理
     # ------------------------------------------------------------------
 
     async def terminate(self) -> None:
-        """Graceful shutdown: cancel tasks, save checkpoints, clean up state."""
+        """优雅关闭：取消任务、保存检查点、清理状态。
+
+        关闭顺序：
+        1. 取消主动调度器任务
+        2. 取消所有后台任务并等待完成
+        3. 保存后台评估队列的最终检查点
+        4. 清理后台队列状态
+        5. 停止 WebUI 服务器
+        """
         p = self._p
         task = getattr(p, "_proactive_scheduler_task", None)
         if task and not task.done():

@@ -1,6 +1,18 @@
-"""LLM response pipeline methods extracted from main.py.
+"""LLM 响应管线 —— 拦截 on_llm_response 事件的核心处理模块。
 
-All methods delegate attribute access to the plugin instance via ``self._p``.
+职责：
+  1. 拦截 LLM 响应，清理 thinking/draft 块
+  2. 实现分段回复：将长回复拆分为多条消息，模拟人类打字节奏
+  3. 流式首句快速发送：在流式输出中检测到第一句完成时立即发送
+  4. 后台触发记忆写入和状态更新
+  5. Claude/哈基德兼容性处理：规范化请求格式、裁剪工具列表
+
+与其他组件的关系：
+  - 与 llm_request_pipeline 配对：request 注入上下文，response 处理输出
+  - 调用 rhythm_learner 获取自适应分段参数
+  - 通过 observe_response 将回复反馈给计算栈
+
+所有方法通过 ``self._p`` 委托访问插件实例属性。
 """
 
 from __future__ import annotations
@@ -13,6 +25,7 @@ from types import SimpleNamespace
 from typing import Any
 
 from sylanne_alpha.compat import realtime_plan, strip_draft_blocks
+from sylanne_alpha.utils import safe_ensure_future
 
 try:
     from astrbot.api import logger  # type: ignore
@@ -21,22 +34,24 @@ except ImportError:
 
     logger = _logging.getLogger("astrbot_plugin_sylanne")  # type: ignore
 
+# 中国时区常量
 _CHINA_TZ = timezone(timedelta(hours=8))
+# 序列化后的请求载荷最大字符数，超过则触发裁剪
 _MAX_PAYLOAD_SERIALIZED_CHARS = 60000
 
 
-def _safe_ensure_future(coro: Any, name: str = "task") -> "asyncio.Task[Any]":
-    """Create a task from a coroutine, handling missing event loop gracefully."""
-    try:
-        loop = asyncio.get_running_loop()
-        return loop.create_task(coro, name=name)
-    except RuntimeError:
-        loop = asyncio.new_event_loop()
-        return loop.create_task(coro, name=name)
-
-
 class LLMResponsePipeline:
-    """Encapsulates LLM response processing pipeline for the Sylanne plugin."""
+    """LLM 响应处理管线，封装 Sylanne 插件的响应拦截逻辑。
+
+    核心流程：
+      LLM 返回 → 清理 draft 块 → 检测首句已发送 → 分段拆分 → 后台调度发送
+
+    与其他组件的关系：
+      - 持有插件实例引用 (self._p)
+      - 使用 compat.realtime_plan 做分段规划
+      - 使用 rhythm_learner 获取自适应节奏参数
+      - 调用 observe_response 反馈给计算栈
+    """
 
     def __init__(self, plugin: Any) -> None:
         self._p = plugin
@@ -45,6 +60,18 @@ class LLMResponsePipeline:
     # Main response handler
     # ------------------------------------------------------------------
     async def _on_llm_response_inner(self, event: Any, response: Any) -> None:
+        """LLM 响应拦截的主入口。
+
+        处理流程：
+          1. 清理 thinking/draft 块
+          2. 若首句已通过流式发送，存储剩余部分为 unfinished
+          3. 否则进行分段规划，后台调度逐段发送
+          4. 启动后台观测任务记录回复
+
+        Args:
+            event: AstrBot 事件对象。
+            response: LLM 响应对象，包含 completion_text。
+        """
         if not hasattr(self._p, "_stream_first_sent"):
             self._p._stream_first_sent = {}
         if not hasattr(self._p, "_unfinished_replies"):
@@ -65,7 +92,7 @@ class LLMResponsePipeline:
         )
 
         if not realtime_enabled or not intercept:
-            # Still filter thinking/draft blocks
+            # 未启用即时聊天拦截时，仅清理 thinking/draft 块
             if response is not None:
                 text = str(getattr(response, "completion_text", "") or "")
                 cleaned = strip_draft_blocks(text)
@@ -86,11 +113,10 @@ class LLMResponsePipeline:
             response.completion_text = ""
             return
 
-        # Check if first sentence was already sent via streaming
+        # 检查首句是否已通过流式发送
         first_sent = self._p._stream_first_sent.pop(session_key, "")
         if first_sent:
-            # First sentence already dispatched via streaming -- don't re-send
-            # Store unfinished remainder
+            # 首句已发送——不重复发送，存储剩余部分供下轮续接
             remainder = cleaned
             if remainder.startswith(first_sent):
                 remainder = remainder[len(first_sent) :].strip()
@@ -106,13 +132,14 @@ class LLMResponsePipeline:
             # Don't modify completion_text, don't stop event
             return
 
-        # Segment and dispatch
+        # 分段规划并调度发送
         origin = str(getattr(event, "unified_msg_origin", "") or "")
         cfg = self._p._config or {}
         default_max_part = int(cfg.get("realtime_chat_max_part_chars", 48))
-        default_cps = 7.5
+        default_cps = 7.5  # 默认每秒字符数（模拟打字速度）
         host = self._p._host(session_key)
         expr_drive = host.kernel.computation.engine.expression_drive()
+        # 计算最近被忽略的回复比例，用于调整节奏
         last_times = [t for t in self._p._last_bot_expression_time.values() if t > 0]
         recent_ignored = 0.0
         if len(last_times) > 3:
@@ -135,16 +162,15 @@ class LLMResponsePipeline:
             response.completion_text = cleaned
             return
 
-        # Keep completion_text intact for AstrBot's context history recording.
-        # Clear result_chain to prevent AstrBot from sending the full message
-        # (we handle sending via segmented dispatch instead).
+        # 保留 completion_text 供 AstrBot 上下文历史记录使用。
+        # 清空 result_chain 防止 AstrBot 发送完整消息（由分段调度代替）。
         response.completion_text = cleaned
         if hasattr(response, "result_chain"):
             response.result_chain = None
         if hasattr(response, "chain"):
             response.chain = None
 
-        # Store unfinished for next round if multi-part
+        # 多段回复时存储未发送部分，供下轮续接
         if len(parts) > 1:
             sent_first = parts[0]["text"]
             rest = cleaned
@@ -152,11 +178,11 @@ class LLMResponsePipeline:
                 rest = rest[len(sent_first) :].strip()
             self._p._unfinished_replies[session_key] = rest
 
-        # Dispatch segments in background
+        # 后台调度分段发送
         self._p.logger.info(
             f"Sylanne segmented reply queued: session={session_key} parts={len(parts)}"
         )
-        task = _safe_ensure_future(
+        task = safe_ensure_future(
             self._dispatch_segmented_parts(origin, parts, session_key=session_key),
             name="dispatch_segmented_parts",
         )
@@ -170,8 +196,8 @@ class LLMResponsePipeline:
         )
         self._p._segmented_tasks[session_key] = task
 
-        # Schedule observation off the hot path
-        obs_task = _safe_ensure_future(
+        # 将观测任务从热路径移出，后台异步执行
+        obs_task = safe_ensure_future(
             self._background_observe_response(session_key, cleaned),
             name="background_observe_response",
         )
@@ -185,6 +211,7 @@ class LLMResponsePipeline:
         )
 
     async def _background_observe_response(self, session_key: str, text: str) -> None:
+        """后台观测 bot 回复：写入对话缓冲、通知社交场域、更新计算栈。"""
         try:
             from sylanne_alpha.memory_system import ConversationBuffer
 
@@ -197,7 +224,7 @@ class LLMResponsePipeline:
             self._p._schedule_buffer_persist(session_key)
             # Parallel sync to AstrBot ConversationManager
             if self._p._has_conversation_manager():
-                _safe_ensure_future(
+                safe_ensure_future(
                     self._p._sync_message_to_conv_mgr(session_key, "bot", text),
                     name="conv_mgr_sync_bot",
                 )
@@ -227,6 +254,15 @@ class LLMResponsePipeline:
     # on_llm_stream_chunk hook -- dispatch first sentence early
     # ------------------------------------------------------------------
     async def on_llm_stream_chunk(self, event: Any, chunk: Any) -> None:
+        """流式输出钩子：在流式生成过程中检测首句完成并提前发送。
+
+        通过累积 delta 到 buffer，检测到完整首句后立即发送给用户，
+        减少用户感知的首次响应延迟。
+
+        Args:
+            event: AstrBot 事件对象。
+            chunk: 流式输出的增量块。
+        """
         session_key = self._p._session_key(event)
         intercept = bool(
             self._p._config.get("sylanne_alpha_realtime_intercept_llm_response")
@@ -247,7 +283,7 @@ class LLMResponsePipeline:
             self._p._stream_first_sent[session_key] = first_sentence
             self._p._stream_buffers.pop(session_key, None)
             origin = str(getattr(event, "unified_msg_origin", "") or "")
-            task = _safe_ensure_future(
+            task = safe_ensure_future(
                 self._send_first_sentence(origin, first_sentence),
                 name="send_first_sentence",
             )
@@ -261,7 +297,10 @@ class LLMResponsePipeline:
             )
 
     def _extract_first_sentence(self, text: str) -> str:
-        """Extract first complete sentence from buffer."""
+        """从缓冲文本中提取第一个完整句子。
+
+        以中英文句末标点或换行符为分隔。连续标点（如 "！？"）视为同一句。
+        """
         delimiters = "。！？!?；;"
         for i, ch in enumerate(text):
             if ch in delimiters and i > 0:
@@ -274,6 +313,7 @@ class LLMResponsePipeline:
         return ""
 
     async def _send_first_sentence(self, origin: str, text: str) -> None:
+        """通过 context.send_message 发送首句文本。"""
         context = self._p.context
         if hasattr(context, "send_message"):
             message = self._astrbot_message(text)
@@ -285,6 +325,13 @@ class LLMResponsePipeline:
     async def _dispatch_segmented_parts(
         self, origin: str, parts: list[dict[str, Any]], session_key: str = ""
     ) -> None:
+        """逐段发送分段回复，每段之间按计划延迟。
+
+        Args:
+            origin: 消息发送目标（unified_msg_origin）。
+            parts: 分段列表，每段包含 text 和 delay_before_seconds。
+            session_key: 会话标识，发送完成后清除 unfinished 标记。
+        """
         context = self._p.context
         if not hasattr(context, "send_message"):
             return
@@ -301,7 +348,7 @@ class LLMResponsePipeline:
             )
             message = self._astrbot_message(text)
             await context.send_message(origin, message)
-        # All parts sent successfully — clear unfinished marker
+        # 所有段发送成功——清除未完成标记
         if session_key:
             self._p._unfinished_replies.pop(session_key, None)
 
@@ -309,6 +356,14 @@ class LLMResponsePipeline:
     # Memory prompt fragment
     # ------------------------------------------------------------------
     def _memory_prompt_fragment(self, payload: dict[str, Any]) -> str:
+        """将记忆查询结果格式化为 prompt 注入片段。
+
+        Args:
+            payload: 记忆查询返回的载荷，包含 matches 列表。
+
+        Returns:
+            格式化的 prompt 片段字符串，无匹配时返回空字符串。
+        """
         matches = payload.get("matches", [])
         _query = str(payload.get("query") or "")
         if not matches:
@@ -331,6 +386,7 @@ class LLMResponsePipeline:
     # Time context
     # ------------------------------------------------------------------
     def _time_context_fragment(self, session_key: str) -> str:
+        """生成时间上下文片段：当前时间 + 距上次对话的间隔标签。"""
         now = datetime.now(_CHINA_TZ)
         weekday_names = ["一", "二", "三", "四", "五", "六", "日"]
         _weekday = weekday_names[now.weekday()]
@@ -351,6 +407,7 @@ class LLMResponsePipeline:
         return f"[T:{date_str}-W{now.weekday()}-{time_str}/gap:{gap_label}]"
 
     def _gap_label_from_seconds(self, seconds: float, has_previous: bool) -> str:
+        """将时间间隔（秒）转换为自然语言标签。"""
         if not has_previous:
             return "first_event"
         if seconds < 900:
@@ -375,6 +432,10 @@ class LLMResponsePipeline:
     # Payload capping
     # ------------------------------------------------------------------
     def _cap_llm_request_payload(self, request: Any) -> None:
+        """裁剪 LLM 请求载荷，确保序列化后不超过最大字符限制。
+
+        多轮渐进裁剪：先裁 extra_user_content_parts，再裁 contexts 和 messages。
+        """
         locked = self._p._config.get("sylanne_alpha_locked_persona_prompt")
         _locked_system = str(locked) if locked else None
 
@@ -493,6 +554,13 @@ class LLMResponsePipeline:
     def _state_injection_budget_for_request(
         self, session_key: str, request: Any, model_hint: str = ""
     ) -> Any:
+        """为请求创建状态注入预算对象。
+
+        根据模型类型决定兼容模式：
+          - claude_agent_owned_context: 哈基德模式，跳过额外注入
+          - claude_advisory: Claude 建议模式，以 advisory 标记注入
+          - 默认：正常注入到 extra_user_content_parts
+        """
         # Access _StateInjectionBudget from the plugin's module to avoid circular import
         import sys
 
@@ -550,6 +618,14 @@ class LLMResponsePipeline:
     def _normalize_claude_request_payload(
         self, request: Any, budget: Any | None = None
     ) -> None:
+        """规范化请求格式以兼容 Claude/哈基德模式。
+
+        处理内容：
+          - 将 extra_user_content_parts 展平到 prompt
+          - 将 system role 的 contexts 合并到 system_prompt
+          - 清理非标准 role 的 messages
+          - 哈基德模式下裁剪 Sylanne 工具
+        """
         hajide = bool(self._p._config.get("sylanne_alpha_hajide_compat_mode"))
 
         # Flatten extra_user_content_parts into prompt
@@ -664,6 +740,10 @@ class LLMResponsePipeline:
             self._prune_hajide_tools(request, budget)
 
     def _prune_hajide_tools(self, request: Any, budget: Any | None = None) -> None:
+        """哈基德兼容模式：从请求中移除 Sylanne 专用工具。
+
+        防止 Claude 模型尝试调用不存在的 Sylanne 内部工具。
+        """
         _SYLANNE_TOOL_PREFIXES = (
             "query_agent_state",
             "get_bot_emotion",
@@ -772,7 +852,7 @@ class LLMResponsePipeline:
     # Text extraction from event
     # ------------------------------------------------------------------
     def _text(self, event: Any) -> str:
-        """Extract text from event, including forward messages and JSON links."""
+        """从事件中提取文本内容，支持转发消息和 JSON 链接卡片。"""
         parts: list[str] = []
         message_str = str(getattr(event, "message_str", "") or "")
         if message_str:
@@ -821,7 +901,10 @@ class LLMResponsePipeline:
     # AstrBot message building
     # ------------------------------------------------------------------
     def _astrbot_message(self, text: str) -> Any:
-        """Build a message suitable for context.send_message."""
+        """构建适用于 context.send_message 的消息对象。
+
+        优先使用 AstrBot 的 MessageChain + Plain 组件，不可用时回退为纯文本。
+        """
         import sys
 
         comp_mod = sys.modules.get("astrbot.api.message_components")

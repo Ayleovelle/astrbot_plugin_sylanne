@@ -1,8 +1,25 @@
-"""Public API facade extracted from main.py.
+"""公共 API 层 —— 暴露给外部调用的接口集合。
 
-Encapsulates observatory/diagnostics, agent identity, LLM tool handlers,
-command handlers, state observation, and internal assessor methods.
-All methods delegate attribute access to the plugin instance via ``self._p``.
+职责：
+  1. Observatory/诊断：提供只读的系统状态面板数据
+  2. Agent 身份管理：追踪对话中的发言者身份和别名
+  3. LLM Tool 处理器：供 LLM 通过 function calling 查询 bot 状态
+  4. 命令处理器：响应用户的管理命令（重置、状态查询等）
+  5. 状态观测：observe_request/observe_response 驱动计算栈更新
+  6. 内部评估器：调用 LLM 做情感评估
+  7. 记忆查询：通过向量检索和关键词匹配召回记忆
+
+设计原则：
+  - 所有对外暴露的数据都经过脱敏（不含原始对话文本）
+  - 只读约束：外部 API 不能修改内部状态（除显式的 reset 命令）
+  - 安全优先：关系推断等敏感数据标记为 internal_only
+
+与其他组件的关系：
+  - 被 AstrBot 的命令系统和 LLM tool 系统调用
+  - 通过 self._p 访问插件实例的所有子系统
+  - 使用 compat 模块的辅助函数做格式转换
+
+所有方法通过 ``self._p`` 委托访问插件实例属性。
 """
 
 from __future__ import annotations
@@ -23,7 +40,17 @@ except ImportError:
 
 
 class PublicAPI:
-    """Extracted public API surface for the Sylanne plugin."""
+    """公共 API 表面层，封装 Sylanne 插件对外暴露的所有接口。
+
+    分组：
+      - Observatory：系统状态面板（只读）
+      - Agent Identity：发言者身份追踪
+      - LLM Tool：供 LLM function calling 使用的状态查询工具
+      - Command：用户管理命令（重置、状态查询）
+      - Observation：驱动计算栈的状态观测方法
+      - Internal Assessor：内部 LLM 情感评估
+      - Memory：记忆查询和注入
+    """
 
     def __init__(self, plugin: Any) -> None:
         self._p = plugin
@@ -41,6 +68,16 @@ class PublicAPI:
     # Observatory / Diagnostics group
     # ------------------------------------------------------------------
     async def sylanne_observatory(self, *, session_key: str) -> dict[str, Any]:
+        """获取 Sylanne 观测台数据：身体感、记忆、人格漂移、网络空间感。
+
+        返回只读的系统状态面板，供 WebUI 展示。不含原始对话文本。
+
+        Args:
+            session_key: 会话标识。
+
+        Returns:
+            观测台数据字典，包含 cards、visualization、config_controls 等。
+        """
         host = self._host(session_key)
         surface = host.diagnostics()
         body = surface["body"]
@@ -192,6 +229,15 @@ class PublicAPI:
     async def get_agent_runtime_diagnostics(
         self, event: Any = None, include_sessions: bool = False, **kwargs: Any
     ) -> dict[str, Any]:
+        """获取 agent 运行时诊断信息：注入预算、后台队列状态、工作者健康度。
+
+        Args:
+            event: 事件对象或会话标识字符串。
+            include_sessions: 是否包含会话列表。
+
+        Returns:
+            诊断数据字典。
+        """
         p = self._p
         if isinstance(event, str):
             session_key = event
@@ -448,6 +494,16 @@ class PublicAPI:
     async def get_agent_identity_profile(
         self, event: Any = None, **kwargs: Any
     ) -> dict[str, Any]:
+        """获取或创建发言者身份档案。
+
+        追踪发言者的 ID、显示名、别名历史。带 TTL 过期和容量限制。
+
+        Args:
+            event: AstrBot 事件对象。
+
+        Returns:
+            身份档案字典。
+        """
         p = self._p
         cache = getattr(p, "_agent_identity_profile_cache", None)
         if cache is None:
@@ -1055,6 +1111,22 @@ class PublicAPI:
         flags: list[str] | None = None,
         now: float = 0.0,
     ) -> dict[str, Any]:
+        """观测用户请求：驱动计算栈更新，触发反馈循环。
+
+        反馈循环逻辑：
+          - 距上次 bot 表达 < 30s → feedback("accepted")
+          - 距上次 bot 表达 > 300s → feedback("ignored")
+
+        Args:
+            session_key: 会话标识。
+            text: 用户消息文本。
+            confidence: 置信度。
+            flags: 标志列表（如 ["safe"]）。
+            now: 事件时间戳。
+
+        Returns:
+            计算栈处理结果。
+        """
         p = self._p
         host = self._host(session_key)
         effective_now = now or time.time()
@@ -1093,6 +1165,18 @@ class PublicAPI:
         flags: list[str] | None = None,
         now: float = 0.0,
     ) -> dict[str, Any]:
+        """观测 bot 回复：更新最后表达时间，驱动计算栈。
+
+        Args:
+            session_key: 会话标识。
+            text: bot 回复文本。
+            confidence: 置信度。
+            flags: 标志列表。
+            now: 事件时间戳。
+
+        Returns:
+            计算栈处理结果。
+        """
         p = self._p
         host = self._host(session_key)
         effective_now = now or time.time()
@@ -1139,6 +1223,7 @@ class PublicAPI:
     async def observe_user_message_withdrawal(
         self, *args: Any, **kwargs: Any
     ) -> dict[str, Any]:
+        """观测用户消息撤回事件：递增 input_epoch，清除相关状态。"""
         p = self._p
         event = args[0] if args else None
         session_key = kwargs.get("session_key", "")
@@ -1315,6 +1400,13 @@ class PublicAPI:
     async def _assess_emotion(
         self, session_key: str = "", text: str = "", event: Any = None, **kwargs: Any
     ) -> Any:
+        """内部情感评估器：通过 LLM 或启发式规则评估文本情感。
+
+        短文本（<= 12 字符）直接返回中性结果，避免无意义的 LLM 调用。
+
+        Returns:
+            SimpleNamespace 对象，包含 values、confidence、label、source 等字段。
+        """
         p = self._p
         current_text = kwargs.get("current_text", text)
         cfg = p.config or {}
@@ -1434,6 +1526,7 @@ class PublicAPI:
         )
 
     async def _call_internal_assessor_llm(self, *args: Any, **kwargs: Any) -> Any:
+        """调用内部评估器 LLM，带并发限制保护。"""
         p = self._p
         limit = self._internal_assessor_llm_concurrency_limit()
         while p._internal_assessor_llm_inflight >= limit:
@@ -1452,6 +1545,7 @@ class PublicAPI:
         return 2
 
     def _internal_assessor_llm_concurrency_decision(self) -> dict[str, Any]:
+        """计算内部评估器 LLM 并发策略：基础 2 通道 + 极端积压时临时 burst 到 3。"""
         p = self._p
         _cfg = p.config or {}
         total_queued = sum(len(q) for q in p._background_post_queues.values())
@@ -1523,6 +1617,17 @@ class PublicAPI:
     async def query_sylanne_memory(
         self, *, session_key: str, query: str = "", limit: int = 5, now: float = 0.0
     ) -> dict[str, Any]:
+        """查询 Sylanne 记忆系统：通过向量相似度和关键词匹配召回记忆。
+
+        Args:
+            session_key: 会话标识。
+            query: 查询文本。
+            limit: 最大返回条数。
+            now: 当前时间戳。
+
+        Returns:
+            记忆查询结果字典，包含 matches 列表。
+        """
         p = self._p
         host = self._host(session_key)
         memory_system = p._memory_system_for_session(session_key)
@@ -1627,6 +1732,15 @@ class PublicAPI:
     async def proactive_sylanne(
         self, *, session_key: str, now: float = 0.0
     ) -> dict[str, Any]:
+        """主动发言检查：通过计算栈判断是否应该主动说话。
+
+        Args:
+            session_key: 会话标识。
+            now: 当前时间戳。
+
+        Returns:
+            主动发言决策字典，包含 should_send、reason_code 等。
+        """
         from .compat import proactive_decision
         from .host import SylanneAlphaHostEvent
 
@@ -1656,6 +1770,11 @@ class PublicAPI:
     # ------------------------------------------------------------------
 
     def sylanne_alpha_switches(self) -> dict[str, Any]:
+        """获取 Sylanne Alpha 功能开关状态汇总。
+
+        Returns:
+            开关状态字典，包含 realtime_chat、proactive_dispatch、embedding_memory 等。
+        """
         cfg = self._p.config or {}
         return {
             "schema_version": "sylanne.alpha.config.v1",

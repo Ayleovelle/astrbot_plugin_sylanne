@@ -1,3 +1,10 @@
+"""配置辅助模块。
+
+提供类型安全的配置读取工具函数（bool_setting / int_setting）以及
+alpha_switches 聚合函数，将分散的配置项整合为结构化的功能开关字典，
+供运行时各子系统查询当前启用状态。
+"""
+
 from __future__ import annotations
 
 from typing import Any
@@ -6,6 +13,16 @@ CONFIG_SCHEMA_VERSION = "sylanne.alpha.config.v1"
 
 
 def bool_setting(config: dict[str, Any], name: str, default: bool = False) -> bool:
+    """从配置字典中读取布尔值，兼容字符串形式（"true"/"1"/"yes" 等）。
+
+    Args:
+        config: 配置字典。
+        name: 配置键名。
+        default: 键不存在时的默认值。
+
+    Returns:
+        解析后的布尔值。
+    """
     value = config.get(name, default)
     if isinstance(value, str):
         return value.strip().lower() in {"1", "true", "yes", "on", "enabled"}
@@ -20,6 +37,18 @@ def int_setting(
     minimum: int = 0,
     maximum: int = 32,
 ) -> int:
+    """从配置字典中读取整数值，并钳位到 [minimum, maximum] 范围。
+
+    Args:
+        config: 配置字典。
+        name: 配置键名。
+        default: 键不存在或解析失败时的默认值。
+        minimum: 允许的最小值。
+        maximum: 允许的最大值。
+
+    Returns:
+        钳位后的整数值。
+    """
     try:
         value = int(config.get(name, default))
     except (TypeError, ValueError):
@@ -28,6 +57,18 @@ def int_setting(
 
 
 def alpha_switches(config: dict[str, Any] | None = None) -> dict[str, Any]:
+    """将分散的配置项聚合为结构化的功能开关字典。
+
+    返回值按子系统分组（realtime_chat / proactive_dispatch / embedding_memory /
+    assessor_llm / fast_assessor / background_workers / safety），每组包含
+    该子系统的启用状态和关键参数。
+
+    Args:
+        config: 原始配置字典，None 时使用空字典。
+
+    Returns:
+        结构化的功能开关字典，包含 schema_version 字段。
+    """
     config = dict(config or {})
     return {
         "schema_version": CONFIG_SCHEMA_VERSION,
@@ -73,6 +114,7 @@ def alpha_switches(config: dict[str, Any] | None = None) -> dict[str, Any]:
                 config, "sylanne_alpha_background_checkpoint_enabled", True
             ),
         },
+        # 安全策略：关系推断和原始对话数据默认禁止对外导出
         "safety": {
             "relational_public_export": "blocked",
             "raw_dialogue_export": "blocked",

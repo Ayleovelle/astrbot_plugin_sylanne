@@ -1,8 +1,13 @@
-"""Void Calculus — Reference Implementation.
+"""Sylanne-Embodiment 计算核心层：虚空微积分（Void Calculus）。
 
-Absence as a first-class computational primitive. Voids are not derived
-from what exists — they are independent objects with their own lifecycle,
-pressure dynamics, and coupling to the Scar Algebra.
+在 7 层计算栈中的位置：L3 VoidScar 层的"虚空"部分。
+职责：将"缺席"（absence）作为一等计算原语。虚空不是从已有事物推导出来的——
+它们是独立的对象，拥有自己的生命周期、压力动力学，以及与伤痕代数的耦合关系。
+
+核心概念：
+  - Void（虚空）：一个"不在场"的对象，由边界向量集合定义
+  - VoidGhost（虚空残影）：死亡虚空的残留物，永久存在，影响未来的检测灵敏度
+  - VoidSpace（虚空空间）：管理活跃虚空、残影，以及收缩/加深/创生/合并/分裂操作
 """
 
 from __future__ import annotations
@@ -14,7 +19,17 @@ from typing import Any, Callable
 
 @dataclass(slots=True)
 class Void:
-    """A first-class absence object."""
+    """一等缺席对象——虚空。
+
+    虚空由其"边界"（boundary）定义：一组 HDC 向量，代表"被回避的话题"。
+    虚空有自己的生命周期：
+      - 创生：检测到话题突然偏转时诞生
+      - 成长：边界被触碰时收缩，被回避时加深
+      - 压力积累：随年龄增长，未被触碰的虚空压力持续上升
+      - 死亡：边界完全被收缩后死亡，留下 VoidGhost 残影
+
+    与伤痕代数的耦合：当压力超过阈值时，通过 Γ 耦合触发伤痕创伤事件。
+    """
 
     boundary: list[bytes]
     depth: float = 0.0
@@ -37,13 +52,18 @@ class Void:
             return 1.0
         return len(self.boundary) / (len(self.boundary) + self._estimated_boundary_size)
 
-    def tick(self):
-        """Age the void and accumulate pressure."""
+    def tick(self, pressure_cap: float = 100.0):
+        """虚空老化：每 tick 增加年龄并按公式积累压力。
+
+        压力公式：pressure += depth * log(age + 1) * (1 - beta)
+        其中 beta = 边界完整度。边界越不完整（被触碰越多），压力积累越快。
+        这模拟了"越是回避的话题，内心压力越大"的心理动力学。
+        """
         self.age += 1
         self.beta = self.boundary_completeness
         if self.depth > 0 and self.age > 0:
             self.pressure += self.depth * math.log(self.age + 1) * (1.0 - self.beta)
-            self.pressure = min(self.pressure, 100.0)
+            self.pressure = min(self.pressure, pressure_cap)
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -59,7 +79,11 @@ class Void:
 
 @dataclass(slots=True)
 class VoidGhost:
-    """Residue of a dead void — permanent, no pressure, affects future detection."""
+    """虚空残影——死亡虚空的永久残留物。
+
+    不再产生压力，但会影响未来虚空的检测灵敏度（ghost_bonus）。
+    模拟"曾经的创伤虽已愈合，但留下了更敏感的检测能力"。
+    """
 
     depth: float
     age_at_death: int
@@ -73,7 +97,23 @@ class VoidGhost:
 
 
 class VoidSpace:
-    """The Void Calculus engine: manages active voids, ghosts, and operations."""
+    """虚空微积分引擎：管理活跃虚空、残影，以及所有虚空操作。
+
+    核心操作（每 tick 按顺序执行）：
+      1. tick: 所有虚空老化，压力积累
+      2. contract: 事件向量触碰虚空边界 → 移除相似的边界点
+      3. deepen: 检测到回避行为（话题突变 + 高惊讶）→ 加深附近虚空
+      4. genesis: 检测到新虚空形成条件 → 创建新虚空
+      5. reap: 清除边界为空的死亡虚空，留下残影
+      6. merge: 合并边界重叠的虚空
+      7. split: 分裂边界呈双峰分布的虚空
+
+    与其他组件的关系：
+      - 接收 L1 HDCEncoder 的输出作为事件向量
+      - 接收 L2 PredictiveCodingGate 的惊讶度
+      - 通过 Γ 耦合向 ScarredState 发送创伤事件
+      - 通过 Φ 耦合接收 ScarredState 的麻木信息
+    """
 
     __slots__ = (
         "voids",
@@ -118,12 +158,17 @@ class VoidSpace:
     def process(
         self, event_vec: bytes, surprise: float, prev_similarity: float
     ) -> dict[str, Any]:
-        """Main entry: process one event through the void space.
+        """主入口：处理一个事件通过虚空空间。
+
+        按顺序执行：老化 → 收缩 → 加深 → 创生 → 收割 → 合并 → 分裂。
 
         Args:
-            event_vec: HDC-encoded event vector
-            surprise: surprise value from predictive coding gate
-            prev_similarity: similarity between current and previous event
+            event_vec: HDC 编码的事件向量
+            surprise: 来自预测编码门控的惊讶度
+            prev_similarity: 当前事件与上一事件的相似度（用于检测话题偏转）
+
+        Returns:
+            包含各操作结果和耦合事件的诊断字典
         """
         self._tick += 1
         result: dict[str, Any] = {
@@ -137,7 +182,7 @@ class VoidSpace:
 
         # Age all voids (pressure accumulates)
         for v in self.voids:
-            v.tick()
+            v.tick(self._pressure_cap)
 
         # Cap pressure per personality-derived limit
         for v in self.voids:
@@ -185,7 +230,11 @@ class VoidSpace:
         return result
 
     def _contract_all(self, event_vec: bytes) -> int:
-        """Remove boundary points similar to the event."""
+        """收缩操作：移除与事件向量相似的边界点。
+
+        当用户主动谈及某个"被回避的话题"时，该话题对应的虚空边界被侵蚀。
+        边界被移除后，压力按比例衰减（话题被正面面对 → 压力释放）。
+        """
         contracted = 0
         for v in self.voids:
             before = len(v.boundary)
@@ -201,7 +250,11 @@ class VoidSpace:
         return contracted
 
     def _deepen_nearby(self, event_vec: bytes) -> int:
-        """Deepen voids whose boundary is near the avoided topic."""
+        """加深操作：当检测到回避行为时，加深附近虚空。
+
+        "附近"定义为：虚空的某个边界点与事件向量的相似度超过 split_threshold。
+        这模拟了"越是绕着话题走，虚空越深"的动力学。
+        """
         deepened = 0
         for v in self.voids:
             for b in v.boundary:
@@ -214,7 +267,12 @@ class VoidSpace:
     def _should_create_void(
         self, event_vec: bytes, surprise: float, prev_sim: float
     ) -> bool:
-        """Void genesis: sudden deflection from a topic."""
+        """虚空创生条件判断：检测话题的突然偏转。
+
+        条件：高惊讶 + 与前一事件低相似度 = 话题突然转向（可能在回避什么）。
+        残影加成：附近有深度 > 0.5 的残影时降低创生阈值（旧伤附近更敏感）。
+        抗性：已有虚空越多，创生阈值越高（防止虚空爆炸）。
+        """
         if self._creation_cooldown > 0:
             self._creation_cooldown -= 1
             return False
@@ -233,7 +291,7 @@ class VoidSpace:
         return surprise > effective_threshold
 
     def _create_void(self, deflected_from: bytes):
-        """Birth a new void with the deflected-from vector as initial boundary."""
+        """创建新虚空：以"被偏转离开的话题"向量作为初始边界。"""
         v = Void(
             boundary=[deflected_from],
             depth=0.0,
@@ -245,11 +303,11 @@ class VoidSpace:
         self._creation_cooldown = self._cooldown_duration
 
     def set_cooldown(self, openness: float) -> None:
-        """Set creation cooldown duration from personality openness."""
+        """根据人格开放性设置创生冷却时间。开放性越高，冷却越长（不急于形成新虚空）。"""
         self._cooldown_duration = int(2 + openness * 3)
 
     def _reap_dead(self) -> int:
-        """Kill voids with empty boundaries, leave ghosts."""
+        """收割死亡虚空：边界为空的虚空死亡，深度 > 0 的留下残影。"""
         dead = [v for v in self.voids if not v.boundary]
         for v in dead:
             if v.depth > 0:
@@ -265,7 +323,7 @@ class VoidSpace:
         return len(dead)
 
     def _merge_pass(self):
-        """Merge voids with overlapping boundaries."""
+        """合并操作：将边界重叠的虚空合并为一个（它们本质上是同一个"缺席"）。"""
         if len(self.voids) < 2:
             return
         merged_indices: set[int] = set()
@@ -303,7 +361,7 @@ class VoidSpace:
         )
 
     def _split_pass(self):
-        """Split voids with bimodal boundaries."""
+        """分裂操作：将边界呈双峰分布的虚空分裂为两个独立虚空。"""
         new_voids: list[Void] = []
         for v in self.voids:
             if len(v.boundary) < 4:
@@ -334,7 +392,10 @@ class VoidSpace:
         self.voids = new_voids
 
     def _try_split(self, v: Void) -> tuple[list[bytes] | None, list[bytes] | None]:
-        """Simple 2-means split attempt on boundary vectors."""
+        """简单 2-means 分裂尝试：以第一个边界点为 pivot 将边界分为近/远两组。
+
+        只有当两组之间的平均相似度低于 split_threshold 时才执行分裂。
+        """
         if len(v.boundary) < 4:
             return None, None
         pivot = v.boundary[0]
@@ -353,7 +414,7 @@ class VoidSpace:
         return sum(v.pressure for v in self.voids)
 
     def coupling_output(self) -> list[dict[str, float]]:
-        """Voids exceeding pressure threshold — ready to wound the scar state."""
+        """返回超过压力阈值的虚空列表——它们准备好通过 Γ 耦合创伤伤痕状态。"""
         return [
             {"pressure": v.pressure, "depth": v.depth, "dim_hint": len(v.boundary) % 8}
             for v in self.voids

@@ -1,8 +1,13 @@
-"""Scar Algebra — Reference Implementation.
+"""Sylanne-Embodiment 计算核心层：伤痕代数（Scar Algebra）。
 
-A self-modifying operator algebra where past operations change
-the semantics of future operations. Scars are irreversible marks
-that modulate how the system processes future inputs.
+在 7 层计算栈中的位置：L3 VoidScar 层的"伤痕"部分。
+职责：实现一种自修改算子代数——过去的操作会不可逆地改变未来操作的语义。
+伤痕是不可逆的标记，它们调制系统处理未来输入的方式。
+
+核心概念：
+  - Scar（伤痕）：附着在某个维度上的不可逆标记，有 RAW→CLOSING→SCARRED→FADED 四阶段愈合
+  - ScarredState（伤痕状态）：基向量 + 伤痕序列，通过 ⊳ 算子实现状态转移
+  - modifier（调制因子）：伤痕对维度的累积放大/麻木效应
 """
 
 from __future__ import annotations
@@ -14,12 +19,19 @@ from typing import Any
 
 
 class HealingStage(IntEnum):
+    """伤痕愈合阶段枚举。
+
+    RAW(0) → CLOSING(1) → SCARRED(2) → FADED(3)
+    每个阶段有不同的 alpha 调制因子和持续时间。
+    """
+
     RAW = 0
     CLOSING = 1
     SCARRED = 2
     FADED = 3
 
 
+# 各阶段的 alpha 调制因子：RAW 阶段放大最强（2.0），FADED 阶段衰减（0.7）
 _STAGE_ALPHA = {
     HealingStage.RAW: 2.0,
     HealingStage.CLOSING: 1.5,
@@ -27,6 +39,7 @@ _STAGE_ALPHA = {
     HealingStage.FADED: 0.7,
 }
 
+# 各阶段的默认持续时间（tick 数），FADED 阶段无限期
 _STAGE_DURATION = {
     HealingStage.RAW: 10,
     HealingStage.CLOSING: 40,
@@ -36,6 +49,13 @@ _STAGE_DURATION = {
 
 @dataclass(slots=True)
 class Scar:
+    """单个伤痕对象。
+
+    附着在特定维度上，有四阶段愈合过程。
+    alpha 属性决定该伤痕对所在维度的调制强度：
+      RAW=2.0（新伤放大）, CLOSING=1.5, SCARRED=1.0（中性）, FADED=0.7（衰减）
+    """
+
     dimension: int
     timestamp: float
     stage: HealingStage = HealingStage.RAW
@@ -46,7 +66,7 @@ class Scar:
         return _STAGE_ALPHA[self.stage]
 
     def heal_tick(self) -> bool:
-        """Advance healing by one tick. Returns True if stage changed."""
+        """推进愈合一个 tick。如果阶段发生变化返回 True。"""
         if self.stage == HealingStage.FADED:
             return False
         self.ticks_in_stage += 1
@@ -76,7 +96,19 @@ class Scar:
 
 
 class ScarredState:
-    """The core Scar Algebra state: base vector + irreversible scar sequence."""
+    """伤痕代数核心状态：基向量 + 不可逆伤痕序列。
+
+    状态转移通过 ⊳ 算子（step 方法）实现：
+      1. 伤痕调制输入（modulate）：每个维度的输入乘以该维度的累积 modifier
+      2. 基向量演化（_evolve_base）：2 层 MLP 将 [当前状态; 调制后输入] 映射为新状态
+      3. 伤痕形成（conditional）：调制后输入超过阈值的维度产生新伤痕
+      4. 愈合（heal）：已有伤痕按阶段推进
+
+    与其他组件的关系：
+      - 被 VoidScarEngine 调用，接收 HDC 压缩后的 8 维输入
+      - 通过 Φ 耦合影响 VoidSpace 的检测灵敏度
+      - observe() 输出 8 维情感状态给下游层
+    """
 
     __slots__ = (
         "base",
@@ -100,6 +132,9 @@ class ScarredState:
         "_recent_scar_ticks",
         # Time-aware healing
         "_last_step_time",
+        # 每维度 modifier 缓存（避免 observe/modulate 重复遍历伤痕列表）
+        "_modifier_cache",
+        "_modifier_cache_valid",
     )
 
     def __init__(self, n_dims: int = 8, wound_threshold: float = 0.6):
@@ -126,27 +161,35 @@ class ScarredState:
         self._recent_scar_ticks: list[int] = []
         # Time-aware healing
         self._last_step_time: float = 0.0
+        # 每维度 modifier 缓存：避免 observe() 和 modulate() 每次都遍历全部伤痕
+        # 任何伤痕变动（新增/愈合/移除）都会使缓存失效
+        self._modifier_cache: dict[int, float] = {}
+        self._modifier_cache_valid: bool = False
 
     def set_healing_rates(
         self, t_raw: int, t_closing: int, t_scarred: int, neuroticism: float = 0.5
     ) -> None:
-        """Set configurable healing durations for each stage.
+        """设置各愈合阶段的持续时间（由人格参数驱动）。
+
+        高神经质 → 愈合更慢（各阶段持续时间更长）。
 
         Args:
-            t_raw: Ticks to stay in RAW stage before advancing to CLOSING.
-            t_closing: Ticks to stay in CLOSING stage before advancing to SCARRED.
-            t_scarred: Ticks to stay in SCARRED stage before advancing to FADED.
-            neuroticism: Personality neuroticism value for modifier cap.
+            t_raw: RAW 阶段持续 tick 数
+            t_closing: CLOSING 阶段持续 tick 数
+            t_scarred: SCARRED 阶段持续 tick 数
+            neuroticism: 人格神经质值，影响 modifier 上限
         """
         self._t_raw = max(1, int(t_raw))
         self._t_closing = max(1, int(t_closing))
         self._t_scarred = max(1, int(t_scarred))
         self._neuroticism = float(neuroticism)
+        # 神经质值影响 modifier 饱和上限，需要使缓存失效
+        self._invalidate_modifier_cache()
 
     def healing_duration(self, stage: "HealingStage", dim: int | None = None) -> int:
-        """Get healing duration for a stage, optionally adjusted per-dimension.
+        """获取某阶段的愈合持续时间，可选按维度调整。
 
-        If a dimension has scar_count > 3, its healing is 1.5x slower.
+        如果某维度的伤痕数 > 3，愈合速度降低 50%（反复受伤的地方更难愈合）。
         """
         base_duration = {
             HealingStage.RAW: self._t_raw,
@@ -162,7 +205,7 @@ class ScarredState:
         return sum(1 for s in self.scars if s.dimension == dim)
 
     def _init_mlp_weights(self, seed: int = 42) -> None:
-        """Initialize MLP weights from a deterministic seed with spectral normalization."""
+        """从确定性种子初始化 MLP 权重，并应用谱归一化。"""
         import random
 
         rng = random.Random(seed)
@@ -184,10 +227,10 @@ class ScarredState:
     def _spectral_normalize(
         self, W: list[list[float]], max_sigma: float = 0.7
     ) -> list[list[float]]:
-        """Spectral normalization via power iteration.
+        """谱归一化：通过幂迭代估计最大奇异值，超过 max_sigma 时缩放矩阵。
 
-        Estimates the largest singular value of W and scales W down
-        if sigma > max_sigma. This ensures ||W||_2 <= max_sigma.
+        确保 ||W||_2 <= max_sigma，这是状态演化收敛的关键保证。
+        10 次幂迭代足以收敛到合理精度。
         """
         rows = len(W)
         cols = len(W[0]) if rows > 0 else 0
@@ -224,12 +267,13 @@ class ScarredState:
         return W
 
     def _evolve_base(self, x: list[float], e_tilde: list[float]) -> list[float]:
-        """Evolve base state using 2-layer MLP with spectral normalization.
+        """通过 2 层 MLP 演化基向量（带谱归一化保证收敛）。
 
         Layer 1: hidden = tanh(W1 * [x; e_tilde])
         Layer 2: output = tanh(W2 * hidden)
 
-        Convergence guarantee: ||W1||_2 * ||W2||_2 < 0.7 * 0.7 = 0.49 < 1
+        收敛保证：||W1||_2 * ||W2||_2 < 0.7 * 0.7 = 0.49 < 1
+        这确保了状态演化是收缩映射，不会发散。
         """
         if self._mlp_w1 is None or self._mlp_w2 is None:
             self._init_mlp_weights()
@@ -253,23 +297,57 @@ class ScarredState:
 
         return output
 
-    def modifier(self, dim: int) -> float:
-        """Compute the cumulative scar modifier for a dimension.
+    def _invalidate_modifier_cache(self) -> None:
+        """使 modifier 缓存失效（伤痕新增/愈合/移除时调用）。"""
+        self._modifier_cache_valid = False
 
-        Uses logarithmic compression with personality-driven cap to prevent
-        unbounded exponential growth from product of scar alphas.
+    def _ensure_modifier_cache(self) -> None:
+        """按需重建全维度 modifier 缓存。
+
+        一次遍历伤痕列表，计算所有维度的 product，再统一做饱和压缩。
+        复杂度从 O(n_dims * num_scars) 降为 O(num_scars + n_dims)。
         """
-        product = 1.0
+        if self._modifier_cache_valid:
+            return
+        # 一次遍历收集每维度的 alpha 乘积
+        products = [1.0] * self.n_dims
         for scar in self.scars:
-            if scar.dimension == dim:
-                product *= scar.alpha
-        if product <= 1.0:
-            return product
+            products[scar.dimension] *= scar.alpha
+        # 对每个维度做饱和压缩
         max_mod = 2.0 + self._neuroticism * 3.0
-        return 1.0 + (max_mod - 1.0) * (1.0 - 1.0 / product)
+        cache = {}
+        for d in range(self.n_dims):
+            p = products[d]
+            if p <= 1.0:
+                cache[d] = max(0.05, p)
+            else:
+                cache[d] = 1.0 + (max_mod - 1.0) * (1.0 - 1.0 / p)
+        self._modifier_cache = cache
+        self._modifier_cache_valid = True
+
+    def modifier(self, dim: int) -> float:
+        """计算某维度的累积伤痕调制因子（带缓存）。
+
+        使用对数压缩 + 人格驱动上限，防止多个伤痕的 alpha 乘积无限增长。
+        公式：当 product > 1 时，modifier = 1 + (max_mod - 1) * (1 - 1/product)
+        这是一个渐近线为 max_mod 的饱和函数。
+
+        缓存策略：首次调用时一次性计算全部维度并缓存，后续直接查表。
+        伤痕变动（wound/heal/remove）时缓存自动失效。
+
+        Returns:
+            调制因子，范围 [0.05, max_mod]。< 0.5 表示"麻木"，> 1.0 表示"敏感化"
+        """
+        self._ensure_modifier_cache()
+        return self._modifier_cache.get(dim, 1.0)
 
     def modulate(self, event: list[float]) -> list[float]:
-        """Apply scar modulation to an input event (Step 1 of ⊳)."""
+        """对输入事件应用伤痕调制（⊳ 算子的第 1 步）。
+
+        每个维度的输入值乘以该维度的 modifier：
+          - modifier > 1：该维度被"敏感化"，微小输入也会被放大
+          - modifier < 1：该维度被"麻木"，需要更大输入才能产生效果
+        """
         result = []
         for d in range(self.n_dims):
             e_d = event[d] if d < len(event) else 0.0
@@ -279,9 +357,21 @@ class ScarredState:
     def step(
         self, event: list[float], timestamp: float = 0.0, *, heal: bool = True
     ) -> dict[str, Any]:
-        """Apply the ⊳ operator: full state transition.
+        """应用 ⊳ 算子：完整状态转移。
 
-        Returns a diagnostic dict describing what happened.
+        四步流程：
+          1. 伤痕调制输入
+          2. MLP 演化基向量
+          3. 条件性伤痕形成（受会话上限和断路器保护）
+          4. 已有伤痕愈合推进
+
+        Args:
+            event: 8 维输入事件向量
+            timestamp: 事件时间戳（用于时间感知愈合）
+            heal: 是否执行愈合步骤（Γ 耦合创伤事件设为 False）
+
+        Returns:
+            诊断字典，包含调制后输入、新伤痕、愈合维度等信息
         """
         if heal:
             self._tick += 1
@@ -317,6 +407,8 @@ class ScarredState:
 
         # Circuit breaker trigger: check for rapid scar formation
         if new_scars:
+            # 新伤痕产生，使 modifier 缓存失效
+            self._invalidate_modifier_cache()
             self._recent_scar_ticks.append(self._tick)
             self._recent_scar_ticks = [
                 t for t in self._recent_scar_ticks if self._tick - t <= 10
@@ -357,6 +449,10 @@ class ScarredState:
                     s for s in self.scars if s.stage != HealingStage.FADED
                 ] + faded[-50:]
 
+            # 愈合/修剪导致伤痕阶段变化或数量变化，使缓存失效
+            if healed or len(faded) > 50:
+                self._invalidate_modifier_cache()
+
         return {
             "modulated": modulated,
             "new_scars": new_scars,
@@ -366,7 +462,7 @@ class ScarredState:
         }
 
     def _heal_one_tick(self, existing_count: int, healed: list[int]) -> None:
-        """Perform one healing tick on pre-existing scars (for bonus time-aware healing)."""
+        """执行一次愈合 tick（用于时间感知的奖励愈合）。"""
         for scar in self.scars[:existing_count]:
             if scar.stage == HealingStage.FADED:
                 continue
@@ -376,36 +472,44 @@ class ScarredState:
                 scar.stage = HealingStage(scar.stage + 1)
                 scar.ticks_in_stage = 0
                 healed.append(scar.dimension)
+                # 阶段转换改变 alpha，使缓存失效
+                self._invalidate_modifier_cache()
 
     def reset_session(self) -> None:
-        """Reset session scar counter (call at session boundaries)."""
+        """重置会话伤痕计数器（在会话边界调用）。"""
         self._session_scar_count = 0
 
     def set_session_cap(self, sovereignty: float) -> None:
-        """Set session scar cap based on sovereignty level.
+        """根据主权性设置会话伤痕上限。
 
-        High sovereignty = lower cap (more protected): range 2-8.
+        高主权性 = 更低的上限（更受保护）：范围 2-8。
+        这是"免疫系统"机制——防止单次会话中被过度伤害。
         """
         self._session_scar_cap = max(2, int(3 + (1 - sovereignty) * 5))
 
     def observe(self) -> dict[str, float]:
-        """Observable output: base state + per-dimension sensitivity."""
+        """可观测输出：基向量状态 + 每维度灵敏度（供下游层使用）。
+
+        优化：预先确保 modifier 缓存有效，避免 8 次重复遍历伤痕列表。
+        """
+        # 一次性构建缓存，后续 modifier(d) 直接查表
+        self._ensure_modifier_cache()
         obs = {}
         for d in range(self.n_dims):
             obs[f"dim_{d}"] = self.base[d]
-            obs[f"sensitivity_{d}"] = self.modifier(d)
+            obs[f"sensitivity_{d}"] = self._modifier_cache[d]
         obs["total_scars"] = float(len(self.scars))
         obs["numbed_dimensions"] = float(
-            sum(1 for d in range(self.n_dims) if self.modifier(d) < 0.5)
+            sum(1 for d in range(self.n_dims) if self._modifier_cache[d] < 0.5)
         )
         return obs
 
     def is_numbed(self, dim: int) -> bool:
-        """Whether a dimension has been scarred into numbness."""
+        """判断某维度是否已被伤痕"麻木"（modifier < 0.5）。"""
         return self.modifier(dim) < 0.5
 
     def scar_density(self, dim: int) -> float:
-        """Weighted scar density on a dimension."""
+        """计算某维度的加权伤痕密度（RAW 权重最高，FADED 最低）。"""
         weights = {
             HealingStage.RAW: 1.0,
             HealingStage.CLOSING: 0.8,

@@ -2,11 +2,10 @@
 
 > <span style="font-size: 1.08em;"><strong>Sylanne-Embodiment：不可逆的关系计算引擎。</strong>不再模拟情绪标签，而是让对话在躯体上留下伤痕、在沉默中积累压力、在关系里长出不可撤销的形状。</span>
 
-![版本 Embodiment-1.2.5](https://img.shields.io/badge/version-Embodiment--1.2.5-red.svg)
+![版本 1.3.0](https://img.shields.io/badge/version-1.3.0-red.svg)
 ![AstrBot >=4.9.2,<5.0.0](https://img.shields.io/badge/AstrBot-%3E%3D4.9.2%2C%3C5.0.0-green)
 ![Python 3.10+](https://img.shields.io/badge/Python-3.10%2B-yellow)
 ![许可证 AGPL-3.0-or-later](https://img.shields.io/badge/license-AGPL--3.0--or--later-red)
-![💩 发酵指数](https://raw.githubusercontent.com/Ayleovelle/astrbot_plugin_sylanne/main/docs/reports/fuck-u-code-fermentation.svg)
 
 ## 介绍
 
@@ -383,16 +382,16 @@ $$\dim H^1(K, \mathcal{F}) > 0 \iff \text{存在不可调和的跨关系矛盾}$
 
 | 文档 | 内容 | 格式 |
 | --- | --- | --- |
-| [**Scar Algebra, Void Calculus & Relational Sheaf Theory（中文版）**](docs/scar_void_arxiv_paper_zh_v3.pdf) | 三套理论 + 人格闭环，11 组实验 | 中文 |
-| [**Scar Algebra, Void Calculus & Relational Sheaf Theory（English）**](docs/scar_void_arxiv_paper_v2.pdf) | Full paper with axioms, theorems, proofs, and 11 experiments | English |
+| [**Scar Algebra, Void Calculus & Relational Sheaf Theory（中文版）**](https://github.com/Ayleovelle/astrbot_plugin_sylanne/releases/download/v1.2.0/scar_void_arxiv_paper_zh_v3.pdf) | 三套理论 + 人格闭环，11 组实验 | 中文 |
+| [**Scar Algebra, Void Calculus & Relational Sheaf Theory（English）**](https://github.com/Ayleovelle/astrbot_plugin_sylanne/releases/download/v1.2.0/scar_void_arxiv_paper_v2.pdf) | Full paper with axioms, theorems, proofs, and 11 experiments | English |
 
-### 实验数据
+<details><summary>实验数据（点击展开）</summary>
 
 **Experiment 1：表达力分离（Scar Algebra vs 固定运算符系统）**
 
 Scar Algebra 在 $k$ 个伤痕后产生 $2^k$ 种可区分状态，固定运算符系统需要 $\Omega(k)$ 维状态空间才能模拟。
 
-![表达力分离](docs/experiments/fig1_expressiveness.png)
+![表达力分离](https://github.com/Ayleovelle/astrbot_plugin_sylanne/releases/download/v1.2.0/fig1_expressiveness.png)
 
 > 受伤系统与基线的 L2 状态发散度随伤害次数单调递增。7 次伤害后平均发散 0.049，证明伤痕产生不可逆的状态分离。
 
@@ -400,7 +399,7 @@ Scar Algebra 在 $k$ 个伤痕后产生 $2^k$ 种可区分状态，固定运算�
 
 空洞检测在不同话题转换速度下的准确率。突然转换（高 surprise）检测率 > 95%。
 
-![Void 检测](docs/experiments/fig2_void_detection.png)
+![Void 检测](https://github.com/Ayleovelle/astrbot_plugin_sylanne/releases/download/v1.2.0/fig2_void_detection.png)
 
 > 高感知锐度（perception_acuity=0.8）产生更多 void（9-10 个），低感知锐度（0.2）产生较少（5-6 个）。检测灵敏度由人格驱动。
 
@@ -408,7 +407,7 @@ Scar Algebra 在 $k$ 个伤痕后产生 $2^k$ 种可区分状态，固定运算�
 
 Void Calculus 能区分"从未讨论"/"已解决"/"主动回避"三种状态——现有框架最多区分两种。
 
-![三态区分](docs/experiments/fig3_three_states.png)
+![三态区分](https://github.com/Ayleovelle/astrbot_plugin_sylanne/releases/download/v1.2.0/fig3_three_states.png)
 
 > 三态通过 void 深度清晰分离：从未讨论（depth=0.20）、已解决（depth=0.30）、主动回避（depth=6.90，34 倍差异）。
 
@@ -416,7 +415,7 @@ Void Calculus 能区分"从未讨论"/"已解决"/"主动回避"三种状态—�
 
 耦合系统产生永久 hysteresis：相同输入序列，不同历史路径产生不同最终状态。
 
-![Hysteresis](docs/experiments/fig4_hysteresis.png)
+![Hysteresis](https://github.com/Ayleovelle/astrbot_plugin_sylanne/releases/download/v1.2.0/fig4_hysteresis.png)
 
 > 不同伤害历史的两个系统接收相同后续输入后持续发散（final divergence=0.104）。47 vs 51 scars 形成，证明路径依赖不可消除。
 
@@ -424,7 +423,7 @@ Void Calculus 能区分"从未讨论"/"已解决"/"主动回避"三种状态—�
 
 去掉 Void Calculus / Scar Algebra / 耦合 / HGT 各层后的性能退化。
 
-![消融实验](docs/experiments/fig5_ablation.png)
+![消融实验](https://github.com/Ayleovelle/astrbot_plugin_sylanne/releases/download/v1.2.0/fig5_ablation.png)
 
 > MoE-HGT 移除影响最大（-23%），是决策生成层。Scar/Void/Coupling 是调节层——移除后系统失去约束但不失去生成能力。各组件有独特的贡献签名。
 
@@ -432,7 +431,7 @@ Void Calculus 能区分"从未讨论"/"已解决"/"主动回避"三种状态—�
 
 1000 轮对话后系统状态的有界性验证。基态有界、伤痕数线性增长、空洞数收敛。
 
-![稳定性](docs/experiments/fig6_stability.png)
+![稳定性](https://github.com/Ayleovelle/astrbot_plugin_sylanne/releases/download/v1.2.0/fig6_stability.png)
 
 > 1000 tick 混合压力测试：基态 norm 有界（0.25），10 scars 形成，最多 11 个同时活跃 void，无 NaN/Inf。对数压缩 + 安全机制保证长期稳定。
 
@@ -440,7 +439,7 @@ Void Calculus 能区分"从未讨论"/"已解决"/"主动回避"三种状态—�
 
 多段关系同时维护时，矛盾积累到什么程度系统会被迫"解离"？
 
-![上同调解离](docs/experiments/fig7_cohomological_dissociation.png)
+![上同调解离](https://github.com/Ayleovelle/astrbot_plugin_sylanne/releases/download/v1.2.0/fig7_cohomological_dissociation.png)
 
 > 对亲密关系输入温暖、对对抗关系输入敌意——两种自我呈现的矛盾随时间积累。当不一致性超过阈值，解离压力飙升。这就是"你迟早要面对自己有很多面"的数学表达。
 
@@ -448,7 +447,7 @@ Void Calculus 能区分"从未讨论"/"已解决"/"主动回避"三种状态—�
 
 一段关系里的伤痕事件，以什么速率影响其他关系？
 
-![谱传播](docs/experiments/fig8_spectral_propagation.png)
+![谱传播](https://github.com/Ayleovelle/astrbot_plugin_sylanne/releases/download/v1.2.0/fig8_spectral_propagation.png)
 
 > 伤痕从源关系向外传播，强度由关系类型的相似度决定——同为亲密关系的受影响最大（耦合 0.98），对抗关系受影响最小（耦合 0.45）。虚线是理论上界，实测严格不超过预测。不是"所有关系都被波及"，而是"相似的关系先被波及"。
 
@@ -456,7 +455,7 @@ Void Calculus 能区分"从未讨论"/"已解决"/"主动回避"三种状态—�
 
 三人同时在场产生的状态，能不能从两两关系中重构？
 
-![三方不可约](docs/experiments/fig9_triadic_irreducibility.png)
+![三方不可约](https://github.com/Ayleovelle/astrbot_plugin_sylanne/releases/download/v1.2.0/fig9_triadic_irreducibility.png)
 
 > 所有 8 个状态维度都存在显著残差——三方共在的效果不能被分解为"A+B 的叠加"。群聊里那种微妙的第三者张力，是拓扑上不可约的涌现。
 
@@ -464,9 +463,11 @@ Void Calculus 能区分"从未讨论"/"已解决"/"主动回避"三种状态—�
 
 人格不是固定的——反复受伤会变敏感，持续被接纳会变外向，跨关系矛盾会让条理性崩塌。
 
-![人格反馈](docs/experiments/fig10_personality_feedback.png)
+![人格反馈](https://github.com/Ayleovelle/astrbot_plugin_sylanne/releases/download/v1.2.0/fig10_personality_feedback.png)
 
 > Dual-EMA 人格漂移实测。持续接纳 → 表达驱力 +0.226；反复受伤 → 表达驱力 +0.091、感知锐度 -0.101；跨关系矛盾 → 关系引力 -0.050。漂移有阻尼，单次事件不改变骨架。
+
+</details>
 
 ---
 
@@ -478,6 +479,33 @@ Embodiment 是完全重写，但对 3.x 用户做了兼容：
 - 旧 README 和文档保留在 [3.x release](https://github.com/Ayleovelle/astrbot_plugin_sylanne/releases/tag/v3.0.0)
 
 ---
+
+## Embodiment-1.3.0 更新日志
+
+> **发布于 2026-05-28**
+
+### 独立观察舱 WebUI
+
+Sylanne 拥有了独立的实验体观察界面，不再依赖 AstrBot Pages 框架。独立 HTTP 服务器（端口 2718）+ 单文件 SPA，包含：登录页实验体观察主题（canvas 粒子引力系统 + 伤痕闪烁）、Void 吞噬/收缩过渡动画、脊柱摇杆导航、会话选择器、熔毁弹窗、配置页折叠联动、中英文切换。
+
+### 性能优化
+
+- HDC 编码 numpy 双路径（长文本自动启用向量化）
+- `int.bit_count()` 替换全部 popcount（提速 2.4×）
+- Scar modifier 缓存（命中提速 6.8×）
+- Per-relationship personality 缓存
+- 诊断 payload 条件跳过（无 WebUI 客户端时自动关闭）
+
+### 记忆系统增强
+
+- 时间感知回忆标签（刚才/N分钟前/N小时前/昨天/N天前）
+- LLM 整合触发器（手动或定时 12h）
+
+### 迁移说明
+
+旧 `pages/dashboard/` 已移除，请访问 `http://<host>:2718`。首次访问需输入 WebUI Token。
+
+<details><summary>历史版本更新日志（点击展开）</summary>
 
 ## Embodiment-1.2.5 更新日志
 
@@ -628,6 +656,8 @@ Embodiment-1.2.0 是基于 Embodiment 架构的一次全量优化。1.0 搭了�
 
 > [!NOTE]
 > 本版本经过了大量打磨，修复了 50+ 个 bug，引入了完整的人格双向闭环和 7 项安全机制。但由于改动范围很大（涉及几乎所有计算模块），**可能还有一些难以预料的 bug 没有被发现**。如果你遇到异常行为，欢迎在 [Issues](https://github.com/Ayleovelle/astrbot_plugin_sylanne/issues) 中反馈，我会尽快修复。感谢理解 🙏
+
+</details>
 
 ---
 

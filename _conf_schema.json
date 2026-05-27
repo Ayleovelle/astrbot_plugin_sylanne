@@ -5,13 +5,7 @@
     "default": "Sylanne",
     "hint": "填写当前会话中使用的人格/角色名字。"
   },
-  "sylanne_persona_version": {
-    "description": "人格版本标识",
-    "type": "string",
-    "default": "",
-    "hint": "版本号，仅用于显示。"
-  },
-  "sylanne_webui_enabled": {
+"sylanne_webui_enabled": {
     "description": "启用 WebUI 管理面板",
     "type": "bool",
     "default": false,
@@ -42,10 +36,10 @@
     "hint": "首次启动自动生成。复制此 token 到浏览器访问 WebUI。"
   },
   "sylanne_alpha_root": {
-    "description": "Sylanne alpha body 状态目录",
+    "description": "Sylanne alpha body 状态目录（留空则使用 AstrBot data 目录下的 sylanne_alpha/）",
     "type": "string",
-    "default": ".sylanne_alpha_state",
-    "hint": "每个会话会保存为独立的 .alpha.json；覆盖安装前请备份旧 Sylanne 数据，再通过导入入口迁入。"
+    "default": "",
+    "hint": "每个会话会保存为独立的 .alpha.json；留空自动使用 AstrBot data/sylanne_alpha/ 目录。覆盖安装前请备份旧 Sylanne 数据。"
   },
   "sylanne_alpha_realtime_chat_enabled": {
     "description": "启用 Sylanne 即时聊天调度",
@@ -94,19 +88,6 @@
     "type": "int",
     "default": 3,
     "hint": "每次召回最多返回的相似记忆条数。"
-  },
-  "sylanne_alpha_assessor_llm_enabled": {
-    "description": "启用独立判断 LLM 通道",
-    "type": "bool",
-    "default": false,
-    "hint": "默认关闭；开启后情绪估计使用独立 provider，不占用主聊天模型。"
-  },
-  "sylanne_alpha_assessor_provider_id": {
-    "description": "深度判断 LLM Provider（后台异步）",
-    "type": "string",
-    "default": "",
-    "_special": "select_provider",
-    "hint": "后台深度语义分析，结果喂给长期状态引擎。不阻塞回复，可用强模型。推荐设置：温度 0，top-p 0.1。"
   },
   "sylanne_alpha_fast_assessor_enabled": {
     "description": "启用即时判断 LLM",
@@ -163,5 +144,43 @@
     "type": "bool",
     "default": true,
     "hint": "默认开启。当 AstrBot 自带的群聊上下文感知功能已启用时，自动跳过 Sylanne 的 shadow buffer 注入以避免重复上下文。社交场计算不受影响。"
+  },
+  "sylanne_alpha_hajide_compat_mode": {
+    "description": "哈基德模型兼容（影响 prompt 构建和响应处理）",
+    "type": "bool",
+    "default": false,
+    "hint": "仅在使用 Hajide 前端时开启；会调整 system prompt 格式和响应后处理逻辑。"
+  },
+  "sylanne_alpha_main_assessor_enabled": {
+    "description": "启用主评估器（深度情感分析，后台异步）",
+    "type": "bool",
+    "default": false,
+    "hint": "默认关闭；开启后情绪估计使用独立 provider，不占用主聊天模型。后台深度语义分析结果喂给长期状态引擎。"
+  },
+  "sylanne_alpha_main_assessor_provider_id": {
+    "description": "主评估器 LLM Provider ID（后台异步）",
+    "type": "string",
+    "default": "",
+    "_special": "select_provider",
+    "hint": "后台深度语义分析，不阻塞回复，可用强模型。推荐设置：温度 0，top-p 0.1。"
+  },
+  "sylanne_alpha_locked_persona_prompt": {
+    "description": "锁定的人格 system prompt（覆盖动态生成）",
+    "type": "string",
+    "default": "",
+    "hint": "填写后将覆盖 Sylanne 动态生成的 system prompt；留空则使用人格引擎自动生成。适用于调试或固定人设场景。"
+  },
+  "sylanne_alpha_transcription_enabled": {
+    "description": "启用非文本消息转述（图片→文字描述，自动检测多模态 provider）",
+    "type": "bool",
+    "default": false,
+    "hint": "默认关闭；开启后收到图片/语音等非文本消息时，自动调用多模态 LLM 转述为文字描述供 Sylanne 理解。"
+  },
+  "sylanne_alpha_transcription_provider_id": {
+    "description": "转述 LLM 的 provider ID（留空自动检测多模态 provider）",
+    "type": "string",
+    "default": "",
+    "_special": "select_provider",
+    "hint": "指定用于转述的多模态 LLM provider；留空则自动检测已配置的多模态 provider。"
   }
 }

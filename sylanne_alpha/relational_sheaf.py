@@ -1,14 +1,18 @@
-"""Relational Sheaf Theory — Computational Module.
+"""关系层析（Relational Sheaf Theory）— 计算模块。
 
-Implements cellular sheaves on simplicial complexes to model
-multi-relational dynamics. Extends Scar Algebra from single-dyad
-to N concurrent relationships with:
-  - Cross-relational influence via sheaf Laplacian diffusion
-  - Consistency measurement via sheaf cohomology (H^1)
-  - Personality-derived presentation matrices
-  - Energy-bounded propagation (Axiom S5)
+在单纯复形上实现胞腔层（cellular sheaves），用于建模多关系动力学。
+将 Scar Algebra 从单一二元关系扩展到 N 个并发关系：
+  - 通过层拉普拉斯扩散实现跨关系影响传播
+  - 通过层上同调（H^1）度量关系一致性
+  - 人格驱动的表示矩阵（presentation matrices）
+  - 能量有界传播（公理 S5）
 
-Reference: theory/relational_sheaf/axioms.md
+数学基础：
+- 层（Sheaf）：在拓扑空间上的"局部→全局"数据结构
+- 上同调 H^1：度量"局部一致但全局矛盾"的维度数
+- 拉普拉斯算子：驱动信息在关系网络中的扩散
+
+参考: theory/relational_sheaf/axioms.md
 """
 
 from __future__ import annotations
@@ -17,18 +21,19 @@ import math
 from typing import Any
 
 # ---------------------------------------------------------------------------
-# Relationship type enum (lightweight, no import needed)
+# 关系类型枚举（轻量级，无需额外导入）
 # ---------------------------------------------------------------------------
 
-INTIMATE = 0
-FRIENDLY = 1
-FORMAL = 2
-ADVERSARIAL = 3
+INTIMATE = 0  # 亲密关系
+FRIENDLY = 1  # 友好关系
+FORMAL = 2  # 正式关系
+ADVERSARIAL = 3  # 对抗关系
 
 _REL_TYPE_NAMES = ("intimate", "friendly", "formal", "adversarial")
 
 
 def _rel_type_from_str(s: str) -> int:
+    """将字符串关系类型转为整数枚举。无法识别时默认为 FRIENDLY。"""
     s_lower = s.lower()
     for i, name in enumerate(_REL_TYPE_NAMES):
         if s_lower == name:
@@ -37,7 +42,8 @@ def _rel_type_from_str(s: str) -> int:
 
 
 # ---------------------------------------------------------------------------
-# Linear algebra helpers (pure Python, no numpy)
+# 线性代数辅助函数（纯 Python 实现，无 numpy 依赖）
+# 用于小规模矩阵运算（≤10x10），性能足够（<0.1ms）
 # ---------------------------------------------------------------------------
 
 
@@ -53,7 +59,7 @@ def _mat_identity(n: int) -> list[list[float]]:
 
 
 def _mat_mul(A: list[list[float]], B: list[list[float]]) -> list[list[float]]:
-    """Matrix multiply A (m x k) @ B (k x n) -> (m x n)."""
+    """矩阵乘法 A (m x k) @ B (k x n) -> (m x n)。"""
     m = len(A)
     k = len(A[0]) if m > 0 else 0
     n = len(B[0]) if len(B) > 0 else 0
@@ -79,7 +85,7 @@ def _mat_transpose(A: list[list[float]]) -> list[list[float]]:
 
 
 def _mat_vec(A: list[list[float]], v: list[float]) -> list[float]:
-    """Matrix-vector product A @ v."""
+    """矩阵-向量乘积 A @ v。"""
     return [sum(A[i][j] * v[j] for j in range(len(v))) for i in range(len(A))]
 
 
@@ -117,10 +123,10 @@ def _mat_scale(A: list[list[float]], s: float) -> list[list[float]]:
 
 
 def _eigenvalues_symmetric(M: list[list[float]], max_iter: int = 50) -> list[float]:
-    """Approximate eigenvalues of a small symmetric matrix via Jacobi iteration.
+    """用 Jacobi 迭代法近似计算小型对称矩阵的特征值。
 
-    For matrices up to ~10x10 this is fast enough (< 0.1ms).
-    Returns eigenvalues sorted ascending.
+    适用于 ≤10x10 的矩阵（<0.1ms）。
+    返回升序排列的特征值列表。
     """
     n = len(M)
     if n == 0:
@@ -174,7 +180,7 @@ def _eigenvalues_symmetric(M: list[list[float]], max_iter: int = 50) -> list[flo
 
 
 def _kernel_dim(M: list[list[float]], tol: float = 1e-8) -> int:
-    """Compute dimension of kernel of M via rank estimation (row echelon)."""
+    """通过行阶梯形式估计矩阵核空间的维度（cols - rank）。"""
     if not M or not M[0]:
         return 0
     rows, cols = len(M), len(M[0])
@@ -205,23 +211,28 @@ def _kernel_dim(M: list[list[float]], tol: float = 1e-8) -> int:
 
 
 # ---------------------------------------------------------------------------
-# RelationalComplex — simplicial complex management
+# RelationalComplex — 单纯复形管理
 # ---------------------------------------------------------------------------
 
 
 class RelationalComplex:
-    """Finite abstract simplicial complex for multi-relational topology.
+    """有限抽象单纯复形，用于多关系拓扑建模。
 
-    Vertex 0 is always the agent. Vertices 1..N are interaction partners.
-    All edges and triangles must contain vertex 0 (agent-centric).
+    顶点 0 始终是 agent（自身）。顶点 1..N 是交互对象。
+    所有边和三角形都必须包含顶点 0（以 agent 为中心）。
+
+    拓扑结构：
+    - 顶点：agent + 各交互对象
+    - 边 (0, i)：agent 与对象 i 的二元关系
+    - 三角形 (0, i, j)：agent 同时与 i、j 共处的三元关系
     """
 
     __slots__ = ("_vertices", "_edges", "_triangles")
 
     def __init__(self) -> None:
-        self._vertices: list[int] = [0]  # agent always present
-        self._edges: list[tuple[int, int]] = []  # (0, partner_idx)
-        self._triangles: list[tuple[int, int, int]] = []  # (0, i, j)
+        self._vertices: list[int] = [0]  # agent 始终存在
+        self._edges: list[tuple[int, int]] = []  # (0, partner_idx) 形式的边
+        self._triangles: list[tuple[int, int, int]] = []  # (0, i, j) 形式的三角形
 
     @property
     def n_vertices(self) -> int:
@@ -236,7 +247,7 @@ class RelationalComplex:
         return len(self._triangles)
 
     def add_partner(self, partner_idx: int) -> None:
-        """Add a partner vertex and the edge (0, partner_idx)."""
+        """添加一个交互对象顶点及其与 agent 的边 (0, partner_idx)。"""
         if partner_idx == 0:
             return
         if partner_idx not in self._vertices:
@@ -246,7 +257,7 @@ class RelationalComplex:
             self._edges.append(edge)
 
     def add_triangle(self, i: int, j: int) -> None:
-        """Add a triangle (0, i, j) — requires both edges to exist."""
+        """添加三角形 (0, i, j)——要求两条边都已存在。"""
         if i == 0 or j == 0 or i == j:
             return
         self.add_partner(i)
@@ -256,7 +267,7 @@ class RelationalComplex:
             self._triangles.append(tri)
 
     def remove_partner(self, partner_idx: int) -> None:
-        """Remove a partner and all incident simplices."""
+        """移除一个交互对象及其所有关联的单纯形。"""
         if partner_idx == 0 or partner_idx not in self._vertices:
             return
         self._vertices.remove(partner_idx)
@@ -264,12 +275,12 @@ class RelationalComplex:
         self._triangles = [t for t in self._triangles if partner_idx not in t]
 
     def edge_index(self, partner_idx: int) -> int:
-        """Get the index of edge (0, partner_idx) in the edge list."""
+        """获取边 (0, partner_idx) 在边列表中的索引。不存在返回 -1。"""
         edge = (0, partner_idx)
         return self._edges.index(edge) if edge in self._edges else -1
 
     def partners(self) -> list[int]:
-        """Return list of partner vertex indices."""
+        """返回所有交互对象的顶点索引列表。"""
         return [v for v in self._vertices if v != 0]
 
     def to_dict(self) -> dict[str, Any]:
@@ -289,23 +300,34 @@ class RelationalComplex:
 
 
 # ---------------------------------------------------------------------------
-# ScarSheaf — the main sheaf structure
+# ScarSheaf — 主层结构
 # ---------------------------------------------------------------------------
 
-# Stalk dimensions
-_VERTEX_STALK_DIM = 8  # agent internal state (matches scar n_dims)
-_EDGE_STALK_DIM = 8  # per-relationship scar state reference
-_TRIANGLE_STALK_DIM = 4  # co-presence state (reduced)
+# 茎空间维度
+_VERTEX_STALK_DIM = 8  # agent 内部状态（与 scar n_dims 匹配）
+_EDGE_STALK_DIM = 8  # 每段关系的 scar 状态引用
+_TRIANGLE_STALK_DIM = 4  # 共处状态（降维表示）
 
 
 class ScarSheaf:
-    """Cellular sheaf on a relational complex for multi-relational Scar dynamics.
+    """关系复形上的胞腔层，用于多关系 Scar 动力学。
 
-    Manages:
-      - Stalks: vertex (agent core), edge (per-relationship), triangle (co-presence)
-      - Presentation matrices P_i (restriction maps)
-      - Coboundary operators and sheaf Laplacian
-      - Propagation dynamics and cohomology computation
+    管理：
+      - 茎（Stalks）：顶点茎（agent 核心）、边茎（每段关系）、三角形茎（共处）
+      - 表示矩阵 P_i（限制映射）：决定 agent 内部状态如何投射到各关系中
+      - 上边界算子和层拉普拉斯算子
+      - 传播动力学和上同调计算
+
+    核心概念：
+    - 表示矩阵 P_i 决定"在关系 i 中暴露自我的哪些维度"
+    - H^1 维度 = 不可约的关系矛盾数量
+    - 谱间隙 = 关系网络的连通性度量
+    - 能量系统限制传播的总量（防止无限扩散）
+
+    与其他组件的关系：
+    - 被 body.py 的主循环在每次交互时调用 tick()
+    - observe() 输出供计算栈和社交场域使用
+    - 人格系统通过 derive_params() 影响所有参数
     """
 
     __slots__ = (
@@ -337,36 +359,36 @@ class ScarSheaf:
         max_energy: float = 1.0,
     ) -> None:
         self.complex = RelationalComplex()
-        # Vertex stalk: agent's internal state
+        # 顶点茎：agent 的内部状态向量
         self._vertex_stalk: list[float] = [0.0] * n0
-        # Edge stalks: per-relationship state vectors
+        # 边茎：每段关系的状态向量
         self._edge_stalks: list[list[float]] = []
-        # Triangle stalks: co-presence state
+        # 三角形茎：共处状态向量
         self._triangle_stalks: list[list[float]] = []
-        # Presentation matrices P_i (n0 x edge_dim)
+        # 表示矩阵 P_i (n0 x edge_dim)：决定内部状态如何投射到各关系
         self._presentation_matrices: list[list[list[float]]] = []
-        # Relationship metadata
-        self._rel_types: list[int] = []
-        self._maturities: list[float] = []
-        # Personality-derived parameters
+        # 关系元数据
+        self._rel_types: list[int] = []  # 关系类型
+        self._maturities: list[float] = []  # 关系成熟度 [0,1]
+        # 人格驱动参数
         self._personality: dict[str, float] = {}
-        self._kappa: float = 0.5  # consistency bound
-        # Energy system (Axiom S5)
+        self._kappa: float = 0.5  # 一致性约束上界
+        # 能量系统（公理 S5：传播消耗能量，防止无限扩散）
         self._energy: float = max_energy
         self._max_energy: float = max_energy
-        self._energy_costs: list[float] = []
-        # Propagation
+        self._energy_costs: list[float] = []  # 每段关系的传播能量消耗
+        # 传播状态
         self._propagation_rate: float = propagation_rate
-        self._propagation_state: list[float] = [0.0] * n0
+        self._propagation_state: list[float] = [0.0] * n0  # 传播幅度观测
         self._tick: int = 0
         self._last_timestamp: float = 0.0
-        # Cohomology cache (expensive, recompute every N ticks)
+        # 上同调缓存（计算昂贵，每 N 步重算一次）
         self._cached_h1: int = 0
         self._cached_dissoc: float = 0.0
         self._cache_tick: int = -1
 
     # ------------------------------------------------------------------
-    # Relationship management
+    # 关系管理
     # ------------------------------------------------------------------
 
     def add_relationship(
@@ -375,7 +397,7 @@ class ScarSheaf:
         rel_type: int | str = FRIENDLY,
         maturity: float = 0.0,
     ) -> None:
-        """Register a new relationship (edge) in the sheaf."""
+        """在层中注册一段新关系（边）。"""
         if isinstance(rel_type, str):
             rel_type = _rel_type_from_str(rel_type)
         self.complex.add_partner(partner_idx)
@@ -395,7 +417,7 @@ class ScarSheaf:
         self._rebuild_presentation_matrix(edge_idx)
 
     def remove_relationship(self, partner_idx: int) -> None:
-        """Remove a relationship from the sheaf."""
+        """从层中移除一段关系。"""
         edge_idx = self.complex.edge_index(partner_idx)
         if edge_idx < 0:
             return
@@ -413,7 +435,7 @@ class ScarSheaf:
         ]
 
     def set_maturity(self, partner_idx: int, maturity: float) -> None:
-        """Update relationship maturity and rebuild its presentation matrix."""
+        """更新关系成熟度并重建其表示矩阵。"""
         edge_idx = self.complex.edge_index(partner_idx)
         if edge_idx < 0:
             return
@@ -421,19 +443,19 @@ class ScarSheaf:
         self._rebuild_presentation_matrix(edge_idx)
 
     # ------------------------------------------------------------------
-    # Personality-derived initialization (Definition 6)
+    # 人格驱动的参数初始化（定义 6）
     # ------------------------------------------------------------------
 
     def derive_params(self, personality: dict[str, float]) -> None:
-        """Initialize sheaf parameters from personality vector.
+        """从人格向量初始化层参数。
 
-        Accepts both legacy Big Five names and new Embodiment Five names.
-        Maps:
-          - extraversion/expression_drive_trait → baseline exposure rank
-          - agreeableness/relational_gravity → lower kappa (more consistent)
-          - neuroticism/perception_acuity → higher kappa (more variable)
-          - openness/boundary_permeability → broader triangle stalk coupling
-          - conscientiousness/inner_order → tighter energy management
+        接受旧版 Big Five 和新版 Embodiment Five 名称。
+        映射关系：
+          - extraversion/expression_drive_trait → 基线暴露秩（表示矩阵的有效维度）
+          - agreeableness/relational_gravity → 降低 kappa（更一致）
+          - neuroticism/perception_acuity → 升高 kappa（更多变）
+          - openness/boundary_permeability → 更宽的三角形茎耦合
+          - conscientiousness/inner_order → 更紧的能量管理
         """
         self._personality = dict(personality)
         e = float(
@@ -454,28 +476,31 @@ class ScarSheaf:
             personality.get("conscientiousness", personality.get("inner_order", 0.5))
         )
 
-        # Consistency bound: kappa(pi) — Axiom (Personality Consistency)
-        # High agreeableness → low kappa; high neuroticism → high kappa
+        # 一致性约束 kappa(pi)——人格一致性公理
+        # 高宜人性→低 kappa（各关系表现更一致）；高神经质→高 kappa（更多变）
         self._kappa = 0.2 + n * 0.6 - a * 0.3
         self._kappa = max(0.05, min(1.0, self._kappa))
 
-        # Propagation rate: extraverts propagate faster (more open channels)
+        # 传播速率：外向者传播更快（更多开放通道）
         self._propagation_rate = 0.05 + e * 0.2 + o * 0.1
 
-        # Energy management: conscientious → more efficient (lower base cost)
+        # 能量管理：高尽责性→更高效（更低基础消耗）
         base_cost = 0.15 - c * 0.08
         for i in range(len(self._energy_costs)):
             self._energy_costs[i] = max(0.02, base_cost)
 
-        # Rebuild all presentation matrices with new personality
+        # 用新人格参数重建所有表示矩阵
         for i in range(len(self._presentation_matrices)):
             self._rebuild_presentation_matrix(i)
 
     def _rebuild_presentation_matrix(self, edge_idx: int) -> None:
-        """Compute P_i = P_base(pi) + Delta_P(tau_i) + m_i * Delta_P_mature.
+        """计算 P_i = P_base(pi) + Delta_P(tau_i) + m_i * Delta_P_mature。
 
-        The presentation matrix determines how the agent's internal state
-        projects into each relationship's observable space.
+        表示矩阵决定 agent 内部状态如何投射到每段关系的可观测空间。
+        三个组成部分：
+        - P_base：人格决定的基线暴露（外向→更多维度暴露）
+        - Delta_P(tau_i)：关系类型调制（亲密→全维暴露，正式→仅表面）
+        - Delta_P_mature：成熟度缩放（越成熟→越接近真实自我）
         """
         n0 = _VERTEX_STALK_DIM
         ne = _EDGE_STALK_DIM
@@ -490,48 +515,46 @@ class ScarSheaf:
             self._maturities[edge_idx] if edge_idx < len(self._maturities) else 0.0
         )
 
-        # P_base: personality determines baseline rank
-        # Extraversion → more dimensions exposed (higher diagonal values)
+        # P_base：人格决定基线秩
+        # 外向性→更多维度暴露（对角线值更高）
         P = _mat_zeros(n0, ne)
-        base_rank = max(2, int(2 + e * 5))  # 2..7 active dimensions
+        base_rank = max(2, int(2 + e * 5))  # 有效维度 2..7
         for d in range(min(base_rank, n0, ne)):
-            P[d][d] = 0.3 + e * 0.4  # diagonal strength
-        # Openness adds off-diagonal coupling (cross-dimension exposure)
+            P[d][d] = 0.3 + e * 0.4  # 对角线强度
+        # 开放性添加非对角耦合（跨维度暴露）
         if o > 0.4:
             for d in range(min(n0, ne) - 1):
                 P[d][d + 1] = (o - 0.4) * 0.3
 
-        # Delta_P(tau_i): relationship type modulation
+        # Delta_P(tau_i)：关系类型调制
         if rel_type == INTIMATE:
-            # Intimate: expose vulnerability dims (high diagonal, full rank)
+            # 亲密：暴露脆弱维度（高对角线，满秩）
             for d in range(min(n0, ne)):
                 P[d][d] += 0.3
-            # Neuroticism dims more visible in intimate relationships
+            # 神经质维度在亲密关系中更可见
             if n0 > 3:
                 P[3][3] += n * 0.2
         elif rel_type == FRIENDLY:
-            # Friendly: moderate exposure, social dims emphasized
+            # 友好：适度暴露，社交维度突出
             for d in range(min(3, n0, ne)):
                 P[d][d] += 0.15
         elif rel_type == FORMAL:
-            # Formal: restricted exposure, only surface dims
+            # 正式：受限暴露，仅表面维度
             for d in range(min(2, n0, ne)):
                 P[d][d] += 0.1
-            # Suppress deeper dimensions
+            # 抑制深层维度
             for d in range(3, min(n0, ne)):
                 P[d][d] *= 0.3
         elif rel_type == ADVERSARIAL:
-            # Adversarial: defensive projection, distorted
+            # 对抗：防御性投射，扭曲
             for d in range(min(n0, ne)):
                 P[d][d] *= 0.5
             if n0 > 0 and ne > 0:
-                P[0][0] += 0.4  # project strength on dim 0
+                P[0][0] += 0.4  # 在维度 0 上投射力量
 
-        # Delta_P_mature: maturity scaling (higher rank P_i)
-        # Mature relationships reveal more of the true self
+        # Delta_P_mature：成熟度缩放（更成熟→更接近真实自我）
         if maturity > 0.0:
             for d in range(min(n0, ne)):
-                # Maturity increases diagonal toward 1.0
                 target = 0.8 + e * 0.2
                 current = P[d][d]
                 P[d][d] = current + maturity * (target - current) * 0.5
@@ -544,14 +567,15 @@ class ScarSheaf:
         self._presentation_matrices[edge_idx] = P
 
     # ------------------------------------------------------------------
-    # Coboundary operators (Definition 3)
+    # 上边界算子（定义 3）
     # ------------------------------------------------------------------
 
     def _coboundary_0_at_edge(self, edge_idx: int) -> list[float]:
-        """Compute (delta^0 x)_e = P_i^T * x_0 - x_i^(ext).
+        """计算 (delta^0 x)_e = P_i^T * x_0 - x_i^(ext)。
 
-        Returns the coboundary vector at edge edge_idx.
-        The external signal x_i^(ext) is the edge stalk itself.
+        返回边 edge_idx 处的上边界向量。
+        外部信号 x_i^(ext) 就是边茎本身。
+        上边界度量"agent 内部状态投射到关系中"与"关系实际状态"的差异。
         """
         if edge_idx >= len(self._presentation_matrices):
             return [0.0] * _EDGE_STALK_DIM
@@ -567,16 +591,15 @@ class ScarSheaf:
         return _vec_sub(projected, ext)
 
     def coboundary_0(self) -> list[list[float]]:
-        """Full delta^0: returns list of coboundary vectors, one per edge."""
+        """完整 delta^0：返回每条边的上边界向量列表。"""
         return [self._coboundary_0_at_edge(i) for i in range(self.complex.n_edges)]
 
     def _coboundary_1_at_triangle(self, tri_idx: int) -> list[float]:
-        """Compute (delta^1 s)_sigma for a triangle.
+        """计算三角形处的 (delta^1 s)_sigma。
 
-        For triangle (0, i, j):
-          delta^1 = restriction(tri→edge_i) - restriction(edge_i→tri) + restriction(edge_j→tri)
-        Simplified: measures inconsistency between the two edge stalks
-        as seen from the co-presence context.
+        对于三角形 (0, i, j)：
+        度量两条边茎从共处上下文看是否一致。
+        不一致意味着"在 i 面前和在 j 面前表现矛盾"。
         """
         if tri_idx >= self.complex.n_triangles:
             return [0.0] * _TRIANGLE_STALK_DIM
@@ -610,28 +633,22 @@ class ScarSheaf:
         return result
 
     def coboundary_1(self) -> list[list[float]]:
-        """Full delta^1: returns list of coboundary vectors, one per triangle."""
+        """完整 delta^1：返回每个三角形的上边界向量列表。"""
         return [
             self._coboundary_1_at_triangle(i) for i in range(self.complex.n_triangles)
         ]
 
     # ------------------------------------------------------------------
-    # Sheaf Laplacian (Definition 4)
+    # 层拉普拉斯算子（定义 4）
     # ------------------------------------------------------------------
 
     def _sheaf_laplacian_at_vertex(self) -> list[float]:
-        """Compute L_F(x_0) = sum_i P_i P_i^T x_0 - P_i P_i^T (P_i^T)^{-1} s_i.
+        """计算顶点处的层拉普拉斯 L_F(x_0)。
 
-        The presentation matrix P_i has shape (n0 x ne).  The restriction map
-        (vertex -> edge) is P_i^T (ne x n0).  The vertex-space sheaf Laplacian
-        is L_F = sum_e delta_e^T delta_e = sum_i (P_i^T)^T (P_i^T) = P_i P_i^T
-        (shape n0 x n0), which is the correct quadratic form on the vertex stalk.
+        L_F = sum_i P_i P_i^T（形状 n0 x n0），是顶点茎上的二次型。
+        仿射项 P_i * s_i 将边信号通过伴随映射投射回顶点空间。
 
-        For the affine term we keep P_i^T s_i (projecting the edge signal back
-        to vertex space via the adjoint), matching the standard formula
-        L_F x - delta^T s.
-
-        Returns the Laplacian applied to the vertex stalk.
+        返回拉普拉斯作用于顶点茎的结果向量。
         """
         n0 = len(self._vertex_stalk)
         result = [0.0] * n0
@@ -658,13 +675,9 @@ class ScarSheaf:
         return result
 
     def sheaf_laplacian_matrix(self) -> list[list[float]]:
-        """Build the full sheaf Laplacian matrix L_F = sum_i P_i P_i^T.
+        """构建完整的层拉普拉斯矩阵 L_F = sum_i P_i P_i^T。
 
-        P_i is (n0 x ne) and P_i^T is the restriction map (ne x n0).
-        The vertex-space Laplacian is L_F = sum_e delta_e^T delta_e
-        = sum_i P_i P_i^T (shape n0 x n0).
-
-        Returns an n0 x n0 matrix (the quadratic form part).
+        返回 n0 x n0 矩阵（二次型部分）。
         """
         n0 = len(self._vertex_stalk)
         L = _mat_zeros(n0, n0)
@@ -678,9 +691,13 @@ class ScarSheaf:
         return L
 
     def spectral_gap(self) -> float:
-        """Compute spectral gap lambda_1 / lambda_max of the sheaf Laplacian.
+        """计算层拉普拉斯的谱间隙 lambda_1 / lambda_max。
 
-        Returns 0.0 if fewer than 2 relationships exist.
+        谱间隙度量关系网络的连通性：
+        - 高谱间隙 = 关系间信息流通顺畅
+        - 低谱间隙 = 关系间相互隔离
+
+        关系数 < 2 时返回 0.0。
         """
         if self.complex.n_edges < 2:
             return 0.0
@@ -696,18 +713,17 @@ class ScarSheaf:
         return 0.0
 
     # ------------------------------------------------------------------
-    # Cohomology computation (Definition 5)
+    # 上同调计算（定义 5）
     # ------------------------------------------------------------------
 
     def compute_h1(self) -> int:
-        """Compute dim H^1(K, F) — the inconsistency dimension.
+        """计算 dim H^1(K, F)——不一致性维度。
 
-        H^1 = ker(delta^1) / im(delta^0).
-        For our finite complex, this equals dim(ker(delta^1)) - dim(im(delta^0))
-        when delta^1 is defined, otherwise just measures delta^0 obstruction.
+        H^1 = ker(delta^1) / im(delta^0)。
+        直觉：H^1 的每个维度代表一个"不可通过局部调整消除的关系矛盾"。
 
-        Returns:
-            Non-negative integer: number of irreducible relational contradictions.
+        返回:
+            非负整数：不可约关系矛盾的数量。
         """
         n_edges = self.complex.n_edges
         if n_edges == 0:
@@ -768,31 +784,30 @@ class ScarSheaf:
         return h1
 
     def inconsistency_vector(self) -> list[float]:
-        """Compute the obstruction cocycle — the actual inconsistency per edge.
+        """计算阻碍上循环——每条边的实际不一致性。
 
-        Returns a vector of length n_edges, where each entry is the
-        norm of the coboundary at that edge. Higher values indicate
-        more inconsistency in that relationship.
+        返回长度为 n_edges 的向量，每个元素是该边上边界的范数。
+        值越高表示该关系的不一致性越大。
         """
         cb = self.coboundary_0()
         return [_vec_norm(v) for v in cb]
 
     def dissociation_pressure(self) -> float:
-        """Scalar pressure toward dissociation (cached, Axiom S3)."""
+        """标量解离压力（带缓存，公理 S3）。"""
         if self._cache_tick == self._tick:
             return self._cached_dissoc
         return self._dissociation_pressure_uncached()
 
     def _dissociation_pressure_uncached(self) -> float:
-        """Scalar pressure toward dissociation (Axiom S3).
+        """标量解离压力（无缓存版本，公理 S3）。
 
-        Combines:
-          - H^1 dimension (irreducible contradictions)
-          - Total inconsistency energy
-          - Spectral gap (isolation measure)
+        综合三个因素：
+          - H^1 维度（不可约矛盾数）
+          - 总不一致性能量
+          - 谱间隙（隔离度量）
 
-        Returns:
-            Float in [0, 1] where 1 = maximum dissociation pressure.
+        返回:
+            [0, 1] 范围的浮点数，1 = 最大解离压力。
         """
         if self.complex.n_edges == 0:
             return 0.0
@@ -819,7 +834,7 @@ class ScarSheaf:
         return max(0.0, min(1.0, pressure))
 
     # ------------------------------------------------------------------
-    # Propagation dynamics (Axiom S2, S4)
+    # 传播动力学（公理 S2, S4）
     # ------------------------------------------------------------------
 
     def propagate(
@@ -828,20 +843,20 @@ class ScarSheaf:
         scar_event: list[float],
         dt: float = 1.0,
     ) -> dict[str, Any]:
-        """Diffuse scar influence from source relationship via Laplacian.
+        """通过拉普拉斯扩散将 scar 影响从源关系传播到其他关系。
 
-        Implements Axiom S2:
+        实现公理 S2：
           dx_0/dt = -alpha * L_F(x_0) + f_local(t)
 
-        And Axiom S4: propagated effects are irreversible.
+        和公理 S4：传播效果不可逆。
 
-        Args:
-            source_idx: Edge index of the source relationship.
-            scar_event: The scar event vector (in edge stalk space).
-            dt: Time step for diffusion.
+        参数:
+            source_idx: 源关系的边索引
+            scar_event: scar 事件向量（在边茎空间中）
+            dt: 扩散时间步长
 
-        Returns:
-            Dict with propagation details.
+        返回:
+            包含传播详情的字典
         """
         if source_idx < 0 or source_idx >= self.complex.n_edges:
             return {"propagated": False, "reason": "invalid_source"}
@@ -937,7 +952,7 @@ class ScarSheaf:
         }
 
     # ------------------------------------------------------------------
-    # Integration interface
+    # 集成接口
     # ------------------------------------------------------------------
 
     def tick(
@@ -946,15 +961,15 @@ class ScarSheaf:
         event_vec: list[float],
         timestamp: float = 0.0,
     ) -> dict[str, Any]:
-        """Main entry point: process one event in the relational sheaf.
+        """主入口：在关系层中处理一个事件。
 
-        Args:
-            active_relationship_idx: Edge index of the currently active relationship.
-            event_vec: Event vector in edge stalk space (from Scar Algebra).
-            timestamp: Event timestamp.
+        参数:
+            active_relationship_idx: 当前活跃关系的边索引
+            event_vec: 事件向量（来自 Scar Algebra，在边茎空间中）
+            timestamp: 事件时间戳
 
-        Returns:
-            Dict with propagation result, cohomology state, energy.
+        返回:
+            包含传播结果、上同调状态、能量的字典
         """
         self._tick += 1
 
@@ -1002,13 +1017,10 @@ class ScarSheaf:
         }
 
     def _evolve_presentation_matrices(self, dt: float) -> None:
-        """Axiom S6: P_i evolves toward consistency.
+        """公理 S6：表示矩阵向一致性方向演化。
 
         P_i(t+1) = P_i(t) + eta * grad_Pi(L_consistency)
-        where L_consistency = ||delta^0 x||^2.
-
-        We use a simplified gradient: push P_i toward reducing its
-        coboundary norm, bounded by kappa.
+        简化梯度：推动 P_i 减小其上边界范数，受 kappa 约束。
         """
         eta = 0.005 * dt  # learning rate
         cb = self.coboundary_0()
@@ -1035,9 +1047,10 @@ class ScarSheaf:
         self._enforce_kappa()
 
     def _enforce_kappa(self) -> None:
-        """Enforce ||P_i - P_j||_F <= kappa * (1 + d(tau_i, tau_j)).
+        """强制执行 ||P_i - P_j||_F <= kappa * (1 + d(tau_i, tau_j))。
 
-        Optimized: compute Frobenius norm inline without allocating diff matrix.
+        确保不同关系的表示矩阵差异不超过人格一致性约束。
+        关系类型差异越大，允许的矩阵差异越大。
         """
         n = len(self._presentation_matrices)
         if n < 2:
@@ -1077,11 +1090,11 @@ class ScarSheaf:
                         Pj_r[c] += adjustment
 
     def observe(self) -> dict[str, Any]:
-        """Observable output for downstream layers.
+        """生成可观测输出，供下游层使用。
 
-        Returns:
-            Dict with cohomology dimensions, spectral gap, energy,
-            propagation state, and per-relationship inconsistency.
+        返回:
+            包含上同调维度、谱间隙、能量、传播状态、
+            每段关系不一致性的字典。
         """
         n_edges = self.complex.n_edges
         # Use cached H^1 if available (expensive to compute)
@@ -1110,11 +1123,11 @@ class ScarSheaf:
         }
 
     # ------------------------------------------------------------------
-    # Serialization
+    # 序列化
     # ------------------------------------------------------------------
 
     def to_dict(self) -> dict[str, Any]:
-        """Serialize full sheaf state for persistence."""
+        """序列化完整层状态用于持久化。"""
         return {
             "complex": self.complex.to_dict(),
             "vertex_stalk": list(self._vertex_stalk),
@@ -1138,7 +1151,7 @@ class ScarSheaf:
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> "ScarSheaf":
-        """Restore sheaf from persisted state."""
+        """从持久化状态恢复层。"""
         sheaf = cls()
         sheaf.complex = RelationalComplex.from_dict(data.get("complex", {}))
         sheaf._vertex_stalk = list(data.get("vertex_stalk", [0.0] * _VERTEX_STALK_DIM))

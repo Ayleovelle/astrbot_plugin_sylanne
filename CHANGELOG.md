@@ -2,6 +2,119 @@
 
 本文件用于 AstrBot 插件市场/管理页展示更新内容。更完整的设计说明、公式推导、测试矩阵和维护手册见 `README.md`。
 
+## 1.3.0
+
+发布日期：2026-05-28
+
+### 新增：独立观察舱 WebUI
+
+Sylanne 拥有了独立的实验体观察界面，不再依赖 AstrBot Pages 框架。
+
+- 独立 HTTP 服务器（默认端口 2718），Bearer Token 认证，支持热重载
+- 单文件 SPA（`UI/index.html`），全部 CSS/JS 内联，零外部依赖
+- 七层计算脊柱实时可视化：数据驱动的 spine 层级面板，展示每层延迟和状态
+- 登录页实验体观察主题：canvas 粒子引力系统 + 伤痕闪烁 + 扫描线
+- Void 吞噬/收缩过渡动画（登录时空洞扩张吞噬面板，登出时收缩回原点）
+- 脊柱摇杆导航：阻尼吸附、键盘 W/S 翻页、snap-on-approach 交互
+- 会话选择器：下拉切换不同关系的实时状态
+- 熔毁弹窗：验证码 + 10s 倒计时 + 终止按钮，防止误操作
+- 配置页：折叠联动（开关控制子项可见性）、中英文切换动画
+- 记忆面板：手动 LLM 整合触发、强制下沉、实时进度展示
+- 两阶段渲染架构：init DOM 一次 + polling 只更新数值，避免重建 DOM
+
+### 新增：记忆系统增强
+
+- 时间感知回忆标签：`刚才` / `N分钟前` / `N小时前` / `昨天` / `N天前` / `N周前` / `N个月前`
+- LLM 整合触发器：手动或定时（12h）触发 L1→L2 记忆评估下沉
+- `MemoryResult.created_at` 字段：所有记忆条目携带创建时间戳
+
+### 性能优化
+
+- HDC 编码双路径：numpy 向量化路径（预计算 256×2048 字符 LUT，批量 XOR+roll+majority vote），长文本（≥128B）自动启用
+- popcount 全面升级：`bin().count("1")` → `int.bit_count()` CPython C 级 intrinsic（4 文件 8 处），**提速 2.4×**
+- Scar modifier 缓存：按需重建全维度 modifier 查找表，observe/modulate 不再重复遍历伤痕列表，**缓存命中提速 6.8×**
+- Per-relationship personality 缓存：session 未变化时跳过 apply_personality 重新分发
+- 诊断 payload 条件跳过：`set_diagnostics(False)` 时 L1 层不构建昂贵的 bit 分析数据
+- jieba 模块级导入：避免每次 `_tokenize` 调用都尝试 import
+
+### 运行时可靠性
+
+- 修复 `_session_locks` 被 LRU 驱逐导致并发保护失效的致命 bug
+- 后台无限循环任务正确注册到 `_background_tasks`，terminate 时统一取消
+- WebUI 速率限制（60 req/min）+ 请求体大小限制（1MB）+ 线程安全读取
+- BoundedDict 新增 `on_evict` 回调，驱逐 host 时触发 persist
+- 后台评估队列 maxlen=500 背压，防止 LLM 故障时 OOM
+- 磁盘持久化 fsync，防止断电数据丢失
+- `drain_assessments` 失败 job 支持一次重试
+- 热重载修复：`__init__` 强制停止旧 WebUI server，避免端口占用
+
+### 配置变更
+
+- 移除：`sylanne_persona_version`（无意义）、`sylanne_alpha_assessor_provider_id`（拆分为独立配置）、`sylanne_alpha_assessor_llm_enabled`（冗余）
+- 新增独立 Provider 配置：main_assessor / fast_assessor / embedding / life_simulation / transcription
+- 新增：`locked_persona_prompt`（覆盖动态生成的人格 system prompt）
+- 新增：哈基德模型兼容开关（Claude 模型兼容模式）
+
+### 代码质量
+
+- `_safe_ensure_future` 提取到 `sylanne_alpha/utils.py`，消除 5 处重复定义
+- `safe_session_key` 加固：过滤全部文件系统不安全字符，截断过长路径
+- 新增 `sylanne_alpha/protocols.py`：类型协议定义
+- 删除 `sylanne_alpha/multi_user.py`（未使用的旧多用户模块）
+
+### 迁移说明
+
+> **旧 `pages/dashboard/` 已移除。** 升级后请访问 `http://<host>:2718` 使用新的独立观察舱。
+> 首次访问需要输入 WebUI Token（在插件配置中设置）。
+>
+> 如果你之前配置了 `sylanne_alpha_assessor_provider_id`，升级后需要在新的 5 个独立 Provider 配置项中重新选择对应的模型提供商。
+
+---
+
+## 1.2.5
+
+发布日期：2026-05-26
+
+### 架构治理
+
+- main.py 8009→2140 行，抽出 10 个职责单一的委托模块
+- WebUI 安全加固：默认 127.0.0.1 绑定、Bearer Token 认证、CORS 收紧、meltdown nonce 防重放
+- BoundedDict(maxsize+TTL) 替换所有 session-keyed 字典，防内存泄漏
+- 消除所有无注释裸 `except Exception: pass`
+- 删除 archive/ 目录和冗余 webui.py
+
+---
+
+## 1.2.3
+
+发布日期：2026-05-25
+
+### 人格系统
+
+- Embodiment 五维人格：expression_drive_trait / perception_acuity / boundary_permeability / inner_order / relational_gravity
+- Dual-EMA 人格漂移（fast τ=50, slow τ=500, set_point τ=5000）
+- 每关系人格覆盖层（±0.1 delta per session）
+- 事件→人格反向塑造闭环
+
+---
+
+## 1.2.0
+
+发布日期：2026-05-24
+
+### 完全重写
+
+- 七层计算脊柱：HDC→Gate→VoidScar→Sheaf→MoE-HGT→Boundary→Expression
+- Scar Algebra / Void Calculus / Relational Sheaf Theory 三套形式化框架
+- MoE-HGT 三阶段架构（Type-Expert FFN → Cross-Attention → Situation-Expert MoE）
+- WebUI Dashboard 实时可视化
+- 纯 Python 实现，无 numpy 依赖
+
+---
+
+<details>
+<summary>旧版本历史（3.x 实验线，已废弃）</summary>
+
 ## 3.0.0-kernel1
 
 发布日期：2026-05-18
@@ -1151,3 +1264,5 @@
 - 提供公共 API，允许其他插件读取、模拟、提交、重置状态。
 - LivingMemory 写入时可冻结当时的情绪、拟人、生命化学习、道德修复、瑕疵和综合自我状态。
 - 发布 AGPL-3.0-or-later 开源版本。
+
+</details>

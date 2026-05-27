@@ -1,8 +1,11 @@
-"""Sylanne-Embodiment computation layer: Unified Computation Spine.
+"""Sylanne-Embodiment 计算核心层：统一计算脊柱（Computation Spine）。
 
-Integrates all computation modules into a single 7-layer pipeline:
-  Perception(HDC) → Gate(PredictiveCoding) → VoidScarEngine →
-  RelationalSheaf → HGT → Boundary(Autopoiesis) → Express(PhaseTransition)
+本模块是 7 层计算管线的总调度器，负责将所有子系统串联为一条完整的信息处理流水线：
+  L1 Perception(HDC) → L2 Gate(PredictiveCoding) → L3 VoidScarEngine →
+  L4 RelationalSheaf → L5 HGT → L6 Boundary(Autopoiesis) → L7 Express(PhaseTransition)
+
+在整个架构中的位置：最顶层编排模块，对外暴露 process() / feedback() / express() 三个主入口。
+所有人格参数通过 apply_personality() 向下分发到各子系统。
 """
 
 from __future__ import annotations
@@ -34,7 +37,19 @@ _TIMING_WINDOW = 50
 
 
 class ComputationSpine:
-    """Unified computation pipeline for Sylanne-Embodiment."""
+    """Sylanne-Embodiment 的统一计算管线。
+
+    整合所有计算模块为 7 层流水线，对外暴露三个主入口：
+      - process(text): 处理一条消息通过全栈
+      - feedback(outcome): 注入表达结果反馈
+      - express(): 触发表达输出
+
+    内部状态管理：
+      - 人格参数通过 apply_personality() 向下分发
+      - 每关系人格覆盖（relationship_deltas）
+      - Embodiment 人格漂移系统（信号提取 → 特质记忆 → 振荡检测）
+      - 全状态可序列化（to_dict/from_dict）
+    """
 
     __slots__ = (
         "encoder",
@@ -63,6 +78,9 @@ class ComputationSpine:
         "_last_drift_time",
         "_drift_min_interval",
         "_relationship_deltas",
+        "_last_effective_session",
+        "_last_effective_params",
+        "_personality_dirty",
     )
 
     def __init__(self):
@@ -124,19 +142,37 @@ class ComputationSpine:
         # Per-relationship personality deltas (session_key -> {trait: delta})
         self._relationship_deltas: dict[str, dict[str, float]] = {}
 
+        # P6: Cache per-relationship personality to avoid double apply_personality
+        self._last_effective_session: str = ""
+        self._last_effective_params: dict[str, float] = {}
+        self._personality_dirty: bool = False
+
+        # Diagnostics toggle — skip expensive _l1_hdc_payload when WebUI isn't polling
+        self._diagnostics_enabled: bool = True
+
+    def set_diagnostics(self, enabled: bool) -> None:
+        """启用/禁用诊断数据生成（_l1_hdc_payload 等昂贵调用）。
+
+        当 WebUI 未主动轮询 /api/computation_logs 时可关闭以节省 CPU。
+        """
+        self._diagnostics_enabled = enabled
+
     def replace_encoder(self, encoder: HDCEncoder) -> None:
-        """Replace the HDC encoder."""
+        """替换 HDC 编码器（用于测试或自定义维度）。"""
         self.encoder = encoder
 
     def apply_personality(self, personality: dict[str, float]) -> None:
-        """Derive computation parameters from personality vector.
+        """从人格向量派生所有子系统的计算参数。
 
-        Accepts BOTH legacy Big Five names and new Embodiment Five names.
-        Maps semantic personality dimensions to internal thresholds:
-        - extraversion/expression_drive_trait → scar wound threshold
-        - neuroticism/perception_acuity → void detection threshold
-        - neuroticism/perception_acuity → healing rates
-        - conscientiousness/inner_order → expression threshold
+        接受 Big Five 传统名称和 Embodiment Five 新名称。
+        将语义人格维度映射为内部阈值：
+          - extraversion → 表达阈值（外向者更低）、伤痕创伤阈值（外向者更高）
+          - neuroticism → 虚空检测阈值（神经质者更低）、愈合速率（神经质者更慢）
+          - conscientiousness → 表达阈值、门控路由阈值
+          - openness → 虚空创生冷却、边界旋转角度
+          - agreeableness → 边界渗透性、关系层析耦合
+
+        这是"人格驱动全参数"设计核心的实现入口。
         """
         personality = normalize_personality(personality)
         self._personality = dict(personality)
@@ -260,10 +296,10 @@ class ComputationSpine:
         # from the host level (main.py) when personality is available.
 
     def effective_personality(self, session_key: str = "") -> dict[str, float]:
-        """Get personality with per-relationship overlay applied.
+        """获取应用了每关系覆盖后的有效人格。
 
-        Each relationship can shift personality by at most +/-0.1 per dimension.
-        If session_key is empty or unknown, returns the base personality.
+        每个关系可以在每个维度上偏移人格最多 +/-0.1。
+        如果 session_key 为空或未知，返回基础人格。
         """
         base = dict(self._personality)
         if not session_key or session_key not in self._relationship_deltas:
@@ -275,13 +311,18 @@ class ComputationSpine:
         return base
 
     def apply_assessment(self, assessment: dict[str, Any]) -> None:
-        """Apply LLM assessment result to modulate Void-Scar state.
+        """应用 LLM 评估结果来调制虚空-伤痕状态。
 
-        Called when the LLM assessor returns within the timeout window,
-        providing precise semantic judgment to refine the HDC coarse path.
+        当 LLM 评估器在超时窗口内返回时调用，提供精确的语义判断来修正 HDC 粗路径。
+
+        调制逻辑：
+          - 高 wound_risk → 向伤痕状态注入创伤事件
+          - 负 valence → 加深活跃虚空的压力
+          - 正 valence → 减少虚空压力（治愈效果）
+          - 特定 intent（如"撒娇"/"生气"）→ 直接调制基向量
 
         Args:
-            assessment: Dict with keys like valence, arousal, intent, wound_risk.
+            assessment: 包含 valence, arousal, intent, wound_risk 等键的字典
         """
         self._last_assessment = assessment
         wound_risk = float(assessment.get("wound_risk") or 0.0)
@@ -328,7 +369,7 @@ class ComputationSpine:
             self.expression.accumulate(arousal * 0.2, dt=0.5)
 
     def apply_social_signals(self, signals: SocialSignals | None) -> None:
-        """Apply social field signals to L7 and L3."""
+        """应用社交场信号到 L7 表达层和 L3 虚空-伤痕引擎。"""
         self.expression.apply_social_signals(signals)
         if signals and signals.is_group:
             self.engine.social_void.group_activity = signals.group_noise_level
@@ -342,26 +383,32 @@ class ComputationSpine:
         *,
         session_key: str = "",
     ) -> dict[str, Any]:
-        """Main entry point: process one message through the full stack.
+        """主入口：处理一条消息通过完整的 7 层计算栈。
+
+        流程：
+          L1: HDC 编码文本 → 高维二进制超向量
+          L2: 预测编码门控 → 计算惊讶度，决定路由（fast/normal/full）
+          L3: 虚空-伤痕引擎 → 情感状态演化
+          L3.5: LLM 评估调制（可选）→ 精确语义判断修正粗路径
+          L4: 关系层析 → 跨关系传播
+          L5: HGT 决策融合 → 4 维决策向量
+          L6: 自创生边界 → 扰动/相变/自修复
+          L7: 相变表达 → 是否应该说话
 
         Args:
-            text: Input message text.
-            timestamp: Event timestamp (epoch seconds).
-            assessment: Optional LLM assessment result. If provided, used to
-                        modulate Void-Scar state for precise semantic judgment.
-                        If None, only HDC coarse path is used.
-            session_key: Optional relationship identifier. When provided, applies
-                         per-relationship personality overlay for this tick.
+            text: 输入消息文本
+            timestamp: 事件时间戳（epoch 秒）
+            assessment: 可选的 LLM 评估结果，用于精确语义调制
+            session_key: 可选的关系标识符，用于每关系人格覆盖
         """
-        # Apply per-relationship personality overlay if session_key provided
-        _personality_restored = False
-        _saved_personality: dict[str, float] | None = None
-        if session_key:
+        # Apply per-relationship personality overlay if session changed or dirty
+        if session_key != self._last_effective_session or self._personality_dirty:
             effective = self.effective_personality(session_key)
-            if effective != self._personality:
-                _saved_personality = dict(self._personality)
-                _personality_restored = True
+            if effective != self._last_effective_params:
                 self.apply_personality(effective)
+                self._last_effective_params = dict(effective)
+            self._last_effective_session = session_key
+            self._personality_dirty = False
         # Empty string handling: skip computation, self-repair only
         if not text or not text.strip():
             self.boundary.self_repair()
@@ -371,8 +418,6 @@ class ComputationSpine:
             )
             result["hgt_decision"] = [0.0, 0.0, 0.0, 0.0]
             result["assessment_source"] = "none"
-            if _personality_restored and _saved_personality is not None:
-                self.apply_personality(_saved_personality)
             return result
 
         self._tick_count += 1
@@ -393,7 +438,16 @@ class ComputationSpine:
         # Layer 2: Predictive Coding Gate -- compute surprise, decide route
         t0 = time.perf_counter_ns()
         surprise = self.gate.surprise(h)
-        l1_payload = self._l1_hdc_payload(text, h, surprise)
+        if self._diagnostics_enabled:
+            l1_payload = self._l1_hdc_payload(text, h, surprise)
+        else:
+            l1_payload = {
+                "ones_ratio": 0.0,
+                "total_bits": 0,
+                "sample_bits": [],
+                "prediction_similarity": 0.0,
+                "flip_ratio": 0.0,
+            }
         route = self.gate.route(surprise)
         self.gate.update(h, surprise)
         self._last_route = route
@@ -439,7 +493,7 @@ class ComputationSpine:
 
         # Layer 5: Heterogeneous Graph Transformer — decision fusion
         t0 = time.perf_counter_ns()
-        hdc_features = self._hdc_to_ssm_input(h, surprise)  # Reuse 8-dim compression
+        hdc_features = ssm_input  # 复用 L3 已计算的 8 维压缩（避免重复调用 _hdc_to_ssm_input）
         hgt_tokens = self.hgt.build_tokens_from_spine(
             scar_state=self.engine.scar_state,
             void_space=self.engine.void_space,
@@ -490,8 +544,6 @@ class ComputationSpine:
                 "L7_Expression": self.expression.state(),
             }
             self._drift_embodiment(result)
-            if _personality_restored and _saved_personality is not None:
-                self.apply_personality(_saved_personality)
             return result
 
         # Normal/Full path: boundary + expression
@@ -547,15 +599,13 @@ class ComputationSpine:
             "L7_Expression": self.expression.state(),
         }
         self._drift_embodiment(result)
-        if _personality_restored and _saved_personality is not None:
-            self.apply_personality(_saved_personality)
         return result
 
     def _drift_embodiment(self, result: dict[str, Any]) -> None:
-        """Extract signals from result and drift Embodiment traits.
+        """从处理结果中提取信号并漂移 Embodiment 人格特质。
 
-        Only re-applies personality if any trait changed by > 0.01.
-        Rate-limited: minimum interval between drift events.
+        只有当某个特质变化超过 0.01 时才重新应用人格参数。
+        有速率限制：两次漂移之间最少间隔 _drift_min_interval 秒。
         """
         # Drift rate limiting: skip if too soon since last drift
         timestamp = self._last_process_time
@@ -619,7 +669,7 @@ class ComputationSpine:
         }
 
     def express(self, now: float = 0.0) -> dict[str, Any]:
-        """Trigger expression if ready."""
+        """如果准备好则触发表达。"""
         if self.expression.should_express():
             self._last_expression_time = now
             return self.expression.express(now=now)
@@ -628,15 +678,17 @@ class ComputationSpine:
     def feedback(
         self, outcome: str, dt: float = 1.0, session_key: str = ""
     ) -> dict[str, float]:
-        """Inject expression outcome back into the Void-Scar engine.
+        """注入表达结果反馈到虚空-伤痕引擎。
+
+        同时更新：HGT 适应、Embodiment 人格漂移、每关系人格 delta。
 
         Args:
             outcome: "accepted" | "ignored" | "rejected"
-            dt: time delta
-            session_key: Optional relationship identifier for per-relationship delta update.
+            dt: 时间步长
+            session_key: 可选的关系标识符，用于每关系 delta 更新
 
         Returns:
-            The updated observation after feedback injection.
+            反馈注入后的更新观测值
         """
         if outcome in self._feedback_counts:
             self._feedback_counts[outcome] += 1
@@ -660,12 +712,12 @@ class ComputationSpine:
         return self.engine.feedback(outcome, dt)
 
     def _update_relationship_delta(self, session_key: str, outcome: str) -> None:
-        """Update per-relationship personality delta based on feedback outcome.
+        """根据反馈结果更新每关系人格 delta。
 
-        Deltas evolve slowly (rate=0.005) and are capped at +/-0.1 per dimension.
-        - accepted: slightly more extraverted and agreeable with this person
-        - rejected: less extraverted, more neurotic with this person
-        - ignored: slightly less extraverted with this person
+        Delta 演化极慢（rate=0.005），每维度上限 +/-0.1：
+          - accepted: 对此人稍微更外向、更随和
+          - rejected: 对此人更内向、更神经质
+          - ignored: 对此人稍微更内向
         """
         if session_key not in self._relationship_deltas:
             self._relationship_deltas[session_key] = {
@@ -681,9 +733,11 @@ class ComputationSpine:
             delta["neuroticism"] = min(0.1, delta.get("neuroticism", 0.0) + rate)
         elif outcome == "ignored":
             delta["extraversion"] = max(-0.1, delta.get("extraversion", 0.0) - rate)
+        # Mark dirty so next process() re-applies effective personality
+        self._personality_dirty = True
 
     def diagnostics(self) -> dict[str, Any]:
-        """Full diagnostic snapshot."""
+        """完整诊断快照（用于调试和 UI 展示）。"""
         return {
             "tick_count": self._tick_count,
             "last_route": self._last_route,
@@ -698,7 +752,7 @@ class ComputationSpine:
         }
 
     def timing_stats(self) -> dict[str, dict[str, float]]:
-        """Return p50/p99 timing stats per layer in nanoseconds."""
+        """返回每层的 p50/p99 耗时统计（纳秒）。"""
         stats: dict[str, dict[str, float]] = {}
         for layer, samples in self._timings.items():
             if not samples:
@@ -716,7 +770,7 @@ class ComputationSpine:
         return stats
 
     def to_dict(self) -> dict[str, Any]:
-        """Serialize full state for persistence."""
+        """序列化完整状态用于持久化。"""
         return {
             "tick_count": self._tick_count,
             "last_process_time": self._last_process_time,
@@ -739,7 +793,7 @@ class ComputationSpine:
         }
 
     def from_dict(self, data: dict[str, Any]):
-        """Restore from persisted state."""
+        """从持久化状态恢复。"""
         self._tick_count = int(data.get("tick_count", 0))
         self._last_process_time = float(data.get("last_process_time", 0.0))
         if "engine" in data:
@@ -794,7 +848,7 @@ class ComputationSpine:
 
     @property
     def last_hdc_sample(self) -> list[int]:
-        """Return first 64 bits of the last HDC encoding as 0/1 list."""
+        """返回最近一次 HDC 编码的前 64 位（0/1 列表，用于可视化）。"""
         if self._last_hdc_vec is None:
             return []
         h = self._last_hdc_vec
@@ -805,17 +859,21 @@ class ComputationSpine:
         return bits
 
     def _hdc_similarity(self, a: bytes, b: bytes) -> float:
-        """HDC-based similarity for the VoidScarEngine."""
+        """基于 HDC 的相似度函数（供 VoidScarEngine 使用）。"""
         return self.encoder.similarity(bytearray(a), bytearray(b))
 
     def _hdc_to_ssm_input(self, h: bytearray, surprise: float) -> list[float]:
-        """Compress HDC bytearray to 8-dim SSM input."""
+        """将 HDC bytearray 压缩为 8 维 SSM 输入。
+
+        将超向量分为 8 个等长块，计算每块的 1-bit 密度，
+        然后居中（-0.5）并乘以 2*surprise 作为缩放因子。
+        """
         byte_dim = len(h)
         chunk_size = max(1, byte_dim // 8)
         result = []
         for i in range(8):
             chunk = h[i * chunk_size : (i + 1) * chunk_size]
-            ones = sum(bin(b).count("1") for b in chunk)
+            ones = sum(b.bit_count() for b in chunk)
             total_bits = len(chunk) * 8
             density = ones / max(1, total_bits)
             result.append((density - 0.5) * 2.0 * surprise)
@@ -824,15 +882,15 @@ class ComputationSpine:
     def _l1_hdc_payload(
         self, text: str, h: bytearray, surprise: float
     ) -> dict[str, Any]:
-        """Serializable Layer 1 diagnostics backed by the actual HDC vector."""
-        ones = sum(bin(byte).count("1") for byte in h)
+        """L1 层诊断数据：基于实际 HDC 向量的可序列化信息。"""
+        ones = sum(b.bit_count() for b in h)
         total_bits = max(1, len(h) * 8)
         prediction = getattr(self.gate, "_prediction", None)
         flip_ratio = float(surprise)
         prediction_similarity = max(0.0, min(1.0, 1.0 - float(surprise)))
         if isinstance(prediction, (bytearray, bytes)):
             compared_bits = max(1, min(len(prediction), len(h)) * 8)
-            xor_count = sum(bin(a ^ b).count("1") for a, b in zip(prediction, h))
+            xor_count = sum((a ^ b).bit_count() for a, b in zip(prediction, h))
             flip_ratio = xor_count / compared_bits
             prediction_similarity = 1.0 - flip_ratio
         sample_bits: list[int] = []
@@ -855,7 +913,7 @@ class ComputationSpine:
         }
 
     def _l3_void_scar_payload(self, emotion: dict[str, float]) -> dict[str, Any]:
-        """Serializable Layer 3 diagnostics for Void/Scar state."""
+        """L3 层诊断数据：虚空/伤痕状态的可序列化信息。"""
         scar_objects = list(getattr(self.engine.scar_state, "scars", []) or [])
         void_objects = list(getattr(self.engine.void_space, "voids", []) or [])
         ghost_objects = list(getattr(self.engine.void_space, "ghosts", []) or [])
@@ -898,7 +956,7 @@ class ComputationSpine:
         }
 
     def _l4_sheaf_payload(self, sheaf_result: dict[str, Any]) -> dict[str, Any]:
-        """Serializable Layer 4 diagnostics for relational sheaf propagation."""
+        """L4 层诊断数据：关系层析传播的可序列化信息。"""
         sheaf_result = sheaf_result if isinstance(sheaf_result, dict) else {}
         prop = sheaf_result.get("propagation", {})
         prop = prop if isinstance(prop, dict) else {}
@@ -918,7 +976,7 @@ class ComputationSpine:
         }
 
     def _emotion_to_boundary_force(self, emotion: dict[str, float]) -> list[float]:
-        """Convert emotion state to a force vector for the autopoietic boundary."""
+        """将 8 维情感状态映射为 32 维边界力向量（平铺 + 缩放）。"""
         # Map 8 emotion dims to 32-dim boundary space (tile + scale)
         values = [
             emotion.get("warmth", 0.0),
