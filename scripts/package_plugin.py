@@ -23,6 +23,7 @@ INCLUDE_ROOT_FILES = {
 INCLUDE_DIRS = {
     "sylanne_alpha",
     "pages",
+    "UI",
 }
 
 ALLOWED_DOC_ASSETS: set[Path] = set()
@@ -44,6 +45,7 @@ EXCLUDED_PARTS = {
     "sticker_cache",
     "sticker-cache",
     "stickers",
+    "pet-frames",
     "literature_kb",
     "personality_literature_kb",
     "psychological_literature_kb",
@@ -53,6 +55,15 @@ EXCLUDED_PARTS = {
 EXCLUDED_SUFFIXES = {
     ".pyc",
     ".pyo",
+    ".stackdump",
+}
+
+EXCLUDED_FILENAMES = {
+    "pet-contact-sheet.png",
+    "sylanne-pet.webp",
+    "BACKEND_API.md",
+    "HANDOFF.md",
+    "arknights-design-language.md",
 }
 
 
@@ -68,6 +79,8 @@ def should_include(path: Path) -> bool:
     if parts & EXCLUDED_PARTS:
         return False
     if path.suffix in EXCLUDED_SUFFIXES:
+        return False
+    if path.name in EXCLUDED_FILENAMES:
         return False
     if len(relative.parts) == 1:
         return relative.name in INCLUDE_ROOT_FILES

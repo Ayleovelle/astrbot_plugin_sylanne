@@ -21,10 +21,12 @@ import asyncio
 import gc
 import json
 import logging
+import os
 import secrets
 import sys
 import threading
 import time
+from collections import deque
 from types import ModuleType
 from typing import TYPE_CHECKING, Any
 from urllib.parse import parse_qs, urlparse
@@ -52,11 +54,74 @@ _httpd_thread: threading.Thread | None = globals().get("_httpd_thread")
 _active_plugin: Any = globals().get("_active_plugin")
 _active_token: str = ""
 _meltdown_nonces: dict[str, str] = {}
+# Item 24: CSRF token — 登录成功后生成，POST/DELETE 端点校验
+_csrf_token: str = ""
 # 线程安全锁：stdlib HTTP server 的多线程 handler 访问插件状态时使用
 _plugin_access_lock = threading.Lock()
 
 # diagnostics 自动联动：有 /api/computation_logs 请求时开启，30s 无请求后关闭
 _last_diag_request: float = 0
+
+# Item 112: WebUI 主题偏好
+_theme_preference: str = "dark"
+
+# Item 47: 健康检查 — 记录服务器启动时间
+_start_time: float = time.time()
+
+# Item 49: 错误率仪表盘 — 每分钟 ERROR/WARNING 计数
+# (timestamp_minute, errors, warnings)
+_error_counts: deque[tuple[int, int, int]] = deque(maxlen=60)
+_error_counts_lock = threading.Lock()
+
+
+class _ErrorStatsHandler(logging.Handler):
+    """捕获 ERROR/WARNING 级别日志，按分钟聚合计数。"""
+
+    def emit(self, record: logging.LogRecord) -> None:
+        minute = int(time.time()) // 60 * 60
+        with _error_counts_lock:
+            if _error_counts and _error_counts[-1][0] == minute:
+                ts, errs, warns = _error_counts[-1]
+                if record.levelno >= logging.ERROR:
+                    _error_counts[-1] = (ts, errs + 1, warns)
+                elif record.levelno >= logging.WARNING:
+                    _error_counts[-1] = (ts, errs, warns + 1)
+            else:
+                if record.levelno >= logging.ERROR:
+                    _error_counts.append((minute, 1, 0))
+                elif record.levelno >= logging.WARNING:
+                    _error_counts.append((minute, 0, 1))
+
+
+# 安装 handler 到 root logger（仅安装一次，用 name 去重避免 reload 累积）
+_ESH_NAME = "sylanne_error_stats"
+if not any(getattr(h, "name", None) == _ESH_NAME for h in logging.root.handlers):
+    _error_stats_handler = _ErrorStatsHandler(level=logging.WARNING)
+    _error_stats_handler.name = _ESH_NAME
+    logging.root.addHandler(_error_stats_handler)
+
+
+def _build_metrics() -> str:
+    """生成 Prometheus 格式指标文本。"""
+    lines = []
+    lines.append("# HELP sylanne_uptime_seconds Plugin uptime in seconds")
+    lines.append("# TYPE sylanne_uptime_seconds gauge")
+    lines.append(f"sylanne_uptime_seconds {time.time() - _start_time:.1f}")
+
+    lines.append("# HELP sylanne_sessions_active Number of active sessions")
+    lines.append("# TYPE sylanne_sessions_active gauge")
+    sessions = 0
+    if _active_plugin:
+        hosts = getattr(_active_plugin, '_hosts', {})
+        sessions = len(hosts) if isinstance(hosts, dict) else 0
+    lines.append(f"sylanne_sessions_active {sessions}")
+
+    lines.append("# HELP sylanne_spine_process_total Total spine process calls")
+    lines.append("# TYPE sylanne_spine_process_total counter")
+    logs = getattr(_active_plugin, '_computation_logs', []) if _active_plugin else []
+    lines.append(f"sylanne_spine_process_total {len(logs)}")
+
+    return "\n".join(lines) + "\n"
 
 
 def _set_spine_diagnostics(plugin: Any, enabled: bool) -> None:
@@ -76,12 +141,14 @@ def _set_spine_diagnostics(plugin: Any, enabled: bool) -> None:
 
 def _ensure_token(config: dict[str, Any]) -> str:
     """生成或获取 WebUI Bearer token，用于 API 鉴权。"""
-    global _active_token
+    global _active_token, _csrf_token
     token = str(config.get("sylanne_webui_token", "") or "")
     if not token:
         token = secrets.token_urlsafe(32)
         config["sylanne_webui_token"] = token
     _active_token = token
+    # Item 24: 每次登录/启动时生成 CSRF token
+    _csrf_token = secrets.token_hex(16)
     return token
 
 
@@ -126,11 +193,20 @@ async def start_webui_server(plugin: Any, host: str = "127.0.0.1", port: int = 2
 
     @web.middleware
     async def auth_middleware(request: web.Request, handler: Any) -> web.Response:
-        if request.path in ("/", "/logo.png", "/assets/logo.png"):
+<<<<<<< Updated upstream
+        if request.path in ("/", "/favicon.ico", "/logo.png", "/assets/logo.png"):
+=======
+        if request.path in ("/", "/health", "/metrics", "/logo.png", "/assets/logo.png"):
+>>>>>>> Stashed changes
             return await handler(request)
         auth = request.headers.get("Authorization", "")
         if not auth.startswith("Bearer ") or auth[7:] != _active_token:
             return web.json_response({"error": "unauthorized"}, status=401)
+        # Item 24: CSRF 防护 — POST/DELETE 需要 X-CSRF-Token header
+        if request.method in ("POST", "DELETE"):
+            csrf_header = request.headers.get("X-CSRF-Token", "")
+            if csrf_header != _csrf_token:
+                return web.json_response({"error": "csrf_token_mismatch"}, status=403)
         return await handler(request)
 
     # Serve the dashboard HTML from UI/index.html
@@ -162,6 +238,8 @@ async def start_webui_server(plugin: Any, host: str = "127.0.0.1", port: int = 2
         data = _build_state(
             _plugin(plugin), session=str(request.query.get("session", "") or "")
         )
+        # Item 24: 在 state 响应中附带 csrf_token
+        data["csrf_token"] = _csrf_token
         return web.json_response(data)
 
     async def handle_settings_get(request: web.Request) -> web.Response:
@@ -350,7 +428,792 @@ async def start_webui_server(plugin: Any, host: str = "127.0.0.1", port: int = 2
             return web.json_response({"ok": False, "error": str(e)})
         return web.json_response({"ok": True, "estimated_seconds": 30})
 
+    async def handle_config_presets(request: web.Request) -> web.Response:
+        """GET /api/config_presets — 返回人格配置预设模板。"""
+        from sylanne_alpha.webui_routes import CONFIG_PRESETS
+
+        return web.json_response({"presets": CONFIG_PRESETS})
+
+    async def handle_glossary(request: web.Request) -> web.Response:
+        """GET /api/glossary — 返回 Sylanne 专有术语词典。"""
+        from sylanne_alpha.webui_routes import GLOSSARY
+
+        return web.json_response({"glossary": GLOSSARY})
+
+    async def handle_export_data(request: web.Request) -> web.Response:
+        """GET /api/export_data?session_key=xxx — 导出指定会话的所有数据。"""
+        session_key = str(request.query.get("session_key", "") or "").strip()
+        if not session_key:
+            return web.json_response({"ok": False, "error": "missing session_key param"})
+        current_plugin = _plugin(plugin)
+        export: dict[str, Any] = {"session_key": session_key}
+
+        # Memory system
+        mem_getter = getattr(current_plugin, "_memory_system_for_session", None)
+        mem_sys = mem_getter(session_key) if callable(mem_getter) else getattr(current_plugin, "_memory_system", None)
+        if mem_sys is not None:
+            export["memory"] = {
+                "l1": [
+                    item.to_dict() if hasattr(item, "to_dict") else dict(item or {})
+                    for item in list(getattr(mem_sys, "_l1", []) or [])
+                ],
+                "l2": [
+                    item.to_dict() if hasattr(item, "to_dict") else dict(item or {})
+                    for item in list(getattr(mem_sys, "_l2", []) or [])
+                ],
+                "l3_nodes": {
+                    k: (v.to_dict() if hasattr(v, "to_dict") else dict(v or {}))
+                    for k, v in dict(getattr(mem_sys, "_l3_nodes", {}) or {}).items()
+                },
+                "l3_edges": [
+                    e.to_dict() if hasattr(e, "to_dict") else dict(e or {})
+                    for e in list(getattr(mem_sys, "_l3_edges", []) or [])
+                ],
+            }
+
+        # Personality & computation state
+        hosts_dict = getattr(current_plugin, "_hosts", {}) or {}
+        if session_key in hosts_dict:
+            host_obj = hosts_dict[session_key]
+            comp = host_obj.kernel.computation
+            export["personality"] = dict(comp._personality)
+            export["computation"] = comp.to_dict()
+        else:
+            export["personality"] = None
+            export["computation"] = None
+
+        return web.json_response({"ok": True, "data": export})
+
+    async def handle_purge_data(request: web.Request) -> web.Response:
+        """DELETE /api/purge_data?session_key=xxx — 彻底删除指定会话的所有数据。"""
+        session_key = str(request.query.get("session_key", "") or "").strip()
+        if not session_key:
+            return web.json_response({"ok": False, "error": "missing session_key param"})
+        current_plugin = _plugin(plugin)
+        purged: list[str] = []
+
+        # Clear memory system
+        mem_getter = getattr(current_plugin, "_memory_system_for_session", None)
+        mem_sys = mem_getter(session_key) if callable(mem_getter) else getattr(current_plugin, "_memory_system", None)
+        if mem_sys is not None:
+            mem_sys._l1.clear()
+            mem_sys._l2.clear()
+            mem_sys._l3_nodes.clear()
+            mem_sys._l3_edges.clear()
+            mem_sys._tick = 0
+            purged.append("memory_system")
+
+        # Remove host instance
+        hosts_dict = getattr(current_plugin, "_hosts", {}) or {}
+        if session_key in hosts_dict:
+            del hosts_dict[session_key]
+            purged.append("host")
+
+        # Clear conversation buffer
+        buffers = getattr(current_plugin, "_conversation_buffers", {}) or {}
+        if session_key in buffers:
+            del buffers[session_key]
+            purged.append("conversation_buffer")
+
+        # Delete persisted KV states
+        for delete_method in (
+            "_delete_state",
+            "_delete_humanlike_state",
+            "_delete_personality_drift_state",
+            "_delete_sylanne_memory_state",
+        ):
+            try:
+                deleter = getattr(current_plugin, delete_method, None)
+                if callable(deleter):
+                    await deleter(session_key)
+                    purged.append(f"kv_{delete_method}")
+            except Exception:
+                pass
+
+        logger.info(f"Sylanne PURGE DATA (standalone): session={session_key}, purged={purged}")
+        return web.json_response({"ok": True, "session_key": session_key, "purged": purged})
+
+    # ------------------------------------------------------------------
+    # Item 47: /health 健康检查（不需要认证）
+    # ------------------------------------------------------------------
+
+    async def handle_health(request: web.Request) -> web.Response:
+        uptime_s = int(time.time() - _start_time)
+        # 活跃 host 数量
+        current = _plugin(plugin)
+        hosts_dict = getattr(current, "_hosts", {}) or {}
+        sessions_count = len(hosts_dict) if isinstance(hosts_dict, dict) else 0
+        # 进程内存
+        memory_mb = _get_process_memory_mb()
+        return web.json_response({
+            "status": "ok",
+            "uptime_s": uptime_s,
+            "sessions": sessions_count,
+            "memory_mb": memory_mb,
+        })
+
+    # ------------------------------------------------------------------
+    # Item 48: /metrics Prometheus 指标导出（不需要认证）
+    # ------------------------------------------------------------------
+
+    async def handle_metrics(request: web.Request) -> web.Response:
+        metrics_text = _build_metrics()
+        return web.Response(
+            text=metrics_text,
+            content_type="text/plain; version=0.0.4; charset=utf-8",
+        )
+
+    # ------------------------------------------------------------------
+    # Item 49: /api/error_stats 错误率仪表盘
+    # ------------------------------------------------------------------
+
+    async def handle_error_stats(request: web.Request) -> web.Response:
+        cutoff = int(time.time()) // 60 * 60 - 3600
+        with _error_counts_lock:
+            data = [
+                {"minute": ts, "errors": errs, "warnings": warns}
+                for ts, errs, warns in _error_counts
+                if ts >= cutoff
+            ]
+        return web.json_response(data)
+
+    # ------------------------------------------------------------------
+    # Item 53: /api/config_export & /api/config_import
+    # ------------------------------------------------------------------
+
+    async def handle_config_export(request: web.Request) -> web.Response:
+        current_plugin = _plugin(plugin)
+        config = dict(getattr(current_plugin, "_config", {}) or {})
+        return web.json_response(config)
+
+    async def handle_config_import(request: web.Request) -> web.Response:
+        try:
+            body = await request.json()
+        except Exception:
+            return web.json_response({"ok": False, "error": "invalid_json"}, status=400)
+        if not isinstance(body, dict):
+            return web.json_response({"ok": False, "error": "expected_object"}, status=400)
+        current_plugin = _plugin(plugin)
+        config = getattr(current_plugin, "_config", None)
+        if config is None:
+            return web.json_response({"ok": False, "error": "no_config"}, status=500)
+        config.update(body)
+        # 持久化
+        persistent = getattr(current_plugin, "config", config)
+        if isinstance(persistent, dict):
+            persistent.update(body)
+        if hasattr(persistent, "save_config"):
+            persistent.save_config()
+        return web.json_response({"ok": True, "keys": list(body.keys())})
+
+    # ------------------------------------------------------------------
+    # Item 66: /api/widget-state AstrBot 管理面板状态卡片
+    # ------------------------------------------------------------------
+
+    async def handle_widget_state(request: web.Request) -> web.Response:
+        current = _plugin(plugin)
+        data = _build_widget_state(current)
+        return web.json_response(data)
+
+    # ------------------------------------------------------------------
+    # Item 6: POST /api/proactive_feedback 主动发言反馈
+    # ------------------------------------------------------------------
+
+    async def handle_proactive_feedback(request: web.Request) -> web.Response:
+        try:
+            body = await request.json()
+        except Exception:
+            body = {}
+        if not isinstance(body, dict):
+            return web.json_response({"ok": False, "error": "invalid_body"}, status=400)
+        session_key = str(body.get("session_key", "")).strip()
+        timestamp = float(body.get("timestamp", 0))
+        rating = str(body.get("rating", "")).strip()
+        if not session_key or not rating or rating not in ("positive", "negative"):
+            return web.json_response({"ok": False, "error": "invalid_params"}, status=400)
+        current = _plugin(plugin)
+        scheduler = getattr(current, "_proactive_scheduler", None)
+        if scheduler is not None and hasattr(scheduler, "record_feedback"):
+            scheduler.record_feedback(session_key, timestamp, rating)
+        return web.json_response({"ok": True})
+
+    # ------------------------------------------------------------------
+    # Item 69: GET /api/weekly_report 周报自动生成
+    # ------------------------------------------------------------------
+
+    async def handle_weekly_report(request: web.Request) -> web.Response:
+        from sylanne_alpha.analytics import generate_weekly_report
+        current = _plugin(plugin)
+        report = generate_weekly_report(current)
+        return web.json_response(report)
+
+    # ------------------------------------------------------------------
+    # Item 70: GET /api/memory/decay_curve 记忆衰减曲线可视化数据
+    # ------------------------------------------------------------------
+
+    async def handle_memory_decay_curve(request: web.Request) -> web.Response:
+        """返回指定记忆的 Ebbinghaus 衰减时间序列。"""
+        import math as _math
+
+        memory_id = str(request.query.get("memory_id", "") or "").strip()
+        if not memory_id:
+            return web.json_response(
+                {"ok": False, "error": "missing memory_id param"}, status=400
+            )
+        current_plugin = _plugin(plugin)
+        # 在所有会话的记忆系统中查找目标记忆
+        target_memory = None
+        hosts_dict = getattr(current_plugin, "_hosts", {}) or {}
+        mem_getter = getattr(current_plugin, "_memory_system_for_session", None)
+        for sk in list(hosts_dict.keys()):
+            mem_sys = mem_getter(sk) if callable(mem_getter) else None
+            if mem_sys is None:
+                continue
+            for pool in (
+                getattr(mem_sys, "_l1", []) or [],
+                getattr(mem_sys, "_l2", []) or [],
+            ):
+                for item in list(pool):
+                    item_id = getattr(item, "id", None) or (
+                        item.get("id") if isinstance(item, dict) else None
+                    )
+                    if str(item_id) == memory_id:
+                        target_memory = item
+                        break
+                if target_memory:
+                    break
+            if target_memory:
+                break
+
+        if target_memory is None:
+            return web.json_response(
+                {"ok": False, "error": "memory_id not found"}, status=404
+            )
+
+        # 提取参数
+        created_at = float(
+            getattr(target_memory, "created_at", 0)
+            or (target_memory.get("created_at", 0) if isinstance(target_memory, dict) else 0)
+        )
+        rehearsal = int(
+            getattr(target_memory, "recall_count", 0)
+            or (target_memory.get("recall_count", 0) if isinstance(target_memory, dict) else 0)
+        )
+        emotional_weight = float(
+            getattr(target_memory, "emotional_weight", 0.5)
+            or (target_memory.get("emotional_weight", 0.5) if isinstance(target_memory, dict) else 0.5)
+        )
+
+        # 生成衰减曲线：每小时一个点，最多 168 点（7 天）
+        stability = 24 * (1 + rehearsal * 0.5) * (1 + emotional_weight)
+        curve = []
+        max_hours = 168
+        for hour in range(max_hours + 1):
+            retention = max(0.05, _math.exp(-hour / stability))
+            curve.append({"hour": hour, "retention": round(retention, 4)})
+
+        return web.json_response({
+            "memory_id": memory_id,
+            "created_at": created_at,
+            "stability": round(stability, 2),
+            "rehearsal": rehearsal,
+            "emotional_weight": round(emotional_weight, 3),
+            "curve": curve,
+        })
+
+    # ------------------------------------------------------------------
+    # Item 84: GET/POST /api/personality/export & /api/personality/import
+    # ------------------------------------------------------------------
+
+    async def handle_personality_export(request: web.Request) -> web.Response:
+        """GET /api/personality/export — 导出当前人格参数。"""
+        current_plugin = _plugin(plugin)
+        hosts_dict = getattr(current_plugin, "_hosts", {}) or {}
+        personality: dict[str, Any] = {}
+        for h in hosts_dict.values():
+            try:
+                personality = (
+                    h.kernel._personality()
+                    if hasattr(h.kernel, "_personality")
+                    else {}
+                )
+                if personality:
+                    break
+            except Exception:
+                continue
+        frontend_data = _frontend_personality(personality)
+        export_payload = {
+            "embodiment_five": frontend_data.get("five", {}),
+            "sylanne_six": {
+                item["name"]: item["value"]
+                for item in frontend_data.get("six", [])
+            },
+            "drift_history": frontend_data.get("drift", []),
+            "description": "",
+        }
+        return web.json_response({"ok": True, "personality": export_payload})
+
+    async def handle_personality_import(request: web.Request) -> web.Response:
+        """POST /api/personality/import — 导入人格配置 JSON。"""
+        try:
+            body = await request.json()
+        except Exception:
+            body = {}
+        if not isinstance(body, dict):
+            return web.json_response({"ok": False, "error": "expected JSON object"}, status=400)
+        embodiment_five = body.get("embodiment_five")
+        sylanne_six = body.get("sylanne_six")
+        if not isinstance(embodiment_five, dict) and not isinstance(sylanne_six, dict):
+            return web.json_response({"ok": False, "error": "missing embodiment_five or sylanne_six"}, status=400)
+        current_plugin = _plugin(plugin)
+        hosts_dict = getattr(current_plugin, "_hosts", {}) or {}
+        updated_sessions: list[str] = []
+        six_name_to_key = {
+            "Curiosity": "curiosity", "Empathy": "warmth", "Precision": "coherence",
+            "Playfulness": "playfulness", "Defiance": "sovereignty", "Melancholy": "melancholy",
+        }
+        for sk, h in hosts_dict.items():
+            try:
+                comp = h.kernel.computation
+                personality_dict = comp._personality
+                if not isinstance(personality_dict, dict):
+                    continue
+                traits = personality_dict.setdefault("traits", {})
+                if isinstance(embodiment_five, dict):
+                    for key, value in embodiment_five.items():
+                        try:
+                            traits[key] = float(value)
+                        except (TypeError, ValueError):
+                            continue
+                if isinstance(sylanne_six, dict):
+                    for name, value in sylanne_six.items():
+                        internal_key = six_name_to_key.get(name, name.lower())
+                        try:
+                            traits[internal_key] = float(value)
+                        except (TypeError, ValueError):
+                            continue
+                updated_sessions.append(sk)
+            except Exception:
+                continue
+        if not updated_sessions:
+            return web.json_response({"ok": False, "error": "no active sessions to update"})
+        return web.json_response({"ok": True, "updated_sessions": updated_sessions})
+
+    # ------------------------------------------------------------------
+    # Item 112: GET/POST /api/theme 主题系统
+    # ------------------------------------------------------------------
+
+    async def handle_theme_get(request: web.Request) -> web.Response:
+        return web.json_response({"theme": _theme_preference})
+
+    async def handle_theme_post(request: web.Request) -> web.Response:
+        global _theme_preference
+        try:
+            body = await request.json()
+        except Exception:
+            body = {}
+        theme = str((body or {}).get("theme", "")).strip()
+        if theme not in ("dark", "light", "auto"):
+            return web.json_response({"ok": False, "error": "invalid theme, must be dark|light|auto"}, status=400)
+        _theme_preference = theme
+        return web.json_response({"ok": True, "theme": _theme_preference})
+
+    # ------------------------------------------------------------------
+    # Item 5: GET /api/rhythm_profile 对话节奏可视化数据
+    # ------------------------------------------------------------------
+
+    async def handle_rhythm_profile(request: web.Request) -> web.Response:
+        current = _plugin(plugin)
+        rhythm_learner = getattr(current, "_rhythm_learner", None)
+        if rhythm_learner is None:
+            return web.json_response({"ok": False, "error": "rhythm_learner unavailable"})
+        # 确定当前活跃会话
+        session = str(request.query.get("session", "") or "").strip()
+        if not session:
+            hosts = getattr(current, "_hosts", {}) or {}
+            if isinstance(hosts, dict) and hosts:
+                session = next(iter(hosts))
+            else:
+                session = "default"
+        profile = rhythm_learner.profile(session)
+        tempo = rhythm_learner.tempo
+        reply_length_factor = rhythm_learner.get_reply_length_factor(session)
+        # breath_hold: 需要最后一条消息时间
+        last_msg_time = 0.0
+        if profile is not None:
+            last_msg_time = profile._last_msg_time
+        breath_hold = rhythm_learner.detect_breath_hold(last_msg_time, time.time()) if last_msg_time > 0 else False
+        avg_message_length = profile.avg_part_chars if profile is not None else 0.0
+        return web.json_response({
+            "ok": True,
+            "session": session,
+            "tempo": round(tempo, 3),
+            "avg_message_length": round(avg_message_length, 1),
+            "reply_length_factor": round(reply_length_factor, 3),
+            "breath_hold": breath_hold,
+            "confidence": round(profile.confidence, 3) if profile is not None else 0.0,
+            "chars_per_second": round(profile.chars_per_second, 2) if profile is not None else 0.0,
+        })
+
+    # ------------------------------------------------------------------
+    # Item 40: GET /api/relationship_temperature 关系温度计
+    # ------------------------------------------------------------------
+
+    async def handle_relationship_temperature(request: web.Request) -> web.Response:
+        current = _plugin(plugin)
+        hosts_dict = getattr(current, "_hosts", {}) or {}
+        all_sessions = _known_sessions(current)
+        session_key = str(request.query.get("session", "") or "").strip()
+        if not session_key and all_sessions:
+            session_key = all_sessions[0]
+
+        temperature = 0.5
+        trend = "stable"
+        try:
+            host = hosts_dict.get(session_key) if isinstance(hosts_dict, dict) else None
+            if host is not None:
+                comp = host.kernel.computation
+                engine_obs = comp.engine.observe()
+                warmth = float(engine_obs.get("warmth", 0.0))
+                # 从 session_context 获取关系年龄信息
+                sc = getattr(current, "_session_context", None)
+                intimacy = 0.0
+                if sc is not None:
+                    first_time = sc.first_interaction_time(session_key)
+                    age_days = (time.time() - first_time) / 86400
+                    # 关系年龄贡献：越久越高，上限 0.3
+                    intimacy = min(0.3, age_days / 365 * 0.3)
+                # 近期互动频率：从 computation logs 估算
+                logs = getattr(current, "_computation_logs", None)
+                freq_bonus = 0.0
+                if logs:
+                    now = time.time()
+                    recent = sum(
+                        1 for e in logs
+                        if str(e.get("session", "")) == session_key
+                        and now - float(e.get("ts", 0)) < 3600
+                    )
+                    freq_bonus = min(0.2, recent * 0.02)
+                temperature = max(0.0, min(1.0, 0.3 + warmth * 0.3 + intimacy + freq_bonus))
+                # 趋势判断：基于 warmth 正负
+                if warmth > 0.1:
+                    trend = "warming"
+                elif warmth < -0.1:
+                    trend = "cooling"
+        except Exception:
+            pass
+        return web.json_response({"temperature": round(temperature, 4), "trend": trend})
+
+    # ------------------------------------------------------------------
+    # Item 60: GET /api/diagnostic_report 自动诊断报告
+    # ------------------------------------------------------------------
+
+    async def handle_diagnostic_report(request: web.Request) -> web.Response:
+        current = _plugin(plugin)
+        hosts_dict = getattr(current, "_hosts", {}) or {}
+        anomalies: list[str] = []
+        total_sessions = len(_known_sessions(current))
+        total_memories = 0
+        total_scars = 0
+        spine_ok = True
+        memory_ok = True
+        personality_ok = True
+
+        try:
+            mem_getter = getattr(current, "_memory_system_for_session", None)
+            if callable(mem_getter) and isinstance(hosts_dict, dict):
+                for sk in hosts_dict:
+                    ms = mem_getter(sk)
+                    if ms:
+                        total_memories += len(getattr(ms, "_l1", []) or [])
+                        total_memories += len(getattr(ms, "_l2", []) or [])
+        except Exception:
+            memory_ok = False
+
+        try:
+            for h in (hosts_dict.values() if isinstance(hosts_dict, dict) else []):
+                comp = h.kernel.computation
+                engine_obs = comp.engine.observe()
+                total_scars += int(engine_obs.get("active_scars", engine_obs.get("scar_count", 0)))
+                # 检查人格维度是否被 clamp
+                personality = h.kernel._personality() if hasattr(h.kernel, "_personality") else {}
+                traits = personality.get("traits", personality) if isinstance(personality, dict) else {}
+                for dim, val in (traits.items() if isinstance(traits, dict) else []):
+                    if isinstance(val, (int, float)):
+                        if val >= 1.0:
+                            anomalies.append(f"personality.{dim} was clamped from >{val:.1f} to 1.0")
+                        elif val <= 0.0:
+                            anomalies.append(f"personality.{dim} was clamped from <{val:.1f} to 0.0")
+        except Exception:
+            spine_ok = False
+
+        # 运行时间估算
+        uptime_hours = 0.0
+        try:
+            import os as _os
+            pid = _os.getpid()
+            import psutil  # type: ignore
+            proc = psutil.Process(pid)
+            uptime_hours = round((time.time() - proc.create_time()) / 3600, 1)
+        except Exception:
+            pass
+
+        return web.json_response({
+            "timestamp": int(time.time()),
+            "health": {"spine_ok": spine_ok, "memory_ok": memory_ok, "personality_ok": personality_ok},
+            "stats": {
+                "total_sessions": total_sessions,
+                "total_memories": total_memories,
+                "total_scars": total_scars,
+                "uptime_hours": uptime_hours,
+            },
+            "anomalies": anomalies,
+            "version": "1.3.0",
+        })
+
+    # ------------------------------------------------------------------
+    # Item 118: GET /api/personality/drift-map 人格漂移可视化
+    # ------------------------------------------------------------------
+
+    async def handle_personality_drift_map(request: web.Request) -> web.Response:
+        current = _plugin(plugin)
+        hosts_dict = getattr(current, "_hosts", {}) or {}
+        session_key = str(request.query.get("session", "") or "").strip()
+        all_sessions = _known_sessions(current, requested=session_key)
+        if not session_key and all_sessions:
+            session_key = all_sessions[0]
+
+        events: list[dict] = []
+        current_traits: dict[str, float] = {}
+        try:
+            host = hosts_dict.get(session_key) if isinstance(hosts_dict, dict) else None
+            if host is not None:
+                comp = host.kernel.computation
+                drift_attr = getattr(comp, "_drift_attribution", None)
+                if drift_attr is not None:
+                    n = int(request.query.get("limit", "50") or "50")
+                    events = drift_attr.recent(n)
+                # 当前特质值
+                personality = host.kernel._personality() if hasattr(host.kernel, "_personality") else {}
+                traits = personality.get("traits", personality) if isinstance(personality, dict) else {}
+                if isinstance(traits, dict):
+                    current_traits = {k: round(float(v), 4) for k, v in traits.items() if isinstance(v, (int, float))}
+        except Exception:
+            pass
+        return web.json_response({"events": events, "current_traits": current_traits})
+
+    # ------------------------------------------------------------------
+    # Item 114: GET /api/quality-trend 对话质量趋势
+    # ------------------------------------------------------------------
+
+    async def handle_quality_trend(request: web.Request) -> web.Response:
+        """聚合 dialogue.self_score 历史数据，返回最近 N 轮的分数列表。"""
+        from sylanne_alpha.dialogue import self_score
+
+        current = _plugin(plugin)
+        session_key = str(request.query.get("session", "") or "").strip()
+        all_sessions = _known_sessions(current, requested=session_key)
+        if not session_key and all_sessions:
+            session_key = all_sessions[0]
+
+        limit = max(1, min(200, int(request.query.get("limit", "50") or "50")))
+        scores: list[dict] = []
+
+        try:
+            # 从 computation_logs 中提取用户文本和 bot 回复，计算 self_score
+            logs = getattr(current, "_computation_logs", None)
+            if logs:
+                session_logs = [
+                    e for e in logs
+                    if str(e.get("session", "")) == session_key
+                ][-limit:]
+                buffers = getattr(current, "_conversation_buffers", {}) or {}
+                buf = buffers.get(session_key)
+                tick = 0
+                for entry in session_logs:
+                    tick += 1
+                    user_text = str(entry.get("text", ""))
+                    # 尝试获取对应的 bot 回复
+                    bot_text = ""
+                    if buf and hasattr(buf, "_messages"):
+                        for i, msg in enumerate(getattr(buf, "_messages", [])):
+                            if msg.get("role") == "user" and msg.get("text", "")[:60] == user_text:
+                                if i + 1 < len(getattr(buf, "_messages", [])):
+                                    next_msg = getattr(buf, "_messages", [])[i + 1]
+                                    if next_msg.get("role") == "bot":
+                                        bot_text = str(next_msg.get("text", ""))
+                                break
+                    if not bot_text:
+                        bot_text = user_text  # fallback
+                    score = self_score(user_text, bot_text)
+                    scores.append({
+                        "tick": tick,
+                        "coherence": round(score.get("coherence", 0.0), 4),
+                        "emotion": round(score.get("emotion_match", 0.0), 4),
+                        "density": round(score.get("info_density", 0.0), 4),
+                    })
+        except Exception:
+            pass
+        return web.json_response({"scores": scores})
+
+    # ------------------------------------------------------------------
+    # Item 32: GET /api/scar_map 伤痕可视化地图数据
+    # ------------------------------------------------------------------
+
+    async def handle_scar_map(request: web.Request) -> web.Response:
+        """返回伤痕力导向图数据：nodes + edges。"""
+        current = _plugin(plugin)
+        session_key = str(request.query.get("session", "") or "").strip()
+        hosts_dict = getattr(current, "_hosts", {}) or {}
+        all_sessions = _known_sessions(current, requested=session_key)
+        if not session_key and all_sessions:
+            session_key = all_sessions[0]
+
+        nodes: list[dict] = []
+        edges: list[dict] = []
+        try:
+            host = hosts_dict.get(session_key) if isinstance(hosts_dict, dict) else None
+            if host is not None:
+                comp = host.kernel.computation
+                scar_state = getattr(comp.engine, "scar_state", None)
+                if scar_state is not None:
+                    for idx, scar in enumerate(scar_state.scars):
+                        nodes.append({
+                            "id": f"scar_{idx}",
+                            "dimension": scar.dimension,
+                            "intensity": round(scar.alpha, 3),
+                            "temperature": round(
+                                1.0 - scar.ticks_in_stage / max(1, 150), 3
+                            ),
+                            "state": scar.stage.name.lower(),
+                        })
+                    # edges: 同维度伤痕之间的耦合
+                    from collections import defaultdict
+                    dim_groups: dict[int, list[int]] = defaultdict(list)
+                    for idx, scar in enumerate(scar_state.scars):
+                        dim_groups[scar.dimension].append(idx)
+                    for dim, indices in dim_groups.items():
+                        for i in range(len(indices)):
+                            for j in range(i + 1, len(indices)):
+                                # 耦合强度：两个伤痕 alpha 的几何平均
+                                a_i = scar_state.scars[indices[i]].alpha
+                                a_j = scar_state.scars[indices[j]].alpha
+                                coupling = round((a_i * a_j) ** 0.5 / 2.0, 3)
+                                edges.append({
+                                    "source": f"scar_{indices[i]}",
+                                    "target": f"scar_{indices[j]}",
+                                    "coupling": coupling,
+                                })
+        except Exception:
+            pass
+        return web.json_response({"nodes": nodes, "edges": edges})
+
+    # ------------------------------------------------------------------
+    # Item 52: GET /api/sheaf_topology 关系层析可视化数据
+    # ------------------------------------------------------------------
+
+    async def handle_sheaf_topology(request: web.Request) -> web.Response:
+        """返回关系层析拓扑数据：nodes + edges + cohomology_h1。"""
+        from sylanne_alpha.relational_sheaf import _REL_TYPE_NAMES
+
+        current = _plugin(plugin)
+        session_key = str(request.query.get("session", "") or "").strip()
+        hosts_dict = getattr(current, "_hosts", {}) or {}
+        all_sessions = _known_sessions(current, requested=session_key)
+        if not session_key and all_sessions:
+            session_key = all_sessions[0]
+
+        nodes: list[dict] = []
+        edges: list[dict] = []
+        h1 = 0.0
+        try:
+            host = hosts_dict.get(session_key) if isinstance(hosts_dict, dict) else None
+            if host is not None:
+                sheaf = host.kernel.computation.sheaf
+                obs = sheaf.observe()
+                h1 = obs.get("h1_dim", 0)
+                # 构建节点：每个顶点（partner）
+                complex_ = sheaf.complex
+                for v in complex_._vertices:
+                    if v == 0:
+                        nodes.append({"id": "agent", "type": "self"})
+                    else:
+                        edge_idx = complex_.edge_index(v)
+                        rel_type_int = (
+                            sheaf._rel_types[edge_idx]
+                            if edge_idx < len(sheaf._rel_types)
+                            else 1
+                        )
+                        type_name = (
+                            _REL_TYPE_NAMES[rel_type_int]
+                            if rel_type_int < len(_REL_TYPE_NAMES)
+                            else "friendly"
+                        )
+                        nodes.append({"id": f"partner_{v}", "type": type_name})
+                # 构建边
+                incon = obs.get("inconsistency_per_edge", [])
+                for ei, (_, partner) in enumerate(complex_._edges):
+                    coupling = round(
+                        1.0 - (incon[ei] if ei < len(incon) else 0.0), 4
+                    )
+                    edges.append({
+                        "source": "agent",
+                        "target": f"partner_{partner}",
+                        "coupling": coupling,
+                    })
+        except Exception:
+            pass
+        return web.json_response({
+            "nodes": nodes,
+            "edges": edges,
+            "cohomology_h1": h1,
+        })
+
+    # ------------------------------------------------------------------
+    # Item 138: GET /api/topic-gravity 话题重力可视化数据
+    # ------------------------------------------------------------------
+
+    async def handle_topic_gravity(request: web.Request) -> web.Response:
+        """返回话题重力场数据。"""
+        import math as _math
+
+        current = _plugin(plugin)
+        session_key = str(request.query.get("session", "") or "").strip()
+        hosts_dict = getattr(current, "_hosts", {}) or {}
+        all_sessions = _known_sessions(current, requested=session_key)
+        if not session_key and all_sessions:
+            session_key = all_sessions[0]
+
+        topics: list[dict] = []
+        try:
+            host = hosts_dict.get(session_key) if isinstance(hosts_dict, dict) else None
+            if host is not None:
+                tg = getattr(host, "_topic_gravity", None) or getattr(
+                    host.kernel, "_topic_gravity", None
+                )
+                if tg is None:
+                    # 尝试从插件级别获取
+                    tg = getattr(current, "_topic_gravity", None)
+                if tg is not None:
+                    now = time.time()
+                    for name, node in tg._topics.items():
+                        age = now - node.last_active
+                        half_life = getattr(tg, "_half_life", 7200)
+                        decay = _math.exp(-age * _math.log(2) / half_life)
+                        topics.append({
+                            "name": node.name,
+                            "mass": round(node.mass * decay, 4),
+                            "decay_factor": round(decay, 4),
+                            "visits": node.visit_count,
+                        })
+                    topics.sort(key=lambda x: x["mass"], reverse=True)
+        except Exception:
+            pass
+        return web.json_response({"topics": topics})
+
     app.router.add_get("/", handle_page)
+    app.router.add_get("/health", handle_health)
+    app.router.add_get("/metrics", handle_metrics)
     app.router.add_get("/api/state", handle_state)
     app.router.add_get("/api/settings", handle_settings_get)
     app.router.add_post("/api/settings", handle_settings_post)
@@ -360,8 +1223,62 @@ async def start_webui_server(plugin: Any, host: str = "127.0.0.1", port: int = 2
     app.router.add_get("/api/memory_sink", handle_memory_sink)
     app.router.add_post("/api/memory_consolidate", handle_memory_consolidate)
     app.router.add_post("/api/memory_meltdown", handle_memory_meltdown)
+    app.router.add_get("/api/config_presets", handle_config_presets)
+    app.router.add_get("/api/glossary", handle_glossary)
+    app.router.add_get("/api/export_data", handle_export_data)
+    app.router.add_delete("/api/purge_data", handle_purge_data)
+    app.router.add_get("/api/error_stats", handle_error_stats)
+    app.router.add_get("/api/config_export", handle_config_export)
+    app.router.add_post("/api/config_import", handle_config_import)
+    app.router.add_get("/api/widget-state", handle_widget_state)
+    app.router.add_post("/api/proactive_feedback", handle_proactive_feedback)
+    app.router.add_get("/api/weekly_report", handle_weekly_report)
+    app.router.add_get("/api/memory/decay_curve", handle_memory_decay_curve)
+    app.router.add_get("/api/personality/export", handle_personality_export)
+    app.router.add_post("/api/personality/import", handle_personality_import)
+    app.router.add_get("/api/relationship_temperature", handle_relationship_temperature)
+    app.router.add_get("/api/diagnostic_report", handle_diagnostic_report)
+    app.router.add_get("/api/personality/drift-map", handle_personality_drift_map)
+    app.router.add_get("/api/quality-trend", handle_quality_trend)
+    app.router.add_get("/api/theme", handle_theme_get)
+    app.router.add_post("/api/theme", handle_theme_post)
+    app.router.add_get("/api/rhythm_profile", handle_rhythm_profile)
+    app.router.add_get("/api/scar_map", handle_scar_map)
+    app.router.add_get("/api/sheaf_topology", handle_sheaf_topology)
+    app.router.add_get("/api/topic-gravity", handle_topic_gravity)
     app.router.add_get("/assets/logo.png", handle_logo)
     app.router.add_get("/logo.png", handle_logo)
+
+    # ------------------------------------------------------------------
+    # Item 16: WebSocket 实时状态推送（/ws/state）
+    # ------------------------------------------------------------------
+
+    _ws_connections: set[web.WebSocketResponse] = set()
+    _WS_MAX_CONNECTIONS = 10
+
+    async def handle_ws_state(request: web.Request) -> web.WebSocketResponse:
+        if len(_ws_connections) >= _WS_MAX_CONNECTIONS:
+            ws = web.WebSocketResponse()
+            await ws.prepare(request)
+            await ws.close(code=1013, message=b"too many connections")
+            return ws
+        ws = web.WebSocketResponse(heartbeat=30)
+        await ws.prepare(request)
+        _ws_connections.add(ws)
+        try:
+            while not ws.closed:
+                state = _build_state(_plugin(plugin))
+                await ws.send_json(state)
+                await asyncio.sleep(2)
+        except Exception:
+            pass
+        finally:
+            _ws_connections.discard(ws)
+            if not ws.closed:
+                await ws.close()
+        return ws
+
+    app.router.add_get("/ws/state", handle_ws_state)
 
     runner = web.AppRunner(app)
     await runner.setup()
@@ -458,6 +1375,7 @@ def start_webui_thread_server(
         server_version = "SylanneWebUI/1.0"
         _MAX_BODY_SIZE = 1024 * 1024  # 1MB max request body
         _rate_limit_window: dict[str, list[float]] = {}
+        _rate_limit_lock = threading.Lock()
         _RATE_LIMIT_MAX = 60  # max requests per window
         _RATE_LIMIT_WINDOW_SEC = 60.0
 
@@ -468,12 +1386,13 @@ def start_webui_thread_server(
             """Return True if request should be rejected (rate limited)."""
             client_ip = self.client_address[0]
             now = time.time()
-            window = self._rate_limit_window.setdefault(client_ip, [])
-            cutoff = now - self._RATE_LIMIT_WINDOW_SEC
-            self._rate_limit_window[client_ip] = [t for t in window if t > cutoff]
-            if len(self._rate_limit_window[client_ip]) >= self._RATE_LIMIT_MAX:
-                return True
-            self._rate_limit_window[client_ip].append(now)
+            with self._rate_limit_lock:
+                window = self._rate_limit_window.setdefault(client_ip, [])
+                cutoff = now - self._RATE_LIMIT_WINDOW_SEC
+                self._rate_limit_window[client_ip] = [t for t in window if t > cutoff]
+                if len(self._rate_limit_window[client_ip]) >= self._RATE_LIMIT_MAX:
+                    return True
+                self._rate_limit_window[client_ip].append(now)
             return False
 
         def _send_json(self, payload: Any, status: int = 200) -> None:
@@ -521,19 +1440,24 @@ def start_webui_thread_server(
                 "Access-Control-Allow-Origin",
                 f"http://127.0.0.1:{port}",
             )
-            self.send_header("Access-Control-Allow-Methods", "GET,POST,OPTIONS")
+            self.send_header("Access-Control-Allow-Methods", "GET,POST,DELETE,OPTIONS")
             self.send_header(
-                "Access-Control-Allow-Headers", "Content-Type,Authorization"
+                "Access-Control-Allow-Headers", "Content-Type,Authorization,X-CSRF-Token"
             )
             self.end_headers()
 
         def do_GET(self) -> None:
+            global _last_diag_request
             if self._check_rate_limit():
                 self._send_json({"error": "rate_limited"}, status=429)
                 return
             parsed = urlparse(self.path)
             path = parsed.path.rstrip("/") or "/"
-            if path not in ("/", "/logo.png", "/assets/logo.png"):
+<<<<<<< Updated upstream
+            if path not in ("/", "/favicon.ico", "/logo.png", "/assets/logo.png"):
+=======
+            if path not in ("/", "/health", "/metrics", "/logo.png", "/assets/logo.png"):
+>>>>>>> Stashed changes
                 auth = self.headers.get("Authorization", "")
                 if not auth.startswith("Bearer ") or auth[7:] != _active_token:
                     self._send_json({"error": "unauthorized"}, status=401)
@@ -553,6 +1477,8 @@ def start_webui_thread_server(
                         state = _build_state(
                             _plugin(plugin), session=query.get("session", "")
                         )
+                    # Item 24: 在 state 响应中附带 csrf_token
+                    state["csrf_token"] = _csrf_token
                     self._send_json(state)
                 elif path == "/api/settings":
                     with _plugin_access_lock:
@@ -567,7 +1493,6 @@ def start_webui_thread_server(
                         {"schema": schema, "values": values, "providers": []}
                     )
                 elif path == "/api/computation_logs":
-                    global _last_diag_request
                     _last_diag_request = time.time()
                     with _plugin_access_lock:
                         current = _plugin(plugin)
@@ -629,6 +1554,232 @@ def start_webui_thread_server(
                                 mem_sys.sink_to_l2(item_ids)
                                 logger.info(f"Sylanne MEMORY SINK (stdlib): session={session}, sunk={len(item_ids)}")
                                 self._send_json({"ok": True, "sunk": len(item_ids)})
+                elif path == "/health":
+                    uptime_s = int(time.time() - _start_time)
+                    current = _plugin(plugin)
+                    hosts_dict = getattr(current, "_hosts", {}) or {}
+                    sessions_count = len(hosts_dict) if isinstance(hosts_dict, dict) else 0
+                    memory_mb = _get_process_memory_mb()
+                    self._send_json({
+                        "status": "ok",
+                        "uptime_s": uptime_s,
+                        "sessions": sessions_count,
+                        "memory_mb": memory_mb,
+                    })
+                elif path == "/metrics":
+                    metrics_text = _build_metrics()
+                    data = metrics_text.encode("utf-8")
+                    self.send_response(200)
+                    self.send_header("Content-Type", "text/plain; version=0.0.4; charset=utf-8")
+                    self.send_header("Content-Length", str(len(data)))
+                    self.end_headers()
+                    self.wfile.write(data)
+                elif path == "/api/error_stats":
+                    cutoff = int(time.time()) // 60 * 60 - 3600
+                    with _error_counts_lock:
+                        data = [
+                            {"minute": ts, "errors": errs, "warnings": warns}
+                            for ts, errs, warns in _error_counts
+                            if ts >= cutoff
+                        ]
+                    self._send_json(data)
+                elif path == "/api/config_export":
+                    with _plugin_access_lock:
+                        current_plugin = _plugin(plugin)
+                        config = dict(getattr(current_plugin, "_config", {}) or {})
+                    self._send_json(config)
+                elif path == "/api/glossary":
+                    from sylanne_alpha.webui_routes import GLOSSARY
+                    self._send_json({"glossary": GLOSSARY})
+                elif path == "/api/widget-state":
+                    with _plugin_access_lock:
+                        current = _plugin(plugin)
+                        data = _build_widget_state(current)
+                    self._send_json(data)
+                elif path == "/api/weekly_report":
+                    from sylanne_alpha.analytics import generate_weekly_report
+                    with _plugin_access_lock:
+                        current = _plugin(plugin)
+                        report = generate_weekly_report(current)
+                    self._send_json(report)
+                elif path == "/api/memory/decay_curve":
+                    import math as _math
+                    memory_id = query.get("memory_id", "")
+                    if not memory_id:
+                        self._send_json({"ok": False, "error": "missing memory_id param"})
+                    else:
+                        target_memory = None
+                        with _plugin_access_lock:
+                            current_plugin = _plugin(plugin)
+                            hosts_d = getattr(current_plugin, "_hosts", {}) or {}
+                            mem_getter = getattr(current_plugin, "_memory_system_for_session", None)
+                            for sk in list(hosts_d.keys()):
+                                mem_sys = mem_getter(sk) if callable(mem_getter) else None
+                                if mem_sys is None:
+                                    continue
+                                for pool in (getattr(mem_sys, "_l1", []) or [], getattr(mem_sys, "_l2", []) or []):
+                                    for item in list(pool):
+                                        item_id = getattr(item, "id", None) or (item.get("id") if isinstance(item, dict) else None)
+                                        if str(item_id) == memory_id:
+                                            target_memory = item
+                                            break
+                                    if target_memory:
+                                        break
+                                if target_memory:
+                                    break
+                        if target_memory is None:
+                            self._send_json({"ok": False, "error": "memory_id not found"})
+                        else:
+                            created_at = float(getattr(target_memory, "created_at", 0) or (target_memory.get("created_at", 0) if isinstance(target_memory, dict) else 0))
+                            rehearsal = int(getattr(target_memory, "recall_count", 0) or (target_memory.get("recall_count", 0) if isinstance(target_memory, dict) else 0))
+                            emotional_weight = float(getattr(target_memory, "emotional_weight", 0.5) or (target_memory.get("emotional_weight", 0.5) if isinstance(target_memory, dict) else 0.5))
+                            stability = 24 * (1 + rehearsal * 0.5) * (1 + emotional_weight)
+                            curve = []
+                            for hour in range(169):
+                                retention = max(0.05, _math.exp(-hour / stability))
+                                curve.append({"hour": hour, "retention": round(retention, 4)})
+                            self._send_json({"memory_id": memory_id, "created_at": created_at, "stability": round(stability, 2), "rehearsal": rehearsal, "emotional_weight": round(emotional_weight, 3), "curve": curve})
+                elif path == "/api/theme":
+                    self._send_json({"theme": _theme_preference})
+                elif path == "/api/rhythm_profile":
+                    with _plugin_access_lock:
+                        current = _plugin(plugin)
+                        rhythm_learner = getattr(current, "_rhythm_learner", None)
+                    if rhythm_learner is None:
+                        self._send_json({"ok": False, "error": "rhythm_learner unavailable"})
+                    else:
+                        session = query.get("session", "")
+                        if not session:
+                            with _plugin_access_lock:
+                                hosts_d = getattr(current, "_hosts", {}) or {}
+                            if isinstance(hosts_d, dict) and hosts_d:
+                                session = next(iter(hosts_d))
+                            else:
+                                session = "default"
+                        profile = rhythm_learner.profile(session)
+                        tempo = rhythm_learner.tempo
+                        reply_length_factor = rhythm_learner.get_reply_length_factor(session)
+                        last_msg_time = profile._last_msg_time if profile is not None else 0.0
+                        breath_hold = rhythm_learner.detect_breath_hold(last_msg_time, time.time()) if last_msg_time > 0 else False
+                        avg_message_length = profile.avg_part_chars if profile is not None else 0.0
+                        self._send_json({
+                            "ok": True,
+                            "session": session,
+                            "tempo": round(tempo, 3),
+                            "avg_message_length": round(avg_message_length, 1),
+                            "reply_length_factor": round(reply_length_factor, 3),
+                            "breath_hold": breath_hold,
+                            "confidence": round(profile.confidence, 3) if profile is not None else 0.0,
+                            "chars_per_second": round(profile.chars_per_second, 2) if profile is not None else 0.0,
+                        })
+                elif path == "/api/scar_map":
+                    session_key = query.get("session", "")
+                    with _plugin_access_lock:
+                        current = _plugin(plugin)
+                        hosts_dict = getattr(current, "_hosts", {}) or {}
+                        all_sessions = _known_sessions(current, requested=session_key)
+                        if not session_key and all_sessions:
+                            session_key = all_sessions[0]
+                    nodes: list = []
+                    edges: list = []
+                    try:
+                        host = hosts_dict.get(session_key) if isinstance(hosts_dict, dict) else None
+                        if host is not None:
+                            comp = host.kernel.computation
+                            scar_state = getattr(comp.engine, "scar_state", None)
+                            if scar_state is not None:
+                                for idx, scar in enumerate(scar_state.scars):
+                                    nodes.append({
+                                        "id": f"scar_{idx}",
+                                        "dimension": scar.dimension,
+                                        "intensity": round(scar.alpha, 3),
+                                        "temperature": round(1.0 - scar.ticks_in_stage / max(1, 150), 3),
+                                        "state": scar.stage.name.lower(),
+                                    })
+                                from collections import defaultdict
+                                dim_groups: dict = defaultdict(list)
+                                for idx, scar in enumerate(scar_state.scars):
+                                    dim_groups[scar.dimension].append(idx)
+                                for dim, indices in dim_groups.items():
+                                    for i in range(len(indices)):
+                                        for j in range(i + 1, len(indices)):
+                                            a_i = scar_state.scars[indices[i]].alpha
+                                            a_j = scar_state.scars[indices[j]].alpha
+                                            coupling = round((a_i * a_j) ** 0.5 / 2.0, 3)
+                                            edges.append({
+                                                "source": f"scar_{indices[i]}",
+                                                "target": f"scar_{indices[j]}",
+                                                "coupling": coupling,
+                                            })
+                    except Exception:
+                        pass
+                    self._send_json({"nodes": nodes, "edges": edges})
+                elif path == "/api/sheaf_topology":
+                    from sylanne_alpha.relational_sheaf import _REL_TYPE_NAMES
+                    session_key = query.get("session", "")
+                    with _plugin_access_lock:
+                        current = _plugin(plugin)
+                        hosts_dict = getattr(current, "_hosts", {}) or {}
+                        all_sessions = _known_sessions(current, requested=session_key)
+                        if not session_key and all_sessions:
+                            session_key = all_sessions[0]
+                    nodes = []
+                    edges = []
+                    h1 = 0.0
+                    try:
+                        host = hosts_dict.get(session_key) if isinstance(hosts_dict, dict) else None
+                        if host is not None:
+                            sheaf = host.kernel.computation.sheaf
+                            obs = sheaf.observe()
+                            h1 = obs.get("h1_dim", 0)
+                            complex_ = sheaf.complex
+                            for v in complex_._vertices:
+                                if v == 0:
+                                    nodes.append({"id": "agent", "type": "self"})
+                                else:
+                                    edge_idx = complex_.edge_index(v)
+                                    rel_type_int = sheaf._rel_types[edge_idx] if edge_idx < len(sheaf._rel_types) else 1
+                                    type_name = _REL_TYPE_NAMES[rel_type_int] if rel_type_int < len(_REL_TYPE_NAMES) else "friendly"
+                                    nodes.append({"id": f"partner_{v}", "type": type_name})
+                            incon = obs.get("inconsistency_per_edge", [])
+                            for ei, (_, partner) in enumerate(complex_._edges):
+                                coupling = round(1.0 - (incon[ei] if ei < len(incon) else 0.0), 4)
+                                edges.append({"source": "agent", "target": f"partner_{partner}", "coupling": coupling})
+                    except Exception:
+                        pass
+                    self._send_json({"nodes": nodes, "edges": edges, "cohomology_h1": h1})
+                elif path == "/api/topic-gravity":
+                    import math as _math
+                    session_key = query.get("session", "")
+                    with _plugin_access_lock:
+                        current = _plugin(plugin)
+                        hosts_dict = getattr(current, "_hosts", {}) or {}
+                        all_sessions = _known_sessions(current, requested=session_key)
+                        if not session_key and all_sessions:
+                            session_key = all_sessions[0]
+                    topics: list = []
+                    try:
+                        host = hosts_dict.get(session_key) if isinstance(hosts_dict, dict) else None
+                        if host is not None:
+                            tg = getattr(host, "_topic_gravity", None) or getattr(host.kernel, "_topic_gravity", None)
+                            if tg is None:
+                                tg = getattr(current, "_topic_gravity", None)
+                            if tg is not None:
+                                now = time.time()
+                                for name, node in tg._topics.items():
+                                    age = now - node.last_active
+                                    half_life = getattr(tg, "_half_life", 7200)
+                                    decay = _math.exp(-age * _math.log(2) / half_life)
+                                    topics.append({
+                                        "name": node.name,
+                                        "mass": round(node.mass * decay, 4),
+                                        "decay_factor": round(decay, 4),
+                                        "visits": node.visit_count,
+                                    })
+                                topics.sort(key=lambda x: x["mass"], reverse=True)
+                    except Exception:
+                        pass
+                    self._send_json({"topics": topics})
                 elif path in {"/assets/logo.png", "/logo.png"}:
                     self._send_logo()
                 else:
@@ -638,16 +1789,22 @@ def start_webui_thread_server(
                 self._send_json({"ok": False, "error": "internal_error"}, status=500)
 
         def do_POST(self) -> None:
+            global _theme_preference
             if self._check_rate_limit():
                 self._send_json({"error": "rate_limited"}, status=429)
                 return
             parsed = urlparse(self.path)
             path = parsed.path.rstrip("/") or "/"
-            if path not in ("/", "/logo.png", "/assets/logo.png"):
+            if path not in ("/", "/favicon.ico", "/logo.png", "/assets/logo.png"):
                 auth = self.headers.get("Authorization", "")
                 if not auth.startswith("Bearer ") or auth[7:] != _active_token:
                     self._send_json({"error": "unauthorized"}, status=401)
                     return
+            # Item 24: CSRF 防护 — POST 需要 X-CSRF-Token header
+            csrf_header = self.headers.get("X-CSRF-Token", "")
+            if csrf_header != _csrf_token:
+                self._send_json({"error": "csrf_token_mismatch"}, status=403)
+                return
             try:
                 length = int(self.headers.get("Content-Length", "0") or "0")
                 if length > self._MAX_BODY_SIZE:
@@ -745,6 +1902,49 @@ def start_webui_thread_server(
                     self._send_json({"ok": True, "session": session, "cleared": True})
                 except Exception as exc:
                     self._send_json({"ok": False, "error": str(exc)}, status=500)
+            elif path == "/api/config_import":
+                try:
+                    if not isinstance(body, dict) or not body:
+                        self._send_json({"ok": False, "error": "expected_object"}, status=400)
+                        return
+                    with _plugin_access_lock:
+                        current_plugin = _plugin(plugin)
+                        config = getattr(current_plugin, "_config", None)
+                        if config is None:
+                            self._send_json({"ok": False, "error": "no_config"}, status=500)
+                            return
+                        config.update(body)
+                        persistent = getattr(current_plugin, "config", config)
+                        if isinstance(persistent, dict):
+                            persistent.update(body)
+                        if hasattr(persistent, "save_config"):
+                            persistent.save_config()
+                    self._send_json({"ok": True, "keys": list(body.keys())})
+                except Exception as exc:
+                    self._send_json({"ok": False, "error": str(exc)}, status=500)
+            elif path == "/api/proactive_feedback":
+                try:
+                    session_key = str(body.get("session_key", "")).strip()
+                    timestamp = float(body.get("timestamp", 0))
+                    rating = str(body.get("rating", "")).strip()
+                    if not session_key or not rating or rating not in ("positive", "negative"):
+                        self._send_json({"ok": False, "error": "invalid_params"}, status=400)
+                        return
+                    with _plugin_access_lock:
+                        current = _plugin(plugin)
+                        scheduler = getattr(current, "_proactive_scheduler", None)
+                        if scheduler is not None and hasattr(scheduler, "record_feedback"):
+                            scheduler.record_feedback(session_key, timestamp, rating)
+                    self._send_json({"ok": True})
+                except Exception as exc:
+                    self._send_json({"ok": False, "error": str(exc)}, status=500)
+            elif path == "/api/theme":
+                theme = str(body.get("theme", "")).strip()
+                if theme not in ("dark", "light", "auto"):
+                    self._send_json({"ok": False, "error": "invalid theme, must be dark|light|auto"}, status=400)
+                    return
+                _theme_preference = theme
+                self._send_json({"ok": True, "theme": _theme_preference})
             else:
                 self.send_error(404)
 
@@ -1704,8 +2904,6 @@ def _memory_graph_node_payload(node: Any) -> dict[str, Any]:
 
 def _load_schema(plugin: Any) -> dict[str, Any]:
     """加载配置 schema（_conf_schema.json）。"""
-    import os
-
     schema_path = os.path.join(
         os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "_conf_schema.json"
     )
@@ -1714,6 +2912,67 @@ def _load_schema(plugin: Any) -> dict[str, Any]:
             return json.load(f)
     except Exception:
         return {}
+
+
+def _get_process_memory_mb() -> float:
+    """获取当前进程内存占用（MB）。优先 psutil，其次 resource，都不可用返回 -1。"""
+    try:
+        import psutil
+        process = psutil.Process(os.getpid())
+        return round(process.memory_info().rss / 1024 / 1024, 1)
+    except Exception:
+        pass
+    try:
+        import resource
+        # resource.getrusage 在 Linux 返回 KB，macOS 返回 bytes
+        usage = resource.getrusage(resource.RUSAGE_SELF)
+        rss_kb = usage.ru_maxrss
+        if sys.platform == "darwin":
+            return round(rss_kb / 1024 / 1024, 1)
+        return round(rss_kb / 1024, 1)
+    except Exception:
+        pass
+    return -1
+
+
+def _build_widget_state(plugin: Any) -> dict[str, Any]:
+    """构建 AstrBot 管理面板状态卡片数据。"""
+    # phase: 从最活跃 host 的 computation spine 获取
+    phase = "normal"
+    temperature = 0.0
+    scars = 0
+    memory_count = 0
+    hosts = getattr(plugin, "_hosts", {}) or {}
+    if isinstance(hosts, dict):
+        for h in hosts.values():
+            try:
+                comp = h.kernel.computation
+                expr = comp.expression.state()
+                phase = str(expr.get("mode", "normal"))
+                engine_obs = comp.engine.observe()
+                temperature = round(float(engine_obs.get("warmth", 0.0)), 2)
+                scars = int(engine_obs.get("active_scars", engine_obs.get("scar_count", 0)))
+                break
+            except Exception:
+                continue
+    # memory_count: 所有会话的 L1+L2 条目总数
+    try:
+        mem_getter = getattr(plugin, "_memory_system_for_session", None)
+        if callable(mem_getter) and isinstance(hosts, dict):
+            for sk in hosts:
+                ms = mem_getter(sk)
+                if ms:
+                    memory_count += len(getattr(ms, "_l1", []) or [])
+                    memory_count += len(getattr(ms, "_l2", []) or [])
+    except Exception:
+        pass
+    return {
+        "phase": phase,
+        "temperature": temperature,
+        "scars": scars,
+        "memory_count": memory_count,
+        "version": "1.3.0",
+    }
 
 
 # ---------------------------------------------------------------------------
