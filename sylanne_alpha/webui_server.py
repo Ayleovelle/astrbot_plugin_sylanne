@@ -528,6 +528,7 @@ def start_webui_thread_server(
             self.end_headers()
 
         def do_GET(self) -> None:
+            global _last_diag_request
             if self._check_rate_limit():
                 self._send_json({"error": "rate_limited"}, status=429)
                 return
@@ -567,7 +568,6 @@ def start_webui_thread_server(
                         {"schema": schema, "values": values, "providers": []}
                     )
                 elif path == "/api/computation_logs":
-                    global _last_diag_request
                     _last_diag_request = time.time()
                     with _plugin_access_lock:
                         current = _plugin(plugin)
