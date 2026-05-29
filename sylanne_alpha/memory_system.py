@@ -747,6 +747,19 @@ class MemorySystem:
             and e.target not in dead_node_set
         ]
 
+        # 清理 label/edge 索引中的 stale entries
+        if dead_node_set:
+            if hasattr(self, "_l3_label_index"):
+                self._l3_label_index = {
+                    label: nid for label, nid in self._l3_label_index.items()
+                    if nid not in dead_node_set
+                }
+            if hasattr(self, "_l3_edge_index"):
+                self._l3_edge_index = {
+                    key: idx for key, idx in self._l3_edge_index.items()
+                    if idx < len(self._l3_edges)
+                }
+
     # ------------------------------------------------------------------
     # Ebbinghaus 遗忘曲线（Item 95）
     # ------------------------------------------------------------------

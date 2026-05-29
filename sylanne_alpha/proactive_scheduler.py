@@ -23,6 +23,7 @@
 from __future__ import annotations
 
 import asyncio
+import collections
 import time
 from typing import Any
 
@@ -53,8 +54,8 @@ class ProactiveScheduler:
         self._ritual_registry: dict[str, dict[str, tuple[int, int]]] = {}
         # 每会话最后消息时间追踪
         self._last_message_times: dict[str, float] = {}
-        # Item 6: 主动发言反馈历史
-        self._feedback_history: list[dict] = []
+        # Item 6: 主动发言反馈历史（限制最近 200 条防止无界增长）
+        self._feedback_history: collections.deque = collections.deque(maxlen=200)
 
     # ------------------------------------------------------------------
     # Policy & feedback
@@ -195,13 +196,13 @@ class ProactiveScheduler:
             sk, 0.0
         )
         cooldown = float(cfg.get("proactive_speech_dispatch_cooldown_seconds", 1800.0))
-        # 人格驱动硬下限：extraversion 高→下限低（最低60s），低→下限高（最高300s）
+        # 人格驱动硬下限：expression_drive 高→下限低（最低60s），低→下限高（最高300s）
         host = self._p._hosts.get(sk)
-        _extraversion = 0.5
+        _expression_drive = 0.5
         if host and hasattr(host.kernel, "_personality"):
             _p = host.kernel._personality() if callable(getattr(host.kernel, "_personality", None)) else {}
-            _extraversion = float((_p or {}).get("extraversion", 0.5))
-        _hard_floor = max(60.0, 300.0 - _extraversion * 240.0)
+            _expression_drive = float((_p or {}).get("expression_drive_trait", (_p or {}).get("extraversion", 0.5)))
+        _hard_floor = max(60.0, 300.0 - _expression_drive * 240.0)
         cooldown = max(cooldown, _hard_floor)
         if last_sent and (now - last_sent) < cooldown:
             return "cooldown_active"

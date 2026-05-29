@@ -400,6 +400,19 @@ class DriftAttribution:
 # ---------------------------------------------------------------------------
 
 
+def _get_seasonal_target() -> str | None:
+    """返回当前季节应调制的特质名，无需调制时返回 None。"""
+    month = time.localtime().tm_mon
+    if month in (12, 1, 2):
+        return "inner_order"
+    elif month in (3, 4, 5):
+        return "expression_drive_trait"
+    elif month in (6, 7, 8):
+        return "boundary_permeability"
+    else:
+        return "perception_acuity"
+
+
 def _seasonal_modulation(traits: dict[str, TraitMemory]) -> None:
     """根据当前月份对 Embodiment Five 施加微弱季节性调制（±0.01 级别）。
 
@@ -410,24 +423,11 @@ def _seasonal_modulation(traits: dict[str, TraitMemory]) -> None:
     - 秋天（9-11月）：perception_acuity 微升 +0.01
 
     调制量极小，仅作为长期背景趋势存在，不会覆盖其他漂移机制。
+    注意：此函数保留用于独立调用场景，compute_embodiment_drift 中已通过
+    pending 机制纳入 drift cap 约束。
     """
-    month = time.localtime().tm_mon
-
-    # 确定当前季节对应的特质和调制方向
-    if month in (12, 1, 2):
-        # 冬天：内在秩序微升
-        target = "inner_order"
-    elif month in (3, 4, 5):
-        # 春天：表达驱力微升
-        target = "expression_drive_trait"
-    elif month in (6, 7, 8):
-        # 夏天：边界渗透性微升
-        target = "boundary_permeability"
-    else:
-        # 秋天（9-11月）：感知敏锐度微升
-        target = "perception_acuity"
-
-    if target in traits:
+    target = _get_seasonal_target()
+    if target and target in traits:
         tm = traits[target]
         if not tm.frozen:
             tm.value = max(_TRAIT_FLOOR, min(_TRAIT_CEIL, tm.value + 0.01))
@@ -508,6 +508,11 @@ def compute_embodiment_drift(
             pending.append((trait_name, raw_delta, signal_name))
 
     # 速率限制：如果总变化量超过 _TICK_DRIFT_CAP，按比例缩放
+    # 季节性调制也纳入预算，不绕过 drift cap
+    seasonal_target = _get_seasonal_target()
+    if seasonal_target and seasonal_target in traits and not traits[seasonal_target].frozen:
+        pending.append((seasonal_target, 0.01, "_seasonal"))
+
     total_abs = sum(abs(d) for _, d, _ in pending)
     if total_abs > _TICK_DRIFT_CAP:
         scale = _TICK_DRIFT_CAP / total_abs
@@ -526,9 +531,6 @@ def compute_embodiment_drift(
         if oscillation_detector and actual != 0:
             if oscillation_detector.record(trait_name, actual):
                 tm.freeze(20)
-
-    # 季节性调制：每次 tick 施加微弱的季节背景趋势
-    _seasonal_modulation(traits)
 
 
 # ---------------------------------------------------------------------------

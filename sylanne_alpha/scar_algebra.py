@@ -425,6 +425,11 @@ class ScarredState:
         # Only heal pre-existing scars; newly formed scars skip their birth tick.
         healed = []
         if heal:
+            # 预计算 per-dim scar count，避免 O(n²)——主循环和奖励愈合共用
+            _dim_counts: dict[int, int] = {}
+            for s in self.scars[:existing_count]:
+                _dim_counts[s.dimension] = _dim_counts.get(s.dimension, 0) + 1
+
             # Time-aware healing: grant bonus ticks for real-time silence
             if timestamp > 0 and self._last_step_time > 0:
                 elapsed_minutes = (timestamp - self._last_step_time) / 60.0
@@ -433,13 +438,8 @@ class ScarredState:
                 )  # 1 bonus tick per 5 min silence
                 bonus_ticks = min(bonus_ticks, 10)  # cap at 10 bonus ticks
                 for _ in range(bonus_ticks):
-                    self._heal_one_tick(existing_count, healed)
+                    self._heal_one_tick(existing_count, healed, _dim_counts)
             self._last_step_time = timestamp
-
-            # 预计算 per-dim scar count，避免 O(n²)
-            _dim_counts: dict[int, int] = {}
-            for s in self.scars[:existing_count]:
-                _dim_counts[s.dimension] = _dim_counts.get(s.dimension, 0) + 1
 
             for scar in self.scars[:existing_count]:
                 if scar.stage == HealingStage.FADED:
@@ -470,13 +470,13 @@ class ScarredState:
             "base": list(self.base),
         }
 
-    def _heal_one_tick(self, existing_count: int, healed: list[int]) -> None:
+    def _heal_one_tick(self, existing_count: int, healed: list[int], _dim_counts: dict[int, int] | None = None) -> None:
         """执行一次愈合 tick（用于时间感知的奖励愈合）。"""
         for scar in self.scars[:existing_count]:
             if scar.stage == HealingStage.FADED:
                 continue
             scar.ticks_in_stage += 1
-            threshold = self.healing_duration(scar.stage, dim=scar.dimension)
+            threshold = self.healing_duration(scar.stage, dim=scar.dimension, _dim_counts=_dim_counts)
             if threshold > 0 and scar.ticks_in_stage >= threshold:
                 scar.stage = HealingStage(scar.stage + 1)
                 scar.ticks_in_stage = 0
@@ -578,6 +578,7 @@ class ScarredState:
             # Circuit breaker
             "circuit_breaker_active": self._circuit_breaker_active,
             "circuit_breaker_remaining": self._circuit_breaker_remaining,
+            "recent_scar_ticks": self._recent_scar_ticks,
             # Time-aware healing
             "last_step_time": self._last_step_time,
         }
@@ -597,6 +598,7 @@ class ScarredState:
         # Circuit breaker
         state._circuit_breaker_active = data.get("circuit_breaker_active", False)
         state._circuit_breaker_remaining = data.get("circuit_breaker_remaining", 0)
+        state._recent_scar_ticks = data.get("recent_scar_ticks", [])
         # Time-aware healing
         state._last_step_time = data.get("last_step_time", 0.0)
         return state
