@@ -333,7 +333,7 @@ class SessionContext:
             root = Path(
                 str(
                     cfg.get("sylanne_alpha_root")
-                    or get_astrbot_data_path() / "sylanne_alpha"
+                    or Path(get_astrbot_data_path()) / "sylanne_alpha"
                 )
             )
             if root.exists():
@@ -381,7 +381,7 @@ class SessionContext:
                 else getattr(self._p, "config", {}) or {}
             )
             root = cfg.get("sylanne_alpha_root") or str(
-                get_astrbot_data_path() / "sylanne_alpha"
+                Path(get_astrbot_data_path()) / "sylanne_alpha"
             )
             host = SylanneAlphaHost(root=root, session_key=session_key)
             # 编码器共享：避免每个 host 各持有一份 encoder 浪费内存
