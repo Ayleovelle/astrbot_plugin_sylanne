@@ -1234,6 +1234,7 @@ function stopNetworkCanvas() {
 var isPreview = false;
 var currentPage = null;
 var appState = null;
+var csrfToken = '';
 var autoScroll = true;
 var selectedLayer = 0;
 // 全局会话标识：持久化选中的 session，页面导航/重渲染不会丢失
@@ -1602,11 +1603,15 @@ async function apiFetch(path, opts) {
   var token = localStorage.getItem('sylanne_token') || '';
   var headers = {};
   if (token) headers['Authorization'] = 'Bearer ' + token;
+  var method = (opts.method || 'GET').toUpperCase();
+  if (csrfToken && method !== 'GET') headers['X-CSRF-Token'] = csrfToken;
   if (opts.headers) for (var k in opts.headers) headers[k] = opts.headers[k];
-  var r = await fetch(path, { method: opts.method || 'GET', headers: headers, body: opts.body || undefined });
+  var r = await fetch(path, { method: method, headers: headers, body: opts.body || undefined });
   if (r.status === 401) throw new Error('UNAUTHORIZED');
   if (!r.ok) throw new Error('HTTP ' + r.status);
-  return await r.json();
+  var json = await r.json();
+  if (json && json.csrf_token) csrfToken = json.csrf_token;
+  return json;
 }
 
 // 验证成功时更新人格连接显示（从后端读人格名和版本号）

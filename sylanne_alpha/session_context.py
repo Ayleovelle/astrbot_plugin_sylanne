@@ -79,6 +79,8 @@ class RitualRegistry:
                 "hour_end": (hour + 1) % 24,
                 "pattern": pattern,
             }
+            # 仪式已注册，只保留最近 5 条观测（用于更新时间窗口）
+            self._observations[key] = self._observations[key][-5:]
 
     def get_active_rituals(self, session_key: str) -> list[dict]:
         """获取指定会话的所有已注册仪式。
@@ -383,7 +385,7 @@ class SessionContext:
         """高强度互动加速关系年龄。
 
         每次高强度互动等效于 intensity * 24 小时的关系积累（最多 1 天）。
-        通过回拨 first_interaction_time 实现。
+        通过回拨 first_interaction_time 实现，但不会超过真实首次交互前 30 天。
 
         Args:
             session_key: 会话标识。
@@ -392,8 +394,11 @@ class SessionContext:
         intensity = max(0.0, min(1.0, intensity))
         acceleration_hours = intensity * 24  # 最多等效 1 天
         # 确保 first_interaction_time 已初始化
-        self.first_interaction_time(session_key)
-        self._first_interaction_times[session_key] -= acceleration_hours * 3600
+        real_first = self.first_interaction_time(session_key)
+        # 下界：不早于真实首次交互前 30 天
+        floor = real_first - 30 * 86400
+        new_time = self._first_interaction_times[session_key] - acceleration_hours * 3600
+        self._first_interaction_times[session_key] = max(floor, new_time)
 
     # ------------------------------------------------------------------
     # Item 103: 设备切换感知问候

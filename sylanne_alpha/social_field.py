@@ -176,6 +176,9 @@ class SocialFieldCollector:
             )
         gs.social_void_pressure = min(self._pressure_cap, gs.social_void_pressure)
 
+        # bot 未回复此消息 → 递增沉默计数
+        self.tick_silence(group_id)
+
         # 记录到旁观缓冲区（供后续上下文注入）
         gs.shadow_buffer.append(
             {
@@ -224,8 +227,7 @@ class SocialFieldCollector:
         """每条消息（即使不回复）都调用——追踪沉默计数。"""
         gs = self._get_group(group_id)
         gs.silence_ticks += 1
-        # 群聊安静时虚空压力缓慢衰减
-        gs.social_void_pressure *= 0.98
+        gs.social_void_pressure *= self._inactive_decay
 
     def is_group_context(self, event: Any) -> bool:
         """从事件对象自动检测是群聊还是私聊。"""

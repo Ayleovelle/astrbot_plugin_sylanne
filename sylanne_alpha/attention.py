@@ -151,6 +151,11 @@ class TinyBodyAttention:
         self.hidden_dim = min(32, max(8, int(hidden_dim)))
         self.heads = min(2, max(1, int(heads)))
         self.layers = 1 if layers != 0 else 0
+        self._boundary_permeability: float = 0.5
+
+    def set_personality_params(self, boundary_permeability: float = 0.5) -> None:
+        """设置人格参数，影响伤害敏感度系数。"""
+        self._boundary_permeability = max(0.0, min(1.0, boundary_permeability))
 
     def update(
         self, state: dict[str, float], event: dict[str, float]
@@ -210,9 +215,11 @@ class TinyBodyAttention:
         add("bloodflow.circulation", 0.03 * has_text + 0.016 * safe)
         add("temperature.warmth", 0.04 * safe + 0.02 * repair - 0.035 * hurt)
         add("temperature.volatility", 0.055 * boundary + 0.035 * hurt - 0.025 * safe)
-        add("wound.open", 0.075 * hurt + 0.03 * boundary - 0.05 * repair)
+        # 边界渗透性调制：permeability 高→伤害更容易穿透
+        bp = 0.6 + self._boundary_permeability * 0.8  # [0.6, 1.4]
+        add("wound.open", (0.075 * hurt + 0.03 * boundary) * bp - 0.05 * repair)
         add("wound.repair", 0.065 * repair + 0.012 * hurt)
-        add("wound.sensitivity", 0.05 * hurt + 0.025 * boundary)
+        add("wound.sensitivity", (0.05 * hurt + 0.025 * boundary) * bp)
         add(
             "nerve.sensitivity",
             0.035 * hurt + 0.02 * boundary + 0.01 * has_text - 0.018 * safe,

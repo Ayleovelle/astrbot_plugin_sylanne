@@ -188,9 +188,9 @@ class RhythmLearner:
         self._profiles: dict[str, RhythmProfile] = {}  # session_key → 节奏画像
         self._intimacy_threshold = intimacy_threshold  # 开始学习的亲密度阈值
         self._default_blend = 0.6  # 默认混合比例
-        self._tempo_timestamps: deque[float] = deque(maxlen=300)  # 5分钟窗口内的交互时间戳
-        self._last_tempo: float = 0.0  # 上一次计算的 tempo 值
-        self._tempo_shift: bool = False  # tempo 是否发生突变
+        self._tempo_timestamps: dict[str, deque] = {}  # session_key → 时间戳窗口
+        self._last_tempo: dict[str, float] = {}  # session_key → 上次 tempo
+        self._tempo_shift: dict[str, bool] = {}  # session_key → 是否突变
 
     def set_personality_params(self, intimacy_threshold: float, blend_rate: float):
         """设置人格驱动的节奏学习参数。"""
@@ -214,7 +214,7 @@ class RhythmLearner:
     ) -> None:
         """观察一条用户消息。只有亲密度足够时才学习。"""
         # 始终记录 tempo（不受亲密度门控）
-        self._record_tempo(timestamp)
+        self._record_tempo(session_key, timestamp)
 
         if not self.is_intimate(engine_observation):
             return
@@ -350,60 +350,82 @@ class RhythmLearner:
     # Item 122: 呼吸节奏的快慢时钟
     # ------------------------------------------------------------------
 
-    def _record_tempo(self, timestamp: float) -> None:
+    def _record_tempo(self, session_key: str, timestamp: float) -> None:
         """记录一次交互时间戳并更新 tempo 状态。"""
-        self._tempo_timestamps.append(timestamp)
-        new_tempo = self.tempo
-        if self._last_tempo > 0.0 and new_tempo > 0.0:
-            ratio = new_tempo / self._last_tempo
-            self._tempo_shift = ratio > 2.0 or ratio < 0.5
+        if session_key not in self._tempo_timestamps:
+            self._tempo_timestamps[session_key] = deque(maxlen=300)
+        self._tempo_timestamps[session_key].append(timestamp)
+        new_tempo = self._session_tempo(session_key)
+        last = self._last_tempo.get(session_key, 0.0)
+        if last > 0.0 and new_tempo > 0.0:
+            ratio = new_tempo / last
+            self._tempo_shift[session_key] = ratio > 2.0 or ratio < 0.5
         else:
-            self._tempo_shift = False
+            self._tempo_shift[session_key] = False
         if new_tempo > 0.0:
-            self._last_tempo = new_tempo
+            self._last_tempo[session_key] = new_tempo
 
-    @property
-    def tempo(self) -> float:
-        """最近 5 分钟内的交互频率（次/分钟），滑动窗口。"""
-        if not self._tempo_timestamps:
+    def _session_tempo(self, session_key: str) -> float:
+        """指定会话最近 5 分钟内的交互频率（次/分钟）。"""
+        timestamps = self._tempo_timestamps.get(session_key)
+        if not timestamps:
             return 0.0
-        now = self._tempo_timestamps[-1]
-        window_start = now - 300.0  # 5 分钟
-        # 统计窗口内的交互次数
-        count = sum(1 for t in self._tempo_timestamps if t >= window_start)
+        now = timestamps[-1]
+        window_start = now - 300.0
+        count = sum(1 for t in timestamps if t >= window_start)
         if count <= 1:
             return 0.0
-        # 窗口实际跨度
-        earliest_in_window = min(t for t in self._tempo_timestamps if t >= window_start)
+        earliest_in_window = min(t for t in timestamps if t >= window_start)
         span_minutes = (now - earliest_in_window) / 60.0
         if span_minutes < 0.01:
             return 0.0
         return count / span_minutes
 
     @property
+    def tempo(self) -> float:
+        """全局 tempo（兼容旧接口，返回最近活跃会话的 tempo）。"""
+        if not self._last_tempo:
+            return 0.0
+        best_key = max(self._last_tempo, key=self._last_tempo.get)
+        return self._session_tempo(best_key)
+
+    def session_tempo(self, session_key: str) -> float:
+        """获取指定会话的 tempo。"""
+        return self._session_tempo(session_key)
+
+    @property
     def tempo_shift(self) -> bool:
-        """tempo 是否发生突变（>2x 或 <0.5x 前值）。"""
-        return self._tempo_shift
+        """任一会话是否发生 tempo 突变（兼容旧接口）。"""
+        return any(self._tempo_shift.values()) if self._tempo_shift else False
+
+    def session_tempo_shift(self, session_key: str) -> bool:
+        """指定会话是否发生 tempo 突变。"""
+        return self._tempo_shift.get(session_key, False)
 
     # ------------------------------------------------------------------
     # Item 129: 对话呼吸的"屏息"检测
     # ------------------------------------------------------------------
 
-    def detect_breath_hold(self, last_message_time: float, now: float) -> bool:
+    def detect_breath_hold(self, last_message_time: float, now: float, session_key: str = "") -> bool:
         """当用户停顿超过正常间隔 2 倍时返回 True。
 
         正常间隔从 tempo_clock 的历史中位数计算。
         如果历史数据不足（<2 条时间戳），返回 False。
         """
-        if len(self._tempo_timestamps) < 2:
-            return False
-
-        # 计算相邻时间戳的间隔
-        sorted_ts = sorted(self._tempo_timestamps)
+        timestamps = self._tempo_timestamps.get(session_key) if session_key else None
+        if not timestamps:
+            all_ts = [t for dq in self._tempo_timestamps.values() for t in dq]
+            if len(all_ts) < 2:
+                return False
+            timestamps = sorted(all_ts)
+        else:
+            if len(timestamps) < 2:
+                return False
+            timestamps = sorted(timestamps)
         gaps = [
-            sorted_ts[i + 1] - sorted_ts[i]
-            for i in range(len(sorted_ts) - 1)
-            if sorted_ts[i + 1] - sorted_ts[i] > 0.1  # 过滤极短间隔
+            timestamps[i + 1] - timestamps[i]
+            for i in range(len(timestamps) - 1)
+            if timestamps[i + 1] - timestamps[i] > 0.1
         ]
         if not gaps:
             return False

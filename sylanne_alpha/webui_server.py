@@ -1839,6 +1839,14 @@ def start_webui_thread_server(
                                 value = str(value)
                             config[key] = value
                             updated.append(key)
+                    # Persist config to disk if AstrBot config supports it
+                    if updated:
+                        p_cfg = getattr(current_plugin, "config", None)
+                        if p_cfg is not None and hasattr(p_cfg, "save_config"):
+                            try:
+                                p_cfg.save_config()
+                            except Exception:
+                                pass
                     self._send_json({"ok": True, "updated": updated})
                 except Exception as exc:
                     self._send_json({"ok": False, "error": str(exc)}, status=500)
