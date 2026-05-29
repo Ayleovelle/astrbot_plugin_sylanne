@@ -14,7 +14,7 @@
 - 200ms 后台计算等待窗口：等 observe 任务完成再注入，避免过时数据
 - 短间隔变化检测：delta > 0.15 才注入慢变信号，避免重复注入
 
-### AstrBot 手册全量合规修复
+### 基于 AstrBot 框架事件工作流剖析的全量优化
 
 - **历史污染根治**：全项目零 `request.prompt` 写入，所有临时注入走 `system_prompt`
 - **realtime_dispatch**：5 处 prompt 污染修复
