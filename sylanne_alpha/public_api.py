@@ -59,8 +59,8 @@ def emit_event(event_type: str, payload: dict):
     for listener in _event_listeners.get(event_type, []):
         try:
             listener(payload)
-        except Exception:
-            pass
+        except Exception as exc:
+            logger.warning("emit_event(%s) listener raised: %s", event_type, exc)
 
 
 def on_event(event_type: str, callback: callable):

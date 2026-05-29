@@ -17,6 +17,7 @@
 
 from __future__ import annotations
 
+import collections
 import hashlib
 from typing import Any
 
@@ -296,7 +297,7 @@ class ModeRouter:
 
     def __init__(self):
         self._current_mode: str = "serious"
-        self._mode_history: list[str] = []
+        self._mode_history: collections.deque = collections.deque(maxlen=50)
 
     @property
     def current_mode(self) -> str:

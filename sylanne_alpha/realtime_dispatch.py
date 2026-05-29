@@ -231,7 +231,10 @@ class RealtimeDispatch:
                 input_epoch=plan_epoch,
                 reason=interrupted_reason,
             )
-            dispatches = p._realtime_chat_active_dispatches
+            dispatches = getattr(p, "_realtime_chat_active_dispatches", None)
+            if dispatches is None:
+                dispatches = {}
+                p._realtime_chat_active_dispatches = dispatches
             dispatches[session_key] = [
                 {
                     "sent_parts": sent_parts,
@@ -528,7 +531,7 @@ class RealtimeDispatch:
         *,
         budget: Any = None,
     ) -> bool:
-        dispatches = self._p._realtime_chat_active_dispatches
+        dispatches = getattr(self._p, "_realtime_chat_active_dispatches", {})
         entries = dispatches.get(session_key, [])
         if not entries:
             return False
@@ -588,7 +591,7 @@ class RealtimeDispatch:
     def append_realtime_ordinary_history_backfills_if_any(
         self, request: Any, session_key: str = "", **kwargs: Any
     ) -> bool:
-        backfills = self._p._realtime_ordinary_history_backfills
+        backfills = getattr(self._p, "_realtime_ordinary_history_backfills", {})
         entries = backfills.get(session_key, [])
         if not entries:
             return False
@@ -679,7 +682,7 @@ class RealtimeDispatch:
         p = self._p
         if state is None:
             return ""
-        cache = p._group_atmosphere_injection_snapshot_cache
+        cache = getattr(p, "_group_atmosphere_injection_snapshot_cache", {})
         previous = cache.get(session_key)
         cfg = p.config or {}
         diff_mode = str(cfg.get("state_injection_compact_mode", "")).lower() == "diff"

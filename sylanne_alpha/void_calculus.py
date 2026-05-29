@@ -81,6 +81,7 @@ class Void:
     age: int = 0
     beta: float = 0.0
     _estimated_boundary_size: int = 5
+    _last_boundary_hash: int = 0
 
     @property
     def is_ghost(self) -> bool:
@@ -107,8 +108,7 @@ class Void:
         self.beta = self.boundary_completeness
         if self.depth > 0 and self.age > 0:
             self.pressure += self.depth * math.log(self.age + 1) * (1.0 - self.beta)
-        # 硬顶：无论 pressure_cap 如何，绝对不超过 5.0
-        self.pressure = min(self.pressure, 5.0, pressure_cap)
+        self.pressure = min(self.pressure, pressure_cap)
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -184,7 +184,7 @@ class VoidSpace:
         split_threshold: float = 0.3,
         merge_threshold: float = 0.7,
         detection_threshold: float = 0.4,
-        pressure_threshold: float = 10.0,
+        pressure_threshold: float = 4.5,
     ):
         self.similarity_fn = similarity_fn
         self.voids: list[Void] = []
@@ -198,7 +198,7 @@ class VoidSpace:
         self._tick = 0
         self._creation_cooldown = 0
         self._cooldown_duration = 3
-        self._pressure_cap = 100.0
+        self._pressure_cap = 5.0
 
     def process(
         self, event_vec: bytes, surprise: float, prev_similarity: float
@@ -229,9 +229,8 @@ class VoidSpace:
         for v in self.voids:
             v.tick(self._pressure_cap)
 
-        # 硬顶：无论人格参数如何，单个虚空压力绝对不超过 5.0
         for v in self.voids:
-            v.pressure = min(v.pressure, 5.0)
+            v.pressure = min(v.pressure, self._pressure_cap)
 
         # Contract: event touches void boundaries
         result["voids_contracted"] = self._contract_all(event_vec)
@@ -283,6 +282,13 @@ class VoidSpace:
         contracted = 0
         for v in self.voids:
             before = len(v.boundary)
+            removed_vecs = [
+                b
+                for b in v.boundary
+                if self.similarity_fn(event_vec, b) >= self._contract_threshold
+            ]
+            if removed_vecs:
+                v._last_boundary_hash = hash(bytes(removed_vecs[-1]))
             v.boundary = [
                 b
                 for b in v.boundary
@@ -359,7 +365,7 @@ class VoidSpace:
                 ghost = VoidGhost(
                     depth=v.depth,
                     age_at_death=v.age,
-                    last_boundary_hash=hash(bytes(v.boundary[0])) if v.boundary else 0,
+                    last_boundary_hash=v._last_boundary_hash,
                 )
                 self.ghosts.append(ghost)
         self.voids = [v for v in self.voids if v.boundary]
