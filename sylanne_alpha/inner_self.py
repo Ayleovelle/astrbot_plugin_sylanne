@@ -53,6 +53,7 @@ class HiddenStateManager:
         for s in self._secrets:
             if random.random() < s.leak_probability:
                 leaked.append(s.description)
+                s.leak_probability *= 0.3
         return leaked
 
     def get_bias_vector(self) -> dict[str, float]:

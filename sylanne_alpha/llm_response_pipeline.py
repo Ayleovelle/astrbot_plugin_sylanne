@@ -143,8 +143,9 @@ class LLMResponsePipeline:
             if remainder.startswith(first_sent):
                 remainder = remainder[len(first_sent) :].strip()
             elif first_sent.rstrip("。！？!?.") in remainder:
-                idx = remainder.find(first_sent.rstrip("。！？!?."))
-                end_idx = idx + len(first_sent)
+                stripped = first_sent.rstrip("。！？!?.")
+                idx = remainder.find(stripped)
+                end_idx = idx + len(stripped)
                 if end_idx < len(remainder):
                     remainder = remainder[end_idx:].strip()
                 else:
@@ -370,6 +371,15 @@ class LLMResponsePipeline:
             )
             message = self._astrbot_message(text)
             await context.send_message(origin, message)
+            # 每发送一段，更新 unfinished 为剩余未发内容（消除竞态）
+            if session_key and idx < total:
+                remaining_text = "".join(
+                    str(p.get("text", "")) for p in parts[idx:]
+                )
+                if remaining_text:
+                    self._p._unfinished_replies[session_key] = remaining_text
+                else:
+                    self._p._unfinished_replies.pop(session_key, None)
         # 所有段发送成功——清除未完成标记
         if session_key:
             self._p._unfinished_replies.pop(session_key, None)

@@ -65,7 +65,7 @@ _SLOT_LABELS = {
 def _compute_injection_budget(gap_seconds: float, cfg: dict) -> int:
     """根据对话间隔计算本轮总注入预算（字符数）。"""
     override = cfg.get("state_injection_max_added_chars")
-    if override:
+    if override is not None:
         return int(override)
     for threshold, budget in _BUDGET_BY_GAP:
         if threshold is None or gap_seconds < threshold:
@@ -399,6 +399,8 @@ class LLMRequestPipeline:
                 topic = topic.strip()
                 if topic and topic not in prefs["taboo_topics"]:
                     prefs["taboo_topics"].append(topic)
+                    if len(prefs["taboo_topics"]) > 20:
+                        prefs["taboo_topics"] = prefs["taboo_topics"][-20:]
 
         # 风格偏好
         for keyword, style in self._PREF_STYLE_KEYWORDS.items():
