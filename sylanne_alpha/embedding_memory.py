@@ -120,4 +120,90 @@ def _cosine(left: list[float], right: list[float]) -> float:
     return dot / (left_norm * right_norm)
 
 
-__all__ = ["EMBEDDING_MEMORY_SCHEMA_VERSION", "recall_with_embedding_assist"]
+# ---------------------------------------------------------------------------
+# Item 116: 学习驱动知识图谱扩展
+# ---------------------------------------------------------------------------
+
+
+class KnowledgeFrontier:
+    """识别用户频繁提及但 Sylanne 理解薄弱的领域。
+
+    通过追踪话题的提及频率和 Sylanne 的理解置信度，
+    计算学习优先级（高频提及 × 低置信度），帮助 Sylanne
+    识别最需要主动学习的知识领域。
+
+    与其他组件的关系：
+    - 被对话处理流程调用 observe_topic() 记录话题
+    - 提供 get_learning_targets() 供主动学习调度器使用
+    - 支持序列化/反序列化以持久化存储
+    """
+
+    def __init__(self, max_topics: int = 20):
+        self._topic_mentions: dict[str, int] = {}  # topic -> mention count
+        self._topic_confidence: dict[str, float] = {}  # topic -> Sylanne 的理解置信度
+        self._max = max_topics
+
+    def observe_topic(self, topic: str, sylanne_confidence: float = 0.5):
+        """记录用户提及的话题和 Sylanne 的理解程度。
+
+        参数:
+            topic: 话题标识
+            sylanne_confidence: Sylanne 对该话题的理解置信度 [0, 1]
+        """
+        self._topic_mentions[topic] = self._topic_mentions.get(topic, 0) + 1
+        # 置信度取最近值
+        self._topic_confidence[topic] = sylanne_confidence
+        # 超出上限时移除最少提及的
+        if len(self._topic_mentions) > self._max:
+            min_topic = min(self._topic_mentions, key=self._topic_mentions.get)  # type: ignore[arg-type]
+            del self._topic_mentions[min_topic]
+            self._topic_confidence.pop(min_topic, None)
+
+    def get_learning_targets(self, top_n: int = 3) -> list[dict]:
+        """返回最需要学习的话题（高频提及 + 低置信度）。
+
+        学习优先级 = 提及频率 × (1 - 置信度)
+
+        参数:
+            top_n: 返回前 N 个最高优先级话题
+
+        返回:
+            按优先级降序排列的话题列表
+        """
+        scored = []
+        for topic, count in self._topic_mentions.items():
+            confidence = self._topic_confidence.get(topic, 0.5)
+            # 学习优先级 = 提及频率 × (1 - 置信度)
+            priority = count * (1 - confidence)
+            scored.append(
+                {
+                    "topic": topic,
+                    "mentions": count,
+                    "confidence": confidence,
+                    "priority": priority,
+                }
+            )
+        scored.sort(key=lambda x: x["priority"], reverse=True)
+        return scored[:top_n]
+
+    def to_dict(self) -> dict:
+        """序列化为字典。"""
+        return {
+            "mentions": dict(self._topic_mentions),
+            "confidence": dict(self._topic_confidence),
+        }
+
+    @classmethod
+    def from_dict(cls, data: dict) -> "KnowledgeFrontier":
+        """从字典恢复 KnowledgeFrontier 实例。"""
+        kf = cls()
+        kf._topic_mentions = data.get("mentions", {})
+        kf._topic_confidence = data.get("confidence", {})
+        return kf
+
+
+__all__ = [
+    "EMBEDDING_MEMORY_SCHEMA_VERSION",
+    "recall_with_embedding_assist",
+    "KnowledgeFrontier",
+]

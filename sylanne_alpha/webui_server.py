@@ -40,6 +40,8 @@ except ImportError:
     def get_astrbot_data_path() -> Path:  # type: ignore
         return Path.home()
 
+from sylanne_alpha.infra import resolve_data_root
+
 
 if TYPE_CHECKING:
     pass
@@ -193,11 +195,7 @@ async def start_webui_server(plugin: Any, host: str = "127.0.0.1", port: int = 2
 
     @web.middleware
     async def auth_middleware(request: web.Request, handler: Any) -> web.Response:
-<<<<<<< Updated upstream
-        if request.path in ("/", "/favicon.ico", "/logo.png", "/assets/logo.png"):
-=======
-        if request.path in ("/", "/health", "/metrics", "/logo.png", "/assets/logo.png"):
->>>>>>> Stashed changes
+        if request.path in ("/", "/favicon.ico", "/health", "/metrics", "/logo.png", "/assets/logo.png"):
             return await handler(request)
         auth = request.headers.get("Authorization", "")
         if not auth.startswith("Bearer ") or auth[7:] != _active_token:
@@ -1453,11 +1451,7 @@ def start_webui_thread_server(
                 return
             parsed = urlparse(self.path)
             path = parsed.path.rstrip("/") or "/"
-<<<<<<< Updated upstream
-            if path not in ("/", "/favicon.ico", "/logo.png", "/assets/logo.png"):
-=======
-            if path not in ("/", "/health", "/metrics", "/logo.png", "/assets/logo.png"):
->>>>>>> Stashed changes
+            if path not in ("/", "/favicon.ico", "/health", "/metrics", "/logo.png", "/assets/logo.png"):
                 auth = self.headers.get("Authorization", "")
                 if not auth.startswith("Bearer ") or auth[7:] != _active_token:
                     self._send_json({"error": "unauthorized"}, status=401)
@@ -2063,12 +2057,7 @@ def _known_sessions(plugin: Any, *, requested: str = "") -> list[str]:
         from pathlib import Path
 
         config = getattr(plugin, "_config", {}) or getattr(plugin, "config", {}) or {}
-        root = Path(
-            str(
-                config.get("sylanne_alpha_root")
-                or get_astrbot_data_path() / "sylanne_alpha"
-            )
-        )
+        root = Path(resolve_data_root(config))
         if root.exists():
             for path in root.glob("*.alpha.json"):
                 add(path.name[: -len(".alpha.json")])

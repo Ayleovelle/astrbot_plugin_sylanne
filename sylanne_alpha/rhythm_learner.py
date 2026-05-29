@@ -19,6 +19,7 @@
 from __future__ import annotations
 
 from collections import deque
+from statistics import median
 from typing import Any
 
 _MAX_SAMPLES = 60  # 最大采样数
@@ -174,12 +175,22 @@ class RhythmLearner:
     - 输出的节奏参数供消息分段器使用
     """
 
-    __slots__ = ("_profiles", "_intimacy_threshold", "_default_blend")
+    __slots__ = (
+        "_profiles",
+        "_intimacy_threshold",
+        "_default_blend",
+        "_tempo_timestamps",
+        "_last_tempo",
+        "_tempo_shift",
+    )
 
     def __init__(self, intimacy_threshold: float = 0.6):
         self._profiles: dict[str, RhythmProfile] = {}  # session_key → 节奏画像
         self._intimacy_threshold = intimacy_threshold  # 开始学习的亲密度阈值
         self._default_blend = 0.6  # 默认混合比例
+        self._tempo_timestamps: deque[float] = deque(maxlen=300)  # 5分钟窗口内的交互时间戳
+        self._last_tempo: float = 0.0  # 上一次计算的 tempo 值
+        self._tempo_shift: bool = False  # tempo 是否发生突变
 
     def set_personality_params(self, intimacy_threshold: float, blend_rate: float):
         """设置人格驱动的节奏学习参数。"""
@@ -202,6 +213,9 @@ class RhythmLearner:
         engine_observation: dict[str, float],
     ) -> None:
         """观察一条用户消息。只有亲密度足够时才学习。"""
+        # 始终记录 tempo（不受亲密度门控）
+        self._record_tempo(timestamp)
+
         if not self.is_intimate(engine_observation):
             return
         if session_key not in self._profiles:
@@ -210,6 +224,37 @@ class RhythmLearner:
                 del self._profiles[oldest_key]
             self._profiles[session_key] = RhythmProfile()
         self._profiles[session_key].observe(text, timestamp)
+
+    def observe_voice_message(
+        self,
+        session_key: str,
+        duration_seconds: float,
+    ) -> None:
+        """观察一条语音消息，按时长换算为等效字符数后记录。
+
+        语音消息按 1 秒 ≈ 5 个字符的信息量换算，
+        生成等效文本长度后调用 observe_user_message 的核心逻辑更新节奏画像。
+
+        Args:
+            session_key: 会话标识。
+            duration_seconds: 语音消息时长（秒）。
+        """
+        if duration_seconds <= 0:
+            return
+        # 1 秒 ≈ 5 个字符的信息量
+        equivalent_chars = int(duration_seconds * 5)
+        # 直接更新 RhythmProfile 的 _msg_lengths（绕过亲密度门控和 tempo 记录，
+        # 因为语音消息的节奏适配是独立于文本消息的补充数据源）
+        if session_key not in self._profiles:
+            if len(self._profiles) >= 200:
+                oldest_key = next(iter(self._profiles))
+                del self._profiles[oldest_key]
+            self._profiles[session_key] = RhythmProfile()
+        profile = self._profiles[session_key]
+        # 将等效字符数追加到消息长度列表
+        if equivalent_chars >= 1:
+            profile._msg_lengths.append(equivalent_chars)
+            profile._recompute()
 
     def get_rhythm_params(
         self,
@@ -269,6 +314,103 @@ class RhythmLearner:
 
     def profile(self, session_key: str) -> RhythmProfile | None:
         return self._profiles.get(session_key)
+
+    # ------------------------------------------------------------------
+    # Item 79: 回复长度自适应控制器
+    # ------------------------------------------------------------------
+
+    def get_reply_length_factor(self, session_key: str) -> float:
+        """统计用户近 20 条消息的平均字符长度，返回回复长度倍率因子。
+
+        规则：
+        - 用户消息短（<30 字）→ 0.7（回复精炼）
+        - 用户消息长（>200 字）→ 1.5（回复详尽）
+        - 中间线性插值，最终 clamp 到 [0.5, 2.0]
+        """
+        profile = self._profiles.get(session_key)
+        if profile is None or len(profile._msg_lengths) == 0:
+            return 1.0
+
+        # 取最近 20 条
+        recent = list(profile._msg_lengths)[-20:]
+        avg_len = sum(recent) / len(recent)
+
+        # 线性插值：30 → 0.7, 200 → 1.5
+        if avg_len <= 30.0:
+            factor = 0.7
+        elif avg_len >= 200.0:
+            factor = 1.5
+        else:
+            # 线性插值 [30, 200] → [0.7, 1.5]
+            factor = 0.7 + (avg_len - 30.0) / (200.0 - 30.0) * (1.5 - 0.7)
+
+        return max(0.5, min(2.0, factor))
+
+    # ------------------------------------------------------------------
+    # Item 122: 呼吸节奏的快慢时钟
+    # ------------------------------------------------------------------
+
+    def _record_tempo(self, timestamp: float) -> None:
+        """记录一次交互时间戳并更新 tempo 状态。"""
+        self._tempo_timestamps.append(timestamp)
+        new_tempo = self.tempo
+        if self._last_tempo > 0.0 and new_tempo > 0.0:
+            ratio = new_tempo / self._last_tempo
+            self._tempo_shift = ratio > 2.0 or ratio < 0.5
+        else:
+            self._tempo_shift = False
+        if new_tempo > 0.0:
+            self._last_tempo = new_tempo
+
+    @property
+    def tempo(self) -> float:
+        """最近 5 分钟内的交互频率（次/分钟），滑动窗口。"""
+        if not self._tempo_timestamps:
+            return 0.0
+        now = self._tempo_timestamps[-1]
+        window_start = now - 300.0  # 5 分钟
+        # 统计窗口内的交互次数
+        count = sum(1 for t in self._tempo_timestamps if t >= window_start)
+        if count <= 1:
+            return 0.0
+        # 窗口实际跨度
+        earliest_in_window = min(t for t in self._tempo_timestamps if t >= window_start)
+        span_minutes = (now - earliest_in_window) / 60.0
+        if span_minutes < 0.01:
+            return 0.0
+        return count / span_minutes
+
+    @property
+    def tempo_shift(self) -> bool:
+        """tempo 是否发生突变（>2x 或 <0.5x 前值）。"""
+        return self._tempo_shift
+
+    # ------------------------------------------------------------------
+    # Item 129: 对话呼吸的"屏息"检测
+    # ------------------------------------------------------------------
+
+    def detect_breath_hold(self, last_message_time: float, now: float) -> bool:
+        """当用户停顿超过正常间隔 2 倍时返回 True。
+
+        正常间隔从 tempo_clock 的历史中位数计算。
+        如果历史数据不足（<2 条时间戳），返回 False。
+        """
+        if len(self._tempo_timestamps) < 2:
+            return False
+
+        # 计算相邻时间戳的间隔
+        sorted_ts = sorted(self._tempo_timestamps)
+        gaps = [
+            sorted_ts[i + 1] - sorted_ts[i]
+            for i in range(len(sorted_ts) - 1)
+            if sorted_ts[i + 1] - sorted_ts[i] > 0.1  # 过滤极短间隔
+        ]
+        if not gaps:
+            return False
+
+        normal_interval = median(gaps)
+        current_gap = now - last_message_time
+        return current_gap > normal_interval * 2.0
 
     def to_dict(self) -> dict[str, Any]:
         return {

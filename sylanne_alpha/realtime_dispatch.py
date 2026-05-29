@@ -4,8 +4,8 @@
   1. 分段发送：将长回复拆分为多条消息，按延迟逐条发送
   2. 中断处理：用户打断时记录断点，下轮可续接
   3. 历史影子：记录已发送的实时回复，供后续请求参考
-  4. 上下文注入：将实时聊天状态注入到 LLM 请求的 prompt 中
-  5. 群聊氛围注入：将群聊情绪状态格式化为 prompt 片段
+  4. 上下文注入：将实时聊天状态注入到 LLM 请求的 system_prompt 中（不持久化）
+  5. 群聊氛围注入：将群聊情绪状态格式化为 system_prompt 片段
 
 设计原则：
   - 模拟人类对话节奏：分段发送 + 打字延迟
@@ -430,9 +430,9 @@ class RealtimeDispatch:
                 f"{event_time.get('event_local_time', event_time.get('local_datetime', ''))}"
                 f"\ntimezone={event_time.get('timezone', '')}"
             )
-        prompt = str(getattr(request, "prompt", "") or "")
-        request.prompt = (
-            prompt
+        _sys = str(getattr(request, "system_prompt", "") or "")
+        request.system_prompt = (
+            _sys
             + "\n[sylanne_realtime_assistant_history]"
             + event_time_line
             + "\n"
@@ -466,9 +466,9 @@ class RealtimeDispatch:
                 f"{event_time.get('event_local_time', event_time.get('local_datetime', ''))}"
                 f"\ntimezone={event_time.get('timezone', '')}"
             )
-        prompt = str(getattr(request, "prompt", "") or "")
-        request.prompt = (
-            prompt
+        _sys = str(getattr(request, "system_prompt", "") or "")
+        request.system_prompt = (
+            _sys
             + "\n[sylanne_interrupted_reply_breakpoint]"
             + event_time_line
             + "\n"
@@ -544,9 +544,9 @@ class RealtimeDispatch:
                 f"{event_time.get('event_local_time', event_time.get('local_datetime', ''))}"
                 f"\ntrigger_timezone={event_time.get('timezone', '')}"
             )
-        prompt = str(getattr(request, "prompt", "") or "")
-        request.prompt = (
-            prompt
+        _sys = str(getattr(request, "system_prompt", "") or "")
+        request.system_prompt = (
+            _sys
             + "\n[sylanne_realtime_chat_active_dispatch]"
             + event_time_line
             + "\n"
@@ -572,7 +572,7 @@ class RealtimeDispatch:
         if not full_text:
             return False
         if "？" in full_text or "?" in full_text:
-            prompt = str(getattr(request, "prompt", "") or "")
+            _sys = str(getattr(request, "system_prompt", "") or "")
             injection = (
                 "[sylanne_realtime_pending_bot_question]\n"
                 + "上一轮 bot 刚提出了一个未闭合问题："
@@ -581,7 +581,7 @@ class RealtimeDispatch:
                 + "current_user_short_answer="
                 + current_user_text
             )
-            request.prompt = prompt + "\n" + injection
+            request.system_prompt = _sys + "\n" + injection
             return True
         return False
 
@@ -592,7 +592,7 @@ class RealtimeDispatch:
         entries = backfills.get(session_key, [])
         if not entries:
             return False
-        current = str(getattr(request, "prompt", "") or "")
+        current = str(getattr(request, "system_prompt", "") or "")
         parts = []
         for entry in entries:
             if isinstance(entry, dict):
@@ -600,7 +600,7 @@ class RealtimeDispatch:
             else:
                 parts.append(str(entry))
         if parts:
-            request.prompt = f"{current}\n[sylanne_backfill_context]\n" + "\n".join(
+            request.system_prompt = f"{current}\n[sylanne_backfill_context]\n" + "\n".join(
                 parts
             )
         backfills[session_key] = []
@@ -791,6 +791,16 @@ class RealtimeDispatch:
         return reply_epoch < current
 
     # ------------------------------------------------------------------
+    # Item 145: 主动沉默引擎
+    # ------------------------------------------------------------------
+
+    def deliberate_silence(self) -> "DeliberateSilence":
+        """获取主动沉默决策器实例（懒初始化）。"""
+        if not hasattr(self, "_deliberate_silence"):
+            self._deliberate_silence = DeliberateSilence()
+        return self._deliberate_silence
+
+    # ------------------------------------------------------------------
     # Background task scheduling
     # ------------------------------------------------------------------
 
@@ -853,3 +863,160 @@ class RealtimeDispatch:
 
     async def on_waiting_llm_request(self, event: Any, **kwargs: Any) -> None:
         pass
+
+    # ------------------------------------------------------------------
+    # Item 7: 对话中断恢复提示
+    # ------------------------------------------------------------------
+
+    def _build_resumption_hint(
+        self, session_key: str, last_time: float, now: float
+    ) -> str | None:
+        """构建对话中断恢复提示。
+
+        当距上次对话超过 2 小时时，生成恢复提示帮助 LLM 自然地重新衔接对话。
+        优先从 session_context 的 offline_buffer 取最近想法作为恢复素材。
+
+        Args:
+            session_key: 会话标识。
+            last_time: 上次对话的 Unix 时间戳。
+            now: 当前 Unix 时间戳。
+
+        Returns:
+            恢复提示字符串，不需要恢复时返回 None。
+        """
+        gap_seconds = now - last_time
+        if gap_seconds <= 7200:
+            return None
+
+        gap_hours = int(gap_seconds / 3600)
+        p = self._p
+
+        # 尝试从 offline_buffer 获取离线期间的想法
+        offline_thought = ""
+        session_ctx = getattr(p, "_session_context", None)
+        if session_ctx is not None and hasattr(session_ctx, "offline_buffer_for_session"):
+            buf = session_ctx.offline_buffer_for_session(session_key)
+            if buf and hasattr(buf, "peek_latest"):
+                latest = buf.peek_latest()
+                if latest:
+                    offline_thought = str(latest)[:100]
+            elif buf and hasattr(buf, "drain_summary"):
+                # peek not available, try summary without draining
+                items = getattr(buf, "_items", None) or getattr(buf, "items", None)
+                if items and isinstance(items, list) and items:
+                    offline_thought = str(items[-1])[:100]
+
+        if offline_thought:
+            return (
+                f"[对话恢复] 距上次对话已过{gap_hours}小时。"
+                f"离线期间的想法：{offline_thought}。"
+                f"可以自然地提及这段时间的感受或想法来衔接对话。"
+            )
+        else:
+            return (
+                f"[对话恢复] 距上次对话已过{gap_hours}小时。"
+                f"可以自然地问候或提及时间间隔来重新衔接对话。"
+            )
+
+
+class DeliberateSilence:
+    """主动沉默决策：某些情况下故意不回复或延迟回复。"""
+
+    def __init__(self):
+        self._silence_reason: str | None = None
+
+    def should_be_silent(
+        self, valence: float, tension: float, void_pressure: float
+    ) -> tuple[bool, str]:
+        """判断是否应该主动沉默。返回 (是否沉默, 原因)。"""
+        if tension > 0.7 and valence < -0.3:
+            return True, "hurt"  # 受伤但不想表达
+        if void_pressure > 3.0 and valence > 0:
+            return True, "digesting"  # 在消化
+        if tension < -0.5:
+            return True, "content"  # 满足无需言语
+        return False, ""
+
+    def get_minimal_response(self, reason: str) -> str | None:
+        """沉默时的极简回复（可选）。"""
+        responses = {
+            "hurt": "……",
+            "digesting": None,  # 完全不回复
+            "content": "嗯。",
+        }
+        return responses.get(reason)
+
+
+# ---------------------------------------------------------------------------
+# Item 121: 对话呼吸节奏引擎
+# ---------------------------------------------------------------------------
+
+
+class BreathingRhythmController:
+    """根据情绪张力和话题密度动态调整回复长短交替模式。
+
+    模拟人类对话中的"呼吸感"——紧张时长短交替加快，
+    平静时节奏舒缓，情绪渐强时回复渐长，收尾时渐短。
+
+    四种呼吸模式：
+    - calm: 短-中-短（平静对话）
+    - intense: 长-短-长-短（高张力交替）
+    - building: 渐长（情绪积累）
+    - winding: 渐短（对话收尾）
+
+    使用方式：
+    每次生成回复前调用 next_length_factor() 获取长度倍率，
+    将基础回复长度乘以该倍率得到目标长度。
+    """
+
+    PATTERNS: dict[str, list[float]] = {
+        "calm": [0.8, 1.0, 0.6],           # 短-中-短
+        "intense": [1.2, 0.5, 1.5, 0.4],   # 长-短-长-短
+        "building": [0.6, 0.8, 1.0, 1.2],  # 渐长
+        "winding": [1.2, 1.0, 0.8, 0.6],   # 渐短
+    }
+
+    def __init__(self) -> None:
+        self._current_pattern: str = "calm"
+        self._pattern_index: int = 0
+
+    def select_pattern(self, tension: float, valence: float) -> str:
+        """根据情绪张力和效价选择呼吸模式。
+
+        Args:
+            tension: 情绪张力 [0, 1]，越高越紧张。
+            valence: 情绪效价 [-1, 1]，正值=积极，负值=消极。
+
+        Returns:
+            模式名称：calm / intense / building / winding。
+        """
+        if tension > 0.6:
+            return "intense"
+        elif tension > 0.3 and valence < 0:
+            return "building"
+        elif valence > 0.5:
+            return "winding"
+        return "calm"
+
+    def next_length_factor(self, tension: float, valence: float) -> float:
+        """返回下一条回复的长度倍率。
+
+        根据当前情绪状态选择模式，若模式切换则重置索引。
+        按模式序列循环返回倍率值。
+
+        Args:
+            tension: 情绪张力 [0, 1]。
+            valence: 情绪效价 [-1, 1]。
+
+        Returns:
+            长度倍率，范围约 [0.4, 1.5]。
+            < 1.0 表示应缩短回复，> 1.0 表示应加长回复。
+        """
+        pattern_name = self.select_pattern(tension, valence)
+        if pattern_name != self._current_pattern:
+            self._current_pattern = pattern_name
+            self._pattern_index = 0
+        pattern = self.PATTERNS[self._current_pattern]
+        factor = pattern[self._pattern_index % len(pattern)]
+        self._pattern_index += 1
+        return factor

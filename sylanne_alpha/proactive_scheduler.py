@@ -5,6 +5,7 @@
   2. 阻塞判断：检查是否满足主动发言条件（空闲时间、冷却期）
   3. 调度循环：定期扫描候选会话，触发主动发言
   4. 话题判断：决定主动发言的内容方向
+  5. 仪式缺席检测：检查用户是否在仪式时间窗口内缺席
 
 设计原则：
   - 人格驱动：表达欲、void_pressure 等计算栈参数影响发言决策
@@ -22,6 +23,7 @@
 from __future__ import annotations
 
 import asyncio
+import time
 from typing import Any
 
 try:
@@ -46,6 +48,13 @@ class ProactiveScheduler:
 
     def __init__(self, plugin: Any) -> None:
         self._p = plugin
+        # 仪式注册表：session_key → {ritual_name: (start_hour, end_hour)}
+        # 初始为空，后续可通过对话学习填充
+        self._ritual_registry: dict[str, dict[str, tuple[int, int]]] = {}
+        # 每会话最后消息时间追踪
+        self._last_message_times: dict[str, float] = {}
+        # Item 6: 主动发言反馈历史
+        self._feedback_history: list[dict] = []
 
     # ------------------------------------------------------------------
     # Policy & feedback
@@ -86,6 +95,21 @@ class ProactiveScheduler:
 
     def observe_dispatch_feedback(self, session_key: str = "", **kwargs: Any) -> None:
         pass
+
+    def record_feedback(self, session_key: str, timestamp: float, rating: str) -> None:
+        """记录用户对主动发言的反馈。
+
+        Args:
+            session_key: 会话标识。
+            timestamp: 主动发言的时间戳（用于关联具体哪条发言）。
+            rating: "positive" 或 "negative"。
+        """
+        self._feedback_history.append({
+            "session_key": session_key,
+            "timestamp": timestamp,
+            "rating": rating,
+            "recorded_at": time.time(),
+        })
 
     def should_exit_after_idle(self, session_key: str = "", **kwargs: Any) -> bool:
         return True
@@ -171,6 +195,14 @@ class ProactiveScheduler:
             sk, 0.0
         )
         cooldown = float(cfg.get("proactive_speech_dispatch_cooldown_seconds", 1800.0))
+        # 人格驱动硬下限：extraversion 高→下限低（最低60s），低→下限高（最高300s）
+        host = self._p._hosts.get(sk)
+        _extraversion = 0.5
+        if host and hasattr(host.kernel, "_personality"):
+            _p = host.kernel._personality() if callable(getattr(host.kernel, "_personality", None)) else {}
+            _extraversion = float((_p or {}).get("extraversion", 0.5))
+        _hard_floor = max(60.0, 300.0 - _extraversion * 240.0)
+        cooldown = max(cooldown, _hard_floor)
         if last_sent and (now - last_sent) < cooldown:
             return "cooldown_active"
         return ""
@@ -249,3 +281,84 @@ class ProactiveScheduler:
 
     async def judge_topic(self, session_key: str = "", **kwargs: Any) -> dict[str, Any]:
         return {"topic": "", "confidence": 0.0, "should_speak": False}
+
+    # ------------------------------------------------------------------
+    # 仪式缺席检测（Item 154）
+    # ------------------------------------------------------------------
+
+    def register_ritual(
+        self, session_key: str, ritual_name: str, start_hour: int, end_hour: int
+    ) -> None:
+        """注册一个仪式时间窗口。
+
+        仪式是用户与 Sylanne 之间形成的习惯性互动模式，
+        例如每晚 22:00-23:00 的"晚安"仪式。
+
+        Args:
+            session_key: 会话标识。
+            ritual_name: 仪式名称（如 "晚安"、"早安"）。
+            start_hour: 仪式窗口开始小时（0-23）。
+            end_hour: 仪式窗口结束小时（0-23）。
+        """
+        if session_key not in self._ritual_registry:
+            self._ritual_registry[session_key] = {}
+        self._ritual_registry[session_key][ritual_name] = (start_hour, end_hour)
+
+    def unregister_ritual(self, session_key: str, ritual_name: str) -> None:
+        """移除一个已注册的仪式。
+
+        Args:
+            session_key: 会话标识。
+            ritual_name: 仪式名称。
+        """
+        if session_key in self._ritual_registry:
+            self._ritual_registry[session_key].pop(ritual_name, None)
+
+    def record_message_time(self, session_key: str, ts: float | None = None) -> None:
+        """记录用户最后一次发消息的时间。
+
+        Args:
+            session_key: 会话标识。
+            ts: 时间戳，默认为当前时间。
+        """
+        self._last_message_times[session_key] = ts if ts is not None else time.time()
+
+    def check_ritual_absence(self, session_key: str, now: float | None = None) -> str | None:
+        """检查是否到了仪式时间但用户未出现。
+
+        判断逻辑：
+        1. 当前时间在某个已注册仪式的时间窗口内
+        2. 用户在该窗口内超过 30 分钟未发消息
+
+        Args:
+            session_key: 会话标识。
+            now: 当前时间戳，默认为 time.time()。
+
+        Returns:
+            缺席的仪式名，或 None（无缺席）。
+        """
+        if now is None:
+            now = time.time()
+
+        rituals = self._ritual_registry.get(session_key)
+        if not rituals:
+            return None
+
+        current_hour = time.localtime(now).tm_hour
+        last_msg = self._last_message_times.get(session_key, 0.0)
+        silence_seconds = now - last_msg
+
+        # 30 分钟未发消息才算缺席
+        absence_threshold = 30 * 60
+
+        for ritual_name, (start_hour, end_hour) in rituals.items():
+            # 判断当前小时是否在仪式窗口内（支持跨午夜）
+            if start_hour <= end_hour:
+                in_window = start_hour <= current_hour <= end_hour
+            else:
+                in_window = current_hour >= start_hour or current_hour <= end_hour
+
+            if in_window and silence_seconds >= absence_threshold:
+                return ritual_name
+
+        return None

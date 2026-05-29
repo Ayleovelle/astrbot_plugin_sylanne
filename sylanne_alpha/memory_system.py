@@ -106,6 +106,38 @@ class MemoryResult:
     temperature: float
     final_score: float
     created_at: float  # 记忆创建时间戳，用于生成相对时间标签
+    recall_count: int = 0  # 被召回次数，用于 Ebbinghaus 遗忘曲线计算
+    emotional_weight: float = 0.5  # 情感权重 [0,1]，用于遗忘曲线稳定性
+    recall_reason: str = ""  # 召回原因: keyword_match / vector_similarity / temporal_proximity / association_graph
+
+    # ------------------------------------------------------------------
+    # 记忆温度（Item 147）
+    # ------------------------------------------------------------------
+
+    @property
+    def memory_temperature(self) -> str:
+        """基于创建时间和召回次数计算记忆温度。
+
+        - hot: 24h 内创建 或 最近被召回（recall_count > 0 且 created_at 在 48h 内）
+        - warm: 7 天内
+        - cold: 30 天+
+        """
+        now = time.time()
+        age_seconds = now - self.created_at if self.created_at > 0 else float("inf")
+        age_days = age_seconds / 86400
+
+        # hot: 24h 内 或 最近被频繁召回（48h 内且有召回记录）
+        if age_days <= 1.0:
+            return "hot"
+        if age_days <= 2.0 and self.recall_count > 0:
+            return "hot"
+        # warm: 7 天内
+        if age_days <= 7.0:
+            return "warm"
+        # cold: 30 天+（7~30 天之间也归为 warm）
+        if age_days <= 30.0:
+            return "warm"
+        return "cold"
 
 
 @dataclass
@@ -328,6 +360,53 @@ def _keyword_overlap(query: str, text: str) -> float:
 
 
 # ---------------------------------------------------------------------------
+# AnniversaryDetector (Item 33)
+# ---------------------------------------------------------------------------
+
+
+class AnniversaryDetector:
+    """追踪关系里程碑日期。"""
+
+    def __init__(self) -> None:
+        self._milestones: dict[str, dict] = {}  # session_key -> {first_chat, important_events: [...]}
+
+    def record_first_chat(self, session_key: str, timestamp: float) -> None:
+        if session_key not in self._milestones:
+            self._milestones[session_key] = {"first_chat": timestamp, "important_events": []}
+
+    def record_important_event(self, session_key: str, event: str, timestamp: float) -> None:
+        if session_key in self._milestones:
+            self._milestones[session_key]["important_events"].append({"event": event, "timestamp": timestamp})
+
+    def check_anniversaries(self, session_key: str, now: float) -> list[str]:
+        """检查是否有纪念日到期。返回纪念描述列表。"""
+        results: list[str] = []
+        data = self._milestones.get(session_key)
+        if not data:
+            return results
+
+        first = data["first_chat"]
+        age_days = (now - first) / 86400
+
+        # 里程碑检测
+        milestones = [7, 30, 90, 180, 365]
+        for m in milestones:
+            if m - 0.5 <= age_days <= m + 0.5:
+                results.append(f"认识第 {m} 天")
+
+        return results
+
+    def to_dict(self) -> dict:
+        return dict(self._milestones)
+
+    @classmethod
+    def from_dict(cls, data: dict) -> "AnniversaryDetector":
+        det = cls()
+        det._milestones = data
+        return det
+
+
+# ---------------------------------------------------------------------------
 # MemorySystem
 # ---------------------------------------------------------------------------
 
@@ -364,6 +443,13 @@ class MemorySystem:
     _L1_CAPACITY = 60
     _L3_NODE_LIMIT = 1000
 
+    # 记忆温度前缀映射（Item 148）
+    _TEMPERATURE_PREFIXES = {
+        "hot": "（刚才提到）",
+        "warm": "（之前聊过）",
+        "cold": "（很久以前）",
+    }
+
     def __init__(self, **kwargs) -> None:
         self._l1: deque[MemoryItem] = deque(maxlen=self._L1_CAPACITY)
         self._l2: list[MemoryItem] = []
@@ -381,7 +467,7 @@ class MemorySystem:
             "compression_threshold": 0.15,
             "mood_weight": 0.2,
             "positive_recall_bias": 1.0,
-            "negative_decay_mult": 1.0,
+            "cold_memory_decay_factor": 1.0,
             "neuroticism": 0.5,
         }
 
@@ -431,7 +517,8 @@ class MemorySystem:
         self._params["mood_weight"] = 0.1 + N * 0.2
         self._params["compression_threshold"] = 0.15 + openness_val * 0.10
         self._params["positive_recall_bias"] = 1.0 + A * 0.3
-        self._params["negative_decay_mult"] = 1.0 - N * 0.5
+        # 高神经质 → 低温记忆衰减更慢（更难忘记冷淡/负面记忆）
+        self._params["cold_memory_decay_factor"] = 1.0 - N * 0.5
         self._params["neuroticism"] = N
 
     # ------------------------------------------------------------------
@@ -594,13 +681,13 @@ class MemorySystem:
         base_decay = self._params["base_decay"]
         age_coeff = self._params["age_coeff"]
         neuroticism = self._params["neuroticism"]
-        neg_decay_mult = self._params["negative_decay_mult"]
+        cold_decay_factor = self._params["cold_memory_decay_factor"]
 
         for item in self._l2:
             decay_rate = base_decay * (1 + age_coeff * math.log(item.age_ticks + 1))
             item.age_ticks += 1
             if item.temperature < 0.3 and neuroticism > 0.6:
-                decay_rate *= neg_decay_mult
+                decay_rate *= cold_decay_factor
             item.weight *= 1 - decay_rate
             if item.weight < 1e-10:
                 item.weight = 0.0
@@ -661,6 +748,25 @@ class MemorySystem:
         ]
 
     # ------------------------------------------------------------------
+    # Ebbinghaus 遗忘曲线（Item 95）
+    # ------------------------------------------------------------------
+
+    def _ebbinghaus_retention(self, memory: MemoryResult, now: float) -> float:
+        """Ebbinghaus 遗忘曲线变体，考虑复习次数和情感权重。
+
+        公式：R = e^(-t/S)
+        其中 S（稳定性）随复习次数和情感权重增加，
+        使得被频繁召回和情感强烈的记忆衰减更慢。
+        """
+        age_hours = (now - memory.created_at) / 3600 if memory.created_at > 0 else 0.0
+        rehearsal = getattr(memory, "recall_count", 0)
+        emotional_weight = getattr(memory, "emotional_weight", 0.5)
+        # 基础遗忘：R = e^(-t/S)，S 随复习次数和情感权重增加
+        stability = 24 * (1 + rehearsal * 0.5) * (1 + emotional_weight)
+        retention = math.exp(-age_hours / stability)
+        return max(0.05, retention)  # 最低保留 5%
+
+    # ------------------------------------------------------------------
     # 召回（v2：三层并行 + reconsolidation 钩子）
     # ------------------------------------------------------------------
 
@@ -677,35 +783,48 @@ class MemorySystem:
         positive_recall_bias = self._params["positive_recall_bias"]
 
         # --- L1 recall ---
+        now = time.time()
         for item in self._l1:
-            relevance = self._compute_relevance(
+            relevance, reason = self._compute_relevance_with_reason(
                 query, query_embedding, item.text, item.embedding
             )
             if relevance <= 0.0:
                 continue
+            # 时间邻近性加成：5 分钟内的记忆额外加分
+            temporal_bonus = 0.0
+            effective_reason = reason
+            if now - item.created_at < 300:
+                temporal_bonus = 0.1
+                if relevance < 0.2:
+                    effective_reason = "temporal_proximity"
             emotion_bias = 1.0 - abs(item.temperature - current_warmth) * mood_weight
             final_score = (
                 self._LAYER_WEIGHTS["L1"] * item.weight * relevance * emotion_bias
-            )
+            ) + temporal_bonus
             if item.temperature > 0:
                 final_score += (positive_recall_bias - 1.0) * relevance
-            candidates.append(
-                MemoryResult(
-                    text=item.text,
-                    layer="L1",
-                    weight=item.weight,
-                    relevance=relevance,
-                    clarity=1.0,
-                    temperature=item.temperature,
-                    final_score=final_score,
-                    created_at=item.created_at,
-                )
+            result = MemoryResult(
+                text=item.text,
+                layer="L1",
+                weight=item.weight,
+                relevance=relevance,
+                clarity=1.0,
+                temperature=item.temperature,
+                final_score=final_score,
+                created_at=item.created_at,
+                recall_count=item.recall_count,
+                emotional_weight=max(0.0, min(1.0, abs(item.temperature))),
+                recall_reason=effective_reason,
             )
+            # 应用 Ebbinghaus 遗忘曲线作为权重因子
+            retention = self._ebbinghaus_retention(result, now)
+            result.final_score *= retention
+            candidates.append(result)
 
         # --- L2 recall ---
         self._recalled_l2_items: list[MemoryItem] = []
         for item in self._l2:
-            relevance = self._compute_relevance(
+            relevance, reason = self._compute_relevance_with_reason(
                 query, query_embedding, item.text, item.embedding
             )
             if relevance <= 0.0:
@@ -716,18 +835,23 @@ class MemorySystem:
             )
             if item.temperature > 0:
                 final_score += (positive_recall_bias - 1.0) * relevance
-            candidates.append(
-                MemoryResult(
-                    text=item.text,
-                    layer="L2",
-                    weight=item.weight,
-                    relevance=relevance,
-                    clarity=1.0,
-                    temperature=item.temperature,
-                    final_score=final_score,
-                    created_at=item.created_at,
-                )
+            result = MemoryResult(
+                text=item.text,
+                layer="L2",
+                weight=item.weight,
+                relevance=relevance,
+                clarity=1.0,
+                temperature=item.temperature,
+                final_score=final_score,
+                created_at=item.created_at,
+                recall_count=item.recall_count,
+                emotional_weight=max(0.0, min(1.0, abs(item.temperature))),
+                recall_reason=reason,
             )
+            # 应用 Ebbinghaus 遗忘曲线作为权重因子
+            retention = self._ebbinghaus_retention(result, now)
+            result.final_score *= retention
+            candidates.append(result)
             self._reinforce_l2(item, current_warmth)
             self._recalled_l2_items.append(item)
 
@@ -754,6 +878,57 @@ class MemorySystem:
                 return True
         return False
 
+    # ------------------------------------------------------------------
+    # Item 149: 记忆的"突然升温"
+    # ------------------------------------------------------------------
+
+    def reheat_memory(self, memory_id: str, reason: str) -> bool:
+        """将指定记忆条目"突然升温"——重置 last_recalled 使其变为 hot。
+
+        通过将 created_at 设为当前时间（模拟刚被提及），使该记忆在
+        memory_temperature 属性中被判定为 "hot"，从而在下次召回时
+        获得更高的优先级。
+
+        同时记录 reheat 原因到日志。
+
+        Args:
+            memory_id: 目标记忆条目的 ID。
+            reason: 升温原因（用于日志记录）。
+
+        Returns:
+            True 表示成功找到并升温，False 表示未找到该 ID。
+        """
+        import logging
+
+        _logger = logging.getLogger("astrbot_plugin_sylanne")
+
+        # 在 L1 中查找
+        for item in self._l1:
+            if item.id == memory_id:
+                item.created_at = time.time()
+                item.recall_count += 1
+                item.last_recalled_tick = self._tick
+                _logger.info(
+                    f"Sylanne memory reheat: id={memory_id}, reason={reason}"
+                )
+                return True
+
+        # 在 L2 中查找
+        for item in self._l2:
+            if item.id == memory_id:
+                item.created_at = time.time()
+                item.recall_count += 1
+                item.last_recalled_tick = self._tick
+                _logger.info(
+                    f"Sylanne memory reheat: id={memory_id}, reason={reason}"
+                )
+                return True
+
+        _logger.debug(
+            f"Sylanne memory reheat failed: id={memory_id} not found"
+        )
+        return False
+
     def _compute_relevance(
         self,
         query: str,
@@ -766,6 +941,23 @@ class MemorySystem:
             if cos >= 0.0:
                 return cos
         return _keyword_overlap(query, text)
+
+    def _compute_relevance_with_reason(
+        self,
+        query: str,
+        query_embedding: list[float] | None,
+        text: str,
+        item_embedding: list[float] | None,
+    ) -> tuple[float, str]:
+        """计算相关度并返回召回原因。"""
+        if query_embedding and item_embedding:
+            cos = _cosine(query_embedding, item_embedding)
+            if cos >= 0.0:
+                return cos, "vector_similarity"
+        kw = _keyword_overlap(query, text)
+        if kw > 0.0:
+            return kw, "keyword_match"
+        return 0.0, ""
 
     def _reinforce_l2(self, item: MemoryItem, current_warmth: float) -> None:
         """对被召回的 L2 条目施加强化：增加权重、重置年龄、更新情绪温度。"""
@@ -783,6 +975,7 @@ class MemorySystem:
         query_lower = query.lower()
         query_words = set(query_lower.split())
         mood_weight = self._params["mood_weight"]
+        now = time.time()
 
         matched_nodes: list[GraphNode] = []
         for node in self._l3_nodes.values():
@@ -814,7 +1007,6 @@ class MemorySystem:
             relevance = len(query_words & set(node.label.lower().split())) / max(
                 len(query_words), 1
             )
-            relevance = max(relevance, 0.3)
 
             emotion_bias = 1.0 - abs(node.emotion_weight - current_warmth) * mood_weight
             final_score = (
@@ -824,18 +1016,24 @@ class MemorySystem:
             node.recall_count += 1
             node.clarity = min(node.clarity + 0.05, 1.0)
 
-            results.append(
-                MemoryResult(
-                    text=text,
-                    layer="L3",
-                    weight=node.clarity,
-                    relevance=relevance,
-                    clarity=node.clarity,
-                    temperature=node.emotion_weight,
-                    final_score=final_score,
-                    created_at=getattr(node, 'created_at', 0.0),
-                )
+            result = MemoryResult(
+                text=text,
+                layer="L3",
+                weight=node.clarity,
+                relevance=relevance,
+                clarity=node.clarity,
+                temperature=node.emotion_weight,
+                final_score=final_score,
+                created_at=getattr(node, "created_at", 0.0),
+                recall_count=node.recall_count,
+                emotional_weight=max(0.0, min(1.0, abs(node.emotion_weight))),
+                recall_reason="association_graph",
             )
+            # L3 节点也应用 Ebbinghaus（created_at 可能为 0，此时 retention=1.0）
+            if result.created_at > 0:
+                retention = self._ebbinghaus_retention(result, now)
+                result.final_score *= retention
+            results.append(result)
 
         return results
 
@@ -850,24 +1048,27 @@ class MemorySystem:
     ) -> str:
         """格式化召回结果为 prompt 注入文本。
 
-        使用具体相对时间标签（如"3小时前"、"昨天"、"5天前"）替代笼统的"近期"，
-        让 LLM 对记忆的时间距离有准确感知。
+        使用记忆温度前缀（hot/warm/cold）提供时间距离感知，
+        同时保留具体相对时间标签作为补充信息。
+        L3 层额外标注可信度/模糊度。
         """
         if not results:
             return ""
         lines = ["[记忆参考]"]
         now = time.time()
         for r in results[:max_items]:
-            # 根据记忆创建时间计算相对时间标签
-            time_label = self._relative_time_label(now, r.created_at)
-            # 根据来源层添加可信度/模糊度前缀
+            # 记忆温度前缀（Item 148）
+            temp_prefix = self._TEMPERATURE_PREFIXES.get(
+                r.memory_temperature, "（之前聊过）"
+            )
+            # 根据来源层添加可信度/模糊度后缀
             if r.layer == "L3" and r.clarity < 0.7:
-                prefix = f"{time_label}/模糊印象"
+                prefix = f"{temp_prefix[:-1]}/模糊印象）"
             elif r.layer == "L3":
-                prefix = f"{time_label}/长期认知"
+                prefix = f"{temp_prefix[:-1]}/长期认知）"
             else:
-                prefix = time_label
-            lines.append(f"{prefix}：{r.text}")
+                prefix = temp_prefix
+            lines.append(f"{prefix}{r.text}")
         return "\n".join(lines)
 
     @staticmethod
@@ -979,11 +1180,14 @@ class MemorySystem:
         temporal_type: str = "episodic",
         valid_from: str | None = None,
     ) -> GraphNode:
-        for node in self._l3_nodes.values():
-            if node.label == label:
-                node.clarity = max(node.clarity, clarity)
-                node.emotion_weight = (node.emotion_weight + emotion_weight) / 2
-                return node
+        if not hasattr(self, "_l3_label_index"):
+            self._l3_label_index = {n.label: nid for nid, n in self._l3_nodes.items()}
+        existing_id = self._l3_label_index.get(label)
+        if existing_id and existing_id in self._l3_nodes:
+            node = self._l3_nodes[existing_id]
+            node.clarity = max(node.clarity, clarity)
+            node.emotion_weight = (node.emotion_weight + emotion_weight) / 2
+            return node
         node = GraphNode(
             id=uuid.uuid4().hex[:12],
             label=label,
@@ -996,6 +1200,7 @@ class MemorySystem:
             staleness_threshold=180,
         )
         self._l3_nodes[node.id] = node
+        self._l3_label_index[label] = node.id
         return node
 
     def _find_or_create_edge(
@@ -1006,12 +1211,15 @@ class MemorySystem:
         emotion_weight: float,
         clarity: float,
     ) -> GraphEdge:
-        for edge in self._l3_edges:
-            if (
-                edge.source == source
-                and edge.target == target
-                and edge.relation == relation
-            ):
+        if not hasattr(self, "_l3_edge_index"):
+            self._l3_edge_index = {
+                (e.source, e.target, e.relation): i for i, e in enumerate(self._l3_edges)
+            }
+        key = (source, target, relation)
+        idx = self._l3_edge_index.get(key)
+        if idx is not None and idx < len(self._l3_edges):
+            edge = self._l3_edges[idx]
+            if edge.source == source and edge.target == target and edge.relation == relation:
                 edge.emotion_weight = (edge.emotion_weight + emotion_weight) / 2
                 edge.clarity = max(edge.clarity, clarity)
                 return edge
@@ -1024,10 +1232,61 @@ class MemorySystem:
             last_recalled=self._tick,
         )
         self._l3_edges.append(edge)
+        self._l3_edge_index[key] = len(self._l3_edges) - 1
         if len(self._l3_edges) > 2000:
             self._l3_edges.sort(key=lambda e: e.clarity, reverse=True)
             self._l3_edges = self._l3_edges[:1500]
+            self._l3_edge_index = {
+                (e.source, e.target, e.relation): i for i, e in enumerate(self._l3_edges)
+            }
         return edge
+
+    # ------------------------------------------------------------------
+    # Item 58: 对话缓冲区压缩
+    # ------------------------------------------------------------------
+
+    def compress_old_turns(self, session_key: str, max_turns: int = 20) -> int:
+        """压缩对话缓冲区中超出 max_turns 的旧消息。
+
+        将最旧的 N 条（超出部分）合并为一条摘要（前 50 字 + "..."），
+        不调用 LLM，纯本地截断合并。
+
+        Args:
+            session_key: 会话标识（用于日志，实际操作在 L1 上）
+            max_turns: 保留的最大条目数
+
+        Returns:
+            压缩掉的条数
+        """
+        if len(self._l1) <= max_turns:
+            return 0
+        overflow = len(self._l1) - max_turns
+        # 取出最旧的 overflow 条
+        old_items: list[MemoryItem] = []
+        for _ in range(overflow):
+            old_items.append(self._l1.popleft())
+        # 合并为一条摘要
+        merged_text = " | ".join(item.text[:50] for item in old_items)
+        if len(merged_text) > 200:
+            merged_text = merged_text[:200] + "..."
+        avg_temp = sum(item.temperature for item in old_items) / len(old_items)
+        self._l1.appendleft(
+            MemoryItem(
+                id=uuid.uuid4().hex[:12],
+                text=f"[压缩摘要] {merged_text}",
+                weight=0.5,
+                temperature=avg_temp,
+                age_ticks=max(item.age_ticks for item in old_items),
+                embedding=None,
+                created_at=old_items[0].created_at,
+                source_turns=sum(item.source_turns for item in old_items),
+                confirmed=False,
+                recall_count=0,
+                last_recalled_tick=0,
+                rewrite_count=0,
+            )
+        )
+        return overflow
 
     # ------------------------------------------------------------------
     # 序列化
@@ -1071,6 +1330,99 @@ class MemorySystem:
             nid: GraphNode.from_dict(nd) for nid, nd in data.get("l3_nodes", {}).items()
         }
         self._l3_edges = [GraphEdge.from_dict(ed) for ed in data.get("l3_edges", [])]
+        self._l3_label_index: dict[str, str] = {
+            n.label: nid for nid, n in self._l3_nodes.items()
+        }
+        self._l3_edge_index: dict[tuple[str, str, str], int] = {
+            (e.source, e.target, e.relation): i for i, e in enumerate(self._l3_edges)
+        }
+
+
+# ---------------------------------------------------------------------------
+# Item 13: 倒排索引加速召回
+# ---------------------------------------------------------------------------
+
+
+class InvertedIndex:
+    """简单倒排索引：关键词 → 记忆 ID 列表。"""
+
+    def __init__(self) -> None:
+        self._index: dict[str, set[str]] = {}  # keyword -> {memory_id, ...}
+
+    def add(self, memory_id: str, keywords: list[str]) -> None:
+        for kw in keywords:
+            if kw not in self._index:
+                self._index[kw] = set()
+            self._index[kw].add(memory_id)
+
+    def remove(self, memory_id: str) -> None:
+        for kw_set in self._index.values():
+            kw_set.discard(memory_id)
+
+    def query(self, keywords: list[str], top_k: int = 10) -> list[str]:
+        """返回匹配最多关键词的 memory_id 列表。"""
+        scores: dict[str, int] = {}
+        for kw in keywords:
+            for mid in self._index.get(kw, set()):
+                scores[mid] = scores.get(mid, 0) + 1
+        ranked = sorted(scores.items(), key=lambda x: x[1], reverse=True)
+        return [mid for mid, _ in ranked[:top_k]]
+
+    def size(self) -> int:
+        return sum(len(v) for v in self._index.values())
+
+
+# ---------------------------------------------------------------------------
+# Item 35: 关系考古学（简化版）
+# ---------------------------------------------------------------------------
+
+
+class ArchaeologyEngine:
+    """关系考古学：从冷记忆中发掘被遗忘的关系模式。"""
+
+    def __init__(self) -> None:
+        self._last_dig: float = 0
+        self._findings: list[dict] = []
+
+    def should_dig(self, now: float) -> bool:
+        """每 24h 最多挖掘一次。"""
+        return now - self._last_dig > 86400
+
+    def dig(self, cold_memories: list, max_findings: int = 3) -> list[dict]:
+        """从冷记忆中发掘模式。"""
+        self._last_dig = time.time()
+
+        if len(cold_memories) < 5:
+            return []
+
+        # 简单模式发掘：找到重复出现的关键词/主题
+        word_freq: dict[str, int] = {}
+        for mem in cold_memories:
+            text = getattr(mem, "text", str(mem))
+            # 简单分词
+            for word in text.split():
+                if len(word) >= 2:
+                    word_freq[word] = word_freq.get(word, 0) + 1
+
+        # 高频词 = 被遗忘的模式
+        patterns = sorted(word_freq.items(), key=lambda x: x[1], reverse=True)[
+            :max_findings
+        ]
+        findings = [
+            {
+                "pattern": p[0],
+                "frequency": p[1],
+                "interpretation": f"在过去的对话中，'{p[0]}' 反复出现了 {p[1]} 次",
+            }
+            for p in patterns
+            if p[1] >= 3
+        ]
+
+        self._findings.extend(findings)
+        return findings
+
+    def get_recent_findings(self, n: int = 5) -> list[dict]:
+        return self._findings[-n:]
 
 
 # ---------------------------------------------------------------------------

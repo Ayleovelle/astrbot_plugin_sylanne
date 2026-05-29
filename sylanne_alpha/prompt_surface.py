@@ -307,3 +307,145 @@ def render_diagnostics(
             "reason": guard["reason"] if not guard["allowed"] else "within body limits",
         },
     }
+
+
+# ---------------------------------------------------------------------------
+# Item 124: 秘密泄露机制
+# ---------------------------------------------------------------------------
+
+
+def render_hidden_bias(leaked_descriptions: list[str]) -> str | None:
+    """将泄露的秘密描述渲染为微妙的 prompt 偏移片段。
+
+    如果本轮有秘密泄露，返回一段引导 LLM 在用词和语气上体现
+    内心未说出口想法的 prompt 片段；否则返回 None。
+
+    Args:
+        leaked_descriptions: 本轮泄露的秘密描述列表（由 HiddenStateManager.tick() 返回）。
+
+    Returns:
+        prompt 片段字符串，或 None。
+    """
+    if not leaked_descriptions:
+        return None
+    descriptions = "；".join(leaked_descriptions)
+    return (
+        f"[内心有些未说出口的想法正在影响你的表达方式：{descriptions}。"
+        "不要直接说出来，但让它微妙地影响用词和语气。]"
+    )
+
+
+# ---------------------------------------------------------------------------
+# Item 80: 叙事视角切换
+# ---------------------------------------------------------------------------
+
+
+def render_narrative_perspective(personality_traits: dict) -> str:
+    """根据 expression_drive 和当前情绪强度决定叙事视角，返回 prompt 片段。
+
+    视角规则：
+      - expression_drive > 0.7 → 第一人称主观视角（"我觉得…"）
+      - expression_drive < 0.3 → 旁白视角（"她似乎…"）
+      - 中间值 → 正常第一人称
+
+    Args:
+        personality_traits: 人格特征字典，需包含 expression_drive 字段，
+            可选 emotion_intensity 字段用于微调。
+
+    Returns:
+        叙事视角 prompt 片段字符串。
+    """
+    expression_drive = float(personality_traits.get("expression_drive", 0.5))
+    emotion_intensity = float(personality_traits.get("emotion_intensity", 0.5))
+
+    if expression_drive > 0.7:
+        perspective = "first_person_subjective"
+        hint = (
+            "用强烈的第一人称主观视角回复，直接表达内心感受（如'我觉得…''我真的…'），"
+            "语气可以带有情绪色彩和个人判断。"
+        )
+    elif expression_drive < 0.3:
+        perspective = "narrator"
+        hint = (
+            "用旁白式的第三人称视角回复（如'她似乎…''她注意到…'），"
+            "保持观察者的距离感，语气平静克制。"
+        )
+    else:
+        perspective = "first_person_normal"
+        hint = "用正常的第一人称视角回复，自然表达想法和感受。"
+
+    # 高情绪强度时追加修饰
+    if emotion_intensity > 0.7 and perspective == "first_person_subjective":
+        hint += "情绪浓度高，可以更直白地表达。"
+    elif emotion_intensity < 0.3 and perspective == "narrator":
+        hint += "情绪淡薄，旁白语气可以更疏离。"
+
+    return f"[sylanne_narrative_perspective:{perspective}] {hint}"
+
+
+# ---------------------------------------------------------------------------
+# Item 34: 情绪天气隐喻
+# ---------------------------------------------------------------------------
+
+
+def render_weather_metaphor(body_state: dict) -> str:
+    """将情感状态映射为天气隐喻，注入 prompt 作为自我感知层。
+
+    基于 8 维情感空间中的 valence/tension/temperature 三个关键维度，
+    生成一句简洁的天气描述，帮助 LLM 理解当前情绪基调。
+
+    Args:
+        body_state: 身体状态字典，需包含 valence/tension/temperature 字段。
+
+    Returns:
+        天气隐喻字符串，格式为 "内心天气：{温度修饰}的{天气}"。
+    """
+    valence = body_state.get("valence", 0)
+    tension = body_state.get("tension", 0)
+    temperature = body_state.get("temperature", 0.5)
+
+    # 基础天气
+    if valence > 0.5 and tension < 0.2:
+        weather = "晴朗温暖"
+    elif valence > 0.2:
+        weather = "多云转晴"
+    elif valence < -0.5:
+        weather = "暴风雨"
+    elif valence < -0.2:
+        weather = "阴沉"
+    elif tension > 0.5:
+        weather = "闷热欲雷"
+    else:
+        weather = "薄雾"
+
+    # 温度修饰
+    if temperature > 0.7:
+        temp_desc = "炽热"
+    elif temperature > 0.4:
+        temp_desc = "温和"
+    else:
+        temp_desc = "清冷"
+
+    return f"内心天气：{temp_desc}的{weather}"
+
+
+# ---------------------------------------------------------------------------
+# Item 2: 首次对话引导流程
+# ---------------------------------------------------------------------------
+
+
+def render_onboarding_fragment(tick_count: int) -> str | None:
+    """根据 tick 计数返回首次对话引导 prompt 片段。
+
+    在关系建立初期（tick_count < 3）注入引导性指令，
+    帮助 Sylanne 以温和好奇的方式开启新关系。
+
+    Args:
+        tick_count: 当前 tick 计数（对话轮次）。
+
+    Returns:
+        引导 prompt 片段字符串，或 None（tick_count >= 3 时不再注入）。
+    """
+    if tick_count < 3:
+        return "这是一段新的关系。保持好奇但不急切，用简短温和的方式了解对方。"
+    return None

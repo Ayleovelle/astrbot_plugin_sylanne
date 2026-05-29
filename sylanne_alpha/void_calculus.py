@@ -17,6 +17,50 @@ from dataclasses import dataclass
 from typing import Any, Callable
 
 
+class SilenceTexture:
+    """沉默质感分类——不同类型的沉默有不同的情感含义。
+
+    四种质感：
+      - WAITING: 期待回复（短沉默 + 中性/正向情绪）
+      - DIGESTING: 需要时间处理（中等沉默 + 负向情绪）
+      - DISTANT: 关系冷却（长沉默 + 低关系温度）
+      - CONTENT: 满足无需言语（短沉默 + 正向情绪）
+    """
+
+    WAITING = "waiting"
+    DIGESTING = "digesting"
+    DISTANT = "distant"
+    CONTENT = "content"
+
+    @staticmethod
+    def classify(
+        silence_duration: float,
+        last_valence: float,
+        relationship_warmth: float,
+    ) -> str:
+        """根据沉默时长、最后情绪和关系温度分类沉默质感。
+
+        Args:
+            silence_duration: 沉默持续时间（秒）
+            last_valence: 最后一次交互的情绪效价 [-1, 1]
+            relationship_warmth: 关系温度 [0, 1]
+
+        Returns:
+            沉默质感字符串
+        """
+        # silence < 5min + valence > 0 → content
+        if silence_duration < 300 and last_valence > 0:
+            return SilenceTexture.CONTENT
+        # silence < 30min + valence < -0.3 → digesting
+        if silence_duration < 1800 and last_valence < -0.3:
+            return SilenceTexture.DIGESTING
+        # silence > 2h + warmth < 0.3 → distant
+        if silence_duration > 7200 and relationship_warmth < 0.3:
+            return SilenceTexture.DISTANT
+        # 其他 → waiting
+        return SilenceTexture.WAITING
+
+
 @dataclass(slots=True)
 class Void:
     """一等缺席对象——虚空。
@@ -63,7 +107,8 @@ class Void:
         self.beta = self.boundary_completeness
         if self.depth > 0 and self.age > 0:
             self.pressure += self.depth * math.log(self.age + 1) * (1.0 - self.beta)
-            self.pressure = min(self.pressure, pressure_cap)
+        # 硬顶：无论 pressure_cap 如何，绝对不超过 5.0
+        self.pressure = min(self.pressure, 5.0, pressure_cap)
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -184,9 +229,9 @@ class VoidSpace:
         for v in self.voids:
             v.tick(self._pressure_cap)
 
-        # Cap pressure per personality-derived limit
+        # 硬顶：无论人格参数如何，单个虚空压力绝对不超过 5.0
         for v in self.voids:
-            v.pressure = min(v.pressure, self._pressure_cap)
+            v.pressure = min(v.pressure, 5.0)
 
         # Contract: event touches void boundaries
         result["voids_contracted"] = self._contract_all(event_vec)
@@ -355,7 +400,7 @@ class VoidSpace:
         return Void(
             boundary=list(set(v1.boundary + v2.boundary)),
             depth=max(v1.depth, v2.depth),
-            pressure=v1.pressure + v2.pressure,
+            pressure=min(v1.pressure + v2.pressure, 5.0),
             age=max(v1.age, v2.age),
             beta=0.0,
         )
@@ -469,3 +514,27 @@ class VoidSpace:
         self._split_threshold = split_threshold
         self._merge_threshold = merge_threshold
         self._pressure_cap = pressure_cap
+
+
+# ---------------------------------------------------------------------------
+# 沉默的语义类型与破冰策略（Item 146）
+# ---------------------------------------------------------------------------
+
+SILENCE_BREAKERS: dict[str, str] = {
+    "waiting": "试探性短句，确认对方是否还在",
+    "digesting": "给予空间，等对方准备好再说",
+    "distant": "轻量问候，不施压",
+    "content": "自然延续，不刻意打破",
+}
+
+
+def get_silence_breaker(texture: str) -> str:
+    """根据沉默的语义类型返回对应的破冰策略描述。
+
+    Args:
+        texture: 沉默纹理类型（waiting / digesting / distant / content）。
+
+    Returns:
+        破冰策略描述文本，未知类型返回空字符串。
+    """
+    return SILENCE_BREAKERS.get(texture, "")

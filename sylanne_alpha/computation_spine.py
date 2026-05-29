@@ -10,15 +10,18 @@
 
 from __future__ import annotations
 
+import logging
 import time
 from collections import deque
 from typing import TYPE_CHECKING, Any
 
 from .autopoiesis import AutopoieticBoundary
+from .bounded_dict import BoundedDict
 from .hdc import HDCEncoder
 from .hgt import HeterogeneousGraphTransformer
 from .personality import (
     EMBODIMENT_TRAITS,
+    DriftAttribution,
     DriftSignalExtractor,
     OscillationDetector,
     TraitMemory,
@@ -33,7 +36,76 @@ from .void_scar_engine import VoidScarEngine
 if TYPE_CHECKING:
     from .social_field import SocialSignals
 
+logger = logging.getLogger("astrbot_plugin_sylanne")
+
 _TIMING_WINDOW = 50
+# 单层执行超时告警阈值（纳秒），200ms
+_LAYER_TIMEOUT_NS = 200_000_000
+
+
+class CircuitBreaker:
+    """计算层异常隔离与自愈断路器。
+
+    当某层连续失败达到阈值时进入 open 状态，在冷却期内直接返回上次成功结果（fallback）。
+    冷却期结束后进入 half-open 状态，允许一次尝试：成功则关闭，失败则重新打开。
+    """
+
+    __slots__ = ("_failures", "_threshold", "_cooldown", "_open_since", "_last_good_result")
+
+    def __init__(self, threshold: int = 3, cooldown: float = 60.0):
+        self._failures: int = 0
+        self._threshold: int = threshold
+        self._cooldown: float = cooldown
+        self._open_since: float = 0.0
+        self._last_good_result: Any = None
+
+    def is_open(self) -> bool:
+        if self._failures >= self._threshold:
+            if time.time() - self._open_since < self._cooldown:
+                return True
+            # half-open: cooldown expired, allow one retry
+            # 设为 threshold-1 使单次失败即可重新打开
+            self._failures = self._threshold - 1
+        return False
+
+    def record_success(self, result: Any) -> None:
+        """记录成功执行，重置失败计数并缓存结果。"""
+        self._failures = 0
+        self._last_good_result = result
+
+    def record_failure(self) -> None:
+        """记录失败，达到阈值时打开断路器。"""
+        self._failures += 1
+        if self._failures >= self._threshold:
+            self._open_since = time.time()
+
+    def fallback(self) -> Any:
+        """返回上次成功的缓存结果。"""
+        return self._last_good_result
+
+
+# ---------------------------------------------------------------------------
+# Item 75: 计算层插件注册表（简化版）
+# ---------------------------------------------------------------------------
+
+
+class LayerRegistry:
+    """计算层注册表：支持第三方注册自定义层。"""
+
+    _custom_layers: dict[str, callable] = {}
+
+    @classmethod
+    def register(cls, name: str, layer_fn: callable):
+        """注册自定义计算层。layer_fn 签名: (input_data, config) -> output_data"""
+        cls._custom_layers[name] = layer_fn
+
+    @classmethod
+    def get_custom_layers(cls) -> dict[str, callable]:
+        return dict(cls._custom_layers)
+
+    @classmethod
+    def has_custom(cls, name: str) -> bool:
+        return name in cls._custom_layers
 
 
 class ComputationSpine:
@@ -81,11 +153,18 @@ class ComputationSpine:
         "_last_effective_session",
         "_last_effective_params",
         "_personality_dirty",
+        "_diagnostics_enabled",
+        "_circuit_breakers",
+        "_layer_enabled",
+        "_result_cache",
+        "_drift_attribution",
+        "_parallel_eligible",
     )
 
-    def __init__(self):
-        self.encoder = HDCEncoder(dim=2048)
-        self.gate = PredictiveCodingGate(dim=2048)
+    def __init__(self, plugin: Any = None):
+        hdc_dim = getattr(plugin, '_cfg_int', lambda k, d: d)('sylanne_alpha_hdc_dimension', 2048)
+        self.encoder = HDCEncoder(dim=hdc_dim)
+        self.gate = PredictiveCodingGate(dim=hdc_dim)
         self.engine = VoidScarEngine(n_dims=8, similarity_fn=self._hdc_similarity)
         self.sheaf = ScarSheaf(n0=8)
         self.boundary = AutopoieticBoundary(identity_dim=32)
@@ -131,6 +210,7 @@ class ComputationSpine:
             name: TraitMemory(0.5) for name in EMBODIMENT_TRAITS
         }
         self._oscillation_detector = OscillationDetector()
+        self._drift_attribution = DriftAttribution(maxlen=100)
         self._drift_tick = 0
         self._last_embodiment_apply: dict[str, float] = {
             name: 0.5 for name in EMBODIMENT_TRAITS
@@ -140,7 +220,7 @@ class ComputationSpine:
         self._drift_min_interval: float = 30.0  # seconds
 
         # Per-relationship personality deltas (session_key -> {trait: delta})
-        self._relationship_deltas: dict[str, dict[str, float]] = {}
+        self._relationship_deltas: BoundedDict = BoundedDict(maxsize=200)
 
         # P6: Cache per-relationship personality to avoid double apply_personality
         self._last_effective_session: str = ""
@@ -149,6 +229,51 @@ class ComputationSpine:
 
         # Diagnostics toggle — skip expensive _l1_hdc_payload when WebUI isn't polling
         self._diagnostics_enabled: bool = True
+
+        # Circuit breakers for each computation layer (异常隔离与自愈)
+        self._circuit_breakers: dict[str, CircuitBreaker] = {
+            "perception": CircuitBreaker(threshold=3, cooldown=60.0),
+            "gate": CircuitBreaker(threshold=3, cooldown=60.0),
+            "void_scar": CircuitBreaker(threshold=3, cooldown=60.0),
+            "sheaf": CircuitBreaker(threshold=3, cooldown=60.0),
+            "hgt": CircuitBreaker(threshold=3, cooldown=60.0),
+            "boundary": CircuitBreaker(threshold=3, cooldown=60.0),
+            "expression": CircuitBreaker(threshold=3, cooldown=60.0),
+        }
+
+        # 计算栈层级开关（Item 57）：可动态禁用某层以降低计算开销或调试
+        self._layer_enabled: dict[str, bool] = {
+            "perception": True,
+            "gate": True,
+            "void_scar": True,
+            "sheaf": True,
+            "hgt": True,
+            "boundary": True,
+            "expression": True,
+        }
+
+        # 计算结果缓存（Item 20）：相同文本短时间内命中缓存，避免重复计算
+        self._result_cache: BoundedDict = BoundedDict(maxsize=50, ttl=30)
+
+        # Item 11: 流水线并行化标记。
+        # L1-L2 与 L4 理论上可并行，但 L4 依赖 L3 输出，且 process() 为同步方法，
+        # 无法使用 asyncio.gather。此标记供未来 async 重构时识别可并行段。
+        # 当前语义：在 normal/full path 中 L4(sheaf) 和 L5(hgt) 可与 L6(boundary)
+        # 并行执行（它们之间无数据依赖），但需要 async 化后才能实现。
+        self._parallel_eligible: bool = False
+
+    def set_layer_enabled(self, layer: str, enabled: bool) -> None:
+        """启用或禁用指定的计算层。
+
+        禁用的层在 process() 中将被跳过，使用默认值代替。
+        可用于调试、性能优化或特定场景下的简化计算。
+
+        Args:
+            layer: 层名称，可选 "perception"/"gate"/"void_scar"/"sheaf"/"hgt"/"boundary"/"expression"。
+            enabled: True 启用，False 禁用。
+        """
+        if layer in self._layer_enabled:
+            self._layer_enabled[layer] = enabled
 
     def set_diagnostics(self, enabled: bool) -> None:
         """启用/禁用诊断数据生成（_l1_hdc_payload 等昂贵调用）。
@@ -401,6 +526,12 @@ class ComputationSpine:
             assessment: 可选的 LLM 评估结果，用于精确语义调制
             session_key: 可选的关系标识符，用于每关系人格覆盖
         """
+        # 结果缓存层（Item 20）：相同文本短时间内直接返回缓存
+        cache_key = (text, session_key or "")
+        cached = self._result_cache.get(cache_key)
+        if cached is not None:
+            return cached
+
         # Apply per-relationship personality overlay if session changed or dirty
         if session_key != self._last_effective_session or self._personality_dirty:
             effective = self.effective_personality(session_key)
@@ -431,50 +562,122 @@ class ComputationSpine:
 
         # Layer 1: Perception -- HDC encode
         t0 = time.perf_counter_ns()
-        h = self.encoder.encode_text(text)
+        if not self._layer_enabled.get("perception", True):
+            h = self._last_hdc_vec or bytearray(self.encoder.dim // 8)
+            logger.debug("Layer perception DISABLED — using default")
+        else:
+            cb = self._circuit_breakers["perception"]
+            if cb.is_open():
+                h = cb.fallback() or bytearray(self.encoder.dim // 8)
+                logger.warning("Layer perception circuit OPEN — using fallback")
+            else:
+                try:
+                    h = self.encoder.encode_text(text)
+                    cb.record_success(h)
+                except Exception as exc:
+                    cb.record_failure()
+                    h = cb.fallback() or bytearray(self.encoder.dim // 8)
+                    logger.error("Layer perception failed: %s — using fallback", exc)
         self._last_hdc_vec = h
-        self._timings["perception"].append(time.perf_counter_ns() - t0)
+        _elapsed = time.perf_counter_ns() - t0
+        self._timings["perception"].append(_elapsed)
+        if _elapsed > _LAYER_TIMEOUT_NS:
+            logger.warning("Layer perception took %.1fms (>200ms)", _elapsed / 1e6)
 
         # Layer 2: Predictive Coding Gate -- compute surprise, decide route
         t0 = time.perf_counter_ns()
-        surprise = self.gate.surprise(h)
-        if self._diagnostics_enabled:
-            l1_payload = self._l1_hdc_payload(text, h, surprise)
+        if not self._layer_enabled.get("gate", True):
+            surprise = 0.0
+            route = "fast"
+            l1_payload = {"ones_ratio": 0.0, "total_bits": 0, "sample_bits": [], "prediction_similarity": 0.0, "flip_ratio": 0.0}
+            logger.debug("Layer gate DISABLED — using defaults")
         else:
-            l1_payload = {
-                "ones_ratio": 0.0,
-                "total_bits": 0,
-                "sample_bits": [],
-                "prediction_similarity": 0.0,
-                "flip_ratio": 0.0,
-            }
-        route = self.gate.route(surprise)
-        self.gate.update(h, surprise)
+            cb = self._circuit_breakers["gate"]
+            if cb.is_open():
+                _gate_fallback = cb.fallback() or {"surprise": 0.0, "route": "fast"}
+                surprise = _gate_fallback["surprise"]
+                route = _gate_fallback["route"]
+                l1_payload = {"ones_ratio": 0.0, "total_bits": 0, "sample_bits": [], "prediction_similarity": 0.0, "flip_ratio": 0.0}
+                logger.warning("Layer gate circuit OPEN — using fallback")
+            else:
+                try:
+                    surprise = self.gate.surprise(h)
+                    if self._diagnostics_enabled:
+                        l1_payload = self._l1_hdc_payload(text, h, surprise)
+                    else:
+                        l1_payload = {
+                            "ones_ratio": 0.0,
+                            "total_bits": 0,
+                            "sample_bits": [],
+                            "prediction_similarity": 0.0,
+                            "flip_ratio": 0.0,
+                        }
+                    route = self.gate.route(surprise)
+                    self.gate.update(h, surprise)
+                    cb.record_success({"surprise": surprise, "route": route})
+                except Exception as exc:
+                    cb.record_failure()
+                    _gate_fallback = cb.fallback() or {"surprise": 0.0, "route": "fast"}
+                    surprise = _gate_fallback["surprise"]
+                    route = _gate_fallback["route"]
+                    l1_payload = {"ones_ratio": 0.0, "total_bits": 0, "sample_bits": [], "prediction_similarity": 0.0, "flip_ratio": 0.0}
+                    logger.error("Layer gate failed: %s — using fallback", exc)
         self._last_route = route
         if route in self._route_counts:
             self._route_counts[route] += 1
-        self._timings["gate"].append(time.perf_counter_ns() - t0)
+        _elapsed = time.perf_counter_ns() - t0
+        self._timings["gate"].append(_elapsed)
+        if _elapsed > _LAYER_TIMEOUT_NS:
+            logger.warning("Layer gate took %.1fms (>200ms)", _elapsed / 1e6)
 
         # Layer 3+4: Void-Scar Engine (replaces SSM + TopologicalMemory)
         t0 = time.perf_counter_ns()
-        ssm_input = self._hdc_to_ssm_input(h, surprise)
-        self.engine.process(
-            event_vec=bytes(h),
-            ssm_input=ssm_input,
-            surprise=surprise,
-            timestamp=timestamp,
-        )
-        emotion = self.engine.observe()
-        # Void boundaries serve as "recalled" context (related memory)
-        recalled = [
-            {"boundary_size": len(v.boundary), "pressure": v.pressure, "depth": v.depth}
-            for v in self.engine.void_space.voids[:3]
-        ]
-        holes = [
-            {"pressure": v.pressure, "depth": v.depth, "age": v.age}
-            for v in self.engine.void_space.voids
-        ]
-        self._timings["void_scar"].append(time.perf_counter_ns() - t0)
+        if not self._layer_enabled.get("void_scar", True):
+            ssm_input = [0.0] * 8
+            emotion = self.engine.observe()
+            recalled = []
+            holes = []
+            logger.debug("Layer void_scar DISABLED — using defaults")
+        else:
+            cb = self._circuit_breakers["void_scar"]
+            if cb.is_open():
+                _vs_fallback = cb.fallback() or {}
+                ssm_input = [0.0] * 8
+                emotion = _vs_fallback.get("emotion", self.engine.observe())
+                recalled = _vs_fallback.get("recalled", [])
+                holes = _vs_fallback.get("holes", [])
+                logger.warning("Layer void_scar circuit OPEN — using fallback")
+            else:
+                try:
+                    ssm_input = self._hdc_to_ssm_input(h, surprise)
+                    self.engine.process(
+                        event_vec=bytes(h),
+                        ssm_input=ssm_input,
+                        surprise=surprise,
+                        timestamp=timestamp,
+                    )
+                    emotion = self.engine.observe()
+                    recalled = [
+                        {"boundary_size": len(v.boundary), "pressure": v.pressure, "depth": v.depth}
+                        for v in self.engine.void_space.voids[:3]
+                    ]
+                    holes = [
+                        {"pressure": v.pressure, "depth": v.depth, "age": v.age}
+                        for v in self.engine.void_space.voids
+                    ]
+                    cb.record_success({"emotion": emotion, "recalled": recalled, "holes": holes})
+                except Exception as exc:
+                    cb.record_failure()
+                    _vs_fallback = cb.fallback() or {}
+                    ssm_input = [0.0] * 8
+                    emotion = _vs_fallback.get("emotion", self.engine.observe())
+                    recalled = _vs_fallback.get("recalled", [])
+                    holes = _vs_fallback.get("holes", [])
+                    logger.error("Layer void_scar failed: %s — using fallback", exc)
+        _elapsed = time.perf_counter_ns() - t0
+        self._timings["void_scar"].append(_elapsed)
+        if _elapsed > _LAYER_TIMEOUT_NS:
+            logger.warning("Layer void_scar took %.1fms (>200ms)", _elapsed / 1e6)
 
         # Layer 3.5: LLM Assessment modulation (if available this tick)
         assessment_source = "hdc_only"
@@ -487,41 +690,87 @@ class ComputationSpine:
 
         # Layer 4: Relational Sheaf — cross-relational propagation
         t0 = time.perf_counter_ns()
-        sheaf_result = self.sheaf.tick(0, ssm_input, timestamp=timestamp)
-        self._timings["sheaf"].append(time.perf_counter_ns() - t0)
+        if not self._layer_enabled.get("sheaf", True):
+            sheaf_result = {}
+            logger.debug("Layer sheaf DISABLED — using defaults")
+        else:
+            cb = self._circuit_breakers["sheaf"]
+            if cb.is_open():
+                sheaf_result = cb.fallback() or {}
+                logger.warning("Layer sheaf circuit OPEN — using fallback")
+            else:
+                try:
+                    sheaf_result = self.sheaf.tick(0, ssm_input, timestamp=timestamp)
+                    cb.record_success(sheaf_result)
+                except Exception as exc:
+                    cb.record_failure()
+                    sheaf_result = cb.fallback() or {}
+                    logger.error("Layer sheaf failed: %s — using fallback", exc)
+        _elapsed = time.perf_counter_ns() - t0
+        self._timings["sheaf"].append(_elapsed)
+        if _elapsed > _LAYER_TIMEOUT_NS:
+            logger.warning("Layer sheaf took %.1fms (>200ms)", _elapsed / 1e6)
         l4_payload = self._l4_sheaf_payload(sheaf_result)
 
         # Layer 5: Heterogeneous Graph Transformer — decision fusion
         t0 = time.perf_counter_ns()
-        hdc_features = ssm_input  # 复用 L3 已计算的 8 维压缩（避免重复调用 _hdc_to_ssm_input）
-        hgt_tokens = self.hgt.build_tokens_from_spine(
-            scar_state=self.engine.scar_state,
-            void_space=self.engine.void_space,
-            boundary=self.boundary,
-            personality=self._personality,
-            surprise=surprise,
-            expression=self.expression,
-            hdc_features=hdc_features,
-        )
-        hgt_decision = self.hgt.forward(hgt_tokens, self._personality)
-        self._timings["hgt"].append(time.perf_counter_ns() - t0)
+        if not self._layer_enabled.get("hgt", True):
+            hgt_decision = [0.0, 0.0, 0.0, 0.0]
+            logger.debug("Layer hgt DISABLED — using defaults")
+        else:
+            cb = self._circuit_breakers["hgt"]
+            if cb.is_open():
+                hgt_decision = cb.fallback() or [0.0, 0.0, 0.0, 0.0]
+                logger.warning("Layer hgt circuit OPEN — using fallback")
+            else:
+                try:
+                    hdc_features = ssm_input  # 复用 L3 已计算的 8 维压缩（避免重复调用 _hdc_to_ssm_input）
+                    hgt_tokens = self.hgt.build_tokens_from_spine(
+                        scar_state=self.engine.scar_state,
+                        void_space=self.engine.void_space,
+                        boundary=self.boundary,
+                        personality=self._personality,
+                        surprise=surprise,
+                        expression=self.expression,
+                        hdc_features=hdc_features,
+                    )
+                    hgt_decision = self.hgt.forward(hgt_tokens, self._personality)
+                    cb.record_success(hgt_decision)
+                except Exception as exc:
+                    cb.record_failure()
+                    hgt_decision = cb.fallback() or [0.0, 0.0, 0.0, 0.0]
+                    logger.error("Layer hgt failed: %s — using fallback", exc)
+        _elapsed = time.perf_counter_ns() - t0
+        self._timings["hgt"].append(_elapsed)
+        if _elapsed > _LAYER_TIMEOUT_NS:
+            logger.warning("Layer hgt took %.1fms (>200ms)", _elapsed / 1e6)
 
         # Fast path: skip heavy computation
         if route == "fast":
             t0 = time.perf_counter_ns()
-            drive = self.engine.expression_drive()
-            # Apply HGT d_0 (expression drive correction)
-            drive = max(0.0, min(1.0, drive + hgt_decision[0] * 0.3))
-            self.expression.accumulate(drive, dt=1.0)
-            self._timings["expression"].append(time.perf_counter_ns() - t0)
+            if not self._layer_enabled.get("expression", True):
+                should_express_fast = False
+            else:
+                drive = self.engine.expression_drive()
+                # Apply HGT d_0 (expression drive correction)
+                drive = max(0.0, min(1.0, drive + hgt_decision[0] * 0.3))
+                self.expression.accumulate(drive, dt=1.0)
+            _elapsed = time.perf_counter_ns() - t0
+            self._timings["expression"].append(_elapsed)
+            if _elapsed > _LAYER_TIMEOUT_NS:
+                logger.warning("Layer expression(fast) took %.1fms (>200ms)", _elapsed / 1e6)
             # Fast path still perturbs boundary lightly (10% force)
-            fast_force = self._emotion_to_boundary_force(emotion)
-            self.boundary.perturb([f * 0.1 for f in fast_force])
+            if self._layer_enabled.get("boundary", True):
+                fast_force = self._emotion_to_boundary_force(emotion)
+                self.boundary.perturb([f * 0.1 for f in fast_force])
             self.boundary.self_repair()
             # HGT d_3 inhibition can veto expression
-            should_express_fast = (
-                self.expression.should_express() and hgt_decision[3] < 0.5
-            )
+            if self._layer_enabled.get("expression", True):
+                should_express_fast = (
+                    self.expression.should_express() and hgt_decision[3] < 0.5
+                )
+            else:
+                should_express_fast = False
             if should_express_fast:
                 self._last_expression_time = timestamp
             result = self._build_result(
@@ -544,40 +793,55 @@ class ComputationSpine:
                 "L7_Expression": self.expression.state(),
             }
             self._drift_embodiment(result)
+            self._result_cache[cache_key] = result
             return result
 
         # Normal/Full path: boundary + expression
         # Layer 5: Autopoietic Boundary
         t0 = time.perf_counter_ns()
         boundary_result = {}
-        force = self._emotion_to_boundary_force(emotion)
-        if route == "full":
-            sensitivity_mod = 1.0 + hgt_decision[1] * 0.5
-            force = [f * sensitivity_mod for f in force]
-            boundary_result = self.boundary.perturb(force)
-        elif route == "normal":
-            boundary_result = self.boundary.perturb([f * 0.3 for f in force])
-        self.boundary.self_repair()
-        self._timings["boundary"].append(time.perf_counter_ns() - t0)
+        if not self._layer_enabled.get("boundary", True):
+            self.boundary.self_repair()
+            logger.debug("Layer boundary DISABLED — using defaults")
+        else:
+            force = self._emotion_to_boundary_force(emotion)
+            if route == "full":
+                sensitivity_mod = 1.0 + hgt_decision[1] * 0.5
+                force = [f * sensitivity_mod for f in force]
+                boundary_result = self.boundary.perturb(force)
+            elif route == "normal":
+                boundary_result = self.boundary.perturb([f * 0.3 for f in force])
+            self.boundary.self_repair()
+        _elapsed = time.perf_counter_ns() - t0
+        self._timings["boundary"].append(_elapsed)
+        if _elapsed > _LAYER_TIMEOUT_NS:
+            logger.warning("Layer boundary took %.1fms (>200ms)", _elapsed / 1e6)
 
         # Layer 6: Phase Transition Expression
         t0 = time.perf_counter_ns()
-        drive = self.engine.expression_drive()
-        # Apply HGT d_0 (expression drive correction)
-        drive = max(0.0, min(1.0, drive + hgt_decision[0] * 0.3))
-        if boundary_result.get("phase_transition"):
-            drive = min(1.0, drive + 0.4)  # Phase transition boosts expression drive
-        self.expression.accumulate(drive, dt=1.0)
-        self.expression.silence_lowers_threshold(dt=dt)
+        if not self._layer_enabled.get("expression", True):
+            should_express = False
+            logger.debug("Layer expression DISABLED — using defaults")
+        else:
+            drive = self.engine.expression_drive()
+            # Apply HGT d_0 (expression drive correction)
+            drive = max(0.0, min(1.0, drive + hgt_decision[0] * 0.3))
+            if boundary_result.get("phase_transition"):
+                drive = min(1.0, drive + 0.4)  # Phase transition boosts expression drive
+            self.expression.accumulate(drive, dt=1.0)
+            self.expression.silence_lowers_threshold(dt=dt)
 
-        # HGT d_2 influences urgency (stored in expression state)
-        # HGT d_3 inhibition can veto expression
-        should_express = self.expression.should_express() and hgt_decision[3] < 0.5
+            # HGT d_2 influences urgency (stored in expression state)
+            # HGT d_3 inhibition can veto expression
+            should_express = self.expression.should_express() and hgt_decision[3] < 0.5
 
-        # Record expression time for feedback timeout detection
-        if should_express:
-            self._last_expression_time = timestamp
-        self._timings["expression"].append(time.perf_counter_ns() - t0)
+            # Record expression time for feedback timeout detection
+            if should_express:
+                self._last_expression_time = timestamp
+        _elapsed = time.perf_counter_ns() - t0
+        self._timings["expression"].append(_elapsed)
+        if _elapsed > _LAYER_TIMEOUT_NS:
+            logger.warning("Layer expression took %.1fms (>200ms)", _elapsed / 1e6)
 
         result = self._build_result(
             text, timestamp, surprise, route, emotion, recalled, holes, should_express
@@ -599,6 +863,7 @@ class ComputationSpine:
             "L7_Expression": self.expression.state(),
         }
         self._drift_embodiment(result)
+        self._result_cache[cache_key] = result
         return result
 
     def _drift_embodiment(self, result: dict[str, Any]) -> None:
@@ -623,6 +888,7 @@ class ComputationSpine:
             signals,
             self._drift_tick,
             oscillation_detector=self._oscillation_detector,
+            drift_attribution=self._drift_attribution,
         )
         self._drift_tick += 1
 
@@ -703,6 +969,7 @@ class ComputationSpine:
                 signals,
                 self._drift_tick,
                 oscillation_detector=self._oscillation_detector,
+                drift_attribution=self._drift_attribution,
             )
 
         # Update per-relationship personality delta

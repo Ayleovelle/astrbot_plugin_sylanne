@@ -84,10 +84,15 @@ class SocialFieldCollector:
     """
 
     def __init__(self, config: dict | None = None):
-        self._groups: dict[str, _GroupState] = {}  # group_id → 群组状态
-        self._bot_names: list[str] = []  # 机器人名字列表（用于提及检测）
-        self._continuation_tau: float = 60.0  # 对话延续的时间常数（秒）
+        self._groups: dict[str, _GroupState] = {}
+        self._bot_names: list[str] = []
+        self._continuation_tau: float = 60.0
         self._config: dict = {}
+        self._pressure_rate: float = 0.1
+        self._pressure_cap: float = 5.0
+        self._post_reply_decay: float = 0.3
+        self._inactive_decay: float = 0.98
+        self._ema_alpha: float = 0.3
         if config:
             self.configure(config)
 
@@ -167,9 +172,9 @@ class SocialFieldCollector:
         beta = 1.0 - topic_relevance
         if depth > 0 and gs.silence_ticks > 0:
             gs.social_void_pressure += (
-                depth * math.log(gs.silence_ticks + 1) * beta * 0.1
+                depth * math.log(gs.silence_ticks + 1) * beta * self._pressure_rate
             )
-        gs.social_void_pressure = min(5.0, gs.social_void_pressure)
+        gs.social_void_pressure = min(self._pressure_cap, gs.social_void_pressure)
 
         # 记录到旁观缓冲区（供后续上下文注入）
         gs.shadow_buffer.append(
@@ -196,7 +201,7 @@ class SocialFieldCollector:
         gs = self._get_group(group_id)
         gs.last_bot_reply_ts = time.time()
         gs.silence_ticks = 0
-        gs.social_void_pressure *= 0.3  # 回复后虚空压力大幅衰减
+        gs.social_void_pressure *= self._post_reply_decay
         gs.shadow_buffer.clear()
 
         # 记录机器人话题词（用于后续话题相关性计算）
@@ -270,7 +275,7 @@ class SocialFieldCollector:
         raw_rate = len(gs.message_timestamps) / (window / 60.0)
         # Normalize to [0, 1] — 20 msg/min = 1.0
         normalized = min(1.0, raw_rate / 20.0)
-        alpha = 0.3
+        alpha = self._ema_alpha
         gs.ema_rate = alpha * normalized + (1.0 - alpha) * gs.ema_rate
 
     def _compute_topic_relevance(self, text: str, gs: _GroupState) -> float:
@@ -321,3 +326,330 @@ class SocialFieldCollector:
         self._post_reply_decay = post_reply_decay
         self._inactive_decay = inactive_decay
         self._ema_alpha = ema_alpha
+
+
+def emotional_resistance(current_intensity: float, inner_order: float) -> float:
+    """计算情绪传染的抵抗力。
+
+    当自身情绪强度高且内在秩序感强时，对外部情绪输入的抵抗力更大。
+    resistance > 0.7 时，外部情绪输入的影响力应减半。
+
+    Args:
+        current_intensity: 当前情绪强度 [0, +inf)
+        inner_order: 内在秩序感 [0, 1]
+
+    Returns:
+        抵抗力值 [0, 1]
+    """
+    return min(1.0, current_intensity * inner_order)
+
+
+class EmotionalInertia:
+    """情绪惯性模型——情绪持续越久，越难被外部冲击改变方向。
+
+    类比物理惯性：情绪"质量"随持续时间对数增长，
+    只有足够大的"冲量"才能突破惯性改变情绪方向。
+    """
+
+    __slots__ = ("_duration", "_direction")
+
+    def __init__(self):
+        self._duration: float = 0.0  # 当前情绪持续时间（秒）
+        self._direction: float = 0.0  # 当前情绪方向（-1 到 1）
+
+    def mass(self) -> float:
+        """情绪质量随持续时间对数增长。
+
+        刚开始时质量为 1.0（容易改变），
+        持续 1 小时后质量约 1.69（需要更大冲击才能改变）。
+        """
+        return 1.0 + math.log1p(self._duration / 3600)
+
+    def can_shift(self, impulse: float) -> bool:
+        """判断 impulse 是否足以突破惯性。
+
+        Args:
+            impulse: 外部情绪冲量的绝对值
+
+        Returns:
+            True 表示冲量足以改变情绪方向
+        """
+        return abs(impulse) > self.mass() * 0.3
+
+    def update(self, dt: float, new_direction: float) -> None:
+        """更新惯性状态。
+
+        如果方向一致则累积持续时间，方向反转则重置。
+
+        Args:
+            dt: 时间增量（秒）
+            new_direction: 新的情绪方向 [-1, 1]
+        """
+        if self._direction * new_direction > 0:
+            # 同方向，累积
+            self._duration += dt
+        else:
+            # 方向反转，重置
+            self._duration = 0.0
+        self._direction = new_direction
+
+    @property
+    def duration(self) -> float:
+        return self._duration
+
+    @property
+    def direction(self) -> float:
+        return self._direction
+
+    def attempt_shift(self, impulse: float, dt: float) -> tuple[bool, float]:
+        """尝试突破情绪惯性。返回 (是否突破, 实际变化量)。
+
+        先根据冲量方向更新惯性，再判断是否突破。
+        同向冲量累积惯性；反向冲量不累积，只判断是否突破。
+
+        Args:
+            impulse: 外部情绪冲量（带方向）
+            dt: 时间增量（秒）
+
+        Returns:
+            (breakthrough, actual_change) 元组
+        """
+        impulse_dir = 1.0 if impulse > 0 else (-1.0 if impulse < 0 else 0.0)
+        self.update(dt, impulse_dir)
+        if self.can_shift(impulse):
+            breakthrough_multiplier = 1.0 + self.mass() * 0.3
+            actual_change = impulse * breakthrough_multiplier
+            self._duration = 0  # 重置持续时间
+            self._direction = 1.0 if impulse > 0 else -1.0
+            return True, actual_change
+        else:
+            # 未突破：只产生微小波动
+            actual_change = impulse * 0.1
+            return False, actual_change
+
+
+# ---------------------------------------------------------------------------
+# Item 100: 冲突事件溯源日志
+# ---------------------------------------------------------------------------
+
+
+@dataclass
+class ConflictEvent:
+    """单条冲突事件记录。"""
+
+    timestamp: float
+    trigger: str  # 用户输入摘要（截断至 100 字符）
+    assessment: str  # 评估结果
+    tension_delta: float  # 张力变化量
+
+
+class ConflictTrace:
+    """冲突事件溯源日志——记录张力显著升高的事件，供复盘和模式识别使用。
+
+    只记录 tension_delta > 0.1 的事件，避免噪声淹没关键信号。
+    使用固定长度 deque 自动淘汰旧事件。
+    """
+
+    def __init__(self, maxlen: int = 20):
+        self._events: deque[ConflictEvent] = deque(maxlen=maxlen)
+
+    def record(self, trigger: str, assessment: str, tension_delta: float) -> None:
+        """记录一条冲突事件（仅当张力变化显著时）。
+
+        Args:
+            trigger: 触发冲突的用户输入摘要
+            assessment: 系统对该事件的评估结果
+            tension_delta: 张力变化量，>0.1 才会被记录
+        """
+        if tension_delta > 0.1:
+            self._events.append(
+                ConflictEvent(time.time(), trigger[:100], assessment, tension_delta)
+            )
+
+    def recent(self, n: int = 5) -> list[ConflictEvent]:
+        """返回最近 n 条冲突事件。"""
+        return list(self._events)[-n:]
+
+    def to_dict(self) -> list[dict]:
+        """序列化为字典列表，供持久化或诊断面板使用。"""
+        return [
+            {
+                "timestamp": e.timestamp,
+                "trigger": e.trigger,
+                "assessment": e.assessment,
+                "delta": e.tension_delta,
+            }
+            for e in self._events
+        ]
+
+
+# ---------------------------------------------------------------------------
+# Item 136: 情绪传染方向性模型
+# ---------------------------------------------------------------------------
+
+
+def compute_influence_ratio(
+    relationship_age_days: float,
+    sylanne_intensity: float,
+    user_intensity: float,
+    relational_gravity: float,
+) -> float:
+    """计算情绪传染的方向性比率。
+
+    返回 0-1 的值：
+    - 0 = 用户完全影响 Sylanne（Sylanne 被动接收）
+    - 1 = Sylanne 完全影响用户（Sylanne 主动辐射）
+
+    默认偏向被用户影响（新关系时 ratio 低）。
+
+    公式：
+        ratio = 0.3 + relational_gravity * 0.3
+                + min(relationship_age_days / 90, 1) * 0.2
+                + (sylanne_intensity - user_intensity) * 0.2
+
+    最终 clamp 到 [0.1, 0.9]，避免完全单向。
+
+    Args:
+        relationship_age_days: 关系存续天数（越久 Sylanne 影响力越大）。
+        sylanne_intensity: Sylanne 当前情绪强度 [0, 1]。
+        user_intensity: 用户当前情绪强度 [0, 1]。
+        relational_gravity: 关系引力参数 [0, 1]（人格配置项）。
+
+    Returns:
+        影响力比率 [0.1, 0.9]。
+    """
+    age_factor = min(relationship_age_days / 90.0, 1.0)
+    intensity_diff = sylanne_intensity - user_intensity
+
+    ratio = (
+        0.3
+        + relational_gravity * 0.3
+        + age_factor * 0.2
+        + intensity_diff * 0.2
+    )
+
+    # Clamp to [0.1, 0.9]
+    return max(0.1, min(0.9, ratio))
+
+
+# ---------------------------------------------------------------------------
+# Item 140: 情绪传染的延迟效应
+# ---------------------------------------------------------------------------
+
+
+# ---------------------------------------------------------------------------
+# Item 56: 群聊角色感知
+# ---------------------------------------------------------------------------
+
+
+class RoleDetector:
+    """群聊中识别每个人的角色：话题发起者/附和者/潜水者。"""
+
+    def __init__(self):
+        self._message_counts: dict[str, int] = {}  # speaker -> count
+        self._topic_starts: dict[str, int] = {}  # speaker -> topic initiation count
+        self._last_active: dict[str, float] = {}  # speaker -> last message time
+
+    def observe(self, speaker: str, is_topic_start: bool, now: float):
+        self._message_counts[speaker] = self._message_counts.get(speaker, 0) + 1
+        if is_topic_start:
+            self._topic_starts[speaker] = self._topic_starts.get(speaker, 0) + 1
+        self._last_active[speaker] = now
+
+    def get_role(self, speaker: str, now: float) -> str:
+        count = self._message_counts.get(speaker, 0)
+        topics = self._topic_starts.get(speaker, 0)
+        last = self._last_active.get(speaker, 0)
+
+        if now - last > 1800:  # 30min 没说话
+            return "lurker"
+        if topics > count * 0.3 and count > 3:
+            return "initiator"
+        if count > 0 and topics < count * 0.1:
+            return "follower"
+        return "participant"
+
+
+# ---------------------------------------------------------------------------
+# Item 140: 情绪传染的延迟效应
+# ---------------------------------------------------------------------------
+
+
+class ResonanceDetector:
+    """检测用户情绪与 Sylanne 情绪的同步/反相模式。
+
+    通过滑动窗口内的 Pearson 相关系数衡量两者情绪效价的共振程度。
+    1 = 完全同步（情绪共鸣），-1 = 完全反相（情绪对抗），0 = 无关。
+    """
+
+    def __init__(self, window: int = 5):
+        self._user_valences: deque[float] = deque(maxlen=window)
+        self._sylanne_valences: deque[float] = deque(maxlen=window)
+
+    def observe(self, user_valence: float, sylanne_valence: float):
+        """记录一对情绪效价观测值。"""
+        self._user_valences.append(user_valence)
+        self._sylanne_valences.append(sylanne_valence)
+
+    def resonance_score(self) -> float:
+        """返回 -1 到 1 的共振分数。1=完全同步，-1=完全反相，0=无关。"""
+        if len(self._user_valences) < 3:
+            return 0.0
+        # 简单 Pearson 相关系数
+        n = len(self._user_valences)
+        u = list(self._user_valences)
+        s = list(self._sylanne_valences)
+        u_mean = sum(u) / n
+        s_mean = sum(s) / n
+        cov = sum((u[i] - u_mean) * (s[i] - s_mean) for i in range(n)) / n
+        u_std = (sum((x - u_mean) ** 2 for x in u) / n) ** 0.5
+        s_std = (sum((x - s_mean) ** 2 for x in s) / n) ** 0.5
+        if u_std < 0.01 or s_std < 0.01:
+            return 0.0
+        return max(-1.0, min(1.0, cov / (u_std * s_std)))
+
+    def is_resonating(self) -> bool:
+        """共振分数 > 0.6 时视为正在共振。"""
+        return self.resonance_score() > 0.6
+
+
+class EmotionalContagionDelay:
+    """情绪传染延迟：用户情绪不立即传染，需要渗透期。
+
+    模拟真实人际互动中情绪传染的时间延迟——
+    对方的情绪不会瞬间影响你，而是需要一段"渗透时间"
+    才能真正改变你的内在状态。
+
+    使用固定长度 deque 存储待渗透的情绪信号，
+    只有超过 penetration_time 的信号才被视为"已渗透"。
+    """
+
+    def __init__(self):
+        self._pending_signals: deque[tuple[float, float]] = deque(maxlen=10)  # (timestamp, valence)
+
+    def push(self, valence: float, now: float) -> None:
+        """推入一个新的情绪信号。
+
+        Args:
+            valence: 情绪效价 [-1, 1]。
+            now: 当前时间戳。
+        """
+        self._pending_signals.append((now, valence))
+
+    def get_effective_valence(self, now: float, penetration_time: float = 120.0) -> float | None:
+        """返回已渗透的情绪值。
+
+        只有在队列中停留超过 penetration_time 的信号才被视为已渗透。
+        返回所有已渗透信号的平均值。
+
+        Args:
+            now: 当前时间戳。
+            penetration_time: 渗透时间（秒），默认 2 分钟。
+
+        Returns:
+            已渗透的平均情绪效价，或 None（无已渗透信号）。
+        """
+        matured = [v for t, v in self._pending_signals if now - t >= penetration_time]
+        if not matured:
+            return None
+        return sum(matured) / len(matured)

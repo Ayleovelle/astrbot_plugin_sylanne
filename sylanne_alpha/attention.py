@@ -366,6 +366,24 @@ def attention_delta(
     return project_attention_delta(TinyBodyAttention().update(state, event))
 
 
+# ---------------------------------------------------------------------------
+# Item 106: 对话上下文重要性标注
+# ---------------------------------------------------------------------------
+
+
+def importance_tagger(text: str, valence: float, is_first: bool, is_question: bool) -> str:
+    """为消息打重要性标签。"""
+    if is_first:
+        return "landmark"  # 首条消息
+    if abs(valence) > 0.6:
+        return "landmark"  # 强情绪
+    if is_question:
+        return "notable"  # 问题
+    if len(text) > 200:
+        return "notable"  # 长消息
+    return "ephemeral"
+
+
 __all__ = [
     "ATTENTION_SCHEMA_VERSION",
     "FLOOD_ATTENTION_SCHEMA_VERSION",
@@ -375,5 +393,6 @@ __all__ = [
     "attention_delta",
     "body_tokens",
     "focus_information_flood",
+    "importance_tagger",
     "project_attention_delta",
 ]

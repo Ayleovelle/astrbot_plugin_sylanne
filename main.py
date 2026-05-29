@@ -437,14 +437,13 @@ class EmotionalStatePlugin(Star):
 
         self._load_config_defaults()
         # WebUI 生命周期管理：先强杀旧监听器（解决热更新时旧实例残留问题），再启动新的
-        # 这确保用户热更新插件时不会出现 'object has no attribute' 错误
         try:
             import asyncio as _aio
-            loop = _aio.get_event_loop()
-            if loop.is_running():
+            try:
+                loop = _aio.get_running_loop()
                 loop.create_task(stop_webui_server())
-            else:
-                loop.run_until_complete(stop_webui_server())
+            except RuntimeError:
+                _aio.run(stop_webui_server())
         except Exception:
             pass
         self._webui_lifecycle = _sylanne_webui_server.WebUILifecycle(self)
@@ -572,6 +571,54 @@ class EmotionalStatePlugin(Star):
                 ["GET"],
                 "Sylanne WebUI Dashboard",
             ),
+            (
+                f"/{P}/api/config_presets",
+                wr.config_presets_handler,
+                ["GET"],
+                "Sylanne config presets (personality templates)",
+            ),
+            (
+                f"/{P}/api/export_data",
+                wr.export_data_handler,
+                ["GET"],
+                "Sylanne export session data",
+            ),
+            (
+                f"/{P}/api/purge_data",
+                wr.purge_data_handler,
+                ["DELETE"],
+                "Sylanne purge session data",
+            ),
+            (
+                f"/{P}/health",
+                wr.health_handler,
+                ["GET"],
+                "Sylanne health check (no auth)",
+            ),
+            (
+                f"/{P}/api/error_stats",
+                wr.error_stats_handler,
+                ["GET"],
+                "Sylanne error/warning rate per minute",
+            ),
+            (
+                f"/{P}/api/config_export",
+                wr.config_export_handler,
+                ["GET"],
+                "Sylanne config export (full JSON)",
+            ),
+            (
+                f"/{P}/api/config_import",
+                wr.config_import_handler,
+                ["POST"],
+                "Sylanne config import (overwrite)",
+            ),
+            (
+                f"/{P}/api/widget-state",
+                wr.widget_state_handler,
+                ["GET"],
+                "Sylanne AstrBot widget state card",
+            ),
         ]
         for path, handler, methods, desc in routes:
             context.register_web_api(path, handler, methods, desc)
@@ -603,19 +650,59 @@ class EmotionalStatePlugin(Star):
             return val.lower() in ("true", "1", "yes")
         return bool(val)
 
-    def _cfg_float(self, key: str, default: float = 0.0) -> float:
+    def _cfg_float(
+        self,
+        key: str,
+        default: float = 0.0,
+        *,
+        min: float | None = None,
+        max: float | None = None,
+    ) -> float:
         val = self._config.get(key, default)
         try:
-            return float(val)
+            result = float(val)
         except (TypeError, ValueError):
             return default
+        if min is not None and result < min:
+            logger.warning(
+                "Config '%s' value %.4f below min %.4f, using default %.4f",
+                key, result, min, default,
+            )
+            return default
+        if max is not None and result > max:
+            logger.warning(
+                "Config '%s' value %.4f above max %.4f, using default %.4f",
+                key, result, max, default,
+            )
+            return default
+        return result
 
-    def _cfg_int(self, key: str, default: int = 0) -> int:
+    def _cfg_int(
+        self,
+        key: str,
+        default: int = 0,
+        *,
+        min: int | None = None,
+        max: int | None = None,
+    ) -> int:
         val = self._config.get(key, default)
         try:
-            return int(val)
+            result = int(val)
         except (TypeError, ValueError):
             return default
+        if min is not None and result < min:
+            logger.warning(
+                "Config '%s' value %d below min %d, using default %d",
+                key, result, min, default,
+            )
+            return default
+        if max is not None and result > max:
+            logger.warning(
+                "Config '%s' value %d above max %d, using default %d",
+                key, result, max, default,
+            )
+            return default
+        return result
 
     # AstrBot group context awareness detection
     def _detect_astrbot_group_context(self) -> bool:
@@ -963,7 +1050,7 @@ class EmotionalStatePlugin(Star):
         self, legacy: dict[str, Any], *, session_key: str
     ) -> dict[str, Any]:
         root = self._config.get("sylanne_alpha_root") or str(
-            get_astrbot_data_path() / "sylanne_alpha"
+            Path(get_astrbot_data_path()) / "plugin_data" / PLUGIN_NAME
         )
         self._hosts[session_key] = SylanneAlphaHost(
             root=root, session_key=session_key, legacy=legacy
@@ -2127,18 +2214,30 @@ class EmotionalStatePlugin(Star):
         return await self._proactive_scheduler.run_once()
 
     async def terminate(self) -> None:
-        """插件卸载/更新前的清理：必须先关闭 WebUI 独立服务器，再持久化状态。
-
-        不关闭 WebUI 会导致旧监听器继续用过期的路由对象处理请求，
-        更新插件后出现 'object has no attribute' 错误。
-        """
-        # 先停止独立 WebUI 服务器（释放端口、清除内存中的旧 HTML 缓存）
+        """插件卸载/更新前的清理：停止所有后台任务、关闭 WebUI、持久化状态。"""
+        # 取消所有后台任务
+        for task in list(self._background_tasks):
+            if not task.done():
+                task.cancel()
+        self._background_tasks.clear()
+        # 取消 checkpoint 任务
+        for task in list(self._background_post_checkpoint_tasks):
+            if not task.done():
+                task.cancel()
+        self._background_post_checkpoint_tasks.clear()
+        # 停止主动调度器
+        sched_task = getattr(self, "_proactive_scheduler_task", None)
+        if sched_task and not sched_task.done():
+            sched_task.cancel()
+        # 停止生命模拟器
+        if hasattr(self._life_simulator, "stop"):
+            self._life_simulator.stop()
+        # 关闭独立 WebUI 服务器
         try:
             await stop_webui_server()
-            logger.info("Sylanne WebUI: 独立服务器已在插件卸载前关闭")
         except Exception as e:
-            logger.warning(f"Sylanne WebUI: 关闭服务器时出错: {e}")
-        # 再持久化运行时状态
+            logger.warning(f"Sylanne WebUI terminate: {e}")
+        # 持久化运行时状态
         await self._state_persistence.terminate()
 
     async def _send_realtime_chat_plan(

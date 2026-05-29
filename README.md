@@ -2,7 +2,7 @@
 
 > <span style="font-size: 1.08em;"><strong>Sylanne-Embodiment：不可逆的关系计算引擎。</strong>不再模拟情绪标签，而是让对话在躯体上留下伤痕、在沉默中积累压力、在关系里长出不可撤销的形状。</span>
 
-![版本 1.3.0](https://img.shields.io/badge/version-1.3.0-red.svg)
+![版本 1.4.0](https://img.shields.io/badge/version-1.4.0-red.svg)
 ![AstrBot >=4.9.2,<5.0.0](https://img.shields.io/badge/AstrBot-%3E%3D4.9.2%2C%3C5.0.0-green)
 ![Python 3.10+](https://img.shields.io/badge/Python-3.10%2B-yellow)
 ![许可证 AGPL-3.0-or-later](https://img.shields.io/badge/license-AGPL--3.0--or--later-red)
@@ -477,6 +477,70 @@ Embodiment 是完全重写，但对 3.x 用户做了兼容：
 - 配置键名保持兼容（旧配置值不丢，升级后无需重新配置）
 - 旧状态文件通过 `import_sylanne_legacy` 自动迁入新架构（记忆、关系数据不丢失）
 - 旧 README 和文档保留在 [3.x release](https://github.com/Ayleovelle/astrbot_plugin_sylanne/releases/tag/v3.0.0)
+
+---
+
+## Embodiment-1.4.0 更新日志
+
+> **发布于 2026-05-29**
+
+Embodiment-1.4.0 是一次全量合规审计 + 注入系统重写。对照 AstrBot v4.x 插件开发手册逐文件审计，修复了 6 个高危 + 8 个中危问题，同时重写了 LLM 上下文注入系统——从简单的 prompt 拼接升级为优先级预算分配 + 三模式注入。
+
+### 注入系统重写
+
+- **优先级预算分配**：5 槽位（感知/迷失/生活/记忆/未完）按优先级竞争 token 预算，行感知截断避免切断多行结构
+- **动态预算**：根据对话间隔自动调整（15min 内 1200 / 2h 内 2400 / 更久 3600 字符）
+- **三模式注入**：default（`_no_save` assistant message）/ claude_advisory（system_prompt）/ hajide（跳过）
+- **200ms 后台等待窗口**：等 observe 任务完成再注入，避免过时数据
+- **短间隔变化检测**：delta > 0.15 才注入慢变信号，避免重复注入浪费 token
+
+### 历史污染根治
+
+- 全项目零 `request.prompt` 写入——所有临时注入走 `system_prompt` 或 `_no_save` contexts
+- `realtime_dispatch.py`：5 处 prompt 污染修复
+- `_normalize_claude_request_payload`：哈基德模式不再清空全部 contexts，只过滤不兼容条目（tool/function role）
+- 普通模式不再展平其他插件的 `extra_user_content_parts`，尊重持久化语义
+
+### 安全加固
+
+- `config_export` 敏感字段脱敏（token/key/secret/password 等模糊匹配）
+- `config_import` 拒绝安全字段覆盖，返回 `sensitive_keys_blocked` 错误
+
+### 资源管理
+
+- `terminate()` 完整清理：取消所有 background tasks / checkpoint tasks / proactive scheduler / life simulator
+- 注册 `register_on_session_deleted` 回调：会话删除时释放内存 + 异步清理 KV 存储
+- LRU 驱逐改为 fire-and-forget async persist，不再阻塞事件循环
+- 文件 IO（persist_kernel / persist_buffer / load_buffer）全部 `asyncio.to_thread`
+
+### 数据路径迁移
+
+- 规范路径：`data/plugin_data/astrbot_plugin_sylanne/`
+- 自动迁移：旧路径 `data/sylanne_alpha/` 存在时自动 move 到新路径
+- 用户显式配置 `sylanne_alpha_root` 时优先使用
+
+### 性能优化
+
+- `scar_algebra.py`：`scar_count(dim)` O(n²) → O(n) 预计算 per-dim count
+- `memory_system.py`：L3 ColdGraph 节点/边查找加索引（label→node、(src,tgt,rel)→edge）
+- `computation_spine.py`：`_relationship_deltas` 改为 BoundedDict(maxsize=200)
+
+### 速率限制
+
+- 主动发言硬下限由 extraversion 驱动：高外向 → 最低 60s，低外向 → 最低 300s
+- 遵循人格驱动全参数原则，不使用死常数
+
+### 新增模块
+
+| 模块 | 职责 |
+|------|------|
+| `analytics.py` | 运行时分析与指标收集 |
+| `dialogue_intelligence.py` | 对话智能（意图识别、话题追踪） |
+| `i18n.py` | 国际化支持 |
+| `infra.py` | 基础设施（BoundedDict、路径解析、异步工具） |
+| `inner_self.py` | 内在自我模型 |
+| `multi_device.py` | 多设备会话同步 |
+| `relationship_dynamics.py` | 关系动力学（仪式、阶段、修复） |
 
 ---
 

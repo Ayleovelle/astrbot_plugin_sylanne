@@ -34,6 +34,46 @@ class LifeEvent:
     timestamp: float  # 发生时间
     wants_to_share: bool = False  # 是否想分享给朋友
     shared: bool = False  # 是否已经分享过
+    event_type: str = ""  # 事件类型（对应 LifeEventType）
+
+
+# ---------------------------------------------------------------------------
+# Item 54: 生命模拟事件类型扩展
+# ---------------------------------------------------------------------------
+
+
+class LifeEventType:
+    """生命模拟事件类型枚举。"""
+
+    READING = "reading"
+    WALKING = "walking"
+    COOKING = "cooking"
+    THINKING = "thinking"
+    CREATING = "creating"
+    RESTING = "resting"
+    OBSERVING = "observing"
+
+
+LIFE_EVENT_WEIGHTS: dict[str, dict[str, float]] = {
+    "reading": {"valence": 0.2, "arousal": -0.1, "share_tendency": 0.4},
+    "walking": {"valence": 0.3, "arousal": 0.1, "share_tendency": 0.3},
+    "cooking": {"valence": 0.2, "arousal": 0.2, "share_tendency": 0.5},
+    "thinking": {"valence": 0.0, "arousal": -0.2, "share_tendency": 0.6},
+    "creating": {"valence": 0.4, "arousal": 0.3, "share_tendency": 0.7},
+    "resting": {"valence": 0.1, "arousal": -0.3, "share_tendency": 0.1},
+    "observing": {"valence": 0.1, "arousal": 0.0, "share_tendency": 0.5},
+}
+
+# 事件类型关键词映射（用于从 LLM 输出推断事件类型）
+_EVENT_TYPE_KEYWORDS: dict[str, list[str]] = {
+    "reading": ["读", "书", "阅读", "看书", "翻阅", "read", "book", "novel", "article"],
+    "walking": ["走", "散步", "漫步", "路", "walk", "stroll", "hike", "wander"],
+    "cooking": ["做饭", "烹饪", "厨房", "煮", "烤", "cook", "kitchen", "bak", "meal"],
+    "thinking": ["想", "思考", "沉思", "冥想", "think", "ponder", "reflect", "contempl"],
+    "creating": ["创作", "画", "写", "做", "制作", "creat", "draw", "writ", "craft", "paint", "compos"],
+    "resting": ["休息", "睡", "躺", "放松", "rest", "sleep", "relax", "nap", "doze"],
+    "observing": ["观察", "看", "注视", "望", "observ", "watch", "gaze", "notic"],
+}
 
 
 @dataclass
@@ -47,6 +87,7 @@ class LifeSimulationState:
     simulation_count: int = 0  # 总模拟次数
     outreach_count: int = 0  # 总主动联系次数
     enabled: bool = False  # 是否启用
+    _pending_emotion_delta: dict = field(default_factory=dict)  # 待应用的情绪增量
 
     def to_dict(self) -> dict[str, Any]:
         """序列化状态（只保留最近 20 个事件）。"""
@@ -241,6 +282,19 @@ class LifeSimulator:
             if len(self.state.events) > 50:
                 self.state.events = self.state.events[-30:]
 
+            # Item 54: 根据事件类型应用情绪权重到 body_state
+            emotion_weights = self._apply_event_emotion_weights(event)
+            if emotion_weights.get("valence", 0.0) != 0.0 or emotion_weights.get("arousal", 0.0) != 0.0:
+                self._apply_to_body_state(emotion_weights)
+
+            # share_tendency 调制 wants_to_share
+            share_tendency = emotion_weights.get("share_tendency", 0.0)
+            if share_tendency > 0.5 and not event.wants_to_share:
+                # 高分享倾向的事件类型可以覆盖 LLM 的判断
+                import random
+                if random.random() < share_tendency * 0.5:
+                    event.wants_to_share = True
+
             if event.wants_to_share and self._should_outreach(now):
                 await self._do_outreach(event, now)
 
@@ -321,15 +375,64 @@ class LifeSimulator:
             activity = str(data.get("activity", ""))
             thought = str(data.get("thought", ""))
             combined = f"{activity}" if not thought else f"{activity}（{thought}）"
+            event_type = self._infer_event_type(combined)
             return LifeEvent(
                 text=combined[:200],
                 mood=str(data.get("mood", "neutral"))[:20],
                 urgency=max(0.0, min(1.0, float(data.get("urgency", 0.0)))),
                 timestamp=now,
                 wants_to_share=bool(data.get("wants_to_share", False)),
+                event_type=event_type,
             )
         except (json.JSONDecodeError, ValueError, TypeError):
             return None
+
+    @staticmethod
+    def _infer_event_type(text: str) -> str:
+        """从事件文本推断事件类型。
+
+        通过关键词匹配确定最可能的事件类型。
+        如果无法匹配，返回空字符串。
+        """
+        text_lower = text.lower()
+        best_type = ""
+        best_score = 0
+        for event_type, keywords in _EVENT_TYPE_KEYWORDS.items():
+            score = sum(1 for kw in keywords if kw in text_lower)
+            if score > best_score:
+                best_score = score
+                best_type = event_type
+        return best_type
+
+    def _apply_event_emotion_weights(self, event: LifeEvent) -> dict[str, float]:
+        """根据事件类型应用情绪权重，返回 body_state 调制值。
+
+        返回的 dict 包含 valence 和 arousal 的增量，
+        以及 share_tendency 用于调制 wants_to_share 判断。
+        """
+        if not event.event_type or event.event_type not in LIFE_EVENT_WEIGHTS:
+            return {"valence": 0.0, "arousal": 0.0, "share_tendency": 0.0}
+        return dict(LIFE_EVENT_WEIGHTS[event.event_type])
+
+    def _apply_to_body_state(self, weights: dict[str, float]) -> None:
+        """将情绪权重增量应用到当前 body_state（通过 emotion_getter 获取并调制）。
+
+        这是一个尽力而为的操作——如果没有可用的情绪系统则静默跳过。
+        """
+        if not self._emotion_getter:
+            return
+        try:
+            current = self._emotion_getter()
+            if not isinstance(current, dict):
+                return
+            # 将 valence/arousal 增量注入（通过插件的 body_state 接口）
+            # 这里只记录到 state 中，实际注入由外部调用者在 tick 时读取
+            self.state._pending_emotion_delta = {
+                "valence": weights.get("valence", 0.0),
+                "arousal": weights.get("arousal", 0.0),
+            }
+        except Exception:
+            pass
 
     def _should_outreach(self, now: float) -> bool:
         """检查是否允许主动联系（冷却期、回调是否存在）。"""
@@ -377,3 +480,66 @@ class LifeSimulator:
 
     def from_dict(self, data: dict[str, Any]):
         self.state = LifeSimulationState.from_dict(data)
+
+
+# ---------------------------------------------------------------------------
+# Item 31: 梦境生成系统
+# ---------------------------------------------------------------------------
+
+
+class DreamGenerator:
+    """梦境生成：离线时基于记忆和伤痕生成碎片化梦境。"""
+
+    def __init__(self):
+        self._last_dream: str = ""
+        self._dream_time: float = 0
+
+    def should_dream(self, offline_hours: float) -> bool:
+        """离线超过 6h 且距上次做梦超过 12h。"""
+        return offline_hours > 6 and (time.time() - self._dream_time > 43200)
+
+    def generate_dream(
+        self,
+        recent_memories: list[str],
+        scar_count: int,
+        void_pressure: float,
+    ) -> str:
+        """基于记忆碎片和状态生成梦境叙事。"""
+        import random
+
+        # 从记忆中随机抽取 2-3 条作为素材
+        fragments = (
+            random.sample(recent_memories, min(3, len(recent_memories)))
+            if recent_memories
+            else ["模糊的影子"]
+        )
+
+        # 根据伤痕数量决定梦境基调
+        if scar_count > 5:
+            tone = "不安的"
+        elif void_pressure > 2:
+            tone = "压抑的"
+        else:
+            tone = "平静的"
+
+        # 拼接碎片化梦境
+        dream_parts = [f"做了一个{tone}梦"]
+        for frag in fragments:
+            # 截取记忆片段的关键词
+            short = frag[:20] if len(frag) > 20 else frag
+            dream_parts.append(f"梦里出现了关于「{short}」的画面")
+
+        if void_pressure > 3:
+            dream_parts.append("梦的最后有什么想说却说不出口")
+
+        self._last_dream = "……".join(dream_parts)
+        self._dream_time = time.time()
+        return self._last_dream
+
+    def has_dream_to_share(self) -> bool:
+        return bool(self._last_dream) and time.time() - self._dream_time < 3600
+
+    def consume_dream(self) -> str:
+        dream = self._last_dream
+        self._last_dream = ""
+        return dream

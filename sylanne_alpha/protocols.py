@@ -64,3 +64,28 @@ class PluginPersistence(Protocol):
     def _has_kv_api(self) -> bool: ...
     def _kernel_kv_key(self, session_key: str) -> str: ...
     def _buffer_kv_key(self, session_key: str) -> str: ...
+
+
+@runtime_checkable
+class PluginLLMAccess(Protocol):
+    """LLM 调用能力协议。
+
+    定义插件子组件访问 LLM 配置参数所需的最小接口，
+    使依赖 LLM 配置的模块可以通过此协议获取类型化的配置值。
+    """
+
+    def _cfg_str(self, key: str, default: str) -> str: ...
+    def _cfg_int(self, key: str, default: int) -> int: ...
+    def _cfg_float(self, key: str, default: float) -> float: ...
+
+
+@runtime_checkable
+class PluginLifecycle(Protocol):
+    """插件生命周期协议。
+
+    定义插件终止和状态保存的最小接口契约，
+    供需要感知插件生命周期的子组件使用。
+    """
+
+    async def terminate(self) -> None: ...
+    def _save_all_states(self) -> None: ...
