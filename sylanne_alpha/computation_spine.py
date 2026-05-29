@@ -526,8 +526,10 @@ class ComputationSpine:
             assessment: 可选的 LLM 评估结果，用于精确语义调制
             session_key: 可选的关系标识符，用于每关系人格覆盖
         """
-        # 结果缓存层（Item 20）：相同文本短时间内直接返回缓存
-        cache_key = (text, session_key or "")
+        # 结果缓存层（Item 20）：相同文本+相同评估短时间内直接返回缓存
+        # assessment 不同意味着 LLM 给出了新评估，必须重新计算
+        assess_sig = id(assessment) if assessment else 0
+        cache_key = (text, session_key or "", assess_sig)
         cached = self._result_cache.get(cache_key)
         if cached is not None:
             return cached

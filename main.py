@@ -2215,20 +2215,25 @@ class EmotionalStatePlugin(Star):
 
     async def terminate(self) -> None:
         """插件卸载/更新前的清理：停止所有后台任务、关闭 WebUI、持久化状态。"""
-        # 取消所有后台任务
+        # 收集所有需要取消的任务
+        tasks_to_cancel: list = []
         for task in list(self._background_tasks):
             if not task.done():
                 task.cancel()
+                tasks_to_cancel.append(task)
         self._background_tasks.clear()
-        # 取消 checkpoint 任务
         for task in list(self._background_post_checkpoint_tasks):
             if not task.done():
                 task.cancel()
+                tasks_to_cancel.append(task)
         self._background_post_checkpoint_tasks.clear()
-        # 停止主动调度器
         sched_task = getattr(self, "_proactive_scheduler_task", None)
         if sched_task and not sched_task.done():
             sched_task.cancel()
+            tasks_to_cancel.append(sched_task)
+        # 等待所有取消的任务完成（带超时保护）
+        if tasks_to_cancel:
+            await asyncio.wait(tasks_to_cancel, timeout=10)
         # 停止生命模拟器
         if hasattr(self._life_simulator, "stop"):
             self._life_simulator.stop()
@@ -2237,8 +2242,11 @@ class EmotionalStatePlugin(Star):
             await stop_webui_server()
         except Exception as e:
             logger.warning(f"Sylanne WebUI terminate: {e}")
-        # 持久化运行时状态
-        await self._state_persistence.terminate()
+        # 持久化运行时状态（带超时保护）
+        try:
+            await asyncio.wait_for(self._state_persistence.terminate(), timeout=15)
+        except asyncio.TimeoutError:
+            logger.warning("Sylanne state persistence terminate timed out (15s)")
 
     async def _send_realtime_chat_plan(
         self,

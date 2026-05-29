@@ -438,6 +438,7 @@ def _render(items: list[dict[str, Any]]) -> str:
 __all__ = [
     "safe_ensure_future",
     "BoundedDict",
+    "resolve_data_root",
     "WORKSET_SCHEMA_VERSION",
     "build_fragment_workset",
 ]

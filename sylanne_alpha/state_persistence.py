@@ -30,32 +30,46 @@ logger = logging.getLogger("astrbot_plugin_sylanne")
 
 _VALID_SUBSYSTEMS = frozenset({"personality", "memory", "spine", "session"})
 
-_dirty_subsystems: set[str] = set()
+
+class _DirtyTracker:
+    """实例级脏标记追踪器，避免模块级全局状态在多实例/热重载时污染。"""
+
+    __slots__ = ("_subsystems",)
+
+    def __init__(self):
+        self._subsystems: set[str] = set()
+
+    def mark(self, subsystem: str) -> None:
+        if subsystem in _VALID_SUBSYSTEMS:
+            self._subsystems.add(subsystem)
+
+    def swap(self) -> set[str]:
+        """原子地取出当前脏集合并清空，避免 get+clear 之间的竞态。"""
+        taken = self._subsystems
+        self._subsystems = set()
+        return taken
+
+    def is_dirty(self) -> bool:
+        return bool(self._subsystems)
+
+
+# 模块级实例——StatePersistence.__init__ 中会替换为自己的实例
+_dirty = _DirtyTracker()
 
 
 def mark_dirty(subsystem: str) -> None:
-    """标记某子系统为脏（需要持久化）。
-
-    Args:
-        subsystem: 子系统名称，可选 "personality"/"memory"/"spine"/"session"。
-    """
-    if subsystem in _VALID_SUBSYSTEMS:
-        _dirty_subsystems.add(subsystem)
-
-
-def get_dirty_subsystems() -> set[str]:
-    """获取当前脏子系统集合（只读副本）。"""
-    return set(_dirty_subsystems)
-
-
-def clear_dirty() -> None:
-    """清空脏标记（save 完成后调用）。"""
-    _dirty_subsystems.clear()
+    """标记某子系统为脏（需要持久化）。向后兼容的模块级 API。"""
+    _dirty.mark(subsystem)
 
 
 def is_dirty() -> bool:
     """是否有任何子系统需要持久化。"""
-    return bool(_dirty_subsystems)
+    return _dirty.is_dirty()
+
+
+def swap_dirty() -> set[str]:
+    """原子地取出当前脏集合并清空。"""
+    return _dirty.swap()
 
 
 # ---------------------------------------------------------------------------
@@ -222,7 +236,7 @@ class StatePersistence:
         if not is_dirty():
             return
 
-        dirty_set = get_dirty_subsystems()
+        dirty_set = swap_dirty()
         snapshot = host.kernel.snapshot()
 
         if self.has_kv_api():
@@ -254,9 +268,6 @@ class StatePersistence:
             await asyncio.to_thread(host.runtime.save, host.kernel)
         except Exception as e:
             logger.warning(f"Sylanne kernel file persist: {e}", exc_info=True)
-
-        # save 完成后清空 dirty set
-        clear_dirty()
 
     def _extract_dirty_snapshot(
         self, snapshot: dict[str, Any], dirty_set: set[str]
@@ -817,27 +828,30 @@ class StatePersistence:
                 logger.info("Sylanne: registered on_session_deleted callback")
         return conv_mgr
 
+    # 会话删除时需要清理的容器属性名注册表
+    _SESSION_KEYED_CONTAINERS: tuple[str, ...] = (
+        "_hosts", "_memory_systems", "_conversation_buffers",
+        "_unfinished_replies", "_stream_buffers", "_stream_first_sent",
+        "_segmented_tasks", "_last_request_budgets",
+        "_last_understanding_closed_loop", "_last_bot_expression_time",
+        "_last_user_texts", "_last_bot_texts",
+        "_conversation_input_epoch", "_last_request_text",
+        "_user_message_withdrawals", "_background_post_queues",
+        "_background_post_dead_letters", "_background_post_sequence",
+        "_background_post_latest_enqueued", "_background_post_last_committed",
+        "_background_post_active", "_background_post_worker_state",
+        "_pending_outreach_context", "_proactive_candidate_sessions",
+        "_last_user_message_time", "_sylanne_memory_cache",
+        "_conversation_pending_response_epochs",
+        "_group_atmosphere_injection_snapshot_cache",
+        "_realtime_ordinary_history_backfills",
+        "_realtime_chat_active_dispatches",
+    )
+
     def _on_session_deleted(self, session_key: str) -> None:
         """AstrBot 会话删除回调——释放 Sylanne 侧的会话资源。"""
         p = self._p
-        for attr in (
-            "_hosts", "_memory_systems", "_conversation_buffers",
-            "_unfinished_replies", "_stream_buffers", "_stream_first_sent",
-            "_segmented_tasks", "_last_request_budgets",
-            "_last_understanding_closed_loop", "_last_bot_expression_time",
-            "_last_user_texts", "_last_bot_texts",
-            "_conversation_input_epoch", "_last_request_text",
-            "_user_message_withdrawals", "_background_post_queues",
-            "_background_post_dead_letters", "_background_post_sequence",
-            "_background_post_latest_enqueued", "_background_post_last_committed",
-            "_background_post_active", "_background_post_worker_state",
-            "_pending_outreach_context", "_proactive_candidate_sessions",
-            "_last_user_message_time", "_sylanne_memory_cache",
-            "_conversation_pending_response_epochs",
-            "_group_atmosphere_injection_snapshot_cache",
-            "_realtime_ordinary_history_backfills",
-            "_realtime_chat_active_dispatches",
-        ):
+        for attr in self._SESSION_KEYED_CONTAINERS:
             container = getattr(p, attr, None)
             if container is None:
                 continue

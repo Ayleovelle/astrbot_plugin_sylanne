@@ -827,7 +827,7 @@ class LLMResponsePipeline:
                 if isinstance(tool_choice.get("function"), dict)
                 else ""
             )
-            if _is_sylanne_tool(name) or name:
+            if _is_sylanne_tool(name):
                 request.tool_choice = "auto"
         elif tool_choice == "required":
             request.tool_choice = "auto"
