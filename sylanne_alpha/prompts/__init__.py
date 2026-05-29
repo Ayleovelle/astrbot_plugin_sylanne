@@ -1,23 +1,19 @@
-"""多语言 prompt 模板加载器。"""
-import json
-from pathlib import Path
+"""多语言 prompt 模板加载器——委托给 i18n 模块。
 
-_PROMPTS_DIR = Path(__file__).parent
-_cache: dict[str, dict] = {}
+保留此接口以兼容直接 import prompts 的代码。
+底层实现统一由 i18n.py 管理。
+"""
+
+from sylanne_alpha.i18n import t
 
 
 def load_prompts(lang: str = "zh") -> dict[str, str]:
-    if lang in _cache:
-        return _cache[lang]
-    path = _PROMPTS_DIR / f"{lang}.json"
-    if not path.exists():
-        path = _PROMPTS_DIR / "zh.json"
-    with open(path, "r", encoding="utf-8") as f:
-        data = json.load(f)
-    _cache[lang] = data
-    return data
+    from sylanne_alpha.i18n import _load_locale, _loaded
+
+    if lang not in _loaded:
+        _load_locale(lang)
+    return _loaded.get(lang, {})
 
 
 def get_prompt(key: str, lang: str = "zh") -> str:
-    prompts = load_prompts(lang)
-    return prompts.get(key, f"[missing:{key}]")
+    return t(key, lang=lang)

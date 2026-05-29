@@ -29,17 +29,19 @@
 
 ### 新增模块
 
-| 模块 | 职责 |
-|------|------|
-| `analytics.py` | 运行时分析与指标收集 |
-| `dialogue_intelligence.py` | 对话智能（意图识别、话题追踪） |
-| `i18n.py` | 国际化支持 |
-| `infra.py` | 基础设施（BoundedDict、路径解析、异步工具） |
-| `inner_self.py` | 内在自我模型 |
-| `multi_device.py` | 多设备会话同步 |
-| `relationship_dynamics.py` | 关系动力学（仪式、阶段、修复） |
-| `prompts/` | Prompt 模板管理 |
-| `strategy_plugins/` | 策略插件系统 |
+| 模块 | 职责 | 状态 |
+|------|------|------|
+| `analytics.py` | 运行时分析与指标收集 | 已集成（WebUI） |
+| `infra.py` | 基础设施（BoundedDict、路径解析、异步工具） | 已集成（统一源头） |
+| `dialogue_intelligence.py` | 对话智能（意图识别、话题追踪） | 架构就绪，待接入 |
+| `i18n.py` | 国际化支持 | 架构就绪，待接入 |
+| `inner_self.py` | 内在自我模型 | 架构就绪，待接入 |
+| `multi_device.py` | 多设备会话同步 | 架构就绪，待接入 |
+| `relationship_dynamics.py` | 关系动力学（仪式、阶段、修复） | 架构就绪，待接入 |
+| `prompts/` | Prompt 模板（委托 i18n） | 架构就绪，待接入 |
+| `strategy_plugins/` | 策略插件系统 | 架构就绪，待接入 |
+
+> 标记"架构就绪"的模块已完成实现和序列化接口，但尚未接入运行时管线。它们定义了 1.4.0 的扩展方向，集成工作将在 1.3.x 稳定后逐步推进。
 
 ### 潜在影响
 
@@ -61,3 +63,14 @@
 main:     Embodiment 1.3.0（稳定发布）
 preview:  Embodiment 1.4.0（开发中，含全量合规修复 + 新模块）
 ```
+
+## 后续路线
+
+当前开发重心在 **1.3.x bugfix**（开发精力有限），1.4.0 的集成工作按以下优先级推进：
+
+1. **dialogue_intelligence** → 接入 `llm_request_pipeline`，为注入系统提供意图/话题信号
+2. **relationship_dynamics** → 接入 `computation_spine`，让修复/仪式机制参与 L3-L4 计算
+3. **inner_self** → 接入 `prompt_surface`，让隐藏状态和矛盾检测影响表达
+4. **i18n + prompts** → 接入 `prompt_surface` + WebUI，统一多语言渲染
+5. **strategy_plugins** → 接入 `llm_response_pipeline`，允许外部策略干预回复生成
+6. **multi_device** → 需要 AstrBot 框架层面的消息总线支持，暂缓
