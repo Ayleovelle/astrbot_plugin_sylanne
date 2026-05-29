@@ -211,6 +211,7 @@ class LifeSimulator:
         emotion_getter: Callable[[], dict[str, float]] | None = None,
         persona_getter: Callable[[], str] | None = None,
         memory_summary_getter: Callable[[], str] | None = None,
+        body_delta_callback: Callable[[dict[str, float]], None] | None = None,
     ):
         """注入外部依赖。所有回调都是可选的。"""
         self._llm_caller = llm_caller
@@ -218,6 +219,7 @@ class LifeSimulator:
         self._emotion_getter = emotion_getter
         self._persona_getter = persona_getter
         self._memory_summary_getter = memory_summary_getter
+        self._body_delta_callback = body_delta_callback
 
     def start(self):
         """启动后台模拟循环。"""
@@ -415,24 +417,21 @@ class LifeSimulator:
         return dict(LIFE_EVENT_WEIGHTS[event.event_type])
 
     def _apply_to_body_state(self, weights: dict[str, float]) -> None:
-        """将情绪权重增量应用到当前 body_state（通过 emotion_getter 获取并调制）。
+        """将情绪权重增量应用到当前 body_state。
 
-        这是一个尽力而为的操作——如果没有可用的情绪系统则静默跳过。
+        通过 body_delta_callback 直接注入到 host 的身体状态。
         """
-        if not self._emotion_getter:
-            return
-        try:
-            current = self._emotion_getter()
-            if not isinstance(current, dict):
-                return
-            # 将 valence/arousal 增量注入（通过插件的 body_state 接口）
-            # 这里只记录到 state 中，实际注入由外部调用者在 tick 时读取
-            self.state._pending_emotion_delta = {
-                "valence": weights.get("valence", 0.0),
-                "arousal": weights.get("arousal", 0.0),
-            }
-        except Exception:
-            pass
+        delta = {
+            "valence": weights.get("valence", 0.0),
+            "arousal": weights.get("arousal", 0.0),
+        }
+        cb = getattr(self, "_body_delta_callback", None)
+        if cb:
+            try:
+                cb(delta)
+            except Exception:
+                pass
+        self.state._pending_emotion_delta = delta
 
     def _should_outreach(self, now: float) -> bool:
         """检查是否允许主动联系（冷却期、回调是否存在）。"""

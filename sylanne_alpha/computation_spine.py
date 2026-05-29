@@ -528,7 +528,7 @@ class ComputationSpine:
         """
         # 结果缓存层（Item 20）：相同文本+相同评估短时间内直接返回缓存
         # assessment 不同意味着 LLM 给出了新评估，必须重新计算
-        assess_sig = id(assessment) if assessment else 0
+        assess_sig = hash(tuple(sorted(assessment.items()))) if assessment else 0
         cache_key = (text, session_key or "", assess_sig)
         cached = self._result_cache.get(cache_key)
         if cached is not None:
@@ -1110,7 +1110,10 @@ class ComputationSpine:
         self._last_drift_time = float(data.get("last_drift_time", 0.0))
         self._drift_min_interval = float(data.get("drift_min_interval", 30.0))
         if "relationship_deltas" in data:
-            self._relationship_deltas = data["relationship_deltas"]
+            rd = BoundedDict(maxsize=200)
+            for k, v in data["relationship_deltas"].items():
+                rd[k] = v
+            self._relationship_deltas = rd
         # Note: personality-derived parameters (thresholds, rates, etc.) are NOT
         # re-applied here. They will be re-derived on the next kernel.tick() call
         # when apply_personality() runs. This avoids overwriting restored state.

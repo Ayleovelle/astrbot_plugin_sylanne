@@ -1113,13 +1113,8 @@ class EmotionalStatePlugin(Star):
             now = time.time()
             # 更新最后消息时间，供 proactive scheduler 计算沉默时长
             self._last_user_message_time[session_key] = now
-            # 喂给节奏学习器（如果 host 已存在则更新，不触发懒创建）
-            if session_key in self._hosts:
-                host = self._hosts[session_key]
-                if hasattr(host, "kernel") and hasattr(host.kernel, "_rhythm_learner"):
-                    learner = host.kernel._rhythm_learner
-                    if learner is not None:
-                        learner.observe(now)
+            # 喂给节奏学习器（记录 tempo，不受亲密度门控）
+            self._rhythm_learner._record_tempo(session_key, now)
         except Exception:
             pass
 

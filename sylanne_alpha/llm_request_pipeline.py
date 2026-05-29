@@ -1220,6 +1220,7 @@ class LLMRequestPipeline:
                     llm_caller=self._life_sim_llm_call,
                     outreach_callback=self._life_sim_outreach,
                     emotion_getter=self._life_sim_emotion,
+                    body_delta_callback=self._life_sim_body_delta,
                 )
                 life_sim.start()
                 p.logger.info(
@@ -2150,3 +2151,35 @@ class LLMRequestPipeline:
             return host.kernel.computation.engine.observe()
         except Exception:
             return {}
+
+    def _life_sim_body_delta(self, delta: dict[str, float]) -> None:
+        """将生命模拟器的情绪增量注入到最近活跃 host 的身体状态。"""
+        p = self._p
+        if not p._hosts:
+            return
+        best_key = ""
+        best_time = 0.0
+        for sk, host in p._hosts.items():
+            last_now = float(host.kernel.last_event.get("now") or 0.0)
+            if last_now > best_time:
+                best_time = last_now
+                best_key = sk
+        if not best_key:
+            best_key = next(iter(p._hosts))
+        host = p._hosts[best_key]
+        try:
+            body = host.kernel.body
+            if body and hasattr(body, "apply_vector_delta"):
+                mapped = {}
+                v = delta.get("valence", 0.0)
+                a = delta.get("arousal", 0.0)
+                if v != 0.0:
+                    mapped["bloodflow.warmth"] = v * 0.03
+                    mapped["temperature.warmth"] = v * 0.02
+                if a != 0.0:
+                    mapped["nerve.sensitivity"] = a * 0.02
+                    mapped["muscle.readiness"] = a * 0.015
+                if mapped:
+                    body.apply_vector_delta(mapped)
+        except Exception:
+            pass
