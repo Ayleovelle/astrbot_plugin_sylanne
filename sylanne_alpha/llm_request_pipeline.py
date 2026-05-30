@@ -410,6 +410,52 @@ class LLMRequestPipeline:
 
     def __init__(self, plugin: Any) -> None:
         self._p = plugin
+        if not hasattr(self._p, "_cached_system_prompt"):
+            self._p._cached_system_prompt = ""
+
+    def _cache_system_prompt(
+        self, request: Any, raw_system_prompt: str | None = None
+    ) -> None:
+        """缓存最近一次非空 system prompt，供生命模拟器复用。
+
+        `raw_system_prompt` 用于在请求归一化前捕获原始人格描述，避免
+        hajide 兼容层把用户内容展平进 `request.system_prompt` 后污染缓存。
+        """
+        source = (
+            raw_system_prompt
+            if raw_system_prompt is not None
+            else getattr(request, "system_prompt", "")
+        )
+        system_prompt = str(source or "").strip()
+        if system_prompt:
+            self._p._cached_system_prompt = system_prompt
+
+    def _life_sim_persona_getter(self) -> str:
+        """返回生命模拟器使用的人格描述。
+
+        受 sylanne_alpha_life_simulation_use_persona 配置控制：
+        - 关闭（默认）：返回空字符串，life_simulation 使用硬编码默认描述
+        - 开启：依次尝试 locked_persona_prompt → 缓存 system prompt → 角色名
+        - 皆无则返回空串，自然 fallback 到默认描述
+        """
+        config = getattr(self._p, "config", None) or {}
+        use_persona = config.get("sylanne_alpha_life_simulation_use_persona", False)
+        if not use_persona:
+            return ""
+
+        locked = str(config.get("sylanne_alpha_locked_persona_prompt") or "").strip()
+        if locked:
+            return locked
+
+        cached = str(getattr(self._p, "_cached_system_prompt", "") or "").strip()
+        if cached:
+            return cached
+
+        name = str(config.get("sylanne_persona_name") or "").strip()
+        if name:
+            return name
+
+        return ""
 
     # ------------------------------------------------------------------
     # 非文本消息转述（图片/语音/文件 → 文本描述）
@@ -916,8 +962,15 @@ class LLMRequestPipeline:
         )
         p._last_request_budgets[session_key] = budget
 
+        # 先缓存原始 system prompt，再做 Claude/hajide 归一化。
+        # 归一化可能会把用户内容展平进 system_prompt，不能让这部分污染 persona。
+        original_system_prompt = str(getattr(request, "system_prompt", "") or "")
+
         if hajide or budget.compat_mode:
             p._normalize_claude_request_payload(request, budget=budget)
+
+        # 缓存最近一次可复用的人格 system prompt，供生命模拟器读取
+        self._cache_system_prompt(request, raw_system_prompt=original_system_prompt)
 
         # 注入时间上下文（当前时间 + 距上次对话的间隔）
         time_fragment = p._time_context_fragment(session_key)
@@ -1227,6 +1280,7 @@ class LLMRequestPipeline:
                     outreach_callback=self._life_sim_outreach,
                     emotion_getter=self._life_sim_emotion,
                     body_delta_callback=self._life_sim_body_delta,
+                    persona_getter=self._life_sim_persona_getter,
                 )
                 life_sim.start()
                 p.logger.info(

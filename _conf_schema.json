@@ -120,6 +120,12 @@
     "default": false,
     "hint": "默认关闭；开启后 Sylanne 会用外部 LLM 模拟自己的生活，某些时刻会因为她那边发生的事主动找用户。"
   },
+  "sylanne_alpha_life_simulation_use_persona": {
+    "description": "生活模拟使用角色人设 Prompt",
+    "type": "bool",
+    "default": false,
+    "hint": "默认关闭；开启后生成模拟日程时会传入角色人设描述（优先 locked_persona_prompt → 缓存的 system prompt → 角色名）；关闭则使用通用默认描述。"
+  },
   "sylanne_alpha_life_simulation_provider_id": {
     "description": "生活模拟 LLM Provider",
     "type": "string",
