@@ -28,13 +28,9 @@ jobs:
       - name: Verify metadata version matches tag
         run: |
           META_VERSION=$(python -c "
-          import yaml
-          with open('metadata.yaml') as f:
-              print(yaml.safe_load(f)['version'])
-          " 2>/dev/null || python -c "
           import re
-          text = open('metadata.yaml').read()
-          m = re.search(r'^version:\s*[\"']?([^\"'\n]+)', text, re.M)
+          text = open('metadata.yaml', encoding='utf-8').read()
+          m = re.search(r'version:\s*\"?([0-9][^\"\n]+)', text)
           print(m.group(1).strip())
           ")
           TAG_VERSION="${{ steps.version.outputs.version }}"
