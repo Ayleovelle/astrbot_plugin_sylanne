@@ -22,3 +22,4 @@ personality_impact:
   modifies_personality: true
   modifies_memory: true
   modifies_proactive: true
+
