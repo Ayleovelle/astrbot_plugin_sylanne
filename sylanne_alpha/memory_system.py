@@ -1334,7 +1334,9 @@ class MemorySystem:
         """就地从 dict 恢复全部三层状态。兼容 v1 和 v2 格式。"""
         self._tick = data.get("tick", 0)
         self._last_consolidation_ts = data.get("last_consolidation_ts", 0.0)
-        self._params = data.get("params", self._params)
+        saved_params = data.get("params")
+        if saved_params is not None:
+            self._params.update(saved_params)
 
         l1_items = [MemoryItem.from_dict(d) for d in data.get("l1", [])]
         self._l1 = deque(l1_items, maxlen=self._L1_CAPACITY)

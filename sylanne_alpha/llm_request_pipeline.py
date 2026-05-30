@@ -604,6 +604,12 @@ class LLMRequestPipeline:
             t2 = loop.create_task(self._consolidation_loop())
             p._background_tasks.extend([t1, t2])
         session_key = p._session_key(event)
+        # 维护 session_key → unified_msg_origin 映射，供主动发送时使用
+        umo = str(getattr(event, "unified_msg_origin", "") or "")
+        if umo:
+            if not hasattr(p, "_session_origins"):
+                p._session_origins: dict[str, str] = {}
+            p._session_origins[session_key] = umo
         message_text = str(getattr(event, "message_str", "") or "")
         # 非文本消息转述：图片/语音等内容转为文本描述
         if not message_text.strip():
@@ -2069,8 +2075,22 @@ class LLMRequestPipeline:
                         message = p._astrbot_message(generated)
                     else:
                         message = p._astrbot_message(f"[{m}] {r}")
+                    # 从映射表获取合法的 AstrBot session origin
+                    origins = getattr(p, "_session_origins", {})
+                    origin = origins.get(session_key, "")
+                    if not origin:
+                        # fallback: 尝试从 session_key 提取前3段
+                        parts = session_key.split(":")
+                        origin = ":".join(parts[:3]) if len(parts) >= 3 else ""
+                    if not origin:
+                        logger.warning(
+                            "Sylanne life_sim_outreach: no valid origin for session '%s',"
+                            " skipping direct send",
+                            session_key,
+                        )
+                        return
                     try:
-                        await context.send_message(session_key, message)
+                        await context.send_message(origin, message)
                     except Exception as e:
                         logger.warning(
                             f"Sylanne life_sim_outreach send: {e}", exc_info=True
