@@ -47,31 +47,6 @@ jobs:
         if: steps.check.outputs.exists == 'false'
         run: python scripts/package_plugin.py --output dist/astrbot_plugin_sylanne-${{ steps.version.outputs.version }}.zip
 
-      - name: Build core-only zip (no UI assets)
-        if: steps.check.outputs.exists == 'false'
-        run: |
-          python -c "
-          import zipfile, pathlib, sys
-          sys.path.insert(0, '.')
-          from scripts.package_plugin import ROOT, PLUGIN_NAME, should_include
-
-          output = pathlib.Path('dist/astrbot_plugin_sylanne-${{ steps.version.outputs.version }}-core.zip')
-          output.parent.mkdir(parents=True, exist_ok=True)
-
-          with zipfile.ZipFile(output, 'w', compression=zipfile.ZIP_DEFLATED) as zf:
-              zf.writestr(f'{PLUGIN_NAME}/', '')
-              for f in sorted(ROOT.rglob('*')):
-                  if not f.is_file():
-                      continue
-                  if not should_include(f):
-                      continue
-                  rel = f.relative_to(ROOT)
-                  if rel.parts[0] == 'UI' and rel.suffix in ('.png', '.webp', '.svg', '.gif'):
-                      continue
-                  zf.write(f, pathlib.Path(PLUGIN_NAME, rel).as_posix())
-          print(f'Core zip: {output} ({output.stat().st_size // 1024}K)')
-          "
-
       - name: Verify zip contents
         if: steps.check.outputs.exists == 'false'
         run: |
@@ -85,19 +60,18 @@ jobs:
               'astrbot_plugin_sylanne/sylanne_alpha/__init__.py',
               'astrbot_plugin_sylanne/sylanne_alpha/kernel.py',
           ]
-          for zp in ['dist/astrbot_plugin_sylanne-${{ steps.version.outputs.version }}.zip',
-                     'dist/astrbot_plugin_sylanne-${{ steps.version.outputs.version }}-core.zip']:
-              with zipfile.ZipFile(zp) as zf:
-                  names = zf.namelist()
-                  missing = [r for r in required if r not in names]
-                  if missing:
-                      print(f'{zp} missing: {missing}')
-                      sys.exit(1)
-                  bad = [n for n in names if '.pyc' in n or '__pycache__' in n]
-                  if bad:
-                      print(f'{zp} has unwanted: {bad}')
-                      sys.exit(1)
-              print(f'{zp}: OK')
+          zp = 'dist/astrbot_plugin_sylanne-${{ steps.version.outputs.version }}.zip'
+          with zipfile.ZipFile(zp) as zf:
+              names = zf.namelist()
+              missing = [r for r in required if r not in names]
+              if missing:
+                  print(f'Missing: {missing}')
+                  sys.exit(1)
+              bad = [n for n in names if '.pyc' in n or '__pycache__' in n]
+              if bad:
+                  print(f'Unwanted: {bad}')
+                  sys.exit(1)
+          print(f'{zp}: OK ({len(names)} files)')
           "
 
       - name: Import smoke test from zip
@@ -128,4 +102,3 @@ jobs:
           generate_release_notes: true
           files: |
             dist/astrbot_plugin_sylanne-${{ steps.version.outputs.version }}.zip
-            dist/astrbot_plugin_sylanne-${{ steps.version.outputs.version }}-core.zip
