@@ -1,0 +1,39 @@
+name: '✨ 功能建议'
+description: 提交功能建议帮助 Sylanne 变得更好。
+title: '[Feature] '
+labels: ['enhancement']
+body:
+  - type: markdown
+    attributes:
+      value: |
+        感谢你的建议！请描述你的想法，我们会认真考虑。
+
+  - type: textarea
+    attributes:
+      label: 功能描述
+      description: 简要描述你希望新增或改进的功能。
+      placeholder: >
+        我希望 Sylanne 能够...
+    validations:
+      required: true
+
+  - type: textarea
+    attributes:
+      label: 使用场景
+      description: 这个功能在什么情况下会用到？解决什么问题？
+      placeholder: >
+        当我在...的时候，我希望...
+    validations:
+      required: true
+
+  - type: textarea
+    attributes:
+      label: 补充说明
+      description: 其他相关信息，如参考实现、截图、相关 issue 等。
+
+  - type: checkboxes
+    attributes:
+      label: 确认
+      options:
+        - label: 我已搜索过现有 Issues，确认没有重复提交。
+          required: true
