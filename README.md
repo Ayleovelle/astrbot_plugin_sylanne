@@ -2,7 +2,7 @@
 
 > <span style="font-size: 1.08em;"><strong>Sylanne-Embodiment：不可逆的关系计算引擎。</strong>不再模拟情绪标签，而是让对话在躯体上留下伤痕、在沉默中积累压力、在关系里长出不可撤销的形状。</span>
 
-![版本 1.3.0](https://img.shields.io/badge/version-1.3.0-red.svg)
+![版本 1.4.0](https://img.shields.io/badge/version-1.4.0-red.svg)
 ![AstrBot >=4.9.2,<5.0.0](https://img.shields.io/badge/AstrBot-%3E%3D4.9.2%2C%3C5.0.0-green)
 ![Python 3.10+](https://img.shields.io/badge/Python-3.10%2B-yellow)
 ![许可证 AGPL-3.0-or-later](https://img.shields.io/badge/license-AGPL--3.0--or--later-red)
@@ -11,7 +11,7 @@
 
 <p align="right"><img src="docs/assets/sylanne-mascot.gif" width="200" alt="Sylanne animated mascot"><br><em>Sylanne向大家问好~~</em></p>
 
-`astrbot_plugin_sylanne` Embodiment-1.2.0 是一次从底层计算逻辑开始的完全重写。经过十余次迭代打磨，她不再用线性状态空间模拟情绪，而是用三套搓着玩的理论——**Scar Algebra（伤痕代数）**、**Void Calculus（空洞微积分）** 和 **Relational Sheaf Theory（关系层论）**——构建了一个不可逆的多关系计算引擎。
+`astrbot_plugin_sylanne` Embodiment 是一次从底层计算逻辑开始的完全重写。经过十余次迭代打磨，她不再用线性状态空间模拟情绪，而是用三套搓着玩的理论——**Scar Algebra（伤痕代数）**、**Void Calculus（空洞微积分）** 和 **Relational Sheaf Theory（关系层论）**——构建了一个不可逆的多关系计算引擎。
 
 > 让不同人格的 bot 在长期对话中，留下不可撤销的伤痕、积累无法忽视的沉默压力、在关系的反复碰撞里长出只属于这段关系的形状。
 
@@ -480,6 +480,30 @@ Embodiment 是完全重写，但对 3.x 用户做了兼容：
 
 ---
 
+## Embodiment-1.4.0 更新日志
+
+> **发布于 2026-05-30**
+
+Embodiment-1.4.0 是一次稳定性与架构治理版本。修复了 3 个用户报告的 bug（GitHub Issues #4、#5），清理了 6 个无用模块（-872 行），并引入了防御性路由注册模式。
+
+### Bug 修复
+
+- **修复 `_diagnostics_enabled` AttributeError**（#4）：WebUI 诊断开关在特定初始化顺序下未定义，已加 `getattr` 防御
+- **修复 session 格式错误导致主动发言失败**（#4）：新增 `_session_origins` 映射，从事件中正确提取 `unified_msg_origin`，不再依赖 session_key 字符串拼接
+- **修复定时任务重复发送**（#5）：cron 触发的 LLM 回复是内部总结，现在检测到 cron 平台后自动抑制 `completion_text`
+- **修复 `cold_memory_decay_factor` KeyError**：旧存档缺少新版参数时，使用 `.update()` 合并而非覆盖，保证向后兼容
+
+### 架构改进
+
+- **防御性路由注册**：WebUI 路由改用 `getattr` 延迟解析 handler，版本不匹配时跳过而非崩溃
+- **移除 6 个无用模块**（-872 行）：`inner_self.py`、`relationship_dynamics.py`、`dialogue_intelligence.py`、`multi_device.py`、`protocols.py`、`strategy_plugins/__init__.py`
+
+### 迁移说明
+
+无破坏性变更。旧存档自动兼容，无需手动操作。
+
+<details><summary>历史版本更新日志（点击展开）</summary>
+
 ## Embodiment-1.3.0 更新日志
 
 > **发布于 2026-05-28**
@@ -515,7 +539,7 @@ Embodiment-1.3.0 是一次 WebUI 的完全重新设计。从依赖 AstrBot Pages
 
 旧 `pages/dashboard/` 已移除，请访问 `http://<host>:2718`。首次访问需输入 WebUI Token。
 
-<details><summary>历史版本更新日志（点击展开）</summary>
+---
 
 ## Embodiment-1.2.5 更新日志
 
