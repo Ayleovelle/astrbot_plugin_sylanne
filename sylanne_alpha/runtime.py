@@ -3,17 +3,22 @@
 负责 AlphaKernel 状态的磁盘读写，使用 .alpha.json 文件格式。
 写入采用原子操作（先写临时文件 + fsync，再 os.replace），确保断电/崩溃
 时不会损坏已有数据。同时提供对话缓冲区（buffer）的独立文件持久化。
+
+包含状态一致性自检守护（Item 83），定期检查内部状态合法性并自动修正。
 """
 
 from __future__ import annotations
 
 import json
+import logging
 import os
 from pathlib import Path
 from typing import Any
 
 from .body import SCHEMA_VERSION
 from .kernel import AlphaKernel
+
+logger = logging.getLogger("astrbot_plugin_sylanne")
 
 
 class AlphaRuntime:
@@ -66,14 +71,8 @@ class AlphaRuntime:
         return AlphaKernel.boot(session_key=session_key, legacy=legacy)
 
     def save(self, kernel: AlphaKernel) -> None:
-        """原子写入 kernel 快照到磁盘。
-
-        写入流程：先写 .tmp 临时文件 → fsync 确保数据落盘 → os.replace 原子替换。
-        若 replace 失败则清理临时文件并向上抛出异常。
-
-        Args:
-            kernel: 要持久化的 AlphaKernel 实例。
-        """
+        """原子写入 kernel 快照到磁盘。写入前执行一致性自检。"""
+        self._consistency_check(kernel)
         self.root.mkdir(parents=True, exist_ok=True)
         path = self._path(kernel.session_key)
         tmp = path.with_suffix(path.suffix + ".tmp")
@@ -84,9 +83,9 @@ class AlphaRuntime:
                 )
             )
             f.flush()
-            os.fsync(f.fileno())  # 确保数据从 OS 缓冲区刷到物理磁盘
+            os.fsync(f.fileno())
         try:
-            os.replace(tmp, path)  # 原子替换，不会出现半写状态
+            os.replace(tmp, path)
         except OSError:
             tmp.unlink(missing_ok=True)
             raise
@@ -191,3 +190,131 @@ class AlphaRuntime:
             or "default"
         )
         return self.root / f"{safe}.buffer.json"
+
+    def _consistency_check(self, kernel: AlphaKernel) -> dict[str, Any]:
+        """状态一致性自检守护：检查内部状态合法性并自动修正。
+
+        检查项：
+          1. 所有人格参数在 [0.0, 1.0] 范围内
+          2. scar_algebra 的 modifier 缓存与实际伤痕列表一致
+          3. void_calculus 的 pressure 不超过 5.0
+
+        如果发现异常，logger.error 并尝试修正（clamp 到合法范围）。
+        此方法应被定期调用（如 background_queue 空闲时）。
+
+        Args:
+            kernel: 要检查的 AlphaKernel 实例。
+
+        Returns:
+            包含检查结果的字典：corrections（修正数量）、details（修正详情列表）。
+        """
+        corrections: list[str] = []
+        comp = kernel.computation
+
+        # 1. 检查所有人格参数在 [0.0, 1.0] 范围内
+        personality = comp._personality
+        for trait, value in list(personality.items()):
+            if not isinstance(value, (int, float)):
+                continue
+            if value < 0.0:
+                logger.error(
+                    f"Consistency check: personality trait '{trait}' = {value} < 0.0, "
+                    f"clamping to 0.0"
+                )
+                personality[trait] = 0.0
+                corrections.append(f"personality.{trait}: {value} -> 0.0")
+            elif value > 1.0:
+                logger.error(
+                    f"Consistency check: personality trait '{trait}' = {value} > 1.0, "
+                    f"clamping to 1.0"
+                )
+                personality[trait] = 1.0
+                corrections.append(f"personality.{trait}: {value} -> 1.0")
+
+        # 2. 检查 scar_algebra 的 modifier 缓存与实际伤痕列表一致
+        scar_state = comp.engine.scar_state
+        # 强制使缓存失效并重建，确保一致性
+        old_cache_valid = scar_state._modifier_cache_valid
+        if old_cache_valid:
+            # 保存旧缓存值用于比较
+            old_cache = dict(scar_state._modifier_cache)
+            # 强制重建
+            scar_state._modifier_cache_valid = False
+            scar_state._ensure_modifier_cache()
+            new_cache = dict(scar_state._modifier_cache)
+            # 比较
+            for dim in range(scar_state.n_dims):
+                old_val = old_cache.get(dim, 1.0)
+                new_val = new_cache.get(dim, 1.0)
+                if abs(old_val - new_val) > 1e-6:
+                    logger.error(
+                        f"Consistency check: scar modifier cache mismatch at dim {dim}: "
+                        f"cached={old_val:.6f}, actual={new_val:.6f}. Cache rebuilt."
+                    )
+                    corrections.append(
+                        f"scar_modifier[{dim}]: {old_val:.6f} -> {new_val:.6f}"
+                    )
+        else:
+            # 缓存本来就无效，重建即可
+            scar_state._ensure_modifier_cache()
+
+        # 3. 检查 void_calculus 的 pressure 不超过 5.0
+        void_space = comp.engine.void_space
+        for idx, void in enumerate(void_space.voids):
+            if void.pressure > 5.0:
+                logger.error(
+                    f"Consistency check: void[{idx}].pressure = {void.pressure:.4f} > 5.0, "
+                    f"clamping to 5.0"
+                )
+                corrections.append(
+                    f"void[{idx}].pressure: {void.pressure:.4f} -> 5.0"
+                )
+                void.pressure = 5.0
+            elif void.pressure < 0.0:
+                logger.error(
+                    f"Consistency check: void[{idx}].pressure = {void.pressure:.4f} < 0.0, "
+                    f"clamping to 0.0"
+                )
+                corrections.append(
+                    f"void[{idx}].pressure: {void.pressure:.4f} -> 0.0"
+                )
+                void.pressure = 0.0
+
+        if corrections:
+            logger.error(
+                f"Consistency check completed with {len(corrections)} correction(s): "
+                f"{corrections}"
+            )
+        return {"corrections": len(corrections), "details": corrections}
+
+
+class HotUpgradeManager:
+    """插件热升级管理器（接口定义，完整实现需要 AstrBot 框架支持）。"""
+
+    def __init__(self):
+        self._upgrade_in_progress: bool = False
+        self._last_upgrade: float = 0
+
+    def can_upgrade(self) -> bool:
+        """检查是否可以安全升级。"""
+        return not self._upgrade_in_progress
+
+    def prepare_upgrade(self) -> dict:
+        """准备升级：收集需要迁移的状态。"""
+        self._upgrade_in_progress = True
+        return {
+            "status": "prepared",
+            "note": "Full hot-upgrade requires AstrBot framework support. "
+            "Current implementation saves state before reload.",
+        }
+
+    def complete_upgrade(self):
+        """完成升级。"""
+        import time
+
+        self._upgrade_in_progress = False
+        self._last_upgrade = time.time()
+
+    def abort_upgrade(self):
+        """中止升级。"""
+        self._upgrade_in_progress = False

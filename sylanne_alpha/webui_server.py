@@ -40,6 +40,8 @@ except ImportError:
     def get_astrbot_data_path() -> Path:  # type: ignore
         return Path.home()
 
+from sylanne_alpha.infra import resolve_data_root
+
 
 if TYPE_CHECKING:
     pass
@@ -1837,6 +1839,14 @@ def start_webui_thread_server(
                                 value = str(value)
                             config[key] = value
                             updated.append(key)
+                    # Persist config to disk if AstrBot config supports it
+                    if updated:
+                        p_cfg = getattr(current_plugin, "config", None)
+                        if p_cfg is not None and hasattr(p_cfg, "save_config"):
+                            try:
+                                p_cfg.save_config()
+                            except Exception:
+                                pass
                     self._send_json({"ok": True, "updated": updated})
                 except Exception as exc:
                     self._send_json({"ok": False, "error": str(exc)}, status=500)
@@ -2055,12 +2065,7 @@ def _known_sessions(plugin: Any, *, requested: str = "") -> list[str]:
         from pathlib import Path
 
         config = getattr(plugin, "_config", {}) or getattr(plugin, "config", {}) or {}
-        root = Path(
-            str(
-                config.get("sylanne_alpha_root")
-                or Path(get_astrbot_data_path()) / "sylanne_alpha"
-            )
-        )
+        root = Path(resolve_data_root(config))
         if root.exists():
             for path in root.glob("*.alpha.json"):
                 add(path.name[: -len(".alpha.json")])

@@ -122,4 +122,43 @@ def alpha_switches(config: dict[str, Any] | None = None) -> dict[str, Any]:
     }
 
 
-__all__ = ["CONFIG_SCHEMA_VERSION", "alpha_switches", "bool_setting", "int_setting"]
+# ---------------------------------------------------------------------------
+# Item 90: 轻量级边缘运行模式
+# ---------------------------------------------------------------------------
+
+
+class EdgeModeConfig:
+    """边缘运行模式：低资源设备适配。"""
+
+    def __init__(self, enabled: bool = False) -> None:
+        self.enabled = enabled
+        # 边缘模式下的参数
+        self.hdc_dimension = 1024  # 降维
+        self.enabled_layers = {"perception", "void_scar", "expression"}  # 只保留 3 层核心
+        self.memory_max_items = 200  # 记忆上限降低
+        self.disable_webui = False  # 可选关闭 WebUI
+        self.disable_proactive = True  # 关闭主动发言
+
+    def apply_to_spine(self, spine: Any) -> None:
+        """将边缘模式配置应用到计算栈。"""
+        if not self.enabled:
+            return
+        all_layers = {"perception", "gate", "void_scar", "sheaf", "hgt", "boundary", "expression"}
+        for layer in all_layers:
+            spine.set_layer_enabled(layer, layer in self.enabled_layers)
+
+    @classmethod
+    def from_config(cls, plugin: Any) -> "EdgeModeConfig":
+        enabled = getattr(plugin, "_cfg_bool", lambda k, d: d)(
+            "sylanne_alpha_edge_mode", False
+        )
+        return cls(enabled=enabled)
+
+
+__all__ = [
+    "CONFIG_SCHEMA_VERSION",
+    "EdgeModeConfig",
+    "alpha_switches",
+    "bool_setting",
+    "int_setting",
+]

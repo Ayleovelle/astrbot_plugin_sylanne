@@ -437,14 +437,13 @@ class EmotionalStatePlugin(Star):
 
         self._load_config_defaults()
         # WebUI 生命周期管理：先强杀旧监听器（解决热更新时旧实例残留问题），再启动新的
-        # 这确保用户热更新插件时不会出现 'object has no attribute' 错误
         try:
             import asyncio as _aio
-            loop = _aio.get_event_loop()
-            if loop.is_running():
+            try:
+                loop = _aio.get_running_loop()
                 loop.create_task(stop_webui_server())
-            else:
-                loop.run_until_complete(stop_webui_server())
+            except RuntimeError:
+                _aio.run(stop_webui_server())
         except Exception:
             pass
         self._webui_lifecycle = _sylanne_webui_server.WebUILifecycle(self)
@@ -453,17 +452,14 @@ class EmotionalStatePlugin(Star):
         self._webui_lifecycle.schedule_listener_takeover()
 
     def _register_web_apis(self, context: Any) -> None:
-        """向 AstrBot 注册所有 WebUI HTTP 路由。
-
-        路由包括：observatory 状态、记忆设置、lineage 观测台、
-        dashboard 页面、状态 API、设置 API、计算日志、记忆池、
-        记忆清除、WebUI 探针、logo 资源等。
-        """
+        """向 AstrBot 注册所有 WebUI HTTP 路由（getattr 延迟解析，防版本不一致崩溃）。"""
         if not hasattr(context, "register_web_api"):
             return
         P = PLUGIN_NAME
         wr = self._webui_routes
-        routes: list[tuple[str, Any, list[str], str]] = [
+
+        # self 上的路由（版本一致性风险低，直接引用）
+        core_routes: list[tuple[str, Any, list[str], str]] = [
             (
                 f"/{P}/observatory-status",
                 self._observatory_route_handler,
@@ -488,93 +484,45 @@ class EmotionalStatePlugin(Star):
                 ["GET"],
                 "Sylanne lineage observatory readonly",
             ),
-            (
-                f"/{P}/webui",
-                wr.page_handler,
-                ["GET"],
-                "Sylanne-Embodiment WebUI dashboard",
-            ),
-            (
-                f"/{P}/api/state",
-                wr.state_handler,
-                ["GET"],
-                "Sylanne-Embodiment WebUI state API",
-            ),
-            (
-                f"/{P}/api/settings",
-                wr.settings_get_handler,
-                ["GET"],
-                "Sylanne-Embodiment WebUI settings read",
-            ),
-            (
-                f"/{P}/api/settings",
-                wr.settings_post_handler,
-                ["POST"],
-                "Sylanne-Embodiment WebUI settings write",
-            ),
-            (
-                f"/{P}/api/computation_logs",
-                wr.computation_logs_handler,
-                ["GET"],
-                "Sylanne-Embodiment computation logs API",
-            ),
-            (
-                f"/{P}/api/memory_pools",
-                wr.memory_pools_handler,
-                ["GET"],
-                "Sylanne-Embodiment memory pools API",
-            ),
-            (
-                f"/{P}/api/memory_meltdown",
-                wr.memory_meltdown_handler,
-                ["POST"],
-                "Sylanne-Embodiment memory meltdown (clear all)",
-            ),
-            (
-                f"/{P}/api/meltdown_nonce",
-                wr.meltdown_nonce_handler,
-                ["GET"],
-                "Sylanne-Embodiment meltdown nonce generator",
-            ),
-            (
-                f"/{P}/api/memory_sink",
-                wr.memory_sink_handler,
-                ["GET"],
-                "Sylanne memory L1→L2 manual sink",
-            ),
-            (
-                f"/{P}/api/memory_consolidate",
-                wr.memory_consolidate_handler,
-                ["POST"],
-                "Trigger memory consolidation evaluation",
-            ),
-            (
-                f"/{P}/api/webui_probe",
-                wr.probe_handler,
-                ["GET"],
-                "Sylanne-Embodiment standalone WebUI probe",
-            ),
-            (
-                f"/{P}/assets/logo.png",
-                wr.logo_handler,
-                ["GET"],
-                "Sylanne plugin logo asset",
-            ),
-            (
-                f"/{P}/logo.png",
-                wr.logo_handler,
-                ["GET"],
-                "Sylanne plugin logo asset (compat)",
-            ),
-            (
-                f"/{P}/dashboard",
-                wr.dashboard_handler,
-                ["GET"],
-                "Sylanne WebUI Dashboard",
-            ),
         ]
-        for path, handler, methods, desc in routes:
+        for path, handler, methods, desc in core_routes:
             context.register_web_api(path, handler, methods, desc)
+
+        # WebUI 路由（跨文件引用，用字符串名 + getattr 防御性解析）
+        webui_routes: list[tuple[str, str, list[str]]] = [
+            (f"/{P}/webui", "page_handler", ["GET"]),
+            (f"/{P}/api/state", "state_handler", ["GET"]),
+            (f"/{P}/api/settings", "settings_get_handler", ["GET"]),
+            (f"/{P}/api/settings", "settings_post_handler", ["POST"]),
+            (f"/{P}/api/computation_logs", "computation_logs_handler", ["GET"]),
+            (f"/{P}/api/memory_pools", "memory_pools_handler", ["GET"]),
+            (f"/{P}/api/memory_meltdown", "memory_meltdown_handler", ["POST"]),
+            (f"/{P}/api/meltdown_nonce", "meltdown_nonce_handler", ["GET"]),
+            (f"/{P}/api/memory_sink", "memory_sink_handler", ["GET"]),
+            (f"/{P}/api/memory_consolidate", "memory_consolidate_handler", ["POST"]),
+            (f"/{P}/api/webui_probe", "probe_handler", ["GET"]),
+            (f"/{P}/assets/logo.png", "logo_handler", ["GET"]),
+            (f"/{P}/logo.png", "logo_handler", ["GET"]),
+            (f"/{P}/dashboard", "dashboard_handler", ["GET"]),
+            (f"/{P}/api/config_presets", "config_presets_handler", ["GET"]),
+            (f"/{P}/api/export_data", "export_data_handler", ["GET"]),
+            (f"/{P}/api/purge_data", "purge_data_handler", ["DELETE"]),
+            (f"/{P}/health", "health_handler", ["GET"]),
+            (f"/{P}/api/error_stats", "error_stats_handler", ["GET"]),
+            (f"/{P}/api/config_export", "config_export_handler", ["GET"]),
+            (f"/{P}/api/config_import", "config_import_handler", ["POST"]),
+            (f"/{P}/api/widget-state", "widget_state_handler", ["GET"]),
+        ]
+        for path, handler_name, methods in webui_routes:
+            handler = getattr(wr, handler_name, None)
+            if handler is None:
+                logger.warning(
+                    "WebUI route %s skipped: handler '%s' not found"
+                    " — possible version mismatch in webui_routes.py",
+                    path, handler_name,
+                )
+                continue
+            context.register_web_api(path, handler, methods, f"Sylanne {handler_name}")
 
     @property
     def config(self) -> dict[str, Any]:
@@ -603,19 +551,59 @@ class EmotionalStatePlugin(Star):
             return val.lower() in ("true", "1", "yes")
         return bool(val)
 
-    def _cfg_float(self, key: str, default: float = 0.0) -> float:
+    def _cfg_float(
+        self,
+        key: str,
+        default: float = 0.0,
+        *,
+        min: float | None = None,
+        max: float | None = None,
+    ) -> float:
         val = self._config.get(key, default)
         try:
-            return float(val)
+            result = float(val)
         except (TypeError, ValueError):
             return default
+        if min is not None and result < min:
+            logger.warning(
+                "Config '%s' value %.4f below min %.4f, using default %.4f",
+                key, result, min, default,
+            )
+            return default
+        if max is not None and result > max:
+            logger.warning(
+                "Config '%s' value %.4f above max %.4f, using default %.4f",
+                key, result, max, default,
+            )
+            return default
+        return result
 
-    def _cfg_int(self, key: str, default: int = 0) -> int:
+    def _cfg_int(
+        self,
+        key: str,
+        default: int = 0,
+        *,
+        min: int | None = None,
+        max: int | None = None,
+    ) -> int:
         val = self._config.get(key, default)
         try:
-            return int(val)
+            result = int(val)
         except (TypeError, ValueError):
             return default
+        if min is not None and result < min:
+            logger.warning(
+                "Config '%s' value %d below min %d, using default %d",
+                key, result, min, default,
+            )
+            return default
+        if max is not None and result > max:
+            logger.warning(
+                "Config '%s' value %d above max %d, using default %d",
+                key, result, max, default,
+            )
+            return default
+        return result
 
     # AstrBot group context awareness detection
     def _detect_astrbot_group_context(self) -> bool:
@@ -963,7 +951,7 @@ class EmotionalStatePlugin(Star):
         self, legacy: dict[str, Any], *, session_key: str
     ) -> dict[str, Any]:
         root = self._config.get("sylanne_alpha_root") or str(
-            get_astrbot_data_path() / "sylanne_alpha"
+            Path(get_astrbot_data_path()) / "plugin_data" / PLUGIN_NAME
         )
         self._hosts[session_key] = SylanneAlphaHost(
             root=root, session_key=session_key, legacy=legacy
@@ -1026,13 +1014,8 @@ class EmotionalStatePlugin(Star):
             now = time.time()
             # 更新最后消息时间，供 proactive scheduler 计算沉默时长
             self._last_user_message_time[session_key] = now
-            # 喂给节奏学习器（如果 host 已存在则更新，不触发懒创建）
-            if session_key in self._hosts:
-                host = self._hosts[session_key]
-                if hasattr(host, "kernel") and hasattr(host.kernel, "_rhythm_learner"):
-                    learner = host.kernel._rhythm_learner
-                    if learner is not None:
-                        learner.observe(now)
+            # 喂给节奏学习器（记录 tempo，不受亲密度门控）
+            self._rhythm_learner._record_tempo(session_key, now)
         except Exception:
             pass
 
@@ -2127,19 +2110,39 @@ class EmotionalStatePlugin(Star):
         return await self._proactive_scheduler.run_once()
 
     async def terminate(self) -> None:
-        """插件卸载/更新前的清理：必须先关闭 WebUI 独立服务器，再持久化状态。
-
-        不关闭 WebUI 会导致旧监听器继续用过期的路由对象处理请求，
-        更新插件后出现 'object has no attribute' 错误。
-        """
-        # 先停止独立 WebUI 服务器（释放端口、清除内存中的旧 HTML 缓存）
+        """插件卸载/更新前的清理：停止所有后台任务、关闭 WebUI、持久化状态。"""
+        # 收集所有需要取消的任务
+        tasks_to_cancel: list = []
+        for task in list(self._background_tasks):
+            if not task.done():
+                task.cancel()
+                tasks_to_cancel.append(task)
+        self._background_tasks.clear()
+        for task in list(self._background_post_checkpoint_tasks):
+            if not task.done():
+                task.cancel()
+                tasks_to_cancel.append(task)
+        self._background_post_checkpoint_tasks.clear()
+        sched_task = getattr(self, "_proactive_scheduler_task", None)
+        if sched_task and not sched_task.done():
+            sched_task.cancel()
+            tasks_to_cancel.append(sched_task)
+        # 等待所有取消的任务完成（带超时保护）
+        if tasks_to_cancel:
+            await asyncio.wait(tasks_to_cancel, timeout=10)
+        # 停止生命模拟器
+        if hasattr(self._life_simulator, "stop"):
+            self._life_simulator.stop()
+        # 关闭独立 WebUI 服务器
         try:
             await stop_webui_server()
-            logger.info("Sylanne WebUI: 独立服务器已在插件卸载前关闭")
         except Exception as e:
-            logger.warning(f"Sylanne WebUI: 关闭服务器时出错: {e}")
-        # 再持久化运行时状态
-        await self._state_persistence.terminate()
+            logger.warning(f"Sylanne WebUI terminate: {e}")
+        # 持久化运行时状态（带超时保护）
+        try:
+            await asyncio.wait_for(self._state_persistence.terminate(), timeout=15)
+        except asyncio.TimeoutError:
+            logger.warning("Sylanne state persistence terminate timed out (15s)")
 
     async def _send_realtime_chat_plan(
         self,

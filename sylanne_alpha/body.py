@@ -19,6 +19,7 @@
 
 from __future__ import annotations
 
+import time
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -726,3 +727,60 @@ class AlphaBodyState:
             self.memory["traces"] = self.memory["traces"][-50:]
             self._observe_relationship_signal(flags=flags, text=text)
             self.observe_shadow_signal(text=text, flags=flags)
+
+
+# ---------------------------------------------------------------------------
+# Item 97: 能量管理模型
+# ---------------------------------------------------------------------------
+
+
+class EnergyPool:
+    """Sylanne 的能量池：模拟认知负荷/情感消耗/恢复周期。"""
+
+    def __init__(self, max_energy: float = 1.0):
+        self._energy: float = max_energy
+        self._max: float = max_energy
+        self._last_tick: float = time.time()
+
+    @property
+    def energy(self) -> float:
+        return self._energy
+
+    @property
+    def is_fatigued(self) -> bool:
+        return self._energy < 0.3
+
+    def consume(self, amount: float):
+        """消耗能量（对话、情感处理、LLM 调用等）。"""
+        self._energy = max(0.0, self._energy - amount)
+
+    def recover(self, dt: float):
+        """自然恢复。dt 为距上次 tick 的秒数。"""
+        # 每小时恢复 0.2 能量
+        recovery = dt / 3600 * 0.2
+        self._energy = min(self._max, self._energy + recovery)
+
+    def tick(self):
+        """每轮对话调用。"""
+        now = time.time()
+        dt = now - self._last_tick
+        self._last_tick = now
+        self.recover(dt)
+
+    def get_fatigue_hint(self) -> str | None:
+        """疲劳时返回风格提示。"""
+        if self._energy < 0.15:
+            return "非常疲惫，回复极简短温和"
+        elif self._energy < 0.3:
+            return "有些疲惫，回复简短但保持温度"
+        return None
+
+    def to_dict(self) -> dict:
+        return {"energy": self._energy, "last_tick": self._last_tick}
+
+    @classmethod
+    def from_dict(cls, data: dict) -> "EnergyPool":
+        pool = cls()
+        pool._energy = data.get("energy", 1.0)
+        pool._last_tick = data.get("last_tick", time.time())
+        return pool

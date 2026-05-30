@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import re
 import time
 from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
@@ -57,6 +58,25 @@ class LLMResponsePipeline:
         self._p = plugin
 
     # ------------------------------------------------------------------
+    # Injection defense
+    # ------------------------------------------------------------------
+    # 匹配 LLM 伪造的 [sylanne_xxx] 系统标签
+    _RE_SYLANNE_TAG = re.compile(r"\[sylanne_[^\]]*\]")
+
+    def _sanitize_response(self, text: str) -> str:
+        """过滤 LLM 返回中伪造的 [sylanne_*] 系统标签。
+
+        防止 LLM 在回复中注入形如 [sylanne_xxx] 的标签来伪造系统指令。
+        """
+        cleaned = self._RE_SYLANNE_TAG.sub("", text)
+        if cleaned != text:
+            logger.warning(
+                "Sanitized %d injected [sylanne_*] tag(s) from LLM response",
+                len(self._RE_SYLANNE_TAG.findall(text)),
+            )
+        return cleaned
+
+    # ------------------------------------------------------------------
     # Main response handler
     # ------------------------------------------------------------------
     async def _on_llm_response_inner(self, event: Any, response: Any) -> None:
@@ -92,10 +112,11 @@ class LLMResponsePipeline:
         )
 
         if not realtime_enabled or not intercept:
-            # 未启用即时聊天拦截时，仅清理 thinking/draft 块
+            # 未启用即时聊天拦截时，仅清理 thinking/draft 块 + 注入防御
             if response is not None:
                 text = str(getattr(response, "completion_text", "") or "")
                 cleaned = strip_draft_blocks(text)
+                cleaned = self._sanitize_response(cleaned)
                 if cleaned != text:
                     response.completion_text = cleaned
             return
@@ -105,9 +126,23 @@ class LLMResponsePipeline:
 
         text = str(getattr(response, "completion_text", "") or "")
         cleaned = strip_draft_blocks(text)
+        cleaned = self._sanitize_response(cleaned)
         self._p.logger.info(
             f"Sylanne on_llm_response: len={len(cleaned)} session={session_key}"
         )
+
+        # 定时任务（cron）的 LLM 回复是内部总结，不应发送给用户
+        _platform = ""
+        _pm = getattr(event, "platform_meta", None)
+        if _pm:
+            _platform = str(getattr(_pm, "name", "") or "")
+        if not _platform:
+            _umo = str(getattr(event, "unified_msg_origin", "") or "")
+            if _umo.startswith("cron"):
+                _platform = "cron"
+        if _platform == "cron":
+            response.completion_text = ""
+            return
 
         if not cleaned.strip():
             response.completion_text = ""
@@ -121,8 +156,9 @@ class LLMResponsePipeline:
             if remainder.startswith(first_sent):
                 remainder = remainder[len(first_sent) :].strip()
             elif first_sent.rstrip("。！？!?.") in remainder:
-                idx = remainder.find(first_sent.rstrip("。！？!?."))
-                end_idx = idx + len(first_sent)
+                stripped = first_sent.rstrip("。！？!?.")
+                idx = remainder.find(stripped)
+                end_idx = idx + len(stripped)
                 if end_idx < len(remainder):
                     remainder = remainder[end_idx:].strip()
                 else:
@@ -348,6 +384,15 @@ class LLMResponsePipeline:
             )
             message = self._astrbot_message(text)
             await context.send_message(origin, message)
+            # 每发送一段，更新 unfinished 为剩余未发内容（消除竞态）
+            if session_key and idx < total:
+                remaining_text = "".join(
+                    str(p.get("text", "")) for p in parts[idx:]
+                )
+                if remaining_text:
+                    self._p._unfinished_replies[session_key] = remaining_text
+                else:
+                    self._p._unfinished_replies.pop(session_key, None)
         # 所有段发送成功——清除未完成标记
         if session_key:
             self._p._unfinished_replies.pop(session_key, None)
@@ -355,6 +400,9 @@ class LLMResponsePipeline:
     # ------------------------------------------------------------------
     # Memory prompt fragment
     # ------------------------------------------------------------------
+    # 记忆注入硬上限（字符数）
+    _MEMORY_INJECT_MAX_CHARS: int = 4000
+
     def _memory_prompt_fragment(self, payload: dict[str, Any]) -> str:
         """将记忆查询结果格式化为 prompt 注入片段。
 
@@ -363,6 +411,7 @@ class LLMResponsePipeline:
 
         Returns:
             格式化的 prompt 片段字符串，无匹配时返回空字符串。
+            硬截断到 _MEMORY_INJECT_MAX_CHARS 字符以防止 prompt 膨胀。
         """
         matches = payload.get("matches", [])
         _query = str(payload.get("query") or "")
@@ -374,13 +423,21 @@ class LLMResponsePipeline:
         for match in matches[:3]:
             text = str(match.get("text") or "")[:120]
             lines.append(f">{text}")
-        return "\n".join(line for line in lines if line)
+        fragment = "\n".join(line for line in lines if line)
+        # 硬截断：防止记忆注入超长导致 prompt 膨胀
+        if len(fragment) > self._MEMORY_INJECT_MAX_CHARS:
+            fragment = fragment[: self._MEMORY_INJECT_MAX_CHARS]
+            logger.warning(
+                "Memory injection truncated to %d chars (hard cap)",
+                self._MEMORY_INJECT_MAX_CHARS,
+            )
+        return fragment
 
     def _append_request_prompt_fragment(self, request: Any, fragment: str) -> None:
         if not fragment:
             return
-        current = str(getattr(request, "prompt", "") or "")
-        request.prompt = f"{current}\n{fragment}".strip()
+        current = str(getattr(request, "system_prompt", "") or "")
+        request.system_prompt = f"{current}\n{fragment}".strip()
 
     # ------------------------------------------------------------------
     # Time context
@@ -598,19 +655,19 @@ class LLMResponsePipeline:
             )
             return False
         if budget and budget.compat_mode == "claude_advisory":
-            # For claude advisory mode, append to prompt with advisory marker
-            current = str(getattr(request, "prompt", "") or "")
-            if "[claude_advisory_context]" not in current:
-                request.prompt = f"{current}\n[claude_advisory_context]\n{text}".strip()
+            # Claude advisory: 注入到 system_prompt（不持久化）
+            # 手册明确：request.prompt 会持久化，system_prompt 不会
+            current_sys = str(getattr(request, "system_prompt", "") or "")
+            if "[claude_advisory_context]" not in current_sys:
+                request.system_prompt = f"{current_sys}\n[claude_advisory_context]\n{text}".strip()
             else:
-                request.prompt = f"{current}\n{text}".strip()
+                request.system_prompt = f"{current_sys}\n{text}".strip()
             if budget:
                 budget.injected.append({"source": source})
             return True
-        # Normal mode: append to extra_user_content_parts
-        parts = getattr(request, "extra_user_content_parts", None)
-        if isinstance(parts, list):
-            parts.append(SimpleNamespace(text=text))
+        # Normal mode: 也注入到 system_prompt 避免历史污染
+        current_sys = str(getattr(request, "system_prompt", "") or "")
+        request.system_prompt = f"{current_sys}\n{text}".strip()
         if budget:
             budget.injected.append({"source": source})
         return True
@@ -628,33 +685,35 @@ class LLMResponsePipeline:
         """
         hajide = bool(self._p._config.get("sylanne_alpha_hajide_compat_mode"))
 
-        # Flatten extra_user_content_parts into prompt
-        extra = getattr(request, "extra_user_content_parts", None)
-        if isinstance(extra, list) and extra:
-            texts = []
-            for part in extra:
-                if hasattr(part, "text"):
-                    texts.append(str(part.text))
-                elif isinstance(part, dict) and "text" in part:
-                    texts.append(str(part["text"]))
-            if texts:
-                current = str(getattr(request, "prompt", "") or "")
-                request.prompt = f"{current}\n" + "\n".join(texts)
-            request.extra_user_content_parts = []
+        # extra_user_content_parts: 仅哈基德模式展平到 system_prompt
+        # 普通模式保留原样，尊重其他插件的持久化语义
+        if hajide:
+            extra = getattr(request, "extra_user_content_parts", None)
+            if isinstance(extra, list) and extra:
+                texts = []
+                for part in extra:
+                    if hasattr(part, "text"):
+                        texts.append(str(part.text))
+                    elif isinstance(part, dict) and "text" in part:
+                        texts.append(str(part["text"]))
+                if texts:
+                    current = str(getattr(request, "system_prompt", "") or "")
+                    request.system_prompt = f"{current}\n" + "\n".join(texts) if current else "\n".join(texts)
+                request.extra_user_content_parts = []
 
-        # Flatten contents into prompt
-        contents = getattr(request, "contents", None)
-        if isinstance(contents, list) and contents:
-            texts = []
-            for item in contents:
-                if isinstance(item, dict) and "text" in item:
-                    texts.append(str(item["text"]))
-                elif hasattr(item, "text"):
-                    texts.append(str(item.text))
-            if texts:
-                current = str(getattr(request, "prompt", "") or "")
-                request.prompt = f"{current}\n" + "\n".join(texts)
-            request.contents = []
+            # contents: 仅哈基德模式展平
+            contents = getattr(request, "contents", None)
+            if isinstance(contents, list) and contents:
+                texts = []
+                for item in contents:
+                    if isinstance(item, dict) and "text" in item:
+                        texts.append(str(item["text"]))
+                    elif hasattr(item, "text"):
+                        texts.append(str(item.text))
+                if texts:
+                    current = str(getattr(request, "system_prompt", "") or "")
+                    request.system_prompt = f"{current}\n" + "\n".join(texts) if current else "\n".join(texts)
+                request.contents = []
 
         # Flatten contexts with system role into system_prompt
         contexts = getattr(request, "contexts", None)
@@ -674,6 +733,8 @@ class LLMResponsePipeline:
                 )
                 if role == "system":
                     system_parts.append(content)
+                elif hajide and role in ("tool", "function"):
+                    continue
                 else:
                     remaining.append(ctx)
             if system_parts:
@@ -683,7 +744,7 @@ class LLMResponsePipeline:
                     if sys_prompt
                     else "\n".join(system_parts)
                 )
-            request.contexts = remaining if not hajide else []
+            request.contexts = remaining
 
         # Sanitize messages
         messages = getattr(request, "messages", None)
@@ -789,7 +850,7 @@ class LLMResponsePipeline:
                 if isinstance(tool_choice.get("function"), dict)
                 else ""
             )
-            if _is_sylanne_tool(name) or name:
+            if _is_sylanne_tool(name):
                 request.tool_choice = "auto"
         elif tool_choice == "required":
             request.tool_choice = "auto"
@@ -896,6 +957,128 @@ class LLMResponsePipeline:
                                     parts.append(desc)
 
         return " ".join(parts) if parts else ""
+
+    # ------------------------------------------------------------------
+    # Sensitive topic tagging (Item 74)
+    # ------------------------------------------------------------------
+
+    # 敏感话题关键词分类
+    _SENSITIVE_KEYWORDS: dict[str, list[str]] = {
+        "health": ["病", "药", "医院", "诊断", "手术", "癌", "抑郁", "焦虑"],
+        "finance": ["贷款", "欠款", "破产", "债务", "催收", "逾期", "高利贷"],
+        "legal": ["律师", "起诉", "判决", "法院", "拘留", "逮捕", "刑事"],
+    }
+
+    def _tag_sensitive(self, text: str) -> tuple[str, bool]:
+        """检查文本是否包含敏感话题关键词。
+
+        敏感类别：健康（病/药/医院/诊断）、财务（贷款/欠款/破产）、法律（律师/起诉/判决）。
+        如果包含任一关键词，返回 (text, True)，标记该记忆条目为 sensitive，
+        不参与跨会话召回。
+
+        Args:
+            text: 待检查的文本内容。
+
+        Returns:
+            (text, is_sensitive) 元组。text 原样返回，is_sensitive 表示是否命中敏感词。
+        """
+        if not text:
+            return (text, False)
+        for _category, keywords in self._SENSITIVE_KEYWORDS.items():
+            for keyword in keywords:
+                if keyword in text:
+                    return (text, True)
+        return (text, False)
+
+    # ------------------------------------------------------------------
+    # Item 1: 对话情绪回顾摘要
+    # ------------------------------------------------------------------
+
+    def _generate_session_summary(self, session_key: str) -> str | None:
+        """生成对话情绪回顾摘要。
+
+        检查该 session 最后一条消息时间，如果距今 > 30min，生成情绪弧线摘要。
+        摘要格式："本次对话从[情绪A]开始，经历了[事件]，以[情绪B]结束"
+
+        通过 body_state 的 valence 变化来推断情绪弧线。调用方负责存入记忆。
+
+        Args:
+            session_key: 会话标识。
+
+        Returns:
+            摘要字符串，不满足条件时返回 None。
+        """
+        p = self._p
+        import time as _time
+
+        # 获取对话缓冲区
+        buf = p._conversation_buffers.get(session_key)
+        if not buf or not buf.messages:
+            return None
+
+        # 检查最后一条消息时间
+        last_msg = buf.messages[-1] if buf.messages else None
+        if not last_msg:
+            return None
+        last_ts = float(last_msg.get("ts", 0) or last_msg.get("timestamp", 0) or 0)
+        if last_ts <= 0:
+            return None
+        if _time.time() - last_ts <= 1800:  # 30 min
+            return None
+
+        # 从 host 获取 body_state 的 valence 历史
+        try:
+            host = p._host(session_key)
+            body = host.kernel.body
+        except Exception:
+            return None
+
+        # 推断情绪弧线：从 traces 中提取 valence 变化
+        traces = body.memory.get("traces", [])
+        if len(traces) < 2:
+            return None
+
+        def _valence_label(v: float) -> str:
+            if v > 0.5:
+                return "愉悦"
+            elif v > 0.2:
+                return "轻松"
+            elif v > -0.2:
+                return "平静"
+            elif v > -0.5:
+                return "低落"
+            else:
+                return "沉重"
+
+        # 取首尾 trace 的 valence
+        first_trace = traces[0] if traces else {}
+        last_trace = traces[-1] if traces else {}
+        first_valence = float(first_trace.get("valence", 0) or 0)
+        last_valence = float(last_trace.get("valence", 0) or 0)
+
+        start_emotion = _valence_label(first_valence)
+        end_emotion = _valence_label(last_valence)
+
+        # 检测中间是否有显著变化（找极值点）
+        mid_event = ""
+        if len(traces) >= 3:
+            valences = [float(t.get("valence", 0) or 0) for t in traces]
+            max_v = max(valences)
+            min_v = min(valences)
+            if max_v - min_v > 0.4:
+                peak_idx = valences.index(max_v)
+                trough_idx = valences.index(min_v)
+                if peak_idx < trough_idx:
+                    mid_event = "情绪高点后回落"
+                else:
+                    mid_event = "经历低谷后回升"
+
+        if mid_event:
+            summary = f"本次对话从{start_emotion}开始，{mid_event}，以{end_emotion}结束"
+        else:
+            summary = f"本次对话从{start_emotion}开始，以{end_emotion}结束"
+
+        return summary
 
     # ------------------------------------------------------------------
     # AstrBot message building

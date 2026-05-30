@@ -22,6 +22,7 @@ from __future__ import annotations
 import asyncio
 import json
 import secrets
+import time
 from pathlib import Path
 from typing import Any
 
@@ -31,6 +32,59 @@ except ImportError:
     import logging as _logging
 
     logger = _logging.getLogger("astrbot_plugin_sylanne")  # type: ignore
+
+
+# ---------------------------------------------------------------------------
+# Item 62: 内置术语词典（供前端悬浮卡片使用）
+# ---------------------------------------------------------------------------
+
+GLOSSARY: dict[str, str] = {
+    "伤痕": "Scar Algebra 中的核心概念。事件在系统中留下的不可删除的痕迹，改变对未来事件的敏感度。",
+    "空洞": "Void Calculus 中的核心概念。没说出口的话形成的计算对象，有深度、压力和边界。",
+    "共振": "Coherence。伤痕和空洞对齐时系统连贯，不对齐时'解离'。",
+    "相变": "Phase Transition。压力积累超过阈值时的表达模式切换。",
+    "层论": "Relational Sheaf Theory。用层上同调描述多关系之间的相互影响。",
+    "脊柱": "Computation Spine。七层计算栈的统称。",
+    "人格漂移": "Personality Drift。人格参数随经历缓慢变化的过程。",
+    "熔毁": "Memory Meltdown。彻底清除所有记忆池的不可逆操作。",
+}
+
+
+CONFIG_PRESETS: dict[str, dict[str, Any]] = {
+    "gentle": {
+        "name": "温柔型",
+        "description": "低主动性、高共情、柔和表达",
+        "values": {
+            "expression_drive_trait": 0.3,
+            "perception_acuity": 0.7,
+            "boundary_permeability": 0.4,
+            "inner_order": 0.6,
+            "relational_gravity": 0.7,
+        },
+    },
+    "sharp": {
+        "name": "锋利型",
+        "description": "高表达驱力、直接、边界清晰",
+        "values": {
+            "expression_drive_trait": 0.8,
+            "perception_acuity": 0.6,
+            "boundary_permeability": 0.2,
+            "inner_order": 0.8,
+            "relational_gravity": 0.4,
+        },
+    },
+    "quiet": {
+        "name": "沉默型",
+        "description": "低表达、高内省、深度观察",
+        "values": {
+            "expression_drive_trait": 0.15,
+            "perception_acuity": 0.9,
+            "boundary_permeability": 0.3,
+            "inner_order": 0.7,
+            "relational_gravity": 0.5,
+        },
+    },
+}
 
 
 class WebUIRoutes:
@@ -81,7 +135,7 @@ class WebUIRoutes:
         计时数据、各层诊断、计算脊柱信息、人格信息、反馈统计等。
         支持 ?session= 参数指定会话，默认选择最活跃的会话。
         """
-        logger.info("Sylanne WebUI: /api/state handler HIT")
+        logger.debug("Sylanne WebUI: /api/state handler HIT")
         from quart import request as quart_request
 
         requested_session = str(quart_request.args.get("session") or "").strip()
@@ -537,6 +591,7 @@ class WebUIRoutes:
                 or data.get("semantic_embedding")
                 or data.get("embedding_provider_id")
             )
+            data.setdefault("recall_reason", "")
             data.pop("embedding", None)
             data.pop("semantic_embedding", None)
             return data
@@ -953,6 +1008,156 @@ class WebUIRoutes:
         return {"ok": True, "sunk": len(item_ids)}
 
     # ------------------------------------------------------------------
+    # Config presets
+    # ------------------------------------------------------------------
+
+    async def config_presets_handler(self) -> dict[str, Any]:
+        """GET /api/config_presets — 返回人格配置预设模板列表。"""
+        return {"presets": CONFIG_PRESETS}
+
+    # ------------------------------------------------------------------
+    # Item 62: GET /api/glossary 术语词典
+    # ------------------------------------------------------------------
+
+    async def glossary_handler(self) -> dict[str, Any]:
+        """GET /api/glossary — 返回 Sylanne 专有术语词典，供前端悬浮卡片渲染。"""
+        return {"glossary": GLOSSARY}
+
+    # ------------------------------------------------------------------
+    # Data export & purge
+    # ------------------------------------------------------------------
+
+    async def export_data_handler(self) -> dict[str, Any]:
+        """GET /api/export_data?session_key=xxx — 导出指定会话的所有数据。
+
+        导出内容包括：记忆系统状态、人格参数、伤痕/虚空状态、计算栈快照。
+        """
+        from quart import request as quart_request
+
+        session_key = str(quart_request.args.get("session_key") or "").strip()
+        if not session_key:
+            return {"ok": False, "error": "missing session_key param"}
+
+        export: dict[str, Any] = {"session_key": session_key}
+
+        # Memory system
+        mem_sys = (
+            self._p._memory_system_for_session(session_key)
+            if hasattr(self._p, "_memory_system_for_session")
+            else getattr(self._p, "_memory_system", None)
+        )
+        if mem_sys is not None:
+            export["memory"] = {
+                "l1": [
+                    item.to_dict() if hasattr(item, "to_dict") else dict(item or {})
+                    for item in list(getattr(mem_sys, "_l1", []) or [])
+                ],
+                "l2": [
+                    item.to_dict() if hasattr(item, "to_dict") else dict(item or {})
+                    for item in list(getattr(mem_sys, "_l2", []) or [])
+                ],
+                "l3_nodes": {
+                    k: (v.to_dict() if hasattr(v, "to_dict") else dict(v or {}))
+                    for k, v in dict(
+                        getattr(mem_sys, "_l3_nodes", {}) or {}
+                    ).items()
+                },
+                "l3_edges": [
+                    e.to_dict() if hasattr(e, "to_dict") else dict(e or {})
+                    for e in list(getattr(mem_sys, "_l3_edges", []) or [])
+                ],
+            }
+
+        # Personality & computation state
+        hosts = getattr(self._p, "_hosts", {}) or {}
+        if session_key in hosts:
+            host = hosts[session_key]
+            comp = host.kernel.computation
+            export["personality"] = dict(comp._personality)
+            export["computation"] = comp.to_dict()
+        else:
+            export["personality"] = None
+            export["computation"] = None
+
+        # Persisted state (KV)
+        try:
+            state = await self._p._load_state(session_key)
+            if state is not None:
+                export["persisted_state"] = (
+                    state.to_dict() if hasattr(state, "to_dict") else state
+                )
+        except Exception:
+            export["persisted_state"] = None
+
+        return {"ok": True, "data": export}
+
+    async def purge_data_handler(self) -> dict[str, Any]:
+        """DELETE /api/purge_data?session_key=xxx — 彻底删除指定会话的所有数据。
+
+        删除内容：记忆系统、持久化 KV 状态、host 实例、对话缓冲。
+        """
+        from quart import request as quart_request
+
+        session_key = str(quart_request.args.get("session_key") or "").strip()
+        if not session_key:
+            return {"ok": False, "error": "missing session_key param"}
+
+        purged: list[str] = []
+
+        # Clear memory system
+        mem_sys = (
+            self._p._memory_system_for_session(session_key)
+            if hasattr(self._p, "_memory_system_for_session")
+            else getattr(self._p, "_memory_system", None)
+        )
+        if mem_sys is not None:
+            mem_sys._l1.clear()
+            mem_sys._l2.clear()
+            mem_sys._l3_nodes.clear()
+            mem_sys._l3_edges.clear()
+            mem_sys._tick = 0
+            purged.append("memory_system")
+
+        # Remove host instance
+        hosts = getattr(self._p, "_hosts", {}) or {}
+        if session_key in hosts:
+            del hosts[session_key]
+            purged.append("host")
+
+        # Clear conversation buffer
+        buffers = getattr(self._p, "_conversation_buffers", {}) or {}
+        if session_key in buffers:
+            del buffers[session_key]
+            purged.append("conversation_buffer")
+
+        # Delete persisted KV states
+        try:
+            await self._p._delete_state(session_key)
+            purged.append("kv_state")
+        except Exception:
+            pass
+        try:
+            await self._p._delete_humanlike_state(session_key)
+            purged.append("kv_humanlike")
+        except Exception:
+            pass
+        try:
+            await self._p._delete_personality_drift_state(session_key)
+            purged.append("kv_personality_drift")
+        except Exception:
+            pass
+        try:
+            await self._p._delete_sylanne_memory_state(session_key)
+            purged.append("kv_memory")
+        except Exception:
+            pass
+
+        logger.info(
+            f"Sylanne PURGE DATA: session={session_key}, purged={purged}"
+        )
+        return {"ok": True, "session_key": session_key, "purged": purged}
+
+    # ------------------------------------------------------------------
     # Frontend data format helpers
     # ------------------------------------------------------------------
 
@@ -1123,12 +1328,299 @@ class WebUIRoutes:
         return Response(html, content_type="text/html; charset=utf-8")
 
     # ------------------------------------------------------------------
+    # Item 47: /health 健康检查（不需要认证）
+    # ------------------------------------------------------------------
+
+    async def health_handler(self) -> dict[str, Any]:
+        """返回服务健康状态，不需要认证。"""
+        from sylanne_alpha.webui_server import _start_time, _get_process_memory_mb
+
+        uptime_s = int(time.time() - _start_time)
+        hosts_dict = getattr(self._p, "_hosts", {}) or {}
+        sessions_count = len(hosts_dict) if isinstance(hosts_dict, dict) else 0
+        memory_mb = _get_process_memory_mb()
+        return {
+            "status": "ok",
+            "uptime_s": uptime_s,
+            "sessions": sessions_count,
+            "memory_mb": memory_mb,
+        }
+
+    # ------------------------------------------------------------------
+    # Item 49: /api/error_stats 错误率仪表盘
+    # ------------------------------------------------------------------
+
+    async def error_stats_handler(self) -> list[dict[str, Any]]:
+        """返回最近 1h 内每分钟的 ERROR/WARNING 计数。"""
+        from sylanne_alpha.webui_server import _error_counts, _error_counts_lock
+
+        cutoff = int(time.time()) // 60 * 60 - 3600
+        with _error_counts_lock:
+            data = [
+                {"minute": ts, "errors": errs, "warnings": warns}
+                for ts, errs, warns in _error_counts
+                if ts >= cutoff
+            ]
+        return data
+
+    # ------------------------------------------------------------------
+    # Item 53: /api/config_export & /api/config_import
+    # ------------------------------------------------------------------
+
+    _SENSITIVE_CONFIG_KEYS = frozenset({
+        "sylanne_webui_token", "api_key", "secret", "token",
+        "password", "credential", "auth_key", "openai_key",
+        "anthropic_key", "gemini_key",
+    })
+
+    def _is_sensitive_key(self, key: str) -> bool:
+        lower = key.lower()
+        return any(s in lower for s in self._SENSITIVE_CONFIG_KEYS)
+
+    async def config_export_handler(self) -> dict[str, Any]:
+        """GET /api/config_export — 返回当前配置 JSON（敏感字段脱敏）。"""
+        config = dict(getattr(self._p, "_config", {}) or {})
+        return {
+            k: ("***" if self._is_sensitive_key(k) else v)
+            for k, v in config.items()
+        }
+
+    async def config_import_handler(self) -> dict[str, Any]:
+        """POST /api/config_import — 接收 JSON body 覆盖写入配置（安全字段保护）。"""
+        from quart import request as quart_request
+
+        body = await quart_request.get_json(silent=True)
+        if not isinstance(body, dict) or not body:
+            return {"ok": False, "error": "expected_object"}
+        config = getattr(self._p, "_config", None)
+        if config is None:
+            return {"ok": False, "error": "no_config"}
+        blocked = [k for k in body if self._is_sensitive_key(k)]
+        if blocked:
+            return {"ok": False, "error": "sensitive_keys_blocked", "keys": blocked}
+        config.update(body)
+        persistent = getattr(self._p, "config", config)
+        if isinstance(persistent, dict):
+            persistent.update(body)
+        if hasattr(persistent, "save_config"):
+            persistent.save_config()
+        return {"ok": True, "keys": list(body.keys())}
+
+    # ------------------------------------------------------------------
+    # Item 66: /api/widget-state AstrBot 管理面板状态卡片
+    # ------------------------------------------------------------------
+
+    async def widget_state_handler(self) -> dict[str, Any]:
+        """返回 AstrBot 管理面板状态卡片数据。"""
+        from sylanne_alpha.webui_server import _build_widget_state
+
+        return _build_widget_state(self._p)
+
+    # ------------------------------------------------------------------
+    # Item 6: POST /api/proactive_feedback 主动发言反馈
+    # ------------------------------------------------------------------
+
+    async def proactive_feedback_handler(self) -> dict[str, Any]:
+        """接收用户对主动发言的反馈（positive/negative）。"""
+        from quart import request as quart_request
+
+        body = await quart_request.get_json(silent=True) or {}
+        session_key = str(body.get("session_key", "")).strip()
+        timestamp = float(body.get("timestamp", 0))
+        rating = str(body.get("rating", "")).strip()
+        if not session_key or not rating or rating not in ("positive", "negative"):
+            return {"ok": False, "error": "invalid_params"}
+        scheduler = getattr(self._p, "_proactive_scheduler", None)
+        if scheduler is not None and hasattr(scheduler, "record_feedback"):
+            scheduler.record_feedback(session_key, timestamp, rating)
+        return {"ok": True}
+
+    # ------------------------------------------------------------------
+    # Item 69: GET /api/weekly_report 周报自动生成
+    # ------------------------------------------------------------------
+
+    async def weekly_report_handler(self) -> dict[str, Any]:
+        """返回过去 7 天的周报统计数据。"""
+        from sylanne_alpha.analytics import generate_weekly_report
+
+        return generate_weekly_report(self._p)
+
+    # ------------------------------------------------------------------
+    # Item 70: GET /api/memory/decay_curve 记忆衰减曲线可视化数据
+    # ------------------------------------------------------------------
+
+    async def memory_decay_curve_handler(self) -> dict[str, Any]:
+        """GET /api/memory/decay_curve?memory_id=xxx — 返回记忆衰减时间序列。"""
+        import math as _math
+
+        from quart import request as quart_request
+
+        memory_id = str(quart_request.args.get("memory_id") or "").strip()
+        if not memory_id:
+            return {"ok": False, "error": "missing memory_id param"}
+
+        # 在所有会话的记忆系统中查找目标记忆
+        target_memory = None
+        hosts = getattr(self._p, "_hosts", {}) or {}
+        for sk in list(hosts.keys()):
+            mem_sys = (
+                self._p._memory_system_for_session(sk)
+                if hasattr(self._p, "_memory_system_for_session")
+                else None
+            )
+            if mem_sys is None:
+                continue
+            for pool in (
+                getattr(mem_sys, "_l1", []) or [],
+                getattr(mem_sys, "_l2", []) or [],
+            ):
+                for item in list(pool):
+                    item_id = getattr(item, "id", None) or (
+                        item.get("id") if isinstance(item, dict) else None
+                    )
+                    if str(item_id) == memory_id:
+                        target_memory = item
+                        break
+                if target_memory:
+                    break
+            if target_memory:
+                break
+
+        if target_memory is None:
+            return {"ok": False, "error": "memory_id not found"}
+
+        # 提取参数
+        created_at = float(
+            getattr(target_memory, "created_at", 0)
+            or (target_memory.get("created_at", 0) if isinstance(target_memory, dict) else 0)
+        )
+        rehearsal = int(
+            getattr(target_memory, "recall_count", 0)
+            or (target_memory.get("recall_count", 0) if isinstance(target_memory, dict) else 0)
+        )
+        emotional_weight = float(
+            getattr(target_memory, "emotional_weight", 0.5)
+            or (target_memory.get("emotional_weight", 0.5) if isinstance(target_memory, dict) else 0.5)
+        )
+
+        # 生成衰减曲线：每小时一个点，最多 168 点（7 天）
+        stability = 24 * (1 + rehearsal * 0.5) * (1 + emotional_weight)
+        curve = []
+        for hour in range(169):
+            retention = max(0.05, _math.exp(-hour / stability))
+            curve.append({"hour": hour, "retention": round(retention, 4)})
+
+        return {
+            "memory_id": memory_id,
+            "created_at": created_at,
+            "stability": round(stability, 2),
+            "rehearsal": rehearsal,
+            "emotional_weight": round(emotional_weight, 3),
+            "curve": curve,
+        }
+
+    # ------------------------------------------------------------------
+    # Item 84: 人格配置分享市场 — 导出/导入人格参数
+    # ------------------------------------------------------------------
+
+    async def personality_export_handler(self) -> dict[str, Any]:
+        """GET /api/personality/export — 导出当前人格参数为 JSON。
+
+        包含 Embodiment Five、Sylanne Six、漂移历史摘要。
+        """
+        # 获取最活跃会话的人格数据
+        hosts = getattr(self._p, "_hosts", {}) or {}
+        personality: dict[str, Any] = {}
+        for h in hosts.values():
+            try:
+                personality = (
+                    h.kernel._personality()
+                    if hasattr(h.kernel, "_personality")
+                    else {}
+                )
+                if personality:
+                    break
+            except Exception:
+                continue
+
+        frontend_data = self._frontend_personality(personality)
+        # 构建导出格式
+        export_payload = {
+            "embodiment_five": frontend_data.get("five", {}),
+            "sylanne_six": {
+                item["name"]: item["value"]
+                for item in frontend_data.get("six", [])
+            },
+            "drift_history": frontend_data.get("drift", []),
+            "description": "",
+        }
+        return {"ok": True, "personality": export_payload}
+
+    async def personality_import_handler(self) -> dict[str, Any]:
+        """POST /api/personality/import — 导入人格配置 JSON，覆盖当前人格参数。
+
+        期望格式：{"embodiment_five": {...}, "sylanne_six": {...}, "description": "..."}
+        """
+        from quart import request as quart_request
+
+        body = await quart_request.get_json(silent=True)
+        if not isinstance(body, dict):
+            return {"ok": False, "error": "expected JSON object"}
+
+        embodiment_five = body.get("embodiment_five")
+        sylanne_six = body.get("sylanne_six")
+        if not isinstance(embodiment_five, dict) and not isinstance(sylanne_six, dict):
+            return {"ok": False, "error": "missing embodiment_five or sylanne_six"}
+
+        # 应用到所有活跃 host 的人格参数
+        hosts = getattr(self._p, "_hosts", {}) or {}
+        updated_sessions: list[str] = []
+        for sk, h in hosts.items():
+            try:
+                comp = h.kernel.computation
+                personality = comp._personality
+                if not isinstance(personality, dict):
+                    continue
+                traits = personality.setdefault("traits", {})
+                # 写入 Embodiment Five
+                if isinstance(embodiment_five, dict):
+                    for key, value in embodiment_five.items():
+                        try:
+                            traits[key] = float(value)
+                        except (TypeError, ValueError):
+                            continue
+                # 写入 Sylanne Six（名称→内部键映射）
+                if isinstance(sylanne_six, dict):
+                    six_name_to_key = {
+                        "Curiosity": "curiosity",
+                        "Empathy": "warmth",
+                        "Precision": "coherence",
+                        "Playfulness": "playfulness",
+                        "Defiance": "sovereignty",
+                        "Melancholy": "melancholy",
+                    }
+                    for name, value in sylanne_six.items():
+                        internal_key = six_name_to_key.get(name, name.lower())
+                        try:
+                            traits[internal_key] = float(value)
+                        except (TypeError, ValueError):
+                            continue
+                updated_sessions.append(sk)
+            except Exception:
+                continue
+
+        if not updated_sessions:
+            return {"ok": False, "error": "no active sessions to update"}
+        return {"ok": True, "updated_sessions": updated_sessions}
+
+    # ------------------------------------------------------------------
     # Helpers
     # ------------------------------------------------------------------
 
     @property
     def _plugin_dir(self) -> str:
-        """解析插件目录路径（从插件实例或模块级常量获取）。"""
-        import main as _main_mod
-
-        return getattr(_main_mod, "_PLUGIN_DIR", ".")
+        try:
+            import main as _main_mod
+            return getattr(_main_mod, "_PLUGIN_DIR", ".")
+        except ImportError:
+            return str(Path(__file__).resolve().parent.parent)

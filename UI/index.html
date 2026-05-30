@@ -520,7 +520,7 @@ body::after {
 <body>
 
 <!-- LOADING SCREEN (covers everything until resources ready) -->
-<div id="loadingScreen">
+<div id="loadingScreen" role="alert" aria-live="polite">
   <div class="loading-label">SYSTEM INIT</div>
   <div class="loading-title">SYLANNE EMBODIMENT</div>
   <div class="loading-spinner"></div>
@@ -532,12 +532,12 @@ body::after {
   <div class="spine-line"></div>
   <!-- 可拖拽手柄：用户可上下拖动切换页面 -->
   <div class="spine-handle" id="spineHandle" style="top:20%"></div>
-  <div class="spine-node" style="top:20%" data-page="monitor" title="Monitor"></div>
-  <div class="spine-node" style="top:32%" data-page="spine" title="Spine"></div>
-  <div class="spine-node" style="top:44%" data-page="config" title="Config"></div>
-  <div class="spine-node" style="top:56%" data-page="logs" title="Logs"></div>
-  <div class="spine-node" style="top:68%" data-page="memory" title="Memory"></div>
-  <div class="spine-node" style="top:80%" data-page="personality" title="Personality"></div>
+  <div class="spine-node" role="button" aria-label="Monitor" style="top:20%" data-page="monitor" title="Monitor"></div>
+  <div class="spine-node" role="button" aria-label="Spine" style="top:32%" data-page="spine" title="Spine"></div>
+  <div class="spine-node" role="button" aria-label="Config" style="top:44%" data-page="config" title="Config"></div>
+  <div class="spine-node" role="button" aria-label="Logs" style="top:56%" data-page="logs" title="Logs"></div>
+  <div class="spine-node" role="button" aria-label="Memory" style="top:68%" data-page="memory" title="Memory"></div>
+  <div class="spine-node" role="button" aria-label="Personality" style="top:80%" data-page="personality" title="Personality"></div>
 </div>
 
 <!-- LOGIN SECTION (hidden during loading and after auth) -->
@@ -608,9 +608,9 @@ body::after {
           <span class="session-pill" id="sessionId" onclick="toggleSessionMenu()">SES-0000<span class="session-pill-arrow"></span></span>
           <div class="session-menu" id="sessionMenu"></div>
         </div>
-        <button class="theme-toggle" id="themeBtn" onclick="toggleTheme()">LIGHT</button>
-        <button class="lang-toggle" id="langToggle" onclick="toggleLang()">EN</button>
-        <button class="lang-toggle" onclick="logout()" style="color:var(--red);border-color:var(--red)">OUT</button>
+        <button class="theme-toggle" id="themeBtn" aria-label="Toggle color theme" onclick="toggleTheme()">LIGHT</button>
+        <button class="lang-toggle" id="langToggle" aria-label="Toggle language" onclick="toggleLang()">EN</button>
+        <button class="lang-toggle" aria-label="Logout" onclick="logout()" style="color:var(--red);border-color:var(--red)">OUT</button>
         <div class="status-dot" id="statusDot"></div>
       </div>
     </header>
@@ -1234,6 +1234,7 @@ function stopNetworkCanvas() {
 var isPreview = false;
 var currentPage = null;
 var appState = null;
+var csrfToken = '';
 var autoScroll = true;
 var selectedLayer = 0;
 // 全局会话标识：持久化选中的 session，页面导航/重渲染不会丢失
@@ -1602,11 +1603,15 @@ async function apiFetch(path, opts) {
   var token = localStorage.getItem('sylanne_token') || '';
   var headers = {};
   if (token) headers['Authorization'] = 'Bearer ' + token;
+  var method = (opts.method || 'GET').toUpperCase();
+  if (csrfToken && method !== 'GET') headers['X-CSRF-Token'] = csrfToken;
   if (opts.headers) for (var k in opts.headers) headers[k] = opts.headers[k];
-  var r = await fetch(path, { method: opts.method || 'GET', headers: headers, body: opts.body || undefined });
+  var r = await fetch(path, { method: method, headers: headers, body: opts.body || undefined });
   if (r.status === 401) throw new Error('UNAUTHORIZED');
   if (!r.ok) throw new Error('HTTP ' + r.status);
-  return await r.json();
+  var json = await r.json();
+  if (json && json.csrf_token) csrfToken = json.csrf_token;
+  return json;
 }
 
 // 验证成功时更新人格连接显示（从后端读人格名和版本号）
