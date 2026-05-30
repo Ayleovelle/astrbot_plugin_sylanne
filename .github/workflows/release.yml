@@ -39,6 +39,55 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
+      - name: Extract changelog for version
+        if: steps.check.outputs.exists == 'false'
+        id: changelog
+        run: |
+          VERSION="${{ steps.version.outputs.version }}"
+          cat > /tmp/extract_changelog.py << 'PYTHON_SCRIPT'
+          import re, sys
+
+          version = sys.argv[1]
+
+          try:
+              with open('CHANGELOG.md', 'r', encoding='utf-8') as f:
+                  content = f.read()
+          except FileNotFoundError:
+              print('修复了一些已知问题')
+              sys.exit(0)
+
+          # Try new format: ## [vX.Y.Z] - YYYY-MM-DD
+          pattern = rf'## \[v{re.escape(version)}\]\s*-\s*\d{{4}}-\d{{2}}-\d{{2}}\s*\n(.*?)(?=\n## \[|\n## \d|\Z)'
+          match = re.search(pattern, content, re.DOTALL)
+
+          if not match:
+              # Try old format: ## X.Y.Z\n\n发布日期：...
+              pattern = rf'## {re.escape(version)}\s*\n+(?:发布日期：[^\n]*\n)?\s*\n?(.*?)(?=\n## |\Z)'
+              match = re.search(pattern, content, re.DOTALL)
+
+          if match:
+              changelog = match.group(1).strip()
+              # Remove trailing horizontal rules
+              changelog = re.sub(r'\n---\s*$', '', changelog).strip()
+              if changelog:
+                  print(changelog)
+              else:
+                  print('修复了一些已知问题')
+          else:
+              print('修复了一些已知问题')
+          PYTHON_SCRIPT
+
+          python3 /tmp/extract_changelog.py "$VERSION" > /tmp/changelog_output.txt
+          CHANGELOG=$(cat /tmp/changelog_output.txt)
+          if [ -z "$CHANGELOG" ]; then
+            CHANGELOG="修复了一些已知问题"
+          fi
+          {
+            echo "body<<EOF"
+            echo "$CHANGELOG"
+            echo "EOF"
+          } >> "$GITHUB_OUTPUT"
+
       - name: Install deps
         if: steps.check.outputs.exists == 'false'
         run: pip install aiohttp
@@ -79,7 +128,6 @@ jobs:
         run: |
           mkdir -p /tmp/verify && cd /tmp/verify
           unzip -q $GITHUB_WORKSPACE/dist/astrbot_plugin_sylanne-${{ steps.version.outputs.version }}.zip
-          pip install aiohttp
           python -c "
           import sys
           sys.path.insert(0, '/tmp/verify/astrbot_plugin_sylanne')
@@ -99,6 +147,7 @@ jobs:
         with:
           tag_name: "v${{ steps.version.outputs.version }}"
           name: "Sylanne-Embodiment ${{ steps.version.outputs.version }}"
-          generate_release_notes: true
+          body: ${{ steps.changelog.outputs.body }}
+          generate_release_notes: false
           files: |
             dist/astrbot_plugin_sylanne-${{ steps.version.outputs.version }}.zip

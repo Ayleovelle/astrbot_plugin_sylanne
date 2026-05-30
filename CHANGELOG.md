@@ -2,9 +2,51 @@
 
 本文件用于 AstrBot 插件市场/管理页展示更新内容。更完整的设计说明、公式推导、测试矩阵和维护手册见 `README.md`。
 
-## 1.3.0
+## [v1.4.2] - 2026-05-31
 
-发布日期：2026-05-28
+### 🐛 Bug Fixes
+
+- 修复 `webui_server.py` 中 `handle_state` / `handle_theme_get` 读取模块级变量未显式声明 `global` 导致部分 Python 环境报 `SyntaxError: name used prior to global declaration` 的问题 (#10)
+
+### 🔧 DevOps
+
+- Release 工作流改为从 CHANGELOG.md 提取版本日志作为 Release Body（不再使用 auto-generated notes）
+- CHANGELOG.md 新增 v1.4.0 / v1.4.1 条目，采用 `## [vX.Y.Z] - YYYY-MM-DD` 格式兼容自动提取
+
+---
+
+## [v1.4.1] - 2026-05-30
+
+### 🐛 Bug Fixes
+
+- 修复 `AlphaKernel` 缺少 `_last_injected_state` 字段导致 `fragment_debounce` 后台任务 100% 崩溃的致命 bug
+  - 根因：v1.4.0 的 `llm_request_pipeline.py` 新增短间隔状态比较优化，写入 `kernel._last_injected_state`，但未在 `@dataclass(slots=True)` 的 AlphaKernel 中声明该字段
+  - 影响：所有经过 fragment debounce 的实时聊天消息静默丢失，用户无回复
+
+### 🔧 DevOps
+
+- 新增完整 CI pipeline（lint / import-test / package），覆盖历史所有恶性 bug 类型
+- 新增自动 Release 工作流：metadata.yaml 变更触发打包 + 发布
+
+---
+
+## [v1.4.0] - 2026-05-29
+
+### ✨ New Features
+
+- LLM 请求管线短间隔状态信号优化：相邻请求间自动比较 warmth/tension 变化，跳过无变化的状态注入
+- Fragment debounce 机制增强：累积用户消息片段，延迟合并处理，减少 LLM 调用次数
+- WebUI 路由注册增加 `getattr` 兜底，防止版本不一致导致插件加载崩溃
+
+### 🐛 Bug Fixes
+
+- 修复 merge conflict 残留导致的语法错误
+- 修复 `get_astrbot_data_path` 类型错误（返回值未正确处理 `Path | str`）
+- 修复插件加载崩溃 + WebUI 前端缺失 + favicon 401
+
+---
+
+## [v1.3.0] - 2026-05-28
 
 ### 新增：独立观察舱 WebUI
 
