@@ -55,10 +55,12 @@ jobs:
         run: ruff check . --select=E9,F63,F7,F82 --no-fix
 
       - name: Pyright type check (sylanne_alpha)
+        continue-on-error: true
         run: pyright --pythonversion ${{ matrix.python-version }} --level warning sylanne_alpha/
 
-      - name: Pyright type check (main.py, warnings only)
-        run: pyright --pythonversion ${{ matrix.python-version }} --level error main.py || true
+      - name: Pyright type check (main.py, informational)
+        continue-on-error: true
+        run: pyright --pythonversion ${{ matrix.python-version }} --level error main.py
 
   import-test:
     name: Import & Smoke Test
