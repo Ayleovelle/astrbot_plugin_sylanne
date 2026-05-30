@@ -228,7 +228,7 @@ async def start_webui_server(plugin: Any, host: str = "127.0.0.1", port: int = 2
         )
 
     async def handle_state(request: web.Request) -> web.Response:
-        # 自动关闭 diagnostics：超过 30s 无 computation_logs 请求
+        global _last_diag_request
         if _last_diag_request and time.time() - _last_diag_request > 30:
             current = _plugin(plugin)
             if current is not None:
@@ -802,6 +802,7 @@ async def start_webui_server(plugin: Any, host: str = "127.0.0.1", port: int = 2
     # ------------------------------------------------------------------
 
     async def handle_theme_get(request: web.Request) -> web.Response:
+        global _theme_preference
         return web.json_response({"theme": _theme_preference})
 
     async def handle_theme_post(request: web.Request) -> web.Response:
