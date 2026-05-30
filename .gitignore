@@ -29,7 +29,6 @@ texput.log
 # IDE / local settings
 .claude/
 .vscode/
-.github/
 
 # Knowledge bases (local only)
 knowledge-base/
