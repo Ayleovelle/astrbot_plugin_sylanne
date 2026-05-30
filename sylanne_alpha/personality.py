@@ -14,7 +14,9 @@ from __future__ import annotations
 
 import hashlib
 import math
+import time
 from collections import deque
+from dataclasses import dataclass
 from typing import Any
 
 PERSONALITY_SCHEMA_VERSION = "sylanne.alpha.personality.embodiment.v1"
@@ -54,6 +56,9 @@ _REVERSE_LEGACY_MAP = {v: k for k, v in _LEGACY_MAP.items()}
 # Embodiment 特质的硬边界——防止极端值导致系统不稳定
 _TRAIT_FLOOR = 0.05
 _TRAIT_CEIL = 0.95
+
+# 单次 tick 内所有特质变化总量（绝对值之和）的上限
+_TICK_DRIFT_CAP = 0.05
 
 # --- 漂移信号 → Embodiment 特质映射（来自设计文档 3.1 节）---
 # 每个信号可以影响一个或多个特质，权重表示影响方向和强度
@@ -338,6 +343,98 @@ class OscillationDetector:
 
 
 # ---------------------------------------------------------------------------
+# DriftAttribution: 人格漂移归因分析（Item 68）
+# ---------------------------------------------------------------------------
+
+
+@dataclass
+class DriftEvent:
+    """单次人格漂移事件记录。"""
+
+    timestamp: float
+    trigger: str  # 触发信号描述
+    dimension: str  # 变化的维度
+    delta: float  # 变化量
+    new_value: float  # 变化后的值
+
+
+class DriftAttribution:
+    """人格漂移归因追踪器。
+
+    记录每次显著的人格漂移事件（|delta| > 0.005），
+    用于事后分析人格变化的来源和趋势。
+
+    与其他组件的关系：
+    - 被 compute_embodiment_drift() 在每次漂移后调用
+    - 提供 recent() 接口供诊断/WebUI 展示漂移历史
+    """
+
+    __slots__ = ("_events",)
+
+    def __init__(self, maxlen: int = 100):
+        self._events: deque[DriftEvent] = deque(maxlen=maxlen)
+
+    def record(self, trigger: str, dimension: str, delta: float, new_value: float):
+        """记录一次漂移事件（仅当变化量显著时）。"""
+        if abs(delta) > 0.005:
+            self._events.append(
+                DriftEvent(time.time(), trigger, dimension, delta, new_value)
+            )
+
+    def recent(self, n: int = 20) -> list[dict]:
+        """返回最近 n 条漂移事件的字典列表。"""
+        return [
+            {
+                "timestamp": e.timestamp,
+                "trigger": e.trigger,
+                "dimension": e.dimension,
+                "delta": e.delta,
+                "value": e.new_value,
+            }
+            for e in list(self._events)[-n:]
+        ]
+
+
+# ---------------------------------------------------------------------------
+# _seasonal_modulation: 季节性微弱调制
+# ---------------------------------------------------------------------------
+
+
+def _get_seasonal_target() -> str | None:
+    """返回当前季节应调制的特质名，无需调制时返回 None。"""
+    month = time.localtime().tm_mon
+    if month in (12, 1, 2):
+        return "inner_order"
+    elif month in (3, 4, 5):
+        return "expression_drive_trait"
+    elif month in (6, 7, 8):
+        return "boundary_permeability"
+    else:
+        return "perception_acuity"
+
+
+def _seasonal_modulation(traits: dict[str, TraitMemory]) -> None:
+    """根据当前月份对 Embodiment Five 施加微弱季节性调制（±0.01 级别）。
+
+    季节规则：
+    - 冬天（12-2月）：inner_order 微升 +0.01
+    - 春天（3-5月）：expression_drive_trait 微升 +0.01
+    - 夏天（6-8月）：boundary_permeability 微升 +0.01
+    - 秋天（9-11月）：perception_acuity 微升 +0.01
+
+    调制量极小，仅作为长期背景趋势存在，不会覆盖其他漂移机制。
+    注意：此函数保留用于独立调用场景，compute_embodiment_drift 中已通过
+    pending 机制纳入 drift cap 约束。
+    """
+    target = _get_seasonal_target()
+    if target and target in traits:
+        tm = traits[target]
+        if not tm.frozen:
+            tm.value = max(_TRAIT_FLOOR, min(_TRAIT_CEIL, tm.value + 0.01))
+            tm.set_point += 0.0002 * (tm.value - tm.set_point)
+
+
+# ---------------------------------------------------------------------------
 # compute_embodiment_drift: 核心漂移公式
 # ---------------------------------------------------------------------------
 
@@ -347,6 +444,7 @@ def compute_embodiment_drift(
     signals: dict[str, float],
     tick_count: int,
     oscillation_detector: OscillationDetector | None = None,
+    drift_attribution: DriftAttribution | None = None,
 ) -> None:
     """根据提取的信号对 Embodiment 特质施加漂移。
 
@@ -359,15 +457,22 @@ def compute_embodiment_drift(
     - homeostatic: 恒稳态阻力，偏离设定点越远阻力越大
     - asymmetric: 非对称阻力，接近极端值时额外减速
 
+    速率限制：单次 tick 内所有特质变化总量（绝对值之和）不超过
+    _TICK_DRIFT_CAP (0.05)。超过时按比例缩放所有 delta。
+
     参数:
         traits: 特质名→TraitMemory 的字典
         signals: 信号名→强度的字典（由 DriftSignalExtractor 产生）
         tick_count: 当前总 tick 数（用于计算惯性）
         oscillation_detector: 可选的震荡检测器
+        drift_attribution: 可选的漂移归因追踪器
     """
     base_rate = 0.003
     # 惯性：随时间对数增长而递减，使人格越来越稳定
     inertia = 1.0 / (1.0 + math.log(1.0 + tick_count / 500.0))
+
+    # 第一遍：收集所有 raw_delta，用于速率限制
+    pending: list[tuple[str, float, str]] = []  # (trait_name, raw_delta, signal_name)
 
     for signal_name, signal_value in signals.items():
         if signal_value <= 0 or signal_name not in DRIFT_SIGNALS:
@@ -400,12 +505,32 @@ def compute_embodiment_drift(
                 * homeostatic
                 * asymmetric
             )
-            actual = tm.update(raw_delta)
+            pending.append((trait_name, raw_delta, signal_name))
 
-            # 震荡检测：如果检测到震荡，冻结该特质 20 步
-            if oscillation_detector and actual != 0:
-                if oscillation_detector.record(trait_name, actual):
-                    tm.freeze(20)
+    # 速率限制：如果总变化量超过 _TICK_DRIFT_CAP，按比例缩放
+    # 季节性调制也纳入预算，不绕过 drift cap
+    seasonal_target = _get_seasonal_target()
+    if seasonal_target and seasonal_target in traits and not traits[seasonal_target].frozen:
+        pending.append((seasonal_target, 0.01, "_seasonal"))
+
+    total_abs = sum(abs(d) for _, d, _ in pending)
+    if total_abs > _TICK_DRIFT_CAP:
+        scale = _TICK_DRIFT_CAP / total_abs
+        pending = [(name, delta * scale, sig) for name, delta, sig in pending]
+
+    # 第二遍：应用缩放后的 delta
+    for trait_name, raw_delta, signal_name in pending:
+        tm = traits[trait_name]
+        actual = tm.update(raw_delta)
+
+        # 漂移归因记录（Item 68）
+        if drift_attribution and actual != 0:
+            drift_attribution.record(signal_name, trait_name, actual, tm.value)
+
+        # 震荡检测：如果检测到震荡，冻结该特质 20 步
+        if oscillation_detector and actual != 0:
+            if oscillation_detector.record(trait_name, actual):
+                tm.freeze(20)
 
 
 # ---------------------------------------------------------------------------
@@ -592,6 +717,29 @@ def normalize_personality(personality: dict[str, float]) -> dict[str, float]:
 
 
 # ---------------------------------------------------------------------------
+# 矛盾容忍度（Item 133）
+# ---------------------------------------------------------------------------
+
+
+def contradiction_tolerance(traits: dict[str, float]) -> float:
+    """inner_order 越高，对自我矛盾的容忍度越低。
+
+    当 inner_order = 1.0 时容忍度最低（0.2），
+    当 inner_order = 0.0 时容忍度最高（1.0）。
+
+    参数:
+        traits: 人格特质字典（需包含 inner_order 或 conscientiousness）
+
+    返回:
+        矛盾容忍度，范围 [0.2, 1.0]。
+    """
+    inner_order = float(
+        traits.get("inner_order", traits.get("conscientiousness", 0.5))
+    )
+    return 1.0 - inner_order * 0.8
+
+
+# ---------------------------------------------------------------------------
 # 私有辅助函数
 # ---------------------------------------------------------------------------
 
@@ -649,6 +797,137 @@ def _digest(text: str) -> str:
     return hashlib.blake2s(text.encode("utf-8"), digest_size=12).hexdigest()
 
 
+# ---------------------------------------------------------------------------
+# Item 98: 好奇心驱动行为生成器
+# ---------------------------------------------------------------------------
+
+
+def should_explore(curiosity: float, info_entropy: float, energy: float) -> bool:
+    """判断是否应触发探索性提问。
+
+    当好奇心高、对话信息量低且能量充足时，返回 True 表示应主动发起探索。
+    这是人格驱动行为的典型体现——好奇心特质直接影响行为决策。
+
+    Args:
+        curiosity: 好奇心特质值 [0, 1]，来自 Sylanne Six 的 curiosity 维度。
+        info_entropy: 对话信息熵 [0, 1]，值越低表示对话信息量越少。
+        energy: 当前能量水平 [0, 1]，来自身体状态。
+
+    Returns:
+        True 表示应触发探索性提问，False 表示维持当前对话节奏。
+    """
+    return curiosity > 0.6 and info_entropy < 0.3 and energy > 0.4
+
+
+# ---------------------------------------------------------------------------
+# Item 126: 关系年龄行为分化
+# ---------------------------------------------------------------------------
+
+
+def apply_relationship_age_modulation(
+    traits: dict, relationship_stage: str
+) -> dict:
+    """根据关系阶段调整人格参数。
+
+    关系阶段定义：
+    - infant (0-3天)：保守，降低边界渗透性和表达驱力
+    - young (3-14天)：逐渐开放，轻微降低边界渗透性
+    - mature (14-90天)：正常，不调整
+    - deep (90天+)：更大情绪波动和更直接表达
+
+    参数:
+        traits: 人格特质字典
+        relationship_stage: 关系阶段标识
+
+    返回:
+        调制后的人格特质字典（不修改原字典）
+    """
+    modulated = dict(traits)
+    if relationship_stage == "infant":  # 0-3天：保守
+        modulated["boundary_permeability"] = max(
+            0.1, traits.get("boundary_permeability", 0.5) - 0.15
+        )
+        modulated["expression_drive_trait"] = max(
+            0.1, traits.get("expression_drive_trait", 0.5) - 0.1
+        )
+    elif relationship_stage == "young":  # 3-14天：逐渐开放
+        modulated["boundary_permeability"] = (
+            traits.get("boundary_permeability", 0.5) - 0.05
+        )
+    elif relationship_stage == "mature":  # 14-90天：正常
+        pass  # 不调整
+    elif relationship_stage == "deep":  # 90天+：更大情绪波动和更直接表达
+        modulated["expression_drive_trait"] = min(
+            0.95, traits.get("expression_drive_trait", 0.5) + 0.1
+        )
+        modulated["boundary_permeability"] = min(
+            0.9, traits.get("boundary_permeability", 0.5) + 0.1
+        )
+    return modulated
+
+
+# ---------------------------------------------------------------------------
+# Item 115: 自我演化日志与回滚
+# ---------------------------------------------------------------------------
+
+
+class EvolutionJournal:
+    """人格演化日志：记录每次变更，支持回滚。
+
+    每次人格发生显著变化时保存快照（checkpoint），
+    支持回退到任意历史快照以恢复之前的人格状态。
+
+    与其他组件的关系：
+    - 被外部调用方在人格漂移后调用 checkpoint() 保存快照
+    - 提供 rollback_to() 接口用于人格回退
+    - 支持序列化/反序列化以持久化存储
+    """
+
+    def __init__(self, max_checkpoints: int = 50):
+        self._checkpoints: list[dict] = []  # [{id, timestamp, traits, trigger}]
+        self._max = max_checkpoints
+        self._next_id: int = 0
+
+    def checkpoint(self, traits: dict, trigger: str) -> int:
+        """保存当前人格快照。返回 checkpoint_id。"""
+        cp_id = self._next_id
+        self._next_id += 1
+        self._checkpoints.append(
+            {
+                "id": cp_id,
+                "timestamp": time.time(),
+                "traits": dict(traits),
+                "trigger": trigger,
+            }
+        )
+        if len(self._checkpoints) > self._max:
+            self._checkpoints.pop(0)
+        return cp_id
+
+    def rollback_to(self, checkpoint_id: int) -> dict | None:
+        """回退到指定快照。返回该快照的 traits 或 None。"""
+        for cp in self._checkpoints:
+            if cp["id"] == checkpoint_id:
+                return dict(cp["traits"])
+        return None
+
+    def recent(self, n: int = 10) -> list[dict]:
+        """返回最近 n 条快照。"""
+        return self._checkpoints[-n:]
+
+    def to_dict(self) -> dict:
+        """序列化为字典。"""
+        return {"checkpoints": self._checkpoints, "next_id": self._next_id}
+
+    @classmethod
+    def from_dict(cls, data: dict) -> "EvolutionJournal":
+        """从字典恢复 EvolutionJournal 实例。"""
+        ej = cls()
+        ej._checkpoints = data.get("checkpoints", [])
+        ej._next_id = data.get("next_id", 0)
+        return ej
+
+
 __all__ = [
     "PERSONALITY_SCHEMA_VERSION",
     "EMBODIMENT_TRAITS",
@@ -656,13 +935,21 @@ __all__ = [
     "TraitMemory",
     "DriftSignalExtractor",
     "OscillationDetector",
+    "DriftEvent",
+    "DriftAttribution",
+    "EvolutionJournal",
     "compute_embodiment_drift",
     "drift_sylanne_traits",
     "drift_personality",
     "initial_personality",
     "normalize_personality",
+    "contradiction_tolerance",
     "sylanne_bounds_from_embodiment",
+    "should_explore",
+    "apply_relationship_age_modulation",
     "DRIFT_SIGNALS",
     "_LEGACY_MAP",
     "_REVERSE_LEGACY_MAP",
+    "_TICK_DRIFT_CAP",
+    "_seasonal_modulation",
 ]

@@ -13,6 +13,8 @@
 from __future__ import annotations
 
 import asyncio
+import random
+import re as _re
 import time
 from typing import Any
 
@@ -28,6 +30,276 @@ except ImportError:
 # 单次未完成回复注入的最大字符数，防止 prompt 过长
 _MAX_UNFINISHED_CONTEXT_CHARS = 2000
 
+# ---------------------------------------------------------------------------
+# 注入预算系统：按优先级分配 token 预算，超限从低优先级裁剪
+# ---------------------------------------------------------------------------
+
+# (slot_name, priority, default_max_chars)
+# priority 越小越重要，裁剪时从大到小砍
+_INJECTION_SLOTS = [
+    ("state",      1, 400),    # 即时情绪/关系状态——必须注入
+    ("amnesia",    2, 120),    # 记忆抹除表达
+    ("outreach",   3, 500),    # 生活事件分享
+    ("memory",     4, 1500),   # 记忆召回（可压缩）
+    ("unfinished", 5, 1000),   # 未完成回复（可截断）
+]
+
+# gap-aware 动态预算
+_BUDGET_BY_GAP = [
+    # (gap_threshold_seconds, total_budget_chars)
+    (900,   1200),   # < 15min: 对话流畅，轻量注入
+    (7200,  2400),   # < 2h: 正常预算
+    (None,  3600),   # > 2h: 完整注入（重新开始）
+]
+
+# 结构化标签映射
+_SLOT_LABELS = {
+    "state":      "感知",
+    "amnesia":    "迷失",
+    "outreach":   "生活",
+    "memory":     "记忆",
+    "unfinished": "未完",
+}
+
+
+def _compute_injection_budget(gap_seconds: float, cfg: dict) -> int:
+    """根据对话间隔计算本轮总注入预算（字符数）。"""
+    override = cfg.get("state_injection_max_added_chars")
+    if override is not None:
+        return int(override)
+    for threshold, budget in _BUDGET_BY_GAP:
+        if threshold is None or gap_seconds < threshold:
+            return budget
+    return 2400
+
+
+def _allocate_and_trim(
+    fragments: dict[str, str], total_budget: int
+) -> dict[str, str]:
+    """按优先级分配预算，超限时从低优先级开始截断/丢弃。
+
+    Args:
+        fragments: {slot_name: content_text} 各槽位的原始内容
+        total_budget: 本轮总字符预算
+
+    Returns:
+        裁剪后的 {slot_name: content_text}，空槽位已移除
+    """
+    result: dict[str, str] = {}
+    remaining = total_budget
+
+    for slot_name, _priority, default_max in _INJECTION_SLOTS:
+        text = fragments.get(slot_name, "")
+        if not text:
+            continue
+        slot_cap = min(default_max, remaining)
+        if slot_cap <= 0:
+            break
+        if len(text) > slot_cap:
+            # 按行截断优先，避免切断结构化内容
+            lines = text.split("\n")
+            truncated = ""
+            for line in lines:
+                if len(truncated) + len(line) + 1 > slot_cap - 6:
+                    break
+                truncated += (("\n" if truncated else "") + line)
+            text = (truncated or text[:slot_cap - 3]) + "..."
+        result[slot_name] = text
+        remaining -= len(text)
+
+    return result
+
+
+def _format_inner_context(trimmed: dict[str, str]) -> str:
+    """将裁剪后的各槽位组装为结构化 [inner_context] 文本。"""
+    if not trimmed:
+        return ""
+    lines = ["[inner_context]"]
+    for slot_name, _priority, _max in _INJECTION_SLOTS:
+        text = trimmed.get(slot_name)
+        if text:
+            label = _SLOT_LABELS.get(slot_name, slot_name)
+            lines.append(f"[{label}] {text}")
+    return "\n".join(lines)
+
+
+# ---------------------------------------------------------------------------
+# LLM 降级链（Item 81）
+# ---------------------------------------------------------------------------
+
+
+class FallbackChain:
+    """LLM 调用降级链：主模型→备用→模板回复。
+
+    当主模型连续失败达到阈值时进入降级状态，在降级期间直接返回模板回复，
+    避免持续向不可用的 API 发送请求。成功调用会重置失败计数。
+    """
+
+    def __init__(self) -> None:
+        self._consecutive_failures: int = 0
+        self._degraded_until: float = 0.0
+
+    def is_degraded(self) -> bool:
+        """判断当前是否处于降级状态。"""
+        return time.time() < self._degraded_until
+
+    def record_success(self) -> None:
+        """记录一次成功调用，重置失败计数。"""
+        self._consecutive_failures = 0
+
+    def record_failure(self) -> None:
+        """记录一次失败调用。连续 3 次失败后进入 60 秒降级。"""
+        self._consecutive_failures += 1
+        if self._consecutive_failures >= 3:
+            # 连续 3 次失败，降级 60 秒
+            self._degraded_until = time.time() + 60.0
+
+    def get_fallback_response(self, context: str = "") -> str:
+        """降级时的模板回复。
+
+        Args:
+            context: 可选的上下文信息（当前未使用，预留扩展）。
+
+        Returns:
+            随机选择的降级模板回复文本。
+        """
+        templates = [
+            "嗯…我现在有点走神，等我缓一下。",
+            "抱歉，我需要一点时间整理思绪。",
+            "…（沉默片刻）",
+        ]
+        return random.choice(templates)
+
+    @property
+    def consecutive_failures(self) -> int:
+        """当前连续失败次数。"""
+        return self._consecutive_failures
+
+    @property
+    def degraded_remaining(self) -> float:
+        """降级剩余时间（秒），未降级时返回 0。"""
+        remaining = self._degraded_until - time.time()
+        return max(0.0, remaining)
+
+
+class OfflineFallback:
+    """LLM 不可达时的纯本地降级回复。
+
+    与 FallbackChain 的区别：FallbackChain 基于连续失败次数自动降级，
+    OfflineFallback 由外部显式标记离线状态（如网络检测、手动切换），
+    提供更温和的"在场但无法完整回复"语义。
+    """
+
+    TEMPLATES = [
+        "嗯，我在听。",
+        "……",
+        "我现在不太能好好回复，但我在。",
+        "（思考中）",
+    ]
+
+    def __init__(self):
+        self._offline_since: float = 0
+        self._is_offline: bool = False
+
+    def mark_offline(self):
+        """标记进入离线状态。"""
+        if not self._is_offline:
+            self._is_offline = True
+            self._offline_since = time.time()
+
+    def mark_online(self):
+        """标记恢复在线。"""
+        self._is_offline = False
+
+    def is_offline(self) -> bool:
+        """当前是否处于离线状态。"""
+        return self._is_offline
+
+    def get_fallback(self) -> str:
+        """获取一条随机降级回复。"""
+        return random.choice(self.TEMPLATES)
+
+    def offline_duration(self) -> float:
+        """离线持续时间（秒），在线时返回 0。"""
+        return time.time() - self._offline_since if self._is_offline else 0
+
+
+def _handle_multimodal_input(message_segments: list) -> dict | None:
+    """检测消息中的多模态内容（图片/语音等非文本段）。
+
+    这是一个扩展点，当前只做检测不做实际分析。
+    未来可接入 vision LLM 或语音情感分析模型。
+
+    Args:
+        message_segments: 消息段列表，每段可以是 dict 或具有 type 属性的对象。
+            支持的段类型：text, image, voice/record/audio
+
+    Returns:
+        检测结果字典，纯文本消息返回 None。
+        - 包含图片时: {"has_image": True, "suggested_valence": 0.0}
+        - 包含语音时: {"has_voice": True, "duration": ...}
+        - 同时包含时合并两者的字段
+    """
+    if not message_segments:
+        return None
+
+    has_image = False
+    has_voice = False
+    voice_duration: float = 0.0
+
+    for seg in message_segments:
+        # 支持 dict 格式和对象格式
+        if isinstance(seg, dict):
+            seg_type = seg.get("type", "text")
+            seg_duration = float(seg.get("duration", 0) or 0)
+        else:
+            seg_type = getattr(seg, "type", "text")
+            seg_duration = float(getattr(seg, "duration", 0) or 0)
+
+        if seg_type == "image":
+            has_image = True
+        elif seg_type in ("voice", "record", "audio"):
+            has_voice = True
+            voice_duration += seg_duration
+
+    if not has_image and not has_voice:
+        return None
+
+    result: dict = {}
+    if has_image:
+        result["has_image"] = True
+        result["suggested_valence"] = 0.0  # 占位，未来接 vision LLM
+    if has_voice:
+        result["has_voice"] = True
+        result["duration"] = voice_duration
+
+    return result
+
+
+# ---------------------------------------------------------------------------
+# Item 71: 本地差分隐私噪声层（简化版）
+# ---------------------------------------------------------------------------
+
+
+class PrivacyFilter:
+    """本地隐私保护：对发送给 LLM 的文本中的 PII 做简单脱敏。"""
+
+    PHONE_PATTERN = _re.compile(r'1[3-9]\d{9}')
+    EMAIL_PATTERN = _re.compile(r'[\w.-]+@[\w.-]+\.\w+')
+    ID_PATTERN = _re.compile(r'\d{17}[\dXx]')
+
+    def __init__(self, enabled: bool = False):
+        self._enabled = enabled
+
+    def sanitize(self, text: str) -> str:
+        """脱敏处理。"""
+        if not self._enabled:
+            return text
+        text = self.PHONE_PATTERN.sub('[手机号]', text)
+        text = self.EMAIL_PATTERN.sub('[邮箱]', text)
+        text = self.ID_PATTERN.sub('[身份证号]', text)
+        return text
+
 
 class LLMRequestPipeline:
     """LLM 请求处理管线，封装 Sylanne 插件的请求拦截逻辑。
@@ -41,6 +313,100 @@ class LLMRequestPipeline:
       - 调用 MemorySystem 做记忆召回和写入
       - 驱动 LifeSimulator 的 LLM 回调
     """
+
+    # ------------------------------------------------------------------
+    # Item 3: 用户偏好自动提取（纯规则匹配）
+    # ------------------------------------------------------------------
+
+    # 称呼偏好模式
+    _PREF_NAME_PATTERNS: list[tuple[str, str]] = [
+        ("叫我", "name"),
+        ("我叫", "name"),
+        ("称呼我", "name"),
+    ]
+    # 话题禁区模式
+    _PREF_TABOO_PATTERNS: list[tuple[str, str]] = [
+        ("不想聊", "taboo"),
+        ("别提", "taboo"),
+        ("不要说", "taboo"),
+    ]
+    # 风格偏好模式
+    _PREF_STYLE_KEYWORDS: dict[str, str] = {
+        "简短点": "brief",
+        "详细说": "verbose",
+        "别太长": "brief",
+    }
+
+    def _extract_preferences(self, text: str, session_key: str) -> None:
+        """从用户消息中提取偏好信号并存入 session_context overlay。
+
+        纯规则匹配，不调用 LLM。提取三类偏好：
+        - 称呼偏好：检测"叫我XX"/"我叫XX"/"称呼我XX"
+        - 话题禁区：检测"不想聊XX"/"别提XX"/"不要说XX"
+        - 风格偏好：检测"简短点"/"详细说"/"别太长"
+
+        Args:
+            text: 用户消息文本。
+            session_key: 会话标识。
+        """
+        if not text:
+            return
+
+        p = self._p
+        # 安全获取 session_context 的 per-relationship overlay
+        session_ctx = getattr(p, "_session_context", None)
+        if session_ctx is None:
+            return
+        overlay = getattr(session_ctx, "_preference_overlays", None)
+        if overlay is None:
+            session_ctx._preference_overlays = {}
+            overlay = session_ctx._preference_overlays
+        prefs = overlay.setdefault(session_key, {
+            "preferred_name": None,
+            "taboo_topics": [],
+            "style": None,
+        })
+
+        # 称呼偏好
+        for pattern, _kind in self._PREF_NAME_PATTERNS:
+            idx = text.find(pattern)
+            if idx >= 0:
+                # 提取模式后面的内容（取到标点或末尾，最多 10 字符）
+                start = idx + len(pattern)
+                rest = text[start:start + 10]
+                # 截断到第一个标点或空格
+                name = ""
+                for ch in rest:
+                    if ch in "，。！？、；：\n ,.!?;:":
+                        break
+                    name += ch
+                name = name.strip()
+                if name:
+                    prefs["preferred_name"] = name
+                break
+
+        # 话题禁区
+        for pattern, _kind in self._PREF_TABOO_PATTERNS:
+            idx = text.find(pattern)
+            if idx >= 0:
+                start = idx + len(pattern)
+                rest = text[start:start + 20]
+                topic = ""
+                for ch in rest:
+                    if ch in "，。！？、；：\n ,.!?;:":
+                        break
+                    topic += ch
+                topic = topic.strip()
+                if topic and topic not in prefs["taboo_topics"]:
+                    prefs["taboo_topics"].append(topic)
+                    if len(prefs["taboo_topics"]) > 20:
+                        prefs["taboo_topics"] = prefs["taboo_topics"][-20:]
+
+        # 风格偏好
+        for keyword, style in self._PREF_STYLE_KEYWORDS.items():
+            if keyword in text:
+                prefs["style"] = style
+                break
 
     def __init__(self, plugin: Any) -> None:
         self._p = plugin
@@ -238,6 +604,12 @@ class LLMRequestPipeline:
             t2 = loop.create_task(self._consolidation_loop())
             p._background_tasks.extend([t1, t2])
         session_key = p._session_key(event)
+        # 维护 session_key → unified_msg_origin 映射，供主动发送时使用
+        umo = str(getattr(event, "unified_msg_origin", "") or "")
+        if umo:
+            if not hasattr(p, "_session_origins"):
+                p._session_origins: dict[str, str] = {}
+            p._session_origins[session_key] = umo
         message_text = str(getattr(event, "message_str", "") or "")
         # 非文本消息转述：图片/语音等内容转为文本描述
         if not message_text.strip():
@@ -372,13 +744,14 @@ class LLMRequestPipeline:
                 )
                 p._fragment_timers[session_key] = timer
                 p._background_tasks.append(timer)
-                timer.add_done_callback(
-                    lambda t: (
-                        p._background_tasks.remove(t)
-                        if t in p._background_tasks
-                        else None
-                    )
-                )
+
+                def _cleanup_task(t, tasks=p._background_tasks):
+                    try:
+                        tasks.remove(t)
+                    except ValueError:
+                        pass
+
+                timer.add_done_callback(_cleanup_task)
                 return  # 暂不处理，等待防抖定时器触发
 
             # 若通过 max_wait 到达此处，继续执行后续处理
@@ -428,24 +801,60 @@ class LLMRequestPipeline:
         """
         p = self._p
 
+        # === 兜底清理：移除上一轮可能泄漏的 _no_save 注入 ===
+        # 正常情况下 _no_save 消息不会被持久化，但如果 AstrBot 行为变更
+        # 导致泄漏，这里在下一轮加载时自愈清除。
+        contexts = getattr(request, "contexts", None)
+        if contexts:
+            before_len = len(contexts)
+            request.contexts = [
+                msg for msg in contexts
+                if not (
+                    isinstance(msg, dict)
+                    and msg.get("role") == "assistant"
+                    and "[inner_context]" in str(msg.get("content", ""))
+                )
+            ]
+            leaked = before_len - len(request.contexts)
+            if leaked:
+                logger.warning(
+                    f"[Sylanne] cleaned {leaked} leaked _no_save message(s) from history"
+                )
+
         # 清理该会话的流式状态，为新一轮请求做准备
         p._stream_buffers.pop(session_key, None)
         p._stream_first_sent.pop(session_key, None)
 
-        # 启动后台观测任务（非阻塞，按会话串行化避免竞态）
+        # 启动后台观测任务（按会话串行化避免竞态）
+        # 给予短超时等待，确保注入的是当前轮计算结果而非上一轮的
+        _observe_task = None
         if message_text:
 
             async def _locked_observe(sk=session_key, txt=message_text):
                 async with p._session_lock(sk):
                     await self._background_observe_request(sk, txt)
 
-            task = safe_ensure_future(_locked_observe(), name="locked_observe")
-            p._background_tasks.append(task)
-            task.add_done_callback(
+            _observe_task = safe_ensure_future(
+                _locked_observe(), name="locked_observe"
+            )
+            p._background_tasks.append(_observe_task)
+            _observe_task.add_done_callback(
                 lambda t: (
                     p._background_tasks.remove(t) if t in p._background_tasks else None
                 )
             )
+            # 等待最多 200ms，让 spine tick 完成后再读取状态
+            _observe_wait_ms = int(
+                (p.config or {}).get("state_injection_observe_wait_ms", 200)
+            )
+            if _observe_wait_ms > 0:
+                try:
+                    await asyncio.wait_for(
+                        asyncio.shield(_observe_task),
+                        timeout=_observe_wait_ms / 1000.0,
+                    )
+                except (asyncio.TimeoutError, Exception):
+                    pass  # 超时不阻塞，用已有状态继续
 
         # 取消该会话过期的分段回复任务
         stale_task = p._segmented_tasks.pop(session_key, None)
@@ -514,6 +923,16 @@ class LLMRequestPipeline:
         time_fragment = p._time_context_fragment(session_key)
         current_prompt = str(getattr(request, "prompt", "") or "")
 
+        # 计算 gap_seconds 用于控制注入强度
+        host_for_gap = p._host(session_key)
+        _last_ev = host_for_gap.kernel.last_event or {}
+        _has_prev = bool(_last_ev.get("now") or _last_ev.get("text"))
+        if _has_prev:
+            _last_now = float(_last_ev.get("now") or 0.0)
+            gap_seconds = max(0.0, time.time() - _last_now) if _last_now else 0.0
+        else:
+            gap_seconds = float("inf")
+
         # 注入未完成回复上下文（上一轮被打断的回复内容）
         unfinished = p._unfinished_replies.pop(session_key, "")
         unfinished_fragment = ""
@@ -544,9 +963,12 @@ class LLMRequestPipeline:
                 f"请自然地在回复中提及或表达这件事，用你自己的语气。"
             )
 
-        # 使用三层记忆系统召回相关记忆
+        # 使用三层记忆系统召回相关记忆（gap-aware: 对话流畅时跳过）
         memory_fragment = ""
-        if realtime_enabled and message_text:
+        _MEMORY_RELEVANCE_THRESHOLD = 0.25
+        _MEMORY_GAP_SKIP = 900  # < 15min: skip memory injection entirely
+        _MEMORY_GAP_LIGHT = 7200  # < 2h: inject at most 1 item, compressed
+        if realtime_enabled and message_text and gap_seconds >= _MEMORY_GAP_SKIP:
             host = p._host(session_key)
             memory_system = p._memory_system_for_session(session_key)
             current_warmth = host.kernel.computation.engine.observe().get("warmth", 0.0)
@@ -565,28 +987,27 @@ class LLMRequestPipeline:
                         )
                 except Exception as e:
                     logger.debug(f"Sylanne skip: {e}")
+            recall_limit = 1 if gap_seconds < _MEMORY_GAP_LIGHT else 3
             results = memory_system.recall(
                 query=message_text[:100],
                 query_embedding=query_embedding,
                 current_warmth=current_warmth,
-                limit=3,
+                limit=recall_limit,
             )
+            if results:
+                # Filter by relevance threshold
+                results = [r for r in results if r.relevance >= _MEMORY_RELEVANCE_THRESHOLD]
             if results:
                 mem_texts = [r.text[:100] for r in results if r.text]
                 if mem_texts:
                     memory_fragment = memory_system.format_recall_injection(
-                        results, max_items=3
+                        results, max_items=recall_limit
                     )
                 # 在后台触发再巩固重写（用当前情绪微调已召回的 L2 记忆）
                 safe_ensure_future(
                     self._reconsolidation_rewrite(session_key, memory_system),
                     name="reconsolidation_rewrite",
                 )
-
-        # 用户当前消息——始终放在最后，确保 LLM 优先关注最新输入
-        user_anchor = ""
-        if message_text and realtime_enabled:
-            user_anchor = f"当前：{message_text}"
 
         # 从计算栈构建情感/关系状态信号片段
         state_fragment = ""
@@ -622,7 +1043,10 @@ class LLMRequestPipeline:
             valence = float(current_assessment.get("valence", 0.0))
             arousal = float(current_assessment.get("arousal", 0.0))
             intent = str(current_assessment.get("intent", ""))
-            # 将状态信号压缩为自然语言描述，供 LLM 参考
+            # 短 gap 时只注入快变信号（valence/arousal/intent/drive），
+            # 慢变信号（warmth/tension/phase）仅在变化显著时注入
+            _short_gap = gap_seconds < 900
+            _prev_state = getattr(host.kernel, "_last_injected_state", None) or {}
             signals = []
             if valence > 0.5:
                 signals.append("对方心情不错")
@@ -632,64 +1056,166 @@ class LLMRequestPipeline:
                 signals.append("对方情绪比较激动")
             if intent and intent not in ("", "neutral", "中性"):
                 signals.append(f"感觉对方在{intent}")
-            if warmth > 0.3:
-                signals.append(f"亲近感{'高' if warmth > 0.6 else '中'}")
-            if tension > 0.3:
-                signals.append(f"紧张感{'高' if tension > 0.6 else '中'}")
+            # 慢变信号：短 gap 时仅在变化 > 0.15 时注入
+            _warmth_changed = abs(warmth - _prev_state.get("warmth", 0)) > 0.15
+            _tension_changed = abs(tension - _prev_state.get("tension", 0)) > 0.15
+            if not _short_gap or _warmth_changed:
+                if warmth > 0.3:
+                    signals.append(f"亲近感{'高' if warmth > 0.6 else '中'}")
+            if not _short_gap or _tension_changed:
+                if tension > 0.3:
+                    signals.append(f"紧张感{'高' if tension > 0.6 else '中'}")
             if coherence < 0.7:
                 signals.append("内心矛盾")
             if void_pressure > 5.0:
                 signals.append("有话想说但在忍")
-            if dissociation > 0.3:
+            if not _short_gap and dissociation > 0.3:
                 signals.append("跨关系压力")
             if drive > 0.6:
                 signals.append("表达欲强")
             elif drive < 0.2 and void_pressure > 1.0:
                 signals.append("不太想说话")
+            # 人格声线信号（影响回复风格）——仅长 gap 时注入
+            if not _short_gap:
+                try:
+                    personality_state = host.kernel._personality()
+                    cadence = personality_state.get("voice", {}).get("cadence", "")
+                    if cadence and cadence != "normal":
+                        signals.append(f"语调{cadence}")
+                except Exception:
+                    pass
+                # 关系阶段信号（影响亲密度表达）
+                try:
+                    rel_mem = host.kernel.body.relationship_memory()
+                    phase = rel_mem.get("continuity", {}).get("phase", "")
+                    if phase and phase != "unknown":
+                        signals.append(f"关系阶段:{phase}")
+                except Exception:
+                    pass
             if signals:
                 state_fragment = f"[当前状态：{'，'.join(signals)}]"
+            # 保存当前状态快照供下一轮短 gap 比较
+            host.kernel._last_injected_state = {
+                "warmth": warmth, "tension": tension,
+            }
         # PLACEHOLDER_PROCESS_LLM_REQUEST_FINAL_PART3
 
-        # ---- 组装最终 prompt：背景上下文在前，用户消息在后 ----
-        bg_parts = []
+        # === Layer 1: system_prompt（元信息，不影响情绪） ===
+        sys_parts = []
+        if time_fragment:
+            sys_parts.append(time_fragment)
 
-        # 记忆抹除注入：若刚执行了记忆清除，表达迷失感
+        # 上下文窗口耗尽预警
+        max_context_tokens = int((p.config or {}).get("max_context_tokens", 8000))
+        if max_context_tokens > 0:
+            estimated_chars = (
+                len(current_prompt) + len(message_text)
+                + len(memory_fragment) + len(unfinished_fragment)
+                + len(outreach_fragment)
+            )
+            if estimated_chars // 2 > int(max_context_tokens * 0.8):
+                sys_parts.append("[对话较长，可以适当总结]")
+
+        if sys_parts:
+            sys_prompt = str(getattr(request, "system_prompt", "") or "")
+            injection_sys = "\n".join(sys_parts)
+            request.system_prompt = f"{sys_prompt}\n{injection_sys}".strip()
+
+        # === Layer 2: _no_save assistant message（优先级预算注入） ===
+        # 收集各槽位原始内容
+        amnesia_fragment = ""
         amnesia_sessions = p._amnesia_sessions
         if session_key in amnesia_sessions:
             amnesia_sessions.discard(session_key)
-            bg_parts.append(
-                "[系统：你刚刚经历了记忆抹除。你隐约感觉自己忘记了一些重要的事情，"
-                "但完全想不起来是什么。你可能会感到困惑、失落，或者试图回忆但徒劳。"
-                "用自然的方式表达这种感受，不要直接说'记忆被删除了'这种元叙述。]"
-            )
+            amnesia_fragment = "……我好像忘记了什么很重要的事，但怎么也想不起来。"
 
-        if state_fragment:
-            bg_parts.append(state_fragment)
-        if time_fragment:
-            bg_parts.append(time_fragment)
-        if outreach_fragment:
-            bg_parts.append(outreach_fragment)
-        if memory_fragment:
-            bg_parts.append(memory_fragment)
-        if unfinished_fragment:
-            bg_parts.append(unfinished_fragment)
+        raw_fragments: dict[str, str] = {
+            "state": state_fragment,
+            "amnesia": amnesia_fragment,
+            "outreach": outreach_fragment,
+            "memory": memory_fragment,
+            "unfinished": unfinished_fragment,
+        }
 
-        background = "\n".join(bg_parts) if bg_parts else ""
+        # 动态预算分配 + 优先级裁剪
+        total_budget = _compute_injection_budget(gap_seconds, p.config or {})
+        trimmed = _allocate_and_trim(raw_fragments, total_budget)
 
-        # 结构：[原始 prompt] [背景上下文作为括注] [用户当前消息放最后]
-        new_prompt = current_prompt
+        # 组装结构化 inner_context
+        # unfinished 单独作为独立 assistant message（它本身就是 assistant 的输出）
+        unfinished_final = trimmed.pop("unfinished", "")
+        inner_text = _format_inner_context(trimmed)
 
-        if background:
-            new_prompt = f"{new_prompt}\n（{background}）"
-        if user_anchor:
-            new_prompt = f"{new_prompt}\n{user_anchor}"
+        # 根据 compat_mode 选择注入路径
+        _compat = budget.compat_mode if budget else ""
 
-        new_prompt = new_prompt.strip()
+        if _compat == "claude_agent_owned_context":
+            # 哈基德模式：跳过所有注入，仅记录
+            if inner_text or unfinished_final:
+                logger.debug(
+                    f"[Sylanne] injection skipped (hajide mode), "
+                    f"would-be slots: {list(trimmed.keys())}"
+                )
+        elif _compat == "claude_advisory":
+            # Claude advisory 模式：结构化内容追加到 prompt
+            advisory_parts = []
+            if inner_text:
+                advisory_parts.append(inner_text)
+            if unfinished_final:
+                label = _SLOT_LABELS["unfinished"]
+                advisory_parts.append(f"[{label}] {unfinished_final}")
+            advisory_text = "\n".join(advisory_parts)
+            if advisory_text:
+                p._append_temp_text_part(
+                    request, advisory_text.strip(), source="inner_context",
+                    budget=budget,
+                )
+                logger.info(
+                    f"[Sylanne] injection (advisory): budget={total_budget} "
+                    f"slots=[{','.join(list(trimmed.keys()) + (['unfinished'] if unfinished_final else []))}] "
+                    f"chars={len(advisory_text)}"
+                )
+        else:
+            # 默认模式：_no_save assistant message 注入 contexts
+            nosave_messages = []
+            if inner_text:
+                nosave_messages.append({
+                    "role": "assistant",
+                    "content": inner_text,
+                    "_no_save": True,
+                })
+            if unfinished_final:
+                nosave_messages.append({
+                    "role": "assistant",
+                    "content": f"[{_SLOT_LABELS['unfinished']}] {unfinished_final}",
+                    "_no_save": True,
+                })
 
-        request.prompt = new_prompt
-        logger.info(
-            f"Sylanne injected prompt ({len(new_prompt)} chars): {new_prompt[:300]}"
-        )
+            if nosave_messages:
+                contexts = getattr(request, "contexts", None)
+                if contexts is None:
+                    request.contexts = []
+                    contexts = request.contexts
+                for msg in nosave_messages:
+                    if not msg.get("_no_save"):
+                        msg["_no_save"] = True
+                    contexts.append(msg)
+
+            # Logging
+            if trimmed or unfinished_final:
+                slots_log = list(trimmed.keys())
+                if unfinished_final:
+                    slots_log.append("unfinished")
+                logger.info(
+                    f"[Sylanne] injection: budget={total_budget} "
+                    f"slots=[{','.join(slots_log)}] "
+                    f"chars={sum(len(v) for v in trimmed.values()) + len(unfinished_final)}"
+                )
+            else:
+                logger.debug(
+                    f"[Sylanne] no context injected "
+                    f"(prompt={len(current_prompt)} chars)"
+                )
 
         # 首次请求时启动生命模拟器（懒初始化）
         if not getattr(p, "_life_simulator_started", False):
@@ -700,6 +1226,7 @@ class LLMRequestPipeline:
                     llm_caller=self._life_sim_llm_call,
                     outreach_callback=self._life_sim_outreach,
                     emotion_getter=self._life_sim_emotion,
+                    body_delta_callback=self._life_sim_body_delta,
                 )
                 life_sim.start()
                 p.logger.info(
@@ -1548,8 +2075,22 @@ class LLMRequestPipeline:
                         message = p._astrbot_message(generated)
                     else:
                         message = p._astrbot_message(f"[{m}] {r}")
+                    # 从映射表获取合法的 AstrBot session origin
+                    origins = getattr(p, "_session_origins", {})
+                    origin = origins.get(session_key, "")
+                    if not origin:
+                        # fallback: 尝试从 session_key 提取前3段
+                        parts = session_key.split(":")
+                        origin = ":".join(parts[:3]) if len(parts) >= 3 else ""
+                    if not origin:
+                        logger.warning(
+                            "Sylanne life_sim_outreach: no valid origin for session '%s',"
+                            " skipping direct send",
+                            session_key,
+                        )
+                        return
                     try:
-                        await context.send_message(session_key, message)
+                        await context.send_message(origin, message)
                     except Exception as e:
                         logger.warning(
                             f"Sylanne life_sim_outreach send: {e}", exc_info=True
@@ -1630,3 +2171,35 @@ class LLMRequestPipeline:
             return host.kernel.computation.engine.observe()
         except Exception:
             return {}
+
+    def _life_sim_body_delta(self, delta: dict[str, float]) -> None:
+        """将生命模拟器的情绪增量注入到最近活跃 host 的身体状态。"""
+        p = self._p
+        if not p._hosts:
+            return
+        best_key = ""
+        best_time = 0.0
+        for sk, host in p._hosts.items():
+            last_now = float(host.kernel.last_event.get("now") or 0.0)
+            if last_now > best_time:
+                best_time = last_now
+                best_key = sk
+        if not best_key:
+            best_key = next(iter(p._hosts))
+        host = p._hosts[best_key]
+        try:
+            body = host.kernel.body
+            if body and hasattr(body, "apply_vector_delta"):
+                mapped = {}
+                v = delta.get("valence", 0.0)
+                a = delta.get("arousal", 0.0)
+                if v != 0.0:
+                    mapped["bloodflow.warmth"] = v * 0.03
+                    mapped["temperature.warmth"] = v * 0.02
+                if a != 0.0:
+                    mapped["nerve.sensitivity"] = a * 0.02
+                    mapped["muscle.readiness"] = a * 0.015
+                if mapped:
+                    body.apply_vector_delta(mapped)
+        except Exception:
+            pass

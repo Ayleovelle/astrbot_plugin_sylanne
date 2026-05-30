@@ -310,6 +310,22 @@ class BackgroundPostQueue:
         decision = self.adaptive_worker_decision(session_key, commit_scale=True)
         return max(1, decision.get("desired_workers", 1))
 
+    def _check_backpressure(self, queue: collections.deque, session_key: str) -> None:
+        """当队列长度超过 maxlen 的 80% 时记录背压告警。
+
+        Args:
+            queue: 待检查的队列。
+            session_key: 会话标识（用于日志）。
+        """
+        if queue.maxlen and len(queue) >= queue.maxlen * 0.8:
+            logger.warning(
+                "Background post queue backpressure: %d/%d (%.0f%%) for session %s",
+                len(queue),
+                queue.maxlen,
+                len(queue) / queue.maxlen * 100,
+                session_key,
+            )
+
     # ------------------------------------------------------------------
     # 回收过期租约的活跃任务
     # ------------------------------------------------------------------
@@ -355,6 +371,7 @@ class BackgroundPostQueue:
         queue_list = sorted(queue, key=lambda j: j.sequence)
         queue.clear()
         queue.extend(queue_list)
+        self._check_backpressure(queue, session_key)
         return recovered
 
     # ------------------------------------------------------------------
@@ -443,6 +460,8 @@ class BackgroundPostQueue:
         # 将需要重试的任务放回队列末尾
         for job in retry_jobs:
             queue.append(job)
+        if retry_jobs:
+            self._check_backpressure(queue, session_key)
 
     # ------------------------------------------------------------------
     # 保存检查点
@@ -572,4 +591,5 @@ class BackgroundPostQueue:
             "last_committed", 0
         )
         self._p._background_post_recovered_sessions.add(session_key)
+        self._check_backpressure(queue, session_key)
         return True

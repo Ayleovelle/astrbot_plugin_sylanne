@@ -39,6 +39,91 @@ except ImportError:
     logger = _logging.getLogger("astrbot_plugin_sylanne")  # type: ignore
 
 
+# ---------------------------------------------------------------------------
+# Item 59: 插件间事件总线
+# ---------------------------------------------------------------------------
+
+_event_listeners: dict[str, list[callable]] = {}
+
+
+def emit_event(event_type: str, payload: dict):
+    """广播 Sylanne 内部事件。
+
+    支持的事件类型：
+      - scar_created: 新伤痕创建
+      - personality_drift: 人格漂移发生
+      - phase_transition: 相变触发
+      - memory_stored: 记忆写入
+      - crisis_detected: 危机检测
+    """
+    for listener in _event_listeners.get(event_type, []):
+        try:
+            listener(payload)
+        except Exception as exc:
+            logger.warning("emit_event(%s) listener raised: %s", event_type, exc)
+
+
+def on_event(event_type: str, callback: callable):
+    """订阅 Sylanne 事件。"""
+    if event_type not in _event_listeners:
+        _event_listeners[event_type] = []
+    _event_listeners[event_type].append(callback)
+
+
+def off_event(event_type: str, callback: callable):
+    """取消订阅。"""
+    listeners = _event_listeners.get(event_type, [])
+    if callback in listeners:
+        listeners.remove(callback)
+
+
+# ---------------------------------------------------------------------------
+# Item 64: AstrBot 事件钩子双向桥接
+# ---------------------------------------------------------------------------
+
+
+class AstrBotEventBridge:
+    """AstrBot 事件与 Sylanne 内部事件的双向桥接。"""
+
+    def __init__(self, plugin):
+        self._plugin = plugin
+
+    def inject_computation_result(self, session_key: str, result: dict):
+        """将计算栈结果注入 AstrBot 事件系统（如果可用）。"""
+        ctx = getattr(self._plugin, 'context', None)
+        if ctx and hasattr(ctx, 'emit'):
+            ctx.emit("sylanne_computation", {"session": session_key, "result": result})
+
+    def get_bridge_status(self) -> dict:
+        """返回桥接状态。"""
+        ctx = getattr(self._plugin, 'context', None)
+        return {"connected": ctx is not None, "event_types": list(_event_listeners.keys())}
+
+
+# ---------------------------------------------------------------------------
+# Item 65: 插件间记忆共享协议
+# ---------------------------------------------------------------------------
+
+
+def shared_memory_read(namespace: str, query: str, requester: str) -> list[dict] | None:
+    """其他插件读取 Sylanne 记忆的接口。
+
+    权限检查：只允许读取非敏感记忆。
+    返回格式：[{"text": "...", "score": 0.8, "timestamp": ...}]
+    """
+    # 占位，需要 plugin 实例才能实际查询
+    return None
+
+
+def shared_memory_write(namespace: str, text: str, metadata: dict, requester: str) -> bool:
+    """其他插件写入 Sylanne 记忆的接口。
+
+    写入到指定 namespace 的 L1 池。
+    """
+    # 占位
+    return False
+
+
 class PublicAPI:
     """公共 API 表面层，封装 Sylanne 插件对外暴露的所有接口。
 

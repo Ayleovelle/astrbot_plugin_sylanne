@@ -95,4 +95,170 @@ def _safe_decision(decision: str) -> str:
     return decision if decision in {"hold", "release"} else "hold"
 
 
-__all__ = ["ASSESSOR_SCHEMA_VERSION", "assess_with_lanes"]
+__all__ = [
+    "ASSESSOR_SCHEMA_VERSION",
+    "assess_with_lanes",
+    "CrisisDetector",
+    "AssessorConfig",
+    "DEFAULT_DIMENSIONS",
+    "MediaEmotion",
+    "tag_media_emotion",
+    "multimodal_fusion",
+]
+
+
+# ---------------------------------------------------------------------------
+# Item 104: 表情包/媒体情绪理解接口
+# ---------------------------------------------------------------------------
+
+from dataclasses import dataclass
+
+
+@dataclass
+class MediaEmotion:
+    """媒体情绪标注结果。"""
+
+    emotion: str  # "happy" / "sad" / "angry" / "neutral" / "ironic"
+    intensity: float  # 0-1
+    irony_probability: float  # 0-1
+
+
+def tag_media_emotion(media_type: str, context_text: str) -> MediaEmotion:
+    """简单的媒体情绪标注（基于上下文推断）。
+
+    Args:
+        media_type: 媒体类型（如 "sticker", "image", "gif"）。
+        context_text: 伴随媒体的上下文文本。
+
+    Returns:
+        MediaEmotion 标注结果。
+    """
+    # 哭笑表情 + 正面文字 → ironic
+    cry_laugh_markers = ("😂", "🤣", "哭笑", "笑哭")
+    if any(m in context_text for m in cry_laugh_markers):
+        return MediaEmotion("ironic", 0.6, 0.7)
+    # 简单情绪关键词
+    if any(w in context_text for w in ("开心", "哈哈", "太好了", "😊", "🥰")):
+        return MediaEmotion("happy", 0.5, 0.1)
+    if any(w in context_text for w in ("难过", "伤心", "😢", "😭")):
+        return MediaEmotion("sad", 0.5, 0.1)
+    return MediaEmotion("neutral", 0.3, 0.0)
+
+
+# ---------------------------------------------------------------------------
+# Item 110: 媒体情绪与文本情绪融合
+# ---------------------------------------------------------------------------
+
+
+def multimodal_fusion(
+    text_valence: float,
+    media_valence: float | None,
+    media_irony: float = 0.0,
+) -> float:
+    """融合文本情绪和媒体情绪。
+
+    Args:
+        text_valence: 文本情绪 valence（-1 到 1）。
+        media_valence: 媒体情绪 valence（-1 到 1），None 表示无媒体。
+        media_irony: 媒体反讽概率（0-1），> 0.5 时取反 media_valence。
+
+    Returns:
+        融合后的 valence 值。
+    """
+    if media_valence is None:
+        return text_valence
+    # 如果反讽概率高，取反媒体情绪
+    adjusted_media = -media_valence if media_irony > 0.5 else media_valence
+    # 融合公式：文本 60% + 媒体 40%
+    fused = text_valence * 0.6 + adjusted_media * 0.4
+    return fused
+
+
+# ---------------------------------------------------------------------------
+# Item 77: 自定义评分维度扩展点
+# ---------------------------------------------------------------------------
+
+DEFAULT_DIMENSIONS = ("valence", "arousal", "tension", "warmth", "surprise", "dominance", "formality", "intimacy")
+
+
+class AssessorConfig:
+    """可配置的评分维度管理器。
+
+    将评分维度从硬编码改为可配置，允许外部模块自定义评估维度集合。
+    validate_assessment() 确保评估结果包含所有配置的维度（缺失维度补 0.0）。
+    """
+
+    def __init__(self, dimensions: tuple[str, ...] = DEFAULT_DIMENSIONS):
+        self.dimensions = dimensions
+
+    def validate_assessment(self, result: dict) -> dict:
+        """确保评估结果包含所有配置的维度，缺失的补 0.0。
+
+        Args:
+            result: 原始评估结果字典。
+
+        Returns:
+            包含所有配置维度的标准化评估结果。
+        """
+        return {d: result.get(d, 0.0) for d in self.dimensions}
+
+
+# ---------------------------------------------------------------------------
+# Item 92: 用户情绪危机检测
+# ---------------------------------------------------------------------------
+
+
+class CrisisDetector:
+    """用户情绪危机检测：基于连续负面情绪斜率 + 关键词。"""
+
+    CRISIS_KEYWORDS = (
+        "不想活", "自杀", "结束一切", "活着没意思",
+        "死", "跳楼", "割腕", "安眠药", "遗书",
+    )
+    WARNING_KEYWORDS = (
+        "好累", "撑不住", "崩溃", "绝望",
+        "没有意义", "放弃", "消失",
+    )
+
+    def __init__(self):
+        self._negative_streak: int = 0
+        self._last_level: str = "normal"  # normal / concern / warning / crisis
+
+    def assess(self, text: str, valence: float) -> str:
+        """评估当前消息的危机等级。"""
+        # 关键词检测
+        text_lower = text.lower()
+        if any(kw in text_lower for kw in self.CRISIS_KEYWORDS):
+            self._last_level = "crisis"
+            return "crisis"
+        if any(kw in text_lower for kw in self.WARNING_KEYWORDS):
+            self._negative_streak += 2
+
+        # 连续负面情绪
+        if valence < -0.5:
+            self._negative_streak += 1
+        elif valence > 0:
+            self._negative_streak = max(0, self._negative_streak - 1)
+
+        if self._negative_streak >= 5:
+            self._last_level = "warning"
+            return "warning"
+        elif self._negative_streak >= 3:
+            self._last_level = "concern"
+            return "concern"
+
+        self._last_level = "normal"
+        return "normal"
+
+    def get_safety_hint(self, level: str) -> str | None:
+        """返回安全提示（注入 prompt）。"""
+        if level == "crisis":
+            return (
+                "用户可能处于危机状态。温和关心，不要说教，"
+                "建议寻求专业帮助。不要忽视也不要过度反应。"
+            )
+        elif level == "warning":
+            return "用户情绪持续低落。保持温暖陪伴，适当询问是否需要帮助。"
+        elif level == "concern":
+            return "注意到用户情绪偏低，保持关注但不要过度追问。"
+        return None
