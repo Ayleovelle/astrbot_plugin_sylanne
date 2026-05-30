@@ -1,0 +1,126 @@
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    name: Build & Publish Release
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install deps
+        run: pip install aiohttp
+
+      - name: Extract version from tag
+        id: version
+        run: echo "version=${GITHUB_REF_NAME#v}" >> "$GITHUB_OUTPUT"
+
+      - name: Verify metadata version matches tag
+        run: |
+          META_VERSION=$(python -c "
+          import yaml
+          with open('metadata.yaml') as f:
+              print(yaml.safe_load(f)['version'])
+          " 2>/dev/null || python -c "
+          import re
+          text = open('metadata.yaml').read()
+          m = re.search(r'^version:\s*[\"']?([^\"'\n]+)', text, re.M)
+          print(m.group(1).strip())
+          ")
+          TAG_VERSION="${{ steps.version.outputs.version }}"
+          if [ "$META_VERSION" != "$TAG_VERSION" ]; then
+            echo "::error::metadata.yaml version ($META_VERSION) != tag version ($TAG_VERSION)"
+            exit 1
+          fi
+          echo "Version: $TAG_VERSION"
+
+      - name: Build full plugin zip
+        run: python scripts/package_plugin.py --output dist/astrbot_plugin_sylanne-${{ steps.version.outputs.version }}.zip
+
+      - name: Build core-only zip (no UI assets)
+        run: |
+          python -c "
+          import zipfile, pathlib, sys
+          sys.path.insert(0, '.')
+          from scripts.package_plugin import ROOT, PLUGIN_NAME, should_include
+
+          output = pathlib.Path('dist/astrbot_plugin_sylanne-${{ steps.version.outputs.version }}-core.zip')
+          output.parent.mkdir(parents=True, exist_ok=True)
+
+          with zipfile.ZipFile(output, 'w', compression=zipfile.ZIP_DEFLATED) as zf:
+              zf.writestr(f'{PLUGIN_NAME}/', '')
+              for f in sorted(ROOT.rglob('*')):
+                  if not f.is_file():
+                      continue
+                  if not should_include(f):
+                      continue
+                  rel = f.relative_to(ROOT)
+                  # Skip large UI assets for core zip
+                  if rel.parts[0] == 'UI' and rel.suffix in ('.png', '.webp', '.svg', '.gif'):
+                      continue
+                  zf.write(f, pathlib.Path(PLUGIN_NAME, rel).as_posix())
+          print(f'Core zip: {output} ({output.stat().st_size // 1024}K)')
+          "
+
+      - name: Verify zip contents
+        run: |
+          python -c "
+          import zipfile, sys
+          required = [
+              'astrbot_plugin_sylanne/main.py',
+              'astrbot_plugin_sylanne/metadata.yaml',
+              'astrbot_plugin_sylanne/__init__.py',
+              'astrbot_plugin_sylanne/README.md',
+              'astrbot_plugin_sylanne/sylanne_alpha/__init__.py',
+              'astrbot_plugin_sylanne/sylanne_alpha/kernel.py',
+          ]
+          for zp in ['dist/astrbot_plugin_sylanne-${{ steps.version.outputs.version }}.zip',
+                     'dist/astrbot_plugin_sylanne-${{ steps.version.outputs.version }}-core.zip']:
+              with zipfile.ZipFile(zp) as zf:
+                  names = zf.namelist()
+                  missing = [r for r in required if r not in names]
+                  if missing:
+                      print(f'{zp} missing: {missing}')
+                      sys.exit(1)
+                  bad = [n for n in names if '.pyc' in n or '__pycache__' in n]
+                  if bad:
+                      print(f'{zp} has unwanted: {bad}')
+                      sys.exit(1)
+              print(f'{zp}: OK')
+          "
+
+      - name: Import smoke test from zip
+        run: |
+          mkdir -p /tmp/verify && cd /tmp/verify
+          unzip -q $GITHUB_WORKSPACE/dist/astrbot_plugin_sylanne-${{ steps.version.outputs.version }}.zip
+          python -c "
+          import sys
+          sys.path.insert(0, '/tmp/verify/astrbot_plugin_sylanne')
+          import importlib.util
+          spec = importlib.util.spec_from_file_location(
+              'main', '/tmp/verify/astrbot_plugin_sylanne/main.py'
+          )
+          mod = importlib.util.module_from_spec(spec)
+          sys.modules['main'] = mod
+          spec.loader.exec_module(mod)
+          print('Import from zip OK')
+          "
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          name: "Sylanne-Embodiment ${{ steps.version.outputs.version }}"
+          generate_release_notes: true
+          files: |
+            dist/astrbot_plugin_sylanne-${{ steps.version.outputs.version }}.zip
+            dist/astrbot_plugin_sylanne-${{ steps.version.outputs.version }}-core.zip
