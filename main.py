@@ -488,91 +488,34 @@ class EmotionalStatePlugin(Star):
                 ["GET"],
                 "Sylanne lineage observatory readonly",
             ),
-            (
-                f"/{P}/webui",
-                wr.page_handler,
-                ["GET"],
-                "Sylanne-Embodiment WebUI dashboard",
-            ),
-            (
-                f"/{P}/api/state",
-                wr.state_handler,
-                ["GET"],
-                "Sylanne-Embodiment WebUI state API",
-            ),
-            (
-                f"/{P}/api/settings",
-                wr.settings_get_handler,
-                ["GET"],
-                "Sylanne-Embodiment WebUI settings read",
-            ),
-            (
-                f"/{P}/api/settings",
-                wr.settings_post_handler,
-                ["POST"],
-                "Sylanne-Embodiment WebUI settings write",
-            ),
-            (
-                f"/{P}/api/computation_logs",
-                wr.computation_logs_handler,
-                ["GET"],
-                "Sylanne-Embodiment computation logs API",
-            ),
-            (
-                f"/{P}/api/memory_pools",
-                wr.memory_pools_handler,
-                ["GET"],
-                "Sylanne-Embodiment memory pools API",
-            ),
-            (
-                f"/{P}/api/memory_meltdown",
-                wr.memory_meltdown_handler,
-                ["POST"],
-                "Sylanne-Embodiment memory meltdown (clear all)",
-            ),
-            (
-                f"/{P}/api/meltdown_nonce",
-                wr.meltdown_nonce_handler,
-                ["GET"],
-                "Sylanne-Embodiment meltdown nonce generator",
-            ),
-            (
-                f"/{P}/api/memory_sink",
-                wr.memory_sink_handler,
-                ["GET"],
-                "Sylanne memory L1→L2 manual sink",
-            ),
-            (
-                f"/{P}/api/memory_consolidate",
-                wr.memory_consolidate_handler,
-                ["POST"],
-                "Trigger memory consolidation evaluation",
-            ),
-            (
-                f"/{P}/api/webui_probe",
-                wr.probe_handler,
-                ["GET"],
-                "Sylanne-Embodiment standalone WebUI probe",
-            ),
-            (
-                f"/{P}/assets/logo.png",
-                wr.logo_handler,
-                ["GET"],
-                "Sylanne plugin logo asset",
-            ),
-            (
-                f"/{P}/logo.png",
-                wr.logo_handler,
-                ["GET"],
-                "Sylanne plugin logo asset (compat)",
-            ),
-            (
-                f"/{P}/dashboard",
-                wr.dashboard_handler,
-                ["GET"],
-                "Sylanne WebUI Dashboard",
-            ),
         ]
+        # WebUI routes — 使用字符串名延迟解析，缺失的 handler 跳过而非崩溃
+        webui_routes: list[tuple[str, str, list[str]]] = [
+            (f"/{P}/webui", "page_handler", ["GET"]),
+            (f"/{P}/api/state", "state_handler", ["GET"]),
+            (f"/{P}/api/settings", "settings_get_handler", ["GET"]),
+            (f"/{P}/api/settings", "settings_post_handler", ["POST"]),
+            (f"/{P}/api/computation_logs", "computation_logs_handler", ["GET"]),
+            (f"/{P}/api/memory_pools", "memory_pools_handler", ["GET"]),
+            (f"/{P}/api/memory_meltdown", "memory_meltdown_handler", ["POST"]),
+            (f"/{P}/api/meltdown_nonce", "meltdown_nonce_handler", ["GET"]),
+            (f"/{P}/api/memory_sink", "memory_sink_handler", ["GET"]),
+            (f"/{P}/api/memory_consolidate", "memory_consolidate_handler", ["POST"]),
+            (f"/{P}/api/webui_probe", "probe_handler", ["GET"]),
+            (f"/{P}/assets/logo.png", "logo_handler", ["GET"]),
+            (f"/{P}/logo.png", "logo_handler", ["GET"]),
+            (f"/{P}/dashboard", "dashboard_handler", ["GET"]),
+        ]
+        for path, handler_name, methods in webui_routes:
+            handler = getattr(wr, handler_name, None)
+            if handler is None:
+                logger.warning(
+                    "WebUI route %s skipped: handler '%s' not found"
+                    " — possible version mismatch in webui_routes.py",
+                    path, handler_name,
+                )
+                continue
+            routes.append((path, handler, methods, f"Sylanne {handler_name}"))
         for path, handler, methods, desc in routes:
             context.register_web_api(path, handler, methods, desc)
 
