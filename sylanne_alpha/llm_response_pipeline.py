@@ -131,6 +131,19 @@ class LLMResponsePipeline:
             f"Sylanne on_llm_response: len={len(cleaned)} session={session_key}"
         )
 
+        # 定时任务（cron）的 LLM 回复是内部总结，不应发送给用户
+        _platform = ""
+        _pm = getattr(event, "platform_meta", None)
+        if _pm:
+            _platform = str(getattr(_pm, "name", "") or "")
+        if not _platform:
+            _umo = str(getattr(event, "unified_msg_origin", "") or "")
+            if _umo.startswith("cron"):
+                _platform = "cron"
+        if _platform == "cron":
+            response.completion_text = ""
+            return
+
         if not cleaned.strip():
             response.completion_text = ""
             return
