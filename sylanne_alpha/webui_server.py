@@ -1446,7 +1446,7 @@ def start_webui_thread_server(
             self.end_headers()
 
         def do_GET(self) -> None:
-            global _last_diag_request
+            global _last_diag_request, _theme_preference
             if self._check_rate_limit():
                 self._send_json({"error": "rate_limited"}, status=429)
                 return
