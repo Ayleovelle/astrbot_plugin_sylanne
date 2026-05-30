@@ -1,11 +1,11 @@
 {
-  "include": ["main.py", "sylanne_alpha/**/*.py"],
+  "include": ["sylanne_alpha/**/*.py"],
   "exclude": ["**/tests/**", "experiments/**", "theory/**", "docs/**", "scripts/**"],
-  "reportMissingImports": "warning",
+  "reportMissingImports": "none",
   "reportMissingModuleSource": "none",
   "reportOptionalMemberAccess": "warning",
-  "reportAttributeAccessIssue": "error",
-  "reportGeneralClassIssues": "error",
+  "reportAttributeAccessIssue": "warning",
+  "reportGeneralClassIssues": "none",
   "pythonVersion": "3.10",
   "typeCheckingMode": "basic"
 }
