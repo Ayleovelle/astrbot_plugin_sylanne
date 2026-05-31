@@ -356,7 +356,7 @@ class EmotionalStatePlugin(Star):
         self._config = self.config
         # 会话管理：session_key → SylanneAlphaHost 映射
         self._hosts: BoundedDict = BoundedDict(maxsize=200)
-        self._background_tasks: list[asyncio.Task] = []
+        self._background_tasks: set[asyncio.Task] = set()
         # 流式回复相关缓冲区
         self._unfinished_replies: BoundedDict = BoundedDict(maxsize=200)
         self._stream_buffers: BoundedDict = BoundedDict(maxsize=200)
