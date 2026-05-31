@@ -1308,11 +1308,8 @@ class StatePersistence:
         for t in list(tasks):
             if not t.done():
                 t.cancel()
-        for t in list(tasks):
-            try:
-                await t
-            except (asyncio.CancelledError, Exception):
-                pass
+        if tasks:
+            await asyncio.gather(*list(tasks), return_exceptions=True)
         if isinstance(tasks, set):
             tasks.clear()
         elif isinstance(tasks, list):

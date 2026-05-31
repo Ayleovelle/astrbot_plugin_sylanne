@@ -877,7 +877,7 @@ class WebUIRoutes:
     # ------------------------------------------------------------------
 
     async def memory_meltdown_handler(self) -> dict[str, Any]:
-        """清除指定会话的所有记忆池。需要 token 验证（服务端 nonce 或客户端双 token）。"""
+        """清除指定会话的所有记忆池。需要 token 验证（仅服务端 nonce）。"""
         from quart import request as quart_request
 
         try:
@@ -888,15 +888,13 @@ class WebUIRoutes:
             return {"ok": False, "error": "invalid_body"}
         session = str(body.get("session", "")).strip()
         nonce = str(body.get("nonce", "") or body.get("token", "")).strip()
-        # Try server-side nonce first
+        # S4 fix: validate ONLY against server-side stored nonce — never trust
+        # client-supplied expected_token (allows trivial bypass).
         server_nonce = getattr(self._p, "_meltdown_nonces", {}).get(session, "")
-        if server_nonce and nonce == server_nonce:
-            self._p._meltdown_nonces.pop(session, None)
-        else:
-            # Fallback: client-side token verification (frontend generates + sends both)
-            expected_token = str(body.get("expected_token", "")).strip()
-            if not nonce or not expected_token or nonce != expected_token:
-                return {"ok": False, "error": "token_mismatch"}
+        if not server_nonce or not nonce or nonce != server_nonce:
+            return {"ok": False, "error": "token_mismatch"}
+        # Consume the nonce (single-use)
+        self._p._meltdown_nonces.pop(session, None)
         # Clear memory for the session
         mem_sys = (
             self._p._memory_system_for_session(session)

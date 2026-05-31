@@ -79,7 +79,7 @@ class AlphaRuntime:
         with open(tmp, "w", encoding="utf-8") as f:
             f.write(
                 json.dumps(
-                    kernel.snapshot(), ensure_ascii=False, sort_keys=True, indent=2
+                    kernel.snapshot(), ensure_ascii=False, sort_keys=True
                 )
             )
             f.flush()

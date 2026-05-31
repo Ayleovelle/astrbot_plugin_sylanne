@@ -120,11 +120,17 @@
     "default": false,
     "hint": "默认关闭；开启后 Sylanne 会用外部 LLM 模拟自己的生活，某些时刻会因为她那边发生的事主动找用户。"
   },
-  "sylanne_alpha_life_simulation_use_persona": {
-    "description": "生活模拟使用角色人设 Prompt",
+  "sylanne_alpha_life_simulation_use_custom_persona": {
+    "description": "生活模拟使用自定义人设",
     "type": "bool",
     "default": false,
-    "hint": "默认关闭；开启后生成模拟日程时会传入角色人设描述（优先 locked_persona_prompt → 缓存的 system prompt → 角色名）；关闭则使用通用默认描述。"
+    "hint": "默认关闭时自动读取 AstrBot 角色人设；开启后使用下方自定义文本覆盖，适用于想让生活中的角色和对话中的角色有差异的场景。"
+  },
+  "sylanne_alpha_life_simulation_custom_persona": {
+    "description": "生活模拟自定义人设文本",
+    "type": "string",
+    "default": "",
+    "hint": "仅在上方开关开启时生效。为生命模拟单独指定一段人设描述，覆盖 AstrBot 默认人设。最多 500 字。"
   },
   "sylanne_alpha_life_simulation_provider_id": {
     "description": "生活模拟 LLM Provider",
