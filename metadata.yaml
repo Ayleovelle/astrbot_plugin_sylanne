@@ -1,8 +1,8 @@
 name: astrbot_plugin_sylanne
 display_name: Sylanne
 desc: "Sylanne-Embodiment：不可逆的关系计算引擎。Embodiment 致力于用数学语言让对话在躯体上留下伤痕、在沉默中积累压力、在关系里长出不可撤销的形状——然后让伤痕沿着关系网络自己找路传播。"
-short_desc: "Sylanne-Embodiment 1.4.5-preview"
-version: "1.4.5-preview"
+short_desc: "Sylanne-Embodiment 1.4.5"
+version: "1.4.5"
 author: Ayleovelle
 license: AGPL-3.0-or-later
 repo: "https://github.com/Ayleovelle/astrbot_plugin_sylanne"
