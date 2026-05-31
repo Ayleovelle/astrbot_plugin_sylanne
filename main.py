@@ -137,13 +137,13 @@ from sylanne_alpha.memory_system import MemorySystem  # noqa: E402
 from sylanne_alpha.llm_request_pipeline import LLMRequestPipeline  # noqa: E402
 from sylanne_alpha.rhythm_learner import RhythmLearner  # noqa: E402
 from sylanne_alpha.proactive_scheduler import ProactiveScheduler  # noqa: E402
-from sylanne_alpha.session_context import SessionContext  # noqa: E402
+from sylanne_alpha.session_context import SessionContext, SessionStateStore  # noqa: E402
 from sylanne_alpha.social_field import SocialFieldCollector  # noqa: E402
 from sylanne_alpha.llm_response_pipeline import LLMResponsePipeline  # noqa: E402
 from sylanne_alpha.public_api import PublicAPI  # noqa: E402
 from sylanne_alpha.state_persistence import StatePersistence  # noqa: E402
 from sylanne_alpha.realtime_dispatch import RealtimeDispatch  # noqa: E402
-from sylanne_alpha.background_queue import BackgroundPostQueue  # noqa: E402
+from sylanne_alpha.background_queue import BackgroundPostQueue, BackgroundQueueState  # noqa: E402
 from sylanne_alpha.webui_routes import WebUIRoutes  # noqa: E402
 
 # 加载 WebUI dashboard HTML（从 UI/index.html）
@@ -376,16 +376,28 @@ class EmotionalStatePlugin(Star):
         self._conversation_input_epoch: BoundedDict = BoundedDict(maxsize=200)
         self._last_request_text: BoundedDict = BoundedDict(maxsize=200)
         self._user_message_withdrawals: BoundedDict = BoundedDict(maxsize=200)
-        # 后台投递队列：异步发送主动消息/分段回复
-        self._background_post_queues: BoundedDict = BoundedDict(maxsize=200)
-        self._background_post_dead_letters: BoundedDict = BoundedDict(maxsize=200)
-        self._background_post_sequence: BoundedDict = BoundedDict(maxsize=200)
-        self._background_post_latest_enqueued: BoundedDict = BoundedDict(maxsize=200)
-        self._background_post_last_committed: BoundedDict = BoundedDict(maxsize=200)
-        self._background_post_recovered_sessions: set[str] = set()
-        self._background_post_active: BoundedDict = BoundedDict(maxsize=200)
-        self._background_post_checkpoint_tasks: dict[str, asyncio.Task] = {}
-        self._background_post_worker_state: BoundedDict = BoundedDict(maxsize=200)
+        # 后台投递队列：异步发送主动消息/分段回复（状态集中在 BackgroundQueueState）
+        self._background_queue_state = BackgroundQueueState(
+            queues=BoundedDict(maxsize=200),
+            active=BoundedDict(maxsize=200),
+            dead_letters=BoundedDict(maxsize=200),
+            latest_enqueued=BoundedDict(maxsize=200),
+            last_committed=BoundedDict(maxsize=200),
+            worker_state=BoundedDict(maxsize=200),
+            checkpoint_tasks={},
+            recovered_sessions=set(),
+            sequence=BoundedDict(maxsize=200),
+        )
+        # 向后兼容别名：其他模块仍可通过 plugin._background_post_xxx 访问
+        self._background_post_queues = self._background_queue_state.queues
+        self._background_post_dead_letters = self._background_queue_state.dead_letters
+        self._background_post_sequence = self._background_queue_state.sequence
+        self._background_post_latest_enqueued = self._background_queue_state.latest_enqueued
+        self._background_post_last_committed = self._background_queue_state.last_committed
+        self._background_post_recovered_sessions = self._background_queue_state.recovered_sessions
+        self._background_post_active = self._background_queue_state.active
+        self._background_post_checkpoint_tasks = self._background_queue_state.checkpoint_tasks
+        self._background_post_worker_state = self._background_queue_state.worker_state
         self._internal_assessor_llm_inflight: int = 0
         self._pending_outreach_context: BoundedDict = BoundedDict(maxsize=50)
         self._amnesia_sessions: set[str] = set()
@@ -405,6 +417,24 @@ class EmotionalStatePlugin(Star):
         )
         self._realtime_chat_active_dispatches: BoundedDict = BoundedDict(maxsize=200)
         self._session_locks: dict[str, asyncio.Lock] = {}
+        # 集中式可变状态容器：所有 per-session 可变状态的单一来源
+        self._session_state = SessionStateStore(
+            hosts=self._hosts,
+            memory_systems=self._memory_systems,
+            conversation_buffers=self._conversation_buffers,
+            stream_buffers=self._stream_buffers,
+            stream_first_sent=self._stream_first_sent,
+            unfinished_replies=self._unfinished_replies,
+            segmented_tasks=self._segmented_tasks,
+            background_tasks=self._background_tasks,
+            last_bot_texts=self._last_bot_texts,
+            last_user_texts=self._last_user_texts,
+            last_bot_expression_time=self._last_bot_expression_time,
+            amnesia_sessions=self._amnesia_sessions,
+            proactive_candidate_sessions=self._proactive_candidate_sessions,
+            offline_buffers={},
+            session_locks=self._session_locks,
+        )
         # 构建只读服务容器，供所有子模块共享
         self._plugin_services = PluginServices(
             config=self._config,
@@ -415,16 +445,21 @@ class EmotionalStatePlugin(Star):
         )
         # 子系统初始化：各子系统持有 self 引用，通过委托模式分工
         _svc = self._plugin_services
-        self._session_ctx = SessionContext(self, services=_svc)
+        self._session_ctx = SessionContext(self, services=_svc, session_state=self._session_state)
         self._state_persistence = StatePersistence(self, services=_svc)
         self._realtime_dispatch = RealtimeDispatch(self, services=_svc)
-        self._background_queue = BackgroundPostQueue(self, services=_svc)
+        self._background_queue = BackgroundPostQueue(
+            self,
+            services=_svc,
+            state=self._background_queue_state,
+            observed_now_cb=self._observed_now,
+        )
         self._webui_routes = WebUIRoutes(self, services=_svc)
         self._memory_system = self._memory_system_for_session("default")
         # 异步评估器：调用 LLM 评估用户文本的情感维度
         self._async_assessor = AsyncAssessor(config=self._config)
-        self._llm_response_pipeline = LLMResponsePipeline(self, services=_svc)
-        self._llm_request_pipeline = LLMRequestPipeline(self, services=_svc)
+        self._llm_response_pipeline = LLMResponsePipeline(self, services=_svc, session_state=self._session_state)
+        self._llm_request_pipeline = LLMRequestPipeline(self, services=_svc, session_state=self._session_state)
         self._public_api = PublicAPI(self, services=_svc)
         # 主动发言调度器：基于身体需求和节律决定是否主动发言
         self._proactive_scheduler = ProactiveScheduler(self, services=_svc)

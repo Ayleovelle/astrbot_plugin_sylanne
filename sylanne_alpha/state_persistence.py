@@ -129,14 +129,16 @@ class StatePersistence:
     通过 self._p 委托访问插件实例。
     """
 
-    def __init__(self, plugin: Any, *, services: "PluginServices | None" = None) -> None:
+    def __init__(self, plugin: Any, *, services: "PluginServices | None" = None, session_state: Any = None) -> None:
         """初始化持久化层。
 
         Args:
             plugin: Sylanne 插件实例。
             services: 只读服务容器（可选，为 None 时从 plugin 构建）。
+            session_state: 集中式会话状态容器（可选）。
         """
         self._p = plugin
+        self._session_state = session_state
         if services is not None:
             self._services = services
         else:
@@ -163,6 +165,8 @@ class StatePersistence:
 
     def has_kv_api(self) -> bool:
         """检查 AstrBot KV 存储 API 是否可用。"""
+        if self._services.put_kv_data is not None:
+            return True
         return hasattr(self._p, "put_kv_data") and callable(self._p.put_kv_data)
 
     # ------------------------------------------------------------------
@@ -215,15 +219,36 @@ class StatePersistence:
 
     def _safe_session_key(self, session_key: str) -> str:
         """将 session_key 转换为 KV 键安全的字符串（带缓存）。"""
-        cache = getattr(self._p, "_safe_session_key_cache", None)
-        if cache is None:
-            self._p._safe_session_key_cache = {}
-            cache = self._p._safe_session_key_cache
+        if self._session_state is not None:
+            cache = self._session_state.safe_session_key_cache
+        else:
+            cache = getattr(self._p, "_safe_session_key_cache", None)
+            if cache is None:
+                self._p._safe_session_key_cache = {}
+                cache = self._p._safe_session_key_cache
         if session_key in cache:
             return cache[session_key]
         safe = session_key.replace("/", "_").replace("\\", "_")
         cache[session_key] = safe
         return safe
+
+    def _kv_put(self):
+        """获取 KV 写入回调（优先 services，回退 plugin）。"""
+        if self._services.put_kv_data is not None:
+            return self._services.put_kv_data
+        return getattr(self._p, "put_kv_data", None)
+
+    def _kv_get(self):
+        """获取 KV 读取回调（优先 services，回退 plugin）。"""
+        if self._services.get_kv_data is not None:
+            return self._services.get_kv_data
+        return getattr(self._p, "get_kv_data", None)
+
+    def _kv_delete(self):
+        """获取 KV 删除回调（优先 services，回退 plugin）。"""
+        if self._services.delete_kv_data is not None:
+            return self._services.delete_kv_data
+        return getattr(self._p, "delete_kv_data", None)
 
     # ------------------------------------------------------------------
     # Kernel 持久化
@@ -263,14 +288,16 @@ class StatePersistence:
                 kv_key = self.kernel_kv_key(session_key)
                 # 保存备份（上一次成功的数据）
                 backup_key = f"{kv_key}_backup"
+                _get_fn = self._kv_get()
+                _put_fn = self._kv_put()
                 try:
-                    existing = await self._p.get_kv_data(kv_key, None)
+                    existing = await _get_fn(kv_key, None)
                     if existing and isinstance(existing, dict):
-                        await self._p.put_kv_data(backup_key, existing)
+                        await _put_fn(backup_key, existing)
                 except Exception:
                     pass  # 备份失败不阻塞主路径
 
-                await self._p.put_kv_data(kv_key, partial_snapshot)
+                await _put_fn(kv_key, partial_snapshot)
             except Exception as e:
                 logger.warning(f"Sylanne kernel KV persist: {e}", exc_info=True)
         # 始终写文件（向后兼容/回退），offload 到线程避免阻塞事件循环
@@ -344,7 +371,8 @@ class StatePersistence:
         """
         if self.has_kv_api():
             try:
-                await self._p.put_kv_data(self.buffer_kv_key(session_key), buf_dict)
+                _put_fn = self._kv_put()
+                await _put_fn(self.buffer_kv_key(session_key), buf_dict)
             except Exception as e:
                 logger.warning(f"Sylanne buffer KV persist: {e}", exc_info=True)
         # 始终写文件（向后兼容/回退），offload 到线程避免阻塞事件循环
@@ -367,7 +395,8 @@ class StatePersistence:
         """
         if self.has_kv_api():
             try:
-                data = await self._p.get_kv_data(self.buffer_kv_key(session_key), None)
+                _get_fn = self._kv_get()
+                data = await _get_fn(self.buffer_kv_key(session_key), None)
                 if data and isinstance(data, dict):
                     return data
             except Exception as e:
@@ -404,10 +433,16 @@ class StatePersistence:
     async def _do_buffer_persist(self, session_key: str) -> None:
         """实际执行 buffer 持久化（由 schedule_buffer_persist 延迟触发）。"""
         self._buffer_persist_timers.pop(session_key, None)
-        buf = self._p._conversation_buffers.get(session_key)
+        if self._session_state is not None:
+            buf = self._session_state.conversation_buffers.get(session_key)
+        else:
+            buf = self._p._conversation_buffers.get(session_key)
         if not buf:
             return
-        host = self._p._hosts.get(session_key)
+        if self._session_state is not None:
+            host = self._session_state.hosts.get(session_key)
+        else:
+            host = self._p._hosts.get(session_key)
         if not host or not hasattr(host, "runtime"):
             return
         buf_dict = buf.to_dict()
@@ -425,12 +460,18 @@ class StatePersistence:
         """
         from .memory_system import ConversationBuffer
 
-        for sk, host in list(self._p._hosts.items()):
+        if self._session_state is not None:
+            hosts = self._session_state.hosts
+            conv_buffers = self._session_state.conversation_buffers
+        else:
+            hosts = self._p._hosts
+            conv_buffers = self._p._conversation_buffers
+        for sk, host in list(hosts.items()):
             if not hasattr(host, "runtime"):
                 continue
             data = host.runtime.load_buffer(sk)
             if data and isinstance(data, dict):
-                self._p._conversation_buffers[sk] = ConversationBuffer.from_dict(data)
+                conv_buffers[sk] = ConversationBuffer.from_dict(data)
 
     # ------------------------------------------------------------------
     # 引擎状态：加载/保存/删除（情感核心）
@@ -461,7 +502,7 @@ class StatePersistence:
         if session_key in cache:
             return cache[session_key]
         key = self.kv_key(session_key)
-        get_kv = getattr(self._p, "get_kv_data", None)
+        get_kv = self._kv_get()
         if get_kv and callable(get_kv):
             data = await get_kv(key, None)
             # CRC32 完整性校验
@@ -660,9 +701,12 @@ class StatePersistence:
         self._p._sylanne_memory_cache = cache
         cache[session_key] = state
         if isinstance(state, MemorySystem):
-            self._p._memory_systems[session_key] = state
+            if self._session_state is not None:
+                self._session_state.memory_systems[session_key] = state
+            else:
+                self._p._memory_systems[session_key] = state
         kv_key = self.sylanne_memory_kv_key(session_key)
-        put_fn = getattr(self._p, "put_kv_data", None)
+        put_fn = self._kv_put()
         if put_fn and callable(put_fn):
             data = state.to_dict() if hasattr(state, "to_dict") else state
             await put_fn(kv_key, data)
@@ -714,7 +758,10 @@ class StatePersistence:
         if has_content(cached_state):
             return cache[session_key]
         # 检查活跃记忆系统
-        system_cache = getattr(self._p, "_memory_systems", {}) or {}
+        if self._session_state is not None:
+            system_cache = self._session_state.memory_systems
+        else:
+            system_cache = getattr(self._p, "_memory_systems", {}) or {}
         live_state = (
             system_cache.get(session_key) if isinstance(system_cache, dict) else None
         )
@@ -722,8 +769,8 @@ class StatePersistence:
             return live_state
         # 从 KV 存储加载
         kv_key = self.sylanne_memory_kv_key(session_key)
-        get_fn = getattr(self._p, "get_kv_data", None)
-        put_fn = getattr(self._p, "put_kv_data", None)
+        get_fn = self._kv_get()
+        put_fn = self._kv_put()
         if get_fn and callable(get_fn):
             data = await get_fn(kv_key, None)
             if data is not None:
@@ -736,7 +783,10 @@ class StatePersistence:
                 }.issubset(data.keys()):
                     try:
                         state = MemorySystem.create_from_dict(data)
-                        self._p._memory_systems[session_key] = state
+                        if self._session_state is not None:
+                            self._session_state.memory_systems[session_key] = state
+                        else:
+                            self._p._memory_systems[session_key] = state
                         cache[session_key] = state
                         return state
                     except Exception as e:
@@ -781,11 +831,15 @@ class StatePersistence:
                     logger.debug(f"Sylanne skip: {e}")
         # 最后回退：从 kernel body.memory 中加载
         try:
-            host = self._p._host(session_key)
+            _host_fn = self._services.host_fn or self._p._host
+            host = _host_fn(session_key)
             data = host.kernel.body.memory.get("_memory_system")
             if isinstance(data, dict):
                 state = MemorySystem.create_from_dict(data)
-                self._p._memory_systems[session_key] = state
+                if self._session_state is not None:
+                    self._session_state.memory_systems[session_key] = state
+                else:
+                    self._p._memory_systems[session_key] = state
                 cache[session_key] = state
                 return state
         except Exception as e:
@@ -806,7 +860,7 @@ class StatePersistence:
         cache = self._p._sylanne_memory_cache
         cache.pop(session_key, None)
         kv_key = self.sylanne_memory_kv_key(session_key)
-        delete_fn = getattr(self._p, "delete_kv_data", None)
+        delete_fn = self._kv_delete()
         if delete_fn and callable(delete_fn):
             await delete_fn(kv_key)
 

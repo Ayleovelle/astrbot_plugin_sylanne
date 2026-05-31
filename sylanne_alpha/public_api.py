@@ -166,10 +166,10 @@ class PublicAPI:
     # Helper accessors
     # ------------------------------------------------------------------
     def _host(self, session_key: str) -> Any:
-        return self._p._host(session_key)
+        return self._services.host_fn(session_key) if self._services.host_fn else self._p._host(session_key)
 
     def _session_key(self, event: Any = None, session_key: str = "") -> str:
-        return self._p._session_key(event, session_key)
+        return self._services.session_key_fn(event, session_key) if self._services.session_key_fn else self._p._session_key(event, session_key)
 
     # ------------------------------------------------------------------
     # Observatory / Diagnostics group
@@ -228,21 +228,21 @@ class PublicAPI:
                 "id": "sylanne_alpha_realtime_chat_enabled",
                 "title": "即时聊天",
                 "enabled": bool(
-                    self._p._config.get("sylanne_alpha_realtime_chat_enabled")
+                    self._services.config.get("sylanne_alpha_realtime_chat_enabled")
                 ),
             },
             {
                 "id": "sylanne_alpha_proactive_dispatch_enabled",
                 "title": "主动发言",
                 "enabled": bool(
-                    self._p._config.get("sylanne_alpha_proactive_dispatch_enabled")
+                    self._services.config.get("sylanne_alpha_proactive_dispatch_enabled")
                 ),
             },
             {
                 "id": "sylanne_alpha_embedding_memory_enabled",
                 "title": "向量记忆",
                 "enabled": bool(
-                    self._p._config.get("sylanne_alpha_embedding_memory_enabled")
+                    self._services.config.get("sylanne_alpha_embedding_memory_enabled")
                 ),
             },
         ]
@@ -271,7 +271,7 @@ class PublicAPI:
             "switches": {
                 "paused": body["immunity"]["paused"],
                 "realtime": bool(
-                    self._p._config.get("sylanne_alpha_realtime_chat_enabled")
+                    self._services.config.get("sylanne_alpha_realtime_chat_enabled")
                 ),
             },
             "cards": cards,

@@ -414,8 +414,9 @@ class LLMRequestPipeline:
                 prefs["style"] = style
                 break
 
-    def __init__(self, plugin: Any, *, services: "PluginServices | None" = None) -> None:
+    def __init__(self, plugin: Any, *, services: "PluginServices | None" = None, session_state: Any = None) -> None:
         self._p = plugin
+        self._session_state = session_state
         if services is not None:
             self._services = services
         else:
@@ -424,25 +425,31 @@ class LLMRequestPipeline:
                 logger=getattr(plugin, "logger", None),
                 context=getattr(plugin, "context", None),
             )
-        if not hasattr(self._p, "_cached_system_prompts"):
-            self._p._cached_system_prompts = {}
+        if self._session_state is not None:
+            pass  # cached_system_prompts lives in session_state
+        else:
+            if not hasattr(self._p, "_cached_system_prompts"):
+                self._p._cached_system_prompts = {}
 
     def _most_recent_host_key(self) -> str:
         """返回最近活跃的 host session_key（按 last_event.now 排序）。
 
         若所有 host 的 last_event.now 均为 0，回退到字典首项。
-        调用前需确保 p._hosts 非空。
+        调用前需确保 hosts 非空。
         """
-        p = self._p
+        if self._session_state is not None:
+            hosts = self._session_state.hosts
+        else:
+            hosts = self._p._hosts
         best_key = ""
         best_time = 0.0
-        for sk, host in p._hosts.items():
+        for sk, host in hosts.items():
             last_now = float(host.kernel.last_event.get("now") or 0.0)
             if last_now > best_time:
                 best_time = last_now
                 best_key = sk
         if not best_key:
-            best_key = next(iter(p._hosts))
+            best_key = next(iter(hosts))
         return best_key
 
     def _cache_system_prompt(
@@ -460,7 +467,10 @@ class LLMRequestPipeline:
         )
         system_prompt = str(source or "").strip()
         if system_prompt:
-            self._p._cached_system_prompts[session_key] = system_prompt
+            if self._session_state is not None:
+                self._session_state.cached_system_prompts[session_key] = system_prompt
+            else:
+                self._p._cached_system_prompts[session_key] = system_prompt
 
     def _life_sim_persona_getter(self, session_key: str = "") -> str:
         """返回生命模拟器使用的人格描述。
@@ -487,7 +497,10 @@ class LLMRequestPipeline:
         if locked:
             return locked[:500]
 
-        cached_prompts = getattr(self._p, "_cached_system_prompts", {})
+        if self._session_state is not None:
+            cached_prompts = self._session_state.cached_system_prompts
+        else:
+            cached_prompts = getattr(self._p, "_cached_system_prompts", {})
         if session_key:
             cached = str(cached_prompts.get(session_key, "") or "").strip()
         else:

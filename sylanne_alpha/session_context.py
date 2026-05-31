@@ -39,6 +39,79 @@ from sylanne_alpha.memory_system import ConversationBuffer, MemorySystem
 
 
 # ---------------------------------------------------------------------------
+# SessionStateStore -- 集中管理所有可变的 per-session 状态
+# ---------------------------------------------------------------------------
+
+
+class SessionStateStore:
+    """Centralized mutable per-session state container.
+
+    Holds all the dictionaries/sets that were previously scattered as
+    self._xxx attributes on the plugin instance.  Pipeline modules receive
+    a reference to this store instead of reaching through self._p._xxx.
+    """
+
+    __slots__ = (
+        "hosts",
+        "memory_systems",
+        "conversation_buffers",
+        "stream_buffers",
+        "stream_first_sent",
+        "unfinished_replies",
+        "segmented_tasks",
+        "background_tasks",
+        "last_bot_texts",
+        "last_user_texts",
+        "last_bot_expression_time",
+        "amnesia_sessions",
+        "proactive_candidate_sessions",
+        "offline_buffers",
+        "session_locks",
+        "safe_session_key_cache",
+        "cached_system_prompts",
+    )
+
+    def __init__(
+        self,
+        *,
+        hosts=None,
+        memory_systems=None,
+        conversation_buffers=None,
+        stream_buffers=None,
+        stream_first_sent=None,
+        unfinished_replies=None,
+        segmented_tasks=None,
+        background_tasks=None,
+        last_bot_texts=None,
+        last_user_texts=None,
+        last_bot_expression_time=None,
+        amnesia_sessions=None,
+        proactive_candidate_sessions=None,
+        offline_buffers=None,
+        session_locks=None,
+        safe_session_key_cache=None,
+        cached_system_prompts=None,
+    ):
+        self.hosts = hosts if hosts is not None else {}
+        self.memory_systems = memory_systems if memory_systems is not None else {}
+        self.conversation_buffers = conversation_buffers if conversation_buffers is not None else {}
+        self.stream_buffers = stream_buffers if stream_buffers is not None else {}
+        self.stream_first_sent = stream_first_sent if stream_first_sent is not None else {}
+        self.unfinished_replies = unfinished_replies if unfinished_replies is not None else {}
+        self.segmented_tasks = segmented_tasks if segmented_tasks is not None else {}
+        self.background_tasks = background_tasks if background_tasks is not None else set()
+        self.last_bot_texts = last_bot_texts if last_bot_texts is not None else {}
+        self.last_user_texts = last_user_texts if last_user_texts is not None else {}
+        self.last_bot_expression_time = last_bot_expression_time if last_bot_expression_time is not None else {}
+        self.amnesia_sessions = amnesia_sessions if amnesia_sessions is not None else set()
+        self.proactive_candidate_sessions = proactive_candidate_sessions if proactive_candidate_sessions is not None else {}
+        self.offline_buffers = offline_buffers if offline_buffers is not None else {}
+        self.session_locks = session_locks if session_locks is not None else {}
+        self.safe_session_key_cache = safe_session_key_cache if safe_session_key_cache is not None else {}
+        self.cached_system_prompts = cached_system_prompts if cached_system_prompts is not None else {}
+
+
+# ---------------------------------------------------------------------------
 # Item 153: 关系仪式注册表（RitualRegistry）
 # ---------------------------------------------------------------------------
 
@@ -327,14 +400,22 @@ class SessionContext:
     host 生命周期、记忆系统初始化）从主插件类中解耦出来。
     """
 
-    def __init__(self, plugin: Any, *, services: "PluginServices | None" = None) -> None:
+    def __init__(
+        self,
+        plugin: Any,
+        *,
+        services: "PluginServices | None" = None,
+        session_state: "SessionStateStore | None" = None,
+    ) -> None:
         """初始化会话上下文。
 
         Args:
             plugin: Sylanne 插件实例，通过 self._p 访问其内部状态。
             services: 只读服务容器（可选，为 None 时从 plugin 构建）。
+            session_state: 集中式可变状态容器（可选，为 None 时回退到 self._p 属性）。
         """
         self._p = plugin
+        self._session_state = session_state
         if services is not None:
             self._services = services
         else:
@@ -538,7 +619,10 @@ class SessionContext:
         Returns:
             该会话对应的 asyncio.Lock 实例。
         """
-        locks = self._p._session_locks
+        if self._session_state is not None:
+            locks = self._session_state.session_locks
+        else:
+            locks = self._p._session_locks
         if session_key not in locks:
             locks[session_key] = asyncio.Lock()
             # 锁字典过大时清理未使用的旧锁，防止内存泄漏
@@ -569,10 +653,13 @@ class SessionContext:
         Returns:
             文件系统安全的会话标识。
         """
-        cache = getattr(self._p, "_safe_session_key_cache", None)
-        if cache is None:
-            self._p._safe_session_key_cache = {}
-            cache = self._p._safe_session_key_cache
+        if self._session_state is not None:
+            cache = self._session_state.safe_session_key_cache
+        else:
+            cache = getattr(self._p, "_safe_session_key_cache", None)
+            if cache is None:
+                self._p._safe_session_key_cache = {}
+                cache = self._p._safe_session_key_cache
         if session_key in cache:
             return cache[session_key]
         # 移除文件系统不安全字符
@@ -638,10 +725,13 @@ class SessionContext:
         """
         if not session_key:
             session_key = "default"
-        systems = getattr(self._p, "_memory_systems", None)
-        if systems is None:
-            self._p._memory_systems = {}
-            systems = self._p._memory_systems
+        if self._session_state is not None:
+            systems = self._session_state.memory_systems
+        else:
+            systems = getattr(self._p, "_memory_systems", None)
+            if systems is None:
+                self._p._memory_systems = {}
+                systems = self._p._memory_systems
         if session_key not in systems:
             systems[session_key] = MemorySystem()
         return systems[session_key]
@@ -739,16 +829,22 @@ class SessionContext:
                 sessions.append(text)
 
         add(requested)
-        for key in getattr(self._p, "_hosts", {}).keys():
+        if self._session_state is not None:
+            hosts_dict = self._session_state.hosts
+            memory_dict = self._session_state.memory_systems
+        else:
+            hosts_dict = getattr(self._p, "_hosts", {})
+            memory_dict = getattr(self._p, "_memory_systems", {})
+        for key in hosts_dict.keys():
             add(key)
-        for key in getattr(self._p, "_memory_systems", {}).keys():
+        for key in memory_dict.keys():
             add(key)
         cache = getattr(self._p, "_sylanne_memory_cache", {}) or {}
         if isinstance(cache, dict):
             for key in cache.keys():
                 add(key)
         # 从 runtime 导出中提取持久化过的 session
-        for host in list(getattr(self._p, "_hosts", {}).values()):
+        for host in list(hosts_dict.values()):
             runtime = getattr(host, "runtime", None)
             export_all = getattr(runtime, "export_all", None)
             if not callable(export_all):
@@ -798,13 +894,19 @@ class SessionContext:
         """
         if not session_key:
             session_key = "default"
-        if not hasattr(self._p, "_hosts"):
-            self._p._hosts = {}
-        if session_key not in self._p._hosts:
+        if self._session_state is not None:
+            hosts = self._session_state.hosts
+            conv_buffers = self._session_state.conversation_buffers
+        else:
+            if not hasattr(self._p, "_hosts"):
+                self._p._hosts = {}
+            hosts = self._p._hosts
+            conv_buffers = self._p._conversation_buffers
+        if session_key not in hosts:
             # LRU 驱逐：超容量时持久化并移除最旧的 host
-            if len(self._p._hosts) >= self._p._MAX_HOSTS:
-                oldest_key = next(iter(self._p._hosts))
-                old_host = self._p._hosts.pop(oldest_key)
+            if len(hosts) >= self._p._MAX_HOSTS:
+                oldest_key = next(iter(hosts))
+                old_host = hosts.pop(oldest_key)
                 from sylanne_alpha.utils import safe_ensure_future
                 safe_ensure_future(
                     self._p._state_persistence.persist_kernel(oldest_key, old_host),
@@ -846,19 +948,19 @@ class SessionContext:
                         self._p._state_persistence.persist_kernel(session_key, host),
                         name=f"hydrate_persist_{session_key}",
                     )
-            self._p._hosts[session_key] = host
+            hosts[session_key] = host
             # 恢复对话缓冲区（文件回退；KV 保持同步）
-            if session_key not in self._p._conversation_buffers:
+            if session_key not in conv_buffers:
                 buf_data = host.runtime.load_buffer(session_key)
                 if buf_data and isinstance(buf_data, dict):
-                    self._p._conversation_buffers[session_key] = (
+                    conv_buffers[session_key] = (
                         ConversationBuffer.from_dict(buf_data)
                     )
         else:
             # 已存在：移到末尾更新 LRU 顺序
-            host = self._p._hosts.pop(session_key)
-            self._p._hosts[session_key] = host
-        return self._p._hosts[session_key]
+            host = hosts.pop(session_key)
+            hosts[session_key] = host
+        return hosts[session_key]
 
     # ------------------------------------------------------------------
     # 离线消息缓冲（Item 107）
@@ -875,10 +977,13 @@ class SessionContext:
         """
         if not session_key:
             session_key = "default"
-        buffers = getattr(self._p, "_offline_buffers", None)
-        if buffers is None:
-            self._p._offline_buffers = {}
-            buffers = self._p._offline_buffers
+        if self._session_state is not None:
+            buffers = self._session_state.offline_buffers
+        else:
+            buffers = getattr(self._p, "_offline_buffers", None)
+            if buffers is None:
+                self._p._offline_buffers = {}
+                buffers = self._p._offline_buffers
         if session_key not in buffers:
             buffers[session_key] = OfflineBuffer()
         return buffers[session_key]

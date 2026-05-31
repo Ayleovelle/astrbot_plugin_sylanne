@@ -29,6 +29,14 @@ class PluginServices:
         put_kv_data: 持久化 KV 写入回调（async callable）。
         get_kv_data: 持久化 KV 读取回调（async callable）。
         delete_kv_data: 持久化 KV 删除回调（async callable）。
+        session_key_fn: 从事件对象派生 session_key 的回调。
+        host_fn: 获取指定 session 的 Host 实例的回调。
+        schedule_buffer_persist_fn: 调度防抖 buffer 持久化的回调。
+        has_conversation_manager_fn: 检查 ConversationManager 是否可用。
+        sync_message_to_conv_mgr_fn: 将消息同步到 ConversationManager（async）。
+        observe_response_fn: 观测 bot 回复的回调（async）。
+        astrbot_message_fn: 构建 AstrBot 消息对象的回调。
+        observed_now_fn: 获取当前观测时间的回调（支持模拟时间）。
     """
 
     config: dict = field(default_factory=dict)
@@ -39,3 +47,12 @@ class PluginServices:
     put_kv_data: Optional[Callable[..., Any]] = None
     get_kv_data: Optional[Callable[..., Any]] = None
     delete_kv_data: Optional[Callable[..., Any]] = None
+    # Phase 4 callbacks: replace self._p method calls
+    session_key_fn: Optional[Callable[..., str]] = None
+    host_fn: Optional[Callable[..., Any]] = None
+    schedule_buffer_persist_fn: Optional[Callable[..., None]] = None
+    has_conversation_manager_fn: Optional[Callable[[], bool]] = None
+    sync_message_to_conv_mgr_fn: Optional[Callable[..., Any]] = None
+    observe_response_fn: Optional[Callable[..., Any]] = None
+    astrbot_message_fn: Optional[Callable[[str], Any]] = None
+    observed_now_fn: Optional[Callable[[], float]] = None

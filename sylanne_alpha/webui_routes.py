@@ -356,7 +356,7 @@ class WebUIRoutes:
         schema = self._p._load_conf_schema()
         values = {}
         for key in schema:
-            values[key] = self._p._config.get(key, schema[key].get("default"))
+            values[key] = self._services.config.get(key, schema[key].get("default"))
         return {
             "schema": schema,
             "values": values,
@@ -448,13 +448,13 @@ class WebUIRoutes:
                     continue
             else:
                 value = str(value)
-            self._p._config[key] = value
+            self._services.config[key] = value
             updated.append(key)
         # Persist if possible
         config = self._services.config
         if isinstance(config, dict):
             for key in updated:
-                config[key] = self._p._config[key]
+                config[key] = self._services.config[key]
         if hasattr(config, "save_config"):
             config.save_config()
         self._p._start_webui_if_enabled()
@@ -1233,9 +1233,9 @@ class WebUIRoutes:
         import urllib.error
         import urllib.request
 
-        enabled = self._p._cfg_bool("sylanne_webui_enabled", False)
-        host = str(self._p._cfg("sylanne_webui_host", "127.0.0.1") or "127.0.0.1")
-        port = self._p._cfg_int("sylanne_webui_port", 2718)
+        enabled = self._services.config.get("sylanne_webui_enabled", False)
+        host = str(self._services.config.get("sylanne_webui_host", "127.0.0.1") or "127.0.0.1")
+        port = int(self._services.config.get("sylanne_webui_port", 2718) or 2718)
         expected_runtime = self._p._webui_runtime_info()
         stopped: list[str] = []
         module_count_before = len(self._p._iter_loaded_webui_server_modules())

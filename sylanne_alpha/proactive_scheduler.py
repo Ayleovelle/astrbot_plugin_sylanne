@@ -49,8 +49,9 @@ class ProactiveScheduler:
       - 通过 host.on_proactive_check 与计算栈交互
     """
 
-    def __init__(self, plugin: Any, *, services: "PluginServices | None" = None) -> None:
+    def __init__(self, plugin: Any, *, services: "PluginServices | None" = None, session_state: Any = None) -> None:
         self._p = plugin
+        self._session_state = session_state
         if services is not None:
             self._services = services
         else:
@@ -187,11 +188,18 @@ class ProactiveScheduler:
         if not cfg.get("enable_proactive_speech_dispatch"):
             return "dispatch_disabled"
         now = (
-            self._p._observed_now()
-            if callable(self._p._observed_now)
-            else self._p._observed_now
+            self._services.observed_now_fn()
+            if self._services.observed_now_fn
+            else (
+                self._p._observed_now()
+                if callable(self._p._observed_now)
+                else self._p._observed_now
+            )
         )
-        candidates = self._p._proactive_candidate_sessions
+        if self._session_state is not None:
+            candidates = self._session_state.proactive_candidate_sessions
+        else:
+            candidates = self._p._proactive_candidate_sessions
         sk = ""
         if event_or_session is not None:
             sk = str(getattr(event_or_session, "unified_msg_origin", "") or "")
@@ -207,7 +215,10 @@ class ProactiveScheduler:
         )
         cooldown = float(cfg.get("proactive_speech_dispatch_cooldown_seconds", 1800.0))
         # 人格驱动硬下限：expression_drive 高→下限低（最低60s），低→下限高（最高300s）
-        host = self._p._hosts.get(sk)
+        if self._session_state is not None:
+            host = self._session_state.hosts.get(sk)
+        else:
+            host = self._p._hosts.get(sk)
         _expression_drive = 0.5
         if host and hasattr(host.kernel, "_personality"):
             _p = host.kernel._personality() if callable(getattr(host.kernel, "_personality", None)) else {}
@@ -234,7 +245,10 @@ class ProactiveScheduler:
             扫描结果字典，包含 checked（检查数）和 dispatched（发送数）。
         """
         self.ensure_state()
-        candidates = dict(self._p._proactive_candidate_sessions)
+        if self._session_state is not None:
+            candidates = dict(self._session_state.proactive_candidate_sessions)
+        else:
+            candidates = dict(self._p._proactive_candidate_sessions)
         checked = 0
         dispatched = 0
         for sk, info in candidates.items():
@@ -279,7 +293,7 @@ class ProactiveScheduler:
             )
             or "default"
         )
-        host = self._p._host(sk)
+        host = self._services.host_fn(sk) if self._services.host_fn else self._p._host(sk)
         surface = host.diagnostics()
         return proactive_decision(surface)
 

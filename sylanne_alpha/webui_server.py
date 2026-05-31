@@ -3068,8 +3068,9 @@ class WebUILifecycle:
     - schedule_listener_takeover(): 延迟接管（等待旧模块完全卸载）
     """
 
-    def __init__(self, plugin: Any, *, services: "PluginServices | None" = None) -> None:
+    def __init__(self, plugin: Any, *, services: "PluginServices | None" = None, session_state: Any = None) -> None:
         self._p = plugin
+        self._session_state = session_state
         if services is not None:
             self._services = services
         else:
@@ -3084,7 +3085,7 @@ class WebUILifecycle:
 
         幂等设计：若已有活跃的 task 或 thread 则跳过。
         """
-        if not self._p._cfg_bool("sylanne_webui_enabled", False):
+        if not self._services.config.get("sylanne_webui_enabled", False):
             return
         self.publish_active_plugin()
         webui_mod = self._current_webui_module_ref()
@@ -3096,9 +3097,9 @@ class WebUILifecycle:
             and webui_mod._httpd_thread.is_alive()
         ):
             return
-        webui_host = str(self._p._cfg("sylanne_webui_host", "127.0.0.1") or "127.0.0.1")
-        webui_port = self._p._cfg_int("sylanne_webui_port", 2718)
-        token = _ensure_token(self._p._config or {})
+        webui_host = str(self._services.config.get("sylanne_webui_host", "127.0.0.1") or "127.0.0.1")
+        webui_port = int(self._services.config.get("sylanne_webui_port", 2718) or 2718)
+        token = _ensure_token(self._services.config or {})
         self._services.logger.info(f"Sylanne WebUI token: {token}")
         try:
             start_webui_background(self._p, host=webui_host, port=webui_port)
@@ -3368,7 +3369,7 @@ class WebUILifecycle:
         return stopped
 
     def schedule_listener_takeover(self) -> None:
-        if not self._p._cfg_bool("sylanne_webui_enabled", False):
+        if not self._services.config.get("sylanne_webui_enabled", False):
             return
         try:
             loop = asyncio.get_running_loop()
@@ -3385,7 +3386,10 @@ class WebUILifecycle:
             self.start_if_enabled()
 
         task = loop.create_task(_takeover())
-        self._p._background_tasks.add(task)
+        if self._session_state is not None:
+            self._session_state.background_tasks.add(task)
+        else:
+            self._p._background_tasks.add(task)
 
     def _current_webui_module_ref(self) -> Any:
         """Return the current webui_server module reference from sys.modules."""
