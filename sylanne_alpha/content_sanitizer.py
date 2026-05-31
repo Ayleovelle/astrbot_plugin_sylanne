@@ -85,12 +85,12 @@ _SENSITIVE_SENTENCE = re.compile(
 # 替换标签映射
 # ---------------------------------------------------------------------------
 
-_TAG_INTIMATE = "[亲密互动]"
-_TAG_BODY = "[身体接触]"
+_TAG_INTIMATE = "[情感互动]"
+_TAG_BODY = "[身体描写已省略]"
 _TAG_EMOTION = "[情感表达]"
-_TAG_ADULT = "[成人内容]"
-_TAG_VIOLENCE = "[暴力描写]"
-_TAG_SENSITIVE = "[敏感内容]"
+_TAG_ADULT = "[内容已省略]"
+_TAG_VIOLENCE = "[内容已省略]"
+_TAG_SENSITIVE = "[内容已省略]"
 
 _VIOLENCE_PATTERN = re.compile(f"(?:{_VIOLENCE_ZH})", re.IGNORECASE)
 _SEXUAL_PATTERN = re.compile(
