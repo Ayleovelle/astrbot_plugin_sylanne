@@ -444,6 +444,7 @@ class EmotionalStatePlugin(Star):
             proactive_candidate_sessions=self._proactive_candidate_sessions,
             offline_buffers={},
             session_locks=self._session_locks,
+            last_understanding_closed_loop=self._last_understanding_closed_loop,
         )
 
     # ------------------------------------------------------------------
@@ -491,7 +492,7 @@ class EmotionalStatePlugin(Star):
         self._async_assessor = AsyncAssessor(config=self._config)
         self._llm_response_pipeline = LLMResponsePipeline(self, services=_svc, session_state=self._session_state)
         self._llm_request_pipeline = LLMRequestPipeline(self, services=_svc, session_state=self._session_state)
-        self._public_api = PublicAPI(self, services=_svc)
+        self._public_api = PublicAPI(self, services=_svc, session_state=self._session_state)
         # 主动发言调度器：基于身体需求和节律决定是否主动发言
         self._proactive_scheduler = ProactiveScheduler(self, services=_svc)
         self._register_web_apis(context)
@@ -524,78 +525,56 @@ class EmotionalStatePlugin(Star):
         self._webui_lifecycle.start_if_enabled()
         self._webui_lifecycle.schedule_listener_takeover()
 
+    # ------------------------------------------------------------------
+    # Declarative route table: (sub_path, handler_name, methods, description)
+    #   handler_name is resolved via getattr on self first, then self._webui_routes.
+    # ------------------------------------------------------------------
+    _WEB_API_ROUTES: list[tuple[str, str, list[str], str]] = [
+        # Core plugin routes (handlers on self)
+        ("observatory-status", "_observatory_route_handler", ["GET"], "Sylanne observatory readonly status"),
+        ("memory-settings", "_memory_settings_get_handler", ["GET"], "Sylanne memory settings page data"),
+        ("memory-settings", "_memory_settings_post_handler", ["POST"], "Update Sylanne memory settings"),
+        ("lineage-observatory", "_lineage_observatory_handler", ["GET"], "Sylanne lineage observatory readonly"),
+        # WebUI routes (handlers on self._webui_routes)
+        ("webui", "page_handler", ["GET"], "Sylanne page_handler"),
+        ("api/state", "state_handler", ["GET"], "Sylanne state_handler"),
+        ("api/settings", "settings_get_handler", ["GET"], "Sylanne settings_get_handler"),
+        ("api/settings", "settings_post_handler", ["POST"], "Sylanne settings_post_handler"),
+        ("api/computation_logs", "computation_logs_handler", ["GET"], "Sylanne computation_logs_handler"),
+        ("api/memory_pools", "memory_pools_handler", ["GET"], "Sylanne memory_pools_handler"),
+        ("api/memory_meltdown", "memory_meltdown_handler", ["POST"], "Sylanne memory_meltdown_handler"),
+        ("api/meltdown_nonce", "meltdown_nonce_handler", ["GET"], "Sylanne meltdown_nonce_handler"),
+        ("api/memory_sink", "memory_sink_handler", ["GET"], "Sylanne memory_sink_handler"),
+        ("api/memory_consolidate", "memory_consolidate_handler", ["POST"], "Sylanne memory_consolidate_handler"),
+        ("api/webui_probe", "probe_handler", ["GET"], "Sylanne probe_handler"),
+        ("assets/logo.png", "logo_handler", ["GET"], "Sylanne logo_handler"),
+        ("logo.png", "logo_handler", ["GET"], "Sylanne logo_handler"),
+        ("dashboard", "dashboard_handler", ["GET"], "Sylanne dashboard_handler"),
+        ("api/config_presets", "config_presets_handler", ["GET"], "Sylanne config_presets_handler"),
+        ("api/export_data", "export_data_handler", ["GET"], "Sylanne export_data_handler"),
+        ("api/purge_data", "purge_data_handler", ["DELETE"], "Sylanne purge_data_handler"),
+        ("health", "health_handler", ["GET"], "Sylanne health_handler"),
+        ("api/error_stats", "error_stats_handler", ["GET"], "Sylanne error_stats_handler"),
+        ("api/config_export", "config_export_handler", ["GET"], "Sylanne config_export_handler"),
+        ("api/config_import", "config_import_handler", ["POST"], "Sylanne config_import_handler"),
+        ("api/widget-state", "widget_state_handler", ["GET"], "Sylanne widget_state_handler"),
+    ]
+
     def _register_web_apis(self, context: Any) -> None:
-        """向 AstrBot 注册所有 WebUI HTTP 路由（getattr 延迟解析，防版本不一致崩溃）。"""
+        """向 AstrBot 注册所有 WebUI HTTP 路由（基于 _WEB_API_ROUTES 声明式路由表）。"""
         if not hasattr(context, "register_web_api"):
             return
-        P = PLUGIN_NAME
-        wr = self._webui_routes
-
-        # self 上的路由（版本一致性风险低，直接引用）
-        core_routes: list[tuple[str, Any, list[str], str]] = [
-            (
-                f"/{P}/observatory-status",
-                self._observatory_route_handler,
-                ["GET"],
-                "Sylanne observatory readonly status",
-            ),
-            (
-                f"/{P}/memory-settings",
-                self._memory_settings_get_handler,
-                ["GET"],
-                "Sylanne memory settings page data",
-            ),
-            (
-                f"/{P}/memory-settings",
-                self._memory_settings_post_handler,
-                ["POST"],
-                "Update Sylanne memory settings",
-            ),
-            (
-                f"/{P}/lineage-observatory",
-                self._lineage_observatory_handler,
-                ["GET"],
-                "Sylanne lineage observatory readonly",
-            ),
-        ]
-        for path, handler, methods, desc in core_routes:
-            context.register_web_api(path, handler, methods, desc)
-
-        # WebUI 路由（跨文件引用，用字符串名 + getattr 防御性解析）
-        webui_routes: list[tuple[str, str, list[str]]] = [
-            (f"/{P}/webui", "page_handler", ["GET"]),
-            (f"/{P}/api/state", "state_handler", ["GET"]),
-            (f"/{P}/api/settings", "settings_get_handler", ["GET"]),
-            (f"/{P}/api/settings", "settings_post_handler", ["POST"]),
-            (f"/{P}/api/computation_logs", "computation_logs_handler", ["GET"]),
-            (f"/{P}/api/memory_pools", "memory_pools_handler", ["GET"]),
-            (f"/{P}/api/memory_meltdown", "memory_meltdown_handler", ["POST"]),
-            (f"/{P}/api/meltdown_nonce", "meltdown_nonce_handler", ["GET"]),
-            (f"/{P}/api/memory_sink", "memory_sink_handler", ["GET"]),
-            (f"/{P}/api/memory_consolidate", "memory_consolidate_handler", ["POST"]),
-            (f"/{P}/api/webui_probe", "probe_handler", ["GET"]),
-            (f"/{P}/assets/logo.png", "logo_handler", ["GET"]),
-            (f"/{P}/logo.png", "logo_handler", ["GET"]),
-            (f"/{P}/dashboard", "dashboard_handler", ["GET"]),
-            (f"/{P}/api/config_presets", "config_presets_handler", ["GET"]),
-            (f"/{P}/api/export_data", "export_data_handler", ["GET"]),
-            (f"/{P}/api/purge_data", "purge_data_handler", ["DELETE"]),
-            (f"/{P}/health", "health_handler", ["GET"]),
-            (f"/{P}/api/error_stats", "error_stats_handler", ["GET"]),
-            (f"/{P}/api/config_export", "config_export_handler", ["GET"]),
-            (f"/{P}/api/config_import", "config_import_handler", ["POST"]),
-            (f"/{P}/api/widget-state", "widget_state_handler", ["GET"]),
-        ]
-        for path, handler_name, methods in webui_routes:
-            handler = getattr(wr, handler_name, None)
+        for sub_path, handler_name, methods, desc in self._WEB_API_ROUTES:
+            path = f"/{PLUGIN_NAME}/{sub_path}"
+            handler = getattr(self, handler_name, None) or getattr(self._webui_routes, handler_name, None)
             if handler is None:
                 logger.warning(
                     "WebUI route %s skipped: handler '%s' not found"
-                    " — possible version mismatch in webui_routes.py",
+                    " — possible version mismatch",
                     path, handler_name,
                 )
                 continue
-            context.register_web_api(path, handler, methods, f"Sylanne {handler_name}")
+            context.register_web_api(path, handler, methods, desc)
 
     @property
     def config(self) -> dict[str, Any]:

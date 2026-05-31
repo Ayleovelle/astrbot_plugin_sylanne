@@ -151,8 +151,9 @@ class PublicAPI:
         "group_atmosphere": "get_group_atmosphere_snapshot",
     }
 
-    def __init__(self, plugin: Any, *, services: "PluginServices | None" = None) -> None:
+    def __init__(self, plugin: Any, *, services: "PluginServices | None" = None, session_state: Any = None) -> None:
         self._plugin = plugin
+        self._session_state = session_state
         if services is not None:
             self._services = services
         else:
@@ -301,7 +302,7 @@ class PublicAPI:
     def _sylanne_lineage_observatory_page_payload(
         self, session_key: str
     ) -> dict[str, Any]:
-        loop_data = self._plugin._last_understanding_closed_loop.get(session_key, {})
+        loop_data = self._session_state.last_understanding_closed_loop.get(session_key, {}) if self._session_state else self._plugin._last_understanding_closed_loop.get(session_key, {})
         observatory = loop_data.get("turning_point_lineage_observatory", {})
         lineage = observatory.get("lineage", {})
         raw_branches = observatory.get("branches", [])
@@ -324,7 +325,7 @@ class PublicAPI:
     def _understanding_closed_loop_diagnostics(
         self, session_key: str
     ) -> dict[str, Any]:
-        loop_data = dict(self._plugin._last_understanding_closed_loop.get(session_key, {}))
+        loop_data = dict((self._session_state.last_understanding_closed_loop if self._session_state else self._plugin._last_understanding_closed_loop).get(session_key, {}))
         if "turning_point_memory_replay" in loop_data:
             loop_data["turning_point_memory_replay"] = {}
         if "turning_point_lineage_observatory" in loop_data:
@@ -387,7 +388,7 @@ class PublicAPI:
                 "warnings": list(budget.warnings),
             }
         }
-        closed_loop = getattr(p, "_last_understanding_closed_loop", {})
+        closed_loop = self._session_state.last_understanding_closed_loop if self._session_state else getattr(p, "_last_understanding_closed_loop", {})
         if isinstance(closed_loop, dict) and session_key in closed_loop:
             loop_data = closed_loop[session_key]
             ledger = getattr(p, "_conversation_event_ledger", None)

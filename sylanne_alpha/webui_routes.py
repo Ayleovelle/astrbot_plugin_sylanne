@@ -92,12 +92,12 @@ CONFIG_PRESETS: dict[str, dict[str, Any]] = {
 class WebUIRoutes:
     """封装所有 WebUI HTTP 路由处理器。
 
-    通过 self._p 引用插件实例，访问 hosts/config/memory 等资源。
+    通过 self._pluginlugin 引用插件实例，访问 hosts/config/memory 等资源。
     所有 handler 方法都是 async，返回 dict 由 Quart 自动序列化为 JSON。
     """
 
     def __init__(self, plugin: Any, *, services: "PluginServices | None" = None) -> None:
-        self._p = plugin
+        self._pluginlugin = plugin
         if services is not None:
             self._services = services
         else:
@@ -112,17 +112,17 @@ class WebUIRoutes:
     # ------------------------------------------------------------------
 
     async def memory_settings_get_handler(self) -> dict[str, Any]:
-        return await self._p._sylanne_memory_settings_page_payload()
+        return await self._plugin._sylanne_memory_settings_page_payload()
 
     async def memory_settings_post_handler(self) -> dict[str, Any]:
         from quart import request as quart_request
 
         body = await quart_request.get_json(silent=True) or {}
-        return await self._p._update_sylanne_memory_settings_from_page(body)
+        return await self._plugin._update_sylanne_memory_settings_from_page(body)
 
     async def lineage_observatory_handler(self) -> dict[str, Any]:
         session_key = "default"
-        return self._p._sylanne_lineage_observatory_page_payload(session_key)
+        return self._plugin._sylanne_lineage_observatory_page_payload(session_key)
 
     # ------------------------------------------------------------------
     # WebUI page & state
@@ -149,7 +149,7 @@ class WebUIRoutes:
         from quart import request as quart_request
 
         requested_session = str(quart_request.args.get("session") or "").strip()
-        all_sessions = self._p._known_webui_sessions(requested_session)
+        all_sessions = self._plugin._known_webui_sessions(requested_session)
         # For overview (empty/default), use the most recently active session
         if (
             not requested_session
@@ -159,7 +159,7 @@ class WebUIRoutes:
             # Find session with highest tick count (most active)
             best_session = "default"
             best_ticks = -1
-            for sk, h in (getattr(self._p, "_hosts", {}) or {}).items():
+            for sk, h in (getattr(self._plugin, "_hosts", {}) or {}).items():
                 ticks = getattr(h.kernel.computation, "_tick_count", 0)
                 if ticks > best_ticks:
                     best_ticks = ticks
@@ -171,7 +171,7 @@ class WebUIRoutes:
             )
         else:
             session_key = requested_session
-        host = self._p._host(session_key)
+        host = self._plugin._host(session_key)
         comp = host.kernel.computation
         logger.info(
             f"Sylanne WebUI state: session={session_key}, tick={comp._tick_count}, route={comp._last_route}"
@@ -307,7 +307,7 @@ class WebUIRoutes:
             host.kernel._personality() if hasattr(host.kernel, "_personality") else {}
         )
         persona_info = {
-            "profile": self._p._persona_profile(None),
+            "profile": self._plugin._persona_profile(None),
             "traits": personality.get(
                 "traits", personality if isinstance(personality, dict) else {}
             ),
@@ -321,7 +321,7 @@ class WebUIRoutes:
 
         return {
             "schema_version": "sylanne.webui.state.v1",
-            "runtime": self._p._webui_runtime_info(),
+            "runtime": self._plugin._webui_runtime_info(),
             "current_session": session_key,
             "session_id": session_key,
             "emotion": {k: round(v, 4) for k, v in emotion.items()},
@@ -344,7 +344,7 @@ class WebUIRoutes:
             "theme": {"base": "#F3A7C8", "source": "emotion", "mode": "soft"},
             "feedback": feedback,
             "sessions": all_sessions,
-            "life_simulation": self._p._life_simulator.to_dict(),
+            "life_simulation": self._plugin._life_simulator.to_dict(),
         }
 
     # ------------------------------------------------------------------
@@ -353,7 +353,7 @@ class WebUIRoutes:
 
     async def settings_get_handler(self) -> dict[str, Any]:
         """返回当前配置值和 schema，供设置面板渲染表单控件。"""
-        schema = self._p._load_conf_schema()
+        schema = self._plugin._load_conf_schema()
         values = {}
         for key in schema:
             values[key] = self._services.config.get(key, schema[key].get("default"))
@@ -365,7 +365,7 @@ class WebUIRoutes:
 
     async def provider_items(self) -> list[dict[str, Any]]:
         """尽力获取 AstrBot 已注册的 LLM/Embedding provider 列表，供设置面板下拉选择。"""
-        context = getattr(self._p, "context", None)
+        context = getattr(self._plugin, "context", None)
         items: list[dict[str, Any]] = []
         seen: set[str] = set()
 
@@ -427,7 +427,7 @@ class WebUIRoutes:
         from quart import request as quart_request
 
         body = await quart_request.get_json(silent=True) or {}
-        schema = self._p._load_conf_schema()
+        schema = self._plugin._load_conf_schema()
         updated: list[str] = []
         for key, value in body.items():
             if key not in schema:
@@ -457,7 +457,7 @@ class WebUIRoutes:
                 config[key] = self._services.config[key]
         if hasattr(config, "save_config"):
             config.save_config()
-        self._p._start_webui_if_enabled()
+        self._plugin._start_webui_if_enabled()
         return {"ok": True, "updated": updated}
 
     # ------------------------------------------------------------------
@@ -473,7 +473,7 @@ class WebUIRoutes:
         except (TypeError, ValueError):
             limit = 50
         requested_session = str(quart_request.args.get("session") or "").strip()
-        logs = list(self._p._computation_logs)
+        logs = list(self._plugin._computation_logs)
         if requested_session:
             logs = [
                 entry
@@ -483,7 +483,7 @@ class WebUIRoutes:
         entries = logs[-limit:]
         return {
             "logs": entries,
-            "total": len(self._p._computation_logs),
+            "total": len(self._plugin._computation_logs),
             "total_for_session": len(logs),
             "session": requested_session or "",
         }
@@ -566,7 +566,7 @@ class WebUIRoutes:
 
         limit = _bounded_limit(quart_request.args.get("limit", "50"))
         session_key = str(quart_request.args.get("session") or "").strip()
-        all_sessions = self._p._known_webui_sessions(session_key)
+        all_sessions = self._plugin._known_webui_sessions(session_key)
         overview_requested = not session_key or session_key == "default"
         if session_key and session_key not in all_sessions:
             all_sessions.append(session_key)
@@ -582,11 +582,11 @@ class WebUIRoutes:
         if not source_sessions:
             source_sessions = [session_key or "default"]
 
-        state = await self._p._load_sylanne_memory_state(session_key)
+        state = await self._plugin._load_sylanne_memory_state(session_key)
 
         # Fallback to the live 3-layer MemorySystem if KV state is unavailable
         if state is None:
-            state = self._p._memory_system_for_session(session_key)
+            state = self._plugin._memory_system_for_session(session_key)
 
         def _memory_item_payload(item: Any) -> dict[str, Any]:
             data = item.to_dict() if hasattr(item, "to_dict") else dict(item or {})
@@ -652,16 +652,16 @@ class WebUIRoutes:
             return data
 
         async def _state_for_display(source_session: str) -> Any:
-            loaded = await self._p._load_sylanne_memory_state(source_session)
+            loaded = await self._plugin._load_sylanne_memory_state(source_session)
             if loaded is not None:
                 return loaded
-            return self._p._memory_system_for_session(source_session)
+            return self._plugin._memory_system_for_session(source_session)
 
         # Duplicated in webui_server.py for standalone mode
         def _body_traces_for_session(source_session: str) -> list[dict[str, Any]]:
             traces: list[dict[str, Any]] = []
             try:
-                host = self._p._host(source_session)
+                host = self._plugin._host(source_session)
                 raw_traces = host.kernel.body.memory.get("traces", [])
             except Exception:
                 raw_traces = []
@@ -900,16 +900,16 @@ class WebUIRoutes:
         nonce = str(body.get("nonce", "") or body.get("token", "")).strip()
         # S4 fix: validate ONLY against server-side stored nonce — never trust
         # client-supplied expected_token (allows trivial bypass).
-        server_nonce = getattr(self._p, "_meltdown_nonces", {}).get(session, "")
+        server_nonce = getattr(self._plugin, "_meltdown_nonces", {}).get(session, "")
         if not server_nonce or not nonce or nonce != server_nonce:
             return {"ok": False, "error": "token_mismatch"}
         # Consume the nonce (single-use)
-        self._p._meltdown_nonces.pop(session, None)
+        self._plugin._meltdown_nonces.pop(session, None)
         # Clear memory for the session
         mem_sys = (
-            self._p._memory_system_for_session(session)
-            if hasattr(self._p, "_memory_system_for_session")
-            else getattr(self._p, "_memory_system", None)
+            self._plugin._memory_system_for_session(session)
+            if hasattr(self._plugin, "_memory_system_for_session")
+            else getattr(self._plugin, "_memory_system", None)
         )
         if mem_sys:
             mem_sys._l1.clear()
@@ -918,21 +918,21 @@ class WebUIRoutes:
             mem_sys._l3_edges.clear()
             mem_sys._tick = 0
         # Also clear legacy body traces
-        hosts = getattr(self._p, "_hosts", {}) or {}
+        hosts = getattr(self._plugin, "_hosts", {}) or {}
         if session in hosts:
             hosts[session].kernel.body.memory["traces"] = []
             hosts[session].kernel.body.memory.pop("_memory_system", None)
         logger.info(f"Sylanne MEMORY MELTDOWN: session={session} — all memory cleared")
         # Set amnesia flag so next LLM response expresses memory loss
-        if not hasattr(self._p, "_amnesia_sessions"):
-            self._p._amnesia_sessions: set[str] = set()
-        self._p._amnesia_sessions.add(session)
+        if not hasattr(self._plugin, "_amnesia_sessions"):
+            self._plugin._amnesia_sessions: set[str] = set()
+        self._plugin._amnesia_sessions.add(session)
         return {"ok": True, "session": session, "cleared": True}
 
     def generate_meltdown_nonce(self, session: str) -> str:
         """生成一次性 nonce 用于记忆清除确认，防止 CSRF。"""
         nonce = secrets.token_hex(16)
-        self._p._meltdown_nonces[session] = nonce
+        self._plugin._meltdown_nonces[session] = nonce
         return nonce
 
     async def meltdown_nonce_handler(self) -> dict[str, Any]:
@@ -960,7 +960,7 @@ class WebUIRoutes:
         if not session:
             return {"ok": False, "error": "missing session param"}
         try:
-            plugin = self._p
+            plugin = self._plugin
             mem_sys = (
                 plugin._memory_system_for_session(session)
                 if hasattr(plugin, "_memory_system_for_session")
@@ -994,9 +994,9 @@ class WebUIRoutes:
 
         # 获取该会话的记忆系统实例
         mem_sys = (
-            self._p._memory_system_for_session(session)
-            if hasattr(self._p, "_memory_system_for_session")
-            else getattr(self._p, "_memory_system", None)
+            self._plugin._memory_system_for_session(session)
+            if hasattr(self._plugin, "_memory_system_for_session")
+            else getattr(self._plugin, "_memory_system", None)
         )
         if mem_sys is None:
             return {"ok": False, "error": "memory system unavailable"}
@@ -1050,9 +1050,9 @@ class WebUIRoutes:
 
         # Memory system
         mem_sys = (
-            self._p._memory_system_for_session(session_key)
-            if hasattr(self._p, "_memory_system_for_session")
-            else getattr(self._p, "_memory_system", None)
+            self._plugin._memory_system_for_session(session_key)
+            if hasattr(self._plugin, "_memory_system_for_session")
+            else getattr(self._plugin, "_memory_system", None)
         )
         if mem_sys is not None:
             export["memory"] = {
@@ -1077,7 +1077,7 @@ class WebUIRoutes:
             }
 
         # Personality & computation state
-        hosts = getattr(self._p, "_hosts", {}) or {}
+        hosts = getattr(self._plugin, "_hosts", {}) or {}
         if session_key in hosts:
             host = hosts[session_key]
             comp = host.kernel.computation
@@ -1089,7 +1089,7 @@ class WebUIRoutes:
 
         # Persisted state (KV)
         try:
-            state = await self._p._load_state(session_key)
+            state = await self._plugin._load_state(session_key)
             if state is not None:
                 export["persisted_state"] = (
                     state.to_dict() if hasattr(state, "to_dict") else state
@@ -1114,9 +1114,9 @@ class WebUIRoutes:
 
         # Clear memory system
         mem_sys = (
-            self._p._memory_system_for_session(session_key)
-            if hasattr(self._p, "_memory_system_for_session")
-            else getattr(self._p, "_memory_system", None)
+            self._plugin._memory_system_for_session(session_key)
+            if hasattr(self._plugin, "_memory_system_for_session")
+            else getattr(self._plugin, "_memory_system", None)
         )
         if mem_sys is not None:
             mem_sys._l1.clear()
@@ -1127,35 +1127,35 @@ class WebUIRoutes:
             purged.append("memory_system")
 
         # Remove host instance
-        hosts = getattr(self._p, "_hosts", {}) or {}
+        hosts = getattr(self._plugin, "_hosts", {}) or {}
         if session_key in hosts:
             del hosts[session_key]
             purged.append("host")
 
         # Clear conversation buffer
-        buffers = getattr(self._p, "_conversation_buffers", {}) or {}
+        buffers = getattr(self._plugin, "_conversation_buffers", {}) or {}
         if session_key in buffers:
             del buffers[session_key]
             purged.append("conversation_buffer")
 
         # Delete persisted KV states
         try:
-            await self._p._delete_state(session_key)
+            await self._plugin._delete_state(session_key)
             purged.append("kv_state")
         except Exception:
             pass
         try:
-            await self._p._delete_humanlike_state(session_key)
+            await self._plugin._delete_humanlike_state(session_key)
             purged.append("kv_humanlike")
         except Exception:
             pass
         try:
-            await self._p._delete_personality_drift_state(session_key)
+            await self._plugin._delete_personality_drift_state(session_key)
             purged.append("kv_personality_drift")
         except Exception:
             pass
         try:
-            await self._p._delete_sylanne_memory_state(session_key)
+            await self._plugin._delete_sylanne_memory_state(session_key)
             purged.append("kv_memory")
         except Exception:
             pass
@@ -1236,20 +1236,20 @@ class WebUIRoutes:
         enabled = self._services.config.get("sylanne_webui_enabled", False)
         host = str(self._services.config.get("sylanne_webui_host", "127.0.0.1") or "127.0.0.1")
         port = int(self._services.config.get("sylanne_webui_port", 2718) or 2718)
-        expected_runtime = self._p._webui_runtime_info()
+        expected_runtime = self._plugin._webui_runtime_info()
         stopped: list[str] = []
-        module_count_before = len(self._p._iter_loaded_webui_server_modules())
+        module_count_before = len(self._plugin._iter_loaded_webui_server_modules())
         if enabled:
-            stopped = await self._p._stop_stale_webui_server_modules(
+            stopped = await self._plugin._stop_stale_webui_server_modules(
                 include_current=True
             )
             if stopped:
                 self._services.logger.info(
                     f"Sylanne WebUI probe stopped stale listener modules: {stopped}"
                 )
-            self._p._start_webui_if_enabled()
+            self._plugin._start_webui_if_enabled()
             await asyncio.sleep(0.2)
-        module_count_after = len(self._p._iter_loaded_webui_server_modules())
+        module_count_after = len(self._plugin._iter_loaded_webui_server_modules())
 
         local_url = f"http://127.0.0.1:{port}/api/state"
 
@@ -1319,7 +1319,7 @@ class WebUIRoutes:
         """返回插件 logo.png，设置正确的 Content-Type。"""
         from quart import Response
 
-        logo_path = Path(self._plugin_dir) / "logo.png"
+        logo_path = Path(self._pluginlugin_dir) / "logo.png"
         if not logo_path.exists():
             return Response("Not Found", status=404)
         data = logo_path.read_bytes()
@@ -1329,7 +1329,7 @@ class WebUIRoutes:
         """通过 AstrBot 内置 Web 服务器提供 WebUI dashboard HTML 页面。"""
         from quart import Response
 
-        dashboard_path = Path(self._plugin_dir) / "UI" / "index.html"
+        dashboard_path = Path(self._pluginlugin_dir) / "UI" / "index.html"
         if not dashboard_path.exists():
             return Response("Dashboard not found", status=404)
         html = dashboard_path.read_text(encoding="utf-8")
@@ -1344,7 +1344,7 @@ class WebUIRoutes:
         from sylanne_alpha.webui_server import _start_time, _get_process_memory_mb
 
         uptime_s = int(time.time() - _start_time)
-        hosts_dict = getattr(self._p, "_hosts", {}) or {}
+        hosts_dict = getattr(self._plugin, "_hosts", {}) or {}
         sessions_count = len(hosts_dict) if isinstance(hosts_dict, dict) else 0
         memory_mb = _get_process_memory_mb()
         return {
@@ -1387,7 +1387,7 @@ class WebUIRoutes:
 
     async def config_export_handler(self) -> dict[str, Any]:
         """GET /api/config_export — 返回当前配置 JSON（敏感字段脱敏）。"""
-        config = dict(getattr(self._p, "_config", {}) or {})
+        config = dict(getattr(self._plugin, "_config", {}) or {})
         return {
             k: ("***" if self._is_sensitive_key(k) else v)
             for k, v in config.items()
@@ -1400,14 +1400,14 @@ class WebUIRoutes:
         body = await quart_request.get_json(silent=True)
         if not isinstance(body, dict) or not body:
             return {"ok": False, "error": "expected_object"}
-        config = getattr(self._p, "_config", None)
+        config = getattr(self._plugin, "_config", None)
         if config is None:
             return {"ok": False, "error": "no_config"}
         blocked = [k for k in body if self._is_sensitive_key(k)]
         if blocked:
             return {"ok": False, "error": "sensitive_keys_blocked", "keys": blocked}
         config.update(body)
-        persistent = getattr(self._p, "config", config)
+        persistent = getattr(self._plugin, "config", config)
         if isinstance(persistent, dict):
             persistent.update(body)
         if hasattr(persistent, "save_config"):
@@ -1422,7 +1422,7 @@ class WebUIRoutes:
         """返回 AstrBot 管理面板状态卡片数据。"""
         from sylanne_alpha.webui_server import _build_widget_state
 
-        return _build_widget_state(self._p)
+        return _build_widget_state(self._plugin)
 
     # ------------------------------------------------------------------
     # Item 6: POST /api/proactive_feedback 主动发言反馈
@@ -1438,7 +1438,7 @@ class WebUIRoutes:
         rating = str(body.get("rating", "")).strip()
         if not session_key or not rating or rating not in ("positive", "negative"):
             return {"ok": False, "error": "invalid_params"}
-        scheduler = getattr(self._p, "_proactive_scheduler", None)
+        scheduler = getattr(self._plugin, "_proactive_scheduler", None)
         if scheduler is not None and hasattr(scheduler, "record_feedback"):
             scheduler.record_feedback(session_key, timestamp, rating)
         return {"ok": True}
@@ -1451,7 +1451,7 @@ class WebUIRoutes:
         """返回过去 7 天的周报统计数据。"""
         from sylanne_alpha.analytics import generate_weekly_report
 
-        return generate_weekly_report(self._p)
+        return generate_weekly_report(self._plugin)
 
     # ------------------------------------------------------------------
     # Item 70: GET /api/memory/decay_curve 记忆衰减曲线可视化数据
@@ -1469,11 +1469,11 @@ class WebUIRoutes:
 
         # 在所有会话的记忆系统中查找目标记忆
         target_memory = None
-        hosts = getattr(self._p, "_hosts", {}) or {}
+        hosts = getattr(self._plugin, "_hosts", {}) or {}
         for sk in list(hosts.keys()):
             mem_sys = (
-                self._p._memory_system_for_session(sk)
-                if hasattr(self._p, "_memory_system_for_session")
+                self._plugin._memory_system_for_session(sk)
+                if hasattr(self._plugin, "_memory_system_for_session")
                 else None
             )
             if mem_sys is None:
@@ -1537,7 +1537,7 @@ class WebUIRoutes:
         包含 Embodiment Five、Sylanne Six、漂移历史摘要。
         """
         # 获取最活跃会话的人格数据
-        hosts = getattr(self._p, "_hosts", {}) or {}
+        hosts = getattr(self._plugin, "_hosts", {}) or {}
         personality: dict[str, Any] = {}
         for h in hosts.values():
             try:
@@ -1581,7 +1581,7 @@ class WebUIRoutes:
             return {"ok": False, "error": "missing embodiment_five or sylanne_six"}
 
         # 应用到所有活跃 host 的人格参数
-        hosts = getattr(self._p, "_hosts", {}) or {}
+        hosts = getattr(self._plugin, "_hosts", {}) or {}
         updated_sessions: list[str] = []
         for sk, h in hosts.items():
             try:

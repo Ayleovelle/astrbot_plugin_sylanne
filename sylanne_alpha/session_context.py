@@ -72,6 +72,7 @@ class SessionStateStore:
         "realtime_ordinary_history_backfills",
         "proactive_dispatch_audit",
         "proactive_dispatch_last_sent",
+        "last_understanding_closed_loop",
     )
 
     def __init__(
@@ -101,6 +102,7 @@ class SessionStateStore:
         realtime_ordinary_history_backfills=None,
         proactive_dispatch_audit=None,
         proactive_dispatch_last_sent=None,
+        last_understanding_closed_loop=None,
     ):
         self.hosts = hosts if hosts is not None else {}
         self.memory_systems = memory_systems if memory_systems is not None else {}
@@ -126,6 +128,7 @@ class SessionStateStore:
         self.realtime_ordinary_history_backfills = realtime_ordinary_history_backfills if realtime_ordinary_history_backfills is not None else {}
         self.proactive_dispatch_audit = proactive_dispatch_audit if proactive_dispatch_audit is not None else {}
         self.proactive_dispatch_last_sent = proactive_dispatch_last_sent if proactive_dispatch_last_sent is not None else {}
+        self.last_understanding_closed_loop = last_understanding_closed_loop if last_understanding_closed_loop is not None else {}
 
 
 # ---------------------------------------------------------------------------
