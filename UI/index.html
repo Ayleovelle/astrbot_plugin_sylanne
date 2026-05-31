@@ -1962,6 +1962,7 @@ window.addEventListener('resize', function() { if (currentPage) navigateTo(curre
 var monitorInited = false;
 var MONITOR_DIMS = ['warmth','arousal','valence','tension','curiosity','repair_pressure','expression_drive','boundary_firmness'];
 var MONITOR_DIM_I18N = {warmth:'dim_warmth',arousal:'dim_arousal',valence:'dim_valence',tension:'dim_tension',curiosity:'dim_curiosity',repair_pressure:'dim_repair_pressure',expression_drive:'dim_expression_drive',boundary_firmness:'dim_boundary_firmness'};
+var TIMING_LAYER_ZH = {'L1 Intake':'L1 摄入','L2 Emotion':'L2 情绪','L3 Boundary':'L3 边界','L4 Gate':'L4 门控','L5 Expression':'L5 表达','L6 Memory':'L6 记忆','L7 Personality':'L7 人格'};
 
 /**
  * initMonitor — 构建 Monitor 页面的静态 DOM 骨架（只调用一次）
@@ -2071,7 +2072,8 @@ function updateMonitor() {
   if (tbody) {
     var rows = '';
     (Array.isArray(s.timing) ? s.timing : []).forEach(function(row) {
-      rows += '<tr><td>' + (row.layer||'-') + '</td><td>' + (row.avg||'-') + '</td><td>' + (row.p95||'-') + '</td><td>' + (row.count||'-') + '</td></tr>';
+      var layerName = (currentLang === 'zh' && TIMING_LAYER_ZH[row.layer]) ? TIMING_LAYER_ZH[row.layer] : (row.layer||'-');
+      rows += '<tr><td>' + layerName + '</td><td>' + (row.avg||'-') + '</td><td>' + (row.p95||'-') + '</td><td>' + (row.count||'-') + '</td></tr>';
     });
     tbody.innerHTML = rows;
   }
@@ -2503,6 +2505,8 @@ var CONFIG_EN = {
   '生活模拟间隔（秒）': 'Life simulation interval (seconds)',
   '主动联系冷却（秒）': 'Outreach cooldown (seconds)',
   '生活模拟主动找用户冷却（秒）': 'Life simulation outreach cooldown (seconds)',
+  '生活模拟使用自定义人设': 'Use custom persona for life simulation',
+  '生活模拟自定义人设文本': 'Life simulation custom persona text',
   '自动检测 AstrBot 群聊上下文感知': 'Auto-detect group chat context',
   '哈基德模型兼容（影响 prompt 构建和响应处理）': 'Claude model compatibility (affects prompt building and response handling)',
   '启用主评估器（用于深度情感分析）': 'Enable main assessor (deep emotion analysis)',
