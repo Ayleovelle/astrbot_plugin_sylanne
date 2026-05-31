@@ -42,12 +42,21 @@
 [data-theme="light"] {
   --bg:#f5f4f2;
   --card:rgba(255,255,255,0.7);
-  --card-border:rgba(0,0,0,0.06);
+  --card-border:rgba(0,0,0,0.1);
   --text:#1a1a1a;
   --text-muted:#666;
   --void-fill:rgba(0,0,0,0.12);
   --void-solid:245,244,242;
 }
+[data-theme="light"] .submit-btn { background:var(--accent); color:#fff; }
+[data-theme="light"] .save-btn { background:var(--accent); color:#fff; box-shadow:0 2px 8px rgba(184,138,158,0.3); }
+[data-theme="light"] .log-refresh-btn { background:#fff; border-color:rgba(0,0,0,0.15); }
+[data-theme="light"] .meltdown-btn { border-color:var(--red); background:rgba(255,68,68,0.06); }
+[data-theme="light"] .config-toggle { background:rgba(0,0,0,0.1); }
+[data-theme="light"] .config-input, [data-theme="light"] .config-select { background:#fff; border-color:rgba(0,0,0,0.12); }
+[data-theme="light"] .provider-btn { background:#fff; border-color:rgba(0,0,0,0.12); }
+[data-theme="light"] .theme-toggle, [data-theme="light"] .lang-toggle { border-color:rgba(0,0,0,0.15); background:rgba(0,0,0,0.04); }
+[data-theme="light"] .spine-node { border-color:rgba(0,0,0,0.2); background:#fff; }
 *,*::before,*::after {
   margin:0;
   padding:0;
@@ -1312,6 +1321,13 @@ var I18N = {
     cfg_life: '生活模拟',
     cfg_advanced: '高级',
     select_provider_placeholder: '-- 选择提供商 --',
+    dim_warmth: '温暖', dim_arousal: '唤醒', dim_valence: '效价', dim_tension: '张力',
+    dim_curiosity: '好奇', dim_repair_pressure: '修复压力', dim_expression_drive: '表达驱力', dim_boundary_firmness: '边界坚定',
+    stat_integrity: '完整度', stat_entropy: '熵', stat_rotation: '旋转', stat_repair_rate: '修复率',
+    gate_surprise: '惊讶度', gate_threshold: '阈值', gate_route: '路由',
+    expr_drive: '驱力', expr_threshold: '阈值',
+    five_openness: '开放性', five_warmth: '温暖', five_intensity: '强度', five_autonomy: '自主性', five_resilience: '韧性',
+    layer: '层级', avg: '均值', p95: 'P95', count: '次数',
   },
   en: {
     brand_small: 'ANALYSIS OS',
@@ -1367,6 +1383,13 @@ var I18N = {
     cfg_life: 'LIFE SIMULATION',
     cfg_advanced: 'ADVANCED',
     select_provider_placeholder: '-- Select Provider --',
+    dim_warmth: 'WARMTH', dim_arousal: 'AROUSAL', dim_valence: 'VALENCE', dim_tension: 'TENSION',
+    dim_curiosity: 'CURIOSITY', dim_repair_pressure: 'REPAIR PRESSURE', dim_expression_drive: 'EXPRESSION DRIVE', dim_boundary_firmness: 'BOUNDARY FIRMNESS',
+    stat_integrity: 'INTEGRITY', stat_entropy: 'ENTROPY', stat_rotation: 'ROTATION', stat_repair_rate: 'REPAIR RATE',
+    gate_surprise: 'SURPRISE', gate_threshold: 'THRESHOLD', gate_route: 'ROUTE',
+    expr_drive: 'drive', expr_threshold: 'threshold',
+    five_openness: 'OPENNESS', five_warmth: 'WARMTH', five_intensity: 'INTENSITY', five_autonomy: 'AUTONOMY', five_resilience: 'RESILIENCE',
+    layer: 'LAYER', avg: 'AVG', p95: 'P95', count: 'COUNT',
   }
 };
 
@@ -1938,6 +1961,7 @@ window.addEventListener('resize', function() { if (currentPage) navigateTo(curre
    ═══════════════════════════════════════════════════════════════ */
 var monitorInited = false;
 var MONITOR_DIMS = ['warmth','arousal','valence','tension','curiosity','repair_pressure','expression_drive','boundary_firmness'];
+var MONITOR_DIM_I18N = {warmth:'dim_warmth',arousal:'dim_arousal',valence:'dim_valence',tension:'dim_tension',curiosity:'dim_curiosity',repair_pressure:'dim_repair_pressure',expression_drive:'dim_expression_drive',boundary_firmness:'dim_boundary_firmness'};
 
 /**
  * initMonitor — 构建 Monitor 页面的静态 DOM 骨架（只调用一次）
@@ -1950,20 +1974,20 @@ function initMonitor() {
   // ── 左侧：情感维度 + 边界统计 + 耗时表 ──
   var barsHtml = MONITOR_DIMS.map(function(d) {
     return '<div class="bar-row">'
-      + '<span class="bar-label">' + d + '</span>'
+      + '<span class="bar-label">' + t(MONITOR_DIM_I18N[d]) + '</span>'
       + '<div class="bar-track"><div class="bar-fill" id="emo-bar-' + d + '" style="width:0%"></div></div>'
       + '<span class="bar-value" id="emo-val-' + d + '">0.00</span>'
       + '</div>';
   }).join('');
 
   var statsHtml = '<div class="stat-grid">'
-    + '<div class="stat-box"><div class="stat-val" id="bd-integrity">0.00</div><div class="stat-lbl">INTEGRITY</div></div>'
-    + '<div class="stat-box"><div class="stat-val" id="bd-entropy">0.00</div><div class="stat-lbl">ENTROPY</div></div>'
-    + '<div class="stat-box"><div class="stat-val" id="bd-rotation">0</div><div class="stat-lbl">ROTATION</div></div>'
-    + '<div class="stat-box"><div class="stat-val" id="bd-repair">0.00</div><div class="stat-lbl">REPAIR RATE</div></div>'
+    + '<div class="stat-box"><div class="stat-val" id="bd-integrity">0.00</div><div class="stat-lbl">' + t('stat_integrity') + '</div></div>'
+    + '<div class="stat-box"><div class="stat-val" id="bd-entropy">0.00</div><div class="stat-lbl">' + t('stat_entropy') + '</div></div>'
+    + '<div class="stat-box"><div class="stat-val" id="bd-rotation">0</div><div class="stat-lbl">' + t('stat_rotation') + '</div></div>'
+    + '<div class="stat-box"><div class="stat-val" id="bd-repair">0.00</div><div class="stat-lbl">' + t('stat_repair_rate') + '</div></div>'
     + '</div>';
 
-  var timingHtml = '<table class="timing-table"><thead><tr><th>LAYER</th><th>AVG</th><th>P95</th><th>COUNT</th></tr></thead>'
+  var timingHtml = '<table class="timing-table"><thead><tr><th>' + t('layer') + '</th><th>' + t('avg') + '</th><th>' + t('p95') + '</th><th>' + t('count') + '</th></tr></thead>'
     + '<tbody id="timing-tbody"></tbody></table>';
 
   left.innerHTML = '<div class="card"><div class="card-title">' + t('emotion_title') + '</div>' + barsHtml + '</div>'
@@ -1983,14 +2007,14 @@ function initMonitor() {
   routeBarHtml += '</div>';
 
   var gateHtml = '<div class="gate-grid">'
-    + '<div class="gate-item"><div class="gate-val" id="gate-surprise" style="color:var(--accent)">0.00</div><div class="gate-lbl">SURPRISE</div></div>'
-    + '<div class="gate-item"><div class="gate-val" id="gate-threshold" style="color:var(--cyan)">0.00</div><div class="gate-lbl">THRESHOLD</div></div>'
-    + '<div class="gate-item"><div class="gate-val" id="gate-route" style="color:var(--amber)">N/A</div><div class="gate-lbl">ROUTE</div></div>'
+    + '<div class="gate-item"><div class="gate-val" id="gate-surprise" style="color:var(--accent)">0.00</div><div class="gate-lbl">' + t('gate_surprise') + '</div></div>'
+    + '<div class="gate-item"><div class="gate-val" id="gate-threshold" style="color:var(--cyan)">0.00</div><div class="gate-lbl">' + t('gate_threshold') + '</div></div>'
+    + '<div class="gate-item"><div class="gate-val" id="gate-route" style="color:var(--amber)">N/A</div><div class="gate-lbl">' + t('gate_route') + '</div></div>'
     + '</div>';
 
   var exprHtml = '<div class="mode-badge" id="expr-mode">SILENT</div>'
-    + '<div class="bar-row"><span class="bar-label">drive</span><div class="bar-track"><div class="bar-fill" id="expr-drive-bar" style="width:0%"></div></div><span class="bar-value" id="expr-drive-val">0.00</span></div>'
-    + '<div class="bar-row"><span class="bar-label">threshold</span><div class="bar-track"><div class="bar-fill" id="expr-thresh-bar" style="width:0%;background:var(--cyan)"></div></div><span class="bar-value" id="expr-thresh-val">0.00</span></div>';
+    + '<div class="bar-row"><span class="bar-label">' + t('expr_drive') + '</span><div class="bar-track"><div class="bar-fill" id="expr-drive-bar" style="width:0%"></div></div><span class="bar-value" id="expr-drive-val">0.00</span></div>'
+    + '<div class="bar-row"><span class="bar-label">' + t('expr_threshold') + '</span><div class="bar-track"><div class="bar-fill" id="expr-thresh-bar" style="width:0%;background:var(--cyan)"></div></div><span class="bar-value" id="expr-thresh-val">0.00</span></div>';
 
   var fbHtml = '<div class="feedback-grid">'
     + '<div class="stat-box"><div class="stat-val" id="fb-positive" style="color:#4caf50">0</div><div class="stat-lbl">' + t('positive') + '</div></div>'
@@ -2575,6 +2599,12 @@ function renderConfigGroup(group) {
     var m = item.key.match(/^(.+_)enabled$/);
     if (m && item.type === 'toggle') enabledPrefixes[m[1]] = item.value;
   });
+  // 额外收集 use_xxx 开关 → xxx 从属关系（如 use_custom_persona → custom_persona）
+  var usePrefixes = {};
+  group.items.forEach(function(item) {
+    var m2 = item.key.match(/^(.+_)use_(.+)$/);
+    if (m2 && item.type === 'toggle') usePrefixes[m2[1] + m2[2]] = {key: item.key, value: item.value};
+  });
   var html = '<div class="card"><div class="config-group-title">' + groupTitle + '</div>';
   group.items.forEach(function(item) {
     var itemLabel = currentLang === 'zh' ? item.label_zh : (item.label_en || item.label);
@@ -2589,6 +2619,16 @@ function renderConfigGroup(group) {
           depAttr = ' data-depends="' + enabledKey + '"';
           depClass = isOn ? ' visible' : '';
           break;
+        }
+      }
+      // use_xxx → xxx 从属关系
+      if (!depAttr) {
+        for (var suffix in usePrefixes) {
+          if (item.key.indexOf(suffix) !== -1 && item.key !== usePrefixes[suffix].key) {
+            depAttr = ' data-depends="' + usePrefixes[suffix].key + '"';
+            depClass = usePrefixes[suffix].value ? ' visible' : '';
+            break;
+          }
         }
       }
     }
@@ -2636,9 +2676,9 @@ function renderConfigGroup(group) {
 function toggleConfig(el) {
   el.classList.toggle('on');
   el.setAttribute('aria-checked', el.classList.contains('on') ? 'true' : 'false');
-  // 通用依赖折叠：_enabled 开关控制同前缀从属项的显隐（CSS transition 动画）
+  // 通用依赖折叠：开关控制同 data-depends 从属项的显隐（CSS transition 动画）
   var key = el.dataset.key;
-  if (key && key.endsWith('_enabled')) {
+  if (key) {
     var isOn = el.classList.contains('on');
     document.querySelectorAll('.config-row[data-depends="' + key + '"]').forEach(function(row) {
       if (isOn) row.classList.add('visible');
@@ -3060,7 +3100,7 @@ async function executeMeltdown() {
       abortBtn.style.pointerEvents = '';
       abortBtn.style.opacity = '';
       abortBtn.textContent = t('mem_meltdown_abort');
-      await renderMemory();
+      logout();
     }, 1200);
   } catch(e) {
     countdownNum.textContent = 'ERR';
@@ -3125,17 +3165,18 @@ function initPersonality() {
   // 数据多边形（通过 ID 更新 points 属性）
   svgHtml += '<polygon class="radar-polygon" id="radar-data-polygon" points=""/>';
   // 静态标签
+  var FIVE_I18N = {openness:'five_openness',warmth:'five_warmth',intensity:'five_intensity',autonomy:'five_autonomy',resilience:'five_resilience'};
   for (var i = 0; i < n; i++) {
     var angle = (2 * Math.PI * i) / n;
     var lp = radarPolarToXY(angle, PERSONALITY_RADAR_R + 20);
-    svgHtml += '<text class="radar-label" x="' + lp.x + '" y="' + lp.y + '" text-anchor="middle" dominant-baseline="middle">' + axes[i].toUpperCase() + '</text>';
+    svgHtml += '<text class="radar-label" x="' + lp.x + '" y="' + lp.y + '" text-anchor="middle" dominant-baseline="middle">' + t(FIVE_I18N[axes[i]] || axes[i]) + '</text>';
   }
   svgHtml += '</svg>';
 
   // 五维数值列表
   var fiveListHtml = '<div style="margin-top:12px" id="personality-five-list">';
   axes.forEach(function(a, i) {
-    fiveListHtml += '<div style="display:flex;justify-content:space-between;padding:3px 0;font-family:var(--font-mono);font-size:13px"><span style="color:var(--text-muted)">' + a.toUpperCase() + '</span><span id="five-val-' + i + '" style="color:var(--accent)">0.00</span></div>';
+    fiveListHtml += '<div style="display:flex;justify-content:space-between;padding:3px 0;font-family:var(--font-mono);font-size:13px"><span style="color:var(--text-muted)">' + t(FIVE_I18N[a] || a) + '</span><span id="five-val-' + i + '" style="color:var(--accent)">0.00</span></div>';
   });
   fiveListHtml += '</div>';
 
