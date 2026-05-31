@@ -36,9 +36,9 @@ except ImportError:
     logger = _logging.getLogger("astrbot_plugin_sylanne")  # type: ignore
 
 # 中国时区常量
-_CHINA_TZ = timezone(timedelta(hours=8))
+from sylanne_alpha.constants import CHINA_TZ as _CHINA_TZ
 # 序列化后的请求载荷最大字符数，超过则触发裁剪
-_MAX_PAYLOAD_SERIALIZED_CHARS = 60000
+from sylanne_alpha.constants import MAX_PAYLOAD_SERIALIZED_CHARS as _MAX_PAYLOAD_SERIALIZED_CHARS
 
 
 class LLMResponsePipeline:

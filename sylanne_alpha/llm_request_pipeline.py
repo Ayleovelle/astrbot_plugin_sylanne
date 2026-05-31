@@ -33,7 +33,7 @@ except ImportError:
     logger = _logging.getLogger("astrbot_plugin_sylanne")  # type: ignore
 
 # 单次未完成回复注入的最大字符数，防止 prompt 过长
-_MAX_UNFINISHED_CONTEXT_CHARS = 2000
+from sylanne_alpha.constants import MAX_UNFINISHED_CONTEXT_CHARS as _MAX_UNFINISHED_CONTEXT_CHARS
 
 # ---------------------------------------------------------------------------
 # 注入预算系统：按优先级分配 token 预算，超限从低优先级裁剪

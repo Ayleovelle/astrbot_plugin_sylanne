@@ -24,11 +24,9 @@ if _PLUGIN_DIR not in sys.path:
 
 import asyncio  # noqa: E402
 import collections  # noqa: E402
-import contextvars  # noqa: E402
 import importlib  # noqa: E402
 import json  # noqa: E402
 import time  # noqa: E402
-from datetime import timedelta, timezone  # noqa: E402
 from pathlib import Path  # noqa: E402
 from typing import Any  # noqa: E402
 
@@ -164,18 +162,6 @@ stop_webui_server = _sylanne_webui_server.stop_webui_server
 # 常量定义
 # ---------------------------------------------------------------------------
 PLUGIN_NAME = "astrbot_plugin_sylanne"
-PLUGIN_VERSION = "1.4.5"
-PUBLIC_API_VERSION = "1.0"
-MAX_LLM_REQUEST_PROMPT_CHARS = 12000
-_MAX_PAYLOAD_SERIALIZED_CHARS = 60000
-_MAX_UNFINISHED_CONTEXT_CHARS = 2000
-_CHINA_TZ = timezone(timedelta(hours=8))
-
-_INTERNAL_LLM_CALL: contextvars.ContextVar[bool] = contextvars.ContextVar(
-    "_INTERNAL_LLM_CALL", default=False
-)
-PROACTIVE_SCHEDULER_WAKE_DELAY_SECONDS = 30.0
-PROACTIVE_SCHEDULER_IDLE_DELAY_SECONDS = 1800.0
 
 from sylanne_alpha.utils import safe_ensure_future  # noqa: E402, F401
 

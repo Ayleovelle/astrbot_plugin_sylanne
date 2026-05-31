@@ -27,7 +27,7 @@ from typing import Any, TYPE_CHECKING
 if TYPE_CHECKING:
     pass  # plugin type is dynamic (Star subclass)
 
-_CHINA_TZ = timezone(timedelta(hours=8))
+from sylanne_alpha.constants import CHINA_TZ as _CHINA_TZ
 
 
 class RealtimeDispatch:
