@@ -393,22 +393,18 @@ class BackgroundPostQueue:
                 "background_post_checkpoint_debounce_seconds", 0.75
             )
         )
-        # 若该 session 已有待执行的 checkpoint 任务，跳过
-        for existing in list(checkpoint_tasks):
-            if (
-                not existing.done()
-                and getattr(existing, "_checkpoint_session", None) == session_key
-            ):
-                return
+        # O(1) dict lookup instead of iterating the full set
+        existing = checkpoint_tasks.get(session_key)
+        if existing is not None and not existing.done():
+            return
 
         async def _debounced_save() -> None:
             await asyncio.sleep(debounce)
             await self.save_checkpoint(session_key)
 
         task = safe_ensure_future(_debounced_save(), name="checkpoint_debounced_save")
-        task._checkpoint_session = session_key  # type: ignore[attr-defined]
-        checkpoint_tasks.add(task)
-        task.add_done_callback(lambda t: checkpoint_tasks.discard(t))
+        checkpoint_tasks[session_key] = task
+        task.add_done_callback(lambda t: checkpoint_tasks.pop(session_key, None))
 
     # ------------------------------------------------------------------
     # 排空评估队列

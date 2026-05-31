@@ -396,12 +396,14 @@ class EmotionalStatePlugin(Star):
         self._background_post_last_committed: BoundedDict = BoundedDict(maxsize=200)
         self._background_post_recovered_sessions: set[str] = set()
         self._background_post_active: BoundedDict = BoundedDict(maxsize=200)
-        self._background_post_checkpoint_tasks: set[asyncio.Task] = set()
+        self._background_post_checkpoint_tasks: dict[str, asyncio.Task] = {}
         self._background_post_worker_state: BoundedDict = BoundedDict(maxsize=200)
         self._internal_assessor_llm_inflight: int = 0
         self._pending_outreach_context: BoundedDict = BoundedDict(maxsize=50)
         self._amnesia_sessions: set[str] = set()
         self._proactive_candidate_sessions: BoundedDict = BoundedDict(maxsize=100)
+        self._proactive_scheduler_task: asyncio.Task | None = None
+        self._proactive_scheduler_locks: dict[str, asyncio.Lock] = {}
         self._last_user_message_time: BoundedDict = BoundedDict(maxsize=200)
         self._sylanne_memory_cache: BoundedDict = BoundedDict(maxsize=200)
         self._conversation_pending_response_epochs: BoundedDict = BoundedDict(
@@ -2118,7 +2120,7 @@ class EmotionalStatePlugin(Star):
                 task.cancel()
                 tasks_to_cancel.append(task)
         self._background_tasks.clear()
-        for task in list(self._background_post_checkpoint_tasks):
+        for task in list(self._background_post_checkpoint_tasks.values()):
             if not task.done():
                 task.cancel()
                 tasks_to_cancel.append(task)

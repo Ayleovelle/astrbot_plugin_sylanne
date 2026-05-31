@@ -214,12 +214,8 @@ class ProactiveScheduler:
 
     def ensure_state(self) -> None:
         """确保调度器所需的运行时状态容器已初始化。"""
-        if not hasattr(self._p, "_proactive_scheduler_task"):
-            self._p._proactive_scheduler_task: asyncio.Task | None = None
-        if not hasattr(self._p, "_proactive_candidate_sessions"):
-            self._p._proactive_candidate_sessions: dict[str, Any] = {}
-        if not hasattr(self._p, "_proactive_scheduler_locks"):
-            self._p._proactive_scheduler_locks: dict[str, asyncio.Lock] = {}
+        # All attributes are now initialized in EmotionalStatePlugin.__init__
+        pass
 
     async def run_once(self) -> dict[str, Any]:
         """执行一次调度扫描：遍历所有候选会话，尝试触发主动发言。

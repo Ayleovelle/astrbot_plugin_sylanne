@@ -24,6 +24,8 @@ import time
 from collections.abc import Callable, Coroutine
 from typing import Any
 
+from sylanne_alpha.content_sanitizer import sanitize_for_assessment, is_content_filter_refusal
+
 ASSESSOR_ASYNC_SCHEMA_VERSION = "sylanne.alpha.assessor_async.v1"
 
 # Fast 层默认超时（秒）
@@ -177,6 +179,8 @@ class AsyncAssessor:
     ) -> dict[str, Any]:
         prompt = self._build_fast_prompt(text)
         response = await llm_caller(prompt)
+        if is_content_filter_refusal(response):
+            return {}
         parsed = self._parse_response(response)
         if parsed:
             parsed["assessed_at"] = time.time()
@@ -184,7 +188,7 @@ class AsyncAssessor:
 
     def _build_fast_prompt(self, text: str) -> str:
         """构建快速评估 prompt：仅文本预览 + JSON 模板，最小化 token 消耗。"""
-        preview = text[:60]
+        preview = sanitize_for_assessment(text[:60])
         return f'"{preview}"\n{{"v":?,"a":?,"i":"?","w":?}}'
 
     # ------------------------------------------------------------------
@@ -198,6 +202,8 @@ class AsyncAssessor:
     ) -> dict[str, Any]:
         prompt = self._build_main_prompt(text, context_lines)
         response = await llm_caller(prompt)
+        if is_content_filter_refusal(response):
+            return {}
         parsed = self._parse_response(response)
         if parsed:
             parsed["assessed_at"] = time.time()
@@ -207,9 +213,9 @@ class AsyncAssessor:
         """构建主评估 prompt：带对话上下文，要求输出扩展字段。"""
         ctx = ""
         if context_lines:
-            ctx = "\n".join(context_lines[-2:])
+            ctx = "\n".join(sanitize_for_assessment(line) for line in context_lines[-2:])
             ctx = f"{ctx}\n"
-        preview = text[:120]
+        preview = sanitize_for_assessment(text[:120])
         return (
             f'{ctx}"{preview}"\n'
             '{"v":?,"a":?,"i":"?","w":?,"m":?,"subtext":"?","avoidance":"?"}\n'

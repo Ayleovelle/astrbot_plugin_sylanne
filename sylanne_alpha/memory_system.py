@@ -359,6 +359,17 @@ def _keyword_overlap(query: str, text: str) -> float:
     return len(intersection) / max(len(q_words), 1)
 
 
+def _keyword_overlap_precomputed(query_tokens: set[str], text: str) -> float:
+    """关键词重叠度计算（query 已预分词，避免重复 tokenize）。"""
+    if not query_tokens:
+        return 0.0
+    t_words = _tokenize(text)
+    if not t_words:
+        return 0.0
+    intersection = query_tokens & t_words
+    return len(intersection) / max(len(query_tokens), 1)
+
+
 # ---------------------------------------------------------------------------
 # AnniversaryDetector (Item 33)
 # ---------------------------------------------------------------------------
@@ -450,6 +461,11 @@ class MemorySystem:
         "cold": "（很久以前）",
     }
 
+    # P1 性能优化：衰减/GC 频率控制
+    _DECAY_L3_EVERY_N = 5       # L3 clarity 衰减每 N tick 执行一次
+    _GC_EVERY_N = 20            # GC（剪枝死节点/重建列表）每 N tick 执行一次
+    _GC_L2_SIZE_THRESHOLD = 600  # L2 超过此大小时强制 GC
+
     def __init__(self, **kwargs) -> None:
         self._l1: deque[MemoryItem] = deque(maxlen=self._L1_CAPACITY)
         self._l2: list[MemoryItem] = []
@@ -458,6 +474,7 @@ class MemorySystem:
         self._tick: int = 0
         self._last_consolidation_ts: float = 0.0
         self._recalled_l2_items: list[MemoryItem] = []
+        self._gc_tick_counter: int = 0  # GC 计数器
         self._params: dict[str, float] = {
             "base_decay": 0.02,
             "age_coeff": 0.15,
@@ -676,13 +693,21 @@ class MemorySystem:
     # ------------------------------------------------------------------
 
     def tick_decay(self) -> None:
-        """推进衰减时钟一步。每条消息调用一次。"""
+        """推进衰减时钟一步。每条消息调用一次。
+
+        性能优化（P1）：
+        - L2 衰减：每 tick 执行（轻量，仅数值运算）
+        - L3 clarity 衰减：每 _DECAY_L3_EVERY_N tick 执行
+        - GC（剪枝/列表重建）：每 _GC_EVERY_N tick 或 L2 超阈值时执行
+        """
         self._tick += 1
+        self._gc_tick_counter += 1
         base_decay = self._params["base_decay"]
         age_coeff = self._params["age_coeff"]
         neuroticism = self._params["neuroticism"]
         cold_decay_factor = self._params["cold_memory_decay_factor"]
 
+        # --- L2 衰减（每 tick，轻量） ---
         for item in self._l2:
             decay_rate = base_decay * (1 + age_coeff * math.log(item.age_ticks + 1))
             item.age_ticks += 1
@@ -692,30 +717,51 @@ class MemorySystem:
             if item.weight < 1e-10:
                 item.weight = 0.0
 
-        now = date.today()
-        for node in self._l3_nodes.values():
-            if node.temporal_type == "permanent":
-                continue
-            elif node.temporal_type == "evolving" and node.valid_from:
-                try:
-                    valid_from_date = date.fromisoformat(node.valid_from)
-                    days_since = (now - valid_from_date).days
-                except (ValueError, TypeError):
-                    days_since = 0
-                if days_since > node.staleness_threshold:
-                    staleness = 1 + 0.5 * math.log(
-                        (days_since - node.staleness_threshold) / 30 + 1
-                    )
-                    node.clarity *= 0.998 / staleness
+        # --- L3 clarity 衰减（每 N tick） ---
+        if self._gc_tick_counter % self._DECAY_L3_EVERY_N == 0:
+            # 批量衰减：0.998^N 等效于连续 N 次 *0.998
+            l3_decay = 0.998 ** self._DECAY_L3_EVERY_N
+            now = date.today()
+            for node in self._l3_nodes.values():
+                if node.temporal_type == "permanent":
+                    continue
+                elif node.temporal_type == "evolving" and node.valid_from:
+                    try:
+                        valid_from_date = date.fromisoformat(node.valid_from)
+                        days_since = (now - valid_from_date).days
+                    except (ValueError, TypeError):
+                        days_since = 0
+                    if days_since > node.staleness_threshold:
+                        staleness = 1 + 0.5 * math.log(
+                            (days_since - node.staleness_threshold) / 30 + 1
+                        )
+                        node.clarity *= l3_decay / staleness
+                    else:
+                        node.clarity *= l3_decay
                 else:
-                    node.clarity *= 0.998
-            else:
-                node.clarity *= 0.998
+                    node.clarity *= l3_decay
 
-        for edge in self._l3_edges:
-            edge.clarity *= 0.998
+            for edge in self._l3_edges:
+                edge.clarity *= l3_decay
 
-        self._gc_l3()
+        # --- GC（每 N tick 或 L2 超阈值） ---
+        need_gc = (
+            self._gc_tick_counter >= self._GC_EVERY_N
+            or len(self._l2) > self._GC_L2_SIZE_THRESHOLD
+        )
+        if need_gc:
+            self._gc_tick_counter = 0
+            self._gc_l2()
+            self._gc_l3()
+
+    def _gc_l2(self) -> None:
+        """就地过滤 L2 中 weight=0 的死条目。"""
+        if not self._l2:
+            return
+        # 就地过滤：仅在有死条目时重建
+        dead_count = sum(1 for item in self._l2 if item.weight <= 0.0)
+        if dead_count > 0:
+            self._l2[:] = [item for item in self._l2 if item.weight > 0.0]
 
     def _gc_l3(self) -> None:
         """回收 L3 中 clarity 低于阈值的节点和边，强制节点数上限。"""
@@ -795,11 +841,14 @@ class MemorySystem:
         mood_weight = self._params["mood_weight"]
         positive_recall_bias = self._params["positive_recall_bias"]
 
+        # P2 优化：预计算 query tokens，避免每个 item 重复 jieba 分词
+        query_tokens = _tokenize(query)
+
         # --- L1 recall ---
         now = time.time()
         for item in self._l1:
             relevance, reason = self._compute_relevance_with_reason(
-                query, query_embedding, item.text, item.embedding
+                query, query_embedding, item.text, item.embedding, query_tokens
             )
             if relevance <= 0.0:
                 continue
@@ -838,7 +887,7 @@ class MemorySystem:
         self._recalled_l2_items: list[MemoryItem] = []
         for item in self._l2:
             relevance, reason = self._compute_relevance_with_reason(
-                query, query_embedding, item.text, item.embedding
+                query, query_embedding, item.text, item.embedding, query_tokens
             )
             if relevance <= 0.0:
                 continue
@@ -948,11 +997,14 @@ class MemorySystem:
         query_embedding: list[float] | None,
         text: str,
         item_embedding: list[float] | None,
+        query_tokens: set[str] | None = None,
     ) -> float:
         if query_embedding and item_embedding:
             cos = _cosine(query_embedding, item_embedding)
             if cos >= 0.0:
                 return cos
+        if query_tokens is not None:
+            return _keyword_overlap_precomputed(query_tokens, text)
         return _keyword_overlap(query, text)
 
     def _compute_relevance_with_reason(
@@ -961,13 +1013,17 @@ class MemorySystem:
         query_embedding: list[float] | None,
         text: str,
         item_embedding: list[float] | None,
+        query_tokens: set[str] | None = None,
     ) -> tuple[float, str]:
         """计算相关度并返回召回原因。"""
         if query_embedding and item_embedding:
             cos = _cosine(query_embedding, item_embedding)
             if cos >= 0.0:
                 return cos, "vector_similarity"
-        kw = _keyword_overlap(query, text)
+        if query_tokens is not None:
+            kw = _keyword_overlap_precomputed(query_tokens, text)
+        else:
+            kw = _keyword_overlap(query, text)
         if kw > 0.0:
             return kw, "keyword_match"
         return 0.0, ""

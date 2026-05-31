@@ -373,6 +373,24 @@ class RealtimeDispatch:
         )
 
     # ------------------------------------------------------------------
+    # Cache trimming
+    # ------------------------------------------------------------------
+
+    _TRIM_MAX_UNCONSUMED = 100
+
+    def _trim_consumed(self, entries: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        """Trim a shadow/breakpoint list: keep at most the last _TRIM_MAX_UNCONSUMED
+        unconsumed entries, discard all consumed entries.
+
+        Mutates and returns the list in-place (replaces contents).
+        """
+        unconsumed = [e for e in entries if not e.get("consumed")]
+        if len(unconsumed) > self._TRIM_MAX_UNCONSUMED:
+            unconsumed = unconsumed[-self._TRIM_MAX_UNCONSUMED:]
+        entries[:] = unconsumed
+        return entries
+
+    # ------------------------------------------------------------------
     # Cache accessors
     # ------------------------------------------------------------------
 
@@ -423,6 +441,7 @@ class RealtimeDispatch:
                 if "[sylanne_realtime_assistant_history]" in ctx_content:
                     last["consumed"] = True
                     last["consumed_reason"] = "official_context_compression_summary"
+                    self._trim_consumed(shadows)
                     return False
         full_text = last.get("full_text", "")
         event_time = last.get("event_time", {})
@@ -443,6 +462,7 @@ class RealtimeDispatch:
         )
         last["consumed"] = True
         last["consumed_reason"] = "injected"
+        self._trim_consumed(shadows)
         return True
 
     def append_interrupted_reply_breakpoint_if_any(
@@ -478,6 +498,7 @@ class RealtimeDispatch:
             + full_text
         )
         last["consumed"] = True
+        self._trim_consumed(entries)
         return True
 
     def build_realtime_delivery_envelope_text(
@@ -556,6 +577,7 @@ class RealtimeDispatch:
             + full_text
         )
         last["consumed"] = True
+        self._trim_consumed(entries)
         return True
 
     def append_realtime_continuity_context_if_any(
@@ -627,6 +649,7 @@ class RealtimeDispatch:
                 shadow["consumed"] = True
                 shadow["consumed_reason"] = reason
                 break
+        self._trim_consumed(shadows)
         backfills = self.realtime_ordinary_history_backfill_cache()
         backfills.pop(session_key, None)
 
@@ -649,6 +672,7 @@ class RealtimeDispatch:
                 changed = True
                 break
         if changed:
+            self._trim_consumed(shadows)
             backfills = self.realtime_ordinary_history_backfill_cache()
             if session_key in backfills:
                 backfills[session_key] = [
@@ -833,11 +857,9 @@ class RealtimeDispatch:
                 )
 
         task = asyncio.ensure_future(_wrapper())
-        p._background_tasks.append(task)
+        p._background_tasks.add(task)
         task.add_done_callback(
-            lambda t: (
-                p._background_tasks.remove(t) if t in p._background_tasks else None
-            )
+            lambda t: p._background_tasks.discard(t)
         )
         return task
 

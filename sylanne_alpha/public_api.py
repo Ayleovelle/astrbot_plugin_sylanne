@@ -28,6 +28,7 @@ import asyncio
 import collections
 import json
 import time
+from collections.abc import Callable
 from types import SimpleNamespace
 from typing import Any
 
@@ -43,7 +44,7 @@ except ImportError:
 # Item 59: 插件间事件总线
 # ---------------------------------------------------------------------------
 
-_event_listeners: dict[str, list[callable]] = {}
+_event_listeners: dict[str, list[Callable[..., Any]]] = {}
 
 
 def emit_event(event_type: str, payload: dict):
@@ -63,14 +64,14 @@ def emit_event(event_type: str, payload: dict):
             logger.warning("emit_event(%s) listener raised: %s", event_type, exc)
 
 
-def on_event(event_type: str, callback: callable):
+def on_event(event_type: str, callback: Callable[..., Any]):
     """订阅 Sylanne 事件。"""
     if event_type not in _event_listeners:
         _event_listeners[event_type] = []
     _event_listeners[event_type].append(callback)
 
 
-def off_event(event_type: str, callback: callable):
+def off_event(event_type: str, callback: Callable[..., Any]):
     """取消订阅。"""
     listeners = _event_listeners.get(event_type, [])
     if callback in listeners:
@@ -136,6 +137,17 @@ class PublicAPI:
       - Internal Assessor：内部 LLM 情感评估
       - Memory：记忆查询和注入
     """
+
+    _SNAPSHOT_METHOD_MAP: dict[str, str] = {
+        "emotion": "get_emotion_snapshot",
+        "humanlike": "get_humanlike_snapshot",
+        "lifelike": "get_lifelike_learning_snapshot",
+        "personality_drift": "get_personality_drift_snapshot",
+        "moral_repair": "get_moral_repair_snapshot",
+        "fallibility": "get_fallibility_snapshot",
+        "integrated": "get_integrated_self_snapshot",
+        "group_atmosphere": "get_group_atmosphere_snapshot",
+    }
 
     def __init__(self, plugin: Any) -> None:
         self._p = plugin
@@ -683,16 +695,7 @@ class PublicAPI:
     ) -> dict[str, Any]:
         p = self._p
         sk = session_key or self._session_key(event)
-        snapshot_method_map = {
-            "emotion": "get_emotion_snapshot",
-            "humanlike": "get_humanlike_snapshot",
-            "lifelike": "get_lifelike_learning_snapshot",
-            "personality_drift": "get_personality_drift_snapshot",
-            "moral_repair": "get_moral_repair_snapshot",
-            "fallibility": "get_fallibility_snapshot",
-            "integrated": "get_integrated_self_snapshot",
-            "group_atmosphere": "get_group_atmosphere_snapshot",
-        }
+        snapshot_method_map = self._SNAPSHOT_METHOD_MAP
         method_name = snapshot_method_map.get(state_name)
         speaker_track_id = ""
         if track == "speaker" and event is not None:
@@ -756,16 +759,7 @@ class PublicAPI:
         if state_name == "integrated":
             state_name = "integrated"
         snapshots: dict[str, Any] = {}
-        snapshot_method_map = {
-            "emotion": "get_emotion_snapshot",
-            "humanlike": "get_humanlike_snapshot",
-            "lifelike": "get_lifelike_learning_snapshot",
-            "personality_drift": "get_personality_drift_snapshot",
-            "moral_repair": "get_moral_repair_snapshot",
-            "fallibility": "get_fallibility_snapshot",
-            "integrated": "get_integrated_self_snapshot",
-            "group_atmosphere": "get_group_atmosphere_snapshot",
-        }
+        snapshot_method_map = self._SNAPSHOT_METHOD_MAP
         method_name = snapshot_method_map.get(state_name) or snapshot_method_map.get(
             state
         )
