@@ -33,12 +33,13 @@
   --void-solid:26,26,27;
   --font-head:'Rajdhani',sans-serif;
   --font-mono:'JetBrains Mono',monospace;
-  --font-body:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;
-  --font-xs:11px;
+  --font-body:-apple-system,BlinkMacSystemFont,"Segoe UI","PingFang SC","Microsoft YaHei","Hiragino Sans GB",sans-serif;
+  --font-xs:12px;
   --font-sm:13px;
   --font-base:14px;
   --font-md:15px;
 }
+[data-lang="zh"] { --font-head:'Rajdhani',"PingFang SC","Microsoft YaHei",sans-serif; --font-xs:12px; --font-sm:14px; --font-base:15px; --font-md:16px; }
 [data-theme="light"] {
   --bg:#f5f4f2;
   --card:rgba(255,255,255,0.7);
@@ -1313,6 +1314,7 @@ var I18N = {
     neutral: '中性',
     active: '活跃',
     idle: '空闲',
+    error: '错误',
     watching: '监听',
     cfg_identity: '身份',
     cfg_webui: 'WebUI',
@@ -1328,6 +1330,8 @@ var I18N = {
     expr_drive: '驱力', expr_threshold: '阈值',
     five_openness: '开放性', five_warmth: '温暖', five_intensity: '强度', five_autonomy: '自主性', five_resilience: '韧性',
     layer: '层级', avg: '均值', p95: 'P95', count: '次数',
+    spine_signals: '信号', spine_status: '状态', spine_visualization: '处理可视化',
+    spine_avg_signals: '{avg}ms 均值 / {count} 信号',
   },
   en: {
     brand_small: 'ANALYSIS OS',
@@ -1375,6 +1379,7 @@ var I18N = {
     neutral: 'NEUTRAL',
     active: 'ACTIVE',
     idle: 'IDLE',
+    error: 'ERROR',
     watching: 'WATCHING',
     cfg_identity: 'IDENTITY',
     cfg_webui: 'WEBUI',
@@ -1390,6 +1395,8 @@ var I18N = {
     expr_drive: 'drive', expr_threshold: 'threshold',
     five_openness: 'OPENNESS', five_warmth: 'WARMTH', five_intensity: 'INTENSITY', five_autonomy: 'AUTONOMY', five_resilience: 'RESILIENCE',
     layer: 'LAYER', avg: 'AVG', p95: 'P95', count: 'COUNT',
+    spine_signals: 'SIGNALS', spine_status: 'STATUS', spine_visualization: 'PROCESSING VISUALIZATION',
+    spine_avg_signals: '{avg}ms avg / {count} signals',
   }
 };
 
@@ -1402,8 +1409,8 @@ function toggleLang() {
   document.getElementById('langToggle').textContent = currentLang === 'zh' ? 'EN' : '中';
 
   // 过渡动画：卡片向脊柱线收回 → 重建内容 → 卡片从脊柱线弹出（和登录转场一致）
-  var leftCards = document.querySelectorAll('.page-section .page-left .card');
-  var rightCards = document.querySelectorAll('.page-section .page-right .card');
+  var leftCards = document.querySelectorAll('.page-section .page-left > *');
+  var rightCards = document.querySelectorAll('.page-section .page-right > *');
 
   // 1. 左侧卡片往右收（translateX +40px），右侧卡片往左收（translateX -40px）
   leftCards.forEach(function(c) {
@@ -1703,8 +1710,8 @@ function logout() {
   // 清除轮询定时器
   if (pollIntervalId) { clearInterval(pollIntervalId); pollIntervalId = null; }
 
-  var leftCards = document.querySelectorAll('.page-section .page-left .card');
-  var rightCards = document.querySelectorAll('.page-section .page-right .card');
+  var leftCards = document.querySelectorAll('.page-section .page-left > *');
+  var rightCards = document.querySelectorAll('.page-section .page-right > *');
   var spineLine = document.querySelector('.fixed-spine .spine-line');
   var spine = document.getElementById('fixedSpine');
   var handle = document.getElementById('spineHandle');
@@ -1959,7 +1966,10 @@ window.addEventListener('resize', function() { if (currentPage) navigateTo(curre
 var monitorInited = false;
 var MONITOR_DIMS = ['warmth','arousal','valence','tension','curiosity','repair_pressure','expression_drive','boundary_firmness'];
 var MONITOR_DIM_I18N = {warmth:'dim_warmth',arousal:'dim_arousal',valence:'dim_valence',tension:'dim_tension',curiosity:'dim_curiosity',repair_pressure:'dim_repair_pressure',expression_drive:'dim_expression_drive',boundary_firmness:'dim_boundary_firmness'};
-var TIMING_LAYER_ZH = {'L1 Intake':'L1 摄入','L2 Emotion':'L2 情绪','L3 Boundary':'L3 边界','L4 Gate':'L4 门控','L5 Expression':'L5 表达','L6 Memory':'L6 记忆','L7 Personality':'L7 人格'};
+var TIMING_LAYER_ZH = {'L1 Intake':'L1 摄入','L2 Emotion':'L2 情绪','L3 Boundary':'L3 边界','L4 Gate':'L4 门控','L5 Expression':'L5 表达','L6 Memory':'L6 记忆','L7 Personality':'L7 人格','L1':'L1 摄入','L2':'L2 情绪','L3':'L3 边界','L4':'L4 门控','L5':'L5 表达','L6':'L6 记忆','L7':'L7 人格','L1_HDC':'L1 摄入','L2_EMO':'L2 情绪','L3_BND':'L3 边界','L4_GATE':'L4 门控','L5_EXPR':'L5 表达','L6_MEM':'L6 记忆','L7_PERS':'L7 人格'};
+var SPINE_NAME_ZH = {'HDC Perception':'HDC 感知编码','Predictive Coding Gate':'预测编码门控','Void-Scar Engine':'虚空-伤痕引擎','Relational Sheaf':'关系层传播','MoE-HGT':'混合专家图变换','Autopoietic Boundary':'自创生边界','Phase Transition':'相变表达'};
+var SPINE_DESC_ZH = {'L1':'超维二进制编码。通过字符双字母组+循环移位将文本转换为2048位向量。','L2':'计算汉明惊讶度与预测对比。路由至快速/正常/完整处理路径。','L3':'不可逆伤痕状态追踪。创伤经历 RAW→CLOSING→SCARRED→FADED 阶段愈合。','L4':'通过层叠拉普拉斯算子进行跨关系传播。一段关系中的伤痕影响其他关系。','L5':'混合专家+异构图变换器。7种令牌类型，4维决策输出。','L6':'32维身份核心与正交投影。相变限制在6度旋转内。','L7':'压力累积至阈值。以暗示/正常/紧急表达模式爆发。'};
+var SIX_NAME_ZH = {'Curiosity':'好奇','Empathy':'共情','Precision':'精确','Playfulness':'玩心','Defiance':'叛逆','Melancholy':'忧郁'};
 
 /**
  * initMonitor — 构建 Monitor 页面的静态 DOM 骨架（只调用一次）
@@ -2169,8 +2179,8 @@ function renderSpineContent() {
     var sel = i === selectedLayer ? ' selected' : '';
     listHtml += '<div class="card layer-card' + sel + '" onclick="selectLayer(' + i + ')">';
     listHtml += '<div class="layer-dot" style="background:' + (statusColors[l.status] || '#555') + '"></div>';
-    listHtml += '<div><div class="layer-name">' + l.id + ' ' + l.name + '</div>';
-    listHtml += '<div class="layer-timing">' + l.avg + 'ms avg / ' + l.count + ' signals</div></div>';
+    listHtml += '<div><div class="layer-name">' + l.id + ' ' + (currentLang==='zh' && SPINE_NAME_ZH[l.name] ? SPINE_NAME_ZH[l.name] : l.name) + '</div>';
+    listHtml += '<div class="layer-timing">' + t('spine_avg_signals').replace('{avg}', l.avg).replace('{count}', l.count) + '</div></div>';
     listHtml += '</div>';
   });
   left.innerHTML = listHtml;
@@ -2191,17 +2201,19 @@ function renderLayerDetail(container, layer) {
   var statusColors = { active: '#4caf50', idle: 'var(--amber)', error: 'var(--red)' };
   var statusColor = statusColors[layer.status] || '#555';
   var html = '<div class="card">';
-  html += '<div class="card-title">' + layer.id + ' ' + layer.name + '</div>';
-  html += '<p style="color:var(--text-muted);font-size:0.8rem;margin-bottom:16px;line-height:1.5">' + layer.desc + '</p>';
+  var layerDisplayName = currentLang==='zh' && SPINE_NAME_ZH[layer.name] ? SPINE_NAME_ZH[layer.name] : layer.name;
+  var layerDesc = currentLang==='zh' && SPINE_DESC_ZH[layer.id] ? SPINE_DESC_ZH[layer.id] : layer.desc;
+  html += '<div class="card-title">' + layer.id + ' ' + layerDisplayName + '</div>';
+  html += '<p style="color:var(--text-muted);font-size:0.8rem;margin-bottom:16px;line-height:1.5">' + layerDesc + '</p>';
   html += '<div class="stat-grid">';
   html += '<div class="stat-box"><div class="stat-val" style="font-size:22px">' + layer.p50 + 'ms</div><div class="stat-lbl">P50</div></div>';
   html += '<div class="stat-box"><div class="stat-val" style="font-size:22px">' + layer.p99 + 'ms</div><div class="stat-lbl">P99</div></div>';
-  html += '<div class="stat-box"><div class="stat-val" style="font-size:22px">' + layer.count + '</div><div class="stat-lbl">SIGNALS</div></div>';
-  html += '<div class="stat-box"><div class="stat-val" style="font-size:22px;color:' + statusColor + '">' + layer.status.toUpperCase() + '</div><div class="stat-lbl">STATUS</div></div>';
+  html += '<div class="stat-box"><div class="stat-val" style="font-size:22px">' + layer.count + '</div><div class="stat-lbl">' + t('spine_signals') + '</div></div>';
+  html += '<div class="stat-box"><div class="stat-val" style="font-size:22px;color:' + statusColor + '">' + t(layer.status).toUpperCase() + '</div><div class="stat-lbl">' + t('spine_status') + '</div></div>';
   html += '</div></div>';
 
   // Layer-specific visualization
-  html += '<div class="card"><div class="card-title">PROCESSING VISUALIZATION</div>';
+  html += '<div class="card"><div class="card-title">' + t('spine_visualization') + '</div>';
   html += '<svg width="100%" height="160" viewBox="0 0 400 160" style="display:block">';
   html += getLayerVisualization(layer.id);
   html += '</svg></div>';
@@ -2896,11 +2908,11 @@ async function renderMemory() {
       var weight = typeof item.weight === 'number' ? item.weight : 0;
       var age = item.age || formatAge(item.created_at);
       html += '<div class="mem-item"><div class="mem-content">' + content + '</div>';
-      html += '<div class="mem-meta"><span>weight: ' + weight.toFixed(2) + '</span><span>age: ' + age + '</span></div>';
+      html += '<div class="mem-meta"><span>' + (currentLang==='zh'?'权重':'weight') + ': ' + weight.toFixed(2) + '</span><span>' + (currentLang==='zh'?'年龄':'age') + ': ' + age + '</span></div>';
       html += '<div class="mem-weight-track"><div class="mem-weight-fill" style="width:' + (weight*100) + '%"></div></div>';
       html += '</div>';
     });
-    if (!items.length) html += '<div style="color:var(--text-muted);font-size:13px;padding:8px">No data</div>';
+    if (!items.length) html += '<div style="color:var(--text-muted);font-size:13px;padding:8px">' + (currentLang==='zh'?'暂无数据':'No data') + '</div>';
     html += '</div></div>';
     return html;
   }
@@ -3186,7 +3198,8 @@ function initPersonality() {
   // ── 右侧：六维条形图 + 漂移时间线 ──
   var sixHtml = '';
   p.six.forEach(function(bar, idx) {
-    sixHtml += '<div class="six-bar"><span class="six-bar-label">' + bar.name + '</span>';
+    var barName = currentLang==='zh' && SIX_NAME_ZH[bar.name] ? SIX_NAME_ZH[bar.name] : bar.name;
+    sixHtml += '<div class="six-bar"><span class="six-bar-label">' + barName + '</span>';
     sixHtml += '<div class="six-bar-track"><div class="six-bar-fill" id="six-bar-fill-' + idx + '" style="width:0%;background:' + bar.color + '"></div></div>';
     sixHtml += '<span id="six-bar-val-' + idx + '" style="font-family:var(--font-mono);font-size:13px;width:40px;text-align:right">0.00</span>';
     sixHtml += '</div>';
