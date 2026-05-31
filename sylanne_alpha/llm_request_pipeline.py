@@ -829,13 +829,10 @@ class LLMRequestPipeline:
                     _process_after_delay(), name="fragment_debounce"
                 )
                 p._fragment_timers[session_key] = timer
-                p._background_tasks.append(timer)
+                p._background_tasks.add(timer)
 
                 def _cleanup_task(t, tasks=p._background_tasks):
-                    try:
-                        tasks.remove(t)
-                    except ValueError:
-                        pass
+                    tasks.discard(t)
 
                 timer.add_done_callback(_cleanup_task)
                 return  # 暂不处理，等待防抖定时器触发
@@ -964,11 +961,9 @@ class LLMRequestPipeline:
             _observe_task = safe_ensure_future(
                 _locked_observe(), name="locked_observe"
             )
-            p._background_tasks.append(_observe_task)
+            p._background_tasks.add(_observe_task)
             _observe_task.add_done_callback(
-                lambda t: (
-                    p._background_tasks.remove(t) if t in p._background_tasks else None
-                )
+                lambda t: p._background_tasks.discard(t)
             )
             # 等待最多 200ms，让 spine tick 完成后再读取状态
             _observe_wait_ms = int(
@@ -1014,13 +1009,9 @@ class LLMRequestPipeline:
                                     p._send_first_sentence(origin, first_sentence),
                                     name="stream_send_first_sentence",
                                 )
-                                p._background_tasks.append(t)
+                                p._background_tasks.add(t)
                                 t.add_done_callback(
-                                    lambda tt: (
-                                        p._background_tasks.remove(tt)
-                                        if tt in p._background_tasks
-                                        else None
-                                    )
+                                    lambda tt: p._background_tasks.discard(tt)
                                 )
 
                 await original_send_streaming(
@@ -2267,11 +2258,9 @@ class LLMRequestPipeline:
             _fallback_direct_send(best_key, reason, mood),
             name="life_sim_outreach_fallback",
         )
-        p._background_tasks.append(task)
+        p._background_tasks.add(task)
         task.add_done_callback(
-            lambda t: (
-                p._background_tasks.remove(t) if t in p._background_tasks else None
-            )
+            lambda t: p._background_tasks.discard(t)
         )
 
     async def _generate_outreach_message(self, reason: str, mood: str) -> str:
