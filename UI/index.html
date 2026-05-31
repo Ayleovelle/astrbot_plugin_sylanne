@@ -2678,7 +2678,7 @@ function renderConfigGroup(group) {
       item.options.forEach(function(opt) { html += '<option' + (opt === item.value ? ' selected' : '') + '>' + opt + '</option>'; });
       html += '</select>';
     } else if (item.type === 'toggle') {
-      html += '<div class="config-toggle' + (item.value ? ' on' : '') + '" data-key="' + item.key + '" role="switch" aria-checked="' + (item.value ? 'true' : 'false') + '" tabindex="0" onclick="toggleConfig(this)"></div>';
+      html += '<div class="config-toggle' + (item.value ? ' on' : '') + '" data-key="' + item.key + '" role="switch" aria-checked="' + (item.value ? 'true' : 'false') + '" tabindex="0" onclick="toggleConfig(this)" onkeydown="if(event.key===\'Enter\'||event.key===\' \'){event.preventDefault();toggleConfig(this)}"></div>';
     }
     html += '</div>';
   });
