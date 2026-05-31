@@ -39,6 +39,8 @@ except ImportError:
 
     logger = _logging.getLogger("astrbot_plugin_sylanne")  # type: ignore
 
+from sylanne_alpha.plugin_services import PluginServices
+
 
 # ---------------------------------------------------------------------------
 # Item 59: 插件间事件总线
@@ -149,8 +151,16 @@ class PublicAPI:
         "group_atmosphere": "get_group_atmosphere_snapshot",
     }
 
-    def __init__(self, plugin: Any) -> None:
+    def __init__(self, plugin: Any, *, services: "PluginServices | None" = None) -> None:
         self._p = plugin
+        if services is not None:
+            self._services = services
+        else:
+            self._services = PluginServices(
+                config=getattr(plugin, "config", None) or getattr(plugin, "_config", {}),
+                logger=getattr(plugin, "logger", None),
+                context=getattr(plugin, "context", None),
+            )
 
     # ------------------------------------------------------------------
     # Helper accessors
@@ -364,7 +374,7 @@ class PublicAPI:
             if hasattr(p, "_last_request_budgets")
             else default_budget
         )
-        cfg = p.config or {}
+        cfg = self._services.config or {}
         result: dict[str, Any] = {
             "state_injection": {
                 "compat_mode": budget.compat_mode,
@@ -504,7 +514,7 @@ class PublicAPI:
 
     async def shadow_diagnostics_status(self, event: Any = None, **kwargs: Any) -> Any:
         p = self._p
-        cfg = p.config or {}
+        cfg = self._services.config or {}
         if not cfg.get("enable_shadow_diagnostics"):
             yield json.dumps(
                 {
@@ -620,7 +630,7 @@ class PublicAPI:
         speaker_track_id = (
             f"{session_id}::speaker:{sender_id}" if sender_id else session_id
         )
-        cfg = p.config or {}
+        cfg = self._services.config or {}
         profile_limit = int(cfg.get("agent_identity_profile_limit", 256))
         ttl = float(cfg.get("agent_identity_ttl_seconds", 2592000.0))
         now = p._observed_now()
@@ -799,7 +809,7 @@ class PublicAPI:
 
     async def query_agent_state_tool(self, event: Any = None, **kwargs: Any) -> str:
         payload = await self.query_agent_state(event, **kwargs)
-        cfg = self._p.config or {}
+        cfg = self._services.config or {}
         max_chars = int(cfg.get("llm_tool_response_max_chars", 400))
         raw = json.dumps(payload, ensure_ascii=False, default=str)
         if len(raw) <= max_chars:
@@ -866,7 +876,7 @@ class PublicAPI:
     async def get_bot_moral_repair_state_tool(
         self, event: Any = None, detail: str = "summary", **kwargs: Any
     ) -> Any:
-        cfg = self._p.config or {}
+        cfg = self._services.config or {}
         exposure = "internal" if detail == "full" else "plugin_safe"
         payload: dict[str, Any] = {
             "kind": "moral_repair_state",
@@ -880,7 +890,7 @@ class PublicAPI:
     async def get_bot_fallibility_state_tool(
         self, event: Any = None, detail: str = "summary", **kwargs: Any
     ) -> Any:
-        cfg = self._p.config or {}
+        cfg = self._services.config or {}
         exposure = "internal" if detail == "full" else "plugin_safe"
         payload: dict[str, Any] = {
             "kind": "fallibility_state",
@@ -976,7 +986,7 @@ class PublicAPI:
         self, event: Any = None, query: str = "", **kwargs: Any
     ) -> Any:
         p = self._p
-        cfg = p.config or {}
+        cfg = self._services.config or {}
         sk = self._session_key(event)
         if not cfg.get("enable_sylanne_memory", True):
             yield "Sylanne 记忆系统未启用。"
@@ -1005,7 +1015,7 @@ class PublicAPI:
 
     async def emotion_reset(self, event: Any = None, **kwargs: Any) -> Any:
         p = self._p
-        cfg = p.config or {}
+        cfg = self._services.config or {}
         sk = self._session_key(event)
         if not cfg.get("allow_emotion_reset_backdoor", True):
             yield "情绪重置后门已关闭，无法执行重置。"
@@ -1023,7 +1033,7 @@ class PublicAPI:
 
     async def _humanlike_reset_command(self, event: Any = None, **kwargs: Any) -> Any:
         p = self._p
-        cfg = p.config or {}
+        cfg = self._services.config or {}
         sk = self._session_key(event)
         if not cfg.get("allow_humanlike_reset_backdoor", True):
             yield "humanlike 重置后门已关闭，无法执行重置。"
@@ -1035,7 +1045,7 @@ class PublicAPI:
 
     async def moral_repair_status(self, event: Any = None, **kwargs: Any) -> Any:
         p = self._p
-        cfg = p.config or {}
+        cfg = self._services.config or {}
         if not cfg.get("enable_moral_repair_state"):
             yield "道德修复状态未启用。"
             return
@@ -1051,7 +1061,7 @@ class PublicAPI:
         self, event: Any = None, **kwargs: Any
     ) -> Any:
         p = self._p
-        cfg = p.config or {}
+        cfg = self._services.config or {}
         if not cfg.get("enable_psychological_screening"):
             yield "心理筛查状态未启用。"
             return
@@ -1110,7 +1120,7 @@ class PublicAPI:
 
     async def fallibility_status(self, event: Any = None, **kwargs: Any) -> Any:
         p = self._p
-        cfg = p.config or {}
+        cfg = self._services.config or {}
         if not cfg.get("enable_fallibility_state"):
             yield "fallibility 状态未启用。"
             return
@@ -1132,7 +1142,7 @@ class PublicAPI:
 
     async def moral_repair_reset(self, event: Any = None, **kwargs: Any) -> Any:
         p = self._p
-        cfg = p.config or {}
+        cfg = self._services.config or {}
         sk = self._session_key(event)
         if not cfg.get("allow_moral_repair_reset_backdoor", True):
             yield "道德修复重置后门已关闭，无法执行重置。"
@@ -1144,7 +1154,7 @@ class PublicAPI:
 
     async def fallibility_reset(self, event: Any = None, **kwargs: Any) -> Any:
         p = self._p
-        cfg = p.config or {}
+        cfg = self._services.config or {}
         sk = self._session_key(event)
         if not cfg.get("allow_fallibility_reset_backdoor", True):
             yield "fallibility 重置后门已关闭，无法执行重置。"
@@ -1156,7 +1166,7 @@ class PublicAPI:
 
     async def lifelike_learning_reset(self, event: Any = None, **kwargs: Any) -> Any:
         p = self._p
-        cfg = p.config or {}
+        cfg = self._services.config or {}
         sk = self._session_key(event)
         if not cfg.get("allow_lifelike_learning_reset_backdoor", True):
             yield "lifelike learning 重置后门已关闭，无法执行重置。"
@@ -1168,7 +1178,7 @@ class PublicAPI:
 
     async def personality_drift_reset(self, event: Any = None, **kwargs: Any) -> Any:
         p = self._p
-        cfg = p.config or {}
+        cfg = self._services.config or {}
         sk = self._session_key(event)
         if not cfg.get("allow_personality_drift_reset_backdoor", True):
             yield "personality drift 重置后门已关闭，无法执行重置。"
@@ -1488,7 +1498,7 @@ class PublicAPI:
         """
         p = self._p
         current_text = kwargs.get("current_text", text)
-        cfg = p.config or {}
+        cfg = self._services.config or {}
         low_signal_enabled = cfg.get("enable_low_signal_light_assessment", True)
         low_signal_max = int(cfg.get("low_signal_max_chars", 12))
         if (
@@ -1626,7 +1636,7 @@ class PublicAPI:
     def _internal_assessor_llm_concurrency_decision(self) -> dict[str, Any]:
         """计算内部评估器 LLM 并发策略：基础 2 通道 + 极端积压时临时 burst 到 3。"""
         p = self._p
-        _cfg = p.config or {}
+        _cfg = self._services.config or {}
         total_queued = sum(len(q) for q in p._background_post_queues.values())
         base_limit = 2
         burst_limit = 3
@@ -1650,7 +1660,7 @@ class PublicAPI:
     async def _sylanne_memory_settings_page_payload(self) -> dict[str, Any]:
         p = self._p
         providers = []
-        context = getattr(p, "context", None) or p.context
+        context = self._services.context
         if hasattr(context, "get_all_embedding_providers"):
             for prov in context.get_all_embedding_providers():
                 cfg = getattr(prov, "provider_config", {})
@@ -1673,7 +1683,7 @@ class PublicAPI:
     ) -> dict[str, Any]:
         p = self._p
         provider_id = str(body.get("embedding_provider_id") or "")
-        context = getattr(p, "context", None) or p.context
+        context = self._services.context
         valid_ids = set()
         if hasattr(context, "get_all_embedding_providers"):
             for prov in context.get_all_embedding_providers():
@@ -1682,7 +1692,7 @@ class PublicAPI:
         if provider_id and provider_id not in valid_ids:
             return {"ok": False, "error": "unknown_embedding_provider"}
         p._config["sylanne_memory_embedding_provider_id"] = provider_id
-        config = p.config if hasattr(p, "config") else p._config
+        config = self._services.config
         if isinstance(config, dict):
             config["sylanne_memory_embedding_provider_id"] = provider_id
         if hasattr(config, "save_config"):
@@ -1854,7 +1864,7 @@ class PublicAPI:
         Returns:
             开关状态字典，包含 realtime_chat、proactive_dispatch、embedding_memory 等。
         """
-        cfg = self._p.config or {}
+        cfg = self._services.config or {}
         return {
             "schema_version": "sylanne.alpha.config.v1",
             "realtime_chat": {

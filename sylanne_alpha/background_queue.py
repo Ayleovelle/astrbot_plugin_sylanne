@@ -19,6 +19,7 @@ import collections
 import logging
 from typing import Any
 
+from sylanne_alpha.plugin_services import PluginServices
 from sylanne_alpha.utils import safe_ensure_future
 
 logger = logging.getLogger("astrbot_plugin_sylanne")
@@ -117,13 +118,22 @@ class BackgroundPostQueue:
     负责自适应工作者调度、租约过期回收、检查点持久化、排空处理和队列恢复。
     """
 
-    def __init__(self, plugin: Any) -> None:
+    def __init__(self, plugin: Any, *, services: "PluginServices | None" = None) -> None:
         """初始化队列管理器。
 
         Args:
             plugin: Sylanne 插件实例。
+            services: 只读服务容器（可选，为 None 时从 plugin 构建）。
         """
         self._p = plugin
+        if services is not None:
+            self._services = services
+        else:
+            self._services = PluginServices(
+                config=getattr(plugin, "config", None) or getattr(plugin, "_config", {}),
+                logger=getattr(plugin, "logger", None),
+                context=getattr(plugin, "context", None),
+            )
 
     # ------------------------------------------------------------------
     # 辅助方法
@@ -189,7 +199,7 @@ class BackgroundPostQueue:
         Returns:
             决策结果字典，包含 desired_workers/dispatch_workers/reasons 等。
         """
-        cfg = self._p.config or {}
+        cfg = self._services.config or {}
         dynamic_enabled = bool(cfg.get("enable_dynamic_background_workers"))
         queue = self._p._background_post_queues.get(session_key, collections.deque())
         queue_depth = len(queue)
@@ -389,7 +399,7 @@ class BackgroundPostQueue:
         """
         checkpoint_tasks = self._p._background_post_checkpoint_tasks
         debounce = float(
-            (self._p.config or {}).get(
+            (self._services.config or {}).get(
                 "background_post_checkpoint_debounce_seconds", 0.75
             )
         )

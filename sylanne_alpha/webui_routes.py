@@ -33,6 +33,8 @@ except ImportError:
 
     logger = _logging.getLogger("astrbot_plugin_sylanne")  # type: ignore
 
+from sylanne_alpha.plugin_services import PluginServices
+
 
 # ---------------------------------------------------------------------------
 # Item 62: 内置术语词典（供前端悬浮卡片使用）
@@ -94,8 +96,16 @@ class WebUIRoutes:
     所有 handler 方法都是 async，返回 dict 由 Quart 自动序列化为 JSON。
     """
 
-    def __init__(self, plugin: Any) -> None:
+    def __init__(self, plugin: Any, *, services: "PluginServices | None" = None) -> None:
         self._p = plugin
+        if services is not None:
+            self._services = services
+        else:
+            self._services = PluginServices(
+                config=getattr(plugin, "config", None) or getattr(plugin, "_config", {}),
+                logger=getattr(plugin, "logger", None),
+                context=getattr(plugin, "context", None),
+            )
 
     # ------------------------------------------------------------------
     # Memory settings & lineage observatory
@@ -441,7 +451,7 @@ class WebUIRoutes:
             self._p._config[key] = value
             updated.append(key)
         # Persist if possible
-        config = self._p.config if hasattr(self._p, "config") else self._p._config
+        config = self._services.config
         if isinstance(config, dict):
             for key in updated:
                 config[key] = self._p._config[key]
@@ -1234,7 +1244,7 @@ class WebUIRoutes:
                 include_current=True
             )
             if stopped:
-                self._p.logger.info(
+                self._services.logger.info(
                     f"Sylanne WebUI probe stopped stale listener modules: {stopped}"
                 )
             self._p._start_webui_if_enabled()

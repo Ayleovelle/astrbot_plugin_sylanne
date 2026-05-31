@@ -34,6 +34,8 @@ except ImportError:
 
     logger = _logging.getLogger("astrbot_plugin_sylanne")  # type: ignore
 
+from sylanne_alpha.plugin_services import PluginServices
+
 
 class ProactiveScheduler:
     """主动发言调度器，封装 Sylanne 插件的主动发言逻辑。
@@ -47,8 +49,16 @@ class ProactiveScheduler:
       - 通过 host.on_proactive_check 与计算栈交互
     """
 
-    def __init__(self, plugin: Any) -> None:
+    def __init__(self, plugin: Any, *, services: "PluginServices | None" = None) -> None:
         self._p = plugin
+        if services is not None:
+            self._services = services
+        else:
+            self._services = PluginServices(
+                config=getattr(plugin, "config", None) or getattr(plugin, "_config", {}),
+                logger=getattr(plugin, "logger", None),
+                context=getattr(plugin, "context", None),
+            )
         # 仪式注册表：session_key → {ritual_name: (start_hour, end_hour)}
         # 初始为空，后续可通过对话学习填充
         self._ritual_registry: dict[str, dict[str, tuple[int, int]]] = {}
@@ -73,7 +83,7 @@ class ProactiveScheduler:
         Returns:
             策略字典，包含 should_dispatch、cooldown_seconds、feedback_pressure。
         """
-        cfg = self._p.config or {}
+        cfg = self._services.config or {}
         cooldown = float(cfg.get("proactive_speech_dispatch_cooldown_seconds", 1800.0))
         # 根据历史反馈计算压力：冷淡/未回复越多，冷却时间越长
         feedback_pressure = 0.0
@@ -137,7 +147,7 @@ class ProactiveScheduler:
         Returns:
             调度请求字典，包含 message_text、quiet_gate、realtime_chat_plan。
         """
-        cfg = self._p.config or {}
+        cfg = self._services.config or {}
         topic_judgement = {}
         if isinstance(decision, dict):
             topic_judgement = decision.get("topic_judgement", {})
@@ -173,7 +183,7 @@ class ProactiveScheduler:
         """
         if force:
             return ""
-        cfg = self._p.config or {}
+        cfg = self._services.config or {}
         if not cfg.get("enable_proactive_speech_dispatch"):
             return "dispatch_disabled"
         now = (

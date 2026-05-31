@@ -28,6 +28,7 @@ if TYPE_CHECKING:
     pass  # plugin type is dynamic (Star subclass)
 
 from sylanne_alpha.constants import CHINA_TZ as _CHINA_TZ
+from sylanne_alpha.plugin_services import PluginServices
 
 
 class RealtimeDispatch:
@@ -42,8 +43,16 @@ class RealtimeDispatch:
       - 被 llm_request_pipeline 调用注入上下文
     """
 
-    def __init__(self, plugin: Any) -> None:
+    def __init__(self, plugin: Any, *, services: "PluginServices | None" = None) -> None:
         self._p = plugin
+        if services is not None:
+            self._services = services
+        else:
+            self._services = PluginServices(
+                config=getattr(plugin, "config", None) or getattr(plugin, "_config", {}),
+                logger=getattr(plugin, "logger", None),
+                context=getattr(plugin, "context", None),
+            )
 
     # ------------------------------------------------------------------
     # Segmented dispatch helpers
@@ -66,7 +75,7 @@ class RealtimeDispatch:
 
     async def send_first_sentence(self, origin: str, text: str) -> None:
         """发送首句文本到指定会话。"""
-        context = self._p.context
+        context = self._services.context
         if hasattr(context, "send_message"):
             message = self._p._astrbot_message(text)
             await context.send_message(origin, message)
@@ -81,7 +90,7 @@ class RealtimeDispatch:
             parts: 分段列表，每段包含 text 和 delay_before_seconds。
             session_key: 会话标识，发送完成后清除 unfinished 标记。
         """
-        context = self._p.context
+        context = self._services.context
         if not hasattr(context, "send_message"):
             return
         total = len(parts)
@@ -92,7 +101,7 @@ class RealtimeDispatch:
             text = str(part.get("text", ""))
             if not text:
                 continue
-            self._p.logger.info(
+            self._services.logger.info(
                 f"Sylanne segmented reply part {idx}/{total}: {text[:60]}"
             )
             message = self._p._astrbot_message(text)
@@ -708,7 +717,7 @@ class RealtimeDispatch:
             return ""
         cache = getattr(p, "_group_atmosphere_injection_snapshot_cache", {})
         previous = cache.get(session_key)
-        cfg = p.config or {}
+        cfg = self._services.config or {}
         diff_mode = str(cfg.get("state_injection_compact_mode", "")).lower() == "diff"
         values = getattr(state, "values", {}) if state else {}
         if diff_mode and previous is not None:

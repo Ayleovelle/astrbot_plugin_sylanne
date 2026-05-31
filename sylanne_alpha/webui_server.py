@@ -33,6 +33,8 @@ from urllib.parse import parse_qs, urlparse
 
 from pathlib import Path
 
+from sylanne_alpha.plugin_services import PluginServices
+
 
 def _get_plugin_version() -> str:
     """从 metadata.yaml 读取版本号（缓存结果）。"""
@@ -3066,8 +3068,16 @@ class WebUILifecycle:
     - schedule_listener_takeover(): 延迟接管（等待旧模块完全卸载）
     """
 
-    def __init__(self, plugin: Any) -> None:
+    def __init__(self, plugin: Any, *, services: "PluginServices | None" = None) -> None:
         self._p = plugin
+        if services is not None:
+            self._services = services
+        else:
+            self._services = PluginServices(
+                config=getattr(plugin, "config", None) or getattr(plugin, "_config", {}),
+                logger=getattr(plugin, "logger", None),
+                context=getattr(plugin, "context", None),
+            )
 
     def start_if_enabled(self) -> None:
         """当配置启用 WebUI 时启动独立服务器。
@@ -3089,18 +3099,18 @@ class WebUILifecycle:
         webui_host = str(self._p._cfg("sylanne_webui_host", "127.0.0.1") or "127.0.0.1")
         webui_port = self._p._cfg_int("sylanne_webui_port", 2718)
         token = _ensure_token(self._p._config or {})
-        self._p.logger.info(f"Sylanne WebUI token: {token}")
+        self._services.logger.info(f"Sylanne WebUI token: {token}")
         try:
             start_webui_background(self._p, host=webui_host, port=webui_port)
-            self._p.logger.info(
+            self._services.logger.info(
                 f"Sylanne WebUI server start requested: http://{webui_host}:{webui_port}"
             )
         except RuntimeError as exc:
-            self._p.logger.debug(
+            self._services.logger.debug(
                 f"Sylanne WebUI server deferred until event loop is running: {exc}"
             )
         except Exception as exc:
-            self._p.logger.warning(f"Sylanne WebUI server failed: {exc}")
+            self._services.logger.warning(f"Sylanne WebUI server failed: {exc}")
 
     def runtime_info(self) -> dict[str, Any]:
         return {
@@ -3369,7 +3379,7 @@ class WebUILifecycle:
             await asyncio.sleep(0.3)
             stopped = await self.stop_stale_server_modules(include_current=True)
             if stopped:
-                self._p.logger.info(
+                self._services.logger.info(
                     f"Sylanne WebUI stopped stale listener modules: {stopped}"
                 )
             self.start_if_enabled()

@@ -17,6 +17,7 @@ import math
 import zlib
 from typing import TYPE_CHECKING, Any
 
+from sylanne_alpha.plugin_services import PluginServices
 from sylanne_alpha.utils import safe_ensure_future
 
 if TYPE_CHECKING:
@@ -128,13 +129,22 @@ class StatePersistence:
     通过 self._p 委托访问插件实例。
     """
 
-    def __init__(self, plugin: Any) -> None:
+    def __init__(self, plugin: Any, *, services: "PluginServices | None" = None) -> None:
         """初始化持久化层。
 
         Args:
             plugin: Sylanne 插件实例。
+            services: 只读服务容器（可选，为 None 时从 plugin 构建）。
         """
         self._p = plugin
+        if services is not None:
+            self._services = services
+        else:
+            self._services = PluginServices(
+                config=getattr(plugin, "config", None) or getattr(plugin, "_config", {}),
+                logger=getattr(plugin, "logger", None),
+                context=getattr(plugin, "context", None),
+            )
         self._buffer_persist_timers: dict[str, asyncio.TimerHandle] = {}
 
     # ------------------------------------------------------------------
@@ -1069,10 +1079,10 @@ class StatePersistence:
         cached = cache.get(sk)
         if cached:
             ts, val = cached
-            ttl = float((p.config or {}).get("provider_id_cache_ttl_seconds", 30.0))
+            ttl = float((self._services.config or {}).get("provider_id_cache_ttl_seconds", 30.0))
             if time.time() - ts < ttl:
                 return val
-        context = getattr(p, "context", None) or p.context
+        context = self._services.context
         if hasattr(context, "get_current_chat_provider_id"):
             try:
                 umo = str(getattr(event, "unified_msg_origin", "") or sk)
@@ -1318,7 +1328,7 @@ class StatePersistence:
         # Save final checkpoints for background post queues
         bg_queues = p._background_post_queues
         checkpoint_enabled = bool(
-            (p.config or {}).get("background_post_queue_checkpoint_enabled")
+            (self._services.config or {}).get("background_post_queue_checkpoint_enabled")
         )
         recovered = p._background_post_recovered_sessions
         if checkpoint_enabled:

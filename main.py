@@ -131,6 +131,7 @@ from sylanne_alpha.compat import (  # noqa: E402
     reset_surface,  # noqa: E402
 )
 from sylanne_alpha.host import SylanneAlphaHost, SylanneAlphaHostEvent  # noqa: E402
+from sylanne_alpha.plugin_services import PluginServices  # noqa: E402
 from sylanne_alpha.life_simulation import LifeSimulator  # noqa: E402
 from sylanne_alpha.memory_system import MemorySystem  # noqa: E402
 from sylanne_alpha.llm_request_pipeline import LLMRequestPipeline  # noqa: E402
@@ -404,20 +405,29 @@ class EmotionalStatePlugin(Star):
         )
         self._realtime_chat_active_dispatches: BoundedDict = BoundedDict(maxsize=200)
         self._session_locks: dict[str, asyncio.Lock] = {}
+        # 构建只读服务容器，供所有子模块共享
+        self._plugin_services = PluginServices(
+            config=self._config,
+            logger=self.logger,
+            context=self.context,
+            rhythm_learner=self._rhythm_learner,
+            social_field=self._social_field,
+        )
         # 子系统初始化：各子系统持有 self 引用，通过委托模式分工
-        self._session_ctx = SessionContext(self)
-        self._state_persistence = StatePersistence(self)
-        self._realtime_dispatch = RealtimeDispatch(self)
-        self._background_queue = BackgroundPostQueue(self)
-        self._webui_routes = WebUIRoutes(self)
+        _svc = self._plugin_services
+        self._session_ctx = SessionContext(self, services=_svc)
+        self._state_persistence = StatePersistence(self, services=_svc)
+        self._realtime_dispatch = RealtimeDispatch(self, services=_svc)
+        self._background_queue = BackgroundPostQueue(self, services=_svc)
+        self._webui_routes = WebUIRoutes(self, services=_svc)
         self._memory_system = self._memory_system_for_session("default")
         # 异步评估器：调用 LLM 评估用户文本的情感维度
         self._async_assessor = AsyncAssessor(config=self._config)
-        self._llm_response_pipeline = LLMResponsePipeline(self)
-        self._llm_request_pipeline = LLMRequestPipeline(self)
-        self._public_api = PublicAPI(self)
+        self._llm_response_pipeline = LLMResponsePipeline(self, services=_svc)
+        self._llm_request_pipeline = LLMRequestPipeline(self, services=_svc)
+        self._public_api = PublicAPI(self, services=_svc)
         # 主动发言调度器：基于身体需求和节律决定是否主动发言
-        self._proactive_scheduler = ProactiveScheduler(self)
+        self._proactive_scheduler = ProactiveScheduler(self, services=_svc)
         self._register_web_apis(context)
 
         # AstrBot ConversationManager / PersonaManager 集成
@@ -435,7 +445,7 @@ class EmotionalStatePlugin(Star):
                 _aio.run(stop_webui_server())
         except Exception:
             pass
-        self._webui_lifecycle = _sylanne_webui_server.WebUILifecycle(self)
+        self._webui_lifecycle = _sylanne_webui_server.WebUILifecycle(self, services=_svc)
         self._webui_lifecycle.publish_active_plugin()
         self._webui_lifecycle.start_if_enabled()
         self._webui_lifecycle.schedule_listener_takeover()

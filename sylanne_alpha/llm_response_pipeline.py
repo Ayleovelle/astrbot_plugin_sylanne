@@ -26,6 +26,7 @@ from types import SimpleNamespace
 from typing import Any
 
 from sylanne_alpha.compat import realtime_plan, strip_draft_blocks
+from sylanne_alpha.plugin_services import PluginServices
 from sylanne_alpha.utils import safe_ensure_future
 
 try:
@@ -54,8 +55,16 @@ class LLMResponsePipeline:
       - 调用 observe_response 反馈给计算栈
     """
 
-    def __init__(self, plugin: Any) -> None:
+    def __init__(self, plugin: Any, *, services: "PluginServices | None" = None) -> None:
         self._p = plugin
+        if services is not None:
+            self._services = services
+        else:
+            self._services = PluginServices(
+                config=getattr(plugin, "config", None) or getattr(plugin, "_config", {}),
+                logger=getattr(plugin, "logger", None),
+                context=getattr(plugin, "context", None),
+            )
 
     # ------------------------------------------------------------------
     # Injection defense
@@ -119,7 +128,7 @@ class LLMResponsePipeline:
         text = str(getattr(response, "completion_text", "") or "")
         cleaned = strip_draft_blocks(text)
         cleaned = self._sanitize_response(cleaned)
-        self._p.logger.info(
+        self._services.logger.info(
             f"Sylanne on_llm_response: len={len(cleaned)} session={session_key}"
         )
 
@@ -207,7 +216,7 @@ class LLMResponsePipeline:
             self._p._unfinished_replies[session_key] = rest
 
         # 后台调度分段发送
-        self._p.logger.info(
+        self._services.logger.info(
             f"Sylanne segmented reply queued: session={session_key} parts={len(parts)}"
         )
         task = safe_ensure_future(
@@ -330,7 +339,7 @@ class LLMResponsePipeline:
 
     async def _send_first_sentence(self, origin: str, text: str) -> None:
         """通过 context.send_message 发送首句文本。"""
-        context = self._p.context
+        context = self._services.context
         if hasattr(context, "send_message"):
             message = self._astrbot_message(text)
             await context.send_message(origin, message)
@@ -348,7 +357,7 @@ class LLMResponsePipeline:
             parts: 分段列表，每段包含 text 和 delay_before_seconds。
             session_key: 会话标识，发送完成后清除 unfinished 标记。
         """
-        context = self._p.context
+        context = self._services.context
         if not hasattr(context, "send_message"):
             return
         total = len(parts)
@@ -359,7 +368,7 @@ class LLMResponsePipeline:
             text = str(part.get("text", ""))
             if not text:
                 continue
-            self._p.logger.info(
+            self._services.logger.info(
                 f"Sylanne segmented reply part {idx}/{total}: {text[:60]}"
             )
             message = self._astrbot_message(text)
@@ -607,7 +616,7 @@ class LLMResponsePipeline:
             from main import _StateInjectionBudget
 
         budget = _StateInjectionBudget(session_key=session_key, model_hint=model_hint)
-        cfg = self._p.config or {}
+        cfg = self._services.config or {}
         budget.max_added_chars = int(cfg.get("state_injection_max_added_chars", 2400))
         budget.max_parts = int(cfg.get("state_injection_max_parts", 8))
         hajide = bool(cfg.get("sylanne_alpha_hajide_compat_mode"))

@@ -23,6 +23,7 @@ from sylanne_alpha.content_sanitizer import (
     wrap_system_prompt_for_analysis,
     is_content_filter_refusal,
 )
+from sylanne_alpha.plugin_services import PluginServices
 from sylanne_alpha.utils import safe_ensure_future
 
 try:
@@ -413,8 +414,16 @@ class LLMRequestPipeline:
                 prefs["style"] = style
                 break
 
-    def __init__(self, plugin: Any) -> None:
+    def __init__(self, plugin: Any, *, services: "PluginServices | None" = None) -> None:
         self._p = plugin
+        if services is not None:
+            self._services = services
+        else:
+            self._services = PluginServices(
+                config=getattr(plugin, "config", None) or getattr(plugin, "_config", {}),
+                logger=getattr(plugin, "logger", None),
+                context=getattr(plugin, "context", None),
+            )
         if not hasattr(self._p, "_cached_system_prompts"):
             self._p._cached_system_prompts = {}
 
@@ -520,7 +529,7 @@ class LLMRequestPipeline:
             return message_text
 
         p = self._p
-        config = p.config or {}
+        config = self._services.config or {}
 
         # 检查消息是否包含非文本内容
         msg_obj = getattr(event, "message_obj", None)
@@ -582,7 +591,7 @@ class LLMRequestPipeline:
             多模态 provider 的 ID，未找到返回空字符串。
         """
         p = self._p
-        config = p.config or {}
+        config = self._services.config or {}
 
         # 用户显式指定了 provider 则直接用
         explicit = str(config.get("sylanne_alpha_transcription_provider_id") or "")
@@ -703,11 +712,11 @@ class LLMRequestPipeline:
         if message_text:
             p._last_user_texts[session_key] = message_text[:120]
         realtime_enabled = bool(
-            (p.config or {}).get("sylanne_alpha_realtime_chat_enabled")
+            (self._services.config or {}).get("sylanne_alpha_realtime_chat_enabled")
         )
-        hajide = bool((p.config or {}).get("sylanne_alpha_hajide_compat_mode"))
+        hajide = bool((self._services.config or {}).get("sylanne_alpha_hajide_compat_mode"))
         intercept = bool(
-            (p.config or {}).get("sylanne_alpha_realtime_intercept_llm_response")
+            (self._services.config or {}).get("sylanne_alpha_realtime_intercept_llm_response")
         )
 
         # ---- 群聊 SFPD（社交场域感知调度）----
@@ -772,12 +781,12 @@ class LLMRequestPipeline:
         )
         if realtime_enabled and message_text and not is_follow_up and not active_reply:
             probe_delay = float(
-                (p.config or {}).get(
+                (self._services.config or {}).get(
                     "realtime_input_completion_probe_delay_seconds", 1.5
                 )
             )
             max_wait = float(
-                (p.config or {}).get("realtime_input_completion_max_wait_seconds", 4.0)
+                (self._services.config or {}).get("realtime_input_completion_max_wait_seconds", 4.0)
             )
 
             # 取消该会话之前的防抖定时器
@@ -967,7 +976,7 @@ class LLMRequestPipeline:
             )
             # 等待最多 200ms，让 spine tick 完成后再读取状态
             _observe_wait_ms = int(
-                (p.config or {}).get("state_injection_observe_wait_ms", 200)
+                (self._services.config or {}).get("state_injection_observe_wait_ms", 200)
             )
             if _observe_wait_ms > 0:
                 try:
@@ -1309,7 +1318,7 @@ class LLMRequestPipeline:
         if time_fragment:
             sys_parts.append(time_fragment)
 
-        max_context_tokens = int((p.config or {}).get("max_context_tokens", 8000))
+        max_context_tokens = int((self._services.config or {}).get("max_context_tokens", 8000))
         if max_context_tokens > 0:
             estimated_chars = (
                 len(current_prompt) + len(message_text)
@@ -1339,7 +1348,7 @@ class LLMRequestPipeline:
             "unfinished": unfinished_fragment,
         }
 
-        total_budget = _compute_injection_budget(gap_seconds, p.config or {})
+        total_budget = _compute_injection_budget(gap_seconds, self._services.config or {})
         trimmed = _allocate_and_trim(raw_fragments, total_budget)
 
         unfinished_final = trimmed.pop("unfinished", "")
@@ -1424,7 +1433,7 @@ class LLMRequestPipeline:
                     persona_getter=self._life_sim_persona_getter,
                 )
                 life_sim.start()
-                p.logger.info(
+                self._services.logger.info(
                     f"Sylanne life simulator: enabled={life_sim.enabled}, "
                     f"interval={life_sim.interval_seconds}s"
                 )
@@ -2083,7 +2092,7 @@ class LLMRequestPipeline:
                 break
         if not provider_id:
             return ""
-        context = p.context
+        context = self._services.context
         if not hasattr(context, "get_provider_by_id"):
             return ""
         provider = context.get_provider_by_id(provider_id)
@@ -2174,7 +2183,7 @@ class LLMRequestPipeline:
         )
         if not provider_id:
             return ""
-        context = p.context
+        context = self._services.context
         if not hasattr(context, "get_provider_by_id"):
             return ""
         provider = context.get_provider_by_id(provider_id)
@@ -2221,7 +2230,7 @@ class LLMRequestPipeline:
             if session_key in pending and pending[session_key].get("reason") == r:
                 # Still not consumed -- send directly
                 pending.pop(session_key, None)
-                context = p.context
+                context = self._services.context
                 if hasattr(context, "send_message"):
                     # Use LLM to generate in-character message if possible
                     generated = await self._generate_outreach_message(r, m)
@@ -2279,7 +2288,7 @@ class LLMRequestPipeline:
         )
         if not provider_id:
             return ""
-        context = p.context
+        context = self._services.context
         if not hasattr(context, "get_provider_by_id"):
             return ""
         provider = context.get_provider_by_id(provider_id)

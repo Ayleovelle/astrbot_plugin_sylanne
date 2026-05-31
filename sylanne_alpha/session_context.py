@@ -31,6 +31,7 @@ except ImportError:
         return Path.home()
 
 from sylanne_alpha.infra import resolve_data_root
+from sylanne_alpha.plugin_services import PluginServices
 
 
 from sylanne_alpha.host import SylanneAlphaHost
@@ -326,13 +327,22 @@ class SessionContext:
     host 生命周期、记忆系统初始化）从主插件类中解耦出来。
     """
 
-    def __init__(self, plugin: Any) -> None:
+    def __init__(self, plugin: Any, *, services: "PluginServices | None" = None) -> None:
         """初始化会话上下文。
 
         Args:
             plugin: Sylanne 插件实例，通过 self._p 访问其内部状态。
+            services: 只读服务容器（可选，为 None 时从 plugin 构建）。
         """
         self._p = plugin
+        if services is not None:
+            self._services = services
+        else:
+            self._services = PluginServices(
+                config=getattr(plugin, "config", None) or getattr(plugin, "_config", {}),
+                logger=getattr(plugin, "logger", None),
+                context=getattr(plugin, "context", None),
+            )
         # 关系年龄追踪：session_key → 首次交互时间戳
         self._first_interaction_times: dict[str, float] = {}
         # Item 103: 设备指纹追踪：session_key → 上次 User-Agent
@@ -800,11 +810,7 @@ class SessionContext:
                     self._p._state_persistence.persist_kernel(oldest_key, old_host),
                     name=f"lru_evict_{oldest_key}",
                 )
-            cfg = (
-                self._p.config
-                if hasattr(self._p, "_config")
-                else getattr(self._p, "config", {}) or {}
-            )
+            cfg = self._services.config or {}
             root = resolve_data_root(cfg)
             host = SylanneAlphaHost(root=root, session_key=session_key)
             # 编码器共享：避免每个 host 各持有一份 encoder 浪费内存
