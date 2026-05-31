@@ -92,14 +92,6 @@ class LLMResponsePipeline:
             event: AstrBot 事件对象。
             response: LLM 响应对象，包含 completion_text。
         """
-        if not hasattr(self._p, "_stream_first_sent"):
-            self._p._stream_first_sent = {}
-        if not hasattr(self._p, "_unfinished_replies"):
-            self._p._unfinished_replies = {}
-        if not hasattr(self._p, "_background_tasks"):
-            self._p._background_tasks = []
-        if not hasattr(self._p, "_segmented_tasks"):
-            self._p._segmented_tasks = {}
         session_key = self._p._session_key(event)
         cfg = self._p._config or {}
         realtime_enabled = bool(
@@ -222,13 +214,9 @@ class LLMResponsePipeline:
             self._dispatch_segmented_parts(origin, parts, session_key=session_key),
             name="dispatch_segmented_parts",
         )
-        self._p._background_tasks.append(task)
+        self._p._background_tasks.add(task)
         task.add_done_callback(
-            lambda t: (
-                self._p._background_tasks.remove(t)
-                if t in self._p._background_tasks
-                else None
-            )
+            lambda t: self._p._background_tasks.discard(t)
         )
         self._p._segmented_tasks[session_key] = task
 
@@ -237,13 +225,9 @@ class LLMResponsePipeline:
             self._background_observe_response(session_key, cleaned),
             name="background_observe_response",
         )
-        self._p._background_tasks.append(obs_task)
+        self._p._background_tasks.add(obs_task)
         obs_task.add_done_callback(
-            lambda t: (
-                self._p._background_tasks.remove(t)
-                if t in self._p._background_tasks
-                else None
-            )
+            lambda t: self._p._background_tasks.discard(t)
         )
 
     async def _background_observe_response(self, session_key: str, text: str) -> None:
@@ -323,13 +307,9 @@ class LLMResponsePipeline:
                 self._send_first_sentence(origin, first_sentence),
                 name="send_first_sentence",
             )
-            self._p._background_tasks.append(task)
+            self._p._background_tasks.add(task)
             task.add_done_callback(
-                lambda t: (
-                    self._p._background_tasks.remove(t)
-                    if t in self._p._background_tasks
-                    else None
-                )
+                lambda t: self._p._background_tasks.discard(t)
             )
 
     def _extract_first_sentence(self, text: str) -> str:

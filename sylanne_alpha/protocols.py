@@ -46,7 +46,7 @@ class PluginSessionAccess(Protocol):
     _session_locks: dict[str, asyncio.Lock]
     _memory_systems: BoundedDict
     _conversation_buffers: BoundedDict
-    _background_tasks: list[asyncio.Task]
+    _background_tasks: set[asyncio.Task]
     _computation_logs: collections.deque
 
     def _session_key(self, event: Any = None, session_key: str = "") -> str: ...

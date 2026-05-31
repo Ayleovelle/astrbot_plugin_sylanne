@@ -33,6 +33,23 @@ from urllib.parse import parse_qs, urlparse
 
 from pathlib import Path
 
+
+def _get_plugin_version() -> str:
+    """从 metadata.yaml 读取版本号（缓存结果）。"""
+    if not hasattr(_get_plugin_version, "_cache"):
+        try:
+            meta_path = Path(__file__).resolve().parent.parent / "metadata.yaml"
+            for line in meta_path.read_text(encoding="utf-8").splitlines():
+                if line.startswith("version:"):
+                    _get_plugin_version._cache = line.split(":", 1)[1].strip().strip('"').strip("'")
+                    break
+            else:
+                _get_plugin_version._cache = "unknown"
+        except Exception:
+            _get_plugin_version._cache = "unknown"
+    return _get_plugin_version._cache
+
+
 try:
     from astrbot.core.utils.astrbot_path import get_astrbot_data_path  # type: ignore
 except ImportError:
@@ -60,6 +77,16 @@ _meltdown_nonces: dict[str, str] = {}
 _csrf_token: str = ""
 # 线程安全锁：stdlib HTTP server 的多线程 handler 访问插件状态时使用
 _plugin_access_lock = threading.Lock()
+
+# S1/S2: 敏感配置键保护
+_SENSITIVE_KEYS = frozenset({"token", "password", "secret", "api_key", "access_token", "auth_token", "bearer", "credential"})
+
+
+def _is_sensitive_key(key: str) -> bool:
+    """检查配置键是否包含敏感子串。"""
+    lower = key.lower()
+    return any(s in lower for s in _SENSITIVE_KEYS)
+
 
 # diagnostics 自动联动：有 /api/computation_logs 请求时开启，30s 无请求后关闭
 _last_diag_request: float = 0
@@ -195,7 +222,14 @@ async def start_webui_server(plugin: Any, host: str = "127.0.0.1", port: int = 2
 
     @web.middleware
     async def auth_middleware(request: web.Request, handler: Any) -> web.Response:
-        if request.path in ("/", "/favicon.ico", "/health", "/metrics", "/logo.png", "/assets/logo.png"):
+        if request.path in ("/", "/favicon.ico", "/health", "/logo.png", "/assets/logo.png"):
+            return await handler(request)
+        # S9: /metrics requires Bearer token when auth is configured
+        if request.path == "/metrics":
+            if _active_token:
+                auth = request.headers.get("Authorization", "")
+                if not auth.startswith("Bearer ") or auth[7:] != _active_token:
+                    return web.json_response({"error": "unauthorized"}, status=401)
             return await handler(request)
         auth = request.headers.get("Authorization", "")
         if not auth.startswith("Bearer ") or auth[7:] != _active_token:
@@ -551,7 +585,7 @@ async def start_webui_server(plugin: Any, host: str = "127.0.0.1", port: int = 2
         })
 
     # ------------------------------------------------------------------
-    # Item 48: /metrics Prometheus 指标导出（不需要认证）
+    # Item 48: /metrics Prometheus 指标导出（需要 Bearer token 认证）
     # ------------------------------------------------------------------
 
     async def handle_metrics(request: web.Request) -> web.Response:
@@ -582,6 +616,8 @@ async def start_webui_server(plugin: Any, host: str = "127.0.0.1", port: int = 2
     async def handle_config_export(request: web.Request) -> web.Response:
         current_plugin = _plugin(plugin)
         config = dict(getattr(current_plugin, "_config", {}) or {})
+        # S1: 过滤敏感键
+        config = {k: v for k, v in config.items() if not _is_sensitive_key(k)}
         return web.json_response(config)
 
     async def handle_config_import(request: web.Request) -> web.Response:
@@ -591,6 +627,10 @@ async def start_webui_server(plugin: Any, host: str = "127.0.0.1", port: int = 2
             return web.json_response({"ok": False, "error": "invalid_json"}, status=400)
         if not isinstance(body, dict):
             return web.json_response({"ok": False, "error": "expected_object"}, status=400)
+        # S2: 拒绝写入敏感键
+        sensitive_found = [k for k in body if _is_sensitive_key(k)]
+        if sensitive_found:
+            return web.json_response({"ok": False, "error": "cannot_import_sensitive_keys", "keys": sensitive_found}, status=403)
         current_plugin = _plugin(plugin)
         config = getattr(current_plugin, "_config", None)
         if config is None:
@@ -967,7 +1007,7 @@ async def start_webui_server(plugin: Any, host: str = "127.0.0.1", port: int = 2
                 "uptime_hours": uptime_hours,
             },
             "anomalies": anomalies,
-            "version": "1.3.0",
+            "version": _get_plugin_version(),
         })
 
     # ------------------------------------------------------------------
@@ -1256,6 +1296,14 @@ async def start_webui_server(plugin: Any, host: str = "127.0.0.1", port: int = 2
     _WS_MAX_CONNECTIONS = 10
 
     async def handle_ws_state(request: web.Request) -> web.WebSocketResponse:
+        # S3: WebSocket 连接鉴权 — 仅在配置了 token 时校验
+        if _active_token:
+            ws_token = request.query.get("token", "")
+            if not ws_token or ws_token != _active_token:
+                ws = web.WebSocketResponse()
+                await ws.prepare(request)
+                await ws.close(code=4001, message=b"unauthorized")
+                return ws
         if len(_ws_connections) >= _WS_MAX_CONNECTIONS:
             ws = web.WebSocketResponse()
             await ws.prepare(request)
@@ -1386,6 +1434,15 @@ def start_webui_thread_server(
             client_ip = self.client_address[0]
             now = time.time()
             with self._rate_limit_lock:
+                # S8: 防止 rate_limit_window 无限增长
+                if len(self._rate_limit_window) > 1000:
+                    cutoff_global = now - self._RATE_LIMIT_WINDOW_SEC
+                    stale_keys = [
+                        ip for ip, timestamps in self._rate_limit_window.items()
+                        if not timestamps or timestamps[-1] < cutoff_global
+                    ]
+                    for ip in stale_keys:
+                        del self._rate_limit_window[ip]
                 window = self._rate_limit_window.setdefault(client_ip, [])
                 cutoff = now - self._RATE_LIMIT_WINDOW_SEC
                 self._rate_limit_window[client_ip] = [t for t in window if t > cutoff]
@@ -1453,6 +1510,12 @@ def start_webui_thread_server(
             parsed = urlparse(self.path)
             path = parsed.path.rstrip("/") or "/"
             if path not in ("/", "/favicon.ico", "/health", "/metrics", "/logo.png", "/assets/logo.png"):
+                auth = self.headers.get("Authorization", "")
+                if not auth.startswith("Bearer ") or auth[7:] != _active_token:
+                    self._send_json({"error": "unauthorized"}, status=401)
+                    return
+            # S9: /metrics requires Bearer token when auth is configured
+            if path == "/metrics" and _active_token:
                 auth = self.headers.get("Authorization", "")
                 if not auth.startswith("Bearer ") or auth[7:] != _active_token:
                     self._send_json({"error": "unauthorized"}, status=401)
@@ -1582,6 +1645,8 @@ def start_webui_thread_server(
                     with _plugin_access_lock:
                         current_plugin = _plugin(plugin)
                         config = dict(getattr(current_plugin, "_config", {}) or {})
+                    # S1: 过滤敏感键
+                    config = {k: v for k, v in config.items() if not _is_sensitive_key(k)}
                     self._send_json(config)
                 elif path == "/api/glossary":
                     from sylanne_alpha.webui_routes import GLOSSARY
@@ -1850,7 +1915,8 @@ def start_webui_thread_server(
                                 pass
                     self._send_json({"ok": True, "updated": updated})
                 except Exception as exc:
-                    self._send_json({"ok": False, "error": str(exc)}, status=500)
+                    logger.error(f"Sylanne WebUI POST /api/settings error: {exc}", exc_info=True)
+                    self._send_json({"ok": False, "error": "Internal server error"}, status=500)
             elif path == "/api/memory_consolidate":
                 try:
                     session = str(body.get("session", "")).strip()
@@ -1871,7 +1937,8 @@ def start_webui_thread_server(
                     )
                     self._send_json({"ok": True, "estimated_seconds": 30})
                 except Exception as exc:
-                    self._send_json({"ok": False, "error": str(exc)}, status=500)
+                    logger.error(f"Sylanne WebUI POST /api/memory_consolidate error: {exc}", exc_info=True)
+                    self._send_json({"ok": False, "error": "Internal server error"}, status=500)
             elif path == "/api/memory_meltdown":
                 try:
                     session = str(body.get("session", "")).strip()
@@ -1904,11 +1971,17 @@ def start_webui_thread_server(
                     logger.info(f"Sylanne MEMORY MELTDOWN (stdlib): session={session}")
                     self._send_json({"ok": True, "session": session, "cleared": True})
                 except Exception as exc:
-                    self._send_json({"ok": False, "error": str(exc)}, status=500)
+                    logger.error(f"Sylanne WebUI POST /api/memory_meltdown error: {exc}", exc_info=True)
+                    self._send_json({"ok": False, "error": "Internal server error"}, status=500)
             elif path == "/api/config_import":
                 try:
                     if not isinstance(body, dict) or not body:
                         self._send_json({"ok": False, "error": "expected_object"}, status=400)
+                        return
+                    # S2: 拒绝写入敏感键
+                    sensitive_found = [k for k in body if _is_sensitive_key(k)]
+                    if sensitive_found:
+                        self._send_json({"ok": False, "error": "cannot_import_sensitive_keys", "keys": sensitive_found}, status=403)
                         return
                     with _plugin_access_lock:
                         current_plugin = _plugin(plugin)
@@ -1924,7 +1997,8 @@ def start_webui_thread_server(
                             persistent.save_config()
                     self._send_json({"ok": True, "keys": list(body.keys())})
                 except Exception as exc:
-                    self._send_json({"ok": False, "error": str(exc)}, status=500)
+                    logger.error(f"Sylanne WebUI POST /api/config_import error: {exc}", exc_info=True)
+                    self._send_json({"ok": False, "error": "Internal server error"}, status=500)
             elif path == "/api/proactive_feedback":
                 try:
                     session_key = str(body.get("session_key", "")).strip()
@@ -1940,7 +2014,8 @@ def start_webui_thread_server(
                             scheduler.record_feedback(session_key, timestamp, rating)
                     self._send_json({"ok": True})
                 except Exception as exc:
-                    self._send_json({"ok": False, "error": str(exc)}, status=500)
+                    logger.error(f"Sylanne WebUI POST /api/proactive_feedback error: {exc}", exc_info=True)
+                    self._send_json({"ok": False, "error": "Internal server error"}, status=500)
             elif path == "/api/theme":
                 theme = str(body.get("theme", "")).strip()
                 if theme not in ("dark", "light", "auto"):
@@ -2969,7 +3044,7 @@ def _build_widget_state(plugin: Any) -> dict[str, Any]:
         "temperature": temperature,
         "scars": scars,
         "memory_count": memory_count,
-        "version": "1.3.0",
+        "version": _get_plugin_version(),
     }
 
 
@@ -3300,7 +3375,7 @@ class WebUILifecycle:
             self.start_if_enabled()
 
         task = loop.create_task(_takeover())
-        self._p._background_tasks.append(task)
+        self._p._background_tasks.add(task)
 
     def _current_webui_module_ref(self) -> Any:
         """Return the current webui_server module reference from sys.modules."""
