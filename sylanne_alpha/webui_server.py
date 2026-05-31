@@ -3069,7 +3069,7 @@ class WebUILifecycle:
     """
 
     def __init__(self, plugin: Any, *, services: "PluginServices | None" = None, session_state: Any = None) -> None:
-        self._p = plugin
+        self._plugin = plugin
         self._session_state = session_state
         if services is not None:
             self._services = services
@@ -3102,7 +3102,7 @@ class WebUILifecycle:
         token = _ensure_token(self._services.config or {})
         self._services.logger.info(f"Sylanne WebUI token: {token}")
         try:
-            start_webui_background(self._p, host=webui_host, port=webui_port)
+            start_webui_background(self._plugin, host=webui_host, port=webui_port)
             self._services.logger.info(
                 f"Sylanne WebUI server start requested: http://{webui_host}:{webui_port}"
             )
@@ -3116,9 +3116,9 @@ class WebUILifecycle:
     def runtime_info(self) -> dict[str, Any]:
         return {
             "plugin_name": "astrbot_plugin_sylanne",
-            "runtime_id": str(getattr(self._p, "_webui_runtime_id", "") or ""),
-            "instance_id": hex(id(self._p)),
-            "module": self._p.__class__.__module__,
+            "runtime_id": str(getattr(self._plugin, "_webui_runtime_id", "") or ""),
+            "instance_id": hex(id(self._plugin)),
+            "module": self._plugin.__class__.__module__,
         }
 
     def iter_loaded_server_modules(self) -> list[tuple[str, Any]]:
@@ -3281,7 +3281,7 @@ class WebUILifecycle:
             if not callable(setter):
                 continue
             try:
-                setter(self._p)
+                setter(self._plugin)
                 updated.append(name)
             except Exception:
                 continue

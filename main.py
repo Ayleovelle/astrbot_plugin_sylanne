@@ -342,6 +342,16 @@ class EmotionalStatePlugin(Star):
         super().__init__(context)
         self.config = config or {}
         self._config = self.config
+        self._init_session_containers()
+        self._init_subsystems(context)
+        self._init_webui()
+
+    # ------------------------------------------------------------------
+    # __init__ 拆分：会话容器初始化
+    # ------------------------------------------------------------------
+
+    def _init_session_containers(self) -> None:
+        """Phase 1: 初始化所有 per-session 容器、BoundedDict、状态存储。"""
         # 会话管理：session_key → SylanneAlphaHost 映射
         self._hosts: BoundedDict = BoundedDict(maxsize=200)
         self._background_tasks: set[asyncio.Task] = set()
@@ -435,6 +445,13 @@ class EmotionalStatePlugin(Star):
             offline_buffers={},
             session_locks=self._session_locks,
         )
+
+    # ------------------------------------------------------------------
+    # __init__ 拆分：子系统初始化
+    # ------------------------------------------------------------------
+
+    def _init_subsystems(self, context: Any) -> None:
+        """Phase 2: 构建 PluginServices 容器，初始化所有子系统对象。"""
         # 构建只读服务容器，供所有子模块共享
         self._plugin_services = PluginServices(
             config=self._config,
@@ -484,6 +501,13 @@ class EmotionalStatePlugin(Star):
         self._persona_mgr = self._state_persistence.init_persona_manager()
 
         self._state_persistence.load_config_defaults()
+
+    # ------------------------------------------------------------------
+    # __init__ 拆分：WebUI 生命周期
+    # ------------------------------------------------------------------
+
+    def _init_webui(self) -> None:
+        """Phase 3: WebUI 生命周期管理——杀旧监听器、启动新服务。"""
         # WebUI 生命周期管理：先强杀旧监听器（解决热更新时旧实例残留问题），再启动新的
         try:
             import asyncio as _aio
@@ -494,6 +518,7 @@ class EmotionalStatePlugin(Star):
                 _aio.run(stop_webui_server())
         except Exception:
             pass
+        _svc = self._plugin_services
         self._webui_lifecycle = _sylanne_webui_server.WebUILifecycle(self, services=_svc)
         self._webui_lifecycle.publish_active_plugin()
         self._webui_lifecycle.start_if_enabled()
@@ -1045,7 +1070,7 @@ class EmotionalStatePlugin(Star):
     @filter.on_llm_request(desc="注入 Sylanne 情感计算上下文到 LLM prompt")
     async def on_llm_request(self, event: Any, request: Any) -> None:
         try:
-            await self._on_llm_request_inner(event, request)
+            await self._llm_request_pipeline._on_llm_request_inner(event, request)
         except Exception as e:
             logger.error(f"Sylanne on_llm_request error: {e}", exc_info=True)
             return
@@ -1053,53 +1078,8 @@ class EmotionalStatePlugin(Star):
     def _session_lock(self, session_key: str) -> asyncio.Lock:
         return self._session_ctx.session_lock(session_key)
 
-    async def _on_llm_request_inner(self, event: Any, request: Any) -> None:
-        return await self._llm_request_pipeline._on_llm_request_inner(event, request)
-
-    async def _process_llm_request_final(
-        self,
-        event: Any,
-        request: Any,
-        message_text: str,
-        session_key: str,
-        realtime_enabled: bool,
-        hajide: bool,
-        intercept: bool,
-    ) -> None:
-        return await self._llm_request_pipeline._process_llm_request_final(
-            event,
-            request,
-            message_text,
-            session_key,
-            realtime_enabled,
-            hajide,
-            intercept,
-        )
-
-    async def _get_model_hint(self, event: Any = None) -> str:
-        return await self._llm_request_pipeline._get_model_hint(event)
-
     def _schedule_buffer_persist(self, session_key: str) -> None:
         self._state_persistence.schedule_buffer_persist(session_key)
-
-    async def _background_observe_request(self, session_key: str, text: str) -> None:
-        return await self._llm_request_pipeline._background_observe_request(
-            session_key, text
-        )
-
-    async def _compress_memories(self, session_key: str, items: list) -> None:
-        return await self._llm_request_pipeline._compress_memories(session_key, items)
-
-    # Memory v2: conversation buffer flush + consolidation + reconsolidation
-
-    async def _flush_conversation_to_l1(self, session_key: str) -> None:
-        return await self._llm_request_pipeline._flush_conversation_to_l1(session_key)
-
-    async def _session_idle_check_loop(self) -> None:
-        return await self._llm_request_pipeline._session_idle_check_loop()
-
-    async def _consolidation_loop(self) -> None:
-        return await self._llm_request_pipeline._consolidation_loop()
 
     async def _trigger_consolidation(self, session_key: str) -> None:
         """手动触发一次 consolidation 评估（WebUI 按钮调用）。"""
@@ -1111,62 +1091,14 @@ class EmotionalStatePlugin(Star):
         except Exception as e:
             logger.warning(f"Manual consolidation failed: {e}")
 
-    async def _run_consolidation(
-        self, session_key: str, memory_system: MemorySystem
-    ) -> None:
-        return await self._llm_request_pipeline._run_consolidation(
-            session_key, memory_system
-        )
-
-    async def _reconsolidation_rewrite(
-        self, session_key: str, memory_system: MemorySystem
-    ) -> None:
-        return await self._llm_request_pipeline._reconsolidation_rewrite(
-            session_key, memory_system
-        )
-
-    def _recent_context_lines(self, session_key: str) -> list[str]:
-        return self._llm_request_pipeline._recent_context_lines(session_key)
-
-    # Assessor LLM callback
-    async def _assessor_llm_call(self, prompt: str) -> str:
-        return await self._llm_request_pipeline._assessor_llm_call(prompt)
-
-    async def _main_assessor_llm_call(self, prompt: str) -> str:
-        return await self._llm_request_pipeline._main_assessor_llm_call(prompt)
-
-    async def _summarizer_llm_call(self, prompt: str) -> str:
-        return await self._llm_request_pipeline._summarizer_llm_call(prompt)
-
-    # Life Simulator callbacks
-    async def _life_sim_llm_call(self, prompt: str) -> str:
-        return await self._llm_request_pipeline._life_sim_llm_call(prompt)
-
-    async def _life_sim_outreach(self, reason: str, mood: str) -> None:
-        return await self._llm_request_pipeline._life_sim_outreach(reason, mood)
-
-    async def _generate_outreach_message(self, reason: str, mood: str) -> str:
-        return await self._llm_request_pipeline._generate_outreach_message(reason, mood)
-
-    def _life_sim_emotion(self) -> dict[str, float]:
-        return self._llm_request_pipeline._life_sim_emotion()
-
     # on_llm_response 钩子：在 LLM 回复后提取信号、更新状态、触发分段回复
     @filter.on_llm_response(desc="处理 LLM 回复，更新情感状态和记忆")
     async def on_llm_response(self, event: Any, response: Any) -> None:
         try:
-            await self._on_llm_response_inner(event, response)
+            await self._llm_response_pipeline._on_llm_response_inner(event, response)
         except Exception as e:
             logger.error(f"Sylanne on_llm_response error: {e}", exc_info=True)
             return
-
-    async def _on_llm_response_inner(self, event: Any, response: Any) -> None:
-        await self._llm_response_pipeline._on_llm_response_inner(event, response)
-
-    async def _background_observe_response(self, session_key: str, text: str) -> None:
-        await self._llm_response_pipeline._background_observe_response(
-            session_key, text
-        )
 
     # on_llm_stream_chunk hook -- dispatch first sentence early
     async def on_llm_stream_chunk(self, event: Any, chunk: Any) -> None:
@@ -1177,14 +1109,6 @@ class EmotionalStatePlugin(Star):
 
     async def _send_first_sentence(self, origin: str, text: str) -> None:
         await self._llm_response_pipeline._send_first_sentence(origin, text)
-
-    # Segmented dispatch
-    async def _dispatch_segmented_parts(
-        self, origin: str, parts: list[dict[str, Any]], session_key: str = ""
-    ) -> None:
-        await self._llm_response_pipeline._dispatch_segmented_parts(
-            origin, parts, session_key=session_key
-        )
 
     # Memory prompt fragment
     def _memory_prompt_fragment(self, payload: dict[str, Any]) -> str:
@@ -1197,30 +1121,8 @@ class EmotionalStatePlugin(Star):
     def _time_context_fragment(self, session_key: str) -> str:
         return self._llm_response_pipeline._time_context_fragment(session_key)
 
-    def _gap_label_from_seconds(self, seconds: float, has_previous: bool) -> str:
-        return self._llm_response_pipeline._gap_label_from_seconds(
-            seconds, has_previous
-        )
-
     def _event_time(self, now: float = 0.0) -> dict[str, Any]:
         return self._llm_response_pipeline._event_time(now)
-
-    # Payload capping
-    def _cap_llm_request_payload(self, request: Any) -> None:
-        self._llm_response_pipeline._cap_llm_request_payload(request)
-
-    def _trim_payload_list(
-        self, items: list, keep_items: int = 2, text_limit: int = 5000
-    ) -> list:
-        return self._llm_response_pipeline._trim_payload_list(
-            items, keep_items, text_limit
-        )
-
-    def _cap_item_text(self, item: Any, limit: int) -> Any:
-        return self._llm_response_pipeline._cap_item_text(item, limit)
-
-    def _make_trim_marker(self, items: list) -> Any:
-        return self._llm_response_pipeline._make_trim_marker(items)
 
     # Observatory (WebUI readonly)
     async def sylanne_observatory(self, *, session_key: str) -> dict[str, Any]:
@@ -1252,15 +1154,6 @@ class EmotionalStatePlugin(Star):
         self, request: Any, budget: _StateInjectionBudget | None = None
     ) -> None:
         self._llm_response_pipeline._normalize_claude_request_payload(request, budget)
-
-    def _prune_hajide_tools(
-        self, request: Any, budget: _StateInjectionBudget | None = None
-    ) -> None:
-        self._llm_response_pipeline._prune_hajide_tools(request, budget)
-
-    # Text extraction from event
-    def _text(self, event: Any) -> str:
-        return self._llm_response_pipeline._text(event)
 
     # AstrBot message building
     def _astrbot_message(self, text: str) -> Any:
@@ -1544,13 +1437,6 @@ class EmotionalStatePlugin(Star):
     async def _delete_humanlike_state(self, session_key: str) -> None:
         await self._state_persistence.delete_humanlike_state(session_key)
 
-    async def _judge_proactive_topic(
-        self, session_key: str = "", **kwargs: Any
-    ) -> dict[str, Any]:
-        return await self._proactive_scheduler.judge_topic(
-            session_key=session_key, **kwargs
-        )
-
     def _persona_profile(self, event: Any = None) -> dict[str, Any]:
         name = str(self._config.get("sylanne_persona_name") or "Sylanne")
         # 版本号从 metadata.yaml 读取，不依赖配置项
@@ -1604,12 +1490,6 @@ class EmotionalStatePlugin(Star):
         epochs = self._conversation_pending_response_epochs
         return epochs.pop(session_key, 0.0)
 
-    def _schedule_background_task(self, coro: Any, *, label: str = "") -> Any:
-        return self._realtime_dispatch.schedule_background_task(coro, label=label)
-
-    def _ensure_runtime_state_containers(self) -> None:
-        self._realtime_dispatch.ensure_runtime_state_containers()
-
     def _build_astrbot_message_chain(self, text: str = "", **kwargs: Any) -> Any:
         return self._realtime_dispatch.build_astrbot_message_chain(text, **kwargs)
 
@@ -1623,114 +1503,8 @@ class EmotionalStatePlugin(Star):
     async def _call_internal_assessor_llm(self, *args: Any, **kwargs: Any) -> Any:
         return await self._public_api._call_internal_assessor_llm(*args, **kwargs)
 
-    def _internal_assessor_llm_concurrency_limit(self) -> int:
-        return self._public_api._internal_assessor_llm_concurrency_limit()
-
-    def _internal_assessor_llm_concurrency_decision(self) -> dict[str, Any]:
-        return self._public_api._internal_assessor_llm_concurrency_decision()
-
-    def _build_realtime_input_completion_prompt(
-        self, session_key: str = "", text: str = "", **kwargs: Any
-    ) -> str:
-        return self._realtime_dispatch.build_realtime_input_completion_prompt(
-            session_key, text, **kwargs
-        )
-
-    def _extract_realtime_response_media_parts(self, response: Any = None) -> list[Any]:
-        return self._realtime_dispatch.extract_realtime_response_media_parts(response)
-
-    def _build_group_atmosphere_injection_for_session(
-        self, session_key: str = "", state: Any = None, **kwargs: Any
-    ) -> str:
-        return self._realtime_dispatch.build_group_atmosphere_injection_for_session(
-            session_key, state, **kwargs
-        )
-
-    def _context_item_to_text(self, item: Any) -> str:
-        return self._realtime_dispatch.context_item_to_text(item)
-
-    def _conversation_time_payload(
-        self, session_key_or_timestamp: Any = "", *, event: Any = None, **kwargs: Any
-    ) -> dict[str, Any]:
-        return self._realtime_dispatch.conversation_time_payload(
-            session_key_or_timestamp, event=event, **kwargs
-        )
-
-    def _napcat_recall_payload(self, event: Any = None) -> dict[str, Any]:
-        return self._realtime_dispatch.napcat_recall_payload(event)
-
-    def _derive_proactive_dispatch_policy(
-        self, decision: Any = None, *, session_key: str = "", **kwargs: Any
-    ) -> dict[str, Any]:
-        return self._proactive_scheduler.derive_dispatch_policy(
-            decision, session_key=session_key, **kwargs
-        )
-
-    def _observe_proactive_dispatch_feedback(
-        self, session_key: str = "", **kwargs: Any
-    ) -> None:
-        return self._proactive_scheduler.observe_dispatch_feedback(
-            session_key=session_key, **kwargs
-        )
-
-    async def _observe_stickers_background(
-        self, event: Any = None, stickers: Any = None, **kwargs: Any
-    ) -> None:
-        await self._realtime_dispatch.observe_stickers_background(
-            event, stickers, **kwargs
-        )
-
-    def _extract_sticker_observations_from_event(
-        self, event: Any = None
-    ) -> list[dict[str, Any]]:
-        return self._realtime_dispatch.extract_sticker_observations_from_event(event)
-
-    def _proactive_scheduler_should_exit_after_idle(
-        self, session_key: str = "", **kwargs: Any
-    ) -> bool:
-        return self._proactive_scheduler.should_exit_after_idle(
-            session_key=session_key, **kwargs
-        )
-
-    def _build_proactive_dispatch_request(
-        self, decision: Any = None, **kwargs: Any
-    ) -> dict[str, Any]:
-        return self._proactive_scheduler.build_dispatch_request(decision, **kwargs)
-
-    def _proactive_dispatch_blocked_reason(
-        self, decision: Any = None, dispatch: Any = None, **kwargs: Any
-    ) -> str:
-        return self._proactive_scheduler.dispatch_blocked_reason(
-            decision, dispatch, **kwargs
-        )
-
-    def _background_post_adaptive_worker_decision(
-        self, session_key: str = "", *, commit_scale: bool = False
-    ) -> dict[str, Any]:
-        return self._background_queue.adaptive_worker_decision(
-            session_key, commit_scale=commit_scale
-        )
-
-    def _background_post_max_workers(self, session_key: str = "") -> int:
-        return self._background_queue.max_workers(session_key)
-
-    def _background_post_job_to_dict(self, job: Any) -> dict[str, Any]:
-        return self._background_queue.job_to_dict(job)
-
-    def _recover_expired_background_post_active(self, session_key: str) -> int:
-        return self._background_queue.recover_expired_active(session_key)
-
-    def _schedule_background_post_checkpoint(self, session_key: str) -> None:
-        self._background_queue.schedule_checkpoint(session_key)
-
-    async def _drain_background_post_assessments(self, session_key: str) -> None:
-        await self._background_queue.drain_assessments(session_key)
-
     async def _save_background_post_checkpoint(self, session_key: str) -> None:
         await self._background_queue.save_checkpoint(session_key)
-
-    async def _recover_background_post_queue(self, session_key: str) -> bool:
-        return await self._background_queue.recover_queue(session_key)
 
     async def on_waiting_llm_request(self, event: Any, **kwargs: Any) -> None:
         await self._realtime_dispatch.on_waiting_llm_request(event, **kwargs)
@@ -1787,15 +1561,6 @@ class EmotionalStatePlugin(Star):
     ) -> dict[str, Any]:
         return await self._public_api.get_agent_runtime_diagnostics(
             event, include_sessions=include_sessions, **kwargs
-        )
-
-    def _append_realtime_ordinary_history_backfills_if_any(
-        self, request: Any, session_key: str = "", **kwargs: Any
-    ) -> bool:
-        return (
-            self._realtime_dispatch.append_realtime_ordinary_history_backfills_if_any(
-                request, session_key=session_key, **kwargs
-            )
         )
 
     # Command methods (status/reset commands expected by tests)
@@ -1936,12 +1701,6 @@ class EmotionalStatePlugin(Star):
             yield chunk
 
     # Proactive scheduler / realtime delivery shims
-    def _ensure_proactive_scheduler_state(self) -> None:
-        self._proactive_scheduler.ensure_state()
-
-    async def _run_proactive_scheduler_once(self) -> dict[str, Any]:
-        return await self._proactive_scheduler.run_once()
-
     async def terminate(self) -> None:
         """插件卸载/更新前的清理：停止所有后台任务、关闭 WebUI、持久化状态。"""
         # 收集所有需要取消的任务
@@ -1976,128 +1735,6 @@ class EmotionalStatePlugin(Star):
             await asyncio.wait_for(self._state_persistence.terminate(), timeout=15)
         except asyncio.TimeoutError:
             logger.warning("Sylanne state persistence terminate timed out (15s)")
-
-    async def _send_realtime_chat_plan(
-        self,
-        event: Any,
-        plan: dict[str, Any],
-        *,
-        source: str = "",
-        record_history_shadow: bool = False,
-    ) -> dict[str, Any]:
-        return await self._realtime_dispatch.send_realtime_chat_plan(
-            event, plan, source=source, record_history_shadow=record_history_shadow
-        )
-
-    def _record_realtime_assistant_history_shadow(
-        self, session_key: str, **kwargs: Any
-    ) -> None:
-        self._realtime_dispatch.record_realtime_assistant_history_shadow(
-            session_key, **kwargs
-        )
-
-    def _record_interrupted_reply_breakpoint(
-        self, session_key: str, **kwargs: Any
-    ) -> None:
-        self._realtime_dispatch.record_interrupted_reply_breakpoint(
-            session_key, **kwargs
-        )
-
-    def _realtime_delivery_context_kv_key(self, session_key: str) -> str:
-        return self._realtime_dispatch.realtime_delivery_context_kv_key(session_key)
-
-    def _record_realtime_ordinary_history_backfill(
-        self, session_key: str, **kwargs: Any
-    ) -> None:
-        self._realtime_dispatch.record_realtime_ordinary_history_backfill(
-            session_key, **kwargs
-        )
-
-    def _record_active_agent_pending_user_turn(
-        self, session_key: str, identity: Any = None, **kwargs: Any
-    ) -> None:
-        self._realtime_dispatch.record_active_agent_pending_user_turn(
-            session_key, identity, **kwargs
-        )
-
-    def _fast_assessor_max_context_chars(self) -> int:
-        return self._realtime_dispatch.fast_assessor_max_context_chars()
-
-    def _discard_conversation_pending_response_epoch(
-        self, session_key: str, epoch: int = 0
-    ) -> None:
-        self._realtime_dispatch.discard_conversation_pending_response_epoch(
-            session_key, epoch
-        )
-
-    def _conversation_reply_is_stale(self, session_key: str, reply_epoch: int) -> bool:
-        return self._realtime_dispatch.conversation_reply_is_stale(
-            session_key, reply_epoch
-        )
-
-    def _realtime_assistant_history_shadow_cache(
-        self,
-    ) -> dict[str, list[dict[str, Any]]]:
-        return self._realtime_dispatch.realtime_assistant_history_shadow_cache()
-
-    def _append_realtime_assistant_history_shadow_if_any(
-        self, request: Any, session_key: str, **kwargs: Any
-    ) -> bool:
-        return self._realtime_dispatch.append_realtime_assistant_history_shadow_if_any(
-            request, session_key, **kwargs
-        )
-
-    def _append_interrupted_reply_breakpoint_if_any(
-        self, request: Any, session_key: str, **kwargs: Any
-    ) -> bool:
-        return self._realtime_dispatch.append_interrupted_reply_breakpoint_if_any(
-            request, session_key, **kwargs
-        )
-
-    def _build_realtime_delivery_envelope_text(self, text: str, **kwargs: Any) -> str:
-        return self._realtime_dispatch.build_realtime_delivery_envelope_text(
-            text, **kwargs
-        )
-
-    def _start_realtime_chat_active_dispatch(
-        self, session_key: str, **kwargs: Any
-    ) -> None:
-        self._realtime_dispatch.start_realtime_chat_active_dispatch(
-            session_key, **kwargs
-        )
-
-    def _append_realtime_chat_active_dispatch_if_any(
-        self, request: Any, session_key: str, **kwargs: Any
-    ) -> bool:
-        return self._realtime_dispatch.append_realtime_chat_active_dispatch_if_any(
-            request, session_key, **kwargs
-        )
-
-    def _append_realtime_continuity_context_if_any(
-        self, request: Any, session_key: str, **kwargs: Any
-    ) -> bool:
-        return self._realtime_dispatch.append_realtime_continuity_context_if_any(
-            request, session_key, **kwargs
-        )
-
-    def _realtime_ordinary_history_backfill_cache(
-        self,
-    ) -> dict[str, list[dict[str, Any]]]:
-        return self._realtime_dispatch.realtime_ordinary_history_backfill_cache()
-
-    async def _release_realtime_temporary_context_after_background_post(
-        self, session_key: str, **kwargs: Any
-    ) -> None:
-        await self._realtime_dispatch.release_realtime_temporary_context_after_background_post(
-            session_key, **kwargs
-        )
-
-    def _release_realtime_temporary_context_after_background_post_in_memory(
-        self, session_key: str, **kwargs: Any
-    ) -> bool:
-        return self._realtime_dispatch.release_realtime_temporary_context_after_background_post_in_memory(
-            session_key, **kwargs
-        )
 
     # LLM Tool: query_agent_state
     @filter.llm_tool(name="query_agent_state")

@@ -78,7 +78,7 @@ class StatePersistence:
 
     采用双写策略：KV 存储为主路径（支持分布式/快速查询），
     文件 IO 为回退路径（向后兼容/离线可用）。
-    通过 self._p 委托访问插件实例。
+    通过 self._plugin 委托访问插件实例。
     """
 
     def __init__(self, plugin: Any, *, services: "PluginServices | None" = None, session_state: Any = None) -> None:
@@ -89,7 +89,7 @@ class StatePersistence:
             services: 只读服务容器（可选，为 None 时从 plugin 构建）。
             session_state: 集中式会话状态容器（可选）。
         """
-        self._p = plugin
+        self._plugin = plugin
         self._session_state = session_state
         if services is not None:
             self._services = services
@@ -803,7 +803,7 @@ class StatePersistence:
         Returns:
             ConversationManager 实例，不可用时返回 None。
         """
-        p = self._p
+        p = self._plugin
         context = getattr(p, "context", None)
         if context is None:
             return None
@@ -840,7 +840,7 @@ class StatePersistence:
 
     def _on_session_deleted(self, session_key: str) -> None:
         """AstrBot 会话删除回调——释放 Sylanne 侧的会话资源。"""
-        p = self._p
+        p = self._plugin
         for attr in self._SESSION_KEYED_CONTAINERS:
             container = getattr(p, attr, None)
             if container is None:
@@ -873,7 +873,7 @@ class StatePersistence:
             f"emotion_state:{safe}",
             f"sylanne_memory_state:{safe}",
         ]
-        delete_fn = getattr(self._p, "delete_kv_data", None)
+        delete_fn = getattr(self._plugin, "delete_kv_data", None)
         if not delete_fn:
             return
         for key in keys_to_delete:
@@ -884,7 +884,7 @@ class StatePersistence:
 
     def has_conversation_manager(self) -> bool:
         """检查 AstrBot ConversationManager 是否可用。"""
-        return getattr(self._p, "_conv_mgr", None) is not None
+        return getattr(self._plugin, "_conv_mgr", None) is not None
 
     async def sync_message_to_conv_mgr(
         self, session_key: str, role: str, text: str
@@ -899,7 +899,7 @@ class StatePersistence:
             role: 消息角色（"user" 或 "assistant"）。
             text: 消息文本内容。
         """
-        p = self._p
+        p = self._plugin
         conv_mgr = getattr(p, "_conv_mgr", None)
         if conv_mgr is None:
             return
@@ -947,7 +947,7 @@ class StatePersistence:
         Returns:
             PersonaManager 实例，不可用时返回 None。
         """
-        p = self._p
+        p = self._plugin
         context = getattr(p, "context", None)
         if context is None:
             return None
@@ -960,7 +960,7 @@ class StatePersistence:
 
     def has_persona_manager(self) -> bool:
         """检查 AstrBot PersonaManager 是否可用。"""
-        return getattr(self._p, "_persona_mgr", None) is not None
+        return getattr(self._plugin, "_persona_mgr", None) is not None
 
     def sync_personality_to_persona_mgr(self, session_key: str) -> None:
         """将 Sylanne 人格状态同步到 AstrBot 的 PersonaManager。
@@ -971,7 +971,7 @@ class StatePersistence:
         Args:
             session_key: 会话标识。
         """
-        p = self._p
+        p = self._plugin
         persona_mgr = getattr(p, "_persona_mgr", None)
         if persona_mgr is None:
             return
@@ -1050,7 +1050,7 @@ class StatePersistence:
         """
         import time
 
-        p = self._p
+        p = self._plugin
         cache = getattr(p, "_provider_id_cache", None)
         if cache is None:
             p._provider_id_cache = {}
@@ -1085,7 +1085,7 @@ class StatePersistence:
         避免运行时因缺失配置而出错。覆盖 WebUI、评估器、实时聊天、
         后台队列、安全边界、记忆系统等全部子系统的配置。
         """
-        p = self._p
+        p = self._plugin
         p._cfg_bool("sylanne_webui_enabled", False)
         p._cfg("sylanne_webui_host", "127.0.0.1")
         p._cfg_int("sylanne_webui_port", 2718)
@@ -1201,7 +1201,7 @@ class StatePersistence:
         """按 session_key 分片存储记忆数据。"""
         key = self._shard_key(session_key, "memory")
         # 通过 plugin 的 KV 接口存储
-        kv = getattr(self._p, 'kv', None) or getattr(self._p, '_kv', None)
+        kv = getattr(self._plugin, 'kv', None) or getattr(self._plugin, '_kv', None)
         if kv and hasattr(kv, 'set'):
             import json
             kv.set(key, json.dumps(memory_data))
@@ -1209,7 +1209,7 @@ class StatePersistence:
     def load_memory_shard(self, session_key: str) -> dict | None:
         """加载指定 session 的记忆分片。"""
         key = self._shard_key(session_key, "memory")
-        kv = getattr(self._p, 'kv', None) or getattr(self._p, '_kv', None)
+        kv = getattr(self._plugin, 'kv', None) or getattr(self._plugin, '_kv', None)
         if kv and hasattr(kv, 'get'):
             import json
             raw = kv.get(key)
@@ -1232,7 +1232,7 @@ class StatePersistence:
         Returns:
             True 表示 AstrBot 已启用群聊上下文感知。
         """
-        p = self._p
+        p = self._plugin
         if not p._cfg_bool("sylanne_alpha_auto_detect_group_context", True):
             return False
         try:
@@ -1282,7 +1282,7 @@ class StatePersistence:
         4. 清理后台队列状态
         5. 停止 WebUI 服务器
         """
-        p = self._p
+        p = self._plugin
         task = getattr(p, "_proactive_scheduler_task", None)
         if task and not task.done():
             task.cancel()

@@ -17,7 +17,7 @@
   - 使用 compat.proactive_decision() 从 host 诊断数据生成决策
   - 通过 host.on_proactive_check() 与计算栈交互
 
-所有方法通过 ``self._p`` 委托访问插件实例属性。
+所有方法通过 ``self._pluginlugin`` 委托访问插件实例属性。
 """
 
 from __future__ import annotations
@@ -43,13 +43,13 @@ class ProactiveScheduler:
       定时扫描 → 策略评估 → 阻塞检查 → 构建请求 → 触发发言
 
     与其他组件的关系：
-      - 持有插件实例引用 (self._p)
+      - 持有插件实例引用 (self._pluginlugin)
       - 使用 compat.proactive_decision 做决策
       - 通过 host.on_proactive_check 与计算栈交互
     """
 
     def __init__(self, plugin: Any, *, services: "PluginServices | None" = None, session_state: Any = None) -> None:
-        self._p = plugin
+        self._plugin = plugin
         self._session_state = session_state
         if services is not None:
             self._services = services
@@ -90,7 +90,7 @@ class ProactiveScheduler:
         if self._session_state is not None:
             audit = self._session_state.proactive_dispatch_audit
         else:
-            audit = getattr(self._p, "_proactive_dispatch_audit", None) or {}
+            audit = getattr(self._plugin, "_proactive_dispatch_audit", None) or {}
         history = audit.get(session_key)
         if history:
             cold_count = sum(
@@ -205,7 +205,7 @@ class ProactiveScheduler:
         if self._session_state is not None:
             last_sent = self._session_state.proactive_dispatch_last_sent.get(sk, 0.0)
         else:
-            last_sent = (getattr(self._p, "_proactive_dispatch_last_sent", None) or {}).get(
+            last_sent = (getattr(self._plugin, "_proactive_dispatch_last_sent", None) or {}).get(
                 sk, 0.0
             )
         cooldown = float(cfg.get("proactive_speech_dispatch_cooldown_seconds", 1800.0))
@@ -248,7 +248,7 @@ class ProactiveScheduler:
         dispatched = 0
         for sk, info in candidates.items():
             checked += 1
-            dispatch_fn = getattr(self._p, "request_proactive_speech_dispatch", None)
+            dispatch_fn = getattr(self._plugin, "request_proactive_speech_dispatch", None)
             if dispatch_fn and callable(dispatch_fn):
                 event = (
                     info.get("event")

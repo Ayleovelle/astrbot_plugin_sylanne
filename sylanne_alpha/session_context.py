@@ -8,7 +8,7 @@
 - 离线消息缓冲与重连摘要
 - 时区感知与作息推断
 
-所有方法通过 self._p 委托访问插件实例的属性和方法。
+所有方法通过 self._plugin 委托访问插件实例的属性和方法。
 """
 
 from __future__ import annotations
@@ -44,7 +44,7 @@ class SessionStateStore:
 
     Holds all the dictionaries/sets that were previously scattered as
     self._xxx attributes on the plugin instance.  Pipeline modules receive
-    a reference to this store instead of reaching through self._p._xxx.
+    a reference to this store instead of reaching through self._plugin._xxx.
     """
 
     __slots__ = (
@@ -368,11 +368,11 @@ class SessionContext:
         """初始化会话上下文。
 
         Args:
-            plugin: Sylanne 插件实例，通过 self._p 访问其内部状态。
+            plugin: Sylanne 插件实例，通过 self._plugin 访问其内部状态。
             services: 只读服务容器（可选，为 None 时从 plugin 构建）。
-            session_state: 集中式可变状态容器（可选，为 None 时回退到 self._p 属性）。
+            session_state: 集中式可变状态容器（可选，为 None 时回退到 self._plugin 属性）。
         """
-        self._p = plugin
+        self._plugin = plugin
         self._session_state = session_state
         if services is not None:
             self._services = services
@@ -791,7 +791,7 @@ class SessionContext:
             add(key)
         for key in memory_dict.keys():
             add(key)
-        cache = getattr(self._p, "_sylanne_memory_cache", {}) or {}
+        cache = getattr(self._plugin, "_sylanne_memory_cache", {}) or {}
         if isinstance(cache, dict):
             for key in cache.keys():
                 add(key)
@@ -866,7 +866,7 @@ class SessionContext:
             root = resolve_data_root(cfg)
             host = SylanneAlphaHost(root=root, session_key=session_key)
             # 编码器共享：避免每个 host 各持有一份 encoder 浪费内存
-            plugin_cls = type(self._p)
+            plugin_cls = type(self._plugin)
             if plugin_cls._shared_encoder is None:
                 plugin_cls._shared_encoder = host.kernel.computation.encoder
             else:

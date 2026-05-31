@@ -12,7 +12,7 @@
   - 调用 rhythm_learner 获取自适应分段参数
   - 通过 observe_response 将回复反馈给计算栈
 
-所有方法通过 ``self._p`` 委托访问插件实例属性。
+所有方法通过 ``self._plugin`` 委托访问插件实例属性。
 """
 
 from __future__ import annotations
@@ -49,14 +49,14 @@ class LLMResponsePipeline:
       LLM 返回 → 清理 draft 块 → 检测首句已发送 → 分段拆分 → 后台调度发送
 
     与其他组件的关系：
-      - 持有插件实例引用 (self._p)
+      - 持有插件实例引用 (self._plugin)
       - 使用 compat.realtime_plan 做分段规划
       - 使用 rhythm_learner 获取自适应节奏参数
       - 调用 observe_response 反馈给计算栈
     """
 
     def __init__(self, plugin: Any, *, services: "PluginServices | None" = None, session_state: Any = None) -> None:
-        self._p = plugin
+        self._plugin = plugin
         self._session_state = session_state
         if services is not None:
             self._services = services
@@ -653,7 +653,7 @@ class LLMResponsePipeline:
         # Access _StateInjectionBudget from the plugin's module to avoid circular import
         import sys
 
-        _mod = sys.modules.get(type(self._p).__module__)
+        _mod = sys.modules.get(type(self._plugin).__module__)
         _StateInjectionBudget = getattr(_mod, "_StateInjectionBudget", None)
         if _StateInjectionBudget is None:
             from main import _StateInjectionBudget

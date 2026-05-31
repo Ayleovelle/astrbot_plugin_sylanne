@@ -135,7 +135,7 @@ class BackgroundQueueState:
 class BackgroundPostQueue:
     """后台评估队列管理器。
 
-    封装队列操作逻辑，通过 self._p 委托访问插件实例的状态。
+    封装队列操作逻辑，通过 self._plugin 委托访问插件实例的状态。
     负责自适应工作者调度、租约过期回收、检查点持久化、排空处理和队列恢复。
     """
 
@@ -155,7 +155,7 @@ class BackgroundPostQueue:
             state: 可变状态容器（可选，为 None 时回退到 plugin 属性）。
             observed_now_cb: 获取当前观测时间的回调（可选）。
         """
-        self._p = plugin
+        self._plugin = plugin
         self._state = state or BackgroundQueueState()
         self._observed_now_cb = observed_now_cb or (lambda: plugin._observed_now())
         if services is not None:
@@ -241,7 +241,7 @@ class BackgroundPostQueue:
         now = self._observed_now()
         # 获取资源压力评估（CPU/内存负载）
         resource_pressure_fn = getattr(
-            self._p, "_background_post_resource_pressure", None
+            self._plugin, "_background_post_resource_pressure", None
         )
         resource_pressure = (
             resource_pressure_fn()

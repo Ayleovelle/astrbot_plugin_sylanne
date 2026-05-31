@@ -7,7 +7,7 @@
   4. 管理记忆 v2 生命周期：对话缓冲 flush、整理、再巩固
   5. 驱动生命模拟器（Life Simulator）的 LLM 回调
 
-所有方法通过 ``self._p`` 委托访问插件实例属性。
+所有方法通过 ``self._plugin`` 委托访问插件实例属性。
 """
 
 from __future__ import annotations
@@ -135,14 +135,14 @@ class LLMRequestPipeline:
       event 到达 → 群聊 SFPD 过滤 → 碎片防抖 → 状态注入 → prompt 组装 → 发出请求
 
     与其他组件的关系：
-      - 持有插件实例引用 (self._p)，通过它访问 host/kernel/memory 等子系统
+      - 持有插件实例引用 (self._plugin)，通过它访问 host/kernel/memory 等子系统
       - 调用 AsyncAssessor 做前台快速评估
       - 调用 MemorySystem 做记忆召回和写入
       - 驱动 LifeSimulator 的 LLM 回调
     """
 
     def __init__(self, plugin: Any, *, services: "PluginServices | None" = None, session_state: Any = None) -> None:
-        self._p = plugin
+        self._plugin = plugin
         self._session_state = session_state
         if services is not None:
             self._services = services
@@ -262,7 +262,7 @@ class LLMRequestPipeline:
         if message_text.strip():
             return message_text
 
-        p = self._p
+        p = self._plugin
         config = self._services.config or {}
 
         # 检查消息是否包含非文本内容
@@ -324,7 +324,7 @@ class LLMRequestPipeline:
         Returns:
             多模态 provider 的 ID，未找到返回空字符串。
         """
-        p = self._p
+        p = self._plugin
         config = self._services.config or {}
 
         # 用户显式指定了 provider 则直接用
@@ -406,7 +406,7 @@ class LLMRequestPipeline:
             event: AstrBot 事件对象，包含消息内容和会话信息。
             request: LLM 请求对象，可修改其 prompt 字段注入上下文。
         """
-        p = self._p
+        p = self._plugin
         # 懒初始化运行时状态容器——这些属性在插件首次收到请求时创建
         if not hasattr(p, "_stream_buffers"):
             p._stream_buffers = {}
@@ -615,7 +615,7 @@ class LLMRequestPipeline:
           4. 情感评估 → _dispatch_assessment
           5. Prompt 组装 → _assemble_final_prompt
         """
-        p = self._p
+        p = self._plugin
 
         # Step 1: 清理流式状态、启动观测、处理流式拦截
         await self._clean_incoming_message(
@@ -670,7 +670,7 @@ class LLMRequestPipeline:
         intercept: bool,
     ) -> None:
         """清理流式状态、移除泄漏的注入消息、启动后台观测任务。"""
-        p = self._p
+        p = self._plugin
 
         # 兜底清理：移除上一轮可能泄漏的 _no_save 注入
         contexts = getattr(request, "contexts", None)
@@ -779,7 +779,7 @@ class LLMRequestPipeline:
         Returns:
             (budget, gap_seconds, current_prompt, time_fragment)
         """
-        p = self._p
+        p = self._plugin
 
         # 检测模型类型（用于 Claude 兼容性处理）
         model_hint = ""
@@ -835,7 +835,7 @@ class LLMRequestPipeline:
         Returns:
             (unfinished_fragment, outreach_fragment, memory_fragment)
         """
-        p = self._p
+        p = self._plugin
 
         # 注入未完成回复上下文
         unfinished = p._unfinished_replies.pop(session_key, "")
@@ -931,7 +931,7 @@ class LLMRequestPipeline:
         if not realtime_enabled:
             return ""
 
-        p = self._p
+        p = self._plugin
         host = p._host(session_key)
         emotion = host.kernel.computation.engine.observe()
         sheaf_obs = host.kernel.computation.sheaf.observe()
@@ -1045,7 +1045,7 @@ class LLMRequestPipeline:
         memory_fragment: str,
     ) -> None:
         """组装最终 prompt：系统提示注入 + 优先级预算注入 + 生命模拟器启动。"""
-        p = self._p
+        p = self._plugin
 
         # === Layer 1: system_prompt（元信息） ===
         sys_parts: list[str] = []
@@ -1186,7 +1186,7 @@ class LLMRequestPipeline:
         Returns:
             模型标识字符串（如 "claude-3-opus"），获取失败返回空字符串。
         """
-        p = self._p
+        p = self._plugin
         context = getattr(p, "context", None) or getattr(p, "_context", None)
         if hasattr(context, "get_current_chat_provider_id"):
             try:
@@ -1219,7 +1219,7 @@ class LLMRequestPipeline:
             session_key: 会话标识。
             text: 用户消息文本。
         """
-        p = self._p
+        p = self._plugin
         from sylanne_alpha.host import SylanneAlphaHostEvent
 
         try:
@@ -1422,7 +1422,7 @@ class LLMRequestPipeline:
             session_key: 会话标识。
             items: 待压缩的 L2 记忆条目列表。
         """
-        p = self._p
+        p = self._plugin
         try:
             memory_system = p._memory_system_for_session(session_key)
             texts = [item.text[:200] for item in items[:10]]
@@ -1481,7 +1481,7 @@ class LLMRequestPipeline:
         Args:
             session_key: 会话标识。
         """
-        p = self._p
+        p = self._plugin
 
         try:
             buf = p._conversation_buffers.get(session_key)
@@ -1588,7 +1588,7 @@ class LLMRequestPipeline:
 
     async def _session_idle_check_loop(self) -> None:
         """每10秒检查会话缓冲区是否需要 flush。"""
-        p = self._p
+        p = self._plugin
         try:
             while True:
                 await asyncio.sleep(10)
@@ -1614,7 +1614,7 @@ class LLMRequestPipeline:
 
     async def _consolidation_loop(self) -> None:
         """每5分钟检查是否需要执行整理（6:00/18:00 或 L1 满 60 条）。"""
-        p = self._p
+        p = self._plugin
         try:
             while True:
                 await asyncio.sleep(300)
@@ -1646,7 +1646,7 @@ class LLMRequestPipeline:
             session_key: 会话标识。
             memory_system: 该会话的记忆系统实例。
         """
-        p = self._p
+        p = self._plugin
         try:
             l1_items = list(memory_system._l1)
             if not l1_items:
@@ -1736,7 +1736,7 @@ class LLMRequestPipeline:
             session_key: 会话标识。
             memory_system: 该会话的记忆系统实例。
         """
-        p = self._p
+        p = self._plugin
         try:
             recalled_items = memory_system.get_recalled_l2_items()
             if not recalled_items:
@@ -1784,7 +1784,7 @@ class LLMRequestPipeline:
         Returns:
             最近 3 条记忆痕迹的文本列表。
         """
-        p = self._p
+        p = self._plugin
         host = p._host(session_key)
         traces = host.kernel.body.memory.get("traces", [])
         lines: list[str] = []
@@ -1818,7 +1818,7 @@ class LLMRequestPipeline:
         Returns:
             LLM 返回的文本，失败返回空字符串。
         """
-        p = self._p
+        p = self._plugin
         provider_id = ""
         for key in provider_config_keys:
             provider_id = str(p._config.get(key) or "")
@@ -1911,7 +1911,7 @@ class LLMRequestPipeline:
 
     async def _life_sim_llm_call(self, prompt: str) -> str:
         """生命模拟器的 LLM 回调：调用配置的 provider 进行生命事件推理。"""
-        p = self._p
+        p = self._plugin
         provider_id = str(
             p._config.get("sylanne_alpha_life_simulation_provider_id") or ""
         )
@@ -1941,7 +1941,7 @@ class LLMRequestPipeline:
             reason: 生命事件描述。
             mood: 当前心情标签。
         """
-        p = self._p
+        p = self._plugin
         if not p._hosts:
             logger.info("Sylanne life_sim_outreach: no active hosts, skipping")
             return
@@ -2016,7 +2016,7 @@ class LLMRequestPipeline:
         Returns:
             生成的消息文本（最多 200 字），失败返回空字符串。
         """
-        p = self._p
+        p = self._plugin
         provider_id = str(
             p._config.get("sylanne_alpha_life_simulation_provider_id") or ""
         )
@@ -2047,7 +2047,7 @@ class LLMRequestPipeline:
         Returns:
             情感状态字典（warmth/tension/coherence 等），无活跃 host 返回空字典。
         """
-        p = self._p
+        p = self._plugin
         if not p._hosts:
             return {}
         best_key = self._most_recent_host_key()
@@ -2059,7 +2059,7 @@ class LLMRequestPipeline:
 
     def _life_sim_body_delta(self, delta: dict[str, float]) -> None:
         """将生命模拟器的情绪增量注入到最近活跃 host 的身体状态。"""
-        p = self._p
+        p = self._plugin
         if not p._hosts:
             return
         best_key = self._most_recent_host_key()

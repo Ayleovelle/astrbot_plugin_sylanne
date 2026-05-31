@@ -16,10 +16,10 @@
 
 与其他组件的关系：
   - 被 AstrBot 的命令系统和 LLM tool 系统调用
-  - 通过 self._p 访问插件实例的所有子系统
+  - 通过 self._plugin 访问插件实例的所有子系统
   - 使用 compat 模块的辅助函数做格式转换
 
-所有方法通过 ``self._p`` 委托访问插件实例属性。
+所有方法通过 ``self._plugin`` 委托访问插件实例属性。
 """
 
 from __future__ import annotations
@@ -152,7 +152,7 @@ class PublicAPI:
     }
 
     def __init__(self, plugin: Any, *, services: "PluginServices | None" = None) -> None:
-        self._p = plugin
+        self._plugin = plugin
         if services is not None:
             self._services = services
         else:
@@ -294,14 +294,14 @@ class PublicAPI:
 
     async def _observatory_route_handler(self) -> dict[str, Any]:
         session_key = "default"
-        if self._p._hosts:
-            session_key = next(iter(self._p._hosts))
+        if self._plugin._hosts:
+            session_key = next(iter(self._plugin._hosts))
         return await self.sylanne_observatory(session_key=session_key)
 
     def _sylanne_lineage_observatory_page_payload(
         self, session_key: str
     ) -> dict[str, Any]:
-        loop_data = self._p._last_understanding_closed_loop.get(session_key, {})
+        loop_data = self._plugin._last_understanding_closed_loop.get(session_key, {})
         observatory = loop_data.get("turning_point_lineage_observatory", {})
         lineage = observatory.get("lineage", {})
         raw_branches = observatory.get("branches", [])
@@ -324,7 +324,7 @@ class PublicAPI:
     def _understanding_closed_loop_diagnostics(
         self, session_key: str
     ) -> dict[str, Any]:
-        loop_data = dict(self._p._last_understanding_closed_loop.get(session_key, {}))
+        loop_data = dict(self._plugin._last_understanding_closed_loop.get(session_key, {}))
         if "turning_point_memory_replay" in loop_data:
             loop_data["turning_point_memory_replay"] = {}
         if "turning_point_lineage_observatory" in loop_data:
@@ -345,7 +345,7 @@ class PublicAPI:
         Returns:
             诊断数据字典。
         """
-        p = self._p
+        p = self._plugin
         if isinstance(event, str):
             session_key = event
         else:
@@ -513,7 +513,7 @@ class PublicAPI:
         return result
 
     async def shadow_diagnostics_status(self, event: Any = None, **kwargs: Any) -> Any:
-        p = self._p
+        p = self._plugin
         cfg = self._services.config or {}
         if not cfg.get("enable_shadow_diagnostics"):
             yield json.dumps(
@@ -611,7 +611,7 @@ class PublicAPI:
         Returns:
             身份档案字典。
         """
-        p = self._p
+        p = self._plugin
         cache = getattr(p, "_agent_identity_profile_cache", None)
         if cache is None:
             p._agent_identity_profile_cache = {}
@@ -680,7 +680,7 @@ class PublicAPI:
     async def get_agent_trail(
         self, event: Any = None, *, limit: int = 10, **kwargs: Any
     ) -> dict[str, Any]:
-        p = self._p
+        p = self._plugin
         cache = getattr(p, "_agent_trail_cache", None)
         if cache is None:
             p._agent_trail_cache = {}
@@ -703,7 +703,7 @@ class PublicAPI:
         detail: str = "summary",
         track: str = "conversation",
     ) -> dict[str, Any]:
-        p = self._p
+        p = self._plugin
         sk = session_key or self._session_key(event)
         snapshot_method_map = self._SNAPSHOT_METHOD_MAP
         method_name = snapshot_method_map.get(state_name)
@@ -763,7 +763,7 @@ class PublicAPI:
         include_runtime: bool = False,
         **kwargs: Any,
     ) -> dict[str, Any]:
-        p = self._p
+        p = self._plugin
         sk = self._session_key(event)
         state_name = state.replace("_state", "").replace("_self", "")
         if state_name == "integrated":
@@ -953,7 +953,7 @@ class PublicAPI:
     async def request_bot_proactive_speech_dispatch_tool(
         self, event: Any = None, **kwargs: Any
     ) -> Any:
-        dispatch_fn = getattr(self._p, "request_proactive_speech_dispatch", None)
+        dispatch_fn = getattr(self._plugin, "request_proactive_speech_dispatch", None)
         if dispatch_fn and callable(dispatch_fn):
             result = await dispatch_fn(event, dry_run=True)
             yield json.dumps(result, ensure_ascii=False, default=str)
@@ -969,7 +969,7 @@ class PublicAPI:
             )
 
     async def _llm_tool_query_agent_state(self, event: Any) -> Any:
-        p = self._p
+        p = self._plugin
         session_key = self._session_key(event)
         host = self._host(session_key)
         payload = host.diagnostics()
@@ -985,7 +985,7 @@ class PublicAPI:
     async def sylanne_memory_status(
         self, event: Any = None, query: str = "", **kwargs: Any
     ) -> Any:
-        p = self._p
+        p = self._plugin
         cfg = self._services.config or {}
         sk = self._session_key(event)
         if not cfg.get("enable_sylanne_memory", True):
@@ -1014,7 +1014,7 @@ class PublicAPI:
             yield f"Sylanne 记忆状态: {len(records)} 条记录。"
 
     async def emotion_reset(self, event: Any = None, **kwargs: Any) -> Any:
-        p = self._p
+        p = self._plugin
         cfg = self._services.config or {}
         sk = self._session_key(event)
         if not cfg.get("allow_emotion_reset_backdoor", True):
@@ -1026,13 +1026,13 @@ class PublicAPI:
         yield f"已重置会话 {sk} 的情绪状态。"
 
     def humanlike_reset(self, event: Any = None, **kwargs: Any) -> Any:
-        p = self._p
+        p = self._plugin
         if "session_key" in kwargs and event is None:
             return p._humanlike_reset_impl(kwargs["session_key"])
         return self._humanlike_reset_command(event, **kwargs)
 
     async def _humanlike_reset_command(self, event: Any = None, **kwargs: Any) -> Any:
-        p = self._p
+        p = self._plugin
         cfg = self._services.config or {}
         sk = self._session_key(event)
         if not cfg.get("allow_humanlike_reset_backdoor", True):
@@ -1044,7 +1044,7 @@ class PublicAPI:
         yield f"已重置会话 {sk} 的 humanlike 状态。"
 
     async def moral_repair_status(self, event: Any = None, **kwargs: Any) -> Any:
-        p = self._p
+        p = self._plugin
         cfg = self._services.config or {}
         if not cfg.get("enable_moral_repair_state"):
             yield "道德修复状态未启用。"
@@ -1060,7 +1060,7 @@ class PublicAPI:
     async def psychological_screening_status(
         self, event: Any = None, **kwargs: Any
     ) -> Any:
-        p = self._p
+        p = self._plugin
         cfg = self._services.config or {}
         if not cfg.get("enable_psychological_screening"):
             yield "心理筛查状态未启用。"
@@ -1074,7 +1074,7 @@ class PublicAPI:
             yield "心理筛查状态: 无数据。"
 
     async def humanlike_status(self, event: Any = None, **kwargs: Any) -> Any:
-        p = self._p
+        p = self._plugin
         sk = self._session_key(event)
         load_fn = getattr(p, "_load_humanlike_state", None)
         if load_fn and callable(load_fn):
@@ -1089,7 +1089,7 @@ class PublicAPI:
             yield "拟人状态: 无数据。"
 
     async def lifelike_learning_status(self, event: Any = None, **kwargs: Any) -> Any:
-        p = self._p
+        p = self._plugin
         sk = self._session_key(event)
         load_fn = getattr(p, "_load_lifelike_learning_state", None)
         if load_fn and callable(load_fn):
@@ -1104,7 +1104,7 @@ class PublicAPI:
             yield "生命化学习状态: 无数据。"
 
     async def personality_drift_status(self, event: Any = None, **kwargs: Any) -> Any:
-        p = self._p
+        p = self._plugin
         sk = self._session_key(event)
         load_fn = getattr(p, "_load_personality_drift_state", None)
         if load_fn and callable(load_fn):
@@ -1119,7 +1119,7 @@ class PublicAPI:
             yield "人格漂移状态: 无数据。"
 
     async def fallibility_status(self, event: Any = None, **kwargs: Any) -> Any:
-        p = self._p
+        p = self._plugin
         cfg = self._services.config or {}
         if not cfg.get("enable_fallibility_state"):
             yield "fallibility 状态未启用。"
@@ -1141,7 +1141,7 @@ class PublicAPI:
             )
 
     async def moral_repair_reset(self, event: Any = None, **kwargs: Any) -> Any:
-        p = self._p
+        p = self._plugin
         cfg = self._services.config or {}
         sk = self._session_key(event)
         if not cfg.get("allow_moral_repair_reset_backdoor", True):
@@ -1153,7 +1153,7 @@ class PublicAPI:
         yield f"已重置会话 {sk} 的道德修复状态。"
 
     async def fallibility_reset(self, event: Any = None, **kwargs: Any) -> Any:
-        p = self._p
+        p = self._plugin
         cfg = self._services.config or {}
         sk = self._session_key(event)
         if not cfg.get("allow_fallibility_reset_backdoor", True):
@@ -1165,7 +1165,7 @@ class PublicAPI:
         yield f"已重置会话 {sk} 的 fallibility 状态。"
 
     async def lifelike_learning_reset(self, event: Any = None, **kwargs: Any) -> Any:
-        p = self._p
+        p = self._plugin
         cfg = self._services.config or {}
         sk = self._session_key(event)
         if not cfg.get("allow_lifelike_learning_reset_backdoor", True):
@@ -1177,7 +1177,7 @@ class PublicAPI:
         yield f"已重置会话 {sk} 的 lifelike learning 状态。"
 
     async def personality_drift_reset(self, event: Any = None, **kwargs: Any) -> Any:
-        p = self._p
+        p = self._plugin
         cfg = self._services.config or {}
         sk = self._session_key(event)
         if not cfg.get("allow_personality_drift_reset_backdoor", True):
@@ -1216,7 +1216,7 @@ class PublicAPI:
         Returns:
             计算栈处理结果。
         """
-        p = self._p
+        p = self._plugin
         host = self._host(session_key)
         effective_now = now or time.time()
         from sylanne_alpha.host import SylanneAlphaHostEvent
@@ -1266,7 +1266,7 @@ class PublicAPI:
         Returns:
             计算栈处理结果。
         """
-        p = self._p
+        p = self._plugin
         host = self._host(session_key)
         effective_now = now or time.time()
         from sylanne_alpha.host import SylanneAlphaHostEvent
@@ -1313,7 +1313,7 @@ class PublicAPI:
         self, *args: Any, **kwargs: Any
     ) -> dict[str, Any]:
         """观测用户消息撤回事件：递增 input_epoch，清除相关状态。"""
-        p = self._p
+        p = self._plugin
         event = args[0] if args else None
         session_key = kwargs.get("session_key", "")
         message_id = kwargs.get("message_id", "")
@@ -1388,7 +1388,7 @@ class PublicAPI:
         import copy
         from sylanne_alpha.compat import emotion_values
 
-        state = await self._p._load_state(session_key)
+        state = await self._plugin._load_state(session_key)
         if not as_dict and state is not None and not isinstance(state, dict):
             return copy.deepcopy(state)
         values = emotion_values(self._host(session_key))
@@ -1414,7 +1414,7 @@ class PublicAPI:
         memory_text: str = "",
         **kwargs: Any,
     ) -> dict[str, Any]:
-        p = self._p
+        p = self._plugin
         sk = (
             session_key
             or (
@@ -1496,7 +1496,7 @@ class PublicAPI:
         Returns:
             SimpleNamespace 对象，包含 values、confidence、label、source 等字段。
         """
-        p = self._p
+        p = self._plugin
         current_text = kwargs.get("current_text", text)
         cfg = self._services.config or {}
         low_signal_enabled = cfg.get("enable_low_signal_light_assessment", True)
@@ -1616,7 +1616,7 @@ class PublicAPI:
 
     async def _call_internal_assessor_llm(self, *args: Any, **kwargs: Any) -> Any:
         """调用内部评估器 LLM，带并发限制保护。"""
-        p = self._p
+        p = self._plugin
         limit = self._internal_assessor_llm_concurrency_limit()
         while p._internal_assessor_llm_inflight >= limit:
             await asyncio.sleep(0.001)
@@ -1635,7 +1635,7 @@ class PublicAPI:
 
     def _internal_assessor_llm_concurrency_decision(self) -> dict[str, Any]:
         """计算内部评估器 LLM 并发策略：基础 2 通道 + 极端积压时临时 burst 到 3。"""
-        p = self._p
+        p = self._plugin
         _cfg = self._services.config or {}
         total_queued = sum(len(q) for q in p._background_post_queues.values())
         base_limit = 2
@@ -1658,7 +1658,7 @@ class PublicAPI:
     # ------------------------------------------------------------------
 
     async def _sylanne_memory_settings_page_payload(self) -> dict[str, Any]:
-        p = self._p
+        p = self._plugin
         providers = []
         context = self._services.context
         if hasattr(context, "get_all_embedding_providers"):
@@ -1681,7 +1681,7 @@ class PublicAPI:
     async def _update_sylanne_memory_settings_from_page(
         self, body: dict[str, Any]
     ) -> dict[str, Any]:
-        p = self._p
+        p = self._plugin
         provider_id = str(body.get("embedding_provider_id") or "")
         context = self._services.context
         valid_ids = set()
@@ -1717,7 +1717,7 @@ class PublicAPI:
         Returns:
             记忆查询结果字典，包含 matches 列表。
         """
-        p = self._p
+        p = self._plugin
         host = self._host(session_key)
         memory_system = p._memory_system_for_session(session_key)
         enabled = bool(p._config.get("sylanne_alpha_embedding_memory_enabled"))
@@ -1770,7 +1770,7 @@ class PublicAPI:
     ) -> dict[str, Any]:
         from .compat import realtime_plan
 
-        p = self._p
+        p = self._plugin
         cfg = getattr(p, "config", None) or getattr(p, "_config", {}) or {}
         max_part_chars = int(
             kwargs.pop("max_part_chars", cfg.get("realtime_chat_max_part_chars", 48))
@@ -1795,7 +1795,7 @@ class PublicAPI:
     async def inject_emotion_context(
         self, event: Any = None, request: Any = None, *, session_key: str = ""
     ) -> dict[str, Any]:
-        p = self._p
+        p = self._plugin
         sk = session_key or self._session_key(event)
         if request is None:
             return {"prompt": ""}
@@ -1833,7 +1833,7 @@ class PublicAPI:
         from .compat import proactive_decision
         from .host import SylanneAlphaHostEvent
 
-        p = self._p
+        p = self._plugin
         host = self._host(session_key)
         event = SylanneAlphaHostEvent(
             text="",

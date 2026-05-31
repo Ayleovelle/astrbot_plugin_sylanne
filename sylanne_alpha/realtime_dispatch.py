@@ -38,13 +38,13 @@ class RealtimeDispatch:
       LLM 回复 → 分段规划 → 逐段发送（带延迟）→ 中断检测 → 断点记录
 
     与其他组件的关系：
-      - 持有插件实例引用 (self._p)
+      - 持有插件实例引用 (self._plugin)
       - 被 llm_response_pipeline 调用执行发送
       - 被 llm_request_pipeline 调用注入上下文
     """
 
     def __init__(self, plugin: Any, *, services: "PluginServices | None" = None, session_state: Any = None) -> None:
-        self._p = plugin
+        self._plugin = plugin
         self._session_state = session_state
         if services is not None:
             self._services = services
@@ -139,7 +139,7 @@ class RealtimeDispatch:
         Returns:
             执行结果字典，包含 message_count、interrupted_reason 等。
         """
-        p = self._p
+        p = self._plugin
         session_key = plan.get("session_key") or p._session_key(event)
         plan_epoch = plan.get("input_epoch", 0)
         parts = plan.get("message_parts", [])
@@ -289,7 +289,7 @@ class RealtimeDispatch:
         delivery_status: str = "",
     ) -> None:
         """记录实时助手回复的历史影子，供后续请求注入上下文。"""
-        p = self._p
+        p = self._plugin
         if not hasattr(p, "_realtime_assistant_history_shadows"):
             p._realtime_assistant_history_shadows: dict[str, list[dict[str, Any]]] = {}
         shadows = p._realtime_assistant_history_shadows.setdefault(session_key, [])
@@ -362,7 +362,7 @@ class RealtimeDispatch:
         text: str = "",
         observed_at: float = 0.0,
     ) -> None:
-        p = self._p
+        p = self._plugin
         if not hasattr(p, "_active_agent_pending_user_turns"):
             p._active_agent_pending_user_turns: dict[str, list[dict[str, Any]]] = {}
         turns = p._active_agent_pending_user_turns.setdefault(session_key, [])
@@ -400,7 +400,7 @@ class RealtimeDispatch:
     def realtime_assistant_history_shadow_cache(
         self,
     ) -> dict[str, list[dict[str, Any]]]:
-        p = self._p
+        p = self._plugin
         if not hasattr(p, "_realtime_assistant_history_shadows"):
             p._realtime_assistant_history_shadows: dict[str, list[dict[str, Any]]] = {}
         return p._realtime_assistant_history_shadows
@@ -692,7 +692,7 @@ class RealtimeDispatch:
 
         支持 diff 模式：若状态变化小于阈值，返回简短的 "无变化" 标记。
         """
-        p = self._p
+        p = self._plugin
         if state is None:
             return ""
         cache = getattr(p, "_group_atmosphere_injection_snapshot_cache", {})
@@ -773,7 +773,7 @@ class RealtimeDispatch:
         Returns:
             创建的 asyncio.Task 对象。
         """
-        p = self._p
+        p = self._plugin
 
         async def _wrapper() -> None:
             try:
