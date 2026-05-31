@@ -78,7 +78,7 @@ class RealtimeDispatch:
         """发送首句文本到指定会话。"""
         context = self._services.context
         if hasattr(context, "send_message"):
-            _msg_fn = self._services.astrbot_message_fn or self._p._astrbot_message
+            _msg_fn = self._services.astrbot_message_fn
             message = _msg_fn(text)
             await context.send_message(origin, message)
 
@@ -106,15 +106,12 @@ class RealtimeDispatch:
             self._services.logger.info(
                 f"Sylanne segmented reply part {idx}/{total}: {text[:60]}"
             )
-            _msg_fn = self._services.astrbot_message_fn or self._p._astrbot_message
+            _msg_fn = self._services.astrbot_message_fn
             message = _msg_fn(text)
             await context.send_message(origin, message)
         # All parts sent successfully — clear unfinished marker
         if session_key:
-            if self._session_state is not None:
-                self._session_state.unfinished_replies.pop(session_key, None)
-            else:
-                self._p._unfinished_replies.pop(session_key, None)
+            self._session_state.unfinished_replies.pop(session_key, None)
 
     # ------------------------------------------------------------------
     # Realtime chat plan delivery

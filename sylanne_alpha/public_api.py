@@ -166,10 +166,10 @@ class PublicAPI:
     # Helper accessors
     # ------------------------------------------------------------------
     def _host(self, session_key: str) -> Any:
-        return self._services.host_fn(session_key) if self._services.host_fn else self._p._host(session_key)
+        return self._services.host_fn(session_key)
 
     def _session_key(self, event: Any = None, session_key: str = "") -> str:
-        return self._services.session_key_fn(event, session_key) if self._services.session_key_fn else self._p._session_key(event, session_key)
+        return self._services.session_key_fn(event, session_key)
 
     # ------------------------------------------------------------------
     # Observatory / Diagnostics group

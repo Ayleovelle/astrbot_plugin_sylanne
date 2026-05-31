@@ -69,6 +69,8 @@ class SessionStateStore:
         "session_locks",
         "safe_session_key_cache",
         "cached_system_prompts",
+        "engine_cache",
+        "sylanne_memory_cache",
     )
 
     def __init__(
@@ -91,6 +93,8 @@ class SessionStateStore:
         session_locks=None,
         safe_session_key_cache=None,
         cached_system_prompts=None,
+        engine_cache=None,
+        sylanne_memory_cache=None,
     ):
         self.hosts = hosts if hosts is not None else {}
         self.memory_systems = memory_systems if memory_systems is not None else {}
@@ -109,6 +113,8 @@ class SessionStateStore:
         self.session_locks = session_locks if session_locks is not None else {}
         self.safe_session_key_cache = safe_session_key_cache if safe_session_key_cache is not None else {}
         self.cached_system_prompts = cached_system_prompts if cached_system_prompts is not None else {}
+        self.engine_cache = engine_cache if engine_cache is not None else {}
+        self.sylanne_memory_cache = sylanne_memory_cache if sylanne_memory_cache is not None else {}
 
 
 # ---------------------------------------------------------------------------
@@ -622,7 +628,7 @@ class SessionContext:
         if self._session_state is not None:
             locks = self._session_state.session_locks
         else:
-            locks = self._p._session_locks
+            locks = {}
         if session_key not in locks:
             locks[session_key] = asyncio.Lock()
             # 锁字典过大时清理未使用的旧锁，防止内存泄漏
@@ -656,10 +662,7 @@ class SessionContext:
         if self._session_state is not None:
             cache = self._session_state.safe_session_key_cache
         else:
-            cache = getattr(self._p, "_safe_session_key_cache", None)
-            if cache is None:
-                self._p._safe_session_key_cache = {}
-                cache = self._p._safe_session_key_cache
+            cache = {}
         if session_key in cache:
             return cache[session_key]
         # 移除文件系统不安全字符
@@ -728,10 +731,7 @@ class SessionContext:
         if self._session_state is not None:
             systems = self._session_state.memory_systems
         else:
-            systems = getattr(self._p, "_memory_systems", None)
-            if systems is None:
-                self._p._memory_systems = {}
-                systems = self._p._memory_systems
+            systems = {}
         if session_key not in systems:
             systems[session_key] = MemorySystem()
         return systems[session_key]
@@ -898,18 +898,16 @@ class SessionContext:
             hosts = self._session_state.hosts
             conv_buffers = self._session_state.conversation_buffers
         else:
-            if not hasattr(self._p, "_hosts"):
-                self._p._hosts = {}
-            hosts = self._p._hosts
-            conv_buffers = self._p._conversation_buffers
+            hosts = {}
+            conv_buffers = {}
         if session_key not in hosts:
             # LRU 驱逐：超容量时持久化并移除最旧的 host
-            if len(hosts) >= self._p._MAX_HOSTS:
+            if len(hosts) >= self._services.max_hosts:
                 oldest_key = next(iter(hosts))
                 old_host = hosts.pop(oldest_key)
                 from sylanne_alpha.utils import safe_ensure_future
                 safe_ensure_future(
-                    self._p._state_persistence.persist_kernel(oldest_key, old_host),
+                    self._services.state_persistence.persist_kernel(oldest_key, old_host),
                     name=f"lru_evict_{oldest_key}",
                 )
             cfg = self._services.config or {}
@@ -945,7 +943,7 @@ class SessionContext:
                     host.kernel.body.memory["_memory_system"] = memory_system.to_dict()
                     from sylanne_alpha.utils import safe_ensure_future
                     safe_ensure_future(
-                        self._p._state_persistence.persist_kernel(session_key, host),
+                        self._services.state_persistence.persist_kernel(session_key, host),
                         name=f"hydrate_persist_{session_key}",
                     )
             hosts[session_key] = host
@@ -980,10 +978,7 @@ class SessionContext:
         if self._session_state is not None:
             buffers = self._session_state.offline_buffers
         else:
-            buffers = getattr(self._p, "_offline_buffers", None)
-            if buffers is None:
-                self._p._offline_buffers = {}
-                buffers = self._p._offline_buffers
+            buffers = {}
         if session_key not in buffers:
             buffers[session_key] = OfflineBuffer()
         return buffers[session_key]

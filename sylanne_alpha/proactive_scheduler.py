@@ -190,16 +190,12 @@ class ProactiveScheduler:
         now = (
             self._services.observed_now_fn()
             if self._services.observed_now_fn
-            else (
-                self._p._observed_now()
-                if callable(self._p._observed_now)
-                else self._p._observed_now
-            )
+            else time.time()
         )
         if self._session_state is not None:
             candidates = self._session_state.proactive_candidate_sessions
         else:
-            candidates = self._p._proactive_candidate_sessions
+            candidates = {}
         sk = ""
         if event_or_session is not None:
             sk = str(getattr(event_or_session, "unified_msg_origin", "") or "")
@@ -218,7 +214,7 @@ class ProactiveScheduler:
         if self._session_state is not None:
             host = self._session_state.hosts.get(sk)
         else:
-            host = self._p._hosts.get(sk)
+            host = None
         _expression_drive = 0.5
         if host and hasattr(host.kernel, "_personality"):
             _p = host.kernel._personality() if callable(getattr(host.kernel, "_personality", None)) else {}
@@ -248,7 +244,7 @@ class ProactiveScheduler:
         if self._session_state is not None:
             candidates = dict(self._session_state.proactive_candidate_sessions)
         else:
-            candidates = dict(self._p._proactive_candidate_sessions)
+            candidates = {}
         checked = 0
         dispatched = 0
         for sk, info in candidates.items():
@@ -293,7 +289,7 @@ class ProactiveScheduler:
             )
             or "default"
         )
-        host = self._services.host_fn(sk) if self._services.host_fn else self._p._host(sk)
+        host = self._services.host_fn(sk)
         surface = host.diagnostics()
         return proactive_decision(surface)
 

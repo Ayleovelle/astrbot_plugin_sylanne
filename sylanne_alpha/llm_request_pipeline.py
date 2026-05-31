@@ -427,9 +427,6 @@ class LLMRequestPipeline:
             )
         if self._session_state is not None:
             pass  # cached_system_prompts lives in session_state
-        else:
-            if not hasattr(self._p, "_cached_system_prompts"):
-                self._p._cached_system_prompts = {}
 
     def _most_recent_host_key(self) -> str:
         """返回最近活跃的 host session_key（按 last_event.now 排序）。
@@ -440,7 +437,7 @@ class LLMRequestPipeline:
         if self._session_state is not None:
             hosts = self._session_state.hosts
         else:
-            hosts = self._p._hosts
+            hosts = {}
         best_key = ""
         best_time = 0.0
         for sk, host in hosts.items():
@@ -467,10 +464,7 @@ class LLMRequestPipeline:
         )
         system_prompt = str(source or "").strip()
         if system_prompt:
-            if self._session_state is not None:
-                self._session_state.cached_system_prompts[session_key] = system_prompt
-            else:
-                self._p._cached_system_prompts[session_key] = system_prompt
+            self._session_state.cached_system_prompts[session_key] = system_prompt
 
     def _life_sim_persona_getter(self, session_key: str = "") -> str:
         """返回生命模拟器使用的人格描述。
@@ -481,7 +475,7 @@ class LLMRequestPipeline:
         - 开关开启：使用用户自定义的生命模拟专用人设文本，覆盖 AstrBot 默认人设。
           适用于想让"生活中的角色"和"对话中的角色"有差异的进阶玩法。
         """
-        config = getattr(self._p, "config", None) or {}
+        config = self._services.config or {}
         use_custom = config.get(
             "sylanne_alpha_life_simulation_use_custom_persona", False
         )
@@ -500,7 +494,7 @@ class LLMRequestPipeline:
         if self._session_state is not None:
             cached_prompts = self._session_state.cached_system_prompts
         else:
-            cached_prompts = getattr(self._p, "_cached_system_prompts", {})
+            cached_prompts = {}
         if session_key:
             cached = str(cached_prompts.get(session_key, "") or "").strip()
         else:

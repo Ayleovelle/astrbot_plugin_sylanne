@@ -68,55 +68,39 @@ class LLMResponsePipeline:
             )
 
     # ------------------------------------------------------------------
-    # State access helpers (prefer session_state, fallback to self._p)
+    # State access helpers (via session_state)
     # ------------------------------------------------------------------
     @property
     def _stream_buffers(self) -> Any:
-        if self._session_state is not None:
-            return self._session_state.stream_buffers
-        return self._p._stream_buffers
+        return self._session_state.stream_buffers
 
     @property
     def _stream_first_sent(self) -> Any:
-        if self._session_state is not None:
-            return self._session_state.stream_first_sent
-        return self._p._stream_first_sent
+        return self._session_state.stream_first_sent
 
     @property
     def _unfinished_replies(self) -> Any:
-        if self._session_state is not None:
-            return self._session_state.unfinished_replies
-        return self._p._unfinished_replies
+        return self._session_state.unfinished_replies
 
     @property
     def _segmented_tasks(self) -> Any:
-        if self._session_state is not None:
-            return self._session_state.segmented_tasks
-        return self._p._segmented_tasks
+        return self._session_state.segmented_tasks
 
     @property
     def _background_tasks(self) -> Any:
-        if self._session_state is not None:
-            return self._session_state.background_tasks
-        return self._p._background_tasks
+        return self._session_state.background_tasks
 
     @property
     def _last_bot_texts(self) -> Any:
-        if self._session_state is not None:
-            return self._session_state.last_bot_texts
-        return self._p._last_bot_texts
+        return self._session_state.last_bot_texts
 
     @property
     def _last_bot_expression_time(self) -> Any:
-        if self._session_state is not None:
-            return self._session_state.last_bot_expression_time
-        return self._p._last_bot_expression_time
+        return self._session_state.last_bot_expression_time
 
     @property
     def _conversation_buffers(self) -> Any:
-        if self._session_state is not None:
-            return self._session_state.conversation_buffers
-        return self._p._conversation_buffers
+        return self._session_state.conversation_buffers
 
     # ------------------------------------------------------------------
     # Injection defense
@@ -153,7 +137,7 @@ class LLMResponsePipeline:
             event: AstrBot 事件对象。
             response: LLM 响应对象，包含 completion_text。
         """
-        session_key = self._services.session_key_fn(event) if self._services.session_key_fn else self._p._session_key(event)
+        session_key = self._services.session_key_fn(event)
         cfg = self._services.config or {}
         realtime_enabled = bool(
             cfg.get("sylanne_alpha_realtime_chat_enabled")
@@ -226,7 +210,7 @@ class LLMResponsePipeline:
         cfg = self._services.config or {}
         default_max_part = int(cfg.get("realtime_chat_max_part_chars", 48))
         default_cps = 7.5  # 默认每秒字符数（模拟打字速度）
-        host = self._services.host_fn(session_key) if self._services.host_fn else self._p._host(session_key)
+        host = self._services.host_fn(session_key)
         expr_drive = host.kernel.computation.engine.expression_drive()
         # 计算最近被忽略的回复比例，用于调整节奏
         last_times = [t for t in self._last_bot_expression_time.values() if t > 0]
@@ -304,16 +288,14 @@ class LLMResponsePipeline:
             self._last_bot_texts[session_key] = text[:120]
             if self._services.schedule_buffer_persist_fn:
                 self._services.schedule_buffer_persist_fn(session_key)
-            else:
-                self._p._schedule_buffer_persist(session_key)
             # Parallel sync to AstrBot ConversationManager
             _has_conv_mgr = (
                 self._services.has_conversation_manager_fn()
                 if self._services.has_conversation_manager_fn
-                else self._p._has_conversation_manager()
+                else False
             )
             if _has_conv_mgr:
-                _sync_fn = self._services.sync_message_to_conv_mgr_fn or self._p._sync_message_to_conv_mgr
+                _sync_fn = self._services.sync_message_to_conv_mgr_fn
                 safe_ensure_future(
                     _sync_fn(session_key, "bot", text),
                     name="conv_mgr_sync_bot",
@@ -325,11 +307,11 @@ class LLMResponsePipeline:
                 social_field.notify_bot_replied(group_id, text)
                 # Reset social void on reply
                 try:
-                    host = self._services.host_fn(session_key) if self._services.host_fn else self._p._host(session_key)
+                    host = self._services.host_fn(session_key)
                     host.kernel.computation.engine.social_void.reset()
                 except Exception:
                     pass  # cleanup: failure acceptable
-            _observe_fn = self._services.observe_response_fn or self._p.observe_response
+            _observe_fn = self._services.observe_response_fn
             await _observe_fn(
                 session_key,
                 text=text[:500],
@@ -353,7 +335,7 @@ class LLMResponsePipeline:
             event: AstrBot 事件对象。
             chunk: 流式输出的增量块。
         """
-        session_key = self._services.session_key_fn(event) if self._services.session_key_fn else self._p._session_key(event)
+        session_key = self._services.session_key_fn(event)
         intercept = bool(
             self._services.config.get("sylanne_alpha_realtime_intercept_llm_response")
         )
@@ -500,7 +482,7 @@ class LLMResponsePipeline:
         time_str = now.strftime("%H:%M")
         date_str = now.strftime("%m-%d")
 
-        host = self._services.host_fn(session_key) if self._services.host_fn else self._p._host(session_key)
+        host = self._services.host_fn(session_key)
         kernel = host.kernel
         last_event = kernel.last_event or {}
         has_previous = bool(last_event.get("now") or last_event.get("text"))

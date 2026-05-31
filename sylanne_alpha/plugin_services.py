@@ -56,3 +56,5 @@ class PluginServices:
     observe_response_fn: Optional[Callable[..., Any]] = None
     astrbot_message_fn: Optional[Callable[[str], Any]] = None
     observed_now_fn: Optional[Callable[[], float]] = None
+    state_persistence: Any = None
+    max_hosts: int = 20

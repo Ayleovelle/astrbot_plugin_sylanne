@@ -442,11 +442,23 @@ class EmotionalStatePlugin(Star):
             context=self.context,
             rhythm_learner=self._rhythm_learner,
             social_field=self._social_field,
+            put_kv_data=self.put_kv_data if hasattr(self, "put_kv_data") else None,
+            get_kv_data=self.get_kv_data if hasattr(self, "get_kv_data") else None,
+            delete_kv_data=self.delete_kv_data if hasattr(self, "delete_kv_data") else None,
+            session_key_fn=self._session_key,
+            host_fn=self._host,
+            schedule_buffer_persist_fn=self._schedule_buffer_persist,
+            has_conversation_manager_fn=self._has_conversation_manager,
+            sync_message_to_conv_mgr_fn=self._sync_message_to_conv_mgr,
+            observe_response_fn=self.observe_response,
+            observed_now_fn=self._observed_now,
+            max_hosts=self._MAX_HOSTS,
         )
         # 子系统初始化：各子系统持有 self 引用，通过委托模式分工
         _svc = self._plugin_services
         self._session_ctx = SessionContext(self, services=_svc, session_state=self._session_state)
         self._state_persistence = StatePersistence(self, services=_svc)
+        _svc.state_persistence = self._state_persistence
         self._realtime_dispatch = RealtimeDispatch(self, services=_svc)
         self._background_queue = BackgroundPostQueue(
             self,

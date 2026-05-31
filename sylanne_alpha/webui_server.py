@@ -3388,8 +3388,6 @@ class WebUILifecycle:
         task = loop.create_task(_takeover())
         if self._session_state is not None:
             self._session_state.background_tasks.add(task)
-        else:
-            self._p._background_tasks.add(task)
 
     def _current_webui_module_ref(self) -> Any:
         """Return the current webui_server module reference from sys.modules."""

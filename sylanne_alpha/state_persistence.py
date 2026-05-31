@@ -165,9 +165,7 @@ class StatePersistence:
 
     def has_kv_api(self) -> bool:
         """检查 AstrBot KV 存储 API 是否可用。"""
-        if self._services.put_kv_data is not None:
-            return True
-        return hasattr(self._p, "put_kv_data") and callable(self._p.put_kv_data)
+        return self._services.put_kv_data is not None
 
     # ------------------------------------------------------------------
     # 各引擎子系统的 KV 键生成
@@ -222,10 +220,7 @@ class StatePersistence:
         if self._session_state is not None:
             cache = self._session_state.safe_session_key_cache
         else:
-            cache = getattr(self._p, "_safe_session_key_cache", None)
-            if cache is None:
-                self._p._safe_session_key_cache = {}
-                cache = self._p._safe_session_key_cache
+            cache = {}
         if session_key in cache:
             return cache[session_key]
         safe = session_key.replace("/", "_").replace("\\", "_")
@@ -233,22 +228,16 @@ class StatePersistence:
         return safe
 
     def _kv_put(self):
-        """获取 KV 写入回调（优先 services，回退 plugin）。"""
-        if self._services.put_kv_data is not None:
-            return self._services.put_kv_data
-        return getattr(self._p, "put_kv_data", None)
+        """获取 KV 写入回调。"""
+        return self._services.put_kv_data
 
     def _kv_get(self):
-        """获取 KV 读取回调（优先 services，回退 plugin）。"""
-        if self._services.get_kv_data is not None:
-            return self._services.get_kv_data
-        return getattr(self._p, "get_kv_data", None)
+        """获取 KV 读取回调。"""
+        return self._services.get_kv_data
 
     def _kv_delete(self):
-        """获取 KV 删除回调（优先 services，回退 plugin）。"""
-        if self._services.delete_kv_data is not None:
-            return self._services.delete_kv_data
-        return getattr(self._p, "delete_kv_data", None)
+        """获取 KV 删除回调。"""
+        return self._services.delete_kv_data
 
     # ------------------------------------------------------------------
     # Kernel 持久化
@@ -436,13 +425,13 @@ class StatePersistence:
         if self._session_state is not None:
             buf = self._session_state.conversation_buffers.get(session_key)
         else:
-            buf = self._p._conversation_buffers.get(session_key)
+            buf = None
         if not buf:
             return
         if self._session_state is not None:
             host = self._session_state.hosts.get(session_key)
         else:
-            host = self._p._hosts.get(session_key)
+            host = None
         if not host or not hasattr(host, "runtime"):
             return
         buf_dict = buf.to_dict()
@@ -464,8 +453,8 @@ class StatePersistence:
             hosts = self._session_state.hosts
             conv_buffers = self._session_state.conversation_buffers
         else:
-            hosts = self._p._hosts
-            conv_buffers = self._p._conversation_buffers
+            hosts = {}
+            conv_buffers = {}
         for sk, host in list(hosts.items()):
             if not hasattr(host, "runtime"):
                 continue
@@ -495,10 +484,7 @@ class StatePersistence:
         """
         import json as _json
 
-        cache = getattr(self._p, "_engine_cache", None)
-        if cache is None:
-            self._p._engine_cache = {}
-            cache = self._p._engine_cache
+        cache = self._session_state.engine_cache if self._session_state is not None else {}
         if session_key in cache:
             return cache[session_key]
         key = self.kv_key(session_key)
@@ -695,16 +681,11 @@ class StatePersistence:
             return
         from .memory_system import MemorySystem
 
-        cache = self._p._sylanne_memory_cache
-        if not isinstance(cache, dict):
-            cache = {}
-        self._p._sylanne_memory_cache = cache
+        cache = self._session_state.sylanne_memory_cache if self._session_state is not None else {}
         cache[session_key] = state
         if isinstance(state, MemorySystem):
             if self._session_state is not None:
                 self._session_state.memory_systems[session_key] = state
-            else:
-                self._p._memory_systems[session_key] = state
         kv_key = self.sylanne_memory_kv_key(session_key)
         put_fn = self._kv_put()
         if put_fn and callable(put_fn):
@@ -750,10 +731,7 @@ class StatePersistence:
                 )
             return bool(list(getattr(state, "records", []) or []))
 
-        cache = self._p._sylanne_memory_cache
-        if not isinstance(cache, dict):
-            cache = {}
-        self._p._sylanne_memory_cache = cache
+        cache = self._session_state.sylanne_memory_cache if self._session_state is not None else {}
         cached_state = cache.get(session_key) if isinstance(cache, dict) else None
         if has_content(cached_state):
             return cache[session_key]
@@ -761,7 +739,7 @@ class StatePersistence:
         if self._session_state is not None:
             system_cache = self._session_state.memory_systems
         else:
-            system_cache = getattr(self._p, "_memory_systems", {}) or {}
+            system_cache = {}
         live_state = (
             system_cache.get(session_key) if isinstance(system_cache, dict) else None
         )
@@ -785,8 +763,6 @@ class StatePersistence:
                         state = MemorySystem.create_from_dict(data)
                         if self._session_state is not None:
                             self._session_state.memory_systems[session_key] = state
-                        else:
-                            self._p._memory_systems[session_key] = state
                         cache[session_key] = state
                         return state
                     except Exception as e:
@@ -831,15 +807,13 @@ class StatePersistence:
                     logger.debug(f"Sylanne skip: {e}")
         # 最后回退：从 kernel body.memory 中加载
         try:
-            _host_fn = self._services.host_fn or self._p._host
+            _host_fn = self._services.host_fn
             host = _host_fn(session_key)
             data = host.kernel.body.memory.get("_memory_system")
             if isinstance(data, dict):
                 state = MemorySystem.create_from_dict(data)
                 if self._session_state is not None:
                     self._session_state.memory_systems[session_key] = state
-                else:
-                    self._p._memory_systems[session_key] = state
                 cache[session_key] = state
                 return state
         except Exception as e:
@@ -857,7 +831,7 @@ class StatePersistence:
         Args:
             session_key: 会话标识。
         """
-        cache = self._p._sylanne_memory_cache
+        cache = self._session_state.sylanne_memory_cache if self._session_state is not None else {}
         cache.pop(session_key, None)
         kv_key = self.sylanne_memory_kv_key(session_key)
         delete_fn = self._kv_delete()
