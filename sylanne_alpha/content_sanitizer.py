@@ -72,7 +72,7 @@ _EXPLICIT_PATTERN = re.compile(
 )
 
 # 匹配包含显式内容的完整句段（中文句号/感叹号/问号/逗号/换行分隔）
-_SENTENCE_SPLIT = re.compile(r"[。！？\n]+")
+_SENTENCE_SPLIT = re.compile(r"[。！？，,\n]+")
 
 # 用于 assessment 的轻量检测——只要句子含显式词就整句替换
 _SENSITIVE_SENTENCE = re.compile(

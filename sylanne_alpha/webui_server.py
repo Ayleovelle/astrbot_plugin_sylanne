@@ -1278,13 +1278,14 @@ async def start_webui_server(plugin: Any, host: str = "127.0.0.1", port: int = 2
     _WS_MAX_CONNECTIONS = 10
 
     async def handle_ws_state(request: web.Request) -> web.WebSocketResponse:
-        # S3: WebSocket 连接鉴权 — 从 query parameter 验证 token
-        ws_token = request.query.get("token", "")
-        if not ws_token or ws_token != _active_token:
-            ws = web.WebSocketResponse()
-            await ws.prepare(request)
-            await ws.close(code=4001, message=b"unauthorized")
-            return ws
+        # S3: WebSocket 连接鉴权 — 仅在配置了 token 时校验
+        if _active_token:
+            ws_token = request.query.get("token", "")
+            if not ws_token or ws_token != _active_token:
+                ws = web.WebSocketResponse()
+                await ws.prepare(request)
+                await ws.close(code=4001, message=b"unauthorized")
+                return ws
         if len(_ws_connections) >= _WS_MAX_CONNECTIONS:
             ws = web.WebSocketResponse()
             await ws.prepare(request)

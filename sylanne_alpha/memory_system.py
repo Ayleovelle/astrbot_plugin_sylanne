@@ -717,8 +717,8 @@ class MemorySystem:
             if item.weight < 1e-10:
                 item.weight = 0.0
 
-        # --- L3 clarity 衰减（每 N tick） ---
-        if self._gc_tick_counter % self._DECAY_L3_EVERY_N == 0:
+        # --- L3 clarity 衰减（每 N tick，用单调递增的 _tick 判断） ---
+        if self._tick % self._DECAY_L3_EVERY_N == 0:
             # 批量衰减：0.998^N 等效于连续 N 次 *0.998
             l3_decay = 0.998 ** self._DECAY_L3_EVERY_N
             now = date.today()

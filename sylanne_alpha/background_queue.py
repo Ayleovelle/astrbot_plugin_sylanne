@@ -404,7 +404,12 @@ class BackgroundPostQueue:
 
         task = safe_ensure_future(_debounced_save(), name="checkpoint_debounced_save")
         checkpoint_tasks[session_key] = task
-        task.add_done_callback(lambda t: checkpoint_tasks.pop(session_key, None))
+
+        def _on_done(t: asyncio.Task) -> None:
+            if checkpoint_tasks.get(session_key) is t:
+                checkpoint_tasks.pop(session_key, None)
+
+        task.add_done_callback(_on_done)
 
     # ------------------------------------------------------------------
     # 排空评估队列

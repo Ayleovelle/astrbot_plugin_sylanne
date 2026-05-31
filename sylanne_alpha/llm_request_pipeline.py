@@ -416,7 +416,7 @@ class LLMRequestPipeline:
     def __init__(self, plugin: Any) -> None:
         self._p = plugin
         if not hasattr(self._p, "_cached_system_prompts"):
-            self._p._cached_system_prompts: dict[str, str] = {}
+            self._p._cached_system_prompts = {}
 
     def _most_recent_host_key(self) -> str:
         """返回最近活跃的 host session_key（按 last_event.now 排序）。
