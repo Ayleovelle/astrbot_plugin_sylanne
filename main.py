@@ -164,6 +164,7 @@ stop_webui_server = _sylanne_webui_server.stop_webui_server
 # 常量定义
 # ---------------------------------------------------------------------------
 PLUGIN_NAME = "astrbot_plugin_sylanne"
+PLUGIN_VERSION = "1.4.5"
 PUBLIC_API_VERSION = "1.0"
 MAX_LLM_REQUEST_PROMPT_CHARS = 12000
 _MAX_PAYLOAD_SERIALIZED_CHARS = 60000

@@ -33,6 +33,23 @@ from urllib.parse import parse_qs, urlparse
 
 from pathlib import Path
 
+
+def _get_plugin_version() -> str:
+    """从 metadata.yaml 读取版本号（缓存结果）。"""
+    if not hasattr(_get_plugin_version, "_cache"):
+        try:
+            meta_path = Path(__file__).resolve().parent.parent / "metadata.yaml"
+            for line in meta_path.read_text(encoding="utf-8").splitlines():
+                if line.startswith("version:"):
+                    _get_plugin_version._cache = line.split(":", 1)[1].strip().strip('"').strip("'")
+                    break
+            else:
+                _get_plugin_version._cache = "unknown"
+        except Exception:
+            _get_plugin_version._cache = "unknown"
+    return _get_plugin_version._cache
+
+
 try:
     from astrbot.core.utils.astrbot_path import get_astrbot_data_path  # type: ignore
 except ImportError:
@@ -990,7 +1007,7 @@ async def start_webui_server(plugin: Any, host: str = "127.0.0.1", port: int = 2
                 "uptime_hours": uptime_hours,
             },
             "anomalies": anomalies,
-            "version": "1.3.0",
+            "version": _get_plugin_version(),
         })
 
     # ------------------------------------------------------------------
@@ -3027,7 +3044,7 @@ def _build_widget_state(plugin: Any) -> dict[str, Any]:
         "temperature": temperature,
         "scars": scars,
         "memory_count": memory_count,
-        "version": "1.3.0",
+        "version": _get_plugin_version(),
     }
 
 

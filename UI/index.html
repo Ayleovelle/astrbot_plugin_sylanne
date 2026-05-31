@@ -608,7 +608,7 @@ body::after {
       </svg>
       <div class="text-stack">
         <div class="text-item t-verify"><h2>VERIFYING ID</h2><p>CHECKING CREDENTIALS</p></div>
-        <div class="text-item t-success"><h2>NEURAL LINK ACTIVE</h2><p id="contactIdDisplay" style="font-family:var(--font-mono);font-size:15px;line-height:1.8;color:var(--text)">&#x300C;Sylanne&#x300D;<br><span style="font-size:11px;color:var(--text-muted);letter-spacing:1px">OS. Embodiment-1.4.5</span></p></div>
+        <div class="text-item t-success"><h2>NEURAL LINK ACTIVE</h2><p id="contactIdDisplay" style="font-family:var(--font-mono);font-size:15px;line-height:1.8;color:var(--text)">&#x300C;Sylanne&#x300D;<br><span style="font-size:11px;color:var(--text-muted);letter-spacing:1px">OS. Embodiment</span></p></div>
         <div class="text-item t-error"><h2>ACCESS DENIED</h2><p>INVALID TOKEN DETECTED</p></div>
       </div>
     </div>
@@ -1660,19 +1660,16 @@ async function apiFetch(path, opts) {
 function updateContactDisplay() {
   var el = document.getElementById('contactIdDisplay');
   if (!el) return;
-  // 从 appState 读取（如果已加载），否则用默认值
   var name = (appState && appState.persona && appState.persona.profile && appState.persona.profile.name) || 'Sylanne';
-  var version = (appState && appState.persona && appState.persona.profile && appState.persona.profile.version) || '';
-  // 如果还没有 appState，尝试异步获取
+  var version = (appState && appState.version) || '';
   if (!appState && !isPreview) {
     apiFetch('/api/state').then(function(data) {
-      var p = data && data.persona && data.persona.profile;
-      var n = (p && p.name) || 'Sylanne';
-      var v = (p && p.version) || '';
-      el.innerHTML = '「' + n + '」<br><span style="font-size:11px;color:var(--text-muted);letter-spacing:1px">OS. Embodiment-' + (v || '1.4.5') + '</span>';
+      var n = (data && data.persona && data.persona.profile && data.persona.profile.name) || 'Sylanne';
+      var v = (data && data.version) || '';
+      el.innerHTML = '「' + n + '」<br><span style="font-size:11px;color:var(--text-muted);letter-spacing:1px">OS. Embodiment-' + v + '</span>';
     }).catch(function() {});
   }
-  el.innerHTML = '「' + name + '」<br><span style="font-size:11px;color:var(--text-muted);letter-spacing:1px">OS. Embodiment-' + (version || '1.4.5') + '</span>';
+  el.innerHTML = '「' + name + '」<br><span style="font-size:11px;color:var(--text-muted);letter-spacing:1px">OS. Embodiment' + (version ? '-' + version : '') + '</span>';
 }
 
 async function verifyToken(token) {
