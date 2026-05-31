@@ -73,54 +73,6 @@ def swap_dirty() -> set[str]:
     return _dirty.swap()
 
 
-# ---------------------------------------------------------------------------
-# Item 73: 端到端加密记忆存储（简化版）
-# ---------------------------------------------------------------------------
-
-
-class EncryptedStorage:
-    """可选的加密存储层。优先使用 Fernet (AES-128-CBC)，不可用时回退到 XOR。"""
-
-    def __init__(self, password: str | None = None):
-        self._key: bytes | None = None
-        self._fernet = None
-        if password:
-            try:
-                from hashlib import pbkdf2_hmac
-                import os
-                self._salt = os.urandom(16)
-                raw_key = pbkdf2_hmac('sha256', password.encode(), self._salt, 100000)
-                self._key = raw_key
-                try:
-                    import base64
-                    from cryptography.fernet import Fernet
-                    fernet_key = base64.urlsafe_b64encode(raw_key[:32])
-                    self._fernet = Fernet(fernet_key)
-                except ImportError:
-                    pass
-            except Exception:
-                pass
-
-    @property
-    def enabled(self) -> bool:
-        return self._key is not None
-
-    def encrypt(self, data: bytes) -> bytes:
-        if not self._key:
-            return data
-        if self._fernet:
-            return self._fernet.encrypt(data)
-        key_len = len(self._key)
-        return bytes(b ^ self._key[i % key_len] for i, b in enumerate(data))
-
-    def decrypt(self, data: bytes) -> bytes:
-        if not self._key:
-            return data
-        if self._fernet:
-            return self._fernet.decrypt(data)
-        return self.encrypt(data)
-
-
 class StatePersistence:
     """封装从插件委托出来的 kernel/buffer 持久化逻辑。
 

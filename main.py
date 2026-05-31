@@ -452,6 +452,8 @@ class EmotionalStatePlugin(Star):
             sync_message_to_conv_mgr_fn=self._sync_message_to_conv_mgr,
             observe_response_fn=self.observe_response,
             observed_now_fn=self._observed_now,
+            assess_emotion_fn=self._assess_emotion,
+            save_state_fn=self._save_state,
             max_hosts=self._MAX_HOSTS,
         )
         # 子系统初始化：各子系统持有 self 引用，通过委托模式分工
@@ -478,10 +480,10 @@ class EmotionalStatePlugin(Star):
         self._register_web_apis(context)
 
         # AstrBot ConversationManager / PersonaManager 集成
-        self._conv_mgr = self._init_conversation_manager()
-        self._persona_mgr = self._init_persona_manager()
+        self._conv_mgr = self._state_persistence.init_conversation_manager()
+        self._persona_mgr = self._state_persistence.init_persona_manager()
 
-        self._load_config_defaults()
+        self._state_persistence.load_config_defaults()
         # WebUI 生命周期管理：先强杀旧监听器（解决热更新时旧实例残留问题），再启动新的
         try:
             import asyncio as _aio
@@ -655,9 +657,6 @@ class EmotionalStatePlugin(Star):
     def _detect_astrbot_group_context(self) -> bool:
         return self._state_persistence.detect_astrbot_group_context()
 
-    def _load_config_defaults(self) -> None:
-        self._state_persistence.load_config_defaults()
-
     def _start_webui_if_enabled(self) -> None:
         return self._webui_lifecycle.start_if_enabled()
 
@@ -674,12 +673,6 @@ class EmotionalStatePlugin(Star):
             include_current=include_current
         )
 
-    def _assessment_timing(self) -> str:
-        timing = str(self._cfg("assessment_timing", "post") or "post").strip().lower()
-        if timing in {"pre", "post", "both"}:
-            return timing
-        return "post"
-
     # Web API route handlers (memory-settings, lineage-observatory)
     async def _memory_settings_get_handler(self) -> dict[str, Any]:
         return await self._sylanne_memory_settings_page_payload()
@@ -693,13 +686,6 @@ class EmotionalStatePlugin(Star):
     async def _lineage_observatory_handler(self) -> dict[str, Any]:
         session_key = "default"
         return self._sylanne_lineage_observatory_page_payload(session_key)
-
-    # WebUI route handlers (kept for internal cross-references)
-    async def _webui_provider_items(self) -> list[dict[str, Any]]:
-        return await self._webui_routes.provider_items()
-
-    def _generate_meltdown_nonce(self, session: str) -> str:
-        return self._webui_routes.generate_meltdown_nonce(session)
 
     def _load_conf_schema(self) -> dict[str, Any]:
         """Load _conf_schema.json from plugin directory."""
@@ -723,11 +709,6 @@ class EmotionalStatePlugin(Star):
         self, session_key: str
     ) -> dict[str, Any]:
         return self._public_api._sylanne_lineage_observatory_page_payload(session_key)
-
-    def _understanding_closed_loop_diagnostics(
-        self, session_key: str
-    ) -> dict[str, Any]:
-        return self._public_api._understanding_closed_loop_diagnostics(session_key)
 
     # Host management
     _MAX_HOSTS = 50
@@ -918,11 +899,6 @@ class EmotionalStatePlugin(Star):
             **kwargs,
         )
 
-    def _embedding_prompt_fragment(
-        self, matches: list[dict[str, Any]], query: str = ""
-    ) -> str:
-        return self._public_api._embedding_prompt_fragment(matches, query)
-
     async def get_proactive_speech_decision(
         self,
         event_or_session: Any = None,
@@ -1028,10 +1004,10 @@ class EmotionalStatePlugin(Star):
         host = self._host(session_key)
         host.kernel = host.runtime.reset(session_key)
         # Also persist the fresh kernel to KV
-        if self._has_kv_api():
+        if self._state_persistence.has_kv_api():
             try:
                 await self.put_kv_data(
-                    self._kernel_kv_key(session_key), host.kernel.snapshot()
+                    self._state_persistence.kernel_kv_key(session_key), host.kernel.snapshot()
                 )
             except Exception as e:
                 logger.warning(f"Sylanne kernel KV persist: {e}", exc_info=True)
@@ -1105,12 +1081,6 @@ class EmotionalStatePlugin(Star):
 
     def _schedule_buffer_persist(self, session_key: str) -> None:
         self._state_persistence.schedule_buffer_persist(session_key)
-
-    async def _do_buffer_persist(self, session_key: str) -> None:
-        await self._state_persistence._do_buffer_persist(session_key)
-
-    def _restore_buffers_on_boot(self) -> None:
-        self._state_persistence.restore_buffers_on_boot()
 
     async def _background_observe_request(self, session_key: str, text: str) -> None:
         return await self._llm_request_pipeline._background_observe_request(
@@ -1540,52 +1510,6 @@ class EmotionalStatePlugin(Star):
     ) -> dict[str, Any]:
         return await self._public_api.get_agent_trail(event, limit=limit, **kwargs)
 
-    async def _provider_id(self, event: Any = None) -> str:
-        return await self._state_persistence.provider_id(event)
-
-    def _kv_key(self, session_key: str) -> str:
-        return self._state_persistence.kv_key(session_key)
-
-    def _humanlike_kv_key(self, session_key: str) -> str:
-        return self._state_persistence.humanlike_kv_key(session_key)
-
-    def _lifelike_learning_kv_key(self, session_key: str) -> str:
-        return self._state_persistence.lifelike_learning_kv_key(session_key)
-
-    def _personality_drift_kv_key(self, session_key: str) -> str:
-        return self._state_persistence.personality_drift_kv_key(session_key)
-
-    def _moral_repair_kv_key(self, session_key: str) -> str:
-        return self._state_persistence.moral_repair_kv_key(session_key)
-
-    def _fallibility_kv_key(self, session_key: str) -> str:
-        return self._state_persistence.fallibility_kv_key(session_key)
-
-    def _psychological_kv_key(self, session_key: str) -> str:
-        return self._state_persistence.psychological_kv_key(session_key)
-
-    def _safe_session_key(self, session_key: str) -> str:
-        return self._session_ctx.safe_session_key(session_key)
-
-    def _sylanne_memory_kv_key(self, session_key: str) -> str:
-        return self._state_persistence.sylanne_memory_kv_key(session_key)
-
-    def _background_post_checkpoint_kv_key(self, session_key: str) -> str:
-        return self._background_queue.checkpoint_kv_key(session_key)
-
-    # KV-first persistence helpers
-    def _kernel_kv_key(self, session_key: str) -> str:
-        return self._state_persistence.kernel_kv_key(session_key)
-
-    def _buffer_kv_key(self, session_key: str) -> str:
-        return self._state_persistence.buffer_kv_key(session_key)
-
-    def _has_kv_api(self) -> bool:
-        return self._state_persistence.has_kv_api()
-
-    # AstrBot ConversationManager / PersonaManager integration
-    def _init_conversation_manager(self) -> Any:
-        return self._state_persistence.init_conversation_manager()
 
     def _has_conversation_manager(self) -> bool:
         return self._state_persistence.has_conversation_manager()
@@ -1594,9 +1518,6 @@ class EmotionalStatePlugin(Star):
         self, session_key: str, role: str, text: str
     ) -> None:
         await self._state_persistence.sync_message_to_conv_mgr(session_key, role, text)
-
-    def _init_persona_manager(self) -> Any:
-        return self._state_persistence.init_persona_manager()
 
     def _has_persona_manager(self) -> bool:
         return self._state_persistence.has_persona_manager()
@@ -1607,51 +1528,12 @@ class EmotionalStatePlugin(Star):
     async def _persist_kernel(self, session_key: str, host: SylanneAlphaHost) -> None:
         await self._state_persistence.persist_kernel(session_key, host)
 
-    def _persist_kernel_sync(self, session_key: str, host: SylanneAlphaHost) -> None:
-        self._state_persistence.persist_kernel_sync(session_key, host)
-
-    async def _persist_buffer(
-        self, session_key: str, host: SylanneAlphaHost, buf_dict: dict[str, Any]
-    ) -> None:
-        await self._state_persistence.persist_buffer(session_key, host, buf_dict)
-
-    async def _load_buffer_data(
-        self, session_key: str, host: SylanneAlphaHost
-    ) -> dict[str, Any] | None:
-        return await self._state_persistence.load_buffer_data(session_key, host)
-
     async def _load_state(
         self, session_key: str, persona_profile: Any = None, *, now: float = 0.0
     ) -> Any:
         return await self._state_persistence.load_state(
             session_key, persona_profile=persona_profile, now=now
         )
-
-    async def _load_psychological_state(self, session_key: str) -> Any:
-        return await self._state_persistence.load_psychological_state(session_key)
-
-    async def _load_humanlike_state(self, session_key: str) -> Any:
-        return await self._state_persistence.load_humanlike_state(session_key)
-
-    async def _load_lifelike_learning_state(
-        self, session_key: str, **kwargs: Any
-    ) -> Any:
-        return await self._state_persistence.load_lifelike_learning_state(
-            session_key, **kwargs
-        )
-
-    async def _load_personality_drift_state(
-        self, session_key: str, **kwargs: Any
-    ) -> Any:
-        return await self._state_persistence.load_personality_drift_state(
-            session_key, **kwargs
-        )
-
-    async def _load_moral_repair_state(self, session_key: str) -> Any:
-        return await self._state_persistence.load_moral_repair_state(session_key)
-
-    async def _load_fallibility_state(self, session_key: str) -> Any:
-        return await self._state_persistence.load_fallibility_state(session_key)
 
     async def _save_state(self, session_key: str, state: Any = None) -> None:
         await self._state_persistence.save_state(session_key, state)
@@ -1661,56 +1543,6 @@ class EmotionalStatePlugin(Star):
 
     async def _delete_humanlike_state(self, session_key: str) -> None:
         await self._state_persistence.delete_humanlike_state(session_key)
-
-    async def _delete_lifelike_learning_state(self, session_key: str) -> None:
-        await self._state_persistence.delete_lifelike_learning_state(session_key)
-
-    async def _delete_personality_drift_state(self, session_key: str) -> None:
-        await self._state_persistence.delete_personality_drift_state(session_key)
-
-    async def _delete_moral_repair_state(self, session_key: str) -> None:
-        await self._state_persistence.delete_moral_repair_state(session_key)
-
-    async def _delete_fallibility_state(self, session_key: str) -> None:
-        await self._state_persistence.delete_fallibility_state(session_key)
-
-    async def _save_humanlike_state(self, session_key: str, state: Any = None) -> None:
-        await self._state_persistence.save_humanlike_state(session_key, state)
-
-    async def _save_psychological_state(
-        self, session_key: str, state: Any = None
-    ) -> None:
-        await self._state_persistence.save_psychological_state(session_key, state)
-
-    async def _save_moral_repair_state(
-        self, session_key: str, state: Any = None
-    ) -> None:
-        await self._state_persistence.save_moral_repair_state(session_key, state)
-
-    async def _save_lifelike_learning_state(
-        self, session_key: str, state: Any = None
-    ) -> None:
-        await self._state_persistence.save_lifelike_learning_state(session_key, state)
-
-    async def _save_fallibility_state(
-        self, session_key: str, state: Any = None
-    ) -> None:
-        await self._state_persistence.save_fallibility_state(session_key, state)
-
-    async def _save_personality_drift_state(
-        self, session_key: str, state: Any = None
-    ) -> None:
-        await self._state_persistence.save_personality_drift_state(session_key, state)
-
-    async def _load_group_atmosphere_state(self, session_key: str) -> Any:
-        return await self._state_persistence.load_group_atmosphere_state(session_key)
-
-    async def _delete_psychological_state(self, session_key: str) -> None:
-        await self._state_persistence.delete_psychological_state(session_key)
-
-    def _engine_for_persona(self, persona_profile: Any = None) -> Any:
-        engine = getattr(self, "engine", None)
-        return engine
 
     async def _judge_proactive_topic(
         self, session_key: str = "", **kwargs: Any
@@ -1741,19 +1573,6 @@ class EmotionalStatePlugin(Star):
             return time.time() + float(cfg.get("benchmark_time_offset_seconds", 0.0))
         return time.time()
 
-    def _request_model_hint_text(self, event: Any = None) -> str:
-        return ""
-
-    async def _request_model_hint_for_event(
-        self, event: Any = None, request: Any = None
-    ) -> str:
-        return await self._get_model_hint(event)
-
-    def _request_to_text(self, request: Any) -> str:
-        if request is None:
-            return ""
-        return str(getattr(request, "prompt", "") or "")[:500]
-
     def _resolve_public_session_key(
         self, event: Any = None, *, request: Any = None, session_key: str = ""
     ) -> str:
@@ -1765,22 +1584,6 @@ class EmotionalStatePlugin(Star):
         self, session_key: str, now: float = 0.0
     ) -> None:
         self._conversation_pending_response_epochs[session_key] = now or time.time()
-
-    async def _sylanne_memory_recall_summary_for_request(
-        self,
-        request: Any = None,
-        *,
-        session_key: str = "",
-        current_user_text: str = "",
-        observed_at: Any = None,
-        **kwargs: Any,
-    ) -> str:
-        return ""
-
-    async def _sylanne_memory_recall_query_for_request(
-        self, session_key: str, text: str = "", **kwargs: Any
-    ) -> str:
-        return text[:100] if text else ""
 
     async def _save_sylanne_memory_state(
         self, session_key: str, state: Any = None
@@ -1800,16 +1603,6 @@ class EmotionalStatePlugin(Star):
     def _consume_conversation_pending_response_epoch(self, session_key: str) -> float:
         epochs = self._conversation_pending_response_epochs
         return epochs.pop(session_key, 0.0)
-
-    async def _observe_sylanne_memory_event_if_enabled(
-        self, session_key: str, text: str = "", **kwargs: Any
-    ) -> None:
-        pass
-
-    async def _commit_sylanne_memory_observations_batch(
-        self, session_key: str, observations: Any = None, **kwargs: Any
-    ) -> None:
-        pass
 
     def _schedule_background_task(self, coro: Any, *, label: str = "") -> Any:
         return self._realtime_dispatch.schedule_background_task(coro, label=label)
@@ -1910,12 +1703,6 @@ class EmotionalStatePlugin(Star):
         return self._proactive_scheduler.dispatch_blocked_reason(
             decision, dispatch, **kwargs
         )
-
-    def _astrbot_active_runner_followup_texts(self, session_key: str = "") -> list[str]:
-        return []
-
-    def _last_request_text_for_session(self, session_key: str = "") -> str:
-        return str(self._last_request_text.get(session_key, ""))
 
     def _background_post_adaptive_worker_decision(
         self, session_key: str = "", *, commit_scale: bool = False
@@ -2201,13 +1988,6 @@ class EmotionalStatePlugin(Star):
         return await self._realtime_dispatch.send_realtime_chat_plan(
             event, plan, source=source, record_history_shadow=record_history_shadow
         )
-
-    async def _flush_sylanne_memory_pending_observations(
-        self, session_key: str, *, generation: int = 0, force: bool = False
-    ) -> None:
-        flush_fn = getattr(self, "_flush_memory_observations", None)
-        if flush_fn and callable(flush_fn):
-            await flush_fn(session_key, force=force)
 
     def _record_realtime_assistant_history_shadow(
         self, session_key: str, **kwargs: Any

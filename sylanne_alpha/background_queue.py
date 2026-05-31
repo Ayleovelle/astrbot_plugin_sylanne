@@ -473,8 +473,8 @@ class BackgroundPostQueue:
         while queue:
             job = queue.popleft()
             try:
-                assess_fn = getattr(self._p, "_assess_emotion", None)
-                if assess_fn and callable(assess_fn):
+                assess_fn = self._services.assess_emotion_fn
+                if assess_fn is not None:
                     observation = await assess_fn(
                         session_key=session_key,
                         event=job.event,
@@ -484,8 +484,8 @@ class BackgroundPostQueue:
                     )
                 else:
                     observation = None
-                save_fn = getattr(self._p, "_save_state", None)
-                if save_fn and callable(save_fn) and observation:
+                save_fn = self._services.save_state_fn
+                if save_fn is not None and observation:
                     await save_fn(session_key, observation)
                 # 更新已提交序号水位线
                 committed = self._state.last_committed
@@ -519,9 +519,9 @@ class BackgroundPostQueue:
         Args:
             session_key: 会话标识。
         """
-        put_fn = getattr(self._p, "put_kv_data", None)
-        delete_fn = getattr(self._p, "delete_kv_data", None)
-        if not put_fn or not callable(put_fn):
+        put_fn = self._services.put_kv_data
+        delete_fn = self._services.delete_kv_data
+        if put_fn is None:
             return
         queue = self._state.queues.get(session_key, collections.deque())
         dead_letters = self._state.dead_letters.get(
@@ -532,7 +532,7 @@ class BackgroundPostQueue:
         kv_key = self.checkpoint_kv_key(session_key)
         # 队列和死信都为空时，删除 KV 条目
         if not queue and not dead_letters:
-            if delete_fn and callable(delete_fn):
+            if delete_fn is not None:
                 await delete_fn(kv_key)
             return
         jobs = [self.job_to_dict(j) for j in queue]
@@ -572,8 +572,8 @@ class BackgroundPostQueue:
         Returns:
             True 表示成功恢复，False 表示无数据或恢复失败。
         """
-        get_fn = getattr(self._p, "get_kv_data", None)
-        if not get_fn or not callable(get_fn):
+        get_fn = self._services.get_kv_data
+        if get_fn is None:
             return False
         kv_key = self.checkpoint_kv_key(session_key)
         try:

@@ -21,7 +21,7 @@ import asyncio
 import json
 import re
 import time
-from datetime import datetime, timedelta, timezone
+from datetime import datetime
 from types import SimpleNamespace
 from typing import Any
 
@@ -990,127 +990,6 @@ class LLMResponsePipeline:
 
         return " ".join(parts) if parts else ""
 
-    # ------------------------------------------------------------------
-    # Sensitive topic tagging (Item 74)
-    # ------------------------------------------------------------------
-
-    # 敏感话题关键词分类
-    _SENSITIVE_KEYWORDS: dict[str, list[str]] = {
-        "health": ["病", "药", "医院", "诊断", "手术", "癌", "抑郁", "焦虑"],
-        "finance": ["贷款", "欠款", "破产", "债务", "催收", "逾期", "高利贷"],
-        "legal": ["律师", "起诉", "判决", "法院", "拘留", "逮捕", "刑事"],
-    }
-
-    def _tag_sensitive(self, text: str) -> tuple[str, bool]:
-        """检查文本是否包含敏感话题关键词。
-
-        敏感类别：健康（病/药/医院/诊断）、财务（贷款/欠款/破产）、法律（律师/起诉/判决）。
-        如果包含任一关键词，返回 (text, True)，标记该记忆条目为 sensitive，
-        不参与跨会话召回。
-
-        Args:
-            text: 待检查的文本内容。
-
-        Returns:
-            (text, is_sensitive) 元组。text 原样返回，is_sensitive 表示是否命中敏感词。
-        """
-        if not text:
-            return (text, False)
-        for _category, keywords in self._SENSITIVE_KEYWORDS.items():
-            for keyword in keywords:
-                if keyword in text:
-                    return (text, True)
-        return (text, False)
-
-    # ------------------------------------------------------------------
-    # Item 1: 对话情绪回顾摘要
-    # ------------------------------------------------------------------
-
-    def _generate_session_summary(self, session_key: str) -> str | None:
-        """生成对话情绪回顾摘要。
-
-        检查该 session 最后一条消息时间，如果距今 > 30min，生成情绪弧线摘要。
-        摘要格式："本次对话从[情绪A]开始，经历了[事件]，以[情绪B]结束"
-
-        通过 body_state 的 valence 变化来推断情绪弧线。调用方负责存入记忆。
-
-        Args:
-            session_key: 会话标识。
-
-        Returns:
-            摘要字符串，不满足条件时返回 None。
-        """
-        p = self._p
-        import time as _time
-
-        # 获取对话缓冲区
-        buf = self._conversation_buffers.get(session_key)
-        if not buf or not buf.messages:
-            return None
-
-        # 检查最后一条消息时间
-        last_msg = buf.messages[-1] if buf.messages else None
-        if not last_msg:
-            return None
-        last_ts = float(last_msg.get("ts", 0) or last_msg.get("timestamp", 0) or 0)
-        if last_ts <= 0:
-            return None
-        if _time.time() - last_ts <= 1800:  # 30 min
-            return None
-
-        # 从 host 获取 body_state 的 valence 历史
-        try:
-            host = p._host(session_key)
-            body = host.kernel.body
-        except Exception:
-            return None
-
-        # 推断情绪弧线：从 traces 中提取 valence 变化
-        traces = body.memory.get("traces", [])
-        if len(traces) < 2:
-            return None
-
-        def _valence_label(v: float) -> str:
-            if v > 0.5:
-                return "愉悦"
-            elif v > 0.2:
-                return "轻松"
-            elif v > -0.2:
-                return "平静"
-            elif v > -0.5:
-                return "低落"
-            else:
-                return "沉重"
-
-        # 取首尾 trace 的 valence
-        first_trace = traces[0] if traces else {}
-        last_trace = traces[-1] if traces else {}
-        first_valence = float(first_trace.get("valence", 0) or 0)
-        last_valence = float(last_trace.get("valence", 0) or 0)
-
-        start_emotion = _valence_label(first_valence)
-        end_emotion = _valence_label(last_valence)
-
-        # 检测中间是否有显著变化（找极值点）
-        mid_event = ""
-        if len(traces) >= 3:
-            valences = [float(t.get("valence", 0) or 0) for t in traces]
-            max_v = max(valences)
-            min_v = min(valences)
-            if max_v - min_v > 0.4:
-                peak_idx = valences.index(max_v)
-                trough_idx = valences.index(min_v)
-                if peak_idx < trough_idx:
-                    mid_event = "情绪高点后回落"
-                else:
-                    mid_event = "经历低谷后回升"
-
-        if mid_event:
-            summary = f"本次对话从{start_emotion}开始，{mid_event}，以{end_emotion}结束"
-        else:
-            summary = f"本次对话从{start_emotion}开始，以{end_emotion}结束"
-
-        return summary
 
     # ------------------------------------------------------------------
     # AstrBot message building

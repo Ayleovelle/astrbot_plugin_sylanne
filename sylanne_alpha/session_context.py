@@ -21,14 +21,10 @@ from typing import Any
 
 try:
     from astrbot.api import logger  # type: ignore
-    from astrbot.core.utils.astrbot_path import get_astrbot_data_path  # type: ignore
 except ImportError:
     import logging as _logging
 
     logger = _logging.getLogger("astrbot_plugin_sylanne")  # type: ignore
-
-    def get_astrbot_data_path() -> Path:  # type: ignore
-        return Path.home()
 
 from sylanne_alpha.infra import resolve_data_root
 from sylanne_alpha.plugin_services import PluginServices
@@ -71,6 +67,11 @@ class SessionStateStore:
         "cached_system_prompts",
         "engine_cache",
         "sylanne_memory_cache",
+        "interrupted_reply_breakpoints",
+        "realtime_chat_active_dispatches",
+        "realtime_ordinary_history_backfills",
+        "proactive_dispatch_audit",
+        "proactive_dispatch_last_sent",
     )
 
     def __init__(
@@ -95,6 +96,11 @@ class SessionStateStore:
         cached_system_prompts=None,
         engine_cache=None,
         sylanne_memory_cache=None,
+        interrupted_reply_breakpoints=None,
+        realtime_chat_active_dispatches=None,
+        realtime_ordinary_history_backfills=None,
+        proactive_dispatch_audit=None,
+        proactive_dispatch_last_sent=None,
     ):
         self.hosts = hosts if hosts is not None else {}
         self.memory_systems = memory_systems if memory_systems is not None else {}
@@ -115,6 +121,11 @@ class SessionStateStore:
         self.cached_system_prompts = cached_system_prompts if cached_system_prompts is not None else {}
         self.engine_cache = engine_cache if engine_cache is not None else {}
         self.sylanne_memory_cache = sylanne_memory_cache if sylanne_memory_cache is not None else {}
+        self.interrupted_reply_breakpoints = interrupted_reply_breakpoints if interrupted_reply_breakpoints is not None else {}
+        self.realtime_chat_active_dispatches = realtime_chat_active_dispatches if realtime_chat_active_dispatches is not None else {}
+        self.realtime_ordinary_history_backfills = realtime_ordinary_history_backfills if realtime_ordinary_history_backfills is not None else {}
+        self.proactive_dispatch_audit = proactive_dispatch_audit if proactive_dispatch_audit is not None else {}
+        self.proactive_dispatch_last_sent = proactive_dispatch_last_sent if proactive_dispatch_last_sent is not None else {}
 
 
 # ---------------------------------------------------------------------------
@@ -338,65 +349,6 @@ class OfflineBuffer:
         ob.buffer = list(data.get("buffer", []))
         ob.last_push_ts = float(data.get("last_push_ts", 0.0))
         return ob
-
-
-def validate_session_isolation(hosts: dict) -> list[str]:
-    """诊断会话隔离：检查不同 session_key 的 host 是否共享了同一个 memory_system 或 kernel 实例。
-
-    通过 id() 比较对象身份，发现违规共享时返回描述列表。
-    空列表表示所有会话完全隔离，通过审计。
-
-    可被 /api/diagnostic_report 调用。
-
-    Args:
-        hosts: session_key → host 实例的字典。
-
-    Returns:
-        违规描述列表（空列表 = 通过）。
-    """
-    violations: list[str] = []
-    if not hosts or not isinstance(hosts, dict):
-        return violations
-
-    # 收集所有 host 的 kernel 和 memory_system 的 id
-    kernel_ids: dict[int, list[str]] = {}  # id(kernel) → [session_keys]
-    memory_ids: dict[int, list[str]] = {}  # id(memory_system) → [session_keys]
-
-    for session_key, host in hosts.items():
-        # 检查 kernel 共享
-        kernel = getattr(host, "kernel", None)
-        if kernel is not None:
-            kid = id(kernel)
-            kernel_ids.setdefault(kid, []).append(session_key)
-
-        # 检查 memory_system 共享（多种获取路径）
-        mem_sys = None
-        # 路径1: host.kernel.body.memory.get("_memory_system") 是序列化数据，不算共享
-        # 路径2: 通过 plugin._memory_systems 字典（但这里只检查 host 级别）
-        # 路径3: host 上直接挂载的 memory_system
-        mem_sys = getattr(host, "memory_system", None)
-        if mem_sys is None and kernel is not None:
-            # 尝试从 kernel 的 body 获取
-            body = getattr(kernel, "body", None)
-            mem_sys = getattr(body, "_memory_system", None)
-        if mem_sys is not None:
-            mid = id(mem_sys)
-            memory_ids.setdefault(mid, []).append(session_key)
-
-    # 检测共享违规
-    for kid, sessions in kernel_ids.items():
-        if len(sessions) > 1:
-            violations.append(
-                f"kernel 实例共享违规: id={kid:#x}, 涉及会话: {sessions}"
-            )
-
-    for mid, sessions in memory_ids.items():
-        if len(sessions) > 1:
-            violations.append(
-                f"memory_system 实例共享违规: id={mid:#x}, 涉及会话: {sessions}"
-            )
-
-    return violations
 
 
 class SessionContext:
@@ -833,8 +785,8 @@ class SessionContext:
             hosts_dict = self._session_state.hosts
             memory_dict = self._session_state.memory_systems
         else:
-            hosts_dict = getattr(self._p, "_hosts", {})
-            memory_dict = getattr(self._p, "_memory_systems", {})
+            hosts_dict = {}
+            memory_dict = {}
         for key in hosts_dict.keys():
             add(key)
         for key in memory_dict.keys():
@@ -861,7 +813,7 @@ class SessionContext:
                     add(key)
         # 从磁盘文件名中提取 session key
         try:
-            cfg = getattr(self._p, "config", {}) or {}
+            cfg = self._services.config or {}
             root = Path(resolve_data_root(cfg))
             if root.exists():
                 for path in root.glob("*.alpha.json"):
@@ -1010,236 +962,3 @@ class SessionContext:
         return buf.drain_summary()
 
 
-# ---------------------------------------------------------------------------
-# Item 105: 用户画像长期演化追踪
-# ---------------------------------------------------------------------------
-
-
-class ProfileEvolution:
-    """用户画像长期演化追踪：每周快照兴趣/情感基线/互动模式。"""
-
-    def __init__(self, max_snapshots: int = 52) -> None:  # 最多保留一年
-        self._snapshots: list[dict] = []
-        self._max = max_snapshots
-
-    def take_snapshot(
-        self,
-        session_key: str,
-        interests: list[str],
-        emotional_baseline: float,
-        interaction_frequency: float,
-    ) -> None:
-        self._snapshots.append(
-            {
-                "timestamp": time.time(),
-                "session_key": session_key,
-                "interests": interests[:10],
-                "emotional_baseline": emotional_baseline,
-                "interaction_frequency": interaction_frequency,
-            }
-        )
-        if len(self._snapshots) > self._max:
-            self._snapshots.pop(0)
-
-    def diff_profile(self, weeks_ago_a: int, weeks_ago_b: int) -> dict | None:
-        """比较两个时间点的画像差异。"""
-        now = time.time()
-        snap_a = self._find_nearest(now - weeks_ago_a * 7 * 86400)
-        snap_b = self._find_nearest(now - weeks_ago_b * 7 * 86400)
-        if not snap_a or not snap_b:
-            return None
-        return {
-            "emotional_shift": snap_b["emotional_baseline"] - snap_a["emotional_baseline"],
-            "frequency_shift": snap_b["interaction_frequency"] - snap_a["interaction_frequency"],
-            "new_interests": [i for i in snap_b["interests"] if i not in snap_a["interests"]],
-            "lost_interests": [i for i in snap_a["interests"] if i not in snap_b["interests"]],
-        }
-
-    def _find_nearest(self, target_time: float) -> dict | None:
-        if not self._snapshots:
-            return None
-        return min(self._snapshots, key=lambda s: abs(s["timestamp"] - target_time))
-
-    def to_dict(self) -> list[dict]:
-        return list(self._snapshots)
-
-    @classmethod
-    def from_dict(cls, data: list[dict]) -> "ProfileEvolution":
-        pe = cls()
-        pe._snapshots = data
-        return pe
-
-
-# ---------------------------------------------------------------------------
-# 时区感知与作息推断
-# ---------------------------------------------------------------------------
-
-
-def infer_active_hours(timestamps: list[float]) -> tuple[int, int]:
-    """根据历史消息时间戳拟合用户活跃窗口。
-
-    算法：
-    1. 将所有时间戳按小时分桶（0-23），统计每小时的消息数
-    2. 找到消息数最多的连续活跃时段（允许跨午夜）
-    3. 活跃时段定义为：包含总消息量 ≥ 70% 的最短连续小时区间
-
-    参数:
-        timestamps: Unix 时间戳列表（秒级）
-
-    返回:
-        (start_hour, end_hour) 元组，表示用户活跃窗口。
-        start_hour 和 end_hour 均为 0-23 的整数。
-        如果 start_hour > end_hour，表示跨午夜（如 22:00 - 06:00）。
-        时间戳不足时返回默认值 (8, 23)。
-    """
-    if not timestamps or len(timestamps) < 3:
-        return (8, 23)
-
-    # 按小时分桶
-    buckets = [0] * 24
-    for ts in timestamps:
-        try:
-            hour = time.localtime(ts).tm_hour
-            buckets[hour] += 1
-        except (OSError, ValueError, OverflowError):
-            continue
-
-    total = sum(buckets)
-    if total == 0:
-        return (8, 23)
-
-    # 找到包含 ≥ 70% 消息量的最短连续窗口
-    threshold = total * 0.7
-    best_start = 0
-    best_length = 24  # 最差情况：全天
-
-    for window_len in range(1, 25):
-        for start in range(24):
-            count = 0
-            for offset in range(window_len):
-                count += buckets[(start + offset) % 24]
-            if count >= threshold and window_len < best_length:
-                best_start = start
-                best_length = window_len
-        # 一旦找到满足阈值的最短窗口就停止
-        if best_length <= window_len:
-            break
-
-    start_hour = best_start
-    end_hour = (best_start + best_length - 1) % 24
-    return (start_hour, end_hour)
-
-
-# ---------------------------------------------------------------------------
-# Item 63: 新手 30 天成长日志
-# ---------------------------------------------------------------------------
-
-
-class GrowthJournal:
-    """新手 30 天成长日志：每日生成 Sylanne 变化摘要。
-
-    在关系早期（infant/young 阶段），每天记录一条 Sylanne 的变化摘要，
-    帮助用户感知 AI 伙伴的"成长"过程。支持序列化/反序列化以持久化。
-    """
-
-    def __init__(self) -> None:
-        self._entries: dict[str, str] = {}  # "2026-05-28" -> "今天人格漂移了..."
-
-    def record_daily(self, date_str: str, summary: str) -> None:
-        """记录某天的成长摘要。
-
-        Args:
-            date_str: ISO 格式日期字符串，如 "2026-05-28"。
-            summary: 当天的变化摘要文本。
-        """
-        self._entries[date_str] = summary
-
-    def get_recent(self, days: int = 7) -> list[dict]:
-        """获取最近 N 天的成长记录。
-
-        Args:
-            days: 回溯天数，默认 7。
-
-        Returns:
-            按日期倒序排列的记录列表，每条包含 date 和 summary。
-        """
-        import datetime
-
-        today = datetime.date.today()
-        results = []
-        for i in range(days):
-            d = (today - datetime.timedelta(days=i)).isoformat()
-            if d in self._entries:
-                results.append({"date": d, "summary": self._entries[d]})
-        return results
-
-    def to_dict(self) -> dict:
-        """序列化为字典。"""
-        return dict(self._entries)
-
-    @classmethod
-    def from_dict(cls, data: dict) -> "GrowthJournal":
-        """从字典恢复。"""
-        gj = cls()
-        gj._entries = dict(data) if isinstance(data, dict) else {}
-        return gj
-
-
-# ---------------------------------------------------------------------------
-# Item 108: 跨设备偏好继承与覆盖
-# ---------------------------------------------------------------------------
-
-
-class DeviceOverrides:
-    """跨设备偏好覆盖层。
-
-    允许为不同设备类型（mobile/desktop/tablet 等）设置独立的偏好覆盖值。
-    查询时优先返回设备特定值，无覆盖时回退到基础值。
-
-    典型用途：
-    - 手机端使用更短的回复长度
-    - 桌面端启用更详细的诊断信息
-    - 平板端调整字体大小偏好
-    """
-
-    def __init__(self) -> None:
-        self._overrides: dict[str, dict[str, Any]] = {}  # device_type -> {key: value}
-
-    def set_override(self, device_type: str, key: str, value: Any) -> None:
-        """为指定设备类型设置偏好覆盖。
-
-        Args:
-            device_type: 设备类型标识（如 "mobile"、"desktop"）。
-            key: 偏好键名。
-            value: 覆盖值。
-        """
-        if device_type not in self._overrides:
-            self._overrides[device_type] = {}
-        self._overrides[device_type][key] = value
-
-    def get(self, device_type: str, key: str, default: Any = None) -> Any:
-        """获取指定设备类型的偏好值。
-
-        Args:
-            device_type: 设备类型标识。
-            key: 偏好键名。
-            default: 无覆盖时的默认值。
-
-        Returns:
-            覆盖值，或 default。
-        """
-        return self._overrides.get(device_type, {}).get(key, default)
-
-    def effective_value(self, device_type: str, key: str, base_value: Any) -> Any:
-        """获取有效值：设备覆盖 > 基础值。
-
-        Args:
-            device_type: 设备类型标识。
-            key: 偏好键名。
-            base_value: 无覆盖时使用的基础值。
-
-        Returns:
-            设备覆盖值（如果存在且非 None），否则 base_value。
-        """
-        override = self.get(device_type, key)
-        return override if override is not None else base_value

@@ -22,7 +22,6 @@
 
 from __future__ import annotations
 
-import asyncio
 import collections
 import time
 from typing import Any
@@ -88,7 +87,10 @@ class ProactiveScheduler:
         cooldown = float(cfg.get("proactive_speech_dispatch_cooldown_seconds", 1800.0))
         # 根据历史反馈计算压力：冷淡/未回复越多，冷却时间越长
         feedback_pressure = 0.0
-        audit = getattr(self._p, "_proactive_dispatch_audit", None) or {}
+        if self._session_state is not None:
+            audit = self._session_state.proactive_dispatch_audit
+        else:
+            audit = getattr(self._p, "_proactive_dispatch_audit", None) or {}
         history = audit.get(session_key)
         if history:
             cold_count = sum(
@@ -105,9 +107,6 @@ class ProactiveScheduler:
             "feedback_pressure": feedback_pressure,
         }
 
-    def observe_dispatch_feedback(self, session_key: str = "", **kwargs: Any) -> None:
-        pass
-
     def record_feedback(self, session_key: str, timestamp: float, rating: str) -> None:
         """记录用户对主动发言的反馈。
 
@@ -122,9 +121,6 @@ class ProactiveScheduler:
             "rating": rating,
             "recorded_at": time.time(),
         })
-
-    def should_exit_after_idle(self, session_key: str = "", **kwargs: Any) -> bool:
-        return True
 
     # ------------------------------------------------------------------
     # Dispatch building & blocking
@@ -206,9 +202,12 @@ class ProactiveScheduler:
         )
         if last_seen and (now - last_seen) < min_idle:
             return "recent_user_activity_quiet_period"
-        last_sent = (getattr(self._p, "_proactive_dispatch_last_sent", None) or {}).get(
-            sk, 0.0
-        )
+        if self._session_state is not None:
+            last_sent = self._session_state.proactive_dispatch_last_sent.get(sk, 0.0)
+        else:
+            last_sent = (getattr(self._p, "_proactive_dispatch_last_sent", None) or {}).get(
+                sk, 0.0
+            )
         cooldown = float(cfg.get("proactive_speech_dispatch_cooldown_seconds", 1800.0))
         # 人格驱动硬下限：expression_drive 高→下限低（最低60s），低→下限高（最高300s）
         if self._session_state is not None:

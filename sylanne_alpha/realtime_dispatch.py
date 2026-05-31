@@ -21,7 +21,7 @@
 from __future__ import annotations
 
 import asyncio
-from datetime import datetime, timedelta, timezone
+from datetime import datetime
 from typing import Any, TYPE_CHECKING
 
 if TYPE_CHECKING:
@@ -243,10 +243,7 @@ class RealtimeDispatch:
                 input_epoch=plan_epoch,
                 reason=interrupted_reason,
             )
-            dispatches = getattr(p, "_realtime_chat_active_dispatches", None)
-            if dispatches is None:
-                dispatches = {}
-                p._realtime_chat_active_dispatches = dispatches
+            dispatches = self._session_state.realtime_chat_active_dispatches
             dispatches[session_key] = [
                 {
                     "sent_parts": sent_parts,
@@ -321,10 +318,7 @@ class RealtimeDispatch:
         source: str = "",
     ) -> None:
         """记录被中断的回复断点，包含已发送和未发送部分。"""
-        p = self._p
-        if not hasattr(p, "_interrupted_reply_breakpoints"):
-            p._interrupted_reply_breakpoints: dict[str, list[dict[str, Any]]] = {}
-        bps = p._interrupted_reply_breakpoints.setdefault(session_key, [])
+        bps = self._session_state.interrupted_reply_breakpoints.setdefault(session_key, [])
         entry: dict[str, Any] = {
             "full_text": full_text,
             "sent_parts": sent_parts or [],
@@ -349,10 +343,7 @@ class RealtimeDispatch:
         source: str = "",
         delivery_status: str = "",
     ) -> None:
-        p = self._p
-        if not hasattr(p, "_realtime_ordinary_history_backfills"):
-            p._realtime_ordinary_history_backfills: dict[str, list[dict[str, Any]]] = {}
-        entries = p._realtime_ordinary_history_backfills.setdefault(session_key, [])
+        entries = self._session_state.realtime_ordinary_history_backfills.setdefault(session_key, [])
         entries.append(
             {
                 "role": role,
@@ -417,10 +408,7 @@ class RealtimeDispatch:
     def realtime_ordinary_history_backfill_cache(
         self,
     ) -> dict[str, list[dict[str, Any]]]:
-        p = self._p
-        if not hasattr(p, "_realtime_ordinary_history_backfills"):
-            p._realtime_ordinary_history_backfills: dict[str, list[dict[str, Any]]] = {}
-        return p._realtime_ordinary_history_backfills
+        return self._session_state.realtime_ordinary_history_backfills
 
     # ------------------------------------------------------------------
     # Context injection (append_*_if_any)
@@ -485,7 +473,7 @@ class RealtimeDispatch:
         budget: Any = None,
     ) -> bool:
         """若有未消费的中断断点，注入到请求 prompt 中。"""
-        bps = getattr(self._p, "_interrupted_reply_breakpoints", {})
+        bps = self._session_state.interrupted_reply_breakpoints
         entries = bps.get(session_key, [])
         if not entries:
             return False
@@ -544,10 +532,7 @@ class RealtimeDispatch:
         source: str = "",
         event_time: dict[str, Any] | None = None,
     ) -> None:
-        p = self._p
-        if not hasattr(p, "_realtime_chat_active_dispatches"):
-            p._realtime_chat_active_dispatches: dict[str, list[dict[str, Any]]] = {}
-        dispatches = p._realtime_chat_active_dispatches.setdefault(session_key, [])
+        dispatches = self._session_state.realtime_chat_active_dispatches.setdefault(session_key, [])
         entry: dict[str, Any] = {
             "input_epoch": input_epoch,
             "full_text": full_text,
@@ -564,7 +549,7 @@ class RealtimeDispatch:
         *,
         budget: Any = None,
     ) -> bool:
-        dispatches = getattr(self._p, "_realtime_chat_active_dispatches", {})
+        dispatches = self._session_state.realtime_chat_active_dispatches
         entries = dispatches.get(session_key, [])
         if not entries:
             return False
@@ -625,7 +610,7 @@ class RealtimeDispatch:
     def append_realtime_ordinary_history_backfills_if_any(
         self, request: Any, session_key: str = "", **kwargs: Any
     ) -> bool:
-        backfills = getattr(self._p, "_realtime_ordinary_history_backfills", {})
+        backfills = self._session_state.realtime_ordinary_history_backfills
         entries = backfills.get(session_key, [])
         if not entries:
             return False
@@ -700,14 +685,6 @@ class RealtimeDispatch:
     # Realtime input/response helpers
     # ------------------------------------------------------------------
 
-    def build_realtime_input_completion_prompt(
-        self, session_key: str = "", text: str = "", **kwargs: Any
-    ) -> str:
-        return text
-
-    def extract_realtime_response_media_parts(self, response: Any = None) -> list[Any]:
-        return []
-
     def build_group_atmosphere_injection_for_session(
         self, session_key: str = "", state: Any = None, **kwargs: Any
     ) -> str:
@@ -746,15 +723,6 @@ class RealtimeDispatch:
         lines.append("</bot_group_atmosphere>")
         return "\n".join(lines)
 
-    def context_item_to_text(self, item: Any) -> str:
-        if isinstance(item, dict):
-            return str(item.get("content", "") or item.get("text", ""))
-        if hasattr(item, "text"):
-            return str(item.text)
-        if hasattr(item, "content"):
-            return str(item.content)
-        return str(item)
-
     def conversation_time_payload(
         self, session_key_or_timestamp: Any = "", *, event: Any = None, **kwargs: Any
     ) -> dict[str, Any]:
@@ -780,54 +748,6 @@ class RealtimeDispatch:
             "timezone": "Asia/Shanghai",
             "event_local_time": f"{ts.strftime('%Y-%m-%d %H:%M:%S')} {offset_formatted}",
         }
-
-    def napcat_recall_payload(self, event: Any = None) -> dict[str, Any]:
-        """从 NapCat 消息撤回事件中提取载荷信息。"""
-        raw = None
-        if event:
-            msg_obj = getattr(event, "message_obj", None)
-            if msg_obj:
-                raw = getattr(msg_obj, "raw_message", None)
-            if not raw:
-                raw = getattr(event, "raw_message", None)
-        if not raw or not isinstance(raw, dict):
-            return {}
-        return {
-            "notice_type": str(raw.get("notice_type", "")),
-            "message_id": str(raw.get("message_id", "")),
-            "group_id": str(raw.get("group_id", "")),
-            "user_id": str(raw.get("user_id", "")),
-            "operator_id": str(raw.get("operator_id", "")),
-        }
-
-    async def observe_stickers_background(
-        self, event: Any = None, stickers: Any = None, **kwargs: Any
-    ) -> None:
-        pass
-
-    def extract_sticker_observations_from_event(
-        self, event: Any = None
-    ) -> list[dict[str, Any]]:
-        return []
-
-    def fast_assessor_max_context_chars(self) -> int:
-        p = self._p
-        return p._cfg_int("fast_assessor_max_context_chars", 240)
-
-    def discard_conversation_pending_response_epoch(
-        self, session_key: str, epoch: int = 0
-    ) -> None:
-        p = self._p
-        epochs = p._conversation_pending_response_epochs
-        if epochs and session_key in epochs:
-            del epochs[session_key]
-
-    def conversation_reply_is_stale(self, session_key: str, reply_epoch: int) -> bool:
-        """判断回复是否已过期（用户在回复生成期间发送了新消息）。"""
-        p = self._p
-        epochs = p._conversation_input_epoch
-        current = epochs.get(session_key, 0)
-        return reply_epoch < current
 
     # ------------------------------------------------------------------
     # Item 145: 主动沉默引擎
@@ -875,86 +795,6 @@ class RealtimeDispatch:
         )
         return task
 
-    def ensure_runtime_state_containers(self) -> None:
-        """确保运行时状态容器已初始化。"""
-        p = self._p
-        if not hasattr(p, "_sylanne_memory_pending_observations"):
-            p._sylanne_memory_pending_observations: dict[str, Any] = {}
-        if not hasattr(p, "_sylanne_memory_idle_generation"):
-            p._sylanne_memory_idle_generation: dict[str, int] = {}
-
-    def build_astrbot_message_chain(self, text: str = "", **kwargs: Any) -> Any:
-        """构建 AstrBot MessageChain 消息对象。"""
-        import sys
-
-        p = self._p
-        event_mod = sys.modules.get("astrbot.api.event")
-        if event_mod:
-            _Chain = getattr(event_mod, "MessageChain", None)
-            if _Chain:
-                chain = _Chain()
-                if hasattr(chain, "message") and callable(chain.message):
-                    chain.message(text)
-                    return chain
-        return p._astrbot_message(text)
-
-    async def on_waiting_llm_request(self, event: Any, **kwargs: Any) -> None:
-        pass
-
-    # ------------------------------------------------------------------
-    # Item 7: 对话中断恢复提示
-    # ------------------------------------------------------------------
-
-    def _build_resumption_hint(
-        self, session_key: str, last_time: float, now: float
-    ) -> str | None:
-        """构建对话中断恢复提示。
-
-        当距上次对话超过 2 小时时，生成恢复提示帮助 LLM 自然地重新衔接对话。
-        优先从 session_context 的 offline_buffer 取最近想法作为恢复素材。
-
-        Args:
-            session_key: 会话标识。
-            last_time: 上次对话的 Unix 时间戳。
-            now: 当前 Unix 时间戳。
-
-        Returns:
-            恢复提示字符串，不需要恢复时返回 None。
-        """
-        gap_seconds = now - last_time
-        if gap_seconds <= 7200:
-            return None
-
-        gap_hours = int(gap_seconds / 3600)
-        p = self._p
-
-        # 尝试从 offline_buffer 获取离线期间的想法
-        offline_thought = ""
-        session_ctx = getattr(p, "_session_context", None)
-        if session_ctx is not None and hasattr(session_ctx, "offline_buffer_for_session"):
-            buf = session_ctx.offline_buffer_for_session(session_key)
-            if buf and hasattr(buf, "peek_latest"):
-                latest = buf.peek_latest()
-                if latest:
-                    offline_thought = str(latest)[:100]
-            elif buf and hasattr(buf, "drain_summary"):
-                # peek not available, try summary without draining
-                items = getattr(buf, "_items", None) or getattr(buf, "items", None)
-                if items and isinstance(items, list) and items:
-                    offline_thought = str(items[-1])[:100]
-
-        if offline_thought:
-            return (
-                f"[对话恢复] 距上次对话已过{gap_hours}小时。"
-                f"离线期间的想法：{offline_thought}。"
-                f"可以自然地提及这段时间的感受或想法来衔接对话。"
-            )
-        else:
-            return (
-                f"[对话恢复] 距上次对话已过{gap_hours}小时。"
-                f"可以自然地问候或提及时间间隔来重新衔接对话。"
-            )
-
 
 class DeliberateSilence:
     """主动沉默决策：某些情况下故意不回复或延迟回复。"""
@@ -984,76 +824,3 @@ class DeliberateSilence:
         return responses.get(reason)
 
 
-# ---------------------------------------------------------------------------
-# Item 121: 对话呼吸节奏引擎
-# ---------------------------------------------------------------------------
-
-
-class BreathingRhythmController:
-    """根据情绪张力和话题密度动态调整回复长短交替模式。
-
-    模拟人类对话中的"呼吸感"——紧张时长短交替加快，
-    平静时节奏舒缓，情绪渐强时回复渐长，收尾时渐短。
-
-    四种呼吸模式：
-    - calm: 短-中-短（平静对话）
-    - intense: 长-短-长-短（高张力交替）
-    - building: 渐长（情绪积累）
-    - winding: 渐短（对话收尾）
-
-    使用方式：
-    每次生成回复前调用 next_length_factor() 获取长度倍率，
-    将基础回复长度乘以该倍率得到目标长度。
-    """
-
-    PATTERNS: dict[str, list[float]] = {
-        "calm": [0.8, 1.0, 0.6],           # 短-中-短
-        "intense": [1.2, 0.5, 1.5, 0.4],   # 长-短-长-短
-        "building": [0.6, 0.8, 1.0, 1.2],  # 渐长
-        "winding": [1.2, 1.0, 0.8, 0.6],   # 渐短
-    }
-
-    def __init__(self) -> None:
-        self._current_pattern: str = "calm"
-        self._pattern_index: int = 0
-
-    def select_pattern(self, tension: float, valence: float) -> str:
-        """根据情绪张力和效价选择呼吸模式。
-
-        Args:
-            tension: 情绪张力 [0, 1]，越高越紧张。
-            valence: 情绪效价 [-1, 1]，正值=积极，负值=消极。
-
-        Returns:
-            模式名称：calm / intense / building / winding。
-        """
-        if tension > 0.6:
-            return "intense"
-        elif tension > 0.3 and valence < 0:
-            return "building"
-        elif valence > 0.5:
-            return "winding"
-        return "calm"
-
-    def next_length_factor(self, tension: float, valence: float) -> float:
-        """返回下一条回复的长度倍率。
-
-        根据当前情绪状态选择模式，若模式切换则重置索引。
-        按模式序列循环返回倍率值。
-
-        Args:
-            tension: 情绪张力 [0, 1]。
-            valence: 情绪效价 [-1, 1]。
-
-        Returns:
-            长度倍率，范围约 [0.4, 1.5]。
-            < 1.0 表示应缩短回复，> 1.0 表示应加长回复。
-        """
-        pattern_name = self.select_pattern(tension, valence)
-        if pattern_name != self._current_pattern:
-            self._current_pattern = pattern_name
-            self._pattern_index = 0
-        pattern = self.PATTERNS[self._current_pattern]
-        factor = pattern[self._pattern_index % len(pattern)]
-        self._pattern_index += 1
-        return factor
