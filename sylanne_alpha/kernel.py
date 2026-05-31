@@ -95,6 +95,7 @@ class AlphaKernel:
     fallibility: dict[str, Any] = field(default_factory=dict)
     computation: ComputationSpine = field(default_factory=ComputationSpine)
     _last_computation_result: dict[str, Any] = field(default_factory=dict)
+    _last_injected_state: dict[str, Any] = field(default_factory=dict)
 
     @classmethod
     def boot(
