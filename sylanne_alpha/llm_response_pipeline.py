@@ -26,7 +26,7 @@ from types import SimpleNamespace
 from typing import Any
 
 from sylanne_alpha.compat import realtime_plan, strip_draft_blocks
-from sylanne_alpha.utils import safe_ensure_future
+from sylanne_alpha.utils import ensure_background_tasks_list, safe_ensure_future
 
 try:
     from astrbot.api import logger  # type: ignore
@@ -92,6 +92,13 @@ class LLMResponsePipeline:
             event: AstrBot 事件对象。
             response: LLM 响应对象，包含 completion_text。
         """
+        if not hasattr(self._p, "_stream_first_sent"):
+            self._p._stream_first_sent = {}
+        if not hasattr(self._p, "_unfinished_replies"):
+            self._p._unfinished_replies = {}
+        ensure_background_tasks_list(self._p)
+        if not hasattr(self._p, "_segmented_tasks"):
+            self._p._segmented_tasks = {}
         session_key = self._p._session_key(event)
         cfg = self._p._config or {}
         realtime_enabled = bool(
@@ -214,9 +221,13 @@ class LLMResponsePipeline:
             self._dispatch_segmented_parts(origin, parts, session_key=session_key),
             name="dispatch_segmented_parts",
         )
-        self._p._background_tasks.add(task)
+        ensure_background_tasks_list(self._p).append(task)
         task.add_done_callback(
-            lambda t: self._p._background_tasks.discard(t)
+            lambda t: (
+                self._p._background_tasks.remove(t)
+                if t in self._p._background_tasks
+                else None
+            )
         )
         self._p._segmented_tasks[session_key] = task
 
@@ -225,9 +236,13 @@ class LLMResponsePipeline:
             self._background_observe_response(session_key, cleaned),
             name="background_observe_response",
         )
-        self._p._background_tasks.add(obs_task)
+        ensure_background_tasks_list(self._p).append(obs_task)
         obs_task.add_done_callback(
-            lambda t: self._p._background_tasks.discard(t)
+            lambda t: (
+                self._p._background_tasks.remove(t)
+                if t in self._p._background_tasks
+                else None
+            )
         )
 
     async def _background_observe_response(self, session_key: str, text: str) -> None:
@@ -307,9 +322,13 @@ class LLMResponsePipeline:
                 self._send_first_sentence(origin, first_sentence),
                 name="send_first_sentence",
             )
-            self._p._background_tasks.add(task)
+            ensure_background_tasks_list(self._p).append(task)
             task.add_done_callback(
-                lambda t: self._p._background_tasks.discard(t)
+                lambda t: (
+                    self._p._background_tasks.remove(t)
+                    if t in self._p._background_tasks
+                    else None
+                )
             )
 
     def _extract_first_sentence(self, text: str) -> str:

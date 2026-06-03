@@ -2,6 +2,21 @@
 
 本文件用于 AstrBot 插件市场/管理页展示更新内容。更完整的设计说明、公式推导、测试矩阵和维护手册见 `README.md`。
 
+## [v1.4.6] - 2026-06-03
+
+### 🐛 Bug Fixes
+
+- 修复 `_background_tasks` set/list 类型混淆导致对话崩溃的致命 bug (#15)
+  - 根因：main 分支部分迁移到 set 操作（`.add`/`.discard`）未完成，与残留的 list 操作（`.append`/`.extend`/`.remove`）冲突
+  - 修复：统一回 list 语义，抽取 `ensure_background_tasks_list()` 公共 helper 到 `infra.py`
+  - 覆盖 4 个文件共 10 处消费点，全部加类型守卫 + 类型不匹配时打 `logger.warning`
+
+### 🔧 Refactor
+
+- 新增 `ensure_background_tasks_list(p)` helper — 集中管理 `_background_tasks` 类型守卫，消除 11 处重复代码
+
+---
+
 ## [v1.4.2] - 2026-05-31
 
 ### 🐛 Bug Fixes

@@ -24,6 +24,8 @@ import asyncio
 from datetime import datetime, timedelta, timezone
 from typing import Any, TYPE_CHECKING
 
+from sylanne_alpha.infra import ensure_background_tasks_list
+
 if TYPE_CHECKING:
     pass  # plugin type is dynamic (Star subclass)
 
@@ -857,9 +859,11 @@ class RealtimeDispatch:
                 )
 
         task = asyncio.ensure_future(_wrapper())
-        p._background_tasks.add(task)
+        ensure_background_tasks_list(p).append(task)
         task.add_done_callback(
-            lambda t: p._background_tasks.discard(t)
+            lambda t: (
+                p._background_tasks.remove(t) if t in p._background_tasks else None
+            )
         )
         return task
 

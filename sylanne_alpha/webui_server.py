@@ -57,7 +57,7 @@ except ImportError:
     def get_astrbot_data_path() -> Path:  # type: ignore
         return Path.home()
 
-from sylanne_alpha.infra import resolve_data_root
+from sylanne_alpha.infra import ensure_background_tasks_list, resolve_data_root
 
 
 if TYPE_CHECKING:
@@ -3375,7 +3375,7 @@ class WebUILifecycle:
             self.start_if_enabled()
 
         task = loop.create_task(_takeover())
-        self._p._background_tasks.add(task)
+        ensure_background_tasks_list(self._p).append(task)
 
     def _current_webui_module_ref(self) -> Any:
         """Return the current webui_server module reference from sys.modules."""
