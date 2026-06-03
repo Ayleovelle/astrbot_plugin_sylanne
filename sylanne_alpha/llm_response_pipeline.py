@@ -96,7 +96,12 @@ class LLMResponsePipeline:
             self._p._stream_first_sent = {}
         if not hasattr(self._p, "_unfinished_replies"):
             self._p._unfinished_replies = {}
-        if not hasattr(self._p, "_background_tasks"):
+        if not hasattr(self._p, "_background_tasks") or not isinstance(self._p._background_tasks, list):
+            if hasattr(self._p, "_background_tasks"):
+                logger.warning(
+                    "Sylanne: _background_tasks type mismatch (expected list, got %s), rebuilding",
+                    type(self._p._background_tasks).__name__,
+                )
             self._p._background_tasks = []
         if not hasattr(self._p, "_segmented_tasks"):
             self._p._segmented_tasks = {}
@@ -222,6 +227,8 @@ class LLMResponsePipeline:
             self._dispatch_segmented_parts(origin, parts, session_key=session_key),
             name="dispatch_segmented_parts",
         )
+        if not isinstance(getattr(self._p, "_background_tasks", None), list):
+            self._p._background_tasks = []
         self._p._background_tasks.append(task)
         task.add_done_callback(
             lambda t: (
@@ -237,6 +244,8 @@ class LLMResponsePipeline:
             self._background_observe_response(session_key, cleaned),
             name="background_observe_response",
         )
+        if not isinstance(getattr(self._p, "_background_tasks", None), list):
+            self._p._background_tasks = []
         self._p._background_tasks.append(obs_task)
         obs_task.add_done_callback(
             lambda t: (
@@ -323,6 +332,8 @@ class LLMResponsePipeline:
                 self._send_first_sentence(origin, first_sentence),
                 name="send_first_sentence",
             )
+            if not isinstance(getattr(self._p, "_background_tasks", None), list):
+                self._p._background_tasks = []
             self._p._background_tasks.append(task)
             task.add_done_callback(
                 lambda t: (

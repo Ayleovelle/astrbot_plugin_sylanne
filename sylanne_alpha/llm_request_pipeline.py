@@ -587,7 +587,12 @@ class LLMRequestPipeline:
             p._segmented_tasks = {}
         if not hasattr(p, "_unfinished_replies"):
             p._unfinished_replies = {}
-        if not hasattr(p, "_background_tasks"):
+        if not hasattr(p, "_background_tasks") or not isinstance(p._background_tasks, list):
+            if hasattr(p, "_background_tasks"):
+                logger.warning(
+                    "Sylanne: _background_tasks type mismatch (expected list, got %s), rebuilding",
+                    type(p._background_tasks).__name__,
+                )
             p._background_tasks = []
         if not hasattr(p, "_last_request_budgets"):
             p._last_request_budgets = {}
@@ -743,6 +748,8 @@ class LLMRequestPipeline:
                     _process_after_delay(), name="fragment_debounce"
                 )
                 p._fragment_timers[session_key] = timer
+                if not isinstance(getattr(p, "_background_tasks", None), list):
+                    p._background_tasks = []
                 p._background_tasks.append(timer)
 
                 def _cleanup_task(t, tasks=p._background_tasks):
@@ -837,6 +844,8 @@ class LLMRequestPipeline:
             _observe_task = safe_ensure_future(
                 _locked_observe(), name="locked_observe"
             )
+            if not isinstance(getattr(p, "_background_tasks", None), list):
+                p._background_tasks = []
             p._background_tasks.append(_observe_task)
             _observe_task.add_done_callback(
                 lambda t: (
@@ -887,6 +896,8 @@ class LLMRequestPipeline:
                                     p._send_first_sentence(origin, first_sentence),
                                     name="stream_send_first_sentence",
                                 )
+                                if not isinstance(getattr(p, "_background_tasks", None), list):
+                                    p._background_tasks = []
                                 p._background_tasks.append(t)
                                 t.add_done_callback(
                                     lambda tt: (
@@ -2104,6 +2115,12 @@ class LLMRequestPipeline:
             _fallback_direct_send(best_key, reason, mood),
             name="life_sim_outreach_fallback",
         )
+        if not isinstance(getattr(p, "_background_tasks", None), list):
+            logger.warning(
+                "Sylanne: _background_tasks type mismatch (expected list, got %s), rebuilding",
+                type(getattr(p, "_background_tasks", None)).__name__,
+            )
+            p._background_tasks = []
         p._background_tasks.append(task)
         task.add_done_callback(
             lambda t: (

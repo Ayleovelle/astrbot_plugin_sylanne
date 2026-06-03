@@ -21,6 +21,7 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 from datetime import datetime, timedelta, timezone
 from typing import Any, TYPE_CHECKING
 
@@ -833,6 +834,12 @@ class RealtimeDispatch:
                 )
 
         task = asyncio.ensure_future(_wrapper())
+        if not isinstance(getattr(p, "_background_tasks", None), list):
+            logging.getLogger("astrbot_plugin_sylanne").warning(
+                "Sylanne: _background_tasks type mismatch (expected list, got %s), rebuilding",
+                type(getattr(p, "_background_tasks", None)).__name__,
+            )
+            p._background_tasks = []
         p._background_tasks.append(task)
         task.add_done_callback(
             lambda t: (

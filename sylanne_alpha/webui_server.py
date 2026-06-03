@@ -3300,6 +3300,12 @@ class WebUILifecycle:
             self.start_if_enabled()
 
         task = loop.create_task(_takeover())
+        if not isinstance(getattr(self._p, "_background_tasks", None), list):
+            logger.warning(
+                "Sylanne: _background_tasks type mismatch (expected list, got %s), rebuilding",
+                type(getattr(self._p, "_background_tasks", None)).__name__,
+            )
+            self._p._background_tasks = []
         self._p._background_tasks.append(task)
 
     def _current_webui_module_ref(self) -> Any:
