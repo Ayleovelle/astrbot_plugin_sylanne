@@ -72,6 +72,31 @@ def resolve_data_root(config: dict[str, Any] | None = None) -> str:
 # ---------------------------------------------------------------------------
 
 
+def ensure_background_tasks_list(p: Any) -> list:
+    """Ensure ``p._background_tasks`` is a ``list``, rebuilding when needed.
+
+    If the attribute is missing or is not a :class:`list` (e.g. a ``set``),
+    it is rebuilt as ``[]``.  When a type mismatch is detected, a warning
+    is logged so the root cause can be traced in production.
+
+    Returns the task list for convenience, allowing callers to write::
+
+        ensure_background_tasks_list(p).append(task)
+
+    instead of duplicating the guard.
+    """
+    if hasattr(p, "_background_tasks") and isinstance(p._background_tasks, list):
+        return p._background_tasks
+
+    if hasattr(p, "_background_tasks"):
+        logging.getLogger("astrbot_plugin_sylanne").warning(
+            "Sylanne: _background_tasks type mismatch (expected list, got %s), rebuilding",
+            type(p._background_tasks).__name__,
+        )
+    p._background_tasks = []
+    return p._background_tasks
+
+
 def safe_ensure_future(
     coro: Any, name: str = "task", task_list: list | None = None
 ) -> "asyncio.Task[Any]":

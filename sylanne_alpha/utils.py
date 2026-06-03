@@ -3,4 +3,4 @@
 实现已合并到 infra.py，此文件保留以兼容现有 import 路径。
 """
 
-from sylanne_alpha.infra import safe_ensure_future  # noqa: F401
+from sylanne_alpha.infra import ensure_background_tasks_list, safe_ensure_future  # noqa: F401

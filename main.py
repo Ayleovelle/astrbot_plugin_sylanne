@@ -164,6 +164,7 @@ stop_webui_server = _sylanne_webui_server.stop_webui_server
 # 常量定义
 # ---------------------------------------------------------------------------
 PLUGIN_NAME = "astrbot_plugin_sylanne"
+PLUGIN_VERSION = "1.4.5"
 PUBLIC_API_VERSION = "1.0"
 MAX_LLM_REQUEST_PROMPT_CHARS = 12000
 _MAX_PAYLOAD_SERIALIZED_CHARS = 60000
@@ -356,7 +357,7 @@ class EmotionalStatePlugin(Star):
         self._config = self.config
         # 会话管理：session_key → SylanneAlphaHost 映射
         self._hosts: BoundedDict = BoundedDict(maxsize=200)
-        self._background_tasks: list[asyncio.Task] = []
+        self._background_tasks: set[asyncio.Task] = set()
         # 流式回复相关缓冲区
         self._unfinished_replies: BoundedDict = BoundedDict(maxsize=200)
         self._stream_buffers: BoundedDict = BoundedDict(maxsize=200)
@@ -396,12 +397,14 @@ class EmotionalStatePlugin(Star):
         self._background_post_last_committed: BoundedDict = BoundedDict(maxsize=200)
         self._background_post_recovered_sessions: set[str] = set()
         self._background_post_active: BoundedDict = BoundedDict(maxsize=200)
-        self._background_post_checkpoint_tasks: set[asyncio.Task] = set()
+        self._background_post_checkpoint_tasks: dict[str, asyncio.Task] = {}
         self._background_post_worker_state: BoundedDict = BoundedDict(maxsize=200)
         self._internal_assessor_llm_inflight: int = 0
         self._pending_outreach_context: BoundedDict = BoundedDict(maxsize=50)
         self._amnesia_sessions: set[str] = set()
         self._proactive_candidate_sessions: BoundedDict = BoundedDict(maxsize=100)
+        self._proactive_scheduler_task: asyncio.Task | None = None
+        self._proactive_scheduler_locks: dict[str, asyncio.Lock] = {}
         self._last_user_message_time: BoundedDict = BoundedDict(maxsize=200)
         self._sylanne_memory_cache: BoundedDict = BoundedDict(maxsize=200)
         self._conversation_pending_response_epochs: BoundedDict = BoundedDict(
@@ -2118,7 +2121,7 @@ class EmotionalStatePlugin(Star):
                 task.cancel()
                 tasks_to_cancel.append(task)
         self._background_tasks.clear()
-        for task in list(self._background_post_checkpoint_tasks):
+        for task in list(self._background_post_checkpoint_tasks.values()):
             if not task.done():
                 task.cancel()
                 tasks_to_cancel.append(task)
