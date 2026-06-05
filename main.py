@@ -1189,8 +1189,8 @@ class EmotionalStatePlugin(Star):
                 else:
                     cleaned_chain.append(seg)
             result.chain = cleaned_chain
-        except Exception:
-            pass
+        except Exception as e:
+            logger.debug(f"Sylanne on_decorating_result strip failed: {e}")
 
     async def _on_llm_response_inner(self, event: Any, response: Any) -> None:
         await self._llm_response_pipeline._on_llm_response_inner(event, response)
