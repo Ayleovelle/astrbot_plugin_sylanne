@@ -2,6 +2,17 @@
 
 本文件用于 AstrBot 插件市场/管理页展示更新内容。更完整的设计说明、公式推导、测试矩阵和维护手册见 `README.md`。
 
+## [v1.4.7] - 2026-06-06
+
+### 🐛 Bug Fixes
+
+- 修复 tool loop 中间步骤向用户泄露 `<thinking>` 内部推理内容的问题
+  - 根因：AstrBot `tool_loop_agent_runner` 在工具调用循环的中间 LLM 调用产生的 `<thinking>` 块，会绕过 `on_llm_response` 钩子直接到达 RespondStage 被发送给用户
+  - 修复：新增 `on_decorating_result` 钩子（Stage 8 / ResultDecorateStage）作为发送前最后一道过滤，对消息链中所有 Plain 文本执行 `strip_draft_blocks`，清除 `<thinking>` / `<think>` / `<draft_notes>` 块
+  - 空内容段自动丢弃，非 Plain 段保持原样；过滤异常降级为 `logger.debug`，不中断响应投递
+
+---
+
 ## [v1.4.6] - 2026-06-03
 
 ### 🐛 Bug Fixes
