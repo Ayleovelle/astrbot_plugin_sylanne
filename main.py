@@ -69,6 +69,12 @@ except ImportError:
 
             return decorator
 
+        def on_decorating_result(self, *args, **kwargs):
+            def decorator(func):
+                return func
+
+            return decorator
+
         def llm_tool(self, *args, **kwargs):
             def decorator(func):
                 return func
@@ -1160,6 +1166,31 @@ class EmotionalStatePlugin(Star):
         except Exception as e:
             logger.error(f"Sylanne on_llm_response error: {e}", exc_info=True)
             return
+
+    @filter.on_decorating_result()
+    async def on_decorating_result(self, event: Any) -> None:
+        """Stage 8 兜底：strip thinking/draft 块，防止 tool loop 中间步骤泄露。"""
+        try:
+            from sylanne_alpha.compat import strip_draft_blocks
+
+            result = event.get_result()
+            if result is None:
+                return
+            chain = getattr(result, "chain", None)
+            if not chain:
+                return
+            cleaned_chain = []
+            for seg in chain:
+                if isinstance(seg, Plain):
+                    text = strip_draft_blocks(seg.text)
+                    if text:
+                        seg.text = text
+                        cleaned_chain.append(seg)
+                else:
+                    cleaned_chain.append(seg)
+            result.chain = cleaned_chain
+        except Exception:
+            pass
 
     async def _on_llm_response_inner(self, event: Any, response: Any) -> None:
         await self._llm_response_pipeline._on_llm_response_inner(event, response)
