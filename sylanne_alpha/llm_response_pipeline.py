@@ -734,6 +734,15 @@ class LLMResponsePipeline:
                     system_parts.append(content)
                 elif hajide and role in ("tool", "function"):
                     continue
+                elif hajide and role == "assistant" and (
+                    ctx.get("tool_calls")
+                    if isinstance(ctx, dict)
+                    else getattr(ctx, "tool_calls", None)
+                ):
+                    # 对称处理：hajide 下删除 tool 响应消息时，同时移除带 tool_calls
+                    # 的 assistant，否则会留下孤儿 tool_calls 触发严格 provider 400
+                    # （与下方 messages 清洗 :760-761 对齐，fixes #18）
+                    continue
                 else:
                     remaining.append(ctx)
             if system_parts:

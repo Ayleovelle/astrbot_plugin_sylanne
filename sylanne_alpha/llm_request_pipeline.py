@@ -128,6 +128,66 @@ def _format_inner_context(trimmed: dict[str, str]) -> str:
     return "\n".join(lines)
 
 
+def _ctx_role(m: Any) -> str:
+    return m.get("role", "") if isinstance(m, dict) else str(getattr(m, "role", "") or "")
+
+
+def _ctx_tool_calls(m: Any) -> list | None:
+    tc = m.get("tool_calls") if isinstance(m, dict) else getattr(m, "tool_calls", None)
+    return tc if isinstance(tc, list) else None
+
+
+def _ctx_tool_call_id(m: Any) -> str | None:
+    return m.get("tool_call_id") if isinstance(m, dict) else getattr(m, "tool_call_id", None)
+
+
+def _tool_call_entry_id(tc: Any) -> str | None:
+    return tc.get("id") if isinstance(tc, dict) else getattr(tc, "id", None)
+
+
+def sanitize_tool_call_pairing(contexts: Any) -> Any:
+    """移除 contexts 中破损的 tool_calls/tool 配对，防止严格 provider（DeepSeek 等）
+    返回 400 "assistant message with tool_calls must be followed by tool messages"。
+
+    三遍扫描，顺序无关：
+      1. 收集所有出现过 tool 响应的 tool_call_id
+      2. 标记 ids 全部被响应的 assistant-tool_calls 为合法
+      3. 重建：丢弃孤儿 assistant-tool_calls 与无主 tool；well-formed 历史原样通过
+    """
+    if not isinstance(contexts, list) or not contexts:
+        return contexts
+    responded: set = set()
+    for m in contexts:
+        if _ctx_role(m) == "tool":
+            tid = _ctx_tool_call_id(m)
+            if tid:
+                responded.add(tid)
+    valid_ids: set = set()
+    for m in contexts:
+        if _ctx_role(m) == "assistant":
+            tcs = _ctx_tool_calls(m)
+            if tcs:
+                ids = [i for i in (_tool_call_entry_id(t) for t in tcs) if i]
+                if ids and all(i in responded for i in ids):
+                    valid_ids.update(ids)
+    result = []
+    for m in contexts:
+        role = _ctx_role(m)
+        if role == "assistant" and _ctx_tool_calls(m):
+            ids = [i for i in (_tool_call_entry_id(t) for t in _ctx_tool_calls(m)) if i]
+            if ids and all(i in valid_ids for i in ids):
+                result.append(m)
+            # else: 孤儿 assistant-tool_calls → 丢弃
+        elif role == "tool":
+            tid = _ctx_tool_call_id(m)
+            if tid and tid in valid_ids:
+                result.append(m)
+            # else: 无主 tool → 丢弃
+        else:
+            result.append(m)
+    return result
+
+
 # ---------------------------------------------------------------------------
 # LLM 降级链（Item 81）
 # ---------------------------------------------------------------------------
@@ -923,6 +983,22 @@ class LLMRequestPipeline:
             outreach_fragment=outreach_fragment,
             memory_fragment=memory_fragment,
         )
+
+        # Step 6: 兜底——在所有 contexts 改写（含 hajide flatten、注入）之后，
+        # 移除破损的 tool_calls/tool 配对，防止严格 provider（DeepSeek 等）返回 400。
+        # 对所有模型生效，不受 hajide/compat 门控限制（fixes #18）。
+        try:
+            contexts = getattr(request, "contexts", None)
+            if isinstance(contexts, list) and contexts:
+                cleaned = sanitize_tool_call_pairing(contexts)
+                if len(cleaned) != len(contexts):
+                    logger.warning(
+                        f"[Sylanne] sanitized {len(contexts) - len(cleaned)} "
+                        f"orphan tool_calls/tool message(s) from contexts"
+                    )
+                    request.contexts = cleaned
+        except Exception as e:
+            logger.debug(f"Sylanne sanitize_tool_call_pairing failed: {e}")
 
     # ------------------------------------------------------------------
     # _clean_incoming_message

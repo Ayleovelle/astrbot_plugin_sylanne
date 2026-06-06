@@ -6,10 +6,17 @@
 
 ### 🐛 Bug Fixes
 
+- 修复 1.4.6 热更新后插件加载崩溃 `ImportError: cannot import name 'ensure_background_tasks_list'` (#17)
+  - 根因：`main.py` 强制 `importlib.reload(webui_server)` 会重新执行其 `from sylanne_alpha.infra import ...`，但热更新（1.4.5→1.4.6 新增 infra 函数）时 `sys.modules` 里的 `infra` 仍是旧缓存模块，import 不到新符号而崩溃
+  - 修复：reload `webui_server` 前先 reload 其依赖 `infra` 让新符号到位；整段加 try/except 兜底，reload 失败时沿用已成功导入的模块，不再崩溃插件加载
 - 修复 tool loop 中间步骤向用户泄露 `<thinking>` 内部推理内容的问题
   - 根因：AstrBot `tool_loop_agent_runner` 在工具调用循环的中间 LLM 调用产生的 `<thinking>` 块，会绕过 `on_llm_response` 钩子直接到达 RespondStage 被发送给用户
   - 修复：新增 `on_decorating_result` 钩子（Stage 8 / ResultDecorateStage）作为发送前最后一道过滤，对消息链中所有 Plain 文本执行 `strip_draft_blocks`，清除 `<thinking>` / `<think>` / `<draft_notes>` 块
   - 空内容段自动丢弃，非 Plain 段保持原样；过滤异常降级为 `logger.debug`，不中断响应投递
+- 修复 DeepSeek 等严格 provider 调用工具时报 400 `assistant message with 'tool_calls' must be followed by tool messages`（孤儿 tool_calls）(#18)
+  - 根因一（竞态）：`sync_message_to_conv_mgr` 为同步 AstrBot 对话系统，每轮"读全量历史快照→append→整体写回"，与 AstrBot 自身 `_save_to_history` 无锁并发，可能读到 tool 循环中途快照后覆盖写回，把 `[assistant tool_calls][tool]` 拆成孤儿。这条几乎无条件触发，解释了"关插件/清上下文即恢复"
+  - 根因二（hajide flatten 不对称）：`_normalize_claude_request_payload` 的 contexts 展平在 hajide 模式删 tool 响应却保留带 tool_calls 的 assistant
+  - 修复：① 新增 `sanitize_tool_call_pairing`，在请求定型后（所有改写之后）移除破损配对，对所有模型生效；② hajide flatten 改为对称删除（删 tool 时同删 assistant-tool_calls）；③ 竞态写回前同样净化，避免把孤儿持久化进历史
 
 ---
 
