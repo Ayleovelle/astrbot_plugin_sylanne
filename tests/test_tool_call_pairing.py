@@ -7,8 +7,10 @@ sanitize_tool_call_pairing 在请求定型后移除破损配对，对所有模�
 
 from __future__ import annotations
 
+import asyncio
 import sys
 import unittest
+from types import SimpleNamespace
 
 from sylanne_alpha.llm_request_pipeline import sanitize_tool_call_pairing
 
@@ -146,6 +148,51 @@ class TestStreamingThinkingFilter(unittest.TestCase):
     def test_partial_tag_flushed(self):
         # 末尾半截看似标签但流结束 → 补发，不丢用户文本
         self.assertEqual(self._run(["答案ok<thi"]), "答案ok<thi")
+
+
+class TestOnDecoratingResultStrip(unittest.TestCase):
+    """非流式路径：on_decorating_result 钩子剥离 thinking（修复回归）。"""
+
+    def _make_plugin(self):
+        import importlib
+
+        main = importlib.import_module("main")
+        return main.EmotionalStatePlugin(context=SimpleNamespace(), config={})
+
+    def _plain(self, text):
+        try:
+            from astrbot.api.message_components import Plain
+        except Exception:  # 降级环境
+            import importlib
+
+            Plain = importlib.import_module("main").Plain
+        return Plain(text)
+
+    def test_hook_strips_thinking_from_chain(self):
+        plugin = self._make_plugin()
+        seg = self._plain("你好<thinking>内部推理</thinking>世界")
+        result = SimpleNamespace(chain=[seg])
+        event = SimpleNamespace(get_result=lambda: result)
+        asyncio.run(plugin.on_decorating_result(event))
+        remaining = "".join(
+            getattr(c, "text", "") for c in result.chain
+        )
+        self.assertEqual(remaining, "你好世界")
+
+    def test_hook_drops_pure_thinking_segment(self):
+        plugin = self._make_plugin()
+        seg = self._plain("<thinking>只有思考</thinking>")
+        result = SimpleNamespace(chain=[seg])
+        event = SimpleNamespace(get_result=lambda: result)
+        asyncio.run(plugin.on_decorating_result(event))
+        # 纯 thinking → 段被丢弃，chain 为空
+        self.assertEqual(len(result.chain), 0)
+
+    def test_hook_handles_none_result(self):
+        plugin = self._make_plugin()
+        event = SimpleNamespace(get_result=lambda: None)
+        # 不应抛异常
+        asyncio.run(plugin.on_decorating_result(event))
 
 
 if __name__ == "__main__":

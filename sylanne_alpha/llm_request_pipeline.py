@@ -194,8 +194,14 @@ def sanitize_tool_call_pairing(contexts: Any) -> Any:
 
 # 需要从流式输出中剥离的标签（与 strip_draft_blocks 一致）
 _STREAM_HIDDEN_TAGS = ("thinking", "think", "draft_notes")
-_STREAM_OPEN_TAGS = tuple(f"<{t}>" for t in _STREAM_HIDDEN_TAGS)
-_STREAM_CLOSE_TAGS = tuple(f"</{t}>" for t in _STREAM_HIDDEN_TAGS)
+# 按长度降序排列，确保 _earliest 多标签匹配时优先选更长（更具体）的标签，
+# 避免前缀重合时的贪婪误匹配
+_STREAM_OPEN_TAGS = tuple(
+    sorted((f"<{t}>" for t in _STREAM_HIDDEN_TAGS), key=len, reverse=True)
+)
+_STREAM_CLOSE_TAGS = tuple(
+    sorted((f"</{t}>" for t in _STREAM_HIDDEN_TAGS), key=len, reverse=True)
+)
 # 末尾可能的半截标签最长长度（如 "</draft_notes>"），用于决定 hold 多少
 _STREAM_MAX_TAG_LEN = max(len(t) for t in _STREAM_OPEN_TAGS + _STREAM_CLOSE_TAGS)
 

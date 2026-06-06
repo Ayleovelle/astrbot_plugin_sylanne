@@ -1187,9 +1187,16 @@ class EmotionalStatePlugin(Star):
                         cleaned_chain.append(seg)
                 else:
                     cleaned_chain.append(seg)
-            result.chain = cleaned_chain
+            # 切片赋值：保留 chain 的对象身份（若为 list 子类/MessageChain
+            # 包装），避免下游依赖原类型方法时 AttributeError
+            if isinstance(result.chain, list):
+                result.chain[:] = cleaned_chain
+            else:
+                result.chain = cleaned_chain
         except Exception as e:
-            logger.debug(f"Sylanne on_decorating_result strip failed: {e}")
+            logger.warning(
+                f"Sylanne on_decorating_result strip failed: {e}", exc_info=True
+            )
 
     async def _on_llm_response_inner(self, event: Any, response: Any) -> None:
         await self._llm_response_pipeline._on_llm_response_inner(event, response)
