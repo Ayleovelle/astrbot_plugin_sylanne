@@ -790,7 +790,11 @@ class SessionContext:
             session_key = "default"
         if not hasattr(self._p, "_hosts"):
             self._p._hosts = {}
-        if session_key not in self._p._hosts:
+        # 用 .get() 单次取值：BoundedDict 的 __contains__ 不查 TTL 而
+        # __getitem__/pop 查，二者不一致会导致 `not in`→`.pop()` 的 TOCTOU
+        # KeyError（并发驱逐/TTL 过期时）。miss 即走创建分支重建，幂等安全。
+        existing_host = self._p._hosts.get(session_key)
+        if existing_host is None:
             # LRU 驱逐：超容量时持久化并移除最旧的 host
             if len(self._p._hosts) >= self._p._MAX_HOSTS:
                 oldest_key = next(iter(self._p._hosts))
@@ -849,10 +853,10 @@ class SessionContext:
                         ConversationBuffer.from_dict(buf_data)
                     )
         else:
-            # 已存在：移到末尾更新 LRU 顺序
-            host = self._p._hosts.pop(session_key)
+            # 已存在：重新写入以刷新 LRU 顺序（__setitem__ 会 move_to_end）
+            host = existing_host
             self._p._hosts[session_key] = host
-        return self._p._hosts[session_key]
+        return host
 
     # ------------------------------------------------------------------
     # 离线消息缓冲（Item 107）
