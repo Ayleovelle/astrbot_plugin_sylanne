@@ -13,6 +13,7 @@
   - 根因：AstrBot `tool_loop_agent_runner` 在工具调用循环的中间 LLM 调用产生的 `<thinking>` 块，会绕过 `on_llm_response` 钩子直接到达 RespondStage 被发送给用户
   - 修复：新增 `on_decorating_result` 钩子（Stage 8 / ResultDecorateStage）作为发送前最后一道过滤，对消息链中所有 Plain 文本执行 `strip_draft_blocks`，清除 `<thinking>` / `<think>` / `<draft_notes>` 块
   - 空内容段自动丢弃，非 Plain 段保持原样；过滤异常降级为 `logger.debug`，不中断响应投递
+  - 流式补强：流式输出会跳过 ResultDecorateStage，上述钩子够不着。新增无条件包装 `event.send_streaming` + 有状态 `StreamingThinkingFilter`，跨 chunk 剥离 thinking 块（处理标签被切断、半截标签、reasoning 通道放行），覆盖 WebChat 等流式 surface
 - 修复 DeepSeek 等严格 provider 调用工具时报 400 `assistant message with 'tool_calls' must be followed by tool messages`（孤儿 tool_calls）(#18)
   - 根因一（竞态）：`sync_message_to_conv_mgr` 为同步 AstrBot 对话系统，每轮"读全量历史快照→append→整体写回"，与 AstrBot 自身 `_save_to_history` 无锁并发，可能读到 tool 循环中途快照后覆盖写回，把 `[assistant tool_calls][tool]` 拆成孤儿。这条几乎无条件触发，解释了"关插件/清上下文即恢复"
   - 根因二（hajide flatten 不对称）：`_normalize_claude_request_payload` 的 contexts 展平在 hajide 模式删 tool 响应却保留带 tool_calls 的 assistant

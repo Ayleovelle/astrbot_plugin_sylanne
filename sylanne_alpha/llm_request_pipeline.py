@@ -189,6 +189,132 @@ def sanitize_tool_call_pairing(contexts: Any) -> Any:
 
 
 # ---------------------------------------------------------------------------
+# 流式 thinking 过滤器（fixes 流式模式下 ResultDecorateStage 被跳过导致的泄露）
+# ---------------------------------------------------------------------------
+
+# 需要从流式输出中剥离的标签（与 strip_draft_blocks 一致）
+_STREAM_HIDDEN_TAGS = ("thinking", "think", "draft_notes")
+_STREAM_OPEN_TAGS = tuple(f"<{t}>" for t in _STREAM_HIDDEN_TAGS)
+_STREAM_CLOSE_TAGS = tuple(f"</{t}>" for t in _STREAM_HIDDEN_TAGS)
+# 末尾可能的半截标签最长长度（如 "</draft_notes>"），用于决定 hold 多少
+_STREAM_MAX_TAG_LEN = max(len(t) for t in _STREAM_OPEN_TAGS + _STREAM_CLOSE_TAGS)
+
+
+class StreamingThinkingFilter:
+    """有状态地从流式文本中剥离 <thinking>/<think>/<draft_notes> 块。
+
+    `feed(delta)` 返回当前可安全发送的文本；标签内内容被丢弃。标签可能跨
+    chunk，故内部缓冲：遇到未闭合的 open tag 前缀会 hold 住，直到能判定。
+    `flush()` 在流结束时返回残留可见文本（未闭合 thinking 块内的内容被丢弃）。
+    """
+
+    def __init__(self) -> None:
+        self._buf = ""
+        self._inside = False  # 是否在 thinking 块内
+
+    @staticmethod
+    def _tail_is_partial(s: str, tags: tuple) -> bool:
+        """s 末尾是否是某个 tag 的非完整前缀（需 hold）。"""
+        for i in range(1, min(len(s), _STREAM_MAX_TAG_LEN - 1) + 1):
+            tail = s[-i:]
+            if any(t.startswith(tail) and len(tail) < len(t) for t in tags):
+                return True
+        return False
+
+    def feed(self, delta: str) -> str:
+        self._buf += str(delta or "")
+        out = []
+        while True:
+            if not self._inside:
+                # 找最早出现的 open tag
+                pos, tag = self._earliest(self._buf, _STREAM_OPEN_TAGS)
+                if pos >= 0:
+                    out.append(self._buf[:pos])
+                    self._buf = self._buf[pos + len(tag):]
+                    self._inside = True
+                    continue
+                # 无完整 open tag：若末尾是半截 open tag，hold 之
+                if self._tail_is_partial(self._buf, _STREAM_OPEN_TAGS):
+                    hold = self._safe_hold(self._buf, _STREAM_OPEN_TAGS)
+                    out.append(self._buf[:hold])
+                    self._buf = self._buf[hold:]
+                else:
+                    out.append(self._buf)
+                    self._buf = ""
+                break
+            else:
+                pos, tag = self._earliest(self._buf, _STREAM_CLOSE_TAGS)
+                if pos >= 0:
+                    self._buf = self._buf[pos + len(tag):]
+                    self._inside = False
+                    continue
+                # 仍在 thinking 内：丢弃，但保留末尾可能的半截 close tag
+                if self._tail_is_partial(self._buf, _STREAM_CLOSE_TAGS):
+                    keep = len(self._buf) - self._safe_hold(self._buf, _STREAM_CLOSE_TAGS)
+                    self._buf = self._buf[-keep:] if keep else ""
+                else:
+                    self._buf = ""
+                break
+        return "".join(out)
+
+    @staticmethod
+    def _earliest(s: str, tags: tuple):
+        best, best_tag = -1, ""
+        for t in tags:
+            i = s.find(t)
+            if i >= 0 and (best < 0 or i < best):
+                best, best_tag = i, t
+        return best, best_tag
+
+    @staticmethod
+    def _safe_hold(s: str, tags: tuple) -> int:
+        """返回可安全发送的前缀长度（末尾半截 tag 之前）。"""
+        for i in range(min(len(s), _STREAM_MAX_TAG_LEN - 1), 0, -1):
+            tail = s[-i:]
+            if any(t.startswith(tail) and len(tail) < len(t) for t in tags):
+                return len(s) - i
+        return len(s)
+
+    def flush(self) -> str:
+        if self._inside:
+            self._buf = ""
+            return ""
+        out, self._buf = self._buf, ""
+        return out
+
+
+def _filter_streaming_chunk(chunk: Any, tfilter: "StreamingThinkingFilter") -> Any:
+    """对单个流式 MessageChain chunk 原地剥离 thinking 文本。
+
+    返回要 yield 的 chunk，或 None 表示该 chunk 全为 thinking 应跳过。
+    reasoning 类型 chunk（API 推理通道，已由 show_reasoning 管控）原样放行。
+    """
+    if getattr(chunk, "type", "") == "reasoning":
+        return chunk
+    comps = getattr(chunk, "chain", None)
+    if not isinstance(comps, list) or not comps:
+        return chunk
+    text_idxs = [
+        i for i, c in enumerate(comps)
+        if type(c).__name__ == "Plain" and hasattr(c, "text")
+    ]
+    if not text_idxs:
+        return chunk
+    full = "".join(str(getattr(comps[i], "text", "") or "") for i in text_idxs)
+    filtered = tfilter.feed(full)
+    if not filtered:
+        new_comps = [c for j, c in enumerate(comps) if j not in text_idxs]
+        if not new_comps:
+            return None
+        chunk.chain = new_comps
+        return chunk
+    comps[text_idxs[0]].text = filtered
+    for i in text_idxs[1:]:
+        comps[i].text = ""
+    return chunk
+
+
+# ---------------------------------------------------------------------------
 # LLM 降级链（Item 81）
 # ---------------------------------------------------------------------------
 
@@ -1073,24 +1199,34 @@ class LLMRequestPipeline:
         if stale_task and not stale_task.done():
             stale_task.cancel()
 
-        # 包装 event.send_streaming：启用首句快速发送时拦截流式输出
+        # 包装 event.send_streaming：无条件剥离流式 thinking（流式跳过
+        # ResultDecorateStage，on_decorating_result 钩子够不着），并在启用
+        # 首句快速发送时叠加首句抢发逻辑。
         stream_first = bool(
             (p._config or {}).get("sylanne_alpha_stream_first_sentence_enabled")
         )
-        if stream_first and intercept and hasattr(event, "send_streaming"):
+        if hasattr(event, "send_streaming") and not getattr(
+            event, "_sylanne_stream_wrapped", False
+        ):
+            event._sylanne_stream_wrapped = True
             original_send_streaming = event.send_streaming
             origin = str(getattr(event, "unified_msg_origin", "") or "")
+            do_first = stream_first and intercept
 
             async def wrapped_send_streaming(generator, use_fallback=False):
+                tfilter = StreamingThinkingFilter()
                 buffer = ""
                 first_sent = False
 
                 async def intercepted_generator():
                     nonlocal buffer, first_sent
                     async for chunk in generator:
-                        yield chunk
-                        if not first_sent:
-                            buffer += str(chunk)
+                        emitted = _filter_streaming_chunk(chunk, tfilter)
+                        if emitted is None:
+                            continue
+                        yield emitted
+                        if do_first and not first_sent:
+                            buffer += str(emitted)
                             first_sentence = p._extract_first_sentence(buffer)
                             if first_sentence:
                                 first_sent = True
@@ -1099,7 +1235,9 @@ class LLMRequestPipeline:
                                     p._send_first_sentence(origin, first_sentence),
                                     name="stream_send_first_sentence",
                                 )
-                                if not isinstance(getattr(p, "_background_tasks", None), list):
+                                if not isinstance(
+                                    getattr(p, "_background_tasks", None), list
+                                ):
                                     p._background_tasks = []
                                 p._background_tasks.append(t)
                                 t.add_done_callback(
@@ -1109,6 +1247,15 @@ class LLMRequestPipeline:
                                         else None
                                     )
                                 )
+                    # 流结束：补发被 hold 的残留可见文本（半截标签误判时）
+                    tail = tfilter.flush()
+                    if tail:
+                        try:
+                            from astrbot.api.event import MessageChain  # type: ignore
+
+                            yield MessageChain().message(tail)
+                        except Exception:
+                            pass
 
                 await original_send_streaming(
                     intercepted_generator(), use_fallback=use_fallback
