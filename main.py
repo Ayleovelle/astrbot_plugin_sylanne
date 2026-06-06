@@ -69,6 +69,12 @@ except ImportError:
 
             return decorator
 
+        def on_decorating_result(self, *args, **kwargs):
+            def decorator(func):
+                return func
+
+            return decorator
+
         def llm_tool(self, *args, **kwargs):
             def decorator(func):
                 return func
@@ -155,8 +161,21 @@ else:
     WEBUI_HTML = "<html><body><h1>Sylanne Dashboard unavailable</h1></body></html>"
 
 # AstrBot 热重载时可能重新 import main.py 但保留 sylanne_alpha 子模块，
-# 强制 reload WebUI server 模块以确保监听器修复被应用
-_sylanne_webui_server = importlib.reload(_sylanne_webui_server)
+# 强制 reload WebUI server 模块以确保监听器修复被应用。
+# 注意：webui_server 依赖 sylanne_alpha.infra 的符号。热更新（如 1.4.5→1.4.6
+# 新增 infra 函数）时，sys.modules 里的 infra 可能仍是旧缓存模块，直接 reload
+# webui_server 会因 import 不到新符号而崩溃（见 issue #17）。故先 reload 依赖
+# 模块 infra 让新符号到位；整段加兜底：即使 reload 失败也沿用第 132 行已成功
+# 导入的模块，避免插件加载崩溃。
+try:
+    import sylanne_alpha.infra as _sylanne_infra  # noqa: E402
+
+    importlib.reload(_sylanne_infra)
+    _sylanne_webui_server = importlib.reload(_sylanne_webui_server)
+except Exception as _reload_err:  # noqa: BLE001
+    logger.warning(
+        f"Sylanne webui_server 热重载失败，沿用已加载模块: {_reload_err}"
+    )
 start_webui_background = _sylanne_webui_server.start_webui_background
 stop_webui_server = _sylanne_webui_server.stop_webui_server
 
@@ -1146,6 +1165,38 @@ class EmotionalStatePlugin(Star):
         except Exception as e:
             logger.error(f"Sylanne on_llm_response error: {e}", exc_info=True)
             return
+
+    @filter.on_decorating_result()
+    async def on_decorating_result(self, event: Any) -> None:
+        """Stage 8 兜底：strip thinking/draft 块，防止 tool loop 中间步骤泄露。"""
+        try:
+            from sylanne_alpha.compat import strip_draft_blocks
+
+            result = event.get_result()
+            if result is None:
+                return
+            chain = getattr(result, "chain", None)
+            if not chain:
+                return
+            cleaned_chain = []
+            for seg in chain:
+                if isinstance(seg, Plain):
+                    text = strip_draft_blocks(seg.text)
+                    if text:
+                        seg.text = text
+                        cleaned_chain.append(seg)
+                else:
+                    cleaned_chain.append(seg)
+            # 切片赋值：保留 chain 的对象身份（若为 list 子类/MessageChain
+            # 包装），避免下游依赖原类型方法时 AttributeError
+            if isinstance(result.chain, list):
+                result.chain[:] = cleaned_chain
+            else:
+                result.chain = cleaned_chain
+        except Exception as e:
+            logger.warning(
+                f"Sylanne on_decorating_result strip failed: {e}", exc_info=True
+            )
 
     async def _on_llm_response_inner(self, event: Any, response: Any) -> None:
         await self._llm_response_pipeline._on_llm_response_inner(event, response)

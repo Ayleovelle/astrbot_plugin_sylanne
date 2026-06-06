@@ -940,6 +940,17 @@ class StatePersistence:
                 getattr(conversation, "history", None) or [] if conversation else []
             )
             history.append(msg)
+            # 防御竞态：本方法与 AstrBot 自身 _save_to_history 无锁并发，可能读到
+            # tool 循环中途的快照（含 assistant tool_calls 但尚无 tool 响应）。写回前
+            # 清除破损的 tool_calls/tool 配对，避免把孤儿持久化进历史（fixes #18）。
+            try:
+                from sylanne_alpha.llm_request_pipeline import (
+                    sanitize_tool_call_pairing,
+                )
+
+                history = sanitize_tool_call_pairing(history)
+            except Exception:
+                pass
             await conv_mgr.update_conversation(session_key, curr_cid, history=history)
         except Exception as e:
             logger.debug(f"Sylanne: ConversationManager sync failed: {e}")

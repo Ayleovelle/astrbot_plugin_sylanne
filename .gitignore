@@ -85,7 +85,5 @@ scripts/build_*_literature_kb.py
 # Duplicate/generated figures
 experiments/figures/
 
-# Tests (local only)
-tests/
 docs/literature_kb.md
 docs/humanlike_agent_literature_kb.md
