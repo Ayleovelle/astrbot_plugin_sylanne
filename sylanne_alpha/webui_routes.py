@@ -87,6 +87,35 @@ CONFIG_PRESETS: dict[str, dict[str, Any]] = {
 }
 
 
+def _comp_gate_dict(comp: object) -> dict:
+    """取计算层 gate.to_dict()，兼容旧 .gate(公有) 与共振场 _gate(私有)。"""
+    g = getattr(comp, "gate", None) or getattr(comp, "_gate", None)
+    if g is not None and hasattr(g, "to_dict"):
+        try:
+            return g.to_dict()
+        except Exception:
+            return {}
+    return {}
+
+
+def _comp_boundary_dict(comp: object) -> dict:
+    """取计算层 boundary.to_dict()，兼容旧 .boundary 与共振场 _boundary。
+
+    共振场字段名为 boundary_integrity/internal_entropy，补 integrity/entropy
+    别名以兼容下游(state_handler 读 integrity/entropy)。
+    """
+    b = getattr(comp, "boundary", None) or getattr(comp, "_boundary", None)
+    if b is not None and hasattr(b, "to_dict"):
+        try:
+            d = dict(b.to_dict())
+            d.setdefault("integrity", d.get("boundary_integrity", 1.0))
+            d.setdefault("entropy", d.get("internal_entropy", 0.0))
+            return d
+        except Exception:
+            return {}
+    return {}
+
+
 class WebUIRoutes:
     """封装所有 WebUI HTTP 路由处理器。
 
@@ -181,8 +210,8 @@ class WebUIRoutes:
         }
         emotion = {**_EMOTION_DEFAULTS, **comp.engine.observe()}
 
-        # Gate stats
-        gate_dict = comp.gate.to_dict()
+        # Gate stats（共振场 gate 为私有 _gate，兼容取）
+        gate_dict = _comp_gate_dict(comp)
         history = gate_dict.get("history", [])
         gate_info = {
             "precision": round(gate_dict.get("precision", 0.0), 4),
@@ -217,8 +246,8 @@ class WebUIRoutes:
             str(r.get("text", ""))[:60] for r in recalled_items if isinstance(r, dict)
         ]
 
-        # Boundary
-        boundary_dict = comp.boundary.to_dict()
+        # Boundary（共振场 boundary 为私有 _boundary，兼容取）
+        boundary_dict = _comp_boundary_dict(comp)
         boundary_info = {
             "integrity": round(boundary_dict.get("integrity", 1.0), 4),
             "entropy": round(boundary_dict.get("entropy", 0.0), 4),
@@ -240,8 +269,8 @@ class WebUIRoutes:
             "count": expr_state.get("count", 0),
         }
 
-        # Timing (convert ns to ms for WebUI display)
-        timing_raw = comp.timing_stats()
+        # Timing (convert ns to ms for WebUI display)（共振场无 timing_stats→空）
+        timing_raw = comp.timing_stats() if hasattr(comp, "timing_stats") else {}
         timing: dict[str, Any] = {}
         total_ms = 0.0
         for layer_name, layer_stats in timing_raw.items():
