@@ -115,16 +115,13 @@ jobs:
           python -c "
           import sys
           sys.path.insert(0, '.')
-          from sylanne_alpha.kernel import AlphaKernel
-          from sylanne_alpha.body import AlphaBodyState
+          from sylanne_alpha import AlphaKernel, AlphaBodyState
 
-          # Verify slotted dataclasses can be instantiated
+          # Verify slotted dataclasses can be instantiated (共振场 kernel)
           kernel = AlphaKernel(session_key='ci-test')
-          assert hasattr(kernel, '_last_injected_state'), 'Missing _last_injected_state slot'
-          assert hasattr(kernel, '_last_computation_result'), 'Missing _last_computation_result slot'
-
-          # Verify dynamic attribute assignment works for all declared fields
-          kernel._last_injected_state = {'warmth': 0.5, 'tension': 0.1}
+          assert kernel.session_key == 'ci-test'
+          assert hasattr(kernel, 'body'), 'kernel missing body'
+          assert hasattr(kernel, 'computation'), 'kernel missing computation'
           print('Slots consistency OK')
           "
 
@@ -133,7 +130,7 @@ jobs:
           python -c "
           import sys, time
           sys.path.insert(0, '.')
-          from sylanne_alpha.kernel import AlphaKernel, AlphaKernelEvent
+          from sylanne_alpha import AlphaKernel, AlphaKernelEvent
 
           kernel = AlphaKernel.boot(session_key='ci-smoke')
           event = AlphaKernelEvent(
@@ -200,7 +197,8 @@ jobs:
               'astrbot_plugin_sylanne/__init__.py',
               'astrbot_plugin_sylanne/README.md',
               'astrbot_plugin_sylanne/sylanne_alpha/__init__.py',
-              'astrbot_plugin_sylanne/sylanne_alpha/kernel.py',
+              'astrbot_plugin_sylanne/sylanne_alpha/host.py',
+              'astrbot_plugin_sylanne/sylanne_alpha/_engine/sylanne_core/__init__.py',
           ]
           with zipfile.ZipFile('dist/plugin.zip') as zf:
               names = zf.namelist()

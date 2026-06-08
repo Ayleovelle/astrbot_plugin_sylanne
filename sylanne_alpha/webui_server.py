@@ -1161,7 +1161,7 @@ async def start_webui_server(plugin: Any, host: str = "127.0.0.1", port: int = 2
 
     async def handle_sheaf_topology(request: web.Request) -> web.Response:
         """返回关系层析拓扑数据：nodes + edges + cohomology_h1。"""
-        from sylanne_alpha.relational_sheaf import _REL_TYPE_NAMES
+        from sylanne_alpha._engine.sylanne_core.compute.relational_sheaf import _REL_TYPE_NAMES
 
         current = _plugin(plugin)
         session_key = str(request.query.get("session", "") or "").strip()
@@ -1783,7 +1783,7 @@ def start_webui_thread_server(
                         pass
                     self._send_json({"nodes": nodes, "edges": edges})
                 elif path == "/api/sheaf_topology":
-                    from sylanne_alpha.relational_sheaf import _REL_TYPE_NAMES
+                    from sylanne_alpha._engine.sylanne_core.compute.relational_sheaf import _REL_TYPE_NAMES
                     session_key = query.get("session", "")
                     with _plugin_access_lock:
                         current = _plugin(plugin)

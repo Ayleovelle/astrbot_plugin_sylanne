@@ -21,7 +21,7 @@ from __future__ import annotations
 from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
-    from .kernel import AlphaKernel
+    from sylanne_alpha._engine.sylanne_core.compute.kernel import AlphaKernel
 
 
 def render_prompt_fragment(
