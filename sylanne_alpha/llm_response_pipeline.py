@@ -249,8 +249,8 @@ class LLMResponsePipeline:
             from sylanne_alpha.memory_system import ConversationBuffer
 
             # Append bot reply to conversation buffer (v2)
-            buf = self._p._conversation_buffers.setdefault(
-                session_key, ConversationBuffer(session_key=session_key)
+            buf = self._p._store.conversation_buffers.get_or_create(
+                session_key, lambda: ConversationBuffer(session_key=session_key)
             )
             buf.append("bot", text)
             self._p._store.last_bot_texts.set(session_key, text[:120])
@@ -1018,7 +1018,7 @@ class LLMResponsePipeline:
         import time as _time
 
         # 获取对话缓冲区
-        buf = p._conversation_buffers.get(session_key)
+        buf = p._store.conversation_buffers.get(session_key)
         if not buf or not buf.messages:
             return None
 

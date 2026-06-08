@@ -379,10 +379,8 @@ class EmotionalStatePlugin(Star):
         # 会话态集中存储：所有 session-keyed 容器收拢于此（CP8-P2）。
         # 经语义方法访问，release_session 统一清理。
         self._store = SessionStateStore()
-        # 会话管理：session_key → SylanneAlphaHost 映射
-        self._hosts: BoundedDict = BoundedDict(maxsize=200)
         self._background_tasks: list[asyncio.Task] = []
-        # 流式回复缓冲区已迁入 self._store（CP8-P2 批1）
+        # hosts/记忆系统/对话缓冲已迁入 self._store（CP8-P2 批3）
         # 计算日志环形缓冲区（供 WebUI 实时显示）
         self._computation_logs: collections.deque = collections.deque(maxlen=200)
         # WebUI 运行时标识（用于探针验证实例一致性）
@@ -393,26 +391,15 @@ class EmotionalStatePlugin(Star):
         # 生命模拟器：idle 时自主演化身体状态
         self._life_simulator = LifeSimulator(config=self._config)
         self._life_simulator_started = False
-        # 三层记忆系统：session_key → MemorySystem 映射
-        self._memory_systems: BoundedDict = BoundedDict(maxsize=100)
-        # 对话缓冲区：用于 flush 到 L1 记忆池
-        self._conversation_buffers: BoundedDict = BoundedDict(maxsize=100)
         self._meltdown_nonces: BoundedDict = BoundedDict(maxsize=50, ttl=300)
         # 社交场收集器：群聊氛围感知
         self._social_field = SocialFieldCollector(config=self._config)
         # 后台投递队列已迁入 self._store（CP8-P2 批2）
         self._background_post_recovered_sessions: set[str] = set()
         self._internal_assessor_llm_inflight: int = 0
-        self._pending_outreach_context: BoundedDict = BoundedDict(maxsize=50)
-        # session_key → unified_msg_origin 映射，供主动发送定位会话。
-        # 在 on_llm_request 流程填充；此处预初始化避免散落懒创建的脆性。
-        self._session_origins: dict[str, str] = {}
+        # outreach/origins/candidates/locks/realtime_dispatches 已迁入 self._store（批3）
         self._amnesia_sessions: set[str] = set()
-        self._proactive_candidate_sessions: BoundedDict = BoundedDict(maxsize=100)
         self._proactive_scheduler_task: asyncio.Task | None = None
-        self._proactive_scheduler_locks: dict[str, asyncio.Lock] = {}
-        self._realtime_chat_active_dispatches: BoundedDict = BoundedDict(maxsize=200)
-        self._session_locks: dict[str, asyncio.Lock] = {}
         # 子系统初始化：各子系统持有 self 引用，通过委托模式分工
         self._session_ctx = SessionContext(self)
         self._state_persistence = StatePersistence(self)
@@ -953,10 +940,11 @@ class EmotionalStatePlugin(Star):
         root = self._config.get("sylanne_alpha_root") or str(
             Path(get_astrbot_data_path()) / "plugin_data" / PLUGIN_NAME
         )
-        self._hosts[session_key] = SylanneAlphaHost(
+        _host_obj = SylanneAlphaHost(
             root=root, session_key=session_key, legacy=legacy
         )
-        return self._hosts[session_key].snapshot()
+        self._store.set_host(session_key, _host_obj)
+        return _host_obj.snapshot()
 
     async def pause_sylanne(self, *, session_key: str) -> dict[str, Any]:
         host = self._host(session_key)

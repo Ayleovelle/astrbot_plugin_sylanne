@@ -184,7 +184,7 @@ class ProactiveScheduler:
             if callable(self._p._observed_now)
             else self._p._observed_now
         )
-        candidates = self._p._proactive_candidate_sessions
+        candidates = self._p._store.proactive_candidate_sessions
         sk = ""
         if event_or_session is not None:
             sk = str(getattr(event_or_session, "unified_msg_origin", "") or "")
@@ -200,7 +200,7 @@ class ProactiveScheduler:
         )
         cooldown = float(cfg.get("proactive_speech_dispatch_cooldown_seconds", 1800.0))
         # 人格驱动硬下限：expression_drive 高→下限低（最低60s），低→下限高（最高300s）
-        host = self._p._hosts.get(sk)
+        host = self._p._store.hosts.get(sk)
         _expression_drive = 0.5
         if host and hasattr(host.kernel, "_personality"):
             _p = host.kernel._personality() if callable(getattr(host.kernel, "_personality", None)) else {}
@@ -227,7 +227,7 @@ class ProactiveScheduler:
             扫描结果字典，包含 checked（检查数）和 dispatched（发送数）。
         """
         self.ensure_state()
-        candidates = dict(self._p._proactive_candidate_sessions)
+        candidates = dict(self._p._store.proactive_candidate_sessions.items())
         checked = 0
         dispatched = 0
         for sk, info in candidates.items():

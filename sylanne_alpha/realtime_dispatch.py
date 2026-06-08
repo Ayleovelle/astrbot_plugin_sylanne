@@ -233,17 +233,13 @@ class RealtimeDispatch:
                 input_epoch=plan_epoch,
                 reason=interrupted_reason,
             )
-            dispatches = getattr(p, "_realtime_chat_active_dispatches", None)
-            if dispatches is None:
-                dispatches = {}
-                p._realtime_chat_active_dispatches = dispatches
-            dispatches[session_key] = [
+            p._store.realtime_chat_active_dispatches.set(session_key, [
                 {
                     "sent_parts": sent_parts,
                     "unsent_parts": unsent_parts,
                     "interrupted_reason": interrupted_reason,
                 }
-            ]
+            ])
 
         if record_history_shadow and message_count > 0:
             full_text = plan.get("full_text", "")
@@ -528,9 +524,7 @@ class RealtimeDispatch:
         event_time: dict[str, Any] | None = None,
     ) -> None:
         p = self._p
-        if not hasattr(p, "_realtime_chat_active_dispatches"):
-            p._realtime_chat_active_dispatches: dict[str, list[dict[str, Any]]] = {}
-        dispatches = p._realtime_chat_active_dispatches.setdefault(session_key, [])
+        dispatches = p._store.realtime_chat_active_dispatches.get_or_create(session_key, list)
         entry: dict[str, Any] = {
             "input_epoch": input_epoch,
             "full_text": full_text,
@@ -547,7 +541,7 @@ class RealtimeDispatch:
         *,
         budget: Any = None,
     ) -> bool:
-        dispatches = getattr(self._p, "_realtime_chat_active_dispatches", {})
+        dispatches = self._p._store.realtime_chat_active_dispatches
         entries = dispatches.get(session_key, [])
         if not entries:
             return False

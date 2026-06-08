@@ -531,20 +531,20 @@ class SessionContext:
         Returns:
             该会话对应的 asyncio.Lock 实例。
         """
-        locks = self._p._session_locks
-        if session_key not in locks:
-            locks[session_key] = asyncio.Lock()
+        locks = self._p._store.session_locks
+        if not locks.has(session_key):
+            locks.set(session_key, asyncio.Lock())
             # 锁字典过大时清理未使用的旧锁，防止内存泄漏
             if len(locks) > 500:
                 to_remove = []
-                for k, lock in locks.items():
+                for k, lock in locks.snapshot_items():
                     if k != session_key and not lock.locked():
                         to_remove.append(k)
                     if len(locks) - len(to_remove) <= 400:
                         break
                 for k in to_remove:
-                    del locks[k]
-        return locks[session_key]
+                    locks.pop(k, None)
+        return locks.get(session_key)
 
     # ------------------------------------------------------------------
     # 文件系统安全的 session key
@@ -631,13 +631,10 @@ class SessionContext:
         """
         if not session_key:
             session_key = "default"
-        systems = getattr(self._p, "_memory_systems", None)
-        if systems is None:
-            self._p._memory_systems = {}
-            systems = self._p._memory_systems
-        if session_key not in systems:
-            systems[session_key] = MemorySystem()
-        return systems[session_key]
+        systems = self._p._store.memory_systems
+        if not systems.has(session_key):
+            systems.set(session_key, MemorySystem())
+        return systems.get(session_key)
 
     def memory_system_has_content(self, memory_system: Any) -> bool:
         """检查记忆系统是否包含有效内容（L1/L2/L3 任一非空）。
@@ -791,17 +788,16 @@ class SessionContext:
         """
         if not session_key:
             session_key = "default"
-        if not hasattr(self._p, "_hosts"):
-            self._p._hosts = {}
+        hosts = self._p._store.hosts
         # 用 .get() 单次取值：BoundedDict 的 __contains__ 不查 TTL 而
         # __getitem__/pop 查，二者不一致会导致 `not in`→`.pop()` 的 TOCTOU
         # KeyError（并发驱逐/TTL 过期时）。miss 即走创建分支重建，幂等安全。
-        existing_host = self._p._hosts.get(session_key)
+        existing_host = hosts.get(session_key)
         if existing_host is None:
             # LRU 驱逐：超容量时持久化并移除最旧的 host
-            if len(self._p._hosts) >= self._p._MAX_HOSTS:
-                oldest_key = next(iter(self._p._hosts))
-                old_host = self._p._hosts.pop(oldest_key)
+            if len(hosts) >= self._p._MAX_HOSTS:
+                oldest_key = next(iter(hosts.keys()))
+                old_host = hosts.pop(oldest_key)
                 from sylanne_alpha.utils import safe_ensure_future
                 safe_ensure_future(
                     self._p._state_persistence.persist_kernel(oldest_key, old_host),
@@ -851,18 +847,18 @@ class SessionContext:
                         self._p._state_persistence.persist_kernel(session_key, host),
                         name=f"hydrate_persist_{session_key}",
                     )
-            self._p._hosts[session_key] = host
+            hosts.set(session_key, host)
             # 恢复对话缓冲区（文件回退；KV 保持同步）
-            if session_key not in self._p._conversation_buffers:
+            if not self._p._store.conversation_buffers.has(session_key):
                 buf_data = host.runtime.load_buffer(session_key)
                 if buf_data and isinstance(buf_data, dict):
-                    self._p._conversation_buffers[session_key] = (
-                        ConversationBuffer.from_dict(buf_data)
+                    self._p._store.conversation_buffers.set(
+                        session_key, ConversationBuffer.from_dict(buf_data)
                     )
         else:
-            # 已存在：重新写入以刷新 LRU 顺序（__setitem__ 会 move_to_end）
+            # 已存在：重新写入以刷新 LRU 顺序（set→__setitem__ 会 move_to_end）
             host = existing_host
-            self._p._hosts[session_key] = host
+            hosts.set(session_key, host)
         return host
 
     # ------------------------------------------------------------------

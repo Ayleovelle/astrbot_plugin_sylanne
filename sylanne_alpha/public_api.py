@@ -287,8 +287,8 @@ class PublicAPI:
 
     async def _observatory_route_handler(self) -> dict[str, Any]:
         session_key = "default"
-        if self._p._hosts:
-            session_key = next(iter(self._p._hosts))
+        if len(self._p._store.hosts):
+            session_key = next(iter(self._p._store.hosts.keys()))
         return await self.sylanne_observatory(session_key=session_key)
 
     def _sylanne_lineage_observatory_page_payload(
@@ -1324,10 +1324,11 @@ class PublicAPI:
             "reason": reason,
             "input_epoch": new_epoch,
         })
-        candidates = p._proactive_candidate_sessions
-        if session_key in candidates:
-            candidates[session_key]["last_user_text_excerpt"] = ""
-            candidates[session_key]["last_withdrawn_message_id"] = message_id
+        candidates = p._store.proactive_candidate_sessions
+        if candidates.has(session_key):
+            entry = candidates.ref(session_key)
+            entry["last_user_text_excerpt"] = ""
+            entry["last_withdrawn_message_id"] = message_id
         return {
             "input_epoch": new_epoch,
             "message_id": message_id,

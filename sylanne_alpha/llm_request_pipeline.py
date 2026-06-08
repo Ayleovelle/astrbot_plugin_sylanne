@@ -644,18 +644,18 @@ class LLMRequestPipeline:
         """返回最近活跃的 host session_key（按 last_event.now 排序）。
 
         若所有 host 的 last_event.now 均为 0，回退到字典首项。
-        调用前需确保 p._hosts 非空。
+        调用前需确保 p._store.hosts 非空。
         """
         p = self._p
         best_key = ""
         best_time = 0.0
-        for sk, host in p._hosts.items():
+        for sk, host in p._store.hosts.items():
             last_now = float(host.kernel.last_event.get("now") or 0.0)
             if last_now > best_time:
                 best_time = last_now
                 best_key = sk
         if not best_key:
-            best_key = next(iter(p._hosts))
+            best_key = next(iter(p._store.hosts.keys()))
         return best_key
 
     def _cache_system_prompt(
@@ -910,9 +910,7 @@ class LLMRequestPipeline:
         # 维护 session_key → unified_msg_origin 映射，供主动发送时使用（已在 __init__ 预初始化）
         umo = str(getattr(event, "unified_msg_origin", "") or "")
         if umo:
-            if not hasattr(p, "_session_origins"):
-                p._session_origins = {}
-            p._session_origins[session_key] = umo
+            p._store.session_origins.set(session_key, umo)
         message_text = str(getattr(event, "message_str", "") or "")
         # 非文本消息转述：图片/语音等内容转为文本描述
         if not message_text.strip():
@@ -1379,8 +1377,7 @@ class LLMRequestPipeline:
 
         # 消费待发送的生命事件上下文
         outreach_fragment = ""
-        pending_outreach = p._pending_outreach_context
-        outreach_ctx = pending_outreach.pop(session_key, None)
+        outreach_ctx = p._store.pending_outreach_context.pop(session_key, None)
         if outreach_ctx:
             reason = outreach_ctx.get("reason", "")
             mood = outreach_ctx.get("mood", "")
@@ -1860,8 +1857,8 @@ class LLMRequestPipeline:
             # 将用户消息追加到对话缓冲区（v2：不直接写入记忆层）
             from sylanne_alpha.memory_system import ConversationBuffer
 
-            buf = p._conversation_buffers.setdefault(
-                session_key, ConversationBuffer(session_key=session_key)
+            buf = p._store.conversation_buffers.get_or_create(
+                session_key, lambda: ConversationBuffer(session_key=session_key)
             )
             # 群聊：在用户消息前注入影子缓冲区（旁观到的群聊上下文）
             _is_group = p._social_field.is_group_context_by_key(session_key)
@@ -1997,7 +1994,7 @@ class LLMRequestPipeline:
         p = self._p
 
         try:
-            buf = p._conversation_buffers.get(session_key)
+            buf = p._store.conversation_buffers.get(session_key)
             if not buf or not buf.messages:
                 return
             msgs = buf.drain()
@@ -2106,7 +2103,7 @@ class LLMRequestPipeline:
             while True:
                 await asyncio.sleep(10)
                 try:
-                    for session_key, buf in list(p._conversation_buffers.items()):
+                    for session_key, buf in p._store.conversation_buffers.snapshot_items():
                         reason = buf.should_flush()
                         if reason:
                             await self._flush_conversation_to_l1(session_key)
@@ -2132,7 +2129,7 @@ class LLMRequestPipeline:
             while True:
                 await asyncio.sleep(300)
                 try:
-                    for session_key, memory_system in list(p._memory_systems.items()):
+                    for session_key, memory_system in p._store.memory_systems.snapshot_items():
                         if not memory_system.needs_consolidation():
                             continue
                         await self._run_consolidation(session_key, memory_system)
@@ -2455,16 +2452,16 @@ class LLMRequestPipeline:
             mood: 当前心情标签。
         """
         p = self._p
-        if not p._hosts:
+        if not len(p._store.hosts):
             logger.info("Sylanne life_sim_outreach: no active hosts, skipping")
             return
         best_key = self._most_recent_host_key()
 
         # Store pending outreach context for injection into next LLM request
-        p._pending_outreach_context[best_key] = {
+        p._store.pending_outreach_context.set(best_key, {
             "reason": reason,
             "mood": mood,
-        }
+        })
         logger.info(
             f"Sylanne life_sim_outreach: stored pending context for session={best_key}, mood={mood}"
         )
@@ -2473,8 +2470,8 @@ class LLMRequestPipeline:
         # 优先交给大饼插件主动发送（不污染全局，防双发）；大饼不可用才回退直发。
         async def _fallback_direct_send(session_key: str, r: str, m: str):
             await asyncio.sleep(300.0)
-            pending = p._pending_outreach_context
-            if session_key in pending and pending[session_key].get("reason") == r:
+            pending = p._store.pending_outreach_context
+            if pending.has(session_key) and pending.get(session_key).get("reason") == r:
                 # Still not consumed -- dispatch
                 pending.pop(session_key, None)
 
@@ -2642,10 +2639,10 @@ class LLMRequestPipeline:
             情感状态字典（warmth/tension/coherence 等），无活跃 host 返回空字典。
         """
         p = self._p
-        if not p._hosts:
+        if not len(p._store.hosts):
             return {}
         best_key = self._most_recent_host_key()
-        host = p._hosts[best_key]
+        host = p._store.hosts.get(best_key)
         try:
             return host.kernel.computation.engine.observe()
         except Exception:
@@ -2654,10 +2651,10 @@ class LLMRequestPipeline:
     def _life_sim_body_delta(self, delta: dict[str, float]) -> None:
         """将生命模拟器的情绪增量注入到最近活跃 host 的身体状态。"""
         p = self._p
-        if not p._hosts:
+        if not len(p._store.hosts):
             return
         best_key = self._most_recent_host_key()
-        host = p._hosts[best_key]
+        host = p._store.hosts.get(best_key)
         try:
             body = host.kernel.body
             if body and hasattr(body, "apply_vector_delta"):
