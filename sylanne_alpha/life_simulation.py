@@ -17,7 +17,6 @@
 
 from __future__ import annotations
 
-import asyncio
 import json
 import time
 from dataclasses import dataclass, field
@@ -169,8 +168,6 @@ class LifeSimulator:
     def __init__(self, config: dict[str, Any] | None = None):
         self._config = config or {}
         self.state = LifeSimulationState()
-        self._running = False
-        self._task: asyncio.Task | None = None
         self._llm_caller: Callable[..., Awaitable[str]] | None = None  # LLM 调用回调
         self._outreach_callback: Callable[[str, str], Awaitable[None]] | None = (
             None  # 主动联系回调
@@ -229,46 +226,14 @@ class LifeSimulator:
         self._body_delta_callback = body_delta_callback
         self._countdown_callback = countdown_callback
 
-    def start(self):
-        """启动后台模拟循环。"""
-        if not self.enabled or self._running:
-            return
-        self._running = True
-        try:
-            loop = asyncio.get_running_loop()
-            self._task = loop.create_task(self._loop())
-        except RuntimeError:
-            pass
+    async def simulate_tick(self) -> None:
+        """执行一次模拟周期（CP8-P3b：公开入口，由 LifeAgent 自驱调用）。
 
-    def stop(self):
-        """停止模拟循环。"""
-        self._running = False
-        if self._task and not self._task.done():
-            self._task.cancel()
-            self._task = None
-
-    async def _loop(self):
-        """后台循环：以随机间隔模拟生活事件。"""
-        import random
-
-        while self._running and self.enabled:
-            try:
-                base = self.interval_seconds
-                jitter = random.uniform(0.4, 1.8)
-                wait = base * jitter
-                await asyncio.sleep(wait)
-                if not self._running:
-                    break
-                await self._simulate_tick()
-            except asyncio.CancelledError:
-                break
-            except Exception as _exc:
-                import logging
-
-                logging.getLogger(__name__).debug(
-                    "life_simulation tick error: %s", _exc
-                )
-                await asyncio.sleep(60.0)
+        原 _loop 后台循环已删除——演化驱动统一收归 AutonomyScheduler，本方法
+        只负责「演化内容」（生成事件 / 算情绪权重 / 注入 body / 触发 outreach），
+        由 LifeAgent.act（autonomous 时点）调用，实现单一心跳的 agent 同构架构。
+        """
+        await self._simulate_tick()
 
     async def _simulate_tick(self):
         """执行一次模拟周期。"""
