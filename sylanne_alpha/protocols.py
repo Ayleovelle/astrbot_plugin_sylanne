@@ -31,10 +31,9 @@ import asyncio
 import collections
 from typing import TYPE_CHECKING, Any, Protocol, runtime_checkable
 
-from sylanne_alpha.bounded_dict import BoundedDict
-
 if TYPE_CHECKING:
     from sylanne_alpha.host import SylanneAlphaHost
+    from sylanne_alpha.session_state_store import SessionStateStore
     from sylanne_alpha.memory_system import MemorySystem
 
 
@@ -60,14 +59,12 @@ class PluginConfig(Protocol):
 class PluginSessionAccess(Protocol):
     """会话管理 + 运行时态访问接口。
 
-    覆盖 session_key 解析、host / 记忆系统按会话取用，以及若干
-    跨模块共享的运行时容器（hosts / locks / buffers / 后台任务等）。
+    会话态容器已收拢于 `_store`（SessionStateStore，CP8-P2），不再散落于插件实例；
+    模块经 `self._p._store.<容器>.<语义方法>` 访问，经 release_session 统一清理。
+    本协议暴露 _store 句柄 + session_key 解析 / host / 记忆系统取用等方法。
     """
 
-    _hosts: BoundedDict
-    _session_locks: dict[str, asyncio.Lock]
-    _memory_systems: BoundedDict
-    _conversation_buffers: BoundedDict
+    _store: SessionStateStore
     _background_tasks: list[asyncio.Task]
     _computation_logs: collections.deque
 

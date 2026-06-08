@@ -717,7 +717,7 @@ class StatePersistence:
                     try:
                         state = MemorySystem.create_from_dict(data)
                         self._p._store.memory_systems.set(session_key, state)
-                        cache[session_key] = state
+                        self._p._store.sylanne_memory_cache.set(session_key, state)
                         return state
                     except Exception as e:
                         logger.debug(f"Sylanne skip: {e}")
@@ -755,7 +755,7 @@ class StatePersistence:
                             if put_fn and callable(put_fn):
                                 save_data = state.to_dict()
                                 await put_fn(kv_key, save_data)
-                    cache[session_key] = state
+                    self._p._store.sylanne_memory_cache.set(session_key, state)
                     return state
                 except Exception as e:
                     logger.debug(f"Sylanne skip: {e}")
@@ -766,7 +766,7 @@ class StatePersistence:
             if isinstance(data, dict):
                 state = MemorySystem.create_from_dict(data)
                 self._p._store.memory_systems.set(session_key, state)
-                cache[session_key] = state
+                self._p._store.sylanne_memory_cache.set(session_key, state)
                 return state
         except Exception as e:
             logger.debug(f"Sylanne skip: {e}")
