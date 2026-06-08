@@ -2251,9 +2251,10 @@ function getLayerVisualization(layerId) {
 
     case 'L2': // Predictive Coding Gate - current surprise vs threshold (data-driven)
       var gate = s.gate || {};
-      var surprise = Number(gate.surprise) || 0;
+      var spineL2 = s.spine || {};
+      var surprise = Number(spineL2.surprise != null ? spineL2.surprise : gate.surprise) || 0;
       var threshold = Number(gate.threshold) || 0.5;
-      var route = (gate.route || 'NORMAL').toUpperCase();
+      var route = (spineL2.route || gate.route || 'NORMAL').toUpperCase();
       var svg = '';
       // Bar background
       svg += '<rect x="40" y="65" width="320" height="12" rx="6" fill="rgba(184,138,158,0.08)"/>';
