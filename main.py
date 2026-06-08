@@ -144,6 +144,7 @@ from sylanne_alpha.memory_system import MemorySystem  # noqa: E402
 from sylanne_alpha.llm_request_pipeline import LLMRequestPipeline  # noqa: E402
 from sylanne_alpha.rhythm_learner import RhythmLearner  # noqa: E402
 from sylanne_alpha.proactive_scheduler import ProactiveScheduler  # noqa: E402
+from sylanne_alpha.proactive_bridge import ProactiveBridge  # noqa: E402
 from sylanne_alpha.session_context import SessionContext  # noqa: E402
 from sylanne_alpha.social_field import SocialFieldCollector  # noqa: E402
 from sylanne_alpha.llm_response_pipeline import LLMResponsePipeline  # noqa: E402
@@ -451,6 +452,8 @@ class EmotionalStatePlugin(Star):
         self._public_api = PublicAPI(self)
         # 主动发言调度器：基于身体需求和节律决定是否主动发言
         self._proactive_scheduler = ProactiveScheduler(self)
+        # 主动发言桥接器：把意图+生活素材交给大饼插件执行发送
+        self._proactive_bridge = ProactiveBridge(self)
         self._register_web_apis(context)
 
         # AstrBot ConversationManager / PersonaManager 集成
@@ -1168,8 +1171,16 @@ class EmotionalStatePlugin(Star):
 
     @filter.on_decorating_result()
     async def on_decorating_result(self, event: Any) -> None:
-        """Stage 8 兜底：strip thinking/draft 块，防止 tool loop 中间步骤泄露。"""
+        """Stage 8 兜底：strip thinking/draft 块，防止 tool loop 中间步骤泄露。
+
+        另：若该消息是 Sylanne 主动发言桥接登记的"待接管分段"，则清空 chain 阻止
+        大饼整段发送，改由 Sylanne 后台连发人格化分段。
+        """
         try:
+            # 分段接管优先判定（大饼主动消息）
+            if await self._maybe_takeover_segments(event):
+                return
+
             from sylanne_alpha.compat import strip_draft_blocks
 
             result = event.get_result()
@@ -1197,6 +1208,72 @@ class EmotionalStatePlugin(Star):
             logger.warning(
                 f"Sylanne on_decorating_result strip failed: {e}", exc_info=True
             )
+
+    async def _maybe_takeover_segments(self, event: Any) -> bool:
+        """若 event 对应的 origin 被桥接登记为待接管分段：
+
+        提取文本 → 清空 chain（大饼见空 chain 不发送）→ 后台用 Sylanne 分段连发。
+        返回 True 表示已接管（调用方应 return，跳过后续 strip）。
+        """
+        bridge = getattr(self, "_proactive_bridge", None)
+        if bridge is None:
+            return False
+        origin = str(getattr(event, "unified_msg_origin", "") or "")
+        if not origin or not bridge.claim_segment_takeover(origin):
+            return False
+        try:
+            result = event.get_result()
+            chain = getattr(result, "chain", None) if result is not None else None
+            text = ""
+            if chain:
+                text = "".join(
+                    seg.text for seg in chain if isinstance(seg, Plain) and seg.text
+                )
+            # 清空 chain → 大饼 _send_chain_with_hooks 见空链直接 return，不发送
+            if result is not None:
+                if isinstance(result.chain, list):
+                    result.chain[:] = []
+                else:
+                    result.chain = []
+            text = text.strip()
+            if not text:
+                return True  # 已拦截，无内容可发
+            # 后台连发 Sylanne 人格化分段（不阻塞装饰链）
+            from sylanne_alpha.compat.facade import realtime_plan
+
+            plan = realtime_plan(origin, text)
+            parts = plan.get("message_parts", [])
+            # 连发中欲言又止：犹豫开启时，按强度给分段插入加长停顿/半句省略号
+            if (self.config or {}).get("sylanne_alpha_proactive_hesitation", False):
+                try:
+                    surface = await self.proactive_sylanne(session_key=origin)
+                    body = surface.get("body", {}) if isinstance(surface, dict) else {}
+                    parts = bridge.apply_segment_hesitation(parts, body)
+                except Exception as e:
+                    logger.warning(f"Sylanne segment hesitation skip: {e}")
+            task = safe_ensure_future(
+                self._llm_response_pipeline._dispatch_segmented_parts(origin, parts),
+                name="proactive_segment_takeover",
+            )
+            if isinstance(getattr(self, "_background_tasks", None), list):
+                self._background_tasks.append(task)
+                task.add_done_callback(
+                    lambda t: (
+                        self._background_tasks.remove(t)
+                        if t in self._background_tasks
+                        else None
+                    )
+                )
+            logger.info(
+                f"Sylanne proactive segment takeover: {len(parts)} parts for {origin}"
+            )
+            return True
+        except Exception as e:
+            logger.warning(
+                f"Sylanne proactive segment takeover failed: {e}", exc_info=True
+            )
+            return False
+
 
     async def _on_llm_response_inner(self, event: Any, response: Any) -> None:
         await self._llm_response_pipeline._on_llm_response_inner(event, response)
@@ -2162,6 +2239,61 @@ class EmotionalStatePlugin(Star):
 
     async def _run_proactive_scheduler_once(self) -> dict[str, Any]:
         return await self._proactive_scheduler.run_once()
+
+    def _start_life_simulator(self) -> None:
+        """配置并启动生命模拟器（幂等）。
+
+        解死锁：以前生命模拟器只在用户首次 LLM 请求时懒启动，导致"用户不说话
+        →永不启动→永不主动"。改为由 initialize() 生命周期钩子在插件加载后直接
+        启动，不再依赖用户消息。
+        """
+        if getattr(self, "_life_simulator_started", False):
+            return
+        life_sim = getattr(self, "_life_simulator", None)
+        if life_sim is None:
+            return
+        self._life_simulator_started = True
+        pipe = self._llm_request_pipeline
+        life_sim.configure(
+            llm_caller=pipe._life_sim_llm_call,
+            outreach_callback=pipe._life_sim_outreach,
+            emotion_getter=pipe._life_sim_emotion,
+            body_delta_callback=pipe._life_sim_body_delta,
+            persona_getter=pipe._life_sim_persona_getter,
+            countdown_callback=self._life_sim_adjust_countdown,
+        )
+        life_sim.start()
+        logger.info(
+            f"Sylanne life simulator: enabled={life_sim.enabled}, "
+            f"interval={life_sim.interval_seconds}s (started at initialize)"
+        )
+
+    async def initialize(self) -> None:
+        """AstrBot 插件生命周期钩子：加载后调用（有 running loop，不依赖用户消息）。"""
+        try:
+            self._start_life_simulator()
+        except Exception as e:
+            logger.error(f"Sylanne initialize: life simulator start failed: {e}", exc_info=True)
+
+    async def _life_sim_adjust_countdown(self) -> None:
+        """生命模拟 tick 回调：用 Sylanne 当前状态拨动大饼下一次主动发言倒计时。
+
+        仅在桥接开关开启且大饼可用时生效；选最近活跃会话。失败静默。
+        """
+        bridge = getattr(self, "_proactive_bridge", None)
+        if bridge is None:
+            return
+        if not (self.config or {}).get("sylanne_alpha_proactive_bridge_enabled", False):
+            return
+        if not bridge.available():
+            return
+        session_key = self._llm_request_pipeline._most_recent_host_key()
+        if not session_key:
+            return
+        try:
+            await bridge.adjust_countdown(session_key)
+        except Exception as e:
+            logger.warning(f"Sylanne adjust_countdown callback: {e}", exc_info=True)
 
     async def terminate(self) -> None:
         """插件卸载/更新前的清理：停止所有后台任务、关闭 WebUI、持久化状态。"""
