@@ -6,6 +6,7 @@ G:\\claude-data\\plans\\cp8-multiagent-warplan.md §3。
 """
 
 from sylanne_alpha.agents.base import (
+    AUTONOMOUS,
     LLM,
     POST,
     PRE,
@@ -51,6 +52,7 @@ __all__ = [
     "PRE",
     "POST",
     "RESPONSE_POST",
+    "AUTONOMOUS",
     "EventBus",
     "AgentEvent",
     "ResponseObserved",

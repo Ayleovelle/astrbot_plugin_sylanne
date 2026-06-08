@@ -58,6 +58,40 @@ class SelfCore:
         self._agents.append(agent)
 
     # ------------------------------------------------------------------
+    # 三态生命周期（CP8-P3b）：基于空闲时长判会话自驱活跃度
+    # ------------------------------------------------------------------
+    # AWAKE：刚互动过，每个自驱扫描拍都参与演化。
+    # DROWSY：空闲数分钟，降频演化（N 拍才一次）。
+    # RETIRED：空闲超阈值，移出自驱迭代，资源归零，等用户消息唤醒。
+    AWAKE = "awake"
+    DROWSY = "drowsy"
+    RETIRED = "retired"
+
+    def autonomy_phase(self, session_key: str, now: float) -> str:
+        """按空闲时长（距上次用户消息）判会话三态。阈值是人格函数的占位实现，
+        后续可随关系亲密度调（越在意的关系退休越慢）。"""
+        try:
+            last = float(
+                self._p._store.last_user_message_time.get(session_key, 0.0) or 0.0
+            )
+        except Exception:
+            last = 0.0
+        idle = now - last
+        drowsy_after = self._cfg_float("sylanne_alpha_autonomy_drowsy_after_seconds", 300.0)
+        retire_after = self._cfg_float("sylanne_alpha_autonomy_retire_after_seconds", 1800.0)
+        if idle < drowsy_after:
+            return self.AWAKE
+        if idle < retire_after:
+            return self.DROWSY
+        return self.RETIRED
+
+    def _cfg_float(self, key: str, default: float) -> float:
+        try:
+            return float((self._p.config or {}).get(key, default))
+        except Exception:
+            return default
+
+    # ------------------------------------------------------------------
     # 编排：一轮 perceive → gate → act → 收集意图
     # ------------------------------------------------------------------
     async def run_cycle(
