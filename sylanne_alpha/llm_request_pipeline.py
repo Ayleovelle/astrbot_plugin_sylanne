@@ -886,15 +886,7 @@ class LLMRequestPipeline:
             request: LLM 请求对象，可修改其 prompt 字段注入上下文。
         """
         p = self._p
-        # 懒初始化运行时状态容器——这些属性在插件首次收到请求时创建
-        if not hasattr(p, "_stream_buffers"):
-            p._stream_buffers = {}
-        if not hasattr(p, "_stream_first_sent"):
-            p._stream_first_sent = {}
-        if not hasattr(p, "_segmented_tasks"):
-            p._segmented_tasks = {}
-        if not hasattr(p, "_unfinished_replies"):
-            p._unfinished_replies = {}
+        # 流式/分段/预算等运行态已迁入 p._store（CP8-P2），无需懒初始化。
         if not hasattr(p, "_background_tasks") or not isinstance(p._background_tasks, list):
             if hasattr(p, "_background_tasks"):
                 logger.warning(
@@ -902,8 +894,6 @@ class LLMRequestPipeline:
                     type(p._background_tasks).__name__,
                 )
             p._background_tasks = []
-        if not hasattr(p, "_last_request_budgets"):
-            p._last_request_budgets = {}
         if not hasattr(p, "_fragment_buffers"):
             p._fragment_buffers = {}
         if not hasattr(p, "_fragment_timers"):
@@ -928,7 +918,7 @@ class LLMRequestPipeline:
         if not message_text.strip():
             message_text = await self._transcribe_non_text(event, message_text)
         if message_text:
-            p._last_user_texts[session_key] = message_text[:120]
+            p._store.last_user_texts.set(session_key, message_text[:120])
         realtime_enabled = bool(
             (p.config or {}).get("sylanne_alpha_realtime_chat_enabled")
         )
@@ -993,10 +983,8 @@ class LLMRequestPipeline:
             getattr(event, "_is_follow_up", False)
             or getattr(event, "order_seq", None) is not None
         )
-        active_reply = (
-            session_key in p._segmented_tasks
-            and not p._segmented_tasks[session_key].done()
-        )
+        _seg_task = p._store.segmented_tasks.get(session_key)
+        active_reply = _seg_task is not None and not _seg_task.done()
         if realtime_enabled and message_text and not is_follow_up and not active_reply:
             probe_delay = float(
                 (p.config or {}).get(
@@ -1196,8 +1184,8 @@ class LLMRequestPipeline:
                 )
 
         # 清理该会话的流式状态
-        p._stream_buffers.pop(session_key, None)
-        p._stream_first_sent.pop(session_key, None)
+        p._store.stream_buffers.pop(session_key, None)
+        p._store.stream_first_sent.pop(session_key, None)
 
         # 启动后台观测任务（按会话串行化避免竞态）
         if message_text:
@@ -1231,7 +1219,7 @@ class LLMRequestPipeline:
                     pass
 
         # 取消该会话过期的分段回复任务
-        stale_task = p._segmented_tasks.pop(session_key, None)
+        stale_task = p._store.segmented_tasks.pop(session_key, None)
         if stale_task and not stale_task.done():
             stale_task.cancel()
 
@@ -1266,7 +1254,7 @@ class LLMRequestPipeline:
                             first_sentence = p._extract_first_sentence(buffer)
                             if first_sentence:
                                 first_sent = True
-                                p._stream_first_sent[session_key] = first_sentence
+                                p._store.stream_first_sent.set(session_key, first_sentence)
                                 t = safe_ensure_future(
                                     p._send_first_sentence(origin, first_sentence),
                                     name="stream_send_first_sentence",
@@ -1326,7 +1314,7 @@ class LLMRequestPipeline:
         budget = p._state_injection_budget_for_request(
             session_key, request, model_hint=model_hint
         )
-        p._last_request_budgets[session_key] = budget
+        p._store.last_request_budgets.set(session_key, budget)
 
         # 先缓存原始 system prompt，再做 Claude/hajide 归一化
         original_system_prompt = str(getattr(request, "system_prompt", "") or "")
@@ -1374,7 +1362,7 @@ class LLMRequestPipeline:
         p = self._p
 
         # 注入未完成回复上下文
-        unfinished = p._unfinished_replies.pop(session_key, "")
+        unfinished = p._store.unfinished_replies.pop(session_key, "")
         unfinished_fragment = ""
         if unfinished:
             host = p._host(session_key)
@@ -1896,7 +1884,7 @@ class LLMRequestPipeline:
                     else:
                         buf.inject_context(shadow_entries)
             buf.append("user", text)
-            p._last_user_texts[session_key] = text[:120]
+            p._store.last_user_texts.set(session_key, text[:120])
             p._schedule_buffer_persist(session_key)
 
             # 并行同步到 AstrBot ConversationManager

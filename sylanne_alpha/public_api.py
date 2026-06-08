@@ -294,7 +294,7 @@ class PublicAPI:
     def _sylanne_lineage_observatory_page_payload(
         self, session_key: str
     ) -> dict[str, Any]:
-        loop_data = self._p._last_understanding_closed_loop.get(session_key, {})
+        loop_data = self._p._store.last_understanding_closed_loop.get(session_key, {})
         observatory = loop_data.get("turning_point_lineage_observatory", {})
         lineage = observatory.get("lineage", {})
         raw_branches = observatory.get("branches", [])
@@ -317,7 +317,7 @@ class PublicAPI:
     def _understanding_closed_loop_diagnostics(
         self, session_key: str
     ) -> dict[str, Any]:
-        loop_data = dict(self._p._last_understanding_closed_loop.get(session_key, {}))
+        loop_data = dict(self._p._store.last_understanding_closed_loop.get(session_key, {}))
         if "turning_point_memory_replay" in loop_data:
             loop_data["turning_point_memory_replay"] = {}
         if "turning_point_lineage_observatory" in loop_data:
@@ -344,8 +344,8 @@ class PublicAPI:
         else:
             session_key = self._session_key(event)
         _BudgetCls = (
-            type(next(iter(p._last_request_budgets.values()), None))
-            if p._last_request_budgets
+            type(next(iter(p._store.last_request_budgets.values()), None))
+            if len(p._store.last_request_budgets)
             else None
         )
         default_budget = (
@@ -362,11 +362,7 @@ class PublicAPI:
                 warnings=[],
             )
         )
-        budget = (
-            p._last_request_budgets.get(session_key, default_budget)
-            if hasattr(p, "_last_request_budgets")
-            else default_budget
-        )
+        budget = p._store.last_request_budgets.get(session_key, default_budget)
         cfg = p.config or {}
         result: dict[str, Any] = {
             "state_injection": {
@@ -984,7 +980,7 @@ class PublicAPI:
         if not cfg.get("enable_sylanne_memory", True):
             yield "Sylanne 记忆系统未启用。"
             return
-        cache = p._sylanne_memory_cache
+        cache = p._store.sylanne_memory_cache
         state = cache.get(sk)
         if state is None:
             yield "当前会话无记忆记录。"
@@ -1222,9 +1218,7 @@ class PublicAPI:
             event_time=p._event_time(now),
         )
         # Feedback loop: trigger based on time since last bot expression
-        if not hasattr(p, "_last_bot_expression_time"):
-            p._last_bot_expression_time = {}
-        last_expr_time = p._last_bot_expression_time.get(session_key, 0.0)
+        last_expr_time = p._store.last_bot_expression_time.get(session_key, 0.0)
         if last_expr_time > 0:
             gap = effective_now - last_expr_time
             if gap < 30.0:
@@ -1271,9 +1265,7 @@ class PublicAPI:
             now=effective_now,
             event_time=p._event_time(now),
         )
-        if not hasattr(p, "_last_bot_expression_time"):
-            p._last_bot_expression_time = {}
-        p._last_bot_expression_time[session_key] = effective_now
+        p._store.last_bot_expression_time.set(session_key, effective_now)
         result = host.on_response(event)
         if p._has_persona_manager():
             p._sync_personality_to_persona_mgr(session_key)
@@ -1322,18 +1314,16 @@ class PublicAPI:
                 message_id = str(raw.get("message_id", ""))
             if not reason:
                 reason = str(raw.get("notice_type", ""))
-        epochs = p._conversation_input_epoch
+        epochs = p._store.conversation_input_epoch
         current_epoch = epochs.get(session_key, 0)
         new_epoch = current_epoch + 1
-        epochs[session_key] = new_epoch
-        last_text = p._last_request_text
-        last_text.pop(session_key, None)
-        withdrawals = p._user_message_withdrawals
-        withdrawals[session_key] = {
+        epochs.set(session_key, new_epoch)
+        p._store.last_request_text.pop(session_key, None)
+        p._store.user_message_withdrawals.set(session_key, {
             "message_id": message_id,
             "reason": reason,
             "input_epoch": new_epoch,
-        }
+        })
         candidates = p._proactive_candidate_sessions
         if session_key in candidates:
             candidates[session_key]["last_user_text_excerpt"] = ""

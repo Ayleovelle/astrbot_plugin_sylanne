@@ -95,13 +95,8 @@ class LLMResponsePipeline:
             event: AstrBot 事件对象。
             response: LLM 响应对象，包含 completion_text。
         """
-        if not hasattr(self._p, "_stream_first_sent"):
-            self._p._stream_first_sent = {}
-        if not hasattr(self._p, "_unfinished_replies"):
-            self._p._unfinished_replies = {}
+        # 流式/分段缓冲已迁入 _store（CP8-P2）
         ensure_background_tasks_list(self._p)
-        if not hasattr(self._p, "_segmented_tasks"):
-            self._p._segmented_tasks = {}
         session_key = self._p._session_key(event)
         cfg = self._p._config or {}
         realtime_enabled = bool(
@@ -151,7 +146,7 @@ class LLMResponsePipeline:
             return
 
         # 检查首句是否已通过流式发送
-        first_sent = self._p._stream_first_sent.pop(session_key, "")
+        first_sent = self._p._store.stream_first_sent.pop(session_key, "")
         if first_sent:
             # 首句已发送——不重复发送，存储剩余部分供下轮续接
             remainder = cleaned
@@ -166,7 +161,7 @@ class LLMResponsePipeline:
                 else:
                     remainder = ""
             if remainder:
-                self._p._unfinished_replies[session_key] = remainder
+                self._p._store.unfinished_replies.set(session_key, remainder)
             # Don't modify completion_text, don't stop event
             return
 
@@ -178,7 +173,7 @@ class LLMResponsePipeline:
         host = self._p._host(session_key)
         expr_drive = host.kernel.computation.engine.expression_drive()
         # 计算最近被忽略的回复比例，用于调整节奏
-        last_times = [t for t in self._p._last_bot_expression_time.values() if t > 0]
+        last_times = [t for t in self._p._store.last_bot_expression_time.values() if t > 0]
         recent_ignored = 0.0
         if len(last_times) > 3:
             now = time.time()
@@ -214,7 +209,7 @@ class LLMResponsePipeline:
             rest = cleaned
             if rest.startswith(sent_first):
                 rest = rest[len(sent_first) :].strip()
-            self._p._unfinished_replies[session_key] = rest
+            self._p._store.unfinished_replies.set(session_key, rest)
 
         # 后台调度分段发送
         self._p.logger.info(
@@ -232,7 +227,7 @@ class LLMResponsePipeline:
                 else None
             )
         )
-        self._p._segmented_tasks[session_key] = task
+        self._p._store.segmented_tasks.set(session_key, task)
 
         # 将观测任务从热路径移出，后台异步执行
         obs_task = safe_ensure_future(
@@ -258,7 +253,7 @@ class LLMResponsePipeline:
                 session_key, ConversationBuffer(session_key=session_key)
             )
             buf.append("bot", text)
-            self._p._last_bot_texts[session_key] = text[:120]
+            self._p._store.last_bot_texts.set(session_key, text[:120])
             self._p._schedule_buffer_persist(session_key)
             # Parallel sync to AstrBot ConversationManager
             if self._p._has_conversation_manager():
@@ -312,14 +307,14 @@ class LLMResponsePipeline:
         if not delta:
             return
 
-        buffer = self._p._stream_buffers.get(session_key, "") + delta
-        self._p._stream_buffers[session_key] = buffer
+        buffer = self._p._store.stream_buffers.get(session_key, "") + delta
+        self._p._store.stream_buffers.set(session_key, buffer)
 
         # Check if we have a complete first sentence
         first_sentence = self._extract_first_sentence(buffer)
-        if first_sentence and session_key not in self._p._stream_first_sent:
-            self._p._stream_first_sent[session_key] = first_sentence
-            self._p._stream_buffers.pop(session_key, None)
+        if first_sentence and not self._p._store.stream_first_sent.has(session_key):
+            self._p._store.stream_first_sent.set(session_key, first_sentence)
+            self._p._store.stream_buffers.pop(session_key, None)
             origin = str(getattr(event, "unified_msg_origin", "") or "")
             task = safe_ensure_future(
                 self._send_first_sentence(origin, first_sentence),
@@ -392,12 +387,12 @@ class LLMResponsePipeline:
                     str(p.get("text", "")) for p in parts[idx:]
                 )
                 if remaining_text:
-                    self._p._unfinished_replies[session_key] = remaining_text
+                    self._p._store.unfinished_replies.set(session_key, remaining_text)
                 else:
-                    self._p._unfinished_replies.pop(session_key, None)
+                    self._p._store.unfinished_replies.pop(session_key, None)
         # 所有段发送成功——清除未完成标记
         if session_key:
-            self._p._unfinished_replies.pop(session_key, None)
+            self._p._store.unfinished_replies.pop(session_key, None)
 
     # ------------------------------------------------------------------
     # Memory prompt fragment

@@ -645,11 +645,7 @@ class StatePersistence:
             return
         from .memory_system import MemorySystem
 
-        cache = self._p._sylanne_memory_cache
-        if not isinstance(cache, dict):
-            cache = {}
-        self._p._sylanne_memory_cache = cache
-        cache[session_key] = state
+        self._p._store.sylanne_memory_cache.set(session_key, state)
         if isinstance(state, MemorySystem):
             self._p._memory_systems[session_key] = state
         kv_key = self.sylanne_memory_kv_key(session_key)
@@ -697,13 +693,9 @@ class StatePersistence:
                 )
             return bool(list(getattr(state, "records", []) or []))
 
-        cache = self._p._sylanne_memory_cache
-        if not isinstance(cache, dict):
-            cache = {}
-        self._p._sylanne_memory_cache = cache
-        cached_state = cache.get(session_key) if isinstance(cache, dict) else None
+        cached_state = self._p._store.sylanne_memory_cache.get(session_key)
         if has_content(cached_state):
-            return cache[session_key]
+            return cached_state
         # 检查活跃记忆系统
         system_cache = getattr(self._p, "_memory_systems", {}) or {}
         live_state = (
@@ -794,8 +786,7 @@ class StatePersistence:
         Args:
             session_key: 会话标识。
         """
-        cache = self._p._sylanne_memory_cache
-        cache.pop(session_key, None)
+        self._p._store.sylanne_memory_cache.pop(session_key, None)
         kv_key = self.sylanne_memory_kv_key(session_key)
         delete_fn = getattr(self._p, "delete_kv_data", None)
         if delete_fn and callable(delete_fn):

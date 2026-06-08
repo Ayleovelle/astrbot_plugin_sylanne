@@ -101,7 +101,7 @@ class RealtimeDispatch:
             await context.send_message(origin, message)
         # All parts sent successfully — clear unfinished marker
         if session_key:
-            self._p._unfinished_replies.pop(session_key, None)
+            self._p._store.unfinished_replies.pop(session_key, None)
 
     # ------------------------------------------------------------------
     # Realtime chat plan delivery
@@ -138,7 +138,7 @@ class RealtimeDispatch:
         media_count = 0
         media_results: list[dict[str, Any]] = []
         interrupted_reason = ""
-        epochs = p._conversation_input_epoch
+        epochs = p._store.conversation_input_epoch
 
         for part in parts:
             if plan_epoch and epochs.get(session_key, 0) > plan_epoch:
@@ -340,9 +340,7 @@ class RealtimeDispatch:
         delivery_status: str = "",
     ) -> None:
         p = self._p
-        if not hasattr(p, "_realtime_ordinary_history_backfills"):
-            p._realtime_ordinary_history_backfills: dict[str, list[dict[str, Any]]] = {}
-        entries = p._realtime_ordinary_history_backfills.setdefault(session_key, [])
+        entries = p._store.realtime_ordinary_history_backfills.get_or_create(session_key, list)
         entries.append(
             {
                 "role": role,
@@ -404,13 +402,8 @@ class RealtimeDispatch:
             p._realtime_assistant_history_shadows: dict[str, list[dict[str, Any]]] = {}
         return p._realtime_assistant_history_shadows
 
-    def realtime_ordinary_history_backfill_cache(
-        self,
-    ) -> dict[str, list[dict[str, Any]]]:
-        p = self._p
-        if not hasattr(p, "_realtime_ordinary_history_backfills"):
-            p._realtime_ordinary_history_backfills: dict[str, list[dict[str, Any]]] = {}
-        return p._realtime_ordinary_history_backfills
+    def realtime_ordinary_history_backfill_cache(self) -> Any:
+        return self._p._store.realtime_ordinary_history_backfills
 
     # ------------------------------------------------------------------
     # Context injection (append_*_if_any)
@@ -676,14 +669,16 @@ class RealtimeDispatch:
         if changed:
             self._trim_consumed(shadows)
             backfills = self.realtime_ordinary_history_backfill_cache()
-            if session_key in backfills:
-                backfills[session_key] = [
+            if backfills.has(session_key):
+                filtered = [
                     e
-                    for e in backfills[session_key]
+                    for e in backfills.get(session_key)
                     if e.get("input_epoch", 0) > input_epoch
                 ]
-                if not backfills[session_key]:
-                    del backfills[session_key]
+                if filtered:
+                    backfills.set(session_key, filtered)
+                else:
+                    backfills.pop(session_key, None)
         return changed
 
     # ------------------------------------------------------------------
@@ -708,7 +703,7 @@ class RealtimeDispatch:
         p = self._p
         if state is None:
             return ""
-        cache = getattr(p, "_group_atmosphere_injection_snapshot_cache", {})
+        cache = p._store.group_atmosphere_injection_snapshot_cache
         previous = cache.get(session_key)
         cfg = p.config or {}
         diff_mode = str(cfg.get("state_injection_compact_mode", "")).lower() == "diff"
@@ -726,10 +721,7 @@ class RealtimeDispatch:
             if max_delta < threshold:
                 return '<bot_group_atmosphere detail="diff">No material room-mood change since last injection.</bot_group_atmosphere>'
         snapshot = {"values": dict(values)}
-        cache[session_key] = snapshot
-        if not hasattr(p, "_group_atmosphere_injection_snapshot_cache"):
-            p._group_atmosphere_injection_snapshot_cache = {}
-        p._group_atmosphere_injection_snapshot_cache[session_key] = snapshot
+        cache.set(session_key, snapshot)
         lines = ["<bot_group_atmosphere>"]
         for k, v in values.items():
             lines.append(f"  {k}={v:.2f}" if isinstance(v, float) else f"  {k}={v}")
@@ -808,14 +800,12 @@ class RealtimeDispatch:
         self, session_key: str, epoch: int = 0
     ) -> None:
         p = self._p
-        epochs = p._conversation_pending_response_epochs
-        if epochs and session_key in epochs:
-            del epochs[session_key]
+        p._store.conversation_pending_response_epochs.pop(session_key, None)
 
     def conversation_reply_is_stale(self, session_key: str, reply_epoch: int) -> bool:
         """判断回复是否已过期（用户在回复生成期间发送了新消息）。"""
         p = self._p
-        epochs = p._conversation_input_epoch
+        epochs = p._store.conversation_input_epoch
         current = epochs.get(session_key, 0)
         return reply_epoch < current
 

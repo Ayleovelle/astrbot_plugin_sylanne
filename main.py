@@ -146,6 +146,7 @@ from sylanne_alpha.rhythm_learner import RhythmLearner  # noqa: E402
 from sylanne_alpha.proactive_scheduler import ProactiveScheduler  # noqa: E402
 from sylanne_alpha.proactive_bridge import ProactiveBridge  # noqa: E402
 from sylanne_alpha.session_context import SessionContext  # noqa: E402
+from sylanne_alpha.session_state_store import SessionStateStore  # noqa: E402
 from sylanne_alpha.social_field import SocialFieldCollector  # noqa: E402
 from sylanne_alpha.llm_response_pipeline import LLMResponsePipeline  # noqa: E402
 from sylanne_alpha.public_api import PublicAPI  # noqa: E402
@@ -375,18 +376,13 @@ class EmotionalStatePlugin(Star):
         super().__init__(context)
         self.config = config or {}
         self._config = self.config
+        # 会话态集中存储：所有 session-keyed 容器收拢于此（CP8-P2）。
+        # 经语义方法访问，release_session 统一清理。
+        self._store = SessionStateStore()
         # 会话管理：session_key → SylanneAlphaHost 映射
         self._hosts: BoundedDict = BoundedDict(maxsize=200)
         self._background_tasks: list[asyncio.Task] = []
-        # 流式回复相关缓冲区
-        self._unfinished_replies: BoundedDict = BoundedDict(maxsize=200)
-        self._stream_buffers: BoundedDict = BoundedDict(maxsize=200)
-        self._stream_first_sent: BoundedDict = BoundedDict(maxsize=200)
-        self._segmented_tasks: BoundedDict = BoundedDict(maxsize=200)
-        # 请求/响应诊断缓存
-        self._last_request_budgets: BoundedDict = BoundedDict(maxsize=200)
-        self._last_understanding_closed_loop: BoundedDict = BoundedDict(maxsize=200)
-        self._last_bot_expression_time: BoundedDict = BoundedDict(maxsize=200)
+        # 流式回复缓冲区已迁入 self._store（CP8-P2 批1）
         # 计算日志环形缓冲区（供 WebUI 实时显示）
         self._computation_logs: collections.deque = collections.deque(maxlen=200)
         # WebUI 运行时标识（用于探针验证实例一致性）
@@ -402,13 +398,8 @@ class EmotionalStatePlugin(Star):
         # 对话缓冲区：用于 flush 到 L1 记忆池
         self._conversation_buffers: BoundedDict = BoundedDict(maxsize=100)
         self._meltdown_nonces: BoundedDict = BoundedDict(maxsize=50, ttl=300)
-        self._last_user_texts: BoundedDict = BoundedDict(maxsize=200)
-        self._last_bot_texts: BoundedDict = BoundedDict(maxsize=200)
         # 社交场收集器：群聊氛围感知
         self._social_field = SocialFieldCollector(config=self._config)
-        self._conversation_input_epoch: BoundedDict = BoundedDict(maxsize=200)
-        self._last_request_text: BoundedDict = BoundedDict(maxsize=200)
-        self._user_message_withdrawals: BoundedDict = BoundedDict(maxsize=200)
         # 后台投递队列：异步发送主动消息/分段回复
         self._background_post_queues: BoundedDict = BoundedDict(maxsize=200)
         self._background_post_dead_letters: BoundedDict = BoundedDict(maxsize=200)
@@ -428,17 +419,6 @@ class EmotionalStatePlugin(Star):
         self._proactive_candidate_sessions: BoundedDict = BoundedDict(maxsize=100)
         self._proactive_scheduler_task: asyncio.Task | None = None
         self._proactive_scheduler_locks: dict[str, asyncio.Lock] = {}
-        self._last_user_message_time: BoundedDict = BoundedDict(maxsize=200)
-        self._sylanne_memory_cache: BoundedDict = BoundedDict(maxsize=200)
-        self._conversation_pending_response_epochs: BoundedDict = BoundedDict(
-            maxsize=200
-        )
-        self._group_atmosphere_injection_snapshot_cache: BoundedDict = BoundedDict(
-            maxsize=200
-        )
-        self._realtime_ordinary_history_backfills: BoundedDict = BoundedDict(
-            maxsize=200
-        )
         self._realtime_chat_active_dispatches: BoundedDict = BoundedDict(maxsize=200)
         self._session_locks: dict[str, asyncio.Lock] = {}
         # 子系统初始化：各子系统持有 self 引用，通过委托模式分工
@@ -1041,7 +1021,7 @@ class EmotionalStatePlugin(Star):
             session_key = self._session_ctx.session_key(event)
             now = time.time()
             # 更新最后消息时间，供 proactive scheduler 计算沉默时长
-            self._last_user_message_time[session_key] = now
+            self._store.last_user_message_time.set(session_key, now)
             # 喂给节奏学习器（记录 tempo，不受亲密度门控）
             self._rhythm_learner._record_tempo(session_key, now)
         except Exception:
@@ -1852,7 +1832,7 @@ class EmotionalStatePlugin(Star):
     def _record_conversation_pending_response_epoch(
         self, session_key: str, now: float = 0.0
     ) -> None:
-        self._conversation_pending_response_epochs[session_key] = now or time.time()
+        self._store.conversation_pending_response_epochs.set(session_key, now or time.time())
 
     async def _sylanne_memory_recall_summary_for_request(
         self,
@@ -1886,8 +1866,7 @@ class EmotionalStatePlugin(Star):
         await self._state_persistence.delete_sylanne_memory_state(session_key)
 
     def _consume_conversation_pending_response_epoch(self, session_key: str) -> float:
-        epochs = self._conversation_pending_response_epochs
-        return epochs.pop(session_key, 0.0)
+        return self._store.conversation_pending_response_epochs.pop(session_key, 0.0)
 
     async def _observe_sylanne_memory_event_if_enabled(
         self, session_key: str, text: str = "", **kwargs: Any
@@ -2003,7 +1982,7 @@ class EmotionalStatePlugin(Star):
         return []
 
     def _last_request_text_for_session(self, session_key: str = "") -> str:
-        return str(self._last_request_text.get(session_key, ""))
+        return str(self._store.last_request_text.get(session_key, ""))
 
     def _background_post_adaptive_worker_decision(
         self, session_key: str = "", *, commit_scale: bool = False
