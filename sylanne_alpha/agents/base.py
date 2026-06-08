@@ -33,11 +33,13 @@ SKIP = "skip"   # 这轮不动（绝大多数 agent 的默认）
 RULE = "rule"   # 用廉价规则处理，零 LLM
 LLM = "llm"     # 够格升级到 LLM + 工具（低频，受全局预算闸约束）
 
-# ── 编排时点：双时点模型（作战文档时序矛盾解法）──
+# ── 编排时点：三时点模型 ──
 # PRE：请求发出前，agent act 产意图影响本轮计算输入（flags/confidence/values）。
-# POST：host 计算完出新 surface 后，agent 消化本轮结果更新自身状态（节奏/记忆/社交）。
+# POST：host 计算完出新 surface 后（请求侧），agent 消化本轮结果（节奏/记忆/主动）。
+# RESPONSE_POST：bot 回复后（响应侧），agent 消化回复结果（社交通知/回复观测）。
 PRE = "pre"
 POST = "post"
+RESPONSE_POST = "response_post"
 
 
 @dataclass(slots=True)

@@ -9,13 +9,13 @@ from __future__ import annotations
 
 from typing import Any
 
-from sylanne_alpha.agents.base import LLM, POST, SKIP, AgentIntent, CognitiveAgent
+from sylanne_alpha.agents.base import LLM, RESPONSE_POST, SKIP, AgentIntent, CognitiveAgent
 from sylanne_alpha.agents.event_bus import ResponseObserved
 
 
 class DialogueAgent(CognitiveAgent):
     name = "dialogue"
-    phases = (POST,)
+    phases = (RESPONSE_POST,)
 
     def perceive(self, surface: dict[str, Any]) -> dict[str, Any]:
         decision = surface.get("decision", {})
@@ -34,9 +34,9 @@ class DialogueAgent(CognitiveAgent):
         return LLM  # 真要说话，组织表达（回话主调用）
 
     async def act(
-        self, session_key: str, mode: str, perceived: dict[str, Any], phase: str = POST
+        self, session_key: str, mode: str, perceived: dict[str, Any], phase: str = RESPONSE_POST
     ) -> AgentIntent | None:
-        if phase != POST:
+        if phase != RESPONSE_POST:
             return None
         bot_text = self._p._store.last_bot_texts.get(session_key, "")
         self.emit(ResponseObserved(

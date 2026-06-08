@@ -8,12 +8,12 @@ from __future__ import annotations
 
 from typing import Any
 
-from sylanne_alpha.agents.base import POST, RULE, SKIP, AgentIntent, CognitiveAgent
+from sylanne_alpha.agents.base import RESPONSE_POST, RULE, SKIP, AgentIntent, CognitiveAgent
 
 
 class SocialAgent(CognitiveAgent):
     name = "social"
-    phases = (POST,)
+    phases = (RESPONSE_POST,)
 
     def perceive(self, surface: dict[str, Any]) -> dict[str, Any]:
         # 是否群聊上下文由 session_key 形态/social_field 判定，此处取本轮 bot 文本
@@ -25,9 +25,9 @@ class SocialAgent(CognitiveAgent):
         return RULE if sf is not None else SKIP
 
     async def act(
-        self, session_key: str, mode: str, perceived: dict[str, Any], phase: str = POST
+        self, session_key: str, mode: str, perceived: dict[str, Any], phase: str = RESPONSE_POST
     ) -> AgentIntent | None:
-        if phase != POST:
+        if phase != RESPONSE_POST:
             return None
         sf = getattr(self._p, "_social_field", None)
         if sf is None:

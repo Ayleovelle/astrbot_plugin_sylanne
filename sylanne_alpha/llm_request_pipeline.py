@@ -1462,7 +1462,9 @@ class LLMRequestPipeline:
         sheaf_obs = _sheaf.observe() if _sheaf is not None and hasattr(_sheaf, "observe") else {}
         expr_state = comp.expression.state() if hasattr(comp, "expression") else {}
 
-        # 前台快速评估器
+        # 前台快速评估器（独立用途：结果立即生成 prompt 状态信号片段，见下方 signals）。
+        # 注：这与后台 AssessorAgent（结果进计算栈影响 kernel）是不同消费路径——
+        # 前台服务实时 prompt 文案、后台服务计算注入，各需一次 fast 评估，非重复执行。
         fast_assessment: dict = {}
         fast_enabled = p._cfg_bool("sylanne_alpha_assessor_llm_enabled")
         if fast_enabled and message_text:

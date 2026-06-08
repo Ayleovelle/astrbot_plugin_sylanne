@@ -261,18 +261,25 @@ class LLMResponsePipeline:
                     self._p._sync_message_to_conv_mgr(session_key, "bot", text),
                     name="conv_mgr_sync_bot",
                 )
-            # Notify social field collector that bot replied
+            # CP8-P3a：social notify_bot_replied 已收编进 SocialAgent（SelfCore
+            # RESPONSE_POST），此处不再直接调，避免双通知。social_void.reset 属计算栈
+            # 层状态清理（非 SocialFieldCollector 业务），保留在管线。
             if hasattr(
                 self._p, "_social_field"
             ) and self._p._social_field.is_group_context_by_key(session_key):
-                group_id = self._p._social_field.extract_group_id_from_key(session_key)
-                self._p._social_field.notify_bot_replied(group_id, text)
-                # Reset social void on reply
                 try:
                     host = self._p._host(session_key)
                     host.kernel.computation.engine.social_void.reset()
                 except Exception:
                     pass  # cleanup: failure acceptable
+            # SelfCore RESPONSE_POST 编排：social/dialogue 消化 bot 回复结果。
+            sc = getattr(self._p, "_self_core", None)
+            if sc is not None:
+                try:
+                    resp_surface = self._p._host(session_key).kernel.surface()
+                    await sc.run_cycle(session_key, resp_surface, phase="response_post")
+                except Exception as exc:
+                    logger.warning(f"Sylanne SelfCore RESPONSE_POST: {exc}", exc_info=True)
             await self._p.observe_response(
                 session_key,
                 text=text[:500],
