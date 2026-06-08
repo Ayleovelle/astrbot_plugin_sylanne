@@ -421,6 +421,9 @@ class EmotionalStatePlugin(Star):
         self._background_post_worker_state: BoundedDict = BoundedDict(maxsize=200)
         self._internal_assessor_llm_inflight: int = 0
         self._pending_outreach_context: BoundedDict = BoundedDict(maxsize=50)
+        # session_key → unified_msg_origin 映射，供主动发送定位会话。
+        # 在 on_llm_request 流程填充；此处预初始化避免散落懒创建的脆性。
+        self._session_origins: dict[str, str] = {}
         self._amnesia_sessions: set[str] = set()
         self._proactive_candidate_sessions: BoundedDict = BoundedDict(maxsize=100)
         self._proactive_scheduler_task: asyncio.Task | None = None
