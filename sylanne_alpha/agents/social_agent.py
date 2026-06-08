@@ -32,12 +32,15 @@ class SocialAgent(CognitiveAgent):
         sf = getattr(self._p, "_social_field", None)
         if sf is None:
             return None
-        bot_text = self._p._store.last_bot_texts.get(session_key, "")
-        if not bot_text:
-            return None
+        # 仅群聊上下文才通知社交场。group_id 须经 social_field 自己的解析（非 session_key）。
         try:
-            # group_id 由 session_key 推导（社交场内部按 group 维护）
-            sf.notify_bot_replied(session_key, bot_text)
+            if not sf.is_group_context_by_key(session_key):
+                return None
+            bot_text = self._p._store.last_bot_texts.get(session_key, "")
+            if not bot_text:
+                return None
+            group_id = sf.extract_group_id_from_key(session_key)
+            sf.notify_bot_replied(group_id, bot_text)
         except Exception:
             pass
         return None

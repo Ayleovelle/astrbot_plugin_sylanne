@@ -147,6 +147,16 @@ from sylanne_alpha.proactive_scheduler import ProactiveScheduler  # noqa: E402
 from sylanne_alpha.proactive_bridge import ProactiveBridge  # noqa: E402
 from sylanne_alpha.session_context import SessionContext  # noqa: E402
 from sylanne_alpha.session_state_store import SessionStateStore  # noqa: E402
+from sylanne_alpha.agents import (  # noqa: E402
+    SelfCore,
+    EmotionAgent,
+    AssessorAgent,
+    PersonaAgent,
+    LifeAgent,
+    MemoryAgent,
+    RhythmAgent,
+    ProactiveAgent,
+)
 from sylanne_alpha.social_field import SocialFieldCollector  # noqa: E402
 from sylanne_alpha.llm_response_pipeline import LLMResponsePipeline  # noqa: E402
 from sylanne_alpha.public_api import PublicAPI  # noqa: E402
@@ -412,6 +422,17 @@ class EmotionalStatePlugin(Star):
         self._llm_response_pipeline = LLMResponsePipeline(self)
         self._llm_request_pipeline = LLMRequestPipeline(self)
         self._public_api = PublicAPI(self)
+        # SelfCore 认知编排器（CP8-P3a）：注册在「请求侧」安全工作的 agent。
+        # PRE（影响计算）：emotion/assessor/persona/life/memory；
+        # 请求-POST（消化结果）：rhythm/memory/proactive。
+        # social/dialogue 属「响应-POST」（需 bot 回复后数据），留响应侧 cycle 的后续提交，
+        # 此处暂不注册以避免与管线响应侧旧调用双重执行。
+        self._self_core = SelfCore(self, llm_budget=3)
+        for _agent_cls in (
+            EmotionAgent, AssessorAgent, PersonaAgent, LifeAgent,
+            MemoryAgent, RhythmAgent, ProactiveAgent,
+        ):
+            self._self_core.register(_agent_cls(self, self._self_core.bus))
         # 主动发言调度器：基于身体需求和节律决定是否主动发言
         self._proactive_scheduler = ProactiveScheduler(self)
         # 主动发言桥接器：把意图+生活素材交给大饼插件执行发送

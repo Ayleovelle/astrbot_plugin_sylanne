@@ -34,19 +34,32 @@ class AssessorAgent(CognitiveAgent):
         if not text:
             return None
         assessor = getattr(p, "_async_assessor", None)
-        llm_caller = getattr(p, "_assessor_llm_call", None)
-        if assessor is None or llm_caller is None:
+        if assessor is None:
             return None
-        try:
-            result = await assessor.assess_fast(text, llm_caller)
-        except Exception:
-            return None
-        if not result:
-            return None
+        fast_result: dict = {}
+        main_result: dict = {}
+        # fast 层（小模型，始终；若启用）
+        if p._cfg_bool("sylanne_alpha_assessor_llm_enabled"):
+            try:
+                fast_result = await assessor.assess_fast(text, p._assessor_llm_call)
+            except Exception:
+                fast_result = {}
+        # main 层（强模型，更长上下文；若启用）——完整保留现有精度，不降级
+        if p._cfg_bool("sylanne_alpha_main_assessor_enabled"):
+            try:
+                context_lines = p._recent_context_lines(session_key)
+                main_result = await assessor.assess_main(
+                    text, context_lines, p._main_assessor_llm_call
+                )
+            except Exception:
+                main_result = {}
+        merged = {**fast_result, **main_result}  # main 覆盖 fast，与原管线一致
+        merged.pop("_level", None)
+        merged.pop("assessed_at", None)
         affect = {
-            k: float(result[k])
+            k: float(merged[k])
             for k in ("valence", "arousal", "wound_risk")
-            if k in result and isinstance(result[k], (int, float))
+            if k in merged and isinstance(merged[k], (int, float))
         }
         if not affect:
             return None

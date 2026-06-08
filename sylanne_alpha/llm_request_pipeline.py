@@ -1736,45 +1736,59 @@ class LLMRequestPipeline:
         from sylanne_alpha.host import SylanneAlphaHostEvent
 
         try:
-            fast_result: dict = {}
-            main_result: dict = {}
-
-            # 快速评估器（始终运行，若启用）
-            fast_enabled = p._cfg_bool("sylanne_alpha_assessor_llm_enabled")
-            if fast_enabled and text:
-                fast_result = await p._async_assessor.assess_fast(
-                    text,
-                    self._assessor_llm_call,
-                )
-
-            # 判断是否需要运行主评估器
+            # CP8-P3a：fast/main 评估已收编进 AssessorAgent（经 SelfCore PRE 调用），
+            # 此处不再直接调 assess_fast/assess_main，避免双重执行。
             host = p._host(session_key)
-            main_enabled = p._cfg_bool("sylanne_alpha_main_assessor_enabled")
-            if main_enabled and text:
-                # Gather recent context lines for richer assessment
-                context_lines = self._recent_context_lines(session_key)
-                main_result = await p._async_assessor.assess_main(
-                    text,
-                    context_lines,
-                    self._main_assessor_llm_call,
-                )
-
-            # 合并结果：主评估覆盖快速评估
-            assessment = {**fast_result, **main_result}
-            # 移除内部元数据
-            assessment.pop("_level", None)
-            assessment.pop("assessed_at", None)
+            assessment: dict = {}
 
             # 将评估结果注入计算栈
             now = time.time()
+            # CP8-P3a：SelfCore PRE 编排——9 个 agent 读上轮 surface 产意图，
+            # 融合成 flags/confidence/values/assessment 替代原硬编码，影响本轮计算。
+            # AssessorAgent 已收编 fast+main 评估，故此处 assessment 来自 agent 融合。
+            sc = getattr(p, "_self_core", None)
+            # assessment 已不在管线直接评估（收编进 AssessorAgent），默认 None，
+            # 由下方 SelfCore PRE 融合结果（composed.assessment）填充。
+            pre_assessment = assessment or None
+            event_flags = ["safe"]
+            event_confidence = 0.7
+            event_values: dict = {}
+            if sc is not None:
+                try:
+                    prev_surface = host.kernel.surface()
+                    pre_intents = await sc.run_cycle(session_key, prev_surface, phase="pre")
+                    composed = sc.compose_inputs(pre_intents)
+                    if composed.flags:
+                        event_flags = composed.flags
+                    if composed.confidence is not None:
+                        event_confidence = composed.confidence
+                    event_values = composed.values
+                    if composed.assessment:
+                        pre_assessment = composed.assessment
+                    # SelfCore 托管的高层意图（回忆/生命事件等）暂存，供后续 prompt 注入
+                    if composed.carried:
+                        p._store.last_understanding_closed_loop.set(
+                            session_key, {"agent_carried": composed.carried}
+                        )
+                except Exception as exc:
+                    logger.warning("Sylanne SelfCore PRE failed: %s", exc)
             event = SylanneAlphaHostEvent(
                 text=text,
-                confidence=0.7,
-                flags=["safe"],
+                confidence=event_confidence,
+                flags=event_flags,
+                values=event_values,
                 now=now,
                 event_time=p._event_time(now),
             )
-            host.on_request(event, assessment=assessment if assessment else None)
+            host.on_request(event, assessment=pre_assessment)
+            # CP8-P3a：SelfCore POST 编排——agent 消化本轮计算结果更新自身状态
+            # （RhythmAgent 节奏观测 / MemoryAgent 衰减 / ProactiveAgent 等）。
+            if sc is not None:
+                try:
+                    post_surface = host.kernel.surface()
+                    await sc.run_cycle(session_key, post_surface, phase="post")
+                except Exception as exc:
+                    logger.warning("Sylanne SelfCore POST failed: %s", exc)
 
             # 将人格漂移同步到 AstrBot PersonaManager
             if p._has_persona_manager():
@@ -1837,16 +1851,15 @@ class LLMRequestPipeline:
                     "route": comp_result.get("route", "?"),
                     "surprise": comp_result.get("surprise", 0),
                     "layers": layers,
-                    "assessor": assessment if assessment else None,
+                    "assessor": pre_assessment if pre_assessment else None,
                     "timing_ns": _comp_timing_ns(host.kernel.computation),
                 }
                 p._computation_logs.append(log_entry)
             except Exception:
                 pass  # Never let logging break the main path
 
-            # 节奏学习：观测用户消息时间间隔，用于自适应分段参数
-            engine_obs = host.kernel.computation.engine.observe()
-            p._rhythm_learner.observe_user_message(session_key, text, now, engine_obs)
+            # CP8-P3a：节奏学习已收编进 RhythmAgent（SelfCore POST），此处不再直接调
+            # observe_user_message，避免双记 tempo。
 
             # 记忆维护：v2 对话缓冲 + 衰减 + 压缩
             _current_warmth = host.kernel.computation.engine.observe().get(
@@ -1891,8 +1904,7 @@ class LLMRequestPipeline:
                     name="conv_mgr_sync_user",
                 )
 
-            # 每条消息都执行衰减 tick
-            memory_system.tick_decay()
+            # CP8-P3a：记忆衰减 tick 已收编进 MemoryAgent（SelfCore POST），此处不再直接调。
 
             # 30 天 L2→L3 压缩检查（将过期记忆提取为知识图谱三元组）
             to_compress = memory_system.compress_check()
