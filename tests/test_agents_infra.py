@@ -101,7 +101,7 @@ class _GateAgent(CognitiveAgent):
     def gate(self, perceived):
         return self._mode
 
-    async def act(self, session_key, mode, perceived):
+    async def act(self, session_key, mode, perceived, phase="post"):
         return AgentIntent(source=self.name, flags=self._flags)
 
 

@@ -33,6 +33,12 @@ SKIP = "skip"   # 这轮不动（绝大多数 agent 的默认）
 RULE = "rule"   # 用廉价规则处理，零 LLM
 LLM = "llm"     # 够格升级到 LLM + 工具（低频，受全局预算闸约束）
 
+# ── 编排时点：双时点模型（作战文档时序矛盾解法）──
+# PRE：请求发出前，agent act 产意图影响本轮计算输入（flags/confidence/values）。
+# POST：host 计算完出新 surface 后，agent 消化本轮结果更新自身状态（节奏/记忆/社交）。
+PRE = "pre"
+POST = "post"
+
 
 @dataclass(slots=True)
 class AgentIntent:
@@ -67,6 +73,9 @@ class CognitiveAgent:
     """
 
     name: str = "base"
+    # agent 在哪些时点参与：PRE（影响计算输入）/ POST（消化计算结果）。
+    # 子类覆盖，多数 worker 只在一个时点活跃。
+    phases: tuple[str, ...] = (POST,)
 
     def __init__(self, plugin: PluginHost, bus: EventBus) -> None:
         self._p = plugin
@@ -81,9 +90,14 @@ class CognitiveAgent:
         return SKIP
 
     async def act(
-        self, session_key: str, mode: str, perceived: dict[str, Any]
+        self, session_key: str, mode: str, perceived: dict[str, Any], phase: str = POST
     ) -> AgentIntent | None:
-        """按档位 mode 行动，产出意图贡献（或 None 表示无贡献）。子类覆盖。"""
+        """按档位 mode、时点 phase 行动，产出意图贡献（或 None）。
+
+        PRE 时点：产意图影响本轮计算（返回的 AgentIntent 被融合进 host event）。
+        POST 时点：消化本轮 surface 结果、更新自身状态（通常返回 None，副作用即收编的业务）。
+        子类覆盖。
+        """
         return None
 
     def emit(self, event: Any) -> None:

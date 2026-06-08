@@ -20,7 +20,7 @@ import logging
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
-from sylanne_alpha.agents.base import LLM, SKIP, VALID_FLAGS, AgentIntent, CognitiveAgent
+from sylanne_alpha.agents.base import LLM, POST, SKIP, VALID_FLAGS, AgentIntent, CognitiveAgent
 from sylanne_alpha.agents.event_bus import EventBus
 
 if TYPE_CHECKING:
@@ -60,15 +60,23 @@ class SelfCore:
     # ------------------------------------------------------------------
     # 编排：一轮 perceive → gate → act → 收集意图
     # ------------------------------------------------------------------
-    async def run_cycle(self, session_key: str, surface: dict[str, Any]) -> list[AgentIntent]:
-        """针对一个 session 跑一轮认知周期，返回各 agent 的意图贡献。
+    async def run_cycle(
+        self, session_key: str, surface: dict[str, Any], phase: str = POST
+    ) -> list[AgentIntent]:
+        """针对一个 session 跑某时点(phase)的认知周期，返回意图贡献。
 
-        perceive 全部先行（只读 surface，可并行安全）；gate 决档；预算闸仲裁
-        哪些 agent 够格 LLM 档；act 产出意图。
+        双时点模型：
+        - PRE：请求发出前，agent 产意图影响本轮计算输入（融合进 host event）。
+        - POST：host 计算完出新 surface 后，agent 消化结果更新自身状态。
+        仅 phase 在 agent.phases 内的 agent 参与本轮。
+
+        perceive 全部先行（只读 surface，并行安全）；gate 决档；预算闸仲裁 LLM 档；
+        act 产意图。
         """
+        active = [a for a in self._agents if phase in a.phases]
         # 1. perceive + gate（纯算术，零 LLM）
         decisions: list[tuple[CognitiveAgent, str, dict]] = []
-        for agent in self._agents:
+        for agent in active:
             perceived = agent.perceive(surface)
             mode = agent.gate(perceived)
             if mode != SKIP:
@@ -81,7 +89,7 @@ class SelfCore:
         intents: list[AgentIntent] = []
         for agent, mode, perceived in decisions:
             try:
-                intent = await agent.act(session_key, mode, perceived)
+                intent = await agent.act(session_key, mode, perceived, phase=phase)
             except Exception as exc:
                 logger.warning("Sylanne agent %s act failed: %s", agent.name, exc)
                 continue

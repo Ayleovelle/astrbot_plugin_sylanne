@@ -7,6 +7,8 @@ G:\\claude-data\\plans\\cp8-multiagent-warplan.md §3。
 
 from sylanne_alpha.agents.base import (
     LLM,
+    POST,
+    PRE,
     RULE,
     SKIP,
     VALID_FLAGS,
@@ -22,6 +24,21 @@ from sylanne_alpha.agents.event_bus import (
     ResponseObserved,
 )
 from sylanne_alpha.agents.self_core import ComposedInputs, SelfCore
+from sylanne_alpha.agents.rhythm_agent import RhythmAgent
+from sylanne_alpha.agents.emotion_agent import EmotionAgent
+from sylanne_alpha.agents.memory_agent import MemoryAgent
+from sylanne_alpha.agents.persona_agent import PersonaAgent
+from sylanne_alpha.agents.proactive_agent import ProactiveAgent
+from sylanne_alpha.agents.life_agent import LifeAgent
+from sylanne_alpha.agents.social_agent import SocialAgent
+from sylanne_alpha.agents.assessor_agent import AssessorAgent
+from sylanne_alpha.agents.dialogue_agent import DialogueAgent
+
+# 9 个认知 worker 的注册清单（供 main 一次性注册进 SelfCore）
+ALL_AGENT_CLASSES = [
+    RhythmAgent, EmotionAgent, MemoryAgent, PersonaAgent, ProactiveAgent,
+    LifeAgent, SocialAgent, AssessorAgent, DialogueAgent,
+]
 
 __all__ = [
     "AgentIntent",
@@ -30,6 +47,8 @@ __all__ = [
     "SKIP",
     "RULE",
     "LLM",
+    "PRE",
+    "POST",
     "EventBus",
     "AgentEvent",
     "ResponseObserved",
@@ -38,4 +57,14 @@ __all__ = [
     "OutreachReady",
     "SelfCore",
     "ComposedInputs",
+    "RhythmAgent",
+    "EmotionAgent",
+    "MemoryAgent",
+    "PersonaAgent",
+    "ProactiveAgent",
+    "LifeAgent",
+    "SocialAgent",
+    "AssessorAgent",
+    "DialogueAgent",
+    "ALL_AGENT_CLASSES",
 ]
