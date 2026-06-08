@@ -2476,19 +2476,25 @@ class LLMRequestPipeline:
                         )
                         return
                     # 犹豫：发前迟疑 / 最后一刻收回 / 踌躇词试探（人类粗糙的迟疑感）
-                    reason_code = await bridge.infer_reason_code(session_key)
                     hesit_on = bool(
                         (getattr(p, "config", None) or {}).get(
                             "sylanne_alpha_proactive_hesitation", False
                         )
                     )
-                    filler = ""
+                    # 犹豫开启时需要 body → 先取一次 surface，reason_code 与 hesitation 复用，
+                    # 避免 infer_reason_code 内部再调一次 proactive_sylanne（双 tick/save + 帧错位）
+                    surface = None
                     if hesit_on:
                         try:
                             surface = await p.proactive_sylanne(session_key=session_key)
-                            body = surface.get("body", {}) if isinstance(surface, dict) else {}
                         except Exception:
-                            body = {}
+                            surface = None
+                    reason_code = await bridge.infer_reason_code(
+                        session_key, surface=surface
+                    )
+                    filler = ""
+                    if hesit_on:
+                        body = surface.get("body", {}) if isinstance(surface, dict) else {}
                         plan = bridge.hesitation_plan(body)
                         if plan["pre_delay_seconds"] > 0:
                             logger.info(

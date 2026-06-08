@@ -164,7 +164,9 @@ class ProactiveBridge:
             return False, "min_interval_throttle"
         return True, "ok"
 
-    async def infer_reason_code(self, session_key: str) -> str:
+    async def infer_reason_code(
+        self, session_key: str, *, surface: dict[str, Any] | None = None
+    ) -> str:
         """查计算栈深层状态 + 仪式缺席，推断主动发言的缘由码。
 
         触发源整合（任一命中即返回对应 reason_code，优先级：仪式 > 计算栈 > 默认）：
@@ -172,9 +174,13 @@ class ProactiveBridge:
           - void / scar / ...：计算栈 proactive_sylanne 给出的 reason_code
           - life_rhythm：默认（纯生活节律驱动）
         全程异常静默，失败回退 life_rhythm。
+
+        Args:
+            surface: 可选的预计算 proactive_sylanne 结果。传入则复用（避免重复
+                tick/save），不传则内部自行调用。ritual 优先级始终先于 surface。
         """
         p = self._p
-        # 1) 仪式缺席（proactive_scheduler.check_ritual_absence）
+        # 1) 仪式缺席（proactive_scheduler.check_ritual_absence）——优先级最高，不依赖 surface
         sched = getattr(p, "_proactive_scheduler", None)
         if sched is not None and hasattr(sched, "check_ritual_absence"):
             try:
@@ -184,16 +190,18 @@ class ProactiveBridge:
             except Exception:
                 pass
         # 2) 计算栈深层缘由（proactive_sylanne → decision.reason_code）
-        getter = getattr(p, "proactive_sylanne", None)
-        if callable(getter):
-            try:
-                res = await getter(session_key=session_key)
-                decision = res.get("decision", {}) if isinstance(res, dict) else {}
-                rc = str(decision.get("reason_code", "") or "").strip()
-                if rc:
-                    return rc
-            except Exception:
-                pass
+        try:
+            res = surface
+            if res is None:
+                getter = getattr(p, "proactive_sylanne", None)
+                if callable(getter):
+                    res = await getter(session_key=session_key)
+            decision = res.get("decision", {}) if isinstance(res, dict) else {}
+            rc = str(decision.get("reason_code", "") or "").strip()
+            if rc:
+                return rc
+        except Exception:
+            pass
         return "life_rhythm"
 
     def build_motivation_text(
