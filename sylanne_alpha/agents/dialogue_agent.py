@@ -66,6 +66,10 @@ class DialogueAgent(CognitiveAgent):
                         fq("dialogue_quality_high")
                     elif quality <= 0.35:
                         fq("dialogue_quality_low")
+                # CP8-P4-C：反应式学习触发——本轮质量驱动门控偏置微调（零 LLM）
+                sc = getattr(p, "_self_core", None)
+                if sc is not None:
+                    sc.reflex_learn(session_key, self_quality=quality, behavior=0.0)
             except Exception:
                 pass
         return None

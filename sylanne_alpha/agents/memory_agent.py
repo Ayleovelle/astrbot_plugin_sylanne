@@ -36,8 +36,11 @@ class MemoryAgent(CognitiveAgent):
 
     def gate(self, perceived: dict[str, Any]) -> str:
         intim = perceived["intimacy_gravity"]
-        # 关系太浅不主动翻记忆（阈值是人格函数）
-        if intim < 0.35:
+        # CP8-P4：叠加学到的门控偏置（带钳位护栏，base 0.35 ± 学习 Δ）
+        evo = perceived.get("_evo_delta")
+        thr = 0.35 + (evo("intimacy_threshold") if callable(evo) else 0.0)
+        # 关系太浅不主动翻记忆（阈值是人格函数 + 学习偏置）
+        if intim < thr:
             return SKIP
         # 修复压力高 → 深度关联检索值得 LLM；否则廉价 KV 召回
         if perceived["repair_pressure"] > 0.6 and intim > 0.65:

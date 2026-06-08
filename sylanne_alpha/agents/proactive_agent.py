@@ -42,8 +42,10 @@ class ProactiveAgent(CognitiveAgent):
         # 怕打扰：边界压力阈值是人格函数
         if perceived["boundary_pressure"] > 0.4 + 0.3 * perceived["sovereignty_guard"]:
             return SKIP
-        # 表达欲阈值是人格函数（intimacy 越高越易开口）
-        if perceived["need_expression"] > 0.6 - 0.2 * perceived["intimacy_gravity"]:
+        # 表达欲阈值是人格函数 + CP8-P4 学习偏置（被忽略多了→门槛上移，学会少打扰）
+        evo = perceived.get("_evo_delta")
+        open_bias = evo("open_threshold") if callable(evo) else 0.0
+        if perceived["need_expression"] > 0.6 - 0.2 * perceived["intimacy_gravity"] + open_bias:
             return RULE
         return SKIP
 

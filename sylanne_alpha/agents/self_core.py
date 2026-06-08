@@ -53,6 +53,58 @@ class SelfCore:
         self._llm_priority = [
             "dialogue", "assessor", "emotion", "proactive", "memory", "persona",
         ]
+        # 自我进化（CP8-P4-C）：per-session 进化档案仓 + 反应式学习器
+        self._evo_stores: dict[str, Any] = {}
+        self._reflex = None  # 惰性建（ReflexLearner），见 _evo_store
+
+    def _evo_store(self, session_key: str):
+        """取（或建）某会话的进化档案仓。"""
+        from sylanne_alpha.agents.learning import EvolutionStore, ReflexLearner
+        if self._reflex is None:
+            self._reflex = ReflexLearner(self._p)
+        store = self._evo_stores.get(session_key)
+        if store is None:
+            store = EvolutionStore()
+            self._evo_stores[session_key] = store
+        return store
+
+    def evo_delta(self, session_key: str, agent_name: str, key: str) -> float:
+        """供 agent gate 读「学到的门控偏置」（叠加在人格函数基线上）。"""
+        store = self._evo_stores.get(session_key)
+        return store.get_delta(agent_name, key) if store is not None else 0.0
+
+    # 可学习的门控参数清单（agent_name → param_key），ReflexLearner 据此微调
+    _LEARNABLE = (
+        ("memory", "intimacy_threshold"),
+        ("proactive", "open_threshold"),
+    )
+
+    def reflex_learn(self, session_key: str, *, self_quality: float | None, behavior: float = 0.0) -> None:
+        """层次1 反应式学习触发（零 LLM）：根据本轮效果微调可学习门控偏置。
+
+        - self_quality：本轮 self_score 综合质量 [0,1]（弱信号）。
+        - behavior：可观测行为信号 {-1 被忽略, 0 未知, +1 被采纳/续聊}（强信号）。
+        由 DialogueAgent 在 RESPONSE_POST（拿到 self_score）触发。
+        """
+        store = self._evo_store(session_key)
+        reflex = self._reflex
+        if reflex is None:
+            return
+        for agent_name, key in self._LEARNABLE:
+            reflex.learn(
+                store, agent_name, key,
+                behavior=behavior, self_quality=self_quality,
+            )
+
+    def evo_to_dict(self, session_key: str) -> dict[str, Any]:
+        store = self._evo_stores.get(session_key)
+        return store.to_dict() if store is not None else {}
+
+    def evo_load(self, session_key: str, data: dict[str, Any]) -> None:
+        if data:
+            self._evo_store(session_key).load_dict(data)
+
+
 
     def register(self, agent: CognitiveAgent) -> None:
         self._agents.append(agent)
@@ -108,10 +160,17 @@ class SelfCore:
         act 产意图。
         """
         active = [a for a in self._agents if phase in a.phases]
-        # 1. perceive + gate（纯算术，零 LLM）
+        store = self._evo_store(session_key)
+        # 1. perceive + gate（纯算术，零 LLM）。perceive 后注入该 agent 学到的门控偏置，
+        #    供 gate 读取（perceived["_evo_delta"](key) → 叠加在人格函数基线上）。
         decisions: list[tuple[CognitiveAgent, str, dict]] = []
         for agent in active:
             perceived = agent.perceive(surface)
+            if isinstance(perceived, dict):
+                _an = agent.name
+                perceived["_evo_delta"] = (
+                    lambda key, _an=_an: store.get_delta(_an, key)
+                )
             mode = agent.gate(perceived)
             if mode != SKIP:
                 decisions.append((agent, mode, perceived))
