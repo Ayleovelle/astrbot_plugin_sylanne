@@ -29,6 +29,7 @@ from .hgt import HeterogeneousGraphTransformer
 from .pad_interop import PADProjector, PADVector
 from .personality import (
     _REVERSE_LEGACY_MAP,
+    DRIFT_SIGNALS,
     EMBODIMENT_TRAITS,
     DriftAttribution,
     DriftSignalExtractor,
@@ -1081,6 +1082,26 @@ class ComputationSpine:
             self._update_relationship_delta(session_key, outcome)
 
         return self.engine.feedback(outcome, dt)
+
+    def feedback_quality(self, signal_key: str) -> None:
+        """注入对话质量自评信号到 Embodiment 人格漂移（CP8-P4 自我进化）。
+
+        与 feedback() 区别：质量信号只驱动人格漂移（DRIFT_SIGNALS），不触碰
+        hgt.adapt / engine.feedback（那两条只认 accepted/ignored/rejected 表达结果），
+        避免污染表达反馈链路。
+
+        Args:
+            signal_key: "dialogue_quality_high" | "dialogue_quality_low"
+        """
+        if signal_key not in DRIFT_SIGNALS:
+            return
+        compute_embodiment_drift(
+            self._embodiment_traits,
+            {signal_key: 1.0},
+            self._drift_tick,
+            oscillation_detector=self._oscillation_detector,
+            drift_attribution=self._drift_attribution,
+        )
 
     def _update_relationship_delta(self, session_key: str, outcome: str) -> None:
         """根据反馈结果更新每关系人格 delta。

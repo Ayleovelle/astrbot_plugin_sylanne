@@ -35,11 +35,13 @@ from .hgt import HeterogeneousGraphTransformer
 from .meta_learner import MetaLearner
 from .pad_interop import PADProjector, PADVector
 from .personality import (
+    DRIFT_SIGNALS,
     EMBODIMENT_TRAITS,
     DriftAttribution,
     DriftSignalExtractor,
     OscillationDetector,
     TraitMemory,
+    compute_embodiment_drift,
     normalize_personality,
 )
 from .phase_transition import PhaseTransitionExpression
@@ -698,6 +700,30 @@ class ResonanceSpine:
         if session_key:
             self._update_relationship_delta(session_key, outcome)
         return self._engine.observe()
+
+    def feedback_quality(self, signal_key: str) -> None:
+        """注入对话质量自评信号到 Embodiment 人格漂移（CP8-P4 自我进化）。
+
+        ResonanceSpine 原本未接 embodiment 漂移（_embodiment_traits 等基础设施已具备
+        但 process/feedback 都未驱动）。本方法激活该闲置通道，让 self_score 三维质量
+        反馈真正影响人格演化——质量高强化表达欲+关系引力，质量低收敛表达欲。
+
+        与 feedback() 区别：只驱动人格漂移，不碰 hgt/engine/expression_policy
+        （那些只认 accepted/ignored/rejected 表达结果），避免污染表达反馈链路。
+
+        Args:
+            signal_key: "dialogue_quality_high" | "dialogue_quality_low"
+        """
+        if signal_key not in DRIFT_SIGNALS:
+            return
+        compute_embodiment_drift(
+            self._embodiment_traits,
+            {signal_key: 1.0},
+            self._drift_tick,
+            oscillation_detector=self._oscillation_detector,
+            drift_attribution=self._drift_attribution,
+        )
+        self._drift_tick += 1
 
     def _update_relationship_delta(self, session_key: str, outcome: str) -> None:
         """Update per-relationship personality deltas based on feedback."""
