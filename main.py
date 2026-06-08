@@ -400,16 +400,8 @@ class EmotionalStatePlugin(Star):
         self._meltdown_nonces: BoundedDict = BoundedDict(maxsize=50, ttl=300)
         # 社交场收集器：群聊氛围感知
         self._social_field = SocialFieldCollector(config=self._config)
-        # 后台投递队列：异步发送主动消息/分段回复
-        self._background_post_queues: BoundedDict = BoundedDict(maxsize=200)
-        self._background_post_dead_letters: BoundedDict = BoundedDict(maxsize=200)
-        self._background_post_sequence: BoundedDict = BoundedDict(maxsize=200)
-        self._background_post_latest_enqueued: BoundedDict = BoundedDict(maxsize=200)
-        self._background_post_last_committed: BoundedDict = BoundedDict(maxsize=200)
+        # 后台投递队列已迁入 self._store（CP8-P2 批2）
         self._background_post_recovered_sessions: set[str] = set()
-        self._background_post_active: BoundedDict = BoundedDict(maxsize=200)
-        self._background_post_checkpoint_tasks: dict[str, asyncio.Task] = {}
-        self._background_post_worker_state: BoundedDict = BoundedDict(maxsize=200)
         self._internal_assessor_llm_inflight: int = 0
         self._pending_outreach_context: BoundedDict = BoundedDict(maxsize=50)
         # session_key → unified_msg_origin 映射，供主动发送定位会话。
@@ -2286,11 +2278,11 @@ class EmotionalStatePlugin(Star):
                 task.cancel()
                 tasks_to_cancel.append(task)
         self._background_tasks.clear()
-        for task in list(self._background_post_checkpoint_tasks.values()):
+        for task in list(self._store.background_post_checkpoint_tasks.values()):
             if not task.done():
                 task.cancel()
                 tasks_to_cancel.append(task)
-        self._background_post_checkpoint_tasks.clear()
+        self._store.background_post_checkpoint_tasks.clear()
         sched_task = getattr(self, "_proactive_scheduler_task", None)
         if sched_task and not sched_task.done():
             sched_task.cancel()

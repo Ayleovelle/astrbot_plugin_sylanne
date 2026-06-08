@@ -1319,7 +1319,7 @@ class StatePersistence:
             tasks.clear()
         p._background_tasks = []
         # Save final checkpoints for background post queues
-        bg_queues = p._background_post_queues
+        bg_queues = p._store.background_post_queues
         checkpoint_enabled = bool(
             (p.config or {}).get("background_post_queue_checkpoint_enabled")
         )
@@ -1333,8 +1333,8 @@ class StatePersistence:
                         pass
         # Clean up background post state
         p._background_post_tasks = {}
-        p._background_post_queues = {}
-        p._background_post_sequence = {}
+        p._store.background_post_queues.clear()
+        p._store.background_post_sequence.clear()
         p._background_post_skipped = {}
         p._terminating = True
         try:

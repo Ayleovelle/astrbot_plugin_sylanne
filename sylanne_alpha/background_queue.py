@@ -194,9 +194,9 @@ class BackgroundPostQueue:
         """
         cfg = self._p.config or {}
         dynamic_enabled = bool(cfg.get("enable_dynamic_background_workers"))
-        queue = self._p._background_post_queues.get(session_key, collections.deque())
+        queue = self._p._store.background_post_queues.get(session_key, collections.deque())
         queue_depth = len(queue)
-        active = self._p._background_post_active
+        active = self._p._store.background_post_active
         global_active_other = sum(len(v) for k, v in active.items() if k != session_key)
         global_cap = 6
         now = self._observed_now()
@@ -237,7 +237,7 @@ class BackgroundPostQueue:
             desired = 1
             dynamic_extra = 0
         else:
-            worker_state = self._p._background_post_worker_state
+            worker_state = self._p._store.background_post_worker_state
             state_entry = worker_state.get(session_key, {})
             last_scale_at = state_entry.get("last_scale_at", 0.0)
             current_level = state_entry.get("current_level", 1)
@@ -246,11 +246,11 @@ class BackgroundPostQueue:
                 if not state_entry:
                     # 首次扩容：直接设为 2
                     desired = 2
-                    worker_state[session_key] = {
+                    worker_state.set(session_key, {
                         "last_scale_at": now,
                         "current_level": desired,
                         "committed": True,
-                    }
+                    })
                     reasons.append("worker_scale_initial")
                 elif now - last_scale_at < scale_interval:
                     # 冷却期内：保持当前水平
@@ -259,11 +259,11 @@ class BackgroundPostQueue:
                 else:
                     # 逐步扩容：每次 +1，不超过目标
                     desired = min(current_level + 1, target_workers, env_cap)
-                    worker_state[session_key] = {
+                    worker_state.set(session_key, {
                         "last_scale_at": now,
                         "current_level": desired,
                         "committed": True,
-                    }
+                    })
                     reasons.append("worker_scale_step_up")
             else:
                 desired = state_entry.get("current_level", 2) if state_entry else 2
@@ -285,7 +285,7 @@ class BackgroundPostQueue:
             "scale_interval_seconds": 5.0,
         }
         if commit_scale and dynamic_enabled:
-            ws = self._p._background_post_worker_state.get(session_key, {})
+            ws = self._p._store.background_post_worker_state.get(session_key, {})
             scale_state.update(ws)
         return {
             "desired_workers": desired if dynamic_enabled else 1,
@@ -345,9 +345,9 @@ class BackgroundPostQueue:
         Returns:
             回收的任务数量。
         """
-        active = self._p._background_post_active.get(session_key, {})
-        queue = self._p._background_post_queues.setdefault(
-            session_key, collections.deque(maxlen=500)
+        active = self._p._store.background_post_active.get(session_key, {})
+        queue = self._p._store.background_post_queues.get_or_create(
+            session_key, lambda: collections.deque(maxlen=500)
         )
         now = self._observed_now()
         recovered = 0
@@ -390,7 +390,7 @@ class BackgroundPostQueue:
         Args:
             session_key: 会话标识。
         """
-        checkpoint_tasks = self._p._background_post_checkpoint_tasks
+        checkpoint_tasks = self._p._store.background_post_checkpoint_tasks
         debounce = float(
             (self._p.config or {}).get(
                 "background_post_checkpoint_debounce_seconds", 0.75
@@ -406,7 +406,7 @@ class BackgroundPostQueue:
             await self.save_checkpoint(session_key)
 
         task = safe_ensure_future(_debounced_save(), name="checkpoint_debounced_save")
-        checkpoint_tasks[session_key] = task
+        checkpoint_tasks.set(session_key, task)
 
         def _on_done(t: asyncio.Task) -> None:
             if checkpoint_tasks.get(session_key) is t:
@@ -427,7 +427,7 @@ class BackgroundPostQueue:
         Args:
             session_key: 会话标识。
         """
-        queue = self._p._background_post_queues.get(session_key)
+        queue = self._p._store.background_post_queues.get(session_key)
         if not queue:
             return
         retry_jobs: list[BackgroundPostJob] = []
@@ -449,8 +449,7 @@ class BackgroundPostQueue:
                 if save_fn and callable(save_fn) and observation:
                     await save_fn(session_key, observation)
                 # 更新已提交序号水位线
-                committed = self._p._background_post_last_committed
-                committed[session_key] = job.sequence
+                self._p._store.background_post_last_committed.set(session_key, job.sequence)
             except Exception as exc:
                 retries = job._retries
                 if retries < 1:
@@ -484,12 +483,12 @@ class BackgroundPostQueue:
         delete_fn = getattr(self._p, "delete_kv_data", None)
         if not put_fn or not callable(put_fn):
             return
-        queue = self._p._background_post_queues.get(session_key, collections.deque())
-        dead_letters = self._p._background_post_dead_letters.get(
+        queue = self._p._store.background_post_queues.get(session_key, collections.deque())
+        dead_letters = self._p._store.background_post_dead_letters.get(
             session_key, collections.deque()
         )
-        latest = self._p._background_post_latest_enqueued.get(session_key, 0)
-        committed = self._p._background_post_last_committed.get(session_key, 0)
+        latest = self._p._store.background_post_latest_enqueued.get(session_key, 0)
+        committed = self._p._store.background_post_last_committed.get(session_key, 0)
         kv_key = self.checkpoint_kv_key(session_key)
         # 队列和死信都为空时，删除 KV 条目
         if not queue and not dead_letters:
@@ -582,18 +581,18 @@ class BackgroundPostQueue:
             job.leased_at = 0.0
             job.lease_until = 0.0
             dead_queue.append(job)
-        # 恢复到插件实例的状态字典中
-        self._p._background_post_queues[session_key] = queue
-        self._p._background_post_dead_letters[session_key] = dead_queue
-        self._p._background_post_sequence[session_key] = checkpoint.get(
+        # 恢复到 store 的状态容器中
+        self._p._store.background_post_queues.set(session_key, queue)
+        self._p._store.background_post_dead_letters.set(session_key, dead_queue)
+        self._p._store.background_post_sequence.set(session_key, checkpoint.get(
             "latest_enqueued", 0
-        )
-        self._p._background_post_latest_enqueued[session_key] = checkpoint.get(
+        ))
+        self._p._store.background_post_latest_enqueued.set(session_key, checkpoint.get(
             "latest_enqueued", 0
-        )
-        self._p._background_post_last_committed[session_key] = checkpoint.get(
+        ))
+        self._p._store.background_post_last_committed.set(session_key, checkpoint.get(
             "last_committed", 0
-        )
+        ))
         self._p._background_post_recovered_sessions.add(session_key)
         self._check_backpressure(queue, session_key)
         return True

@@ -394,13 +394,13 @@ class PublicAPI:
                     ]
             result["understanding_closed_loop"] = loop_data
             result["read_only"] = True
-        bg_queues = p._background_post_queues
-        bg_active = p._background_post_active
-        bg_dead_letters = p._background_post_dead_letters
-        bg_latest = p._background_post_latest_enqueued
-        bg_committed = p._background_post_last_committed
+        bg_queues = p._store.background_post_queues
+        bg_active = p._store.background_post_active
+        bg_dead_letters = p._store.background_post_dead_letters
+        bg_latest = p._store.background_post_latest_enqueued
+        bg_committed = p._store.background_post_last_committed
         bg_skipped = getattr(p, "_background_post_skipped", {})
-        _bg_sequence = p._background_post_sequence
+        _bg_sequence = p._store.background_post_sequence
         has_bg_data = bool(bg_queues or bg_active or bg_dead_letters)
         if include_sessions or has_bg_data:
             queue = bg_queues.get(session_key, collections.deque())
@@ -1620,7 +1620,7 @@ class PublicAPI:
         """计算内部评估器 LLM 并发策略：基础 2 通道 + 极端积压时临时 burst 到 3。"""
         p = self._p
         _cfg = p.config or {}
-        total_queued = sum(len(q) for q in p._background_post_queues.values())
+        total_queued = sum(len(q) for q in p._store.background_post_queues.values())
         base_limit = 2
         burst_limit = 3
         reasons = ["base_two_lane_guard"]
