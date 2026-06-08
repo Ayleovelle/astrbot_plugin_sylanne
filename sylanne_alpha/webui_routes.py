@@ -24,7 +24,10 @@ import json
 import secrets
 import time
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
+
+if TYPE_CHECKING:
+    from sylanne_alpha.protocols import PluginHost
 
 try:
     from astrbot.api import logger  # type: ignore
@@ -123,7 +126,7 @@ class WebUIRoutes:
     所有 handler 方法都是 async，返回 dict 由 Quart 自动序列化为 JSON。
     """
 
-    def __init__(self, plugin: Any) -> None:
+    def __init__(self, plugin: PluginHost) -> None:
         self._p = plugin
 
     # ------------------------------------------------------------------

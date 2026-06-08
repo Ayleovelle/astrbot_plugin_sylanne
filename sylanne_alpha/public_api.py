@@ -30,7 +30,10 @@ import json
 import time
 from collections.abc import Callable
 from types import SimpleNamespace
-from typing import Any
+from typing import TYPE_CHECKING, Any
+
+if TYPE_CHECKING:
+    from sylanne_alpha.protocols import PluginHost
 
 try:
     from astrbot.api import logger  # type: ignore
@@ -149,7 +152,7 @@ class PublicAPI:
         "group_atmosphere": "get_group_atmosphere_snapshot",
     }
 
-    def __init__(self, plugin: Any) -> None:
+    def __init__(self, plugin: PluginHost) -> None:
         self._p = plugin
 
     # ------------------------------------------------------------------

@@ -61,7 +61,7 @@ from sylanne_alpha.infra import ensure_background_tasks_list, resolve_data_root
 
 
 if TYPE_CHECKING:
-    pass
+    from sylanne_alpha.protocols import PluginHost
 
 logger = logging.getLogger(__name__)
 
@@ -3078,7 +3078,7 @@ class WebUILifecycle:
     - schedule_listener_takeover(): 延迟接管（等待旧模块完全卸载）
     """
 
-    def __init__(self, plugin: Any) -> None:
+    def __init__(self, plugin: PluginHost) -> None:
         self._p = plugin
 
     def start_if_enabled(self) -> None:

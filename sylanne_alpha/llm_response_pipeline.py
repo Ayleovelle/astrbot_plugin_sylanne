@@ -23,10 +23,13 @@ import re
 import time
 from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from sylanne_alpha.compat import realtime_plan, strip_draft_blocks
 from sylanne_alpha.utils import ensure_background_tasks_list, safe_ensure_future
+
+if TYPE_CHECKING:
+    from sylanne_alpha.protocols import PluginHost
 
 try:
     from astrbot.api import logger  # type: ignore
@@ -54,7 +57,7 @@ class LLMResponsePipeline:
       - 调用 observe_response 反馈给计算栈
     """
 
-    def __init__(self, plugin: Any) -> None:
+    def __init__(self, plugin: PluginHost) -> None:
         self._p = plugin
 
     # ------------------------------------------------------------------

@@ -17,7 +17,7 @@ import asyncio
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 try:
     from astrbot.api import logger  # type: ignore
@@ -35,6 +35,9 @@ from sylanne_alpha.infra import resolve_data_root
 
 from sylanne_alpha.host import SylanneAlphaHost
 from sylanne_alpha.memory_system import ConversationBuffer, MemorySystem
+
+if TYPE_CHECKING:
+    from sylanne_alpha.protocols import PluginHost
 
 
 # ---------------------------------------------------------------------------
@@ -326,7 +329,7 @@ class SessionContext:
     host 生命周期、记忆系统初始化）从主插件类中解耦出来。
     """
 
-    def __init__(self, plugin: Any) -> None:
+    def __init__(self, plugin: PluginHost) -> None:
         """初始化会话上下文。
 
         Args:

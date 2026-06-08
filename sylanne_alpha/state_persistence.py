@@ -21,6 +21,7 @@ from sylanne_alpha.utils import safe_ensure_future
 
 if TYPE_CHECKING:
     from .host import SylanneAlphaHost
+    from .protocols import PluginHost
 
 logger = logging.getLogger("astrbot_plugin_sylanne")
 
@@ -128,7 +129,7 @@ class StatePersistence:
     通过 self._p 委托访问插件实例。
     """
 
-    def __init__(self, plugin: Any) -> None:
+    def __init__(self, plugin: PluginHost) -> None:
         """初始化持久化层。
 
         Args:

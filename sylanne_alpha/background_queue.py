@@ -17,9 +17,12 @@ from __future__ import annotations
 import asyncio
 import collections
 import logging
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from sylanne_alpha.utils import safe_ensure_future
+
+if TYPE_CHECKING:
+    from sylanne_alpha.protocols import PluginHost
 
 logger = logging.getLogger("astrbot_plugin_sylanne")
 
@@ -117,7 +120,7 @@ class BackgroundPostQueue:
     负责自适应工作者调度、租约过期回收、检查点持久化、排空处理和队列恢复。
     """
 
-    def __init__(self, plugin: Any) -> None:
+    def __init__(self, plugin: PluginHost) -> None:
         """初始化队列管理器。
 
         Args:

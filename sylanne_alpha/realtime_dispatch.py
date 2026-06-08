@@ -27,7 +27,7 @@ from typing import Any, TYPE_CHECKING
 from sylanne_alpha.infra import ensure_background_tasks_list
 
 if TYPE_CHECKING:
-    pass  # plugin type is dynamic (Star subclass)
+    from sylanne_alpha.protocols import PluginHost
 
 _CHINA_TZ = timezone(timedelta(hours=8))
 
@@ -44,7 +44,7 @@ class RealtimeDispatch:
       - 被 llm_request_pipeline 调用注入上下文
     """
 
-    def __init__(self, plugin: Any) -> None:
+    def __init__(self, plugin: PluginHost) -> None:
         self._p = plugin
 
     # ------------------------------------------------------------------

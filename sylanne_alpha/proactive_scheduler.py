@@ -25,7 +25,10 @@ from __future__ import annotations
 import asyncio
 import collections
 import time
-from typing import Any
+from typing import TYPE_CHECKING, Any
+
+if TYPE_CHECKING:
+    from sylanne_alpha.protocols import PluginHost
 
 try:
     from astrbot.api import logger  # type: ignore
@@ -47,7 +50,7 @@ class ProactiveScheduler:
       - 通过 host.on_proactive_check 与计算栈交互
     """
 
-    def __init__(self, plugin: Any) -> None:
+    def __init__(self, plugin: PluginHost) -> None:
         self._p = plugin
         # 仪式注册表：session_key → {ritual_name: (start_hour, end_hour)}
         # 初始为空，后续可通过对话学习填充

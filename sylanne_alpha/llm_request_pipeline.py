@@ -16,7 +16,7 @@ import asyncio
 import random
 import re as _re
 import time
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from sylanne_alpha.content_sanitizer import (
     sanitize_for_summary,
@@ -24,6 +24,9 @@ from sylanne_alpha.content_sanitizer import (
     is_content_filter_refusal,
 )
 from sylanne_alpha.utils import safe_ensure_future
+
+if TYPE_CHECKING:
+    from sylanne_alpha.protocols import PluginHost
 
 try:
     from astrbot.api import logger  # type: ignore
@@ -632,7 +635,7 @@ class LLMRequestPipeline:
                 prefs["style"] = style
                 break
 
-    def __init__(self, plugin: Any) -> None:
+    def __init__(self, plugin: PluginHost) -> None:
         self._p = plugin
         if not hasattr(self._p, "_cached_system_prompts"):
             self._p._cached_system_prompts = {}
