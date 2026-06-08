@@ -887,11 +887,11 @@ class LLMRequestPipeline:
             t2 = loop.create_task(self._consolidation_loop())
             p._background_tasks.extend([t1, t2])
         session_key = p._session_key(event)
-        # 维护 session_key → unified_msg_origin 映射，供主动发送时使用
+        # 维护 session_key → unified_msg_origin 映射，供主动发送时使用（已在 __init__ 预初始化）
         umo = str(getattr(event, "unified_msg_origin", "") or "")
         if umo:
             if not hasattr(p, "_session_origins"):
-                p._session_origins: dict[str, str] = {}
+                p._session_origins = {}
             p._session_origins[session_key] = umo
         message_text = str(getattr(event, "message_str", "") or "")
         # 非文本消息转述：图片/语音等内容转为文本描述
