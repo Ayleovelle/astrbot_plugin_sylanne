@@ -67,6 +67,33 @@ _SLOT_LABELS = {
 }
 
 
+def _comp_boundary_stability(comp: Any) -> float:
+    """取计算层边界稳定度，兼容旧 ComputationSpine(.boundary) 与共振场(_boundary)。"""
+    b = getattr(comp, "boundary", None) or getattr(comp, "_boundary", None)
+    if b is not None and hasattr(b, "stability"):
+        try:
+            return float(b.stability())
+        except Exception:
+            return 1.0
+    return 1.0
+
+
+def _comp_timing_ns(comp: Any) -> dict[str, int]:
+    """取计算层分层耗时(ns)，兼容旧 dict[layer→deque] 与共振场单 deque。
+
+    共振场 _timings 是整个 spine 的单一 deque[int]，无 per-layer 拆分，
+    映射为 {"spine": 最近一次耗时}。
+    """
+    t = getattr(comp, "_timings", None)
+    if isinstance(t, dict):
+        return {k: (v[-1] if v else 0) for k, v in t.items()}
+    # 共振场：单 deque
+    try:
+        return {"spine": int(t[-1]) if t else 0}
+    except Exception:
+        return {}
+
+
 def _compute_injection_budget(gap_seconds: float, cfg: dict) -> int:
     """根据对话间隔计算本轮总注入预算（字符数）。"""
     override = cfg.get("state_injection_max_added_chars")
@@ -1802,7 +1829,7 @@ class LLMRequestPipeline:
                     "L6_Boundary",
                     {
                         "stability": round(
-                            host.kernel.computation.boundary.stability(), 3
+                            _comp_boundary_stability(host.kernel.computation), 3
                         )
                     },
                 )
@@ -1823,10 +1850,7 @@ class LLMRequestPipeline:
                     "surprise": comp_result.get("surprise", 0),
                     "layers": layers,
                     "assessor": assessment if assessment else None,
-                    "timing_ns": {
-                        k: v[-1] if v else 0
-                        for k, v in host.kernel.computation._timings.items()
-                    },
+                    "timing_ns": _comp_timing_ns(host.kernel.computation),
                 }
                 p._computation_logs.append(log_entry)
             except Exception:
