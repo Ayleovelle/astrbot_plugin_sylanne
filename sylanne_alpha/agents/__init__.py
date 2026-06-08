@@ -26,6 +26,7 @@ from sylanne_alpha.agents.event_bus import (
     ResponseObserved,
 )
 from sylanne_alpha.agents.self_core import ComposedInputs, SelfCore
+from sylanne_alpha.agents.autonomy_scheduler import AutonomyScheduler
 from sylanne_alpha.agents.rhythm_agent import RhythmAgent
 from sylanne_alpha.agents.emotion_agent import EmotionAgent
 from sylanne_alpha.agents.memory_agent import MemoryAgent
@@ -61,6 +62,7 @@ __all__ = [
     "OutreachReady",
     "SelfCore",
     "ComposedInputs",
+    "AutonomyScheduler",
     "RhythmAgent",
     "EmotionAgent",
     "MemoryAgent",

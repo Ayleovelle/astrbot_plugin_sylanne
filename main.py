@@ -149,6 +149,7 @@ from sylanne_alpha.session_context import SessionContext  # noqa: E402
 from sylanne_alpha.session_state_store import SessionStateStore  # noqa: E402
 from sylanne_alpha.agents import (  # noqa: E402
     SelfCore,
+    AutonomyScheduler,
     EmotionAgent,
     AssessorAgent,
     PersonaAgent,
@@ -435,6 +436,8 @@ class EmotionalStatePlugin(Star):
             SocialAgent, DialogueAgent,
         ):
             self._self_core.register(_agent_cls(self, self._self_core.bus))
+        # 全局自驱心跳（CP8-P3b）：让她没人说话也演化。initialize 启动、terminate 回收。
+        self._autonomy_scheduler = AutonomyScheduler(self, self._self_core)
         # 主动发言调度器：基于身体需求和节律决定是否主动发言
         self._proactive_scheduler = ProactiveScheduler(self)
         # 主动发言桥接器：把意图+生活素材交给大饼插件执行发送
@@ -2226,11 +2229,11 @@ class EmotionalStatePlugin(Star):
         return await self._proactive_scheduler.run_once()
 
     def _start_life_simulator(self) -> None:
-        """配置并启动生命模拟器（幂等）。
+        """配置生命模拟器并启动全局自驱心跳（幂等）。
 
-        解死锁：以前生命模拟器只在用户首次 LLM 请求时懒启动，导致"用户不说话
-        →永不启动→永不主动"。改为由 initialize() 生命周期钩子在插件加载后直接
-        启动，不再依赖用户消息。
+        CP8-P3b：LifeSimulator 不再自跑 _loop（已纯函数化）。改由 AutonomyScheduler
+        全局心跳驱动 LifeAgent 的 AUTONOMOUS 时点调 simulate_tick。configure 仍需
+        注入回调（simulate_tick 内部用 llm/outreach/body_delta 等）。
         """
         if getattr(self, "_life_simulator_started", False):
             return
@@ -2247,18 +2250,29 @@ class EmotionalStatePlugin(Star):
             persona_getter=pipe._life_sim_persona_getter,
             countdown_callback=self._life_sim_adjust_countdown,
         )
-        life_sim.start()
+        # 启动全局自驱心跳（替代原 life_sim.start() 的后台循环）。
+        # LifeSim 持久化状态恢复在 async initialize 里 await（KV 读为异步）。
+        self._autonomy_scheduler.start()
         logger.info(
-            f"Sylanne life simulator: enabled={life_sim.enabled}, "
-            f"interval={life_sim.interval_seconds}s (started at initialize)"
+            f"Sylanne autonomy: life_sim enabled={life_sim.enabled}, "
+            f"interval={life_sim.interval_seconds}s, scheduler started at initialize"
         )
 
     async def initialize(self) -> None:
         """AstrBot 插件生命周期钩子：加载后调用（有 running loop，不依赖用户消息）。"""
+        # 恢复 LifeSim 持久化状态（修复历史「重启丢作息」缺陷）——KV 读为异步，故在此 await
+        try:
+            life_sim = getattr(self, "_life_simulator", None)
+            if life_sim is not None and self._has_kv_api():
+                saved = await self.get_kv_data("sylanne_life_sim_state", None)
+                if saved and isinstance(saved, dict):
+                    life_sim.from_dict(saved)
+        except Exception as e:
+            logger.debug(f"Sylanne life sim state restore skipped: {e}")
         try:
             self._start_life_simulator()
         except Exception as e:
-            logger.error(f"Sylanne initialize: life simulator start failed: {e}", exc_info=True)
+            logger.error(f"Sylanne initialize: autonomy start failed: {e}", exc_info=True)
 
     async def _life_sim_adjust_countdown(self) -> None:
         """生命模拟 tick 回调：用 Sylanne 当前状态拨动大饼下一次主动发言倒计时。
@@ -2301,9 +2315,17 @@ class EmotionalStatePlugin(Star):
         # 等待所有取消的任务完成（带超时保护）
         if tasks_to_cancel:
             await asyncio.wait(tasks_to_cancel, timeout=10)
-        # 停止生命模拟器
-        if hasattr(self._life_simulator, "stop"):
-            self._life_simulator.stop()
+        # 停止全局自驱心跳（CP8-P3b：替代原 life_simulator.stop）
+        sched = getattr(self, "_autonomy_scheduler", None)
+        if sched is not None:
+            sched.stop()
+        # 持久化 LifeSim 状态（修复历史「重启丢作息」缺陷）
+        try:
+            life_sim = getattr(self, "_life_simulator", None)
+            if life_sim is not None and self._has_kv_api():
+                await self.put_kv_data("sylanne_life_sim_state", life_sim.to_dict())
+        except Exception as e:
+            logger.debug(f"Sylanne life sim state persist skipped: {e}")
         # 关闭独立 WebUI 服务器
         try:
             await stop_webui_server()
