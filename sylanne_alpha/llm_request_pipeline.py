@@ -1660,23 +1660,11 @@ class LLMRequestPipeline:
                     f"(prompt={len(current_prompt)} chars)"
                 )
 
-        # 首次请求时启动生命模拟器（懒初始化）
+        # 兜底：若 initialize() 生命周期钩子未启动生命模拟器（幂等，已启动则跳过）
         if not getattr(p, "_life_simulator_started", False):
-            p._life_simulator_started = True
-            life_sim = getattr(p, "_life_simulator", None)
-            if life_sim is not None:
-                life_sim.configure(
-                    llm_caller=self._life_sim_llm_call,
-                    outreach_callback=self._life_sim_outreach,
-                    emotion_getter=self._life_sim_emotion,
-                    body_delta_callback=self._life_sim_body_delta,
-                    persona_getter=self._life_sim_persona_getter,
-                )
-                life_sim.start()
-                p.logger.info(
-                    f"Sylanne life simulator: enabled={life_sim.enabled}, "
-                    f"interval={life_sim.interval_seconds}s"
-                )
+            start_fn = getattr(p, "_start_life_simulator", None)
+            if callable(start_fn):
+                start_fn()
             p._start_webui_if_enabled()
 
     # ------------------------------------------------------------------
@@ -2463,13 +2451,80 @@ class LLMRequestPipeline:
         )
 
         # Fallback: if no LLM request picks this up within 5 minutes,
-        # send directly (scheduled as background task)
+        # 优先交给大饼插件主动发送（不污染全局，防双发）；大饼不可用才回退直发。
         async def _fallback_direct_send(session_key: str, r: str, m: str):
             await asyncio.sleep(300.0)
             pending = p._pending_outreach_context
             if session_key in pending and pending[session_key].get("reason") == r:
-                # Still not consumed -- send directly
+                # Still not consumed -- dispatch
                 pending.pop(session_key, None)
+
+                # 优先：大饼桥接（Sylanne 决定何时 + 提供素材，大饼负责发送）
+                bridge = getattr(p, "_proactive_bridge", None)
+                bridge_on = bool(
+                    (getattr(p, "config", None) or {}).get(
+                        "sylanne_alpha_proactive_bridge_enabled", False
+                    )
+                )
+                if bridge is not None and bridge_on and bridge.available():
+                    # 大饼时间公式闸门：免打扰时段/距上次太频则压住，连素材都不生成
+                    allowed, gate_reason = bridge.should_dispatch_now(session_key)
+                    if not allowed:
+                        logger.info(
+                            f"Sylanne bridge gated ({gate_reason}), skip this outreach: "
+                            f"session={session_key}"
+                        )
+                        return
+                    # 犹豫：发前迟疑 / 最后一刻收回 / 踌躇词试探（人类粗糙的迟疑感）
+                    reason_code = await bridge.infer_reason_code(session_key)
+                    hesit_on = bool(
+                        (getattr(p, "config", None) or {}).get(
+                            "sylanne_alpha_proactive_hesitation", False
+                        )
+                    )
+                    filler = ""
+                    if hesit_on:
+                        try:
+                            surface = await p.proactive_sylanne(session_key=session_key)
+                            body = surface.get("body", {}) if isinstance(surface, dict) else {}
+                        except Exception:
+                            body = {}
+                        plan = bridge.hesitation_plan(body)
+                        if plan["pre_delay_seconds"] > 0:
+                            logger.info(
+                                f"Sylanne hesitates {plan['pre_delay_seconds']}s before outreach "
+                                f"(h={plan['hesitation']}): session={session_key}"
+                            )
+                            await asyncio.sleep(plan["pre_delay_seconds"])
+                        if plan["withdraw"]:
+                            # 最后一刻收回——沉默本身成为表达
+                            logger.info(
+                                f"Sylanne withdraws outreach at the last moment "
+                                f"(h={plan['hesitation']}): session={session_key}"
+                            )
+                            return
+                        filler = plan["filler"]
+                    motivation = bridge.build_motivation_text(
+                        r, m, reason_code=reason_code, session_key=session_key
+                    )
+                    if filler:
+                        # 踌躇词试探：把迟疑感写进给大饼的动机提示
+                        motivation = (
+                            motivation
+                            + f"\n（开口时带一点迟疑，先轻轻起个头，比如用「{filler}」这样的语气，别太利落。）"
+                        )
+                    result = await bridge.dispatch(session_key, motivation)
+                    if result.get("dispatched"):
+                        logger.info(
+                            f"Sylanne outreach via proactive_chat bridge: session={session_key}"
+                        )
+                        return
+                    logger.info(
+                        f"Sylanne bridge dispatch not sent ({result.get('reason')}), "
+                        "falling back to direct send"
+                    )
+
+                # 回退：大饼不可用/未启用/失败时，沿用原直发链路
                 context = p.context
                 if hasattr(context, "send_message"):
                     # Use LLM to generate in-character message if possible

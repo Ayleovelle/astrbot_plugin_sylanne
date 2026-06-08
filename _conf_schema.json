@@ -71,6 +71,24 @@
     "default": false,
     "hint": "默认关闭；用于低频检查，不执行高频循环。"
   },
+  "sylanne_alpha_proactive_bridge_enabled": {
+    "description": "启用主动发言桥接（交给 astrbot_plugin_proactive_chat 发送）",
+    "type": "bool",
+    "default": false,
+    "hint": "默认关闭；开启后 Sylanne 决定何时主动+提供生活素材，由大饼主动消息插件负责发送。需已安装 astrbot_plugin_proactive_chat，未安装时静默降级。"
+  },
+  "sylanne_alpha_proactive_segment_takeover": {
+    "description": "由 Sylanne 接管大饼主动消息的分段发送",
+    "type": "bool",
+    "default": false,
+    "hint": "默认关闭；开启后关掉大饼自己的分段，改由 Sylanne 用人格化节奏把主动消息拆成多条连发（更像真人）。仅在桥接开启时生效。"
+  },
+  "sylanne_alpha_proactive_hesitation": {
+    "description": "主动发言的犹豫感（发前迟疑/最后一刻收回/踌躇词）",
+    "type": "bool",
+    "default": false,
+    "hint": "默认关闭；开启后主动发言会带人类式的迟疑：发出前随机停顿、按犹豫强度可能最后一刻收回不发、偶尔先发个踌躇词起头。强度由 Sylanne 的内在状态（怕打扰/想安静/熟悉度）驱动。仅在桥接开启时生效。"
+  },
   "sylanne_alpha_embedding_memory_enabled": {
     "description": "启用 embedding 记忆辅助召回",
     "type": "bool",

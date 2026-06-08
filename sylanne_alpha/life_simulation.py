@@ -180,6 +180,9 @@ class LifeSimulator:
         )
         self._persona_getter: Callable[[], str] | None = None  # 角色描述获取
         self._memory_summary_getter: Callable[[], str] | None = None  # 记忆摘要获取
+        self._countdown_callback: Callable[[], Awaitable[None]] | None = (
+            None  # 拨动外部主动发言倒计时（如大饼）
+        )
 
     @property
     def enabled(self) -> bool:
@@ -215,6 +218,7 @@ class LifeSimulator:
         persona_getter: Callable[[], str] | None = None,
         memory_summary_getter: Callable[[], str] | None = None,
         body_delta_callback: Callable[[dict[str, float]], None] | None = None,
+        countdown_callback: Callable[[], Awaitable[None]] | None = None,
     ):
         """注入外部依赖。所有回调都是可选的。"""
         self._llm_caller = llm_caller
@@ -223,6 +227,7 @@ class LifeSimulator:
         self._persona_getter = persona_getter
         self._memory_summary_getter = memory_summary_getter
         self._body_delta_callback = body_delta_callback
+        self._countdown_callback = countdown_callback
 
     def start(self):
         """启动后台模拟循环。"""
@@ -302,6 +307,14 @@ class LifeSimulator:
 
             if event.wants_to_share and self._should_outreach(now):
                 await self._do_outreach(event, now)
+
+        # 状态变就拨：每个 tick（身体状态已演化）后，拨动外部主动发言倒计时。
+        # 即使没 outreach，Sylanne 的内在节律变化也应影响下一次主动发言时机。
+        if self._countdown_callback is not None:
+            try:
+                await self._countdown_callback()
+            except Exception:
+                pass
 
     def _build_prompt(self, now: float) -> str:
         """构建 LLM 提示词，包含角色设定、时间、情绪、记忆等上下文。"""
