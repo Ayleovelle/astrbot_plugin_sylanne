@@ -1439,9 +1439,13 @@ class LLMRequestPipeline:
 
         p = self._p
         host = p._host(session_key)
-        emotion = host.kernel.computation.engine.observe()
-        sheaf_obs = host.kernel.computation.sheaf.observe()
-        expr_state = host.kernel.computation.expression.state()
+        comp = host.kernel.computation
+        emotion = comp.engine.observe()
+        # 共振场(ResonanceSpine)无公有 sheaf 属性(私有 _sheaf)，旧 ComputationSpine 有。
+        # CP3 切换计算芯后此处加固防崩；CP5 将整体改读 Surface。
+        _sheaf = getattr(comp, "sheaf", None) or getattr(comp, "_sheaf", None)
+        sheaf_obs = _sheaf.observe() if _sheaf is not None and hasattr(_sheaf, "observe") else {}
+        expr_state = comp.expression.state() if hasattr(comp, "expression") else {}
 
         # 前台快速评估器
         fast_assessment: dict = {}
@@ -1454,8 +1458,8 @@ class LLMRequestPipeline:
             except Exception as e:
                 logger.warning(f"Sylanne fast assessment: {e}", exc_info=True)
 
-        # 合并评估结果
-        last_assessment = host.kernel.computation._last_assessment or {}
+        # 合并评估结果（共振场可能无 _last_assessment，getattr 守卫）
+        last_assessment = getattr(comp, "_last_assessment", None) or {}
         current_assessment = (
             {**last_assessment, **fast_assessment}
             if fast_assessment

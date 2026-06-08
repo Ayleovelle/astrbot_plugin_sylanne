@@ -811,12 +811,16 @@ class SessionContext:
             )
             root = resolve_data_root(cfg)
             host = SylanneAlphaHost(root=root, session_key=session_key)
-            # 编码器共享：避免每个 host 各持有一份 encoder 浪费内存
-            plugin_cls = type(self._p)
-            if plugin_cls._shared_encoder is None:
-                plugin_cls._shared_encoder = host.kernel.computation.encoder
-            else:
-                host.kernel.computation.replace_encoder(plugin_cls._shared_encoder)
+            # 编码器共享：避免每个 host 各持有一份 encoder 浪费内存。
+            # 仅旧 ComputationSpine 暴露 encoder/replace_encoder；SDK 共振场
+            # （ResonanceSpine）架构不同、无此属性，跳过共享（其编码自管）。
+            comp = getattr(host.kernel, "computation", None)
+            if comp is not None and hasattr(comp, "encoder") and hasattr(comp, "replace_encoder"):
+                plugin_cls = type(self._p)
+                if plugin_cls._shared_encoder is None:
+                    plugin_cls._shared_encoder = comp.encoder
+                else:
+                    comp.replace_encoder(plugin_cls._shared_encoder)
             # 从人格状态派生记忆系统参数（人格驱动全参数）
             personality = (
                 host.kernel._personality()
