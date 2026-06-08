@@ -377,7 +377,7 @@ class EmotionalStatePlugin(Star):
         self._config = self.config
         # 会话管理：session_key → SylanneAlphaHost 映射
         self._hosts: BoundedDict = BoundedDict(maxsize=200)
-        self._background_tasks: set[asyncio.Task] = set()
+        self._background_tasks: list[asyncio.Task] = []
         # 流式回复相关缓冲区
         self._unfinished_replies: BoundedDict = BoundedDict(maxsize=200)
         self._stream_buffers: BoundedDict = BoundedDict(maxsize=200)
@@ -1231,8 +1231,8 @@ class EmotionalStatePlugin(Star):
                 )
             # 清空 chain → 大饼 _send_chain_with_hooks 见空链直接 return，不发送
             if result is not None:
-                if isinstance(result.chain, list):
-                    result.chain[:] = []
+                if isinstance(chain, list):
+                    chain[:] = []  # 切片清空，保留 list/MessageChain 子类对象身份
                 else:
                     result.chain = []
             text = text.strip()

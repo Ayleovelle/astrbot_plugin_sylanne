@@ -123,8 +123,10 @@ class FakeSylanne:
         self._reason_code = reason_code
         self._body = body
         self._guard_allowed = guard_allowed
+        self.proactive_calls = 0
 
     async def proactive_sylanne(self, *, session_key: str, now: float = 0.0) -> dict:
+        self.proactive_calls += 1
         out: dict = {"decision": {}}
         if self._reason_code:
             out["decision"] = {"reason_code": self._reason_code}
@@ -233,6 +235,31 @@ class TestInferReasonCode(unittest.TestCase):
         syl = FakeSylanne(FakeContext(FakeProactivePlugin()), ritual=None, reason_code=None)
         rc = asyncio.run(ProactiveBridge(syl).infer_reason_code("s:1:1"))
         self.assertEqual(rc, "life_rhythm")
+
+    def test_surface_reuse_skips_internal_call(self):
+        """传入预计算 surface → 不再内部调 proactive_sylanne（消除双调用）。"""
+        syl = FakeSylanne(FakeContext(FakeProactivePlugin()), ritual=None, reason_code="void")
+        bridge = ProactiveBridge(syl)
+        surface = {"decision": {"reason_code": "scar"}}
+        rc = asyncio.run(bridge.infer_reason_code("s:1:1", surface=surface))
+        self.assertEqual(rc, "scar")  # 用的是传入 surface 的 reason_code
+        self.assertEqual(syl.proactive_calls, 0)  # 没有内部调用
+
+    def test_no_surface_still_calls_internally(self):
+        """不传 surface → 维持原行为，内部调一次 proactive_sylanne。"""
+        syl = FakeSylanne(FakeContext(FakeProactivePlugin()), ritual=None, reason_code="void")
+        bridge = ProactiveBridge(syl)
+        rc = asyncio.run(bridge.infer_reason_code("s:1:1"))
+        self.assertEqual(rc, "void")
+        self.assertEqual(syl.proactive_calls, 1)
+
+    def test_ritual_priority_over_surface(self):
+        """仪式命中时优先返回 ritual，即使传了 surface 也不被覆盖。"""
+        syl = FakeSylanne(FakeContext(FakeProactivePlugin()), ritual="晚安", reason_code="void")
+        bridge = ProactiveBridge(syl)
+        surface = {"decision": {"reason_code": "scar"}}
+        rc = asyncio.run(bridge.infer_reason_code("s:1:1", surface=surface))
+        self.assertEqual(rc, "ritual")
 
 
 class TestBuildMotivationText(unittest.TestCase):
