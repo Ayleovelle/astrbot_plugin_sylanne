@@ -5,13 +5,17 @@
 ![astrbot_plugin_sylanne](https://socialify.git.ci/Ayleovelle/astrbot_plugin_sylanne/image?custom_description=%E4%B8%8D%E5%8F%AF%E9%80%86%E7%9A%84%E5%85%B3%E7%B3%BB%E8%AE%A1%E7%AE%97%E5%BC%95%E6%93%8E+%2B+%E8%87%AA%E6%88%91%E8%BF%9B%E5%8C%96%E8%AE%A4%E7%9F%A5%E4%BD%93&description=1&font=Inter&forks=1&issues=1&language=1&name=1&owner=1&pattern=Brick+Wall&pulls=1&stargazers=1&theme=Auto)
 
 <p align="center">
-  <img src="https://img.shields.io/badge/version-2.0.0-red.svg" alt="version 2.0.0">
+  <a href="https://github.com/Ayleovelle/astrbot_plugin_sylanne/releases"><img src="https://img.shields.io/badge/version-2.0.0-red.svg" alt="version 2.0.0"></a>
+  <a href="https://github.com/Ayleovelle/astrbot_plugin_sylanne/stargazers"><img src="https://img.shields.io/github/stars/Ayleovelle/astrbot_plugin_sylanne?style=flat&color=orange" alt="GitHub Stars"></a>
   <img src="https://img.shields.io/badge/AstrBot-%3E%3D4.9.2%2C%3C5.0.0-green" alt="AstrBot >=4.9.2,<5.0.0">
-  <img src="https://img.shields.io/badge/Python-3.10%2B-yellow" alt="Python 3.10+">
-  <img src="https://img.shields.io/badge/license-AGPL--3.0--or--later-red" alt="license AGPL-3.0-or-later">
+  <img src="https://img.shields.io/badge/Python-3.10%2B-blue" alt="Python 3.10+">
+  <a href="https://github.com/Ayleovelle/astrbot_plugin_sylanne/commits"><img src="https://img.shields.io/github/last-commit/Ayleovelle/astrbot_plugin_sylanne?color=purple" alt="Last Commit"></a>
+  <a href="LICENSE"><img src="https://img.shields.io/badge/license-AGPL--3.0--or--later-red" alt="license AGPL-3.0-or-later"></a>
 </p>
 
-[![Moe Counter](https://count.getloli.com/get/@astrbot_plugin_sylanne?theme=moebooru)](https://github.com/Ayleovelle/astrbot_plugin_sylanne)
+<p align="center">
+  <a href="https://github.com/Ayleovelle/astrbot_plugin_sylanne"><img src="https://count.getloli.com/get/@astrbot_plugin_sylanne?theme=moebooru" alt="Moe Counter"></a>
+</p>
 
 > <span style="font-size: 1.08em;"><strong>Sylanne-Embodiment：不可逆的关系计算引擎 + 自我进化认知体。</strong>不再模拟情绪标签，而是让对话在躯体上留下伤痕、在沉默中积累压力、在关系里长出不可撤销的形状——再让 9 个认知 agent 编排出一颗会自我进化的心智：白天反应式微调，睡眠期反思沉淀，跨重启累积学习。</span>
 
@@ -19,7 +23,7 @@
 
 - [介绍](#介绍)
 - [为什么重写](#为什么重写)
-- [计算架构（7 层）](#计算架构7-层)
+- [计算架构（共振场 + 7 模块）](#计算架构共振场--7-模块)
 - [自我进化（多智能体认知体）](#自我进化多智能体认知体)
 - [特色功能](#特色功能)
 - [工作流](#工作流)
@@ -86,49 +90,67 @@ Embodiment 用数学证明了这些性质不是"感觉上像"，而是计算上*
 
 ---
 
-## 计算架构（7 层）
+## 计算架构（共振场 + 7 模块）
+
+2.0 的计算层由独立 SDK [**SylannEngine**](https://github.com/Ayleovelle/SylannEngine) 提供，插件通过适配器消费 Surface 输出。详细的计算理论、公理系统和 benchmark 请参见 SDK 仓库。
+
+7 个计算模块仍然存在，但**执行方式从顺序管线升级为单纯共振场（Simplicial Resonance Field）**——所有模块作为完全 6-单纯形 Δ⁶ 的顶点同时共振，表达从场的相变中涌现，而非逐层顺序算出。本插件使用 **lite 档位**（成对耦合，42 通道，纯 Python，无外部依赖）。
+
+### 默认模式：共振场（ResonanceSpine）
 
 ```mermaid
-block-beta
-    columns 1
-    block:L7["L7 相变表达"]:1
-        L7a["压力积累 → 阈值判断 → hint / normal / urgent"]
-    end
-    block:L6["L6 自创生边界"]:1
-        L6a["32 维身份核心 · 小扰动吸收 · 大冲击相变（≤6°旋转）"]
-    end
-    block:L5["L5 MoE-HGT 决策融合"]:1
-        L5a["MoE 负载均衡 · 7 类型 token · 类型感知 Q/K/V · 人格先验 μ · 4 维决策输出"]
-    end
-    block:L4["L4 Relational Sheaf（多关系层论）"]:1
-        L4a["层上同调 H¹ 一致性 · 拉普拉斯谱传播 · 人格派生呈现矩阵"]
-    end
-    block:L3["L3 Void-Scar Engine（核心创新）"]:1
-        L3a["Scar Algebra 不可逆伤痕"]
-        L3b["⇄ 双向耦合 Γ,Φ ⇄"]
-        L3c["Void Calculus 缺席追踪"]
-    end
-    block:L2["L2 预测编码门控"]:1
-        L2a["惊讶度 → fast（典型~90%）/ normal / full"]
-    end
-    block:L1["L1 HDC 感知编码"]:1
-        L1a["文本 → 2048-bit 超维向量 · < 0.1ms"]
+graph TD
+    INPUT["文本输入"] --> FIELD
+
+    subgraph FIELD["Simplicial Resonance Field Δ⁶ · lite"]
+        direction TB
+        M0["⓪ HDC 感知"]
+        M1["① 预测编码"]
+        M2["② Void-Scar Engine"]
+        M3["③ Relational Sheaf"]
+        M4["④ MoE-HGT 融合"]
+        M5["⑤ 自创生边界"]
+        M6["⑥ 相变表达"]
+
+        M0 <--> M1 & M2 & M3 & M4 & M5 & M6
+        M1 <--> M2 & M3 & M4 & M5 & M6
+        M2 <--> M3 & M4 & M5 & M6
+        M3 <--> M4 & M5 & M6
+        M4 <--> M5 & M6
+        M5 <--> M6
     end
 
-    L1 --> L2 --> L3 --> L4 --> L5 --> L6 --> L7
+    FIELD --> CONV{"收敛？"}
+    CONV -->|"‖Δstate‖ < ε"| SURFACE["Surface 输出"]
+    CONV -->|"未收敛"| FIELD
 ```
 
-| 层 | 模块 | 职责 | 延迟 |
-|:---:|------|------|:---:|
-| **L1** | HDC 感知编码 | 文本→2048-bit 超维向量，字符 bigram + 循环移位 + 多数投票 | 8.8ms |
-| **L2** | 预测编码门控 | 完整 Hamming surprise，冷启动守卫，三路由决策 | 0.3ms |
-| **L3** | Void-Scar Engine | 伤痕代数（不可逆）+ 空洞微积分（自主压力）+ 双向耦合 | 0.15ms |
-| **L4** | Relational Sheaf | 层上同调一致性检测 + 拉普拉斯谱传播 + 能量守恒 | 0.005ms |
-| **L5** | MoE-HGT 决策融合 | MoE 多专家混合 + 异构图 Transformer，scar token 对数压缩，负载均衡，人格派生全参数 | 0.75ms |
-| **L6** | 自创生边界 | 32 维身份核心，正交投影穿透判断，相变旋转 | 0.02ms |
-| **L7** | 相变表达 | 连续强度（hint/normal/urgent），人格驱动阈值 | 0.005ms |
+- 7 个模块同时注入共振场，通过成对耦合通道迭代至收敛
+- 谐波形式（Hodge Laplacian 零空间）= 拓扑不变量 = 系统的"灵魂"
+- 附带 Hopfield 吸引子景观 + Echo State 时序记忆 + 耗散结构远离平衡态
 
-### L3：Void-Scar Engine（核心创新）
+### Fallback 模式：顺序管线（ComputationSpine）
+
+兼容旧架构的顺序执行路径，可在配置中切换：
+
+```mermaid
+flowchart LR
+    L1["L1 HDC"] --> L2["L2 门控"] --> L3["L3 Void-Scar"] --> L4["L4 Sheaf"] --> L5["L5 HGT"] --> L6["L6 边界"] --> L7["L7 表达"]
+```
+
+### 模块速查
+
+| # | 模块 | 职责 | 延迟（p50） |
+|:---:|------|------|:---:|
+| **0** | HDC 感知编码 | 文本→2048-bit 超维向量，字符 bigram + 循环移位 + 多数投票 | 8.8ms |
+| **1** | 预测编码门控 | Hamming surprise，冷启动守卫，三路由决策 | 0.3ms |
+| **2** | Void-Scar Engine | 伤痕代数（不可逆）+ 空洞微积分（自主压力）+ 双向耦合 | 0.15ms |
+| **3** | Relational Sheaf | 层上同调一致性检测 + 拉普拉斯谱传播 + 能量守恒 | 0.005ms |
+| **4** | MoE-HGT 决策融合 | 多专家混合 + 异构图 Transformer，scar token 对数压缩，负载均衡 | 0.75ms |
+| **5** | 自创生边界 | 32 维身份核心，正交投影穿透判断，相变旋转（≤6°） | 0.02ms |
+| **6** | 相变表达 | 连续强度（hint/normal/urgent），人格驱动阈值 | 0.005ms |
+
+### Void-Scar Engine（核心创新）
 
 **Scar Algebra（伤痕代数）**
 - 事件不只改变状态，还会留下**不可删除的伤痕**
@@ -147,7 +169,7 @@ block-beta
 - Φ：维度麻木→降低空洞检测阈值（反复受伤导致回避）
 - 涌现 coherence：伤痕和空洞对齐时系统连贯，不对齐时"解离"
 
-### L4：Relational Sheaf（多关系层论）
+### Relational Sheaf（多关系层论）
 
 - 多段关系不是独立副本，而是一个**单纯复形上的层**
 - 层上同调 H¹ 度量跨关系矛盾（对不同人说不同话的代价）
@@ -159,7 +181,7 @@ block-beta
 
 ## 自我进化（多智能体认知体）
 
-> **一句话概括：** 7 层计算栈是她的「身体」，9 个认知 agent 是她的「心智」——一个编排器 SelfCore 把它们组织成一颗会自我进化的脑：白天反应式微调门控，睡眠期反思沉淀策略，跨重启累积学习。她越用越懂你，而且**重启不归零**。
+> **一句话概括：** 共振场计算栈是她的「身体」，9 个认知 agent 是她的「心智」——一个编排器 SelfCore 把它们组织成一颗会自我进化的脑：白天反应式微调门控，睡眠期反思沉淀策略，跨重启累积学习。她越用越懂你，而且**重启不归零**。
 
 2.0.0 在不可逆计算引擎之上，长出了一套多智能体认知架构。计算栈负责「此刻的状态」，agent 团队负责「如何运用这些状态去判断、表达、演化」。
 
@@ -261,7 +283,7 @@ flowchart TD
     B -->|"超时或 max 4s"| C
     C --> C1["取消正在发送的旧分段回复（打断）"]
     C1 --> PRE["SelfCore PRE 编排<br/>emotion/assessor/persona/life/memory<br/>perceive→gate→act → 融合成事件输入"]
-    PRE --> C2["kernel.tick() → 计算层 7 层"]
+    PRE --> C2["kernel.tick() → 共振场迭代收敛"]
     C2 --> POST["SelfCore POST 编排<br/>rhythm 节奏学习 / memory 衰减 / proactive 主动判断"]
     POST --> RL["反应式学习：本轮 reward 微调门控偏置（零 LLM）"]
     RL --> C4["注入上下文 + 记忆碎片到 prompt"]
@@ -277,20 +299,17 @@ flowchart TD
     G3 --> G4["后台按打字节奏逐段发送"]
 ```
 
-> 计算栈（7 层）是「身体」，SelfCore 四时点编排的 9 个 agent 是「心智」。PRE 影响本轮怎么算，POST/RESPONSE_POST 消化结果并喂回反应式学习——一条消息走完，她对你的门控偏置就微调了一点点。
+> 共振场是「身体」，SelfCore 四时点编排的 9 个 agent 是「心智」。PRE 影响本轮怎么算，POST/RESPONSE_POST 消化结果并喂回反应式学习——一条消息走完，她对你的门控偏置就微调了一点点。
 
 
 ### 计算层（每条消息内部）
 
 ```mermaid
 flowchart TD
-    L1["L1 HDC 感知<br/>文本 → 2048-bit 向量<br/>⏱ 0.1ms"] --> L2["L2 预测编码门控<br/>惊讶度 → 路由决策<br/>⏱ 0.01ms"]
-    L2 --> L3["L3 Void-Scar Engine<br/>伤痕调制 → 状态演化 → 空洞检测<br/>耦合：压力→伤害 / 麻木→降低检测<br/>⏱ 2-6ms"]
-    L3 --> L4["L4 Relational Sheaf<br/>跨关系传播 · H¹ 一致性检测<br/>⏱ 0.7ms"]
-    L4 --> L5["L5 MoE-HGT 决策融合<br/>MoE 负载均衡 · scar token 对数压缩<br/>7 类型 token → 类型感知 attention → 4 维决策<br/>⏱ 0.4ms"]
-    L5 -->|"fast: 10% 力"| L6["L6 自创生边界<br/>外力投影 → 穿透判断<br/>吸收 or 相变（≤6°旋转）<br/>⏱ 0.01ms"]
-    L5 -->|"full: 100% 力"| L6
-    L6 --> L7["L7 相变表达<br/>压力积累 → 超过阈值<br/>hint / normal / urgent<br/>⏱ 0.001ms"]
+    IN["文本输入"] --> HDC["⓪ HDC 感知<br/>文本 → 2048-bit 向量"]
+    HDC --> RF["共振场 Δ⁶ 迭代<br/>7 模块全连接耦合<br/>收敛 ‖Δ‖ < ε"]
+    RF --> SURF["Surface 输出<br/>decision · state · guard"]
+    RF -.->|"Hopfield 吸引子<br/>+ Echo State 时序记忆"| RF
 ```
 
 ### 反馈闭环
@@ -415,7 +434,7 @@ $$\dim H^1(K, \mathcal{F}) > 0 \iff \text{存在不可调和的跨关系矛盾}$
 | 维度 | 1.0.0 | 1.2.x | 2.0.0 |
 | --- | --- | --- | --- |
 | **代码架构** | 单体 main.py | 2140 行宿主 + 10 委托模块 | + 9 认知 agent + 进化层 4 模块 |
-| **计算层** | 6 层（无 MoE） | 7 层 + MoE-HGT 三阶段决策融合 | 同 1.2.x |
+| **计算层** | 6 层（无 MoE） | 7 层 + MoE-HGT 三阶段决策融合 | **共振场 Δ⁶ 迭代（7 模块全连接）** |
 | **心智架构** | 无（直调计算栈） | 无 | **SelfCore 编排 9 agent · 四时点** |
 | **自我进化** | 无 | 无 | **三层进化（反应式/反思式/巩固式）** |
 | **跨重启学习** | 状态恢复 | 状态恢复 | **进化档案落盘 KV，门控偏置不归零** |
@@ -424,7 +443,7 @@ $$\dim H^1(K, \mathcal{F}) > 0 \iff \text{存在不可调和的跨关系矛盾}$
 | **安全机制** | 无 | 7 项安全阀 + WebUI 加固 | + 进化三铁律护栏（钳位/回归/可回滚） |
 | **token 控制** | LLM 预算闸 | 同左 | + 反思三道闸（首拍/预算池/输入压缩） |
 | **内存管理** | 无限增长 | BoundedDict LRU 驱逐 | + 进化层 per-session 状态随会话清理 |
-| **本地延迟** | ~3ms（6 层，部分跳过） | ~10ms（7 层全跑） | 同 1.2.x（agent 编排零 LLM 本地算术） |
+| **本地延迟** | ~3ms（6 层，部分跳过） | ~10ms（7 层全跑） | ~10ms（共振场收敛，agent 编排零 LLM） |
 
 <details><summary><strong>与远古 3.x 对比（历史参考，点击展开）</strong></summary>
 
@@ -565,6 +584,8 @@ Embodiment 是完全重写，但对 3.x 用户做了兼容：
 
 ---
 
+<details><summary><strong>更新日志（点击展开）</strong></summary>
+
 ## Embodiment-1.4.0 更新日志
 
 > **发布于 2026-05-30**
@@ -587,7 +608,7 @@ Embodiment-1.4.0 是一次稳定性与架构治理版本。修复了 3 个用户
 
 无破坏性变更。旧存档自动兼容，无需手动操作。
 
-<details><summary>历史版本更新日志（点击展开）</summary>
+---
 
 ## Embodiment-1.3.0 更新日志
 
@@ -795,6 +816,7 @@ Embodiment-1.2.0 是基于 Embodiment 架构的一次全量优化。1.0 搭了�
 
 ## 📚 推荐阅读
 
+- [SylannEngine](https://github.com/Ayleovelle/SylannEngine) — 共振场计算层 SDK。本插件的计算核心，独立仓库，可单独集成到任何 Python 异步项目中。
 - [主动消息 (Proactive_Chat)](https://github.com/DBJD-CR/astrbot_plugin_proactive_chat) — Sylanne **自带**完整的主动发言（生活模拟 + LLM 推断何时开口），可以独立工作；但搭配 Proactive_Chat **食用更佳**：Sylanne 决定「此刻想不想说、为什么想说」并提供生活素材，把成熟的调度与发送链路交给它，各取所长。
 - [AstrBot](https://github.com/AstrBotDevs/AstrBot) — 本插件依附的机器人框架，感谢其开发团队的付出。
 
@@ -802,15 +824,7 @@ Embodiment-1.2.0 是基于 Embodiment 架构的一次全量优化。1.0 搭了�
 
 欢迎提交 [Issue](https://github.com/Ayleovelle/astrbot_plugin_sylanne/issues) 和 [Pull Request](https://github.com/Ayleovelle/astrbot_plugin_sylanne/pulls)。提 PR 前请阅读 [贡献指南](CONTRIBUTING.md)，参与互动请遵守[行为准则](CODE_OF_CONDUCT.md)。
 
-## 📊 仓库状态
-
-![Repobeats analytics](https://repobeats.axiom.co/api/embed/sylanne-placeholder.svg "Repobeats analytics image")
-
-> Repobeats 卡片需在 [repobeats.axiom.co](https://repobeats.axiom.co) 为本仓库生成专属嵌入链接后替换上方占位 URL。
-
----
-
-## 许可证
+## 📜 许可证
 
 [AGPL-3.0-or-later](LICENSE)
 
