@@ -4,7 +4,19 @@
 
 ## [v2.0.0] - 2026-06-09
 
-> 一次叠了三层的重构：在不可逆关系计算引擎之上，重铺地基（模块 agent 化）、长出心智（多智能体编排）、学会成长（自我进化）。
+> 一次叠了三层的重构：在不可逆关系计算引擎之上，重铺地基（模块 agent 化）、长出心智（多智能体编排）、学会成长（自我进化）。计算核心外包给独立 SDK，插件瘦身为纯业务编排层。
+
+### 🏗️ 架构重构：SDK 深度集成
+
+- **计算层 SDK 化**：核心计算从插件内部剥离为独立 vendored SDK（[SylannEngine](https://github.com/Ayleovelle/SylannEngine) `sylanne_core`），插件通过 `engine_adapter.py` 消费 Surface 输出，计算可独立演化
+- **共振场替代顺序管线**：7 个计算模块不再 L1→L2→...→L7 顺序执行，而是作为完全 6-单纯形 Δ⁶ 的顶点同时注入 Simplicial Resonance Field 迭代至收敛；表达从场的相变中涌现，旧顺序管线保留为 fallback（ComputationSpine）
+- **lite 档位配置**：成对耦合，42 通道，纯 Python 无外部依赖，实测 ~10ms 收敛
+- **旧计算层删除**（~9620 行）：计算彻底外包给 SDK，插件不再持有计算实现
+
+### 🏗️ 架构重构：契约化与状态治理
+
+- **Protocol 接口契约化**（CP8-P1）：10 个子模块从 `plugin: Any` → `PluginHost` Protocol 类型契约，编辑器可静态检查，禁止穿透访问
+- **SessionStateStore**（CP8-P2）：新建集中运行态容器仓，34 个散落的 per-session dict 迁入统一注册的 `SessionMap`，带 LRU 驱逐 + TTL + 类型守卫，结构性消除 dict 泄漏和跨模块裸访问
 
 ### ✨ Features
 
@@ -19,11 +31,7 @@
   - **跨重启累积学习**：进化档案持久化到 KV，服务器重启 / 插件重载后门控偏置不归零
 - **进化三铁律护栏**：硬钳位（反射 ±0.15 / 反思 ±0.10 / 总和 ±0.20）+ 无信号自动回归基线 + 与人格漂移物理隔离 + 一键出厂复位
 - **主动发言桥接**：适配 [astrbot_plugin_proactive_chat](https://github.com/DBJD-CR/astrbot_plugin_proactive_chat)，Sylanne 决定"何时主动 + 提供生活素材"，可接管分段发送 / 拨动倒计时 / 注入犹豫感（自带主动发言可独立工作，搭配食用更佳）
-
-### 🔧 Refactor
-
-- 计算栈第二代：七层神经脊、MoE-HGT 决策融合、关系层论传播全部独立成可单测模块
-- Protocol 契约化 + SessionStateStore：34 个 per-session 容器迁入统一登记的状态仓，结构性清理杜绝裸 dict 泄漏
+- **生活模拟素材化**：生活模拟 LLM 产出永远只作为上下文素材，不绕过主模型直发；事件按情况写入记忆层（去标签，LLM 无法区分独立经历与对话记忆）
 
 ### 🐛 Bug Fixes
 
@@ -32,10 +40,20 @@
 - 修复主动发言 session→UMO 映射读错位置（origin 恒回退，带后缀会话可能投错）
 - 修复自驱 / 巩固持会话锁期间 await LLM/IO 长占锁（改锁舞：锁内取快照、LLM/IO 移锁外）
 - MemoryAgent POST 记忆衰减不再被亲密度门控误杀；BoundedDict `__contains__` 补 TTL 一致性
+- 修复 PersonaManager async 兼容（AstrBot v4.25 API 变 coroutine，旧代码 coroutine never awaited）
+- 修复生活模拟直发路径（大饼不可用时回退为直接 send_message，改为存回 pending context 走主模型链路）
 
 ### 📝 工程化
 
 - 仓库美化与协作骨架（借鉴 [@DBJD-CR](https://github.com/DBJD-CR) 的插件模板）：README 重排（Socialify 头图 / 居中徽章 / 快速导航 / 自我进化章节 / 重绘工作流 / 与 Embodiment-1.0.0 对比）、新增 CONTRIBUTING / CODE_OF_CONDUCT / 设计·讨论·文档 Issue 模板 / Dependabot / stale 工作流 / run_ruff.bat
+- README 计算架构改写为共振场 Mermaid 全连接图 + SDK 超链接 + 动态 badge
+- Changelog 统一折叠进 `<details>` 块，Repobeats 占位移除
+
+### 📊 数据
+
+- 139 文件变更，+27,411 行 / -4,144 行
+- 74 commits
+- 实机测试：AstrBot v4.25.1，129 pytest 全过，全链路零报错
 
 ---
 
