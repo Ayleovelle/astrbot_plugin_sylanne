@@ -7,8 +7,11 @@
 ⚠️ token 三道闸（FM2 防 token 悖论，硬约束，全部落地）：
 1. 首拍闸：只在会话 AWAKE→DROWSY 跳变的那一拍触发一次（非每拍、非 per-tick）。
    由 AutonomyScheduler 的相位跳变检测保证，本引擎再用 last_reflected 兜底。
-2. 全局预算池：reflection_daily_budget 默认每会话每日 2 次，**全局计数非 per-session
-   无限**（防"空闲会话越多反思越多"的反直觉爆炸）。超额直接跳过（降级层次3）。
+2. 预算池：reflection_daily_budget 默认**每会话每日 2 次**（per-session 配额）。
+   设计上界 = 活跃会话数 × 2 次/天，可算可控（见 cp8-p4 作战文档"token 经济学"）。
+   超额直接跳过（降级层次3）。注：这是 per-session 配额而非单一全局计数器——
+   会话越多总量线性增长但有硬上界，符合"最坏上界可枚举"的设计约束。
+   计数随进化档案落盘 KV，进程重启不清零（防频繁重启绕过日预算）。
 3. 输入压缩：决策日志 + 档案现状压成 ≤1500 字才喂 LLM。
 
 ⚠️ 影子副本 + 锁舞（FM4 防竞态，唤醒优先）：
@@ -43,10 +46,8 @@ class ReflectionEngine:
     def __init__(self, plugin: Any, self_core: Any) -> None:
         self._p = plugin
         self._sc = self_core
-        # 每会话上次反思日（YYYYMMDD-localdate）→ 当日已用次数（预算池）
-        self._daily_used: dict[str, list] = {}  # sk → [date_str, count]
-        # 每会话上次反思时间（首拍闸兜底，避免同一 DROWSY 段反复反思）
-        self._last_reflected: dict[str, float] = {}
+        # CP8-P6：预算/间隔状态迁到 SelfCore.reflection_meta（随进化档案落盘，重启不清零，
+        # 且统一由 SelfCore.forget_session 清理）。本引擎不再自持 per-session dict。
         # 同会话两次反思最小间隔（秒），兜底首拍闸
         self._min_interval = 1800.0
 
@@ -60,30 +61,40 @@ class ReflectionEngine:
     def _today(self, now: float) -> str:
         return time.strftime("%Y%m%d", time.localtime(now))
 
+    def _meta(self, session_key: str) -> dict:
+        """取该会话的反思预算元数据（持久化在 SelfCore，重启不丢）。"""
+        try:
+            return self._sc.reflection_meta(session_key)
+        except Exception:
+            return {}
+
     def _has_budget(self, session_key: str, now: float) -> bool:
         budget = self._budget()
         if budget <= 0:
             return False
-        rec = self._daily_used.get(session_key)
+        rec = self._meta(session_key).get("daily")
         today = self._today(now)
-        if rec is None or rec[0] != today:
+        if not rec or rec[0] != today:
             return True  # 新的一天，配额重置
         return rec[1] < budget
 
     def _consume_budget(self, session_key: str, now: float) -> None:
+        meta = self._meta(session_key)
         today = self._today(now)
-        rec = self._daily_used.get(session_key)
-        if rec is None or rec[0] != today:
-            self._daily_used[session_key] = [today, 1]
+        rec = meta.get("daily")
+        if not rec or rec[0] != today:
+            meta["daily"] = [today, 1]
         else:
             rec[1] += 1
 
     def _interval_ok(self, session_key: str, now: float) -> bool:
-        return (now - self._last_reflected.get(session_key, 0.0)) >= self._min_interval
+        last = float(self._meta(session_key).get("last_reflected", 0.0) or 0.0)
+        return (now - last) >= self._min_interval
 
     def forget_session(self, session_key: str) -> None:
-        self._daily_used.pop(session_key, None)
-        self._last_reflected.pop(session_key, None)
+        # 预算元数据归 SelfCore.reflection_meta，由 SelfCore.forget_session 清理；
+        # 此处保留空实现以兼容 AutonomyScheduler.forget_session 的转交调用。
+        pass
 
     async def maybe_reflect(self, session_key: str, now: float) -> bool:
         """DROWSY 首拍调用。三道闸全过才跑一次反思。返回是否真的反思了。
@@ -122,7 +133,7 @@ class ReflectionEngine:
         #    但丢弃不扣"会绕过预算池（FM2 token 悖论的真实形式，skeptic 核查捕获）。
         #    代价：偶发丢弃会"浪费"一次配额，但这正确——花掉的 token 不可退。
         self._consume_budget(session_key, now)
-        self._last_reflected[session_key] = now
+        self._meta(session_key)["last_reflected"] = now
         # ③ 锁外跑 LLM（带 timeout 降级），唤醒可在此期间发生
         raw = await self._call_llm(prompt)
         if not raw:

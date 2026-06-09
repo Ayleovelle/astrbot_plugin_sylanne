@@ -87,14 +87,23 @@ def test_emotion_strong_valence_llm():
 
 
 # ── MemoryAgent ──
-def test_memory_shallow_intimacy_skips():
+def test_memory_gate_always_rule_for_post_decay():
+    # CP8-P6：MemoryAgent gate 恒 RULE，避免误杀 POST 的 tick_decay（必跑维护）。
     a = _mk(MemoryAgent)
-    assert a.gate(a.perceive(_surface(intimacy_gravity=0.1))) == SKIP
+    assert a.gate(a.perceive(_surface(intimacy_gravity=0.1))) == RULE
+    assert a.gate(a.perceive(_surface(intimacy_gravity=0.8, repair_pressure=0.8))) == RULE
 
 
-def test_memory_high_repair_intimacy_llm():
+def test_memory_shallow_intimacy_pre_recall_skipped():
+    # 浅关系：gate 仍放行（为 POST 衰减），但 PRE 召回在 act 内被亲密度阈值挡掉。
+    import asyncio
     a = _mk(MemoryAgent)
-    assert a.gate(a.perceive(_surface(intimacy_gravity=0.8, repair_pressure=0.8))) == LLM
+    perceived = a.perceive(_surface(intimacy_gravity=0.1))
+    perceived["_evo_delta"] = lambda k: 0.0
+    a._p._store.last_user_texts.set("s", "想起一件事")
+    from sylanne_alpha.agents.base import PRE
+    out = asyncio.run(a.act("s", RULE, perceived, phase=PRE))
+    assert out is None  # 浅关系不主动翻记忆
 
 
 # ── PersonaAgent ──

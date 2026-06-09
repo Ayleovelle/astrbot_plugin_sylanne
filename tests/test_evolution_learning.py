@@ -125,15 +125,28 @@ def test_reflection_bias_clamped_more_conservative():
 
 
 def test_get_delta_sums_reflex_and_reflection():
+    # 用小幅度，确保两路之和不触发总 cap(0.20)，验证纯叠加语义
     arc = AgentEvolutionArchive("memory")
-    for _ in range(30):
-        arc.update("k", 1.0, eta=0.01)       # 推高 reflex delta
+    for _ in range(5):
+        arc.update("k", 1.0, eta=0.01)       # 推高 reflex delta（约 0.05）
     for _ in range(20):
-        arc.apply_reflection("k", 0.08)      # 叠加 reflection_bias
+        arc.apply_reflection("k", 0.04)      # 叠加 reflection_bias（约 0.04）
     total = arc.get_delta("k")
     snap = arc.param_snapshot()["k"]
-    assert abs(total - (snap["delta"] + snap["reflection_bias"])) < 1e-6
+    # snap 值经 round(...,4)，total 未舍入，故用 1e-3 容差比对"是否就是两路之和"
+    assert abs(total - (snap["delta"] + snap["reflection_bias"])) < 1e-3
     assert total > snap["delta"]  # 反思偏置确实叠加上去了
+
+
+def test_get_delta_total_cap_clamps_sum():
+    # CP8-P6：两路同向叠加超总 cap(0.20) 时被钳住
+    arc = AgentEvolutionArchive("memory")
+    for _ in range(500):
+        arc.update("k", 1.0, eta=0.01)       # delta 顶到 0.15
+    for _ in range(50):
+        arc.apply_reflection("k", 0.5)       # reflection_bias 顶到 0.10
+    total = arc.get_delta("k")
+    assert total <= 0.20 + 1e-9              # 0.15+0.10=0.25 被总 cap 钳到 0.20
 
 
 def test_reflection_persistence_roundtrip():
@@ -196,6 +209,14 @@ class _FakeSelfCore:
         self._p = plugin
         self._evo_stores = {}
         self._phase = phase
+        self._reflection_meta = {}
+
+    def reflection_meta(self, sk):
+        m = self._reflection_meta.get(sk)
+        if m is None:
+            m = {}
+            self._reflection_meta[sk] = m
+        return m
 
     def autonomy_phase(self, sk, now):
         return self._phase

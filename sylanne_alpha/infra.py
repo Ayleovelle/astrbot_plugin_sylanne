@@ -182,6 +182,16 @@ class BoundedDict(OrderedDict):
                         exc,
                     )
 
+    def __contains__(self, key: Any) -> bool:
+        # CP8-P6：TTL 模式下，过期条目视为不存在（与 __getitem__ 的过期语义一致），
+        # 修复 get_or_create 等 `key in d`→True 但 `d[key]` 抛 KeyError 的 TOCTOU。
+        # 只读判断、不在此删除（避免在 __setitem__ 的 `key in self` 调用里产生副作用）。
+        if not super().__contains__(key):
+            return False
+        if self.ttl and key in self._ts and (time.time() - self._ts[key] > self.ttl):
+            return False
+        return True
+
     def __getitem__(self, key: Any) -> Any:
         # TTL 检查：过期则惰性删除并抛出 KeyError
         if self.ttl and key in self._ts:

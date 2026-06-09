@@ -803,6 +803,10 @@ class SessionContext:
                     self._p._state_persistence.persist_kernel(oldest_key, old_host),
                     name=f"lru_evict_{oldest_key}",
                 )
+                # CP8-P6：驱逐前先把进化档案落盘（否则未巩固的反射/反思偏置随驱逐丢失），
+                # 再清进化层 per-session 状态。尤其 _restored 守卫必须清——否则同 key
+                # 后续重建时不会再从 KV 恢复，已落盘学习成果静默丢失。
+                self._persist_and_forget_evolution(oldest_key)
             cfg = (
                 self._p.config
                 if hasattr(self._p, "_config")
@@ -860,6 +864,36 @@ class SessionContext:
             host = existing_host
             hosts.set(session_key, host)
         return host
+
+    def _persist_and_forget_evolution(self, session_key: str) -> None:
+        """LRU 驱逐时：先同步取进化档案快照并异步落盘 KV，再清进化层 per-session 状态。
+
+        关键时序：必须**同步**先取 evo_to_dict 快照，再调 forget 清容器，最后让落盘
+        协程写入快照——否则 forget 先清空，落盘协程跑时只会写到空档案，未巩固的
+        反射/反思偏置静默丢失。
+        """
+        p = self._p
+        sched = getattr(p, "_autonomy_scheduler", None)
+        consol = getattr(sched, "_consolidation", None)
+        sc = getattr(p, "_self_core", None)
+        snapshot = None
+        if sc is not None and hasattr(sc, "evo_to_dict"):
+            try:
+                snapshot = sc.evo_to_dict(session_key)
+            except Exception:
+                snapshot = None
+        if snapshot and consol is not None and hasattr(consol, "_write_evolution"):
+            from sylanne_alpha.utils import safe_ensure_future
+            safe_ensure_future(
+                consol._write_evolution(session_key, snapshot),
+                name=f"evo_persist_evict_{session_key}",
+            )
+        forget = getattr(p, "_forget_evolution_session", None)
+        if callable(forget):
+            try:
+                forget(session_key)
+            except Exception:
+                pass
 
     # ------------------------------------------------------------------
     # 离线消息缓冲（Item 107）

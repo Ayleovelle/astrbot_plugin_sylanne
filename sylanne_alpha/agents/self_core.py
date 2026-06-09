@@ -56,6 +56,20 @@ class SelfCore:
         # 自我进化（CP8-P4-C）：per-session 进化档案仓 + 反应式学习器
         self._evo_stores: dict[str, Any] = {}
         self._reflex = None  # 惰性建（ReflexLearner），见 _evo_store
+        # CP8-P6：可观测行为信号——本会话上次 bot 回复时刻（自管，避免与
+        # last_bot_expression_time 的更新时序耦合）。供 compute_behavior 算续聊/被忽略。
+        self._last_bot_reply_time: dict[str, float] = {}
+        # CP8-P6：反思预算元数据（per-session）随进化档案一同落盘/恢复，进程重启不清零。
+        # 形如 {sk: {"daily": [date_str, count], "last_reflected": ts}}。由 ReflectionEngine 读写。
+        self._reflection_meta: dict[str, dict] = {}
+
+    def reflection_meta(self, session_key: str) -> dict:
+        """取（或建）某会话的反思预算元数据（供 ReflectionEngine 读写 + 落盘）。"""
+        m = self._reflection_meta.get(session_key)
+        if m is None:
+            m = {}
+            self._reflection_meta[session_key] = m
+        return m
 
     def _evo_store(self, session_key: str):
         """取（或建）某会话的进化档案仓。"""
@@ -79,16 +93,25 @@ class SelfCore:
         ("proactive", "open_threshold"),
     )
 
-    def reflex_learn(self, session_key: str, *, self_quality: float | None, behavior: float = 0.0) -> None:
+    def reflex_learn(
+        self, session_key: str, *, self_quality: float | None, behavior: float | None = None
+    ) -> None:
         """层次1 反应式学习触发（零 LLM）：根据本轮效果微调可学习门控偏置。
 
-        - self_quality：本轮 self_score 综合质量 [0,1]（弱信号）。
-        - behavior：可观测行为信号 {-1 被忽略, 0 未知, +1 被采纳/续聊}（强信号）。
+        - self_quality：本轮 self_score 综合质量 [0,1]（弱信号，防 Goodhart 权重低）。
+        - behavior：可观测行为信号 {-1 被忽略, 0 未知, +1 续聊}（强信号）。
+          CP8-P6：传 None 时由 compute_behavior 自动从"用户续聊间隔"推断（接线强信号
+          通道，此前恒传 0.0 导致 reward 全靠弱自评、易单向锁死）。
         由 DialogueAgent 在 RESPONSE_POST（拿到 self_score）触发。
         """
+        import time as _time
+        now = _time.time()
+        if behavior is None:
+            behavior = self.compute_behavior(session_key, now)
         store = self._evo_store(session_key)
         reflex = self._reflex
         if reflex is None:
+            self.mark_bot_reply(session_key, now)
             return
         for agent_name, key in self._LEARNABLE:
             reflex.learn(
@@ -96,16 +119,64 @@ class SelfCore:
                 behavior=behavior, self_quality=self_quality,
             )
         # 顺手记一条聚合决策样本（供层次2 睡眠反思读，FM6：只存聚合不存逐条）
-        import time as _time
-        store.record_decision(self_quality=self_quality, behavior=behavior, now=_time.time())
+        store.record_decision(self_quality=self_quality, behavior=behavior, now=now)
+        # 记录本次 bot 回复时刻，供下一轮 compute_behavior 算续聊间隔
+        self.mark_bot_reply(session_key, now)
 
     def evo_to_dict(self, session_key: str) -> dict[str, Any]:
         store = self._evo_stores.get(session_key)
-        return store.to_dict() if store is not None else {}
+        data = store.to_dict() if store is not None else {}
+        # CP8-P6：把反思预算元数据并入档案落盘（重启不丢配额计数）。用保留键避免与
+        # agent_name 撞（agent 名都是小写标识，不含双下划线包裹）。
+        meta = self._reflection_meta.get(session_key)
+        if meta:
+            data = dict(data)
+            data["__reflection_meta__"] = dict(meta)
+        return data
 
     def evo_load(self, session_key: str, data: dict[str, Any]) -> None:
+        if not data:
+            return
+        meta = data.get("__reflection_meta__") if isinstance(data, dict) else None
+        if isinstance(meta, dict):
+            self._reflection_meta[session_key] = dict(meta)
+            # 不要把保留键当成 agent 档案喂给 EvolutionStore.load_dict
+            data = {k: v for k, v in data.items() if k != "__reflection_meta__"}
         if data:
             self._evo_store(session_key).load_dict(data)
+
+    def compute_behavior(self, session_key: str, now: float) -> float:
+        """可观测行为信号 ∈ {-1,0,+1}（CP8-P6 接线，防 Goodhart 的强信号通道）。
+
+        以"用户对上一条 bot 回复的反应速度"为代理（强信号，比自评可信）：
+        - 距上次 bot 回复 ≤ engaged 秒（默认 5min）→ 用户续聊，+1（当前策略有效）；
+        - > ignored 秒（默认 2h）→ 上次像被晾着，-1（策略可能需收敛）；
+        - 之间 / 无历史 → 0（未知，不驱动学习）。
+        阈值取保守值，宁可判 0 不误判，避免噪声驱动漂移。
+        """
+        last = self._last_bot_reply_time.get(session_key, 0.0)
+        if last <= 0.0:
+            return 0.0
+        gap = now - last
+        if gap < 0:
+            return 0.0
+        engaged = self._cfg_float("sylanne_alpha_behavior_engaged_seconds", 300.0)
+        ignored = self._cfg_float("sylanne_alpha_behavior_ignored_seconds", 7200.0)
+        if gap <= engaged:
+            return 1.0
+        if gap >= ignored:
+            return -1.0
+        return 0.0
+
+    def mark_bot_reply(self, session_key: str, now: float) -> None:
+        """记录本会话最近一次 bot 回复时刻（供下轮 compute_behavior 算续聊间隔）。"""
+        self._last_bot_reply_time[session_key] = now
+
+    def forget_session(self, session_key: str) -> None:
+        """释放某会话的进化档案仓（CP8-P6：接入会话删除/驱逐清理，防无界增长）。"""
+        self._evo_stores.pop(session_key, None)
+        self._last_bot_reply_time.pop(session_key, None)
+        self._reflection_meta.pop(session_key, None)
 
 
 
@@ -168,13 +239,19 @@ class SelfCore:
         #    供 gate 读取（perceived["_evo_delta"](key) → 叠加在人格函数基线上）。
         decisions: list[tuple[CognitiveAgent, str, dict]] = []
         for agent in active:
-            perceived = agent.perceive(surface)
-            if isinstance(perceived, dict):
-                _an = agent.name
-                perceived["_evo_delta"] = (
-                    lambda key, _an=_an: store.get_delta(_an, key)
-                )
-            mode = agent.gate(perceived)
+            # CP8-P6：perceive/gate 也包进 try/except——单个 agent 拿到畸形 surface
+            # 崩溃不应中断整轮（否则所有 agent 失活）。失败则跳过该 agent。
+            try:
+                perceived = agent.perceive(surface)
+                if isinstance(perceived, dict):
+                    _an = agent.name
+                    perceived["_evo_delta"] = (
+                        lambda key, _an=_an: store.get_delta(_an, key)
+                    )
+                mode = agent.gate(perceived)
+            except Exception as exc:
+                logger.warning("Sylanne agent %s perceive/gate failed: %s", agent.name, exc)
+                continue
             if mode != SKIP:
                 decisions.append((agent, mode, perceived))
 

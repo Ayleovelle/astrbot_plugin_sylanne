@@ -62,6 +62,11 @@ class EvolutionStore:
         for arc in self._archives.values():
             arc.reset_to_factory()
 
+    def decay_reflection_all(self, factor: float = 0.1) -> None:
+        """CP8-P6：所有 agent 档案的 reflection_bias 朝 0 衰减一步（深睡巩固调）。"""
+        for arc in self._archives.values():
+            arc.decay_reflection(factor)
+
     def to_dict(self) -> dict[str, Any]:
         return {name: arc.to_dict() for name, arc in self._archives.items()}
 

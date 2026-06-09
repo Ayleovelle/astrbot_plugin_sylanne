@@ -703,6 +703,25 @@ class EmotionalStatePlugin(Star):
     def _host(self, session_key: str) -> SylanneAlphaHost:
         return self._session_ctx.host(session_key)
 
+    def _forget_evolution_session(self, session_key: str) -> None:
+        """收口清理某会话的进化层 per-session 状态（CP8-P6 防无界泄漏）。
+
+        进化层状态挂在引擎对象上（非 store 登记的 SessionMap），release_session 碰
+        不到，故这里显式 fan-out。两个触发点：① 会话删除回调 ② host LRU 驱逐
+        （驱逐后同 key 重建时 _restored 守卫须先清，否则学习成果不再从 KV 恢复）。
+        """
+        for owner in (
+            getattr(self, "_self_core", None),
+            getattr(self, "_autonomy_scheduler", None),
+            getattr(self, "_proactive_bridge", None),
+        ):
+            fn = getattr(owner, "forget_session", None)
+            if callable(fn):
+                try:
+                    fn(session_key)
+                except Exception as e:
+                    logger.debug(f"Sylanne forget_session [{session_key}]: {e}")
+
     def _memory_system_for_session(self, session_key: str) -> MemorySystem:
         return self._session_ctx.memory_system_for_session(session_key)
 

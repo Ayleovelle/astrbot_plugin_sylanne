@@ -16,9 +16,9 @@ class SocialAgent(CognitiveAgent):
     phases = (RESPONSE_POST,)
 
     def perceive(self, surface: dict[str, Any]) -> dict[str, Any]:
-        # 是否群聊上下文由 session_key 形态/social_field 判定，此处取本轮 bot 文本
-        bot_text = self._p._store.last_bot_texts.get("__last__", "")
-        return {"bot_text": bot_text}
+        # 群聊判定与 bot 文本读取都在 act 内按 session_key 做（perceive 无需取值，
+        # 旧实现读 "__last__" 是错键且结果未被使用，已删）。
+        return {}
 
     def gate(self, perceived: dict[str, Any]) -> str:
         sf = getattr(self._p, "_social_field", None)

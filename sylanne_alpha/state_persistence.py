@@ -827,6 +827,14 @@ class StatePersistence:
         p = self._p
         p._store.release_session(session_key)
         p._amnesia_sessions.discard(session_key)
+        # CP8-P6：进化层 per-session 状态挂在引擎对象上（非 store 登记容器），
+        # release_session 碰不到，显式 fan-out 清理防无界泄漏。
+        forget = getattr(p, "_forget_evolution_session", None)
+        if callable(forget):
+            try:
+                forget(session_key)
+            except Exception as e:
+                logger.debug(f"Sylanne evolution forget on delete failed: {e}")
         # 异步清理 KV 存储中的持久化数据
         safe_ensure_future(
             self._cleanup_kv_for_session(session_key),

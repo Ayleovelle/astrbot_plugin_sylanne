@@ -9,7 +9,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from sylanne_alpha.agents.base import LLM, PRE, AgentIntent, CognitiveAgent
+from sylanne_alpha.agents.base import LLM, PRE, RULE, AgentIntent, CognitiveAgent
 
 
 class AssessorAgent(CognitiveAgent):
@@ -21,7 +21,7 @@ class AssessorAgent(CognitiveAgent):
 
     def gate(self, perceived: dict[str, Any]) -> str:
         # 评估恒需进行（情感维度是计算的关键输入），始终 LLM 档
-        # 受全局预算闸约束，超预算时 SelfCore 会降级
+        # 受全局预算闸约束，超预算时 SelfCore 会降级为 RULE
         return LLM
 
     async def act(
@@ -44,8 +44,10 @@ class AssessorAgent(CognitiveAgent):
                 fast_result = await assessor.assess_fast(text, p._assessor_llm_call)
             except Exception:
                 fast_result = {}
-        # main 层（强模型，更长上下文；若启用）——完整保留现有精度，不降级
-        if p._cfg_bool("sylanne_alpha_main_assessor_enabled"):
+        # main 层（强模型，长上下文，重 token）——CP8-P6：尊重全局预算闸。
+        # 被降级为 RULE（mode != LLM）时跳过 main 层，只保留廉价 fast，
+        # 让"全局 LLM 预算闸"真正拦得住 token 成本（修复闸形同虚设）。
+        if mode == LLM and p._cfg_bool("sylanne_alpha_main_assessor_enabled"):
             try:
                 context_lines = p._recent_context_lines(session_key)
                 main_result = await assessor.assess_main(

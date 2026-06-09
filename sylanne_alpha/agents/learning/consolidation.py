@@ -50,7 +50,23 @@ class ConsolidationEngine:
         return (now - last) >= self._min_interval
 
     async def consolidate(self, session_key: str, now: float) -> None:
-        """对一个会话跑一次深睡巩固（真·零 LLM）。"""
+        """对一个会话跑一次深睡巩固（真·零 LLM）。
+
+        内部 = 同步巩固（取快照）+ 异步落盘。供 terminate 等无锁上下文直接 await。
+        持锁的自驱路径应改用 consolidate_sync + _write_evolution 锁舞（见 scheduler）。
+        """
+        snapshot = self.consolidate_sync(session_key, now)
+        try:
+            await self._write_evolution(session_key, snapshot)
+        except Exception as exc:
+            logger.debug("Sylanne consolidate evolution [%s]: %s", session_key, exc)
+
+    def consolidate_sync(self, session_key: str, now: float) -> dict:
+        """深睡巩固的同步部分（零 LLM、零 IO）：记忆衰减 + 反思回归，返回待落盘快照。
+
+        CP8-P6：与 KV 落盘拆开，使自驱路径可在 session_lock 内只跑这段同步计算，
+        把 put_kv_data 移到锁外（避免 IO 长占会话锁、阻塞唤醒）。
+        """
         self._last_consolidated[session_key] = now
         p = self._p
         # 1. 记忆衰减推进（纯数值运算）。语义巩固（L1→L2，需 LLM）交给现有
@@ -61,11 +77,21 @@ class ConsolidationEngine:
                 ms.tick_decay()
         except Exception as exc:
             logger.debug("Sylanne consolidate memory [%s]: %s", session_key, exc)
-        # 2. 进化档案落盘（反应式学习的门控偏置持久化）
+        # 1.5 反思偏置缓慢回归（CP8-P6）：深睡时朝 0 衰减一步，无新反思则自动复位，
+        #     防 reflection_bias 单向锁死（反射 delta 已有自回归，此处补反思路）。
         try:
-            await self._persist_evolution(session_key)
+            sc = getattr(p, "_self_core", None)
+            store = sc._evo_stores.get(session_key) if sc is not None else None
+            if store is not None and hasattr(store, "decay_reflection_all"):
+                store.decay_reflection_all()
         except Exception as exc:
-            logger.debug("Sylanne consolidate evolution [%s]: %s", session_key, exc)
+            logger.debug("Sylanne consolidate reflection decay [%s]: %s", session_key, exc)
+        # 2. 取进化档案快照（落盘交给锁外的 _write_evolution）
+        try:
+            sc = getattr(p, "_self_core", None)
+            return sc.evo_to_dict(session_key) if sc is not None else {}
+        except Exception:
+            return {}
 
     async def _persist_evolution(self, session_key: str) -> None:
         """把该会话的进化档案存进 KV（深睡低频写，省 IO）。"""
@@ -74,7 +100,12 @@ class ConsolidationEngine:
         if sc is None or not getattr(p, "_has_kv_api", lambda: False)():
             return
         data = sc.evo_to_dict(session_key)
-        if not data:
+        await self._write_evolution(session_key, data)
+
+    async def _write_evolution(self, session_key: str, data: dict) -> None:
+        """把给定进化档案快照写入 KV（供驱逐时先取快照再落盘，避免与 forget 竞争）。"""
+        p = self._p
+        if not data or not getattr(p, "_has_kv_api", lambda: False)():
             return
         safe = p._safe_session_key(session_key) if hasattr(p, "_safe_session_key") else session_key
         await p.put_kv_data(f"sylanne_evolution_{safe}", data)

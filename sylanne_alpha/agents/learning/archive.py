@@ -17,6 +17,10 @@ from collections import deque
 from dataclasses import dataclass
 from typing import Any
 
+# 两路偏置（反射 delta + 反思 reflection_bias）之和的总钳位上界。
+# 略小于两路 cap 之和(0.15+0.10=0.25)，作为同向叠加时的最后一道刹车。
+_TOTAL_CAP = 0.20
+
 
 @dataclass(slots=True)
 class _ParamState:
@@ -71,9 +75,20 @@ class AgentEvolutionArchive:
         return ps
 
     def get_delta(self, key: str) -> float:
-        """读某门控参数当前学到的总偏置（gate 里叠加用）= 反射 + 反思。无则 0。"""
+        """读某门控参数当前学到的总偏置（gate 里叠加用）= 反射 + 反思。无则 0。
+
+        CP8-P6：两路各自钳位外，再对其和做一道总 cap（_TOTAL_CAP），防两路同向叠加
+        后总偏置过大冲击 gate 阈值（钳位护栏的最后一道）。
+        """
         ps = self._params.get(key)
-        return (ps.delta + ps.reflection_bias) if ps is not None else 0.0
+        if ps is None:
+            return 0.0
+        total = ps.delta + ps.reflection_bias
+        if total > _TOTAL_CAP:
+            return _TOTAL_CAP
+        if total < -_TOTAL_CAP:
+            return -_TOTAL_CAP
+        return total
 
     def update(
         self,
@@ -111,6 +126,20 @@ class AgentEvolutionArchive:
     def record_outcome(self, quality: float) -> None:
         """记录综合效果（用于回滚判据/背离监控）。"""
         self._outcome_ema = 0.9 * self._outcome_ema + 0.1 * quality
+
+    def decay_reflection(self, factor: float = 0.1) -> None:
+        """CP8-P6：让所有 reflection_bias 朝 0 衰减一步（深睡巩固时调）。
+
+        反思偏置原本只靠下次反思 lerp 改写，预算耗尽/不再进 DROWSY 后会永久停在
+        某值——加这道缓慢回归（默认每次乘 0.9），无新反思时自动复位，防单向锁死。
+        delta（反射）已有 update 内的 regress 自回归，此处只处理 reflection_bias。
+        """
+        factor = max(0.0, min(1.0, factor))
+        for ps in self._params.values():
+            if ps.reflection_bias != 0.0:
+                ps.reflection_bias *= (1.0 - factor)
+                if abs(ps.reflection_bias) < 1e-4:
+                    ps.reflection_bias = 0.0
 
     def apply_reflection(
         self, key: str, target_bias: float, *, lerp: float = 0.5, delta_cap: float = 0.15

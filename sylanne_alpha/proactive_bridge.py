@@ -45,6 +45,20 @@ class ProactiveBridge:
         # key = 大饼实际发送用的 origin（unified_msg_origin）
         self._pending_segment_takeover: set[str] = set()
 
+    def forget_session(self, session_key: str) -> None:
+        """释放某会话在桥接层的残留态（CP8-P6：会话删除/驱逐时清理，防无界增长）。
+
+        session_key 经 _resolve_origin 转 origin 后才是 _last_bridge_dispatch 的键，
+        故两种键都尝试清除（origin 解析可能因映射已被清而回退，双清更稳妥）。
+        """
+        self._last_bridge_dispatch.pop(session_key, None)
+        try:
+            origin = self._resolve_origin(session_key)
+            self._last_bridge_dispatch.pop(origin, None)
+            self._pending_segment_takeover.discard(origin)
+        except Exception:
+            pass
+
     def _get_proactive_plugin(self) -> Any:
         """拿大饼插件实例；未安装/拿不到则返回 None（静默降级）。"""
         context = getattr(self._p, "context", None)
@@ -95,14 +109,45 @@ class ProactiveBridge:
             return True
         return False
 
+    # 桥接依赖的大饼接口清单（含私有方法）。大饼升级若改了内部实现，这里探测得到。
+    _REQUIRED_API = (
+        "check_and_chat",
+        "session_override_manager",
+        "_get_session_config",
+        "_schedule_next_chat_and_save",
+    )
+
     def available(self) -> bool:
-        """大饼是否可用（已安装且暴露所需接口）。"""
+        """大饼是否可用（已安装且暴露所需接口）。
+
+        CP8-P6：核心接口（check_and_chat + session_override_manager）齐才算可用；
+        但桥接还依赖若干私有方法（_get_session_config/_schedule_next_chat_and_save），
+        大饼升级改内部实现会让这些静默失效——故 probe_missing 一次性 warning 告警，
+        让用户能发现"主动发言已废"而非毫无察觉。
+        """
         plugin = self._get_proactive_plugin()
-        return bool(
+        core_ok = bool(
             plugin is not None
             and hasattr(plugin, "check_and_chat")
             and getattr(plugin, "session_override_manager", None) is not None
         )
+        if core_ok:
+            self._probe_missing_api(plugin)
+        return core_ok
+
+    def _probe_missing_api(self, plugin: Any) -> None:
+        """探测桥接依赖的大饼接口是否齐全，缺失则一次性 warning（避免刷屏）。"""
+        if getattr(self, "_api_probed", False):
+            return
+        self._api_probed = True
+        missing = [name for name in self._REQUIRED_API if not hasattr(plugin, name)]
+        if missing:
+            logger.warning(
+                "Sylanne 主动发言桥接：大饼(astrbot_plugin_proactive_chat)缺失接口 %s"
+                "——大饼可能已升级改了内部实现，部分主动发言功能将静默降级。"
+                "请检查大饼版本或在 issue 反馈。",
+                missing,
+            )
 
     # ------------------------------------------------------------------
     # 时间闸门：复用大饼的时间公式（quiet_hours + min_interval 节流）

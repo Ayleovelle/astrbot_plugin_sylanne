@@ -143,7 +143,7 @@ async def main():
     check("唤醒丢弃 → reflection_bias 未提交", bias3 == 0.0)
     # 唤醒丢弃前已扣 1 次预算（调 LLM 前扣）：sid3 budget=2，扣 1 后还剩 1，仍有预算
     check("唤醒丢弃 → 但 LLM 已烧、预算已扣 1（防 token 悖论）",
-          refl._daily_used.get(sid3, ["", 0])[1] == 1)
+          sc.reflection_meta(sid3).get("daily", ["", 0])[1] == 1)
 
     print("\n[6] P4-D 深睡巩固：进 RETIRED → tick_decay + 进化档案落盘 KV")
     # 让 sid 进 RETIRED（上次消息 > 1800s 前）

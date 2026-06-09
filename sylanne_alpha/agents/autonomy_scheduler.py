@@ -79,6 +79,21 @@ class AutonomyScheduler:
             self._task.cancel()
         self._task = None
 
+    def forget_session(self, session_key: str) -> None:
+        """释放某会话在自驱层的残留态（CP8-P6：会话删除/驱逐时清理，防无界增长）。
+
+        清 _prev_phase（相位跳变追踪）+ 转交反思/巩固引擎清各自的 per-session 守卫。
+        """
+        self._prev_phase.pop(session_key, None)
+        try:
+            self._reflection.forget_session(session_key)
+        except Exception:
+            pass
+        try:
+            self._consolidation.forget_session(session_key)
+        except Exception:
+            pass
+
     async def _loop(self) -> None:
         while True:
             try:
@@ -108,11 +123,17 @@ class AutonomyScheduler:
             self._prev_phase[sk] = phase
             if phase == self._sc.RETIRED:
                 # 深睡：退休前跑一次巩固（记忆固化 + 进化档案落盘），再归零。
-                # session_lock 串行化，与 reactive 互斥；巩固内部零 LLM 纯计算。
+                # CP8-P6 锁舞：持锁只做同步巩固 + 取快照，KV 落盘移到锁外
+                # （避免 put_kv_data 的 IO 长占会话锁、阻塞 reactive 唤醒）。
                 if self._consolidation.needs_consolidation(sk, now):
                     lock = self._p._session_lock(sk)
                     async with lock:
-                        await self._consolidation.consolidate(sk, now)
+                        snapshot = self._consolidation.consolidate_sync(sk, now)
+                    if snapshot:
+                        try:
+                            await self._consolidation._write_evolution(sk, snapshot)
+                        except Exception as exc:
+                            logger.debug("Sylanne consolidate write [%s]: %s", sk, exc)
                 continue  # 巩固后移出自驱，资源归零
             if phase == self._sc.DROWSY:
                 # CP8-P4-E 首拍闸：仅 AWAKE→DROWSY 跳变的那一拍触发一次反思
@@ -137,13 +158,20 @@ class AutonomyScheduler:
             logger.debug("Sylanne global autonomy: %s", exc)
 
     async def _tick_session(self, session_key: str, host, now: float) -> None:
-        """单会话自驱 tick：按会话锁串行化，空 event 驱动演化 + run_cycle。"""
+        """单会话自驱 tick：空 event 驱动演化 + run_cycle。
+
+        CP8-P6 锁舞：持锁只做同步的 host 演化 + 取 surface 快照；run_cycle(AUTONOMOUS)
+        移到锁外（其唯一 LLM 来源 LifeAgent 驱动的是全局生命模拟、不写本会话 host，
+        故无需在锁内，避免 LLM 长占会话锁阻塞 reactive 唤醒）。
+        """
         lock = self._p._session_lock(session_key)
-        async with lock:
-            try:
-                # 空 event 驱动 host 纯演化（无文本，body 状态照常漂移）
+        try:
+            async with lock:
+                # 空 event 驱动 host 纯演化（无文本，body 状态照常漂移）——同步、需持锁
                 host.on_request(None)
                 surface = host.kernel.surface()
-                await self._sc.run_cycle(session_key, surface, phase=AUTONOMOUS)
-            except Exception as exc:
-                logger.debug("Sylanne autonomy tick [%s]: %s", session_key, exc)
+            # run_cycle 在锁外：AUTONOMOUS 时点 agent 不写本会话 host（LifeAgent 演化的
+            # 是全局生命模拟），读的是已取的 surface 快照，无竞态。
+            await self._sc.run_cycle(session_key, surface, phase=AUTONOMOUS)
+        except Exception as exc:
+            logger.debug("Sylanne autonomy tick [%s]: %s", session_key, exc)
