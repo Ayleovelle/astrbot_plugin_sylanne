@@ -2,6 +2,44 @@
 
 本文件用于 AstrBot 插件市场/管理页展示更新内容。更完整的设计说明、公式推导、测试矩阵和维护手册见 `README.md`。
 
+## [v2.0.0] - 2026-06-09
+
+> 一次叠了三层的重构：在不可逆关系计算引擎之上，重铺地基（模块 agent 化）、长出心智（多智能体编排）、学会成长（自我进化）。
+
+### ✨ Features
+
+- **多智能体认知架构**：新增编排器 SelfCore + 9 个标准化认知 agent（emotion/assessor/persona/life/memory/rhythm/proactive/social/dialogue），统一 `perceive→gate→act` 契约，四时点（PRE/POST/RESPONSE_POST/AUTONOMOUS）按需编排，融合多份意图喂回计算栈
+  - 模块 agent 化：把原先散在主流程、互相耦合的逻辑拆成独立官能，新增"心思"只需照契约挂一个 agent，不再动核心——为未来扩展与迭代铺路
+  - 全局 LLM 预算闸：超预算 agent 按优先级降级为规则档，token 成本有硬上界
+- **自驱心跳**：全局单 task 后台循环，按会话三态（AWAKE/DROWSY/RETIRED）演化，"没人说话也活着"
+- **三层自我进化（带刹车的自适应）**：
+  - 层次1 反应式（零 LLM）：每轮对话后 EMA 微调门控偏置，reward 以"用户续聊间隔"为强信号 + 自评弱先验（防 Goodhart）
+  - 层次2 反思式（低频 LLM）：浅睡首拍跑一次元认知，沉淀 reflection_bias；token 三道闸（首拍闸 / 每会话每日预算池 / 输入压缩 ≤1500 字）+ 影子副本锁舞（唤醒优先）
+  - 层次3 巩固式（零 LLM）：深睡前记忆衰减 + 反思偏置回归基线 + 进化档案落盘 KV
+  - **跨重启累积学习**：进化档案持久化到 KV，服务器重启 / 插件重载后门控偏置不归零
+- **进化三铁律护栏**：硬钳位（反射 ±0.15 / 反思 ±0.10 / 总和 ±0.20）+ 无信号自动回归基线 + 与人格漂移物理隔离 + 一键出厂复位
+- **主动发言桥接**：适配 [astrbot_plugin_proactive_chat](https://github.com/DBJD-CR/astrbot_plugin_proactive_chat)，Sylanne 决定"何时主动 + 提供生活素材"，可接管分段发送 / 拨动倒计时 / 注入犹豫感（自带主动发言可独立工作，搭配食用更佳）
+
+### 🔧 Refactor
+
+- 计算栈第二代：七层神经脊、MoE-HGT 决策融合、关系层论传播全部独立成可单测模块
+- Protocol 契约化 + SessionStateStore：34 个 per-session 容器迁入统一登记的状态仓，结构性清理杜绝裸 dict 泄漏
+
+### 🐛 Bug Fixes
+
+- 修复进化层 per-session 状态无界泄漏（forget_session 收口接入会话删除 / LRU 驱逐）
+- 修复 LLM 预算闸形同虚设（assessor 按 mode 分流，降级时跳过重 token 的 main 层）
+- 修复主动发言 session→UMO 映射读错位置（origin 恒回退，带后缀会话可能投错）
+- 修复自驱 / 巩固持会话锁期间 await LLM/IO 长占锁（改锁舞：锁内取快照、LLM/IO 移锁外）
+- MemoryAgent POST 记忆衰减不再被亲密度门控误杀；BoundedDict `__contains__` 补 TTL 一致性
+
+### 📝 工程化
+
+- 仓库美化与协作骨架（借鉴 [@DBJD-CR](https://github.com/DBJD-CR) 的插件模板）：README 重排（Socialify 头图 / 居中徽章 / 快速导航 / 自我进化章节 / 重绘工作流 / 与 Embodiment-1.0.0 对比）、新增 CONTRIBUTING / CODE_OF_CONDUCT / 设计·讨论·文档 Issue 模板 / Dependabot / stale 工作流 / run_ruff.bat
+
+---
+
+
 ## [v1.4.7] - 2026-06-06
 
 ### 🐛 Bug Fixes
