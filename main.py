@@ -2318,7 +2318,29 @@ class EmotionalStatePlugin(Star):
         # 停止全局自驱心跳（CP8-P3b：替代原 life_simulator.stop）
         sched = getattr(self, "_autonomy_scheduler", None)
         if sched is not None:
+            sched_self_task = sched._task
             sched.stop()
+            # 等自驱 task 真正收尾，消除「stop 仅 cancel 未 await」与下方
+            # 退出巩固之间的并发窗口（避免重入 session_lock 的潜在竞态）。
+            if sched_self_task is not None and not sched_self_task.done():
+                try:
+                    await asyncio.wait_for(
+                        asyncio.shield(sched_self_task), timeout=5
+                    )
+                except (asyncio.CancelledError, asyncio.TimeoutError):
+                    pass
+                except Exception as e:
+                    logger.debug(f"Sylanne autonomy task drain: {e}")
+            # CP8-P4-D：退出前对活跃会话做一次最终巩固（tick_decay + 进化档案落盘），
+            # 保证反应式学习累积的门控偏置不随关机丢失。零 LLM、绕 needs 守卫强制落盘。
+            consol = getattr(sched, "_consolidation", None)
+            if consol is not None:
+                try:
+                    now = time.time()
+                    for sk, _host in self._store.hosts.snapshot_items():
+                        await consol.consolidate(sk, now)
+                except Exception as e:
+                    logger.debug(f"Sylanne terminate consolidate skipped: {e}")
         # 持久化 LifeSim 状态（修复历史「重启丢作息」缺陷）
         try:
             life_sim = getattr(self, "_life_simulator", None)

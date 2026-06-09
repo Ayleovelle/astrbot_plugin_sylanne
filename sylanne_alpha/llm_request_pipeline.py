@@ -1743,6 +1743,16 @@ class LLMRequestPipeline:
             host = p._host(session_key)
             assessment: dict = {}
 
+            # CP8-P4-D：会话首次活跃时从 KV 恢复一次进化档案（跨重启累积学习）。
+            # host() 同步无法 await，故恢复放在此异步入口；一次性守卫内部自管。
+            sched = getattr(p, "_autonomy_scheduler", None)
+            consol = getattr(sched, "_consolidation", None)
+            if consol is not None:
+                try:
+                    await consol.ensure_restored(session_key)
+                except Exception as exc:
+                    logger.debug("Sylanne restore evolution [%s]: %s", session_key, exc)
+
             # 将评估结果注入计算栈
             now = time.time()
             # CP8-P3a：SelfCore PRE 编排——9 个 agent 读上轮 surface 产意图，

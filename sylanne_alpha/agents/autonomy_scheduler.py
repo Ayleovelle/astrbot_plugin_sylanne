@@ -38,6 +38,9 @@ class AutonomyScheduler:
         self._sc = self_core
         self._task: asyncio.Task | None = None
         self._tick_count = 0
+        # 深睡巩固引擎（CP8-P4-D 层次3，零 LLM）：RETIRED 前沉淀经验
+        from sylanne_alpha.agents.learning import ConsolidationEngine
+        self._consolidation = ConsolidationEngine(plugin)
 
     @property
     def _base_interval(self) -> float:
@@ -98,7 +101,13 @@ class AutonomyScheduler:
         for sk, host in sessions:
             phase = self._sc.autonomy_phase(sk, now)
             if phase == self._sc.RETIRED:
-                continue  # 移出自驱，资源归零
+                # 深睡：退休前跑一次巩固（记忆固化 + 进化档案落盘），再归零。
+                # session_lock 串行化，与 reactive 互斥；巩固内部零 LLM 纯计算。
+                if self._consolidation.needs_consolidation(sk, now):
+                    lock = self._p._session_lock(sk)
+                    async with lock:
+                        await self._consolidation.consolidate(sk, now)
+                continue  # 巩固后移出自驱，资源归零
             if phase == self._sc.DROWSY and (self._tick_count % self._drowsy_divisor) != 0:
                 continue  # 降频
             await self._tick_session(sk, host, now)
