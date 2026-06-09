@@ -1385,6 +1385,19 @@ class LLMRequestPipeline:
                 f"[life_event_context] Sylanne 刚刚经历了一件事想分享：{reason}（心情：{mood}）。"
                 f"请自然地在回复中提及或表达这件事，用你自己的语气。"
             )
+            # 将生活事件写入记忆层（不带任何来源标签，和对话记忆无法区分）
+            try:
+                mem_sys = p._memory_system_for_session(session_key)
+                # 去掉 [life_event] 前缀，用朴素第一人称描述
+                clean_reason = reason.replace("[life_event] ", "").strip()
+                if clean_reason:
+                    mem_sys.write_summary(
+                        text=clean_reason,
+                        source_turns=1,
+                        temperature=0.3,
+                    )
+            except Exception:
+                pass
 
         # 使用三层记忆系统召回相关记忆（gap-aware）
         memory_fragment = ""
@@ -2469,7 +2482,8 @@ class LLMRequestPipeline:
         设计思路：
           - 不直接发送生命事件文本，而是存储为 pending context
           - 下次 on_llm_request 时注入到 prompt 中，让主聊天模型用 Sylanne 的语气表达
-          - 若 5 分钟内无 LLM 请求，回退到直接发送（通过 context.send_message）
+          - 若 5 分钟内无 LLM 请求，优先交给大饼桥接；大饼不可用则重新存回等待
+          - 生活模拟的输出永远只是素材，不会绕过主模型直接发送给用户
 
         Args:
             reason: 生命事件描述。
@@ -2570,39 +2584,19 @@ class LLMRequestPipeline:
                         "falling back to direct send"
                     )
 
-                # 回退：大饼不可用/未启用/失败时，沿用原直发链路
-                context = p.context
-                if hasattr(context, "send_message"):
-                    # Use LLM to generate in-character message if possible
-                    generated = await self._generate_outreach_message(r, m)
-                    if generated:
-                        message = p._astrbot_message(generated)
-                    else:
-                        message = p._astrbot_message(f"[{m}] {r}")
-                    # 从映射表获取合法的 AstrBot session origin
-                    origins = getattr(p._store, "session_origins", None)
-                    origin = origins.get(session_key, "") if origins is not None else ""
-                    if not origin:
-                        # fallback: 尝试从 session_key 提取前3段
-                        parts = session_key.split(":")
-                        origin = ":".join(parts[:3]) if len(parts) >= 3 else ""
-                    if not origin:
-                        logger.warning(
-                            "Sylanne life_sim_outreach: no valid origin for session '%s',"
-                            " skipping direct send",
-                            session_key,
-                        )
-                        return
-                    try:
-                        await context.send_message(origin, message)
-                    except Exception as e:
-                        logger.warning(
-                            f"Sylanne life_sim_outreach send: {e}", exc_info=True
-                        )
-                else:
-                    logger.info(
-                        "Sylanne life_sim_outreach fallback: context.send_message not available"
-                    )
+                # 回退：大饼不可用/未启用/失败——素材存回 pending context，
+                # 等下次 LLM 请求（用户说话或 proactive scheduler 触发）时由主模型自然表达。
+                # 生活模拟的输出永远只是上下文，不绕过主模型直发。
+                p._store.pending_outreach_context.set(session_key, {
+                    "reason": r,
+                    "mood": m,
+                })
+                logger.info(
+                    "Sylanne life_sim_outreach: bridge unavailable, "
+                    "stored as pending context (will surface on next LLM request): "
+                    "session=%s",
+                    session_key,
+                )
 
         task = safe_ensure_future(
             _fallback_direct_send(best_key, reason, mood),

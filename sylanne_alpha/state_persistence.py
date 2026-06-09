@@ -971,7 +971,6 @@ class StatePersistence:
             host = p._store.hosts.get(session_key)
             if not host:
                 return
-            # 从 kernel 提取人格数据
             personality = (
                 host.kernel._personality()
                 if hasattr(host.kernel, "_personality")
@@ -983,7 +982,6 @@ class StatePersistence:
             traits = personality.get("traits", {})
             voice = personality.get("voice", {})
 
-            # 从人格状态构建 system prompt 片段
             trait_lines = []
             for k, v in traits.items():
                 if isinstance(v, (int, float)):
@@ -1000,27 +998,43 @@ class StatePersistence:
                 f"Voice: {voice if voice else 'default'}"
             )
 
-            # 先尝试更新，不存在则创建
-            try:
-                existing = persona_mgr.get_persona(persona_id)
-                if existing:
-                    persona_mgr.update_persona(persona_id, system_prompt=system_prompt)
-                else:
-                    persona_mgr.create_persona(
-                        persona_id=persona_id,
-                        system_prompt=system_prompt,
-                        begin_dialogs=[],
-                        tools=None,
-                    )
-            except Exception:
-                # 旧版 API 可能不接受所有参数
+            import asyncio
+            import inspect
+
+            async def _do_sync() -> None:
                 try:
-                    persona_mgr.create_persona(
-                        persona_id=persona_id,
-                        system_prompt=system_prompt,
-                    )
+                    existing = persona_mgr.get_persona(persona_id)
+                    if inspect.isawaitable(existing):
+                        existing = await existing
+                    if existing:
+                        ret = persona_mgr.update_persona(persona_id, system_prompt=system_prompt)
+                        if inspect.isawaitable(ret):
+                            await ret
+                    else:
+                        ret = persona_mgr.create_persona(
+                            persona_id=persona_id,
+                            system_prompt=system_prompt,
+                            begin_dialogs=[],
+                            tools=None,
+                        )
+                        if inspect.isawaitable(ret):
+                            await ret
                 except Exception:
-                    pass  # persona 同步失败可接受
+                    try:
+                        ret = persona_mgr.create_persona(
+                            persona_id=persona_id,
+                            system_prompt=system_prompt,
+                        )
+                        if inspect.isawaitable(ret):
+                            await ret
+                    except Exception:
+                        pass
+
+            try:
+                loop = asyncio.get_running_loop()
+                loop.create_task(_do_sync())
+            except RuntimeError:
+                pass
         except Exception as e:
             logger.debug(f"Sylanne: PersonaManager sync failed: {e}")
 
