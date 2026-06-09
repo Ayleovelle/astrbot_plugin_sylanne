@@ -51,6 +51,7 @@ class FakeDaPing:
         self._sylanne = sylanne
         self.sent = []
         self.scheduled = []
+        self.chat_sids = []  # 记录 check_and_chat 实际收到的 sid（验证 origin 解析）
 
     def _get_session_config(self, sid):
         base = {"schedule_settings": {"min_interval_minutes": 30, "max_interval_minutes": 900},
@@ -58,6 +59,7 @@ class FakeDaPing:
         return self.session_override_manager.get_effective(sid, base)
 
     async def check_and_chat(self, sid):
+        self.chat_sids.append(sid)
         cfg = self._get_session_config(sid)
         text = cfg.get("proactive_prompt", "默认主动消息")
         try:
@@ -156,7 +158,23 @@ async def main():
     check("怕打扰→犹豫高", h_anxious > 0.6)
     check("想表达+熟悉→犹豫低", h_warm == 0.0)
 
-    print("\n[5] terminate 清理")
+    print("\n[5] P5: session_key→UMO 映射解析（带多发言人后缀）")
+    # 模拟收消息时 pipeline 写入的映射：内部带后缀的 session_key → 真实 UMO
+    internal_sk = "aiocqhttp:GroupMessage:99999::agent:userA"
+    real_umo = "aiocqhttp:GroupMessage:99999"
+    plugin._store.session_origins.set(internal_sk, real_umo)
+    daping.chat_sids.clear()
+    r5 = await bridge.dispatch(internal_sk, "带后缀会话的主动素材")
+    check("带后缀会话 dispatch 成功", r5.get("dispatched") is True)
+    # 关键：大饼收到的 sid 必须是映射的真实 UMO，而非剥后缀的猜测值
+    check("check_and_chat 收到映射的真实 UMO（非回退猜测）",
+          daping.chat_sids == [real_umo])
+    # 无映射时仍能回退剥后缀（不回归）
+    daping.chat_sids.clear()
+    await bridge.dispatch("plat:Group:42::speaker:u9", "无映射回退")
+    check("无映射 → 回退剥后缀仍工作", daping.chat_sids == ["plat:Group:42"])
+
+    print("\n[6] terminate 清理")
     try:
         await plugin.terminate()
         check("terminate 不崩", True)
