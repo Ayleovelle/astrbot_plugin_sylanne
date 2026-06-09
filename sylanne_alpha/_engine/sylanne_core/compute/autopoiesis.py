@@ -118,16 +118,19 @@ class AutopoieticBoundary:
         """自修复循环——每 tick 运行 repair_passes 次。
 
         多轮修复（pro/max 模式）允许更快的恢复和更精细的熵管理。
+        活跃压力下（penetration > 0.4）只做衰减，不修复 integrity，
+        防止多轮绕过"伤口未愈不能满血"保护。
         """
+        under_pressure = self._last_penetration > 0.4
         for _pass in range(self.repair_passes):
-            self._repair_step()
+            if under_pressure:
+                self._last_penetration *= 0.8
+                self.internal_entropy = max(0.0, self.internal_entropy - self.repair_rate * 0.2)
+            else:
+                self._repair_step()
 
     def _repair_step(self) -> None:
-        """单次修复步骤。"""
-        if self._last_penetration > 0.4:
-            self._last_penetration *= 0.8
-            self.internal_entropy = max(0.0, self.internal_entropy - self.repair_rate * 0.2)
-            return
+        """单次修复步骤（仅在非压力状态下调用）。"""
         self.boundary_integrity = max(0.3, min(1.0, self.boundary_integrity + self.repair_rate))
         self.internal_entropy = max(0.0, self.internal_entropy - self.repair_rate * 0.5)
         if self.internal_entropy > 0.01:

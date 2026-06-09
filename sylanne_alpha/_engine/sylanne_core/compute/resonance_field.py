@@ -230,11 +230,6 @@ class ResonanceField:
         else:
             skipped_channels = 0
 
-        # Apply residual decay from previous cycle
-        for i in range(self._n_modules):
-            for d in range(self._state_dim):
-                self._module_states[i][d] *= self._residual_decay
-
         # Update echo state reservoir with current input
         self._update_reservoir()
 
@@ -293,6 +288,14 @@ class ResonanceField:
         self._harmonics_cache = None
         self._update_harmonic_identity()
         self._maybe_store_attractor()
+
+        # Apply residual decay AFTER resonance convergence.
+        # This decays the converged state for the NEXT cycle, ensuring that
+        # freshly injected signals participate in the current cycle at full strength.
+        for i in range(self._n_modules):
+            for d in range(self._state_dim):
+                self._module_states[i][d] *= self._residual_decay
+        self._had_injection = False
 
         return {
             "iterations": len(self._convergence_history),
@@ -382,7 +385,6 @@ class ResonanceField:
             # Pure decay when no external input
             for i in range(reservoir_dim):
                 self._reservoir[i] *= self._reservoir_decay
-        self._had_injection = False
 
     def _inject_reservoir_memory(self, states: list[list[float]]) -> None:
         """Inject reservoir state back into field as temporal context."""

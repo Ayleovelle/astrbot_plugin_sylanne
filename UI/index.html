@@ -3284,7 +3284,7 @@ function buildSessionMenu(sessions) {
   if (!sessions.length) { menu.innerHTML = ''; return; }
   menu.innerHTML = sessions.map(function(key) {
     var cls = key === current ? 'session-opt active' : 'session-opt';
-    return '<button class="' + cls + '" onclick="selectSession(\'' + key.replace(/\\/g, "\\\\").replace(/'/g, "\\'") + '\')">' + esc(key) + '</button>';
+    return '<button class="' + cls + '" onclick="selectSession(\'' + key.replace(/\\/g, "\\\\").replace(/'/g, "\\'").replace(/"/g, "&quot;") + '\')">' + esc(key) + '</button>';
   }).join('');
 }
 
