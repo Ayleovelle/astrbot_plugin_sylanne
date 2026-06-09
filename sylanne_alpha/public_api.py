@@ -30,7 +30,10 @@ import json
 import time
 from collections.abc import Callable
 from types import SimpleNamespace
-from typing import Any
+from typing import TYPE_CHECKING, Any
+
+if TYPE_CHECKING:
+    from sylanne_alpha.protocols import PluginHost
 
 try:
     from astrbot.api import logger  # type: ignore
@@ -149,7 +152,7 @@ class PublicAPI:
         "group_atmosphere": "get_group_atmosphere_snapshot",
     }
 
-    def __init__(self, plugin: Any) -> None:
+    def __init__(self, plugin: PluginHost) -> None:
         self._p = plugin
 
     # ------------------------------------------------------------------
@@ -284,14 +287,14 @@ class PublicAPI:
 
     async def _observatory_route_handler(self) -> dict[str, Any]:
         session_key = "default"
-        if self._p._hosts:
-            session_key = next(iter(self._p._hosts))
+        if len(self._p._store.hosts):
+            session_key = next(iter(self._p._store.hosts.keys()))
         return await self.sylanne_observatory(session_key=session_key)
 
     def _sylanne_lineage_observatory_page_payload(
         self, session_key: str
     ) -> dict[str, Any]:
-        loop_data = self._p._last_understanding_closed_loop.get(session_key, {})
+        loop_data = self._p._store.last_understanding_closed_loop.get(session_key, {})
         observatory = loop_data.get("turning_point_lineage_observatory", {})
         lineage = observatory.get("lineage", {})
         raw_branches = observatory.get("branches", [])
@@ -314,7 +317,7 @@ class PublicAPI:
     def _understanding_closed_loop_diagnostics(
         self, session_key: str
     ) -> dict[str, Any]:
-        loop_data = dict(self._p._last_understanding_closed_loop.get(session_key, {}))
+        loop_data = dict(self._p._store.last_understanding_closed_loop.get(session_key, {}))
         if "turning_point_memory_replay" in loop_data:
             loop_data["turning_point_memory_replay"] = {}
         if "turning_point_lineage_observatory" in loop_data:
@@ -341,8 +344,8 @@ class PublicAPI:
         else:
             session_key = self._session_key(event)
         _BudgetCls = (
-            type(next(iter(p._last_request_budgets.values()), None))
-            if p._last_request_budgets
+            type(next(iter(p._store.last_request_budgets.values()), None))
+            if len(p._store.last_request_budgets)
             else None
         )
         default_budget = (
@@ -359,11 +362,7 @@ class PublicAPI:
                 warnings=[],
             )
         )
-        budget = (
-            p._last_request_budgets.get(session_key, default_budget)
-            if hasattr(p, "_last_request_budgets")
-            else default_budget
-        )
+        budget = p._store.last_request_budgets.get(session_key, default_budget)
         cfg = p.config or {}
         result: dict[str, Any] = {
             "state_injection": {
@@ -395,13 +394,13 @@ class PublicAPI:
                     ]
             result["understanding_closed_loop"] = loop_data
             result["read_only"] = True
-        bg_queues = p._background_post_queues
-        bg_active = p._background_post_active
-        bg_dead_letters = p._background_post_dead_letters
-        bg_latest = p._background_post_latest_enqueued
-        bg_committed = p._background_post_last_committed
+        bg_queues = p._store.background_post_queues
+        bg_active = p._store.background_post_active
+        bg_dead_letters = p._store.background_post_dead_letters
+        bg_latest = p._store.background_post_latest_enqueued
+        bg_committed = p._store.background_post_last_committed
         bg_skipped = getattr(p, "_background_post_skipped", {})
-        _bg_sequence = p._background_post_sequence
+        _bg_sequence = p._store.background_post_sequence
         has_bg_data = bool(bg_queues or bg_active or bg_dead_letters)
         if include_sessions or has_bg_data:
             queue = bg_queues.get(session_key, collections.deque())
@@ -981,7 +980,7 @@ class PublicAPI:
         if not cfg.get("enable_sylanne_memory", True):
             yield "Sylanne 记忆系统未启用。"
             return
-        cache = p._sylanne_memory_cache
+        cache = p._store.sylanne_memory_cache
         state = cache.get(sk)
         if state is None:
             yield "当前会话无记忆记录。"
@@ -1219,9 +1218,7 @@ class PublicAPI:
             event_time=p._event_time(now),
         )
         # Feedback loop: trigger based on time since last bot expression
-        if not hasattr(p, "_last_bot_expression_time"):
-            p._last_bot_expression_time = {}
-        last_expr_time = p._last_bot_expression_time.get(session_key, 0.0)
+        last_expr_time = p._store.last_bot_expression_time.get(session_key, 0.0)
         if last_expr_time > 0:
             gap = effective_now - last_expr_time
             if gap < 30.0:
@@ -1268,9 +1265,7 @@ class PublicAPI:
             now=effective_now,
             event_time=p._event_time(now),
         )
-        if not hasattr(p, "_last_bot_expression_time"):
-            p._last_bot_expression_time = {}
-        p._last_bot_expression_time[session_key] = effective_now
+        p._store.last_bot_expression_time.set(session_key, effective_now)
         result = host.on_response(event)
         if p._has_persona_manager():
             p._sync_personality_to_persona_mgr(session_key)
@@ -1319,22 +1314,21 @@ class PublicAPI:
                 message_id = str(raw.get("message_id", ""))
             if not reason:
                 reason = str(raw.get("notice_type", ""))
-        epochs = p._conversation_input_epoch
+        epochs = p._store.conversation_input_epoch
         current_epoch = epochs.get(session_key, 0)
         new_epoch = current_epoch + 1
-        epochs[session_key] = new_epoch
-        last_text = p._last_request_text
-        last_text.pop(session_key, None)
-        withdrawals = p._user_message_withdrawals
-        withdrawals[session_key] = {
+        epochs.set(session_key, new_epoch)
+        p._store.last_request_text.pop(session_key, None)
+        p._store.user_message_withdrawals.set(session_key, {
             "message_id": message_id,
             "reason": reason,
             "input_epoch": new_epoch,
-        }
-        candidates = p._proactive_candidate_sessions
-        if session_key in candidates:
-            candidates[session_key]["last_user_text_excerpt"] = ""
-            candidates[session_key]["last_withdrawn_message_id"] = message_id
+        })
+        candidates = p._store.proactive_candidate_sessions
+        if candidates.has(session_key):
+            entry = candidates.ref(session_key)
+            entry["last_user_text_excerpt"] = ""
+            entry["last_withdrawn_message_id"] = message_id
         return {
             "input_epoch": new_epoch,
             "message_id": message_id,
@@ -1627,7 +1621,7 @@ class PublicAPI:
         """计算内部评估器 LLM 并发策略：基础 2 通道 + 极端积压时临时 burst 到 3。"""
         p = self._p
         _cfg = p.config or {}
-        total_queued = sum(len(q) for q in p._background_post_queues.values())
+        total_queued = sum(len(q) for q in p._store.background_post_queues.values())
         base_limit = 2
         burst_limit = 3
         reasons = ["base_two_lane_guard"]

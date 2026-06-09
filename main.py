@@ -144,7 +144,22 @@ from sylanne_alpha.memory_system import MemorySystem  # noqa: E402
 from sylanne_alpha.llm_request_pipeline import LLMRequestPipeline  # noqa: E402
 from sylanne_alpha.rhythm_learner import RhythmLearner  # noqa: E402
 from sylanne_alpha.proactive_scheduler import ProactiveScheduler  # noqa: E402
+from sylanne_alpha.proactive_bridge import ProactiveBridge  # noqa: E402
 from sylanne_alpha.session_context import SessionContext  # noqa: E402
+from sylanne_alpha.session_state_store import SessionStateStore  # noqa: E402
+from sylanne_alpha.agents import (  # noqa: E402
+    SelfCore,
+    AutonomyScheduler,
+    EmotionAgent,
+    AssessorAgent,
+    PersonaAgent,
+    LifeAgent,
+    MemoryAgent,
+    RhythmAgent,
+    ProactiveAgent,
+    SocialAgent,
+    DialogueAgent,
+)
 from sylanne_alpha.social_field import SocialFieldCollector  # noqa: E402
 from sylanne_alpha.llm_response_pipeline import LLMResponsePipeline  # noqa: E402
 from sylanne_alpha.public_api import PublicAPI  # noqa: E402
@@ -374,18 +389,11 @@ class EmotionalStatePlugin(Star):
         super().__init__(context)
         self.config = config or {}
         self._config = self.config
-        # 会话管理：session_key → SylanneAlphaHost 映射
-        self._hosts: BoundedDict = BoundedDict(maxsize=200)
-        self._background_tasks: set[asyncio.Task] = set()
-        # 流式回复相关缓冲区
-        self._unfinished_replies: BoundedDict = BoundedDict(maxsize=200)
-        self._stream_buffers: BoundedDict = BoundedDict(maxsize=200)
-        self._stream_first_sent: BoundedDict = BoundedDict(maxsize=200)
-        self._segmented_tasks: BoundedDict = BoundedDict(maxsize=200)
-        # 请求/响应诊断缓存
-        self._last_request_budgets: BoundedDict = BoundedDict(maxsize=200)
-        self._last_understanding_closed_loop: BoundedDict = BoundedDict(maxsize=200)
-        self._last_bot_expression_time: BoundedDict = BoundedDict(maxsize=200)
+        # 会话态集中存储：所有 session-keyed 容器收拢于此（CP8-P2）。
+        # 经语义方法访问，release_session 统一清理。
+        self._store = SessionStateStore()
+        self._background_tasks: list[asyncio.Task] = []
+        # hosts/记忆系统/对话缓冲已迁入 self._store（CP8-P2 批3）
         # 计算日志环形缓冲区（供 WebUI 实时显示）
         self._computation_logs: collections.deque = collections.deque(maxlen=200)
         # WebUI 运行时标识（用于探针验证实例一致性）
@@ -396,47 +404,15 @@ class EmotionalStatePlugin(Star):
         # 生命模拟器：idle 时自主演化身体状态
         self._life_simulator = LifeSimulator(config=self._config)
         self._life_simulator_started = False
-        # 三层记忆系统：session_key → MemorySystem 映射
-        self._memory_systems: BoundedDict = BoundedDict(maxsize=100)
-        # 对话缓冲区：用于 flush 到 L1 记忆池
-        self._conversation_buffers: BoundedDict = BoundedDict(maxsize=100)
         self._meltdown_nonces: BoundedDict = BoundedDict(maxsize=50, ttl=300)
-        self._last_user_texts: BoundedDict = BoundedDict(maxsize=200)
-        self._last_bot_texts: BoundedDict = BoundedDict(maxsize=200)
         # 社交场收集器：群聊氛围感知
         self._social_field = SocialFieldCollector(config=self._config)
-        self._conversation_input_epoch: BoundedDict = BoundedDict(maxsize=200)
-        self._last_request_text: BoundedDict = BoundedDict(maxsize=200)
-        self._user_message_withdrawals: BoundedDict = BoundedDict(maxsize=200)
-        # 后台投递队列：异步发送主动消息/分段回复
-        self._background_post_queues: BoundedDict = BoundedDict(maxsize=200)
-        self._background_post_dead_letters: BoundedDict = BoundedDict(maxsize=200)
-        self._background_post_sequence: BoundedDict = BoundedDict(maxsize=200)
-        self._background_post_latest_enqueued: BoundedDict = BoundedDict(maxsize=200)
-        self._background_post_last_committed: BoundedDict = BoundedDict(maxsize=200)
+        # 后台投递队列已迁入 self._store（CP8-P2 批2）
         self._background_post_recovered_sessions: set[str] = set()
-        self._background_post_active: BoundedDict = BoundedDict(maxsize=200)
-        self._background_post_checkpoint_tasks: dict[str, asyncio.Task] = {}
-        self._background_post_worker_state: BoundedDict = BoundedDict(maxsize=200)
         self._internal_assessor_llm_inflight: int = 0
-        self._pending_outreach_context: BoundedDict = BoundedDict(maxsize=50)
+        # outreach/origins/candidates/locks/realtime_dispatches 已迁入 self._store（批3）
         self._amnesia_sessions: set[str] = set()
-        self._proactive_candidate_sessions: BoundedDict = BoundedDict(maxsize=100)
         self._proactive_scheduler_task: asyncio.Task | None = None
-        self._proactive_scheduler_locks: dict[str, asyncio.Lock] = {}
-        self._last_user_message_time: BoundedDict = BoundedDict(maxsize=200)
-        self._sylanne_memory_cache: BoundedDict = BoundedDict(maxsize=200)
-        self._conversation_pending_response_epochs: BoundedDict = BoundedDict(
-            maxsize=200
-        )
-        self._group_atmosphere_injection_snapshot_cache: BoundedDict = BoundedDict(
-            maxsize=200
-        )
-        self._realtime_ordinary_history_backfills: BoundedDict = BoundedDict(
-            maxsize=200
-        )
-        self._realtime_chat_active_dispatches: BoundedDict = BoundedDict(maxsize=200)
-        self._session_locks: dict[str, asyncio.Lock] = {}
         # 子系统初始化：各子系统持有 self 引用，通过委托模式分工
         self._session_ctx = SessionContext(self)
         self._state_persistence = StatePersistence(self)
@@ -449,8 +425,23 @@ class EmotionalStatePlugin(Star):
         self._llm_response_pipeline = LLMResponsePipeline(self)
         self._llm_request_pipeline = LLMRequestPipeline(self)
         self._public_api = PublicAPI(self)
+        # SelfCore 认知编排器（CP8-P3a）：注册全部 9 个 agent。
+        # PRE（影响计算）：emotion/assessor/persona/life/memory；
+        # 请求-POST（消化计算结果）：rhythm/memory/proactive；
+        # 响应-POST（消化 bot 回复）：social/dialogue。
+        self._self_core = SelfCore(self, llm_budget=3)
+        for _agent_cls in (
+            EmotionAgent, AssessorAgent, PersonaAgent, LifeAgent,
+            MemoryAgent, RhythmAgent, ProactiveAgent,
+            SocialAgent, DialogueAgent,
+        ):
+            self._self_core.register(_agent_cls(self, self._self_core.bus))
+        # 全局自驱心跳（CP8-P3b）：让她没人说话也演化。initialize 启动、terminate 回收。
+        self._autonomy_scheduler = AutonomyScheduler(self, self._self_core)
         # 主动发言调度器：基于身体需求和节律决定是否主动发言
         self._proactive_scheduler = ProactiveScheduler(self)
+        # 主动发言桥接器：把意图+生活素材交给大饼插件执行发送
+        self._proactive_bridge = ProactiveBridge(self)
         self._register_web_apis(context)
 
         # AstrBot ConversationManager / PersonaManager 集成
@@ -711,6 +702,25 @@ class EmotionalStatePlugin(Star):
 
     def _host(self, session_key: str) -> SylanneAlphaHost:
         return self._session_ctx.host(session_key)
+
+    def _forget_evolution_session(self, session_key: str) -> None:
+        """收口清理某会话的进化层 per-session 状态（CP8-P6 防无界泄漏）。
+
+        进化层状态挂在引擎对象上（非 store 登记的 SessionMap），release_session 碰
+        不到，故这里显式 fan-out。两个触发点：① 会话删除回调 ② host LRU 驱逐
+        （驱逐后同 key 重建时 _restored 守卫须先清，否则学习成果不再从 KV 恢复）。
+        """
+        for owner in (
+            getattr(self, "_self_core", None),
+            getattr(self, "_autonomy_scheduler", None),
+            getattr(self, "_proactive_bridge", None),
+        ):
+            fn = getattr(owner, "forget_session", None)
+            if callable(fn):
+                try:
+                    fn(session_key)
+                except Exception as e:
+                    logger.debug(f"Sylanne forget_session [{session_key}]: {e}")
 
     def _memory_system_for_session(self, session_key: str) -> MemorySystem:
         return self._session_ctx.memory_system_for_session(session_key)
@@ -975,10 +985,11 @@ class EmotionalStatePlugin(Star):
         root = self._config.get("sylanne_alpha_root") or str(
             Path(get_astrbot_data_path()) / "plugin_data" / PLUGIN_NAME
         )
-        self._hosts[session_key] = SylanneAlphaHost(
+        _host_obj = SylanneAlphaHost(
             root=root, session_key=session_key, legacy=legacy
         )
-        return self._hosts[session_key].snapshot()
+        self._store.set_host(session_key, _host_obj)
+        return _host_obj.snapshot()
 
     async def pause_sylanne(self, *, session_key: str) -> dict[str, Any]:
         host = self._host(session_key)
@@ -1035,7 +1046,7 @@ class EmotionalStatePlugin(Star):
             session_key = self._session_ctx.session_key(event)
             now = time.time()
             # 更新最后消息时间，供 proactive scheduler 计算沉默时长
-            self._last_user_message_time[session_key] = now
+            self._store.last_user_message_time.set(session_key, now)
             # 喂给节奏学习器（记录 tempo，不受亲密度门控）
             self._rhythm_learner._record_tempo(session_key, now)
         except Exception:
@@ -1168,8 +1179,16 @@ class EmotionalStatePlugin(Star):
 
     @filter.on_decorating_result()
     async def on_decorating_result(self, event: Any) -> None:
-        """Stage 8 兜底：strip thinking/draft 块，防止 tool loop 中间步骤泄露。"""
+        """Stage 8 兜底：strip thinking/draft 块，防止 tool loop 中间步骤泄露。
+
+        另：若该消息是 Sylanne 主动发言桥接登记的"待接管分段"，则清空 chain 阻止
+        大饼整段发送，改由 Sylanne 后台连发人格化分段。
+        """
         try:
+            # 分段接管优先判定（大饼主动消息）
+            if await self._maybe_takeover_segments(event):
+                return
+
             from sylanne_alpha.compat import strip_draft_blocks
 
             result = event.get_result()
@@ -1197,6 +1216,72 @@ class EmotionalStatePlugin(Star):
             logger.warning(
                 f"Sylanne on_decorating_result strip failed: {e}", exc_info=True
             )
+
+    async def _maybe_takeover_segments(self, event: Any) -> bool:
+        """若 event 对应的 origin 被桥接登记为待接管分段：
+
+        提取文本 → 清空 chain（大饼见空 chain 不发送）→ 后台用 Sylanne 分段连发。
+        返回 True 表示已接管（调用方应 return，跳过后续 strip）。
+        """
+        bridge = getattr(self, "_proactive_bridge", None)
+        if bridge is None:
+            return False
+        origin = str(getattr(event, "unified_msg_origin", "") or "")
+        if not origin or not bridge.claim_segment_takeover(origin):
+            return False
+        try:
+            result = event.get_result()
+            chain = getattr(result, "chain", None) if result is not None else None
+            text = ""
+            if chain:
+                text = "".join(
+                    seg.text for seg in chain if isinstance(seg, Plain) and seg.text
+                )
+            # 清空 chain → 大饼 _send_chain_with_hooks 见空链直接 return，不发送
+            if result is not None:
+                if isinstance(chain, list):
+                    chain[:] = []  # 切片清空，保留 list/MessageChain 子类对象身份
+                else:
+                    result.chain = []
+            text = text.strip()
+            if not text:
+                return True  # 已拦截，无内容可发
+            # 后台连发 Sylanne 人格化分段（不阻塞装饰链）
+            from sylanne_alpha.compat.facade import realtime_plan
+
+            plan = realtime_plan(origin, text)
+            parts = plan.get("message_parts", [])
+            # 连发中欲言又止：犹豫开启时，按强度给分段插入加长停顿/半句省略号
+            if (self.config or {}).get("sylanne_alpha_proactive_hesitation", False):
+                try:
+                    surface = await self.proactive_sylanne(session_key=origin)
+                    body = surface.get("body", {}) if isinstance(surface, dict) else {}
+                    parts = bridge.apply_segment_hesitation(parts, body)
+                except Exception as e:
+                    logger.warning(f"Sylanne segment hesitation skip: {e}")
+            task = safe_ensure_future(
+                self._llm_response_pipeline._dispatch_segmented_parts(origin, parts),
+                name="proactive_segment_takeover",
+            )
+            if isinstance(getattr(self, "_background_tasks", None), list):
+                self._background_tasks.append(task)
+                task.add_done_callback(
+                    lambda t: (
+                        self._background_tasks.remove(t)
+                        if t in self._background_tasks
+                        else None
+                    )
+                )
+            logger.info(
+                f"Sylanne proactive segment takeover: {len(parts)} parts for {origin}"
+            )
+            return True
+        except Exception as e:
+            logger.warning(
+                f"Sylanne proactive segment takeover failed: {e}", exc_info=True
+            )
+            return False
+
 
     async def _on_llm_response_inner(self, event: Any, response: Any) -> None:
         await self._llm_response_pipeline._on_llm_response_inner(event, response)
@@ -1772,7 +1857,7 @@ class EmotionalStatePlugin(Star):
     def _record_conversation_pending_response_epoch(
         self, session_key: str, now: float = 0.0
     ) -> None:
-        self._conversation_pending_response_epochs[session_key] = now or time.time()
+        self._store.conversation_pending_response_epochs.set(session_key, now or time.time())
 
     async def _sylanne_memory_recall_summary_for_request(
         self,
@@ -1806,8 +1891,7 @@ class EmotionalStatePlugin(Star):
         await self._state_persistence.delete_sylanne_memory_state(session_key)
 
     def _consume_conversation_pending_response_epoch(self, session_key: str) -> float:
-        epochs = self._conversation_pending_response_epochs
-        return epochs.pop(session_key, 0.0)
+        return self._store.conversation_pending_response_epochs.pop(session_key, 0.0)
 
     async def _observe_sylanne_memory_event_if_enabled(
         self, session_key: str, text: str = "", **kwargs: Any
@@ -1923,7 +2007,7 @@ class EmotionalStatePlugin(Star):
         return []
 
     def _last_request_text_for_session(self, session_key: str = "") -> str:
-        return str(self._last_request_text.get(session_key, ""))
+        return str(self._store.last_request_text.get(session_key, ""))
 
     def _background_post_adaptive_worker_decision(
         self, session_key: str = "", *, commit_scale: bool = False
@@ -2163,6 +2247,72 @@ class EmotionalStatePlugin(Star):
     async def _run_proactive_scheduler_once(self) -> dict[str, Any]:
         return await self._proactive_scheduler.run_once()
 
+    def _start_life_simulator(self) -> None:
+        """配置生命模拟器并启动全局自驱心跳（幂等）。
+
+        CP8-P3b：LifeSimulator 不再自跑 _loop（已纯函数化）。改由 AutonomyScheduler
+        全局心跳驱动 LifeAgent 的 AUTONOMOUS 时点调 simulate_tick。configure 仍需
+        注入回调（simulate_tick 内部用 llm/outreach/body_delta 等）。
+        """
+        if getattr(self, "_life_simulator_started", False):
+            return
+        life_sim = getattr(self, "_life_simulator", None)
+        if life_sim is None:
+            return
+        self._life_simulator_started = True
+        pipe = self._llm_request_pipeline
+        life_sim.configure(
+            llm_caller=pipe._life_sim_llm_call,
+            outreach_callback=pipe._life_sim_outreach,
+            emotion_getter=pipe._life_sim_emotion,
+            body_delta_callback=pipe._life_sim_body_delta,
+            persona_getter=pipe._life_sim_persona_getter,
+            countdown_callback=self._life_sim_adjust_countdown,
+        )
+        # 启动全局自驱心跳（替代原 life_sim.start() 的后台循环）。
+        # LifeSim 持久化状态恢复在 async initialize 里 await（KV 读为异步）。
+        self._autonomy_scheduler.start()
+        logger.info(
+            f"Sylanne autonomy: life_sim enabled={life_sim.enabled}, "
+            f"interval={life_sim.interval_seconds}s, scheduler started at initialize"
+        )
+
+    async def initialize(self) -> None:
+        """AstrBot 插件生命周期钩子：加载后调用（有 running loop，不依赖用户消息）。"""
+        # 恢复 LifeSim 持久化状态（修复历史「重启丢作息」缺陷）——KV 读为异步，故在此 await
+        try:
+            life_sim = getattr(self, "_life_simulator", None)
+            if life_sim is not None and self._has_kv_api():
+                saved = await self.get_kv_data("sylanne_life_sim_state", None)
+                if saved and isinstance(saved, dict):
+                    life_sim.from_dict(saved)
+        except Exception as e:
+            logger.debug(f"Sylanne life sim state restore skipped: {e}")
+        try:
+            self._start_life_simulator()
+        except Exception as e:
+            logger.error(f"Sylanne initialize: autonomy start failed: {e}", exc_info=True)
+
+    async def _life_sim_adjust_countdown(self) -> None:
+        """生命模拟 tick 回调：用 Sylanne 当前状态拨动大饼下一次主动发言倒计时。
+
+        仅在桥接开关开启且大饼可用时生效；选最近活跃会话。失败静默。
+        """
+        bridge = getattr(self, "_proactive_bridge", None)
+        if bridge is None:
+            return
+        if not (self.config or {}).get("sylanne_alpha_proactive_bridge_enabled", False):
+            return
+        if not bridge.available():
+            return
+        session_key = self._llm_request_pipeline._most_recent_host_key()
+        if not session_key:
+            return
+        try:
+            await bridge.adjust_countdown(session_key)
+        except Exception as e:
+            logger.warning(f"Sylanne adjust_countdown callback: {e}", exc_info=True)
+
     async def terminate(self) -> None:
         """插件卸载/更新前的清理：停止所有后台任务、关闭 WebUI、持久化状态。"""
         # 收集所有需要取消的任务
@@ -2172,11 +2322,11 @@ class EmotionalStatePlugin(Star):
                 task.cancel()
                 tasks_to_cancel.append(task)
         self._background_tasks.clear()
-        for task in list(self._background_post_checkpoint_tasks.values()):
+        for task in list(self._store.background_post_checkpoint_tasks.values()):
             if not task.done():
                 task.cancel()
                 tasks_to_cancel.append(task)
-        self._background_post_checkpoint_tasks.clear()
+        self._store.background_post_checkpoint_tasks.clear()
         sched_task = getattr(self, "_proactive_scheduler_task", None)
         if sched_task and not sched_task.done():
             sched_task.cancel()
@@ -2184,9 +2334,39 @@ class EmotionalStatePlugin(Star):
         # 等待所有取消的任务完成（带超时保护）
         if tasks_to_cancel:
             await asyncio.wait(tasks_to_cancel, timeout=10)
-        # 停止生命模拟器
-        if hasattr(self._life_simulator, "stop"):
-            self._life_simulator.stop()
+        # 停止全局自驱心跳（CP8-P3b：替代原 life_simulator.stop）
+        sched = getattr(self, "_autonomy_scheduler", None)
+        if sched is not None:
+            sched_self_task = sched._task
+            sched.stop()
+            # 等自驱 task 真正收尾，消除「stop 仅 cancel 未 await」与下方
+            # 退出巩固之间的并发窗口（避免重入 session_lock 的潜在竞态）。
+            if sched_self_task is not None and not sched_self_task.done():
+                try:
+                    await asyncio.wait_for(
+                        asyncio.shield(sched_self_task), timeout=5
+                    )
+                except (asyncio.CancelledError, asyncio.TimeoutError):
+                    pass
+                except Exception as e:
+                    logger.debug(f"Sylanne autonomy task drain: {e}")
+            # CP8-P4-D：退出前对活跃会话做一次最终巩固（tick_decay + 进化档案落盘），
+            # 保证反应式学习累积的门控偏置不随关机丢失。零 LLM、绕 needs 守卫强制落盘。
+            consol = getattr(sched, "_consolidation", None)
+            if consol is not None:
+                try:
+                    now = time.time()
+                    for sk, _host in self._store.hosts.snapshot_items():
+                        await consol.consolidate(sk, now)
+                except Exception as e:
+                    logger.debug(f"Sylanne terminate consolidate skipped: {e}")
+        # 持久化 LifeSim 状态（修复历史「重启丢作息」缺陷）
+        try:
+            life_sim = getattr(self, "_life_simulator", None)
+            if life_sim is not None and self._has_kv_api():
+                await self.put_kv_data("sylanne_life_sim_state", life_sim.to_dict())
+        except Exception as e:
+            logger.debug(f"Sylanne life sim state persist skipped: {e}")
         # 关闭独立 WebUI 服务器
         try:
             await stop_webui_server()

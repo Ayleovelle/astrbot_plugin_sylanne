@@ -1395,6 +1395,12 @@ var I18N = {
 
 var currentLang = localStorage.getItem('sylanne_lang') || 'zh';
 function t(key) { return I18N[currentLang][key] || I18N['en'][key] || key; }
+function esc(s) {
+  // HTML 转义，防止用户可控内容(记忆/日志/session key)注入 innerHTML 造成 XSS
+  return String(s == null ? '' : s)
+    .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;').replace(/'/g, '&#39;');
+}
 function toggleLang() {
   currentLang = currentLang === 'zh' ? 'en' : 'zh';
   localStorage.setItem('sylanne_lang', currentLang);
@@ -2251,9 +2257,10 @@ function getLayerVisualization(layerId) {
 
     case 'L2': // Predictive Coding Gate - current surprise vs threshold (data-driven)
       var gate = s.gate || {};
-      var surprise = Number(gate.surprise) || 0;
+      var spineL2 = s.spine || {};
+      var surprise = Number(spineL2.surprise != null ? spineL2.surprise : gate.surprise) || 0;
       var threshold = Number(gate.threshold) || 0.5;
-      var route = (gate.route || 'NORMAL').toUpperCase();
+      var route = (spineL2.route || gate.route || 'NORMAL').toUpperCase();
       var svg = '';
       // Bar background
       svg += '<rect x="40" y="65" width="320" height="12" rx="6" fill="rgba(184,138,158,0.08)"/>';
@@ -2838,7 +2845,7 @@ async function updateLogs() {
     var time = formatLogTime(l.time);
     var msg = l.msg || l.text || l.message || '';
     var layers = l.layers ? ' [' + Object.keys(l.layers).join(',') + ']' : '';
-    return '<div class="log-entry"><span class="log-time">' + time + '</span><span class="log-badge ' + cls + '">' + route + '</span><span class="log-msg">' + msg + layers + '</span></div>';
+    return '<div class="log-entry"><span class="log-time">' + time + '</span><span class="log-badge ' + cls + '">' + route + '</span><span class="log-msg">' + esc(msg) + esc(layers) + '</span></div>';
   }).join('');
 
   var term = document.getElementById('logTerminal');
@@ -2895,7 +2902,7 @@ async function renderMemory() {
       var content = item.content || item.text || item.summary || '';
       var weight = typeof item.weight === 'number' ? item.weight : 0;
       var age = item.age || formatAge(item.created_at);
-      html += '<div class="mem-item"><div class="mem-content">' + content + '</div>';
+      html += '<div class="mem-item"><div class="mem-content">' + esc(content) + '</div>';
       html += '<div class="mem-meta"><span>weight: ' + weight.toFixed(2) + '</span><span>age: ' + age + '</span></div>';
       html += '<div class="mem-weight-track"><div class="mem-weight-fill" style="width:' + (weight*100) + '%"></div></div>';
       html += '</div>';
@@ -3277,7 +3284,7 @@ function buildSessionMenu(sessions) {
   if (!sessions.length) { menu.innerHTML = ''; return; }
   menu.innerHTML = sessions.map(function(key) {
     var cls = key === current ? 'session-opt active' : 'session-opt';
-    return '<button class="' + cls + '" onclick="selectSession(\'' + key.replace(/'/g, "\\'") + '\')">' + key + '</button>';
+    return '<button class="' + cls + '" onclick="selectSession(\'' + key.replace(/\\/g, "\\\\").replace(/'/g, "\\'").replace(/"/g, "&quot;") + '\')">' + esc(key) + '</button>';
   }).join('');
 }
 

@@ -21,6 +21,7 @@ from sylanne_alpha.utils import safe_ensure_future
 
 if TYPE_CHECKING:
     from .host import SylanneAlphaHost
+    from .protocols import PluginHost
 
 logger = logging.getLogger("astrbot_plugin_sylanne")
 
@@ -128,7 +129,7 @@ class StatePersistence:
     通过 self._p 委托访问插件实例。
     """
 
-    def __init__(self, plugin: Any) -> None:
+    def __init__(self, plugin: PluginHost) -> None:
         """初始化持久化层。
 
         Args:
@@ -394,10 +395,10 @@ class StatePersistence:
     async def _do_buffer_persist(self, session_key: str) -> None:
         """实际执行 buffer 持久化（由 schedule_buffer_persist 延迟触发）。"""
         self._buffer_persist_timers.pop(session_key, None)
-        buf = self._p._conversation_buffers.get(session_key)
+        buf = self._p._store.conversation_buffers.get(session_key)
         if not buf:
             return
-        host = self._p._hosts.get(session_key)
+        host = self._p._store.hosts.get(session_key)
         if not host or not hasattr(host, "runtime"):
             return
         buf_dict = buf.to_dict()
@@ -415,12 +416,12 @@ class StatePersistence:
         """
         from .memory_system import ConversationBuffer
 
-        for sk, host in list(self._p._hosts.items()):
+        for sk, host in self._p._store.hosts.snapshot_items():
             if not hasattr(host, "runtime"):
                 continue
             data = host.runtime.load_buffer(sk)
             if data and isinstance(data, dict):
-                self._p._conversation_buffers[sk] = ConversationBuffer.from_dict(data)
+                self._p._store.conversation_buffers.set(sk, ConversationBuffer.from_dict(data))
 
     # ------------------------------------------------------------------
     # 引擎状态：加载/保存/删除（情感核心）
@@ -644,13 +645,9 @@ class StatePersistence:
             return
         from .memory_system import MemorySystem
 
-        cache = self._p._sylanne_memory_cache
-        if not isinstance(cache, dict):
-            cache = {}
-        self._p._sylanne_memory_cache = cache
-        cache[session_key] = state
+        self._p._store.sylanne_memory_cache.set(session_key, state)
         if isinstance(state, MemorySystem):
-            self._p._memory_systems[session_key] = state
+            self._p._store.memory_systems.set(session_key, state)
         kv_key = self.sylanne_memory_kv_key(session_key)
         put_fn = getattr(self._p, "put_kv_data", None)
         if put_fn and callable(put_fn):
@@ -696,18 +693,11 @@ class StatePersistence:
                 )
             return bool(list(getattr(state, "records", []) or []))
 
-        cache = self._p._sylanne_memory_cache
-        if not isinstance(cache, dict):
-            cache = {}
-        self._p._sylanne_memory_cache = cache
-        cached_state = cache.get(session_key) if isinstance(cache, dict) else None
+        cached_state = self._p._store.sylanne_memory_cache.get(session_key)
         if has_content(cached_state):
-            return cache[session_key]
+            return cached_state
         # 检查活跃记忆系统
-        system_cache = getattr(self._p, "_memory_systems", {}) or {}
-        live_state = (
-            system_cache.get(session_key) if isinstance(system_cache, dict) else None
-        )
+        live_state = self._p._store.memory_systems.get(session_key)
         if has_content(live_state):
             return live_state
         # 从 KV 存储加载
@@ -726,8 +716,8 @@ class StatePersistence:
                 }.issubset(data.keys()):
                     try:
                         state = MemorySystem.create_from_dict(data)
-                        self._p._memory_systems[session_key] = state
-                        cache[session_key] = state
+                        self._p._store.memory_systems.set(session_key, state)
+                        self._p._store.sylanne_memory_cache.set(session_key, state)
                         return state
                     except Exception as e:
                         logger.debug(f"Sylanne skip: {e}")
@@ -765,7 +755,7 @@ class StatePersistence:
                             if put_fn and callable(put_fn):
                                 save_data = state.to_dict()
                                 await put_fn(kv_key, save_data)
-                    cache[session_key] = state
+                    self._p._store.sylanne_memory_cache.set(session_key, state)
                     return state
                 except Exception as e:
                     logger.debug(f"Sylanne skip: {e}")
@@ -775,8 +765,8 @@ class StatePersistence:
             data = host.kernel.body.memory.get("_memory_system")
             if isinstance(data, dict):
                 state = MemorySystem.create_from_dict(data)
-                self._p._memory_systems[session_key] = state
-                cache[session_key] = state
+                self._p._store.memory_systems.set(session_key, state)
+                self._p._store.sylanne_memory_cache.set(session_key, state)
                 return state
         except Exception as e:
             logger.debug(f"Sylanne skip: {e}")
@@ -793,8 +783,7 @@ class StatePersistence:
         Args:
             session_key: 会话标识。
         """
-        cache = self._p._sylanne_memory_cache
-        cache.pop(session_key, None)
+        self._p._store.sylanne_memory_cache.pop(session_key, None)
         kv_key = self.sylanne_memory_kv_key(session_key)
         delete_fn = getattr(self._p, "delete_kv_data", None)
         if delete_fn and callable(delete_fn):
@@ -828,42 +817,24 @@ class StatePersistence:
                 logger.info("Sylanne: registered on_session_deleted callback")
         return conv_mgr
 
-    # 会话删除时需要清理的容器属性名注册表
-    _SESSION_KEYED_CONTAINERS: tuple[str, ...] = (
-        "_hosts", "_memory_systems", "_conversation_buffers",
-        "_unfinished_replies", "_stream_buffers", "_stream_first_sent",
-        "_segmented_tasks", "_last_request_budgets",
-        "_last_understanding_closed_loop", "_last_bot_expression_time",
-        "_last_user_texts", "_last_bot_texts",
-        "_conversation_input_epoch", "_last_request_text",
-        "_user_message_withdrawals", "_background_post_queues",
-        "_background_post_dead_letters", "_background_post_sequence",
-        "_background_post_latest_enqueued", "_background_post_last_committed",
-        "_background_post_active", "_background_post_worker_state",
-        "_pending_outreach_context", "_proactive_candidate_sessions",
-        "_last_user_message_time", "_sylanne_memory_cache",
-        "_conversation_pending_response_epochs",
-        "_group_atmosphere_injection_snapshot_cache",
-        "_realtime_ordinary_history_backfills",
-        "_realtime_chat_active_dispatches",
-    )
-
     def _on_session_deleted(self, session_key: str) -> None:
-        """AstrBot 会话删除回调——释放 Sylanne 侧的会话资源。"""
+        """AstrBot 会话删除回调——释放 Sylanne 侧的会话资源。
+
+        会话态容器统一收口于 p._store.release_session（CP8-P2），结构性登记保证
+        新增容器自动纳入清理，杜绝原反射式 _SESSION_KEYED_CONTAINERS 手抄元组的
+        漏登记静默泄漏（曾漏 3 个无界裸 dict）。
+        """
         p = self._p
-        for attr in self._SESSION_KEYED_CONTAINERS:
-            container = getattr(p, attr, None)
-            if container is None:
-                continue
-            if isinstance(container, dict):
-                container.pop(session_key, None)
-            elif hasattr(container, "pop"):
-                try:
-                    container.pop(session_key, None)
-                except Exception:
-                    pass
+        p._store.release_session(session_key)
         p._amnesia_sessions.discard(session_key)
-        p._session_locks.pop(session_key, None)
+        # CP8-P6：进化层 per-session 状态挂在引擎对象上（非 store 登记容器），
+        # release_session 碰不到，显式 fan-out 清理防无界泄漏。
+        forget = getattr(p, "_forget_evolution_session", None)
+        if callable(forget):
+            try:
+                forget(session_key)
+            except Exception as e:
+                logger.debug(f"Sylanne evolution forget on delete failed: {e}")
         # 异步清理 KV 存储中的持久化数据
         safe_ensure_future(
             self._cleanup_kv_for_session(session_key),
@@ -997,10 +968,9 @@ class StatePersistence:
         if persona_mgr is None:
             return
         try:
-            host = p._hosts.get(session_key)
+            host = p._store.hosts.get(session_key)
             if not host:
                 return
-            # 从 kernel 提取人格数据
             personality = (
                 host.kernel._personality()
                 if hasattr(host.kernel, "_personality")
@@ -1012,7 +982,6 @@ class StatePersistence:
             traits = personality.get("traits", {})
             voice = personality.get("voice", {})
 
-            # 从人格状态构建 system prompt 片段
             trait_lines = []
             for k, v in traits.items():
                 if isinstance(v, (int, float)):
@@ -1029,27 +998,43 @@ class StatePersistence:
                 f"Voice: {voice if voice else 'default'}"
             )
 
-            # 先尝试更新，不存在则创建
-            try:
-                existing = persona_mgr.get_persona(persona_id)
-                if existing:
-                    persona_mgr.update_persona(persona_id, system_prompt=system_prompt)
-                else:
-                    persona_mgr.create_persona(
-                        persona_id=persona_id,
-                        system_prompt=system_prompt,
-                        begin_dialogs=[],
-                        tools=None,
-                    )
-            except Exception:
-                # 旧版 API 可能不接受所有参数
+            import asyncio
+            import inspect
+
+            async def _do_sync() -> None:
                 try:
-                    persona_mgr.create_persona(
-                        persona_id=persona_id,
-                        system_prompt=system_prompt,
-                    )
+                    existing = persona_mgr.get_persona(persona_id)
+                    if inspect.isawaitable(existing):
+                        existing = await existing
+                    if existing:
+                        ret = persona_mgr.update_persona(persona_id, system_prompt=system_prompt)
+                        if inspect.isawaitable(ret):
+                            await ret
+                    else:
+                        ret = persona_mgr.create_persona(
+                            persona_id=persona_id,
+                            system_prompt=system_prompt,
+                            begin_dialogs=[],
+                            tools=None,
+                        )
+                        if inspect.isawaitable(ret):
+                            await ret
                 except Exception:
-                    pass  # persona 同步失败可接受
+                    try:
+                        ret = persona_mgr.create_persona(
+                            persona_id=persona_id,
+                            system_prompt=system_prompt,
+                        )
+                        if inspect.isawaitable(ret):
+                            await ret
+                    except Exception:
+                        pass
+
+            try:
+                loop = asyncio.get_running_loop()
+                loop.create_task(_do_sync())
+            except RuntimeError:
+                pass
         except Exception as e:
             logger.debug(f"Sylanne: PersonaManager sync failed: {e}")
 
@@ -1312,8 +1297,8 @@ class StatePersistence:
             except (asyncio.CancelledError, Exception):
                 pass
         p._proactive_scheduler_task = None
-        p._proactive_candidate_sessions = {}
-        p._proactive_scheduler_locks = {}
+        p._store.proactive_candidate_sessions.clear()
+        p._store.proactive_scheduler_locks.clear()
         # Cancel all background tasks
         tasks = getattr(p, "_background_tasks", [])
         for t in list(tasks):
@@ -1327,7 +1312,7 @@ class StatePersistence:
             tasks.clear()
         p._background_tasks = []
         # Save final checkpoints for background post queues
-        bg_queues = p._background_post_queues
+        bg_queues = p._store.background_post_queues
         checkpoint_enabled = bool(
             (p.config or {}).get("background_post_queue_checkpoint_enabled")
         )
@@ -1341,8 +1326,8 @@ class StatePersistence:
                         pass
         # Clean up background post state
         p._background_post_tasks = {}
-        p._background_post_queues = {}
-        p._background_post_sequence = {}
+        p._store.background_post_queues.clear()
+        p._store.background_post_sequence.clear()
         p._background_post_skipped = {}
         p._terminating = True
         try:

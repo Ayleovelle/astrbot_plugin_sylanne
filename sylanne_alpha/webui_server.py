@@ -61,7 +61,7 @@ from sylanne_alpha.infra import ensure_background_tasks_list, resolve_data_root
 
 
 if TYPE_CHECKING:
-    pass
+    from sylanne_alpha.protocols import PluginHost
 
 logger = logging.getLogger(__name__)
 
@@ -279,9 +279,14 @@ async def start_webui_server(plugin: Any, host: str = "127.0.0.1", port: int = 2
         schema = _load_schema(current_plugin)
         config = dict(getattr(current_plugin, "_config", {}) or {})
         # Ensure every schema key is present in values (use default if unconfigured)
+        # 敏感字段(token/密钥等)的值掩码，避免明文回传给前端泄露
         values = {}
         for key, meta in schema.items():
-            values[key] = config.get(key, meta.get("default"))
+            raw = config.get(key, meta.get("default"))
+            if _is_sensitive_key(key) and raw:
+                values[key] = "********"
+            else:
+                values[key] = raw
         return web.json_response(
             {
                 "schema": schema,
@@ -303,6 +308,9 @@ async def start_webui_server(plugin: Any, host: str = "127.0.0.1", port: int = 2
         updated = []
         for key, value in body.items():
             if key not in schema:
+                continue
+            # 敏感字段若收到掩码占位值，说明前端未改动，跳过避免覆盖真实值
+            if _is_sensitive_key(key) and value == "********":
                 continue
             meta = schema[key]
             # Type coercion per schema
@@ -1153,7 +1161,7 @@ async def start_webui_server(plugin: Any, host: str = "127.0.0.1", port: int = 2
 
     async def handle_sheaf_topology(request: web.Request) -> web.Response:
         """返回关系层析拓扑数据：nodes + edges + cohomology_h1。"""
-        from sylanne_alpha.relational_sheaf import _REL_TYPE_NAMES
+        from sylanne_alpha._engine.sylanne_core.compute.relational_sheaf import _REL_TYPE_NAMES
 
         current = _plugin(plugin)
         session_key = str(request.query.get("session", "") or "").strip()
@@ -1775,7 +1783,7 @@ def start_webui_thread_server(
                         pass
                     self._send_json({"nodes": nodes, "edges": edges})
                 elif path == "/api/sheaf_topology":
-                    from sylanne_alpha.relational_sheaf import _REL_TYPE_NAMES
+                    from sylanne_alpha._engine.sylanne_core.compute.relational_sheaf import _REL_TYPE_NAMES
                     session_key = query.get("session", "")
                     with _plugin_access_lock:
                         current = _plugin(plugin)
@@ -2353,7 +2361,9 @@ def _build_state(plugin: Any, *, session: str = "") -> dict[str, Any]:
         if host is None:
             raise KeyError(session_key)
         comp = host.kernel.computation
-        gate = comp.gate.to_dict()
+        gate = (lambda g: g.to_dict() if g is not None and hasattr(g, "to_dict") else {})(
+            getattr(comp, "gate", None) or getattr(comp, "_gate", None)
+        )
         # Route stats from computation spine counters
         comp_diag = comp.diagnostics() if hasattr(comp, "diagnostics") else {}
         route_counts = (
@@ -2370,7 +2380,9 @@ def _build_state(plugin: Any, *, session: str = "") -> dict[str, Any]:
         if not isinstance(layers, dict):
             layers = {}
         # Boundary: map internal field names to frontend-expected names
-        boundary_raw = comp.boundary.to_dict()
+        boundary_raw = (lambda b: b.to_dict() if b is not None and hasattr(b, "to_dict") else {})(
+            getattr(comp, "boundary", None) or getattr(comp, "_boundary", None)
+        )
         boundary = {
             "integrity": boundary_raw.get("boundary_integrity", 1.0),
             "entropy": boundary_raw.get("internal_entropy", 0.0),
@@ -2393,7 +2405,7 @@ def _build_state(plugin: Any, *, session: str = "") -> dict[str, Any]:
             "coherence": 1.0,
         }
         # Timing: convert ns to ms
-        timing_raw = comp.timing_stats()
+        timing_raw = comp.timing_stats() if hasattr(comp, "timing_stats") else {}
         timing = {}
         total_ms = 0.0
         for layer_name, layer_stats in timing_raw.items():
@@ -3066,7 +3078,7 @@ class WebUILifecycle:
     - schedule_listener_takeover(): 延迟接管（等待旧模块完全卸载）
     """
 
-    def __init__(self, plugin: Any) -> None:
+    def __init__(self, plugin: PluginHost) -> None:
         self._p = plugin
 
     def start_if_enabled(self) -> None:

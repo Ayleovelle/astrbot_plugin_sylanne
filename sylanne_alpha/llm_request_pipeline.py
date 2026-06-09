@@ -16,7 +16,7 @@ import asyncio
 import random
 import re as _re
 import time
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from sylanne_alpha.content_sanitizer import (
     sanitize_for_summary,
@@ -24,6 +24,9 @@ from sylanne_alpha.content_sanitizer import (
     is_content_filter_refusal,
 )
 from sylanne_alpha.utils import safe_ensure_future
+
+if TYPE_CHECKING:
+    from sylanne_alpha.protocols import PluginHost
 
 try:
     from astrbot.api import logger  # type: ignore
@@ -65,6 +68,33 @@ _SLOT_LABELS = {
     "memory":     "记忆",
     "unfinished": "未完",
 }
+
+
+def _comp_boundary_stability(comp: Any) -> float:
+    """取计算层边界稳定度，兼容旧 ComputationSpine(.boundary) 与共振场(_boundary)。"""
+    b = getattr(comp, "boundary", None) or getattr(comp, "_boundary", None)
+    if b is not None and hasattr(b, "stability"):
+        try:
+            return float(b.stability())
+        except Exception:
+            return 1.0
+    return 1.0
+
+
+def _comp_timing_ns(comp: Any) -> dict[str, int]:
+    """取计算层分层耗时(ns)，兼容旧 dict[layer→deque] 与共振场单 deque。
+
+    共振场 _timings 是整个 spine 的单一 deque[int]，无 per-layer 拆分，
+    映射为 {"spine": 最近一次耗时}。
+    """
+    t = getattr(comp, "_timings", None)
+    if isinstance(t, dict):
+        return {k: (v[-1] if v else 0) for k, v in t.items()}
+    # 共振场：单 deque
+    try:
+        return {"spine": int(t[-1]) if t else 0}
+    except Exception:
+        return {}
 
 
 def _compute_injection_budget(gap_seconds: float, cfg: dict) -> int:
@@ -605,7 +635,7 @@ class LLMRequestPipeline:
                 prefs["style"] = style
                 break
 
-    def __init__(self, plugin: Any) -> None:
+    def __init__(self, plugin: PluginHost) -> None:
         self._p = plugin
         if not hasattr(self._p, "_cached_system_prompts"):
             self._p._cached_system_prompts = {}
@@ -614,18 +644,18 @@ class LLMRequestPipeline:
         """返回最近活跃的 host session_key（按 last_event.now 排序）。
 
         若所有 host 的 last_event.now 均为 0，回退到字典首项。
-        调用前需确保 p._hosts 非空。
+        调用前需确保 p._store.hosts 非空。
         """
         p = self._p
         best_key = ""
         best_time = 0.0
-        for sk, host in p._hosts.items():
+        for sk, host in p._store.hosts.items():
             last_now = float(host.kernel.last_event.get("now") or 0.0)
             if last_now > best_time:
                 best_time = last_now
                 best_key = sk
         if not best_key:
-            best_key = next(iter(p._hosts))
+            best_key = next(iter(p._store.hosts.keys()))
         return best_key
 
     def _cache_system_prompt(
@@ -856,15 +886,7 @@ class LLMRequestPipeline:
             request: LLM 请求对象，可修改其 prompt 字段注入上下文。
         """
         p = self._p
-        # 懒初始化运行时状态容器——这些属性在插件首次收到请求时创建
-        if not hasattr(p, "_stream_buffers"):
-            p._stream_buffers = {}
-        if not hasattr(p, "_stream_first_sent"):
-            p._stream_first_sent = {}
-        if not hasattr(p, "_segmented_tasks"):
-            p._segmented_tasks = {}
-        if not hasattr(p, "_unfinished_replies"):
-            p._unfinished_replies = {}
+        # 流式/分段/预算等运行态已迁入 p._store（CP8-P2），无需懒初始化。
         if not hasattr(p, "_background_tasks") or not isinstance(p._background_tasks, list):
             if hasattr(p, "_background_tasks"):
                 logger.warning(
@@ -872,8 +894,6 @@ class LLMRequestPipeline:
                     type(p._background_tasks).__name__,
                 )
             p._background_tasks = []
-        if not hasattr(p, "_last_request_budgets"):
-            p._last_request_budgets = {}
         if not hasattr(p, "_fragment_buffers"):
             p._fragment_buffers = {}
         if not hasattr(p, "_fragment_timers"):
@@ -887,18 +907,16 @@ class LLMRequestPipeline:
             t2 = loop.create_task(self._consolidation_loop())
             p._background_tasks.extend([t1, t2])
         session_key = p._session_key(event)
-        # 维护 session_key → unified_msg_origin 映射，供主动发送时使用
+        # 维护 session_key → unified_msg_origin 映射，供主动发送时使用（已在 __init__ 预初始化）
         umo = str(getattr(event, "unified_msg_origin", "") or "")
         if umo:
-            if not hasattr(p, "_session_origins"):
-                p._session_origins: dict[str, str] = {}
-            p._session_origins[session_key] = umo
+            p._store.session_origins.set(session_key, umo)
         message_text = str(getattr(event, "message_str", "") or "")
         # 非文本消息转述：图片/语音等内容转为文本描述
         if not message_text.strip():
             message_text = await self._transcribe_non_text(event, message_text)
         if message_text:
-            p._last_user_texts[session_key] = message_text[:120]
+            p._store.last_user_texts.set(session_key, message_text[:120])
         realtime_enabled = bool(
             (p.config or {}).get("sylanne_alpha_realtime_chat_enabled")
         )
@@ -963,10 +981,8 @@ class LLMRequestPipeline:
             getattr(event, "_is_follow_up", False)
             or getattr(event, "order_seq", None) is not None
         )
-        active_reply = (
-            session_key in p._segmented_tasks
-            and not p._segmented_tasks[session_key].done()
-        )
+        _seg_task = p._store.segmented_tasks.get(session_key)
+        active_reply = _seg_task is not None and not _seg_task.done()
         if realtime_enabled and message_text and not is_follow_up and not active_reply:
             probe_delay = float(
                 (p.config or {}).get(
@@ -1166,8 +1182,8 @@ class LLMRequestPipeline:
                 )
 
         # 清理该会话的流式状态
-        p._stream_buffers.pop(session_key, None)
-        p._stream_first_sent.pop(session_key, None)
+        p._store.stream_buffers.pop(session_key, None)
+        p._store.stream_first_sent.pop(session_key, None)
 
         # 启动后台观测任务（按会话串行化避免竞态）
         if message_text:
@@ -1201,7 +1217,7 @@ class LLMRequestPipeline:
                     pass
 
         # 取消该会话过期的分段回复任务
-        stale_task = p._segmented_tasks.pop(session_key, None)
+        stale_task = p._store.segmented_tasks.pop(session_key, None)
         if stale_task and not stale_task.done():
             stale_task.cancel()
 
@@ -1236,7 +1252,7 @@ class LLMRequestPipeline:
                             first_sentence = p._extract_first_sentence(buffer)
                             if first_sentence:
                                 first_sent = True
-                                p._stream_first_sent[session_key] = first_sentence
+                                p._store.stream_first_sent.set(session_key, first_sentence)
                                 t = safe_ensure_future(
                                     p._send_first_sentence(origin, first_sentence),
                                     name="stream_send_first_sentence",
@@ -1296,7 +1312,7 @@ class LLMRequestPipeline:
         budget = p._state_injection_budget_for_request(
             session_key, request, model_hint=model_hint
         )
-        p._last_request_budgets[session_key] = budget
+        p._store.last_request_budgets.set(session_key, budget)
 
         # 先缓存原始 system prompt，再做 Claude/hajide 归一化
         original_system_prompt = str(getattr(request, "system_prompt", "") or "")
@@ -1344,7 +1360,7 @@ class LLMRequestPipeline:
         p = self._p
 
         # 注入未完成回复上下文
-        unfinished = p._unfinished_replies.pop(session_key, "")
+        unfinished = p._store.unfinished_replies.pop(session_key, "")
         unfinished_fragment = ""
         if unfinished:
             host = p._host(session_key)
@@ -1361,8 +1377,7 @@ class LLMRequestPipeline:
 
         # 消费待发送的生命事件上下文
         outreach_fragment = ""
-        pending_outreach = p._pending_outreach_context
-        outreach_ctx = pending_outreach.pop(session_key, None)
+        outreach_ctx = p._store.pending_outreach_context.pop(session_key, None)
         if outreach_ctx:
             reason = outreach_ctx.get("reason", "")
             mood = outreach_ctx.get("mood", "")
@@ -1370,6 +1385,19 @@ class LLMRequestPipeline:
                 f"[life_event_context] Sylanne 刚刚经历了一件事想分享：{reason}（心情：{mood}）。"
                 f"请自然地在回复中提及或表达这件事，用你自己的语气。"
             )
+            # 将生活事件写入记忆层（不带任何来源标签，和对话记忆无法区分）
+            try:
+                mem_sys = p._memory_system_for_session(session_key)
+                # 去掉 [life_event] 前缀，用朴素第一人称描述
+                clean_reason = reason.replace("[life_event] ", "").strip()
+                if clean_reason:
+                    mem_sys.write_summary(
+                        text=clean_reason,
+                        source_turns=1,
+                        temperature=0.3,
+                    )
+            except Exception:
+                pass
 
         # 使用三层记忆系统召回相关记忆（gap-aware）
         memory_fragment = ""
@@ -1439,11 +1467,17 @@ class LLMRequestPipeline:
 
         p = self._p
         host = p._host(session_key)
-        emotion = host.kernel.computation.engine.observe()
-        sheaf_obs = host.kernel.computation.sheaf.observe()
-        expr_state = host.kernel.computation.expression.state()
+        comp = host.kernel.computation
+        emotion = comp.engine.observe()
+        # 共振场(ResonanceSpine)无公有 sheaf 属性(私有 _sheaf)，旧 ComputationSpine 有。
+        # CP3 切换计算芯后此处加固防崩；CP5 将整体改读 Surface。
+        _sheaf = getattr(comp, "sheaf", None) or getattr(comp, "_sheaf", None)
+        sheaf_obs = _sheaf.observe() if _sheaf is not None and hasattr(_sheaf, "observe") else {}
+        expr_state = comp.expression.state() if hasattr(comp, "expression") else {}
 
-        # 前台快速评估器
+        # 前台快速评估器（独立用途：结果立即生成 prompt 状态信号片段，见下方 signals）。
+        # 注：这与后台 AssessorAgent（结果进计算栈影响 kernel）是不同消费路径——
+        # 前台服务实时 prompt 文案、后台服务计算注入，各需一次 fast 评估，非重复执行。
         fast_assessment: dict = {}
         fast_enabled = p._cfg_bool("sylanne_alpha_assessor_llm_enabled")
         if fast_enabled and message_text:
@@ -1454,8 +1488,8 @@ class LLMRequestPipeline:
             except Exception as e:
                 logger.warning(f"Sylanne fast assessment: {e}", exc_info=True)
 
-        # 合并评估结果
-        last_assessment = host.kernel.computation._last_assessment or {}
+        # 合并评估结果（共振场可能无 _last_assessment，getattr 守卫）
+        last_assessment = getattr(comp, "_last_assessment", None) or {}
         current_assessment = (
             {**last_assessment, **fast_assessment}
             if fast_assessment
@@ -1660,23 +1694,11 @@ class LLMRequestPipeline:
                     f"(prompt={len(current_prompt)} chars)"
                 )
 
-        # 首次请求时启动生命模拟器（懒初始化）
+        # 兜底：若 initialize() 生命周期钩子未启动生命模拟器（幂等，已启动则跳过）
         if not getattr(p, "_life_simulator_started", False):
-            p._life_simulator_started = True
-            life_sim = getattr(p, "_life_simulator", None)
-            if life_sim is not None:
-                life_sim.configure(
-                    llm_caller=self._life_sim_llm_call,
-                    outreach_callback=self._life_sim_outreach,
-                    emotion_getter=self._life_sim_emotion,
-                    body_delta_callback=self._life_sim_body_delta,
-                    persona_getter=self._life_sim_persona_getter,
-                )
-                life_sim.start()
-                p.logger.info(
-                    f"Sylanne life simulator: enabled={life_sim.enabled}, "
-                    f"interval={life_sim.interval_seconds}s"
-                )
+            start_fn = getattr(p, "_start_life_simulator", None)
+            if callable(start_fn):
+                start_fn()
             p._start_webui_if_enabled()
 
     # ------------------------------------------------------------------
@@ -1729,45 +1751,69 @@ class LLMRequestPipeline:
         from sylanne_alpha.host import SylanneAlphaHostEvent
 
         try:
-            fast_result: dict = {}
-            main_result: dict = {}
-
-            # 快速评估器（始终运行，若启用）
-            fast_enabled = p._cfg_bool("sylanne_alpha_assessor_llm_enabled")
-            if fast_enabled and text:
-                fast_result = await p._async_assessor.assess_fast(
-                    text,
-                    self._assessor_llm_call,
-                )
-
-            # 判断是否需要运行主评估器
+            # CP8-P3a：fast/main 评估已收编进 AssessorAgent（经 SelfCore PRE 调用），
+            # 此处不再直接调 assess_fast/assess_main，避免双重执行。
             host = p._host(session_key)
-            main_enabled = p._cfg_bool("sylanne_alpha_main_assessor_enabled")
-            if main_enabled and text:
-                # Gather recent context lines for richer assessment
-                context_lines = self._recent_context_lines(session_key)
-                main_result = await p._async_assessor.assess_main(
-                    text,
-                    context_lines,
-                    self._main_assessor_llm_call,
-                )
+            assessment: dict = {}
 
-            # 合并结果：主评估覆盖快速评估
-            assessment = {**fast_result, **main_result}
-            # 移除内部元数据
-            assessment.pop("_level", None)
-            assessment.pop("assessed_at", None)
+            # CP8-P4-D：会话首次活跃时从 KV 恢复一次进化档案（跨重启累积学习）。
+            # host() 同步无法 await，故恢复放在此异步入口；一次性守卫内部自管。
+            sched = getattr(p, "_autonomy_scheduler", None)
+            consol = getattr(sched, "_consolidation", None)
+            if consol is not None:
+                try:
+                    await consol.ensure_restored(session_key)
+                except Exception as exc:
+                    logger.debug("Sylanne restore evolution [%s]: %s", session_key, exc)
 
             # 将评估结果注入计算栈
             now = time.time()
+            # CP8-P3a：SelfCore PRE 编排——9 个 agent 读上轮 surface 产意图，
+            # 融合成 flags/confidence/values/assessment 替代原硬编码，影响本轮计算。
+            # AssessorAgent 已收编 fast+main 评估，故此处 assessment 来自 agent 融合。
+            sc = getattr(p, "_self_core", None)
+            # assessment 已不在管线直接评估（收编进 AssessorAgent），默认 None，
+            # 由下方 SelfCore PRE 融合结果（composed.assessment）填充。
+            pre_assessment = assessment or None
+            event_flags = ["safe"]
+            event_confidence = 0.7
+            event_values: dict = {}
+            if sc is not None:
+                try:
+                    prev_surface = host.kernel.surface()
+                    pre_intents = await sc.run_cycle(session_key, prev_surface, phase="pre")
+                    composed = sc.compose_inputs(pre_intents)
+                    if composed.flags:
+                        event_flags = composed.flags
+                    if composed.confidence is not None:
+                        event_confidence = composed.confidence
+                    event_values = composed.values
+                    if composed.assessment:
+                        pre_assessment = composed.assessment
+                    # SelfCore 托管的高层意图（回忆/生命事件等）暂存，供后续 prompt 注入
+                    if composed.carried:
+                        p._store.last_understanding_closed_loop.set(
+                            session_key, {"agent_carried": composed.carried}
+                        )
+                except Exception as exc:
+                    logger.warning("Sylanne SelfCore PRE failed: %s", exc)
             event = SylanneAlphaHostEvent(
                 text=text,
-                confidence=0.7,
-                flags=["safe"],
+                confidence=event_confidence,
+                flags=event_flags,
+                values=event_values,
                 now=now,
                 event_time=p._event_time(now),
             )
-            host.on_request(event, assessment=assessment if assessment else None)
+            host.on_request(event, assessment=pre_assessment)
+            # CP8-P3a：SelfCore POST 编排——agent 消化本轮计算结果更新自身状态
+            # （RhythmAgent 节奏观测 / MemoryAgent 衰减 / ProactiveAgent 等）。
+            if sc is not None:
+                try:
+                    post_surface = host.kernel.surface()
+                    await sc.run_cycle(session_key, post_surface, phase="post")
+                except Exception as exc:
+                    logger.warning("Sylanne SelfCore POST failed: %s", exc)
 
             # 将人格漂移同步到 AstrBot PersonaManager
             if p._has_persona_manager():
@@ -1810,7 +1856,7 @@ class LLMRequestPipeline:
                     "L6_Boundary",
                     {
                         "stability": round(
-                            host.kernel.computation.boundary.stability(), 3
+                            _comp_boundary_stability(host.kernel.computation), 3
                         )
                     },
                 )
@@ -1830,19 +1876,15 @@ class LLMRequestPipeline:
                     "route": comp_result.get("route", "?"),
                     "surprise": comp_result.get("surprise", 0),
                     "layers": layers,
-                    "assessor": assessment if assessment else None,
-                    "timing_ns": {
-                        k: v[-1] if v else 0
-                        for k, v in host.kernel.computation._timings.items()
-                    },
+                    "assessor": pre_assessment if pre_assessment else None,
+                    "timing_ns": _comp_timing_ns(host.kernel.computation),
                 }
                 p._computation_logs.append(log_entry)
             except Exception:
                 pass  # Never let logging break the main path
 
-            # 节奏学习：观测用户消息时间间隔，用于自适应分段参数
-            engine_obs = host.kernel.computation.engine.observe()
-            p._rhythm_learner.observe_user_message(session_key, text, now, engine_obs)
+            # CP8-P3a：节奏学习已收编进 RhythmAgent（SelfCore POST），此处不再直接调
+            # observe_user_message，避免双记 tempo。
 
             # 记忆维护：v2 对话缓冲 + 衰减 + 压缩
             _current_warmth = host.kernel.computation.engine.observe().get(
@@ -1853,8 +1895,8 @@ class LLMRequestPipeline:
             # 将用户消息追加到对话缓冲区（v2：不直接写入记忆层）
             from sylanne_alpha.memory_system import ConversationBuffer
 
-            buf = p._conversation_buffers.setdefault(
-                session_key, ConversationBuffer(session_key=session_key)
+            buf = p._store.conversation_buffers.get_or_create(
+                session_key, lambda: ConversationBuffer(session_key=session_key)
             )
             # 群聊：在用户消息前注入影子缓冲区（旁观到的群聊上下文）
             _is_group = p._social_field.is_group_context_by_key(session_key)
@@ -1877,7 +1919,7 @@ class LLMRequestPipeline:
                     else:
                         buf.inject_context(shadow_entries)
             buf.append("user", text)
-            p._last_user_texts[session_key] = text[:120]
+            p._store.last_user_texts.set(session_key, text[:120])
             p._schedule_buffer_persist(session_key)
 
             # 并行同步到 AstrBot ConversationManager
@@ -1887,8 +1929,7 @@ class LLMRequestPipeline:
                     name="conv_mgr_sync_user",
                 )
 
-            # 每条消息都执行衰减 tick
-            memory_system.tick_decay()
+            # CP8-P3a：记忆衰减 tick 已收编进 MemoryAgent（SelfCore POST），此处不再直接调。
 
             # 30 天 L2→L3 压缩检查（将过期记忆提取为知识图谱三元组）
             to_compress = memory_system.compress_check()
@@ -1990,7 +2031,7 @@ class LLMRequestPipeline:
         p = self._p
 
         try:
-            buf = p._conversation_buffers.get(session_key)
+            buf = p._store.conversation_buffers.get(session_key)
             if not buf or not buf.messages:
                 return
             msgs = buf.drain()
@@ -2099,7 +2140,7 @@ class LLMRequestPipeline:
             while True:
                 await asyncio.sleep(10)
                 try:
-                    for session_key, buf in list(p._conversation_buffers.items()):
+                    for session_key, buf in p._store.conversation_buffers.snapshot_items():
                         reason = buf.should_flush()
                         if reason:
                             await self._flush_conversation_to_l1(session_key)
@@ -2125,7 +2166,7 @@ class LLMRequestPipeline:
             while True:
                 await asyncio.sleep(300)
                 try:
-                    for session_key, memory_system in list(p._memory_systems.items()):
+                    for session_key, memory_system in p._store.memory_systems.snapshot_items():
                         if not memory_system.needs_consolidation():
                             continue
                         await self._run_consolidation(session_key, memory_system)
@@ -2441,67 +2482,121 @@ class LLMRequestPipeline:
         设计思路：
           - 不直接发送生命事件文本，而是存储为 pending context
           - 下次 on_llm_request 时注入到 prompt 中，让主聊天模型用 Sylanne 的语气表达
-          - 若 5 分钟内无 LLM 请求，回退到直接发送（通过 context.send_message）
+          - 若 5 分钟内无 LLM 请求，优先交给大饼桥接；大饼不可用则重新存回等待
+          - 生活模拟的输出永远只是素材，不会绕过主模型直接发送给用户
 
         Args:
             reason: 生命事件描述。
             mood: 当前心情标签。
         """
         p = self._p
-        if not p._hosts:
+        if not len(p._store.hosts):
             logger.info("Sylanne life_sim_outreach: no active hosts, skipping")
             return
         best_key = self._most_recent_host_key()
 
         # Store pending outreach context for injection into next LLM request
-        p._pending_outreach_context[best_key] = {
+        p._store.pending_outreach_context.set(best_key, {
             "reason": reason,
             "mood": mood,
-        }
+        })
         logger.info(
             f"Sylanne life_sim_outreach: stored pending context for session={best_key}, mood={mood}"
         )
 
         # Fallback: if no LLM request picks this up within 5 minutes,
-        # send directly (scheduled as background task)
+        # 优先交给大饼插件主动发送（不污染全局，防双发）；大饼不可用才回退直发。
         async def _fallback_direct_send(session_key: str, r: str, m: str):
             await asyncio.sleep(300.0)
-            pending = p._pending_outreach_context
-            if session_key in pending and pending[session_key].get("reason") == r:
-                # Still not consumed -- send directly
+            pending = p._store.pending_outreach_context
+            if pending.has(session_key) and pending.get(session_key).get("reason") == r:
+                # Still not consumed -- dispatch
                 pending.pop(session_key, None)
-                context = p.context
-                if hasattr(context, "send_message"):
-                    # Use LLM to generate in-character message if possible
-                    generated = await self._generate_outreach_message(r, m)
-                    if generated:
-                        message = p._astrbot_message(generated)
-                    else:
-                        message = p._astrbot_message(f"[{m}] {r}")
-                    # 从映射表获取合法的 AstrBot session origin
-                    origins = getattr(p, "_session_origins", {})
-                    origin = origins.get(session_key, "")
-                    if not origin:
-                        # fallback: 尝试从 session_key 提取前3段
-                        parts = session_key.split(":")
-                        origin = ":".join(parts[:3]) if len(parts) >= 3 else ""
-                    if not origin:
-                        logger.warning(
-                            "Sylanne life_sim_outreach: no valid origin for session '%s',"
-                            " skipping direct send",
-                            session_key,
+
+                # 优先：大饼桥接（Sylanne 决定何时 + 提供素材，大饼负责发送）
+                bridge = getattr(p, "_proactive_bridge", None)
+                bridge_on = bool(
+                    (getattr(p, "config", None) or {}).get(
+                        "sylanne_alpha_proactive_bridge_enabled", False
+                    )
+                )
+                if bridge is not None and bridge_on and bridge.available():
+                    # 大饼时间公式闸门：免打扰时段/距上次太频则压住，连素材都不生成
+                    allowed, gate_reason = bridge.should_dispatch_now(session_key)
+                    if not allowed:
+                        logger.info(
+                            f"Sylanne bridge gated ({gate_reason}), skip this outreach: "
+                            f"session={session_key}"
                         )
                         return
-                    try:
-                        await context.send_message(origin, message)
-                    except Exception as e:
-                        logger.warning(
-                            f"Sylanne life_sim_outreach send: {e}", exc_info=True
+                    # 犹豫：发前迟疑 / 最后一刻收回 / 踌躇词试探（人类粗糙的迟疑感）
+                    hesit_on = bool(
+                        (getattr(p, "config", None) or {}).get(
+                            "sylanne_alpha_proactive_hesitation", False
                         )
-                else:
-                    logger.info(
-                        "Sylanne life_sim_outreach fallback: context.send_message not available"
                     )
+                    # 犹豫开启时需要 body → 先取一次 surface，reason_code 与 hesitation 复用，
+                    # 避免 infer_reason_code 内部再调一次 proactive_sylanne（双 tick/save + 帧错位）
+                    surface = None
+                    if hesit_on:
+                        try:
+                            surface = await p.proactive_sylanne(session_key=session_key)
+                        except Exception:
+                            surface = None
+                    reason_code = await bridge.infer_reason_code(
+                        session_key, surface=surface
+                    )
+                    filler = ""
+                    if hesit_on:
+                        body = surface.get("body", {}) if isinstance(surface, dict) else {}
+                        plan = bridge.hesitation_plan(body)
+                        if plan["pre_delay_seconds"] > 0:
+                            logger.info(
+                                f"Sylanne hesitates {plan['pre_delay_seconds']}s before outreach "
+                                f"(h={plan['hesitation']}): session={session_key}"
+                            )
+                            await asyncio.sleep(plan["pre_delay_seconds"])
+                        if plan["withdraw"]:
+                            # 最后一刻收回——沉默本身成为表达
+                            logger.info(
+                                f"Sylanne withdraws outreach at the last moment "
+                                f"(h={plan['hesitation']}): session={session_key}"
+                            )
+                            return
+                        filler = plan["filler"]
+                    motivation = bridge.build_motivation_text(
+                        r, m, reason_code=reason_code, session_key=session_key
+                    )
+                    if filler:
+                        # 踌躇词试探：把迟疑感写进给大饼的动机提示
+                        motivation = (
+                            motivation
+                            + f"\n（开口时带一点迟疑，先轻轻起个头，比如用「{filler}」这样的语气，别太利落。）"
+                        )
+                    result = await bridge.dispatch(session_key, motivation)
+                    if result.get("dispatched"):
+                        logger.info(
+                            f"Sylanne outreach via proactive_chat bridge: session={session_key}"
+                        )
+                        return
+                    logger.info(
+                        f"Sylanne bridge dispatch not sent ({result.get('reason')}), "
+                        "falling back to direct send"
+                    )
+
+                # 回退：大饼不可用/未启用/失败——素材存回 pending context，
+                # 等下次 LLM 请求（用户说话或 proactive scheduler 触发）时由主模型自然表达。
+                # 生活模拟的输出永远只是上下文，不绕过主模型直发。
+                p._store.pending_outreach_context.set(session_key, {
+                    "reason": r,
+                    "mood": m,
+                })
+                logger.info(
+                    "Sylanne life_sim_outreach: bridge unavailable, "
+                    "stored as pending context (will surface on next LLM request): "
+                    "session=%s",
+                    session_key,
+                )
 
         task = safe_ensure_future(
             _fallback_direct_send(best_key, reason, mood),
@@ -2562,10 +2657,10 @@ class LLMRequestPipeline:
             情感状态字典（warmth/tension/coherence 等），无活跃 host 返回空字典。
         """
         p = self._p
-        if not p._hosts:
+        if not len(p._store.hosts):
             return {}
         best_key = self._most_recent_host_key()
-        host = p._hosts[best_key]
+        host = p._store.hosts.get(best_key)
         try:
             return host.kernel.computation.engine.observe()
         except Exception:
@@ -2574,10 +2669,10 @@ class LLMRequestPipeline:
     def _life_sim_body_delta(self, delta: dict[str, float]) -> None:
         """将生命模拟器的情绪增量注入到最近活跃 host 的身体状态。"""
         p = self._p
-        if not p._hosts:
+        if not len(p._store.hosts):
             return
         best_key = self._most_recent_host_key()
-        host = p._hosts[best_key]
+        host = p._store.hosts.get(best_key)
         try:
             body = host.kernel.body
             if body and hasattr(body, "apply_vector_delta"):

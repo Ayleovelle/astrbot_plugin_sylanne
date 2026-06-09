@@ -17,7 +17,7 @@ import asyncio
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 try:
     from astrbot.api import logger  # type: ignore
@@ -35,6 +35,9 @@ from sylanne_alpha.infra import resolve_data_root
 
 from sylanne_alpha.host import SylanneAlphaHost
 from sylanne_alpha.memory_system import ConversationBuffer, MemorySystem
+
+if TYPE_CHECKING:
+    from sylanne_alpha.protocols import PluginHost
 
 
 # ---------------------------------------------------------------------------
@@ -326,7 +329,7 @@ class SessionContext:
     host 生命周期、记忆系统初始化）从主插件类中解耦出来。
     """
 
-    def __init__(self, plugin: Any) -> None:
+    def __init__(self, plugin: PluginHost) -> None:
         """初始化会话上下文。
 
         Args:
@@ -528,20 +531,20 @@ class SessionContext:
         Returns:
             该会话对应的 asyncio.Lock 实例。
         """
-        locks = self._p._session_locks
-        if session_key not in locks:
-            locks[session_key] = asyncio.Lock()
+        locks = self._p._store.session_locks
+        if not locks.has(session_key):
+            locks.set(session_key, asyncio.Lock())
             # 锁字典过大时清理未使用的旧锁，防止内存泄漏
             if len(locks) > 500:
                 to_remove = []
-                for k, lock in locks.items():
+                for k, lock in locks.snapshot_items():
                     if k != session_key and not lock.locked():
                         to_remove.append(k)
                     if len(locks) - len(to_remove) <= 400:
                         break
                 for k in to_remove:
-                    del locks[k]
-        return locks[session_key]
+                    locks.pop(k, None)
+        return locks.get(session_key)
 
     # ------------------------------------------------------------------
     # 文件系统安全的 session key
@@ -628,13 +631,10 @@ class SessionContext:
         """
         if not session_key:
             session_key = "default"
-        systems = getattr(self._p, "_memory_systems", None)
-        if systems is None:
-            self._p._memory_systems = {}
-            systems = self._p._memory_systems
-        if session_key not in systems:
-            systems[session_key] = MemorySystem()
-        return systems[session_key]
+        systems = self._p._store.memory_systems
+        if not systems.has(session_key):
+            systems.set(session_key, MemorySystem())
+        return systems.get(session_key)
 
     def memory_system_has_content(self, memory_system: Any) -> bool:
         """检查记忆系统是否包含有效内容（L1/L2/L3 任一非空）。
@@ -788,22 +788,25 @@ class SessionContext:
         """
         if not session_key:
             session_key = "default"
-        if not hasattr(self._p, "_hosts"):
-            self._p._hosts = {}
+        hosts = self._p._store.hosts
         # 用 .get() 单次取值：BoundedDict 的 __contains__ 不查 TTL 而
         # __getitem__/pop 查，二者不一致会导致 `not in`→`.pop()` 的 TOCTOU
         # KeyError（并发驱逐/TTL 过期时）。miss 即走创建分支重建，幂等安全。
-        existing_host = self._p._hosts.get(session_key)
+        existing_host = hosts.get(session_key)
         if existing_host is None:
             # LRU 驱逐：超容量时持久化并移除最旧的 host
-            if len(self._p._hosts) >= self._p._MAX_HOSTS:
-                oldest_key = next(iter(self._p._hosts))
-                old_host = self._p._hosts.pop(oldest_key)
+            if len(hosts) >= self._p._MAX_HOSTS:
+                oldest_key = next(iter(hosts.keys()))
+                old_host = hosts.pop(oldest_key)
                 from sylanne_alpha.utils import safe_ensure_future
                 safe_ensure_future(
                     self._p._state_persistence.persist_kernel(oldest_key, old_host),
                     name=f"lru_evict_{oldest_key}",
                 )
+                # CP8-P6：驱逐前先把进化档案落盘（否则未巩固的反射/反思偏置随驱逐丢失），
+                # 再清进化层 per-session 状态。尤其 _restored 守卫必须清——否则同 key
+                # 后续重建时不会再从 KV 恢复，已落盘学习成果静默丢失。
+                self._persist_and_forget_evolution(oldest_key)
             cfg = (
                 self._p.config
                 if hasattr(self._p, "_config")
@@ -811,12 +814,16 @@ class SessionContext:
             )
             root = resolve_data_root(cfg)
             host = SylanneAlphaHost(root=root, session_key=session_key)
-            # 编码器共享：避免每个 host 各持有一份 encoder 浪费内存
-            plugin_cls = type(self._p)
-            if plugin_cls._shared_encoder is None:
-                plugin_cls._shared_encoder = host.kernel.computation.encoder
-            else:
-                host.kernel.computation.replace_encoder(plugin_cls._shared_encoder)
+            # 编码器共享：避免每个 host 各持有一份 encoder 浪费内存。
+            # 仅旧 ComputationSpine 暴露 encoder/replace_encoder；SDK 共振场
+            # （ResonanceSpine）架构不同、无此属性，跳过共享（其编码自管）。
+            comp = getattr(host.kernel, "computation", None)
+            if comp is not None and hasattr(comp, "encoder") and hasattr(comp, "replace_encoder"):
+                plugin_cls = type(self._p)
+                if plugin_cls._shared_encoder is None:
+                    plugin_cls._shared_encoder = comp.encoder
+                else:
+                    comp.replace_encoder(plugin_cls._shared_encoder)
             # 从人格状态派生记忆系统参数（人格驱动全参数）
             personality = (
                 host.kernel._personality()
@@ -844,19 +851,49 @@ class SessionContext:
                         self._p._state_persistence.persist_kernel(session_key, host),
                         name=f"hydrate_persist_{session_key}",
                     )
-            self._p._hosts[session_key] = host
+            hosts.set(session_key, host)
             # 恢复对话缓冲区（文件回退；KV 保持同步）
-            if session_key not in self._p._conversation_buffers:
+            if not self._p._store.conversation_buffers.has(session_key):
                 buf_data = host.runtime.load_buffer(session_key)
                 if buf_data and isinstance(buf_data, dict):
-                    self._p._conversation_buffers[session_key] = (
-                        ConversationBuffer.from_dict(buf_data)
+                    self._p._store.conversation_buffers.set(
+                        session_key, ConversationBuffer.from_dict(buf_data)
                     )
         else:
-            # 已存在：重新写入以刷新 LRU 顺序（__setitem__ 会 move_to_end）
+            # 已存在：重新写入以刷新 LRU 顺序（set→__setitem__ 会 move_to_end）
             host = existing_host
-            self._p._hosts[session_key] = host
+            hosts.set(session_key, host)
         return host
+
+    def _persist_and_forget_evolution(self, session_key: str) -> None:
+        """LRU 驱逐时：先同步取进化档案快照并异步落盘 KV，再清进化层 per-session 状态。
+
+        关键时序：必须**同步**先取 evo_to_dict 快照，再调 forget 清容器，最后让落盘
+        协程写入快照——否则 forget 先清空，落盘协程跑时只会写到空档案，未巩固的
+        反射/反思偏置静默丢失。
+        """
+        p = self._p
+        sched = getattr(p, "_autonomy_scheduler", None)
+        consol = getattr(sched, "_consolidation", None)
+        sc = getattr(p, "_self_core", None)
+        snapshot = None
+        if sc is not None and hasattr(sc, "evo_to_dict"):
+            try:
+                snapshot = sc.evo_to_dict(session_key)
+            except Exception:
+                snapshot = None
+        if snapshot and consol is not None and hasattr(consol, "_write_evolution"):
+            from sylanne_alpha.utils import safe_ensure_future
+            safe_ensure_future(
+                consol._write_evolution(session_key, snapshot),
+                name=f"evo_persist_evict_{session_key}",
+            )
+        forget = getattr(p, "_forget_evolution_session", None)
+        if callable(forget):
+            try:
+                forget(session_key)
+            except Exception:
+                pass
 
     # ------------------------------------------------------------------
     # 离线消息缓冲（Item 107）

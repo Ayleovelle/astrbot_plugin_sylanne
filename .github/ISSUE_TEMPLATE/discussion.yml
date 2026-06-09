@@ -1,0 +1,37 @@
+name: '💬 开放讨论'
+description: 不是 bug 也不是明确的功能请求——想聊聊用法、现象、理论或随便什么。
+title: '[Discussion] '
+labels: ['type/discussion']
+body:
+  - type: markdown
+    attributes:
+      value: |
+        这是个偏研究、偏「用代码写情书」的项目，欢迎任何形式的交流：
+        你观察到的有趣行为、对伤痕/空洞/进化的疑问、用法心得、甚至只是想吐槽都行。
+
+  - type: textarea
+    attributes:
+      label: 想聊点什么
+      description: 把你的想法 / 观察 / 问题写下来。
+      placeholder: >
+        如：我发现冷落她几天再回来，她的语气明显变了，这是反应式学习还是单纯的状态漂移？
+    validations:
+      required: true
+
+  - type: dropdown
+    attributes:
+      label: 话题类型
+      options:
+        - '使用体验 / 现象观察'
+        - '理论疑问（伤痕代数 / 空洞微积分 / 关系层论）'
+        - '自我进化行为讨论'
+        - '配置 / 调参心得'
+        - '与其他插件的搭配'
+        - '随便聊聊 / 其他'
+    validations:
+      required: true
+
+  - type: textarea
+    attributes:
+      label: 背景信息（可选）
+      description: 如果和你的版本、配置、平台有关，可以补充。

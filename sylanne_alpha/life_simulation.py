@@ -17,7 +17,6 @@
 
 from __future__ import annotations
 
-import asyncio
 import json
 import time
 from dataclasses import dataclass, field
@@ -169,8 +168,6 @@ class LifeSimulator:
     def __init__(self, config: dict[str, Any] | None = None):
         self._config = config or {}
         self.state = LifeSimulationState()
-        self._running = False
-        self._task: asyncio.Task | None = None
         self._llm_caller: Callable[..., Awaitable[str]] | None = None  # LLM 调用回调
         self._outreach_callback: Callable[[str, str], Awaitable[None]] | None = (
             None  # 主动联系回调
@@ -180,6 +177,9 @@ class LifeSimulator:
         )
         self._persona_getter: Callable[[], str] | None = None  # 角色描述获取
         self._memory_summary_getter: Callable[[], str] | None = None  # 记忆摘要获取
+        self._countdown_callback: Callable[[], Awaitable[None]] | None = (
+            None  # 拨动外部主动发言倒计时（如大饼）
+        )
 
     @property
     def enabled(self) -> bool:
@@ -215,6 +215,7 @@ class LifeSimulator:
         persona_getter: Callable[[], str] | None = None,
         memory_summary_getter: Callable[[], str] | None = None,
         body_delta_callback: Callable[[dict[str, float]], None] | None = None,
+        countdown_callback: Callable[[], Awaitable[None]] | None = None,
     ):
         """注入外部依赖。所有回调都是可选的。"""
         self._llm_caller = llm_caller
@@ -223,47 +224,16 @@ class LifeSimulator:
         self._persona_getter = persona_getter
         self._memory_summary_getter = memory_summary_getter
         self._body_delta_callback = body_delta_callback
+        self._countdown_callback = countdown_callback
 
-    def start(self):
-        """启动后台模拟循环。"""
-        if not self.enabled or self._running:
-            return
-        self._running = True
-        try:
-            loop = asyncio.get_running_loop()
-            self._task = loop.create_task(self._loop())
-        except RuntimeError:
-            pass
+    async def simulate_tick(self) -> None:
+        """执行一次模拟周期（CP8-P3b：公开入口，由 LifeAgent 自驱调用）。
 
-    def stop(self):
-        """停止模拟循环。"""
-        self._running = False
-        if self._task and not self._task.done():
-            self._task.cancel()
-            self._task = None
-
-    async def _loop(self):
-        """后台循环：以随机间隔模拟生活事件。"""
-        import random
-
-        while self._running and self.enabled:
-            try:
-                base = self.interval_seconds
-                jitter = random.uniform(0.4, 1.8)
-                wait = base * jitter
-                await asyncio.sleep(wait)
-                if not self._running:
-                    break
-                await self._simulate_tick()
-            except asyncio.CancelledError:
-                break
-            except Exception as _exc:
-                import logging
-
-                logging.getLogger(__name__).debug(
-                    "life_simulation tick error: %s", _exc
-                )
-                await asyncio.sleep(60.0)
+        原 _loop 后台循环已删除——演化驱动统一收归 AutonomyScheduler，本方法
+        只负责「演化内容」（生成事件 / 算情绪权重 / 注入 body / 触发 outreach），
+        由 LifeAgent.act（autonomous 时点）调用，实现单一心跳的 agent 同构架构。
+        """
+        await self._simulate_tick()
 
     async def _simulate_tick(self):
         """执行一次模拟周期。"""
@@ -302,6 +272,14 @@ class LifeSimulator:
 
             if event.wants_to_share and self._should_outreach(now):
                 await self._do_outreach(event, now)
+
+        # 状态变就拨：每个 tick（身体状态已演化）后，拨动外部主动发言倒计时。
+        # 即使没 outreach，Sylanne 的内在节律变化也应影响下一次主动发言时机。
+        if self._countdown_callback is not None:
+            try:
+                await self._countdown_callback()
+            except Exception:
+                pass
 
     def _build_prompt(self, now: float) -> str:
         """构建 LLM 提示词，包含角色设定、时间、情绪、记忆等上下文。"""

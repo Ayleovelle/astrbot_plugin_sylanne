@@ -23,10 +23,13 @@ import re
 import time
 from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from sylanne_alpha.compat import realtime_plan, strip_draft_blocks
 from sylanne_alpha.utils import ensure_background_tasks_list, safe_ensure_future
+
+if TYPE_CHECKING:
+    from sylanne_alpha.protocols import PluginHost
 
 try:
     from astrbot.api import logger  # type: ignore
@@ -54,7 +57,7 @@ class LLMResponsePipeline:
       - 调用 observe_response 反馈给计算栈
     """
 
-    def __init__(self, plugin: Any) -> None:
+    def __init__(self, plugin: PluginHost) -> None:
         self._p = plugin
 
     # ------------------------------------------------------------------
@@ -92,13 +95,8 @@ class LLMResponsePipeline:
             event: AstrBot 事件对象。
             response: LLM 响应对象，包含 completion_text。
         """
-        if not hasattr(self._p, "_stream_first_sent"):
-            self._p._stream_first_sent = {}
-        if not hasattr(self._p, "_unfinished_replies"):
-            self._p._unfinished_replies = {}
+        # 流式/分段缓冲已迁入 _store（CP8-P2）
         ensure_background_tasks_list(self._p)
-        if not hasattr(self._p, "_segmented_tasks"):
-            self._p._segmented_tasks = {}
         session_key = self._p._session_key(event)
         cfg = self._p._config or {}
         realtime_enabled = bool(
@@ -148,7 +146,7 @@ class LLMResponsePipeline:
             return
 
         # 检查首句是否已通过流式发送
-        first_sent = self._p._stream_first_sent.pop(session_key, "")
+        first_sent = self._p._store.stream_first_sent.pop(session_key, "")
         if first_sent:
             # 首句已发送——不重复发送，存储剩余部分供下轮续接
             remainder = cleaned
@@ -163,7 +161,7 @@ class LLMResponsePipeline:
                 else:
                     remainder = ""
             if remainder:
-                self._p._unfinished_replies[session_key] = remainder
+                self._p._store.unfinished_replies.set(session_key, remainder)
             # Don't modify completion_text, don't stop event
             return
 
@@ -175,7 +173,7 @@ class LLMResponsePipeline:
         host = self._p._host(session_key)
         expr_drive = host.kernel.computation.engine.expression_drive()
         # 计算最近被忽略的回复比例，用于调整节奏
-        last_times = [t for t in self._p._last_bot_expression_time.values() if t > 0]
+        last_times = [t for t in self._p._store.last_bot_expression_time.values() if t > 0]
         recent_ignored = 0.0
         if len(last_times) > 3:
             now = time.time()
@@ -211,7 +209,7 @@ class LLMResponsePipeline:
             rest = cleaned
             if rest.startswith(sent_first):
                 rest = rest[len(sent_first) :].strip()
-            self._p._unfinished_replies[session_key] = rest
+            self._p._store.unfinished_replies.set(session_key, rest)
 
         # 后台调度分段发送
         self._p.logger.info(
@@ -229,7 +227,7 @@ class LLMResponsePipeline:
                 else None
             )
         )
-        self._p._segmented_tasks[session_key] = task
+        self._p._store.segmented_tasks.set(session_key, task)
 
         # 将观测任务从热路径移出，后台异步执行
         obs_task = safe_ensure_future(
@@ -251,11 +249,11 @@ class LLMResponsePipeline:
             from sylanne_alpha.memory_system import ConversationBuffer
 
             # Append bot reply to conversation buffer (v2)
-            buf = self._p._conversation_buffers.setdefault(
-                session_key, ConversationBuffer(session_key=session_key)
+            buf = self._p._store.conversation_buffers.get_or_create(
+                session_key, lambda: ConversationBuffer(session_key=session_key)
             )
             buf.append("bot", text)
-            self._p._last_bot_texts[session_key] = text[:120]
+            self._p._store.last_bot_texts.set(session_key, text[:120])
             self._p._schedule_buffer_persist(session_key)
             # Parallel sync to AstrBot ConversationManager
             if self._p._has_conversation_manager():
@@ -263,18 +261,25 @@ class LLMResponsePipeline:
                     self._p._sync_message_to_conv_mgr(session_key, "bot", text),
                     name="conv_mgr_sync_bot",
                 )
-            # Notify social field collector that bot replied
+            # CP8-P3a：social notify_bot_replied 已收编进 SocialAgent（SelfCore
+            # RESPONSE_POST），此处不再直接调，避免双通知。social_void.reset 属计算栈
+            # 层状态清理（非 SocialFieldCollector 业务），保留在管线。
             if hasattr(
                 self._p, "_social_field"
             ) and self._p._social_field.is_group_context_by_key(session_key):
-                group_id = self._p._social_field.extract_group_id_from_key(session_key)
-                self._p._social_field.notify_bot_replied(group_id, text)
-                # Reset social void on reply
                 try:
                     host = self._p._host(session_key)
                     host.kernel.computation.engine.social_void.reset()
                 except Exception:
                     pass  # cleanup: failure acceptable
+            # SelfCore RESPONSE_POST 编排：social/dialogue 消化 bot 回复结果。
+            sc = getattr(self._p, "_self_core", None)
+            if sc is not None:
+                try:
+                    resp_surface = self._p._host(session_key).kernel.surface()
+                    await sc.run_cycle(session_key, resp_surface, phase="response_post")
+                except Exception as exc:
+                    logger.warning(f"Sylanne SelfCore RESPONSE_POST: {exc}", exc_info=True)
             await self._p.observe_response(
                 session_key,
                 text=text[:500],
@@ -309,14 +314,14 @@ class LLMResponsePipeline:
         if not delta:
             return
 
-        buffer = self._p._stream_buffers.get(session_key, "") + delta
-        self._p._stream_buffers[session_key] = buffer
+        buffer = self._p._store.stream_buffers.get(session_key, "") + delta
+        self._p._store.stream_buffers.set(session_key, buffer)
 
         # Check if we have a complete first sentence
         first_sentence = self._extract_first_sentence(buffer)
-        if first_sentence and session_key not in self._p._stream_first_sent:
-            self._p._stream_first_sent[session_key] = first_sentence
-            self._p._stream_buffers.pop(session_key, None)
+        if first_sentence and not self._p._store.stream_first_sent.has(session_key):
+            self._p._store.stream_first_sent.set(session_key, first_sentence)
+            self._p._store.stream_buffers.pop(session_key, None)
             origin = str(getattr(event, "unified_msg_origin", "") or "")
             task = safe_ensure_future(
                 self._send_first_sentence(origin, first_sentence),
@@ -389,12 +394,12 @@ class LLMResponsePipeline:
                     str(p.get("text", "")) for p in parts[idx:]
                 )
                 if remaining_text:
-                    self._p._unfinished_replies[session_key] = remaining_text
+                    self._p._store.unfinished_replies.set(session_key, remaining_text)
                 else:
-                    self._p._unfinished_replies.pop(session_key, None)
+                    self._p._store.unfinished_replies.pop(session_key, None)
         # 所有段发送成功——清除未完成标记
         if session_key:
-            self._p._unfinished_replies.pop(session_key, None)
+            self._p._store.unfinished_replies.pop(session_key, None)
 
     # ------------------------------------------------------------------
     # Memory prompt fragment
@@ -1020,7 +1025,7 @@ class LLMResponsePipeline:
         import time as _time
 
         # 获取对话缓冲区
-        buf = p._conversation_buffers.get(session_key)
+        buf = p._store.conversation_buffers.get(session_key)
         if not buf or not buf.messages:
             return None
 
