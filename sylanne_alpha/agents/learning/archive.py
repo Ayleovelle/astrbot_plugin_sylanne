@@ -20,18 +20,30 @@ from typing import Any
 
 @dataclass(slots=True)
 class _ParamState:
-    """单个可学习门控偏置的状态：当前偏置 + EMA 信号 + 钳位。"""
+    """单个可学习门控偏置的状态：当前偏置 + EMA 信号 + 钳位。
 
-    delta: float = 0.0          # 当前学到的偏置（叠加在 base 人格函数上）
+    两路偏置物理隔离、各自独立钳位（护栏 FM1 防双环共振）：
+    - delta：层次1 反应式学习的高频微调（每轮 EMA，自动回归基线）。
+    - reflection_bias：层次2 睡眠反思沉淀的低频偏置（DROWSY 首拍 LLM 元认知产出）。
+    gate 读取的总偏置 = delta + reflection_bias，二者来源/时间尺度不同，分开存。
+    """
+
+    delta: float = 0.0          # 层次1 反应式学到的偏置（高频）
     reward_ema: float = 0.0     # 效果信号的指数滑动平均（聚合，不存逐条）
     delta_cap: float = 0.15     # 硬钳位：|delta| ≤ cap（防漂出）
     updates: int = 0            # 累计更新次数（审计用）
+    reflection_bias: float = 0.0  # 层次2 反思沉淀的偏置（低频，睡眠期产出）
+    reflection_cap: float = 0.10  # 反思偏置硬钳位（比反射更保守）
 
     def clamp(self) -> None:
         if self.delta > self.delta_cap:
             self.delta = self.delta_cap
         elif self.delta < -self.delta_cap:
             self.delta = -self.delta_cap
+        if self.reflection_bias > self.reflection_cap:
+            self.reflection_bias = self.reflection_cap
+        elif self.reflection_bias < -self.reflection_cap:
+            self.reflection_bias = -self.reflection_cap
 
 
 class AgentEvolutionArchive:
@@ -59,9 +71,9 @@ class AgentEvolutionArchive:
         return ps
 
     def get_delta(self, key: str) -> float:
-        """读某门控参数当前学到的偏置（gate 里叠加用）。无则 0。"""
+        """读某门控参数当前学到的总偏置（gate 里叠加用）= 反射 + 反思。无则 0。"""
         ps = self._params.get(key)
-        return ps.delta if ps is not None else 0.0
+        return (ps.delta + ps.reflection_bias) if ps is not None else 0.0
 
     def update(
         self,
@@ -100,15 +112,43 @@ class AgentEvolutionArchive:
         """记录综合效果（用于回滚判据/背离监控）。"""
         self._outcome_ema = 0.9 * self._outcome_ema + 0.1 * quality
 
+    def apply_reflection(
+        self, key: str, target_bias: float, *, lerp: float = 0.5, delta_cap: float = 0.15
+    ) -> None:
+        """层次2 反思沉淀（低频）：把某门控参数的 reflection_bias 朝 LLM 给的目标
+        偏置插值收拢一步，再钳位 + 审计。
+
+        - 用插值（lerp，默认 0.5）而非直接赋值：单次反思不能一步到位，
+          多次反思才逼近目标（防一次坏推理把偏置打满，护栏 FM1）。
+        - reflection_bias 与 delta 物理隔离、独立钳位（reflection_cap 更保守）。
+        """
+        ps = self.ensure_param(key, delta_cap=delta_cap)
+        old = ps.reflection_bias
+        ps.reflection_bias += (target_bias - ps.reflection_bias) * max(0.0, min(1.0, lerp))
+        ps.clamp()
+        if abs(ps.reflection_bias - old) > 1e-9:
+            self._audit.append({
+                "t": time.time(), "key": key, "old": round(old, 6),
+                "new": round(ps.reflection_bias, 6), "src": "reflection",
+            })
+
     @property
     def outcome_ema(self) -> float:
         return self._outcome_ema
+
+    def param_snapshot(self) -> dict[str, dict[str, float]]:
+        """只读快照：各门控参数当前两路偏置（供反思 prompt 描述现状）。"""
+        return {
+            k: {"delta": round(ps.delta, 4), "reflection_bias": round(ps.reflection_bias, 4)}
+            for k, ps in self._params.items()
+        }
 
     def reset_to_factory(self) -> None:
         """一键出厂复位：清空所有学到的偏置（护栏：可回滚）。"""
         for ps in self._params.values():
             ps.delta = 0.0
             ps.reward_ema = 0.0
+            ps.reflection_bias = 0.0
         self._audit.append({"t": time.time(), "key": "*", "action": "factory_reset"})
 
     # ---- 持久化 ----
@@ -118,7 +158,9 @@ class AgentEvolutionArchive:
             "outcome_ema": round(self._outcome_ema, 6),
             "params": {
                 k: {"delta": round(ps.delta, 6), "reward_ema": round(ps.reward_ema, 6),
-                    "delta_cap": ps.delta_cap, "updates": ps.updates}
+                    "delta_cap": ps.delta_cap, "updates": ps.updates,
+                    "reflection_bias": round(ps.reflection_bias, 6),
+                    "reflection_cap": ps.reflection_cap}
                 for k, ps in self._params.items()
             },
         }
@@ -133,6 +175,8 @@ class AgentEvolutionArchive:
                 reward_ema=float(pd.get("reward_ema", 0.0)),
                 delta_cap=float(pd.get("delta_cap", 0.15)),
                 updates=int(pd.get("updates", 0)),
+                reflection_bias=float(pd.get("reflection_bias", 0.0)),
+                reflection_cap=float(pd.get("reflection_cap", 0.10)),
             )
             ps.clamp()
             arc._params[k] = ps

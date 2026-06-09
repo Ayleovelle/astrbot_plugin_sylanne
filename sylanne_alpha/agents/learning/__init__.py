@@ -2,6 +2,7 @@
 
 from sylanne_alpha.agents.learning.archive import AgentEvolutionArchive
 from sylanne_alpha.agents.learning.consolidation import ConsolidationEngine
+from sylanne_alpha.agents.learning.reflection import ReflectionEngine
 from sylanne_alpha.agents.learning.reflex import EvolutionStore, ReflexLearner
 
 __all__ = [
@@ -9,4 +10,5 @@ __all__ = [
     "EvolutionStore",
     "ReflexLearner",
     "ConsolidationEngine",
+    "ReflectionEngine",
 ]

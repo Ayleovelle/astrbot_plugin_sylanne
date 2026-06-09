@@ -39,8 +39,12 @@ class AutonomyScheduler:
         self._task: asyncio.Task | None = None
         self._tick_count = 0
         # 深睡巩固引擎（CP8-P4-D 层次3，零 LLM）：RETIRED 前沉淀经验
-        from sylanne_alpha.agents.learning import ConsolidationEngine
+        from sylanne_alpha.agents.learning import ConsolidationEngine, ReflectionEngine
         self._consolidation = ConsolidationEngine(plugin)
+        # 反思引擎（CP8-P4-E 层次2，低频 LLM）：AWAKE→DROWSY 首拍触发一次元认知
+        self._reflection = ReflectionEngine(plugin, self_core)
+        # 上一拍各会话相位（检测 AWAKE→DROWSY 跳变 = 反思首拍闸）
+        self._prev_phase: dict[str, str] = {}
 
     @property
     def _base_interval(self) -> float:
@@ -100,6 +104,8 @@ class AutonomyScheduler:
             sessions = []
         for sk, host in sessions:
             phase = self._sc.autonomy_phase(sk, now)
+            prev = self._prev_phase.get(sk)
+            self._prev_phase[sk] = phase
             if phase == self._sc.RETIRED:
                 # 深睡：退休前跑一次巩固（记忆固化 + 进化档案落盘），再归零。
                 # session_lock 串行化，与 reactive 互斥；巩固内部零 LLM 纯计算。
@@ -108,8 +114,13 @@ class AutonomyScheduler:
                     async with lock:
                         await self._consolidation.consolidate(sk, now)
                 continue  # 巩固后移出自驱，资源归零
-            if phase == self._sc.DROWSY and (self._tick_count % self._drowsy_divisor) != 0:
-                continue  # 降频
+            if phase == self._sc.DROWSY:
+                # CP8-P4-E 首拍闸：仅 AWAKE→DROWSY 跳变的那一拍触发一次反思
+                # （低频 LLM 元认知）。maybe_reflect 内部还有预算池 + 间隔兜底。
+                if prev == self._sc.AWAKE:
+                    await self._reflection.maybe_reflect(sk, now)
+                if (self._tick_count % self._drowsy_divisor) != 0:
+                    continue  # 降频
             await self._tick_session(sk, host, now)
 
     async def _global_autonomy(self, now: float) -> None:

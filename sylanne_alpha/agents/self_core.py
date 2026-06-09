@@ -95,6 +95,9 @@ class SelfCore:
                 store, agent_name, key,
                 behavior=behavior, self_quality=self_quality,
             )
+        # 顺手记一条聚合决策样本（供层次2 睡眠反思读，FM6：只存聚合不存逐条）
+        import time as _time
+        store.record_decision(self_quality=self_quality, behavior=behavior, now=_time.time())
 
     def evo_to_dict(self, session_key: str) -> dict[str, Any]:
         store = self._evo_stores.get(session_key)
