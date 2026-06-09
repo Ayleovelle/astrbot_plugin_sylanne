@@ -63,10 +63,17 @@ class ProactiveBridge:
         """把 Sylanne 的 session_key 转成大饼可用的 unified_msg_origin。
 
         Sylanne 的 session_key 基础形态即标准 UMO，但可能带 ::agent:/::speaker:
-        后缀（内部多发言人追踪用）。优先用 _session_origins 映射，回退剥后缀。
+        后缀（内部多发言人追踪用）。优先用 _store.session_origins 映射
+        （收消息时由 request pipeline 写入 session_key→UMO），回退剥后缀。
         """
-        origins = getattr(self._p, "_session_origins", {}) or {}
-        umo = origins.get(session_key, "")
+        umo = ""
+        store = getattr(self._p, "_store", None)
+        origins = getattr(store, "session_origins", None)
+        if origins is not None:
+            try:
+                umo = origins.get(session_key, "") or ""
+            except Exception:
+                umo = ""
         if umo:
             return str(umo)
         # 回退：剥掉 Sylanne 内部后缀

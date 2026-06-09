@@ -108,6 +108,13 @@ class FakeSimulator:
         return "（Sylanne 最近的生活：在看一本旧书）"
 
 
+class _FakeStore:
+    """最小 _store 替身：仅提供 session_origins 映射（session_key→UMO）。"""
+
+    def __init__(self, origins=None):
+        self.session_origins = dict(origins or {})
+
+
 class FakeSylanne:
     """模拟 Sylanne 插件实例，注入桥接所需的最小依赖。"""
 
@@ -116,7 +123,8 @@ class FakeSylanne:
         body=None, guard_allowed=True,
     ) -> None:
         self.context = context
-        self._session_origins = origins or {}
+        # 真实路径：映射存在 _store.session_origins（收消息时 pipeline 写入）
+        self._store = _FakeStore(origins)
         self.config = {"sylanne_persona_name": "知花"}
         self._proactive_scheduler = FakeScheduler(ritual)
         self._life_simulator = FakeSimulator()
@@ -187,6 +195,23 @@ class TestDispatch(unittest.TestCase):
         self.assertEqual(plugin.received, "x")
         sids = {c[1] for c in plugin.session_override_manager.calls if len(c) > 1}
         self.assertEqual(sids, {"plat:Group:42"})
+
+    def test_resolve_origin_uses_store_mapping(self):
+        """有 _store.session_origins 映射时优先用映射的 UMO（不止是剥后缀）。
+
+        回归：映射曾被错读成 p._session_origins（不存在）而恒走剥后缀回退。
+        此处映射的 UMO 与"剥后缀"结果不同，确保走的是映射而非回退。
+        """
+        plugin = FakeProactivePlugin()
+        syl = FakeSylanne(
+            FakeContext(plugin),
+            origins={"sk_internal::agent:u1": "aiocqhttp:GroupMessage:777"},
+        )
+        bridge = ProactiveBridge(syl)
+        asyncio.run(bridge.dispatch("sk_internal::agent:u1", "x"))
+        sids = {c[1] for c in plugin.session_override_manager.calls if len(c) > 1}
+        # 映射命中 → 用真实 UMO；若错走回退则会是 "sk_internal"
+        self.assertEqual(sids, {"aiocqhttp:GroupMessage:777"})
 
 
 class TestGracefulDegrade(unittest.TestCase):

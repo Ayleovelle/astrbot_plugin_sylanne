@@ -2580,8 +2580,8 @@ class LLMRequestPipeline:
                     else:
                         message = p._astrbot_message(f"[{m}] {r}")
                     # 从映射表获取合法的 AstrBot session origin
-                    origins = getattr(p, "_session_origins", {})
-                    origin = origins.get(session_key, "")
+                    origins = getattr(p._store, "session_origins", None)
+                    origin = origins.get(session_key, "") if origins is not None else ""
                     if not origin:
                         # fallback: 尝试从 session_key 提取前3段
                         parts = session_key.split(":")
