@@ -276,40 +276,72 @@ flowchart TD
 
 ```mermaid
 flowchart TD
-    A["用户发消息：你怎么不理我了"] --> FU{"AstrBot follow-up?"}
-    FU -->|"是（agent run 进行中）"| C["on_llm_request（跳过防抖）"]
-    FU -->|"否"| B["碎片防抖（1.5s）"]
-    B -->|"1.5s 内又来一条"| B
-    B -->|"超时或 max 4s"| C
+    A["用户发消息"] --> FU{"AstrBot follow-up?"}
+    FU -->|"是"| C["on_llm_request（跳过防抖）"]
+    FU -->|"否"| B["碎片防抖（1.5s / max 4s）"]
+    B --> C
     C --> C1["取消正在发送的旧分段回复（打断）"]
-    C1 --> PRE["SelfCore PRE 编排<br/>emotion/assessor/persona/life/memory<br/>perceive→gate→act → 融合成事件输入"]
-    PRE --> C2["kernel.tick() → 共振场迭代收敛"]
-    C2 --> POST["SelfCore POST 编排<br/>rhythm 节奏学习 / memory 衰减 / proactive 主动判断"]
-    POST --> RL["反应式学习：本轮 reward 微调门控偏置（零 LLM）"]
+
+    C1 --> PRE
+
+    subgraph PRE["① SelfCore PRE 编排"]
+        direction LR
+        AG1["emotion"] --> GATE1{"gate"}
+        AG2["assessor"] --> GATE2{"gate"}
+        AG3["persona"] --> GATE3{"gate"}
+        AG4["life"] --> GATE4{"gate"}
+        AG5["memory"] --> GATE5{"gate"}
+        GATE1 & GATE2 & GATE3 & GATE4 & GATE5 --> FUSE["融合意图→单事件"]
+    end
+
+    PRE -->|"事件输入"| CORE
+
+    subgraph CORE["② 共振场计算（Leader）"]
+        direction TB
+        TICK["kernel.tick()"] --> RF["Resonance Field Δ⁶<br/>7 模块迭代收敛"]
+        RF --> SURF["Surface 输出<br/>decision · state · guard"]
+    end
+
+    CORE --> POST
+
+    subgraph POST["③ SelfCore POST 编排"]
+        direction LR
+        R1["rhythm 节奏学习"]
+        R2["memory 衰减"]
+        R3["proactive 主动判断"]
+    end
+
+    POST --> RL["④ 反应式学习<br/>reward → 微调门控偏置（零 LLM）"]
     RL --> C4["注入上下文 + 记忆碎片到 prompt"]
-    C4 --> D["请求发给 LLM"]
-    D --> E{"首句抢发开启？"}
-    E -->|"是 + 流式"| E1["检测到第一句就提前发"]
-    E -->|"否"| F["等待完整回复"]
-    E1 --> F
+    C4 --> D["⑤ 请求发给 LLM"]
+    D --> F["等待回复"]
     F --> G["on_llm_response"]
     G --> G1["过滤 thinking/draft_notes"]
-    G1 --> RP["SelfCore RESPONSE_POST 编排<br/>social 社交通知 / dialogue 质量自评→反应式学习"]
-    RP --> G3["realtime_plan 拆成多段（节奏学习）"]
+
+    G1 --> RP
+
+    subgraph RP["⑥ SelfCore RESPONSE_POST 编排"]
+        direction LR
+        S1["social 社交通知"]
+        S2["dialogue 质量自评→反应式学习"]
+    end
+
+    RP --> G3["realtime_plan 拆成多段"]
     G3 --> G4["后台按打字节奏逐段发送"]
 ```
 
-> 共振场是「身体」，SelfCore 四时点编排的 9 个 agent 是「心智」。PRE 影响本轮怎么算，POST/RESPONSE_POST 消化结果并喂回反应式学习——一条消息走完，她对你的门控偏置就微调了一点点。
+> **编排逻辑：** 共振场（计算栈）是 Leader——它拥有状态、做出决策（Surface）。9 个 agent 是它的感官（PRE：感知环境→产意图→融合成事件喂给 Leader）和执行器（POST/RESPONSE_POST：消化 Leader 输出→学习→驱动行为）。Agent 不直接决策，Leader 不直接感知——分工通过 SelfCore 四时点编排粘合。
 
 
 ### 计算层（每条消息内部）
 
 ```mermaid
 flowchart TD
-    IN["文本输入"] --> HDC["⓪ HDC 感知<br/>文本 → 2048-bit 向量"]
+    IN["融合事件<br/>（来自 agent PRE）"] --> HDC["⓪ HDC 感知<br/>文本 → 2048-bit 向量"]
     HDC --> RF["共振场 Δ⁶ 迭代<br/>7 模块全连接耦合<br/>收敛 ‖Δ‖ < ε"]
     RF --> SURF["Surface 输出<br/>decision · state · guard"]
     RF -.->|"Hopfield 吸引子<br/>+ Echo State 时序记忆"| RF
+    SURF -->|"反馈给 agent POST"| OUT["rhythm / memory / proactive"]
 ```
 
 ### 反馈闭环
