@@ -23,7 +23,7 @@ jobs:
       - name: Extract version from metadata.yaml
         id: version
         run: |
-          VERSION=$(grep -E '^version:' metadata.yaml | sed 's/version: *//' | sed 's/ *#.*//' | tr -d ' "')
+          VERSION=$(grep -E '^version:' metadata.yaml | sed 's/version: *//' | sed 's/ *#.*//' | tr -d ' "\r')
           echo "version=$VERSION" >> "$GITHUB_OUTPUT"
           echo "Extracted version: $VERSION"
 
