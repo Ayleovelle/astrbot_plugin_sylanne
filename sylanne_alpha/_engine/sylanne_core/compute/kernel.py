@@ -124,6 +124,7 @@ class AlphaKernel:
     hot_pool: HotPool = field(default_factory=HotPool)
     _last_computation_result: dict[str, Any] = field(default_factory=dict)
     _cached_vector_summary: dict[str, float] | None = field(default=None, repr=False)
+    _last_injected_state: dict[str, float] | None = field(default=None, repr=False)
 
     @classmethod
     def boot(
