@@ -29,7 +29,6 @@ from .hgt import HeterogeneousGraphTransformer
 from .pad_interop import PADProjector, PADVector
 from .personality import (
     _REVERSE_LEGACY_MAP,
-    DRIFT_SIGNALS,
     EMBODIMENT_TRAITS,
     DriftAttribution,
     DriftSignalExtractor,
@@ -579,6 +578,7 @@ class ComputationSpine:
         assessment: dict[str, Any] | None = None,
         *,
         session_key: str = "",
+        dialogue_quality: float | None = None,
     ) -> dict[str, Any]:
         """主入口：处理一条消息通过完整的 7 层计算栈。
 
@@ -597,6 +597,9 @@ class ComputationSpine:
             timestamp: 事件时间戳（epoch 秒）
             assessment: 可选的 LLM 评估结果，用于精确语义调制
             session_key: 可选的关系标识符，用于每关系人格覆盖
+            dialogue_quality: 可选的上一轮回复质量自评（归一化 [0,1]）。滞后反馈——对第 N 轮
+                回复的评分，在第 N+1 轮调 process() 时传入；高分强化表达欲+拉近关系，低分收敛
+                表达欲（经 canonical 自动漂移通道）。
         """
         # 结果缓存层（Item 20）：相同文本+相同评估短时间内直接返回缓存
         # assessment 不同意味着 LLM 给出了新评估，必须重新计算
@@ -605,7 +608,7 @@ class ComputationSpine:
             if assessment
             else ""
         )
-        cache_key = (text, session_key or "", assess_sig)
+        cache_key = (text, session_key or "", assess_sig, dialogue_quality)
         cached = self._result_cache.get(cache_key)
         if cached is not None:
             return copy.deepcopy(cached)
@@ -875,6 +878,8 @@ class ComputationSpine:
                 "L6_Boundary": self.boundary.to_dict(),
                 "L7_Expression": result["expression_state"],
             }
+            if dialogue_quality is not None:
+                result["dialogue_quality"] = dialogue_quality
             self._drift_embodiment(result)
             self._result_cache[cache_key] = result
             return result
@@ -971,6 +976,8 @@ class ComputationSpine:
             "L6_Boundary": self.boundary.to_dict(),
             "L7_Expression": self.expression.state(),
         }
+        if dialogue_quality is not None:
+            result["dialogue_quality"] = dialogue_quality
         self._drift_embodiment(result)
         self._result_cache[cache_key] = result
         return result
@@ -1082,26 +1089,6 @@ class ComputationSpine:
             self._update_relationship_delta(session_key, outcome)
 
         return self.engine.feedback(outcome, dt)
-
-    def feedback_quality(self, signal_key: str) -> None:
-        """注入对话质量自评信号到 Embodiment 人格漂移（CP8-P4 自我进化）。
-
-        与 feedback() 区别：质量信号只驱动人格漂移（DRIFT_SIGNALS），不触碰
-        hgt.adapt / engine.feedback（那两条只认 accepted/ignored/rejected 表达结果），
-        避免污染表达反馈链路。
-
-        Args:
-            signal_key: "dialogue_quality_high" | "dialogue_quality_low"
-        """
-        if signal_key not in DRIFT_SIGNALS:
-            return
-        compute_embodiment_drift(
-            self._embodiment_traits,
-            {signal_key: 1.0},
-            self._drift_tick,
-            oscillation_detector=self._oscillation_detector,
-            drift_attribution=self._drift_attribution,
-        )
 
     def _update_relationship_delta(self, session_key: str, outcome: str) -> None:
         """根据反馈结果更新每关系人格 delta。

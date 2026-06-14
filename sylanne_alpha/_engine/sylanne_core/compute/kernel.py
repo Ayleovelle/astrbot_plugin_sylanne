@@ -237,8 +237,21 @@ class AlphaKernel:
             "values": dict(event.values),
         }
         self.hot_pool.amplify_event(event_dict)
+        # dialogue_quality 走 values 通道（"额外数值信号"）→ 透传给 spine 的 canonical
+        # 漂移入参。滞后反馈：上一轮回复的自评在本轮 process 时随 values 一并进来。
+        # values 是不可信输入，非数字（str/list/dict）时安全回退为 None，不让一条坏值掀翻整个 tick。
+        _dq_raw = event.values.get("dialogue_quality")
+        _dq: float | None = None
+        if _dq_raw is not None:
+            try:
+                _dq = float(_dq_raw)
+            except (ValueError, TypeError):
+                logger.warning("ignoring non-numeric dialogue_quality: %r", _dq_raw)
         self._last_computation_result = self.computation.process(
-            event.text, event.now, assessment=assessment
+            event.text,
+            event.now,
+            assessment=assessment,
+            dialogue_quality=_dq,
         )
         collapse_record = self.hot_pool.tick(body=self.body, spine=self.computation)
         if collapse_record is not None:

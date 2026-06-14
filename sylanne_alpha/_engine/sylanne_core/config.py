@@ -185,7 +185,7 @@ class SylanneConfig:
     """Engine configuration options.
 
     Attributes:
-        mode: Computation tier — "lite" (5 plugins), "pro" (25), "max" (50+).
+        mode: Computation tier — "lite" (5 sessions), "pro" (25), "max" (50+).
         diagnostics: Include pipeline debug info in Surface output.
         assessor_enabled: Use LLM for semantic assessment. Disable for local-only mode.
         persistence_fsync: fsync after state writes (safer but slower).

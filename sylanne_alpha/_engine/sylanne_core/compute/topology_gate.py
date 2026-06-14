@@ -54,7 +54,8 @@ def _sigmoid_vec(logits: list[float]) -> list[float]:
     """Apply sigmoid element-wise to a list of logits."""
     if _HAS_NUMPY:
         arr = np.array(logits, dtype=np.float64)
-        return (1.0 / (1.0 + np.exp(-np.clip(arr, -500, 500)))).tolist()
+        result: list[float] = (1.0 / (1.0 + np.exp(-np.clip(arr, -500, 500)))).tolist()
+        return result
     return [_sigmoid(x) for x in logits]
 
 
@@ -296,7 +297,8 @@ class TopologyGate:
         if _HAS_NUMPY and hasattr(weights, "__array__"):
             w_arr = np.asarray(weights, dtype=np.float64)
             g_arr = np.array(gate_values, dtype=np.float64)
-            return (w_arr * g_arr).tolist()
+            gated: list[float] = (w_arr * g_arr).tolist()
+            return gated
         # Pure Python path
         n = min(len(weights), len(gate_values))
         return [weights[i] * gate_values[i] for i in range(n)]

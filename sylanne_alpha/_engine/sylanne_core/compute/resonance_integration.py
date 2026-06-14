@@ -30,12 +30,12 @@ from typing import TYPE_CHECKING, Any
 from .autopoiesis import AutopoieticBoundary
 from .bounded_dict import BoundedDict
 from .emergence import EmergenceTracker
-from .expression_policy import ExpressionPolicy, N_FEATURES as _POLICY_N_FEATURES
+from .expression_policy import ExpressionPolicy
 from .hgt import HeterogeneousGraphTransformer
 from .meta_learner import MetaLearner
 from .pad_interop import PADProjector, PADVector
 from .personality import (
-    DRIFT_SIGNALS,
+    _REVERSE_LEGACY_MAP,
     EMBODIMENT_TRAITS,
     DriftAttribution,
     DriftSignalExtractor,
@@ -298,8 +298,17 @@ class ResonanceSpine:
             topo_gate._conscientiousness_decay_mod = 1.0 - conscientiousness * 0.7
             topo_gate._enforce_min_connectivity()
 
-        # === Expression policy: update personality modulation ===
-        self._expression_policy.set_personality(openness)
+        # === Expression policy: update personality modulation + A7 saddle ===
+        # Hard-gate bounds become personality explicit functions. Anchor the
+        # trait defaults at 0.5 (NOT derive_params' historical 0.68 for
+        # sovereignty): 0.5 is the value that reproduces the legacy 0.95/0.1
+        # constants, so deployments whose personality omits these keys keep
+        # tick-for-tick identical behaviour.
+        self._expression_policy.set_personality(
+            openness,
+            expression_drive_trait=float(personality.get("expression_drive_trait", 0.5)),
+            sovereignty_guard=float(personality.get("sovereignty_guard", 0.5)),
+        )
 
         # === Meta-learner: seed from personality, then override with adapted values ===
         self._meta_learner.init_from_personality(personality)
@@ -338,6 +347,7 @@ class ResonanceSpine:
         assessment: dict[str, Any] | None = None,
         *,
         session_key: str = "",
+        dialogue_quality: float | None = None,
     ) -> dict[str, Any]:
         """Process text through resonance field with real module injection.
 
@@ -347,6 +357,15 @@ class ResonanceSpine:
         3. Field resonates (iterative coupling) until convergence
         4. Expression decision emerges from the converged field state
         5. Emergence metrics feed back into coupling dynamics (criticality gain)
+
+        Args:
+            text: 输入消息文本
+            timestamp: 事件时间戳（epoch 秒）
+            assessment: 可选的 LLM 评估结果，用于精确语义调制
+            session_key: 可选的关系标识符，用于每关系人格覆盖
+            dialogue_quality: 可选的上一轮回复质量自评（归一化 [0,1]）。这是滞后反馈——
+                对第 N 轮回复的评分，在第 N+1 轮调 process() 时传入。高分强化表达欲、
+                拉近关系，低分收敛表达欲（经 canonical 自动漂移通道，无后门）。
         """
         if not text or not text.strip():
             self._route_counts["skip"] = self._route_counts.get("skip", 0) + 1
@@ -474,7 +493,56 @@ class ResonanceSpine:
         elapsed = time.perf_counter_ns() - t0
         self._timings.append(elapsed)
 
-        return self._build_result(text, timestamp, self._should_express, hgt_decision)
+        result = self._build_result(text, timestamp, self._should_express, hgt_decision)
+        if dialogue_quality is not None:
+            result["dialogue_quality"] = dialogue_quality
+        self._drift_embodiment(result)
+        return result
+
+    def _drift_embodiment(self, result: dict[str, Any]) -> None:
+        """从处理结果中提取信号并漂移 Embodiment 人格特质。
+
+        只有当某个特质变化超过 0.01 时才重新应用人格参数。
+        有速率限制：两次漂移之间最少间隔 _drift_min_interval 秒。
+        """
+        # Drift rate limiting: skip if too soon since last drift
+        timestamp = self._last_process_time
+        dt = timestamp - self._last_drift_time
+        if dt < self._drift_min_interval:
+            self._drift_tick += 1
+            return
+        self._last_drift_time = timestamp
+
+        signals = self._signal_extractor.extract(result)
+        if not signals:
+            self._drift_tick += 1
+            return
+        compute_embodiment_drift(
+            self._embodiment_traits,
+            signals,
+            self._drift_tick,
+            oscillation_detector=self._oscillation_detector,
+            drift_attribution=self._drift_attribution,
+            dt=dt,
+        )
+        self._drift_tick += 1
+
+        # Check if any trait changed significantly since last apply
+        needs_reapply = False
+        for name, tm in self._embodiment_traits.items():
+            if abs(tm.value - self._last_embodiment_apply.get(name, 0.5)) > 0.01:
+                needs_reapply = True
+                break
+        if needs_reapply:
+            self._last_embodiment_apply = {n: t.value for n, t in self._embodiment_traits.items()}
+            # Rebuild personality dict with new embodiment values mapped to legacy names
+            updated = dict(self._personality)
+            for emb_name, tm in self._embodiment_traits.items():
+                legacy_name = _REVERSE_LEGACY_MAP.get(emb_name)
+                if legacy_name:
+                    updated[legacy_name] = tm.value
+                updated[emb_name] = tm.value
+            self.apply_personality(updated)
 
     def _hdc_to_field_signal(self, h: bytearray) -> list[float]:
         """Compress HDC vector into field state dimension."""
@@ -616,10 +684,13 @@ class ResonanceSpine:
         # Ask policy for decision
         should_express, _confidence = self._expression_policy.decide(policy_context)
 
-        # Hard constraints override policy (safety)
-        if self._expression_drive > 0.95:
+        # Hard constraints override policy. These bounds are the policy's own
+        # personality-derived saddle (A7), read from the single source of truth
+        # rather than re-hardcoded here — keeps this override in lockstep with
+        # ``decide``'s internal gate. At neutral traits they are 0.95 / 0.1.
+        if self._expression_drive > self._expression_policy.force_express_threshold:
             should_express = True
-        elif self._expression_drive < 0.1:
+        elif self._expression_drive < self._expression_policy.force_hold_threshold:
             should_express = False
 
         self._should_express = should_express
@@ -662,8 +733,28 @@ class ResonanceSpine:
         """Return diagnostics snapshot of the meta-learner state."""
         return self._meta_learner.diagnostics()
 
-    def feedback(self, outcome: str, dt: float = 1.0, session_key: str = "") -> dict[str, float]:
-        """Feedback modulates coupling plasticity + real engine state + topology."""
+    def feedback(
+        self,
+        outcome: str,
+        dt: float = 1.0,
+        session_key: str = "",
+        actual_expressed: bool | None = None,
+    ) -> dict[str, float]:
+        """Feedback modulates coupling plasticity + real engine state + topology.
+
+        Args:
+            outcome: "accepted" | "ignored" | "rejected".
+            dt: time step.
+            session_key: optional relationship identifier for per-relationship delta.
+            actual_expressed: optional ground truth of whether expression actually
+                fired downstream (True/False). When the final express/hold decision
+                is owned by a layer above this spine (e.g. an external arbiter),
+                pass it so the expression policy assigns credit to the action that
+                was really executed rather than the one it internally planned.
+                ``None`` (default) preserves the original behaviour. This is a pure
+                passthrough to the expression policy — the other five feedback-bus
+                consumers are untouched.
+        """
         if outcome in self._feedback_counts:
             self._feedback_counts[outcome] += 1
         # Real engine feedback (scar healing/deepening)
@@ -683,8 +774,10 @@ class ResonanceSpine:
         if topo_gate is not None:
             active_channels = topo_gate.get_active_channels()
             self._field._coupling.feedback_topology(outcome, active_channels)
-        # Expression policy learning (REINFORCE update from feedback)
-        self._expression_policy.update_from_feedback(outcome)
+        # Expression policy learning (REINFORCE update from feedback). Pass the
+        # true executed action through when supplied (None -> legacy behaviour).
+        actual_action = None if actual_expressed is None else int(bool(actual_expressed))
+        self._expression_policy.update_from_feedback(outcome, actual_action=actual_action)
         # Meta-learner adaptation (online hyperparameter tuning)
         self._meta_learner.update(outcome)
         meta = self._meta_learner.current_values
@@ -700,30 +793,6 @@ class ResonanceSpine:
         if session_key:
             self._update_relationship_delta(session_key, outcome)
         return self._engine.observe()
-
-    def feedback_quality(self, signal_key: str) -> None:
-        """注入对话质量自评信号到 Embodiment 人格漂移（CP8-P4 自我进化）。
-
-        ResonanceSpine 原本未接 embodiment 漂移（_embodiment_traits 等基础设施已具备
-        但 process/feedback 都未驱动）。本方法激活该闲置通道，让 self_score 三维质量
-        反馈真正影响人格演化——质量高强化表达欲+关系引力，质量低收敛表达欲。
-
-        与 feedback() 区别：只驱动人格漂移，不碰 hgt/engine/expression_policy
-        （那些只认 accepted/ignored/rejected 表达结果），避免污染表达反馈链路。
-
-        Args:
-            signal_key: "dialogue_quality_high" | "dialogue_quality_low"
-        """
-        if signal_key not in DRIFT_SIGNALS:
-            return
-        compute_embodiment_drift(
-            self._embodiment_traits,
-            {signal_key: 1.0},
-            self._drift_tick,
-            oscillation_detector=self._oscillation_detector,
-            drift_attribution=self._drift_attribution,
-        )
-        self._drift_tick += 1
 
     def _update_relationship_delta(self, session_key: str, outcome: str) -> None:
         """Update per-relationship personality deltas based on feedback."""

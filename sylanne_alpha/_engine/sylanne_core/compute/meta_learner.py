@@ -20,7 +20,6 @@ Design principles:
 
 from __future__ import annotations
 
-import math
 import random
 from collections import deque
 from typing import Any
