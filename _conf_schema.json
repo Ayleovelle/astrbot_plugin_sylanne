@@ -5,7 +5,25 @@
     "default": "Sylanne",
     "hint": "填写当前会话中使用的人格/角色名字。"
   },
-"sylanne_webui_enabled": {
+  "sylanne_enable_v2core": {
+    "description": "v2core 认知内核（唯一认知核；关闭=紧急回退 v1 旧认知）",
+    "type": "bool",
+    "default": true,
+    "hint": "默认开。v2core 双层 agent（PERCEPT@请求注入心象/评价 + DELIBERATE/EVOLVE@回复裁决学习）是唯一认知内核；启用即退役 v1 逐轮认知（旧 9-agent SelfCore PRE/POST/RESPONSE_POST 与逐轮 LLM 评估不再运行，省每轮评估开销）。存档无损复用同一引擎；任何异常单轮回落旧管线不阻断回复。置 false 仅作部署级紧急回退。"
+  },
+  "sylanne_no_ghost_reply": {
+    "description": "空回复兜底（按成因分治）",
+    "type": "bool",
+    "default": true,
+    "hint": "默认开。空回复按成因分治：模型把答案塞进 thinking 块（strip 后空）→ 兜底一句防已读不回；工具循环死锁等真空回复 → 静默不出声（避免蹦出解释式怪话）。若你在下方填了自定义兜底语，则真空回复也走你的兜底。关闭本项=所有空回复都静默（恢复旧行为，不建议）。"
+  },
+  "sylanne_ghost_fallback_text": {
+    "description": "空回复兜底语（自定义）",
+    "type": "string",
+    "default": "",
+    "hint": "留空=按成因分治（thinking 包答案才兜底，工具死锁静默）。填了则任何空回复都用这句兜底——建议用她自己的口吻（如一句短停顿/岔话），别写成第三人称旁白。"
+  },
+  "sylanne_webui_enabled": {
     "description": "启用 WebUI 管理面板",
     "type": "bool",
     "default": false,
@@ -88,6 +106,13 @@
     "type": "bool",
     "default": false,
     "hint": "默认关闭；开启后主动发言会带人类式的迟疑：发出前随机停顿、按犹豫强度可能最后一刻收回不发、偶尔先发个踌躇词起头。强度由 Sylanne 的内在状态（怕打扰/想安静/熟悉度）驱动。仅在桥接开启时生效。"
+  },
+  "sylanne_alpha_recall_mode": {
+    "description": "记忆召回引擎模式",
+    "type": "string",
+    "default": "legacy",
+    "options": ["legacy", "shadow", "activation"],
+    "hint": "legacy=现有四维加权（默认）；shadow=新旧并跑只记差异不改行为（灰度评估用）；activation=启用 ACT-R 激活核召回。建议先 shadow 观察 /api/memory/recall_debug 的 overlap 再切 activation。"
   },
   "sylanne_alpha_embedding_memory_enabled": {
     "description": "启用 embedding 记忆辅助召回",
