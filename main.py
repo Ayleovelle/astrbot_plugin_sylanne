@@ -1232,6 +1232,19 @@ class EmotionalStatePlugin(Star):
         try:
             result = event.get_result()
             chain = getattr(result, "chain", None) if result is not None else None
+            # issue#26 根治（手术刀）：chain 含【非 Plain 组件】（大饼 TTS 的 Record 语音 /
+            # 图片 Image 等）时【不接管】，return False 让大饼原样发送——避免下方"只提 Plain
+            # 文本 + 无条件清空 chain"把语音/图片整条吞掉（语音被清、Sylanne 又因无 Plain 不发
+            # → QQ 收不到、无报错）。仅【纯 Plain 文本 chain】才接管分段。
+            # 判据只依赖已 import 的 Plain（不枚举所有非文本类型，最不易漏判）。
+            # claim 已消费标记（一次性），return False 后大饼正常发，本条不被吞，标记不泄漏到下条。
+            if chain and any(not isinstance(seg, Plain) for seg in chain):
+                logger.info(
+                    "Sylanne proactive segment takeover skipped: chain 含非文本组件"
+                    "(TTS语音/图片)，放行大饼原样发送 for %s",
+                    origin,
+                )
+                return False
             text = ""
             if chain:
                 text = "".join(
