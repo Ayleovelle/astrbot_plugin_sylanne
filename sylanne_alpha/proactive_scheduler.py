@@ -274,10 +274,126 @@ class ProactiveScheduler:
         )
         host = self._p._host(sk)
         surface = host.diagnostics()
-        return proactive_decision(surface)
+        decision = proactive_decision(surface)
+        # v2core 空闲触达咨询：沉默积累（你的节律超期 + 她憋着的话）让 reach 胜出时，
+        # 把决策升格为 reach_out——外部主动桥轮询本方法，这是"她主动找你"的真实入口。
+        # 防连发不在这里造闸：下游 dispatch 自带冷却/静默期机制。
+        try:
+            from sylanne_alpha.v2core.integration import merge_idle_reach_into_decision
+
+            decision = await merge_idle_reach_into_decision(self._p, sk, decision)
+        except Exception:
+            pass
+        return decision
 
     async def request_dispatch(self, *args: Any, **kwargs: Any) -> dict[str, Any]:
-        return {}
+        """主动发言 dispatch：决策 → 桥接发送（或 dry_run 只返回决策）。"""
+        from sylanne_alpha.engine_adapter import derive_should_send
+
+        event_or_session = args[0] if args else kwargs.get("event_or_session")
+        dry_run = bool(kwargs.get("dry_run", False))
+        force = bool(kwargs.get("force", False))
+        sk = str(
+            kwargs.get("session_key", "")
+            or (
+                getattr(event_or_session, "unified_msg_origin", "")
+                if event_or_session is not None
+                else ""
+            )
+            or ""
+        ).strip()
+        if not sk:
+            return {"dispatched": False, "reason": "no_session_key", "dry_run": dry_run}
+
+        dispatch_req = self.build_dispatch_request(session_key=sk)
+        block = self.dispatch_blocked_reason(
+            dispatch=dispatch_req,
+            event_or_session=event_or_session,
+            dry_run=dry_run,
+            force=force,
+        )
+        if block:
+            return {
+                "dispatched": False,
+                "reason": block,
+                "session_key": sk,
+                "dry_run": dry_run,
+            }
+
+        decision = await self.get_speech_decision(
+            event_or_session=event_or_session, session_key=sk
+        )
+        guard = {"allowed": decision.get("allowed", True)}
+        if not derive_should_send(decision, guard):
+            return {
+                "dispatched": False,
+                "reason": f"action_{decision.get('action', 'hold')}",
+                "session_key": sk,
+                "decision": decision,
+                "dry_run": dry_run,
+            }
+
+        if dry_run:
+            return {
+                "dispatched": False,
+                "would_dispatch": True,
+                "session_key": sk,
+                "decision": decision,
+                "dry_run": True,
+            }
+
+        cfg = self._p.config or {}
+        bridge = getattr(self._p, "_proactive_bridge", None)
+        bridge_on = bool(cfg.get("sylanne_alpha_proactive_bridge_enabled", False))
+        if bridge is None or not bridge_on or not bridge.available():
+            return {
+                "dispatched": False,
+                "reason": "proactive_bridge_unavailable",
+                "session_key": sk,
+                "decision": decision,
+            }
+
+        allowed, gate_reason = bridge.should_dispatch_now(sk)
+        if not allowed:
+            return {
+                "dispatched": False,
+                "reason": f"bridge_gated:{gate_reason}",
+                "session_key": sk,
+                "decision": decision,
+            }
+
+        host = self._p._host(sk)
+        surface = host.diagnostics()
+        reason_code = await bridge.infer_reason_code(sk, surface=surface)
+        mood = ""
+        body = surface.get("body", {}) if isinstance(surface.get("body"), dict) else {}
+        pulse = body.get("pulse", {}) if isinstance(body.get("pulse"), dict) else {}
+        mood = str(pulse.get("mood_label", "") or pulse.get("mood", "") or "").strip()
+        motivation = bridge.build_motivation_text(
+            str(decision.get("reason", "") or "想找你聊聊"),
+            mood,
+            reason_code=reason_code,
+            session_key=sk,
+        )
+        result = await bridge.dispatch(sk, motivation)
+        if result.get("dispatched"):
+            last_sent = getattr(self._p, "_proactive_dispatch_last_sent", None)
+            if not isinstance(last_sent, dict):
+                last_sent = {}
+                self._p._proactive_dispatch_last_sent = last_sent
+            now = (
+                self._p._observed_now()
+                if callable(self._p._observed_now)
+                else self._p._observed_now
+            )
+            last_sent[sk] = float(now)
+
+        return {
+            **result,
+            "session_key": sk,
+            "decision": decision,
+            "dry_run": False,
+        }
 
     async def judge_topic(self, session_key: str = "", **kwargs: Any) -> dict[str, Any]:
         return {"topic": "", "confidence": 0.0, "should_speak": False}
@@ -314,6 +430,16 @@ class ProactiveScheduler:
         if session_key in self._ritual_registry:
             self._ritual_registry[session_key].pop(ritual_name, None)
 
+    def _last_user_ts(self, session_key: str) -> float:
+        """用户最后消息时间：本地缓存优先，回落 SessionStateStore（T2 双源对齐）。"""
+        ts = float(self._last_message_times.get(session_key, 0.0) or 0.0)
+        if ts > 0:
+            return ts
+        store = getattr(self._p, "_store", None)
+        if store is not None:
+            return float(store.last_user_message_time.get(session_key, 0.0) or 0.0)
+        return 0.0
+
     def record_message_time(self, session_key: str, ts: float | None = None) -> None:
         """记录用户最后一次发消息的时间。
 
@@ -321,7 +447,11 @@ class ProactiveScheduler:
             session_key: 会话标识。
             ts: 时间戳，默认为当前时间。
         """
-        self._last_message_times[session_key] = ts if ts is not None else time.time()
+        when = ts if ts is not None else time.time()
+        self._last_message_times[session_key] = when
+        store = getattr(self._p, "_store", None)
+        if store is not None:
+            store.last_user_message_time.set(session_key, when)
 
     def check_ritual_absence(self, session_key: str, now: float | None = None) -> str | None:
         """检查是否到了仪式时间但用户未出现。
@@ -345,8 +475,8 @@ class ProactiveScheduler:
             return None
 
         current_hour = time.localtime(now).tm_hour
-        last_msg = self._last_message_times.get(session_key, 0.0)
-        silence_seconds = now - last_msg
+        last_msg = self._last_user_ts(session_key)
+        silence_seconds = now - last_msg if last_msg > 0 else float("inf")
 
         # 30 分钟未发消息才算缺席
         absence_threshold = 30 * 60

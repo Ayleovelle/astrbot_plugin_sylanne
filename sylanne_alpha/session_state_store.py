@@ -128,6 +128,17 @@ class SessionStateStore:
         self.stream_buffers: SessionMap = self._reg("stream_buffers", BoundedDict(maxsize=200))
         self.stream_first_sent: SessionMap = self._reg("stream_first_sent", BoundedDict(maxsize=200))
         self.segmented_tasks: SessionMap = self._reg("segmented_tasks", BoundedDict(maxsize=200))
+        # 碎片防抖缓冲（inline-await 方案B）：按 session_key 存
+        # {texts: list[str], start_time: float, latest_seq: int}。
+        # 经 _reg 登记，自动纳入 release_session / reset_all 统一清理；
+        # 取代旧 plugin._fragment_buffers / _fragment_timers 上帝对象裸 dict（漏清理风险）。
+        #
+        # 用普通 dict 而非 BoundedDict：LRU 驱逐与 winner pop 都返回 None，二者无法在
+        # 段B 区分——一旦因 >maxsize 并发会话被驱逐，该会话碎片会被误判为 loser 而
+        # stop_event() 静默丢失用户消息。改普通 dict 后 `get→None` 唯一含义是
+        # "已被 winner pop"，loser 语义无歧义。buf 生命周期极短（≤max_wait，winner pop
+        # 即清），孤儿仅在 winner 协程被取消时短暂残留，由 release_session 兜底清理。
+        self.fragment_buffers: SessionMap = self._reg("fragment_buffers", {})
 
         # ---- 请求/响应诊断缓存 ----
         self.last_request_budgets: SessionMap = self._reg("last_request_budgets", BoundedDict(maxsize=200))
@@ -165,6 +176,10 @@ class SessionStateStore:
         # ---- 锁容器（存 asyncio.Lock，pop 清理但不序列化）----
         self.session_locks: SessionMap = self._reg("session_locks", {})
         self.proactive_scheduler_locks: SessionMap = self._reg("proactive_scheduler_locks", {})
+        # ConversationManager 同步专用锁：串行化同一会话"读历史→append→写回"，
+        # 防止 safe_ensure_future 后台并发 sync 互相覆盖整表写回（消息丢失/乱序）。
+        # 用普通 dict 而非 BoundedDict——锁被 LRU 驱逐会让并发保护静默失效（见 #_session_locks）。
+        self.conv_sync_locks: SessionMap = self._reg("conv_sync_locks", {})
 
     def _reg(self, name: str, backing: Any) -> SessionMap:
         m: SessionMap = SessionMap(name, backing)
@@ -196,4 +211,12 @@ class SessionStateStore:
     def get_session_lock(self, session_key: str) -> asyncio.Lock:
         """取（或惰性建）某会话的 asyncio.Lock。"""
         return self.session_locks.get_or_create(session_key, asyncio.Lock)
+
+    def get_conv_sync_lock(self, session_key: str) -> asyncio.Lock:
+        """取（或惰性建）某会话的 ConversationManager 同步锁。
+
+        与 get_session_lock 分离，避免与通用 session 锁互相阻塞。锁实例跨多次 sync
+        调用持久存在（挂在 store 上），从而真正串行化同一会话的并发写回。
+        """
+        return self.conv_sync_locks.get_or_create(session_key, asyncio.Lock)
 

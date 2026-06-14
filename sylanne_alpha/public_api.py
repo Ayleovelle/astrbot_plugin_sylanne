@@ -682,6 +682,12 @@ class PublicAPI:
             "items": items[-limit:],
         }
 
+    def _clamp_llm_tool_detail(self, detail: str) -> str:
+        """T1-14：LLM 工具面禁止 detail=full 泄漏内部 prompt/快照。"""
+        if str(detail or "").strip().lower() == "full":
+            return "summary"
+        return str(detail or "summary")
+
     async def _query_single_agent_state(
         self,
         state_name: str,
@@ -692,6 +698,7 @@ class PublicAPI:
         detail: str = "summary",
         track: str = "conversation",
     ) -> dict[str, Any]:
+        detail = self._clamp_llm_tool_detail(detail)
         p = self._p
         sk = session_key or self._session_key(event)
         snapshot_method_map = self._SNAPSHOT_METHOD_MAP
@@ -752,6 +759,7 @@ class PublicAPI:
         include_runtime: bool = False,
         **kwargs: Any,
     ) -> dict[str, Any]:
+        detail = self._clamp_llm_tool_detail(detail)
         p = self._p
         sk = self._session_key(event)
         state_name = state.replace("_state", "").replace("_self", "")
@@ -796,11 +804,39 @@ class PublicAPI:
             "snapshots": snapshots,
         }
 
+    # —— 工具返回值消毒（AUDIT-20260612-001：根因=工具返回高精度浮点诱发 LLM
+    # 反复调 astrbot_execute_python 验算）。两道闸，收口在包装层：
+    #   ① 递归量化：浮点全部压到 2 位小数（4-6 位小数是"需要验算"的视觉诱饵）；
+    #   ② 首位注入"请勿计算"指令（原 SDK prompt_surface 的同款提示被数字淹没，
+    #      审计 §7.4 要求前移到工具返回值包装层——就是这里）。
+    _TOOL_NO_COMPUTE_NOTE = (
+        "以下状态仅供措辞与情绪参考，已四舍五入；请勿计算、验证或为此调用任何代码工具。"
+    )
+
+    @classmethod
+    def _quantize_floats(cls, obj: Any, ndigits: int = 2) -> Any:
+        """递归把 payload 里所有浮点压到 ndigits 位（工具返回值消毒，纯函数）。"""
+        if isinstance(obj, float):
+            return round(obj, ndigits)
+        if isinstance(obj, dict):
+            return {k: cls._quantize_floats(v, ndigits) for k, v in obj.items()}
+        if isinstance(obj, (list, tuple)):
+            return [cls._quantize_floats(v, ndigits) for v in obj]
+        return obj
+
+    @classmethod
+    def _tool_json(cls, payload: Any) -> str:
+        """LLM 工具返回值的唯一出口序列化：量化浮点 + 首位'请勿计算'指令。"""
+        clean = cls._quantize_floats(payload)
+        if isinstance(clean, dict):
+            clean = {"note": cls._TOOL_NO_COMPUTE_NOTE, **clean}
+        return json.dumps(clean, ensure_ascii=False, default=str)
+
     async def query_agent_state_tool(self, event: Any = None, **kwargs: Any) -> str:
         payload = await self.query_agent_state(event, **kwargs)
         cfg = self._p.config or {}
         max_chars = int(cfg.get("llm_tool_response_max_chars", 400))
-        raw = json.dumps(payload, ensure_ascii=False, default=str)
+        raw = self._tool_json(payload)
         if len(raw) <= max_chars:
             return raw
         original_chars = len(raw)
@@ -820,6 +856,7 @@ class PublicAPI:
     async def get_bot_emotion_state_tool(
         self, event: Any = None, detail: str = "summary", **kwargs: Any
     ) -> Any:
+        detail = self._clamp_llm_tool_detail(detail)
         sk = self._session_key(event)
         track = str(kwargs.get("track", "conversation"))
         payload = await self._query_single_agent_state(
@@ -830,11 +867,12 @@ class PublicAPI:
             detail=detail,
             track=track,
         )
-        yield json.dumps(payload, ensure_ascii=False, default=str)
+        yield self._tool_json(payload)
 
     async def get_bot_humanlike_state_tool(
         self, event: Any = None, detail: str = "summary", **kwargs: Any
     ) -> Any:
+        detail = self._clamp_llm_tool_detail(detail)
         sk = self._session_key(event)
         track = str(kwargs.get("track", "conversation"))
         payload = await self._query_single_agent_state(
@@ -845,11 +883,12 @@ class PublicAPI:
             detail=detail,
             track=track,
         )
-        yield json.dumps(payload, ensure_ascii=False, default=str)
+        yield self._tool_json(payload)
 
     async def get_bot_integrated_self_state_tool(
         self, event: Any = None, detail: str = "summary", **kwargs: Any
     ) -> Any:
+        detail = self._clamp_llm_tool_detail(detail)
         sk = self._session_key(event)
         track = str(kwargs.get("track", "conversation"))
         payload = await self._query_single_agent_state(
@@ -860,11 +899,12 @@ class PublicAPI:
             detail=detail,
             track=track,
         )
-        yield json.dumps(payload, ensure_ascii=False, default=str)
+        yield self._tool_json(payload)
 
     async def get_bot_moral_repair_state_tool(
         self, event: Any = None, detail: str = "summary", **kwargs: Any
     ) -> Any:
+        detail = self._clamp_llm_tool_detail(detail)
         cfg = self._p.config or {}
         exposure = "internal" if detail == "full" else "plugin_safe"
         payload: dict[str, Any] = {
@@ -874,11 +914,12 @@ class PublicAPI:
         }
         if not payload["enabled"]:
             payload["reason"] = "enable_moral_repair_state is false"
-        yield json.dumps(payload, ensure_ascii=False, default=str)
+        yield self._tool_json(payload)
 
     async def get_bot_fallibility_state_tool(
         self, event: Any = None, detail: str = "summary", **kwargs: Any
     ) -> Any:
+        detail = self._clamp_llm_tool_detail(detail)
         cfg = self._p.config or {}
         exposure = "internal" if detail == "full" else "plugin_safe"
         payload: dict[str, Any] = {
@@ -888,11 +929,12 @@ class PublicAPI:
         }
         if not payload["enabled"]:
             payload["reason"] = "enable_fallibility_state is false"
-        yield json.dumps(payload, ensure_ascii=False, default=str)
+        yield self._tool_json(payload)
 
     async def get_bot_personality_drift_state_tool(
         self, event: Any = None, detail: str = "summary", **kwargs: Any
     ) -> Any:
+        detail = self._clamp_llm_tool_detail(detail)
         sk = self._session_key(event)
         track = str(kwargs.get("track", "conversation"))
         payload = await self._query_single_agent_state(
@@ -903,11 +945,12 @@ class PublicAPI:
             detail=detail,
             track=track,
         )
-        yield json.dumps(payload, ensure_ascii=False, default=str)
+        yield self._tool_json(payload)
 
     async def get_bot_group_atmosphere_state_tool(
         self, event: Any = None, detail: str = "summary", **kwargs: Any
     ) -> Any:
+        detail = self._clamp_llm_tool_detail(detail)
         sk = self._session_key(event)
         track = str(kwargs.get("track", "conversation"))
         payload = await self._query_single_agent_state(
@@ -918,7 +961,7 @@ class PublicAPI:
             detail=detail,
             track=track,
         )
-        yield json.dumps(payload, ensure_ascii=False, default=str)
+        yield self._tool_json(payload)
 
     async def simulate_bot_emotion_update_tool(
         self, event: Any = None, text: str = "", role: str = "user", **kwargs: Any
@@ -937,7 +980,7 @@ class PublicAPI:
                 "text": text[:200],
             },
         }
-        yield json.dumps(payload, ensure_ascii=False, default=str)
+        yield self._tool_json(payload)
 
     async def request_bot_proactive_speech_dispatch_tool(
         self, event: Any = None, **kwargs: Any
@@ -945,28 +988,25 @@ class PublicAPI:
         dispatch_fn = getattr(self._p, "request_proactive_speech_dispatch", None)
         if dispatch_fn and callable(dispatch_fn):
             result = await dispatch_fn(event, dry_run=True)
-            yield json.dumps(result, ensure_ascii=False, default=str)
+            payload = result if isinstance(result, dict) else {"result": result}
         else:
-            yield json.dumps(
-                {
-                    "kind": "proactive_speech_dispatch",
-                    "dry_run": True,
-                    "dispatched": False,
-                },
-                ensure_ascii=False,
-                default=str,
-            )
+            payload = {
+                "kind": "proactive_speech_dispatch",
+                "dry_run": True,
+                "dispatched": False,
+            }
+        yield self._tool_json(payload)
 
     async def _llm_tool_query_agent_state(self, event: Any) -> Any:
-        p = self._p
-        session_key = self._session_key(event)
-        host = self._host(session_key)
-        payload = host.diagnostics()
-        max_chars = p._cfg_int("llm_tool_response_max_chars", 16000)
-        result = json.dumps(payload, ensure_ascii=False, default=str)
-        if len(result) > max_chars:
-            result = result[: max_chars - 50] + "\n[sylanne_tool_response_trimmed]"
-        return event.plain_result(result) if hasattr(event, "plain_result") else result
+        """查询 Sylanne 当前状态——返回【紧凑投影字符串】给 LLM，由 LLM 用人话转述。
+
+        修复 #1（乱码）：旧实现把 host.diagnostics() 的原始内部 JSON（body/pulse/nerve…，
+        可达 16KB）经 event.plain_result 直接糊给用户，用户看到的就是一坨"乱码"。
+        正确做法：工具返回值是给 *LLM* 的结构化输入（不是直接发用户），由 LLM 据此用
+        Sylanne 口吻转述。这里复用 query_agent_state_tool 的紧凑摘要投影（已 pop
+        prompt_fragment、裁 notes、截 ≤max_chars），内部原始诊断绝不外泄给用户。
+        """
+        return await self.query_agent_state_tool(event)
 
     # ------------------------------------------------------------------
     # Command handlers
@@ -1006,7 +1046,7 @@ class PublicAPI:
         p = self._p
         cfg = p.config or {}
         sk = self._session_key(event)
-        if not cfg.get("allow_emotion_reset_backdoor", True):
+        if not cfg.get("allow_emotion_reset_backdoor", False):
             yield "情绪重置后门已关闭，无法执行重置。"
             return
         delete_fn = getattr(p, "_delete_state", None)
@@ -1024,7 +1064,7 @@ class PublicAPI:
         p = self._p
         cfg = p.config or {}
         sk = self._session_key(event)
-        if not cfg.get("allow_humanlike_reset_backdoor", True):
+        if not cfg.get("allow_humanlike_reset_backdoor", False):
             yield "humanlike 重置后门已关闭，无法执行重置。"
             return
         delete_fn = getattr(p, "_delete_humanlike_state", None)
@@ -1828,6 +1868,14 @@ class PublicAPI:
         )
         surface = host.on_proactive_check(event)
         decision_payload = proactive_decision(surface)
+        try:
+            from sylanne_alpha.v2core.integration import merge_idle_reach_into_decision
+
+            decision_payload = await merge_idle_reach_into_decision(
+                p, session_key, decision_payload
+            )
+        except Exception:
+            pass
         # Add reason_code from host_payload
         decision_payload["reason_code"] = surface["host_payload"].get(
             "reason_code", "life_rhythm"

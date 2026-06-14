@@ -35,23 +35,35 @@ _VALID_SUBSYSTEMS = frozenset({"personality", "memory", "spine", "session"})
 class _DirtyTracker:
     """实例级脏标记追踪器，避免模块级全局状态在多实例/热重载时污染。"""
 
-    __slots__ = ("_subsystems",)
+    __slots__ = ("_subsystems", "_lock")
 
     def __init__(self):
+        import threading
+
         self._subsystems: set[str] = set()
+        self._lock = threading.Lock()
 
     def mark(self, subsystem: str) -> None:
         if subsystem in _VALID_SUBSYSTEMS:
-            self._subsystems.add(subsystem)
+            with self._lock:
+                self._subsystems.add(subsystem)
 
     def swap(self) -> set[str]:
         """原子地取出当前脏集合并清空，避免 get+clear 之间的竞态。"""
-        taken = self._subsystems
-        self._subsystems = set()
-        return taken
+        with self._lock:
+            taken = self._subsystems
+            self._subsystems = set()
+            return taken
+
+    def restore(self, subsystems: set[str]) -> None:
+        if not subsystems:
+            return
+        with self._lock:
+            self._subsystems.update(subsystems)
 
     def is_dirty(self) -> bool:
-        return bool(self._subsystems)
+        with self._lock:
+            return bool(self._subsystems)
 
 
 # 模块级实例——StatePersistence.__init__ 中会替换为自己的实例
@@ -233,14 +245,10 @@ class StatePersistence:
         """
         import json as _json
 
-        # 增量持久化：dirty set 为空时跳过 save（减少无变化时的 IO）
-        if not is_dirty():
-            return
-
-        dirty_set = swap_dirty()
+        dirty_set = swap_dirty() if is_dirty() else set()
         snapshot = host.kernel.snapshot()
 
-        if self.has_kv_api():
+        if dirty_set and self.has_kv_api():
             try:
                 # 只序列化 dirty 子系统对应的数据
                 partial_snapshot = self._extract_dirty_snapshot(snapshot, dirty_set)
@@ -263,6 +271,7 @@ class StatePersistence:
 
                 await self._p.put_kv_data(kv_key, partial_snapshot)
             except Exception as e:
+                _dirty.restore(dirty_set)
                 logger.warning(f"Sylanne kernel KV persist: {e}", exc_info=True)
         # 始终写文件（向后兼容/回退），offload 到线程避免阻塞事件循环
         try:
@@ -789,6 +798,37 @@ class StatePersistence:
         if delete_fn and callable(delete_fn):
             await delete_fn(kv_key)
 
+    async def purge_session_after_meltdown(self, session_key: str) -> None:
+        """记忆清除后同步抹掉专用 KV、kernel KV、域状态 KV 与 v2core 运行时缓存（T1-13）。"""
+        await self.delete_sylanne_memory_state(session_key)
+        delete_fn = getattr(self._p, "delete_kv_data", None)
+        if delete_fn and callable(delete_fn) and self.has_kv_api():
+            safe = self._safe_session_key(session_key)
+            for key in (
+                self.kernel_kv_key(session_key),
+                f"{self.kernel_kv_key(session_key)}_backup",
+                f"sylanne_v2core_domains:{safe}",
+            ):
+                try:
+                    await delete_fn(key)
+                except Exception as e:
+                    logger.debug(f"Sylanne meltdown KV delete {key}: {e}")
+        cache = getattr(self._p, "_v2core_runtimes", None)
+        if isinstance(cache, dict):
+            cache.pop(session_key, None)
+        host = None
+        try:
+            host = self._p._host(session_key)
+        except Exception:
+            pass
+        if host is not None:
+            try:
+                host.kernel.body.memory.pop("_memory_system", None)
+                host.kernel.body.memory["traces"] = []
+                await asyncio.to_thread(host.runtime.save, host.kernel)
+            except Exception as e:
+                logger.debug(f"Sylanne meltdown kernel file purge: {e}")
+
     # ------------------------------------------------------------------
     # AstrBot ConversationManager 集成
     # ------------------------------------------------------------------
@@ -884,6 +924,38 @@ class StatePersistence:
         conv_mgr = getattr(p, "_conv_mgr", None)
         if conv_mgr is None:
             return
+
+        # 取 per-session 同步锁，串行化同一会话的"读历史→append→写回"。
+        # 拿不到锁容器（旧版/测试环境无 _store）时降级为无锁——绝不能因为锁机制
+        # 本身报错而阻断同步。锁挂在 store 上跨多次 sync 调用持久存在。
+        lock = None
+        try:
+            store = getattr(p, "_store", None)
+            if store is not None:
+                lock = store.get_conv_sync_lock(session_key)
+        except Exception as e:
+            # 降级无锁是有意取向（绝不因锁机制本身报错而阻断同步），但不能静默：
+            # 恰是高并发时最易触发，无日志运维无从发现并发覆盖风险。
+            lock = None
+            logger.warning(
+                "Sylanne conv-sync 取锁失败，降级为无锁同步（并发写回可能互相覆盖）：%s",
+                e,
+            )
+
+        if lock is not None:
+            async with lock:
+                await self._do_sync_to_conv_mgr(conv_mgr, session_key, role, text)
+        else:
+            await self._do_sync_to_conv_mgr(conv_mgr, session_key, role, text)
+
+    async def _do_sync_to_conv_mgr(
+        self, conv_mgr: Any, session_key: str, role: str, text: str
+    ) -> None:
+        """实际执行 ConversationManager 同步的"读→append→写回"。
+
+        必须在 per-session 同步锁内调用（由 sync_message_to_conv_mgr 负责），
+        以避免并发整表写回互相覆盖。
+        """
         try:
             # 获取或创建当前会话
             curr_cid = await conv_mgr.get_curr_conversation_id(session_key)
@@ -1166,7 +1238,7 @@ class StatePersistence:
         p._cfg_float("passive_load_fresh_seconds", 1.0)
         p._cfg_bool("benchmark_enable_simulated_time", False)
         p._cfg_float("benchmark_time_offset_seconds", 0.0)
-        p._cfg_bool("allow_emotion_reset_backdoor", True)
+        p._cfg_bool("allow_emotion_reset_backdoor", False)
         p._cfg_bool("enable_psychological_screening", False)
         p._cfg_float("sylanne_memory_idle_commit_delay_seconds", 4.0)
         p._cfg_bool("sylanne_memory_vector_retrieval_enabled", True)
@@ -1175,7 +1247,7 @@ class StatePersistence:
         p._cfg_int("sylanne_memory_record_embedding_max_per_flush", 1)
         p._cfg_bool("sylanne_memory_debug_view_enabled", False)
         p._cfg_bool("humanlike_memory_write_enabled", True)
-        p._cfg_bool("allow_humanlike_reset_backdoor", True)
+        p._cfg_bool("allow_humanlike_reset_backdoor", False)
         p._cfg_bool("lifelike_learning_memory_write_enabled", True)
         p._cfg_bool("allow_lifelike_learning_reset_backdoor", True)
         p._cfg_bool("personality_drift_memory_write_enabled", True)

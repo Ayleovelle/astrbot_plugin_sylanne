@@ -109,13 +109,27 @@ class LLMResponsePipeline:
         )
 
         if not realtime_enabled or not intercept:
-            # 未启用即时聊天拦截时，仅清理 thinking/draft 块 + 注入防御
+            # 未启用即时聊天拦截时，仅清理 thinking/draft 块 + 注入防御；
+            # 仍须把 bot 回复写入 conversation_buffers（v2core 已 tick，勿再 observe_response）。
             if response is not None:
                 text = str(getattr(response, "completion_text", "") or "")
                 cleaned = strip_draft_blocks(text)
                 cleaned = self._sanitize_response(cleaned)
                 if cleaned != text:
                     response.completion_text = cleaned
+                if cleaned.strip():
+                    obs_task = safe_ensure_future(
+                        self._append_bot_reply_buffer(session_key, cleaned),
+                        name="append_bot_reply_buffer",
+                    )
+                    ensure_background_tasks_list(self._p).append(obs_task)
+                    obs_task.add_done_callback(
+                        lambda t: (
+                            self._p._background_tasks.remove(t)
+                            if t in self._p._background_tasks
+                            else None
+                        )
+                    )
             return
 
         if response is None:
@@ -142,8 +156,42 @@ class LLMResponsePipeline:
             return
 
         if not cleaned.strip():
-            response.completion_text = ""
-            return
+            # 修复 #2（ghost 空回复）——本层语义是"LLM 已被调用、本该有回复"，所以这里的空
+            # 【永远是意外】（模型把答案塞进 thinking / 真没产出），绝不是人格主动装死
+            # （那由上游表达闸决定，不在这层）。故默认不 ghost：给一句 Sylanne 口吻兜底，
+            # 走和正常回复一样的分段发送路径。区分成因仅供调试留痕（D8）。
+            _reason = "stripped_to_empty" if text.strip() else "empty_completion"
+            _cfg = self._p._config or {}
+            _no_ghost = bool(_cfg.get("sylanne_no_ghost_reply", True))
+            # 按 reason 分治（2026-06-13 治日志蹦兜底）：
+            # - stripped_to_empty（thinking 包答案）：原 06:11 真 ghost bug，仍兜底防"已读不回"。
+            # - empty_completion（completion_text 真空）：常见于 AstrBot tool 循环死锁——AstrBot
+            #   core 已自己塞过 [SYSTEM NOTICE] 重复调用警告，再蹦 Sylanne 兜底文案是雪上加霜，
+            #   且语气解释式（"我想说点什么…再给我一秒"）反而让人觉得是说明书不是她。静默更对。
+            # config 显式开 ghost（_no_ghost=False）依然全静默；config 设了自定义兜底文案则继续走兜底。
+            _has_custom_fallback = bool(str(_cfg.get("sylanne_ghost_fallback_text") or "").strip())
+            _silent_this = (not _no_ghost) or (
+                _reason == "empty_completion" and not _has_custom_fallback
+            )
+            if _silent_this:
+                self._p.logger.info(
+                    f"Sylanne reply silent: session={session_key} "
+                    f"reason={_reason} raw_len={len(text)} "
+                    f"cfg_no_ghost={_no_ghost} has_custom={_has_custom_fallback}"
+                )
+                response.completion_text = ""
+                return
+            # 走到这里：stripped_to_empty 默认兜底 / 用户显式配了自定义兜底文案
+            _fallback = str(
+                _cfg.get("sylanne_ghost_fallback_text")
+                or "……（我想说点什么，可话到嘴边又散了，再给我一秒。）"
+            )
+            self._p.logger.info(
+                f"Sylanne empty reply -> fallback (no ghost): session={session_key} "
+                f"reason={_reason} raw_len={len(text)} fallback_len={len(_fallback)}"
+            )
+            cleaned = _fallback
+            # 落入下方正常分段发送流程（不 return）
 
         # 检查首句是否已通过流式发送
         first_sent = self._p._store.stream_first_sent.pop(session_key, "")
@@ -243,27 +291,22 @@ class LLMResponsePipeline:
             )
         )
 
-    async def _background_observe_response(self, session_key: str, text: str) -> None:
-        """后台观测 bot 回复：写入对话缓冲、通知社交场域、更新计算栈。"""
+    async def _append_bot_reply_buffer(self, session_key: str, text: str) -> None:
+        """仅写入对话缓冲 + ConvMgr 同步（不 tick / 不 observe_response）。"""
         try:
             from sylanne_alpha.memory_system import ConversationBuffer
 
-            # Append bot reply to conversation buffer (v2)
             buf = self._p._store.conversation_buffers.get_or_create(
                 session_key, lambda: ConversationBuffer(session_key=session_key)
             )
             buf.append("bot", text)
             self._p._store.last_bot_texts.set(session_key, text[:120])
             self._p._schedule_buffer_persist(session_key)
-            # Parallel sync to AstrBot ConversationManager
             if self._p._has_conversation_manager():
                 safe_ensure_future(
                     self._p._sync_message_to_conv_mgr(session_key, "bot", text),
                     name="conv_mgr_sync_bot",
                 )
-            # CP8-P3a：social notify_bot_replied 已收编进 SocialAgent（SelfCore
-            # RESPONSE_POST），此处不再直接调，避免双通知。social_void.reset 属计算栈
-            # 层状态清理（非 SocialFieldCollector 业务），保留在管线。
             if hasattr(
                 self._p, "_social_field"
             ) and self._p._social_field.is_group_context_by_key(session_key):
@@ -271,9 +314,25 @@ class LLMResponsePipeline:
                     host = self._p._host(session_key)
                     host.kernel.computation.engine.social_void.reset()
                 except Exception:
-                    pass  # cleanup: failure acceptable
-            # SelfCore RESPONSE_POST 编排：social/dialogue 消化 bot 回复结果。
-            sc = getattr(self._p, "_self_core", None)
+                    pass
+        except Exception as e:
+            logger.warning(f"Sylanne append_bot_reply_buffer: {e}", exc_info=True)
+
+    async def _background_observe_response(self, session_key: str, text: str) -> None:
+        """后台观测 bot 回复：写入对话缓冲、通知社交场域、更新计算栈。"""
+        try:
+            await self._append_bot_reply_buffer(session_key, text)
+            # SelfCore RESPONSE_POST 编排（仅 v1 模式）：social/dialogue 消化 bot 回复。
+            # v1 逐轮认知退役（v2core 启用）后不跑——bot 回复的消化在 v2core 的
+            # EVOLVE（领域 ingest）+ response tick（行动知觉）里完成，单脑运行。
+            _v1_retired = False
+            try:
+                from sylanne_alpha.v2core.integration import v1_turn_cognition_retired
+
+                _v1_retired = v1_turn_cognition_retired(self._p)
+            except Exception:
+                _v1_retired = False
+            sc = None if _v1_retired else getattr(self._p, "_self_core", None)
             if sc is not None:
                 try:
                     resp_surface = self._p._host(session_key).kernel.surface()
@@ -317,8 +376,12 @@ class LLMResponsePipeline:
         buffer = self._p._store.stream_buffers.get(session_key, "") + delta
         self._p._store.stream_buffers.set(session_key, buffer)
 
+        # 抢发首句前先取【可见前缀】：剥已闭合隐藏块 + 在未闭合 thinking 处截断，
+        # 杜绝把思维链碎片当正文抢发（2026-06-13 流式 thinking 泄漏 bug 根治）。
+        visible = self._visible_stream_prefix(buffer)
+
         # Check if we have a complete first sentence
-        first_sentence = self._extract_first_sentence(buffer)
+        first_sentence = self._extract_first_sentence(visible)
         if first_sentence and not self._p._store.stream_first_sent.has(session_key):
             self._p._store.stream_first_sent.set(session_key, first_sentence)
             self._p._store.stream_buffers.pop(session_key, None)
@@ -335,6 +398,39 @@ class LLMResponsePipeline:
                     else None
                 )
             )
+
+    # 流式隐藏标签（与 strip_draft_blocks 同源；抢发侧需流式增量版本）
+    _STREAM_HIDDEN_TAGS = ("draft_notes", "thinking", "think")
+
+    def _visible_stream_prefix(self, buffer: str) -> str:
+        """流式抢发安全的"可见前缀"：剥掉已闭合的隐藏块，并在遇到【未闭合】的隐藏
+        open 标签处截断——标签之后的内容尚未确定是不是思维链，绝不能抢发。
+
+        修复（2026-06-13 用户诊断）：旧版 _extract_first_sentence 直接吃裸 buffer，
+        模型流式【先吐 thinking】时，buffer 第一个句末标点落在 thinking 段里 →
+        抢发了思维链碎片（泄漏 thinking 给用户）+ 存进 stream_first_sent 污染 remainder
+        匹配，连锁触发 on_llm_response 的 stripped_to_empty 兜底。
+
+        策略：
+        1) 先用 (?is)<tag ...>.*?</tag> 去掉所有已闭合隐藏块（含跨行）；
+        2) 扫剩余文本，遇到未闭合的隐藏 open 标签 → 在此截断（其后是 pending 思维链）；
+        3) buffer 末尾若是半截标签（如 "<thi" / "<thinking"），一并切掉防误判。
+        纯函数式，零状态。返回可安全用于抢发首句判定的可见前缀（可能为空）。
+        """
+        if not buffer:
+            return ""
+        tag_alt = "|".join(self._STREAM_HIDDEN_TAGS)
+        # 1) 去掉已闭合隐藏块（非贪婪，含跨行 DOTALL + 大小写无关）
+        cleaned = re.sub(rf"(?is)<(?:{tag_alt})[^>]*>.*?</(?:{tag_alt})>", "", buffer)
+        # 2) 未闭合隐藏 open 标签 → 此处及之后全是 pending，截断
+        m = re.search(rf"(?i)<(?:{tag_alt})(?:\s[^>]*)?>", cleaned)
+        if m:
+            cleaned = cleaned[: m.start()]
+        # 3) 末尾半截标签（流式把 "<thinking>" 切在两个 chunk 间）→ 切掉，下个 chunk 再判
+        m2 = re.search(r"<[a-zA-Z/]*$", cleaned)
+        if m2:
+            cleaned = cleaned[: m2.start()]
+        return cleaned
 
     def _extract_first_sentence(self, text: str) -> str:
         """从缓冲文本中提取第一个完整句子。
