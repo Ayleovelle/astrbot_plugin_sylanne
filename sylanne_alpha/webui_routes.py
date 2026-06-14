@@ -944,6 +944,9 @@ class WebUIRoutes:
         if session in hosts:
             hosts[session].kernel.body.memory["traces"] = []
             hosts[session].kernel.body.memory.pop("_memory_system", None)
+        sp = getattr(self._p, "_state_persistence", None)
+        if sp is not None and hasattr(sp, "purge_session_after_meltdown"):
+            await sp.purge_session_after_meltdown(session)
         logger.info(f"Sylanne MEMORY MELTDOWN: session={session} — all memory cleared")
         # Set amnesia flag so next LLM response expresses memory loss
         if not hasattr(self._p, "_amnesia_sessions"):
