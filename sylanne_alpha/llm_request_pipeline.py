@@ -1547,7 +1547,9 @@ class LLMRequestPipeline:
         arousal = float(current_assessment.get("arousal", 0.0))
         intent = str(current_assessment.get("intent", ""))
 
-        _prev_state = getattr(host.kernel, "_last_injected_state", None) or {}
+        # 上一轮注入状态（短 gap 慢变信号比较）：2.1.0 从 kernel._last_injected_state slot
+        # 挪到 agent 层 _store（SDK 整树同步会冲掉该 slot，存 agent 层解耦 SDK 依赖）。
+        _prev_state = p._store.last_injected_states.get(session_key) or {}
         signals: list[str] = []
 
         if valence > 0.5:
@@ -1600,12 +1602,8 @@ class LLMRequestPipeline:
         if signals:
             state_fragment = f"[当前状态：{'，'.join(signals)}]"
 
-        # 保存当前状态快照供下一轮短 gap 比较
-        # 防御：即使 kernel 缺该 slot（旧存档/异常），也不能阻断回复生成
-        try:
-            host.kernel._last_injected_state = {"warmth": warmth, "tension": tension}
-        except (AttributeError, TypeError):
-            pass
+        # 保存当前状态快照供下一轮短 gap 比较（2.1.0 存 agent 层 _store，不再依赖 kernel slot）
+        p._store.last_injected_states.set(session_key, {"warmth": warmth, "tension": tension})
         return state_fragment
 
     # ------------------------------------------------------------------

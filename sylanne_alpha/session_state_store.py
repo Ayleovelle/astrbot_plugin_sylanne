@@ -167,6 +167,9 @@ class SessionStateStore:
 
         # ---- 其他运行态 ----
         self.last_user_message_time: SessionMap = self._reg("last_user_message_time", BoundedDict(maxsize=200))
+        # 短 gap 慢变信号比较用：上一轮注入的 {warmth,tension}（2.1.0 从 kernel slot 挪来——
+        # SDK 整树同步会冲掉 kernel._last_injected_state slot，故改存 agent 层，解耦 SDK 依赖）。
+        self.last_injected_states: SessionMap = self._reg("last_injected_states", BoundedDict(maxsize=200))
         self.sylanne_memory_cache: SessionMap = self._reg("sylanne_memory_cache", BoundedDict(maxsize=200))
         self.conversation_pending_response_epochs: SessionMap = self._reg("conversation_pending_response_epochs", BoundedDict(maxsize=200))
         self.group_atmosphere_injection_snapshot_cache: SessionMap = self._reg("group_atmosphere_injection_snapshot_cache", BoundedDict(maxsize=200))
