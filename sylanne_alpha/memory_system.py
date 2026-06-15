@@ -401,6 +401,30 @@ class ConversationBuffer:
         if role == "bot":
             self.turn_count += 1
 
+    def _in_active_exchange(self, now: float) -> bool:
+        """结构判定：是否处于"活跃来回"中（任务/纠正链进行中，不是真闲置）。
+
+        2026-06-15 事故：用户连续纠正改写任务，轮次间隔 ~90s，被 60s idle flush
+        抽干上下文，Agent 读到空 buffer 转去翻 SQLite 主动消息→话题彻底漂走。
+        纯结构信号（消息条数 + 近端轮次间隔），不看内容：最近 3 条里若有快速来回
+        （相邻间隔中位数 < 90s），说明这是一段活着的对话线程，给更长的 idle 宽限。
+        """
+        msgs = self.messages
+        if len(msgs) < 3:
+            return False
+        recent = msgs[-4:]
+        gaps = [
+            float(recent[i]["ts"]) - float(recent[i - 1]["ts"])
+            for i in range(1, len(recent))
+            if recent[i].get("ts") and recent[i - 1].get("ts")
+        ]
+        if not gaps:
+            return False
+        gaps.sort()
+        median_gap = gaps[len(gaps) // 2]
+        # 近端轮次密集（来回快）且整体未冷太久 → 仍算活跃
+        return median_gap < 90.0 and (now - self.last_activity) < 240.0
+
     def should_flush(self, idle_seconds: float = 60.0, max_turns: int = 20) -> str:
         """返回触发原因，空字符串表示不需要 flush。"""
         if not self.messages:
@@ -408,7 +432,10 @@ class ConversationBuffer:
         if self.turn_count >= max_turns:
             return "max_turns"
         now = time.time()
-        if now - self.last_activity >= idle_seconds:
+        # 活跃来回中（任务/纠正链）：把 idle 宽限拉长到 3x，别在用户连续纠正的
+        # 间隙里把任务态 flush 掉（事故根因 L3）。仍受 max_turns 硬上限兜底。
+        effective_idle = idle_seconds * 3.0 if self._in_active_exchange(now) else idle_seconds
+        if now - self.last_activity >= effective_idle:
             has_user = any(m.get("role") == "user" for m in self.messages)
             if not has_user and now - self.last_activity < idle_seconds * 3:
                 return ""

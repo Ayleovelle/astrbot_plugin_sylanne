@@ -1096,6 +1096,25 @@ class LLMRequestPipeline:
                 "Sylanne v2core request stage error: %s", exc, exc_info=True
             )
 
+        # Step 0.5: 交付模式门控（2026-06-15 事故 P0-3）——结构判定"反复纠正同一产出"，
+        # 命中则摘代码执行逃生舱工具（防 thrash）+ 注交付契约（压住人设反任务取向）。
+        # 放在 v2core 注入之后：契约追加到 system_prompt 末尾，最后说的最重，盖过 _PRESENCE。
+        try:
+            from sylanne_alpha import deliverable_mode
+
+            buf = p._store.conversation_buffers.get(session_key)
+            outcome = deliverable_mode.apply(event, request, buf)
+            if outcome.get("deliverable"):
+                logger.info(
+                    "Sylanne deliverable mode: session=%s gated=%s contract=%s",
+                    session_key, outcome.get("gated_tools"),
+                    outcome.get("contract_injected"),
+                )
+        except Exception as exc:
+            logger.error(
+                "Sylanne deliverable mode error（继续）: %s", exc, exc_info=True
+            )
+
         # Step 1: 清理流式状态、启动观测、处理流式拦截
         await self._clean_incoming_message(
             event, request, message_text, session_key, intercept,
@@ -1632,6 +1651,18 @@ class LLMRequestPipeline:
         sys_parts: list[str] = []
         if time_fragment:
             sys_parts.append(time_fragment)
+
+        # 回复长度自适应（H10 修复）：rhythm_learner 已按用户近 20 条均长算出倍率因子，
+        # 原先只在 webui 展示、从不入 prompt。这里把它落成一句长度提示——用户一直发短句
+        # （纠正/追问）时压短回复，别拿大段轰炸。仅在明显偏离中性(1.0)时出手，避免噪声。
+        try:
+            rl_factor = float(self._p._rhythm_learner.get_reply_length_factor(session_key))
+            if rl_factor <= 0.8:
+                sys_parts.append("[对方在发短消息，回复也精简些，别长篇大论]")
+            elif rl_factor >= 1.4:
+                sys_parts.append("[对方消息偏长，可以答得详尽些]")
+        except Exception:
+            pass
 
         max_context_tokens = int((p.config or {}).get("max_context_tokens", 8000))
         if max_context_tokens > 0:

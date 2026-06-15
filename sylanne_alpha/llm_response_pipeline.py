@@ -138,7 +138,7 @@ class LLMResponsePipeline:
         text = str(getattr(response, "completion_text", "") or "")
         cleaned = strip_draft_blocks(text)
         cleaned = self._sanitize_response(cleaned)
-        self._p.logger.info(
+        logger.info(
             f"Sylanne on_llm_response: len={len(cleaned)} session={session_key}"
         )
 
@@ -174,7 +174,7 @@ class LLMResponsePipeline:
                 _reason == "empty_completion" and not _has_custom_fallback
             )
             if _silent_this:
-                self._p.logger.info(
+                logger.info(
                     f"Sylanne reply silent: session={session_key} "
                     f"reason={_reason} raw_len={len(text)} "
                     f"cfg_no_ghost={_no_ghost} has_custom={_has_custom_fallback}"
@@ -186,7 +186,7 @@ class LLMResponsePipeline:
                 _cfg.get("sylanne_ghost_fallback_text")
                 or "……（我想说点什么，可话到嘴边又散了，再给我一秒。）"
             )
-            self._p.logger.info(
+            logger.info(
                 f"Sylanne empty reply -> fallback (no ghost): session={session_key} "
                 f"reason={_reason} raw_len={len(text)} fallback_len={len(_fallback)}"
             )
@@ -260,7 +260,7 @@ class LLMResponsePipeline:
             self._p._store.unfinished_replies.set(session_key, rest)
 
         # 后台调度分段发送
-        self._p.logger.info(
+        logger.info(
             f"Sylanne segmented reply queued: session={session_key} parts={len(parts)}"
         )
         task = safe_ensure_future(
@@ -472,27 +472,38 @@ class LLMResponsePipeline:
         if not hasattr(context, "send_message"):
             return
         total = len(parts)
-        for idx, part in enumerate(parts, 1):
-            delay = float(part.get("delay_before_seconds", 0))
-            if delay > 0:
-                await asyncio.sleep(delay)
-            text = str(part.get("text", ""))
-            if not text:
-                continue
-            self._p.logger.info(
-                f"Sylanne segmented reply part {idx}/{total}: {text[:60]}"
-            )
-            message = self._astrbot_message(text)
-            await context.send_message(origin, message)
-            # 每发送一段，更新 unfinished 为剩余未发内容（消除竞态）
-            if session_key and idx < total:
-                remaining_text = "".join(
-                    str(p.get("text", "")) for p in parts[idx:]
+        try:
+            for idx, part in enumerate(parts, 1):
+                delay = float(part.get("delay_before_seconds", 0))
+                if delay > 0:
+                    await asyncio.sleep(delay)
+                text = str(part.get("text", ""))
+                if not text:
+                    continue
+                logger.info(
+                    f"Sylanne segmented reply part {idx}/{total}: {text[:60]}"
                 )
-                if remaining_text:
-                    self._p._store.unfinished_replies.set(session_key, remaining_text)
-                else:
-                    self._p._store.unfinished_replies.pop(session_key, None)
+                message = self._astrbot_message(text)
+                await context.send_message(origin, message)
+                # 每发送一段，更新 unfinished 为剩余未发内容（消除竞态）
+                if session_key and idx < total:
+                    remaining_text = "".join(
+                        str(p.get("text", "")) for p in parts[idx:]
+                    )
+                    if remaining_text:
+                        self._p._store.unfinished_replies.set(session_key, remaining_text)
+                    else:
+                        self._p._store.unfinished_replies.pop(session_key, None)
+        except asyncio.CancelledError:
+            # 新请求 cancel 旧分段任务（llm_request_pipeline 主动 cancel segmented_tasks）：
+            # 不静默吞——留痕已发到第几段，unfinished 保留剩余供续接/下轮判断，然后重抛。
+            sent = locals().get("idx", 0)
+            logger.info(
+                "Sylanne segmented dispatch cancelled: session=%s sent=%d/%d "
+                "(剩余留在 unfinished 供续接)",
+                session_key, sent, total,
+            )
+            raise
         # 所有段发送成功——清除未完成标记
         if session_key:
             self._p._store.unfinished_replies.pop(session_key, None)

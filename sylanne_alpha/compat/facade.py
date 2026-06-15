@@ -123,23 +123,47 @@ def strip_draft_blocks(text: str) -> str:
     return "\n".join(visible).strip()
 
 
+# 出站分段硬上限：单条回复最多发这么多段 IM。防 thinking 泄露/超长回复被
+# _split_text 按行碎成几十上百段连发轰炸用户（2026-06-15 事故 Turn8：86 段）。
+# 超限时【合并尾部】成一段（不丢内容，只少发几条），而非丢弃——交付型成品常落在
+# 末尾，丢尾会把真正的答案删掉。这是兜底闸：正常人格回复远到不了 12 段。
+_DEFAULT_MAX_PARTS = 12
+
+
+def _cap_parts(parts: list[str], *, max_parts: int) -> list[str]:
+    """把分段数压到 max_parts 以内：保留前 max_parts-1 段，其余合并成最后一段。"""
+    if max_parts <= 0 or len(parts) <= max_parts:
+        return parts
+    head = parts[: max_parts - 1]
+    tail = [p for p in parts[max_parts - 1 :] if p]
+    merged_tail = "\n".join(tail).strip()
+    if merged_tail:
+        head.append(merged_tail)
+    return head
+
+
 def realtime_plan(
     session_key: str,
     text: str,
     *,
     max_part_chars: int = 48,
     chars_per_second: float = 7.5,
+    max_parts: int = _DEFAULT_MAX_PARTS,
 ) -> dict[str, Any]:
     raw = str(text or "")
     visible = strip_draft_blocks(raw)
     parts = _split_text(visible, max_part_chars=max_part_chars)
+    capped = _cap_parts(parts, max_parts=max_parts)
     return {
         "schema_version": REALTIME_PLAN_SCHEMA_VERSION,
         "kind": "realtime_chat_plan",
         "session_key": session_key,
         "enabled": True,
-        "message_count": len(parts),
-        "message_parts": _message_parts(parts, chars_per_second=chars_per_second),
+        "max_parts": max_parts,
+        "capped": len(capped) != len(parts),
+        "uncapped_count": len(parts),
+        "message_count": len(capped),
+        "message_parts": _message_parts(capped, chars_per_second=chars_per_second),
         "source_text_chars": len(raw),
     }
 
