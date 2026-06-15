@@ -44,6 +44,23 @@ def test_presence_intent_words_present() -> None:
     assert "沉浸" in frag, "缺'沉浸进去'（沉浸 > 办任务）"
 
 
+def test_presence_carbon_stepping_discipline() -> None:
+    """更彻底的工具纪律（memory: tool-usage-carbon-stepping）：碳步途中也要认怂。
+
+    不只是"一开始没工具就认怂"，还要在试错途中察觉自己在原地打转就收手——
+    同一件事试两三回不成、或系统提醒重复调用同一工具，重复本身就是"做不到"信号。
+    钉死这条引导词在位，且明确不是"把工具规划得更聪明"（那是逞强的另一种形式）。
+    """
+    frag = build_mind_fragment(_ctx(_body()), {})
+    assert "做不到" in frag, "缺'做不到'坦白权"
+    assert "重复" in frag, "缺'重复本身就是做不到信号'（碳步认怂核心）"
+    assert "停手" in frag, "缺'停手认了就行'（劝退越钻越细）"
+    # 反向：不该把它写成"规划纪律 / 先列计划 / 想清楚再动手"那种逞强话术
+    for forbidden in ("先规划", "列计划", "想清楚再"):
+        assert forbidden not in frag, f"工具纪律不该写成规划话术（逞强变体）: {forbidden}"
+
+
+
 def test_presence_coexists_with_state_lines() -> None:
     """有状态时：状态行 + 临场态度共存（态度不挤掉状态线索）。"""
     emo = EmotionLedger()
