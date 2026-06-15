@@ -1,7 +1,7 @@
 # Issue #26 研判 — 主动消息进了历史但 QQ 收不到
 
 > 来源:4-agent opus 研判(任务 w71u1nk5a)，三路链路独立收敛同一机制
-> 状态:研判完成，未动代码。需 owner 确认运行期配置才能定修法分支。
+> 状态:**已修复**（commit 513fee4 `fix(proactive): 分段接管不再吞掉非 Plain（TTS 语音/图片）chain`）。根治=接管前检测非 Plain 则不接管。
 > **更新(深挖):clone 大饼 DBJD-CR/astrbot_plugin_proactive_chat 源码逐行走完发送链，见文末"深挖结论"——浮现一个比开关假设更硬的设计级结构冲突。**
 
 ## 一句话根因
