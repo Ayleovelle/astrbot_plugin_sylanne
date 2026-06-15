@@ -805,7 +805,7 @@ class HeterogeneousGraphTransformer:
         # Stage 1: Type-Expert FFN
         te = self._type_experts
         if self._use_numpy:
-            from sylanne_core.compute.hgt_numpy import numpy_type_expert_forward
+            from .hgt_numpy import numpy_type_expert_forward
 
             encoded: list[list[float]] = [
                 numpy_type_expert_forward(
@@ -825,7 +825,7 @@ class HeterogeneousGraphTransformer:
         attended = encoded
         attn_weights: list[list[float]] = []
         if self._use_numpy:
-            from sylanne_core.compute.hgt_numpy import numpy_multi_head_attention
+            from .hgt_numpy import numpy_multi_head_attention
 
             attn = self._attention
             for _round in range(self._attention_rounds):
@@ -895,7 +895,7 @@ class HeterogeneousGraphTransformer:
         weights_moe = [gate_probs[i] / gate_sum for i in top_indices]
 
         if self._use_numpy:
-            from sylanne_core.compute.hgt_numpy import numpy_moe_forward
+            from .hgt_numpy import numpy_moe_forward
 
             expert_w1s = [moe.experts[idx].w1_flat for idx in top_indices]
             expert_w2s = [moe.experts[idx].w2_flat for idx in top_indices]
