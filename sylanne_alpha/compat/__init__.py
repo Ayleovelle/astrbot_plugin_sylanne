@@ -10,6 +10,7 @@ from .facade import (
     realtime_plan,
     simulate_update,
     strip_draft_blocks,
+    truncate_at_sentence,
 )
 
 __all__ = [
@@ -24,4 +25,5 @@ __all__ = [
     "reset_surface",
     "simulate_update",
     "strip_draft_blocks",
+    "truncate_at_sentence",
 ]

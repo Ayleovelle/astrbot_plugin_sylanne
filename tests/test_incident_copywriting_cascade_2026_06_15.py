@@ -182,15 +182,19 @@ class TestH2PresenceAntiTask:
         from sylanne_alpha import deliverable_mode as dm
 
         t = time.time()
-        # 真 hook 时机：当前用户消息【还没】写进 buffer（后台任务晚于钩子），
-        # 故 buffer 末条是上一版 bot 回复。fixture 如实反映这个状态。
+        # 真 hook 时机：当前用户消息【还没】写进 buffer（后台任务晚于钩子），末条是上一版 bot。
+        # 交付返工形态：user 短句纠正 + bot 反复掏长成品（B1 后用"非对称长度"信号，非节奏）。
+        _long = (
+            "情感不是额外教的标签，语言预测任务本身就藏着情感结构，学说话的时候顺手就学会了"
+            "感受。这不是哲学宣言，是实打实的实验数据，在神经网络的训练里有据可查。"
+        )
         msgs = [
             {"role": "user", "text": "改写这句", "ts": t - 300},
-            {"role": "bot", "text": "v1", "ts": t - 250},
+            {"role": "bot", "text": _long + "v1", "ts": t - 250},
             {"role": "user", "text": "面向用户的", "ts": t - 180},
-            {"role": "bot", "text": "v2", "ts": t - 130},
+            {"role": "bot", "text": _long + "v2", "ts": t - 130},
             {"role": "user", "text": "也不是原来的意思", "ts": t - 60},
-            {"role": "bot", "text": "v3", "ts": t - 30},
+            {"role": "bot", "text": _long + "v3", "ts": t - 30},
         ]
 
         class _Buf:
@@ -221,10 +225,86 @@ class TestH2PresenceAntiTask:
 
         req = _Req()
         out = dm.apply(_Ev(), req, _Buf())
-        assert out["deliverable"] is True
+        assert out["should_contract"] is True
         assert "astrbot_execute_python" in out["gated_tools"]
         assert "clone_tts" in req.func_tool.names()  # 合法工具保留
-        assert "[本轮任务模式]" in req.system_prompt  # 契约在末尾压住人设
+        assert "[本轮提示]" in req.system_prompt  # 契约注入
+        assert "去人设" not in req.system_prompt  # B1：绝不要求去人设（保住苏思澜）
+
+    def test_wide_gate_chat_no_attachment_gates_tools_no_contract(self) -> None:
+        """放宽门控：无附件的普通闲聊也摘逃生舱工具，但不注契约（非纠正链）。"""
+        from sylanne_alpha import deliverable_mode as dm
+
+        t = time.time()
+
+        class _Buf:
+            messages = [
+                {"role": "user", "text": "在吗", "ts": t - 30},
+                {"role": "bot", "text": "在的", "ts": t - 20},
+            ]
+
+        class _Seg:
+            type = "plain"
+
+        class _MO:
+            message = [_Seg()]
+
+        class _Ev:
+            message_obj = _MO()
+
+        class _Tools:
+            def __init__(self):
+                self._n = ["astrbot_execute_python", "clone_tts"]
+
+            def names(self):
+                return list(self._n)
+
+            def remove_tool(self, n):
+                self._n = [x for x in self._n if x != n]
+
+        class _Req:
+            func_tool = _Tools()
+            system_prompt = "你是苏思澜。"
+
+        req = _Req()
+        out = dm.apply(_Ev(), req, _Buf())
+        assert out["should_gate"] is True
+        assert "astrbot_execute_python" not in req.func_tool.names()
+        assert "clone_tts" in req.func_tool.names()
+        assert out["contract_injected"] is False  # 闲聊不注契约
+        assert "[本轮任务模式]" not in req.system_prompt
+
+    def test_attachment_turn_keeps_tools(self) -> None:
+        """带附件轮：不摘工具（可能要处理附件）。"""
+        from sylanne_alpha import deliverable_mode as dm
+
+        class _Seg:
+            type = "image"
+
+        class _MO:
+            message = [_Seg()]
+
+        class _Ev:
+            message_obj = _MO()
+
+        class _Tools:
+            def __init__(self):
+                self._n = ["astrbot_execute_python"]
+
+            def names(self):
+                return list(self._n)
+
+            def remove_tool(self, n):
+                self._n = [x for x in self._n if x != n]
+
+        class _Req:
+            func_tool = _Tools()
+            system_prompt = ""
+
+        req = _Req()
+        out = dm.apply(_Ev(), req, None)
+        assert out["should_gate"] is False
+        assert "astrbot_execute_python" in req.func_tool.names()
 
 
 class TestH1ImageTranscribeSkip:
@@ -317,3 +397,63 @@ class TestLogTurn1Turn2Metrics:
         plan = realtime_plan("s", turn1, max_part_chars=48)
         assert plan["message_count"] == 6
         assert 170 <= len(turn1) <= 200
+
+
+class TestOutputPathCoverageHardening:
+    """深挖：补齐绕过 max_parts cap 的输出路径（path2 非实时 / path5 流式首句 / path3 TTS）。"""
+
+    def test_path5_first_sentence_length_cap(self) -> None:
+        """流式抢发首句：久无句末标点不再攒超长，到阈值在软边界切。"""
+        from sylanne_alpha.llm_response_pipeline import LLMResponsePipeline
+
+        inst = LLMResponsePipeline.__new__(LLMResponsePipeline)
+        f = inst._extract_first_sentence
+        # 正常截句不受影响
+        assert f("你好呀。后面") == "你好呀。"
+        # 短文本不触发（等更多）
+        assert f("还没说完") == ""
+        # 超长无标点 → 软边界切，且短于全文
+        long = "第一段内容" * 8 + "，" + "第二段内容" * 8
+        out = f(long)
+        assert 0 < len(out) < len(long)
+        assert out.endswith("，")
+
+    def test_path2_nonrealtime_no_truncation(self) -> None:
+        """path2 非实时直发分支：审查后【移除】超长截断（单条消息非86段，截断丢内容撞契约）。"""
+        import sylanne_alpha.llm_response_pipeline as mod
+
+        src = open(mod.__file__, encoding="utf-8").read()
+        # 不再有 path2 长度兜底常量 / 不在该分支调 truncate
+        assert "_NONREALTIME_MAX_CHARS" not in src
+        assert not hasattr(mod.LLMResponsePipeline, "_NONREALTIME_MAX_CHARS")
+
+    def test_truncate_at_sentence_shortens_and_ascii_safe(self) -> None:
+        """truncate_at_sentence（path3 TTS 用）：句末优先截短；入参校验；不切坏 ASCII token。"""
+        from sylanne_alpha.compat import truncate_at_sentence
+
+        huge = "这是一段挺长的内容呀。" * 120
+        out = truncate_at_sentence(huge, 600)
+        assert len(out) <= 600
+        assert out.endswith("。")  # 句末收尾
+        assert truncate_at_sentence("晚安笨蛋。", 600) == "晚安笨蛋。"  # 短文不动
+        assert truncate_at_sentence("abc", 0) == ""  # 入参校验（n2）
+        # 纯 ASCII 长 token 串：硬切不报错、长度有界
+        assert len(truncate_at_sentence("x" * 900, 600)) <= 600
+
+    def test_path3_tts_tool_hook_wired(self) -> None:
+        """path3：on_using_llm_tool 钩子已注册，工具执行前清理文本参数。"""
+        import main as main_mod
+
+        src = open(main_mod.__file__, encoding="utf-8").read()
+        assert "on_using_llm_tool" in src
+        assert "_optional_using_llm_tool_filter" in src
+        # 钩子方法存在
+        assert hasattr(main_mod.EmotionalStatePlugin, "on_using_llm_tool")
+
+    def test_path3_tts_strips_thinking_from_text_arg(self) -> None:
+        """TTS 文本参数里的 thinking 块会被剥（核心安全项：别念出内心独白）。"""
+        from sylanne_alpha.compat import strip_draft_blocks
+
+        # 复刻钩子核心：strip_draft_blocks 作用于 tool_args["text"]
+        leaked = "<thinking>我该怎么回</thinking>晚安笨蛋。"
+        assert strip_draft_blocks(leaked) == "晚安笨蛋。"

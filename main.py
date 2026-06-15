@@ -87,6 +87,12 @@ except ImportError:
 
             return decorator
 
+        def on_using_llm_tool(self, *args, **kwargs):
+            def decorator(func):
+                return func
+
+            return decorator
+
         def event_message_type(self, *args, **kwargs):
             def decorator(func):
                 return func
@@ -353,6 +359,14 @@ class _StateInjectionBudget:
 def _optional_stream_chunk_filter(**kwargs: Any):
     """AstrBot 部分版本 filter 无 on_llm_stream_chunk → 直通注册。"""
     dec = getattr(filter, "on_llm_stream_chunk", None)
+    if dec is None:
+        return lambda f: f
+    return dec(**kwargs)
+
+
+def _optional_using_llm_tool_filter(**kwargs: Any):
+    """AstrBot 部分版本 filter 无 on_using_llm_tool → 直通注册（不挂钩子，降级为无操作）。"""
+    dec = getattr(filter, "on_using_llm_tool", None)
     if dec is None:
         return lambda f: f
     return dec(**kwargs)
@@ -1204,6 +1218,53 @@ class EmotionalStatePlugin(Star):
         except Exception as e:
             logger.error(f"Sylanne on_llm_response error: {e}", exc_info=True)
             return
+
+    # 只对"把文本念出来/发出去"类工具清理 text 参数（白名单）。绝不碰 FileWrite/
+    # FileEdit 的 content、execute_python 的 code 等——那些 strip/截断会静默写坏文件/代码。
+    _SPEECH_TOOL_NAMES = ("clone_tts", "tts", "send_message_to_user", "send_message")
+
+    @_optional_using_llm_tool_filter(desc="语音/发言类工具调用前清理 text（防 thinking 进 TTS）")
+    async def on_using_llm_tool(self, event: Any, tool: Any, tool_args: Any) -> None:
+        """path3 兜底：模型把要"说"的内容打包进【语音/发言类】工具参数（如 clone_tts 的
+        text）时，绕过了 on_llm_response 的剥离。这里在工具执行【前】就地清理。tool_args 是
+        executor 实际消费的同一 dict（tool_loop_agent_runner:1075/1083 验证），就地改即生效。
+
+        【白名单】只处理 _SPEECH_TOOL_NAMES——别的工具（文件写入/代码执行）的文本参数原样
+        放过，否则 strip/截断会静默写坏文件（M3 审查）。
+        - 剥 thinking/draft 块：核心安全项——别让内心独白被念成语音/发出去。
+        - 极端超长才句末截断：TTS 只长度有害（数分钟音频）。strip 后为空则不写回（n1）。
+        """
+        try:
+            if not isinstance(tool_args, dict) or not tool_args:
+                return
+            tool_name = str(getattr(tool, "name", "") or "")
+            if tool_name not in self._SPEECH_TOOL_NAMES:
+                return  # 非语音/发言类工具：一概不碰，避免误伤文件/代码参数
+            from sylanne_alpha.compat import strip_draft_blocks, truncate_at_sentence
+
+            _HARD_MAX = 1200  # 极端兜底；正常语音远不到
+            for key in ("text", "content", "message", "msg"):
+                val = tool_args.get(key)
+                if not isinstance(val, str) or not val.strip():
+                    continue
+                cleaned = strip_draft_blocks(val)
+                cleaned = truncate_at_sentence(cleaned, _HARD_MAX)
+                # 全是 thinking 被剥空：不写回（喂 TTS 空串会报错/产 0 长音频）
+                if not cleaned.strip():
+                    logger.warning(
+                        "Sylanne tool-arg %s 剥后为空，保留原文交工具自行处理: tool=%s",
+                        key, tool_name,
+                    )
+                    continue
+                if cleaned != val:
+                    tool_args[key] = cleaned
+                    logger.info(
+                        "Sylanne tool-arg cleaned: tool=%s key=%s %d→%d chars",
+                        tool_name, key, len(val), len(cleaned),
+                    )
+        except Exception as e:
+            # 安全闸降级必须可见（m1）：不静默吞到 debug
+            logger.warning(f"Sylanne on_using_llm_tool clean failed: {e}", exc_info=True)
 
     @filter.on_decorating_result()
     async def on_decorating_result(self, event: Any) -> None:

@@ -1096,15 +1096,16 @@ class LLMRequestPipeline:
                 "Sylanne v2core request stage error: %s", exc, exc_info=True
             )
 
-        # Step 0.5: 交付模式门控（2026-06-15 事故 P0-3）——结构判定"反复纠正同一产出"，
-        # 命中则摘代码执行逃生舱工具（防 thrash）+ 注交付契约（压住人设反任务取向）。
+        # Step 0.5: 交付模式门控（2026-06-15 事故 P0-3）。两档独立粒度：
+        #   宽——本轮无附件即摘代码执行逃生舱工具（防 thrash，纯聊天用不到）；
+        #   窄——仅纠正链注交付契约（压住人设反任务取向）。
         # 放在 v2core 注入之后：契约追加到 system_prompt 末尾，最后说的最重，盖过 _PRESENCE。
         try:
             from sylanne_alpha import deliverable_mode
 
             buf = p._store.conversation_buffers.get(session_key)
             outcome = deliverable_mode.apply(event, request, buf)
-            if outcome.get("deliverable"):
+            if outcome.get("gated_tools") or outcome.get("contract_injected"):
                 logger.info(
                     "Sylanne deliverable mode: session=%s gated=%s contract=%s",
                     session_key, outcome.get("gated_tools"),

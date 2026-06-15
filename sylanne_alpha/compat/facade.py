@@ -123,6 +123,31 @@ def strip_draft_blocks(text: str) -> str:
     return "\n".join(visible).strip()
 
 
+# 整段长度硬截断（不同于 _cap_parts 的"限段数"）。当前唯一调用方：path3 TTS——
+# text 整段进语音合成，段数无意义、只长度有害（数分钟音频）。按字符数在句末标点回退
+# 截断；找不到句末标点时退而求安全 ASCII 边界（不切坏代码/URL token，M2 审查），
+# 再不行才硬切。阈值放宽，只兜异常长。
+def truncate_at_sentence(text: str, max_chars: int) -> str:
+    """超过 max_chars 时在 <=max_chars 内截断：优先句末标点 → 安全 ASCII 边界 → 硬切。"""
+    if max_chars <= 0:
+        return ""
+    s = str(text or "")
+    if len(s) <= max_chars:
+        return s
+    cut = s[:max_chars]
+    lo = max_chars // 2
+    # ① 句末标点
+    for j in range(len(cut) - 1, lo - 1, -1):
+        if cut[j] in "。！？!?；;\n":
+            return cut[: j + 1]
+    # ② 安全边界：切点不能落在一个 ASCII token（标识符/URL）中间（复用既有判定）
+    for j in range(len(cut) - 1, lo - 1, -1):
+        if _safe_ascii_boundary(s, j):
+            return cut[:j].rstrip() or cut[:j]
+    # ③ 实在没有 → 硬切
+    return cut
+
+
 # 出站分段硬上限：单条回复最多发这么多段 IM。防 thinking 泄露/超长回复被
 # _split_text 按行碎成几十上百段连发轰炸用户（2026-06-15 事故 Turn8：86 段）。
 # 超限时【合并尾部】成一段（不丢内容，只少发几条），而非丢弃——交付型成品常落在

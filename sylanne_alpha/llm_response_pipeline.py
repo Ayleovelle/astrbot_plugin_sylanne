@@ -115,6 +115,10 @@ class LLMResponsePipeline:
                 text = str(getattr(response, "completion_text", "") or "")
                 cleaned = strip_draft_blocks(text)
                 cleaned = self._sanitize_response(cleaned)
+                # 注：此分支 completion_text 整段直发 AstrBot（不分段）。曾在此加超长截断
+                # 兜底，经审查移除——单条长消息不是事故的 86 段轰炸，tagged thinking 已剥；
+                # 截断会丢内容、还撞 deliverable 契约"一次给全"，是治 speculative 问题反引入
+                # 真 bug。源头的 deliverable_mode（摘逃生舱工具）才是 thrash/泄露的真兜底。
                 if cleaned != text:
                     response.completion_text = cleaned
                 if cleaned.strip():
@@ -432,10 +436,19 @@ class LLMResponsePipeline:
             cleaned = cleaned[: m2.start()]
         return cleaned
 
+    # 流式抢发首句的长度软上限：模型久不吐句末标点时，别把超长一坨当"首句"直发
+    # （path5：流式首句不经分段 cap）。到阈值则在安全软边界（逗号/空格）切，没有就硬切。
+    _STREAM_FIRST_SENT_MAX = 60
+
     def _extract_first_sentence(self, text: str) -> str:
         """从缓冲文本中提取第一个完整句子。
 
         以中英文句末标点或换行符为分隔。连续标点（如 "！？"）视为同一句。
+
+        超长软切（M5 审查后收窄）：只在缓冲【含 CJK 或已出现过中文软标点】时，超过
+        _STREAM_FIRST_SENT_MAX 仍无句末标点才在软边界切。**纯拉丁 run-on 保持旧的保守
+        return ''（不抢发）**——否则会把模型先吐的无标签英文 CoT 当首句直发，重开
+        "无标签英文思维链流式泄漏"那条在案信道（见 memory: thinking-leak-untagged-cot）。
         """
         delimiters = "。！？!?；;"
         for i, ch in enumerate(text):
@@ -446,6 +459,17 @@ class LLMResponsePipeline:
                 return text[: i + 1]
             if ch == "\n" and i > 0:
                 return text[:i]
+        # 无句末标点但已超长 → 仅当含中文/中文软标点才软切；纯拉丁 run-on 不抢发（防 CoT 泄漏）
+        if len(text) >= self._STREAM_FIRST_SENT_MAX:
+            has_cjk = any("一" <= c <= "鿿" for c in text)
+            has_cn_soft = any(c in "，、：" for c in text)
+            if not (has_cjk or has_cn_soft):
+                return ""  # 纯英文未断句：保守等待，绝不把英文 CoT 当首句直发
+            window = text[: self._STREAM_FIRST_SENT_MAX]
+            for j in range(len(window) - 1, self._STREAM_FIRST_SENT_MAX // 2 - 1, -1):
+                if window[j] in "，、,：: ":
+                    return text[: j + 1].rstrip()  # n3：去尾随空格
+            return window.rstrip()  # 连软边界都没有 → 硬切窗口
         return ""
 
     async def _send_first_sentence(self, origin: str, text: str) -> None:
