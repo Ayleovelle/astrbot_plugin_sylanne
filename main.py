@@ -1237,7 +1237,7 @@ class EmotionalStatePlugin(Star):
         try:
             if not isinstance(tool_args, dict) or not tool_args:
                 return
-            tool_name = str(getattr(tool, "name", "") or "")
+            tool_name = tool if isinstance(tool, str) else str(getattr(tool, "name", "") or "")
             if tool_name not in self._SPEECH_TOOL_NAMES:
                 return  # 非语音/发言类工具：一概不碰，避免误伤文件/代码参数
             from sylanne_alpha.compat import strip_draft_blocks, truncate_at_sentence
