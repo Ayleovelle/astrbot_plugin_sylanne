@@ -198,20 +198,20 @@ flowchart LR
 
 2.0.0 在不可逆计算引擎之上，长出了一套多智能体认知架构。计算栈负责「此刻的状态」，agent 团队负责「如何运用这些状态去判断、表达、演化」。
 
-### 9 个认知 agent + 四时点编排
+### 认知能力 + 三拍编排（2.1.0）
 
-每个 agent 是一个 `perceive（只读快照）→ gate（纯算术人格门控）→ act（产意图）` 的 worker。编排器 SelfCore 在四个时点按需调度它们，融合多份意图成单个事件喂回计算栈——强来自结构（单一收敛点 + 人格门控），不来自通讯带宽。
+v2core 把原来的 9 个独立 agent 重构为**能力（Capability）+ 领域（Domain）**双层架构，由 SelfCore 在三拍（PERCEPT / DELIBERATE / EVOLVE）中编排。能力是无状态的信号提取器/决策器，领域是有状态的单一写者——跨领域影响经 Intent + EVOLVE 拍编排，绝不穿透。
 
-| 时点 | 触发 | 参与 agent | 职责 |
-|------|------|-----------|------|
-| **PRE** | 请求发出前 | emotion / assessor / persona / life / memory | 产意图影响本轮计算输入（flags/置信/情感） |
-| **POST** | 计算完出新状态 | rhythm / memory / proactive | 消化结果：节奏学习 / 记忆衰减 / 主动开口决策 |
-| **RESPONSE_POST** | bot 回复后 | social / dialogue | 社交场通知 / 回复质量自评 |
-| **AUTONOMOUS** | 无人说话的自驱时点 | life | 作息/生活事件自主演化——「没人说话也活着」 |
+| 拍 | 语义 | 参与 | 纪律 |
+|---|---|---|---|
+| **PERCEPT** | 只读快照，抽取信号 | 全部 Capability（情绪/对你/躯体标记/表达风格/话头/记忆召回/点火/共享理解） | 只读 BodySnapshot + 领域接口，零写 |
+| **DELIBERATE** | 决定怎么回应 | 热路径 Capability（受 budget_ms 约束） | 产出 Intent，不落地 |
+| **EVOLVE** | 唯一写相位 | 全部 Domain（情绪/记忆/对你/叙事自我/话头/蒸馏） | 集中写、单一写者 |
 
+- **心象片段注入**：PERCEPT 拍产物由 `build_mind_fragment` 压成 ≤420 字结构化中文，经 `system_prompt` 注入 LLM——她的认知从此真正塑形她的言语。
 - **门控即人格函数**：gate 阈值由人格派生（表达驱力、亲密引力、主权守护…），纯算术、微秒级、零 LLM。
-- **全局 LLM 预算闸**：LLM 档 agent 超预算时按优先级降级为规则档，token 成本有硬上界。
-- **自驱心跳**：全局单 task 后台循环按会话三态（AWAKE / DROWSY / RETIRED）演化，她在没人理的时候也照常漂移、积累、想起你。
+- **全局 LLM 预算闸**：LLM 档能力超预算时按优先级降级为规则档。
+- **交付模式**（2026-06-15 新增）：结构判定"反复纠正同一成品"后摘逃生舱工具 + 注交付契约，防 thrash 循环。
 
 ### 三层进化（频率与 LLM 成本成反比）
 
@@ -295,55 +295,48 @@ flowchart TD
     B --> C
     C --> C1["取消正在发送的旧分段回复（打断）"]
 
-    C1 --> PRE
+    C1 --> PERCEPT
 
-    subgraph PRE["① SelfCore PRE 编排"]
+    subgraph PERCEPT["① v2core PERCEPT 拍（只读快照）"]
         direction LR
-        AG1["emotion"] --> GATE1{"gate"}
-        AG2["assessor"] --> GATE2{"gate"}
-        AG3["persona"] --> GATE3{"gate"}
-        AG4["life"] --> GATE4{"gate"}
-        AG5["memory"] --> GATE5{"gate"}
-        GATE1 & GATE2 & GATE3 & GATE4 & GATE5 --> FUSE["融合意图→单事件"]
+        CAP1["情绪感知"]
+        CAP2["对你预测"]
+        CAP3["躯体标记"]
+        CAP4["表达风格"]
+        CAP5["话头锚定"]
+        CAP6["记忆召回"]
+        CAP1 & CAP2 & CAP3 & CAP4 & CAP5 & CAP6 --> FRAG["build_mind_fragment<br/>→ 心象片段注入 system_prompt"]
     end
 
-    PRE -->|"事件输入"| CORE
+    PERCEPT --> DM
 
-    subgraph CORE["② 共振场计算（Leader）"]
-        direction TB
-        TICK["kernel.tick()"] --> RF["Resonance Field Δ⁶<br/>7 模块迭代收敛"]
-        RF --> SURF["Surface 输出<br/>decision · state · guard"]
-    end
-
-    CORE --> POST
-
-    subgraph POST["③ SelfCore POST 编排"]
+    subgraph DM["①.5 交付模式门控"]
         direction LR
-        R1["rhythm 节奏学习"]
-        R2["memory 衰减"]
-        R3["proactive 主动判断"]
+        DET{"反复纠正<br/>同一成品？"}
+        DET -->|"是"| GATE["摘逃生舱工具<br/>+ 注交付契约"]
+        DET -->|"否"| SKIP["保留全部工具"]
     end
 
-    POST --> RL["④ 反应式学习<br/>reward → 微调门控偏置（零 LLM）"]
-    RL --> C4["注入上下文 + 记忆碎片到 prompt"]
-    C4 --> D["⑤ 请求发给 LLM"]
+    DM --> INJ["② 注入上下文 + 记忆碎片 + 回复长度提示"]
+    INJ --> D["③ 请求发给 LLM"]
     D --> F["等待回复"]
     F --> G["on_llm_response"]
-    G --> G1["过滤 thinking/draft_notes"]
+    G --> G1["strip thinking/draft 块"]
 
-    G1 --> RP
+    G1 --> DELIB
 
-    subgraph RP["⑥ SelfCore RESPONSE_POST 编排"]
+    subgraph DELIB["④ v2core DELIBERATE + EVOLVE 拍"]
         direction LR
-        S1["social 社交通知"]
-        S2["dialogue 质量自评→反应式学习"]
+        DE1["决策：SPEAK / SILENT / FALLBACK"]
+        DE2["情绪漂移 + 人格微调"]
+        DE3["记忆写入 + 节奏学习"]
     end
 
-    RP --> G3["realtime_plan 拆成多段"]
+    DELIB --> G3["⑤ realtime_plan 拆分段<br/>（max_parts=12 熔断）"]
     G3 --> G4["后台按打字节奏逐段发送"]
 ```
 
-> **编排逻辑：** 共振场（计算栈）是 Leader——它拥有状态、做出决策（Surface）。9 个 agent 是它的感官（PRE：感知环境→产意图→融合成事件喂给 Leader）和执行器（POST/RESPONSE_POST：消化 Leader 输出→学习→驱动行为）。Agent 不直接决策，Leader 不直接感知——分工通过 SelfCore 四时点编排粘合。
+> **编排逻辑（2.1.0 三拍制）：** v2core 的 SelfCore 用三拍编排所有能力 agent——PERCEPT（感知：只读 body + 领域接口，抽取信号）→ DELIBERATE（审议：决定怎么回应）→ EVOLVE（进化：唯一写相位，落地状态变更）。计算栈 kernel.tick() 在 PERCEPT 拍前由 BodyPort 驱动，心象片段在 PERCEPT 拍后注入 system_prompt——她的认知真正塑形她的言语。
 
 
 ### 计算层（每条消息内部）
