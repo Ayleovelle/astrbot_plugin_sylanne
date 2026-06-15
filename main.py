@@ -1073,9 +1073,6 @@ class EmotionalStatePlugin(Star):
             sched = getattr(self, "_proactive_scheduler", None)
             if sched is not None and hasattr(sched, "record_message_time"):
                 sched.record_message_time(session_key, now)
-            sched = getattr(self, "_proactive_scheduler", None)
-            if sched is not None and hasattr(sched, "record_message_time"):
-                sched.record_message_time(session_key, now)
             # 喂给节奏学习器（记录 tempo，不受亲密度门控）
             self._rhythm_learner._record_tempo(session_key, now)
         except Exception:
