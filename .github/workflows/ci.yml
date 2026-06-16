@@ -168,7 +168,7 @@ jobs:
       - name: Install deps
         run: |
           pip install --upgrade pip
-          pip install pytest aiohttp numpy jieba
+          pip install pytest pytest-asyncio aiohttp numpy jieba
 
       - name: Run pytest
         run: pytest tests/ -v --no-header -p no:cacheprovider
