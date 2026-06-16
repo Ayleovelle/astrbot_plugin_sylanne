@@ -120,9 +120,7 @@ class PhaseTransitionExpression:
         return self._order_params
 
     def accumulate_channel(self, channel: int, drive: float, dt: float = 1.0) -> None:
-        """积累指定通道的表达压力（仅注入驱动力，不做衰减）。
-
-        衰减统一由 accumulate() 负责，避免同一 tick 内双重衰减。
+        """积累指定通道的表达压力。
 
         Args:
             channel: 通道索引 (0 ~ order_params-1)

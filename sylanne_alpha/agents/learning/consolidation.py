@@ -86,6 +86,22 @@ class ConsolidationEngine:
                 store.decay_reflection_all()
         except Exception as exc:
             logger.debug("Sylanne consolidate reflection decay [%s]: %s", session_key, exc)
+        # 1.7 梦境巩固（2.2.0-a，REM 对应物·零 LLM 段）：把白天 v2core 长出的东西
+        #     ——锚点厚度/最热的"我们的说法"/合拍程度/情绪基线——压成一枚"梦:"锚点
+        #     写进叙事自我。守卫在 register_dream（无新经历无梦）；本引擎 1800s 间隔
+        #     闸防 RETIRED 期反复做梦。成梦才落盘（走 v2core 既有 fire-and-forget 通道，
+        #     同步零 IO，create_task 不在锁内做网络/磁盘）。
+        try:
+            from sylanne_alpha.v2core.dream import weave_and_register_dream
+
+            if weave_and_register_dream(p, session_key):
+                from sylanne_alpha.v2core.integration import _schedule_domain_save
+
+                rt = (getattr(p, "_v2core_runtimes", None) or {}).get(session_key)
+                if isinstance(rt, dict) and isinstance(rt.get("domains"), dict):
+                    _schedule_domain_save(p, session_key, rt["domains"])
+        except Exception as exc:
+            logger.debug("Sylanne consolidate dream [%s]: %s", session_key, exc)
         # 2. 取进化档案快照（落盘交给锁外的 _write_evolution）
         try:
             sc = getattr(p, "_self_core", None)

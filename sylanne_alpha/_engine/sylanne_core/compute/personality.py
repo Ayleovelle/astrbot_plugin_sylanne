@@ -60,6 +60,11 @@ _TRAIT_CEIL = 0.95
 # 单次 tick 内所有特质变化总量（绝对值之和）的上限
 _TICK_DRIFT_CAP = 0.05
 
+# 对话质量自评信号的高/低阈值（作用于归一化 [0,1] 质量分）
+# 质量分 ≥ HIGH → dialogue_quality_high；≤ LOW → dialogue_quality_low；中间区不产信号
+_DIALOGUE_QUALITY_HIGH = 0.7
+_DIALOGUE_QUALITY_LOW = 0.3
+
 # --- 漂移信号 → Embodiment 特质映射（来自设计文档 3.1 节）---
 # 每个信号可以影响一个或多个特质，权重表示影响方向和强度
 # 正权重 = 特质值上升，负权重 = 特质值下降
@@ -74,11 +79,11 @@ DRIFT_SIGNALS: dict[str, list[tuple[str, float]]] = {
     "expression_fired": [("expression_drive_trait", +0.3)],  # 成功触发表达→正反馈
     "sustained_silence": [("expression_drive_trait", -0.1)],  # 持续沉默→缓慢抑制
     # 对话质量自评信号（CP8-P4 自我进化：self_score 三维质量 → 人格漂移）
-    "dialogue_quality_high": [  # 回复质量高→强化表达欲 + 拉近关系（越聊越自信亲近）
+    "dialogue_quality_high": [  # 回复质量高 → 强化表达欲 + 拉近关系
         ("expression_drive_trait", +0.25),
         ("relational_gravity", +0.15),
     ],
-    "dialogue_quality_low": [("expression_drive_trait", -0.15)],  # 质量低→收敛表达欲
+    "dialogue_quality_low": [("expression_drive_trait", -0.15)],  # 质量低 → 收敛表达欲
     # 感知敏锐度相关信号
     "high_tension": [("perception_acuity", +0.5)],  # 高张力→感知变敏锐
     "low_coherence": [("perception_acuity", +0.4)],  # 低一致性→警觉提升
@@ -238,6 +243,27 @@ class DriftSignalExtractor:
         # 表达触发信号
         if should_express:
             signals["expression_fired"] = 1.0
+
+        # 对话质量自评信号（CP8-P4 自我进化）：agent 层把上一轮回复的归一化质量分
+        # 经 process(dialogue_quality=...) 注入 → 落到 result["dialogue_quality"]。
+        # 高质量强化表达欲+拉近关系，低质量收敛表达欲；信号强度按偏离阈值的程度归一化。
+        # 直接调 spine.process 的路径不经 kernel 的类型守卫，故此处兜底过滤坏类型与 NaN/Inf。
+        dq = result.get("dialogue_quality")
+        if dq is not None:
+            try:
+                dq = float(dq)
+            except (ValueError, TypeError):
+                dq = None
+            if dq is not None and not math.isnan(dq) and not math.isinf(dq):
+                dq = max(0.0, min(1.0, dq))
+                if dq >= _DIALOGUE_QUALITY_HIGH:
+                    signals["dialogue_quality_high"] = min(
+                        1.0, (dq - _DIALOGUE_QUALITY_HIGH) / max(1e-6, 1.0 - _DIALOGUE_QUALITY_HIGH)
+                    )
+                elif dq <= _DIALOGUE_QUALITY_LOW:
+                    signals["dialogue_quality_low"] = min(
+                        1.0, (_DIALOGUE_QUALITY_LOW - dq) / max(1e-6, _DIALOGUE_QUALITY_LOW)
+                    )
 
         # 路由相关信号：连续 skip 表示持续沉默
         if route == "skip":

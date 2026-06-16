@@ -146,7 +146,6 @@ class SylanneAlphaHost:
         """主动发言检查：tick 后若 host_payload 指示应发送，则消耗中断预算并进入冷却。"""
         surface = self._tick(event, phase="proactive")
         if surface["host_payload"].get("should_send"):
-            # Direct state mutation — proactive check is outside the normal pipeline path
             self.kernel.body.immunity.interruption_budget = max(
                 0.0, self.kernel.body.immunity.interruption_budget - 0.2
             )

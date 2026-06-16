@@ -123,23 +123,72 @@ def strip_draft_blocks(text: str) -> str:
     return "\n".join(visible).strip()
 
 
+# 整段长度硬截断（不同于 _cap_parts 的"限段数"）。当前唯一调用方：path3 TTS——
+# text 整段进语音合成，段数无意义、只长度有害（数分钟音频）。按字符数在句末标点回退
+# 截断；找不到句末标点时退而求安全 ASCII 边界（不切坏代码/URL token，M2 审查），
+# 再不行才硬切。阈值放宽，只兜异常长。
+def truncate_at_sentence(text: str, max_chars: int) -> str:
+    """超过 max_chars 时在 <=max_chars 内截断：优先句末标点 → 安全 ASCII 边界 → 硬切。"""
+    if max_chars <= 0:
+        return ""
+    s = str(text or "")
+    if len(s) <= max_chars:
+        return s
+    cut = s[:max_chars]
+    lo = max_chars // 2
+    # ① 句末标点
+    for j in range(len(cut) - 1, lo - 1, -1):
+        if cut[j] in "。！？!?；;\n":
+            return cut[: j + 1]
+    # ② 安全边界：切点不能落在一个 ASCII token（标识符/URL）中间（复用既有判定）
+    for j in range(len(cut) - 1, lo - 1, -1):
+        if _safe_ascii_boundary(s, j):
+            return cut[:j].rstrip() or cut[:j]
+    # ③ 实在没有 → 硬切
+    return cut
+
+
+# 出站分段硬上限：单条回复最多发这么多段 IM。防 thinking 泄露/超长回复被
+# _split_text 按行碎成几十上百段连发轰炸用户（2026-06-15 事故 Turn8：86 段）。
+# 超限时【合并尾部】成一段（不丢内容，只少发几条），而非丢弃——交付型成品常落在
+# 末尾，丢尾会把真正的答案删掉。这是兜底闸：正常人格回复远到不了 12 段。
+_DEFAULT_MAX_PARTS = 12
+
+
+def _cap_parts(parts: list[str], *, max_parts: int) -> list[str]:
+    """把分段数压到 max_parts 以内：保留前 max_parts-1 段，其余合并成最后一段。"""
+    if max_parts <= 0 or len(parts) <= max_parts:
+        return parts
+    head = parts[: max_parts - 1]
+    tail = [p for p in parts[max_parts - 1 :] if p]
+    merged_tail = "\n".join(tail).strip()
+    if merged_tail:
+        head.append(merged_tail)
+    return head
+
+
 def realtime_plan(
     session_key: str,
     text: str,
     *,
     max_part_chars: int = 48,
     chars_per_second: float = 7.5,
+    max_parts: int = _DEFAULT_MAX_PARTS,
 ) -> dict[str, Any]:
     raw = str(text or "")
     visible = strip_draft_blocks(raw)
     parts = _split_text(visible, max_part_chars=max_part_chars)
+    capped = _cap_parts(parts, max_parts=max_parts)
     return {
         "schema_version": REALTIME_PLAN_SCHEMA_VERSION,
         "kind": "realtime_chat_plan",
         "session_key": session_key,
         "enabled": True,
-        "message_count": len(parts),
-        "message_parts": _message_parts(parts, chars_per_second=chars_per_second),
+        "max_parts": max_parts,
+        "capped": len(capped) != len(parts),
+        "uncapped_count": len(parts),
+        "message_count": len(capped),
+        "message_parts": _message_parts(capped, chars_per_second=chars_per_second),
         "source_text_chars": len(raw),
     }
 

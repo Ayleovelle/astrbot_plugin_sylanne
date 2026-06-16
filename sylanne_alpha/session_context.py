@@ -633,7 +633,11 @@ class SessionContext:
             session_key = "default"
         systems = self._p._store.memory_systems
         if not systems.has(session_key):
-            systems.set(session_key, MemorySystem())
+            # 召回引擎灰度模式：插件配置 sylanne_alpha_recall_mode 优先，
+            # 缺省时 MemorySystem 内部会回退到环境变量 SYLANNE_RECALL_MODE / LEGACY。
+            cfg = getattr(self._p, "config", None) or {}
+            recall_mode = cfg.get("sylanne_alpha_recall_mode") or None
+            systems.set(session_key, MemorySystem(recall_mode=recall_mode))
         return systems.get(session_key)
 
     def memory_system_has_content(self, memory_system: Any) -> bool:

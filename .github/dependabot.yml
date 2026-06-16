@@ -18,3 +18,7 @@ updates:
       python-dependencies:
         patterns:
           - "*"
+    # aiohttp 必须跟随 AstrBot 核心锁定的版本，不能让 dependabot 顶高下限
+    # （否则会触发"依赖版本保护冲突"，阻止插件安装）
+    ignore:
+      - dependency-name: "aiohttp"

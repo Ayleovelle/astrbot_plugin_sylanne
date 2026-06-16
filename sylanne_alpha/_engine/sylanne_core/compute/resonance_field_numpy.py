@@ -134,7 +134,8 @@ class NumpyResonanceField:
     @property
     def module_states(self) -> list[list[float]]:
         """Return states as list[list[float]] for compatibility."""
-        return self._module_states_np.tolist()
+        states: list[list[float]] = self._module_states_np.tolist()
+        return states
 
     @property
     def active_channels(self) -> int:
@@ -371,7 +372,7 @@ class NumpyResonanceField:
         """Extract harmonic component as flat numpy array."""
         if self._harmonics_cache is not None:
             return self._harmonics_cache
-        signal = self._module_states_np.ravel().copy()
+        signal: np.ndarray = self._module_states_np.ravel().copy()
         self._harmonics_cache = signal
         return signal
 

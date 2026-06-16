@@ -24,6 +24,7 @@ from sylanne_alpha.content_sanitizer import (
     is_content_filter_refusal,
 )
 from sylanne_alpha.utils import safe_ensure_future
+from sylanne_alpha.state_persistence import mark_dirty
 
 if TYPE_CHECKING:
     from sylanne_alpha.protocols import PluginHost
@@ -51,6 +52,9 @@ _INJECTION_SLOTS = [
     ("memory",     4, 1500),   # 记忆召回（可压缩）
     ("unfinished", 5, 1000),   # 未完成回复（可截断）
 ]
+# 注：话题锚点（抗跳话题）不在此设槽——那是"再加一坨注入抢预算"的治标做法。
+# 话头连续性已上提为一等公民认知器官 FocusDomain（v2core/domains/focus.py），
+# 经永远在场的心象片段(system_prompt)注入，所有兼容模式生效。见该模块设计说明。
 
 # gap-aware 动态预算
 _BUDGET_BY_GAP = [
@@ -894,10 +898,8 @@ class LLMRequestPipeline:
                     type(p._background_tasks).__name__,
                 )
             p._background_tasks = []
-        if not hasattr(p, "_fragment_buffers"):
-            p._fragment_buffers = {}
-        if not hasattr(p, "_fragment_timers"):
-            p._fragment_timers = {}
+        # 碎片防抖缓冲已迁入 p._store.fragment_buffers（CP8 inline-await 方案B），
+        # 旧 p._fragment_buffers / p._fragment_timers 懒初始化整体废弃。
         p._start_webui_if_enabled()
         # 首次请求时启动记忆 v2 后台定时器（会话空闲检查 + 整理循环）
         if not hasattr(p, "_memory_timers_started"):
@@ -992,70 +994,62 @@ class LLMRequestPipeline:
             max_wait = float(
                 (p.config or {}).get("realtime_input_completion_max_wait_seconds", 4.0)
             )
+            # 防误配：probe_delay >= max_wait 会让首个醒来的碎片必然命中 max_wait 兜底
+            # 而提前 pop（防抖窗口塌缩），故 clamp 到 max_wait 的 0.8 倍留出兜底余量。
+            if max_wait > 0 and probe_delay >= max_wait:
+                probe_delay = max_wait * 0.8
+            buffers = p._store.fragment_buffers
 
-            # 取消该会话之前的防抖定时器
-            old_timer = p._fragment_timers.pop(session_key, None)
-            if old_timer and not old_timer.done():
-                old_timer.cancel()
+            # ---- 同步段A：领号 + 入缓冲（无 await，单线程原子）----
+            buf = buffers.get(session_key)
+            if buf is None:
+                buf = {"texts": [], "start_time": time.time(), "latest_seq": 0}
+                buffers.set(session_key, buf)
+            buf["latest_seq"] += 1
+            my_seq = buf["latest_seq"]
+            buf["texts"].append(message_text)
+            start_time = buf["start_time"]
 
-            # 累积碎片到缓冲区
-            if session_key not in p._fragment_buffers:
-                p._fragment_buffers[session_key] = {
-                    "texts": [],
-                    "start_time": time.time(),
-                    "event": event,
-                    "request": request,
-                }
-            p._fragment_buffers[session_key]["texts"].append(message_text)
-            p._fragment_buffers[session_key]["event"] = event
-            p._fragment_buffers[session_key]["request"] = request
+            # ---- 让出：等待更晚碎片到达并刷新 latest_seq ----
+            await asyncio.sleep(probe_delay)
 
-            elapsed = time.time() - p._fragment_buffers[session_key]["start_time"]
-            if elapsed >= max_wait:
-                # 超过最大等待时间，立即合并处理
-                merged = " ".join(p._fragment_buffers.pop(session_key)["texts"])
-                event.message_str = merged
+            # ---- 同步段B：判定（无 await，pop 作为 CAS，单线程原子）----
+            # 副作用须知：loser 分支调 event.stop_event() 会中止该事件的后续 on_llm_request
+            # 钩子链。这意味着依赖每条原始碎片做计费/审计统计的下游插件，对被合并掉的
+            # 碎片会"漏计"——这是有意取向（多个碎片本就应被视作一次输入），但接入新统计
+            # 插件时需知晓：只有 winner（合并后的那条）会走完整 pipeline。
+            #
+            # fragment_buffers 为普通 dict（非 BoundedDict），故 cur is None 的唯一
+            # 含义是"本会话碎片已被某 winner pop 并合并"——本条内容已含在那次合并里，
+            # 直接作废即可，不会丢消息（旧 BoundedDict 实现下驱逐也返回 None，无法区分）。
+            cur = buffers.get(session_key)
+            if cur is None:
+                event.stop_event()
+                return
+
+            elapsed = time.time() - start_time
+            is_latest = my_seq == cur["latest_seq"]
+
+            if is_latest or elapsed >= max_wait:
+                # 自然最新 或 超时兜底：尝试领取（pop 为唯一移除点，CAS）
+                claimed = buffers.pop(session_key)
+                if claimed is None:
+                    # 竞争失败（被并发兜底者先 pop）→ loser
+                    event.stop_event()
+                    return
+                merged = " ".join(claimed["texts"])
+                # 关键：LLM 实际读 req.prompt（req 在 hook 之前已 build），必须改这个
+                request.prompt = merged
+                event.message_str = merged  # 供历史/其他钩子
                 message_text = merged
-                logger.info(f"Sylanne fragment merged (max_wait): {merged[:60]}")
+                logger.info("Sylanne fragment merged (winner): %s", merged[:60])
+                # fall-through 到下方 _process_llm_request_final（不 stop）
             else:
-                # 设置延迟定时器，等待更多碎片到达
-                async def _process_after_delay(sk=session_key):
-                    await asyncio.sleep(probe_delay)
-                    buf = p._fragment_buffers.pop(sk, None)
-                    if buf:
-                        merged = " ".join(buf["texts"])
-                        buf["event"].message_str = merged
-                        logger.info(
-                            f"Sylanne fragment merged (debounce): {merged[:60]}"
-                        )
-                        await self._process_llm_request_final(
-                            buf["event"],
-                            buf["request"],
-                            merged,
-                            sk,
-                            realtime_enabled,
-                            hajide,
-                            intercept,
-                        )
+                # 有更晚碎片，本条作废
+                event.stop_event()
+                return
 
-                timer = safe_ensure_future(
-                    _process_after_delay(), name="fragment_debounce"
-                )
-                p._fragment_timers[session_key] = timer
-                if not isinstance(getattr(p, "_background_tasks", None), list):
-                    p._background_tasks = []
-                p._background_tasks.append(timer)
-
-                def _cleanup_task(t, tasks=p._background_tasks):
-                    try:
-                        tasks.remove(t)
-                    except ValueError:
-                        pass
-
-                timer.add_done_callback(_cleanup_task)
-                return  # 暂不处理，等待防抖定时器触发
-
-            # 若通过 max_wait 到达此处，继续执行后续处理
+            # winner 续跑下方正常 pipeline
 
         await self._process_llm_request_final(
             event,
@@ -1091,6 +1085,36 @@ class LLMRequestPipeline:
           5. Prompt 组装 → _assemble_final_prompt
         """
         p = self._p
+
+        # Step 0: v2core PERCEPT（碎片合并/SFPD 之后，文本与是否应答已确定）
+        try:
+            from sylanne_alpha.v2core.integration import apply_v2core_request
+
+            await apply_v2core_request(p, event, request)
+        except Exception as exc:
+            logger.error(
+                "Sylanne v2core request stage error: %s", exc, exc_info=True
+            )
+
+        # Step 0.5: 交付模式门控（2026-06-15 事故 P0-3）。两档独立粒度：
+        #   宽——本轮无附件即摘代码执行逃生舱工具（防 thrash，纯聊天用不到）；
+        #   窄——仅纠正链注交付契约（压住人设反任务取向）。
+        # 放在 v2core 注入之后：契约追加到 system_prompt 末尾，最后说的最重，盖过 _PRESENCE。
+        try:
+            from sylanne_alpha import deliverable_mode
+
+            buf = p._store.conversation_buffers.get(session_key)
+            outcome = deliverable_mode.apply(event, request, buf)
+            if outcome.get("gated_tools") or outcome.get("contract_injected"):
+                logger.info(
+                    "Sylanne deliverable mode: session=%s gated=%s contract=%s",
+                    session_key, outcome.get("gated_tools"),
+                    outcome.get("contract_injected"),
+                )
+        except Exception as exc:
+            logger.error(
+                "Sylanne deliverable mode error（继续）: %s", exc, exc_info=True
+            )
 
         # Step 1: 清理流式状态、启动观测、处理流式拦截
         await self._clean_incoming_message(
@@ -1131,6 +1155,17 @@ class LLMRequestPipeline:
             outreach_fragment=outreach_fragment,
             memory_fragment=memory_fragment,
         )
+
+        # Step 5b: 低信息消息时稀释较早高密度 history（路径 B / Wave 3）
+        try:
+            from sylanne_alpha.history_dilution import dilute_dense_contexts
+
+            contexts = getattr(request, "contexts", None)
+            diluted = dilute_dense_contexts(contexts, message_text)
+            if diluted is not contexts and diluted is not None:
+                request.contexts = diluted
+        except Exception as e:
+            logger.debug(f"Sylanne history dilution skipped: {e}")
 
         # Step 6: 兜底——在所有 contexts 改写（含 hajide flatten、注入）之后，
         # 移除破损的 tool_calls/tool 配对，防止严格 provider（DeepSeek 等）返回 400。
@@ -1367,6 +1402,7 @@ class LLMRequestPipeline:
             host.kernel.body.observe_shadow_signal(
                 text="", flags=["unfinished_reply"], kind="interruption"
             )
+            mark_dirty("session")
             await p._persist_kernel(session_key, host)
             capped = unfinished[:_MAX_UNFINISHED_CONTEXT_CHARS]
             if len(unfinished) > _MAX_UNFINISHED_CONTEXT_CHARS:
@@ -1385,7 +1421,8 @@ class LLMRequestPipeline:
                 f"[life_event_context] Sylanne 刚刚经历了一件事想分享：{reason}（心情：{mood}）。"
                 f"请自然地在回复中提及或表达这件事，用你自己的语气。"
             )
-            # 将生活事件写入记忆层（不带任何来源标签，和对话记忆无法区分）
+            # 将生活事件写入记忆层，标记 source="life_sim" 以便召回时
+            # 区分"Sylanne 自己脑补的生活"与"和用户真实聊过的事"
             try:
                 mem_sys = p._memory_system_for_session(session_key)
                 # 去掉 [life_event] 前缀，用朴素第一人称描述
@@ -1395,16 +1432,23 @@ class LLMRequestPipeline:
                         text=clean_reason,
                         source_turns=1,
                         temperature=0.3,
+                        source="life_sim",
                     )
             except Exception:
                 pass
 
         # 使用三层记忆系统召回相关记忆（gap-aware）
         memory_fragment = ""
-        _MEMORY_RELEVANCE_THRESHOLD = 0.25
-        _MEMORY_GAP_SKIP = 900
+        # 主门控已移入 memory_system.recall 的 composite 人格化硬门控；
+        # 此处 relevance 阈值降级为阶段1粗筛的双保险，适当下调避免与内部门控
+        # 叠加导致过度空召回。embedding 模式仍用较高阈值（余弦普遍 0.3-0.8）。
+        _MEMORY_RELEVANCE_THRESHOLD_KEYWORD = 0.15
+        _MEMORY_RELEVANCE_THRESHOLD_EMBEDDING = 0.45
+        v2core_on = bool((p.config or {}).get("sylanne_enable_v2core"))
+        _MEMORY_GAP_SKIP = 120 if v2core_on else 900
         _MEMORY_GAP_LIGHT = 7200
-        if realtime_enabled and message_text and gap_seconds >= _MEMORY_GAP_SKIP:
+        recall_allowed = message_text and gap_seconds >= _MEMORY_GAP_SKIP
+        if recall_allowed and (realtime_enabled or v2core_on):
             host = p._host(session_key)
             memory_system = p._memory_system_for_session(session_key)
             current_warmth = host.kernel.computation.engine.observe().get("warmth", 0.0)
@@ -1429,9 +1473,20 @@ class LLMRequestPipeline:
                 current_warmth=current_warmth,
                 limit=recall_limit,
             )
+            # embedding 实际生效（启用且成功取到向量）时用高阈值，否则用关键词阈值
+            relevance_threshold = (
+                _MEMORY_RELEVANCE_THRESHOLD_EMBEDDING
+                if (enabled and query_embedding is not None)
+                else _MEMORY_RELEVANCE_THRESHOLD_KEYWORD
+            )
             if results:
+                # temporal_proximity（近期记忆走 recency 通道）豁免外层 relevance 粗筛，
+                # 否则刚说过、关键词不重合的话会被兜底分（0.05）以下的阈值二次否决，
+                # 与 memory_system 内部 composite 门控放行的结果自相矛盾。
                 results = [
-                    r for r in results if r.relevance >= _MEMORY_RELEVANCE_THRESHOLD
+                    r for r in results
+                    if r.relevance >= relevance_threshold
+                    or r.recall_reason == "temporal_proximity"
                 ]
             if results:
                 mem_texts = [r.text[:100] for r in results if r.text]
@@ -1440,7 +1495,7 @@ class LLMRequestPipeline:
                         results, max_items=recall_limit
                     )
                 safe_ensure_future(
-                    self._reconsolidation_rewrite(session_key, memory_system),
+                    self._reconsolidation_rewrite_guarded(session_key, memory_system),
                     name="reconsolidation_rewrite",
                 )
 
@@ -1462,10 +1517,11 @@ class LLMRequestPipeline:
         Returns:
             state_fragment 字符串，无信号时为空。
         """
-        if not realtime_enabled:
+        p = self._p
+        v2core_on = bool((p.config or {}).get("sylanne_enable_v2core"))
+        if not realtime_enabled and not v2core_on:
             return ""
 
-        p = self._p
         host = p._host(session_key)
         comp = host.kernel.computation
         emotion = comp.engine.observe()
@@ -1480,7 +1536,7 @@ class LLMRequestPipeline:
         # 前台服务实时 prompt 文案、后台服务计算注入，各需一次 fast 评估，非重复执行。
         fast_assessment: dict = {}
         fast_enabled = p._cfg_bool("sylanne_alpha_assessor_llm_enabled")
-        if fast_enabled and message_text:
+        if fast_enabled and message_text and realtime_enabled:
             try:
                 fast_assessment = await p._async_assessor.assess_fast(
                     message_text, self._assessor_llm_call
@@ -1490,6 +1546,10 @@ class LLMRequestPipeline:
 
         # 合并评估结果（共振场可能无 _last_assessment，getattr 守卫）
         last_assessment = getattr(comp, "_last_assessment", None) or {}
+        _short_gap = gap_seconds < 900
+        # T1-11：短间隔且无本轮 fast 评估时，不用上轮 _last_assessment 的情绪/意图（防漂移）
+        if _short_gap and not fast_assessment:
+            last_assessment = {}
         current_assessment = (
             {**last_assessment, **fast_assessment}
             if fast_assessment
@@ -1507,8 +1567,9 @@ class LLMRequestPipeline:
         arousal = float(current_assessment.get("arousal", 0.0))
         intent = str(current_assessment.get("intent", ""))
 
-        _short_gap = gap_seconds < 900
-        _prev_state = getattr(host.kernel, "_last_injected_state", None) or {}
+        # 上一轮注入状态（短 gap 慢变信号比较）：2.1.0 从 kernel._last_injected_state slot
+        # 挪到 agent 层 _store（SDK 整树同步会冲掉该 slot，存 agent 层解耦 SDK 依赖）。
+        _prev_state = p._store.last_injected_states.get(session_key) or {}
         signals: list[str] = []
 
         if valence > 0.5:
@@ -1561,8 +1622,8 @@ class LLMRequestPipeline:
         if signals:
             state_fragment = f"[当前状态：{'，'.join(signals)}]"
 
-        # 保存当前状态快照供下一轮短 gap 比较
-        host.kernel._last_injected_state = {"warmth": warmth, "tension": tension}
+        # 保存当前状态快照供下一轮短 gap 比较（2.1.0 存 agent 层 _store，不再依赖 kernel slot）
+        p._store.last_injected_states.set(session_key, {"warmth": warmth, "tension": tension})
         return state_fragment
 
     # ------------------------------------------------------------------
@@ -1591,6 +1652,18 @@ class LLMRequestPipeline:
         sys_parts: list[str] = []
         if time_fragment:
             sys_parts.append(time_fragment)
+
+        # 回复长度自适应（H10 修复）：rhythm_learner 已按用户近 20 条均长算出倍率因子，
+        # 原先只在 webui 展示、从不入 prompt。这里把它落成一句长度提示——用户一直发短句
+        # （纠正/追问）时压短回复，别拿大段轰炸。仅在明显偏离中性(1.0)时出手，避免噪声。
+        try:
+            rl_factor = float(self._p._rhythm_learner.get_reply_length_factor(session_key))
+            if rl_factor <= 0.8:
+                sys_parts.append("[对方在发短消息，回复也精简些，别长篇大论]")
+            elif rl_factor >= 1.4:
+                sys_parts.append("[对方消息偏长，可以答得详尽些]")
+        except Exception:
+            pass
 
         max_context_tokens = int((p.config or {}).get("max_context_tokens", 8000))
         if max_context_tokens > 0:
@@ -1631,10 +1704,13 @@ class LLMRequestPipeline:
         _compat = budget.compat_mode if budget else ""
 
         if _compat == "claude_agent_owned_context":
+            slots_log = list(trimmed.keys())
+            if unfinished_final:
+                slots_log.append("unfinished")
             if inner_text or unfinished_final:
                 logger.debug(
                     f"[Sylanne] injection skipped (hajide mode), "
-                    f"would-be slots: {list(trimmed.keys())}"
+                    f"would-be slots=[{','.join(slots_log)}]"
                 )
         elif _compat == "claude_advisory":
             advisory_parts = []
@@ -1655,38 +1731,35 @@ class LLMRequestPipeline:
                     f"chars={len(advisory_text)}"
                 )
         else:
-            nosave_messages = []
+            # 默认模式（含 Gemini/OpenAI 等所有非 Claude provider）：注入【并入 system_prompt】，
+            # 绝不以 role=assistant append 到 contexts 末尾。
+            #
+            # 根因修复（2026-06-14 Gemini 实测）：旧实现把 inner_context 当假 assistant 消息
+            # append 到 contexts 末尾。Gemini adapter(_prepare_conversation) 把 role=assistant
+            # 转成末尾 ModelContent——破坏"末尾应是 user turn"的生成语义，模型把这条元数据当成
+            # "自己已开口的半句话"续写，于是无视当前 user 消息(如"😋")、回头续上下文里情感最浓的
+            # 旧 assistant 长文 → 跳话题。OpenAI 同理（末尾 assistant 触发续写）。
+            # 并入 system_prompt 后：contexts 末尾保持真实 user turn，turn 结构不破；
+            # system_prompt 本就不持久化（_no_save 语义天然满足）。这与本文件 _append_temp_text_part
+            # 默认分支注释"也注入到 system_prompt 避免历史污染"一致——消除两处注入策略打架。
+            inject_parts: list[str] = []
             if inner_text:
-                nosave_messages.append({
-                    "role": "assistant",
-                    "content": inner_text,
-                    "_no_save": True,
-                })
+                inject_parts.append(inner_text)
             if unfinished_final:
-                nosave_messages.append({
-                    "role": "assistant",
-                    "content": f"[{_SLOT_LABELS['unfinished']}] {unfinished_final}",
-                    "_no_save": True,
-                })
+                inject_parts.append(f"[{_SLOT_LABELS['unfinished']}] {unfinished_final}")
 
-            if nosave_messages:
-                contexts = getattr(request, "contexts", None)
-                if contexts is None:
-                    request.contexts = []
-                    contexts = request.contexts
-                for msg in nosave_messages:
-                    if not msg.get("_no_save"):
-                        msg["_no_save"] = True
-                    contexts.append(msg)
-
-            if trimmed or unfinished_final:
+            if inject_parts:
+                inject_text = "\n".join(inject_parts)
+                # 此处 system_prompt 已含 v2core 心象片段；只 append，勿直接赋值覆盖。
+                sys_prompt = str(getattr(request, "system_prompt", "") or "")
+                request.system_prompt = f"{sys_prompt}\n{inject_text}".strip()
                 slots_log = list(trimmed.keys())
                 if unfinished_final:
                     slots_log.append("unfinished")
                 logger.info(
-                    f"[Sylanne] injection: budget={total_budget} "
+                    f"[Sylanne] injection(system_prompt): budget={total_budget} "
                     f"slots=[{','.join(slots_log)}] "
-                    f"chars={sum(len(v) for v in trimmed.values()) + len(unfinished_final)}"
+                    f"chars={len(inject_text)}"
                 )
             else:
                 logger.debug(
@@ -1768,12 +1841,20 @@ class LLMRequestPipeline:
 
             # 将评估结果注入计算栈
             now = time.time()
-            # CP8-P3a：SelfCore PRE 编排——9 个 agent 读上轮 surface 产意图，
-            # 融合成 flags/confidence/values/assessment 替代原硬编码，影响本轮计算。
-            # AssessorAgent 已收编 fast+main 评估，故此处 assessment 来自 agent 融合。
-            sc = getattr(p, "_self_core", None)
-            # assessment 已不在管线直接评估（收编进 AssessorAgent），默认 None，
-            # 由下方 SelfCore PRE 融合结果（composed.assessment）填充。
+            # v1 逐轮认知退役判定（2026-06-12 拍板：v2core 是唯一认知内核）：
+            # 退役时旧 SelfCore PRE/POST 与 AssessorAgent 逐轮 LLM 评估一概不跑，
+            # assessment 唯一来源是 v2core 的评价（下方合并）。flag 显式置 false
+            # 才回到 v1 旧认知（部署级紧急回退口）。
+            _v1_retired = False
+            try:
+                from sylanne_alpha.v2core.integration import v1_turn_cognition_retired
+
+                _v1_retired = v1_turn_cognition_retired(p)
+            except Exception:
+                _v1_retired = False
+            # CP8-P3a（仅 v1 模式）：SelfCore PRE 编排——9 个 agent 读上轮 surface
+            # 产意图，融合成 flags/confidence/values/assessment，影响本轮计算。
+            sc = None if _v1_retired else getattr(p, "_self_core", None)
             pre_assessment = assessment or None
             event_flags = ["safe"]
             event_confidence = 0.7
@@ -1797,6 +1878,29 @@ class LLMRequestPipeline:
                         )
                 except Exception as exc:
                     logger.warning("Sylanne SelfCore PRE failed: %s", exc)
+            # v2core 阶段一暂存的评价（对【这条消息】的多维评价）：合并进本轮 request
+            # tick 的 assessment——apply_assessment 是 SDK 唯一 assessment 入口，借
+            # 本来就要打的这一拍入体，零额外 tick。v1 退役后这是唯一评价来源；
+            # 它不含 intent 键 → SDK 里 intent=="撒娇" 的硬编码路径自然断粮。
+            try:
+                from sylanne_alpha.v2core.integration import consume_pending_assessment
+
+                _v2a = consume_pending_assessment(p, session_key)
+                if _v2a:
+                    pre_assessment = {**(pre_assessment or {}), **_v2a}
+            except Exception as exc:
+                logger.debug("Sylanne v2core assessment merge skipped: %s", exc)
+            # 对话质量分(float)滞后注入 event.values["dialogue_quality"]:上一轮自评经
+            # rt["pending_quality"] 携带至本轮 → kernel.tick 透传 process(dialogue_quality=)
+            # → _drift_embodiment 自动漂移(canonical 正道,替代已退役 feedback_quality 后门)。
+            try:
+                from sylanne_alpha.v2core.integration import consume_pending_quality
+
+                _dq = consume_pending_quality(p, session_key)
+                if _dq is not None:
+                    event_values = {**event_values, "dialogue_quality": _dq}
+            except Exception as exc:
+                logger.debug("Sylanne v2core quality inject skipped: %s", exc)
             event = SylanneAlphaHostEvent(
                 text=text,
                 confidence=event_confidence,
@@ -1806,8 +1910,8 @@ class LLMRequestPipeline:
                 event_time=p._event_time(now),
             )
             host.on_request(event, assessment=pre_assessment)
-            # CP8-P3a：SelfCore POST 编排——agent 消化本轮计算结果更新自身状态
-            # （RhythmAgent 节奏观测 / MemoryAgent 衰减 / ProactiveAgent 等）。
+            # CP8-P3a（仅 v1 模式）：SelfCore POST 编排——agent 消化本轮计算结果。
+            # v1 退役后不跑（节律学习在 v2core UserModel；记忆衰减在巩固循环里照常）。
             if sc is not None:
                 try:
                     post_surface = host.kernel.surface()
@@ -1941,6 +2045,7 @@ class LLMRequestPipeline:
 
             # 定期持久化记忆状态（每 10 个 tick）
             host.kernel.body.memory["_memory_system"] = memory_system.to_dict()
+            mark_dirty("memory")
             await p._persist_kernel(session_key, host)
             if memory_system._tick % 10 == 0:
                 await p._save_sylanne_memory_state(session_key, memory_system)
@@ -2005,6 +2110,7 @@ class LLMRequestPipeline:
                         host.kernel.body.memory["_memory_system"] = (
                             memory_system.to_dict()
                         )
+                        mark_dirty("memory")
                         await p._persist_kernel(session_key, host)
                         await p._save_sylanne_memory_state(session_key, memory_system)
         except Exception as e:
@@ -2124,6 +2230,7 @@ class LLMRequestPipeline:
                     logger.debug(f"Sylanne skip: {e}")
 
             host.kernel.body.memory["_memory_system"] = memory_system.to_dict()
+            mark_dirty("memory")
             await p._persist_kernel(session_key, host)
             await p._save_sylanne_memory_state(session_key, memory_system)
         except Exception as e:
@@ -2260,6 +2367,7 @@ class LLMRequestPipeline:
             # Persist
             host = p._host(session_key)
             host.kernel.body.memory["_memory_system"] = memory_system.to_dict()
+            mark_dirty("memory")
             await p._persist_kernel(session_key, host)
             await p._save_sylanne_memory_state(session_key, memory_system)
         except Exception as e:
@@ -2270,6 +2378,22 @@ class LLMRequestPipeline:
     # ------------------------------------------------------------------
     # _reconsolidation_rewrite
     # ------------------------------------------------------------------
+
+    def _recon_lock(self, session_key: str) -> asyncio.Lock:
+        locks = getattr(self._p, "_reconsolidation_locks", None)
+        if not isinstance(locks, dict):
+            locks = {}
+            self._p._reconsolidation_locks = locks
+        if session_key not in locks:
+            locks[session_key] = asyncio.Lock()
+        return locks[session_key]
+
+    async def _reconsolidation_rewrite_guarded(
+        self, session_key: str, memory_system: Any
+    ) -> None:
+        """T1-12：同会话再巩固串行，避免与下一轮 recall 竞态。"""
+        async with self._recon_lock(session_key):
+            await self._reconsolidation_rewrite(session_key, memory_system)
 
     async def _reconsolidation_rewrite(
         self, session_key: str, memory_system: Any
@@ -2312,7 +2436,9 @@ class LLMRequestPipeline:
                     memory_system.rewrite_item(item.id, new_text.strip())
 
             host.kernel.body.memory["_memory_system"] = memory_system.to_dict()
+            mark_dirty("memory")
             await p._persist_kernel(session_key, host)
+            await p._save_sylanne_memory_state(session_key, memory_system)
         except Exception as e:
             logger.error(
                 f"Reconsolidation rewrite failed for {session_key}: {e}", exc_info=True

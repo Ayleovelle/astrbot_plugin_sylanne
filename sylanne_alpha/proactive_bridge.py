@@ -512,7 +512,11 @@ class ProactiveBridge:
             lo_min, hi_min = 30.0, 900.0
         if hi_min < lo_min:
             hi_min = lo_min
-        target = self._urge_to_minutes(urge, quiet, lo_min, hi_min)
+        decision = surface.get("decision", {}) if isinstance(surface.get("decision"), dict) else {}
+        if str(decision.get("action", "")).strip().lower() == "reach_out":
+            target = lo_min
+        else:
+            target = self._urge_to_minutes(urge, quiet, lo_min, hi_min)
 
         # 4) 压掉 random（min=max=target）→ 调大饼重排 → 恢复
         mgr = getattr(plugin, "session_override_manager", None)

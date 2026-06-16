@@ -1,8 +1,7 @@
 """SylanneEngine — the public entry point for Sylanne-Core SDK.
 
 Provides the async API for integrating affective computation into chatbots.
-Designed as an AstrBot plugin dependency: downstream plugins call get_engine()
-to obtain a pre-configured instance.
+Instantiate it directly with your own LLM callback.
 
 Typical usage::
 
@@ -64,7 +63,17 @@ class SylanneEngine:
         llm: Callable[[str, str], Awaitable[str]],
         embedding: Callable[[str], Awaitable[list[float]]] | None = None,
         config: SylanneConfig | None = None,
+        *,
+        _shared: bool = False,
     ) -> None:
+        # _shared is set only by SylanneEngine.shared() when it builds the one
+        # canonical instance for a data_dir. Direct construction (the default)
+        # warns if that data_dir already has a live shared engine, to surface
+        # the "many plugins, many redundant engines on one directory" waste.
+        if not _shared:
+            from ._sharing import warn_if_shared_exists
+
+            warn_if_shared_exists(data_dir)
         self._data_dir = Path(data_dir)
         self._llm = llm
         self._embedding = embedding
@@ -139,6 +148,9 @@ class SylanneEngine:
             flags: Semantic flags (e.g. ["safe"], ["hurt", "boundary"]).
             now: Unix timestamp. Defaults to current time.
             values: Additional numeric signals (e.g. {"group_heat": 0.7}).
+                特殊键 ``"dialogue_quality"``（归一化 [0,1]）= 对上一轮回复的质量自评，
+                驱动「越聊越校准」人格漂移：高分强化表达欲+拉近关系，低分收敛表达欲。
+                滞后反馈——在评分对象的下一轮调用时传入。
 
         Returns:
             Surface dict with keys: state, decision, guard, personality, memory, dynamics.
@@ -260,6 +272,81 @@ class SylanneEngine:
     def exists(self, session_id: str) -> bool:
         """Check if a session exists without creating it."""
         return session_id in self._hosts
+
+    # --- shared instance registry ---
+
+    @classmethod
+    async def shared(
+        cls,
+        data_dir: str | Path,
+        llm: Callable[[str, str], Awaitable[str]],
+        embedding: Callable[[str], Awaitable[list[float]]] | None = None,
+        config: SylanneConfig | None = None,
+    ) -> SylanneEngine:
+        """Return (and start) the process-shared engine for ``data_dir``.
+
+        One engine per resolved data_dir is maintained for the process lifetime,
+        so independent call sites can share a single instance without passing
+        the object around — and one persistence directory is never owned by two
+        engines at once (which would cause lost updates on flush).
+
+        Later calls with the same data_dir return the existing instance. A
+        conflicting ``config`` raises SharedEngineConflictError; a different
+        ``llm``/``embedding`` object logs a warning but reuses the original.
+        The returned engine is already started (status == "running").
+
+        Warning: the shared engine is event-loop affine. Do not drive it from a
+        different event loop than the one used for the first shared() call. Do
+        NOT use ``async with`` on a shared instance — the first context exit
+        would shut it down for all holders. Use release_shared() for teardown.
+        """
+        from ._sharing import get_shared_engine
+
+        return await get_shared_engine(data_dir, llm, embedding=embedding, config=config)
+
+    @classmethod
+    async def release_shared(cls, data_dir: str | Path) -> None:
+        """Shut down and remove the shared engine for ``data_dir``.
+
+        Flushes all sessions to disk and frees the registry slot. After this
+        returns, a subsequent shared() call for the same path creates a new
+        engine. Call only when no other holder is still using the instance;
+        wire this into your application's shutdown path (there is no atexit
+        auto-flush — see module docs).
+        """
+        from ._sharing import release_shared_engine
+
+        await release_shared_engine(data_dir)
+
+    @classmethod
+    def clear_shared_registry(cls) -> None:
+        """Drop all shared registry entries without shutdown. TEST ISOLATION ONLY.
+
+        DANGER: does NOT flush sessions — unpersisted state is lost and live
+        engines are orphaned. Never call this in production; use release_shared()
+        for real teardown. Safe to call from sync fixtures (no event loop needed).
+        """
+        from ._sharing import clear_shared_registry
+
+        clear_shared_registry()
+
+    @classmethod
+    def is_shared(cls, data_dir: str | Path) -> bool:
+        """Return True if a live shared engine is registered for ``data_dir``."""
+        from ._sharing import is_shared
+
+        return is_shared(data_dir)
+
+    @classmethod
+    def list_shared(cls) -> list[dict[str, str]]:
+        """Snapshot of live shared engines: ``[{"data_dir", "status"}, ...]``.
+
+        Diagnostic helper for spotting redundant engines across plugins sharing
+        one process. Slots mid-teardown are omitted.
+        """
+        from ._sharing import list_shared
+
+        return list_shared()
 
     # --- internal ---
 

@@ -69,6 +69,12 @@ except ImportError:
 
             return decorator
 
+        def on_llm_stream_chunk(self, *args, **kwargs):
+            def decorator(func):
+                return func
+
+            return decorator
+
         def on_decorating_result(self, *args, **kwargs):
             def decorator(func):
                 return func
@@ -76,6 +82,12 @@ except ImportError:
             return decorator
 
         def llm_tool(self, *args, **kwargs):
+            def decorator(func):
+                return func
+
+            return decorator
+
+        def on_using_llm_tool(self, *args, **kwargs):
             def decorator(func):
                 return func
 
@@ -344,6 +356,22 @@ class _StateInjectionBudget:
 # ---------------------------------------------------------------------------
 # EmotionalStatePlugin -- Sylanne-Embodiment 薄宿主层
 # ---------------------------------------------------------------------------
+def _optional_stream_chunk_filter(**kwargs: Any):
+    """AstrBot 部分版本 filter 无 on_llm_stream_chunk → 直通注册。"""
+    dec = getattr(filter, "on_llm_stream_chunk", None)
+    if dec is None:
+        return lambda f: f
+    return dec(**kwargs)
+
+
+def _optional_using_llm_tool_filter(**kwargs: Any):
+    """AstrBot 部分版本 filter 无 on_using_llm_tool → 直通注册（不挂钩子，降级为无操作）。"""
+    dec = getattr(filter, "on_using_llm_tool", None)
+    if dec is None:
+        return lambda f: f
+    return dec(**kwargs)
+
+
 @register(
     "astrbot_plugin_sylanne",
     "Aylovelle.S.S",
@@ -992,22 +1020,31 @@ class EmotionalStatePlugin(Star):
         return _host_obj.snapshot()
 
     async def pause_sylanne(self, *, session_key: str) -> dict[str, Any]:
+        from sylanne_alpha.state_persistence import mark_dirty
+
         host = self._host(session_key)
         host.kernel.body.immunity.paused = True
+        mark_dirty("session")
         await self._persist_kernel(session_key, host)
         return host.diagnostics()
 
     async def resume_sylanne(self, *, session_key: str) -> dict[str, Any]:
+        from sylanne_alpha.state_persistence import mark_dirty
+
         host = self._host(session_key)
         host.kernel.body.immunity.paused = False
+        mark_dirty("session")
         await self._persist_kernel(session_key, host)
         return host.diagnostics()
 
     async def cooldown_sylanne(self, *, session_key: str) -> dict[str, Any]:
+        from sylanne_alpha.state_persistence import mark_dirty
+
         host = self._host(session_key)
         host.kernel.body.immunity.cooldown = max(
             host.kernel.body.immunity.cooldown, 0.5
         )
+        mark_dirty("session")
         await self._persist_kernel(session_key, host)
         return host.diagnostics()
 
@@ -1047,6 +1084,9 @@ class EmotionalStatePlugin(Star):
             now = time.time()
             # 更新最后消息时间，供 proactive scheduler 计算沉默时长
             self._store.last_user_message_time.set(session_key, now)
+            sched = getattr(self, "_proactive_scheduler", None)
+            if sched is not None and hasattr(sched, "record_message_time"):
+                sched.record_message_time(session_key, now)
             # 喂给节奏学习器（记录 tempo，不受亲密度门控）
             self._rhythm_learner._record_tempo(session_key, now)
         except Exception:
@@ -1065,6 +1105,8 @@ class EmotionalStatePlugin(Star):
         return self._session_ctx.session_lock(session_key)
 
     async def _on_llm_request_inner(self, event: Any, request: Any) -> None:
+        # v2core PERCEPT 在请求管线内执行（碎片合并 + SFPD 判定之后），
+        # 避免早跑 PERCEPT 与合并文本不一致，以及群聊静默时心象已注入却无 tick。
         return await self._llm_request_pipeline._on_llm_request_inner(event, request)
 
     async def _process_llm_request_final(
@@ -1177,6 +1219,53 @@ class EmotionalStatePlugin(Star):
             logger.error(f"Sylanne on_llm_response error: {e}", exc_info=True)
             return
 
+    # 只对"把文本念出来/发出去"类工具清理 text 参数（白名单）。绝不碰 FileWrite/
+    # FileEdit 的 content、execute_python 的 code 等——那些 strip/截断会静默写坏文件/代码。
+    _SPEECH_TOOL_NAMES = ("clone_tts", "tts", "send_message_to_user", "send_message")
+
+    @_optional_using_llm_tool_filter(desc="语音/发言类工具调用前清理 text（防 thinking 进 TTS）")
+    async def on_using_llm_tool(self, event: Any, tool: Any, tool_args: Any) -> None:
+        """path3 兜底：模型把要"说"的内容打包进【语音/发言类】工具参数（如 clone_tts 的
+        text）时，绕过了 on_llm_response 的剥离。这里在工具执行【前】就地清理。tool_args 是
+        executor 实际消费的同一 dict（tool_loop_agent_runner:1075/1083 验证），就地改即生效。
+
+        【白名单】只处理 _SPEECH_TOOL_NAMES——别的工具（文件写入/代码执行）的文本参数原样
+        放过，否则 strip/截断会静默写坏文件（M3 审查）。
+        - 剥 thinking/draft 块：核心安全项——别让内心独白被念成语音/发出去。
+        - 极端超长才句末截断：TTS 只长度有害（数分钟音频）。strip 后为空则不写回（n1）。
+        """
+        try:
+            if not isinstance(tool_args, dict) or not tool_args:
+                return
+            tool_name = tool if isinstance(tool, str) else str(getattr(tool, "name", "") or "")
+            if tool_name not in self._SPEECH_TOOL_NAMES:
+                return  # 非语音/发言类工具：一概不碰，避免误伤文件/代码参数
+            from sylanne_alpha.compat import strip_draft_blocks, truncate_at_sentence
+
+            _HARD_MAX = 1200  # 极端兜底；正常语音远不到
+            for key in ("text", "content", "message", "msg"):
+                val = tool_args.get(key)
+                if not isinstance(val, str) or not val.strip():
+                    continue
+                cleaned = strip_draft_blocks(val)
+                cleaned = truncate_at_sentence(cleaned, _HARD_MAX)
+                # 全是 thinking 被剥空：不写回（喂 TTS 空串会报错/产 0 长音频）
+                if not cleaned.strip():
+                    logger.warning(
+                        "Sylanne tool-arg %s 剥后为空，保留原文交工具自行处理: tool=%s",
+                        key, tool_name,
+                    )
+                    continue
+                if cleaned != val:
+                    tool_args[key] = cleaned
+                    logger.info(
+                        "Sylanne tool-arg cleaned: tool=%s key=%s %d→%d chars",
+                        tool_name, key, len(val), len(cleaned),
+                    )
+        except Exception as e:
+            # 安全闸降级必须可见（m1）：不静默吞到 debug
+            logger.warning(f"Sylanne on_using_llm_tool clean failed: {e}", exc_info=True)
+
     @filter.on_decorating_result()
     async def on_decorating_result(self, event: Any) -> None:
         """Stage 8 兜底：strip thinking/draft 块，防止 tool loop 中间步骤泄露。
@@ -1232,6 +1321,19 @@ class EmotionalStatePlugin(Star):
         try:
             result = event.get_result()
             chain = getattr(result, "chain", None) if result is not None else None
+            # issue#26 根治（手术刀）：chain 含【非 Plain 组件】（大饼 TTS 的 Record 语音 /
+            # 图片 Image 等）时【不接管】，return False 让大饼原样发送——避免下方"只提 Plain
+            # 文本 + 无条件清空 chain"把语音/图片整条吞掉（语音被清、Sylanne 又因无 Plain 不发
+            # → QQ 收不到、无报错）。仅【纯 Plain 文本 chain】才接管分段。
+            # 判据只依赖已 import 的 Plain（不枚举所有非文本类型，最不易漏判）。
+            # claim 已消费标记（一次性），return False 后大饼正常发，本条不被吞，标记不泄漏到下条。
+            if chain and any(not isinstance(seg, Plain) for seg in chain):
+                logger.info(
+                    "Sylanne proactive segment takeover skipped: chain 含非文本组件"
+                    "(TTS语音/图片)，放行大饼原样发送 for %s",
+                    origin,
+                )
+                return False
             text = ""
             if chain:
                 text = "".join(
@@ -1284,6 +1386,16 @@ class EmotionalStatePlugin(Star):
 
 
     async def _on_llm_response_inner(self, event: Any, response: Any) -> None:
+        # v2core 认知阶段二（DELIBERATE/EVOLVE，默认开——唯一认知内核）：裁决草稿 + 学习。
+        # 返回 True 仅在 SILENT（终结本轮，防 legacy no-ghost 复活刻意装死）；
+        # SPEAK/FALLBACK 返回 False【故意落入下方 legacy】——sanitize/分段打字节奏/
+        # 观测是 legacy 的嘴，v2core 接管心智不没收嘴。异常同样 False（紧急回退口）。
+        try:
+            from sylanne_alpha.v2core.integration import apply_v2core_response
+            if await apply_v2core_response(self, event, response):
+                return
+        except Exception as exc:  # 桥接自身异常绝不阻断回复
+            logger.error(f"Sylanne v2core bridge error, fallback to legacy: {exc}", exc_info=True)
         await self._llm_response_pipeline._on_llm_response_inner(event, response)
 
     async def _background_observe_response(self, session_key: str, text: str) -> None:
@@ -1291,7 +1403,7 @@ class EmotionalStatePlugin(Star):
             session_key, text
         )
 
-    # on_llm_stream_chunk hook -- dispatch first sentence early
+    @_optional_stream_chunk_filter(desc="流式首句提前发送")
     async def on_llm_stream_chunk(self, event: Any, chunk: Any) -> None:
         await self._llm_response_pipeline.on_llm_stream_chunk(event, chunk)
 
@@ -2315,6 +2427,22 @@ class EmotionalStatePlugin(Star):
 
     async def terminate(self) -> None:
         """插件卸载/更新前的清理：停止所有后台任务、关闭 WebUI、持久化状态。"""
+        # v2core：先排干在途域状态落盘 + 终扫一遍（必须在 cancel 后台任务【之前】，
+        # 否则最后一轮 fire-and-forget 存档会被反手 cancel——她的最近成长就丢了）
+        try:
+            from sylanne_alpha.v2core.integration import (
+                drain_pending_saves,
+                save_all_domains,
+            )
+
+            await drain_pending_saves(timeout=5)
+            await save_all_domains(self)
+        except Exception as e:
+            logger.warning(
+                "Sylanne v2core terminate save failed (domain state may be stale): %s",
+                e,
+                exc_info=True,
+            )
         # 收集所有需要取消的任务
         tasks_to_cancel: list = []
         for task in list(self._background_tasks):

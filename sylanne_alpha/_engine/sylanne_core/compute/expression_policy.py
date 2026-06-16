@@ -59,9 +59,13 @@ FEATURE_NAMES: list[str] = [
 
 N_FEATURES: int = len(FEATURE_NAMES)
 
-# Hard constraint boundaries
-_DRIVE_FORCE_EXPRESS: float = 0.95  # Always express above this
-_DRIVE_FORCE_HOLD: float = 0.1  # Never express below this
+# Hard constraint boundaries — module-level DEFAULTS / backward-compat anchors.
+# These are no longer dead constants in the decision path: each instance holds
+# its own ``_force_express`` / ``_force_hold`` (see ``set_personality``), derived
+# as personality explicit functions (axiom A7). At the neutral trait value 0.5 the
+# formulas reproduce these constants exactly, so default behaviour is unchanged.
+_DRIVE_FORCE_EXPRESS: float = 0.95  # default: always express above this
+_DRIVE_FORCE_HOLD: float = 0.1  # default: never express below this
 
 # Exploration schedule
 _EPSILON_START: float = 0.3
@@ -141,6 +145,9 @@ class ExpressionPolicy:
         "_last_context",
         "_last_action",
         "_last_prob",
+        "_force_express",
+        "_force_hold",
+        "_last_forced",
     )
 
     def __init__(
@@ -193,6 +200,18 @@ class ExpressionPolicy:
         self._last_action: int | None = None
         self._last_prob: float = 0.5
 
+        # Hard-gate (saddle) boundaries — A7 personality explicit functions.
+        # Initialized to the legacy constants so a freshly constructed policy
+        # whose personality is never set behaves identically to the old code.
+        # ``set_personality`` re-derives them from traits.
+        self._force_express: float = _DRIVE_FORCE_EXPRESS
+        self._force_hold: float = _DRIVE_FORCE_HOLD
+
+        # Whether the *last* decision was produced by a hard gate (forced) rather
+        # than by the learned policy. Transient (not persisted): only meaningful
+        # within the same turn for off-policy-aware credit assignment.
+        self._last_forced: bool = False
+
     # ------------------------------------------------------------------
     # Policy computation
     # ------------------------------------------------------------------
@@ -216,8 +235,11 @@ class ExpressionPolicy:
             how certain the policy is about its decision.
 
         Hard constraints override the learned policy:
-          - drive > 0.95 -> always express (safety: extreme emotion must out)
-          - drive < 0.1  -> never express (nothing to say)
+          - drive > self._force_express -> always express (extreme emotion must out)
+          - drive < self._force_hold    -> never express (nothing to say)
+
+        Both bounds are personality explicit functions (see ``set_personality``),
+        defaulting to 0.95 / 0.1 at neutral traits for backward compatibility.
         """
         if len(context) != N_FEATURES:
             raise ValueError(
@@ -227,17 +249,19 @@ class ExpressionPolicy:
         drive = context[0]  # expression_drive is feature 0
 
         # Hard constraint: extreme drive forces expression
-        if drive > _DRIVE_FORCE_EXPRESS:
+        if drive > self._force_express:
             self._last_context = list(context)
             self._last_action = 1
             self._last_prob = 1.0
+            self._last_forced = True
             return True, 1.0
 
         # Hard constraint: negligible drive prevents expression
-        if drive < _DRIVE_FORCE_HOLD:
+        if drive < self._force_hold:
             self._last_context = list(context)
             self._last_action = 0
             self._last_prob = 0.0
+            self._last_forced = True
             return False, 1.0
 
         # Learned policy
@@ -255,6 +279,7 @@ class ExpressionPolicy:
         self._last_context = list(context)
         self._last_action = action
         self._last_prob = prob_express
+        self._last_forced = False
         self._step_count += 1
 
         # Decay epsilon
@@ -276,6 +301,8 @@ class ExpressionPolicy:
         self,
         outcome: str,
         context_at_decision: list[float] | None = None,
+        actual_action: int | None = None,
+        skip_forced: bool = False,
     ) -> None:
         """Update policy weights from interaction feedback.
 
@@ -290,6 +317,20 @@ class ExpressionPolicy:
             outcome: One of "accepted", "rejected", "ignored".
             context_at_decision: The context vector at the time of the decision.
                 If None, uses the stored last context.
+            actual_action: The action that was *actually* executed downstream
+                (1 = expressed, 0 = held). When the expression decision is owned
+                by a layer above this policy (e.g. an external arbiter), the
+                bandit's own ``_last_action`` may not reflect what really
+                happened. Passing the true action assigns credit to the action
+                that was carried out. ``None`` (default) preserves the original
+                behaviour and uses the stored ``_last_action``.
+            skip_forced: When True, feedback for a decision that was produced by
+                a hard gate (``_last_forced``) updates the bookkeeping counters
+                but skips the weight/bias gradient step. This avoids off-policy
+                contamination: a forced decision was not chosen by the learned
+                policy, so training on it biases the policy toward choices it did
+                not make. Default ``False`` preserves the original behaviour
+                (forced samples train the weights).
         """
         # Determine reward
         if outcome == "accepted":
@@ -301,14 +342,19 @@ class ExpressionPolicy:
         else:
             return  # Unknown outcome, skip
 
-        # Track feedback
+        # Track feedback (counters/history advance regardless of skip_forced)
         self._feedback_history.append(outcome)
         self._reward_history.append(reward)
         self._total_updates += 1
 
+        # T3: drop the gradient step for forced decisions when asked. Counters
+        # above are intentionally still updated (diagnostics stay honest).
+        if skip_forced and self._last_forced:
+            return
+
         # Get context and action for this update
         context = context_at_decision if context_at_decision is not None else self._last_context
-        action = self._last_action
+        action = actual_action if actual_action is not None else self._last_action
 
         if context is None or action is None:
             return  # No decision to update from
@@ -350,15 +396,42 @@ class ExpressionPolicy:
     # Personality modulation
     # ------------------------------------------------------------------
 
-    def set_personality(self, openness: float = 0.5) -> None:
-        """Update personality modulation of learning rate.
+    def set_personality(
+        self,
+        openness: float = 0.5,
+        expression_drive_trait: float | None = None,
+        sovereignty_guard: float | None = None,
+    ) -> None:
+        """Update personality modulation of learning rate and hard-gate saddle.
 
         Args:
             openness: Openness trait value in [0, 1].
                 Higher openness -> faster adaptation to feedback.
+            expression_drive_trait: Embodiment expression-drive trait in [0, 1].
+                Lowers the force-express bound as it rises (a more expressive
+                personality is forced to speak sooner). ``None`` leaves the
+                bound untouched (backward-compatible: old single-arg callers do
+                not move the saddle).
+            sovereignty_guard: Sovereignty trait in [0, 1]. Raises the force-hold
+                bound as it rises (a more sovereign personality has a wider
+                "can't be bothered to speak" zone). ``None`` leaves it untouched.
+
+        Hard-gate explicit functions (axiom A7), anchored so the neutral trait
+        value 0.5 reproduces the legacy constants exactly:
+            force_express = 1.05 - 0.20 * expression_drive_trait   # 0.5 -> 0.95
+            force_hold    = 0.02 + 0.16 * sovereignty_guard        # 0.5 -> 0.10
+
+        Monotonicity: d(force_express)/d(drive) < 0; d(force_hold)/d(sovereignty)
+        > 0. ``force_express > 1.0`` is a legal value (personality never forced
+        to speak). The bounds are NOT clamped here — that is intentional.
         """
         self._openness_mod = 0.5 + openness
         self._learning_rate = self._base_learning_rate * self._openness_mod
+
+        if expression_drive_trait is not None:
+            self._force_express = 1.05 - 0.20 * expression_drive_trait
+        if sovereignty_guard is not None:
+            self._force_hold = 0.02 + 0.16 * sovereignty_guard
 
     # ------------------------------------------------------------------
     # Diagnostics
@@ -378,6 +451,21 @@ class ExpressionPolicy:
     def exploration_rate(self) -> float:
         """Current epsilon (exploration probability)."""
         return self._epsilon
+
+    @property
+    def force_express_threshold(self) -> float:
+        """Drive level at/above which expression is forced (A7 personality fn)."""
+        return self._force_express
+
+    @property
+    def force_hold_threshold(self) -> float:
+        """Drive level below which expression is suppressed (A7 personality fn)."""
+        return self._force_hold
+
+    @property
+    def last_decision_forced(self) -> bool:
+        """Whether the last ``decide`` was produced by a hard gate, not the policy."""
+        return self._last_forced
 
     @property
     def recent_reward_avg(self) -> float:
@@ -431,6 +519,8 @@ class ExpressionPolicy:
             "recent_accept_rate": round(self.recent_accept_rate, 4),
             "recent_reject_rate": round(self.recent_reject_rate, 4),
             "policy_confidence": round(self.policy_confidence, 4),
+            "force_express": round(self._force_express, 4),
+            "force_hold": round(self._force_hold, 4),
             "top_features": [
                 (name, round(w, 4)) for name, w in self.weight_summary()[:5]
             ],
@@ -455,6 +545,8 @@ class ExpressionPolicy:
             "total_updates": self._total_updates,
             "feedback_history": list(self._feedback_history),
             "reward_history": list(self._reward_history),
+            "force_express": self._force_express,
+            "force_hold": self._force_hold,
         }
 
     @classmethod
@@ -482,6 +574,11 @@ class ExpressionPolicy:
         policy._epsilon = data.get("epsilon", _EPSILON_START)
         policy._step_count = data.get("step_count", 0)
         policy._total_updates = data.get("total_updates", 0)
+        # Hard-gate bounds: absent in legacy archives -> fall back to the legacy
+        # constants, preserving exact old behaviour on load (red line: archive
+        # backward compatibility).
+        policy._force_express = float(data.get("force_express", _DRIVE_FORCE_EXPRESS))
+        policy._force_hold = float(data.get("force_hold", _DRIVE_FORCE_HOLD))
         if "feedback_history" in data:
             policy._feedback_history = deque(data["feedback_history"], maxlen=_FEEDBACK_WINDOW)
         if "reward_history" in data:

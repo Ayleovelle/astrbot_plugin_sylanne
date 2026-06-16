@@ -24,7 +24,93 @@ import uuid
 from collections import deque
 from dataclasses import dataclass, field
 from datetime import date
+from enum import Enum
 from typing import Any
+
+
+class RecallMode(Enum):
+    """召回引擎模式（阶段0 灰度开关）。
+
+    LEGACY     — 现有两阶段四维加权召回（默认，行为零变化）。
+    SHADOW     — 新旧并跑：返回 LEGACY 结果，后台计算 ACTIVATION 并记录差异（不影响线上）。
+    ACTIVATION — ACT-R 激活核召回（阶段1+ 实现后启用）。
+    """
+
+    LEGACY = "legacy"
+    SHADOW = "shadow"
+    ACTIVATION = "activation"
+
+# ---------------------------------------------------------------------------
+# 写入时重要性启发式（模块级，零 LLM）
+#
+# 提到模块级，使 MemoryItem.from_dict 无需反向依赖 MemorySystem（消除分层倒置：
+# 数据类不应回调聚合根的静态方法）。MemorySystem 仍暴露同名静态方法薄封装兼容旧调用。
+# ---------------------------------------------------------------------------
+
+# 承诺/事实类关键词：名字、日期、数字、喜好、约定等高保留信号
+_COMMITMENT_KW = (
+    "喜欢", "讨厌", "答应", "约定", "约好", "记得", "别忘", "一定", "保证",
+    "承诺", "生日", "纪念", "名字", "叫我", "我叫", "明天", "后天", "下周",
+    "下个月", "号见", "点见", "等我", "等你",
+)
+
+
+def _has_commitment_kw(text: str) -> bool:
+    """检测文本是否含承诺/事实类关键词（关键词表 + 阿拉伯数字模式）。"""
+    if not text:
+        return False
+    for kw in _COMMITMENT_KW:
+        if kw in text:
+            return True
+    # 含阿拉伯数字（日期/数量/时间）也视为高信息
+    return any(c.isdigit() for c in text)
+
+
+def _compute_importance_heuristic(
+    text: str, source_turns: int, temperature: float
+) -> float:
+    """写入时零-LLM 重要性打分，复用 source_turns/temperature/长度/承诺关键词。
+
+    - 基线 0.30
+    - 聊得久（source_turns 多）→ 更重要
+    - 情绪强烈（|temperature| 大）→ 更重要
+    - 信息量（文本长）→ 更重要
+    - 含承诺/事实类关键词 → 加成
+    """
+    t = max(-1.0, min(1.0, float(temperature)))
+    imp = 0.30
+    imp += 0.25 * min(source_turns / 4.0, 1.0)
+    imp += 0.30 * abs(t)
+    imp += 0.15 * min(len(text) / 120.0, 1.0)
+    if _has_commitment_kw(text):
+        imp += 0.20
+    return max(0.0, min(1.0, imp))
+
+
+# ---------------------------------------------------------------------------
+# 阶段2：L3 spreading activation 关系语义强度规则表（零 LLM）
+#
+# 关系类型决定激活沿边扩散的强度：核心情感/归属关系传导强，弱关联传导弱。
+# ingest 时按此表给 GraphEdge.strength 赋值；表外关系回退默认值。
+# ---------------------------------------------------------------------------
+_RELATION_WEIGHTS: dict[str, float] = {
+    "爱": 1.0, "喜欢": 0.9, "讨厌": 0.8, "害怕": 0.8, "想念": 0.85,
+    "是": 0.85, "属于": 0.8, "拥有": 0.85, "等于": 0.85,
+    "参与": 0.6, "发生在": 0.6, "提到": 0.55, "相关": 0.5, "认识": 0.6,
+    "类似": 0.3, "可能": 0.25,
+}
+_RELATION_WEIGHT_DEFAULT = 0.4
+
+
+def _relation_strength(relation: str) -> float:
+    """按关系类型查语义强度；含子串匹配以容忍 LLM 抽取的措辞变体。"""
+    if relation in _RELATION_WEIGHTS:
+        return _RELATION_WEIGHTS[relation]
+    for kw, w in _RELATION_WEIGHTS.items():
+        if kw in relation:
+            return w
+    return _RELATION_WEIGHT_DEFAULT
+
 
 # ---------------------------------------------------------------------------
 # Data classes
@@ -56,6 +142,17 @@ class MemoryItem:
     recall_count: int = 0
     last_recalled_tick: int = 0
     rewrite_count: int = 0
+    # 记忆来源："dialogue"=与用户真实对话；"life_sim"=Sylanne 自己的生活模拟/心境
+    source: str = "dialogue"
+    # 拟人化召回重构：重要性（写入时零-LLM 启发式打分，持久化）
+    importance: float = 0.5
+    # 召回刷新时间戳（与 created_at 解耦：created_at 保护真实创建时间，
+    # last_recalled_ts 在被召回时刷新，使 recency 复活）
+    last_recalled_ts: float = 0.0
+    # 阶段0地基（ACT-R base-level learning 用）：EMA 激活累加器，近似 Σtⱼ⁻ᵈ。
+    # 命中时按 acc = acc*(dt_h**-d) + 1 递推，免存完整召回时间序列。默认 1.0=单次编码。
+    # LEGACY 召回路径不读它，仅在 ACTIVATION 模式生效——阶段0 只负责持久化与回填。
+    actr_acc: float = 1.0
 
     def to_dict(self) -> dict:
         return {
@@ -71,10 +168,27 @@ class MemoryItem:
             "recall_count": self.recall_count,
             "last_recalled_tick": self.last_recalled_tick,
             "rewrite_count": self.rewrite_count,
+            "source": self.source,
+            "importance": self.importance,
+            "last_recalled_ts": self.last_recalled_ts,
+            "actr_acc": self.actr_acc,
         }
 
     @classmethod
     def from_dict(cls, d: dict) -> "MemoryItem":
+        # 旧存档兼容：importance 缺省时用启发式回填（而非固定 0.5）。
+        # last_recalled_ts 缺省 0.0 即可——recency 评分取 max(created_at, last_recalled_ts)，
+        # 0.0 会自然回退到 created_at，二者等效。
+        created_at = d["created_at"]
+        if "importance" in d:
+            # clamp 到 [0,1]：旧/异常存档若写入越界值会让 recency τ 极度膨胀、永不衰减。
+            importance = max(0.0, min(1.0, float(d["importance"])))
+        else:
+            importance = _compute_importance_heuristic(
+                d["text"],
+                d.get("source_turns", 1),
+                d.get("temperature", 0.0),
+            )
         return cls(
             id=d["id"],
             text=d["text"],
@@ -82,12 +196,19 @@ class MemoryItem:
             temperature=d["temperature"],
             age_ticks=d["age_ticks"],
             embedding=d.get("embedding"),
-            created_at=d["created_at"],
+            created_at=created_at,
             source_turns=d.get("source_turns", 1),
             confirmed=d.get("confirmed", False),
             recall_count=d.get("recall_count", 0),
             last_recalled_tick=d.get("last_recalled_tick", 0),
             rewrite_count=d.get("rewrite_count", 0),
+            source=d.get("source", "dialogue"),
+            importance=importance,
+            last_recalled_ts=float(d.get("last_recalled_ts", 0.0)),
+            # 旧存档无 actr_acc：回填 1.0（中性激活）而非用未知历史 d 重算召回序列，
+            # 避免历史与新 d 语义不匹配。频次信号仍由 recall_count 保留，阶段1 ACT-R
+            # 可参考。切到 ACTIVATION 后头几次召回会自然把 acc 累积正常化。
+            actr_acc=float(d.get("actr_acc", 1.0)),
         )
 
 
@@ -106,9 +227,21 @@ class MemoryResult:
     temperature: float
     final_score: float
     created_at: float  # 记忆创建时间戳，用于生成相对时间标签
-    recall_count: int = 0  # 被召回次数，用于 Ebbinghaus 遗忘曲线计算
-    emotional_weight: float = 0.5  # 情感权重 [0,1]，用于遗忘曲线稳定性
+    recall_count: int = 0  # 被召回次数，参与 _recency_score 的 τ（衰减变慢）
+    emotional_weight: float = 0.5  # 情感权重 [0,1]
     recall_reason: str = ""  # 召回原因: keyword_match / vector_similarity / temporal_proximity / association_graph
+    # 记忆来源："dialogue"=与用户真实对话；"life_sim"=Sylanne 自己的生活模拟/心境
+    source: str = "dialogue"
+    # 拟人化召回重构：重要性（注入/调试用，来自 item.importance 或 L3 clarity 近似）
+    importance: float = 0.5
+    # 命中后刷新用：指向底层 MemoryItem/GraphNode 的引用（不参与比较/repr）
+    source_obj: Any = field(default=None, repr=False, compare=False)
+    # 阶段0地基（可观测）：ACTIVATION 模式下的置信分级与激活值；LEGACY 下保持默认。
+    # confidence ∈ {clear, vague, tot}（阶段3 启用），activation 为 ACT-R 激活归一值。
+    confidence: str = "clear"
+    activation: float = 0.0
+    # 调试快照（每候选的打分分解，影子模式/WebUI 用；不参与比较/repr）
+    debug: dict = field(default_factory=dict, repr=False, compare=False)
 
     # ------------------------------------------------------------------
     # 记忆温度（Item 147）
@@ -159,6 +292,12 @@ class GraphNode:
     recall_count: int = 0
     valid_from: str | None = None  # ISO date for evolving
     staleness_threshold: int = 180  # days, default 6 months
+    # 拟人化召回：节点真实创建时间 + 召回刷新时间戳（与 MemoryItem 对齐）。
+    # 缺失时 recency 评分会退化为中性 0.5，因此创建/命中时必须写入。
+    created_at: float = 0.0
+    last_recalled_ts: float = 0.0
+    # 阶段0地基（ACT-R）：与 MemoryItem 对齐的 EMA 激活累加器。LEGACY 路径不读。
+    actr_acc: float = 1.0
 
     def to_dict(self) -> dict:
         return {
@@ -171,6 +310,9 @@ class GraphNode:
             "recall_count": self.recall_count,
             "valid_from": self.valid_from,
             "staleness_threshold": self.staleness_threshold,
+            "created_at": self.created_at,
+            "last_recalled_ts": self.last_recalled_ts,
+            "actr_acc": self.actr_acc,
         }
 
     @classmethod
@@ -185,6 +327,9 @@ class GraphNode:
             recall_count=d.get("recall_count", 0),
             valid_from=d.get("valid_from"),
             staleness_threshold=d.get("staleness_threshold", 180),
+            created_at=float(d.get("created_at", 0.0)),
+            last_recalled_ts=float(d.get("last_recalled_ts", 0.0)),
+            actr_acc=float(d.get("actr_acc", 1.0)),
         )
 
 
@@ -198,6 +343,10 @@ class GraphEdge:
     emotion_weight: float  # [-1.0, 1.0]
     clarity: float  # [0.0, 1.0]
     last_recalled: int = 0  # tick
+    # 阶段0地基（阶段2 spreading activation 用）：关系语义强度 [0,1]。
+    # ingest 时按关系类型规则表赋值（阶段2 落地），缺省回退到 clarity*|emotion| 的近似。
+    # LEGACY 路径不读它，仅持久化与回填。
+    strength: float = 1.0
 
     def to_dict(self) -> dict:
         return {
@@ -207,6 +356,7 @@ class GraphEdge:
             "emotion_weight": self.emotion_weight,
             "clarity": self.clarity,
             "last_recalled": self.last_recalled,
+            "strength": self.strength,
         }
 
     @classmethod
@@ -218,6 +368,14 @@ class GraphEdge:
             emotion_weight=d["emotion_weight"],
             clarity=d["clarity"],
             last_recalled=d.get("last_recalled", 0),
+            # 旧存档无 strength：用 clarity*|emotion_weight| 近似回填（情绪越强、越清晰
+            # 的关系语义强度越高），clamp [0,1]。阶段2 上线后新边按关系规则表赋值。
+            strength=float(
+                d.get(
+                    "strength",
+                    max(0.0, min(1.0, d["clarity"] * abs(d["emotion_weight"]))),
+                )
+            ),
         )
 
 
@@ -243,6 +401,30 @@ class ConversationBuffer:
         if role == "bot":
             self.turn_count += 1
 
+    def _in_active_exchange(self, now: float) -> bool:
+        """结构判定：是否处于"活跃来回"中（任务/纠正链进行中，不是真闲置）。
+
+        2026-06-15 事故：用户连续纠正改写任务，轮次间隔 ~90s，被 60s idle flush
+        抽干上下文，Agent 读到空 buffer 转去翻 SQLite 主动消息→话题彻底漂走。
+        纯结构信号（消息条数 + 近端轮次间隔），不看内容：最近 3 条里若有快速来回
+        （相邻间隔中位数 < 90s），说明这是一段活着的对话线程，给更长的 idle 宽限。
+        """
+        msgs = self.messages
+        if len(msgs) < 3:
+            return False
+        recent = msgs[-4:]
+        gaps = [
+            float(recent[i]["ts"]) - float(recent[i - 1]["ts"])
+            for i in range(1, len(recent))
+            if recent[i].get("ts") and recent[i - 1].get("ts")
+        ]
+        if not gaps:
+            return False
+        gaps.sort()
+        median_gap = gaps[len(gaps) // 2]
+        # 近端轮次密集（来回快）且整体未冷太久 → 仍算活跃
+        return median_gap < 90.0 and (now - self.last_activity) < 240.0
+
     def should_flush(self, idle_seconds: float = 60.0, max_turns: int = 20) -> str:
         """返回触发原因，空字符串表示不需要 flush。"""
         if not self.messages:
@@ -250,7 +432,10 @@ class ConversationBuffer:
         if self.turn_count >= max_turns:
             return "max_turns"
         now = time.time()
-        if now - self.last_activity >= idle_seconds:
+        # 活跃来回中（任务/纠正链）：把 idle 宽限拉长到 3x，别在用户连续纠正的
+        # 间隙里把任务态 flush 掉（事故根因 L3）。仍受 max_turns 硬上限兜底。
+        effective_idle = idle_seconds * 3.0 if self._in_active_exchange(now) else idle_seconds
+        if now - self.last_activity >= effective_idle:
             has_user = any(m.get("role") == "user" for m in self.messages)
             if not has_user and now - self.last_activity < idle_seconds * 3:
                 return ""
@@ -454,6 +639,18 @@ class MemorySystem:
     _L1_CAPACITY = 60
     _L3_NODE_LIMIT = 1000
 
+    # 拟人化召回：阶段1宽召回候选数（仅按 relevance 粗筛取 top-K）
+    _RECALL_WIDE_K = 20
+    # 高重要性旁路保底：阶段1额外保留 importance 最高的 N 条进入 rerank，
+    # 防止 relevance 低但极重要（承诺/约定）的条目被 top-K 截断。
+    _RECALL_IMPORTANCE_BYPASS = 3
+    _RECALL_IMPORTANCE_BYPASS_FLOOR = 0.8
+    # recency τ 公式中 recall_count 的封顶（10 次后 τ 增益饱和，约 6 倍基线），
+    # 防止高频老记忆衰减无限变慢、永久垄断召回。
+    _RECENCY_RECALL_CAP = 10
+    # 近期记忆（5 分钟内）关键词 relevance=0 时的兜底分，确保进入阶段2 rerank。
+    _RECENT_FLOOR_RELEVANCE = 0.05
+
     # 记忆温度前缀映射（Item 148）
     _TEMPERATURE_PREFIXES = {
         "hot": "（刚才提到）",
@@ -475,6 +672,14 @@ class MemorySystem:
         self._last_consolidation_ts: float = 0.0
         self._recalled_l2_items: list[MemoryItem] = []
         self._gc_tick_counter: int = 0  # GC 计数器
+        self._inverted_index = InvertedIndex()
+        # 阶段0 召回灰度开关：默认 LEGACY（零行为变化）。可由 kwargs 或环境变量
+        # SYLANNE_RECALL_MODE 覆盖；非法值静默回退 LEGACY。
+        self._recall_mode: RecallMode = self._resolve_recall_mode(
+            kwargs.get("recall_mode")
+        )
+        # SHADOW 模式下记录最近一次新旧召回差异（供 get_debug_snapshot 读取）
+        self._last_shadow_diff: dict[str, Any] | None = None
         self._params: dict[str, float] = {
             "base_decay": 0.02,
             "age_coeff": 0.15,
@@ -486,6 +691,32 @@ class MemorySystem:
             "positive_recall_bias": 1.0,
             "cold_memory_decay_factor": 1.0,
             "neuroticism": 0.5,
+            # 拟人化召回四维权重（和=1，由人格推导覆盖）
+            "w_rel": 0.45,
+            "w_rec": 0.25,
+            "w_imp": 0.15,
+            "w_emo": 0.15,
+            # 人格化硬门控基线（composite < gate → 丢弃，空召回优于错召回）
+            "recall_gate_base": 0.20,
+            # 阶段1 ACT-R 激活核参数默认值（无人格时也能跑 ACTIVATION 模式）
+            "actr_d": 0.50,
+            "actr_importance_scale": 1.25,
+            "actr_emo_scale": 0.35,
+            "actr_base_threshold": -1.1,
+            "w_rel_act": 0.55,
+            "w_act": 0.45,
+            # 阶段3 软召回三级置信 + 情感特权默认值
+            "theta_clear": 0.55,
+            "theta_tot": 0.15,
+            "emotion_privilege_k": 0.20,
+            "emo_bypass_floor": 0.55,
+            "emo_bypass_imp_floor": 0.55,
+            "l1_confidence": 0.85,
+            # 原始人格值（子方法 novelty/spreading 读取；无人格时中性 0.5）
+            "perception_acuity_raw": 0.5,
+            "relational_gravity_raw": 0.5,
+            "inner_order_raw": 0.5,
+            "boundary_permeability": 0.5,
         }
 
         personality_keys = {
@@ -538,6 +769,69 @@ class MemorySystem:
         self._params["cold_memory_decay_factor"] = 1.0 - N * 0.5
         self._params["neuroticism"] = N
 
+        # ---- 拟人化召回：四维权重 = 人格函数（归一化和=1）----
+        # perception_acuity（感知敏锐）→ 语义相关主导；缺省回退 N。
+        # relational_gravity（关系引力）→ mood-congruent 主导；缺省回退 A。
+        pa = personality.get("perception_acuity", N)
+        rg = personality.get("relational_gravity", A)
+        raw_rel = 0.40 + pa * 0.60  # 感知敏锐→语义相关主导
+        raw_rec = 0.30 + N * 0.30   # 神经质→更黏近期
+        raw_imp = 0.30 + C * 0.50   # 尽责→重要性导向
+        raw_emo = 0.20 + rg * 0.60  # 关系引力→mood-congruent 主导
+        s = raw_rel + raw_rec + raw_imp + raw_emo
+        if s <= 0:
+            s = 1.0
+        self._params["w_rel"] = raw_rel / s
+        self._params["w_rec"] = raw_rec / s
+        self._params["w_imp"] = raw_imp / s
+        self._params["w_emo"] = raw_emo / s
+        # 人格化硬门控：高感知人格门槛更高（更挑剔，宁缺毋滥）
+        self._params["recall_gate_base"] = 0.20 + pa * 0.15
+
+        # ---- 阶段1：ACT-R 激活核参数（ACTIVATION 模式用；LEGACY 不读）----
+        io = personality.get("inner_order", C)
+        # 存原始人格值供子方法读取（novelty/spreading 等按需取，避免重算/失配）。
+        self._params["perception_acuity_raw"] = pa
+        self._params["relational_gravity_raw"] = rg
+        self._params["inner_order_raw"] = io
+        self._params["boundary_permeability"] = personality.get(
+            "boundary_permeability", personality.get("openness", 0.5)
+        )
+        # base-level 衰减率 d ∈[0.30,0.70]：高内秩序/尽责→d 小→衰减慢→记得久。
+        self._params["actr_d"] = 0.70 - io * 0.40
+        # importance 作 activation 先验偏置的幅度 ∈[0.5,2.0]：高尽责→更重视重要性。
+        # 注意：importance 在 ACTIVATION 模式只经此处进入打分（不再有独立 w_imp 维度），
+        # 避免 LEGACY 曾犯的双重计入。
+        self._params["actr_importance_scale"] = 0.5 + C * 1.5
+        # mood-congruent 对检索阈值的调节系数 ∈[0.1,0.6]：高关系引力→情绪更影响门控。
+        self._params["actr_emo_scale"] = 0.1 + rg * 0.5
+        # 激活门控基线（A < threshold → 丢弃）∈[-1.5,-0.7]：高感知→门槛略高、更挑剔。
+        self._params["actr_base_threshold"] = -1.5 + pa * 0.8
+        # ACTIVATION 模式二维权重：composite = w_rel_act*rel + w_act*activation。
+        # （recency+frequency 已被 base-level 统一吸收，importance 已并入 activation，
+        # emotional 走 threshold 调节，故只剩 rel 与 activation 两维。）
+        raw_rel_act = 0.40 + pa * 0.60   # 感知敏锐→语义相关主导
+        raw_act = 0.40 + io * 0.40       # 内秩序→激活（频次/近因/重要）主导
+        sa = raw_rel_act + raw_act
+        if sa <= 0:
+            sa = 1.0
+        self._params["w_rel_act"] = raw_rel_act / sa
+        self._params["w_act"] = raw_act / sa
+
+        # ---- 阶段3：软召回三级置信阈值 + 情感特权（ACTIVATION 模式用）----
+        # 修正 LEGACY 的"感知越敏锐 gate 越高→越健忘"反直觉：这里 pa 高 → 分辨更细
+        # （clear 门槛略高使 vague 区间更宽），而非整体更难召回。
+        self._params["theta_clear"] = 0.45 + pa * 0.20   # 确信阈值 ∈[0.45,0.65]
+        self._params["theta_tot"] = 0.10 + C * 0.10      # 舌尖下限 ∈[0.10,0.20]
+        # 情感特权：高关系引力→情感记忆获得更大激活加成、更低旁路门槛。
+        self._params["emotion_privilege_k"] = 0.10 + rg * 0.25   # ∈[0.10,0.35]
+        self._params["emo_bypass_floor"] = 0.65 - rg * 0.20      # ∈[0.45,0.65]
+        self._params["emo_bypass_imp_floor"] = 0.65 - rg * 0.15  # ∈[0.50,0.65]
+        # 阶段2：L1 层置信折扣（仅 ACTIVATION 用，取代 _LAYER_WEIGHTS 硬乘）。
+        # L1 是未确认近期摘要，尽责性高→对未确认记忆更挑剔（折扣更狠）。
+        # L2 已确认、L3 已有 clarity 衰减，不再额外折扣（否则与 activation 重复惩罚）。
+        self._params["l1_confidence"] = 0.70 + io * 0.30  # ∈[0.70,1.0]
+
     # ------------------------------------------------------------------
     # 写入（v2：基于摘要）
     # ------------------------------------------------------------------
@@ -550,9 +844,19 @@ class MemorySystem:
         source_turns: int = 1,
         embedding: list[float] | None = None,
         temperature: float = 0.0,
+        source: str = "dialogue",
+        importance: float | None = None,
     ) -> MemoryItem:
-        """v2 写入：将对话摘要写入 L1。由会话结束/20轮保底触发。"""
+        """v2 写入：将对话摘要写入 L1。由会话结束/20轮保底触发。
+
+        source: "dialogue"=与用户真实对话；"life_sim"=Sylanne 自己的生活模拟/心境。
+        importance: 重要性 [0,1]，None 时用零-LLM 启发式打分（_compute_importance）。
+        """
         text = text[: self._MAX_SUMMARY_CHARS]
+        if importance is None:
+            # 基础启发式 + 新颖度（RPE）加成：重复内容不再因文本长而持续拿高分。
+            importance = self._compute_importance(text, source_turns, temperature)
+            importance = min(1.0, importance + self._compute_novelty_bonus(text))
         # L1 满时，把最老的已确认项下沉到 L2（防止静默丢失）
         if len(self._l1) >= self._L1_CAPACITY:
             self._overflow_rescue()
@@ -570,9 +874,52 @@ class MemorySystem:
             recall_count=0,
             last_recalled_tick=0,
             rewrite_count=0,
+            source=source,
+            importance=importance,
         )
         self._l1.append(item)
+        self._index_memory_item(item)
         return item
+
+    def _index_memory_item(self, item: MemoryItem) -> None:
+        kws = [w for w in _tokenize(item.text) if len(w) >= 2][:24]
+        if kws:
+            self._inverted_index.add(item.id, kws)
+
+    # ------------------------------------------------------------------
+    # 写入时重要性启发式（薄封装，实现已提到模块级 _compute_importance_heuristic，
+    # 见文件顶部——避免 MemoryItem.from_dict 反向依赖本类，消除分层倒置）
+    # ------------------------------------------------------------------
+
+    # 兼容别名：旧引用 MemorySystem._COMMITMENT_KW 仍可用
+    _COMMITMENT_KW = _COMMITMENT_KW
+
+    @staticmethod
+    def _has_commitment_kw(text: str) -> bool:
+        return _has_commitment_kw(text)
+
+    @staticmethod
+    def _compute_importance(
+        text: str, source_turns: int, temperature: float
+    ) -> float:
+        return _compute_importance_heuristic(text, source_turns, temperature)
+
+    def _compute_novelty_bonus(self, text: str) -> float:
+        """惊讶度/预测误差（RPE）启发式：内容越新颖（与近期记忆重合越少）→ 越重要。
+
+        修复"重复信息打高分"——_compute_importance 里文本越长分越高，导致反复说
+        "今天好累"这类重复内容持续拿高 importance。这里用与最近 L1/L2 条目的关键词
+        重叠度做反向加成（新颖→加分，重复→不加）。零 LLM，复用 _keyword_overlap。
+        文献依据：dopamine reward-prediction-error（Schultz 1997）——意外的事更该记住。
+        """
+        sample = (list(self._l1)[-10:] + self._l2[-10:])
+        if not sample:
+            return 0.2  # 无参照（首条记忆）：视为新颖，给中性偏上加成
+        overlaps = [_keyword_overlap(text, m.text) for m in sample]
+        avg_overlap = sum(overlaps) / len(overlaps)
+        pa = self._params.get("perception_acuity_raw", 0.5)
+        # 新颖度 = 1 - 平均重合；感知敏锐者对新颖更敏感（加成幅度更大）。
+        return min(0.4, (1.0 - avg_overlap) * 0.4 * (0.5 + pa * 0.5))
 
     def _overflow_rescue(self) -> None:
         """L1 满时，把最老的已确认项下沉到 L2，未确认的丢弃。"""
@@ -807,27 +1154,89 @@ class MemorySystem:
                 }
 
     # ------------------------------------------------------------------
-    # Ebbinghaus 遗忘曲线（Item 95）
+    # 拟人化召回：四维归一化打分 helper（全部 clamp 到 [0,1]）
+    #
+    # 注：原 _ebbinghaus_retention（Item 95，R=e^(-t/S)）已删除——其"复习/情感
+    # 提升稳定性、衰减变慢"的思想已被 _recency_score 的 τ 吸收（τ 随 recall_count/
+    # importance 增大）。两者并存会对近期记忆双重衰减，故不再保留。
     # ------------------------------------------------------------------
 
-    def _ebbinghaus_retention(self, memory: MemoryResult, now: float) -> float:
-        """Ebbinghaus 遗忘曲线变体，考虑复习次数和情感权重。
+    @staticmethod
+    def _recency_score(
+        created_at: float,
+        last_recalled_ts: float,
+        recall_count: int,
+        importance: float,
+        now: float,
+    ) -> float:
+        """近期性评分。被召回会刷新 last_recalled_ts 使其复活。
 
-        公式：R = e^(-t/S)
-        其中 S（稳定性）随复习次数和情感权重增加，
-        使得被频繁召回和情感强烈的记忆衰减更慢。
+        τ（时间常数）吸收原 Ebbinghaus 的稳定性思想：召回越多/越重要 → 衰减越慢。
+        因此 recall 中不再单独乘 Ebbinghaus retention，避免对近期记忆双重衰减。
         """
-        age_hours = (now - memory.created_at) / 3600 if memory.created_at > 0 else 0.0
-        rehearsal = getattr(memory, "recall_count", 0)
-        emotional_weight = getattr(memory, "emotional_weight", 0.5)
-        # 基础遗忘：R = e^(-t/S)，S 随复习次数和情感权重增加
-        stability = 24 * (1 + rehearsal * 0.5) * (1 + emotional_weight)
-        retention = math.exp(-age_hours / stability)
-        return max(0.05, retention)  # 最低保留 5%
+        eff_ts = max(created_at, last_recalled_ts)
+        if eff_ts <= 0:
+            return 0.5  # 无时间信息（如部分 L3 节点）给中性值
+        dt_h = max(0.0, (now - eff_ts) / 3600.0)
+        # recall_count 封顶（防止高频老记忆 τ 无限膨胀、永久霸占召回槽 —— rich-get-richer）。
+        rc = min(max(0, recall_count), MemorySystem._RECENCY_RECALL_CAP)
+        # τ 只随 recall_count（频次）放大，不再乘 (1+importance)：
+        # importance 已作为独立维度进入 _composite(w_imp*imp)，再让它膨胀 τ 是双重计入，
+        # 会让高 importance 记忆在 recency 维也被不公平抬高。改为对高 importance 记忆
+        # 施加一个小幅 recency 加成（nudge），保留"重要的东西更不易被时间冲淡"的直觉，
+        # 但量级远小于旧式乘子，避免主导排序。
+        tau = 200.0 * (1 + 0.5 * rc)
+        base_recency = math.exp(-dt_h / tau)  # ∈(0,1]
+        importance_nudge = 0.05 * max(0.0, importance - 0.5)
+        return min(1.0, base_recency + importance_nudge)
+
+    def _emotional_match_score(
+        self, temperature: float, warmth: float
+    ) -> float:
+        """情绪一致性评分（mood-congruent）。两者均 clamp 到 [-1,1]。"""
+        t = max(-1.0, min(1.0, temperature))
+        w = max(-1.0, min(1.0, warmth))
+        base = 1.0 - abs(t - w) / 2.0  # ∈[0,1]
+        if t > 0:  # 宜人性正向偏好：正向记忆按 bias 乘法放大
+            # 旧式 base += (bias-1)*0.1 在 bias∈[1.0,1.3] 下最大仅 +0.03，
+            # 再经 w_emo(~0.15) 稀释后对 composite 影响 <0.005，人格参数形同虚设。
+            # 改乘法：bias=1.3、base=0.7 → 0.91，正向偏好真正进入排序。
+            base *= self._params["positive_recall_bias"]
+        return max(0.0, min(1.0, base))
+
+    def _composite(
+        self, rel: float, rec: float, imp: float, emo: float
+    ) -> float:
+        """四维加权合成分（权重为人格函数，和=1）。"""
+        p = self._params
+        return (
+            p["w_rel"] * rel
+            + p["w_rec"] * rec
+            + p["w_imp"] * imp
+            + p["w_emo"] * emo
+        )
 
     # ------------------------------------------------------------------
     # 召回（v2：三层并行 + reconsolidation 钩子）
     # ------------------------------------------------------------------
+
+    @staticmethod
+    def _resolve_recall_mode(explicit: Any) -> "RecallMode":
+        """决定召回模式：显式参数 > 环境变量 SYLANNE_RECALL_MODE > 默认 LEGACY。
+
+        非法值静默回退 LEGACY，绝不让一个配置错误阻断召回。
+        """
+        import os
+
+        if isinstance(explicit, RecallMode):
+            return explicit
+        raw = explicit if isinstance(explicit, str) else os.environ.get(
+            "SYLANNE_RECALL_MODE", ""
+        )
+        try:
+            return RecallMode(str(raw).strip().lower())
+        except ValueError:
+            return RecallMode.LEGACY
 
     def recall(
         self,
@@ -836,108 +1245,719 @@ class MemorySystem:
         current_warmth: float = 0.0,
         limit: int = 5,
     ) -> list[MemoryResult]:
-        """并行查询三层，返回加权合并后的 top-k 结果。"""
-        candidates: list[MemoryResult] = []
-        mood_weight = self._params["mood_weight"]
-        positive_recall_bias = self._params["positive_recall_bias"]
+        """召回入口分发器（阶段0 灰度）。
 
-        # P2 优化：预计算 query tokens，避免每个 item 重复 jieba 分词
+        - LEGACY：现有两阶段四维加权召回（默认，行为零变化）。
+        - ACTIVATION：ACT-R 激活核召回（阶段1+ 实现，未实现前回退 LEGACY）。
+        - SHADOW：返回 LEGACY 结果，同时后台跑 ACTIVATION 记录差异（不影响返回值）。
+        """
+        mode = self._recall_mode
+        if mode is RecallMode.LEGACY:
+            return self._recall_legacy(query, query_embedding, current_warmth, limit)
+        if mode is RecallMode.ACTIVATION:
+            activation_fn = getattr(self, "_recall_activation", None)
+            if activation_fn is None:
+                # 阶段1 未落地：安全回退，不让开关把召回打瘫。
+                return self._recall_legacy(
+                    query, query_embedding, current_warmth, limit
+                )
+            return activation_fn(query, query_embedding, current_warmth, limit)
+        # SHADOW：以 LEGACY 为准返回，新引擎仅观测
+        legacy = self._recall_legacy(query, query_embedding, current_warmth, limit)
+        activation_fn = getattr(self, "_recall_activation", None)
+        if activation_fn is not None:
+            try:
+                # observe_only：影子评估不能污染记忆状态（不刷新 actr_acc/不 reinforce），
+                # 否则 LEGACY 返回的同时新引擎偷偷"练习"了 actr_acc，影子就不是纯观测。
+                new = activation_fn(
+                    query, query_embedding, current_warmth, limit, observe_only=True
+                )
+                self._record_shadow_diff(query, legacy, new)
+            except Exception as e:  # 影子计算绝不能影响线上返回
+                import logging
+
+                logging.getLogger("astrbot_plugin_sylanne").warning(
+                    "Sylanne recall shadow 计算失败（不影响返回）：%s", e
+                )
+        return legacy
+
+    # 影子历史滚动缓冲上限（评估足够、内存可控）
+    _SHADOW_HISTORY_MAX = 50
+
+    def _record_shadow_diff(
+        self,
+        query: str,
+        legacy: list["MemoryResult"],
+        new: list["MemoryResult"],
+    ) -> None:
+        """记录 LEGACY vs ACTIVATION 召回的 top 集合差异，供影子模式离线评估。
+
+        差异同时：①存最近一条 _last_shadow_diff；②追加进滚动历史 _shadow_history
+        （供 get_debug_snapshot / WebUI 拉取批量评估）；③打 info 日志（运维可 grep 收集）。
+        """
+        legacy_texts = [r.text for r in legacy]
+        new_texts = [r.text for r in new]
+        ls, ns = set(legacy_texts), set(new_texts)
+        union = ls | ns
+        overlap = (len(ls & ns) / len(union)) if union else 1.0
+        diff = {
+            "query": query[:100],
+            "legacy_top": legacy_texts[:5],
+            "activation_top": new_texts[:5],
+            "overlap": round(overlap, 3),
+            "only_legacy": list(ls - ns)[:5],
+            "only_activation": list(ns - ls)[:5],
+            "ts": time.time(),
+        }
+        self._last_shadow_diff = diff
+        hist = getattr(self, "_shadow_history", None)
+        if hist is None:
+            hist = self._shadow_history = []
+        hist.append(diff)
+        if len(hist) > self._SHADOW_HISTORY_MAX:
+            del hist[: len(hist) - self._SHADOW_HISTORY_MAX]
+        import logging
+        logging.getLogger("astrbot_plugin_sylanne").info(
+            "Sylanne recall shadow diff: overlap=%.3f only_legacy=%d only_act=%d q=%r",
+            overlap, len(ls - ns), len(ns - ls), query[:40],
+        )
+
+    # ------------------------------------------------------------------
+    # 阶段1 宽召回（LEGACY 与 ACTIVATION 共享，差异只在阶段2 rerank）
+    # ------------------------------------------------------------------
+
+    def _gather_pool(
+        self,
+        query: str,
+        query_embedding: list[float] | None,
+        now: float,
+    ) -> list[dict]:
+        """遍历 L1/L2/L3 产出候选池（只算 relevance）。
+
+        候选记录：{rel, reason, obj, layer, text, temperature, importance,
+                   created_at, last_recalled_ts, recall_count, clarity}。
+        近期记忆（5min 内）relevance=0 也给兜底分强制入池（recency 通道）。
+        """
         query_tokens = _tokenize(query)
+        pool: list[dict] = []
+        index_ids: set[str] = set()
+        if query.strip():
+            index_ids = set(
+                self._inverted_index.query(list(query_tokens)[:15], top_k=15)
+            )
+        in_pool: set[str] = set()
 
-        # --- L1 recall ---
-        now = time.time()
         for item in self._l1:
             relevance, reason = self._compute_relevance_with_reason(
                 query, query_embedding, item.text, item.embedding, query_tokens
             )
+            is_recent = now - item.created_at < 300
             if relevance <= 0.0:
-                continue
-            # 时间邻近性加成：5 分钟内的记忆额外加分
-            temporal_bonus = 0.0
-            effective_reason = reason
-            if now - item.created_at < 300:
-                temporal_bonus = 0.1
-                if relevance < 0.2:
-                    effective_reason = "temporal_proximity"
-            emotion_bias = 1.0 - abs(item.temperature - current_warmth) * mood_weight
-            final_score = (
-                self._LAYER_WEIGHTS["L1"] * item.weight * relevance * emotion_bias
-            ) + temporal_bonus
-            if item.temperature > 0:
-                final_score += (positive_recall_bias - 1.0) * relevance
-            result = MemoryResult(
-                text=item.text,
-                layer="L1",
-                weight=item.weight,
-                relevance=relevance,
-                clarity=1.0,
-                temperature=item.temperature,
-                final_score=final_score,
-                created_at=item.created_at,
-                recall_count=item.recall_count,
-                emotional_weight=max(0.0, min(1.0, abs(item.temperature))),
-                recall_reason=effective_reason,
-            )
-            # 应用 Ebbinghaus 遗忘曲线作为权重因子
-            retention = self._ebbinghaus_retention(result, now)
-            result.final_score *= retention
-            candidates.append(result)
+                if not is_recent:
+                    continue
+                relevance = self._RECENT_FLOOR_RELEVANCE
+                reason = "temporal_proximity"
+            elif is_recent and relevance < 0.2:
+                reason = "temporal_proximity"
+            pool.append({
+                "rel": relevance, "reason": reason, "obj": item, "layer": "L1",
+                "text": item.text, "temperature": item.temperature,
+                "importance": item.importance, "created_at": item.created_at,
+                "last_recalled_ts": item.last_recalled_ts,
+                "recall_count": item.recall_count, "clarity": 1.0,
+            })
+            in_pool.add(item.id)
 
-        # --- L2 recall ---
-        self._recalled_l2_items: list[MemoryItem] = []
         for item in self._l2:
             relevance, reason = self._compute_relevance_with_reason(
                 query, query_embedding, item.text, item.embedding, query_tokens
             )
+            if relevance <= 0.0 and item.id in index_ids:
+                relevance = 0.12
+                reason = "inverted_index"
             if relevance <= 0.0:
                 continue
-            emotion_bias = 1.0 - abs(item.temperature - current_warmth) * mood_weight
-            final_score = (
-                self._LAYER_WEIGHTS["L2"] * item.weight * relevance * emotion_bias
-            )
-            if item.temperature > 0:
-                final_score += (positive_recall_bias - 1.0) * relevance
-            result = MemoryResult(
-                text=item.text,
-                layer="L2",
-                weight=item.weight,
-                relevance=relevance,
-                clarity=1.0,
-                temperature=item.temperature,
-                final_score=final_score,
-                created_at=item.created_at,
-                recall_count=item.recall_count,
-                emotional_weight=max(0.0, min(1.0, abs(item.temperature))),
-                recall_reason=reason,
-            )
-            # 应用 Ebbinghaus 遗忘曲线作为权重因子
-            retention = self._ebbinghaus_retention(result, now)
-            result.final_score *= retention
-            candidates.append(result)
-            self._reinforce_l2(item, current_warmth)
-            self._recalled_l2_items.append(item)
+            pool.append({
+                "rel": relevance, "reason": reason, "obj": item, "layer": "L2",
+                "text": item.text, "temperature": item.temperature,
+                "importance": item.importance, "created_at": item.created_at,
+                "last_recalled_ts": item.last_recalled_ts,
+                "recall_count": item.recall_count, "clarity": 1.0,
+            })
+            in_pool.add(item.id)
 
-        # --- L3 recall ---
-        l3_results = self._recall_l3(query, current_warmth)
-        candidates.extend(l3_results)
+        for item in self._l2:
+            if item.id in index_ids and item.id not in in_pool:
+                pool.append({
+                    "rel": 0.12, "reason": "inverted_index", "obj": item, "layer": "L2",
+                    "text": item.text, "temperature": item.temperature,
+                    "importance": item.importance, "created_at": item.created_at,
+                    "last_recalled_ts": item.last_recalled_ts,
+                    "recall_count": item.recall_count, "clarity": 1.0,
+                })
 
-        candidates.sort(key=lambda r: r.final_score, reverse=True)
-        return candidates[:limit]
+        # L3 候选（节点匹配，带 relevance；importance 用 clarity 近似）
+        pool.extend(self._recall_l3_candidates(query))
+        return pool
+
+    def _select_wide(self, pool: list[dict]) -> list[dict]:
+        """按 relevance 排序取 top-WIDE_K，高重要性条目旁路保底（防被截断）。"""
+        pool.sort(key=lambda c: c["rel"], reverse=True)
+        wide = pool[: self._RECALL_WIDE_K]
+        if len(pool) > self._RECALL_WIDE_K:
+            in_wide = {id(c["obj"]) for c in wide}
+            bypass = [
+                c for c in pool[self._RECALL_WIDE_K:]
+                if c["importance"] >= self._RECALL_IMPORTANCE_BYPASS_FLOOR
+                and id(c["obj"]) not in in_wide
+            ]
+            bypass.sort(key=lambda c: c["importance"], reverse=True)
+            wide = wide + bypass[: self._RECALL_IMPORTANCE_BYPASS]
+        return wide
+
+    def _apply_emotion_bypass(
+        self, pool: list[dict], wide: list[dict], current_warmth: float
+    ) -> list[dict]:
+        """情感特权旁路（阶段3）：把强情绪 + 较高重要性的记忆补回候选。
+
+        实现"情感强烈的记忆即使语义不相关也会浮现"——情感陪伴的核心。
+        仅在当前心境本身带情绪（|current_warmth| 偏离中性）时触发：中性闲聊时不该
+        被无关旧情绪记忆打断；用户情绪起伏时，与之"同频/呼应"的强情绪记忆才浮现
+        （mood-congruent retrieval）。补回项仍需过 _classify_confidence，激活太低
+        会落到 tot（模糊浮现）或被丢弃，不会硬塞确信内容。
+        """
+        if abs(current_warmth) < 0.3:
+            return wide  # 心境中性：不触发情感旁路
+        emo_floor = self._params.get("emo_bypass_floor", 0.55)
+        imp_floor = self._params.get("emo_bypass_imp_floor", 0.55)
+        in_wide = {id(c["obj"]) for c in wide}
+        # 直接扫 L1/L2（不依赖 pool——pool 已按 relevance 过滤掉 rel=0 的项，
+        # 而情感旁路的全部意义就是召回语义不相关但情感强烈的记忆）。
+        extra: list[dict] = []
+        for layer, store in (("L1", self._l1), ("L2", self._l2)):
+            for item in store:
+                if id(item) in in_wide:
+                    continue
+                # 情绪需与当前心境同向（都正或都负），避免开心时翻出难过事
+                if abs(item.temperature) < emo_floor or item.importance < imp_floor:
+                    continue
+                if (item.temperature >= 0) != (current_warmth >= 0):
+                    continue
+                extra.append({
+                    "rel": 0.0, "reason": "emotion_bypass", "obj": item,
+                    "layer": layer, "text": item.text,
+                    "temperature": item.temperature, "importance": item.importance,
+                    "created_at": item.created_at,
+                    "last_recalled_ts": item.last_recalled_ts,
+                    "recall_count": item.recall_count, "clarity": 1.0,
+                })
+        extra.sort(
+            key=lambda c: abs(c["temperature"]) * c["importance"], reverse=True
+        )
+        return wide + extra[:2]
+
+    def _recall_legacy(
+        self,
+        query: str,
+        query_embedding: list[float] | None = None,
+        current_warmth: float = 0.0,
+        limit: int = 5,
+    ) -> list[MemoryResult]:
+        """拟人化两阶段召回（LEGACY，原 recall() 实现，逐行未改）。
+
+        阶段1（宽召回）：遍历 L1/L2/L3，只算 relevance 粗筛，rel>0 入池，
+                         按 relevance 排序取 top-WIDE_K，并对高重要性条目设旁路保底。
+        阶段2（rerank）：对候选算四维 composite（rel/recency/importance/emotional），
+                         comp<gate 丢弃（人格化硬门控，空召回优于错召回），
+                         final = layer_weight × composite，排序取 top-limit。
+        命中后刷新 last_recalled_ts（使 recency 复活）+ importance 微增 + L2 reinforce。
+        """
+        now = time.time()
+
+        # ---- 阶段1：宽召回（LEGACY/ACTIVATION 共享，只算 relevance）----
+        pool = self._gather_pool(query, query_embedding, now)
+        wide = self._select_wide(pool)
+
+        # ---- 阶段2：rerank，算完整四维 composite ----
+        gate = self._params["recall_gate_base"]
+        results: list[MemoryResult] = []
+        for c in wide:
+            rel = c["rel"]
+            rec = self._recency_score(
+                c["created_at"], c["last_recalled_ts"],
+                c["recall_count"], c["importance"], now,
+            )
+            imp = c["importance"]
+            emo = self._emotional_match_score(c["temperature"], current_warmth)
+            comp = self._composite(rel, rec, imp, emo)
+            if comp < gate:
+                continue  # 空召回优于错召回
+            final = self._LAYER_WEIGHTS[c["layer"]] * comp
+            results.append(MemoryResult(
+                text=c["text"],
+                layer=c["layer"],
+                weight=getattr(c["obj"], "weight", c["clarity"]),
+                relevance=rel,
+                clarity=c["clarity"],
+                temperature=c["temperature"],
+                final_score=final,
+                created_at=c["created_at"],
+                recall_count=c["recall_count"],
+                emotional_weight=max(0.0, min(1.0, abs(c["temperature"]))),
+                recall_reason=c["reason"],
+                source=getattr(c["obj"], "source", "dialogue"),
+                importance=imp,
+                source_obj=c["obj"],
+            ))
+
+        results.sort(key=lambda r: r.final_score, reverse=True)
+        top = results[:limit]
+
+        # 命中刷新 → recency 复活 + frequency + L2 reinforce
+        self._recalled_l2_items: list[MemoryItem] = []
+        for r in top:
+            self._refresh_recall(r.source_obj, now, current_warmth, r.layer)
+        return top
+
+    # ------------------------------------------------------------------
+    # 阶段1：ACT-R 激活核（base-level learning + EMA 近似）
+    # ------------------------------------------------------------------
+
+    # base-level 归一化区间：A=B+imp_scale*imp。B=ln(decayed)，decayed≈acc*dt^-d。
+    # 单次编码、间隔 1h 时 B≈0；长期不召回 B 趋向负；高频近召回 B>0。经验区间 [-4, B_max]。
+    _ACTR_B_MIN = -4.0
+    # Δt 下限（小时）：ACT-R 中 t⁻ᵈ 在 t<1 时会 >1 反向爆炸（刚创建即召回时 Δt→0
+    # 会让激活炸到上千）。标准做法是给时间间隔一个最小单位。取 0.25h（15min）：
+    # 同一会话内的连续召回不会被算成"无限近"而虚高，跨会话间隔则正常衰减。
+    _ACTR_MIN_DT_H = 0.25
+
+    # 阶段2 spreading activation：扩散硬上限（防爆炸/超预算）与激活地板（剪枝）。
+    _SPREAD_MAX_NODES = 30        # 单次召回扩散触达的新节点总数上限
+    _SPREAD_ACTIVATION_FLOOR = 0.08  # 扩散增量低于此值则剪枝，不再传导
+    _SPREAD_REL_CAP = 0.6         # 扩散节点作为候选的 relevance 上限（弱于直接命中）
+
+    def _update_actr_acc(self, obj: Any, now: float) -> None:
+        """ACT-R base-level learning 的 EMA 近似递推（命中时调用）。
+
+        精确式 B=ln(Σ tⱼ⁻ᵈ) 需存全部召回时间戳；这里用单标量累加器近似：
+            acc ← acc * (Δt_h)⁻ᵈ + 1
+        Δt_h 为距上次召回（或创建）的小时数，下限 _ACTR_MIN_DT_H 防 t⁻ᵈ 爆炸。
+        等价于"把已有激活按幂律衰减到当下，再叠加本次召回的 +1"。
+        Petrov(2006) 证明该近似与完整序列误差 < 0.05 nats。
+        """
+        d = self._params.get("actr_d", 0.5)
+        lrt = obj.last_recalled_ts if getattr(obj, "last_recalled_ts", 0.0) > 0 \
+            else obj.created_at
+        dt_h = max((now - lrt) / 3600.0, self._ACTR_MIN_DT_H)
+        decayed = obj.actr_acc * (dt_h ** -d)
+        obj.actr_acc = min(decayed + 1.0, 1e6)  # 防溢出上限
+
+    def _activation_score(
+        self,
+        actr_acc: float,
+        last_recalled_ts: float,
+        created_at: float,
+        importance: float,
+        temperature: float,
+        current_warmth: float,
+        now: float,
+    ) -> tuple[float, bool]:
+        """ACT-R 激活：A = ln(acc·Δt⁻ᵈ) + imp_scale·importance；返回 (归一激活, 是否过门控)。
+
+        - base-level B = ln(decayed) 统一编码频次+近因（acc 越大、Δt 越小 → B 越高）。
+        - importance 作先验偏置加到 A（**唯一**计入点，不再有独立维度，杜绝双重计入）。
+        - emotional（mood-congruent）不进 A，而是降低检索阈值（情绪契合→更易被想起），
+          对应 ACT-R 的 retrieval threshold 调节，也实现"情感记忆特权"。
+        """
+        d = self._params.get("actr_d", 0.5)
+        imp_scale = self._params.get("actr_importance_scale", 1.25)
+        emo_scale = self._params.get("actr_emo_scale", 0.35)
+        base_threshold = self._params.get("actr_base_threshold", -1.1)
+
+        eff_ts = max(last_recalled_ts, created_at)
+        if eff_ts <= 0:
+            dt_h = 1.0  # 无时间信息（部分 L3 节点）给中性 1h
+        else:
+            dt_h = max((now - eff_ts) / 3600.0, self._ACTR_MIN_DT_H)
+        decayed = max(actr_acc * (dt_h ** -d), 1e-10)
+        B = math.log(decayed)
+        A = B + imp_scale * max(0.0, min(1.0, importance))
+
+        b_max = 1.5 + imp_scale
+        act_norm = max(0.0, min(1.0, (A - self._ACTR_B_MIN) / (b_max - self._ACTR_B_MIN)))
+
+        t = max(-1.0, min(1.0, temperature))
+        w = max(-1.0, min(1.0, current_warmth))
+        emo_match = 1.0 - abs(t - w) / 2.0          # ∈[0,1]
+        effective_threshold = base_threshold - emo_scale * emo_match  # 情绪契合→阈值下降
+        passes = A >= effective_threshold
+        return act_norm, passes
+
+    # ------------------------------------------------------------------
+    # 阶段3：软召回三级置信 + 情感特权 + 舌尖现象
+    # ------------------------------------------------------------------
+
+    def _compute_final_activation(
+        self,
+        act_norm: float,
+        emotional_weight: float,
+        current_warmth: float,
+        temperature: float,
+    ) -> float:
+        """在归一激活上叠加情感特权加成：强情绪且与当前心境契合的记忆被抬高。
+
+        实现"她对情感强烈的事记得更牢"——情感陪伴的核心价值。仅对 emo_w>0.6 生效。
+        """
+        k = self._params.get("emotion_privilege_k", 0.20)
+        bonus = 0.0
+        if emotional_weight > 0.6:
+            congruence = 1.0 - abs(
+                max(-1.0, min(1.0, temperature)) - max(-1.0, min(1.0, current_warmth))
+            ) / 2.0
+            bonus = k * emotional_weight * congruence
+        return min(1.0, act_norm + bonus)
+
+    def _classify_confidence(
+        self, activation: float, importance: float, emotional_weight: float
+    ) -> str | None:
+        """三级置信分级（替代硬门控）。返回 clear/vague/tot 或 None（彻底想不起）。
+
+        - activation ≥ theta_clear → "clear"：确信记得。
+        - activation ≥ theta_tot   → "vague"：依稀记得（注入时模糊措辞）。
+        - 否则若 importance/emotion 够高 → "tot"：舌尖现象（知道有这么回事但记不清）。
+          这比干净遗忘更拟人、更暖——"她记得我"胜过"她忘了"。
+        - 都不满足 → None：丢弃（空召回优于错召回）。
+        """
+        if activation >= self._params.get("theta_clear", 0.55):
+            return "clear"
+        if activation >= self._params.get("theta_tot", 0.15):
+            return "vague"
+        if importance >= 0.7 or emotional_weight >= 0.6:
+            return "tot"
+        return None
+
+    def _layer_confidence(self, layer: str) -> float:
+        """ACTIVATION 模式的层置信因子（取代 _LAYER_WEIGHTS 硬乘）。
+
+        L1 未确认近期摘要 → 折扣（人格化，尽责性高更挑剔）；
+        L2 已确认、L3 已有 clarity 衰减 → 不折扣（避免与 activation 重复惩罚）。
+        """
+        if layer == "L1":
+            return self._params.get("l1_confidence", 0.85)
+        return 1.0
+
+    # ------------------------------------------------------------------
+    # 阶段2：L3 spreading activation（让图谱的边参与召回——联想扩散）
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _edge_weight(edge: "GraphEdge", current_warmth: float) -> float:
+        """边的传导权重：clarity × strength × 情绪契合调节，clamp [0,1]。
+
+        情绪与当前心境契合的关系传导更强（mood-congruent 联想），系数 ∈[0.7,1.3]。
+        """
+        emo_align = 1.0 - abs(edge.emotion_weight - current_warmth) / 2.0  # ∈[0,1]
+        emotion_modifier = 0.7 + 0.6 * emo_align                           # ∈[0.7,1.3]
+        return max(0.0, min(1.0, edge.clarity * edge.strength * emotion_modifier))
+
+    def _build_adjacency(self) -> dict[str, list[tuple[str, "GraphEdge"]]]:
+        """按需构建邻接表（node_id → [(邻居 id, edge), ...]）。
+
+        刻意每次召回重建（边数上限 2000，O(E) dict 操作 < 0.5ms），而非维护持久
+        _l3_adj 索引——后者需在 加边/GC/反序列化 三处同步，是高发不一致 bug 源
+        （见重构评审 facet E）。无状态重建以极小成本换正确性。
+        """
+        adj: dict[str, list[tuple[str, GraphEdge]]] = {}
+        for edge in self._l3_edges:
+            if edge.source in self._l3_nodes and edge.target in self._l3_nodes:
+                adj.setdefault(edge.source, []).append((edge.target, edge))
+                adj.setdefault(edge.target, []).append((edge.source, edge))
+        return adj
+
+    def _spread_activation(
+        self, seed_activations: dict[str, float], current_warmth: float
+    ) -> dict[str, float]:
+        """从种子节点沿边扩散激活（最多 2 跳，fan effect 抑制 + 硬上限剪枝）。
+
+        返回 {node_id: spread_activation}（仅含扩散新增节点，不含种子）。
+        - fan effect（Anderson）：连接数多的节点向每个邻居传导被 1/√fan 稀释，
+          避免"枢纽节点"把激活无差别灌给所有邻居。
+        - boundary 节点不接收扩散（用户边界/禁忌不该被无关联想拽出）。
+        - 低于 floor 的增量剪枝；触达节点数达上限即停（防爆炸 + 守 <5ms 预算）。
+        """
+        if not seed_activations or not self._l3_edges:
+            return {}
+        bp = self._params.get("boundary_permeability", 0.5)
+        hop1_decay = 0.3 + bp * 0.5  # 开放性越高→联想扩散越远 ∈[0.3,0.8]
+        floor = self._SPREAD_ACTIVATION_FLOOR
+        adj = self._build_adjacency()
+
+        spread: dict[str, float] = {}
+        count = 0
+
+        def _emit(src_id: str, src_act: float, decay: float) -> bool:
+            """从 src 向邻居传导一跳。返回是否已达上限。"""
+            nonlocal count
+            neighbors = adj.get(src_id, [])
+            if not neighbors:
+                return False
+            fan_penalty = 1.0 / math.sqrt(len(neighbors))
+            for nbr_id, edge in neighbors:
+                if nbr_id in seed_activations:
+                    continue  # 种子节点已直接命中，不重复
+                nbr = self._l3_nodes.get(nbr_id)
+                if nbr is None or nbr.type == "boundary":
+                    continue
+                delta = src_act * self._edge_weight(edge, current_warmth) \
+                    * fan_penalty * decay
+                if delta < floor:
+                    continue
+                if nbr_id not in spread:
+                    count += 1
+                spread[nbr_id] = max(spread.get(nbr_id, 0.0), delta)
+                if count >= self._SPREAD_MAX_NODES:
+                    return True
+            return False
+
+        # 第一跳：从种子出发
+        for sid, sact in seed_activations.items():
+            if sact < floor:
+                continue
+            if _emit(sid, sact, hop1_decay):
+                return spread
+
+        # 第二跳：仅从第一跳新增节点出发，衰减平方
+        hop2_decay = hop1_decay ** 2
+        for sid, sact in list(spread.items()):
+            if sact < floor:
+                continue
+            if _emit(sid, sact, hop2_decay):
+                return spread
+
+        return spread
+
+    def _spreading_candidates(
+        self, pool: list[dict], current_warmth: float, now: float
+    ) -> list[dict]:
+        """基于已匹配的 L3 候选做 spreading，产出扩散节点的额外候选。
+
+        种子激活 = 直接命中的 L3 节点的 relevance；扩散到的邻居节点封装为新候选，
+        relevance = 扩散激活值（上限 _SPREAD_REL_CAP），reason=spreading_activation。
+        """
+        seeds: dict[str, float] = {}
+        for c in pool:
+            if c["layer"] == "L3" and hasattr(c["obj"], "id"):
+                nid = c["obj"].id
+                seeds[nid] = max(seeds.get(nid, 0.0), c["rel"])
+        if not seeds:
+            return []
+
+        spread = self._spread_activation(seeds, current_warmth)
+        in_pool = {c["obj"].id for c in pool
+                   if c["layer"] == "L3" and hasattr(c["obj"], "id")}
+        extra: list[dict] = []
+        for nid, act in spread.items():
+            if nid in in_pool:
+                continue
+            node = self._l3_nodes.get(nid)
+            if node is None or node.clarity < 0.1:
+                continue
+            extra.append({
+                "rel": min(self._SPREAD_REL_CAP, act),
+                "reason": "spreading_activation",
+                "obj": node,
+                "layer": "L3",
+                "text": node.label,
+                "temperature": node.emotion_weight,
+                "importance": node.clarity,
+                "created_at": getattr(node, "created_at", 0.0),
+                "last_recalled_ts": getattr(node, "last_recalled_ts", 0.0),
+                "recall_count": node.recall_count,
+                "clarity": node.clarity,
+            })
+        return extra
+
+    def _recall_activation(
+        self,
+        query: str,
+        query_embedding: list[float] | None = None,
+        current_warmth: float = 0.0,
+        limit: int = 5,
+        observe_only: bool = False,
+    ) -> list[MemoryResult]:
+        """ACT-R 激活核召回（ACTIVATION 模式）。
+
+        observe_only=True（SHADOW 影子评估）时不施加任何命中副作用——不刷新
+        actr_acc/last_recalled_ts、不 reinforce L2，保证影子是纯只读观测。
+
+        阶段1（宽召回）：与 LEGACY 共享 _gather_pool；额外做 L3 spreading activation，
+                         把联想到的邻居节点也纳入候选池。
+        阶段2（rerank）：composite = w_rel_act·rel + w_act·activation。
+        阶段3（软召回）：不再硬丢弃低分项，而按激活分三级置信（clear/vague/tot）；
+                         强情绪记忆走特权旁路 + 激活加成；舌尖项保留为模糊浮现。
+        命中按 base-level 更新 acc。
+        """
+        now = time.time()
+        pool = self._gather_pool(query, query_embedding, now)
+        # 阶段2 L3 扩散激活：让图谱的边参与召回（联想浮现）。
+        pool.extend(self._spreading_candidates(pool, current_warmth, now))
+        wide = self._select_wide(pool)
+        # 阶段3 情感特权旁路：强情绪 + 较高重要性的记忆即使 relevance 低被 WIDE_K
+        # 截断，也补回候选——情感陪伴里"她记得那次你难过"比语义相关更重要。
+        wide = self._apply_emotion_bypass(pool, wide, current_warmth)
+
+        w_rel = self._params.get("w_rel_act", 0.55)
+        w_act = self._params.get("w_act", 0.45)
+        results: list[MemoryResult] = []
+        for c in wide:
+            rel = c["rel"]
+            act_norm, _ = self._activation_score(
+                getattr(c["obj"], "actr_acc", 1.0),
+                c["last_recalled_ts"], c["created_at"],
+                c["importance"], c["temperature"], current_warmth, now,
+            )
+            emo_w = max(0.0, min(1.0, abs(c["temperature"])))
+            # 情感特权加成后再分级（强情绪记忆更容易够到 clear/vague）
+            final_act = self._compute_final_activation(
+                act_norm, emo_w, current_warmth, c["temperature"]
+            )
+            confidence = self._classify_confidence(final_act, c["importance"], emo_w)
+            if confidence is None:
+                continue  # 彻底想不起（连舌尖都够不到）
+            comp = w_rel * rel + w_act * final_act
+            # ACTIVATION 用 _layer_confidence 取代 _LAYER_WEIGHTS 硬乘：
+            # recency/frequency/importance 已被 activation 编码，再按 L1=1/L2=.7/L3=.4
+            # 硬乘是重复惩罚。仅对 L1（未确认）保留置信折扣。
+            final = self._layer_confidence(c["layer"]) * comp
+            results.append(MemoryResult(
+                text=c["text"],
+                layer=c["layer"],
+                weight=getattr(c["obj"], "weight", c["clarity"]),
+                relevance=rel,
+                clarity=c["clarity"],
+                temperature=c["temperature"],
+                final_score=final,
+                created_at=c["created_at"],
+                recall_count=c["recall_count"],
+                emotional_weight=emo_w,
+                recall_reason=c["reason"],
+                source=getattr(c["obj"], "source", "dialogue"),
+                importance=c["importance"],
+                activation=final_act,
+                confidence=confidence,
+                source_obj=c["obj"],
+                debug={"rel": round(rel, 3), "act": round(act_norm, 3),
+                       "final_act": round(final_act, 3), "conf": confidence,
+                       "comp": round(comp, 3)},
+            ))
+
+        results.sort(key=lambda r: r.final_score, reverse=True)
+        top = results[:limit]
+
+        if observe_only:
+            return top  # 影子评估：纯只读，不施加命中副作用
+        self._recalled_l2_items: list[MemoryItem] = []
+        for r in top:
+            self._refresh_recall(
+                r.source_obj, now, current_warmth, r.layer, update_actr=True
+            )
+        return top
+
+    # ------------------------------------------------------------------
+    # 可观测（阶段0：零副作用快照，供 WebUI/影子模式调试）
+    # ------------------------------------------------------------------
+
+    def get_debug_snapshot(self) -> dict:
+        """返回召回引擎当前状态快照（只读，无副作用）。
+
+        供 WebUI dashboard 轮询 / 影子模式离线评估使用。不触发任何召回或衰减。
+        """
+        hist = getattr(self, "_shadow_history", []) or []
+        shadow_stats = None
+        if hist:
+            overlaps = [d["overlap"] for d in hist]
+            shadow_stats = {
+                "samples": len(hist),
+                "avg_overlap": round(sum(overlaps) / len(overlaps), 3),
+                "min_overlap": round(min(overlaps), 3),
+            }
+        return {
+            "recall_mode": self._recall_mode.value,
+            "l1_size": len(self._l1),
+            "l2_size": len(self._l2),
+            "l3_nodes": len(self._l3_nodes),
+            "l3_edges": len(self._l3_edges),
+            "tick": self._tick,
+            "params": dict(self._params),
+            "last_shadow_diff": self._last_shadow_diff,
+            "shadow_stats": shadow_stats,
+            "shadow_history": hist[-10:],  # 最近 10 条，避免快照过大
+        }
+
+    def _refresh_recall(
+        self, obj: Any, now: float, current_warmth: float, layer: str,
+        update_actr: bool = False,
+    ) -> None:
+        """命中后刷新：last_recalled_ts=now + importance 微增 + 层内强化。
+
+        update_actr=True（ACTIVATION 模式）时，先按 base-level learning 递推 actr_acc，
+        必须在 last_recalled_ts 被刷新为 now *之前* 调用（_update_actr_acc 用旧 ts 算 dt）。
+        """
+        if obj is None:
+            return
+        beta = self._params["reconsolidation_rate"]
+        if layer == "L3":
+            # GraphNode：clarity 微增 + recall_count + 刷新 last_recalled_ts
+            # （否则 recency 永远退化为中性 0.5，L3 的近期性维度形同虚设）
+            if update_actr and hasattr(obj, "actr_acc"):
+                self._update_actr_acc(obj, now)
+            if hasattr(obj, "clarity"):
+                obj.clarity = min(obj.clarity + 0.05, 1.0)
+            if hasattr(obj, "recall_count"):
+                obj.recall_count += 1
+            if hasattr(obj, "last_recalled_ts"):
+                obj.last_recalled_ts = now
+            # reconsolidation：L3 节点情绪也随当前心境漂移（与 L2 对称，否则
+            # 三层 reconsolidation 不一致——只有 L2 的记忆会被心境重塑）
+            if hasattr(obj, "emotion_weight"):
+                obj.emotion_weight = obj.emotion_weight * (1 - beta) + current_warmth * beta
+            return
+        # L1/L2 MemoryItem
+        if update_actr:
+            self._update_actr_acc(obj, now)  # 用旧 last_recalled_ts 算 dt
+        obj.last_recalled_ts = now
+        # importance 增益随接近上限而衰减（越重要的条目每次命中加得越少），
+        # 配合 τ 的 recall_count 封顶，共同抑制 rich-get-richer 垄断。
+        obj.importance = min(1.0, obj.importance + 0.02 * max(0.3, 1.0 - obj.importance))
+        if layer == "L2":
+            self._reinforce_l2(obj, current_warmth)
+            self._recalled_l2_items.append(obj)
+        else:
+            # L1：刷新频率/召回时钟 + reconsolidation 温度漂移（与 L2 对称）。
+            # 不做 L2 的权重强化（L1 是未确认近期摘要，强化留到下沉 L2 后）。
+            obj.recall_count += 1
+            obj.last_recalled_tick = self._tick
+            obj.temperature = obj.temperature * (1 - beta) + current_warmth * beta
 
     def get_recalled_l2_items(self) -> list[MemoryItem]:
         """返回上次 recall() 中被命中的 L2 条目（供外部 reconsolidation 重写）。"""
         return getattr(self, "_recalled_l2_items", [])
 
     def rewrite_item(self, item_id: str, new_text: str) -> bool:
-        """Reconsolidation v2: 用重写后的文本覆盖 L2 条目。"""
-        for item in self._l2:
-            if item.id == item_id:
-                if item.rewrite_count >= REWRITE_FREEZE_AFTER:
-                    return False
-                item.text = new_text
-                item.rewrite_count += 1
-                item.weight += 0.03
-                return True
+        """Reconsolidation v2: 用重写后的文本覆盖记忆条目。
+
+        同时遍历 L1 与 L2——召回可能命中 L1 条目（近期摘要），若只查 L2，
+        对 L1 命中项的 reconsolidation 重写会静默失败（找不到 → 返回 False）。
+        """
+        for store in (self._l1, self._l2):
+            for item in store:
+                if item.id == item_id:
+                    if item.rewrite_count >= REWRITE_FREEZE_AFTER:
+                        return False
+                    item.text = new_text
+                    item.rewrite_count += 1
+                    item.weight = min(1.0, item.weight + 0.03)
+                    return True
         return False
 
     # ------------------------------------------------------------------
@@ -945,11 +1965,11 @@ class MemorySystem:
     # ------------------------------------------------------------------
 
     def reheat_memory(self, memory_id: str, reason: str) -> bool:
-        """将指定记忆条目"突然升温"——重置 last_recalled 使其变为 hot。
+        """将指定记忆条目"突然升温"——刷新 last_recalled_ts 使 recency 复活。
 
-        通过将 created_at 设为当前时间（模拟刚被提及），使该记忆在
-        memory_temperature 属性中被判定为 "hot"，从而在下次召回时
-        获得更高的优先级。
+        重构后：只刷新 last_recalled_ts（而非覆盖 created_at），保护真实创建时间
+        用于注入时的相对时间标签。recency 评分基于 max(created_at, last_recalled_ts)，
+        因此刷新 last_recalled_ts 即可让该记忆在下次召回获得更高近期性分。
 
         同时记录 reheat 原因到日志。
 
@@ -963,28 +1983,19 @@ class MemorySystem:
         import logging
 
         _logger = logging.getLogger("astrbot_plugin_sylanne")
+        now = time.time()
 
-        # 在 L1 中查找
-        for item in self._l1:
-            if item.id == memory_id:
-                item.created_at = time.time()
-                item.recall_count += 1
-                item.last_recalled_tick = self._tick
-                _logger.info(
-                    f"Sylanne memory reheat: id={memory_id}, reason={reason}"
-                )
-                return True
-
-        # 在 L2 中查找
-        for item in self._l2:
-            if item.id == memory_id:
-                item.created_at = time.time()
-                item.recall_count += 1
-                item.last_recalled_tick = self._tick
-                _logger.info(
-                    f"Sylanne memory reheat: id={memory_id}, reason={reason}"
-                )
-                return True
+        # 在 L1 / L2 中查找
+        for pool in (self._l1, self._l2):
+            for item in pool:
+                if item.id == memory_id:
+                    item.last_recalled_ts = now
+                    item.recall_count += 1
+                    item.last_recalled_tick = self._tick
+                    _logger.info(
+                        f"Sylanne memory reheat: id={memory_id}, reason={reason}"
+                    )
+                    return True
 
         _logger.debug(
             f"Sylanne memory reheat failed: id={memory_id} not found"
@@ -1038,20 +2049,25 @@ class MemorySystem:
         beta = self._params["reconsolidation_rate"]
         item.temperature = item.temperature * (1 - beta) + current_warmth * beta
 
-    def _recall_l3(self, query: str, current_warmth: float) -> list[MemoryResult]:
-        """从 L3 图谱中通过关键词匹配节点标签进行召回。"""
-        results: list[MemoryResult] = []
+    def _recall_l3_candidates(self, query: str) -> list[dict]:
+        """阶段1：从 L3 图谱按关键词匹配节点标签产出候选（只算 relevance）。
+
+        不在此处计算 final_score 或施加强化副作用——final_score 由阶段2 统一
+        composite 计算，节点强化（recall_count/clarity）由命中后 _refresh_recall 施加。
+        importance 用 node.clarity 近似，emotional 用 node.emotion_weight（作温度）。
+        """
+        candidates: list[dict] = []
         query_lower = query.lower()
-        query_words = set(query_lower.split())
-        mood_weight = self._params["mood_weight"]
-        now = time.time()
+        # 用 _tokenize（jieba）而非 .split()：L1/L2 都用 _tokenize，L3 若用 .split()
+        # 对中文（无空格）几乎切不出词，词级交集恒空、只能退到子串匹配，三层口径不一致。
+        query_words = _tokenize(query)
 
         matched_nodes: list[GraphNode] = []
         for node in self._l3_nodes.values():
             if node.type == "boundary":
                 if node.label.lower() not in query_lower:
                     continue
-            label_words = set(node.label.lower().split())
+            label_words = _tokenize(node.label)
             if label_words & query_words or node.label.lower() in query_lower:
                 matched_nodes.append(node)
 
@@ -1073,38 +2089,39 @@ class MemorySystem:
             if connected_texts:
                 text = f"{node.label}: {'; '.join(connected_texts[:3])}"
 
-            relevance = len(query_words & set(node.label.lower().split())) / max(
-                len(query_words), 1
-            )
+            # relevance：词级用对称 Jaccard（交集/并集），避免短 label 单词命中即虚高
+            # （旧式 交集/len(query) 让 1 词 label 命中就得 0.33-0.5，挤占 L1/L2 槽位）。
+            # 用 _tokenize 与上方匹配口径、与 L1/L2 口径一致。
+            label_lower = node.label.lower()
+            label_words = _tokenize(node.label)
+            overlap = query_words & label_words
+            if overlap:
+                relevance = len(overlap) / max(len(query_words | label_words), 1)
+            elif label_lower and label_lower in query_lower:
+                # 整标签作为子串命中（中文无空格分词时的主路径，否则词级交集恒空、
+                # relevance=0 被丢弃 → 中文 L3 召回瘫痪）。按标签字符占比给分，
+                # 上限 0.5：子串命中证据强度弱于词级重合。
+                relevance = min(0.5, len(label_lower) / max(len(query_lower), 1))
+            else:
+                continue
+            if relevance <= 0.0:
+                continue
 
-            emotion_bias = 1.0 - abs(node.emotion_weight - current_warmth) * mood_weight
-            final_score = (
-                self._LAYER_WEIGHTS["L3"] * node.clarity * relevance * emotion_bias
-            )
+            candidates.append({
+                "rel": relevance,
+                "reason": "association_graph",
+                "obj": node,
+                "layer": "L3",
+                "text": text,
+                "temperature": node.emotion_weight,  # emotional 用 emotion_weight
+                "importance": node.clarity,           # importance 用 clarity 近似
+                "created_at": getattr(node, "created_at", 0.0),
+                "last_recalled_ts": getattr(node, "last_recalled_ts", 0.0),
+                "recall_count": node.recall_count,
+                "clarity": node.clarity,
+            })
 
-            node.recall_count += 1
-            node.clarity = min(node.clarity + 0.05, 1.0)
-
-            result = MemoryResult(
-                text=text,
-                layer="L3",
-                weight=node.clarity,
-                relevance=relevance,
-                clarity=node.clarity,
-                temperature=node.emotion_weight,
-                final_score=final_score,
-                created_at=getattr(node, "created_at", 0.0),
-                recall_count=node.recall_count,
-                emotional_weight=max(0.0, min(1.0, abs(node.emotion_weight))),
-                recall_reason="association_graph",
-            )
-            # L3 节点也应用 Ebbinghaus（created_at 可能为 0，此时 retention=1.0）
-            if result.created_at > 0:
-                retention = self._ebbinghaus_retention(result, now)
-                result.final_score *= retention
-            results.append(result)
-
-        return results
+        return candidates
 
     # ------------------------------------------------------------------
     # 召回格式化（v2：分层注入）
@@ -1122,23 +2139,55 @@ class MemorySystem:
         L3 层额外标注可信度/模糊度。
         """
         if not results:
-            return ""
+            return ""  # 空召回优于错召回（配合门控）
         lines = ["[记忆参考]"]
         now = time.time()
         for r in results[:max_items]:
-            # 记忆温度前缀（Item 148）
+            # 生活模拟记忆：这是 Sylanne 自己的生活/心境，不是和对方聊过的，
+            # 用专属前缀避免 LLM 误以为"和用户真实聊过/发生过"
+            if getattr(r, "source", "dialogue") == "life_sim":
+                lines.append(f"（我自己经历的）{r.text}")
+                continue
+            # 阶段3 软召回：按置信度用不同措辞，让 LLM 感知"确信记得"vs"依稀"vs"舌尖"。
+            # confidence 默认 "clear"（LEGACY 结果不带分级 → 走原确信路径，行为不变）。
+            confidence = getattr(r, "confidence", "clear")
+            time_label = self._relative_time_label(now, r.created_at)
+            if confidence == "tot":
+                # 舌尖现象：知道有这么回事但记不清内容——不直述细节，只给情感线索。
+                lines.append(
+                    f"（好像有件事和你有关{self._emotion_hint(r.temperature)}，"
+                    f"但我一时记不太清了…）"
+                )
+                continue
+            if confidence == "vague":
+                snippet = r.text[:60]
+                lines.append(
+                    f"（依稀记得·{time_label}）好像是{snippet}……不过细节记得不太清了。"
+                )
+                continue
+            # clear：确信记得（原有逻辑）
             temp_prefix = self._TEMPERATURE_PREFIXES.get(
                 r.memory_temperature, "（之前聊过）"
             )
-            # 根据来源层添加可信度/模糊度后缀
             if r.layer == "L3" and r.clarity < 0.7:
-                prefix = f"{temp_prefix[:-1]}/模糊印象）"
+                prefix = f"{temp_prefix[:-1]}·{time_label}/模糊印象）"
             elif r.layer == "L3":
-                prefix = f"{temp_prefix[:-1]}/长期认知）"
+                prefix = f"{temp_prefix[:-1]}·{time_label}/长期认知）"
             else:
-                prefix = temp_prefix
+                prefix = f"{temp_prefix[:-1]}·{time_label}）"
             lines.append(f"{prefix}{r.text}")
         return "\n".join(lines)
+
+    @staticmethod
+    def _emotion_hint(temperature: float) -> str:
+        """按温度返回情感线索（舌尖现象用，不泄露记忆内容细节）。"""
+        if temperature >= 0.5:
+            return "（是件挺开心的事）"
+        if temperature <= -0.5:
+            return "（那次你情绪有点低落）"
+        if temperature < 0:
+            return "（当时气氛有点微妙）"
+        return ""
 
     @staticmethod
     def _relative_time_label(now: float, created_at: float) -> str:
@@ -1267,6 +2316,7 @@ class MemorySystem:
             recall_count=0,
             valid_from=valid_from,
             staleness_threshold=180,
+            created_at=time.time(),
         )
         self._l3_nodes[node.id] = node
         self._l3_label_index[label] = node.id
@@ -1299,6 +2349,7 @@ class MemorySystem:
             emotion_weight=emotion_weight,
             clarity=clarity,
             last_recalled=self._tick,
+            strength=_relation_strength(relation),  # 阶段2 spreading 用
         )
         self._l3_edges.append(edge)
         self._l3_edge_index[key] = len(self._l3_edges) - 1
@@ -1339,6 +2390,9 @@ class MemorySystem:
         if len(merged_text) > 200:
             merged_text = merged_text[:200] + "..."
         avg_temp = sum(item.temperature for item in old_items) / len(old_items)
+        # importance 取被合并条目的最大值，而非默认 0.5：一批旧消息里若含承诺/约定
+        # 等高重要性条目，压缩后不能把它稀释成中性，否则重要信号在压缩时静默丢失。
+        max_imp = max((item.importance for item in old_items), default=0.5)
         self._l1.appendleft(
             MemoryItem(
                 id=uuid.uuid4().hex[:12],
@@ -1353,6 +2407,7 @@ class MemorySystem:
                 recall_count=0,
                 last_recalled_tick=0,
                 rewrite_count=0,
+                importance=max_imp,
             )
         )
         return overflow

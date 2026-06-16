@@ -16,7 +16,12 @@ Device priority: CUDA > MPS > CPU (auto-detected).
 from __future__ import annotations
 
 import math
-from typing import Any
+from collections.abc import Callable
+from typing import Any, TypeVar
+
+from .coupling_dynamics import _TIER_MAX_ORDER, SimplicialComplex
+
+_DecoratedF = TypeVar("_DecoratedF", bound=Callable[..., Any])
 
 try:
     import torch
@@ -30,17 +35,15 @@ except ImportError:
     F = None  # type: ignore[assignment]
     TORCH_AVAILABLE = False
 
-    def _inference_mode():  # type: ignore[no-redef]
+    def _inference_mode() -> Callable[[_DecoratedF], _DecoratedF]:  # type: ignore[no-redef]
         """No-op decorator when torch is not available."""
 
-        def decorator(fn):  # type: ignore[no-untyped-def]
+        def decorator(fn: _DecoratedF) -> _DecoratedF:
             return fn
 
         return decorator
 
-    _no_grad = _inference_mode  # type: ignore[assignment]
-
-from .coupling_dynamics import _TIER_MAX_ORDER, SimplicialComplex
+    _no_grad = _inference_mode  # type: ignore[assignment,misc]
 
 # ---------------------------------------------------------------------------
 # Tier configuration (mirrors resonance_field.py)
@@ -257,7 +260,7 @@ class TorchCouplingDynamics:
                 if source != target:
                     self.coupling_matrix[source, target] += w / len(simplex)
 
-    @_no_grad()
+    @_no_grad()  # type: ignore[misc,untyped-decorator]
     def step(self, states: torch.Tensor) -> dict[str, Any]:
         """Vectorized coupling dynamics step.
 
@@ -847,7 +850,7 @@ class TorchResonanceField:
             return self._harmonics_cache
 
         # Flatten states to CPU list for Hodge computation
-        signal = self._states.reshape(-1).cpu().tolist()
+        signal: list[float] = self._states.reshape(-1).cpu().tolist()
 
         # Compute Hodge Laplacian L_k (CPU, one-time)
         laplacian = self._hodge_laplacian(k)
@@ -927,7 +930,8 @@ class TorchResonanceField:
     @property
     def module_states(self) -> list[list[float]]:
         """Module states as nested Python lists (CPU transfer at boundary)."""
-        return self._states.cpu().tolist()
+        states: list[list[float]] = self._states.cpu().tolist()
+        return states
 
     @property
     def state_dim(self) -> int:

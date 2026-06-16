@@ -222,7 +222,7 @@ async def start_webui_server(plugin: Any, host: str = "127.0.0.1", port: int = 2
 
     @web.middleware
     async def auth_middleware(request: web.Request, handler: Any) -> web.Response:
-        if request.path in ("/", "/favicon.ico", "/health", "/logo.png", "/assets/logo.png"):
+        if request.path in ("/", "/twin", "/favicon.ico", "/health", "/logo.png", "/assets/logo.png"):
             return await handler(request)
         # S9: /metrics requires Bearer token when auth is configured
         if request.path == "/metrics":
@@ -259,6 +259,11 @@ async def start_webui_server(plugin: Any, host: str = "127.0.0.1", port: int = 2
     async def handle_page(request: web.Request) -> web.Response:
         return web.Response(
             text=dashboard_html, content_type="text/html", charset="utf-8"
+        )
+
+    async def handle_twin_page(request: web.Request) -> web.Response:
+        return web.Response(
+            text=_TWIN_VIEWER_HTML, content_type="text/html", charset="utf-8"
         )
 
     async def handle_state(request: web.Request) -> web.Response:
@@ -421,6 +426,11 @@ async def start_webui_server(plugin: Any, host: str = "127.0.0.1", port: int = 2
         if session in hosts:
             hosts[session].kernel.body.memory["traces"] = []
             hosts[session].kernel.body.memory.pop("_memory_system", None)
+        sp = getattr(current_plugin, "_state_persistence", None)
+        if sp is not None and hasattr(sp, "purge_session_after_meltdown"):
+            import asyncio as _asyncio
+
+            await sp.purge_session_after_meltdown(session)
         logger.info(f"Sylanne MEMORY MELTDOWN (standalone): session={session}")
         return web.json_response({"ok": True, "session": session, "cleared": True})
 
@@ -768,6 +778,27 @@ async def start_webui_server(plugin: Any, host: str = "127.0.0.1", port: int = 2
         })
 
     # ------------------------------------------------------------------
+    # GET /api/memory/recall_debug 召回引擎调试快照（灰度模式/影子差异/参数）
+    # ------------------------------------------------------------------
+
+    async def handle_memory_recall_debug(request: web.Request) -> web.Response:
+        """返回指定会话记忆系统的召回调试快照（含 recall_mode、影子差异统计）。"""
+        session = str(request.query.get("session", "") or "").strip() or "default"
+        current_plugin = _plugin(plugin)
+        mem_getter = getattr(current_plugin, "_memory_system_for_session", None)
+        if not callable(mem_getter):
+            return web.json_response(
+                {"ok": False, "error": "memory system unavailable"}, status=503
+            )
+        mem_sys = mem_getter(session)
+        snap_fn = getattr(mem_sys, "get_debug_snapshot", None)
+        if not callable(snap_fn):
+            return web.json_response(
+                {"ok": False, "error": "snapshot unsupported"}, status=501
+            )
+        return web.json_response({"ok": True, "session": session, "snapshot": snap_fn()})
+
+    # ------------------------------------------------------------------
     # Item 84: GET/POST /api/personality/export & /api/personality/import
     # ------------------------------------------------------------------
 
@@ -1050,6 +1081,27 @@ async def start_webui_server(plugin: Any, host: str = "127.0.0.1", port: int = 2
         return web.json_response({"events": events, "current_traits": current_traits})
 
     # ------------------------------------------------------------------
+    # Phase G: GET /api/twin_synchrony_trajectory 二重奏跨会话同步度轨迹
+    # ------------------------------------------------------------------
+
+    async def handle_twin_synchrony(request: web.Request) -> web.Response:
+        """二重奏同步度轨迹（v2core UserModelDomain）：她越来越懂你的那条收敛曲线。"""
+        current = _plugin(plugin)
+        session = str(request.query.get("session", "") or "").strip()
+        limit = max(1, min(200, int(request.query.get("limit", "200") or "200")))
+        return web.json_response(_twin_synchrony_payload(current, session=session, limit=limit))
+
+    # ------------------------------------------------------------------
+    # 认知核页: GET /api/v2core_state — 三拍/四域/裁决/心象投影（纯只读）
+    # ------------------------------------------------------------------
+
+    async def handle_v2core_state(request: web.Request) -> web.Response:
+        """v2core 认知核状态（SPA 第二页消费）：四域真状态 + 最近裁决 + 心象片段。"""
+        current = _plugin(plugin)
+        session = str(request.query.get("session", "") or "").strip()
+        return web.json_response(_v2core_state_payload(current, session=session))
+
+    # ------------------------------------------------------------------
     # Item 114: GET /api/quality-trend 对话质量趋势
     # ------------------------------------------------------------------
 
@@ -1259,6 +1311,7 @@ async def start_webui_server(plugin: Any, host: str = "127.0.0.1", port: int = 2
         return web.json_response({"topics": topics})
 
     app.router.add_get("/", handle_page)
+    app.router.add_get("/twin", handle_twin_page)
     app.router.add_get("/health", handle_health)
     app.router.add_get("/metrics", handle_metrics)
     app.router.add_get("/api/state", handle_state)
@@ -1281,11 +1334,14 @@ async def start_webui_server(plugin: Any, host: str = "127.0.0.1", port: int = 2
     app.router.add_post("/api/proactive_feedback", handle_proactive_feedback)
     app.router.add_get("/api/weekly_report", handle_weekly_report)
     app.router.add_get("/api/memory/decay_curve", handle_memory_decay_curve)
+    app.router.add_get("/api/memory/recall_debug", handle_memory_recall_debug)
     app.router.add_get("/api/personality/export", handle_personality_export)
     app.router.add_post("/api/personality/import", handle_personality_import)
     app.router.add_get("/api/relationship_temperature", handle_relationship_temperature)
     app.router.add_get("/api/diagnostic_report", handle_diagnostic_report)
     app.router.add_get("/api/personality/drift-map", handle_personality_drift_map)
+    app.router.add_get("/api/twin_synchrony_trajectory", handle_twin_synchrony)
+    app.router.add_get("/api/v2core_state", handle_v2core_state)
     app.router.add_get("/api/quality-trend", handle_quality_trend)
     app.router.add_get("/api/theme", handle_theme_get)
     app.router.add_post("/api/theme", handle_theme_post)
@@ -1517,7 +1573,7 @@ def start_webui_thread_server(
                 return
             parsed = urlparse(self.path)
             path = parsed.path.rstrip("/") or "/"
-            if path not in ("/", "/favicon.ico", "/health", "/metrics", "/logo.png", "/assets/logo.png"):
+            if path not in ("/", "/twin", "/favicon.ico", "/health", "/metrics", "/logo.png", "/assets/logo.png"):
                 auth = self.headers.get("Authorization", "")
                 if not auth.startswith("Bearer ") or auth[7:] != _active_token:
                     self._send_json({"error": "unauthorized"}, status=401)
@@ -1532,6 +1588,8 @@ def start_webui_thread_server(
             try:
                 if path == "/":
                     self._send_text(dashboard_html)
+                elif path == "/twin":
+                    self._send_text(_TWIN_VIEWER_HTML)
                 elif path == "/api/state":
                     # 自动关闭 diagnostics：超过 30s 无 computation_logs 请求
                     if _last_diag_request and time.time() - _last_diag_request > 30:
@@ -1551,10 +1609,13 @@ def start_webui_thread_server(
                         current_plugin = _plugin(plugin)
                         schema = _load_schema(current_plugin)
                         config = dict(getattr(current_plugin, "_config", {}) or {})
-                        values = {
-                            key: config.get(key, meta.get("default"))
-                            for key, meta in schema.items()
-                        }
+                        values = {}
+                        for key, meta in schema.items():
+                            raw = config.get(key, meta.get("default"))
+                            if _is_sensitive_key(key) and raw:
+                                values[key] = "********"
+                            else:
+                                values[key] = raw
                     self._send_json(
                         {"schema": schema, "values": values, "providers": []}
                     )
@@ -1709,6 +1770,19 @@ def start_webui_thread_server(
                             self._send_json({"memory_id": memory_id, "created_at": created_at, "stability": round(stability, 2), "rehearsal": rehearsal, "emotional_weight": round(emotional_weight, 3), "curve": curve})
                 elif path == "/api/theme":
                     self._send_json({"theme": _theme_preference})
+                elif path == "/api/twin_synchrony_trajectory":
+                    with _plugin_access_lock:
+                        current = _plugin(plugin)
+                    session = query.get("session", "")
+                    try:
+                        limit = max(1, min(200, int(query.get("limit", "200") or "200")))
+                    except (TypeError, ValueError):
+                        limit = 200
+                    self._send_json(_twin_synchrony_payload(current, session=session, limit=limit))
+                elif path == "/api/v2core_state":
+                    with _plugin_access_lock:
+                        current = _plugin(plugin)
+                    self._send_json(_v2core_state_payload(current, session=query.get("session", "")))
                 elif path == "/api/rhythm_profile":
                     with _plugin_access_lock:
                         current = _plugin(plugin)
@@ -1976,6 +2050,16 @@ def start_webui_thread_server(
                             hosts[session].kernel.body.memory.pop(
                                 "_memory_system", None
                             )
+                        sp = getattr(current_plugin, "_state_persistence", None)
+                        if sp is not None and hasattr(sp, "purge_session_after_meltdown"):
+                            try:
+                                loop = asyncio.get_event_loop()
+                                loop.call_soon_threadsafe(
+                                    asyncio.ensure_future,
+                                    sp.purge_session_after_meltdown(session),
+                                )
+                            except Exception:
+                                pass
                     logger.info(f"Sylanne MEMORY MELTDOWN (stdlib): session={session}")
                     self._send_json({"ok": True, "session": session, "cleared": True})
                 except Exception as exc:
@@ -2158,6 +2242,249 @@ def _known_sessions(plugin: Any, *, requested: str = "") -> list[str]:
     if not sessions:
         add("default")
     return sessions
+
+
+# 二重奏同步度 —— 自包含 live 查看页（Phase G）。独立 /twin 路由，零依赖、不碰庞大的 SPA，
+# 客户端拉 /api/twin_synchrony_trajectory 自渲染内联 SVG（与 tools/twin_synchrony_viz.py 同构）。
+_TWIN_VIEWER_HTML = """<!doctype html><html lang=zh><head><meta charset=utf-8>
+<meta name=viewport content="width=device-width,initial-scale=1">
+<title>二重奏同步度 · Sylanne</title>
+<style>
+body{background:#0b1120;color:#e2e8f0;font-family:system-ui,sans-serif;margin:0;padding:24px}
+h1{font-size:18px;font-weight:600;margin:0 0 4px}
+.sub{color:#64748b;font-size:12px;margin-bottom:14px}
+.card{background:#0f172a;border:1px solid #1e293b;border-radius:10px;padding:16px;margin:12px 0;max-width:780px}
+.verdict{font-size:14px;color:#38bdf8;margin:10px 0}
+select,button{background:#1e293b;color:#e2e8f0;border:1px solid #334155;border-radius:6px;padding:6px 10px;font-size:13px}
+table{border-collapse:collapse;font-size:13px}td{padding:3px 16px 3px 0;color:#94a3b8}
+.empty{color:#64748b;text-align:center;padding:40px}
+</style></head><body>
+<h1>二重奏 · 跨会话同步度轨迹</h1>
+<div class=sub>她越来越懂你的那条收敛曲线：grip↑（越懂你）+ user_pe↓（猜得越准）+ sync（广义同步度，Friston&Frith 2015）</div>
+<div class=card>
+  <span class=sub>会话</span>
+  <select id=sess onchange=load()></select>
+  <button onclick=load()>刷新</button>
+</div>
+<div class=verdict id=verdict>—</div>
+<div class=card id=chart><div class=empty>加载中…</div></div>
+<div class=card><table id=summary></table></div>
+<script>
+var W=720,H=360,PL=52,PR=16,PT=28,PB=36;
+var SERIES=[["grip","#3b82f6","把握度 grip ↑"],["sync","#10b981","同步度 sync"],["user_pe","#f59e0b","预测误差 user_pe ↓"]];
+function tok(){return localStorage.getItem('sylanne_token')||''}
+function poly(points,key){
+  var n=points.length; if(!n) return '';
+  var pw=W-PL-PR, ph=H-PT-PB, out=[];
+  for(var i=0;i<n;i++){var v=+points[i][key]||0; v=v<0?0:(v>1?1:v);
+    var x=PL+(n>1?pw*(i/(n-1)):pw/2), y=PT+ph*(1-v); out.push(x.toFixed(1)+','+y.toFixed(1));}
+  return out.join(' ');
+}
+function svg(points){
+  var pw=W-PL-PR, ph=H-PT-PB, p=['<svg viewBox="0 0 '+W+' '+H+'" xmlns="http://www.w3.org/2000/svg" font-family="system-ui" font-size="11">'];
+  p.push('<rect width="'+W+'" height="'+H+'" fill="#0f172a" rx="8"/>');
+  [0,0.5,1].forEach(function(g){var gy=PT+ph*(1-g);
+    p.push('<line x1="'+PL+'" y1="'+gy+'" x2="'+(W-PR)+'" y2="'+gy+'" stroke="#1e293b"/>');
+    p.push('<text x="'+(PL-8)+'" y="'+(gy+3)+'" fill="#64748b" text-anchor="end">'+g.toFixed(1)+'</text>');});
+  if(!points.length){p.push('<text x="'+(W/2)+'" y="'+(H/2)+'" fill="#64748b" text-anchor="middle">暂无数据（v2core 未启用 / 该会话未对话）</text>');p.push('</svg>');return p.join('');}
+  SERIES.forEach(function(s){var pts=poly(points,s[0]); if(pts) p.push('<polyline points="'+pts+'" fill="none" stroke="'+s[1]+'" stroke-width="2" stroke-linejoin="round"/>');});
+  var lx=PL; SERIES.forEach(function(s){p.push('<rect x="'+lx+'" y="6" width="10" height="10" fill="'+s[1]+'" rx="2"/>');p.push('<text x="'+(lx+14)+'" y="15" fill="#cbd5e1">'+s[2]+'</text>');lx+=11*s[2].length+30;});
+  p.push('</svg>'); return p.join('');
+}
+async function fetchJSON(path){
+  var h={}; var t=tok(); if(t) h['Authorization']='Bearer '+t;
+  var r=await fetch(path,{headers:h}); if(!r.ok) throw new Error('HTTP '+r.status); return r.json();
+}
+async function load(){
+  var sess=document.getElementById('sess').value||'';
+  var d; try{ d=await fetchJSON('/api/twin_synchrony_trajectory'+(sess?('?session='+encodeURIComponent(sess)):'')); }
+  catch(e){ document.getElementById('chart').innerHTML='<div class=empty>加载失败：'+e.message+'</div>'; return; }
+  var pts=d.points||[]; document.getElementById('chart').innerHTML=svg(pts);
+  var sm=d.summary||{}, v='—';
+  if(sm.grip_gain>0&&sm.user_pe_drop>0) v='✓ 二重奏收敛中：她越来越懂你（grip↑ + user_pe↓）';
+  else if(sm.grip_gain>0||sm.user_pe_drop>0) v='～ 部分收敛（单指标改善）';
+  else if(pts.length) v='· 尚未显现收敛（样本不足或关系波动期）';
+  document.getElementById('verdict').textContent=v;
+  document.getElementById('summary').innerHTML=Object.keys(sm).length?Object.keys(sm).map(function(k){return '<tr><td>'+k+'</td><td>'+sm[k]+'</td></tr>';}).join(''):'<tr><td>无数据</td></tr>';
+  var sel=document.getElementById('sess'); if(!sel.dataset.filled&&d.sessions&&d.sessions.length){
+    sel.innerHTML=d.sessions.map(function(s){return '<option'+(s===d.session?' selected':'')+'>'+s+'</option>';}).join(''); sel.dataset.filled='1';}
+}
+load();
+</script></body></html>"""
+
+
+def _twin_synchrony_payload(plugin: Any, *, session: str = "", limit: int = 200) -> dict[str, Any]:
+    """二重奏同步度轨迹（Phase G 可视化）：读 v2core UserModelDomain.synchrony_trajectory()。
+
+    数据源是 plugin._v2core_runtimes[session]["domains"]["usermodel"]（v2core 开关开启后
+    每会话累积的真 agent 状态）。开关关 / 该会话没跑过 v2core → 空轨迹（enabled=False），
+    前端据此显示"未启用/无数据"，绝不报错。纯只读，不碰任何 SDK / kernel。
+
+    返回 {enabled, session, sessions, points:[{turn,sync,grip,user_pe}], summary}。
+    summary 给"她越来越懂你"的收敛结论：grip 升幅 + user_pe 降幅 + 样本数。
+    """
+    runtimes = getattr(plugin, "_v2core_runtimes", None)
+    sessions = sorted(runtimes.keys()) if isinstance(runtimes, dict) else []
+    out: dict[str, Any] = {
+        "enabled": bool(sessions), "session": session,
+        "sessions": sessions, "points": [], "summary": {},
+    }
+    if not isinstance(runtimes, dict) or not runtimes:
+        return out
+    sk = session.strip() if session and session.strip() in runtimes else (sessions[0] if sessions else "")
+    out["session"] = sk
+    rt = runtimes.get(sk) if sk else None
+    doms = rt.get("domains") if isinstance(rt, dict) else None
+    um = doms.get("usermodel") if isinstance(doms, dict) else None
+    traj_fn = getattr(um, "synchrony_trajectory", None)
+    if not callable(traj_fn):
+        return out
+    try:
+        points = traj_fn()
+    except Exception:
+        return out
+    if limit and len(points) > limit:
+        points = points[-limit:]
+    out["points"] = points
+    if points:
+        first, last = points[0], points[-1]
+        out["summary"] = {
+            "samples": len(points),
+            "grip_gain": round(float(last.get("grip", 0.0)) - float(first.get("grip", 0.0)), 4),
+            "user_pe_drop": round(float(first.get("user_pe", 0.0)) - float(last.get("user_pe", 0.0)), 4),
+            "sync_latest": round(float(last.get("sync", 0.5)), 4),
+            "grip_latest": round(float(last.get("grip", 0.5)), 4),
+        }
+    return out
+
+
+def _v2core_state_payload(plugin: Any, *, session: str = "") -> dict[str, Any]:
+    """v2core 认知核状态投影（WebUI 认知核页 /api/v2core_state）。
+
+    与 _twin_synchrony_payload 同款纪律：纯只读——域走各自公开只读接口
+    （view/self_prior/synchrony/to_dict/prompt_line），躯体走 body_port.observe()
+    （唯一边界，零 tick 零写）；开关关 / 会话没跑过 → enabled=False 空数据，
+    前端显示"未启用"，绝不报错、绝不拿假数据冒充。
+
+    返回 {enabled, session, sessions, fragment, decision, body, domains}。
+    fragment = 最近一轮注入 LLM 的心象片段原文（她看到什么，你也看到什么）；
+    decision = 最近一轮 ignition 裁决留痕（说/不说的代价比较现场）。
+    """
+    runtimes = getattr(plugin, "_v2core_runtimes", None)
+    sessions = sorted(runtimes.keys()) if isinstance(runtimes, dict) else []
+    out: dict[str, Any] = {
+        "enabled": bool(sessions), "session": session, "sessions": sessions,
+        "fragment": "", "decision": {}, "body": {}, "domains": {},
+    }
+    if not isinstance(runtimes, dict) or not runtimes:
+        return out
+    sk = session.strip() if session and session.strip() in runtimes else (sessions[0] if sessions else "")
+    out["session"] = sk
+    rt = runtimes.get(sk)
+    if not isinstance(rt, dict):
+        return out
+
+    out["fragment"] = str(rt.get("last_fragment", "") or "")
+    dec = rt.get("last_decision")
+    out["decision"] = dict(dec) if isinstance(dec, dict) else {}
+
+    # —— 躯体切面（四域的共同输入；observe 只读不 tick）——
+    body = None
+    try:
+        bp = rt.get("body_port")
+        if bp is not None and hasattr(bp, "observe"):
+            body = bp.observe()
+            out["body"] = {
+                "warmth": round(float(body.warmth), 4),
+                "tension": round(float(body.tension), 4),
+                "repair_pressure": round(float(body.repair_pressure), 4),
+                "scar": round(float(body.scar), 4),
+                "sovereignty": round(float(body.sovereignty), 4),
+                "exhaustion": round(float(body.exhaustion), 4),
+                "expression_drive": round(float(body.expression_drive), 4),
+                "surprise": round(float(body.surprise), 4),
+                "precision": round(float(body.precision), 4),
+                "turns": int(body.turns),
+            }
+    except Exception:
+        body = None
+
+    doms = rt.get("domains") if isinstance(rt.get("domains"), dict) else {}
+
+    # —— 各域独立容错：任何一域失败只丢那一块，绝不拖垮整个 payload ——
+    emo = doms.get("emotion")
+    if emo is not None:
+        try:
+            block: dict[str, Any] = {}
+            if body is not None and hasattr(emo, "view"):
+                v = emo.view(body)
+                block.update({
+                    "warmth": round(float(v.warmth), 4),
+                    "valence": round(float(v.valence), 4),
+                    "arousal": round(float(v.arousal), 4),
+                    "tension": round(float(v.tension), 4),
+                    "volatility": round(float(v.volatility), 4),
+                    "trend": round(float(v.trend), 4),
+                })
+            d = emo.to_dict() if hasattr(emo, "to_dict") else {}
+            block["unexpressed"] = round(float(d.get("unexpressed", 0.0) or 0.0), 4)
+            if body is not None and hasattr(emo, "prompt_line"):
+                block["line"] = str(emo.prompt_line(body) or "")
+            out["domains"]["emotion"] = block
+        except Exception:
+            pass
+
+    um = doms.get("usermodel")
+    if um is not None:
+        try:
+            d = um.to_dict() if hasattr(um, "to_dict") else {}
+            disp = d.get("disposition") if isinstance(d.get("disposition"), dict) else {}
+            prec = d.get("disp_precision") if isinstance(d.get("disp_precision"), dict) else {}
+            block = {
+                "synchrony": round(float(um.synchrony()), 4) if hasattr(um, "synchrony") else 0.5,
+                "grip": round(sum(prec.values()) / len(prec), 4) if prec else 0.5,
+                "rhythm_ema": (round(float(d["rhythm_ema"]), 1)
+                               if d.get("rhythm_ema") is not None else None),
+                "disposition": {k: round(float(v), 4) for k, v in disp.items()},
+                "line": str(um.prompt_line() or "") if hasattr(um, "prompt_line") else "",
+            }
+            out["domains"]["usermodel"] = block
+        except Exception:
+            pass
+
+    nar = doms.get("narrative")
+    if nar is not None:
+        try:
+            d = nar.to_dict() if hasattr(nar, "to_dict") else {}
+            oss = d.get("ossification") if isinstance(d.get("ossification"), dict) else {}
+            rigidity = round(sum(oss.values()) / len(oss), 4) if oss else 0.0
+            block = {
+                "epoch": int(d.get("epoch", 0) or 0),
+                "rigidity": rigidity,
+                "ossification": {k: round(float(v), 4) for k, v in oss.items()},
+                "anchor_count": len(d.get("anchors") or []),
+                "anchor_total": int(d.get("anchor_total", 0) or 0),
+                "line": str(nar.prompt_line() or "") if hasattr(nar, "prompt_line") else "",
+            }
+            out["domains"]["narrative"] = block
+        except Exception:
+            pass
+
+    dis = doms.get("distill")
+    if dis is not None:
+        try:
+            d = dis.to_dict() if hasattr(dis, "to_dict") else {}
+            err = d.get("err_ema") if isinstance(d.get("err_ema"), dict) else {}
+            block = {
+                "fidelity": round(float(dis.fidelity()), 4) if hasattr(dis, "fidelity") else 0.0,
+                "samples": int(d.get("samples", 0) or 0),
+                "mean_error": (round(sum(err.values()) / len(err), 4) if err else 1.0),
+            }
+            out["domains"]["distill"] = block
+        except Exception:
+            pass
+
+    return out
 
 
 def _last_bot_text(plugin: Any, session_key: str) -> str:
