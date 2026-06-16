@@ -8,7 +8,21 @@
 
 from __future__ import annotations
 
+import importlib.util
+import sys
+from pathlib import Path
 from types import SimpleNamespace
+
+import pytest
+
+# tools/ 不是包,按路径加载;CI 无此目录则跳过
+_TOOL_PATH = Path(__file__).resolve().parent.parent / "tools" / "twin_synchrony_viz.py"
+if not _TOOL_PATH.exists():
+    pytest.skip("tools/twin_synchrony_viz.py 不存在（CI 环境）", allow_module_level=True)
+_spec = importlib.util.spec_from_file_location("twin_synchrony_viz", _TOOL_PATH)
+_mod = importlib.util.module_from_spec(_spec)
+sys.modules["tools.twin_synchrony_viz"] = _mod
+_spec.loader.exec_module(_mod)
 
 from sylanne_alpha.v2core.contracts import Phase
 from sylanne_alpha.v2core.domains.user_model import UserModelDomain

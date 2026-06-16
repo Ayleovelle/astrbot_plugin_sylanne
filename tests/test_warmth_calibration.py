@@ -10,8 +10,12 @@ from __future__ import annotations
 import importlib.util
 from pathlib import Path
 
+import pytest
+
 # 工具在 tools/ 下，不是包；直接按路径加载，避免 sys.path 依赖。
 _TOOL = Path(__file__).resolve().parent.parent / "tools" / "v2core_warmth_calibration.py"
+if not _TOOL.exists():
+    pytest.skip("tools/v2core_warmth_calibration.py 不存在（CI 环境）", allow_module_level=True)
 _spec = importlib.util.spec_from_file_location("warmth_calib", _TOOL)
 _mod = importlib.util.module_from_spec(_spec)
 _spec.loader.exec_module(_mod)  # type: ignore[union-attr]

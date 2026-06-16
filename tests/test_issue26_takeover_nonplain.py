@@ -10,9 +10,12 @@
 from __future__ import annotations
 
 import asyncio
-from types import SimpleNamespace
 
-from astrbot.api.message_components import Plain, Record
+pytest = __import__("pytest")
+astrbot_components = pytest.importorskip("astrbot.api.message_components")
+Plain = astrbot_components.Plain
+Record = astrbot_components.Record
+from types import SimpleNamespace
 
 from main import EmotionalStatePlugin
 
