@@ -73,7 +73,7 @@ class LifeAgent(CognitiveAgent):
 
         if phase == PRE:
             try:
-                ctx = sim.recent_context_for_prompt(limit=3)
+                ctx = sim.life_prompt_fragment(limit=3)
             except Exception:
                 return None
             if not ctx:

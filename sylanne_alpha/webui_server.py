@@ -279,6 +279,81 @@ async def start_webui_server(plugin: Any, host: str = "127.0.0.1", port: int = 2
         data["csrf_token"] = _csrf_token
         return web.json_response(data)
 
+    async def handle_life_status(request: web.Request) -> web.Response:
+        """PR-B6：生活模拟只读可观测面板。
+
+        暴露：节律(phase/energy/focus)、当前活动、最近事件、事件来源/隐私分布、
+        统计计数、prompt fragment 预览。便于排查"为什么生成这个事件 /
+        为什么没有主动发言"。只读，不修改状态。
+        """
+        current = _plugin(plugin)
+        life_sim = getattr(current, "_life_simulator", None)
+        if life_sim is None:
+            return web.json_response({"enabled": False, "available": False})
+        try:
+            state = life_sim.state
+            recent = state.events[-8:]
+            # 来源/隐私分布（观测 life_sim 是否污染 user_fact）
+            source_dist: dict[str, int] = {}
+            privacy_dist: dict[str, int] = {}
+            for e in state.events:
+                source_dist[e.source or "unknown"] = source_dist.get(e.source or "unknown", 0) + 1
+                privacy_dist[e.privacy_level or "unknown"] = privacy_dist.get(e.privacy_level or "unknown", 0) + 1
+            import time as _t
+            return web.json_response({
+                "available": True,
+                "enabled": bool(life_sim.enabled),
+                "schema_version": getattr(state.world, "schema_version", None),
+                "world": {
+                    "phase": state.world.phase,
+                    "local_date": state.world.local_date,
+                    "energy": round(state.world.energy, 3),
+                    "focus": round(state.world.focus, 3),
+                    "current_activity_id": state.world.current_activity_id,
+                    "last_tick_at": state.world.last_tick_at,
+                    "seconds_since_tick": (
+                        round(_t.time() - state.world.last_tick_at, 1)
+                        if state.world.last_tick_at else None
+                    ),
+                },
+                "current_activity": state.current_activity,
+                "counts": {
+                    "simulation_count": state.simulation_count,
+                    "outreach_count": state.outreach_count,
+                    "events_total": len(state.events),
+                },
+                "timing": {
+                    "last_simulation_time": state.last_simulation_time,
+                    "last_outreach_time": state.last_outreach_time,
+                    "seconds_since_outreach": (
+                        round(_t.time() - state.last_outreach_time, 1)
+                        if state.last_outreach_time else None
+                    ),
+                },
+                "recent_events": [
+                    {
+                        "event_id": e.event_id,
+                        "ts": e.timestamp,
+                        "text": e.text,
+                        "mood": e.mood,
+                        "event_type": e.event_type,
+                        "source": e.source,
+                        "privacy_level": e.privacy_level,
+                        "importance": round(e.importance, 3),
+                        "wants_to_share": e.wants_to_share,
+                        "shared": e.shared,
+                    }
+                    for e in recent
+                ],
+                "distribution": {
+                    "source": source_dist,
+                    "privacy": privacy_dist,
+                },
+                "prompt_fragment_preview": (life_sim.life_prompt_fragment(limit=3) or "")[:300],
+            })
+        except Exception as e:
+            return web.json_response({"available": True, "error": f"{type(e).__name__}: {e}"})
+
     async def handle_settings_get(request: web.Request) -> web.Response:
         current_plugin = _plugin(plugin)
         schema = _load_schema(current_plugin)
@@ -1315,6 +1390,7 @@ async def start_webui_server(plugin: Any, host: str = "127.0.0.1", port: int = 2
     app.router.add_get("/health", handle_health)
     app.router.add_get("/metrics", handle_metrics)
     app.router.add_get("/api/state", handle_state)
+    app.router.add_get("/api/life/status", handle_life_status)  # PR-B6 只读观测
     app.router.add_get("/api/settings", handle_settings_get)
     app.router.add_post("/api/settings", handle_settings_post)
     app.router.add_get("/api/computation_logs", handle_computation_logs)

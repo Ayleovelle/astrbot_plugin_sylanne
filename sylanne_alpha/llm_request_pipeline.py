@@ -1413,29 +1413,38 @@ class LLMRequestPipeline:
 
         # 消费待发送的生命事件上下文
         outreach_fragment = ""
+        # MED-1 去重（review）：life_sim 写 memory 延后到本轮 recall 之后执行，
+        # 避免刚写入的近期记忆被同轮 temporal_proximity 兜底召回，与 outreach_fragment
+        # 重复注入同一 life_event_id。None=本轮无待写；否则为 (clean_reason, event_id)。
+        _deferred_life_sim_write: tuple[str, str] | None = None
         outreach_ctx = p._store.pending_outreach_context.pop(session_key, None)
         if outreach_ctx:
-            reason = outreach_ctx.get("reason", "")
-            mood = outreach_ctx.get("mood", "")
-            outreach_fragment = (
-                f"[life_event_context] Sylanne 刚刚经历了一件事想分享：{reason}（心情：{mood}）。"
-                f"请自然地在回复中提及或表达这件事，用你自己的语气。"
-            )
-            # 将生活事件写入记忆层，标记 source="life_sim" 以便召回时
-            # 区分"Sylanne 自己脑补的生活"与"和用户真实聊过的事"
-            try:
-                mem_sys = p._memory_system_for_session(session_key)
-                # 去掉 [life_event] 前缀，用朴素第一人称描述
+            # PR-B/C review HIGH2：消费前查 expires_at，过期则 drop
+            # （与 fallback 路径过期语义一致：不注入 prompt、不写 memory、不标 consumed）
+            expires_at = float(outreach_ctx.get("expires_at", 0.0) or 0.0)
+            if expires_at and time.time() > expires_at:
+                self._mark_life_outcome(outreach_ctx.get("event_id", ""), "dropped")
+                logger.info(
+                    "Sylanne life_sim outreach dropped (expired at consume): session=%s",
+                    session_key,
+                )
+            else:
+                reason = outreach_ctx.get("reason", "")
+                mood = outreach_ctx.get("mood", "")
+                # PR-C3/C4：回写 consumed_at 到对应 LifeEvent（四时点追踪）
+                self._mark_life_outcome(outreach_ctx.get("event_id", ""), "consumed")
+                outreach_fragment = (
+                    f"[life_event_context] Sylanne 刚刚经历了一件事想分享：{reason}（心情：{mood}）。"
+                    f"请自然地在回复中提及或表达这件事，用你自己的语气。"
+                )
+                # 将生活事件写入记忆层，标记 source="life_sim" 以便召回时
+                # 区分"Sylanne 自己脑补的生活"与"和用户真实聊过的事"。
+                # MED-1：不在此处立即写，记下参数延后到 recall 之后执行（见下方）。
                 clean_reason = reason.replace("[life_event] ", "").strip()
                 if clean_reason:
-                    mem_sys.write_summary(
-                        text=clean_reason,
-                        source_turns=1,
-                        temperature=0.3,
-                        source="life_sim",
+                    _deferred_life_sim_write = (
+                        clean_reason, outreach_ctx.get("event_id", "")
                     )
-            except Exception:
-                pass
 
         # 使用三层记忆系统召回相关记忆（gap-aware）
         memory_fragment = ""
@@ -1497,6 +1506,30 @@ class LLMRequestPipeline:
                 safe_ensure_future(
                     self._reconsolidation_rewrite_guarded(session_key, memory_system),
                     name="reconsolidation_rewrite",
+                )
+
+        # MED-1：延后执行 life_sim 写 memory（在本轮 recall 之后），使刚写入的记忆
+        # 本轮不会被 temporal_proximity 召回，避免与 outreach_fragment 双重注入同一
+        # life_event_id；下一轮才进 recall，且彼时 fragment 已 consumed 跳过。
+        if _deferred_life_sim_write is not None:
+            _clean_reason, _life_event_id = _deferred_life_sim_write
+            try:
+                mem_sys = p._memory_system_for_session(session_key)
+                # PR-D/F：life_sim 固定 shareable（可召回，非 internal）、confidence=0.5
+                # （中性，不回灌 ShareIntent.final_score）、life_event_id 作结构化去重键。
+                mem_sys.write_summary(
+                    text=_clean_reason,
+                    source_turns=1,
+                    temperature=0.3,
+                    source="life_sim",
+                    confidence=0.5,
+                    privacy_level="shareable",
+                    life_event_id=_life_event_id,
+                )
+            except Exception as e:
+                # 不静默吞（PR-A/B/C 纪律）：warning 但不 raise、不改主流程。
+                logger.warning(
+                    "Sylanne life_sim 写记忆失败（不影响本次注入）：%s", e
                 )
 
         return unfinished_fragment, outreach_fragment, memory_fragment
@@ -2602,10 +2635,20 @@ class LLMRequestPipeline:
         except Exception:
             return ""
 
-    async def _life_sim_outreach(self, reason: str, mood: str) -> None:
+    async def _life_sim_outreach(
+        self, reason: str, mood: str, intent: dict | None = None
+    ) -> None:
         """将生命事件存储为待注入上下文，等待下次 LLM 请求时自然表达。
 
-        设计思路：
+        PR-C：
+          - 扩展 pending context 字段（intent_id/reason_code/delivery_mode/
+            expires_at/target_session），消费时回写 consumed_at。
+          - H3 收口：5 分钟 fallback 在过 Bridge gate 之前，先过 ProactiveScheduler
+            的 evaluate_outreach_gate（cooldown/quiet/feedback/人格下限），与
+            request_dispatch 同口径。否则原 fallback 绕过 scheduler gate，
+            生活事件可能从该路径绕开发送（提案盲点 H3）。
+
+        设计思路（不变）：
           - 不直接发送生命事件文本，而是存储为 pending context
           - 下次 on_llm_request 时注入到 prompt 中，让主聊天模型用 Sylanne 的语气表达
           - 若 5 分钟内无 LLM 请求，优先交给大饼桥接；大饼不可用则重新存回等待
@@ -2614,6 +2657,8 @@ class LLMRequestPipeline:
         Args:
             reason: 生命事件描述。
             mood: 当前心情标签。
+            intent: 可选的 ShareIntent dict（PR-C1），含 final_score/delivery_mode/
+                reason_code/expires_at/event_id 等。
         """
         p = self._p
         if not len(p._store.hosts):
@@ -2621,111 +2666,153 @@ class LLMRequestPipeline:
             return
         best_key = self._most_recent_host_key()
 
-        # Store pending outreach context for injection into next LLM request
-        p._store.pending_outreach_context.set(best_key, {
+        # PR-C3：扩展 pending context 字段
+        intent_id = (intent or {}).get("intent_id", "")
+        event_id = (intent or {}).get("event_id", "")
+        delivery_mode = (intent or {}).get("delivery_mode", "next_reply")
+        reason_code = (intent or {}).get("reason_code", "")
+        expires_at = float((intent or {}).get("expires_at", 0.0) or 0.0)
+        if expires_at == 0.0:
+            expires_at = time.time() + 1800.0  # 默认 30min 过期
+
+        pending_ctx = {
             "reason": reason,
             "mood": mood,
-        })
+            "intent_id": intent_id,
+            "event_id": event_id,
+            "delivery_mode": delivery_mode,
+            "reason_code": reason_code,
+            "expires_at": expires_at,
+            "target_session": best_key,
+            "queued_at": time.time(),
+        }
+        p._store.pending_outreach_context.set(best_key, pending_ctx)
         logger.info(
-            f"Sylanne life_sim_outreach: stored pending context for session={best_key}, mood={mood}"
+            f"Sylanne life_sim_outreach: stored pending context for session={best_key}, "
+            f"mood={mood}, delivery={delivery_mode}, score={reason_code}"
         )
 
-        # Fallback: if no LLM request picks this up within 5 minutes,
-        # 优先交给大饼插件主动发送（不污染全局，防双发）；大饼不可用才回退直发。
-        async def _fallback_direct_send(session_key: str, r: str, m: str):
+        # H3 收口：fallback 必须先过 scheduler gate，与 request_dispatch 同口径
+        async def _fallback_direct_send(session_key: str, ctx: dict):
             await asyncio.sleep(300.0)
             pending = p._store.pending_outreach_context
-            if pending.has(session_key) and pending.get(session_key).get("reason") == r:
-                # Still not consumed -- dispatch
+            cur = pending.get(session_key) if pending.has(session_key) else None
+            if not cur or cur.get("reason") != ctx["reason"]:
+                return  # 已被消费或被替换
+            # 过期则丢弃（PR-C3：expires_at 生效）
+            if ctx["expires_at"] and time.time() > ctx["expires_at"]:
                 pending.pop(session_key, None)
+                self._mark_life_outcome(ctx["event_id"], "dropped")
+                logger.info(f"Sylanne life_sim outreach expired: session={session_key}")
+                return
 
-                # 优先：大饼桥接（Sylanne 决定何时 + 提供素材，大饼负责发送）
-                bridge = getattr(p, "_proactive_bridge", None)
-                bridge_on = bool(
-                    (getattr(p, "config", None) or {}).get(
-                        "sylanne_alpha_proactive_bridge_enabled", False
-                    )
-                )
-                if bridge is not None and bridge_on and bridge.available():
-                    # 大饼时间公式闸门：免打扰时段/距上次太频则压住，连素材都不生成
-                    allowed, gate_reason = bridge.should_dispatch_now(session_key)
-                    if not allowed:
-                        logger.info(
-                            f"Sylanne bridge gated ({gate_reason}), skip this outreach: "
-                            f"session={session_key}"
-                        )
-                        return
-                    # 犹豫：发前迟疑 / 最后一刻收回 / 踌躇词试探（人类粗糙的迟疑感）
-                    hesit_on = bool(
-                        (getattr(p, "config", None) or {}).get(
-                            "sylanne_alpha_proactive_hesitation", False
-                        )
-                    )
-                    # 犹豫开启时需要 body → 先取一次 surface，reason_code 与 hesitation 复用，
-                    # 避免 infer_reason_code 内部再调一次 proactive_sylanne（双 tick/save + 帧错位）
-                    surface = None
-                    if hesit_on:
-                        try:
-                            surface = await p.proactive_sylanne(session_key=session_key)
-                        except Exception:
-                            surface = None
-                    reason_code = await bridge.infer_reason_code(
-                        session_key, surface=surface
-                    )
-                    filler = ""
-                    if hesit_on:
-                        body = surface.get("body", {}) if isinstance(surface, dict) else {}
-                        plan = bridge.hesitation_plan(body)
-                        if plan["pre_delay_seconds"] > 0:
-                            logger.info(
-                                f"Sylanne hesitates {plan['pre_delay_seconds']}s before outreach "
-                                f"(h={plan['hesitation']}): session={session_key}"
-                            )
-                            await asyncio.sleep(plan["pre_delay_seconds"])
-                        if plan["withdraw"]:
-                            # 最后一刻收回——沉默本身成为表达
-                            logger.info(
-                                f"Sylanne withdraws outreach at the last moment "
-                                f"(h={plan['hesitation']}): session={session_key}"
-                            )
-                            return
-                        filler = plan["filler"]
-                    motivation = bridge.build_motivation_text(
-                        r, m, reason_code=reason_code, session_key=session_key
-                    )
-                    if filler:
-                        # 踌躇词试探：把迟疑感写进给大饼的动机提示
-                        motivation = (
-                            motivation
-                            + f"\n（开口时带一点迟疑，先轻轻起个头，比如用「{filler}」这样的语气，别太利落。）"
-                        )
-                    result = await bridge.dispatch(session_key, motivation)
-                    if result.get("dispatched"):
-                        logger.info(
-                            f"Sylanne outreach via proactive_chat bridge: session={session_key}"
-                        )
-                        return
+            # ① H3：先过 ProactiveScheduler gate（cooldown/quiet/feedback/人格下限）
+            scheduler = getattr(p, "_proactive_scheduler", None)
+            if scheduler is not None and hasattr(scheduler, "evaluate_outreach_gate"):
+                allowed, gate_reason = scheduler.evaluate_outreach_gate(session_key)
+                if not allowed:
+                    # gate 拒绝：存回 pending 等下次（不直发；保 ADR：不绕过 scheduler）
                     logger.info(
-                        f"Sylanne bridge dispatch not sent ({result.get('reason')}), "
-                        "falling back to direct send"
+                        f"Sylanne scheduler gated ({gate_reason}), defer outreach: "
+                        f"session={session_key}"
                     )
+                    return
 
-                # 回退：大饼不可用/未启用/失败——素材存回 pending context，
-                # 等下次 LLM 请求（用户说话或 proactive scheduler 触发）时由主模型自然表达。
-                # 生活模拟的输出永远只是上下文，不绕过主模型直发。
-                p._store.pending_outreach_context.set(session_key, {
-                    "reason": r,
-                    "mood": m,
-                })
-                logger.info(
-                    "Sylanne life_sim_outreach: bridge unavailable, "
-                    "stored as pending context (will surface on next LLM request): "
-                    "session=%s",
-                    session_key,
+            pending.pop(session_key, None)
+            self._mark_life_outcome(ctx["event_id"], "dispatching")
+
+            # ② 再过 Bridge gate（quiet_hours/min_interval）+ hesitation
+            bridge = getattr(p, "_proactive_bridge", None)
+            bridge_on = bool(
+                (getattr(p, "config", None) or {}).get(
+                    "sylanne_alpha_proactive_bridge_enabled", False
                 )
+            )
+            if bridge is not None and bridge_on and bridge.available():
+                allowed, gate_reason = bridge.should_dispatch_now(session_key)
+                if not allowed:
+                    logger.info(
+                        f"Sylanne bridge gated ({gate_reason}), skip this outreach: "
+                        f"session={session_key}"
+                    )
+                    self._mark_life_outcome(ctx["event_id"], "dropped")
+                    return
+                # 犹豫：发前迟疑 / 最后一刻收回 / 踌躇词试探
+                hesit_on = bool(
+                    (getattr(p, "config", None) or {}).get(
+                        "sylanne_alpha_proactive_hesitation", False
+                    )
+                )
+                surface = None
+                if hesit_on:
+                    try:
+                        surface = await p.proactive_sylanne(session_key=session_key)
+                    except Exception:
+                        surface = None
+                bridge_reason_code = await bridge.infer_reason_code(
+                    session_key, surface=surface
+                )
+                filler = ""
+                if hesit_on:
+                    body = surface.get("body", {}) if isinstance(surface, dict) else {}
+                    plan = bridge.hesitation_plan(body)
+                    if plan["pre_delay_seconds"] > 0:
+                        logger.info(
+                            f"Sylanne hesitates {plan['pre_delay_seconds']}s before outreach "
+                            f"(h={plan['hesitation']}): session={session_key}"
+                        )
+                        await asyncio.sleep(plan["pre_delay_seconds"])
+                    if plan["withdraw"]:
+                        logger.info(
+                            f"Sylanne withdraws outreach at the last moment "
+                            f"(h={plan['hesitation']}): session={session_key}"
+                        )
+                        self._mark_life_outcome(ctx["event_id"], "dropped")
+                        return
+                    filler = plan["filler"]
+                motivation = bridge.build_motivation_text(
+                    ctx["reason"], ctx["mood"], reason_code=bridge_reason_code,
+                    session_key=session_key,
+                )
+                if filler:
+                    motivation = (
+                        motivation
+                        + f"\n（开口时带一点迟疑，先轻轻起个头，比如用「{filler}」这样的语气，别太利落。）"
+                    )
+                result = await bridge.dispatch(session_key, motivation)
+                if result.get("dispatched"):
+                    logger.info(
+                        f"Sylanne outreach via proactive_chat bridge: session={session_key}"
+                    )
+                    self._mark_life_outcome(ctx["event_id"], "dispatched")
+                    return
+                logger.info(
+                    f"Sylanne bridge dispatch not sent ({result.get('reason')}), "
+                    "falling back to pending"
+                )
+
+            # ③ 回退：大饼不可用/未启用/失败——素材存回 pending context，
+            # 等下次 LLM 请求时由主模型自然表达。生活模拟输出永远只是素材。
+            p._store.pending_outreach_context.set(session_key, {
+                "reason": ctx["reason"],
+                "mood": ctx["mood"],
+                "intent_id": ctx["intent_id"],
+                "event_id": ctx["event_id"],
+                "delivery_mode": ctx["delivery_mode"],
+                "reason_code": ctx["reason_code"],
+                "expires_at": ctx["expires_at"],
+                "target_session": session_key,
+                "queued_at": time.time(),
+            })
+            logger.info(
+                "Sylanne life_sim_outreach: bridge unavailable, "
+                "stored as pending context (will surface on next LLM request): "
+                "session=%s",
+                session_key,
+            )
 
         task = safe_ensure_future(
-            _fallback_direct_send(best_key, reason, mood),
+            _fallback_direct_send(best_key, pending_ctx),
             name="life_sim_outreach_fallback",
         )
         if not isinstance(getattr(p, "_background_tasks", None), list):
@@ -2740,6 +2827,29 @@ class LLMRequestPipeline:
                 p._background_tasks.remove(t) if t in p._background_tasks else None
             )
         )
+
+    def _mark_life_outcome(self, event_id: str, outcome: str) -> None:
+        """PR-C3/C4：回写 LifeEvent 投递四时点（dispatched/consumed/dropped）。"""
+        if not event_id:
+            return
+        life_sim = getattr(self._p, "_life_simulator", None)
+        if life_sim is None:
+            return
+        try:
+            now = time.time()
+            if outcome == "dispatched":
+                life_sim.mark_outreach_dispatched(event_id, now)
+            elif outcome == "consumed":
+                life_sim.mark_outreach_consumed(event_id, now)
+            elif outcome == "dropped":
+                life_sim.mark_outreach_dropped(event_id, now)
+        except Exception as e:
+            # 不静默吞（implementation ruling §5）：warning 可观测，但不 raise、不改主流程——
+            # 四时点回写失败不应中断 prompt 准备。
+            logger.warning(
+                "Sylanne _mark_life_outcome 回写失败（event_id=%s, outcome=%s）：%s: %s",
+                event_id, outcome, type(e).__name__, e,
+            )
 
     async def _generate_outreach_message(self, reason: str, mood: str) -> str:
         """使用 LLM 生成角色内的主动联系消息。
@@ -2791,6 +2901,33 @@ class LLMRequestPipeline:
             return host.kernel.computation.engine.observe()
         except Exception:
             return {}
+
+    def _life_sim_memory_summary(self) -> str:
+        """获取最近活跃 host 的记忆摘要，供生命模拟器 `_build_prompt` 注入。
+
+        取最近活跃会话的 memory_system.get_recent_findings()，拼成简短中文摘要。
+        无活跃 host / 无记忆 / 取用异常时返回空串（life sim 降级为无记忆上下文）。
+
+        L17 修复：原 main.py 的 configure 调用未接线本回调，导致 _build_prompt 的
+        "最近聊天摘要"恒为空。PR-A3 在 main.py 补传本方法。
+        """
+        p = self._p
+        if not len(p._store.hosts):
+            return ""
+        best_key = self._most_recent_host_key()
+        try:
+            mem_sys = p._memory_system_for_session(best_key)
+            findings = mem_sys.get_recent_findings(n=3)
+            if not findings:
+                return ""
+            parts = []
+            for f in findings:
+                text = f.get("text") or ""
+                if text:
+                    parts.append(str(text)[:80])
+            return "；".join(parts)
+        except Exception:
+            return ""
 
     def _life_sim_body_delta(self, delta: dict[str, float]) -> None:
         """将生命模拟器的情绪增量注入到最近活跃 host 的身体状态。"""
