@@ -334,15 +334,6 @@ def _callback_accepts_intent(cb: Callable[..., Any]) -> bool:
             p.kind in (inspect.Parameter.VAR_POSITIONAL, inspect.Parameter.VAR_KEYWORD)
             for p in params
         )
-        n_required = sum(
-            1 for p in params
-            if p.default is inspect.Parameter.empty
-            and p.kind
-            in (
-                inspect.Parameter.POSITIONAL_ONLY,
-                inspect.Parameter.POSITIONAL_OR_KEYWORD,
-            )
-        )
         n_positional = sum(
             1 for p in params
             if p.kind
@@ -351,7 +342,6 @@ def _callback_accepts_intent(cb: Callable[..., Any]) -> bool:
                 inspect.Parameter.POSITIONAL_OR_KEYWORD,
             )
         )
-        accepts = has_var or n_positional >= 3 or (n_required <= 3 and n_positional >= 3)
         # 简化：能传 3 个位置参数 或 有可变参 就接受
         accepts = has_var or n_positional >= 3
     except Exception:
