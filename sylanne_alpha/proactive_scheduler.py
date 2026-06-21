@@ -211,6 +211,39 @@ class ProactiveScheduler:
             return "cooldown_active"
         return ""
 
+    def evaluate_outreach_gate(self, session_key: str = "") -> tuple[bool, str]:
+        """PR-C2 / H3 收口：仅按 session_key 评估主动发言 gate（不跑决策/LLM）。
+
+        两条 outreach 路径共用此闸，避免 _life_sim_outreach 的 5min fallback
+        绕过 scheduler 的 cooldown / quiet_period / feedback_pressure / 人格下限
+        （原 bug：fallback 只过 Bridge gate，scheduler gate 全漏）。
+
+        本方法返回与 request_dispatch 同口径的阻塞判定（dispatch_blocked_reason 的
+        session_key-only 封装），但【不】调用 derive_should_send / 不取 surface /
+        不跑 hesitation——后者仍是 Bridge 的职责（ADR：Bridge 拥最终否决权）。
+
+        Returns:
+            (allowed, reason): allowed=False 时 reason 给出 gate 名（供 reason_code）。
+        """
+        if not session_key:
+            return False, "no_session_key"
+        synth_session = type("_S", (), {"unified_msg_origin": session_key})()
+        dispatch_req = {"quiet_gate": {"min_idle_seconds": float(
+            (self._p.config or {}).get("proactive_speech_min_idle_seconds", 300.0)
+        )}}
+        try:
+            block = self.dispatch_blocked_reason(
+                dispatch=dispatch_req,
+                event_or_session=synth_session,
+                dry_run=True,
+                force=False,
+            )
+        except Exception:
+            return False, "gate_eval_error"
+        if block:
+            return False, block
+        return True, ""
+
     # ------------------------------------------------------------------
     # Scheduler state & loop
     # ------------------------------------------------------------------

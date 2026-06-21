@@ -199,10 +199,16 @@ class BoundedDict(OrderedDict):
                 self._ts.pop(key, None)
                 del self[key]
                 raise KeyError(key)
-        # 访问时移到末尾，更新 LRU 顺序
-        if key in self:
-            self.move_to_end(key)
-        return super().__getitem__(key)
+        # 让底层存储做权威存在性判定：缺失时由 super().__getitem__ 抛出正确的 KeyError。
+        # 不能先用 `if key in self` 守 move_to_end——Py3.10 的 C 层 OrderedDict.pop 会路由到
+        # 本重写的 __getitem__，与重写的 __contains__ 交互时 move_to_end 可能对“已被 pop 抽走
+        # 的 key”抛 KeyError(204)，制造出非真实缺失的伪 KeyError（3.13 的 pop 不路由到此，故只 3.10 炸）。
+        value = super().__getitem__(key)  # key 真缺 → 这里抛 KeyError，pop(default) 正常兜底
+        try:
+            self.move_to_end(key)  # LRU 更新；并发/pop 交互下 key 已不在则忽略
+        except KeyError:
+            pass
+        return value
 
     def get(self, key: Any, default: Any = None) -> Any:
         """获取值，不存在或已过期时返回 default。"""

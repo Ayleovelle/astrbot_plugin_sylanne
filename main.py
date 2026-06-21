@@ -221,6 +221,9 @@ _INTERNAL_LLM_CALL: contextvars.ContextVar[bool] = contextvars.ContextVar(
     "_INTERNAL_LLM_CALL", default=False
 )
 PROACTIVE_SCHEDULER_WAKE_DELAY_SECONDS = 30.0
+# PR-A5：life sim tick 后节流落盘 KV 的最小间隔（秒）。区间 60-180s，
+# 默认 90s：既保护崩溃不丢太多事件，又避免每 tick（默认 1800s）都写 IO。
+_LIFE_SIM_SAVE_MIN_GAP_SECONDS = 90.0
 PROACTIVE_SCHEDULER_IDLE_DELAY_SECONDS = 1800.0
 
 from sylanne_alpha.utils import safe_ensure_future  # noqa: E402, F401
@@ -432,6 +435,9 @@ class EmotionalStatePlugin(Star):
         # 生命模拟器：idle 时自主演化身体状态
         self._life_simulator = LifeSimulator(config=self._config)
         self._life_simulator_started = False
+        # PR-A5：life sim 节流落盘状态（tick 间最多 _throttle 秒一次 KV 写）
+        self._life_sim_last_save_ts: float = 0.0
+        self._life_sim_dirty_in_flight: bool = False
         self._meltdown_nonces: BoundedDict = BoundedDict(maxsize=50, ttl=300)
         # 社交场收集器：群聊氛围感知
         self._social_field = SocialFieldCollector(config=self._config)
@@ -2379,7 +2385,9 @@ class EmotionalStatePlugin(Star):
             emotion_getter=pipe._life_sim_emotion,
             body_delta_callback=pipe._life_sim_body_delta,
             persona_getter=pipe._life_sim_persona_getter,
+            memory_summary_getter=pipe._life_sim_memory_summary,
             countdown_callback=self._life_sim_adjust_countdown,
+            state_dirty_callback=self._life_sim_throttled_save,
         )
         # 启动全局自驱心跳（替代原 life_sim.start() 的后台循环）。
         # LifeSim 持久化状态恢复在 async initialize 里 await（KV 读为异步）。
@@ -2424,6 +2432,34 @@ class EmotionalStatePlugin(Star):
             await bridge.adjust_countdown(session_key)
         except Exception as e:
             logger.warning(f"Sylanne adjust_countdown callback: {e}", exc_info=True)
+
+    async def _life_sim_throttled_save(self) -> None:
+        """PR-A5：tick 后节流落盘 life sim 状态到 KV。
+
+        规则（修 H4：原基线仅 initialize/terminate 读写，崩溃丢全部演化）：
+        - 距上次落盘 < _LIFE_SIM_SAVE_MIN_GAP_SECONDS（默认 90s）则跳过。
+        - 上一次保存仍在进行则跳过（_dirty_in_flight 防重入）。
+        - 无 KV API 则跳过（与 initialize/terminate 的 _has_kv_api 一致）。
+        - 失败静默（不阻断演化心跳），最后一次仍由 terminate 兜底。
+        """
+        now = time.time()
+        if self._life_sim_dirty_in_flight:
+            return
+        if (now - self._life_sim_last_save_ts) < _LIFE_SIM_SAVE_MIN_GAP_SECONDS:
+            return
+        if not self._has_kv_api():
+            return
+        life_sim = getattr(self, "_life_simulator", None)
+        if life_sim is None:
+            return
+        self._life_sim_dirty_in_flight = True
+        self._life_sim_last_save_ts = now
+        try:
+            await self.put_kv_data("sylanne_life_sim_state", life_sim.to_dict())
+        except Exception as e:
+            logger.debug(f"Sylanne life sim throttled save skipped: {e}")
+        finally:
+            self._life_sim_dirty_in_flight = False
 
     async def terminate(self) -> None:
         """插件卸载/更新前的清理：停止所有后台任务、关闭 WebUI、持久化状态。"""
