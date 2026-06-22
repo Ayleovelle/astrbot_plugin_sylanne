@@ -125,6 +125,7 @@ class LifeEvent:
     consumed_at: float = 0.0
     dropped_at: float = 0.0
     share_intent_id: str = ""  # PR-C1：关联 ShareIntent
+    origin_session: str = ""  # PR-I：投递目标会话 key（投递时回填，路由元数据）
 
     def __post_init__(self) -> None:
         if not self.event_id:
@@ -388,6 +389,7 @@ def _event_to_dict(e: LifeEvent) -> dict[str, Any]:
         "consumed_at": e.consumed_at,
         "dropped_at": e.dropped_at,
         "share_intent_id": e.share_intent_id,
+        "origin_session": e.origin_session,
     }
 
 
@@ -423,6 +425,7 @@ def _event_from_dict(d: dict[str, Any]) -> LifeEvent:
         consumed_at=float(d.get("consumed_at", 0.0)),
         dropped_at=float(d.get("dropped_at", 0.0)),
         share_intent_id=str(d.get("share_intent_id", "")) or "",
+        origin_session=str(d.get("origin_session", "")) or "",
     )
     # 旧档迁移：无 source 视作 legacy（保留 event_id 不覆盖，若有）
     if not e.source:
