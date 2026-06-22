@@ -2523,10 +2523,16 @@ class EmotionalStatePlugin(Star):
                         await asyncio.sleep(max(0.0, delay))
                     except Exception:
                         return
-                    # 窗末强制落盘（不再走节流判断，否则 timing 抖动会卡死 pending）
-                    await self._do_rel_state_save()
+                    # 窗末兜底：仅当仍有未落的尾改才落盘（延迟期间若已被 leading
+                    # edge 落过，pending_dirty 已清，跳过以免冗余写）
+                    if self._rel_state_pending_dirty:
+                        await self._do_rel_state_save()
 
-                safe_ensure_future(_trailing_save(), name="rel_state_trailing_save")
+                safe_ensure_future(
+                    _trailing_save(),
+                    name="rel_state_trailing_save",
+                    task_list=getattr(self, "_background_tasks", None),
+                )
             return
         await self._do_rel_state_save()
 
@@ -2552,7 +2558,9 @@ class EmotionalStatePlugin(Star):
                 self._rel_state_pending_dirty = False
                 from sylanne_alpha.infra import safe_ensure_future
                 safe_ensure_future(
-                    self._do_rel_state_save(), name="rel_state_followup_save"
+                    self._do_rel_state_save(),
+                    name="rel_state_followup_save",
+                    task_list=getattr(self, "_background_tasks", None),
                 )
 
     async def terminate(self) -> None:

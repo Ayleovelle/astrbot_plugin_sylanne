@@ -72,10 +72,10 @@ def _make_plugin(events, llm_reply, plan=None):
 
     p._session_lock = _session_lock
 
-    async def _main_assessor_llm_call(prompt):
+    async def _summarizer_llm_call(prompt):
         return llm_reply
 
-    p._main_assessor_llm_call = _main_assessor_llm_call
+    p._summarizer_llm_call = _summarizer_llm_call
     return p
 
 

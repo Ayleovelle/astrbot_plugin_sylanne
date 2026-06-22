@@ -169,7 +169,11 @@ class LifeReflectionEngine:
         done = skipped = planned = 0
         if plan is not None:
             for a in list(getattr(plan, "anchors", []) or []):
-                st = str(getattr(a, "status", "") or "")
+                # anchors 经 _plan_from_dict 恢复后可能是 dict（未重建对象），兼容两者
+                if isinstance(a, dict):
+                    st = str(a.get("status", "") or "")
+                else:
+                    st = str(getattr(a, "status", "") or "")
                 if st == "done":
                     done += 1
                 elif st == "skipped":
@@ -191,7 +195,7 @@ class LifeReflectionEngine:
 
     async def _call_llm(self, prompt: str) -> str:
         try:
-            call = self._p._main_assessor_llm_call
+            call = self._p._summarizer_llm_call
             return await asyncio.wait_for(call(prompt), timeout=_REFLECT_TIMEOUT)
         except Exception as exc:
             logger.debug("Sylanne life reflection LLM degraded: %s", exc)
@@ -213,14 +217,15 @@ class LifeReflectionEngine:
             allow = {"study", "create", "game", "rest", "social", "reflect"}
             if isinstance(raw_bias, dict):
                 for k, v in raw_bias.items():
-                    if str(k) not in allow:
+                    key = str(k).lower().strip()
+                    if key not in allow:
                         continue
                     try:
                         fv = float(v)
                     except (TypeError, ValueError):
                         continue
                     # 有界 clamp（防自证循环放大）
-                    kind_bias[str(k)] = max(-_KIND_BIAS_CAP, min(_KIND_BIAS_CAP, fv))
+                    kind_bias[key] = max(-_KIND_BIAS_CAP, min(_KIND_BIAS_CAP, fv))
             if not arc and not kind_bias:
                 return {}
             return {"arc": arc, "kind_bias": kind_bias}

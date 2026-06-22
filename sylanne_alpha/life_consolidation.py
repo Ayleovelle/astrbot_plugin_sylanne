@@ -148,7 +148,7 @@ class LifeConsolidationEngine:
         # 次日日期（本地 now + 1 天）
         tomorrow = time.localtime(now + 86400)
         date_str = time.strftime("%Y-%m-%d", tomorrow)
-        tz = getattr(getattr(state, "world", None), "local_date", "") and "" or ""
+        tz = ""
         confidence = min(0.7, 0.3 + 0.05 * len(anchors))  # 锚点越多越有据，封顶 0.7
         return LifePlan(
             date=date_str,
