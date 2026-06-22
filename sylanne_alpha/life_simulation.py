@@ -33,7 +33,32 @@ from typing import Any, Awaitable, Callable
 # PR-B1: schema 版本 + 来源/隐私/相位常量
 # ---------------------------------------------------------------------------
 
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
+
+# Phase 3 常量：项目晋升 / 里程碑 / 分享策略 / 技能 / outreach 审计 ----------------
+# 项目里程碑阈值（progress 跨越 → 写入 LifeProject.milestones）
+PROJECT_MILESTONES = (0.25, 0.5, 0.75, 1.0)
+# 项目分享策略
+SHARE_POLICY_NEVER = "never"
+SHARE_POLICY_MILESTONE = "milestone"
+SHARE_POLICY_CASUAL = "casual"
+# 项目晋升：N 天窗口内至少 M 个不同日的同类事件 → 晋升为项目
+PROJECT_PROMOTION_WINDOW_SECONDS = 7 * 86400.0
+PROJECT_PROMOTION_MIN_DAYS = 3
+PROJECT_MAX_ACTIVE = 4
+# 技能冷却倍率边界（adaptive：effectiveness 低则冷却拉长）
+SKILL_COOLDOWN_MULT_MIN = 1.0
+SKILL_COOLDOWN_MULT_MAX = 4.0
+SKILL_EFFECTIVENESS_FLOOR = 0.1
+# outreach 审计：超时阈值与每会话条数上限（M8 数据源补建）
+OUTREACH_TIMEOUT_SECONDS = 1800.0
+OUTREACH_AUDIT_PER_SESSION = 20
+OUTREACH_AUDIT_MAX_SESSIONS = 100
+
+# 内部哨兵：from_dict 中区分 "skills" key 缺席（v2 数据需 seed）vs key 存在但值为
+# 空 list（v3 数据用户清空，应保留）。不能用 None / [] 做 sentinel，因为 v3 的
+# `"skills": []` 是合法值。
+_SKILLS_MISSING: object = object()
 
 
 class LifeSource:
@@ -215,13 +240,90 @@ class LifePlan:
 
 
 @dataclass
-class LifeWorldState:
-    """生活世界状态（working memory）：让相邻事件有连续上下文。
+class LifeProject:
+    """Phase 3：长期项目线程（LifeProject）。
 
-    对应 v2 §4.1。PR-B 只填充 phase/energy/focus/current_activity_id/
-    active_plan_id/last_tick_at；habits/relationship_snapshot/projects
-    留给 Phase 2/3（此处占位，向前兼容）。
+    由确定性聚类晋升而来：7 天窗口内 ≥3 个不同日的同类 event_type → 自动晋升。
+    上限 PROJECT_MAX_ACTIVE 个活跃项目（防爆炸）。LifeConsolidation 负责生灭与
+    进度推进（零 LLM），LifeReflection 据 effectiveness 提供 kind_bias 微调。
+
+    分享策略（share_policy）：
+      - never:     不分享（项目级 SILENT）
+      - milestone: 仅里程碑分享（默认；非里程碑事件被门控强制 SILENT）
+      - casual:    自由分享（与原行为一致）
+
+    effectiveness ∈ [0, 1]：项目产出的"主观值"，初始 0.5，由巩固期事件 importance
+    均值缓慢更新；LifeReflection 可参考此值微调下日 kind_bias。
     """
+
+    project_id: str = ""
+    title: str = ""
+    kind: str = "rest"              # study/create/game/rest/social/reflect
+    state: str = "active"           # active/paused/finished
+    progress: float = 0.0           # 0.0 - 1.0
+    milestones: list = field(default_factory=list)            # 已命中的阈值字符串
+    milestones_shared: list = field(default_factory=list)     # 已分享过的里程碑
+    event_type: str = ""            # 触发此项目的 LifeEventType
+    last_touched_at: float = 0.0
+    created_at: float = 0.0
+    share_policy: str = SHARE_POLICY_MILESTONE
+    effectiveness: float = 0.5
+
+    def __post_init__(self) -> None:
+        if not self.project_id:
+            self.project_id = uuid.uuid4().hex[:12]
+
+
+@dataclass
+class LifeSkill:
+    """Phase 3：自适应行为技能（LifeSkill）。
+
+    内置三个种子技能（SEED_SKILLS），命中 trigger_event_types 时由
+    LifeSimulator 在 tick 中触发，受冷却约束。冷却倍率随效用调整：
+      cooldown_multiplier = clamp(1 + 2 * (1 - effectiveness), 1, 4)
+    成功 → effectiveness 上行（被 outreach consumed），失败 → 下行（被 dropped）。
+
+    effectiveness 有最低 SKILL_EFFECTIVENESS_FLOOR（0.1），防完全失活。
+    """
+
+    skill_id: str = ""
+    name: str = ""
+    trigger_event_types: list = field(default_factory=list)
+    cooldown_seconds: int = 3600
+    cooldown_multiplier: float = 1.0
+    last_triggered_at: float = 0.0  # 0.0 = 从未触发
+    success_count: int = 0
+    failure_count: int = 0
+    effectiveness: float = 0.5
+
+    def __post_init__(self) -> None:
+        if not self.skill_id:
+            self.skill_id = uuid.uuid4().hex[:12]
+
+
+# Phase 3 种子技能：默认三个内置技能（首次创建 state 时注入）
+def _seed_skills() -> list[LifeSkill]:
+    return [
+        LifeSkill(
+            name="evening_soft_checkin",
+            trigger_event_types=[LifeEventType.RESTING, LifeEventType.OBSERVING],
+            cooldown_seconds=7200,
+        ),
+        LifeSkill(
+            name="creative_milestone_share",
+            trigger_event_types=[LifeEventType.CREATING],
+            cooldown_seconds=14400,
+        ),
+        LifeSkill(
+            name="thesis_companion",
+            trigger_event_types=[LifeEventType.READING, LifeEventType.THINKING],
+            cooldown_seconds=10800,
+        ),
+    ]
+
+
+@dataclass
+class LifeWorldState:
 
     schema_version: int = SCHEMA_VERSION
     local_date: str = ""
@@ -512,6 +614,68 @@ def _plan_from_dict(d: dict[str, Any] | None) -> LifePlan | None:
         return None
 
 
+def _project_to_dict(p: LifeProject) -> dict[str, Any]:
+    return {
+        "project_id": p.project_id,
+        "title": p.title,
+        "kind": p.kind,
+        "state": p.state,
+        "progress": p.progress,
+        "milestones": list(p.milestones),
+        "milestones_shared": list(p.milestones_shared),
+        "event_type": p.event_type,
+        "last_touched_at": p.last_touched_at,
+        "created_at": p.created_at,
+        "share_policy": p.share_policy,
+        "effectiveness": p.effectiveness,
+    }
+
+
+def _project_from_dict(d: dict[str, Any]) -> LifeProject:
+    return LifeProject(
+        project_id=str(d.get("project_id", "")) or "",
+        title=str(d.get("title", "")),
+        kind=str(d.get("kind", "rest")),
+        state=str(d.get("state", "active")),
+        progress=float(d.get("progress", 0.0)),
+        milestones=list(d.get("milestones", []) or []),
+        milestones_shared=list(d.get("milestones_shared", []) or []),
+        event_type=str(d.get("event_type", "")),
+        last_touched_at=float(d.get("last_touched_at", 0.0)),
+        created_at=float(d.get("created_at", 0.0)),
+        share_policy=str(d.get("share_policy", SHARE_POLICY_MILESTONE)),
+        effectiveness=float(d.get("effectiveness", 0.5)),
+    )
+
+
+def _skill_to_dict(s: LifeSkill) -> dict[str, Any]:
+    return {
+        "skill_id": s.skill_id,
+        "name": s.name,
+        "trigger_event_types": list(s.trigger_event_types),
+        "cooldown_seconds": s.cooldown_seconds,
+        "cooldown_multiplier": s.cooldown_multiplier,
+        "last_triggered_at": s.last_triggered_at,
+        "success_count": s.success_count,
+        "failure_count": s.failure_count,
+        "effectiveness": s.effectiveness,
+    }
+
+
+def _skill_from_dict(d: dict[str, Any]) -> LifeSkill:
+    return LifeSkill(
+        skill_id=str(d.get("skill_id", "")) or "",
+        name=str(d.get("name", "")),
+        trigger_event_types=list(d.get("trigger_event_types", []) or []),
+        cooldown_seconds=int(d.get("cooldown_seconds", 3600)),
+        cooldown_multiplier=float(d.get("cooldown_multiplier", 1.0)),
+        last_triggered_at=float(d.get("last_triggered_at", 0.0)),
+        success_count=int(d.get("success_count", 0)),
+        failure_count=int(d.get("failure_count", 0)),
+        effectiveness=float(d.get("effectiveness", 0.5)),
+    )
+
+
 
 
 
@@ -523,6 +687,11 @@ class LifeSimulationState:
 
     PR-B：新增 world（LifeWorldState）与 plan（LifePlan|None）。
     旧 to_dict 漏存 event_type 的缺陷（v1）在 PR-B 修复（_event_to_dict 完整序列化）。
+
+    Phase 3：新增 projects（LifeProject 列表）/ skills（LifeSkill 列表）
+    / outreach_audit（M8 单一数据源补建：{session_key: [entry, ...]}，BoundedDict
+    式按会话裁剪 + 每会话按时间裁剪）。schema 升至 3，旧档 (v2) 自动迁移：
+    projects=[]、skills=种子三条、outreach_audit={}。
     """
 
     events: list[LifeEvent] = field(default_factory=list)  # 历史事件列表
@@ -535,6 +704,13 @@ class LifeSimulationState:
     # PR-B2：结构化世界状态 + 日计划
     world: LifeWorldState = field(default_factory=LifeWorldState)
     plan: LifePlan | None = None
+    # Phase 3：项目线程 + 自适应技能 + outreach 审计（M8 单一数据源）
+    projects: list[LifeProject] = field(default_factory=list)
+    skills: list[LifeSkill] = field(default_factory=_seed_skills)  # 默认种子三条
+    # outreach_audit: {session_key: list[dict]}（entry: dispatched/responded/timeout 等）
+    # 形态选 dict 而非 BoundedDict——LifeSimulationState 是数据 dataclass，运行时由
+    # LifeSimulator 在 _bound_audit() 内做按会话/每会话裁剪。
+    outreach_audit: dict[str, list[dict]] = field(default_factory=dict)
 
     def to_dict(self) -> dict[str, Any]:
         """序列化状态（只保留最近 20 个事件，完整含 V2 字段）。"""
@@ -548,16 +724,26 @@ class LifeSimulationState:
             "outreach_count": self.outreach_count,
             "world": _world_to_dict(self.world),
             "plan": _plan_to_dict(self.plan),
+            # Phase 3 新增字段（旧档读时容缺，已迁移至 v3 时回填）
+            "projects": [_project_to_dict(p) for p in self.projects],
+            "skills": [_skill_to_dict(s) for s in self.skills],
+            "outreach_audit": dict(self.outreach_audit),
         }
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> "LifeSimulationState":
         """从字典恢复状态。旧档容缺迁移：无 V2 字段时补默认值。
 
-        迁移规则（v2 ADR-002）：
+        迁移规则（v2 ADR-002 / v3 Phase 3）：
           - 旧 events → source=LEGACY, confidence=0.5, privacy_level=INTERNAL
           - 无 world → 默认 LifeWorldState（last_tick_at=0）
           - 无 plan → None
+          - v2 → v3：无 projects → []；无 outreach_audit → {}
+          - skills 迁移按 key 存在性判断（第二轮 review 修复）：
+              * "skills" key 缺席（v2 数据）→ 注入种子三条
+              * "skills": [] （v3 数据，用户清空）→ 保留为空
+              * "skills": [...]（v3 数据）→ 反序列化
+              * 其他类型（损坏）→ 兜底回到种子
         """
         state = cls()
         state.current_activity = data.get("current_activity", "")
@@ -570,6 +756,36 @@ class LifeSimulationState:
         # PR-B2：恢复 world/plan（旧档无 → 默认，迁移兜底）
         state.world = _world_from_dict(data.get("world"))
         state.plan = _plan_from_dict(data.get("plan"))
+        # Phase 3：projects / skills / outreach_audit
+        raw_projects = data.get("projects")
+        if isinstance(raw_projects, list):
+            state.projects = [
+                _project_from_dict(d) for d in raw_projects if isinstance(d, dict)
+            ]
+        else:
+            state.projects = []  # v2 → v3：空项目
+        raw_skills = data.get("skills", _SKILLS_MISSING)
+        if raw_skills is _SKILLS_MISSING:
+            # v2 数据（"skills" key 整体缺席）→ 注入种子技能（首次升级默认值）
+            state.skills = _seed_skills()
+        elif isinstance(raw_skills, list):
+            # v3 数据（key 存在，即使是空列表也尊重用户清空意图）
+            state.skills = [
+                _skill_from_dict(d) for d in raw_skills if isinstance(d, dict)
+            ]
+        else:
+            # 数据损坏（key 存在但不是 list）→ 兜底回到种子
+            state.skills = _seed_skills()
+        raw_audit = data.get("outreach_audit")
+        if isinstance(raw_audit, dict):
+            # 第一轮 review 修复：列表元素也要类型校验，损坏数据里的非 dict 条目会让
+            # _check_outreach_timeouts / _update_skill_outcomes 在 entry.get() 时崩。
+            state.outreach_audit = {
+                str(k): [entry for entry in v if isinstance(entry, dict)]
+                for k, v in raw_audit.items() if isinstance(v, list)
+            }
+        else:
+            state.outreach_audit = {}
         return state
 
 
@@ -702,6 +918,8 @@ class LifeSimulator:
         import datetime as _dt
 
         now = time.time()
+        # Phase 3 / M8 audit：tick 开始扫一遍 outreach 超时（response 长时间未到 → timeout）
+        self._check_outreach_timeouts(now)
         ctx = self._load_world_context(now, _dt)
 
         prompt = self._build_prompt(now, ctx)
@@ -820,7 +1038,25 @@ class LifeSimulator:
         """事件副作用：outreach / countdown / dirty save（均由 event 门控）。
 
         PR-C：先评估 ShareIntent，delivery_mode=SILENT 时直接跳过 outreach（只留 journal）。
+        Phase 3：在 ShareIntent 评估【之前】先做项目认领 + share_policy 门控 + 技能匹配。
+        门控被命中时强制 SILENT（不进 outreach 链路）；技能命中时记触发并标记 success。
         """
+        # Phase 3：项目认领（event.project_id 设值供 fragment / consolidation 跟踪）
+        project = self._find_project_for_event(event)
+        if project is not None:
+            event.project_id = project.project_id
+            project.last_touched_at = now
+
+        # Phase 3：share_policy 项目级门控（在 ShareIntent 评估前介入，
+        # 命中门控的事件被强制 SILENT；不影响项目认领与技能匹配）。
+        policy_block = False
+        policy_reason = ""
+        if event.wants_to_share and project is not None:
+            policy_block, policy_reason = self._check_share_policy_gate(event, project)
+
+        # Phase 3：技能匹配 + 触发记录（trigger_event_types 命中 + 冷却放行）
+        triggered_skill = self._match_skill(event, now)
+
         if event.wants_to_share:
             intent = self._evaluate_share_intent(event, emotion_weights, None, now)
             # ctx 传 None（_evaluate_share_intent 内部用 emotion_getter 兜底相位）；
@@ -829,18 +1065,36 @@ class LifeSimulator:
             # 重算 final（interruptibility 影响评分）+ delivery
             intent.final_score = self._recompute_final(intent)
             intent.delivery_mode = _score_to_delivery(intent.final_score)
+            # Phase 3：项目门控覆盖（永远以策略为先 —— 即便 score 高也强制 SILENT）。
+            if policy_block:
+                intent.delivery_mode = DeliveryMode.SILENT
+                intent.reason_code = policy_reason or "policy_gated"
             self._share_intents[intent.intent_id] = intent
             event.share_intent_id = intent.intent_id
 
             if intent.delivery_mode == DeliveryMode.SILENT:
-                # 只留 journal，不进 outreach 链路（v2 §4.6：< 0.25）
+                # 只留 journal，不进 outreach 链路（v2 §4.6：< 0.25 或被项目策略门控）
                 import logging
                 logging.getLogger(__name__).debug(
-                    "life_sim outreach silent (score=%.2f): event=%s",
-                    intent.final_score, event.event_id,
+                    "life_sim outreach silent (score=%.2f, reason=%s): event=%s",
+                    intent.final_score, intent.reason_code, event.event_id,
                 )
             elif self._should_outreach(now):
-                await self._do_outreach(event, now, intent)
+                await self._do_outreach(event, now, intent, triggered_skill)
+                # Phase 3 第一轮 review 修复：milestone 策略放行后，必须把首个未分享的
+                # milestone 标 shared，否则 _check_share_policy_gate 会一直放行。
+                # 仅当：①确有项目认领 ②策略为 milestone ③门控未阻断 ④outreach 真的发出去
+                # （event.shared=True 由 _do_outreach 成功路径设置）才标记。
+                if (
+                    project is not None
+                    and project.share_policy == SHARE_POLICY_MILESTONE
+                    and not policy_block
+                    and event.shared
+                ):
+                    for milestone in project.milestones:
+                        if milestone not in project.milestones_shared:
+                            project.milestones_shared.append(milestone)
+                            break  # 一次 outreach 只消费一个 milestone
 
         # 二审 HIGH 修复：两个 callback 统一由 event 门控（空 tick 不触发）
         if self._countdown_callback is not None:
@@ -1138,11 +1392,21 @@ class LifeSimulator:
         event.share_intent_id = intent.intent_id
         return intent
 
-    async def _do_outreach(self, event: LifeEvent, now: float, intent: ShareIntent | None = None):
+    async def _do_outreach(
+        self,
+        event: LifeEvent,
+        now: float,
+        intent: ShareIntent | None = None,
+        skill: LifeSkill | None = None,
+    ):
         """基于生活事件触发主动联系（PR-C：携带 ShareIntent）。
 
         回调签名扩展为 (reason, mood, intent_dict|None)；旧回调（两参）仍兼容——
         Python 多传一个默认参数不破坏两参调用方。
+
+        Phase 3：dispatch 同时写入 state.outreach_audit（M8 单一数据源补建）。
+        skill 在此时记 dispatched，response 到达后由 record_user_response 标 success；
+        若 OUTREACH_TIMEOUT_SECONDS 内未到 response，由 _check_outreach_timeouts 标 failure。
         """
         if not self._outreach_callback:
             return
@@ -1171,6 +1435,9 @@ class LifeSimulator:
             event.shared = True
             self.state.last_outreach_time = now
             self.state.outreach_count += 1
+            # Phase 3 / M8：把 dispatch 写入 outreach_audit（session_key = event.origin_session
+            # 优先；缺失则用通配 key "_global"，仍保会话隔离语义——通配 key 不会污染真实会话）。
+            self._record_audit_dispatch(event, intent, skill, now)
         except Exception as e:
             # PR-B/C 二审 MED1：outreach 是旁路副作用，不阻断 tick；但必须可观测。
             # 静默 pass 会让真实回调 bug 不可见。记录 warning（含异常类型+消息）。
@@ -1180,6 +1447,169 @@ class LifeSimulator:
                 "%s: %s", type(e).__name__, e,
             )
 
+
+    # ------------------------------------------------------------------
+    # Phase 3：项目认领 / 分享策略门控 / 技能匹配 / outreach 审计
+    # ------------------------------------------------------------------
+
+    def _find_project_for_event(self, event: LifeEvent) -> "LifeProject | None":
+        """按 event_type 匹配 active 项目。事件无 event_type 或无 active 项目 → None。"""
+        if not event.event_type:
+            return None
+        for proj in self.state.projects:
+            if proj.state != "active":
+                continue
+            if proj.event_type == event.event_type:
+                return proj
+        return None
+
+    def _check_share_policy_gate(
+        self, event: LifeEvent, project: "LifeProject"
+    ) -> tuple[bool, str]:
+        """项目级分享策略门控：返回 (是否阻断, 原因码)。
+
+        策略：
+          - never:     一律阻断（reason=policy_never）
+          - milestone: 仅命中里程碑（progress 跨过阈值且未分享）的事件放行；
+                       其余事件阻断（reason=policy_milestone）。这里只做读判定，
+                       milestone 写入由 LifeConsolidation 在巩固期更新 progress 后处理。
+          - casual:    放行
+        """
+        policy = project.share_policy
+        if policy == SHARE_POLICY_NEVER:
+            return True, "policy_never"
+        if policy == SHARE_POLICY_CASUAL:
+            return False, ""
+        # milestone：只有当事件携带 milestone 标记时才放行（巩固期写）
+        if policy == SHARE_POLICY_MILESTONE:
+            # 当前事件不属于任何里程碑窗口 → 强制 silent
+            has_unshared_milestone = any(
+                m for m in project.milestones if m not in project.milestones_shared
+            )
+            if not has_unshared_milestone:
+                return True, "policy_milestone"
+            return False, ""
+        # 未知策略保守阻断
+        return True, "policy_unknown"
+
+    def _match_skill(self, event: LifeEvent, now: float) -> "LifeSkill | None":
+        """按 trigger_event_types 匹配技能；命中且冷却放行 → 标 last_triggered_at 并返回。
+
+        冷却：cooldown_seconds × cooldown_multiplier。multiplier 随 effectiveness 自适应。
+        """
+        if not event.event_type:
+            return None
+        for skill in self.state.skills:
+            if event.event_type not in skill.trigger_event_types:
+                continue
+            cooldown = skill.cooldown_seconds * max(SKILL_COOLDOWN_MULT_MIN, min(
+                SKILL_COOLDOWN_MULT_MAX, skill.cooldown_multiplier
+            ))
+            if skill.last_triggered_at > 0 and (now - skill.last_triggered_at) < cooldown:
+                continue
+            skill.last_triggered_at = now
+            return skill
+        return None
+
+    @staticmethod
+    def _adaptive_cooldown_multiplier(effectiveness: float) -> float:
+        """clamp(1 + 2*(1-effectiveness), 1, 4)。effectiveness 越低冷却越长。"""
+        raw = 1.0 + 2.0 * (1.0 - max(0.0, min(1.0, effectiveness)))
+        return max(SKILL_COOLDOWN_MULT_MIN, min(SKILL_COOLDOWN_MULT_MAX, raw))
+
+    def _audit_session_key(self, event: LifeEvent) -> str:
+        """选择 audit 索引 key：origin_session 优先，否则 _global（不污染真实会话）。"""
+        return event.origin_session or "_global"
+
+    def _audit_bucket_append(self, key: str, entry: dict) -> None:
+        """把 entry 写入 outreach_audit[key]，并维持双重上限。
+
+        - 每会话 FIFO：每个 bucket 最多 OUTREACH_AUDIT_PER_SESSION 条，超出裁旧。
+        - 全局 LRU：pop + 重插让 key 走到 dict 末尾（= 最近访问），头部 = 最久未访问；
+          会话数超 OUTREACH_AUDIT_MAX_SESSIONS 时从头淘汰。
+
+        第二轮 review 抽出：原 _record_audit_dispatch 内联同样的 pop+裁剪+淘汰逻辑，
+        后续 audit kind（响应/超时落地）若想复用此 bucket 形态，统一调本 helper 即可。
+        """
+        bucket = self.state.outreach_audit.pop(key, None) or []
+        bucket.append(entry)
+        if len(bucket) > OUTREACH_AUDIT_PER_SESSION:
+            # FIFO 裁旧：保留尾部 OUTREACH_AUDIT_PER_SESSION 条
+            bucket = bucket[-OUTREACH_AUDIT_PER_SESSION:]
+        self.state.outreach_audit[key] = bucket  # 重插至末尾 = LRU 最新
+        # 会话数上限：从最旧端（dict 头部 = 最久未访问）淘汰。
+        # 注：key 刚 pop+reinsert 到末尾，绝不会出现在头部（除非全局只剩它，但那时
+        # len == 1 不会触发循环），所以无需防御性 break。
+        while len(self.state.outreach_audit) > OUTREACH_AUDIT_MAX_SESSIONS:
+            oldest_key = next(iter(self.state.outreach_audit))
+            del self.state.outreach_audit[oldest_key]
+
+    def _record_audit_dispatch(
+        self,
+        event: LifeEvent,
+        intent: ShareIntent | None,
+        skill: "LifeSkill | None",
+        now: float,
+    ) -> None:
+        """记录一次 dispatch 到 outreach_audit（M8 数据源 + Phase 3 技能反馈基础）。
+
+        entry: {kind: "dispatch", event_id, intent_id, skill_id|"", ts, response_at: 0, timeout_at: 0}
+        裁剪/淘汰由 _audit_bucket_append 统一处理（第二轮 review：bounded-audit 抽 helper）。
+        """
+        key = self._audit_session_key(event)
+        entry = {
+            "kind": "dispatch",
+            "event_id": event.event_id,
+            "intent_id": intent.intent_id if intent else "",
+            "skill_id": skill.skill_id if skill else "",
+            "ts": now,
+            "response_at": 0.0,
+            "timeout_at": 0.0,
+            "feedback_status": "pending",
+        }
+        self._audit_bucket_append(key, entry)
+
+    def record_user_response(
+        self, session_key: str, now: float | None = None
+    ) -> int:
+        """M8 数据源：用户回应到达，把该会话中所有 pending dispatch 标 answered。
+
+        返回标记的条数。供 main.py / pipeline 在收到用户消息时调用。
+        """
+        if not session_key:
+            return 0
+        ts = now if now is not None else time.time()
+        bucket = self.state.outreach_audit.get(session_key)
+        if not bucket:
+            return 0
+        marked = 0
+        for entry in bucket:
+            if entry.get("feedback_status") == "pending":
+                entry["feedback_status"] = "answered"
+                entry["response_at"] = ts
+                marked += 1
+        return marked
+
+    def _check_outreach_timeouts(self, now: float) -> int:
+        """扫所有 audit：超过 OUTREACH_TIMEOUT_SECONDS 仍 pending → 标 unanswered。
+
+        返回标记的条数。供 tick 起始扫一遍，让 feedback_pressure 真有数据。
+        条目缺 ts 字段（异常 entry）跳过；ts=0.0 是合法值（unix epoch），用 `"ts" in entry`
+        判定存在性而非 truthy 判定，避免漏标 epoch=0 的合成测试条目。
+        """
+        marked = 0
+        for bucket in self.state.outreach_audit.values():
+            for entry in bucket:
+                if entry.get("feedback_status") != "pending":
+                    continue
+                if "ts" not in entry:
+                    continue
+                ts = float(entry.get("ts", 0.0) or 0.0)
+                if (now - ts) >= OUTREACH_TIMEOUT_SECONDS:
+                    entry["feedback_status"] = "unanswered"
+                    entry["timeout_at"] = now
+                    marked += 1
+        return marked
 
     def pending_share_events(self) -> list[LifeEvent]:
         """获取想分享但尚未被消费/丢弃的事件列表（M11 四时点语义）。

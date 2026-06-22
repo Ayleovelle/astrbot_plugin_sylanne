@@ -75,19 +75,58 @@ class ProactiveScheduler:
 
         Returns:
             策略字典，包含 should_dispatch、cooldown_seconds、feedback_pressure。
+
+        Phase 3：除现有 `_proactive_dispatch_audit`（pipeline 视角）外，再读
+        `_life_simulator.state.outreach_audit[session_key]`（life_sim 视角）。
+        两个视角的 unanswered/cold_reply 合并计数。ShareIntent 侧 unanswered_penalty
+        维持 * 0.0（M8 单一惩罚通道——scheduler gate 独占，不与 intent 侧双罚）。
         """
         cfg = self._p.config or {}
         cooldown = float(cfg.get("proactive_speech_dispatch_cooldown_seconds", 1800.0))
         # 根据历史反馈计算压力：冷淡/未回复越多，冷却时间越长
         feedback_pressure = 0.0
+        cold_count = 0
+        # 第一轮 review 修复：两份 audit（pipeline 视角 + life_sim 视角）可能记同一个
+        # event 的同一次未回复，按 event_id 去重，避免 cold_count 双数据源双罚。
+        seen_event_ids: set[str] = set()
+        # ① pipeline 视角（Phase 2C 数据源，BoundedDict[session_key] → deque）
         audit = getattr(self._p, "_proactive_dispatch_audit", None) or {}
-        history = audit.get(session_key)
+        history = audit.get(session_key) if session_key else None
         if history:
-            cold_count = sum(
-                1
-                for entry in history
-                if entry.get("feedback_status") in ("cold_reply", "unanswered")
-            )
+            for entry in history:
+                if not isinstance(entry, dict):
+                    continue
+                if entry.get("feedback_status") not in ("cold_reply", "unanswered"):
+                    continue
+                eid = str(entry.get("event_id", ""))
+                if eid and eid in seen_event_ids:
+                    continue
+                cold_count += 1
+                if eid:
+                    seen_event_ids.add(eid)
+        # ② life_sim 视角（Phase 3 数据源补建：dict[session_key] → list[entry]）
+        life_sim = getattr(self._p, "_life_simulator", None)
+        if life_sim is not None and session_key:
+            try:
+                ls_audit = getattr(life_sim.state, "outreach_audit", {}) or {}
+                ls_history = ls_audit.get(session_key)
+                if ls_history:
+                    for entry in ls_history:
+                        if not isinstance(entry, dict):
+                            continue
+                        if entry.get("feedback_status") not in (
+                            "cold_reply", "unanswered"
+                        ):
+                            continue
+                        eid = str(entry.get("event_id", ""))
+                        if eid and eid in seen_event_ids:
+                            continue
+                        cold_count += 1
+                        if eid:
+                            seen_event_ids.add(eid)
+            except Exception:
+                pass
+        if cold_count > 0:
             feedback_pressure = min(1.0, cold_count * 0.3)
             cooldown = cooldown * (1.0 + feedback_pressure)
         return {
