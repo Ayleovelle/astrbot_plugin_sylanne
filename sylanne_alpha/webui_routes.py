@@ -1041,6 +1041,220 @@ class WebUIRoutes:
         return {"ok": True, "sunk": len(item_ids)}
 
     # ------------------------------------------------------------------
+    # Phase 4：生活观测面板（AstrBot 端镜像 webui_server 的 /api/life/* 接口）
+    # ------------------------------------------------------------------
+
+    async def life_status_handler(self) -> dict[str, Any]:
+        """GET /api/life/status — 只读生活状态概览（节律/活动/最近事件/分布/prompt 预览）。"""
+        life_sim = getattr(self._p, "_life_simulator", None)
+        if life_sim is None:
+            return {"enabled": False, "available": False}
+        try:
+            state = life_sim.state
+            recent = list(state.events[-8:])
+            source_dist: dict[str, int] = {}
+            privacy_dist: dict[str, int] = {}
+            for e in state.events:
+                src = e.source or "unknown"
+                priv = getattr(e, "privacy_level", "") or "unknown"
+                source_dist[src] = source_dist.get(src, 0) + 1
+                privacy_dist[priv] = privacy_dist.get(priv, 0) + 1
+            seconds_since_tick = (
+                round(time.time() - state.world.last_tick_at, 1)
+                if state.world.last_tick_at
+                else None
+            )
+            seconds_since_outreach = (
+                round(time.time() - state.last_outreach_time, 1)
+                if state.last_outreach_time
+                else None
+            )
+            return {
+                "available": True,
+                "enabled": bool(life_sim.enabled),
+                "schema_version": getattr(state.world, "schema_version", None),
+                "world": {
+                    "phase": state.world.phase,
+                    "local_date": state.world.local_date,
+                    "energy": round(state.world.energy, 3),
+                    "focus": round(state.world.focus, 3),
+                    "current_activity_id": state.world.current_activity_id,
+                    "last_tick_at": state.world.last_tick_at,
+                    "seconds_since_tick": seconds_since_tick,
+                },
+                "current_activity": state.current_activity,
+                "counts": {
+                    "simulation_count": state.simulation_count,
+                    "outreach_count": state.outreach_count,
+                    "events_total": len(state.events),
+                },
+                "timing": {
+                    "last_simulation_time": state.last_simulation_time,
+                    "last_outreach_time": state.last_outreach_time,
+                    "seconds_since_outreach": seconds_since_outreach,
+                },
+                "recent_events": [
+                    {
+                        "event_id": e.event_id,
+                        "ts": e.timestamp,
+                        "text": e.text,
+                        "mood": e.mood,
+                        "event_type": e.event_type,
+                        "source": e.source,
+                        "privacy_level": getattr(e, "privacy_level", ""),
+                        "importance": round(e.importance, 3),
+                        "wants_to_share": e.wants_to_share,
+                        "shared": e.shared,
+                    }
+                    for e in recent
+                ],
+                "distribution": {"source": source_dist, "privacy": privacy_dist},
+                "prompt_fragment_preview": (
+                    life_sim.life_prompt_fragment(limit=3) or ""
+                )[:300],
+            }
+        except Exception as e:
+            return {"available": True, "error": f"{type(e).__name__}: {e}"}
+
+    async def life_events_handler(self) -> dict[str, Any]:
+        """GET /api/life/events — 最近 20 条生活事件（含归属字段）。"""
+        life_sim = getattr(self._p, "_life_simulator", None)
+        if life_sim is None:
+            return {"events": [], "available": False}
+        try:
+            events: list[dict[str, Any]] = []
+            for ev in list(life_sim.state.events[-20:]):
+                events.append(
+                    {
+                        "event_id": getattr(ev, "event_id", "") or "",
+                        "text": getattr(ev, "text", "") or "",
+                        "event_type": getattr(ev, "event_type", "") or "",
+                        "timestamp": float(getattr(ev, "timestamp", 0.0) or 0.0),
+                        "source": getattr(ev, "source", "") or "",
+                        "importance": round(
+                            float(getattr(ev, "importance", 0.5) or 0.0), 3
+                        ),
+                        "wants_to_share": bool(getattr(ev, "wants_to_share", False)),
+                        "shared": bool(getattr(ev, "shared", False)),
+                        "project_id": getattr(ev, "project_id", "") or "",
+                        "origin_session": getattr(ev, "origin_session", "") or "",
+                        "privacy_level": getattr(ev, "privacy_level", "") or "",
+                    }
+                )
+            return {"events": events, "available": True}
+        except Exception as e:
+            return {"events": [], "available": True, "error": f"{type(e).__name__}: {e}"}
+
+    async def life_projects_handler(self) -> dict[str, Any]:
+        """GET /api/life/projects — 活跃项目 + 技能库。"""
+        life_sim = getattr(self._p, "_life_simulator", None)
+        if life_sim is None:
+            return {"projects": [], "skills": [], "available": False}
+        try:
+            from sylanne_alpha.life_simulation import (
+                _project_to_dict,
+                _skill_to_dict,
+            )
+
+            projects = [_project_to_dict(p) for p in list(life_sim.state.projects)]
+            skills = [_skill_to_dict(s) for s in list(life_sim.state.skills)]
+            return {"projects": projects, "skills": skills, "available": True}
+        except Exception as e:
+            return {
+                "projects": [],
+                "skills": [],
+                "available": True,
+                "error": f"{type(e).__name__}: {e}",
+            }
+
+    async def life_audit_handler(self) -> dict[str, Any]:
+        """GET /api/life/audit — outreach 审计日志。"""
+        life_sim = getattr(self._p, "_life_simulator", None)
+        if life_sim is None:
+            return {"audit": {}, "available": False}
+        try:
+            audit = {
+                str(k): list(v or [])
+                for k, v in dict(life_sim.state.outreach_audit or {}).items()
+            }
+            return {"audit": audit, "available": True}
+        except Exception as e:
+            return {"audit": {}, "available": True, "error": f"{type(e).__name__}: {e}"}
+
+    async def life_diagnostics_handler(self) -> dict[str, Any]:
+        """GET /api/life/diagnostics — 一键完整状态导出（含 prompt fragment 预览）。"""
+        life_sim = getattr(self._p, "_life_simulator", None)
+        if life_sim is None:
+            return {"available": False}
+        try:
+            data = life_sim.state.to_dict()
+            try:
+                data["prompt_fragment"] = life_sim.life_prompt_fragment(
+                    limit=5, max_budget=2000
+                )
+            except TypeError:
+                data["prompt_fragment"] = life_sim.life_prompt_fragment(limit=5)
+            except Exception:
+                data["prompt_fragment"] = ""
+            data["available"] = True
+            return data
+        except Exception as e:
+            return {"available": True, "error": f"{type(e).__name__}: {e}"}
+
+    async def life_controls_handler(self) -> dict[str, Any]:
+        """POST /api/life/controls — 用户控制（开关 / 强度 / 清除 journal/projects/plan）。"""
+        from quart import request as quart_request
+
+        life_sim = getattr(self._p, "_life_simulator", None)
+        if life_sim is None:
+            return {"error": "life sim not available"}
+        body = await quart_request.get_json(silent=True) or {}
+        if not isinstance(body, dict):
+            return {"error": "invalid body"}
+        action = str(body.get("action", "") or "").strip()
+        config = getattr(self._p, "_config", None)
+        if config is None:
+            config = {}
+            try:
+                self._p._config = config
+            except Exception:
+                pass
+
+        def _persist_config(key: str, value: Any) -> None:
+            config[key] = value
+            if hasattr(self._p, "config") and isinstance(self._p.config, dict):
+                self._p.config[key] = value
+                save = getattr(self._p.config, "save_config", None)
+                if callable(save):
+                    try:
+                        save()
+                    except Exception:
+                        pass
+
+        if action == "toggle_enabled":
+            value = bool(body.get("value", False))
+            _persist_config("sylanne_alpha_life_simulation_enabled", value)
+            return {"ok": True, "enabled": value}
+        if action == "set_share_intensity":
+            intensity = str(body.get("value", "standard") or "standard")
+            if intensity not in ("off", "low", "standard", "high"):
+                return {"error": "invalid intensity"}
+            _persist_config(
+                "sylanne_alpha_life_simulation_share_intensity", intensity
+            )
+            return {"ok": True, "share_intensity": intensity}
+        if action == "clear_journal":
+            life_sim.state.events.clear()
+            return {"ok": True, "cleared": "events"}
+        if action == "clear_projects":
+            life_sim.state.projects.clear()
+            return {"ok": True, "cleared": "projects"}
+        if action == "clear_plan":
+            life_sim.state.plan = None
+            return {"ok": True, "cleared": "plan"}
+        return {"error": f"unknown action: {action}"}
+
+    # ------------------------------------------------------------------
     # Config presets
     # ------------------------------------------------------------------
 

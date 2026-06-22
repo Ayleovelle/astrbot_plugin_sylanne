@@ -608,13 +608,14 @@ body::after {
 <div class="fixed-spine" id="fixedSpine">
   <div class="spine-line"></div>
   <!-- 可拖拽手柄：用户可上下拖动切换页面 -->
-  <div class="spine-handle" id="spineHandle" style="top:20%"></div>
-  <div class="spine-node" role="button" aria-label="Monitor" style="top:20%" data-page="monitor" data-label="MONITOR"></div>
-  <div class="spine-node" role="button" aria-label="Spine" style="top:32%" data-page="spine" data-label="SPINE"></div>
-  <div class="spine-node" role="button" aria-label="Config" style="top:44%" data-page="config" data-label="CONFIG"></div>
-  <div class="spine-node" role="button" aria-label="Logs" style="top:56%" data-page="logs" data-label="LOGS"></div>
-  <div class="spine-node" role="button" aria-label="Memory" style="top:68%" data-page="memory" data-label="MEMORY"></div>
-  <div class="spine-node" role="button" aria-label="Personality" style="top:80%" data-page="personality" data-label="PERSONALITY"></div>
+  <div class="spine-handle" id="spineHandle" style="top:18%"></div>
+  <div class="spine-node" role="button" aria-label="Monitor" style="top:18%" data-page="monitor" data-label="MONITOR"></div>
+  <div class="spine-node" role="button" aria-label="Spine" style="top:28%" data-page="spine" data-label="SPINE"></div>
+  <div class="spine-node" role="button" aria-label="Config" style="top:38%" data-page="config" data-label="CONFIG"></div>
+  <div class="spine-node" role="button" aria-label="Logs" style="top:48%" data-page="logs" data-label="LOGS"></div>
+  <div class="spine-node" role="button" aria-label="Memory" style="top:58%" data-page="memory" data-label="MEMORY"></div>
+  <div class="spine-node" role="button" aria-label="Personality" style="top:68%" data-page="personality" data-label="PERSONALITY"></div>
+  <div class="spine-node" role="button" aria-label="Life" style="top:78%" data-page="life" data-label="LIFE"></div>
 </div>
 
 <!-- LOGIN SECTION (hidden during loading and after auth) -->
@@ -724,6 +725,11 @@ body::after {
         <div class="page-section" data-page="personality">
           <div class="page-left" id="personalityLeft"></div>
           <div class="page-right" id="personalityRight"></div>
+        </div>
+        <!-- Page 6: Life (Phase 4 生活观测面板) -->
+        <div class="page-section" data-page="life">
+          <div class="page-left" id="lifeLeft"></div>
+          <div class="page-right" id="lifeRight"></div>
         </div>
       </div>
     </div>
@@ -1840,7 +1846,7 @@ function logout() {
   var spine = document.getElementById('fixedSpine');
   var handle = document.getElementById('spineHandle');
   var nodes = document.querySelectorAll('.spine-node');
-  var nodePositions = [20, 32, 44, 56, 68, 80];
+  var nodePositions = [18, 28, 38, 48, 58, 68, 78];
 
   // ── 第1步（0~0.35s）：Cards 收回脊柱线 + handle 淡出 + 关闭弹窗 ──
   document.getElementById('meltdownModal').classList.remove('show');
@@ -2057,7 +2063,7 @@ function transitionToDashboard() {
 /* ═══════════════════════════════════════════════════════════════
    NAVIGATION (vertical slider)
    ═══════════════════════════════════════════════════════════════ */
-var PAGE_ORDER = ['monitor', 'spine', 'config', 'logs', 'memory', 'personality'];
+var PAGE_ORDER = ['monitor', 'spine', 'config', 'logs', 'memory', 'personality', 'life'];
 
 function navigateTo(page) {
   var idx = PAGE_ORDER.indexOf(page);
@@ -2075,6 +2081,21 @@ function navigateTo(page) {
   });
   // 同步拖拽手柄位置到当前活跃节点
   syncSpineHandleToPage(page);
+
+  // Phase 4：进入 LIFE 页时启动 30s 自刷新；离开时停掉计时器避免后台无意义拉数据。
+  if (page === 'life') {
+    try { updateLife(); } catch(e) {}
+    if (!lifeTickId) {
+      lifeTickId = setInterval(function() {
+        if (currentPage === 'life') {
+          try { updateLife(); } catch(e) {}
+        }
+      }, 30000);
+    }
+  } else if (lifeTickId) {
+    clearInterval(lifeTickId);
+    lifeTickId = null;
+  }
 }
 
 window.addEventListener('resize', function() { if (currentPage) navigateTo(currentPage); });
@@ -3326,6 +3347,307 @@ function updatePersonality() {
 
 /** renderPersonality — 兼容旧调用 */
 function renderPersonality() { if (!personalityInited) initPersonality(); updatePersonality(); }
+
+/* ═══════════════════════════════════════════════════════════════
+   RENDER: LIFE (Phase 4 生活观测面板)
+   ─────────────────────────────────────────────────────────────
+   左侧：状态概览（节律 / 当前活动 / 项目卡片）
+   右侧：事件时间线 + 控制面板（开关 / 强度 / 清除）
+   数据来源：/api/life/status, /api/life/events, /api/life/projects, /api/life/audit
+   仅在 currentPage === 'life' 时通过 setInterval 30s 自刷新（lifeTickId）
+   ═══════════════════════════════════════════════════════════════ */
+var lifeInited = false;
+var lifeTickId = null;
+
+function initLife() {
+  var left = document.getElementById('lifeLeft');
+  var right = document.getElementById('lifeRight');
+  if (!left || !right) return;
+
+  var statusHtml = '<div class="card" style="position:relative">'
+    + '<div class="card-title">' + (currentLang === 'zh' ? '生活节律' : 'Life Rhythm') + ' '
+    + '<span id="life-availability-badge" class="badge" style="margin-left:8px"></span></div>'
+    + '<div class="stat-grid">'
+    + '<div class="stat-box"><div class="stat-val" id="life-phase">—</div><div class="stat-lbl">' + (currentLang === 'zh' ? '当前阶段' : 'Phase') + '</div></div>'
+    + '<div class="stat-box"><div class="stat-val" id="life-activity">—</div><div class="stat-lbl">' + (currentLang === 'zh' ? '正在做' : 'Activity') + '</div></div>'
+    + '<div class="stat-box"><div class="stat-val" id="life-sim-count">0</div><div class="stat-lbl">' + (currentLang === 'zh' ? '模拟次数' : 'Sim Count') + '</div></div>'
+    + '<div class="stat-box"><div class="stat-val" id="life-outreach-count">0</div><div class="stat-lbl">' + (currentLang === 'zh' ? '主动次数' : 'Outreach') + '</div></div>'
+    + '</div>'
+    + '<div class="bar-row" style="margin-top:14px"><span class="bar-label">' + (currentLang === 'zh' ? '能量' : 'Energy') + '</span><div class="bar-track"><div class="bar-fill" id="life-bar-energy" style="width:0%"></div></div><span class="bar-value" id="life-val-energy">0.00</span></div>'
+    + '<div class="bar-row"><span class="bar-label">' + (currentLang === 'zh' ? '专注' : 'Focus') + '</span><div class="bar-track"><div class="bar-fill" id="life-bar-focus" style="width:0%;background:var(--cyan)"></div></div><span class="bar-value" id="life-val-focus">0.00</span></div>'
+    + '<div style="margin-top:10px;font-size:11px;color:var(--text-muted)" id="life-last-tick">' + (currentLang === 'zh' ? '尚未模拟' : 'No simulation yet') + '</div>'
+    + '</div>';
+
+  var projectsHtml = '<div class="card">'
+    + '<div class="card-title">' + (currentLang === 'zh' ? '项目线程' : 'Active Projects') + '</div>'
+    + '<div id="life-projects-list" style="display:flex;flex-direction:column;gap:8px"></div>'
+    + '</div>';
+
+  var skillsHtml = '<div class="card">'
+    + '<div class="card-title">' + (currentLang === 'zh' ? '技能库' : 'Skill Library') + '</div>'
+    + '<div id="life-skills-list" style="display:flex;flex-direction:column;gap:6px"></div>'
+    + '</div>';
+
+  left.innerHTML = statusHtml + projectsHtml + skillsHtml;
+
+  var eventsHtml = '<div class="card">'
+    + '<div class="card-title">' + (currentLang === 'zh' ? '事件时间线（最近 20 条）' : 'Event Timeline (Last 20)') + '</div>'
+    + '<div id="life-events-list" style="display:flex;flex-direction:column;gap:6px;max-height:300px;overflow:auto"></div>'
+    + '</div>';
+
+  var auditHtml = '<div class="card">'
+    + '<div class="card-title">' + (currentLang === 'zh' ? 'Outreach 审计' : 'Outreach Audit') + '</div>'
+    + '<div id="life-audit-list" style="display:flex;flex-direction:column;gap:6px;max-height:200px;overflow:auto"></div>'
+    + '</div>';
+
+  var controlsHtml = '<div class="card">'
+    + '<div class="card-title">' + (currentLang === 'zh' ? '用户控制' : 'User Controls') + '</div>'
+    + '<div style="display:flex;flex-direction:column;gap:12px">'
+    + '<div style="display:flex;justify-content:space-between;align-items:center">'
+    + '<span style="font-size:13px">' + (currentLang === 'zh' ? '启用生活模拟' : 'Life Sim Enabled') + '</span>'
+    + '<label class="switch"><input type="checkbox" id="life-toggle-enabled" onclick="lifeToggleEnabled()"><span class="slider"></span></label>'
+    + '</div>'
+    + '<div>'
+    + '<div style="font-size:13px;margin-bottom:6px">' + (currentLang === 'zh' ? '主动分享强度' : 'Share Intensity') + '</div>'
+    + '<select id="life-share-intensity" onchange="lifeSetShareIntensity()" style="width:100%;background:var(--bg-elev);color:var(--text);border:1px solid var(--border);padding:6px 10px;border-radius:4px">'
+    + '<option value="off">off</option><option value="low">low</option><option value="standard" selected>standard</option><option value="high">high</option>'
+    + '</select>'
+    + '</div>'
+    + '<div style="display:flex;flex-wrap:wrap;gap:6px;margin-top:6px">'
+    + '<button class="meltdown-cancel" style="font-size:11px;padding:6px 10px" onclick="lifeClear(\'clear_journal\')">' + (currentLang === 'zh' ? '清空事件' : 'Clear Events') + '</button>'
+    + '<button class="meltdown-cancel" style="font-size:11px;padding:6px 10px" onclick="lifeClear(\'clear_projects\')">' + (currentLang === 'zh' ? '清空项目' : 'Clear Projects') + '</button>'
+    + '<button class="meltdown-cancel" style="font-size:11px;padding:6px 10px" onclick="lifeClear(\'clear_plan\')">' + (currentLang === 'zh' ? '清空计划' : 'Clear Plan') + '</button>'
+    + '<button class="meltdown-cancel" style="font-size:11px;padding:6px 10px" onclick="lifeDownloadDiagnostics()">' + (currentLang === 'zh' ? '导出诊断' : 'Export Diagnostics') + '</button>'
+    + '</div>'
+    + '<div id="life-controls-msg" style="font-size:11px;color:var(--text-muted);min-height:14px"></div>'
+    + '</div>'
+    + '</div>';
+
+  right.innerHTML = eventsHtml + auditHtml + controlsHtml;
+  lifeInited = true;
+}
+
+function lifeRelTime(ts) {
+  if (!ts) return '—';
+  var now = Date.now() / 1000;
+  var diff = Math.max(0, now - ts);
+  if (diff < 60) return Math.floor(diff) + 's';
+  if (diff < 3600) return Math.floor(diff / 60) + 'm';
+  if (diff < 86400) return Math.floor(diff / 3600) + 'h';
+  return Math.floor(diff / 86400) + 'd';
+}
+
+async function updateLife() {
+  if (!lifeInited) initLife();
+  try {
+    var statusJson = await apiFetch('/api/life/status');
+    var badge = document.getElementById('life-availability-badge');
+    if (badge) {
+      if (statusJson && statusJson.available) {
+        badge.textContent = 'AVAILABLE';
+        badge.style.color = 'var(--accent)';
+      } else {
+        badge.textContent = 'UNAVAILABLE';
+        badge.style.color = 'var(--text-muted)';
+      }
+    }
+    var phase = (statusJson && statusJson.world && statusJson.world.phase) || '—';
+    var act = (statusJson && statusJson.current_activity) || '—';
+    var simC = (statusJson && statusJson.counts && statusJson.counts.simulation_count) || 0;
+    var outC = (statusJson && statusJson.counts && statusJson.counts.outreach_count) || 0;
+    var energy = (statusJson && statusJson.world && statusJson.world.energy) || 0;
+    var focus = (statusJson && statusJson.world && statusJson.world.focus) || 0;
+    var lastTickSec = (statusJson && statusJson.world && statusJson.world.seconds_since_tick);
+    var setText = function(id, val) { var el = document.getElementById(id); if (el) el.textContent = val; };
+    setText('life-phase', phase);
+    setText('life-activity', (act.length > 24 ? act.slice(0, 24) + '…' : act));
+    setText('life-sim-count', simC);
+    setText('life-outreach-count', outC);
+    var be = document.getElementById('life-bar-energy');
+    var bf = document.getElementById('life-bar-focus');
+    if (be) be.style.width = Math.min(100, energy * 100).toFixed(1) + '%';
+    if (bf) bf.style.width = Math.min(100, focus * 100).toFixed(1) + '%';
+    setText('life-val-energy', Number(energy).toFixed(2));
+    setText('life-val-focus', Number(focus).toFixed(2));
+    setText('life-last-tick', (lastTickSec != null) ? ('Δt = ' + lastTickSec + 's') : (currentLang === 'zh' ? '尚未模拟' : 'No simulation yet'));
+
+    // 启用开关 + 强度 select 与配置同步（轮询时静默重置 UI，避免和用户编辑冲突由 onchange 立即生效抵消）
+    try {
+      var settings = await apiFetch('/api/settings');
+      if (settings && settings.values) {
+        var toggle = document.getElementById('life-toggle-enabled');
+        if (toggle) toggle.checked = !!settings.values.sylanne_alpha_life_simulation_enabled;
+        var sel = document.getElementById('life-share-intensity');
+        if (sel) {
+          var iv = settings.values.sylanne_alpha_life_simulation_share_intensity || 'standard';
+          if (['off','low','standard','high'].indexOf(iv) !== -1) sel.value = iv;
+        }
+      }
+    } catch(e) { console.warn('[life] settings update failed:', e); }
+
+    // 事件时间线
+    var eventsJson = await apiFetch('/api/life/events');
+    var elist = document.getElementById('life-events-list');
+    if (elist) {
+      var evs = (eventsJson && eventsJson.events) || [];
+      if (!evs.length) {
+        elist.innerHTML = '<div style="color:var(--text-muted);font-size:12px;padding:10px;text-align:center">' + (currentLang === 'zh' ? '暂无生活事件' : 'No life events yet') + '</div>';
+      } else {
+        var html = '';
+         for (var i = evs.length - 1; i >= 0; i--) {
+           var ev = evs[i];
+           var shareLabel = ev.shared ? ('<span class="badge" style="color:var(--accent)">shared</span>')
+             : (ev.wants_to_share ? '<span class="badge" style="color:var(--amber)">wants_share</span>' : '');
+           var projTag = ev.project_id ? '<span style="font-size:10px;color:var(--cyan)">@' + esc((ev.project_id || '').slice(0, 6)) + '</span>' : '';
+           html += '<div style="border-left:2px solid var(--border);padding:6px 10px;font-size:12px">'
+             + '<div style="display:flex;justify-content:space-between;color:var(--text-muted);font-size:10px">'
+             + '<span>' + esc(ev.event_type || '—') + ' · ' + lifeRelTime(ev.timestamp) + ' ago</span>'
+             + '<span>' + esc(ev.source || '') + '</span>'
+             + '</div>'
+             + '<div style="margin-top:2px">' + esc(ev.text || '') + '</div>'
+             + '<div style="margin-top:4px;display:flex;gap:6px;font-size:10px;color:var(--text-muted)">'
+             + '<span>imp=' + (ev.importance != null ? ev.importance.toFixed(2) : '—') + '</span>'
+             + projTag + ' ' + shareLabel
+             + '</div>'
+             + '</div>';
+         }
+        elist.innerHTML = html;
+      }
+    }
+
+    // 项目 + 技能
+    var projJson = await apiFetch('/api/life/projects');
+    var plist = document.getElementById('life-projects-list');
+    if (plist) {
+      var projects = (projJson && projJson.projects) || [];
+      if (!projects.length) {
+        plist.innerHTML = '<div style="color:var(--text-muted);font-size:12px;padding:8px">' + (currentLang === 'zh' ? '暂无活跃项目' : 'No active projects') + '</div>';
+      } else {
+        var ph = '';
+         projects.forEach(function(p) {
+           var prog = Math.max(0, Math.min(1, p.progress || 0));
+           ph += '<div style="border:1px solid var(--border);padding:8px;border-radius:4px">'
+             + '<div style="display:flex;justify-content:space-between;font-size:13px"><strong>' + esc(p.title || p.kind || '—') + '</strong><span style="color:var(--text-muted);font-size:10px">' + esc(p.state || '') + '</span></div>'
+             + '<div class="bar-track" style="margin-top:4px"><div class="bar-fill" style="width:' + (prog * 100).toFixed(1) + '%"></div></div>'
+             + '<div style="font-size:10px;color:var(--text-muted);margin-top:4px">progress=' + prog.toFixed(2) + ' · share=' + esc(p.share_policy || '—') + ' · eff=' + Number(p.effectiveness || 0).toFixed(2) + '</div>'
+             + '</div>';
+         });
+        plist.innerHTML = ph;
+      }
+    }
+    var slist = document.getElementById('life-skills-list');
+    if (slist) {
+      var skills = (projJson && projJson.skills) || [];
+      if (!skills.length) {
+        slist.innerHTML = '<div style="color:var(--text-muted);font-size:12px;padding:6px">' + (currentLang === 'zh' ? '暂无技能' : 'No skills') + '</div>';
+      } else {
+        var sh = '';
+         skills.forEach(function(s) {
+           sh += '<div style="display:flex;justify-content:space-between;font-size:12px;padding:4px 0;border-bottom:1px dashed var(--border)">'
+             + '<span>' + esc(s.name || '—') + '</span>'
+             + '<span style="color:var(--text-muted);font-size:10px">eff=' + Number(s.effectiveness || 0).toFixed(2) + ' · ✓' + (s.success_count || 0) + ' ✗' + (s.failure_count || 0) + '</span>'
+             + '</div>';
+         });
+        slist.innerHTML = sh;
+      }
+    }
+
+    // 审计
+    var auditJson = await apiFetch('/api/life/audit');
+    var alist = document.getElementById('life-audit-list');
+    if (alist) {
+      var audit = (auditJson && auditJson.audit) || {};
+      var rows = [];
+      Object.keys(audit).forEach(function(sess) {
+        (audit[sess] || []).forEach(function(entry) { rows.push({sess: sess, entry: entry}); });
+      });
+      rows.sort(function(a, b) { return (b.entry.timestamp || 0) - (a.entry.timestamp || 0); });
+      if (!rows.length) {
+        alist.innerHTML = '<div style="color:var(--text-muted);font-size:12px;padding:8px">' + (currentLang === 'zh' ? '暂无审计记录' : 'No audit entries') + '</div>';
+      } else {
+         var ah = '';
+         rows.slice(0, 15).forEach(function(r) {
+           var e = r.entry || {};
+           var status = e.status || e.kind || '—';
+           var reasonTag = e.reason ? ('<span style="color:var(--amber)">[' + esc(e.reason) + ']</span>') : '';
+           ah += '<div style="border-left:2px solid var(--cyan);padding:4px 8px;font-size:11px">'
+             + '<div style="display:flex;justify-content:space-between"><strong>' + esc(status) + '</strong><span style="color:var(--text-muted);font-size:10px">' + esc(r.sess === '_global' ? '_global' : r.sess.slice(0, 10)) + '</span></div>'
+             + '<div style="color:var(--text-muted);font-size:10px">' + lifeRelTime(e.timestamp) + ' ago ' + reasonTag + '</div>'
+             + '</div>';
+         });
+        alist.innerHTML = ah;
+      }
+    }
+   } catch(e) {
+     console.warn('[life] update failed:', e);
+   }
+}
+
+function renderLife() { if (!lifeInited) initLife(); updateLife(); }
+
+async function lifePostControl(action, value) {
+  var msgEl = document.getElementById('life-controls-msg');
+  try {
+    var body = { action: action };
+    if (value !== undefined) body.value = value;
+    var resp = await apiFetch('/api/life/controls', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body)
+    });
+    if (msgEl) {
+      if (resp && resp.ok) {
+        msgEl.style.color = 'var(--accent)';
+        msgEl.textContent = (currentLang === 'zh' ? '已应用：' : 'Applied: ') + action;
+      } else {
+        msgEl.style.color = 'var(--red)';
+        msgEl.textContent = (resp && resp.error) || (currentLang === 'zh' ? '操作失败' : 'Failed');
+      }
+    }
+    updateLife();
+  } catch(e) {
+    if (msgEl) {
+      msgEl.style.color = 'var(--red)';
+      msgEl.textContent = (currentLang === 'zh' ? '请求失败' : 'Request error');
+    }
+  }
+}
+
+function lifeToggleEnabled() {
+  var el = document.getElementById('life-toggle-enabled');
+  lifePostControl('toggle_enabled', !!(el && el.checked));
+}
+
+function lifeSetShareIntensity() {
+  var el = document.getElementById('life-share-intensity');
+  if (!el) return;
+  lifePostControl('set_share_intensity', el.value);
+}
+
+function lifeClear(action) {
+  var confirmMsg = currentLang === 'zh' ? '确认执行该清除操作？' : 'Confirm this clear action?';
+  if (!window.confirm(confirmMsg)) return;
+  lifePostControl(action);
+}
+
+async function lifeDownloadDiagnostics() {
+  try {
+    var data = await apiFetch('/api/life/diagnostics');
+    var blob = new Blob([JSON.stringify(data, null, 2)], { type: 'application/json' });
+    var url = URL.createObjectURL(blob);
+    var a = document.createElement('a');
+    a.href = url;
+    a.download = 'sylanne-life-diagnostics-' + Date.now() + '.json';
+    document.body.appendChild(a); a.click(); document.body.removeChild(a);
+    setTimeout(function() { URL.revokeObjectURL(url); }, 1000);
+    var msgEl = document.getElementById('life-controls-msg');
+    if (msgEl) { msgEl.style.color = 'var(--accent)'; msgEl.textContent = (currentLang === 'zh' ? '已下载诊断 JSON' : 'Diagnostics JSON downloaded'); }
+  } catch(e) {
+    var msgEl2 = document.getElementById('life-controls-msg');
+    if (msgEl2) { msgEl2.style.color = 'var(--red)'; msgEl2.textContent = (currentLang === 'zh' ? '诊断下载失败' : 'Diagnostics download failed'); }
+  }
+}
+
 /* ═══════════════════════════════════════════════════════════════
    LOAD STATE — fetch + adapt backend data to frontend format
    ═══════════════════════════════════════════════════════════════ */
@@ -3464,21 +3786,24 @@ async function renderAllPages() {
   spineInited = false;
   logsInited = false;
   personalityInited = false;
+  lifeInited = false;
   try { renderMonitor(); } catch(e) { console.error('renderMonitor:', e); }
   try { renderSpine(); } catch(e) { console.error('renderSpine:', e); }
   try { await renderConfig(); } catch(e) { console.error('renderConfig:', e); }
   try { await renderLogs(); } catch(e) { console.error('renderLogs:', e); }
   try { await renderMemory(); } catch(e) { console.error('renderMemory:', e); }
   try { renderPersonality(); } catch(e) { console.error('renderPersonality:', e); }
+  try { renderLife(); } catch(e) { console.error('renderLife:', e); }
 }
 
 // 轮询刷新：只更新实时数据页的值，不重建 DOM 骨架（避免闪烁和打断用户交互）
 async function refreshLivePages() {
-  try { updateMonitor(); } catch(e) {}
-  try { await updateSpine(); } catch(e) {}
-  try { await updateLogs(); } catch(e) {}
-  try { updatePersonality(); } catch(e) {}
-}
+   try { updateMonitor(); } catch(e) {}
+   try { await updateSpine(); } catch(e) {}
+   try { await updateLogs(); } catch(e) {}
+   try { updatePersonality(); } catch(e) {}
+   // life 页只在用户停留时刷新（30s 节奏由 navigateTo 维护 lifeTickId）
+ }
 
 /* ═══════════════════════════════════════════════════════════════
    START DASHBOARD (after login or token check)
@@ -3542,7 +3867,7 @@ function initSpineHandle() {
   var spineEl = document.getElementById('fixedSpine');
 
   // 获取脊柱可拖拽范围（节点最小/最大 Y 百分比）
-  var nodePositions = [20, 32, 44, 56, 68, 80]; // 对应 6 个节点的 top%
+  var nodePositions = [18, 28, 38, 48, 58, 68, 78]; // 对应 7 个节点的 top%
 
   // 防抖：记录上次吸附的节点索引，避免重复触发同一节点导致闪烁
   var lastSnappedIdx = -1;

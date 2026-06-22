@@ -194,6 +194,25 @@
     "default": 3600.0,
     "hint": "因为生活事件主动找用户的最短间隔。默认 1 小时。"
   },
+  "sylanne_alpha_life_simulation_share_intensity": {
+    "description": "Sylanne 主动分享强度（off=关闭主动分享 / low=低频 / standard=标准 / high=高频）",
+    "type": "string",
+    "default": "standard",
+    "options": ["off", "low", "standard", "high"],
+    "hint": "Phase 4：生活观测面板的总闸。off=完全关闭主动分享（但仍模拟生活）；low/standard/high 按节律调整门控宽严。仅控制生活模拟分享侧，不影响普通会话回复。"
+  },
+  "sylanne_alpha_life_simulation_night_consolidation": {
+    "description": "夜间/低活跃期执行生活反思巩固",
+    "type": "bool",
+    "default": true,
+    "hint": "Phase 2/3：在夜间或低活跃期跑反思 + 巩固，沉淀次日叙事弧和项目进度。关闭会让 plan/projects 停留在最近一次模拟产出，不再被反思修正。"
+  },
+  "sylanne_alpha_life_simulation_allow_memory_write": {
+    "description": "允许生活模拟事件写入长期记忆",
+    "type": "bool",
+    "default": true,
+    "hint": "Phase 3：开启时高重要度的生活事件可作为 user_fact/common_ground 候选写入长期记忆。关闭则生活完全停留在生活模拟侧不污染主记忆。"
+  },
   "sylanne_alpha_auto_detect_group_context": {
     "description": "自动检测 AstrBot 群聊上下文感知",
     "type": "bool",

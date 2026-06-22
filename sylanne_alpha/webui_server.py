@@ -354,6 +354,170 @@ async def start_webui_server(plugin: Any, host: str = "127.0.0.1", port: int = 2
         except Exception as e:
             return web.json_response({"available": True, "error": f"{type(e).__name__}: {e}"})
 
+    # ------------------------------------------------------------------
+    # Phase 4：生活观测面板（events / projects / audit / diagnostics / controls）
+    # ------------------------------------------------------------------
+
+    async def handle_life_events(request: web.Request) -> web.Response:
+        """GET /api/life/events — 最近 20 条生活事件（含 Phase 3 归属字段）。"""
+        current = _plugin(plugin)
+        life_sim = getattr(current, "_life_simulator", None)
+        if life_sim is None:
+            return web.json_response({"events": [], "available": False})
+        try:
+            state = life_sim.state
+            events: list[dict[str, Any]] = []
+            for ev in list(state.events[-20:]):
+                events.append(
+                    {
+                        "event_id": getattr(ev, "event_id", "") or "",
+                        "text": getattr(ev, "text", "") or "",
+                        "event_type": getattr(ev, "event_type", "") or "",
+                        "timestamp": float(getattr(ev, "timestamp", 0.0) or 0.0),
+                        "source": getattr(ev, "source", "") or "",
+                        "importance": round(float(getattr(ev, "importance", 0.5) or 0.0), 3),
+                        "wants_to_share": bool(getattr(ev, "wants_to_share", False)),
+                        "shared": bool(getattr(ev, "shared", False)),
+                        "project_id": getattr(ev, "project_id", "") or "",
+                        "origin_session": getattr(ev, "origin_session", "") or "",
+                        "privacy_level": getattr(ev, "privacy_level", "") or "",
+                    }
+                )
+            return web.json_response({"events": events, "available": True})
+        except Exception as e:
+            return web.json_response(
+                {"events": [], "available": True, "error": f"{type(e).__name__}: {e}"}
+            )
+
+    async def handle_life_projects(request: web.Request) -> web.Response:
+        """GET /api/life/projects — 活跃项目 + 技能库。"""
+        current = _plugin(plugin)
+        life_sim = getattr(current, "_life_simulator", None)
+        if life_sim is None:
+            return web.json_response({"projects": [], "skills": [], "available": False})
+        try:
+            from sylanne_alpha.life_simulation import _project_to_dict, _skill_to_dict
+            projects = [_project_to_dict(p) for p in list(life_sim.state.projects)]
+            skills = [_skill_to_dict(s) for s in list(life_sim.state.skills)]
+            return web.json_response(
+                {"projects": projects, "skills": skills, "available": True}
+            )
+        except Exception as e:
+            return web.json_response(
+                {
+                    "projects": [],
+                    "skills": [],
+                    "available": True,
+                    "error": f"{type(e).__name__}: {e}",
+                }
+            )
+
+    async def handle_life_audit(request: web.Request) -> web.Response:
+        """GET /api/life/audit — outreach 审计（M8 单一数据源 + Phase 3 分享决策）。"""
+        current = _plugin(plugin)
+        life_sim = getattr(current, "_life_simulator", None)
+        if life_sim is None:
+            return web.json_response({"audit": {}, "available": False})
+        try:
+            audit = {
+                str(k): list(v or [])
+                for k, v in dict(life_sim.state.outreach_audit or {}).items()
+            }
+            return web.json_response({"audit": audit, "available": True})
+        except Exception as e:
+            return web.json_response(
+                {"audit": {}, "available": True, "error": f"{type(e).__name__}: {e}"}
+            )
+
+    async def handle_life_diagnostics(request: web.Request) -> web.Response:
+        """GET /api/life/diagnostics — 一键完整状态导出（含 prompt fragment 预览）。"""
+        current = _plugin(plugin)
+        life_sim = getattr(current, "_life_simulator", None)
+        if life_sim is None:
+            return web.json_response({"available": False})
+        try:
+            data = life_sim.state.to_dict()
+            try:
+                data["prompt_fragment"] = life_sim.life_prompt_fragment(
+                    limit=5, max_budget=2000
+                )
+            except TypeError:
+                # 旧签名不支持 max_budget kwarg
+                data["prompt_fragment"] = life_sim.life_prompt_fragment(limit=5)
+            except Exception:
+                data["prompt_fragment"] = ""
+            data["available"] = True
+            return web.json_response(data)
+        except Exception as e:
+            return web.json_response(
+                {"available": True, "error": f"{type(e).__name__}: {e}"}
+            )
+
+    async def handle_life_controls(request: web.Request) -> web.Response:
+        """POST /api/life/controls — 用户控制（开关 / 强度 / 清除 journal/projects/plan）。
+
+        body: {"action": str, "value": Any}
+        actions:
+          - toggle_enabled              value: bool
+          - set_share_intensity         value: off|low|standard|high
+          - clear_journal               clear state.events
+          - clear_projects              clear state.projects
+          - clear_plan                  state.plan = None
+        """
+        current = _plugin(plugin)
+        life_sim = getattr(current, "_life_simulator", None)
+        if life_sim is None:
+            return web.json_response(
+                {"error": "life sim not available"}, status=400
+            )
+        try:
+            body = await request.json()
+        except Exception:
+            body = {}
+        if not isinstance(body, dict):
+            return web.json_response({"error": "invalid body"}, status=400)
+        action = str(body.get("action", "") or "").strip()
+        config = getattr(current, "_config", None)
+        if config is None:
+            config = {}
+            current._config = config
+
+        def _persist_config(key: str, value: Any) -> None:
+            config[key] = value
+            if hasattr(current, "config") and isinstance(current.config, dict):
+                current.config[key] = value
+                save = getattr(current.config, "save_config", None)
+                if callable(save):
+                    try:
+                        save()
+                    except Exception:
+                        pass
+
+        if action == "toggle_enabled":
+            value = bool(body.get("value", False))
+            _persist_config("sylanne_alpha_life_simulation_enabled", value)
+            return web.json_response({"ok": True, "enabled": value})
+        if action == "set_share_intensity":
+            intensity = str(body.get("value", "standard") or "standard")
+            if intensity not in ("off", "low", "standard", "high"):
+                return web.json_response({"error": "invalid intensity"}, status=400)
+            _persist_config(
+                "sylanne_alpha_life_simulation_share_intensity", intensity
+            )
+            return web.json_response({"ok": True, "share_intensity": intensity})
+        if action == "clear_journal":
+            life_sim.state.events.clear()
+            return web.json_response({"ok": True, "cleared": "events"})
+        if action == "clear_projects":
+            life_sim.state.projects.clear()
+            return web.json_response({"ok": True, "cleared": "projects"})
+        if action == "clear_plan":
+            life_sim.state.plan = None
+            return web.json_response({"ok": True, "cleared": "plan"})
+        return web.json_response(
+            {"error": f"unknown action: {action}"}, status=400
+        )
+
     async def handle_settings_get(request: web.Request) -> web.Response:
         current_plugin = _plugin(plugin)
         schema = _load_schema(current_plugin)
@@ -1391,6 +1555,12 @@ async def start_webui_server(plugin: Any, host: str = "127.0.0.1", port: int = 2
     app.router.add_get("/metrics", handle_metrics)
     app.router.add_get("/api/state", handle_state)
     app.router.add_get("/api/life/status", handle_life_status)  # PR-B6 只读观测
+    # Phase 4：生活观测面板（events / projects / audit / diagnostics / controls）
+    app.router.add_get("/api/life/events", handle_life_events)
+    app.router.add_get("/api/life/projects", handle_life_projects)
+    app.router.add_get("/api/life/audit", handle_life_audit)
+    app.router.add_get("/api/life/diagnostics", handle_life_diagnostics)
+    app.router.add_post("/api/life/controls", handle_life_controls)
     app.router.add_get("/api/settings", handle_settings_get)
     app.router.add_post("/api/settings", handle_settings_post)
     app.router.add_get("/api/computation_logs", handle_computation_logs)
