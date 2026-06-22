@@ -446,6 +446,10 @@ class EmotionalStatePlugin(Star):
         self._rel_state_last_save_ts: float = 0.0
         self._rel_state_dirty_in_flight: bool = False
         self._meltdown_nonces: BoundedDict = BoundedDict(maxsize=50, ttl=300)
+        # M8：主动发言反馈 audit（feedback_pressure 单一数据源）。按 session_key 索引，
+        # 值为 deque（_record_dispatch_feedback 写、derive_dispatch_policy 读）。
+        # BoundedDict LRU 防会话无限增长；每会话内 deque maxlen 防单会话条目无界。
+        self._proactive_dispatch_audit: BoundedDict = BoundedDict(maxsize=100)
         # 社交场收集器：群聊氛围感知
         self._social_field = SocialFieldCollector(config=self._config)
         # 后台投递队列已迁入 self._store（CP8-P2 批2）

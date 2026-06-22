@@ -13,6 +13,7 @@
 from __future__ import annotations
 
 import asyncio
+import collections
 import random
 import re as _re
 import time
@@ -38,6 +39,8 @@ except ImportError:
 
 # 单次未完成回复注入的最大字符数，防止 prompt 过长
 _MAX_UNFINISHED_CONTEXT_CHARS = 2000
+# M8：每会话主动发言反馈 audit 保留最近条数（deque maxlen，防无界增长）。
+_DISPATCH_AUDIT_PER_SESSION = 20
 
 # ---------------------------------------------------------------------------
 # 注入预算系统：按优先级分配 token 预算，超限从低优先级裁剪
@@ -1454,7 +1457,9 @@ class LLMRequestPipeline:
             # （与 fallback 路径过期语义一致：不注入 prompt、不写 memory、不标 consumed）
             expires_at = float(outreach_ctx.get("expires_at", 0.0) or 0.0)
             if expires_at and time.time() > expires_at:
-                self._mark_life_outcome(outreach_ctx.get("event_id", ""), "dropped")
+                self._mark_life_outcome(
+                    outreach_ctx.get("event_id", ""), "dropped", session_key
+                )
                 logger.info(
                     "Sylanne life_sim outreach dropped (expired at consume): session=%s",
                     session_key,
@@ -1463,7 +1468,9 @@ class LLMRequestPipeline:
                 reason = outreach_ctx.get("reason", "")
                 mood = outreach_ctx.get("mood", "")
                 # PR-C3/C4：回写 consumed_at 到对应 LifeEvent（四时点追踪）
-                self._mark_life_outcome(outreach_ctx.get("event_id", ""), "consumed")
+                self._mark_life_outcome(
+                    outreach_ctx.get("event_id", ""), "consumed", session_key
+                )
                 outreach_fragment = (
                     f"[life_event_context] Sylanne 刚刚经历了一件事想分享：{reason}（心情：{mood}）。"
                     f"请自然地在回复中提及或表达这件事，用你自己的语气。"
@@ -2739,7 +2746,7 @@ class LLMRequestPipeline:
             # 过期则丢弃（PR-C3：expires_at 生效）
             if ctx["expires_at"] and time.time() > ctx["expires_at"]:
                 pending.pop(session_key, None)
-                self._mark_life_outcome(ctx["event_id"], "dropped")
+                self._mark_life_outcome(ctx["event_id"], "dropped", session_key)
                 logger.info(f"Sylanne life_sim outreach expired: session={session_key}")
                 return
 
@@ -2772,7 +2779,7 @@ class LLMRequestPipeline:
                         f"Sylanne bridge gated ({gate_reason}), skip this outreach: "
                         f"session={session_key}"
                     )
-                    self._mark_life_outcome(ctx["event_id"], "dropped")
+                    self._mark_life_outcome(ctx["event_id"], "dropped", session_key)
                     return
                 # 犹豫：发前迟疑 / 最后一刻收回 / 踌躇词试探
                 hesit_on = bool(
@@ -2804,7 +2811,7 @@ class LLMRequestPipeline:
                             f"Sylanne withdraws outreach at the last moment "
                             f"(h={plan['hesitation']}): session={session_key}"
                         )
-                        self._mark_life_outcome(ctx["event_id"], "dropped")
+                        self._mark_life_outcome(ctx["event_id"], "dropped", session_key)
                         return
                     filler = plan["filler"]
                 motivation = bridge.build_motivation_text(
@@ -2865,10 +2872,23 @@ class LLMRequestPipeline:
             )
         )
 
-    def _mark_life_outcome(self, event_id: str, outcome: str) -> None:
-        """PR-C3/C4：回写 LifeEvent 投递四时点（dispatched/consumed/dropped）。"""
+    def _mark_life_outcome(
+        self, event_id: str, outcome: str, session_key: str = ""
+    ) -> None:
+        """PR-C3/C4：回写 LifeEvent 投递四时点（dispatched/consumed/dropped）。
+
+        M8：consumed/dropped 同时写主动发言反馈 audit（feedback_pressure 的单一数据源）。
+        - consumed = 用户消费了 pending（回应了）→ answered
+        - dropped  = pending 过期未消费（没回应）→ unanswered
+        audit 按 session_key 索引（origin_session 隔离：A 没回应不抬 B 的 cooldown）。
+        """
         if not event_id:
             return
+        # M8：先写反馈 audit（不依赖 life_sim 是否存在；session_key 空则跳过）
+        if session_key and outcome in ("consumed", "dropped"):
+            self._record_dispatch_feedback(
+                session_key, "answered" if outcome == "consumed" else "unanswered"
+            )
         life_sim = getattr(self._p, "_life_simulator", None)
         if life_sim is None:
             return
@@ -2887,6 +2907,27 @@ class LLMRequestPipeline:
                 "Sylanne _mark_life_outcome 回写失败（event_id=%s, outcome=%s）：%s: %s",
                 event_id, outcome, type(e).__name__, e,
             )
+
+    def _record_dispatch_feedback(self, session_key: str, status: str) -> None:
+        """M8 audit 生产者：把一次主动发言反馈写进 _proactive_dispatch_audit[session_key]。
+
+        feedback_pressure（proactive_scheduler.derive_dispatch_policy）读此 audit，
+        数 feedback_status in (cold_reply, unanswered) 的条数派生压力。这是 unanswered
+        惩罚的**单一数据源**——ShareIntent 侧 unanswered_penalty 维持 *0.0，不重复惩罚。
+        """
+        try:
+            audit = getattr(self._p, "_proactive_dispatch_audit", None)
+            if audit is None:
+                return
+            entry = {"feedback_status": status, "ts": time.time()}
+            hist = audit.get(session_key)
+            if hist is None:
+                # 每会话最近 N 条（deque 自动淘汰旧条，防无界增长）
+                hist = collections.deque(maxlen=_DISPATCH_AUDIT_PER_SESSION)
+                audit[session_key] = hist
+            hist.append(entry)
+        except Exception as e:
+            logger.debug("Sylanne dispatch feedback record skipped: %s", e)
 
     async def _generate_outreach_message(self, reason: str, mood: str) -> str:
         """使用 LLM 生成角色内的主动联系消息。
