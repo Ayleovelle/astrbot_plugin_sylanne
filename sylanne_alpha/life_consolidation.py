@@ -94,8 +94,22 @@ class LifeConsolidationEngine:
         """纯本地：按当天事件的 event_type 频次 + 重要性，聚合成次日锚点活动。
 
         不调 LLM、不读投递成败——只看"她今天在忙什么类型的事"，延续到明天的锚点。
+        读 LifeReflection 产的 next_plan_hint.kind_bias 作偏好输入（单写者规则：本引擎
+        仍是 state.plan 唯一所有者，hint 只是众多输入之一，有界不主导）。
         """
         from sylanne_alpha.life_simulation import LifeActivity, LifePlan
+
+        # 反思建议（advisory，有界）：{kind: bounded_bias}。读 world.next_plan_hint。
+        kind_bias: dict = {}
+        try:
+            world = getattr(state, "world", None)
+            hint = getattr(world, "next_plan_hint", None) if world else None
+            if isinstance(hint, dict):
+                kb = hint.get("kind_bias")
+                if isinstance(kb, dict):
+                    kind_bias = kb
+        except Exception:
+            kind_bias = {}
 
         # 按 event_type 聚合重要性权重（importance 累加，取 top N 类）
         type_weight: Counter = Counter()
@@ -109,6 +123,17 @@ class LifeConsolidationEngine:
             if et not in type_sample_title:
                 txt = str(getattr(e, "text", "") or "")[:40]
                 type_sample_title[et] = txt
+
+        # 应用反思偏好：按 kind 给对应 event_type 的权重加 bias（有界，不主导排序）。
+        if kind_bias:
+            for et in list(type_weight.keys()):
+                kind = _event_type_to_kind(et)
+                bias = kind_bias.get(kind)
+                if bias is not None:
+                    try:
+                        type_weight[et] += float(bias)
+                    except (TypeError, ValueError):
+                        pass
 
         anchors = []
         for et, _w in type_weight.most_common(_MAX_ANCHORS):

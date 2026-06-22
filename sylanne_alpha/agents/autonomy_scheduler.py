@@ -47,6 +47,10 @@ class AutonomyScheduler:
         self._life_consolidation = LifeConsolidationEngine(plugin)
         # 反思引擎（CP8-P4-E 层次2，低频 LLM）：AWAKE→DROWSY 首拍触发一次元认知
         self._reflection = ReflectionEngine(plugin, self_core)
+        # Phase 2 核心：生活反思引擎（白天/入睡前低频 LLM）——产次日计划建议 next_plan_hint。
+        # 活在生活模拟域，与对话策略 ReflectionEngine 独立预算/KV（proposal §4.4 防污染）。
+        from sylanne_alpha.life_reflection import LifeReflectionEngine
+        self._life_reflection = LifeReflectionEngine(plugin)
         # 上一拍各会话相位（检测 AWAKE→DROWSY 跳变 = 反思首拍闸）
         self._prev_phase: dict[str, str] = {}
 
@@ -99,6 +103,10 @@ class AutonomyScheduler:
             pass
         try:
             self._life_consolidation.forget_session(session_key)
+        except Exception:
+            pass
+        try:
+            self._life_reflection.forget_session(session_key)
         except Exception:
             pass
 
@@ -159,6 +167,12 @@ class AutonomyScheduler:
                 # （低频 LLM 元认知）。maybe_reflect 内部还有预算池 + 间隔兜底。
                 if prev == self._sc.AWAKE:
                     await self._reflection.maybe_reflect(sk, now)
+                    # Phase 2 核心：生活反思（独立预算，与对话反思隔离）。同首拍触发，
+                    # 产 next_plan_hint 供晚些 RETIRED 巩固读（DROWSY 先于 RETIRED）。
+                    try:
+                        await self._life_reflection.maybe_reflect(sk, now)
+                    except Exception as exc:
+                        logger.debug("Sylanne life reflection [%s]: %s", sk, exc)
                 if (self._tick_count % self._drowsy_divisor) != 0:
                     continue  # 降频
             await self._tick_session(sk, host, now)

@@ -234,6 +234,10 @@ class LifeWorldState:
     active_project_ids: list = field(default_factory=list)
     habits: dict = field(default_factory=dict)
     relationship_snapshot: dict = field(default_factory=dict)
+    # Phase 2 核心：LifeReflection 写的次日计划建议（单写者=反思，巩固只读作输入）。
+    # advisory only：巩固仍是 state.plan 唯一所有者；hint 每日由反思重生（不累积），
+    # 防自证循环。结构 {"arc": str 叙事弧, "kind_bias": {kind: bounded_float}}。
+    next_plan_hint: dict = field(default_factory=dict)
     last_tick_at: float = 0.0
 
 
@@ -446,6 +450,7 @@ def _world_to_dict(w: LifeWorldState) -> dict[str, Any]:
         "active_project_ids": list(w.active_project_ids),
         "habits": dict(w.habits),
         "relationship_snapshot": dict(w.relationship_snapshot),
+        "next_plan_hint": dict(w.next_plan_hint),
         "last_tick_at": w.last_tick_at,
     }
 
@@ -467,6 +472,7 @@ def _world_from_dict(d: dict[str, Any] | None) -> LifeWorldState:
             active_project_ids=list(d.get("active_project_ids", []) or []),
             habits=dict(d.get("habits", {}) or {}),
             relationship_snapshot=dict(d.get("relationship_snapshot", {}) or {}),
+            next_plan_hint=dict(d.get("next_plan_hint", {}) or {}),
             last_tick_at=float(d.get("last_tick_at", 0.0)),
         )
     except Exception:
