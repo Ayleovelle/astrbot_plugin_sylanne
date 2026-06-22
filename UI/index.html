@@ -3483,7 +3483,7 @@ async function updateLife() {
           if (['off','low','standard','high'].indexOf(iv) !== -1) sel.value = iv;
         }
       }
-    } catch(e) { /* settings 拉不到不影响生活面板主流程 */ }
+    } catch(e) { console.warn('[life] settings update failed:', e); }
 
     // 事件时间线
     var eventsJson = await apiFetch('/api/life/events');
@@ -3494,23 +3494,23 @@ async function updateLife() {
         elist.innerHTML = '<div style="color:var(--text-muted);font-size:12px;padding:10px;text-align:center">' + (currentLang === 'zh' ? '暂无生活事件' : 'No life events yet') + '</div>';
       } else {
         var html = '';
-        for (var i = evs.length - 1; i >= 0; i--) {
-          var ev = evs[i];
-          var shareLabel = ev.shared ? ('<span class="badge" style="color:var(--accent)">shared</span>')
-            : (ev.wants_to_share ? '<span class="badge" style="color:var(--amber)">wants_share</span>' : '');
-          var projTag = ev.project_id ? '<span style="font-size:10px;color:var(--cyan)">@' + (ev.project_id || '').slice(0, 6) + '</span>' : '';
-          html += '<div style="border-left:2px solid var(--border);padding:6px 10px;font-size:12px">'
-            + '<div style="display:flex;justify-content:space-between;color:var(--text-muted);font-size:10px">'
-            + '<span>' + (ev.event_type || '—') + ' · ' + lifeRelTime(ev.timestamp) + ' ago</span>'
-            + '<span>' + (ev.source || '') + '</span>'
-            + '</div>'
-            + '<div style="margin-top:2px">' + (ev.text || '').replace(/</g, '&lt;') + '</div>'
-            + '<div style="margin-top:4px;display:flex;gap:6px;font-size:10px;color:var(--text-muted)">'
-            + '<span>imp=' + (ev.importance != null ? ev.importance.toFixed(2) : '—') + '</span>'
-            + projTag + ' ' + shareLabel
-            + '</div>'
-            + '</div>';
-        }
+         for (var i = evs.length - 1; i >= 0; i--) {
+           var ev = evs[i];
+           var shareLabel = ev.shared ? ('<span class="badge" style="color:var(--accent)">shared</span>')
+             : (ev.wants_to_share ? '<span class="badge" style="color:var(--amber)">wants_share</span>' : '');
+           var projTag = ev.project_id ? '<span style="font-size:10px;color:var(--cyan)">@' + esc((ev.project_id || '').slice(0, 6)) + '</span>' : '';
+           html += '<div style="border-left:2px solid var(--border);padding:6px 10px;font-size:12px">'
+             + '<div style="display:flex;justify-content:space-between;color:var(--text-muted);font-size:10px">'
+             + '<span>' + esc(ev.event_type || '—') + ' · ' + lifeRelTime(ev.timestamp) + ' ago</span>'
+             + '<span>' + esc(ev.source || '') + '</span>'
+             + '</div>'
+             + '<div style="margin-top:2px">' + esc(ev.text || '') + '</div>'
+             + '<div style="margin-top:4px;display:flex;gap:6px;font-size:10px;color:var(--text-muted)">'
+             + '<span>imp=' + (ev.importance != null ? ev.importance.toFixed(2) : '—') + '</span>'
+             + projTag + ' ' + shareLabel
+             + '</div>'
+             + '</div>';
+         }
         elist.innerHTML = html;
       }
     }
@@ -3524,14 +3524,14 @@ async function updateLife() {
         plist.innerHTML = '<div style="color:var(--text-muted);font-size:12px;padding:8px">' + (currentLang === 'zh' ? '暂无活跃项目' : 'No active projects') + '</div>';
       } else {
         var ph = '';
-        projects.forEach(function(p) {
-          var prog = Math.max(0, Math.min(1, p.progress || 0));
-          ph += '<div style="border:1px solid var(--border);padding:8px;border-radius:4px">'
-            + '<div style="display:flex;justify-content:space-between;font-size:13px"><strong>' + (p.title || p.kind || '—') + '</strong><span style="color:var(--text-muted);font-size:10px">' + (p.state || '') + '</span></div>'
-            + '<div class="bar-track" style="margin-top:4px"><div class="bar-fill" style="width:' + (prog * 100).toFixed(1) + '%"></div></div>'
-            + '<div style="font-size:10px;color:var(--text-muted);margin-top:4px">progress=' + prog.toFixed(2) + ' · share=' + (p.share_policy || '—') + ' · eff=' + Number(p.effectiveness || 0).toFixed(2) + '</div>'
-            + '</div>';
-        });
+         projects.forEach(function(p) {
+           var prog = Math.max(0, Math.min(1, p.progress || 0));
+           ph += '<div style="border:1px solid var(--border);padding:8px;border-radius:4px">'
+             + '<div style="display:flex;justify-content:space-between;font-size:13px"><strong>' + esc(p.title || p.kind || '—') + '</strong><span style="color:var(--text-muted);font-size:10px">' + esc(p.state || '') + '</span></div>'
+             + '<div class="bar-track" style="margin-top:4px"><div class="bar-fill" style="width:' + (prog * 100).toFixed(1) + '%"></div></div>'
+             + '<div style="font-size:10px;color:var(--text-muted);margin-top:4px">progress=' + prog.toFixed(2) + ' · share=' + esc(p.share_policy || '—') + ' · eff=' + Number(p.effectiveness || 0).toFixed(2) + '</div>'
+             + '</div>';
+         });
         plist.innerHTML = ph;
       }
     }
@@ -3542,12 +3542,12 @@ async function updateLife() {
         slist.innerHTML = '<div style="color:var(--text-muted);font-size:12px;padding:6px">' + (currentLang === 'zh' ? '暂无技能' : 'No skills') + '</div>';
       } else {
         var sh = '';
-        skills.forEach(function(s) {
-          sh += '<div style="display:flex;justify-content:space-between;font-size:12px;padding:4px 0;border-bottom:1px dashed var(--border)">'
-            + '<span>' + (s.name || '—') + '</span>'
-            + '<span style="color:var(--text-muted);font-size:10px">eff=' + Number(s.effectiveness || 0).toFixed(2) + ' · ✓' + (s.success_count || 0) + ' ✗' + (s.failure_count || 0) + '</span>'
-            + '</div>';
-        });
+         skills.forEach(function(s) {
+           sh += '<div style="display:flex;justify-content:space-between;font-size:12px;padding:4px 0;border-bottom:1px dashed var(--border)">'
+             + '<span>' + esc(s.name || '—') + '</span>'
+             + '<span style="color:var(--text-muted);font-size:10px">eff=' + Number(s.effectiveness || 0).toFixed(2) + ' · ✓' + (s.success_count || 0) + ' ✗' + (s.failure_count || 0) + '</span>'
+             + '</div>';
+         });
         slist.innerHTML = sh;
       }
     }
@@ -3565,22 +3565,22 @@ async function updateLife() {
       if (!rows.length) {
         alist.innerHTML = '<div style="color:var(--text-muted);font-size:12px;padding:8px">' + (currentLang === 'zh' ? '暂无审计记录' : 'No audit entries') + '</div>';
       } else {
-        var ah = '';
-        rows.slice(0, 15).forEach(function(r) {
-          var e = r.entry || {};
-          var status = e.status || e.kind || '—';
-          var reasonTag = e.reason ? ('<span style="color:var(--amber)">[' + e.reason + ']</span>') : '';
-          ah += '<div style="border-left:2px solid var(--cyan);padding:4px 8px;font-size:11px">'
-            + '<div style="display:flex;justify-content:space-between"><strong>' + status + '</strong><span style="color:var(--text-muted);font-size:10px">' + (r.sess === '_global' ? '_global' : r.sess.slice(0, 10)) + '</span></div>'
-            + '<div style="color:var(--text-muted);font-size:10px">' + lifeRelTime(e.timestamp) + ' ago ' + reasonTag + '</div>'
-            + '</div>';
-        });
+         var ah = '';
+         rows.slice(0, 15).forEach(function(r) {
+           var e = r.entry || {};
+           var status = e.status || e.kind || '—';
+           var reasonTag = e.reason ? ('<span style="color:var(--amber)">[' + esc(e.reason) + ']</span>') : '';
+           ah += '<div style="border-left:2px solid var(--cyan);padding:4px 8px;font-size:11px">'
+             + '<div style="display:flex;justify-content:space-between"><strong>' + esc(status) + '</strong><span style="color:var(--text-muted);font-size:10px">' + esc(r.sess === '_global' ? '_global' : r.sess.slice(0, 10)) + '</span></div>'
+             + '<div style="color:var(--text-muted);font-size:10px">' + lifeRelTime(e.timestamp) + ' ago ' + reasonTag + '</div>'
+             + '</div>';
+         });
         alist.innerHTML = ah;
       }
     }
-  } catch(e) {
-    /* 任何拉取失败都静默；不污染 console */
-  }
+   } catch(e) {
+     console.warn('[life] update failed:', e);
+   }
 }
 
 function renderLife() { if (!lifeInited) initLife(); updateLife(); }
@@ -3798,15 +3798,12 @@ async function renderAllPages() {
 
 // 轮询刷新：只更新实时数据页的值，不重建 DOM 骨架（避免闪烁和打断用户交互）
 async function refreshLivePages() {
-  try { updateMonitor(); } catch(e) {}
-  try { await updateSpine(); } catch(e) {}
-  try { await updateLogs(); } catch(e) {}
-  try { updatePersonality(); } catch(e) {}
-  // life 页只在用户停留时刷新（30s 节奏由 navigateTo 维护 lifeTickId）
-  if (currentPage === 'life') {
-    try { await updateLife(); } catch(e) {}
-  }
-}
+   try { updateMonitor(); } catch(e) {}
+   try { await updateSpine(); } catch(e) {}
+   try { await updateLogs(); } catch(e) {}
+   try { updatePersonality(); } catch(e) {}
+   // life 页只在用户停留时刷新（30s 节奏由 navigateTo 维护 lifeTickId）
+ }
 
 /* ═══════════════════════════════════════════════════════════════
    START DASHBOARD (after login or token check)
