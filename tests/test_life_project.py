@@ -18,6 +18,7 @@ from sylanne_alpha.life_consolidation import LifeConsolidationEngine
 from sylanne_alpha.life_simulation import (
     PROJECT_MAX_ACTIVE,
     PROJECT_MILESTONES,
+    PROJECT_PROMOTION_WINDOW_SECONDS,
     LifeEvent,
     LifeProject,
     LifeSimulationState,
@@ -157,6 +158,24 @@ def test_promote_project_three_distinct_days():
     assert projects[0].state == "active"
     # kind 由 _event_type_to_kind 推断（无显式 reading→study 映射，落 rest 兜底）
     assert projects[0].kind in ("rest", "study")
+
+
+def test_promote_project_ignores_events_outside_window():
+    """7 天窗口外的事件不计入晋升判定（第二轮 review 边界用例）。"""
+    now = time.time()
+    one_day = 86400.0
+    window = PROJECT_PROMOTION_WINDOW_SECONDS  # 7 * 86400
+    events = [
+        _event("reading", now - (window + 1.0)),  # 窗口外（>7天前）
+        _event("reading", now - 2 * one_day),     # 窗口内
+        _event("reading", now),                    # 窗口内 → 窗口内只 2 个不同日
+    ]
+    p = _make_plugin(events)
+    eng = LifeConsolidationEngine(p)
+    eng.consolidate_sync("s1", now)
+    projects = p._life_simulator.state.projects
+    # 窗口内只 2 个不同日（< PROJECT_PROMOTION_MIN_DAYS=3）→ 不晋升
+    assert projects == []
 
 
 def test_promote_project_skipped_when_too_few_days():

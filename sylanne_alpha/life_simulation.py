@@ -55,6 +55,11 @@ OUTREACH_TIMEOUT_SECONDS = 1800.0
 OUTREACH_AUDIT_PER_SESSION = 20
 OUTREACH_AUDIT_MAX_SESSIONS = 100
 
+# 内部哨兵：from_dict 中区分 "skills" key 缺席（v2 数据需 seed）vs key 存在但值为
+# 空 list（v3 数据用户清空，应保留）。不能用 None / [] 做 sentinel，因为 v3 的
+# `"skills": []` 是合法值。
+_SKILLS_MISSING: object = object()
+
 
 class LifeSource:
     """生活事件来源标签（写入 memory 时区分，对应 v2 ADR-002）。"""
@@ -700,12 +705,12 @@ class LifeSimulationState:
     world: LifeWorldState = field(default_factory=LifeWorldState)
     plan: LifePlan | None = None
     # Phase 3：项目线程 + 自适应技能 + outreach 审计（M8 单一数据源）
-    projects: list = field(default_factory=list)  # list[LifeProject]
-    skills: list = field(default_factory=_seed_skills)    # list[LifeSkill]，默认种子三条
+    projects: list[LifeProject] = field(default_factory=list)
+    skills: list[LifeSkill] = field(default_factory=_seed_skills)  # 默认种子三条
     # outreach_audit: {session_key: list[dict]}（entry: dispatched/responded/timeout 等）
     # 形态选 dict 而非 BoundedDict——LifeSimulationState 是数据 dataclass，运行时由
     # LifeSimulator 在 _bound_audit() 内做按会话/每会话裁剪。
-    outreach_audit: dict = field(default_factory=dict)
+    outreach_audit: dict[str, list[dict]] = field(default_factory=dict)
 
     def to_dict(self) -> dict[str, Any]:
         """序列化状态（只保留最近 20 个事件，完整含 V2 字段）。"""
@@ -733,7 +738,12 @@ class LifeSimulationState:
           - 旧 events → source=LEGACY, confidence=0.5, privacy_level=INTERNAL
           - 无 world → 默认 LifeWorldState（last_tick_at=0）
           - 无 plan → None
-          - v2 → v3：无 projects → []；无 skills → 种子三条；无 outreach_audit → {}
+          - v2 → v3：无 projects → []；无 outreach_audit → {}
+          - skills 迁移按 key 存在性判断（第二轮 review 修复）：
+              * "skills" key 缺席（v2 数据）→ 注入种子三条
+              * "skills": [] （v3 数据，用户清空）→ 保留为空
+              * "skills": [...]（v3 数据）→ 反序列化
+              * 其他类型（损坏）→ 兜底回到种子
         """
         state = cls()
         state.current_activity = data.get("current_activity", "")
@@ -754,13 +764,17 @@ class LifeSimulationState:
             ]
         else:
             state.projects = []  # v2 → v3：空项目
-        raw_skills = data.get("skills")
-        if isinstance(raw_skills, list) and raw_skills:
+        raw_skills = data.get("skills", _SKILLS_MISSING)
+        if raw_skills is _SKILLS_MISSING:
+            # v2 数据（"skills" key 整体缺席）→ 注入种子技能（首次升级默认值）
+            state.skills = _seed_skills()
+        elif isinstance(raw_skills, list):
+            # v3 数据（key 存在，即使是空列表也尊重用户清空意图）
             state.skills = [
                 _skill_from_dict(d) for d in raw_skills if isinstance(d, dict)
             ]
         else:
-            # v2 → v3：注入种子技能（首次升级默认值）
+            # 数据损坏（key 存在但不是 list）→ 兜底回到种子
             state.skills = _seed_skills()
         raw_audit = data.get("outreach_audit")
         if isinstance(raw_audit, dict):
@@ -1507,6 +1521,29 @@ class LifeSimulator:
         """选择 audit 索引 key：origin_session 优先，否则 _global（不污染真实会话）。"""
         return event.origin_session or "_global"
 
+    def _audit_bucket_append(self, key: str, entry: dict) -> None:
+        """把 entry 写入 outreach_audit[key]，并维持双重上限。
+
+        - 每会话 FIFO：每个 bucket 最多 OUTREACH_AUDIT_PER_SESSION 条，超出裁旧。
+        - 全局 LRU：pop + 重插让 key 走到 dict 末尾（= 最近访问），头部 = 最久未访问；
+          会话数超 OUTREACH_AUDIT_MAX_SESSIONS 时从头淘汰。
+
+        第二轮 review 抽出：原 _record_audit_dispatch 内联同样的 pop+裁剪+淘汰逻辑，
+        后续 audit kind（响应/超时落地）若想复用此 bucket 形态，统一调本 helper 即可。
+        """
+        bucket = self.state.outreach_audit.pop(key, None) or []
+        bucket.append(entry)
+        if len(bucket) > OUTREACH_AUDIT_PER_SESSION:
+            # FIFO 裁旧：保留尾部 OUTREACH_AUDIT_PER_SESSION 条
+            bucket = bucket[-OUTREACH_AUDIT_PER_SESSION:]
+        self.state.outreach_audit[key] = bucket  # 重插至末尾 = LRU 最新
+        # 会话数上限：从最旧端（dict 头部 = 最久未访问）淘汰。
+        # 注：key 刚 pop+reinsert 到末尾，绝不会出现在头部（除非全局只剩它，但那时
+        # len == 1 不会触发循环），所以无需防御性 break。
+        while len(self.state.outreach_audit) > OUTREACH_AUDIT_MAX_SESSIONS:
+            oldest_key = next(iter(self.state.outreach_audit))
+            del self.state.outreach_audit[oldest_key]
+
     def _record_audit_dispatch(
         self,
         event: LifeEvent,
@@ -1517,8 +1554,7 @@ class LifeSimulator:
         """记录一次 dispatch 到 outreach_audit（M8 数据源 + Phase 3 技能反馈基础）。
 
         entry: {kind: "dispatch", event_id, intent_id, skill_id|"", ts, response_at: 0, timeout_at: 0}
-        每会话最多 OUTREACH_AUDIT_PER_SESSION 条（FIFO 裁剪）；会话数最多
-        OUTREACH_AUDIT_MAX_SESSIONS（LRU 风格裁剪：超限丢最旧 key）。
+        裁剪/淘汰由 _audit_bucket_append 统一处理（第二轮 review：bounded-audit 抽 helper）。
         """
         key = self._audit_session_key(event)
         entry = {
@@ -1531,22 +1567,7 @@ class LifeSimulator:
             "timeout_at": 0.0,
             "feedback_status": "pending",
         }
-        # 第一轮 review 修复：用 pop + 重插实现 LRU。原先用 dict 插入顺序裁剪会让
-        # 早期创建但仍活跃的 session 被误删。pop 出来再追加 = 最近访问的 key 走到末尾。
-        bucket = self.state.outreach_audit.pop(key, None)
-        if bucket is None:
-            bucket = []
-        bucket.append(entry)
-        if len(bucket) > OUTREACH_AUDIT_PER_SESSION:
-            del bucket[: len(bucket) - OUTREACH_AUDIT_PER_SESSION]
-        self.state.outreach_audit[key] = bucket  # 重插至末尾 = LRU 最新
-        # 会话数上限：超限时从最旧端（dict 头部 = 最久未访问）淘汰。
-        while len(self.state.outreach_audit) > OUTREACH_AUDIT_MAX_SESSIONS:
-            oldest_key = next(iter(self.state.outreach_audit))
-            if oldest_key == key:
-                # 防御：当前 key 就在头部（理论上不会，因为刚重插到末尾）则直接停。
-                break
-            del self.state.outreach_audit[oldest_key]
+        self._audit_bucket_append(key, entry)
 
     def record_user_response(
         self, session_key: str, now: float | None = None

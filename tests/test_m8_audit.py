@@ -17,6 +17,7 @@ import types
 
 from sylanne_alpha.bounded_dict import BoundedDict
 from sylanne_alpha.life_simulation import (
+    OUTREACH_AUDIT_MAX_SESSIONS,
     OUTREACH_AUDIT_PER_SESSION,
     OUTREACH_TIMEOUT_SECONDS,
     LifeEvent,
@@ -192,6 +193,25 @@ def test_audit_per_session_capped():
     assert len(bucket) == OUTREACH_AUDIT_PER_SESSION
     # 保留最新的（FIFO 裁旧）
     assert bucket[-1]["event_id"]  # 最后一个有 id
+
+
+def test_audit_max_sessions_capped_lru():
+    """超过 OUTREACH_AUDIT_MAX_SESSIONS 个会话时，最旧的被淘汰（第二轮 review 用例）。"""
+    sim = LifeSimulator(config={})
+    total_sessions = OUTREACH_AUDIT_MAX_SESSIONS + 5
+    for i in range(total_sessions):
+        session_id = f"sess{i}"
+        event = LifeEvent(
+            text=f"e{i}", mood="m", urgency=0.1, timestamp=float(i),
+            origin_session=session_id, event_type="creating",
+        )
+        sim._record_audit_dispatch(event, intent=None, skill=None, now=float(i))
+    audit = sim.state.outreach_audit
+    assert len(audit) == OUTREACH_AUDIT_MAX_SESSIONS
+    # 最新写入的会话保留
+    assert f"sess{total_sessions - 1}" in audit
+    # 最旧的会话已被 LRU 淘汰
+    assert "sess0" not in audit
 
 
 # ---------------------------------------------------------------------------
