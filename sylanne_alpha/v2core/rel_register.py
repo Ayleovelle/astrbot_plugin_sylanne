@@ -108,7 +108,9 @@ async def classify_and_store(
         if call is None or reg is None or not text.strip():
             return
         raw = await call(
-            _PROMPT.format(text=text[:300]),
+            # 转义花括号：用户消息含 {} 会被 .format 当占位符 → KeyError/ValueError
+            # 被外层吞掉，导致含 {} 的消息静默无法分类。
+            _PROMPT.format(text=text[:300].replace("{", "{{").replace("}", "}}")),
             provider_config_keys=[
                 "sylanne_alpha_rel_register_provider_id",
                 "sylanne_alpha_assessor_provider_id",

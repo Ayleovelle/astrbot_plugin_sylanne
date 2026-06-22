@@ -135,3 +135,15 @@ def test_classify_handles_missing_pipe_gracefully():
     # 无 _llm_response_pipeline → 不抛、不写
     asyncio.run(R.classify_and_store(_P(), "s", _FakeEvent(), "hi"))
     assert _P._store.relationship_register_state.get("s") is None
+
+
+def test_classify_survives_braces_in_user_text():
+    """用户消息含花括号 {} 不应让 _PROMPT.format 崩（KeyError/ValueError 被吞→静默失分类）。
+
+    转义生效则正常分类写入；若漏转义，format 抛异常被外层吞掉，store 写不进 → 断言失败。
+    """
+    p = _FakePlugin()
+    asyncio.run(R.classify_and_store(p, "sessB", _FakeEvent(), "老公你看这个 {placeholder} 和 {0} 好好玩"))
+    st = p._store.relationship_register_state.get("sessB")
+    assert st is not None
+    assert st["romantic_count"] == 1
