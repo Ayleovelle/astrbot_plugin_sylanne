@@ -156,7 +156,11 @@ class LifeReflectionEngine:
         return today[-_MAX_TODAY_EVENTS:]
 
     def _build_summary(self, state: Any, today_events: list) -> str:
-        """把当天事件 + 计划完成率压成叙事 prompt 输入（不读投递成败）。"""
+        """把当天事件 + 计划完成率压成叙事 prompt 输入（不读投递成败）。
+
+        Phase 3：附加 active 项目 + 技能 effectiveness 简要清单（≤3 条），
+        让反思能在叙事中纳入项目状态（仍是只读，绝不直接改 kind_bias 的 clamp 边界）。
+        """
         # 活动类型分布
         type_count: Counter = Counter()
         for e in today_events:
@@ -185,7 +189,30 @@ class LifeReflectionEngine:
             if (done or skipped or planned)
             else "昨日无计划记录"
         )
-        return f"活动分布：{dist}\n事件数：{len(today_events)}\n{completion}"
+        # Phase 3：项目 / 技能简报（只读，供 LLM 叙事参考；不改任何 clamp）
+        projects = list(getattr(state, "projects", []) or [])
+        active_projects = [p for p in projects if getattr(p, "state", "") == "active"]
+        proj_line = ""
+        if active_projects:
+            tops = sorted(
+                active_projects, key=lambda p: -float(getattr(p, "progress", 0.0) or 0.0)
+            )[:3]
+            proj_line = "活跃项目：" + "、".join(
+                f"{p.title}(进度{int(p.progress * 100)}%/效用{p.effectiveness:.2f})"
+                for p in tops
+            )
+        skills = list(getattr(state, "skills", []) or [])
+        skill_line = ""
+        if skills:
+            tops = sorted(
+                skills, key=lambda s: -float(getattr(s, "effectiveness", 0.0) or 0.0)
+            )[:3]
+            skill_line = "技能效用：" + "、".join(
+                f"{s.name}={s.effectiveness:.2f}" for s in tops
+            )
+        extra_lines = [s for s in [proj_line, skill_line] if s]
+        extra = ("\n" + "\n".join(extra_lines)) if extra_lines else ""
+        return f"活动分布：{dist}\n事件数：{len(today_events)}\n{completion}{extra}"
 
     def _user_ts(self, session_key: str) -> float:
         try:

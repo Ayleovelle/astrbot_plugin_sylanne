@@ -49,6 +49,11 @@ class LifeConsolidationEngine:
 
         返回待落盘快照 dict（含 plan_dict + relationship_summary），无可巩固内容返回 None。
         与 KV 落盘拆开：调用方在 session_lock 内只跑这段同步计算，put_kv_data 移到锁外。
+
+        Phase 3：此处接管 LifeProject 与 LifeSkill 的演化（零 LLM）：
+          - _maybe_promote_projects：7 天 ≥3 天同类 → 晋升项目（最多 PROJECT_MAX_ACTIVE）
+          - _update_project_progress：按当天事件命中类型推进 progress + 标 milestones
+          - _update_skill_outcomes：按 outreach_audit 标 answered/unanswered 调 effectiveness
         """
         self._last_consolidated[session_key] = now
         sim = getattr(self._p, "_life_simulator", None)
@@ -67,6 +72,13 @@ class LifeConsolidationEngine:
                 state.world.relationship_snapshot = summary
             except Exception:
                 pass
+            # Phase 3：项目 + 技能巩固（零 LLM；唯一所有者口径不变——本引擎写 projects/skills）
+            try:
+                self._maybe_promote_projects(state, now)
+                self._update_project_progress(state, today_events, now)
+                self._update_skill_outcomes(state, now)
+            except Exception as exc:
+                logger.debug("Sylanne life consolidate phase3 [%s]: %s", session_key, exc)
             from sylanne_alpha.life_simulation import _plan_to_dict
             return {
                 "plan": _plan_to_dict(plan),
@@ -171,6 +183,161 @@ class LifeConsolidationEngine:
             "valence_avg": round(val / n, 4) if n else 0.0,
             "arousal_avg": round(aro / n, 4) if n else 0.0,
         }
+
+    # ------------------------------------------------------------------
+    # Phase 3：项目 + 技能巩固（零 LLM）
+    # ------------------------------------------------------------------
+
+    def _maybe_promote_projects(self, state: Any, now: float) -> int:
+        """确定性聚类晋升：7 天窗口内 ≥3 个不同日的同类 event_type → 晋升 LifeProject。
+
+        - 同 event_type 已有 active 项目则跳过。
+        - 上限 PROJECT_MAX_ACTIVE 个 active；超限不晋升（不替换）。
+        返回新晋升数。零 LLM、纯计算、纯整型/时间运算。
+        """
+        from sylanne_alpha.life_simulation import (
+            LifeProject,
+            PROJECT_MAX_ACTIVE,
+            PROJECT_PROMOTION_MIN_DAYS,
+            PROJECT_PROMOTION_WINDOW_SECONDS,
+        )
+
+        events = list(getattr(state, "events", []) or [])
+        if not events:
+            return 0
+        active_event_types = {
+            p.event_type for p in state.projects if p.state == "active" and p.event_type
+        }
+        active_count = sum(1 for p in state.projects if p.state == "active")
+        # 按 event_type 聚不同日（YYYY-MM-DD）
+        cutoff = now - PROJECT_PROMOTION_WINDOW_SECONDS
+        per_type_days: dict[str, set[str]] = {}
+        per_type_title: dict[str, str] = {}
+        for e in events:
+            ts = float(getattr(e, "timestamp", 0.0) or 0.0)
+            if ts < cutoff:
+                continue
+            et = str(getattr(e, "event_type", "") or "").strip()
+            if not et:
+                continue
+            if et in active_event_types:
+                continue  # 已有 active 项目，无需再晋升
+            day = time.strftime("%Y-%m-%d", time.localtime(ts))
+            per_type_days.setdefault(et, set()).add(day)
+            if et not in per_type_title:
+                per_type_title[et] = str(getattr(e, "text", "") or "")[:40] or et
+        promoted = 0
+        for et, days in per_type_days.items():
+            if len(days) < PROJECT_PROMOTION_MIN_DAYS:
+                continue
+            if active_count >= PROJECT_MAX_ACTIVE:
+                break
+            state.projects.append(
+                LifeProject(
+                    title=per_type_title.get(et, et),
+                    kind=_event_type_to_kind(et),
+                    event_type=et,
+                    created_at=now,
+                    last_touched_at=now,
+                )
+            )
+            active_count += 1
+            promoted += 1
+        return promoted
+
+    def _update_project_progress(
+        self, state: Any, today_events: list, now: float
+    ) -> int:
+        """按当天事件命中类型推进 active 项目 progress，并写入命中里程碑。
+
+        每个匹配事件给 +0.05 progress（importance 加权：×(0.5+importance)），
+        progress clamp 到 [0, 1]。跨越 PROJECT_MILESTONES 阈值时写 milestones（不重复）。
+        progress 达到 1.0 → state="finished"。返回更新的项目数。
+        """
+        from sylanne_alpha.life_simulation import PROJECT_MILESTONES
+
+        if not state.projects:
+            return 0
+        updated_ids: set[str] = set()
+        per_type_events: dict[str, list] = {}
+        for e in today_events:
+            et = str(getattr(e, "event_type", "") or "").strip()
+            if not et:
+                continue
+            per_type_events.setdefault(et, []).append(e)
+        for proj in state.projects:
+            if proj.state != "active":
+                continue
+            matches = per_type_events.get(proj.event_type, [])
+            if not matches:
+                continue
+            old_progress = proj.progress
+            for e in matches:
+                imp = float(getattr(e, "importance", 0.0) or 0.0)
+                proj.progress = min(1.0, proj.progress + 0.05 * (0.5 + imp))
+            proj.last_touched_at = now
+            updated_ids.add(proj.project_id)
+            # 里程碑命中（跨越阈值 → 写）
+            for threshold in PROJECT_MILESTONES:
+                label = f"{int(threshold * 100)}"
+                if old_progress < threshold <= proj.progress and label not in proj.milestones:
+                    proj.milestones.append(label)
+            # 完成
+            if proj.progress >= 1.0 and proj.state == "active":
+                proj.state = "finished"
+            # effectiveness 缓慢上行：基于今日 importance 均值（不剧烈跳变）
+            imp_avg = sum(
+                float(getattr(e, "importance", 0.0) or 0.0) for e in matches
+            ) / max(1, len(matches))
+            proj.effectiveness = max(
+                0.0, min(1.0, 0.7 * proj.effectiveness + 0.3 * imp_avg)
+            )
+        return len(updated_ids)
+
+    def _update_skill_outcomes(self, state: Any, now: float) -> int:
+        """按 outreach_audit 反馈调整技能 effectiveness。
+
+        每条 audit entry 带 skill_id；feedback_status：
+          - answered → success_count++，effectiveness 上行
+          - unanswered → failure_count++，effectiveness 下行（不低于 SKILL_EFFECTIVENESS_FLOOR）
+        消费后该 entry 标 "consumed" 防重复消费。返回更新的技能数。
+        """
+        from sylanne_alpha.life_simulation import (
+            SKILL_COOLDOWN_MULT_MAX,
+            SKILL_COOLDOWN_MULT_MIN,
+            SKILL_EFFECTIVENESS_FLOOR,
+        )
+
+        if not state.skills:
+            return 0
+        skill_by_id = {s.skill_id: s for s in state.skills}
+        updated: set[str] = set()
+        for bucket in state.outreach_audit.values():
+            for entry in bucket:
+                if entry.get("feedback_status") not in ("answered", "unanswered"):
+                    continue
+                if entry.get("consumed_by_skill"):
+                    continue
+                sid = entry.get("skill_id", "")
+                if not sid or sid not in skill_by_id:
+                    continue
+                skill = skill_by_id[sid]
+                if entry["feedback_status"] == "answered":
+                    skill.success_count += 1
+                    skill.effectiveness = min(1.0, skill.effectiveness * 0.8 + 0.2)
+                else:
+                    skill.failure_count += 1
+                    skill.effectiveness = max(
+                        SKILL_EFFECTIVENESS_FLOOR, skill.effectiveness * 0.8
+                    )
+                # cooldown_multiplier 自适应
+                raw = 1.0 + 2.0 * (1.0 - skill.effectiveness)
+                skill.cooldown_multiplier = max(
+                    SKILL_COOLDOWN_MULT_MIN, min(SKILL_COOLDOWN_MULT_MAX, raw)
+                )
+                entry["consumed_by_skill"] = True
+                updated.add(sid)
+        return len(updated)
 
     async def _write_state(self, session_key: str, snapshot: dict) -> None:
         """把巩固快照写入独立 KV key（深睡低频写）。"""
