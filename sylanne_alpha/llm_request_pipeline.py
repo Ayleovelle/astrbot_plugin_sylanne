@@ -662,6 +662,34 @@ class LLMRequestPipeline:
             best_key = next(iter(p._store.hosts.keys()))
         return best_key
 
+    def _most_recent_intimate_host_key(self) -> str:
+        """Phase 2B / PR-I：返回最近活跃的**亲密私聊** host session_key，无则 ""。
+
+        与 _most_recent_host_key 区别（不改后者，它另有 5 个 last-active 调用方）：
+        - 排除群 session_key（is_group_context_by_key）——亲密私推绝不投群（防广播泄露）。
+        - 仅 relationship_layer.is_romantic 为真的会话（身份门控在 is_romantic 内）。
+        - 无候选时返回 ""（调用方据此不投、不存 pending、不回退 last-active，杜绝漂移）。
+        """
+        p = self._p
+        try:
+            from sylanne_alpha import relationship_layer as _rl
+            sf = getattr(p, "_social_field", None)
+            best_key = ""
+            best_time = 0.0
+            for sk, host in p._store.hosts.items():
+                if sf is not None and sf.is_group_context_by_key(sk):
+                    continue  # 群会话不投亲密私推
+                if not _rl.is_romantic(p, sk):
+                    continue
+                last_now = float(host.kernel.last_event.get("now") or 0.0)
+                if last_now >= best_time:
+                    best_time = last_now
+                    best_key = sk
+            return best_key
+        except Exception as exc:  # noqa: BLE001
+            logger.debug("Sylanne _most_recent_intimate_host_key failed: %s", exc)
+            return ""
+
     def _cache_system_prompt(
         self, request: Any, session_key: str, raw_system_prompt: str | None = None
     ) -> None:
@@ -2664,7 +2692,13 @@ class LLMRequestPipeline:
         if not len(p._store.hosts):
             logger.info("Sylanne life_sim_outreach: no active hosts, skipping")
             return
-        best_key = self._most_recent_host_key()
+        # PR-I：投递目标改为亲密私聊会话（排除群 + 身份门控）。空则不投、不存 pending、
+        # 不回退 last-active——私聊闸前移到目标选择/pending 存入之前，同时堵住 bridge 派发
+        # 与 line-1420 reactive 注入两条路径（dispatch 时再拦盖不到 reactive 那条）。
+        best_key = self._most_recent_intimate_host_key()
+        if not best_key:
+            logger.info("Sylanne life_sim_outreach: no intimate private session, skipping")
+            return
 
         # PR-C3：扩展 pending context 字段
         intent_id = (intent or {}).get("intent_id", "")

@@ -237,5 +237,18 @@
     "default": "",
     "_special": "select_provider",
     "hint": "指定用于转述的多模态 LLM provider；留空则自动检测已配置的多模态 provider。"
+  },
+  "sylanne_alpha_owner_id": {
+    "description": "主人身份 ID（sender_id）：仅此身份的会话可被自动判定为亲密关系，/bond 也仅此身份可用",
+    "type": "string",
+    "default": "",
+    "hint": "Phase 2B 防对抗性注入：填你的平台 sender_id（如 QQ 号）。留空则全部会话禁用自动亲密晋升、/bond 拒绝（fail-closed）。内容信号可伪造，只有身份不可伪造。"
+  },
+  "sylanne_alpha_rel_register_provider_id": {
+    "description": "关系类型分类 LLM 的 provider ID（留空回退 assessor/emotion provider）",
+    "type": "string",
+    "default": "",
+    "_special": "select_provider",
+    "hint": "Phase 2B：低频后台判会话关系语域（恋人/朋友/同事）。留空则复用 assessor provider。"
   }
 }
