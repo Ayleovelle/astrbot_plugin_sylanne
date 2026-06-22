@@ -684,9 +684,12 @@ class LLMRequestPipeline:
                     continue  # 群会话不投亲密私推
                 if not _rl.is_romantic(p, sk):
                     continue
-                # last_event 可能为 None（同文件 :1397 惯例）；某会话 None 不该
+                # host.kernel 可能为 None（测试/初始化未完成）；某 host None 不该
                 # 抛 AttributeError 拖垮整个方法→返回 "" 使全部亲密路由失效。
-                last_event = host.kernel.last_event or {}
+                kernel = getattr(host, "kernel", None)
+                if kernel is None:
+                    continue
+                last_event = kernel.last_event or {}
                 last_now = float(last_event.get("now") or 0.0)
                 if last_now > best_time:
                     best_time = last_now
