@@ -572,6 +572,13 @@ class EmotionalStatePlugin(Star):
             (f"/{P}/api/config_export", "config_export_handler", ["GET"]),
             (f"/{P}/api/config_import", "config_import_handler", ["POST"]),
             (f"/{P}/api/widget-state", "widget_state_handler", ["GET"]),
+            # Phase 4：生活观测面板（与独立 webui_server 镜像）
+            (f"/{P}/api/life/status", "life_status_handler", ["GET"]),
+            (f"/{P}/api/life/events", "life_events_handler", ["GET"]),
+            (f"/{P}/api/life/projects", "life_projects_handler", ["GET"]),
+            (f"/{P}/api/life/audit", "life_audit_handler", ["GET"]),
+            (f"/{P}/api/life/diagnostics", "life_diagnostics_handler", ["GET"]),
+            (f"/{P}/api/life/controls", "life_controls_handler", ["POST"]),
         ]
         for path, handler_name, methods in webui_routes:
             handler = getattr(wr, handler_name, None)
