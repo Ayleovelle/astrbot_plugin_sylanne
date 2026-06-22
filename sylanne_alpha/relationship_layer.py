@@ -26,8 +26,11 @@ except Exception:  # pragma: no cover
 
     logger = logging.getLogger("astrbot_plugin_sylanne")
 
-# 标定锚（handoff §7 待 review）：阈值须 > 实测"高频爱称友好语料"上的 romantic 误判占比，
-# 非简单 >0.5。这里取偏高默认 0.6 + 最小样本 5，实测后调。
+# 标定依据（解析推导，与 rel_register._accumulate 配套；handoff §7 占位收敛为有据值）：
+# conf 累积 n 大时 → 友好误判占比 p；"友好不误升"要求阈值 > p。纯浪漫 ratio=1、
+# N=8 下 n=5 → conf=0.625。取 0.6 + 最小样本 5：浪漫第 5 有效样本即晋升，友好需
+# p>0.6（>60% 轮被误判）才误升；文献高频爱称友好语料误判 ~20-35%，0.6 保守压其上。
+# ⚠ 真机实测 p 后微调仍 deferred（协议见 phase-2c handoff 草案）。
 _ROMANTIC_THRESHOLD = 0.6
 _MIN_SAMPLE = 5
 

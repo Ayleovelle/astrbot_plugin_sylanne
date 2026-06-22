@@ -25,8 +25,18 @@ except Exception:  # pragma: no cover - 测试环境无 astrbot
 _REL_TYPES = ("romantic", "friendly", "formal")
 # 累积平滑：置信 = 某类占比 × min(1, sample_count / _REL_CONFIDENCE_SAMPLES)。
 # 样本不足时折扣，单轮分类不足以判定（多轮稳定才算数）。
+#
+# 标定依据（解析推导，handoff §7 待 review 的占位由此收敛为有据值）：
+#   设某友好用户被系统性误判 romantic 的占比为 p（相关误差，累积不抵消、会被固化）。
+#   n 大时 conf → (romantic_count/n) × 1 → p。故"友好不误升"要求阈值 > p。
+#   纯浪漫用户 ratio=1，conf = min(1, n/_REL_CONFIDENCE_SAMPLES)；N=8 时 n=5 → 0.625。
+#   配 _ROMANTIC_THRESHOLD=0.6 + _MIN_SAMPLE=5：浪漫用户第 5 个有效样本即晋升，
+#   而友好用户需 p>0.6（>60% 轮次被误判）才误升。文献"高频爱称友好语料"误判率
+#   约 20-35%，0.6 保守压在其上。N=8 给出"5 样本即可达阈、8 样本满折扣"的平滑窗。
+#   ⚠ 真机标定（实测 p 后微调阈值）仍 deferred —— 协议见 phase-2c handoff 草案。
 _REL_CONFIDENCE_SAMPLES = 8
 # 低频 gating：每 N 轮分类一次（省 token；消费方 is_romantic 多轮滞后，稀疏够用）。
+# N=6 配 _MIN_SAMPLE=5 → 约 30 轮对话才够样本自动晋升，符合"多轮滞后可接受"契约。
 _REL_GATING_EVERY = 6
 
 _PROMPT = (
