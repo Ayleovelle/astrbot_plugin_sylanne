@@ -43,8 +43,13 @@ def _owner_id(plugin: Any) -> str:
 
 
 def _event_sender_id(event: Any) -> str:
-    """robust accessor：属性 → get_sender_id()。"""
-    sid = str(getattr(event, "sender_id", "") or "")
+    """robust accessor：sender_id → user_id → get_sender_id()。
+
+    AstrBot 部分平台事件把发送者 ID 存在 user_id（非 sender_id）；漏 user_id 回落
+    会让这些平台上 owner 认证失败 → 身份门控 fail-closed 误判 + /bond 被错拒。
+    本函数是 sender_id 解析的唯一来源（rel_register 等调用方复用，禁止另起重复逻辑）。
+    """
+    sid = str(getattr(event, "sender_id", "") or getattr(event, "user_id", "") or "")
     if not sid and hasattr(event, "get_sender_id"):
         try:
             sid = str(event.get_sender_id() or "")
@@ -124,11 +129,17 @@ def restore(plugin: Any, data: dict) -> None:
     store = getattr(plugin, "_store", None)
     if store is None:
         return
-    for sk, st in (data.get("register_state") or {}).items():
-        if isinstance(st, dict):
-            store.relationship_register_state.set(sk, st)
-    for sk, ov in (data.get("override") or {}).items():
-        store.intimacy_override.set(sk, bool(ov))
+    # 中间层也做 isinstance：旧档迁移/损坏时 register_state/override 可能非 dict，
+    # 直接 .items() 会抛 AttributeError 中断整个恢复流程。
+    reg_state = data.get("register_state")
+    if isinstance(reg_state, dict):
+        for sk, st in reg_state.items():
+            if isinstance(st, dict):
+                store.relationship_register_state.set(sk, st)
+    override_state = data.get("override")
+    if isinstance(override_state, dict):
+        for sk, ov in override_state.items():
+            store.intimacy_override.set(sk, bool(ov))
 
 
 # ---- /bond·/unbond（owner-gated，无 TOFU）----
@@ -144,6 +155,9 @@ async def bond_command(plugin: Any, event: Any):
         yield "你又不是我对象，凑什么热闹。"
         return
     sk = plugin._session_key(event) if hasattr(plugin, "_session_key") else ""
+    if not sk:
+        yield "唔…这会儿没认出是哪个窗口，等下再跟我说嘛。"
+        return
     plugin._store.intimacy_override.set(sk, True)
     request_persist(plugin)
     yield "嗯…那这边算我们自己人了，别到处说。"
@@ -160,6 +174,12 @@ async def unbond_command(plugin: Any, event: Any):
         yield "这跟你没关系吧。"
         return
     sk = plugin._session_key(event) if hasattr(plugin, "_session_key") else ""
-    plugin._store.intimacy_override.set(sk, False)
+    if not sk:
+        yield "唔…这会儿没认出是哪个窗口，等下再跟我说嘛。"
+        return
+    # 删 override（而非置 False）：handoff §2.3 要求 /unbond = 恢复自动判定。
+    # 置 False 会让 override 永久压住自动信号（override 优先），自动累积再也翻不回来，
+    # 与"恢复自动"语义相悖。删 key → is_romantic 回落到身份门控的自动晋升路径。
+    plugin._store.intimacy_override.pop(sk, None)
     request_persist(plugin)
-    yield "行吧，当我没说，这边恢复自动判定了。"
+    yield "哦…那就当我没说过，以后还是看你怎么待我吧，笨蛋。"

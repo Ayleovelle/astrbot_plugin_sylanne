@@ -76,9 +76,10 @@ def _accumulate(st: dict, label: str, sender_id: str, now: float) -> None:
     """
     if label not in _REL_TYPES:
         return  # unknown 不更新累积
-    if sender_id and not st.get("sender_id"):
-        st["sender_id"] = sender_id
-    elif sender_id:
+    # 总是更新为最新认证 sender_id（非"保留首个"）：session_key 是平台会话标识，
+    # 若同一会话换人登录，身份门控必须跟到新身份——保留旧 sender_id 反而会把前任
+    # owner 的亲密门控错套在新登录者上（安全洞）。认证 sender_id 不可伪造，更新安全。
+    if sender_id:
         st["sender_id"] = sender_id
     st["sample_count"] = int(st.get("sample_count", 0)) + 1
     key = f"{label}_count"
@@ -119,13 +120,10 @@ async def classify_and_store(
         label = _parse_rel(raw)
         if label == "unknown":
             return
-        # 认证 sender_id（robust accessor：属性 → get_sender_id()）
-        sender_id = str(getattr(event, "sender_id", "") or "")
-        if not sender_id and hasattr(event, "get_sender_id"):
-            try:
-                sender_id = str(event.get_sender_id() or "")
-            except Exception:
-                sender_id = ""
+        # 认证 sender_id：复用 relationship_layer 的唯一解析器（含 user_id 回落），
+        # 不在此另起重复逻辑——否则两处会随平台事件形态变化而漂移。
+        from sylanne_alpha.relationship_layer import _event_sender_id
+        sender_id = _event_sender_id(event)
         st = reg.get(session_key) or {}
         _accumulate(st, label, sender_id, time.time())
         reg.set(session_key, st)

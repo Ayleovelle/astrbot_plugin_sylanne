@@ -27,6 +27,9 @@ class _Reg:
     def set(self, k, v):
         self._d[k] = v
 
+    def pop(self, k, default=None):
+        return self._d.pop(k, default)
+
     def snapshot_items(self):
         return list(self._d.items())
 
@@ -145,7 +148,25 @@ def test_unbond_owner_gated():
     p = _Plugin(owner="owner-1")
     p._store.intimacy_override.set("s1", True)
     _run_cmd(RL.unbond_command(p, _Ev(sender_id="owner-1", sk="s1")))
-    assert p._store.intimacy_override.get("s1") is False
+    # unbond 删 override（恢复自动判定），而非置 False（handoff §2.3）
+    assert p._store.intimacy_override.get("s1") is None
+
+
+def test_unbond_restores_auto_judgment():
+    """unbond 删 key 后，is_romantic 回落到自动晋升路径（而非被 False 永久压死）。
+
+    钉死本次行为变更核心：override=False 会让 is_romantic 永远非亲密；删 key
+    则让累积过阈的 owner 会话能重新被自动判亲密。
+    """
+    p = _Plugin(owner="owner-1")
+    # 该会话累积已过阈（owner 本人 + romantic_conf 高 + 样本足）
+    p._store.relationship_register_state.set("s1", _romantic_state("owner-1"))
+    # 先 /bond 再 /unbond
+    p._store.intimacy_override.set("s1", True)
+    assert RL.is_romantic(p, "s1") is True  # bond 生效
+    _run_cmd(RL.unbond_command(p, _Ev(sender_id="owner-1", sk="s1")))
+    # 删 key 后回落自动晋升：累积仍过阈 → 仍亲密（若误置 False 这里会变 False）
+    assert RL.is_romantic(p, "s1") is True
 
 
 # ---- 持久化 roundtrip ----

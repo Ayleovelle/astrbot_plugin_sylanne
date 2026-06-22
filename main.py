@@ -2432,9 +2432,9 @@ class EmotionalStatePlugin(Star):
         # Phase 2B / PR-H：恢复关系层状态（register_state + override，独立 KV key）
         try:
             if self._has_kv_api():
-                rel_saved = await self.get_kv_data("sylanne_relationship_state", None)
+                from sylanne_alpha import relationship_layer as _rl
+                rel_saved = await self.get_kv_data(_rl._KV_KEY, None)
                 if rel_saved and isinstance(rel_saved, dict):
-                    from sylanne_alpha import relationship_layer as _rl
                     _rl.restore(self, rel_saved)
         except Exception as e:
             logger.debug(f"Sylanne relationship state restore skipped: {e}")
@@ -2510,7 +2510,7 @@ class EmotionalStatePlugin(Star):
         self._rel_state_last_save_ts = now
         try:
             from sylanne_alpha import relationship_layer as _rl
-            await self.put_kv_data("sylanne_relationship_state", _rl.snapshot(self))
+            await self.put_kv_data(_rl._KV_KEY, _rl.snapshot(self))
         except Exception as e:
             logger.debug(f"Sylanne relationship state throttled save skipped: {e}")
         finally:
@@ -2590,7 +2590,7 @@ class EmotionalStatePlugin(Star):
         try:
             if self._has_kv_api():
                 from sylanne_alpha import relationship_layer as _rl
-                await self.put_kv_data("sylanne_relationship_state", _rl.snapshot(self))
+                await self.put_kv_data(_rl._KV_KEY, _rl.snapshot(self))
         except Exception as e:
             logger.debug(f"Sylanne relationship state persist skipped: {e}")
         # 关闭独立 WebUI 服务器
