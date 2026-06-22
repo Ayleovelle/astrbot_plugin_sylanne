@@ -41,6 +41,10 @@ class AutonomyScheduler:
         # 深睡巩固引擎（CP8-P4-D 层次3，零 LLM）：RETIRED 前沉淀经验
         from sylanne_alpha.agents.learning import ConsolidationEngine, ReflectionEngine
         self._consolidation = ConsolidationEngine(plugin)
+        # Phase 2 核心：生活巩固引擎（夜间零 LLM）——当天 LifeEvent → 次日 LifePlan + 关系摘要。
+        # 与对话策略 ConsolidationEngine 独立命名/预算/KV namespace（proposal §4.4）。
+        from sylanne_alpha.life_consolidation import LifeConsolidationEngine
+        self._life_consolidation = LifeConsolidationEngine(plugin)
         # 反思引擎（CP8-P4-E 层次2，低频 LLM）：AWAKE→DROWSY 首拍触发一次元认知
         self._reflection = ReflectionEngine(plugin, self_core)
         # 上一拍各会话相位（检测 AWAKE→DROWSY 跳变 = 反思首拍闸）
@@ -93,6 +97,10 @@ class AutonomyScheduler:
             self._consolidation.forget_session(session_key)
         except Exception:
             pass
+        try:
+            self._life_consolidation.forget_session(session_key)
+        except Exception:
+            pass
 
     async def _loop(self) -> None:
         while True:
@@ -134,6 +142,17 @@ class AutonomyScheduler:
                             await self._consolidation._write_evolution(sk, snapshot)
                         except Exception as exc:
                             logger.debug("Sylanne consolidate write [%s]: %s", sk, exc)
+                # Phase 2 核心：生活巩固（当天 LifeEvent → 次日 LifePlan）。独立守卫+锁舞，
+                # 与对话策略巩固并列。锁内同步聚合取快照，锁外落盘（IO 不占会话锁）。
+                if self._life_consolidation.needs_consolidation(sk, now):
+                    lock = self._p._session_lock(sk)
+                    async with lock:
+                        life_snap = self._life_consolidation.consolidate_sync(sk, now)
+                    if life_snap:
+                        try:
+                            await self._life_consolidation._write_state(sk, life_snap)
+                        except Exception as exc:
+                            logger.debug("Sylanne life consolidate write [%s]: %s", sk, exc)
                 continue  # 巩固后移出自驱，资源归零
             if phase == self._sc.DROWSY:
                 # CP8-P4-E 首拍闸：仅 AWAKE→DROWSY 跳变的那一拍触发一次反思
