@@ -445,7 +445,13 @@ class EmotionalStatePlugin(Star):
         # 否则 life_sim 关掉时 throttled 路径整段被早返回挡掉，只剩 terminate 兜底）。
         self._rel_state_last_save_ts: float = 0.0
         self._rel_state_dirty_in_flight: bool = False
+        # trailing-edge：节流窗内被丢弃的变更标脏，由后续触发补落（防非优雅退出丢尾改）。
+        self._rel_state_pending_dirty: bool = False
         self._meltdown_nonces: BoundedDict = BoundedDict(maxsize=50, ttl=300)
+        # M8：主动发言反馈 audit（feedback_pressure 单一数据源）。按 session_key 索引，
+        # 值为 deque（_record_dispatch_feedback 写、derive_dispatch_policy 读）。
+        # BoundedDict LRU 防会话无限增长；每会话内 deque maxlen 防单会话条目无界。
+        self._proactive_dispatch_audit: BoundedDict = BoundedDict(maxsize=100)
         # 社交场收集器：群聊氛围感知
         self._social_field = SocialFieldCollector(config=self._config)
         # 后台投递队列已迁入 self._store（CP8-P2 批2）
@@ -2497,17 +2503,49 @@ class EmotionalStatePlugin(Star):
         由真正写关系层状态的三点位触发（rel_register 累积 / /bond / /unbond），
         经 relationship_layer.request_persist → safe_ensure_future 后台跑。
         与 _life_sim_throttled_save 完全独立——life_sim 关闭不影响关系层落盘。
-        规则同 life_sim：节流间隔 + 防重入 + 无 KV 跳过 + 失败静默（terminate 兜底）。
+
+        leading+trailing edge 节流：
+        - 窗外（距上次 ≥ gap）：立即落盘（leading edge）。
+        - 窗内：标脏 + 调度一个窗口末兜底落盘（trailing edge），确保最后一次改
+          （如 /bond 紧接 /unbond）即便无后续事件、非优雅退出也能落，不丢尾改。
         """
         now = time.time()
-        if self._rel_state_dirty_in_flight:
+        gap = now - self._rel_state_last_save_ts
+        if gap < _REL_STATE_SAVE_MIN_GAP_SECONDS:
+            # 节流窗内：标脏并调度窗口末强制落盘（只调度一次，避免任务堆积）
+            if not self._rel_state_pending_dirty:
+                self._rel_state_pending_dirty = True
+                delay = _REL_STATE_SAVE_MIN_GAP_SECONDS - gap
+                from sylanne_alpha.infra import safe_ensure_future
+
+                async def _trailing_save() -> None:
+                    try:
+                        await asyncio.sleep(max(0.0, delay))
+                    except Exception:
+                        return
+                    # 窗末兜底：仅当仍有未落的尾改才落盘（延迟期间若已被 leading
+                    # edge 落过，pending_dirty 已清，跳过以免冗余写）
+                    if self._rel_state_pending_dirty:
+                        await self._do_rel_state_save()
+
+                safe_ensure_future(
+                    _trailing_save(),
+                    name="rel_state_trailing_save",
+                    task_list=getattr(self, "_background_tasks", None),
+                )
             return
-        if (now - self._rel_state_last_save_ts) < _REL_STATE_SAVE_MIN_GAP_SECONDS:
+        await self._do_rel_state_save()
+
+    async def _do_rel_state_save(self) -> None:
+        """实际落盘（绕过节流，供 leading edge 与 trailing 兜底共用）。防重入 + 失败静默。"""
+        if self._rel_state_dirty_in_flight:
+            self._rel_state_pending_dirty = True  # 在途时来的改，落完再补
             return
         if not self._has_kv_api():
             return
         self._rel_state_dirty_in_flight = True
-        self._rel_state_last_save_ts = now
+        self._rel_state_last_save_ts = time.time()
+        self._rel_state_pending_dirty = False
         try:
             from sylanne_alpha import relationship_layer as _rl
             await self.put_kv_data(_rl._KV_KEY, _rl.snapshot(self))
@@ -2515,6 +2553,15 @@ class EmotionalStatePlugin(Star):
             logger.debug(f"Sylanne relationship state throttled save skipped: {e}")
         finally:
             self._rel_state_dirty_in_flight = False
+            # 落盘期间若又有改（pending_dirty 被重新置位），再补一次
+            if self._rel_state_pending_dirty:
+                self._rel_state_pending_dirty = False
+                from sylanne_alpha.infra import safe_ensure_future
+                safe_ensure_future(
+                    self._do_rel_state_save(),
+                    name="rel_state_followup_save",
+                    task_list=getattr(self, "_background_tasks", None),
+                )
 
     async def terminate(self) -> None:
         """插件卸载/更新前的清理：停止所有后台任务、关闭 WebUI、持久化状态。"""
