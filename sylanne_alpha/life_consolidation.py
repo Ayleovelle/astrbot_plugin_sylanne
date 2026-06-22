@@ -303,9 +303,8 @@ class LifeConsolidationEngine:
         消费后该 entry 标 "consumed" 防重复消费。返回更新的技能数。
         """
         from sylanne_alpha.life_simulation import (
-            SKILL_COOLDOWN_MULT_MAX,
-            SKILL_COOLDOWN_MULT_MIN,
             SKILL_EFFECTIVENESS_FLOOR,
+            LifeSimulator,
         )
 
         if not state.skills:
@@ -330,10 +329,10 @@ class LifeConsolidationEngine:
                     skill.effectiveness = max(
                         SKILL_EFFECTIVENESS_FLOOR, skill.effectiveness * 0.8
                     )
-                # cooldown_multiplier 自适应
-                raw = 1.0 + 2.0 * (1.0 - skill.effectiveness)
-                skill.cooldown_multiplier = max(
-                    SKILL_COOLDOWN_MULT_MIN, min(SKILL_COOLDOWN_MULT_MAX, raw)
+                # cooldown_multiplier 自适应（第一轮 review 修复：复用 LifeSimulator
+                # 的静态实现，避免公式漂移；公式仍是 clamp(1+2*(1-eff), 1, 4)）
+                skill.cooldown_multiplier = LifeSimulator._adaptive_cooldown_multiplier(
+                    skill.effectiveness
                 )
                 entry["consumed_by_skill"] = True
                 updated.add(sid)

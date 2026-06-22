@@ -116,6 +116,36 @@ def test_milestone_policy_allows_when_unshared_milestone_pending():
     assert intent.reason_code != "policy_milestone"
 
 
+def test_milestone_marked_shared_after_successful_outreach():
+    """第一轮 review 修复回归：outreach 成功后，首个未分享 milestone 必须被标 shared。
+
+    否则 _check_share_policy_gate 在下一次 tick 仍放行，等价于 milestone 门控失效。
+    """
+    sim, proj, outreach_calls = _setup_sim_with_project(
+        SHARE_POLICY_MILESTONE,
+        milestones=["50", "75"],
+        milestones_shared=[],  # 全部未分享
+    )
+    _force_event_type(sim, "creating")
+    asyncio.run(sim.simulate_tick())
+    # outreach 真的被调用（intent 评分够高 + 项目门控放行）
+    assert len(outreach_calls) == 1, f"expected one outreach, got {outreach_calls}"
+    # 首个未分享 milestone（"50"）被标 shared；"75" 仍未分享
+    assert proj.milestones_shared == ["50"]
+    # 重置 outreach 冷却让第二次 tick 也能发；验证 "75" 也会被依次消费
+    sim.state.last_outreach_time = 0.0
+    asyncio.run(sim.simulate_tick())
+    assert proj.milestones_shared == ["50", "75"]
+    # 再次重置冷却：所有 milestone 已分享 → 门控应阻断（policy_milestone）
+    sim.state.last_outreach_time = 0.0
+    asyncio.run(sim.simulate_tick())
+    last_event = sim.state.events[-1]
+    last_intent = sim._share_intents.get(last_event.share_intent_id)
+    assert last_intent is not None
+    assert last_intent.reason_code == "policy_milestone"
+    assert last_intent.delivery_mode == DeliveryMode.SILENT
+
+
 # ---------------------------------------------------------------------------
 # never：一律阻断
 # ---------------------------------------------------------------------------

@@ -764,8 +764,11 @@ class LifeSimulationState:
             state.skills = _seed_skills()
         raw_audit = data.get("outreach_audit")
         if isinstance(raw_audit, dict):
+            # 第一轮 review 修复：列表元素也要类型校验，损坏数据里的非 dict 条目会让
+            # _check_outreach_timeouts / _update_skill_outcomes 在 entry.get() 时崩。
             state.outreach_audit = {
-                str(k): list(v) for k, v in raw_audit.items() if isinstance(v, list)
+                str(k): [entry for entry in v if isinstance(entry, dict)]
+                for k, v in raw_audit.items() if isinstance(v, list)
             }
         else:
             state.outreach_audit = {}
@@ -1064,6 +1067,20 @@ class LifeSimulator:
                 )
             elif self._should_outreach(now):
                 await self._do_outreach(event, now, intent, triggered_skill)
+                # Phase 3 第一轮 review 修复：milestone 策略放行后，必须把首个未分享的
+                # milestone 标 shared，否则 _check_share_policy_gate 会一直放行。
+                # 仅当：①确有项目认领 ②策略为 milestone ③门控未阻断 ④outreach 真的发出去
+                # （event.shared=True 由 _do_outreach 成功路径设置）才标记。
+                if (
+                    project is not None
+                    and project.share_policy == SHARE_POLICY_MILESTONE
+                    and not policy_block
+                    and event.shared
+                ):
+                    for milestone in project.milestones:
+                        if milestone not in project.milestones_shared:
+                            project.milestones_shared.append(milestone)
+                            break  # 一次 outreach 只消费一个 milestone
 
         # 二审 HIGH 修复：两个 callback 统一由 event 门控（空 tick 不触发）
         if self._countdown_callback is not None:
@@ -1514,21 +1531,22 @@ class LifeSimulator:
             "timeout_at": 0.0,
             "feedback_status": "pending",
         }
-        bucket = self.state.outreach_audit.get(key)
+        # 第一轮 review 修复：用 pop + 重插实现 LRU。原先用 dict 插入顺序裁剪会让
+        # 早期创建但仍活跃的 session 被误删。pop 出来再追加 = 最近访问的 key 走到末尾。
+        bucket = self.state.outreach_audit.pop(key, None)
         if bucket is None:
             bucket = []
-            self.state.outreach_audit[key] = bucket
         bucket.append(entry)
         if len(bucket) > OUTREACH_AUDIT_PER_SESSION:
             del bucket[: len(bucket) - OUTREACH_AUDIT_PER_SESSION]
-        # 会话数上限：超限丢最旧（dict 插入顺序）。
-        if len(self.state.outreach_audit) > OUTREACH_AUDIT_MAX_SESSIONS:
-            for stale_key in list(self.state.outreach_audit.keys()):
-                if len(self.state.outreach_audit) <= OUTREACH_AUDIT_MAX_SESSIONS:
-                    break
-                if stale_key == key:
-                    continue
-                del self.state.outreach_audit[stale_key]
+        self.state.outreach_audit[key] = bucket  # 重插至末尾 = LRU 最新
+        # 会话数上限：超限时从最旧端（dict 头部 = 最久未访问）淘汰。
+        while len(self.state.outreach_audit) > OUTREACH_AUDIT_MAX_SESSIONS:
+            oldest_key = next(iter(self.state.outreach_audit))
+            if oldest_key == key:
+                # 防御：当前 key 就在头部（理论上不会，因为刚重插到末尾）则直接停。
+                break
+            del self.state.outreach_audit[oldest_key]
 
     def record_user_response(
         self, session_key: str, now: float | None = None

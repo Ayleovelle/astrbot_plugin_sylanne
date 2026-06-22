@@ -86,15 +86,24 @@ class ProactiveScheduler:
         # 根据历史反馈计算压力：冷淡/未回复越多，冷却时间越长
         feedback_pressure = 0.0
         cold_count = 0
+        # 第一轮 review 修复：两份 audit（pipeline 视角 + life_sim 视角）可能记同一个
+        # event 的同一次未回复，按 event_id 去重，避免 cold_count 双数据源双罚。
+        seen_event_ids: set[str] = set()
         # ① pipeline 视角（Phase 2C 数据源，BoundedDict[session_key] → deque）
         audit = getattr(self._p, "_proactive_dispatch_audit", None) or {}
         history = audit.get(session_key) if session_key else None
         if history:
-            cold_count += sum(
-                1
-                for entry in history
-                if entry.get("feedback_status") in ("cold_reply", "unanswered")
-            )
+            for entry in history:
+                if not isinstance(entry, dict):
+                    continue
+                if entry.get("feedback_status") not in ("cold_reply", "unanswered"):
+                    continue
+                eid = str(entry.get("event_id", ""))
+                if eid and eid in seen_event_ids:
+                    continue
+                cold_count += 1
+                if eid:
+                    seen_event_ids.add(eid)
         # ② life_sim 视角（Phase 3 数据源补建：dict[session_key] → list[entry]）
         life_sim = getattr(self._p, "_life_simulator", None)
         if life_sim is not None and session_key:
@@ -102,11 +111,19 @@ class ProactiveScheduler:
                 ls_audit = getattr(life_sim.state, "outreach_audit", {}) or {}
                 ls_history = ls_audit.get(session_key)
                 if ls_history:
-                    cold_count += sum(
-                        1
-                        for entry in ls_history
-                        if entry.get("feedback_status") in ("cold_reply", "unanswered")
-                    )
+                    for entry in ls_history:
+                        if not isinstance(entry, dict):
+                            continue
+                        if entry.get("feedback_status") not in (
+                            "cold_reply", "unanswered"
+                        ):
+                            continue
+                        eid = str(entry.get("event_id", ""))
+                        if eid and eid in seen_event_ids:
+                            continue
+                        cold_count += 1
+                        if eid:
+                            seen_event_ids.add(eid)
             except Exception:
                 pass
         if cold_count > 0:
