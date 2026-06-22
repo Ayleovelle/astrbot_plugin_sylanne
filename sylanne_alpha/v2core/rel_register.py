@@ -12,6 +12,7 @@ plugin._store.relationship_register_state。PR-H 的 is_romantic 据此 + 身份
 
 from __future__ import annotations
 
+import re
 import time
 from typing import Any
 
@@ -49,12 +50,16 @@ _PROMPT = (
 
 
 def _parse_rel(raw: Any) -> str:
-    """把模型输出规范化为 _REL_TYPES 之一，非法/缺→unknown。"""
+    """把模型输出规范化为 _REL_TYPES 之一，非法/缺→unknown。
+
+    按词边界匹配（非子串）：避免 "informal" 含 "formal"、"unromantic" 含
+    "romantic" 的子串误判。提取字母词成 set，精确判类型。
+    """
     if not raw:
         return "unknown"
-    s = str(raw).strip().lower()
+    words = set(re.findall(r"[a-z]+", str(raw).strip().lower()))
     for t in _REL_TYPES:
-        if t in s:
+        if t in words:
             return t
     return "unknown"
 

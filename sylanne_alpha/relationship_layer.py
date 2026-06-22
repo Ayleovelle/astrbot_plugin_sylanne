@@ -77,9 +77,9 @@ def is_romantic(plugin: Any, session_key: str) -> bool:
             return False
         if str(st.get("sender_id", "")) != owner:
             return False  # 身份门控：非 owner 会话恒非亲密（防注入）
-        if int(st.get("sample_count", 0)) < _MIN_SAMPLE:
+        if int(st.get("sample_count") or 0) < _MIN_SAMPLE:
             return False
-        return float(st.get("romantic_conf", 0.0)) >= _ROMANTIC_THRESHOLD
+        return float(st.get("romantic_conf") or 0.0) >= _ROMANTIC_THRESHOLD
     except Exception as exc:  # noqa: BLE001
         logger.debug("Sylanne is_romantic failed (fail-closed): %s", exc)
         return False

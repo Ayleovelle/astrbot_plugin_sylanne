@@ -32,6 +32,15 @@ def test_parse_rel_invalid_unknown():
     assert R._parse_rel(None) == "unknown"
 
 
+def test_parse_rel_word_boundary_no_substring_misclassify():
+    """词边界匹配：含子串的词不误判（informal≠formal, unromantic≠romantic）。"""
+    assert R._parse_rel("informal") == "unknown"
+    assert R._parse_rel("unromantic") == "unknown"
+    assert R._parse_rel("unfriendly") == "unknown"
+    # 真词仍命中
+    assert R._parse_rel("this is formal") == "formal"
+
+
 # ---- 低频 gating ----
 
 def test_rel_gating_low_frequency():

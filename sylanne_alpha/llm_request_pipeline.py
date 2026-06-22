@@ -675,7 +675,7 @@ class LLMRequestPipeline:
             from sylanne_alpha import relationship_layer as _rl
             sf = getattr(p, "_social_field", None)
             best_key = ""
-            best_time = 0.0
+            best_time = -1.0
             for sk, host in p._store.hosts.items():
                 if sf is not None and sf.is_group_context_by_key(sk):
                     continue  # 群会话不投亲密私推
@@ -685,7 +685,7 @@ class LLMRequestPipeline:
                 # 抛 AttributeError 拖垮整个方法→返回 "" 使全部亲密路由失效。
                 last_event = host.kernel.last_event or {}
                 last_now = float(last_event.get("now") or 0.0)
-                if last_now >= best_time:
+                if last_now > best_time:
                     best_time = last_now
                     best_key = sk
             return best_key
