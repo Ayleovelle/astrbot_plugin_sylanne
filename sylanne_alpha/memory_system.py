@@ -1259,9 +1259,10 @@ class MemorySystem:
                     if nid not in dead_node_set
                 }
             if hasattr(self, "_l3_edge_index"):
+                # Rebuild edge index from scratch after GC — old positions are invalid
+                # Filtering removes edges from the middle of the list, so indices must be recomputed
                 self._l3_edge_index = {
-                    key: idx for key, idx in self._l3_edge_index.items()
-                    if idx < len(self._l3_edges)
+                    (e.source, e.target, e.relation): idx for idx, e in enumerate(self._l3_edges)
                 }
 
     # ------------------------------------------------------------------

@@ -147,3 +147,18 @@ def _summary(
 ) -> str:
     label = SLICE_LABELS.get(slice_name, slice_name)
     return f"{label}: action={decision['action']}; allowed={guard['allowed']}; warmth={body['temperature']['warmth']:.2f}."
+
+
+def proactive_decision(surface: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "kind": "proactive_decision",
+        "schema_version": surface["schema_version"],
+        "session_key": surface["session_key"],
+        "action": surface["decision"]["action"],
+        "allowed": surface["guard"]["allowed"],
+        "reason": surface["host_payload"]["reason"],
+        "host_payload": surface["host_payload"],
+    }
+
+
+__all__ = ["command_surface", "reset_surface", "memory_surface", "proactive_decision"]

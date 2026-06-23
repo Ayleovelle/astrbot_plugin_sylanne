@@ -9,7 +9,7 @@ from __future__ import annotations
 import asyncio
 
 from sylanne_alpha.memory_system import MemorySystem, RecallMode
-from sylanne_alpha.v2core.body_port import snapshot_from_surface
+from sylanne_alpha.v2core.body_port_v2 import snapshot_from_surface
 from sylanne_alpha.v2core.capabilities.recall import RecallCapability
 from sylanne_alpha.v2core.contracts import BodySnapshot, Phase
 from sylanne_alpha.v2core.domains.memory import MemoryDomain
@@ -112,7 +112,7 @@ def test_recall_chain_end_to_end():
     recall_intents = [i for i in ctx.intents if i.source == "recall"]
     assert recall_intents, "应产出召回意图"
     assert recall_intents[0].payload["recalled"]
-    assert "recalled" in ctx.scratch
+    assert "recalled_deliberate" in ctx.scratch
 
 
 def test_recall_chain_blocked_by_low_intimacy():
@@ -143,7 +143,7 @@ def test_recall_chain_matches_oracle():
     sc = SelfCore(body)
     sc.register(RecallCapability())
     ctx = _run(sc.turn("u", object(), "旅行", domains={"memory": dom}))
-    new_texts = [m["text"] for m in ctx.scratch.get("recalled", [])]
+    new_texts = [m["text"] for m in ctx.scratch.get("recalled_deliberate", [])]
 
     assert new_texts == oracle, f"新链路 {new_texts} 应与 oracle {oracle} 一致"
 

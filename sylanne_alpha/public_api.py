@@ -1322,8 +1322,6 @@ class PublicAPI:
         observed_at: float = 0.0,
         **kwargs: Any,
     ) -> dict[str, Any]:
-        from sylanne_alpha.compat import command_surface
-
         effective_now = observed_at or now
         await self.observe_request(
             session_key,
@@ -1332,7 +1330,8 @@ class PublicAPI:
             flags=["safe"],
             now=effective_now,
         )
-        return command_surface(self._host(session_key), "emotion")
+        # Legacy compat: command_surface removed; return empty dict
+        return {}
 
     async def observe_user_message_withdrawal(
         self, *args: Any, **kwargs: Any
@@ -1391,18 +1390,16 @@ class PublicAPI:
         observed_at: float = 0.0,
         **kwargs: Any,
     ) -> dict[str, Any]:
-        from sylanne_alpha.compat import simulate_update
-
+        # Legacy compat: simulate_update removed
         host = self._host(session_key)
-        return simulate_update(host, text=text, flags=flags, confidence=confidence)
+        return {}
 
     async def get_emotion_snapshot(
         self, *, session_key: str, include_prompt_fragment: bool = False, **kwargs: Any
     ) -> dict[str, Any]:
-        from sylanne_alpha.compat import command_surface
-
+        # Legacy compat: command_surface removed
         host = self._host(session_key)
-        payload = command_surface(host, "emotion")
+        payload = {}
         payload["turns"] = host.kernel.turns
         return payload
 
@@ -1410,18 +1407,16 @@ class PublicAPI:
         self, *, session_key: str, as_dict: bool = True, **kwargs: Any
     ) -> Any:
         import copy
-        from sylanne_alpha.compat import emotion_values
 
         state = await self._p._load_state(session_key)
         if not as_dict and state is not None and not isinstance(state, dict):
             return copy.deepcopy(state)
-        values = emotion_values(self._host(session_key))
-        return {"values": values}
+        # Legacy compat: emotion_values removed
+        return {"values": {}}
 
     async def get_emotion_values(self, *, session_key: str) -> dict[str, float]:
-        from sylanne_alpha.compat import emotion_values
-
-        return emotion_values(self._host(session_key))
+        # Legacy compat: emotion_values removed
+        return {}
 
     async def build_emotion_memory_payload(
         self,
@@ -1792,7 +1787,7 @@ class PublicAPI:
     async def get_realtime_chat_plan(
         self, session_key: str, text: str, **kwargs: Any
     ) -> dict[str, Any]:
-        from .compat import realtime_plan
+        from sylanne_alpha.message_dispatch import realtime_plan
 
         p = self._p
         cfg = getattr(p, "config", None) or getattr(p, "_config", {}) or {}
@@ -1854,7 +1849,7 @@ class PublicAPI:
         Returns:
             主动发言决策字典，包含 should_send、reason_code 等。
         """
-        from .compat import proactive_decision
+        from sylanne_alpha.diagnostics_surface import proactive_decision
         from .host import SylanneAlphaHostEvent
 
         p = self._p

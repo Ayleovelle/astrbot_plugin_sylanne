@@ -57,7 +57,7 @@ class RecallCapability:
         if not results:
             return None
         # 消费者：ReconsolidationCapability（重固化窗口）+ ExpressionCapability（has_recall）
-        ctx.scratch["recalled"] = results
+        ctx.scratch["recalled_deliberate"] = results
         return Intent(
             source=self.name,
             payload={"recalled": results},

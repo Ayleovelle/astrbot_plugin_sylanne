@@ -25,8 +25,9 @@ from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 from typing import TYPE_CHECKING, Any
 
-from sylanne_alpha.compat import realtime_plan, strip_draft_blocks
+
 from sylanne_alpha.utils import ensure_background_tasks_list, safe_ensure_future
+from sylanne_alpha.message_dispatch import realtime_plan, strip_draft_blocks
 
 if TYPE_CHECKING:
     from sylanne_alpha.protocols import PluginHost
@@ -326,23 +327,6 @@ class LLMResponsePipeline:
         """后台观测 bot 回复：写入对话缓冲、通知社交场域、更新计算栈。"""
         try:
             await self._append_bot_reply_buffer(session_key, text)
-            # SelfCore RESPONSE_POST 编排（仅 v1 模式）：social/dialogue 消化 bot 回复。
-            # v1 逐轮认知退役（v2core 启用）后不跑——bot 回复的消化在 v2core 的
-            # EVOLVE（领域 ingest）+ response tick（行动知觉）里完成，单脑运行。
-            _v1_retired = False
-            try:
-                from sylanne_alpha.v2core.integration import v1_turn_cognition_retired
-
-                _v1_retired = v1_turn_cognition_retired(self._p)
-            except Exception:
-                _v1_retired = False
-            sc = None if _v1_retired else getattr(self._p, "_self_core", None)
-            if sc is not None:
-                try:
-                    resp_surface = self._p._host(session_key).kernel.surface()
-                    await sc.run_cycle(session_key, resp_surface, phase="response_post")
-                except Exception as exc:
-                    logger.warning(f"Sylanne SelfCore RESPONSE_POST: {exc}", exc_info=True)
             await self._p.observe_response(
                 session_key,
                 text=text[:500],

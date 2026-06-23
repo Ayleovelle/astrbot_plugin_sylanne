@@ -10,7 +10,7 @@ import time
 
 import pytest
 
-from sylanne_alpha.compat.facade import realtime_plan, strip_draft_blocks
+from sylanne_alpha.message_dispatch import realtime_plan, strip_draft_blocks
 from sylanne_alpha.history_dilution import dilute_dense_contexts
 from sylanne_alpha.memory_system import ConversationBuffer
 from sylanne_alpha.v2core.fragment import _PRESENCE, build_mind_fragment
@@ -429,7 +429,7 @@ class TestOutputPathCoverageHardening:
 
     def test_truncate_at_sentence_shortens_and_ascii_safe(self) -> None:
         """truncate_at_sentence（path3 TTS 用）：句末优先截短；入参校验；不切坏 ASCII token。"""
-        from sylanne_alpha.compat import truncate_at_sentence
+        from sylanne_alpha.message_dispatch import truncate_at_sentence
 
         huge = "这是一段挺长的内容呀。" * 120
         out = truncate_at_sentence(huge, 600)
@@ -452,7 +452,7 @@ class TestOutputPathCoverageHardening:
 
     def test_path3_tts_strips_thinking_from_text_arg(self) -> None:
         """TTS 文本参数里的 thinking 块会被剥（核心安全项：别念出内心独白）。"""
-        from sylanne_alpha.compat import strip_draft_blocks
+        from sylanne_alpha.message_dispatch import strip_draft_blocks
 
         # 复刻钩子核心：strip_draft_blocks 作用于 tool_args["text"]
         leaked = "<thinking>我该怎么回</thinking>晚安笨蛋。"

@@ -31,10 +31,10 @@
 死线守护（铁律④）：域状态总键 sylanne_v2core_domains:{safe} 与旧档格式兼容；
 host/body 漂移仍走插件现有文件持久化，不另起炉灶。
 
-开关：sylanne_enable_v2core（**默认开——v2core 是唯一认知内核**）。启用即同时退役
-v1 逐轮认知（见 v1_turn_cognition_retired；旧 SelfCore PRE/POST/RESPONSE_POST 与
-AssessorAgent 逐轮 LLM 评估不再运行，intent=="撒娇" 硬编码路径自然断粮）。
-flag 置 false = 部署级紧急回退到 v1。任何异常 → 单轮回落旧管线，不阻断回复。
+开关：sylanne_enable_v2core（**默认开——v2core 是唯一认知内核**）。v2core 即唯一认知
+内核（旧 SelfCore PRE/POST/RESPONSE_POST 与 AssessorAgent 逐轮 LLM 评估已退役、删除，
+intent=="撒娇" 硬编码路径自然断粮）。flag 置 false = 部署级紧急回退到 v1。
+任何异常 → 单轮回落旧管线，不阻断回复。
 """
 
 from __future__ import annotations
@@ -64,18 +64,6 @@ def v2core_enabled(plugin: Any) -> bool:
     """
     cfg = getattr(plugin, "_config", None) or getattr(plugin, "config", None) or {}
     return bool(cfg.get(_V2CORE_FLAG, True))
-
-
-def v1_turn_cognition_retired(plugin: Any) -> bool:
-    """v1 逐轮认知（旧 9-agent SelfCore 的 PRE/POST/RESPONSE_POST + AssessorAgent
-    的逐轮 LLM 评估）是否退役。
-
-    全面退役决议（2026-06-12 用户拍板：推翻重构，不缝缝补补）：v2core 启用即退役——
-    单脑运行，不再新旧两套评价同时往一个躯体写。退役范围是【逐轮认知】；
-    自主生命基础设施（AutonomyScheduler 的作息演化 / 深睡巩固 / 反思引擎 /
-    进化档案持久化）不属认知逐轮路径，保留运行。
-    """
-    return v2core_enabled(plugin)
 
 
 def _safe_session_key(session_key: str) -> str:
@@ -638,7 +626,6 @@ async def consult_idle_reach(plugin: Any, session_key: str) -> dict[str, Any]:
 
 __all__ = [
     "v2core_enabled",
-    "v1_turn_cognition_retired",
     "apply_v2core_request",
     "apply_v2core_response",
     "consume_pending_assessment",

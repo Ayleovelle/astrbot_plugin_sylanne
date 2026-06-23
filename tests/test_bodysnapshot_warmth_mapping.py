@@ -8,7 +8,7 @@ warmth 旧读 host_payload.affect_dynamics.computation_emotion.warmth（近零�
 
 from __future__ import annotations
 
-from sylanne_alpha.v2core.body_port import snapshot_from_surface
+from sylanne_alpha.v2core.body_port_v2 import snapshot_from_surface
 
 
 def _surface(warmth01: float, strain: float = 0.0, need_repair: float = 0.0) -> dict:

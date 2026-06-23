@@ -333,7 +333,7 @@ class ProactiveScheduler:
         Returns:
             决策字典，包含 should_speak、reason 等字段。
         """
-        from sylanne_alpha.compat import proactive_decision
+
 
         sk = (
             session_key
@@ -344,6 +344,8 @@ class ProactiveScheduler:
             )
             or "default"
         )
+        from sylanne_alpha.diagnostics_surface import proactive_decision
+
         host = self._p._host(sk)
         surface = host.diagnostics()
         decision = proactive_decision(surface)

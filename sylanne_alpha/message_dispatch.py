@@ -3,101 +3,7 @@ from __future__ import annotations
 import re
 from typing import Any
 
-from .commands import command_surface, memory_surface, reset_surface
-
 REALTIME_PLAN_SCHEMA_VERSION = "sylanne.alpha.realtime_plan.v1"
-SIMULATION_SCHEMA_VERSION = "sylanne.alpha.compat.simulation.v1"
-
-
-def emotion_values(host: Any) -> dict[str, float]:
-    values = command_surface(host, "emotion")["values"]
-    return {
-        "warmth": float(values["warmth"]),
-        "pulse": float(values["pulse"]),
-        "expression": float(values["expression"]),
-        "repair": float(values["repair"]),
-    }
-
-
-def build_memory_payload(host: Any, query: str = "", limit: int = 5) -> dict[str, Any]:
-    payload = memory_surface(host, query=query, limit=limit)
-    payload["prompt_fragment"] = _safe_prompt_fragment(host)
-    return payload
-
-
-def inject_context(host: Any, request: Any) -> Any:
-    fragment = _safe_prompt_fragment(host)
-    current = str(getattr(request, "prompt", "") or "")
-    setattr(request, "prompt", f"{current}\n{fragment}".strip())
-    return request
-
-
-def _safe_prompt_fragment(host: Any) -> str:
-    diagnostics = host.diagnostics()
-    payload = diagnostics["host_payload"]
-    relationship = (
-        payload.get("relationship_memory", {})
-        if isinstance(payload.get("relationship_memory"), dict)
-        else {}
-    )
-    continuity = (
-        relationship.get("continuity", {})
-        if isinstance(relationship.get("continuity"), dict)
-        else {}
-    )
-    personality = (
-        payload.get("personality", {})
-        if isinstance(payload.get("personality"), dict)
-        else {}
-    )
-    voice = (
-        personality.get("voice", {})
-        if isinstance(personality.get("voice"), dict)
-        else {}
-    )
-    return "\n".join(
-        [
-            "[retrieved_conversation_context]",
-            f"（{_relationship_summary(str(continuity.get('phase', 'low_signal')), float(continuity.get('weight') or 0.0))}）",
-            f"（{_voice_summary(str(voice.get('cadence', 'steady')), str(voice.get('boundary', 'clear')))}）",
-        ]
-    )
-
-
-def _relationship_summary(phase: str, weight: float) -> str:
-    if phase in {"stable", "warm", "established"} or weight >= 0.45:
-        return "你们已经有一些连续互动，可以自然承接，但不要替用户下结论。"
-    if phase not in {"", "none", "low_signal"} or weight >= 0.12:
-        return "已有少量上下文线索，可以轻微参考，仍以眼前问题为准。"
-    return "可用上下文很少，把这轮当作当前问题来处理。"
-
-
-def _voice_summary(cadence: str, boundary: str) -> str:
-    style = (
-        "语速放慢一点，短句之间保留停顿感"
-        if cadence in {"slow_burn", "slow", "gentle"}
-        else "表达保持清楚，不要堆太多设定"
-    )
-    guard = "，边界感要清楚" if boundary in {"strong", "clear"} else ""
-    return f"{style}{guard}。"
-
-
-def simulate_update(
-    host: Any,
-    *,
-    text: str = "",
-    flags: list[str] | None = None,
-    confidence: float = 0.5,
-) -> dict[str, Any]:
-    body = host.kernel.body
-    event = body.event_vector(text=text, flags=list(flags or []), confidence=confidence)
-    simulated = body.simulate_vectors([event])
-    return {
-        "schema_version": SIMULATION_SCHEMA_VERSION,
-        "session_key": host.session_key,
-        "event": event,
-        "vector": simulated,
-    }
 
 
 def strip_draft_blocks(text: str) -> str:
@@ -244,18 +150,6 @@ def realtime_dispatch(session_key: str, text: str) -> dict[str, Any]:
     }
 
 
-def proactive_decision(surface: dict[str, Any]) -> dict[str, Any]:
-    return {
-        "kind": "proactive_decision",
-        "schema_version": surface["schema_version"],
-        "session_key": surface["session_key"],
-        "action": surface["decision"]["action"],
-        "allowed": surface["guard"]["allowed"],
-        "reason": surface["host_payload"]["reason"],
-        "host_payload": surface["host_payload"],
-    }
-
-
 def _split_text(text: str, *, max_part_chars: int) -> list[str]:
     if not text:
         return []
@@ -389,16 +283,4 @@ def _would_split_protected_ascii_token(text: str, split_at: int) -> bool:
     )
 
 
-__all__ = [
-    "build_memory_payload",
-    "command_surface",
-    "emotion_values",
-    "inject_context",
-    "memory_surface",
-    "proactive_decision",
-    "realtime_dispatch",
-    "realtime_plan",
-    "reset_surface",
-    "simulate_update",
-    "strip_draft_blocks",
-]
+__all__ = ["strip_draft_blocks", "truncate_at_sentence", "realtime_plan", "realtime_dispatch"]

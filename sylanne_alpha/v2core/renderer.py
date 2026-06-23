@@ -27,7 +27,7 @@ import logging
 from dataclasses import dataclass, field
 from typing import Any, Iterable, Protocol, runtime_checkable
 
-from sylanne_alpha.compat.facade import strip_draft_blocks
+from sylanne_alpha.message_dispatch import strip_draft_blocks
 from sylanne_alpha.v2core.contracts import (
     BeatContext,
     BodySnapshot,

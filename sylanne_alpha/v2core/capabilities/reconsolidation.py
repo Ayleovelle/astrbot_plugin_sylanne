@@ -21,7 +21,7 @@ class ReconsolidationCapability:
     phases = (Phase.EVOLVE,)
 
     def evolve(self, ctx: BeatContext) -> None:
-        recalled = ctx.scratch.get("recalled")
+        recalled = ctx.scratch.get("recalled_deliberate") or ctx.scratch.get("recalled")
         if not recalled:
             return                      # 本轮没召回 → 无重固化窗口
         memory = ctx.domain("memory")

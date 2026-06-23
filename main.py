@@ -144,12 +144,8 @@ except ImportError:
 from sylanne_alpha import webui_server as _sylanne_webui_server  # noqa: E402
 from sylanne_alpha.assessor_async import AsyncAssessor  # noqa: E402
 from sylanne_alpha.bounded_dict import BoundedDict  # noqa: E402
-from sylanne_alpha.compat import (  # noqa: E402
-    command_surface,
-    memory_surface,
-    realtime_dispatch,
-    reset_surface,  # noqa: E402
-)
+from sylanne_alpha.diagnostics_surface import command_surface, memory_surface, reset_surface  # noqa: E402
+from sylanne_alpha.message_dispatch import realtime_dispatch  # noqa: E402
 from sylanne_alpha.host import SylanneAlphaHost, SylanneAlphaHostEvent  # noqa: E402
 from sylanne_alpha.life_simulation import LifeSimulator  # noqa: E402
 from sylanne_alpha.memory_system import MemorySystem  # noqa: E402
@@ -162,15 +158,7 @@ from sylanne_alpha.session_state_store import SessionStateStore  # noqa: E402
 from sylanne_alpha.agents import (  # noqa: E402
     SelfCore,
     AutonomyScheduler,
-    EmotionAgent,
-    AssessorAgent,
-    PersonaAgent,
     LifeAgent,
-    MemoryAgent,
-    RhythmAgent,
-    ProactiveAgent,
-    SocialAgent,
-    DialogueAgent,
 )
 from sylanne_alpha.social_field import SocialFieldCollector  # noqa: E402
 from sylanne_alpha.llm_response_pipeline import LLMResponsePipeline  # noqa: E402
@@ -472,17 +460,9 @@ class EmotionalStatePlugin(Star):
         self._llm_response_pipeline = LLMResponsePipeline(self)
         self._llm_request_pipeline = LLMRequestPipeline(self)
         self._public_api = PublicAPI(self)
-        # SelfCore 认知编排器（CP8-P3a）：注册全部 9 个 agent。
-        # PRE（影响计算）：emotion/assessor/persona/life/memory；
-        # 请求-POST（消化计算结果）：rhythm/memory/proactive；
-        # 响应-POST（消化 bot 回复）：social/dialogue。
+        # SelfCore 认知编排器：仅注册 LifeAgent（唯一保留的 AUTONOMOUS 时点 agent）。
         self._self_core = SelfCore(self, llm_budget=3)
-        for _agent_cls in (
-            EmotionAgent, AssessorAgent, PersonaAgent, LifeAgent,
-            MemoryAgent, RhythmAgent, ProactiveAgent,
-            SocialAgent, DialogueAgent,
-        ):
-            self._self_core.register(_agent_cls(self, self._self_core.bus))
+        self._self_core.register(LifeAgent(self, self._self_core.bus))
         # 全局自驱心跳（CP8-P3b）：让她没人说话也演化。initialize 启动、terminate 回收。
         self._autonomy_scheduler = AutonomyScheduler(self, self._self_core)
         # 主动发言调度器：基于身体需求和节律决定是否主动发言
@@ -1161,6 +1141,12 @@ class EmotionalStatePlugin(Star):
     def _schedule_buffer_persist(self, session_key: str) -> None:
         self._state_persistence.schedule_buffer_persist(session_key)
 
+    def _schedule_kernel_persist(self, session_key: str) -> None:
+        self._state_persistence.schedule_kernel_persist(session_key)
+
+    async def _flush_pending_kernel_persists(self) -> None:
+        await self._state_persistence.flush_pending_kernel_persists()
+
     async def _do_buffer_persist(self, session_key: str) -> None:
         await self._state_persistence._do_buffer_persist(session_key)
 
@@ -1266,7 +1252,7 @@ class EmotionalStatePlugin(Star):
             tool_name = tool if isinstance(tool, str) else str(getattr(tool, "name", "") or "")
             if tool_name not in self._SPEECH_TOOL_NAMES:
                 return  # 非语音/发言类工具：一概不碰，避免误伤文件/代码参数
-            from sylanne_alpha.compat import strip_draft_blocks, truncate_at_sentence
+            from sylanne_alpha.message_dispatch import strip_draft_blocks, truncate_at_sentence
 
             _HARD_MAX = 1200  # 极端兜底；正常语音远不到
             for key in ("text", "content", "message", "msg"):
@@ -1304,7 +1290,7 @@ class EmotionalStatePlugin(Star):
             if await self._maybe_takeover_segments(event):
                 return
 
-            from sylanne_alpha.compat import strip_draft_blocks
+            from sylanne_alpha.message_dispatch import strip_draft_blocks
 
             result = event.get_result()
             if result is None:
@@ -1375,7 +1361,7 @@ class EmotionalStatePlugin(Star):
             if not text:
                 return True  # 已拦截，无内容可发
             # 后台连发 Sylanne 人格化分段（不阻塞装饰链）
-            from sylanne_alpha.compat.facade import realtime_plan
+            from sylanne_alpha.message_dispatch import realtime_plan
 
             plan = realtime_plan(origin, text)
             parts = plan.get("message_parts", [])

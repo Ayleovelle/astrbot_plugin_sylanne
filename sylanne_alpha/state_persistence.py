@@ -69,10 +69,25 @@ class _DirtyTracker:
 # 模块级实例——StatePersistence.__init__ 中会替换为自己的实例
 _dirty = _DirtyTracker()
 
+# 模块级活跃持久化实例引用——StatePersistence.__init__ 中绑定。
+# 让向后兼容的模块级 mark_dirty() 能触达实例级的合并落盘调度（debounce），
+# 无需调用方持有 StatePersistence 句柄。多实例/热重载时指向最后一次构造的实例。
+_active_persistence: StatePersistence | None = None
 
-def mark_dirty(subsystem: str) -> None:
-    """标记某子系统为脏（需要持久化）。向后兼容的模块级 API。"""
+
+def mark_dirty(subsystem: str, session_key: str | None = None) -> None:
+    """标记某子系统为脏（需要持久化）。向后兼容的模块级 API。
+
+    Args:
+        subsystem: 子系统名称（personality/memory/spine/session）。
+        session_key: 可选会话标识。提供时额外触发该会话的合并 kernel 落盘
+            （debounce 窗口内的多次脏标记合并为一次 persist_kernel），
+            缓解多会话并发直写 KV/文件造成的 IO 突发。不提供时仅标记脏集合
+            （完全向后兼容旧调用）。
+    """
     _dirty.mark(subsystem)
+    if session_key is not None and _active_persistence is not None:
+        _active_persistence.schedule_kernel_persist(session_key)
 
 
 def is_dirty() -> bool:
@@ -149,6 +164,14 @@ class StatePersistence:
         """
         self._p = plugin
         self._buffer_persist_timers: dict[str, asyncio.TimerHandle] = {}
+        # 防抖 kernel 落盘的 per-session 定时器表（合并 kernel 持久化）。
+        # 多会话并发标记脏时，窗口内合并为单次 persist_kernel，缓解 2 核 2G VPS
+        # 上的 IO 突发。键为 session_key，值为待触发的 TimerHandle。
+        self._kernel_persist_timers: dict[str, asyncio.TimerHandle] = {}
+        # 绑定模块级活跃实例引用，让 mark_dirty(subsystem, session_key) 能触达
+        # 本实例的合并落盘调度，无需调用方持有 StatePersistence 句柄。
+        global _active_persistence
+        _active_persistence = self
 
     # ------------------------------------------------------------------
     # KV 键生成辅助方法
@@ -414,6 +437,103 @@ class StatePersistence:
         await self.persist_buffer(session_key, host, buf_dict)
 
     # ------------------------------------------------------------------
+    # 防抖 Kernel 持久化调度（合并落盘，缓解 IO 突发）
+    # ------------------------------------------------------------------
+
+    def _kernel_persist_debounce_seconds(self) -> float:
+        """读取 kernel 防抖窗口（秒），默认 4.0。"""
+        cfg = getattr(self._p, "config", None) or {}
+        try:
+            return float(cfg.get("sylanne_alpha_kernel_persist_debounce_seconds", 4.0))
+        except (TypeError, ValueError):
+            return 4.0
+
+    def schedule_kernel_persist(self, session_key: str) -> None:
+        """调度防抖的 kernel 持久化——窗口内多次脏标记合并为一次 persist_kernel。
+
+        与 schedule_buffer_persist 不同：这里采用「首个调度赢」策略——若该会话已有
+        待触发的定时器则跳过，不重置窗口。这样窗口内累积的多次 mark_dirty 共享同一个
+        dirty set，到点一次性落盘，避免高频脏标记把落盘无限期推后（饥饿）。
+
+        Args:
+            session_key: 会话标识。
+        """
+        if session_key in self._kernel_persist_timers:
+            return  # 已有待触发定时器，合并到该次落盘
+        try:
+            loop = asyncio.get_running_loop()
+            delay = self._kernel_persist_debounce_seconds()
+            self._kernel_persist_timers[session_key] = loop.call_later(
+                delay,
+                lambda sk=session_key: safe_ensure_future(
+                    self._do_kernel_persist(sk), name="kernel_persist"
+                ),
+            )
+        except RuntimeError:
+            pass  # 无事件循环时静默跳过（如测试环境）
+
+    async def _do_kernel_persist(self, session_key: str) -> None:
+        """实际执行 kernel 持久化（由 schedule_kernel_persist 延迟触发）。"""
+        self._kernel_persist_timers.pop(session_key, None)
+        host = self._p._store.hosts.get(session_key)
+        if not host or not hasattr(host, "runtime"):
+            return
+        await self.persist_kernel(session_key, host)
+
+    async def flush_pending_kernel_persists(self) -> None:
+        """卸载/关闭前立即排干所有待触发的 kernel 落盘。
+
+        取消所有挂起的定时器，并对每个会话同步执行一次 persist_kernel，
+        保证 debounce 窗口内累积但尚未落盘的脏状态不随关机丢失。
+        须在后台任务被 cancel 之前调用（否则 fire-and-forget 落盘会被反手取消）。
+        """
+        timers = self._kernel_persist_timers
+        self._kernel_persist_timers = {}
+        pending_keys = list(timers.keys())
+        for handle in timers.values():
+            try:
+                handle.cancel()
+            except Exception:
+                pass
+        for sk in pending_keys:
+            host = self._p._store.hosts.get(sk)
+            if not host or not hasattr(host, "runtime"):
+                continue
+            try:
+                await self.persist_kernel(sk, host)
+            except Exception as e:
+                logger.warning(
+                    f"Sylanne kernel flush on terminate ({sk}): {e}", exc_info=True
+                )
+
+    def _cleanup_pending_timers(self, session_key: str) -> None:
+        """取消某会话在会话释放时的待触发 buffer/kernel 防抖定时器（CP8-P3）。
+
+        session 释放时确保防抖队列中该 session 的定时器被立即取消，
+        避免防抖定时器在会话被清理后仍在事件循环中触发，导致"释放后访问"或
+        失孤 fire-and-forget 任务。在 _on_session_deleted 中被调用，且须在
+        p._store.release_session 之后（后者清理 hosts 等，防抖落盘任务会检查 hosts.get）。
+
+        Args:
+            session_key: 会话标识。
+        """
+        # 取消 buffer 防抖定时器（若存在）
+        if session_key in self._buffer_persist_timers:
+            try:
+                self._buffer_persist_timers[session_key].cancel()
+            except Exception:
+                pass
+            self._buffer_persist_timers.pop(session_key, None)
+
+        # 取消 kernel 防抖定时器（若存在）
+        if session_key in self._kernel_persist_timers:
+            try:
+                self._kernel_persist_timers[session_key].cancel()
+            except Exception:
+                pass
+            self._kernel_persist_timers.pop(session_key, None)
+
+    # ------------------------------------------------------------------
     # 启动时 Buffer 恢复
     # ------------------------------------------------------------------
 
@@ -508,7 +628,6 @@ class StatePersistence:
         if data is not None:
             cache[session_key] = data
             return data
-        cache[session_key] = data
         return data
 
     async def save_state(self, session_key: str, state: Any = None) -> None:
@@ -867,6 +986,10 @@ class StatePersistence:
         p = self._p
         p._store.release_session(session_key)
         p._amnesia_sessions.discard(session_key)
+        # CP8-P3：防抖定时器清理——取消该 session 在 buffer/kernel 防抖队列中的
+        # 待触发定时器，避免会话被清理后定时器仍在事件循环中触发。须在
+        # release_session 之后调用（hosts.get 会返回 None，防抖任务不执行落盘）。
+        self._cleanup_pending_timers(session_key)
         # CP8-P6：进化层 per-session 状态挂在引擎对象上（非 store 登记容器），
         # release_session 碰不到，显式 fan-out 清理防无界泄漏。
         forget = getattr(p, "_forget_evolution_session", None)
@@ -1212,6 +1335,7 @@ class StatePersistence:
         p._cfg_bool("sylanne_alpha_main_assessor_enabled", False)
         p._cfg("sylanne_alpha_main_assessor_provider_id", "")
         p._cfg_float("sylanne_alpha_main_assessor_timeout_seconds", 3.0)
+        p._cfg_float("sylanne_alpha_kernel_persist_debounce_seconds", 4.0)
         p._cfg_bool("agent_speaker_relationship_tracking", True)
         p._cfg_bool("agent_include_speaker_in_assessment", True)
         p._cfg_int("agent_identity_profile_limit", 256)
@@ -1361,6 +1485,12 @@ class StatePersistence:
         5. 停止 WebUI 服务器
         """
         p = self._p
+        # 先排干合并 kernel 落盘：debounce 窗口内累积的脏状态须在 cancel 后台任务
+        # 之前同步落盘，否则待触发的定时器和 fire-and-forget 落盘会被反手取消而丢失。
+        try:
+            await self.flush_pending_kernel_persists()
+        except Exception as e:
+            logger.warning(f"Sylanne kernel flush on terminate: {e}", exc_info=True)
         task = getattr(p, "_proactive_scheduler_task", None)
         if task and not task.done():
             task.cancel()
