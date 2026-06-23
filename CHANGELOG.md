@@ -2,6 +2,48 @@
 
 本文件用于 AstrBot 插件市场/管理页展示更新内容。更完整的设计说明、公式推导、测试矩阵和维护手册见 `README.md`。
 
+## [v2.2.0] - 2026-06-23
+
+> 生活模拟全栈落地：从"随机活动池"进化为"有长期成长线、会自适应收敛、带 WebUI 观测面板"的完整系统。
+
+### ✨ Features
+
+- **LifeProject 长期项目线程**（Phase 3）：确定性聚类晋升（7 天内 ≥3 天同类事件自动成为项目），上限 4 个活跃项目，里程碑阈值 {0.25, 0.5, 0.75, 1.0}
+- **LifeSkill 自适应技能库**（Phase 3）：3 个种子技能（evening_soft_checkin / creative_milestone_share / thesis_companion），冷却自适应 `clamp(1+2×(1-effectiveness), 1, 4)` —— 用户不回应时技能自动拉长冷却至 4 倍
+- **share_policy 项目级门控**（Phase 3）：milestone 模式非里程碑事件强制 SILENT，每项目每次巩固最多分享 1 条里程碑
+- **M8 数据源补建**（Phase 3）：`_proactive_dispatch_audit` 写入点补建，feedback_pressure 不再恒为 0；dispatch/response/timeout 闭环；scheduler 双数据源 event_id 去重防双罚
+- **WebUI 生活观测面板**（Phase 4）：5 个 API 端点（events/projects/audit/diagnostics/controls），standalone + AstrBot 双端镜像
+- **UI 第 7 页 LIFE**（Phase 4）：状态概览 + 项目卡片 + 事件时间线 + 控制面板（开关/强度/清除），30s 自刷新
+- **3 个新配置项**：`share_intensity`（off/low/standard/high）、`night_consolidation`（bool）、`allow_memory_write`（bool）
+- **记忆契约**（Phase 2A）：来源感知召回，life_sim 事件不被当作用户事实
+- **亲密会话路由**（Phase 2B）：rel_register LLM 分类器 + 关系层身份门控 + 生活 outreach 只投亲密私聊
+- **反思 + 巩固引擎**（Phase 2C）：LifeReflection（DROWSY，低频 LLM，写 kind_bias）+ LifeConsolidation（RETIRED，零 LLM，生成次日计划）
+
+### 🏗️ 架构
+
+- Schema v2→v3 迁移（旧档自动兼容：空 projects + seed skills）
+- 零新引擎、零新 agent——LifeProject/LifeSkill 纯数据，由现有三引擎分阶段管理
+- 自适应反馈闭环：effectiveness ↓ → cooldown_multiplier ↑ → 自动收敛到不打扰
+- M8 单一惩罚通道守线不变（`unanswered_penalty * 0.0`，scheduler gate 独占）
+
+### 🐛 Bug Fixes
+
+- 修复 milestone 门控永久放行（outreach 成功后标记 milestones_shared）
+- 修复 outreach_audit from_dict 非 dict 元素导致 AttributeError
+- 修复 audit session 淘汰非 LRU（改 pop+re-insert）
+- 修复 scheduler 双数据源 cold_count 重复计算（event_id 去重）
+- 修复 v3 state 空 skills 列表被误 seed（按 key 存在性判断）
+- 修复 WebUI LIFE 页 XSS（全部动态文本统一 esc() 转义）
+- 修复 LIFE 页双重刷新（移除 realtime loop 冗余调用）
+
+### 📊 数据
+
+- 12 文件变更，+2860 行代码 / +880 行测试
+- 新增 8 个测试文件，779+ pytest 全过
+- 5 个 PR（#29 #30 #31 #32 #33），经 4 轮机器人 review 打磨
+
+---
+
 ## [v2.0.0] - 2026-06-09
 
 > 一次叠了三层的重构：在不可逆关系计算引擎之上，重铺地基（模块 agent 化）、长出心智（多智能体编排）、学会成长（自我进化）。计算核心外包给独立 SDK，插件瘦身为纯业务编排层。
