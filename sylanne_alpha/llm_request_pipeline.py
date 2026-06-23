@@ -1915,43 +1915,10 @@ class LLMRequestPipeline:
 
             # 将评估结果注入计算栈
             now = time.time()
-            # v1 逐轮认知退役判定（2026-06-12 拍板：v2core 是唯一认知内核）：
-            # 退役时旧 SelfCore PRE/POST 与 AssessorAgent 逐轮 LLM 评估一概不跑，
-            # assessment 唯一来源是 v2core 的评价（下方合并）。flag 显式置 false
-            # 才回到 v1 旧认知（部署级紧急回退口）。
-            _v1_retired = False
-            try:
-                from sylanne_alpha.v2core.integration import v1_turn_cognition_retired
-
-                _v1_retired = v1_turn_cognition_retired(p)
-            except Exception:
-                _v1_retired = False
-            # CP8-P3a（仅 v1 模式）：SelfCore PRE 编排——9 个 agent 读上轮 surface
-            # 产意图，融合成 flags/confidence/values/assessment，影响本轮计算。
-            sc = None if _v1_retired else getattr(p, "_self_core", None)
             pre_assessment = assessment or None
             event_flags = ["safe"]
             event_confidence = 0.7
             event_values: dict = {}
-            if sc is not None:
-                try:
-                    prev_surface = host.kernel.surface()
-                    pre_intents = await sc.run_cycle(session_key, prev_surface, phase="pre")
-                    composed = sc.compose_inputs(pre_intents)
-                    if composed.flags:
-                        event_flags = composed.flags
-                    if composed.confidence is not None:
-                        event_confidence = composed.confidence
-                    event_values = composed.values
-                    if composed.assessment:
-                        pre_assessment = composed.assessment
-                    # SelfCore 托管的高层意图（回忆/生命事件等）暂存，供后续 prompt 注入
-                    if composed.carried:
-                        p._store.last_understanding_closed_loop.set(
-                            session_key, {"agent_carried": composed.carried}
-                        )
-                except Exception as exc:
-                    logger.warning("Sylanne SelfCore PRE failed: %s", exc)
             # v2core 阶段一暂存的评价（对【这条消息】的多维评价）：合并进本轮 request
             # tick 的 assessment——apply_assessment 是 SDK 唯一 assessment 入口，借
             # 本来就要打的这一拍入体，零额外 tick。v1 退役后这是唯一评价来源；
@@ -1984,14 +1951,6 @@ class LLMRequestPipeline:
                 event_time=p._event_time(now),
             )
             host.on_request(event, assessment=pre_assessment)
-            # CP8-P3a（仅 v1 模式）：SelfCore POST 编排——agent 消化本轮计算结果。
-            # v1 退役后不跑（节律学习在 v2core UserModel；记忆衰减在巩固循环里照常）。
-            if sc is not None:
-                try:
-                    post_surface = host.kernel.surface()
-                    await sc.run_cycle(session_key, post_surface, phase="post")
-                except Exception as exc:
-                    logger.warning("Sylanne SelfCore POST failed: %s", exc)
 
             # 将人格漂移同步到 AstrBot PersonaManager
             if p._has_persona_manager():
@@ -2890,7 +2849,9 @@ class LLMRequestPipeline:
         # M8：先写反馈 audit（不依赖 life_sim 是否存在；session_key 空则跳过）
         if session_key and outcome in ("consumed", "dropped"):
             self._record_dispatch_feedback(
-                session_key, "answered" if outcome == "consumed" else "unanswered"
+                session_key,
+                "answered" if outcome == "consumed" else "unanswered",
+                event_id,
             )
         life_sim = getattr(self._p, "_life_simulator", None)
         if life_sim is None:
@@ -2911,18 +2872,29 @@ class LLMRequestPipeline:
                 event_id, outcome, type(e).__name__, e,
             )
 
-    def _record_dispatch_feedback(self, session_key: str, status: str) -> None:
+    def _record_dispatch_feedback(
+        self, session_key: str, status: str, event_id: str = ""
+    ) -> None:
         """M8 audit 生产者：把一次主动发言反馈写进 _proactive_dispatch_audit[session_key]。
 
         feedback_pressure（proactive_scheduler.derive_dispatch_policy）读此 audit，
         数 feedback_status in (cold_reply, unanswered) 的条数派生压力。这是 unanswered
         惩罚的**单一数据源**——ShareIntent 侧 unanswered_penalty 维持 *0.0，不重复惩罚。
+
+        PR #34 review HIGH#3：补 event_id 字段。proactive_scheduler 的 M8 dedup
+        逻辑会读 entry.get("event_id", "")，若 pipeline 侧写空串则同一 event 反复入 audit
+        相当于绕过 dedup。event_id 默认空字符串以保持向后兼容（旧调用点降级，新调用点
+        必须传以闭环 dedup）。
         """
         try:
             audit = getattr(self._p, "_proactive_dispatch_audit", None)
             if audit is None:
                 return
-            entry = {"feedback_status": status, "ts": time.time()}
+            entry = {
+                "feedback_status": status,
+                "ts": time.time(),
+                "event_id": event_id,
+            }
             hist = audit.get(session_key)
             if hist is None:
                 # 每会话最近 N 条（deque 自动淘汰旧条，防无界增长）

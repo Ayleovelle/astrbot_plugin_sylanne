@@ -3561,7 +3561,7 @@ async function updateLife() {
       Object.keys(audit).forEach(function(sess) {
         (audit[sess] || []).forEach(function(entry) { rows.push({sess: sess, entry: entry}); });
       });
-      rows.sort(function(a, b) { return (b.entry.timestamp || 0) - (a.entry.timestamp || 0); });
+      rows.sort(function(a, b) { return ((b.entry && b.entry.ts) || 0) - ((a.entry && a.entry.ts) || 0); });
       if (!rows.length) {
         alist.innerHTML = '<div style="color:var(--text-muted);font-size:12px;padding:8px">' + (currentLang === 'zh' ? '暂无审计记录' : 'No audit entries') + '</div>';
       } else {
@@ -3572,7 +3572,7 @@ async function updateLife() {
            var reasonTag = e.reason ? ('<span style="color:var(--amber)">[' + esc(e.reason) + ']</span>') : '';
            ah += '<div style="border-left:2px solid var(--cyan);padding:4px 8px;font-size:11px">'
              + '<div style="display:flex;justify-content:space-between"><strong>' + esc(status) + '</strong><span style="color:var(--text-muted);font-size:10px">' + esc(r.sess === '_global' ? '_global' : r.sess.slice(0, 10)) + '</span></div>'
-             + '<div style="color:var(--text-muted);font-size:10px">' + lifeRelTime(e.timestamp) + ' ago ' + reasonTag + '</div>'
+              + '<div style="color:var(--text-muted);font-size:10px">' + lifeRelTime(e.ts || 0) + ' ago ' + reasonTag + '</div>'
              + '</div>';
          });
         alist.innerHTML = ah;

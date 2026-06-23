@@ -79,6 +79,19 @@ class LifeConsolidationEngine:
                 self._update_skill_outcomes(state, now)
             except Exception as exc:
                 logger.debug("Sylanne life consolidate phase3 [%s]: %s", session_key, exc)
+            # PR #34 review HIGH#2：Phase 3 改写了 state.projects / state.skills，但这两个
+            # 字段属于 sylanne_life_sim_state KV，落盘走 main._life_sim_throttled_save 的 90s
+            # 节流。若不主动标脏，巩固后 90s 内崩溃就丢演化结果。这里调一次 dirty callback
+            # 让节流保存器尽快把改动写进 KV（节流逻辑自身判 90s 间隔，调多次也安全）。
+            try:
+                cb = getattr(sim, "_state_dirty_callback", None)
+                if cb is not None:
+                    from sylanne_alpha.infra import safe_ensure_future
+                    safe_ensure_future(cb(), name="life_consolidation_dirty")
+            except Exception as exc:
+                logger.debug(
+                    "Sylanne life consolidate dirty cb [%s]: %s", session_key, exc
+                )
             from sylanne_alpha.life_simulation import _plan_to_dict
             return {
                 "plan": _plan_to_dict(plan),
