@@ -5,7 +5,7 @@
 ![astrbot_plugin_sylanne](https://socialify.git.ci/Ayleovelle/astrbot_plugin_sylanne/image?custom_description=%E4%B8%8D%E5%8F%AF%E9%80%86%E7%9A%84%E5%85%B3%E7%B3%BB%E8%AE%A1%E7%AE%97%E5%BC%95%E6%93%8E+%2B+%E8%87%AA%E6%88%91%E8%BF%9B%E5%8C%96%E8%AE%A4%E7%9F%A5%E4%BD%93&description=1&font=Inter&forks=1&issues=1&language=1&name=1&owner=1&pattern=Brick+Wall&pulls=1&stargazers=1&theme=Auto)
 
 <p align="center">
-  <a href="https://github.com/Ayleovelle/astrbot_plugin_sylanne/releases"><img src="https://img.shields.io/badge/version-2.1.0-red.svg" alt="version 2.1.0"></a>
+  <a href="https://github.com/Ayleovelle/astrbot_plugin_sylanne/releases"><img src="https://img.shields.io/badge/version-2.2.0-red.svg" alt="version 2.2.0"></a>
   <a href="https://sylanne.app"><img src="https://img.shields.io/badge/website-sylanne.app-blue" alt="website"></a>
   <a href="https://github.com/Ayleovelle/astrbot_plugin_sylanne/stargazers"><img src="https://img.shields.io/github/stars/Ayleovelle/astrbot_plugin_sylanne?style=flat&color=orange" alt="GitHub Stars"></a>
   <img src="https://img.shields.io/badge/AstrBot-%3E%3D4.9.2%2C%3C5.0.0-green" alt="AstrBot >=4.9.2,<5.0.0">
@@ -27,7 +27,7 @@
   <a href="https://github.com/Ayleovelle/astrbot_plugin_sylanne"><img src="https://count.getloli.com/get/@astrbot_plugin_sylanne?theme=moebooru" alt="Moe Counter"></a>
 </p>
 
-> <span style="font-size: 1.08em;"><strong>Sylanne-Embodiment：不可逆的关系计算引擎 + 自我进化认知体 + 关系性自证心智。</strong>不再模拟情绪标签，而是让对话在躯体上留下伤痕、在沉默中积累压力、在关系里长出不可撤销的形状——再让认知 agent 团队编排出一颗会自我进化的心智：白天反应式微调，睡眠期反思沉淀，跨重启累积学习。2.1.0 在此之上再往前走了一步：她开始会因为你们之间真实发生过的事，改变自己怎么说话。</span>
+> <span style="font-size: 1.08em;"><strong>Sylanne-Embodiment：不可逆的关系计算引擎 + 自我进化认知体 + 关系性自证心智。</strong>不再模拟情绪标签，而是让对话在躯体上留下伤痕、在沉默中积累压力、在关系里长出不可撤销的形状——再让认知 agent 团队编排出一颗会自我进化的心智：白天反应式微调，睡眠期反思沉淀，跨重启累积学习。2.2.0 让她的生活有了长期成长线：确定性聚类自动生成项目、自适应技能库越用越懂边界、里程碑驱动的分享策略让她只在真正值得的时候开口。</span>
 
 ## 介绍
 
@@ -90,7 +90,7 @@ Embodiment 的底线不变：Sylanne 可以燃烧，但不能把用户当燃料�
 - 🧩 **群聊涌现不可约**：三人同时在场产生的状态，不能从任何两两关系中重构——拓扑上不可约的涌现。
 - 🧬 **人格驱动一切**：表达驱力决定表达阈值，感知锐度决定灵敏度。人格漂移时行为自然跟着变，不需要手动调参。
 - 💬 **更像即时聊天**：回复拆成多条短消息按打字节奏发送；碎片消息会等说完再回；正在发的回复可被新消息打断；聊久了会刻意同步你的节奏。
-- 🌙 **有自己的生活**：后台用 LLM 模拟独立生活状态，某些时刻会因为她那边发生的事主动找你，而不是只在你找她时才存在。
+- 🌙 **有自己的生活**：后台用 LLM 模拟独立生活状态，某些时刻会因为她那边发生的事主动找你，而不是只在你找她时才存在。长期项目会自动从重复行为中聚类生长，技能库根据你的反馈自适应冷却——用户不回应时她会自动收敛，不刷存在感。
 - 🛡️ **用户主权不可关闭**：暂停、重置、离开硬编码在 guard 层，不能被配置覆盖，不能被人格漂移绕过。
 - 🔮 **记忆即重构**：每次回忆都是基于当前情绪的重建，不是播放录像。开心时更容易想起温暖的事，紧张时更容易想起冲突。
 - 🧠 **会自我进化**：白天反应式微调门控（零 LLM），睡眠期反思沉淀策略，跨重启累积学习。她越用越懂你，而且重启不归零。

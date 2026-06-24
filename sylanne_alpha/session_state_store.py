@@ -164,6 +164,14 @@ class SessionStateStore:
         self.pending_outreach_context: SessionMap = self._reg("pending_outreach_context", BoundedDict(maxsize=50))
         self.proactive_candidate_sessions: SessionMap = self._reg("proactive_candidate_sessions", BoundedDict(maxsize=100))
         self.session_origins: SessionMap = self._reg("session_origins", {})
+        # ---- Phase 2B：关系类型层（PR-G 写 / PR-H 读）----
+        # 壳层关系层累积态：{session_key: {sender_id, romantic_conf, friendly_conf,
+        #   formal_conf, sample_count, updated_at, last_active}}。rel_register 分类按类累积，
+        #   is_romantic(PR-H) 据此 + 身份门控判亲密。plain dict（不随 LRU 驱逐），真持久化走
+        #   独立 KV key sylanne_relationship_state（仿 sylanne_life_sim_state，PR-H 接 restore/save）。
+        self.relationship_register_state: SessionMap = self._reg("relationship_register_state", {})
+        # 手动覆盖（/bond·/unbond 写，owner-gated）：{session_key: bool}（True 亲密/False 非亲密）。
+        self.intimacy_override: SessionMap = self._reg("intimacy_override", {})
 
         # ---- 其他运行态 ----
         self.last_user_message_time: SessionMap = self._reg("last_user_message_time", BoundedDict(maxsize=200))

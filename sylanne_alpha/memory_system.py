@@ -18,6 +18,7 @@ v2 核心变更（相对 v1）:
 
 from __future__ import annotations
 
+import logging
 import math
 import time
 import uuid
@@ -39,6 +40,51 @@ class RecallMode(Enum):
     LEGACY = "legacy"
     SHADOW = "shadow"
     ACTIVATION = "activation"
+
+
+class MemorySource:
+    """记忆来源取值常量（PR-B5）。source 是开放字符串字段，无需 schema 改动。
+
+    写入优先级（召回分级时参考，PR-C/Phase 2 启用 source-aware 过滤）：
+      USER_EXPLICIT > INTERACTION > LIFE_SIM > LIFE_REFLECTION
+    生活模拟内容（LIFE_SIM/LIFE_REFLECTION）永不自动标 USER_FACT（v2 ADR-002）。
+    """
+
+    DIALOGUE = "dialogue"                  # 与用户真实对话（默认）
+    INTERACTION = "interaction"             # 双方互动事实
+    USER_EXPLICIT = "user_explicit"        # 用户明确表达的事实（高优先）
+    LIFE_SIM = "life_sim"                  # Sylanne 自身模拟生活/心境
+    LIFE_REFLECTION = "life_reflection"     # 系统反思结论（带 evidence/confidence）
+
+
+# 合法 privacy_level 取值集（PR-D / Phase 2A）。
+#   "open"      — memory 层基线：旧 dialogue 记忆默认值，可召回可注入（行为零变化）
+#   "internal"  — 内部独白，默认不进用户可见 prompt（与 life_simulation.LifePrivacy 对齐）
+#   "shareable" — 可分享（life_sim 写 memory 的默认级）
+#   "user_fact" — 仅来自用户明确事实，life sim 永不自造（ADR-002）
+# 规范化规则（fail-closed）：未知/非法字符串一律降为 "internal"，绝不兜底为 "open"。
+_LEGAL_PRIVACY_LEVELS = frozenset({"open", "internal", "shareable", "user_fact"})
+_PRIVACY_BASELINE = "open"           # 缺字段/旧档迁移基线（仅历史 dialogue 兼容）
+_PRIVACY_FAILCLOSED = "internal"     # 未知/非法值的 fail-closed 归一目标
+
+
+def _normalize_privacy_level(value: Any) -> str:
+    """把任意输入规范化为合法 privacy_level（fail-closed）。
+
+    - None / 空串：视为缺省 → 基线 "open"（旧 dialogue 兼容，行为不变）。
+    - 合法字符串：原样返回。
+    - 未知/非法字符串：降为 "internal" 并 warning（不兜底为 "open"，防 typo/脏数据绕过过滤）。
+    """
+    if value is None or value == "":
+        return _PRIVACY_BASELINE
+    sval = str(value)
+    if sval in _LEGAL_PRIVACY_LEVELS:
+        return sval
+    logging.getLogger("astrbot_plugin_sylanne").warning(
+        "Sylanne memory: 非法 privacy_level=%r 已 fail-closed 规范化为 'internal'", value
+    )
+    return _PRIVACY_FAILCLOSED
+
 
 # ---------------------------------------------------------------------------
 # 写入时重要性启发式（模块级，零 LLM）
@@ -153,6 +199,31 @@ class MemoryItem:
     # 命中时按 acc = acc*(dt_h**-d) + 1 递推，免存完整召回时间序列。默认 1.0=单次编码。
     # LEGACY 召回路径不读它，仅在 ACTIVATION 模式生效——阶段0 只负责持久化与回填。
     actr_acc: float = 1.0
+    # ---- Phase 2A / PR-D：记忆契约新增字段 ----
+    # confidence：记忆条目元数据置信分 float[0,1]（写入时零-LLM 启发式，默认中性 0.5）。
+    #   注意：与 MemoryResult.confidence(str: clear/vague/tot 的召回清晰度分级) 同名但不同类、
+    #   不同语义——本字段是 float metadata，那个是 recall label，召回侧只从 obj 读本 float。
+    confidence: float = 0.5
+    # privacy_level：可见性级别（open/internal/shareable/user_fact）。基线 "open"=旧 dialogue
+    #   兼容（可召回可注入，行为不变）；"internal" 默认不进用户可见 prompt。规范化见 _normalize_privacy_level。
+    privacy_level: str = "open"
+    # life_event_id：life_sim 来源条目的结构化去重键（= LifeEvent.event_id）；dialogue 条目为空。
+    life_event_id: str = ""
+
+    def __post_init__(self) -> None:
+        """单点规范化 chokepoint（覆盖直接构造 / write_summary / from_dict 全路径）。
+
+        clamp confidence 到 [0,1]；privacy_level 经 fail-closed 归一（非法→internal）；
+        life_event_id 兜成 str。这样任何构造路径产出的 MemoryItem 隐私值都合法，
+        _apply_privacy_filter 无需依赖上游保证即可 fail-closed。
+        """
+        confidence_value = self.confidence
+        try:
+            self.confidence = max(0.0, min(1.0, float(confidence_value)))
+        except (TypeError, ValueError):
+            self.confidence = 0.5
+        self.privacy_level = _normalize_privacy_level(self.privacy_level)
+        self.life_event_id = "" if self.life_event_id is None else str(self.life_event_id)
 
     def to_dict(self) -> dict:
         return {
@@ -172,6 +243,10 @@ class MemoryItem:
             "importance": self.importance,
             "last_recalled_ts": self.last_recalled_ts,
             "actr_acc": self.actr_acc,
+            # ---- Phase 2A / PR-D：持久化出口（与内存态一致；__post_init__ 已规范化）----
+            "confidence": self.confidence,
+            "privacy_level": self.privacy_level,
+            "life_event_id": self.life_event_id,
         }
 
     @classmethod
@@ -209,6 +284,15 @@ class MemoryItem:
             # 避免历史与新 d 语义不匹配。频次信号仍由 recall_count 保留，阶段1 ACT-R
             # 可参考。切到 ACTIVATION 后头几次召回会自然把 acc 累积正常化。
             actr_acc=float(d.get("actr_acc", 1.0)),
+            # ---- Phase 2A / PR-D：缺字段迁移（旧档兼容）----
+            # 三个新字段一律传原值，规范化/clamp/fail-closed 全部交给 __post_init__ 单点处理
+            # （故意不在此处 float()，否则旧档存了非数字字符串会当场抛错、绕过 __post_init__ 的兜底）。
+            confidence=d.get("confidence", 0.5),
+            # privacy_level 缺字段 → "open"（旧 dialogue 基线，行为零变化）；
+            # 旧档若存非法字符串，__post_init__ 的 _normalize_privacy_level 会 fail-closed 降为 internal。
+            privacy_level=d.get("privacy_level", "open"),
+            # life_event_id 缺省空串（dialogue 条目本就为空）。
+            life_event_id=d.get("life_event_id", ""),
         )
 
 
@@ -298,6 +382,15 @@ class GraphNode:
     last_recalled_ts: float = 0.0
     # 阶段0地基（ACT-R）：与 MemoryItem 对齐的 EMA 激活累加器。LEGACY 路径不读。
     actr_acc: float = 1.0
+    # Phase 2A / PR-E（review HIGH 修）：L3 节点可见性级别。默认 "open"=旧图谱基线
+    #   （历史 L3 由 dialogue 压缩而来，保持可召回，行为不变）。显式持有该字段后，
+    #   _apply_privacy_filter 不再靠"缺属性=open"隐式放行——无该属性的对象一律 fail-closed drop。
+    #   若未来 internal/life_sim 内容下沉 L3，ingest 时须显式写非 open 级别。
+    privacy_level: str = "open"
+
+    def __post_init__(self) -> None:
+        # 与 MemoryItem 同口径：privacy_level 经 fail-closed 归一（非法→internal）。
+        self.privacy_level = _normalize_privacy_level(self.privacy_level)
 
     def to_dict(self) -> dict:
         return {
@@ -313,6 +406,7 @@ class GraphNode:
             "created_at": self.created_at,
             "last_recalled_ts": self.last_recalled_ts,
             "actr_acc": self.actr_acc,
+            "privacy_level": self.privacy_level,
         }
 
     @classmethod
@@ -330,6 +424,9 @@ class GraphNode:
             created_at=float(d.get("created_at", 0.0)),
             last_recalled_ts=float(d.get("last_recalled_ts", 0.0)),
             actr_acc=float(d.get("actr_acc", 1.0)),
+            # review HIGH：旧图谱无该字段 → 显式迁移为 "open"（基线可见，行为不变）。
+            # __post_init__ 再 fail-closed 归一（旧档若存非法值降 internal）。
+            privacy_level=d.get("privacy_level", "open"),
         )
 
 
@@ -846,17 +943,28 @@ class MemorySystem:
         temperature: float = 0.0,
         source: str = "dialogue",
         importance: float | None = None,
+        confidence: float | None = None,
+        privacy_level: str | None = None,
+        life_event_id: str = "",
     ) -> MemoryItem:
         """v2 写入：将对话摘要写入 L1。由会话结束/20轮保底触发。
 
         source: "dialogue"=与用户真实对话；"life_sim"=Sylanne 自己的生活模拟/心境。
         importance: 重要性 [0,1]，None 时用零-LLM 启发式打分（_compute_importance）。
+        confidence: 记忆条目置信分 [0,1]（PR-D）；None → 中性 0.5（life_sim 写入固定 0.5）。
+        privacy_level: 可见性级别（PR-D）；None → 基线 "open"（旧 dialogue 行为不变）。
+          life_sim 写入应显式传 "shareable"。非法值由 MemoryItem.__post_init__ fail-closed 降为 internal。
+        life_event_id: life_sim 去重键（= LifeEvent.event_id），dialogue 调用留空。
         """
         text = text[: self._MAX_SUMMARY_CHARS]
         if importance is None:
             # 基础启发式 + 新颖度（RPE）加成：重复内容不再因文本长而持续拿高分。
             importance = self._compute_importance(text, source_turns, temperature)
             importance = min(1.0, importance + self._compute_novelty_bonus(text))
+        # confidence 缺省走中性 0.5（零-LLM）；privacy_level 缺省走基线 open。
+        # 实际 clamp / fail-closed 归一统一在 MemoryItem.__post_init__ 完成（单点）。
+        confidence_value = 0.5 if confidence is None else confidence
+        privacy_value = "open" if privacy_level is None else privacy_level
         # L1 满时，把最老的已确认项下沉到 L2（防止静默丢失）
         if len(self._l1) >= self._L1_CAPACITY:
             self._overflow_rescue()
@@ -876,6 +984,9 @@ class MemorySystem:
             rewrite_count=0,
             source=source,
             importance=importance,
+            confidence=confidence_value,
+            privacy_level=privacy_value,
+            life_event_id=life_event_id,
         )
         self._l1.append(item)
         self._index_memory_item(item)
@@ -1400,6 +1511,87 @@ class MemorySystem:
         pool.extend(self._recall_l3_candidates(query))
         return pool
 
+    def _apply_privacy_filter(
+        self, pool: list[dict], visibility: str = "user_visible"
+    ) -> list[dict]:
+        """公共隐私可见性过滤层（PR-E / Phase 2A，三 RecallMode 共用）。
+
+        放在 _gather_pool 之后、_select_wide/扩散之前，LEGACY/ACTIVATION/SHADOW 都经过，
+        使 internal 内容在最早处被摘除，不依赖 _recall_legacy 私有逻辑（裁决 §3）。
+
+        Fail-closed 设计（裁决 §3 / review HIGH）：
+        - 隐私级别从候选的 source_obj（c["obj"]）读取。MemoryItem 与 GraphNode 都显式持有
+          privacy_level（经各自 __post_init__ 规范化），值恒合法。
+        - obj 缺 privacy_level 属性（异常对象/裸 dict/None）→ fail-closed **drop**，
+          不再"视为 open"隐式放行（旧实现的绕口，review HIGH 修）。
+        - obj 有该属性但值非法→经 _normalize_privacy_level fail-closed 降为 internal。
+        - 单候选读取/归一抛异常→丢弃该候选（保守）。
+        - 整个过滤抛异常→返回空列表（空召回优于泄露），绝不返回未过滤池。
+        visibility != "user_visible" 时（内部/调试用途）不施加过滤，原样返回。
+        """
+        if visibility != "user_visible":
+            return pool
+        try:
+            kept: list[dict] = []
+            for c in pool:
+                try:
+                    obj = c.get("obj") if isinstance(c, dict) else None
+                    if not hasattr(obj, "privacy_level"):
+                        # 缺隐私属性的对象一律 fail-closed 丢弃（不隐式放行）
+                        continue
+                    priv = _normalize_privacy_level(getattr(obj, "privacy_level"))
+                    if priv == "internal":
+                        continue  # 内部独白不进用户可见 prompt
+                    kept.append(c)
+                except Exception:
+                    # 单候选异常：保守丢弃（fail-closed），不放行
+                    continue
+            return kept
+        except Exception:
+            logging.getLogger("astrbot_plugin_sylanne").warning(
+                "Sylanne memory: _apply_privacy_filter 异常，fail-closed 返回空召回"
+            )
+            return []
+
+    # source 优先级（数字大=靠前，配合 reverse=True）。裁决 §4：
+    #   user_fact（privacy=user_fact 或 source=user_explicit）> interaction > dialogue/open > life_sim > life_reflection
+    _SOURCE_RANK = {
+        "user_explicit": 4,
+        "interaction": 3,
+        "dialogue": 2,
+        "life_sim": 1,
+        "life_reflection": 0,
+    }
+
+    def _source_aware_rank(self, results: list["MemoryResult"]) -> list["MemoryResult"]:
+        """source-aware 稳定排序增强（PR-E / 裁决 §4）。
+
+        只做 tiebreaker，绝不推翻 LEGACY 主序：
+        - 主键 final_score 降序（第一优先级，与原 results.sort 完全一致）。
+        - 仅在 final_score 相同时，按 source 优先级（user_fact 最前、life_sim/life_reflection 靠后）。
+        - 再相同，按 confidence(float metadata，从 source_obj 读，非 recall label) 高者优先。
+        异常降级：保留"已过滤后的"原始 final_score 排序，绝不绕过 privacy filter（裁决 §3.5）。
+        """
+        try:
+            def _key(r):
+                priv = getattr(getattr(r, "source_obj", None), "privacy_level", "")
+                src = getattr(r, "source", "dialogue")
+                if priv == "user_fact" or src == "user_explicit":
+                    prio = 4
+                else:
+                    prio = self._SOURCE_RANK.get(src, 2)  # 未知 source 当 dialogue 基线
+                memory_confidence = getattr(
+                    getattr(r, "source_obj", None), "confidence", 0.5
+                )
+                return (r.final_score, prio, memory_confidence)
+
+            return sorted(results, key=_key, reverse=True)
+        except Exception:
+            logging.getLogger("astrbot_plugin_sylanne").warning(
+                "Sylanne memory: _source_aware_rank 异常，降级为 final_score 排序"
+            )
+            return sorted(results, key=lambda r: r.final_score, reverse=True)
+
     def _select_wide(self, pool: list[dict]) -> list[dict]:
         """按 relevance 排序取 top-WIDE_K，高重要性条目旁路保底（防被截断）。"""
         pool.sort(key=lambda c: c["rel"], reverse=True)
@@ -1476,6 +1668,8 @@ class MemorySystem:
 
         # ---- 阶段1：宽召回（LEGACY/ACTIVATION 共享，只算 relevance）----
         pool = self._gather_pool(query, query_embedding, now)
+        # PR-E：公共隐私过滤层（三模式共用），internal 在最早处摘除（fail-closed）
+        pool = self._apply_privacy_filter(pool, visibility="user_visible")
         wide = self._select_wide(pool)
 
         # ---- 阶段2：rerank，算完整四维 composite ----
@@ -1510,7 +1704,8 @@ class MemorySystem:
                 source_obj=c["obj"],
             ))
 
-        results.sort(key=lambda r: r.final_score, reverse=True)
+        # PR-E：source-aware 排序（final_score 主序 + source/confidence 同分 tiebreaker）
+        results = self._source_aware_rank(results)
         top = results[:limit]
 
         # 命中刷新 → recency 复活 + frequency + L2 reinforce
@@ -1708,6 +1903,13 @@ class MemorySystem:
                 nbr = self._l3_nodes.get(nbr_id)
                 if nbr is None or nbr.type == "boundary":
                     continue
+                # review MEDIUM：internal 节点在用户可见扩散里不可遍历——既不作结果，
+                # 也不作二跳桥。邻居为 internal 则不纳入 spread（不接收激活，自然也不会
+                # 在下一跳作为 src 传导）。defense-in-depth，独立于末端二次 filter。
+                if _normalize_privacy_level(
+                    getattr(nbr, "privacy_level", "open")
+                ) == "internal":
+                    continue
                 delta = src_act * self._edge_weight(edge, current_warmth) \
                     * fan_penalty * decay
                 if delta < floor:
@@ -1722,6 +1924,12 @@ class MemorySystem:
         # 第一跳：从种子出发
         for sid, sact in seed_activations.items():
             if sact < floor:
+                continue
+            # review MEDIUM：internal 种子不作扩散源（不可遍历）
+            _sn = self._l3_nodes.get(sid)
+            if _sn is not None and _normalize_privacy_level(
+                getattr(_sn, "privacy_level", "open")
+            ) == "internal":
                 continue
             if _emit(sid, sact, hop1_decay):
                 return spread
@@ -1799,12 +2007,19 @@ class MemorySystem:
         """
         now = time.time()
         pool = self._gather_pool(query, query_embedding, now)
+        # PR-E：公共隐私过滤层（与 LEGACY 同一函数），internal 在扩散/选宽前摘除（fail-closed），
+        # 使 internal 节点不参与扩散种子。
+        pool = self._apply_privacy_filter(pool, visibility="user_visible")
         # 阶段2 L3 扩散激活：让图谱的边参与召回（联想浮现）。
         pool.extend(self._spreading_candidates(pool, current_warmth, now))
         wide = self._select_wide(pool)
         # 阶段3 情感特权旁路：强情绪 + 较高重要性的记忆即使 relevance 低被 WIDE_K
         # 截断，也补回候选——情感陪伴里"她记得那次你难过"比语义相关更重要。
         wide = self._apply_emotion_bypass(pool, wide, current_warmth)
+        # review HIGH：spreading_candidates 与 _apply_emotion_bypass 都在首道 filter 之后
+        # 追加候选（扩散 L3 邻居 / 直接扫 L1+L2），故对最终 wide 再过一道公共 privacy filter，
+        # 确保一切进 rerank/结果的候选都必经隐私层（internal 节点不会因扩散/情感旁路绕回）。
+        wide = self._apply_privacy_filter(wide, visibility="user_visible")
 
         w_rel = self._params.get("w_rel_act", 0.55)
         w_act = self._params.get("w_act", 0.45)
@@ -2080,6 +2295,14 @@ class MemorySystem:
                     src_label = self._l3_nodes.get(edge.source)
                     tgt_label = self._l3_nodes.get(edge.target)
                     if src_label and tgt_label:
+                        # review HIGH：边片段会把邻居 label 嵌进本节点 text，
+                        # 若邻居是 internal 则造成隐私泄露（公共 filter 只看候选 obj 的级别，
+                        # 看不到被拼进 text 的邻居）。故跳过任一端为 internal 的边。
+                        if (_normalize_privacy_level(
+                                getattr(src_label, "privacy_level", "open")) == "internal"
+                            or _normalize_privacy_level(
+                                getattr(tgt_label, "privacy_level", "open")) == "internal"):
+                            continue
                         fragment = (
                             f"{src_label.label} {edge.relation} {tgt_label.label}"
                         )
@@ -2224,9 +2447,17 @@ class MemorySystem:
     # ------------------------------------------------------------------
 
     def compress_check(self) -> list[MemoryItem]:
-        """v2: 返回 L2 中 30 天未被召回的条目（按 age_ticks 判断）。"""
+        """v2: 返回 L2 中 30 天未被召回的条目（按 age_ticks 判断）。
+
+        review BLOCKER 修：排除 privacy_level=="internal" 的条目——internal L2 绝不进入
+        L2→L3 压缩（否则被 LLM 抽成默认 open 的 GraphNode，绕过 internal 召回过滤）。
+        internal 内容留在 L2 作 internal MemoryItem，继续受 _apply_privacy_filter 保护。
+        """
         return [
-            item for item in self._l2 if item.age_ticks >= L2_COMPRESSION_AGE_TICKS
+            item for item in self._l2
+            if item.age_ticks >= L2_COMPRESSION_AGE_TICKS
+            and _normalize_privacy_level(getattr(item, "privacy_level", "open"))
+            != "internal"
         ][:10]
 
     def remove_compressed(self, item_ids: list[str]) -> None:
@@ -2261,6 +2492,13 @@ class MemorySystem:
                 valid_from = triple.get("valid_from")
                 subj_type = triple.get("subject_type", "topic")
                 obj_type = triple.get("object_type", "topic")
+                # review BLOCKER 防御：显式标 internal 的 triple 一律 fail-closed 跳过，
+                # 不进 L3（L3 无逐节点/逐边隐私语义，无法保证 internal 内容不外泄）。
+                if _normalize_privacy_level(triple.get("privacy_level")) == "internal":
+                    logging.getLogger("astrbot_plugin_sylanne").warning(
+                        "Sylanne L3 ingest: 跳过 internal triple（不进用户可见图谱）"
+                    )
+                    continue
 
             subj_node = self._find_or_create_node(
                 label=subj_label,
