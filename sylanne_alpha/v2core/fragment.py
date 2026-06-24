@@ -48,6 +48,7 @@ _SAL_MEMORY = 3.0       # 召回：具体历史连续性，STATE 里最后被淘
 _SAL_NARRATIVE = 0.4    # 自我形状：调味，最先被淘汰
 _SAL_EMOTION_BASE = 1.0
 _SAL_USERMODEL_BASE = 0.8
+_SAL_LIFE_BASE = 0.6    # Wave 5 生活底色：平淡日不出；卡住/刚通时随停滞深度爬过对你/自我，封顶仍在召回之下
 _SAL_DRIVE_BASE = 0.9     # Wave 2 驱力线索：响一个就稳压 usermodel/narrative，强 surprise 排得更高
 
 # 情绪行的"响度"主要来自账本内部信号（trend / 比平时偏离 / 未表达积分），它们只活在
@@ -160,6 +161,12 @@ def build_mind_fragment(ctx: BeatContext, domains: dict[str, Any]) -> str:
     drive_text, drive_int = _drive_line(ctx)
     if drive_text:
         state.append((3, _SAL_DRIVE_BASE + drive_int, drive_text))
+
+    # 生活底色行（Wave 5）——她自己生活的轻重（项目卡住/刚通）渗进口吻，脱钩话题。STATE 档，
+    # order 4.5 夹在对你(4)与自我(5)之间；平淡日不出，坏日子靠强度爬过对你/自我。
+    life_text, life_int = _life_line(ctx)
+    if life_text:
+        state.append((4.5, _SAL_LIFE_BASE + life_int, life_text))
 
     # 自我行（NarrativeSelfDomain.prompt_line）。显著性最低（抽象形状，调味）。
     narrative = domains.get("narrative")
@@ -304,6 +311,39 @@ def _behavior_line(ctx: BeatContext) -> str:
     """
     directive = ctx.scratch.get("behavior_directive")
     return directive if isinstance(directive, str) and directive else ""
+
+
+# Wave 5 生活底色：内心天气句（脱钩话题）——不报项目名/活动/数字，alive test 要的是"蔫着
+# 漏进【不相关】回答"。派生(stalled/resolved/强度/mood)在 integration 里算好塞 scratch，本行
+# 只读渲染（fragment 零写）。STATE 档：平淡日返回 ("",0.0) 不占位，坏日子靠强度爬上来。
+_LIFE_STALLED_LINE = "心里压着件没推动的事，提不太起劲"
+_LIFE_RESOLVED_LINE = "心里那件事总算松了口气，轻快些"
+
+
+def _life_line(ctx: BeatContext) -> tuple[str, float]:
+    """读 scratch["life_cue"]（integration 据 LifeSimulator.undertone_cue 派生），返回 (text, 强度)。
+
+    无 cue（平淡日 / 非 v2core 路径）→ ("",0.0)，不进预算。强度供 build_mind_fragment 算
+    salience（_SAL_LIFE_BASE + 强度），坏日子的底色才压过对你/自我行。
+    """
+    cue = ctx.scratch.get("life_cue")
+    if not isinstance(cue, dict):
+        return "", 0.0
+    kind = cue.get("kind")
+    if kind == "stalled":
+        text = _LIFE_STALLED_LINE
+    elif kind == "resolved":
+        text = _LIFE_RESOLVED_LINE
+    else:
+        return "", 0.0
+    try:
+        intensity = max(0.0, min(1.0, float(cue.get("intensity", 0.0))))
+    except (TypeError, ValueError):
+        intensity = 0.0
+    mood = cue.get("mood")
+    if isinstance(mood, str) and mood.strip():
+        text = f"{text}（{mood.strip()}）"
+    return text, intensity
 
 
 def _drive_line(ctx: BeatContext) -> tuple[str, float]:

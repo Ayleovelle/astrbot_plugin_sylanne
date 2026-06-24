@@ -46,6 +46,11 @@ SHARE_POLICY_CASUAL = "casual"
 PROJECT_PROMOTION_WINDOW_SECONDS = 7 * 86400.0
 PROJECT_PROMOTION_MIN_DAYS = 3
 PROJECT_MAX_ACTIVE = 4
+# Wave 5（life → 表达底色）：从主导项目派生"卡住/刚通"内心底色的判定窗口（秒）。
+# v1 用"久未触碰"作停滞代理（不追踪 progress 增量，residual：被碰但没进展会漏判，保守可接受）。
+_LIFE_STALE_S = 2 * 86400.0        # active 项目超 2 天没碰 = 开始蔫
+_LIFE_STALE_HI_S = 5 * 86400.0     # 5 天没碰 = 底色强度封顶
+_LIFE_RESOLVED_WINDOW_S = 2 * 86400.0  # finished 后 2 天内仍"轻快"，之后自然归零
 # 技能冷却倍率边界（adaptive：effectiveness 低则冷却拉长）
 SKILL_COOLDOWN_MULT_MIN = 1.0
 SKILL_COOLDOWN_MULT_MAX = 4.0
@@ -1184,15 +1189,16 @@ class LifeSimulator:
         time_desc = dt.strftime("%H:%M, %A")
 
         emotion_desc = "neutral"
+        emo_dict: dict = {}
         if self._emotion_getter:
             try:
-                emo = self._emotion_getter()
+                emo_dict = self._emotion_getter() or {}
                 parts = []
-                if emo.get("warmth", 0) > 0.3:
+                if emo_dict.get("warmth", 0) > 0.3:
                     parts.append("warm")
-                if emo.get("tension", 0) > 0.3:
+                if emo_dict.get("tension", 0) > 0.3:
                     parts.append("tense")
-                if emo.get("curiosity", 0) > 0.3:
+                if emo_dict.get("curiosity", 0) > 0.3:
                     parts.append("curious")
                 emotion_desc = ", ".join(parts) if parts else "calm"
             except Exception:
@@ -1223,6 +1229,15 @@ class LifeSimulator:
                 rhythm_hint = "\n节律提示：当前是傍晚/夜间，活动宜偏舒缓。"
             elif phase == LifePhase.MORNING and energy > 0.6:
                 rhythm_hint = "\n节律提示：当前是清晨、能量充足，适合专注或创造性活动。"
+
+        # Wave 5（mood-coherence）：躯体疲惫/低落 → 倾向室内、低能量活动（给 4.9 bad days 当底座）。
+        # 复用上面已取的 emo_dict（_emotion_getter，只读容错）；不覆盖节律提示，追加一句即可。
+        try:
+            if (emo_dict.get("tension", 0.0) > 0.6 or emo_dict.get("warmth", 0.0) < -0.1
+                    or emo_dict.get("void_pressure", 0.0) > 0.6):
+                rhythm_hint += "\n躯体提示：当前身体偏疲惫/状态低落，倾向待在室内、做低能量的安静活动。"
+        except Exception:
+            pass
 
         persona_desc = "一个有自己生活节奏的虚构角色"
         if self._persona_getter:
@@ -1709,6 +1724,66 @@ class LifeSimulator:
     def recent_context_for_prompt(self, limit: int = 3) -> str:
         """v1 兼容 alias（M5：迁移到 life_prompt_fragment，旧调用点暂保留）。"""
         return self.life_prompt_fragment(limit=limit)
+
+    def undertone_cue(self, now: float | None = None) -> dict | None:
+        """Wave 5（life → 表达底色）：从主导项目状态派生一条【内心底色】线索。
+
+        返回 {"kind": "stalled"|"resolved", "intensity": float[0,1], "mood": str} 或 None。
+        纯读、零 LLM、零 IO。【不】暴露项目标题/活动/进度数字——渲染端（fragment._life_line）
+        据此出一句脱钩话题的内心天气句，让生活的轻重渗进【不相关】的回答（alive test）。
+
+        - stalled：某 active 项目久未推进（last_touched_at 陈旧 ≥ _LIFE_STALE_S）→ 蔫；
+          强度随停滞天数线性爬（_LIFE_STALE_S→_LIFE_STALE_HI_S 封顶 1.0）。
+        - resolved：某项目近 _LIFE_RESOLVED_WINDOW_S 内 finished → 松快；强度随时距衰减。
+        - 选择：有 stalled 取【最陈旧】的（底色由它生成）；否则取【最近】resolved。蔫盖过轻快。
+        """
+        if now is None:
+            now = time.time()
+        try:
+            projects = [p for p in self.state.projects if isinstance(getattr(p, "state", None), str)]
+        except Exception:
+            return None
+
+        best_stalled = None
+        best_stale = 0.0
+        best_resolved = None
+        best_recency = 0.0
+        for p in projects:
+            touched = float(getattr(p, "last_touched_at", 0.0) or 0.0)
+            if touched <= 0:
+                continue
+            if p.state == "active":
+                stale = now - touched
+                if stale >= _LIFE_STALE_S and stale > best_stale:
+                    best_stale, best_stalled = stale, p
+            elif p.state == "finished":
+                age = now - touched
+                if 0 <= age <= _LIFE_RESOLVED_WINDOW_S:
+                    recency = 1.0 - age / _LIFE_RESOLVED_WINDOW_S
+                    if recency > best_recency:
+                        best_recency, best_resolved = recency, p
+
+        mood = self._recent_mood_word()
+        if best_stalled is not None:
+            span = max(1.0, _LIFE_STALE_HI_S - _LIFE_STALE_S)
+            intensity = max(0.0, min(1.0, (best_stale - _LIFE_STALE_S) / span))
+            return {"kind": "stalled", "intensity": intensity, "mood": mood}
+        if best_resolved is not None:
+            return {"kind": "resolved", "intensity": max(0.0, min(1.0, best_recency)), "mood": mood}
+        return None
+
+    def _recent_mood_word(self) -> str:
+        """取最近一条非 USER_FACT 事件的 mood 单词（隐私安全：不读 text/private_thought）。"""
+        try:
+            for e in reversed(self.state.events):
+                if getattr(e, "privacy_level", "") == LifePrivacy.USER_FACT:
+                    continue
+                m = getattr(e, "mood", "")
+                if isinstance(m, str) and m.strip():
+                    return m.strip()[:8]
+        except Exception:
+            pass
+        return ""
 
     def to_dict(self) -> dict[str, Any]:
         return self.state.to_dict()

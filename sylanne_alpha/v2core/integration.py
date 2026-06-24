@@ -416,6 +416,17 @@ async def apply_v2core_request(plugin: Any, event: Any, request: Any) -> None:
         except Exception as _bx:  # noqa: BLE001
             logger.debug("Sylanne behavior select skipped: %s", _bx)
 
+        # 生活底色（Wave 5）：把她自己生活的轻重（项目卡住/刚通了）派生成一条内心底色线索塞
+        # ctx.scratch，由 fragment._life_line 渲染——脱钩话题，渗进不相关回答。只读、零阻断。
+        try:
+            _sim = getattr(plugin, "_life_simulator", None)
+            if _sim is not None and getattr(_sim, "enabled", False):
+                _cue = _sim.undertone_cue()
+                if _cue:
+                    ctx.scratch["life_cue"] = _cue
+        except Exception as _lx:  # noqa: BLE001
+            logger.debug("Sylanne life cue skipped: %s", _lx)
+
         # 心象片段 → system prompt（主动脉：认知影响言语）
         from sylanne_alpha.v2core.fragment import build_mind_fragment
         frag = build_mind_fragment(ctx, rt["domains"])
