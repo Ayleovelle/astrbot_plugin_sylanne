@@ -222,3 +222,20 @@ def test_cold_start_still_only_presence() -> None:
     frag = build_mind_fragment(_ctx(body, {}), {})
     assert frag and _PRESENCE in frag
     assert frag.startswith(_HEADER)
+
+
+def test_nondict_disposition_does_not_drop_usermodel_line() -> None:
+    """scratch 注入「真值非 dict」disposition 时，对你行不被静默丢弃（gemini review 第2轮）。
+
+    disp 若是字符串/列表，_disposition_hint / _usermodel_salience 的 disp.get 会抛
+    AttributeError，被 um 块的 except Exception 吞掉 → 整条对你行白丢（prompt_line 已成功）。
+    调用处把 disp 规整为 dict 后，对你行照常入列（仅无处置提示）。修复前本测试会失败。
+    """
+    um = _UM(_line("对你UMTOKEN", 40))  # 短行，确保不因预算被淘汰
+    domains = {"usermodel": um}
+    body = BodySnapshot(session_key="u", turns=1, warmth=0.3)
+    ctx = _ctx(body, domains)
+    ctx.scratch["you_probably"] = {"disposition": "happy"}  # 非 dict！
+    frag = build_mind_fragment(ctx, domains)
+
+    assert "对你UMTOKEN" in frag, "非 dict disposition 不应让对你行被静默丢弃"

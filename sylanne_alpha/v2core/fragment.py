@@ -141,7 +141,12 @@ def build_mind_fragment(ctx: BeatContext, domains: dict[str, Any]) -> str:
             line = um.prompt_line()
             if line:
                 yp = ctx.scratch.get("you_probably") or {}
-                disp = yp.get("disposition") or {}
+                disp = yp.get("disposition")
+                # 一次性规整成 dict：scratch 若被塞成「真值非 dict」(字符串/列表等)，下面
+                # _disposition_hint / _usermodel_salience 的 disp.get 都会抛 AttributeError，
+                # 被本块 except Exception 吞掉会【整条对你行白丢】(prompt_line 已成功)。在源头掐死。
+                if not isinstance(disp, dict):
+                    disp = {}
                 hint = _disposition_hint(disp)
                 full = line + (f"·此刻Ta{hint}" if hint else "")
                 state.append((3, _usermodel_salience(disp), full))
