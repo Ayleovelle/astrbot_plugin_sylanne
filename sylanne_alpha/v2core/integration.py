@@ -536,6 +536,31 @@ async def apply_v2core_response(plugin: Any, event: Any, response: Any) -> bool:
             except Exception:  # noqa: BLE001
                 pass
 
+            # Wave 4：重连 reflex_learn（层次1 反应式学习，零 LLM）——v1 清理后断了 caller。
+            # 仅【真有回复发出去】的轮才触发：用本轮自评质量(弱信号，防 Goodhart 低权重) +
+            # 下一轮续聊间隔(强信号，compute_behavior 自动从 mark_bot_reply 时刻推断)微调可学习
+            # 门控偏置。接 agents.SelfCore（plugin._self_core，持进化档案/reflex），非 v2core 运行态。
+            #
+            # 出站判据（review wiring-correctness high）：SPEAK，或 FALLBACK 且有上游草稿（legacy
+            # 真发草稿）。绝不在 SILENT、或 FALLBACK-空草稿（legacy empty_completion 静默丢弃、
+            # 没有 bot 回复）上触发——否则 mark_bot_reply 记下幽灵回复，下一轮把用户的新消息误读成
+            # "秒回上一条回复"，灌进虚假 +1 续聊奖励。这正是 SILENT 闸的本意，只是闸窄了一格。
+            _will_send = (reply.kind is ReplyKind.SPEAK) or (
+                reply.kind is ReplyKind.FALLBACK and draft is not None
+            )
+            if _will_send:
+                try:
+                    _sc = getattr(plugin, "_self_core", None)
+                    if _sc is not None and hasattr(_sc, "reflex_learn"):
+                        _q = ctx.scratch.get("quality_score")
+                        _sc.reflex_learn(
+                            session_key,
+                            self_quality=float(_q) if isinstance(_q, (int, float)) else None,
+                            behavior=None,
+                        )
+                except Exception:  # noqa: BLE001
+                    pass  # 学习失败绝不阻断回复
+
             handled: bool
             if reply.kind is ReplyKind.SILENT:
                 response.completion_text = ""
