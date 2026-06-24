@@ -47,6 +47,7 @@ _SAL_MEMORY = 3.0       # 召回：具体历史连续性，STATE 里最后被淘
 _SAL_NARRATIVE = 0.4    # 自我形状：调味，最先被淘汰
 _SAL_EMOTION_BASE = 1.0
 _SAL_USERMODEL_BASE = 0.8
+_SAL_DRIVE_BASE = 0.9     # Wave 2 驱力线索：响一个就稳压 usermodel/narrative，强 surprise 排得更高
 
 # 情绪行的"响度"主要来自账本内部信号（trend / 比平时偏离 / 未表达积分），它们只活在
 # emo.prompt_line 渲染出的【行文本】里，瞬时 BodySnapshot 看不到（review behavior-diff）。
@@ -149,9 +150,14 @@ def build_mind_fragment(ctx: BeatContext, domains: dict[str, Any]) -> str:
                     disp = {}
                 hint = _disposition_hint(disp)
                 full = line + (f"·此刻Ta{hint}" if hint else "")
-                state.append((3, _usermodel_salience(disp), full))
+                state.append((4, _usermodel_salience(disp), full))
         except Exception:
             pass
+
+    # 驱力线索行（Wave 2）——把 6 个原本到不了 LLM 的躯体字段路由成表达线索。
+    drive_text, drive_int = _drive_line(ctx)
+    if drive_text:
+        state.append((3, _SAL_DRIVE_BASE + drive_int, drive_text))
 
     # 自我行（NarrativeSelfDomain.prompt_line）。显著性最低（抽象形状，调味）。
     narrative = domains.get("narrative")
@@ -159,7 +165,7 @@ def build_mind_fragment(ctx: BeatContext, domains: dict[str, Any]) -> str:
         try:
             line = narrative.prompt_line()
             if line:
-                state.append((4, _SAL_NARRATIVE, line))
+                state.append((5, _SAL_NARRATIVE, line))
         except Exception:
             pass
 
@@ -194,7 +200,7 @@ def _pack_within_budget(
         segs.append({"order": order, "text": text, "pinned": False,
                      "pin_prio": 0, "sal": sal})
     if style:
-        segs.append({"order": 5, "text": style, "pinned": True,
+        segs.append({"order": 6, "text": style, "pinned": True,
                      "pin_prio": _PIN_STYLE, "sal": float("inf")})
 
     prefix = len(_HEADER) + 1  # _HEADER + 一个空格
@@ -264,6 +270,89 @@ def _usermodel_salience(disp: dict[str, Any]) -> float:
         # disp.get 会抛 AttributeError——一并吞掉，回落 base，与本函数「坏输入返回 base」一致。
         return _SAL_USERMODEL_BASE
     return _SAL_USERMODEL_BASE + warmth + distress + defensive
+
+
+def _norm(value: float, thr: float, hi: float, *, below: bool = False) -> float:
+    """把"越过阈值 thr 朝极值 hi 的程度"归一到 [0,1]，让量纲不同的字段强度可比。
+
+    below=True 用于"越低越强"的字段（precision/mean_surprise）。span≤0 退 0（防除零）。
+    这是 Wave 2 cap-3 排序的公平秤：没有它，带固定加项的环境位会系统性挤掉刚触发的 surprise。
+    """
+    span = (thr - hi) if below else (hi - thr)
+    if span <= 0:
+        return 0.0
+    frac = (thr - value) / span if below else (value - thr) / span
+    return max(0.0, min(1.0, frac))
+
+
+def _drive_line(ctx: BeatContext) -> tuple[str, float]:
+    """Wave 2：把 6 个原本到不了 LLM 的躯体字段路由成表达线索。返回 (text, max_intensity)。
+
+    审计（roadmap part1）：expression_drive / intimacy_gravity / surprise / mean_surprise /
+    threshold_drift / precision 每轮都算、却零路径进 prompt（intimacy 只到 response 阶段的
+    renderer，算完即弃、不塑形生成）。本行把它们路由进 system_prompt 主动脉。
+
+    纪律：每个字段【仅在明显偏离中性】时占一个线索位；强度经 _norm 归一到 [0,1] 后排序取前 3，
+    避免刷屏（roadmap Wave 2 兜底）。阈值尽量复用现成单源（expression_drive→ignition.
+    personality_saddle），不另立一套数。各字段独立容错。
+    """
+    b = ctx.body
+    bits: list[tuple[float, str]] = []  # (intensity∈[0,1], text)
+
+    # expression_drive：驱力越过人格 speak 阈 → 心里有话想说（复用 ignition saddle，单源）。
+    try:
+        from sylanne_alpha.v2core.capabilities.ignition import personality_saddle
+        express_at = personality_saddle(b)[0]
+        drive = float(b.expression_drive)
+        if drive >= express_at:
+            bits.append((_norm(drive, express_at, express_at + 1.0), "心里有话想说"))
+    except Exception:
+        pass
+
+    # surprise：相对她自己的均值基线骤升 → 有点意外（canonical PE，接 mentalize 语义）。
+    # familiarity 是独立信号：长期低基线 + 本轮比基线还平（transient gate）→ 这轮顺得不用费劲
+    # 解释。transient gate 防稳态刷屏（mean_surprise settle 低位后不再每轮重盖），且与高 surprise
+    # 天然互斥（startling 的一轮不会说"不用解释"）。
+    try:
+        surprise = float(b.surprise)
+        mean_s = float(b.mean_surprise)
+        if surprise >= 0.45 and surprise - mean_s >= 0.12:
+            bits.append((_norm(surprise - mean_s, 0.12, 1.0), "有点意外，没料到你这么说"))
+        if mean_s <= 0.32 and surprise <= mean_s - 0.05:
+            bits.append((_norm(mean_s, 0.32, 0.0, below=True), "对你已经很熟，不太用费劲解释"))
+    except Exception:
+        pass
+
+    # precision 低：注意增益低 → 拿不太准你的意思（倾向问清而非臆断）。
+    try:
+        precision = float(b.precision)
+        if precision <= 0.32:
+            bits.append((_norm(precision, 0.32, 0.0, below=True), "拿不太准你的意思，想问清楚"))
+    except Exception:
+        pass
+
+    # threshold_drift 高：阈值随重复上移 → 跟你说话越来越随便（降正式度）。
+    try:
+        drift = float(b.threshold_drift)
+        if drift >= 0.2:
+            bits.append((_norm(drift, 0.2, 1.0), "跟你说话越来越随便"))
+    except Exception:
+        pass
+
+    # intimacy_gravity 高 → 想再靠近一点。门 0.6 略高于该 trait 的自然天花板（seed 0.50±0.06→~0.56）：
+    # 中性人格不触发，warm drift 后可达；故意比 renderer 的 0.66"近"档低一点，让它在普通暖聊里够得着。
+    try:
+        g = float(b.intimacy_gravity)
+        if g >= 0.6:
+            bits.append((_norm(g, 0.6, 1.0), "想再靠近你一点"))
+    except Exception:
+        pass
+
+    if not bits:
+        return "", 0.0
+    bits.sort(key=lambda x: x[0], reverse=True)
+    top = bits[:3]
+    return "此刻我:" + "、".join(t for _, t in top), top[0][0]
 
 
 def _disposition_hint(disp: dict[str, Any]) -> str:
