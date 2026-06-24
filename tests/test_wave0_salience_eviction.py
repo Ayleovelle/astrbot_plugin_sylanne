@@ -63,6 +63,16 @@ class _Mem:
         return self.text
 
 
+class _Foc:
+    """话头桩（FocusDomain）：build_mind_fragment 以 ctx.text 调 prompt_line 取话头行。"""
+
+    def __init__(self, text: str) -> None:
+        self.text = text
+
+    def prompt_line(self, text: str) -> str:  # noqa: ANN001
+        return self.text
+
+
 def _ctx(body: BodySnapshot, domains: dict, *, recalled: bool = False) -> BeatContext:
     c = BeatContext(session_key="u", event=None, body=body, text="测试文本",
                     phase=Phase.PERCEPT, domains=domains)
@@ -93,6 +103,25 @@ def test_style_line_survives_genuine_state_overflow() -> None:
     assert _PRESENCE in frag, "临场态度(PINNED)被淘汰了"
 
 
+def test_focus_line_survives_genuine_state_overflow() -> None:
+    """Wave 0 keystone：focus_line(PINNED 话头) 在 STATE 真溢出时永生。
+
+    补全 PINNED 覆盖——原 style 用例只钉 style 行，此条钉 focus_line：4 条 ~150 字 STATE
+    撑爆预算时，话头行绝不被淘汰，靠丢最低显著性 STATE(自我行) 恢复预算。
+    """
+    foc = _Foc(_line("话头FOCUSTOKEN"))
+    emo = _Emo(_line("情绪EMOTOKEN"))
+    um = _UM(_line("对你UMTOKEN"))
+    narr = _Narr(_line("自我NARRTOKEN"))
+    mem = _Mem(_line("记忆MEMTOKEN"))
+    domains = {"focus": foc, "emotion": emo, "usermodel": um, "narrative": narr, "memory": mem}
+    body = BodySnapshot(session_key="u", turns=1, **_GUARDED_HOT)
+    frag = build_mind_fragment(_ctx(body, domains, recalled=True), domains)
+
+    assert "话头FOCUSTOKEN" in frag, "话头行(PINNED)在 STATE 溢出时被淘汰了——Wave 0 失败"
+    assert "自我NARRTOKEN" not in frag, "最低显著性 STATE(自我行) 该先丢给 PINNED 让预算"
+
+
 def test_lowest_salience_evicted_first() -> None:
     """STATE 按显著性整行淘汰：召回(3.0)/情绪(~2.0) 留，对你(0.8)/自我(0.4) 先丢。"""
     emo = _Emo(_line("情绪EMOTOKEN"))
@@ -109,6 +138,8 @@ def test_lowest_salience_evicted_first() -> None:
     # 低显著性被淘汰
     assert "自我NARRTOKEN" not in frag, "自我行(显著性最低)该最先被淘汰"
     assert "对你UMTOKEN" not in frag, "对你行(次低显著性)该被淘汰"
+    # 幸存 STATE 保持 canonical 渲染序：记忆(order1) 在 情绪(order2) 之前（淘汰只动成员、不乱序）
+    assert frag.index("记忆MEMTOKEN") < frag.index("情绪EMOTOKEN"), "STATE 渲染序被打乱了(记忆应在情绪前)"
 
 
 def test_no_mid_sentence_cut_on_survivors() -> None:

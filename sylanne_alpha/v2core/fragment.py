@@ -254,7 +254,9 @@ def _usermodel_salience(disp: dict[str, Any]) -> float:
         warmth = abs(float(disp.get("warmth", 0.0)))
         distress = float(disp.get("distress", 0.0))
         defensive = float(disp.get("defensiveness", 0.0))
-    except (TypeError, ValueError):
+    except (TypeError, ValueError, AttributeError):
+        # disp 在调用处已被 `or {}` 兜底，但若 scratch 被塞成「真值非 dict」(如字符串)，
+        # disp.get 会抛 AttributeError——一并吞掉，回落 base，与本函数「坏输入返回 base」一致。
         return _SAL_USERMODEL_BASE
     return _SAL_USERMODEL_BASE + warmth + distress + defensive
 
