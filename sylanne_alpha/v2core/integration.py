@@ -96,19 +96,23 @@ def _session_lock(plugin: Any, session_key: str) -> Any:
 # 域状态持久化（键格式与旧档兼容）
 # ===========================================================================
 
-async def _load_domains(plugin: Any, session_key: str, domains: dict[str, Any]) -> None:
-    """从域状态总键恢复各域（容缺：键不存在/某域缺=空起步，铁律④）。"""
+async def _load_domains(plugin: Any, session_key: str, domains: dict[str, Any]) -> dict[str, float]:
+    """从域状态总键恢复各域（容缺：键不存在/某域缺=空起步，铁律④）。
+
+    返回恢复出的缺陷行为不应期表（behavior_last_fired，{id: ts}），供 _ensure_loaded 灌回 rt——
+    陈旧 ts（早于不应期）天然被 select_behavior 忽略，无需迁移/时钟处理（review medium：重启不清零）。
+    """
     kv = _kv(plugin)
     if kv is None:
-        return
+        return {}
     try:
         key = _DOMAIN_STATE_KEY_FMT.format(safe=_safe_session_key(session_key))
         blob = await kv.get_kv_data(key, None)
     except Exception as exc:  # noqa: BLE001
         logger.debug("Sylanne v2core 域状态读取失败 [%s]: %s", session_key, exc)
-        return
+        return {}
     if not isinstance(blob, dict):
-        return
+        return {}
     for name, dom in domains.items():
         data = blob.get(name)
         if not isinstance(data, dict):
@@ -119,10 +123,19 @@ async def _load_domains(plugin: Any, session_key: str, domains: dict[str, Any]) 
                 loader(data)
         except Exception as exc:  # noqa: BLE001
             logger.warning("Sylanne v2core 域 %r 恢复失败: %s", name, exc)
+    blf = blob.get("_behavior_last_fired")
+    if isinstance(blf, dict):
+        return {str(k): float(v) for k, v in blf.items() if isinstance(v, (int, float))}
+    return {}
 
 
-async def _save_domains(plugin: Any, session_key: str, domains: dict[str, Any]) -> None:
-    """各域状态落进域总键。memory 域只存重固化影子层（底层 MemorySystem 自有键）。"""
+async def _save_domains(plugin: Any, session_key: str, domains: dict[str, Any],
+                        behavior_last_fired: dict[str, float] | None = None) -> None:
+    """各域状态落进域总键。memory 域只存重固化影子层（底层 MemorySystem 自有键）。
+
+    behavior_last_fired（缺陷行为不应期表）随域 blob 一同落盘——piggyback 既有 debounce 落盘，
+    请求热路径仍零 IO（review medium：不应期 RAM-only 重启即丢，敏感行为长不应期形同虚设）。
+    """
     kv = _kv(plugin)
     if kv is None:
         return
@@ -134,6 +147,9 @@ async def _save_domains(plugin: Any, session_key: str, domains: dict[str, Any]) 
                 blob[name] = dumper()
         except Exception as exc:  # noqa: BLE001
             logger.warning("Sylanne v2core 域 %r 序列化失败: %s", name, exc)
+    if isinstance(behavior_last_fired, dict) and behavior_last_fired:
+        blob["_behavior_last_fired"] = {str(k): float(v) for k, v in behavior_last_fired.items()
+                                        if isinstance(v, (int, float))}
     try:
         key = _DOMAIN_STATE_KEY_FMT.format(safe=_safe_session_key(session_key))
         await kv.put_kv_data(key, blob)
@@ -141,13 +157,14 @@ async def _save_domains(plugin: Any, session_key: str, domains: dict[str, Any]) 
         logger.debug("Sylanne v2core 域状态写入失败 [%s]: %s", session_key, exc)
 
 
-def _schedule_domain_save(plugin: Any, session_key: str, domains: dict[str, Any]) -> None:
+def _schedule_domain_save(plugin: Any, session_key: str, domains: dict[str, Any],
+                          behavior_last_fired: dict[str, float] | None = None) -> None:
     """fire-and-forget 落盘。模块级 _PENDING_SAVES 强引用锚定（防 GC）。
 
     与旧版的差别：不再挂 plugin._background_tasks——terminate() 对那张表做的是
     cancel（取消在途存档=反向 bug）。停机排干走本模块 drain_pending_saves()。
     """
-    coro = _save_domains(plugin, session_key, domains)
+    coro = _save_domains(plugin, session_key, domains, behavior_last_fired)
     try:
         loop = asyncio.get_running_loop()
     except RuntimeError:
@@ -183,7 +200,8 @@ async def save_all_domains(plugin: Any) -> None:
         domains = rt.get("domains") if isinstance(rt, dict) else None
         if isinstance(domains, dict) and domains:
             try:
-                await _save_domains(plugin, session_key, domains)
+                await _save_domains(plugin, session_key, domains,
+                                    rt.get("behavior_last_fired") if isinstance(rt, dict) else None)
             except Exception as exc:  # noqa: BLE001
                 logger.debug("Sylanne v2core 终扫落盘失败 [%s]: %s", session_key, exc)
 
@@ -273,7 +291,7 @@ def _runtime_for(plugin: Any, session_key: str) -> dict[str, Any]:
 
 async def _ensure_loaded(plugin: Any, session_key: str, rt: dict[str, Any]) -> None:
     if not rt.get("loaded"):
-        await _load_domains(plugin, session_key, rt["domains"])
+        rt["behavior_last_fired"] = await _load_domains(plugin, session_key, rt["domains"])
         rt["loaded"] = True
 
 
@@ -378,6 +396,19 @@ async def apply_v2core_request(plugin: Any, event: Any, request: Any) -> None:
                 )
         except Exception as _exc:  # noqa: BLE001 - 分类失败绝不影响请求
             logger.debug("Sylanne rel_register dispatch skipped: %s", _exc)
+
+        # 缺陷行为层（Wave 3）：选本轮该点燃的行为（互斥 + 不应期，状态存 rt 跨轮），
+        # 命中则塞 ctx.scratch，由 fragment._behavior_line 渲染进 PINNED。零-LLM，吞错不阻断。
+        try:
+            from sylanne_alpha.v2core.behavior import select_behavior
+            _lf = rt.setdefault("behavior_last_fired", {})
+            _bsel = select_behavior(ctx.body, ctx.scratch, _lf, time.time())
+            if _bsel:
+                ctx.scratch["behavior_directive"] = _bsel["directive"]
+                rt["last_behavior"] = {"id": _bsel["id"], "activation": _bsel["activation"],
+                                       "ts": time.time()}   # 可观测留痕（WebUI 认知核页）
+        except Exception as _bx:  # noqa: BLE001
+            logger.debug("Sylanne behavior select skipped: %s", _bx)
 
         # 心象片段 → system prompt（主动脉：认知影响言语）
         from sylanne_alpha.v2core.fragment import build_mind_fragment
@@ -586,7 +617,7 @@ async def apply_v2core_response(plugin: Any, event: Any, response: Any) -> bool:
             "Sylanne v2core turn: session=%s kind=%s handled=%s",
             session_key, reply.kind.value, handled,
         )
-        _schedule_domain_save(plugin, session_key, rt["domains"])
+        _schedule_domain_save(plugin, session_key, rt["domains"], rt.get("behavior_last_fired"))
         return handled
     except Exception as exc:  # noqa: BLE001
         logger.error("Sylanne v2core bridge failed, 回落旧管线: %s", exc, exc_info=True)
