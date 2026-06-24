@@ -35,6 +35,7 @@ from __future__ import annotations
 from typing import Any
 
 from sylanne_alpha.v2core.contracts import BeatContext
+from sylanne_alpha.v2core.capabilities.ignition import personality_saddle
 
 _MAX_CHARS = 420
 _HEADER = "[心象|内在状态线索，融进语气措辞，不要复述本段]"
@@ -301,12 +302,11 @@ def _drive_line(ctx: BeatContext) -> tuple[str, float]:
 
     # expression_drive：驱力越过人格 speak 阈 → 心里有话想说（复用 ignition saddle，单源）。
     try:
-        from sylanne_alpha.v2core.capabilities.ignition import personality_saddle
         express_at = personality_saddle(b)[0]
         drive = float(b.expression_drive)
         if drive >= express_at:
             bits.append((_norm(drive, express_at, express_at + 1.0), "心里有话想说"))
-    except Exception:
+    except (AttributeError, TypeError, ValueError):
         pass
 
     # surprise：相对她自己的均值基线骤升 → 有点意外（canonical PE，接 mentalize 语义）。
@@ -322,7 +322,7 @@ def _drive_line(ctx: BeatContext) -> tuple[str, float]:
             # max(0.0, …)：mean_s<0.05 时 mean_s-0.05 为负，而 surprise 恒非负，旧式 `surprise<=负`
             # 永不成立——最熟络的极端反成死区。掐下限后，极低基线+完美预测(surprise=0)仍能触发。
             bits.append((_norm(mean_s, 0.32, 0.0, below=True), "对你已经很熟，不太用费劲解释"))
-    except Exception:
+    except (AttributeError, TypeError, ValueError):
         pass
 
     # precision 低：注意增益低 → 拿不太准你的意思（倾向问清而非臆断）。
@@ -330,7 +330,7 @@ def _drive_line(ctx: BeatContext) -> tuple[str, float]:
         precision = float(b.precision)
         if precision <= 0.32:
             bits.append((_norm(precision, 0.32, 0.0, below=True), "拿不太准你的意思，想问清楚"))
-    except Exception:
+    except (AttributeError, TypeError, ValueError):
         pass
 
     # threshold_drift 高：阈值随重复上移 → 跟你说话越来越随便（降正式度）。
@@ -338,7 +338,7 @@ def _drive_line(ctx: BeatContext) -> tuple[str, float]:
         drift = float(b.threshold_drift)
         if drift >= 0.2:
             bits.append((_norm(drift, 0.2, 1.0), "跟你说话越来越随便"))
-    except Exception:
+    except (AttributeError, TypeError, ValueError):
         pass
 
     # intimacy_gravity 高 → 想再靠近一点。门 0.6 略高于该 trait 的自然天花板（seed 0.50±0.06→~0.56）：
@@ -347,7 +347,7 @@ def _drive_line(ctx: BeatContext) -> tuple[str, float]:
         g = float(b.intimacy_gravity)
         if g >= 0.6:
             bits.append((_norm(g, 0.6, 1.0), "想再靠近你一点"))
-    except Exception:
+    except (AttributeError, TypeError, ValueError):
         pass
 
     if not bits:
