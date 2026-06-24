@@ -318,7 +318,9 @@ def _drive_line(ctx: BeatContext) -> tuple[str, float]:
         mean_s = float(b.mean_surprise)
         if surprise >= 0.45 and surprise - mean_s >= 0.12:
             bits.append((_norm(surprise - mean_s, 0.12, 1.0), "有点意外，没料到你这么说"))
-        if mean_s <= 0.32 and surprise <= mean_s - 0.05:
+        if mean_s <= 0.32 and surprise <= max(0.0, mean_s - 0.05):
+            # max(0.0, …)：mean_s<0.05 时 mean_s-0.05 为负，而 surprise 恒非负，旧式 `surprise<=负`
+            # 永不成立——最熟络的极端反成死区。掐下限后，极低基线+完美预测(surprise=0)仍能触发。
             bits.append((_norm(mean_s, 0.32, 0.0, below=True), "对你已经很熟，不太用费劲解释"))
     except Exception:
         pass

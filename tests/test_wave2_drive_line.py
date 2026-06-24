@@ -7,8 +7,10 @@ threshold_drift / precision 每轮都算、却零路径进 prompt。本文件钉
 
 from __future__ import annotations
 
+import pytest
+
 from sylanne_alpha.v2core.contracts import BeatContext, BodySnapshot, Phase
-from sylanne_alpha.v2core.fragment import build_mind_fragment, _drive_line
+from sylanne_alpha.v2core.fragment import build_mind_fragment, _drive_line, _norm
 
 
 def _ctx(body: BodySnapshot) -> BeatContext:
@@ -106,3 +108,43 @@ def test_drive_line_reaches_fragment() -> None:
     """驱力行真进 system_prompt 片段（端到端，不只是函数）。"""
     frag = build_mind_fragment(_ctx(_body(surprise=0.7, mean_surprise=0.4)), {})
     assert "此刻我:" in frag and "有点意外" in frag
+
+
+def test_familiarity_fires_at_extreme_low_baseline() -> None:
+    """gemini review：mean_surprise 极低(<0.05)且本轮完美预测(surprise=0) → '已经很熟'仍触发。
+
+    旧式 `surprise <= mean_s - 0.05` 在 mean_s<0.05 时阈值为负、surprise 非负恒不成立 →
+    最熟络的极端反成死区。`max(0.0, mean_s-0.05)` 掐下限修复。移除该修复时本测试 FAIL。
+    """
+    text, _ = _drive_line(_ctx(_body(surprise=0.0, mean_surprise=0.02)))
+    assert "已经很熟" in text, "极低基线+完美预测下熟络线索被死区吞掉了"
+
+
+# --------------------------------------------------------------------------
+# _norm 焦点单测（sourcery review）：cap-3 排序的公平秤，独立钉死其边界/clip 行为，
+# 不再只靠 drive-line 间接覆盖。期望值经独立手推 + 实跑双核对。
+# --------------------------------------------------------------------------
+
+def test_norm_below_false_interior_and_clamps() -> None:
+    """below=False：线性映射 [thr,hi]→[0,1]，value=thr→0、value=hi→1、越界 clamp。"""
+    assert _norm(0.0, 0.0, 1.0) == pytest.approx(0.0)    # value=thr → 0
+    assert _norm(1.0, 0.0, 1.0) == pytest.approx(1.0)    # value=hi → 1
+    assert _norm(0.5, 0.0, 1.0) == pytest.approx(0.5)    # 中点
+    assert _norm(2.0, 0.0, 1.0) == pytest.approx(1.0)    # 上 clamp（越过 hi）
+    assert _norm(-1.0, 0.0, 1.0) == pytest.approx(0.0)   # 下 clamp（低于 thr）
+
+
+def test_norm_span_guard_returns_zero() -> None:
+    """span≤0（防除零）→ 直接退 0.0，不做除法。覆盖 below 两种模式。"""
+    assert _norm(0.5, 1.0, 1.0) == 0.0                   # below=False, span=hi-thr=0
+    assert _norm(0.5, 1.0, 0.5) == 0.0                   # below=False, span<0
+    assert _norm(0.16, 0.0, 0.32, below=True) == 0.0     # below=True, span=thr-hi=-0.32<0
+
+
+def test_norm_below_true_interior_and_clamps() -> None:
+    """below=True（越低越强）：value=thr→0、value=hi→1、越界 clamp。"""
+    assert _norm(0.32, 0.32, 0.0, below=True) == pytest.approx(0.0)   # value=thr → 0
+    assert _norm(0.0, 0.32, 0.0, below=True) == pytest.approx(1.0)    # value=hi → 1
+    assert _norm(0.16, 0.32, 0.0, below=True) == pytest.approx(0.5)   # 中点
+    assert _norm(0.5, 0.32, 0.0, below=True) == pytest.approx(0.0)    # 下 clamp（value>thr）
+    assert _norm(-0.1, 0.32, 0.0, below=True) == pytest.approx(1.0)   # 上 clamp（value<hi）
