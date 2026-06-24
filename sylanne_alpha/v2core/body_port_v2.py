@@ -148,6 +148,11 @@ def snapshot_from_surface(
         # 叙事自我
         threshold_drift=_f(body, "nerve", "threshold_drift"),
         epoch=int(_ext_f(ext, "epoch", 0.0)),
+        # Wave 3 缺陷行为层信号（SDK 真实路径投影；void_pressure 经 extras 注入）
+        void_pressure=_ext_f(ext, "void_pressure", 0.0),
+        load=_f(body, "mortality", "load"),
+        plasticity=_f(body, "nerve", "plasticity", default=0.5),
+        boundary_pressure=_f(body, "immunity", "boundary_pressure"),
         raw=hp,
     )
 
@@ -275,6 +280,14 @@ class CanonicalKernelBodyPort:
                     ms = getattr(gate, "mean_surprise", None)
                     if ms is not None:
                         ext["mean_surprise"] = float(ms)
+                # Wave 3：void_pressure（VoidScarEngine 空腔压力）也只在 computation 上，不在
+                # surface。engine.observe() 经核实只读（带缓存、不推进；haiku 侦察 + 上游 audit），
+                # 同 surprise/precision 的单一来源纪律，从这唯一边界处取，禁止 agent 下探。
+                engine = getattr(comp, "engine", None)
+                if engine is not None and hasattr(engine, "observe"):
+                    obs = engine.observe()
+                    if isinstance(obs, dict) and obs.get("void_pressure") is not None:
+                        ext["void_pressure"] = float(obs["void_pressure"])
         except Exception:
             pass  # PE 取不到 → snapshot_from_surface 降级中性值（fast-path 安全）
         return ext

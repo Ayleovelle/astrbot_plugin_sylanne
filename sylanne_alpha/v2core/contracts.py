@@ -66,6 +66,12 @@ class BodySnapshot:
     # 叙事自我（理论6，Conway 2000 / Nader 2000 重固化）
     threshold_drift: float = 0.0   # 阈值漂移（body.nerve.threshold_drift）
     epoch: int = 0                 # 关系纪元（情感域固化程度 age_decay 来源）
+    # ═══ Wave 3 缺陷行为层所需信号（2026-06-24；SDK 真实路径，仅 body_port_v2 适配器投影）═══
+    # 这些 SDK 早已在算，但此前未投影进 BodySnapshot，fragment 读不到 → 缺陷行为触发不了。
+    void_pressure: float = 0.0     # 空腔压力（VoidScarEngine；冲动泄露/示弱道歉/逃避 触发）
+    load: float = 0.0              # 负荷（body.mortality.load；犯懒 触发）
+    plasticity: float = 0.5        # 可塑性（body.nerve.plasticity；低=过滤差→冲动 触发；中性默认 0.5）
+    boundary_pressure: float = 0.0 # 边界压力（body.immunity.boundary_pressure；吃醋 触发）
     # —— 原始 surface（逃生舱：迁移期暂存完整 dict，迁移完成后逐步收窄到具名字段）——
     raw: dict[str, Any] = field(default_factory=dict, repr=False)
 

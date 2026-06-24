@@ -114,6 +114,12 @@ class ReflexLearner:
         """对某 agent 的某门控参数做一次反应式微调。"""
         reward = self.compute_reward(behavior=behavior, self_quality=self_quality)
         arc = store.archive(agent_name)
-        arc.update(param_key, reward, delta_cap=delta_cap)
+        # 防 Goodhart 单向跑飞（review learning-loop high）：无可观测行为信号时（behavior==0，
+        # 异步异国恋里 5min–2h 的回复间隔极常见），不让保守自评(真机实测 ~0.4)单独驱动门控步进
+        # ——否则 r = W_SELF*(q*2-1) 每轮同号累积，几百轮把门控钉到 ±delta_cap 地板，成了一条不由
+        # 真实用户反馈驱动的单向漂移。self_quality 仅在有行为信号时作弱调味（设计本意：行为强、自评弱）。
+        # 仍 record_outcome 记自评 EMA（供层次2 睡眠反思读，不丢审计）。
+        if behavior != 0.0:
+            arc.update(param_key, reward, delta_cap=delta_cap)
         if self_quality is not None:
             arc.record_outcome(self_quality)

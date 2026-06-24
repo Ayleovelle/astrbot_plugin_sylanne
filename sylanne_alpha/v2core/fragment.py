@@ -66,6 +66,7 @@ _EMOTION_LOUD_CAP = 1.5
 
 # PINNED 层优先级（仅在病态场景 PINNED 自身超预算时用——实际几乎不触发，因为话头/
 # 表达倾向行本身都自限长。真触发时整行丢，绝不切半句）：表达倾向(躯体真相)最高，话头次之。
+_PIN_BEHAVIOR = 3   # 缺陷行为指令：最该活下来的情境指令（Wave 3）
 _PIN_STYLE = 2
 _PIN_FOCUS = 1
 
@@ -175,7 +176,11 @@ def build_mind_fragment(ctx: BeatContext, domains: dict[str, Any]) -> str:
     # guard/soften 经 somatic.guard_soften_from_body 单源公式从 body 取（review F2）。
     style = _style_line(ctx)
 
-    live = _pack_within_budget(focus_line, state, style)
+    # —— PINNED：缺陷行为指令（Wave 3）——integration 在 REQUEST 拍已选好（互斥+不应期）塞
+    # scratch；本行只读渲染（fragment 零写）。是本轮最强的情境指令，钉死永生、靠前显眼。
+    behavior_line = _behavior_line(ctx)
+
+    live = _pack_within_budget(focus_line, behavior_line, state, style)
     # Wave 1：临场态度作为恒在人格底色追加在片段尾部，独立于 _MAX_CHARS 预算。
     segments = [seg for seg in (live, _PRESENCE) if seg]
     return f"{_HEADER} {_SEP.join(segments)}"
@@ -183,6 +188,7 @@ def build_mind_fragment(ctx: BeatContext, domains: dict[str, Any]) -> str:
 
 def _pack_within_budget(
     focus_line: str,
+    behavior_line: str,
     state: list[tuple[int, float, str]],
     style: str,
 ) -> str:
@@ -197,6 +203,10 @@ def _pack_within_budget(
     if focus_line:
         segs.append({"order": 0, "text": focus_line, "pinned": True,
                      "pin_prio": _PIN_FOCUS, "sal": float("inf")})
+    if behavior_line:
+        # 行为指令紧随话头、靠前显眼（order 0.5），最高 pin_prio——病态兜底里最后才舍。
+        segs.append({"order": 0.5, "text": behavior_line, "pinned": True,
+                     "pin_prio": _PIN_BEHAVIOR, "sal": float("inf")})
     for order, sal, text in state:
         segs.append({"order": order, "text": text, "pinned": False,
                      "pin_prio": 0, "sal": sal})
@@ -284,6 +294,16 @@ def _norm(value: float, thr: float, hi: float, *, below: bool = False) -> float:
         return 0.0
     frac = (thr - value) / span if below else (value - thr) / span
     return max(0.0, min(1.0, frac))
+
+
+def _behavior_line(ctx: BeatContext) -> str:
+    """缺陷行为指令（Wave 3）：只读 ctx.scratch["behavior_directive"]。
+
+    选择 + 互斥 + 不应期在 integration.apply_v2core_request（持 rt 跨轮态）里做好，本行不决策、
+    不写状态——fragment 零写纪律。scratch 无该键（非 v2core 路径/未点燃）→ 空串，不占位。
+    """
+    directive = ctx.scratch.get("behavior_directive")
+    return directive if isinstance(directive, str) and directive else ""
 
 
 def _drive_line(ctx: BeatContext) -> tuple[str, float]:
