@@ -75,6 +75,21 @@ def test_undertone_stalled_wins_over_resolved() -> None:
     assert cue and cue["kind"] == "stalled"
 
 
+def test_undertone_skips_project_with_bad_timestamp() -> None:
+    """单个项目 last_touched_at 是脏数据（非数值字符串）→ 只跳它，不掀翻整条 cue。
+
+    回归：修复前 float("garbage") 抛 ValueError 逃出 undertone_cue（loop 在 try 外），
+    整条 cue 连同好项目一起丢；修复后坏项目被跳过，好的 stalled 项目照常出底色。
+    """
+    sim = _sim()
+    sim.state.projects = [
+        LifeProject(title="坏", state="active", last_touched_at="garbage"),
+        LifeProject(title="好", state="active", last_touched_at=_NOW - 4 * _DAY),
+    ]
+    cue = sim.undertone_cue(now=_NOW)
+    assert cue and cue["kind"] == "stalled", cue
+
+
 def test_undertone_mood_skips_user_fact() -> None:
     """mood 取最近【非 USER_FACT】事件的词（隐私：不读用户事实/正文）。"""
     sim = _sim()
@@ -132,3 +147,23 @@ def test_good_body_no_stay_in_hint() -> None:
     sim._emotion_getter = lambda: {"tension": 0.1, "warmth": 0.2}
     prompt = sim._build_prompt(_NOW)
     assert "倾向待在室内" not in prompt
+
+
+def test_high_void_pressure_alone_does_not_trigger_indoor() -> None:
+    """void_pressure 是无上界求和（observe() 里阈值 >1.0/>5.0），且语义=表达积压非疲惫。
+
+    回归：修复前分支含 `void_pressure > 0.6`，void_pressure=9.0 会误触发室内提示，
+    打穿“坏日子才室内”的意图；修复后只认 tension/warmth，单高 void_pressure 不触发。
+    """
+    sim = _sim()
+    sim._emotion_getter = lambda: {"tension": 0.0, "warmth": 0.0, "void_pressure": 9.0}
+    prompt = sim._build_prompt(_NOW)
+    assert "倾向待在室内" not in prompt
+
+
+def test_negative_warmth_triggers_indoor() -> None:
+    """warmth 转负（< -0.1）= 状态低落 → 追室内提示（锁住 warmth 这条臂）。"""
+    sim = _sim()
+    sim._emotion_getter = lambda: {"tension": 0.0, "warmth": -0.3}
+    prompt = sim._build_prompt(_NOW)
+    assert "倾向待在室内" in prompt

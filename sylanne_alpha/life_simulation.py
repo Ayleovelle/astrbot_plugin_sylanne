@@ -1231,10 +1231,13 @@ class LifeSimulator:
                 rhythm_hint = "\n节律提示：当前是清晨、能量充足，适合专注或创造性活动。"
 
         # Wave 5（mood-coherence）：躯体疲惫/低落 → 倾向室内、低能量活动（给 4.9 bad days 当底座）。
-        # 复用上面已取的 emo_dict（_emotion_getter，只读容错）；不覆盖节律提示，追加一句即可。
+        # 复用上面已取的 emo_dict（_emotion_getter → engine.observe()，只读容错）；追加不覆盖。
+        # 信号只取 tension/warmth：二者皆在 [-1,1] 量级，阈值与 llm_request_pipeline 一致。
+        # 【刻意不用 void_pressure】：它是 void_space.total_pressure() 的【无上界求和】（同源
+        # observe() 里其阈值是 >1.0/>5.0，非 0-1），且语义是“表达积压”而非“躯体疲惫”——
+        # 一旦纳入会让本提示几乎常驻触发，打穿“坏日子才室内”的意图。
         try:
-            if (emo_dict.get("tension", 0.0) > 0.6 or emo_dict.get("warmth", 0.0) < -0.1
-                    or emo_dict.get("void_pressure", 0.0) > 0.6):
+            if emo_dict.get("tension", 0.0) > 0.6 or emo_dict.get("warmth", 0.0) < -0.1:
                 rhythm_hint += "\n躯体提示：当前身体偏疲惫/状态低落，倾向待在室内、做低能量的安静活动。"
         except Exception:
             pass
@@ -1749,7 +1752,10 @@ class LifeSimulator:
         best_resolved = None
         best_recency = 0.0
         for p in projects:
-            touched = float(getattr(p, "last_touched_at", 0.0) or 0.0)
+            try:
+                touched = float(getattr(p, "last_touched_at", 0.0) or 0.0)
+            except (TypeError, ValueError):
+                continue  # 单个项目 ts 脏（字符串/坏值）→ 只跳它，不掀翻整条 cue
             if touched <= 0:
                 continue
             if p.state == "active":
