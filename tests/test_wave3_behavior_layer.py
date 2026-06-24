@@ -36,6 +36,18 @@ def test_teasing() -> None:
     assert sel and sel["id"] == "teasing"
 
 
+def test_clock_back_does_not_block_behavior() -> None:
+    """gemini review：系统时钟回拨(now < last_fired)不该把行为永久门住。
+
+    last 落在未来(模拟 NTP/VM 回拨) → now-last 为负 → 旧式 `<refr` 恒真把行为门死。
+    `0<=(now-last)<refr` 下界守卫把回拨视为不应期失效，行为照常可点燃。移除守卫时本测试 FAIL。
+    """
+    body = _body(exhaustion=0.9, load=0.9, expression_drive=0.0)   # 触发 laziness
+    last_fired = {"laziness": 5000.0}                              # 未来 ts = 时钟已回拨
+    sel = select_behavior(body, {}, last_fired, 1000.0)           # now=1000 < last=5000
+    assert sel and sel["id"] == "laziness", "时钟回拨不应把行为永久门住"
+
+
 def test_impulse_leak() -> None:
     # 表达驱力高(可达的 0.9，≤1.0) + 防备低(sovereignty=1→guard=0) + 空腔压力抬升(归一后)。
     sel = _sel(_body(expression_drive=0.9, void_pressure=18.0))

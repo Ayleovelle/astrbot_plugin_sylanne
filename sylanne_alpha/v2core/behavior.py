@@ -198,7 +198,9 @@ def select_behavior(
         # 不应期：刚发过的跳过（人格敏感行为用更长的 override）
         refr = _REFRACTORY_OVERRIDE.get(bid, refractory_s)
         last = last_fired.get(bid)
-        if last is not None and (now - last) < refr:
+        # 0<= 下界守卫：系统时钟回拨(NTP/VM 迁移)时 now<last → now-last 为负，旧式 `<refr` 恒真
+        # 会把行为永久门住；视回拨为不应期失效，行为照常可点燃。链式短路，正常窗口语义不变。
+        if last is not None and 0 <= (now - last) < refr:
             continue
         try:
             act = float(fn(body, d, scratch))

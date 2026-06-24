@@ -9,6 +9,7 @@ memory 域只存 overlay。验收：喂数轮→落盘→清运行态重建→�
 from __future__ import annotations
 
 import asyncio
+import math
 import tempfile
 
 from sylanne_alpha._engine.sylanne_core.compute.host import SylanneAlphaHost
@@ -94,6 +95,30 @@ def test_domains_survive_restart() -> None:
     assert doms2["usermodel"].to_dict() == snap_um1, "UserModel 后验/轨迹未还原"
     assert doms2["narrative"].to_dict() == snap_narr1, "Narrative 锚点/纪元未还原"
     assert doms2["distill"]._samples == 3
+
+
+def test_behavior_last_fired_drops_nonfinite_ts() -> None:
+    """sourcery review：NaN/±inf 不应期 ts 会废掉门控（NaN→门常开、+inf→永久压制）。
+
+    读写两路都用 math.isfinite 过滤：落盘只留有限值，恢复也滤掉混入的非有限值。
+    移除任一侧的 math.isfinite 时，对应断言 FAIL。
+    """
+    root = tempfile.mkdtemp(prefix="p07nan_")
+    p = _KVPlugin(root)
+    key = ig._DOMAIN_STATE_KEY_FMT.format(safe=ig._safe_session_key("sess:persist"))
+
+    # 写路径：含 NaN/+inf/-inf 的不应期表落盘 → 只留有限项
+    blf = {"laziness": float("nan"), "grudge": float("inf"),
+           "jealousy": float("-inf"), "lying": 1234.5}
+    asyncio.run(ig._save_domains(p, "sess:persist", {}, blf))
+    stored = p._kv[key]["_behavior_last_fired"]
+    assert stored == {"lying": 1234.5}, f"写路径未滤掉非有限 ts：{stored}"
+
+    # 读路径：即便 KV 里混进 NaN，恢复出来也不带它（否则门控被废）
+    p._kv[key]["_behavior_last_fired"] = {"x": float("nan"), "y": 99.0}
+    out = asyncio.run(ig._load_domains(p, "sess:persist", {}))
+    assert out == {"y": 99.0}, f"读路径未滤掉非有限 ts：{out}"
+    assert all(math.isfinite(v) for v in out.values())
 
 
 def test_load_tolerates_missing_key() -> None:

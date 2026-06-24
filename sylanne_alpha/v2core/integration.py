@@ -42,6 +42,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import logging
+import math
 import time
 from typing import Any
 
@@ -125,7 +126,10 @@ async def _load_domains(plugin: Any, session_key: str, domains: dict[str, Any]) 
             logger.warning("Sylanne v2core 域 %r 恢复失败: %s", name, exc)
     blf = blob.get("_behavior_last_fired")
     if isinstance(blf, dict):
-        return {str(k): float(v) for k, v in blf.items() if isinstance(v, (int, float))}
+        # math.isfinite：丢弃 NaN/±inf——NaN 会让不应期比较恒 False(门常开)、+inf 永久压制，
+        # 损坏的持久化 ts 不得废掉门控（sourcery review）。
+        return {str(k): float(v) for k, v in blf.items()
+                if isinstance(v, (int, float)) and math.isfinite(v)}
     return {}
 
 
@@ -148,8 +152,9 @@ async def _save_domains(plugin: Any, session_key: str, domains: dict[str, Any],
         except Exception as exc:  # noqa: BLE001
             logger.warning("Sylanne v2core 域 %r 序列化失败: %s", name, exc)
     if isinstance(behavior_last_fired, dict) and behavior_last_fired:
+        # 写路径同样滤掉非有限 ts，存下来的不应期表保证全是有限值（与读路径对称）。
         blob["_behavior_last_fired"] = {str(k): float(v) for k, v in behavior_last_fired.items()
-                                        if isinstance(v, (int, float))}
+                                        if isinstance(v, (int, float)) and math.isfinite(v)}
     try:
         key = _DOMAIN_STATE_KEY_FMT.format(safe=_safe_session_key(session_key))
         await kv.put_kv_data(key, blob)
@@ -402,11 +407,12 @@ async def apply_v2core_request(plugin: Any, event: Any, request: Any) -> None:
         try:
             from sylanne_alpha.v2core.behavior import select_behavior
             _lf = rt.setdefault("behavior_last_fired", {})
-            _bsel = select_behavior(ctx.body, ctx.scratch, _lf, time.time())
+            _now = time.time()   # 一次取时：选择器写入不应期 ts 与下方留痕 ts 一致（sourcery review）
+            _bsel = select_behavior(ctx.body, ctx.scratch, _lf, _now)
             if _bsel:
                 ctx.scratch["behavior_directive"] = _bsel["directive"]
                 rt["last_behavior"] = {"id": _bsel["id"], "activation": _bsel["activation"],
-                                       "ts": time.time()}   # 可观测留痕（WebUI 认知核页）
+                                       "ts": _now}   # 可观测留痕（WebUI 认知核页）
         except Exception as _bx:  # noqa: BLE001
             logger.debug("Sylanne behavior select skipped: %s", _bx)
 
