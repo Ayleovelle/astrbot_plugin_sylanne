@@ -11,6 +11,23 @@ PERCEPT 拍的产物压成一小段结构化中文，经 system prompt 喂给主
   slot 预算，本片段独立小额追加）。
 - 只投影"倾向/印象"，绝不 dump 数值表之外的内部结构（renderer #1/#4 纪律同源）。
 - 内容全部来自领域只读接口 + PERCEPT scratch——本模块不写任何状态。
+
+预算分配（Wave 0 + Wave 1，2026-06-24 重做）：
+- 旧实现把所有状态行 join 成一坨、再 body_text[:budget] 盲截尾巴。因为 _style_line
+  最后入列，张力低预算时它永远第一个被砍——而它恰是唯一让躯体（防备/软化/累/紧）
+  弯折她措辞的信道。盲截还会切出半句，读起来像坏掉的 AI。
+- Wave 0：改成两层。PINNED 层（话头行 + 表达倾向行 + 临场态度）永不淘汰、永不切半句；
+  STATE 层（情绪/对你/自我/记忆）带显著性分，预算紧时按"最低显著性整行先丢"淘汰，
+  绝不切半句。最强的躯体信号永远活到 LLM。
+- Wave 1（本次只交付"预算回收"半边）：临场态度常量（_PRESENCE，实测 218 字）不再计入
+  STATE 预算分母——它作为恒在人格底色追加在片段尾部（PINNED，独立于 _MAX_CHARS），被它
+  占掉的 ~218 字预算全部还给 STATE。意图词与抗幻觉纪律一字不动（防工具死锁，工具循环每步
+  都要读得到）。
+  【已知偏离 roadmap，留作后续】roadmap 原方案另有一半："把这段长文搬进 system_prompt 人设段
+  〔每会话一次〕、fragment 只留 ~70 字指针"以省每轮重复传输的 token。该"降每轮 token"子目标
+  本次【未做、延后】：本架构 system_prompt 每轮由宿主人设重建、无可靠的"每会话一次"钩子；且
+  这段恰是工具循环每步都要读的纪律，贸然搬走会丢覆盖、并破坏多个钉死意图词的测试。按 roadmap
+  自己的兜底（part2 Wave 1：over-compression 风险 → 保持满强度），本次原样保留 _PRESENCE。
 """
 
 from __future__ import annotations
@@ -21,8 +38,34 @@ from sylanne_alpha.v2core.contracts import BeatContext
 
 _MAX_CHARS = 420
 _HEADER = "[心象|内在状态线索，融进语气措辞，不要复述本段]"
-# focus_line / body / _PRESENCE 三段 join 时的分隔符与换行余量
-_SEP_OVERHEAD = 9
+_SEP = " | "
+
+# STATE 层显著性常量（动态项见 _emotion_salience / _usermodel_salience）。
+# 神经直觉：具体召回的连续性 > 当下情绪强度 > 对你的把握 > 抽象自我形状。
+# 预算紧时整行淘汰从最低显著性开始——抽象的"自我形状"先丢，具体的"上次你说过"留到最后。
+_SAL_MEMORY = 3.0       # 召回：具体历史连续性，STATE 里最后被淘汰
+_SAL_NARRATIVE = 0.4    # 自我形状：调味，最先被淘汰
+_SAL_EMOTION_BASE = 1.0
+_SAL_USERMODEL_BASE = 0.8
+
+# 情绪行的"响度"主要来自账本内部信号（trend / 比平时偏离 / 未表达积分），它们只活在
+# emo.prompt_line 渲染出的【行文本】里，瞬时 BodySnapshot 看不到（review behavior-diff）。
+# 故 _emotion_salience 额外从已渲染行文本里嗅这些响度词补分——零耦合、零 IO、容错（纯串操作）。
+# 总补分封顶 _EMOTION_LOUD_CAP，让滚烫情绪稳压 usermodel/narrative，但不越过召回(具体历史最高)。
+_EMOTION_LOUD_KEYWORDS = (
+    ("骤然", 1.2),        # 骤升/骤降：最强方向信号
+    ("憋了很多话", 1.2),  # 未表达积分高位
+    ("得多", 0.8),        # 比平时暖得多/凉得多：强基线偏离
+    ("有话憋着", 0.5),    # 未表达积分中位
+    ("升温", 0.4),        # 缓升
+    ("降温", 0.4),        # 缓降
+)
+_EMOTION_LOUD_CAP = 1.5
+
+# PINNED 层优先级（仅在病态场景 PINNED 自身超预算时用——实际几乎不触发，因为话头/
+# 表达倾向行本身都自限长。真触发时整行丢，绝不切半句）：表达倾向(躯体真相)最高，话头次之。
+_PIN_STYLE = 2
+_PIN_FOCUS = 1
 
 # 临场态度（人格常量，每轮恒在）：把"沉浸 > 办任务、够用 > 完美、认怂 > 逞强"焊进她的性子。
 # 设计依据（用户 2026-06-13 / 2026-06-15 拍板）：①她钻牛角尖调 29 次工具不开口，根因是
@@ -51,12 +94,12 @@ def build_mind_fragment(ctx: BeatContext, domains: dict[str, Any]) -> str:
     """把本轮 PERCEPT 产物压成心象片段。产出空串=无可注入（调用方跳过）。
 
     各行独立容错：任何一个领域缺失/异常只丢那一行，绝不抛出。
-    """
-    lines: list[str] = []
 
-    # 话头行（FocusDomain）——抗跳话题的根因修复，必须独立于状态预算永不被截。
+    两层装配（见模块 docstring）：PINNED（话头 + 表达倾向 + 临场态度）永生；
+    STATE（情绪/对你/自我/记忆）按显著性整行淘汰进 _MAX_CHARS 预算。
+    """
+    # —— PINNED：话头行（FocusDomain）——抗跳话题的根因修复，永不被截。
     # 仅在【当前消息低信息（表情/短应答）】且有存量话头时出手钉锚，否则空串（不抢位）。
-    # 放在状态行之前累计、但与 _PRESENCE 一样从受截 body_text 中剥离（见下方预算段）。
     focus_line = ""
     foc = domains.get("focus")
     if foc is not None and hasattr(foc, "prompt_line"):
@@ -65,68 +108,162 @@ def build_mind_fragment(ctx: BeatContext, domains: dict[str, Any]) -> str:
         except Exception:
             focus_line = ""
 
-    # 记忆线索（PERCEPT 召回，T1-6/7：当轮 prompt 可消费）
+    # —— STATE 候选：(canonical_order, salience, text) —— 渲染按 order，淘汰按 salience。
+    state: list[tuple[int, float, str]] = []
+
+    # 记忆线索（PERCEPT 召回，T1-6/7：当轮 prompt 可消费）。显著性最高（具体历史）。
     recalled = ctx.scratch.get("recalled")
-    memory_line = ""
     mem_dom = domains.get("memory")
     if isinstance(recalled, list) and recalled and mem_dom is not None:
         try:
             fn = getattr(mem_dom, "recall_prompt_line", None)
             if callable(fn):
                 memory_line = fn(recalled) or ""
+                if memory_line:
+                    state.append((1, _SAL_MEMORY, memory_line))
         except Exception:
-            memory_line = ""
+            pass
 
-    # 情绪行（EmotionLedger.prompt_line）
+    # 情绪行（EmotionLedger.prompt_line）。显著性 = 偏离中性的距离（|暖|+张力）。
     emo = domains.get("emotion")
     if emo is not None and hasattr(emo, "prompt_line"):
         try:
             line = emo.prompt_line(ctx.body)
             if line:
-                lines.append(line)
+                state.append((2, _emotion_salience(ctx.body, line), line))
         except Exception:
             pass
 
-    # 对你行（UserModelDomain.prompt_line + 本轮预判）
+    # 对你行（UserModelDomain.prompt_line + 本轮预判）。显著性 = 处置强度。
     um = domains.get("usermodel")
     if um is not None and hasattr(um, "prompt_line"):
         try:
             line = um.prompt_line()
             if line:
                 yp = ctx.scratch.get("you_probably") or {}
-                disp = yp.get("disposition") or {}
+                disp = yp.get("disposition")
+                # 一次性规整成 dict：scratch 若被塞成「真值非 dict」(字符串/列表等)，下面
+                # _disposition_hint / _usermodel_salience 的 disp.get 都会抛 AttributeError，
+                # 被本块 except Exception 吞掉会【整条对你行白丢】(prompt_line 已成功)。在源头掐死。
+                if not isinstance(disp, dict):
+                    disp = {}
                 hint = _disposition_hint(disp)
-                lines.append(line + (f"·此刻Ta{hint}" if hint else ""))
+                full = line + (f"·此刻Ta{hint}" if hint else "")
+                state.append((3, _usermodel_salience(disp), full))
         except Exception:
             pass
 
-    # 自我行（NarrativeSelfDomain.prompt_line）
+    # 自我行（NarrativeSelfDomain.prompt_line）。显著性最低（抽象形状，调味）。
     narrative = domains.get("narrative")
     if narrative is not None and hasattr(narrative, "prompt_line"):
         try:
             line = narrative.prompt_line()
             if line:
-                lines.append(line)
+                state.append((4, _SAL_NARRATIVE, line))
         except Exception:
             pass
 
-    # 表达倾向行（expression 风格 + 躯体偏置）——风格由 ExpressionCapability.perceive
-    # 在 PERCEPT 拍挂 scratch["express"]（review F1：DELIBERATE 拍产物本阶段永远读不到）；
+    # —— PINNED：表达倾向行（躯体偏置 guard/soften + 风格三量）——Wave 0 焊死永生。
+    # 风格由 ExpressionCapability.perceive 在 PERCEPT 拍挂 scratch["express"]（review F1）；
     # guard/soften 经 somatic.guard_soften_from_body 单源公式从 body 取（review F2）。
     style = _style_line(ctx)
-    if style:
-        lines.append(style)
 
-    # 状态行先按预算截（给恒在的临场态度常量 + 话头行留位）；态度常量与话头行永不被截。
-    # 话头是抗漂移的根因修复，剥离出受截区间；临场态度是恒在性子，同样恒在。
-    # 即使本轮无任何状态行（冷启动），也仍注入态度——她的性子不依赖状态存在。
-    body_text = " | ".join(lines)
-    reserved = len(_HEADER) + len(_PRESENCE) + len(focus_line) + len(memory_line) + _SEP_OVERHEAD
-    budget_for_state = _MAX_CHARS - reserved
-    if budget_for_state > 0 and len(body_text) > budget_for_state:
-        body_text = body_text[:budget_for_state]
-    segments = [seg for seg in (focus_line, memory_line, body_text, _PRESENCE) if seg]
-    return f"{_HEADER} {' | '.join(segments)}"
+    live = _pack_within_budget(focus_line, state, style)
+    # Wave 1：临场态度作为恒在人格底色追加在片段尾部，独立于 _MAX_CHARS 预算。
+    segments = [seg for seg in (live, _PRESENCE) if seg]
+    return f"{_HEADER} {_SEP.join(segments)}"
+
+
+def _pack_within_budget(
+    focus_line: str,
+    state: list[tuple[int, float, str]],
+    style: str,
+) -> str:
+    """两层装配 + 显著性淘汰：返回 _HEADER 之后、_PRESENCE 之前的活体块（不含 header）。
+
+    PINNED（focus_line / style）永不淘汰、永不切半句；STATE 预算紧时按最低显著性整行先丢。
+    预算口径：len(_HEADER)+1（空格）+ len(活体块) ≤ _MAX_CHARS。各领域行本身自限长，
+    整行淘汰不产生半句残断（铁律：mid-sentence cut 像坏掉的 AI，永不产出）。
+    """
+    # 候选段：dict(order, text, pinned, pin_prio, salience)
+    segs: list[dict[str, Any]] = []
+    if focus_line:
+        segs.append({"order": 0, "text": focus_line, "pinned": True,
+                     "pin_prio": _PIN_FOCUS, "sal": float("inf")})
+    for order, sal, text in state:
+        segs.append({"order": order, "text": text, "pinned": False,
+                     "pin_prio": 0, "sal": sal})
+    if style:
+        segs.append({"order": 5, "text": style, "pinned": True,
+                     "pin_prio": _PIN_STYLE, "sal": float("inf")})
+
+    prefix = len(_HEADER) + 1  # _HEADER + 一个空格
+
+    def live_len(active: list[dict[str, Any]]) -> int:
+        if not active:
+            return prefix
+        body = _SEP.join(s["text"] for s in active)
+        return prefix + len(body)
+
+    active = list(segs)
+    # 1) STATE 淘汰：超预算时反复丢"最低显著性"的 STATE 整行。
+    while live_len(active) > _MAX_CHARS:
+        state_in = [s for s in active if not s["pinned"]]
+        if not state_in:
+            break
+        victim = min(state_in, key=lambda s: s["sal"])
+        active.remove(victim)
+    # 2) 兜底：PINNED 自身仍超预算（病态，实际几乎不触发——focus/style 行本身都自限长）。
+    #    按优先级整行丢（style 最后丢），绝不切半句：宁可丢整条 PINNED，也不产出半句残断。
+    while live_len(active) > _MAX_CHARS and len(active) > 1:
+        victim = min(active, key=lambda s: s["pin_prio"])
+        active.remove(victim)
+    # 3) 最后一道（仅当某单条 PINNED 行自身就长过预算时可达——需上游 builder 反常产出超长行才会
+    #    触发；现实不可达）：整行已无法再丢（丢了就全空），只能就地 clamp 以铁死总长上界。
+    #    codepoint-safe 切片（不产生乱码）；此路径才允许切句——总比一个无界片段强。
+    if len(active) == 1 and live_len(active) > _MAX_CHARS:
+        room = _MAX_CHARS - prefix
+        if room > 0:
+            active[0]["text"] = active[0]["text"][:room]
+        else:
+            active = []
+
+    active.sort(key=lambda s: s["order"])
+    return _SEP.join(s["text"] for s in active)
+
+
+def _emotion_salience(body: Any, line: str = "") -> float:
+    """情绪行显著性：偏离中性越远越该活到 LLM（roadmap：weight=distance-from-neutral）。
+
+    瞬时躯体（|暖|+张力）+ 行文本里的响度词补分（trend/比平时/未表达——这些只在渲染行里可见，
+    BodySnapshot 看不到）。补分封顶，避免某一项把情绪抬过召回（具体历史显著性最高）。
+    """
+    try:
+        warmth = abs(float(getattr(body, "warmth", 0.0)))
+        tension = float(getattr(body, "tension", 0.0))
+    except (TypeError, ValueError):
+        warmth = tension = 0.0
+    sal = _SAL_EMOTION_BASE + warmth
+    if tension > 0.33:
+        sal += tension - 0.33
+    bonus = 0.0
+    for kw, b in _EMOTION_LOUD_KEYWORDS:
+        if kw in line:
+            bonus += b
+    return sal + min(_EMOTION_LOUD_CAP, bonus)
+
+
+def _usermodel_salience(disp: dict[str, Any]) -> float:
+    """对你行显著性：处置后验越"响"（暖/距/苦/防）越该活到 LLM。"""
+    try:
+        warmth = abs(float(disp.get("warmth", 0.0)))
+        distress = float(disp.get("distress", 0.0))
+        defensive = float(disp.get("defensiveness", 0.0))
+    except (TypeError, ValueError, AttributeError):
+        # disp 在调用处已被 `or {}` 兜底，但若 scratch 被塞成「真值非 dict」(如字符串)，
+        # disp.get 会抛 AttributeError——一并吞掉，回落 base，与本函数「坏输入返回 base」一致。
+        return _SAL_USERMODEL_BASE
+    return _SAL_USERMODEL_BASE + warmth + distress + defensive
 
 
 def _disposition_hint(disp: dict[str, Any]) -> str:
