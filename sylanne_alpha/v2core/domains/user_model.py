@@ -156,6 +156,17 @@ class UserModelDomain:
         """对你下一条消息处置的期望 = 当前后验均值（静态模型的诚实预测）。"""
         return dict(self._disposition)
 
+    def bond(self) -> float:
+        """关系质量代理（_bond_ema 裸值）。供 AdaptationDomain StyleMirror 的 CAT bond 闸。
+
+        注意与 bond_hint() 区分：后者返回叠加 sync_trace/memes 派生分的【措辞串】，非裸 EMA。
+        """
+        return self._bond_ema
+
+    def style_sketch(self) -> dict[str, float]:
+        """你被观测到的风格三轴只读副本，键为 'len'/'punct'/'warmth'（首条消息前为空 dict）。"""
+        return dict(self._style_sketch)
+
     def predict_you(self, body: BodySnapshot, text: str) -> UserView:
         """投影：结合本条文本浅证据的预判 + 把握度。只读，喂 Mentalize/心象片段。"""
         ev = evidence_from_signals(read_signals(text))

@@ -50,6 +50,7 @@ _SAL_EMOTION_BASE = 1.0
 _SAL_USERMODEL_BASE = 0.8
 _SAL_LIFE_BASE = 0.6    # Wave 5 生活底色：平淡日不出；卡住/刚通时随停滞深度爬过对你/自我，封顶仍在召回之下
 _SAL_DRIVE_BASE = 0.9     # Wave 2 驱力线索：响一个就稳压 usermodel/narrative，强 surprise 排得更高
+_SAL_ADAPT_BASE = 0.5   # Wave 6 适应层：口吻镜像/话题亲和的长期底色，轻；夹在生活(0.6)与自我(0.4)之间
 
 # 情绪行的"响度"主要来自账本内部信号（trend / 比平时偏离 / 未表达积分），它们只活在
 # emo.prompt_line 渲染出的【行文本】里，瞬时 BodySnapshot 看不到（review behavior-diff）。
@@ -167,6 +168,22 @@ def build_mind_fragment(ctx: BeatContext, domains: dict[str, Any]) -> str:
     life_text, life_int = _life_line(ctx)
     if life_text:
         state.append((4.5, _SAL_LIFE_BASE + life_int, life_text))
+
+    # 适应层行（Wave 6 PR-B）——口吻镜像/话题亲和的长期适应渗进口吻。STATE 档 order 4.6，
+    # 夹在生活(4.5)与自我(5)之间。prompt_line 是哑域防御的真接缝（TurnRunner 不自动调）；
+    # 风格漂移提示要 bond 闸，故这里把 usermodel.bond() 喂进去（跨域只读）。
+    ad = domains.get("adaptation")
+    if ad is not None and hasattr(ad, "prompt_line"):
+        try:
+            um_bond = 0.0
+            um_ad = domains.get("usermodel")
+            if um_ad is not None and hasattr(um_ad, "bond"):
+                um_bond = float(um_ad.bond())
+            ad_line = ad.prompt_line(current_text=ctx.text or "", bond=um_bond)
+            if ad_line:
+                state.append((4.6, _SAL_ADAPT_BASE, ad_line))
+        except Exception:
+            pass
 
     # 自我行（NarrativeSelfDomain.prompt_line）。显著性最低（抽象形状，调味）。
     narrative = domains.get("narrative")

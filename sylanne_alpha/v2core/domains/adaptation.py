@@ -12,10 +12,12 @@ blob、同跨域读，拆开只多 plumbing 不多隔离）：
 （旧档无此域=空起步，新字段缺省=保持初值）。零-LLM、零 IO。
 
 —— 落地分期（4 个 phase-PR）——
-本文件是 PR-A【地基】：只交付可持久化的领域骨架（状态 + to_dict/load_dict），进 integration
-的 domains dict 后即随 _save_domains/_load_domains 自动持久化。学习写入（ingest）、心象注入
-（prompt_line + fragment 接缝）、coping/facets、life 双向分别随 PR-B/C/D 落地——届时再补
-对应方法，不在地基里放恒空 stub。
+PR-A【地基】：可持久化骨架（四子结构状态 + to_dict/load_dict），进 domains dict 自动持久化。
+PR-B【口吻镜像+话题亲和，本批】：StyleMirror（_style_target 向你的风格 bond 闸收敛/敌意背离）
++ TopicAffinity（_topics 亲和 EMA+衰减+LRU）的 ingest 学习，prompt_line 出风格漂移/话题提示
+两类轻线索，经 fragment 接进心象（STATE 档）。
+PR-C：ExpressionPrefs（学习+过滤 drive 三bit）+ CopingTable（coping 指令 PINNED）+ 可改信念 facets。
+PR-D：life 双向（interest_hint 反哺 life-sim，复用 top_topics/select_proactive_topic）+ WebUI 观测。
 
 落地前已逐行核验、就地修正设计文档的硬伤（见 memory wave6-adaptation-grounding）：
 ExpressionPrefs 的 emoji 维【砍掉】（lexicon 无干净源）；风格三轴键用 UserModel 真实键
@@ -26,6 +28,9 @@ from __future__ import annotations
 
 import math
 from typing import Any
+
+from sylanne_alpha.v2core.contracts import BeatContext, Phase
+from sylanne_alpha.v2core.domains.focus import is_substantive
 
 # —— ExpressionPrefs ——（emoji 维砍掉：TextSignals 无 emoji_density 等干净源，warm 词表混
 # emoji 是脏代理）。其余三维从 lexicon 现有字段干净导出（PR-B 实装观测）。
@@ -40,6 +45,20 @@ _COPING_INIT = 0.5              # 均匀有效度先验：稀疏 distress 事件
 # —— TopicAffinity ——
 _TOPIC_CAP = 24                 # LRU 上限：偏好图而非全量历史
 _TOPIC_KEY_MAX = 40             # 话题键最大字符（与 FocusDomain 话头 _GIST_MAX 同标）
+
+# —— StyleMirror（PR-B）—— [CAT / Giles：关系条件化趋同；陌生人不趋同，敌意背离]
+_STYLE_DIMS = ("len", "punct", "warmth")   # 镜像 UserModel._style_sketch 的【真实键】（'len' 非 'length'）
+_STYLE_CONVERGE_RATE = 0.03     # 显式收敛步长；LLM 已隐式 accommodate ~0.01-0.02，合计落在 CAT 0.04-0.05 经验带，勿调高
+_STYLE_BOND_FLOOR = 0.15        # bond 低于此不收敛（陌生人不趋同，CAT 核心）
+_STYLE_DIVERGE_RATE = 0.02      # 敌意（defensiveness 高）时背离步长
+_DEFENSIVE_GATE = 0.25          # defensiveness ≥ 此判敌意 → 背离
+_STYLE_HINT = "和你聊久了，用词节奏在不知不觉往你那边靠"
+
+# —— TopicAffinity 学习（PR-B）—— [EVOLVCONV：偏好图非全量历史]
+_TOPIC_AFFINITY_ALPHA = 0.20    # 亲和 EMA 步长（话题喜好按对话速度漂，比风格快、比反射慢）
+_TOPIC_DECAY = 0.98             # 每 EVOLVE 全表乘性衰减（没碰的话题降温——偏好是活的不是账本）
+_TOPIC_PROACTIVE_FLOOR = 0.35   # 主动提起话题的最低亲和
+_TOPIC_HINT_MAX = 12            # 话题提示只用够短、像主题词的话头（长句 gist 不当话题报，FocusDomain 不给主题词级粒度）
 
 
 def _is_num(v: Any) -> bool:
@@ -75,7 +94,7 @@ def _clamp01(x: float) -> float:
 
 
 class AdaptationDomain:
-    """适应领域 agent。PR-A：写仅持久化骨架；学习/注入随后续 PR。"""
+    """适应领域 agent。PR-B：StyleMirror + TopicAffinity 学习（ingest）+ 心象注入（prompt_line）。"""
 
     name = "adaptation"
 
@@ -97,6 +116,134 @@ class AdaptationDomain:
         self._coping: dict[str, float] = {s: _COPING_INIT for s in _COPING_STRATEGIES}
         self._coping_pending: list[dict] = []
         self._last_proactive_topic: str = ""
+
+    # ---- 写接口（仅 EVOLVE，单一写者；纯算术、零 LLM、零 IO）----
+
+    def ingest(self, ctx: BeatContext) -> None:
+        """EVOLVE 唯一写：①口吻向你收敛（bond 闸、敌意背离）；②话题亲和 EMA+衰减+LRU。
+
+        跨域只读 usermodel(bond/style_sketch/defensiveness) 与 focus(current)——读不写，
+        符合铁律①单一写者。任一子步自带容错，单步异常不拖垮另一步、不抛出（TurnRunner
+        的 EVOLVE 循环会吞异常并静默，故 ingest 自身必须稳）。
+        """
+        if ctx.phase is not Phase.EVOLVE:
+            return
+        try:
+            turn = int(getattr(ctx.body, "turns", 0) or 0)
+        except (TypeError, ValueError):
+            turn = 0
+        # 两子步各自隔离：一步崩不拖垮另一步、ingest 整体不抛（TurnRunner 只静默 log）。
+        try:
+            self._ingest_style(ctx)
+        except Exception:
+            pass
+        try:
+            self._ingest_topics(ctx, turn)
+        except Exception:
+            pass
+
+    def _ingest_style(self, ctx: BeatContext) -> None:
+        """StyleMirror：bond≥floor 且不敌意 → 口吻向你的风格收敛；敌意 → 背离；否则不动。"""
+        um = ctx.domain("usermodel")
+        if um is None:
+            return
+        try:
+            bond = float(um.bond())
+            sketch = um.style_sketch()
+            defensiveness = float(um.expectation().get("defensiveness", 0.0) or 0.0)
+        except (AttributeError, TypeError, ValueError):
+            return
+        if not isinstance(sketch, dict) or not sketch:
+            return  # 还没观测到你的风格（首条消息前）→ 不动
+        if bond >= _STYLE_BOND_FLOOR and defensiveness < _DEFENSIVE_GATE:
+            rate = _STYLE_CONVERGE_RATE
+        elif defensiveness >= _DEFENSIVE_GATE:
+            rate = -_STYLE_DIVERGE_RATE  # 敌意 → 背离
+        else:
+            return  # bond 不够且不敌意 → 陌生人不趋同
+        for d in _STYLE_DIMS:
+            v = sketch.get(d)
+            if not _is_num(v):
+                continue
+            cur = self._style_target.get(d, float(v))  # 惰性初始化为首次观测值
+            self._style_target[d] = cur + rate * (float(v) - cur)
+
+    def _ingest_topics(self, ctx: BeatContext, turn: int) -> None:
+        """TopicAffinity：当前实义话头亲和 EMA 上涨（投入/唤起加权）；全表衰减；LRU 封顶。"""
+        for rec in self._topics.values():  # 全表降温（没碰的话题冷却）
+            rec["aff"] = _clamp01(rec["aff"] * _TOPIC_DECAY)
+        focus = ctx.domain("focus")
+        topic = ""
+        if focus is not None:
+            try:
+                topic = (focus.current or "").strip()
+            except (AttributeError, TypeError):
+                topic = ""
+        if topic and is_substantive(topic):
+            weight = _clamp01(0.5 + 0.5 * self._engagement(ctx) + 0.3 * self._arousal(ctx))
+            key = topic[:_TOPIC_KEY_MAX]
+            rec = self._topics.get(key)
+            if rec is None:
+                rec = {"aff": 0.0, "last_turn": turn, "raised_turn": 0}
+                self._topics[key] = rec
+            rec["aff"] = _clamp01(rec["aff"] + _TOPIC_AFFINITY_ALPHA * weight * (1.0 - rec["aff"]))
+            rec["last_turn"] = turn
+        if len(self._topics) > _TOPIC_CAP:  # LRU：留 last_turn 最新的一批
+            keep = sorted(self._topics.items(), key=lambda kv: kv[1]["last_turn"], reverse=True)[:_TOPIC_CAP]
+            self._topics = dict(keep)
+
+    @staticmethod
+    def _engagement(ctx: BeatContext) -> float:
+        sig = ctx.scratch.get("signals")
+        try:
+            return _clamp01(float(getattr(sig, "engagement_cue", 0.0) or 0.0))
+        except (TypeError, ValueError):
+            return 0.0
+
+    @staticmethod
+    def _arousal(ctx: BeatContext) -> float:
+        a = ctx.scratch.get("assessment")  # AppraisalCapability 仅在有用户文本轮写（mentalize.py）
+        if not isinstance(a, dict):
+            return 0.0
+        try:
+            return _clamp01(float(a.get("arousal", 0.0) or 0.0))
+        except (TypeError, ValueError):
+            return 0.0
+
+    # ---- 读接口（PERCEPT/REQUEST，纯只读）----
+
+    def select_proactive_topic(self) -> str:
+        """最高亲和且过 floor 的话题（供心象话题提示 + PR-D 主动/兴趣）。无则空串。"""
+        cands = [(v["aff"], k) for k, v in self._topics.items()
+                 if v["aff"] >= _TOPIC_PROACTIVE_FLOOR]
+        if not cands:
+            return ""
+        cands.sort(reverse=True)
+        return cands[0][1]
+
+    def top_topics(self, limit: int = 3) -> list[str]:
+        """亲和降序的话题（观测/测试/PR-D 兴趣 hint）。"""
+        ranked = sorted(self._topics.items(), key=lambda kv: kv[1]["aff"], reverse=True)
+        return [k for k, _ in ranked[:max(0, limit)]]
+
+    def prompt_line(self, current_text: str = "", bond: float = 0.0) -> str:
+        """心象「适应层」行（纯模板、零数字、零 LLM）。PR-B 出两类轻提示：
+
+        - 风格漂移：bond 过 floor 且已学到你的风格 → 一句"用词往你靠"。
+        - 话题亲和：当前消息低信息（无话可接）且有够短、过 floor 的高亲和话题 → 轻轻往那带。
+        coping 指令 + user_distress 参数随 PR-C 补（届时改签名 + fragment 调用）。
+        """
+        bits: list[str] = []
+        try:
+            if bond >= _STYLE_BOND_FLOOR and self._style_target:
+                bits.append(_STYLE_HINT)
+            if current_text and not is_substantive(current_text):
+                topic = self.select_proactive_topic()
+                if topic and len(topic) <= _TOPIC_HINT_MAX:
+                    bits.append(f"你常爱聊「{topic}」，接得上的话可以自然往那带一带")
+        except Exception:
+            return ""
+        return "；".join(bits)
 
     # ---- 持久化（铁律④：旧档无此域=空起步；缺字段/脏类型保持初值）----
 
