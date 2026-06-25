@@ -30,9 +30,9 @@ jobs:
       - name: Check if release already exists
         id: check
         run: |
-          if gh release view "v${{ steps.version.outputs.version }}" &>/dev/null; then
+          if gh release view "Embodiment-${{ steps.version.outputs.version }}" &>/dev/null; then
             echo "exists=true" >> "$GITHUB_OUTPUT"
-            echo "Release v${{ steps.version.outputs.version }} already exists, skipping"
+            echo "Release Embodiment-${{ steps.version.outputs.version }} already exists, skipping"
           else
             echo "exists=false" >> "$GITHUB_OUTPUT"
           fi
@@ -146,7 +146,7 @@ jobs:
         if: steps.check.outputs.exists == 'false'
         uses: softprops/action-gh-release@v3
         with:
-          tag_name: "v${{ steps.version.outputs.version }}"
+          tag_name: "Embodiment-${{ steps.version.outputs.version }}"
           name: "Sylanne-Embodiment ${{ steps.version.outputs.version }}"
           body: ${{ steps.changelog.outputs.body }}
           generate_release_notes: false
