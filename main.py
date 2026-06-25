@@ -221,6 +221,12 @@ _INTERNAL_LLM_CALL: contextvars.ContextVar[bool] = contextvars.ContextVar(
     "_INTERNAL_LLM_CALL", default=False
 )
 PROACTIVE_SCHEDULER_WAKE_DELAY_SECONDS = 30.0
+# PR-A5：life sim tick 后节流落盘 KV 的最小间隔（秒）。区间 60-180s，
+# 默认 90s：既保护崩溃不丢太多事件，又避免每 tick（默认 1800s）都写 IO。
+_LIFE_SIM_SAVE_MIN_GAP_SECONDS = 90.0
+# PR-H 解耦：关系层独立节流间隔。比 life_sim 短——/bond·/unbond 是用户即时动作，
+# 期望几秒内落盘；rel_register 高频累积则靠节流压成稀疏写。
+_REL_STATE_SAVE_MIN_GAP_SECONDS = 10.0
 PROACTIVE_SCHEDULER_IDLE_DELAY_SECONDS = 1800.0
 
 from sylanne_alpha.utils import safe_ensure_future  # noqa: E402, F401
@@ -432,7 +438,20 @@ class EmotionalStatePlugin(Star):
         # 生命模拟器：idle 时自主演化身体状态
         self._life_simulator = LifeSimulator(config=self._config)
         self._life_simulator_started = False
+        # PR-A5：life sim 节流落盘状态（tick 间最多 _throttle 秒一次 KV 写）
+        self._life_sim_last_save_ts: float = 0.0
+        self._life_sim_dirty_in_flight: bool = False
+        # PR-H 解耦：关系层独立节流落盘状态（不再折进 life_sim 落盘——
+        # 否则 life_sim 关掉时 throttled 路径整段被早返回挡掉，只剩 terminate 兜底）。
+        self._rel_state_last_save_ts: float = 0.0
+        self._rel_state_dirty_in_flight: bool = False
+        # trailing-edge：节流窗内被丢弃的变更标脏，由后续触发补落（防非优雅退出丢尾改）。
+        self._rel_state_pending_dirty: bool = False
         self._meltdown_nonces: BoundedDict = BoundedDict(maxsize=50, ttl=300)
+        # M8：主动发言反馈 audit（feedback_pressure 单一数据源）。按 session_key 索引，
+        # 值为 deque（_record_dispatch_feedback 写、derive_dispatch_policy 读）。
+        # BoundedDict LRU 防会话无限增长；每会话内 deque maxlen 防单会话条目无界。
+        self._proactive_dispatch_audit: BoundedDict = BoundedDict(maxsize=100)
         # 社交场收集器：群聊氛围感知
         self._social_field = SocialFieldCollector(config=self._config)
         # 后台投递队列已迁入 self._store（CP8-P2 批2）
@@ -553,6 +572,13 @@ class EmotionalStatePlugin(Star):
             (f"/{P}/api/config_export", "config_export_handler", ["GET"]),
             (f"/{P}/api/config_import", "config_import_handler", ["POST"]),
             (f"/{P}/api/widget-state", "widget_state_handler", ["GET"]),
+            # Phase 4：生活观测面板（与独立 webui_server 镜像）
+            (f"/{P}/api/life/status", "life_status_handler", ["GET"]),
+            (f"/{P}/api/life/events", "life_events_handler", ["GET"]),
+            (f"/{P}/api/life/projects", "life_projects_handler", ["GET"]),
+            (f"/{P}/api/life/audit", "life_audit_handler", ["GET"]),
+            (f"/{P}/api/life/diagnostics", "life_diagnostics_handler", ["GET"]),
+            (f"/{P}/api/life/controls", "life_controls_handler", ["POST"]),
         ]
         for path, handler_name, methods in webui_routes:
             handler = getattr(wr, handler_name, None)
@@ -2296,6 +2322,20 @@ class EmotionalStatePlugin(Star):
         ):
             yield chunk
 
+    @filter.command("bond")
+    async def bond_command(self, event: Any = None, **kwargs: Any) -> Any:
+        """Phase 2B：标当前会话为亲密关系（仅主人 sylanne_alpha_owner_id 可用）。"""
+        from sylanne_alpha import relationship_layer as _rl
+        async for text in _rl.bond_command(self, event):
+            yield event.plain_result(text) if hasattr(event, "plain_result") else text
+
+    @filter.command("unbond")
+    async def unbond_command(self, event: Any = None, **kwargs: Any) -> Any:
+        """Phase 2B：取消当前会话亲密标记，恢复自动判定（仅主人可用）。"""
+        from sylanne_alpha import relationship_layer as _rl
+        async for text in _rl.unbond_command(self, event):
+            yield event.plain_result(text) if hasattr(event, "plain_result") else text
+
     async def get_bot_integrated_self_state_tool(
         self, event: Any = None, detail: str = "summary", **kwargs: Any
     ) -> Any:
@@ -2379,7 +2419,9 @@ class EmotionalStatePlugin(Star):
             emotion_getter=pipe._life_sim_emotion,
             body_delta_callback=pipe._life_sim_body_delta,
             persona_getter=pipe._life_sim_persona_getter,
+            memory_summary_getter=pipe._life_sim_memory_summary,
             countdown_callback=self._life_sim_adjust_countdown,
+            state_dirty_callback=self._life_sim_throttled_save,
         )
         # 启动全局自驱心跳（替代原 life_sim.start() 的后台循环）。
         # LifeSim 持久化状态恢复在 async initialize 里 await（KV 读为异步）。
@@ -2400,6 +2442,15 @@ class EmotionalStatePlugin(Star):
                     life_sim.from_dict(saved)
         except Exception as e:
             logger.debug(f"Sylanne life sim state restore skipped: {e}")
+        # Phase 2B / PR-H：恢复关系层状态（register_state + override，独立 KV key）
+        try:
+            if self._has_kv_api():
+                from sylanne_alpha import relationship_layer as _rl
+                rel_saved = await self.get_kv_data(_rl._KV_KEY, None)
+                if rel_saved and isinstance(rel_saved, dict):
+                    _rl.restore(self, rel_saved)
+        except Exception as e:
+            logger.debug(f"Sylanne relationship state restore skipped: {e}")
         try:
             self._start_life_simulator()
         except Exception as e:
@@ -2424,6 +2475,100 @@ class EmotionalStatePlugin(Star):
             await bridge.adjust_countdown(session_key)
         except Exception as e:
             logger.warning(f"Sylanne adjust_countdown callback: {e}", exc_info=True)
+
+    async def _life_sim_throttled_save(self) -> None:
+        """PR-A5：tick 后节流落盘 life sim 状态到 KV。
+
+        规则（修 H4：原基线仅 initialize/terminate 读写，崩溃丢全部演化）：
+        - 距上次落盘 < _LIFE_SIM_SAVE_MIN_GAP_SECONDS（默认 90s）则跳过。
+        - 上一次保存仍在进行则跳过（_dirty_in_flight 防重入）。
+        - 无 KV API 则跳过（与 initialize/terminate 的 _has_kv_api 一致）。
+        - 失败静默（不阻断演化心跳），最后一次仍由 terminate 兜底。
+        """
+        now = time.time()
+        if self._life_sim_dirty_in_flight:
+            return
+        if (now - self._life_sim_last_save_ts) < _LIFE_SIM_SAVE_MIN_GAP_SECONDS:
+            return
+        if not self._has_kv_api():
+            return
+        life_sim = getattr(self, "_life_simulator", None)
+        if life_sim is None:
+            return
+        self._life_sim_dirty_in_flight = True
+        self._life_sim_last_save_ts = now
+        try:
+            await self.put_kv_data("sylanne_life_sim_state", life_sim.to_dict())
+        except Exception as e:
+            logger.debug(f"Sylanne life sim throttled save skipped: {e}")
+        finally:
+            self._life_sim_dirty_in_flight = False
+
+    async def _rel_state_throttled_save(self) -> None:
+        """PR-H 解耦：关系层状态独立节流落盘到 KV（独立 KV key）。
+
+        由真正写关系层状态的三点位触发（rel_register 累积 / /bond / /unbond），
+        经 relationship_layer.request_persist → safe_ensure_future 后台跑。
+        与 _life_sim_throttled_save 完全独立——life_sim 关闭不影响关系层落盘。
+
+        leading+trailing edge 节流：
+        - 窗外（距上次 ≥ gap）：立即落盘（leading edge）。
+        - 窗内：标脏 + 调度一个窗口末兜底落盘（trailing edge），确保最后一次改
+          （如 /bond 紧接 /unbond）即便无后续事件、非优雅退出也能落，不丢尾改。
+        """
+        now = time.time()
+        gap = now - self._rel_state_last_save_ts
+        if gap < _REL_STATE_SAVE_MIN_GAP_SECONDS:
+            # 节流窗内：标脏并调度窗口末强制落盘（只调度一次，避免任务堆积）
+            if not self._rel_state_pending_dirty:
+                self._rel_state_pending_dirty = True
+                delay = _REL_STATE_SAVE_MIN_GAP_SECONDS - gap
+                from sylanne_alpha.infra import safe_ensure_future
+
+                async def _trailing_save() -> None:
+                    try:
+                        await asyncio.sleep(max(0.0, delay))
+                    except Exception:
+                        return
+                    # 窗末兜底：仅当仍有未落的尾改才落盘（延迟期间若已被 leading
+                    # edge 落过，pending_dirty 已清，跳过以免冗余写）
+                    if self._rel_state_pending_dirty:
+                        await self._do_rel_state_save()
+
+                safe_ensure_future(
+                    _trailing_save(),
+                    name="rel_state_trailing_save",
+                    task_list=getattr(self, "_background_tasks", None),
+                )
+            return
+        await self._do_rel_state_save()
+
+    async def _do_rel_state_save(self) -> None:
+        """实际落盘（绕过节流，供 leading edge 与 trailing 兜底共用）。防重入 + 失败静默。"""
+        if self._rel_state_dirty_in_flight:
+            self._rel_state_pending_dirty = True  # 在途时来的改，落完再补
+            return
+        if not self._has_kv_api():
+            return
+        self._rel_state_dirty_in_flight = True
+        self._rel_state_last_save_ts = time.time()
+        self._rel_state_pending_dirty = False
+        try:
+            from sylanne_alpha import relationship_layer as _rl
+            await self.put_kv_data(_rl._KV_KEY, _rl.snapshot(self))
+        except Exception as e:
+            logger.debug(f"Sylanne relationship state throttled save skipped: {e}")
+        finally:
+            self._rel_state_dirty_in_flight = False
+            # 落盘期间若又有改（pending_dirty 被重新置位），再补一次
+            if self._rel_state_pending_dirty:
+                self._rel_state_pending_dirty = False
+                from sylanne_alpha.infra import safe_ensure_future
+                safe_ensure_future(
+                    self._do_rel_state_save(),
+                    name="rel_state_followup_save",
+                    task_list=getattr(self, "_background_tasks", None),
+                )
 
     async def terminate(self) -> None:
         """插件卸载/更新前的清理：停止所有后台任务、关闭 WebUI、持久化状态。"""
@@ -2495,6 +2640,13 @@ class EmotionalStatePlugin(Star):
                 await self.put_kv_data("sylanne_life_sim_state", life_sim.to_dict())
         except Exception as e:
             logger.debug(f"Sylanne life sim state persist skipped: {e}")
+        # Phase 2B / PR-H：关系层状态终扫落盘（独立 KV key）
+        try:
+            if self._has_kv_api():
+                from sylanne_alpha import relationship_layer as _rl
+                await self.put_kv_data(_rl._KV_KEY, _rl.snapshot(self))
+        except Exception as e:
+            logger.debug(f"Sylanne relationship state persist skipped: {e}")
         # 关闭独立 WebUI 服务器
         try:
             await stop_webui_server()

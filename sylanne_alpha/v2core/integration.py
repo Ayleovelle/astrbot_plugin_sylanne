@@ -378,6 +378,19 @@ async def apply_v2core_request(plugin: Any, event: Any, request: Any) -> None:
         rt["pending"] = {"ctx": ctx, "ts": time.time(), "text": text}
         rt["pending_assessment"] = ctx.scratch.get("assessment") or None
 
+        # Phase 2B / PR-G：关系类型分类（off-path，不阻塞请求）。低频 gated；
+        # 经后台任务调 LLM 判关系语域、累积进壳层 store。绝不 inline await、不进 SDK 域。
+        try:
+            from sylanne_alpha.v2core import rel_register as _relreg
+            if _relreg.should_classify(rt, time.time()):
+                from sylanne_alpha.infra import safe_ensure_future
+                safe_ensure_future(
+                    _relreg.classify_and_store(plugin, session_key, event, text),
+                    name="rel_register_classify",
+                )
+        except Exception as _exc:  # noqa: BLE001 - 分类失败绝不影响请求
+            logger.debug("Sylanne rel_register dispatch skipped: %s", _exc)
+
         # 心象片段 → system prompt（主动脉：认知影响言语）
         from sylanne_alpha.v2core.fragment import build_mind_fragment
         frag = build_mind_fragment(ctx, rt["domains"])
