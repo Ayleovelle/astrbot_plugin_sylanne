@@ -88,6 +88,54 @@ def test_expr_clamped_to_unit() -> None:
     assert ad._expr["directness"] == 0.5
 
 
+def test_load_nonfinite_turn_does_not_crash() -> None:
+    """机器人 review：'nan'/'inf' 字符串经 _num 变 float→ int() 抛 ValueError/OverflowError。
+
+    回归：修复前 int(float('nan')) 废掉整条 load_dict；修复后 _num 把非有限回落 0。
+    """
+    ad = AdaptationDomain()
+    ad.load_dict({
+        "topics": {"x": {"aff": 0.5, "last_turn": "nan", "raised_turn": "inf"}},
+        "coping_pending": [{"strategy": "gentle_probe", "base_distress": 0.3, "turn": "nan"}],
+    })
+    assert ad._topics["x"]["last_turn"] == 0
+    assert ad._topics["x"]["raised_turn"] == 0
+    assert ad._coping_pending[0]["turn"] == 0
+
+
+def test_bool_does_not_pollute_topic_numbers() -> None:
+    """机器人 review(gemini high)：topics/pending 直调 _num，bool 会污染数值字段。
+
+    回归：修复前 _num(True)=1.0 → aff=1.0/last_turn=1；修复后 _num 挡 bool 回落 0。
+    """
+    ad = AdaptationDomain()
+    ad.load_dict({"topics": {"x": {"aff": True, "last_turn": True, "raised_turn": 0}}})
+    assert ad._topics["x"]["aff"] == 0.0
+    assert ad._topics["x"]["last_turn"] == 0
+
+
+def test_load_dict_rejects_nondict() -> None:
+    """机器人 review(gemini medium)：非空非 dict（list/str）→ not data 为 False → .get 崩。
+
+    回归：修复前 'corrupted'.get 抛 AttributeError；修复后 isinstance 守卫空起步。
+    """
+    ad = AdaptationDomain()
+    ad.load_dict(["corrupted"])  # type: ignore[arg-type]
+    ad.load_dict("corrupted")    # type: ignore[arg-type]
+    assert ad._expr == {"verbosity": 0.5, "formality": 0.5, "directness": 0.5}
+    assert ad._coping == {s: 0.5 for s in _COPING_STRATEGIES}
+
+
+def test_nonfinite_in_expr_keeps_prior() -> None:
+    """非有限 float 进 expr → _is_num 加 isfinite 后判 False → 保持先验，不被 clamp 成端值。"""
+    ad = AdaptationDomain()
+    ad.load_dict({"expr": {"verbosity": float("inf"),
+                           "formality": float("nan"), "directness": 0.8}})
+    assert ad._expr["verbosity"] == 0.5   # 修复前 _is_num(inf)=True → clamp 成 1.0
+    assert ad._expr["formality"] == 0.5
+    assert ad._expr["directness"] == 0.8
+
+
 def test_topics_lru_capped_on_load() -> None:
     # 喂 30 个话题，last_turn 各不同 → 加载后只留 24 个（last_turn 最新的一批）
     big = {f"t{i}": {"aff": 0.3, "last_turn": i, "raised_turn": 0} for i in range(30)}

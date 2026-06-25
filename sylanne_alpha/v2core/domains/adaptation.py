@@ -24,6 +24,7 @@ ExpressionPrefs 的 emoji 维【砍掉】（lexicon 无干净源）；风格三�
 
 from __future__ import annotations
 
+import math
 from typing import Any
 
 # —— ExpressionPrefs ——（emoji 维砍掉：TextSignals 无 emoji_density 等干净源，warm 词表混
@@ -42,15 +43,31 @@ _TOPIC_KEY_MAX = 40             # 话题键最大字符（与 FocusDomain 话头
 
 
 def _is_num(v: Any) -> bool:
-    """是不是真数值（排除 bool——bool 是 int 子类，会污染数值字段）。"""
-    return isinstance(v, (int, float)) and not isinstance(v, bool)
+    """是不是真【有限】数值。排除 bool（int 子类，会污染数值字段）；排除 nan/inf。
+
+    int 恒有限（且巨整数喂 math.isfinite 会 OverflowError），故 int 直接放行；只对
+    float 验有限性。用于 expr/coping/style_target 的"采纳 vs 保持先验"门控。
+    """
+    if isinstance(v, bool):
+        return False
+    if isinstance(v, int):
+        return True
+    return isinstance(v, float) and math.isfinite(v)
 
 
 def _num(v: Any, default: float = 0.0) -> float:
-    try:
-        return float(v)
-    except (TypeError, ValueError):
+    """容缺转 float：bool / 不可解析 / 非有限（nan/inf）/ 巨整数溢出一律回落 default。
+
+    回落非有限是关键：_load_topics/_load_pending 随后对结果做 int()，int(nan) 抛
+    ValueError、int(inf) 抛 OverflowError——脏档（手改/JSON NaN 往返）会废掉整条 load_dict。
+    """
+    if isinstance(v, bool):
         return default
+    try:
+        x = float(v)
+    except (TypeError, ValueError, OverflowError):
+        return default
+    return x if math.isfinite(x) else default
 
 
 def _clamp01(x: float) -> float:
@@ -94,7 +111,7 @@ class AdaptationDomain:
         }
 
     def load_dict(self, data: dict[str, Any]) -> None:
-        if not data:
+        if not isinstance(data, dict):   # 非 dict（list/str/None 脏档）→ 空起步不崩
             return
 
         st = data.get("style_target")
