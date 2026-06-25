@@ -633,7 +633,7 @@ async def start_webui_server(plugin: Any, host: str = "127.0.0.1", port: int = 2
         )
         if not os.path.exists(logo_path):
             return web.Response(text="Not Found", status=404)
-        with open(logo_path, "rb") as f:
+        with open(logo_path, "rb") as f:  # noqa: ASYNC230 (静态小文件读，改 to_thread 留独立 fix PR)
             data = f.read()
         return web.Response(body=data, content_type="image/png")
 
@@ -1650,7 +1650,7 @@ async def start_webui_server(plugin: Any, host: str = "127.0.0.1", port: int = 2
 
     # Keep running until cancelled
     try:
-        while True:
+        while True:  # noqa: ASYNC110 (sleep-until-cancelled 惯用法，ASYNC110 在此属过度报警)
             await asyncio.sleep(3600)
     except asyncio.CancelledError:
         await runner.cleanup()

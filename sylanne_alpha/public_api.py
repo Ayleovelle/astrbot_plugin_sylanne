@@ -1637,7 +1637,7 @@ class PublicAPI:
         """调用内部评估器 LLM，带并发限制保护。"""
         p = self._p
         limit = self._internal_assessor_llm_concurrency_limit()
-        while p._internal_assessor_llm_inflight >= limit:
+        while p._internal_assessor_llm_inflight >= limit:  # noqa: ASYNC110 (手写并发闸忙等，改 Semaphore 留独立 fix PR)
             await asyncio.sleep(0.001)
         p._internal_assessor_llm_inflight += 1
         try:
