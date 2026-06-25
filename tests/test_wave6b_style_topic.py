@@ -178,5 +178,39 @@ def test_ingest_style_failure_does_not_block_topics() -> None:
 
 def test_prompt_line_returns_empty_on_internal_error() -> None:
     ad = AdaptationDomain()
-    ad._topics = {"x": "notadict"}     # select_proactive_topic 遍历时 TypeError
+    ad._topics = {"x": "notadict"}     # select_proactive_topic 遍历时本会 TypeError
     assert ad.prompt_line(current_text="嗯", bond=0.0) == ""
+
+
+# ---- review 回归（gemini + sourcery #42）-----------------------------------
+
+def test_divergence_clamps_len_punct_nonneg() -> None:
+    """持续敌意背离不得把 len/punct 推成负数（物理非负，gemini review）。warmth 可负不夹。"""
+    ad = AdaptationDomain()
+    ad._style_target = {"len": 0.1, "punct": 0.1, "warmth": 0.0}
+    for _ in range(50):  # 反复背离：sketch 比当前大 → 背离把目标往下推
+        ad.ingest(_ctx(domains={"usermodel": _um(0.5, {"len": 9.0, "punct": 9.0, "warmth": 0.0},
+                                                  defensiveness=0.6), "focus": _focus("")}))
+    assert ad._style_target["len"] >= 0.0
+    assert ad._style_target["punct"] >= 0.0
+
+
+def test_new_topic_raised_turn_is_current() -> None:
+    """新话题 raised_turn 记当前轮次（非硬编码 0，gemini review）。"""
+    ad = AdaptationDomain()
+    ad.ingest(_ctx(domains={"usermodel": _um(), "focus": _focus("毕设")},
+                   scratch={"signals": read_signals("毕设"), "assessment": {}}, turns=7))
+    assert ad._topics["毕设"]["raised_turn"] == 7
+
+
+def test_malformed_topic_record_does_not_abort_decay() -> None:
+    """单条畸形话题记录被跳过，不中断其余话题的衰减/更新（sourcery review）。"""
+    ad = AdaptationDomain()
+    ad._topics = {"好": {"aff": 0.8, "last_turn": 1, "raised_turn": 1}, "坏": "notadict"}
+    ad.ingest(_ctx(domains={"usermodel": _um(), "focus": _focus("新话题")},
+                   scratch={"signals": read_signals("新话题"), "assessment": {}}, turns=9))
+    assert abs(ad._topics["好"]["aff"] - 0.8 * 0.98) < 1e-6   # 好记录照常衰减
+    assert "新话题" in ad._topics                              # 新话题照常记录
+    # 畸形记录不绊倒读方法
+    assert isinstance(ad.top_topics(), list)
+    assert isinstance(ad.select_proactive_topic(), str)

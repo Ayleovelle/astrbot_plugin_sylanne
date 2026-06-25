@@ -26,11 +26,14 @@ ExpressionPrefs 的 emoji 维【砍掉】（lexicon 无干净源）；风格三�
 
 from __future__ import annotations
 
+import logging
 import math
 from typing import Any
 
 from sylanne_alpha.v2core.contracts import BeatContext, Phase
 from sylanne_alpha.v2core.domains.focus import is_substantive
+
+_log = logging.getLogger(__name__)
 
 # —— ExpressionPrefs ——（emoji 维砍掉：TextSignals 无 emoji_density 等干净源，warm 词表混
 # emoji 是脏代理）。其余三维从 lexicon 现有字段干净导出（PR-B 实装观测）。
@@ -136,11 +139,11 @@ class AdaptationDomain:
         try:
             self._ingest_style(ctx)
         except Exception:
-            pass
+            _log.debug("adaptation style ingest skipped", exc_info=True)
         try:
             self._ingest_topics(ctx, turn)
         except Exception:
-            pass
+            _log.debug("adaptation topic ingest skipped", exc_info=True)
 
     def _ingest_style(self, ctx: BeatContext) -> None:
         """StyleMirror：bond≥floor 且不敌意 → 口吻向你的风格收敛；敌意 → 背离；否则不动。"""
@@ -166,12 +169,19 @@ class AdaptationDomain:
             if not _is_num(v):
                 continue
             cur = self._style_target.get(d, float(v))  # 惰性初始化为首次观测值
-            self._style_target[d] = cur + rate * (float(v) - cur)
+            new_val = cur + rate * (float(v) - cur)
+            if d in ("len", "punct"):
+                new_val = max(0.0, new_val)  # 长度/标点密度物理非负，持续背离不得跌破 0（gemini review）
+            self._style_target[d] = new_val
 
     def _ingest_topics(self, ctx: BeatContext, turn: int) -> None:
-        """TopicAffinity：当前实义话头亲和 EMA 上涨（投入/唤起加权）；全表衰减；LRU 封顶。"""
+        """TopicAffinity：当前实义话头亲和 EMA 上涨（投入/唤起加权）；全表衰减；LRU 封顶。
+
+        每条记录做形状守卫：畸形/非数值条目被跳过而非中断整批（防部分迁移/损坏，sourcery review）。
+        """
         for rec in self._topics.values():  # 全表降温（没碰的话题冷却）
-            rec["aff"] = _clamp01(rec["aff"] * _TOPIC_DECAY)
+            if isinstance(rec, dict) and _is_num(rec.get("aff")):
+                rec["aff"] = _clamp01(float(rec["aff"]) * _TOPIC_DECAY)
         focus = ctx.domain("focus")
         topic = ""
         if focus is not None:
@@ -183,14 +193,25 @@ class AdaptationDomain:
             weight = _clamp01(0.5 + 0.5 * self._engagement(ctx) + 0.3 * self._arousal(ctx))
             key = topic[:_TOPIC_KEY_MAX]
             rec = self._topics.get(key)
-            if rec is None:
-                rec = {"aff": 0.0, "last_turn": turn, "raised_turn": 0}
+            if not isinstance(rec, dict) or not _is_num(rec.get("aff")):  # 新建或修复畸形
+                rec = {"aff": 0.0, "last_turn": turn, "raised_turn": turn}
                 self._topics[key] = rec
-            rec["aff"] = _clamp01(rec["aff"] + _TOPIC_AFFINITY_ALPHA * weight * (1.0 - rec["aff"]))
+            aff = float(rec["aff"])
+            rec["aff"] = _clamp01(aff + _TOPIC_AFFINITY_ALPHA * weight * (1.0 - aff))
             rec["last_turn"] = turn
         if len(self._topics) > _TOPIC_CAP:  # LRU：留 last_turn 最新的一批
-            keep = sorted(self._topics.items(), key=lambda kv: kv[1]["last_turn"], reverse=True)[:_TOPIC_CAP]
+            keep = sorted(self._topics.items(),
+                          key=lambda kv: self._rec_num(kv[1], "last_turn"), reverse=True)[:_TOPIC_CAP]
             self._topics = dict(keep)
+
+    @staticmethod
+    def _rec_num(rec: Any, field: str) -> float:
+        """安全取话题记录字段数值（畸形/非数值 → 0.0），供排序/筛选不被坏记录绊倒。"""
+        if isinstance(rec, dict):
+            v = rec.get(field)
+            if _is_num(v):
+                return float(v)
+        return 0.0
 
     @staticmethod
     def _engagement(ctx: BeatContext) -> float:
@@ -214,8 +235,8 @@ class AdaptationDomain:
 
     def select_proactive_topic(self) -> str:
         """最高亲和且过 floor 的话题（供心象话题提示 + PR-D 主动/兴趣）。无则空串。"""
-        cands = [(v["aff"], k) for k, v in self._topics.items()
-                 if v["aff"] >= _TOPIC_PROACTIVE_FLOOR]
+        cands = [(self._rec_num(v, "aff"), k) for k, v in self._topics.items()]
+        cands = [(a, k) for a, k in cands if a >= _TOPIC_PROACTIVE_FLOOR]
         if not cands:
             return ""
         cands.sort(reverse=True)
@@ -223,7 +244,8 @@ class AdaptationDomain:
 
     def top_topics(self, limit: int = 3) -> list[str]:
         """亲和降序的话题（观测/测试/PR-D 兴趣 hint）。"""
-        ranked = sorted(self._topics.items(), key=lambda kv: kv[1]["aff"], reverse=True)
+        ranked = sorted(self._topics.items(),
+                        key=lambda kv: self._rec_num(kv[1], "aff"), reverse=True)
         return [k for k, _ in ranked[:max(0, limit)]]
 
     def prompt_line(self, current_text: str = "", bond: float = 0.0) -> str:
@@ -242,6 +264,7 @@ class AdaptationDomain:
                 if topic and len(topic) <= _TOPIC_HINT_MAX:
                     bits.append(f"你常爱聊「{topic}」，接得上的话可以自然往那带一带")
         except Exception:
+            _log.debug("adaptation prompt_line failed", exc_info=True)
             return ""
         return "；".join(bits)
 

@@ -176,9 +176,8 @@ def build_mind_fragment(ctx: BeatContext, domains: dict[str, Any]) -> str:
     if ad is not None and hasattr(ad, "prompt_line"):
         try:
             um_bond = 0.0
-            um_ad = domains.get("usermodel")
-            if um_ad is not None and hasattr(um_ad, "bond"):
-                um_bond = float(um_ad.bond())
+            if um is not None and hasattr(um, "bond"):  # 复用上文已取的 um（gemini review）
+                um_bond = float(um.bond())
             ad_line = ad.prompt_line(current_text=ctx.text or "", bond=um_bond)
             if ad_line:
                 state.append((4.6, _SAL_ADAPT_BASE, ad_line))
