@@ -230,6 +230,7 @@ def _runtime_for(plugin: Any, session_key: str) -> dict[str, Any]:
         OutreachCapability,
         SomaticMarkerCapability,
     )
+    from sylanne_alpha.v2core.domains.adaptation import AdaptationDomain
     from sylanne_alpha.v2core.domains.distillation import DistillationDomain
     from sylanne_alpha.v2core.domains.emotion import EmotionLedger
     from sylanne_alpha.v2core.domains.focus import FocusDomain
@@ -271,6 +272,9 @@ def _runtime_for(plugin: Any, session_key: str) -> dict[str, Any]:
         "narrative": NarrativeSelfDomain(),
         "distill": DistillationDomain(),
         "focus": FocusDomain(),
+        # Wave 6 地基（PR-A）：进 dict 即随 _save/_load_domains 自动持久化（blob 子键
+        # 'adaptation'，不撞 _version/_behavior_last_fired）；学习/注入随 PR-B/C/D 落地。
+        "adaptation": AdaptationDomain(),
     }
     try:
         ms_getter = getattr(plugin, "_memory_system_for_session", None)
