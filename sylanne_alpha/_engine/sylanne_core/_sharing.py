@@ -97,9 +97,7 @@ async def get_shared_engine(
             if slot is None:
                 # First acquire: llm is mandatory to build a new engine.
                 if llm is None:
-                    raise ValueError(
-                        f"llm is required to create a new shared engine for {key!r}"
-                    )
+                    raise ValueError(f"llm is required to create a new shared engine for {key!r}")
                 # Publish an init Future as a placeholder, then build+start OUTSIDE
                 # the lock. Concurrent acquirers see the Future and await it rather
                 # than racing into a second start(). Only on success do we swap in

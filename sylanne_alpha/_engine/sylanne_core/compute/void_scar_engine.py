@@ -15,6 +15,8 @@ import math
 from collections.abc import Callable
 from typing import Any
 
+from . import pel_core as _pel_core  # module ref so SEMANTIC_PRIOR stays monkeypatchable
+from .pel_core import N as _PEL_N
 from .scar_algebra import ScarredState
 from .void_calculus import VoidSpace
 
@@ -94,6 +96,9 @@ class VoidScarEngine:
         "_ignored_deepening",
         "_personality_detection_floor",
         "_cached_observe",
+        # PEL-Core: 1-tick-deferred assessor affect store (D-2) for x_t assembly.
+        "_pel_affect",
+        "_pel_confidence",
     )
 
     def __init__(
@@ -104,9 +109,14 @@ class VoidScarEngine:
         max_voids: int = 50,
         pressure_threshold: float = 10.0,
         scar_mlp_passes: int = 1,
+        *,
+        pel_enabled: bool = False,
     ):
         self.scar_state = ScarredState(
-            n_dims=n_dims, wound_threshold=wound_threshold, mlp_passes=scar_mlp_passes
+            n_dims=n_dims,
+            wound_threshold=wound_threshold,
+            mlp_passes=scar_mlp_passes,
+            pel_enabled=pel_enabled,
         )
         self.similarity_fn = similarity_fn or _default_similarity
         self.void_space = VoidSpace(
@@ -125,6 +135,11 @@ class VoidScarEngine:
         self._ignored_deepening = 0.05
         self._personality_detection_floor: float = 0.1
         self._cached_observe: dict[str, float] | None = None
+        # PEL deferred affect: the last assessor read (8-dim a_vec + confidence),
+        # folded into next main tick's x_t. Zero/0.0 => x_t is surprise-scaled HDC
+        # only (the unevaluated-tick case). Populated via ``store_pel_affect``.
+        self._pel_affect: list[float] = [0.0] * _PEL_N
+        self._pel_confidence: float = 0.0
 
     def process(
         self,
@@ -183,7 +198,10 @@ class VoidScarEngine:
             coupling_wounds.append(wound_result)
 
         # --- Scar Algebra step (main event) ---
-        scar_result = self.scar_state.step(ssm_input, timestamp)
+        # When PEL is active, assemble x_t = c*a_vec + (1-c)*s*h_t (design §3.1)
+        # and pass it as the main-step context so the latent core drives base.
+        pel_ctx = self._build_pel_ctx(ssm_input, surprise)
+        scar_result = self.scar_state.step(ssm_input, timestamp, pel_ctx=pel_ctx)
 
         # --- Compute coherence (emergent resonance) ---
         self._coherence = self._compute_coherence()
@@ -195,6 +213,44 @@ class VoidScarEngine:
             "coherence": self._coherence,
             "observation": self.observe(),
         }
+
+    def _build_pel_ctx(
+        self, ssm_input: list[float], surprise: float
+    ) -> tuple[list[float], float, list[float] | None, float] | None:
+        """Assemble the PEL main-step context, or ``None`` when PEL is inactive.
+
+        v2.5 redesign (B): ``x_t = s*h_t`` predicts the LIVE surprise-scaled HDC
+        afferent, so ``e0 = x_t - W_gen*mu`` is a genuine prediction error (the fix
+        for dead M1 precision); the deferred assessor affect (``a_vec``, confidence
+        ``c``) is carried SEPARATELY as a precision-weighted semantic prior, NOT
+        blended into ``x_t``. With ``SEMANTIC_PRIOR`` off this falls back to the
+        legacy value-blend ``x_t = c*a_vec + (1-c)*s*h_t`` (no prior). ``x_t`` never
+        contains prior latent state. Returns ``None`` => legacy MLP path (byte-
+        identical to today).
+        """
+        if not self.scar_state.pel_active():
+            return None
+        c = self._pel_confidence
+        a_vec = self._pel_affect
+        if _pel_core.SEMANTIC_PRIOR:
+            x_t = [surprise * (ssm_input[i] if i < len(ssm_input) else 0.0) for i in range(_PEL_N)]
+            return x_t, surprise, list(a_vec), c
+        x_t = [
+            c * (a_vec[i] if i < len(a_vec) else 0.0)
+            + (1.0 - c) * surprise * (ssm_input[i] if i < len(ssm_input) else 0.0)
+            for i in range(_PEL_N)
+        ]
+        return x_t, surprise, None, 0.0
+
+    def store_pel_affect(self, affect_vec: list[float], confidence: float) -> None:
+        """Stash the assessor's affect read for the NEXT main tick's PEL input.
+
+        Implements the 1-tick deferred fold (D-2): the main ``step()`` runs before
+        the assessor result is available, so the read drives ``mu`` on the
+        following tick. Safe to call regardless of whether PEL is enabled.
+        """
+        self._pel_affect = list(affect_vec)
+        self._pel_confidence = max(0.0, min(1.0, confidence))
 
     # Canonical dimension names for the 8-dim emotion space
     _DIM_NAMES: tuple[str, ...] = (
@@ -305,13 +361,18 @@ class VoidScarEngine:
         }
 
     def diagnostics(self) -> dict[str, Any]:
-        return {
+        out: dict[str, Any] = {
             "scar": self.scar_state.observe(),
             "void": self.void_space.diagnostics(),
             "coherence": self._coherence,
             "expression_drive": self.expression_drive(),
             "tick": self._tick,
         }
+        # PEL signal surface (additive; absent entirely when PEL is inactive).
+        pel = self.scar_state.pel_diagnostics()
+        if pel is not None:
+            out["pel"] = pel
+        return out
 
     def set_personality_params(
         self,

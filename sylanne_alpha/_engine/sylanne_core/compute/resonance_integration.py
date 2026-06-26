@@ -1,19 +1,17 @@
-"""Resonance Integration — drop-in replacement for ComputationSpine.
+"""Resonance Integration — the default serving spine (kernel.py:48-53).
 
-ResonanceSpine wraps the ResonanceField + CouplingDynamics + EmergenceTracker
-into the same interface as ComputationSpine (process/feedback/express/to_dict/
-from_dict/apply_personality). The sequential pipeline becomes iterative resonance
-while maintaining full API compatibility.
+ResonanceSpine exposes the ComputationSpine interface (process/feedback/express/
+to_dict/from_dict/apply_personality). The name is historical: the iterate-to-
+convergence "resonance field" it once wrapped is RETIRED (v2.5). The field is now
+``DeterministicFusion`` (a single deterministic coherence pass), and the emotion
+core is the predictive-coding ``PEL-Core`` (behind ``pel_core_enabled``). The 7
+modules each compute once and contribute to a single-pass result; nothing iterates
+to a fixed point. The result-dict contract is preserved for API compatibility.
 
-Design principle: the 7 modules still exist as individual computation units,
-but instead of L1→L2→...→L7, they all inject into the resonance field and
-the field converges through coupled dynamics. Expression emerges from the
-field's phase transition rather than being computed sequentially.
-
-Module mapping (vertex index → computation unit):
+Module mapping (injection index → computation unit):
   0: HDCEncoder (perception)
   1: PredictiveCodingGate (surprise/gating)
-  2: VoidScarEngine (emotional core)
+  2: VoidScarEngine (emotional core; PEL-Core when enabled)
   3: ScarSheaf (relational propagation)
   4: HGT (decision fusion)
   5: AutopoieticBoundary (self-repair)
@@ -27,8 +25,10 @@ import time
 from collections import deque
 from typing import TYPE_CHECKING, Any
 
+from . import pel_core as _pel_core  # module ref so SEMANTIC_PRIOR stays monkeypatchable
 from .autopoiesis import AutopoieticBoundary
 from .bounded_dict import BoundedDict
+from .deterministic_fusion import create_deterministic_fusion
 from .emergence import EmergenceTracker
 from .expression_policy import ExpressionPolicy
 from .hgt import HeterogeneousGraphTransformer
@@ -47,7 +47,6 @@ from .personality import (
 from .phase_transition import PhaseTransitionExpression
 from .predictive_coding import PredictiveCodingGate
 from .relational_sheaf import ScarSheaf
-from .resonance_field import create_resonance_field
 from .void_scar_engine import VoidScarEngine
 
 if TYPE_CHECKING:
@@ -117,18 +116,23 @@ class ResonanceSpine:
         "_pad_projector_cache",
         # Meta-learner (online hyperparameter adaptation)
         "_meta_learner",
+        # PEL-Core enable flag (config-gated; default off)
+        "_pel_enabled",
+        # PEL-Core D-10: last non-semantic assessor-advisable gate signal
+        "_last_assessor_advisable",
     )
 
-    def __init__(self, profile: DimensionProfile | None = None):
+    def __init__(self, profile: DimensionProfile | None = None, *, pel_enabled: bool = False):
         if profile is None:
             from ..config import build_profile
 
             profile = build_profile("lite")
         self._profile = profile
         self._tier = profile.mode
+        self._pel_enabled = pel_enabled
 
         # Resonance field + emergence
-        self._field = create_resonance_field(n_modules=7, tier=self._tier)
+        self._field = create_deterministic_fusion(n_modules=7, tier=self._tier)
         self._emergence = EmergenceTracker(window=50)
 
         # Real computation modules (same as ComputationSpine)
@@ -140,6 +144,7 @@ class ResonanceSpine:
             n_dims=profile.emotion_dim,
             similarity_fn=self._hdc_similarity,
             scar_mlp_passes=profile.scar_mlp_passes,
+            pel_enabled=pel_enabled,
         )
         self._sheaf = ScarSheaf(n0=profile.stalk_dim)
         self._hgt = HeterogeneousGraphTransformer(
@@ -183,6 +188,8 @@ class ResonanceSpine:
         self._diagnostics_enabled = False
         self._last_hdc_vec: bytearray | None = None
         self._last_surprise = 0.0
+        # D-10: default True (fail-safe — when in doubt, advise calling the assessor).
+        self._last_assessor_advisable = True
 
         # Expression policy (contextual bandit for expression decisions)
         self._expression_policy = ExpressionPolicy(
@@ -269,6 +276,9 @@ class ResonanceSpine:
         # === Module-level personality (same as ComputationSpine) ===
         self._expression.threshold = 0.9 - extraversion * 0.6
         self._engine.scar_state.wound_threshold = 0.3 + extraversion * 0.6
+        # PEL-Core: derive the latent attractor prior pi / W_gen / precisions from
+        # personality (no-op unless PEL enabled on the 8-dim core).
+        self._engine.scar_state.set_pel_priors(personality)
         self._engine.void_space._detection_threshold = 0.6 - neuroticism * 0.5
         self._engine.void_space.set_cooldown(openness)
         self._gate.precision = 0.3 + neuroticism * 0.5
@@ -286,17 +296,6 @@ class ResonanceSpine:
             silence_drop_rate=0.005 + neuroticism * 0.008,
             min_threshold_floor=0.15 + sovereignty * 0.2,
         )
-
-        # === Topology gate: initialize priors from personality ===
-        from .topology_gate import personality_to_gate_prior
-
-        topo_gate = self._field._coupling.topology_gate
-        if topo_gate is not None:
-            priors = personality_to_gate_prior(personality, topo_gate.n_channels)
-            topo_gate._logits = priors
-            topo_gate._openness_lr_mod = 0.5 + openness
-            topo_gate._conscientiousness_decay_mod = 1.0 - conscientiousness * 0.7
-            topo_gate._enforce_min_connectivity()
 
         # === Expression policy: update personality modulation + A7 saddle ===
         # Hard-gate bounds become personality explicit functions. Anchor the
@@ -321,6 +320,19 @@ class ResonanceSpine:
             self._field._identity_inertia = meta["identity_inertia"]
             self._field._coupling.kuramoto._k1 = meta["kuramoto_k1"]
             self._field._coupling.broadcast._threshold = meta["broadcast_threshold"]
+
+    def _restore_pel_after_scar(self) -> None:
+        """Reconcile a freshly-restored ScarredState with the spine's PEL flag.
+
+        A snapshot that carried a ``"pel"`` sub-key already rebuilt the latent
+        core (and marked it active). A legacy snapshot (no ``"pel"``) lands with
+        PEL off; if this spine is configured for PEL, re-init the core from the
+        current personality (migration-safe, techspec §4 ``data.get`` pattern).
+        """
+        scar = self._engine.scar_state
+        if self._pel_enabled and not scar.pel_active():
+            scar._pel_enabled = True
+            scar.set_pel_priors(self._personality)
 
     def set_diagnostics(self, enabled: bool) -> None:
         self._diagnostics_enabled = enabled
@@ -348,15 +360,19 @@ class ResonanceSpine:
         *,
         session_key: str = "",
         dialogue_quality: float | None = None,
+        expression_outcome: bool | None = None,
     ) -> dict[str, Any]:
-        """Process text through resonance field with real module injection.
+        """Process one input message through the modules and produce a result dict.
 
-        Unlike ComputationSpine's sequential L1→...→L7, here:
-        1. Each module computes independently on the input
-        2. Module outputs are injected into the resonance field as signals
-        3. Field resonates (iterative coupling) until convergence
-        4. Expression decision emerges from the converged field state
-        5. Emergence metrics feed back into coupling dynamics (criticality gain)
+        v2.5: the old "modules inject into a shared field that iterates to convergence"
+        paradigm is retired — the field is now ``DeterministicFusion`` (a single
+        deterministic coherence pass, no loop/attractors), and the emotion core is the
+        predictive-coding ``PEL-Core`` (behind ``pel_core_enabled``). The per-tick flow
+        is a single pass: HDC perception → PredictiveCodingGate (surprise) → VoidScar
+        engine (emotion core, PEL when enabled) → assessor fold → DeterministicFusion
+        coherence pass → emergence read → expression decision → embodiment drift. The
+        result-dict contract (route/assessment_source literals, key sets, active_channels)
+        is preserved.
 
         Args:
             text: 输入消息文本
@@ -366,6 +382,10 @@ class ResonanceSpine:
             dialogue_quality: 可选的上一轮回复质量自评（归一化 [0,1]）。这是滞后反馈——
                 对第 N 轮回复的评分，在第 N+1 轮调 process() 时传入。高分强化表达欲、
                 拉近关系，低分收敛表达欲（经 canonical 自动漂移通道，无后门）。
+            expression_outcome: 可选的 agent 真实表达裁决（True=SPEAK, False=SILENT）。
+                这是上一轮 renderer 裁决后的 ground-truth，在第 N+1 轮调 process() 时
+                传入（与 dialogue_quality 同款滞后通道）。若提供，会覆盖 result["should_express"]
+                中 policy 的猜测值，使 expression_fired 漂移信号反映真实裁决而非策略预测。
         """
         if not text or not text.strip():
             self._route_counts["skip"] = self._route_counts.get("skip", 0) + 1
@@ -407,12 +427,29 @@ class ResonanceSpine:
 
         # === Module 2: VoidScar Engine ===
         ssm_input = self._hdc_to_ssm_input(h, surprise)
-        self._engine.process(
+        engine_result = self._engine.process(
             event_vec=bytes(h),
             ssm_input=ssm_input,
             surprise=surprise,
             timestamp=timestamp,
         )
+        # D-10: non-semantic assessor-advisable gate. Wound hints come from the
+        # engine's own coupling wounds / fresh scars this tick (no assessor needed).
+        # Asymmetric safety: ANY wound hint => advisable True regardless of surprise.
+        #
+        # "Low novelty" is ADAPTIVE, not a fixed absolute constant. A tick counts as
+        # low-surprise only when its surprise sits below the gate's own running-mean
+        # surprise. The realistic spine regime has a high surprise floor (~0.45-0.5);
+        # a small fixed threshold (the old 0.25) sat far below that floor, pinning the
+        # gate to a constant True and leaving the "low => False" branch dead. Comparing
+        # against the running mean keeps the branch live across regimes/corpora — about
+        # half the ticks fall below their own recent average and advise skipping, while
+        # any wound still forces True. SIGNAL ONLY: no downstream call is skipped here.
+        scar_step = engine_result.get("scar")
+        new_scars = scar_step.get("new_scars") if isinstance(scar_step, dict) else None
+        wound_hint = bool(engine_result.get("coupling_wounds")) or bool(new_scars)
+        low_surprise = surprise < self._gate.mean_surprise()
+        self._last_assessor_advisable = (not low_surprise) or wound_hint
         if assessment:
             self._apply_assessment_to_engine(assessment)
         emotion = self._engine.observe()
@@ -496,6 +533,12 @@ class ResonanceSpine:
         result = self._build_result(text, timestamp, self._should_express, hgt_decision)
         if dialogue_quality is not None:
             result["dialogue_quality"] = dialogue_quality
+            result["_consume_dialogue_quality"] = True  # one-shot bypass of drift rate-limit
+        # Ground-truth 覆盖：agent 把上一轮 renderer 真实裁决（SPEAK/SILENT）经此通道
+        # 灌入 result["should_express"]，覆盖 policy 猜测，消除假阳性 expression_fired。
+        # 与 dialogue_quality 相同的滞后通道（N+1 轮传入上一轮裁决），无破契约。
+        if expression_outcome is not None:
+            result["should_express"] = bool(expression_outcome)
         self._drift_embodiment(result)
         return result
 
@@ -505,10 +548,15 @@ class ResonanceSpine:
         只有当某个特质变化超过 0.01 时才重新应用人格参数。
         有速率限制：两次漂移之间最少间隔 _drift_min_interval 秒。
         """
-        # Drift rate limiting: skip if too soon since last drift
+        # Drift rate limiting: skip if too soon since last drift.
+        # Exception: an explicit dialogue_quality feedback bypasses the interval gate
+        # so fast-chat turns don't silently drop quality signals. Consume-once: the
+        # marker is popped here, and _last_drift_time still advances on a bypass, so
+        # repeated fast turns are dt-scaled down rather than blowing the 30s budget.
         timestamp = self._last_process_time
         dt = timestamp - self._last_drift_time
-        if dt < self._drift_min_interval:
+        has_explicit_feedback = result.pop("_consume_dialogue_quality", False)
+        if dt < self._drift_min_interval and not has_explicit_feedback:
             self._drift_tick += 1
             return
         self._last_drift_time = timestamp
@@ -570,21 +618,89 @@ class ResonanceSpine:
         return result
 
     def _apply_assessment_to_engine(self, assessment: dict[str, Any]) -> None:
-        wound_risk = float(assessment.get("wound_risk", 0.0))
-        valence = float(assessment.get("valence", 0.0))
+        """Drive the emotion core from the LLM's semantic read.
+
+        The SDK cannot judge meaning on its own, so the assessor (external LLM) is
+        the only source of real affect. Runs after the main VoidScar step but before
+        ``observe()``, so the LLM's read moves *this* tick's emotion output. All
+        nudges are gated on the assessor actually reporting non-zero affect — with no
+        assessment (e.g. direct spine tests) this method is never reached.
+        """
+        n = self._engine.scar_state.n_dims
+        wound_risk = max(0.0, min(1.0, float(assessment.get("wound_risk", 0.0))))
+        valence = max(-1.0, min(1.0, float(assessment.get("valence", 0.0))))
+        arousal = max(0.0, min(1.0, float(assessment.get("arousal", 0.0))))
+        # Confidence scales how much the read drives the core: an unsure LLM nudges
+        # gently, a confident one drives hard. Floor keeps a low-confidence read from
+        # vanishing entirely. (Trauma/void paths below use raw thresholds — an extreme
+        # wound_risk should land even at middling confidence.)
+        gain = (0.4 + 0.6 * max(0.0, min(1.0, float(assessment.get("confidence", 0.5))))) * 0.3
+
+        # Strong hurt: irreversible trauma injection (tension + repair_pressure).
+        # Done FIRST: step() re-evolves the whole base through the MLP, so the affect
+        # bias below must land afterwards or it would be scrambled by the wound step.
         if wound_risk > 0.7:
-            wound_vec = [0.0] * self._engine.scar_state.n_dims
-            if len(wound_vec) > 3:
+            wound_vec = [0.0] * n
+            if n > 3:
                 wound_vec[3] = wound_risk * 0.8
-            if len(wound_vec) > 5:
+            if n > 5:
                 wound_vec[5] = wound_risk * 0.5
             self._engine.scar_state.step(wound_vec, 0.0, heal=False)
+
+        # Continuous nudge: let mild/moderate semantic affect reach the core, not
+        # only the extreme thresholds. observe() returns scar_state.base[d] directly,
+        # while step() routes input through a random-seeded MLP that mixes dimensions
+        # and does not preserve per-dim sign — so a transient affect read is biased
+        # onto the observed base dims directly (the interpretable channel), stamped on
+        # top of any wound step so it always shows in this tick's observation.
+        # dim order: warmth0 arousal1 valence2 tension3 curiosity4 ...
+        # v2.5 redesign (B): when PEL runs the semantic-prior path, the assessor
+        # reaches z through the e2 precision-weighted prior (store_pel_affect below),
+        # NOT this direct base stamp — collapsing the assessor dual-write into one
+        # precision-weighted entry. The fast direct nudge is kept only for the legacy
+        # path (PEL off, or SEMANTIC_PRIOR off). Wound injection + void pressure stay
+        # live on both paths. (assessor->z fidelity under the e2 path is a ship red-line.)
+        direct_affect = not (_pel_core.SEMANTIC_PRIOR and self._engine.scar_state.pel_active())
+        if direct_affect:
+            base = self._engine.scar_state.base
+            if n > 2 and abs(valence) > 1e-6:
+                base[2] = max(-1.0, min(1.0, base[2] + valence * gain))
+            if n > 1 and arousal > 1e-6:
+                base[1] = max(-1.0, min(1.0, base[1] + arousal * gain))
+            if n > 0 and valence > 0.0:
+                base[0] = max(
+                    -1.0, min(1.0, base[0] + valence * gain * 0.67)
+                )  # warmth tracks positive valence
+
+        # Negative valence raises void pressure; strong positive valence relieves it.
         if valence < -0.5:
             for void in self._engine.void_space.voids[:2]:
                 void.pressure = min(1.0, void.pressure + abs(valence) * 0.2)
         if valence > 0.5:
             for void in self._engine.void_space.voids[:3]:
                 void.pressure *= max(0.5, 1.0 - valence * 0.3)
+
+        # ``process()`` already populated VoidScarEngine's observe() cache; the
+        # mutations above (scar base + void pressure) happen after that, so the
+        # cache must be dropped for the upcoming ``observe()`` to see the LLM read.
+        self._engine._cached_observe = None
+
+        # PEL-Core 1-tick deferred fold (D-2): the main VoidScar step already ran
+        # this tick *before* the assessor read was available, so stash the affect
+        # for the NEXT main tick's x_t = c*a_vec + (1-c)*s*h_t. a_vec mirrors the
+        # existing assessor->base mapping (design §3.1); no-op unless PEL is live.
+        confidence = max(0.0, min(1.0, float(assessment.get("confidence", 0.5))))
+        a_vec = [
+            0.67 * valence,  # 0 warmth tracks positive valence
+            arousal,  # 1 arousal
+            valence,  # 2 valence
+            0.8 * wound_risk,  # 3 tension
+            0.0,  # 4 curiosity
+            0.5 * wound_risk,  # 5 repair_pressure
+            0.0,  # 6 expression_drive
+            0.0,  # 7 boundary_firmness
+        ]
+        self._engine.store_pel_affect(a_vec, confidence)
 
     def _emotion_to_boundary_force(self, emotion: dict[str, float]) -> list[float]:
         values = (
@@ -669,15 +785,15 @@ class ResonanceSpine:
         ticks_since_expr = self._tick_count  # approximate; reset on expression
         ticks_since_user = 1.0  # we just got a message
         policy_context = [
-            self._expression_drive,                          # expression_drive
-            self._expression_threshold,                      # expression_threshold
-            emergence.get("phi", 0.0),                       # phi
-            resonance_meta.get("sync_order", 0.0),           # sync_order
-            resonance_meta.get("energy", 0.0),               # energy
-            min(1.0, ticks_since_expr / 50.0),               # ticks_since_last_expression (normalized)
-            min(1.0, ticks_since_user / 10.0),               # ticks_since_last_user_message (normalized)
-            self._expression_policy.recent_accept_rate,      # recent_accept_rate
-            self._expression_policy.recent_reject_rate,      # recent_reject_rate
+            self._expression_drive,  # expression_drive
+            self._expression_threshold,  # expression_threshold
+            emergence.get("phi", 0.0),  # phi
+            resonance_meta.get("sync_order", 0.0),  # sync_order
+            resonance_meta.get("energy", 0.0),  # energy
+            min(1.0, ticks_since_expr / 50.0),  # ticks_since_last_expression (normalized)
+            min(1.0, ticks_since_user / 10.0),  # ticks_since_last_user_message (normalized)
+            self._expression_policy.recent_accept_rate,  # recent_accept_rate
+            self._expression_policy.recent_reject_rate,  # recent_reject_rate
             float(self._personality.get("extraversion", 0.5)),  # personality_extraversion
         ]
 
@@ -757,6 +873,20 @@ class ResonanceSpine:
         """
         if outcome in self._feedback_counts:
             self._feedback_counts[outcome] += 1
+        # Inject feedback into embodiment drift (parity with ComputationSpine.feedback).
+        # 'ignored' is the real "expression got no response" signal (feedback_ignored ->
+        # expression_drive_trait -0.2). ResonanceSpine previously omitted this, so being
+        # persistently ignored could never drift expression drive on the resonance
+        # channel (SDK backlog gap-1). Mirrors ComputationSpine exactly (no dt = full step).
+        signal_key = f"feedback_{outcome}"
+        if signal_key in ("feedback_accepted", "feedback_ignored", "feedback_rejected"):
+            compute_embodiment_drift(
+                self._embodiment_traits,
+                {signal_key: 1.0},
+                self._drift_tick,
+                oscillation_detector=self._oscillation_detector,
+                drift_attribution=self._drift_attribution,
+            )
         # Real engine feedback (scar healing/deepening)
         self._engine.feedback(outcome, dt)
         # HGT adaptation
@@ -832,6 +962,20 @@ class ResonanceSpine:
                 "boundary_firmness": 0.0,
             }
         )
+        resonance: dict[str, Any] = {
+            "iterations": self._last_resonance_meta.get("iterations", 0),
+            "converged": self._last_resonance_meta.get("converged", True),
+            "energy": round(obs["total_energy"], 4),
+            "sync_order": round(obs["sync_order"], 4),
+            "active_channels": obs["active_channels"],
+            "plasticity_ratio": round(obs["plasticity_ratio"], 4),
+            "phi": round(self._emergence.phi.phi, 4),
+        }
+        # D-1: surface the PEL free energy as an additive key (present only when the
+        # latent core is live, so the legacy path's result shape is unchanged).
+        pel_diag = self._engine.scar_state.pel_diagnostics()
+        if pel_diag is not None:
+            resonance["free_energy"] = round(float(pel_diag["free_energy"]), 4)
         return {
             "tick": self._tick_count,
             "text": text[:120],
@@ -852,21 +996,13 @@ class ResonanceSpine:
                 "exploration_rate": round(self._expression_policy.exploration_rate, 4),
             },
             "boundary_stability": self._boundary.stability(),
-            "resonance": {
-                "iterations": self._last_resonance_meta.get("iterations", 0),
-                "converged": self._last_resonance_meta.get("converged", True),
-                "energy": round(obs["total_energy"], 4),
-                "sync_order": round(obs["sync_order"], 4),
-                "active_channels": obs["active_channels"],
-                "plasticity_ratio": round(obs["plasticity_ratio"], 4),
-                "phi": round(self._emergence.phi.phi, 4),
-            },
+            "resonance": resonance,
             "hgt_decision": list(hgt_decision) if hgt_decision else [0.0, 0.0, 0.0, 0.0],
             "assessment_source": "resonance_field",
         }
 
     def diagnostics(self) -> dict[str, Any]:
-        return {
+        out: dict[str, Any] = {
             "tick_count": self._tick_count,
             "last_route": self._last_route,
             "route_counts": dict(self._route_counts),
@@ -884,6 +1020,29 @@ class ResonanceSpine:
                 "is_critical": self._emergence.order.is_critical,
             },
         }
+        # D-10: non-semantic PEL gate signal + surprise + per-dim precisions.
+        # SIGNAL ONLY — the SDK produces ``assessor_advisable``; any decision to
+        # actually skip an assessor/LLM call is a downstream concern, not wired here.
+        pel_diag = self._engine.scar_state.pel_diagnostics()
+        if pel_diag is not None:
+            out["pel"] = {
+                "assessor_advisable": self._last_assessor_advisable,
+                "surprise": round(self._last_surprise, 4),
+                "free_energy": round(float(pel_diag["free_energy"]), 4),
+                "pi_obs": pel_diag["pi_obs"],
+                "pi_top": pel_diag["pi_top"],
+                "mean_abs_e0": round(float(pel_diag["mean_abs_e0"]), 6),
+                "mean_abs_e1": round(float(pel_diag["mean_abs_e1"]), 6),
+                # 更脑 v2 production liveness witness (must-fix #4): a downstream
+                # monitor windows these on real traffic and alerts if precision goes
+                # dead (cross-dim spread collapses) where CI on the corpus stays green.
+                "precision_live": pel_diag["precision_live"],
+                "pi_obs_pstd": round(float(pel_diag["pi_obs_pstd"]), 6),
+                "pi_top_pstd": round(float(pel_diag["pi_top_pstd"]), 6),
+                "prod_spread": round(float(pel_diag["prod_spread"]), 6),
+                "pi_anchor_drift": round(float(pel_diag["pi_anchor_drift"]), 6),
+            }
+        return out
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -924,7 +1083,10 @@ class ResonanceSpine:
             from .scar_algebra import ScarredState
 
             if "scar" in engine_data:
-                self._engine.scar_state = ScarredState.from_dict(engine_data["scar"])
+                self._engine.scar_state = ScarredState.from_dict(
+                    engine_data["scar"], pel_enabled=self._pel_enabled
+                )
+                self._restore_pel_after_scar()
             if "void" in engine_data:
                 self._engine.void_space.from_dict(engine_data["void"])
         if "boundary" in data:

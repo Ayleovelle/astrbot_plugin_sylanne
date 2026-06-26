@@ -25,6 +25,7 @@ from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
     from .compute import SylanneHost
+    from .telemetry import DistillationSink
 
 from .compute.utils import safe_filename
 from .config import SylanneConfig
@@ -82,6 +83,7 @@ class SylanneEngine:
         self._hosts: dict[str, SylanneHost] = {}
         self._locks: dict[str, asyncio.Lock] = {}
         self._listeners: list[Callable[[str, Surface], Any]] = []
+        self._telemetry_sink: DistillationSink | None = self._build_telemetry_sink()
 
     @property
     def status(self) -> EngineStatus:
@@ -120,6 +122,8 @@ class SylanneEngine:
                     self._status = "degraded"
         self._hosts.clear()
         self._locks.clear()
+        if self._telemetry_sink is not None:
+            self._telemetry_sink.close()
         self._status = "closed"
 
     async def __aenter__(self) -> SylanneEngine:
@@ -372,8 +376,48 @@ class SylanneEngine:
                 root=self._data_dir,
                 session_key=session_id,
                 profile=self._config.profile(),
+                telemetry_sink=self._telemetry_sink,
+                pel_enabled=self._config.pel_core_enabled,
             )
         return self._hosts[session_id]
+
+    def _build_telemetry_sink(self) -> DistillationSink | None:
+        """Construct the shared distillation sink if opted in, else None.
+
+        One sink per engine (a single append file) shared across all sessions.
+        When the flag is off this returns None and the per-tick path stays
+        zero-cost. Never raises into construction — a misconfigured sink
+        disables collection rather than breaking the engine.
+        """
+        cfg = self._config
+        if not cfg.training_data_sink:
+            return None
+        import secrets
+
+        from .telemetry import DistillationSink
+
+        base = self._data_dir / "telemetry"
+        fname = Path(cfg.training_data_path or "distill_corpus.jsonl").name
+        salt = cfg.training_data_salt
+        if not salt:
+            salt = secrets.token_hex(8)
+            logger.warning(
+                "training_data_salt is empty; using a per-process random salt — "
+                "cross-run session grouping will be unstable"
+            )
+        try:
+            return DistillationSink(
+                enabled=True,
+                path=base / (fname or "distill_corpus.jsonl"),
+                salt=salt,
+                base_dir=base,
+            )
+        except (OSError, ValueError):
+            logger.warning(
+                "could not open distillation sink; data collection disabled",
+                exc_info=True,
+            )
+            return None
 
     async def _assess(self, text: str) -> dict[str, Any] | None:
         if not text.strip():

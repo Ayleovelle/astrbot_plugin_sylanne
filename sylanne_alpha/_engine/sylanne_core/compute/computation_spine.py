@@ -209,14 +209,23 @@ class ComputationSpine:
         "_result_cache",
         "_drift_attribution",
         "_pad_projector_cache",
+        # PEL-Core enable flag (config-gated; default off)
+        "_pel_enabled",
     )
 
-    def __init__(self, plugin: Any = None, profile: DimensionProfile | None = None):
+    def __init__(
+        self,
+        plugin: Any = None,
+        profile: DimensionProfile | None = None,
+        *,
+        pel_enabled: bool = False,
+    ):
         if profile is None:
             from ..config import build_profile
 
             profile = build_profile("lite")
         self._profile = profile
+        self._pel_enabled = pel_enabled
         hdc_dim = profile.hdc_dim
         if plugin is not None:
             hdc_dim = getattr(plugin, "_cfg_int", lambda k, d: d)(
@@ -228,6 +237,7 @@ class ComputationSpine:
             n_dims=profile.emotion_dim,
             similarity_fn=self._hdc_similarity,
             scar_mlp_passes=profile.scar_mlp_passes,
+            pel_enabled=pel_enabled,
         )
         self.sheaf = ScarSheaf(n0=profile.stalk_dim)
         self.boundary = AutopoieticBoundary(
@@ -386,6 +396,9 @@ class ComputationSpine:
         # Scar wound threshold: extraverts wound less easily (higher threshold)
         # Range: 0.3 (very introverted, wounds easily) to 0.9 (very extraverted)
         self.engine.scar_state.wound_threshold = 0.3 + extraversion * 0.6
+
+        # PEL-Core: derive latent attractor prior from personality (no-op off).
+        self.engine.scar_state.set_pel_priors(personality)
 
         # Void detection threshold: neurotic = lower threshold (detects absence easily)
         # Range: 0.1 (very neurotic) to 0.6 (very stable)
@@ -880,6 +893,7 @@ class ComputationSpine:
             }
             if dialogue_quality is not None:
                 result["dialogue_quality"] = dialogue_quality
+                result["_consume_dialogue_quality"] = True  # one-shot bypass of drift rate-limit
             self._drift_embodiment(result)
             self._result_cache[cache_key] = result
             return result
@@ -978,6 +992,7 @@ class ComputationSpine:
         }
         if dialogue_quality is not None:
             result["dialogue_quality"] = dialogue_quality
+            result["_consume_dialogue_quality"] = True  # one-shot bypass of drift rate-limit
         self._drift_embodiment(result)
         self._result_cache[cache_key] = result
         return result
@@ -988,10 +1003,15 @@ class ComputationSpine:
         只有当某个特质变化超过 0.01 时才重新应用人格参数。
         有速率限制：两次漂移之间最少间隔 _drift_min_interval 秒。
         """
-        # Drift rate limiting: skip if too soon since last drift
+        # Drift rate limiting: skip if too soon since last drift.
+        # Exception: an explicit dialogue_quality feedback bypasses the interval gate
+        # so fast-chat turns don't silently drop quality signals. Consume-once: the
+        # marker is popped here, and _last_drift_time still advances on a bypass, so
+        # repeated fast turns are dt-scaled down rather than blowing the 30s budget.
         timestamp = self._last_process_time
         dt = timestamp - self._last_drift_time
-        if dt < self._drift_min_interval:
+        has_explicit_feedback = result.pop("_consume_dialogue_quality", False)
+        if dt < self._drift_min_interval and not has_explicit_feedback:
             self._drift_tick += 1
             return
         self._last_drift_time = timestamp
@@ -1199,7 +1219,14 @@ class ComputationSpine:
             from .scar_algebra import ScarredState
 
             if "scar" in engine_data:
-                self.engine.scar_state = ScarredState.from_dict(engine_data["scar"])
+                self.engine.scar_state = ScarredState.from_dict(
+                    engine_data["scar"], pel_enabled=self._pel_enabled
+                )
+                if self._pel_enabled and not self.engine.scar_state.pel_active():
+                    # Legacy snapshot (no "pel"): re-init the latent core from
+                    # personality so a PEL-configured spine stays consistent.
+                    self.engine.scar_state._pel_enabled = True
+                    self.engine.scar_state.set_pel_priors(self._personality)
             if "void" in engine_data:
                 self.engine.void_space.from_dict(engine_data["void"])
             if "social_void" in engine_data:
