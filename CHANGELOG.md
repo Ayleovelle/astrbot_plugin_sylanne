@@ -2,6 +2,29 @@
 
 本文件用于 AstrBot 插件市场/管理页展示更新内容。更完整的设计说明、公式推导、测试矩阵和维护手册见 `README.md`。
 
+## [Embodiment-2.3.0] - 2026-06-27
+
+> issue #43「主动消息重复」根因三链修复 + 对话内容片段泄露修复 + 上游引擎升级 2.3.0，整包同时生效。
+
+### 🐛 Bug Fixes
+
+- **issue #43 主动消息重复（三链根治）**：
+  - H1 生活模拟静默冻结 → 失败计数 + 漏桶探测式退避（阈值 3 / 最多跳 20 拍，永不永久封死）+ 壁钟节流告警（`_LIFE_FAIL_WARN_INTERVAL_S=3600`），provider 缺失时启动即 WARNING，恢复后立即复原节律。
+  - 大饼 override 残留（崩溃/竞态）→ ProactiveBridge 改 provenance 安全：per-sid 锁短临界区、in-flight 守卫、KV sidecar 基线、RMW 只还原自有键（`proactive_prompt`/`segmented_reply_settings`），三段式还原进 finally，启动期 `recover_inflight_baselines()` 清残留；用户的 `proactive_prompt` 配置全程不被误删。
+  - H3 记忆按 `life_event_id` 去重 → 写入即去重（命中跳过不更新）+ 召回两条路径（legacy 与 activation）统一折叠，空 id 不当去重键。
+- **内容片段泄露（T3）**：provider 把回复以 `[{'type':'text',...}]` 列表/repr 形式返回时，`normalize_completion_text` 在所有读边界归一（v2core 首读 + 回复管线两处），仅 `ast.literal_eval` 还原（无脆弱正则）、绝不吞正常正文（散文/JSON/图注原样透传）、支持截断 repr 与尾反斜杠还原。
+
+### 🏗️ 架构 / 引擎
+
+- **vendored `sylanne_core` 升级 2.0.0 → 2.3.0**（canonical SylannEngine）：新增 `deterministic_fusion` / `pel_core` / `telemetry`，移除 resonance-field 死栈（`resonance_field*` / `coupling_dynamics` / `topology_gate`）；公共导出面（`__all__` 43 符号）逐字不变，对插件零接口变更。
+- `compat` 模块更名 `message_dispatch`（next-gen 线既有重命名），T3 归一与现有 strip/realtime 工具同处一模块。
+
+### ✅ 验证
+
+- 全量本地 `python -m pytest -q`：913 passed / 2 skipped；ruff 干净。
+- 四条修复通道各有专项测试：`test_issue43_h1_freeze` / `test_issue43_memory_dedup` / `test_issue43_bridge_residual` / `test_issue_t3_content_parts`。
+- 8 路对抗审查（每个 hand-merge 文件逐 hunk 比对 fix 分支 source of truth + 跨文件签名核对）：fix 逻辑全 clean、零回归。
+
 ## [v2.2.0] - 2026-06-23
 
 > 生活模拟全栈落地：从"随机活动池"进化为"有长期成长线、会自适应收敛、带 WebUI 观测面板"的完整系统。
