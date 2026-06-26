@@ -516,10 +516,13 @@ async def apply_v2core_response(plugin: Any, event: Any, response: Any) -> bool:
     if response is None or _is_cron_event(event):
         return False
     try:
+        from sylanne_alpha.message_dispatch import normalize_completion_text
         from sylanne_alpha.v2core.contracts import ReplyKind
 
         session_key = plugin._session_key(event)
-        draft_raw = str(getattr(response, "completion_text", "") or "")
+        # T3 防护：completion_text 可能是 content-parts 列表/repr（provider tool 轮产物），
+        # 在这第一道读边界就归一为纯文本——既不漏进正文，也防写回 AstrBot 历史被 repr 污染。
+        draft_raw = normalize_completion_text(getattr(response, "completion_text", ""))
         draft = draft_raw if draft_raw.strip() else None
 
         rt = _runtime_for(plugin, session_key)

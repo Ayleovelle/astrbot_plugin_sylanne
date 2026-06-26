@@ -180,7 +180,7 @@
     "type": "string",
     "default": "",
     "_special": "select_provider",
-    "hint": "用于模拟 Sylanne 生活的 LLM；建议用便宜的小模型。"
+    "hint": "用于模拟 Sylanne 生活的 LLM；建议用便宜的小模型。启用生活模拟时必填，留空会静默失效（生活状态冻结、主动消息可能复读）。"
   },
   "sylanne_alpha_life_simulation_interval_seconds": {
     "description": "生活模拟间隔（秒）",

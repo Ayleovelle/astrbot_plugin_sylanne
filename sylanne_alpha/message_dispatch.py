@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import ast
+import logging
 import re
 from typing import Any
 
@@ -283,4 +285,119 @@ def _would_split_protected_ascii_token(text: str, split_at: int) -> bool:
     )
 
 
-__all__ = ["strip_draft_blocks", "truncate_at_sentence", "realtime_plan", "realtime_dispatch"]
+# ── T3 防护：把 LLM completion 归一为纯文本（防 content-parts 列表/repr 漏进正文）──
+_LOG = logging.getLogger("astrbot_plugin_sylanne")
+_content_parts_warned = False
+
+
+def normalize_completion_text(value: Any) -> str:
+    """把 LLM completion 归一为纯文本。
+
+    防 T3：某些 OpenAI 兼容 provider（含 OpenAI 兼容 Gemini 端点）走完 tool 轮后把
+    assistant content 返成 content-parts 列表 [{'type':'text','text':...}]，或返回它已被
+    str() 成的单引号 repr（流式拼接还可能截断）。裸 str() 会把这串结构原样漏进正文。
+
+    铁律（复审 CLUSTER B）：**只在确为 content-parts 时改写，绝不吃掉/截断正经内容**——
+    正经回复恰好以 [{...'type'...}] 开头（如模型在讲 JSON schema）必须原样保留。
+    ① 真 list：抽 text 拼接；但若抽不到且不像 content-parts（如 [1,2,3]）→ 原样 str()。
+    ② repr 字符串：仅当【整串完整解析为含 text 的 content-parts】或【其流式截断】才抽；
+       否则（带尾部 prose、非 content-parts、image-only）→ 退回原文。③ 其它 → 原样 str()。
+    """
+    if isinstance(value, list):
+        if not value:
+            return ""  # 空 list = 无内容（保持旧 `or ""` 语义）
+        joined = _join_content_parts(value)
+        if joined or _looks_like_content_parts(value):
+            _warn_content_parts("list")
+            return joined
+        return str(value)  # 不像 content-parts 的 list → 不吃，原样 str
+    s = "" if value is None else str(value)
+    head = s.lstrip()
+    if head.startswith("[{") and ("'type'" in head[:120] or '"type"' in head[:120]):
+        recovered = _recover_content_parts_repr(head)
+        if recovered:  # 仅在确抽到 content-parts 文本时改写；None/空 → 退回原文（绝不吃成空）
+            _warn_content_parts("repr-str")
+            return recovered
+    return s
+
+
+def _warn_content_parts(shape: str) -> None:
+    """一次性告警：completion 归一触发（兼作运行期 list-vs-repr 判别探针）。"""
+    global _content_parts_warned
+    if not _content_parts_warned:
+        _content_parts_warned = True
+        _LOG.warning(
+            "Sylanne T3: LLM completion 是 content-parts(%s)，已归一为纯文本"
+            "（provider 把 content 返成 [{'type':'text',...}] 列表/repr，AstrBot 未归一）。",
+            shape,
+        )
+
+
+def _looks_like_content_parts(value: Any) -> bool:
+    """非空 list 且每项是带 'type' 键的 dict 或 str → 像 OpenAI content-parts。"""
+    if not isinstance(value, list) or not value:
+        return False
+    for part in value:
+        if isinstance(part, str):
+            continue
+        if isinstance(part, dict) and "type" in part:
+            continue
+        return False
+    return True
+
+
+def _join_content_parts(parts: Any) -> str:
+    """从 content-parts（list[dict|str]）抽 text 拼接；非 text part（image/tool 等）丢弃。"""
+    out: list[str] = []
+    for part in parts if isinstance(parts, list) else []:
+        if isinstance(part, dict):
+            if part.get("type") in (None, "text"):
+                txt = part.get("text")
+                if isinstance(txt, str):
+                    out.append(txt)
+        elif isinstance(part, str):
+            out.append(part)
+    return "\n".join(p for p in out if p)
+
+
+def _recover_content_parts_repr(s: str) -> str | None:
+    """从 content-parts 的 repr 字符串抽回纯文本。**只用 literal_eval（不用脆弱正则）**：
+    仅当整串完整解析为含 text 的 content-parts、或其流式截断补尾后能完整解析，才返回文本；
+    其它（尾部带 prose、非 content-parts list、image-only）一律返回 None → 调用方退回原文，
+    绝不吃掉/截断/串味正经内容（复审 CLUSTER B：丢正则的嵌套-text 误抽 + 转义截断 bug）。
+    """
+    # ① 整串完整字面量（literal_eval 本就拒绝尾部多余 prose，故 prose 会落到 ② 并失败）
+    try:
+        parsed = ast.literal_eval(s)
+    except (ValueError, SyntaxError):
+        pass
+    else:
+        if isinstance(parsed, list):
+            return _join_content_parts(parsed) or None  # list 但无 text → None（退回原文）
+        return None  # 完整解析但非 list → 不是 content-parts
+    # ② 流式截断（整串解析失败）：补常见缺尾再试，只认能解析出【含 text】的 content-parts。
+    #    悬空尾部反斜杠只可能是被截断的转义（绝非有意义内容），去掉再试一轮——否则截断恰好
+    #    落在 \ 上时整串补尾都解析失败 → 漏出 raw repr（复审 LANE B residual leak）。
+    bases = [s]
+    if s.endswith("\\"):
+        bases.append(s.rstrip("\\"))
+    for base in bases:
+        for suffix in ("'}]", '"}]', "']}]", "}]", "]"):
+            try:
+                parsed = ast.literal_eval(base + suffix)
+            except (ValueError, SyntaxError):
+                continue
+            if isinstance(parsed, list):
+                joined = _join_content_parts(parsed)
+                if joined:
+                    return joined
+    return None
+
+
+__all__ = [
+    "strip_draft_blocks",
+    "truncate_at_sentence",
+    "realtime_plan",
+    "realtime_dispatch",
+    "normalize_completion_text",
+]

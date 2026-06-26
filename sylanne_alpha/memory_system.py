@@ -957,6 +957,15 @@ class MemorySystem:
         life_event_id: life_sim 去重键（= LifeEvent.event_id），dialogue 调用留空。
         """
         text = text[: self._MAX_SUMMARY_CHARS]
+        # issue#43 Wave3：life_event_id 去重（兑现 docstring 承诺的「去重键」）。同一
+        # life_sim 事件被反复写入会让它每轮被召回、注入对话回复（H3 复读）。命中已有同
+        # id 条目则【跳过、返回原件】，不 append 新条目；故意【不改动】原件的 created_at /
+        # last_recalled_ts / recall_count / importance —— 改这些会复活近期性、并打穿 MED-1
+        # 「延迟写入避免同轮双注入」。dialogue 写入 life_event_id 恒空、永不进此分支（行为不变）。
+        if life_event_id:
+            existing = self._find_by_life_event_id(life_event_id)
+            if existing is not None:
+                return existing
         if importance is None:
             # 基础启发式 + 新颖度（RPE）加成：重复内容不再因文本长而持续拿高分。
             importance = self._compute_importance(text, source_turns, temperature)
@@ -991,6 +1000,18 @@ class MemorySystem:
         self._l1.append(item)
         self._index_memory_item(item)
         return item
+
+    def _find_by_life_event_id(self, life_event_id: str) -> MemoryItem | None:
+        """按 life_event_id 在 L1/L2 找已有条目（issue#43 Wave3 去重；空 id 不匹配）。"""
+        if not life_event_id:
+            return None
+        for item in self._l1:
+            if item.life_event_id == life_event_id:
+                return item
+        for item in self._l2:
+            if item.life_event_id == life_event_id:
+                return item
+        return None
 
     def _index_memory_item(self, item: MemoryItem) -> None:
         kws = [w for w in _tokenize(item.text) if len(w) >= 2][:24]
@@ -1707,6 +1728,10 @@ class MemorySystem:
 
         # PR-E：source-aware 排序（final_score 主序 + source/confidence 同分 tiebreaker）
         results = self._source_aware_rank(results)
+        # issue#43 Wave3：召回侧折叠——同一非空 life_event_id 只保留得分最高的一条
+        # （已按 final_score 降序，保留首现即最高分）。兜住 dedup-on-write 之前就堆积的
+        # 旧重复 + L1 容量淘汰后重新下沉的边角，避免同一生活事件多份霸占召回名额。
+        results = self._fold_by_life_event_id(results)
         top = results[:limit]
 
         # 命中刷新 → recency 复活 + frequency + L2 reinforce
@@ -1714,6 +1739,24 @@ class MemorySystem:
         for r in top:
             self._refresh_recall(r.source_obj, now, current_warmth, r.layer)
         return top
+
+    @staticmethod
+    def _fold_by_life_event_id(results: list[MemoryResult]) -> list[MemoryResult]:
+        """折叠同一非空 life_event_id 的重复召回，保留输入序中首现（=最高分）的一条。
+
+        life_event_id 取自 source_obj（L1/L2 MemoryItem）；L3 / 无该字段的条目原样保留。
+        输入须已按 final_score 降序（_source_aware_rank 后）。issue#43 Wave3。
+        """
+        seen: set[str] = set()
+        folded: list[MemoryResult] = []
+        for r in results:
+            leid = getattr(getattr(r, "source_obj", None), "life_event_id", "") or ""
+            if leid:
+                if leid in seen:
+                    continue
+                seen.add(leid)
+            folded.append(r)
+        return folded
 
     # ------------------------------------------------------------------
     # 阶段1：ACT-R 激活核（base-level learning + EMA 近似）
@@ -2068,6 +2111,9 @@ class MemorySystem:
             ))
 
         results.sort(key=lambda r: r.final_score, reverse=True)
+        # issue#43 Wave3：ACTIVATION 模式也折叠同 life_event_id 重复（与 _recall_legacy 对称——
+        # 复审 Finding 5：原来只 LEGACY 折叠、ACTIVATION 漏掉，开了 activation 就还会复读）。
+        results = self._fold_by_life_event_id(results)
         top = results[:limit]
 
         if observe_only:

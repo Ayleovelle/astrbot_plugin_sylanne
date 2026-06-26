@@ -2616,24 +2616,75 @@ class LLMRequestPipeline:
     # ------------------------------------------------------------------
 
     async def _life_sim_llm_call(self, prompt: str) -> str:
-        """生命模拟器的 LLM 回调：调用配置的 provider 进行生命事件推理。"""
+        """生命模拟器的 LLM 回调：调用配置的 provider 进行生命事件推理。
+
+        issue#43 Wave1：四处失败原本 `return ""` 且全程零日志，是「生活状态静默冻结
+        + 主动消息复读」的源头之一（provider 没配/不可用时无声无息）。改为按 cause 节流
+        告警（首次 + 每 N 次重发），让故障可见。返回契约不变：失败仍返回空串。
+        """
         p = self._p
         provider_id = str(
             p._config.get("sylanne_alpha_life_simulation_provider_id") or ""
         )
         if not provider_id:
+            self._life_sim_warn(
+                "provider_id_empty",
+                "未配置 sylanne_alpha_life_simulation_provider_id（启用了生活模拟却没选 Provider）",
+            )
             return ""
         context = p.context
         if not hasattr(context, "get_provider_by_id"):
+            self._life_sim_warn(
+                "no_provider_api", "运行环境无 get_provider_by_id 接口，生活模拟 LLM 调用降级为空"
+            )
             return ""
         provider = context.get_provider_by_id(provider_id)
         if provider is None:
+            self._life_sim_warn(
+                "provider_missing",
+                f"provider_id={provider_id!r} 解析不到 provider（可能已删除或改名）",
+            )
             return ""
         try:
             resp = await provider.text_chat(prompt=prompt)
-            return str(getattr(resp, "completion_text", "") or "")
-        except Exception:
+            text = str(getattr(resp, "completion_text", "") or "")
+            # provider 可达即清告警节流；空 completion 不在此判失败，交给 simulator 退避。
+            self._life_sim_warn_reset()
+            return text
+        except Exception as e:
+            self._life_sim_warn(
+                "text_chat_error", f"生活模拟 provider.text_chat 抛错：{type(e).__name__}: {e}"
+            )
             return ""
+
+    def _life_sim_warn(self, cause: str, detail: str) -> None:
+        """按 cause 节流的生活模拟告警：首次出现 + 之后每隔 1 小时壁钟重发。
+
+        用【壁钟】而非次数模：simulator 退避会把实际调用稀释到天级，次数模会让多小时/多天
+        宕机只剩一行日志后归于沉默（红队 finding）。计数/时间戳懒挂在 pipeline 实例上，
+        provider 恢复时由 _life_sim_warn_reset 清零。
+        """
+        counts = getattr(self, "_life_sim_warn_counts", None)
+        if counts is None:
+            counts = self._life_sim_warn_counts = {}
+        warn_ts = getattr(self, "_life_sim_warn_ts", None)
+        if warn_ts is None:
+            warn_ts = self._life_sim_warn_ts = {}
+        n = counts.get(cause, 0) + 1
+        counts[cause] = n
+        now = time.time()
+        if n == 1 or now - warn_ts.get(cause, 0.0) >= 3600.0:
+            warn_ts[cause] = now
+            logger.warning("Sylanne life_sim LLM 失败[%s]（第%d次）：%s", cause, n, detail)
+
+    def _life_sim_warn_reset(self) -> None:
+        """provider 恢复（一次无异常调用）即清空告警节流计数/时间戳，下次故障重新响亮告警。"""
+        counts = getattr(self, "_life_sim_warn_counts", None)
+        if counts:
+            counts.clear()
+        warn_ts = getattr(self, "_life_sim_warn_ts", None)
+        if warn_ts:
+            warn_ts.clear()
 
     async def _life_sim_outreach(
         self, reason: str, mood: str, intent: dict | None = None
