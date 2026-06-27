@@ -107,6 +107,18 @@
     "default": false,
     "hint": "默认关闭；开启后主动发言会带人类式的迟疑：发出前随机停顿、按犹豫强度可能最后一刻收回不发、偶尔先发个踌躇词起头。强度由 Sylanne 的内在状态（怕打扰/想安静/熟悉度）驱动。仅在桥接开启时生效。"
   },
+  "sylanne_alpha_emotion_spirit_bridge_enabled": {
+    "description": "启用 emotion_spirit 适配桥（与 astrbot_plugin_emotion_spirit 对接）",
+    "type": "bool",
+    "default": false,
+    "hint": "默认关闭；开启后若探测到 astrbot_plugin_emotion_spirit 已安装，则关掉它自己的 persona 注入（让 Sylanne 当 system_prompt 唯一主）。注意：当前【仅关闭其注入】——把它的情绪/躯体/上下文拉回合并、记忆主控路由到它的 MemoryPool 这两步是【后续集成步骤，尚未接线】；故装了它再开本项会净损失（它被静音但其素材还没被消费），等 consumption 接线后再开。未安装时完全 no-op，对现有行为零影响。"
+  },
+  "sylanne_alpha_emotion_spirit_engine_share": {
+    "description": "（高级·保守）让 Sylanne 抢占 emotion_spirit 的引擎 data_dir 做共享 master",
+    "type": "bool",
+    "default": false,
+    "hint": "默认关闭，且强烈建议保持关闭直到本机核实。原理：在 emotion_spirit 的 data_dir 上先 SylanneEngine.shared() 抢占，使它后调时拿到我们 2.3.x 引擎。风险：emotion_spirit 内嵌引擎版本未知，SylanneConfig 不一致会抛 SharedEngineConflictError；需本机装上 emotion_spirit 核实其内嵌引擎版本与取引擎方式后才建议开启。"
+  },
   "sylanne_alpha_recall_mode": {
     "description": "记忆召回引擎模式",
     "type": "string",

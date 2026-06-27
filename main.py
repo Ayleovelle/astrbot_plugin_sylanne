@@ -153,6 +153,7 @@ from sylanne_alpha.llm_request_pipeline import LLMRequestPipeline  # noqa: E402
 from sylanne_alpha.rhythm_learner import RhythmLearner  # noqa: E402
 from sylanne_alpha.proactive_scheduler import ProactiveScheduler  # noqa: E402
 from sylanne_alpha.proactive_bridge import ProactiveBridge  # noqa: E402
+from sylanne_alpha.emotion_spirit_bridge import EmotionSpiritBridge  # noqa: E402
 from sylanne_alpha.session_context import SessionContext  # noqa: E402
 from sylanne_alpha.session_state_store import SessionStateStore  # noqa: E402
 from sylanne_alpha.agents import (  # noqa: E402
@@ -469,6 +470,8 @@ class EmotionalStatePlugin(Star):
         self._proactive_scheduler = ProactiveScheduler(self)
         # 主动发言桥接器：把意图+生活素材交给大饼插件执行发送
         self._proactive_bridge = ProactiveBridge(self)
+        # emotion_spirit 适配桥（检测门控；未装即 no-op，对现有行为零影响）
+        self._emotion_spirit_bridge = EmotionSpiritBridge(self)
         self._register_web_apis(context)
 
         # AstrBot ConversationManager / PersonaManager 集成
@@ -2459,6 +2462,35 @@ class EmotionalStatePlugin(Star):
                     )
         except Exception as e:
             logger.debug(f"Sylanne proactive_bridge baseline recovery skipped: {e}")
+        # emotion_spirit 适配桥：仅在配置开启且探测到 emotion_spirit 时激活（关它的 persona
+        # 注入，让 Sylanne 当 system_prompt 唯一主）。未装 / 未开 → 完全 no-op，零影响。
+        try:
+            es_bridge = getattr(self, "_emotion_spirit_bridge", None)
+            es_on = bool(
+                (self.config or {}).get("sylanne_alpha_emotion_spirit_bridge_enabled", False)
+            )
+            if es_bridge is not None and es_on and es_bridge.available():
+                res = es_bridge.activate()
+                if res.get("active"):
+                    logger.info(
+                        "Sylanne emotion_spirit 桥：已激活（persona 注入交还 Sylanne 主控）。"
+                        "注意：拉取 emotion_spirit context 合并 / 记忆路由的消费侧尚未接进流水线，"
+                        "属后续集成步骤（pull_context / memory_backend 已就绪待接线）。"
+                    )
+                    # 引擎共享对齐：保守、默认关，且需本机核实 emotion_spirit 内嵌引擎版本。
+                    # 这里只在显式开启时给出明确告警——不自动建共享引擎（无可信 llm 入口 +
+                    # 版本未核实，强行 shared() 可能撞 SharedEngineConflictError）。
+                    if (self.config or {}).get(
+                        "sylanne_alpha_emotion_spirit_engine_share", False
+                    ):
+                        logger.warning(
+                            "Sylanne emotion_spirit 桥：引擎共享开关已开，但未自动对齐——"
+                            "需本机核实 emotion_spirit 内嵌引擎版本与取引擎方式（确认经 "
+                            "SylanneEngine.shared 同一 data_dir、且 SylanneConfig 不冲突）后，"
+                            "再显式调 align_shared_engine(llm, enabled=True) 接线。"
+                        )
+        except Exception as e:
+            logger.debug(f"Sylanne emotion_spirit bridge activation skipped: {e}")
         try:
             self._start_life_simulator()
         except Exception as e:
