@@ -438,8 +438,12 @@ class ProactiveBridge:
         sidecar 让启动 recover 修复，绝不在还原失败时清掉 breadcrumb（复审 CLUSTER A）。"""
         try:
             cur = dict(mgr.get_override(sid) or {})
-        except Exception:
-            cur = {}
+        except Exception as e:
+            # get_override 垮了就不知道 override 里还有哪些键——强行用 cur={} 重写只剩 dispatch-owned
+            # 键 = 抹掉并发 adjust 写的 schedule_settings 等（静默丢配置，gemini PR#46）。中止并返回
+            # False：sidecar 保留、下次启动 recover 再修，绝不在读失败时破坏 RMW 的"保留其它键"。
+            logger.warning(f"Sylanne proactive_bridge get_override failed, skip restore: {e}")
+            return False
         for key in self._DISPATCH_OWNED_KEYS:
             if key in baseline:
                 cur[key] = baseline[key]
@@ -462,8 +466,11 @@ class ProactiveBridge:
         （如并发 dispatch 写的 proactive_prompt）；整体空了就 delete_override。"""
         try:
             cur = dict(mgr.get_override(sid) or {})
-        except Exception:
-            cur = {}
+        except Exception as e:
+            # 同 _restore_dispatch_keys：读失败用 cur={} 重写会抹掉并发 dispatch 写的 proactive_prompt。
+            # 中止、不写——保留 override 全部键，下次 adjust/recover 再修（gemini PR#46）。
+            logger.warning(f"Sylanne adjust_countdown get_override failed, skip restore: {e}")
+            return
         if "schedule_settings" in baseline:
             cur["schedule_settings"] = baseline["schedule_settings"]
         else:

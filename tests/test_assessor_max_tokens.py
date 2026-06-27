@@ -34,6 +34,15 @@ def test_string_value_coerced_to_int():
     assert _pipeline_with_config({"sylanne_alpha_assessor_max_tokens": "1500"})._assessor_max_tokens() == 1500
 
 
+def test_string_zero_and_negatives_fall_back():
+    # gemini PR#46：`or 1024` 对字符串 "0" 失效（非空串为真值 → int("0")=0 绕过默认）；
+    # 负数也无效。任何 <=0（含字符串/负数）都须回退 1024。
+    assert _pipeline_with_config({"sylanne_alpha_assessor_max_tokens": "0"})._assessor_max_tokens() == 1024
+    assert _pipeline_with_config({"sylanne_alpha_assessor_max_tokens": -10})._assessor_max_tokens() == 1024
+    assert _pipeline_with_config({"sylanne_alpha_assessor_max_tokens": "-5"})._assessor_max_tokens() == 1024
+    assert _pipeline_with_config({"sylanne_alpha_assessor_max_tokens": "abc"})._assessor_max_tokens() == 1024
+
+
 def test_schema_declares_key():
     import json
 

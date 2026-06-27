@@ -2574,8 +2574,14 @@ class LLMRequestPipeline:
 
     def _assessor_max_tokens(self) -> int:
         """语义评估输出上限（可配置）。默认 1024：推理模型先耗 token 做隐藏推理，
-        过低（旧版写死 50/100）会让正文为空、情感读数恒落中性。非推理模型解完即停不多花。"""
-        return int(self._p._config.get("sylanne_alpha_assessor_max_tokens") or 1024)
+        过低（旧版写死 50/100）会让正文为空、情感读数恒落中性。非推理模型解完即停不多花。
+        任何无效值（None / 非数字 / 字符串 "0" / <=0）都安全回退 1024
+        （gemini PR#46：`or 1024` 对字符串 "0" 失效——非空串为真值会绕过默认值）。"""
+        try:
+            val = int(self._p._config.get("sylanne_alpha_assessor_max_tokens"))
+        except (TypeError, ValueError):
+            return 1024
+        return val if val > 0 else 1024
 
     async def _assessor_llm_call(self, prompt: str) -> str:
         """调用配置的 LLM provider 执行快速语义评估（max_tokens 可配置，默认 1024）。"""

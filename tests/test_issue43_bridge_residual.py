@@ -26,8 +26,11 @@ class FakeOverrideManager:
         self.store: dict[str, dict] = {}
         self._set_n = 0
         self.fail_on_set_call: int | None = None  # 让第 N 次 set_override 抛错（模拟瞬时失败）
+        self.fail_get: bool = False  # 让 get_override 抛错（模拟瞬时读失败）
 
     def get_override(self, sid: str) -> dict:
+        if self.fail_get:
+            raise RuntimeError("transient get_override failure")
         return dict(self.store.get(sid, {}))
 
     async def set_override(self, sid: str, patch: dict) -> None:
@@ -200,6 +203,25 @@ class TestProvenanceRecovery(unittest.TestCase):
             final.get("schedule_settings"), {"min_interval_minutes": 1},
             "非 dispatch 拥有的 schedule 不被恢复波及",
         )
+
+    def test_get_override_failure_aborts_restore_no_wipe(self):
+        """gemini PR#46：get_override 抛异常时绝不能用 cur={} 重写——会抹掉读失败时没读到的
+        并发键。读失败须中止：_restore_dispatch_keys 返 False、_restore_schedule_keys 不写，
+        override 全键原样保留。"""
+        star = FakeDaPing()
+        syl = FakeKVSylanne(star)
+        bridge = ProactiveBridge(syl)
+        mgr = star.session_override_manager
+        live = {"proactive_prompt": "桥注入", "schedule_settings": {"min_interval_minutes": 1}}
+        mgr.store["s1"] = dict(live)
+        mgr.fail_get = True
+        # dispatch 还原：读失败 → 返回 False（保留 sidecar 下次再修），且一个键都不许动
+        ok = _run(bridge._restore_dispatch_keys(mgr, "s1", {}))
+        self.assertFalse(ok, "读失败应返回 False")
+        self.assertEqual(mgr.store["s1"], live, "读失败不得用 cur={} 重写抹掉任何键")
+        # schedule 还原：读失败 → 不写，键全保留
+        _run(bridge._restore_schedule_keys(mgr, "s1", {}))
+        self.assertEqual(mgr.store["s1"], live, "schedule 读失败同样不得抹键")
 
 
 class TestRaceSerialization(unittest.TestCase):
