@@ -25,6 +25,7 @@ import time
 from collections import deque
 from typing import TYPE_CHECKING, Any
 
+from .._numeric import _coerce_float
 from . import pel_core as _pel_core  # module ref so SEMANTIC_PRIOR stays monkeypatchable
 from .autopoiesis import AutopoieticBoundary
 from .bounded_dict import BoundedDict
@@ -392,6 +393,14 @@ class ResonanceSpine:
             self._boundary.self_repair()
             return self._build_result("", timestamp, False)
 
+        # Container guard: process() is a public entry, so a caller may hand in a
+        # non-dict assessment — the same malformed shape Fix 1 shows an LLM emits
+        # ([] / "x" / 42). Normalize it to None once, here, so every assessment-derived
+        # branch below treats it as "no read" instead of AttributeError-ing on
+        # assessment.get(...). Field-level None/non-numeric is handled later by _coerce_float.
+        if assessment is not None and not isinstance(assessment, dict):
+            assessment = None
+
         # Apply per-relationship personality overlay if session changed or dirty
         if session_key != self._last_effective_session or self._personality_dirty:
             effective = self.effective_personality(session_key)
@@ -627,14 +636,18 @@ class ResonanceSpine:
         assessment (e.g. direct spine tests) this method is never reached.
         """
         n = self._engine.scar_state.n_dims
-        wound_risk = max(0.0, min(1.0, float(assessment.get("wound_risk", 0.0))))
-        valence = max(-1.0, min(1.0, float(assessment.get("valence", 0.0))))
-        arousal = max(0.0, min(1.0, float(assessment.get("arousal", 0.0))))
+        # assessment may be a caller-supplied dict (public process()/host.on_request
+        # entry points) whose fields came back explicitly null from an external LLM —
+        # _coerce_float clamps and falls back on None/non-numeric instead of float(None)
+        # crashing the whole tick. Same clamp ranges as before; happy path unchanged.
+        wound_risk = _coerce_float(assessment.get("wound_risk", 0.0), 0.0, 1.0, 0.0)
+        valence = _coerce_float(assessment.get("valence", 0.0), -1.0, 1.0, 0.0)
+        arousal = _coerce_float(assessment.get("arousal", 0.0), 0.0, 1.0, 0.0)
         # Confidence scales how much the read drives the core: an unsure LLM nudges
         # gently, a confident one drives hard. Floor keeps a low-confidence read from
         # vanishing entirely. (Trauma/void paths below use raw thresholds — an extreme
         # wound_risk should land even at middling confidence.)
-        gain = (0.4 + 0.6 * max(0.0, min(1.0, float(assessment.get("confidence", 0.5))))) * 0.3
+        gain = (0.4 + 0.6 * _coerce_float(assessment.get("confidence", 0.5), 0.0, 1.0, 0.5)) * 0.3
 
         # Strong hurt: irreversible trauma injection (tension + repair_pressure).
         # Done FIRST: step() re-evolves the whole base through the MLP, so the affect
@@ -689,7 +702,7 @@ class ResonanceSpine:
         # this tick *before* the assessor read was available, so stash the affect
         # for the NEXT main tick's x_t = c*a_vec + (1-c)*s*h_t. a_vec mirrors the
         # existing assessor->base mapping (design §3.1); no-op unless PEL is live.
-        confidence = max(0.0, min(1.0, float(assessment.get("confidence", 0.5))))
+        confidence = _coerce_float(assessment.get("confidence", 0.5), 0.0, 1.0, 0.5)
         a_vec = [
             0.67 * valence,  # 0 warmth tracks positive valence
             arousal,  # 1 arousal

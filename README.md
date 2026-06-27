@@ -27,7 +27,7 @@
   <a href="https://github.com/Ayleovelle/astrbot_plugin_sylanne"><img src="https://count.getloli.com/get/@astrbot_plugin_sylanne?theme=moebooru" alt="Moe Counter"></a>
 </p>
 
-> **Sylanne-Embodiment：不可逆的关系计算引擎 + 自我进化认知体 + 关系性自证心智。** 不模拟情绪标签——对话在躯体上留疤，沉默中积压，关系里长出不可撤销的形状。认知内核编排出一颗会自我进化的心智：白天反应式微调，睡眠期反思沉淀，跨重启累积学习。2.3.0 根治了主动消息的三链重复、堵住了内容片段泄露通道，底层引擎升级至 SylannEngine 2.3.0。
+> **Sylanne-Embodiment：不可逆的关系计算引擎 + 自我进化认知体 + 关系性自证心智。** 不模拟情绪标签——对话在躯体上留疤，沉默中积压，关系里长出不可撤销的形状。认知内核编排出一颗会自我进化的心智：白天反应式微调，睡眠期反思沉淀，跨重启累积学习。2.3.0 根治了主动消息的三链重复、堵住了内容片段泄露通道，底层引擎升级至 SylannEngine 2.3.1。
 
 ---
 
@@ -456,9 +456,9 @@ flowchart TD
 
 部分 provider 把回复以 `[{'type':'text',...}]` 列表/repr 形式返回，原样透传给用户。新增 `normalize_completion_text` 在所有读边界归一（v2core 首读 + 回复管线两处），仅 `ast.literal_eval` 还原，绝不吞正常正文。
 
-**3. 引擎升级 SylannEngine 2.3.0**
+**3. 引擎升级 SylannEngine 2.3.1**
 
-vendored sylanne_core 2.0.0 → 2.3.0：新增 deterministic_fusion / pel_core / telemetry，移除 resonance-field 死栈；公共导出面（43 符号）逐字不变，对插件零接口变更。
+vendored sylanne_core 2.0.0 → 2.3.1：2.3.0 新增 deterministic_fusion / pel_core / telemetry、移除 resonance-field 死栈；2.3.1 在此基础上做畸形 LLM 输入硬化（非 dict JSON / null 字段 / 跨档位快照维度对齐 / NaN·溢出守卫，新增 `_numeric` 共享数值工具）。公共导出面（43 符号）逐字不变，对插件零接口变更。
 
 ---
 

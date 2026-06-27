@@ -268,7 +268,17 @@ class DeterministicFusion:
         # "states" is also present in legacy ResonanceField snapshots, so old saves
         # migrate gracefully — states load, the dropped field internals are ignored.
         if "states" in data:
-            self._module_states = [list(s) for s in data["states"]]
+            # Align loaded states to THIS instance's shape — BOTH per-state width and
+            # module count. A snapshot from another tier (pro=16 / max=128) or a legacy
+            # ResonanceField save must match, or the next resonate()/inject() reads past
+            # the configured shape: range(state_dim) over a too-short state IndexErrors,
+            # and range(n_modules) over too-few states (line ~178, `for i in range(n)`)
+            # IndexErrors too. _resize fixes width; pad/truncate fixes the row count.
+            # (Same _resize convention as switch_tier; count normalization mirrors it.)
+            states = [_resize(s, self._state_dim) for s in data["states"]]
+            if len(states) < self._n_modules:
+                states += [[0.0] * self._state_dim for _ in range(self._n_modules - len(states))]
+            self._module_states = states[: self._n_modules]
         self._total_resonances = data.get("total_resonances", 0)
         self._iteration_count = data.get("iteration_count", 0)
         self._dissipation = data.get("dissipation", self._dissipation)

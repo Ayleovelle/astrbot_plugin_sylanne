@@ -239,6 +239,12 @@ class AlphaKernel:
         event: AlphaKernelEvent,
         assessment: dict[str, Any] | None,
     ) -> dict[str, Any]:
+        # Container guard for the public host.on_request(assessment=...) boundary: a
+        # non-dict assessment would AttributeError in _update_affect_debt (its except
+        # catches only TypeError/ValueError) and in the spine. Normalize once so all
+        # downstream consumers treat a malformed container as "no assessment".
+        if assessment is not None and not isinstance(assessment, dict):
+            assessment = None
         self.body.apply(
             text=event.text,
             flags=event.flags,

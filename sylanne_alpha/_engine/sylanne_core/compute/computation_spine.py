@@ -614,6 +614,14 @@ class ComputationSpine:
                 回复的评分，在第 N+1 轮调 process() 时传入；高分强化表达欲+拉近关系，低分收敛
                 表达欲（经 canonical 自动漂移通道）。
         """
+        # Container guard (public entry): a non-dict assessment would AttributeError
+        # below — assessment.items() in the cache signature just here, and
+        # assessment.get(...) in apply_assessment. Normalize once so the whole tick
+        # treats a malformed container as "no assessment" (mirrors ResonanceSpine.process
+        # / AlphaKernel._tick_inner). Field-level None/NaN is handled by _coerce_float.
+        if assessment is not None and not isinstance(assessment, dict):
+            assessment = None
+
         # 结果缓存层（Item 20）：相同文本+相同评估短时间内直接返回缓存
         # assessment 不同意味着 LLM 给出了新评估，必须重新计算
         assess_sig = (
@@ -773,7 +781,7 @@ class ComputationSpine:
 
         # Layer 3.5: LLM Assessment modulation (if available this tick)
         assessment_source = "hdc_only"
-        if assessment:
+        if assessment:  # already normalized to dict-or-None at process() entry
             self.apply_assessment(assessment)
             assessment_source = "llm_assessed"
             # Re-observe after assessment modulation

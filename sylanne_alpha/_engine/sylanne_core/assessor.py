@@ -16,6 +16,8 @@ import logging
 from collections.abc import Awaitable, Callable
 from typing import Any
 
+from ._numeric import _coerce_float
+
 logger = logging.getLogger("sylanne_core")
 
 _SYSTEM_PROMPT = """你是一个文本情感分析器。分析用户输入的文本，返回 JSON 格式的评估结果。
@@ -70,14 +72,6 @@ async def assess_text(
         return result
 
 
-def _coerce_float(value: Any, lo: float, hi: float, default: float) -> float:
-    """Best-effort float in [lo, hi]; untrusted LLM output falls back to default."""
-    try:
-        return max(lo, min(hi, float(value)))
-    except (TypeError, ValueError):
-        return default
-
-
 def _neutral(*, flags: list[str], confidence: float) -> dict[str, Any]:
     return {
         "confidence": confidence,
@@ -109,7 +103,10 @@ def _parse_response(response: str) -> dict[str, Any]:
             "arousal": _coerce_float(data.get("arousal", 0.0), 0.0, 1.0, 0.0),
             "wound_risk": _coerce_float(data.get("wound_risk", 0.0), 0.0, 1.0, 0.0),
         }
-    except (json.JSONDecodeError, ValueError, TypeError):
+    except (json.JSONDecodeError, ValueError, TypeError, AttributeError):
+        # AttributeError: legal-but-non-dict JSON (``[]`` / ``"text"`` / ``null``)
+        # parses fine, then ``data.get`` blows up — treat it as malformed, same as
+        # a decode error, rather than letting it propagate out of the assessor.
         return _neutral(flags=["idle"], confidence=0.3)
 
 
