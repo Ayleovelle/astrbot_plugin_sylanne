@@ -2572,20 +2572,25 @@ class LLMRequestPipeline:
                 await asyncio.sleep(1.0)
         return ""
 
+    def _assessor_max_tokens(self) -> int:
+        """语义评估输出上限（可配置）。默认 1024：推理模型先耗 token 做隐藏推理，
+        过低（旧版写死 50/100）会让正文为空、情感读数恒落中性。非推理模型解完即停不多花。"""
+        return int(self._p._config.get("sylanne_alpha_assessor_max_tokens") or 1024)
+
     async def _assessor_llm_call(self, prompt: str) -> str:
-        """调用配置的 LLM provider 执行快速语义评估（max_tokens=50）。"""
+        """调用配置的 LLM provider 执行快速语义评估（max_tokens 可配置，默认 1024）。"""
         return await self._generic_llm_call(
             prompt,
             provider_config_keys=[
                 "sylanne_alpha_assessor_provider_id",
                 "emotion_provider_id",
             ],
-            max_tokens=50,
+            max_tokens=self._assessor_max_tokens(),
             temperature=0.0,
         )
 
     async def _main_assessor_llm_call(self, prompt: str) -> str:
-        """调用配置的 LLM provider 执行主（深度）语义评估（max_tokens=100）。"""
+        """调用配置的 LLM provider 执行主（深度）语义评估（max_tokens 可配置，默认 1024）。"""
         return await self._generic_llm_call(
             prompt,
             provider_config_keys=[
@@ -2593,7 +2598,7 @@ class LLMRequestPipeline:
                 "sylanne_alpha_assessor_provider_id",
                 "emotion_provider_id",
             ],
-            max_tokens=100,
+            max_tokens=self._assessor_max_tokens(),
             temperature=0.0,
         )
 

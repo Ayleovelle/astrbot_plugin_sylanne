@@ -145,6 +145,12 @@
     "_special": "select_provider",
     "hint": "前台同步等待 2s，需要响应快的小模型。即时情绪直接影响当前轮回复语气。推荐设置：温度 0，top-p 0.1，Max Tokens 无需设置（插件已接管）。"
   },
+  "sylanne_alpha_assessor_max_tokens": {
+    "description": "语义评估 LLM 最大输出 token",
+    "type": "int",
+    "default": 1024,
+    "hint": "快速/主语义评估的输出上限。推理模型（如 deepseek-v4 等带隐藏思考的模型）会先把 token 花在推理上，过低（旧版写死 50/100）会让正文为空、情感读数恒落中性，越情绪化的消息越严重；故默认 1024 留足余量。非推理模型解完即停、不会多花。"
+  },
   "sylanne_alpha_background_workers_enabled": {
     "description": "启用后台工作队列",
     "type": "bool",
