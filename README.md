@@ -181,7 +181,7 @@ Sylanne 的心智由三个相互嵌套的层级构成：
 | L6 | 自创生边界 | 主权守卫 + 中断预算 |
 | L7 | 相变表达 | 表达从场的相变中涌现 |
 
-计算层可纯 Python 运行——numpy 只是可选加速依赖，缺失时自动回退纯 Python，它不是延迟瓶颈。
+计算层可纯 Python 运行——numpy 只是可选加速依赖，缺失时自动回退纯 Python。实测（本机 lite 纯 Python，1500 次采样）单 tick 中位 ~3.7 ms、p99 ~12 ms，相对 LLM 推理（秒级）可忽略，不是延迟瓶颈。
 
 之上是 **8 子系统的身体状态模型**（AlphaBodyState）：脉搏、血流、神经、肌肉、温度、伤口、免疫、死亡率——29 维状态向量，接收事件并演化。
 
@@ -489,7 +489,7 @@ vendored sylanne_core 2.0.0 → 2.3.1：2.3.0 新增 deterministic_fusion / pel_
 | `sylanne_alpha_owner_id` | 空 | 主人 sender_id（用于亲密会话路由的身份门控） |
 | `sylanne_alpha_recall_mode` | `legacy` | 召回引擎模式（legacy / shadow / activation） |
 
-> 计算层是本地算术（numpy 可选加速，缺失自动回退纯 Python），不是延迟瓶颈；实际延迟主要来自 LLM 推理。agent 编排与反应式学习都是零 LLM 的本地算术，反思走睡眠期异步，开全功能实机无可感知的额外延迟。
+> 计算层是本地算术（numpy 可选加速，缺失自动回退纯 Python），实测单 tick 中位 ~3.7 ms / p99 ~12 ms，相对 LLM 推理（秒级）可忽略，不是延迟瓶颈；实际延迟主要来自 LLM 推理。agent 编排与反应式学习都是零 LLM 的本地算术，反思走睡眠期异步，开全功能实机无可感知的额外延迟。
 
 ---
 
