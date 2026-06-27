@@ -1320,7 +1320,15 @@ class LLMRequestPipeline:
                             continue
                         yield emitted
                         if do_first and not first_sent:
-                            buffer += str(emitted)
+                            # 抽 Plain 文本，别 str(MessageChain)——它是纯 dataclass、无 __str__，
+                            # str() 会把 "MessageChain(chain=[Plain(...))" 对象 repr 当正文漏给用户。
+                            _chain = getattr(emitted, "chain", None)
+                            if isinstance(_chain, list):
+                                buffer += "".join(
+                                    t
+                                    for c in _chain
+                                    if isinstance(t := getattr(c, "text", None), str)
+                                )
                             first_sentence = p._extract_first_sentence(buffer)
                             if first_sentence:
                                 first_sent = True

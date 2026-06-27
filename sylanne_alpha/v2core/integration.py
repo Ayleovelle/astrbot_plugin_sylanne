@@ -344,7 +344,12 @@ async def _percept_recall(
                 try:
                     provider = get_prov(provider_id)
                     if provider:
-                        query_embedding = await provider.get_embedding(text[:100])
+                        # 热路径（PERCEPT，LLM 调用前）：embedding provider 若挂起会卡死整条
+                        # 召回 → 用户消息无回复。超时兜底，挂起→TimeoutError→下面 except→无
+                        # embedding 降级召回，绝不让一个慢 provider 堵死回复。
+                        query_embedding = await asyncio.wait_for(
+                            provider.get_embedding(text[:100]), timeout=5.0
+                        )
                 except Exception:
                     query_embedding = None
         results = memory.recall(
