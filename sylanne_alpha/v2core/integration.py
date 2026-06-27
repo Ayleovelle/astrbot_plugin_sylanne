@@ -325,7 +325,9 @@ async def _percept_recall(
     if memory is None or not (text or "").strip():
         return
     try:
-        if not memory.intimacy_ok(ctx.body):
+        # #29：PERCEPT 召回门控同样吃 memory.intimacy_threshold 进化偏置（与 DELIBERATE
+        # 召回同源，gate 一致）。ctx 由 run_percept_stage 注入了 scratch["evo_delta"]。
+        if not memory.intimacy_ok(ctx.body, bias=ctx.evo_bias("memory", "intimacy_threshold")):
             return
         limit = 2
         bias = ctx.scratch.get("somatic_bias")
@@ -354,6 +356,29 @@ async def _percept_recall(
             ctx.scratch["recalled"] = results
     except Exception:
         pass
+
+
+def _evo_provider(plugin: Any, session_key: str):
+    """构造本会话的进化偏置 provider：callable(agent, key) -> float（#29 输出侧接通）。
+
+    背后是 agents.SelfCore.evo_delta（plugin._self_core，持 EvolutionStore：反射 delta +
+    反思 reflection_bias，自带 ±0.20 总 cap）。注入 ctx.scratch["evo_delta"]，live 门控
+    （IgnitionArbiter / MemoryDomain.intimacy_ok）经 ctx.evo_bias 读取并二次钳位。
+
+    _self_core 缺失（未装/旧路径）或读取异常 → 返回 None / 0.0：门控落回纯人格基线，
+    零行为变化（绝不因学习层缺位而阻断或改写回复）。
+    """
+    sc = getattr(plugin, "_self_core", None)
+    if sc is None or not hasattr(sc, "evo_delta"):
+        return None
+
+    def _get(agent: str, key: str) -> float:
+        try:
+            return float(sc.evo_delta(session_key, agent, key))
+        except Exception:  # noqa: BLE001
+            return 0.0
+
+    return _get
 
 
 def _user_text(plugin: Any, event: Any) -> str:
@@ -388,6 +413,7 @@ async def apply_v2core_request(plugin: Any, event: Any, request: Any) -> None:
 
         ctx = rt["runner"].run_percept_stage(
             session_key, event, text, domains=rt["domains"],
+            evo_delta=_evo_provider(plugin, session_key),
         )
         await _percept_recall(plugin, ctx, rt["domains"], text)
         rt["pending"] = {"ctx": ctx, "ts": time.time(), "text": text}
@@ -547,6 +573,7 @@ async def apply_v2core_response(plugin: Any, event: Any, response: Any) -> bool:
                 text = _user_text(plugin, event)
                 ctx = rt["runner"].run_percept_stage(
                     session_key, event, text, domains=rt["domains"],
+                    evo_delta=_evo_provider(plugin, session_key),
                 )
 
             reply = rt["runner"].run_decision_stage(
@@ -684,6 +711,7 @@ async def consult_idle_reach(plugin: Any, session_key: str) -> dict[str, Any]:
         runner = rt["runner"]
         ctx = runner.run_percept_stage(
             session_key, {"proactive": True}, "", domains=rt["domains"], idle=True,
+            evo_delta=_evo_provider(plugin, session_key),
         )
         ctx.scratch["proactive"] = True
         # 只跑 DELIBERATE（outreach/ignition），不 render、不 EVOLVE、不 tick——零副作用

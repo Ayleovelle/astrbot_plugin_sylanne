@@ -74,9 +74,14 @@ class MemoryDomain:
             out.append(row)
         return out
 
-    def intimacy_ok(self, body: BodySnapshot) -> bool:
-        """关系是否够亲密到主动翻记忆（阈值=人格函数基线，可被进化偏置覆盖）。"""
-        return body.intimacy_gravity >= self._INTIMACY_BASE
+    def intimacy_ok(self, body: BodySnapshot, *, bias: float = 0.0) -> bool:
+        """关系是否够亲密到主动翻记忆（阈值=人格函数基线 + 进化偏置）。
+
+        #29：bias = reflex/反思 学到的 memory.intimacy_threshold 偏置（叠加在基线上，
+        调用方经 ctx.evo_bias 取并已二次钳位 ±0.15）。负偏置=降门槛=更早愿意翻记忆
+        （更主动）；缺省 0.0 = 纯人格基线（向后兼容旧调用与测试）。
+        """
+        return body.intimacy_gravity >= self._INTIMACY_BASE + bias
 
     def format_injection(self, results: list[Any], max_items: int = 3) -> str:
         """委托 MemorySystem 的分级注入格式化（clear/vague/tot 措辞）。"""

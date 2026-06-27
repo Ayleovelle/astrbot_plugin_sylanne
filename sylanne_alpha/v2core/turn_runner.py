@@ -64,15 +64,22 @@ class TurnRunner:
         groups: Any = None,
         now: float | None = None,
         idle: bool = False,
+        evo_delta: Any = None,
     ) -> BeatContext:
         """跑 PERCEPT 拍，返回 ctx（供 integration 暂存到 response 阶段续用）。
 
         全程只读（observe + 领域读接口），不 tick、不写领域——天然并发安全。
+
+        evo_delta（#29）：可选 callable(agent, key)->float，进化偏置 provider。注入
+        ctx.scratch["evo_delta"] 后，DELIBERATE/PERCEPT 各能力经 ctx.evo_bias(...) 读到
+        学到的门控偏置（叠加在人格函数基线上）。None=不注入（旧路径/测试，门控落回纯人格）。
         """
         ctx = self._sc.make_context(
             session_key, event, text, domains=domains or {}, groups=groups,
             now=now if now is not None else _event_now(event),
         )
+        if evo_delta is not None:
+            ctx.scratch["evo_delta"] = evo_delta
         if idle:
             ctx.scratch["idle"] = True
         ev = getattr(ctx, "event", None)
