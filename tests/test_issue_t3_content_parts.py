@@ -120,3 +120,12 @@ def test_fp_truncated_on_backslash_no_raw_leak():
     out = norm(cut)
     assert "'type'" not in out and "[{" not in out, "不得漏出 content-parts 结构"
     assert out == "line1"
+
+
+def test_deeply_nested_untrusted_input_no_crash():
+    """不可信 provider 输出深度嵌套（通过 [{...'type'... 守卫）→ literal_eval 在 Py3.10/3.11
+    可能抛 RecursionError、Py3.12+ 抛 SyntaxError，两者都须兜住 → 退回原文，绝不让畸形
+    输入打挂回复管线（gemini PR #45 review 提的 RecursionError 面）。"""
+    evil = "[{'type':'text','text':" + "[" * 5000 + "]" * 5000 + "}]"
+    out = norm(evil)  # 不得抛 RecursionError/SyntaxError
+    assert out == evil  # 解析失败 → 原样退回，绝不吃/截断/串味

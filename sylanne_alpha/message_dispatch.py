@@ -369,7 +369,7 @@ def _recover_content_parts_repr(s: str) -> str | None:
     # ① 整串完整字面量（literal_eval 本就拒绝尾部多余 prose，故 prose 会落到 ② 并失败）
     try:
         parsed = ast.literal_eval(s)
-    except (ValueError, SyntaxError):
+    except (ValueError, SyntaxError, RecursionError):
         pass
     else:
         if isinstance(parsed, list):
@@ -385,7 +385,7 @@ def _recover_content_parts_repr(s: str) -> str | None:
         for suffix in ("'}]", '"}]', "']}]", "}]", "]"):
             try:
                 parsed = ast.literal_eval(base + suffix)
-            except (ValueError, SyntaxError):
+            except (ValueError, SyntaxError, RecursionError):
                 continue
             if isinstance(parsed, list):
                 joined = _join_content_parts(parsed)
