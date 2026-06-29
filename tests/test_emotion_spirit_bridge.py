@@ -1,11 +1,15 @@
-"""Tests for EmotionSpiritBridge —— Sylanne ↔ astrbot_plugin_emotion_spirit 适配桥。
+"""Tests for EmotionSpiritBridge —— Sylanne ↔ astrbot_plugin_emotion_spirit 适配桥（Design B）。
 
-核心验证两条路径（对应任务约束②④）：
-  - 装了（探到 emotion_spirit）：桥激活 + persona_mode 被设 "disabled" + 记忆路由到 MemoryPool。
-  - 没装：available()/is_active()/memory_backend() 全 no-op，调任何方法零副作用、零异常。
+2026-06-29 本机装 emotion_spirit v1.1.0、11-agent 工作流深挖真实 API 后，用户拍板 Design B：
+  - 记忆仍以 Sylanne 原生为主控；只【消费】它的稳定情绪/躯体状态注入 system_prompt 当背景。
+  - 引擎共享确认结构上不可行 → align_shared_engine 永久 no-op、移除开关。
+  - 记忆写入路由（memory_backend）作 Phase 2 镜像双写预置，当前不接线但已修真 bug。
 
-另验证：pull_context 合并、deactivate 还原 persona_mode、引擎共享默认保守关、缺方法优雅降级。
-设计约束：不硬 import emotion_spirit，全鸭子类型；未装时对 Sylanne 现有行为零影响。
+测试替身按【实测 API】构造（非旧脚手架幻觉）：
+  - 实例属性 _pool / _public_api / _persona_mode（main.py:78/220）。
+  - PublicAPI.get_emotion_state/get_body_state 是 **async**、cold session 返 None。
+  - MemoryPool.add(..., participants=, privacy=) / recall(keyword, current_user=, max_results=)，
+    recall 返回带 .tier/.emotional_weight/.text 的对象（非 .pool/.score）。
 """
 
 from __future__ import annotations
@@ -16,20 +20,43 @@ import unittest
 from sylanne_alpha.emotion_spirit_bridge import (
     EMOTION_SPIRIT_STAR_NAME,
     EmotionSpiritBridge,
+    _bucket,
+    _clamp,
+    _clamp01,
 )
 
 
 # ---------------------------------------------------------------------------
-# 测试替身：模拟 emotion_spirit 插件（仿 proactive 测试里的 FakeDaPing）
+# 测试替身：按实测 emotion_spirit v1.1.0 API 构造
 # ---------------------------------------------------------------------------
+class FakeEntry:
+    """模拟 emotion_spirit UnifiedEntry：真实字段 .tier/.emotional_weight/.text。"""
+
+    def __init__(self, text: str, tier: str, emotional_weight: float) -> None:
+        self.text = text
+        self.tier = tier
+        self.emotional_weight = emotional_weight
+        self.source_user = "user1"
+
+
 class FakeMemoryPool:
-    """模拟 emotion_spirit MemoryPool：记录 add/recall 调用。"""
+    """模拟 emotion_spirit MemoryPool：真实 add/recall 签名，记录调用。"""
 
     def __init__(self) -> None:
         self.added: list[dict] = []
         self.recall_calls: list[tuple] = []
 
-    def add(self, text, raw_weight=None, phi=None, tags=None, source_user=None) -> None:
+    def add(
+        self,
+        text,
+        raw_weight=None,
+        phi=None,
+        tags=None,
+        source_user=None,
+        participants=None,
+        privacy="private",
+        entities=None,
+    ) -> FakeEntry:
         self.added.append(
             {
                 "text": text,
@@ -37,40 +64,52 @@ class FakeMemoryPool:
                 "phi": phi,
                 "tags": list(tags or []),
                 "source_user": source_user,
+                "participants": set(participants) if participants else None,
             }
         )
+        return FakeEntry(text, "buffer", raw_weight or 0.0)
 
-    def recall(self, query, k=5):
-        self.recall_calls.append((query, k))
+    def recall(self, keyword, current_user=None, max_results=5, privacy_filter=None):
+        self.recall_calls.append(
+            {"keyword": keyword, "current_user": current_user, "max_results": max_results}
+        )
         return [
-            {"text": "warm-hit", "pool": "warm", "score": 0.8, "source_user": "user1"},
-            {"text": "ghost-hit", "pool": "ghost", "score": 0.2, "source_user": "self"},
+            FakeEntry("warm-hit", "warm", 0.8),
+            FakeEntry("ghost-hit", "ghost", 0.2),
         ]
 
 
 class FakePublicAPI:
-    def get_emotion_state(self, session_key, include_trajectory=False):
-        return {"valence": 0.3, "arousal": 0.6, "session": session_key,
-                "trajectory": include_trajectory}
+    """实测：get_emotion_state/get_body_state 是 async，cold session 返 None。"""
 
-    def get_body_state(self, session_key):
-        return {"energy": 0.7, "session": session_key}
+    async def get_emotion_state(self, session_key, include_trajectory=False):
+        if session_key == "cold":
+            return None
+        out = {
+            "pad_primary": "平静",
+            "pad_label": "neutral",          # 已弃用别名，渲染应优先 pad_primary
+            "pad_intensity": 0.82,           # 渲染应分桶成「高」，不得出现裸 0.82
+            "pad_valence": 0.3,
+        }
+        if include_trajectory:
+            out["emotion_trajectory"] = [{"valence": 0.3, "timestamp": 1.0}]
+        return out
 
-
-class FakePromptInjector:
-    def build_context(self, session_key):
-        return f"[emotion_spirit context for {session_key}]"
+    async def get_body_state(self, session_key):
+        if session_key == "cold":
+            return None
+        return {"pad_primary": "平静", "warmth": 0.9, "pulse": 0.2,
+                "expression": 0.5, "repair": 0.1}
 
 
 class FakeEmotionSpiritStar:
-    """模拟 EmotionSpiritPlugin(Star) 实例：暴露记忆池/公共 API/注入器 + persona_mode 门控。"""
+    """模拟 EmotionSpiritPlugin(Star) 实例：grounded 属性 _pool / _public_api / _persona_mode。"""
 
     def __init__(self, *, with_api=True, persona_mode="enabled") -> None:
-        self.memory_pool = FakeMemoryPool()
+        self._pool = FakeMemoryPool()
         self._persona_mode = persona_mode
         if with_api:
-            self.public_api = FakePublicAPI()
-            self.prompt_injector = FakePromptInjector()
+            self._public_api = FakePublicAPI()
 
 
 class FakeMeta:
@@ -106,7 +145,7 @@ class FakeNativeMemory:
 
 
 class FakeSylanne:
-    """模拟 Sylanne 插件实例，仅注入桥所需的最小依赖（context）。"""
+    """模拟 Sylanne 插件实例，仅注入桥所需的最小依赖（context + config）。"""
 
     def __init__(self, star) -> None:
         self.context = FakeContext(star)
@@ -121,11 +160,11 @@ def _run(coro, timeout=5.0):
 
 
 # ---------------------------------------------------------------------------
-# 没装 emotion_spirit → 完全 no-op（任务约束②④的核心证明）
+# 没装 emotion_spirit → 完全 no-op
 # ---------------------------------------------------------------------------
 class TestNotInstalledIsNoOp(unittest.TestCase):
     def setUp(self) -> None:
-        self.syl = FakeSylanne(star=None)  # 未安装
+        self.syl = FakeSylanne(star=None)
         self.bridge = EmotionSpiritBridge(self.syl)
 
     def test_available_false(self):
@@ -138,58 +177,45 @@ class TestNotInstalledIsNoOp(unittest.TestCase):
         self.assertFalse(self.bridge.is_active())
 
     def test_memory_backend_none(self):
-        # 未激活 → None；调用方据此继续走原生 memory_system（现有路径一字不改）
         self.assertIsNone(self.bridge.memory_backend(FakeNativeMemory()))
 
     def test_pull_context_all_none(self):
-        ctx = self.bridge.pull_context("s:1:1")
-        self.assertEqual(
-            ctx, {"emotion_state": None, "body_state": None, "context": None}
-        )
+        ctx = _run(self.bridge.pull_context("s:1:1"))
+        self.assertEqual(ctx, {"emotion_state": None, "body_state": None})
+
+    def test_consume_state_block_empty(self):
+        self.assertEqual(_run(self.bridge.consume_state_block("s:1:1")), "")
+
+    def test_reassert_false(self):
+        self.assertFalse(self.bridge.reassert_persona_disabled())
 
     def test_deactivate_noop(self):
-        res = self.bridge.deactivate()
-        self.assertFalse(res["restored"])
+        self.assertFalse(self.bridge.deactivate()["restored"])
 
-    def test_engine_share_default_off(self):
-        async def _llm(sysp, user):  # pragma: no cover - 不应被调用
-            return ""
-
-        res = _run(self.bridge.align_shared_engine(_llm))
+    def test_engine_share_permanent_noop(self):
+        res = _run(self.bridge.align_shared_engine())
         self.assertFalse(res["aligned"])
-        self.assertEqual(res["reason"], "disabled_by_default")
-        self.assertIn("note", res)
+        self.assertEqual(res["reason"], "infeasible_cross_namespace_registry")
 
-    def test_all_public_methods_no_exception_and_no_side_effect(self):
-        """逐一调每个公共方法：无异常、无副作用（star=None 时本就无可改对象）。"""
+    def test_all_public_methods_no_exception(self):
         b = self.bridge
         self.assertFalse(b.available())
         self.assertFalse(b.activate()["active"])
         self.assertIsNone(b.memory_backend())
-        self.assertIsNotNone(b.pull_context("x"))
+        self.assertEqual(_run(b.pull_context("x")), {"emotion_state": None, "body_state": None})
+        self.assertEqual(_run(b.consume_state_block("x")), "")
+        self.assertFalse(b.reassert_persona_disabled())
         self.assertFalse(b.deactivate()["restored"])
         self.assertFalse(b.is_active())
-
-        async def _llm(s, u):  # pragma: no cover
-            return ""
-
-        # 即便显式 enabled，star=None 时检测门控直接 not_installed：data_dir 不解析、
-        # 绝不 import/建任何引擎（红队 B1 回归防护）。
-        res = _run(b.align_shared_engine(_llm, enabled=True))
-        self.assertFalse(res["aligned"])
-        self.assertEqual(res["reason"], "not_installed")
-        self.assertIsNone(res["data_dir"])
-        # data_dir 推算在未装时返回 None（不凭空合成路径）
-        self.assertIsNone(b._emotion_spirit_data_dir())
+        self.assertFalse(_run(b.align_shared_engine(lambda s, u: ""))["aligned"])
 
 
 # ---------------------------------------------------------------------------
-# 装了 emotion_spirit → 激活 + persona_mode disabled + 记忆路由
+# 装了 emotion_spirit → 激活 + persona_mode disabled + 自愈重申
 # ---------------------------------------------------------------------------
 class TestInstalledActivation(unittest.TestCase):
     def test_available_true(self):
-        star = FakeEmotionSpiritStar()
-        bridge = EmotionSpiritBridge(FakeSylanne(star))
+        bridge = EmotionSpiritBridge(FakeSylanne(FakeEmotionSpiritStar()))
         self.assertTrue(bridge.available())
 
     def test_activate_sets_persona_mode_disabled(self):
@@ -198,185 +224,252 @@ class TestInstalledActivation(unittest.TestCase):
         res = bridge.activate()
         self.assertTrue(res["active"])
         self.assertTrue(bridge.is_active())
-        # 核心：emotion_spirit 的 persona 注入被关掉（== "disabled" 即早返不注入）
-        self.assertEqual(star._persona_mode, "disabled")
-
-    def test_deactivate_restores_persona_mode(self):
-        star = FakeEmotionSpiritStar(persona_mode="default")
-        bridge = EmotionSpiritBridge(FakeSylanne(star))
-        bridge.activate()
-        self.assertEqual(star._persona_mode, "disabled")
-        res = bridge.deactivate()
-        self.assertTrue(res["restored"])
-        self.assertEqual(star._persona_mode, "default")  # 还原成接管前的值，不留痕
-        self.assertFalse(bridge.is_active())
-
-    def test_memory_backend_routes_add_to_pool(self):
-        star = FakeEmotionSpiritStar()
-        bridge = EmotionSpiritBridge(FakeSylanne(star))
-        bridge.activate()
-        native = FakeNativeMemory()
-        backend = bridge.memory_backend(native)
-        self.assertIsNotNone(backend)
-        self.assertTrue(backend.routes_to_emotion_spirit)
-
-        res = backend.add(
-            "记得我喜欢猫",
-            importance=0.9,
-            confidence=0.7,
-            temperature=0.5,
-            source="user_explicit",
-            life_event_id="evt-42",
-            source_user="user1",
-        )
-        self.assertEqual(res["routed"], "emotion_spirit")
-        # 写进了 emotion_spirit 池，没碰原生
-        self.assertEqual(len(star.memory_pool.added), 1)
-        self.assertEqual(len(native.writes), 0)
-        rec = star.memory_pool.added[0]
-        self.assertEqual(rec["text"], "记得我喜欢猫")
-        self.assertAlmostEqual(rec["raw_weight"], 0.9)        # importance → raw_weight
-        self.assertAlmostEqual(rec["phi"], 0.7)               # confidence → phi
-        self.assertEqual(rec["source_user"], "user1")
-        # life_event_id / source 映射进 tags（去重键 + 来源保留）
-        self.assertIn("life_event_id:evt-42", rec["tags"])
-        self.assertIn("source:user_explicit", rec["tags"])
-
-    def test_memory_backend_routes_recall_to_pool(self):
-        star = FakeEmotionSpiritStar()
-        bridge = EmotionSpiritBridge(FakeSylanne(star))
-        bridge.activate()
-        backend = bridge.memory_backend(FakeNativeMemory())
-        results = backend.recall("猫", k=3)
-        self.assertEqual(star.memory_pool.recall_calls, [("猫", 3)])
-        # 4 层池 → L1/L2/L3 映射归一
-        layers = {r["layer"] for r in results}
-        self.assertIn("L2", layers)   # warm → L2
-        self.assertIn("L3", layers)   # ghost → L3
-        self.assertEqual(results[0]["text"], "warm-hit")
-
-    def test_pull_context_merges_state(self):
-        star = FakeEmotionSpiritStar()
-        bridge = EmotionSpiritBridge(FakeSylanne(star))
-        bridge.activate()
-        ctx = bridge.pull_context("s:9:9", include_trajectory=True)
-        self.assertEqual(ctx["emotion_state"]["valence"], 0.3)
-        self.assertTrue(ctx["emotion_state"]["trajectory"])
-        self.assertEqual(ctx["body_state"]["energy"], 0.7)
-        self.assertIn("emotion_spirit context", ctx["context"])
-
-
-# ---------------------------------------------------------------------------
-# 优雅降级：emotion_spirit 在场但缺方法 / 抛错 → 不崩、降级
-# ---------------------------------------------------------------------------
-class TestGracefulDegradation(unittest.TestCase):
-    def test_missing_api_still_available_but_context_none(self):
-        # star 只有 memory_pool，缺 public_api / prompt_injector
-        star = FakeEmotionSpiritStar(with_api=False)
-        bridge = EmotionSpiritBridge(FakeSylanne(star))
-        self.assertTrue(bridge.available())  # 探到即 available（probe 只 warning）
-        bridge.activate()
-        ctx = bridge.pull_context("s:1:1")
-        self.assertIsNone(ctx["emotion_state"])
-        self.assertIsNone(ctx["context"])
-
-    def test_pool_add_failure_falls_back_to_native(self):
-        star = FakeEmotionSpiritStar()
-
-        def _boom(*a, **k):
-            raise RuntimeError("pool down")
-
-        star.memory_pool.add = _boom  # type: ignore
-        bridge = EmotionSpiritBridge(FakeSylanne(star))
-        bridge.activate()
-        native = FakeNativeMemory()
-        backend = bridge.memory_backend(native)
-        res = backend.add("x", importance=0.5)
-        # 池写失败 → 降级到原生 memory_system
-        self.assertEqual(res["routed"], "native")
-        self.assertEqual(len(native.writes), 1)
-
-    def test_recall_pool_failure_falls_back_to_native(self):
-        star = FakeEmotionSpiritStar()
-
-        def _boom(*a, **k):
-            raise RuntimeError("recall down")
-
-        star.memory_pool.recall = _boom  # type: ignore
-        bridge = EmotionSpiritBridge(FakeSylanne(star))
-        bridge.activate()
-        native = FakeNativeMemory()
-        backend = bridge.memory_backend(native)
-        out = backend.recall("猫", k=2)
-        # 池召回失败 → 降级原生 recall（被调用），返回空列表（原生替身无数据）
-        self.assertEqual(native.recall_calls, [("猫", 2)])
-        self.assertEqual(out, [])
-
-    def test_engine_share_installed_no_llm_no_engine(self):
-        """装了但不传 llm：仍不建引擎（no_llm_callable），data_dir 推算不依赖 astrbot 实例属性。"""
-        star = FakeEmotionSpiritStar()
-        star.data_dir = "/tmp/es/sylanne_sessions"  # type: ignore
-        bridge = EmotionSpiritBridge(FakeSylanne(star))
-        bridge.activate()
-        res = _run(bridge.align_shared_engine(None, enabled=True))
-        self.assertFalse(res["aligned"])
-        self.assertEqual(res["reason"], "no_llm_callable")
-
-    def test_persona_mode_written_directly_to_grounded_field(self):
-        """直接写 grounded 门控字段 _persona_mode（emotion_spirit 的 gate 直读它）。"""
-        star = FakeEmotionSpiritStar(persona_mode="enabled")
-        bridge = EmotionSpiritBridge(FakeSylanne(star))
-        res = bridge.activate()
-        self.assertTrue(res["active"])
         self.assertEqual(star._persona_mode, "disabled")
         self.assertIn("setattr:_persona_mode", res["persona_mode_disabled"]["via"])
 
-    def test_deactivate_deletes_attr_when_absent_before(self):
-        """接管前没有 persona_mode 字段：deactivate 应删除我们写入的（不留痕，哨兵区分）。"""
-        star = FakeEmotionSpiritStar()
-        delattr(star, "_persona_mode")  # 模拟接管前根本没有该字段
-        self.assertFalse(hasattr(star, "_persona_mode"))
+    def test_deactivate_restores_persona_mode(self):
+        star = FakeEmotionSpiritStar(persona_mode="auto")
         bridge = EmotionSpiritBridge(FakeSylanne(star))
         bridge.activate()
-        self.assertEqual(star._persona_mode, "disabled")  # 接管写入
+        self.assertEqual(star._persona_mode, "disabled")
         res = bridge.deactivate()
         self.assertTrue(res["restored"])
-        self.assertFalse(hasattr(star, "_persona_mode"))  # 删回不留痕
+        self.assertEqual(star._persona_mode, "auto")   # 还原成接管前的值，不留痕
+        self.assertFalse(bridge.is_active())
+
+    def test_reassert_self_heals_external_revert(self):
+        """用户/配置中途把 persona_mode 改回 'auto' → 每轮 reassert 自愈成 'disabled'。"""
+        star = FakeEmotionSpiritStar(persona_mode="enabled")
+        bridge = EmotionSpiritBridge(FakeSylanne(star))
+        bridge.activate()
+        star._persona_mode = "auto"                    # 外部偷偷改回
+        self.assertTrue(bridge.reassert_persona_disabled())
+        self.assertEqual(star._persona_mode, "disabled")
+        # 已是 disabled → 不再无谓写
+        self.assertFalse(bridge.reassert_persona_disabled())
+
+    def test_deactivate_deletes_attr_when_absent_before(self):
+        star = FakeEmotionSpiritStar()
+        delattr(star, "_persona_mode")
+        bridge = EmotionSpiritBridge(FakeSylanne(star))
+        bridge.activate()
+        self.assertEqual(star._persona_mode, "disabled")
+        res = bridge.deactivate()
+        self.assertTrue(res["restored"])
+        self.assertFalse(hasattr(star, "_persona_mode"))
 
     def test_deactivate_restores_none_when_prev_was_none(self):
-        """接管前字段值就是 None：哨兵保证 deactivate 还原成 None 而非删除。"""
         star = FakeEmotionSpiritStar(persona_mode=None)
         bridge = EmotionSpiritBridge(FakeSylanne(star))
         bridge.activate()
         self.assertEqual(star._persona_mode, "disabled")
         res = bridge.deactivate()
         self.assertTrue(res["restored"])
-        self.assertIsNone(star._persona_mode)  # 还原成 None，不被当作「不存在」删掉
+        self.assertIsNone(star._persona_mode)
 
 
 # ---------------------------------------------------------------------------
-# 引擎共享对齐：默认关 + 缺 llm + note 永远在
+# 消费：拉稳定状态 + 渲染观察式背景块（粗粒度、无裸 float）
 # ---------------------------------------------------------------------------
-class TestEngineShareConservative(unittest.TestCase):
-    def test_enabled_but_no_llm(self):
+class TestConsumeState(unittest.TestCase):
+    def setUp(self) -> None:
+        self.star = FakeEmotionSpiritStar()
+        self.bridge = EmotionSpiritBridge(FakeSylanne(self.star))
+        self.bridge.activate()
+
+    def test_pull_context_awaits_async_api(self):
+        ctx = _run(self.bridge.pull_context("s:9:9", include_trajectory=True))
+        self.assertEqual(ctx["emotion_state"]["pad_primary"], "平静")
+        self.assertIn("emotion_trajectory", ctx["emotion_state"])
+        self.assertEqual(ctx["body_state"]["warmth"], 0.9)
+
+    def test_pull_context_cold_session_none(self):
+        ctx = _run(self.bridge.pull_context("cold"))
+        self.assertIsNone(ctx["emotion_state"])
+        self.assertIsNone(ctx["body_state"])
+
+    def test_consume_state_block_observational_coarse(self):
+        block = _run(self.bridge.consume_state_block("s:9:9"))
+        self.assertIn("[emotion_spirit 内在状态]", block)
+        self.assertIn("背景参考", block)               # 观察式措辞
+        self.assertIn("情绪基调: 平静", block)          # pad_primary 优先
+        self.assertNotIn("neutral", block)             # 不用已弃用的 pad_label
+        self.assertIn("强度高", block)                  # 0.82 → 高（分桶）
+        self.assertIn("暖意高", block)                  # warmth 0.9 → 高
+        self.assertIn("联结低", block)                  # pulse 0.2 → 低
+        # 关键：不得泄露裸 float（断掉模型复读→EMA 自强化回环）
+        self.assertNotIn("0.82", block)
+        self.assertNotIn("0.9", block)
+
+    def test_consume_state_block_empty_on_cold(self):
+        self.assertEqual(_run(self.bridge.consume_state_block("cold")), "")
+
+    def test_consume_state_block_empty_when_inactive(self):
+        b = EmotionSpiritBridge(FakeSylanne(FakeEmotionSpiritStar()))  # 未 activate
+        self.assertEqual(_run(b.consume_state_block("s:1:1")), "")
+
+
+# ---------------------------------------------------------------------------
+# 记忆后端（Phase 2 预置）：写读 bug 已修，行为正确
+# ---------------------------------------------------------------------------
+class TestMemoryBackendPrep(unittest.TestCase):
+    def setUp(self) -> None:
+        self.star = FakeEmotionSpiritStar()
+        self.bridge = EmotionSpiritBridge(FakeSylanne(self.star))
+        self.bridge.activate()
+        self.native = FakeNativeMemory()
+        self.backend = self.bridge.memory_backend(self.native)
+
+    def test_add_routes_with_clamped_weight_and_namespaced_tags(self):
+        res = self.backend.add(
+            "记得我喜欢猫",
+            importance=0.9,           # > cap 0.75 → 应被钳
+            confidence=0.7,
+            source="user_explicit",
+            life_event_id="evt-42",
+            source_user="user1",
+            tags=["fav"],
+        )
+        self.assertEqual(res["routed"], "emotion_spirit")
+        self.assertEqual(len(self.star._pool.added), 1)
+        self.assertEqual(len(self.native.writes), 0)
+        rec = self.star._pool.added[0]
+        self.assertAlmostEqual(rec["raw_weight"], 0.75)        # 钳在 bypass 阈下
+        self.assertEqual(rec["source_user"], "user1")
+        self.assertEqual(rec["participants"], {"user1"})        # 收窄 owner，无 <global>
+        # tags 全部命名空间化，防与 'betrayal'/'collapse' 促进触发词碰撞
+        self.assertIn("syl:fav", rec["tags"])
+        self.assertIn("syl:life_event_id:evt-42", rec["tags"])
+        self.assertIn("syl:source:user_explicit", rec["tags"])
+
+    def test_add_without_owner_fails_closed_to_native(self):
+        """缺 source_user → 绝不写进 es 池（避免无主/全局可见写洞），fail-closed 走原生。"""
+        res = self.backend.add("无主记忆", importance=0.5, source_user=None)
+        self.assertEqual(res["routed"], "native")
+        self.assertEqual(len(self.star._pool.added), 0)
+        self.assertEqual(len(self.native.writes), 1)
+
+    def test_recall_requires_current_user_and_maps_tier(self):
+        results = self.backend.recall("猫", current_user="user1", k=3)
+        self.assertEqual(len(self.star._pool.recall_calls), 1)
+        call = self.star._pool.recall_calls[0]
+        self.assertEqual(call["current_user"], "user1")
+        self.assertEqual(call["max_results"], 3)               # 正确传 max_results 非 k=
+        layers = {r["layer"] for r in results}
+        self.assertIn("L2", layers)                            # warm → L2
+        self.assertIn("L3", layers)                            # ghost → L3
+        self.assertEqual(results[0]["text"], "warm-hit")
+        self.assertAlmostEqual(results[0]["score"], 0.8)       # 读 .emotional_weight
+
+    def test_recall_without_current_user_does_not_leak(self):
+        """current_user=None → 绝不调它的 recall（那会捞全员私货串号），降级原生。"""
+        out = self.backend.recall("猫", current_user=None, k=3)
+        self.assertEqual(self.star._pool.recall_calls, [])     # 没碰 es 池
+        self.assertEqual(self.native.recall_calls, [("猫", 3)])
+        self.assertEqual(out, [])
+
+    def test_add_pool_failure_falls_back_to_native(self):
+        def _boom(*a, **k):
+            raise RuntimeError("pool down")
+
+        self.star._pool.add = _boom  # type: ignore
+        res = self.backend.add("x", importance=0.5, source_user="user1")
+        self.assertEqual(res["routed"], "native")
+        self.assertEqual(len(self.native.writes), 1)
+
+    def test_recall_pool_failure_falls_back_to_native(self):
+        def _boom(*a, **k):
+            raise RuntimeError("recall down")
+
+        self.star._pool.recall = _boom  # type: ignore
+        out = self.backend.recall("猫", current_user="user1", k=2)
+        self.assertEqual(self.native.recall_calls, [("猫", 2)])
+        self.assertEqual(out, [])
+
+
+# ---------------------------------------------------------------------------
+# 优雅降级 + 引擎共享永久 no-op
+# ---------------------------------------------------------------------------
+class TestGracefulDegradation(unittest.TestCase):
+    def test_missing_api_available_but_consume_empty(self):
+        star = FakeEmotionSpiritStar(with_api=False)   # 只有 _pool，缺 _public_api
+        bridge = EmotionSpiritBridge(FakeSylanne(star))
+        self.assertTrue(bridge.available())
+        bridge.activate()
+        self.assertEqual(_run(bridge.consume_state_block("s:1:1")), "")
+
+    def test_engine_share_noop_ignores_llm(self):
         star = FakeEmotionSpiritStar()
         bridge = EmotionSpiritBridge(FakeSylanne(star))
         bridge.activate()
-        res = _run(bridge.align_shared_engine(None, enabled=True))
+        res = _run(bridge.align_shared_engine(lambda s, u: ""))
         self.assertFalse(res["aligned"])
-        self.assertEqual(res["reason"], "no_llm_callable")
+        self.assertEqual(res["reason"], "infeasible_cross_namespace_registry")
         self.assertIn("note", res)
 
-    def test_note_always_warns_about_local_verification(self):
+
+class FakePoolNoParticipants:
+    """模拟 add() 缺 participants kwarg 的旧/变体 MemoryPool（探测应降级、不靠 catch TypeError）。"""
+
+    def __init__(self) -> None:
+        self.added: list[dict] = []
+
+    def add(self, text, raw_weight=None, phi=None, tags=None, source_user=None):
+        self.added.append({"text": text, "raw_weight": raw_weight, "source_user": source_user})
+
+
+# ---------------------------------------------------------------------------
+# 红队复审修复回归：NaN 分桶/钳位、不可哈希 fail-closed、缺 participants 签名探测
+# ---------------------------------------------------------------------------
+class TestBugFixes(unittest.TestCase):
+    def test_bucket_coarse_and_nonfinite_skipped(self):
+        self.assertEqual(_bucket(None), "")
+        self.assertEqual(_bucket("x"), "")
+        self.assertEqual(_bucket(0.2), "低")
+        self.assertEqual(_bucket(0.5), "中")
+        self.assertEqual(_bucket(0.9), "高")
+        # NaN/±inf 跳过（不渲染成假「高」）
+        self.assertEqual(_bucket(float("nan")), "")
+        self.assertEqual(_bucket(float("inf")), "")
+        self.assertEqual(_bucket(float("-inf")), "")
+
+    def test_clamp_nan_maps_to_default_not_upper_bound(self):
+        self.assertAlmostEqual(_clamp(0.9, 0.0, 0.75), 0.75)        # 正常钳上界
+        self.assertAlmostEqual(_clamp(float("nan"), 0.0, 0.75, default=0.5), 0.5)
+        self.assertAlmostEqual(_clamp01(float("nan")), 0.5)        # 不悄悄变 1.0
+        self.assertAlmostEqual(_clamp(float("inf"), 0.0, 0.75, default=0.5), 0.5)
+
+    def _backend(self):
         star = FakeEmotionSpiritStar()
         bridge = EmotionSpiritBridge(FakeSylanne(star))
+        bridge.activate()
+        return star, bridge.memory_backend(FakeNativeMemory())
 
-        async def _llm(s, u):  # pragma: no cover
-            return ""
+    def test_add_nan_importance_uses_safe_default_weight(self):
+        star, backend = self._backend()
+        backend.add("x", importance=float("nan"), source_user="u1")
+        self.assertAlmostEqual(star._pool.added[0]["raw_weight"], 0.5)  # 不是上界 0.75
 
-        res = _run(bridge.align_shared_engine(_llm, enabled=False))
-        self.assertFalse(res["aligned"])
-        self.assertIn("核实", res["note"])
+    def test_unhashable_source_user_fails_closed_to_native(self):
+        star, backend = self._backend()
+        native = backend._native
+        res = backend.add("x", importance=0.5, source_user=["unhashable"])
+        self.assertEqual(res["routed"], "native")          # fail-closed，不退成全局可见写
+        self.assertEqual(len(star._pool.added), 0)
+        self.assertEqual(len(native.writes), 1)
+
+    def test_pool_without_participants_param_routes_ok_no_participants(self):
+        """add() 缺 participants：靠 inspect.signature 探测降级，不误把内部 TypeError 当签名不符。"""
+        star = FakeEmotionSpiritStar()
+        star._pool = FakePoolNoParticipants()
+        bridge = EmotionSpiritBridge(FakeSylanne(star))
+        bridge.activate()
+        backend = bridge.memory_backend(FakeNativeMemory())
+        res = backend.add("x", importance=0.5, source_user="u1", tags=["fav"])
+        self.assertEqual(res["routed"], "emotion_spirit")
+        self.assertEqual(res["reason"], "ok_no_participants")
+        self.assertEqual(len(star._pool.added), 1)         # 只写一次，无重复
+        self.assertEqual(star._pool.added[0]["source_user"], "u1")
 
 
 if __name__ == "__main__":

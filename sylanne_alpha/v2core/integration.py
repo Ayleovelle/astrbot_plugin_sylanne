@@ -447,6 +447,46 @@ async def apply_v2core_request(plugin: Any, event: Any, request: Any) -> None:
                 request.system_prompt = f"{current}\n{frag}".strip()
             logger.debug("Sylanne v2core mind fragment injected: session=%s chars=%d",
                          session_key, len(frag))
+
+        # emotion_spirit 状态消费（Design B：只读、观察式背景；未装/未开/未激活 → no-op，
+        # 零行为变化）。注入在心象片段之后，复用同一 appender。三条腿（persona 重申/拉状态/
+        # 渲染）都在 bridge 内自查 live presence + active，同源门控（红队 lifecycle）。独立
+        # try 包裹：emotion_spirit 侧任何失败都不波及上面的心象片段注入与主请求。
+        try:
+            es_bridge = getattr(plugin, "_emotion_spirit_bridge", None)
+            es_on = bool((getattr(plugin, "config", None) or {}).get(
+                "sylanne_alpha_emotion_spirit_bridge_enabled", False))
+            if es_bridge is not None and es_on and es_bridge.is_active():
+                es_bridge.reassert_persona_disabled()   # 自愈中途被改回 'auto' 的双注入
+                # emotion_spirit 按 sender_id 给信号做键（main.py:1069 get_sender_id），不是我们
+                # 的 unified_msg_origin session_key；用它的键查，否则永远 miss（红队 contract）。
+                es_skey = session_key
+                try:
+                    _sid = event.get_sender_id()
+                    if _sid:
+                        es_skey = str(_sid)
+                except Exception:  # noqa: BLE001
+                    pass
+                es_block = await es_bridge.consume_state_block(es_skey)
+                if es_block:
+                    appender = getattr(
+                        getattr(plugin, "_llm_response_pipeline", None),
+                        "_append_request_prompt_fragment", None,
+                    )
+                    if callable(appender):
+                        appender(request, es_block)
+                    else:
+                        current = str(getattr(request, "system_prompt", "") or "")
+                        request.system_prompt = f"{current}\n{es_block}".strip()
+                    logger.debug(
+                        "Sylanne emotion_spirit state injected: session=%s chars=%d",
+                        es_skey, len(es_block))
+            elif es_bridge is not None and not es_on and es_bridge.is_active():
+                # 用户中途把桥配置关掉 → 还原 emotion_spirit 自己的 persona 注入（不留痕，
+                # 红队 lifecycle：flag-off 不还原会把它一直静音）。
+                es_bridge.deactivate()
+        except Exception as _esx:  # noqa: BLE001 - emotion_spirit 消费失败绝不阻断请求
+            logger.debug("Sylanne emotion_spirit consume skipped: %s", _esx)
     except Exception as exc:  # noqa: BLE001
         logger.error("Sylanne v2core request stage failed（继续旧管线）: %s", exc, exc_info=True)
 

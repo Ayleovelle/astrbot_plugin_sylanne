@@ -111,13 +111,7 @@
     "description": "启用 emotion_spirit 适配桥（与 astrbot_plugin_emotion_spirit 对接）",
     "type": "bool",
     "default": false,
-    "hint": "默认关闭；开启后若探测到 astrbot_plugin_emotion_spirit 已安装，则关掉它自己的 persona 注入（让 Sylanne 当 system_prompt 唯一主）。注意：当前【仅关闭其注入】——把它的情绪/躯体/上下文拉回合并、记忆主控路由到它的 MemoryPool 这两步是【后续集成步骤，尚未接线】；故装了它再开本项会净损失（它被静音但其素材还没被消费），等 consumption 接线后再开。未安装时完全 no-op，对现有行为零影响。"
-  },
-  "sylanne_alpha_emotion_spirit_engine_share": {
-    "description": "（高级·保守）让 Sylanne 抢占 emotion_spirit 的引擎 data_dir 做共享 master",
-    "type": "bool",
-    "default": false,
-    "hint": "默认关闭，且强烈建议保持关闭直到本机核实。原理：在 emotion_spirit 的 data_dir 上先 SylanneEngine.shared() 抢占，使它后调时拿到我们 2.3.x 引擎。风险：emotion_spirit 内嵌引擎版本未知，SylanneConfig 不一致会抛 SharedEngineConflictError；需本机装上 emotion_spirit 核实其内嵌引擎版本与取引擎方式后才建议开启。"
+    "hint": "默认关闭；开启后若探测到 astrbot_plugin_emotion_spirit 已安装：①关掉它自己的 persona 注入并每轮请求自愈重申（让 Sylanne 当 system_prompt 唯一主，避免双注入）；②观察式拉取它的情绪/躯体状态（仅用其稳定契约 get_emotion_state/get_body_state）合进 system_prompt 当背景参考。记忆仍以 Sylanne 原生为主控（emotion_spirit 自己继续记它的池）；把记忆写入接管给它属高风险（卸载即丢/多人串号/双写污染），按设计延后到可逆镜像双写。引擎共享已确认结构上不可行（跨命名空间注册表互不可见）故移除。未安装时完全 no-op，对现有行为零影响。"
   },
   "sylanne_alpha_recall_mode": {
     "description": "记忆召回引擎模式",

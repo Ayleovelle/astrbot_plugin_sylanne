@@ -2465,30 +2465,23 @@ class EmotionalStatePlugin(Star):
         # emotion_spirit 适配桥：仅在配置开启且探测到 emotion_spirit 时激活（关它的 persona
         # 注入，让 Sylanne 当 system_prompt 唯一主）。未装 / 未开 → 完全 no-op，零影响。
         try:
+            from sylanne_alpha.v2core.integration import v2core_enabled as _v2core_enabled
             es_bridge = getattr(self, "_emotion_spirit_bridge", None)
             es_on = bool(
                 (self.config or {}).get("sylanne_alpha_emotion_spirit_bridge_enabled", False)
             )
-            if es_bridge is not None and es_on and es_bridge.available():
+            # 额外门控 v2core：消费侧只在 v2core 请求阶段跑；v2core 关时若仍激活，会把 emotion_spirit
+            # 静音却无替代注入（红队 zero-behavior MINOR 不对称耦合）。故 v2core 关则不激活本桥。
+            if es_bridge is not None and es_on and _v2core_enabled(self) and es_bridge.available():
                 res = es_bridge.activate()
                 if res.get("active"):
                     logger.info(
-                        "Sylanne emotion_spirit 桥：已激活（persona 注入交还 Sylanne 主控）。"
-                        "注意：拉取 emotion_spirit context 合并 / 记忆路由的消费侧尚未接进流水线，"
-                        "属后续集成步骤（pull_context / memory_backend 已就绪待接线）。"
+                        "Sylanne emotion_spirit 桥：已激活（persona 注入交还 Sylanne 主控，每轮请求"
+                        "自愈重申）。状态消费已按稳定契约接线（v2core 请求阶段、观察式）。注：emotion_spirit"
+                        " v1.1.0 的 SurfaceConsumer 缓存上游未喂 session_id，PublicAPI 暂对任何 key 返"
+                        " None → 状态消费暂空转，待上游修复自动生效。记忆仍以 Sylanne 原生为主控（写入"
+                        "接管/镜像双写按 Design B 延后）；引擎共享已确认结构上不可行、不提供该开关。"
                     )
-                    # 引擎共享对齐：保守、默认关，且需本机核实 emotion_spirit 内嵌引擎版本。
-                    # 这里只在显式开启时给出明确告警——不自动建共享引擎（无可信 llm 入口 +
-                    # 版本未核实，强行 shared() 可能撞 SharedEngineConflictError）。
-                    if (self.config or {}).get(
-                        "sylanne_alpha_emotion_spirit_engine_share", False
-                    ):
-                        logger.warning(
-                            "Sylanne emotion_spirit 桥：引擎共享开关已开，但未自动对齐——"
-                            "需本机核实 emotion_spirit 内嵌引擎版本与取引擎方式（确认经 "
-                            "SylanneEngine.shared 同一 data_dir、且 SylanneConfig 不冲突）后，"
-                            "再显式调 align_shared_engine(llm, enabled=True) 接线。"
-                        )
         except Exception as e:
             logger.debug(f"Sylanne emotion_spirit bridge activation skipped: {e}")
         try:
@@ -2628,6 +2621,14 @@ class EmotionalStatePlugin(Star):
                 e,
                 exc_info=True,
             )
+        # emotion_spirit 桥：卸载前还原它的 persona_mode（接管时我们把它设成了 disabled，不还原
+        # 会把人家插件永久静音、需重启才恢复，红队 lifecycle MAJOR）。cheap getattr/setattr、吞错。
+        try:
+            es_bridge = getattr(self, "_emotion_spirit_bridge", None)
+            if es_bridge is not None and es_bridge.is_active():
+                es_bridge.deactivate()
+        except Exception as e:
+            logger.debug(f"Sylanne emotion_spirit bridge deactivate skipped: {e}")
         # 收集所有需要取消的任务
         tasks_to_cancel: list = []
         for task in list(self._background_tasks):
