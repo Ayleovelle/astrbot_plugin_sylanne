@@ -4,7 +4,7 @@
 
 ## [Embodiment-2.3.0] - 2026-06-27
 
-> issue #43「主动消息重复」根因三链修复 + 对话内容片段泄露修复 + 上游引擎升级 2.3.1，整包同时生效。
+> issue #43「主动消息重复」根因三链修复 + 对话内容片段泄露修复 + 上游引擎升级 2.3.2，整包同时生效。
 
 ### 🐛 Bug Fixes
 
@@ -16,7 +16,7 @@
 
 ### 🏗️ 架构 / 引擎
 
-- **vendored `sylanne_core` 升级 2.0.0 → 2.3.1**（canonical SylannEngine）：2.3.0 新增 `deterministic_fusion` / `pel_core` / `telemetry`、移除 resonance-field 死栈（`resonance_field*` / `coupling_dynamics` / `topology_gate`）；2.3.1 追加畸形 LLM 输入硬化（非 dict JSON 兜 `AttributeError`、`null` 字段经 `_coerce_float` 安全归一、跨档位快照 `_resize` 维度对齐、NaN/溢出守卫，新增 `_numeric` 共享工具）——正是 PR #45 gemini 审查点到的三处 SDK 鲁棒性缺口，上游 PR #19 已修复。公共导出面（`__all__` 43 符号）逐字不变，对插件零接口变更。
+- **vendored `sylanne_core` 升级 2.0.0 → 2.3.2**（canonical SylannEngine）：2.3.0 新增 `deterministic_fusion` / `pel_core` / `telemetry`、移除 resonance-field 死栈（`resonance_field*` / `coupling_dynamics` / `topology_gate`）；2.3.1 追加畸形 LLM 输入硬化（非 dict JSON 兜 `AttributeError`、`null` 字段经 `_coerce_float` 安全归一、跨档位快照 `_resize` 维度对齐、NaN/溢出守卫，新增 `_numeric` 共享工具）——正是 PR #45 gemini 审查点到的三处 SDK 鲁棒性缺口，上游 PR #19 已修复；2.3.2 专项加固进程级引擎共享（`shared()` completeness 审计补 2 blocker + 4 major、并发与鲁棒性，上游 PR #20/#21），新增 `_config_store` / `_identity`（per-copy 身份诊断，运行时自铸不入库）/ `_rendezvous` / `_assessor_llm` 内部模块。公共导出面（`__all__` 43 符号）逐字不变，对插件零接口变更。
 - `compat` 模块更名 `message_dispatch`（next-gen 线既有重命名），T3 归一与现有 strip/realtime 工具同处一模块。
 
 ### ✅ 验证

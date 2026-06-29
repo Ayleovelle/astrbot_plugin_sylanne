@@ -65,6 +65,7 @@ class SylanneEngine:
         embedding: Callable[[str], Awaitable[list[float]]] | None = None,
         config: SylanneConfig | None = None,
         *,
+        assessor_llm: Callable[[str, str], Awaitable[str]] | None = None,
         _shared: bool = False,
     ) -> None:
         # _shared is set only by SylanneEngine.shared() when it builds the one
@@ -78,7 +79,25 @@ class SylanneEngine:
         self._data_dir = Path(data_dir)
         self._llm = llm
         self._embedding = embedding
-        self._config = config or SylanneConfig()
+        # Track whether config came from the file (vs passed in code) so start()
+        # can drop a starter template only for the file-driven path.
+        self._config_from_file = config is None
+        # No config passed -> self-read it from the shared config file in data_dir
+        # (one stable place users edit, independent of which copy owns the engine).
+        # A missing/invalid file falls back to defaults. An ``assessor_model`` block
+        # becomes a small dedicated assessor llm; without one, assessment falls back
+        # to the main llm.
+        if config is None:
+            from ._config_store import load_config
+
+            config, assessor_block = load_config(data_dir)
+            if assessor_llm is None and assessor_block:
+                from ._assessor_llm import build_from_config
+
+                assessor_llm = build_from_config(assessor_block)
+        self._config = config
+        self._assessor_llm = assessor_llm
+        self._shared = _shared
         self._status: EngineStatus = "init"
         self._hosts: dict[str, SylanneHost] = {}
         self._locks: dict[str, asyncio.Lock] = {}
@@ -92,7 +111,29 @@ class SylanneEngine:
     async def start(self) -> None:
         """Initialize the engine. Must be called before process/tick."""
         self._data_dir.mkdir(parents=True, exist_ok=True)
+        if self._config_from_file:
+            from ._config_store import write_default_config
+
+            write_default_config(self._data_dir)
         self._status = "running"
+
+    async def _ensure_started(self) -> None:
+        """Start a not-yet-started engine; restart a closed DIRECT engine.
+
+        A closed SHARED engine must NOT silently self-resurrect: it was released
+        and removed from the registry, so reviving it here would let the next
+        SylanneEngine.shared() build a SECOND engine on this data_dir and
+        double-flush. Raise instead, telling the caller to re-acquire via shared().
+        """
+        if self._status == "closed":
+            if self._shared:
+                raise RuntimeError(
+                    "This shared SylanneEngine was released (status='closed'). "
+                    "Re-acquire it via SylanneEngine.shared(data_dir, ...); reusing a "
+                    "released instance would duplicate the engine on this data_dir and "
+                    "lose updates on flush."
+                )
+            await self.start()
 
     def on(self, listener: Callable[[str, Surface], Any]) -> None:
         """注册推送监听器。每次 process() 完成后，listener(session_id, surface) 会被调用。"""
@@ -114,17 +155,24 @@ class SylanneEngine:
 
     async def shutdown(self) -> None:
         """Flush all sessions and release resources. Engine becomes 'closed'."""
-        for host in self._hosts.values():
+        had_flush_error = False
+        for session_id, host in self._hosts.items():
             try:
                 host.flush()
             except Exception:
-                if self._status == "running":
-                    self._status = "degraded"
+                had_flush_error = True
+                logger.warning(
+                    "flush failed for session %r during shutdown; its latest state may be lost",
+                    session_id,
+                    exc_info=True,
+                )
         self._hosts.clear()
         self._locks.clear()
         if self._telemetry_sink is not None:
             self._telemetry_sink.close()
-        self._status = "closed"
+        # Preserve a flush failure in the final status instead of masking it as a
+        # clean 'closed'.
+        self._status = "degraded" if had_flush_error else "closed"
 
     async def __aenter__(self) -> SylanneEngine:
         await self.start()
@@ -159,8 +207,7 @@ class SylanneEngine:
         Returns:
             Surface dict with keys: state, decision, guard, personality, memory, dynamics.
         """
-        if self._status == "closed":
-            await self.start()
+        await self._ensure_started()
         assessment = await self._assess(text) if self._config.assessor_enabled else None
         async with self._session_lock(session_id):
             host = self._get_or_create_host(session_id)
@@ -186,8 +233,7 @@ class SylanneEngine:
         flags: list[str] | None = None,
     ) -> Surface:
         """Advance session state without user input (background heartbeat)."""
-        if self._status == "closed":
-            await self.start()
+        await self._ensure_started()
         async with self._session_lock(session_id):
             host = self._get_or_create_host(session_id)
             event = {
@@ -258,8 +304,7 @@ class SylanneEngine:
                 f"Invalid influence_type {influence_type!r}. "
                 f"Must be one of: {', '.join(sorted(_VALID_INFLUENCE_TYPES))}"
             )
-        if self._status == "closed":
-            await self.start()
+        await self._ensure_started()
         async with self._session_lock(session_id):
             host = self._get_or_create_host(session_id)
             from .compute.hot_pool import Influence
@@ -286,13 +331,24 @@ class SylanneEngine:
         llm: Callable[[str, str], Awaitable[str]],
         embedding: Callable[[str], Awaitable[list[float]]] | None = None,
         config: SylanneConfig | None = None,
+        *,
+        assessor_llm: Callable[[str, str], Awaitable[str]] | None = None,
     ) -> SylanneEngine:
         """Return (and start) the process-shared engine for ``data_dir``.
 
         One engine per resolved data_dir is maintained for the process lifetime,
         so independent call sites can share a single instance without passing
         the object around — and one persistence directory is never owned by two
-        engines at once (which would cause lost updates on flush).
+        engines at once WITHIN THIS PROCESS (which would cause lost updates on
+        flush). This guarantee is per-process only: there is no cross-process
+        lock, so running two OS processes on one data_dir will double-flush and
+        lose updates — use one process per data_dir.
+
+        When ``config`` is omitted, the engine self-reads it from
+        ``<data_dir>/sylanne.config.json`` (one stable place users edit), so every
+        plugin can just call ``shared(data_dir)`` and share the same settings. An
+        ``assessor_model`` block in that file routes assessment to a small
+        dedicated model; otherwise assessment uses the main ``llm``.
 
         Later calls with the same data_dir return the existing instance. A
         conflicting ``config`` raises SharedEngineConflictError; a different
@@ -306,7 +362,9 @@ class SylanneEngine:
         """
         from ._sharing import get_shared_engine
 
-        return await get_shared_engine(data_dir, llm, embedding=embedding, config=config)
+        return await get_shared_engine(
+            data_dir, llm, embedding=embedding, config=config, assessor_llm=assessor_llm
+        )
 
     @classmethod
     async def release_shared(cls, data_dir: str | Path) -> None:
@@ -425,7 +483,7 @@ class SylanneEngine:
         try:
             from .assessor import assess_text
 
-            result = await assess_text(text, self._llm)
+            result = await assess_text(text, self._assessor_llm or self._llm)
             if result and result.pop("_degraded", False):
                 if self._status == "running":
                     self._status = "degraded"

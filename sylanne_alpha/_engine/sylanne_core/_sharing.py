@@ -1,7 +1,9 @@
 """Process-local sharing registry for SylanneEngine.
 
 Deduplicates engines by resolved data_dir so one persistence directory is owned
-by exactly one engine per process (prevents lost-update on flush).
+by exactly one engine per process (prevents lost-update on flush). The guarantee
+is PER PROCESS: there is no cross-process lock, so two OS processes pointed at one
+data_dir each build an engine and double-flush — run one process per data_dir.
 
 Engines are event-loop affine: a shared engine must be used from the loop it was
 first acquired on. Cross-loop sharing raises RuntimeError.
@@ -14,15 +16,17 @@ from __future__ import annotations
 
 import asyncio
 import dataclasses
+import importlib
 import logging
 import os
-import threading
 import weakref
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any, TypeGuard
 
+from ._identity import resolve_identity
+from ._rendezvous import get_cell
 from .config import SylanneConfig
 
 if TYPE_CHECKING:
@@ -52,8 +56,14 @@ class _Entry:
 # A slot holds either a live _Entry or, while shutdown is in flight, an
 # asyncio.Future tombstone. Concurrent shared() that sees a tombstone awaits it
 # (outside the lock) then retries the lookup.
-_REGISTRY: dict[str, _Entry | asyncio.Future[None]] = {}
-_LOCK = threading.Lock()
+#
+# The registry and its lock live in a process-global rendezvous cell, not in this
+# module: vendored copies under different module names then converge on ONE
+# registry and dedup for real. These names alias the cell's objects, which are
+# stable for the process lifetime (cleared in place, never rebound).
+_cell = get_cell()
+_REGISTRY: dict[str, _Entry | asyncio.Future[None]] = _cell.registry
+_LOCK = _cell.lock
 
 
 def _make_key(data_dir: str | Path) -> str:
@@ -65,9 +75,84 @@ def _make_key(data_dir: str | Path) -> str:
     return os.path.normcase(str(Path(data_dir).resolve()))
 
 
+def _is_live_entry(slot: object) -> TypeGuard[_Entry]:
+    """A slot is a live engine entry iff it is present and not a tombstone Future.
+
+    Duck-typed on purpose (NOT isinstance _Entry): vendored copies under different
+    module names have distinct _Entry classes, so isinstance would misjudge a
+    co-resident copy's entry as absent — making the diagnostics lie and, worse,
+    letting clear_shared_registry orphan another copy's still-running engine.
+    """
+    return slot is not None and not isinstance(slot, asyncio.Future)
+
+
 def _copy_config(cfg: SylanneConfig) -> SylanneConfig:
     """Return an independent copy so caller mutation cannot shift the baseline."""
     return dataclasses.replace(cfg)
+
+
+_SELF_IDENTITY: dict[str, Any] | None = None
+
+
+def _self_identity() -> dict[str, Any]:
+    """Resolve (and cache) THIS copy's diagnostic identity. Best-effort.
+
+    Lazy on purpose: ``__version__`` is defined in ``__init__`` AFTER this module
+    is imported, so it is read at call time, not import time.
+    """
+    global _SELF_IDENTITY
+    if _SELF_IDENTITY is None:
+        pkg = __package__ or "sylanne_core"
+        try:
+            version = getattr(importlib.import_module(pkg), "__version__", "0+unknown")
+        except Exception:
+            version = "0+unknown"
+        _SELF_IDENTITY = resolve_identity(Path(__file__).resolve().parent, version, pkg)
+    return _SELF_IDENTITY
+
+
+def _note_identity(key: str, *, built: bool) -> None:
+    """Register this copy in the rendezvous cell; warn when a consuming copy's
+    version differs from the version that built the engine.
+
+    Best-effort and never raises — identity is diagnostics, not correctness. The
+    cell mutations run OUTSIDE the dedup lock section of get_shared_engine, so the
+    non-reentrant cell lock is never taken twice.
+    """
+    try:
+        cell = get_cell()
+        ident = _self_identity()
+        copy_id = ident.get("copy_id")
+        if not copy_id:
+            return
+        builder_version: str | None = None
+        builder_short: str | None = None
+        with cell.lock:
+            cell.identities[copy_id] = ident
+            if built:
+                cell.builders[key] = copy_id
+                return
+            builder_id = cell.builders.get(key)
+            if builder_id and builder_id != copy_id:
+                # Read the builder's record INSIDE the lock; another thread may be
+                # registering or clearing identities concurrently.
+                builder = cell.identities.get(builder_id)
+                if builder:
+                    builder_version = builder.get("version")
+                    builder_short = builder.get("short")
+        if builder_version and builder_version != ident.get("version"):
+            logger.warning(
+                "sylanne_core version skew on %r: engine built by %s (v%s), but this "
+                "copy %s (v%s) loaded a different version. Namespace the vendored copy "
+                "or install sylanne_core once as a shared dependency.",
+                key,
+                builder_short,
+                builder_version,
+                ident.get("short"),
+                ident.get("version"),
+            )
+    except Exception:
+        return
 
 
 async def get_shared_engine(
@@ -75,6 +160,7 @@ async def get_shared_engine(
     llm: LLMFn | None,
     embedding: EmbeddingFn | None = None,
     config: SylanneConfig | None = None,
+    assessor_llm: LLMFn | None = None,
 ) -> SylanneEngine:
     """Return (and start) the process-shared engine for ``data_dir``.
 
@@ -84,7 +170,22 @@ async def get_shared_engine(
 
     key = _make_key(data_dir)
     resolved_dir = Path(data_dir).resolve()
-    cfg = _copy_config(config if config is not None else SylanneConfig())
+    explicit_config = config is not None
+    # When no config is passed, self-read it (and any assessor_model block) from
+    # the shared config file in data_dir, so the conflict baseline and the engine
+    # see the same user-controlled settings.
+    if config is not None:
+        cfg = _copy_config(config)
+    else:
+        from ._config_store import load_config, write_default_config
+
+        loaded_cfg, assessor_block = load_config(data_dir)
+        write_default_config(data_dir)  # drop a starter template on first use
+        cfg = _copy_config(loaded_cfg)
+        if assessor_llm is None and assessor_block:
+            from ._assessor_llm import build_from_config
+
+            assessor_llm = build_from_config(assessor_block)
     loop = asyncio.get_running_loop()
 
     while True:
@@ -125,9 +226,25 @@ async def get_shared_engine(
                     # loop-bound and is preserved.
                     slot.loop_ref = weakref.ref(loop)
                     slot.engine._locks.clear()
-                if slot.config != cfg:
-                    raise SharedEngineConflictError(
-                        f"Shared engine {key!r} already exists with a different SylanneConfig."
+                # Config compatibility, compared by VALUE over the INTERSECTION of
+                # field names: two vendored copies have distinct SylanneConfig
+                # classes (and a newer copy may have ADDED a defaulted field), so a
+                # plain != would falsely conflict on class identity or an extra key.
+                stored = dataclasses.asdict(slot.config)
+                wanted = dataclasses.asdict(cfg)
+                if any(stored[k] != wanted[k] for k in stored.keys() & wanted.keys()):
+                    if explicit_config:
+                        # A caller explicitly handed a conflicting config: hard error.
+                        raise SharedEngineConflictError(
+                            f"Shared engine {key!r} already exists with a different SylanneConfig."
+                        )
+                    # Self-read diff (the on-disk file was edited, or a cross-version
+                    # copy): do NOT crash a bystander acquirer. Keep the running
+                    # config and tell the operator a restart is needed to apply it.
+                    logger.warning(
+                        "shared engine %r: on-disk config differs from the running "
+                        "engine; keeping the running config (restart to apply).",
+                        key,
                     )
                 if llm is not None and slot.llm is not llm:
                     logger.warning(
@@ -155,7 +272,12 @@ async def get_shared_engine(
             assert llm is not None
             try:
                 new_engine = SylanneEngine(
-                    resolved_dir, llm, embedding=embedding, config=cfg, _shared=True
+                    resolved_dir,
+                    llm,
+                    embedding=embedding,
+                    config=cfg,
+                    assessor_llm=assessor_llm,
+                    _shared=True,
                 )
                 await new_engine.start()
             except BaseException:
@@ -170,12 +292,14 @@ async def get_shared_engine(
                 raise
             with _LOCK:
                 _REGISTRY[key] = _Entry(new_engine, cfg, llm, embedding, weakref.ref(loop))
+            _note_identity(key, built=True)
             init_future.set_result(None)
             return new_engine
 
         assert engine is not None
         if engine.status in ("init", "closed"):
             await engine.start()
+        _note_identity(key, built=False)
         return engine
 
 
@@ -223,20 +347,47 @@ async def release_shared_engine(data_dir: str | Path) -> None:
 
 
 def clear_shared_registry() -> None:
-    """Drop all registry entries WITHOUT shutdown. TEST ISOLATION ONLY.
+    """Drop THIS copy's registry entries WITHOUT shutdown. TEST ISOLATION ONLY.
 
     DANGER: this does NOT call shutdown() and does NOT flush sessions — any
     in-memory state not yet persisted is lost, and live engines are orphaned
     (still running, just no longer findable via shared()). It exists so tests
     can reset process-global state cheaply between cases.
 
+    Scoped to entries THIS copy built (plus tombstones and builder-less slots),
+    so a reset in one vendored copy never orphans an engine a co-resident copy is
+    still using. In the common single-copy case this clears everything, as before.
+
     Never call this in production. For real teardown use release_shared_engine()
     (or SylanneEngine.release_shared), which flushes and shuts down cleanly.
 
     Safe to call from sync code with no event loop.
     """
-    with _LOCK:
-        _REGISTRY.clear()
+    cell = get_cell()
+    try:
+        my_copy_id = _self_identity().get("copy_id")
+    except Exception:
+        my_copy_id = None
+    with cell.lock:
+        if my_copy_id is None:
+            # Identity unavailable: clear everything (safe in the single-copy/test
+            # case this method exists for).
+            cell.registry.clear()
+            cell.identities.clear()
+            cell.builders.clear()
+            return
+        for slot_key in list(cell.registry):
+            entry = cell.registry[slot_key]
+            if not _is_live_entry(entry):
+                # Tombstone (Future): transient, drop it.
+                del cell.registry[slot_key]
+                cell.builders.pop(slot_key, None)
+            elif cell.builders.get(slot_key) == my_copy_id:
+                # A live entry THIS copy built. A foreign copy's live entry (or one
+                # with no recorded builder) is left alone so we never orphan it.
+                del cell.registry[slot_key]
+                cell.builders.pop(slot_key, None)
+        cell.identities.pop(my_copy_id, None)
 
 
 def is_shared(data_dir: str | Path) -> bool:
@@ -247,7 +398,7 @@ def is_shared(data_dir: str | Path) -> bool:
     """
     key = _make_key(data_dir)
     with _LOCK:
-        return isinstance(_REGISTRY.get(key), _Entry)
+        return _is_live_entry(_REGISTRY.get(key))
 
 
 def list_shared() -> list[dict[str, str]]:
@@ -258,7 +409,7 @@ def list_shared() -> list[dict[str, str]]:
     Intended for diagnostics — e.g. spotting redundant engines across plugins.
     """
     with _LOCK:
-        snapshot = [(key, entry) for key, entry in _REGISTRY.items() if isinstance(entry, _Entry)]
+        snapshot = [(key, entry) for key, entry in _REGISTRY.items() if _is_live_entry(entry)]
     # Read engine.status outside the lock; it is a cheap attribute read.
     return [{"data_dir": key, "status": entry.engine.status} for key, entry in snapshot]
 
@@ -273,7 +424,7 @@ def warn_if_shared_exists(data_dir: str | Path) -> None:
     """
     key = _make_key(data_dir)
     with _LOCK:
-        exists = isinstance(_REGISTRY.get(key), _Entry)
+        exists = _is_live_entry(_REGISTRY.get(key))
     if exists:
         logger.warning(
             "A shared SylanneEngine already exists for %r, but a new engine is being "

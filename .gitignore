@@ -87,3 +87,6 @@ experiments/figures/
 
 docs/literature_kb.md
 docs/humanlike_agent_literature_kb.md
+
+# vendored SDK 运行时 per-copy 身份（write-once UUID，每份副本自铸，不入库）
+sylanne_alpha/_engine/sylanne_core/_identity.json
