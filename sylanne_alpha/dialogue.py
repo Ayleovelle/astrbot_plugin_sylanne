@@ -149,20 +149,25 @@ _EMOTION_KEYWORDS = tuple(dict.fromkeys((
     "comfort", "touched", "longing", "embrace", "accompany",
 )))
 
-# 词边界匹配（核查任务 wzwd8i0ta #6）：英文情感词裸子串匹配会假阳性
+# 词边界匹配（核查任务 wzwd8i0ta #6 + 红队复审）：英文情感词裸子串匹配会假阳性
 # （warm∈warmth、miss∈dismiss、joy∈enjoy）。按语言分两路：中文无空格、夹在更长的中文里
-# 时 \b 反而会漏命中，故仍用子串 in；英文用"两侧非 ASCII 字母"的环视精确卡词边界——
-# 既挡掉 warmth/dismiss/enjoy 这类字母粘连假阳性，又保留 "warm！"/"warm的"/"i miss you"
-# 这类紧贴中文或标点的真命中。
+# 时 \b 反而会漏命中，故仍用子串 in；英文则左侧禁接 ASCII 字母（挡掉 dismiss/enjoy 这类
+# 前缀粘连，及 warmth 这类非屈折尾缀），右侧允许常见屈折后缀（复数/过去式/进行时/比较级/
+# -ful），避免把人设常用的英文情感词屈折形（thanks/loved/missed/missing/warmer/painful）
+# 误杀成 0——self_score 本就偏保守，不能再雪上加霜。
+# 计数语义：捕获组只圈词根（后缀在组外），findall 取词根去重 → 仍是"命中的不同关键词数"
+# （同旧 `in` 的 distinct-keyword 计数，loved/loving 不会被当成两个 love 重复计）。
 _CJK_EMOTION_KEYWORDS = tuple(kw for kw in _EMOTION_KEYWORDS if not kw.isascii())
 _ASCII_EMOTION_KEYWORDS = tuple(kw for kw in _EMOTION_KEYWORDS if kw.isascii())
 _ASCII_EMOTION_RE = re.compile(
-    r"(?<![a-z])(?:" + "|".join(re.escape(kw) for kw in _ASCII_EMOTION_KEYWORDS) + r")(?![a-z])"
+    r"(?<![a-z])(" + "|".join(re.escape(kw) for kw in _ASCII_EMOTION_KEYWORDS) + r")"
+    r"(?:s|es|ed|d|ing|er|ers|ful)?(?![a-z])"
 )
 
 
 def _count_emotion_hits(response_lower: str) -> int:
-    """命中的不同情感词数（中文子串 + 英文词边界）。语义同旧 `in` 计数，仅去英文假阳性。"""
+    """命中的不同情感词数（中文子串 + 英文词根去重）。语义同旧 `in` 的 distinct 计数，
+    去 dismiss/enjoy/warmth 假阳性，但保留 thanks/loved/missed 等真实屈折形。"""
     cjk = sum(1 for kw in _CJK_EMOTION_KEYWORDS if kw in response_lower)
     ascii_hits = len(set(_ASCII_EMOTION_RE.findall(response_lower)))
     return cjk + ascii_hits

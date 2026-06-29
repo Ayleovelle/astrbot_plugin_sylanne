@@ -94,9 +94,10 @@ def test_predict_you_falls_back_when_scratch_absent():
 # ---------------------------------------------------------------------------
 
 def test_emotion_hits_ascii_substring_false_positives_removed():
-    assert _count_emotion_hits("warmth") == 0       # warm 不该命中
-    assert _count_emotion_hits("dismiss") == 0      # miss 不该命中
-    assert _count_emotion_hits("enjoyable") == 0    # joy 不该命中
+    assert _count_emotion_hits("warmth") == 0       # warm 不该命中（th 非屈折尾缀）
+    assert _count_emotion_hits("dismiss") == 0      # miss 不该命中（前缀粘连）
+    assert _count_emotion_hits("dismissed") == 0    # 前缀粘连，加后缀也不该命中
+    assert _count_emotion_hits("enjoyable") == 0    # joy 不该命中（前缀粘连）
     # 混合上下文：旧实现 warmth 会误算一次，新实现只数 happy
     assert _count_emotion_hits("warmth makes me happy") == 1
 
@@ -105,6 +106,24 @@ def test_emotion_hits_true_english_words_still_count():
     assert _count_emotion_hits("i feel warm today") == 1
     assert _count_emotion_hits("i miss you") == 1
     assert _count_emotion_hits("happy") == 1
+
+
+def test_emotion_hits_english_inflections_preserved():
+    # 红队复审：复数/过去式/进行时/比较级/-ful 屈折形必须仍计（self_score 已偏保守）
+    assert _count_emotion_hits("thanks!") == 1            # thank + s
+    assert _count_emotion_hits("i loved it") == 1         # love + d
+    assert _count_emotion_hits("i missed you") == 1       # miss + ed
+    assert _count_emotion_hits("missing you") == 1        # miss + ing
+    assert _count_emotion_hits("it's warmer now") == 1    # warm + er
+    assert _count_emotion_hits("that's painful") == 1     # pain + ful
+
+
+def test_emotion_hits_distinct_keyword_dedup():
+    # 同一词根的多个屈折形只算一次（distinct-keyword 语义，同旧 `in`）
+    assert _count_emotion_hits("love loved loves") == 1
+    assert _count_emotion_hits("warm warmer") == 1
+    # 两个不同词根 → 2
+    assert _count_emotion_hits("i'm happy and i missed you") == 2
 
 
 def test_emotion_hits_chinese_and_cjk_adjacent_english_preserved():
