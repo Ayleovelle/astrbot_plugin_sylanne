@@ -16,9 +16,7 @@ S2 关键修正（枚举不靠 KV 扫描，也不只靠空注册表）：
 
 from __future__ import annotations
 
-import json
 import logging
-import zlib
 from dataclasses import dataclass, field
 from enum import Enum
 from pathlib import Path
@@ -235,11 +233,6 @@ class StateMigrator:
         return SessionMigrationResult(
             session_key=safe, status=status,
             migrated_parts=tuple(migrated), degraded_parts=tuple(degraded), errors=errors)
-
-    @staticmethod
-    def _crc32(data: dict[str, Any]) -> int:
-        payload = json.dumps(data, ensure_ascii=False, sort_keys=True).encode("utf-8")
-        return zlib.crc32(payload) & 0xFFFFFFFF
 
     async def _get(self, key: str) -> Any:
         return await self._kv.get_kv_data(key, None)

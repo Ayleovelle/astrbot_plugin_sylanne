@@ -167,9 +167,15 @@ class UserModelDomain:
         """你被观测到的风格三轴只读副本，键为 'len'/'punct'/'warmth'（首条消息前为空 dict）。"""
         return dict(self._style_sketch)
 
-    def predict_you(self, body: BodySnapshot, text: str) -> UserView:
-        """投影：结合本条文本浅证据的预判 + 把握度。只读，喂 Mentalize/心象片段。"""
-        ev = evidence_from_signals(read_signals(text))
+    def predict_you(self, ctx: BeatContext) -> UserView:
+        """投影：结合本条文本浅证据的预判 + 把握度。只读，喂 Mentalize/心象片段。
+
+        铁律（别重复 tokenize）：复用 make_context 预读进 scratch["signals"] 的 TextSignals，
+        不在每轮热路径重新分词；scratch 缺位（极端容错）才回落 read_signals。
+        """
+        body = ctx.body
+        sig: TextSignals = ctx.scratch.get("signals") or read_signals(ctx.text or "")
+        ev = evidence_from_signals(sig)
         predicted = {
             d: self._disposition[d] + 0.3 * ev.get(d, 0.0) for d in _DISPOSITION_DIMS
         }
