@@ -1329,6 +1329,9 @@ class LLMRequestPipeline:
                                     for c in _chain
                                     if isinstance(t := getattr(c, "text", None), str)
                                 )
+                            # 原始 str 分片（部分 provider/流式路径会产出）也要喂首句缓冲，否则首句抢发静默失效。
+                            elif isinstance(emitted, str):
+                                buffer += emitted
                             first_sentence = p._extract_first_sentence(buffer)
                             if first_sentence:
                                 first_sent = True
