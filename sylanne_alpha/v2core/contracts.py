@@ -6,6 +6,7 @@
 
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass, field
 from enum import Enum
 from typing import Any, Protocol, runtime_checkable
@@ -162,6 +163,8 @@ class BeatContext:
         try:
             v = float(fn(agent, key))
         except Exception:
+            return 0.0
+        if not math.isfinite(v):
             return 0.0
         if v > _EVO_BIAS_CAP:
             return _EVO_BIAS_CAP
