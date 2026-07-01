@@ -163,14 +163,27 @@ _ASCII_EMOTION_RE = re.compile(
     r"(?<![a-z])(" + "|".join(re.escape(kw) for kw in _ASCII_EMOTION_KEYWORDS) + r")"
     r"(?:s|es|ed|d|ing|er|ers|ful)?(?![a-z])"
 )
+# 去 e 屈折形补丁：词根本身以 e 收尾时（love/hate/hope/embrace），-ing 会先删掉词根的 e
+# （loving/hating/hoping/embracing），普通子串规则匹配不到裸词根，需单独兜底。命中后把
+# 词根还原（去掉的 e 补回）再并入去重集合，保持 loved/loving 只算一次的既有语义。
+_E_DROP_EMOTION_KEYWORDS = tuple(kw for kw in _ASCII_EMOTION_KEYWORDS if kw.endswith("e"))
+_ASCII_EMOTION_ING_RE = (
+    re.compile(
+        r"(?<![a-z])(" + "|".join(re.escape(kw[:-1]) for kw in _E_DROP_EMOTION_KEYWORDS) + r")ing(?![a-z])"
+    )
+    if _E_DROP_EMOTION_KEYWORDS
+    else None
+)
 
 
 def _count_emotion_hits(response_lower: str) -> int:
     """命中的不同情感词数（中文子串 + 英文词根去重）。语义同旧 `in` 的 distinct 计数，
     去 dismiss/enjoy/warmth 假阳性，但保留 thanks/loved/missed 等真实屈折形。"""
     cjk = sum(1 for kw in _CJK_EMOTION_KEYWORDS if kw in response_lower)
-    ascii_hits = len(set(_ASCII_EMOTION_RE.findall(response_lower)))
-    return cjk + ascii_hits
+    ascii_matches = set(_ASCII_EMOTION_RE.findall(response_lower))
+    if _ASCII_EMOTION_ING_RE is not None:
+        ascii_matches.update(stem + "e" for stem in _ASCII_EMOTION_ING_RE.findall(response_lower))
+    return cjk + len(ascii_matches)
 
 
 def self_score(

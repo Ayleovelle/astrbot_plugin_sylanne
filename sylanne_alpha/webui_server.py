@@ -1822,7 +1822,7 @@ def start_webui_thread_server(
             path = parsed.path.rstrip("/") or "/"
             if path not in ("/", "/twin", "/favicon.ico", "/health", "/metrics", "/logo.png", "/assets/logo.png"):
                 auth = self.headers.get("Authorization", "")
-                if not auth.startswith("Bearer ") or auth[7:] != _active_token:
+                if not _active_token or not auth.startswith("Bearer ") or auth[7:] != _active_token:
                     self._send_json({"error": "unauthorized"}, status=401)
                     return
             # S9: /metrics requires Bearer token when auth is configured
@@ -2186,7 +2186,7 @@ def start_webui_thread_server(
             path = parsed.path.rstrip("/") or "/"
             if path not in ("/", "/favicon.ico", "/logo.png", "/assets/logo.png"):
                 auth = self.headers.get("Authorization", "")
-                if not auth.startswith("Bearer ") or auth[7:] != _active_token:
+                if not _active_token or not auth.startswith("Bearer ") or auth[7:] != _active_token:
                     self._send_json({"error": "unauthorized"}, status=401)
                     return
             # Item 24: CSRF 防护 — POST 需要 X-CSRF-Token header
