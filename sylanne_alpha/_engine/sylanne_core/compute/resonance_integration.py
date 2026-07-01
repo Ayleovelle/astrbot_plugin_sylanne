@@ -229,7 +229,7 @@ class ResonanceSpine:
         """Personality modulates ALL dynamics: coupling, modules, field, expression.
 
         Every tunable parameter in the system derives from personality traits.
-        This is the "personality-computation coupling" axiom (A7 in SPEC.md).
+        This is the "personality-computation coupling" axiom (A7 in docs/theoretical_spec.md).
         """
         personality = normalize_personality(personality)
         self._personality = dict(personality)

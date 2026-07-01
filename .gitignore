@@ -87,3 +87,8 @@ experiments/figures/
 
 docs/literature_kb.md
 docs/humanlike_agent_literature_kb.md
+
+# SylannEngine 2.3.2+ per-copy identity: minted at runtime INTO the vendored module dir
+# (by any shared() call, e.g. tests/test_body_port_v2.py) — machine-specific UUID, never commit.
+sylanne_alpha/_engine/sylanne_core/_identity.json
+sylanne_alpha/_engine/sylanne_core/_identity.json.tmp
