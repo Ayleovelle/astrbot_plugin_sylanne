@@ -236,6 +236,21 @@ class TestMaybeSoftenSilence:
         assert reply.parts == ("……",)
         assert reply.meta.get("mode") == "minimal_silence"
 
+    def test_content_reason_softens_to_minimal_speak(self) -> None:
+        """MINOR 修复回归：tension<0.15 且 warmth>0.5（v2core 真实值域内）→ "content"，
+        极简回应"嗯。"。红队 finding：旧阈值 tension<-0.5 在 [0,1] 值域下永不可达，
+        本用例钉住重标定后用【契约域内的正常值】就能命中，不再需要越界手造 tension。"""
+        body = _body(warmth=0.8, tension=0.05)
+        ctx = _ctx(body, text="在吗")
+        plugin = _FakePluginForSoften(ds=DeliberateSilence())
+        reply, reason = ig._maybe_soften_silence(plugin, ctx)
+        assert reason == "content"
+        assert reply is not None
+        from sylanne_alpha.v2core.contracts import ReplyKind
+        assert reply.kind is ReplyKind.SPEAK
+        assert reply.parts == ("嗯。",)
+        assert reply.meta.get("mode") == "minimal_silence"
+
     def test_digesting_reason_keeps_full_silence(self) -> None:
         """void_pressure>3 且 valence>0 → "digesting"，get_minimal_response 返回 None：
         不软化，但理由仍回传供留痕/心象。"""
@@ -525,6 +540,28 @@ class TestStartWinddownWindow:
         ig._start_winddown_window(plugin, "s1", rt, None, now=1000.0)
         assert rt["winddown_until"] == 1000.0 + ig._WINDDOWN_DEFAULT_S
 
+    def test_scheduler_raises_closes_coro_no_leak(self) -> None:
+        """MINOR 修复回归（红队 finding）：scheduler() 抛异常时，此前先构造好的
+        _winddown_return_after(...) 协程对象从未被 await/close，GC 时会炸出
+        "coroutine was never awaited" RuntimeWarning。现在 except 分支要 close 它——
+        用 inspect 断言协程确已进入 CORO_CLOSED，而不是仅仅"没崩"。"""
+        import inspect
+
+        captured: dict[str, object] = {}
+
+        class _RaisingScheduler:
+            def schedule_background_task(self, coro, *, label: str = ""):
+                captured["coro"] = coro
+                raise RuntimeError("no running event loop")
+
+        plugin = type("P", (), {"_realtime_dispatch": _RaisingScheduler()})()
+        rt: dict = {}
+        ig._start_winddown_window(plugin, "s1", rt, _FakeSimDuration(None), now=1000.0)
+        # 窗口本身仍生效（调度失败不阻断）
+        assert rt["winddown_until"] == 1000.0 + ig._WINDDOWN_DEFAULT_S
+        assert "coro" in captured
+        assert inspect.getcoroutinestate(captured["coro"]) == "CORO_CLOSED"
+
 
 # ===========================================================================
 # T2-03⑥：返场触达（_winddown_return_after）——桥不可用时静默退出，不抛
@@ -706,29 +743,51 @@ class TestLifeSimulatorWinddownReaders:
         sim.state.world.phase = LifePhase.AFTERNOON
         assert sim.interruptibility() == 0.7
 
-    def test_current_activity_duration_min_no_plan(self) -> None:
+    def test_current_activity_duration_min_no_events(self) -> None:
+        """MAJOR 修复回归：无事件（无计划/刚启动）→ None，不臆造。"""
         from sylanne_alpha.life_simulation import LifeSimulator
 
         sim = LifeSimulator()
         assert sim.current_activity_duration_min() is None
 
-    def test_current_activity_duration_min_matches_anchor(self) -> None:
-        from sylanne_alpha.life_simulation import LifeActivity, LifePlan, LifeSimulator
+    def test_current_activity_duration_min_matches_latest_event_type(self) -> None:
+        """MAJOR 修复（红队 finding）：此前按 current_activity_id 匹配 plan 锚点/弹性槽
+        是死代码——current_activity_id 恒被写成事件自身 event_id，与锚点 activity_id
+        是两个从未相交的 id 空间，且唯一的计划生成器从不填 expected_duration_min。
+        改读最近一条真实事件的 event_type（_record_event 每 tick 真写）估算典型时长，
+        本用例用生产会真正产生的状态（append 一条 LifeEvent），不再手造匹配的 id。"""
+        from sylanne_alpha.life_simulation import LifeEvent, LifeSimulator
 
         sim = LifeSimulator()
-        act = LifeActivity(kind="study", title="写论文", expected_duration_min=25)
-        sim.state.plan = LifePlan(anchors=[act])
-        sim.state.world.current_activity_id = act.activity_id
-        assert sim.current_activity_duration_min() == 25
+        sim.state.events.append(
+            LifeEvent(text="在读书", mood="平静", urgency=0.1, timestamp=1000.0,
+                      event_type="reading")
+        )
+        assert sim.current_activity_duration_min() == 30
 
-    def test_current_activity_duration_min_zero_treated_as_missing(self) -> None:
-        from sylanne_alpha.life_simulation import LifeActivity, LifePlan, LifeSimulator
+    def test_current_activity_duration_min_unknown_event_type_is_none(self) -> None:
+        from sylanne_alpha.life_simulation import LifeEvent, LifeSimulator
 
         sim = LifeSimulator()
-        act = LifeActivity(kind="rest", title="发呆", expected_duration_min=0)
-        sim.state.plan = LifePlan(flexible_slots=[act])
-        sim.state.world.current_activity_id = act.activity_id
+        sim.state.events.append(
+            LifeEvent(text="？？？", mood="", urgency=0.0, timestamp=1000.0,
+                      event_type="")
+        )
         assert sim.current_activity_duration_min() is None
+
+    def test_current_activity_duration_min_uses_most_recent_event(self) -> None:
+        from sylanne_alpha.life_simulation import LifeEvent, LifeSimulator
+
+        sim = LifeSimulator()
+        sim.state.events.append(
+            LifeEvent(text="在读书", mood="平静", urgency=0.1, timestamp=1000.0,
+                      event_type="reading")
+        )
+        sim.state.events.append(
+            LifeEvent(text="在做饭", mood="专注", urgency=0.2, timestamp=1100.0,
+                      event_type="cooking")
+        )
+        assert sim.current_activity_duration_min() == 25
 
 
 # ===========================================================================

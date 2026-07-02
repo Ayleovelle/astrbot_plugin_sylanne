@@ -191,6 +191,24 @@ LIFE_EVENT_WEIGHTS: dict[str, dict[str, float]] = {
     "observing": {"valence": 0.1, "arousal": 0.0, "share_tendency": 0.5},
 }
 
+# T2-03⑤ 红队修复：当前活动典型时长（分钟），按 LIFE_EVENT_WEIGHTS 同一套真实
+# event_type 键给粗粒度估算。此前 current_activity_duration_min() 试图按
+# world.current_activity_id 匹配 state.plan 的锚点/弹性槽的 activity_id，但两者是
+# 从未相交的 id 空间（current_activity_id 恒被 _record_event 写成事件自身 event_id，
+# 计划锚点的 activity_id 独立生成，从无 tick 写入/匹配过），且唯一的计划生成器
+# （life_consolidation._build_next_day_plan）从不填 expected_duration_min（恒 0）——
+# 原实现是永远读不到值的死代码。改读【真实在用】的信号：最近一条事件的
+# event_type（_record_event 每 tick 真写），值粗但生效，而非臆造精确值。
+_ACTIVITY_TYPICAL_DURATION_MIN: dict[str, int] = {
+    "reading": 30,
+    "walking": 20,
+    "cooking": 25,
+    "thinking": 15,
+    "creating": 40,
+    "resting": 20,
+    "observing": 15,
+}
+
 # 事件类型关键词映射（用于从 LLM 输出推断事件类型）
 _EVENT_TYPE_KEYWORDS: dict[str, list[str]] = {
     "reading": ["读", "书", "阅读", "看书", "翻阅", "read", "book", "novel", "article"],
@@ -1875,19 +1893,18 @@ class LifeSimulator:
         return self._interruptibility_for_phase(self.state.world.phase)
 
     def current_activity_duration_min(self) -> int | None:
-        """当前活动的预期时长（分钟），来自日计划里匹配 current_activity_id 的锚点/弹性槽。
+        """当前活动的预期时长（分钟），据最近一条事件的 event_type 估算典型时长
+        （_ACTIVITY_TYPICAL_DURATION_MIN，红队 MAJOR 修复：见该表上方注释，此前的
+        plan-anchor 匹配是死代码）。
 
-        无计划 / 当前活动不在计划里 / 时长未填（0）→ None（调用方自行给默认值，不臆造）。
+        无事件 / event_type 未知（旧档、LLM 越界输出）→ None（调用方自行给默认值，
+        不臆造）。
         """
-        plan = self.state.plan
-        activity_id = self.state.world.current_activity_id
-        if plan is None or not activity_id:
+        events = self.state.events
+        if not events:
             return None
-        for act in list(plan.anchors or ()) + list(plan.flexible_slots or ()):
-            if getattr(act, "activity_id", "") == activity_id:
-                dur = int(getattr(act, "expected_duration_min", 0) or 0)
-                return dur if dur > 0 else None
-        return None
+        et = str(getattr(events[-1], "event_type", "") or "").strip().lower()
+        return _ACTIVITY_TYPICAL_DURATION_MIN.get(et)
 
     def _recent_mood_word(self) -> str:
         """取最近一条非 USER_FACT 事件的 mood 单词（隐私安全：不读 text/private_thought）。"""

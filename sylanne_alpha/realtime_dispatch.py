@@ -941,13 +941,21 @@ class DeliberateSilence:
     def should_be_silent(
         self, valence: float, tension: float, void_pressure: float
     ) -> tuple[bool, str]:
-        """判断是否应该主动沉默。返回 (是否沉默, 原因)。"""
+        """判断是否应该主动沉默。返回 (是否沉默, 原因)。
+
+        MINOR 修复（红队 finding）：本类复活时沿用旧值域写的阈值，"content" 分支
+        原判据 tension < -0.5 在 v2core 里永不可达——tension 由调用方传入
+        BodySnapshot.tension，其契约域是 [0,1]（见 contracts.py），负值不存在，
+        原分支是死代码（唯一能命中它的路径是测试直接手造越界的 tension=-0.8）。
+        改按 v2core 真实值域重新标定："低张力+高温暖"＝安稳满足、无需多言，
+        与 valence（此处调用方传的是 body.warmth，[-1,1]）同一套已生效的语义。
+        """
         if tension > 0.7 and valence < -0.3:
             return True, "hurt"  # 受伤但不想表达
         if void_pressure > 3.0 and valence > 0:
             return True, "digesting"  # 在消化
-        if tension < -0.5:
-            return True, "content"  # 满足无需言语
+        if tension < 0.15 and valence > 0.5:
+            return True, "content"  # 满足无需言语（低张力 + 高温暖）
         return False, ""
 
     def get_minimal_response(self, reason: str) -> str | None:

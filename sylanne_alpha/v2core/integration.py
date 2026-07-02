@@ -532,8 +532,9 @@ def _start_winddown_window(
     plugin: Any, session_key: str, rt: dict[str, Any], sim: Any, now: float,
 ) -> None:
     """T2-03⑤⑥：behavior.py 选中 winddown 那一刻——开收尾窗口 + 排定窗口结束后的
-    返场触达。窗口时长（分钟级，15–45min）优先取 life_sim 当前活动的计划时长，
-    读不到（无计划/未匹配/未填）→ 默认 30min（卡片"if available"的诚实兜底）。
+    返场触达。窗口时长（分钟级，15–45min）优先取 life_sim 当前活动 event_type 估算
+    的典型时长（见 LifeSimulator.current_activity_duration_min），读不到（无事件/
+    类型未知）→ 默认 30min（卡片"if available"的诚实兜底）。
     """
     duration_s = _WINDDOWN_DEFAULT_S
     if sim is not None:
@@ -548,13 +549,14 @@ def _start_winddown_window(
 
     scheduler = getattr(getattr(plugin, "_realtime_dispatch", None), "schedule_background_task", None)
     if callable(scheduler):
+        coro = _winddown_return_after(plugin, session_key, duration_s)
         try:
-            scheduler(
-                _winddown_return_after(plugin, session_key, duration_s),
-                label="winddown_return",
-            )
+            scheduler(coro, label="winddown_return")
         except Exception:  # noqa: BLE001
-            pass   # 调度失败不阻断——窗口本身仍生效，返场退化到 ⑥ 的 fragment 兜底
+            # MINOR 修复（红队 finding）：调度失败（如 ensure_future 抛异常）时 coro
+            # 从未被 await 过——不 close 会在 GC 时炸出 "coroutine was never awaited"
+            # RuntimeWarning。窗口本身仍生效，返场退化到 ⑥ 的 fragment 兜底。
+            coro.close()
 
 
 async def _winddown_return_after(plugin: Any, session_key: str, delay_s: float) -> None:
