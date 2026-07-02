@@ -88,6 +88,18 @@ def test_presence_survives_truncation() -> None:
     assert _PRESENCE in frag, "无论状态多长，临场态度常量必须完整保留（永不被截）"
 
 
+def test_presence_style_discipline_present() -> None:
+    """T4-01 反AI味文风底色：_PRESENCE 恒带一条口吻纪律行——QQ 短句、不排比列点、
+    不总分总、不说『首先/其次』、不解释自己为什么这么说；且它随 _PRESENCE 一起
+    豁免于 _MAX_CHARS 预算（不会被状态行挤没）。
+    """
+    frag = build_mind_fragment(_ctx(_body()), {})
+    assert "QQ 短句" in frag, "缺文风底色行"
+    assert "不排比" in frag and "不列点" in frag
+    assert "首先/其次" in frag
+    assert "文风：QQ 短句" in _PRESENCE, "文风行必须焊在 _PRESENCE 常量内（继承预算豁免）"
+
+
 def test_fragment_within_reasonable_bound() -> None:
     """片段总长有界（态度常量 + 截断后状态行，不会无限膨胀）。"""
     um = UserModelDomain()

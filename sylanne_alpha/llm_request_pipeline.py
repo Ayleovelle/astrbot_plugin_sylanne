@@ -75,6 +75,15 @@ _SLOT_LABELS = {
     "unfinished": "未完",
 }
 
+# 关系阶段（body.relationship_memory().continuity.phase）的定性中文映射——
+# 注入卫生 T4-03③：裸 snake_case 枚举值不该原样喂给 LLM（读起来像调试日志、
+# 诱发模型把它当变量名复述），过一遍定性措辞再进 prompt。
+_RELATIONSHIP_PHASE_WORDS = {
+    "low_signal": "还处在认识阶段",
+    "forming_continuity": "正在处得越来越熟",
+    "active_continuity": "已经处得很熟、有稳定默契",
+}
+
 
 def _comp_boundary_stability(comp: Any) -> float:
     """取计算层边界稳定度，兼容旧 ComputationSpine(.boundary) 与共振场(_boundary)。"""
@@ -160,7 +169,13 @@ def _format_inner_context(trimmed: dict[str, str]) -> str:
         text = trimmed.get(slot_name)
         if text:
             label = _SLOT_LABELS.get(slot_name, slot_name)
-            lines.append(f"[{label}] {text}")
+            if slot_name == "state":
+                # 注入卫生 T4-03②：[感知] 原样读起来像状态播报（对方心情不错，亲近感高），
+                # 容易被当成要念出来的播报词——加一句点明这是她自己的当下感受，要体现在
+                # 语气里，不是复述出来的信息。
+                lines.append(f"[{label}] 这是我自己此刻的感受，融进语气自然带出，不是要念出来的播报：{text}")
+            else:
+                lines.append(f"[{label}] {text}")
     return "\n".join(lines)
 
 
@@ -1518,7 +1533,7 @@ class LLMRequestPipeline:
                 rel_mem = host.kernel.body.relationship_memory()
                 phase = rel_mem.get("continuity", {}).get("phase", "")
                 if phase and phase != "unknown":
-                    signals.append(f"关系阶段:{phase}")
+                    signals.append(f"关系{_RELATIONSHIP_PHASE_WORDS.get(phase, phase)}")
             except Exception:
                 pass
 
