@@ -12,6 +12,7 @@
 
 from __future__ import annotations
 
+import math
 import time
 from collections import deque
 from dataclasses import dataclass
@@ -20,6 +21,19 @@ from typing import Any
 # 两路偏置（反射 delta + 反思 reflection_bias）之和的总钳位上界。
 # 略小于两路 cap 之和(0.15+0.10=0.25)，作为同向叠加时的最后一道刹车。
 _TOTAL_CAP = 0.20
+
+
+def _finite_float(value: Any, default: float) -> float:
+    """载入侧消毒：转 float 失败或非有限（NaN/±inf）一律回落默认值。
+
+    防损坏 KV 档（archive 持久化）把 NaN 带回来——NaN 与钳位边界比较恒 False，
+    会绕过 _ParamState.clamp() 直接污染下游 evo_bias/反射门控算术（同 #29 根因）。
+    """
+    try:
+        v = float(value)
+    except (TypeError, ValueError):
+        return default
+    return v if math.isfinite(v) else default
 
 
 @dataclass(slots=True)
@@ -197,15 +211,15 @@ class AgentEvolutionArchive:
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> "AgentEvolutionArchive":
         arc = cls(str(data.get("agent_name", "?")))
-        arc._outcome_ema = float(data.get("outcome_ema", 0.5))
+        arc._outcome_ema = _finite_float(data.get("outcome_ema", 0.5), 0.5)
         for k, pd in (data.get("params") or {}).items():
             ps = _ParamState(
-                delta=float(pd.get("delta", 0.0)),
-                reward_ema=float(pd.get("reward_ema", 0.0)),
-                delta_cap=float(pd.get("delta_cap", 0.15)),
+                delta=_finite_float(pd.get("delta", 0.0), 0.0),
+                reward_ema=_finite_float(pd.get("reward_ema", 0.0), 0.0),
+                delta_cap=_finite_float(pd.get("delta_cap", 0.15), 0.15),
                 updates=int(pd.get("updates", 0)),
-                reflection_bias=float(pd.get("reflection_bias", 0.0)),
-                reflection_cap=float(pd.get("reflection_cap", 0.10)),
+                reflection_bias=_finite_float(pd.get("reflection_bias", 0.0), 0.0),
+                reflection_cap=_finite_float(pd.get("reflection_cap", 0.10), 0.10),
             )
             ps.clamp()
             arc._params[k] = ps

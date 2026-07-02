@@ -83,22 +83,39 @@ class ReflexLearner:
 
     在每轮认知周期末尾，根据本轮效果信号微调各 agent 的门控偏置。
     reward 综合（防 Goodhart：self_score 弱、行为信号强）：
-      reward = w_behav * behavior_signal + w_self * (self_score_quality*2-1)
+      reward = w_behav * behavior_signal + w_self * clamp((self_quality - baseline) * gain)
     其中 behavior_signal：被忽略=-1，被续聊/采纳=+1，未知=0。
+
+    #31 滚动基线（self_score 奖励改"相对最近平均"）：自评支点不再固定 0.5，而是
+    用该 agent 近期 self_score 的 EMA（AgentEvolutionArchive.outcome_ema）作支点。
+    根因——真机实测保守评价器把好回复也判到 0.4–0.5、够不到固定 0.5 支点，导致自评项
+    几乎恒负、自我进化几乎不触发。改成"比我最近平均好/差"后，绝对值偏低但相对改善的
+    回复也能给正信号；稳态时 (q-baseline)→0 自评项自然归零（防 Goodhart：自评只在偏离
+    近期常态时才说话，不当恒定偏置）。gain=2 使支点=0.5 时精确回到旧式 (q*2-1)（锚定不变）。
     """
 
     # 防 Goodhart：自评权重远低于可观测行为
     W_BEHAVIOR = 0.7
     W_SELF = 0.3
+    # 自评支点增益：baseline=0.5 时 (q-0.5)*2 == 旧式 (q*2-1)，向后兼容锚点
+    _SELF_GAIN = 2.0
 
     def __init__(self, plugin: Any) -> None:
         self._p = plugin
 
-    def compute_reward(self, *, behavior: float, self_quality: float | None) -> float:
-        """behavior ∈ {-1,0,1}（被忽略/未知/被采纳）；self_quality ∈ [0,1] 或 None。"""
+    def compute_reward(
+        self, *, behavior: float, self_quality: float | None, self_baseline: float = 0.5
+    ) -> float:
+        """behavior ∈ {-1,0,1}（被忽略/未知/被采纳）；self_quality ∈ [0,1] 或 None。
+
+        self_baseline：自评滚动支点（#31，默认 0.5 = 旧固定支点，向后兼容）。自评项＝
+        clamp((self_quality - self_baseline) * gain, -1, 1)，即"比近期平均好/差"而非"绝对>0.5"。
+        """
         r = self.W_BEHAVIOR * behavior
         if self_quality is not None:
-            r += self.W_SELF * (self_quality * 2.0 - 1.0)
+            self_term = (self_quality - self_baseline) * self._SELF_GAIN
+            self_term = max(-1.0, min(1.0, self_term))   # 自评项独立钳位，单项不超 ±W_SELF
+            r += self.W_SELF * self_term
         return max(-1.0, min(1.0, r))
 
     def learn(
@@ -112,14 +129,28 @@ class ReflexLearner:
         delta_cap: float = 0.15,
     ) -> None:
         """对某 agent 的某门控参数做一次反应式微调。"""
-        reward = self.compute_reward(behavior=behavior, self_quality=self_quality)
         arc = store.archive(agent_name)
-        # 防 Goodhart 单向跑飞（review learning-loop high）：无可观测行为信号时（behavior==0，
-        # 异步异国恋里 5min–2h 的回复间隔极常见），不让保守自评(真机实测 ~0.4)单独驱动门控步进
-        # ——否则 r = W_SELF*(q*2-1) 每轮同号累积，几百轮把门控钉到 ±delta_cap 地板，成了一条不由
-        # 真实用户反馈驱动的单向漂移。self_quality 仅在有行为信号时作弱调味（设计本意：行为强、自评弱）。
-        # 仍 record_outcome 记自评 EMA（供层次2 睡眠反思读，不丢审计）。
-        if behavior != 0.0:
+        # #31 滚动基线：用该 agent 近期 self_score 的 EMA 作自评支点（更新前读取＝不含本轮，
+        # 严格是"近期平均"）。首轮 outcome_ema=0.5 → 退化成旧固定支点（冷启动锚点不变）。
+        baseline = arc.outcome_ema
+        reward = self.compute_reward(
+            behavior=behavior, self_quality=self_quality, self_baseline=baseline
+        )
+        # 【#31 配套放闸 —— 旗标决策，见交付说明】历史上这里有 `if behavior != 0.0` 守卫
+        # （review learning-loop high）：异步异国恋里 5min–2h 回复间隔极常见 → behavior 恒 0
+        # （#30 死区，禁改）→ 守卫挡掉一切自评驱动的步进。该守卫的原始顾虑是"固定 0.5 支点下
+        # 保守自评(~0.4) 每轮同号(恒负)累积，几百轮钉到 ±cap 地板，成不由真实反馈的单向漂移"。
+        #
+        # #31 的滚动基线正好拔掉这条顾虑的根：自评项＝(q − 近期EMA)，稳态下均值回归到 0、不再
+        # 每轮同号；故放开守卫让自评在 behavior==0 时也能驱动门控，是 #31 让"自进化在行为未知轮
+        # 也能触发"落地的必要一步（否则滚动基线对 delta 全程无效，只动审计 EMA）。
+        #
+        # 放闸后的四道护栏（替代旧守卫，强度足够）：① 滚动基线 → 均值回归、非单向；② 死区
+        # deadzone=0.05 → behavior==0 时 reward=W_SELF·self_term，仅 |q−EMA|≳0.083 才迈步，噪声被滤；
+        # ③ regress 每步朝 0 收缩 → 无持续信号自动复位；④ delta_cap ±0.15 硬钳 + 档案总 cap ±0.20
+        # + live 门控 evo_bias 二次 cap ±0.15。残留风险=长期单向【质量趋势】里 EMA 滞后致同号偏置，
+        # 但被 ±0.15 钳死且趋势一平即 regress 回收（已在交付隐患清单列明，留用户裁定是否收紧）。
+        if behavior != 0.0 or self_quality is not None:
             arc.update(param_key, reward, delta_cap=delta_cap)
         if self_quality is not None:
             arc.record_outcome(self_quality)
