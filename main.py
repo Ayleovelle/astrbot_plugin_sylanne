@@ -153,6 +153,7 @@ from sylanne_alpha.llm_request_pipeline import LLMRequestPipeline  # noqa: E402
 from sylanne_alpha.rhythm_learner import RhythmLearner  # noqa: E402
 from sylanne_alpha.proactive_scheduler import ProactiveScheduler  # noqa: E402
 from sylanne_alpha.proactive_bridge import ProactiveBridge  # noqa: E402
+from sylanne_alpha.emotion_spirit_bridge import EmotionSpiritBridge  # noqa: E402
 from sylanne_alpha.session_context import SessionContext  # noqa: E402
 from sylanne_alpha.session_state_store import SessionStateStore  # noqa: E402
 from sylanne_alpha.agents import (  # noqa: E402
@@ -469,6 +470,8 @@ class EmotionalStatePlugin(Star):
         self._proactive_scheduler = ProactiveScheduler(self)
         # 主动发言桥接器：把意图+生活素材交给大饼插件执行发送
         self._proactive_bridge = ProactiveBridge(self)
+        # emotion_spirit 适配桥（检测门控；未装即 no-op，对现有行为零影响）
+        self._emotion_spirit_bridge = EmotionSpiritBridge(self)
         self._register_web_apis(context)
 
         # AstrBot ConversationManager / PersonaManager 集成
@@ -2459,6 +2462,28 @@ class EmotionalStatePlugin(Star):
                     )
         except Exception as e:
             logger.debug(f"Sylanne proactive_bridge baseline recovery skipped: {e}")
+        # emotion_spirit 适配桥：仅在配置开启且探测到 emotion_spirit 时激活（关它的 persona
+        # 注入，让 Sylanne 当 system_prompt 唯一主）。未装 / 未开 → 完全 no-op，零影响。
+        try:
+            from sylanne_alpha.v2core.integration import v2core_enabled as _v2core_enabled
+            es_bridge = getattr(self, "_emotion_spirit_bridge", None)
+            es_on = bool(
+                (self.config or {}).get("sylanne_alpha_emotion_spirit_bridge_enabled", False)
+            )
+            # 额外门控 v2core：消费侧只在 v2core 请求阶段跑；v2core 关时若仍激活，会把 emotion_spirit
+            # 静音却无替代注入（红队 zero-behavior MINOR 不对称耦合）。故 v2core 关则不激活本桥。
+            if es_bridge is not None and es_on and _v2core_enabled(self) and es_bridge.available():
+                res = es_bridge.activate()
+                if res.get("active"):
+                    logger.info(
+                        "Sylanne emotion_spirit 桥：已激活（persona 注入交还 Sylanne 主控，每轮请求"
+                        "自愈重申）。状态消费已按稳定契约接线（v2core 请求阶段、观察式）。注：emotion_spirit"
+                        " v1.1.0 的 SurfaceConsumer 缓存上游未喂 session_id，PublicAPI 暂对任何 key 返"
+                        " None → 状态消费暂空转，待上游修复自动生效。记忆仍以 Sylanne 原生为主控（写入"
+                        "接管/镜像双写按 Design B 延后）；引擎共享已确认结构上不可行、不提供该开关。"
+                    )
+        except Exception as e:
+            logger.debug(f"Sylanne emotion_spirit bridge activation skipped: {e}")
         try:
             self._start_life_simulator()
         except Exception as e:
@@ -2596,6 +2621,14 @@ class EmotionalStatePlugin(Star):
                 e,
                 exc_info=True,
             )
+        # emotion_spirit 桥：卸载前还原它的 persona_mode（接管时我们把它设成了 disabled，不还原
+        # 会把人家插件永久静音、需重启才恢复，红队 lifecycle MAJOR）。cheap getattr/setattr、吞错。
+        try:
+            es_bridge = getattr(self, "_emotion_spirit_bridge", None)
+            if es_bridge is not None and es_bridge.is_active():
+                es_bridge.deactivate()
+        except Exception as e:
+            logger.debug(f"Sylanne emotion_spirit bridge deactivate skipped: {e}")
         # 收集所有需要取消的任务
         tasks_to_cancel: list = []
         for task in list(self._background_tasks):

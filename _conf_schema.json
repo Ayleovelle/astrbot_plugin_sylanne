@@ -107,6 +107,12 @@
     "default": false,
     "hint": "默认关闭；开启后主动发言会带人类式的迟疑：发出前随机停顿、按犹豫强度可能最后一刻收回不发、偶尔先发个踌躇词起头。强度由 Sylanne 的内在状态（怕打扰/想安静/熟悉度）驱动。仅在桥接开启时生效。"
   },
+  "sylanne_alpha_emotion_spirit_bridge_enabled": {
+    "description": "启用 emotion_spirit 适配桥（与 astrbot_plugin_emotion_spirit 对接）",
+    "type": "bool",
+    "default": false,
+    "hint": "默认关闭；开启后若探测到 astrbot_plugin_emotion_spirit 已安装：①关掉它自己的 persona 注入并每轮请求自愈重申（让 Sylanne 当 system_prompt 唯一主，避免双注入）；②观察式拉取它的情绪/躯体状态（仅用其稳定契约 get_emotion_state/get_body_state）合进 system_prompt 当背景参考。记忆仍以 Sylanne 原生为主控（emotion_spirit 自己继续记它的池）；把记忆写入接管给它属高风险（卸载即丢/多人串号/双写污染），按设计延后到可逆镜像双写。引擎共享已确认结构上不可行（跨命名空间注册表互不可见）故移除。未安装时完全 no-op，对现有行为零影响。"
+  },
   "sylanne_alpha_recall_mode": {
     "description": "记忆召回引擎模式",
     "type": "string",
