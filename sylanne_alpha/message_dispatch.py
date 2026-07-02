@@ -99,6 +99,7 @@ def realtime_plan(
     chars_per_second: float = 7.5,
     max_parts: int = _DEFAULT_MAX_PARTS,
     rng: random.Random | None = None,
+    first_delay: float = 0.0,
 ) -> dict[str, Any]:
     raw = str(text or "")
     visible = strip_draft_blocks(raw)
@@ -114,7 +115,10 @@ def realtime_plan(
         "uncapped_count": len(parts),
         "message_count": len(capped),
         "message_parts": _message_parts(
-            capped, chars_per_second=chars_per_second, rng=rng
+            capped,
+            chars_per_second=chars_per_second,
+            rng=rng,
+            first_delay=first_delay,
         ),
         "source_text_chars": len(raw),
     }
@@ -125,6 +129,7 @@ def _message_parts(
     *,
     chars_per_second: float = 7.5,
     rng: random.Random | None = None,
+    first_delay: float = 0.0,
 ) -> list[dict[str, Any]]:
     picker = rng if rng is not None else random
     raw_delays = [
@@ -143,7 +148,12 @@ def _message_parts(
 
     message_parts: list[dict[str, Any]] = []
     for index, (part, delay) in enumerate(zip(parts, raw_delays, strict=True)):
-        if index == distracted_index:
+        if index == 0 and first_delay > 0:
+            # T1-01：首段延迟改用调用方算好的"读信+启动打字"时间（长消息/深夜情绪/
+            # 隔久重逢都比裸 0 更真实），不再走原本恒为 0 的首段起手式。不吃抖动/
+            # 走神——那两个效应是段内打字节奏，首段前的这段是完全不同的"读"阶段。
+            final_delay = first_delay
+        elif index == distracted_index:
             final_delay = picker.uniform(_DISTRACTED_PAUSE_MIN, _DISTRACTED_PAUSE_MAX)
         else:
             jitter = picker.uniform(_JITTER_MIN, _JITTER_MAX)

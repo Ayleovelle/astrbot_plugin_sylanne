@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import random
 import re
 import time
 from datetime import datetime, timedelta, timezone
@@ -65,6 +66,21 @@ _CPS_ENERGY_WEIGHT = 4.0
 _CPS_AROUSAL_WEIGHT = 4.0
 _CPS_TENSION_WEIGHT = 1.0
 
+# T1-01 读信时间："看到消息到开始打字"的启动延迟，区别于 T1-02 的段内打字节奏
+# （4.2s 硬顶那个是打字本身）。杀的问题：深夜 300 字表白和一句"哦"此前拿到完全
+# 相同的 LLM 速度瞬发首段——零思考时间。范围保守：0.8s 底~6s 顶（正常白天场景）。
+_THINK_DELAY_FLOOR = 0.8
+_THINK_DELAY_CEILING = 6.0
+_THINK_READ_CPS = 12.0  # 阅读速度（比打字快），消息越长读得越久
+_THINK_READ_CAP = 3.0  # 阅读耗时封顶：消息再长也别把读信时间推爆
+_THINK_INTENSITY_WEIGHT = 2.2  # 情绪强度越高回得越快（红队意见：重话该更快回，不是更慢）
+_THINK_GAP_WEIGHT = 1.6  # 隔得越久，重新搭话的启动稍慢一点
+_THINK_GAP_SATURATE_SECONDS = 3600.0  # 超过 1 小时不再继续加码
+_THINK_ENERGY_WEIGHT = 1.2  # 没精神启动慢
+_THINK_TENSION_WEIGHT = 0.6  # 紧张一点点拖慢启动（呼应 cps 里 tension 只往下拖）
+_THINK_JITTER_MIN = 0.85
+_THINK_JITTER_MAX = 1.2
+
 
 class LLMResponsePipeline:
     """LLM 响应处理管线，封装 Sylanne 插件的响应拦截逻辑。
@@ -105,16 +121,17 @@ class LLMResponsePipeline:
     # T1-02③ 身体驱动打字速度
     # ------------------------------------------------------------------
     @staticmethod
-    def _body_driven_cps(host: Any) -> float:
-        """从躯体状态推导打字速度（chars/sec），替代原恒定 7.5。
+    def _body_signals(host: Any) -> tuple[float, float, float]:
+        """读取躯体 energy/arousal/tension 三路信号（0.5/0.5/0.0 为中性默认值）。
 
-        没精神（exhaustion 高 → energy 低）打字慢；情绪唤醒（arousal）高打字快；
-        张力（tension）高只往下拖一点（紧张不会让人打字变快）。三路信号都已经在
-        host.kernel 上（response 分段规划这条路径已经拿着 host 了，不新开管线）：
+        三路信号都已经在 host.kernel 上（response 分段规划这条路径已经拿着 host
+        了，不新开管线）：
           - energy = 1 - host.kernel.body.mortality.exhaustion
           - arousal / tension 来自 host.kernel.computation.engine.observe()
             （8 维情感空间的既有输出，同一 engine 上 expression_drive() 已在用）。
-        读取路径异常（缺字段/host 结构不符预期）时优雅退回默认值，绝不炸分段管线。
+        读取路径异常（缺字段/host 结构不符预期）时优雅退回中性默认值，绝不炸管线。
+        供 _body_driven_cps（③ 打字速度）与 _think_delay（T1-01 读信时间）共用，
+        避免同一 host 被两条独立逻辑各读一遍。
         """
         try:
             exhaustion = float(host.kernel.body.mortality.exhaustion)
@@ -123,7 +140,17 @@ class LLMResponsePipeline:
             arousal = max(0.0, min(1.0, float(emotion.get("arousal", 0.5))))
             tension = max(0.0, min(1.0, float(emotion.get("tension", 0.0))))
         except (AttributeError, TypeError, ValueError, KeyError):
-            return _DEFAULT_CPS
+            return 0.5, 0.5, 0.0
+        return energy, arousal, tension
+
+    @staticmethod
+    def _body_driven_cps(host: Any) -> float:
+        """从躯体状态推导打字速度（chars/sec），替代原恒定 7.5。
+
+        没精神（exhaustion 高 → energy 低）打字慢；情绪唤醒（arousal）高打字快；
+        张力（tension）高只往下拖一点（紧张不会让人打字变快）。
+        """
+        energy, arousal, tension = LLMResponsePipeline._body_signals(host)
         cps = (
             _DEFAULT_CPS
             + (energy - 0.5) * _CPS_ENERGY_WEIGHT
@@ -131,6 +158,75 @@ class LLMResponsePipeline:
             - tension * _CPS_TENSION_WEIGHT
         )
         return max(_CPS_MIN, min(_CPS_MAX, cps))
+
+    # ------------------------------------------------------------------
+    # T1-01 读信时间
+    # ------------------------------------------------------------------
+    @staticmethod
+    def _think_delay(
+        incoming_text: str,
+        *,
+        arousal: float,
+        tension: float,
+        energy: float,
+        gap_seconds: float,
+        rng: random.Random | None = None,
+    ) -> float:
+        """算"看到消息到开始打字"的启动延迟（首段专用，不是段内打字节奏）。
+
+        长消息读得久、隔了很久重新搭话慢一点、没精神慢一点、紧张一点点拖慢启动——
+        都增加延迟；情绪强度（这里用 arousal 当"turn 的情绪强度"代理——已经是本轮
+        真实算出来的量，不是发明的 task 分类）越高回得越快（红队意见：沉重的话该更
+        快回，不是更慢），减少延迟。刻意不用任何"任务分类"信号——没这东西。
+
+        所有输入各自 clamp 到合理范围，最后再统一 clamp 到 [floor, ceiling]，
+        任何权重组合都不会越出保守区间。
+        """
+        picker = rng if rng is not None else random
+        visible_chars = sum(1 for ch in str(incoming_text or "") if not ch.isspace())
+        read_time = min(_THINK_READ_CAP, visible_chars / _THINK_READ_CPS)
+
+        intensity = max(0.0, min(1.0, arousal))
+        intensity_adjust = -_THINK_INTENSITY_WEIGHT * intensity
+
+        gap_ratio = max(0.0, min(1.0, gap_seconds / _THINK_GAP_SATURATE_SECONDS))
+        gap_adjust = _THINK_GAP_WEIGHT * gap_ratio
+
+        energy_adjust = _THINK_ENERGY_WEIGHT * (1.0 - max(0.0, min(1.0, energy)))
+        tension_adjust = _THINK_TENSION_WEIGHT * max(0.0, min(1.0, tension))
+
+        base = (
+            _THINK_DELAY_FLOOR
+            + read_time
+            + intensity_adjust
+            + gap_adjust
+            + energy_adjust
+            + tension_adjust
+        )
+        jitter = picker.uniform(_THINK_JITTER_MIN, _THINK_JITTER_MAX)
+        delay = base * jitter
+        return round(max(_THINK_DELAY_FLOOR, min(_THINK_DELAY_CEILING, delay)), 3)
+
+    def _incoming_think_delay(self, event: Any, session_key: str) -> float:
+        """T1-01 单一入口：reply 路径（首段延迟）与 stream 抢发路径共用同一计算，
+        保证两条路径口径一致（card ③ 要求的"同一个choke point"）。"""
+        host = self._p._host(session_key)
+        energy, arousal, tension = self._body_signals(host)
+        gap_seconds = 0.0
+        try:
+            prev_now = float(host.kernel.previous_event.get("now") or 0.0)
+            if prev_now > 0.0:
+                gap_seconds = max(0.0, time.time() - prev_now)
+        except (AttributeError, TypeError, ValueError):
+            gap_seconds = 0.0
+        incoming_text = self._text(event)
+        return self._think_delay(
+            incoming_text,
+            arousal=arousal,
+            tension=tension,
+            energy=energy,
+            gap_seconds=gap_seconds,
+        )
 
     # ------------------------------------------------------------------
     # Main response handler
@@ -312,8 +408,14 @@ class LLMResponsePipeline:
             expression_drive=expr_drive,
             recent_ignored_rate=recent_ignored,
         )
+        # T1-01：首段延迟改用"读信+启动打字"时间，不再是裸 0（零思考时间瞬发）。
+        think_delay = self._incoming_think_delay(event, session_key)
         plan = realtime_plan(
-            session_key, cleaned, max_part_chars=max_part_chars, chars_per_second=cps
+            session_key,
+            cleaned,
+            max_part_chars=max_part_chars,
+            chars_per_second=cps,
+            first_delay=think_delay,
         )
         parts = plan.get("message_parts", [])
 
@@ -447,8 +549,17 @@ class LLMResponsePipeline:
             self._p._store.stream_first_sent.set(session_key, first_sentence)
             self._p._store.stream_buffers.pop(session_key, None)
             origin = str(getattr(event, "unified_msg_origin", "") or "")
+            # T1-01②：流式首句抢发此前直接和 LLM 流赛跑（零思考时间瞬发）。现在
+            # 补齐同一份 think_delay，用【已经耗掉的流式生成时间】抵扣——LLM 生成
+            # 本身就要花时间，只补剩余差额，不重复计时。
+            think_delay = self._incoming_think_delay(event, session_key)
+            last_user_at = self._p._store.last_user_message_time.get(
+                session_key, time.time()
+            )
+            elapsed = max(0.0, time.time() - last_user_at)
+            remaining_delay = max(0.0, think_delay - elapsed)
             task = safe_ensure_future(
-                self._send_first_sentence(origin, first_sentence),
+                self._send_first_sentence(origin, first_sentence, delay=remaining_delay),
                 name="send_first_sentence",
             )
             ensure_background_tasks_list(self._p).append(task)
@@ -529,8 +640,16 @@ class LLMResponsePipeline:
             return window.rstrip()  # 连软边界都没有 → 硬切窗口
         return ""
 
-    async def _send_first_sentence(self, origin: str, text: str) -> None:
-        """通过 context.send_message 发送首句文本。"""
+    async def _send_first_sentence(
+        self, origin: str, text: str, delay: float = 0.0
+    ) -> None:
+        """通过 context.send_message 发送首句文本。
+
+        T1-01②：delay>0 时先睡够剩余的 think_delay 差额，再发——不再和 LLM 流
+        赛跑抢发首句。
+        """
+        if delay > 0:
+            await asyncio.sleep(delay)
         context = self._p.context
         if hasattr(context, "send_message"):
             message = self._astrbot_message(text)
