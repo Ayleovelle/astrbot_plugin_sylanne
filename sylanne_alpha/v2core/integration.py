@@ -43,6 +43,7 @@ import asyncio
 import contextlib
 import logging
 import math
+import random
 import time
 from typing import Any
 
@@ -60,6 +61,8 @@ _WINDDOWN_MIN_S = 15 * 60.0   # T2-03⑤ 收尾窗口下限（15 分钟，卡片
 _WINDDOWN_MAX_S = 45 * 60.0   # T2-03⑤ 收尾窗口上限（45 分钟）
 _WINDDOWN_DEFAULT_S = 30 * 60.0  # 无法从 life_sim 读到活动时长时的默认窗口
 _WINDDOWN_HOLD_BIAS = 0.30    # 窗口内叠加进 g_hold 的固定偏置（独立于 T2-01① 的语境食粮）
+_NIGHT_WAKE_GAP_S = 3600.0    # T1-03③ 夜间"首条消息"判定：距上次请求超过此值才算重新搭话
+_NIGHT_WAKE_CUE_PROB = 0.25   # T1-03③ 命中"首条夜间消息"时，附加"刚被叫醒"线索的概率
 
 # 落盘任务的模块级强引用锚（防 fire-and-forget task 被 GC 提前回收）
 _PENDING_SAVES: set[Any] = set()
@@ -406,6 +409,9 @@ def _apply_v2core_feature_flags(ctx: Any, plugin: Any) -> None:
     ctx.scratch["winddown_enabled"] = bool(
         cfg.get("sylanne_alpha_winddown_enabled", False)
     )
+    ctx.scratch["night_rhythm_enabled"] = bool(
+        cfg.get("sylanne_alpha_night_rhythm_enabled", False)
+    )
 
 
 def _apply_winddown_window_scratch(ctx: Any, rt: dict[str, Any]) -> None:
@@ -425,6 +431,43 @@ def _apply_winddown_window_scratch(ctx: Any, rt: dict[str, Any]) -> None:
             ctx.scratch["winddown_hold_bias"] = _WINDDOWN_HOLD_BIAS
     except Exception:  # noqa: BLE001
         pass
+
+
+def _apply_night_texture_scratch(
+    plugin: Any, session_key: str, ctx: Any, rt: dict[str, Any], text: str, now: float,
+) -> None:
+    """T1-03①③：免打扰时段给心象加一句"深夜话少"的软纹理线索；距上次请求超过
+    _NIGHT_WAKE_GAP_S 的首条夜间消息，小概率再叠一句"刚被叫醒"。
+
+    豁免（②）：incoming 文本命中孤独/紧急关键词时，本函数整体跳过——不产生任何
+    scratch 键，本轮心象与"总开关关闭"时完全一致（红队铁律：这类消息不能被
+    "深夜该少说话"误伤）。只更新 rt 里的时间戳（供下一条非豁免消息算 gap），
+    不写任何 cue。
+
+    调用前提：ctx.scratch["night_rhythm_enabled"] 已为真（调用方保证）。
+    """
+    from sylanne_alpha.proactive_bridge import is_night_fast_reply_exempt
+
+    prev_time = rt.get("night_last_request_time")
+    rt["night_last_request_time"] = now
+    if is_night_fast_reply_exempt(text):
+        return
+    bridge = getattr(plugin, "_proactive_bridge", None)
+    if bridge is None:
+        return
+    try:
+        sid = bridge._resolve_origin(session_key)
+        in_quiet = bool(bridge._in_quiet_hours(sid))
+    except Exception:
+        in_quiet = False
+    if not in_quiet:
+        return
+    ctx.scratch["night_texture_cue"] = True
+    gap = 0.0
+    if isinstance(prev_time, (int, float)) and prev_time > 0.0:
+        gap = now - float(prev_time)
+    if gap > _NIGHT_WAKE_GAP_S and random.random() < _NIGHT_WAKE_CUE_PROB:
+        ctx.scratch["night_wake_cue"] = True
 
 
 def _hash_text(text: str) -> str:
@@ -599,6 +642,15 @@ async def apply_v2core_request(plugin: Any, event: Any, request: Any) -> None:
                     rt["winddown_return_notified"] = True
             except Exception:  # noqa: BLE001
                 pass
+
+        # T1-03①③ 夜间温和版：免打扰时段给心象加"深夜话少"软纹理线索（+小概率
+        # "刚被叫醒"）。孤独/紧急关键词豁免整段效果，与 response 阶段的延迟/cps
+        # 豁免（llm_response_pipeline._night_rhythm_active）共用同一份判定口径。
+        if ctx.scratch.get("night_rhythm_enabled"):
+            try:
+                _apply_night_texture_scratch(plugin, session_key, ctx, rt, text, time.time())
+            except Exception as _nx:  # noqa: BLE001
+                logger.debug("Sylanne night rhythm cue skipped: %s", _nx)
 
         # Phase 2B / PR-G：关系类型分类（off-path，不阻塞请求）。低频 gated；
         # 经后台任务调 LLM 判关系语域、累积进壳层 store。绝不 inline await、不进 SDK 域。

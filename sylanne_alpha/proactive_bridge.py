@@ -53,6 +53,40 @@ _HESITATION_FILLERS: tuple[str, ...] = (
     "算了还是说吧，",
 )
 
+# T1-03②：夜间温和版的快速回复豁免——命中任一关键词，本轮完全跳过夜间延迟/cps
+# 拖慢（读信变慢+打字变慢+"深夜话少"心象线索全部不生效），走原速回复。红队铁律：
+# 『睡不着』『在吗』这类低唤醒高孤独感消息绝不能被"夜间该少说话"误伤成慢回/冷处理
+# ——夜里一直在，是核心安全感，这张卡只加轻微质感，不能碰这条线。模块级单元组，
+# Chinese，方便后续按真实反馈扩展。两处消费者（llm_response_pipeline 的延迟/cps
+# 缩放、v2core.integration 的心象线索注入）共用同一份判定，口径不会漂移。
+NIGHT_EXEMPT_KEYWORDS: tuple[str, ...] = (
+    "睡不着",
+    "在吗",
+    "难受",
+    "想你",
+    "陪陪我",
+    "陪我",
+    "害怕",
+    "emo",
+    "崩溃",
+    "撑不住",
+    "救命",
+    "孤独",
+    "好孤单",
+)
+
+
+def is_night_fast_reply_exempt(text: str) -> bool:
+    """T1-03②：incoming 文本是否命中夜间快速回复豁免关键词。
+
+    空文本/无命中 → False（正常走夜间温和版）。纯字符串子串匹配，刻意不做
+    分词/语义判断——这是快路径的保守豁免闸，宁可对精确匹配之外的委婉表达失焦，
+    也不在这道安全阀上引入额外的不确定性。
+    """
+    if not text:
+        return False
+    return any(kw in text for kw in NIGHT_EXEMPT_KEYWORDS)
+
 
 class ProactiveBridge:
     """Sylanne → 大饼 主动发言桥接器。"""

@@ -50,6 +50,8 @@ _SAL_EMOTION_BASE = 1.0
 _SAL_USERMODEL_BASE = 0.8
 _SAL_LIFE_BASE = 0.6    # Wave 5 生活底色：平淡日不出；卡住/刚通时随停滞深度爬过对你/自我，封顶仍在召回之下
 _SAL_LAST_SILENT = 1.1  # T2-01③ 事后认账：一次性线索，略高于情绪基线，确保下一轮真的带出来
+_SAL_NIGHT_BASE = 0.7    # T1-03①③ 夜间软纹理：quiet hours 内每轮都可能出现（非一次性），基线介于生活(0.6)与驱力(0.9)之间
+_SAL_NIGHT_WAKE_BOOST = 0.4  # 叠加"刚被叫醒"线索时略微加权，让首条夜间消息更容易被看见
 _SAL_DRIVE_BASE = 0.9     # Wave 2 驱力线索：响一个就稳压 usermodel/narrative，强 surprise 排得更高
 _SAL_ADAPT_BASE = 0.5   # Wave 6 适应层：口吻镜像/话题亲和的长期底色，轻；夹在生活(0.6)与自我(0.4)之间
 
@@ -171,6 +173,13 @@ def build_mind_fragment(ctx: BeatContext, domains: dict[str, Any]) -> str:
     life_text, life_int = _life_line(ctx)
     if life_text:
         state.append((4.5, _SAL_LIFE_BASE + life_int, life_text))
+
+    # T1-03①③ 夜间软纹理——quiet hours 时"深夜话少"渗进口吻，靠 LLM 自己收着写、
+    # 自然变短，不是硬性截断。order 4.4 紧邻生活底色(4.5)之前。integration 侧已经
+    # 做过豁免判定（孤独/紧急关键词命中则不产生这两个 scratch 键），本行零决策。
+    night_text, night_boost = _night_line(ctx)
+    if night_text:
+        state.append((4.4, _SAL_NIGHT_BASE + night_boost, night_text))
 
     # 事后认账行（T2-01③）——上一轮装死/软化沉默过，本轮心象自然带出来（一次性，
     # integration 在 REQUEST 拍读 rt["last_silent"] 派生成 scratch["last_silent_cue"]）。
@@ -375,6 +384,25 @@ def _life_line(ctx: BeatContext) -> tuple[str, float]:
     if isinstance(mood, str) and mood.strip():
         text = f"{text}（{mood.strip()}）"
     return text, intensity
+
+
+_NIGHT_TEXTURE_LINE = "深夜，人有点迷糊，话自然少"
+_NIGHT_WAKE_LINE = "刚迷糊着被消息叫醒"
+
+
+def _night_line(ctx: BeatContext) -> tuple[str, float]:
+    """读 scratch["night_texture_cue"]/["night_wake_cue"]（integration 据免打扰
+    时段 + 首条夜间消息小概率派生），返回 (text, 显著性加成)。
+
+    无 cue（关闭/非夜里/命中豁免关键词）→ ("", 0.0)，不进预算。只读渲染，不做
+    豁免判断——integration 已经在源头把豁免场景的 scratch 键掐掉了（fragment
+    零决策纪律）。
+    """
+    if not ctx.scratch.get("night_texture_cue"):
+        return "", 0.0
+    if ctx.scratch.get("night_wake_cue"):
+        return f"{_NIGHT_WAKE_LINE}，{_NIGHT_TEXTURE_LINE}", _SAL_NIGHT_WAKE_BOOST
+    return _NIGHT_TEXTURE_LINE, 0.0
 
 
 # T2-01③：事后认账——DeliberateSilence/ignition 的沉默理由码 → 一句"刚才怎么了"的

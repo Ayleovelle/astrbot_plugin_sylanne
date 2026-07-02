@@ -33,6 +33,7 @@ from sylanne_alpha.message_dispatch import (
     realtime_plan,
     strip_draft_blocks,
 )
+from sylanne_alpha.proactive_bridge import is_night_fast_reply_exempt
 from sylanne_alpha.variant_pool import (
     EMPTY_REPLY_FALLBACK_VARIANTS,
     LAST_RESORT_FALLBACK_TEXT,
@@ -80,6 +81,16 @@ _THINK_ENERGY_WEIGHT = 1.2  # 没精神启动慢
 _THINK_TENSION_WEIGHT = 0.6  # 紧张一点点拖慢启动（呼应 cps 里 tension 只往下拖）
 _THINK_JITTER_MIN = 0.85
 _THINK_JITTER_MAX = 1.2
+
+# T1-03 夜间温和版（config: sylanne_alpha_night_rhythm_enabled，默认关）。免打扰
+# 时段给读信时间温和放大、打字速度降一档——不是"变冷淡"，只是深夜人有点迷糊。
+# 硬顶 _NIGHT_THINK_DELAY_CAP=10s：红队铁律——绝不允许滑向分钟级不理人，夜里
+# 一直在是核心安全感，这张卡只加轻微质感。孤独/紧急关键词命中（见 proactive_bridge.
+# is_night_fast_reply_exempt）时整层直接豁免，原速回复。
+_NIGHT_THINK_DELAY_MULT_MIN = 1.5
+_NIGHT_THINK_DELAY_MULT_MAX = 2.5
+_NIGHT_THINK_DELAY_CAP = 10.0
+_NIGHT_CPS_DELTA = -1.0  # 打字速度降一档，仍会被 clamp 回 [_CPS_MIN, _CPS_MAX]
 
 # T2-02 补刀与改口：一段 SPEAK 分段回复正常发完（未被打断）后，按表达驱动力算一个
 # 概率骰子，命中则 20~180s 后追发一句很短的补充/更正。杀的问题：她说完话就再没
@@ -271,6 +282,56 @@ class LLMResponsePipeline:
             energy=energy,
             gap_seconds=gap_seconds,
         )
+
+    # ------------------------------------------------------------------
+    # T1-03 夜间温和版
+    # ------------------------------------------------------------------
+    def _night_rhythm_active(self, session_key: str, incoming_text: str) -> bool:
+        """T1-03①②：本轮是否套用夜间温和版——总开关开 + 当前在免打扰时段 +
+        incoming 文本未命中孤独/紧急豁免关键词。任一条件不满足 → False（原样）。
+
+        免打扰时段判定复用 proactive_bridge._in_quiet_hours——它已经实现了"读
+        大饼 schedule_settings，读不到则回退 1-7 点默认公式"的完整逻辑，这里
+        不重新发明。大饼未安装/未启用桥接都不影响——_in_quiet_hours 本身不依赖
+        bridge.available()，纯粹是"现在是不是夜里"的时间判断。
+        """
+        cfg = self._p._config or {}
+        if not bool(cfg.get("sylanne_alpha_night_rhythm_enabled", False)):
+            return False
+        if is_night_fast_reply_exempt(incoming_text):
+            return False
+        bridge = getattr(self._p, "_proactive_bridge", None)
+        if bridge is None:
+            return False
+        try:
+            sid = bridge._resolve_origin(session_key)
+            return bool(bridge._in_quiet_hours(sid))
+        except Exception:
+            return False
+
+    @staticmethod
+    def _apply_night_rhythm(
+        cps: float,
+        think_delay: float,
+        *,
+        active: bool,
+        rng: random.Random | None = None,
+    ) -> tuple[float, float]:
+        """T1-03①：夜间温和版最终力学缩放——打字速度降一档、读信+启动延迟温和
+        放大（硬顶 _NIGHT_THINK_DELAY_CAP，绝不滑向分钟级不理人）。
+
+        作用在【T3-01 调制 + rhythm_learner 习得节奏 + T1-01 读信延迟】之后的
+        最终值上（同 T3-01 extra_predelay 的分层原则：不与更早的层打架，只是
+        最后再叠一层温和的夜间质感）。active=False（总开关关/非夜里/命中豁免）
+        → 原样透传，零变化。
+        """
+        if not active:
+            return cps, think_delay
+        picker = rng if rng is not None else random
+        night_cps = max(_CPS_MIN, cps + _NIGHT_CPS_DELTA)
+        mult = picker.uniform(_NIGHT_THINK_DELAY_MULT_MIN, _NIGHT_THINK_DELAY_MULT_MAX)
+        night_delay = min(_NIGHT_THINK_DELAY_CAP, think_delay * mult)
+        return night_cps, night_delay
 
     # ------------------------------------------------------------------
     # Main response handler
@@ -471,6 +532,12 @@ class LLMResponsePipeline:
         # T1-01：首段延迟改用"读信+启动打字"时间，不再是裸 0（零思考时间瞬发）。
         # T3-01：逃避行为的 extra_predelay_s 叠加在 think_delay 之上（拖着不想碰）。
         think_delay = self._incoming_think_delay(event, session_key) + extra_predelay
+        # T1-03①②：夜间温和版——免打扰时段打字略慢、读信+启动延迟温和放大（硬顶
+        # 10s）；孤独/紧急消息（『睡不着』『在吗』等）整层豁免、原速回复。作为最后
+        # 一层叠在 T3-01 调制 + rhythm_learner 习得节奏 + T1-01 读信延迟之上，不与
+        # 更早的层打架。总开关关闭时 _night_rhythm_active 恒 False，零变化。
+        night_active = self._night_rhythm_active(session_key, self._text(event))
+        cps, think_delay = self._apply_night_rhythm(cps, think_delay, active=night_active)
         plan = realtime_plan(
             session_key,
             cleaned,
