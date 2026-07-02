@@ -108,3 +108,41 @@ def test_no_session_key_no_audit():
     pipe = _bind_pipe(p)
     pipe._mark_life_outcome("ev1", "dropped", "")
     assert p._proactive_dispatch_audit.get("") is None
+
+
+# ---------------------------------------------------------------------------
+# T2-07③：withheld（她自己的门控/迟疑取消）不是惩罚性 unanswered
+# ---------------------------------------------------------------------------
+
+def test_withheld_does_not_write_unanswered_audit():
+    """gate 拒绝 / 犹豫收回 → withheld，不应写 unanswered（不是用户没回应）。"""
+    p = _make_plugin()
+    pipe = _bind_pipe(p)
+    pipe._mark_life_outcome("ev1", "withheld", "sessA")
+    assert p._proactive_dispatch_audit.get("sessA") is None
+
+
+def test_withheld_does_not_raise_feedback_pressure():
+    """withheld 不应贡献 feedback_pressure（否则等于她的收回反过来罚用户）。"""
+    p = _make_plugin()
+    pipe = _bind_pipe(p)
+    sched = _scheduler(p)
+    pipe._mark_life_outcome("ev1", "withheld", "sessA")
+    pipe._mark_life_outcome("ev2", "withheld", "sessA")
+    assert sched.derive_dispatch_policy(session_key="sessA")["feedback_pressure"] == 0.0
+
+
+def test_withheld_still_marks_lifeevent_dropped_at():
+    """withheld 仍要回写 LifeEvent.dropped_at（生命周期记账不受影响，只是不惩罚）。"""
+    from sylanne_alpha.life_simulation import LifeEvent, LifeSimulator
+
+    sim = LifeSimulator(config={})
+    sim.state.events = [
+        LifeEvent(text="e", mood="m", urgency=0.1, timestamp=1.0, wants_to_share=True),
+    ]
+    eid = sim.state.events[0].event_id
+    p = _make_plugin()
+    p._life_simulator = sim
+    pipe = _bind_pipe(p)
+    pipe._mark_life_outcome(eid, "withheld", "sessA")
+    assert sim.state.events[0].dropped_at > 0

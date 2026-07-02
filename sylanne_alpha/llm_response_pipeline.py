@@ -229,13 +229,20 @@ class LLMResponsePipeline:
         default_cps = 7.5  # 默认每秒字符数（模拟打字速度）
         host = self._p._host(session_key)
         expr_drive = host.kernel.computation.engine.expression_drive()
-        # 计算最近被忽略的回复比例，用于调整节奏
-        last_times = [t for t in self._p._store.last_bot_expression_time.values() if t > 0]
+        # 计算"最近被忽略"信号，用于调整节奏。T1-04③修复：原实现取
+        # last_bot_expression_time.values()（跨所有会话的单值池），A 会话的节奏会被
+        # B/C 会话是否被忽略污染。last_bot_expression_time/last_user_message_time
+        # 都是按 session_key 存的单值（非历史序列），改为只看本会话自己的信号：
+        # 若本会话上次表达之后用户还没再开口，且已经过去够久，视为"正在被忽略"，
+        # 沉默越久信号越强（600s 封顶到 1.0）。
         recent_ignored = 0.0
-        if len(last_times) > 3:
+        last_expr_at = self._p._store.last_bot_expression_time.get(session_key, 0.0)
+        last_user_at = self._p._store.last_user_message_time.get(session_key, 0.0)
+        if last_expr_at > 0 and last_user_at < last_expr_at:
             now = time.time()
-            ignored_count = sum(1 for t in last_times[-10:] if now - t > 300)
-            recent_ignored = ignored_count / min(10, len(last_times))
+            silence = now - last_expr_at
+            if silence > 300.0:
+                recent_ignored = min(1.0, (silence - 300.0) / 300.0)
         max_part_chars, cps = self._p._rhythm_learner.get_rhythm_params(
             session_key,
             default_max_part=default_max_part,

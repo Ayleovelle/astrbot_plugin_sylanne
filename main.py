@@ -217,6 +217,9 @@ _LIFE_SIM_SAVE_MIN_GAP_SECONDS = 90.0
 # 期望几秒内落盘；rel_register 高频累积则靠节流压成稀疏写。
 _REL_STATE_SAVE_MIN_GAP_SECONDS = 10.0
 PROACTIVE_SCHEDULER_IDLE_DELAY_SECONDS = 1800.0
+# T1-04②：RhythmLearner 节流落盘间隔（秒）。由 on_message 高频驱动，节流到与
+# life_sim 同量级，避免每条消息都写 KV。
+_RHYTHM_LEARNER_SAVE_MIN_GAP_SECONDS = 90.0
 
 from sylanne_alpha.utils import safe_ensure_future  # noqa: E402, F401
 
@@ -423,6 +426,9 @@ class EmotionalStatePlugin(Star):
         self._webui_runtime_id = f"{int(time.time() * 1000)}-{id(self):x}"
         # 节律学习器：学习用户的交互节奏
         self._rhythm_learner = RhythmLearner(intimacy_threshold=0.6)
+        # T1-04②：节奏学习器节流落盘状态（镜像 life_sim 的节流落盘模式）
+        self._rhythm_learner_last_save_ts: float = 0.0
+        self._rhythm_learner_dirty_in_flight: bool = False
         self.logger = logger
         # 生命模拟器：idle 时自主演化身体状态
         self._life_simulator = LifeSimulator(config=self._config)
@@ -1096,8 +1102,31 @@ class EmotionalStatePlugin(Star):
             sched = getattr(self, "_proactive_scheduler", None)
             if sched is not None and hasattr(sched, "record_message_time"):
                 sched.record_message_time(session_key, now)
-            # 喂给节奏学习器（记录 tempo，不受亲密度门控）
-            self._rhythm_learner._record_tempo(session_key, now)
+            # T2-07①：喂主动反馈回路——用户真的回应了，把该会话所有 pending
+            # outreach 标 answered（此前只有超时会标 unanswered，她学不到"他回我了"）。
+            life_sim = getattr(self, "_life_simulator", None)
+            if life_sim is not None and hasattr(life_sim, "record_user_response"):
+                life_sim.record_user_response(session_key, now)
+            # T1-04①：复活 RhythmLearner 画像学习（内部已含 _record_tempo，
+            # 始终记录 tempo、亲密度不够时跳过画像学习——不再只调低层 _record_tempo）。
+            # 用 hosts.get() 非创建式查询：on_message 对 EventMessageType.ALL 触发，
+            # 若改用 self._host() 会为从未真正对话过的会话（如纯群聊噪音）也提前建
+            # host/记忆系统，这是本次纯接线之外的资源副作用，不做。没有 host 时退化
+            # engine_obs={}（is_intimate 判非亲密），tempo 仍照常记录。
+            try:
+                message_text = str(getattr(event, "message_str", "") or "")
+                engine_obs: dict[str, float] = {}
+                existing_host = self._store.hosts.get(session_key)
+                kernel = getattr(existing_host, "kernel", None)
+                if kernel is not None:
+                    engine_obs = kernel.computation.engine.observe()
+                self._rhythm_learner.observe_user_message(
+                    session_key, message_text, now, engine_obs
+                )
+            except Exception:
+                pass
+            # T1-04②：节流落盘节奏学习器状态（镜像 life_sim 的节流落盘模式）。
+            await self._rhythm_learner_throttled_save()
         except Exception:
             pass
 
@@ -2441,6 +2470,19 @@ class EmotionalStatePlugin(Star):
                     life_sim.from_dict(saved)
         except Exception as e:
             logger.debug(f"Sylanne life sim state restore skipped: {e}")
+        # T1-04②：恢复 RhythmLearner 持久化状态（重启保节奏画像，不从零重学）。
+        try:
+            if self._has_kv_api():
+                saved_rhythm = await self.get_kv_data(
+                    "sylanne_rhythm_learner_state", None
+                )
+                if saved_rhythm and isinstance(saved_rhythm, dict):
+                    self._rhythm_learner = RhythmLearner.from_dict(
+                        saved_rhythm,
+                        intimacy_threshold=self._rhythm_learner._intimacy_threshold,
+                    )
+        except Exception as e:
+            logger.debug(f"Sylanne rhythm learner state restore skipped: {e}")
         # Phase 2B / PR-H：恢复关系层状态（register_state + override，独立 KV key）
         try:
             if self._has_kv_api():
@@ -2536,6 +2578,31 @@ class EmotionalStatePlugin(Star):
             logger.debug(f"Sylanne life sim throttled save skipped: {e}")
         finally:
             self._life_sim_dirty_in_flight = False
+
+    async def _rhythm_learner_throttled_save(self) -> None:
+        """T1-04②：节流落盘 RhythmLearner 状态（镜像 _life_sim_throttled_save）。
+
+        由 on_message 高频驱动（每条消息都尝试一次），但受 min-gap 节流，实际
+        写 KV 频率与 life_sim 同量级。失败静默（不阻断消息处理），最后一次仍由
+        terminate 兜底。
+        """
+        now = time.time()
+        if self._rhythm_learner_dirty_in_flight:
+            return
+        if (now - self._rhythm_learner_last_save_ts) < _RHYTHM_LEARNER_SAVE_MIN_GAP_SECONDS:
+            return
+        if not self._has_kv_api():
+            return
+        self._rhythm_learner_dirty_in_flight = True
+        self._rhythm_learner_last_save_ts = now
+        try:
+            await self.put_kv_data(
+                "sylanne_rhythm_learner_state", self._rhythm_learner.to_dict()
+            )
+        except Exception as e:
+            logger.debug(f"Sylanne rhythm learner throttled save skipped: {e}")
+        finally:
+            self._rhythm_learner_dirty_in_flight = False
 
     async def _rel_state_throttled_save(self) -> None:
         """PR-H 解耦：关系层状态独立节流落盘到 KV（独立 KV key）。
@@ -2681,6 +2748,14 @@ class EmotionalStatePlugin(Star):
                 await self.put_kv_data("sylanne_life_sim_state", life_sim.to_dict())
         except Exception as e:
             logger.debug(f"Sylanne life sim state persist skipped: {e}")
+        # T1-04②：持久化 RhythmLearner 状态（终扫落盘，兜底 throttled save 漏窗）
+        try:
+            if self._has_kv_api():
+                await self.put_kv_data(
+                    "sylanne_rhythm_learner_state", self._rhythm_learner.to_dict()
+                )
+        except Exception as e:
+            logger.debug(f"Sylanne rhythm learner state persist skipped: {e}")
         # Phase 2B / PR-H：关系层状态终扫落盘（独立 KV key）
         try:
             if self._has_kv_api():
