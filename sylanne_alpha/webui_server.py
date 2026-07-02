@@ -232,7 +232,10 @@ async def start_webui_server(plugin: Any, host: str = "127.0.0.1", port: int = 2
                     return web.json_response({"error": "unauthorized"}, status=401)
             return await handler(request)
         auth = request.headers.get("Authorization", "")
-        if not auth.startswith("Bearer ") or auth[7:] != _active_token:
+        # fail-closed：_active_token 为空（未配置 / setup 未跑）时一律 401，绝不让空 Bearer
+        # （Authorization: Bearer ）因 auth[7:]=="" == _active_token=="" 漏进受保护路由。
+        # 正常运行 token 必被自动生成（setup 处 secrets.token_urlsafe），故零回归。
+        if not _active_token or not auth.startswith("Bearer ") or auth[7:] != _active_token:
             return web.json_response({"error": "unauthorized"}, status=401)
         # Item 24: CSRF 防护 — POST/DELETE 需要 X-CSRF-Token header
         if request.method in ("POST", "DELETE"):
@@ -1819,7 +1822,7 @@ def start_webui_thread_server(
             path = parsed.path.rstrip("/") or "/"
             if path not in ("/", "/twin", "/favicon.ico", "/health", "/metrics", "/logo.png", "/assets/logo.png"):
                 auth = self.headers.get("Authorization", "")
-                if not auth.startswith("Bearer ") or auth[7:] != _active_token:
+                if not _active_token or not auth.startswith("Bearer ") or auth[7:] != _active_token:
                     self._send_json({"error": "unauthorized"}, status=401)
                     return
             # S9: /metrics requires Bearer token when auth is configured
@@ -2183,7 +2186,7 @@ def start_webui_thread_server(
             path = parsed.path.rstrip("/") or "/"
             if path not in ("/", "/favicon.ico", "/logo.png", "/assets/logo.png"):
                 auth = self.headers.get("Authorization", "")
-                if not auth.startswith("Bearer ") or auth[7:] != _active_token:
+                if not _active_token or not auth.startswith("Bearer ") or auth[7:] != _active_token:
                     self._send_json({"error": "unauthorized"}, status=401)
                     return
             # Item 24: CSRF 防护 — POST 需要 X-CSRF-Token header

@@ -158,9 +158,9 @@ class TestDispatch(unittest.TestCase):
         res = asyncio.run(bridge.dispatch("aiocqhttp:GroupMessage:123::agent:u1", "素材A"))
         self.assertTrue(res["dispatched"])
         self.assertEqual(plugin.received, "素材A")
-        # 调用序：get → set → check → del
+        # 调用序（issue#43 Wave2 三段式）：get(基线) → set(注入) → check → get(RMW还原读) → del
         kinds = [c[0] for c in plugin.session_override_manager.calls]
-        self.assertEqual(kinds, ["get", "set", "check", "del"])
+        self.assertEqual(kinds, ["get", "set", "check", "get", "del"])
         # session_id 已剥后缀
         for c in plugin.session_override_manager.calls:
             if len(c) > 1:

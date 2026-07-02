@@ -325,7 +325,9 @@ async def _percept_recall(
     if memory is None or not (text or "").strip():
         return
     try:
-        if not memory.intimacy_ok(ctx.body):
+        # #29：PERCEPT 召回门控同样吃 memory.intimacy_threshold 进化偏置（与 DELIBERATE
+        # 召回同源，gate 一致）。ctx 由 run_percept_stage 注入了 scratch["evo_delta"]。
+        if not memory.intimacy_ok(ctx.body, bias=ctx.evo_bias("memory", "intimacy_threshold")):
             return
         limit = 2
         bias = ctx.scratch.get("somatic_bias")
@@ -344,7 +346,12 @@ async def _percept_recall(
                 try:
                     provider = get_prov(provider_id)
                     if provider:
-                        query_embedding = await provider.get_embedding(text[:100])
+                        # 热路径（PERCEPT，LLM 调用前）：embedding provider 若挂起会卡死整条
+                        # 召回 → 用户消息无回复。超时兜底，挂起→TimeoutError→下面 except→无
+                        # embedding 降级召回，绝不让一个慢 provider 堵死回复。
+                        query_embedding = await asyncio.wait_for(
+                            provider.get_embedding(text[:100]), timeout=5.0
+                        )
                 except Exception:
                     query_embedding = None
         results = memory.recall(
@@ -354,6 +361,29 @@ async def _percept_recall(
             ctx.scratch["recalled"] = results
     except Exception:
         pass
+
+
+def _evo_provider(plugin: Any, session_key: str):
+    """构造本会话的进化偏置 provider：callable(agent, key) -> float（#29 输出侧接通）。
+
+    背后是 agents.SelfCore.evo_delta（plugin._self_core，持 EvolutionStore：反射 delta +
+    反思 reflection_bias，自带 ±0.20 总 cap）。注入 ctx.scratch["evo_delta"]，live 门控
+    （IgnitionArbiter / MemoryDomain.intimacy_ok）经 ctx.evo_bias 读取并二次钳位。
+
+    _self_core 缺失（未装/旧路径）或读取异常 → 返回 None / 0.0：门控落回纯人格基线，
+    零行为变化（绝不因学习层缺位而阻断或改写回复）。
+    """
+    sc = getattr(plugin, "_self_core", None)
+    if sc is None or not hasattr(sc, "evo_delta"):
+        return None
+
+    def _get(agent: str, key: str) -> float:
+        try:
+            return float(sc.evo_delta(session_key, agent, key))
+        except Exception:  # noqa: BLE001
+            return 0.0
+
+    return _get
 
 
 def _user_text(plugin: Any, event: Any) -> str:
@@ -388,6 +418,7 @@ async def apply_v2core_request(plugin: Any, event: Any, request: Any) -> None:
 
         ctx = rt["runner"].run_percept_stage(
             session_key, event, text, domains=rt["domains"],
+            evo_delta=_evo_provider(plugin, session_key),
         )
         await _percept_recall(plugin, ctx, rt["domains"], text)
         rt["pending"] = {"ctx": ctx, "ts": time.time(), "text": text}
@@ -447,6 +478,50 @@ async def apply_v2core_request(plugin: Any, event: Any, request: Any) -> None:
                 request.system_prompt = f"{current}\n{frag}".strip()
             logger.debug("Sylanne v2core mind fragment injected: session=%s chars=%d",
                          session_key, len(frag))
+
+        # emotion_spirit 状态消费（Design B：只读、观察式背景；未装/未开/未激活 → no-op，
+        # 零行为变化）。注入在心象片段之后，复用同一 appender。三条腿（persona 重申/拉状态/
+        # 渲染）都在 bridge 内自查 live presence + active，同源门控（红队 lifecycle）。独立
+        # try 包裹：emotion_spirit 侧任何失败都不波及上面的心象片段注入与主请求。
+        try:
+            es_bridge = getattr(plugin, "_emotion_spirit_bridge", None)
+            es_on = bool((getattr(plugin, "config", None) or {}).get(
+                "sylanne_alpha_emotion_spirit_bridge_enabled", False))
+            if es_bridge is not None and es_on and not es_bridge.is_active():
+                # 懒激活：emotion_spirit 晚于本插件加载/中途安装时，initialize 的一次性激活
+                # 会扑空——这里按请求兜底重试（未装时 activate 是廉价 no-op，返回 not_installed）。
+                es_bridge.activate()
+            if es_bridge is not None and es_on and es_bridge.is_active():
+                es_bridge.reassert_persona_disabled()   # 自愈中途被改回 'auto' 的双注入
+                # emotion_spirit 按 sender_id 给信号做键（main.py:1069 get_sender_id），不是我们
+                # 的 unified_msg_origin session_key；用它的键查，否则永远 miss（红队 contract）。
+                es_skey = session_key
+                try:
+                    _sid = event.get_sender_id()
+                    if _sid:
+                        es_skey = str(_sid)
+                except Exception:  # noqa: BLE001
+                    pass
+                es_block = await es_bridge.consume_state_block(es_skey)
+                if es_block:
+                    appender = getattr(
+                        getattr(plugin, "_llm_response_pipeline", None),
+                        "_append_request_prompt_fragment", None,
+                    )
+                    if callable(appender):
+                        appender(request, es_block)
+                    else:
+                        current = str(getattr(request, "system_prompt", "") or "")
+                        request.system_prompt = f"{current}\n{es_block}".strip()
+                    logger.debug(
+                        "Sylanne emotion_spirit state injected: session=%s chars=%d",
+                        es_skey, len(es_block))
+            elif es_bridge is not None and not es_on and es_bridge.is_active():
+                # 用户中途把桥配置关掉 → 还原 emotion_spirit 自己的 persona 注入（不留痕，
+                # 红队 lifecycle：flag-off 不还原会把它一直静音）。
+                es_bridge.deactivate()
+        except Exception as _esx:  # noqa: BLE001 - emotion_spirit 消费失败绝不阻断请求
+            logger.debug("Sylanne emotion_spirit consume skipped: %s", _esx)
     except Exception as exc:  # noqa: BLE001
         logger.error("Sylanne v2core request stage failed（继续旧管线）: %s", exc, exc_info=True)
 
@@ -516,10 +591,13 @@ async def apply_v2core_response(plugin: Any, event: Any, response: Any) -> bool:
     if response is None or _is_cron_event(event):
         return False
     try:
+        from sylanne_alpha.message_dispatch import normalize_completion_text
         from sylanne_alpha.v2core.contracts import ReplyKind
 
         session_key = plugin._session_key(event)
-        draft_raw = str(getattr(response, "completion_text", "") or "")
+        # T3 防护：completion_text 可能是 content-parts 列表/repr（provider tool 轮产物），
+        # 在这第一道读边界就归一为纯文本——既不漏进正文，也防写回 AstrBot 历史被 repr 污染。
+        draft_raw = normalize_completion_text(getattr(response, "completion_text", ""))
         draft = draft_raw if draft_raw.strip() else None
 
         rt = _runtime_for(plugin, session_key)
@@ -544,6 +622,7 @@ async def apply_v2core_response(plugin: Any, event: Any, response: Any) -> bool:
                 text = _user_text(plugin, event)
                 ctx = rt["runner"].run_percept_stage(
                     session_key, event, text, domains=rt["domains"],
+                    evo_delta=_evo_provider(plugin, session_key),
                 )
 
             reply = rt["runner"].run_decision_stage(
@@ -681,6 +760,7 @@ async def consult_idle_reach(plugin: Any, session_key: str) -> dict[str, Any]:
         runner = rt["runner"]
         ctx = runner.run_percept_stage(
             session_key, {"proactive": True}, "", domains=rt["domains"], idle=True,
+            evo_delta=_evo_provider(plugin, session_key),
         )
         ctx.scratch["proactive"] = True
         # 只跑 DELIBERATE（outreach/ignition），不 render、不 EVOLVE、不 tick——零副作用

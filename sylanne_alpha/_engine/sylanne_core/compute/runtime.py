@@ -34,15 +34,23 @@ class AlphaRuntime:
 
     _CONSISTENCY_CHECK_INTERVAL: int = 50
 
-    def __init__(self, root: str | Path, profile: DimensionProfile | None = None):
+    def __init__(
+        self,
+        root: str | Path,
+        profile: DimensionProfile | None = None,
+        *,
+        pel_enabled: bool = False,
+    ):
         """初始化运行时，指定持久化根目录。
 
         Args:
             root: 存储 .alpha.json 文件的根目录路径。
             profile: 计算维度配置（lite/pro/max），传递给 kernel。
+            pel_enabled: 是否启用 PEL-Core 情绪潜核（默认 False，行为字节一致）。
         """
         self.root = Path(root)
         self._profile = profile
+        self._pel_enabled = pel_enabled
         self._save_count: int = 0
 
     def load(self, session_key: str, legacy: dict[str, Any] | None = None) -> AlphaKernel:
@@ -68,14 +76,29 @@ class AlphaRuntime:
                 self.root.mkdir(parents=True, exist_ok=True)
                 path.replace(path.with_suffix(path.suffix + ".damaged"))
                 recovered = AlphaKernel.boot(
-                    session_key=session_key, legacy=legacy, profile=self._profile
+                    session_key=session_key,
+                    legacy=legacy,
+                    profile=self._profile,
+                    pel_enabled=self._pel_enabled,
                 )
                 self.save(recovered)
                 return recovered
             if data.get("schema_version") == SCHEMA_VERSION:
-                return AlphaKernel.restore(data, profile=self._profile)
-            return AlphaKernel.boot(session_key=session_key, legacy=data, profile=self._profile)
-        return AlphaKernel.boot(session_key=session_key, legacy=legacy, profile=self._profile)
+                return AlphaKernel.restore(
+                    data, profile=self._profile, pel_enabled=self._pel_enabled
+                )
+            return AlphaKernel.boot(
+                session_key=session_key,
+                legacy=data,
+                profile=self._profile,
+                pel_enabled=self._pel_enabled,
+            )
+        return AlphaKernel.boot(
+            session_key=session_key,
+            legacy=legacy,
+            profile=self._profile,
+            pel_enabled=self._pel_enabled,
+        )
 
     def save(self, kernel: AlphaKernel) -> None:
         """原子写入 kernel 快照到磁盘。定期执行一致性自检。"""
@@ -108,7 +131,9 @@ class AlphaRuntime:
         Returns:
             全新启动的 AlphaKernel 实例。
         """
-        kernel = AlphaKernel.boot(session_key=session_key, profile=self._profile)
+        kernel = AlphaKernel.boot(
+            session_key=session_key, profile=self._profile, pel_enabled=self._pel_enabled
+        )
         self.save(kernel)
         return kernel
 

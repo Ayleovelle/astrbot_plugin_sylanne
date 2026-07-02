@@ -107,6 +107,12 @@
     "default": false,
     "hint": "默认关闭；开启后主动发言会带人类式的迟疑：发出前随机停顿、按犹豫强度可能最后一刻收回不发、偶尔先发个踌躇词起头。强度由 Sylanne 的内在状态（怕打扰/想安静/熟悉度）驱动。仅在桥接开启时生效。"
   },
+  "sylanne_alpha_emotion_spirit_bridge_enabled": {
+    "description": "启用 emotion_spirit 适配桥（与 astrbot_plugin_emotion_spirit 对接）",
+    "type": "bool",
+    "default": false,
+    "hint": "默认关闭；开启后若探测到 astrbot_plugin_emotion_spirit 已安装：①关掉它自己的 persona 注入并每轮请求自愈重申（让 Sylanne 当 system_prompt 唯一主，避免双注入）；②观察式拉取它的情绪/躯体状态（仅用其稳定契约 get_emotion_state/get_body_state）合进 system_prompt 当背景参考。记忆仍以 Sylanne 原生为主控（emotion_spirit 自己继续记它的池）；把记忆写入接管给它属高风险（卸载即丢/多人串号/双写污染），按设计延后到可逆镜像双写。引擎共享已确认结构上不可行（跨命名空间注册表互不可见）故移除。未安装时完全 no-op，对现有行为零影响。"
+  },
   "sylanne_alpha_recall_mode": {
     "description": "记忆召回引擎模式",
     "type": "string",
@@ -145,6 +151,12 @@
     "_special": "select_provider",
     "hint": "前台同步等待 2s，需要响应快的小模型。即时情绪直接影响当前轮回复语气。推荐设置：温度 0，top-p 0.1，Max Tokens 无需设置（插件已接管）。"
   },
+  "sylanne_alpha_assessor_max_tokens": {
+    "description": "语义评估 LLM 最大输出 token",
+    "type": "int",
+    "default": 1024,
+    "hint": "快速/主语义评估的输出上限。推理模型（如 deepseek-v4 等带隐藏思考的模型）会先把 token 花在推理上，过低（旧版写死 50/100）会让正文为空、情感读数恒落中性，越情绪化的消息越严重；故默认 1024 留足余量。非推理模型解完即停、不会多花。"
+  },
   "sylanne_alpha_background_workers_enabled": {
     "description": "启用后台工作队列",
     "type": "bool",
@@ -180,7 +192,7 @@
     "type": "string",
     "default": "",
     "_special": "select_provider",
-    "hint": "用于模拟 Sylanne 生活的 LLM；建议用便宜的小模型。"
+    "hint": "用于模拟 Sylanne 生活的 LLM；建议用便宜的小模型。启用生活模拟时必填，留空会静默失效（生活状态冻结、主动消息可能复读）。"
   },
   "sylanne_alpha_life_simulation_interval_seconds": {
     "description": "生活模拟间隔（秒）",

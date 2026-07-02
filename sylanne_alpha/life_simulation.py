@@ -851,6 +851,11 @@ class LifeSimulator:
         )
         # PR-C1：ShareIntent store（intent_id → ShareIntent），供 pipeline 取用
         self._share_intents: dict[str, ShareIntent] = {}
+        # issue#43 Wave1：生活模拟连续失败计数 + 退避剩余跳过拍数（瞬时态，故意
+        # 不进 LifeSimulationState / 不持久化——重启即重新探测 provider）。
+        self._consecutive_failures: int = 0
+        self._backoff_skip_remaining: int = 0
+        self._last_fail_warn_ts: float = 0.0  # 上次持续失败告警的壁钟（时间制重发节流）
 
     @property
     def enabled(self) -> bool:
@@ -923,24 +928,71 @@ class LifeSimulator:
         import datetime as _dt
 
         now = time.time()
-        # Phase 3 / M8 audit：tick 开始扫一遍 outreach 超时（response 长时间未到 → timeout）
+        # Phase 3 / M8 audit：tick 开始扫一遍 outreach 超时（response 长时间未到 → timeout）。
+        # 放在退避短路【之前】——超时 housekeeping 不调 LLM，退避期间也要照常做。
         self._check_outreach_timeouts(now)
-        ctx = self._load_world_context(now, _dt)
 
-        prompt = self._build_prompt(now, ctx)
+        # issue#43 Wave1：失败退避（漏桶探测式）。连续失败到阈值后跳过若干心跳，
+        # 跳完放行一拍探测 provider；探测成功由 _record_event 清零，失败再退避。
+        # 绝不永久门死（否则 provider 恢复后永远不再被探测，比原本空转更糟）；
+        # 也绝不在失败路径推进 last_simulation_time（守 PR-A 零副作用契约，且不掩盖 due 故障信号）。
+        if self._backoff_skip_remaining > 0:
+            self._backoff_skip_remaining -= 1
+            return
+
+        # 加宽 try（红队 finding）：_load_world_context / _build_prompt 的异常也要走失败处理，
+        # 否则它们抛错会绕过计数/退避/告警，再被 life_agent.act 的 except-pass 吞成新的静默冻结。
         try:
+            ctx = self._load_world_context(now, _dt)
+            prompt = self._build_prompt(now, ctx)
             response = await self._llm_caller(prompt)
             parsed = self._parse_response(response, now)
         except Exception:
-            return  # 异常零副作用（不 bump、不 callback）
+            self._note_tick_failure("tick_exception")
+            return  # 零副作用（不 bump、不 callback）
 
         if not parsed:
+            self._note_tick_failure("empty_or_unparseable")
             return  # 空响应零副作用（PR-A review HIGH）
 
         event, emotion_weights = parsed
         self._record_event(event, emotion_weights, ctx, now)
         await self._emit_side_effects(event, emotion_weights, now)
         self._log_tick(event, ctx, now)
+
+    # issue#43 Wave1：退避阈值 + 跳过拍数封顶（瞬时退避，类常量）+ 重发告警壁钟间隔。
+    _LIFE_FAIL_BACKOFF_THRESHOLD = 3
+    _LIFE_FAIL_BACKOFF_MAX_SKIP = 20
+    _LIFE_FAIL_WARN_INTERVAL_S = 3600.0
+
+    def _note_tick_failure(self, reason: str) -> None:
+        """记一次失败：自增连续失败计数、触发退避、按壁钟节流告警。
+
+        不推进任何 state（守零副作用契约）。退避跳过拍数随失败次数增长并封顶。
+        告警在到阈值首次 + 之后每隔 _LIFE_FAIL_WARN_INTERVAL_S 壁钟重发——【不用次数模运算】，
+        因为退避会把探测拍稀释到天级，次数模会让多小时/多天宕机只剩一行日志后归于沉默（红队 finding）。
+        """
+        self._consecutive_failures += 1
+        n = self._consecutive_failures
+        if n >= self._LIFE_FAIL_BACKOFF_THRESHOLD:
+            # 跳过拍数随失败次数增长、封顶；跳完后那一拍放行探测（漏桶式）。
+            self._backoff_skip_remaining = min(self._LIFE_FAIL_BACKOFF_MAX_SKIP, n)
+        now = time.time()
+        first = n == self._LIFE_FAIL_BACKOFF_THRESHOLD
+        due = now - self._last_fail_warn_ts >= self._LIFE_FAIL_WARN_INTERVAL_S
+        if first or (n > self._LIFE_FAIL_BACKOFF_THRESHOLD and due):
+            self._last_fail_warn_ts = now
+            import logging
+            logging.getLogger(__name__).warning(
+                "Sylanne life_sim 连续失败 %d 次（%s）：生活状态停止推进、已退避探测；"
+                "若启用了生活模拟，请检查 sylanne_alpha_life_simulation_provider_id 是否配置/可用。",
+                n, reason,
+            )
+
+    @property
+    def consecutive_failures(self) -> int:
+        """生活模拟连续失败次数（0=健康）。供 WebUI/调试观测故障，不持久化。"""
+        return self._consecutive_failures
 
     def _load_world_context(self, now: float, _dt) -> dict[str, Any]:
         """读取世界状态 + 计算相位/能量候选值，供编排与 prompt 注入。
@@ -998,6 +1050,11 @@ class LifeSimulator:
         取 LIFE_EVENT_WEIGHTS。ShareIntent 评分留给 PR-C。
         """
         state = self.state
+        # issue#43 Wave1：成功一拍即清零失败计数 + 退避 + 告警壁钟（provider 恢复立即复原节律，
+        # 下次故障从阈值首次重新响亮告警，不被旧 streak 的告警时间戳压住）。
+        self._consecutive_failures = 0
+        self._backoff_skip_remaining = 0
+        self._last_fail_warn_ts = 0.0
         # bump（仅在确认有效事件后，见 PR-A review HIGH）
         state.last_simulation_time = now
         state.simulation_count += 1

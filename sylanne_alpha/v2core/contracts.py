@@ -6,9 +6,15 @@
 
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass, field
 from enum import Enum
 from typing import Any, Protocol, runtime_checkable
+
+# #29 进化偏置喂回 live 门控时的二次硬钳位：live 门控见到的学习偏置绝不超过 ±此值，
+# 保证"人格显函数是主项、学习只微调"。比 EvolutionStore 总 cap(0.20)更紧，是 gate 侧
+# 的最后一道刹车（即使上游 cap 将来调整也兜得住）。
+_EVO_BIAS_CAP = 0.15
 
 
 # ===========================================================================
@@ -136,6 +142,35 @@ class BeatContext:
     def domain(self, name: str) -> Any:
         """取本会话某领域 agent；缺失返 None（能力按需判空降级）。"""
         return self.domains.get(name)
+
+    def evo_bias(self, agent: str, key: str) -> float:
+        """读某门控参数学到的进化偏置（#29：reflex/反思 学到的偏置喂回 live 门控）。
+
+        语义约定（叠加在人格函数基线上的小偏置）：effective_threshold = baseline + bias。
+        负偏置＝降低门槛＝更主动（与 reflex/反思 "更主动=delta 负" 的既有约定一致，见
+        manual_evolution_e2e[1] 与 reflection prompt）；正偏置＝抬高门槛＝更收敛。
+
+        provider 由 integration 建 ctx 时注入 scratch["evo_delta"]（callable(agent,key)->float，
+        背后是 agents.SelfCore.evo_delta，读 EvolutionStore 的 反射 delta + 反思 reflection_bias）。
+        未注入（测试/旧路径）或异常 → 0.0（live 门控落回纯人格基线，零行为变化）。
+
+        二次钳位（_EVO_BIAS_CAP）：即使 EvolutionStore 总 cap 将来放宽，live 门控见到的偏置
+        也绝不超过 ±0.15——人格显函数永远是主项，学习只能微调不能改写。
+        """
+        fn = self.scratch.get("evo_delta")
+        if not callable(fn):
+            return 0.0
+        try:
+            v = float(fn(agent, key))
+        except Exception:
+            return 0.0
+        if not math.isfinite(v):
+            return 0.0
+        if v > _EVO_BIAS_CAP:
+            return _EVO_BIAS_CAP
+        if v < -_EVO_BIAS_CAP:
+            return -_EVO_BIAS_CAP
+        return v
 
 
 # ===========================================================================

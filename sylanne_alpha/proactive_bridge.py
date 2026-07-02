@@ -19,6 +19,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import random
 import time
 from typing import Any
@@ -37,6 +38,13 @@ PROACTIVE_CHAT_STAR_NAME = "astrbot_plugin_proactive_chat"
 class ProactiveBridge:
     """Sylanne → 大饼 主动发言桥接器。"""
 
+    # issue#43 Wave2：崩溃中断的 dispatch 在此 KV 键留下「干净 override 基线」sidecar，
+    # 启动时精确还原（含用户自配 proactive_prompt），绝不按 key/value 盲删大饼配置。
+    _BASELINE_KV = "sylanne_proactive_inflight_baseline"
+    # dispatch 唯一会改的 override 键集合：sidecar 只存这些键的干净基线、恢复也只 RMW 这些
+    # 键，永不波及 schedule_settings / tts_settings 等其它（用户或 adjust 拥有的）键。
+    _DISPATCH_OWNED_KEYS = ("proactive_prompt", "segmented_reply_settings")
+
     def __init__(self, plugin: Any) -> None:
         self._p = plugin
         # 每会话上次桥接触发时间（用于间隔节流，复用大饼的 min_interval 公式）
@@ -44,6 +52,17 @@ class ProactiveBridge:
         # 待 Sylanne 接管分段的 origin 集合：dispatch 时标记，on_decorating_result 钩子消费。
         # key = 大饼实际发送用的 origin（unified_msg_origin）
         self._pending_segment_takeover: set[str] = set()
+        # issue#43 Wave2：per-sid 锁序列化 dispatch∥adjust_countdown 对同一 sid override 的
+        # 读改写（治残留竞态②）；键 = resolved origin。短临界区——锁【不跨】check_and_chat /
+        # _schedule_next_chat_and_save 的外部 LLM 调用（不重蹈 3.0 跨边界长持锁）。
+        self._sid_locks: dict[str, asyncio.Lock] = {}
+        # 串行化 sidecar KV dict 的跨 sid 读改写（短持，不跨外部调用）。
+        self._baseline_kv_lock = asyncio.Lock()
+        # issue#43 Wave2 修订（验证红队 finding）：同方法并发去重。锁不跨 LLM 窗口，故同一
+        # sid 上第二个 dispatch/adjust 进来时第一个仍在飞——它会把对方的临时注入误当「干净
+        # 基线」snapshot 回去造成残留复读。in-flight 闸保证同 sid 同方法只有一个在飞。
+        self._inflight_dispatch: set[str] = set()
+        self._inflight_adjust: set[str] = set()
 
     def forget_session(self, session_key: str) -> None:
         """释放某会话在桥接层的残留态（CP8-P6：会话删除/驱逐时清理，防无界增长）。
@@ -56,6 +75,12 @@ class ProactiveBridge:
             origin = self._resolve_origin(session_key)
             self._last_bridge_dispatch.pop(origin, None)
             self._pending_segment_takeover.discard(origin)
+            # issue#43 Wave2：只清【未被持有】的锁——若该 sid 正有 dispatch/adjust 在飞，
+            # 删了它后续 _lock_for 会 setdefault 一把新锁，与在飞 task 失去互斥（红队 nit）。
+            lk = self._sid_locks.get(origin)
+            if lk is not None and not lk.locked() and origin not in self._inflight_dispatch \
+                    and origin not in self._inflight_adjust:
+                self._sid_locks.pop(origin, None)
         except Exception:
             pass
 
@@ -316,44 +341,234 @@ class ProactiveBridge:
         if not sid:
             return {"dispatched": False, "reason": "no_valid_origin"}
 
-        # 备份原 override，注入素材，触发，恢复
-        prev: dict[str, Any] = {}
-        try:
-            prev = mgr.get_override(sid) or {}
-        except Exception:
-            prev = {}
-        patched = {**prev, "proactive_prompt": motivation_text}
-        # 分段接管：关掉大饼自己的分段，并登记接管标记，由 on_decorating_result 钩子消费
+        # issue#43 Wave2：三段式。锁【不跨】check_and_chat（不在锁内 await 外部 LLM，
+        # 规避 3.0 式跨边界长持锁）；注入前把干净基线存进 sidecar，崩溃后由
+        # recover_inflight_baselines 在启动时精确还原用户配置——绝不盲删 proactive_prompt。
         takeover = self._segment_takeover_enabled()
-        if takeover:
-            prev_seg = prev.get("segmented_reply_settings", {})
-            patched["segmented_reply_settings"] = {
-                **(prev_seg if isinstance(prev_seg, dict) else {}),
-                "enable": False,
-            }
-            self._pending_segment_takeover.add(sid)
+        # dispatch 拥有键的干净基线（复审 CLUSTER A）：优先复用已存的 sidecar——上次 dispatch 没
+        # 还原干净时 live override 可能是脏残留，sidecar 里那份才是真基线（anti-latching）。
+        baseline_owned: dict[str, Any] = {}
+
+        # 三段式，全程 try/finally：段3 还原 + in-flight 清理都在 finally——无论正常/异常/
+        # CancelledError 都【尝试】把 override 还原干净；还原成功才清 sidecar，失败/被取消则保留
+        # sidecar 让启动 recover 修复。复审 CLUSTER A：原来段3 在 finally 外 + sidecar 无条件清，
+        # restore 瞬时失败 / 取消会把用户 pp 永久毁掉、breadcrumb 也丢 = 重现 issue#43 复读。
+        dispatched = False
+        reason = "ok"
+        i_own = False
         try:
-            await mgr.set_override(sid, patched)
-            await check_and_chat(sid)
-            # 记录触发时间，供 min_interval 节流闸门使用
-            self._last_bridge_dispatch[sid] = time.time()
-            return {"dispatched": True, "reason": "ok"}
-        except Exception as e:
-            logger.warning(f"Sylanne proactive_bridge dispatch failed: {e}", exc_info=True)
-            return {"dispatched": False, "reason": f"error:{type(e).__name__}"}
-        finally:
-            # 用完即清：有原值写回，无则删除
-            try:
-                if prev:
-                    await mgr.set_override(sid, prev)
+            # 段1（短锁）：in-flight 去重 → 定干净基线（存/复用 sidecar）→ 写注入态。
+            async with self._lock_for(sid):
+                if sid in self._inflight_dispatch:
+                    # 已有 dispatch 在飞：第二个不再注入（否则把对方素材误当基线 → 残留复读）
+                    return {"dispatched": False, "reason": "dispatch_in_flight"}
+                self._inflight_dispatch.add(sid)
+                i_own = True
+                try:
+                    live = mgr.get_override(sid) or {}
+                except Exception:
+                    live = {}
+                if not isinstance(live, dict):
+                    live = {}
+                existing = await self._peek_inflight_baseline(sid)
+                if existing is not None:
+                    # 上次 dispatch 留下未还原的干净基线 → 它才是真基线，不被脏 live 覆盖
+                    baseline_owned = existing
                 else:
-                    await mgr.delete_override(sid)
+                    baseline_owned = {
+                        k: live[k] for k in self._DISPATCH_OWNED_KEYS if k in live
+                    }
+                    await self._save_inflight_baseline(sid, baseline_owned)
+                patched = {**live, "proactive_prompt": motivation_text}
+                # 分段接管：关掉大饼自己的分段，并登记接管标记，由 on_decorating_result 钩子消费
+                if takeover:
+                    prev_seg = live.get("segmented_reply_settings", {})
+                    patched["segmented_reply_settings"] = {
+                        **(prev_seg if isinstance(prev_seg, dict) else {}),
+                        "enable": False,
+                    }
+                    self._pending_segment_takeover.add(sid)
+                try:
+                    await mgr.set_override(sid, patched)
+                except Exception as e:
+                    logger.warning(
+                        f"Sylanne proactive_bridge set_override failed: {e}", exc_info=True
+                    )
+                    return {"dispatched": False, "reason": f"error:{type(e).__name__}"}
+
+            # 段2（无锁）：触发大饼生成 + 发送。外部 LLM 调用绝不在锁内 await。
+            try:
+                await check_and_chat(sid)
+                # 仅【发送成功】才计入 min_interval 节流（复审 nit：失败的发送不该压住后续
+                # 30min 重试；并发触发由 in-flight 闸挡，不靠这个时间戳，故无需在 await 前抢记）。
+                self._last_bridge_dispatch[sid] = time.time()
+                dispatched = True
             except Exception as e:
-                logger.warning(
-                    f"Sylanne proactive_bridge override restore failed: {e}"
-                )
-            # 防御性清理：钩子正常会消费掉标记，万一未触发则在此移除，避免误伤后续消息
-            self._pending_segment_takeover.discard(sid)
+                reason = f"error:{type(e).__name__}"
+                logger.warning(f"Sylanne proactive_bridge dispatch failed: {e}", exc_info=True)
+            return {"dispatched": dispatched, "reason": reason}
+        finally:
+            if i_own:
+                # 段3（在 finally）：RMW 把 owned 键还原成干净基线，保留并发 adjust 的 schedule。
+                # 还原成功才清 sidecar；失败/取消则保留 sidecar 让 recover 在重启时修。
+                try:
+                    async with self._lock_for(sid):
+                        restored = await self._restore_dispatch_keys(mgr, sid, baseline_owned)
+                        if restored:
+                            await self._clear_inflight_baseline(sid)
+                except BaseException:
+                    # 取消/异常打断还原 await：保留 sidecar（不清），交给启动 recover 修复。
+                    pass
+                self._inflight_dispatch.discard(sid)
+                self._pending_segment_takeover.discard(sid)
+
+    def _lock_for(self, sid: str) -> asyncio.Lock:
+        """per-sid 锁（懒建，键 = resolved origin）。setdefault 单步原子、无 await，防两
+        task 各建一把锁导致序列化失效（issue#43 Wave2 死锁红队 finding）。"""
+        return self._sid_locks.setdefault(sid, asyncio.Lock())
+
+    async def _restore_dispatch_keys(
+        self, mgr: Any, sid: str, baseline: dict[str, Any]
+    ) -> bool:
+        """RMW 还原 dispatch 拥有的键（proactive_prompt / segmented_reply_settings）到 baseline，
+        保留当前 override 的其它键（如并发 adjust 写的 schedule_settings）。baseline 有该键则恢复
+        其值，无则删除桥接注入的；整体空了就 delete_override。
+
+        返回是否真正持久化成功——失败（瞬时 set_override 异常等）时返回 False，调用方据此保留
+        sidecar 让启动 recover 修复，绝不在还原失败时清掉 breadcrumb（复审 CLUSTER A）。"""
+        try:
+            cur = dict(mgr.get_override(sid) or {})
+        except Exception as e:
+            # get_override 垮了就不知道 override 里还有哪些键——强行用 cur={} 重写只剩 dispatch-owned
+            # 键 = 抹掉并发 adjust 写的 schedule_settings 等（静默丢配置，gemini PR#46）。中止并返回
+            # False：sidecar 保留、下次启动 recover 再修，绝不在读失败时破坏 RMW 的"保留其它键"。
+            logger.warning(f"Sylanne proactive_bridge get_override failed, skip restore: {e}")
+            return False
+        for key in self._DISPATCH_OWNED_KEYS:
+            if key in baseline:
+                cur[key] = baseline[key]
+            else:
+                cur.pop(key, None)
+        try:
+            if cur:
+                await mgr.set_override(sid, cur)
+            else:
+                await mgr.delete_override(sid)
+            return True
+        except Exception as e:
+            logger.warning(f"Sylanne proactive_bridge override restore failed: {e}")
+            return False
+
+    async def _restore_schedule_keys(
+        self, mgr: Any, sid: str, baseline: dict[str, Any]
+    ) -> None:
+        """RMW 还原 adjust_countdown 注入的 schedule_settings 到 baseline，保留其它键
+        （如并发 dispatch 写的 proactive_prompt）；整体空了就 delete_override。"""
+        try:
+            cur = dict(mgr.get_override(sid) or {})
+        except Exception as e:
+            # 同 _restore_dispatch_keys：读失败用 cur={} 重写会抹掉并发 dispatch 写的 proactive_prompt。
+            # 中止、不写——保留 override 全部键，下次 adjust/recover 再修（gemini PR#46）。
+            logger.warning(f"Sylanne adjust_countdown get_override failed, skip restore: {e}")
+            return
+        if "schedule_settings" in baseline:
+            cur["schedule_settings"] = baseline["schedule_settings"]
+        else:
+            cur.pop("schedule_settings", None)
+        try:
+            if cur:
+                await mgr.set_override(sid, cur)
+            else:
+                await mgr.delete_override(sid)
+        except Exception as e:
+            logger.warning(f"Sylanne adjust_countdown override restore failed: {e}")
+
+    async def _save_inflight_baseline(self, sid: str, baseline: dict[str, Any]) -> None:
+        """注入前把 sid 的干净 override 基线写进 Sylanne 自己的 KV（含用户自配
+        proactive_prompt / segmented），供崩溃后精确还原。无 KV 能力则静默降级（退回旧的
+        靠 finally 还原语义）。跨 sid 的 sidecar dict 读改写由 _baseline_kv_lock 串行化。"""
+        p = self._p
+        if not (hasattr(p, "_has_kv_api") and p._has_kv_api()):
+            return
+        try:
+            async with self._baseline_kv_lock:
+                data = await self._load_inflight_baselines()
+                data[sid] = dict(baseline)
+                await p.put_kv_data(self._BASELINE_KV, data)
+        except Exception:
+            pass
+
+    async def _clear_inflight_baseline(self, sid: str) -> None:
+        """dispatch 正常收尾时清掉该 sid 的 sidecar 基线（不再算崩溃残留）。"""
+        p = self._p
+        if not (hasattr(p, "_has_kv_api") and p._has_kv_api()):
+            return
+        try:
+            async with self._baseline_kv_lock:
+                data = await self._load_inflight_baselines()
+                if sid in data:
+                    data.pop(sid, None)
+                    await p.put_kv_data(self._BASELINE_KV, data)
+        except Exception:
+            pass
+
+    async def _load_inflight_baselines(self) -> dict[str, Any]:
+        """读 sidecar dict（{sid: 基线}）；无则空。调用方须持 _baseline_kv_lock 做 RMW。"""
+        p = self._p
+        try:
+            data = await p.get_kv_data(self._BASELINE_KV, None)
+        except Exception:
+            return {}
+        return dict(data) if isinstance(data, dict) else {}
+
+    async def _peek_inflight_baseline(self, sid: str) -> dict[str, Any] | None:
+        """读 sidecar 里 sid 的干净基线（dict）；无 / 无 KV → None。供 dispatch 段1 anti-latching：
+        上次 dispatch 留下未还原的基线说明 live override 可能脏，应以这份为准（复审 CLUSTER A）。"""
+        p = self._p
+        if not (hasattr(p, "_has_kv_api") and p._has_kv_api()):
+            return None
+        try:
+            async with self._baseline_kv_lock:
+                data = await self._load_inflight_baselines()
+        except Exception:
+            return None
+        entry = data.get(sid)
+        return dict(entry) if isinstance(entry, dict) else None
+
+    async def recover_inflight_baselines(self) -> int:
+        """启动时还原崩溃中断的桥接基线（issue#43 Wave2 provenance 恢复）。
+
+        sidecar 里残留的 {sid: dispatch 拥有键的干净基线} 来自「set_override(注入) 后、还原
+        前」进程崩溃的 dispatch。逐 sid 把 override 里 dispatch 拥有的键（proactive_prompt /
+        segmented_reply_settings）RMW 还原成基线值（基线没有该键则删该键），schedule_settings
+        等其它键一律不动，再清空 sidecar。无残留 / 无 KV / 大饼不可用则 no-op。绝不盲删整条
+        override、绝不波及非 dispatch 拥有的键。返回还原的 sid 数。
+        """
+        p = self._p
+        if not (hasattr(p, "_has_kv_api") and p._has_kv_api()):
+            return 0
+        plugin = self._get_proactive_plugin()
+        mgr = getattr(plugin, "session_override_manager", None) if plugin else None
+        if mgr is None:
+            return 0
+        # 短锁内只【快照】sidecar（不再先清空整个 sidecar——复审 CLUSTER A：原来 put({}) 在
+        # 逐 sid 还原之前，任一 set_override 失败就永久丢掉那条 breadcrumb）。外部 set_override
+        # 写在锁外（守 _baseline_kv_lock 「不跨外部调用」契约）。
+        async with self._baseline_kv_lock:
+            data = await self._load_inflight_baselines()
+        if not data:
+            return 0
+        recovered = 0
+        for sid, baseline in list(data.items()):
+            if not isinstance(baseline, dict):
+                baseline = {}
+            # 每 sid 的 RMW 走 per-sid 锁（防 init 顺序重排撞 live dispatch）；仅还原【成功】才清
+            # 该 sid 的 sidecar，失败则保留 breadcrumb 下次启动再修。
+            async with self._lock_for(sid):
+                if await self._restore_dispatch_keys(mgr, sid, baseline):
+                    await self._clear_inflight_baseline(sid)
+                    recovered += 1
+        return recovered
 
     # ------------------------------------------------------------------
     # 犹豫：人类粗糙的迟疑感。不是 bug，是"我在乎要不要说"的痕迹。
@@ -518,34 +733,73 @@ class ProactiveBridge:
         else:
             target = self._urge_to_minutes(urge, quiet, lo_min, hi_min)
 
-        # 4) 压掉 random（min=max=target）→ 调大饼重排 → 恢复
+        # 4) 压掉 random（min=max=target）→ 调大饼重排 → 还原。issue#43 Wave2：三段式，
+        #    锁【不跨】_schedule_next_chat_and_save；RMW 只还原自己的 schedule_settings，
+        #    保留并发 dispatch 写的 proactive_prompt（adjust 不碰 pp，故不需 sidecar）。
         mgr = getattr(plugin, "session_override_manager", None)
         prev: dict[str, Any] = {}
-        if mgr is not None:
-            try:
-                prev = mgr.get_override(sid) or {}
-            except Exception:
-                prev = {}
+        result: dict[str, Any] = {"adjusted": False, "reason": "ok", "target_minutes": None}
+        i_own = False
         try:
+            # 段1（短锁）：in-flight 去重 → 读基线 → 写 schedule 注入态。
             if mgr is not None:
-                sched_patch = dict(prev)
-                sched_patch["schedule_settings"] = {
-                    **(prev.get("schedule_settings", {}) if isinstance(prev.get("schedule_settings"), dict) else {}),
-                    "min_interval_minutes": int(round(target)),
-                    "max_interval_minutes": int(round(target)),
+                async with self._lock_for(sid):
+                    if sid in self._inflight_adjust:
+                        # 已有 adjust 在飞：第二个不再注入（否则把对方临时 schedule 误当基线 → 残留）
+                        return {
+                            "adjusted": False,
+                            "reason": "adjust_in_flight",
+                            "target_minutes": None,
+                        }
+                    self._inflight_adjust.add(sid)
+                    i_own = True
+                    try:
+                        prev = mgr.get_override(sid) or {}
+                    except Exception:
+                        prev = {}
+                    if not isinstance(prev, dict):
+                        prev = {}
+                    prev_sched = prev.get("schedule_settings", {})
+                    sched_patch = dict(prev)
+                    sched_patch["schedule_settings"] = {
+                        **(prev_sched if isinstance(prev_sched, dict) else {}),
+                        "min_interval_minutes": int(round(target)),
+                        "max_interval_minutes": int(round(target)),
+                    }
+                    try:
+                        await mgr.set_override(sid, sched_patch)
+                    except Exception as e:
+                        logger.warning(
+                            f"Sylanne adjust_countdown set_override failed: {e}", exc_info=True
+                        )
+                        return {
+                            "adjusted": False,
+                            "reason": f"error:{type(e).__name__}",
+                            "target_minutes": None,
+                        }
+
+            # 段2（无锁）：调大饼重排倒计时。绝不在锁内 await。
+            try:
+                await plugin._schedule_next_chat_and_save(sid)
+                result = {"adjusted": True, "reason": "ok", "target_minutes": round(target, 2)}
+            except Exception as e:
+                logger.warning(f"Sylanne adjust_countdown failed: {e}", exc_info=True)
+                result = {
+                    "adjusted": False,
+                    "reason": f"error:{type(e).__name__}",
+                    "target_minutes": None,
                 }
-                await mgr.set_override(sid, sched_patch)
-            await plugin._schedule_next_chat_and_save(sid)
-            return {"adjusted": True, "reason": "ok", "target_minutes": round(target, 2)}
-        except Exception as e:
-            logger.warning(f"Sylanne adjust_countdown failed: {e}", exc_info=True)
-            return {"adjusted": False, "reason": f"error:{type(e).__name__}", "target_minutes": None}
+
+            return result
         finally:
-            if mgr is not None:
-                try:
-                    if prev:
-                        await mgr.set_override(sid, prev)
-                    else:
-                        await mgr.delete_override(sid)
-                except Exception as e:
-                    logger.warning(f"Sylanne adjust_countdown override restore failed: {e}")
+            if i_own:
+                # 段3（在 finally）：RMW 还原 schedule_settings 到基线——无论正常/异常/CancelledError
+                # 都尝试还原；取消打断 await 也吞掉（adjust 无 sidecar，残留仅 timing，下次 adjust
+                # 会再修，复审 CLUSTER A）。
+                if mgr is not None:
+                    try:
+                        async with self._lock_for(sid):
+                            await self._restore_schedule_keys(mgr, sid, prev)
+                    except BaseException:
+                        pass
+                self._inflight_adjust.discard(sid)

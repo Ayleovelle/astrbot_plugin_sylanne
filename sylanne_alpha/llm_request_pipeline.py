@@ -15,7 +15,6 @@ from __future__ import annotations
 import asyncio
 import collections
 import random
-import re as _re
 import time
 from typing import TYPE_CHECKING, Any
 
@@ -357,71 +356,10 @@ def _filter_streaming_chunk(chunk: Any, tfilter: "StreamingThinkingFilter") -> A
     return chunk
 
 
-# ---------------------------------------------------------------------------
-# LLM 降级链（Item 81）
-# ---------------------------------------------------------------------------
-
-
-class FallbackChain:
-    """LLM 调用降级链：主模型→备用→模板回复。
-
-    当主模型连续失败达到阈值时进入降级状态，在降级期间直接返回模板回复，
-    避免持续向不可用的 API 发送请求。成功调用会重置失败计数。
-    """
-
-    def __init__(self) -> None:
-        self._consecutive_failures: int = 0
-        self._degraded_until: float = 0.0
-
-    def is_degraded(self) -> bool:
-        """判断当前是否处于降级状态。"""
-        return time.time() < self._degraded_until
-
-    def record_success(self) -> None:
-        """记录一次成功调用，重置失败计数。"""
-        self._consecutive_failures = 0
-
-    def record_failure(self) -> None:
-        """记录一次失败调用。连续 3 次失败后进入 60 秒降级。"""
-        self._consecutive_failures += 1
-        if self._consecutive_failures >= 3:
-            # 连续 3 次失败，降级 60 秒
-            self._degraded_until = time.time() + 60.0
-
-    def get_fallback_response(self, context: str = "") -> str:
-        """降级时的模板回复。
-
-        Args:
-            context: 可选的上下文信息（当前未使用，预留扩展）。
-
-        Returns:
-            随机选择的降级模板回复文本。
-        """
-        templates = [
-            "嗯…我现在有点走神，等我缓一下。",
-            "抱歉，我需要一点时间整理思绪。",
-            "…（沉默片刻）",
-        ]
-        return random.choice(templates)
-
-    @property
-    def consecutive_failures(self) -> int:
-        """当前连续失败次数。"""
-        return self._consecutive_failures
-
-    @property
-    def degraded_remaining(self) -> float:
-        """降级剩余时间（秒），未降级时返回 0。"""
-        remaining = self._degraded_until - time.time()
-        return max(0.0, remaining)
-
-
 class OfflineFallback:
     """LLM 不可达时的纯本地降级回复。
 
-    与 FallbackChain 的区别：FallbackChain 基于连续失败次数自动降级，
-    OfflineFallback 由外部显式标记离线状态（如网络检测、手动切换），
-    提供更温和的"在场但无法完整回复"语义。
+    由外部显式标记离线状态（如网络检测、手动切换），提供"在场但无法完整回复"语义。
     """
 
     TEMPLATES = [
@@ -510,31 +448,6 @@ def _handle_multimodal_input(message_segments: list) -> dict | None:
     return result
 
 
-# ---------------------------------------------------------------------------
-# Item 71: 本地差分隐私噪声层（简化版）
-# ---------------------------------------------------------------------------
-
-
-class PrivacyFilter:
-    """本地隐私保护：对发送给 LLM 的文本中的 PII 做简单脱敏。"""
-
-    PHONE_PATTERN = _re.compile(r'1[3-9]\d{9}')
-    EMAIL_PATTERN = _re.compile(r'[\w.-]+@[\w.-]+\.\w+')
-    ID_PATTERN = _re.compile(r'\d{17}[\dXx]')
-
-    def __init__(self, enabled: bool = False):
-        self._enabled = enabled
-
-    def sanitize(self, text: str) -> str:
-        """脱敏处理。"""
-        if not self._enabled:
-            return text
-        text = self.PHONE_PATTERN.sub('[手机号]', text)
-        text = self.EMAIL_PATTERN.sub('[邮箱]', text)
-        text = self.ID_PATTERN.sub('[身份证号]', text)
-        return text
-
-
 class LLMRequestPipeline:
     """LLM 请求处理管线，封装 Sylanne 插件的请求拦截逻辑。
 
@@ -547,100 +460,6 @@ class LLMRequestPipeline:
       - 调用 MemorySystem 做记忆召回和写入
       - 驱动 LifeSimulator 的 LLM 回调
     """
-
-    # ------------------------------------------------------------------
-    # Item 3: 用户偏好自动提取（纯规则匹配）
-    # ------------------------------------------------------------------
-
-    # 称呼偏好模式
-    _PREF_NAME_PATTERNS: list[tuple[str, str]] = [
-        ("叫我", "name"),
-        ("我叫", "name"),
-        ("称呼我", "name"),
-    ]
-    # 话题禁区模式
-    _PREF_TABOO_PATTERNS: list[tuple[str, str]] = [
-        ("不想聊", "taboo"),
-        ("别提", "taboo"),
-        ("不要说", "taboo"),
-    ]
-    # 风格偏好模式
-    _PREF_STYLE_KEYWORDS: dict[str, str] = {
-        "简短点": "brief",
-        "详细说": "verbose",
-        "别太长": "brief",
-    }
-
-    def _extract_preferences(self, text: str, session_key: str) -> None:
-        """从用户消息中提取偏好信号并存入 session_context overlay。
-
-        纯规则匹配，不调用 LLM。提取三类偏好：
-        - 称呼偏好：检测"叫我XX"/"我叫XX"/"称呼我XX"
-        - 话题禁区：检测"不想聊XX"/"别提XX"/"不要说XX"
-        - 风格偏好：检测"简短点"/"详细说"/"别太长"
-
-        Args:
-            text: 用户消息文本。
-            session_key: 会话标识。
-        """
-        if not text:
-            return
-
-        p = self._p
-        # 安全获取 session_context 的 per-relationship overlay
-        session_ctx = getattr(p, "_session_context", None)
-        if session_ctx is None:
-            return
-        overlay = getattr(session_ctx, "_preference_overlays", None)
-        if overlay is None:
-            session_ctx._preference_overlays = {}
-            overlay = session_ctx._preference_overlays
-        prefs = overlay.setdefault(session_key, {
-            "preferred_name": None,
-            "taboo_topics": [],
-            "style": None,
-        })
-
-        # 称呼偏好
-        for pattern, _kind in self._PREF_NAME_PATTERNS:
-            idx = text.find(pattern)
-            if idx >= 0:
-                # 提取模式后面的内容（取到标点或末尾，最多 10 字符）
-                start = idx + len(pattern)
-                rest = text[start:start + 10]
-                # 截断到第一个标点或空格
-                name = ""
-                for ch in rest:
-                    if ch in "，。！？、；：\n ,.!?;:":
-                        break
-                    name += ch
-                name = name.strip()
-                if name:
-                    prefs["preferred_name"] = name
-                break
-
-        # 话题禁区
-        for pattern, _kind in self._PREF_TABOO_PATTERNS:
-            idx = text.find(pattern)
-            if idx >= 0:
-                start = idx + len(pattern)
-                rest = text[start:start + 20]
-                topic = ""
-                for ch in rest:
-                    if ch in "，。！？、；：\n ,.!?;:":
-                        break
-                    topic += ch
-                topic = topic.strip()
-                if topic and topic not in prefs["taboo_topics"]:
-                    prefs["taboo_topics"].append(topic)
-                    if len(prefs["taboo_topics"]) > 20:
-                        prefs["taboo_topics"] = prefs["taboo_topics"][-20:]
-
-        # 风格偏好
-        for keyword, style in self._PREF_STYLE_KEYWORDS.items():
-            if keyword in text:
-                prefs["style"] = style
-                break
 
     def __init__(self, plugin: PluginHost) -> None:
         self._p = plugin
@@ -1320,7 +1139,18 @@ class LLMRequestPipeline:
                             continue
                         yield emitted
                         if do_first and not first_sent:
-                            buffer += str(emitted)
+                            # 抽 Plain 文本，别 str(MessageChain)——它是纯 dataclass、无 __str__，
+                            # str() 会把 "MessageChain(chain=[Plain(...))" 对象 repr 当正文漏给用户。
+                            _chain = getattr(emitted, "chain", None)
+                            if isinstance(_chain, list):
+                                buffer += "".join(
+                                    t
+                                    for c in _chain
+                                    if isinstance(t := getattr(c, "text", None), str)
+                                )
+                            # 原始 str 分片（部分 provider/流式路径会产出）也要喂首句缓冲，否则首句抢发静默失效。
+                            elif isinstance(emitted, str):
+                                buffer += emitted
                             first_sentence = p._extract_first_sentence(buffer)
                             if first_sentence:
                                 first_sent = True
@@ -2572,20 +2402,31 @@ class LLMRequestPipeline:
                 await asyncio.sleep(1.0)
         return ""
 
+    def _assessor_max_tokens(self) -> int:
+        """语义评估输出上限（可配置）。默认 1024：推理模型先耗 token 做隐藏推理，
+        过低（旧版写死 50/100）会让正文为空、情感读数恒落中性。非推理模型解完即停不多花。
+        任何无效值（None / 非数字 / 字符串 "0" / <=0）都安全回退 1024
+        （gemini PR#46：`or 1024` 对字符串 "0" 失效——非空串为真值会绕过默认值）。"""
+        try:
+            val = int(self._p._config.get("sylanne_alpha_assessor_max_tokens"))
+        except (TypeError, ValueError):
+            return 1024
+        return val if val > 0 else 1024
+
     async def _assessor_llm_call(self, prompt: str) -> str:
-        """调用配置的 LLM provider 执行快速语义评估（max_tokens=50）。"""
+        """调用配置的 LLM provider 执行快速语义评估（max_tokens 可配置，默认 1024）。"""
         return await self._generic_llm_call(
             prompt,
             provider_config_keys=[
                 "sylanne_alpha_assessor_provider_id",
                 "emotion_provider_id",
             ],
-            max_tokens=50,
+            max_tokens=self._assessor_max_tokens(),
             temperature=0.0,
         )
 
     async def _main_assessor_llm_call(self, prompt: str) -> str:
-        """调用配置的 LLM provider 执行主（深度）语义评估（max_tokens=100）。"""
+        """调用配置的 LLM provider 执行主（深度）语义评估（max_tokens 可配置，默认 1024）。"""
         return await self._generic_llm_call(
             prompt,
             provider_config_keys=[
@@ -2593,7 +2434,7 @@ class LLMRequestPipeline:
                 "sylanne_alpha_assessor_provider_id",
                 "emotion_provider_id",
             ],
-            max_tokens=100,
+            max_tokens=self._assessor_max_tokens(),
             temperature=0.0,
         )
 
@@ -2616,24 +2457,75 @@ class LLMRequestPipeline:
     # ------------------------------------------------------------------
 
     async def _life_sim_llm_call(self, prompt: str) -> str:
-        """生命模拟器的 LLM 回调：调用配置的 provider 进行生命事件推理。"""
+        """生命模拟器的 LLM 回调：调用配置的 provider 进行生命事件推理。
+
+        issue#43 Wave1：四处失败原本 `return ""` 且全程零日志，是「生活状态静默冻结
+        + 主动消息复读」的源头之一（provider 没配/不可用时无声无息）。改为按 cause 节流
+        告警（首次 + 每 N 次重发），让故障可见。返回契约不变：失败仍返回空串。
+        """
         p = self._p
         provider_id = str(
             p._config.get("sylanne_alpha_life_simulation_provider_id") or ""
         )
         if not provider_id:
+            self._life_sim_warn(
+                "provider_id_empty",
+                "未配置 sylanne_alpha_life_simulation_provider_id（启用了生活模拟却没选 Provider）",
+            )
             return ""
         context = p.context
         if not hasattr(context, "get_provider_by_id"):
+            self._life_sim_warn(
+                "no_provider_api", "运行环境无 get_provider_by_id 接口，生活模拟 LLM 调用降级为空"
+            )
             return ""
         provider = context.get_provider_by_id(provider_id)
         if provider is None:
+            self._life_sim_warn(
+                "provider_missing",
+                f"provider_id={provider_id!r} 解析不到 provider（可能已删除或改名）",
+            )
             return ""
         try:
             resp = await provider.text_chat(prompt=prompt)
-            return str(getattr(resp, "completion_text", "") or "")
-        except Exception:
+            text = str(getattr(resp, "completion_text", "") or "")
+            # provider 可达即清告警节流；空 completion 不在此判失败，交给 simulator 退避。
+            self._life_sim_warn_reset()
+            return text
+        except Exception as e:
+            self._life_sim_warn(
+                "text_chat_error", f"生活模拟 provider.text_chat 抛错：{type(e).__name__}: {e}"
+            )
             return ""
+
+    def _life_sim_warn(self, cause: str, detail: str) -> None:
+        """按 cause 节流的生活模拟告警：首次出现 + 之后每隔 1 小时壁钟重发。
+
+        用【壁钟】而非次数模：simulator 退避会把实际调用稀释到天级，次数模会让多小时/多天
+        宕机只剩一行日志后归于沉默（红队 finding）。计数/时间戳懒挂在 pipeline 实例上，
+        provider 恢复时由 _life_sim_warn_reset 清零。
+        """
+        counts = getattr(self, "_life_sim_warn_counts", None)
+        if counts is None:
+            counts = self._life_sim_warn_counts = {}
+        warn_ts = getattr(self, "_life_sim_warn_ts", None)
+        if warn_ts is None:
+            warn_ts = self._life_sim_warn_ts = {}
+        n = counts.get(cause, 0) + 1
+        counts[cause] = n
+        now = time.time()
+        if n == 1 or now - warn_ts.get(cause, 0.0) >= 3600.0:
+            warn_ts[cause] = now
+            logger.warning("Sylanne life_sim LLM 失败[%s]（第%d次）：%s", cause, n, detail)
+
+    def _life_sim_warn_reset(self) -> None:
+        """provider 恢复（一次无异常调用）即清空告警节流计数/时间戳，下次故障重新响亮告警。"""
+        counts = getattr(self, "_life_sim_warn_counts", None)
+        if counts:
+            counts.clear()
+        warn_ts = getattr(self, "_life_sim_warn_ts", None)
+        if warn_ts:
+            warn_ts.clear()
 
     async def _life_sim_outreach(
         self, reason: str, mood: str, intent: dict | None = None

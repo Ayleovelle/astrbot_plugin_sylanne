@@ -28,10 +28,24 @@ from sylanne_alpha.content_sanitizer import sanitize_for_assessment, is_content_
 
 ASSESSOR_ASYNC_SCHEMA_VERSION = "sylanne.alpha.assessor_async.v1"
 
-# Fast 层默认超时（秒）
-_FAST_TIMEOUT = 2.0
+# Fast 层默认超时（秒）。2s 对推理模型（先做隐藏推理、生成慢）太短——刚把 assessor
+# max_tokens 提到 1024 后生成更长，2s 必超时、修复白搭；放宽到 4s 兼顾前台体感。前台仍建议
+# 配快的小模型（见 _conf_schema hint），推理模型走主评估器。可经配置项继续上调。
+_FAST_TIMEOUT = 4.0
 # Main 层默认超时（秒）——后台运行，不急
 _MAIN_TIMEOUT = 15.0
+
+
+def _clamp_float(value: Any, lo: float, hi: float) -> float | None:
+    """安全转 float 并钳到 [lo, hi]；坏值（非数字/None/列表等）→ None。
+
+    用于解析不可信 LLM JSON：单个坏字段只丢自己，不再让 float() 抛错拖垮整条评估
+    （gemini/audit：valence/arousal/wound_risk 原为裸 float，一个坏值整条丢成 {}）。
+    """
+    try:
+        return max(lo, min(hi, float(value)))
+    except (TypeError, ValueError):
+        return None
 
 
 class AsyncAssessor:
@@ -244,18 +258,18 @@ class AsyncAssessor:
         except (json.JSONDecodeError, ValueError):
             return {}
         result: dict[str, Any] = {}
-        valence = data.get("v") if "v" in data else data.get("valence")
+        valence = _clamp_float(data.get("v") if "v" in data else data.get("valence"), -1.0, 1.0)
         if valence is not None:
-            result["valence"] = max(-1.0, min(1.0, float(valence)))
-        arousal = data.get("a") if "a" in data else data.get("arousal")
+            result["valence"] = valence
+        arousal = _clamp_float(data.get("a") if "a" in data else data.get("arousal"), 0.0, 1.0)
         if arousal is not None:
-            result["arousal"] = max(0.0, min(1.0, float(arousal)))
+            result["arousal"] = arousal
         intent = data.get("i") if "i" in data else data.get("intent")
         if intent is not None:
             result["intent"] = str(intent)[:20]
-        wound_risk = data.get("w") if "w" in data else data.get("wound_risk")
+        wound_risk = _clamp_float(data.get("w") if "w" in data else data.get("wound_risk"), 0.0, 1.0)
         if wound_risk is not None:
-            result["wound_risk"] = max(0.0, min(1.0, float(wound_risk)))
+            result["wound_risk"] = wound_risk
         # Main assessor extended fields
         subtext = data.get("subtext")
         if subtext is not None:

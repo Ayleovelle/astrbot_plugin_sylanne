@@ -377,8 +377,10 @@ def _drive_line(ctx: BeatContext) -> tuple[str, float]:
     bits: list[tuple[float, str]] = []  # (intensity∈[0,1], text)
 
     # expression_drive：驱力越过人格 speak 阈 → 心里有话想说（复用 ignition saddle，单源）。
+    # #29：叠加同一条 proactive.open_threshold 进化偏置，让"心里有话想说"心象与 IgnitionArbiter
+    # 实际 speak 门保持一致（否则 prompt 线索与真实门控漂移）。缺 provider 时 evo_bias→0，不变。
     try:
-        express_at = personality_saddle(b)[0]
+        express_at = personality_saddle(b)[0] + ctx.evo_bias("proactive", "open_threshold")
         drive = float(b.expression_drive)
         if drive >= express_at:
             bits.append((_norm(drive, express_at, express_at + 1.0), "心里有话想说"))

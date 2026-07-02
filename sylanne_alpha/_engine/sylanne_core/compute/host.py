@@ -25,6 +25,7 @@ from .runtime import AlphaRuntime
 
 if TYPE_CHECKING:
     from ..config import DimensionProfile
+    from ..telemetry import DistillationSink
 
 _FLUSH_INTERVAL: float = 5.0
 _FLUSH_TICK_THRESHOLD: int = 8
@@ -83,6 +84,8 @@ class SylanneAlphaHost:
     session_key: str = "default"
     legacy: dict[str, Any] | None = None
     profile: DimensionProfile | None = None
+    telemetry_sink: DistillationSink | None = None
+    pel_enabled: bool = False
     runtime: AlphaRuntime = field(init=False)
     kernel: AlphaKernel = field(init=False)
     _dirty: bool = field(init=False, default=False)
@@ -91,8 +94,11 @@ class SylanneAlphaHost:
     _pending_snapshot: dict[str, Any] | None = field(init=False, default=None)
 
     def __post_init__(self) -> None:
-        self.runtime = AlphaRuntime(Path(self.root), profile=self.profile)
+        self.runtime = AlphaRuntime(
+            Path(self.root), profile=self.profile, pel_enabled=self.pel_enabled
+        )
         self.kernel = self.runtime.load(self.session_key, legacy=self.legacy)
+        self.kernel.set_telemetry(self.telemetry_sink)
         self._last_flush_time = time.time()
 
     def on_request(
@@ -150,6 +156,10 @@ class SylanneAlphaHost:
                 0.0, self.kernel.body.immunity.interruption_budget - 0.2
             )
             self.kernel.body.immunity.cooldown = max(self.kernel.body.immunity.cooldown, 0.35)
+            # Spend the emotional debt that drove this reach-out so it can't re-fire
+            # every time cooldown recovers (delayed-talkative guard), keeping the
+            # affect-debt clock in sync with the real-time cooldown/budget clocks.
+            self.kernel.discharge_affect_debt()
             self._dirty = True
             self._pending_snapshot = self.kernel.snapshot()
             self._flush()

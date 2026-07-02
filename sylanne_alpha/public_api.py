@@ -1634,12 +1634,19 @@ class PublicAPI:
         )
 
     async def _call_internal_assessor_llm(self, *args: Any, **kwargs: Any) -> Any:
-        """调用内部评估器 LLM，带并发限制保护。"""
+        """调用内部评估器 LLM，带并发限制保护。
+
+        并发闸用 asyncio.Condition（替代旧 `asyncio.sleep(0.05)` 忙等轮询）：消除轮询
+        延迟与 inflight 计数竞态——计数的读-改-写全在条件锁内原子完成，动态 limit 每次
+        被唤醒时重新判定，槽位释放时精确唤醒一个等待者。
+        """
         p = self._p
-        limit = self._internal_assessor_llm_concurrency_limit()
-        while p._internal_assessor_llm_inflight >= limit:  # noqa: ASYNC110 (动态 limit 忙等；正经修=asyncio.Condition，留独立 fix PR)
-            await asyncio.sleep(0.05)
-        p._internal_assessor_llm_inflight += 1
+        cond = self._internal_assessor_llm_condition()
+        async with cond:
+            while (p._internal_assessor_llm_inflight
+                   >= self._internal_assessor_llm_concurrency_limit()):
+                await cond.wait()
+            p._internal_assessor_llm_inflight += 1
         try:
             context = getattr(p, "context", None) or getattr(p, "_context", None)
             if hasattr(context, "llm_generate"):
@@ -1647,7 +1654,18 @@ class PublicAPI:
                 return result
             return SimpleNamespace(completion_text="")
         finally:
-            p._internal_assessor_llm_inflight -= 1
+            async with cond:
+                p._internal_assessor_llm_inflight -= 1
+                cond.notify()
+
+    def _internal_assessor_llm_condition(self) -> asyncio.Condition:
+        """惰性创建并复用内部评估器并发闸的条件变量（绑定首次调用时的事件循环）。"""
+        p = self._p
+        cond = getattr(p, "_internal_assessor_llm_cond", None)
+        if cond is None:
+            cond = asyncio.Condition()
+            p._internal_assessor_llm_cond = cond
+        return cond
 
     def _internal_assessor_llm_concurrency_limit(self) -> int:
         return 2

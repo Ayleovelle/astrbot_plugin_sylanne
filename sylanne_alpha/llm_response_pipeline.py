@@ -27,7 +27,11 @@ from typing import TYPE_CHECKING, Any
 
 
 from sylanne_alpha.utils import ensure_background_tasks_list, safe_ensure_future
-from sylanne_alpha.message_dispatch import realtime_plan, strip_draft_blocks
+from sylanne_alpha.message_dispatch import (
+    normalize_completion_text,
+    realtime_plan,
+    strip_draft_blocks,
+)
 
 if TYPE_CHECKING:
     from sylanne_alpha.protocols import PluginHost
@@ -113,7 +117,7 @@ class LLMResponsePipeline:
             # 未启用即时聊天拦截时，仅清理 thinking/draft 块 + 注入防御；
             # 仍须把 bot 回复写入 conversation_buffers（v2core 已 tick，勿再 observe_response）。
             if response is not None:
-                text = str(getattr(response, "completion_text", "") or "")
+                text = normalize_completion_text(getattr(response, "completion_text", ""))
                 cleaned = strip_draft_blocks(text)
                 cleaned = self._sanitize_response(cleaned)
                 # 注：此分支 completion_text 整段直发 AstrBot（不分段）。曾在此加超长截断
@@ -140,7 +144,7 @@ class LLMResponsePipeline:
         if response is None:
             return
 
-        text = str(getattr(response, "completion_text", "") or "")
+        text = normalize_completion_text(getattr(response, "completion_text", ""))
         cleaned = strip_draft_blocks(text)
         cleaned = self._sanitize_response(cleaned)
         logger.info(

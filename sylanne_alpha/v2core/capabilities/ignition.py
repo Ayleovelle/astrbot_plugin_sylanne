@@ -71,6 +71,15 @@ class IgnitionArbiter:
         body = ctx.body
         express_at, hold_below, hold_floor = personality_saddle(body)
 
+        # #29 进化偏置喂回 live 门控：把 reflex/反思 学到的 proactive.open_threshold 偏置
+        # 叠加在人格鞍点 express_at 上（人格显函数仍是主项，学习只微调，带 ±0.15 二次钳位）。
+        # express_at 同时管"说/不说"(g_speak=express_at-eff_drive) 与空闲"主动"(speak 折叠成
+        # reach)。负偏置=降门槛=空闲更主动（约定见 ctx.evo_bias）。注意子分支非全同向（红队实测）：
+        # addressed-hold 分支里 g_speak 随负偏置下降，会让"被直接说话时"更易成 hold（赌气）——即
+        # "空闲更主动"与"被问更易赌气"经 g_speak 同一杠杆耦合，量级被 ±0.15 钳死、仅窄窗触发。
+        # 不进 personality_saddle（保持其为纯人格函数、无运行时耦合），只在仲裁处叠加。
+        express_at += ctx.evo_bias("proactive", "open_threshold")
+
         # —— 有效表达驱力：SDK 表达驱力 + 显式 speak_drive 意图 ——
         eff_drive = float(body.expression_drive)
         for it in ctx.intents:
