@@ -12,6 +12,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import math
 import zlib
@@ -1048,9 +1049,28 @@ class StatePersistence:
         if conv_mgr is None:
             return
 
+        # AstrBot ConversationManager 按 unified_msg_origin 建索引，插件内部的
+        # session_key 群聊场景下会追加 ":sender_id" 后缀（session_context.py:
+        # session_key()），两者不是同一个 key 空间。llm_request_pipeline 在每次
+        # 请求时都会把 session_key → unified_msg_origin 的映射写进
+        # p._store.session_origins（见 llm_request_pipeline.py:846-849），这里
+        # 取出来对齐，取不到时才退化用 session_key 自己（好过完全不同步）。
+        umo = session_key
+        try:
+            store = getattr(p, "_store", None)
+            origins = getattr(store, "session_origins", None) if store else None
+            if origins is not None:
+                mapped = origins.get(session_key, "")
+                if mapped:
+                    umo = str(mapped)
+        except Exception:
+            pass  # 映射查询失败不阻断同步，退化用 session_key
+
         # 取 per-session 同步锁，串行化同一会话的"读历史→append→写回"。
         # 拿不到锁容器（旧版/测试环境无 _store）时降级为无锁——绝不能因为锁机制
-        # 本身报错而阻断同步。锁挂在 store 上跨多次 sync 调用持久存在。
+        # 本身报错而阻断同步。锁挂在 store 上跨多次 sync 调用持久存在。锁本身仍按
+        # 插件内部 session_key 取（同一 session_key 必然映射到同一 umo，用哪个
+        # 做锁名不影响互斥语义，session_key 是插件内部本来就有的稳定粒度）。
         lock = None
         try:
             store = getattr(p, "_store", None)
@@ -1067,23 +1087,53 @@ class StatePersistence:
 
         if lock is not None:
             async with lock:
-                await self._do_sync_to_conv_mgr(conv_mgr, session_key, role, text)
+                await self._do_sync_to_conv_mgr(conv_mgr, umo, role, text)
         else:
-            await self._do_sync_to_conv_mgr(conv_mgr, session_key, role, text)
+            await self._do_sync_to_conv_mgr(conv_mgr, umo, role, text)
+
+    @staticmethod
+    def _extract_conv_history_list(conversation: Any) -> list:
+        """把 conv_mgr.get_conversation() 返回对象的 history 字段规整成 list。
+
+        真实 AstrBot ConversationManager.get_conversation() 返回的是从内部
+        ConversationV2（content 字段为 list）转换出的 V1 Conversation dataclass，
+        其 history 字段是 JSON 字符串——conversation_mgr.py:
+        `history=json.dumps(conv_v2.content or [])`，不是 list。对着一个字符串
+        直接 `list(...)` 会把它拆成单字符列表，写回时把整段历史污染成字符垃圾。
+        这里显式区分字符串 / list / None 三种可能形状。
+        """
+        if conversation is None:
+            return []
+        raw = getattr(conversation, "history", None)
+        if raw is None:
+            return []
+        if isinstance(raw, str):
+            if not raw.strip():
+                return []
+            try:
+                parsed = json.loads(raw)
+            except (TypeError, ValueError):
+                return []
+            return list(parsed) if isinstance(parsed, list) else []
+        if isinstance(raw, list):
+            return list(raw)
+        return []
 
     async def _do_sync_to_conv_mgr(
-        self, conv_mgr: Any, session_key: str, role: str, text: str
+        self, conv_mgr: Any, umo: str, role: str, text: str
     ) -> None:
         """实际执行 ConversationManager 同步的"读→append→写回"。
 
         必须在 per-session 同步锁内调用（由 sync_message_to_conv_mgr 负责），
-        以避免并发整表写回互相覆盖。
+        以避免并发整表写回互相覆盖。`umo` 必须是框架的 unified_msg_origin
+        （由调用方 sync_message_to_conv_mgr 完成 session_key → umo 的映射），
+        不是插件内部 session_key。
         """
         try:
             # 获取或创建当前会话
-            curr_cid = await conv_mgr.get_curr_conversation_id(session_key)
+            curr_cid = await conv_mgr.get_curr_conversation_id(umo)
             if not curr_cid:
-                curr_cid = await conv_mgr.new_conversation(session_key)
+                curr_cid = await conv_mgr.new_conversation(umo)
 
             # 尝试使用 AstrBot 消息类型；不可用时回退到普通字典
             try:
@@ -1094,17 +1144,20 @@ class StatePersistence:
                 )
 
                 if role == "user":
-                    msg = UserMessageSegment(content=[TextPart(text=text)])
+                    msg_obj = UserMessageSegment(content=[TextPart(text=text)])
                 else:
-                    msg = AssistantMessageSegment(content=[TextPart(text=text)])
+                    msg_obj = AssistantMessageSegment(content=[TextPart(text=text)])
+                # 立即拍平成普通 dict：整条历史最终要经 SQLAlchemy JSON 列落库
+                # （默认 json.dumps 序列化器），直接把 pydantic 对象塞进历史列表
+                # 会在写库时炸 TypeError，且被本方法自己的 except 静默吞掉——
+                # 表现为"同步看起来成功，实际上库里什么都没写"。
+                msg = msg_obj.model_dump()
             except ImportError:
                 # 旧版 AstrBot 或测试环境：使用普通字典
                 msg = {"role": role, "content": text}
 
-            conversation = await conv_mgr.get_conversation(session_key, curr_cid)
-            history = list(
-                getattr(conversation, "history", None) or [] if conversation else []
-            )
+            conversation = await conv_mgr.get_conversation(umo, curr_cid)
+            history = self._extract_conv_history_list(conversation)
             history.append(msg)
             # 防御竞态：本方法与 AstrBot 自身 _save_to_history 无锁并发，可能读到
             # tool 循环中途的快照（含 assistant tool_calls 但尚无 tool 响应）。写回前
@@ -1117,7 +1170,7 @@ class StatePersistence:
                 history = sanitize_tool_call_pairing(history)
             except Exception:
                 pass
-            await conv_mgr.update_conversation(session_key, curr_cid, history=history)
+            await conv_mgr.update_conversation(umo, curr_cid, history=history)
         except Exception as e:
             logger.debug(f"Sylanne: ConversationManager sync failed: {e}")
 

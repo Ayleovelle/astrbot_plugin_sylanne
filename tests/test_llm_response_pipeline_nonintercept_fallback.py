@@ -75,10 +75,18 @@ def test_thinking_only_draft_gets_fallback_not_silence() -> None:
     _run(pipe, resp, p)
 
     assert resp.completion_text.strip(), "非拦截分支 thinking-only 剥空后应兜底，不应真空"
-    assert resp.completion_text in (
-        *EMPTY_REPLY_FALLBACK_VARIANTS,
-        LAST_RESORT_FALLBACK_TEXT,
-    ) or resp.completion_text.strip()
+    # EMPTY_REPLY_FALLBACK_VARIANTS 是 dict[warmth_bucket, list[str]]（按 warm/cold/
+    # neutral 分桶的文案列表），不是一份扁平的文案元组——`*EMPTY_REPLY_FALLBACK_VARIANTS`
+    # 展开的是桶名（"warm"/"cold"/"neutral"）而不是实际文案，必须把各桶的 value 列表
+    # 摊平后再做成员检查，否则这条断言永远不可能通过真实文案。
+    _all_variants = {
+        variant
+        for variants in EMPTY_REPLY_FALLBACK_VARIANTS.values()
+        for variant in variants
+    }
+    assert resp.completion_text in _all_variants | {LAST_RESORT_FALLBACK_TEXT}, (
+        "兜底文案必须来自 variant pool 或 last-resort 常量，不能是随手拼的别的文本"
+    )
 
 
 def test_true_empty_completion_stays_silent() -> None:

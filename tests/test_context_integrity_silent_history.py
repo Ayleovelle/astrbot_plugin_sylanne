@@ -1,31 +1,58 @@
 """fix/context-integrity 红队诊断验证：SILENT / thinking-only 轮的用户消息保存。
 
-背景（诊断复核，见 PR 描述 PRIME/CONTRIB 两条 finding）：
+背景（诊断复核，见 PR 描述 PRIME/CONTRIB 两条 finding，以及后续验收 BLOCKER 回合）：
   (a) PRIME 假设：v2core SILENT 把 completion_text 清空后，AstrBot 框架自身的
       _save_to_history 在 completion_text 为空时提前 return、不写库，因此整轮
       （包括用户刚发的那句话）从会话历史里消失。
   (b) CONTRIB 假设：legacy 非拦截分支（realtime_intercept=False，现网默认）里，
       thinking-only 草稿被剥空后直接返回，既不发送也没有 no-ghost 兜底。
 
-本文件先用真实（非重新实现）的 sync_message_to_conv_mgr 路径复核 (a)：插件在
-llm_request_pipeline._background_observe_request 里对**每一条**用户消息都会在
-拿到 LLM 回复之前，异步把用户原文单独 append 进 AstrBot ConversationManager
-（sylanne_alpha/state_persistence.py:_do_sync_to_conv_mgr）。这条写入路径完全
-独立于 v2core 在 response 阶段对 completion_text 做了什么——SILENT 轮同样会走
-到这次写入。因此 (a) 描述的"整轮从历史消失"在当前代码库里不成立：用户的话已经
-在 LLM 甚至还没返回时就落了库；SILENT 分支本身不需要（也不应该）再补一次写，
-否则会把同一句用户消息在 ConversationManager 历史里追加两次。
+第一次复核（be5f7b8）声称 (a) 不成立，理由是 llm_request_pipeline 在拿到 LLM
+回复之前就已经把用户原文经 sync_message_to_conv_mgr 异步写进了 AstrBot
+ConversationManager。verify 阶段指出这个复核本身是假的：真实的
+_do_sync_to_conv_mgr（state_persistence.py）当时有三处独立缺陷，任何一处单独
+就足以让这条"保护"在生产环境里变成静默 no-op 或者写坏数据：
 
-这份测试把这条既有链路端到端跑一遍（request 阶段的 conv_mgr 同步 + response
-阶段真实的 apply_v2core_response SILENT 判定），断言：
+  1. 把 AstrBot 消息类型（UserMessageSegment/AssistantMessageSegment，pydantic
+     对象）原样 append 进历史列表再整体写回；框架的持久化列（SQLAlchemy JSON
+     列）用默认 json.dumps 序列化器，遇到 pydantic 对象直接 TypeError，被
+     _do_sync_to_conv_mgr 自己的 broad except 静默吞掉——表现为"同步看似成功，
+     实际库里什么都没写"。
+  2. AstrBot ConversationManager.get_conversation() 返回的 V1 Conversation
+     dataclass，其 history 字段是 **JSON 字符串**
+     （conversation_mgr.py:_convert_conv_from_v2_to_v1 里
+     `history=json.dumps(conv_v2.content or [])`），不是 list。旧代码直接
+     `list(conversation.history)` 会把字符串拆成单字符列表；一旦走到
+     dict-fallback（AstrBot 消息类型 ImportError 时）分支，这些单字符 + 一条
+     dict 全部可 JSON 序列化，写回会 **成功**，把整段已保存历史替换成字符垃圾
+     ——这是一条主动破坏数据的路径，不只是"没生效"。
+  3. 同步用插件内部 session_key 当 key，而框架按 unified_msg_origin
+     （session_context.py 里群聊场景会在 session_key 后面追加 ":sender_id"）
+     建索引——两者不是同一 key 空间，即便前两个缺陷都不存在，写入也可能落进一个
+     框架从未读取的会话里。
+
+本文件现在验证的是**修复后的真实行为**（sylanne_alpha/state_persistence.py：
+sync_message_to_conv_mgr 做 session_key → unified_msg_origin 映射查询，
+_do_sync_to_conv_mgr 在 append 前对 AstrBot 消息类型调用 model_dump()，
+_extract_conv_history_list 显式处理 JSON 字符串 / list / None 三种历史形状）：
   1. SILENT 轮结束后，conv_mgr 历史里恰好有一条用户消息，没有助手消息。
   2. 不会因为在 SILENT 分支重复调用同步而产生重复条目。
+  3. 同步会用 session_origins 映射出的 unified_msg_origin 建会话，而不是插件
+     内部的 session_key。
+  4. history 以 JSON 字符串形状往返（模拟真实框架），依然能正确 append 而不是
+     被拆成字符。
+
+FakeConversationManager 因此刻意贴近真实框架的关键窄面：get_conversation()
+返回 JSON 字符串形态的 history；update_conversation() 收到的 history 必须是
+可 JSON 序列化的普通 list[dict]（存之前先 json.dumps 校验一遍，任何漏网的
+pydantic 对象都会像真实 SQLAlchemy JSON 列一样在这里炸出来，而不是被静默放过）。
 
 (b) 的验证见 test_llm_response_pipeline_nonintercept_fallback.py（同一 PR 分组）。
 """
 
 from __future__ import annotations
 
+import json
 import tempfile
 from types import SimpleNamespace
 
@@ -37,10 +64,19 @@ from sylanne_alpha.v2core.integration import apply_v2core_response
 
 
 class FakeConversationManager:
-    """与 tests/test_astrbot_manager_integration.py 同款最小 AstrBot ConvMgr 桩。"""
+    """贴近真实 AstrBot ConversationManager 关键窄面的最小桩。
+
+    与 tests/test_astrbot_manager_integration.py 的同名桩不同：这里的
+    get_conversation() 故意返回 JSON **字符串**形态的 history（对齐
+    conversation_mgr.py:_convert_conv_from_v2_to_v1 的
+    `history=json.dumps(conv_v2.content or [])`），update_conversation() 写入前
+    做一次 json.dumps 可序列化性校验（对齐真实 SQLAlchemy JSON 列落库时的隐性
+    要求）。任何一处 state_persistence.py 里没做对的读写形状转换，都会在这里
+    要么读出乱码字符列表，要么写入时直接炸 TypeError——不会像旧桩那样悄悄放过。
+    """
 
     def __init__(self) -> None:
-        self.conversations: dict[str, dict] = {}
+        self._content: dict[str, list] = {}  # cid -> list[dict]（DB 侧真值）
         self._curr_ids: dict[str, str] = {}
         self._next_id = 1
 
@@ -51,19 +87,21 @@ class FakeConversationManager:
         cid = f"conv_{self._next_id}"
         self._next_id += 1
         self._curr_ids[uid] = cid
-        self.conversations[cid] = {"uid": uid, "history": []}
+        self._content[cid] = []
         return cid
 
     async def get_conversation(self, uid: str, cid: str):
-        data = self.conversations.get(cid)
-        if data is None:
+        if cid not in self._content:
             return None
-        return SimpleNamespace(history=data["history"])
+        history_json = json.dumps(self._content[cid], ensure_ascii=False)
+        return SimpleNamespace(history=history_json)
 
     async def update_conversation(self, uid: str, cid: str, history=None, title=None):
-        if cid in self.conversations:
-            if history is not None:
-                self.conversations[cid]["history"] = history
+        if cid not in self._content:
+            return
+        if history is not None:
+            json.dumps(history, ensure_ascii=False)  # 校验可序列化性，模拟真实落库
+            self._content[cid] = history
 
 
 class _Resp:
@@ -135,6 +173,11 @@ async def test_request_time_user_sync_survives_silent_turn() -> None:
     text = "在干嘛呢"
     p, conv_mgr = _plugin(text)
 
+    # 模拟 llm_request_pipeline 里维护的 session_key → unified_msg_origin 映射
+    # （真实调用点：llm_request_pipeline.py:846-849，在 _sync_message_to_conv_mgr
+    # 之前就已经写好）。
+    p._store.session_origins.set("u1", "test:u1")
+
     # Step 1：模拟 llm_request_pipeline._background_observe_request 里已经
     # 无条件跑过的那次同步（真实调用点：sylanne_alpha/llm_request_pipeline.py:2021）。
     await p._sync_message_to_conv_mgr("u1", "user", text)
@@ -157,9 +200,13 @@ async def test_request_time_user_sync_survives_silent_turn() -> None:
     # Step 3：框架侧 _save_to_history 在 completion_text 为空时提前 return，
     # 不做任何事——这里不模拟它，因为它本来就什么都不做。真正验证的是 conv_mgr
     # 里此刻已经落库的内容：用户那句话必须还在，且不应该因为 SILENT 分支被
-    # 二次写入而重复。
-    cid = conv_mgr._curr_ids["u1"]
-    history = conv_mgr.conversations[cid]["history"]
+    # 二次写入而重复。会话必须落在 unified_msg_origin（"test:u1"）下，而不是
+    # 插件内部的 session_key（"u1"）。
+    assert "u1" not in conv_mgr._curr_ids, (
+        "conv_mgr 必须按 unified_msg_origin 建会话，不能用插件内部 session_key"
+    )
+    cid = conv_mgr._curr_ids["test:u1"]
+    history = conv_mgr._content[cid]
     assert len(history) == 1, f"用户消息应恰好一条，不应被 SILENT 抹掉或重复写：{history}"
 
     user_entries = [h for h in history if _role_of(h) == "user"]
@@ -174,6 +221,7 @@ async def test_silent_branch_itself_makes_no_conv_mgr_writes() -> None:
     """
     text = "喂"
     p, conv_mgr = _plugin(text)
+    p._store.session_origins.set("u1", "test:u1")
 
     warmup = _Resp("warmup")
     await apply_v2core_response(p, _Event(), warmup)
@@ -189,7 +237,58 @@ async def test_silent_branch_itself_makes_no_conv_mgr_writes() -> None:
     resp = _Resp("draft")
     took = await apply_v2core_response(p, _Event(), resp)
     assert took is True
-    assert conv_mgr.conversations == {}, "SILENT 分支不应自己产生任何 conv_mgr 写入"
+    assert conv_mgr._content == {}, "SILENT 分支不应自己产生任何 conv_mgr 写入"
+
+
+@pytest.mark.asyncio
+async def test_sync_uses_unified_msg_origin_when_mapping_present() -> None:
+    """回归 BLOCKER 缺陷 (3)：同步必须按 unified_msg_origin 建会话，插件内部
+    session_key（群聊场景下会带 ":sender_id" 后缀）不是框架的 key 空间。
+    """
+    p, conv_mgr = _plugin("占位")
+    p._store.session_origins.set("group:123:sender_9", "aiocqhttp:GroupMessage:123")
+
+    await p._sync_message_to_conv_mgr("group:123:sender_9", "user", "有人在吗")
+
+    assert "group:123:sender_9" not in conv_mgr._curr_ids
+    assert "aiocqhttp:GroupMessage:123" in conv_mgr._curr_ids
+    cid = conv_mgr._curr_ids["aiocqhttp:GroupMessage:123"]
+    assert len(conv_mgr._content[cid]) == 1
+
+
+@pytest.mark.asyncio
+async def test_sync_falls_back_to_session_key_when_no_mapping() -> None:
+    """映射还没建立（比如同步先于 request 主流程跑到）时，退化用 session_key
+    自己当 key——好过完全不同步；行为应与旧代码在无映射时一致。
+    """
+    p, conv_mgr = _plugin("占位")
+    # 故意不调用 p._store.session_origins.set(...)
+
+    await p._sync_message_to_conv_mgr("no_mapping_session", "user", "有人在吗")
+
+    assert "no_mapping_session" in conv_mgr._curr_ids
+    cid = conv_mgr._curr_ids["no_mapping_session"]
+    assert len(conv_mgr._content[cid]) == 1
+
+
+@pytest.mark.asyncio
+async def test_history_json_string_roundtrip_appends_not_explodes() -> None:
+    """回归 BLOCKER 缺陷 (2)：history 以 JSON 字符串往返时（真实框架形状），
+    第二次同步必须正确 append 成两条记录，而不是把字符串拆成单字符列表。
+    """
+    p, conv_mgr = _plugin("占位")
+    p._store.session_origins.set("u1", "test:u1")
+
+    await p._sync_message_to_conv_mgr("u1", "user", "第一句")
+    await p._sync_message_to_conv_mgr("u1", "bot", "第二句回复")
+
+    cid = conv_mgr._curr_ids["test:u1"]
+    history = conv_mgr._content[cid]
+    assert len(history) == 2, f"两条消息应恰好 append 两次，不应被字符串炸开：{history}"
+    assert _role_of(history[0]) == "user"
+    assert _content_of(history[0]) == "第一句"
+    assert _role_of(history[1]) in ("assistant", "bot")
+    assert _content_of(history[1]) == "第二句回复"
 
 
 def _role_of(entry: object) -> str:
@@ -199,21 +298,15 @@ def _role_of(entry: object) -> str:
 
 
 def _content_of(entry: object) -> str:
-    """兼容两种落库形状：dict（旧版/测试环境回退）与真实
-    UserMessageSegment/AssistantMessageSegment 对象（AstrBot 消息类型可用时，
-    _do_sync_to_conv_mgr 直接 append 的是 pydantic 对象本身，不是 model_dump()
-    后的 dict——见 state_persistence.py:_do_sync_to_conv_mgr）。
+    """修复后 _do_sync_to_conv_mgr 在 append 前总是对 AstrBot 消息类型调用
+    model_dump()，因此历史条目现在保证是普通 dict（不再是裸 pydantic 对象）。
+    dict 形态下 content 字段可能是字符串，也可能是 [{"type": "text", "text": ...}]
+    这种分段列表（TextPart.model_dump() 的形状），两种都兼容取出。
     """
-    if isinstance(entry, dict):
-        content = entry.get("content")
-    else:
-        content = getattr(entry, "content", None)
+    content = entry.get("content") if isinstance(entry, dict) else None
     if isinstance(content, list):
         for part in content:
             if isinstance(part, dict) and "text" in part:
                 return str(part["text"])
-            text = getattr(part, "text", None)
-            if text is not None:
-                return str(text)
         return ""
     return str(content or "")
