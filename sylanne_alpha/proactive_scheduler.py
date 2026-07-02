@@ -451,6 +451,13 @@ class ProactiveScheduler:
         )
         result = await bridge.dispatch(sk, motivation)
         if result.get("dispatched"):
+            # T2-05 MAJOR-1 修复：user_followup 标签的消息真的发出去了才消费掉
+            # 产生该标签的那条待跟进线索——否则它会一直"到期"，把接下来每一次
+            # 主动发言都贴上一模一样的标签文案（issue-43 同源的内容复读）。
+            try:
+                bridge.consume_followup_on_dispatch(sk, reason_code)
+            except Exception:  # noqa: BLE001
+                pass  # 消费失败绝不阻断已经发出的 dispatch
             last_sent = getattr(self._p, "_proactive_dispatch_last_sent", None)
             if not isinstance(last_sent, dict):
                 last_sent = {}

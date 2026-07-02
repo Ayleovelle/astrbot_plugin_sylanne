@@ -77,6 +77,30 @@
     "default": false,
     "hint": "默认关闭；用于对话分段和打断识别，不恢复旧 realtime engine。"
   },
+  "sylanne_alpha_afterthought_enabled": {
+    "description": "启用补刀/改口（回复发完后偶尔追加一句）",
+    "type": "bool",
+    "default": false,
+    "hint": "默认关闭；开启后一段 SPEAK 分段回复正常发完（未被打断）时，按当轮表达驱动力算一个概率骰子，命中则在 20~180 秒后追发一条很短的补充或更正——像人一样话说完了又想起点什么。用户在此期间发了任何消息则自动取消。内容优先复用现成的未发完/被打断残留文本（零额外开销），否则走一次极短的 LLM 调用生成一句话。同会话至少间隔 8 轮交流才会再触发一次（仅会话内计数，重启清零）。仅在 sylanne_alpha_realtime_chat_enabled + sylanne_alpha_realtime_intercept_llm_response 都开启时才有意义。"
+  },
+  "sylanne_alpha_deliberate_silence_enabled": {
+    "description": "启用已读不回（软化版：极简回应代替彻底装死）",
+    "type": "bool",
+    "default": false,
+    "hint": "默认关闭；开启后，被问到但触发沉默判定时不再 100% 保持全程静默——低信息量消息（表情/短应答/复读）、连发轰炸、边界压力（吃醋/被顶）、深夜四类语境信号会给\"想沉默\"添一点真实的分量（幅度很小，只是让沉默成为可能，不代表常见）。真触发时优先用一句极简回应（如\"……\"\"嗯。\"）代替彻底不说话；下一轮她会自然带一句\"刚才看到消息了没说话\"的线索，不用你追问才认账。不开此项时沉默机制与此前完全一致（100% 有回复）。"
+  },
+  "sylanne_alpha_winddown_enabled": {
+    "description": "启用去忙收尾（她会说要去忙一下，忙完再回来）",
+    "type": "bool",
+    "default": false,
+    "hint": "默认关闭；需要同时开启 sylanne_alpha_life_simulation_enabled 才有效果（读她当前的生活相位/精力/专注度判断该不该收线）。触发时会自然说一句类似\"我先去忙一下\"，随后进入一段收尾窗口（15~45 分钟，尽量按她当前活动的计划时长走，读不到则默认 30 分钟）——窗口内回复会变慢、偶尔只回极简的话，不是不理你。窗口结束后她会尝试主动找你接着聊（依赖 sylanne_alpha_proactive_bridge_enabled 和大饼插件；不可用时下一条消息会自然带一句\"刚忙完\"的线索）。不开此项时她不会主动喊忙、不会有收尾窗口。"
+  },
+  "sylanne_alpha_night_rhythm_enabled": {
+    "description": "启用夜间温和版（免打扰时段读信更慢、打字略慢，话自然短一点）",
+    "type": "bool",
+    "default": false,
+    "hint": "默认关闭；开启后在免打扰时段（复用大饼 schedule_settings 里的 quiet_hours，读不到则用 1-7 点默认）：读信+启动打字的延迟温和放大（约 1.5~2.5 倍，硬顶 10 秒——绝不会拖成分钟级不理人）、打字速度降一档，并给她的心象加一句\"深夜话少\"的线索，让回复自然短一点，不是刻意敷衍。距上次说话超过 1 小时的当晚第一条消息，还有小概率带一句\"刚被叫醒\"的迷糊感。安全阀：消息里带『睡不着』『在吗』『难受』『想你』等孤独/紧急词时，这些效果全部不生效，照常原速回复——夜里一直在，不会因为这个开关变得慢半拍。"
+  },
   "sylanne_alpha_proactive_dispatch_enabled": {
     "description": "启用 Sylanne 主动发起派发",
     "type": "bool",

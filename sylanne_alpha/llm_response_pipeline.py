@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import random
 import re
 import time
 from datetime import datetime, timedelta, timezone
@@ -32,6 +33,7 @@ from sylanne_alpha.message_dispatch import (
     realtime_plan,
     strip_draft_blocks,
 )
+from sylanne_alpha.proactive_bridge import is_night_fast_reply_exempt
 from sylanne_alpha.variant_pool import (
     EMPTY_REPLY_FALLBACK_VARIANTS,
     LAST_RESORT_FALLBACK_TEXT,
@@ -64,6 +66,48 @@ _CPS_MAX = 11.0
 _CPS_ENERGY_WEIGHT = 4.0
 _CPS_AROUSAL_WEIGHT = 4.0
 _CPS_TENSION_WEIGHT = 1.0
+
+# T1-01 读信时间："看到消息到开始打字"的启动延迟，区别于 T1-02 的段内打字节奏
+# （4.2s 硬顶那个是打字本身）。杀的问题：深夜 300 字表白和一句"哦"此前拿到完全
+# 相同的 LLM 速度瞬发首段——零思考时间。范围保守：0.8s 底~6s 顶（正常白天场景）。
+_THINK_DELAY_FLOOR = 0.8
+_THINK_DELAY_CEILING = 6.0
+_THINK_READ_CPS = 12.0  # 阅读速度（比打字快），消息越长读得越久
+_THINK_READ_CAP = 3.0  # 阅读耗时封顶：消息再长也别把读信时间推爆
+_THINK_INTENSITY_WEIGHT = 2.2  # 情绪强度越高回得越快（红队意见：重话该更快回，不是更慢）
+_THINK_GAP_WEIGHT = 1.6  # 隔得越久，重新搭话的启动稍慢一点
+_THINK_GAP_SATURATE_SECONDS = 3600.0  # 超过 1 小时不再继续加码
+_THINK_ENERGY_WEIGHT = 1.2  # 没精神启动慢
+_THINK_TENSION_WEIGHT = 0.6  # 紧张一点点拖慢启动（呼应 cps 里 tension 只往下拖）
+_THINK_JITTER_MIN = 0.85
+_THINK_JITTER_MAX = 1.2
+
+# T1-03 夜间温和版（config: sylanne_alpha_night_rhythm_enabled，默认关）。免打扰
+# 时段给读信时间温和放大、打字速度降一档——不是"变冷淡"，只是深夜人有点迷糊。
+# 硬顶 _NIGHT_THINK_DELAY_CAP=10s：红队铁律——绝不允许滑向分钟级不理人，夜里
+# 一直在是核心安全感，这张卡只加轻微质感。孤独/紧急关键词命中（见 proactive_bridge.
+# is_night_fast_reply_exempt）时整层直接豁免，原速回复。
+_NIGHT_THINK_DELAY_MULT_MIN = 1.5
+_NIGHT_THINK_DELAY_MULT_MAX = 2.5
+_NIGHT_THINK_DELAY_CAP = 10.0
+_NIGHT_CPS_DELTA = -1.0  # 打字速度降一档，仍会被 clamp 回 [_CPS_MIN, _CPS_MAX]
+
+# T2-02 补刀与改口：一段 SPEAK 分段回复正常发完（未被打断）后，按表达驱动力算一个
+# 概率骰子，命中则 20~180s 后追发一句很短的补充/更正。杀的问题：她说完话就再没
+# 声了——unfinished_replies/断点残留只会在【下一轮用户消息】里被动带出，从不会
+# 自己先开口补一句。默认关闭（sylanne_alpha_afterthought_enabled）。
+_AFTERTHOUGHT_DELAY_MIN = 20.0
+_AFTERTHOUGHT_DELAY_MAX = 180.0
+# 概率 = floor + drive_weight * expression_drive（[0,1] 上的表达驱动力，同 rhythm_learner
+# 用的那个 host.kernel.computation.engine.expression_drive()），clamp 到 [floor, ceil]。
+_AFTERTHOUGHT_PROB_FLOOR = 0.05
+_AFTERTHOUGHT_PROB_CEIL = 0.45
+_AFTERTHOUGHT_PROB_DRIVE_WEIGHT = 0.40
+# 冷却：同会话至少隔 8 轮"发完一段完整回复"才允许再触发一次，避免刷屏。
+_AFTERTHOUGHT_REFRACTORY_EXCHANGES = 8
+# 追发首段前的固定小延迟（不用 think_delay 那套读信逻辑——这不是在回一条新消息，
+# 是她自己突然想起点什么，不需要"读信"时间）。
+_AFTERTHOUGHT_FIRST_DELAY = 0.6
 
 
 class LLMResponsePipeline:
@@ -105,16 +149,17 @@ class LLMResponsePipeline:
     # T1-02③ 身体驱动打字速度
     # ------------------------------------------------------------------
     @staticmethod
-    def _body_driven_cps(host: Any) -> float:
-        """从躯体状态推导打字速度（chars/sec），替代原恒定 7.5。
+    def _body_signals(host: Any) -> tuple[float, float, float]:
+        """读取躯体 energy/arousal/tension 三路信号（0.5/0.5/0.0 为中性默认值）。
 
-        没精神（exhaustion 高 → energy 低）打字慢；情绪唤醒（arousal）高打字快；
-        张力（tension）高只往下拖一点（紧张不会让人打字变快）。三路信号都已经在
-        host.kernel 上（response 分段规划这条路径已经拿着 host 了，不新开管线）：
+        三路信号都已经在 host.kernel 上（response 分段规划这条路径已经拿着 host
+        了，不新开管线）：
           - energy = 1 - host.kernel.body.mortality.exhaustion
           - arousal / tension 来自 host.kernel.computation.engine.observe()
             （8 维情感空间的既有输出，同一 engine 上 expression_drive() 已在用）。
-        读取路径异常（缺字段/host 结构不符预期）时优雅退回默认值，绝不炸分段管线。
+        读取路径异常（缺字段/host 结构不符预期）时优雅退回中性默认值，绝不炸管线。
+        供 _body_driven_cps（③ 打字速度）与 _think_delay（T1-01 读信时间）共用，
+        避免同一 host 被两条独立逻辑各读一遍。
         """
         try:
             exhaustion = float(host.kernel.body.mortality.exhaustion)
@@ -123,7 +168,17 @@ class LLMResponsePipeline:
             arousal = max(0.0, min(1.0, float(emotion.get("arousal", 0.5))))
             tension = max(0.0, min(1.0, float(emotion.get("tension", 0.0))))
         except (AttributeError, TypeError, ValueError, KeyError):
-            return _DEFAULT_CPS
+            return 0.5, 0.5, 0.0
+        return energy, arousal, tension
+
+    @staticmethod
+    def _body_driven_cps(host: Any) -> float:
+        """从躯体状态推导打字速度（chars/sec），替代原恒定 7.5。
+
+        没精神（exhaustion 高 → energy 低）打字慢；情绪唤醒（arousal）高打字快；
+        张力（tension）高只往下拖一点（紧张不会让人打字变快）。
+        """
+        energy, arousal, tension = LLMResponsePipeline._body_signals(host)
         cps = (
             _DEFAULT_CPS
             + (energy - 0.5) * _CPS_ENERGY_WEIGHT
@@ -131,6 +186,152 @@ class LLMResponsePipeline:
             - tension * _CPS_TENSION_WEIGHT
         )
         return max(_CPS_MIN, min(_CPS_MAX, cps))
+
+    # ------------------------------------------------------------------
+    # T3-01 状态改变消息形状：把 v2core 派发调制器叠到身体基线上
+    # ------------------------------------------------------------------
+    @staticmethod
+    def _apply_dispatch_modulators(
+        default_cps: float,
+        default_max_part: int,
+        dispatch_mods: dict[str, float] | None,
+    ) -> tuple[float, int, float]:
+        """把 T3-01 派发调制器（cps_mult/max_part_chars_mult/extra_predelay_s）叠加到
+        身体基线打字速度/分段长度上，返回 (调制后 cps, 调制后 max_part, 额外 predelay)。
+
+        dispatch_mods 为 None/空 → 原样透传、extra_predelay=0.0（无行为/信号在场时零
+        力学变化，card 要求的"no-behavior turns unchanged"）。调制器本身在 behavior.py /
+        integration.py 已 clamp 到 [0.7,1.3]/[0,5]，这里只管应用，不重复 clamp 上限，
+        但仍把最终 cps 拉回既有身体节奏合法区间 [_CPS_MIN, _CPS_MAX]（防合成后越出打字
+        速度物理意义），max_part 拉回 >=8 的安全下限（防极端调制把消息剁成不可读碎片）。
+        """
+        if not dispatch_mods:
+            return default_cps, default_max_part, 0.0
+        cps_mult = float(dispatch_mods.get("cps_mult", 1.0) or 1.0)
+        max_part_mult = float(dispatch_mods.get("max_part_chars_mult", 1.0) or 1.0)
+        extra_predelay = float(dispatch_mods.get("extra_predelay_s", 0.0) or 0.0)
+        cps = max(_CPS_MIN, min(_CPS_MAX, default_cps * cps_mult))
+        max_part = max(8, int(round(default_max_part * max_part_mult)))
+        return cps, max_part, extra_predelay
+
+    # ------------------------------------------------------------------
+    # T1-01 读信时间
+    # ------------------------------------------------------------------
+    @staticmethod
+    def _think_delay(
+        incoming_text: str,
+        *,
+        arousal: float,
+        tension: float,
+        energy: float,
+        gap_seconds: float,
+        rng: random.Random | None = None,
+    ) -> float:
+        """算"看到消息到开始打字"的启动延迟（首段专用，不是段内打字节奏）。
+
+        长消息读得久、隔了很久重新搭话慢一点、没精神慢一点、紧张一点点拖慢启动——
+        都增加延迟；情绪强度（这里用 arousal 当"turn 的情绪强度"代理——已经是本轮
+        真实算出来的量，不是发明的 task 分类）越高回得越快（红队意见：沉重的话该更
+        快回，不是更慢），减少延迟。刻意不用任何"任务分类"信号——没这东西。
+
+        所有输入各自 clamp 到合理范围，最后再统一 clamp 到 [floor, ceiling]，
+        任何权重组合都不会越出保守区间。
+        """
+        picker = rng if rng is not None else random
+        visible_chars = sum(1 for ch in str(incoming_text or "") if not ch.isspace())
+        read_time = min(_THINK_READ_CAP, visible_chars / _THINK_READ_CPS)
+
+        intensity = max(0.0, min(1.0, arousal))
+        intensity_adjust = -_THINK_INTENSITY_WEIGHT * intensity
+
+        gap_ratio = max(0.0, min(1.0, gap_seconds / _THINK_GAP_SATURATE_SECONDS))
+        gap_adjust = _THINK_GAP_WEIGHT * gap_ratio
+
+        energy_adjust = _THINK_ENERGY_WEIGHT * (1.0 - max(0.0, min(1.0, energy)))
+        tension_adjust = _THINK_TENSION_WEIGHT * max(0.0, min(1.0, tension))
+
+        base = (
+            _THINK_DELAY_FLOOR
+            + read_time
+            + intensity_adjust
+            + gap_adjust
+            + energy_adjust
+            + tension_adjust
+        )
+        jitter = picker.uniform(_THINK_JITTER_MIN, _THINK_JITTER_MAX)
+        delay = base * jitter
+        return round(max(_THINK_DELAY_FLOOR, min(_THINK_DELAY_CEILING, delay)), 3)
+
+    def _incoming_think_delay(self, event: Any, session_key: str) -> float:
+        """T1-01 单一入口：reply 路径（首段延迟）与 stream 抢发路径共用同一计算，
+        保证两条路径口径一致（card ③ 要求的"同一个choke point"）。"""
+        host = self._p._host(session_key)
+        energy, arousal, tension = self._body_signals(host)
+        gap_seconds = 0.0
+        try:
+            prev_now = float(host.kernel.previous_event.get("now") or 0.0)
+            if prev_now > 0.0:
+                gap_seconds = max(0.0, time.time() - prev_now)
+        except (AttributeError, TypeError, ValueError):
+            gap_seconds = 0.0
+        incoming_text = self._text(event)
+        return self._think_delay(
+            incoming_text,
+            arousal=arousal,
+            tension=tension,
+            energy=energy,
+            gap_seconds=gap_seconds,
+        )
+
+    # ------------------------------------------------------------------
+    # T1-03 夜间温和版
+    # ------------------------------------------------------------------
+    def _night_rhythm_active(self, session_key: str, incoming_text: str) -> bool:
+        """T1-03①②：本轮是否套用夜间温和版——总开关开 + 当前在免打扰时段 +
+        incoming 文本未命中孤独/紧急豁免关键词。任一条件不满足 → False（原样）。
+
+        免打扰时段判定复用 proactive_bridge._in_quiet_hours——它已经实现了"读
+        大饼 schedule_settings，读不到则回退 1-7 点默认公式"的完整逻辑，这里
+        不重新发明。大饼未安装/未启用桥接都不影响——_in_quiet_hours 本身不依赖
+        bridge.available()，纯粹是"现在是不是夜里"的时间判断。
+        """
+        cfg = self._p._config or {}
+        if not bool(cfg.get("sylanne_alpha_night_rhythm_enabled", False)):
+            return False
+        if is_night_fast_reply_exempt(incoming_text):
+            return False
+        bridge = getattr(self._p, "_proactive_bridge", None)
+        if bridge is None:
+            return False
+        try:
+            sid = bridge._resolve_origin(session_key)
+            return bool(bridge._in_quiet_hours(sid))
+        except Exception:
+            return False
+
+    @staticmethod
+    def _apply_night_rhythm(
+        cps: float,
+        think_delay: float,
+        *,
+        active: bool,
+        rng: random.Random | None = None,
+    ) -> tuple[float, float]:
+        """T1-03①：夜间温和版最终力学缩放——打字速度降一档、读信+启动延迟温和
+        放大（硬顶 _NIGHT_THINK_DELAY_CAP，绝不滑向分钟级不理人）。
+
+        作用在【T3-01 调制 + rhythm_learner 习得节奏 + T1-01 读信延迟】之后的
+        最终值上（同 T3-01 extra_predelay 的分层原则：不与更早的层打架，只是
+        最后再叠一层温和的夜间质感）。active=False（总开关关/非夜里/命中豁免）
+        → 原样透传，零变化。
+        """
+        if not active:
+            return cps, think_delay
+        picker = rng if rng is not None else random
+        night_cps = max(_CPS_MIN, cps + _NIGHT_CPS_DELTA)
+        mult = picker.uniform(_NIGHT_THINK_DELAY_MULT_MIN, _NIGHT_THINK_DELAY_MULT_MAX)
+        night_delay = min(_NIGHT_THINK_DELAY_CAP, think_delay * mult)
+        return night_cps, night_delay
 
     # ------------------------------------------------------------------
     # Main response handler
@@ -305,6 +506,22 @@ class LLMResponsePipeline:
             silence = now - last_expr_at
             if silence > 300.0:
                 recent_ignored = min(1.0, (silence - 300.0) / 300.0)
+        # T3-01：状态改变消息形状——v2core 本轮算好的派发调制器（缺陷行为的
+        # cps_mult/max_part_chars_mult/extra_predelay_s，合成表达风格 segment_bias/
+        # pause_bias），作用在【身体基线】之上（rhythm_learner 之前），让"习得节奏"
+        # 这层继续在调制后的基线上学习，两层不互相打架。v2core 关闭/未激活/取不到
+        # → 全中性默认（1.0/1.0/0.0），零行为变化。
+        dispatch_mods: dict[str, float] | None = None
+        try:
+            from sylanne_alpha.v2core.integration import consume_dispatch_modulators
+
+            dispatch_mods = consume_dispatch_modulators(self._p, session_key)
+        except Exception:
+            dispatch_mods = None
+        default_cps, default_max_part, extra_predelay = self._apply_dispatch_modulators(
+            default_cps, default_max_part, dispatch_mods
+        )
+
         max_part_chars, cps = self._p._rhythm_learner.get_rhythm_params(
             session_key,
             default_max_part=default_max_part,
@@ -312,8 +529,21 @@ class LLMResponsePipeline:
             expression_drive=expr_drive,
             recent_ignored_rate=recent_ignored,
         )
+        # T1-01：首段延迟改用"读信+启动打字"时间，不再是裸 0（零思考时间瞬发）。
+        # T3-01：逃避行为的 extra_predelay_s 叠加在 think_delay 之上（拖着不想碰）。
+        think_delay = self._incoming_think_delay(event, session_key) + extra_predelay
+        # T1-03①②：夜间温和版——免打扰时段打字略慢、读信+启动延迟温和放大（硬顶
+        # 10s）；孤独/紧急消息（『睡不着』『在吗』等）整层豁免、原速回复。作为最后
+        # 一层叠在 T3-01 调制 + rhythm_learner 习得节奏 + T1-01 读信延迟之上，不与
+        # 更早的层打架。总开关关闭时 _night_rhythm_active 恒 False，零变化。
+        night_active = self._night_rhythm_active(session_key, self._text(event))
+        cps, think_delay = self._apply_night_rhythm(cps, think_delay, active=night_active)
         plan = realtime_plan(
-            session_key, cleaned, max_part_chars=max_part_chars, chars_per_second=cps
+            session_key,
+            cleaned,
+            max_part_chars=max_part_chars,
+            chars_per_second=cps,
+            first_delay=think_delay,
         )
         parts = plan.get("message_parts", [])
 
@@ -354,6 +584,15 @@ class LLMResponsePipeline:
             )
         )
         self._p._store.segmented_tasks.set(session_key, task)
+
+        # T2-02①：SPEAK 分段发送任务正常发完（未被打断/未炸）后，按表达驱动力
+        # 概率骰子决定要不要在 20~180s 后追发一句补刀/改口。config 关闭时
+        # 回调内部第一件事就是查 config 直接 return（零行为/零额外状态分配）。
+        task.add_done_callback(
+            lambda t: self._on_segment_dispatch_done_maybe_afterthought(
+                t, session_key, origin, expr_drive
+            )
+        )
 
         # 将观测任务从热路径移出，后台异步执行
         obs_task = safe_ensure_future(
@@ -447,8 +686,17 @@ class LLMResponsePipeline:
             self._p._store.stream_first_sent.set(session_key, first_sentence)
             self._p._store.stream_buffers.pop(session_key, None)
             origin = str(getattr(event, "unified_msg_origin", "") or "")
+            # T1-01②：流式首句抢发此前直接和 LLM 流赛跑（零思考时间瞬发）。现在
+            # 补齐同一份 think_delay，用【已经耗掉的流式生成时间】抵扣——LLM 生成
+            # 本身就要花时间，只补剩余差额，不重复计时。
+            think_delay = self._incoming_think_delay(event, session_key)
+            last_user_at = self._p._store.last_user_message_time.get(
+                session_key, time.time()
+            )
+            elapsed = max(0.0, time.time() - last_user_at)
+            remaining_delay = max(0.0, think_delay - elapsed)
             task = safe_ensure_future(
-                self._send_first_sentence(origin, first_sentence),
+                self._send_first_sentence(origin, first_sentence, delay=remaining_delay),
                 name="send_first_sentence",
             )
             ensure_background_tasks_list(self._p).append(task)
@@ -529,8 +777,16 @@ class LLMResponsePipeline:
             return window.rstrip()  # 连软边界都没有 → 硬切窗口
         return ""
 
-    async def _send_first_sentence(self, origin: str, text: str) -> None:
-        """通过 context.send_message 发送首句文本。"""
+    async def _send_first_sentence(
+        self, origin: str, text: str, delay: float = 0.0
+    ) -> None:
+        """通过 context.send_message 发送首句文本。
+
+        T1-01②：delay>0 时先睡够剩余的 think_delay 差额，再发——不再和 LLM 流
+        赛跑抢发首句。
+        """
+        if delay > 0:
+            await asyncio.sleep(delay)
         context = self._p.context
         if hasattr(context, "send_message"):
             message = self._astrbot_message(text)
@@ -588,6 +844,193 @@ class LLMResponsePipeline:
         # 所有段发送成功——清除未完成标记
         if session_key:
             self._p._store.unfinished_replies.pop(session_key, None)
+
+    # ------------------------------------------------------------------
+    # T2-02 补刀与改口
+    # ------------------------------------------------------------------
+    @staticmethod
+    def _afterthought_probability(expression_drive: float) -> float:
+        """表达驱动力 → 触发概率，线性映射后 clamp 到 [floor, ceil]。"""
+        drive = max(0.0, min(1.0, expression_drive))
+        prob = _AFTERTHOUGHT_PROB_FLOOR + drive * _AFTERTHOUGHT_PROB_DRIVE_WEIGHT
+        return max(_AFTERTHOUGHT_PROB_FLOOR, min(_AFTERTHOUGHT_PROB_CEIL, prob))
+
+    @staticmethod
+    def _afterthought_roll(probability: float, rng: random.Random | None = None) -> bool:
+        picker = rng if rng is not None else random
+        return picker.random() < probability
+
+    @staticmethod
+    def _afterthought_delay(rng: random.Random | None = None) -> float:
+        picker = rng if rng is not None else random
+        return picker.uniform(_AFTERTHOUGHT_DELAY_MIN, _AFTERTHOUGHT_DELAY_MAX)
+
+    @staticmethod
+    def _afterthought_refractory_ok(exchange_count: int, last_fired_at: int) -> bool:
+        """至少隔 _AFTERTHOUGHT_REFRACTORY_EXCHANGES 轮"发完一段完整回复"才放行。"""
+        return (exchange_count - last_fired_at) >= _AFTERTHOUGHT_REFRACTORY_EXCHANGES
+
+    def _afterthought_state(self, session_key: str) -> dict[str, int]:
+        return self._p._store.afterthought_state.get_or_create(
+            session_key, lambda: {"exchange_count": 0, "last_fired_at": -1_000_000}
+        )
+
+    def _on_segment_dispatch_done_maybe_afterthought(
+        self,
+        task: Any,
+        session_key: str,
+        origin: str,
+        expression_drive: float,
+        *,
+        rng: random.Random | None = None,
+    ) -> None:
+        """T2-02①：一段 SPEAK 分段回复正常发完（未取消/未炸）后的挂钩。
+
+        config 关闭 → 立即 return，不分配任何 refractory 状态、不骰子（"config off =
+        零行为"）。被打断（task.cancelled()）或分段发送本身炸了（task.exception()
+        非空）都不算"正常发完"，不触发。
+        """
+        try:
+            if task.cancelled():
+                return
+            if task.exception() is not None:
+                return
+        except asyncio.CancelledError:
+            return
+        cfg = self._p._config or {}
+        if not bool(cfg.get("sylanne_alpha_afterthought_enabled")):
+            return
+        state = self._afterthought_state(session_key)
+        state["exchange_count"] = int(state.get("exchange_count", 0)) + 1
+        if not self._afterthought_refractory_ok(
+            state["exchange_count"], int(state.get("last_fired_at", -1_000_000))
+        ):
+            return
+        probability = self._afterthought_probability(expression_drive)
+        if not self._afterthought_roll(probability, rng=rng):
+            return
+        # T2-02③ 取消判定：本想用 conversation_input_epoch，但排查发现它只在【消息
+        # 撤回】特殊路径才递增（见 public_api.py withdraw 处理），普通用户消息完全
+        # 不碰它——拿它当锚点等于取消判定永远命不中（epoch_at_dispatch 恒为 0，
+        # 之后也恒为 0，`>` 判断恒假）。改用 card 给的 fallback：
+        # last_user_message_time——main.py on_message 对【每条】消息都更新它，是
+        # 真正随用户插话推进的信号。锚定当前值，_fire_afterthought 醒来后一旦发现
+        # 该值前进了，说明用户在等待期间说了话，取消补刀。
+        anchor_last_user_at = self._p._store.last_user_message_time.get(
+            session_key, 0.0
+        )
+        delay = self._afterthought_delay(rng=rng)
+        afterthought_task = safe_ensure_future(
+            self._fire_afterthought(session_key, origin, anchor_last_user_at, delay),
+            name="afterthought",
+        )
+        ensure_background_tasks_list(self._p).append(afterthought_task)
+        # 双保险：也挂到 segmented_tasks——llm_request_pipeline 收到下一条真实用户
+        # 请求时会自动 cancel 该 slot 里过期的分段任务（既有机制，:1126 附近），
+        # 补刀的睡眠/发送因此也能被这条路径兜住，不必只靠时间戳判定单点防线。
+        self._p._store.segmented_tasks.set(session_key, afterthought_task)
+        afterthought_task.add_done_callback(
+            lambda t: (
+                self._p._background_tasks.remove(t)
+                if t in self._p._background_tasks
+                else None
+            )
+        )
+
+    def _afterthought_content_from_remnants(self, session_key: str) -> str:
+        """T2-02②(a)：零额外 LLM 开销的内容来源——现成的 unfinished_replies /
+        未消费的中断断点残留（都是"这轮本来还有话没说完"的真实素材）。"""
+        remnant = self._p._store.unfinished_replies.get(session_key)
+        if remnant and str(remnant).strip():
+            text = str(remnant).strip()
+            self._p._store.unfinished_replies.pop(session_key, None)
+            return text
+        bps = getattr(self._p, "_interrupted_reply_breakpoints", {})
+        entries = bps.get(session_key) or []
+        for entry in reversed(entries):
+            if entry.get("consumed"):
+                continue
+            unsent = entry.get("unsent_parts") or []
+            text = "".join(str(p) for p in unsent).strip()
+            if text:
+                entry["consumed"] = True
+                entry["consumed_reason"] = "afterthought"
+                return text
+        return ""
+
+    async def _afterthought_llm_content(self, session_key: str) -> str:
+        """T2-02②(b)：没有现成残留时，走一次极短 prompt 的 cheap LLM 调用
+        （复用 assessor provider 链路，不是新开一条昂贵通路）。"""
+        last_reply = str(self._p._store.last_bot_texts.get(session_key, "") or "")
+        if not last_reply:
+            return ""
+        prompt = (
+            "你是苏思澜，刚才对男友说了这句话：\n"
+            f"「{last_reply}」\n"
+            "现在突然想再补一条很短的追加或更正，用你平时的口吻，只要一句话，"
+            "不用称呼开头，不用解释，不要加引号。"
+        )
+        caller = getattr(self._p, "_assessor_llm_call", None)
+        if not callable(caller):
+            return ""
+        try:
+            raw = await caller(prompt)
+        except Exception as e:
+            logger.debug(f"Sylanne afterthought llm call skipped: {e}")
+            return ""
+        text = normalize_completion_text(raw)
+        text = strip_draft_blocks(text)
+        text = self._sanitize_response(text)
+        return text.strip()
+
+    def _afterthought_interrupted(
+        self, session_key: str, anchor_last_user_at: float
+    ) -> bool:
+        """T2-02③：用户在锚定时刻之后是否又发了消息（last_user_message_time 前进）。"""
+        current = self._p._store.last_user_message_time.get(session_key, 0.0) or 0.0
+        return current > anchor_last_user_at
+
+    async def _fire_afterthought(
+        self, session_key: str, origin: str, anchor_last_user_at: float, delay: float
+    ) -> None:
+        """T2-02①②③④：睡够随机延迟后，若用户没插话就补发一条很短的补刀/改口，
+        走和正常回复一样的分段发送路径（④，让 wave-1 的打字节奏照常生效）。"""
+        try:
+            await asyncio.sleep(delay)
+        except asyncio.CancelledError:
+            raise
+        if self._afterthought_interrupted(session_key, anchor_last_user_at):
+            return
+        cfg = self._p._config or {}
+        if not bool(cfg.get("sylanne_alpha_afterthought_enabled")):
+            return
+        content = self._afterthought_content_from_remnants(session_key)
+        if not content:
+            content = await self._afterthought_llm_content(session_key)
+        if not content:
+            return
+        # LLM 调用可能耗了几秒——发之前再核一次用户没插话
+        if self._afterthought_interrupted(session_key, anchor_last_user_at):
+            return
+        host = self._p._host(session_key)
+        cps = self._body_driven_cps(host)
+        max_part = int(cfg.get("realtime_chat_max_part_chars", 48))
+        plan = realtime_plan(
+            session_key,
+            content,
+            max_part_chars=max_part,
+            chars_per_second=cps,
+            first_delay=_AFTERTHOUGHT_FIRST_DELAY,
+        )
+        parts = plan.get("message_parts", [])
+        if not parts:
+            return
+        logger.info(
+            f"Sylanne afterthought queued: session={session_key} parts={len(parts)}"
+        )
+        await self._dispatch_segmented_parts(origin, parts, session_key=session_key)
+        state = self._afterthought_state(session_key)
+        state["last_fired_at"] = state.get("exchange_count", 0)
 
     # ------------------------------------------------------------------
     # Memory prompt fragment

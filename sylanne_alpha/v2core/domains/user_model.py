@@ -131,7 +131,7 @@ class UserModelDomain:
     __slots__ = (
         "_disposition", "_disp_precision", "_rhythm_ema", "_last_user_ts",
         "_style_sketch", "_last_prediction", "_pe_history", "_sync_trace",
-        "_meme_cands", "_memes", "_hesitation_ema", "_bond_ema",
+        "_meme_cands", "_memes", "_hesitation_ema", "_bond_ema", "_last_user_text",
     )
 
     def __init__(self) -> None:
@@ -149,6 +149,10 @@ class UserModelDomain:
         self._memes: dict[str, dict[str, float]] = {}
         self._hesitation_ema: float = 0.0
         self._bond_ema: float = 0.0
+        # T2-01①：上一条真实用户文本（不含空闲/主动轮），供 IgnitionArbiter 做零状态
+        # 的"复读检测"（本轮文本与上轮文本相同 → 低信息量）。只在 EVOLVE 写，DELIBERATE
+        # 读到的永远是"上一轮"的值（与 _last_user_ts 同一时序纪律，见 reply_overdue）。
+        self._last_user_text: str = ""
 
     # ---- 读接口（PERCEPT/DELIBERATE，纯只读）----
 
@@ -207,6 +211,21 @@ class UserModelDomain:
         ranked = sorted(self._memes.items(),
                         key=lambda kv: (-float(kv[1].get("count", 0.0)), -len(kv[0])))
         return [g for g, _ in ranked[:max(0, limit)]]
+
+    def last_user_text(self) -> str:
+        """上一条真实用户文本（本轮之前）；无历史 → 空串。消费者：ignition 低信息量/复读检测。"""
+        return self._last_user_text
+
+    def seconds_since_last_user(self, now: float) -> float | None:
+        """距上一条真实用户消息过了多久（秒）；无历史/无效 now → None。
+
+        消费者：ignition 的"连发轰炸"启发式（T2-01①）——不看节律 EMA 的相对超期，
+        只看绝对间隔，冷启动（无 EMA）也能识别真连发。
+        """
+        if self._last_user_ts is None or now <= 0.0:
+            return None
+        gap = now - self._last_user_ts
+        return gap if gap >= 0.0 else None
 
     def reply_overdue(self, body: BodySnapshot, now: float) -> float:
         """相对你的节律 EMA，本次沉默超期多少倍。无节律画像 → 0。不封顶（铁律②）。"""
@@ -338,6 +357,7 @@ class UserModelDomain:
                                         + _RHYTHM_ALPHA * gap)
             self._last_user_ts = now
         if text:
+            self._last_user_text = text
             self._update_style(sig)
             # SharedLexicon：唤起取 appraisal 的真实评价（PERCEPT 写 scratch，EVOLVE 读）
             arousal = 0.0
@@ -559,6 +579,7 @@ class UserModelDomain:
             "bond_ema": self._bond_ema,
             "meme_cands": {g: dict(c) for g, c in self._meme_cands.items()},
             "memes": {g: dict(m) for g, m in self._memes.items()},
+            "last_user_text": self._last_user_text,
         }
 
     def load_dict(self, data: dict[str, Any]) -> None:
@@ -582,6 +603,9 @@ class UserModelDomain:
                         pass
         self._rhythm_ema = _opt_f(data.get("rhythm_ema"))
         self._last_user_ts = _opt_f(data.get("last_user_ts"))
+        lut = data.get("last_user_text")
+        if isinstance(lut, str):
+            self._last_user_text = lut
         hes = _opt_f(data.get("hesitation_ema"))
         if hes is not None:
             self._hesitation_ema = hes

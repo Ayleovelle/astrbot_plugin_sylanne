@@ -53,6 +53,40 @@ _HESITATION_FILLERS: tuple[str, ...] = (
     "算了还是说吧，",
 )
 
+# T1-03②：夜间温和版的快速回复豁免——命中任一关键词，本轮完全跳过夜间延迟/cps
+# 拖慢（读信变慢+打字变慢+"深夜话少"心象线索全部不生效），走原速回复。红队铁律：
+# 『睡不着』『在吗』这类低唤醒高孤独感消息绝不能被"夜间该少说话"误伤成慢回/冷处理
+# ——夜里一直在，是核心安全感，这张卡只加轻微质感，不能碰这条线。模块级单元组，
+# Chinese，方便后续按真实反馈扩展。两处消费者（llm_response_pipeline 的延迟/cps
+# 缩放、v2core.integration 的心象线索注入）共用同一份判定，口径不会漂移。
+NIGHT_EXEMPT_KEYWORDS: tuple[str, ...] = (
+    "睡不着",
+    "在吗",
+    "难受",
+    "想你",
+    "陪陪我",
+    "陪我",
+    "害怕",
+    "emo",
+    "崩溃",
+    "撑不住",
+    "救命",
+    "孤独",
+    "好孤单",
+)
+
+
+def is_night_fast_reply_exempt(text: str) -> bool:
+    """T1-03②：incoming 文本是否命中夜间快速回复豁免关键词。
+
+    空文本/无命中 → False（正常走夜间温和版）。纯字符串子串匹配，刻意不做
+    分词/语义判断——这是快路径的保守豁免闸，宁可对精确匹配之外的委婉表达失焦，
+    也不在这道安全阀上引入额外的不确定性。
+    """
+    if not text:
+        return False
+    return any(kw in text for kw in NIGHT_EXEMPT_KEYWORDS)
+
 
 class ProactiveBridge:
     """Sylanne → 大饼 主动发言桥接器。"""
@@ -264,20 +298,82 @@ class ProactiveBridge:
             return False, "min_interval_throttle"
         return True, "ok"
 
+    def _memory_system_if_exists(self, session_key: str) -> Any | None:
+        """按 store 的 .has() 守卫取该会话【已存在】的 memory_system，不存在则
+        返回 None——不触发 p._memory_system_for_session 的懒创建。
+
+        T2-05②/MAJOR-1 的跟进线索检查与消费都只是"查一下/收尾一下"，不该把
+        一次纯粹的探测变成"从此这个会话多了一个空 MemorySystem 实例"的副作用
+        （同 llm_request_pipeline._prepare_memory_context 里 consume-on-mention
+        消费点的既有守卫手法一致）。测试替身若不提供 p._store.memory_systems
+        （没有该守卫能力）则退化为直接调用 getter，维持改动前的行为不变。
+        """
+        p = self._p
+        mem_getter = getattr(p, "_memory_system_for_session", None)
+        if not callable(mem_getter):
+            return None
+        store = getattr(p, "_store", None)
+        mem_map = getattr(store, "memory_systems", None) if store is not None else None
+        if mem_map is not None and hasattr(mem_map, "has") and not mem_map.has(session_key):
+            return None
+        return mem_getter(session_key)
+
+    def consume_followup_on_dispatch(self, session_key: str, reason_code: str) -> None:
+        """T2-05 MAJOR-1 修复（issue-43 同源的内容复读）：user_followup 标签的
+        主动消息真正【发出】之后，消费掉产生该标签的那条待跟进线索。
+
+        背景：infer_reason_code/build_motivation_text 打标签时只【读】
+        due_pending_followup()，从不消费——此前没有任何生产调用方在发送成功
+        后真正 consume 掉它，同一条线索会一直"到期"，让接下来每一次主动发言
+        都被重新贴上 user_followup 标签、拼出几乎相同的动机文案，直到某次
+        consume-on-mention 的关键词重合巧合命中才会消失。
+
+        线索身份：本方法与 infer_reason_code/build_motivation_text 一样调用
+        只读的 due_pending_followup()（deterministic，返回列表里最早到期的
+        一条，不随机）——同一次 dispatch 周期内、期间没有能修改这个会话
+        pending_followups 的 await 的话，三处查到的是同一条线索。万一有其它
+        协程并发消费了同一条（理论可能但极窄的竞态），consume_pending_followup
+        按值比较删除，找不到就安全地返回 False，不会误删别的线索。
+
+        调用方应只在 bridge.dispatch(...) 确认 result['dispatched'] 为真之后才
+        调用本方法——没真的发出去就不该消费掉"记得要问"的线索。reason_code
+        非 'user_followup' 时是 no-op。全程静默失败：消费失败/查不到
+        memory_system 都不该影响已经发出的主动消息。
+        """
+        if reason_code != "user_followup":
+            return
+        try:
+            mem_sys = self._memory_system_if_exists(session_key)
+            if mem_sys is None:
+                return
+            due = mem_sys.due_pending_followup()
+            if due:
+                mem_sys.consume_pending_followup(due)
+        except Exception:
+            pass
+
     async def infer_reason_code(
         self, session_key: str, *, surface: dict[str, Any] | None = None
     ) -> str:
-        """查计算栈深层状态 + 仪式缺席，推断主动发言的缘由码。
+        """查计算栈深层状态 + 仪式缺席 + 跟进线索，推断主动发言的缘由码。
 
-        触发源整合（任一命中即返回对应 reason_code，优先级：仪式 > 计算栈 > 默认）：
+        触发源整合（任一命中即返回对应 reason_code，优先级：仪式 > 跟进线索 >
+        计算栈 > 默认）：
           - ritual：到了习惯互动时间但用户缺席
+          - user_followup：她记得你之前提过的、带时间点的事到期了（T2-05）
           - void / scar / ...：计算栈 proactive_sylanne 给出的 reason_code
           - life_rhythm：默认（纯生活节律驱动）
         全程异常静默，失败回退 life_rhythm。
 
+        注意：本方法只在【已经决定要主动开口】之后打标签——真正"要不要现在说话"
+        由上游 dispatch_blocked_reason / should_dispatch_now / derive_should_send
+        （含 v2core consult_idle_reach 的人格仲裁与 T2-03 winddown 抑制）把关，
+        这里新增的 user_followup 检查同样只读、不重新判断、不绕过任何既有闸门。
+
         Args:
             surface: 可选的预计算 proactive_sylanne 结果。传入则复用（避免重复
-                tick/save），不传则内部自行调用。ritual 优先级始终先于 surface。
+                tick/save），不传则内部自行调用。ritual/user_followup 优先级
+                始终先于 surface。
         """
         p = self._p
         # 1) 仪式缺席（proactive_scheduler.check_ritual_absence）——优先级最高，不依赖 surface
@@ -289,6 +385,16 @@ class ProactiveBridge:
                     return "ritual"
             except Exception:
                 pass
+        # 1.5) T2-05②：跟进线索到期——只打标签，不新增触发源（见上方 docstring）。
+        # MINOR(b) 修复：经 _memory_system_if_exists 取，不对没有 memory_system 的
+        # 会话触发懒创建（否则单纯"查一下有没有到期线索"就会生出一个幽灵会话）。
+        try:
+            mem_sys = self._memory_system_if_exists(session_key)
+            due = mem_sys.due_pending_followup() if mem_sys is not None else None
+            if due:
+                return "user_followup"
+        except Exception:
+            pass
         # 2) 计算栈深层缘由（proactive_sylanne → decision.reason_code）
         try:
             res = surface
@@ -318,12 +424,32 @@ class ProactiveBridge:
         persona_name = str(cfg.get("sylanne_persona_name") or "Sylanne").strip() or "Sylanne"
 
         # 触发缘由 → 自然语言动机
-        reason_phrase = {
-            "void": "心里有一处空落落的，很想找ta说说话",
-            "scar": "有件没说完的事一直搁在心上",
-            "ritual": "到了你俩平时会聊两句的时间，ta却没出现",
-            "life_rhythm": "刚好想起ta了",
-        }.get(str(reason_code or "").lower(), "")
+        _rc = str(reason_code or "").lower()
+        if _rc == "user_followup":
+            # T2-05②：动态取回到期跟进线索的话题，组装『他之前说过[topic]，
+            # 想问问后来怎么样了』；取不到时退化为不带话题的通用措辞。
+            topic = ""
+            try:
+                mem_getter = getattr(p, "_memory_system_for_session", None)
+                if callable(mem_getter) and session_key:
+                    mem_sys = mem_getter(session_key)
+                    due = mem_sys.due_pending_followup() if mem_sys is not None else None
+                    if due:
+                        topic = str(due.get("topic_snippet", "")).strip()
+            except Exception:
+                topic = ""
+            reason_phrase = (
+                f"他之前说过{topic}，想问问后来怎么样了"
+                if topic
+                else "他之前说过一件事，想问问后来怎么样了"
+            )
+        else:
+            reason_phrase = {
+                "void": "心里有一处空落落的，很想找ta说说话",
+                "scar": "有件没说完的事一直搁在心上",
+                "ritual": "到了你俩平时会聊两句的时间，ta却没出现",
+                "life_rhythm": "刚好想起ta了",
+            }.get(_rc, "")
 
         # 近期生活上下文（复用 life_simulation 现成方法）
         life_ctx = ""

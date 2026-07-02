@@ -194,3 +194,73 @@ def test_life_sim_outreach_no_event_id_does_not_crash():
     asyncio.run(pipe._life_sim_outreach("摸鱼中", "开心", None))
     for t in list(p._background_tasks):
         t.cancel()
+
+
+# ---- T2-05 MAJOR-1：第二条可达 dispatch 路径（5min fallback 直发分支）也要
+# 在真正发出后消费掉产生 user_followup 标签的那条待跟进线索 ----
+
+
+def test_life_sim_outreach_consumes_followup_after_bridge_dispatch(monkeypatch) -> None:
+    """MAJOR-1 修复覆盖的第二条路径：_life_sim_outreach 的 5min fallback 直发
+    分支，bridge.dispatch 真正成功后也要消费掉产生 user_followup 标签的那条
+    线索——否则它会一直"到期"，让接下来经这条路径触发的每一次主动消息都被
+    重新贴上一模一样的标签文案（issue-43 同源的内容复读）。proactive_scheduler.
+    request_dispatch 那条路径见 test_wave_l2_t2_05_t2_06_followup_ritual.py 的
+    TestMajorOneConsumeOnDispatchWiring。
+
+    只 stub 掉"是否真的连上了大饼"的机制细节（已有 test_proactive_bridge.py
+    覆盖）与 5 分钟 asyncio.sleep；infer_reason_code / build_motivation_text /
+    consume_followup_on_dispatch 全部走真实实现。
+    """
+    import asyncio
+    import time
+
+    from sylanne_alpha.life_simulation import LifeEvent, LifeSimulator
+    from sylanne_alpha.memory_system import MemorySystem
+    from sylanne_alpha.proactive_bridge import ProactiveBridge
+
+    import sylanne_alpha.llm_request_pipeline as _pipe_mod
+
+    async def _fast_sleep(_seconds: float) -> None:
+        return None
+
+    monkeypatch.setattr(_pipe_mod.asyncio, "sleep", _fast_sleep)
+
+    mem = MemorySystem()
+    mem.write_summary("我答应你明天一定去面试", source_turns=2, temperature=0.5)
+    mem._pending_followups[0]["due_ts_estimate"] = time.time() - 10.0
+
+    p = _Plugin({"priv:owner-1": _Host(100.0)})
+    p._store.relationship_register_state.set("priv:owner-1", _romantic())
+    p._store.pending_outreach_context = _PendingCtx()
+    p._background_tasks: list = []
+    p._memory_system_for_session = lambda sk: mem
+    p.config["sylanne_alpha_proactive_bridge_enabled"] = True
+
+    sim = LifeSimulator(config={})
+    ev = LifeEvent(text="摸鱼中", mood="happy", urgency=0.1, timestamp=1.0)
+    sim.state.events = [ev]
+    p._life_simulator = sim
+
+    bridge = ProactiveBridge(p)
+    bridge.available = lambda: True  # type: ignore[method-assign]
+    bridge.should_dispatch_now = lambda sk: (True, "ok")  # type: ignore[method-assign]
+
+    async def _fake_dispatch(sk: str, motivation: str) -> dict:
+        return {"dispatched": True, "reason": "ok"}
+
+    bridge.dispatch = _fake_dispatch  # type: ignore[method-assign]
+    p._proactive_bridge = bridge
+
+    pipe = _pipe(p)
+    intent = {"event_id": ev.event_id, "delivery_mode": "direct"}
+
+    async def _drive() -> None:
+        await pipe._life_sim_outreach("摸鱼中", "开心", intent)
+        assert p._background_tasks, "应已排入 5min fallback 后台任务"
+        await asyncio.gather(*p._background_tasks)
+
+    asyncio.run(_drive())
+
+    # 产生 user_followup 标签的那条线索应已被真正消费——不再等在列表里。
+    assert mem._pending_followups == []
