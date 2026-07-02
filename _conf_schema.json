@@ -83,6 +83,18 @@
     "default": false,
     "hint": "默认关闭；开启后一段 SPEAK 分段回复正常发完（未被打断）时，按当轮表达驱动力算一个概率骰子，命中则在 20~180 秒后追发一条很短的补充或更正——像人一样话说完了又想起点什么。用户在此期间发了任何消息则自动取消。内容优先复用现成的未发完/被打断残留文本（零额外开销），否则走一次极短的 LLM 调用生成一句话。同会话至少间隔 8 轮交流才会再触发一次（仅会话内计数，重启清零）。仅在 sylanne_alpha_realtime_chat_enabled + sylanne_alpha_realtime_intercept_llm_response 都开启时才有意义。"
   },
+  "sylanne_alpha_deliberate_silence_enabled": {
+    "description": "启用已读不回（软化版：极简回应代替彻底装死）",
+    "type": "bool",
+    "default": false,
+    "hint": "默认关闭；开启后，被问到但触发沉默判定时不再 100% 保持全程静默——低信息量消息（表情/短应答/复读）、连发轰炸、边界压力（吃醋/被顶）、深夜四类语境信号会给\"想沉默\"添一点真实的分量（幅度很小，只是让沉默成为可能，不代表常见）。真触发时优先用一句极简回应（如\"……\"\"嗯。\"）代替彻底不说话；下一轮她会自然带一句\"刚才看到消息了没说话\"的线索，不用你追问才认账。不开此项时沉默机制与此前完全一致（100% 有回复）。"
+  },
+  "sylanne_alpha_winddown_enabled": {
+    "description": "启用去忙收尾（她会说要去忙一下，忙完再回来）",
+    "type": "bool",
+    "default": false,
+    "hint": "默认关闭；需要同时开启 sylanne_alpha_life_simulation_enabled 才有效果（读她当前的生活相位/精力/专注度判断该不该收线）。触发时会自然说一句类似\"我先去忙一下\"，随后进入一段收尾窗口（15~45 分钟，尽量按她当前活动的计划时长走，读不到则默认 30 分钟）——窗口内回复会变慢、偶尔只回极简的话，不是不理你。窗口结束后她会尝试主动找你接着聊（依赖 sylanne_alpha_proactive_bridge_enabled 和大饼插件；不可用时下一条消息会自然带一句\"刚忙完\"的线索）。不开此项时她不会主动喊忙、不会有收尾窗口。"
+  },
   "sylanne_alpha_proactive_dispatch_enabled": {
     "description": "启用 Sylanne 主动发起派发",
     "type": "bool",

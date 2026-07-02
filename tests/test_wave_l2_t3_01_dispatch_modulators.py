@@ -56,10 +56,11 @@ class TestBehaviorModulators:
         assert sel and sel["id"] == "teasing"
         assert sel["modulators"] == {}
 
-    def test_only_three_behaviors_carry_modulators(self) -> None:
-        """card 明确只挂三条（文本本身就在说打字方式会变的那三条），其余七条留空。"""
+    def test_only_four_behaviors_carry_modulators(self) -> None:
+        """card 明确只挂文本本身就在说"打字方式会变"的几条，其余留空。Wave-L2 二批
+        新增 winddown（T2-03④："要转身走了"同样是打字方式会变的文本）加入这个名单。"""
         with_mods = {bid for bid, _fn, _dir, mods in _BEHAVIORS if mods}
-        assert with_mods == {"laziness", "impulse", "avoidance"}
+        assert with_mods == {"laziness", "impulse", "avoidance", "winddown"}
 
     def test_clamp_multipliers_upper(self) -> None:
         clamped = _clamp_modulators({"cps_mult": 5.0, "max_part_chars_mult": 5.0})

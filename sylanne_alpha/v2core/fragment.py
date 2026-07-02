@@ -49,6 +49,7 @@ _SAL_NARRATIVE = 0.4    # 自我形状：调味，最先被淘汰
 _SAL_EMOTION_BASE = 1.0
 _SAL_USERMODEL_BASE = 0.8
 _SAL_LIFE_BASE = 0.6    # Wave 5 生活底色：平淡日不出；卡住/刚通时随停滞深度爬过对你/自我，封顶仍在召回之下
+_SAL_LAST_SILENT = 1.1  # T2-01③ 事后认账：一次性线索，略高于情绪基线，确保下一轮真的带出来
 _SAL_DRIVE_BASE = 0.9     # Wave 2 驱力线索：响一个就稳压 usermodel/narrative，强 surprise 排得更高
 _SAL_ADAPT_BASE = 0.5   # Wave 6 适应层：口吻镜像/话题亲和的长期底色，轻；夹在生活(0.6)与自我(0.4)之间
 
@@ -170,6 +171,18 @@ def build_mind_fragment(ctx: BeatContext, domains: dict[str, Any]) -> str:
     life_text, life_int = _life_line(ctx)
     if life_text:
         state.append((4.5, _SAL_LIFE_BASE + life_int, life_text))
+
+    # 事后认账行（T2-01③）——上一轮装死/软化沉默过，本轮心象自然带出来（一次性，
+    # integration 在 REQUEST 拍读 rt["last_silent"] 派生成 scratch["last_silent_cue"]）。
+    # order 3.5：紧跟驱力线索(3)、赶在对你(4)之前——这是"刚才那轮"的事，比长期对你印象更急迫。
+    last_silent_text = _last_silent_line(ctx)
+    if last_silent_text:
+        state.append((3.5, _SAL_LAST_SILENT, last_silent_text))
+
+    # 去忙收尾·返场行（T2-03⑥）——与事后认账同一档位，同样是"一次性、该被看见"的线索。
+    winddown_return_text = _winddown_return_line(ctx)
+    if winddown_return_text:
+        state.append((3.6, _SAL_LAST_SILENT, winddown_return_text))
 
     # 适应层行（Wave 6 PR-B）——口吻镜像/话题亲和的长期适应渗进口吻。STATE 档 order 4.6，
     # 夹在生活(4.5)与自我(5)之间。prompt_line 是哑域防御的真接缝（TurnRunner 不自动调）；
@@ -362,6 +375,37 @@ def _life_line(ctx: BeatContext) -> tuple[str, float]:
     if isinstance(mood, str) and mood.strip():
         text = f"{text}（{mood.strip()}）"
     return text, intensity
+
+
+# T2-01③：事后认账——DeliberateSilence/ignition 的沉默理由码 → 一句"刚才怎么了"的
+# 人话。未知/空理由码兜底成通用句（不臆造具体情绪，诚实模糊）。
+_LAST_SILENT_REASON_WORDS = {
+    "hurt": "心里有点不舒服，没想说话",
+    "digesting": "在自己消化，没顾上回",
+    "content": "没什么好说的，就没接话",
+}
+_LAST_SILENT_FALLBACK = "没想好要说什么"
+
+
+def _last_silent_line(ctx: BeatContext) -> str:
+    """读 scratch["last_silent_cue"]（integration 据 rt["last_silent"] 派生的理由码），
+    返回一句"刚才看到了没说话"的自然线索。无 cue → 空串，不占位。
+    """
+    reason = ctx.scratch.get("last_silent_cue")
+    if not isinstance(reason, str) or not reason:
+        return ""
+    words = _LAST_SILENT_REASON_WORDS.get(reason, _LAST_SILENT_FALLBACK)
+    return f"刚才看到消息了，没说话——{words}，现在可以自然接上、不用特意解释"
+
+
+# T2-03⑥ 退化路径：收尾窗口结束、主动返场触达没送达（桥不可用/被冷却压住）时，
+# 下一条真实消息进来给一句"刚忙完"线索，让回复自然带出"回来了"的感觉。
+_WINDDOWN_RETURN_LINE = "刚把手头那件事收了尾，喘口气，现在能好好接着聊了"
+
+
+def _winddown_return_line(ctx: BeatContext) -> str:
+    """读 scratch["winddown_return_cue"]（integration 在收尾窗口过期后一次性置真）。"""
+    return _WINDDOWN_RETURN_LINE if ctx.scratch.get("winddown_return_cue") else ""
 
 
 def _drive_line(ctx: BeatContext) -> tuple[str, float]:

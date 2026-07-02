@@ -32,6 +32,7 @@ _REFRACTORY_OVERRIDE = {
     "grudge": 4 * 86400.0,     # 记仇：≤ 一周一次量级（spec 目标）
     "jealousy": 12 * 3600.0,   # 吃醋：半天一次封顶
     "lying": 6 * 3600.0,       # 撒谎否认：几小时一次
+    "winddown": 3 * 3600.0,    # T2-03：去忙收尾——长不应期（小时级），不然每次专注都念叨一遍
 }
 
 
@@ -89,6 +90,11 @@ def _void01(b: BodySnapshot) -> float:
 # 10 个缺陷行为：activation(b, d, scr) -> [0,1]；d=派生量 dict；scr=ctx.scratch
 # 触发条件取自 roadmap part2 §4.1–4.10；文本意图条件（被直接追问/提到第三方/逼向某话题）
 # 难零-LLM 精确判，用躯体信号 + 已有 scratch 信号做保守近似（见各注释）。
+#
+# +1（T2-03④，2026-07）：winddown 不是"缺陷"，是"她有自己的生活边界"——同一互斥+
+# 不应期机制天然适配（同一时刻只该有一个最强指令），故并入同一注册表，不另开一套。
+# 只在 sylanne_alpha_winddown_enabled 开、且 scr 里有 integration 注入的
+# life_sim_signals 时才可能激活；config 默认关＝该条恒 0（见 _act_winddown）。
 # ===========================================================================
 
 def _act_lying(b: BodySnapshot, d: dict[str, float], scr: dict[str, Any]) -> float:
@@ -174,10 +180,35 @@ def _act_avoidance(b: BodySnapshot, d: dict[str, float], scr: dict[str, Any]) ->
     return min(numbed, pushed)
 
 
+def _act_winddown(b: BodySnapshot, d: dict[str, float], scr: dict[str, Any]) -> float:
+    """T2-03④：去忙收尾——她不是随时都有空聊天，专注在手头事上时会自然想收线。
+
+    读 scr["life_sim_signals"]（integration 在 sylanne_alpha_winddown_enabled 打开
+    且 LifeSimulator 可用时才注入；关闭/不可用 → scr 里没这个键 → 恒 0，config 默认
+    关＝零行为变化，不需要在本函数内再查一遍 config）。
+    合取：可打断度低（正忙）AND 专注度高（心思不在这儿）——两者都要，单独"忙"或单独
+    "专注"都不够；躯体耗竭（低能量）也会想收线，作为独立的次要来源（打折不合取，
+    "累了想歇会"本身就够构成收尾理由，不必再要求同时专注）。
+    """
+    sig = scr.get("life_sim_signals")
+    if not isinstance(sig, dict):
+        return 0.0
+    try:
+        interruptibility = float(sig.get("interruptibility", 0.7) or 0.7)
+        energy = float(sig.get("energy", 0.6) or 0.6)
+        focus = float(sig.get("focus", 0.5) or 0.5)
+    except (TypeError, ValueError):
+        return 0.0
+    busy_focused = min(_ramp(1.0 - interruptibility, 0.4, 0.8), _ramp(focus, 0.55, 0.85))
+    tired = _ramp(1.0 - energy, 0.55, 0.9) * 0.75
+    return max(busy_focused, tired)
+
+
 # (id, activation_fn, directive, modulators)。directive 取 roadmap part2 §4 文本（略收口对齐
-# PINNED 预算）。modulators：只在犯懒/冲动泄露/逃避三条上挂——这仨的文本本身就在说"打字方式
-# 会变"（回得短/脱口而出/拖着不碰），力学调制只是把已经在说的话真的落到派发参数上，其余七条
-# 文本不涉及打字节奏/分段，故不挂（不为挂而挂，避免无本之木的独立调制，见 module docstring）。
+# PINNED 预算）。modulators：只在犯懒/冲动泄露/逃避/去忙收尾四条上挂——这几条的文本本身就在说
+# "打字方式会变"（回得短/脱口而出/拖着不碰/要转身走了），力学调制只是把已经在说的话真的落到
+# 派发参数上，其余六条文本不涉及打字节奏/分段，故不挂（不为挂而挂，避免无本之木的独立调制，
+# 见 module docstring）。
 _BEHAVIORS: list[
     tuple[str, Callable[[BodySnapshot, dict[str, float], dict[str, Any]], float], str, dict[str, float]]
 ] = [
@@ -215,6 +246,11 @@ _BEHAVIORS: list[
      "[此刻:下意识不想碰某件事——含糊、转移、或“忘了”，不是真忘，是不想面对。]",
      # 逃避：下意识拖一拖再开口（比正常读信启动延迟更久一点）。
      {"extra_predelay_s": 3.0}),
+    ("winddown", _act_winddown,
+     "[此刻:手头这件事需要收个尾，心思没法全在这儿——可以自然说一句“我先去忙一下”，"
+     "别硬撑着继续闲聊，收得利落一点，忙完了自然会回来接着聊。]",
+     # 去忙收尾：说完这句就该慢下来了，打字慢一点、多顿一下，像真的要转身去做别的事。
+     {"cps_mult": 0.85, "extra_predelay_s": 2.5}),
 ]
 
 

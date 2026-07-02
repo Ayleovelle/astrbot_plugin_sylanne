@@ -1864,6 +1864,31 @@ class LifeSimulator:
             return {"kind": "resolved", "intensity": max(0.0, min(1.0, best_recency)), "mood": mood}
         return None
 
+    # ------------------------------------------------------------------
+    # T2-03：去忙收尾——behavior.py 的 winddown 激活 + integration 的收尾窗口时长，
+    # 都需要只读地取"她现在多容易被打断/在忙什么"，不碰 tick/写状态。
+    # ------------------------------------------------------------------
+
+    def interruptibility(self) -> float:
+        """当下相位的可打断度 [0,1]，越低越"正忙着"。纯读，复用 outreach 评分同一份公式
+        （_interruptibility_for_phase），不另立一套阈值（防两处漂移）。"""
+        return self._interruptibility_for_phase(self.state.world.phase)
+
+    def current_activity_duration_min(self) -> int | None:
+        """当前活动的预期时长（分钟），来自日计划里匹配 current_activity_id 的锚点/弹性槽。
+
+        无计划 / 当前活动不在计划里 / 时长未填（0）→ None（调用方自行给默认值，不臆造）。
+        """
+        plan = self.state.plan
+        activity_id = self.state.world.current_activity_id
+        if plan is None or not activity_id:
+            return None
+        for act in list(plan.anchors or ()) + list(plan.flexible_slots or ()):
+            if getattr(act, "activity_id", "") == activity_id:
+                dur = int(getattr(act, "expected_duration_min", 0) or 0)
+                return dur if dur > 0 else None
+        return None
+
     def _recent_mood_word(self) -> str:
         """取最近一条非 USER_FACT 事件的 mood 单词（隐私安全：不读 text/private_thought）。"""
         try:

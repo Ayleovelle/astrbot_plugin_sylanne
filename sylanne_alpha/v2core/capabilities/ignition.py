@@ -23,6 +23,9 @@ warmth_bias；没有 extraversion / expression_drive_trait）：
 
 from __future__ import annotations
 
+import datetime
+import re
+
 from sylanne_alpha.v2core.contracts import BeatContext, BodySnapshot, Intent, Phase
 
 # 中性锚点系数（trait=0.5 ⇒ express_at=0.95 / hold_below=0.10 / hold_floor=0.15）
@@ -50,6 +53,106 @@ def personality_saddle(body: BodySnapshot) -> tuple[float, float, float]:
     hold_below = _HOLD_BASE + _HOLD_W_SOVEREIGNTY * sov
     hold_floor = _FLOOR_BASE + _FLOOR_W_PATIENCE * patience
     return express_at, hold_below, hold_floor
+
+
+
+# ===========================================================================
+# T2-01①：g_hold 的语境食粮（红队 kill fix：hold 此前只能吃 emo.hold_free_energy，
+# 而它只在 SILENT 之后才积累——沉默从未发生过就永远没食粮，死循环）。
+#
+# 这里给 g_hold 加一路【与未表达积分正交】的语境代价：本轮消息本身有多"不值得
+# 认真开口"（低信息量/连发轰炸/边界压力/深夜）。量级刻意压得很小（见各常量），
+# 只让 hold 在多个信号叠加、且人格+当下表达驱力恰好把 g_speak 压低时才真的够得着
+# ——"可能"而非"常见"，仅本模块 deliberate() 消费，不进 emotion 领域的真值。
+#
+# 门控：只有 T2-01 总开关（integration 经 ctx.scratch["deliberate_silence_enabled"]
+# 注入）打开时才计算，config 默认关时这条食粮恒 0（零行为变化，不改变默认沉默频率）。
+# ===========================================================================
+
+_CONTEXT_HOLD_ENABLED_KEY = "deliberate_silence_enabled"
+
+_LOW_INFO_ACKS = frozenset({
+    "哦", "嗯", "嗯嗯", "哦哦", "额", "呵呵", "草", "6", "666",
+    "ok", "OK", "Ok", "好", "好的", "是", "是的", "嗯呢", "？", "?", "。", "...", "……",
+})
+_LOW_INFO_MAXLEN = 2      # 短应答字数上限（超过此长度不再按"低信息量"计）
+_LOW_INFO_HOLD = 0.12     # 低信息量消息（表情/短应答/复读）贡献
+_BURST_WINDOW_S = 8.0     # 视作"连发"的绝对间隔窗（秒），冷启动无节律 EMA 也能识别
+_BURST_HOLD = 0.10        # 连发轰炸贡献（越贴近 0 秒越接近满额）
+_BOUNDARY_HOLD = 0.10     # 边界压力贡献（吃醋/被顶——不想好声好气接话）
+_NIGHT_HOLD = 0.08        # 深夜（23:00–06:00，中国时区）贡献
+_HAS_WORD_RE = re.compile(r"[\w一-鿿]")
+_CHINA_TZ = datetime.timezone(datetime.timedelta(hours=8))
+
+
+def _ramp01(x: float, lo: float, hi: float) -> float:
+    """线性斜坡 [0,1]：x≤lo→0，x≥hi→1。hi≤lo 退 0（防除零，与 behavior.py 同款独立实现）。"""
+    if hi <= lo:
+        return 0.0
+    return max(0.0, min(1.0, (x - lo) / (hi - lo)))
+
+
+def _is_low_info_text(text: str, last_text: str) -> bool:
+    """本轮文本是否"不值得认真开口"：短应答词表 / 纯表情符号(无字母数字汉字) / 逐字复读上一条。
+
+    空文本不算（那是空闲轮，走别的分支，不在此列）。
+    """
+    if not text:
+        return False
+    if text == last_text and last_text:
+        return True
+    if len(text) <= _LOW_INFO_MAXLEN and text in _LOW_INFO_ACKS:
+        return True
+    if not _HAS_WORD_RE.search(text):
+        return True   # 纯符号/表情，没有一个字母数字汉字
+    return False
+
+
+def _is_deep_night(now: float) -> bool:
+    """是否处于深夜（23:00–06:00，中国时区）。now<=0（测试/无时钟）→ False，不臆测。"""
+    if now <= 0.0:
+        return False
+    try:
+        hour = datetime.datetime.fromtimestamp(now, tz=_CHINA_TZ).hour
+    except (OverflowError, OSError, ValueError):
+        return False
+    return hour >= 23 or hour < 6
+
+
+def context_hold_food(ctx: BeatContext) -> float:
+    """T2-01①：g_hold 的语境食粮，纯函数、只读、不封顶叠加但单项均已很小（铁律②）。
+
+    ctx.scratch["deliberate_silence_enabled"] 非真值 → 恒 0（config 默认关＝零变化）。
+    """
+    if not ctx.scratch.get(_CONTEXT_HOLD_ENABLED_KEY):
+        return 0.0
+    food = 0.0
+    text = (ctx.text or "").strip()
+    um = ctx.domain("usermodel")
+    last_text = ""
+    if um is not None and hasattr(um, "last_user_text"):
+        try:
+            last_text = str(um.last_user_text() or "")
+        except Exception:
+            last_text = ""
+    if _is_low_info_text(text, last_text):
+        food += _LOW_INFO_HOLD
+
+    now = float(ctx.scratch.get("now", 0.0) or 0.0)
+    if text and um is not None and hasattr(um, "seconds_since_last_user"):
+        try:
+            gap = um.seconds_since_last_user(now)
+        except Exception:
+            gap = None
+        if gap is not None and gap < _BURST_WINDOW_S:
+            food += _BURST_HOLD * (1.0 - _ramp01(gap, 0.0, _BURST_WINDOW_S))
+
+    food += _BOUNDARY_HOLD * _ramp01(float(ctx.body.boundary_pressure), 0.4, 0.85)
+
+    if _is_deep_night(now):
+        food += _NIGHT_HOLD
+
+    return food
 
 
 class IgnitionArbiter:
@@ -94,6 +197,13 @@ class IgnitionArbiter:
                 g_hold = float(emo.hold_free_energy(body))
             except Exception:
                 g_hold = 0.0
+        # T2-01①：语境食粮——与未表达积分正交的独立信号，破"hold 从未发生过就永远
+        # 没食粮"的死循环（config 关时 context_hold_food 恒 0，见其函数文档）。
+        g_hold += context_hold_food(ctx)
+        # T2-03⑤：收尾窗口内的临时 hold 偏置——integration 只在仍处于 winddown 窗口时
+        # 才写非零值（见 integration._start_winddown_window / apply_v2core_request），
+        # 窗口外/功能关闭恒读到 0.0，与该功能不存在时零差异。
+        g_hold += float(ctx.scratch.get("winddown_hold_bias", 0.0) or 0.0)
         g_speak = max(0.0, express_at - eff_drive)
         g_reach_raw = 0.0
         has_reach = False
@@ -143,4 +253,4 @@ class IgnitionArbiter:
         )
 
 
-__all__ = ["personality_saddle", "IgnitionArbiter"]
+__all__ = ["personality_saddle", "context_hold_food", "IgnitionArbiter"]

@@ -55,6 +55,11 @@ _PENDING_CTX_TTL = 180.0      # request 阶段暂存 ctx 的有效期（秒）
 _QUALITY_TTL_S = 600.0        # 对话质量分滞后反馈时效（秒）：超此视为陈旧/新话题，丢弃不注入
 _DISPATCH_MOD_TTL = 30.0      # T3-01 派发调制器时效（秒）：同轮 response 处理内消费，
                               # 留量级余裕防跨轮陈旧值误用（rt 是跨轮持久字典）
+_LAST_SILENT_TTL_S = 7200.0   # T2-01③ 认账留痕时效（秒）：超此不再喂给下一轮心象
+_WINDDOWN_MIN_S = 15 * 60.0   # T2-03⑤ 收尾窗口下限（15 分钟，卡片给定量级）
+_WINDDOWN_MAX_S = 45 * 60.0   # T2-03⑤ 收尾窗口上限（45 分钟）
+_WINDDOWN_DEFAULT_S = 30 * 60.0  # 无法从 life_sim 读到活动时长时的默认窗口
+_WINDDOWN_HOLD_BIAS = 0.30    # 窗口内叠加进 g_hold 的固定偏置（独立于 T2-01① 的语境食粮）
 
 # 落盘任务的模块级强引用锚（防 fire-and-forget task 被 GC 提前回收）
 _PENDING_SAVES: set[Any] = set()
@@ -388,6 +393,143 @@ def _evo_provider(plugin: Any, session_key: str):
     return _get
 
 
+def _apply_v2core_feature_flags(ctx: Any, plugin: Any) -> None:
+    """T2-01/T2-03 特性开关经 ctx.scratch 注入（与 evo_delta provider 同款模式）：
+    v2core 能力/领域是纯函数，不知道"我在插件里"，只读 scratch 里的布尔值——
+    保持 ignition.py / behavior.py 等模块零宿主依赖。默认关＝对应能力恒读到
+    False，行为与关闭该模块前完全一致（零变化）。
+    """
+    cfg = getattr(plugin, "_config", None) or getattr(plugin, "config", None) or {}
+    ctx.scratch["deliberate_silence_enabled"] = bool(
+        cfg.get("sylanne_alpha_deliberate_silence_enabled", False)
+    )
+    ctx.scratch["winddown_enabled"] = bool(
+        cfg.get("sylanne_alpha_winddown_enabled", False)
+    )
+
+
+def _apply_winddown_window_scratch(ctx: Any, rt: dict[str, Any]) -> None:
+    """T2-03⑤：收尾窗口生效期——不管本轮是否刚点燃 winddown，只要还在窗口内就把临时
+    hold 偏置 + 派发预延迟喂进 scratch（ignition.context_hold_food 之外的独立加项 +
+    _compose_dispatch_modulators 的 extra_predelay，见二者读取处）。窗口外/关闭 →
+    键不出现，两处消费者的 .get(..., 0.0) 天然回落中性。
+
+    两个调用点都要跑（request 阶段的正常 ctx，与 response 阶段 pending 过期后现场
+    补跑的 ctx）——否则 pending TTL（180s）过期时重建的 ctx 会漏挂这份偏置，窗口内
+    却读到中性值（红队 finding：单点注入在慢响应场景下会失效）。
+    """
+    try:
+        _until = rt.get("winddown_until")
+        if isinstance(_until, (int, float)) and time.time() < float(_until):
+            ctx.scratch["winddown_active"] = True
+            ctx.scratch["winddown_hold_bias"] = _WINDDOWN_HOLD_BIAS
+    except Exception:  # noqa: BLE001
+        pass
+
+
+def _hash_text(text: str) -> str:
+    """T2-01③：认账留痕只存文本指纹，不存原文（rt 是跨轮 RAM 态，没必要多留一份原文）。"""
+    import hashlib
+    return hashlib.sha256((text or "").encode("utf-8", "ignore")).hexdigest()[:12]
+
+
+def _maybe_soften_silence(plugin: Any, ctx: Any) -> tuple[Any, str]:
+    """T2-01②：DeliberateSilence 作第二沉默源，把"彻底装死"软化成极简回应。
+
+    只在【被问】（有本轮用户文本）时考虑——空闲/主动轮的静默语义不动。复用
+    realtime_dispatch.DeliberateSilence（此前零调用方，见其模块内 review 记录）：
+    读同一份 body 快照的 warmth/tension/void_pressure，与 IgnitionArbiter 的 hold
+    决策各自独立、互不覆盖对方判据——它只决定"这次沉默要不要留一个极简音"。
+
+    返回 (minimal_reply_or_None, ds_reason)：
+    - should_be_silent=False → (None, "")：DeliberateSilence 不掺和，保留原判据的
+      SILENT，last_silent 仍会用 ignition 自己的 reason 留痕。
+    - should_be_silent=True 但 get_minimal_response 为 None（如"digesting"，故意
+      彻底沉默）→ (None, reason)：不软化，但把更贴切的理由回传供留痕/下轮心象。
+    - 两者都命中 → (Reply.speak(minimal, mode="minimal_silence"), reason)。
+    """
+    if not (ctx.text or "").strip():
+        return None, ""
+    ds_factory = getattr(getattr(plugin, "_realtime_dispatch", None), "deliberate_silence", None)
+    if not callable(ds_factory):
+        return None, ""
+    try:
+        ds = ds_factory()
+        body = ctx.body
+        should, reason = ds.should_be_silent(
+            float(body.warmth), float(body.tension), float(body.void_pressure)
+        )
+        if not should:
+            return None, ""
+        minimal = ds.get_minimal_response(reason)
+        if not minimal:
+            return None, reason
+        from sylanne_alpha.v2core.contracts import Reply
+        return Reply.speak(minimal, mode="minimal_silence", silent_reason=reason), reason
+    except Exception:  # noqa: BLE001
+        return None, ""
+
+
+def _start_winddown_window(
+    plugin: Any, session_key: str, rt: dict[str, Any], sim: Any, now: float,
+) -> None:
+    """T2-03⑤⑥：behavior.py 选中 winddown 那一刻——开收尾窗口 + 排定窗口结束后的
+    返场触达。窗口时长（分钟级，15–45min）优先取 life_sim 当前活动的计划时长，
+    读不到（无计划/未匹配/未填）→ 默认 30min（卡片"if available"的诚实兜底）。
+    """
+    duration_s = _WINDDOWN_DEFAULT_S
+    if sim is not None:
+        try:
+            dur_min = sim.current_activity_duration_min()
+            if dur_min is not None:
+                duration_s = max(_WINDDOWN_MIN_S, min(_WINDDOWN_MAX_S, float(dur_min) * 60.0))
+        except Exception:  # noqa: BLE001
+            pass
+    rt["winddown_until"] = now + duration_s
+    rt["winddown_return_notified"] = False   # 新窗口开了，允许下次窗口结束再提醒一次
+
+    scheduler = getattr(getattr(plugin, "_realtime_dispatch", None), "schedule_background_task", None)
+    if callable(scheduler):
+        try:
+            scheduler(
+                _winddown_return_after(plugin, session_key, duration_s),
+                label="winddown_return",
+            )
+        except Exception:  # noqa: BLE001
+            pass   # 调度失败不阻断——窗口本身仍生效，返场退化到 ⑥ 的 fragment 兜底
+
+
+async def _winddown_return_after(plugin: Any, session_key: str, delay_s: float) -> None:
+    """T2-03⑥：收尾窗口结束后尝试主动"回来接着聊"。
+
+    background-task 模式（realtime_dispatch.schedule_background_task 同款：异常吞掉、
+    完成即从 plugin._background_tasks 摘除；main.terminate() 停机时会 cancel 该表，
+    这里的 asyncio.sleep 天然可被取消——不留悬挂任务）。复用既有主动桥
+    （available/should_dispatch_now/dispatch），吃它全部 quiet_hours/min_interval
+    冷却与"大饼未装"静默降级——不新开一套触达阀门（红队命门：别造第二个主动通道）。
+    桥不可用/被冷却压住 → 直接放弃，下一条真实消息走 apply_v2core_request 里的
+    ⑥ 退化路径（winddown_return_cue）兜底。
+    """
+    try:
+        await asyncio.sleep(max(0.0, delay_s))
+    except asyncio.CancelledError:
+        raise
+    try:
+        bridge = getattr(plugin, "_proactive_bridge", None)
+        if bridge is None or not bridge.available():
+            return
+        allowed, _reason = bridge.should_dispatch_now(session_key)
+        if not allowed:
+            return
+        motivation = bridge.build_motivation_text(
+            "忙完手头的事，回来接着聊", "松了口气，想起来刚才聊到哪了",
+            reason_code="life_rhythm", session_key=session_key,
+        )
+        await bridge.dispatch(session_key, motivation)
+    except Exception as exc:  # noqa: BLE001
+        logger.debug("Sylanne T2-03 winddown 返场触达失败 [%s]: %s", session_key, exc)
+
+
 def _user_text(plugin: Any, event: Any) -> str:
     """提取用户文本：message_str 优先，回落 response 管线的链解析。"""
     text = str(getattr(event, "message_str", "") or "")
@@ -422,9 +564,41 @@ async def apply_v2core_request(plugin: Any, event: Any, request: Any) -> None:
             session_key, event, text, domains=rt["domains"],
             evo_delta=_evo_provider(plugin, session_key),
         )
+        _apply_v2core_feature_flags(ctx, plugin)
         await _percept_recall(plugin, ctx, rt["domains"], text)
         rt["pending"] = {"ctx": ctx, "ts": time.time(), "text": text}
         rt["pending_assessment"] = ctx.scratch.get("assessment") or None
+
+        # T2-01③：事后认账——上一轮若装死/软化沉默过，本轮心象带一句"刚才看到了
+        # 没说话"的线索（一次性：不管本轮是否真的用上，用过就清；TTL 兜底防陈旧
+        # 线索赖在 rt 里跨会话空窗期）。两个开关任一打开都可能产生过 last_silent
+        # 留痕（deliberate_silence 直接命中 / winddown 窗口内被迫 hold），故都读；
+        # 都关时 rt 里即便意外有残留也不会被消费，行为与两功能都不存在时一致。
+        if ctx.scratch.get("deliberate_silence_enabled") or ctx.scratch.get("winddown_enabled"):
+            try:
+                _ls = rt.get("last_silent")
+                if isinstance(_ls, dict):
+                    _age = time.time() - float(_ls.get("ts", 0.0) or 0.0)
+                    if 0.0 <= _age <= _LAST_SILENT_TTL_S:
+                        ctx.scratch["last_silent_cue"] = str(_ls.get("reason", "") or "")
+                    rt["last_silent"] = None
+            except Exception:  # noqa: BLE001
+                pass
+
+        # T2-03⑥ 退化路径：收尾窗口已经过去、还没通知过 → 给下一轮心象一次性"刚忙完"
+        # 提示。不管上面后台返场触达（_winddown_return_after）有没有真的送达都会触发
+        # ——桥不可用/被冷却压住时，这是唯一的兜底（卡片原话："退化成下一条消息带
+        # 刚忙完线索"）；桥若已经先一步主动发了消息，这条线索也只是让下一句更自然，
+        # 无害。一次性：notified 置真后不再重复。
+        if ctx.scratch.get("winddown_enabled"):
+            try:
+                _wu = rt.get("winddown_until")
+                if (isinstance(_wu, (int, float)) and time.time() >= float(_wu)
+                        and not rt.get("winddown_return_notified")):
+                    ctx.scratch["winddown_return_cue"] = True
+                    rt["winddown_return_notified"] = True
+            except Exception:  # noqa: BLE001
+                pass
 
         # Phase 2B / PR-G：关系类型分类（off-path，不阻塞请求）。低频 gated；
         # 经后台任务调 LLM 判关系语域、累积进壳层 store。绝不 inline await、不进 SDK 域。
@@ -439,8 +613,30 @@ async def apply_v2core_request(plugin: Any, event: Any, request: Any) -> None:
         except Exception as _exc:  # noqa: BLE001 - 分类失败绝不影响请求
             logger.debug("Sylanne rel_register dispatch skipped: %s", _exc)
 
-        # 缺陷行为层（Wave 3）：选本轮该点燃的行为（互斥 + 不应期，状态存 rt 跨轮），
-        # 命中则塞 ctx.scratch，由 fragment._behavior_line 渲染进 PINNED。零-LLM，吞错不阻断。
+        # 生活底色（Wave 5）+ T2-03 去忙收尾信号：两者都读同一个 _life_simulator，
+        # 合并一次取用（life_sim_signals 必须在下面 select_behavior 之前就绪，behavior.py
+        # 的 winddown 激活读它）。只读、零阻断；未装/未开 → 两个 scratch 键都不出现。
+        _sim = None
+        try:
+            _sim = getattr(plugin, "_life_simulator", None)
+            if _sim is not None and getattr(_sim, "enabled", False):
+                _cue = _sim.undertone_cue()
+                if _cue:
+                    ctx.scratch["life_cue"] = _cue
+                if ctx.scratch.get("winddown_enabled"):
+                    ctx.scratch["life_sim_signals"] = {
+                        "phase": _sim.state.world.phase,
+                        "energy": float(_sim.state.world.energy),
+                        "focus": float(_sim.state.world.focus),
+                        "interruptibility": float(_sim.interruptibility()),
+                    }
+        except Exception as _lx:  # noqa: BLE001
+            logger.debug("Sylanne life cue / winddown signals skipped: %s", _lx)
+            _sim = None
+
+        # 缺陷行为层（Wave 3）+ T2-03④ 去忙收尾：选本轮该点燃的行为（互斥 + 不应期，
+        # 状态存 rt 跨轮），命中则塞 ctx.scratch，由 fragment._behavior_line 渲染进
+        # PINNED。零-LLM，吞错不阻断。
         try:
             from sylanne_alpha.v2core.behavior import select_behavior
             _lf = rt.setdefault("behavior_last_fired", {})
@@ -453,19 +649,12 @@ async def apply_v2core_request(plugin: Any, event: Any, request: Any) -> None:
                 ctx.scratch["behavior_modulators"] = _bsel.get("modulators") or {}
                 rt["last_behavior"] = {"id": _bsel["id"], "activation": _bsel["activation"],
                                        "ts": _now}   # 可观测留痕（WebUI 认知核页）
+                if _bsel["id"] == "winddown":
+                    _start_winddown_window(plugin, session_key, rt, _sim, _now)
         except Exception as _bx:  # noqa: BLE001
             logger.debug("Sylanne behavior select skipped: %s", _bx)
 
-        # 生活底色（Wave 5）：把她自己生活的轻重（项目卡住/刚通了）派生成一条内心底色线索塞
-        # ctx.scratch，由 fragment._life_line 渲染——脱钩话题，渗进不相关回答。只读、零阻断。
-        try:
-            _sim = getattr(plugin, "_life_simulator", None)
-            if _sim is not None and getattr(_sim, "enabled", False):
-                _cue = _sim.undertone_cue()
-                if _cue:
-                    ctx.scratch["life_cue"] = _cue
-        except Exception as _lx:  # noqa: BLE001
-            logger.debug("Sylanne life cue skipped: %s", _lx)
+        _apply_winddown_window_scratch(ctx, rt)
 
         # 心象片段 → system prompt（主动脉：认知影响言语）
         from sylanne_alpha.v2core.fragment import build_mind_fragment
@@ -613,6 +802,13 @@ def _compose_dispatch_modulators(ctx: Any) -> dict[str, float]:
         if pause_bias > 0.8:        # 同 fragment._style_line "说话带停顿" 阈值
             extra_predelay += min(1.5, (pause_bias - 0.8) * 1.5)
 
+    # T2-03⑤：收尾窗口内——即便本轮没被压成 hold/极简回应，正常说话也该慢半拍
+    # （"delayed reply" 是卡片给的两条腿之一）。同源读 winddown_hold_bias（与
+    # ignition 的 g_hold 加项同一个 scratch 值），不另开一路计算（防公式分叉）。
+    winddown_bias = float(ctx.scratch.get("winddown_hold_bias", 0.0) or 0.0)
+    if winddown_bias > 0.0:
+        extra_predelay += min(2.5, winddown_bias * 5.0)
+
     return {
         "cps_mult": max(0.7, min(1.3, cps_mult)),
         "max_part_chars_mult": max(0.7, min(1.3, max_part_mult)),
@@ -704,6 +900,8 @@ async def apply_v2core_response(plugin: Any, event: Any, response: Any) -> bool:
                     session_key, event, text, domains=rt["domains"],
                     evo_delta=_evo_provider(plugin, session_key),
                 )
+                _apply_v2core_feature_flags(ctx, plugin)
+                _apply_winddown_window_scratch(ctx, rt)
 
             # T3-01：本轮派发调制器（行为力学 + 表达风格力学合成），供 legacy 派发路径
             # 取走。每轮都重写（哪怕是 {}/中性）——覆盖上一轮陈旧值，不留串味风险。
@@ -722,6 +920,34 @@ async def apply_v2core_response(plugin: Any, event: Any, response: Any) -> bool:
                 # 无法预知，故这里给"legacy 不观测"时恒打；SILENT 的修正见下。
                 do_response_tick=not legacy_observes,
             )
+
+            # T2-01②③ + T2-03⑤：SILENT 落地前——DeliberateSilence 第二沉默源尝试软化
+            # （绝对沉默像掉线，极简回应才像心情）+ 事后认账留痕（不管软化与否，只要
+            # 本轮真是"该说而没细说"就记下来，供下一轮心象自然带出）。两个触发源都会
+            # 进这块：deliberate_silence_enabled 直接开，或本轮仍在 winddown 收尾窗口内
+            # （winddown_active）——忙线期间被迫的 hold 同样不该读成"掉线"。两开关都
+            # 关闭/都不在窗口内时两个 scratch 键都是 False，本块整体 no-op。
+            if reply.kind is ReplyKind.SILENT and (
+                ctx.scratch.get("deliberate_silence_enabled") or ctx.scratch.get("winddown_active")
+            ):
+                try:
+                    sil0 = ctx.scratch.get("silent")
+                    base_reason = ""
+                    if isinstance(sil0, dict):
+                        base_reason = str(sil0.get("reason", "") or "")
+                    elif isinstance(sil0, str):
+                        base_reason = sil0
+                    minimal_reply, ds_reason = _maybe_soften_silence(plugin, ctx)
+                    final_reason = ds_reason or base_reason or "unspecified"
+                    rt["last_silent"] = {
+                        "ts": time.time(),
+                        "reason": final_reason,
+                        "ignored_text_hash": _hash_text(ctx.text or ""),
+                    }
+                    if minimal_reply is not None:
+                        reply = minimal_reply
+                except Exception:  # noqa: BLE001
+                    pass   # 软化/留痕失败绝不阻断裁决——原 SILENT 照旧生效
 
             # 裁决留痕（可观测，运行态缓存非域状态）：WebUI 认知核页展示
             # "她最近一轮说/不说是怎么裁决的"。纯采集 ctx 已有产物，零写域。
@@ -853,6 +1079,10 @@ async def consult_idle_reach(plugin: Any, session_key: str) -> dict[str, Any]:
             evo_delta=_evo_provider(plugin, session_key),
         )
         ctx.scratch["proactive"] = True
+        _apply_v2core_feature_flags(ctx, plugin)
+        # T2-03⑤：忙线窗口内不该一边"要去忙了"一边又高频主动找你——同一份偏置也
+        # 压一压空闲轮的 reach 倾向（ignition 折叠 speak/reach 时共用同一个 g_hold）。
+        _apply_winddown_window_scratch(ctx, rt)
         # 只跑 DELIBERATE（outreach/ignition），不 render、不 EVOLVE、不 tick——零副作用
         runner.run_deliberate_only(ctx)
         for it in ctx.intents:
