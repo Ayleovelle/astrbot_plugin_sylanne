@@ -1125,16 +1125,12 @@ class LLMRequestPipeline:
             memory_fragment=memory_fragment,
         )
 
-        # Step 5b: 低信息消息时稀释较早高密度 history（路径 B / Wave 3）
-        try:
-            from sylanne_alpha.history_dilution import dilute_dense_contexts
-
-            contexts = getattr(request, "contexts", None)
-            diluted = dilute_dense_contexts(contexts, message_text)
-            if diluted is not contexts and diluted is not None:
-                request.contexts = diluted
-        except Exception as e:
-            logger.debug(f"Sylanne history dilution skipped: {e}")
+        # Step 5b 已废止（fix/context-integrity，2026-07）：曾在此处对低信息
+        # 消息稀释较早 history（路径 B / Wave 3），但 req.contexts 会被 AstrBot
+        # 写穿透持久化到会话 DB，原地截断等于永久腰斩用户历史，且逐日复利。
+        # 详见 sylanne_alpha/history_dilution.py 顶部墓碑说明。原始意图（低信息
+        # 延续时别被旧浓文本带跑话题）已由 FocusDomain 经 system_prompt 满足，
+        # 且不写回 contexts，不受写穿透影响。
 
         # Step 6: 兜底——在所有 contexts 改写（含 hajide flatten、注入）之后，
         # 移除破损的 tool_calls/tool 配对，防止严格 provider（DeepSeek 等）返回 400。
