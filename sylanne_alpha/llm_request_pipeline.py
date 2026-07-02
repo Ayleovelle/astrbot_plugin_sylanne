@@ -15,7 +15,6 @@ from __future__ import annotations
 import asyncio
 import collections
 import random
-import re as _re
 import time
 from typing import TYPE_CHECKING, Any
 
@@ -357,71 +356,10 @@ def _filter_streaming_chunk(chunk: Any, tfilter: "StreamingThinkingFilter") -> A
     return chunk
 
 
-# ---------------------------------------------------------------------------
-# LLM 降级链（Item 81）
-# ---------------------------------------------------------------------------
-
-
-class FallbackChain:
-    """LLM 调用降级链：主模型→备用→模板回复。
-
-    当主模型连续失败达到阈值时进入降级状态，在降级期间直接返回模板回复，
-    避免持续向不可用的 API 发送请求。成功调用会重置失败计数。
-    """
-
-    def __init__(self) -> None:
-        self._consecutive_failures: int = 0
-        self._degraded_until: float = 0.0
-
-    def is_degraded(self) -> bool:
-        """判断当前是否处于降级状态。"""
-        return time.time() < self._degraded_until
-
-    def record_success(self) -> None:
-        """记录一次成功调用，重置失败计数。"""
-        self._consecutive_failures = 0
-
-    def record_failure(self) -> None:
-        """记录一次失败调用。连续 3 次失败后进入 60 秒降级。"""
-        self._consecutive_failures += 1
-        if self._consecutive_failures >= 3:
-            # 连续 3 次失败，降级 60 秒
-            self._degraded_until = time.time() + 60.0
-
-    def get_fallback_response(self, context: str = "") -> str:
-        """降级时的模板回复。
-
-        Args:
-            context: 可选的上下文信息（当前未使用，预留扩展）。
-
-        Returns:
-            随机选择的降级模板回复文本。
-        """
-        templates = [
-            "嗯…我现在有点走神，等我缓一下。",
-            "抱歉，我需要一点时间整理思绪。",
-            "…（沉默片刻）",
-        ]
-        return random.choice(templates)
-
-    @property
-    def consecutive_failures(self) -> int:
-        """当前连续失败次数。"""
-        return self._consecutive_failures
-
-    @property
-    def degraded_remaining(self) -> float:
-        """降级剩余时间（秒），未降级时返回 0。"""
-        remaining = self._degraded_until - time.time()
-        return max(0.0, remaining)
-
-
 class OfflineFallback:
     """LLM 不可达时的纯本地降级回复。
 
-    与 FallbackChain 的区别：FallbackChain 基于连续失败次数自动降级，
-    OfflineFallback 由外部显式标记离线状态（如网络检测、手动切换），
-    提供更温和的"在场但无法完整回复"语义。
+    由外部显式标记离线状态（如网络检测、手动切换），提供"在场但无法完整回复"语义。
     """
 
     TEMPLATES = [
@@ -510,31 +448,6 @@ def _handle_multimodal_input(message_segments: list) -> dict | None:
     return result
 
 
-# ---------------------------------------------------------------------------
-# Item 71: 本地差分隐私噪声层（简化版）
-# ---------------------------------------------------------------------------
-
-
-class PrivacyFilter:
-    """本地隐私保护：对发送给 LLM 的文本中的 PII 做简单脱敏。"""
-
-    PHONE_PATTERN = _re.compile(r'1[3-9]\d{9}')
-    EMAIL_PATTERN = _re.compile(r'[\w.-]+@[\w.-]+\.\w+')
-    ID_PATTERN = _re.compile(r'\d{17}[\dXx]')
-
-    def __init__(self, enabled: bool = False):
-        self._enabled = enabled
-
-    def sanitize(self, text: str) -> str:
-        """脱敏处理。"""
-        if not self._enabled:
-            return text
-        text = self.PHONE_PATTERN.sub('[手机号]', text)
-        text = self.EMAIL_PATTERN.sub('[邮箱]', text)
-        text = self.ID_PATTERN.sub('[身份证号]', text)
-        return text
-
-
 class LLMRequestPipeline:
     """LLM 请求处理管线，封装 Sylanne 插件的请求拦截逻辑。
 
@@ -547,100 +460,6 @@ class LLMRequestPipeline:
       - 调用 MemorySystem 做记忆召回和写入
       - 驱动 LifeSimulator 的 LLM 回调
     """
-
-    # ------------------------------------------------------------------
-    # Item 3: 用户偏好自动提取（纯规则匹配）
-    # ------------------------------------------------------------------
-
-    # 称呼偏好模式
-    _PREF_NAME_PATTERNS: list[tuple[str, str]] = [
-        ("叫我", "name"),
-        ("我叫", "name"),
-        ("称呼我", "name"),
-    ]
-    # 话题禁区模式
-    _PREF_TABOO_PATTERNS: list[tuple[str, str]] = [
-        ("不想聊", "taboo"),
-        ("别提", "taboo"),
-        ("不要说", "taboo"),
-    ]
-    # 风格偏好模式
-    _PREF_STYLE_KEYWORDS: dict[str, str] = {
-        "简短点": "brief",
-        "详细说": "verbose",
-        "别太长": "brief",
-    }
-
-    def _extract_preferences(self, text: str, session_key: str) -> None:
-        """从用户消息中提取偏好信号并存入 session_context overlay。
-
-        纯规则匹配，不调用 LLM。提取三类偏好：
-        - 称呼偏好：检测"叫我XX"/"我叫XX"/"称呼我XX"
-        - 话题禁区：检测"不想聊XX"/"别提XX"/"不要说XX"
-        - 风格偏好：检测"简短点"/"详细说"/"别太长"
-
-        Args:
-            text: 用户消息文本。
-            session_key: 会话标识。
-        """
-        if not text:
-            return
-
-        p = self._p
-        # 安全获取 session_context 的 per-relationship overlay
-        session_ctx = getattr(p, "_session_context", None)
-        if session_ctx is None:
-            return
-        overlay = getattr(session_ctx, "_preference_overlays", None)
-        if overlay is None:
-            session_ctx._preference_overlays = {}
-            overlay = session_ctx._preference_overlays
-        prefs = overlay.setdefault(session_key, {
-            "preferred_name": None,
-            "taboo_topics": [],
-            "style": None,
-        })
-
-        # 称呼偏好
-        for pattern, _kind in self._PREF_NAME_PATTERNS:
-            idx = text.find(pattern)
-            if idx >= 0:
-                # 提取模式后面的内容（取到标点或末尾，最多 10 字符）
-                start = idx + len(pattern)
-                rest = text[start:start + 10]
-                # 截断到第一个标点或空格
-                name = ""
-                for ch in rest:
-                    if ch in "，。！？、；：\n ,.!?;:":
-                        break
-                    name += ch
-                name = name.strip()
-                if name:
-                    prefs["preferred_name"] = name
-                break
-
-        # 话题禁区
-        for pattern, _kind in self._PREF_TABOO_PATTERNS:
-            idx = text.find(pattern)
-            if idx >= 0:
-                start = idx + len(pattern)
-                rest = text[start:start + 20]
-                topic = ""
-                for ch in rest:
-                    if ch in "，。！？、；：\n ,.!?;:":
-                        break
-                    topic += ch
-                topic = topic.strip()
-                if topic and topic not in prefs["taboo_topics"]:
-                    prefs["taboo_topics"].append(topic)
-                    if len(prefs["taboo_topics"]) > 20:
-                        prefs["taboo_topics"] = prefs["taboo_topics"][-20:]
-
-        # 风格偏好
-        for keyword, style in self._PREF_STYLE_KEYWORDS.items():
-            if keyword in text:
-                prefs["style"] = style
-                break
 
     def __init__(self, plugin: PluginHost) -> None:
         self._p = plugin

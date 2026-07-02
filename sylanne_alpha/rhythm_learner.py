@@ -106,34 +106,6 @@ class RhythmProfile:
     def chars_per_second(self) -> float:
         return self._chars_per_second
 
-    def modulate(
-        self, default_max_part: int, default_cps: float, blend: float
-    ) -> tuple[int, float]:
-        """返回混合后的 (max_part_chars, chars_per_second)。
-
-        参数:
-            default_max_part: 默认最大分段字符数
-            default_cps: 默认打字速度
-            blend: 混合比例，0.0=纯默认，1.0=纯用户节奏
-
-        实际混合比例还会乘以置信度（采样不足时不生效）。
-        """
-        effective_blend = blend * self._confidence
-        if effective_blend < 0.05:
-            return default_max_part, default_cps
-
-        learned_part = max(12, min(120, int(self._avg_part_chars)))
-        learned_cps = self._chars_per_second
-
-        blended_part = int(
-            default_max_part * (1 - effective_blend) + learned_part * effective_blend
-        )
-        blended_cps = (
-            default_cps * (1 - effective_blend) + learned_cps * effective_blend
-        )
-
-        return max(12, min(120, blended_part)), max(2.0, min(20.0, blended_cps))
-
     def to_dict(self) -> dict[str, Any]:
         """序列化画像状态。"""
         return {
@@ -293,7 +265,11 @@ class RhythmLearner:
 
         # 净同步意图：正值=想同步，负值=在退缩
         sync_intent = drive_factor - withdrawal_factor
-        effective_blend = max(0.0, blend * profile.confidence * max(0.1, sync_intent))
+        # flavor 级校准（核查任务 wzwd8i0ta #27）：内层地板 0.1 让成熟画像
+        # （confidence≈1）的 effective_blend 恒 ≥ blend*1*0.1=0.06 > 0.05，退缩分支永不可达。
+        # 改地板 0.0：净退缩（sync_intent≤0）时 effective_blend 真归零，成熟画像也能进退缩放慢。
+        # 正向同步区间（sync_intent>0.1）行为不变，不动整体节律语义。
+        effective_blend = max(0.0, blend * profile.confidence * max(0.0, sync_intent))
 
         if effective_blend < 0.05:
             # 退缩模式：使用比默认更慢的节奏

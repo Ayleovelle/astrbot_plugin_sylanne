@@ -48,6 +48,19 @@ def _event_now(event: Any) -> float:
     return time.time()
 
 
+def _event_proactive(event: Any) -> bool:
+    """本轮事件是否主动触达——对象属性 + dict 键双形态探测（对齐 _event_now）。
+
+    旧实现只用 getattr，对 dict 形态事件（如 integration 主动轮传 {"proactive": True}）
+    恒读到 False，靠调用方手补 scratch 兜底——是雷。这里统一双形态探测，根上修。
+    """
+    if event is None:
+        return False
+    if isinstance(event, dict):
+        return bool(event.get("proactive", False))
+    return bool(getattr(event, "proactive", False))
+
+
 class TurnRunner:
     """两阶段编排器。组合 SelfCore（拍调度）+ Renderer（出口契约）+ 领域 ingest。"""
 
@@ -83,7 +96,7 @@ class TurnRunner:
         if idle:
             ctx.scratch["idle"] = True
         ev = getattr(ctx, "event", None)
-        if ev is not None and getattr(ev, "proactive", False):
+        if _event_proactive(ev):
             ctx.scratch["proactive"] = True
         self._sc.run_percept(ctx)
         return ctx
