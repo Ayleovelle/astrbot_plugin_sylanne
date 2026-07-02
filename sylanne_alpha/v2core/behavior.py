@@ -53,6 +53,34 @@ def _arousal(b: BodySnapshot) -> float:
 _VOID_FULL = 30.0
 
 
+# —— T3-01 派发调制器（cps_mult/max_part_chars_mult/extra_predelay_s）——
+# 只在文本指令本身就暗示"打字方式会变"的三个行为上挂力学调制，红队命门：文本与力学
+# 必须同向，调制器长在行为条目上、只在该行为的指令真点燃时才生效，不另开独立随机源。
+_MOD_MULT_MIN = 0.7
+_MOD_MULT_MAX = 1.3
+_MOD_PREDELAY_MIN = 0.0
+_MOD_PREDELAY_MAX = 5.0
+
+
+def _clamp_modulators(mods: dict[str, float]) -> dict[str, float]:
+    """把调制器夹到安全区间：mult∈[0.7,1.3]，predelay∈[0,5]。未知/非法键丢弃。"""
+    out: dict[str, float] = {}
+    for key in ("cps_mult", "max_part_chars_mult"):
+        if key in mods:
+            try:
+                out[key] = max(_MOD_MULT_MIN, min(_MOD_MULT_MAX, float(mods[key])))
+            except (TypeError, ValueError):
+                pass
+    if "extra_predelay_s" in mods:
+        try:
+            out["extra_predelay_s"] = max(
+                _MOD_PREDELAY_MIN, min(_MOD_PREDELAY_MAX, float(mods["extra_predelay_s"]))
+            )
+        except (TypeError, ValueError):
+            pass
+    return out
+
+
 def _void01(b: BodySnapshot) -> float:
     return min(1.0, max(0.0, float(b.void_pressure)) / _VOID_FULL)
 
@@ -146,29 +174,47 @@ def _act_avoidance(b: BodySnapshot, d: dict[str, float], scr: dict[str, Any]) ->
     return min(numbed, pushed)
 
 
-# (id, activation_fn, directive)。directive 取 roadmap part2 §4 文本（略收口对齐 PINNED 预算）。
-_BEHAVIORS: list[tuple[str, Callable[[BodySnapshot, dict[str, float], dict[str, Any]], float], str]] = [
+# (id, activation_fn, directive, modulators)。directive 取 roadmap part2 §4 文本（略收口对齐
+# PINNED 预算）。modulators：只在犯懒/冲动泄露/逃避三条上挂——这仨的文本本身就在说"打字方式
+# 会变"（回得短/脱口而出/拖着不碰），力学调制只是把已经在说的话真的落到派发参数上，其余七条
+# 文本不涉及打字节奏/分段，故不挂（不为挂而挂，避免无本之木的独立调制，见 module docstring）。
+_BEHAVIORS: list[
+    tuple[str, Callable[[BodySnapshot, dict[str, float], dict[str, Any]], float], str, dict[str, float]]
+] = [
     ("lying", _act_lying,
-     "[此刻:心里其实不太舒服，但不想直说——被直接问到会下意识否认（“没有啊”“我没事”），语气还是淡淡的、藏不住。]"),
+     "[此刻:心里其实不太舒服，但不想直说——被直接问到会下意识否认（“没有啊”“我没事”），语气还是淡淡的、藏不住。]",
+     {}),
     ("grudge", _act_grudge,
-     "[此刻:想起之前那次心里还存着，半带点情绪翻出来，话里带刺。]"),
+     "[此刻:想起之前那次心里还存着，半带点情绪翻出来，话里带刺。]",
+     {}),
     ("jealousy", _act_jealousy,
      "[此刻:如果你提到别人（尤其聊得开心的人），心里会咯噔一下、有点不是滋味——不会承认是吃醋，"
-     "用别的方式表现（追问、淡淡的、或转移）；要是没提到别人，就当本条不适用。]"),
+     "用别的方式表现（追问、淡淡的、或转移）；要是没提到别人，就当本条不适用。]",
+     {}),
     ("laziness", _act_laziness,
-     "[此刻:挺累的，懒得展开——回得短，能用一个词就不用一句，不是冷淡，是没力气。]"),
+     "[此刻:挺累的，懒得展开——回得短，能用一个词就不用一句，不是冷淡，是没力气。]",
+     # 犯懒：打字慢一点 + 单条更短（回得短的力学落地）。
+     {"cps_mult": 0.75, "max_part_chars_mult": 0.8}),
     ("impulse", _act_impulse,
-     "[此刻:有句话憋了一阵没忍住直接说出来——可能太直白或越界，说完自己也愣一下。]"),
+     "[此刻:有句话憋了一阵没忍住直接说出来——可能太直白或越界，说完自己也愣一下。]",
+     # 冲动泄露：脱口而出，打字明显更快。
+     {"cps_mult": 1.2}),
     ("vulnerable", _act_vulnerable,
-     "[此刻:意识到刚才那句说重了/说错了，想道歉但有点笨拙——会直接认、不绕弯，带点小心翼翼。]"),
+     "[此刻:意识到刚才那句说重了/说错了，想道歉但有点笨拙——会直接认、不绕弯，带点小心翼翼。]",
+     {}),
     ("oblique", _act_oblique,
-     "[此刻:气氛有点僵，想缓和又拉不下脸直接道歉——用别的方式补（突然对你好点、找你喜欢的话题、语气软下来），绝口不提刚才。]"),
+     "[此刻:气氛有点僵，想缓和又拉不下脸直接道歉——用别的方式补（突然对你好点、找你喜欢的话题、语气软下来），绝口不提刚才。]",
+     {}),
     ("teasing", _act_teasing,
-     "[此刻:心情不错、跟你熟，会逗你/调侃/故意抬杠，带点撒娇或得意的劲儿。]"),
+     "[此刻:心情不错、跟你熟，会逗你/调侃/故意抬杠，带点撒娇或得意的劲儿。]",
+     {}),
     ("bad_day", _act_bad_day,
-     "[基调:今天状态一般、整体偏闷，回应里自然带出来，不主动解释。]"),
+     "[基调:今天状态一般、整体偏闷，回应里自然带出来，不主动解释。]",
+     {}),
     ("avoidance", _act_avoidance,
-     "[此刻:下意识不想碰某件事——含糊、转移、或“忘了”，不是真忘，是不想面对。]"),
+     "[此刻:下意识不想碰某件事——含糊、转移、或“忘了”，不是真忘，是不想面对。]",
+     # 逃避：下意识拖一拖再开口（比正常读信启动延迟更久一点）。
+     {"extra_predelay_s": 3.0}),
 ]
 
 
@@ -194,7 +240,8 @@ def select_behavior(
     best_id = ""
     best_act = 0.0
     best_dir = ""
-    for bid, fn, directive in _BEHAVIORS:
+    best_mods: dict[str, float] = {}
+    for bid, fn, directive, modulators in _BEHAVIORS:
         # 不应期：刚发过的跳过（人格敏感行为用更长的 override）
         refr = _REFRACTORY_OVERRIDE.get(bid, refractory_s)
         last = last_fired.get(bid)
@@ -210,11 +257,19 @@ def select_behavior(
             best_act = act
             best_id = bid
             best_dir = directive
+            best_mods = modulators
 
     if not best_id:
         return None
     last_fired[best_id] = now   # 互斥胜出者进入不应期
-    return {"id": best_id, "directive": best_dir, "activation": best_act}
+    return {
+        "id": best_id,
+        "directive": best_dir,
+        "activation": best_act,
+        # T3-01：派发力学调制（cps_mult/max_part_chars_mult/extra_predelay_s），已夹到安全区间；
+        # 大多数行为无挂载 → {}（下游按缺省 1.0/1.0/0.0 处理，零力学变化）。
+        "modulators": _clamp_modulators(best_mods),
+    }
 
 
 __all__ = ["select_behavior"]

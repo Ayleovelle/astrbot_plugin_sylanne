@@ -160,6 +160,33 @@ class LLMResponsePipeline:
         return max(_CPS_MIN, min(_CPS_MAX, cps))
 
     # ------------------------------------------------------------------
+    # T3-01 状态改变消息形状：把 v2core 派发调制器叠到身体基线上
+    # ------------------------------------------------------------------
+    @staticmethod
+    def _apply_dispatch_modulators(
+        default_cps: float,
+        default_max_part: int,
+        dispatch_mods: dict[str, float] | None,
+    ) -> tuple[float, int, float]:
+        """把 T3-01 派发调制器（cps_mult/max_part_chars_mult/extra_predelay_s）叠加到
+        身体基线打字速度/分段长度上，返回 (调制后 cps, 调制后 max_part, 额外 predelay)。
+
+        dispatch_mods 为 None/空 → 原样透传、extra_predelay=0.0（无行为/信号在场时零
+        力学变化，card 要求的"no-behavior turns unchanged"）。调制器本身在 behavior.py /
+        integration.py 已 clamp 到 [0.7,1.3]/[0,5]，这里只管应用，不重复 clamp 上限，
+        但仍把最终 cps 拉回既有身体节奏合法区间 [_CPS_MIN, _CPS_MAX]（防合成后越出打字
+        速度物理意义），max_part 拉回 >=8 的安全下限（防极端调制把消息剁成不可读碎片）。
+        """
+        if not dispatch_mods:
+            return default_cps, default_max_part, 0.0
+        cps_mult = float(dispatch_mods.get("cps_mult", 1.0) or 1.0)
+        max_part_mult = float(dispatch_mods.get("max_part_chars_mult", 1.0) or 1.0)
+        extra_predelay = float(dispatch_mods.get("extra_predelay_s", 0.0) or 0.0)
+        cps = max(_CPS_MIN, min(_CPS_MAX, default_cps * cps_mult))
+        max_part = max(8, int(round(default_max_part * max_part_mult)))
+        return cps, max_part, extra_predelay
+
+    # ------------------------------------------------------------------
     # T1-01 读信时间
     # ------------------------------------------------------------------
     @staticmethod
@@ -401,6 +428,22 @@ class LLMResponsePipeline:
             silence = now - last_expr_at
             if silence > 300.0:
                 recent_ignored = min(1.0, (silence - 300.0) / 300.0)
+        # T3-01：状态改变消息形状——v2core 本轮算好的派发调制器（缺陷行为的
+        # cps_mult/max_part_chars_mult/extra_predelay_s，合成表达风格 segment_bias/
+        # pause_bias），作用在【身体基线】之上（rhythm_learner 之前），让"习得节奏"
+        # 这层继续在调制后的基线上学习，两层不互相打架。v2core 关闭/未激活/取不到
+        # → 全中性默认（1.0/1.0/0.0），零行为变化。
+        dispatch_mods: dict[str, float] | None = None
+        try:
+            from sylanne_alpha.v2core.integration import consume_dispatch_modulators
+
+            dispatch_mods = consume_dispatch_modulators(self._p, session_key)
+        except Exception:
+            dispatch_mods = None
+        default_cps, default_max_part, extra_predelay = self._apply_dispatch_modulators(
+            default_cps, default_max_part, dispatch_mods
+        )
+
         max_part_chars, cps = self._p._rhythm_learner.get_rhythm_params(
             session_key,
             default_max_part=default_max_part,
@@ -409,7 +452,8 @@ class LLMResponsePipeline:
             recent_ignored_rate=recent_ignored,
         )
         # T1-01：首段延迟改用"读信+启动打字"时间，不再是裸 0（零思考时间瞬发）。
-        think_delay = self._incoming_think_delay(event, session_key)
+        # T3-01：逃避行为的 extra_predelay_s 叠加在 think_delay 之上（拖着不想碰）。
+        think_delay = self._incoming_think_delay(event, session_key) + extra_predelay
         plan = realtime_plan(
             session_key,
             cleaned,

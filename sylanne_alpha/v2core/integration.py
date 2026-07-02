@@ -53,6 +53,8 @@ _DOMAIN_STATE_KEY_FMT = "sylanne_v2core_domains:{safe}"
 _DOMAIN_STATE_VERSION = 1
 _PENDING_CTX_TTL = 180.0      # request 阶段暂存 ctx 的有效期（秒）
 _QUALITY_TTL_S = 600.0        # 对话质量分滞后反馈时效（秒）：超此视为陈旧/新话题，丢弃不注入
+_DISPATCH_MOD_TTL = 30.0      # T3-01 派发调制器时效（秒）：同轮 response 处理内消费，
+                              # 留量级余裕防跨轮陈旧值误用（rt 是跨轮持久字典）
 
 # 落盘任务的模块级强引用锚（防 fire-and-forget task 被 GC 提前回收）
 _PENDING_SAVES: set[Any] = set()
@@ -446,6 +448,9 @@ async def apply_v2core_request(plugin: Any, event: Any, request: Any) -> None:
             _bsel = select_behavior(ctx.body, ctx.scratch, _lf, _now)
             if _bsel:
                 ctx.scratch["behavior_directive"] = _bsel["directive"]
+                # T3-01：本轮点燃行为的派发力学调制，塞 scratch 供 apply_v2core_response
+                # 读出后经 rt 转手给 legacy 派发路径（llm_response_pipeline 没有 ctx）。
+                ctx.scratch["behavior_modulators"] = _bsel.get("modulators") or {}
                 rt["last_behavior"] = {"id": _bsel["id"], "activation": _bsel["activation"],
                                        "ts": _now}   # 可观测留痕（WebUI 认知核页）
         except Exception as _bx:  # noqa: BLE001
@@ -575,6 +580,76 @@ def consume_pending_quality(plugin: Any, session_key: str) -> float | None:
         return None
 
 
+def _compose_dispatch_modulators(ctx: Any) -> dict[str, float]:
+    """T3-01：把本轮"状态该怎么改消息形状"的两路信号合成一份派发调制器。
+
+    两路信号：
+      1) 行为层（behavior.py）挂在点燃指令上的 cps_mult/max_part_chars_mult/
+         extra_predelay_s——文本已经在说"回得短/脱口而出/拖着不碰"，力学同向落地。
+      2) 表达风格（ExpressionCapability.perceive 挂的 scratch["express"]）里的
+         segment_bias/pause_bias——此前只喂 fragment._style_line 的文本提示（"想多
+         说几句"/"说话带停顿"），从未真的改过派发参数（review kill：flattened into
+         prompt words）。这里复用 fragment 已经在用的同一对阈值（1.5 / 0.8），保证
+         "嘴上说" 和 "手上做" 在同一信号上触发——不另开独立随机源（红队命门）。
+    最终对乘法调制器 clamp 到 [0.7,1.3]、predelay clamp 到 [0,5]（同 behavior.py
+    的安全区间，防合成后越界）。零信号 → 全中性默认（1.0/1.0/0.0）。
+    """
+    behavior_mods = ctx.scratch.get("behavior_modulators")
+    if not isinstance(behavior_mods, dict):
+        behavior_mods = {}
+    cps_mult = float(behavior_mods.get("cps_mult", 1.0) or 1.0)
+    max_part_mult = float(behavior_mods.get("max_part_chars_mult", 1.0) or 1.0)
+    extra_predelay = float(behavior_mods.get("extra_predelay_s", 0.0) or 0.0)
+
+    express = ctx.scratch.get("express")
+    if isinstance(express, dict):
+        try:
+            segment_bias = float(express.get("segment_bias", 0.0) or 0.0)
+            pause_bias = float(express.get("pause_bias", 0.0) or 0.0)
+        except (TypeError, ValueError):
+            segment_bias = pause_bias = 0.0
+        if segment_bias > 1.5:      # 同 fragment._style_line "想多说几句" 阈值
+            max_part_mult *= 0.9    # 更碎一点：想说的更多，倾向拆成更多条而不是一条更长
+        if pause_bias > 0.8:        # 同 fragment._style_line "说话带停顿" 阈值
+            extra_predelay += min(1.5, (pause_bias - 0.8) * 1.5)
+
+    return {
+        "cps_mult": max(0.7, min(1.3, cps_mult)),
+        "max_part_chars_mult": max(0.7, min(1.3, max_part_mult)),
+        "extra_predelay_s": max(0.0, min(5.0, extra_predelay)),
+    }
+
+
+def consume_dispatch_modulators(plugin: Any, session_key: str) -> dict[str, float] | None:
+    """legacy 派发管线（llm_response_pipeline，没有 ctx）取走本轮 T3-01 派发调制器。
+
+    一次性语义（取走即清，同 consume_pending_quality）。开关关/无暂存/陈旧
+    （> _DISPATCH_MOD_TTL，防跨轮串味——rt 是跨轮持久字典）→ None，调用方按中性
+    默认（1.0/1.0/0.0）处理，零力学变化。
+    """
+    if not v2core_enabled(plugin):
+        return None
+    cache = getattr(plugin, "_v2core_runtimes", None)
+    rt = cache.get(session_key) if isinstance(cache, dict) else None
+    if not isinstance(rt, dict):
+        return None
+    mods = rt.get("turn_dispatch_modulators")
+    rt["turn_dispatch_modulators"] = None
+    if not isinstance(mods, dict):
+        return None
+    try:
+        ts = float(mods.get("ts", 0.0) or 0.0)
+        if ts <= 0.0 or (time.time() - ts) > _DISPATCH_MOD_TTL:
+            return None
+        return {
+            "cps_mult": float(mods.get("cps_mult", 1.0) or 1.0),
+            "max_part_chars_mult": float(mods.get("max_part_chars_mult", 1.0) or 1.0),
+            "extra_predelay_s": float(mods.get("extra_predelay_s", 0.0) or 0.0),
+        }
+    except (TypeError, ValueError):
+        return None
+
+
 # ===========================================================================
 # 阶段二：response 钩子（DELIBERATE+EVOLVE，持锁）
 # ===========================================================================
@@ -601,6 +676,11 @@ async def apply_v2core_response(plugin: Any, event: Any, response: Any) -> bool:
         draft = draft_raw if draft_raw.strip() else None
 
         rt = _runtime_for(plugin, session_key)
+        # T3-01 防陈旧串味：先重置成中性，再往下走。若本轮后续步骤（_ensure_loaded/
+        # percept 补跑/decision stage）中途抛异常触发下面的兜底 `except → return False`
+        # 回落 legacy，legacy 会去 consume_dispatch_modulators 取值——这里先清空，保证
+        # 拿到的要么是本轮真算出来的调制器，要么是 None（中性），绝不是上一轮的陈旧值。
+        rt["turn_dispatch_modulators"] = None
         await _ensure_loaded(plugin, session_key, rt)
 
         # legacy realtime 拦截开启 = legacy 的 observe_response 会打 response tick
@@ -624,6 +704,16 @@ async def apply_v2core_response(plugin: Any, event: Any, response: Any) -> bool:
                     session_key, event, text, domains=rt["domains"],
                     evo_delta=_evo_provider(plugin, session_key),
                 )
+
+            # T3-01：本轮派发调制器（行为力学 + 表达风格力学合成），供 legacy 派发路径
+            # 取走。每轮都重写（哪怕是 {}/中性）——覆盖上一轮陈旧值，不留串味风险。
+            try:
+                rt["turn_dispatch_modulators"] = {
+                    **_compose_dispatch_modulators(ctx),
+                    "ts": time.time(),
+                }
+            except Exception:  # noqa: BLE001 - 调制器合成失败绝不阻断裁决/回复
+                rt["turn_dispatch_modulators"] = None
 
             reply = rt["runner"].run_decision_stage(
                 ctx, draft=draft,
