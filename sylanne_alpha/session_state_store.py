@@ -173,6 +173,11 @@ class SessionStateStore:
         # 手动覆盖（/bond·/unbond 写，owner-gated）：{session_key: bool}（True 亲密/False 非亲密）。
         self.intimacy_override: SessionMap = self._reg("intimacy_override", {})
 
+        # ---- T4-02：变体池 recent-N 去重历史 ----
+        # {session_key: {recent_key: [最近选过的变体...]}}——variant_pool.choose 的 state
+        # 参数直接就是内层 dict（按模板家族 recent_key 分列，如 "empty_reply_fallback"）。
+        self.variant_recent: SessionMap = self._reg("variant_recent", BoundedDict(maxsize=200))
+
         # ---- 其他运行态 ----
         self.last_user_message_time: SessionMap = self._reg("last_user_message_time", BoundedDict(maxsize=200))
         # 短 gap 慢变信号比较用：上一轮注入的 {warmth,tension}（2.1.0 从 kernel slot 挪来——

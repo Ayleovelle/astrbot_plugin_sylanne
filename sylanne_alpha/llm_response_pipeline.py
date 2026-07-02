@@ -32,6 +32,12 @@ from sylanne_alpha.message_dispatch import (
     realtime_plan,
     strip_draft_blocks,
 )
+from sylanne_alpha.variant_pool import (
+    EMPTY_REPLY_FALLBACK_VARIANTS,
+    LAST_RESORT_FALLBACK_TEXT,
+    choose as _pool_choose,
+    warmth_bucket as _warmth_bucket,
+)
 
 if TYPE_CHECKING:
     from sylanne_alpha.protocols import PluginHost
@@ -47,6 +53,17 @@ except ImportError:
 _CHINA_TZ = timezone(timedelta(hours=8))
 # 序列化后的请求载荷最大字符数，超过则触发裁剪
 _MAX_PAYLOAD_SERIALIZED_CHARS = 60000
+
+# T1-02③ 身体驱动打字速度（chars/sec）。基线沿用原恒定默认值，energy/arousal
+# 各按 ±4.0 幅度围绕基线摆动，tension 只往下拖（紧张不会打字变快）；
+# 最终 clamp 到 [4.5, 11]（card 给定区间），energy=0/arousal=1 时约落在给定
+# 示例值 5.5 / 9.5 附近（验证见 tests/test_wave_l1_g4_liveness.py）。
+_DEFAULT_CPS = 7.5
+_CPS_MIN = 4.5
+_CPS_MAX = 11.0
+_CPS_ENERGY_WEIGHT = 4.0
+_CPS_AROUSAL_WEIGHT = 4.0
+_CPS_TENSION_WEIGHT = 1.0
 
 
 class LLMResponsePipeline:
@@ -83,6 +100,37 @@ class LLMResponsePipeline:
                 len(self._RE_SYLANNE_TAG.findall(text)),
             )
         return cleaned
+
+    # ------------------------------------------------------------------
+    # T1-02③ 身体驱动打字速度
+    # ------------------------------------------------------------------
+    @staticmethod
+    def _body_driven_cps(host: Any) -> float:
+        """从躯体状态推导打字速度（chars/sec），替代原恒定 7.5。
+
+        没精神（exhaustion 高 → energy 低）打字慢；情绪唤醒（arousal）高打字快；
+        张力（tension）高只往下拖一点（紧张不会让人打字变快）。三路信号都已经在
+        host.kernel 上（response 分段规划这条路径已经拿着 host 了，不新开管线）：
+          - energy = 1 - host.kernel.body.mortality.exhaustion
+          - arousal / tension 来自 host.kernel.computation.engine.observe()
+            （8 维情感空间的既有输出，同一 engine 上 expression_drive() 已在用）。
+        读取路径异常（缺字段/host 结构不符预期）时优雅退回默认值，绝不炸分段管线。
+        """
+        try:
+            exhaustion = float(host.kernel.body.mortality.exhaustion)
+            energy = max(0.0, min(1.0, 1.0 - exhaustion))
+            emotion = host.kernel.computation.engine.observe()
+            arousal = max(0.0, min(1.0, float(emotion.get("arousal", 0.5))))
+            tension = max(0.0, min(1.0, float(emotion.get("tension", 0.0))))
+        except (AttributeError, TypeError, ValueError, KeyError):
+            return _DEFAULT_CPS
+        cps = (
+            _DEFAULT_CPS
+            + (energy - 0.5) * _CPS_ENERGY_WEIGHT
+            + (arousal - 0.5) * _CPS_AROUSAL_WEIGHT
+            - tension * _CPS_TENSION_WEIGHT
+        )
+        return max(_CPS_MIN, min(_CPS_MAX, cps))
 
     # ------------------------------------------------------------------
     # Main response handler
@@ -191,10 +239,22 @@ class LLMResponsePipeline:
                 response.completion_text = ""
                 return
             # 走到这里：stripped_to_empty 默认兜底 / 用户显式配了自定义兜底文案
-            _fallback = str(
-                _cfg.get("sylanne_ghost_fallback_text")
-                or "……（我想说点什么，可话到嘴边又散了，再给我一秒。）"
-            )
+            # T4-02①：用户自定义文案（config 通道）优先级最高，锁定不变；否则走
+            # EMPTY_REPLY_FALLBACK_VARIANTS 变体池（同 renderer.py 共用一份），按上一轮
+            # 缓存的 warmth 分挑语气（此处是同步热路径，拿不到实时 body，last_injected_states
+            # 是本轮 request 阶段刚写入的近期快照，足够便宜、足够新——不为此发额外异步取值），
+            # recent-N 去重存 _store.variant_recent（按 session 隔离，随 release_session 清理）。
+            _custom_fallback = str(_cfg.get("sylanne_ghost_fallback_text") or "").strip()
+            if _custom_fallback:
+                _fallback = _custom_fallback
+            else:
+                _prev_state = self._p._store.last_injected_states.get(session_key) or {}
+                _fallback = _pool_choose(
+                    EMPTY_REPLY_FALLBACK_VARIANTS,
+                    recent_key="empty_reply_fallback",
+                    state=self._p._store.variant_recent.get_or_create(session_key, dict),
+                    condition=_warmth_bucket(_prev_state.get("warmth")),
+                ) or LAST_RESORT_FALLBACK_TEXT
             logger.info(
                 f"Sylanne empty reply -> fallback (no ghost): session={session_key} "
                 f"reason={_reason} raw_len={len(text)} fallback_len={len(_fallback)}"
@@ -226,16 +286,25 @@ class LLMResponsePipeline:
         origin = str(getattr(event, "unified_msg_origin", "") or "")
         cfg = self._p._config or {}
         default_max_part = int(cfg.get("realtime_chat_max_part_chars", 48))
-        default_cps = 7.5  # 默认每秒字符数（模拟打字速度）
         host = self._p._host(session_key)
+        # T1-02③：默认打字速度从恒定 7.5 改成躯体状态驱动——没精神打字慢，
+        # 情绪唤醒高打字快（"手抖打得快"）。host 在这里已经持有，复用而非新开管线。
+        default_cps = self._body_driven_cps(host)
         expr_drive = host.kernel.computation.engine.expression_drive()
-        # 计算最近被忽略的回复比例，用于调整节奏
-        last_times = [t for t in self._p._store.last_bot_expression_time.values() if t > 0]
+        # 计算"最近被忽略"信号，用于调整节奏。T1-04③修复：原实现取
+        # last_bot_expression_time.values()（跨所有会话的单值池），A 会话的节奏会被
+        # B/C 会话是否被忽略污染。last_bot_expression_time/last_user_message_time
+        # 都是按 session_key 存的单值（非历史序列），改为只看本会话自己的信号：
+        # 若本会话上次表达之后用户还没再开口，且已经过去够久，视为"正在被忽略"，
+        # 沉默越久信号越强（600s 封顶到 1.0）。
         recent_ignored = 0.0
-        if len(last_times) > 3:
+        last_expr_at = self._p._store.last_bot_expression_time.get(session_key, 0.0)
+        last_user_at = self._p._store.last_user_message_time.get(session_key, 0.0)
+        if last_expr_at > 0 and last_user_at < last_expr_at:
             now = time.time()
-            ignored_count = sum(1 for t in last_times[-10:] if now - t > 300)
-            recent_ignored = ignored_count / min(10, len(last_times))
+            silence = now - last_expr_at
+            if silence > 300.0:
+                recent_ignored = min(1.0, (silence - 300.0) / 300.0)
         max_part_chars, cps = self._p._rhythm_learner.get_rhythm_params(
             session_key,
             default_max_part=default_max_part,

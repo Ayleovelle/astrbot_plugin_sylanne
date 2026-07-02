@@ -2410,7 +2410,10 @@ class MemorySystem:
         """
         if not results:
             return ""  # 空召回优于错召回（配合门控）
-        lines = ["[记忆参考]"]
+        lines = [
+            "[记忆参考]",
+            "这些是你自己记起来的事——化进话里自然带出，别报时间戳、别照抄前缀、别用『你上次说过』句式。",
+        ]
         now = time.time()
         for r in results[:max_items]:
             # 生活模拟记忆：这是 Sylanne 自己的生活/心境，不是和对方聊过的，

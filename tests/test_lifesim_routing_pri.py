@@ -123,3 +123,74 @@ def test_shared_host_key_unchanged_picks_last_active():
     """共享 _most_recent_host_key 行为不变：选最近活跃，不管亲密/群。"""
     p = _Plugin({"a": _Host(50.0), "GroupMessage:g:x": _Host(300.0)})
     assert _pipe(p)._most_recent_host_key() == "GroupMessage:g:x"
+
+
+# ---- T2-07②：_life_sim_outreach 回填 origin_session ----
+
+
+class _PendingCtx:
+    """极简 pending_outreach_context 替身：仅 _life_sim_outreach 用到的接口。"""
+
+    def __init__(self):
+        self.data: dict = {}
+
+    def set(self, k, v):
+        self.data[k] = v
+
+    def get(self, k, default=None):
+        return self.data.get(k, default)
+
+    def has(self, k):
+        return k in self.data
+
+    def pop(self, k, default=None):
+        return self.data.pop(k, default)
+
+
+def test_life_sim_outreach_backfills_origin_session():
+    """T2-07②：目标会话确定后应回填 LifeEvent.origin_session。
+
+    此前该字段有定义（PR-I）但运行时从未被赋值——_audit_session_key 只能
+    读到空串，一律落进 "_global" 桶，per-session audit 隔离形同虚设。
+    """
+    import asyncio
+
+    from sylanne_alpha.life_simulation import LifeEvent, LifeSimulator
+
+    p = _Plugin({"priv:owner-1": _Host(100.0)})
+    p._store.relationship_register_state.set("priv:owner-1", _romantic())
+    p._store.pending_outreach_context = _PendingCtx()
+    p._background_tasks: list = []
+
+    sim = LifeSimulator(config={})
+    ev = LifeEvent(text="摸鱼中", mood="happy", urgency=0.1, timestamp=1.0)
+    assert ev.origin_session == ""  # 未回填前的默认态
+    sim.state.events = [ev]
+    p._life_simulator = sim
+
+    pipe = _pipe(p)
+    intent = {"event_id": ev.event_id, "delivery_mode": "next_reply"}
+    asyncio.run(pipe._life_sim_outreach("摸鱼中", "开心", intent))
+
+    assert ev.origin_session == "priv:owner-1"
+    # 清理内部起的 5 分钟 fallback 后台任务，避免测试遗留 pending task 警告。
+    for t in list(p._background_tasks):
+        t.cancel()
+
+
+def test_life_sim_outreach_no_event_id_does_not_crash():
+    """intent 缺 event_id（如两参旧回调路径）时不应报错，origin_session 逻辑直接跳过。"""
+    import asyncio
+
+    from sylanne_alpha.life_simulation import LifeSimulator
+
+    p = _Plugin({"priv:owner-1": _Host(100.0)})
+    p._store.relationship_register_state.set("priv:owner-1", _romantic())
+    p._store.pending_outreach_context = _PendingCtx()
+    p._background_tasks: list = []
+    p._life_simulator = LifeSimulator(config={})
+
+    pipe = _pipe(p)
+    asyncio.run(pipe._life_sim_outreach("摸鱼中", "开心", None))
+    for t in list(p._background_tasks):
+        t.cancel()

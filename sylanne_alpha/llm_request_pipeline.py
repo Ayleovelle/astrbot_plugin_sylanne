@@ -75,6 +75,15 @@ _SLOT_LABELS = {
     "unfinished": "未完",
 }
 
+# 关系阶段（body.relationship_memory().continuity.phase）的定性中文映射——
+# 注入卫生 T4-03③：裸 snake_case 枚举值不该原样喂给 LLM（读起来像调试日志、
+# 诱发模型把它当变量名复述），过一遍定性措辞再进 prompt。
+_RELATIONSHIP_PHASE_WORDS = {
+    "low_signal": "还处在认识阶段",
+    "forming_continuity": "正在处得越来越熟",
+    "active_continuity": "已经处得很熟、有稳定默契",
+}
+
 
 def _comp_boundary_stability(comp: Any) -> float:
     """取计算层边界稳定度，兼容旧 ComputationSpine(.boundary) 与共振场(_boundary)。"""
@@ -160,7 +169,13 @@ def _format_inner_context(trimmed: dict[str, str]) -> str:
         text = trimmed.get(slot_name)
         if text:
             label = _SLOT_LABELS.get(slot_name, slot_name)
-            lines.append(f"[{label}] {text}")
+            if slot_name == "state":
+                # 注入卫生 T4-03②：[感知] 原样读起来像状态播报（对方心情不错，亲近感高），
+                # 容易被当成要念出来的播报词——加一句点明这是她自己的当下感受，要体现在
+                # 语气里，不是复述出来的信息。
+                lines.append(f"[{label}] 这是我自己此刻的感受，融进语气自然带出，不是要念出来的播报：{text}")
+            else:
+                lines.append(f"[{label}] {text}")
     return "\n".join(lines)
 
 
@@ -1518,7 +1533,7 @@ class LLMRequestPipeline:
                 rel_mem = host.kernel.body.relationship_memory()
                 phase = rel_mem.get("continuity", {}).get("phase", "")
                 if phase and phase != "unknown":
-                    signals.append(f"关系阶段:{phase}")
+                    signals.append(f"关系{_RELATIONSHIP_PHASE_WORDS.get(phase, phase)}")
             except Exception:
                 pass
 
@@ -1850,8 +1865,11 @@ class LLMRequestPipeline:
             except Exception:
                 pass  # Never let logging break the main path
 
-            # CP8-P3a：节奏学习已收编进 RhythmAgent（SelfCore POST），此处不再直接调
-            # observe_user_message，避免双记 tempo。
+            # T1-04：节奏学习改由 main.py::on_message 钩子调用
+            # self._rhythm_learner.observe_user_message()（每条消息都会先经过
+            # on_message 再到这里）。这里不再重复调用，避免同一条用户消息把
+            # tempo/画像样本记两遍。CP8-P3a 时期这条注释提到的 "RhythmAgent" 从未
+            # 真正存在——彼时 observe_user_message 其实是零调用的死代码。
 
             # 记忆维护：v2 对话缓冲 + 衰减 + 压缩
             _current_warmth = host.kernel.computation.engine.observe().get(
@@ -2567,6 +2585,19 @@ class LLMRequestPipeline:
         # PR-C3：扩展 pending context 字段
         intent_id = (intent or {}).get("intent_id", "")
         event_id = (intent or {}).get("event_id", "")
+        # T2-07②：目标会话选定后立刻回填 LifeEvent.origin_session，让
+        # _audit_session_key 不再落进 "_global" 桶（此前该字段有定义但运行时从未被
+        # 赋值，per-session audit 隔离形同虚设）。
+        if event_id:
+            life_sim = getattr(p, "_life_simulator", None)
+            if life_sim is not None:
+                try:
+                    for _e in life_sim.state.events:
+                        if _e.event_id == event_id:
+                            _e.origin_session = best_key
+                            break
+                except Exception:
+                    pass
         delivery_mode = (intent or {}).get("delivery_mode", "next_reply")
         reason_code = (intent or {}).get("reason_code", "")
         expires_at = float((intent or {}).get("expires_at", 0.0) or 0.0)
@@ -2633,7 +2664,9 @@ class LLMRequestPipeline:
                         f"Sylanne bridge gated ({gate_reason}), skip this outreach: "
                         f"session={session_key}"
                     )
-                    self._mark_life_outcome(ctx["event_id"], "dropped", session_key)
+                    # T2-07③：bridge gate 是她自己的门控拒绝（quiet_hours/min_interval），
+                    # 不是用户没回应——用非惩罚性的 withheld，不写 unanswered audit。
+                    self._mark_life_outcome(ctx["event_id"], "withheld", session_key)
                     return
                 # 犹豫：发前迟疑 / 最后一刻收回 / 踌躇词试探
                 hesit_on = bool(
@@ -2653,7 +2686,7 @@ class LLMRequestPipeline:
                 filler = ""
                 if hesit_on:
                     body = surface.get("body", {}) if isinstance(surface, dict) else {}
-                    plan = bridge.hesitation_plan(body)
+                    plan = bridge.hesitation_plan(body, session_key=session_key)
                     if plan["pre_delay_seconds"] > 0:
                         logger.info(
                             f"Sylanne hesitates {plan['pre_delay_seconds']}s before outreach "
@@ -2665,7 +2698,8 @@ class LLMRequestPipeline:
                             f"Sylanne withdraws outreach at the last moment "
                             f"(h={plan['hesitation']}): session={session_key}"
                         )
-                        self._mark_life_outcome(ctx["event_id"], "dropped", session_key)
+                        # T2-07③：最后一刻的犹豫收回是她自己的选择，同样非惩罚性。
+                        self._mark_life_outcome(ctx["event_id"], "withheld", session_key)
                         return
                     filler = plan["filler"]
                 motivation = bridge.build_motivation_text(
@@ -2729,16 +2763,24 @@ class LLMRequestPipeline:
     def _mark_life_outcome(
         self, event_id: str, outcome: str, session_key: str = ""
     ) -> None:
-        """PR-C3/C4：回写 LifeEvent 投递四时点（dispatched/consumed/dropped）。
+        """PR-C3/C4：回写 LifeEvent 投递四时点（dispatched/consumed/dropped/withheld）。
 
         M8：consumed/dropped 同时写主动发言反馈 audit（feedback_pressure 的单一数据源）。
         - consumed = 用户消费了 pending（回应了）→ answered
-        - dropped  = pending 过期未消费（没回应）→ unanswered
+        - dropped  = pending 真正过期未消费（超时无回应）→ unanswered（惩罚性）
+        - withheld = 她自己的门控/迟疑取消了这次发言（bridge gate 拒绝 / 最后一刻
+          犹豫收回），不是用户没回应——T2-07③：不写惩罚性 unanswered audit，只回写
+          LifeEvent 的 dropped_at（复用同一时间戳字段，语义上仍是"没发出去"）。
+          同时必须把 life_sim 侧 outreach_audit 里那条 dispatch 时写下的 pending
+          条目也一起标成非惩罚性的 "withheld"（见 mark_outreach_withheld），否则它
+          会在原地等 _check_outreach_timeouts 超时后被误标 unanswered，反过来抬高
+          feedback_pressure/cooldown——等于她自己的收回被记成用户冷淡。
         audit 按 session_key 索引（origin_session 隔离：A 没回应不抬 B 的 cooldown）。
         """
         if not event_id:
             return
-        # M8：先写反馈 audit（不依赖 life_sim 是否存在；session_key 空则跳过）
+        # M8：先写反馈 audit（不依赖 life_sim 是否存在；session_key 空则跳过）。
+        # withheld 不在此列——她自己收回的发言不该反过来抬用户的"冷淡"计数。
         if session_key and outcome in ("consumed", "dropped"):
             self._record_dispatch_feedback(
                 session_key,
@@ -2756,6 +2798,8 @@ class LLMRequestPipeline:
                 life_sim.mark_outreach_consumed(event_id, now)
             elif outcome == "dropped":
                 life_sim.mark_outreach_dropped(event_id, now)
+            elif outcome == "withheld":
+                life_sim.mark_outreach_withheld(event_id, now)
         except Exception as e:
             # 不静默吞（implementation ruling §5）：warning 可观测，但不 raise、不改主流程——
             # 四时点回写失败不应中断 prompt 准备。

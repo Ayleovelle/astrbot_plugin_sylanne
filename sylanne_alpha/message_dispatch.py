@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import ast
 import logging
+import random
 import re
 from typing import Any
 
@@ -62,6 +63,21 @@ def truncate_at_sentence(text: str, max_chars: int) -> str:
 # 末尾，丢尾会把真正的答案删掉。这是兜底闸：正常人格回复远到不了 12 段。
 _DEFAULT_MAX_PARTS = 12
 
+# T1-02 打碎节拍器：分段延迟不再是纯确定性公式（人类打字节奏本身有抖动，恒定节拍才是
+# "机器味"信号）。两个独立效应，都在【预算 scale 之后】叠加，不改变原有 scale 语义：
+#   ① 逐段抖动：每段延迟乘 uniform(0.6,1.4)（±40%），乘完仍走既有 min(4.2,...) 硬顶——
+#      因此单段绝不超过原上限，总预算不会被抖动系统性推高（cap 会把超冲部分削回去，
+#      期望值仍贴近预算，只加方差不加偏置）。
+#   ② 走神停顿：整条回复 5% 概率选一个非首段，让它的延迟越过 4.2s 硬顶冲到 5~9s——
+#      模拟"打字打到一半愣了一下"，故意不受 cap 约束（这就是"走神"的点）。
+# 两者都吃 rng 参数（对齐 variant_pool.choose 的既有约定：默认走全局 random 模块，
+# 测试传 random.Random(seed) 进来即可复现）。
+_JITTER_MIN = 0.6
+_JITTER_MAX = 1.4
+_DISTRACTED_PAUSE_PROBABILITY = 0.05
+_DISTRACTED_PAUSE_MIN = 5.0
+_DISTRACTED_PAUSE_MAX = 9.0
+
 
 def _cap_parts(parts: list[str], *, max_parts: int) -> list[str]:
     """把分段数压到 max_parts 以内：保留前 max_parts-1 段，其余合并成最后一段。"""
@@ -82,6 +98,7 @@ def realtime_plan(
     max_part_chars: int = 48,
     chars_per_second: float = 7.5,
     max_parts: int = _DEFAULT_MAX_PARTS,
+    rng: random.Random | None = None,
 ) -> dict[str, Any]:
     raw = str(text or "")
     visible = strip_draft_blocks(raw)
@@ -96,14 +113,20 @@ def realtime_plan(
         "capped": len(capped) != len(parts),
         "uncapped_count": len(parts),
         "message_count": len(capped),
-        "message_parts": _message_parts(capped, chars_per_second=chars_per_second),
+        "message_parts": _message_parts(
+            capped, chars_per_second=chars_per_second, rng=rng
+        ),
         "source_text_chars": len(raw),
     }
 
 
 def _message_parts(
-    parts: list[str], *, chars_per_second: float = 7.5
+    parts: list[str],
+    *,
+    chars_per_second: float = 7.5,
+    rng: random.Random | None = None,
 ) -> list[dict[str, Any]]:
+    picker = rng if rng is not None else random
     raw_delays = [
         _typing_delay(previous, chars_per_second=chars_per_second)
         for previous, _ in _previous_and_current(parts)
@@ -111,14 +134,28 @@ def _message_parts(
     budget = min(36.0, max(0.0, (len(parts) - 1) * 3.2))
     total = sum(raw_delays)
     scale = 1.0 if total <= budget or total <= 0 else budget / total
-    return [
-        {
-            "index": index,
-            "text": part,
-            "delay_before_seconds": round(min(4.2, delay * scale), 3),
-        }
-        for index, (part, delay) in enumerate(zip(parts, raw_delays, strict=True))
-    ]
+
+    # 走神：整条回复只掷一次骰子（不是每段掷），命中则挑一个非首段（index>=1）
+    # 走神；无非首段（单段回复）时天然掷不到。
+    distracted_index: int | None = None
+    if len(parts) > 1 and picker.random() < _DISTRACTED_PAUSE_PROBABILITY:
+        distracted_index = picker.randrange(1, len(parts))
+
+    message_parts: list[dict[str, Any]] = []
+    for index, (part, delay) in enumerate(zip(parts, raw_delays, strict=True)):
+        if index == distracted_index:
+            final_delay = picker.uniform(_DISTRACTED_PAUSE_MIN, _DISTRACTED_PAUSE_MAX)
+        else:
+            jitter = picker.uniform(_JITTER_MIN, _JITTER_MAX)
+            final_delay = min(4.2, delay * scale * jitter)
+        message_parts.append(
+            {
+                "index": index,
+                "text": part,
+                "delay_before_seconds": round(final_delay, 3),
+            }
+        )
+    return message_parts
 
 
 def _previous_and_current(parts: list[str]) -> list[tuple[str, str]]:
