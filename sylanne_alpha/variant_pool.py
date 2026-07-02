@@ -98,9 +98,19 @@ def choose(
     bucket = _resolve_bucket(variants, condition)
     if not bucket:
         return ""
-    if len(bucket) == 1:
-        return bucket[0]
     picker = rng if rng is not None else random
+    if len(bucket) == 1:
+        picked = bucket[0]
+        # 单候选桶也要记入历史：调用方可能在同一 recent_key 下于不同 turn 切换到别的桶
+        # （如 warmth 分档变化），若这里不记录，前一次的单候选桶挑选不会计入 avoid 集合，
+        # 下一次换到别的桶又切回来时可能出现"看似连续复读"（MINOR，2026-07-02 修）。
+        if state is not None and recent_n > 0:
+            recent = state.setdefault(recent_key, [])
+            recent.append(picked)
+            overflow = recent_n * 4
+            if len(recent) > overflow:
+                del recent[: len(recent) - recent_n * 2]
+        return picked
     if state is None or recent_n <= 0:
         return picker.choice(bucket)
     recent = state.setdefault(recent_key, [])
@@ -141,9 +151,17 @@ EMPTY_REPLY_FALLBACK_VARIANTS: dict[str | None, list[str]] = {
 }
 
 
+# 绝对最后一道兜底：EMPTY_REPLY_FALLBACK_VARIANTS 桶为空（理论上不会，桶恒非空）或
+# choose() 因异常返回 "" 时的静态安全网。两个调用方（renderer.py / llm_response_pipeline.py）
+# 共用这一份常量，不再各自内联复制字符串字面量（MINOR，2026-07-02 修：堵住 T4-02 本该
+# 消灭的"同一句话两处硬编码"复读，即便这条分支实际不可达）。
+LAST_RESORT_FALLBACK_TEXT = "……（我想说点什么，可话到嘴边又散了，再给我一秒。）"
+
+
 __all__ = [
     "DEFAULT_RECENT_N",
     "warmth_bucket",
     "choose",
     "EMPTY_REPLY_FALLBACK_VARIANTS",
+    "LAST_RESORT_FALLBACK_TEXT",
 ]

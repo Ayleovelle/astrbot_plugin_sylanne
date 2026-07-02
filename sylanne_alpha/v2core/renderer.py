@@ -37,6 +37,7 @@ from sylanne_alpha.v2core.contracts import (
 )
 from sylanne_alpha.variant_pool import (
     EMPTY_REPLY_FALLBACK_VARIANTS,
+    LAST_RESORT_FALLBACK_TEXT as _DEFAULT_FALLBACK_TEXT,
     choose as _pool_choose,
     warmth_bucket as _warmth_bucket,
 )
@@ -44,7 +45,8 @@ from sylanne_alpha.variant_pool import (
 logger = logging.getLogger("astrbot_plugin_sylanne")
 
 # 渲染兜底文案：输入为空/异常时给一句安全的 Sylanne 口吻回复，绝不静默吞掉（堵 #2）。
-_DEFAULT_FALLBACK_TEXT = "……（我想说点什么，可话到嘴边又散了，再给我一秒。）"
+# 常量本体挪进 variant_pool.LAST_RESORT_FALLBACK_TEXT，与 llm_response_pipeline.py 共用
+# 同一份，不再各自内联字面量（MINOR 修复，2026-07-02）。
 
 
 # ===========================================================================
@@ -95,6 +97,15 @@ class Projector(Protocol):
 # ===========================================================================
 # StateProjector —— 状态查询投影（纯模板把 body 套 Sylanne 口吻，P11 禁调 LLM）
 # ===========================================================================
+# 现状纠偏（2026-07-02，红队复核发现 T4-02 提交信息误判）：StateProjector.source ==
+# "state_query"，但目前【没有任何生产代码路径】会产出 source="state_query" 的 Intent——
+# 各 capability（mentalize/appraisal/somatic_marker/recall/expression/outreach/
+# ignition/reconsolidation）都不会走这个 source，DefaultRenderer._collect 因此永远
+# 匹配不到这个 Projector。它只在单测里被直接调用（test_state_projector 等），在真实
+# 聊天路径上是【全域休眠】，并非 T4-02 卡片说的"WebUI-only"分类，也不是"已确认走
+# chat 的 state_query intent"（85e83c3 commit message 这句话是误判，已在此更正）。
+# 变体化处理本身无害（纯模板、已测），按卡片"若判定为休眠则轻量处理/注明理由"的兜底
+# 条款保留原样，作为未来若真接上 state_query intent 生产方时的现成收尾，不需要现在返工。
 
 # T4-02③：每档 2-3 个变体，语气要真的不同（软糯/简短/念叨），不是同义词替换。
 # StateProjector 实例随 DefaultRenderer 按 session 建（见 integration.py 的 per-session

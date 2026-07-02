@@ -34,6 +34,7 @@ from sylanne_alpha.message_dispatch import (
 )
 from sylanne_alpha.variant_pool import (
     EMPTY_REPLY_FALLBACK_VARIANTS,
+    LAST_RESORT_FALLBACK_TEXT,
     choose as _pool_choose,
     warmth_bucket as _warmth_bucket,
 )
@@ -211,7 +212,7 @@ class LLMResponsePipeline:
                     recent_key="empty_reply_fallback",
                     state=self._p._store.variant_recent.get_or_create(session_key, dict),
                     condition=_warmth_bucket(_prev_state.get("warmth")),
-                ) or "……（我想说点什么，可话到嘴边又散了，再给我一秒。）"
+                ) or LAST_RESORT_FALLBACK_TEXT
             logger.info(
                 f"Sylanne empty reply -> fallback (no ghost): session={session_key} "
                 f"reason={_reason} raw_len={len(text)} fallback_len={len(_fallback)}"

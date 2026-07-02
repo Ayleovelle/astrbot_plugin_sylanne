@@ -25,7 +25,7 @@ from sylanne_alpha.v2core.renderer import (
     StateProjector,
     _DEFAULT_FALLBACK_TEXT,
 )
-from sylanne_alpha.variant_pool import choose, warmth_bucket
+from sylanne_alpha.variant_pool import LAST_RESORT_FALLBACK_TEXT, choose, warmth_bucket
 
 
 # ===========================================================================
@@ -67,6 +67,33 @@ def test_choose_state_none_is_stateless_but_safe() -> None:
     """state=None 时不去重，也不应抛异常（无 session 上下文可用时的兜底路径）。"""
     for _ in range(20):
         assert choose(["only"], recent_key="k", state=None) == "only"
+
+
+def test_choose_single_candidate_bucket_still_records_into_state() -> None:
+    """MINOR 回归（2026-07-02 修）：单候选桶挑选也要落进 dedup 历史，否则调用方在同一
+    recent_key 下于单候选桶与多候选桶之间切换时，前一次单候选挑选不计入 avoid 集合。"""
+    state: dict[str, list[str]] = {}
+    picked = choose(["only"], recent_key="k", state=state, recent_n=2)
+    assert picked == "only"
+    assert state["k"] == ["only"], "单候选桶挑选未记入 state（recent-N 历史缺失一条）"
+
+
+def test_choose_single_candidate_then_multi_candidate_avoids_immediate_repeat() -> None:
+    """接上一条：单候选桶 -> 多候选桶（含同名候选）切换时，avoid 集合要生效。"""
+    state: dict[str, list[str]] = {}
+    picked_single = choose(["x"], recent_key="k", state=state, recent_n=2)
+    assert picked_single == "x"
+    for _ in range(20):
+        picked_multi = choose(["x", "y", "z"], recent_key="k", state=state, recent_n=2)
+        assert picked_multi != "x", "紧跟单候选桶挑选之后不应立刻复读同一个候选"
+        break
+
+
+def test_last_resort_fallback_text_shared_by_renderer_and_pipeline() -> None:
+    """MINOR 修复回归：renderer._DEFAULT_FALLBACK_TEXT 与 llm_response_pipeline 引用的
+    LAST_RESORT_FALLBACK_TEXT 是同一份常量，不再各自内联复制字符串字面量。"""
+    assert LAST_RESORT_FALLBACK_TEXT == _DEFAULT_FALLBACK_TEXT
+    assert LAST_RESORT_FALLBACK_TEXT is _DEFAULT_FALLBACK_TEXT
 
 
 def test_warmth_bucket_thresholds() -> None:
