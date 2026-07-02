@@ -77,6 +77,12 @@
     "default": false,
     "hint": "默认关闭；用于对话分段和打断识别，不恢复旧 realtime engine。"
   },
+  "sylanne_alpha_afterthought_enabled": {
+    "description": "启用补刀/改口（回复发完后偶尔追加一句）",
+    "type": "bool",
+    "default": false,
+    "hint": "默认关闭；开启后一段 SPEAK 分段回复正常发完（未被打断）时，按当轮表达驱动力算一个概率骰子，命中则在 20~180 秒后追发一条很短的补充或更正——像人一样话说完了又想起点什么。用户在此期间发了任何消息则自动取消。内容优先复用现成的未发完/被打断残留文本（零额外开销），否则走一次极短的 LLM 调用生成一句话。同会话至少间隔 8 轮交流才会再触发一次（仅会话内计数，重启清零）。仅在 sylanne_alpha_realtime_chat_enabled + sylanne_alpha_realtime_intercept_llm_response 都开启时才有意义。"
+  },
   "sylanne_alpha_proactive_dispatch_enabled": {
     "description": "启用 Sylanne 主动发起派发",
     "type": "bool",

@@ -81,6 +81,23 @@ _THINK_TENSION_WEIGHT = 0.6  # 紧张一点点拖慢启动（呼应 cps 里 tens
 _THINK_JITTER_MIN = 0.85
 _THINK_JITTER_MAX = 1.2
 
+# T2-02 补刀与改口：一段 SPEAK 分段回复正常发完（未被打断）后，按表达驱动力算一个
+# 概率骰子，命中则 20~180s 后追发一句很短的补充/更正。杀的问题：她说完话就再没
+# 声了——unfinished_replies/断点残留只会在【下一轮用户消息】里被动带出，从不会
+# 自己先开口补一句。默认关闭（sylanne_alpha_afterthought_enabled）。
+_AFTERTHOUGHT_DELAY_MIN = 20.0
+_AFTERTHOUGHT_DELAY_MAX = 180.0
+# 概率 = floor + drive_weight * expression_drive（[0,1] 上的表达驱动力，同 rhythm_learner
+# 用的那个 host.kernel.computation.engine.expression_drive()），clamp 到 [floor, ceil]。
+_AFTERTHOUGHT_PROB_FLOOR = 0.05
+_AFTERTHOUGHT_PROB_CEIL = 0.45
+_AFTERTHOUGHT_PROB_DRIVE_WEIGHT = 0.40
+# 冷却：同会话至少隔 8 轮"发完一段完整回复"才允许再触发一次，避免刷屏。
+_AFTERTHOUGHT_REFRACTORY_EXCHANGES = 8
+# 追发首段前的固定小延迟（不用 think_delay 那套读信逻辑——这不是在回一条新消息，
+# 是她自己突然想起点什么，不需要"读信"时间）。
+_AFTERTHOUGHT_FIRST_DELAY = 0.6
+
 
 class LLMResponsePipeline:
     """LLM 响应处理管线，封装 Sylanne 插件的响应拦截逻辑。
@@ -501,6 +518,15 @@ class LLMResponsePipeline:
         )
         self._p._store.segmented_tasks.set(session_key, task)
 
+        # T2-02①：SPEAK 分段发送任务正常发完（未被打断/未炸）后，按表达驱动力
+        # 概率骰子决定要不要在 20~180s 后追发一句补刀/改口。config 关闭时
+        # 回调内部第一件事就是查 config 直接 return（零行为/零额外状态分配）。
+        task.add_done_callback(
+            lambda t: self._on_segment_dispatch_done_maybe_afterthought(
+                t, session_key, origin, expr_drive
+            )
+        )
+
         # 将观测任务从热路径移出，后台异步执行
         obs_task = safe_ensure_future(
             self._background_observe_response(session_key, cleaned),
@@ -751,6 +777,193 @@ class LLMResponsePipeline:
         # 所有段发送成功——清除未完成标记
         if session_key:
             self._p._store.unfinished_replies.pop(session_key, None)
+
+    # ------------------------------------------------------------------
+    # T2-02 补刀与改口
+    # ------------------------------------------------------------------
+    @staticmethod
+    def _afterthought_probability(expression_drive: float) -> float:
+        """表达驱动力 → 触发概率，线性映射后 clamp 到 [floor, ceil]。"""
+        drive = max(0.0, min(1.0, expression_drive))
+        prob = _AFTERTHOUGHT_PROB_FLOOR + drive * _AFTERTHOUGHT_PROB_DRIVE_WEIGHT
+        return max(_AFTERTHOUGHT_PROB_FLOOR, min(_AFTERTHOUGHT_PROB_CEIL, prob))
+
+    @staticmethod
+    def _afterthought_roll(probability: float, rng: random.Random | None = None) -> bool:
+        picker = rng if rng is not None else random
+        return picker.random() < probability
+
+    @staticmethod
+    def _afterthought_delay(rng: random.Random | None = None) -> float:
+        picker = rng if rng is not None else random
+        return picker.uniform(_AFTERTHOUGHT_DELAY_MIN, _AFTERTHOUGHT_DELAY_MAX)
+
+    @staticmethod
+    def _afterthought_refractory_ok(exchange_count: int, last_fired_at: int) -> bool:
+        """至少隔 _AFTERTHOUGHT_REFRACTORY_EXCHANGES 轮"发完一段完整回复"才放行。"""
+        return (exchange_count - last_fired_at) >= _AFTERTHOUGHT_REFRACTORY_EXCHANGES
+
+    def _afterthought_state(self, session_key: str) -> dict[str, int]:
+        return self._p._store.afterthought_state.get_or_create(
+            session_key, lambda: {"exchange_count": 0, "last_fired_at": -1_000_000}
+        )
+
+    def _on_segment_dispatch_done_maybe_afterthought(
+        self,
+        task: Any,
+        session_key: str,
+        origin: str,
+        expression_drive: float,
+        *,
+        rng: random.Random | None = None,
+    ) -> None:
+        """T2-02①：一段 SPEAK 分段回复正常发完（未取消/未炸）后的挂钩。
+
+        config 关闭 → 立即 return，不分配任何 refractory 状态、不骰子（"config off =
+        零行为"）。被打断（task.cancelled()）或分段发送本身炸了（task.exception()
+        非空）都不算"正常发完"，不触发。
+        """
+        try:
+            if task.cancelled():
+                return
+            if task.exception() is not None:
+                return
+        except asyncio.CancelledError:
+            return
+        cfg = self._p._config or {}
+        if not bool(cfg.get("sylanne_alpha_afterthought_enabled")):
+            return
+        state = self._afterthought_state(session_key)
+        state["exchange_count"] = int(state.get("exchange_count", 0)) + 1
+        if not self._afterthought_refractory_ok(
+            state["exchange_count"], int(state.get("last_fired_at", -1_000_000))
+        ):
+            return
+        probability = self._afterthought_probability(expression_drive)
+        if not self._afterthought_roll(probability, rng=rng):
+            return
+        # T2-02③ 取消判定：本想用 conversation_input_epoch，但排查发现它只在【消息
+        # 撤回】特殊路径才递增（见 public_api.py withdraw 处理），普通用户消息完全
+        # 不碰它——拿它当锚点等于取消判定永远命不中（epoch_at_dispatch 恒为 0，
+        # 之后也恒为 0，`>` 判断恒假）。改用 card 给的 fallback：
+        # last_user_message_time——main.py on_message 对【每条】消息都更新它，是
+        # 真正随用户插话推进的信号。锚定当前值，_fire_afterthought 醒来后一旦发现
+        # 该值前进了，说明用户在等待期间说了话，取消补刀。
+        anchor_last_user_at = self._p._store.last_user_message_time.get(
+            session_key, 0.0
+        )
+        delay = self._afterthought_delay(rng=rng)
+        afterthought_task = safe_ensure_future(
+            self._fire_afterthought(session_key, origin, anchor_last_user_at, delay),
+            name="afterthought",
+        )
+        ensure_background_tasks_list(self._p).append(afterthought_task)
+        # 双保险：也挂到 segmented_tasks——llm_request_pipeline 收到下一条真实用户
+        # 请求时会自动 cancel 该 slot 里过期的分段任务（既有机制，:1126 附近），
+        # 补刀的睡眠/发送因此也能被这条路径兜住，不必只靠时间戳判定单点防线。
+        self._p._store.segmented_tasks.set(session_key, afterthought_task)
+        afterthought_task.add_done_callback(
+            lambda t: (
+                self._p._background_tasks.remove(t)
+                if t in self._p._background_tasks
+                else None
+            )
+        )
+
+    def _afterthought_content_from_remnants(self, session_key: str) -> str:
+        """T2-02②(a)：零额外 LLM 开销的内容来源——现成的 unfinished_replies /
+        未消费的中断断点残留（都是"这轮本来还有话没说完"的真实素材）。"""
+        remnant = self._p._store.unfinished_replies.get(session_key)
+        if remnant and str(remnant).strip():
+            text = str(remnant).strip()
+            self._p._store.unfinished_replies.pop(session_key, None)
+            return text
+        bps = getattr(self._p, "_interrupted_reply_breakpoints", {})
+        entries = bps.get(session_key) or []
+        for entry in reversed(entries):
+            if entry.get("consumed"):
+                continue
+            unsent = entry.get("unsent_parts") or []
+            text = "".join(str(p) for p in unsent).strip()
+            if text:
+                entry["consumed"] = True
+                entry["consumed_reason"] = "afterthought"
+                return text
+        return ""
+
+    async def _afterthought_llm_content(self, session_key: str) -> str:
+        """T2-02②(b)：没有现成残留时，走一次极短 prompt 的 cheap LLM 调用
+        （复用 assessor provider 链路，不是新开一条昂贵通路）。"""
+        last_reply = str(self._p._store.last_bot_texts.get(session_key, "") or "")
+        if not last_reply:
+            return ""
+        prompt = (
+            "你是苏思澜，刚才对男友说了这句话：\n"
+            f"「{last_reply}」\n"
+            "现在突然想再补一条很短的追加或更正，用你平时的口吻，只要一句话，"
+            "不用称呼开头，不用解释，不要加引号。"
+        )
+        caller = getattr(self._p, "_assessor_llm_call", None)
+        if not callable(caller):
+            return ""
+        try:
+            raw = await caller(prompt)
+        except Exception as e:
+            logger.debug(f"Sylanne afterthought llm call skipped: {e}")
+            return ""
+        text = normalize_completion_text(raw)
+        text = strip_draft_blocks(text)
+        text = self._sanitize_response(text)
+        return text.strip()
+
+    def _afterthought_interrupted(
+        self, session_key: str, anchor_last_user_at: float
+    ) -> bool:
+        """T2-02③：用户在锚定时刻之后是否又发了消息（last_user_message_time 前进）。"""
+        current = self._p._store.last_user_message_time.get(session_key, 0.0) or 0.0
+        return current > anchor_last_user_at
+
+    async def _fire_afterthought(
+        self, session_key: str, origin: str, anchor_last_user_at: float, delay: float
+    ) -> None:
+        """T2-02①②③④：睡够随机延迟后，若用户没插话就补发一条很短的补刀/改口，
+        走和正常回复一样的分段发送路径（④，让 wave-1 的打字节奏照常生效）。"""
+        try:
+            await asyncio.sleep(delay)
+        except asyncio.CancelledError:
+            raise
+        if self._afterthought_interrupted(session_key, anchor_last_user_at):
+            return
+        cfg = self._p._config or {}
+        if not bool(cfg.get("sylanne_alpha_afterthought_enabled")):
+            return
+        content = self._afterthought_content_from_remnants(session_key)
+        if not content:
+            content = await self._afterthought_llm_content(session_key)
+        if not content:
+            return
+        # LLM 调用可能耗了几秒——发之前再核一次用户没插话
+        if self._afterthought_interrupted(session_key, anchor_last_user_at):
+            return
+        host = self._p._host(session_key)
+        cps = self._body_driven_cps(host)
+        max_part = int(cfg.get("realtime_chat_max_part_chars", 48))
+        plan = realtime_plan(
+            session_key,
+            content,
+            max_part_chars=max_part,
+            chars_per_second=cps,
+            first_delay=_AFTERTHOUGHT_FIRST_DELAY,
+        )
+        parts = plan.get("message_parts", [])
+        if not parts:
+            return
+        logger.info(
+            f"Sylanne afterthought queued: session={session_key} parts={len(parts)}"
+        )
+        await self._dispatch_segmented_parts(origin, parts, session_key=session_key)
+        state = self._afterthought_state(session_key)
+        state["last_fired_at"] = state.get("exchange_count", 0)
 
     # ------------------------------------------------------------------
     # Memory prompt fragment

@@ -178,6 +178,12 @@ class SessionStateStore:
         # 参数直接就是内层 dict（按模板家族 recent_key 分列，如 "empty_reply_fallback"）。
         self.variant_recent: SessionMap = self._reg("variant_recent", BoundedDict(maxsize=200))
 
+        # ---- T2-02：补刀/改口 refractory 计数（仅会话内，不落 KV，重启清零）----
+        # {session_key: {"exchange_count": int, "last_fired_at": int}}——
+        # exchange_count 每次 SPEAK 分段回复正常发完 +1，last_fired_at 记录上次真正
+        # 触发补刀时的 exchange_count，两者差 >= 8 才允许再骰一次。
+        self.afterthought_state: SessionMap = self._reg("afterthought_state", BoundedDict(maxsize=200))
+
         # ---- 其他运行态 ----
         self.last_user_message_time: SessionMap = self._reg("last_user_message_time", BoundedDict(maxsize=200))
         # 短 gap 慢变信号比较用：上一轮注入的 {warmth,tension}（2.1.0 从 kernel slot 挪来——
