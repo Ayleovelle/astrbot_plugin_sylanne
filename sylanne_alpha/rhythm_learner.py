@@ -101,6 +101,25 @@ class RhythmProfile:
         sorted_gaps = sorted(self._inter_msg_gaps)
         return sorted_gaps[len(sorted_gaps) // 2]
 
+    def intra_burst_median_gap_seconds(
+        self, burst_threshold: float = 10.0
+    ) -> float | None:
+        """连发内间隔中位数（秒）——只用小于 burst_threshold 的样本。
+
+        review 发现：median_gap_seconds() 的全量样本混着"两条连发之间隔几秒"和
+        "一轮对话结束到下一轮重新开口之间隔几十秒"两种截然不同的停顿，成熟画像
+        的全量中位数几乎总落在几十秒量级——用它去撑 T2-04③ 的自适应合并窗口，
+        会把 clamp 钝化成常量 8.0s 天花板，等于没自适应。这里先过滤掉像是跨轮
+        停顿的大间隔样本，只留"像连发"的间隔再取中位数，更贴近"这个人连着发
+        消息时，条与条之间隔多久"这个问题本身。
+
+        样本不足（过滤后 <3）时返回 None，调用方应回退默认值/整体中位数。
+        """
+        candidates = sorted(g for g in self._inter_msg_gaps if g < burst_threshold)
+        if len(candidates) < 3:
+            return None
+        return candidates[len(candidates) // 2]
+
     @property
     def confidence(self) -> float:
         return self._confidence
@@ -308,6 +327,21 @@ class RhythmLearner:
         if profile is None or profile.confidence < 0.1:
             return None
         return profile.median_gap_seconds()
+
+    def get_intra_burst_median_gap(
+        self, session_key: str, burst_threshold: float = 10.0
+    ) -> float | None:
+        """获取该会话"像连发"的消息间隔中位数（秒），排除跨轮对话停顿污染。
+
+        门槛与 get_median_inter_message_gap 一致（confidence >= 0.1）。供 T2-04②③
+        自适应探测/合并窗口使用——比全量中位数更贴近"这个人连发时条与条之间
+        隔多久"，不会被对话轮次之间的长静默拉高（见
+        RhythmProfile.intra_burst_median_gap_seconds 的 review 说明）。
+        """
+        profile = self._profiles.get(session_key)
+        if profile is None or profile.confidence < 0.1:
+            return None
+        return profile.intra_burst_median_gap_seconds(burst_threshold)
 
     # ------------------------------------------------------------------
     # Item 79: 回复长度自适应控制器

@@ -764,14 +764,50 @@ class LLMRequestPipeline:
     def _adaptive_max_wait(configured_max_wait: float, median_gap: float | None) -> float:
         """T2-04③：碎片合并窗口自适应——用已学到的用户消息间隔中位数替代固定窗口。
 
-        画像还不成熟（median_gap 为 None，即 RhythmLearner.get_median_inter_message_gap
+        画像还不成熟（median_gap 为 None，即 RhythmLearner.get_intra_burst_median_gap
         因样本不足/未达亲密门槛而拒答）时原样回退调用方传入的配置/默认值，零行为变化。
         画像可用时 clamp 到 [1.5, 8.0] 秒——下限护住极快打字者不被压到不合理的窗口，
         上限护住慢打字者不会让防抖等成十几秒的静默感。
+
+        决策记录（review MINOR-3，接受的权衡）：median_gap 落在 [1.5, 4.0) 区间时
+        （手速快、连发间隔本就短于默认 4s 的用户）本函数会把 max_wait 收窄到低于
+        configured_max_wait——这是有意的，让这类用户不必死等固定 4s 才被强制领走；
+        代价是这类用户长连发会比改动前更早触发 elapsed>=max_wait 强制切分，切分点
+        更多但更贴近其真实节奏，不是"越切越碎"。见
+        test_median_gap_below_configured_can_force_earlier_claim_is_accepted_tradeoff。
         """
         if median_gap is None:
             return configured_max_wait
         return max(1.5, min(8.0, median_gap))
+
+    @staticmethod
+    def _adaptive_probe_delay(
+        configured_probe_delay: float,
+        median_gap: float | None,
+        already_bursting: bool,
+    ) -> float:
+        """T2-04②(review 补丁，MAJOR 修复)：连发中途放宽单条探测等待。
+
+        根因：真正卡住"慢打字连发"的是 probe_delay，不是 max_wait——每条碎片到达后
+        只睡 probe_delay（固定约 1.5s）就检查自己是否仍是最新，若下一条消息到达
+        晚于 probe_delay，当前这条会先被当赢家提前领走并 pop 整个缓冲，max_wait
+        的强制兜底根本没有机会介入。间隔中位数 > 1.5s 的用户（也就是"慢打字连发"
+        这个人群本身）此前对自适应 max_wait 完全免疫，行为和改动前逐字节相同。
+
+        不能无条件放宽 probe_delay——那会让每一条孤立的单发消息都多等一截，伤到
+        所有人的首字延迟。折中：只在"已确认这是连发中的第 2 条或更晚"（调用方在
+        领号入缓冲之后传入 already_bursting=len(buf['texts'])>=2）时才用画像学到
+        的连发内间隔中位数（intra-burst，已按 rhythm_learner.py 的 burst_threshold
+        过滤跨轮对话停顿）撑住等待窗口；真正孤立的第一条消息仍按配置的 probe_delay
+        走，不额外等待。clamp 到 [1.5, 4.0] 秒——上限比 max_wait 的 8.0s 更保守，
+        因为这是每条碎片都可能触发的等待，不是整个缓冲区只算一次的兜底窗口。
+
+        画像不成熟（median_gap=None）或本条本就是这个 burst 里的第一条时原样回退
+        configured_probe_delay，零行为变化。
+        """
+        if not already_bursting or median_gap is None:
+            return configured_probe_delay
+        return max(configured_probe_delay, max(1.5, min(4.0, median_gap)))
 
     async def _on_llm_request_inner(self, event: Any, request: Any) -> None:
         """LLM 请求拦截的主入口。
@@ -893,19 +929,18 @@ class LLMRequestPipeline:
                 (p.config or {}).get("realtime_input_completion_max_wait_seconds", 4.0)
             )
             # T2-04③：自适应合并窗口——慢打字/爱分段的人本该给更宽的等待，手速快的
-            # 不必死等固定 4s。用 RhythmLearner 已学到的用户消息间隔中位数替代固定
-            # max_wait；画像还不成熟（样本不足/未达亲密门槛）时 get_median_inter_message_gap
-            # 返回 None，原样回退到上面算出的配置/默认值，零行为变化。
+            # 不必死等固定 4s。用 RhythmLearner 已学到的"连发内"消息间隔中位数
+            # （intra-burst，已过滤跨轮对话停顿，见 rhythm_learner.py 的
+            # get_intra_burst_median_gap；review 发现全量中位数被跨轮静默污染，
+            # 成熟画像几乎总落在几十秒量级，会把这里钝化成常量 8.0s 天花板）替代
+            # 固定 max_wait；画像还不成熟（样本不足/未达亲密门槛）时返回 None，原样
+            # 回退到上面算出的配置/默认值，零行为变化。
             median_gap = None
             try:
-                median_gap = p._rhythm_learner.get_median_inter_message_gap(session_key)
+                median_gap = p._rhythm_learner.get_intra_burst_median_gap(session_key)
             except Exception:
                 median_gap = None
             max_wait = self._adaptive_max_wait(max_wait, median_gap)
-            # 防误配：probe_delay >= max_wait 会让首个醒来的碎片必然命中 max_wait 兜底
-            # 而提前 pop（防抖窗口塌缩），故 clamp 到 max_wait 的 0.8 倍留出兜底余量。
-            if max_wait > 0 and probe_delay >= max_wait:
-                probe_delay = max_wait * 0.8
             buffers = p._store.fragment_buffers
 
             # ---- 同步段A：领号 + 入缓冲（无 await，单线程原子）----
@@ -917,6 +952,19 @@ class LLMRequestPipeline:
             my_seq = buf["latest_seq"]
             buf["texts"].append(message_text)
             start_time = buf["start_time"]
+
+            # T2-04②(review 补丁，MAJOR 修复)：只有本条已是这个 burst 里第 2+ 条时
+            # 才放宽单条探测等待，避免给每条孤立单发消息都加时延；细节见
+            # _adaptive_probe_delay 文档。
+            already_bursting = len(buf["texts"]) >= 2
+            probe_delay = self._adaptive_probe_delay(
+                probe_delay, median_gap, already_bursting
+            )
+            # 防误配：probe_delay >= max_wait 会让首个醒来的碎片必然命中 max_wait 兜底
+            # 而提前 pop（防抖窗口塌缩），故 clamp 到 max_wait 的 0.8 倍留出兜底余量。
+            # 放在②放宽 probe_delay 之后再兜底一次，防止②把它顶到 >= max_wait。
+            if max_wait > 0 and probe_delay >= max_wait:
+                probe_delay = max_wait * 0.8
 
             # ---- 让出：等待更晚碎片到达并刷新 latest_seq ----
             await asyncio.sleep(probe_delay)
@@ -947,16 +995,23 @@ class LLMRequestPipeline:
                     return
                 # T2-04①：连发不缝合（细节见 _merge_fragments）。
                 n_frags = len(claimed["texts"])
-                merged = self._merge_fragments(claimed["texts"])
+                merged_plain = "\n".join(claimed["texts"])
+                merged_prompt = self._merge_fragments(claimed["texts"])
                 if n_frags >= 2:
                     # 瞬态标记：仅供本轮 v2core 心象层（apply_v2core_request）读取，
                     # 不写入任何持久化存储，下一轮 event 是新对象、自动失效。
                     event._sylanne_burst_count = n_frags
-                # 关键：LLM 实际读 req.prompt（req 在 hook 之前已 build），必须改这个
-                request.prompt = merged
-                event.message_str = merged  # 供历史/其他钩子
-                message_text = merged
-                logger.info("Sylanne fragment merged (winner): %s", merged[:60])
+                # 关键：LLM 实际读 req.prompt（req 在 hook 之前已 build），必须改这个；
+                # 合并标记『(他连着发了N条)』只应出现在喂给 LLM 的 prompt 里——
+                # event.message_str / message_text 还会流入记忆观测
+                # （_clean_incoming_message → _background_observe_request）和 v2core
+                # 感知召回（_user_text → _percept_recall），那两处存的该是"用户说了
+                # 什么"，不该带这条元指令标记（review MINOR 修复：标记曾经泄漏进
+                # 记忆与召回查询）。
+                request.prompt = merged_prompt
+                event.message_str = merged_plain  # 供历史/其他钩子（不含合并标记）
+                message_text = merged_plain
+                logger.info("Sylanne fragment merged (winner): %s", merged_prompt[:60])
                 # fall-through 到下方 _process_llm_request_final（不 stop）
             else:
                 # 有更晚碎片，本条作废

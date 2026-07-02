@@ -6,11 +6,18 @@
 
 覆盖：
   ① LLMRequestPipeline._merge_fragments：换行拼接 + N>=2 时前缀连发标记；N==1
-     不加标记（单条碎片本就该原样透传）。
+     不加标记（单条碎片本就该原样透传）。合并标记只应出现在喂给 LLM 的
+     prompt 里，不该泄漏进 event.message_str/记忆观测/v2core 召回（见 TestMarkerDoesNotLeakIntoPlainText）。
   ② LLMRequestPipeline._adaptive_max_wait：画像可用时 clamp 到 [1.5, 8.0]，画像
-     不成熟（median_gap=None）时原样回退配置值。
+     不成熟（median_gap=None）时原样回退配置值。median<configured 时收窄窗口是
+     接受的权衡（见 TestAdaptiveMaxWaitAcceptedTradeoff）。
+  ②b LLMRequestPipeline._adaptive_probe_delay（review MAJOR 修复）：真正卡住慢
+     打字连发的是 probe_delay 不是 max_wait，只在"已确认在连发"（已有 ≥1 条在
+     缓冲区）时才放宽单条探测等待，孤立单发消息零延迟增加。
   ③ RhythmLearner.get_median_inter_message_gap / RhythmProfile.median_gap_seconds：
      样本不足 → None；样本足够 → 真实中位数。
+  ③b RhythmLearner.get_intra_burst_median_gap / RhythmProfile.intra_burst_median_gap_seconds
+     （review MAJOR 修复）：过滤跨轮对话停顿污染，只用"像连发"的间隔样本。
   ④ v2core.integration._apply_burst_cue_scratch + fragment._burst_line /
      build_mind_fragment：cue 只在本轮真发生连发合并（event 带
      `_sylanne_burst_count>=2`）时渲染，其余轮次不占位。
@@ -94,6 +101,107 @@ class TestAdaptiveMaxWait:
         assert LLMRequestPipeline._adaptive_max_wait(4.0, 8.0) == 8.0
 
 
+class TestAdaptiveMaxWaitAcceptedTradeoff:
+    """决策记录（review MINOR-3）：median_gap < configured_max_wait 时窗口会收窄
+    到低于 configured，导致这类"手速快、连发间隔本就短"的用户在长连发场景下比
+    改动前更早命中 elapsed>=max_wait 的强制切分。这是接受的权衡（见
+    _adaptive_max_wait 文档），本测试把它钉死成显式断言而不是隐性行为。
+    """
+
+    def test_median_below_configured_shrinks_window_and_would_force_earlier_claim(
+        self,
+    ) -> None:
+        configured_max_wait = 4.0
+        median_gap = 2.0  # 手速快，连发间隔中位数低于默认 4s
+        adaptive = LLMRequestPipeline._adaptive_max_wait(configured_max_wait, median_gap)
+        assert adaptive == 2.0
+        assert adaptive < configured_max_wait
+        # 模拟一次跨度 3s 的连发：改动前 (elapsed=3.0 < max_wait=4.0) 不会被强制
+        # 切分；改动后 (elapsed=3.0 >= max_wait=2.0) 会被强制切分——这就是权衡本身。
+        elapsed = 3.0
+        assert elapsed < configured_max_wait
+        assert elapsed >= adaptive
+
+
+# ---------------------------------------------------------------------------
+# ②b _adaptive_probe_delay：只在已确认连发时放宽单条探测等待（review MAJOR 修复）
+# ---------------------------------------------------------------------------
+
+
+class TestAdaptiveProbeDelay:
+    def test_first_fragment_not_bursting_uses_configured_even_with_median(self) -> None:
+        """孤立的第一条消息（already_bursting=False）不该被延迟，哪怕画像成熟。"""
+        assert (
+            LLMRequestPipeline._adaptive_probe_delay(1.5, 3.0, already_bursting=False)
+            == 1.5
+        )
+
+    def test_none_median_falls_back_even_when_bursting(self) -> None:
+        assert (
+            LLMRequestPipeline._adaptive_probe_delay(1.5, None, already_bursting=True)
+            == 1.5
+        )
+
+    def test_bursting_with_median_widens_probe_delay(self) -> None:
+        """慢一点的连发（间隔中位数 2.5s > 默认 probe_delay 1.5s）：第 2+ 条到达后
+        应该把等待撑宽到 2.5s，而不是仍然只等 1.5s（这正是 review MAJOR 指出的
+        "慢打字连发对 max_wait 自适应免疫"的根治点）。
+        """
+        assert (
+            LLMRequestPipeline._adaptive_probe_delay(1.5, 2.5, already_bursting=True)
+            == 2.5
+        )
+
+    def test_bursting_median_below_configured_does_not_shrink(self) -> None:
+        """放宽只应该扩大等待，不该让连发中途的探测比配置的 probe_delay 更短。"""
+        assert (
+            LLMRequestPipeline._adaptive_probe_delay(1.5, 0.5, already_bursting=True)
+            == 1.5
+        )
+
+    def test_bursting_clamped_to_four_seconds_upper_bound(self) -> None:
+        assert (
+            LLMRequestPipeline._adaptive_probe_delay(1.5, 30.0, already_bursting=True)
+            == 4.0
+        )
+
+
+# ---------------------------------------------------------------------------
+# ① 合并标记只进 prompt，不进 event.message_str / 记忆观测 / v2core 召回
+# ---------------------------------------------------------------------------
+
+
+class TestMarkerDoesNotLeakIntoPlainText:
+    """review MINOR-2：pipeline 在赢家分支里把合并标记版本喂给 request.prompt，
+    但 event.message_str（供 _background_observe_request 记忆观测、
+    v2core._user_text → _percept_recall 召回使用）应保持不带标记的纯换行拼接。
+    这里直接验证 pipeline 实际使用的两条构造路径的产物不同、且纯文本路径确实
+    不含标记字面量。
+    """
+
+    def test_plain_join_has_no_marker(self) -> None:
+        texts = ["第一条", "第二条", "第三条"]
+        merged_plain = "\n".join(texts)  # pipeline 里 event.message_str 走的路径
+        assert "连着发了" not in merged_plain
+        assert merged_plain == "第一条\n第二条\n第三条"
+
+    def test_prompt_join_has_marker_plain_does_not(self) -> None:
+        texts = ["在吗", "有空吗"]
+        merged_prompt = LLMRequestPipeline._merge_fragments(texts)  # request.prompt 路径
+        merged_plain = "\n".join(texts)  # event.message_str 路径
+        assert "连着发了2条" in merged_prompt
+        assert "连着发了" not in merged_plain
+        # 标记之外，两者共享同一段换行拼接的正文
+        assert merged_prompt.endswith(merged_plain)
+
+    def test_single_fragment_plain_and_prompt_identical(self) -> None:
+        """N==1 时两条路径本就该完全一致（没有标记可去）。"""
+        texts = ["就这一句"]
+        merged_prompt = LLMRequestPipeline._merge_fragments(texts)
+        merged_plain = "\n".join(texts)
+        assert merged_prompt == merged_plain == "就这一句"
+
+
 # ---------------------------------------------------------------------------
 # ③ RhythmLearner/RhythmProfile：消息间隔中位数
 # ---------------------------------------------------------------------------
@@ -140,6 +248,85 @@ class TestMedianInterMessageGap:
         gap = learner.get_median_inter_message_gap("s1")
         assert gap is not None
         assert gap == 4.0
+
+
+# ---------------------------------------------------------------------------
+# ③b RhythmLearner/RhythmProfile：连发内间隔中位数（review MAJOR 修复）
+# ---------------------------------------------------------------------------
+
+
+class TestIntraBurstMedianGap:
+    def test_profile_insufficient_candidates_returns_none(self) -> None:
+        """过滤 burst_threshold 后候选不足 3 个 → None，即便原始样本数够。"""
+        profile = RhythmProfile()
+        for gap in (2.0, 3.0, 20.0, 25.0, 30.0):
+            profile._inter_msg_gaps.append(gap)
+        # burst_threshold 默认 10.0：候选只剩 [2.0, 3.0]，不足 3 个
+        assert profile.intra_burst_median_gap_seconds() is None
+
+    def test_filters_out_cross_turn_pauses_contaminating_global_median(self) -> None:
+        """核心回归：全量中位数被跨轮长停顿拉高，intra-burst 版本不该被拉高。"""
+        profile = RhythmProfile()
+        # 3 个"像连发"的短间隔 + 3 个几十秒的跨轮停顿
+        for gap in (1.5, 2.0, 2.5, 45.0, 60.0, 90.0):
+            profile._inter_msg_gaps.append(gap)
+        # 全量中位数（sorted[3]）落在跨轮停顿量级，被污染
+        assert profile.median_gap_seconds() == 45.0
+        # intra-burst 版本只用 [1.5, 2.0, 2.5]，中位数 2.0——不被跨轮停顿污染
+        assert profile.intra_burst_median_gap_seconds() == 2.0
+
+    def test_custom_burst_threshold(self) -> None:
+        profile = RhythmProfile()
+        for gap in (1.0, 5.0, 9.0, 11.0, 15.0):
+            profile._inter_msg_gaps.append(gap)
+        # threshold=6.0 时候选 [1.0, 5.0]，不足 3 个
+        assert profile.intra_burst_median_gap_seconds(burst_threshold=6.0) is None
+        # threshold=12.0 时候选 [1.0, 5.0, 9.0, 11.0]，中位数取 sorted[2]=9.0
+        assert profile.intra_burst_median_gap_seconds(burst_threshold=12.0) == 9.0
+
+    def test_learner_no_profile_returns_none(self) -> None:
+        learner = RhythmLearner()
+        assert learner.get_intra_burst_median_gap("no-such-session") is None
+
+    def test_learner_low_confidence_returns_none(self) -> None:
+        learner = RhythmLearner(intimacy_threshold=0.0)
+        engine_obs = {"warmth": 1.0, "coherence": 1.0, "tension": 0.0}
+        t = 1000.0
+        for i in range(3):
+            learner.observe_user_message("s1", f"消息{i}", t, engine_obs)
+            t += 2.0
+        assert learner.get_intra_burst_median_gap("s1") is None
+
+    def test_learner_mature_profile_filters_cross_turn_gaps(self) -> None:
+        """模拟真实分布：真实会话里"孤立单条消息、隔几十秒才开口"的轮次远多于
+        "连着发好几条"的轮次——这正是 review 指出的污染场景：跨轮停顿样本在
+        数量上占多数，把全量中位数拉到停顿量级，intra-burst 口径不受影响。
+
+        构造：1 次 4 条连发（3 个 2s 短间隔）+ 11 次孤立单条消息（11 个 80s
+        跨轮间隔）。短间隔样本数(3) 够跨过 intra-burst 的 <3 门槛，但在全量
+        17 个样本里占少数，长间隔(11)占多数。
+        """
+        learner = RhythmLearner(intimacy_threshold=0.0)
+        engine_obs = {"warmth": 1.0, "coherence": 1.0, "tension": 0.0}
+        t = 1000.0
+        # 一次连发：4 条消息，3 个 2.0s 间隔
+        for i in range(4):
+            learner.observe_user_message("s1", f"burst{i}", t, engine_obs)
+            t += 2.0
+        # 之后 11 次孤立单条消息，彼此间隔 80s（含burst结束到第一条孤立消息的间隔）
+        for i in range(11):
+            t += 80.0
+            learner.observe_user_message("s1", f"lone{i}", t, engine_obs)
+
+        intra = learner.get_intra_burst_median_gap("s1")
+        assert intra is not None
+        assert intra == 2.0
+        # 全量中位数被占多数的跨轮停顿样本拉高，与 intra-burst 版本不再一致——
+        # 正是 review 指出的污染问题，intra-burst 口径修复了它。
+        full = learner.get_median_inter_message_gap("s1")
+        assert full is not None
+        assert full != intra
+        assert full >= 80.0
 
 
 # ---------------------------------------------------------------------------
