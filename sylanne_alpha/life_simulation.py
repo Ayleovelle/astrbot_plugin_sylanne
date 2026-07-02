@@ -1726,6 +1726,35 @@ class LifeSimulator:
                 e.dropped_at = ts
                 return
 
+    def mark_outreach_withheld(self, event_id: str, now: float | None = None) -> None:
+        """T2-07③ 修复：她自己的门控/迟疑取消了这次投递（bridge gate 拒绝 / 最后一刻
+        犹豫收回），回写 LifeEvent.dropped_at（沿用 mark_outreach_dropped 的语义——
+        "没发出去"）的同时，同步把 outreach_audit 里对应的 pending 条目标成非惩罚性
+        的 "withheld"，而不是留在 "pending"。
+
+        若不这样做：_record_audit_dispatch 写下的 pending 条目会在原地等
+        _check_outreach_timeouts 在 OUTREACH_TIMEOUT_SECONDS 后把它标成
+        "unanswered"（因为用户在安静时段自然不会在 30 分钟内说话），
+        derive_dispatch_policy 再把这个 "unanswered" 计入 feedback_pressure/cooldown
+        ——等于她自己收回的发言反过来被记成用户冷淡，正是 T2-07③ 要消灭的场景。
+
+        按 event_id 扫全部 bucket（不局限于 _audit_session_key(e) 算出的单一 key），
+        防止 origin_session 与 dispatch 时的 audit key 因竞态或异常路径不一致而漏标。
+        """
+        ts = now if now is not None else time.time()
+        for e in self.state.events:
+            if e.event_id == event_id:
+                e.dropped_at = ts
+                break
+        for bucket in self.state.outreach_audit.values():
+            for entry in bucket:
+                if (
+                    entry.get("event_id") == event_id
+                    and entry.get("feedback_status") == "pending"
+                ):
+                    entry["feedback_status"] = "withheld"
+                    entry["timeout_at"] = ts
+
     def life_prompt_fragment(self, limit: int = 3, max_budget: int = 800) -> str:
         """渲染结构化生活上下文片段，供对话 prompt 注入（PR-B4，M5 改名）。
 

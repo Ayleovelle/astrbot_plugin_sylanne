@@ -2756,6 +2756,10 @@ class LLMRequestPipeline:
         - withheld = 她自己的门控/迟疑取消了这次发言（bridge gate 拒绝 / 最后一刻
           犹豫收回），不是用户没回应——T2-07③：不写惩罚性 unanswered audit，只回写
           LifeEvent 的 dropped_at（复用同一时间戳字段，语义上仍是"没发出去"）。
+          同时必须把 life_sim 侧 outreach_audit 里那条 dispatch 时写下的 pending
+          条目也一起标成非惩罚性的 "withheld"（见 mark_outreach_withheld），否则它
+          会在原地等 _check_outreach_timeouts 超时后被误标 unanswered，反过来抬高
+          feedback_pressure/cooldown——等于她自己的收回被记成用户冷淡。
         audit 按 session_key 索引（origin_session 隔离：A 没回应不抬 B 的 cooldown）。
         """
         if not event_id:
@@ -2777,8 +2781,10 @@ class LLMRequestPipeline:
                 life_sim.mark_outreach_dispatched(event_id, now)
             elif outcome == "consumed":
                 life_sim.mark_outreach_consumed(event_id, now)
-            elif outcome in ("dropped", "withheld"):
+            elif outcome == "dropped":
                 life_sim.mark_outreach_dropped(event_id, now)
+            elif outcome == "withheld":
+                life_sim.mark_outreach_withheld(event_id, now)
         except Exception as e:
             # 不静默吞（implementation ruling §5）：warning 可观测，但不 raise、不改主流程——
             # 四时点回写失败不应中断 prompt 准备。
