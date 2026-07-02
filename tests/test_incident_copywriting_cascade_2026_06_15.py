@@ -111,7 +111,12 @@ class TestH3SegmentationNoCap:
         assert plan["message_count"] <= 12
         assert plan["uncapped_count"] >= 50  # 没熔断的话会爆
         delays = [p["delay_before_seconds"] for p in plan["message_parts"]]
-        assert sum(delays) <= 36.0 + 0.1
+        # T1-02 打碎节拍器后不再是纯确定性总和：逐段抖动(±40%，仍吃 min(4.2,...) 硬顶，
+        # 期望值贴近 36s 预算不加偏置) + 5% 概率的走神段可越顶冲到 9s。算式上界（不依赖
+        # 具体随机结果，恒成立）：非走神段每段硬顶 4.2s，至多一段走神硬顶 9s。
+        segment_count = len(delays)
+        worst_case_sum = max(0, segment_count - 1) * 4.2 + 9.0
+        assert sum(delays) <= worst_case_sum + 0.1
 
 
 class TestH6BufferIdleFlush:

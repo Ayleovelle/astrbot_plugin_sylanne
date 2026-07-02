@@ -54,6 +54,17 @@ _CHINA_TZ = timezone(timedelta(hours=8))
 # 序列化后的请求载荷最大字符数，超过则触发裁剪
 _MAX_PAYLOAD_SERIALIZED_CHARS = 60000
 
+# T1-02③ 身体驱动打字速度（chars/sec）。基线沿用原恒定默认值，energy/arousal
+# 各按 ±4.0 幅度围绕基线摆动，tension 只往下拖（紧张不会打字变快）；
+# 最终 clamp 到 [4.5, 11]（card 给定区间），energy=0/arousal=1 时约落在给定
+# 示例值 5.5 / 9.5 附近（验证见 tests/test_wave_l1_g4_liveness.py）。
+_DEFAULT_CPS = 7.5
+_CPS_MIN = 4.5
+_CPS_MAX = 11.0
+_CPS_ENERGY_WEIGHT = 4.0
+_CPS_AROUSAL_WEIGHT = 4.0
+_CPS_TENSION_WEIGHT = 1.0
+
 
 class LLMResponsePipeline:
     """LLM 响应处理管线，封装 Sylanne 插件的响应拦截逻辑。
@@ -89,6 +100,37 @@ class LLMResponsePipeline:
                 len(self._RE_SYLANNE_TAG.findall(text)),
             )
         return cleaned
+
+    # ------------------------------------------------------------------
+    # T1-02③ 身体驱动打字速度
+    # ------------------------------------------------------------------
+    @staticmethod
+    def _body_driven_cps(host: Any) -> float:
+        """从躯体状态推导打字速度（chars/sec），替代原恒定 7.5。
+
+        没精神（exhaustion 高 → energy 低）打字慢；情绪唤醒（arousal）高打字快；
+        张力（tension）高只往下拖一点（紧张不会让人打字变快）。三路信号都已经在
+        host.kernel 上（response 分段规划这条路径已经拿着 host 了，不新开管线）：
+          - energy = 1 - host.kernel.body.mortality.exhaustion
+          - arousal / tension 来自 host.kernel.computation.engine.observe()
+            （8 维情感空间的既有输出，同一 engine 上 expression_drive() 已在用）。
+        读取路径异常（缺字段/host 结构不符预期）时优雅退回默认值，绝不炸分段管线。
+        """
+        try:
+            exhaustion = float(host.kernel.body.mortality.exhaustion)
+            energy = max(0.0, min(1.0, 1.0 - exhaustion))
+            emotion = host.kernel.computation.engine.observe()
+            arousal = max(0.0, min(1.0, float(emotion.get("arousal", 0.5))))
+            tension = max(0.0, min(1.0, float(emotion.get("tension", 0.0))))
+        except (AttributeError, TypeError, ValueError, KeyError):
+            return _DEFAULT_CPS
+        cps = (
+            _DEFAULT_CPS
+            + (energy - 0.5) * _CPS_ENERGY_WEIGHT
+            + (arousal - 0.5) * _CPS_AROUSAL_WEIGHT
+            - tension * _CPS_TENSION_WEIGHT
+        )
+        return max(_CPS_MIN, min(_CPS_MAX, cps))
 
     # ------------------------------------------------------------------
     # Main response handler
@@ -244,8 +286,10 @@ class LLMResponsePipeline:
         origin = str(getattr(event, "unified_msg_origin", "") or "")
         cfg = self._p._config or {}
         default_max_part = int(cfg.get("realtime_chat_max_part_chars", 48))
-        default_cps = 7.5  # 默认每秒字符数（模拟打字速度）
         host = self._p._host(session_key)
+        # T1-02③：默认打字速度从恒定 7.5 改成躯体状态驱动——没精神打字慢，
+        # 情绪唤醒高打字快（"手抖打得快"）。host 在这里已经持有，复用而非新开管线。
+        default_cps = self._body_driven_cps(host)
         expr_drive = host.kernel.computation.engine.expression_drive()
         # 计算"最近被忽略"信号，用于调整节奏。T1-04③修复：原实现取
         # last_bot_expression_time.values()（跨所有会话的单值池），A 会话的节奏会被
