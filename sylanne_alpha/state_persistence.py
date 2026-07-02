@@ -1050,8 +1050,12 @@ class StatePersistence:
             return
 
         # AstrBot ConversationManager 按 unified_msg_origin 建索引，插件内部的
-        # session_key 群聊场景下会追加 ":sender_id" 后缀（session_context.py:
-        # session_key()），两者不是同一个 key 空间。llm_request_pipeline 在每次
+        # session_key 不是同一个 key 空间——且不止群聊场景：session_context.py:
+        # session_key() 的 base 取的是 event.session_id（取不到才退化到
+        # unified_msg_origin），本身就常常与 unified_msg_origin 不同；":sender_id"
+        # 后缀只要 event 带 sender_id/user_id（私聊消息通常也带）就会追加，并非
+        # "仅群聊"才有。两条差异叠加，session_key 在真实平台上几乎不可能等于
+        # unified_msg_origin。llm_request_pipeline 在每次
         # 请求时都会把 session_key → unified_msg_origin 的映射写进
         # p._store.session_origins（见 llm_request_pipeline.py:846-849），这里
         # 取出来对齐，取不到时才退化用 session_key 自己（好过完全不同步）。
@@ -1119,6 +1123,36 @@ class StatePersistence:
             return list(raw)
         return []
 
+    @staticmethod
+    def _history_entry_signature(entry: Any) -> tuple[str, str] | None:
+        """提取历史条目的 (归一化 role, 纯文本 content) 签名，供幂等去重比较。
+
+        dict-fallback 路径（AstrBot 消息类型 import 失败时）落库的 role 是调用方
+        原始传入值（"user"/"bot"）；AstrBot 消息类型路径落库后固定是
+        "user"/"assistant"（AssistantMessageSegment.role 字面量约束）——两者不是
+        同一命名空间，比较前先归一化（非 "user" 一律视为 assistant 侧），否则
+        同一次真实重叠写因两条构造路径落库方式不同，永远比不出"相同"，guard 形
+        同虚设。content 同样兼容纯字符串 / TextPart.model_dump() 产出的
+        [{"type": "text", "text": ...}] 分段列表两种形状。
+
+        entry 不是 dict（遗留裸 pydantic 对象、意外字符串垃圾等）时返回 None，
+        调用方应放行不比较——不确定的东西不能拿来判等，宁可不去重也不误杀。
+        """
+        if not isinstance(entry, dict):
+            return None
+        role = str(entry.get("role", ""))
+        norm_role = "user" if role == "user" else "assistant"
+        content = entry.get("content")
+        if isinstance(content, list):
+            content_str = "".join(
+                str(part.get("text", ""))
+                for part in content
+                if isinstance(part, dict) and "text" in part
+            )
+        else:
+            content_str = str(content or "")
+        return norm_role, content_str
+
     async def _do_sync_to_conv_mgr(
         self, conv_mgr: Any, umo: str, role: str, text: str
     ) -> None:
@@ -1158,6 +1192,31 @@ class StatePersistence:
 
             conversation = await conv_mgr.get_conversation(umo, curr_cid)
             history = self._extract_conv_history_list(conversation)
+            # fix/context-integrity round-2 MAJOR②：幂等守卫（第二道防线，第一道是
+            # llm_response_pipeline.py 非拦截分支的 skip_conv_sync——从源头就不产生
+            # 这次并发写）。本方法仍可能与 AstrBot 自身 _save_to_history 并发写同一个
+            # conv_mgr.update_conversation：若我们这次的读恰好发生在框架那次全量覆盖
+            # 写之后，history 末条会已经是这次要追加的同一条消息，再 append 一次会
+            # 产生连续两条相同 role 记录（已知 Gemini 连续 assistant turn 结构雷区）。
+            # 末条签名完全一致就直接跳过、不追加也不写回——原样保留框架那次写（可能
+            # 更全，含 tool_calls/多模态/checkpoint），不去覆盖它。
+            #
+            # 刻意只对非 "user" 一侧（bot/assistant）生效：会真正跟框架
+            # _save_to_history 并发写的只有 bot 侧同步（request 阶段的 user 同步
+            # 发生在 LLM 调用之前，压根不存在并发写这回事）。若不加这条限制，用户
+            # 连续两轮发完全相同的文字（例如中间那轮 bot 恰好 SILENT、没有任何
+            # assistant 记录夹在中间）会被这条 guard 误判成"重复"而丢掉第二条真实
+            # 用户消息——这是比它防的竞态更容易踩中的真实回归，必须避免。
+            if role != "user" and history:
+                new_sig = self._history_entry_signature(msg)
+                last_sig = self._history_entry_signature(history[-1])
+                if new_sig is not None and last_sig is not None and last_sig == new_sig:
+                    logger.debug(
+                        "Sylanne conv-sync 幂等跳过：末条历史已是同 role+content "
+                        "(umo=%s)，疑似与框架 _save_to_history 并发写重叠",
+                        umo,
+                    )
+                    return
             history.append(msg)
             # 防御竞态：本方法与 AstrBot 自身 _save_to_history 无锁并发，可能读到
             # tool 循环中途的快照（含 assistant tool_calls 但尚无 tool 响应）。写回前

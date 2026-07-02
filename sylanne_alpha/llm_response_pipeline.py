@@ -334,6 +334,73 @@ class LLMResponsePipeline:
         return night_cps, night_delay
 
     # ------------------------------------------------------------------
+    # 空回复兜底/静默判定（非拦截分支与拦截分支共用）
+    # ------------------------------------------------------------------
+    def _resolve_empty_reply(self, text: str, session_key: str) -> str | None:
+        """判定 completion_text 剥空后该静默还是兜底，两条分支（非拦截 ~365-432 /
+        拦截分段发送 ~434-651）完全相同的 ~40 行逻辑此前各内联一份，2026-07-03
+        fix/context-integrity 复审 MINOR 抽取合一（行为零变化，纯去重）。
+
+        本层语义是"LLM 已被调用、本该有回复"，所以走到这里的空【永远是意外】
+        （模型把答案塞进 thinking / 真没产出），绝不是人格主动装死（那由上游
+        表达闸决定，不在这层）。故默认不 ghost：给一句 Sylanne 口吻兜底，
+        走和正常回复一样的分段发送路径。区分成因仅供调试留痕（D8）。
+
+        Args:
+            text: 剥离 draft/thinking 块【之前】的原始 completion_text——只用来判断
+                成因 reason（stripped_to_empty：thinking 包了答案；empty_completion：
+                真空，常见于 tool 循环死锁）与日志留痕，不参与兜底文案本身。
+            session_key: 会话标识，供兜底文案变体池按 warmth 分桶去重取用。
+
+        Returns:
+            None —— 本轮应保持静默，调用方须把 response.completion_text 清空并 return。
+            str —— 应该发送的兜底文案（自定义 sylanne_ghost_fallback_text 优先，否则
+                走 EMPTY_REPLY_FALLBACK_VARIANTS 变体池，兜底常量 LAST_RESORT_FALLBACK_TEXT）。
+        """
+        _reason = "stripped_to_empty" if text.strip() else "empty_completion"
+        _cfg = self._p._config or {}
+        _no_ghost = bool(_cfg.get("sylanne_no_ghost_reply", True))
+        # 按 reason 分治（2026-06-13 治日志蹦兜底）：
+        # - stripped_to_empty（thinking 包答案）：原 06:11 真 ghost bug，仍兜底防"已读不回"。
+        # - empty_completion（completion_text 真空）：常见于 AstrBot tool 循环死锁——AstrBot
+        #   core 已自己塞过 [SYSTEM NOTICE] 重复调用警告，再蹦 Sylanne 兜底文案是雪上加霜，
+        #   且语气解释式（"我想说点什么…再给我一秒"）反而让人觉得是说明书不是她。静默更对。
+        # config 显式开 ghost（_no_ghost=False）依然全静默；config 设了自定义兜底文案则继续走兜底。
+        _has_custom_fallback = bool(str(_cfg.get("sylanne_ghost_fallback_text") or "").strip())
+        _silent_this = (not _no_ghost) or (
+            _reason == "empty_completion" and not _has_custom_fallback
+        )
+        if _silent_this:
+            logger.info(
+                f"Sylanne reply silent: session={session_key} "
+                f"reason={_reason} raw_len={len(text)} "
+                f"cfg_no_ghost={_no_ghost} has_custom={_has_custom_fallback}"
+            )
+            return None
+        # 走到这里：stripped_to_empty 默认兜底 / 用户显式配了自定义兜底文案
+        # T4-02①：用户自定义文案（config 通道）优先级最高，锁定不变；否则走
+        # EMPTY_REPLY_FALLBACK_VARIANTS 变体池（同 renderer.py 共用一份），按上一轮
+        # 缓存的 warmth 分挑语气（此处是同步热路径，拿不到实时 body，last_injected_states
+        # 是本轮 request 阶段刚写入的近期快照，足够便宜、足够新——不为此发额外异步取值），
+        # recent-N 去重存 _store.variant_recent（按 session 隔离，随 release_session 清理）。
+        _custom_fallback = str(_cfg.get("sylanne_ghost_fallback_text") or "").strip()
+        if _custom_fallback:
+            _fallback = _custom_fallback
+        else:
+            _prev_state = self._p._store.last_injected_states.get(session_key) or {}
+            _fallback = _pool_choose(
+                EMPTY_REPLY_FALLBACK_VARIANTS,
+                recent_key="empty_reply_fallback",
+                state=self._p._store.variant_recent.get_or_create(session_key, dict),
+                condition=_warmth_bucket(_prev_state.get("warmth")),
+            ) or LAST_RESORT_FALLBACK_TEXT
+        logger.info(
+            f"Sylanne empty reply -> fallback (no ghost): session={session_key} "
+            f"reason={_reason} raw_len={len(text)} fallback_len={len(_fallback)}"
+        )
+        return _fallback
+
+    # ------------------------------------------------------------------
     # Main response handler
     # ------------------------------------------------------------------
     async def _on_llm_response_inner(self, event: Any, response: Any) -> None:
@@ -377,48 +444,34 @@ class LLMResponsePipeline:
                     # fix/context-integrity CONTRIB：此分支（非拦截，现网 realtime_intercept
                     # 默认关时的常态路径）此前 thinking-only 草稿剥空后直接吞掉——既不发送
                     # 也没有下面 intercept 分支那套 EMPTY_REPLY_FALLBACK 兜底，用户完全收不到
-                    # 回复（"已读不回"假象）。这里搬同一份 reason 分治逻辑过来，保持两分支
-                    # 语义一致：stripped_to_empty（thinking 包了答案）默认兜底一句；
-                    # empty_completion（completion_text 真空，常见于 tool 循环死锁场景，
-                    # AstrBot core 已自己塞过提示）继续保持静默——不是人格装死，不该硬凑话。
-                    _reason = "stripped_to_empty" if text.strip() else "empty_completion"
-                    _cfg = self._p._config or {}
-                    _no_ghost = bool(_cfg.get("sylanne_no_ghost_reply", True))
-                    _has_custom_fallback = bool(
-                        str(_cfg.get("sylanne_ghost_fallback_text") or "").strip()
-                    )
-                    _silent_this = (not _no_ghost) or (
-                        _reason == "empty_completion" and not _has_custom_fallback
-                    )
-                    if _silent_this:
-                        logger.info(
-                            f"Sylanne reply silent (non-intercept): session={session_key} "
-                            f"reason={_reason} raw_len={len(text)} "
-                            f"cfg_no_ghost={_no_ghost} has_custom={_has_custom_fallback}"
-                        )
+                    # 回复（"已读不回"假象）。这里复用同一份 reason 分治逻辑（_resolve_empty_reply，
+                    # 两分支共用一份实现），保持两分支语义一致：stripped_to_empty（thinking
+                    # 包了答案）默认兜底一句；empty_completion（completion_text 真空，常见于
+                    # tool 循环死锁场景，AstrBot core 已自己塞过提示）继续保持静默——不是人格
+                    # 装死，不该硬凑话。
+                    _resolved = self._resolve_empty_reply(text, session_key)
+                    if _resolved is None:
                         response.completion_text = ""
                         return
-                    _custom_fallback = str(_cfg.get("sylanne_ghost_fallback_text") or "").strip()
-                    if _custom_fallback:
-                        _fallback = _custom_fallback
-                    else:
-                        _prev_state = self._p._store.last_injected_states.get(session_key) or {}
-                        _fallback = _pool_choose(
-                            EMPTY_REPLY_FALLBACK_VARIANTS,
-                            recent_key="empty_reply_fallback",
-                            state=self._p._store.variant_recent.get_or_create(session_key, dict),
-                            condition=_warmth_bucket(_prev_state.get("warmth")),
-                        ) or LAST_RESORT_FALLBACK_TEXT
-                    logger.info(
-                        f"Sylanne empty reply -> fallback (no ghost): session={session_key} "
-                        f"reason={_reason} raw_len={len(text)} fallback_len={len(_fallback)}"
-                    )
-                    cleaned = _fallback
+                    cleaned = _resolved
                 if cleaned != text:
                     response.completion_text = cleaned
                 if cleaned.strip():
+                    # fix/context-integrity round-2 BLOCKER：此分支 completion_text 非空
+                    # 且事件未被 stop（本文件从未调用 event.stop_event()），AstrBot 框架
+                    # 自己的 _save_to_history 会在 on_llm_response 钩子返回后，用
+                    # agent_runner.run_context.messages 做一次【全量覆盖写】同一个
+                    # conv_mgr.update_conversation(umo, cid, history=...)——框架才是这条
+                    # 路径唯一且权威的历史写入者。我们自己的读-改-写（_append_bot_reply_buffer
+                    # 内部 _sync_message_to_conv_mgr）若继续跟它并发，两种时序都出问题：
+                    # 读在框架写之前→用陈旧快照覆盖掉框架刚写的 tool_calls/多模态/checkpoint
+                    # 记录；读在框架写之后→重复 append 出连续两条 assistant 记录（Gemini
+                    # turn 结构已知雷区）。故这里显式 skip_conv_sync=True，只留
+                    # conversation_buffers/last_bot_texts 这些插件自身状态照常更新。
                     obs_task = safe_ensure_future(
-                        self._append_bot_reply_buffer(session_key, cleaned),
+                        self._append_bot_reply_buffer(
+                            session_key, cleaned, skip_conv_sync=True
+                        ),
                         name="append_bot_reply_buffer",
                     )
                     ensure_background_tasks_list(self._p).append(obs_task)
@@ -459,49 +512,13 @@ class LLMResponsePipeline:
             # 【永远是意外】（模型把答案塞进 thinking / 真没产出），绝不是人格主动装死
             # （那由上游表达闸决定，不在这层）。故默认不 ghost：给一句 Sylanne 口吻兜底，
             # 走和正常回复一样的分段发送路径。区分成因仅供调试留痕（D8）。
-            _reason = "stripped_to_empty" if text.strip() else "empty_completion"
-            _cfg = self._p._config or {}
-            _no_ghost = bool(_cfg.get("sylanne_no_ghost_reply", True))
-            # 按 reason 分治（2026-06-13 治日志蹦兜底）：
-            # - stripped_to_empty（thinking 包答案）：原 06:11 真 ghost bug，仍兜底防"已读不回"。
-            # - empty_completion（completion_text 真空）：常见于 AstrBot tool 循环死锁——AstrBot
-            #   core 已自己塞过 [SYSTEM NOTICE] 重复调用警告，再蹦 Sylanne 兜底文案是雪上加霜，
-            #   且语气解释式（"我想说点什么…再给我一秒"）反而让人觉得是说明书不是她。静默更对。
-            # config 显式开 ghost（_no_ghost=False）依然全静默；config 设了自定义兜底文案则继续走兜底。
-            _has_custom_fallback = bool(str(_cfg.get("sylanne_ghost_fallback_text") or "").strip())
-            _silent_this = (not _no_ghost) or (
-                _reason == "empty_completion" and not _has_custom_fallback
-            )
-            if _silent_this:
-                logger.info(
-                    f"Sylanne reply silent: session={session_key} "
-                    f"reason={_reason} raw_len={len(text)} "
-                    f"cfg_no_ghost={_no_ghost} has_custom={_has_custom_fallback}"
-                )
+            # fix/context-integrity MINOR：与上面非拦截分支完全相同的 ~40 行判定逻辑
+            # 已抽成 _resolve_empty_reply 共用，此处不再内联第二份拷贝。
+            _resolved = self._resolve_empty_reply(text, session_key)
+            if _resolved is None:
                 response.completion_text = ""
                 return
-            # 走到这里：stripped_to_empty 默认兜底 / 用户显式配了自定义兜底文案
-            # T4-02①：用户自定义文案（config 通道）优先级最高，锁定不变；否则走
-            # EMPTY_REPLY_FALLBACK_VARIANTS 变体池（同 renderer.py 共用一份），按上一轮
-            # 缓存的 warmth 分挑语气（此处是同步热路径，拿不到实时 body，last_injected_states
-            # 是本轮 request 阶段刚写入的近期快照，足够便宜、足够新——不为此发额外异步取值），
-            # recent-N 去重存 _store.variant_recent（按 session 隔离，随 release_session 清理）。
-            _custom_fallback = str(_cfg.get("sylanne_ghost_fallback_text") or "").strip()
-            if _custom_fallback:
-                _fallback = _custom_fallback
-            else:
-                _prev_state = self._p._store.last_injected_states.get(session_key) or {}
-                _fallback = _pool_choose(
-                    EMPTY_REPLY_FALLBACK_VARIANTS,
-                    recent_key="empty_reply_fallback",
-                    state=self._p._store.variant_recent.get_or_create(session_key, dict),
-                    condition=_warmth_bucket(_prev_state.get("warmth")),
-                ) or LAST_RESORT_FALLBACK_TEXT
-            logger.info(
-                f"Sylanne empty reply -> fallback (no ghost): session={session_key} "
-                f"reason={_reason} raw_len={len(text)} fallback_len={len(_fallback)}"
-            )
-            cleaned = _fallback
+            cleaned = _resolved
             # 落入下方正常分段发送流程（不 return）
 
         # 检查首句是否已通过流式发送
@@ -649,8 +666,22 @@ class LLMResponsePipeline:
             )
         )
 
-    async def _append_bot_reply_buffer(self, session_key: str, text: str) -> None:
-        """仅写入对话缓冲 + ConvMgr 同步（不 tick / 不 observe_response）。"""
+    async def _append_bot_reply_buffer(
+        self, session_key: str, text: str, *, skip_conv_sync: bool = False
+    ) -> None:
+        """仅写入对话缓冲 + ConvMgr 同步（不 tick / 不 observe_response）。
+
+        Args:
+            skip_conv_sync: fix/context-integrity round-2 BLOCKER。默认 False——
+                照常把 bot 回复同步进 AstrBot ConversationManager，这是【插件是唯一
+                历史写入者】路径（拦截分段发送 / 未来的主动消息等）该有的行为。
+                调用方在【框架自己稍后会用 _save_to_history 做一次全量覆盖写同一个
+                conv_mgr.update_conversation】时须传 True——两个独立写入者并发写
+                同一份历史，无论谁先谁后都会出问题（陈旧读-改-写覆盖掉框架刚写的
+                tool_calls/多模态/checkpoint 记录，或者反过来把同一句话重复 append
+                成连续两条 assistant 记录）。True 时 conversation_buffers/
+                last_bot_texts 等插件自身状态仍照常更新，只跳过 conv_mgr 这一步。
+        """
         try:
             from sylanne_alpha.memory_system import ConversationBuffer
 
@@ -660,7 +691,7 @@ class LLMResponsePipeline:
             buf.append("bot", text)
             self._p._store.last_bot_texts.set(session_key, text[:120])
             self._p._schedule_buffer_persist(session_key)
-            if self._p._has_conversation_manager():
+            if not skip_conv_sync and self._p._has_conversation_manager():
                 safe_ensure_future(
                     self._p._sync_message_to_conv_mgr(session_key, "bot", text),
                     name="conv_mgr_sync_bot",
