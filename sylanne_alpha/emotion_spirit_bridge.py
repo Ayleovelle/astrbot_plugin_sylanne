@@ -282,6 +282,8 @@ class EmotionSpiritMemoryBackend:
         except TypeError:
             return out
         for item in items:
+            if item is None:
+                continue  # 外部池混入 None 项不产出空 dict（gemini #47 意见，裁决 VALID）
             if isinstance(item, str):
                 out.append({"text": item, "layer": "", "score": 0.0, "source": "emotion_spirit"})
                 continue

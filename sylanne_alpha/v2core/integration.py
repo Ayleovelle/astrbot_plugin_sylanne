@@ -456,6 +456,10 @@ async def apply_v2core_request(plugin: Any, event: Any, request: Any) -> None:
             es_bridge = getattr(plugin, "_emotion_spirit_bridge", None)
             es_on = bool((getattr(plugin, "config", None) or {}).get(
                 "sylanne_alpha_emotion_spirit_bridge_enabled", False))
+            if es_bridge is not None and es_on and not es_bridge.is_active():
+                # 懒激活：emotion_spirit 晚于本插件加载/中途安装时，initialize 的一次性激活
+                # 会扑空——这里按请求兜底重试（未装时 activate 是廉价 no-op，返回 not_installed）。
+                es_bridge.activate()
             if es_bridge is not None and es_on and es_bridge.is_active():
                 es_bridge.reassert_persona_disabled()   # 自愈中途被改回 'auto' 的双注入
                 # emotion_spirit 按 sender_id 给信号做键（main.py:1069 get_sender_id），不是我们
