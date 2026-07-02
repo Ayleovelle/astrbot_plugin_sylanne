@@ -155,6 +155,27 @@ def test_on_message_without_existing_host_still_records_tempo_and_skips_creation
     assert p._rhythm_learner.profile("priv:owner-1") is None  # 无 host→非亲密→不建画像
 
 
+class _FakeHostPartialKernel:
+    """host.kernel 存在但内部链路不完整（模拟 partially initialized host）：
+    kernel 上没有 .computation，访问 kernel.computation.engine.observe() 会抛
+    AttributeError。"""
+
+    def __init__(self):
+        self.kernel = types.SimpleNamespace()  # 无 .computation
+
+
+def test_on_message_survives_partially_initialized_kernel_chain_tempo_still_recorded():
+    """kernel 链路本身抛 AttributeError（非 kernel is None）时，engine_obs 应退化为
+    {}，但 tempo 记录（observe_user_message）不能被一起吞掉——回归此前『engine_obs
+    获取与 observe_user_message 共享一个 try block』导致的静默跳过 bug。"""
+    p = _make_on_message_plugin([])
+    p._store.hosts = _FakeHosts({"priv:owner-1": _FakeHostPartialKernel()})
+    asyncio.run(p.on_message(_fake_event("priv:owner-1")))
+    assert p._rhythm_learner.session_tempo("priv:owner-1") >= 0.0
+    assert "priv:owner-1" in p._rhythm_learner._tempo_timestamps
+    assert p._rhythm_learner.profile("priv:owner-1") is None  # engine_obs={} → 非亲密
+
+
 def test_on_message_learns_profile_when_intimate():
     """亲密度够（warmth 高）时应学习消息长度画像。"""
     p = _make_on_message_plugin([], obs={"warmth": 0.9, "coherence": 0.9, "tension": 0.0})
