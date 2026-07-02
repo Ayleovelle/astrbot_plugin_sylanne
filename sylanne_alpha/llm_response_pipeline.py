@@ -336,7 +336,9 @@ class LLMResponsePipeline:
     # ------------------------------------------------------------------
     # 空回复兜底/静默判定（非拦截分支与拦截分支共用）
     # ------------------------------------------------------------------
-    def _resolve_empty_reply(self, text: str, session_key: str) -> str | None:
+    def _resolve_empty_reply(
+        self, text: str, session_key: str, *, path: str = "unknown"
+    ) -> str | None:
         """判定 completion_text 剥空后该静默还是兜底，两条分支（非拦截 ~365-432 /
         拦截分段发送 ~434-651）完全相同的 ~40 行逻辑此前各内联一份，2026-07-03
         fix/context-integrity 复审 MINOR 抽取合一（行为零变化，纯去重）。
@@ -351,6 +353,11 @@ class LLMResponsePipeline:
                 成因 reason（stripped_to_empty：thinking 包了答案；empty_completion：
                 真空，常见于 tool 循环死锁）与日志留痕，不参与兜底文案本身。
             session_key: 会话标识，供兜底文案变体池按 warmth 分桶去重取用。
+            path: 调用方分支标签（"intercept" / "non_intercept"），仅用于日志留痕。
+                两分支合一成本方法之前，各自内联的日志天然带着"是哪条分支炸的静默"
+                这个信息；合一后若不显式传，日志会退化成看不出走的是拦截还是非
+                拦截分支，排障时无法区分——round-3 复审补回来（纯日志修复，不影响
+                判定逻辑本身）。
 
         Returns:
             None —— 本轮应保持静默，调用方须把 response.completion_text 清空并 return。
@@ -372,7 +379,7 @@ class LLMResponsePipeline:
         )
         if _silent_this:
             logger.info(
-                f"Sylanne reply silent: session={session_key} "
+                f"Sylanne reply silent: session={session_key} path={path} "
                 f"reason={_reason} raw_len={len(text)} "
                 f"cfg_no_ghost={_no_ghost} has_custom={_has_custom_fallback}"
             )
@@ -396,7 +403,8 @@ class LLMResponsePipeline:
             ) or LAST_RESORT_FALLBACK_TEXT
         logger.info(
             f"Sylanne empty reply -> fallback (no ghost): session={session_key} "
-            f"reason={_reason} raw_len={len(text)} fallback_len={len(_fallback)}"
+            f"path={path} reason={_reason} raw_len={len(text)} "
+            f"fallback_len={len(_fallback)}"
         )
         return _fallback
 
@@ -449,7 +457,9 @@ class LLMResponsePipeline:
                     # 包了答案）默认兜底一句；empty_completion（completion_text 真空，常见于
                     # tool 循环死锁场景，AstrBot core 已自己塞过提示）继续保持静默——不是人格
                     # 装死，不该硬凑话。
-                    _resolved = self._resolve_empty_reply(text, session_key)
+                    _resolved = self._resolve_empty_reply(
+                        text, session_key, path="non_intercept"
+                    )
                     if _resolved is None:
                         response.completion_text = ""
                         return
@@ -468,6 +478,12 @@ class LLMResponsePipeline:
                     # 记录；读在框架写之后→重复 append 出连续两条 assistant 记录（Gemini
                     # turn 结构已知雷区）。故这里显式 skip_conv_sync=True，只留
                     # conversation_buffers/last_bot_texts 这些插件自身状态照常更新。
+                    # round-3 纠偏：这个论证同样适用于下面拦截/分段发送分支——round-2
+                    # 曾误以为那条分支是"插件唯一历史写入者"而不传 True，源码里那条
+                    # 分支在分段调度前同样显式保留了 response.completion_text = cleaned
+                    # （供 AstrBot 记录用），事件同样未被 stop，框架一样会保存，故那边
+                    # 现在也已改成显式 skip_conv_sync=True（见
+                    # _background_observe_response 调用点）。
                     obs_task = safe_ensure_future(
                         self._append_bot_reply_buffer(
                             session_key, cleaned, skip_conv_sync=True
@@ -514,7 +530,9 @@ class LLMResponsePipeline:
             # 走和正常回复一样的分段发送路径。区分成因仅供调试留痕（D8）。
             # fix/context-integrity MINOR：与上面非拦截分支完全相同的 ~40 行判定逻辑
             # 已抽成 _resolve_empty_reply 共用，此处不再内联第二份拷贝。
-            _resolved = self._resolve_empty_reply(text, session_key)
+            _resolved = self._resolve_empty_reply(
+                text, session_key, path="intercept"
+            )
             if _resolved is None:
                 response.completion_text = ""
                 return
@@ -653,8 +671,20 @@ class LLMResponsePipeline:
         )
 
         # 将观测任务从热路径移出，后台异步执行
+        # fix/context-integrity round-3 纠偏：round-2 曾误判这条拦截/分段发送分支是
+        # "插件唯一历史写入者"，理由不成立——上面分段调度前显式保留了
+        # response.completion_text = cleaned（供 AstrBot 上下文使用），且本文件从未
+        # 调用 event.stop_event()。框架侧 _save_to_history 的落库条件只看
+        # completion_text 是否非空 + 事件是否被 stop，不关心走的是拦截分支还是非
+        # 拦截分支——两条分支这两个条件都成立，框架都会做一次全量覆盖写。故这里
+        # 必须和上面非拦截分支（~464 附近）同样传 skip_conv_sync=True，否则插件的
+        # 读-改-写与框架的全量覆盖写并发，产生 clobber / 重复 assistant 记录，与
+        # round-2 BLOCKER 是同一个 bug。conversation_buffers/last_bot_texts 等插件
+        # 自身状态不受影响，仍照常更新。
         obs_task = safe_ensure_future(
-            self._background_observe_response(session_key, cleaned),
+            self._background_observe_response(
+                session_key, cleaned, skip_conv_sync=True
+            ),
             name="background_observe_response",
         )
         ensure_background_tasks_list(self._p).append(obs_task)
@@ -672,15 +702,41 @@ class LLMResponsePipeline:
         """仅写入对话缓冲 + ConvMgr 同步（不 tick / 不 observe_response）。
 
         Args:
-            skip_conv_sync: fix/context-integrity round-2 BLOCKER。默认 False——
-                照常把 bot 回复同步进 AstrBot ConversationManager，这是【插件是唯一
-                历史写入者】路径（拦截分段发送 / 未来的主动消息等）该有的行为。
-                调用方在【框架自己稍后会用 _save_to_history 做一次全量覆盖写同一个
-                conv_mgr.update_conversation】时须传 True——两个独立写入者并发写
-                同一份历史，无论谁先谁后都会出问题（陈旧读-改-写覆盖掉框架刚写的
-                tool_calls/多模态/checkpoint 记录，或者反过来把同一句话重复 append
-                成连续两条 assistant 记录）。True 时 conversation_buffers/
-                last_bot_texts 等插件自身状态仍照常更新，只跳过 conv_mgr 这一步。
+            skip_conv_sync: fix/context-integrity round-2 BLOCKER 引入，round-3
+                纠偏其错误前提。round-2 曾以为"拦截/分段发送分支"是插件的唯一
+                历史写入者、默认 False 让它继续同步——这个前提被框架源码推翻：
+                AstrBot 的 _save_to_history（on_llm_response 钩子返回后，用
+                agent_runner.run_context.messages 对 conv_mgr.update_conversation
+                做一次全量覆盖写）只看两个条件——completion_text 是否非空、事件是否
+                被 event.stop_event() 终止——完全不区分调用方是拦截分支还是非拦截
+                分支。凡是这两个条件成立的 turn，框架都是唯一且权威的历史写入者；
+                插件自己的读-改-写（本方法内部对 _sync_message_to_conv_mgr 的调用）
+                若在同一 turn 上继续跑，就是两个独立写入者并发写同一份历史，无论谁
+                先谁后都会出问题（陈旧快照覆盖掉框架刚写的 tool_calls/多模态/
+                checkpoint 记录，或者反过来把同一句话重复 append 成连续两条
+                assistant 记录）。
+
+                截至 round-3，本文件内【全部】两个调用点（非拦截分支 ~464 附近、
+                拦截/分段发送分支的 _background_observe_response）传的都是 True——
+                两条路径的 completion_text 在到达这里之前均保持非空且事件从未被
+                stop，框架都会保存。参数默认值仍保留 False 且未整体删除
+                skip_conv_sync=False 的分支代码，是为了给【真正会绕开
+                on_llm_response 钩子、框架确定不会保存】的路径（例如未来某条完全
+                独立于 LLM 响应事件之外的主动消息直发通道）留出口——只要该路径确实
+                会调用本方法。目前代码库内没有这样的调用点（_fallback_direct_send /
+                proactive_bridge.dispatch 等主动消息路径要么走 bridge.dispatch 触发
+                外部插件自己的 LLM 调用、同样会经过本文件的 on_llm_response 钩子，
+                要么根本不调用本方法，直接用 _dispatch_segmented_parts 发送，参见
+                _fire_afterthought / main.py:_maybe_takeover_segments），所以目前
+                conv_mgr 同步这条支路是死代码，只等一个真正符合条件的未来调用点。
+                True 时 conversation_buffers/last_bot_texts 等插件自身状态仍照常
+                更新，只跳过 conv_mgr 这一步。
+
+                另需注意（已知残留问题，本轮不修）：框架 _save_to_history 落库的是
+                【hook 前】的原始 completion_text，插件自己发给用户的是清理后
+                （strip_draft_blocks/_sanitize_response）的 cleaned 文本——两者若不
+                同签名不一致，是"发送内容≠保存内容"的独立缺陷，留给专门的历史补丁
+                工作项处理，不在本卡范围内。
         """
         try:
             from sylanne_alpha.memory_system import ConversationBuffer
@@ -707,10 +763,20 @@ class LLMResponsePipeline:
         except Exception as e:
             logger.warning(f"Sylanne append_bot_reply_buffer: {e}", exc_info=True)
 
-    async def _background_observe_response(self, session_key: str, text: str) -> None:
-        """后台观测 bot 回复：写入对话缓冲、通知社交场域、更新计算栈。"""
+    async def _background_observe_response(
+        self, session_key: str, text: str, *, skip_conv_sync: bool = False
+    ) -> None:
+        """后台观测 bot 回复：写入对话缓冲、通知社交场域、更新计算栈。
+
+        Args:
+            skip_conv_sync: 透传给 _append_bot_reply_buffer——见该方法 docstring。
+                拦截/分段发送分支（唯一调用本方法的调用点）自 round-3 起显式传
+                True（框架会保存这条 turn）。
+        """
         try:
-            await self._append_bot_reply_buffer(session_key, text)
+            await self._append_bot_reply_buffer(
+                session_key, text, skip_conv_sync=skip_conv_sync
+            )
             await self._p.observe_response(
                 session_key,
                 text=text[:500],

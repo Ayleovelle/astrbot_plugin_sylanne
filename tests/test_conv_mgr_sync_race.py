@@ -1,30 +1,49 @@
-"""fix/context-integrity round-2 复审：conv_mgr bot 同步"跳过 vs 保留"两个调用点
-的行为钉死，以及 _do_sync_to_conv_mgr 幂等守卫在读写交错时的语义。
+"""fix/context-integrity round-3 复审：conv_mgr bot 同步的最终原则，以及
+_do_sync_to_conv_mgr 幂等守卫在读写交错时的语义。
 
-背景（round-2 MAJOR，adjudicated 结论见 PR 描述）：641ae74 把 _do_sync_to_conv_mgr
-从"看似生效实际 no-op / 写坏数据"修成"真的会写"，副作用是【非拦截默认路径】
-（llm_response_pipeline.py 里 `if not realtime_enabled or not intercept:` 分支，
-现网默认配置就走这条）的 response-phase bot 同步现在会跟 AstrBot 框架自己的
-_save_to_history（在 on_llm_response 钩子返回后，用 agent_runner.run_context.
-messages 对同一个 conv_mgr.update_conversation 做一次全量覆盖写）产生真实的并发
-写竞态：
+背景（round-2 → round-3 doctrine 修正，adjudicated 结论见 PR 描述）：641ae74 把
+_do_sync_to_conv_mgr 从"看似生效实际 no-op / 写坏数据"修成"真的会写"，副作用是
+让插件自己的 bot 侧 conv_mgr 同步跟 AstrBot 框架自己的 _save_to_history（在
+on_llm_response 钩子返回后，用 agent_runner.run_context.messages 对同一个
+conv_mgr.update_conversation 做一次全量覆盖写）产生真实的并发写竞态：
   - 我们的读发生在框架写之前 → 用陈旧快照覆盖掉框架刚写的 tool_calls / 多模态 /
     checkpoint 记录；
   - 我们的读发生在框架写之后 → 把同一句话重复 append 成连续两条 assistant 记录
     （已知 Gemini 连续 assistant turn 结构雷区）。
 
+round-2 曾经的结论：只有【非拦截分支】需要 skip_conv_sync=True，【拦截/分段发送
+分支】是插件唯一的历史写入者、应该继续同步。round-3 adjudicated 判定这个区分
+不成立——框架源码显示 _save_to_history 的落库条件只看两件事：completion_text 是
+否非空、事件是否被 event.stop_event() 终止，完全不区分调用方走的是拦截分支还是
+非拦截分支。拦截/分段发送分支在 llm_response_pipeline.py 里同样保留了
+response.completion_text（供 AstrBot 记录用）且从未 stop 事件，所以框架同样会
+对这条分支的正常回复做一次全量覆盖写。
+
+最终原则（doctrine）：框架是【每一个 completion_text 非空且事件未被 stop 的
+turn】的权威历史写入者。插件自己的 bot 侧 conv_mgr 同步只应该存在于【框架确定
+不会保存】的路径上。截至本轮，_append_bot_reply_buffer 的两个调用点（非拦截
+分支 / 拦截-分段发送分支经 _background_observe_response）都满足"框架会保存"，
+因此都显式传 skip_conv_sync=True——conv_mgr 同步这条支路目前是死代码，只等一个
+真正符合"框架确定不保存"条件的未来调用点（详见
+llm_response_pipeline.py::_append_bot_reply_buffer 的 docstring）。
+
 两道防线：
-  ① llm_response_pipeline.py 非拦截分支调用 _append_bot_reply_buffer 时显式传
-     skip_conv_sync=True——从源头不产生这次并发写（框架才是这条路径唯一权威的
-     历史写入者）。拦截 / 分段发送分支（_background_observe_response 调用同一
-     函数）不传这个 flag，继续照常同步——插件在那条路径上仍是唯一的历史写入者。
-  ② state_persistence.py::_do_sync_to_conv_mgr 加一道幂等守卫：append 前若末条
-     历史已经是同 role+content，直接跳过（不追加、不写回）——万一未来还有别的
-     时序意外，这是廉价的第二道防线。
+  ① llm_response_pipeline.py 的两个调用点都显式传 skip_conv_sync=True——从源头
+     不产生这次并发写。
+  ② state_persistence.py::_do_sync_to_conv_mgr 保留一道幂等守卫（防御性纵深，
+     供未来真正的"框架不保存"调用点使用）：append 前若末条历史（跳过尾随的
+     checkpoint/system/tool 记录后）已经是同 role+content，直接跳过（不追加、
+     不写回）。
+
+已知残留问题（不在本卡范围，留给专门的历史补丁工作项）：框架 _save_to_history
+落库的是 hook 前的原始 completion_text，插件实际发给用户的是清理后
+（strip_draft_blocks/_sanitize_response）的 cleaned 文本，两者签名不一致，是
+独立于本卡的"发送内容≠保存内容"缺陷。
 
 本文件钉死：
-  1. 非拦截分支正常（非空）回复不再触发插件自己的 conv_mgr bot 同步。
-  2. 拦截 / 分段发送分支正常回复仍然触发（"保留"语义不受影响的回归锁）。
+  1. 非拦截分支正常（非空）回复不触发插件自己的 conv_mgr bot 同步。
+  2. 拦截 / 分段发送分支正常回复【同样】不触发（round-3 doctrine 修正的回归
+     锁——防止未来重构把这条路径的 skip_conv_sync 又误改回 False）。
   3. 组合回归：同一会话里先 SILENT 后普通非拦截 SPEAK，两轮都不应产生插件自己
      的 conv_mgr bot 写入，用户消息（request 阶段已同步）应完整保留。
   4. _do_sync_to_conv_mgr 幂等守卫：模拟"框架的全量覆盖写恰好插在我们的读之后"
@@ -32,6 +51,9 @@ messages 对同一个 conv_mgr.update_conversation 做一次全量覆盖写）�
      重复 append，框架那次写（这里用只有框架才会写的 tool_calls 字段代表"更全"
      的内容）原样保留，不被我们的写回吞掉；同时确认内容不同的普通 append 不受
      误伤（不会把守卫做成"完全不追加"的死锁）。
+  5. round-2 MINOR 修复回归锁：末条历史若是框架追加的尾随 CheckpointMessageSegment
+     （role="_checkpoint"），守卫应扫过它找到真正的最后一条 assistant 消息来比较，
+     而不是被 history[-1] 的 checkpoint 记录挡住导致漏检真实重复。
 """
 
 from __future__ import annotations
@@ -131,7 +153,7 @@ def _run(pipe: LLMResponsePipeline, resp: _Resp, plugin: _BasePlugin) -> None:
 
 
 def test_non_intercept_normal_reply_skips_conv_mgr_bot_sync() -> None:
-    """非拦截分支（现网默认配置就走这条）：正常非空回复不应再触发插件自己的
+    """非拦截分支（现网默认配置就走这条）：正常非空回复不应触发插件自己的
     conv_mgr bot 同步——框架自己的 _save_to_history 才是这条路径唯一权威的历史
     写入者，两个写入者并发写同一份历史必出问题（clobber 或重复）。"""
     p = _BasePlugin(
@@ -148,7 +170,7 @@ def test_non_intercept_normal_reply_skips_conv_mgr_bot_sync() -> None:
 
     assert resp.completion_text == "今天天气不错"
     assert p.conv_sync_calls == [], (
-        "非拦截分支正常回复不应再触发插件自己的 conv_mgr bot 同步"
+        "非拦截分支正常回复不应触发插件自己的 conv_mgr bot 同步"
     )
     buf = p._store.conversation_buffers.get("sess:convrace")
     assert buf is not None and any(m.get("role") == "bot" for m in buf.messages), (
@@ -156,9 +178,13 @@ def test_non_intercept_normal_reply_skips_conv_mgr_bot_sync() -> None:
     )
 
 
-def test_intercept_segmented_reply_still_syncs_bot_to_conv_mgr() -> None:
-    """拦截 / 分段发送分支：插件是这条路径唯一的历史写入者，正常回复仍应触发
-    conv_mgr bot 同步——回归锁，防止未来重构误把这条路径也一并 skip 掉。"""
+def test_intercept_segmented_reply_also_skips_conv_mgr_bot_sync() -> None:
+    """拦截 / 分段发送分支：round-3 doctrine 修正——round-2 曾以为这条路径是
+    插件唯一的历史写入者而保留同步，但框架的 _save_to_history 不区分拦截/非
+    拦截分支，这条分支的 completion_text 同样被保留（供框架记录用）且事件同样
+    从未被 stop，框架一样会做一次全量覆盖写。故这条路径现在也必须
+    skip_conv_sync=True——回归锁，防止未来重构把这里误改回 False，重新引入
+    round-2 BLOCKER 那种并发写竞态。"""
     p = _BasePlugin(
         tempfile.mkdtemp(prefix="convrace_ic_"),
         {
@@ -176,9 +202,14 @@ def test_intercept_segmented_reply_still_syncs_bot_to_conv_mgr() -> None:
 
     _run(pipe, resp, p)
 
-    assert p.conv_sync_calls == [
-        ("sess:convrace", "bot", "今天天气不错，我们出去走走吧")
-    ], "拦截/分段发送分支应照常同步 bot 回复到 conv_mgr（保留语义未受影响）"
+    assert resp.completion_text == "今天天气不错，我们出去走走吧"
+    assert p.conv_sync_calls == [], (
+        "拦截/分段发送分支正常回复也不应再触发插件自己的 conv_mgr bot 同步"
+    )
+    buf = p._store.conversation_buffers.get("sess:convrace")
+    assert buf is not None and any(m.get("role") == "bot" for m in buf.messages), (
+        "跳过的只是 conv_mgr 同步这一步，conversation_buffers 仍应照常写入"
+    )
 
 
 @pytest.mark.asyncio
@@ -411,3 +442,46 @@ async def test_idempotence_guard_never_drops_a_genuinely_repeated_user_message()
     assert len(history) == 2, (
         f"用户连续两轮发相同文字都应被完整保留，不应被幂等守卫误删第二条：{history}"
     )
+
+
+@pytest.mark.asyncio
+async def test_idempotence_guard_skips_trailing_checkpoint_segment() -> None:
+    """round-2 MINOR 回归锁：框架的 _save_to_history
+    （AstrBot core/pipeline/.../internal.py:481-488）可能在 assistant 消息之后
+    追加一条 CheckpointMessageSegment（role="_checkpoint"）。若守卫仍然硬编码
+    history[-1]，读到的"末条"会是这条 checkpoint 记录而不是真正的 assistant
+    消息，比较永远判"不同"，真实的重复写入会被漏检、照样重复 append。守卫必须
+    跳过这类尾随的非对话记录，找到真正的最后一条 assistant 消息来比较。"""
+    framework_history = [
+        {"role": "user", "content": [{"type": "text", "text": "在干嘛"}]},
+        {
+            "role": "assistant",
+            "content": [{"type": "text", "text": "在写代码呢"}],
+            "tool_calls": [
+                {"id": "call_1", "type": "function", "function": {"name": "noop"}}
+            ],
+        },
+        # 框架在 assistant 消息之后追加的 checkpoint 尾巴（internal.py:483-488）。
+        {"role": "_checkpoint", "content": {"id": "ckpt_1"}},
+    ]
+    conv_mgr = _FrameworkInterleavingConvMgr(framework_history)
+
+    class _Plugin:
+        def __init__(self) -> None:
+            self._conv_mgr = conv_mgr
+            self._store = SessionStateStore()
+
+    p = _Plugin()
+    sp = StatePersistence(p)  # type: ignore[arg-type]
+    await conv_mgr.new_conversation("u1")
+
+    # 这句要同步的 bot 文本，和框架已经落地的最后一条【真正】assistant 消息完全
+    # 相同——中间隔着一条 checkpoint 尾巴，守卫应该跳过它识别出重复。
+    await sp.sync_message_to_conv_mgr("u1", "bot", "在写代码呢")
+
+    cid = conv_mgr._curr_ids["u1"]
+    assert conv_mgr._content[cid] == framework_history, (
+        "守卫应跳过尾随 checkpoint 记录识别出重复，原样保留框架那次写（含 "
+        "tool_calls 与 checkpoint 尾巴），不追加出连续两条 assistant 记录"
+    )
+    assert conv_mgr.update_calls == [], "命中幂等守卫时不应再调用 update_conversation"

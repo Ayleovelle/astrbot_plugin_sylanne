@@ -19,6 +19,11 @@
 的 invariant 本身不变（分治三要素齐全、silent/fallback 两条腿并存），只是挪了
 地方；额外补一条断言确认两个调用分支确实都在【调用】这个共用方法（没有偷偷
 各自再内联回一份重复逻辑）。
+
+round-3 复审：合一成共用方法后，原本各自内联时天然带着"是哪个分支"的信息在日志
+里丢了——排障时看不出静默/兜底是拦截分支还是非拦截分支触发的。补回一个
+`path` 参数，两个调用点分别传 "non_intercept" / "intercept"，日志里带上这个
+discriminator。
 """
 
 from __future__ import annotations
@@ -65,10 +70,23 @@ def test_dispatch_logic_sketch() -> None:
 
 def test_both_branches_delegate_to_shared_resolver() -> None:
     """去重验证：非拦截分支与拦截分支都必须【调用】共用的 _resolve_empty_reply，
-    而不是各自再内联一份分治逻辑（否则又会漂移回本次修复要消灭的重复状态）。"""
+    而不是各自再内联一份分治逻辑（否则又会漂移回本次修复要消灭的重复状态）。
+    round-3：调用点还必须各自带上 path discriminator（见本文件顶部说明），
+    不能只调用不传 path，否则日志又退化成分不清是哪个分支。"""
     src = inspect.getsource(LLMResponsePipeline._on_llm_response_inner)
-    assert src.count("self._resolve_empty_reply(text, session_key)") == 2, (
+    assert src.count("self._resolve_empty_reply(") == 2, (
         "非拦截 / 拦截两个分支都应调用共用的 _resolve_empty_reply，且只应各调用一次"
     )
+    assert 'path="non_intercept"' in src, "非拦截分支调用应传 path=\"non_intercept\""
+    assert 'path="intercept"' in src, "拦截分支调用应传 path=\"intercept\""
     # 两分支各自都不应再重复内联判定逻辑的关键标志变量
     assert "_silent_this" not in src, "分治逻辑应已完全搬进 _resolve_empty_reply，不应留在调用方"
+
+
+def test_resolve_empty_reply_logs_path_discriminator() -> None:
+    """round-3 复审：_resolve_empty_reply 的两条日志（静默 / 兜底）都必须带上
+    path= 字段，否则合一之后就丢了"这是哪个分支炸的"这条排障信息。"""
+    src = inspect.getsource(LLMResponsePipeline._resolve_empty_reply)
+    assert src.count("path={path}") == 2, (
+        "静默日志与兜底日志都应带上 path= discriminator"
+    )

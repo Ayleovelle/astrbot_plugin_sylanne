@@ -1153,6 +1153,40 @@ class StatePersistence:
             content_str = str(content or "")
         return norm_role, content_str
 
+    # framework 侧非对话角色（AstrBot core/agent/message.py）：round-2 的幂等守卫
+    # 硬编码 history[-1] 时漏考虑了这些——internal.py:481-488 在保存历史时，可能在
+    # assistant 消息【之后】追加一条 CheckpointMessageSegment（role="_checkpoint"），
+    # 使真正的最后一条 assistant/user 消息并不在数组末尾。
+    _NON_CONVERSATIONAL_ROLES = frozenset({"_checkpoint", "system", "tool"})
+
+    @classmethod
+    def _last_conversational_entry(cls, history: list) -> Any:
+        """从历史末尾往前跳过尾随的非对话 role 条目，取真正最后一条
+        user/assistant 消息用于幂等比较。
+
+        round-2 MINOR：guard 曾直接用 `history[-1]` 当"框架刚写的那条"，但框架的
+        _save_to_history（AstrBot core/pipeline/.../internal.py:481-488）在正常
+        assistant 消息之后可能再追加一条 CheckpointMessageSegment
+        （role="_checkpoint"，用于恢复用的 checkpoint 标记，不代表一轮对话内容）。
+        若末条恰好是这类记录，`_history_entry_signature(history[-1])` 会拿一个
+        checkpoint/system 条目的内容去跟本次要同步的 bot 文本比较——两者天然不同，
+        guard 因此永远判定"不同"，真正应该被识别为重复的框架写入被漏检、照样又
+        追加一次，产生连续两条 assistant 记录。这里改为从末尾向前扫，跳过
+        _NON_CONVERSATIONAL_ROLES 里的角色，取第一条"真"消息用于比较。
+
+        Returns:
+            最后一条非 checkpoint/system/tool 的历史条目；全是非对话条目或历史为
+            空时返回 None（调用方应视为"无可比较对象"，不阻止追加）。
+        """
+        for entry in reversed(history):
+            if (
+                isinstance(entry, dict)
+                and str(entry.get("role", "")) in cls._NON_CONVERSATIONAL_ROLES
+            ):
+                continue
+            return entry
+        return None
+
     async def _do_sync_to_conv_mgr(
         self, conv_mgr: Any, umo: str, role: str, text: str
     ) -> None:
@@ -1192,14 +1226,31 @@ class StatePersistence:
 
             conversation = await conv_mgr.get_conversation(umo, curr_cid)
             history = self._extract_conv_history_list(conversation)
-            # fix/context-integrity round-2 MAJOR②：幂等守卫（第二道防线，第一道是
-            # llm_response_pipeline.py 非拦截分支的 skip_conv_sync——从源头就不产生
-            # 这次并发写）。本方法仍可能与 AstrBot 自身 _save_to_history 并发写同一个
-            # conv_mgr.update_conversation：若我们这次的读恰好发生在框架那次全量覆盖
-            # 写之后，history 末条会已经是这次要追加的同一条消息，再 append 一次会
-            # 产生连续两条相同 role 记录（已知 Gemini 连续 assistant turn 结构雷区）。
-            # 末条签名完全一致就直接跳过、不追加也不写回——原样保留框架那次写（可能
-            # 更全，含 tool_calls/多模态/checkpoint），不去覆盖它。
+            # fix/context-integrity round-2 MAJOR② / round-3 纠偏：幂等守卫（第二道
+            # 防线）。round-2 曾以为第一道防线（llm_response_pipeline.py 非拦截分支的
+            # skip_conv_sync）已经让【本方法只会在拦截/分段发送分支被调用】、且那条
+            # 路径是插件唯一写入者——两个前提都不成立：round-3 复审确认框架的
+            # _save_to_history 不区分拦截/非拦截分支，两条路径的完整正常回复都会
+            # 被框架保存，本方法当前的两个调用点因此都已改成 skip_conv_sync=True。
+            # 但本方法本身（sync_message_to_conv_mgr → _do_sync_to_conv_mgr）仍然是
+            # 一个独立的读-改-写，只要调用方哪天新增一条"框架确定不会保存"的路径
+            # （见 llm_response_pipeline.py::_append_bot_reply_buffer 的
+            # skip_conv_sync docstring），本方法就可能与框架 _save_to_history 并发写
+            # 同一个 conv_mgr.update_conversation：若我们这次的读恰好发生在框架那次
+            # 全量覆盖写之后，history 末条会已经是这次要追加的同一条消息，再 append
+            # 一次会产生连续两条相同 role 记录（已知 Gemini 连续 assistant turn
+            # 结构雷区）——这道守卫就是为这种时序兜底，与当前是否有调用点真的会
+            # 触发并发无关，属于防御性纵深。末条签名完全一致就直接跳过、不追加也不
+            # 写回——原样保留框架那次写（可能更全，含 tool_calls/多模态/checkpoint），
+            # 不去覆盖它。
+            #
+            # round-2 MINOR（本轮修复）：判"末条"时不能直接取 history[-1]。AstrBot
+            # 的 _save_to_history（core/pipeline/.../internal.py:481-488）可能在
+            # assistant 消息之后再追加一条 CheckpointMessageSegment
+            # （role="_checkpoint"），framework 那次写完之后数组末尾就不是 assistant
+            # 消息本身。改用 _last_conversational_entry 从末尾向前跳过
+            # checkpoint/system/tool 等非对话角色，取真正最后一条 user/assistant
+            # 消息来比较，避免这类尾随记录让 guard 误判"不同"从而漏检真实重复。
             #
             # 刻意只对非 "user" 一侧（bot/assistant）生效：会真正跟框架
             # _save_to_history 并发写的只有 bot 侧同步（request 阶段的 user 同步
@@ -1208,12 +1259,18 @@ class StatePersistence:
             # assistant 记录夹在中间）会被这条 guard 误判成"重复"而丢掉第二条真实
             # 用户消息——这是比它防的竞态更容易踩中的真实回归，必须避免。
             if role != "user" and history:
+                last_entry = self._last_conversational_entry(history)
                 new_sig = self._history_entry_signature(msg)
-                last_sig = self._history_entry_signature(history[-1])
+                last_sig = (
+                    self._history_entry_signature(last_entry)
+                    if last_entry is not None
+                    else None
+                )
                 if new_sig is not None and last_sig is not None and last_sig == new_sig:
                     logger.debug(
-                        "Sylanne conv-sync 幂等跳过：末条历史已是同 role+content "
-                        "(umo=%s)，疑似与框架 _save_to_history 并发写重叠",
+                        "Sylanne conv-sync 幂等跳过：末条（跳过尾随 checkpoint/"
+                        "system/tool 记录后）已是同 role+content (umo=%s)，"
+                        "疑似与框架 _save_to_history 并发写重叠",
                         umo,
                     )
                     return
