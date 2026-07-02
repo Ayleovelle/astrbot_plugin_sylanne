@@ -25,7 +25,7 @@ import time
 import uuid
 from collections import deque
 from dataclasses import dataclass, field
-from datetime import date, datetime, timedelta
+from datetime import date, datetime, timedelta, timezone
 from enum import Enum
 from typing import Any
 
@@ -176,16 +176,25 @@ def _next_day_of_month(base_date: date, day: int) -> date:
     return base_date + timedelta(days=30)  # 理论不可达兜底
 
 
+# 时区感知：固定中国时区 UTC+8——datetime.fromtimestamp() 不带 tz 会读宿主系统时区，
+# UTC 服务器上会把"明晚"这类相对时段词估出的 due_ts 整体偏移 8 小时。与
+# v2core/capabilities/ignition.py 的 _CHINA_TZ 同一常量定义，口径对齐。
+_CHINA_TZ = timezone(timedelta(hours=8))
+
+
 def _estimate_due_ts(text: str, now: float | None = None) -> float:
     """粗略估计文本中提到的未来时间点（一次性模糊估计，明天≈次日正午即可）。
 
     命中优先级：相对天数词（大后天/后天/明天/下(下)周）> 具体日期（N号）>
     单独时段词（晚上/今晚，只调小时不改天数）。仅时段词命中且今天该时段已过
     时顺延到明天。
+
+    全程用中国时区（_CHINA_TZ）解读/构造时间，不用系统本地时区——否则 UTC 部署下
+    "今晚 8 点"会被当成 UTC 20:00（=北京时间凌晨 4 点）存下，估出的 due_ts 偏 8 小时。
     """
     if now is None:
         now = time.time()
-    now_dt = datetime.fromtimestamp(now)
+    now_dt = datetime.fromtimestamp(now, tz=_CHINA_TZ)
     target_date = now_dt.date()
     matched_day = False
 
@@ -213,7 +222,9 @@ def _estimate_due_ts(text: str, now: float | None = None) -> float:
                 matched_day = True
 
     hour = 20 if ("晚上" in text or "今晚" in text) else 12
-    due_dt = datetime.combine(target_date, datetime.min.time()).replace(hour=hour)
+    due_dt = datetime.combine(
+        target_date, datetime.min.time(), tzinfo=_CHINA_TZ
+    ).replace(hour=hour)
     if not matched_day and due_dt <= now_dt:
         # 只命中时段词、没有具体天数：今天该时段已过就顺延明天
         due_dt = due_dt + timedelta(days=1)

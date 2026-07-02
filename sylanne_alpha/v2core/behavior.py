@@ -19,6 +19,7 @@
 
 from __future__ import annotations
 
+import math
 from typing import Any, Callable
 
 from sylanne_alpha.v2core.contracts import BodySnapshot
@@ -194,9 +195,19 @@ def _act_winddown(b: BodySnapshot, d: dict[str, float], scr: dict[str, Any]) -> 
     if not isinstance(sig, dict):
         return 0.0
     try:
-        interruptibility = float(sig.get("interruptibility", 0.7) or 0.7)
-        energy = float(sig.get("energy", 0.6) or 0.6)
-        focus = float(sig.get("focus", 0.5) or 0.5)
+        # 0.0 是合法的"精疲力竭"能量值，但是 falsy——`x or default` 会把它误判成"没给值"
+        # 悄悄换回默认 0.6，恰好在最该触发"累了->收线"的时候把信号抹掉（review critical）。
+        # 显式区分 None（真没给）与 0.0（给了但是零），三个字段一致处理。
+        v = sig.get("interruptibility")
+        interruptibility = 0.7 if v is None else float(v)
+        v = sig.get("energy")
+        energy = 0.6 if v is None else float(v)
+        v = sig.get("focus")
+        focus = 0.5 if v is None else float(v)
+        # math.isfinite：NaN/±inf 不是合法信号，一律退回 0（不应期机制不该被脏值点燃），
+        # 对齐 contracts.py EvoBias / integration.py behavior_last_fired 同款防御式 isfinite 校验。
+        if not (math.isfinite(interruptibility) and math.isfinite(energy) and math.isfinite(focus)):
+            return 0.0
     except (TypeError, ValueError):
         return 0.0
     busy_focused = min(_ramp(1.0 - interruptibility, 0.4, 0.8), _ramp(focus, 0.55, 0.85))

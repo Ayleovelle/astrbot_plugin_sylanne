@@ -14,6 +14,7 @@
 from __future__ import annotations
 
 import asyncio
+import datetime
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -38,6 +39,12 @@ from sylanne_alpha.memory_system import ConversationBuffer, MemorySystem
 
 if TYPE_CHECKING:
     from sylanne_alpha.protocols import PluginHost
+
+
+# 时区感知：固定中国时区 UTC+8——time.localtime()/datetime.fromtimestamp() 不带 tz
+# 会读宿主系统时区，境外/UTC 服务器上会把凌晨的"早安"仪式误判成"深夜"（8 小时偏移）。
+# 与 v2core/capabilities/ignition.py 的 _CHINA_TZ 同一常量定义，仪式判断口径对齐。
+_CHINA_TZ = datetime.timezone(datetime.timedelta(hours=8))
 
 
 # ---------------------------------------------------------------------------
@@ -752,7 +759,9 @@ class SessionContext:
         if not pattern:
             return
         ts = now if now is not None else time.time()
-        hour = time.localtime(ts).tm_hour
+        # 中国时区读取小时（非 time.localtime 的系统时区），避免境外/UTC 部署把凌晨
+        # 早安仪式误判成深夜（8 小时偏移）。
+        hour = datetime.datetime.fromtimestamp(ts, tz=_CHINA_TZ).hour
         self.observe_ritual_pattern(session_key, hour, pattern)
 
     # ------------------------------------------------------------------

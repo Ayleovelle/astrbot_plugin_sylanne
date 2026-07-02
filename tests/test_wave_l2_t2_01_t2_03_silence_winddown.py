@@ -546,6 +546,32 @@ class TestWinddownActivation:
         act = _act_winddown(_body(), {}, {"life_sim_signals": sig})
         assert act >= 0.5
 
+    def test_zero_energy_is_not_reset_to_default(self) -> None:
+        """energy=0.0（精疲力竭，合法值但 Python 里是 falsy）回归：旧写法
+        `sig.get("energy", 0.6) or 0.6` 会把它误判成"没给值"悄悄换回默认 0.6，
+        恰好在最该触发"累了->收线"的时候把信号抹掉。0.0 必须真被当 0.0 用，
+        使 tired 支路顶到满值触发。"""
+        sig = {"phase": "night", "energy": 0.0, "focus": 0.5, "interruptibility": 0.7}
+        act = _act_winddown(_body(), {}, {"life_sim_signals": sig})
+        assert act >= 0.5
+
+    def test_zero_interruptibility_and_focus_are_not_reset_to_default(self) -> None:
+        """同一 falsy-0.0 bug 对 interruptibility / focus 的回归：0.0 可打断度（=完全
+        不可打断，最"忙"）与 0.0 专注度都应保留原值，不被 `or` 换回默认。"""
+        sig = {"phase": "afternoon", "energy": 0.6, "focus": 0.0, "interruptibility": 0.0}
+        act = _act_winddown(_body(), {}, {"life_sim_signals": sig})
+        # focus=0.0 → busy_focused 支路应彻底不激活（focus 斜坡在 0.55-0.85，0.0 远低于门）；
+        # 唯一可能的激活来源只剩 tired，而 energy=0.6 不够累，故整体应接近 0。
+        assert act < 0.5
+
+    def test_nonfinite_signal_deactivates_instead_of_crashing(self) -> None:
+        """NaN/inf 混进 life_sim_signals（脏值/序列化损坏）不应被当成合法信号点燃
+        不应期机制——一律退回 0，不抛异常。"""
+        sig = {"phase": "night", "energy": float("nan"), "focus": 0.5, "interruptibility": 0.7}
+        assert _act_winddown(_body(), {}, {"life_sim_signals": sig}) == 0.0
+        sig_inf = {"phase": "night", "energy": 0.05, "focus": float("inf"), "interruptibility": 0.7}
+        assert _act_winddown(_body(), {}, {"life_sim_signals": sig_inf}) == 0.0
+
     def test_select_behavior_picks_winddown(self) -> None:
         sig = {"phase": "afternoon", "energy": 0.6, "focus": 0.95, "interruptibility": 0.05}
         sel = select_behavior(_body(), {"life_sim_signals": sig}, {}, 1000.0)

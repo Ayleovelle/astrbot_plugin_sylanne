@@ -25,8 +25,9 @@ from __future__ import annotations
 import asyncio
 import time
 import types
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 
+import sylanne_alpha.memory_system as _memory_system_mod
 import sylanne_alpha.proactive_scheduler as _sched_mod
 from sylanne_alpha.llm_request_pipeline import LLMRequestPipeline
 from sylanne_alpha.memory_system import MemorySystem
@@ -106,6 +107,45 @@ class TestPendingFollowupCreation:
         assert ms._pending_followups == []
         # 二次消费同一条 → False（已经不在列表里）
         assert ms.consume_pending_followup(entry) is False
+
+
+# ===========================================================================
+# 时区回归：_estimate_due_ts 必须用中国时区（_CHINA_TZ）解读 now/构造 due_dt，
+# 不能依赖 datetime.fromtimestamp(now) 隐式读取的宿主系统时区——否则 UTC 部署下
+# "明天晚上"这类相对时段词会被整体算错（日期+8 小时都可能偏）。
+# ===========================================================================
+
+
+class TestEstimateDueTsChinaTimezone:
+    def test_uses_china_tz_not_system_tz(self, monkeypatch) -> None:
+        """Windows 无 time.tzset()，无法可移植地把真实系统时区改成非中国时区来验证。
+        用一个模拟"宿主系统时区=UTC"的 datetime 桩替换模块内 datetime 名字：只在
+        没有显式传 tz（旧 bug 的裸调用方式）时退化为纯 UTC 解释；显式传 tz 时原样
+        委托真实实现（真实 datetime.fromtimestamp(ts, tz=...) 本就不依赖系统时区）。
+
+        已知 UTC 时刻 2026-07-02 20:00:00Z == 中国时区 2026-07-03 04:00（次日凌晨）。
+        文本"明天晚上"应算出中国时区 2026-07-04 20:00——如果退化成裸系统时区
+        （模拟 UTC）解读，"今天"会被误判成 07-02，"明天"变成 07-03，整整错一天。
+        """
+        real_datetime = _memory_system_mod.datetime
+
+        class _FakeSystemUTCDatetime(real_datetime):
+            @classmethod
+            def fromtimestamp(cls, ts, tz=None):
+                if tz is None:
+                    return real_datetime.fromtimestamp(ts, tz=timezone.utc).replace(
+                        tzinfo=None
+                    )
+                return real_datetime.fromtimestamp(ts, tz=tz)
+
+        monkeypatch.setattr(_memory_system_mod, "datetime", _FakeSystemUTCDatetime)
+
+        now = real_datetime(2026, 7, 2, 20, 0, 0, tzinfo=timezone.utc).timestamp()
+        due_ts = _memory_system_mod._estimate_due_ts("明天晚上一起吃饭吧", now=now)
+        due_cst = real_datetime.fromtimestamp(due_ts, tz=timezone(timedelta(hours=8)))
+        assert (due_cst.year, due_cst.month, due_cst.day, due_cst.hour) == (
+            2026, 7, 4, 20,
+        )
 
 
 # ===========================================================================
@@ -495,6 +535,36 @@ class TestRitualObservationWiring:
         for _ in range(3):
             ctx.detect_and_observe_ritual_from_text("sessB", "晚安啦，睡了", now=now2)
         assert ctx._ritual_registry.get_ritual("sessB", "night_farewell") is not None
+
+    def test_detect_and_observe_from_text_hour_independent_of_system_tz(
+        self, monkeypatch
+    ) -> None:
+        """回归：仪式小时判定必须走固定中国时区（_CHINA_TZ），不能依赖
+        time.localtime() 读到的宿主系统时区——境外/UTC 服务器上 time.localtime
+        会把"早安"仪式判到完全错误的小时（8 小时偏移）。
+
+        用已知 UTC 时刻构造 ts（2026-07-02 23:30:00 UTC == 2026-07-03 07:30:00
+        中国时区），并把 time.localtime 打成必炸桩——证明修复后的代码路径根本
+        不再经过它，仍正确落在中国时区对应的小时 7。
+        """
+        plugin = _FakePluginForRitual()
+        sched = ProactiveScheduler(plugin)
+        plugin._proactive_scheduler = sched
+        ctx = SessionContext(plugin)
+
+        ts = datetime(2026, 7, 2, 23, 30, 0, tzinfo=timezone.utc).timestamp()
+
+        def _boom(_ts=None):
+            raise AssertionError("不应再调用依赖系统时区的 time.localtime()")
+
+        monkeypatch.setattr(time, "localtime", _boom)
+
+        for _ in range(3):
+            ctx.detect_and_observe_ritual_from_text("sessA", "早安呀！", now=ts)
+        ritual = ctx._ritual_registry.get_ritual("sessA", "morning_greeting")
+        assert ritual is not None
+        assert ritual["hour_start"] == 7
+        assert ritual["hour_end"] == 8
 
     def test_detect_and_observe_from_text_no_match_is_noop(self) -> None:
         plugin = _FakePluginForRitual()
