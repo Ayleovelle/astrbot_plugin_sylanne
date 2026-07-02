@@ -2826,6 +2826,14 @@ class LLMRequestPipeline:
                     )
                 result = await bridge.dispatch(session_key, motivation)
                 if result.get("dispatched"):
+                    # T2-05 MAJOR-1 修复：user_followup 标签的消息真的发出去了才
+                    # 消费掉产生该标签的那条待跟进线索（同 proactive_scheduler.
+                    # request_dispatch 的发送点消费一致，两条可达的 dispatch 路径
+                    # 都要接上，否则漏掉这条路径同样会让线索无限期复读标签）。
+                    try:
+                        bridge.consume_followup_on_dispatch(session_key, bridge_reason_code)
+                    except Exception:  # noqa: BLE001
+                        pass  # 消费失败绝不阻断已经发出的 dispatch
                     logger.info(
                         f"Sylanne outreach via proactive_chat bridge: session={session_key}"
                     )

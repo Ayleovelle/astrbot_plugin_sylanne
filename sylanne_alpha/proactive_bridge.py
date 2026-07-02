@@ -298,6 +298,60 @@ class ProactiveBridge:
             return False, "min_interval_throttle"
         return True, "ok"
 
+    def _memory_system_if_exists(self, session_key: str) -> Any | None:
+        """按 store 的 .has() 守卫取该会话【已存在】的 memory_system，不存在则
+        返回 None——不触发 p._memory_system_for_session 的懒创建。
+
+        T2-05②/MAJOR-1 的跟进线索检查与消费都只是"查一下/收尾一下"，不该把
+        一次纯粹的探测变成"从此这个会话多了一个空 MemorySystem 实例"的副作用
+        （同 llm_request_pipeline._prepare_memory_context 里 consume-on-mention
+        消费点的既有守卫手法一致）。测试替身若不提供 p._store.memory_systems
+        （没有该守卫能力）则退化为直接调用 getter，维持改动前的行为不变。
+        """
+        p = self._p
+        mem_getter = getattr(p, "_memory_system_for_session", None)
+        if not callable(mem_getter):
+            return None
+        store = getattr(p, "_store", None)
+        mem_map = getattr(store, "memory_systems", None) if store is not None else None
+        if mem_map is not None and hasattr(mem_map, "has") and not mem_map.has(session_key):
+            return None
+        return mem_getter(session_key)
+
+    def consume_followup_on_dispatch(self, session_key: str, reason_code: str) -> None:
+        """T2-05 MAJOR-1 修复（issue-43 同源的内容复读）：user_followup 标签的
+        主动消息真正【发出】之后，消费掉产生该标签的那条待跟进线索。
+
+        背景：infer_reason_code/build_motivation_text 打标签时只【读】
+        due_pending_followup()，从不消费——此前没有任何生产调用方在发送成功
+        后真正 consume 掉它，同一条线索会一直"到期"，让接下来每一次主动发言
+        都被重新贴上 user_followup 标签、拼出几乎相同的动机文案，直到某次
+        consume-on-mention 的关键词重合巧合命中才会消失。
+
+        线索身份：本方法与 infer_reason_code/build_motivation_text 一样调用
+        只读的 due_pending_followup()（deterministic，返回列表里最早到期的
+        一条，不随机）——同一次 dispatch 周期内、期间没有能修改这个会话
+        pending_followups 的 await 的话，三处查到的是同一条线索。万一有其它
+        协程并发消费了同一条（理论可能但极窄的竞态），consume_pending_followup
+        按值比较删除，找不到就安全地返回 False，不会误删别的线索。
+
+        调用方应只在 bridge.dispatch(...) 确认 result['dispatched'] 为真之后才
+        调用本方法——没真的发出去就不该消费掉"记得要问"的线索。reason_code
+        非 'user_followup' 时是 no-op。全程静默失败：消费失败/查不到
+        memory_system 都不该影响已经发出的主动消息。
+        """
+        if reason_code != "user_followup":
+            return
+        try:
+            mem_sys = self._memory_system_if_exists(session_key)
+            if mem_sys is None:
+                return
+            due = mem_sys.due_pending_followup()
+            if due:
+                mem_sys.consume_pending_followup(due)
+        except Exception:
+            pass
+
     async def infer_reason_code(
         self, session_key: str, *, surface: dict[str, Any] | None = None
     ) -> str:
@@ -332,13 +386,13 @@ class ProactiveBridge:
             except Exception:
                 pass
         # 1.5) T2-05②：跟进线索到期——只打标签，不新增触发源（见上方 docstring）。
+        # MINOR(b) 修复：经 _memory_system_if_exists 取，不对没有 memory_system 的
+        # 会话触发懒创建（否则单纯"查一下有没有到期线索"就会生出一个幽灵会话）。
         try:
-            mem_getter = getattr(p, "_memory_system_for_session", None)
-            if callable(mem_getter):
-                mem_sys = mem_getter(session_key)
-                due = mem_sys.due_pending_followup() if mem_sys is not None else None
-                if due:
-                    return "user_followup"
+            mem_sys = self._memory_system_if_exists(session_key)
+            due = mem_sys.due_pending_followup() if mem_sys is not None else None
+            if due:
+                return "user_followup"
         except Exception:
             pass
         # 2) 计算栈深层缘由（proactive_sylanne → decision.reason_code）

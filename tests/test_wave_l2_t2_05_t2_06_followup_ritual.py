@@ -109,6 +109,96 @@ class TestPendingFollowupCreation:
 
 
 # ===========================================================================
+# MAJOR-1 rider：72h TTL 自愈兜底——发送点 consume 万一被漏调，due_pending_followup
+# 扫描时自己丢掉早已到期太久的僵尸线索，不再无限期复读同一个 user_followup 标签。
+# ===========================================================================
+
+
+class TestFollowupTTLBackstop:
+    def test_stale_entry_past_ttl_is_dropped_on_scan(self):
+        ms = MemorySystem()
+        ms.write_summary("我答应你明天一定去面试", source_turns=1, temperature=0.0)
+        due_ts = ms._pending_followups[0]["due_ts_estimate"]
+        stale_now = due_ts + ms._FOLLOWUP_TTL_SECONDS + 1.0
+        assert ms.due_pending_followup(now=stale_now) is None
+        # 自愈丢弃：不是"到期但不返回"，而是整条从列表里被清掉
+        assert ms._pending_followups == []
+
+    def test_entry_within_ttl_still_returned(self):
+        """刚过期没多久（TTL 内）仍正常返回，不误伤——TTL 只兜底真正被遗忘的线索。"""
+        ms = MemorySystem()
+        ms.write_summary("我答应你明天一定去面试", source_turns=1, temperature=0.0)
+        due_ts = ms._pending_followups[0]["due_ts_estimate"]
+        within_ttl_now = due_ts + ms._FOLLOWUP_TTL_SECONDS - 10.0
+        due = ms.due_pending_followup(now=within_ttl_now)
+        assert due is not None
+        assert "面试" in due["topic_snippet"]
+        assert len(ms._pending_followups) == 1
+
+    def test_ttl_drop_does_not_disturb_other_valid_entries(self):
+        """僵尸线索只丢自己那条，同会话里其它仍在 TTL 内的线索不受影响。"""
+        ms = MemorySystem()
+        ms.write_summary("我答应你明天一定去面试", source_turns=1, temperature=0.0)
+        ms.write_summary("我保证后天一定还钱", source_turns=1, temperature=0.0)
+        stale_entry, fresh_entry = ms._pending_followups[0], ms._pending_followups[1]
+        # 把第一条推到 TTL 之外，第二条保持刚到期（TTL 内）
+        stale_now = stale_entry["due_ts_estimate"] + ms._FOLLOWUP_TTL_SECONDS + 1.0
+        fresh_entry["due_ts_estimate"] = stale_now - 5.0
+
+        due = ms.due_pending_followup(now=stale_now)
+        assert due is not None
+        assert "还钱" in due["topic_snippet"]
+        assert len(ms._pending_followups) == 1
+        assert "面试" not in ms._pending_followups[0]["topic_snippet"]
+
+
+# ===========================================================================
+# MINOR rider (a)：restore 时过滤 due_ts_estimate 非有限数的条目——None/NaN/±inf
+# （例如损坏的存档）此前会让 due_pending_followup 的比较 TypeError，被调用方
+# try/except 静默吞掉，效果是"user_followup 标签能力全体失效"。
+# ===========================================================================
+
+
+class TestFollowupRestoreFiltersNonFiniteDueTs:
+    def test_none_due_ts_dropped_at_restore(self):
+        ms = MemorySystem()
+        ms.write_summary("我答应你明天一定去面试", source_turns=1, temperature=0.0)
+        blob = ms.to_dict()
+        blob["pending_followups"][0]["due_ts_estimate"] = None
+        restored = MemorySystem.create_from_dict(blob)
+        assert restored._pending_followups == []
+        # 且不会因为坏条目混进去而让 due_pending_followup 整体 TypeError
+        assert restored.due_pending_followup() is None
+
+    def test_nan_due_ts_dropped_at_restore(self):
+        ms = MemorySystem()
+        ms.write_summary("我答应你明天一定去面试", source_turns=1, temperature=0.0)
+        blob = ms.to_dict()
+        blob["pending_followups"][0]["due_ts_estimate"] = float("nan")
+        restored = MemorySystem.create_from_dict(blob)
+        assert restored._pending_followups == []
+
+    def test_inf_due_ts_dropped_at_restore(self):
+        ms = MemorySystem()
+        ms.write_summary("我答应你明天一定去面试", source_turns=1, temperature=0.0)
+        blob = ms.to_dict()
+        blob["pending_followups"][0]["due_ts_estimate"] = float("inf")
+        restored = MemorySystem.create_from_dict(blob)
+        assert restored._pending_followups == []
+
+    def test_bad_entry_does_not_take_down_valid_sibling(self):
+        """坏条目只丢自己那条，不连累同一存档里其它有效的跟进线索。"""
+        ms = MemorySystem()
+        ms.write_summary("我答应你明天一定去面试", source_turns=1, temperature=0.0)
+        ms.write_summary("我保证后天一定还钱", source_turns=1, temperature=0.0)
+        blob = ms.to_dict()
+        blob["pending_followups"][0]["due_ts_estimate"] = None
+        restored = MemorySystem.create_from_dict(blob)
+        assert len(restored._pending_followups) == 1
+        assert "还钱" in restored._pending_followups[0]["topic_snippet"]
+
+
+# ===========================================================================
 # T2-05③：consume-on-mention —— 用户主动提起同一话题时静默消费
 # ===========================================================================
 
@@ -134,6 +224,41 @@ class TestConsumeOnMention:
         ms.write_summary("我答应你明天一定去面试", source_turns=1, temperature=0.0)
         assert ms.consume_pending_followups_by_text("") == 0
         assert len(ms._pending_followups) == 1
+
+    # -- MAJOR-2 红队实测：触发词（明天/一定/答应/数字）撑过阈值的假阳性 --------
+
+    def test_probe_明天见_does_not_falsely_consume(self):
+        """仅靠触发词『明天』撑过旧阈值，跟话题内容（面试）毫无关系。"""
+        ms = MemorySystem()
+        ms.write_summary("我答应你明天一定去面试", source_turns=1, temperature=0.0)
+        assert ms.consume_pending_followups_by_text("明天见！") == 0
+        assert len(ms._pending_followups) == 1
+
+    def test_probe_明天再说吧_does_not_falsely_consume(self):
+        ms = MemorySystem()
+        ms.write_summary("我答应你明天一定去面试", source_turns=1, temperature=0.0)
+        assert ms.consume_pending_followups_by_text("明天再说吧") == 0
+        assert len(ms._pending_followups) == 1
+
+    def test_probe_我明天有空_does_not_falsely_consume(self):
+        ms = MemorySystem()
+        ms.write_summary("我答应你明天一定去面试", source_turns=1, temperature=0.0)
+        assert ms.consume_pending_followups_by_text("我明天有空") == 0
+        assert len(ms._pending_followups) == 1
+
+    def test_probe_一定哦_does_not_falsely_consume(self):
+        ms = MemorySystem()
+        ms.write_summary("我答应你明天一定去面试", source_turns=1, temperature=0.0)
+        assert ms.consume_pending_followups_by_text("一定哦") == 0
+        assert len(ms._pending_followups) == 1
+
+    def test_true_positive_content_mention_still_consumes(self):
+        """修复没有矫枉过正：真提到实质内容（面试）时仍应正常消费。"""
+        ms = MemorySystem()
+        ms.write_summary("我答应你明天一定去面试", source_turns=1, temperature=0.0)
+        consumed = ms.consume_pending_followups_by_text("面试过了,还挺顺利")
+        assert consumed == 1
+        assert ms._pending_followups == []
 
 
 # ===========================================================================
@@ -439,4 +564,119 @@ class TestCooldownStillGatesDespiteDueFollowup:
         assert result["dispatched"] is False
         assert result["reason"] == "cooldown_active"
         # 到期线索仍原封不动地留着（没有被误消费/误发出）
+        assert len(mem._pending_followups) == 1
+
+
+# ===========================================================================
+# MAJOR-1：user_followup 标签的消息真正发出后，消费掉产生该标签的那条线索
+#
+# 两条可达 dispatch 路径都要接：这里覆盖 proactive_scheduler.request_dispatch；
+# llm_request_pipeline._life_sim_outreach 的 5min fallback 直发分支见
+# tests/test_lifesim_routing_pri.py 的
+# test_life_sim_outreach_consumes_followup_after_bridge_dispatch。
+# ===========================================================================
+
+
+class TestMajorOneConsumeOnDispatchWiring:
+    def test_request_dispatch_consumes_thread_after_real_send(self) -> None:
+        """dispatch 真正成功（result['dispatched'] is True）后，产生 user_followup
+        标签的那条待跟进线索应被消费掉——否则它会一直"到期"，让接下来经这条
+        路径触发的每一次主动发言都被重新贴上一模一样的标签文案（issue-43 同源
+        的内容复读）。只 stub 掉"是否真的连上了大饼"的机制细节（bridge.available/
+        should_dispatch_now/dispatch，已有 test_proactive_bridge.py 覆盖），
+        infer_reason_code / build_motivation_text / consume_followup_on_dispatch
+        全部走真实实现。
+        """
+        mem = MemorySystem()
+        mem.write_summary("我答应你明天一定去面试", source_turns=2, temperature=0.5)
+        mem._pending_followups[0]["due_ts_estimate"] = time.time() - 10.0
+
+        class _FakeHost:
+            def diagnostics(self) -> dict:
+                return {"body": {"pulse": {"mood_label": "平静"}}}
+
+        p = types.SimpleNamespace()
+        p.config = {
+            "enable_proactive_speech_dispatch": True,
+            "sylanne_alpha_proactive_bridge_enabled": True,
+        }
+        p._store = SessionStateStore()
+        p._store.memory_systems.set("sessA", mem)
+        p._observed_now = lambda: time.time()
+        p._proactive_dispatch_last_sent = {}
+        p._host = lambda sk: _FakeHost()
+        p._memory_system_for_session = lambda sk: mem
+
+        sched = ProactiveScheduler(p)
+
+        async def _fake_get_speech_decision(*args, **kwargs):
+            return {"action": "reach_out", "allowed": True}
+
+        sched.get_speech_decision = _fake_get_speech_decision  # type: ignore[method-assign]
+
+        bridge = ProactiveBridge(p)
+        bridge.available = lambda: True  # type: ignore[method-assign]
+        bridge.should_dispatch_now = lambda sk: (True, "ok")  # type: ignore[method-assign]
+
+        async def _fake_dispatch(sk: str, motivation: str) -> dict:
+            return {"dispatched": True, "reason": "ok"}
+
+        bridge.dispatch = _fake_dispatch  # type: ignore[method-assign]
+        p._proactive_bridge = bridge
+
+        class _Ev:
+            unified_msg_origin = "sessA"
+
+        result = asyncio.run(sched.request_dispatch(_Ev(), force=True))
+
+        assert result["dispatched"] is True
+        # 产生 user_followup 标签的那条线索应已被真正消费——不再等在列表里。
+        assert mem._pending_followups == []
+
+    def test_request_dispatch_does_not_consume_when_not_dispatched(self) -> None:
+        """反证：桥接没有真的发出去（dispatched=False）时绝不消费——没发出去
+        不该消费掉"记得要问"的线索。"""
+        mem = MemorySystem()
+        mem.write_summary("我答应你明天一定去面试", source_turns=2, temperature=0.5)
+        mem._pending_followups[0]["due_ts_estimate"] = time.time() - 10.0
+
+        class _FakeHost:
+            def diagnostics(self) -> dict:
+                return {"body": {"pulse": {"mood_label": "平静"}}}
+
+        p = types.SimpleNamespace()
+        p.config = {
+            "enable_proactive_speech_dispatch": True,
+            "sylanne_alpha_proactive_bridge_enabled": True,
+        }
+        p._store = SessionStateStore()
+        p._store.memory_systems.set("sessA", mem)
+        p._observed_now = lambda: time.time()
+        p._proactive_dispatch_last_sent = {}
+        p._host = lambda sk: _FakeHost()
+        p._memory_system_for_session = lambda sk: mem
+
+        sched = ProactiveScheduler(p)
+
+        async def _fake_get_speech_decision(*args, **kwargs):
+            return {"action": "reach_out", "allowed": True}
+
+        sched.get_speech_decision = _fake_get_speech_decision  # type: ignore[method-assign]
+
+        bridge = ProactiveBridge(p)
+        bridge.available = lambda: True  # type: ignore[method-assign]
+        bridge.should_dispatch_now = lambda sk: (True, "ok")  # type: ignore[method-assign]
+
+        async def _fake_dispatch_fails(sk: str, motivation: str) -> dict:
+            return {"dispatched": False, "reason": "error:boom"}
+
+        bridge.dispatch = _fake_dispatch_fails  # type: ignore[method-assign]
+        p._proactive_bridge = bridge
+
+        class _Ev:
+            unified_msg_origin = "sessA"
+
+        result = asyncio.run(sched.request_dispatch(_Ev(), force=True))
+
+        assert result["dispatched"] is False
         assert len(mem._pending_followups) == 1
