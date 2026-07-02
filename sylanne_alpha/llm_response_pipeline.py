@@ -373,6 +373,47 @@ class LLMResponsePipeline:
                 # 兜底，经审查移除——单条长消息不是事故的 86 段轰炸，tagged thinking 已剥；
                 # 截断会丢内容、还撞 deliverable 契约"一次给全"，是治 speculative 问题反引入
                 # 真 bug。源头的 deliverable_mode（摘逃生舱工具）才是 thrash/泄露的真兜底。
+                if not cleaned.strip():
+                    # fix/context-integrity CONTRIB：此分支（非拦截，现网 realtime_intercept
+                    # 默认关时的常态路径）此前 thinking-only 草稿剥空后直接吞掉——既不发送
+                    # 也没有下面 intercept 分支那套 EMPTY_REPLY_FALLBACK 兜底，用户完全收不到
+                    # 回复（"已读不回"假象）。这里搬同一份 reason 分治逻辑过来，保持两分支
+                    # 语义一致：stripped_to_empty（thinking 包了答案）默认兜底一句；
+                    # empty_completion（completion_text 真空，常见于 tool 循环死锁场景，
+                    # AstrBot core 已自己塞过提示）继续保持静默——不是人格装死，不该硬凑话。
+                    _reason = "stripped_to_empty" if text.strip() else "empty_completion"
+                    _cfg = self._p._config or {}
+                    _no_ghost = bool(_cfg.get("sylanne_no_ghost_reply", True))
+                    _has_custom_fallback = bool(
+                        str(_cfg.get("sylanne_ghost_fallback_text") or "").strip()
+                    )
+                    _silent_this = (not _no_ghost) or (
+                        _reason == "empty_completion" and not _has_custom_fallback
+                    )
+                    if _silent_this:
+                        logger.info(
+                            f"Sylanne reply silent (non-intercept): session={session_key} "
+                            f"reason={_reason} raw_len={len(text)} "
+                            f"cfg_no_ghost={_no_ghost} has_custom={_has_custom_fallback}"
+                        )
+                        response.completion_text = ""
+                        return
+                    _custom_fallback = str(_cfg.get("sylanne_ghost_fallback_text") or "").strip()
+                    if _custom_fallback:
+                        _fallback = _custom_fallback
+                    else:
+                        _prev_state = self._p._store.last_injected_states.get(session_key) or {}
+                        _fallback = _pool_choose(
+                            EMPTY_REPLY_FALLBACK_VARIANTS,
+                            recent_key="empty_reply_fallback",
+                            state=self._p._store.variant_recent.get_or_create(session_key, dict),
+                            condition=_warmth_bucket(_prev_state.get("warmth")),
+                        ) or LAST_RESORT_FALLBACK_TEXT
+                    logger.info(
+                        f"Sylanne empty reply -> fallback (no ghost): session={session_key} "
+                        f"reason={_reason} raw_len={len(text)} fallback_len={len(_fallback)}"
+                    )
+                    cleaned = _fallback
                 if cleaned != text:
                     response.completion_text = cleaned
                 if cleaned.strip():
