@@ -740,7 +740,15 @@ def _tokenize(text: str) -> set[str]:
     return tokens
 
 
-_STOPWORDS = frozenset("的了是在我你他她它们这那有不会就都也要能可以说到和与及")
+# 多字虚词/功能词（jieba 分词后是完整 word，单字表接不住，需整词命中）。
+# 挑高频、几乎不携带语义的常见虚词/代词短语，控制在小而准，避免误伤实义词。
+_STOPWORDS_MULTI = frozenset((
+    "一个", "没有", "什么", "这个", "那个", "因为", "所以", "但是",
+    "如果", "虽然", "不过", "而且", "还是", "已经", "可能", "应该",
+    "可以", "觉得", "知道", "一样", "还有", "自己", "现在", "时候",
+    "一下", "一点", "这样", "那样", "一直", "或者", "怎么", "为什么",
+))
+_STOPWORDS = frozenset("的了是在我你他她它们这那有不会就都也要能可以说到和与及") | _STOPWORDS_MULTI
 
 
 def _keyword_overlap(query: str, text: str) -> float:

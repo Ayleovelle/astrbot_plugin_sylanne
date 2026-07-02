@@ -1522,7 +1522,8 @@ class LLMRequestPipeline:
                 )
                 outreach_fragment = (
                     f"[life_event_context] Sylanne 刚刚经历了一件事想分享：{reason}（心情：{mood}）。"
-                    f"请自然地在回复中提及或表达这件事，用你自己的语气。"
+                    f"如果话赶话聊到了，可以顺嘴带一句、带着你自己的语气；不用为了提它硬转话题，"
+                    f"这轮没提到也没关系。"
                 )
                 # 将生活事件写入记忆层，标记 source="life_sim" 以便召回时
                 # 区分"Sylanne 自己脑补的生活"与"和用户真实聊过的事"。
@@ -1584,6 +1585,25 @@ class LLMRequestPipeline:
                     if r.relevance >= relevance_threshold
                     or r.recall_reason == "temporal_proximity"
                 ]
+            if results and v2core_on:
+                # 同轮跨路径去重：v2core_on 时 PERCEPT（apply_v2core_request，Step 0，
+                # 已跑在先）与本方法都会各自召回一次，同一条记忆可能被两边命中，
+                # 若不去重会在同一个 prompt 里重复出现两次。只窥视 PERCEPT 本轮已
+                # 召回的原文集合做精确文本去重（不改 PERCEPT 侧，legacy 不用 v2core
+                # 时该集合恒空，行为不变）。
+                try:
+                    from sylanne_alpha.v2core.integration import (
+                        peek_percept_recalled_texts,
+                    )
+
+                    _percept_texts = peek_percept_recalled_texts(p, session_key)
+                except Exception:
+                    _percept_texts = set()
+                if _percept_texts:
+                    results = [
+                        r for r in results
+                        if (r.text or "").strip() not in _percept_texts
+                    ]
             if results:
                 mem_texts = [r.text[:100] for r in results if r.text]
                 if mem_texts:

@@ -56,6 +56,15 @@ class MemoryDomain:
         results = self._ms.recall(text, query_embedding, warmth, limit=limit)
         out: list[dict[str, Any]] = []
         for r in results:
+            # 单一 v2core choke 点：情感旁路（ACTIVATION 模式 _apply_emotion_bypass）
+            # 补回的 rel≈0 强情绪项若同时语义几乎不相关（relevance<0.15），在这里落地前
+            # 丢弃——防止高 warmth 场景下每轮都被无关往事打断话题。不动 emotion_bypass
+            # 本身（legacy 走 MemorySystem.recall 直连，不经本方法，行为不变）。
+            if (
+                getattr(r, "recall_reason", "") == "emotion_bypass"
+                and getattr(r, "relevance", 0.0) < 0.15
+            ):
+                continue
             item_text = getattr(r, "text", str(r))
             # 情绪键：MemoryResult.temperature（透传）+ emotional_weight；取不到给 None（不充 0）
             temperature = getattr(r, "temperature", None)
