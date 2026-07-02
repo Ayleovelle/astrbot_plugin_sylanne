@@ -24,6 +24,8 @@ import random
 import time
 from typing import Any
 
+from sylanne_alpha.variant_pool import choose
+
 try:
     from astrbot.api import logger  # type: ignore
 except ImportError:
@@ -33,6 +35,23 @@ except ImportError:
 
 
 PROACTIVE_CHAT_STAR_NAME = "astrbot_plugin_proactive_chat"
+
+# T4-02②：踌躇词试探。10+ 变体，语气有软有窘有转折，去掉了"在吗？我"这种陌生人register
+# （对男朋友讲这句会显得突兀/生分，见 T4-02 卡片）。
+_HESITATION_FILLERS: tuple[str, ...] = (
+    "那个……",
+    "嗯…",
+    "诶，",
+    "…话说，",
+    "唔，",
+    "啊对了…",
+    "呃，",
+    "怎么说呢…",
+    "话说回来…",
+    "对了，",
+    "唉…",
+    "算了还是说吧，",
+)
 
 
 class ProactiveBridge:
@@ -63,6 +82,8 @@ class ProactiveBridge:
         # 基线」snapshot 回去造成残留复读。in-flight 闸保证同 sid 同方法只有一个在飞。
         self._inflight_dispatch: set[str] = set()
         self._inflight_adjust: set[str] = set()
+        # T4-02②：踌躇词变体池 recent-N 去重历史（按 session_key 分列，forget_session 清理）。
+        self._filler_recent: dict[str, list[str]] = {}
 
     def forget_session(self, session_key: str) -> None:
         """释放某会话在桥接层的残留态（CP8-P6：会话删除/驱逐时清理，防无界增长）。
@@ -71,9 +92,11 @@ class ProactiveBridge:
         故两种键都尝试清除（origin 解析可能因映射已被清而回退，双清更稳妥）。
         """
         self._last_bridge_dispatch.pop(session_key, None)
+        self._filler_recent.pop(session_key, None)
         try:
             origin = self._resolve_origin(session_key)
             self._last_bridge_dispatch.pop(origin, None)
+            self._filler_recent.pop(origin, None)
             self._pending_segment_takeover.discard(origin)
             # issue#43 Wave2：只清【未被持有】的锁——若该 sid 正有 dispatch/adjust 在飞，
             # 删了它后续 _lock_for 会 setdefault 一把新锁，与在飞 task 失去互斥（红队 nit）。
@@ -605,8 +628,14 @@ class ProactiveBridge:
         raw = max(boundary, need_quiet) - need_expr - warmth * 0.5
         return max(0.0, min(1.0, raw))
 
-    def hesitation_plan(self, body: dict[str, Any]) -> dict[str, Any]:
+    def hesitation_plan(
+        self, body: dict[str, Any], *, session_key: str | None = None
+    ) -> dict[str, Any]:
         """根据犹豫强度产出本次主动发言的犹豫计划。
+
+        Args:
+            session_key: 用于踌躇词变体池 recent-N 去重（同一会话不连续撞同一个试探词）；
+                拿不到时退回全局去重（跨会话共享一份历史，仍好过完全无状态）。
 
         Returns:
             {
@@ -621,10 +650,14 @@ class ProactiveBridge:
         pre_delay = round(h * random.uniform(2.0, 45.0), 2) if h > 0.05 else 0.0
         # 最后一刻收回：高犹豫时才可能放弃，概率 = h^2 * 0.5（最高约 50%）
         withdraw = random.random() < (h * h * 0.5)
-        # 踌躇词试探：中高犹豫时偶尔加
+        # 踌躇词试探：中高犹豫时偶尔加（T4-02②：变体池挑，recent-N 去重防连续复读）
         filler = ""
         if h > 0.4 and random.random() < (h * 0.6):
-            filler = random.choice(["那个……", "嗯…", "在吗？我", "诶，", "…话说，"])
+            filler = choose(
+                _HESITATION_FILLERS,
+                recent_key=session_key or "_global",
+                state=self._filler_recent,
+            )
         return {
             "hesitation": round(h, 4),
             "pre_delay_seconds": pre_delay,

@@ -32,6 +32,11 @@ from sylanne_alpha.message_dispatch import (
     realtime_plan,
     strip_draft_blocks,
 )
+from sylanne_alpha.variant_pool import (
+    EMPTY_REPLY_FALLBACK_VARIANTS,
+    choose as _pool_choose,
+    warmth_bucket as _warmth_bucket,
+)
 
 if TYPE_CHECKING:
     from sylanne_alpha.protocols import PluginHost
@@ -191,10 +196,22 @@ class LLMResponsePipeline:
                 response.completion_text = ""
                 return
             # 走到这里：stripped_to_empty 默认兜底 / 用户显式配了自定义兜底文案
-            _fallback = str(
-                _cfg.get("sylanne_ghost_fallback_text")
-                or "……（我想说点什么，可话到嘴边又散了，再给我一秒。）"
-            )
+            # T4-02①：用户自定义文案（config 通道）优先级最高，锁定不变；否则走
+            # EMPTY_REPLY_FALLBACK_VARIANTS 变体池（同 renderer.py 共用一份），按上一轮
+            # 缓存的 warmth 分挑语气（此处是同步热路径，拿不到实时 body，last_injected_states
+            # 是本轮 request 阶段刚写入的近期快照，足够便宜、足够新——不为此发额外异步取值），
+            # recent-N 去重存 _store.variant_recent（按 session 隔离，随 release_session 清理）。
+            _custom_fallback = str(_cfg.get("sylanne_ghost_fallback_text") or "").strip()
+            if _custom_fallback:
+                _fallback = _custom_fallback
+            else:
+                _prev_state = self._p._store.last_injected_states.get(session_key) or {}
+                _fallback = _pool_choose(
+                    EMPTY_REPLY_FALLBACK_VARIANTS,
+                    recent_key="empty_reply_fallback",
+                    state=self._p._store.variant_recent.get_or_create(session_key, dict),
+                    condition=_warmth_bucket(_prev_state.get("warmth")),
+                ) or "……（我想说点什么，可话到嘴边又散了，再给我一秒。）"
             logger.info(
                 f"Sylanne empty reply -> fallback (no ghost): session={session_key} "
                 f"reason={_reason} raw_len={len(text)} fallback_len={len(_fallback)}"

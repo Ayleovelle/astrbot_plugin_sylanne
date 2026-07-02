@@ -2686,7 +2686,7 @@ class LLMRequestPipeline:
                 filler = ""
                 if hesit_on:
                     body = surface.get("body", {}) if isinstance(surface, dict) else {}
-                    plan = bridge.hesitation_plan(body)
+                    plan = bridge.hesitation_plan(body, session_key=session_key)
                     if plan["pre_delay_seconds"] > 0:
                         logger.info(
                             f"Sylanne hesitates {plan['pre_delay_seconds']}s before outreach "
