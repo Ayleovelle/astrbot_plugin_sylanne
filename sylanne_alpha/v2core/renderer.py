@@ -306,7 +306,11 @@ class DefaultRenderer:
             return self._fallback_text
         try:
             body = getattr(ctx, "body", None) if ctx is not None else None
-            condition = _warmth_bucket(body.warmth) if body is not None else None
+            condition = (
+                _warmth_bucket(getattr(body, "warmth", None))
+                if body is not None
+                else None
+            )
             text = _pool_choose(
                 EMPTY_REPLY_FALLBACK_VARIANTS,
                 recent_key="empty_reply_fallback",

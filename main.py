@@ -1116,10 +1116,15 @@ class EmotionalStatePlugin(Star):
             try:
                 message_text = str(getattr(event, "message_str", "") or "")
                 engine_obs: dict[str, float] = {}
-                existing_host = self._store.hosts.get(session_key)
-                kernel = getattr(existing_host, "kernel", None)
-                if kernel is not None:
-                    engine_obs = kernel.computation.engine.observe()
+                try:
+                    existing_host = self._store.hosts.get(session_key)
+                    kernel = getattr(existing_host, "kernel", None)
+                    if kernel is not None:
+                        engine_obs = kernel.computation.engine.observe()
+                except Exception:
+                    # 宿主/内核链路部分初始化时的任何异常都退化为 engine_obs={}，
+                    # 绝不能让 tempo 记录（observe_user_message）跟着一起被吞掉。
+                    engine_obs = {}
                 self._rhythm_learner.observe_user_message(
                     session_key, message_text, now, engine_obs
                 )

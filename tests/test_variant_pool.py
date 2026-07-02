@@ -152,6 +152,18 @@ def test_default_fallback_text_constant_still_exported() -> None:
     assert isinstance(_DEFAULT_FALLBACK_TEXT, str) and _DEFAULT_FALLBACK_TEXT.strip()
 
 
+def test_renderer_fallback_body_without_warmth_attr_does_not_crash() -> None:
+    """ctx.body 是缺 warmth 属性的畸形对象（非 None）时不应抛 AttributeError——
+    _pick_fallback_text 须走 getattr(body, "warmth", None) 防御式取值，退到无条件
+    默认桶，而不是直接 body.warmth 崩给外层 try/except 兜底成静态文案。"""
+    r = DefaultRenderer()
+    ctx = _empty_draft_ctx()
+    ctx.body = types.SimpleNamespace()  # 没有 warmth 属性
+    reply = r.render(ctx, draft="")
+    all_variants = {v for bucket in EMPTY_REPLY_FALLBACK_VARIANTS.values() for v in bucket}
+    assert "".join(reply.parts) in all_variants
+
+
 # ===========================================================================
 # ①空回复兜底 —— llm_response_pipeline.py（config 覆盖通道优先级）
 # ===========================================================================
