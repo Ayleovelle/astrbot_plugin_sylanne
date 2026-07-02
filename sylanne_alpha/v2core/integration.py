@@ -414,6 +414,21 @@ def _apply_v2core_feature_flags(ctx: Any, plugin: Any) -> None:
     )
 
 
+def _apply_burst_cue_scratch(event: Any, ctx: Any) -> None:
+    """T2-04②：连发合并线索——llm_request_pipeline 碎片防抖 winner 在合并 N>=2 条
+    碎片时，往 event 上打了一个瞬态属性 `_sylanne_burst_count`（不跨轮持久化，下一
+    轮 event 是新对象自动失效）。这里转成 scratch 键供 fragment 渲染一句"挑要紧的
+    接"提示，防止 LLM 逐句逐点公式化回应。始终开（T2-04 属 always-on 增强，不经
+    feature flag 门控），无标记/异常值 → 不设键，行为与本能力不存在时一致。
+    """
+    try:
+        burst_n = int(getattr(event, "_sylanne_burst_count", 0) or 0)
+    except (TypeError, ValueError):
+        return
+    if burst_n >= 2:
+        ctx.scratch["burst_cue"] = True
+
+
 def _apply_winddown_window_scratch(ctx: Any, rt: dict[str, Any]) -> None:
     """T2-03⑤：收尾窗口生效期——不管本轮是否刚点燃 winddown，只要还在窗口内就把临时
     hold 偏置 + 派发预延迟喂进 scratch（ignition.context_hold_food 之外的独立加项 +
@@ -611,6 +626,9 @@ async def apply_v2core_request(plugin: Any, event: Any, request: Any) -> None:
         await _percept_recall(plugin, ctx, rt["domains"], text)
         rt["pending"] = {"ctx": ctx, "ts": time.time(), "text": text}
         rt["pending_assessment"] = ctx.scratch.get("assessment") or None
+
+        # T2-04②：连发合并线索。始终开（T2-04 属 always-on 增强，不经 feature flag 门控）。
+        _apply_burst_cue_scratch(event, ctx)
 
         # T2-01③：事后认账——上一轮若装死/软化沉默过，本轮心象带一句"刚才看到了
         # 没说话"的线索（一次性：不管本轮是否真的用上，用过就清；TTL 兜底防陈旧

@@ -746,6 +746,33 @@ class LLMRequestPipeline:
         p._multimodal_provider_cache = (time.time(), "")
         return ""
 
+    @staticmethod
+    def _merge_fragments(texts: list[str]) -> str:
+        """T2-04①：连发不缝合——把碎片防抖收集到的多条用户消息合并成一条。
+
+        用换行而非空格拼接，保留每条消息的边界（原来的 " ".join 会把独立的几句
+        糊成一句读不出停顿感的长句，LLM 也更容易逐句逐点地公式化回应——客服感
+        的根因之一）。N>=2 时前面加一句轻量标记，明确告诉 LLM 这是"连着发的好
+        几条"而不是天然的一整句话。
+        """
+        merged = "\n".join(texts)
+        if len(texts) >= 2:
+            merged = f"『(他连着发了{len(texts)}条)』\n{merged}"
+        return merged
+
+    @staticmethod
+    def _adaptive_max_wait(configured_max_wait: float, median_gap: float | None) -> float:
+        """T2-04③：碎片合并窗口自适应——用已学到的用户消息间隔中位数替代固定窗口。
+
+        画像还不成熟（median_gap 为 None，即 RhythmLearner.get_median_inter_message_gap
+        因样本不足/未达亲密门槛而拒答）时原样回退调用方传入的配置/默认值，零行为变化。
+        画像可用时 clamp 到 [1.5, 8.0] 秒——下限护住极快打字者不被压到不合理的窗口，
+        上限护住慢打字者不会让防抖等成十几秒的静默感。
+        """
+        if median_gap is None:
+            return configured_max_wait
+        return max(1.5, min(8.0, median_gap))
+
     async def _on_llm_request_inner(self, event: Any, request: Any) -> None:
         """LLM 请求拦截的主入口。
 
@@ -865,6 +892,16 @@ class LLMRequestPipeline:
             max_wait = float(
                 (p.config or {}).get("realtime_input_completion_max_wait_seconds", 4.0)
             )
+            # T2-04③：自适应合并窗口——慢打字/爱分段的人本该给更宽的等待，手速快的
+            # 不必死等固定 4s。用 RhythmLearner 已学到的用户消息间隔中位数替代固定
+            # max_wait；画像还不成熟（样本不足/未达亲密门槛）时 get_median_inter_message_gap
+            # 返回 None，原样回退到上面算出的配置/默认值，零行为变化。
+            median_gap = None
+            try:
+                median_gap = p._rhythm_learner.get_median_inter_message_gap(session_key)
+            except Exception:
+                median_gap = None
+            max_wait = self._adaptive_max_wait(max_wait, median_gap)
             # 防误配：probe_delay >= max_wait 会让首个醒来的碎片必然命中 max_wait 兜底
             # 而提前 pop（防抖窗口塌缩），故 clamp 到 max_wait 的 0.8 倍留出兜底余量。
             if max_wait > 0 and probe_delay >= max_wait:
@@ -908,7 +945,13 @@ class LLMRequestPipeline:
                     # 竞争失败（被并发兜底者先 pop）→ loser
                     event.stop_event()
                     return
-                merged = " ".join(claimed["texts"])
+                # T2-04①：连发不缝合（细节见 _merge_fragments）。
+                n_frags = len(claimed["texts"])
+                merged = self._merge_fragments(claimed["texts"])
+                if n_frags >= 2:
+                    # 瞬态标记：仅供本轮 v2core 心象层（apply_v2core_request）读取，
+                    # 不写入任何持久化存储，下一轮 event 是新对象、自动失效。
+                    event._sylanne_burst_count = n_frags
                 # 关键：LLM 实际读 req.prompt（req 在 hook 之前已 build），必须改这个
                 request.prompt = merged
                 event.message_str = merged  # 供历史/其他钩子

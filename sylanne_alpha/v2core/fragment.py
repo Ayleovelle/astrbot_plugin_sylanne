@@ -193,6 +193,11 @@ def build_mind_fragment(ctx: BeatContext, domains: dict[str, Any]) -> str:
     if winddown_return_text:
         state.append((3.6, _SAL_LAST_SILENT, winddown_return_text))
 
+    # 连发不缝合行（T2-04②）——同一档位：一次性、该被看见，紧跟去忙收尾返场行。
+    burst_text = _burst_line(ctx)
+    if burst_text:
+        state.append((3.7, _SAL_LAST_SILENT, burst_text))
+
     # 适应层行（Wave 6 PR-B）——口吻镜像/话题亲和的长期适应渗进口吻。STATE 档 order 4.6，
     # 夹在生活(4.5)与自我(5)之间。prompt_line 是哑域防御的真接缝（TurnRunner 不自动调）；
     # 风格漂移提示要 bond 闸，故这里把 usermodel.bond() 喂进去（跨域只读）。
@@ -434,6 +439,18 @@ _WINDDOWN_RETURN_LINE = "刚把手头那件事收了尾，喘口气，现在能�
 def _winddown_return_line(ctx: BeatContext) -> str:
     """读 scratch["winddown_return_cue"]（integration 在收尾窗口过期后一次性置真）。"""
     return _WINDDOWN_RETURN_LINE if ctx.scratch.get("winddown_return_cue") else ""
+
+
+# T2-04②：连发不缝合——当碎片防抖把用户连着发的好几条合并成一条时，integration
+# 会把标记转成这个 scratch 键（一次性、只这一轮）。渲染一句"挑要紧的接"提示，防止
+# LLM 逐句逐点公式化回应（客服感的根因之一）。
+_BURST_LINE = "他连发几条时，挑要紧的接就行，不用每句都回应"
+
+
+def _burst_line(ctx: BeatContext) -> str:
+    """读 scratch["burst_cue"]（integration 据 llm_request_pipeline 碎片合并 N>=2
+    条时打的瞬态标记派生）。无 cue → 空串，不占位。"""
+    return _BURST_LINE if ctx.scratch.get("burst_cue") else ""
 
 
 def _drive_line(ctx: BeatContext) -> tuple[str, float]:

@@ -94,6 +94,13 @@ class RhythmProfile:
             if median_gap > 0.1:
                 self._chars_per_second = max(2.0, min(20.0, median_len / median_gap))
 
+    def median_gap_seconds(self) -> float | None:
+        """用户消息间隔中位数（秒）。样本不足（<3）时返回 None（调用方应回退默认值）。"""
+        if len(self._inter_msg_gaps) < 3:
+            return None
+        sorted_gaps = sorted(self._inter_msg_gaps)
+        return sorted_gaps[len(sorted_gaps) // 2]
+
     @property
     def confidence(self) -> float:
         return self._confidence
@@ -290,6 +297,17 @@ class RhythmLearner:
 
     def profile(self, session_key: str) -> RhythmProfile | None:
         return self._profiles.get(session_key)
+
+    def get_median_inter_message_gap(self, session_key: str) -> float | None:
+        """获取该会话用户消息间隔中位数（秒），供自适应防抖合并窗口等场景使用。
+
+        门槛与 get_rhythm_params 一致（confidence >= 0.1）——画像还不成熟时返回
+        None，调用方应回退到固定/配置窗口，而不是拿噪声样本硬算。
+        """
+        profile = self._profiles.get(session_key)
+        if profile is None or profile.confidence < 0.1:
+            return None
+        return profile.median_gap_seconds()
 
     # ------------------------------------------------------------------
     # Item 79: 回复长度自适应控制器
