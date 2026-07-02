@@ -96,6 +96,77 @@ class RitualRegistry:
         """
         return [v for k, v in self._rituals.items() if k.startswith(session_key)]
 
+    def get_ritual(self, session_key: str, pattern: str) -> dict | None:
+        """获取指定会话+模式的已注册仪式（未达自动注册阈值则 None）。
+
+        Args:
+            session_key: 会话标识。
+            pattern: 行为模式描述（如 "morning_greeting"）。
+        """
+        return self._rituals.get(f"{session_key}:{pattern}")
+
+    # ------------------------------------------------------------------
+    # 序列化（T2-06⑤：随插件 KV 周期持久化，重启不丢已学到的仪式）
+    # ------------------------------------------------------------------
+
+    def to_dict(self) -> dict:
+        """序列化为可 JSON 化的 dict。"""
+        return {
+            "rituals": dict(self._rituals),
+            "observations": {k: list(v) for k, v in self._observations.items()},
+        }
+
+    @classmethod
+    def from_dict(cls, data: dict) -> "RitualRegistry":
+        """从字典恢复（load-compat：坏/缺字段一律安全降级为空）。"""
+        reg = cls()
+        if not isinstance(data, dict):
+            return reg
+        rituals = data.get("rituals", {})
+        if isinstance(rituals, dict):
+            reg._rituals = {
+                str(k): dict(v) for k, v in rituals.items() if isinstance(v, dict)
+            }
+        observations = data.get("observations", {})
+        if isinstance(observations, dict):
+            reg._observations = {
+                str(k): [float(t) for t in v if isinstance(t, (int, float))]
+                for k, v in observations.items()
+                if isinstance(v, list)
+            }
+        return reg
+
+
+# ---------------------------------------------------------------------------
+# T2-06④：早安/晚安兜底关键词识别
+#
+# 设计原打算读 sylanne_core 后台 assessor（_engine/sylanne_core/assessor.py）的
+# greeting/farewell 分类 flag，但审计确认：插件的 EngineFacade
+# （engine_adapter.py::EngineFacade.__init__）构造 SDK 引擎时 assessor_enabled
+# 默认为 False，且全仓没有任何调用点把它覆盖为 True；插件运行时实际驱动
+# valence/arousal 的是完全独立的 sylanne_alpha/assessor_async.py（自有 v/a/i/w
+# 极简 prompt，不含 flags/greeting/farewell）。也就是说 sylanne_core.assessor 的
+# flags 分类在插件当前运行时路径下不可达——因此这里按卡片指示退化为关键词兜底
+# （小集合、模块级、可扩展），并在实现报告中记录这一偏差。
+# ---------------------------------------------------------------------------
+
+_MORNING_GREETING_KW = ("早安", "早上好")
+_NIGHT_FAREWELL_KW = ("晚安",)
+
+
+def _detect_greeting_ritual_pattern(text: str) -> str | None:
+    """从消息文本粗判是否命中早安问候/晚安告别模式。"""
+    if not text:
+        return None
+    if any(kw in text for kw in _MORNING_GREETING_KW):
+        return "morning_greeting"
+    if any(kw in text for kw in _NIGHT_FAREWELL_KW):
+        return "night_farewell"
+    return None
+
+
+_RITUAL_REGISTRY_KV_KEY = "sylanne_ritual_registry_state"
+
 
 # ---------------------------------------------------------------------------
 # 关系年龄计算器（Item 125）
@@ -615,6 +686,74 @@ class SessionContext:
             if sid:
                 return str(sid)
         return "global"
+
+    # ------------------------------------------------------------------
+    # Item 153 / T2-06：关系仪式注册表——观察 + 接线到 ProactiveScheduler
+    # ------------------------------------------------------------------
+
+    def observe_ritual_pattern(self, session_key: str, hour: int, pattern: str) -> None:
+        """观察到重复问候/告别模式时喂给 RitualRegistry。
+
+        一旦 RitualRegistry 侧自动注册（≥3 次观测），同步登记进
+        ProactiveScheduler 自己的仪式表（scheduler.register_ritual）——此前
+        RitualRegistry 只是个孤立记录，没有任何调用方把它接到调度器的
+        check_ritual_absence，reason_code='ritual' 因此从未真正可达
+        （T2-06 审计发现的缺口）。命中即落盘（观测频率天然低，无需节流）。
+
+        Args:
+            session_key: 会话标识。
+            hour: 当前小时（0-23）。
+            pattern: 行为模式描述（如 "morning_greeting"、"night_farewell"）。
+        """
+        self._ritual_registry.observe_pattern(session_key, hour, pattern)
+        ritual = self._ritual_registry.get_ritual(session_key, pattern)
+        if not ritual:
+            return
+        scheduler = getattr(self._p, "_proactive_scheduler", None)
+        register = getattr(scheduler, "register_ritual", None) if scheduler is not None else None
+        if callable(register):
+            try:
+                register(
+                    session_key,
+                    str(ritual.get("pattern", pattern)),
+                    int(ritual.get("hour_start", hour)),
+                    int(ritual.get("hour_end", (hour + 1) % 24)),
+                )
+            except Exception as e:
+                logger.debug(f"Sylanne ritual register_ritual skipped: {e}")
+        if hasattr(self._p, "_has_kv_api") and self._p._has_kv_api():
+            try:
+                from sylanne_alpha.utils import safe_ensure_future
+
+                safe_ensure_future(
+                    self._p.put_kv_data(
+                        _RITUAL_REGISTRY_KV_KEY, self._ritual_registry.to_dict()
+                    ),
+                    name=f"ritual_registry_save_{session_key}",
+                )
+            except Exception as e:
+                logger.debug(f"Sylanne ritual registry save skipped: {e}")
+
+    def detect_and_observe_ritual_from_text(
+        self, session_key: str, text: str, now: float | None = None
+    ) -> None:
+        """T2-06④：message ingest 钩子——从原始用户文本识别早安/晚安模式。
+
+        识别方式与偏差说明见模块级 `_detect_greeting_ritual_pattern` 的注释
+        （assessor 的 greeting/farewell flag 在插件运行时路径不可达，退化为
+        关键词兜底）。命中才调用 observe_ritual_pattern，未命中零开销。
+
+        Args:
+            session_key: 会话标识。
+            text: 原始用户消息文本。
+            now: 当前时间戳，默认为 time.time()。
+        """
+        pattern = _detect_greeting_ritual_pattern(text)
+        if not pattern:
+            return
+        ts = now if now is not None else time.time()
+        hour = time.localtime(ts).tm_hour
+        self.observe_ritual_pattern(session_key, hour, pattern)
 
     # ------------------------------------------------------------------
     # 记忆系统辅助方法

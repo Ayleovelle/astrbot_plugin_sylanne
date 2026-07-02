@@ -154,7 +154,7 @@ from sylanne_alpha.rhythm_learner import RhythmLearner  # noqa: E402
 from sylanne_alpha.proactive_scheduler import ProactiveScheduler  # noqa: E402
 from sylanne_alpha.proactive_bridge import ProactiveBridge  # noqa: E402
 from sylanne_alpha.emotion_spirit_bridge import EmotionSpiritBridge  # noqa: E402
-from sylanne_alpha.session_context import SessionContext  # noqa: E402
+from sylanne_alpha.session_context import SessionContext, RitualRegistry  # noqa: E402
 from sylanne_alpha.session_state_store import SessionStateStore  # noqa: E402
 from sylanne_alpha.agents import (  # noqa: E402
     SelfCore,
@@ -1122,6 +1122,11 @@ class EmotionalStatePlugin(Star):
                     engine_obs = kernel.computation.engine.observe()
                 self._rhythm_learner.observe_user_message(
                     session_key, message_text, now, engine_obs
+                )
+                # T2-06④：早安/晚安等重复问候模式观察（关键词兜底识别，见
+                # session_context._detect_greeting_ritual_pattern 的偏差说明）。
+                self._session_ctx.detect_and_observe_ritual_from_text(
+                    session_key, message_text, now
                 )
             except Exception:
                 pass
@@ -2483,6 +2488,32 @@ class EmotionalStatePlugin(Star):
                     )
         except Exception as e:
             logger.debug(f"Sylanne rhythm learner state restore skipped: {e}")
+        # T2-06⑤：恢复关系仪式注册表持久化状态（重启不丢已学到的问候/晚安仪式），
+        # 并把已注册的仪式重新接线回 ProactiveScheduler（否则重启后 check_ritual_absence
+        # 读到的调度器仪式表是空的，需要再攒 3 次观测才恢复可达）。
+        try:
+            if self._has_kv_api():
+                from sylanne_alpha.session_context import _RITUAL_REGISTRY_KV_KEY
+
+                saved_rituals = await self.get_kv_data(_RITUAL_REGISTRY_KV_KEY, None)
+                if saved_rituals and isinstance(saved_rituals, dict):
+                    registry = RitualRegistry.from_dict(saved_rituals)
+                    self._session_ctx._ritual_registry = registry
+                    scheduler = getattr(self, "_proactive_scheduler", None)
+                    register = getattr(scheduler, "register_ritual", None)
+                    if callable(register):
+                        for key, ritual in registry._rituals.items():
+                            key_session, _, _pattern_key = key.rpartition(":")
+                            if not key_session:
+                                continue
+                            register(
+                                key_session,
+                                str(ritual.get("pattern", _pattern_key)),
+                                int(ritual.get("hour_start", 0)),
+                                int(ritual.get("hour_end", 1)),
+                            )
+        except Exception as e:
+            logger.debug(f"Sylanne ritual registry state restore skipped: {e}")
         # Phase 2B / PR-H：恢复关系层状态（register_state + override，独立 KV key）
         try:
             if self._has_kv_api():
@@ -2756,6 +2787,16 @@ class EmotionalStatePlugin(Star):
                 )
         except Exception as e:
             logger.debug(f"Sylanne rhythm learner state persist skipped: {e}")
+        # T2-06⑤：持久化 RitualRegistry 状态（终扫落盘，兜底命中即存漏窗）
+        try:
+            if self._has_kv_api():
+                from sylanne_alpha.session_context import _RITUAL_REGISTRY_KV_KEY
+
+                await self.put_kv_data(
+                    _RITUAL_REGISTRY_KV_KEY, self._session_ctx._ritual_registry.to_dict()
+                )
+        except Exception as e:
+            logger.debug(f"Sylanne ritual registry state persist skipped: {e}")
         # Phase 2B / PR-H：关系层状态终扫落盘（独立 KV key）
         try:
             if self._has_kv_api():

@@ -1040,3 +1040,25 @@ class TestWinddownScratchAppliedOnAllCtxRebuildPaths:
         )
         assert decision.get("action") != "reach_out"
         assert decision["v2core_reach"]["action"] != "reach"
+
+    def test_winddown_still_suppresses_reach_with_due_user_followup(self) -> None:
+        """T2-05② 的跟进线索到期检查只在 infer_reason_code 里打标签，绝不新增
+        触发源——即使该会话有一条已到期的待跟进线索，consult_idle_reach（T2-05②
+        依赖的"是否已经决定要开口"的唯一裁判）仍应受 winddown 窗口抑制，不因为
+        多了 user_followup 检查就多一条绕过路径。（G11 移植：窗口内短路语义下
+        本断言更强——直接命中 consult 的中性默认值。）"""
+        from sylanne_alpha.memory_system import MemorySystem
+
+        plugin = _make_host_plugin(config={
+            "sylanne_enable_v2core": True,
+            "sylanne_alpha_winddown_enabled": True,
+        })
+        mem = MemorySystem()
+        mem.write_summary("我答应你明天一定去面试", source_turns=2, temperature=0.5)
+        mem._pending_followups[0]["due_ts_estimate"] = ig.time.time() - 10.0
+        plugin._memory_system_for_session = lambda sk: mem  # noqa: ARG005
+
+        rt = ig._runtime_for(plugin, "u1")
+        rt["winddown_until"] = ig.time.time() + 600.0
+        out = asyncio.run(ig.consult_idle_reach(plugin, "u1"))
+        assert out["action"] != "reach"

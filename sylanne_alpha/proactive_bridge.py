@@ -301,17 +301,25 @@ class ProactiveBridge:
     async def infer_reason_code(
         self, session_key: str, *, surface: dict[str, Any] | None = None
     ) -> str:
-        """查计算栈深层状态 + 仪式缺席，推断主动发言的缘由码。
+        """查计算栈深层状态 + 仪式缺席 + 跟进线索，推断主动发言的缘由码。
 
-        触发源整合（任一命中即返回对应 reason_code，优先级：仪式 > 计算栈 > 默认）：
+        触发源整合（任一命中即返回对应 reason_code，优先级：仪式 > 跟进线索 >
+        计算栈 > 默认）：
           - ritual：到了习惯互动时间但用户缺席
+          - user_followup：她记得你之前提过的、带时间点的事到期了（T2-05）
           - void / scar / ...：计算栈 proactive_sylanne 给出的 reason_code
           - life_rhythm：默认（纯生活节律驱动）
         全程异常静默，失败回退 life_rhythm。
 
+        注意：本方法只在【已经决定要主动开口】之后打标签——真正"要不要现在说话"
+        由上游 dispatch_blocked_reason / should_dispatch_now / derive_should_send
+        （含 v2core consult_idle_reach 的人格仲裁与 T2-03 winddown 抑制）把关，
+        这里新增的 user_followup 检查同样只读、不重新判断、不绕过任何既有闸门。
+
         Args:
             surface: 可选的预计算 proactive_sylanne 结果。传入则复用（避免重复
-                tick/save），不传则内部自行调用。ritual 优先级始终先于 surface。
+                tick/save），不传则内部自行调用。ritual/user_followup 优先级
+                始终先于 surface。
         """
         p = self._p
         # 1) 仪式缺席（proactive_scheduler.check_ritual_absence）——优先级最高，不依赖 surface
@@ -323,6 +331,16 @@ class ProactiveBridge:
                     return "ritual"
             except Exception:
                 pass
+        # 1.5) T2-05②：跟进线索到期——只打标签，不新增触发源（见上方 docstring）。
+        try:
+            mem_getter = getattr(p, "_memory_system_for_session", None)
+            if callable(mem_getter):
+                mem_sys = mem_getter(session_key)
+                due = mem_sys.due_pending_followup() if mem_sys is not None else None
+                if due:
+                    return "user_followup"
+        except Exception:
+            pass
         # 2) 计算栈深层缘由（proactive_sylanne → decision.reason_code）
         try:
             res = surface
@@ -352,12 +370,32 @@ class ProactiveBridge:
         persona_name = str(cfg.get("sylanne_persona_name") or "Sylanne").strip() or "Sylanne"
 
         # 触发缘由 → 自然语言动机
-        reason_phrase = {
-            "void": "心里有一处空落落的，很想找ta说说话",
-            "scar": "有件没说完的事一直搁在心上",
-            "ritual": "到了你俩平时会聊两句的时间，ta却没出现",
-            "life_rhythm": "刚好想起ta了",
-        }.get(str(reason_code or "").lower(), "")
+        _rc = str(reason_code or "").lower()
+        if _rc == "user_followup":
+            # T2-05②：动态取回到期跟进线索的话题，组装『他之前说过[topic]，
+            # 想问问后来怎么样了』；取不到时退化为不带话题的通用措辞。
+            topic = ""
+            try:
+                mem_getter = getattr(p, "_memory_system_for_session", None)
+                if callable(mem_getter) and session_key:
+                    mem_sys = mem_getter(session_key)
+                    due = mem_sys.due_pending_followup() if mem_sys is not None else None
+                    if due:
+                        topic = str(due.get("topic_snippet", "")).strip()
+            except Exception:
+                topic = ""
+            reason_phrase = (
+                f"他之前说过{topic}，想问问后来怎么样了"
+                if topic
+                else "他之前说过一件事，想问问后来怎么样了"
+            )
+        else:
+            reason_phrase = {
+                "void": "心里有一处空落落的，很想找ta说说话",
+                "scar": "有件没说完的事一直搁在心上",
+                "ritual": "到了你俩平时会聊两句的时间，ta却没出现",
+                "life_rhythm": "刚好想起ta了",
+            }.get(_rc, "")
 
         # 近期生活上下文（复用 life_simulation 现成方法）
         life_ctx = ""

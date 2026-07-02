@@ -20,11 +20,12 @@ from __future__ import annotations
 
 import logging
 import math
+import re
 import time
 import uuid
 from collections import deque
 from dataclasses import dataclass, field
-from datetime import date
+from datetime import date, datetime, timedelta
 from enum import Enum
 from typing import Any
 
@@ -131,6 +132,92 @@ def _compute_importance_heuristic(
     if _has_commitment_kw(text):
         imp += 0.20
     return max(0.0, min(1.0, imp))
+
+
+# ---------------------------------------------------------------------------
+# T2-05①：待跟进线索（user_followup）——承诺 + 未来时间词 → 记一条模糊到期时间
+#
+# 与 _COMMITMENT_KW 用途不同（那个是写入重要性打分），这里单独维护一张小的、
+# 可扩展的未来时间词表，只用于判断"这条承诺是否带了一个（哪怕模糊的）时间点"。
+# ---------------------------------------------------------------------------
+
+_FUTURE_TIME_KW = (
+    "明天", "后天", "大后天", "下周", "下星期", "下下周",
+    "晚上", "今晚",
+    "周一", "周二", "周三", "周四", "周五", "周六", "周日", "周天",
+)
+_DAY_OF_MONTH_RE = re.compile(r"(\d{1,2})号")
+
+
+def _has_future_time_kw(text: str) -> bool:
+    """检测文本是否含未来时间词（明天/下周/周N/N号/晚上等，模块级、可扩展）。"""
+    if not text:
+        return False
+    for kw in _FUTURE_TIME_KW:
+        if kw in text:
+            return True
+    return bool(_DAY_OF_MONTH_RE.search(text))
+
+
+def _next_day_of_month(base_date: date, day: int) -> date:
+    """返回从 base_date（含当天）起下一个"该月 N 号"，处理月末溢出（如 2 月没有 30 号）。"""
+    year, month = base_date.year, base_date.month
+    for _ in range(13):  # 最多探到 13 个月，理论上远用不到
+        try:
+            candidate = date(year, month, day)
+        except ValueError:
+            candidate = None
+        if candidate is not None and candidate >= base_date:
+            return candidate
+        month += 1
+        if month > 12:
+            month = 1
+            year += 1
+    return base_date + timedelta(days=30)  # 理论不可达兜底
+
+
+def _estimate_due_ts(text: str, now: float | None = None) -> float:
+    """粗略估计文本中提到的未来时间点（一次性模糊估计，明天≈次日正午即可）。
+
+    命中优先级：相对天数词（大后天/后天/明天/下(下)周）> 具体日期（N号）>
+    单独时段词（晚上/今晚，只调小时不改天数）。仅时段词命中且今天该时段已过
+    时顺延到明天。
+    """
+    if now is None:
+        now = time.time()
+    now_dt = datetime.fromtimestamp(now)
+    target_date = now_dt.date()
+    matched_day = False
+
+    if "大后天" in text:
+        target_date = target_date + timedelta(days=3)
+        matched_day = True
+    elif "后天" in text:
+        target_date = target_date + timedelta(days=2)
+        matched_day = True
+    elif "明天" in text:
+        target_date = target_date + timedelta(days=1)
+        matched_day = True
+    elif "下下周" in text:
+        target_date = target_date + timedelta(days=14)
+        matched_day = True
+    elif "下周" in text or "下星期" in text:
+        target_date = target_date + timedelta(days=7)
+        matched_day = True
+    else:
+        m = _DAY_OF_MONTH_RE.search(text)
+        if m:
+            day = int(m.group(1))
+            if 1 <= day <= 31:
+                target_date = _next_day_of_month(target_date, day)
+                matched_day = True
+
+    hour = 20 if ("晚上" in text or "今晚" in text) else 12
+    due_dt = datetime.combine(target_date, datetime.min.time()).replace(hour=hour)
+    if not matched_day and due_dt <= now_dt:
+        # 只命中时段词、没有具体天数：今天该时段已过就顺延明天
+        due_dt = due_dt + timedelta(days=1)
+    return due_dt.timestamp()
 
 
 # ---------------------------------------------------------------------------
@@ -760,6 +847,11 @@ class MemorySystem:
     _GC_EVERY_N = 20            # GC（剪枝死节点/重建列表）每 N tick 执行一次
     _GC_L2_SIZE_THRESHOLD = 600  # L2 超过此大小时强制 GC
 
+    # T2-05：待跟进线索（user_followup）
+    _PENDING_FOLLOWUP_CAP = 10       # 每会话最多保留条数，超出淘汰最旧
+    _FOLLOWUP_SNIPPET_CHARS = 80     # topic_snippet 截断长度
+    _FOLLOWUP_CONSUME_OVERLAP = 0.30  # ③ consume-on-mention 关键词重合阈值
+
     def __init__(self, **kwargs) -> None:
         self._l1: deque[MemoryItem] = deque(maxlen=self._L1_CAPACITY)
         self._l2: list[MemoryItem] = []
@@ -770,6 +862,9 @@ class MemorySystem:
         self._recalled_l2_items: list[MemoryItem] = []
         self._gc_tick_counter: int = 0  # GC 计数器
         self._inverted_index = InvertedIndex()
+        # T2-05①：待跟进线索列表（{topic_snippet, due_ts_estimate, session_key,
+        # created_ts}），one-shot 消费，cap 见 _PENDING_FOLLOWUP_CAP。
+        self._pending_followups: list[dict[str, Any]] = []
         # 阶段0 召回灰度开关：默认 LEGACY（零行为变化）。可由 kwargs 或环境变量
         # SYLANNE_RECALL_MODE 覆盖；非法值静默回退 LEGACY。
         self._recall_mode: RecallMode = self._resolve_recall_mode(
@@ -946,6 +1041,7 @@ class MemorySystem:
         confidence: float | None = None,
         privacy_level: str | None = None,
         life_event_id: str = "",
+        session_key: str = "",
     ) -> MemoryItem:
         """v2 写入：将对话摘要写入 L1。由会话结束/20轮保底触发。
 
@@ -955,6 +1051,8 @@ class MemorySystem:
         privacy_level: 可见性级别（PR-D）；None → 基线 "open"（旧 dialogue 行为不变）。
           life_sim 写入应显式传 "shareable"。非法值由 MemoryItem.__post_init__ fail-closed 降为 internal。
         life_event_id: life_sim 去重键（= LifeEvent.event_id），dialogue 调用留空。
+        session_key: 仅用于标注 T2-05 待跟进线索的来源会话（MemorySystem 本身是
+          per-session 实例，不影响功能，纯调试/展示信息）；可留空。
         """
         text = text[: self._MAX_SUMMARY_CHARS]
         # issue#43 Wave3：life_event_id 去重（兑现 docstring 承诺的「去重键」）。同一
@@ -999,7 +1097,71 @@ class MemorySystem:
         )
         self._l1.append(item)
         self._index_memory_item(item)
+        # T2-05①：承诺关键词 + 未来时间词同时命中 → 记一条待跟进线索。排除
+        # life_sim/life_reflection（Sylanne 自己的模拟生活不算"用户的承诺"，
+        # 同 ADR-002"生活模拟内容永不自动标 USER_FACT"的精神）。
+        if source not in (MemorySource.LIFE_SIM, MemorySource.LIFE_REFLECTION):
+            if _has_commitment_kw(text) and _has_future_time_kw(text):
+                self._add_pending_followup(text, session_key=session_key)
         return item
+
+    def _add_pending_followup(self, text: str, *, session_key: str = "") -> None:
+        """T2-05①：记一条待跟进线索（one-shot，由 due_pending_followup 消费）。
+
+        cap 见 _PENDING_FOLLOWUP_CAP，超出淘汰最旧的一条。
+        """
+        entry = {
+            "topic_snippet": text[: self._FOLLOWUP_SNIPPET_CHARS],
+            "due_ts_estimate": _estimate_due_ts(text),
+            "session_key": session_key,
+            "created_ts": time.time(),
+        }
+        self._pending_followups.append(entry)
+        if len(self._pending_followups) > self._PENDING_FOLLOWUP_CAP:
+            self._pending_followups = self._pending_followups[
+                -self._PENDING_FOLLOWUP_CAP :
+            ]
+
+    def due_pending_followup(self, now: float | None = None) -> dict[str, Any] | None:
+        """T2-05②：返回第一条已到期的待跟进线索（不移除）。
+
+        真正"消费掉"（发出主动跟进之后）由调用方显式调用
+        consume_pending_followup(entry)；本方法只读、可重复调用。
+        """
+        if now is None:
+            now = time.time()
+        for entry in self._pending_followups:
+            if now >= entry.get("due_ts_estimate", float("inf")):
+                return entry
+        return None
+
+    def consume_pending_followup(self, entry: dict[str, Any]) -> bool:
+        """消费（移除）一条指定的待跟进线索。返回是否真的移除了。"""
+        try:
+            self._pending_followups.remove(entry)
+            return True
+        except ValueError:
+            return False
+
+    def consume_pending_followups_by_text(self, text: str) -> int:
+        """T2-05③：consume-on-mention——用户主动提起同一话题时静默消费匹配的
+        待跟进线索（关键词重合，零信号，不影响本轮回复）。
+
+        Returns:
+            被消费（移除）的线索条数。
+        """
+        if not text or not self._pending_followups:
+            return 0
+        kept: list[dict[str, Any]] = []
+        consumed = 0
+        for entry in self._pending_followups:
+            topic = str(entry.get("topic_snippet", ""))
+            if topic and _keyword_overlap(text, topic) >= self._FOLLOWUP_CONSUME_OVERLAP:
+                consumed += 1
+                continue
+            kept.append(entry)
+        self._pending_followups = kept
+        return consumed
 
     def _find_by_life_event_id(self, life_event_id: str) -> MemoryItem | None:
         """按 life_event_id 在 L1/L2 找已有条目（issue#43 Wave3 去重；空 id 不匹配）。"""
@@ -2715,6 +2877,9 @@ class MemorySystem:
             "l2": [item.to_dict() for item in self._l2],
             "l3_nodes": {nid: node.to_dict() for nid, node in self._l3_nodes.items()},
             "l3_edges": [edge.to_dict() for edge in self._l3_edges],
+            # T2-05①：待跟进线索——随 MemorySystem 自身的持久化周期落盘/恢复，
+            # 不新开 KV key（本身已经过 state_persistence 走 KV）。
+            "pending_followups": list(self._pending_followups),
         }
 
     def from_dict(self, data: dict) -> "MemorySystem":
@@ -2744,6 +2909,13 @@ class MemorySystem:
             nid: GraphNode.from_dict(nd) for nid, nd in data.get("l3_nodes", {}).items()
         }
         self._l3_edges = [GraphEdge.from_dict(ed) for ed in data.get("l3_edges", [])]
+        # T2-05①：恢复待跟进线索（load-compat：旧存档无此字段时默认空列表）。
+        raw_followups = data.get("pending_followups", [])
+        if isinstance(raw_followups, list):
+            restored_followups = [dict(e) for e in raw_followups if isinstance(e, dict)]
+            self._pending_followups = restored_followups[-self._PENDING_FOLLOWUP_CAP :]
+        else:
+            self._pending_followups = []
         self._l3_label_index: dict[str, str] = {
             n.label: nid for nid, n in self._l3_nodes.items()
         }

@@ -13,8 +13,10 @@
 from __future__ import annotations
 
 import asyncio
+import time
 import unittest
 
+from sylanne_alpha.memory_system import MemorySystem
 from sylanne_alpha.proactive_bridge import ProactiveBridge
 
 
@@ -120,7 +122,7 @@ class FakeSylanne:
 
     def __init__(
         self, context, *, ritual=None, reason_code=None, origins=None,
-        body=None, guard_allowed=True,
+        body=None, guard_allowed=True, memory_system=None,
     ) -> None:
         self.context = context
         # 真实路径：映射存在 _store.session_origins（收消息时 pipeline 写入）
@@ -132,6 +134,12 @@ class FakeSylanne:
         self._body = body
         self._guard_allowed = guard_allowed
         self.proactive_calls = 0
+        # T2-05②：可选注入的 memory_system，供 infer_reason_code/build_motivation_text
+        # 查待跟进线索（不传则 _memory_system_for_session 不存在，行为与改动前一致）。
+        self._memory_system = memory_system
+
+    def _memory_system_for_session(self, session_key: str):
+        return self._memory_system
 
     async def proactive_sylanne(self, *, session_key: str, now: float = 0.0) -> dict:
         self.proactive_calls += 1
@@ -286,6 +294,45 @@ class TestInferReasonCode(unittest.TestCase):
         rc = asyncio.run(bridge.infer_reason_code("s:1:1", surface=surface))
         self.assertEqual(rc, "ritual")
 
+    # -- T2-05②：跟进线索到期 reason_code --------------------------------
+
+    def test_user_followup_beats_computation_stack(self):
+        """跟进线索到期时，优先于计算栈缘由（void/scar）返回 user_followup。"""
+        mem = MemorySystem()
+        mem.write_summary("我答应你明天一定去面试", source_turns=2, temperature=0.5)
+        # 强制到期（写入时的模糊估计通常在未来，这里直接改到过去以模拟"已到期"）。
+        mem._pending_followups[0]["due_ts_estimate"] = time.time() - 10.0
+        syl = FakeSylanne(
+            FakeContext(FakeProactivePlugin()), ritual=None, reason_code="void",
+            memory_system=mem,
+        )
+        rc = asyncio.run(ProactiveBridge(syl).infer_reason_code("s:1:1"))
+        self.assertEqual(rc, "user_followup")
+
+    def test_ritual_priority_over_user_followup(self):
+        """仪式缺席仍然优先于跟进线索（既有优先级不因新增检查而改变）。"""
+        mem = MemorySystem()
+        mem.write_summary("我答应你明天一定去面试", source_turns=2, temperature=0.5)
+        mem._pending_followups[0]["due_ts_estimate"] = time.time() - 10.0
+        syl = FakeSylanne(
+            FakeContext(FakeProactivePlugin()), ritual="晚安", reason_code="void",
+            memory_system=mem,
+        )
+        rc = asyncio.run(ProactiveBridge(syl).infer_reason_code("s:1:1"))
+        self.assertEqual(rc, "ritual")
+
+    def test_no_due_followup_falls_through_to_computation_stack(self):
+        """跟进线索存在但未到期 → 不应命中 user_followup，继续走计算栈缘由。"""
+        mem = MemorySystem()
+        mem.write_summary("我答应你明天一定去面试", source_turns=2, temperature=0.5)
+        # 保留写入时估计的未来到期时间（未过期）
+        syl = FakeSylanne(
+            FakeContext(FakeProactivePlugin()), ritual=None, reason_code="scar",
+            memory_system=mem,
+        )
+        rc = asyncio.run(ProactiveBridge(syl).infer_reason_code("s:1:1"))
+        self.assertEqual(rc, "scar")
+
 
 class TestBuildMotivationText(unittest.TestCase):
     def test_contains_persona_reason_event_context(self):
@@ -313,6 +360,26 @@ class TestBuildMotivationText(unittest.TestCase):
         )
         self.assertIn("知花", text)
         self.assertIn("随便走走", text)
+
+    def test_user_followup_includes_topic(self):
+        """T2-05②：user_followup 缘由应带上到期线索的话题片段。"""
+        mem = MemorySystem()
+        mem.write_summary("我答应你明天一定去面试", source_turns=2, temperature=0.5)
+        mem._pending_followups[0]["due_ts_estimate"] = time.time() - 10.0
+        syl = FakeSylanne(FakeContext(FakeProactivePlugin()), memory_system=mem)
+        text = ProactiveBridge(syl).build_motivation_text(
+            "随便走走", "平静", reason_code="user_followup", session_key="s:1:1",
+        )
+        self.assertIn("面试", text)
+        self.assertIn("想问问后来怎么样了", text)
+
+    def test_user_followup_without_topic_uses_generic_phrase(self):
+        """无法取到 topic（无 memory_system）时退化为通用措辞，不报错。"""
+        syl = FakeSylanne(FakeContext(FakeProactivePlugin()))
+        text = ProactiveBridge(syl).build_motivation_text(
+            "随便走走", "平静", reason_code="user_followup", session_key="s:1:1",
+        )
+        self.assertIn("想问问后来怎么样了", text)
 
 
 class TestEndToEnd(unittest.TestCase):

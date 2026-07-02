@@ -1374,6 +1374,20 @@ class LLMRequestPipeline:
         """
         p = self._p
 
+        # T2-05③：consume-on-mention——用户这轮主动提起了某个待跟进话题，静默
+        # 消费掉匹配的线索（零信号，不影响本轮回复文案）。只在该会话已有
+        # memory_system 时才查，避免为全新会话提前创建实例（无实例=无待办）。
+        if message_text:
+            try:
+                _mem_map = getattr(p, "_store", None)
+                _mem_map = getattr(_mem_map, "memory_systems", None) if _mem_map else None
+                if _mem_map is not None and _mem_map.has(session_key):
+                    _existing_mem = _mem_map.get(session_key)
+                    if _existing_mem is not None:
+                        _existing_mem.consume_pending_followups_by_text(message_text)
+            except Exception as e:
+                logger.debug(f"Sylanne pending followup consume-on-mention skipped: {e}")
+
         # 注入未完成回复上下文
         unfinished = p._store.unfinished_replies.pop(session_key, "")
         unfinished_fragment = ""
@@ -2189,6 +2203,7 @@ class LLMRequestPipeline:
                 text=summary.strip(),
                 source_turns=max(source_turns, 1),
                 temperature=current_warmth,
+                session_key=session_key,
             )
 
             # Embedding for memorable summaries
