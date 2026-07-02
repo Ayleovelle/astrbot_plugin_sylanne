@@ -67,6 +67,12 @@ def personality_saddle(body: BodySnapshot) -> tuple[float, float, float]:
 #
 # 门控：只有 T2-01 总开关（integration 经 ctx.scratch["deliberate_silence_enabled"]
 # 注入）打开时才计算，config 默认关时这条食粮恒 0（零行为变化，不改变默认沉默频率）。
+#
+# MAJOR 修复（红队 finding）：本函数算出的食粮 + T2-03⑤ 的 winddown_hold_bias，
+# 只在 IgnitionArbiter.deliberate 的 addressed 分支叠进 g_hold——空闲（未被问）
+# 分支是 min-cost 选择器，那里 g_hold 是"hold 的代价"而非"沉默的吸引力"，同一份
+# 偏置在两个分支方向相反（见 deliberate() 内联注释），故调用点做了 addressed 门控，
+# 本函数自身不重复判断。
 # ===========================================================================
 
 _CONTEXT_HOLD_ENABLED_KEY = "deliberate_silence_enabled"
@@ -96,12 +102,17 @@ def _is_low_info_text(text: str, last_text: str) -> bool:
     """本轮文本是否"不值得认真开口"：短应答词表 / 纯表情符号(无字母数字汉字) / 逐字复读上一条。
 
     空文本不算（那是空闲轮，走别的分支，不在此列）。
+
+    MINOR 修复（红队 finding）：词表命中必须先于长度门判——"666"/"..."/"……" 等
+    词表成员本身长度就超过 _LOW_INFO_MAXLEN=2，旧版 `len(text)<=MAXLEN and text in ACKS`
+    先卡长度，这些成员永远够不到词表判据；恰好它们又都含数字/ASCII 点号能被
+    _HAS_WORD_RE 命中，于是连"纯符号"兜底也接不住，直接漏判成"非低信息量"。
     """
     if not text:
         return False
     if text == last_text and last_text:
         return True
-    if len(text) <= _LOW_INFO_MAXLEN and text in _LOW_INFO_ACKS:
+    if text in _LOW_INFO_ACKS:
         return True
     if not _HAS_WORD_RE.search(text):
         return True   # 纯符号/表情，没有一个字母数字汉字
@@ -189,6 +200,8 @@ class IgnitionArbiter:
             if "speak_drive" in (it.flags or ()):
                 eff_drive += it.priority * (1.0 if it.confidence is None else it.confidence)
 
+        addressed = bool((ctx.text or "").strip())
+
         # —— 三个代价 ——
         g_hold = 0.0
         emo = ctx.domain("emotion")
@@ -197,13 +210,18 @@ class IgnitionArbiter:
                 g_hold = float(emo.hold_free_energy(body))
             except Exception:
                 g_hold = 0.0
-        # T2-01①：语境食粮——与未表达积分正交的独立信号，破"hold 从未发生过就永远
-        # 没食粮"的死循环（config 关时 context_hold_food 恒 0，见其函数文档）。
-        g_hold += context_hold_food(ctx)
-        # T2-03⑤：收尾窗口内的临时 hold 偏置——integration 只在仍处于 winddown 窗口时
-        # 才写非零值（见 integration._start_winddown_window / apply_v2core_request），
-        # 窗口外/功能关闭恒读到 0.0，与该功能不存在时零差异。
-        g_hold += float(ctx.scratch.get("winddown_hold_bias", 0.0) or 0.0)
+        # T2-01①语境食粮 + T2-03⑤收尾窗口偏置：两者的语义都是"g_hold=沉默这一行动
+        # 有多吸引人"，只在 addressed 分支成立——那里 argmin 逻辑是"g_hold 越大越
+        # 容易 hold"（下方 `g_hold > g_speak` 判据），加偏置=更容易装死，方向对。
+        # 空闲分支（else 分支）是 min-cost 选择器，"hold"是三选一之一，加同一份偏置
+        # 反而把 hold 的【代价】推高、argmin 更容易滑向 reach——方向刚好相反（红队
+        # finding：T2-03⑤ 想压一压空闲 reach 倾向，实际在这条分支里做了反效果）。
+        # 故这两路食粮只喂 addressed 分支；空闲分支的窗口抑制改在
+        # integration.consult_idle_reach 里直接短路（该函数窗口内根本不再咨询
+        # deliberate），不靠这里的数值博弈。
+        if addressed:
+            g_hold += context_hold_food(ctx)
+            g_hold += float(ctx.scratch.get("winddown_hold_bias", 0.0) or 0.0)
         g_speak = max(0.0, express_at - eff_drive)
         g_reach_raw = 0.0
         has_reach = False
@@ -213,8 +231,6 @@ class IgnitionArbiter:
                 has_reach = g_reach_raw > 0.0
                 break
         g_reach = max(0.0, 1.0 - g_reach_raw) if has_reach else float("inf")
-
-        addressed = bool((ctx.text or "").strip())
 
         if eff_drive >= express_at:
             action = "speak"            # 越过强制表达鞍点（人格显函数）

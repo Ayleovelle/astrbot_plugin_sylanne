@@ -1145,6 +1145,20 @@ async def consult_idle_reach(plugin: Any, session_key: str) -> dict[str, Any]:
     try:
         rt = _runtime_for(plugin, session_key)
         await _ensure_loaded(plugin, session_key, rt)
+        # T2-03⑤ MAJOR 修复（红队 finding）：忙线窗口内不该一边"要去忙了"一边又高频
+        # 主动找你——旧实现想通过 _apply_winddown_window_scratch 把 winddown_hold_bias
+        # 也塞进这条空闲咨询的 g_hold，指望"压一压"reach 倾向；但 ignition 的空闲分支
+        # 是 min-cost 选择器，那里 g_hold 是"hold 的代价"，加偏置反而推高 hold 代价、
+        # argmin 更容易滑向 reach——方向做反了（她在收尾窗口内反而更爱主动戳你）。
+        # 窗口内的真实语义是"没有主动意图"，这里直接说出来、压根不咨询 deliberate，
+        # 不再指望数值博弈把方向掰回来。
+        _until = rt.get("winddown_until")
+        if isinstance(_until, (int, float)) and time.time() < float(_until):
+            logger.debug(
+                "Sylanne v2core consult_idle_reach [%s]: 收尾窗口内，主动意图直接抑制",
+                session_key,
+            )
+            return out
         runner = rt["runner"]
         ctx = runner.run_percept_stage(
             session_key, {"proactive": True}, "", domains=rt["domains"], idle=True,
@@ -1152,9 +1166,6 @@ async def consult_idle_reach(plugin: Any, session_key: str) -> dict[str, Any]:
         )
         ctx.scratch["proactive"] = True
         _apply_v2core_feature_flags(ctx, plugin)
-        # T2-03⑤：忙线窗口内不该一边"要去忙了"一边又高频主动找你——同一份偏置也
-        # 压一压空闲轮的 reach 倾向（ignition 折叠 speak/reach 时共用同一个 g_hold）。
-        _apply_winddown_window_scratch(ctx, rt)
         # 只跑 DELIBERATE（outreach/ignition），不 render、不 EVOLVE、不 tick——零副作用
         runner.run_deliberate_only(ctx)
         for it in ctx.intents:

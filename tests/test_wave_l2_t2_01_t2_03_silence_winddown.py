@@ -34,7 +34,7 @@ from sylanne_alpha.v2core.capabilities.ignition import (
     _is_low_info_text,
     context_hold_food,
 )
-from sylanne_alpha.v2core.contracts import BeatContext, BodySnapshot, Phase
+from sylanne_alpha.v2core.contracts import BeatContext, BodySnapshot, Intent, Phase
 from sylanne_alpha.v2core.domains.emotion import EmotionLedger
 
 
@@ -88,6 +88,19 @@ class TestLowInfoDetection:
     def test_empty_text_is_not_low_info(self) -> None:
         """空文本是空闲轮，不归这条判据管（别把它算成"低信息量已读"）。"""
         assert _is_low_info_text("", "") is False
+
+    def test_666_is_low_info(self) -> None:
+        """MINOR 修复回归：'666' 长度 3 超过 _LOW_INFO_MAXLEN=2，旧版先卡长度门再查
+        词表，词表命中判据永远够不到；又因为全是数字能被 _HAS_WORD_RE 命中，连"纯
+        符号"兜底也接不住——'666' 曾经无论如何都判不成低信息量。现在词表命中先判，
+        不再看长度。"""
+        assert _is_low_info_text("666", "") is True
+
+    def test_other_long_ack_words_are_also_low_info(self) -> None:
+        """同一个 bug 也曾漏判词表里其它超过 MAXLEN 的成员（"好的"/"是的"/"嗯呢"/
+        "..."），一并钉住不回归。"""
+        for word in ("好的", "是的", "嗯呢", "..."):
+            assert _is_low_info_text(word, "") is True, word
 
 
 class TestDeepNight:
@@ -187,6 +200,72 @@ class TestHoldBootstrapUnblocked:
         out = IgnitionArbiter().deliberate(ctx)
         assert out.payload["action"] == "speak", out.payload
         assert "silent" not in ctx.scratch
+
+
+# ===========================================================================
+# MAJOR 修复回归：idle 分支（未被问）是 min-cost 选择器——g_hold 在那里的语义是
+# "hold 这一行动的代价"，而不是 addressed 分支里"沉默的吸引力"。T2-01①语境食粮 /
+# T2-03⑤ winddown_hold_bias 若像 addressed 分支一样直接叠进 g_hold，会把 hold 的
+# 代价推高、argmin 反而更容易滑向 reach——方向和卡片设计意图（"压一压 reach 倾向"）
+# 刚好相反。这里直接钉住 IgnitionArbiter.deliberate 本身的防线：两路食粮只在
+# addressed 分支生效；idle 分支即便 scratch 意外带着这些键也必须免疫。
+# ===========================================================================
+
+
+class TestIdleMinCostBiasGating:
+    def _idle_ctx(self, *, winddown_bias: float = 0.0) -> BeatContext:
+        """构造一个真正的边际带（不是冷启动全零）：g_hold=0.20 < g_reach=0.25 <
+        g_speak=0.35——三个代价彼此接近，argmin 的选择对偏置真的敏感。"""
+        body = _body(
+            expression_drive=0.60,
+            personality={"curiosity": 0.5, "warmth_bias": 0.5,
+                        "sovereignty_guard": 0.5, "patience": 0.5},
+        )
+        emo = EmotionLedger()
+        emo.load_dict({"unexpressed": 0.20})   # warmth/tension/repair_pressure=0 → 强度=0 → g_hold=0.20 整
+        scratch: dict[str, object] = {"now": 0.0}
+        if winddown_bias:
+            scratch["winddown_hold_bias"] = winddown_bias
+        ctx = _ctx(body, text="", domains={"emotion": emo}, scratch=scratch)
+        # 手填 outreach 意图（跳过 OutreachCapability，直接控制 g_reach_raw=0.75 → g_reach=0.25）
+        ctx.intents.append(Intent(source="outreach", payload={"g_reach": 0.75}, priority=0.5))
+        return ctx
+
+    def test_baseline_marginal_band_picks_hold(self) -> None:
+        """无偏置基线：hold(0.20) < reach(0.25) < speak(0.35) → hold 胜出。"""
+        ctx = self._idle_ctx()
+        out = IgnitionArbiter().deliberate(ctx)
+        assert out.payload["action"] == "hold", out.payload
+        assert out.payload["g_hold"] == 0.20
+
+    def test_winddown_bias_leaked_into_idle_ctx_does_not_flip_to_reach(self) -> None:
+        """修复钉子——这正是红队描述的翻转场景：若 idle 分支像 addressed 分支一样
+        把 winddown_hold_bias=0.30 直接叠进 g_hold，代价会变成 0.20+0.30=0.50，
+        costs={hold:0.50, speak:0.35, reach:0.25} 的 argmin 从 hold 翻成 reach——
+        她在"该安静"的窗口里反而更爱主动戳你。修复后 idle 分支对这个偏置免疫，
+        g_hold 应与无偏置基线完全一致，action 也不该翻。"""
+        ctx = self._idle_ctx(winddown_bias=0.30)
+        out = IgnitionArbiter().deliberate(ctx)
+        assert out.payload["g_hold"] == 0.20, (
+            "idle 分支被偏置污染了——重演了红队描述的 hold→reach 翻转",
+            out.payload,
+        )
+        assert out.payload["action"] == "hold", out.payload
+
+    def test_addressed_branch_still_gets_the_bias_direction_unchanged(self) -> None:
+        """方向对照：同一份偏置在 addressed 分支必须照常叠加——那边的方向本来就是
+        对的（g_hold 越大越容易 hold/装死），不该被这次的 idle 门控误伤。"""
+        body = _body(
+            expression_drive=0.0,
+            personality={"curiosity": 0.5, "warmth_bias": 0.5,
+                        "sovereignty_guard": 0.5, "patience": 0.5},
+        )
+        emo = EmotionLedger()
+        emo.load_dict({"unexpressed": 0.20})
+        ctx = _ctx(body, text="在吗", domains={"emotion": emo},
+                  scratch={"now": 0.0, "winddown_hold_bias": 0.30})
+        out = IgnitionArbiter().deliberate(ctx)
+        assert out.payload["g_hold"] == 0.20 + 0.30, out.payload
 
 
 # ===========================================================================
@@ -835,10 +914,26 @@ class TestUserModelDomainNewReaders:
 
 
 # ===========================================================================
-# 红队 finding 修复回归：pending ctx 过期后 response 阶段现场重建的 ctx，以及
-# consult_idle_reach 的空闲 ctx，也必须挂上 winddown 窗口偏置（否则慢响应/空闲轮
-# 会漏挂偏置，读到假中性值）。
+# 红队 finding 修复回归：pending ctx 过期后 response 阶段现场重建的 ctx，必须挂上
+# winddown 窗口偏置（否则慢响应场景会漏挂偏置，读到假中性值）——这两个 addressed
+# 分支的调用点方向是对的，偏置照常生效。
+#
+# MAJOR 修复（另一条红队 finding）：consult_idle_reach 的空闲 ctx 不再走这条注入
+# ——idle 分支是 min-cost 选择器，同一份偏置在那里方向相反（见 ignition.py），
+# 窗口内改成直接短路抑制，见 _FakeBodyPort 类下方两个用例。
 # ===========================================================================
+
+
+class _FakeBodyPort:
+    """测试桩：让 consult_idle_reach 走真实 TurnRunner/SelfCore 路径，但 body
+    快照可控——不依赖真实 kernel 人格/情绪默认值算出的边际态（那些默认值不是
+    本测试的契约，写死了会很脆）。"""
+
+    def __init__(self, body: BodySnapshot) -> None:
+        self._body = body
+
+    def observe(self) -> BodySnapshot:
+        return self._body
 
 
 class TestWinddownScratchAppliedOnAllCtxRebuildPaths:
@@ -881,13 +976,67 @@ class TestWinddownScratchAppliedOnAllCtxRebuildPaths:
         assert mods is not None
         assert mods["extra_predelay_s"] > 0.0
 
-    def test_idle_reach_consult_gets_winddown_bias(self) -> None:
+    def test_idle_reach_consult_suppressed_in_window_but_reachable_outside(self) -> None:
+        """MAJOR 修复回归：旧版本这条测试在冷启动全零信号下断言"不是 reach"——
+        emo.hold_free_energy 恒 0、outreach 无信号，costs={"hold":0, "speak":..}
+        里 "hold" 代价 0 是不可能被打败的最小值，断言无论修复对不对都 trivially
+        成立，从未真的进过边际带，测不出红队描述的方向翻转（旧实现把
+        winddown_hold_bias 也叠进这条空闲咨询的 g_hold，方向反了——见 ignition.py
+        deliberate() 与本模块 consult_idle_reach 的注释）。
+
+        这里真造一个可达 reach 的边际态（中等 reply_overdue + 小额未表达积分），
+        用可控 body port 让全链路（Somatic/Expression/Outreach/Ignition）跑出确定
+        数值：g_reach≈0.008 < g_hold=0.05 < g_speak≈0.4375。先证明"窗口外这套
+        信号真能判成 reach"（不是编的），再证明"窗口内被直接短路抑制"——不是
+        靠偏置把 g_hold 顶回去掰断方向，是 T2-03⑤ 修复后 consult_idle_reach 压根
+        不再咨询 deliberate。
+        """
         plugin = _make_host_plugin(config={
             "sylanne_enable_v2core": True,
             "sylanne_alpha_winddown_enabled": True,
         })
         rt = ig._runtime_for(plugin, "u1")
+        asyncio.run(ig._ensure_loaded(plugin, "u1", rt))   # 先落盘态就绪，再手填边际态，避免被 load 覆盖
+
+        body = _body(personality={"curiosity": 0.5, "warmth_bias": 0.5,
+                                  "sovereignty_guard": 0.5, "patience": 0.5})
+        rt["runner"]._sc._body = _FakeBodyPort(body)
+        rt["domains"]["emotion"].load_dict({"unexpressed": 0.05})
+        now = ig.time.time()
+        rt["domains"]["usermodel"].load_dict({"rhythm_ema": 90.0, "last_user_ts": now - 150.0})
+
+        out_no_window = asyncio.run(ig.consult_idle_reach(plugin, "u1"))
+        assert out_no_window["action"] == "reach", out_no_window   # 边际带真实可达，不是编的
+
         rt["winddown_until"] = ig.time.time() + 600.0
-        out = asyncio.run(ig.consult_idle_reach(plugin, "u1"))
-        # 窗口内偏置压 g_hold：空闲轮不该判 reach（除非其它压力极大，这里全默认冷启动）
-        assert out["action"] != "reach"
+        out_in_window = asyncio.run(ig.consult_idle_reach(plugin, "u1"))
+        # 短路：压根没跑 deliberate，回到 consult_idle_reach 的中性默认值
+        assert out_in_window == {"reach": False, "g_reach": 0.0, "action": "hold"}
+
+    def test_in_window_reach_never_promotes_decision_action(self) -> None:
+        """T2-03⑤ 修复的下游关切（红队 finding 的直接后果链）：consult_idle_reach
+        的 reach 一旦被 merge_idle_reach_into_decision 升格成
+        decision["action"]="reach_out"，外部主动桥会真的发一条消息、顺手消费掉
+        min_interval 冷却——这会挤占 T2-03⑥ 排定的"收尾窗口结束后回来"返场触达。
+        这里用同一份【窗口外本该判成 reach】的边际信号验证：窗口内 decision.action
+        绝不会被升格。"""
+        plugin = _make_host_plugin(config={
+            "sylanne_enable_v2core": True,
+            "sylanne_alpha_winddown_enabled": True,
+        })
+        rt = ig._runtime_for(plugin, "u1")
+        asyncio.run(ig._ensure_loaded(plugin, "u1", rt))
+
+        body = _body(personality={"curiosity": 0.5, "warmth_bias": 0.5,
+                                  "sovereignty_guard": 0.5, "patience": 0.5})
+        rt["runner"]._sc._body = _FakeBodyPort(body)
+        rt["domains"]["emotion"].load_dict({"unexpressed": 0.05})
+        now = ig.time.time()
+        rt["domains"]["usermodel"].load_dict({"rhythm_ema": 90.0, "last_user_ts": now - 150.0})
+        rt["winddown_until"] = ig.time.time() + 600.0
+
+        decision = asyncio.run(
+            ig.merge_idle_reach_into_decision(plugin, "u1", {"allowed": True})
+        )
+        assert decision.get("action") != "reach_out"
+        assert decision["v2core_reach"]["action"] != "reach"
