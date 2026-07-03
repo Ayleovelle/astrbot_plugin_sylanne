@@ -1159,6 +1159,20 @@ class StatePersistence:
 
         合并追加而非覆盖（同一 session 多次加载都可能产生新的 quarantine 条目），
         cap 500 条防止无界增长——quarantine 只是审计留痕，不是主存储。
+
+        MEM-03 PR-3（design §3 臂⑧）：本方法自身签名/内部逻辑不变（仍是无锁的
+        get→merge→put），调用方决定是否/何时调它才是本 PR 收编的重点，两条路径
+        分别处理：
+          - `hydrate_memory_system`：本身整体是一个 `kind="hydrate"` 咽喉 op 的
+            factory，调用处内联 `await`（而非 fire-and-forget），让这次侧车写钉在
+            本 op 的执行窗口内，不会被同 session 后面排队的 delete op 抢先执行
+            后又被姗姗来迟的写入穿越复活。
+          - `load_sylanne_memory_state`：本身不是咽喉 op（无法直接借咽喉的顺序化
+            保证），调用处改为在 `token`/`has_pending_delete` 双条件（见
+            `_load_admit_ok`）放行时才调用——会话删除进行中/已过期的归档，其
+            quarantine 明文条目也不再另行落盘。仍不完全排除"两次并发 load 各自
+            get→merge→put 互相覆盖"这类与删除无关的既有竞态（未被本 PR 处理，
+            见 PR-3 交付说明的已知局限）。
         """
         if not entries:
             return
@@ -1186,6 +1200,77 @@ class StatePersistence:
             logger.debug(
                 f"Sylanne memory quarantine persist failed for {session_key!r}: {e}"
             )
+
+    def _load_admit_ok(self, session_key: str, token: int) -> bool:
+        """MEM-03 PR-3（design §3 臂⑦，红队 MAJOR-3/MAJOR-7 的核心闸门）：判定一次
+        `load_sylanne_memory_state` 的 KV/文件回退命中【此刻】是否还可信任——供
+        `_admit_loaded_state`（store 准入）与 load 内三处 quarantine 侧车写共用。
+
+        `token` 是调用方在 `load_sylanne_memory_state` 最开头、【第一次 await 之前】
+        用 `self._throat.current_epoch(session_key)` 捕获的纪元快照。
+
+        两个条件都要满足，缺一不可：
+
+          - `token == self._throat.current_epoch(session_key)`：捕获"load 执行期间
+            发生的 bump"——KV 读、归一化、`create_from_dict` 都经过 await，这段时间
+            如果这个 session 被删（bump_epoch 同步执行），纪元会先于本次判定变化，
+            token 就不再等于当前纪元。
+
+          - `not self._throat.has_pending_delete(session_key)`：捕获"load 开始之前
+            就已经提交、但尚未执行完的 delete/purge"——这是本卡真正的难点：
+            `bump_epoch` 在删除类公开壳里是【提交瞬间同步】执行的（设计 §2），不是
+            等 delete op 真正跑到才 bump。也就是说，如果一次 delete 在 load 开始之前
+            的哪怕一瞬间就已经 submit 了，`token`（此刻捕获）会拿到的就已经是【bump
+            之后】的纪元值——它和"稍后再读一次 current_epoch"必然相等，单看 token
+            这一条件永远判不出"有一个 delete 正压在这个 session 头上、只是还没轮到
+            它清空 KV"。`has_pending_delete` 直接查队列 + in-flight 集合，跟纪元数值
+            无关，专门补上这个盲区。没有它，一次 WebUI overview 读（遍历全部
+            session）就可能在 delete op 真正执行、清空 KV 之前，把这份"即将被删"的
+            归档重新写回 `_store`（活体/占位者），成为下一次 save 的落盘来源——delete
+            跑完了，新的一份"复活"副本已经在店里了。
+
+        两个条件都必须为真才放行；任一为假一律拒绝——fail-closed，宁可这次读到的
+        内容只用来临时展示，也不落进 store / 不重新持久化 quarantine。
+        """
+        if token != self._throat.current_epoch(session_key):
+            return False
+        if self._throat.has_pending_delete(session_key):
+            return False
+        return True
+
+    def _admit_loaded_state(self, session_key: str, state: Any, token: int) -> Any:
+        """MEM-03 PR-3（design §3 臂⑦）：load 路径的 SYNC（无 await）store 准入闸门。
+
+        取代此前三处 `load_sylanne_memory_state` KV/文件回退命中处各自内联的
+        `memory_systems.set` + `sylanne_memory_cache.set` 写回对——那对写回完全
+        绕过咽喉与化身栅栏，是红队 MAJOR-3/MAJOR-7 打的洞：WebUI 记忆页/overview
+        遍历全部 session 时的一次读，能在会话删除进行中把注定被删的归档重新塞回
+        店面当活体/占位者，下一次 save 就把它重新持久化 = 复活。
+
+        判定见 `_load_admit_ok`（token + has_pending_delete 双条件，fail-closed）。
+
+        - 准入通过：写回 `_store.memory_systems` / `_store.sylanne_memory_cache`
+          （与此前行为一致），并用 `self._throat.stamp` 盖上【当前】纪元印章——
+          保证这个新晋占位者此后的 save 能通过验章（而不是继续带着 load 开始时的
+          旧 token）。
+        - 准入拒绝：完全不碰 `_store`（不 set，不动既有占位者，也不动 `_hydrated`），
+          原样返回 `state` 本身——它是一个刚从 KV/文件反序列化出来、从未被塞进任何
+          登记容器的对象，天然就是"游离展示副本"：调用方（WebUI `_state_for_display`
+          等只读渲染路径）可以照常读它的 `_l1`/`_l2`/`_l3_nodes` 渲染，它只是永远
+          不会成为 store 里的占位者，也不会被后续任何 save 当作"当前活体"落盘
+          （没人再持有它、也没人把它传给 save）。
+
+        必须保持纯同步、零 await——`load_sylanne_memory_state` 本身不是咽喉 op，
+        这里如果反过来调用 `throat.submit(...)` 再 await，等于把一次读路径伪装成
+        写路径去挤咽喉队列，徒增复杂度和潜在的重入面；简单的字典写就是这里要做的
+        全部事情，和它替换掉的原地内联写回等价，只是多了准入判定这一步。
+        """
+        if not self._load_admit_ok(session_key, token):
+            return state
+        self._p._store.memory_systems.set(session_key, state)
+        self._p._store.sylanne_memory_cache.set(session_key, state)
+        self._throat.stamp(state, session_key)
+        return state
 
     async def load_sylanne_memory_state(
         self, session_key: str, *, now: float = 0.0
@@ -1217,6 +1302,15 @@ class StatePersistence:
         """
         del now
         from .memory_system import MemorySystem
+
+        # MEM-03 PR-3（design §3 臂⑦）：load 准入栅栏令牌——在本方法【任何 await 之前】
+        # 捕获当前纪元。三处 KV/文件回退命中会把新读出的 MemorySystem 写回
+        # `_store`（memory_systems/sylanne_memory_cache），这条写回本身此前完全绕过
+        # 咽喉与化身栅栏——一次 WebUI 读（overview 会遍历全部 session）可能在会话
+        # 删除进行中，把即将被删的归档重新写回活体，之后一次 save 就把它再持久化
+        # 回 KV = 复活。`token` 与 `_admit_loaded_state`/`_load_admit_ok` 配合把这条
+        # 写回也纳入 fail-closed 判定，见下方两个方法的注释。
+        token = self._throat.current_epoch(session_key)
 
         def has_content(state: Any) -> bool:
             """检查状态对象是否包含有效内容。"""
@@ -1269,7 +1363,14 @@ class StatePersistence:
                             {"layer": "legacy_record", "raw": r, "error": ""}
                             for r in quarantined_raw
                         ] + list(getattr(state, "_quarantine", []) or [])
-                        if combined_quarantine:
+                        # MEM-03 PR-3（arm ⑧）：同一 fail-closed 判定门槛也挡这条
+                        # quarantine 侧车写——若这份归档注定不被准入（会话删除
+                        # 进行中/已错过纪元），没理由把它的 quarantine 明文条目
+                        # 另行落盘（那本身也是一次"复活"，只是复活到侧车键而非
+                        # 主键）。见 `_load_admit_ok` 注释。
+                        if combined_quarantine and self._load_admit_ok(
+                            session_key, token
+                        ):
                             await self._persist_memory_quarantine(
                                 session_key, combined_quarantine
                             )
@@ -1279,9 +1380,7 @@ class StatePersistence:
                                 f"SylanneMemoryState 格式迁移读取，l2={len(state._l2)} "
                                 f"条，quarantine={len(combined_quarantine)} 条"
                             )
-                        self._p._store.memory_systems.set(session_key, state)
-                        self._p._store.sylanne_memory_cache.set(session_key, state)
-                        return state
+                        return self._admit_loaded_state(session_key, state, token)
                 elif isinstance(data, dict):
                     logger.debug(
                         f"Sylanne memory: session {session_key!r} 的 KV 数据不属于"
@@ -1295,13 +1394,13 @@ class StatePersistence:
             data = host.kernel.body.memory.get("_memory_system")
             if isinstance(data, dict):
                 state_from_body = MemorySystem.create_from_dict(data)
-                if getattr(state_from_body, "_quarantine", None):
+                if getattr(state_from_body, "_quarantine", None) and self._load_admit_ok(
+                    session_key, token
+                ):
                     await self._persist_memory_quarantine(
                         session_key, list(state_from_body._quarantine)
                     )
-                self._p._store.memory_systems.set(session_key, state_from_body)
-                self._p._store.sylanne_memory_cache.set(session_key, state_from_body)
-                return state_from_body
+                return self._admit_loaded_state(session_key, state_from_body, token)
         except Exception as e:
             logger.debug(f"Sylanne skip: {e}")
         # MEM-01 最后回退（row c）：AlphaBodyState.from_dict（sylanne_core/compute/
@@ -1321,12 +1420,13 @@ class StatePersistence:
                 raw_mem_data = salvage_memory_system_from_alpha_json(alpha_path)
                 if isinstance(raw_mem_data, dict):
                     state = MemorySystem.create_from_dict(raw_mem_data)
-                    if getattr(state, "_quarantine", None):
+                    if getattr(state, "_quarantine", None) and self._load_admit_ok(
+                        session_key, token
+                    ):
                         await self._persist_memory_quarantine(
                             session_key, list(state._quarantine)
                         )
-                    self._p._store.memory_systems.set(session_key, state)
-                    self._p._store.sylanne_memory_cache.set(session_key, state)
+                    state = self._admit_loaded_state(session_key, state, token)
                     logger.info(
                         f"Sylanne memory: session {session_key!r} 从 .alpha.json "
                         "原始文件救援读取记忆存档（body.memory 白名单丢弃路径的补救）"
@@ -1452,11 +1552,20 @@ class StatePersistence:
         if merge_q:
             combined_quarantine += merge_q
         if combined_quarantine:
-            safe_ensure_future(
-                self._persist_memory_quarantine(session_key, combined_quarantine),
-                name=f"memory_hydrate_quarantine_{session_key}",
-                task_list=getattr(self._p, "_background_tasks", None),
-            )
+            # MEM-03 PR-3（arm ⑧）：内联 await 而非 fire-and-forget。
+            # `hydrate_memory_system` 现在整体作为一个 `kind="hydrate"` 咽喉 op 的
+            # factory 执行（session_context.py `_schedule_memory_hydration` 经
+            # `throat.submit` 提交）——在本 op 的 drainer 还没跑到"这个 await 之后
+            # 的下一行"之前，同 session 的下一个排队 op（哪怕是紧随其后的 delete）都
+            # 不会被处理，因为单 drainer 严格串行、一次只处理一个 op。若像原来那样
+            # `safe_ensure_future` 出去，这个 quarantine 写就成了一个独立任务，drain
+            # 循环会在它派生的瞬间就继续处理队列里的下一个 op；一旦那是个 delete，
+            # 它可能先把 quarantine 键删掉，随后这个游离任务才姗姗来迟地把明文条目
+            # 重新 put 回去——delete 跑完了，明文侧车键却复活了。inline 等待把这次
+            # 写钉死在本 op 的执行窗口内，保证它要么在下一个 op（可能是 delete）开始
+            # 之前完成，要么随本 op 的异常一起被 drainer 的逐 op try/except 捕获，
+            # 两种情况都不会被后面的删除穿越。
+            await self._persist_memory_quarantine(session_key, combined_quarantine)
         live._hydrated = True
         logger.info(
             f"Sylanne memory: hydrated session {session_key!r} from KV archive "

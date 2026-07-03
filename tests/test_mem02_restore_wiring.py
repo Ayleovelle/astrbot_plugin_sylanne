@@ -1395,3 +1395,204 @@ def test_session_delete_fences_pipeline_held_occupant_ref_blocker1() -> None:
         assert throat.reject_count > rc0, "化身栅栏未拒绝 stale-ref save（fence 未生效）"
 
     asyncio.run(go())
+
+
+# ===========================================================================
+# MEM-03 PR-3：load 准入栅栏（_admit_loaded_state）+ quarantine 收编 —— 集成回归
+# ===========================================================================
+
+_PR3_ARCHIVE_TEMPLATE = {
+    "version": "3.0.0",
+    "l1": [
+        {
+            "id": "doomed",
+            "text": "注定被删的记忆",
+            "weight": 1.0,
+            "temperature": 0.0,
+            "age_ticks": 0,
+            "created_at": 1.0,
+        }
+    ],
+    "l2": [],
+    "l3_nodes": {},
+    "l3_edges": [],
+}
+
+
+def test_load_admit_refused_during_pending_delete() -> None:
+    """核心臂（arm ⑦）：一个 delete 已经 bump 过纪元、且此刻仍在（模拟）执行中——
+    这正是设计文档强调的"pre-load-delete 细节"：bump 发生在删除壳提交的那一瞬间，
+    不是等 delete op 真正跑到才发生，所以 load 在这之后捕获的 `token` 早已经是
+    bump 之后的值，跟"再读一次 current_epoch"必然相等——单靠 token 比对完全看
+    不出这个会话头上正压着一个尚未执行完的删除。只有 `has_pending_delete`
+    （直接查队列 + in-flight 集合，跟纪元数值无关）能补上这个盲区。
+
+    用手工 bump_epoch + 手工排一个卡在 Event 上、真正"在跑但没跑完"的 delete op
+    （而不是调用真实 delete_sylanne_memory_state 再指望不可控的调度交错）来确定性
+    地摆出这个前提条件——这就是这个 op 实际提交时会同步做的事，行为等价，但不靠
+    假 KV 偶然的同步/异步时序去凑巧触发。
+    """
+    kv_key = "sylanne_memory_state:sess:pend-del"
+    shared_kv: dict = {kv_key: dict(_PR3_ARCHIVE_TEMPLATE)}
+
+    async def go() -> None:
+        p = _FakePlugin(shared_kv)
+        sp = p._state_persistence
+        throat = sp._throat
+        sk = "sess:pend-del"
+
+        throat.bump_epoch(sk)  # 纪元 0->1，此刻无占位者，不 restamp 任何对象。
+        release_delete = asyncio.Event()
+        delete_started = asyncio.Event()
+
+        async def fake_delete_op() -> None:
+            delete_started.set()
+            await release_delete.wait()
+            shared_kv.pop(kv_key, None)  # 真正执行删除。
+
+        delete_fut = throat.submit(sk, fake_delete_op, kind="delete")
+        await delete_started.wait()  # delete op 已出队，正在 in-flight 执行中。
+        assert throat.has_pending_delete(sk) is True
+
+        loaded = await sp.load_sylanne_memory_state(sk)
+
+        # 仍然返回一份可渲染的展示副本（WebUI 读路径不受影响）……
+        assert loaded is not None
+        assert any(
+            getattr(it, "text", None) == "注定被删的记忆"
+            for it in list(getattr(loaded, "_l1", []) or [])
+        )
+        # ……但绝不是 store 的占位者/缓存——没有被准入，也没有被盖上当前纪元印章。
+        assert p._store.memory_systems.get(sk) is not loaded, (
+            "pending delete 期间 load 把游离副本准入成了 store 占位者（arm ⑦ 回归）"
+        )
+        assert p._store.sylanne_memory_cache.get(sk) is not loaded
+        assert getattr(loaded, "_incarnation_epoch", 0) != throat.current_epoch(sk), (
+            "未准入的游离副本不该被盖上当前纪元印章"
+        )
+
+        # delete 执行完成：primary key 真的被清掉了。
+        release_delete.set()
+        await delete_fut
+        assert kv_key not in shared_kv
+
+        # 之后如果有人（比如还攥着这份游离副本的另一个并发 WebUI 请求）想把它
+        # save 回去——必须被化身栅栏拒绝，不能复活已删记忆。
+        rc0 = throat.reject_count
+        await sp.save_sylanne_memory_state(sk, loaded)
+        assert kv_key not in shared_kv, "未准入的游离副本被 save 复活了（arm ⑦ 回归）"
+        assert throat.reject_count > rc0
+
+    asyncio.run(go())
+
+
+def test_load_admits_normally_without_pending_delete() -> None:
+    """反事实对照：没有 pending delete 时，load 必须正常准入——否则上面那个测试
+    只是因为"准入恒被拒绝"这种退化实现而通过，不能证明门禁真的按条件生效。
+    """
+    kv_key = "sylanne_memory_state:sess:normal-load"
+    shared_kv: dict = {kv_key: dict(_PR3_ARCHIVE_TEMPLATE)}
+
+    async def go() -> None:
+        p = _FakePlugin(shared_kv)
+        sp = p._state_persistence
+        sk = "sess:normal-load"
+
+        loaded = await sp.load_sylanne_memory_state(sk)
+        assert loaded is not None
+        # 准入通过：store 占位者/缓存就是这份读出的对象本身。
+        assert p._store.memory_systems.get(sk) is loaded
+        assert p._store.sylanne_memory_cache.get(sk) is loaded
+        assert loaded._incarnation_epoch == sp._throat.current_epoch(sk)
+
+        # 准入通过的对象此后必须能正常落盘（不该被栅栏误挡）。
+        loaded.write_summary(text="新增内容", source_turns=1, session_key=sk)
+        await sp.save_sylanne_memory_state(sk, loaded)
+        texts = [it["text"] for it in shared_kv[kv_key]["l1"]]
+        assert "新增内容" in texts, "准入通过的正常 load 后续 save 却被挡住了（回归）"
+
+    asyncio.run(go())
+
+
+def test_load_quarantine_write_dropped_when_pending_delete() -> None:
+    """arm ⑧：load 命中一份带 quarantine 条目（本例：l1 里一条非 dict 坏记录）的
+    归档时，若此刻会话正处在 pending delete 状态，quarantine 明文绝不能被
+    (re)写进侧车 KV——这本身也是一次"复活"，只是复活到侧车键而非主键，与
+    `_admit_loaded_state` 挡的是同一类漏洞，用同一判据（`_load_admit_ok`）挡。
+    """
+    from sylanne_alpha.memory_legacy_formats import quarantine_kv_key
+
+    kv_key = "sylanne_memory_state:sess:q-pend-del"
+    shared_kv: dict = {
+        kv_key: {
+            "version": "3.0.0",
+            "l1": ["not_a_dict_entry"],  # 触发 quarantine（_salvage_parse_list）
+            "l2": [],
+            "l3_nodes": {},
+            "l3_edges": [],
+        }
+    }
+
+    async def go() -> None:
+        p = _FakePlugin(shared_kv)
+        sp = p._state_persistence
+        throat = sp._throat
+        sk = "sess:q-pend-del"
+        safe = sp._safe_session_key(sk)
+        q_key = quarantine_kv_key(safe)
+
+        throat.bump_epoch(sk)
+        release_delete = asyncio.Event()
+        delete_started = asyncio.Event()
+
+        async def fake_delete_op() -> None:
+            delete_started.set()
+            await release_delete.wait()
+            shared_kv.pop(kv_key, None)
+
+        delete_fut = throat.submit(sk, fake_delete_op, kind="delete")
+        await delete_started.wait()
+        assert throat.has_pending_delete(sk) is True
+
+        loaded = await sp.load_sylanne_memory_state(sk)
+        assert loaded is not None
+        assert q_key not in shared_kv, (
+            "quarantine 明文在 pending delete 期间被写入侧车 KV（arm ⑧ 回归）"
+        )
+
+        release_delete.set()
+        await delete_fut
+
+    asyncio.run(go())
+
+
+def test_load_quarantine_write_persists_without_pending_delete() -> None:
+    """反事实对照：没有 pending delete 时，quarantine 明文必须照常落盘——证明上面
+    的"dropped"断言不是因为 quarantine 写路径整体失灵，而是准确命中了 pending
+    delete 这一个条件。
+    """
+    from sylanne_alpha.memory_legacy_formats import quarantine_kv_key
+
+    kv_key = "sylanne_memory_state:sess:q-normal"
+    shared_kv: dict = {
+        kv_key: {
+            "version": "3.0.0",
+            "l1": ["not_a_dict_entry"],
+            "l2": [],
+            "l3_nodes": {},
+            "l3_edges": [],
+        }
+    }
+
+    async def go() -> None:
+        p = _FakePlugin(shared_kv)
+        sp = p._state_persistence
+        sk = "sess:q-normal"
+        safe = sp._safe_session_key(sk)
+        q_key = quarantine_kv_key(safe)
+
+        loaded = await sp.load_sylanne_memory_state(sk)
+        assert loaded is not None
+        assert q_key in shared_kv, "无 pending delete 时 quarantine 写路径未正常工作（回归）"
+
+    asyncio.run(go())
