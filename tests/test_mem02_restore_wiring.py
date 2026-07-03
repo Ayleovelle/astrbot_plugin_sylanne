@@ -3,9 +3,13 @@
 覆盖卡片里的三道闸门：
   (a) 首次懒创建 MemorySystem 时后台调度 KV 归档补水，非破坏性合并（不整层替换）。
   (b) 未补水的空 MemorySystem 不允许覆盖 KV 里已存在的非空归档。
-  (c) memory_systems BoundedDict LRU 驱逐 / release_session 前先落盘。
+  (c) memory_systems BoundedDict LRU 驱逐前先落盘。
 
 以及冻结契约：_memory_system_for_session 签名/同步返回不变。
+
+MEM-03 PR-2 附加：_on_session_deleted 废除了驱逐路径以外那次"release_session 前
+先落盘"（那是 F4 窗口的成因本身，见 test_release_session_no_persist_then_delete），
+真删除类操作改经单写咽喉 + 化身栅栏，见文末 PR-2 小节。
 """
 
 from __future__ import annotations
@@ -55,10 +59,22 @@ class _FakePlugin:
 
 
 async def _drain_background_tasks(p: _FakePlugin) -> None:
-    """反复 gather，直到没有新任务产生为止（补水任务本身不会再派生任务，一轮足够）。"""
+    """反复 gather，直到没有新任务产生为止（补水任务本身不会再派生任务，一轮足够）。
+
+    MEM-03 PR-2：hydrate 调度改经单写咽喉提交（kind="hydrate"），不再落进
+    `p._background_tasks`——它现在跑在 `StatePersistence._throat` 的 per-session
+    drainer 任务里（`throat._drainers[session_key]`）。只 gather
+    `p._background_tasks` 不再足以等到 hydrate 真正跑完，这里一并纳入当前存活的
+    drainer 任务，否则测试会在 hydrate 真正合并归档前就走到断言。
+    """
     seen: set[int] = set()
-    for _ in range(5):
+    for _ in range(10):
         pending = [t for t in list(p._background_tasks) if id(t) not in seen]
+        throat = getattr(p._state_persistence, "_throat", None)
+        if throat is not None:
+            pending += [
+                t for t in list(throat._drainers.values()) if id(t) not in seen
+            ]
         if not pending:
             return
         for t in pending:
@@ -188,8 +204,12 @@ def test_evict_persists_via_bounded_dict_on_evict() -> None:
     assert shared_kv["sylanne_memory_state:sess:evict-a"]["l1"], "驱逐落盘内容为空/丢失"
 
 
-def test_release_session_persists_before_pop() -> None:
-    """_on_session_deleted 应在 release_session 硬删除前先落盘非空记忆。"""
+def test_release_session_no_persist_then_delete() -> None:
+    """MEM-03 PR-2：_on_session_deleted 废除了死的 persist-then-cleanup（F4 窗口的
+    成因本身）——真删除的终态就是"已删除"，不再有"先落盘、再删除"这一步，也就不
+    存在"删除后被自己的落盘复活"的时序窗口。验证：release_session 硬删除前的内容
+    从未被写回 KV（没有任何 put），删除后记忆键确实清空。
+    """
     shared_kv: dict = {}
     p = _FakePlugin(shared_kv)
 
@@ -207,19 +227,17 @@ def test_release_session_persists_before_pop() -> None:
     persisted_key = "sylanne_memory_state:sess:release"
     assert not p._store.memory_systems.has("sess:release"), "release_session 未清理 memory_systems"
 
-    # _on_session_deleted 末尾会异步清空该 session 的全部 KV（AstrBot 会话真删除语义，
-    # 比 LRU 驱逐更彻底），所以最终态里这个 key 会被删掉——但核心断言是"落盘确实发生
-    # 过、且发生在删除之前"，而不是最终 KV 里还留着什么。
     put_indices = [
         i for i, (op, key) in enumerate(p.kv_call_log) if op == "put" and key == persisted_key
     ]
     delete_indices = [
         i for i, (op, key) in enumerate(p.kv_call_log) if op == "delete" and key == persisted_key
     ]
-    assert put_indices, "release 前从未真正落盘——MEM-02③ 未生效"
+    assert not put_indices, (
+        "废除的 persist-then-cleanup 复活了——真删除不该再对这个 key 有任何 put（F4 abolition 回归）"
+    )
     assert delete_indices, "会话删除的 KV 清理链路未触发（测试前提被破坏）"
-    assert min(put_indices) < min(delete_indices), "落盘发生在清理删除之后，顺序错了"
-    assert persisted_key not in shared_kv, "全会话删除的最终态应仍是 KV 被清空（未破坏既有清理语义）"
+    assert persisted_key not in shared_kv, "全会话删除的最终态应是 KV 被清空"
 
 
 def test_hydration_merge_prefers_newer_by_created_at() -> None:
@@ -945,3 +963,408 @@ def test_throat_serializes_concurrent_v3_first_writes_f2() -> None:
         f"反事实未复现备份门 TOCTOU（应≥2 次备份写，说明挂起点未触发交错，测试失真）："
         f"{len(puts_bypass)}"
     )
+
+
+# ===========================================================================
+# MEM-03 PR-2：删除臂激活化身栅栏 —— 集成回归
+# ===========================================================================
+
+
+class _FakeKernelBody:
+    def __init__(self) -> None:
+        self.memory: dict = {}
+
+
+class _FakeKernel:
+    def __init__(self) -> None:
+        self.body = _FakeKernelBody()
+
+
+class _FakeRuntime:
+    def __init__(self) -> None:
+        self.save_calls = 0
+
+    def save(self, kernel) -> None:  # noqa: ANN001
+        self.save_calls += 1
+
+
+class _FakeHost:
+    def __init__(self) -> None:
+        self.kernel = _FakeKernel()
+        self.runtime = _FakeRuntime()
+
+
+class _FakePluginWithHost(_FakePlugin):
+    """扩展基础 fake plugin，加一个可返回 fake host 的 `_host()`——PR-2 的 kernel
+    .alpha.json 文件 scrub（红队 must-fix 第 4 条复活臂）只有在 `_p._host()` 存在时
+    才会真正执行，基础 `_FakePlugin` 没有这个方法（调用会被 scrub helper 的
+    try/except 吞掉、静默 no-op），这里补上以便直接断言 scrub 生效。
+    """
+
+    def __init__(self, shared_kv: dict | None = None) -> None:
+        super().__init__(shared_kv)
+        self._fake_hosts: dict[str, _FakeHost] = {}
+
+    def _host(self, session_key: str) -> _FakeHost:
+        return self._fake_hosts.setdefault(session_key, _FakeHost())
+
+
+def test_delete_recreate_f3_hydrate_rejected() -> None:
+    """F3（hydrate 复活臂闭合）：memory_system_for_session 懒创建时排的 hydrate op
+    （入队时纪元 0），若在真正执行前该 session 被删（bump 纪元），必须被验章拒绝——
+    不能把已经被删掉的 v3 归档合并回活体。用真实时序复现"hydrate 已入队、尚未
+    执行，此刻会话被删"的窗口：memory_system_for_session 只排队不 drain，delete
+    在同一事件循环 tick 内同步 bump 纪元后才第一次 await，drain 在那次 await 才
+    真正跑起来，此时 hydrate 与 delete 已经【同队列】按提交序等待执行。
+    """
+    kv_key = "sylanne_memory_state:sess:f3"
+    backup_key = "sylanne_memory_state_backup_v2:sess:f3"
+    from sylanne_alpha.memory_legacy_formats import quarantine_kv_key
+
+    shared_kv: dict = {
+        kv_key: {
+            "version": "3.0.0",
+            "l1": [
+                {
+                    "id": "doomed",
+                    "text": "注定被删的记忆",
+                    "weight": 1.0,
+                    "temperature": 0.0,
+                    "age_ticks": 0,
+                    "created_at": 1.0,
+                }
+            ],
+            "l2": [],
+            "l3_nodes": {},
+            "l3_edges": [],
+        }
+    }
+
+    async def go() -> None:
+        p = _FakePlugin(shared_kv)
+        sp = p._state_persistence
+        safe = sp._safe_session_key("sess:f3")
+        q_key = quarantine_kv_key(safe)
+
+        mem = p._memory_system_for_session("sess:f3")  # 排 hydrate（token=0），未 drain
+        assert mem._hydrated is False
+
+        # BEFORE draining：立即删除。delete_sylanne_memory_state 内部先同步
+        # bump_epoch（纪元 0→1），再 submit delete op，然后才第一次 await——这次
+        # await 才让 drainer 真正开始跑，此时队列里是 [hydrate(token=0), delete(豁免)]。
+        await sp.delete_sylanne_memory_state("sess:f3")
+
+        # 陈旧 hydrate 被拒：活体没有被合并、也没有被标记为已补水。
+        assert mem._hydrated is False, "陈旧 hydrate 未被验章拒绝——F3 hydrate 臂复活"
+        assert not p._memory_system_has_content(mem)
+        assert sp._throat.reject_count >= 1
+
+        # delete op 正常执行：三键全空。
+        assert kv_key not in shared_kv
+        assert backup_key not in shared_kv
+        assert q_key not in shared_kv
+
+    asyncio.run(go())
+
+
+def test_stale_ref_save_rejected_blocker1() -> None:
+    """BLOCKER-1：一个不再是 store 占位者的陈旧 MemorySystem 引用（例如某个更早、
+    已被替换掉的并发请求持有的对象），在其所属 session 被删除（bump 纪元）之后，
+    携带它的 save 必须被栅栏拒绝——不能借由这个陈旧对象把已删归档重新写回 KV。
+
+    与 bump-and-restamp（占位者权威兜底）区分开：这里的 stale_ref 从头到尾都【不是】
+    store 里的占位者（current_occupant 才是），所以不会被 bump 时的 restamp 捎带
+    放行——这正是"删除后陈旧引用复活"（F3）本体，也是本卡片列出的 BLOCKER-1。
+    """
+    shared_kv: dict = {}
+
+    async def go() -> None:
+        p = _FakePlugin(shared_kv)
+        sp = p._state_persistence
+
+        stale_ref = MemorySystem()
+        sp._throat.stamp(stale_ref, "sess:stale")  # 盖 epoch 0
+
+        current_occupant = MemorySystem()
+        p._store.memory_systems.set("sess:stale", current_occupant)
+        sp._throat.stamp(current_occupant, "sess:stale")  # 同为 epoch 0
+
+        # 删除：bump 纪元至 1。bump-and-restamp 只重新盖占位者（current_occupant）；
+        # stale_ref 不是占位者，纹丝不动，仍钉在陈旧的 epoch 0。
+        await sp.delete_sylanne_memory_state("sess:stale")
+        assert current_occupant._incarnation_epoch == 1
+        assert stale_ref._incarnation_epoch == 0
+
+        stale_ref.write_summary(
+            text="幽灵记忆（不该写回）", source_turns=1, session_key="sess:stale"
+        )
+        await sp.save_sylanne_memory_state("sess:stale", stale_ref)
+
+        kv_key = "sylanne_memory_state:sess:stale"
+        assert kv_key not in shared_kv, "陈旧引用的 save 未被栅栏拒绝——F3/BLOCKER-1 复活"
+        assert sp._throat.reject_count >= 1
+
+    asyncio.run(go())
+
+
+def test_meltdown_then_chat_still_persists_restamp() -> None:
+    """meltdown-then-chat 回归（bump-and-restamp 必要性）：meltdown 清空活体但复用
+    同一对象继续当占位者（真实 WebUI handler 语义）——purge_session_after_meltdown
+    的 bump 若只 bump 不 restamp，占位者会因为携带旧印章被永久拒写，meltdown 后
+    继续聊天产生的新记忆会【永远】落不了盘，比记忆复活更糟。这里验证 restamp 确实
+    生效：meltdown 之后，同一对象 write_summary + save 必须成功持久化。
+    """
+    shared_kv: dict = {}
+
+    async def go() -> None:
+        p = _FakePlugin(shared_kv)
+        sp = p._state_persistence
+        kv_key = "sylanne_memory_state:sess:melt2"
+
+        mem = p._memory_system_for_session("sess:melt2")
+        mem.write_summary(
+            text="即将被抹掉的记忆", source_turns=1, session_key="sess:melt2"
+        )
+        mem._hydrated = True
+        await sp.save_sylanne_memory_state("sess:melt2", mem)
+        assert shared_kv[kv_key]["l1"]
+
+        # 真实 meltdown handler 语义：原地清空但复用同一个对象继续当占位者。
+        mem._l1.clear()
+        mem._l2.clear()
+        mem._l3_nodes.clear()
+        mem._l3_edges.clear()
+        mem._tick = 0
+        mem._hydrated = True
+        await sp.purge_session_after_meltdown("sess:melt2")
+        assert kv_key not in shared_kv
+        # bump-and-restamp 生效：占位者印章已追平最新纪元。
+        assert mem._incarnation_epoch == sp._throat.current_epoch("sess:melt2")
+
+        # 继续聊天：同一对象写入新内容，必须仍能落盘。
+        mem.write_summary(
+            text="meltdown 后的新记忆", source_turns=1, session_key="sess:melt2"
+        )
+        await sp.save_sylanne_memory_state("sess:melt2", mem)
+        assert shared_kv.get(kv_key, {}).get("l1"), (
+            "meltdown 的 bump 只 bump 不 restamp——新记忆被永久拒写（比复活更糟的回归）"
+        )
+
+    asyncio.run(go())
+
+
+def test_alpha_json_scrub_on_session_delete() -> None:
+    """红队 must-fix（第 4 条复活臂）：_on_session_deleted 必须清空 kernel 文件里的
+    body.memory['_memory_system'] + traces——否则 WebUI overview salvage（
+    load_sylanne_memory_state 第 5 级 .alpha.json 直读回退）会把这份文件残留读回来，
+    再被下一次周期性 save 写回 KV，等于"删除"从未真正发生。
+    """
+    p = _FakePluginWithHost()
+
+    async def go() -> None:
+        host = p._host("sess:scrub")
+        host.kernel.body.memory["_memory_system"] = {
+            "l1": [{"id": "x", "text": "残留明文"}]
+        }
+        host.kernel.body.memory["traces"] = ["旧 trace"]
+
+        p._state_persistence._on_session_deleted("sess:scrub")
+        await _drain_background_tasks(p)
+
+        assert "_memory_system" not in host.kernel.body.memory, (
+            "kernel .alpha.json 文件里的 _memory_system 残留未被 scrub"
+        )
+        assert host.kernel.body.memory.get("traces") == []
+        assert host.runtime.save_calls >= 1, "scrub 后没有把清空结果写回 kernel 文件"
+
+    asyncio.run(go())
+
+
+def test_v2core_domains_purged_on_plain_session_delete() -> None:
+    """红队 MINOR-3：sylanne_v2core_domains:{safe}（reconsolidation overlay，legacy
+    键含原始记忆 TEXT）在 meltdown 路径早已清（purge_session_after_meltdown），但
+    普通会话删除（_on_session_deleted）此前漏删，留下明文残留。PR-2 补上。
+    """
+    shared_kv: dict = {}
+    p = _FakePlugin(shared_kv)
+    safe = p._state_persistence._safe_session_key("sess:domains")
+    domains_key = f"sylanne_v2core_domains:{safe}"
+    shared_kv[domains_key] = {"legacy": {"text": "reconsolidation 明文"}}
+
+    async def go() -> None:
+        p._state_persistence._on_session_deleted("sess:domains")
+        await _drain_background_tasks(p)
+
+    asyncio.run(go())
+
+    assert domains_key not in shared_kv, (
+        "普通会话删除未清 sylanne_v2core_domains 侧车键（红队 MINOR-3 回归）"
+    )
+
+
+def test_purge_after_meltdown_no_self_deadlock() -> None:
+    """purge_session_after_meltdown 的复合 op 必须内部调用
+    `_delete_sylanne_memory_state_impl`（而非公开壳 `delete_sylanne_memory_state`）——
+    否则壳会对同一 session 队列再 submit+await，命中咽喉的 task-identity re-entrancy
+    断言（立即 RuntimeError，单 drainer 等自己完成本就是死锁），purge 就永远无法
+    正常完成。用超时包一层，回归时快速失败而不是挂起整条测试流水线。
+    """
+    shared_kv: dict = {}
+
+    async def go() -> None:
+        p = _FakePlugin(shared_kv)
+        sp = p._state_persistence
+        kv_key = "sylanne_memory_state:sess:nodeadlock"
+
+        mem = p._memory_system_for_session("sess:nodeadlock")
+        mem.write_summary(
+            text="待清除", source_turns=1, session_key="sess:nodeadlock"
+        )
+        mem._hydrated = True
+        await sp.save_sylanne_memory_state("sess:nodeadlock", mem)
+        assert shared_kv[kv_key]["l1"]
+
+        await asyncio.wait_for(
+            sp.purge_session_after_meltdown("sess:nodeadlock"), timeout=2.0
+        )
+        assert kv_key not in shared_kv
+
+    asyncio.run(go())
+
+
+def test_delete_kv_key_with_retry_recovers_from_transient_failure() -> None:
+    """有界重试本体：一个键的删除前两次抛异常、第三次成功——必须最终被删掉（而不是
+    第一次失败就放弃）。同时验证耗尽重试次数仍不抛出（fail-safe，不中断整个 op）。
+    """
+    shared_kv = {"k1": 1, "k2": 2}
+
+    class _FlakyPlugin(_FakePlugin):
+        def __init__(self, shared_kv: dict) -> None:
+            super().__init__(shared_kv)
+            self.fail_left = {"k1": 2}  # k1 前两次失败，第三次成功
+
+        async def delete_kv_data(self, key: str) -> None:  # noqa: ANN001
+            left = self.fail_left.get(key, 0)
+            if left > 0:
+                self.fail_left[key] = left - 1
+                raise RuntimeError("simulated transient delete failure")
+            await super().delete_kv_data(key)
+
+    async def go() -> None:
+        p = _FlakyPlugin(shared_kv)
+        sp = p._state_persistence
+
+        await sp._delete_kv_key_with_retry("k1")
+        assert "k1" not in shared_kv, "有界重试未在耗尽前的成功尝试上恢复删除"
+
+        # k2 恒失败（永远不会调用 super()），耗尽 3 次重试后必须放弃但不抛异常。
+        async def always_fail(key: str) -> None:  # noqa: ANN001
+            raise RuntimeError("always fails")
+
+        p.delete_kv_data = always_fail  # type: ignore[assignment]
+        await sp._delete_kv_key_with_retry("k2")  # 不应抛异常
+        assert "k2" in shared_kv, "k2 应仍在（重试耗尽后放弃，但 fail-safe 不代表能删掉）"
+
+    asyncio.run(go())
+
+
+def test_hydrate_schedule_reaches_throat_from_worker_thread() -> None:
+    """design §8 PR-2 行（"stdlib 线程 meltdown 真达咽喉执行"）：真实 WebUI meltdown
+    handler（webui_server.py 的 stdlib ThreadingHTTPServer 工作线程）会在【无
+    running loop】的线程里同步调用 `_memory_system_for_session(session)`——这个
+    accessor 内部现在经 `throat.submit(kind="hydrate")` 调度补水（PR-2 前是
+    `safe_ensure_future`，在无 running loop 的线程里会静默 `coro.close()` 丢弃，
+    从未真正补过水）。验证：off-loop 调用确实把 hydrate op 送进了绑定 loop 的
+    咽喉队列并真正执行到底，而不是静默丢弃。
+    """
+    import threading
+    import time
+
+    kv_key = "sylanne_memory_state:sess:thread"
+    shared_kv: dict = {
+        kv_key: {
+            "version": "3.0.0",
+            "l1": [
+                {
+                    "id": "a",
+                    "text": "线程补水记忆",
+                    "weight": 1.0,
+                    "temperature": 0.0,
+                    "age_ticks": 0,
+                    "created_at": 1.0,
+                }
+            ],
+            "l2": [],
+            "l3_nodes": {},
+            "l3_edges": [],
+        }
+    }
+    p = _FakePlugin(shared_kv)
+    result: dict = {}
+
+    async def go() -> None:
+        loop = asyncio.get_running_loop()
+        p._state_persistence._throat.bind_loop(loop)
+
+        def worker() -> None:
+            # 无 running loop 的线程——真实 webui_server.py meltdown handler 的调用
+            # 现场（见该文件 ~2290-2294 行 mem_getter(session) 的同步调用）。
+            result["mem"] = p._memory_system_for_session("sess:thread")
+
+        t = threading.Thread(target=worker)
+        t.start()
+        t.join()
+
+        # 轮询等待：call_soon_threadsafe 排的 _enqueue 回调、以及随后的 drainer 任务
+        # 都要等本 loop 有机会跑才会执行，不能假设 t.join() 一返回就已经跑完。
+        deadline = time.monotonic() + 3.0
+        while not result.get("mem")._hydrated:
+            if time.monotonic() > deadline:
+                raise AssertionError("off-loop hydrate 在超时内未完成——咽喉未真正执行")
+            await asyncio.sleep(0.01)
+
+    asyncio.run(go())
+
+    mem = result["mem"]
+    assert mem._hydrated is True, "off-loop 调用未真正把 hydrate 送进咽喉执行"
+    all_texts = [it.text for it in list(mem._l1) + list(mem._l2)]
+    assert "线程补水记忆" in all_texts, f"补水内容缺失: {all_texts}"
+
+
+def test_session_delete_fences_pipeline_held_occupant_ref_blocker1() -> None:
+    """PR-2 gate 修正 / BLOCKER-1 真场景：pipeline 跨 LLM await 攥着【当前占位者】引用，
+    期间会话被 AstrBot 删除。delete 的 bump 必须在 release_session【之后】（占位者已
+    pop、occupant=None、不 restamp），使那个旧占位者引用的后续 save 被化身栅栏拒绝——
+    已删记忆不复活。若 bump 在 release 之前（会把待删占位者 restamp 成新纪元），其 save
+    反被放行 = 复活，本测试拦回。
+    """
+    shared_kv: dict = {}
+    kv_key = "sylanne_memory_state:sess:del-f3"
+
+    async def go() -> None:
+        p = _FakePlugin(shared_kv)
+        ref = p._memory_system_for_session("sess:del-f3")  # 建占位者，印章 epoch 0
+        ref._hydrated = True
+        ref.write_summary(
+            text="待删记忆", source_turns=2, temperature=0.3, session_key="sess:del-f3"
+        )
+        await p._state_persistence.save_sylanne_memory_state("sess:del-f3", ref)
+        assert kv_key in shared_kv and shared_kv[kv_key]["l1"]
+
+        throat = p._state_persistence._throat
+        rc0 = throat.reject_count
+
+        # AstrBot 删除会话（同步回调）：release 弹出占位者 → bump(occupant=None) → 删 op。
+        p._state_persistence._on_session_deleted("sess:del-f3")
+        await _drain_background_tasks(p)
+        assert kv_key not in shared_kv, "删除 op 未删掉记忆键"
+
+        # pipeline 用它一直攥着的旧占位者引用落盘 → 必须被栅栏拒绝，不得复活。
+        await p._state_persistence.save_sylanne_memory_state("sess:del-f3", ref)
+        await _drain_background_tasks(p)
+        assert kv_key not in shared_kv, (
+            "已删记忆被 stale 占位者引用的 save 复活了（BLOCKER-1 / bump-after-release 回归）"
+        )
+        assert throat.reject_count > rc0, "化身栅栏未拒绝 stale-ref save（fence 未生效）"
+
+    asyncio.run(go())

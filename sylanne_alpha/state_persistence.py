@@ -254,18 +254,24 @@ class StatePersistence:
             fut.add_done_callback(lambda f: f.cancelled() or f.exception())
 
     async def _persist_memory_kv_only(self, session_key: str, state: Any) -> None:
-        """只写 KV，不touch `_store` 的活体引用——专供驱逐/释放场景使用。
+        """只写 KV，不touch `_store` 的活体引用——专供驱逐场景使用。
 
         `save_sylanne_memory_state` 常规路径会顺手把 state 写回
         `_store.memory_systems` / `sylanne_memory_cache`（保持缓存与 KV 一致，
-        绝大多数调用点需要这个副作用）。但驱逐/release 场景恰恰是"这个对象正在
-        或已经离开活体 store"——如果落盘复用那个方法，会在 pop 之后又把它重新
-        塞回 store，制造出"明明驱逐/release 了、entry 却还在"的假象。这里绕开
-        store 写回，只落 KV，语义更贴合调用现场。
+        绝大多数调用点需要这个副作用）。但驱逐场景恰恰是"这个对象正在或已经离开
+        活体 store"——如果落盘复用那个方法，会在 pop 之后又把它重新塞回 store，
+        制造出"明明驱逐了、entry 却还在"的假象。这里绕开 store 写回，只落 KV，
+        语义更贴合调用现场。
 
         MEM-03 PR-1：公开壳，经单写咽喉串行化（与 save 同队列）。驱逐回调改为直接
         throat.submit（见 _on_memory_system_evicted）——off-loop 线程侧驱逐也能经绑定
         loop 执行，顺手修好今日线程侧驱逐落盘被 coro.close() 静默丢的暗病。
+
+        MEM-03 PR-2：会话删除路径（`_on_session_deleted`）此前也会先调本壳做落盘
+        桥接，再走清理删除——那正是 F4 窗口（persist 与 cleanup 无序竞态）的成因，
+        现已废除（真删除的终态就是"已删除"，见 `_on_session_deleted`/
+        `_session_deleted_delete_op`）。本壳目前唯一的生产调用方是驱逐回调；保留
+        公开壳签名不删，避免破坏可能存在的直接调用方/未来复用。
         """
         if state is None:
             return
@@ -1457,6 +1463,56 @@ class StatePersistence:
             f"(format={detected_format})"
         )
 
+    async def _delete_kv_key_with_retry(self, key: str, *, attempts: int = 3) -> None:
+        """有界重试删除单个 KV 键（≤3 次，`await asyncio.sleep(0)` 退避）。
+
+        MEM-03 PR-2（design §4 结论提前落地）：废弃"失败即丢/靠 WAL 事后盲重放"，
+        改为一次瞬时删除失败就地重试。fail-safe：重试耗尽只记日志，绝不向上抛出——
+        不能让一个键的删除失败中断整个 delete/purge/session-deleted op 的其余步骤。
+        """
+        delete_fn = getattr(self._p, "delete_kv_data", None)
+        if not callable(delete_fn):
+            return
+        last_exc: Exception | None = None
+        for attempt in range(attempts):
+            try:
+                await delete_fn(key)
+                return
+            except Exception as e:  # noqa: BLE001 — fail-safe：绝不让删除失败中断 op
+                last_exc = e
+                if attempt < attempts - 1:
+                    await asyncio.sleep(0)
+        logger.warning(
+            f"Sylanne memory delete: {key!r} failed after {attempts} attempts: {last_exc}"
+        )
+
+    async def _scrub_kernel_alpha_json_memory(self, session_key: str) -> None:
+        """清空 kernel 文件（.alpha.json）里的 body.memory['_memory_system'] + traces。
+
+        红队 must-fix（第 4 条复活臂）：`load_sylanne_memory_state` 第 5 级回退
+        （见该方法 MEM-01 救援段）会绕开 KV / body.memory 白名单，直接读裸
+        .alpha.json 文件本身救援记忆——一个已删除会话若这份文件仍留着旧
+        `_memory_system` blob，WebUI overview salvage 会把它读回来、再被下一次
+        周期性 save 写回 KV，等于"删除"从未发生。`purge_session_after_meltdown`
+        与 `_on_session_deleted` 的删除/清除 op 都必须清掉这份文件残留，故抽成
+        共享辅助方法，避免各自漏一处。
+        """
+        host = None
+        try:
+            host = self._p._host(session_key)
+        except Exception:
+            pass
+        if host is None:
+            return
+        try:
+            host.kernel.body.memory.pop("_memory_system", None)
+            host.kernel.body.memory["traces"] = []
+            await asyncio.to_thread(host.runtime.save, host.kernel)
+        except Exception as e:
+            logger.debug(
+                f"Sylanne memory kernel file scrub failed for {session_key!r}: {e}"
+            )
+
     async def delete_sylanne_memory_state(self, session_key: str) -> None:
         """删除 Sylanne 记忆状态——记忆子系统拥有的【全部三个】KV 键 + 内存缓存。
 
@@ -1466,30 +1522,79 @@ class StatePersistence:
         留下完整可恢复的记忆明文副本（隐私/留存违约）。三键清单见
         memory_migration_spine.MEMORY_KV_KEYS_MANIFEST（primary/v2_backup/quarantine）。
 
+        MEM-03 PR-2：公开壳，签名不变。提交瞬间【同步】bump_epoch（激活化身栅栏——
+        PR-1 里栅栏无生产调用方、恒惰性；本方法是三条删除类壳之一，接上后即生效）：
+        bump 必须发生在 submit 之前，让"delete 入队后、真正执行前"提交的陈旧血统
+        save/hydrate 立即失效，而不是等 delete op 真正跑到才失效——根治 F3（删除后
+        陈旧引用把已删记忆写回）。真逻辑见 `_delete_sylanne_memory_state_impl`，只准
+        经咽喉 op 调用；delete kind 自身豁免验章（定义 bump，幂等，见
+        `MemoryWriteThroat._validate`）。
+
         Args:
             session_key: 会话标识。
+        """
+        self._throat.bump_epoch(
+            session_key, occupant=self._current_memory_occupant(session_key)
+        )
+        fut = self._throat.submit(
+            session_key,
+            lambda: self._delete_sylanne_memory_state_impl(session_key),
+            kind="delete",
+            state=None,
+        )
+        if fut is not None:
+            await fut
+
+    async def _delete_sylanne_memory_state_impl(self, session_key: str) -> None:
+        """delete 真逻辑——只准经咽喉 op 调用（勿直接 await，会绕过串行化 + 栅栏
+        bump 记账）。记忆子系统全部三键，primary-first 顺序
+        （primary → backup_v2 → quarantine，design §4 固定顺序），每键有界重试删除。
         """
         from .memory_legacy_formats import quarantine_kv_key
 
         self._p._store.sylanne_memory_cache.pop(session_key, None)
-        delete_fn = getattr(self._p, "delete_kv_data", None)
-        if delete_fn and callable(delete_fn):
-            safe = self._safe_session_key(session_key)
-            for key in (
-                self.sylanne_memory_kv_key(session_key),
-                self.sylanne_memory_backup_v2_kv_key(session_key),
-                quarantine_kv_key(safe),
-            ):
-                try:
-                    await delete_fn(key)
-                except Exception as e:
-                    logger.debug(f"Sylanne memory delete {key}: {e}")
+        safe = self._safe_session_key(session_key)
+        for key in (
+            self.sylanne_memory_kv_key(session_key),
+            self.sylanne_memory_backup_v2_kv_key(session_key),
+            quarantine_kv_key(safe),
+        ):
+            await self._delete_kv_key_with_retry(key)
 
     async def purge_session_after_meltdown(self, session_key: str) -> None:
-        """记忆清除后同步抹掉专用 KV、kernel KV、域状态 KV 与 v2core 运行时缓存（T1-13）。"""
-        # delete_sylanne_memory_state 已删掉记忆子系统全部三键（primary/backup_v2/
-        # quarantine，FIX F5）；这里只补 kernel / v2core 域状态等非记忆键。
-        await self.delete_sylanne_memory_state(session_key)
+        """记忆清除后同步抹掉专用 KV、kernel KV、域状态 KV 与 v2core 运行时缓存（T1-13）。
+
+        MEM-03 PR-2：公开壳，签名不变。提交瞬间同步 bump_epoch——bump-and-restamp
+        当前占位者（meltdown 语义是"原地清空活体 + 继续当占位者"：调用方在此之前
+        已经原地清空了 MemorySystem 的内容但复用同一个对象，见 webui_routes.py /
+        webui_server.py 的 meltdown handler）。只 bump 不 restamp 会让 meltdown 后
+        继续聊天写入的新记忆因旧印章被永久拒写（比复活更糟）；bump_epoch 内部已经
+        处理 restamp，这里无需额外操作。真逻辑经复合 op（kind="purge"，与 delete 同样
+        栅栏豁免、幂等）串行执行，见 `_purge_session_after_meltdown_impl`。
+        """
+        self._throat.bump_epoch(
+            session_key, occupant=self._current_memory_occupant(session_key)
+        )
+        fut = self._throat.submit(
+            session_key,
+            lambda: self._purge_session_after_meltdown_impl(session_key),
+            kind="purge",
+            state=None,
+        )
+        if fut is not None:
+            await fut
+
+    async def _purge_session_after_meltdown_impl(self, session_key: str) -> None:
+        """purge 真逻辑——只准经咽喉 op 调用。
+
+        内部调用 `_delete_sylanne_memory_state_impl`（【绝不】调用公开壳
+        `delete_sylanne_memory_state`）：本 op 已经跑在本 session 的 drainer 任务
+        内部，若改调壳，壳会对同一 session 队列再 submit + await，命中
+        `MemoryWriteThroat.submit()` 的 task-identity re-entrancy 断言（立即
+        RuntimeError）——单 drainer 等一个只有自己能完成的 Future 本就是永久停摆，
+        该断言正是为拦这个真实会发生的场景。
+        """
+        await self._delete_sylanne_memory_state_impl(session_key)
         delete_fn = getattr(self._p, "delete_kv_data", None)
         if delete_fn and callable(delete_fn) and self.has_kv_api():
             safe = self._safe_session_key(session_key)
@@ -1498,25 +1603,11 @@ class StatePersistence:
                 f"{self.kernel_kv_key(session_key)}_backup",
                 f"sylanne_v2core_domains:{safe}",
             ):
-                try:
-                    await delete_fn(key)
-                except Exception as e:
-                    logger.debug(f"Sylanne meltdown KV delete {key}: {e}")
+                await self._delete_kv_key_with_retry(key)
         cache = getattr(self._p, "_v2core_runtimes", None)
         if isinstance(cache, dict):
             cache.pop(session_key, None)
-        host = None
-        try:
-            host = self._p._host(session_key)
-        except Exception:
-            pass
-        if host is not None:
-            try:
-                host.kernel.body.memory.pop("_memory_system", None)
-                host.kernel.body.memory["traces"] = []
-                await asyncio.to_thread(host.runtime.save, host.kernel)
-            except Exception as e:
-                logger.debug(f"Sylanne meltdown kernel file purge: {e}")
+        await self._scrub_kernel_alpha_json_memory(session_key)
 
     # ------------------------------------------------------------------
     # AstrBot ConversationManager 集成
@@ -1553,32 +1644,33 @@ class StatePersistence:
         新增容器自动纳入清理，杜绝原反射式 _SESSION_KEYED_CONTAINERS 手抄元组的
         漏登记静默泄漏（曾漏 3 个无界裸 dict）。
 
-        MEM-02③：release_session 只是同步 pop，对 memory_systems 而言等于硬删除
-        （没有 BoundedDict 驱逐时的 on_evict 语义）——若这中间还有未落盘的内容
-        （最长 9 个 tick），会随 pop 直接静默丢失。这里在 pop 之前先同步取一次
-        引用、快照式 fire-and-forget 落盘，再走原有 release/清理流程；本方法末尾
-        紧接着的 _cleanup_kv_for_session 仍会把这份刚落盘的 KV 一并删掉——那是
-        AstrBot 侧真正的"会话已删除"语义（比 LRU 驱逐更彻底），持久化只是防止
-        在两步之间出现"内存里已丢、KV 里还没来得及有"的空窗。
+        MEM-03 PR-2（废除死的 persist-then-cleanup，design §3 臂⑥ / §8 PR-2 行）：
+        此前这里会在 release_session 前先 fire-and-forget 落盘一份"释放前快照"，
+        再串行走清理删除——那是 F4 窗口的成因本身（persist 现在还多走守卫 + 备份门
+        若干 await，理论上能在同一毫秒窗口内被后到的补水/请求读到"待删但仍非空"的
+        归档并合并回活体）。一次真正的会话删除，终态就该是"已删除"——persist 完
+        马上又删掉纯属多此一举，不落这个 persist 步骤反而从根上关掉这个窗口。
+
+        bump_epoch 必须在 release_session【之后】（design §2 + PR-2 gate 修正）：
+        此刻占位者已被 release_session pop，occupant_getter 返回 None，bump-and-restamp
+        无对象可 restamp，于是【全部旧引用出局】。若在 release 之前 bump（会取到待删的
+        当前占位者并把它 restamp 成新纪元），pipeline 跨多秒 LLM await 持有的那个正是
+        这个占位者引用，其后续 save 携新印章反被放行 = 复活已删记忆——正是 F3/BLOCKER-1
+        要关的洞。真删除类操作里，占位者要被丢弃，绝不能 restamp。随后 submit 一个
+        kind="delete" 复合 op：记忆三键（经 _impl）+ 非记忆键（原 _cleanup_kv_for_session
+        的职责折进来）+ kernel .alpha.json 文件 scrub（红队 must-fix 第 4 条复活臂）+
+        sylanne_v2core_domains 侧车键（红队 MINOR-3：reconsolidation overlay legacy 键含
+        原始记忆 TEXT，普通会话删除此前漏删，明文残留）。fire-and-forget（本方法是同步
+        回调，不 await），异常经 done_callback 消费掉，避免 "Future exception was never
+        retrieved" 噪音（详见 _on_memory_system_evicted 同款模式的 MINOR-1 注释）。
         """
         p = self._p
-        memory_system = p._store.memory_systems.get(session_key)
-        has_content = False
-        if memory_system is not None:
-            has_content_fn = getattr(p, "_memory_system_has_content", None)
-            try:
-                has_content = (
-                    bool(has_content_fn(memory_system))
-                    if callable(has_content_fn)
-                    else True
-                )
-            except Exception:
-                has_content = True
-        # 在 release_session 的 pop 之前捕获引用（pop 之后对象仍存活，串行任务照用）。
-        mem_to_persist = memory_system if has_content else None
-
         p._store.release_session(session_key)
         p._amnesia_sessions.discard(session_key)
+        # bump 在 release 之后：占位者已 pop → occupant=None → 不 restamp → 旧引用全出局。
+        self._throat.bump_epoch(
+            session_key, occupant=self._current_memory_occupant(session_key)
+        )
         # CP8-P3：防抖定时器清理——取消该 session 在 buffer/kernel 防抖队列中的
         # 待触发定时器，避免会话被清理后定时器仍在事件循环中触发。须在
         # release_session 之后调用（hosts.get 会返回 None，防抖任务不执行落盘）。
@@ -1592,56 +1684,36 @@ class StatePersistence:
             except Exception as e:
                 logger.debug(f"Sylanne evolution forget on delete failed: {e}")
 
-        # FIX(F4，合并前对抗闸)：删除路径的"落盘窗口桥接"与 KV 清理必须【串行且清理
-        # 在后】。原来 persist 与 cleanup 是两个无序的 fire-and-forget 任务——persist
-        # 现在还多走守卫 + 备份门若干 await（窗口更长），可能落在 cleanup 的 delete
-        # 之后，把刚删掉的会话记忆键重新写回，导致"已删除会话的记忆复活"（隐私违约）。
-        # 串成一个任务、清理永远最后一步，保证最终态是"已删除"。用只写 KV 的
-        # _persist_memory_kv_only（而非 save_*，后者会把 entry 复活回 _store）。
-        # 【已知局限，Phase-1/MEM-03 单写咽喉解决】若在本任务 persist→cleanup 的毫秒
-        # 窗口内，同一 session 又来消息触发 memory_system_for_session 懒创建 + 排补水，
-        # 补水可能在 cleanup 删键前读到这份待删归档、合并进新活体（删除会话记忆复活）。
-        # 需要 per-session 写序列化才能根治（与备份门并发同属 MEM-03 职责），本阶段仅记录。
-        async def _persist_then_cleanup() -> None:
-            if mem_to_persist is not None:
-                try:
-                    await self._persist_memory_kv_only(session_key, mem_to_persist)
-                except Exception as e:
-                    logger.debug(
-                        f"Sylanne release persist failed for {session_key!r}: {e}"
-                    )
-            await self._cleanup_kv_for_session(session_key)
-
-        safe_ensure_future(
-            _persist_then_cleanup(),
-            name=f"memory_release_persist_cleanup_{session_key}",
-            task_list=getattr(p, "_background_tasks", None),
+        fut = self._throat.submit(
+            session_key,
+            lambda: self._session_deleted_delete_op(session_key),
+            kind="delete",
+            state=None,
         )
+        if fut is not None:
+            fut.add_done_callback(lambda f: f.cancelled() or f.exception())
         logger.debug(f"Sylanne: session resources released for {session_key}")
 
-    async def _cleanup_kv_for_session(self, session_key: str) -> None:
-        """删除 KV 存储中该 session 的所有持久化数据。"""
-        if not self.has_kv_api():
-            return
-        safe = self._safe_session_key(session_key)
-        # 记忆子系统的全部三键（primary/backup_v2/quarantine）统一走规范原语
-        # delete_sylanne_memory_state 清除（FIX F5 根因：各清除路径各自列键必漏），
-        # 本方法只负责补删 kernel / buffer / emotion 等非记忆键。
-        await self.delete_sylanne_memory_state(session_key)
-        keys_to_delete = [
-            f"sylanne_kernel_{safe}",
-            f"sylanne_kernel_{safe}_backup",
-            f"sylanne_buffer_{safe}",
-            f"emotion_state:{safe}",
-        ]
-        delete_fn = getattr(self._p, "delete_kv_data", None)
-        if not delete_fn:
-            return
-        for key in keys_to_delete:
-            try:
-                await delete_fn(key)
-            except Exception:
-                pass
+    async def _session_deleted_delete_op(self, session_key: str) -> None:
+        """`_on_session_deleted` 的复合删除 op——只准经咽喉调用（跑在本 session 的
+        drainer 任务内）。折合原 `_cleanup_kv_for_session` 的非记忆键清理 + 记忆三键
+        删除（经 `_delete_sylanne_memory_state_impl`，非公开壳）+ kernel .alpha.json
+        文件 scrub + `sylanne_v2core_domains` 侧车键，一次性删干净。
+        """
+        await self._delete_sylanne_memory_state_impl(session_key)
+        if self.has_kv_api():
+            safe = self._safe_session_key(session_key)
+            for key in (
+                f"sylanne_kernel_{safe}",
+                f"sylanne_kernel_{safe}_backup",
+                f"sylanne_buffer_{safe}",
+                f"emotion_state:{safe}",
+                # 红队 MINOR-3：普通会话删除此前漏删这个键，reconsolidation overlay
+                # 的 legacy 键含原始记忆 TEXT，留下明文残留。
+                f"sylanne_v2core_domains:{safe}",
+            ):
+                await self._delete_kv_key_with_retry(key)
+        await self._scrub_kernel_alpha_json_memory(session_key)
 
     def has_conversation_manager(self) -> bool:
         """检查 AstrBot ConversationManager 是否可用。"""

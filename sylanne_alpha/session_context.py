@@ -812,21 +812,50 @@ class SessionContext:
         `StatePersistence.hydrate_memory_system` 自己会检查 `_hydrated` 标记，
         重复调度（例如同一 session 短时间内多次懒创建，理论上不该发生但防御一下）
         不会重复合并——第二次进去时活体已经 `_hydrated=True`，直接 no-op 返回。
+
+        MEM-03 PR-2（design §3 臂③ / §8 PR-2 行）：改经单写咽喉提交
+        （kind="hydrate"），不再直接 `safe_ensure_future`。若本次懒创建之后、hydrate
+        真正执行之前该 session 被删（三条删除类壳之一 bump 了纪元），入队时捕获的
+        token 与执行时的当前纪元不再相等，咽喉会把这个陈旧 hydrate op 直接丢弃、
+        不合并那份已经注定被删的归档——闭合 F3 的 hydrate 复活臂。同一 session 的
+        hydrate 与 save/delete 现在共享同一条 FIFO 队列，天然按提交序串行，不再是
+        与其他记忆写路径完全独立、时序不确定的后台任务。
+
+        本方法自身依然不 await（`memory_system_for_session` 冻结同步契约不变）；
+        `throat.submit` 本身就是同步调用，返回的 Future 用 done_callback 消费掉
+        异常/取消（与 `_on_memory_system_evicted` 同款 MINOR-1 模式一致），避免
+        "Future exception was never retrieved" 噪音。若拿不到咽喉实例（旧/测试环境
+        降级），回退到原 fire-and-forget 调度，保持行为不倒退。
         """
         state_persistence = getattr(self._p, "_state_persistence", None)
         hydrate = getattr(state_persistence, "hydrate_memory_system", None)
         if not callable(hydrate):
             return
-        try:
-            from sylanne_alpha.utils import safe_ensure_future
+        throat = getattr(state_persistence, "_throat", None)
+        if throat is None:
+            try:
+                from sylanne_alpha.utils import safe_ensure_future
 
-            safe_ensure_future(
-                hydrate(session_key),
-                name=f"memory_hydrate_{session_key}",
-                task_list=getattr(self._p, "_background_tasks", None),
+                safe_ensure_future(
+                    hydrate(session_key),
+                    name=f"memory_hydrate_{session_key}",
+                    task_list=getattr(self._p, "_background_tasks", None),
+                )
+            except Exception as e:
+                logger.debug(f"Sylanne memory hydration scheduling skipped: {e}")
+            return
+        try:
+            fut = throat.submit(
+                session_key,
+                lambda: hydrate(session_key),
+                kind="hydrate",
+                state=None,
             )
         except Exception as e:
             logger.debug(f"Sylanne memory hydration scheduling skipped: {e}")
+            return
+        if fut is not None:
+            fut.add_done_callback(lambda f: f.cancelled() or f.exception())
 
     def memory_system_has_content(self, memory_system: Any) -> bool:
         """检查记忆系统是否包含有效内容（L1/L2/L3 任一非空）。
