@@ -32,6 +32,9 @@ class _FakePlugin:
         self.kv_call_log: list[tuple[str, str]] = []
         self._session_ctx = SessionContext(self)
         self._state_persistence = StatePersistence(self)
+        # 测试默认模拟"initialize() 的 pending-delete 启动扫描已完成"——生产里 WebUI
+        # load 只发生在 init 之后。需要测 pre-scan fail-closed 的用例显式设回 False。
+        self._state_persistence._pending_delete_scan_done = True
 
     async def get_kv_data(self, key: str, default=None):  # noqa: ANN001
         return self._kv.get(key, default)
@@ -102,10 +105,12 @@ def test_register_before_delete_and_clear_after_normal_delete() -> None:
         release = asyncio.Event()
         original_impl = sp._delete_sylanne_memory_state_impl
 
-        async def paused_impl(session_key: str) -> None:
+        async def paused_impl(session_key: str) -> bool:
             started.set()
             await release.wait()
-            await original_impl(session_key)
+            # PR-4 gate CRITICAL：impl 现在返回是否全删成功，op 壳据此 gate clear——
+            # 包装器必须【转发】返回值，否则 deleted_ok=None(falsy) 会误判成删除失败、不摘 entry。
+            return await original_impl(session_key)
 
         sp._delete_sylanne_memory_state_impl = paused_impl  # type: ignore[method-assign]
 
@@ -464,6 +469,36 @@ def test_load_admits_normally_once_persistent_entry_cleared() -> None:
     asyncio.run(go())
 
 
+def test_load_fail_closed_until_startup_scan_done() -> None:
+    """PR-4 gate（startup-ordering fail-open）：initialize() 的启动扫描【完成之前】，
+    WebUI load 一律不准入 store（只返回游离副本供渲染），防抢跑的读漏检跨重启崩溃
+    残留而复活。扫描完成（空索引 → scan_done=True）后恢复正常准入。
+    """
+
+    async def go() -> None:
+        sk = "sess:pre-scan"
+        kv_key = "sylanne_memory_state:sess:pre-scan"
+        shared_kv: dict = {kv_key: dict(_ARCHIVE_TEMPLATE)}
+        p = _FakePlugin(shared_kv)
+        sp = p._state_persistence
+        sp._pending_delete_scan_done = False  # 模拟 initialize() 尚未跑扫描
+
+        loaded = await sp.load_sylanne_memory_state(sk)
+        assert loaded is not None  # 仍返回对象供渲染
+        assert p._store.memory_systems.get(sk) is None, (
+            "pre-scan 抢跑的 load 把归档准入了 store（startup fail-open 回归）"
+        )
+
+        await sp._scan_pending_deletes()  # 空索引 → 扫描完成
+        assert sp._pending_delete_scan_done is True
+        loaded2 = await sp.load_sylanne_memory_state(sk)
+        assert p._store.memory_systems.get(sk) is loaded2, (
+            "扫描完成后 load 仍未恢复正常准入"
+        )
+
+    asyncio.run(go())
+
+
 # ===========================================================================
 # 5. 全局锁：并发 register 不丢更新
 # ===========================================================================
@@ -583,5 +618,42 @@ def test_without_lock_counterfactual_reproduces_lost_update() -> None:
         # in-process 镜像本身不丢（synchronous 赋值不涉及 await）——丢的只是这次
         # KV 落盘快照的完整性，这正是本卡片强调"全局锁保护的是持久化一致性"。
         assert "sess:race-b" in sp._pending_delete_mirror
+
+    asyncio.run(go())
+
+
+def test_delete_kv_failure_keeps_pending_delete_entry_no_resurrection() -> None:
+    """PR-4 gate CRITICAL 回归：删除时 KV delete 瞬时故障（`_delete_kv_key_with_retry`
+    fail-safe 不抛、归档幸存），删除 op 必须【保留】pending-delete entry 而【不】无条件
+    摘除——否则 `_has_unresolved_pending_delete` 变 False、hydrate/load 继续把非空归档
+    复活。这修的是"一次瞬时 KV 删除故障就复活已删/已 wipe 记忆"的红线洞。
+    """
+
+    async def go() -> None:
+        shared_kv: dict = {}
+        p = _FakePlugin(shared_kv)
+        sp = p._state_persistence
+        sk = "sess:del-fail"
+        kv_key = sp.sylanne_memory_kv_key(sk)
+
+        mem = p._memory_system_for_session(sk)
+        mem._hydrated = True
+        mem.write_summary(text="待删记忆", source_turns=1, session_key=sk)
+        await sp.save_sylanne_memory_state(sk, mem)
+        assert shared_kv[kv_key]["l1"]
+
+        # 让 delete_kv_data 瞬时故障（一直抛）——put 仍正常（register/索引写不受影响）。
+        async def failing_delete(key: str) -> None:
+            raise RuntimeError("transient KV delete outage")
+
+        p.delete_kv_data = failing_delete  # type: ignore[method-assign]
+
+        await sp.delete_sylanne_memory_state(sk)
+
+        # 归档没删掉（delete 全故障），entry 必须保留 → 仍算 pending → hydrate/load fail-closed。
+        assert shared_kv.get(kv_key, {}).get("l1"), "归档应仍在（delete 故障未删掉）"
+        assert sp._has_unresolved_pending_delete(sk), (
+            "删除失败却摘掉了 pending-delete entry → hydrate/load 会复活已删记忆（CRITICAL 回归）"
+        )
 
     asyncio.run(go())
