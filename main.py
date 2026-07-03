@@ -2482,6 +2482,18 @@ class EmotionalStatePlugin(Star):
                 throat.bind_loop(asyncio.get_running_loop())
         except Exception as e:
             logger.debug(f"Sylanne memory throat loop bind skipped: {e}")
+        # MEM-03 PR-4：启动扫描跨重启 pending-delete 索引——完成/驳回上一次进程运行
+        # 遗留的删除意图残留（primary 已空则补完；primary 非空绝不重放，交管理员），
+        # 并把未决 entry 载入进程内镜像供本次运行期间 hydrate/load-admit 消费
+        # （见 state_persistence.py::_scan_pending_deletes）。须在 bind_loop 之后、
+        # 任何用户消息/WebUI 请求之前跑；扫描本身失败不应阻断插件其余初始化。
+        try:
+            sp = getattr(self, "_state_persistence", None)
+            scan_fn = getattr(sp, "_scan_pending_deletes", None) if sp is not None else None
+            if callable(scan_fn):
+                await scan_fn()
+        except Exception as e:
+            logger.debug(f"Sylanne memory pending-delete scan skipped: {e}")
         # 恢复 LifeSim 持久化状态（修复历史「重启丢作息」缺陷）——KV 读为异步，故在此 await
         try:
             life_sim = getattr(self, "_life_simulator", None)
