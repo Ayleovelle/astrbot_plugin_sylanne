@@ -663,6 +663,10 @@ async def start_webui_server(plugin: Any, host: str = "127.0.0.1", port: int = 2
                 mem_sys._l3_nodes.clear()
                 mem_sys._l3_edges.clear()
                 mem_sys._tick = 0
+                # FIX(F2，完整性复审)：显式擦除必须置 _hydrated=True，否则懒创建时排的
+                # 后台补水任务会把尚未删除的 KV 旧档合并回活体，令 meltdown 被自己的
+                # 补水复活（详见 webui_routes 同名注释）。
+                mem_sys._hydrated = True
         hosts = getattr(current_plugin, "_hosts", {}) or {}
         if session in hosts:
             hosts[session].kernel.body.memory["traces"] = []
@@ -792,6 +796,9 @@ async def start_webui_server(plugin: Any, host: str = "127.0.0.1", port: int = 2
             mem_sys._l3_nodes.clear()
             mem_sys._l3_edges.clear()
             mem_sys._tick = 0
+            # FIX(F1，完整性复审)：同 meltdown——置 _hydrated=True 阻断懒创建补水任务
+            # 把刚清空的记忆从 KV 旧档复活回活体再被周期 save 写回。
+            mem_sys._hydrated = True
             purged.append("memory_system")
 
         # Remove host instance
@@ -2291,6 +2298,9 @@ def start_webui_thread_server(
                                 mem_sys._l3_nodes.clear()
                                 mem_sys._l3_edges.clear()
                                 mem_sys._tick = 0
+                                # FIX(F2，完整性复审)：置 _hydrated=True 阻断补水复活
+                                # （详见 webui_routes meltdown 同名注释）。
+                                mem_sys._hydrated = True
                         hosts = getattr(current_plugin, "_hosts", {}) or {}
                         if session in hosts:
                             hosts[session].kernel.body.memory["traces"] = []

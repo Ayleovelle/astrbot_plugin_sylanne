@@ -810,3 +810,50 @@ def test_delete_memory_state_purges_all_three_keys() -> None:
         assert q_key not in shared_kv, "规范原语漏删 quarantine（purge_data 端点会泄漏）"
 
     asyncio.run(go())
+
+
+def test_explicit_wipe_latch_prevents_hydration_resurrection() -> None:
+    """FIX F1/F2（完整性复审 gate 现场复现）：显式擦除（meltdown/purge_data）清空活体
+    后必须置 _hydrated=True，否则懒创建时排的后台补水任务会在 handler 后续 await 期间、
+    从【尚未删除】的 KV 旧档把记忆合并回活体，随后周期 save 又写回 KV——擦除被自己的
+    补水复活。本测试按真实 handler 时序复现：懒创建(排补水)→清空+置hydrated→跑补水
+    （此刻 KV 旧档仍在）→活体仍空→删 KV→周期 save 不复活。
+    """
+    shared_kv: dict = {}
+    kv_key = "sylanne_memory_state:sess:wipe"
+
+    async def seed() -> None:
+        p0 = _FakePlugin(shared_kv)
+        mem = p0._memory_system_for_session("sess:wipe")
+        mem.write_summary(
+            text="待擦除记忆", source_turns=2, temperature=0.4, session_key="sess:wipe"
+        )
+        await p0._state_persistence.save_sylanne_memory_state("sess:wipe", mem)
+
+    asyncio.run(seed())
+    assert shared_kv[kv_key]["l1"]
+
+    async def go() -> None:
+        p = _FakePlugin(shared_kv)
+        # 擦除一个 not-loaded session：懒创建空活体 + 排后台补水任务。
+        mem = p._memory_system_for_session("sess:wipe")
+        assert mem._hydrated is False
+        # 模拟擦除 handler：清空 + 置 _hydrated=True（F1/F2 latch）。
+        mem._l1.clear()
+        mem._l2.clear()
+        mem._l3_nodes.clear()
+        mem._l3_edges.clear()
+        mem._tick = 0
+        mem._hydrated = True
+        # 跑补水任务——此刻 KV 旧档【仍在】（真实 handler 先 await 删别的键，记忆键最后删）。
+        # 无 latch 时补水会读到旧档并合并回活体；有 latch 则顶部 _hydrated 检查直接放弃。
+        await _drain_background_tasks(p)
+        assert not p._memory_system_has_content(mem), "补水把已擦除记忆复活回活体（F1 回归）"
+
+        # 之后才删记忆 KV 键。
+        await p._state_persistence.delete_sylanne_memory_state("sess:wipe")
+        # 再来一次周期 save：活体已空且 hydrated，写回的是空档，不复活内容。
+        await p._state_persistence.save_sylanne_memory_state("sess:wipe", mem)
+        assert not shared_kv.get(kv_key, {}).get("l1"), "擦除后 save 把归档复活了（F1 回归）"
+
+    asyncio.run(go())

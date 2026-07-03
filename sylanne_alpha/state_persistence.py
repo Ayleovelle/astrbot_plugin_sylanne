@@ -1365,13 +1365,20 @@ class StatePersistence:
                 exc_info=True,
             )
             return
+        combined_quarantine: list[dict[str, Any]] = []
         if quarantined_raw:
-            combined = [
+            combined_quarantine += [
                 {"layer": "legacy_record", "raw": r, "error": ""}
                 for r in quarantined_raw
             ]
+        # FIX(F4)：把 merge_kv_archive 本次摘除的坏记录也一并落 quarantine 侧车，
+        # 与 load_sylanne_memory_state 路径的 quarantine 语义对齐（不再静默湮灭）。
+        merge_q = getattr(live, "_last_merge_quarantine", None)
+        if merge_q:
+            combined_quarantine += merge_q
+        if combined_quarantine:
             safe_ensure_future(
-                self._persist_memory_quarantine(session_key, combined),
+                self._persist_memory_quarantine(session_key, combined_quarantine),
                 name=f"memory_hydrate_quarantine_{session_key}",
                 task_list=getattr(self._p, "_background_tasks", None),
             )
@@ -1522,6 +1529,10 @@ class StatePersistence:
         # 之后，把刚删掉的会话记忆键重新写回，导致"已删除会话的记忆复活"（隐私违约）。
         # 串成一个任务、清理永远最后一步，保证最终态是"已删除"。用只写 KV 的
         # _persist_memory_kv_only（而非 save_*，后者会把 entry 复活回 _store）。
+        # 【已知局限，Phase-1/MEM-03 单写咽喉解决】若在本任务 persist→cleanup 的毫秒
+        # 窗口内，同一 session 又来消息触发 memory_system_for_session 懒创建 + 排补水，
+        # 补水可能在 cleanup 删键前读到这份待删归档、合并进新活体（删除会话记忆复活）。
+        # 需要 per-session 写序列化才能根治（与备份门并发同属 MEM-03 职责），本阶段仅记录。
         async def _persist_then_cleanup() -> None:
             if mem_to_persist is not None:
                 try:

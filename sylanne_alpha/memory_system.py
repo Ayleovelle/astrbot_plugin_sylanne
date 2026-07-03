@@ -3211,30 +3211,45 @@ class MemorySystem:
         if not isinstance(data, dict):
             return
 
-        def _safe_items(cls: Any, raw: Any) -> list[Any]:
+        # FIX(F4，完整性复审)：hydrate-merge 路径此前对解析失败的记录静默 continue
+        # 丢弃，与 _restore_from_data 的 quarantine 语义不一致——一条 text 完好但缺必需
+        # 键的记录会在聊天恢复路径被永久湮灭且无审计副本。这里逐条收进 merge_quarantine，
+        # 由调用方（hydrate_memory_system）落 quarantine 侧车 KV，与 load 路径对齐。
+        merge_quarantine: list[dict[str, Any]] = []
+
+        def _safe_items(cls: Any, raw: Any, layer: str) -> list[Any]:
             out: list[Any] = []
             for d in raw or []:
                 if not isinstance(d, dict):
+                    merge_quarantine.append(
+                        {"layer": layer, "raw": d, "error": "not_a_dict"}
+                    )
                     continue
                 try:
                     out.append(cls.from_dict(d))
-                except Exception:
-                    continue
+                except Exception as e:  # noqa: BLE001 — 逐条隔离并留痕
+                    merge_quarantine.append({"layer": layer, "raw": d, "error": repr(e)})
             return out
 
-        kv_l1 = _safe_items(MemoryItem, data.get("l1"))
-        kv_l2 = _safe_items(MemoryItem, data.get("l2"))
+        kv_l1 = _safe_items(MemoryItem, data.get("l1"), "l1")
+        kv_l2 = _safe_items(MemoryItem, data.get("l2"), "l2")
         raw_l3_nodes = data.get("l3_nodes")
         kv_l3_nodes: dict[str, GraphNode] = {}
         if isinstance(raw_l3_nodes, dict):
             for nid, nd in raw_l3_nodes.items():
                 if not isinstance(nd, dict):
+                    merge_quarantine.append(
+                        {"layer": "l3_nodes", "raw": nd, "error": "not_a_dict"}
+                    )
                     continue
                 try:
                     kv_l3_nodes[str(nid)] = GraphNode.from_dict(nd)
-                except Exception:
+                except Exception as e:  # noqa: BLE001
+                    merge_quarantine.append(
+                        {"layer": "l3_nodes", "raw": nd, "error": repr(e)}
+                    )
                     continue
-        kv_l3_edges = _safe_items(GraphEdge, data.get("l3_edges"))
+        kv_l3_edges = _safe_items(GraphEdge, data.get("l3_edges"), "l3_edges")
 
         merged_l1 = self._merge_items_by_id(list(self._l1), kv_l1)
         merged_l2 = self._merge_items_by_id(self._l2, kv_l2)
@@ -3287,6 +3302,10 @@ class MemorySystem:
             self._pending_followups = self._pending_followups[
                 -self._PENDING_FOLLOWUP_CAP :
             ]
+
+        # FIX(F4)：本次 merge 摘除的坏记录留给调用方落 quarantine 侧车（每次 merge 覆盖，
+        # 只反映当次；hydrate_memory_system 会读取并持久化）。
+        self._last_merge_quarantine = merge_quarantine
 
         logging.getLogger("astrbot_plugin_sylanne").info(
             "Sylanne memory hydrate-merge: l1=%d l2=%d l3_nodes=%d l3_edges=%d "

@@ -1369,6 +1369,12 @@ class WebUIRoutes:
             mem_sys._l3_nodes.clear()
             mem_sys._l3_edges.clear()
             mem_sys._tick = 0
+            # FIX(F1，完整性复审)：与 meltdown 同理——显式擦除必须把 _hydrated 置 True，
+            # 否则 _memory_system_for_session 懒创建时排的后台补水任务会在本 handler 的
+            # 后续 await 期间跑起来、从尚未删除的 KV 旧档把刚清空的记忆合并回活体，随后
+            # 一次周期 save 又把它写回 KV——显式清除被自己的补水复活。置 True 让补水的
+            # 二次 _hydrated 检查放弃合并。
+            mem_sys._hydrated = True
             purged.append("memory_system")
 
         # Remove host instance
