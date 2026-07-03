@@ -113,6 +113,26 @@ class TestScrubLeavesNormalTurnsByteIdentical:
         assert n == 0
         assert out is None
 
+    def test_non_dict_entries_mixed_in_pass_through_untouched(self) -> None:
+        """防御性纵深：contexts 里混入非 dict 条目（str/None/int）时，扫描逻辑
+        对每个元素先做 `isinstance(m, dict)` 判断（见 scrub_proactive_template_
+        turns 的 if 条件），不满足直接落入 else 分支原样 append——不应因为这些
+        意外类型抛异常，也不应把它们判定为命中。"""
+        contexts = [
+            "just a string, not a dict",
+            None,
+            42,
+            {"role": "user", "content": _TEMPLATE_TEXT},
+            {"role": "assistant", "content": "在的呀"},
+        ]
+        out, n = scrub_proactive_template_turns(contexts)
+        assert n == 1
+        assert out[0] == "just a string, not a dict"
+        assert out[1] is None
+        assert out[2] == 42
+        assert out[3]["content"] == _PROACTIVE_TEMPLATE_PLACEHOLDER
+        assert out[4] == {"role": "assistant", "content": "在的呀"}
+
 
 class TestScrubRoleGating:
     def test_assistant_role_with_matching_text_not_touched(self) -> None:

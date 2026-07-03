@@ -54,6 +54,12 @@ llm_response_pipeline.py::_append_bot_reply_buffer 的 docstring）。
   5. round-2 MINOR 修复回归锁：末条历史若是框架追加的尾随 CheckpointMessageSegment
      （role="_checkpoint"），守卫应扫过它找到真正的最后一条 assistant 消息来比较，
      而不是被 history[-1] 的 checkpoint 记录挡住导致漏检真实重复。
+  6. round-4 adjudicated 修复回归锁：history 字段本身是损坏的 JSON 字符串（或
+     解析结果不是 list）时，_extract_conv_history_list 必须 fail-closed 返回
+     None，_do_sync_to_conv_mgr 必须整体跳过本次同步（绝不调用
+     update_conversation）——旧实现遇到这种情况会静默退化成 `[]`，调用方随后
+     append 新消息再整体写回，等价于用只含一条新消息的历史覆盖写回，把损坏
+     之外原本可能仍然完好的历史数据一并摧毁。
 """
 
 from __future__ import annotations
@@ -485,3 +491,112 @@ async def test_idempotence_guard_skips_trailing_checkpoint_segment() -> None:
         "tool_calls 与 checkpoint 尾巴），不追加出连续两条 assistant 记录"
     )
     assert conv_mgr.update_calls == [], "命中幂等守卫时不应再调用 update_conversation"
+
+
+# ===========================================================================
+# round-4 adjudicated：history 字段损坏时必须 fail-closed 整体跳过同步
+# ===========================================================================
+
+
+class _CorruptedHistoryConvMgr:
+    """get_conversation() 返回损坏 JSON 字符串形态 history 的桩。
+
+    用于验证 _extract_conv_history_list 遇到无法解析的 history 时 fail-closed
+    返回 None，且 _do_sync_to_conv_mgr 整体放弃本次同步——不能退化成"当作空
+    历史处理，append 新消息后整体写回"，那样等于用只含新消息的历史覆盖写回，
+    静默摧毁损坏之外原本可能仍完好的历史数据。update_conversation 一旦被调用
+    即代表 fail-closed 没生效。
+    """
+
+    def __init__(self, corrupted_history: str) -> None:
+        self._content: dict[str, list] = {}
+        self._curr_ids: dict[str, str] = {}
+        self._next_id = 1
+        self._corrupted_history = corrupted_history
+        self.update_calls: list[list[dict]] = []
+
+    async def get_curr_conversation_id(self, uid: str) -> str | None:
+        return self._curr_ids.get(uid)
+
+    async def new_conversation(self, uid: str) -> str:
+        cid = f"conv_{self._next_id}"
+        self._next_id += 1
+        self._curr_ids[uid] = cid
+        self._content[cid] = []
+        return cid
+
+    async def get_conversation(self, uid: str, cid: str):
+        if cid not in self._content:
+            return None
+        return SimpleNamespace(history=self._corrupted_history)
+
+    async def update_conversation(self, uid, cid, history=None, title=None):
+        self.update_calls.append(history)
+        if history is not None:
+            self._content[cid] = history
+
+
+@pytest.mark.asyncio
+async def test_corrupted_json_history_skips_sync_never_calls_update() -> None:
+    """回归 round-4 adjudicated finding①：history 字段是无法 json.loads 的损坏
+    字符串时，同步必须整体跳过——不能调用 update_conversation 用只含新消息的
+    重建历史覆盖写回。"""
+    conv_mgr = _CorruptedHistoryConvMgr("{not valid json, corrupted]")
+
+    class _Plugin:
+        def __init__(self) -> None:
+            self._conv_mgr = conv_mgr
+            self._store = SessionStateStore()
+
+    p = _Plugin()
+    sp = StatePersistence(p)  # type: ignore[arg-type]
+
+    await sp.sync_message_to_conv_mgr("u1", "user", "新消息")
+
+    assert conv_mgr.update_calls == [], (
+        "history JSON 损坏时必须 fail-closed 跳过整次同步，不能调用 "
+        "update_conversation"
+    )
+
+
+@pytest.mark.asyncio
+async def test_non_list_json_history_skips_sync_never_calls_update() -> None:
+    """回归 round-4 adjudicated finding①的第二种损坏形状：history 字段是合法
+    JSON 但解析结果不是 list（例如被写坏成一个 dict）——同样必须 fail-closed
+    跳过，不能当作空历史处理再覆盖写回。"""
+    conv_mgr = _CorruptedHistoryConvMgr(json.dumps({"not": "a list"}))
+
+    class _Plugin:
+        def __init__(self) -> None:
+            self._conv_mgr = conv_mgr
+            self._store = SessionStateStore()
+
+    p = _Plugin()
+    sp = StatePersistence(p)  # type: ignore[arg-type]
+
+    await sp.sync_message_to_conv_mgr("u1", "bot", "新回复")
+
+    assert conv_mgr.update_calls == [], (
+        "history 解析结果不是 list 时同样必须 fail-closed，不能调用 "
+        "update_conversation"
+    )
+
+
+def test_extract_conv_history_list_returns_none_on_corruption() -> None:
+    """直接钉死 _extract_conv_history_list 的返回值契约：损坏输入 → None，
+    合法的空历史（None / 空字符串）仍然 → []，不能一刀切都返回 []。"""
+    from sylanne_alpha.state_persistence import StatePersistence as _SP
+
+    assert _SP._extract_conv_history_list(None) == []
+    assert _SP._extract_conv_history_list(SimpleNamespace(history=None)) == []
+    assert _SP._extract_conv_history_list(SimpleNamespace(history="")) == []
+    assert _SP._extract_conv_history_list(SimpleNamespace(history="   ")) == []
+    assert _SP._extract_conv_history_list(SimpleNamespace(history=[1, 2])) == [1, 2]
+
+    # 损坏形状：一律 None，绝不能悄悄退化成 []
+    assert _SP._extract_conv_history_list(SimpleNamespace(history="{bad json")) is None
+    assert (
+        _SP._extract_conv_history_list(SimpleNamespace(history=json.dumps({"a": 1})))
+        is None
+    )
+    assert _SP._extract_conv_history_list(SimpleNamespace(history=42)) is None

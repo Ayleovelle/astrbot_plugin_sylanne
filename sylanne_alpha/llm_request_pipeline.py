@@ -269,7 +269,9 @@ def _ctx_leading_text(content: Any) -> str:
     if isinstance(content, list):
         for block in content:
             if isinstance(block, dict) and block.get("type") == "text":
-                return str(block.get("text", ""))
+                # .get("text") or "" ——键存在但值为 None 时 .get("text", "") 会
+                # 返回 None，str(None) == "None" 混进比较字符串，污染签名匹配。
+                return str(block.get("text") or "")
     return ""
 
 

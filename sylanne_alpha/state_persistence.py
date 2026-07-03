@@ -1096,7 +1096,7 @@ class StatePersistence:
             await self._do_sync_to_conv_mgr(conv_mgr, umo, role, text)
 
     @staticmethod
-    def _extract_conv_history_list(conversation: Any) -> list:
+    def _extract_conv_history_list(conversation: Any) -> list | None:
         """把 conv_mgr.get_conversation() 返回对象的 history 字段规整成 list。
 
         真实 AstrBot ConversationManager.get_conversation() 返回的是从内部
@@ -1105,6 +1105,16 @@ class StatePersistence:
         `history=json.dumps(conv_v2.content or [])`，不是 list。对着一个字符串
         直接 `list(...)` 会把它拆成单字符列表，写回时把整段历史污染成字符垃圾。
         这里显式区分字符串 / list / None 三种可能形状。
+
+        fail-closed（round-4 adjudicated 修复）：JSON 解析失败、解析结果不是
+        list、或者 history 字段本身是既非 str 又非 list 的意外类型，一律返回
+        None——这些都是"数据损坏，无法安全判断真实历史长啥样"，绝不能当成
+        "空历史"处理。旧实现在这些分支统一返回 `[]`，调用方
+        `_do_sync_to_conv_mgr` 会在这个"看似合法的空列表"后面 append 本次新
+        消息再整体写回，等价于用只含一条新消息的历史覆盖写回，把损坏之外原本
+        可能仍然完好的历史数据一并静默摧毁。真正合法的"没有历史"（conversation
+        为 None、history 字段为 None、history 是空/纯空白字符串）不受影响，
+        仍然返回 `[]`。
         """
         if conversation is None:
             return []
@@ -1117,11 +1127,11 @@ class StatePersistence:
             try:
                 parsed = json.loads(raw)
             except (TypeError, ValueError):
-                return []
-            return list(parsed) if isinstance(parsed, list) else []
+                return None
+            return list(parsed) if isinstance(parsed, list) else None
         if isinstance(raw, list):
             return list(raw)
-        return []
+        return None
 
     @staticmethod
     def _history_entry_signature(entry: Any) -> tuple[str, str] | None:
@@ -1145,7 +1155,9 @@ class StatePersistence:
         content = entry.get("content")
         if isinstance(content, list):
             content_str = "".join(
-                str(part.get("text", ""))
+                # .get("text") or "" ——键存在但值为 None 时 .get("text", "")
+                # 会返回 None，str(None) == "None" 混进签名字符串，污染幂等比较。
+                str(part.get("text") or "")
                 for part in content
                 if isinstance(part, dict) and "text" in part
             )
@@ -1226,6 +1238,19 @@ class StatePersistence:
 
             conversation = await conv_mgr.get_conversation(umo, curr_cid)
             history = self._extract_conv_history_list(conversation)
+            if history is None:
+                # round-4 adjudicated fail-closed：history 字段损坏（JSON 解析
+                # 失败 / 解析结果不是 list / 意外类型），无法安全判断真实历史
+                # 长啥样。整体放弃本次同步——绝不能用只含这一条新消息的重建
+                # 历史去覆盖写回，那样会把损坏之外原本可能仍然完好的历史数据
+                # 也一并静默摧毁。宁可这一条消息暂时不同步，也不能丢历史。
+                logger.debug(
+                    "Sylanne conv-sync 跳过：umo=%s 的 history 字段无法安全解析"
+                    "（疑似损坏），fail-closed 放弃本次同步以避免覆盖写摧毁"
+                    "已存储历史",
+                    umo,
+                )
+                return
             # fix/context-integrity round-2 MAJOR② / round-3 纠偏：幂等守卫（第二道
             # 防线）。round-2 曾以为第一道防线（llm_response_pipeline.py 非拦截分支的
             # skip_conv_sync）已经让【本方法只会在拦截/分段发送分支被调用】、且那条
