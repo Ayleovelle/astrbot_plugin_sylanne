@@ -507,8 +507,12 @@ def test_nonempty_unhydrated_refused_not_just_empty() -> None:
 
     async def go() -> None:
         p = _FakePlugin(shared_kv)
-        mem = p._memory_system_for_session("sess:partial2")  # 空、未补水、已排补水
-        # 补水跑完前往活体写一条新内容 → 非空但仍未补水。
+        # 直接构造未补水非空活体（不经 accessor，不排补水任务）——隔离守卫行为。
+        # 注：MEM-03 咽喉把 save 放进 drainer op（会 yield），若经 accessor 建 mem 则
+        # 挂起的补水任务可能在 save op 验守卫前抢先补水，结果写出 archive∪零星（无损超集，
+        # 不是 == archive）。那是竞态时序产物、两种赛果都无损；本测试专验守卫拒写这一支，
+        # 故直接建 mem 令其确定性。
+        mem = MemorySystem()
         mem.write_summary(
             text="补水前的零星新内容",
             source_turns=1,
@@ -518,12 +522,11 @@ def test_nonempty_unhydrated_refused_not_just_empty() -> None:
         assert mem._hydrated is False
         assert p._memory_system_has_content(mem) is True  # 非空
 
-        # 未 drain（补水没跑）→ 此刻 save：旧代码 is_empty=False 会穿过守卫覆盖；新代码拒绝。
+        # save：旧代码 is_empty=False 会穿过守卫覆盖；新代码（未补水 + KV 有内容）拒绝。
         await p._state_persistence.save_sylanne_memory_state("sess:partial2", mem)
         assert shared_kv[kv_key] == archive, (
             "非空未补水活体覆盖了完整归档（FIX B 回归）"
         )
-        await _drain_background_tasks(p)  # 清理挂起的补水任务
 
     asyncio.run(go())
 
@@ -855,5 +858,68 @@ def test_explicit_wipe_latch_prevents_hydration_resurrection() -> None:
         # 再来一次周期 save：活体已空且 hydrated，写回的是空档，不复活内容。
         await p._state_persistence.save_sylanne_memory_state("sess:wipe", mem)
         assert not shared_kv.get(kv_key, {}).get("l1"), "擦除后 save 把归档复活了（F1 回归）"
+
+    asyncio.run(go())
+
+
+# ===========================================================================
+# MEM-03 PR-1：单写咽喉根治 F2 备份门 TOCTOU —— 集成回归
+# ===========================================================================
+
+
+def test_throat_serializes_concurrent_v3_first_writes_f2() -> None:
+    """MEM-03 PR-1（F2 根治）：同 session 两条并发 v3 首写经咽喉串行——备份门的
+    read-check-write 不再交错，v2 备份恰写一次且 CRC 自洽、内容=原始旧档（而非某条
+    竞态中间态）。Phase-0 文档化遗留的备份门 TOCTOU 关闭。
+    """
+    shared_kv: dict = {}
+    kv_key = "sylanne_memory_state:sess:f2"
+    backup_key = "sylanne_memory_state_backup_v2:sess:f2"
+
+    async def go() -> None:
+        p = _FakePlugin(shared_kv)
+        # 预置非空 v3 归档，让备份门走"读现档→备份"分支（而非空档早退）。
+        shared_kv[kv_key] = {
+            "version": "3.0.0",
+            "l1": [
+                {
+                    "id": "old",
+                    "text": "旧档",
+                    "weight": 1.0,
+                    "temperature": 0.0,
+                    "age_ticks": 0,
+                    "created_at": 1.0,
+                }
+            ],
+            "l2": [],
+            "l3_nodes": {},
+            "l3_edges": [],
+        }
+
+        def mk(txt: str) -> MemorySystem:
+            m = MemorySystem()
+            m._hydrated = True  # 已补水，守卫放行
+            m.write_summary(
+                text=txt, source_turns=1, temperature=0.1, session_key="sess:f2"
+            )
+            return m
+
+        mem_a, mem_b = mk("A"), mk("B")
+        # 并发两条 save → 咽喉按 session 串行化。
+        await asyncio.gather(
+            p._state_persistence.save_sylanne_memory_state("sess:f2", mem_a),
+            p._state_persistence.save_sylanne_memory_state("sess:f2", mem_b),
+        )
+
+        # 备份恰写一次（第二条 save 的门 step-1 见备份已存在→不重写）。
+        backup_puts = [
+            k for (op, k) in p.kv_call_log if op == "put" and k == backup_key
+        ]
+        assert len(backup_puts) == 1, (
+            f"备份门 TOCTOU 未被串行化：v2 备份被写了 {len(backup_puts)} 次"
+        )
+        # 备份 CRC 自洽 + 内容 = 原始旧档。
+        assert p._state_persistence._backup_blob_is_valid(shared_kv[backup_key])
+        assert shared_kv[backup_key]["data"]["l1"][0]["text"] == "旧档"
 
     asyncio.run(go())

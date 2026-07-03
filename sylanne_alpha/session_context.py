@@ -796,6 +796,13 @@ class SessionContext:
             cfg = getattr(self._p, "config", None) or {}
             recall_mode = cfg.get("sylanne_alpha_recall_mode") or None
             systems.set(session_key, MemorySystem(recall_mode=recall_mode))
+            # MEM-03 PR-1：懒创建即盖化身印章（同步、无 await，不破坏本 accessor 的
+            # 冻结同步契约）。PR-1 惰性（纪元恒 0，印章恒 0）；PR-2 删除臂 bump 后即生效
+            # ——让"删除后新建的活体"带新纪元、旧引用携旧印章被咽喉验章丢弃。
+            sp = getattr(self._p, "_state_persistence", None)
+            throat = getattr(sp, "_throat", None) if sp is not None else None
+            if throat is not None:
+                throat.stamp(systems.get(session_key), session_key)
             self._schedule_memory_hydration(session_key)
         return systems.get(session_key)
 

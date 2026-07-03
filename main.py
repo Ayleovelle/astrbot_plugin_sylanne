@@ -2473,6 +2473,15 @@ class EmotionalStatePlugin(Star):
 
     async def initialize(self) -> None:
         """AstrBot 插件生命周期钩子：加载后调用（有 running loop，不依赖用户消息）。"""
+        # MEM-03 PR-1：把记忆写入咽喉权威绑定到本 running loop——此后 off-loop（stdlib
+        # WebUI 工作线程）提交经 call_soon_threadsafe 转入本 loop 串行执行，不再静默丢弃。
+        try:
+            sp = getattr(self, "_state_persistence", None)
+            throat = getattr(sp, "_throat", None) if sp is not None else None
+            if throat is not None:
+                throat.bind_loop(asyncio.get_running_loop())
+        except Exception as e:
+            logger.debug(f"Sylanne memory throat loop bind skipped: {e}")
         # 恢复 LifeSim 持久化状态（修复历史「重启丢作息」缺陷）——KV 读为异步，故在此 await
         try:
             life_sim = getattr(self, "_life_simulator", None)
