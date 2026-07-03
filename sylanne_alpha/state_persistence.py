@@ -14,9 +14,11 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import time
 import zlib
 from typing import TYPE_CHECKING, Any
 
+from sylanne_alpha.memory_migration_spine import MEMORY_KV_KEYS_MANIFEST
 from sylanne_alpha.utils import safe_ensure_future
 
 if TYPE_CHECKING:
@@ -24,6 +26,10 @@ if TYPE_CHECKING:
     from .protocols import PluginHost
 
 logger = logging.getLogger("astrbot_plugin_sylanne")
+
+# MEM-03 PR-4：单键全局跨重启 pending-delete 索引的 KV 键——不属于任何单一
+# session（详见 memory_migration_spine.MEMORY_KV_KEYS_MANIFEST 里的注释）。
+PENDING_DELETE_INDEX_KV_KEY: str = MEMORY_KV_KEYS_MANIFEST["pending_delete_index"]
 
 # ---------------------------------------------------------------------------
 # 增量持久化 dirty-flag 机制（Item 12）
@@ -198,6 +204,17 @@ class StatePersistence:
         from .memory_write_throat import MemoryWriteThroat
 
         self._throat = MemoryWriteThroat(occupant_getter=self._current_memory_occupant)
+        # MEM-03 PR-4：跨重启 pending-delete 持久索引——进程内镜像（键=safe session
+        # key）+ 全局锁（单键 KV，被所有 per-session drainer 并发改动，锁保护
+        # "镜像镜像快照→整体落盘"这段临界区，防丢更新，见 §4/红队 must-fix）。
+        # `asyncio.Lock()` 在 py>=3.10 无需 running loop 即可构造，此处在 __init__
+        # （无 loop）里创建是安全的。
+        self._pending_delete_mirror: dict[str, dict] = {}
+        self._pending_delete_lock: asyncio.Lock = asyncio.Lock()
+        # PR-4 gate（startup-ordering fail-open）：镜像由 initialize() 的
+        # _scan_pending_deletes 载入；扫描完成前为空。在此之前 WebUI load 一律不准入
+        # store（只返回游离副本渲染），防抢跑的读把崩溃残留的删除意图漏检、复活归档。
+        self._pending_delete_scan_done: bool = False
 
     def _current_memory_occupant(self, session_key: str) -> Any:
         """返回某 session 在 store 里当前占位的 MemorySystem（占位者权威兜底用）。"""
@@ -1201,6 +1218,271 @@ class StatePersistence:
                 f"Sylanne memory quarantine persist failed for {session_key!r}: {e}"
             )
 
+    # ------------------------------------------------------------------
+    # MEM-03 PR-4：跨重启 pending-delete 持久索引
+    # ------------------------------------------------------------------
+    #
+    # 设计 §4 + 红队 must-fix：进程内咽喉的 `_epochs`/`has_pending_delete` 只在
+    # 本次进程运行期间有效——若进程在 delete/purge op 跑到一半时崩溃（或有界
+    # 重试耗尽、或 drainer 被取消），残留的 KV 键连同"这个 session 正在被删"
+    # 这条信号会一起随进程消失，重启后一次 WebUI 读（hydrate/load-admit）可能
+    # 把还没删干净的归档重新当作合法内容对待。这里补一个**持久化**的单键全局
+    # 索引：delete-class op 提交执行时先登记（register）、全部键删 + scrub 都
+    # 成功之后才摘除（clear）；`initialize()` 里的 `_scan_pending_deletes` 在
+    # 每次启动时把索引里的未决 entry 载入本节的进程内镜像，让 hydrate/admit
+    # 对这些 session 继续 fail-closed，直到扫描把它们解决掉或管理员手动 purge。
+    #
+    # 硬性红线（务必不要在后续修改里踩）：
+    #   - 【绝不】在 save 路径调用 `_clear_pending_delete`——那是"证据销毁"洞：
+    #     一次复活后的 save 会把"这里曾经请求过一次 wipe"的唯一记录抹掉。
+    #     entry 只能由 (a) 对应 delete/purge op 跑完全部步骤、(b) 启动扫描确认
+    #     primary 已空后补完删除、(c) 管理员 purge 决断 三种方式摘除。
+    #   - 索引是【单个全局键】，被【每 session 一个】的 drainer 并发改动——所有
+    #     改动必须经 `self._pending_delete_lock` 串行，否则并发 register/clear
+    #     的"镜像快照→整体落盘"会互相踩踏丢更新（见
+    #     tests/test_mem_phase1_pr4_pending_delete_index.py 的锁竞态回归）。
+    #   - register/clear 本身只是普通 KV 读写，【绝不】经 `self._throat.submit`
+    #     ——它们被 delete-class op 自身在其执行体内部调用（跑在 per-session
+    #     drainer 任务里），反过来 submit 同一 session 队列会命中
+    #     re-entrancy 断言（永久停摆）。
+
+    async def _persist_pending_delete_index_locked(self) -> None:
+        """把当前 `self._pending_delete_mirror` 整体写回索引 KV。
+
+        调用方必须已经持有 `self._pending_delete_lock`——本方法自身不加锁
+        （`asyncio.Lock` 不可重入，调用方与本方法重复加锁会死锁）。用进程内
+        镜像整体覆盖写，而不是"读现有 KV blob→合并→写回"：镜像本身已经是
+        在锁保护下维护的权威状态，直接整体落盘既避免了一次多余的 KV 读，也
+        避免了"读到的 KV 快照与当前镜像不一致"这另一类 TOCTOU。
+
+        Fail-safe：KV 写失败只记 warning，绝不向上抛出——不能让索引记账失败
+        中断调用方所在的 delete/purge op 的其余步骤。进程内镜像已经是最新
+        状态，本进程内的 fail-closed 判定不受影响；只有"跨重启"这一层保护
+        会打折扣（这次落盘失败、进程恰好又崩溃，则这条 entry 在下次启动的
+        索引里不可见）——这与本索引本身"尽力而为的跨重启防护"定位一致，
+        不是本次改动新增的数据丢失风险。
+        """
+        put_fn = getattr(self._p, "put_kv_data", None)
+        if not callable(put_fn):
+            return
+        blob = {"version": 1, "entries": dict(self._pending_delete_mirror)}
+        try:
+            await put_fn(PENDING_DELETE_INDEX_KV_KEY, blob)
+        except Exception as e:
+            logger.warning(
+                "Sylanne memory pending-delete index KV persist failed (in-process "
+                f"mirror still updated; cross-restart protection degraded for this "
+                f"entry until next successful persist): {e}"
+            )
+
+    async def _register_pending_delete_safe(self, safe: str, epoch: int) -> None:
+        """按已经安全化的 key 登记（scan 只知道 safe，不知道原始 session_key）。"""
+        async with self._pending_delete_lock:
+            self._pending_delete_mirror[safe] = {"epoch": epoch, "ts": time.time()}
+            await self._persist_pending_delete_index_locked()
+
+    async def _clear_pending_delete_safe(self, safe: str) -> None:
+        """按已经安全化的 key 摘除（scan 只知道 safe，不知道原始 session_key）。"""
+        async with self._pending_delete_lock:
+            self._pending_delete_mirror.pop(safe, None)
+            await self._persist_pending_delete_index_locked()
+
+    async def _register_pending_delete(self, session_key: str, epoch: int) -> None:
+        """delete-class op 的【首步】——登记本 session 的跨重启 pending-delete
+        entry（进程内镜像 + 持久化索引 KV 双写，全局锁串行）。必须在任何记忆键
+        删除动作之前调用，见各 op（`_delete_sylanne_memory_state_op` /
+        `_purge_session_after_meltdown_impl` / `_session_deleted_delete_op`）
+        开头的调用点。
+        """
+        await self._register_pending_delete_safe(self._safe_session_key(session_key), epoch)
+
+    async def _clear_pending_delete(self, session_key: str) -> None:
+        """delete-class op 的【末步】——仅在该 op 的全部记忆键删除 + kernel 文件
+        scrub（以及 purge/session-delete 各自的非记忆键清理）都跑完之后才调用。
+        【绝不】在 save 路径调用——见本节顶部"证据销毁"红线。
+        """
+        await self._clear_pending_delete_safe(self._safe_session_key(session_key))
+
+    def _has_unresolved_pending_delete(self, session_key: str) -> bool:
+        """PR-4 红队 must-fix 核心闸门：判定某 session 是否存在【任一来源】的
+        未决删除信号——
+
+          - 进程内咽喉 `throat.has_pending_delete`：本进程本次运行期间提交、
+            排队中或正在执行的 delete/purge op（PR-3 已有，覆盖"进程没重启"
+            场景）。
+          - 持久索引镜像 `self._pending_delete_mirror`：跨重启信号——本进程
+            启动时 `_scan_pending_deletes` 从 KV 索引载入的、上一次运行遗留
+            且尚未被扫描解决（primary 非空，交管理员）或本次扫描期间正在
+            处理的未决 entry。
+
+        命中任一个都判定为未决——hydrate（`hydrate_memory_system`）与 load
+        准入（`_load_admit_ok`）都用它做 fail-closed 门禁：宁可这次读到的
+        内容只用来临时展示/暂不合并，也不能把一份可能仍在被删、或已经被
+        崩溃中断删除的归档重新当作活体的合法内容用。
+        """
+        if self._throat.has_pending_delete(session_key):
+            return True
+        return self._safe_session_key(session_key) in self._pending_delete_mirror
+
+    async def _scan_pending_deletes(self) -> None:
+        """PR-4 启动扫描——由 `main.py initialize()` 在绑定咽喉 loop 之后调用
+        （有 running loop，早于任何用户消息/WebUI 请求）。读取全局 pending-delete
+        索引，对每条未决 entry 做出决断。
+
+        **绝不盲重放**是本方法存在的意义：一次失败重试耗尽/进程崩溃，KV 里
+        可能残留一条"删除意图"记录，但如果直接无脑重放"删掉这个 session 的
+        记忆"，会把"回滚到 Phase-0 期间、用户在这段时间产生的合法新记忆，
+        再次升级后重新看到这条陈旧 entry"这种情况下的新数据一起摧毁——这正
+        是本卡片的头号红线（design §7 回滚地板 + 本卡片 HARD CONSTRAINTS）。
+
+        两条分支：
+          - primary 键**缺失或为空**——delete 显然已经开始执行（至少清空/
+            删掉了主键，只是没跑完剩下的步骤就中断了），视为"崩溃在删除
+            中途"：补完 backup_v2/quarantine 两个侧车键 + kernel 文件 scrub
+            （复用 `_delete_sylanne_memory_state_impl`，它对已经不存在的键
+            重复删除是幂等的），成功后摘除索引 entry。
+          - primary 键**非空**——**绝不重放**。保留 entry、记 error 日志，
+            并把它载入进程内镜像，让本进程后续对这个 session 的 hydrate/
+            load-admit 继续 fail-closed，交管理员经 admin purge 决断（design
+            §9："诚实遗留"，不在启动扫描里自动决断歧义 entry）。
+
+        本方法只处理【记忆三键】（primary/v2_backup/quarantine）+ kernel 文件
+        scrub——索引本身是记忆子系统专属的残留检测，非记忆键（kernel/buffer/
+        emotion/v2core_domains 等）的崩溃残留不在本索引追踪范围内：those 残留
+        按设计文档 §9"诚实遗留"处理（admin inspect 可见、手动 purge 补删），
+        不在启动扫描里盲目扩大清理范围到本索引从未记录过的键——宁可留有非
+        记忆键残留，也不错删本不该删的会话状态（例如一次单纯的 WebUI
+        /api/purge_data 记忆清除，从未打算清掉 kernel/人格状态）。
+
+        读索引本身失败（KV 抖动）——整体放弃本次扫描（下次重启再试），不假设
+        "读失败=无残留"。单条 entry 的 primary 读失败同样保守处理为"不确定"
+        分支（保留 + fail-closed），绝不能把读异常误判成"缺失"从而误触发
+        补删/重放。
+
+        已知局限（诚实标注）：索引/镜像只按 `_safe_session_key` 的输出建索引
+        （register/clear 的调用方知道原始 session_key，但 KV 索引本身、以及
+        本方法从 KV 读出来的 entries，都只有 safe key）。本方法对"缺失/空"
+        分支调用 `_delete_sylanne_memory_state_impl(safe)`——safe 本身没有
+        '/' 或 '\\' 时（AstrBot 常见 session_key 用 ':' 分隔，不含这两个字符）
+        与传入原始 session_key 完全等价；理论上若原始 session_key 恰好含有
+        这两个字符，`_scrub_kernel_alpha_json_memory` 内部按 safe 去查
+        `self._p._host()` 可能查不到真正对应的 host（kernel 文件 scrub 这一
+        步会静默 no-op），但三个记忆 KV 键的生成本身对 safe 输入是幂等的，
+        删除仍然正确——这是 safe-key 方案本身既有的边界情况，非本 PR 引入。
+
+        实现细节（自我审查踩中的一个真实排序坑，记录下来防止后续修改踩回去）：
+        本方法【先】把索引里全部 entry 原样批量载入 `self._pending_delete_mirror`
+        （一次性、在锁下，见下方第一段 `async with`），【然后】才逐条决断
+        finish/keep。不能反过来"边遍历边决定要不要 clear"——若还没轮到的
+        entry C 此刻还不在镜像里，而排在它前面的 entry B 恰好被 finish 后调
+        `_clear_pending_delete_safe`（会把【当前镜像快照】整体重新落盘 KV），
+        这次落盘会用一份【还没包含 C】的镜像覆盖 KV，C 的持久 entry 就在这次
+        扫描过程中被意外抹掉——即便 C 最终会在稍后的循环里被正确判定为"非空
+        primary，需要保留"并写回镜像，那也只是进程内镜像正确，KV 上的持久
+        记录已经在中途丢了一拍，若进程恰好在那之后崩溃，C 的证据就没了。先
+        整体载入再逐条 finish，保证任何一次 clear 触发的整体快照落盘都已经
+        包含了全部尚未处理的 entry。
+        """
+        get_fn = getattr(self._p, "get_kv_data", None)
+        if not callable(get_fn):
+            # 无 KV API = 无持久索引可扫、无跨重启残留可能——放行 load-admit（无风险）。
+            self._pending_delete_scan_done = True
+            return
+        try:
+            blob = await get_fn(PENDING_DELETE_INDEX_KV_KEY, None)
+        except Exception as e:
+            logger.error(
+                "Sylanne memory pending-delete scan: index read failed, aborting "
+                f"scan (will retry next restart): {e}"
+            )
+            # 索引读失败：scan_done 保持 False → load-admit 继续 fail-closed（WebUI 只读
+            # 渲染仍可用），绝不因读不到索引就 fail-open 准入。
+            return
+        if not isinstance(blob, dict):
+            self._pending_delete_scan_done = True  # 索引不存在/损坏=无未决残留，放行 load-admit
+            return
+        raw_entries = blob.get("entries")
+        if not isinstance(raw_entries, dict) or not raw_entries:
+            self._pending_delete_scan_done = True  # 空索引=无未决残留，放行
+            return
+
+        valid_entries: dict[str, dict] = {}
+        for safe, meta in raw_entries.items():
+            if not isinstance(safe, str) or not isinstance(meta, dict):
+                continue
+            try:
+                epoch = int(meta.get("epoch", 0))
+            except (TypeError, ValueError):
+                epoch = 0
+            try:
+                ts = float(meta.get("ts", 0.0))
+            except (TypeError, ValueError):
+                ts = 0.0
+            valid_entries[safe] = {"epoch": epoch, "ts": ts}
+        if not valid_entries:
+            self._pending_delete_scan_done = True  # 无有效 entry，放行
+            return
+
+        # 先整体载入镜像（不落盘——KV 里已经是这份内容，原样镜像不算改动），
+        # 再逐条决断，避免上面文档段落说明的排序坑。
+        async with self._pending_delete_lock:
+            self._pending_delete_mirror.update(valid_entries)
+        # 镜像已载入全部未决 entry——【此处】放行 load-admit（在此之前一律 fail-closed）。
+        # 必须在镜像载入【之后】、且不能提前到"读到 blob 就放行"（那样镜像还没填、有
+        # await 窗口会 fail-open）。resolve 循环对每条 finish/keep 不再改变"哪些 session
+        # 未决"的判定面（keep 保留、finish 删完清 entry），故放在循环之前即安全。
+        self._pending_delete_scan_done = True
+
+        for safe in list(valid_entries.keys()):
+            try:
+                primary = await get_fn(self.sylanne_memory_kv_key(safe), None)
+            except Exception as e:
+                logger.error(
+                    "Sylanne memory pending-delete scan: primary read failed for "
+                    f"{safe!r}, keeping entry fail-closed (admin must resolve via "
+                    f"purge): {e}"
+                )
+                continue  # 已在镜像里（上面批量载入），保持不动即可。
+
+            if _kv_archive_has_content(primary):
+                logger.error(
+                    "Sylanne memory pending-delete scan: primary key for "
+                    f"{safe!r} is NON-EMPTY — refusing to replay delete intent "
+                    "(a rolled-back build may have written legitimate new data "
+                    "in the meantime); entry kept, admin must resolve via purge"
+                )
+                continue  # 同上：绝不重放，保留在镜像里，不摘索引。
+
+            logger.warning(
+                "Sylanne memory pending-delete scan: primary key for "
+                f"{safe!r} missing/empty — finishing crash-interrupted delete "
+                "(backup_v2/quarantine + kernel-file scrub)"
+            )
+            try:
+                finished_ok = await self._delete_sylanne_memory_state_impl(safe)
+            except Exception as e:
+                logger.error(
+                    "Sylanne memory pending-delete scan: finishing delete for "
+                    f"{safe!r} raised, keeping entry for retry on next restart: {e}"
+                )
+                continue  # 补删抛异常——保留在镜像里（已批量载入），下次重启再试。
+
+            # PR-4 gate CRITICAL：impl fail-safe 不抛，补删失败也会正常返回 False——只有
+            # 全删成功才摘 entry，否则保留交下次重启重试（旧版无条件 clear 会在补删失败时
+            # 摘掉 entry、残留幸存 = 复活/泄漏，且那个 except 分支形同虚设）。
+            if finished_ok:
+                await self._clear_pending_delete_safe(safe)
+            else:
+                logger.error(
+                    "Sylanne memory pending-delete scan: finishing delete for "
+                    f"{safe!r} incomplete (KV delete/scrub failed), keeping entry for "
+                    "retry on next restart / admin purge"
+                )
+
+        # 扫描正常跑完（含空索引/无残留）——镜像已载入全部未决 entry，放行 load-admit
+        # （在此之前一律 fail-closed，防抢跑的 WebUI load 漏检崩溃残留而复活）。
+        self._pending_delete_scan_done = True
+
     def _load_admit_ok(self, session_key: str, token: int) -> bool:
         """MEM-03 PR-3（design §3 臂⑦，红队 MAJOR-3/MAJOR-7 的核心闸门）：判定一次
         `load_sylanne_memory_state` 的 KV/文件回退命中【此刻】是否还可信任——供
@@ -1231,10 +1513,19 @@ class StatePersistence:
 
         两个条件都必须为真才放行；任一为假一律拒绝——fail-closed，宁可这次读到的
         内容只用来临时展示，也不落进 store / 不重新持久化 quarantine。
+
+        MEM-03 PR-4（红队 must-fix）：`has_pending_delete` 只覆盖【本进程本次
+        运行期间】的删除信号——若上一次进程运行中一个 delete/purge 因崩溃/有界
+        重试耗尽而没跑完，KV 里可能残留一条持久化的 pending-delete entry，但
+        本进程重启后全新的咽喉 `_epochs`/队列对此一无所知（`has_pending_delete`
+        会天真地返回 False）。用 `_has_unresolved_pending_delete` 替换原来单独
+        的 `has_pending_delete` 检查——它在此基础上多查一层进程内镜像
+        `self._pending_delete_mirror`（由 `initialize()` 的 `_scan_pending_deletes`
+        载入未决 entry），把"跨重启"这条线也并进同一个 fail-closed 判定。
         """
         if token != self._throat.current_epoch(session_key):
             return False
-        if self._throat.has_pending_delete(session_key):
+        if self._has_unresolved_pending_delete(session_key):
             return False
         return True
 
@@ -1266,6 +1557,15 @@ class StatePersistence:
         全部事情，和它替换掉的原地内联写回等价，只是多了准入判定这一步。
         """
         if not self._load_admit_ok(session_key, token):
+            return state
+        # PR-4 gate（startup-ordering fail-open）：跨重启 pending-delete 镜像由
+        # initialize() 的 _scan_pending_deletes 载入；扫描【完成之前】镜像为空，一次抢跑
+        # 的 WebUI load 会漏检崩溃残留的删除意图、把注定被删的归档【准入 store】= 复活。
+        # 仅 store 准入这条【复活向量】需要这道额外闸门——扫描完成前只返回游离副本供 WebUI
+        # 只读渲染（无副作用、不占位），扫描失败也保持 fail-closed，绝不 fail-open 复活。
+        # （load 内的 quarantine 侧车审计写不经此闸门：它是审计留痕、不是复活源，只受
+        #  `_load_admit_ok` 的 token+has_pending_delete 双条件约束。）
+        if not self._pending_delete_scan_done:
             return state
         self._p._store.memory_systems.set(session_key, state)
         self._p._store.sylanne_memory_cache.set(session_key, state)
@@ -1459,6 +1759,14 @@ class StatePersistence:
         fail-closed 守卫继续挡着，绝不让一次瞬时读失败被当成"归档不存在"而解除保护
         （FIX A：重启清零 bug 的 fail-open 根因）。识别范围经 normalize_memory_blob
         覆盖当前 v2/v3 形状与旧版 SylanneMemoryState（records）格式（FIX F）。
+
+        MEM-03 PR-4（红队 must-fix）：若该 session 存在未决 pending-delete
+        （`_has_unresolved_pending_delete`——本进程内咽喉的 in-flight/排队信号，
+        或跨重启持久索引镜像），拒绝合并——这份 KV 归档可能正在被删、或是上一次
+        进程崩溃时删了一半留下的残局，绝不能把它合并进活体当作合法内容。保持
+        `_hydrated=False`，`_refuse_unhydrated_overwrite` 继续挡住任何后续 save
+        覆盖归档；entry 会由 `_scan_pending_deletes`（下次重启）或管理员 purge
+        解决，绝不由本方法自作主张地推进。
         """
         from .memory_system import MemorySystem
 
@@ -1468,6 +1776,14 @@ class StatePersistence:
         if live is None or not isinstance(live, MemorySystem):
             return
         if getattr(live, "_hydrated", False):
+            return
+        if self._has_unresolved_pending_delete(session_key):
+            logger.debug(
+                f"Sylanne memory hydrate: unresolved pending-delete for "
+                f"{session_key!r} (in-process and/or persistent index) — refusing "
+                "to merge KV archive (fail-closed); leaving un-hydrated so the "
+                "save-side guard keeps protecting the archive until resolved"
+            )
             return
 
         read_ok = True
@@ -1572,21 +1888,27 @@ class StatePersistence:
             f"(format={detected_format})"
         )
 
-    async def _delete_kv_key_with_retry(self, key: str, *, attempts: int = 3) -> None:
+    async def _delete_kv_key_with_retry(self, key: str, *, attempts: int = 3) -> bool:
         """有界重试删除单个 KV 键（≤3 次，`await asyncio.sleep(0)` 退避）。
 
         MEM-03 PR-2（design §4 结论提前落地）：废弃"失败即丢/靠 WAL 事后盲重放"，
         改为一次瞬时删除失败就地重试。fail-safe：重试耗尽只记日志，绝不向上抛出——
         不能让一个键的删除失败中断整个 delete/purge/session-deleted op 的其余步骤。
+
+        PR-4 gate CRITICAL 修复：返回【是否删除成功】。以前无返回值 + fail-safe 不抛，
+        调用方（op 壳 / scan）据此【无条件】摘除 pending-delete 索引 entry——一次瞬时
+        KV 删除故障就会让 entry 被摘、非空归档幸存 = hydrate/load 复活。现在把成败上抛，
+        调用方只在【真删掉了】才 clear entry。True=已删（或无 KV API 无键可删）；
+        False=重试耗尽仍失败。
         """
         delete_fn = getattr(self._p, "delete_kv_data", None)
         if not callable(delete_fn):
-            return
+            return True  # 无 KV API：无键可删，视为成功（不阻塞 entry 摘除）
         last_exc: Exception | None = None
         for attempt in range(attempts):
             try:
                 await delete_fn(key)
-                return
+                return True
             except Exception as e:  # noqa: BLE001 — fail-safe：绝不让删除失败中断 op
                 last_exc = e
                 if attempt < attempts - 1:
@@ -1594,9 +1916,14 @@ class StatePersistence:
         logger.warning(
             f"Sylanne memory delete: {key!r} failed after {attempts} attempts: {last_exc}"
         )
+        return False
 
-    async def _scrub_kernel_alpha_json_memory(self, session_key: str) -> None:
+    async def _scrub_kernel_alpha_json_memory(self, session_key: str) -> bool:
         """清空 kernel 文件（.alpha.json）里的 body.memory['_memory_system'] + traces。
+
+        PR-4 gate CRITICAL：返回是否清扫成功（True=已清或无 host 无残留；False=host
+        在但清扫/落盘失败，.alpha.json 残留可能仍在）——供 _delete_..._impl 汇总，
+        决定是否可安全摘除 pending-delete 索引 entry。
 
         红队 must-fix（第 4 条复活臂）：`load_sylanne_memory_state` 第 5 级回退
         （见该方法 MEM-01 救援段）会绕开 KV / body.memory 白名单，直接读裸
@@ -1612,15 +1939,17 @@ class StatePersistence:
         except Exception:
             pass
         if host is None:
-            return
+            return True  # 无 host = 无 .alpha.json 文件残留可救援，视为已清扫
         try:
             host.kernel.body.memory.pop("_memory_system", None)
             host.kernel.body.memory["traces"] = []
             await asyncio.to_thread(host.runtime.save, host.kernel)
+            return True
         except Exception as e:
             logger.debug(
                 f"Sylanne memory kernel file scrub failed for {session_key!r}: {e}"
             )
+            return False
 
     async def delete_sylanne_memory_state(self, session_key: str) -> None:
         """删除 Sylanne 记忆状态——记忆子系统拥有的【全部三个】KV 键 + 内存缓存。
@@ -1635,9 +1964,9 @@ class StatePersistence:
         PR-1 里栅栏无生产调用方、恒惰性；本方法是三条删除类壳之一，接上后即生效）：
         bump 必须发生在 submit 之前，让"delete 入队后、真正执行前"提交的陈旧血统
         save/hydrate 立即失效，而不是等 delete op 真正跑到才失效——根治 F3（删除后
-        陈旧引用把已删记忆写回）。真逻辑见 `_delete_sylanne_memory_state_impl`，只准
-        经咽喉 op 调用；delete kind 自身豁免验章（定义 bump，幂等，见
-        `MemoryWriteThroat._validate`）。
+        陈旧引用把已删记忆写回）。真逻辑见 `_delete_sylanne_memory_state_op`（PR-4：
+        首尾包裹跨重启 pending-delete 索引 register/clear），只准经咽喉 op 调用；
+        delete kind 自身豁免验章（定义 bump，幂等，见 `MemoryWriteThroat._validate`）。
 
         Args:
             session_key: 会话标识。
@@ -1647,36 +1976,75 @@ class StatePersistence:
         )
         fut = self._throat.submit(
             session_key,
-            lambda: self._delete_sylanne_memory_state_impl(session_key),
+            lambda: self._delete_sylanne_memory_state_op(session_key),
             kind="delete",
             state=None,
         )
         if fut is not None:
             await fut
 
-    async def _delete_sylanne_memory_state_impl(self, session_key: str) -> None:
+    async def _delete_sylanne_memory_state_op(self, session_key: str) -> None:
+        """standalone 删除 op（PR-4）——`delete_sylanne_memory_state` 壳提交的
+        factory 本体。首尾包裹跨重启 pending-delete 索引记账：register（首步）→
+        `_delete_sylanne_memory_state_impl`（三键删除 + kernel 文件 scrub）→
+        clear（末步，仅在全部删除成功跑完之后才摘除 entry——若中途抛异常，
+        clear 这一行不会被执行到，entry 按设计意图【原样保留】，交下次启动的
+        `_scan_pending_deletes` 或管理员 purge 决断）。
+
+        只准经咽喉 op 调用（勿直接 await `_delete_sylanne_memory_state_impl` 再
+        自行 register/clear——那会绕开这里统一的记账时机）。
+        """
+        await self._register_pending_delete(
+            session_key, epoch=self._throat.current_epoch(session_key)
+        )
+        deleted_ok = await self._delete_sylanne_memory_state_impl(session_key)
+        # PR-4 gate CRITICAL：只有记忆三键 + scrub 全删成功才摘除 entry。impl fail-safe
+        # 不抛（一次瞬时 KV 删除故障不异常），故不能无条件 clear——否则 entry 被摘、
+        # 非空归档幸存 = hydrate/load 复活。失败则保留 entry，交下次启动
+        # _scan_pending_deletes / 管理员 purge 重试。
+        if deleted_ok:
+            await self._clear_pending_delete(session_key)
+
+    async def _delete_sylanne_memory_state_impl(self, session_key: str) -> bool:
         """delete 真逻辑——只准经咽喉 op 调用（勿直接 await，会绕过串行化 + 栅栏
         bump 记账）。记忆子系统全部三键，primary-first 顺序
         （primary → backup_v2 → quarantine，design §4 固定顺序），每键有界重试删除；
         并清扫 .alpha.json 里的 _memory_system 救援残留（见下）。
+
+        PR-4 gate CRITICAL 修复：返回 True 【仅当】三键删除 + .alpha.json scrub 全部
+        成功。调用方（三个 op 壳 + _scan_pending_deletes）据此 gate `_clear_pending_delete`：
+        任一失败则 entry【原样保留】——fail-closed，宁可留着索引让下次启动/管理员重试，
+        也绝不在非空归档/残留仍在的情况下摘除保护、让 hydrate/load 把它复活。
+
+        MEM-03 PR-4：本方法【不】做 pending-delete 索引 register/clear——它被
+        三个不同的"逻辑删除单元"共用（standalone 删除 `_delete_sylanne_memory_state_op`
+        / meltdown 后 `_purge_session_after_meltdown_impl` / 会话删除
+        `_session_deleted_delete_op`），后两者在调用本方法之后还有各自的非记忆键
+        清理要做——如果 register/clear 钉在本方法内部，purge/session-delete 会在
+        它们的非记忆键还没删完时就提前摘除索引 entry，让"崩溃发生在非记忆键清理
+        阶段"这类窗口漏检。register/clear 因此上提到三个调用方各自的顶层（首尾
+        包裹整个逻辑删除单元），本方法保持"只删记忆三键 + scrub"的单一职责。
         """
         from .memory_legacy_formats import quarantine_kv_key
 
         self._p._store.sylanne_memory_cache.pop(session_key, None)
         safe = self._safe_session_key(session_key)
+        all_deleted = True
         for key in (
             self.sylanne_memory_kv_key(session_key),
             self.sylanne_memory_backup_v2_kv_key(session_key),
             quarantine_kv_key(safe),
         ):
-            await self._delete_kv_key_with_retry(key)
+            if not await self._delete_kv_key_with_retry(key):
+                all_deleted = False
         # 红队 must-fix（第 4 条复活臂）/ PR-2 gate：.alpha.json 里的 _memory_system 是
         # load 第 5 级救援的读取源，已删会话若留着它会被 WebUI overview salvage 读回、
         # 再周期 save 写回 KV = 删除从未发生。收进本【规范删除原语】——所有清除入口
         # （含 WebUI /api/purge_data 走的独立 delete_sylanne_memory_state 路径，此前只有
         # meltdown / session-delete 两条 op 各自 scrub、漏了 purge_data）自动获得清扫，
         # 不再各自漏一处。host 不存在时 scrub 内部安全早返回。
-        await self._scrub_kernel_alpha_json_memory(session_key)
+        scrub_ok = await self._scrub_kernel_alpha_json_memory(session_key)
+        return all_deleted and scrub_ok
 
     async def purge_session_after_meltdown(self, session_key: str) -> None:
         """记忆清除后同步抹掉专用 KV、kernel KV、域状态 KV 与 v2core 运行时缓存（T1-13）。
@@ -1705,13 +2073,26 @@ class StatePersistence:
         """purge 真逻辑——只准经咽喉 op 调用。
 
         内部调用 `_delete_sylanne_memory_state_impl`（【绝不】调用公开壳
-        `delete_sylanne_memory_state`）：本 op 已经跑在本 session 的 drainer 任务
-        内部，若改调壳，壳会对同一 session 队列再 submit + await，命中
-        `MemoryWriteThroat.submit()` 的 task-identity re-entrancy 断言（立即
-        RuntimeError）——单 drainer 等一个只有自己能完成的 Future 本就是永久停摆，
-        该断言正是为拦这个真实会发生的场景。
+        `delete_sylanne_memory_state`，也【不】调用 `_delete_sylanne_memory_state_op`）：
+        本 op 已经跑在本 session 的 drainer 任务内部，若改调壳，壳会对同一 session
+        队列再 submit + await，命中 `MemoryWriteThroat.submit()` 的 task-identity
+        re-entrancy 断言（立即 RuntimeError）——单 drainer 等一个只有自己能完成的
+        Future 本就是永久停摆，该断言正是为拦这个真实会发生的场景。不调用
+        `_delete_sylanne_memory_state_op` 则是为了避免 PR-4 索引记账被内层再
+        register/clear 一次（见下）。
+
+        MEM-03 PR-4：register/clear 钉在本方法【首尾】，而非内层
+        `_delete_sylanne_memory_state_impl`——本 op 是"记忆三键删除 + kernel/
+        domain 键清理"合成的单一逻辑删除单元，若 register/clear 放在内层，会在
+        三键删完、kernel/domain 键还没删时就提前摘除索引 entry，让"崩溃恰好发生
+        在 kernel/domain 键清理阶段"这个窗口从索引里漏检。clear 只在下面全部步骤
+        无异常跑完后才会被执行到——中途抛异常则 entry 按设计意图原样保留，交
+        `_scan_pending_deletes` 或管理员 purge 决断。
         """
-        await self._delete_sylanne_memory_state_impl(session_key)
+        await self._register_pending_delete(
+            session_key, epoch=self._throat.current_epoch(session_key)
+        )
+        deleted_ok = await self._delete_sylanne_memory_state_impl(session_key)
         delete_fn = getattr(self._p, "delete_kv_data", None)
         if delete_fn and callable(delete_fn) and self.has_kv_api():
             safe = self._safe_session_key(session_key)
@@ -1720,11 +2101,15 @@ class StatePersistence:
                 f"{self.kernel_kv_key(session_key)}_backup",
                 f"sylanne_v2core_domains:{safe}",
             ):
-                await self._delete_kv_key_with_retry(key)
+                await self._delete_kv_key_with_retry(key)  # 非记忆键 best-effort，不 gate entry
         cache = getattr(self._p, "_v2core_runtimes", None)
         if isinstance(cache, dict):
             cache.pop(session_key, None)
         # .alpha.json 清扫已在 _delete_sylanne_memory_state_impl 里做过（规范原语），此处不再重复。
+        # PR-4 gate CRITICAL：仅当记忆三键 + scrub 全删成功才摘 entry（非记忆键 best-effort、
+        # scan 只重试记忆键，故只 gate 记忆 impl）；失败保留 entry 交下次启动/admin。
+        if deleted_ok:
+            await self._clear_pending_delete(session_key)
 
     # ------------------------------------------------------------------
     # AstrBot ConversationManager 集成
@@ -1814,10 +2199,20 @@ class StatePersistence:
     async def _session_deleted_delete_op(self, session_key: str) -> None:
         """`_on_session_deleted` 的复合删除 op——只准经咽喉调用（跑在本 session 的
         drainer 任务内）。折合原 `_cleanup_kv_for_session` 的非记忆键清理 + 记忆三键
-        删除（经 `_delete_sylanne_memory_state_impl`，非公开壳）+ kernel .alpha.json
+        删除（经 `_delete_sylanne_memory_state_impl`，非公开壳，也非
+        `_delete_sylanne_memory_state_op`——原因同 `_purge_session_after_meltdown_impl`
+        的同款注释：避免 PR-4 索引记账被内层重复 register/clear）+ kernel .alpha.json
         文件 scrub + `sylanne_v2core_domains` 侧车键，一次性删干净。
+
+        MEM-03 PR-4：register/clear 钉在本方法【首尾】——本 op 是"记忆三键删除 +
+        kernel/buffer/emotion/domain 非记忆键清理"合成的单一逻辑删除单元，clear
+        只在全部步骤无异常跑完后才会被执行到；中途抛异常则 entry 原样保留，交
+        `_scan_pending_deletes`（下次重启）或管理员 purge 决断。
         """
-        await self._delete_sylanne_memory_state_impl(session_key)
+        await self._register_pending_delete(
+            session_key, epoch=self._throat.current_epoch(session_key)
+        )
+        deleted_ok = await self._delete_sylanne_memory_state_impl(session_key)
         if self.has_kv_api():
             safe = self._safe_session_key(session_key)
             for key in (
@@ -1829,8 +2224,11 @@ class StatePersistence:
                 # 的 legacy 键含原始记忆 TEXT，留下明文残留。
                 f"sylanne_v2core_domains:{safe}",
             ):
-                await self._delete_kv_key_with_retry(key)
+                await self._delete_kv_key_with_retry(key)  # 非记忆键 best-effort，不 gate entry
         # .alpha.json 清扫已在上面的 _delete_sylanne_memory_state_impl 里做过（规范原语），此处不再重复。
+        # PR-4 gate CRITICAL：仅当记忆三键 + scrub 全删成功才摘 entry；失败保留交下次启动/admin。
+        if deleted_ok:
+            await self._clear_pending_delete(session_key)
 
     def has_conversation_manager(self) -> bool:
         """检查 AstrBot ConversationManager 是否可用。"""

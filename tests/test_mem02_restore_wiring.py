@@ -38,6 +38,9 @@ class _FakePlugin:
         # 顺序与 main.py 一致：先 store，再 session_ctx / state_persistence。
         self._session_ctx = SessionContext(self)
         self._state_persistence = StatePersistence(self)
+        # 测试默认模拟"initialize() 的 pending-delete 启动扫描已完成"（生产里 WebUI
+        # load 只发生在 init 之后；PR-4 gate 的 startup-ordering fail-open 保护）。
+        self._state_persistence._pending_delete_scan_done = True
 
     async def get_kv_data(self, key: str, default=None):  # noqa: ANN001
         return self._kv.get(key, default)

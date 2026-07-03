@@ -152,6 +152,13 @@ MEMORY_KV_KEYS_MANIFEST: Final[dict[str, str]] = {
     # 的键名——与本清单里其余"记忆自身格式版本演进"用途不同，见 §3。
     "v2core_migration_target": "sylanne_v2_store_{safe}",
     "v2core_migration_marker": "sylanne_v2_migrated_{safe}",
+    # MEM-03 PR-4 新增：单键全局跨重启 pending-delete 索引（design §4/§9 红队
+    # must-fix）——**不属于任何单一 session**，模板不含 {safe} 占位符（对不含该
+    # 占位符的字符串调用 `.format(safe=...)` 是 no-op，调用方无需特判）。value
+    # 形状为 `{"version": 1, "entries": {safe: {"epoch": int, "ts": float}}}`，
+    # 供进程重启后的 `_scan_pending_deletes` 完成/驳回崩溃中断的删除意图，见
+    # state_persistence.py 同名方法与 `_register_pending_delete`/`_clear_pending_delete`。
+    "pending_delete_index": "sylanne_memory_pending_deletes",
 }
 
 
