@@ -215,6 +215,32 @@ def test_reentrant_submit_from_within_op_raises() -> None:
     asyncio.run(go())
 
 
+def test_drainer_cancellation_resolves_inflight_future() -> None:
+    """MINOR-2：drainer 被取消（关停/reload）时，正在执行的 op Future 被解决（取消）
+    而非永久挂起——否则 save/persist 壳里 await fut 的调用方会一直卡住。
+    """
+    throat = MemoryWriteThroat()
+
+    async def go() -> None:
+        started = asyncio.Event()
+
+        async def slow_op() -> None:
+            started.set()
+            await asyncio.sleep(10)  # 长挂起点，等被取消
+
+        fut = throat.submit("s", slow_op, kind="write")
+        assert fut is not None
+        await started.wait()  # 确保 op 已开始执行
+        drainer = throat._drainers.get("s")
+        assert drainer is not None
+        drainer.cancel()
+        # op Future 必须被解决（取消）；不加 MINOR-2 修复的话这里会永久挂起。
+        with pytest.raises(asyncio.CancelledError):
+            await asyncio.wait_for(fut, timeout=3.0)
+
+    asyncio.run(go())
+
+
 def test_unbound_loop_off_loop_drops_fail_closed() -> None:
     """未绑定 loop 时线程 off-loop 提交 fail-closed 丢弃（等价今日 coro.close()），不炸。"""
     throat = MemoryWriteThroat()  # 未 bind_loop

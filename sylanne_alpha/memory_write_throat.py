@@ -209,7 +209,18 @@ class MemoryWriteThroat:
             )
             return None
         op = _Op(kind, factory, state=state, future=None)
-        loop.call_soon_threadsafe(self._enqueue, session_key, op)
+        try:
+            loop.call_soon_threadsafe(self._enqueue, session_key, op)
+        except RuntimeError:
+            # MINOR-3：is_closed() 与 call_soon_threadsafe 之间 loop 恰好关闭（关停竞态
+            # 窗）——fail-closed 丢弃（等价今日 coro.close()），绝不把异常炸到工作线程。
+            self.dropped_no_loop_count += 1
+            logger.warning(
+                "MemoryWriteThroat: loop closed during off-loop submit, dropping %s op "
+                "for %r (fail-closed)",
+                kind,
+                session_key,
+            )
         return None
 
     def _enqueue(self, session_key: str, op: _Op) -> None:
@@ -257,6 +268,13 @@ class MemoryWriteThroat:
                 result = await op.factory()
                 if op.future is not None and not op.future.done():
                     op.future.set_result(result)
+            except asyncio.CancelledError:
+                # MINOR-2：drainer 被取消（关停/reload 取消 loop 任务）——CancelledError 是
+                # BaseException，不被下面的 except Exception 捕获。先解决当前 op 的 Future
+                # （取消它，让 awaiter 收到 CancelledError 而非永久挂起），再传播取消。
+                if op.future is not None and not op.future.done():
+                    op.future.cancel()
+                raise
             except Exception as e:  # noqa: BLE001 — 逐 op 隔离，绝不杀 drainer
                 logger.error(
                     "MemoryWriteThroat: %s op for %r raised: %s",

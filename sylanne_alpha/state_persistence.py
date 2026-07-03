@@ -240,12 +240,18 @@ class StatePersistence:
         # call_soon_threadsafe 保证真执行。fire-and-forget（驱逐语义本就不等待）。
         from .memory_system import MemorySystem
 
-        self._throat.submit(
+        fut = self._throat.submit(
             session_key,
             lambda: self._persist_memory_kv_only_impl(session_key, memory_system),
             kind="write",
             state=memory_system if isinstance(memory_system, MemorySystem) else None,
         )
+        # MINOR-1：驱逐落盘是 fire-and-forget。on-loop 提交会返回一个无人 await 的 Future；
+        # 若该 op 落盘失败，drainer 会 set_exception，未被检取则触发 asyncio "Future exception
+        # was never retrieved" GC 噪音（错误本身已在 drainer 内 log）。挂个 done 回调消费掉
+        # 异常/取消，消除噪音；off-loop 返回 None 时跳过。
+        if fut is not None:
+            fut.add_done_callback(lambda f: f.cancelled() or f.exception())
 
     async def _persist_memory_kv_only(self, session_key: str, state: Any) -> None:
         """只写 KV，不touch `_store` 的活体引用——专供驱逐/释放场景使用。
