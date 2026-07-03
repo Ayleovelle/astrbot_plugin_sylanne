@@ -255,3 +255,97 @@ def test_unbound_loop_off_loop_drops_fail_closed() -> None:
     t.join()
     assert result["ret"] is None
     assert throat.dropped_no_loop_count == 1
+
+
+# ---------------------------------------------------------------------------
+# MEM-03 PR-3: has_pending_delete
+# ---------------------------------------------------------------------------
+
+
+def test_has_pending_delete_false_when_idle() -> None:
+    """没有任何 delete/purge 排队或在跑——false（基线，防止恒真的退化实现骗过其余测试）。"""
+    throat = MemoryWriteThroat()
+    assert throat.has_pending_delete("s") is False
+
+
+def test_has_pending_delete_true_when_queued() -> None:
+    """delete op 已提交入队、drainer 尚未轮到它执行——has_pending_delete 必须为 true。
+
+    用一个先卡住的 write op 占住 drainer，紧接着再提交一个 delete op：此刻 delete
+    还只是静静地排在队列里（真实场景：正在做别的记忆写的会话，此刻又被删除）。
+    """
+    throat = MemoryWriteThroat()
+
+    async def go() -> None:
+        blocker_started = asyncio.Event()
+        release_blocker = asyncio.Event()
+
+        async def blocker() -> None:
+            blocker_started.set()
+            await release_blocker.wait()
+
+        blocker_fut = throat.submit("s", blocker, kind="write")
+        await blocker_started.wait()
+
+        async def dop() -> None:
+            pass
+
+        delete_fut = throat.submit("s", dop, kind="delete")
+        # delete 已入队但 drainer 还卡在 blocker 里，尚未轮到它。
+        assert throat.has_pending_delete("s") is True
+
+        release_blocker.set()
+        await blocker_fut
+        await delete_fut
+        # delete 已经跑完并自然出队——不再算 pending。
+        assert throat.has_pending_delete("s") is False
+
+    asyncio.run(go())
+
+
+def test_has_pending_delete_true_while_inflight() -> None:
+    """delete op 已经出队、正在 await 其 factory 内部（例如卡在某次 KV 删除中途）——
+    仍要判定为 pending，覆盖"已过验章、真正在跑"这一半程（纯扫队列看不见它）。
+    """
+    throat = MemoryWriteThroat()
+
+    async def go() -> None:
+        started = asyncio.Event()
+        release = asyncio.Event()
+
+        async def dop() -> None:
+            started.set()
+            await release.wait()
+
+        fut = throat.submit("s", dop, kind="delete")
+        await started.wait()
+        # op 已出队、正在它自己的 await 里——只有 in-flight 集合能看见。
+        assert throat.queue_depth("s") == 0
+        assert throat.has_pending_delete("s") is True
+
+        release.set()
+        await fut
+        assert throat.has_pending_delete("s") is False
+
+    asyncio.run(go())
+
+
+def test_has_pending_delete_purge_kind_also_counts() -> None:
+    """kind='purge' 与 'delete' 同等对待——两者都是"会话正在被清除"的信号。"""
+    throat = MemoryWriteThroat()
+
+    async def go() -> None:
+        started = asyncio.Event()
+        release = asyncio.Event()
+
+        async def pop() -> None:
+            started.set()
+            await release.wait()
+
+        fut = throat.submit("s", pop, kind="purge")
+        await started.wait()
+        assert throat.has_pending_delete("s") is True
+        release.set()
+        await fut
+
+    asyncio.run(go())

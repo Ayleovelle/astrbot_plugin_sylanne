@@ -70,6 +70,13 @@ class MemoryWriteThroat:
         # 墓碑被 pop = fail-open（正是要防的事，见设计 §1/§2）。
         self._epochs: dict[str, int] = {}
         self._occupant_getter = occupant_getter
+        # MEM-03 PR-3：正在 drain 循环里执行（已过验章、`await op.factory()` 已发起
+        # 但尚未完成）的 delete/purge op 的 session 集合。补齐 `has_pending_delete` 的
+        # "in-flight" 一半——单靠扫队列只能看见【还没轮到执行】的排队 op，看不见
+        # "已经出队、正在 await 内部 KV 删除"这半程，而 load 的准入栅栏恰恰要在
+        # 这半程也拒绝把新读到的归档写回 store（否则会在 delete 的 KV 清除步骤
+        # 之间，被一次并发 load 抢先把内容重新塞回活体/占位者）。
+        self._inflight_delete: set[str] = set()
         # 可观测计数（暴露到 admin inspect / 日志）。
         self.reject_count = 0
         self.rebuild_count = 0
@@ -264,6 +271,12 @@ class MemoryWriteThroat:
                     op.future.set_result(None)  # 被拒 = 无操作，不是错误
                 q = self._queues.get(session_key)
                 continue
+            # MEM-03 PR-3：delete/purge 即将 await 其 factory——从此刻起标记 in-flight，
+            # 直到 factory 返回/抛出为止（finally 兜底摘除，覆盖正常完成/异常/取消
+            # 三条路径）。让 `has_pending_delete` 在 op 已出队、真正执行期间也能看见它。
+            is_delete_like = op.kind in ("delete", "purge")
+            if is_delete_like:
+                self._inflight_delete.add(session_key)
             try:
                 result = await op.factory()
                 if op.future is not None and not op.future.done():
@@ -285,6 +298,9 @@ class MemoryWriteThroat:
                 )
                 if op.future is not None and not op.future.done():
                     op.future.set_exception(e)
+            finally:
+                if is_delete_like:
+                    self._inflight_delete.discard(session_key)
             q = self._queues.get(session_key)
         # 原子自毁：while 退出时 q 已空，且此后【无 await】——单 loop 语义下 _enqueue
         # 不可能在这两步之间插入，故 pop 是安全的。下一次 submit 会经 _ensure_drainer 重建。
@@ -299,6 +315,26 @@ class MemoryWriteThroat:
     def queue_depth(self, session_key: str) -> int:
         q = self._queues.get(session_key)
         return len(q) if q is not None else 0
+
+    def has_pending_delete(self, session_key: str) -> bool:
+        """MEM-03 PR-3：sync (no-await) read — True iff this session has a
+        delete/purge op either QUEUED (submitted, not yet drained) or IN-FLIGHT
+        (drainer has popped it, past validation, currently `await op.factory()`).
+
+        Load-path admission (`_admit_loaded_state` in state_persistence.py)
+        consumes this alongside a token check: the token check alone catches a
+        bump that happens *during* the load, but `bump_epoch` runs synchronously
+        at delete/purge *submit* time — a delete submitted *before* the load even
+        started already has the epoch bumped by the time the load captures its
+        token, so the token trivially matches and can't see the pending delete on
+        its own. This method covers exactly that gap.
+        """
+        if session_key in self._inflight_delete:
+            return True
+        q = self._queues.get(session_key)
+        if not q:
+            return False
+        return any(op.kind in ("delete", "purge") for op in q)
 
     def stats(self) -> dict[str, int]:
         return {
