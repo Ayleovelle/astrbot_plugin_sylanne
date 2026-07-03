@@ -1,8 +1,12 @@
 """facet E 点名缺陷修复回归测试（3/4/5/6）。
 
 - 3：RPE/novelty importance（重复信息不再因文本长持续拿高分）。
-- 4：rewrite_item 同时遍历 L1/L2（L1 命中不再静默失败）。
-- 5：reconsolidation 三层对称（L1 temperature / L3 emotion_weight 也随心境漂移）。
+- 4：rewrite_item【MEM-09 起整体下线为 no-op】——曾经的破坏性再固化（原地覆盖
+  item.text，无备份、embedding 错配、孤立 v2core 影子层）已废除，本节测试改为
+  钉住"不再修改任何状态"的新契约（回归保护，防止破坏性行为复活）。
+- 5：reconsolidation 三层对称（L1 temperature / L3 emotion_weight 也随心境漂移，
+  这条走的是 _refresh_recall 的情绪漂移，与 rewrite_item 的文本覆盖是两回事，
+  MEM-09 不动它）。
 - 6：ACTIVATION 用 _layer_confidence 取代 _LAYER_WEIGHTS 硬乘（L3 不再被 0.4 重罚）。
 """
 
@@ -60,24 +64,27 @@ def test_novelty_first_memory_no_crash():
 
 
 # ---------------------------------------------------------------------------
-# 4：rewrite_item 覆盖 L1
+# 4：rewrite_item【MEM-09】下线为 no-op —— 不再覆盖 L1/L2 的 item.text
 # ---------------------------------------------------------------------------
 
-def test_rewrite_item_finds_l1():
+def test_rewrite_item_l1_is_noop():
+    """MEM-09：L1 命中也不再被改写——no-op 恒返回 False，text/rewrite_count 不动。"""
     m = _sys()
     item = m.write_summary("原始文本", temperature=0.0)
-    assert m.rewrite_item(item.id, "重写后的文本") is True
-    assert item.text == "重写后的文本"
-    assert item.rewrite_count == 1
+    assert m.rewrite_item(item.id, "重写后的文本") is False
+    assert item.text == "原始文本"
+    assert item.rewrite_count == 0
 
 
-def test_rewrite_item_finds_l2():
+def test_rewrite_item_l2_is_noop():
+    """MEM-09：L2 命中同样是 no-op——原文原样保留。"""
     m = _sys()
     item = m.write_summary("L2 文本", temperature=0.0)
     item.confirmed = True
     m.sink_to_l2([item.id])
-    assert m.rewrite_item(item.id, "L2 重写") is True
-    assert any(it.text == "L2 重写" for it in m._l2)
+    assert m.rewrite_item(item.id, "L2 重写") is False
+    assert all(it.text != "L2 重写" for it in m._l2)
+    assert any(it.text == "L2 文本" for it in m._l2)
 
 
 def test_rewrite_item_missing_returns_false():
@@ -85,19 +92,24 @@ def test_rewrite_item_missing_returns_false():
     assert m.rewrite_item("nonexistent", "x") is False
 
 
-def test_rewrite_item_respects_freeze():
+def test_rewrite_item_noop_even_below_freeze_threshold():
+    """MEM-09：即便 rewrite_count 远低于 REWRITE_FREEZE_AFTER 上限，no-op 仍不改写
+    （回归保护：防止"废除的破坏性再固化"被无意间复活）。"""
     m = _sys()
     item = m.write_summary("文本", temperature=0.0)
-    item.rewrite_count = 20  # REWRITE_FREEZE_AFTER
+    item.rewrite_count = 0
     assert m.rewrite_item(item.id, "新") is False
+    assert item.text == "文本"
+    assert item.rewrite_count == 0
 
 
-def test_rewrite_weight_clamped():
+def test_rewrite_item_does_not_touch_weight():
+    """MEM-09：no-op 不再顺带把 item.weight 抬到 +0.03（旧行为已废除）。"""
     m = _sys()
     item = m.write_summary("文本", temperature=0.0)
-    item.weight = 0.99
+    before = item.weight
     m.rewrite_item(item.id, "新")
-    assert item.weight <= 1.0
+    assert item.weight == before
 
 
 # ---------------------------------------------------------------------------

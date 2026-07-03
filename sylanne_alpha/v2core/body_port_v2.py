@@ -127,6 +127,12 @@ def snapshot_from_surface(
         turns = int(surface.get("turns") or 0)
     except (TypeError, ValueError):   # total 契约：垃圾 surface 不炸（性质测试抓的洞）
         turns = 0
+    try:
+        # 同 turns 契约：epoch 走 extras 注入，'INF'/'NaN' 等垃圾会让 int(float('inf'))
+        # 抛 OverflowError（性质测试 falsifying example: extras={'epoch': 'INF'}）——容错降级到 0。
+        epoch = int(_ext_f(ext, "epoch", 0.0))
+    except (TypeError, ValueError, OverflowError):
+        epoch = 0
     return BodySnapshot(
         session_key=str(surface.get("session_key") or session_key),
         turns=turns,
@@ -147,7 +153,7 @@ def snapshot_from_surface(
         expression_drive=_f(body_cpl, "expression_drive"),
         # 叙事自我
         threshold_drift=_f(body, "nerve", "threshold_drift"),
-        epoch=int(_ext_f(ext, "epoch", 0.0)),
+        epoch=epoch,
         # Wave 3 缺陷行为层信号（SDK 真实路径投影；void_pressure 经 extras 注入）
         void_pressure=_ext_f(ext, "void_pressure", 0.0),
         load=_f(body, "mortality", "load"),

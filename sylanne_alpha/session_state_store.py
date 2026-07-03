@@ -93,6 +93,14 @@ class SessionMap(Generic[V]):
     def clear(self) -> None:
         self._d.clear()
 
+    def set_on_evict(self, callback: Any) -> None:
+        """挂载/替换底层 BoundedDict 的 LRU 驱逐回调（普通 dict 静默忽略——无驱逐语义）。
+
+        回调签名 fn(key, value)，同步调用（由 BoundedDict.__setitem__ 内部触发）。
+        """
+        if hasattr(self._d, "_on_evict"):
+            self._d._on_evict = callback
+
     def __len__(self) -> int:
         return len(self._d)
 

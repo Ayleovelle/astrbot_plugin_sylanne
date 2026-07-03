@@ -14,7 +14,6 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
-import math
 import zlib
 from typing import TYPE_CHECKING, Any
 
@@ -101,6 +100,19 @@ def swap_dirty() -> set[str]:
     return _dirty.swap()
 
 
+def _kv_archive_has_content(data: Any) -> bool:
+    """MEM-02②：判断一份 KV 归档 dict 是否包含非空的记忆内容。
+
+    覆盖新版 MemorySystem 格式（l1/l2/l3_nodes/l3_edges）与旧版
+    SylanneMemoryState 格式（records）——两种都可能出现在存量 KV 数据里。
+    """
+    if not isinstance(data, dict):
+        return False
+    if any(data.get(k) for k in ("l1", "l2", "l3_nodes", "l3_edges")):
+        return True
+    return bool(data.get("records"))
+
+
 # ---------------------------------------------------------------------------
 # Item 73: 端到端加密记忆存储（简化版）
 # ---------------------------------------------------------------------------
@@ -173,6 +185,74 @@ class StatePersistence:
         # 本实例的合并落盘调度，无需调用方持有 StatePersistence 句柄。
         global _active_persistence
         _active_persistence = self
+        # MEM-02③：_store.memory_systems 是 BoundedDict(maxsize=100)，超容量时
+        # LRU 驱逐——驱逐前若无回调，被逐出的会话记忆直接从内存态消失（未落盘的
+        # 最长 9 个 tick 静默丢失），且下次访问该 session 会重建全新空 MemorySystem，
+        # 反过来有覆盖 KV 归档的风险。这里挂 on_evict 做 fire-and-forget 持久化，
+        # 补上这条驱逐链路（BoundedDict 原生支持 on_evict，无需新造机制）。
+        self._wire_memory_eviction_persistence()
+
+    def _wire_memory_eviction_persistence(self) -> None:
+        """把 memory_systems 的 LRU 驱逐接到落盘回调（幂等，可重复调用）。"""
+        store = getattr(self._p, "_store", None)
+        memory_map = getattr(store, "memory_systems", None)
+        set_on_evict = getattr(memory_map, "set_on_evict", None)
+        if callable(set_on_evict):
+            set_on_evict(self._on_memory_system_evicted)
+
+    def _on_memory_system_evicted(self, session_key: str, memory_system: Any) -> None:
+        """memory_systems BoundedDict LRU 驱逐单个 session 条目时的回调。
+
+        同步回调（BoundedDict.__setitem__ 内部触发，不能 await），驱逐前先判断
+        是否有实际内容再决定是否 fire-and-forget 落盘，避免驱逐一堆空对象时
+        制造无意义的 KV 写入。
+        """
+        has_content_fn = getattr(self._p, "_memory_system_has_content", None)
+        try:
+            has_content = (
+                bool(has_content_fn(memory_system)) if callable(has_content_fn) else True
+            )
+        except Exception:
+            has_content = True
+        if not has_content:
+            return
+        safe_ensure_future(
+            self._persist_memory_kv_only(session_key, memory_system),
+            name=f"memory_evict_persist_{session_key}",
+            task_list=getattr(self._p, "_background_tasks", None),
+        )
+
+    async def _persist_memory_kv_only(self, session_key: str, state: Any) -> None:
+        """只写 KV，不touch `_store` 的活体引用——专供驱逐/释放场景使用。
+
+        `save_sylanne_memory_state` 常规路径会顺手把 state 写回
+        `_store.memory_systems` / `sylanne_memory_cache`（保持缓存与 KV 一致，
+        绝大多数调用点需要这个副作用）。但驱逐/release 场景恰恰是"这个对象正在
+        或已经离开活体 store"——如果落盘复用那个方法，会在 pop 之后又把它重新
+        塞回 store，制造出"明明驱逐/release 了、entry 却还在"的假象。这里绕开
+        store 写回，只落 KV，语义更贴合调用现场。
+        """
+        if state is None:
+            return
+        # MEM-02② (FIX E)：驱逐/释放落盘同样是一条真实 KV 写路径。若一个未补水的实例
+        # 在补水任务跑完前就被 LRU 挤出（挤出后挂起的 hydrate 会因活体不在而 no-op），
+        # 用它覆盖非空归档就是那条"驱逐清零"链路——这里套同一个 fail-closed 守卫拦住。
+        if not await self._refuse_unhydrated_overwrite(session_key, state):
+            return
+        kv_key = self.sylanne_memory_kv_key(session_key)
+        put_fn = getattr(self._p, "put_kv_data", None)
+        if put_fn and callable(put_fn):
+            data = state.to_dict() if hasattr(state, "to_dict") else state
+            # MEM-01：与 save_sylanne_memory_state 同一条闸门——驱逐/释放场景也是
+            # 一条真实的 KV 写入路径，不能因为绕开了 store 写回就也绕开备份闸门。
+            if isinstance(data, dict) and data.get("version") == "3.0.0":
+                backup_key = self.sylanne_memory_backup_v2_kv_key(session_key)
+                gate_ok = await self._ensure_v2_backup_before_v3_write(
+                    session_key, kv_key, backup_key
+                )
+                if not gate_ok:
+                    return
+            await put_fn(kv_key, data)
 
     # ------------------------------------------------------------------
     # KV 键生成辅助方法
@@ -235,6 +315,11 @@ class StatePersistence:
         """Sylanne 记忆状态 KV 键。"""
         safe = session_key.replace("/", "_").replace("\\", "_")
         return f"sylanne_memory_state:{safe}"
+
+    def sylanne_memory_backup_v2_kv_key(self, session_key: str) -> str:
+        """MEM-01：v2→v3 首写前备份键（此后只读，永不被覆盖）。"""
+        safe = session_key.replace("/", "_").replace("\\", "_")
+        return f"sylanne_memory_state_backup_v2:{safe}"
 
     # ------------------------------------------------------------------
     # 内部辅助方法
@@ -759,6 +844,85 @@ class StatePersistence:
     # Sylanne 记忆状态
     # ------------------------------------------------------------------
 
+    async def _refuse_unhydrated_overwrite(self, session_key: str, state: Any) -> bool:
+        """MEM-02② fail-closed 守卫：返回 True 表示可以安全落盘 `state`；False 表示
+        本次落盘会覆盖一份尚未合并进活体的非空 KV 归档，应跳过。
+
+        一个 `_hydrated=False` 的 MemorySystem 意味着补水（hydrate_memory_system）
+        还没把 KV 归档合并进来——它的 to_dict()（空、或只含本会话补水前零星写入的
+        几条新内容）一旦写回 KV，就把那份尚未合并的历史抹掉了。所以：
+
+          - 已 `_hydrated`（或不是 MemorySystem）→ 放行（归档已合并 / 不适用）。
+          - 未补水，但成功读到 KV 归档且**为空** → 放行（没有可保护的内容；不在此处
+            翻 `_hydrated`，把该标记的唯一权威留给 hydrate_memory_system，避免与补水
+            任务竞争地设置同一标记）。
+          - 未补水且 KV 归档**非空** → 拒绝（无论活体当前是空还是只有零星内容，都
+            不能盖掉未合并的归档）。
+          - 读 KV 归档时**抛异常** → 拒绝（fail-closed）。绝不把"读失败"当成"归档不
+            存在"——那正是重启清零 bug 的 fail-open 根因。
+        """
+        from .memory_system import MemorySystem
+
+        if not isinstance(state, MemorySystem):
+            return True
+        if getattr(state, "_hydrated", True):
+            return True
+        get_fn = getattr(self._p, "get_kv_data", None)
+        if not callable(get_fn):
+            return True  # 无 KV 读 API——本守卫不适用
+        kv_key = self.sylanne_memory_kv_key(session_key)
+        try:
+            existing = await get_fn(kv_key, None)
+        except Exception as e:
+            logger.warning(
+                "Sylanne memory guard: 读取现有 KV 归档失败，fail-closed 跳过本次落盘 "
+                f"（未补水实例，无法证明归档为空，拒绝覆盖）({session_key!r}): {e}"
+            )
+            return False
+        if _kv_archive_has_content(existing):
+            if not getattr(state, "_empty_write_warned", False):
+                logger.warning(
+                    "Sylanne memory: refused to overwrite non-empty KV archive for "
+                    f"session {session_key!r} with an un-hydrated MemorySystem "
+                    "(hydration still pending/failed); skipping this persist"
+                )
+                try:
+                    state._empty_write_warned = True
+                except Exception:
+                    pass
+            return False
+        return True
+
+    def _backup_blob_is_valid(self, blob: Any) -> bool:
+        """MEM-01 (FIX D)：校验一份既有 v2 备份 blob 是否结构完整且 CRC 自洽。
+
+        备份门 step-1 不能只凭 `backup_key` 存在就放行 v3 写入——一次失败的备份写入
+        可能在 `backup_key` 上留下损坏 blob，若只看"非空"就放行，等于在没有可信备份
+        的情况下继续覆盖旧数据。这里对既有备份重新算 CRC 比对，只有自洽才算数。
+        """
+        if not isinstance(blob, dict) or "data" not in blob or "_crc32" not in blob:
+            return False
+        try:
+            import json as _json
+
+            payload = _json.dumps(
+                blob.get("data"), ensure_ascii=False, sort_keys=True
+            ).encode("utf-8")
+            return (zlib.crc32(payload) & 0xFFFFFFFF) == blob.get("_crc32")
+        except Exception:
+            return False
+
+    async def _delete_kv_best_effort(self, key: str) -> None:
+        """尽力删除一个 KV 键（无删除 API 或删除失败都只 debug 记录，不抛）。"""
+        delete_fn = getattr(self._p, "delete_kv_data", None)
+        if callable(delete_fn):
+            try:
+                await delete_fn(key)
+            except Exception as e:
+                logger.debug(
+                    f"Sylanne memory: best-effort delete of {key!r} failed: {e}"
+                )
+
     async def save_sylanne_memory_state(
         self, session_key: str, state: Any = None
     ) -> None:
@@ -774,6 +938,15 @@ class StatePersistence:
             return
         from .memory_system import MemorySystem
 
+        # MEM-02② (强化 fail-closed)：单点闸门——详见 _refuse_unhydrated_overwrite。
+        # 一个尚未补水（_hydrated=False）的 MemorySystem 还没把 KV 归档合并进来，用它
+        # 的 to_dict()（空、或只含补水前零星新内容）覆盖一份非空归档 = 丢失尚未合并的
+        # 历史。守卫 fail-closed：连"归档是否为空"都读不到（KV 读异常）时也拒绝写入，
+        # 绝不把异常当成"归档不存在"（那正是重启清零的 fail-open 根因）。显式清除
+        # （WebUI meltdown）走 delete_sylanne_memory_state，不经过本方法，不受影响。
+        if not await self._refuse_unhydrated_overwrite(session_key, state):
+            return
+
         self._p._store.sylanne_memory_cache.set(session_key, state)
         if isinstance(state, MemorySystem):
             self._p._store.memory_systems.set(session_key, state)
@@ -781,28 +954,193 @@ class StatePersistence:
         put_fn = getattr(self._p, "put_kv_data", None)
         if put_fn and callable(put_fn):
             data = state.to_dict() if hasattr(state, "to_dict") else state
+            # MEM-01：写入 v3 格式前的一次性备份 + CRC32 校验闸门（write-gate，
+            # 不是"写了就算"）。只在即将写入 v3 且尚未做过这次备份时触发；backup
+            # 验证失败 fail-closed 跳过本次写入，旧数据原样保留在 kv_key 上不动。
+            if isinstance(data, dict) and data.get("version") == "3.0.0":
+                backup_key = self.sylanne_memory_backup_v2_kv_key(session_key)
+                gate_ok = await self._ensure_v2_backup_before_v3_write(
+                    session_key, kv_key, backup_key
+                )
+                if not gate_ok:
+                    return
             await put_fn(kv_key, data)
+
+    async def _ensure_v2_backup_before_v3_write(
+        self, session_key: str, kv_key: str, backup_key: str
+    ) -> bool:
+        """MEM-01：v3 首写前的备份 + CRC32 验证闸门。
+
+        流程：
+          1. backup_key 已存在（此前已经做过备份）——直接放行，backup_key 此后只读，
+             不会被本方法或任何其他路径覆盖。
+          2. kv_key 现有内容为空（全新 session，没有旧数据可备份）——直接放行。
+          3. 否则：读现有 winning KV blob → 算 CRC32 → 写入 backup_key（连同 CRC）→
+             立刻读回 backup_key → 比对 CRC。只有验证通过才放行调用方继续写 v3。
+
+        任何一步读/写异常，或 CRC 校验不一致，一律 fail-closed 返回 False——调用方
+        应放弃本次 v3 写入，宁可这次的新内容暂不落盘，也不能在没有验证过的备份
+        凭据下就先斩后奏地覆盖旧数据。
+
+        【已知局限，Phase-0 不修，留 Phase-1/MEM-03 单写咽喉解决】本方法是无锁的
+        read-check-write，跨多个 await 挂起点。同一 session 若在"首次 v3 写入"这一拍
+        有并发落盘（周期 save + fire-and-forget 驱逐/释放落盘），理论上存在 TOCTOU：
+        后到者 step-1 读到 stale=None、在前者写完 v2 备份后又用 v3 快照覆盖 backup_key，
+        破坏"备份写一次此后只读"的不变量。影响面仅限【回滚快照】——主键 v3 内容不丢、
+        用户在线记忆不受影响，故不构成红线数据丢失；根治需 per-session 写序列化，属
+        MEM-03 单一写咽喉的职责，本阶段仅记录不引入锁（避免热路径加锁的新风险面）。
+
+        Returns:
+            True 表示可以安全继续写入 v3；False 表示应跳过本次写入。
+        """
+        import json as _json
+
+        get_fn = getattr(self._p, "get_kv_data", None)
+        put_fn = getattr(self._p, "put_kv_data", None)
+        if not callable(get_fn) or not callable(put_fn):
+            return True  # 无 KV API（如纯文件回退环境）——本闸门不适用，不阻塞写入
+
+        try:
+            already_backed_up = await get_fn(backup_key, None)
+        except Exception as e:
+            logger.warning(
+                f"Sylanne memory v3 backup: 读取已有备份键失败，fail-closed 跳过 "
+                f"本次写入 ({session_key!r}): {e}"
+            )
+            return False
+        if already_backed_up is not None:
+            # FIX D：不能只凭 backup_key 存在就放行——一次失败的备份写可能在此留下
+            # 损坏 blob，若照放行等于在没有可信备份的情况下继续覆盖旧数据。重新校验
+            # CRC，只有自洽的既有备份才算数；损坏的删掉、往下重新备份（此刻 kv_key
+            # 尚未被 v3 写过、仍是 v2，重新备份快照的正是那份 v2，语义正确）。
+            if self._backup_blob_is_valid(already_backed_up):
+                return True
+            logger.warning(
+                "Sylanne memory v3 backup: 既有备份完整性校验失败（损坏/CRC 不符），"
+                f"删除后重新备份再放行 v3 写入 ({session_key!r})"
+            )
+            await self._delete_kv_best_effort(backup_key)
+
+        try:
+            existing = await get_fn(kv_key, None)
+        except Exception as e:
+            logger.warning(
+                f"Sylanne memory v3 backup: 读取现有 KV 归档失败，fail-closed 跳过 "
+                f"本次写入 ({session_key!r}): {e}"
+            )
+            return False
+        if existing is None:
+            return True  # 没有旧数据可备份
+
+        try:
+            payload_bytes = _json.dumps(
+                existing, ensure_ascii=False, sort_keys=True
+            ).encode("utf-8")
+            checksum = zlib.crc32(payload_bytes) & 0xFFFFFFFF
+            await put_fn(backup_key, {"data": existing, "_crc32": checksum})
+            verify = await get_fn(backup_key, None)
+            if not isinstance(verify, dict):
+                logger.error(
+                    "Sylanne memory v3 backup: 回读备份失败（非 dict），fail-closed "
+                    f"跳过本次 v3 写入 ({session_key!r})"
+                )
+                # FIX D：删掉这次写坏的备份 blob，否则下次 step-1 会把它当"已备份"
+                # 而放行 v3 写入（在没有可信备份下覆盖旧数据）——校验失败必须让
+                # backup_key 回到"没有备份"状态，下次重新完整地备份一遍。
+                await self._delete_kv_best_effort(backup_key)
+                return False
+            verify_bytes = _json.dumps(
+                verify.get("data"), ensure_ascii=False, sort_keys=True
+            ).encode("utf-8")
+            verify_checksum = zlib.crc32(verify_bytes) & 0xFFFFFFFF
+            if verify_checksum != verify.get("_crc32") or verify_checksum != checksum:
+                logger.error(
+                    "Sylanne memory v3 backup: CRC32 校验不一致 "
+                    f"(write={checksum} verify_stored={verify.get('_crc32')} "
+                    f"verify_recomputed={verify_checksum})，fail-closed 跳过本次 "
+                    f"v3 写入 ({session_key!r})，旧数据原样保留"
+                )
+                await self._delete_kv_best_effort(backup_key)  # FIX D：清掉坏备份
+                return False
+        except Exception as e:
+            logger.error(
+                f"Sylanne memory v3 backup: 备份/校验过程异常，fail-closed 跳过 "
+                f"本次写入 ({session_key!r}): {e}",
+                exc_info=True,
+            )
+            await self._delete_kv_best_effort(backup_key)  # FIX D：清掉可能的半写备份
+            return False
+
+        logger.info(
+            f"Sylanne memory: v2→v3 首次写入前备份已验证通过 "
+            f"(session={session_key!r}, backup_key={backup_key!r})"
+        )
+        return True
+
+    async def _persist_memory_quarantine(
+        self, session_key: str, entries: list[dict[str, Any]]
+    ) -> None:
+        """MEM-01：把记忆恢复期间摘除的坏记录写入 quarantine 侧车 KV。
+
+        合并追加而非覆盖（同一 session 多次加载都可能产生新的 quarantine 条目），
+        cap 500 条防止无界增长——quarantine 只是审计留痕，不是主存储。
+        """
+        if not entries:
+            return
+        if not self.has_kv_api():
+            return
+        from .memory_legacy_formats import quarantine_kv_key
+
+        safe = self._safe_session_key(session_key)
+        key = quarantine_kv_key(safe)
+        get_fn = getattr(self._p, "get_kv_data", None)
+        put_fn = getattr(self._p, "put_kv_data", None)
+        if not callable(get_fn) or not callable(put_fn):
+            return
+        try:
+            existing = await get_fn(key, None)
+            existing_list = (
+                existing.get("items", []) if isinstance(existing, dict) else []
+            )
+            if not isinstance(existing_list, list):
+                existing_list = []
+            merged = existing_list + list(entries)
+            merged = merged[-500:]
+            await put_fn(key, {"items": merged, "count": len(merged)})
+        except Exception as e:
+            logger.debug(
+                f"Sylanne memory quarantine persist failed for {session_key!r}: {e}"
+            )
 
     async def load_sylanne_memory_state(
         self, session_key: str, *, now: float = 0.0
     ) -> Any:
-        """加载 Sylanne 记忆状态，支持多级回退和衰减遗忘。
+        """加载 Sylanne 记忆状态，支持多级回退。
 
         查找顺序：
         1. 内存缓存 (_sylanne_memory_cache)
         2. 活跃记忆系统 (_memory_systems)
-        3. KV 存储（支持 MemorySystem 和旧版 SylanneMemoryState 两种格式）
-        4. kernel body.memory 中的持久化数据
+        3. KV 存储（经 memory_legacy_formats.normalize_memory_blob 统一识别：当前
+           v2/v3 MemorySystem 形状，或旧版 SylanneMemoryState「records」格式）
+        4. kernel body.memory 中的持久化数据（若非空）
+        5. MEM-01 救援：绕过 kernel 恢复白名单，直接读裸 .alpha.json 文件本身
 
-        当提供 now 参数时，对旧版格式执行半衰期衰减遗忘。
+        MEM-01：`now` 参数目前保留仅为向后兼容旧调用签名——历史上曾用于对旧版
+        SylanneMemoryState 执行半衰期衰减遗忘，但那条代码路径依赖的
+        `from memory_engine import SylanneMemoryState` 早已因模块归档而恒定
+        ImportError（被 except 静默吞掉，从未真正执行过）。旧格式现在改走
+        `memory_legacy_formats.legacy_state_to_v3_dict` 的一次性迁移读取，不再
+        重放半衰期衰减——这是有意的保守选择：宁可多保留一些旧记录，也不要在
+        "从来没跑通过的历史逻辑"基础上继续演化衰减细节。
 
         Args:
             session_key: 会话标识。
-            now: 当前时间戳，用于衰减计算（0 表示不执行衰减）。
+            now: 保留参数，当前实现不使用（见上）。
 
         Returns:
             记忆状态对象，无数据时返回 None。
         """
+        del now
         from .memory_system import MemorySystem
 
         def has_content(state: Any) -> bool:
@@ -832,73 +1170,95 @@ class StatePersistence:
         # 从 KV 存储加载
         kv_key = self.sylanne_memory_kv_key(session_key)
         get_fn = getattr(self._p, "get_kv_data", None)
-        put_fn = getattr(self._p, "put_kv_data", None)
         if get_fn and callable(get_fn):
             data = await get_fn(kv_key, None)
             if data is not None:
-                # 尝试作为新版 MemorySystem 格式解析
-                if isinstance(data, dict) and {
-                    "l1",
-                    "l2",
-                    "l3_nodes",
-                    "l3_edges",
-                }.issubset(data.keys()):
+                # MEM-01：统一归一化入口——覆盖当前 v2/v3 MemorySystem 形状（原样
+                # 直通）与旧版 SylanneMemoryState 格式（records 结构，替代已死的
+                # `from memory_engine import SylanneMemoryState` import——那个模块
+                # 早已归档到 archive/3x_engines/，旧分支过去必炸 ImportError、被
+                # 静默吞掉，等价于遇到旧格式直接放弃）。
+                from .memory_legacy_formats import normalize_memory_blob
+
+                normalized, quarantined_raw, detected_format = normalize_memory_blob(
+                    data
+                )
+                if normalized is not None:
                     try:
-                        state = MemorySystem.create_from_dict(data)
+                        state = MemorySystem.create_from_dict(normalized)
+                    except Exception as e:
+                        logger.debug(f"Sylanne skip: {e}")
+                        state = None
+                    if state is not None:
+                        combined_quarantine = [
+                            {"layer": "legacy_record", "raw": r, "error": ""}
+                            for r in quarantined_raw
+                        ] + list(getattr(state, "_quarantine", []) or [])
+                        if combined_quarantine:
+                            await self._persist_memory_quarantine(
+                                session_key, combined_quarantine
+                            )
+                        if detected_format == "legacy_sylanne_memory_state":
+                            logger.info(
+                                f"Sylanne memory: session {session_key!r} 从旧版 "
+                                f"SylanneMemoryState 格式迁移读取，l2={len(state._l2)} "
+                                f"条，quarantine={len(combined_quarantine)} 条"
+                            )
                         self._p._store.memory_systems.set(session_key, state)
                         self._p._store.sylanne_memory_cache.set(session_key, state)
                         return state
-                    except Exception as e:
-                        logger.debug(f"Sylanne skip: {e}")
-                # 尝试作为旧版 SylanneMemoryState 格式解析
-                try:
-                    from memory_engine import SylanneMemoryState
-
-                    state = SylanneMemoryState.from_dict(data)
-                    # 执行半衰期衰减遗忘
-                    if now and hasattr(state, "records"):
-                        original_count = len(state.records)
-                        surviving = []
-                        for rec in state.records:
-                            auto_params = getattr(rec, "auto_parameters", None) or {}
-                            half_life = float(
-                                auto_params.get("decay_half_life_seconds", 0)
-                            )
-                            if half_life > 0:
-                                created = getattr(rec, "created_at", 0.0)
-                                elapsed = now - created
-                                # 指数衰减：exp(-ln2 * elapsed / half_life)
-                                decay = math.exp(-0.693 * elapsed / half_life)
-                                effective_depth = getattr(rec, "depth", 0.5) * decay
-                                if effective_depth < 0.01:
-                                    continue  # 衰减到阈值以下，遗忘
-                            surviving.append(rec)
-                        forgotten_count = original_count - len(surviving)
-                        state.records = surviving
-                        # 记录遗忘数量并回写 KV
-                        if forgotten_count > 0:
-                            if hasattr(state, "dynamics") and hasattr(
-                                state.dynamics, "notes"
-                            ):
-                                state.dynamics.notes = f"forgotten={forgotten_count}"
-                            if put_fn and callable(put_fn):
-                                save_data = state.to_dict()
-                                await put_fn(kv_key, save_data)
-                    self._p._store.sylanne_memory_cache.set(session_key, state)
-                    return state
-                except Exception as e:
-                    logger.debug(f"Sylanne skip: {e}")
-        # 最后回退：从 kernel body.memory 中加载
+                elif isinstance(data, dict):
+                    logger.debug(
+                        f"Sylanne memory: session {session_key!r} 的 KV 数据不属于"
+                        "任何已知记忆格式（既非当前 MemorySystem 形状，也非旧版"
+                        "SylanneMemoryState），跳过（既不当作有效数据用，也不当空覆盖）"
+                    )
+        # 回退：从 kernel body.memory 中加载
+        state_from_body = None
         try:
             host = self._p._host(session_key)
             data = host.kernel.body.memory.get("_memory_system")
             if isinstance(data, dict):
-                state = MemorySystem.create_from_dict(data)
-                self._p._store.memory_systems.set(session_key, state)
-                self._p._store.sylanne_memory_cache.set(session_key, state)
-                return state
+                state_from_body = MemorySystem.create_from_dict(data)
+                if getattr(state_from_body, "_quarantine", None):
+                    await self._persist_memory_quarantine(
+                        session_key, list(state_from_body._quarantine)
+                    )
+                self._p._store.memory_systems.set(session_key, state_from_body)
+                self._p._store.sylanne_memory_cache.set(session_key, state_from_body)
+                return state_from_body
         except Exception as e:
             logger.debug(f"Sylanne skip: {e}")
+        # MEM-01 最后回退（row c）：AlphaBodyState.from_dict（sylanne_core/compute/
+        # body.py）恢复 body.memory 时只认 relationship/shadow 两个子键，会把
+        # _memory_system/traces 静默丢弃——上面 host.kernel.body.memory 的读取因此
+        # 在"kernel 已经走过一次 restore/boot"之后几乎总是落空。KV 与 body.memory
+        # 两条路径都没有数据时，绕开 kernel 反序列化，直接读裸 .alpha.json 文件本身
+        # 做最后的救援读取（只读、不改动 body.py 的既有恢复契约）。
+        try:
+            from .memory_legacy_formats import salvage_memory_system_from_alpha_json
+
+            host = self._p._host(session_key)
+            runtime = getattr(host, "runtime", None)
+            path_fn = getattr(runtime, "_path", None) if runtime is not None else None
+            if callable(path_fn):
+                alpha_path = path_fn(session_key)
+                raw_mem_data = salvage_memory_system_from_alpha_json(alpha_path)
+                if isinstance(raw_mem_data, dict):
+                    state = MemorySystem.create_from_dict(raw_mem_data)
+                    if getattr(state, "_quarantine", None):
+                        await self._persist_memory_quarantine(
+                            session_key, list(state._quarantine)
+                        )
+                    self._p._store.memory_systems.set(session_key, state)
+                    self._p._store.sylanne_memory_cache.set(session_key, state)
+                    logger.info(
+                        f"Sylanne memory: session {session_key!r} 从 .alpha.json "
+                        "原始文件救援读取记忆存档（body.memory 白名单丢弃路径的补救）"
+                    )
+                    return state
+        except Exception as e:
+            logger.debug(f"Sylanne memory alpha.json salvage skip: {e}")
         # 返回任何可用的缓存状态（即使为空）
         if cached_state is not None:
             return cached_state
@@ -906,20 +1266,160 @@ class StatePersistence:
             return live_state
         return None
 
+    async def hydrate_memory_system(self, session_key: str) -> None:
+        """MEM-02①：后台补水——把 KV 归档非破坏性地合并进当前活体 MemorySystem。
+
+        由 `SessionContext.memory_system_for_session` 在首次为某 session 创建
+        MemorySystem 时以 fire-and-forget 后台任务调度（该 accessor 是冻结的同步
+        契约，不能改成 async；调 KV 的 get_kv_data 是 async，只能异步补水）。
+
+        与直接调用 `load_sylanne_memory_state`（会把 `_store.memory_systems[key]`
+        整体替换成新对象）不同——这里刻意只读 KV、不碰 store 的对象引用，全程原地
+        合并进已经在 store 里、可能已经被其他并发请求持有引用并写入的那个活体
+        实例，避免"KV 加载出的新对象 replace 掉 store 引用，旧引用的持有者继续写
+        旧对象、最终一次 save 又把刚加载出来的归档盖掉"这条二次归零链路。
+
+        补水【成功读到 KV】后才把 `_hydrated` 翻 True（合并了归档、或确认归档为空）；
+        KV 读【失败】时刻意保持 `_hydrated=False`，让 `save_sylanne_memory_state` 的
+        fail-closed 守卫继续挡着，绝不让一次瞬时读失败被当成"归档不存在"而解除保护
+        （FIX A：重启清零 bug 的 fail-open 根因）。识别范围经 normalize_memory_blob
+        覆盖当前 v2/v3 形状与旧版 SylanneMemoryState（records）格式（FIX F）。
+        """
+        from .memory_system import MemorySystem
+
+        store = getattr(self._p, "_store", None)
+        memory_map = getattr(store, "memory_systems", None) if store is not None else None
+        live = memory_map.get(session_key) if memory_map is not None else None
+        if live is None or not isinstance(live, MemorySystem):
+            return
+        if getattr(live, "_hydrated", False):
+            return
+
+        read_ok = True
+        data: Any = None
+        try:
+            kv_key = self.sylanne_memory_kv_key(session_key)
+            get_fn = getattr(self._p, "get_kv_data", None)
+            if callable(get_fn):
+                data = await get_fn(kv_key, None)
+        except Exception as e:
+            # FIX A：读失败 ≠ 归档不存在。把异常吞成 data=None 再走"空归档→翻
+            # _hydrated"的老路，会让一次瞬时 DB 抖动就解除守卫、复活重启清零。
+            logger.warning(f"Sylanne memory hydrate KV read failed for {session_key!r}: {e}")
+            read_ok = False
+            data = None
+
+        # await 期间该 session 可能已被别的路径显式恢复/清空/替换——重新取一次
+        # 活体引用，且若已经在这段时间内被标记 hydrated（例如 WebUI meltdown
+        # 或并发的另一次补水），直接放弃，不做任何合并，避免把过期数据合并回去。
+        live = memory_map.get(session_key) if memory_map is not None else None
+        if live is None or not isinstance(live, MemorySystem):
+            return
+        if getattr(live, "_hydrated", False):
+            return
+
+        if not read_ok:
+            # FIX A：读失败——刻意【不】翻 _hydrated，让 save 侧 fail-closed 守卫继续
+            # 挡着（空/零星活体不得覆盖可能非空的归档），本次不合并，等下次补水/重启
+            # 重试。宁可这个 session 本进程内暂时读不到历史，也绝不因一次读失败而覆盖。
+            logger.debug(
+                f"Sylanne memory hydrate: KV read failed for {session_key!r}, "
+                "leaving un-hydrated (guard stays active), will retry on restart"
+            )
+            return
+
+        if not _kv_archive_has_content(data):
+            # 读成功且归档确实为空——没什么可保护的，标记为已尝试过，避免后续每次
+            # save 都重复付一次 KV 读代价。
+            live._hydrated = True
+            return
+
+        # FIX F：识别 + 归一化【任何】已知归档形状——不只是内联的 l1/l2/l3 子集，
+        # 还包括旧版 SylanneMemoryState（records 结构）。normalize_memory_blob 是
+        # load_sylanne_memory_state（WebUI 路径）已经在用的同一个统一入口；补水
+        # （聊天恢复路径）此前没接它，导致旧 records 档在聊天路径永远不迁移、不加载
+        # （"开 WebUI 记忆才时有时无"根因之一）。
+        from .memory_legacy_formats import normalize_memory_blob
+
+        normalized, quarantined_raw, detected_format = normalize_memory_blob(data)
+        if normalized is None:
+            # 被 _kv_archive_has_content 判为有内容、但 normalize 认不出的真·未知格式——
+            # 刻意【不】翻 _hydrated，让 fail-closed 守卫继续挡着，绝不用活体覆盖一份
+            # 读得到、但解析不了的归档。
+            logger.debug(
+                f"Sylanne memory hydrate: unrecognized KV format for "
+                f"{session_key!r}, leaving un-hydrated (guard stays active)"
+            )
+            return
+
+        try:
+            live.merge_kv_archive(normalized)
+        except Exception as e:
+            # FIX(F1/F3) 防御纵深：即便下游合并意外崩溃，也绝不让补水任务猝死 + session
+            # 永久冻结。保持 _hydrated=False（守卫继续护住归档，不被空/脏活体覆盖），记
+            # error 待排查。经 from_dict/_merge_items_by_id 的 fail-closed 清洗后正常不该
+            # 到这里；到了就是真·未知损坏——宁可本进程这个 session 读不到历史，也绝不覆盖。
+            logger.error(
+                f"Sylanne memory hydrate: merge_kv_archive crashed for {session_key!r}, "
+                f"leaving un-hydrated (guard stays active): {e}",
+                exc_info=True,
+            )
+            return
+        combined_quarantine: list[dict[str, Any]] = []
+        if quarantined_raw:
+            combined_quarantine += [
+                {"layer": "legacy_record", "raw": r, "error": ""}
+                for r in quarantined_raw
+            ]
+        # FIX(F4)：把 merge_kv_archive 本次摘除的坏记录也一并落 quarantine 侧车，
+        # 与 load_sylanne_memory_state 路径的 quarantine 语义对齐（不再静默湮灭）。
+        merge_q = getattr(live, "_last_merge_quarantine", None)
+        if merge_q:
+            combined_quarantine += merge_q
+        if combined_quarantine:
+            safe_ensure_future(
+                self._persist_memory_quarantine(session_key, combined_quarantine),
+                name=f"memory_hydrate_quarantine_{session_key}",
+                task_list=getattr(self._p, "_background_tasks", None),
+            )
+        live._hydrated = True
+        logger.info(
+            f"Sylanne memory: hydrated session {session_key!r} from KV archive "
+            f"(format={detected_format})"
+        )
+
     async def delete_sylanne_memory_state(self, session_key: str) -> None:
-        """删除 Sylanne 记忆状态（缓存 + KV 存储）。
+        """删除 Sylanne 记忆状态——记忆子系统拥有的【全部三个】KV 键 + 内存缓存。
+
+        FIX(F5，第三条清除路径)：本方法是"删除某会话记忆"的规范原语，所有清除入口
+        （meltdown、AstrBot 会话删除、WebUI /api/purge_data 显式抹除）最终都汇到这里。
+        因此必须一并删掉 MEM-01 新增的 backup_v2 / quarantine 侧车键——否则任一入口都会
+        留下完整可恢复的记忆明文副本（隐私/留存违约）。三键清单见
+        memory_migration_spine.MEMORY_KV_KEYS_MANIFEST（primary/v2_backup/quarantine）。
 
         Args:
             session_key: 会话标识。
         """
+        from .memory_legacy_formats import quarantine_kv_key
+
         self._p._store.sylanne_memory_cache.pop(session_key, None)
-        kv_key = self.sylanne_memory_kv_key(session_key)
         delete_fn = getattr(self._p, "delete_kv_data", None)
         if delete_fn and callable(delete_fn):
-            await delete_fn(kv_key)
+            safe = self._safe_session_key(session_key)
+            for key in (
+                self.sylanne_memory_kv_key(session_key),
+                self.sylanne_memory_backup_v2_kv_key(session_key),
+                quarantine_kv_key(safe),
+            ):
+                try:
+                    await delete_fn(key)
+                except Exception as e:
+                    logger.debug(f"Sylanne memory delete {key}: {e}")
 
     async def purge_session_after_meltdown(self, session_key: str) -> None:
         """记忆清除后同步抹掉专用 KV、kernel KV、域状态 KV 与 v2core 运行时缓存（T1-13）。"""
+        # delete_sylanne_memory_state 已删掉记忆子系统全部三键（primary/backup_v2/
+        # quarantine，FIX F5）；这里只补 kernel / v2core 域状态等非记忆键。
         await self.delete_sylanne_memory_state(session_key)
         delete_fn = getattr(self._p, "delete_kv_data", None)
         if delete_fn and callable(delete_fn) and self.has_kv_api():
@@ -983,8 +1483,31 @@ class StatePersistence:
         会话态容器统一收口于 p._store.release_session（CP8-P2），结构性登记保证
         新增容器自动纳入清理，杜绝原反射式 _SESSION_KEYED_CONTAINERS 手抄元组的
         漏登记静默泄漏（曾漏 3 个无界裸 dict）。
+
+        MEM-02③：release_session 只是同步 pop，对 memory_systems 而言等于硬删除
+        （没有 BoundedDict 驱逐时的 on_evict 语义）——若这中间还有未落盘的内容
+        （最长 9 个 tick），会随 pop 直接静默丢失。这里在 pop 之前先同步取一次
+        引用、快照式 fire-and-forget 落盘，再走原有 release/清理流程；本方法末尾
+        紧接着的 _cleanup_kv_for_session 仍会把这份刚落盘的 KV 一并删掉——那是
+        AstrBot 侧真正的"会话已删除"语义（比 LRU 驱逐更彻底），持久化只是防止
+        在两步之间出现"内存里已丢、KV 里还没来得及有"的空窗。
         """
         p = self._p
+        memory_system = p._store.memory_systems.get(session_key)
+        has_content = False
+        if memory_system is not None:
+            has_content_fn = getattr(p, "_memory_system_has_content", None)
+            try:
+                has_content = (
+                    bool(has_content_fn(memory_system))
+                    if callable(has_content_fn)
+                    else True
+                )
+            except Exception:
+                has_content = True
+        # 在 release_session 的 pop 之前捕获引用（pop 之后对象仍存活，串行任务照用）。
+        mem_to_persist = memory_system if has_content else None
+
         p._store.release_session(session_key)
         p._amnesia_sessions.discard(session_key)
         # CP8-P3：防抖定时器清理——取消该 session 在 buffer/kernel 防抖队列中的
@@ -999,10 +1522,31 @@ class StatePersistence:
                 forget(session_key)
             except Exception as e:
                 logger.debug(f"Sylanne evolution forget on delete failed: {e}")
-        # 异步清理 KV 存储中的持久化数据
+
+        # FIX(F4，合并前对抗闸)：删除路径的"落盘窗口桥接"与 KV 清理必须【串行且清理
+        # 在后】。原来 persist 与 cleanup 是两个无序的 fire-and-forget 任务——persist
+        # 现在还多走守卫 + 备份门若干 await（窗口更长），可能落在 cleanup 的 delete
+        # 之后，把刚删掉的会话记忆键重新写回，导致"已删除会话的记忆复活"（隐私违约）。
+        # 串成一个任务、清理永远最后一步，保证最终态是"已删除"。用只写 KV 的
+        # _persist_memory_kv_only（而非 save_*，后者会把 entry 复活回 _store）。
+        # 【已知局限，Phase-1/MEM-03 单写咽喉解决】若在本任务 persist→cleanup 的毫秒
+        # 窗口内，同一 session 又来消息触发 memory_system_for_session 懒创建 + 排补水，
+        # 补水可能在 cleanup 删键前读到这份待删归档、合并进新活体（删除会话记忆复活）。
+        # 需要 per-session 写序列化才能根治（与备份门并发同属 MEM-03 职责），本阶段仅记录。
+        async def _persist_then_cleanup() -> None:
+            if mem_to_persist is not None:
+                try:
+                    await self._persist_memory_kv_only(session_key, mem_to_persist)
+                except Exception as e:
+                    logger.debug(
+                        f"Sylanne release persist failed for {session_key!r}: {e}"
+                    )
+            await self._cleanup_kv_for_session(session_key)
+
         safe_ensure_future(
-            self._cleanup_kv_for_session(session_key),
-            name=f"kv_cleanup_{session_key}",
+            _persist_then_cleanup(),
+            name=f"memory_release_persist_cleanup_{session_key}",
+            task_list=getattr(p, "_background_tasks", None),
         )
         logger.debug(f"Sylanne: session resources released for {session_key}")
 
@@ -1011,12 +1555,15 @@ class StatePersistence:
         if not self.has_kv_api():
             return
         safe = self._safe_session_key(session_key)
+        # 记忆子系统的全部三键（primary/backup_v2/quarantine）统一走规范原语
+        # delete_sylanne_memory_state 清除（FIX F5 根因：各清除路径各自列键必漏），
+        # 本方法只负责补删 kernel / buffer / emotion 等非记忆键。
+        await self.delete_sylanne_memory_state(session_key)
         keys_to_delete = [
             f"sylanne_kernel_{safe}",
             f"sylanne_kernel_{safe}_backup",
             f"sylanne_buffer_{safe}",
             f"emotion_state:{safe}",
-            f"sylanne_memory_state:{safe}",
         ]
         delete_fn = getattr(self._p, "delete_kv_data", None)
         if not delete_fn:

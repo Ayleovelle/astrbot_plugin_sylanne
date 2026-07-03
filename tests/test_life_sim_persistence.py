@@ -362,17 +362,15 @@ def test_pending_emotion_delta_field_removed():
 
 
 # ---------------------------------------------------------------------------
-# Pipeline 级接线：_life_sim_memory_summary 从最近活跃 host 取 memory
-# （PR-A review §2：原测试只覆盖直接注入 fake getter，未覆盖真实 pipeline 路径）
+# Pipeline 级接线：_life_sim_memory_summary（MEM-09 幽灵方法摘除后恒空）
+#
+# 原测试组用 _FakeMemorySystem 实现了一个 `get_recent_findings` 方法，验证
+# _life_sim_memory_summary 会调用它拼摘要——但生产环境真正在跑的 MemorySystem
+# 从未实现这个方法（只有从未被实例化的 ArchaeologyEngine 有它），这条路径在
+# 生产环境每次都 AttributeError，被 bare except 静默吞掉、恒返回空串。旧测试
+# 因此测出了假象（桩实现了生产代码没有的接口）。MEM-09 审计判定为可平凡移除
+# 的死代码，摘除该调用后本节测试改为钉住"恒返回空串"的真实生产契约。
 # ---------------------------------------------------------------------------
-class _FakeMemorySystem:
-    def __init__(self, findings):
-        self._findings = findings
-
-    def get_recent_findings(self, n: int = 5):
-        return self._findings[:n]
-
-
 class _FakeHost:
     def __init__(self, last_now: float):
         self.kernel = type(
@@ -388,7 +386,7 @@ class _FakeStore:
 
 
 class _FakePlugin:
-    def __init__(self, hosts, mem_sys):
+    def __init__(self, hosts, mem_sys=None):
         self._store = _FakeStore(hosts)
         self._mem_sys = mem_sys
 
@@ -396,53 +394,26 @@ class _FakePlugin:
         return self._mem_sys
 
 
-def test_pipeline_memory_summary_extracts_recent_findings():
-    """验证 _life_sim_memory_summary 真实从最近活跃 host 的 memory_system 取摘要。"""
-    from sylanne_alpha.llm_request_pipeline import LLMRequestPipeline
-
-    hosts = {"sess_a": _FakeHost(last_now=1000.0)}
-    mem = _FakeMemorySystem(
-        findings=[
-            {"text": "用户在聊毕业设计"},
-            {"text": "提到了 shader 实验"},
-            {"text": ""},
-            {"text": "这条超出 n=3 不应出现"},
-        ]
-    )
-    plugin = _FakePlugin(hosts=hosts, mem_sys=mem)
-    pipe = LLMRequestPipeline.__new__(LLMRequestPipeline)
-    pipe._p = plugin
-
-    summary = pipe._life_sim_memory_summary()
-    assert "毕业设计" in summary
-    assert "shader" in summary
-    assert "不应出现" not in summary  # n=3 截断
-    assert summary.count("；") == 1    # 两条有效，一个分隔符
-
-
 def test_pipeline_memory_summary_no_hosts_returns_empty():
     from sylanne_alpha.llm_request_pipeline import LLMRequestPipeline
 
-    plugin = _FakePlugin(hosts={}, mem_sys=_FakeMemorySystem(findings=[]))
+    plugin = _FakePlugin(hosts={})
     pipe = LLMRequestPipeline.__new__(LLMRequestPipeline)
     pipe._p = plugin
 
     assert pipe._life_sim_memory_summary() == ""
 
 
-def test_pipeline_memory_summary_exception_returns_empty():
-    """memory_system_for_session 抛异常时降级为空串，不阻断 life sim。"""
+def test_pipeline_memory_summary_with_hosts_returns_empty():
+    """MEM-09：即便有活跃 host，摘除幽灵方法后也恒返回空串（生产环境行为零变化——
+    该路径本来就从未真正工作过）。"""
     from sylanne_alpha.llm_request_pipeline import LLMRequestPipeline
 
-    class _BrokenPlugin:
-        class _store:
-            hosts = {"s1": _FakeHost(last_now=1.0)}
-
-        def _memory_system_for_session(self, sk):
-            raise RuntimeError("db down")
-
+    hosts = {"sess_a": _FakeHost(last_now=1000.0)}
+    plugin = _FakePlugin(hosts=hosts, mem_sys=object())
     pipe = LLMRequestPipeline.__new__(LLMRequestPipeline)
-    pipe._p = _BrokenPlugin()
+    pipe._p = plugin
+
     assert pipe._life_sim_memory_summary() == ""
 
 

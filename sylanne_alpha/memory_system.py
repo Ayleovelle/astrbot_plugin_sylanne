@@ -231,6 +231,25 @@ def _estimate_due_ts(text: str, now: float | None = None) -> float:
     return due_dt.timestamp()
 
 
+def _safe_float(value: Any, default: float = 0.0) -> float:
+    """安全 float 转换：非数字/NaN/±inf 一律回退 default，绝不抛异常。
+
+    MEM-01 红队 finding：MemoryItem.from_dict / GraphNode.from_dict 里原来的裸
+    float() 调用（last_recalled_ts / actr_acc / importance / created_at）遇到
+    垃圾值（非数字字符串、None 以外的坏类型、NaN/inf）会直接抛异常；这些方法被
+    _restore_from_data 用列表推导式批量调用，任何一条抛异常都会让【整份存档】
+    的恢复失败——单条记录的脏字段被放大成全档丢失。这里改为单字段兜底默认值，
+    上层调用点各自决定 default（通常与"字段缺失"分支一致），从不向上传播异常。
+    """
+    try:
+        f = float(value)
+    except (TypeError, ValueError, OverflowError):
+        return default
+    if not math.isfinite(f):
+        return default
+    return f
+
+
 def _is_finite_due_ts(v: Any) -> bool:
     """判断 due_ts_estimate 是否是真【有限】数值（MAJOR-1 rider，恢复时的过滤门）。
 
@@ -366,10 +385,19 @@ class MemoryItem:
         # 旧存档兼容：importance 缺省时用启发式回填（而非固定 0.5）。
         # last_recalled_ts 缺省 0.0 即可——recency 评分取 max(created_at, last_recalled_ts)，
         # 0.0 会自然回退到 created_at，二者等效。
-        created_at = d["created_at"]
+        # FIX(F1/F3，合并前对抗闸)：必需数值/键字段做 fail-closed 清洗。缺键仍抛
+        # KeyError（由 _salvage_parse_list/_safe_items 逐条 quarantine，语义不变），但
+        # 【存在但脏】的值（非数字字符串 created_at、unhashable id 等）不再原样穿透——
+        # 否则会在下游 _merge_items_by_id 的 float()/dict-key 处崩溃、掀翻整个
+        # merge_kv_archive、让补水后台任务猝死、_hydrated 永远 False、守卫从此拒绝该
+        # session 一切落盘（新记忆全丢且每次重启复现）。与 GraphNode.from_dict（:557
+        # 既有 _safe_float(created_at)）对齐。
+        created_at = _safe_float(d["created_at"], 0.0)
         if "importance" in d:
             # clamp 到 [0,1]：旧/异常存档若写入越界值会让 recency τ 极度膨胀、永不衰减。
-            importance = max(0.0, min(1.0, float(d["importance"])))
+            # _safe_float：字段存在但是垃圾值（非数字字符串等）时不再抛异常中止整条
+            # 记录恢复，退回中性 0.5（等同"缺字段"分支的默认）。
+            importance = max(0.0, min(1.0, _safe_float(d["importance"], 0.5)))
         else:
             importance = _compute_importance_heuristic(
                 d["text"],
@@ -377,11 +405,11 @@ class MemoryItem:
                 d.get("temperature", 0.0),
             )
         return cls(
-            id=d["id"],
-            text=d["text"],
-            weight=d["weight"],
-            temperature=d["temperature"],
-            age_ticks=d["age_ticks"],
+            id=str(d["id"]),
+            text=str(d["text"]),
+            weight=_safe_float(d["weight"], 0.0),
+            temperature=_safe_float(d["temperature"], 0.0),
+            age_ticks=int(_safe_float(d["age_ticks"], 0)),
             embedding=d.get("embedding"),
             created_at=created_at,
             source_turns=d.get("source_turns", 1),
@@ -391,11 +419,11 @@ class MemoryItem:
             rewrite_count=d.get("rewrite_count", 0),
             source=d.get("source", "dialogue"),
             importance=importance,
-            last_recalled_ts=float(d.get("last_recalled_ts", 0.0)),
+            last_recalled_ts=_safe_float(d.get("last_recalled_ts", 0.0), 0.0),
             # 旧存档无 actr_acc：回填 1.0（中性激活）而非用未知历史 d 重算召回序列，
             # 避免历史与新 d 语义不匹配。频次信号仍由 recall_count 保留，阶段1 ACT-R
             # 可参考。切到 ACTIVATION 后头几次召回会自然把 acc 累积正常化。
-            actr_acc=float(d.get("actr_acc", 1.0)),
+            actr_acc=_safe_float(d.get("actr_acc", 1.0), 1.0),
             # ---- Phase 2A / PR-D：缺字段迁移（旧档兼容）----
             # 三个新字段一律传原值，规范化/clamp/fail-closed 全部交给 __post_init__ 单点处理
             # （故意不在此处 float()，否则旧档存了非数字字符串会当场抛错、绕过 __post_init__ 的兜底）。
@@ -533,9 +561,9 @@ class GraphNode:
             recall_count=d.get("recall_count", 0),
             valid_from=d.get("valid_from"),
             staleness_threshold=d.get("staleness_threshold", 180),
-            created_at=float(d.get("created_at", 0.0)),
-            last_recalled_ts=float(d.get("last_recalled_ts", 0.0)),
-            actr_acc=float(d.get("actr_acc", 1.0)),
+            created_at=_safe_float(d.get("created_at", 0.0), 0.0),
+            last_recalled_ts=_safe_float(d.get("last_recalled_ts", 0.0), 0.0),
+            actr_acc=_safe_float(d.get("actr_acc", 1.0), 1.0),
             # review HIGH：旧图谱无该字段 → 显式迁移为 "open"（基线可见，行为不变）。
             # __post_init__ 再 fail-closed 归一（旧档若存非法值降 internal）。
             privacy_level=d.get("privacy_level", "open"),
@@ -570,6 +598,12 @@ class GraphEdge:
 
     @classmethod
     def from_dict(cls, d: dict) -> "GraphEdge":
+        # MEM-01：default_strength 的计算本身也要耐脏（旧档 clarity/emotion_weight
+        # 若混进非数字垃圾，不能让默认值推导本身先炸），再用 _safe_float 兜底
+        # strength 字段自身的垃圾值——两处都不允许向上抛异常中止整条边的恢复。
+        safe_clarity = _safe_float(d.get("clarity", 0.0), 0.0)
+        safe_emotion = _safe_float(d.get("emotion_weight", 0.0), 0.0)
+        default_strength = max(0.0, min(1.0, safe_clarity * abs(safe_emotion)))
         return cls(
             source=d["source"],
             target=d["target"],
@@ -579,11 +613,8 @@ class GraphEdge:
             last_recalled=d.get("last_recalled", 0),
             # 旧存档无 strength：用 clarity*|emotion_weight| 近似回填（情绪越强、越清晰
             # 的关系语义强度越高），clamp [0,1]。阶段2 上线后新边按关系规则表赋值。
-            strength=float(
-                d.get(
-                    "strength",
-                    max(0.0, min(1.0, d["clarity"] * abs(d["emotion_weight"]))),
-                )
+            strength=max(
+                0.0, min(1.0, _safe_float(d.get("strength", default_strength), default_strength))
             ),
         )
 
@@ -867,6 +898,36 @@ class AnniversaryDetector:
 # MemorySystem
 # ---------------------------------------------------------------------------
 
+# ---------------------------------------------------------------------------
+# MEM-01：金档往返基座——schema 版本常量
+#
+# "3.0.0" 只是给 to_dict 输出打上可读的版本标签；序列化【形状】故意保持与 v2 完全
+# 一致（同一组 l1/l2/l3_nodes/l3_edges 顶层键），这样旧代码（尚未升级到本次改动
+# 的历史构建）的 key-subset 嗅探式格式判定（state_persistence.py 的
+# `{"l1","l2","l3_nodes","l3_edges"}.issubset(data.keys())`）仍会把 v3 blob 当成
+# 合法的"新版 MemorySystem 格式"接受——这是有意保留的 graceful-degrade 回滚路径：
+# 即便某个环境被回滚到本次改动之前的旧构建，它读到 v3 存档也不会崩溃或误判为
+# 空/损坏，只是不认识新字段（新字段本身也都是可选 .get() 读取，纯 additive）。
+# ---------------------------------------------------------------------------
+CURRENT_SCHEMA_VERSION = "3.0.0"
+_CURRENT_SCHEMA_MAJOR = 3
+
+
+def _parse_schema_major(version: Any) -> int | None:
+    """从形如 '3.0.0' / '2.0.0' 的 version 字符串解析主版本号。
+
+    解析失败（非字符串、非数字开头）一律返回 None，调用方按"未知/旧版本"处理
+    （不是 fail-closed 报错，只是退回到与"无 version 字段"完全相同的兼容路径）。
+    """
+    if not isinstance(version, str):
+        return None
+    head = version.split(".", 1)[0].strip()
+    try:
+        return int(head)
+    except ValueError:
+        return None
+
+
 # v2 常量
 IDLE_FLUSH_SECONDS = 60.0  # 空闲多久触发 flush
 MAX_TURNS_BEFORE_FLUSH = 20  # 最多多少轮触发 flush
@@ -943,9 +1004,23 @@ class MemorySystem:
         self._recalled_l2_items: list[MemoryItem] = []
         self._gc_tick_counter: int = 0  # GC 计数器
         self._inverted_index = InvertedIndex()
+        # MEM-02②：运行时补水标记（不持久化——不进 to_dict）。一个刚 __init__ 出来、
+        # 还没经过任何一次真实恢复尝试（无论是 body 通道 from_dict 还是后台 KV
+        # 归档补水）的实例，_hydrated 恒为 False。StatePersistence.save_sylanne_memory_state
+        # 用它挡住"空对象覆盖非空 KV 归档"这条重启致零链路；一旦 _restore_from_data
+        # 跑过一次（即便结果仍是空），或后台补水任务跑完一次（无论有没有拿到数据），
+        # 就翻 True，此后不再拦这个实例的写入。
+        self._hydrated: bool = False
+        # 配合 _hydrated 的一次性 warn 节流：同一实例反复命中拦截只警告一次。
+        self._empty_write_warned: bool = False
         # T2-05①：待跟进线索列表（{topic_snippet, due_ts_estimate, session_key,
         # created_ts}），one-shot 消费，cap 见 _PENDING_FOLLOWUP_CAP。
         self._pending_followups: list[dict[str, Any]] = []
+        # MEM-01：最近一次 _restore_from_data 的逐条恢复失败记录（不持久化——不进
+        # to_dict）。每条 {"layer","raw","error"}。调用方（state_persistence）在
+        # create_from_dict 之后读取一次，写入 quarantine 侧车 KV 键做审计，而不是
+        # 让单条脏记录静默拖垮整份存档的恢复。新建实例默认空列表。
+        self._quarantine: list[dict[str, Any]] = []
         # 阶段0 召回灰度开关：默认 LEGACY（零行为变化）。可由 kwargs 或环境变量
         # SYLANNE_RECALL_MODE 覆盖；非法值静默回退 LEGACY。
         self._recall_mode: RecallMode = self._resolve_recall_mode(
@@ -2475,20 +2550,25 @@ class MemorySystem:
         return getattr(self, "_recalled_l2_items", [])
 
     def rewrite_item(self, item_id: str, new_text: str) -> bool:
-        """Reconsolidation v2: 用重写后的文本覆盖记忆条目。
+        """[MEM-09 废弃，回滚窗口保留] 曾经的破坏性再固化：原地覆盖 item.text。
 
-        同时遍历 L1 与 L2——召回可能命中 L1 条目（近期摘要），若只查 L2，
-        对 L1 命中项的 reconsolidation 重写会静默失败（找不到 → 返回 False）。
+        问题（审计 MEM-09）：无原文备份，一条记忆最多可被覆盖 REWRITE_FREEZE_AFTER
+        次且不可逆；覆盖后 embedding 不再匹配新文本；被覆盖的文本还是 v2core
+        影子层（v2core/domains/memory.py._reconsolidation_overlay）按原文文本建键
+        的依据，覆盖后旧影子条目会被孤立、再也查不到。v2core 的非破坏性 overlay
+        reconsolidation（original_text 永不动）才是业主认定的正确再固化路径，
+        两条通道同时改写记忆即互相打架、伪造历史。
+
+        本方法自本轮起整体下线为 no-op：不再修改 item.text / rewrite_count /
+        weight，只记录一条 debug 日志。经 grep 复核，唯一调用方
+        `llm_request_pipeline._reconsolidation_rewrite` 已同步下线；本方法体保留
+        一个发布周期供回滚参考，下一周期与调用方一并删除。
         """
-        for store in (self._l1, self._l2):
-            for item in store:
-                if item.id == item_id:
-                    if item.rewrite_count >= REWRITE_FREEZE_AFTER:
-                        return False
-                    item.text = new_text
-                    item.rewrite_count += 1
-                    item.weight = min(1.0, item.weight + 0.03)
-                    return True
+        _logger = logging.getLogger("astrbot_plugin_sylanne")
+        _logger.debug(
+            "Sylanne rewrite_item no-op (MEM-09 destructive reconsolidation "
+            f"retired): item_id={item_id}"
+        )
         return False
 
     # ------------------------------------------------------------------
@@ -2976,7 +3056,7 @@ class MemorySystem:
     def to_dict(self) -> dict:
         """序列化全部三层为可 JSON 化的 dict。"""
         return {
-            "version": "2.0.0",
+            "version": CURRENT_SCHEMA_VERSION,
             "tick": self._tick,
             "last_consolidation_ts": self._last_consolidation_ts,
             "params": dict(self._params),
@@ -3001,21 +3081,86 @@ class MemorySystem:
         mem._restore_from_data(data)
         return mem
 
+    @staticmethod
+    def _salvage_parse_list(
+        raw: Any, parser: Any, layer: str, quarantine: list[dict[str, Any]]
+    ) -> list:
+        """逐条 parse，单条失败即 quarantine（记录原始 dict + 错误原因），不中止整个列表。
+
+        MEM-01 核心修复：旧实现用列表推导式批量 `parser(d) for d in raw`——任何一条
+        抛异常都会让整层（l1/l2/l3_edges）恢复直接失败并向上传播，state_persistence
+        的调用点用 try/except 兜底后表现为"这份存档整体不认识"，等价于把一条脏记录
+        放大成全部记忆静默清零。这里改为逐条 try/except，坏记录被摘除进 quarantine
+        列表（供上层写入 quarantine 侧车 KV 审计），好记录正常留在结果里。
+        """
+        out: list[Any] = []
+        if not isinstance(raw, list):
+            return out
+        for d in raw:
+            if not isinstance(d, dict):
+                quarantine.append({"layer": layer, "raw": d, "error": "not_a_dict"})
+                continue
+            try:
+                out.append(parser(d))
+            except Exception as e:  # noqa: BLE001 — 逐条隔离，任何异常都不能传播
+                quarantine.append({"layer": layer, "raw": d, "error": repr(e)})
+        return out
+
     def _restore_from_data(self, data: dict) -> None:
-        """就地从 dict 恢复全部三层状态。兼容 v1 和 v2 格式。"""
+        """就地从 dict 恢复全部三层状态。兼容 v1/v2/v3 及未知更高版本格式。
+
+        版本分支（MEM-01）：schema_version 字段目前只用于【可观测性】——三层结构
+        （l1/l2/l3_nodes/l3_edges）从 v2 到 v3 是纯 additive 演进，新字段全部靠
+        `.get(key, default)` 缺省兼容，因此 v2/unversioned/v3 天然走同一套按字段
+        恢复逻辑，无需真正的分叉代码路径。唯一有实际行为差异的是"未知更高版本"
+        （version 主版本号 > 本代码认识的 CURRENT_SCHEMA_MAJOR）：这意味着存档来自
+        一个更新的构建、可能带有本代码不认识的字段——按已知字段加载 + 大声 WARN，
+        绝不静默清空（旧代码遇到不认识的新格式，最坏情况也只是丢弃陌生字段，
+        而不是把整份存档当空）。
+        """
+        version = data.get("version")
+        major = _parse_schema_major(version)
+        if major is not None and major > _CURRENT_SCHEMA_MAJOR:
+            logging.getLogger("astrbot_plugin_sylanne").warning(
+                "Sylanne memory: 存档 version=%r 的主版本号高于本代码已知的 %d"
+                "（CURRENT_SCHEMA_VERSION=%s）。按已知字段尽力加载，未识别的新字段"
+                "将被忽略——绝不因为版本更新而把这份存档当空处理。",
+                version,
+                _CURRENT_SCHEMA_MAJOR,
+                CURRENT_SCHEMA_VERSION,
+            )
+
         self._tick = data.get("tick", 0)
         self._last_consolidation_ts = data.get("last_consolidation_ts", 0.0)
         saved_params = data.get("params")
         if saved_params is not None:
             self._params.update(saved_params)
 
-        l1_items = [MemoryItem.from_dict(d) for d in data.get("l1", [])]
+        quarantine: list[dict[str, Any]] = []
+        l1_items = self._salvage_parse_list(
+            data.get("l1", []), MemoryItem.from_dict, "l1", quarantine
+        )
         self._l1 = deque(l1_items, maxlen=self._L1_CAPACITY)
-        self._l2 = [MemoryItem.from_dict(d) for d in data.get("l2", [])]
-        self._l3_nodes = {
-            nid: GraphNode.from_dict(nd) for nid, nd in data.get("l3_nodes", {}).items()
-        }
-        self._l3_edges = [GraphEdge.from_dict(ed) for ed in data.get("l3_edges", [])]
+        self._l2 = self._salvage_parse_list(
+            data.get("l2", []), MemoryItem.from_dict, "l2", quarantine
+        )
+        raw_l3_nodes = data.get("l3_nodes", {})
+        self._l3_nodes = {}
+        if isinstance(raw_l3_nodes, dict):
+            for nid, nd in raw_l3_nodes.items():
+                if not isinstance(nd, dict):
+                    quarantine.append(
+                        {"layer": "l3_nodes", "raw": {"id": nid, "data": nd}, "error": "not_a_dict"}
+                    )
+                    continue
+                try:
+                    self._l3_nodes[str(nid)] = GraphNode.from_dict(nd)
+                except Exception as e:  # noqa: BLE001 — 逐条隔离
+                    quarantine.append({"layer": "l3_nodes", "raw": nd, "error": repr(e)})
+        self._l3_edges = self._salvage_parse_list(
+            data.get("l3_edges", []), GraphEdge.from_dict, "l3_edges", quarantine
+        )
+        self._quarantine = quarantine
         # T2-05①：恢复待跟进线索（load-compat：旧存档无此字段时默认空列表）。
         # MAJOR-1 rider（红队 finding）：过滤 due_ts_estimate 非有限数的条目——
         # None/NaN/±inf（例如损坏的存档）会让 due_pending_followup 里的
@@ -3040,6 +3185,164 @@ class MemorySystem:
         self._l3_edge_index: dict[tuple[str, str, str], int] = {
             (e.source, e.target, e.relation): i for i, e in enumerate(self._l3_edges)
         }
+        # MEM-02②：一次真实的恢复尝试已经发生（哪怕恢复出来的内容仍是空），
+        # 后续 save_sylanne_memory_state 的"空对象保护 KV"闸门不再拦这个实例。
+        self._hydrated = True
+
+    # ------------------------------------------------------------------
+    # MEM-02①：非破坏性补水合并（restore-wiring race guard）
+    # ------------------------------------------------------------------
+
+    def merge_kv_archive(self, data: dict) -> None:
+        """把 KV 归档 dict 合并进当前（可能已经写入过内容的）活体实例。
+
+        与 `_restore_from_data`（整层替换，deque 重建）不同——那是"把一份存档
+        加载进一个全新/待清空实例"的正确语义；这里是"进程重启后 body 通道断链，
+        chat 路径已经拿到一个空的活体 MemorySystem 并可能已经写入了几条新内容，
+        随后后台补水任务才从 KV 读到旧档"的场景，KV 存档系统性滞后（最长 9 个
+        tick，因为落盘只在 `_tick % 10 == 0` 时发生），所以不能整层覆盖——那样会
+        把补水这几个 tick 之间活体已经写入的新内容原地抹掉。
+
+        合并规则：按 id 去重，同 id 冲突时保留 `max(created_at, last_recalled_ts)`
+        更大（更新）的版本；L3 图节点/边按 id/(source,target,relation) 做并集
+        （活体优先，KV 补空位）；tick / last_consolidation_ts 取二者较大值；
+        pending_followups 按 (topic_snippet, due_ts_estimate) 去重合并。
+        """
+        if not isinstance(data, dict):
+            return
+
+        # FIX(F4，完整性复审)：hydrate-merge 路径此前对解析失败的记录静默 continue
+        # 丢弃，与 _restore_from_data 的 quarantine 语义不一致——一条 text 完好但缺必需
+        # 键的记录会在聊天恢复路径被永久湮灭且无审计副本。这里逐条收进 merge_quarantine，
+        # 由调用方（hydrate_memory_system）落 quarantine 侧车 KV，与 load 路径对齐。
+        merge_quarantine: list[dict[str, Any]] = []
+
+        def _safe_items(cls: Any, raw: Any, layer: str) -> list[Any]:
+            out: list[Any] = []
+            for d in raw or []:
+                if not isinstance(d, dict):
+                    merge_quarantine.append(
+                        {"layer": layer, "raw": d, "error": "not_a_dict"}
+                    )
+                    continue
+                try:
+                    out.append(cls.from_dict(d))
+                except Exception as e:  # noqa: BLE001 — 逐条隔离并留痕
+                    merge_quarantine.append({"layer": layer, "raw": d, "error": repr(e)})
+            return out
+
+        kv_l1 = _safe_items(MemoryItem, data.get("l1"), "l1")
+        kv_l2 = _safe_items(MemoryItem, data.get("l2"), "l2")
+        raw_l3_nodes = data.get("l3_nodes")
+        kv_l3_nodes: dict[str, GraphNode] = {}
+        if isinstance(raw_l3_nodes, dict):
+            for nid, nd in raw_l3_nodes.items():
+                if not isinstance(nd, dict):
+                    merge_quarantine.append(
+                        {"layer": "l3_nodes", "raw": nd, "error": "not_a_dict"}
+                    )
+                    continue
+                try:
+                    kv_l3_nodes[str(nid)] = GraphNode.from_dict(nd)
+                except Exception as e:  # noqa: BLE001
+                    merge_quarantine.append(
+                        {"layer": "l3_nodes", "raw": nd, "error": repr(e)}
+                    )
+                    continue
+        kv_l3_edges = _safe_items(GraphEdge, data.get("l3_edges"), "l3_edges")
+
+        merged_l1 = self._merge_items_by_id(list(self._l1), kv_l1)
+        merged_l2 = self._merge_items_by_id(self._l2, kv_l2)
+        self._l1 = deque(merged_l1[-self._L1_CAPACITY :], maxlen=self._L1_CAPACITY)
+        self._l2 = merged_l2
+
+        for nid, node in kv_l3_nodes.items():
+            if nid not in self._l3_nodes:
+                self._l3_nodes[nid] = node
+        existing_edge_keys = {
+            (e.source, e.target, e.relation) for e in self._l3_edges
+        }
+        for edge in kv_l3_edges:
+            key = (edge.source, edge.target, edge.relation)
+            if key not in existing_edge_keys:
+                self._l3_edges.append(edge)
+                existing_edge_keys.add(key)
+        self._l3_label_index = {n.label: nid for nid, n in self._l3_nodes.items()}
+        self._l3_edge_index = {
+            (e.source, e.target, e.relation): i
+            for i, e in enumerate(self._l3_edges)
+        }
+
+        kv_tick = data.get("tick", 0)
+        if isinstance(kv_tick, (int, float)) and kv_tick > self._tick:
+            self._tick = int(kv_tick)
+        kv_consolidation_ts = data.get("last_consolidation_ts", 0.0)
+        if (
+            isinstance(kv_consolidation_ts, (int, float))
+            and kv_consolidation_ts > self._last_consolidation_ts
+        ):
+            self._last_consolidation_ts = float(kv_consolidation_ts)
+
+        raw_followups = data.get("pending_followups", [])
+        if isinstance(raw_followups, list):
+            existing_keys = {
+                (str(e.get("topic_snippet", "")), e.get("due_ts_estimate"))
+                for e in self._pending_followups
+                if isinstance(e, dict)
+            }
+            for entry in raw_followups:
+                if not isinstance(entry, dict):
+                    continue
+                if not _is_finite_due_ts(entry.get("due_ts_estimate")):
+                    continue
+                key = (str(entry.get("topic_snippet", "")), entry.get("due_ts_estimate"))
+                if key not in existing_keys:
+                    self._pending_followups.append(dict(entry))
+                    existing_keys.add(key)
+            self._pending_followups = self._pending_followups[
+                -self._PENDING_FOLLOWUP_CAP :
+            ]
+
+        # FIX(F4)：本次 merge 摘除的坏记录留给调用方落 quarantine 侧车（每次 merge 覆盖，
+        # 只反映当次；hydrate_memory_system 会读取并持久化）。
+        self._last_merge_quarantine = merge_quarantine
+
+        logging.getLogger("astrbot_plugin_sylanne").info(
+            "Sylanne memory hydrate-merge: l1=%d l2=%d l3_nodes=%d l3_edges=%d "
+            "tick=%d (source=kv_archive+in_ram, conflict_rule=newer_wins_by_id)",
+            len(self._l1),
+            len(self._l2),
+            len(self._l3_nodes),
+            len(self._l3_edges),
+            self._tick,
+        )
+
+    @staticmethod
+    def _merge_items_by_id(
+        live_items: list["MemoryItem"], kv_items: list["MemoryItem"]
+    ) -> list["MemoryItem"]:
+        """按 id 合并两个 MemoryItem 列表，同 id 冲突取更新鲜的版本。"""
+
+        def freshness(item: "MemoryItem") -> float:
+            # FIX(F1/F3) 防御纵深：即便某条 item 的 created_at/last_recalled_ts 是脏值
+            # （非数字），也用 _safe_float 兜住，绝不让一条脏记录的 float() 崩掉整个
+            # merge（from_dict 已在上游清洗，这里是第二道保险）。
+            return max(
+                _safe_float(getattr(item, "created_at", 0.0), 0.0),
+                _safe_float(getattr(item, "last_recalled_ts", 0.0), 0.0),
+            )
+
+        by_id: dict[str, MemoryItem] = {}
+        for item in kv_items:
+            by_id[str(item.id)] = item
+        for item in live_items:
+            key = str(item.id)
+            existing = by_id.get(key)
+            if existing is None or freshness(item) >= freshness(existing):
+                by_id[key] = item
+        merged = list(by_id.values())
+        merged.sort(key=lambda it: _safe_float(getattr(it, "created_at", 0.0), 0.0))
+        return merged
 
 
 # ---------------------------------------------------------------------------

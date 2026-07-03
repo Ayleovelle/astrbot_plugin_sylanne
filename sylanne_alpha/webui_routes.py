@@ -939,6 +939,12 @@ class WebUIRoutes:
             mem_sys._l3_nodes.clear()
             mem_sys._l3_edges.clear()
             mem_sys._tick = 0
+            # MEM-02②/①: 显式擦除是唯一允许"空对象覆盖 KV"的路径——标记为已补水，
+            # 使 save_sylanne_memory_state 的空对象保护闸门不拦这次之后的写入；
+            # 同时若一次尚未完成的后台补水任务此刻正好读完 KV 准备合并，它会在
+            # merge 前重新检查 _hydrated 并发现已被这里设为 True，从而放弃合并，
+            # 避免把刚清除的记忆从 KV 旧档里复活回来。
+            mem_sys._hydrated = True
         # Also clear legacy body traces
         hosts = getattr(self._p, "_hosts", {}) or {}
         if session in hosts:
@@ -1363,6 +1369,12 @@ class WebUIRoutes:
             mem_sys._l3_nodes.clear()
             mem_sys._l3_edges.clear()
             mem_sys._tick = 0
+            # FIX(F1，完整性复审)：与 meltdown 同理——显式擦除必须把 _hydrated 置 True，
+            # 否则 _memory_system_for_session 懒创建时排的后台补水任务会在本 handler 的
+            # 后续 await 期间跑起来、从尚未删除的 KV 旧档把刚清空的记忆合并回活体，随后
+            # 一次周期 save 又把它写回 KV——显式清除被自己的补水复活。置 True 让补水的
+            # 二次 _hydrated 检查放弃合并。
+            mem_sys._hydrated = True
             purged.append("memory_system")
 
         # Remove host instance
