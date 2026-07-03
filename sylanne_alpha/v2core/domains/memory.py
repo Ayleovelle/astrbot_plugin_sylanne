@@ -35,7 +35,8 @@ class MemoryDomain:
     def __init__(self, memory_system: "MemorySystem") -> None:
         self._ms = memory_system
         # 重固化影子层（红线2：original_text 永不动；改写只落这里，召回时叠加）。
-        # 键=记忆条目身份(text 或 id)，值={overlay_warmth, rewrite_count, last_pe}。
+        # 键=记忆条目身份，优先 item.id（MEM-09 起）；text 兜底解析历史存档遗留的
+        # 旧 text 键（迁移期只读兼容，见 reconsolidate()/_overlay_lookup()）。
         self._reconsolidation_overlay: dict[str, dict[str, Any]] = {}
 
     # ---- 读接口（热路径，内联同步，不调 LLM）----
@@ -48,8 +49,13 @@ class MemoryDomain:
 
         P0-6 修复：①补情绪键 temperature/emotional_weight（MemoryResult 真有这两字段），
         重固化才有真实情绪基线算 narrative_pe，不再拿 0.0 充数 spam 锚点。②读侧接通影子层——
-        每条查 overlay_for(key) 命中则附 overlay_warmth（召回呈现/format_injection 用叠加值），
+        每条查 overlay 命中则附 overlay_warmth（召回呈现/format_injection 用叠加值），
         original 字段照旧（红线2 不破）。
+
+        MEM-09：新增 "id" 键（取自 MemoryResult.source_obj.id，底层 MemoryItem/GraphNode
+        的稳定身份）；overlay 命中改为优先按 id 查，text 只作旧档兜底（见
+        _overlay_lookup）。source_obj 缺失（如测试桩）时 id 退化为空串，行为等同
+        MEM-09 之前（纯 text 键）。
         """
         if not text:
             return []
@@ -66,18 +72,20 @@ class MemoryDomain:
             ):
                 continue
             item_text = getattr(r, "text", str(r))
+            item_id = str(getattr(getattr(r, "source_obj", None), "id", "") or "")
             # 情绪键：MemoryResult.temperature（透传）+ emotional_weight；取不到给 None（不充 0）
             temperature = getattr(r, "temperature", None)
             row: dict[str, Any] = {
                 "text": item_text,
+                "id": item_id,
                 "confidence": getattr(r, "confidence", "clear"),
                 "layer": getattr(r, "layer", ""),
                 "activation": getattr(r, "activation", 0.0),
                 "temperature": float(temperature) if isinstance(temperature, (int, float)) else None,
                 "emotional_weight": float(getattr(r, "emotional_weight", 0.5)),
             }
-            # 读侧接通影子层：命中则附 overlay_warmth（呈现叠加值）
-            ov = self._reconsolidation_overlay.get(item_text)
+            # 读侧接通影子层：优先按 id 查，miss 再退回旧 text 键（兼容 MEM-09 前存档）
+            ov = self._overlay_lookup(item_id, item_text)
             if ov is not None:
                 row["overlay_warmth"] = float(ov.get("overlay_warmth", 0.0))
             out.append(row)
@@ -142,6 +150,25 @@ class MemoryDomain:
     _RECON_RATE = 0.3            # 情绪温度向当下漂移的比例（Nader 2000 重固化窗口）
     _RECON_CAP = 20              # 单条最多重固化次数（呼应旧 MemoryItem.rewrite_count 上限）
     _OVERLAY_MAXLEN = 256        # 影子层条目上限（LRU 淘汰最旧；防无界膨胀+永久落盘垃圾）
+    # MEM-09：单次重固化的漂移幅度钳位（|Δoverlay_warmth| <= 此值）。retrieval-time
+    # plasticity 本身是特性（Nader 2000）保留，但旧公式 (1-rate)*old+rate*current 在
+    # old/current 反差大时单次漂移可达 ~0.6（[-1,1] 效价域的一大截），钳位后温度漂移
+    # 变成小步累积而非一次到位，行为仍然"越回忆越贴近当下心境"，只是更缓。
+    _RECON_DRIFT_CAP = 0.1
+
+    def _overlay_lookup(self, primary_key: str, fallback_key: str) -> dict[str, Any] | None:
+        """按 primary_key（item.id）查影子层，未命中且 fallback_key（text）不同时
+        退回 fallback_key——兼容 MEM-09 之前纯 text 键的历史存档。两键都空时返回 None。
+        """
+        primary_key = str(primary_key or "")
+        fallback_key = str(fallback_key or "")
+        if primary_key:
+            ov = self._reconsolidation_overlay.get(primary_key)
+            if ov is not None:
+                return ov
+        if fallback_key and fallback_key != primary_key:
+            return self._reconsolidation_overlay.get(fallback_key)
+        return None
 
     def reconsolidate(self, recalled: list[dict[str, Any]], *, current_warmth: float,
                       narrative_pe: float, pe_gate: float) -> int:
@@ -149,22 +176,30 @@ class MemoryDomain:
         改写由预测误差门控）。**只写影子层，original_text 一字不动（红线2）**。
 
         narrative_pe < pe_gate → 符合预期，不改。
-        narrative_pe >= pe_gate → 被召回条目的情绪温度向当下 warmth 漂移（落 overlay），
-          rewrite_count++（封顶 _RECON_CAP）。召回呈现时由 overlay_warmth 叠加，迁移/回滚
-          永远能回到原文+原始情绪。返回本次改写的条目数。
+        narrative_pe >= pe_gate → 被召回条目的情绪温度向当下 warmth 漂移（落 overlay，
+          单次漂移幅度钳位 _RECON_DRIFT_CAP），rewrite_count++（封顶 _RECON_CAP）。
+          召回呈现时由 overlay_warmth 叠加，迁移/回滚永远能回到原文+原始情绪。
+          返回本次改写的条目数。
 
         基线修正（Fable 版）：条目无情绪温度（temperature/warmth 均为 None）时，
         初始 overlay 基线取 current_warmth（首次改写=向当下温度靠拢的中性起步），
         绝不拿 0.0 充数——0.0 在 [-1,1] 效价域是一个有语义的值。
+
+        MEM-09：存储键优先 item.id（recalled dict 的 "id"），旧 text 键仅用于兜底
+        解析 MEM-09 之前持久化的影子条目；一旦被 id 命中的旧 text 条目会原地迁移到
+        id 键下（同条目不留两份），新写入一律落 id 键（无 id 时退回 text，与之前
+        行为一致，兼容测试桩等不带底层对象引用的调用方）。
         """
         if narrative_pe < pe_gate or not recalled:
             return 0
         n = 0
         for r in recalled:
-            key = str(r.get("text") or r.get("id") or "")
+            item_id = str(r.get("id") or "").strip()
+            text_key = str(r.get("text") or "")
+            key = item_id or text_key
             if not key:
                 continue
-            ov = self._reconsolidation_overlay.get(key)
+            ov = self._overlay_lookup(item_id, text_key)
             if ov is None:
                 base_raw = r.get("temperature")
                 if base_raw is None:
@@ -176,12 +211,19 @@ class MemoryDomain:
                 ov = {"overlay_warmth": base, "rewrite_count": 0, "last_pe": 0.0}
             if ov["rewrite_count"] >= self._RECON_CAP:
                 continue
-            ov["overlay_warmth"] = ((1 - self._RECON_RATE) * ov["overlay_warmth"]
-                                    + self._RECON_RATE * float(current_warmth))
+            target = ((1 - self._RECON_RATE) * ov["overlay_warmth"]
+                      + self._RECON_RATE * float(current_warmth))
+            delta = max(-self._RECON_DRIFT_CAP,
+                        min(self._RECON_DRIFT_CAP, target - ov["overlay_warmth"]))
+            ov["overlay_warmth"] = ov["overlay_warmth"] + delta
             ov["rewrite_count"] += 1
             ov["last_pe"] = float(narrative_pe)
-            # LRU 语义：重插到末尾=最近触碰；超限淘汰最旧（dict 保插入序）
+            # LRU 语义：重插到末尾=最近触碰；超限淘汰最旧（dict 保插入序）。
+            # 同时清掉旧 text 键（若与新 key 不同）——把命中的旧档条目迁移到 id 键，
+            # 避免同一条目在影子层同时留下 id 键与孤立的旧 text 键两份。
             self._reconsolidation_overlay.pop(key, None)
+            if text_key != key:
+                self._reconsolidation_overlay.pop(text_key, None)
             self._reconsolidation_overlay[key] = ov
             while len(self._reconsolidation_overlay) > self._OVERLAY_MAXLEN:
                 oldest = next(iter(self._reconsolidation_overlay))
@@ -189,9 +231,18 @@ class MemoryDomain:
             n += 1
         return n
 
-    def overlay_for(self, key: str) -> dict[str, Any] | None:
-        """取某条目的重固化影子（召回呈现时叠加；无则 None=用原文原始情绪）。"""
-        return self._reconsolidation_overlay.get(str(key))
+    def overlay_for(self, key: str, *, text_fallback: str | None = None) -> dict[str, Any] | None:
+        """取某条目的重固化影子（召回呈现时叠加；无则 None=用原文原始情绪）。
+
+        MEM-09：`key` 应传 item.id；`text_fallback` 可选传原文，未命中 id 时兜底按
+        text 查（兼容旧档）。调用方只传单一 key（历史调用惯例）时行为等同直查该键。
+        """
+        ov = self._reconsolidation_overlay.get(str(key))
+        if ov is not None:
+            return ov
+        if text_fallback is not None and text_fallback != key:
+            return self._reconsolidation_overlay.get(str(text_fallback))
+        return None
 
     # ---- 影子层独立持久化（P0-7：域状态落盘，但 memory 域只存 overlay）----
     # MemorySystem 自有持久化键（sylanne_memory_state:*），域状态总键不重复存它（双写冲突），

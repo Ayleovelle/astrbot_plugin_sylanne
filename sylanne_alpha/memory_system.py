@@ -2484,20 +2484,25 @@ class MemorySystem:
         return getattr(self, "_recalled_l2_items", [])
 
     def rewrite_item(self, item_id: str, new_text: str) -> bool:
-        """Reconsolidation v2: 用重写后的文本覆盖记忆条目。
+        """[MEM-09 废弃，回滚窗口保留] 曾经的破坏性再固化：原地覆盖 item.text。
 
-        同时遍历 L1 与 L2——召回可能命中 L1 条目（近期摘要），若只查 L2，
-        对 L1 命中项的 reconsolidation 重写会静默失败（找不到 → 返回 False）。
+        问题（审计 MEM-09）：无原文备份，一条记忆最多可被覆盖 REWRITE_FREEZE_AFTER
+        次且不可逆；覆盖后 embedding 不再匹配新文本；被覆盖的文本还是 v2core
+        影子层（v2core/domains/memory.py._reconsolidation_overlay）按原文文本建键
+        的依据，覆盖后旧影子条目会被孤立、再也查不到。v2core 的非破坏性 overlay
+        reconsolidation（original_text 永不动）才是业主认定的正确再固化路径，
+        两条通道同时改写记忆即互相打架、伪造历史。
+
+        本方法自本轮起整体下线为 no-op：不再修改 item.text / rewrite_count /
+        weight，只记录一条 debug 日志。经 grep 复核，唯一调用方
+        `llm_request_pipeline._reconsolidation_rewrite` 已同步下线；本方法体保留
+        一个发布周期供回滚参考，下一周期与调用方一并删除。
         """
-        for store in (self._l1, self._l2):
-            for item in store:
-                if item.id == item_id:
-                    if item.rewrite_count >= REWRITE_FREEZE_AFTER:
-                        return False
-                    item.text = new_text
-                    item.rewrite_count += 1
-                    item.weight = min(1.0, item.weight + 0.03)
-                    return True
+        _logger = logging.getLogger("astrbot_plugin_sylanne")
+        _logger.debug(
+            "Sylanne rewrite_item no-op (MEM-09 destructive reconsolidation "
+            f"retired): item_id={item_id}"
+        )
         return False
 
     # ------------------------------------------------------------------
