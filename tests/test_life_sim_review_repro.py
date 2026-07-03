@@ -160,6 +160,50 @@ def test_case3b_fresh_pending_consumed_normally():
     assert sim.state.events[0].dropped_at == 0            # 未 drop
 
 
+def test_outreach_fragment_wording_is_undertone_not_imperative():
+    """CONTRIB b：outreach_fragment 措辞应是"可以顺嘴带一句"的语气托底，而不是
+    "请自然地在回复中提及或表达这件事"这种对主模型的显式话题指令（容易被读成
+    "必须在这轮把话题掰过去"，制造生硬转场）。"""
+    from sylanne_alpha.llm_request_pipeline import LLMRequestPipeline
+    from sylanne_alpha.session_state_store import SessionStateStore
+
+    sim = LifeSimulator(config={})
+    sim.state.events = [
+        LifeEvent(text="新鲜事件", mood="m", urgency=0.2, timestamp=1.0,
+                  wants_to_share=True, queued_at=1.0),
+    ]
+    eid = sim.state.events[0].event_id
+    store = SessionStateStore()
+
+    class _FakePlugin:
+        _life_simulator = sim
+        _store = store
+        config = {}
+        _config = {}
+
+    pipe = LLMRequestPipeline.__new__(LLMRequestPipeline)
+    pipe._p = _FakePlugin()
+
+    fresh_ctx = {
+        "reason": "新鲜事件", "mood": "m", "intent_id": "i3", "event_id": eid,
+        "delivery_mode": "next_reply", "reason_code": "score_0.3",
+        "expires_at": time.time() + 1000.0,
+        "target_session": "s1", "queued_at": 1.0,
+    }
+    pipe._p._store.pending_outreach_context.set("s1", fresh_ctx)
+
+    _, outreach_fragment, _ = asyncio.run(
+        pipe._prepare_memory_context("s1", "", gap_seconds=0, realtime_enabled=False)
+    )
+    assert outreach_fragment != ""
+    # 旧的硬指令式措辞不应再出现
+    assert "请自然地在回复中提及或表达这件事" not in outreach_fragment
+    # 新措辞应传达"可提可不提"的宽松语气，而非强制话题指令
+    assert "不用" in outreach_fragment or "也没关系" in outreach_fragment
+    # 事件文本本身仍照常带到
+    assert "新鲜事件" in outreach_fragment
+
+
 # ---------------------------------------------------------------------------
 # case 4：三参回调内部 TypeError 不退化重试、不推进状态（MED3）
 # + 二审 MED1：异常不静默吞，记录 warning（可观测），但 outreach_count 不推进

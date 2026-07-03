@@ -5,9 +5,14 @@
 的人容易被切断。
 
 覆盖：
-  ① LLMRequestPipeline._merge_fragments：换行拼接 + N>=2 时前缀连发标记；N==1
-     不加标记（单条碎片本就该原样透传）。合并标记只应出现在喂给 LLM 的
-     prompt 里，不该泄漏进 event.message_str/记忆观测/v2core 召回（见 TestMarkerDoesNotLeakIntoPlainText）。
+  ① LLMRequestPipeline._merge_fragments：换行拼接，不加任何标记。
+     review 修复（contrib）：曾经 N>=2 时会加一句『(他连着发了N条)』标记并
+     写进 request.prompt——但 request.prompt 会被 AstrBot 写穿透持久化为
+     "用户说了什么"，标记因此永久混入历史成为异物；现在改为 request.prompt/
+     event.message_str/message_text 三处统一使用不带标记的纯换行拼接文本
+     （见 TestMarkerRemovedFromAllPaths）。连发计数改由
+     event._sylanne_burst_count 传递，burst_cue 提示的渲染从未依赖这段文本
+     标记，去掉标记不影响 ④ 的行为。
   ② LLMRequestPipeline._adaptive_max_wait：画像可用时 clamp 到 [1.5, 8.0]，画像
      不成熟（median_gap=None）时原样回退配置值。median<configured 时收窄窗口是
      接受的权衡（见 TestAdaptiveMaxWaitAcceptedTradeoff）。
@@ -62,16 +67,17 @@ class TestMergeFragments:
         assert merged == "就这一句"
         assert "连着发了" not in merged
 
-    def test_two_fragments_newline_joined_with_marker(self) -> None:
+    def test_two_fragments_newline_joined_no_marker(self) -> None:
         merged = LLMRequestPipeline._merge_fragments(["第一条", "第二条"])
-        assert merged == "『(他连着发了2条)』\n第一条\n第二条"
+        assert merged == "第一条\n第二条"
+        assert "连着发了" not in merged
         # 边界保留：换行拼接，不是空格糊成一句
         assert " ".join(["第一条", "第二条"]) not in merged
 
-    def test_three_fragments_marker_count_matches(self) -> None:
+    def test_three_fragments_no_marker(self) -> None:
         merged = LLMRequestPipeline._merge_fragments(["a", "b", "c"])
-        assert merged.startswith("『(他连着发了3条)』\n")
-        assert merged == "『(他连着发了3条)』\na\nb\nc"
+        assert merged == "a\nb\nc"
+        assert "连着发了" not in merged
 
     def test_empty_list_returns_empty_string(self) -> None:
         assert LLMRequestPipeline._merge_fragments([]) == ""
@@ -167,35 +173,37 @@ class TestAdaptiveProbeDelay:
 
 
 # ---------------------------------------------------------------------------
-# ① 合并标记只进 prompt，不进 event.message_str / 记忆观测 / v2core 召回
+# ① review 修复（contrib）：标记从所有路径里彻底移除，request.prompt / plain
+# 两条路径产物完全一致（marker 不再存在，无处可漏）
 # ---------------------------------------------------------------------------
 
 
-class TestMarkerDoesNotLeakIntoPlainText:
-    """review MINOR-2：pipeline 在赢家分支里把合并标记版本喂给 request.prompt，
-    但 event.message_str（供 _background_observe_request 记忆观测、
-    v2core._user_text → _percept_recall 召回使用）应保持不带标记的纯换行拼接。
-    这里直接验证 pipeline 实际使用的两条构造路径的产物不同、且纯文本路径确实
-    不含标记字面量。
+class TestMarkerRemovedFromAllPaths:
+    """review 修复（contrib，foreign matter persisted as user speech）：曾经
+    pipeline 在赢家分支里把带『(他连着发了N条)』标记的版本喂给 request.prompt，
+    而 request.prompt 正是 AstrBot 写穿透持久化为"用户说了什么"的字段
+    （core/provider/entities.py assemble_context 读 self.prompt）——标记因此
+    被当成用户说过的话永久存进历史。修复后 _merge_fragments 不再产出任何
+    标记，request.prompt / event.message_str / message_text 三处统一使用同一
+    段纯换行拼接文本，不存在"哪条路径漏了标记"的问题。
     """
 
     def test_plain_join_has_no_marker(self) -> None:
         texts = ["第一条", "第二条", "第三条"]
-        merged_plain = "\n".join(texts)  # pipeline 里 event.message_str 走的路径
+        merged_plain = "\n".join(texts)
         assert "连着发了" not in merged_plain
         assert merged_plain == "第一条\n第二条\n第三条"
 
-    def test_prompt_join_has_marker_plain_does_not(self) -> None:
+    def test_prompt_path_identical_to_plain_path_no_marker(self) -> None:
         texts = ["在吗", "有空吗"]
         merged_prompt = LLMRequestPipeline._merge_fragments(texts)  # request.prompt 路径
         merged_plain = "\n".join(texts)  # event.message_str 路径
-        assert "连着发了2条" in merged_prompt
+        assert "连着发了" not in merged_prompt
         assert "连着发了" not in merged_plain
-        # 标记之外，两者共享同一段换行拼接的正文
-        assert merged_prompt.endswith(merged_plain)
+        # 两条路径现在完全一致——不再有标记造成的分歧
+        assert merged_prompt == merged_plain
 
     def test_single_fragment_plain_and_prompt_identical(self) -> None:
-        """N==1 时两条路径本就该完全一致（没有标记可去）。"""
         texts = ["就这一句"]
         merged_prompt = LLMRequestPipeline._merge_fragments(texts)
         merged_plain = "\n".join(texts)

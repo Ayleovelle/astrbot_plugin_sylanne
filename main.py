@@ -1452,9 +1452,11 @@ class EmotionalStatePlugin(Star):
             logger.error(f"Sylanne v2core bridge error, fallback to legacy: {exc}", exc_info=True)
         await self._llm_response_pipeline._on_llm_response_inner(event, response)
 
-    async def _background_observe_response(self, session_key: str, text: str) -> None:
+    async def _background_observe_response(
+        self, session_key: str, text: str, *, skip_conv_sync: bool = False
+    ) -> None:
         await self._llm_response_pipeline._background_observe_response(
-            session_key, text
+            session_key, text, skip_conv_sync=skip_conv_sync
         )
 
     @_optional_stream_chunk_filter(desc="流式首句提前发送")

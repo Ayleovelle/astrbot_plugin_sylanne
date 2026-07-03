@@ -323,7 +323,12 @@ class TestH1ImageTranscribeSkip:
 
 
 class TestH9FocusAndDilutionNoHelp:
-    """H9: 实义用户句不触发 history_dilution；Focus 不帮交付任务。"""
+    """H9: 实义用户句不触发 history_dilution；Focus 不帮交付任务。
+
+    history_dilution 已在 fix/context-integrity 中废止为永久 no-op（写穿透
+    持久化会永久腰斩用户历史，见 sylanne_alpha/history_dilution.py 墓碑说明）；
+    以下两条断言均改为验证「无论输入如何，contexts 都原样不变」。
+    """
 
     def test_dilution_skips_substantive_clarification(self) -> None:
         contexts = [
@@ -334,7 +339,7 @@ class TestH9FocusAndDilutionNoHelp:
         out = dilute_dense_contexts(contexts, msg)
         assert out is contexts  # 未改写
 
-    def test_dilution_runs_on_low_info_only(self) -> None:
+    def test_dilution_never_mutates_even_on_low_info(self) -> None:
         contexts = [
             {"role": "user", "content": "旧话题" * 80},
             {"role": "assistant", "content": "旧告白" * 80},
@@ -344,8 +349,8 @@ class TestH9FocusAndDilutionNoHelp:
             {"role": "assistant", "content": "最近回复"},
         ]
         out = dilute_dense_contexts(contexts, "😋")
-        assert out is not contexts
-        assert "较早对话已压缩" in str(out[0].get("content", ""))
+        assert out is contexts
+        assert "较早对话已压缩" not in str(out[0].get("content", ""))
 
 
 class TestH10ReplyLengthFactorUnwired:

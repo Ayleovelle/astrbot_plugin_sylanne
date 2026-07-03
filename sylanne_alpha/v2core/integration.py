@@ -373,6 +373,44 @@ async def _percept_recall(
         pass
 
 
+def peek_percept_recalled_texts(plugin: Any, session_key: str) -> set[str]:
+    """只读窥视本轮 PERCEPT 已召回的记忆原文集合（不新建/不触发 v2core 运行态）。
+
+    供 legacy [记忆参考] 格式化前做同轮跨路径去重：v2core_on 时 PERCEPT
+    （_percept_recall，本模块）与 legacy（llm_request_pipeline._prepare_memory_context）
+    两条召回路径在同一轮都会跑，同一条记忆可能被两边都命中，重复注入进同一个 prompt。
+
+    只 peek 已存在的 `plugin._v2core_runtimes` 缓存条目——绝不调用 `_runtime_for`
+    新建（v2core 未开启/本轮 PERCEPT 未跑时缓存不存在，返回空集，legacy 行为不变）。
+    任何环节异常一律返回空集（fail-open：宁可不去重，也不能因为这个旁路影响
+    legacy 记忆注入这条主路径）。
+    """
+    try:
+        cache = getattr(plugin, "_v2core_runtimes", None)
+        if not isinstance(cache, dict):
+            return set()
+        rt = cache.get(session_key)
+        if not isinstance(rt, dict):
+            return set()
+        pending = rt.get("pending")
+        if not isinstance(pending, dict):
+            return set()
+        ctx = pending.get("ctx")
+        scratch = getattr(ctx, "scratch", None) if ctx is not None else None
+        recalled = scratch.get("recalled") if isinstance(scratch, dict) else None
+        if not isinstance(recalled, list):
+            return set()
+        out: set[str] = set()
+        for r in recalled:
+            if isinstance(r, dict):
+                t = str(r.get("text") or "").strip()
+                if t:
+                    out.add(t)
+        return out
+    except Exception:
+        return set()
+
+
 def _evo_provider(plugin: Any, session_key: str):
     """构造本会话的进化偏置 provider：callable(agent, key) -> float（#29 输出侧接通）。
 

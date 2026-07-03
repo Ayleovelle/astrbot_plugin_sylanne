@@ -240,6 +240,79 @@ def sanitize_tool_call_pairing(contexts: Any) -> Any:
 
 
 # ---------------------------------------------------------------------------
+# 外部插件（astrbot_plugin_proactive_chat）主动消息模板泄漏进历史 → 脱敏
+# ---------------------------------------------------------------------------
+
+# 私聊主动消息默认提示词模板的签名前缀（astrbot_plugin_proactive_chat/
+# _conf_schema.json friend_settings.proactive_prompt.default）。该外部插件
+# 每次主动发送后都把这整段 system-task 元指令模板当成"用户说的话"存进
+# conversation_manager 历史（core/chat_flow.py._finalize_and_reschedule →
+# add_message_pair 里的 user_prompt 就是这个模板本身，不是真实用户文本），
+# 此后每一轮对话都会把它当成用户历史发言原样喂回 LLM，逐轮累积、毒化后续
+# 上下文。该插件是外部代码，不可改；只能在我们自己读取 request.contexts 时
+# 把这类条目替换成中性占位。只做精确签名前缀匹配（不做宽松包含匹配）：
+# 真实用户文本几乎不可能恰好以这个字面量开头，误伤概率可忽略。
+_PROACTIVE_TEMPLATE_SIGNATURE = "[系统任务：主动对话]"
+_PROACTIVE_TEMPLATE_PLACEHOLDER = "（她此前主动发来过一条消息）"
+
+
+def _ctx_leading_text(content: Any) -> str:
+    """从 contexts 消息的 content 字段取出可判定的文本。
+
+    兼容两种历史存储形态：纯字符串（legacy）与 AstrBot Message.model_dump()
+    输出的内容块列表 [{"type": "text", "text": "..."}, ...]（见
+    core/agent/message.py TextPart / UserMessageSegment）。其余类型（图片等）
+    一律返回空串，不参与匹配。
+    """
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        for block in content:
+            if isinstance(block, dict) and block.get("type") == "text":
+                # .get("text") or "" ——键存在但值为 None 时 .get("text", "") 会
+                # 返回 None，str(None) == "None" 混进比较字符串，污染签名匹配。
+                return str(block.get("text") or "")
+    return ""
+
+
+def scrub_proactive_template_turns(contexts: Any) -> tuple[Any, int]:
+    """把泄漏进历史的主动消息 system-task 模板"用户话"替换成中性占位。
+
+    只替换 role=="user" 且内容以 `_PROACTIVE_TEMPLATE_SIGNATURE` 开头的条目
+    （精确签名匹配），保留原消息的其余字段（时间戳等）不动。
+
+    Returns:
+        (处理后的 contexts, 命中数)。命中数为 0 时原样返回同一对象引用，
+        不做无意义拷贝。
+    """
+    if not isinstance(contexts, list) or not contexts:
+        return contexts, 0
+    result: list = []
+    hit = 0
+    for m in contexts:
+        if (
+            isinstance(m, dict)
+            and m.get("role") == "user"
+            and _ctx_leading_text(m.get("content")).startswith(
+                _PROACTIVE_TEMPLATE_SIGNATURE
+            )
+        ):
+            new_m = dict(m)
+            new_m["content"] = (
+                [{"type": "text", "text": _PROACTIVE_TEMPLATE_PLACEHOLDER}]
+                if isinstance(m.get("content"), list)
+                else _PROACTIVE_TEMPLATE_PLACEHOLDER
+            )
+            result.append(new_m)
+            hit += 1
+        else:
+            result.append(m)
+    if not hit:
+        return contexts, 0
+    return result, hit
+
+
+# ---------------------------------------------------------------------------
 # 流式 thinking 过滤器（fixes 流式模式下 ResultDecorateStage 被跳过导致的泄露）
 # ---------------------------------------------------------------------------
 
@@ -752,13 +825,21 @@ class LLMRequestPipeline:
 
         用换行而非空格拼接，保留每条消息的边界（原来的 " ".join 会把独立的几句
         糊成一句读不出停顿感的长句，LLM 也更容易逐句逐点地公式化回应——客服感
-        的根因之一）。N>=2 时前面加一句轻量标记，明确告诉 LLM 这是"连着发的好
-        几条"而不是天然的一整句话。
+        的根因之一）。
+
+        review 修复（contrib，foreign matter persisted as user speech）：曾经
+        N>=2 时会在这里前缀一句『(他连着发了N条)』标记写进 request.prompt——
+        但 request.prompt 正是 AstrBot 组装并写穿透持久化到会话历史的"用户说了
+        什么"（core/agent/runners/tool_loop_agent_runner.py
+        _assemble_request_context_for_provider → ProviderRequest.assemble_context
+        读 self.prompt），不是只喂给这一轮 LLM 看的临时文本。这条元指令标记会被
+        当成用户说过的话永久存进历史，往后每一轮都读到"用户说了『(他连着发了N
+        条)』"——这本身就是需要清理的异物，不是真实用户说的话。合并计数改由
+        event._sylanne_burst_count 传递（见调用处），v2core.integration.
+        _apply_burst_cue_scratch 已经从那个瞬态属性读取，从未依赖这行文本标记，
+        故去掉标记不影响 burst_cue 提示的渲染。
         """
-        merged = "\n".join(texts)
-        if len(texts) >= 2:
-            merged = f"『(他连着发了{len(texts)}条)』\n{merged}"
-        return merged
+        return "\n".join(texts)
 
     @staticmethod
     def _adaptive_max_wait(configured_max_wait: float, median_gap: float | None) -> float:
@@ -995,23 +1076,22 @@ class LLMRequestPipeline:
                     return
                 # T2-04①：连发不缝合（细节见 _merge_fragments）。
                 n_frags = len(claimed["texts"])
-                merged_plain = "\n".join(claimed["texts"])
-                merged_prompt = self._merge_fragments(claimed["texts"])
+                merged_plain = self._merge_fragments(claimed["texts"])
                 if n_frags >= 2:
                     # 瞬态标记：仅供本轮 v2core 心象层（apply_v2core_request）读取，
                     # 不写入任何持久化存储，下一轮 event 是新对象、自动失效。
                     event._sylanne_burst_count = n_frags
-                # 关键：LLM 实际读 req.prompt（req 在 hook 之前已 build），必须改这个；
-                # 合并标记『(他连着发了N条)』只应出现在喂给 LLM 的 prompt 里——
-                # event.message_str / message_text 还会流入记忆观测
-                # （_clean_incoming_message → _background_observe_request）和 v2core
-                # 感知召回（_user_text → _percept_recall），那两处存的该是"用户说了
-                # 什么"，不该带这条元指令标记（review MINOR 修复：标记曾经泄漏进
-                # 记忆与召回查询）。
-                request.prompt = merged_prompt
-                event.message_str = merged_plain  # 供历史/其他钩子（不含合并标记）
+                # review 修复（contrib）：request.prompt 会被 AstrBot 写穿透持久化
+                # 为"用户说了什么"（core/provider/entities.py assemble_context 读
+                # self.prompt 建用户消息，随后原样存进会话历史）——merged_plain 是
+                # 纯换行拼接、不带任何元指令标记的正文，request.prompt / event.
+                # message_str / message_text 三处统一用它，异物不再有机会混进
+                # 任何一条持久化路径。连发计数已通过 event._sylanne_burst_count
+                # 单独传给 v2core（burst_cue 渲染读那个属性，不读这段文本）。
+                request.prompt = merged_plain
+                event.message_str = merged_plain
                 message_text = merged_plain
-                logger.info("Sylanne fragment merged (winner): %s", merged_prompt[:60])
+                logger.info("Sylanne fragment merged (winner, %d frags): %s", n_frags, merged_plain[:60])
                 # fall-through 到下方 _process_llm_request_final（不 stop）
             else:
                 # 有更晚碎片，本条作废
@@ -1125,16 +1205,12 @@ class LLMRequestPipeline:
             memory_fragment=memory_fragment,
         )
 
-        # Step 5b: 低信息消息时稀释较早高密度 history（路径 B / Wave 3）
-        try:
-            from sylanne_alpha.history_dilution import dilute_dense_contexts
-
-            contexts = getattr(request, "contexts", None)
-            diluted = dilute_dense_contexts(contexts, message_text)
-            if diluted is not contexts and diluted is not None:
-                request.contexts = diluted
-        except Exception as e:
-            logger.debug(f"Sylanne history dilution skipped: {e}")
+        # Step 5b 已废止（fix/context-integrity，2026-07）：曾在此处对低信息
+        # 消息稀释较早 history（路径 B / Wave 3），但 req.contexts 会被 AstrBot
+        # 写穿透持久化到会话 DB，原地截断等于永久腰斩用户历史，且逐日复利。
+        # 详见 sylanne_alpha/history_dilution.py 顶部墓碑说明。原始意图（低信息
+        # 延续时别被旧浓文本带跑话题）已由 FocusDomain 经 system_prompt 满足，
+        # 且不写回 contexts，不受写穿透影响。
 
         # Step 6: 兜底——在所有 contexts 改写（含 hajide flatten、注入）之后，
         # 移除破损的 tool_calls/tool 配对，防止严格 provider（DeepSeek 等）返回 400。
@@ -1183,6 +1259,21 @@ class LLMRequestPipeline:
             if leaked:
                 logger.warning(
                     f"[Sylanne] cleaned {leaked} leaked _no_save message(s) from history"
+                )
+
+        # 兜底清理：把外部主动消息插件（astrbot_plugin_proactive_chat）泄漏进
+        # 历史的 system-task 模板"假用户话"替换成中性占位（见
+        # scrub_proactive_template_turns 文档）。converting instruction-templates
+        # to placeholders IMPROVES persisted history；只做精确签名匹配，真实
+        # 用户文本不会被误伤。
+        contexts = getattr(request, "contexts", None)
+        if contexts:
+            scrubbed, scrubbed_n = scrub_proactive_template_turns(contexts)
+            if scrubbed_n:
+                request.contexts = scrubbed
+                logger.info(
+                    f"[Sylanne] scrubbed {scrubbed_n} proactive-template turn(s) "
+                    "from history (astrbot_plugin_proactive_chat leak)"
                 )
 
         # 清理该会话的流式状态
@@ -1433,7 +1524,8 @@ class LLMRequestPipeline:
                 )
                 outreach_fragment = (
                     f"[life_event_context] Sylanne 刚刚经历了一件事想分享：{reason}（心情：{mood}）。"
-                    f"请自然地在回复中提及或表达这件事，用你自己的语气。"
+                    f"如果话赶话聊到了，可以顺嘴带一句、带着你自己的语气；不用为了提它硬转话题，"
+                    f"这轮没提到也没关系。"
                 )
                 # 将生活事件写入记忆层，标记 source="life_sim" 以便召回时
                 # 区分"Sylanne 自己脑补的生活"与"和用户真实聊过的事"。
@@ -1495,6 +1587,25 @@ class LLMRequestPipeline:
                     if r.relevance >= relevance_threshold
                     or r.recall_reason == "temporal_proximity"
                 ]
+            if results and v2core_on:
+                # 同轮跨路径去重：v2core_on 时 PERCEPT（apply_v2core_request，Step 0，
+                # 已跑在先）与本方法都会各自召回一次，同一条记忆可能被两边命中，
+                # 若不去重会在同一个 prompt 里重复出现两次。只窥视 PERCEPT 本轮已
+                # 召回的原文集合做精确文本去重（不改 PERCEPT 侧，legacy 不用 v2core
+                # 时该集合恒空，行为不变）。
+                try:
+                    from sylanne_alpha.v2core.integration import (
+                        peek_percept_recalled_texts,
+                    )
+
+                    _percept_texts = peek_percept_recalled_texts(p, session_key)
+                except Exception:
+                    _percept_texts = set()
+                if _percept_texts:
+                    results = [
+                        r for r in results
+                        if (r.text or "").strip() not in _percept_texts
+                    ]
             if results:
                 mem_texts = [r.text[:100] for r in results if r.text]
                 if mem_texts:
