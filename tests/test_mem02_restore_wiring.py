@@ -11,6 +11,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 
 from sylanne_alpha.memory_system import GraphNode, MemoryItem, MemorySystem
 from sylanne_alpha.session_context import SessionContext
@@ -350,11 +351,11 @@ def test_hydration_merge_unions_l3_nodes() -> None:
     assert live._l3_nodes["n2"].label == "KV 独有节点"
 
 
-def test_hydrate_leaves_unrecognized_legacy_format_unhydrated() -> None:
-    """遗留 SylanneMemoryState（records 字段，非 l1/l2/l3_nodes/l3_edges 新格式）
-    补水时本方法不懂怎么合并——不能翻 _hydrated，否则下一次周期性 save 就会用
-    活体的空对象把这份旧档覆盖掉。宁可让保护闸门一直挡着，直到活体自然积累出
-    真实内容（这时 has_content 天然为真，闸门不再相关）。
+def test_hydrate_migrates_legacy_records_format() -> None:
+    """FIX F（红队 L1-04/L2-4）：遗留 SylanneMemoryState（records 字段）补水时经
+    normalize_memory_blob 识别 + 迁移读取，合并进活体并翻 _hydrated——而不是像修复
+    前那样在聊天恢复路径永远不加载（旧行为把一份能迁移的老档判成"不认识"，只有
+    开 WebUI 走 load_sylanne_memory_state 才会迁移，即"记忆时有时无"根因之一）。
     """
     shared_kv: dict = {}
 
@@ -367,14 +368,279 @@ def test_hydrate_leaves_unrecognized_legacy_format_unhydrated() -> None:
         assert mem._hydrated is False
         await _drain_background_tasks(p)
 
-        # 无法识别的旧格式：既没有被合并，也没有被翻 hydrated。
-        assert mem._hydrated is False
-        assert shared_kv[kv_key] == {"records": [{"text": "旧版记忆", "depth": 0.9}]}
+        # 遗留 records 档被识别 + 迁移 + 合并进活体，_hydrated 翻 True。
+        assert mem._hydrated is True
+        all_texts = [it.text for it in list(mem._l1) + list(mem._l2)]
+        assert "旧版记忆" in all_texts, f"遗留记忆未迁移进活体: {all_texts}"
 
-        # 保护闸门仍然生效：这时如果有代码尝试用这个空活体去 save，应该被拦下。
-        await p._state_persistence.save_sylanne_memory_state("sess:legacy", mem)
-        assert shared_kv[kv_key] == {"records": [{"text": "旧版记忆", "depth": 0.9}]}, (
-            "未识别的旧格式档案被空对象覆盖了"
+    asyncio.run(go())
+
+
+def test_hydrate_leaves_partial_unrecognized_blob_unhydrated() -> None:
+    """FIX A/F：一份被 _kv_archive_has_content 判为"有内容"、但 normalize_memory_blob
+    认不出的残缺/未知 blob（例如只有 l1 键、缺 l2/l3——真实 to_dict 永远四键齐全，
+    这种只可能来自截断/损坏），补水刻意【不】翻 _hydrated，让 fail-closed 守卫继续
+    挡着，绝不用空/零星活体覆盖一份读得到但解析不了的归档。
+    """
+    shared_kv: dict = {}
+
+    async def go() -> None:
+        p = _FakePlugin(shared_kv)
+        kv_key = "sylanne_memory_state:sess:partial"
+        # 只有 l1 键（缺 l2/l3_nodes/l3_edges）：_kv_archive_has_content=True，但
+        # normalize 的 _MEMORY_SYSTEM_SHAPE_KEYS.issubset 需四键齐全 → 返回 None。
+        original = {
+            "l1": [
+                {
+                    "id": "x",
+                    "text": "残档",
+                    "weight": 1.0,
+                    "temperature": 0.0,
+                    "age_ticks": 0,
+                    "created_at": 0.0,
+                }
+            ]
+        }
+        shared_kv[kv_key] = dict(original)
+
+        mem = p._memory_system_for_session("sess:partial")
+        await _drain_background_tasks(p)
+
+        # 认不出的残缺档：不合并、不翻 hydrated。
+        assert mem._hydrated is False
+        # 守卫仍生效：空/未补水活体 save 不得覆盖这份读得到但不认识的归档。
+        await p._state_persistence.save_sylanne_memory_state("sess:partial", mem)
+        assert shared_kv[kv_key] == original, "未识别的残缺档被覆盖了"
+
+    asyncio.run(go())
+
+
+# ===========================================================================
+# 合并前对抗闸（PR #55 gate）确认的 fail-open 洞 —— fail-closed 回归证明
+# ===========================================================================
+
+
+class _RaisingKVPlugin(_FakePlugin):
+    """get_kv_data 可被切成"读即抛"，模拟瞬时 KV/DB 抖动。"""
+
+    def __init__(self, shared_kv: dict | None = None) -> None:
+        super().__init__(shared_kv)
+        self.raise_reads = False
+
+    async def get_kv_data(self, key: str, default=None):  # noqa: ANN001
+        if self.raise_reads:
+            raise RuntimeError("simulated transient KV read failure")
+        return await super().get_kv_data(key, default)
+
+
+class _CorruptReadbackPlugin(_FakePlugin):
+    """备份 blob 写进去后，回读时返回损坏值（模拟存储层回读损坏）。"""
+
+    async def get_kv_data(self, key: str, default=None):  # noqa: ANN001
+        if key.startswith("sylanne_memory_state_backup_v2:") and key in self._kv:
+            return "corrupted-not-a-dict"
+        return await super().get_kv_data(key, default)
+
+
+def test_hydrate_read_exception_leaves_unhydrated_and_guard_active() -> None:
+    """FIX A / C（红队 L1-01/L2-1/L3-1，CRITICAL）：补水时 KV 读【抛异常】绝不能被
+    当成"归档不存在"而翻 _hydrated——那会解除守卫、让下一次 save 用空活体覆盖真档，
+    即重启清零 bug 原地复活。读失败必须保持 _hydrated=False（fail-closed）；且守卫
+    自己的 KV 读若也抛异常，同样 fail-closed 拒绝落盘。
+    """
+    shared_kv: dict = {}
+    kv_key = "sylanne_memory_state:sess:raise"
+
+    async def seed() -> None:
+        p0 = _FakePlugin(shared_kv)
+        mem = p0._memory_system_for_session("sess:raise")
+        mem.write_summary(
+            text="重要记忆", source_turns=2, temperature=0.5, session_key="sess:raise"
         )
+        await p0._state_persistence.save_sylanne_memory_state("sess:raise", mem)
+
+    asyncio.run(seed())
+    assert shared_kv[kv_key]["l1"]
+    original = json.loads(json.dumps(shared_kv[kv_key]))
+
+    async def go() -> None:
+        p = _RaisingKVPlugin(shared_kv)
+        mem = p._memory_system_for_session("sess:raise")  # 排补水任务
+        p.raise_reads = True  # 补水读 + 守卫读都会抛
+        await _drain_background_tasks(p)
+
+        # FIX A：读失败 → 保持未补水（fail-closed）。
+        assert mem._hydrated is False
+        # FIX C：守卫读也抛 → fail-closed 拒绝 save → 真档一字不改。
+        await p._state_persistence.save_sylanne_memory_state("sess:raise", mem)
+        assert shared_kv[kv_key] == original, (
+            "读异常被 fail-open 当成空档，真实归档被覆盖（重启清零复活）"
+        )
+
+    asyncio.run(go())
+
+
+def test_nonempty_unhydrated_refused_not_just_empty() -> None:
+    """FIX B（红队 L2-2，CRITICAL）：守卫此前嵌在 `if is_empty:` 里——一个非空但
+    【未补水】的活体（补水前零星写入了几条新内容）会穿过守卫、用只含零星内容的
+    to_dict 覆盖掉尚未合并的完整归档。守卫改为：未补水 + KV 有内容 → 一律拒绝，
+    无论活体当前是空还是非空。
+    """
+    shared_kv: dict = {}
+    kv_key = "sylanne_memory_state:sess:partial2"
+
+    async def seed() -> None:
+        p0 = _FakePlugin(shared_kv)
+        mem = p0._memory_system_for_session("sess:partial2")
+        for i in range(5):
+            mem.write_summary(
+                text=f"完整归档记忆{i}",
+                source_turns=2,
+                temperature=0.3,
+                session_key="sess:partial2",
+            )
+        await p0._state_persistence.save_sylanne_memory_state("sess:partial2", mem)
+
+    asyncio.run(seed())
+    archive = json.loads(json.dumps(shared_kv[kv_key]))
+    assert len(archive["l1"]) >= 1
+
+    async def go() -> None:
+        p = _FakePlugin(shared_kv)
+        mem = p._memory_system_for_session("sess:partial2")  # 空、未补水、已排补水
+        # 补水跑完前往活体写一条新内容 → 非空但仍未补水。
+        mem.write_summary(
+            text="补水前的零星新内容",
+            source_turns=1,
+            temperature=0.2,
+            session_key="sess:partial2",
+        )
+        assert mem._hydrated is False
+        assert p._memory_system_has_content(mem) is True  # 非空
+
+        # 未 drain（补水没跑）→ 此刻 save：旧代码 is_empty=False 会穿过守卫覆盖；新代码拒绝。
+        await p._state_persistence.save_sylanne_memory_state("sess:partial2", mem)
+        assert shared_kv[kv_key] == archive, (
+            "非空未补水活体覆盖了完整归档（FIX B 回归）"
+        )
+        await _drain_background_tasks(p)  # 清理挂起的补水任务
+
+    asyncio.run(go())
+
+
+def test_evicted_unhydrated_nonempty_does_not_clobber_archive() -> None:
+    """FIX E（红队 L1-03）：一个非空但未补水的活体被 LRU 挤出时，_persist_memory_kv_only
+    落盘路径同样受 fail-closed 守卫——不得用它（只含零星内容）覆盖尚未合并的完整归档。
+    直接构造活体 + 触发驱逐回调，隔离补水任务，专测驱逐路径。
+    """
+    shared_kv: dict = {}
+    kv_key = "sylanne_memory_state:sess:evict2"
+
+    async def seed() -> None:
+        p0 = _FakePlugin(shared_kv)
+        mem = p0._memory_system_for_session("sess:evict2")
+        for i in range(4):
+            mem.write_summary(
+                text=f"完整归档{i}",
+                source_turns=2,
+                temperature=0.3,
+                session_key="sess:evict2",
+            )
+        await p0._state_persistence.save_sylanne_memory_state("sess:evict2", mem)
+
+    asyncio.run(seed())
+    archive = json.loads(json.dumps(shared_kv[kv_key]))
+
+    async def go() -> None:
+        p = _FakePlugin(shared_kv)
+        mem = MemorySystem()  # 不经 accessor，不排补水任务
+        mem.write_summary(
+            text="补水前零星", source_turns=1, temperature=0.2, session_key="sess:evict2"
+        )
+        assert mem._hydrated is False and p._memory_system_has_content(mem)
+
+        # 直接触发 LRU 驱逐回调（同步），内部 fire-and-forget 走 _persist_memory_kv_only。
+        p._state_persistence._on_memory_system_evicted("sess:evict2", mem)
+        await _drain_background_tasks(p)
+
+        assert shared_kv[kv_key] == archive, (
+            "驱逐落盘用非空未补水活体覆盖了完整归档（FIX E 回归）"
+        )
+
+    asyncio.run(go())
+
+
+def test_corrupt_existing_backup_is_revalidated_not_trusted() -> None:
+    """FIX D（红队 L1-02）：备份门 step-1 不能只凭 backup_key 存在就放行——一份损坏的
+    既有备份（CRC 不符）必须被识别、删除、用现有真档重新备份，而不是被当成"已安全
+    备份"从而在无可信备份下放行 v3 覆盖。
+    """
+    shared_kv: dict = {}
+    kv_key = "sylanne_memory_state:sess:bk"
+    backup_key = "sylanne_memory_state_backup_v2:sess:bk"
+    shared_kv[kv_key] = {
+        "version": "3.0.0",
+        "l1": [
+            {
+                "id": "a",
+                "text": "真档",
+                "weight": 1.0,
+                "temperature": 0.0,
+                "age_ticks": 0,
+                "created_at": 0.0,
+            }
+        ],
+        "l2": [],
+        "l3_nodes": {},
+        "l3_edges": [],
+    }
+    # 损坏的既有备份：是 dict、有两个键，但 CRC 与 data 不符。
+    shared_kv[backup_key] = {"data": {"garbage": True}, "_crc32": 12345}
+
+    async def go() -> None:
+        p = _FakePlugin(shared_kv)
+        sp = p._state_persistence
+        gate_ok = await sp._ensure_v2_backup_before_v3_write("sess:bk", kv_key, backup_key)
+        assert gate_ok is True
+        new_bk = shared_kv.get(backup_key)
+        assert sp._backup_blob_is_valid(new_bk), "step-1 未重建可信备份"
+        assert new_bk["data"] == shared_kv[kv_key], "重建备份没有快照现有真档"
+
+    asyncio.run(go())
+
+
+def test_backup_readback_corruption_fails_closed_and_deletes_poison() -> None:
+    """FIX D（红队 L1-02）：备份写入后回读损坏（非 dict）→ fail-closed 返回 False
+    （跳过 v3 写入），并【删除】这次写坏的备份 blob，否则下次 step-1 会把它当"已备份"
+    放行，在无可信备份下覆盖旧数据。
+    """
+    shared_kv: dict = {}
+    kv_key = "sylanne_memory_state:sess:bk2"
+    backup_key = "sylanne_memory_state_backup_v2:sess:bk2"
+    shared_kv[kv_key] = {
+        "version": "3.0.0",
+        "l1": [
+            {
+                "id": "a",
+                "text": "真档",
+                "weight": 1.0,
+                "temperature": 0.0,
+                "age_ticks": 0,
+                "created_at": 0.0,
+            }
+        ],
+        "l2": [],
+        "l3_nodes": {},
+        "l3_edges": [],
+    }
+
+    async def go() -> None:
+        p = _CorruptReadbackPlugin(shared_kv)
+        sp = p._state_persistence
+        gate_ok = await sp._ensure_v2_backup_before_v3_write(
+            "sess:bk2", kv_key, backup_key
+        )
+        assert gate_ok is False, "回读损坏必须 fail-closed"
+        assert backup_key not in shared_kv, "写坏的备份没被删除，会毒化下次 step-1"
 
     asyncio.run(go())
