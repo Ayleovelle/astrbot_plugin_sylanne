@@ -69,9 +69,6 @@ class MemoryWriteThroat:
         # 【刻意不】注册进 session_state_store._maps：release_session 会 pop 登记容器，
         # 墓碑被 pop = fail-open（正是要防的事，见设计 §1/§2）。
         self._epochs: dict[str, int] = {}
-        # 正在执行 op 的会话集合——防"drainer op 内部再 submit+await 同队列"自死锁
-        # （含 op spawn 的子任务，因为按 session 判定与调用者 task 身份无关）。
-        self._in_drainer: set[str] = set()
         self._occupant_getter = occupant_getter
         # 可观测计数（暴露到 admin inspect / 日志）。
         self.reject_count = 0
@@ -183,9 +180,14 @@ class MemoryWriteThroat:
             # （红队条件③自绑定 + 多 loop 场景的正确性，绝不 call_soon_threadsafe 到闭 loop）。
             if self._loop is not running:
                 self._loop = running
-            # 红队 MAJOR-6 / 条件③：禁止在本 session drainer op 执行中再 submit 本队列
-            # （含 op spawn 的子任务）——单 drainer 等只有自己能完成的 Future = 永久停摆。
-            if session_key in self._in_drainer:
+            # 红队 MAJOR-6 / 条件③：禁止【在本 session drainer op 内部】再 submit 本队列并
+            # 等待——单 drainer 等只有自己能完成的 Future = 永久停摆。判据是【任务身份】：
+            # 只有"当前执行任务【就是】本 session 的 drainer 任务"才算 re-entrant；来自其它
+            # 任务（pipeline 并发 save、驱逐回调等）的同 session 提交是【正常并发】，必须入队
+            # 串行化而【非】拒绝——那正是咽喉存在的意义。用 _in_drainer 集合判"drainer 是否
+            # 忙"会把正常并发也误拒并丢写（PR-1 gate T3-1 现场复现的真 bug）。
+            drainer = self._drainers.get(session_key)
+            if drainer is not None and asyncio.current_task() is drainer:
                 raise RuntimeError(
                     f"MemoryWriteThroat: re-entrant submit to session {session_key!r} "
                     "from within its own drainer op (would deadlock)"
@@ -251,7 +253,6 @@ class MemoryWriteThroat:
                     op.future.set_result(None)  # 被拒 = 无操作，不是错误
                 q = self._queues.get(session_key)
                 continue
-            self._in_drainer.add(session_key)
             try:
                 result = await op.factory()
                 if op.future is not None and not op.future.done():
@@ -266,8 +267,6 @@ class MemoryWriteThroat:
                 )
                 if op.future is not None and not op.future.done():
                     op.future.set_exception(e)
-            finally:
-                self._in_drainer.discard(session_key)
             q = self._queues.get(session_key)
         # 原子自毁：while 退出时 q 已空，且此后【无 await】——单 loop 语义下 _enqueue
         # 不可能在这两步之间插入，故 pop 是安全的。下一次 submit 会经 _ensure_drainer 重建。

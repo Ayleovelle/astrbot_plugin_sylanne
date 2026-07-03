@@ -51,6 +51,39 @@ def test_on_loop_submit_executes_and_self_destructs() -> None:
     asyncio.run(go())
 
 
+def test_throat_serializes_concurrent_same_session_ops() -> None:
+    """核心保证 + gate T3-1 回归：同 session 两个并发提交（各含 await 挂起点）被咽喉
+    【串行】执行、不交错——无锁 read-modify-write 不丢更新。这是 F2 根治的机制本体。
+    关键：并发同 session 提交必须【入队串行】而【非】被 re-entrancy 误判拒绝丢弃
+    （旧 _in_drainer 集合判据把正常并发也当 re-entrant 拒掉，是 gate 现场复现的真 bug）。
+    """
+    throat = MemoryWriteThroat()
+
+    async def go() -> None:
+        shared = {"v": 0}
+        order: list[str] = []
+
+        def make_op(tag: str):
+            async def op() -> None:
+                x = shared["v"]
+                await asyncio.sleep(0)  # 挂起点：无串行化则另一 op 在此插进来读到同一 x
+                await asyncio.sleep(0)
+                shared["v"] = x + 1
+                order.append(tag)
+
+            return op
+
+        # 两个并发提交（来自同一调用任务，非 drainer 任务）——必须都入队，都不被拒。
+        f1 = throat.submit("s", make_op("a"), kind="write")
+        f2 = throat.submit("s", make_op("b"), kind="write")
+        assert f1 is not None and f2 is not None, "并发同 session 提交被 re-entrancy 误拒（T3-1）"
+        await asyncio.gather(f1, f2)
+        assert shared["v"] == 2, "并发 op 交错丢更新——咽喉未真正串行化"
+        assert len(order) == 2
+
+    asyncio.run(go())
+
+
 def test_drainer_exception_propagates_and_does_not_kill_drainer() -> None:
     throat = MemoryWriteThroat()
 

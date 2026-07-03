@@ -863,63 +863,85 @@ def test_explicit_wipe_latch_prevents_hydration_resurrection() -> None:
 
 
 # ===========================================================================
-# MEM-03 PR-1：单写咽喉根治 F2 备份门 TOCTOU —— 集成回归
+# MEM-03 PR-1：单写咽喉根治 F2 备份门 TOCTOU —— 集成回归（含反事实，非空跑）
 # ===========================================================================
+
+
+class _SuspendingKVPlugin(_FakePlugin):
+    """get/put 前 await sleep(0)，制造真实挂起点——让并发 op 的 read-check-write
+    有机会交错（否则同步 fake KV 从不 yield，gather 的 save 会内联串行、测试失真）。
+    """
+
+    async def get_kv_data(self, key: str, default=None):  # noqa: ANN001
+        await asyncio.sleep(0)
+        return self._kv.get(key, default)
+
+    async def put_kv_data(self, key: str, value) -> None:  # noqa: ANN001
+        await asyncio.sleep(0)
+        self._kv[key] = value
+        self.kv_call_log.append(("put", key))
+
+
+_F2_ARCHIVE = {
+    "version": "3.0.0",
+    "l1": [
+        {
+            "id": "old",
+            "text": "旧档",
+            "weight": 1.0,
+            "temperature": 0.0,
+            "age_ticks": 0,
+            "created_at": 1.0,
+        }
+    ],
+    "l2": [],
+    "l3_nodes": {},
+    "l3_edges": [],
+}
+
+
+def _f2_make_state(txt: str) -> MemorySystem:
+    m = MemorySystem()
+    m._hydrated = True  # 已补水，守卫放行
+    m.write_summary(text=txt, source_turns=1, temperature=0.1, session_key="sess:f2")
+    return m
 
 
 def test_throat_serializes_concurrent_v3_first_writes_f2() -> None:
     """MEM-03 PR-1（F2 根治）：同 session 两条并发 v3 首写经咽喉串行——备份门的
-    read-check-write 不再交错，v2 备份恰写一次且 CRC 自洽、内容=原始旧档（而非某条
-    竞态中间态）。Phase-0 文档化遗留的备份门 TOCTOU 关闭。
+    read-check-write 不再交错，v2 备份恰写一次。用【会挂起】的 fake KV 制造真实交错，
+    并配【反事实】（绕过咽喉直跑 _impl）证明：不串行化时备份门 TOCTOU 真会重写备份
+    （≥2 次），咽喉才是修复者——本测试非空。
     """
-    shared_kv: dict = {}
-    kv_key = "sylanne_memory_state:sess:f2"
     backup_key = "sylanne_memory_state_backup_v2:sess:f2"
 
-    async def go() -> None:
-        p = _FakePlugin(shared_kv)
-        # 预置非空 v3 归档，让备份门走"读现档→备份"分支（而非空档早退）。
-        shared_kv[kv_key] = {
-            "version": "3.0.0",
-            "l1": [
-                {
-                    "id": "old",
-                    "text": "旧档",
-                    "weight": 1.0,
-                    "temperature": 0.0,
-                    "age_ticks": 0,
-                    "created_at": 1.0,
-                }
-            ],
-            "l2": [],
-            "l3_nodes": {},
-            "l3_edges": [],
-        }
-
-        def mk(txt: str) -> MemorySystem:
-            m = MemorySystem()
-            m._hydrated = True  # 已补水，守卫放行
-            m.write_summary(
-                text=txt, source_turns=1, temperature=0.1, session_key="sess:f2"
-            )
-            return m
-
-        mem_a, mem_b = mk("A"), mk("B")
-        # 并发两条 save → 咽喉按 session 串行化。
+    async def via_throat() -> list[str]:
+        p = _SuspendingKVPlugin({"sylanne_memory_state:sess:f2": dict(_F2_ARCHIVE)})
         await asyncio.gather(
-            p._state_persistence.save_sylanne_memory_state("sess:f2", mem_a),
-            p._state_persistence.save_sylanne_memory_state("sess:f2", mem_b),
+            p._state_persistence.save_sylanne_memory_state("sess:f2", _f2_make_state("A")),
+            p._state_persistence.save_sylanne_memory_state("sess:f2", _f2_make_state("B")),
         )
+        assert p._state_persistence._backup_blob_is_valid(p._kv[backup_key])
+        assert p._kv[backup_key]["data"]["l1"][0]["text"] == "旧档"
+        return [k for (op, k) in p.kv_call_log if op == "put" and k == backup_key]
 
-        # 备份恰写一次（第二条 save 的门 step-1 见备份已存在→不重写）。
-        backup_puts = [
-            k for (op, k) in p.kv_call_log if op == "put" and k == backup_key
-        ]
-        assert len(backup_puts) == 1, (
-            f"备份门 TOCTOU 未被串行化：v2 备份被写了 {len(backup_puts)} 次"
+    async def bypass_throat() -> list[str]:
+        # 反事实：绕过咽喉，直接并发跑 _impl → 备份门无串行化，TOCTOU 显形。
+        p = _SuspendingKVPlugin({"sylanne_memory_state:sess:f2": dict(_F2_ARCHIVE)})
+        sp = p._state_persistence
+        await asyncio.gather(
+            sp._save_sylanne_memory_state_impl("sess:f2", _f2_make_state("A")),
+            sp._save_sylanne_memory_state_impl("sess:f2", _f2_make_state("B")),
         )
-        # 备份 CRC 自洽 + 内容 = 原始旧档。
-        assert p._state_persistence._backup_blob_is_valid(shared_kv[backup_key])
-        assert shared_kv[backup_key]["data"]["l1"][0]["text"] == "旧档"
+        return [k for (op, k) in p.kv_call_log if op == "put" and k == backup_key]
 
-    asyncio.run(go())
+    puts_throat = asyncio.run(via_throat())
+    assert len(puts_throat) == 1, (
+        f"咽喉未串行化备份门：v2 备份被写了 {len(puts_throat)} 次"
+    )
+
+    puts_bypass = asyncio.run(bypass_throat())
+    assert len(puts_bypass) >= 2, (
+        f"反事实未复现备份门 TOCTOU（应≥2 次备份写，说明挂起点未触发交错，测试失真）："
+        f"{len(puts_bypass)}"
+    )
