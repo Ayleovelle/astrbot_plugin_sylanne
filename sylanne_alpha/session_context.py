@@ -771,6 +771,16 @@ class SessionContext:
     def memory_system_for_session(self, session_key: str) -> MemorySystem:
         """获取指定会话的记忆系统实例（懒创建）。
 
+        MEM-02①：本方法是冻结的同步契约（外部消费方按同步 API 调用），不能改成
+        async——但 chat 路径重启后 body 通道恢复不到真实内容（CP1 起
+        AlphaBodyState.to_dict 白名单 memory 到 {relationship, shadow,
+        recent_texts}，_memory_system 键从未落进去），首次为某 session 懒创建的
+        MemorySystem 永远是空的。这里在懒创建的同一拍，把"从 KV 归档补水"调度成
+        后台 fire-and-forget 任务（仓库既有的 anchored 后台任务模式），不阻塞、
+        不改变本方法的同步返回契约；真正的合并逻辑在
+        StatePersistence.hydrate_memory_system 里非破坏性地原地合并（不是整层替换），
+        避免补水任务完成前活体已经写入的新内容被覆盖。
+
         Args:
             session_key: 会话标识。
 
@@ -786,7 +796,30 @@ class SessionContext:
             cfg = getattr(self._p, "config", None) or {}
             recall_mode = cfg.get("sylanne_alpha_recall_mode") or None
             systems.set(session_key, MemorySystem(recall_mode=recall_mode))
+            self._schedule_memory_hydration(session_key)
         return systems.get(session_key)
+
+    def _schedule_memory_hydration(self, session_key: str) -> None:
+        """MEM-02①：懒创建 MemorySystem 后台补水的调度点（幂等，失败静默降级）。
+
+        `StatePersistence.hydrate_memory_system` 自己会检查 `_hydrated` 标记，
+        重复调度（例如同一 session 短时间内多次懒创建，理论上不该发生但防御一下）
+        不会重复合并——第二次进去时活体已经 `_hydrated=True`，直接 no-op 返回。
+        """
+        state_persistence = getattr(self._p, "_state_persistence", None)
+        hydrate = getattr(state_persistence, "hydrate_memory_system", None)
+        if not callable(hydrate):
+            return
+        try:
+            from sylanne_alpha.utils import safe_ensure_future
+
+            safe_ensure_future(
+                hydrate(session_key),
+                name=f"memory_hydrate_{session_key}",
+                task_list=getattr(self._p, "_background_tasks", None),
+            )
+        except Exception as e:
+            logger.debug(f"Sylanne memory hydration scheduling skipped: {e}")
 
     def memory_system_has_content(self, memory_system: Any) -> bool:
         """检查记忆系统是否包含有效内容（L1/L2/L3 任一非空）。

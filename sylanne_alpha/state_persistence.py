@@ -101,6 +101,19 @@ def swap_dirty() -> set[str]:
     return _dirty.swap()
 
 
+def _kv_archive_has_content(data: Any) -> bool:
+    """MEM-02②：判断一份 KV 归档 dict 是否包含非空的记忆内容。
+
+    覆盖新版 MemorySystem 格式（l1/l2/l3_nodes/l3_edges）与旧版
+    SylanneMemoryState 格式（records）——两种都可能出现在存量 KV 数据里。
+    """
+    if not isinstance(data, dict):
+        return False
+    if any(data.get(k) for k in ("l1", "l2", "l3_nodes", "l3_edges")):
+        return True
+    return bool(data.get("records"))
+
+
 # ---------------------------------------------------------------------------
 # Item 73: 端到端加密记忆存储（简化版）
 # ---------------------------------------------------------------------------
@@ -173,6 +186,60 @@ class StatePersistence:
         # 本实例的合并落盘调度，无需调用方持有 StatePersistence 句柄。
         global _active_persistence
         _active_persistence = self
+        # MEM-02③：_store.memory_systems 是 BoundedDict(maxsize=100)，超容量时
+        # LRU 驱逐——驱逐前若无回调，被逐出的会话记忆直接从内存态消失（未落盘的
+        # 最长 9 个 tick 静默丢失），且下次访问该 session 会重建全新空 MemorySystem，
+        # 反过来有覆盖 KV 归档的风险。这里挂 on_evict 做 fire-and-forget 持久化，
+        # 补上这条驱逐链路（BoundedDict 原生支持 on_evict，无需新造机制）。
+        self._wire_memory_eviction_persistence()
+
+    def _wire_memory_eviction_persistence(self) -> None:
+        """把 memory_systems 的 LRU 驱逐接到落盘回调（幂等，可重复调用）。"""
+        store = getattr(self._p, "_store", None)
+        memory_map = getattr(store, "memory_systems", None)
+        set_on_evict = getattr(memory_map, "set_on_evict", None)
+        if callable(set_on_evict):
+            set_on_evict(self._on_memory_system_evicted)
+
+    def _on_memory_system_evicted(self, session_key: str, memory_system: Any) -> None:
+        """memory_systems BoundedDict LRU 驱逐单个 session 条目时的回调。
+
+        同步回调（BoundedDict.__setitem__ 内部触发，不能 await），驱逐前先判断
+        是否有实际内容再决定是否 fire-and-forget 落盘，避免驱逐一堆空对象时
+        制造无意义的 KV 写入。
+        """
+        has_content_fn = getattr(self._p, "_memory_system_has_content", None)
+        try:
+            has_content = (
+                bool(has_content_fn(memory_system)) if callable(has_content_fn) else True
+            )
+        except Exception:
+            has_content = True
+        if not has_content:
+            return
+        safe_ensure_future(
+            self._persist_memory_kv_only(session_key, memory_system),
+            name=f"memory_evict_persist_{session_key}",
+            task_list=getattr(self._p, "_background_tasks", None),
+        )
+
+    async def _persist_memory_kv_only(self, session_key: str, state: Any) -> None:
+        """只写 KV，不touch `_store` 的活体引用——专供驱逐/释放场景使用。
+
+        `save_sylanne_memory_state` 常规路径会顺手把 state 写回
+        `_store.memory_systems` / `sylanne_memory_cache`（保持缓存与 KV 一致，
+        绝大多数调用点需要这个副作用）。但驱逐/release 场景恰恰是"这个对象正在
+        或已经离开活体 store"——如果落盘复用那个方法，会在 pop 之后又把它重新
+        塞回 store，制造出"明明驱逐/release 了、entry 却还在"的假象。这里绕开
+        store 写回，只落 KV，语义更贴合调用现场。
+        """
+        if state is None:
+            return
+        kv_key = self.sylanne_memory_kv_key(session_key)
+        put_fn = getattr(self._p, "put_kv_data", None)
+        if put_fn and callable(put_fn):
+            data = state.to_dict() if hasattr(state, "to_dict") else state
+            await put_fn(kv_key, data)
 
     # ------------------------------------------------------------------
     # KV 键生成辅助方法
@@ -774,6 +841,44 @@ class StatePersistence:
             return
         from .memory_system import MemorySystem
 
+        # MEM-02②：单点闸门——一个从未真正恢复过（_hydrated=False）且当前为空
+        # 的 MemorySystem，不允许把已存在的非空 KV 归档覆盖为空。这是"重启即
+        # 清零"链路的最后一道防线：正常情况下 _hydrated 早已在
+        # host()/memory_system_for_session() 的恢复路径或补水任务完成时翻 True，
+        # 只有对"刚创建、补水还没跑完/还没跑到"的实例调用本方法才会走到这个分支
+        # ——多付一次 KV 读代价，换空对象不会把真实历史抹掉的保证。显式清除
+        # （WebUI meltdown）不经过本方法写空值，不受影响。
+        if isinstance(state, MemorySystem) and not getattr(state, "_hydrated", True):
+            has_content_fn = getattr(self._p, "_memory_system_has_content", None)
+            is_empty = True
+            if callable(has_content_fn):
+                try:
+                    is_empty = not bool(has_content_fn(state))
+                except Exception:
+                    is_empty = True
+            if is_empty:
+                kv_key = self.sylanne_memory_kv_key(session_key)
+                get_fn = getattr(self._p, "get_kv_data", None)
+                existing = None
+                if callable(get_fn):
+                    try:
+                        existing = await get_fn(kv_key, None)
+                    except Exception as e:
+                        logger.debug(f"Sylanne memory guard existing-KV read failed: {e}")
+                        existing = None
+                if _kv_archive_has_content(existing):
+                    if not getattr(state, "_empty_write_warned", False):
+                        logger.warning(
+                            "Sylanne memory: refused to overwrite non-empty KV archive "
+                            f"for session {session_key!r} with an un-hydrated empty "
+                            "MemorySystem (hydration still pending); skipping this save"
+                        )
+                        try:
+                            state._empty_write_warned = True
+                        except Exception:
+                            pass
+                    return
+
         self._p._store.sylanne_memory_cache.set(session_key, state)
         if isinstance(state, MemorySystem):
             self._p._store.memory_systems.set(session_key, state)
@@ -906,6 +1011,78 @@ class StatePersistence:
             return live_state
         return None
 
+    async def hydrate_memory_system(self, session_key: str) -> None:
+        """MEM-02①：后台补水——把 KV 归档非破坏性地合并进当前活体 MemorySystem。
+
+        由 `SessionContext.memory_system_for_session` 在首次为某 session 创建
+        MemorySystem 时以 fire-and-forget 后台任务调度（该 accessor 是冻结的同步
+        契约，不能改成 async；调 KV 的 get_kv_data 是 async，只能异步补水）。
+
+        与直接调用 `load_sylanne_memory_state`（会把 `_store.memory_systems[key]`
+        整体替换成新对象）不同——这里刻意只读 KV、不碰 store 的对象引用，全程原地
+        合并进已经在 store 里、可能已经被其他并发请求持有引用并写入的那个活体
+        实例，避免"KV 加载出的新对象 replace 掉 store 引用，旧引用的持有者继续写
+        旧对象、最终一次 save 又把刚加载出来的归档盖掉"这条二次归零链路。
+
+        无论 KV 里有没有数据，只要真正尝试过一次，都会把 `_hydrated` 翻 True——
+        这样 `save_sylanne_memory_state` 的空对象保护闸门不会对同一个实例反复
+        触发 KV 读。
+        """
+        from .memory_system import MemorySystem
+
+        store = getattr(self._p, "_store", None)
+        memory_map = getattr(store, "memory_systems", None) if store is not None else None
+        live = memory_map.get(session_key) if memory_map is not None else None
+        if live is None or not isinstance(live, MemorySystem):
+            return
+        if getattr(live, "_hydrated", False):
+            return
+
+        data: Any = None
+        try:
+            kv_key = self.sylanne_memory_kv_key(session_key)
+            get_fn = getattr(self._p, "get_kv_data", None)
+            if callable(get_fn):
+                data = await get_fn(kv_key, None)
+        except Exception as e:
+            logger.warning(f"Sylanne memory hydrate KV read failed for {session_key!r}: {e}")
+            data = None
+
+        # await 期间该 session 可能已被别的路径显式恢复/清空/替换——重新取一次
+        # 活体引用，且若已经在这段时间内被标记 hydrated（例如 WebUI meltdown
+        # 或并发的另一次补水），直接放弃，不做任何合并，避免把过期数据合并回去。
+        live = memory_map.get(session_key) if memory_map is not None else None
+        if live is None or not isinstance(live, MemorySystem):
+            return
+        if getattr(live, "_hydrated", False):
+            return
+
+        if isinstance(data, dict) and {
+            "l1",
+            "l2",
+            "l3_nodes",
+            "l3_edges",
+        }.issubset(data.keys()):
+            live.merge_kv_archive(data)
+            logger.info(
+                f"Sylanne memory: hydrated session {session_key!r} from KV archive"
+            )
+            live._hydrated = True
+        elif not _kv_archive_has_content(data):
+            # KV 里确实没有（或没有可识别的）内容——没什么可保护的，标记为已尝试过，
+            # 避免后续每次 save 都重复付一次 KV 读代价。
+            live._hydrated = True
+        else:
+            # 无法识别的旧格式（如遗留 SylanneMemoryState.records）——本方法不懂
+            # 怎么把它合并进当前的 MemorySystem，所以刻意【不】翻 _hydrated。留着
+            # save_sylanne_memory_state 的空对象保护闸门继续挡着，直到活体自己从
+            # 真实对话里积累出非空内容（那时 has_content 天然为真，闸门不再相关）
+            # ——总比翻 True 之后第一次周期性 save 就用空对象把这份旧档覆盖掉安全。
+            logger.debug(
+                f"Sylanne memory hydrate: unrecognized/legacy KV format for "
+                f"{session_key!r}, leaving un-hydrated (guard stays active)"
+            )
+
     async def delete_sylanne_memory_state(self, session_key: str) -> None:
         """删除 Sylanne 记忆状态（缓存 + KV 存储）。
 
@@ -983,8 +1160,37 @@ class StatePersistence:
         会话态容器统一收口于 p._store.release_session（CP8-P2），结构性登记保证
         新增容器自动纳入清理，杜绝原反射式 _SESSION_KEYED_CONTAINERS 手抄元组的
         漏登记静默泄漏（曾漏 3 个无界裸 dict）。
+
+        MEM-02③：release_session 只是同步 pop，对 memory_systems 而言等于硬删除
+        （没有 BoundedDict 驱逐时的 on_evict 语义）——若这中间还有未落盘的内容
+        （最长 9 个 tick），会随 pop 直接静默丢失。这里在 pop 之前先同步取一次
+        引用、快照式 fire-and-forget 落盘，再走原有 release/清理流程；本方法末尾
+        紧接着的 _cleanup_kv_for_session 仍会把这份刚落盘的 KV 一并删掉——那是
+        AstrBot 侧真正的"会话已删除"语义（比 LRU 驱逐更彻底），持久化只是防止
+        在两步之间出现"内存里已丢、KV 里还没来得及有"的空窗。
         """
         p = self._p
+        memory_system = p._store.memory_systems.get(session_key)
+        if memory_system is not None:
+            has_content_fn = getattr(p, "_memory_system_has_content", None)
+            try:
+                has_content = (
+                    bool(has_content_fn(memory_system))
+                    if callable(has_content_fn)
+                    else True
+                )
+            except Exception:
+                has_content = True
+            if has_content:
+                # 用只写 KV 的变体（而非 save_sylanne_memory_state）——否则这个
+                # fire-and-forget 任务真正跑起来时会把 state 写回
+                # `_store.memory_systems`，在下面这行 release_session 的 pop
+                # 之后又把 entry 复活回去。
+                safe_ensure_future(
+                    self._persist_memory_kv_only(session_key, memory_system),
+                    name=f"memory_release_persist_{session_key}",
+                    task_list=getattr(p, "_background_tasks", None),
+                )
         p._store.release_session(session_key)
         p._amnesia_sessions.discard(session_key)
         # CP8-P3：防抖定时器清理——取消该 session 在 buffer/kernel 防抖队列中的

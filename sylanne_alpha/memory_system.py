@@ -943,6 +943,15 @@ class MemorySystem:
         self._recalled_l2_items: list[MemoryItem] = []
         self._gc_tick_counter: int = 0  # GC 计数器
         self._inverted_index = InvertedIndex()
+        # MEM-02②：运行时补水标记（不持久化——不进 to_dict）。一个刚 __init__ 出来、
+        # 还没经过任何一次真实恢复尝试（无论是 body 通道 from_dict 还是后台 KV
+        # 归档补水）的实例，_hydrated 恒为 False。StatePersistence.save_sylanne_memory_state
+        # 用它挡住"空对象覆盖非空 KV 归档"这条重启致零链路；一旦 _restore_from_data
+        # 跑过一次（即便结果仍是空），或后台补水任务跑完一次（无论有没有拿到数据），
+        # 就翻 True，此后不再拦这个实例的写入。
+        self._hydrated: bool = False
+        # 配合 _hydrated 的一次性 warn 节流：同一实例反复命中拦截只警告一次。
+        self._empty_write_warned: bool = False
         # T2-05①：待跟进线索列表（{topic_snippet, due_ts_estimate, session_key,
         # created_ts}），one-shot 消费，cap 见 _PENDING_FOLLOWUP_CAP。
         self._pending_followups: list[dict[str, Any]] = []
@@ -3040,6 +3049,141 @@ class MemorySystem:
         self._l3_edge_index: dict[tuple[str, str, str], int] = {
             (e.source, e.target, e.relation): i for i, e in enumerate(self._l3_edges)
         }
+        # MEM-02②：一次真实的恢复尝试已经发生（哪怕恢复出来的内容仍是空），
+        # 后续 save_sylanne_memory_state 的"空对象保护 KV"闸门不再拦这个实例。
+        self._hydrated = True
+
+    # ------------------------------------------------------------------
+    # MEM-02①：非破坏性补水合并（restore-wiring race guard）
+    # ------------------------------------------------------------------
+
+    def merge_kv_archive(self, data: dict) -> None:
+        """把 KV 归档 dict 合并进当前（可能已经写入过内容的）活体实例。
+
+        与 `_restore_from_data`（整层替换，deque 重建）不同——那是"把一份存档
+        加载进一个全新/待清空实例"的正确语义；这里是"进程重启后 body 通道断链，
+        chat 路径已经拿到一个空的活体 MemorySystem 并可能已经写入了几条新内容，
+        随后后台补水任务才从 KV 读到旧档"的场景，KV 存档系统性滞后（最长 9 个
+        tick，因为落盘只在 `_tick % 10 == 0` 时发生），所以不能整层覆盖——那样会
+        把补水这几个 tick 之间活体已经写入的新内容原地抹掉。
+
+        合并规则：按 id 去重，同 id 冲突时保留 `max(created_at, last_recalled_ts)`
+        更大（更新）的版本；L3 图节点/边按 id/(source,target,relation) 做并集
+        （活体优先，KV 补空位）；tick / last_consolidation_ts 取二者较大值；
+        pending_followups 按 (topic_snippet, due_ts_estimate) 去重合并。
+        """
+        if not isinstance(data, dict):
+            return
+
+        def _safe_items(cls: Any, raw: Any) -> list[Any]:
+            out: list[Any] = []
+            for d in raw or []:
+                if not isinstance(d, dict):
+                    continue
+                try:
+                    out.append(cls.from_dict(d))
+                except Exception:
+                    continue
+            return out
+
+        kv_l1 = _safe_items(MemoryItem, data.get("l1"))
+        kv_l2 = _safe_items(MemoryItem, data.get("l2"))
+        raw_l3_nodes = data.get("l3_nodes")
+        kv_l3_nodes: dict[str, GraphNode] = {}
+        if isinstance(raw_l3_nodes, dict):
+            for nid, nd in raw_l3_nodes.items():
+                if not isinstance(nd, dict):
+                    continue
+                try:
+                    kv_l3_nodes[str(nid)] = GraphNode.from_dict(nd)
+                except Exception:
+                    continue
+        kv_l3_edges = _safe_items(GraphEdge, data.get("l3_edges"))
+
+        merged_l1 = self._merge_items_by_id(list(self._l1), kv_l1)
+        merged_l2 = self._merge_items_by_id(self._l2, kv_l2)
+        self._l1 = deque(merged_l1[-self._L1_CAPACITY :], maxlen=self._L1_CAPACITY)
+        self._l2 = merged_l2
+
+        for nid, node in kv_l3_nodes.items():
+            if nid not in self._l3_nodes:
+                self._l3_nodes[nid] = node
+        existing_edge_keys = {
+            (e.source, e.target, e.relation) for e in self._l3_edges
+        }
+        for edge in kv_l3_edges:
+            key = (edge.source, edge.target, edge.relation)
+            if key not in existing_edge_keys:
+                self._l3_edges.append(edge)
+                existing_edge_keys.add(key)
+        self._l3_label_index = {n.label: nid for nid, n in self._l3_nodes.items()}
+        self._l3_edge_index = {
+            (e.source, e.target, e.relation): i
+            for i, e in enumerate(self._l3_edges)
+        }
+
+        kv_tick = data.get("tick", 0)
+        if isinstance(kv_tick, (int, float)) and kv_tick > self._tick:
+            self._tick = int(kv_tick)
+        kv_consolidation_ts = data.get("last_consolidation_ts", 0.0)
+        if (
+            isinstance(kv_consolidation_ts, (int, float))
+            and kv_consolidation_ts > self._last_consolidation_ts
+        ):
+            self._last_consolidation_ts = float(kv_consolidation_ts)
+
+        raw_followups = data.get("pending_followups", [])
+        if isinstance(raw_followups, list):
+            existing_keys = {
+                (str(e.get("topic_snippet", "")), e.get("due_ts_estimate"))
+                for e in self._pending_followups
+                if isinstance(e, dict)
+            }
+            for entry in raw_followups:
+                if not isinstance(entry, dict):
+                    continue
+                if not _is_finite_due_ts(entry.get("due_ts_estimate")):
+                    continue
+                key = (str(entry.get("topic_snippet", "")), entry.get("due_ts_estimate"))
+                if key not in existing_keys:
+                    self._pending_followups.append(dict(entry))
+                    existing_keys.add(key)
+            self._pending_followups = self._pending_followups[
+                -self._PENDING_FOLLOWUP_CAP :
+            ]
+
+        logging.getLogger("astrbot_plugin_sylanne").info(
+            "Sylanne memory hydrate-merge: l1=%d l2=%d l3_nodes=%d l3_edges=%d "
+            "tick=%d (source=kv_archive+in_ram, conflict_rule=newer_wins_by_id)",
+            len(self._l1),
+            len(self._l2),
+            len(self._l3_nodes),
+            len(self._l3_edges),
+            self._tick,
+        )
+
+    @staticmethod
+    def _merge_items_by_id(
+        live_items: list["MemoryItem"], kv_items: list["MemoryItem"]
+    ) -> list["MemoryItem"]:
+        """按 id 合并两个 MemoryItem 列表，同 id 冲突取更新鲜的版本。"""
+
+        def freshness(item: "MemoryItem") -> float:
+            return max(
+                float(getattr(item, "created_at", 0.0) or 0.0),
+                float(getattr(item, "last_recalled_ts", 0.0) or 0.0),
+            )
+
+        by_id: dict[str, MemoryItem] = {}
+        for item in kv_items:
+            by_id[item.id] = item
+        for item in live_items:
+            existing = by_id.get(item.id)
+            if existing is None or freshness(item) >= freshness(existing):
+                by_id[item.id] = item
+        merged = list(by_id.values())
+        merged.sort(key=lambda it: float(getattr(it, "created_at", 0.0) or 0.0))
+        return merged
 
 
 # ---------------------------------------------------------------------------
