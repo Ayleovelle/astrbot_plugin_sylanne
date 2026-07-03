@@ -2155,8 +2155,12 @@ class LLMRequestPipeline:
                 )
 
             # 定期持久化记忆状态（每 10 个 tick）
-            host.kernel.body.memory["_memory_system"] = memory_system.to_dict()
-            mark_dirty("memory")
+            # MEM-03 PR-5（存储解耦）：删掉写 body.memory["_memory_system"] 的死重——
+            # AlphaBodyState.from_dict 白名单本就丢弃它、从未在 kernel 快照往返中幸存，
+            # KV(sylanne_memory_state) 才是唯一持久面（PR-1~4 全部围绕它建栅栏/索引）。
+            # _persist_kernel 保留（flush 本请求其余脏 kernel 分区）；周期 KV save 保留。
+            # 诚实标注：load 第 4 级回退（读 body.memory["_memory_system"] 的进程内残值）
+            # 随之退化为"仅旧 kernel 文件残档可达"，1/2/3/5 级 + .alpha.json 救援全保留。
             await p._persist_kernel(session_key, host)
             if memory_system._tick % 10 == 0:
                 await p._save_sylanne_memory_state(session_key, memory_system)
@@ -2218,10 +2222,8 @@ class LLMRequestPipeline:
                             [item.id for item in items[:10]]
                         )
                         host = p._host(session_key)
-                        host.kernel.body.memory["_memory_system"] = (
-                            memory_system.to_dict()
-                        )
-                        mark_dirty("memory")
+                        # MEM-03 PR-5：删死写 body._memory_system（白名单丢弃、从未幸存）；
+                        # _persist_kernel + KV save 保留。
                         await p._persist_kernel(session_key, host)
                         await p._save_sylanne_memory_state(session_key, memory_system)
         except Exception as e:
@@ -2341,8 +2343,7 @@ class LLMRequestPipeline:
                 except Exception as e:
                     logger.debug(f"Sylanne skip: {e}")
 
-            host.kernel.body.memory["_memory_system"] = memory_system.to_dict()
-            mark_dirty("memory")
+            # MEM-03 PR-5：删死写 body._memory_system；_persist_kernel + KV save 保留。
             await p._persist_kernel(session_key, host)
             await p._save_sylanne_memory_state(session_key, memory_system)
         except Exception as e:
@@ -2478,8 +2479,7 @@ class LLMRequestPipeline:
 
             # Persist
             host = p._host(session_key)
-            host.kernel.body.memory["_memory_system"] = memory_system.to_dict()
-            mark_dirty("memory")
+            # MEM-03 PR-5：删死写 body._memory_system；_persist_kernel + KV save 保留。
             await p._persist_kernel(session_key, host)
             await p._save_sylanne_memory_state(session_key, memory_system)
         except Exception as e:
