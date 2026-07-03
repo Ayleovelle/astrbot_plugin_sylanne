@@ -1180,6 +1180,33 @@ def test_alpha_json_scrub_on_session_delete() -> None:
     asyncio.run(go())
 
 
+def test_alpha_json_scrub_on_standalone_delete_purge_data() -> None:
+    """PR-2 gate MAJOR：WebUI /api/purge_data 走【独立的 delete_sylanne_memory_state】
+    路径（非 meltdown、非 session-delete op），此前漏 scrub .alpha.json——留下的
+    _memory_system 明文残留会被 overview salvage 复活。修复把 scrub 收进【规范删除
+    原语】_delete_sylanne_memory_state_impl，本测试证实 purge_data 等价路径也清扫。
+    """
+    p = _FakePluginWithHost()
+
+    async def go() -> None:
+        host = p._host("sess:pd-scrub")
+        host.kernel.body.memory["_memory_system"] = {
+            "l1": [{"id": "x", "text": "残留明文"}]
+        }
+        host.kernel.body.memory["traces"] = ["旧 trace"]
+
+        # purge_data 端点等价路径：_delete_sylanne_memory_state -> delete_sylanne_memory_state
+        await p._state_persistence.delete_sylanne_memory_state("sess:pd-scrub")
+
+        assert "_memory_system" not in host.kernel.body.memory, (
+            "独立 delete（purge_data 路径）未 scrub .alpha.json 残留（PR-2 gate MAJOR）"
+        )
+        assert host.kernel.body.memory.get("traces") == []
+        assert host.runtime.save_calls >= 1
+
+    asyncio.run(go())
+
+
 def test_v2core_domains_purged_on_plain_session_delete() -> None:
     """红队 MINOR-3：sylanne_v2core_domains:{safe}（reconsolidation overlay，legacy
     键含原始记忆 TEXT）在 meltdown 路径早已清（purge_session_after_meltdown），但

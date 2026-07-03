@@ -1548,7 +1548,8 @@ class StatePersistence:
     async def _delete_sylanne_memory_state_impl(self, session_key: str) -> None:
         """delete 真逻辑——只准经咽喉 op 调用（勿直接 await，会绕过串行化 + 栅栏
         bump 记账）。记忆子系统全部三键，primary-first 顺序
-        （primary → backup_v2 → quarantine，design §4 固定顺序），每键有界重试删除。
+        （primary → backup_v2 → quarantine，design §4 固定顺序），每键有界重试删除；
+        并清扫 .alpha.json 里的 _memory_system 救援残留（见下）。
         """
         from .memory_legacy_formats import quarantine_kv_key
 
@@ -1560,6 +1561,13 @@ class StatePersistence:
             quarantine_kv_key(safe),
         ):
             await self._delete_kv_key_with_retry(key)
+        # 红队 must-fix（第 4 条复活臂）/ PR-2 gate：.alpha.json 里的 _memory_system 是
+        # load 第 5 级救援的读取源，已删会话若留着它会被 WebUI overview salvage 读回、
+        # 再周期 save 写回 KV = 删除从未发生。收进本【规范删除原语】——所有清除入口
+        # （含 WebUI /api/purge_data 走的独立 delete_sylanne_memory_state 路径，此前只有
+        # meltdown / session-delete 两条 op 各自 scrub、漏了 purge_data）自动获得清扫，
+        # 不再各自漏一处。host 不存在时 scrub 内部安全早返回。
+        await self._scrub_kernel_alpha_json_memory(session_key)
 
     async def purge_session_after_meltdown(self, session_key: str) -> None:
         """记忆清除后同步抹掉专用 KV、kernel KV、域状态 KV 与 v2core 运行时缓存（T1-13）。
@@ -1607,7 +1615,7 @@ class StatePersistence:
         cache = getattr(self._p, "_v2core_runtimes", None)
         if isinstance(cache, dict):
             cache.pop(session_key, None)
-        await self._scrub_kernel_alpha_json_memory(session_key)
+        # .alpha.json 清扫已在 _delete_sylanne_memory_state_impl 里做过（规范原语），此处不再重复。
 
     # ------------------------------------------------------------------
     # AstrBot ConversationManager 集成
@@ -1713,7 +1721,7 @@ class StatePersistence:
                 f"sylanne_v2core_domains:{safe}",
             ):
                 await self._delete_kv_key_with_retry(key)
-        await self._scrub_kernel_alpha_json_memory(session_key)
+        # .alpha.json 清扫已在上面的 _delete_sylanne_memory_state_impl 里做过（规范原语），此处不再重复。
 
     def has_conversation_manager(self) -> bool:
         """检查 AstrBot ConversationManager 是否可用。"""
