@@ -1065,13 +1065,11 @@ class SessionContext:
                     memory_system,
                     host.kernel.body.memory.get("traces", []),
                 )
-                if self.memory_system_has_content(memory_system):
-                    host.kernel.body.memory["_memory_system"] = memory_system.to_dict()
-                    from sylanne_alpha.utils import safe_ensure_future
-                    safe_ensure_future(
-                        self._p._state_persistence.persist_kernel(session_key, host),
-                        name=f"hydrate_persist_{session_key}",
-                    )
+                # MEM-03 PR-5（存储解耦）：trace 注水出的内容留在活体占位者里，由下一次
+                # 周期 KV save 落盘（sylanne_memory_state 唯一真源）——删掉原来写
+                # body.memory["_memory_system"] 死档 + persist_kernel 那对：AlphaBodyState
+                # 白名单丢弃该键、从未在 kernel 快照往返幸存，persist_kernel 只落这份死写，
+                # durability 上等于没落盘（真档一直靠周期 KV save）。故删之无损。
             hosts.set(session_key, host)
             # 恢复对话缓冲区（文件回退；KV 保持同步）
             if not self._p._store.conversation_buffers.has(session_key):
