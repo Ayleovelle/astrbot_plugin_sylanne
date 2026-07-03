@@ -507,8 +507,12 @@ def test_nonempty_unhydrated_refused_not_just_empty() -> None:
 
     async def go() -> None:
         p = _FakePlugin(shared_kv)
-        mem = p._memory_system_for_session("sess:partial2")  # 空、未补水、已排补水
-        # 补水跑完前往活体写一条新内容 → 非空但仍未补水。
+        # 直接构造未补水非空活体（不经 accessor，不排补水任务）——隔离守卫行为。
+        # 注：MEM-03 咽喉把 save 放进 drainer op（会 yield），若经 accessor 建 mem 则
+        # 挂起的补水任务可能在 save op 验守卫前抢先补水，结果写出 archive∪零星（无损超集，
+        # 不是 == archive）。那是竞态时序产物、两种赛果都无损；本测试专验守卫拒写这一支，
+        # 故直接建 mem 令其确定性。
+        mem = MemorySystem()
         mem.write_summary(
             text="补水前的零星新内容",
             source_turns=1,
@@ -518,12 +522,11 @@ def test_nonempty_unhydrated_refused_not_just_empty() -> None:
         assert mem._hydrated is False
         assert p._memory_system_has_content(mem) is True  # 非空
 
-        # 未 drain（补水没跑）→ 此刻 save：旧代码 is_empty=False 会穿过守卫覆盖；新代码拒绝。
+        # save：旧代码 is_empty=False 会穿过守卫覆盖；新代码（未补水 + KV 有内容）拒绝。
         await p._state_persistence.save_sylanne_memory_state("sess:partial2", mem)
         assert shared_kv[kv_key] == archive, (
             "非空未补水活体覆盖了完整归档（FIX B 回归）"
         )
-        await _drain_background_tasks(p)  # 清理挂起的补水任务
 
     asyncio.run(go())
 
@@ -857,3 +860,88 @@ def test_explicit_wipe_latch_prevents_hydration_resurrection() -> None:
         assert not shared_kv.get(kv_key, {}).get("l1"), "擦除后 save 把归档复活了（F1 回归）"
 
     asyncio.run(go())
+
+
+# ===========================================================================
+# MEM-03 PR-1：单写咽喉根治 F2 备份门 TOCTOU —— 集成回归（含反事实，非空跑）
+# ===========================================================================
+
+
+class _SuspendingKVPlugin(_FakePlugin):
+    """get/put 前 await sleep(0)，制造真实挂起点——让并发 op 的 read-check-write
+    有机会交错（否则同步 fake KV 从不 yield，gather 的 save 会内联串行、测试失真）。
+    """
+
+    async def get_kv_data(self, key: str, default=None):  # noqa: ANN001
+        await asyncio.sleep(0)
+        return self._kv.get(key, default)
+
+    async def put_kv_data(self, key: str, value) -> None:  # noqa: ANN001
+        await asyncio.sleep(0)
+        self._kv[key] = value
+        self.kv_call_log.append(("put", key))
+
+
+_F2_ARCHIVE = {
+    "version": "3.0.0",
+    "l1": [
+        {
+            "id": "old",
+            "text": "旧档",
+            "weight": 1.0,
+            "temperature": 0.0,
+            "age_ticks": 0,
+            "created_at": 1.0,
+        }
+    ],
+    "l2": [],
+    "l3_nodes": {},
+    "l3_edges": [],
+}
+
+
+def _f2_make_state(txt: str) -> MemorySystem:
+    m = MemorySystem()
+    m._hydrated = True  # 已补水，守卫放行
+    m.write_summary(text=txt, source_turns=1, temperature=0.1, session_key="sess:f2")
+    return m
+
+
+def test_throat_serializes_concurrent_v3_first_writes_f2() -> None:
+    """MEM-03 PR-1（F2 根治）：同 session 两条并发 v3 首写经咽喉串行——备份门的
+    read-check-write 不再交错，v2 备份恰写一次。用【会挂起】的 fake KV 制造真实交错，
+    并配【反事实】（绕过咽喉直跑 _impl）证明：不串行化时备份门 TOCTOU 真会重写备份
+    （≥2 次），咽喉才是修复者——本测试非空。
+    """
+    backup_key = "sylanne_memory_state_backup_v2:sess:f2"
+
+    async def via_throat() -> list[str]:
+        p = _SuspendingKVPlugin({"sylanne_memory_state:sess:f2": dict(_F2_ARCHIVE)})
+        await asyncio.gather(
+            p._state_persistence.save_sylanne_memory_state("sess:f2", _f2_make_state("A")),
+            p._state_persistence.save_sylanne_memory_state("sess:f2", _f2_make_state("B")),
+        )
+        assert p._state_persistence._backup_blob_is_valid(p._kv[backup_key])
+        assert p._kv[backup_key]["data"]["l1"][0]["text"] == "旧档"
+        return [k for (op, k) in p.kv_call_log if op == "put" and k == backup_key]
+
+    async def bypass_throat() -> list[str]:
+        # 反事实：绕过咽喉，直接并发跑 _impl → 备份门无串行化，TOCTOU 显形。
+        p = _SuspendingKVPlugin({"sylanne_memory_state:sess:f2": dict(_F2_ARCHIVE)})
+        sp = p._state_persistence
+        await asyncio.gather(
+            sp._save_sylanne_memory_state_impl("sess:f2", _f2_make_state("A")),
+            sp._save_sylanne_memory_state_impl("sess:f2", _f2_make_state("B")),
+        )
+        return [k for (op, k) in p.kv_call_log if op == "put" and k == backup_key]
+
+    puts_throat = asyncio.run(via_throat())
+    assert len(puts_throat) == 1, (
+        f"咽喉未串行化备份门：v2 备份被写了 {len(puts_throat)} 次"
+    )
+
+    puts_bypass = asyncio.run(bypass_throat())
+    assert len(puts_bypass) >= 2, (
+        f"反事实未复现备份门 TOCTOU（应≥2 次备份写，说明挂起点未触发交错，测试失真）："
+        f"{len(puts_bypass)}"
+    )

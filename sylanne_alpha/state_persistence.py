@@ -191,6 +191,24 @@ class StatePersistence:
         # 反过来有覆盖 KV 归档的风险。这里挂 on_evict 做 fire-and-forget 持久化，
         # 补上这条驱逐链路（BoundedDict 原生支持 on_evict，无需新造机制）。
         self._wire_memory_eviction_persistence()
+        # MEM-03 PR-1：记忆写入单写咽喉 + 化身栅栏。所有记忆 KV 写按 session 串行化
+        # （根治 F2 备份门 TOCTOU），占位者兜底回调返回 store 当前占位 MemorySystem。
+        # loop 由 main.py initialize() 里 throat.bind_loop() 权威绑定；未绑定前 off-loop
+        # 提交 fail-closed 丢弃（等价今日 coro.close()），on-loop 提交自绑定。
+        from .memory_write_throat import MemoryWriteThroat
+
+        self._throat = MemoryWriteThroat(occupant_getter=self._current_memory_occupant)
+
+    def _current_memory_occupant(self, session_key: str) -> Any:
+        """返回某 session 在 store 里当前占位的 MemorySystem（占位者权威兜底用）。"""
+        store = getattr(self._p, "_store", None)
+        systems = getattr(store, "memory_systems", None) if store is not None else None
+        if systems is None:
+            return None
+        try:
+            return systems.get(session_key)
+        except Exception:  # noqa: BLE001
+            return None
 
     def _wire_memory_eviction_persistence(self) -> None:
         """把 memory_systems 的 LRU 驱逐接到落盘回调（幂等，可重复调用）。"""
@@ -216,11 +234,24 @@ class StatePersistence:
             has_content = True
         if not has_content:
             return
-        safe_ensure_future(
-            self._persist_memory_kv_only(session_key, memory_system),
-            name=f"memory_evict_persist_{session_key}",
-            task_list=getattr(self._p, "_background_tasks", None),
+        # MEM-03 PR-1：直接经咽喉提交（双路径 submit 覆盖 on/off-loop）。驱逐回调可能在
+        # stdlib WebUI 工作线程触发（off-loop），旧的 safe_ensure_future 在无 running loop
+        # 的线程里会 coro.close() 静默丢弃这次落盘（暗病）；throat.submit 走绑定 loop 的
+        # call_soon_threadsafe 保证真执行。fire-and-forget（驱逐语义本就不等待）。
+        from .memory_system import MemorySystem
+
+        fut = self._throat.submit(
+            session_key,
+            lambda: self._persist_memory_kv_only_impl(session_key, memory_system),
+            kind="write",
+            state=memory_system if isinstance(memory_system, MemorySystem) else None,
         )
+        # MINOR-1：驱逐落盘是 fire-and-forget。on-loop 提交会返回一个无人 await 的 Future；
+        # 若该 op 落盘失败，drainer 会 set_exception，未被检取则触发 asyncio "Future exception
+        # was never retrieved" GC 噪音（错误本身已在 drainer 内 log）。挂个 done 回调消费掉
+        # 异常/取消，消除噪音；off-loop 返回 None 时跳过。
+        if fut is not None:
+            fut.add_done_callback(lambda f: f.cancelled() or f.exception())
 
     async def _persist_memory_kv_only(self, session_key: str, state: Any) -> None:
         """只写 KV，不touch `_store` 的活体引用——专供驱逐/释放场景使用。
@@ -231,7 +262,26 @@ class StatePersistence:
         或已经离开活体 store"——如果落盘复用那个方法，会在 pop 之后又把它重新
         塞回 store，制造出"明明驱逐/release 了、entry 却还在"的假象。这里绕开
         store 写回，只落 KV，语义更贴合调用现场。
+
+        MEM-03 PR-1：公开壳，经单写咽喉串行化（与 save 同队列）。驱逐回调改为直接
+        throat.submit（见 _on_memory_system_evicted）——off-loop 线程侧驱逐也能经绑定
+        loop 执行，顺手修好今日线程侧驱逐落盘被 coro.close() 静默丢的暗病。
         """
+        if state is None:
+            return
+        from .memory_system import MemorySystem
+
+        fut = self._throat.submit(
+            session_key,
+            lambda: self._persist_memory_kv_only_impl(session_key, state),
+            kind="write",
+            state=state if isinstance(state, MemorySystem) else None,
+        )
+        if fut is not None:
+            await fut
+
+    async def _persist_memory_kv_only_impl(self, session_key: str, state: Any) -> None:
+        """驱逐/释放落盘真逻辑——只准经咽喉 op 调用。"""
         if state is None:
             return
         # MEM-02② (FIX E)：驱逐/释放落盘同样是一条真实 KV 写路径。若一个未补水的实例
@@ -930,12 +980,29 @@ class StatePersistence:
 
         同时更新内存缓存和 _memory_systems 引用，确保后续读取一致。
 
+        MEM-03 PR-1：公开壳，签名不变。经单写咽喉把真逻辑（_impl）按 session 串行化——
+        同一会话的周期 save 与驱逐落盘不再并发穿插备份门（关掉 F2）。栅栏携带 state 印章，
+        执行前验章（PR-1 惰性：无 bump 调用方，恒通过）。
+
         Args:
             session_key: 会话标识。
             state: MemorySystem 实例或可序列化的状态对象。
         """
         if state is None:
             return
+        from .memory_system import MemorySystem
+
+        fut = self._throat.submit(
+            session_key,
+            lambda: self._save_sylanne_memory_state_impl(session_key, state),
+            kind="write",
+            state=state if isinstance(state, MemorySystem) else None,
+        )
+        if fut is not None:
+            await fut
+
+    async def _save_sylanne_memory_state_impl(self, session_key: str, state: Any) -> None:
+        """save 真逻辑——只准经咽喉 op 调用（勿直接 await，会绕过串行化与栅栏）。"""
         from .memory_system import MemorySystem
 
         # MEM-02② (强化 fail-closed)：单点闸门——详见 _refuse_unhydrated_overwrite。
@@ -957,6 +1024,8 @@ class StatePersistence:
             # MEM-01：写入 v3 格式前的一次性备份 + CRC32 校验闸门（write-gate，
             # 不是"写了就算"）。只在即将写入 v3 且尚未做过这次备份时触发；backup
             # 验证失败 fail-closed 跳过本次写入，旧数据原样保留在 kv_key 上不动。
+            # PR-1：备份门整段现在在咽喉 op 内执行——同 session 并发首写天然串行，
+            # 其 TOCTOU（Phase-0 遗留 F2）由串行化根治。
             if isinstance(data, dict) and data.get("version") == "3.0.0":
                 backup_key = self.sylanne_memory_backup_v2_kv_key(session_key)
                 gate_ok = await self._ensure_v2_backup_before_v3_write(
