@@ -982,6 +982,14 @@ class StatePersistence:
         应放弃本次 v3 写入，宁可这次的新内容暂不落盘，也不能在没有验证过的备份
         凭据下就先斩后奏地覆盖旧数据。
 
+        【已知局限，Phase-0 不修，留 Phase-1/MEM-03 单写咽喉解决】本方法是无锁的
+        read-check-write，跨多个 await 挂起点。同一 session 若在"首次 v3 写入"这一拍
+        有并发落盘（周期 save + fire-and-forget 驱逐/释放落盘），理论上存在 TOCTOU：
+        后到者 step-1 读到 stale=None、在前者写完 v2 备份后又用 v3 快照覆盖 backup_key，
+        破坏"备份写一次此后只读"的不变量。影响面仅限【回滚快照】——主键 v3 内容不丢、
+        用户在线记忆不受影响，故不构成红线数据丢失；根治需 per-session 写序列化，属
+        MEM-03 单一写咽喉的职责，本阶段仅记录不引入锁（避免热路径加锁的新风险面）。
+
         Returns:
             True 表示可以安全继续写入 v3；False 表示应跳过本次写入。
         """
@@ -1344,7 +1352,19 @@ class StatePersistence:
             )
             return
 
-        live.merge_kv_archive(normalized)
+        try:
+            live.merge_kv_archive(normalized)
+        except Exception as e:
+            # FIX(F1/F3) 防御纵深：即便下游合并意外崩溃，也绝不让补水任务猝死 + session
+            # 永久冻结。保持 _hydrated=False（守卫继续护住归档，不被空/脏活体覆盖），记
+            # error 待排查。经 from_dict/_merge_items_by_id 的 fail-closed 清洗后正常不该
+            # 到这里；到了就是真·未知损坏——宁可本进程这个 session 读不到历史，也绝不覆盖。
+            logger.error(
+                f"Sylanne memory hydrate: merge_kv_archive crashed for {session_key!r}, "
+                f"leaving un-hydrated (guard stays active): {e}",
+                exc_info=True,
+            )
+            return
         if quarantined_raw:
             combined = [
                 {"layer": "legacy_record", "raw": r, "error": ""}
@@ -1378,11 +1398,18 @@ class StatePersistence:
         await self.delete_sylanne_memory_state(session_key)
         delete_fn = getattr(self._p, "delete_kv_data", None)
         if delete_fn and callable(delete_fn) and self.has_kv_api():
+            from .memory_legacy_formats import quarantine_kv_key
+
             safe = self._safe_session_key(session_key)
             for key in (
                 self.kernel_kv_key(session_key),
                 f"{self.kernel_kv_key(session_key)}_backup",
                 f"sylanne_v2core_domains:{safe}",
+                # FIX(F5)：meltdown（"抹掉我的记忆"）必须连 MEM-01 新增的备份/隔离键
+                # 一并清掉——否则用户显式清除后，这两个键里仍留着完整可恢复的记忆明文
+                # 副本，直接架空清除功能的隐私契约。
+                self.sylanne_memory_backup_v2_kv_key(session_key),
+                quarantine_kv_key(safe),
             ):
                 try:
                     await delete_fn(key)
@@ -1449,6 +1476,7 @@ class StatePersistence:
         """
         p = self._p
         memory_system = p._store.memory_systems.get(session_key)
+        has_content = False
         if memory_system is not None:
             has_content_fn = getattr(p, "_memory_system_has_content", None)
             try:
@@ -1459,16 +1487,9 @@ class StatePersistence:
                 )
             except Exception:
                 has_content = True
-            if has_content:
-                # 用只写 KV 的变体（而非 save_sylanne_memory_state）——否则这个
-                # fire-and-forget 任务真正跑起来时会把 state 写回
-                # `_store.memory_systems`，在下面这行 release_session 的 pop
-                # 之后又把 entry 复活回去。
-                safe_ensure_future(
-                    self._persist_memory_kv_only(session_key, memory_system),
-                    name=f"memory_release_persist_{session_key}",
-                    task_list=getattr(p, "_background_tasks", None),
-                )
+        # 在 release_session 的 pop 之前捕获引用（pop 之后对象仍存活，串行任务照用）。
+        mem_to_persist = memory_system if has_content else None
+
         p._store.release_session(session_key)
         p._amnesia_sessions.discard(session_key)
         # CP8-P3：防抖定时器清理——取消该 session 在 buffer/kernel 防抖队列中的
@@ -1483,10 +1504,27 @@ class StatePersistence:
                 forget(session_key)
             except Exception as e:
                 logger.debug(f"Sylanne evolution forget on delete failed: {e}")
-        # 异步清理 KV 存储中的持久化数据
+
+        # FIX(F4，合并前对抗闸)：删除路径的"落盘窗口桥接"与 KV 清理必须【串行且清理
+        # 在后】。原来 persist 与 cleanup 是两个无序的 fire-and-forget 任务——persist
+        # 现在还多走守卫 + 备份门若干 await（窗口更长），可能落在 cleanup 的 delete
+        # 之后，把刚删掉的会话记忆键重新写回，导致"已删除会话的记忆复活"（隐私违约）。
+        # 串成一个任务、清理永远最后一步，保证最终态是"已删除"。用只写 KV 的
+        # _persist_memory_kv_only（而非 save_*，后者会把 entry 复活回 _store）。
+        async def _persist_then_cleanup() -> None:
+            if mem_to_persist is not None:
+                try:
+                    await self._persist_memory_kv_only(session_key, mem_to_persist)
+                except Exception as e:
+                    logger.debug(
+                        f"Sylanne release persist failed for {session_key!r}: {e}"
+                    )
+            await self._cleanup_kv_for_session(session_key)
+
         safe_ensure_future(
-            self._cleanup_kv_for_session(session_key),
-            name=f"kv_cleanup_{session_key}",
+            _persist_then_cleanup(),
+            name=f"memory_release_persist_cleanup_{session_key}",
+            task_list=getattr(p, "_background_tasks", None),
         )
         logger.debug(f"Sylanne: session resources released for {session_key}")
 
@@ -1494,6 +1532,8 @@ class StatePersistence:
         """删除 KV 存储中该 session 的所有持久化数据。"""
         if not self.has_kv_api():
             return
+        from .memory_legacy_formats import quarantine_kv_key
+
         safe = self._safe_session_key(session_key)
         keys_to_delete = [
             f"sylanne_kernel_{safe}",
@@ -1501,6 +1541,10 @@ class StatePersistence:
             f"sylanne_buffer_{safe}",
             f"emotion_state:{safe}",
             f"sylanne_memory_state:{safe}",
+            # FIX(F5)：MEM-01 新增的两个记忆子系统 KV 键也必须随会话删除一并清掉，
+            # 否则删了会话、这两个键里仍留着完整的记忆明文副本（隐私/留存违约）。
+            self.sylanne_memory_backup_v2_kv_key(session_key),
+            quarantine_kv_key(safe),
         ]
         delete_fn = getattr(self._p, "delete_kv_data", None)
         if not delete_fn:

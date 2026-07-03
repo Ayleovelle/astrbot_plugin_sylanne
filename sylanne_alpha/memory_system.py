@@ -385,7 +385,14 @@ class MemoryItem:
         # 旧存档兼容：importance 缺省时用启发式回填（而非固定 0.5）。
         # last_recalled_ts 缺省 0.0 即可——recency 评分取 max(created_at, last_recalled_ts)，
         # 0.0 会自然回退到 created_at，二者等效。
-        created_at = d["created_at"]
+        # FIX(F1/F3，合并前对抗闸)：必需数值/键字段做 fail-closed 清洗。缺键仍抛
+        # KeyError（由 _salvage_parse_list/_safe_items 逐条 quarantine，语义不变），但
+        # 【存在但脏】的值（非数字字符串 created_at、unhashable id 等）不再原样穿透——
+        # 否则会在下游 _merge_items_by_id 的 float()/dict-key 处崩溃、掀翻整个
+        # merge_kv_archive、让补水后台任务猝死、_hydrated 永远 False、守卫从此拒绝该
+        # session 一切落盘（新记忆全丢且每次重启复现）。与 GraphNode.from_dict（:557
+        # 既有 _safe_float(created_at)）对齐。
+        created_at = _safe_float(d["created_at"], 0.0)
         if "importance" in d:
             # clamp 到 [0,1]：旧/异常存档若写入越界值会让 recency τ 极度膨胀、永不衰减。
             # _safe_float：字段存在但是垃圾值（非数字字符串等）时不再抛异常中止整条
@@ -398,11 +405,11 @@ class MemoryItem:
                 d.get("temperature", 0.0),
             )
         return cls(
-            id=d["id"],
-            text=d["text"],
-            weight=d["weight"],
-            temperature=d["temperature"],
-            age_ticks=d["age_ticks"],
+            id=str(d["id"]),
+            text=str(d["text"]),
+            weight=_safe_float(d["weight"], 0.0),
+            temperature=_safe_float(d["temperature"], 0.0),
+            age_ticks=int(_safe_float(d["age_ticks"], 0)),
             embedding=d.get("embedding"),
             created_at=created_at,
             source_turns=d.get("source_turns", 1),
@@ -3298,20 +3305,24 @@ class MemorySystem:
         """按 id 合并两个 MemoryItem 列表，同 id 冲突取更新鲜的版本。"""
 
         def freshness(item: "MemoryItem") -> float:
+            # FIX(F1/F3) 防御纵深：即便某条 item 的 created_at/last_recalled_ts 是脏值
+            # （非数字），也用 _safe_float 兜住，绝不让一条脏记录的 float() 崩掉整个
+            # merge（from_dict 已在上游清洗，这里是第二道保险）。
             return max(
-                float(getattr(item, "created_at", 0.0) or 0.0),
-                float(getattr(item, "last_recalled_ts", 0.0) or 0.0),
+                _safe_float(getattr(item, "created_at", 0.0), 0.0),
+                _safe_float(getattr(item, "last_recalled_ts", 0.0), 0.0),
             )
 
         by_id: dict[str, MemoryItem] = {}
         for item in kv_items:
-            by_id[item.id] = item
+            by_id[str(item.id)] = item
         for item in live_items:
-            existing = by_id.get(item.id)
+            key = str(item.id)
+            existing = by_id.get(key)
             if existing is None or freshness(item) >= freshness(existing):
-                by_id[item.id] = item
+                by_id[key] = item
         merged = list(by_id.values())
-        merged.sort(key=lambda it: float(getattr(it, "created_at", 0.0) or 0.0))
+        merged.sort(key=lambda it: _safe_float(getattr(it, "created_at", 0.0), 0.0))
         return merged
 
 

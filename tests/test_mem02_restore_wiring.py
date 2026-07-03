@@ -644,3 +644,137 @@ def test_backup_readback_corruption_fails_closed_and_deletes_poison() -> None:
         assert backup_key not in shared_kv, "写坏的备份没被删除，会毒化下次 step-1"
 
     asyncio.run(go())
+
+
+# ===========================================================================
+# 二轮对抗闸（re-gate）确认的相邻洞 —— 回归证明
+# ===========================================================================
+
+
+def test_hydrate_survives_dirty_created_at_no_persist_freeze() -> None:
+    """FIX F1/F3（re-gate 现场复现的 MAJOR）：KV 归档里一条 item 的 created_at 是非
+    数字字符串（损坏/异构写入），补水时经 from_dict/_merge_items_by_id 的 fail-closed
+    清洗照常合并、翻 _hydrated——绝不崩溃 merge_kv_archive、绝不让补水任务猝死把
+    session 永久冻结（守卫从此拒绝一切落盘、新记忆全丢且每次重启复现）。
+    """
+    shared_kv: dict = {}
+    kv_key = "sylanne_memory_state:sess:dirty"
+    shared_kv[kv_key] = {
+        "version": "3.0.0",
+        "l1": [
+            {
+                "id": "good",
+                "text": "干净记忆",
+                "weight": 1.0,
+                "temperature": 0.0,
+                "age_ticks": 0,
+                "created_at": 100.0,
+            }
+        ],
+        "l2": [
+            {
+                "id": "bad",
+                "text": "脏 created_at 记忆",
+                "weight": 1.0,
+                "temperature": 0.0,
+                "age_ticks": 0,
+                "created_at": "2025-01-01T00:00:00",  # 非数字字符串
+            }
+        ],
+        "l3_nodes": {},
+        "l3_edges": [],
+    }
+
+    async def go() -> None:
+        p = _FakePlugin(shared_kv)
+        mem = p._memory_system_for_session("sess:dirty")
+        await _drain_background_tasks(p)
+
+        # 没崩溃、成功补水。
+        assert mem._hydrated is True
+        texts = [it.text for it in list(mem._l1) + list(mem._l2)]
+        assert "干净记忆" in texts
+        assert "脏 created_at 记忆" in texts  # 脏值被清洗成 0.0，条目照样进来
+
+        # session 没被冻结：hydrated 后守卫放行，后续新记忆正常落盘。
+        mem.write_summary(
+            text="补水后新记忆", source_turns=1, temperature=0.1, session_key="sess:dirty"
+        )
+        await p._state_persistence.save_sylanne_memory_state("sess:dirty", mem)
+        blob = shared_kv[kv_key]
+        saved = [it.get("text") for it in blob.get("l1", []) + blob.get("l2", [])]
+        assert "补水后新记忆" in saved, "hydrated session 落盘失败——疑似冻结未解除"
+
+    asyncio.run(go())
+
+
+def test_session_delete_purges_all_keys_no_resurrect() -> None:
+    """FIX F4 + F5（delete 路径）：会话删除时 persist(窗口桥接) 与 cleanup(删除) 串行、
+    删除在后——删除后记忆主键 + backup_v2 + quarantine 三键必须全空，不会被无序的
+    persist 任务重新写回复活（F4），也不残留明文副本（F5）。
+    """
+    from sylanne_alpha.memory_legacy_formats import quarantine_kv_key
+
+    shared_kv: dict = {}
+
+    async def go() -> None:
+        p = _FakePlugin(shared_kv)
+        sp = p._state_persistence
+        safe = sp._safe_session_key("sess:del")
+        kv_key = sp.sylanne_memory_kv_key("sess:del")
+        backup_key = sp.sylanne_memory_backup_v2_kv_key("sess:del")
+        q_key = quarantine_kv_key(safe)
+
+        mem = p._memory_system_for_session("sess:del")
+        mem.write_summary(
+            text="待删记忆", source_turns=2, temperature=0.3, session_key="sess:del"
+        )
+        await p._state_persistence.save_sylanne_memory_state("sess:del", mem)
+        # 预置备份 + 隔离侧车（模拟迁移期留下的明文副本）。
+        shared_kv[backup_key] = {"data": {"l1": [{"text": "旧明文"}]}, "_crc32": 1}
+        shared_kv[q_key] = [{"raw": {"text": "隔离明文"}}]
+        assert kv_key in shared_kv
+
+        sp._on_session_deleted("sess:del")
+        await _drain_background_tasks(p)
+
+        assert kv_key not in shared_kv, "已删除会话的记忆键被 persist 复活了（F4 回归）"
+        assert backup_key not in shared_kv, "删除后 backup_v2 明文副本仍在（F5 回归）"
+        assert q_key not in shared_kv, "删除后 quarantine 明文副本仍在（F5 回归）"
+
+    asyncio.run(go())
+
+
+def test_meltdown_purges_backup_and_quarantine_keys() -> None:
+    """FIX F5（meltdown 路径）：WebUI meltdown（"抹掉我的记忆"）必须连 backup_v2 /
+    quarantine 两个新键一并清掉，否则清除后仍留完整明文副本（隐私/留存违约）。
+    """
+    from sylanne_alpha.memory_legacy_formats import quarantine_kv_key
+
+    shared_kv: dict = {}
+
+    async def go() -> None:
+        p = _FakePlugin(shared_kv)
+        sp = p._state_persistence
+        safe = sp._safe_session_key("sess:melt")
+        kv_key = sp.sylanne_memory_kv_key("sess:melt")
+        backup_key = sp.sylanne_memory_backup_v2_kv_key("sess:melt")
+        q_key = quarantine_kv_key(safe)
+
+        shared_kv[kv_key] = {
+            "version": "3.0.0",
+            "l1": [],
+            "l2": [],
+            "l3_nodes": {},
+            "l3_edges": [],
+        }
+        shared_kv[backup_key] = {"data": {"l1": [{"text": "旧明文"}]}, "_crc32": 1}
+        shared_kv[q_key] = [{"raw": {"text": "隔离明文"}}]
+
+        await sp.purge_session_after_meltdown("sess:melt")
+
+        assert kv_key not in shared_kv
+        assert backup_key not in shared_kv, "meltdown 后 backup_v2 明文副本仍在（F5 回归）"
+        assert q_key not in shared_kv, "meltdown 后 quarantine 明文副本仍在（F5 回归）"
+
+    asyncio.run(go())
