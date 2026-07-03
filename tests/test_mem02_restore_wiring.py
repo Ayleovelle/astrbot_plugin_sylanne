@@ -778,3 +778,35 @@ def test_meltdown_purges_backup_and_quarantine_keys() -> None:
         assert q_key not in shared_kv, "meltdown 后 quarantine 明文副本仍在（F5 回归）"
 
     asyncio.run(go())
+
+
+def test_delete_memory_state_purges_all_three_keys() -> None:
+    """FIX F5（第三条路径 /api/purge_data，gate3 finding）：delete_sylanne_memory_state
+    是"删除某会话记忆"的规范原语，所有清除入口（含 WebUI /api/purge_data 显式抹除，
+    它经 _delete_sylanne_memory_state 汇到本原语）都必须一次删掉记忆子系统的全部三个
+    KV 键——primary / backup_v2 / quarantine。原语只删 primary 就会让 purge_data 端点
+    留下明文副本。
+    """
+    from sylanne_alpha.memory_legacy_formats import quarantine_kv_key
+
+    shared_kv: dict = {}
+
+    async def go() -> None:
+        p = _FakePlugin(shared_kv)
+        sp = p._state_persistence
+        safe = sp._safe_session_key("sess:purge")
+        kv_key = sp.sylanne_memory_kv_key("sess:purge")
+        backup_key = sp.sylanne_memory_backup_v2_kv_key("sess:purge")
+        q_key = quarantine_kv_key(safe)
+        shared_kv[kv_key] = {"version": "3.0.0", "l1": [{"text": "明文"}]}
+        shared_kv[backup_key] = {"data": {"l1": [{"text": "备份明文"}]}, "_crc32": 1}
+        shared_kv[q_key] = [{"raw": {"text": "隔离明文"}}]
+
+        # purge_data 端点等价路径：_delete_sylanne_memory_state -> delete_sylanne_memory_state
+        await sp.delete_sylanne_memory_state("sess:purge")
+
+        assert kv_key not in shared_kv
+        assert backup_key not in shared_kv, "规范原语漏删 backup_v2（purge_data 端点会泄漏）"
+        assert q_key not in shared_kv, "规范原语漏删 quarantine（purge_data 端点会泄漏）"
+
+    asyncio.run(go())

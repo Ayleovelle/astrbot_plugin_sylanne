@@ -1382,34 +1382,45 @@ class StatePersistence:
         )
 
     async def delete_sylanne_memory_state(self, session_key: str) -> None:
-        """删除 Sylanne 记忆状态（缓存 + KV 存储）。
+        """删除 Sylanne 记忆状态——记忆子系统拥有的【全部三个】KV 键 + 内存缓存。
+
+        FIX(F5，第三条清除路径)：本方法是"删除某会话记忆"的规范原语，所有清除入口
+        （meltdown、AstrBot 会话删除、WebUI /api/purge_data 显式抹除）最终都汇到这里。
+        因此必须一并删掉 MEM-01 新增的 backup_v2 / quarantine 侧车键——否则任一入口都会
+        留下完整可恢复的记忆明文副本（隐私/留存违约）。三键清单见
+        memory_migration_spine.MEMORY_KV_KEYS_MANIFEST（primary/v2_backup/quarantine）。
 
         Args:
             session_key: 会话标识。
         """
+        from .memory_legacy_formats import quarantine_kv_key
+
         self._p._store.sylanne_memory_cache.pop(session_key, None)
-        kv_key = self.sylanne_memory_kv_key(session_key)
         delete_fn = getattr(self._p, "delete_kv_data", None)
         if delete_fn and callable(delete_fn):
-            await delete_fn(kv_key)
+            safe = self._safe_session_key(session_key)
+            for key in (
+                self.sylanne_memory_kv_key(session_key),
+                self.sylanne_memory_backup_v2_kv_key(session_key),
+                quarantine_kv_key(safe),
+            ):
+                try:
+                    await delete_fn(key)
+                except Exception as e:
+                    logger.debug(f"Sylanne memory delete {key}: {e}")
 
     async def purge_session_after_meltdown(self, session_key: str) -> None:
         """记忆清除后同步抹掉专用 KV、kernel KV、域状态 KV 与 v2core 运行时缓存（T1-13）。"""
+        # delete_sylanne_memory_state 已删掉记忆子系统全部三键（primary/backup_v2/
+        # quarantine，FIX F5）；这里只补 kernel / v2core 域状态等非记忆键。
         await self.delete_sylanne_memory_state(session_key)
         delete_fn = getattr(self._p, "delete_kv_data", None)
         if delete_fn and callable(delete_fn) and self.has_kv_api():
-            from .memory_legacy_formats import quarantine_kv_key
-
             safe = self._safe_session_key(session_key)
             for key in (
                 self.kernel_kv_key(session_key),
                 f"{self.kernel_kv_key(session_key)}_backup",
                 f"sylanne_v2core_domains:{safe}",
-                # FIX(F5)：meltdown（"抹掉我的记忆"）必须连 MEM-01 新增的备份/隔离键
-                # 一并清掉——否则用户显式清除后，这两个键里仍留着完整可恢复的记忆明文
-                # 副本，直接架空清除功能的隐私契约。
-                self.sylanne_memory_backup_v2_kv_key(session_key),
-                quarantine_kv_key(safe),
             ):
                 try:
                     await delete_fn(key)
@@ -1532,19 +1543,16 @@ class StatePersistence:
         """删除 KV 存储中该 session 的所有持久化数据。"""
         if not self.has_kv_api():
             return
-        from .memory_legacy_formats import quarantine_kv_key
-
         safe = self._safe_session_key(session_key)
+        # 记忆子系统的全部三键（primary/backup_v2/quarantine）统一走规范原语
+        # delete_sylanne_memory_state 清除（FIX F5 根因：各清除路径各自列键必漏），
+        # 本方法只负责补删 kernel / buffer / emotion 等非记忆键。
+        await self.delete_sylanne_memory_state(session_key)
         keys_to_delete = [
             f"sylanne_kernel_{safe}",
             f"sylanne_kernel_{safe}_backup",
             f"sylanne_buffer_{safe}",
             f"emotion_state:{safe}",
-            f"sylanne_memory_state:{safe}",
-            # FIX(F5)：MEM-01 新增的两个记忆子系统 KV 键也必须随会话删除一并清掉，
-            # 否则删了会话、这两个键里仍留着完整的记忆明文副本（隐私/留存违约）。
-            self.sylanne_memory_backup_v2_kv_key(session_key),
-            quarantine_kv_key(safe),
         ]
         delete_fn = getattr(self._p, "delete_kv_data", None)
         if not delete_fn:
