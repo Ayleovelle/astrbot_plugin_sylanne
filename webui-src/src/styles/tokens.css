@@ -21,8 +21,9 @@
   --amber: #ffaa00;
   --green: #4caf50;
 
-  /* specimen canvas */
-  --void-fill: rgba(0, 0, 0, 0.45);
+  /* specimen canvas — lighter fill so the blob reads as a translucent membrane
+   * on near-black instead of a muddy black smudge behind the login form */
+  --void-fill: rgba(0, 0, 0, 0.22);
   --void-solid: 26, 26, 27; /* raw rgb = bg, for canvas rgba() building */
 
   /* fonts */
@@ -56,10 +57,18 @@
   --r-lg: 12px;
   --r-pill: 100px;
 
-  /* elevation */
+  /* elevation + bioluminescent glow (the identity — must actually render on
+   * near-black, so pushed well past the old 6px/40% that read as flat) */
   --shadow-toast: 0 8px 32px rgba(0, 0, 0, 0.3);
   --ring-focus: 0 0 0 2px var(--glow);
-  --glow-accent: 0 0 6px rgba(184, 138, 158, 0.4);
+  --glow-accent: 0 0 10px rgba(184, 138, 158, 0.6);
+  --glow-strong: 0 0 16px rgba(184, 138, 158, 0.7);
+  --glow-text: 0 0 12px rgba(184, 138, 158, 0.45);
+  /* card + stat surfaces: faint rose tint so structure survives BOTH themes
+   * (fixes the light-theme invisible stat-box) and reads as "glowing tissue" */
+  --stat-bg: rgba(184, 138, 158, 0.07);
+  --stat-border: rgba(184, 138, 158, 0.16);
+  --card-tick: rgba(184, 138, 158, 0.5);
 
   /* motion */
   --ease-snap: cubic-bezier(0.4, 0, 0.2, 1);
@@ -77,7 +86,7 @@
   /* chrome geometry */
   --header-h: 52px;
   --footer-h: 36px;
-  --nav-w: 68px;
+  --nav-w: 92px;
 }
 
 [data-theme='light'] {

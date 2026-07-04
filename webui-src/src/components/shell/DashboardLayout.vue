@@ -44,6 +44,10 @@ onUnmounted(() => live.stop())
   grid-row: 2;
   overflow-y: auto;
   padding: var(--space-8);
+  /* faint instrument ambiance so the field isn't a dead-flat --bg */
+  background:
+    radial-gradient(ellipse 120% 70% at 50% -10%, rgba(184, 138, 158, 0.04), transparent 55%),
+    radial-gradient(ellipse 90% 60% at 50% 120%, rgba(0, 0, 0, 0.25), transparent 60%);
 }
 .area-foot {
   grid-column: 2;

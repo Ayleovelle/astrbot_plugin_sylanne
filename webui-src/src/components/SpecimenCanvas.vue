@@ -374,10 +374,15 @@ onMounted(() => {
     }
     cx.fill()
 
-    const strokeAlpha = direction !== 'idle' ? 0.3 * (1 - rawProgress) : 0.3
+    const strokeAlpha = direction !== 'idle' ? 0.5 * (1 - rawProgress) : 0.5
     cx.strokeStyle = `rgba(${accentRGB},${strokeAlpha.toFixed(3)})`
     cx.lineWidth = 1.5
+    if (!frozen && direction === 'idle') {
+      cx.shadowColor = `rgba(${accentRGB},0.5)`
+      cx.shadowBlur = 14
+    }
     cx.stroke()
+    cx.shadowBlur = 0
 
     // ── scars ──
     if (!frozen) {

@@ -23,13 +23,15 @@ withDefaults(defineProps<{ items: StatItem[]; cols?: number }>(), { cols: 2 })
 .stat-box {
   text-align: center;
   padding: var(--space-5);
-  background: rgba(255, 255, 255, 0.03);
+  background: var(--stat-bg);
+  border: 1px solid var(--stat-border);
   border-radius: var(--r-md);
 }
 .stat-val {
   font-size: var(--font-lg);
   font-weight: 700;
   color: var(--accent);
+  text-shadow: var(--glow-text);
 }
 .stat-lbl {
   font-size: var(--font-xs);

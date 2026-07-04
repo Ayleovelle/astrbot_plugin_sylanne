@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { computed } from 'vue'
-import { useRouter } from 'vue-router'
+import { useRoute, useRouter } from 'vue-router'
 import { useI18n } from '../../composables/useI18n'
 import { useTheme, useLang } from '../../composables/useTheme'
 import { useAuthStore } from '../../stores/auth'
@@ -8,7 +8,13 @@ import { useSessionStore, sessionId, sessionLabel } from '../../stores/session'
 import { useLiveStore } from '../../stores/live'
 
 const router = useRouter()
+const route = useRoute()
 const { t } = useI18n()
+
+const pageName = computed(() => {
+  const n = route.name
+  return typeof n === 'string' ? t('nav.' + n) : ''
+})
 const { theme, toggleTheme } = useTheme()
 const { lang, toggleLang } = useLang()
 const auth = useAuthStore()
@@ -30,9 +36,13 @@ function logout(): void {
 
 <template>
   <header class="top">
-    <div class="brand">
-      <span class="brand-name">SYLANNE</span>
-      <span class="brand-sub">{{ t('app.title') }}</span>
+    <div class="left">
+      <div class="brand">
+        <span class="brand-name">SYLANNE</span>
+        <span class="brand-sub">{{ t('app.title') }}</span>
+      </div>
+      <span v-if="pageName" class="page-sep" aria-hidden="true" />
+      <span v-if="pageName" class="page-name">{{ pageName }}</span>
     </div>
 
     <div class="controls">
@@ -76,10 +86,27 @@ function logout(): void {
   padding: 0 var(--space-8);
   border-bottom: 1px solid var(--card-border);
 }
+.left {
+  display: flex;
+  align-items: center;
+  gap: var(--space-6);
+}
 .brand {
   display: flex;
   align-items: baseline;
   gap: var(--space-4);
+}
+.page-sep {
+  width: 1px;
+  height: 18px;
+  background: var(--card-border);
+}
+.page-name {
+  font-size: var(--font-sm);
+  letter-spacing: 2px;
+  text-transform: uppercase;
+  color: var(--accent);
+  text-shadow: var(--glow-text);
 }
 .brand-name {
   font-size: var(--font-md);

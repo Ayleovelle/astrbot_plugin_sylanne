@@ -21,11 +21,25 @@ const slots = useSlots()
   border-radius: var(--r-lg);
   padding: var(--space-8);
   position: relative;
-  transition: border-color var(--dur-mid) ease;
+  overflow: hidden;
+  box-shadow: 0 2px 20px rgba(0, 0, 0, 0.22);
+  transition: border-color var(--dur-mid) ease, box-shadow var(--dur-mid) ease;
   animation: fadeUp 0.5s var(--ease-snap) both;
 }
+/* glowing "tissue slice" top edge — a constant faint version of the hover tint */
+.card::before {
+  content: '';
+  position: absolute;
+  top: 0;
+  left: var(--space-7);
+  right: var(--space-7);
+  height: 1px;
+  background: linear-gradient(90deg, transparent, var(--card-tick), transparent);
+  opacity: 0.4;
+}
 .card:hover {
-  border-color: rgba(184, 138, 158, 0.22);
+  border-color: rgba(184, 138, 158, 0.28);
+  box-shadow: 0 2px 24px rgba(0, 0, 0, 0.28), 0 0 20px rgba(184, 138, 158, 0.06);
 }
 .card-head {
   display: flex;
@@ -34,9 +48,22 @@ const slots = useSlots()
   margin-bottom: var(--space-6);
 }
 .card-title {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-3);
   font-size: var(--font-xs);
   letter-spacing: 2px;
   text-transform: uppercase;
-  color: var(--text-muted);
+  color: var(--text);
+  opacity: 0.85;
+}
+/* glowing rose anchor tick — gives each card title an identity, not just a label */
+.card-title::before {
+  content: '';
+  width: 3px;
+  height: 12px;
+  border-radius: 1px;
+  background: var(--accent);
+  box-shadow: var(--glow-accent);
 }
 </style>
