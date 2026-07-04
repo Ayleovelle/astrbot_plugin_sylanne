@@ -1,0 +1,143 @@
+import { useLang } from './useTheme'
+
+// Central flat i18n dictionary (owned in one file to avoid parallel-edit churn).
+// Access via t('key'); falls back zh -> key. Reactive because t() reads lang.value.
+
+type Dict = Record<string, string>
+
+const zh: Dict = {
+  // chrome
+  'app.title': '认知核活体',
+  'nav.monitor': '监测',
+  'nav.cognition': '认知核',
+  'nav.config': '配置',
+  'nav.logs': '日志',
+  'nav.memory': '记忆',
+  'nav.personality': '人格',
+  'nav.life': '生活',
+  'nav.admin': '管理',
+  'chrome.session': '会话',
+  'chrome.theme': '主题',
+  'chrome.lang': '语言',
+  'chrome.logout': '登出',
+  'chrome.online': '在线',
+  'chrome.offline': '离线',
+  // login
+  'login.title': 'SYLANNE',
+  'login.subtitle': '认知核活体 · 观测台',
+  'login.token': '访问令牌',
+  'login.authenticate': '验证',
+  'login.verifying': '验证中',
+  'login.success': '已接入',
+  'login.error': '令牌无效',
+  // monitor
+  'monitor.emotion': '情绪维度',
+  'monitor.boundary': '边界',
+  'monitor.routing': '路由分布',
+  'monitor.gate': '门控',
+  'monitor.expression': '表达',
+  'monitor.feedback': '反馈',
+  'monitor.timing': '层耗时',
+  'emo.warmth': '温度',
+  'emo.arousal': '唤醒',
+  'emo.valence': '效价',
+  'emo.tension': '张力',
+  'emo.curiosity': '好奇',
+  'emo.repair_pressure': '修复压力',
+  'emo.expression_drive': '表达驱动',
+  'emo.boundary_firmness': '边界强度',
+  'bound.integrity': '完整度',
+  'bound.entropy': '熵',
+  'bound.rotation': '旋转',
+  'bound.repair_rate': '修复率',
+  'gate.surprise': '惊异',
+  'gate.threshold': '阈值',
+  'gate.route': '路由',
+  'expr.mode': '模式',
+  'expr.drive': '驱动',
+  'expr.threshold': '阈值',
+  'fb.positive': '正向',
+  'fb.negative': '负向',
+  'fb.neutral': '中性',
+  'timing.layer': '层',
+  'timing.avg': '均值',
+  'timing.p95': 'p95',
+  'timing.count': '计数',
+  // common
+  'common.empty': '暂无数据',
+  'common.loading': '加载中',
+  'common.retry': '重试',
+  'common.soon': '即将上线',
+}
+
+const en: Dict = {
+  'app.title': 'Cognitive Core',
+  'nav.monitor': 'Monitor',
+  'nav.cognition': 'Cognition',
+  'nav.config': 'Config',
+  'nav.logs': 'Logs',
+  'nav.memory': 'Memory',
+  'nav.personality': 'Persona',
+  'nav.life': 'Life',
+  'nav.admin': 'Admin',
+  'chrome.session': 'Session',
+  'chrome.theme': 'Theme',
+  'chrome.lang': 'Lang',
+  'chrome.logout': 'Logout',
+  'chrome.online': 'ONLINE',
+  'chrome.offline': 'OFFLINE',
+  'login.title': 'SYLANNE',
+  'login.subtitle': 'Cognitive Core · Observatory',
+  'login.token': 'Access token',
+  'login.authenticate': 'AUTHENTICATE',
+  'login.verifying': 'VERIFYING',
+  'login.success': 'CONNECTED',
+  'login.error': 'INVALID TOKEN',
+  'monitor.emotion': 'Emotion',
+  'monitor.boundary': 'Boundary',
+  'monitor.routing': 'Route Distribution',
+  'monitor.gate': 'Gate',
+  'monitor.expression': 'Expression',
+  'monitor.feedback': 'Feedback',
+  'monitor.timing': 'Layer Timing',
+  'emo.warmth': 'warmth',
+  'emo.arousal': 'arousal',
+  'emo.valence': 'valence',
+  'emo.tension': 'tension',
+  'emo.curiosity': 'curiosity',
+  'emo.repair_pressure': 'repair_pressure',
+  'emo.expression_drive': 'expression_drive',
+  'emo.boundary_firmness': 'boundary_firmness',
+  'bound.integrity': 'integrity',
+  'bound.entropy': 'entropy',
+  'bound.rotation': 'rotation',
+  'bound.repair_rate': 'repair_rate',
+  'gate.surprise': 'surprise',
+  'gate.threshold': 'threshold',
+  'gate.route': 'route',
+  'expr.mode': 'mode',
+  'expr.drive': 'drive',
+  'expr.threshold': 'threshold',
+  'fb.positive': 'positive',
+  'fb.negative': 'negative',
+  'fb.neutral': 'neutral',
+  'timing.layer': 'layer',
+  'timing.avg': 'avg',
+  'timing.p95': 'p95',
+  'timing.count': 'count',
+  'common.empty': 'No data',
+  'common.loading': 'Loading',
+  'common.retry': 'Retry',
+  'common.soon': 'Coming soon',
+}
+
+const dicts: Record<string, Dict> = { zh, en }
+
+export function useI18n() {
+  const { lang } = useLang()
+  function t(key: string): string {
+    const d = dicts[lang.value] || zh
+    return d[key] ?? zh[key] ?? key
+  }
+  return { t, lang }
+}
