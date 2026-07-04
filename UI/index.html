@@ -9,12 +9,9 @@
       // Vue-mounted code runs too late and would flash the wrong theme.
       (function () {
         try {
-          var t =
-            localStorage.getItem('sylanne_theme') ||
-            (window.matchMedia &&
-            window.matchMedia('(prefers-color-scheme: light)').matches
-              ? 'light'
-              : 'dark')
+          // Dark is the signature identity; default to it unless the user has
+          // explicitly opted into light (persisted). Not OS-driven.
+          var t = localStorage.getItem('sylanne_theme') || 'dark'
           document.documentElement.setAttribute('data-theme', t)
           var l = localStorage.getItem('sylanne_lang')
           if (l) document.documentElement.setAttribute('data-lang', l)
