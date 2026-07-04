@@ -75,22 +75,23 @@ export async function apiFetch<T = unknown>(path: string, opts: ApiOptions = {})
   }
   if (method !== 'GET' && csrfToken) headers['X-CSRF-Token'] = csrfToken
 
+  // DEV-only mock (dead-code-stripped from production: import.meta.env.DEV is a
+  // build-time constant). Used ONLY as a fallback when a mockable path yields no
+  // usable response — a real backend (via the dev proxy) always wins.
+  const mockable = import.meta.env.DEV ? devMock(path, method) : undefined
+  const returnMock = (m: unknown): T => {
+    if (m && typeof m === 'object') {
+      const c = (m as Record<string, unknown>).csrf_token
+      if (typeof c === 'string' && c) csrfToken = c
+    }
+    return m as T
+  }
+
   let res: Response
   try {
     res = await fetch(apiBase() + path, { method, headers, body, signal: opts.signal })
   } catch (err) {
-    // DEV-only: if no backend is reachable, fall back to a mock so `pnpm dev`
-    // can show the full dashboard. Stripped from production builds.
-    if (import.meta.env.DEV) {
-      const mock = devMock(path, method)
-      if (mock !== undefined) {
-        if (mock && typeof mock === 'object') {
-          const c = (mock as Record<string, unknown>).csrf_token
-          if (typeof c === 'string' && c) csrfToken = c
-        }
-        return mock as T
-      }
-    }
+    if (mockable !== undefined) return returnMock(mockable)
     throw err
   }
 
@@ -109,6 +110,12 @@ export async function apiFetch<T = unknown>(path: string, opts: ApiOptions = {})
       data = text
     }
   }
+  // DEV: no usable JSON object (proxy error / SPA index.html fallback / non-ok)
+  // for a mockable path -> use the mock.
+  if (mockable !== undefined && (!res.ok || data === null || typeof data !== 'object')) {
+    return returnMock(mockable)
+  }
+
   if (data && typeof data === 'object') {
     const c = (data as Record<string, unknown>).csrf_token
     if (typeof c === 'string' && c) csrfToken = c
