@@ -337,146 +337,152 @@ async function exportDiagnostics(): Promise<void> {
 </script>
 
 <template>
-  <div class="page">
-    <template v-if="status && !available">
-      <Card :title="t('life.rhythm')">
-        <EmptyState message-key="common.empty">
-          {{ t('common.empty') }}
-        </EmptyState>
-      </Card>
-    </template>
+  <div class="page-split">
+    <div class="pane-left">
+      <template v-if="status && !available">
+        <Card :title="t('life.rhythm')">
+          <EmptyState message-key="common.empty">
+            {{ t('common.empty') }}
+          </EmptyState>
+        </Card>
+      </template>
 
-    <template v-else-if="status">
-      <Card :title="t('life.rhythm')">
-        <template #action>
-          <Badge variant="accent">{{ phase }}</Badge>
-        </template>
-        <StatGrid :items="rhythmStats" :cols="2" />
-        <BarRow
-          :label="t('life.energy')"
-          :value="energyValue"
-          :display="energyValue.toFixed(2)"
-        />
-        <BarRow
-          :label="t('life.focus')"
-          :value="focusValue"
-          color="var(--cyan)"
-          :display="focusValue.toFixed(2)"
-        />
-      </Card>
+      <template v-else-if="status">
+        <Card :title="t('life.rhythm')">
+          <template #action>
+            <Badge variant="accent">{{ phase }}</Badge>
+          </template>
+          <StatGrid :items="rhythmStats" :cols="2" />
+          <BarRow
+            :label="t('life.energy')"
+            :value="energyValue"
+            :display="energyValue.toFixed(2)"
+          />
+          <BarRow
+            :label="t('life.focus')"
+            :value="focusValue"
+            color="var(--cyan)"
+            :display="focusValue.toFixed(2)"
+          />
+        </Card>
 
-      <Card :title="t('life.projects')">
-        <div v-if="projectList.length" class="project-list">
-          <div v-for="(p, i) in projectList" :key="p.title ? p.title + i : i" class="project-item">
-            <div class="project-head">
-              <strong>{{ p.title || p.kind || '—' }}</strong>
-              <div class="project-badges">
-                <Badge variant="neutral">{{ p.kind || '—' }}</Badge>
-                <Badge variant="neutral">{{ p.state || '—' }}</Badge>
+        <Card :title="t('life.projects')">
+          <div v-if="projectList.length" class="project-list">
+            <div v-for="(p, i) in projectList" :key="p.title ? p.title + i : i" class="project-item">
+              <div class="project-head">
+                <strong>{{ p.title || p.kind || '—' }}</strong>
+                <div class="project-badges">
+                  <Badge variant="neutral">{{ p.kind || '—' }}</Badge>
+                  <Badge variant="neutral">{{ p.state || '—' }}</Badge>
+                </div>
+              </div>
+              <BarRow
+                label="progress"
+                :value="projectProgress(p)"
+                :display="projectProgress(p).toFixed(2)"
+              />
+              <div class="project-meta mono">
+                share={{ p.share_policy || '—' }} · eff={{ Number(p.effectiveness || 0).toFixed(2) }}
               </div>
             </div>
-            <BarRow
-              label="progress"
-              :value="projectProgress(p)"
-              :display="projectProgress(p).toFixed(2)"
+          </div>
+          <EmptyState v-else message-key="common.empty" />
+        </Card>
+
+        <Card :title="t('life.skills')">
+          <div v-if="skillList.length" class="skill-list">
+            <div v-for="(s, i) in skillList" :key="s.name ? s.name + i : i" class="skill-item">
+              <span class="skill-name">{{ s.name || '—' }}</span>
+              <BarRow
+                label="effectiveness"
+                :value="num(s, ['effectiveness'], 0)"
+                :display="Number(s.effectiveness || 0).toFixed(2)"
+              />
+              <div class="skill-meta mono">
+                ✓{{ s.success_count || 0 }} ✗{{ s.failure_count || 0 }}
+              </div>
+            </div>
+          </div>
+          <EmptyState v-else message-key="common.empty" />
+        </Card>
+      </template>
+
+      <template v-else-if="attempted">
+        <Card :title="t('life.rhythm')">
+          <EmptyState message-key="common.empty" />
+        </Card>
+      </template>
+
+      <div v-else class="loading-state">
+        <span class="mono">{{ t('common.loading') }}</span>
+      </div>
+    </div>
+
+    <div class="pane-right">
+      <template v-if="status && available">
+        <Card :title="t('life.events')" class="card-events">
+          <Timeline v-if="timelineItems.length" :items="timelineItems" />
+          <EmptyState v-else message-key="common.empty" />
+        </Card>
+
+        <Card :title="t('life.audit')">
+          <div v-if="auditRows.length" class="audit-list">
+            <div v-for="(r, i) in auditRows" :key="i" class="audit-item">
+              <div class="audit-head">
+                <strong class="mono">{{ r.entry.feedback_status || r.entry.kind || '—' }}</strong>
+                <span class="audit-session mono">{{ auditSessionLabel(r.session) }}</span>
+              </div>
+              <div class="audit-meta mono">
+                {{ relTimeAgo(num(r.entry, ['ts', 'timestamp'], 0)) }}
+                <span v-if="r.entry.intent_id" class="audit-reason">[{{ r.entry.intent_id }}]</span>
+              </div>
+            </div>
+          </div>
+          <EmptyState v-else message-key="common.empty" />
+        </Card>
+
+        <Card :title="t('life.controls')" class="card-controls">
+          <div class="control-row">
+            <Toggle :model-value="enabled" @update:model-value="onToggleEnabled">
+              {{ t('life.enabled') }}
+            </Toggle>
+          </div>
+          <div class="control-row">
+            <label class="control-label mono">{{ t('life.share_intensity') }}</label>
+            <Select
+              :model-value="shareIntensity"
+              :options="shareIntensityOptions"
+              @update:model-value="onSetShareIntensity"
             />
-            <div class="project-meta mono">
-              share={{ p.share_policy || '—' }} · eff={{ Number(p.effectiveness || 0).toFixed(2) }}
-            </div>
           </div>
-        </div>
-        <EmptyState v-else message-key="common.empty" />
-      </Card>
-
-      <Card :title="t('life.skills')">
-        <div v-if="skillList.length" class="skill-list">
-          <div v-for="(s, i) in skillList" :key="s.name ? s.name + i : i" class="skill-item">
-            <span class="skill-name">{{ s.name || '—' }}</span>
-            <BarRow
-              label="effectiveness"
-              :value="num(s, ['effectiveness'], 0)"
-              :display="Number(s.effectiveness || 0).toFixed(2)"
-            />
-            <div class="skill-meta mono">
-              ✓{{ s.success_count || 0 }} ✗{{ s.failure_count || 0 }}
-            </div>
+          <div class="control-buttons">
+            <Button variant="secondary" size="sm" @click="openClearConfirm('events')">
+              {{ t('life.clear_events') }}
+            </Button>
+            <Button variant="secondary" size="sm" @click="openClearConfirm('projects')">
+              {{ t('life.clear_projects') }}
+            </Button>
+            <Button variant="secondary" size="sm" @click="openClearConfirm('plan')">
+              {{ t('life.clear_plan') }}
+            </Button>
+            <Button
+              variant="secondary"
+              size="sm"
+              :loading="exportingDiag"
+              @click="exportDiagnostics"
+            >
+              {{ t('life.export_diag') }}
+            </Button>
           </div>
-        </div>
-        <EmptyState v-else message-key="common.empty" />
-      </Card>
-
-      <Card :title="t('life.events')" class="card-events">
-        <Timeline v-if="timelineItems.length" :items="timelineItems" />
-        <EmptyState v-else message-key="common.empty" />
-      </Card>
-
-      <Card :title="t('life.audit')">
-        <div v-if="auditRows.length" class="audit-list">
-          <div v-for="(r, i) in auditRows" :key="i" class="audit-item">
-            <div class="audit-head">
-              <strong class="mono">{{ r.entry.feedback_status || r.entry.kind || '—' }}</strong>
-              <span class="audit-session mono">{{ auditSessionLabel(r.session) }}</span>
-            </div>
-            <div class="audit-meta mono">
-              {{ relTimeAgo(num(r.entry, ['ts', 'timestamp'], 0)) }}
-              <span v-if="r.entry.intent_id" class="audit-reason">[{{ r.entry.intent_id }}]</span>
-            </div>
-          </div>
-        </div>
-        <EmptyState v-else message-key="common.empty" />
-      </Card>
-
-      <Card :title="t('life.controls')" class="card-controls">
-        <div class="control-row">
-          <Toggle :model-value="enabled" @update:model-value="onToggleEnabled">
-            {{ t('life.enabled') }}
-          </Toggle>
-        </div>
-        <div class="control-row">
-          <label class="control-label mono">{{ t('life.share_intensity') }}</label>
-          <Select
-            :model-value="shareIntensity"
-            :options="shareIntensityOptions"
-            @update:model-value="onSetShareIntensity"
-          />
-        </div>
-        <div class="control-buttons">
-          <Button variant="secondary" size="sm" @click="openClearConfirm('events')">
-            {{ t('life.clear_events') }}
-          </Button>
-          <Button variant="secondary" size="sm" @click="openClearConfirm('projects')">
-            {{ t('life.clear_projects') }}
-          </Button>
-          <Button variant="secondary" size="sm" @click="openClearConfirm('plan')">
-            {{ t('life.clear_plan') }}
-          </Button>
-          <Button
-            variant="secondary"
-            size="sm"
-            :loading="exportingDiag"
-            @click="exportDiagnostics"
+          <div
+            v-if="controlsMsg"
+            class="control-msg mono"
+            :class="{ 'is-error': controlsMsgIsError }"
           >
-            {{ t('life.export_diag') }}
-          </Button>
-        </div>
-        <div
-          v-if="controlsMsg"
-          class="control-msg mono"
-          :class="{ 'is-error': controlsMsgIsError }"
-        >
-          {{ controlsMsg }}
-        </div>
-      </Card>
-    </template>
-
-    <template v-else-if="attempted">
-      <Card :title="t('life.rhythm')">
-        <EmptyState message-key="common.empty" />
-      </Card>
-    </template>
-
-    <div v-else class="loading-state">
-      <span class="mono">{{ t('common.loading') }}</span>
+            {{ controlsMsg }}
+          </div>
+        </Card>
+      </template>
     </div>
 
     <Modal v-model:open="confirmOpen" :title="confirmKind ? t(CLEAR_LABEL_KEY[confirmKind]) : ''" size="sm">
@@ -490,16 +496,9 @@ async function exportDiagnostics(): Promise<void> {
 </template>
 
 <style scoped>
-.page {
-  display: grid;
-  grid-template-columns: repeat(2, 1fr);
-  gap: var(--page-row-gap, var(--space-8)) var(--page-col-gap, var(--space-8));
-  align-items: start;
-}
-
-.card-events,
-.card-controls {
-  grid-column: 1 / -1;
+.pane-left > .card + .card,
+.pane-right > .card + .card {
+  margin-top: var(--space-8);
 }
 
 .project-list,
@@ -623,7 +622,6 @@ async function exportDiagnostics(): Promise<void> {
 }
 
 .loading-state {
-  grid-column: 1 / -1;
   height: 100%;
   min-height: 200px;
   display: grid;
@@ -632,11 +630,5 @@ async function exportDiagnostics(): Promise<void> {
   font-size: var(--font-sm);
   letter-spacing: 1px;
   opacity: 0.7;
-}
-
-@media (max-width: 900px) {
-  .page {
-    grid-template-columns: 1fr;
-  }
 }
 </style>

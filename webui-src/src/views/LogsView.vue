@@ -118,43 +118,30 @@ function refresh(): void {
 </script>
 
 <template>
-  <div class="page">
-    <Card :title="t('logs.title')" class="card-terminal">
-      <template #action>
-        <div class="terminal-actions">
-          <Toggle v-model="autoScroll">{{ t('logs.autoscroll') }}</Toggle>
-          <Button size="sm" @click="refresh">{{ t('logs.refresh') }}</Button>
-        </div>
-      </template>
-      <LogTerminal v-if="logLines.length" :lines="logLines" :auto-scroll="autoScroll" />
-      <EmptyState v-else message-key="common.empty" />
-    </Card>
+  <div class="page-split">
+    <div class="pane-left">
+      <Card :title="t('logs.title')" class="card-terminal">
+        <template #action>
+          <div class="terminal-actions">
+            <Toggle v-model="autoScroll">{{ t('logs.autoscroll') }}</Toggle>
+            <Button size="sm" @click="refresh">{{ t('logs.refresh') }}</Button>
+          </div>
+        </template>
+        <LogTerminal v-if="logLines.length" :lines="logLines" :auto-scroll="autoScroll" />
+        <EmptyState v-else message-key="common.empty" />
+      </Card>
+    </div>
 
-    <Card :title="t('logs.stats')">
-      <RouteBar :dist="routeDist" />
-      <StatGrid :items="statItems" :cols="4" />
-    </Card>
+    <div class="pane-right">
+      <Card :title="t('logs.stats')">
+        <RouteBar :dist="routeDist" />
+        <StatGrid :items="statItems" :cols="4" />
+      </Card>
+    </div>
   </div>
 </template>
 
 <style scoped>
-/* 2-col grid so the terminal (left) and route stats (right) part around the
- * center rail — same split the old dashboard's page-left/page-right had. A
- * flex column here left --page-col-gap inert and the fixed spine sat on top
- * of the terminal text at >=900px. */
-.page {
-  display: grid;
-  grid-template-columns: repeat(2, 1fr);
-  gap: var(--page-row-gap, var(--space-8)) var(--page-col-gap, var(--space-8));
-  align-items: start;
-}
-
-@media (max-width: 900px) {
-  .page {
-    grid-template-columns: 1fr;
-  }
-}
-
 .terminal-actions {
   display: flex;
   align-items: center;
@@ -165,7 +152,7 @@ function refresh(): void {
   margin-top: var(--space-2);
 }
 
-.page > .card + .card :deep(.stat-grid) {
+.pane-right :deep(.stat-grid) {
   margin-top: var(--space-6);
 }
 </style>

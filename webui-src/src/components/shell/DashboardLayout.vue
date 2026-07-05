@@ -86,9 +86,14 @@ watch(
 <style scoped>
 /* ≥900px: SpineNav is a fixed-position floating rail on the viewport's
  * center seam (see SpineNav.vue) — it does not occupy a grid track, so the
- * content spans full width and the two card columns part around it via
- * --page-col-gap (styles/base.css). Below 900px SpineNav docks as a left
- * strip instead, so the grid gets a matching dedicated nav column there. */
+ * content spans full width and floats over it. The content area itself is a
+ * fixed-height stage (no page-level scroll) — each routed view renders a
+ * .page-split (styles/base.css) whose two .pane-left/.pane-right panes each
+ * scroll independently and dissolve at top/bottom via mask-image, exactly
+ * like the old .page-section/.page-left/.page-right anatomy table. Below
+ * 900px SpineNav docks as a left strip instead, so the grid gets a matching
+ * dedicated nav column there, and .page-split collapses to a normal-flow
+ * single column (see base.css). */
 .layout {
   display: grid;
   grid-template-columns: 1fr;
@@ -105,8 +110,7 @@ watch(
 .area-content {
   grid-column: 1;
   grid-row: 2;
-  overflow-y: auto;
-  padding: var(--space-8);
+  overflow: hidden;
   /* faint instrument ambiance so the field isn't a dead-flat --bg */
   background:
     radial-gradient(ellipse 120% 70% at 50% -10%, rgba(184, 138, 158, 0.04), transparent 55%),
@@ -125,6 +129,12 @@ watch(
   .area-content,
   .area-foot {
     grid-column: 2;
+  }
+  /* Below 900px .page-split is normal-flow (base.css), so the stage itself
+   * must scroll again instead of clipping it. */
+  .area-content {
+    overflow-y: auto;
+    padding: var(--space-8);
   }
 }
 
@@ -172,25 +182,41 @@ watch(
 .arrive .area-nav :deep(.spine-node) {
   animation: spineNodeIn 0.4s var(--ease-organic) 0.9s backwards;
 }
-.arrive .area-content :deep(.card) {
+/* Cards now live inside .pane-left/.pane-right (the two dissected tissue
+ * panes either side of the spine) instead of one shared grid, so the old
+ * nth-child(even)/(odd) approximation is replaced with the real thing: each
+ * pane's cards fly in FROM the direction the spine is on — left pane from
+ * the left, right pane from the right — exactly like the old
+ * cardFromLeft/cardFromRight split (UI/index.html .page-left/.page-right
+ * .card.animate-in). Stagger is per-pane (each column counts its own
+ * children), matching the old :nth-child stagger being scoped inside
+ * .page-left/.page-right rather than across the whole page. */
+.arrive .area-content :deep(.pane-left .card) {
   animation-name: cardFromLeft;
   animation-duration: 0.5s;
   animation-timing-function: var(--ease-snap);
   animation-fill-mode: backwards;
 }
-.arrive .area-content :deep(.card:nth-child(even)) {
+.arrive .area-content :deep(.pane-right .card) {
   animation-name: cardFromRight;
+  animation-duration: 0.5s;
+  animation-timing-function: var(--ease-snap);
+  animation-fill-mode: backwards;
 }
-.arrive .area-content :deep(.card:nth-child(2)) {
+.arrive .area-content :deep(.pane-left .card:nth-child(2)),
+.arrive .area-content :deep(.pane-right .card:nth-child(2)) {
   animation-delay: 0.07s;
 }
-.arrive .area-content :deep(.card:nth-child(3)) {
+.arrive .area-content :deep(.pane-left .card:nth-child(3)),
+.arrive .area-content :deep(.pane-right .card:nth-child(3)) {
   animation-delay: 0.14s;
 }
-.arrive .area-content :deep(.card:nth-child(4)) {
+.arrive .area-content :deep(.pane-left .card:nth-child(4)),
+.arrive .area-content :deep(.pane-right .card:nth-child(4)) {
   animation-delay: 0.21s;
 }
-.arrive .area-content :deep(.card:nth-child(n + 5)) {
+.arrive .area-content :deep(.pane-left .card:nth-child(n + 5)),
+.arrive .area-content :deep(.pane-right .card:nth-child(n + 5)) {
   animation-delay: 0.28s;
 }
 

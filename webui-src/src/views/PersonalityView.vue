@@ -57,27 +57,31 @@ const driftItems = computed<TimelineItem[]>(() => {
 </script>
 
 <template>
-  <div v-if="live.state" class="page">
-    <Card :title="t('pers.radar')">
-      <RadarChart :axes="radarAxes" :max="1" />
-    </Card>
+  <div v-if="live.state" class="page-split">
+    <div class="pane-left">
+      <Card :title="t('pers.radar')">
+        <RadarChart :axes="radarAxes" :max="1" />
+      </Card>
+    </div>
 
-    <Card :title="t('pers.six')">
-      <BarRow
-        v-for="row in sixRows"
-        :key="row.label"
-        :label="row.label"
-        :value="row.value"
-        :color="row.color"
-        :display="row.value.toFixed(2)"
-      />
-      <EmptyState v-if="!sixRows.length" />
-    </Card>
+    <div class="pane-right">
+      <Card :title="t('pers.six')">
+        <BarRow
+          v-for="row in sixRows"
+          :key="row.label"
+          :label="row.label"
+          :value="row.value"
+          :color="row.color"
+          :display="row.value.toFixed(2)"
+        />
+        <EmptyState v-if="!sixRows.length" />
+      </Card>
 
-    <Card :title="t('pers.drift')" class="card-drift">
-      <Timeline v-if="driftItems.length" :items="driftItems" />
-      <EmptyState v-else />
-    </Card>
+      <Card :title="t('pers.drift')">
+        <Timeline v-if="driftItems.length" :items="driftItems" />
+        <EmptyState v-else />
+      </Card>
+    </div>
   </div>
 
   <div v-else class="loading-state">
@@ -86,15 +90,8 @@ const driftItems = computed<TimelineItem[]>(() => {
 </template>
 
 <style scoped>
-.page {
-  display: grid;
-  grid-template-columns: repeat(2, 1fr);
-  gap: var(--page-row-gap, var(--space-8)) var(--page-col-gap, var(--space-8));
-  align-items: start;
-}
-
-.card-drift {
-  grid-column: 1 / -1;
+.pane-right > .card + .card {
+  margin-top: var(--space-8);
 }
 
 .loading-state {
@@ -106,11 +103,5 @@ const driftItems = computed<TimelineItem[]>(() => {
   font-size: var(--font-sm);
   letter-spacing: 1px;
   opacity: 0.7;
-}
-
-@media (max-width: 900px) {
-  .page {
-    grid-template-columns: 1fr;
-  }
 }
 </style>

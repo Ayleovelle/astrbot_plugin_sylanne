@@ -249,12 +249,21 @@ onBeforeUnmount(() => {
   left: 50%;
   width: 3px;
   transform: translateX(-50%);
+  /* Pixel-anchored fades (not percentage stops) so the line reads as passing
+   * UNDER the header/footer chrome rather than stabbing through it — it's
+   * fully transparent for exactly --header-h / --footer-h, then fades in
+   * over 48px into the visible band that spans the node area (16%..79%,
+   * see NODES below). Percentage stops would drift relative to header/footer
+   * height on differently-sized viewports; anchoring to the same --header-h/
+   * --footer-h vars TopBar/AppFooter use keeps the seam exact. */
   background: linear-gradient(
     180deg,
-    transparent 5%,
-    var(--accent) 15%,
-    var(--accent) 85%,
-    transparent 95%
+    transparent 0,
+    transparent var(--header-h),
+    var(--accent) calc(var(--header-h) + 48px),
+    var(--accent) calc(100% - var(--footer-h) - 48px),
+    transparent calc(100% - var(--footer-h)),
+    transparent 100%
   );
   /* Resting state is fully drawn-in; DashboardLayout's `.arrive` choreography
    * (fired once, only on a real login/welcome-back arrival) overrides this

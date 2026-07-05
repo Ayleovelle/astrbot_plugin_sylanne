@@ -155,68 +155,72 @@ const timingRows = computed<TimingRow[]>(() => {
 </script>
 
 <template>
-  <div v-if="live.state" class="page">
-    <Card :title="t('monitor.emotion')">
-      <BarRow
-        v-for="row in emotionRows"
-        :key="row.key"
-        :label="row.label"
-        :value="row.value"
-        :color="row.color"
-        :display="row.display"
-      />
-    </Card>
+  <div v-if="live.state" class="page-split">
+    <div class="pane-left">
+      <Card :title="t('monitor.emotion')">
+        <BarRow
+          v-for="row in emotionRows"
+          :key="row.key"
+          :label="row.label"
+          :value="row.value"
+          :color="row.color"
+          :display="row.display"
+        />
+      </Card>
 
-    <Card :title="t('monitor.boundary')">
-      <StatGrid :items="boundaryItems" :cols="2" />
-    </Card>
+      <Card :title="t('monitor.boundary')">
+        <StatGrid :items="boundaryItems" :cols="2" />
+      </Card>
 
-    <Card :title="t('monitor.routing')">
-      <RouteBar :dist="routeDist" />
-    </Card>
+      <Card :title="t('monitor.timing')">
+        <table v-if="timingRows.length" class="timing-table mono">
+          <thead>
+            <tr>
+              <th>{{ t('timing.layer') }}</th>
+              <th>{{ t('timing.avg') }}</th>
+              <th>{{ t('timing.p95') }}</th>
+              <th>{{ t('timing.count') }}</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr v-for="row in timingRows" :key="row.layer">
+              <td>{{ row.layer }}</td>
+              <td>{{ row.avg }}</td>
+              <td>{{ row.p95 }}</td>
+              <td>{{ row.count }}</td>
+            </tr>
+          </tbody>
+        </table>
+        <div v-else class="empty-note">{{ t('common.empty') }}</div>
+      </Card>
+    </div>
 
-    <Card :title="t('monitor.gate')">
-      <StatGrid :items="gateItems" :cols="3" />
-    </Card>
+    <div class="pane-right">
+      <Card :title="t('monitor.routing')">
+        <RouteBar :dist="routeDist" />
+      </Card>
 
-    <Card :title="t('monitor.expression')">
-      <div class="expr-mode">
-        <Badge variant="accent">{{ exprMode }}</Badge>
-      </div>
-      <BarRow :label="t('expr.drive')" :value="exprDrive" :display="exprDrive.toFixed(2)" />
-      <BarRow
-        :label="t('expr.threshold')"
-        :value="exprThreshold"
-        color="var(--cyan)"
-        :display="exprThreshold.toFixed(2)"
-      />
-    </Card>
+      <Card :title="t('monitor.gate')">
+        <StatGrid :items="gateItems" :cols="3" />
+      </Card>
 
-    <Card :title="t('monitor.feedback')">
-      <StatGrid :items="feedbackItems" :cols="3" />
-    </Card>
+      <Card :title="t('monitor.expression')">
+        <div class="expr-mode">
+          <Badge variant="accent">{{ exprMode }}</Badge>
+        </div>
+        <BarRow :label="t('expr.drive')" :value="exprDrive" :display="exprDrive.toFixed(2)" />
+        <BarRow
+          :label="t('expr.threshold')"
+          :value="exprThreshold"
+          color="var(--cyan)"
+          :display="exprThreshold.toFixed(2)"
+        />
+      </Card>
 
-    <Card :title="t('monitor.timing')" class="card-timing">
-      <table v-if="timingRows.length" class="timing-table mono">
-        <thead>
-          <tr>
-            <th>{{ t('timing.layer') }}</th>
-            <th>{{ t('timing.avg') }}</th>
-            <th>{{ t('timing.p95') }}</th>
-            <th>{{ t('timing.count') }}</th>
-          </tr>
-        </thead>
-        <tbody>
-          <tr v-for="row in timingRows" :key="row.layer">
-            <td>{{ row.layer }}</td>
-            <td>{{ row.avg }}</td>
-            <td>{{ row.p95 }}</td>
-            <td>{{ row.count }}</td>
-          </tr>
-        </tbody>
-      </table>
-      <div v-else class="empty-note">{{ t('common.empty') }}</div>
-    </Card>
+      <Card :title="t('monitor.feedback')">
+        <StatGrid :items="feedbackItems" :cols="3" />
+      </Card>
+    </div>
   </div>
 
   <div v-else class="loading-state">
@@ -225,15 +229,9 @@ const timingRows = computed<TimingRow[]>(() => {
 </template>
 
 <style scoped>
-.page {
-  display: grid;
-  grid-template-columns: repeat(2, 1fr);
-  gap: var(--page-row-gap, var(--space-8)) var(--page-col-gap, var(--space-8));
-  align-items: start;
-}
-
-.card-timing {
-  grid-column: 1 / -1;
+.pane-left > .card + .card,
+.pane-right > .card + .card {
+  margin-top: var(--space-8);
 }
 
 .expr-mode {
@@ -277,11 +275,5 @@ const timingRows = computed<TimingRow[]>(() => {
   font-size: var(--font-sm);
   letter-spacing: 1px;
   opacity: 0.7;
-}
-
-@media (max-width: 900px) {
-  .page {
-    grid-template-columns: 1fr;
-  }
 }
 </style>

@@ -165,78 +165,83 @@ const distillStats = computed(() => {
 </script>
 
 <template>
-  <div v-if="disabled" class="page">
-    <Card :title="t('cog.cycle')">
-      <EmptyState message-key="cog.disabled" />
-    </Card>
+  <div v-if="disabled" class="page-split">
+    <div class="pane-left">
+      <Card :title="t('cog.cycle')">
+        <EmptyState message-key="cog.disabled" />
+      </Card>
+    </div>
+    <div class="pane-right"></div>
   </div>
 
-  <div v-else class="page">
-    <Card :title="t('cog.decision')">
-      <div class="badge-row">
-        <Badge variant="accent">{{ decisionAction }}</Badge>
-        <Badge v-if="decisionOutcome" variant="neutral">{{ decisionOutcome }}</Badge>
-      </div>
-      <div v-if="silentReason" class="silent-reason mono">{{ silentReason }}</div>
-      <BarRow
-        v-for="row in decisionBars"
-        :key="row.key"
-        :label="row.label"
-        :value="row.value"
-        :display="row.display"
-      />
-      <StatGrid :items="decisionStats" :cols="2" />
-    </Card>
+  <div v-else class="page-split">
+    <div class="pane-left">
+      <Card :title="t('cog.decision')">
+        <div class="badge-row">
+          <Badge variant="accent">{{ decisionAction }}</Badge>
+          <Badge v-if="decisionOutcome" variant="neutral">{{ decisionOutcome }}</Badge>
+        </div>
+        <div v-if="silentReason" class="silent-reason mono">{{ silentReason }}</div>
+        <BarRow
+          v-for="row in decisionBars"
+          :key="row.key"
+          :label="row.label"
+          :value="row.value"
+          :display="row.display"
+        />
+        <StatGrid :items="decisionStats" :cols="2" />
+      </Card>
 
-    <Card :title="t('cog.fragment')">
-      <pre v-if="fragment" class="fragment mono">{{ fragment }}</pre>
-      <EmptyState v-else />
-    </Card>
+      <Card :title="t('cog.fragment')">
+        <pre v-if="fragment" class="fragment mono">{{ fragment }}</pre>
+        <EmptyState v-else />
+      </Card>
+    </div>
 
-    <Card :title="t('cog.emotion')">
-      <BarRow
-        v-for="row in emotionBars"
-        :key="row.key"
-        :label="row.label"
-        :value="row.value"
-        :display="row.display"
-      />
-      <div class="caption-row">
-        <span v-if="emotionLine" class="line-caption mono">{{ emotionLine }}</span>
-        <Badge v-if="emotionTrend !== undefined && emotionTrend !== null" variant="neutral">
-          {{ emotionTrendDisplay }}
-        </Badge>
-      </div>
-    </Card>
+    <div class="pane-right">
+      <Card :title="t('cog.emotion')">
+        <BarRow
+          v-for="row in emotionBars"
+          :key="row.key"
+          :label="row.label"
+          :value="row.value"
+          :display="row.display"
+        />
+        <div class="caption-row">
+          <span v-if="emotionLine" class="line-caption mono">{{ emotionLine }}</span>
+          <Badge v-if="emotionTrend !== undefined && emotionTrend !== null" variant="neutral">
+            {{ emotionTrendDisplay }}
+          </Badge>
+        </div>
+      </Card>
 
-    <Card :title="t('cog.usermodel')">
-      <BarRow
-        v-for="row in usermodelBars"
-        :key="row.key"
-        :label="row.label"
-        :value="row.value"
-        :display="row.display"
-      />
-      <div v-if="usermodelLine" class="line-caption mono">{{ usermodelLine }}</div>
-    </Card>
+      <Card :title="t('cog.usermodel')">
+        <BarRow
+          v-for="row in usermodelBars"
+          :key="row.key"
+          :label="row.label"
+          :value="row.value"
+          :display="row.display"
+        />
+        <div v-if="usermodelLine" class="line-caption mono">{{ usermodelLine }}</div>
+      </Card>
 
-    <Card :title="t('cog.narrative')">
-      <StatGrid :items="narrativeStats" :cols="narrativeStats.length > 3 ? 4 : 3" />
-      <div v-if="narrativeLine" class="line-caption mono">{{ narrativeLine }}</div>
-    </Card>
+      <Card :title="t('cog.narrative')">
+        <StatGrid :items="narrativeStats" :cols="narrativeStats.length > 3 ? 4 : 3" />
+        <div v-if="narrativeLine" class="line-caption mono">{{ narrativeLine }}</div>
+      </Card>
 
-    <Card :title="t('cog.distill')">
-      <StatGrid :items="distillStats" :cols="3" />
-    </Card>
+      <Card :title="t('cog.distill')">
+        <StatGrid :items="distillStats" :cols="3" />
+      </Card>
+    </div>
   </div>
 </template>
 
 <style scoped>
-.page {
-  display: grid;
-  grid-template-columns: repeat(2, 1fr);
-  gap: var(--page-row-gap, var(--space-8)) var(--page-col-gap, var(--space-8));
-  align-items: start;
+.pane-left > .card + .card,
+.pane-right > .card + .card {
+  margin-top: var(--space-8);
 }
 
 .badge-row {
@@ -276,11 +281,5 @@ const distillStats = computed(() => {
   font-size: var(--font-xs);
   margin-top: var(--space-4);
   display: block;
-}
-
-@media (max-width: 900px) {
-  .page {
-    grid-template-columns: 1fr;
-  }
 }
 </style>

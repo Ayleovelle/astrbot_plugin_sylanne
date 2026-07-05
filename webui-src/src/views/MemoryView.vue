@@ -282,68 +282,74 @@ onUnmounted(() => {
 </script>
 
 <template>
-  <ErrorState v-if="!pools && poolsError" :message="poolsError" class="page-error" />
+  <div class="page-split">
+    <div class="pane-left">
+      <ErrorState v-if="!pools && poolsError" :message="poolsError" class="page-error" />
 
-  <div v-else-if="!pools" class="loading-state">
-    <span class="mono">{{ t('common.loading') }}</span>
-  </div>
+      <div v-else-if="!pools" class="loading-state">
+        <span class="mono">{{ t('common.loading') }}</span>
+      </div>
 
-  <div v-else class="page">
-    <Card :title="t('mem.l1')" class="pool-card">
-      <div v-if="l1Items.length" class="pool-list">
-        <div v-for="(it, i) in l1Items" :key="i" class="pool-item">
-          <div class="pool-text mono">{{ itemText(it) }}</div>
-          <div class="pool-meta mono">{{ itemMeta(it) }}</div>
+      <template v-else>
+        <Card :title="t('mem.l1')" class="pool-card">
+          <div v-if="l1Items.length" class="pool-list">
+            <div v-for="(it, i) in l1Items" :key="i" class="pool-item">
+              <div class="pool-text mono">{{ itemText(it) }}</div>
+              <div class="pool-meta mono">{{ itemMeta(it) }}</div>
+            </div>
+          </div>
+          <EmptyState v-else />
+        </Card>
+
+        <Card :title="t('mem.l2')" class="pool-card">
+          <div v-if="l2Items.length" class="pool-list">
+            <div v-for="(it, i) in l2Items" :key="i" class="pool-item">
+              <div class="pool-text mono">{{ itemText(it) }}</div>
+              <div class="pool-meta mono">{{ itemMeta(it) }}</div>
+            </div>
+          </div>
+          <EmptyState v-else />
+        </Card>
+
+        <Card class="stat-card">
+          <StatGrid :items="summaryItems" :cols="3" />
+        </Card>
+      </template>
+    </div>
+
+    <div v-if="pools" class="pane-right">
+      <Card :title="t('mem.l3')" class="pool-card">
+        <div v-if="l3Items.length" class="pool-list">
+          <div v-for="(it, i) in l3Items" :key="i" class="pool-item">
+            <div class="pool-text mono">{{ itemText(it) }}</div>
+            <div class="pool-meta mono">{{ itemMeta(it) }}</div>
+          </div>
         </div>
-      </div>
-      <EmptyState v-else />
-    </Card>
+        <EmptyState v-else />
+      </Card>
 
-    <Card :title="t('mem.l2')" class="pool-card">
-      <div v-if="l2Items.length" class="pool-list">
-        <div v-for="(it, i) in l2Items" :key="i" class="pool-item">
-          <div class="pool-text mono">{{ itemText(it) }}</div>
-          <div class="pool-meta mono">{{ itemMeta(it) }}</div>
+      <Card :title="t('mem.consolidate')" class="consolidate-card">
+        <div class="consolidate-row">
+          <Button
+            variant="primary"
+            :loading="consolidating"
+            :disabled="consolidating"
+            @click="startConsolidate"
+          >
+            {{ t('mem.sink') }}
+          </Button>
+          <span v-if="consolidating && consolidateCountdown > 0" class="countdown mono">
+            {{ consolidateCountdown }}s
+          </span>
+          <span v-if="sinkResult !== null" class="sink-result mono">sunk: {{ sinkResult }}</span>
         </div>
-      </div>
-      <EmptyState v-else />
-    </Card>
+      </Card>
 
-    <Card :title="t('mem.l3')" class="pool-card">
-      <div v-if="l3Items.length" class="pool-list">
-        <div v-for="(it, i) in l3Items" :key="i" class="pool-item">
-          <div class="pool-text mono">{{ itemText(it) }}</div>
-          <div class="pool-meta mono">{{ itemMeta(it) }}</div>
-        </div>
-      </div>
-      <EmptyState v-else />
-    </Card>
-
-    <Card class="stat-card">
-      <StatGrid :items="summaryItems" :cols="3" />
-    </Card>
-
-    <Card :title="t('mem.consolidate')" class="consolidate-card">
-      <div class="consolidate-row">
-        <Button
-          variant="primary"
-          :loading="consolidating"
-          :disabled="consolidating"
-          @click="startConsolidate"
-        >
-          {{ t('mem.sink') }}
-        </Button>
-        <span v-if="consolidating && consolidateCountdown > 0" class="countdown mono">
-          {{ consolidateCountdown }}s
-        </span>
-        <span v-if="sinkResult !== null" class="sink-result mono">sunk: {{ sinkResult }}</span>
-      </div>
-    </Card>
-
-    <Card :title="t('mem.meltdown')" class="meltdown-card">
-      <p class="meltdown-desc">{{ t('mem.meltdown_desc') }}</p>
-      <Button variant="danger" @click="openMeltdown">{{ t('mem.meltdown_btn') }}</Button>
-    </Card>
+      <Card :title="t('mem.meltdown')" class="meltdown-card">
+        <p class="meltdown-desc">{{ t('mem.meltdown_desc') }}</p>
+        <Button variant="danger" @click="openMeltdown">{{ t('mem.meltdown_btn') }}</Button>
+      </Card>
+    </div>
 
     <Modal v-model:open="meltdownOpen" :title="t('mem.meltdown_btn')" size="sm">
       <div v-if="meltdownStage === 'confirm'" class="meltdown-confirm">
@@ -377,17 +383,9 @@ onUnmounted(() => {
 </template>
 
 <style scoped>
-.page {
-  display: grid;
-  grid-template-columns: repeat(2, 1fr);
-  gap: var(--page-row-gap, var(--space-8)) var(--page-col-gap, var(--space-8));
-  align-items: start;
-}
-
-.stat-card,
-.consolidate-card,
-.meltdown-card {
-  grid-column: 1 / -1;
+.pane-left > .card + .card,
+.pane-right > .card + .card {
+  margin-top: var(--space-8);
 }
 
 .pool-list {
@@ -488,11 +486,5 @@ onUnmounted(() => {
   font-size: var(--font-sm);
   letter-spacing: 1px;
   opacity: 0.7;
-}
-
-@media (max-width: 900px) {
-  .page {
-    grid-template-columns: 1fr;
-  }
 }
 </style>

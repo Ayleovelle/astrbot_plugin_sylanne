@@ -174,6 +174,13 @@ const groups = computed(() => {
   }))
 })
 
+// Two-pane split, old dashboard's schema-group flow: left = first three
+// present groups (Identity, WebUI, Realtime), right = the rest (Memory &
+// Assessment, Life Simulation, Advanced) with the save bar appended at the
+// end of the right pane — never spanning the seam.
+const leftGroups = computed(() => groups.value.slice(0, 3))
+const rightGroups = computed(() => groups.value.slice(3))
+
 function providerOptions(key: string): SelectOption[] {
   let list = providers.value
   if (key.indexOf('embedding') !== -1) {
@@ -261,16 +268,16 @@ async function save(): Promise<void> {
 </script>
 
 <template>
-  <div class="page">
-    <ErrorState v-if="loadError" :message-key="'config.fetch_failed'">
-      <template #action>
-        <Button variant="primary" @click="load">{{ t('common.retry') }}</Button>
-      </template>
-    </ErrorState>
+  <div class="page-split">
+    <div class="pane-left">
+      <ErrorState v-if="loadError" :message-key="'config.fetch_failed'">
+        <template #action>
+          <Button variant="primary" @click="load">{{ t('common.retry') }}</Button>
+        </template>
+      </ErrorState>
 
-    <template v-else-if="loaded">
-      <div class="groups">
-        <Card v-for="group in groups" :key="group.groupKey" :title="t(group.groupKey)">
+      <template v-else-if="loaded">
+        <Card v-for="group in leftGroups" :key="group.groupKey" :title="t(group.groupKey)">
           <div
             v-for="item in group.items"
             :key="item.key"
@@ -323,44 +330,92 @@ async function save(): Promise<void> {
             </div>
           </div>
         </Card>
-      </div>
-    </template>
+      </template>
 
-    <div v-else class="loading-state">
-      <span class="mono">{{ t('common.loading') }}</span>
+      <div v-else class="loading-state">
+        <span class="mono">{{ t('common.loading') }}</span>
+      </div>
     </div>
 
-    <div v-if="loaded && !loadError" class="save-bar">
-      <ErrorState v-if="saveError" :message="saveError" class="save-error" />
-      <Badge v-if="justSaved" variant="green">{{ t('config.saved') }}</Badge>
-      <Button
-        variant="primary"
-        :loading="saving"
-        :disabled="!dirtyKeys.size"
-        @click="save"
-      >
-        {{ t('config.save') }}
-      </Button>
+    <div class="pane-right">
+      <template v-if="loaded && !loadError">
+        <Card v-for="group in rightGroups" :key="group.groupKey" :title="t(group.groupKey)">
+          <div
+            v-for="item in group.items"
+            :key="item.key"
+            class="config-row"
+            v-show="dependsVisible(item, group.items)"
+          >
+            <span class="config-label">{{ item.label }}</span>
+            <div class="config-control">
+              <TextInput
+                v-if="item.control === 'masked'"
+                :model-value="strValue(item.key)"
+                @update:model-value="(v) => setValue(item.key, v)"
+              />
+              <Toggle
+                v-else-if="item.control === 'toggle'"
+                :model-value="boolValue(item.key)"
+                @update:model-value="(v) => setValue(item.key, v)"
+              />
+              <NumberInput
+                v-else-if="item.control === 'number'"
+                :model-value="numValue(item.key)"
+                :step="item.numberStep ?? 1"
+                @update:model-value="(v) => setValue(item.key, v)"
+              />
+              <Select
+                v-else-if="item.control === 'select'"
+                :model-value="strValue(item.key)"
+                :options="item.options || []"
+                @update:model-value="(v) => setValue(item.key, v)"
+              />
+              <template v-else-if="item.control === 'provider'">
+                <Select
+                  v-if="!manualProviderKeys.has(item.key)"
+                  :model-value="providerSelectValue(item.key)"
+                  :options="providerOptions(item.key)"
+                  @update:model-value="(v) => onProviderSelect(item.key, v)"
+                />
+                <TextInput
+                  v-else
+                  :model-value="strValue(item.key)"
+                  :placeholder="MANUAL_INPUT_LABEL"
+                  @update:model-value="(v) => setValue(item.key, v)"
+                />
+              </template>
+              <TextInput
+                v-else
+                :model-value="strValue(item.key)"
+                @update:model-value="(v) => setValue(item.key, v)"
+              />
+            </div>
+          </div>
+        </Card>
+
+        <div class="save-bar">
+          <ErrorState v-if="saveError" :message="saveError" class="save-error" />
+          <Badge v-if="justSaved" variant="green">{{ t('config.saved') }}</Badge>
+          <Button
+            variant="primary"
+            :loading="saving"
+            :disabled="!dirtyKeys.size"
+            @click="save"
+          >
+            {{ t('config.save') }}
+          </Button>
+        </div>
+      </template>
     </div>
   </div>
 </template>
 
 <style scoped>
-.page {
-  display: flex;
-  flex-direction: column;
-  gap: var(--space-8);
-  padding-bottom: var(--space-11);
-}
-
-/* .groups is the real 2-col grid here (.page is a flex column), so the
- * center-rail clearance var must land on IT — on .page it was inert and
- * the fixed spine overlaid the config cards at >=900px. */
-.groups {
-  display: grid;
-  grid-template-columns: repeat(2, 1fr);
-  gap: var(--page-row-gap, var(--space-8)) var(--page-col-gap, var(--space-8));
-  align-items: start;
+/* .pane-left/.pane-right supply the grid, scroll, and edge-fade — see
+ * base.css .page-split. Only inter-card spacing within each pane is ours. */
+.pane-left > .card + .card,
+.pane-right > .card + .card {
+  margin-top: var(--space-8);
 }
 
 .config-row {
@@ -406,6 +461,7 @@ async function save(): Promise<void> {
   align-items: center;
   justify-content: flex-end;
   gap: var(--space-6);
+  margin-top: var(--space-8);
   padding: var(--space-6) var(--space-8);
   background: var(--card);
   border: 1px solid var(--card-border);
@@ -419,9 +475,6 @@ async function save(): Promise<void> {
 }
 
 @media (max-width: 900px) {
-  .groups {
-    grid-template-columns: 1fr;
-  }
   .config-control {
     max-width: 55%;
   }

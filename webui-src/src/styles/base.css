@@ -113,23 +113,78 @@ body::after {
   }
 }
 
-/* ── Center-seam spine clearance ──────────────────────────────────────────
- * At ≥900px SpineNav floats as a FIXED rail on the viewport's center seam
- * (see SpineNav.vue), sitting on top of whatever content is there. A plain
- * :where(.area-content .page) { column-gap } rule has zero specificity and
- * loses outright to each view's own scoped `gap: var(--space-8)` shorthand
- * (Vue's [data-v-xxxx] attribute bump beats :where()'s (0,0,0,0) every
- * time), so instead each view's `.page` gap line reads through the
- * `--page-col-gap` / `--page-row-gap` var indirection (falls back to
- * --space-8 when unset). This rule sets that var — via :where() to stay
- * low-specificity/non-invasive — wide enough for the two card columns to
- * part around the rail instead of colliding with it. Below 900px the rail
- * docks to the left edge instead, so no extra clearance is needed and the
- * var stays unset (falls back to normal).
+/* ── Two-tissue anatomy stage ─────────────────────────────────────────────
+ * The dashboard content is an ANATOMY TABLE: the spine rail (SpineNav.vue,
+ * fixed on the viewport's center seam) is the specimen's midline axis, and
+ * each routed page is dissected into two independent tissue panes either
+ * side of it. Ported 1:1 in spirit from the old .page-section/.page-left/
+ * .page-right (UI/index.html 8655acd, lines 290-330 + 566-582).
+ *
+ * Structural laws this enforces:
+ *   1. Nothing ever crosses the midline — no full-width cards/tables. Every
+ *      element belongs to .pane-left or .pane-right.
+ *   2. Each pane scrolls INDEPENDENTLY (overflow-y:auto, hidden scrollbar)
+ *      with a mask-image edge fade top+bottom so content dissolves into the
+ *      void instead of clipping.
+ *   3. The seam gap is negative space OWNED BY THE SPINE, not by pane
+ *      padding tricks: grid is 1fr 40px 1fr with an empty middle column
+ *      (sturdier than a `gap` — a real track the fixed spine floats over),
+ *      and each pane's inward padding (44-48px) extends that clearance so
+ *      content doesn't hug the rail.
+ *
+ * Below 900px SpineNav docks as a left strip (see SpineNav.vue) instead of
+ * straddling a seam, so .page-split collapses to one normal-flow column —
+ * panes stack, no independent scroll, no midline. This is also the old
+ * "mobile" fix: the previous build's `.page-right{display:none}` silently
+ * dropped every control that lived in the right column (config save button,
+ * memory danger-zone) — stacking keeps all of it reachable.
  */
-@media (min-width: 900px) {
-  :where(.area-content .page) {
-    --page-col-gap: 96px;
+.page-split {
+  display: grid;
+  grid-template-columns: 1fr 40px 1fr;
+  height: 100%;
+}
+.pane-left,
+.pane-right {
+  overflow-y: auto;
+  scrollbar-width: none;
+  padding-top: var(--space-8);
+  padding-bottom: var(--space-8);
+}
+.pane-left::-webkit-scrollbar,
+.pane-right::-webkit-scrollbar {
+  display: none;
+}
+.pane-left {
+  grid-column: 1;
+  padding-left: var(--space-8);
+  padding-right: var(--space-11);
+}
+.pane-right {
+  grid-column: 3;
+  padding-left: var(--space-11);
+  padding-right: var(--space-8);
+}
+@supports (mask-image: linear-gradient(#000, #000)) or (-webkit-mask-image: linear-gradient(#000, #000)) {
+  .pane-left,
+  .pane-right {
+    -webkit-mask-image: linear-gradient(180deg, transparent 0, #000 28px, #000 calc(100% - 28px), transparent 100%);
+    mask-image: linear-gradient(180deg, transparent 0, #000 28px, #000 calc(100% - 28px), transparent 100%);
+  }
+}
+
+@media (max-width: 899px) {
+  .page-split {
+    display: block;
+    height: auto;
+  }
+  .pane-left,
+  .pane-right {
+    overflow-y: visible;
+    grid-column: auto;
+    padding: var(--space-7) var(--space-8) var(--space-3);
+    mask-image: none;
+    -webkit-mask-image: none;
   }
 }
 
