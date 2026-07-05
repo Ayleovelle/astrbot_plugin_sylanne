@@ -89,7 +89,7 @@ const driftItems = computed<TimelineItem[]>(() => {
 .page {
   display: grid;
   grid-template-columns: repeat(2, 1fr);
-  gap: var(--space-8);
+  gap: var(--page-row-gap, var(--space-8)) var(--page-col-gap, var(--space-8));
   align-items: start;
 }
 

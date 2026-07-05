@@ -69,7 +69,12 @@ watch(
     <TopBar class="area-top" />
     <main class="area-content">
       <RouterView v-slot="{ Component }">
-        <Transition :name="transitionName" mode="out-in">
+        <!-- Explicit :duration: completion runs on a JS timer instead of
+             waiting for transitionend — in a compositor-less environment
+             (headless embed, hidden webview) that event may never fire and
+             mode="out-in" would strand the leave phase, leaving navigation
+             permanently stuck on the outgoing page. -->
+        <Transition :name="transitionName" mode="out-in" :duration="350">
           <component :is="Component" :key="routeKey" />
         </Transition>
       </RouterView>
@@ -79,22 +84,26 @@ watch(
 </template>
 
 <style scoped>
+/* ≥900px: SpineNav is a fixed-position floating rail on the viewport's
+ * center seam (see SpineNav.vue) — it does not occupy a grid track, so the
+ * content spans full width and the two card columns part around it via
+ * --page-col-gap (styles/base.css). Below 900px SpineNav docks as a left
+ * strip instead, so the grid gets a matching dedicated nav column there. */
 .layout {
   display: grid;
-  grid-template-columns: var(--nav-w) 1fr;
+  grid-template-columns: 1fr;
   grid-template-rows: var(--header-h) 1fr var(--footer-h);
   height: 100vh;
 }
-.area-nav {
-  grid-column: 1;
-  grid-row: 1 / -1;
-}
+/* SpineNav itself is position:fixed (see SpineNav.vue) so it never actually
+ * occupies a grid track — .area-nav is just a class hook for the :deep()
+ * arrival-choreography selectors below. */
 .area-top {
-  grid-column: 2;
+  grid-column: 1;
   grid-row: 1;
 }
 .area-content {
-  grid-column: 2;
+  grid-column: 1;
   grid-row: 2;
   overflow-y: auto;
   padding: var(--space-8);
@@ -104,13 +113,18 @@ watch(
     radial-gradient(ellipse 90% 60% at 50% 120%, rgba(0, 0, 0, 0.25), transparent 60%);
 }
 .area-foot {
-  grid-column: 2;
+  grid-column: 1;
   grid-row: 3;
 }
 
-@media (max-width: 720px) {
+@media (max-width: 899px) {
   .layout {
     grid-template-columns: 56px 1fr;
+  }
+  .area-top,
+  .area-content,
+  .area-foot {
+    grid-column: 2;
   }
 }
 
@@ -152,8 +166,11 @@ watch(
 .arrive .area-nav :deep(.spine-line) {
   animation: spineDrawIn 1.2s var(--ease-organic) both;
 }
-.arrive .area-nav :deep(.node) {
-  animation: fadeUp 0.4s var(--ease-organic) 0.9s backwards;
+/* Partial keyframe (from-only): animates opacity to each node's natural
+ * resting value (.4 normal / 1 active) and never touches transform, so the
+ * translate(-50%,-50%) centering isn't overridden mid-entrance. */
+.arrive .area-nav :deep(.spine-node) {
+  animation: spineNodeIn 0.4s var(--ease-organic) 0.9s backwards;
 }
 .arrive .area-content :deep(.card) {
   animation-name: cardFromLeft;
@@ -203,6 +220,11 @@ watch(
   }
   to {
     clip-path: inset(0 0 0 0);
+  }
+}
+@keyframes spineNodeIn {
+  from {
+    opacity: 0;
   }
 }
 @keyframes cardFromLeft {

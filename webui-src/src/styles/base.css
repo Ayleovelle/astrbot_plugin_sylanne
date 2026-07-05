@@ -113,6 +113,26 @@ body::after {
   }
 }
 
+/* ── Center-seam spine clearance ──────────────────────────────────────────
+ * At ≥900px SpineNav floats as a FIXED rail on the viewport's center seam
+ * (see SpineNav.vue), sitting on top of whatever content is there. A plain
+ * :where(.area-content .page) { column-gap } rule has zero specificity and
+ * loses outright to each view's own scoped `gap: var(--space-8)` shorthand
+ * (Vue's [data-v-xxxx] attribute bump beats :where()'s (0,0,0,0) every
+ * time), so instead each view's `.page` gap line reads through the
+ * `--page-col-gap` / `--page-row-gap` var indirection (falls back to
+ * --space-8 when unset). This rule sets that var — via :where() to stay
+ * low-specificity/non-invasive — wide enough for the two card columns to
+ * part around the rail instead of colliding with it. Below 900px the rail
+ * docks to the left edge instead, so no extra clearance is needed and the
+ * var stays unset (falls back to normal).
+ */
+@media (min-width: 900px) {
+  :where(.area-content .page) {
+    --page-col-gap: 96px;
+  }
+}
+
 /* accessibility: honor reduced-motion globally (canvas engine honors it too) */
 @media (prefers-reduced-motion: reduce) {
   *,

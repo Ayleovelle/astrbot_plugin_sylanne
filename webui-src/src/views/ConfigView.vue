@@ -353,10 +353,13 @@ async function save(): Promise<void> {
   padding-bottom: var(--space-11);
 }
 
+/* .groups is the real 2-col grid here (.page is a flex column), so the
+ * center-rail clearance var must land on IT — on .page it was inert and
+ * the fixed spine overlaid the config cards at >=900px. */
 .groups {
   display: grid;
   grid-template-columns: repeat(2, 1fr);
-  gap: var(--space-8);
+  gap: var(--page-row-gap, var(--space-8)) var(--page-col-gap, var(--space-8));
   align-items: start;
 }
 

@@ -45,7 +45,7 @@ const shown = computed(() => {
   gap: var(--space-4);
 }
 .bar-label {
-  font-size: 12px;
+  font-size: var(--font-sm);
   width: 150px;
   flex: none;
   color: var(--text-muted);

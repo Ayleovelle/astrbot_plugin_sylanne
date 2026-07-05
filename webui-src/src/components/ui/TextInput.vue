@@ -42,7 +42,7 @@ function onInput(e: Event): void {
 .text-input {
   width: 100%;
   padding: var(--space-4) var(--space-5);
-  font-size: var(--font-sm);
+  font-size: var(--font-base);
   color: var(--text);
   background: var(--input-bg);
   border: 1px solid var(--card-border);

@@ -85,7 +85,7 @@ watch(
   border: 1px solid var(--card-border);
   border-radius: var(--r-md);
   padding: var(--space-5) var(--space-6);
-  font-size: var(--font-xs);
+  font-size: var(--font-sm);
   line-height: 1.7;
 }
 /* subtle scanline vibe consistent with the "living tissue" identity —

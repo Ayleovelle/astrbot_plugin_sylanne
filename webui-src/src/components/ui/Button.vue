@@ -79,7 +79,7 @@ function onClick(e: MouseEvent): void {
 }
 .s-md {
   padding: var(--space-4) var(--space-8);
-  font-size: var(--font-sm);
+  font-size: var(--font-base);
 }
 
 .v-primary {
