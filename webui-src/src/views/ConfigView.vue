@@ -1,7 +1,426 @@
 <script setup lang="ts">
-import PlaceholderPage from '../components/ui/PlaceholderPage.vue'
+import { computed, onMounted, reactive, ref } from 'vue'
+import { apiFetch, ApiError } from '../api/client'
+import { useI18n } from '../composables/useI18n'
+import type { ProviderInfo, SettingsResponse, SettingsSchemaEntry } from '../api/types'
+import Card from '../components/ui/Card.vue'
+import Badge from '../components/ui/Badge.vue'
+import Button from '../components/ui/Button.vue'
+import Toggle from '../components/ui/Toggle.vue'
+import TextInput from '../components/ui/TextInput.vue'
+import NumberInput from '../components/ui/NumberInput.vue'
+import Select from '../components/ui/Select.vue'
+import ErrorState from '../components/ui/ErrorState.vue'
+import type { SelectOption } from '../components/ui/Select.vue'
+
+const { t } = useI18n()
+
+// computed so it re-renders on language switch (t() reads lang.value)
+const MANUAL_INPUT_LABEL = computed(() => t('config.manual_input'))
+
+// ── Grouping: exact port of CONFIG_GROUP_PREFIXES / classifyConfigKey from
+// the old dashboard (UI/index.html @ 8655acd). Order matters — first prefix
+// match wins, longer/more-specific prefixes are listed before their broader
+// parents. Any 'sylanne_alpha_*' key not otherwise matched, and anything
+// else, falls through to Advanced.
+interface GroupRule {
+  prefix: string
+  groupKey: string
+}
+
+const CONFIG_GROUP_PREFIXES: GroupRule[] = [
+  { prefix: 'sylanne_persona_', groupKey: 'config.identity' },
+  { prefix: 'sylanne_webui_', groupKey: 'config.webui' },
+  { prefix: 'sylanne_group_', groupKey: 'config.webui' },
+  { prefix: 'sylanne_alpha_realtime_', groupKey: 'config.realtime' },
+  { prefix: 'sylanne_alpha_stream_', groupKey: 'config.realtime' },
+  { prefix: 'sylanne_alpha_proactive_', groupKey: 'config.realtime' },
+  { prefix: 'sylanne_alpha_intercept_', groupKey: 'config.realtime' },
+  { prefix: 'sylanne_alpha_embedding_', groupKey: 'config.memory' },
+  { prefix: 'sylanne_alpha_main_assessor_', groupKey: 'config.memory' },
+  { prefix: 'sylanne_alpha_fast_assessor_', groupKey: 'config.memory' },
+  { prefix: 'sylanne_alpha_background_', groupKey: 'config.memory' },
+  { prefix: 'sylanne_alpha_life_simulation_', groupKey: 'config.life' },
+  { prefix: 'sylanne_alpha_transcription_', groupKey: 'config.advanced' },
+]
+
+// Group render order (old dashboard: Identity, WebUI, Realtime, Memory &
+// Assessment, Life Simulation, Advanced).
+const GROUP_ORDER = [
+  'config.identity',
+  'config.webui',
+  'config.realtime',
+  'config.memory',
+  'config.life',
+  'config.advanced',
+] as const
+
+function classifyConfigKey(key: string): string {
+  for (const rule of CONFIG_GROUP_PREFIXES) {
+    if (key.startsWith(rule.prefix)) return rule.groupKey
+  }
+  return 'config.advanced'
+}
+
+// ── Data ──
+const schema = ref<Record<string, SettingsSchemaEntry>>({})
+const providers = ref<ProviderInfo[]>([])
+const loaded = ref(false)
+const loadError = ref(false)
+
+// Dirty-tracked local values, seeded from values[key] ?? schema[key].default.
+const values = reactive<Record<string, unknown>>({})
+// Keys the user has actually touched — only these go in the save payload.
+const dirtyKeys = reactive<Set<string>>(new Set())
+// Manual-entry mode for provider_id fields where the stack swaps to a plain
+// text input (old dashboard's "Manual Input..." option).
+const manualProviderKeys = reactive<Set<string>>(new Set())
+// Keys whose value came back from load() as the '********' mask sentinel —
+// sticky for this load so the control doesn't swap away from TextInput
+// mid-edit (e.g. an int field like *_max_tokens re-becoming a NumberInput
+// while the user is still typing over the mask).
+const maskedKeys = reactive<Set<string>>(new Set())
+
+// Backend masks sensitive values (secrets, but also plain int/float fields
+// whose key merely contains 'token', e.g. *_max_tokens) as this sentinel —
+// regardless of the field's schema type. NumberInput would coerce it via
+// Number('********') -> NaN -> 0, silently showing a fake 0.
+const MASK_SENTINEL = '********'
+
+const saving = ref(false)
+const saveError = ref('')
+const justSaved = ref(false)
+let savedTimer: ReturnType<typeof setTimeout> | undefined
+
+async function load(): Promise<void> {
+  loaded.value = false
+  loadError.value = false
+  try {
+    const resp = await apiFetch<SettingsResponse>('/api/settings')
+    schema.value = resp.schema || {}
+    providers.value = resp.providers || []
+    const respValues = resp.values || {}
+    for (const key of Object.keys(values)) delete values[key]
+    dirtyKeys.clear()
+    manualProviderKeys.clear()
+    maskedKeys.clear()
+    for (const key of Object.keys(schema.value)) {
+      const meta = schema.value[key]
+      const v = respValues[key]
+      values[key] = v !== undefined ? v : meta?.default !== undefined ? meta.default : ''
+      if (values[key] === MASK_SENTINEL) maskedKeys.add(key)
+      if (key.indexOf('provider_id') !== -1) {
+        const val = values[key]
+        const known = providers.value.some((p) => p.id === val)
+        if (val && !known) manualProviderKeys.add(key)
+      }
+    }
+    loaded.value = true
+  } catch {
+    loadError.value = true
+    loaded.value = true
+  }
+}
+
+onMounted(load)
+
+interface ConfigItem {
+  key: string
+  label: string
+  control: 'toggle' | 'number' | 'select' | 'provider' | 'text' | 'masked'
+  options?: SelectOption[]
+  numberStep?: number
+}
+
+const groups = computed(() => {
+  const byGroup: Record<string, ConfigItem[]> = {}
+  for (const key of Object.keys(schema.value)) {
+    const meta = schema.value[key]
+    if (meta.invisible) continue
+    const groupKey = classifyConfigKey(key)
+    if (!byGroup[groupKey]) byGroup[groupKey] = []
+
+    const isProvider = key.indexOf('provider_id') !== -1
+    let control: ConfigItem['control']
+    let options: SelectOption[] | undefined
+    let numberStep: number | undefined
+    if (maskedKeys.has(key)) {
+      control = 'masked'
+    } else if (meta.type === 'bool') {
+      control = 'toggle'
+    } else if (meta.type === 'int' || meta.type === 'float') {
+      control = 'number'
+      numberStep = meta.type === 'float' ? 0.01 : 1
+    } else if (meta.options && meta.options.length) {
+      control = 'select'
+      options = meta.options.map((o) => ({ label: o, value: o }))
+    } else if (isProvider) {
+      control = 'provider'
+    } else {
+      control = 'text'
+    }
+
+    byGroup[groupKey].push({
+      key,
+      label: meta.description || key,
+      control,
+      options,
+      numberStep,
+    })
+  }
+  return GROUP_ORDER.filter((g) => byGroup[g] && byGroup[g].length).map((g) => ({
+    groupKey: g,
+    items: byGroup[g],
+  }))
+})
+
+function providerOptions(key: string): SelectOption[] {
+  let list = providers.value
+  if (key.indexOf('embedding') !== -1) {
+    list = list.filter((p) => !p.type || p.type === 'embedding')
+  }
+  const opts: SelectOption[] = list.map((p) => ({ label: p.name || p.id || '', value: p.id || '' }))
+  opts.push({ label: MANUAL_INPUT_LABEL.value, value: '__manual__' })
+  return opts
+}
+
+function providerSelectValue(key: string): string {
+  if (manualProviderKeys.has(key)) return '__manual__'
+  return String(values[key] ?? '')
+}
+
+function onProviderSelect(key: string, val: string): void {
+  if (val === '__manual__') {
+    manualProviderKeys.add(key)
+    return
+  }
+  manualProviderKeys.delete(key)
+  setValue(key, val)
+}
+
+function setValue(key: string, val: unknown): void {
+  values[key] = val
+  dirtyKeys.add(key)
+}
+
+function boolValue(key: string): boolean {
+  return Boolean(values[key])
+}
+function numValue(key: string): number {
+  const n = Number(values[key])
+  return Number.isNaN(n) ? 0 : n
+}
+function strValue(key: string): string {
+  return values[key] === undefined || values[key] === null ? '' : String(values[key])
+}
+
+// Dependent-row visibility: reproduces the old dashboard's two forms of
+// hide-when-off — a sibling '<prefix>enabled' toggle, or a 'use_<suffix>'
+// toggle gating a same-named field. Not literally documented as
+// classifyConfigKey/data-depends logic (that lived in renderConfigGroup),
+// so this is a best-effort port; see caveats.
+function dependsVisible(item: ConfigItem, items: ConfigItem[]): boolean {
+  if (item.key.endsWith('_enabled')) return true
+  for (const other of items) {
+    if (other.control !== 'toggle') continue
+    const m = other.key.match(/^(.+_)enabled$/)
+    if (m && item.key.startsWith(m[1]) && item.key !== other.key) {
+      return boolValue(other.key)
+    }
+  }
+  for (const other of items) {
+    if (other.control !== 'toggle') continue
+    const m2 = other.key.match(/^(.+_)use_(.+)$/)
+    if (m2 && item.key.indexOf(m2[1] + m2[2]) !== -1 && item.key !== other.key) {
+      return boolValue(other.key)
+    }
+  }
+  return true
+}
+
+async function save(): Promise<void> {
+  if (!dirtyKeys.size) return
+  saving.value = true
+  saveError.value = ''
+  const payload: Record<string, unknown> = {}
+  for (const key of dirtyKeys) payload[key] = values[key]
+  try {
+    await apiFetch('/api/settings', { method: 'POST', body: payload })
+    dirtyKeys.clear()
+    justSaved.value = true
+    if (savedTimer) clearTimeout(savedTimer)
+    savedTimer = setTimeout(() => {
+      justSaved.value = false
+    }, 2500)
+  } catch (e) {
+    saveError.value = e instanceof ApiError ? e.message : String(e)
+  } finally {
+    saving.value = false
+  }
+}
 </script>
 
 <template>
-  <PlaceholderPage title-key="nav.config" />
+  <div class="page">
+    <ErrorState v-if="loadError" :message-key="'config.fetch_failed'">
+      <template #action>
+        <Button variant="primary" @click="load">{{ t('common.retry') }}</Button>
+      </template>
+    </ErrorState>
+
+    <template v-else-if="loaded">
+      <div class="groups">
+        <Card v-for="group in groups" :key="group.groupKey" :title="t(group.groupKey)">
+          <div
+            v-for="item in group.items"
+            :key="item.key"
+            class="config-row"
+            v-show="dependsVisible(item, group.items)"
+          >
+            <span class="config-label">{{ item.label }}</span>
+            <div class="config-control">
+              <TextInput
+                v-if="item.control === 'masked'"
+                :model-value="strValue(item.key)"
+                @update:model-value="(v) => setValue(item.key, v)"
+              />
+              <Toggle
+                v-else-if="item.control === 'toggle'"
+                :model-value="boolValue(item.key)"
+                @update:model-value="(v) => setValue(item.key, v)"
+              />
+              <NumberInput
+                v-else-if="item.control === 'number'"
+                :model-value="numValue(item.key)"
+                :step="item.numberStep ?? 1"
+                @update:model-value="(v) => setValue(item.key, v)"
+              />
+              <Select
+                v-else-if="item.control === 'select'"
+                :model-value="strValue(item.key)"
+                :options="item.options || []"
+                @update:model-value="(v) => setValue(item.key, v)"
+              />
+              <template v-else-if="item.control === 'provider'">
+                <Select
+                  v-if="!manualProviderKeys.has(item.key)"
+                  :model-value="providerSelectValue(item.key)"
+                  :options="providerOptions(item.key)"
+                  @update:model-value="(v) => onProviderSelect(item.key, v)"
+                />
+                <TextInput
+                  v-else
+                  :model-value="strValue(item.key)"
+                  :placeholder="MANUAL_INPUT_LABEL"
+                  @update:model-value="(v) => setValue(item.key, v)"
+                />
+              </template>
+              <TextInput
+                v-else
+                :model-value="strValue(item.key)"
+                @update:model-value="(v) => setValue(item.key, v)"
+              />
+            </div>
+          </div>
+        </Card>
+      </div>
+    </template>
+
+    <div v-else class="loading-state">
+      <span class="mono">{{ t('common.loading') }}</span>
+    </div>
+
+    <div v-if="loaded && !loadError" class="save-bar">
+      <ErrorState v-if="saveError" :message="saveError" class="save-error" />
+      <Badge v-if="justSaved" variant="green">{{ t('config.saved') }}</Badge>
+      <Button
+        variant="primary"
+        :loading="saving"
+        :disabled="!dirtyKeys.size"
+        @click="save"
+      >
+        {{ t('config.save') }}
+      </Button>
+    </div>
+  </div>
 </template>
+
+<style scoped>
+.page {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-8);
+  padding-bottom: var(--space-11);
+}
+
+.groups {
+  display: grid;
+  grid-template-columns: repeat(2, 1fr);
+  gap: var(--space-8);
+  align-items: start;
+}
+
+.config-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-6);
+  padding: var(--space-5) 0;
+  border-bottom: 1px solid var(--card-border);
+}
+.config-row:last-child {
+  border-bottom: none;
+}
+
+.config-label {
+  font-size: var(--font-sm);
+  color: var(--text);
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
+.config-control {
+  flex: 0 0 auto;
+  width: 200px;
+  max-width: 45%;
+}
+
+.loading-state {
+  height: 100%;
+  min-height: 200px;
+  display: grid;
+  place-items: center;
+  color: var(--text-muted);
+  font-size: var(--font-sm);
+  letter-spacing: 1px;
+  opacity: 0.7;
+}
+
+.save-bar {
+  position: sticky;
+  bottom: 0;
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: var(--space-6);
+  padding: var(--space-6) var(--space-8);
+  background: var(--card);
+  border: 1px solid var(--card-border);
+  border-radius: var(--r-lg);
+  box-shadow: 0 2px 20px rgba(0, 0, 0, 0.22);
+}
+
+.save-error {
+  flex: 1 1 auto;
+  padding: var(--space-3) var(--space-6);
+}
+
+@media (max-width: 900px) {
+  .groups {
+    grid-template-columns: 1fr;
+  }
+  .config-control {
+    max-width: 55%;
+  }
+}
+</style>

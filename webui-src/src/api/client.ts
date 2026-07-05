@@ -60,6 +60,8 @@ export interface ApiOptions {
   body?: unknown
   signal?: AbortSignal
   auth?: boolean
+  /** internal — set on the one allowed retry to prevent recursion */
+  _retried?: boolean
 }
 
 export async function apiFetch<T = unknown>(path: string, opts: ApiOptions = {}): Promise<T> {
@@ -73,6 +75,11 @@ export async function apiFetch<T = unknown>(path: string, opts: ApiOptions = {})
     headers['Content-Type'] = 'application/json'
     body = JSON.stringify(opts.body)
   }
+  // Remember whether csrfToken was empty when THIS request was built — a
+  // hard-load straight into a page that immediately POSTs (e.g. #/config)
+  // can race /api/state's csrf_token capture, so a 403 in that specific
+  // case is worth one recovery retry (below), not just a hard failure.
+  const hadNoCsrfAtSend = method !== 'GET' && !csrfToken
   if (method !== 'GET' && csrfToken) headers['X-CSRF-Token'] = csrfToken
 
   // DEV-only mock (dead-code-stripped from production: import.meta.env.DEV is a
@@ -99,6 +106,21 @@ export async function apiFetch<T = unknown>(path: string, opts: ApiOptions = {})
     clearToken()
     if (onUnauthorized) onUnauthorized()
     throw new ApiError(401, 'unauthorized')
+  }
+
+  // CSRF race recovery: a non-GET sent before /api/state ever populated
+  // csrfToken can get rejected with 403. Fetch /api/state once (it carries
+  // csrf_token in its body) and retry the original request exactly once.
+  // _retried guards against ever looping — the retry cannot retry again.
+  if (res.status === 403 && !opts._retried && hadNoCsrfAtSend) {
+    try {
+      await apiFetch('/api/state')
+    } catch {
+      /* fall through to normal 403 handling below */
+    }
+    if (csrfToken) {
+      return apiFetch<T>(path, { ...opts, _retried: true })
+    }
   }
 
   const text = await res.text()
