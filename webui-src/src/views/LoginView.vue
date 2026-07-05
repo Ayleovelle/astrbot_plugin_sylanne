@@ -1,9 +1,10 @@
 <script setup lang="ts">
-import { onMounted, ref } from 'vue'
+import { nextTick, onMounted, ref, watch } from 'vue'
 import { useRouter, useRoute } from 'vue-router'
 import { useAuthStore } from '../stores/auth'
 import { useI18n } from '../composables/useI18n'
 import { useVoidTransition } from '../composables/useVoidTransition'
+import { useBoot } from '../composables/useBoot'
 import SpecimenCanvas from '../components/SpecimenCanvas.vue'
 
 // Login screen — faithful port of the old #loginSection p3 (form) / p4
@@ -15,6 +16,7 @@ const route = useRoute()
 const auth = useAuthStore()
 const { t } = useI18n()
 const voidTransition = useVoidTransition()
+const boot = useBoot()
 
 type Phase = 'form' | 'verify'
 type VerifyState = 'verifying' | 'success' | 'error'
@@ -55,9 +57,31 @@ async function submit(): Promise<void> {
   if (ok) {
     verifyState.value = 'success'
     await delay(2200)
+    // 1. Specimen swallow plays exactly as before — ends fully solid.
     await voidTransition.start('expanding')
+    // 2. Veil snaps opaque BEFORE the canvas unmounts (route change below),
+    //    so the solid void never drops for a frame between the two.
+    voidTransition.setVeilSolid(true)
+    boot.requestArrival()
     const redirect = (route.query.redirect as string) || '/monitor'
-    void router.replace(redirect)
+    // 3. Navigate underneath the opaque veil.
+    try {
+      await router.replace(redirect)
+    } catch {
+      // Failed nav (e.g. guard bounce) — never trap the UI behind a solid veil.
+      voidTransition.reset()
+      return
+    }
+    // 4. Wait for the dashboard route to actually mount, then iris the veil
+    //    open — with a failsafe timeout so a stalled mount can't leave the
+    //    veil solid (or the FSM stuck mid-transition) forever.
+    await nextTick()
+    const revealTimedOut = await Promise.race([
+      voidTransition.start('revealing', 900).then(() => false),
+      delay(1500).then(() => true),
+    ])
+    if (revealTimedOut) voidTransition.reset()
+    voidTransition.setVeilSolid(false)
   } else {
     verifyState.value = 'error'
     await delay(1600)
@@ -70,9 +94,24 @@ async function submit(): Promise<void> {
 }
 
 onMounted(() => {
-  setTimeout(() => {
-    decoEntered.value = true
-  }, 300)
+  // Old behavior: decos only .entered once the loading cover finished
+  // fading (UI/index.html ~4134-4137). If boot already finished (e.g. a
+  // hot route change back to /login), enter immediately instead of waiting
+  // on a boot that will never complete again.
+  if (boot.done.value) {
+    setTimeout(() => {
+      decoEntered.value = true
+    }, 300)
+  } else {
+    const stop = watch(boot.done, (isDone) => {
+      if (isDone) {
+        stop()
+        setTimeout(() => {
+          decoEntered.value = true
+        }, 300)
+      }
+    })
+  }
   tokenInputEl.value?.focus()
 })
 </script>

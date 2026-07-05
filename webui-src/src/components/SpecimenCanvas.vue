@@ -261,6 +261,15 @@ onMounted(() => {
   // pseudopod/scanline/REC all suppressed. The void-transition radius/fill
   // ramp still runs (it's a functional state change, not ambient motion).
   function render(now: number, frozen: boolean): void {
+    // Zero-sized viewport (hidden/pre-layout webview, background prerender):
+    // drawImage from a 0×0 canvas throws InvalidStateError — and an exception
+    // escaping the first mounted-hook frame aborts Vue's remaining post-flush
+    // queue in dev, taking sibling components (the boot cover) down with it.
+    // Skip the frame and re-poll the size; the loop self-heals once laid out.
+    if (W === 0 || H === 0) {
+      resize()
+      return
+    }
     const t = frozen ? 0 : (now - startTime) / 1000
     cx.clearRect(0, 0, W, H)
 
@@ -569,7 +578,9 @@ onMounted(() => {
   function loop(now: number): void {
     render(now, reduced)
     const activeTransition = voidState.value !== 'idle'
-    if (!reduced || activeTransition) {
+    // W===0: keep the loop alive through a zero-sized (pre-layout) viewport
+    // even under reduced motion, so the static frame appears once laid out.
+    if (!reduced || activeTransition || W === 0) {
       raf = requestAnimationFrame(loop)
     } else {
       raf = 0

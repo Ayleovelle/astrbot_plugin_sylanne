@@ -26,6 +26,8 @@ export const useAuthStore = defineStore('auth', () => {
   }
 
   // On app load, verify a persisted token before admitting to the dashboard.
+  // Only a real 401 invalidates the token; a transient network/5xx failure
+  // must NOT log the user out (the dashboard surfaces its own offline state).
   async function verifyExisting(): Promise<boolean> {
     if (!getToken()) {
       status.value = 'anon'
@@ -35,10 +37,15 @@ export const useAuthStore = defineStore('auth', () => {
       await apiFetch('/api/state')
       status.value = 'ok'
       return true
-    } catch {
-      clearToken()
-      status.value = 'anon'
-      return false
+    } catch (e) {
+      if (e instanceof ApiError && e.status === 401) {
+        // apiFetch already cleared the token on 401; mirror the state here.
+        clearToken()
+        status.value = 'anon'
+        return false
+      }
+      status.value = 'ok'
+      return true
     }
   }
 
