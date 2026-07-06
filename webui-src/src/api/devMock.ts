@@ -383,6 +383,58 @@ function mockLifeAudit(): Record<string, unknown> {
   }
 }
 
+function mockAdminInspect(): Record<string, unknown> {
+  return {
+    session: 'qq:private:2300184498',
+    kv_keys: {
+      primary: { exists: true, bytes: 48213, version: 'v3' },
+      v2_backup: { exists: true, bytes: 47990, version: 'v3', crc_valid: true },
+      quarantine: { exists: false, bytes: null, version: null },
+    },
+    hydrated: true,
+    incarnation_epoch: 7,
+    current_epoch: 7,
+    epoch_matches: true,
+    queue_depth: 0,
+    throat_stats: {
+      reject_count: 2,
+      rebuild_count: 1,
+      dropped_no_loop_count: 0,
+      active_sessions: 3,
+      tracked_epochs: 7,
+    },
+    has_pending_delete: false,
+  }
+}
+
+function mockAdminQuarantineView(): Record<string, unknown> {
+  return {
+    session: 'qq:private:2300184498',
+    sessions: {
+      'qq:private:2300184498': { count: 0, items: [] },
+      'qq:group:10086': {
+        count: 2,
+        items: [
+          { reason: 'crc_mismatch', epoch: 5, ts: (Date.now() - 3_600_000) / 1000 },
+          { reason: 'epoch_stale', epoch: 4, ts: (Date.now() - 9_000_000) / 1000 },
+        ],
+      },
+    },
+    total_entries: 2,
+    note: 'quarantine entries are retained for manual inspection only; nothing is auto-deleted',
+  }
+}
+
+function mockAdminPendingDeletes(): Record<string, unknown> {
+  return {
+    scan_done: true,
+    entries: {
+      'qq:group:99999': { epoch: 3, ts: (Date.now() - 1_800_000) / 1000 },
+    },
+    count: 1,
+  }
+}
+
 // Return a mock payload for a known GET path, or undefined to signal "no mock".
 export function devMock(path: string, method: string): unknown {
   const clean = path.split('?')[0]
@@ -400,6 +452,9 @@ export function devMock(path: string, method: string): unknown {
     if (clean.endsWith('/api/life/events')) return mockLifeEvents()
     if (clean.endsWith('/api/life/projects')) return mockLifeProjects()
     if (clean.endsWith('/api/life/audit')) return mockLifeAudit()
+    if (clean.endsWith('/api/admin/inspect')) return mockAdminInspect()
+    if (clean.endsWith('/api/admin/quarantine_view')) return mockAdminQuarantineView()
+    if (clean.endsWith('/api/admin/pending_deletes')) return mockAdminPendingDeletes()
     return undefined
   }
   if (method === 'POST') {

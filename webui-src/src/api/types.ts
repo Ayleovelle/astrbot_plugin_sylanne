@@ -365,3 +365,73 @@ export interface LifeAuditResponse {
   available?: boolean
   [k: string]: unknown
 }
+
+// --- admin diagnostics (Wave: admin page) ---
+// Three new read-only endpoints exposing internal KV/epoch/quarantine state
+// for debugging the session persistence pipeline. Same permissive-optional
+// philosophy as the rest of this file — every field may be absent or null
+// depending on backend state (e.g. inspect before any session has hydrated).
+
+export interface AdminKvSlot {
+  exists?: boolean | null
+  bytes?: number | null
+  version?: string | null
+  crc_valid?: boolean | null
+  error?: boolean
+  [k: string]: unknown
+}
+
+export interface AdminThroatStats {
+  reject_count?: number
+  rebuild_count?: number
+  dropped_no_loop_count?: number
+  active_sessions?: number
+  tracked_epochs?: number
+  [k: string]: unknown
+}
+
+export interface AdminInspectResponse {
+  session?: string
+  kv_keys?: {
+    primary?: AdminKvSlot | null
+    v2_backup?: AdminKvSlot | null
+    quarantine?: AdminKvSlot | null
+    [k: string]: AdminKvSlot | null | undefined
+  } | null
+  hydrated?: boolean | null
+  incarnation_epoch?: number | null
+  current_epoch?: number | null
+  epoch_matches?: boolean | null
+  queue_depth?: number | null
+  throat_stats?: AdminThroatStats | null
+  has_pending_delete?: boolean | null
+  [k: string]: unknown
+}
+
+export interface AdminQuarantineSession {
+  count?: number
+  items?: unknown[]
+  error?: boolean
+  [k: string]: unknown
+}
+
+export interface AdminQuarantineResponse {
+  session?: string
+  sessions?: Record<string, AdminQuarantineSession>
+  total_entries?: number
+  note?: string
+  [k: string]: unknown
+}
+
+export interface AdminPendingDeleteEntry {
+  epoch?: number
+  ts?: number
+  [k: string]: unknown
+}
+
+export interface AdminPendingDeletesResponse {
+  scan_done?: boolean | null
+  entries?: Record<string, AdminPendingDeleteEntry>
+  count?: number
+  [k: string]: unknown
+}
