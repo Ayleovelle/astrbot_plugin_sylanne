@@ -165,6 +165,7 @@ from sylanne_alpha.social_field import SocialFieldCollector  # noqa: E402
 from sylanne_alpha.llm_response_pipeline import LLMResponsePipeline  # noqa: E402
 from sylanne_alpha.public_api import PublicAPI  # noqa: E402
 from sylanne_alpha.state_persistence import StatePersistence  # noqa: E402
+from sylanne_alpha.memory_facade import MemoryFacade  # noqa: E402
 from sylanne_alpha.realtime_dispatch import RealtimeDispatch  # noqa: E402
 from sylanne_alpha.background_queue import BackgroundPostQueue  # noqa: E402
 from sylanne_alpha.webui_routes import WebUIRoutes  # noqa: E402
@@ -458,6 +459,9 @@ class EmotionalStatePlugin(Star):
         # 子系统初始化：各子系统持有 self 引用，通过委托模式分工
         self._session_ctx = SessionContext(self)
         self._state_persistence = StatePersistence(self)
+        # MEM-03 PR-6：记忆门面，薄转发到 _session_ctx（同步 accessor）+
+        # _state_persistence（写走单写咽喉），本身不持有新状态。
+        self._memory_facade = MemoryFacade(self)
         self._realtime_dispatch = RealtimeDispatch(self)
         self._background_queue = BackgroundPostQueue(self)
         self._webui_routes = WebUIRoutes(self)
@@ -561,6 +565,12 @@ class EmotionalStatePlugin(Star):
             (f"/{P}/api/config_export", "config_export_handler", ["GET"]),
             (f"/{P}/api/config_import", "config_import_handler", ["POST"]),
             (f"/{P}/api/widget-state", "widget_state_handler", ["GET"]),
+            (f"/{P}/api/v2core_state", "v2core_state_handler", ["GET"]),
+            # MEM-03 PR-7：三只读 admin 端点（嵌入式镜像，独立 webui_server 侧见
+            # /api/admin/* 的 aiohttp 注册）。
+            (f"/{P}/api/admin/inspect", "admin_inspect_handler", ["GET"]),
+            (f"/{P}/api/admin/quarantine_view", "admin_quarantine_view_handler", ["GET"]),
+            (f"/{P}/api/admin/pending_deletes", "admin_pending_deletes_handler", ["GET"]),
             # Phase 4：生活观测面板（与独立 webui_server 镜像）
             (f"/{P}/api/life/status", "life_status_handler", ["GET"]),
             (f"/{P}/api/life/events", "life_events_handler", ["GET"]),
@@ -766,7 +776,7 @@ class EmotionalStatePlugin(Star):
                     logger.debug(f"Sylanne forget_session [{session_key}]: {e}")
 
     def _memory_system_for_session(self, session_key: str) -> MemorySystem:
-        return self._session_ctx.memory_system_for_session(session_key)
+        return self._memory_facade.memory_system_for_session(session_key)
 
     def _memory_system_has_content(self, memory_system: Any) -> bool:
         return self._session_ctx.memory_system_has_content(memory_system)
@@ -2046,17 +2056,17 @@ class EmotionalStatePlugin(Star):
     async def _save_sylanne_memory_state(
         self, session_key: str, state: Any = None
     ) -> None:
-        await self._state_persistence.save_sylanne_memory_state(session_key, state)
+        await self._memory_facade.save_sylanne_memory_state(session_key, state)
 
     async def _load_sylanne_memory_state(
         self, session_key: str, *, now: float = 0.0
     ) -> Any:
-        return await self._state_persistence.load_sylanne_memory_state(
+        return await self._memory_facade.load_sylanne_memory_state(
             session_key, now=now
         )
 
     async def _delete_sylanne_memory_state(self, session_key: str) -> None:
-        await self._state_persistence.delete_sylanne_memory_state(session_key)
+        await self._memory_facade.delete_sylanne_memory_state(session_key)
 
     def _consume_conversation_pending_response_epoch(self, session_key: str) -> float:
         return self._store.conversation_pending_response_epochs.pop(session_key, 0.0)

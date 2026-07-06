@@ -1591,6 +1591,32 @@ async def start_webui_server(plugin: Any, host: str = "127.0.0.1", port: int = 2
             pass
         return web.json_response({"topics": topics})
 
+    # ------------------------------------------------------------------
+    # MEM-03 PR-7: GET /api/admin/inspect|quarantine_view|pending_deletes
+    # 三只读 admin 端点——诚实只读，builder 见模块级 _admin_* 函数（两个消费面
+    # 共享同一份 builder，见 _v2core_state_payload 上方注释的既有共享模式）。
+    # ------------------------------------------------------------------
+
+    async def handle_admin_inspect(request: web.Request) -> web.Response:
+        """单 session 记忆诊断：KV 键存在性/字节数/version/backup CRC、
+        _hydrated/_incarnation_epoch vs 当前纪元、写咽喉队深/拒写计数。"""
+        current = _plugin(plugin)
+        session = str(request.query.get("session", "") or "").strip()
+        return web.json_response(await _admin_inspect_payload(current, session=session))
+
+    async def handle_admin_quarantine_view(request: web.Request) -> web.Response:
+        """quarantine 侧车只读视图（此前只写不读的缺口）。"""
+        current = _plugin(plugin)
+        session = str(request.query.get("session", "") or "").strip()
+        return web.json_response(
+            await _admin_quarantine_view_payload(current, session=session)
+        )
+
+    async def handle_admin_pending_deletes(request: web.Request) -> web.Response:
+        """跨重启 pending-delete 索引进程内镜像快照。"""
+        current = _plugin(plugin)
+        return web.json_response(_admin_pending_deletes_payload(current))
+
     app.router.add_get("/", handle_page)
     app.router.add_get("/twin", handle_twin_page)
     app.router.add_get("/health", handle_health)
@@ -1637,6 +1663,9 @@ async def start_webui_server(plugin: Any, host: str = "127.0.0.1", port: int = 2
     app.router.add_get("/api/scar_map", handle_scar_map)
     app.router.add_get("/api/sheaf_topology", handle_sheaf_topology)
     app.router.add_get("/api/topic-gravity", handle_topic_gravity)
+    app.router.add_get("/api/admin/inspect", handle_admin_inspect)
+    app.router.add_get("/api/admin/quarantine_view", handle_admin_quarantine_view)
+    app.router.add_get("/api/admin/pending_deletes", handle_admin_pending_deletes)
     app.router.add_get("/assets/logo.png", handle_logo)
     app.router.add_get("/logo.png", handle_logo)
 
@@ -2838,6 +2867,201 @@ def _v2core_state_payload(plugin: Any, *, session: str = "") -> dict[str, Any]:
         except Exception:
             pass
 
+    return out
+
+
+# ---------------------------------------------------------------------------
+# MEM-03 PR-7：三只读 admin 端点（诚实只读——只暴露已存在的字段，绝不新增持久
+# 状态）。两个消费面（独立 aiohttp 服务器 + 嵌入式 AstrBot Web 服务器）共用
+# 本节的模块级 builder，镜像 `_build_widget_state` / `_v2core_state_payload`
+# 的既有共享模式。
+# ---------------------------------------------------------------------------
+
+
+def _admin_inspect_fence_stats(plugin: Any, session: str = "") -> dict[str, Any]:
+    """化身栅栏 + 写咽喉部分（同步、纯内存读取，无 await）：`_hydrated` /
+    `_incarnation_epoch`（只从活体内存对象上 getattr，绝不经 to_dict/序列化）
+    vs 当前纪元、队深、拒写等计数、未决删除。抽成独立同步辅助供
+    `_admin_inspect_payload` 复用，不直接对外注册为 handler。
+    """
+    out: dict[str, Any] = {
+        "hydrated": None,
+        "incarnation_epoch": None,
+        "current_epoch": None,
+        "epoch_matches": None,
+        "queue_depth": None,
+        "throat_stats": None,
+        "has_pending_delete": None,
+    }
+    sp = getattr(plugin, "_state_persistence", None)
+    if sp is None or not session:
+        return out
+    try:
+        store = getattr(plugin, "_store", None)
+        systems = getattr(store, "memory_systems", None) if store is not None else None
+        live = systems.get(session) if systems is not None else None
+        throat = getattr(sp, "_throat", None)
+        current_epoch = throat.current_epoch(session) if throat is not None else None
+        stamp = getattr(live, "_incarnation_epoch", None) if live is not None else None
+        out["hydrated"] = getattr(live, "_hydrated", None) if live is not None else None
+        out["incarnation_epoch"] = stamp
+        out["current_epoch"] = current_epoch
+        out["epoch_matches"] = (
+            (stamp == current_epoch) if stamp is not None and current_epoch is not None else None
+        )
+    except Exception:
+        pass
+    try:
+        throat = getattr(sp, "_throat", None)
+        if throat is not None:
+            out["queue_depth"] = throat.queue_depth(session)
+            out["throat_stats"] = throat.stats()
+            out["has_pending_delete"] = throat.has_pending_delete(session)
+    except Exception:
+        pass
+    return out
+
+
+async def _admin_inspect_payload(plugin: Any, session: str = "") -> dict[str, Any]:
+    """单 session 诊断：键存在性/字节数/version/backup CRC/_hydrated/
+    _incarnation_epoch vs 当前纪元/写咽喉队深/拒写计数。
+
+    Best-effort：任何一块读取失败只把该块置 null，绝不因单点异常炸掉整个响应。
+    `_incarnation_epoch` 只从【活体内存对象】上读（getattr），从不经过任何
+    to_dict/序列化路径——冻结面：该属性绝不允许出现在任何持久化 blob 里，本
+    builder 也只读不写，绝不把它塞回任何 dict 之外的地方。两个 HTTP 消费面
+    （独立 aiohttp / 嵌入式 quart）都在 async 上下文中，故本 builder 是唯一
+    真实实现（不提供假的同步壳，避免"看起来能同步跑，其实读不到 KV"的假象）。
+    """
+    out: dict[str, Any] = {"session": session, "kv_keys": None}
+    out.update(_admin_inspect_fence_stats(plugin, session))
+    if not session:
+        return out
+
+    sp = getattr(plugin, "_state_persistence", None)
+    if sp is None:
+        return out
+
+    import json as _json
+
+    get_fn = getattr(plugin, "get_kv_data", None)
+    kv_keys: dict[str, Any] = {}
+    if callable(get_fn):
+        primary_key = sp.sylanne_memory_kv_key(session)
+        backup_key = sp.sylanne_memory_backup_v2_kv_key(session)
+        try:
+            from .memory_legacy_formats import quarantine_kv_key
+
+            quarantine_key = quarantine_kv_key(sp._safe_session_key(session))
+        except Exception:
+            quarantine_key = None
+
+        async def _probe(key: str | None) -> dict[str, Any] | None:
+            if key is None:
+                return None
+            try:
+                blob = await get_fn(key, None)
+            except Exception:
+                return {"exists": None, "error": True}
+            if blob is None:
+                return {"exists": False}
+            try:
+                size = len(_json.dumps(blob, ensure_ascii=False).encode("utf-8"))
+            except Exception:
+                size = None
+            entry: dict[str, Any] = {"exists": True, "bytes": size}
+            if isinstance(blob, dict) and "version" in blob:
+                entry["version"] = blob.get("version")
+            return entry
+
+        kv_keys["primary"] = await _probe(primary_key)
+        backup_entry = await _probe(backup_key)
+        if backup_entry is not None and backup_entry.get("exists"):
+            try:
+                backup_blob = await get_fn(backup_key, None)
+                backup_entry["crc_valid"] = (
+                    sp._backup_blob_is_valid(backup_blob)
+                    if hasattr(sp, "_backup_blob_is_valid")
+                    else None
+                )
+            except Exception:
+                backup_entry["crc_valid"] = None
+        kv_keys["v2_backup"] = backup_entry
+        kv_keys["quarantine"] = await _probe(quarantine_key)
+    out["kv_keys"] = kv_keys or None
+    return out
+
+
+async def _admin_quarantine_view_payload(plugin: Any, session: str = "") -> dict[str, Any]:
+    """MEM-01 quarantine 侧车（此前只写不读的缺口）：可选按 session 过滤，
+    否则聚合遍历所有已知 session 的 quarantine 键（best-effort，KV 无枚举 API，
+    只能基于 `_known_sessions` 已知集合探测）。逐 session 读 quarantine 侧车键
+    （未知 session 的残留侧车键无法被发现，诚实标注在 `note` 字段）。
+    """
+    sp = getattr(plugin, "_state_persistence", None)
+    get_fn = getattr(plugin, "get_kv_data", None)
+    out: dict[str, Any] = {
+        "session": session,
+        "sessions": {},
+        "total_entries": 0,
+        "note": (
+            "AstrBot KV 无键枚举 API，仅覆盖 _known_sessions 已知的会话集合；"
+            "未活跃过的会话残留 quarantine 侧车键不可见（诚实遗留，见设计文档 §9）"
+        ),
+    }
+    if sp is None or not callable(get_fn):
+        return out
+    try:
+        from .memory_legacy_formats import quarantine_kv_key
+    except Exception:
+        return out
+
+    candidates = [session] if session else _known_sessions(plugin)
+    sessions_out: dict[str, Any] = {}
+    total = 0
+    for sk in candidates:
+        if not sk:
+            continue
+        try:
+            safe = sp._safe_session_key(sk)
+            key = quarantine_kv_key(safe)
+            blob = await get_fn(key, None)
+        except Exception:
+            sessions_out[sk] = {"error": True}
+            continue
+        if not isinstance(blob, dict):
+            continue
+        items = blob.get("items") if isinstance(blob.get("items"), list) else []
+        if not items:
+            continue
+        count = int(blob.get("count", len(items)) or len(items))
+        sessions_out[sk] = {"count": count, "items": items}
+        total += count
+    out["sessions"] = sessions_out
+    out["total_entries"] = total
+    return out
+
+
+def _admin_pending_deletes_payload(plugin: Any) -> dict[str, Any]:
+    """跨重启 pending-delete 索引：进程内镜像（`_pending_delete_mirror`）快照，
+    含扫描完成标志——纯只读，绝不修改镜像/绝不触发 clear。
+    """
+    sp = getattr(plugin, "_state_persistence", None)
+    out: dict[str, Any] = {
+        "scan_done": None,
+        "entries": {},
+        "count": 0,
+    }
+    if sp is None:
+        return out
+    try:
+        mirror = getattr(sp, "_pending_delete_mirror", None)
+        out["scan_done"] = getattr(sp, "_pending_delete_scan_done", None)
+        if isinstance(mirror, dict):
+            out["entries"] = dict(mirror)
+            out["count"] = len(mirror)
+    except Exception:
+        pass
     return out
 
 
