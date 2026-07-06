@@ -71,6 +71,15 @@ _server_task: asyncio.Task | None = globals().get("_server_task")
 _httpd: Any = globals().get("_httpd")
 _httpd_thread: threading.Thread | None = globals().get("_httpd_thread")
 _active_plugin: Any = globals().get("_active_plugin")
+# DATA-LOSS 修复：stdlib ThreadingHTTPServer 回退模式下，worker 线程没有自己的
+# running loop，`asyncio.get_event_loop()` 在线程里拿到的是新建的、从未 run 过的
+# loop——`call_soon_threadsafe` 排的回调永远不会执行，导致"永久删除"类操作
+# （meltdown 的持久化 purge）悄悄变成 no-op，却仍对用户回 {ok: True}。
+# 这里持有 AstrBot 进程级 persistent main loop 的引用（由 main.py 的 async
+# initialize() 在其运行的 loop 上调用 set_main_loop() 权威绑定，镜像
+# MemoryWriteThroat.bind_loop 的既有模式），供 stdlib handler 用
+# run_coroutine_threadsafe 提交到「真正在跑」的 loop。
+_main_loop: asyncio.AbstractEventLoop | None = globals().get("_main_loop")
 _active_token: str = ""
 _meltdown_nonces: dict[str, str] = {}
 # Item 24: CSRF token — 登录成功后生成，POST/DELETE 端点校验
@@ -185,6 +194,30 @@ def _set_active_plugin(plugin: Any) -> None:
     """将独立监听器指向最新的插件实例（热重载时调用）。"""
     global _active_plugin
     _active_plugin = plugin
+
+
+def set_main_loop(loop: asyncio.AbstractEventLoop | None) -> None:
+    """绑定 AstrBot 进程级 persistent main loop（供 stdlib 回退路径提交持久化协程）。
+
+    必须在 main.py 的 async initialize()（保证运行在该 persistent loop 上）里调用；
+    调用点须早于 stdlib 服务器开始处理请求。插件卸载/停止时传 None 清除，防止
+    持有已关闭 loop 的悬垂引用。
+    """
+    global _main_loop
+    _main_loop = loop
+
+
+def _get_main_loop() -> asyncio.AbstractEventLoop | None:
+    """返回当前绑定的 persistent main loop（未绑定或已停止则返回 None）。"""
+    loop = _main_loop
+    if loop is None:
+        return None
+    try:
+        if loop.is_closed():
+            return None
+    except Exception:
+        return None
+    return loop
 
 
 def _plugin(default: Any = None) -> Any:
@@ -1683,7 +1716,12 @@ def start_webui_background(plugin: Any, host: str = "127.0.0.1", port: int = 271
 
 async def stop_webui_server() -> None:
     """停止独立监听器（插件卸载/重载时调用）。清理 task、httpd、thread。"""
-    global _server_task, _httpd, _httpd_thread, _active_plugin
+    global _server_task, _httpd, _httpd_thread, _active_plugin, _main_loop
+    # 清掉 persistent main loop 引用：卸载/重载后旧 loop 即将失效（或已由新一轮
+    # __init__ 抢占式清理），避免 stdlib handler 用 run_coroutine_threadsafe 提交
+    # 到一个已经不再服务的悬垂 loop 上。main.py 的 async initialize() 会在新一轮
+    # 生命周期里重新调用 set_main_loop() 权威绑定。
+    _main_loop = None
     task = _server_task
     _server_task = None
     if task and not task.done():
@@ -2266,10 +2304,24 @@ def start_webui_thread_server(
                     if mem_sys is None or not list(mem_sys._l1):
                         self._send_json({"ok": True, "estimated_seconds": 0})
                         return
-                    loop = asyncio.get_event_loop()
-                    loop.call_soon_threadsafe(
-                        asyncio.ensure_future,
+                    # DATA-LOSS 修复：get_event_loop() 在 worker 线程里会造出一个从未
+                    # run 过的新 loop，call_soon_threadsafe 排的回调永远不执行——
+                    # consolidation 悄悄没跑却仍回 {ok: True}。改提交到真正在跑的
+                    # persistent main loop（set_main_loop 绑定）；拿不到就诚实报错。
+                    main_loop = _get_main_loop()
+                    if main_loop is None or not main_loop.is_running():
+                        logger.warning(
+                            "Sylanne WebUI memory_consolidate (stdlib): 无可用的 "
+                            "persistent main loop，consolidation 未调度"
+                        )
+                        self._send_json(
+                            {"ok": False, "error": "consolidation_unavailable_no_loop"},
+                            status=503,
+                        )
+                        return
+                    asyncio.run_coroutine_threadsafe(
                         current_plugin._trigger_consolidation(session),
+                        main_loop,
                     )
                     self._send_json({"ok": True, "estimated_seconds": 30})
                 except Exception as exc:
@@ -2308,17 +2360,62 @@ def start_webui_thread_server(
                                 "_memory_system", None
                             )
                         sp = getattr(current_plugin, "_state_persistence", None)
-                        if sp is not None and hasattr(sp, "purge_session_after_meltdown"):
+                    # DATA-LOSS 修复：原先用 get_event_loop()+call_soon_threadsafe+
+                    # ensure_future 在 worker 线程里排持久化 purge——该线程没有自己的
+                    # running loop，get_event_loop() 只会造一个从未 run 过的新 loop，
+                    # 回调永远不会执行。disk 上的会话状态就此存活，重启后可"复活"，
+                    # 但接口仍照常回 {ok: True, cleared: True} 造成假成功。
+                    # 现在改提交到 AstrBot 进程级 persistent main loop（由 main.py 的
+                    # async initialize() 用 set_main_loop() 绑定），并 block 等结果，
+                    # 确保响应体如实反映持久化 purge 是否真的执行完成。
+                    persistent_purge_ok = True
+                    warning: str | None = None
+                    if sp is not None and hasattr(sp, "purge_session_after_meltdown"):
+                        main_loop = _get_main_loop()
+                        if main_loop is not None and main_loop.is_running():
                             try:
-                                loop = asyncio.get_event_loop()
-                                loop.call_soon_threadsafe(
-                                    asyncio.ensure_future,
-                                    sp.purge_session_after_meltdown(session),
+                                fut = asyncio.run_coroutine_threadsafe(
+                                    sp.purge_session_after_meltdown(session), main_loop
                                 )
-                            except Exception:
-                                pass
+                                fut.result(timeout=10)
+                            except Exception as purge_exc:
+                                persistent_purge_ok = False
+                                warning = (
+                                    "in-memory cleared; persistent purge failed/"
+                                    "timed out"
+                                )
+                                logger.error(
+                                    "Sylanne MEMORY MELTDOWN (stdlib): persistent "
+                                    f"purge failed for session={session}: {purge_exc}",
+                                    exc_info=True,
+                                )
+                        else:
+                            persistent_purge_ok = False
+                            warning = (
+                                "in-memory cleared; persistent purge unavailable "
+                                "(no running loop)"
+                            )
+                            logger.warning(
+                                "Sylanne MEMORY MELTDOWN (stdlib): no running "
+                                f"persistent main loop, session={session} disk "
+                                "state NOT purged"
+                            )
                     logger.info(f"Sylanne MEMORY MELTDOWN (stdlib): session={session}")
-                    self._send_json({"ok": True, "session": session, "cleared": True})
+                    if persistent_purge_ok:
+                        self._send_json(
+                            {"ok": True, "session": session, "cleared": True}
+                        )
+                    else:
+                        # NEVER 裸 cleared:true——诚实告知内存已清但磁盘 purge 未执行。
+                        self._send_json(
+                            {
+                                "ok": True,
+                                "session": session,
+                                "cleared": True,
+                                "persistent_purge": False,
+                                "warning": warning,
+                            }
+                        )
                 except Exception as exc:
                     logger.error(f"Sylanne WebUI POST /api/memory_meltdown error: {exc}", exc_info=True)
                     self._send_json({"ok": False, "error": "Internal server error"}, status=500)

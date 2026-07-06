@@ -2482,6 +2482,16 @@ class EmotionalStatePlugin(Star):
                 throat.bind_loop(asyncio.get_running_loop())
         except Exception as e:
             logger.debug(f"Sylanne memory throat loop bind skipped: {e}")
+        # DATA-LOSS 修复：绑定 AstrBot 进程级 persistent main loop，供
+        # webui_server.py 的 stdlib ThreadingHTTPServer 回退路径（worker 线程无
+        # running loop）用 run_coroutine_threadsafe 提交持久化 purge/consolidation
+        # 协程到「真正在跑」的 loop（镜像上面 throat.bind_loop 的既有模式）。必须在
+        # 本 loop 上调用、且早于 stdlib 服务器开始处理任何请求——initialize() 保证
+        # 两者都满足。WebUI 是可选子系统，绑定失败不应阻断插件其余初始化。
+        try:
+            _sylanne_webui_server.set_main_loop(asyncio.get_running_loop())
+        except Exception as e:
+            logger.debug(f"Sylanne WebUI main loop bind skipped: {e}")
         # MEM-03 PR-4：启动扫描跨重启 pending-delete 索引——完成/驳回上一次进程运行
         # 遗留的删除意图残留（primary 已空则补完；primary 非空绝不重放，交管理员），
         # 并把未决 entry 载入进程内镜像供本次运行期间 hydrate/load-admit 消费
