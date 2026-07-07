@@ -81,6 +81,12 @@ except ImportError:
 
             return decorator
 
+        def after_message_sent(self, *args, **kwargs):
+            def decorator(func):
+                return func
+
+            return decorator
+
         def llm_tool(self, *args, **kwargs):
             def decorator(func):
                 return func
@@ -1369,6 +1375,81 @@ class EmotionalStatePlugin(Star):
             logger.warning(
                 f"Sylanne on_decorating_result strip failed: {e}", exc_info=True
             )
+
+    # -----------------------------------------------------------------------
+    # issue43 PRIMARY 修复：AstrBot /reset（及 /new 切换新会话）幽灵源清理
+    # -----------------------------------------------------------------------
+    #
+    # 根因（已用真模型 A/B 复核，详见任务交接记录）：AstrBot 内置 /reset 会清空
+    # 它自己的 conversation.history（→ 真实对话历史丢失），但从不触碰本插件的
+    # MemorySystem/ConversationBuffer/pending_outreach_context（→ 幽灵话题存活，
+    # 继续被召回进 [心象] 记忆线索 与 [life_event_context] 槽位）。真实历史缺失 +
+    # 幽灵注入残留 —— 这个联合条件才会让模型漂移到幽灵话题；单独一边都不会。
+    #
+    # AstrBot 侧机制（astrbot/builtin_stars/builtin_commands/commands/conversation.py
+    # 的 reset()/new_conv()）：`message.set_extra("_clean_ltm_session", True)`，
+    # 仅在 AstrBot 自己的 after_message_sent 钩子里被消费一次（调用它自己的内置
+    # LTM.remove_session，与本插件无关）。本插件此前完全不读这个标记——这里补上
+    # 同名钩子，跟随同一套约定读同一个 extra key（API 参考 §3 after_message_sent /
+    # §4 event.get_extra）。
+    @filter.after_message_sent()
+    async def on_after_message_sent_reset_ghost_cleanup(self, event: Any) -> None:
+        """AstrBot /reset 发生后清理本插件的幽灵记忆源（不触碰关系/人格状态）。"""
+        try:
+            clean_session = False
+            get_extra = getattr(event, "get_extra", None)
+            if callable(get_extra):
+                clean_session = bool(get_extra("_clean_ltm_session", False))
+            if not clean_session:
+                return
+            session_key = self._session_ctx.session_key(event)
+            self._on_session_reset(session_key)
+        except Exception as e:
+            logger.warning(
+                f"Sylanne on_after_message_sent_reset_ghost_cleanup failed: {e}",
+                exc_info=True,
+            )
+
+    def _on_session_reset(self, session_key: str) -> None:
+        """/reset 触发的幽灵源清理（同步、可测试）。
+
+        清（透明工作记忆/瞬时携带者，"忘记这段对话"）：
+        - MemorySystem L1 热池（clear_l1_hot_pool）——近期未确认摘要，最直接的
+          temporal_proximity 幽灵搬运工。
+        - MemorySystem 自动召回纪元边界（set_recall_epoch_boundary）——非破坏性
+          门控：早于此刻的 L1/L2/L3 记忆不再被自动召回拼进 prompt，但条目本身
+          不删除、不清零，管理面板/WebUI 直读旁路不受影响。
+        - ConversationBuffer（本轮暂存原文，尚未 flush 进记忆的部分）。
+        - pending_outreach_context（[life_event_context] 槽位的待发送生活事件，
+          幽灵话题的另一条直接注入通路）。
+
+        保留（关系/人格/身份状态，"忘记这段对话" != "忘记你是谁/我们的关系"）：
+        - L2/L3 已下沉/已压缩的记忆本体（只是纪元门控，不删除）。
+        - v2core 人格/关系/身份域（usermodel disposition、narrative self、
+          emotion baseline、distill 等）——本方法完全不触碰。
+        - _incarnation_epoch（从不序列化，本方法也不touch）。
+        """
+        now = time.time()
+        memory_system = self._store.memory_systems.get(session_key)
+        if memory_system is not None:
+            try:
+                memory_system.set_recall_epoch_boundary(now)
+            except Exception as e:
+                logger.debug(f"Sylanne _on_session_reset epoch boundary [{session_key}]: {e}")
+            try:
+                memory_system.clear_l1_hot_pool()
+            except Exception as e:
+                logger.debug(f"Sylanne _on_session_reset clear L1 [{session_key}]: {e}")
+        conv_buf = self._store.conversation_buffers.get(session_key)
+        if conv_buf is not None:
+            try:
+                conv_buf.drain()
+            except Exception as e:
+                logger.debug(f"Sylanne _on_session_reset drain buffer [{session_key}]: {e}")
+        try:
+            self._store.pending_outreach_context.pop(session_key, None)
+        except Exception as e:
+            logger.debug(f"Sylanne _on_session_reset pop outreach [{session_key}]: {e}")
 
     async def _maybe_takeover_segments(self, event: Any) -> bool:
         """若 event 对应的 origin 被桥接登记为待接管分段：

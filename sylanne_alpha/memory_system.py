@@ -1026,6 +1026,13 @@ class MemorySystem:
         self._recall_mode: RecallMode = self._resolve_recall_mode(
             kwargs.get("recall_mode")
         )
+        # issue43 PRIMARY 修复：/reset 召回纪元边界（不持久化——不进 to_dict，
+        # v1 限制见 set_recall_epoch_boundary 文档）。默认 0.0 = 不生效（放行全部
+        # 历史记忆，现有行为零变化）。/reset 时插给一个时间戳后，_gather_pool 会把
+        # created_at 早于该边界的候选（L1/L2/L3 全部三层）排除出自动召回候选池——
+        # 这是"不再自动浮上来"而非"删除"：条目仍完整保留在 _l1/_l2/_l3_nodes 里，
+        # 手动查询/管理面板等旁路读取路径不受影响，只挡自动召回这一条通路。
+        self._recall_epoch_boundary: float = 0.0
         # SHADOW 模式下记录最近一次新旧召回差异（供 get_debug_snapshot 读取）
         self._last_shadow_diff: dict[str, Any] | None = None
         self._params: dict[str, float] = {
@@ -1485,6 +1492,40 @@ class MemorySystem:
         self._l1 = kept
         return before - len(self._l1)
 
+    # ------------------------------------------------------------------
+    # issue43 PRIMARY 修复：/reset 幽灵源清理
+    # ------------------------------------------------------------------
+
+    def set_recall_epoch_boundary(self, ts: float) -> None:
+        """设置自动召回纪元边界（/reset 触发，non-destructive gate）。
+
+        只影响 recall() 的自动候选池筛选（_gather_pool）——created_at 早于 ts 的
+        L1/L2/L3 条目不再被自动浮上来拼进 prompt，但条目本身完整保留，不删除、
+        不清零，管理面板/WebUI 的直接读取旁路不受影响。
+
+        v1 限制（cheap-persist，未升级序列化 shape）：此边界不进 to_dict/from_dict，
+        纯内存态。进程重启会把边界打回 0.0（相当于"忘记了曾经 /reset 过"），
+        届时旧记忆会重新符合自动召回资格——已知的 v1 限制，不是本次修复的阻断项
+        （见任务指令第5点：宁可不动冻结的序列化 shape，也不做重启不丢失）。
+        """
+        self._recall_epoch_boundary = float(ts)
+
+    def clear_l1_hot_pool(self) -> int:
+        """清空 L1 热池（/reset 触发的透明工作记忆载体，直接清除而非纪元门控）。
+
+        L1 是"近期对话摘要、未确认可丢弃"的瞬时工作记忆，语义上就是本轮对话的
+        草稿区——/reset 清空 AstrBot 侧对话历史后，这里的残留摘要就是幽灵话题的
+        直接搬运工（_gather_pool 对 L1 的 temporal_proximity 兜底命中尤其明显）。
+        与 L2/L3（转 epoch 门控、保留但不自动浮现）不同，L1 本身就是transient——
+        直接清空，不是"删除记忆"，是"清掉这轮已经作废的工作记忆草稿"。
+
+        Returns:
+            被清除的条目数。
+        """
+        before = len(self._l1)
+        self._l1 = deque(maxlen=self._L1_CAPACITY)
+        return before
+
     def needs_consolidation(self) -> bool:
         """检查是否需要执行整理。触发条件：每天 6:00/18:00 或 L1 满 60 条。"""
         # 保底：L1 满了就触发
@@ -1823,8 +1864,14 @@ class MemorySystem:
                 self._inverted_index.query(list(query_tokens)[:15], top_k=15)
             )
         in_pool: set[str] = set()
+        # issue43 PRIMARY 修复：/reset 纪元边界——早于边界的条目不参与自动召回
+        # 候选池（仍完整保留在 _l1/_l2/_l3_nodes 里，只是不再被 _gather_pool 挑出来）。
+        # 边界默认 0.0，未触发过 /reset 的会话恒放行，现有行为零变化。
+        epoch = self._recall_epoch_boundary
 
         for item in self._l1:
+            if epoch > 0.0 and item.created_at < epoch:
+                continue
             relevance, reason = self._compute_relevance_with_reason(
                 query, query_embedding, item.text, item.embedding, query_tokens
             )
@@ -1846,6 +1893,8 @@ class MemorySystem:
             in_pool.add(item.id)
 
         for item in self._l2:
+            if epoch > 0.0 and item.created_at < epoch:
+                continue
             relevance, reason = self._compute_relevance_with_reason(
                 query, query_embedding, item.text, item.embedding, query_tokens
             )
@@ -1864,6 +1913,8 @@ class MemorySystem:
             in_pool.add(item.id)
 
         for item in self._l2:
+            if epoch > 0.0 and item.created_at < epoch:
+                continue
             if item.id in index_ids and item.id not in in_pool:
                 pool.append({
                     "rel": 0.12, "reason": "inverted_index", "obj": item, "layer": "L2",
@@ -1874,7 +1925,13 @@ class MemorySystem:
                 })
 
         # L3 候选（节点匹配，带 relevance；importance 用 clarity 近似）
-        pool.extend(self._recall_l3_candidates(query))
+        l3_candidates = self._recall_l3_candidates(query)
+        if epoch > 0.0:
+            l3_candidates = [
+                c for c in l3_candidates
+                if float(c.get("created_at", 0.0) or 0.0) >= epoch
+            ]
+        pool.extend(l3_candidates)
         return pool
 
     def _apply_privacy_filter(
@@ -1995,6 +2052,10 @@ class MemorySystem:
         for layer, store in (("L1", self._l1), ("L2", self._l2)):
             for item in store:
                 if id(item) in in_wide:
+                    continue
+                # 召回纪元门控：reset 前的记忆不自动浮现（与 _gather_pool 一致，
+                # 否则情感旁路会绕过 epoch 边界把幽灵情绪记忆翻回来）。
+                if self._recall_epoch_boundary > 0.0 and item.created_at < self._recall_epoch_boundary:
                     continue
                 # 情绪需与当前心境同向（都正或都负），避免开心时翻出难过事
                 if abs(item.temperature) < emo_floor or item.importance < imp_floor:
@@ -2357,6 +2418,10 @@ class MemorySystem:
                 continue
             node = self._l3_nodes.get(nid)
             if node is None or node.clarity < 0.1:
+                continue
+            # 召回纪元门控：扩散不得把 reset 前的邻居节点当新候选带回来。
+            if (self._recall_epoch_boundary > 0.0
+                    and getattr(node, "created_at", 0.0) < self._recall_epoch_boundary):
                 continue
             extra.append({
                 "rel": min(self._SPREAD_REL_CAP, act),
