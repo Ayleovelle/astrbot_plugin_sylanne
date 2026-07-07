@@ -2,6 +2,39 @@
 
 本文件用于 AstrBot 插件市场/管理页展示更新内容。更完整的设计说明、公式推导、测试矩阵和维护手册见 `README.md`。
 
+## [Embodiment-2.4.0] - 2026-07-08  （灰度测试版 / grey）
+
+> 上下文防漂移（红线，真模型证实的联合条件根治）+ WebUI 全量重构 + 记忆只读管理面（MEM-04）+ 巩固假成功修复。本包为灰测版，先行小范围验证后再正式发布。
+
+### 🐛 上下文防漂移（红线修复：几轮就失忆 + 跳到不相干旧话题）
+
+真模型 A/B 证实：跳题的真根因是**「历史丢失 AND 幽灵注入」联合条件**，缺一不发作（历史在场时模型无视幽灵、扣题；只有历史被清空/打薄那一轮，一段响亮的离题旧记忆才会把无锚轮劫持走）。分三条腿断链：
+
+- **leg-1 认 /reset（断历史丢失腿）**：插件监听 `_clean_ltm_session`（AstrBot `/reset`、`/new` 都设，对真框架 4.25.1 核过），reset 时设 `MemorySystem` 召回纪元边界（`created_at < 边界`的记忆不再自动召回，**一条不删**）+ 清 L1 热池 / ConversationBuffer / 待发 outreach；L2/L3 长期记忆、v2core 关系人格自我、`_incarnation_epoch` 全保住——忘掉这段对话，但没忘你是谁。
+- **leg-2a 历史感知幽灵门控（断幽灵注入腿，主防御）**：`memory_system.recall()` 新增 `history_present`（默认 True，所有既有调用逐字不变），在**唯一收敛点**丢弃历史缺失轮的零相关近期兜底项（temporal_proximity 幽灵）——LEGACY/ACTIVATION/SHADOW 三模式、PERCEPT/legacy 两条召回路径一处生效全覆盖（v2core_on 时 PERCEPT 是主注入路径，必须在收敛点门控，否则漏）。有真实词面/向量相关的召回一律不动；生活事件在无锚轮 defer（放回 pending，不消费不丢），留到有历史锚的正常轮再顺嘴带。历史锚由 orchestrator 从 `req.contexts` 数真实历史轮得出（阈值 2）。
+- **leg-2c 动态注入绝对封顶（兜底）**：`_assemble_final_prompt` 把已注入的 v2core [心象]+Layer-1 计入 gap 感知上限收紧 Layer-2，`_LAYER2_MIN_BUDGET=400` 地板绝不饿死最高优先级感知槽；仅非 hajide 路径生效（归一化会摊平历史致估算失真）。
+- **leg-2d 召回冗余去重（blake2b 归一化-精确）**：折叠"仅标点/空白/大小写不同的同一句"，用密码学哈希当去重裁判、永不进 prompt。**刻意弃用模糊 Jaccard/MinHash**——字符相似度分不清「过来/过去」（判 0.85 会误删语义相反的记忆），归一化-精确杜绝之，且排除有语义的运算/比较符（`- + < > = / :`）防「今天-5度/5度」折叠；仅历史缺失轮生效，历史在场路径逐字不变。
+- **leg-3 空回吞轮补第二条历史丢失路**：`_background_observe_request` 里 conv_mgr 用户轮同步从大 `try` 深处上移到 `try` 之前（移动非新增，恰好一次、不双写）。上游任一评估/内核异常都不再跳过它；否则该轮若又判 SILENT，AstrBot 自身 `_save_to_history` 也因 completion 为空跳过 → 用户消息永久从会话历史消失。
+
+**验证四路**：确定性装配 A/B（薄历史轮幽灵全消、满历史轮逐字保留）+ opus 红线对抗闸 5 攻击位逐条独立复核（3 REAL 全修，含 strip-集残留二次逮修）+ 全量 **1487 passed / 2 skipped** + 真模型 glm-5 A/B（修后 Arm A 不再跳到「标注元数据」）。冻结面零动（public_api/大饼桥、to_dict/from_dict、`_incarnation_epoch`、路由注册、per-session 隔离、AstrBot SDK 全未碰；新增状态皆瞬态不落盘）。
+
+### ✨ WebUI 全量重构
+
+- **技术栈换代**：从三份手写 monolith HTML 重构为 **Vue 3 + Vite + TypeScript + Pinia + vue-router** 单文件构建（`vite-plugin-singlefile` 内联进 `UI/index.html`，仍是零依赖单文件、AstrBot 直接托管）。
+- **8 个真页面**（占位页全部替换为真端点）：监测 / 认知核 / 配置 / 日志 / 记忆 / 人格 / 生活 / 管理。
+- **找回丢掉的仪式感**：开机 / 登录 / 归来过渡动画重做；恢复中缝脊柱轨（带拖拽物理）与「解剖台」两栏布局（任何东西都不跨过中线）；可读性字号地板。
+- **签名身份**：默认暗色主题（不跟随系统偏好）；对抗式设计评审加固模板。
+
+### 🧠 记忆 / 后端
+
+- **MEM-04 记忆只读管理面**：新增 `MemoryFacade` + 三个只读 admin 端点（`/api/admin/inspect`、`/quarantine_view`、`/pending_deletes`）+ v2core 镜像；配套「管理」页。
+- **巩固/崩解假成功修复**：WebUI stdlib handler 用捕获的 `_main_loop` 走 `run_coroutine_threadsafe`，meltdown/consolidate 不再谎报成功。
+
+### ⚠️ 灰测说明
+
+- 版本号 2.4.0，本包为灰度测试构建，正式发布前先小范围验证。
+- 4 个默认关闭的活人感行为等实机开验；上下文修复建议重点验：`/reset` 后开新对话、连发短句，看是否还几轮跳题。
+
 ## [Embodiment-2.3.0] - 2026-06-27
 
 > issue #43「主动消息重复」根因三链修复 + 对话内容片段泄露修复 + 上游引擎升级 2.4.0，整包同时生效。
