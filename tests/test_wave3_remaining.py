@@ -39,7 +39,7 @@ def test_dilute_dense_contexts_is_permanent_noop() -> None:
 
 def test_percept_recall_populates_scratch() -> None:
     class _MS:
-        def recall(self, text, query_embedding=None, current_warmth=0.0, limit=3):
+        def recall(self, text, query_embedding=None, current_warmth=0.0, limit=3, **kwargs):
             return [type("R", (), {"text": "上次聊过猫", "confidence": "clear",
                                    "layer": "L2", "activation": 1.0,
                                    "temperature": 0.2, "emotional_weight": 0.5})()]

@@ -44,6 +44,7 @@ class MemoryDomain:
     def recall(
         self, text: str, *, warmth: float = 0.0, limit: int = 3,
         query_embedding: list[float] | None = None,
+        history_present: bool = True,
     ) -> list[dict[str, Any]]:
         """召回相关记忆，返回纯数据 dict 列表（不泄露 MemoryResult 内部对象）。
 
@@ -59,7 +60,10 @@ class MemoryDomain:
         """
         if not text:
             return []
-        results = self._ms.recall(text, query_embedding, warmth, limit=limit)
+        results = self._ms.recall(
+            text, query_embedding, warmth, limit=limit,
+            history_present=history_present,
+        )
         out: list[dict[str, Any]] = []
         for r in results:
             # 单一 v2core choke 点：情感旁路（ACTIVATION 模式 _apply_emotion_bypass）

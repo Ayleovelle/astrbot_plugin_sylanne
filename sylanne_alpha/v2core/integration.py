@@ -324,11 +324,45 @@ def _is_cron_event(event: Any) -> bool:
     return umo.startswith("cron")
 
 
+# leg-2a：与 llm_request_pipeline._MIN_HISTORY_TURNS_FOR_ANCHOR 对齐。此处独立定义避免
+# integration ← pipeline 的循环导入（pipeline 已 import 本模块的 peek_percept_recalled_texts）。
+_MIN_HISTORY_TURNS_FOR_ANCHOR = 2
+
+
+def _history_present(request: Any) -> bool:
+    """req.contexts 是否有 ≥阈值 条带非空文本的真实 user/assistant 轮（leg-2a）。
+
+    PERCEPT 跑在 Step 0（早于 legacy 清洗），看到的是原始 contexts——泄漏注入会让计数
+    略偏高，即偏向"历史在场"、少压制，是安全方向（只在明显薄历史时才压幽灵）。
+    """
+    contexts = getattr(request, "contexts", None)
+    if not isinstance(contexts, list):
+        return False
+    n = 0
+    for m in contexts:
+        if isinstance(m, dict) and m.get("role") in ("user", "assistant"):
+            content = m.get("content")
+            if isinstance(content, str):
+                if content.strip():
+                    n += 1
+            elif isinstance(content, list):
+                if any(
+                    isinstance(b, dict) and b.get("type") == "text"
+                    and str(b.get("text") or "").strip()
+                    for b in content
+                ):
+                    n += 1
+        if n >= _MIN_HISTORY_TURNS_FOR_ANCHOR:
+            return True
+    return False
+
+
 async def _percept_recall(
     plugin: Any,
     ctx: Any,
     domains: dict[str, Any],
     text: str,
+    history_present: bool = True,
 ) -> None:
     """PERCEPT 拍召回（T1-6/7）：当轮 prompt 可消费，含 embedding。"""
     memory = domains.get("memory")
@@ -365,7 +399,8 @@ async def _percept_recall(
                 except Exception:
                     query_embedding = None
         results = memory.recall(
-            text, warmth=ctx.current_warmth, limit=limit, query_embedding=query_embedding
+            text, warmth=ctx.current_warmth, limit=limit,
+            query_embedding=query_embedding, history_present=history_present,
         )
         if results:
             ctx.scratch["recalled"] = results
@@ -663,7 +698,12 @@ async def apply_v2core_request(plugin: Any, event: Any, request: Any) -> None:
             evo_delta=_evo_provider(plugin, session_key),
         )
         _apply_v2core_feature_flags(ctx, plugin)
-        await _percept_recall(plugin, ctx, rt["domains"], text)
+        # leg-2a：历史缺失/病态轮压制 PERCEPT 侧零相关近期召回（幽灵）——与 legacy 侧同门，
+        # 覆盖 v2core_on（业主实盘配置）这条主注入路径。
+        await _percept_recall(
+            plugin, ctx, rt["domains"], text,
+            history_present=_history_present(request),
+        )
         rt["pending"] = {"ctx": ctx, "ts": time.time(), "text": text}
         rt["pending_assessment"] = ctx.scratch.get("assessment") or None
 

@@ -24,7 +24,7 @@ class _FakeMS:
     def __init__(self, results) -> None:  # noqa: ANN001
         self._results = results
 
-    def recall(self, text, _none, warmth, limit=3):  # noqa: ANN001
+    def recall(self, text, _none, warmth, limit=3, **kwargs):  # noqa: ANN001
         return self._results[:limit]
 
     def to_dict(self):

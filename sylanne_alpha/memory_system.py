@@ -18,6 +18,7 @@ v2 核心变更（相对 v1）:
 
 from __future__ import annotations
 
+import hashlib
 import logging
 import math
 import re
@@ -801,6 +802,44 @@ def _keyword_overlap_precomputed(query_tokens: set[str], text: str) -> float:
         return 0.0
     intersection = query_tokens & t_words
     return len(intersection) / max(len(query_tokens), 1)
+
+
+# ---------------------------------------------------------------------------
+# leg-2(d) 召回冗余去重：归一化-精确 blake2b 签名（业主要的"用密码学压制重复注入"）。
+#
+# 【为何不是模糊 Jaccard/MinHash】红队实测证伪了字符 shingle 的模糊相似度：它无法把
+# "过来"和"过去"（差一个尾字，Jaccard 0.85 高于任何可用阈值）与真正的重复区分开——
+# 恰好在语义翻转的危险区（来/去、买/卖、是/否）误删语义不同的记忆；而真正换说法的
+# 转述反而普遍落在阈值以下逮不到。字符相似度天然测不出语义差，任何阈值都堵不住。
+#
+# 【安全形态】只折叠"仅大小写/空白/标点不同的同一句"——casefold + 去空白与常见中英
+# 标点后做【精确】哈希匹配。过来≠过去（实字保留），绝不误删语义不同的记忆；同时仍
+# 逮住逐字精确去重漏网的标点/空白/大小写变体。签名紧凑、只当去重裁判，永不进 prompt、
+# 永不落盘、永不喂给模型。
+# ---------------------------------------------------------------------------
+# 只收纯装饰性符号（空白 + 句读/引号/括号）。刻意排除有语义的运算/比较/分隔符
+# （- + < > = / * : ~ % 等）——红队实测：strip 掉它们会把 "今天-5度"/"今天5度"、
+# "盈亏+2000"/"盈亏-2000"、"体重>60"/"体重<60"、"8:00"/"800" 这类真不同的数值记忆
+# 折叠成一条。真正的装饰性重复绝不会仅差一个运算符，故排除它们零损失。
+_DEDUP_STRIP_CHARS = frozenset(
+    " \t\n\r　"                         # 空白（含全角空格）
+    "，。！？、；“”‘’（）【】《》…—·"       # 中文句读/引号/括号/间隔号
+    ".,!?;\"'()[]"                           # 英文句读/引号/括号
+)
+
+
+def _normalized_dedup_sig(text: str) -> int | None:
+    """归一化-精确去重签名：casefold + 去空白/标点后 blake2b(8B)。
+
+    空文本（或归一化后为空）→ None（不参与去重）。两段文本仅在空白/标点/大小写上
+    不同 → 同签名；任何实字差异（过来/过去）→ 不同签名。
+    """
+    t = "".join(c for c in (text or "").casefold() if c not in _DEDUP_STRIP_CHARS)
+    if not t:
+        return None
+    return int.from_bytes(
+        hashlib.blake2b(t.encode("utf-8", "ignore"), digest_size=8).digest(), "big"
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -1762,42 +1801,64 @@ class MemorySystem:
         query_embedding: list[float] | None = None,
         current_warmth: float = 0.0,
         limit: int = 5,
+        *,
+        history_present: bool = True,
     ) -> list[MemoryResult]:
         """召回入口分发器（阶段0 灰度）。
 
         - LEGACY：现有两阶段四维加权召回（默认，行为零变化）。
         - ACTIVATION：ACT-R 激活核召回（阶段1+ 实现，未实现前回退 LEGACY）。
         - SHADOW：返回 LEGACY 结果，同时后台跑 ACTIVATION 记录差异（不影响返回值）。
+
+        Args:
+            history_present: 本轮 req.contexts 是否有充分真实历史（leg-2a）。默认 True
+                → 所有既有调用点（public_api / emotion_spirit / 单测）行为逐字不变。
+                per-turn 注入路径（legacy 与 PERCEPT 两条召回）在历史缺失/病态轮传 False，
+                据以在【唯一收敛点】丢掉零相关近期项（temporal_proximity 幽灵）——真模型证实
+                "跳到不相干旧话题"仅在【历史丢失 AND 幽灵注入】联合成立时发作。此门断"幽灵"
+                那条腿，且只砍 recency 兜底项，有真实词面/向量相关的召回一律不动。
         """
         mode = self._recall_mode
         if mode is RecallMode.LEGACY:
-            return self._recall_legacy(query, query_embedding, current_warmth, limit)
-        if mode is RecallMode.ACTIVATION:
+            results = self._recall_legacy(query, query_embedding, current_warmth, limit)
+        elif mode is RecallMode.ACTIVATION:
             activation_fn = getattr(self, "_recall_activation", None)
             if activation_fn is None:
                 # 阶段1 未落地：安全回退，不让开关把召回打瘫。
-                return self._recall_legacy(
+                results = self._recall_legacy(
                     query, query_embedding, current_warmth, limit
                 )
-            return activation_fn(query, query_embedding, current_warmth, limit)
-        # SHADOW：以 LEGACY 为准返回，新引擎仅观测
-        legacy = self._recall_legacy(query, query_embedding, current_warmth, limit)
-        activation_fn = getattr(self, "_recall_activation", None)
-        if activation_fn is not None:
-            try:
-                # observe_only：影子评估不能污染记忆状态（不刷新 actr_acc/不 reinforce），
-                # 否则 LEGACY 返回的同时新引擎偷偷"练习"了 actr_acc，影子就不是纯观测。
-                new = activation_fn(
-                    query, query_embedding, current_warmth, limit, observe_only=True
-                )
-                self._record_shadow_diff(query, legacy, new)
-            except Exception as e:  # 影子计算绝不能影响线上返回
-                import logging
+            else:
+                results = activation_fn(query, query_embedding, current_warmth, limit)
+        else:
+            # SHADOW：以 LEGACY 为准返回，新引擎仅观测
+            results = self._recall_legacy(
+                query, query_embedding, current_warmth, limit
+            )
+            activation_fn = getattr(self, "_recall_activation", None)
+            if activation_fn is not None:
+                try:
+                    # observe_only：影子评估不能污染记忆状态（不刷新 actr_acc/不 reinforce），
+                    # 否则 LEGACY 返回的同时新引擎偷偷"练习"了 actr_acc，影子就不是纯观测。
+                    new = activation_fn(
+                        query, query_embedding, current_warmth, limit,
+                        observe_only=True,
+                    )
+                    self._record_shadow_diff(query, results, new)
+                except Exception as e:  # 影子计算绝不能影响线上返回
+                    import logging
 
-                logging.getLogger("astrbot_plugin_sylanne").warning(
-                    "Sylanne recall shadow 计算失败（不影响返回）：%s", e
-                )
-        return legacy
+                    logging.getLogger("astrbot_plugin_sylanne").warning(
+                        "Sylanne recall shadow 计算失败（不影响返回）：%s", e
+                    )
+        # leg-2a 唯一收敛点：历史缺失轮丢弃 temporal_proximity 近期兜底项（幽灵）。
+        # LEGACY/ACTIVATION/SHADOW 三模式、PERCEPT/legacy 两调用路径都经此，一处生效全覆盖。
+        if not history_present and results:
+            results = [
+                r for r in results
+                if getattr(r, "recall_reason", "") != "temporal_proximity"
+            ]
+        return results
 
     # 影子历史滚动缓冲上限（评估足够、内存可控）
     _SHADOW_HISTORY_MAX = 50
