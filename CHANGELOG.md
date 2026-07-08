@@ -71,6 +71,11 @@
 ### 🐛 其他修复
 
 - **巩固/崩解假成功修复**：WebUI stdlib handler 用捕获的 `_main_loop` 走 `run_coroutine_threadsafe`，meltdown/consolidate 不再谎报成功。
+- **节律 EMA 被跨停机 gap 污染修复**：`UserModelDomain._rhythm_ema`（相邻用户消息间隔的 EMA）无 gap 上限，加载旧持久化数据后插件停机那段跨重启间隔（可达数天）被当成一次真实节律喂进 EMA，实机实测把值顶到 1 万+，`reply_overdue` 随之几乎永不触发、活人感静默/主动搭话哑掉。修：仅 `0<gap<=3600s` 才入 EMA（超上限=离开/停机，不学，只推进时间戳）；加载时越界/NaN/inf/负值置 None 冷启（下条正常 gap 一轮重初始化到真 cadence）。全库扫描确认无同类未修暗桩。
+
+### 🏗️ 引擎
+
+- **vendored `sylanne_core` 升级 2.4.0 → 2.5.0**：2.5 清死栈——移除零行为消费者的 `_Kuramoto`/`_Plasticity`/`_FreeEnergy` 惰性桩及只写不读的 personality/feedback reach-in（`kuramoto_k1`/`plasticity`/`free_energy`/`hopfield_strength` 等），载荷输出 `sync_order` 保留。公共导出面 `__all__`（43 符号）逐字不变，对插件零接口变更；插件只吃 vendored 自包含副本、相对导入不串 pip 包；全量 1492 passed。
 
 ### ⚠️ 灰测说明
 
