@@ -206,9 +206,14 @@ class SylanneConfig:
         persistence_fsync: fsync after state writes (safer but slower).
         tick_drift_cap: Max personality drift per tick [0, 1].
         locale: Language for internal prompts ("zh" or "en").
-        force_backend: Override auto-detected compute backend.
-            None = auto-detect, "torch" = force GPU via PyTorch,
-            "python" = force pure-Python (useful for testing/debugging).
+        force_backend: Override auto-detected compute backend. Accepted and
+            validated, and written into ``DimensionProfile.backend`` — but that
+            field currently has no reader anywhere in the engine (the HGT
+            module's numpy-acceleration flag is hardcoded from local
+            ``_HAS_NUMPY``, not read from the profile), so this parameter has
+            no observable effect on computation today. The parameter position
+            is kept because downstream plugins pass ``force_backend="python"``
+            explicitly at construction time.
         training_data_sink: Opt in to writing a local distillation corpus
             (numeric features + assessor affect) for offline student training.
             Default False — collects nothing. This is multi-user data; no raw
