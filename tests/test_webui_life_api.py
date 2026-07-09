@@ -217,8 +217,10 @@ class _FakeQuartRequest:
 
 def _patch_quart_request(monkeypatch, body):
     fake = _FakeQuartRequest(body)
-    # 直接给 quart.request 打补丁；webui_routes.life_controls_handler 内 import 局部
-    import quart  # noqa: WPS433  (运行时 import 与目标模块一致)
+    # 直接给 quart.request 打补丁；webui_routes.life_controls_handler 内 import 局部。
+    # quart 非硬依赖（运行时由 AstrBot 环境提供，requirements 只列 aiohttp）——CI 未装时
+    # importorskip 让本 helper 相关的 5 个 life_controls 测试 skip，而非 ModuleNotFoundError 炸红。
+    quart = pytest.importorskip("quart")
 
     monkeypatch.setattr(quart, "request", fake, raising=False)
     return fake

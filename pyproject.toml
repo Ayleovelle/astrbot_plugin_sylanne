@@ -13,6 +13,9 @@ ignore = []
 [tool.ruff.lint.per-file-ignores]
 "experiments/*" = ["ALL"]
 "theory/*" = ["ALL"]
+# vendored 第三方 SDK：mirror 上游 sylanne_core，不由本仓 lint（改它=偏离上游）。
+# 例：_sharing.py 的 ASYNC240（async 里 Path().resolve()）是上游代码的事，我们不改 vendored。
+"sylanne_alpha/_engine/*" = ["ALL"]
 
 [tool.ruff.format]
 # 排版用上面的 line-length=120。注：全库现有 200 文件未按 ruff format 排版，
