@@ -1,7 +1,7 @@
 <script setup lang="ts">
 // Numeric input primitive — same chrome as TextInput, mono digits, emits a
 // real number (not a string) on v-model:number.
-withDefaults(
+const props = withDefaults(
   defineProps<{
     modelValue: number
     min?: number
@@ -26,6 +26,17 @@ function onInput(e: Event): void {
     emit('update:modelValue', n)
   }
 }
+
+// 清空/非法输入时不改模型（onInput 已跳过），失焦时把视图回填成当前模型值——
+// 否则 `:value="modelValue"` 在 modelValue 未变时不会把 DOM 拨回去，会留下
+// "输入框显示空、底层模型仍是旧值"的 UI/数据不一致（gemini review）。
+function onBlur(e: Event): void {
+  const el = e.target as HTMLInputElement
+  const n = Number(el.value)
+  if (el.value === '' || Number.isNaN(n)) {
+    el.value = String(props.modelValue)
+  }
+}
 </script>
 
 <template>
@@ -38,6 +49,7 @@ function onInput(e: Event): void {
     :step="step"
     :disabled="disabled"
     @input="onInput"
+    @blur="onBlur"
   />
 </template>
 
