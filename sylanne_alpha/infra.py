@@ -99,7 +99,7 @@ def ensure_background_tasks_list(p: Any) -> list:
 
 def safe_ensure_future(
     coro: Any, name: str = "task", task_list: list | None = None
-) -> "asyncio.Task[Any]":
+) -> "asyncio.Task[Any] | None":
     """将协程安全地调度为 asyncio Task，并附加异常日志回调。
 
     Args:
@@ -109,9 +109,16 @@ def safe_ensure_future(
                    便于外部统一管理/取消后台任务。
 
     Returns:
-        创建的 asyncio.Task 实例。
+        创建的 asyncio.Task 实例，或在无运行事件循环时返回 None。
+        若返回 None，协程已被关闭以防止资源泄漏。
     """
-    loop = asyncio.get_running_loop()
+    try:
+        loop = asyncio.get_running_loop()
+    except RuntimeError:
+        # No running loop (sync context, init/teardown) — close coro to prevent leak
+        coro.close()
+        return None
+    
     task = loop.create_task(coro)
     if task_list is not None:
         task_list.append(task)

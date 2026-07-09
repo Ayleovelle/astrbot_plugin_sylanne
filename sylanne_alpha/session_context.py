@@ -14,6 +14,7 @@
 from __future__ import annotations
 
 import asyncio
+import datetime
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -38,6 +39,12 @@ from sylanne_alpha.memory_system import ConversationBuffer, MemorySystem
 
 if TYPE_CHECKING:
     from sylanne_alpha.protocols import PluginHost
+
+
+# 时区感知：固定中国时区 UTC+8——time.localtime()/datetime.fromtimestamp() 不带 tz
+# 会读宿主系统时区，境外/UTC 服务器上会把凌晨的"早安"仪式误判成"深夜"（8 小时偏移）。
+# 与 v2core/capabilities/ignition.py 的 _CHINA_TZ 同一常量定义，仪式判断口径对齐。
+_CHINA_TZ = datetime.timezone(datetime.timedelta(hours=8))
 
 
 # ---------------------------------------------------------------------------
@@ -95,6 +102,77 @@ class RitualRegistry:
             该会话的仪式列表，每个仪式包含 hour_start、hour_end、pattern。
         """
         return [v for k, v in self._rituals.items() if k.startswith(session_key)]
+
+    def get_ritual(self, session_key: str, pattern: str) -> dict | None:
+        """获取指定会话+模式的已注册仪式（未达自动注册阈值则 None）。
+
+        Args:
+            session_key: 会话标识。
+            pattern: 行为模式描述（如 "morning_greeting"）。
+        """
+        return self._rituals.get(f"{session_key}:{pattern}")
+
+    # ------------------------------------------------------------------
+    # 序列化（T2-06⑤：随插件 KV 周期持久化，重启不丢已学到的仪式）
+    # ------------------------------------------------------------------
+
+    def to_dict(self) -> dict:
+        """序列化为可 JSON 化的 dict。"""
+        return {
+            "rituals": dict(self._rituals),
+            "observations": {k: list(v) for k, v in self._observations.items()},
+        }
+
+    @classmethod
+    def from_dict(cls, data: dict) -> "RitualRegistry":
+        """从字典恢复（load-compat：坏/缺字段一律安全降级为空）。"""
+        reg = cls()
+        if not isinstance(data, dict):
+            return reg
+        rituals = data.get("rituals", {})
+        if isinstance(rituals, dict):
+            reg._rituals = {
+                str(k): dict(v) for k, v in rituals.items() if isinstance(v, dict)
+            }
+        observations = data.get("observations", {})
+        if isinstance(observations, dict):
+            reg._observations = {
+                str(k): [float(t) for t in v if isinstance(t, (int, float))]
+                for k, v in observations.items()
+                if isinstance(v, list)
+            }
+        return reg
+
+
+# ---------------------------------------------------------------------------
+# T2-06④：早安/晚安兜底关键词识别
+#
+# 设计原打算读 sylanne_core 后台 assessor（_engine/sylanne_core/assessor.py）的
+# greeting/farewell 分类 flag，但审计确认：插件的 EngineFacade
+# （engine_adapter.py::EngineFacade.__init__）构造 SDK 引擎时 assessor_enabled
+# 默认为 False，且全仓没有任何调用点把它覆盖为 True；插件运行时实际驱动
+# valence/arousal 的是完全独立的 sylanne_alpha/assessor_async.py（自有 v/a/i/w
+# 极简 prompt，不含 flags/greeting/farewell）。也就是说 sylanne_core.assessor 的
+# flags 分类在插件当前运行时路径下不可达——因此这里按卡片指示退化为关键词兜底
+# （小集合、模块级、可扩展），并在实现报告中记录这一偏差。
+# ---------------------------------------------------------------------------
+
+_MORNING_GREETING_KW = ("早安", "早上好")
+_NIGHT_FAREWELL_KW = ("晚安",)
+
+
+def _detect_greeting_ritual_pattern(text: str) -> str | None:
+    """从消息文本粗判是否命中早安问候/晚安告别模式。"""
+    if not text:
+        return None
+    if any(kw in text for kw in _MORNING_GREETING_KW):
+        return "morning_greeting"
+    if any(kw in text for kw in _NIGHT_FAREWELL_KW):
+        return "night_farewell"
+    return None
+
+
+_RITUAL_REGISTRY_KV_KEY = "sylanne_ritual_registry_state"
 
 
 # ---------------------------------------------------------------------------
@@ -617,11 +695,91 @@ class SessionContext:
         return "global"
 
     # ------------------------------------------------------------------
+    # Item 153 / T2-06：关系仪式注册表——观察 + 接线到 ProactiveScheduler
+    # ------------------------------------------------------------------
+
+    def observe_ritual_pattern(self, session_key: str, hour: int, pattern: str) -> None:
+        """观察到重复问候/告别模式时喂给 RitualRegistry。
+
+        一旦 RitualRegistry 侧自动注册（≥3 次观测），同步登记进
+        ProactiveScheduler 自己的仪式表（scheduler.register_ritual）——此前
+        RitualRegistry 只是个孤立记录，没有任何调用方把它接到调度器的
+        check_ritual_absence，reason_code='ritual' 因此从未真正可达
+        （T2-06 审计发现的缺口）。命中即落盘（观测频率天然低，无需节流）。
+
+        Args:
+            session_key: 会话标识。
+            hour: 当前小时（0-23）。
+            pattern: 行为模式描述（如 "morning_greeting"、"night_farewell"）。
+        """
+        self._ritual_registry.observe_pattern(session_key, hour, pattern)
+        ritual = self._ritual_registry.get_ritual(session_key, pattern)
+        if not ritual:
+            return
+        scheduler = getattr(self._p, "_proactive_scheduler", None)
+        register = getattr(scheduler, "register_ritual", None) if scheduler is not None else None
+        if callable(register):
+            try:
+                register(
+                    session_key,
+                    str(ritual.get("pattern", pattern)),
+                    int(ritual.get("hour_start", hour)),
+                    int(ritual.get("hour_end", (hour + 1) % 24)),
+                )
+            except Exception as e:
+                logger.debug(f"Sylanne ritual register_ritual skipped: {e}")
+        if hasattr(self._p, "_has_kv_api") and self._p._has_kv_api():
+            try:
+                from sylanne_alpha.utils import safe_ensure_future
+
+                safe_ensure_future(
+                    self._p.put_kv_data(
+                        _RITUAL_REGISTRY_KV_KEY, self._ritual_registry.to_dict()
+                    ),
+                    name=f"ritual_registry_save_{session_key}",
+                )
+            except Exception as e:
+                logger.debug(f"Sylanne ritual registry save skipped: {e}")
+
+    def detect_and_observe_ritual_from_text(
+        self, session_key: str, text: str, now: float | None = None
+    ) -> None:
+        """T2-06④：message ingest 钩子——从原始用户文本识别早安/晚安模式。
+
+        识别方式与偏差说明见模块级 `_detect_greeting_ritual_pattern` 的注释
+        （assessor 的 greeting/farewell flag 在插件运行时路径不可达，退化为
+        关键词兜底）。命中才调用 observe_ritual_pattern，未命中零开销。
+
+        Args:
+            session_key: 会话标识。
+            text: 原始用户消息文本。
+            now: 当前时间戳，默认为 time.time()。
+        """
+        pattern = _detect_greeting_ritual_pattern(text)
+        if not pattern:
+            return
+        ts = now if now is not None else time.time()
+        # 中国时区读取小时（非 time.localtime 的系统时区），避免境外/UTC 部署把凌晨
+        # 早安仪式误判成深夜（8 小时偏移）。
+        hour = datetime.datetime.fromtimestamp(ts, tz=_CHINA_TZ).hour
+        self.observe_ritual_pattern(session_key, hour, pattern)
+
+    # ------------------------------------------------------------------
     # 记忆系统辅助方法
     # ------------------------------------------------------------------
 
     def memory_system_for_session(self, session_key: str) -> MemorySystem:
         """获取指定会话的记忆系统实例（懒创建）。
+
+        MEM-02①：本方法是冻结的同步契约（外部消费方按同步 API 调用），不能改成
+        async——但 chat 路径重启后 body 通道恢复不到真实内容（CP1 起
+        AlphaBodyState.to_dict 白名单 memory 到 {relationship, shadow,
+        recent_texts}，_memory_system 键从未落进去），首次为某 session 懒创建的
+        MemorySystem 永远是空的。这里在懒创建的同一拍，把"从 KV 归档补水"调度成
+        后台 fire-and-forget 任务（仓库既有的 anchored 后台任务模式），不阻塞、
+        不改变本方法的同步返回契约；真正的合并逻辑在
+        StatePersistence.hydrate_memory_system 里非破坏性地原地合并（不是整层替换），
+        避免补水任务完成前活体已经写入的新内容被覆盖。
 
         Args:
             session_key: 会话标识。
@@ -638,7 +796,66 @@ class SessionContext:
             cfg = getattr(self._p, "config", None) or {}
             recall_mode = cfg.get("sylanne_alpha_recall_mode") or None
             systems.set(session_key, MemorySystem(recall_mode=recall_mode))
+            # MEM-03 PR-1：懒创建即盖化身印章（同步、无 await，不破坏本 accessor 的
+            # 冻结同步契约）。PR-1 惰性（纪元恒 0，印章恒 0）；PR-2 删除臂 bump 后即生效
+            # ——让"删除后新建的活体"带新纪元、旧引用携旧印章被咽喉验章丢弃。
+            sp = getattr(self._p, "_state_persistence", None)
+            throat = getattr(sp, "_throat", None) if sp is not None else None
+            if throat is not None:
+                throat.stamp(systems.get(session_key), session_key)
+            self._schedule_memory_hydration(session_key)
         return systems.get(session_key)
+
+    def _schedule_memory_hydration(self, session_key: str) -> None:
+        """MEM-02①：懒创建 MemorySystem 后台补水的调度点（幂等，失败静默降级）。
+
+        `StatePersistence.hydrate_memory_system` 自己会检查 `_hydrated` 标记，
+        重复调度（例如同一 session 短时间内多次懒创建，理论上不该发生但防御一下）
+        不会重复合并——第二次进去时活体已经 `_hydrated=True`，直接 no-op 返回。
+
+        MEM-03 PR-2（design §3 臂③ / §8 PR-2 行）：改经单写咽喉提交
+        （kind="hydrate"），不再直接 `safe_ensure_future`。若本次懒创建之后、hydrate
+        真正执行之前该 session 被删（三条删除类壳之一 bump 了纪元），入队时捕获的
+        token 与执行时的当前纪元不再相等，咽喉会把这个陈旧 hydrate op 直接丢弃、
+        不合并那份已经注定被删的归档——闭合 F3 的 hydrate 复活臂。同一 session 的
+        hydrate 与 save/delete 现在共享同一条 FIFO 队列，天然按提交序串行，不再是
+        与其他记忆写路径完全独立、时序不确定的后台任务。
+
+        本方法自身依然不 await（`memory_system_for_session` 冻结同步契约不变）；
+        `throat.submit` 本身就是同步调用，返回的 Future 用 done_callback 消费掉
+        异常/取消（与 `_on_memory_system_evicted` 同款 MINOR-1 模式一致），避免
+        "Future exception was never retrieved" 噪音。若拿不到咽喉实例（旧/测试环境
+        降级），回退到原 fire-and-forget 调度，保持行为不倒退。
+        """
+        state_persistence = getattr(self._p, "_state_persistence", None)
+        hydrate = getattr(state_persistence, "hydrate_memory_system", None)
+        if not callable(hydrate):
+            return
+        throat = getattr(state_persistence, "_throat", None)
+        if throat is None:
+            try:
+                from sylanne_alpha.utils import safe_ensure_future
+
+                safe_ensure_future(
+                    hydrate(session_key),
+                    name=f"memory_hydrate_{session_key}",
+                    task_list=getattr(self._p, "_background_tasks", None),
+                )
+            except Exception as e:
+                logger.debug(f"Sylanne memory hydration scheduling skipped: {e}")
+            return
+        try:
+            fut = throat.submit(
+                session_key,
+                lambda: hydrate(session_key),
+                kind="hydrate",
+                state=None,
+            )
+        except Exception as e:
+            logger.debug(f"Sylanne memory hydration scheduling skipped: {e}")
+            return
+        if fut is not None:
+            fut.add_done_callback(lambda f: f.cancelled() or f.exception())
 
     def memory_system_has_content(self, memory_system: Any) -> bool:
         """检查记忆系统是否包含有效内容（L1/L2/L3 任一非空）。
@@ -848,13 +1065,11 @@ class SessionContext:
                     memory_system,
                     host.kernel.body.memory.get("traces", []),
                 )
-                if self.memory_system_has_content(memory_system):
-                    host.kernel.body.memory["_memory_system"] = memory_system.to_dict()
-                    from sylanne_alpha.utils import safe_ensure_future
-                    safe_ensure_future(
-                        self._p._state_persistence.persist_kernel(session_key, host),
-                        name=f"hydrate_persist_{session_key}",
-                    )
+                # MEM-03 PR-5（存储解耦）：trace 注水出的内容留在活体占位者里，由下一次
+                # 周期 KV save 落盘（sylanne_memory_state 唯一真源）——删掉原来写
+                # body.memory["_memory_system"] 死档 + persist_kernel 那对：AlphaBodyState
+                # 白名单丢弃该键、从未在 kernel 快照往返幸存，persist_kernel 只落这份死写，
+                # durability 上等于没落盘（真档一直靠周期 KV save）。故删之无损。
             hosts.set(session_key, host)
             # 恢复对话缓冲区（文件回退；KV 保持同步）
             if not self._p._store.conversation_buffers.has(session_key):

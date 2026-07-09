@@ -7,9 +7,10 @@
 from __future__ import annotations
 
 import asyncio
+import time
 
 from sylanne_alpha.memory_system import MemorySystem, RecallMode
-from sylanne_alpha.v2core.body_port import snapshot_from_surface
+from sylanne_alpha.v2core.body_port_v2 import snapshot_from_surface
 from sylanne_alpha.v2core.capabilities.recall import RecallCapability
 from sylanne_alpha.v2core.contracts import BodySnapshot, Phase
 from sylanne_alpha.v2core.domains.memory import MemoryDomain
@@ -112,7 +113,7 @@ def test_recall_chain_end_to_end():
     recall_intents = [i for i in ctx.intents if i.source == "recall"]
     assert recall_intents, "应产出召回意图"
     assert recall_intents[0].payload["recalled"]
-    assert "recalled" in ctx.scratch
+    assert "recalled_deliberate" in ctx.scratch
 
 
 def test_recall_chain_blocked_by_low_intimacy():
@@ -143,9 +144,63 @@ def test_recall_chain_matches_oracle():
     sc = SelfCore(body)
     sc.register(RecallCapability())
     ctx = _run(sc.turn("u", object(), "旅行", domains={"memory": dom}))
-    new_texts = [m["text"] for m in ctx.scratch.get("recalled", [])]
+    new_texts = [m["text"] for m in ctx.scratch.get("recalled_deliberate", [])]
 
     assert new_texts == oracle, f"新链路 {new_texts} 应与 oracle {oracle} 一致"
+
+
+# --- 情感旁路 v2core 择点过滤（PRIME a：flood 修复）------------------------
+
+def test_domain_recall_drops_low_relevance_emotion_bypass():
+    """ACTIVATION 模式下，emotion_bypass 补回的 rel≈0 强情绪项在 MemoryDomain.recall
+    这个唯一 v2core choke 点被过滤掉（防高 warmth 场景每轮打断话题）；同一份记忆用
+    MemorySystem.recall 直调（legacy/直连路径）时仍原样含情感旁路项——不动其本身。
+    """
+    ms = MemorySystem(recall_mode=RecallMode.ACTIVATION)
+    now = time.time()
+    sad = ms.write_summary(
+        "那天你说工作压力很大很难过", source_turns=3,
+        temperature=-0.8, importance=0.8,
+    )
+    sad.created_at = now - 3600 * 24 * 30
+    sad.last_recalled_ts = 0.0
+    sad.actr_acc = 1.0
+
+    # oracle：MemorySystem.recall 直连（v2core 之外的路径）——情感旁路项仍在。
+    oracle = ms.recall("随便聊聊", current_warmth=-0.6, limit=5)
+    oracle_texts = [r.text for r in oracle]
+    assert any("工作压力" in t for t in oracle_texts), (
+        "直连 MemorySystem.recall 的情感旁路行为不应被本次修复改变"
+    )
+    bypassed = [r for r in oracle if r.recall_reason == "emotion_bypass"]
+    assert bypassed and bypassed[0].relevance < 0.15
+
+    # MemoryDomain.recall：v2core 唯一 choke 点——同一召回应把低相关的情感旁路项丢弃。
+    dom = MemoryDomain(ms)
+    out = dom.recall("随便聊聊", warmth=-0.6, limit=5)
+    out_texts = [r["text"] for r in out]
+    assert not any("工作压力" in t for t in out_texts), (
+        "MemoryDomain.recall 应过滤掉 relevance<0.15 的 emotion_bypass 项"
+    )
+
+
+def test_domain_recall_keeps_relevant_emotion_bypass():
+    """情感旁路项若本身语义也相关（relevance>=0.15），MemoryDomain.recall 不应误删。"""
+    ms = MemorySystem(recall_mode=RecallMode.ACTIVATION)
+    now = time.time()
+    sad = ms.write_summary(
+        "工作压力很大让人很难过", source_turns=3,
+        temperature=-0.8, importance=0.8,
+    )
+    sad.created_at = now - 3600 * 24 * 30
+    sad.last_recalled_ts = 0.0
+    sad.actr_acc = 1.0
+
+    dom = MemoryDomain(ms)
+    # 查询词与记忆文本有实义词重合 → relevance 应 >= 0.15，不应被当成低相关旁路丢弃。
+    out = dom.recall("最近工作压力好大", warmth=-0.6, limit=5)
+    out_texts = [r["text"] for r in out]
+    assert any("工作压力" in t for t in out_texts)
 
 
 def test_tick_decay_via_domain():

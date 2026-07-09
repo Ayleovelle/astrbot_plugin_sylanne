@@ -333,7 +333,7 @@ class ProactiveScheduler:
         Returns:
             决策字典，包含 should_speak、reason 等字段。
         """
-        from sylanne_alpha.compat import proactive_decision
+
 
         sk = (
             session_key
@@ -344,6 +344,8 @@ class ProactiveScheduler:
             )
             or "default"
         )
+        from sylanne_alpha.diagnostics_surface import proactive_decision
+
         host = self._p._host(sk)
         surface = host.diagnostics()
         decision = proactive_decision(surface)
@@ -449,6 +451,13 @@ class ProactiveScheduler:
         )
         result = await bridge.dispatch(sk, motivation)
         if result.get("dispatched"):
+            # T2-05 MAJOR-1 修复：user_followup 标签的消息真的发出去了才消费掉
+            # 产生该标签的那条待跟进线索——否则它会一直"到期"，把接下来每一次
+            # 主动发言都贴上一模一样的标签文案（issue-43 同源的内容复读）。
+            try:
+                bridge.consume_followup_on_dispatch(sk, reason_code)
+            except Exception:  # noqa: BLE001
+                pass  # 消费失败绝不阻断已经发出的 dispatch
             last_sent = getattr(self._p, "_proactive_dispatch_last_sent", None)
             if not isinstance(last_sent, dict):
                 last_sent = {}
@@ -459,6 +468,15 @@ class ProactiveScheduler:
                 else self._p._observed_now
             )
             last_sent[sk] = float(now)
+            # Wave 4（review learning-loop high）：主动消息也是真出站回复，刷新 reflex 续聊锚点。
+            # 否则她主动 ping、用户秒回，下一轮 reflex_learn 仍拿很久前的反应式回复时刻当锚，
+            # 把"被秒回"误判成"被忽略"灌进虚假负奖励——恰好砸 Wave 4 的 alive-test。零 IO，吞错。
+            try:
+                _sc = getattr(self._p, "_self_core", None)
+                if _sc is not None and hasattr(_sc, "mark_bot_reply"):
+                    _sc.mark_bot_reply(sk, float(now))
+            except Exception:  # noqa: BLE001
+                pass  # 学习锚点更新绝不阻断 dispatch
 
         return {
             **result,

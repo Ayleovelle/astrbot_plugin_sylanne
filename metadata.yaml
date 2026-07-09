@@ -1,8 +1,8 @@
 name: astrbot_plugin_sylanne
 display_name: Sylanne
 desc: "Sylanne-Embodiment：不可逆的关系计算引擎 + 自我进化认知体。数学语言让对话在躯体上留下伤痕、在沉默中积累压力、在关系里长出不可撤销的形状；9 个认知 agent 编排出多智能体心智，在使用中自我进化——白天反应式微调，睡眠期反思沉淀，跨重启累积学习。"
-short_desc: "Sylanne-Embodiment 2.2.0 — Life Simulation Full Stack"
-version: "2.2.0"
+short_desc: "Sylanne-Embodiment 2.4.0 — 上下文防漂移 · WebUI 重构"
+version: "2.4.0"
 author: Ayleovelle
 license: AGPL-3.0-or-later
 repo: "https://github.com/Ayleovelle/astrbot_plugin_sylanne"

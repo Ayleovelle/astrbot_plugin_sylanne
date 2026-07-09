@@ -1,4 +1,4 @@
-"""Wave 3 + 剩余 Tier1/2：历史稀释、PERCEPT 召回、工具面、meltdown KV。"""
+"""Wave 3 + 剩余 Tier1/2：历史稀释（已废止，验证 no-op）、PERCEPT 召回、工具面、meltdown KV。"""
 
 from __future__ import annotations
 
@@ -14,7 +14,12 @@ from sylanne_alpha.v2core.fragment import build_mind_fragment
 from sylanne_alpha.v2core.integration import _percept_recall
 
 
-def test_dilute_only_on_low_info_message() -> None:
+def test_dilute_dense_contexts_is_permanent_noop() -> None:
+    """history_dilution 已废止（写穿透持久化会永久腰斩用户历史）：
+
+    dilute_dense_contexts 现在必须原样返回 contexts（同一对象、不截断、
+    不改写任何条目），无论当前消息是否低信息。
+    """
     long_old = "这是一段很长的旧告白" * 20
     contexts = [
         {"role": "user", "content": long_old},
@@ -24,18 +29,17 @@ def test_dilute_only_on_low_info_message() -> None:
         {"role": "user", "content": "😋"},
     ]
     out = dilute_dense_contexts(contexts, "😋")
-    assert out is not None
-    assert "已压缩" in out[0]["content"]
-    assert out[-1]["content"] == "😋"
+    assert out is contexts
+    assert out[0]["content"] == long_old
+    assert "已压缩" not in out[0]["content"]
 
-    # 实义新话题不稀释
     same = dilute_dense_contexts(contexts, "明天开会几点")
-    assert same == contexts
+    assert same is contexts
 
 
 def test_percept_recall_populates_scratch() -> None:
     class _MS:
-        def recall(self, text, query_embedding=None, current_warmth=0.0, limit=3):
+        def recall(self, text, query_embedding=None, current_warmth=0.0, limit=3, **kwargs):
             return [type("R", (), {"text": "上次聊过猫", "confidence": "clear",
                                    "layer": "L2", "activation": 1.0,
                                    "temperature": 0.2, "emotional_weight": 0.5})()]

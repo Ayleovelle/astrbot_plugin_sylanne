@@ -2,9 +2,10 @@
 
 职责（作战文档 §3.0-3.1）：
 - 状态权威 + 综合者：SDK kernel 是它的大脑（生理/情绪/人格计算）。
-- 编排：每轮针对一个 session，依次跑 9 个 worker 的 perceive→gate→act，
+- 编排：每轮针对一个 session，依次跑已注册 worker 的 perceive→gate→act，
   收集 AgentIntent，融合成单个 host event 输入（flags/confidence/values/
   assessment），交给 host.on_request/on_response 驱动 kernel.tick。
+  （旧 8 个 per-turn agent 已退役，现仅保留 LifeAgent 的 AUTONOMOUS 时点。）
 - 承载力闭合：SDK event 吃不下的高层意图（payload）由 SelfCore 托管进 surface。
 
 全局单例（非每会话）：reactive 是无状态的一轮编排，会话态在 host/surface 里，
@@ -102,7 +103,7 @@ class SelfCore:
         - behavior：可观测行为信号 {-1 被忽略, 0 未知, +1 续聊}（强信号）。
           CP8-P6：传 None 时由 compute_behavior 自动从"用户续聊间隔"推断（接线强信号
           通道，此前恒传 0.0 导致 reward 全靠弱自评、易单向锁死）。
-        由 DialogueAgent 在 RESPONSE_POST（拿到 self_score）触发。
+        历史上由 RESPONSE_POST 时点（拿到 self_score）触发。
         """
         import time as _time
         now = _time.time()

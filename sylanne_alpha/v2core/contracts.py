@@ -6,9 +6,15 @@
 
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass, field
 from enum import Enum
 from typing import Any, Protocol, runtime_checkable
+
+# #29 进化偏置喂回 live 门控时的二次硬钳位：live 门控见到的学习偏置绝不超过 ±此值，
+# 保证"人格显函数是主项、学习只微调"。比 EvolutionStore 总 cap(0.20)更紧，是 gate 侧
+# 的最后一道刹车（即使上游 cap 将来调整也兜得住）。
+_EVO_BIAS_CAP = 0.15
 
 
 # ===========================================================================
@@ -66,6 +72,12 @@ class BodySnapshot:
     # 叙事自我（理论6，Conway 2000 / Nader 2000 重固化）
     threshold_drift: float = 0.0   # 阈值漂移（body.nerve.threshold_drift）
     epoch: int = 0                 # 关系纪元（情感域固化程度 age_decay 来源）
+    # ═══ Wave 3 缺陷行为层所需信号（2026-06-24；SDK 真实路径，仅 body_port_v2 适配器投影）═══
+    # 这些 SDK 早已在算，但此前未投影进 BodySnapshot，fragment 读不到 → 缺陷行为触发不了。
+    void_pressure: float = 0.0     # 空腔压力（VoidScarEngine；冲动泄露/示弱道歉/逃避 触发）
+    load: float = 0.0              # 负荷（body.mortality.load；犯懒 触发）
+    plasticity: float = 0.5        # 可塑性（body.nerve.plasticity；低=过滤差→冲动 触发；中性默认 0.5）
+    boundary_pressure: float = 0.0 # 边界压力（body.immunity.boundary_pressure；吃醋 触发）
     # —— 原始 surface（逃生舱：迁移期暂存完整 dict，迁移完成后逐步收窄到具名字段）——
     raw: dict[str, Any] = field(default_factory=dict, repr=False)
 
@@ -130,6 +142,35 @@ class BeatContext:
     def domain(self, name: str) -> Any:
         """取本会话某领域 agent；缺失返 None（能力按需判空降级）。"""
         return self.domains.get(name)
+
+    def evo_bias(self, agent: str, key: str) -> float:
+        """读某门控参数学到的进化偏置（#29：reflex/反思 学到的偏置喂回 live 门控）。
+
+        语义约定（叠加在人格函数基线上的小偏置）：effective_threshold = baseline + bias。
+        负偏置＝降低门槛＝更主动（与 reflex/反思 "更主动=delta 负" 的既有约定一致，见
+        manual_evolution_e2e[1] 与 reflection prompt）；正偏置＝抬高门槛＝更收敛。
+
+        provider 由 integration 建 ctx 时注入 scratch["evo_delta"]（callable(agent,key)->float，
+        背后是 agents.SelfCore.evo_delta，读 EvolutionStore 的 反射 delta + 反思 reflection_bias）。
+        未注入（测试/旧路径）或异常 → 0.0（live 门控落回纯人格基线，零行为变化）。
+
+        二次钳位（_EVO_BIAS_CAP）：即使 EvolutionStore 总 cap 将来放宽，live 门控见到的偏置
+        也绝不超过 ±0.15——人格显函数永远是主项，学习只能微调不能改写。
+        """
+        fn = self.scratch.get("evo_delta")
+        if not callable(fn):
+            return 0.0
+        try:
+            v = float(fn(agent, key))
+        except Exception:
+            return 0.0
+        if not math.isfinite(v):
+            return 0.0
+        if v > _EVO_BIAS_CAP:
+            return _EVO_BIAS_CAP
+        if v < -_EVO_BIAS_CAP:
+            return -_EVO_BIAS_CAP
+        return v
 
 
 # ===========================================================================

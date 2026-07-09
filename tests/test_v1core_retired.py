@@ -2,20 +2,20 @@
 
 退役语义：
 - sylanne_enable_v2core 默认【开】（缺省键=开）——v2core 是唯一认知内核。
-- 启用即退役 v1 逐轮认知：旧 9-agent SelfCore 的 PRE/POST（请求管线）与
-  RESPONSE_POST（回复管线）不再运行；AssessorAgent 逐轮 LLM 评估随之消失；
+- v1 逐轮认知已退役并删除：旧 9-agent SelfCore 的 PRE/POST（请求管线）与
+  RESPONSE_POST（回复管线）调用点已从源码移除；AssessorAgent 逐轮 LLM 评估随之消失；
   assessment 唯一来源是 v2core 评价（不含 intent 键 → SDK intent=="撒娇"
   硬编码路径断粮）。
 - 保留范围：自主生命基础设施（AutonomyScheduler 作息演化/深睡巩固/反思/
   进化档案）不属逐轮认知，照常运行。
-- flag 显式置 false = 部署级紧急回退 v1（绞杀式安全口，非缝补）。
+- flag 显式置 false = 部署级紧急回退（绞杀式安全口，非缝补）。
 """
 
 from __future__ import annotations
 
 import inspect
 
-from sylanne_alpha.v2core.integration import v1_turn_cognition_retired, v2core_enabled
+from sylanne_alpha.v2core.integration import v2core_enabled
 
 
 class _P:
@@ -33,12 +33,6 @@ def test_v2core_default_on() -> None:
 
 def test_explicit_false_is_emergency_rollback() -> None:
     assert v2core_enabled(_P({"sylanne_enable_v2core": False})) is False
-    assert v1_turn_cognition_retired(_P({"sylanne_enable_v2core": False})) is False
-
-
-def test_retirement_follows_v2core() -> None:
-    assert v1_turn_cognition_retired(_P({})) is True
-    assert v1_turn_cognition_retired(_P({"sylanne_enable_v2core": True})) is True
 
 
 def test_schema_default_flipped() -> None:
@@ -50,27 +44,24 @@ def test_schema_default_flipped() -> None:
     assert schema["sylanne_enable_v2core"]["default"] is True
 
 
-# ---- 两条管线的退役闸真的存在且包住了 v1 调用点（源级证明，仿 repo 既有手法）----
+# ---- 两条管线的 v1 逐轮认知调用点已彻底删除（源级证明，仿 repo 既有手法）----
 
-def test_request_pipeline_gates_v1_pre_post() -> None:
-    """请求管线：SelfCore PRE/POST 必须被 v1_turn_cognition_retired 闸住。"""
+def test_request_pipeline_has_no_v1_run_cycle() -> None:
+    """请求管线：SelfCore PRE/POST 的 run_cycle 调用点已删除（不留死闸）。"""
     from sylanne_alpha.llm_request_pipeline import LLMRequestPipeline
 
     src = inspect.getsource(LLMRequestPipeline._background_observe_request)
-    assert "v1_turn_cognition_retired" in src, "请求管线没有退役闸"
-    # 闸必须真的决定 sc 是否为 None（PRE/POST 共用 sc 变量，sc=None 即两段全死）
-    assert "None if _v1_retired" in src, "退役闸没有接到 SelfCore 调用点"
-    # 退役闸必须出现在 run_cycle 之前（先判退役再谈编排）
-    assert src.index("v1_turn_cognition_retired") < src.index("run_cycle")
+    assert "v1_turn_cognition_retired" not in src
+    assert "run_cycle" not in src
 
 
-def test_response_pipeline_gates_v1_response_post() -> None:
-    """回复管线：SelfCore RESPONSE_POST 必须被退役闸闸住。"""
+def test_response_pipeline_has_no_v1_run_cycle() -> None:
+    """回复管线：SelfCore RESPONSE_POST 的 run_cycle 调用点已删除。"""
     from sylanne_alpha.llm_response_pipeline import LLMResponsePipeline
 
     src = inspect.getsource(LLMResponsePipeline._background_observe_response)
-    assert "v1_turn_cognition_retired" in src, "回复管线没有退役闸"
-    assert "None if _v1_retired" in src, "退役闸没有接到 RESPONSE_POST 调用点"
+    assert "v1_turn_cognition_retired" not in src
+    assert "run_cycle" not in src
 
 
 def test_v2_assessment_has_no_intent_key() -> None:

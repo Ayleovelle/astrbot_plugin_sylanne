@@ -77,6 +77,30 @@
     "default": false,
     "hint": "默认关闭；用于对话分段和打断识别，不恢复旧 realtime engine。"
   },
+  "sylanne_alpha_afterthought_enabled": {
+    "description": "启用补刀/改口（回复发完后偶尔追加一句）",
+    "type": "bool",
+    "default": false,
+    "hint": "默认关闭；开启后一段 SPEAK 分段回复正常发完（未被打断）时，按当轮表达驱动力算一个概率骰子，命中则在 20~180 秒后追发一条很短的补充或更正——像人一样话说完了又想起点什么。用户在此期间发了任何消息则自动取消。内容优先复用现成的未发完/被打断残留文本（零额外开销），否则走一次极短的 LLM 调用生成一句话。同会话至少间隔 8 轮交流才会再触发一次（仅会话内计数，重启清零）。仅在 sylanne_alpha_realtime_chat_enabled + sylanne_alpha_realtime_intercept_llm_response 都开启时才有意义。"
+  },
+  "sylanne_alpha_deliberate_silence_enabled": {
+    "description": "启用已读不回（软化版：极简回应代替彻底装死）",
+    "type": "bool",
+    "default": false,
+    "hint": "默认关闭；开启后，被问到但触发沉默判定时不再 100% 保持全程静默——低信息量消息（表情/短应答/复读）、连发轰炸、边界压力（吃醋/被顶）、深夜四类语境信号会给\"想沉默\"添一点真实的分量（幅度很小，只是让沉默成为可能，不代表常见）。真触发时优先用一句极简回应（如\"……\"\"嗯。\"）代替彻底不说话；下一轮她会自然带一句\"刚才看到消息了没说话\"的线索，不用你追问才认账。不开此项时沉默机制与此前完全一致（100% 有回复）。"
+  },
+  "sylanne_alpha_winddown_enabled": {
+    "description": "启用去忙收尾（她会说要去忙一下，忙完再回来）",
+    "type": "bool",
+    "default": false,
+    "hint": "默认关闭；需要同时开启 sylanne_alpha_life_simulation_enabled 才有效果（读她当前的生活相位/精力/专注度判断该不该收线）。触发时会自然说一句类似\"我先去忙一下\"，随后进入一段收尾窗口（15~45 分钟，尽量按她当前活动的计划时长走，读不到则默认 30 分钟）——窗口内回复会变慢、偶尔只回极简的话，不是不理你。窗口结束后她会尝试主动找你接着聊（依赖 sylanne_alpha_proactive_bridge_enabled 和大饼插件；不可用时下一条消息会自然带一句\"刚忙完\"的线索）。不开此项时她不会主动喊忙、不会有收尾窗口。"
+  },
+  "sylanne_alpha_night_rhythm_enabled": {
+    "description": "启用夜间温和版（免打扰时段读信更慢、打字略慢，话自然短一点）",
+    "type": "bool",
+    "default": false,
+    "hint": "默认关闭；开启后在免打扰时段（复用大饼 schedule_settings 里的 quiet_hours，读不到则用 1-7 点默认）：读信+启动打字的延迟温和放大（约 1.5~2.5 倍，硬顶 10 秒——绝不会拖成分钟级不理人）、打字速度降一档，并给她的心象加一句\"深夜话少\"的线索，让回复自然短一点，不是刻意敷衍。距上次说话超过 1 小时的当晚第一条消息，还有小概率带一句\"刚被叫醒\"的迷糊感。安全阀：消息里带『睡不着』『在吗』『难受』『想你』等孤独/紧急词时，这些效果全部不生效，照常原速回复——夜里一直在，不会因为这个开关变得慢半拍。"
+  },
   "sylanne_alpha_proactive_dispatch_enabled": {
     "description": "启用 Sylanne 主动发起派发",
     "type": "bool",
@@ -106,6 +130,12 @@
     "type": "bool",
     "default": false,
     "hint": "默认关闭；开启后主动发言会带人类式的迟疑：发出前随机停顿、按犹豫强度可能最后一刻收回不发、偶尔先发个踌躇词起头。强度由 Sylanne 的内在状态（怕打扰/想安静/熟悉度）驱动。仅在桥接开启时生效。"
+  },
+  "sylanne_alpha_emotion_spirit_bridge_enabled": {
+    "description": "启用 emotion_spirit 适配桥（与 astrbot_plugin_emotion_spirit 对接）",
+    "type": "bool",
+    "default": false,
+    "hint": "默认关闭；开启后若探测到 astrbot_plugin_emotion_spirit 已安装：①关掉它自己的 persona 注入并每轮请求自愈重申（让 Sylanne 当 system_prompt 唯一主，避免双注入）；②观察式拉取它的情绪/躯体状态（仅用其稳定契约 get_emotion_state/get_body_state）合进 system_prompt 当背景参考。记忆仍以 Sylanne 原生为主控（emotion_spirit 自己继续记它的池）；把记忆写入接管给它属高风险（卸载即丢/多人串号/双写污染），按设计延后到可逆镜像双写。引擎共享已确认结构上不可行（跨命名空间注册表互不可见）故移除。未安装时完全 no-op，对现有行为零影响。"
   },
   "sylanne_alpha_recall_mode": {
     "description": "记忆召回引擎模式",
@@ -145,6 +175,12 @@
     "_special": "select_provider",
     "hint": "前台同步等待 2s，需要响应快的小模型。即时情绪直接影响当前轮回复语气。推荐设置：温度 0，top-p 0.1，Max Tokens 无需设置（插件已接管）。"
   },
+  "sylanne_alpha_assessor_max_tokens": {
+    "description": "语义评估 LLM 最大输出 token",
+    "type": "int",
+    "default": 1024,
+    "hint": "快速/主语义评估的输出上限。推理模型（如 deepseek-v4 等带隐藏思考的模型）会先把 token 花在推理上，过低（旧版写死 50/100）会让正文为空、情感读数恒落中性，越情绪化的消息越严重；故默认 1024 留足余量。非推理模型解完即停、不会多花。"
+  },
   "sylanne_alpha_background_workers_enabled": {
     "description": "启用后台工作队列",
     "type": "bool",
@@ -180,7 +216,7 @@
     "type": "string",
     "default": "",
     "_special": "select_provider",
-    "hint": "用于模拟 Sylanne 生活的 LLM；建议用便宜的小模型。"
+    "hint": "用于模拟 Sylanne 生活的 LLM；建议用便宜的小模型。启用生活模拟时必填，留空会静默失效（生活状态冻结、主动消息可能复读）。"
   },
   "sylanne_alpha_life_simulation_interval_seconds": {
     "description": "生活模拟间隔（秒）",

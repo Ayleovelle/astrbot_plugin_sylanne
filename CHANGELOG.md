@@ -2,6 +2,109 @@
 
 本文件用于 AstrBot 插件市场/管理页展示更新内容。更完整的设计说明、公式推导、测试矩阵和维护手册见 `README.md`。
 
+## [Embodiment-2.4.0] - 2026-07-08
+
+> 自 2.3.0 起累积的一个**大版本**，四条主线 + 两个后端面同包生效：①活人感行为层（让她像活人不像机器人）；②记忆数据安全重设计（防丢失/复活/污染，两阶段红线）；③上下文完整性 + 防漂移根治（几轮就失忆跳题，真模型证实的联合条件）；④WebUI 全量重构。外加记忆只读管理面（MEM-04）与巩固假成功修复。经灰度验证后转正式发布。
+
+> **版本号说明**：上一个对外发布是 **Embodiment-2.2.0**；**Embodiment-2.3.0 未单独发布**（仅 next-gen 线内部里程碑），其内容（issue #43 主动消息重复三链修复 + T3 内容片段泄露修复 + 上游引擎升级 2.4.0）**随本版一并发布**。因此从上一个公开版本 2.2.0 升级，即同时获得 2.3.0 与 2.4.0 的全部改动——2.3.0 那批详见下方独立条目。公开发布序列 2.2.0 → 2.4.0，跳过的 2.3.0 号不再单发。
+
+### 🫀 活人感（Liveness，15 张卡两 wave 全落地）
+
+从"规整的应答机器"改造成"有呼吸感的人"，绝大多数默认关、可配置：
+
+- **打破节拍器**：首段回复前加思考延迟；抖动 / 分心 / 躯体驱动的打字速度（cps），不再每条都同一个节奏（T1-01/T1-02）。
+- **软"已读不回" + 冷却收尾再回来**：情绪低时读了先不回，过阵子自己接回来（T2-01/T2-03）。
+- **SPEAK 后的追发 / 补充**：说完一句想起来再补一条（afterthought，T2-02）。
+- **连发不被合并**：你连发几条，她不再糊成一段回（T2-04）。
+- **用户追问线程 + 仪式可达性**（T2-05/T2-06）；**主动反馈闭环 + RhythmLearner 复活**（T2-07/T1-04）。
+- **状态驱动的分发调制**（cps / 分段 / 预延迟随情绪状态变化，T3-01）。
+- **反 AI 腔风格线 + 注入卫生**（T4-01/T4-03）；**共享 VariantPool** 取代静态单行模板（T4-02）。
+- **轻度夜间节律纹理**（T1-03，配置门控、默认关）。
+- 每张卡过抗幻觉流水线，拦下多次真 MAJOR；4 个较激进行为默认关，等实机开验。
+
+### 🧠 记忆数据安全重设计（红线：防丢失 / 复活 / 污染，两阶段）
+
+**Phase 0（MEM-01/02/09）**：
+
+- **MEM-01** 黄金往返基线 + 迁移脊柱（磁盘形状锁死、可回归）。
+- **MEM-02** 恢复 KV 水合接线 + 防重启清零（进程重启不再把记忆归零）。
+- **MEM-09** 退役破坏性再固化重写——旧路径会把召回命中的 L2 条目原地送 LLM 改写、无备份、embedding 错配、孤立影子层，已下线（非破坏性 overlay 才是正道）。
+- 显式抹除对抗水合复活的门闩、delete 清全 3 键、崩溃残留净化。
+
+**Phase 1（MEM-03，数据安全四张 + 存储解耦）**：
+
+- **写入咽喉 + incarnation 栅栏**原语（F2）：所有记忆写入过单一咽喉，转世纪元栅栏挡住跨身份污染。
+- **delete 臂激活栅栏**（F3）：删除即激活栅栏，`.alpha.json` 清理并入删除原语。
+- **load 路径准入栅栏 + 隔离路由**：加载时可疑数据进隔离区而非直接入库。
+- **持久化待删索引 + 启动扫描**：崩溃/中断的删除有据可查、启动补扫。
+- **存储解耦**（PR-5）：删掉写 `body.memory["_memory_system"]` 的死重，KV 成唯一持久面。
+- 每张过 opus/fable 对抗闸专猎 fail-open，逐条对抗复核 + 修完再核。
+
+### 🩹 上下文完整性 + 防漂移（红线：几轮就失忆 + 跳到不相干旧话题）
+
+**上下文完整性（先修的一批）**：
+
+- 不再把外部主动消息插件泄漏进历史的模板"假用户话"当真用户语音持久化。
+- 历史稀释不再永久腰斩已落库历史（写穿透会复利腰斩，已下线原地截断）。
+- conv_mgr 同步不再和框架自身历史写入抢跑；损坏会话历史 fail-closed；thinking-only 草稿 no-ghost 兜底。
+- **SILENT 轮真正保住用户消息**：修好 `sync_message_to_conv_mgr` 三处独立缺陷（pydantic 对象序列化炸库、history JSON 字符串被拆成单字符、session_key 与 unified_msg_origin key 空间错位）。
+
+**防漂移三腿（真模型 A/B 证实根因是「历史丢失 AND 幽灵注入」联合条件，缺一不发作）**：
+
+- **leg-1 认 /reset**：监听 `_clean_ltm_session`（`/reset`、`/new` 都设，对真框架 4.25.1 核过），设 `MemorySystem` 召回纪元边界（`created_at < 边界`不再自动召回，**一条不删**）+ 清工作集；L2/L3 长期记忆、关系人格自我、`_incarnation_epoch` 全保住——忘掉这段对话，但没忘你是谁。
+- **leg-2 注入侧纵深防御**：历史缺失轮在 `recall()` **唯一收敛点**丢弃零相关近期兜底项（temporal_proximity 幽灵，PERCEPT/legacy 两路一处全覆盖），延后离题生活事件（defer 不丢）；动态注入绝对封顶兜底（floor 护住感知槽）；召回冗余用 blake2b 归一化-精确去重——**刻意弃用模糊 Jaccard/MinHash**，字符相似度分不清「过来/过去」（会误删语义相反的记忆），只折叠"仅标点/空白/大小写不同的同一句"。历史在场的 on-topic 路径逐字不变。
+- **leg-3 空回吞轮补第二条历史丢失路**：`_background_observe_request` 的 conv_mgr 用户轮同步上移到任何可能抛异常的代码之前（移动非新增，恰好一次、不双写），堵住"这轮判 SILENT → 用户那句话永久从历史消失"。
+
+**验证四路**：确定性装配 A/B（薄历史轮幽灵全消、满历史轮逐字保留）+ opus 红线对抗闸逐条独立复核（3 REAL 全修）+ 全量 **1487 passed / 2 skipped** + 真模型 glm-5 A/B（修后不再跳到「标注元数据」）。
+
+### ✨ WebUI 全量重构
+
+- **技术栈换代**：从三份手写 monolith HTML 重构为 **Vue 3 + Vite + TypeScript + Pinia + vue-router** 单文件构建（`vite-plugin-singlefile` 内联进 `UI/index.html`，仍是零依赖单文件、AstrBot 直接托管）。
+- **8 个真页面**（占位页全部替换为真端点）：监测 / 认知核 / 配置 / 日志 / 记忆 / 人格 / 生活 / 管理。
+- **找回丢掉的仪式感**：开机 / 登录 / 归来过渡动画重做；恢复中缝脊柱轨（带拖拽物理）与「解剖台」两栏布局（任何东西都不跨过中线）；可读性字号地板。
+- **签名身份**：默认暗色主题（不跟随系统偏好）；对抗式设计评审加固模板。
+
+### 🗂️ 记忆只读管理面（MEM-04）
+
+- 新增 `MemoryFacade` + 三个只读 admin 端点（`/api/admin/inspect`、`/quarantine_view`、`/pending_deletes`）+ v2core 镜像；配套「管理」页，直接看隔离区 / 待删 / 记忆核查。
+
+### 🐛 其他修复
+
+- **巩固/崩解假成功修复**：WebUI stdlib handler 用捕获的 `_main_loop` 走 `run_coroutine_threadsafe`，meltdown/consolidate 不再谎报成功。
+- **节律 EMA 被跨停机 gap 污染修复**：`UserModelDomain._rhythm_ema`（相邻用户消息间隔的 EMA）无 gap 上限，加载旧持久化数据后插件停机那段跨重启间隔（可达数天）被当成一次真实节律喂进 EMA，实机实测把值顶到 1 万+，`reply_overdue` 随之几乎永不触发、活人感静默/主动搭话哑掉。修：仅 `0<gap<=3600s` 才入 EMA（超上限=离开/停机，不学，只推进时间戳）；加载时越界/NaN/inf/负值置 None 冷启（下条正常 gap 一轮重初始化到真 cadence）。全库扫描确认无同类未修暗桩。
+
+### 🏗️ 引擎
+
+- **vendored `sylanne_core` 升级 2.4.0 → 2.5.0**：2.5 清死栈——移除零行为消费者的 `_Kuramoto`/`_Plasticity`/`_FreeEnergy` 惰性桩及只写不读的 personality/feedback reach-in（`kuramoto_k1`/`plasticity`/`free_energy`/`hopfield_strength` 等），载荷输出 `sync_order` 保留。公共导出面 `__all__`（43 符号）逐字不变，对插件零接口变更；插件只吃 vendored 自包含副本、相对导入不串 pip 包；全量 1492 passed。
+
+### ⚠️ 升级提示 / 已知限制
+
+- 建议升级后验一下上下文修复：`/reset` 后开新对话、连发短句，看是否还几轮跳题；活人感 4 个默认关行为按需开启。
+- 已知限制：`/reset` 对 L2/L3 长期记忆的召回压制是运行时纪元边界（不落盘），进程重启后失效——被 `/reset` 压下去的旧话题在重启后可能重新可召回（保守设计、不丢数据；L1 热池清空是持久的，主漂移修复也是持久的）。
+
+## [Embodiment-2.3.0] - 2026-06-27
+
+> issue #43「主动消息重复」根因三链修复 + 对话内容片段泄露修复 + 上游引擎升级 2.4.0，整包同时生效。
+
+### 🐛 Bug Fixes
+
+- **issue #43 主动消息重复（三链根治）**：
+  - H1 生活模拟静默冻结 → 失败计数 + 漏桶探测式退避（阈值 3 / 最多跳 20 拍，永不永久封死）+ 壁钟节流告警（`_LIFE_FAIL_WARN_INTERVAL_S=3600`），provider 缺失时启动即 WARNING，恢复后立即复原节律。
+  - 大饼 override 残留（崩溃/竞态）→ ProactiveBridge 改 provenance 安全：per-sid 锁短临界区、in-flight 守卫、KV sidecar 基线、RMW 只还原自有键（`proactive_prompt`/`segmented_reply_settings`），三段式还原进 finally，启动期 `recover_inflight_baselines()` 清残留；用户的 `proactive_prompt` 配置全程不被误删。
+  - H3 记忆按 `life_event_id` 去重 → 写入即去重（命中跳过不更新）+ 召回两条路径（legacy 与 activation）统一折叠，空 id 不当去重键。
+- **内容片段泄露（T3）**：provider 把回复以 `[{'type':'text',...}]` 列表/repr 形式返回时，`normalize_completion_text` 在所有读边界归一（v2core 首读 + 回复管线两处），仅 `ast.literal_eval` 还原（无脆弱正则）、绝不吞正常正文（散文/JSON/图注原样透传）、支持截断 repr 与尾反斜杠还原。
+
+### 🏗️ 架构 / 引擎
+
+- **vendored `sylanne_core` 升级 2.0.0 → 2.4.0**（canonical SylannEngine）：2.3.0 新增 `deterministic_fusion` / `pel_core` / `telemetry`、移除 resonance-field 死栈（`resonance_field*` / `coupling_dynamics` / `topology_gate`）；2.3.1 追加畸形 LLM 输入硬化（非 dict JSON 兜 `AttributeError`、`null` 字段经 `_coerce_float` 安全归一、跨档位快照 `_resize` 维度对齐、NaN/溢出守卫，新增 `_numeric` 共享工具）——正是 PR #45 gemini 审查点到的三处 SDK 鲁棒性缺口，上游 PR #19 已修复；2.3.2 多插件引擎共享硬化（模块级注册表、loop 亲和、首占即主、`SharedEngineConflictError` 值比较，新增 `_config_store`/`_identity`/`_rendezvous`/`_assessor_llm`）；2.4.0 新增 single-fire `submit()` 引擎级幂等（`submit_window_seconds=10`）、`tick()` 每 session 45s 心跳收敛器（**本插件 tick 全为事件驱动，已在 `EngineFacade` 构造处显式 `tick_min_interval_seconds=0.0` 关闭**，且生产路径直连 compute 层不经该 API）、`peek_shared`/`wait_shared` 只读探活、`set_llm` 热替换。公共导出面（`__all__` 43 符号）逐字不变，对插件零接口变更；运行时铸造的 `_identity.json`（per-copy UUID，写入模块目录）已列入 `.gitignore` 排除。
+- `compat` 模块更名 `message_dispatch`（next-gen 线既有重命名），T3 归一与现有 strip/realtime 工具同处一模块。
+
+### ✅ 验证
+
+- 全量本地 `python -m pytest -q`：913 passed / 2 skipped；ruff 干净。
+- 四条修复通道各有专项测试：`test_issue43_h1_freeze` / `test_issue43_memory_dedup` / `test_issue43_bridge_residual` / `test_issue_t3_content_parts`。
+- 8 路对抗审查（每个 hand-merge 文件逐 hunk 比对 fix 分支 source of truth + 跨文件签名核对）：fix 逻辑全 clean、零回归。
+
 ## [v2.2.0] - 2026-06-23
 
 > 生活模拟全栈落地：从"随机活动池"进化为"有长期成长线、会自适应收敛、带 WebUI 观测面板"的完整系统。

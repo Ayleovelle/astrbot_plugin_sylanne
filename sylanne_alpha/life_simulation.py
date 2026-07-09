@@ -46,6 +46,11 @@ SHARE_POLICY_CASUAL = "casual"
 PROJECT_PROMOTION_WINDOW_SECONDS = 7 * 86400.0
 PROJECT_PROMOTION_MIN_DAYS = 3
 PROJECT_MAX_ACTIVE = 4
+# Wave 5（life → 表达底色）：从主导项目派生"卡住/刚通"内心底色的判定窗口（秒）。
+# v1 用"久未触碰"作停滞代理（不追踪 progress 增量，residual：被碰但没进展会漏判，保守可接受）。
+_LIFE_STALE_S = 2 * 86400.0        # active 项目超 2 天没碰 = 开始蔫
+_LIFE_STALE_HI_S = 5 * 86400.0     # 5 天没碰 = 底色强度封顶
+_LIFE_RESOLVED_WINDOW_S = 2 * 86400.0  # finished 后 2 天内仍"轻快"，之后自然归零
 # 技能冷却倍率边界（adaptive：effectiveness 低则冷却拉长）
 SKILL_COOLDOWN_MULT_MIN = 1.0
 SKILL_COOLDOWN_MULT_MAX = 4.0
@@ -184,6 +189,24 @@ LIFE_EVENT_WEIGHTS: dict[str, dict[str, float]] = {
     "creating": {"valence": 0.4, "arousal": 0.3, "share_tendency": 0.7},
     "resting": {"valence": 0.1, "arousal": -0.3, "share_tendency": 0.1},
     "observing": {"valence": 0.1, "arousal": 0.0, "share_tendency": 0.5},
+}
+
+# T2-03⑤ 红队修复：当前活动典型时长（分钟），按 LIFE_EVENT_WEIGHTS 同一套真实
+# event_type 键给粗粒度估算。此前 current_activity_duration_min() 试图按
+# world.current_activity_id 匹配 state.plan 的锚点/弹性槽的 activity_id，但两者是
+# 从未相交的 id 空间（current_activity_id 恒被 _record_event 写成事件自身 event_id，
+# 计划锚点的 activity_id 独立生成，从无 tick 写入/匹配过），且唯一的计划生成器
+# （life_consolidation._build_next_day_plan）从不填 expected_duration_min（恒 0）——
+# 原实现是永远读不到值的死代码。改读【真实在用】的信号：最近一条事件的
+# event_type（_record_event 每 tick 真写），值粗但生效，而非臆造精确值。
+_ACTIVITY_TYPICAL_DURATION_MIN: dict[str, int] = {
+    "reading": 30,
+    "walking": 20,
+    "cooking": 25,
+    "thinking": 15,
+    "creating": 40,
+    "resting": 20,
+    "observing": 15,
 }
 
 # 事件类型关键词映射（用于从 LLM 输出推断事件类型）
@@ -846,6 +869,11 @@ class LifeSimulator:
         )
         # PR-C1：ShareIntent store（intent_id → ShareIntent），供 pipeline 取用
         self._share_intents: dict[str, ShareIntent] = {}
+        # issue#43 Wave1：生活模拟连续失败计数 + 退避剩余跳过拍数（瞬时态，故意
+        # 不进 LifeSimulationState / 不持久化——重启即重新探测 provider）。
+        self._consecutive_failures: int = 0
+        self._backoff_skip_remaining: int = 0
+        self._last_fail_warn_ts: float = 0.0  # 上次持续失败告警的壁钟（时间制重发节流）
 
     @property
     def enabled(self) -> bool:
@@ -918,24 +946,71 @@ class LifeSimulator:
         import datetime as _dt
 
         now = time.time()
-        # Phase 3 / M8 audit：tick 开始扫一遍 outreach 超时（response 长时间未到 → timeout）
+        # Phase 3 / M8 audit：tick 开始扫一遍 outreach 超时（response 长时间未到 → timeout）。
+        # 放在退避短路【之前】——超时 housekeeping 不调 LLM，退避期间也要照常做。
         self._check_outreach_timeouts(now)
-        ctx = self._load_world_context(now, _dt)
 
-        prompt = self._build_prompt(now, ctx)
+        # issue#43 Wave1：失败退避（漏桶探测式）。连续失败到阈值后跳过若干心跳，
+        # 跳完放行一拍探测 provider；探测成功由 _record_event 清零，失败再退避。
+        # 绝不永久门死（否则 provider 恢复后永远不再被探测，比原本空转更糟）；
+        # 也绝不在失败路径推进 last_simulation_time（守 PR-A 零副作用契约，且不掩盖 due 故障信号）。
+        if self._backoff_skip_remaining > 0:
+            self._backoff_skip_remaining -= 1
+            return
+
+        # 加宽 try（红队 finding）：_load_world_context / _build_prompt 的异常也要走失败处理，
+        # 否则它们抛错会绕过计数/退避/告警，再被 life_agent.act 的 except-pass 吞成新的静默冻结。
         try:
+            ctx = self._load_world_context(now, _dt)
+            prompt = self._build_prompt(now, ctx)
             response = await self._llm_caller(prompt)
             parsed = self._parse_response(response, now)
         except Exception:
-            return  # 异常零副作用（不 bump、不 callback）
+            self._note_tick_failure("tick_exception")
+            return  # 零副作用（不 bump、不 callback）
 
         if not parsed:
+            self._note_tick_failure("empty_or_unparseable")
             return  # 空响应零副作用（PR-A review HIGH）
 
         event, emotion_weights = parsed
         self._record_event(event, emotion_weights, ctx, now)
         await self._emit_side_effects(event, emotion_weights, now)
         self._log_tick(event, ctx, now)
+
+    # issue#43 Wave1：退避阈值 + 跳过拍数封顶（瞬时退避，类常量）+ 重发告警壁钟间隔。
+    _LIFE_FAIL_BACKOFF_THRESHOLD = 3
+    _LIFE_FAIL_BACKOFF_MAX_SKIP = 20
+    _LIFE_FAIL_WARN_INTERVAL_S = 3600.0
+
+    def _note_tick_failure(self, reason: str) -> None:
+        """记一次失败：自增连续失败计数、触发退避、按壁钟节流告警。
+
+        不推进任何 state（守零副作用契约）。退避跳过拍数随失败次数增长并封顶。
+        告警在到阈值首次 + 之后每隔 _LIFE_FAIL_WARN_INTERVAL_S 壁钟重发——【不用次数模运算】，
+        因为退避会把探测拍稀释到天级，次数模会让多小时/多天宕机只剩一行日志后归于沉默（红队 finding）。
+        """
+        self._consecutive_failures += 1
+        n = self._consecutive_failures
+        if n >= self._LIFE_FAIL_BACKOFF_THRESHOLD:
+            # 跳过拍数随失败次数增长、封顶；跳完后那一拍放行探测（漏桶式）。
+            self._backoff_skip_remaining = min(self._LIFE_FAIL_BACKOFF_MAX_SKIP, n)
+        now = time.time()
+        first = n == self._LIFE_FAIL_BACKOFF_THRESHOLD
+        due = now - self._last_fail_warn_ts >= self._LIFE_FAIL_WARN_INTERVAL_S
+        if first or (n > self._LIFE_FAIL_BACKOFF_THRESHOLD and due):
+            self._last_fail_warn_ts = now
+            import logging
+            logging.getLogger(__name__).warning(
+                "Sylanne life_sim 连续失败 %d 次（%s）：生活状态停止推进、已退避探测；"
+                "若启用了生活模拟，请检查 sylanne_alpha_life_simulation_provider_id 是否配置/可用。",
+                n, reason,
+            )
+
+    @property
+    def consecutive_failures(self) -> int:
+        """生活模拟连续失败次数（0=健康）。供 WebUI/调试观测故障，不持久化。"""
+        return self._consecutive_failures
 
     def _load_world_context(self, now: float, _dt) -> dict[str, Any]:
         """读取世界状态 + 计算相位/能量候选值，供编排与 prompt 注入。
@@ -993,6 +1068,11 @@ class LifeSimulator:
         取 LIFE_EVENT_WEIGHTS。ShareIntent 评分留给 PR-C。
         """
         state = self.state
+        # issue#43 Wave1：成功一拍即清零失败计数 + 退避 + 告警壁钟（provider 恢复立即复原节律，
+        # 下次故障从阈值首次重新响亮告警，不被旧 streak 的告警时间戳压住）。
+        self._consecutive_failures = 0
+        self._backoff_skip_remaining = 0
+        self._last_fail_warn_ts = 0.0
         # bump（仅在确认有效事件后，见 PR-A review HIGH）
         state.last_simulation_time = now
         state.simulation_count += 1
@@ -1184,15 +1264,16 @@ class LifeSimulator:
         time_desc = dt.strftime("%H:%M, %A")
 
         emotion_desc = "neutral"
+        emo_dict: dict = {}
         if self._emotion_getter:
             try:
-                emo = self._emotion_getter()
+                emo_dict = self._emotion_getter() or {}
                 parts = []
-                if emo.get("warmth", 0) > 0.3:
+                if emo_dict.get("warmth", 0) > 0.3:
                     parts.append("warm")
-                if emo.get("tension", 0) > 0.3:
+                if emo_dict.get("tension", 0) > 0.3:
                     parts.append("tense")
-                if emo.get("curiosity", 0) > 0.3:
+                if emo_dict.get("curiosity", 0) > 0.3:
                     parts.append("curious")
                 emotion_desc = ", ".join(parts) if parts else "calm"
             except Exception:
@@ -1223,6 +1304,18 @@ class LifeSimulator:
                 rhythm_hint = "\n节律提示：当前是傍晚/夜间，活动宜偏舒缓。"
             elif phase == LifePhase.MORNING and energy > 0.6:
                 rhythm_hint = "\n节律提示：当前是清晨、能量充足，适合专注或创造性活动。"
+
+        # Wave 5（mood-coherence）：躯体疲惫/低落 → 倾向室内、低能量活动（给 4.9 bad days 当底座）。
+        # 复用上面已取的 emo_dict（_emotion_getter → engine.observe()，只读容错）；追加不覆盖。
+        # 信号只取 tension/warmth：二者皆在 [-1,1] 量级，阈值与 llm_request_pipeline 一致。
+        # 【刻意不用 void_pressure】：它是 void_space.total_pressure() 的【无上界求和】（同源
+        # observe() 里其阈值是 >1.0/>5.0，非 0-1），且语义是“表达积压”而非“躯体疲惫”——
+        # 一旦纳入会让本提示几乎常驻触发，打穿“坏日子才室内”的意图。
+        try:
+            if emo_dict.get("tension", 0.0) > 0.6 or emo_dict.get("warmth", 0.0) < -0.1:
+                rhythm_hint += "\n躯体提示：当前身体偏疲惫/状态低落，倾向待在室内、做低能量的安静活动。"
+        except Exception:
+            pass
 
         persona_desc = "一个有自己生活节奏的虚构角色"
         if self._persona_getter:
@@ -1651,6 +1744,35 @@ class LifeSimulator:
                 e.dropped_at = ts
                 return
 
+    def mark_outreach_withheld(self, event_id: str, now: float | None = None) -> None:
+        """T2-07③ 修复：她自己的门控/迟疑取消了这次投递（bridge gate 拒绝 / 最后一刻
+        犹豫收回），回写 LifeEvent.dropped_at（沿用 mark_outreach_dropped 的语义——
+        "没发出去"）的同时，同步把 outreach_audit 里对应的 pending 条目标成非惩罚性
+        的 "withheld"，而不是留在 "pending"。
+
+        若不这样做：_record_audit_dispatch 写下的 pending 条目会在原地等
+        _check_outreach_timeouts 在 OUTREACH_TIMEOUT_SECONDS 后把它标成
+        "unanswered"（因为用户在安静时段自然不会在 30 分钟内说话），
+        derive_dispatch_policy 再把这个 "unanswered" 计入 feedback_pressure/cooldown
+        ——等于她自己收回的发言反过来被记成用户冷淡，正是 T2-07③ 要消灭的场景。
+
+        按 event_id 扫全部 bucket（不局限于 _audit_session_key(e) 算出的单一 key），
+        防止 origin_session 与 dispatch 时的 audit key 因竞态或异常路径不一致而漏标。
+        """
+        ts = now if now is not None else time.time()
+        for e in self.state.events:
+            if e.event_id == event_id:
+                e.dropped_at = ts
+                break
+        for bucket in self.state.outreach_audit.values():
+            for entry in bucket:
+                if (
+                    entry.get("event_id") == event_id
+                    and entry.get("feedback_status") == "pending"
+                ):
+                    entry["feedback_status"] = "withheld"
+                    entry["timeout_at"] = ts
+
     def life_prompt_fragment(self, limit: int = 3, max_budget: int = 800) -> str:
         """渲染结构化生活上下文片段，供对话 prompt 注入（PR-B4，M5 改名）。
 
@@ -1709,6 +1831,93 @@ class LifeSimulator:
     def recent_context_for_prompt(self, limit: int = 3) -> str:
         """v1 兼容 alias（M5：迁移到 life_prompt_fragment，旧调用点暂保留）。"""
         return self.life_prompt_fragment(limit=limit)
+
+    def undertone_cue(self, now: float | None = None) -> dict | None:
+        """Wave 5（life → 表达底色）：从主导项目状态派生一条【内心底色】线索。
+
+        返回 {"kind": "stalled"|"resolved", "intensity": float[0,1], "mood": str} 或 None。
+        纯读、零 LLM、零 IO。【不】暴露项目标题/活动/进度数字——渲染端（fragment._life_line）
+        据此出一句脱钩话题的内心天气句，让生活的轻重渗进【不相关】的回答（alive test）。
+
+        - stalled：某 active 项目久未推进（last_touched_at 陈旧 ≥ _LIFE_STALE_S）→ 蔫；
+          强度随停滞天数线性爬（_LIFE_STALE_S→_LIFE_STALE_HI_S 封顶 1.0）。
+        - resolved：某项目近 _LIFE_RESOLVED_WINDOW_S 内 finished → 松快；强度随时距衰减。
+        - 选择：有 stalled 取【最陈旧】的（底色由它生成）；否则取【最近】resolved。蔫盖过轻快。
+        """
+        if now is None:
+            now = time.time()
+        try:
+            projects = [p for p in self.state.projects if isinstance(getattr(p, "state", None), str)]
+        except Exception:
+            return None
+
+        best_stalled = None
+        best_stale = 0.0
+        best_resolved = None
+        best_recency = 0.0
+        for p in projects:
+            try:
+                touched = float(getattr(p, "last_touched_at", 0.0) or 0.0)
+            except (TypeError, ValueError):
+                continue  # 单个项目 ts 脏（字符串/坏值）→ 只跳它，不掀翻整条 cue
+            if touched <= 0:
+                continue
+            if p.state == "active":
+                stale = now - touched
+                if stale >= _LIFE_STALE_S and stale > best_stale:
+                    best_stale, best_stalled = stale, p
+            elif p.state == "finished":
+                age = now - touched
+                if 0 <= age <= _LIFE_RESOLVED_WINDOW_S:
+                    recency = 1.0 - age / _LIFE_RESOLVED_WINDOW_S
+                    if recency > best_recency:
+                        best_recency, best_resolved = recency, p
+
+        mood = self._recent_mood_word()
+        if best_stalled is not None:
+            span = max(1.0, _LIFE_STALE_HI_S - _LIFE_STALE_S)
+            intensity = max(0.0, min(1.0, (best_stale - _LIFE_STALE_S) / span))
+            return {"kind": "stalled", "intensity": intensity, "mood": mood}
+        if best_resolved is not None:
+            return {"kind": "resolved", "intensity": max(0.0, min(1.0, best_recency)), "mood": mood}
+        return None
+
+    # ------------------------------------------------------------------
+    # T2-03：去忙收尾——behavior.py 的 winddown 激活 + integration 的收尾窗口时长，
+    # 都需要只读地取"她现在多容易被打断/在忙什么"，不碰 tick/写状态。
+    # ------------------------------------------------------------------
+
+    def interruptibility(self) -> float:
+        """当下相位的可打断度 [0,1]，越低越"正忙着"。纯读，复用 outreach 评分同一份公式
+        （_interruptibility_for_phase），不另立一套阈值（防两处漂移）。"""
+        return self._interruptibility_for_phase(self.state.world.phase)
+
+    def current_activity_duration_min(self) -> int | None:
+        """当前活动的预期时长（分钟），据最近一条事件的 event_type 估算典型时长
+        （_ACTIVITY_TYPICAL_DURATION_MIN，红队 MAJOR 修复：见该表上方注释，此前的
+        plan-anchor 匹配是死代码）。
+
+        无事件 / event_type 未知（旧档、LLM 越界输出）→ None（调用方自行给默认值，
+        不臆造）。
+        """
+        events = self.state.events
+        if not events:
+            return None
+        et = str(getattr(events[-1], "event_type", "") or "").strip().lower()
+        return _ACTIVITY_TYPICAL_DURATION_MIN.get(et)
+
+    def _recent_mood_word(self) -> str:
+        """取最近一条非 USER_FACT 事件的 mood 单词（隐私安全：不读 text/private_thought）。"""
+        try:
+            for e in reversed(self.state.events):
+                if getattr(e, "privacy_level", "") == LifePrivacy.USER_FACT:
+                    continue
+                m = getattr(e, "mood", "")
+                if isinstance(m, str) and m.strip():
+                    return m.strip()[:8]
+        except Exception:
+            pass
+        return ""
 
     def to_dict(self) -> dict[str, Any]:
         return self.state.to_dict()

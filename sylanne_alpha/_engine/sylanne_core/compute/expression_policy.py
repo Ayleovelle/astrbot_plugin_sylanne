@@ -170,16 +170,16 @@ class ExpressionPolicy:
         # - expression_threshold should negatively influence (higher bar = less expression)
         # - phi (meaningfulness) should positively influence
         # - ticks_since_last_expression should positively influence (silence pressure)
-        self.weights[0] = 0.5   # expression_drive: express when drive is high
+        self.weights[0] = 0.5  # expression_drive: express when drive is high
         self.weights[1] = -0.3  # expression_threshold: respect the threshold
-        self.weights[2] = 0.2   # phi: meaningful states deserve expression
-        self.weights[3] = 0.1   # sync_order: coherent states are expressive
-        self.weights[4] = 0.1   # energy: high energy -> more expression
-        self.weights[5] = 0.2   # ticks_since_last_expression: silence builds pressure
+        self.weights[2] = 0.2  # phi: meaningful states deserve expression
+        self.weights[3] = 0.1  # sync_order: coherent states are expressive
+        self.weights[4] = 0.1  # energy: high energy -> more expression
+        self.weights[5] = 0.2  # ticks_since_last_expression: silence builds pressure
         self.weights[6] = -0.1  # ticks_since_last_user_message: don't talk to void
-        self.weights[7] = 0.3   # recent_accept_rate: success breeds confidence
+        self.weights[7] = 0.3  # recent_accept_rate: success breeds confidence
         self.weights[8] = -0.3  # recent_reject_rate: rejection breeds caution
-        self.weights[9] = 0.2   # personality_extraversion: extraverts express more
+        self.weights[9] = 0.2  # personality_extraversion: extraverts express more
 
         # Learning rate modulated by openness
         self._base_learning_rate = learning_rate
@@ -242,9 +242,7 @@ class ExpressionPolicy:
         defaulting to 0.95 / 0.1 at neutral traits for backward compatibility.
         """
         if len(context) != N_FEATURES:
-            raise ValueError(
-                f"Context must have {N_FEATURES} features, got {len(context)}"
-            )
+            raise ValueError(f"Context must have {N_FEATURES} features, got {len(context)}")
 
         drive = context[0]  # expression_drive is feature 0
 
@@ -521,9 +519,7 @@ class ExpressionPolicy:
             "policy_confidence": round(self.policy_confidence, 4),
             "force_express": round(self._force_express, 4),
             "force_hold": round(self._force_hold, 4),
-            "top_features": [
-                (name, round(w, 4)) for name, w in self.weight_summary()[:5]
-            ],
+            "top_features": [(name, round(w, 4)) for name, w in self.weight_summary()[:5]],
         }
 
     # ------------------------------------------------------------------
@@ -582,9 +578,7 @@ class ExpressionPolicy:
         if "feedback_history" in data:
             policy._feedback_history = deque(data["feedback_history"], maxlen=_FEEDBACK_WINDOW)
         if "reward_history" in data:
-            policy._reward_history = deque(
-                data["reward_history"], maxlen=_REWARD_WINDOW
-            )
+            policy._reward_history = deque(data["reward_history"], maxlen=_REWARD_WINDOW)
         return policy
 
     # ------------------------------------------------------------------

@@ -10,7 +10,7 @@ import time
 
 import pytest
 
-from sylanne_alpha.compat.facade import realtime_plan, strip_draft_blocks
+from sylanne_alpha.message_dispatch import realtime_plan, strip_draft_blocks
 from sylanne_alpha.history_dilution import dilute_dense_contexts
 from sylanne_alpha.memory_system import ConversationBuffer
 from sylanne_alpha.v2core.fragment import _PRESENCE, build_mind_fragment
@@ -111,7 +111,12 @@ class TestH3SegmentationNoCap:
         assert plan["message_count"] <= 12
         assert plan["uncapped_count"] >= 50  # 没熔断的话会爆
         delays = [p["delay_before_seconds"] for p in plan["message_parts"]]
-        assert sum(delays) <= 36.0 + 0.1
+        # T1-02 打碎节拍器后不再是纯确定性总和：逐段抖动(±40%，仍吃 min(4.2,...) 硬顶，
+        # 期望值贴近 36s 预算不加偏置) + 5% 概率的走神段可越顶冲到 9s。算式上界（不依赖
+        # 具体随机结果，恒成立）：非走神段每段硬顶 4.2s，至多一段走神硬顶 9s。
+        segment_count = len(delays)
+        worst_case_sum = max(0, segment_count - 1) * 4.2 + 9.0
+        assert sum(delays) <= worst_case_sum + 0.1
 
 
 class TestH6BufferIdleFlush:
@@ -318,7 +323,12 @@ class TestH1ImageTranscribeSkip:
 
 
 class TestH9FocusAndDilutionNoHelp:
-    """H9: 实义用户句不触发 history_dilution；Focus 不帮交付任务。"""
+    """H9: 实义用户句不触发 history_dilution；Focus 不帮交付任务。
+
+    history_dilution 已在 fix/context-integrity 中废止为永久 no-op（写穿透
+    持久化会永久腰斩用户历史，见 sylanne_alpha/history_dilution.py 墓碑说明）；
+    以下两条断言均改为验证「无论输入如何，contexts 都原样不变」。
+    """
 
     def test_dilution_skips_substantive_clarification(self) -> None:
         contexts = [
@@ -329,7 +339,7 @@ class TestH9FocusAndDilutionNoHelp:
         out = dilute_dense_contexts(contexts, msg)
         assert out is contexts  # 未改写
 
-    def test_dilution_runs_on_low_info_only(self) -> None:
+    def test_dilution_never_mutates_even_on_low_info(self) -> None:
         contexts = [
             {"role": "user", "content": "旧话题" * 80},
             {"role": "assistant", "content": "旧告白" * 80},
@@ -339,8 +349,8 @@ class TestH9FocusAndDilutionNoHelp:
             {"role": "assistant", "content": "最近回复"},
         ]
         out = dilute_dense_contexts(contexts, "😋")
-        assert out is not contexts
-        assert "较早对话已压缩" in str(out[0].get("content", ""))
+        assert out is contexts
+        assert "较早对话已压缩" not in str(out[0].get("content", ""))
 
 
 class TestH10ReplyLengthFactorUnwired:
@@ -429,7 +439,7 @@ class TestOutputPathCoverageHardening:
 
     def test_truncate_at_sentence_shortens_and_ascii_safe(self) -> None:
         """truncate_at_sentence（path3 TTS 用）：句末优先截短；入参校验；不切坏 ASCII token。"""
-        from sylanne_alpha.compat import truncate_at_sentence
+        from sylanne_alpha.message_dispatch import truncate_at_sentence
 
         huge = "这是一段挺长的内容呀。" * 120
         out = truncate_at_sentence(huge, 600)
@@ -452,7 +462,7 @@ class TestOutputPathCoverageHardening:
 
     def test_path3_tts_strips_thinking_from_text_arg(self) -> None:
         """TTS 文本参数里的 thinking 块会被剥（核心安全项：别念出内心独白）。"""
-        from sylanne_alpha.compat import strip_draft_blocks
+        from sylanne_alpha.message_dispatch import strip_draft_blocks
 
         # 复刻钩子核心：strip_draft_blocks 作用于 tool_args["text"]
         leaked = "<thinking>我该怎么回</thinking>晚安笨蛋。"

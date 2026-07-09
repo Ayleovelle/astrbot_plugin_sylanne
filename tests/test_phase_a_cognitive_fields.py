@@ -12,7 +12,7 @@ from __future__ import annotations
 import tempfile
 
 from sylanne_alpha._engine.sylanne_core.compute.host import SylanneAlphaHost
-from sylanne_alpha.v2core.body_port import snapshot_from_surface
+from sylanne_alpha.v2core.body_port_v2 import snapshot_from_surface
 from sylanne_alpha.v2core.body_port_v2 import CanonicalKernelBodyPort
 from sylanne_alpha.v2core.contracts import BodySnapshot
 

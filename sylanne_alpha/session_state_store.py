@@ -93,6 +93,14 @@ class SessionMap(Generic[V]):
     def clear(self) -> None:
         self._d.clear()
 
+    def set_on_evict(self, callback: Any) -> None:
+        """挂载/替换底层 BoundedDict 的 LRU 驱逐回调（普通 dict 静默忽略——无驱逐语义）。
+
+        回调签名 fn(key, value)，同步调用（由 BoundedDict.__setitem__ 内部触发）。
+        """
+        if hasattr(self._d, "_on_evict"):
+            self._d._on_evict = callback
+
     def __len__(self) -> int:
         return len(self._d)
 
@@ -172,6 +180,17 @@ class SessionStateStore:
         self.relationship_register_state: SessionMap = self._reg("relationship_register_state", {})
         # 手动覆盖（/bond·/unbond 写，owner-gated）：{session_key: bool}（True 亲密/False 非亲密）。
         self.intimacy_override: SessionMap = self._reg("intimacy_override", {})
+
+        # ---- T4-02：变体池 recent-N 去重历史 ----
+        # {session_key: {recent_key: [最近选过的变体...]}}——variant_pool.choose 的 state
+        # 参数直接就是内层 dict（按模板家族 recent_key 分列，如 "empty_reply_fallback"）。
+        self.variant_recent: SessionMap = self._reg("variant_recent", BoundedDict(maxsize=200))
+
+        # ---- T2-02：补刀/改口 refractory 计数（仅会话内，不落 KV，重启清零）----
+        # {session_key: {"exchange_count": int, "last_fired_at": int}}——
+        # exchange_count 每次 SPEAK 分段回复正常发完 +1，last_fired_at 记录上次真正
+        # 触发补刀时的 exchange_count，两者差 >= 8 才允许再骰一次。
+        self.afterthought_state: SessionMap = self._reg("afterthought_state", BoundedDict(maxsize=200))
 
         # ---- 其他运行态 ----
         self.last_user_message_time: SessionMap = self._reg("last_user_message_time", BoundedDict(maxsize=200))

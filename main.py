@@ -81,6 +81,12 @@ except ImportError:
 
             return decorator
 
+        def after_message_sent(self, *args, **kwargs):
+            def decorator(func):
+                return func
+
+            return decorator
+
         def llm_tool(self, *args, **kwargs):
             def decorator(func):
                 return func
@@ -144,12 +150,8 @@ except ImportError:
 from sylanne_alpha import webui_server as _sylanne_webui_server  # noqa: E402
 from sylanne_alpha.assessor_async import AsyncAssessor  # noqa: E402
 from sylanne_alpha.bounded_dict import BoundedDict  # noqa: E402
-from sylanne_alpha.compat import (  # noqa: E402
-    command_surface,
-    memory_surface,
-    realtime_dispatch,
-    reset_surface,  # noqa: E402
-)
+from sylanne_alpha.diagnostics_surface import command_surface, memory_surface, reset_surface  # noqa: E402
+from sylanne_alpha.message_dispatch import realtime_dispatch  # noqa: E402
 from sylanne_alpha.host import SylanneAlphaHost, SylanneAlphaHostEvent  # noqa: E402
 from sylanne_alpha.life_simulation import LifeSimulator  # noqa: E402
 from sylanne_alpha.memory_system import MemorySystem  # noqa: E402
@@ -157,25 +159,19 @@ from sylanne_alpha.llm_request_pipeline import LLMRequestPipeline  # noqa: E402
 from sylanne_alpha.rhythm_learner import RhythmLearner  # noqa: E402
 from sylanne_alpha.proactive_scheduler import ProactiveScheduler  # noqa: E402
 from sylanne_alpha.proactive_bridge import ProactiveBridge  # noqa: E402
-from sylanne_alpha.session_context import SessionContext  # noqa: E402
+from sylanne_alpha.emotion_spirit_bridge import EmotionSpiritBridge  # noqa: E402
+from sylanne_alpha.session_context import SessionContext, RitualRegistry  # noqa: E402
 from sylanne_alpha.session_state_store import SessionStateStore  # noqa: E402
 from sylanne_alpha.agents import (  # noqa: E402
     SelfCore,
     AutonomyScheduler,
-    EmotionAgent,
-    AssessorAgent,
-    PersonaAgent,
     LifeAgent,
-    MemoryAgent,
-    RhythmAgent,
-    ProactiveAgent,
-    SocialAgent,
-    DialogueAgent,
 )
 from sylanne_alpha.social_field import SocialFieldCollector  # noqa: E402
 from sylanne_alpha.llm_response_pipeline import LLMResponsePipeline  # noqa: E402
 from sylanne_alpha.public_api import PublicAPI  # noqa: E402
 from sylanne_alpha.state_persistence import StatePersistence  # noqa: E402
+from sylanne_alpha.memory_facade import MemoryFacade  # noqa: E402
 from sylanne_alpha.realtime_dispatch import RealtimeDispatch  # noqa: E402
 from sylanne_alpha.background_queue import BackgroundPostQueue  # noqa: E402
 from sylanne_alpha.webui_routes import WebUIRoutes  # noqa: E402
@@ -228,6 +224,9 @@ _LIFE_SIM_SAVE_MIN_GAP_SECONDS = 90.0
 # 期望几秒内落盘；rel_register 高频累积则靠节流压成稀疏写。
 _REL_STATE_SAVE_MIN_GAP_SECONDS = 10.0
 PROACTIVE_SCHEDULER_IDLE_DELAY_SECONDS = 1800.0
+# T1-04②：RhythmLearner 节流落盘间隔（秒）。由 on_message 高频驱动，节流到与
+# life_sim 同量级，避免每条消息都写 KV。
+_RHYTHM_LEARNER_SAVE_MIN_GAP_SECONDS = 90.0
 
 from sylanne_alpha.utils import safe_ensure_future  # noqa: E402, F401
 
@@ -434,6 +433,9 @@ class EmotionalStatePlugin(Star):
         self._webui_runtime_id = f"{int(time.time() * 1000)}-{id(self):x}"
         # 节律学习器：学习用户的交互节奏
         self._rhythm_learner = RhythmLearner(intimacy_threshold=0.6)
+        # T1-04②：节奏学习器节流落盘状态（镜像 life_sim 的节流落盘模式）
+        self._rhythm_learner_last_save_ts: float = 0.0
+        self._rhythm_learner_dirty_in_flight: bool = False
         self.logger = logger
         # 生命模拟器：idle 时自主演化身体状态
         self._life_simulator = LifeSimulator(config=self._config)
@@ -463,6 +465,9 @@ class EmotionalStatePlugin(Star):
         # 子系统初始化：各子系统持有 self 引用，通过委托模式分工
         self._session_ctx = SessionContext(self)
         self._state_persistence = StatePersistence(self)
+        # MEM-03 PR-6：记忆门面，薄转发到 _session_ctx（同步 accessor）+
+        # _state_persistence（写走单写咽喉），本身不持有新状态。
+        self._memory_facade = MemoryFacade(self)
         self._realtime_dispatch = RealtimeDispatch(self)
         self._background_queue = BackgroundPostQueue(self)
         self._webui_routes = WebUIRoutes(self)
@@ -472,23 +477,17 @@ class EmotionalStatePlugin(Star):
         self._llm_response_pipeline = LLMResponsePipeline(self)
         self._llm_request_pipeline = LLMRequestPipeline(self)
         self._public_api = PublicAPI(self)
-        # SelfCore 认知编排器（CP8-P3a）：注册全部 9 个 agent。
-        # PRE（影响计算）：emotion/assessor/persona/life/memory；
-        # 请求-POST（消化计算结果）：rhythm/memory/proactive；
-        # 响应-POST（消化 bot 回复）：social/dialogue。
+        # SelfCore 认知编排器：仅注册 LifeAgent（唯一保留的 AUTONOMOUS 时点 agent）。
         self._self_core = SelfCore(self, llm_budget=3)
-        for _agent_cls in (
-            EmotionAgent, AssessorAgent, PersonaAgent, LifeAgent,
-            MemoryAgent, RhythmAgent, ProactiveAgent,
-            SocialAgent, DialogueAgent,
-        ):
-            self._self_core.register(_agent_cls(self, self._self_core.bus))
+        self._self_core.register(LifeAgent(self, self._self_core.bus))
         # 全局自驱心跳（CP8-P3b）：让她没人说话也演化。initialize 启动、terminate 回收。
         self._autonomy_scheduler = AutonomyScheduler(self, self._self_core)
         # 主动发言调度器：基于身体需求和节律决定是否主动发言
         self._proactive_scheduler = ProactiveScheduler(self)
         # 主动发言桥接器：把意图+生活素材交给大饼插件执行发送
         self._proactive_bridge = ProactiveBridge(self)
+        # emotion_spirit 适配桥（检测门控；未装即 no-op，对现有行为零影响）
+        self._emotion_spirit_bridge = EmotionSpiritBridge(self)
         self._register_web_apis(context)
 
         # AstrBot ConversationManager / PersonaManager 集成
@@ -572,6 +571,12 @@ class EmotionalStatePlugin(Star):
             (f"/{P}/api/config_export", "config_export_handler", ["GET"]),
             (f"/{P}/api/config_import", "config_import_handler", ["POST"]),
             (f"/{P}/api/widget-state", "widget_state_handler", ["GET"]),
+            (f"/{P}/api/v2core_state", "v2core_state_handler", ["GET"]),
+            # MEM-03 PR-7：三只读 admin 端点（嵌入式镜像，独立 webui_server 侧见
+            # /api/admin/* 的 aiohttp 注册）。
+            (f"/{P}/api/admin/inspect", "admin_inspect_handler", ["GET"]),
+            (f"/{P}/api/admin/quarantine_view", "admin_quarantine_view_handler", ["GET"]),
+            (f"/{P}/api/admin/pending_deletes", "admin_pending_deletes_handler", ["GET"]),
             # Phase 4：生活观测面板（与独立 webui_server 镜像）
             (f"/{P}/api/life/status", "life_status_handler", ["GET"]),
             (f"/{P}/api/life/events", "life_events_handler", ["GET"]),
@@ -777,7 +782,7 @@ class EmotionalStatePlugin(Star):
                     logger.debug(f"Sylanne forget_session [{session_key}]: {e}")
 
     def _memory_system_for_session(self, session_key: str) -> MemorySystem:
-        return self._session_ctx.memory_system_for_session(session_key)
+        return self._memory_facade.memory_system_for_session(session_key)
 
     def _memory_system_has_content(self, memory_system: Any) -> bool:
         return self._session_ctx.memory_system_has_content(memory_system)
@@ -1113,8 +1118,41 @@ class EmotionalStatePlugin(Star):
             sched = getattr(self, "_proactive_scheduler", None)
             if sched is not None and hasattr(sched, "record_message_time"):
                 sched.record_message_time(session_key, now)
-            # 喂给节奏学习器（记录 tempo，不受亲密度门控）
-            self._rhythm_learner._record_tempo(session_key, now)
+            # T2-07①：喂主动反馈回路——用户真的回应了，把该会话所有 pending
+            # outreach 标 answered（此前只有超时会标 unanswered，她学不到"他回我了"）。
+            life_sim = getattr(self, "_life_simulator", None)
+            if life_sim is not None and hasattr(life_sim, "record_user_response"):
+                life_sim.record_user_response(session_key, now)
+            # T1-04①：复活 RhythmLearner 画像学习（内部已含 _record_tempo，
+            # 始终记录 tempo、亲密度不够时跳过画像学习——不再只调低层 _record_tempo）。
+            # 用 hosts.get() 非创建式查询：on_message 对 EventMessageType.ALL 触发，
+            # 若改用 self._host() 会为从未真正对话过的会话（如纯群聊噪音）也提前建
+            # host/记忆系统，这是本次纯接线之外的资源副作用，不做。没有 host 时退化
+            # engine_obs={}（is_intimate 判非亲密），tempo 仍照常记录。
+            try:
+                message_text = str(getattr(event, "message_str", "") or "")
+                engine_obs: dict[str, float] = {}
+                try:
+                    existing_host = self._store.hosts.get(session_key)
+                    kernel = getattr(existing_host, "kernel", None)
+                    if kernel is not None:
+                        engine_obs = kernel.computation.engine.observe()
+                except Exception:
+                    # 宿主/内核链路部分初始化时的任何异常都退化为 engine_obs={}，
+                    # 绝不能让 tempo 记录（observe_user_message）跟着一起被吞掉。
+                    engine_obs = {}
+                self._rhythm_learner.observe_user_message(
+                    session_key, message_text, now, engine_obs
+                )
+                # T2-06④：早安/晚安等重复问候模式观察（关键词兜底识别，见
+                # session_context._detect_greeting_ritual_pattern 的偏差说明）。
+                self._session_ctx.detect_and_observe_ritual_from_text(
+                    session_key, message_text, now
+                )
+            except Exception:
+                pass
+            # T1-04②：节流落盘节奏学习器状态（镜像 life_sim 的节流落盘模式）。
+            await self._rhythm_learner_throttled_save()
         except Exception:
             pass
 
@@ -1160,6 +1198,12 @@ class EmotionalStatePlugin(Star):
 
     def _schedule_buffer_persist(self, session_key: str) -> None:
         self._state_persistence.schedule_buffer_persist(session_key)
+
+    def _schedule_kernel_persist(self, session_key: str) -> None:
+        self._state_persistence.schedule_kernel_persist(session_key)
+
+    async def _flush_pending_kernel_persists(self) -> None:
+        await self._state_persistence.flush_pending_kernel_persists()
 
     async def _do_buffer_persist(self, session_key: str) -> None:
         await self._state_persistence._do_buffer_persist(session_key)
@@ -1266,7 +1310,7 @@ class EmotionalStatePlugin(Star):
             tool_name = tool if isinstance(tool, str) else str(getattr(tool, "name", "") or "")
             if tool_name not in self._SPEECH_TOOL_NAMES:
                 return  # 非语音/发言类工具：一概不碰，避免误伤文件/代码参数
-            from sylanne_alpha.compat import strip_draft_blocks, truncate_at_sentence
+            from sylanne_alpha.message_dispatch import strip_draft_blocks, truncate_at_sentence
 
             _HARD_MAX = 1200  # 极端兜底；正常语音远不到
             for key in ("text", "content", "message", "msg"):
@@ -1304,7 +1348,7 @@ class EmotionalStatePlugin(Star):
             if await self._maybe_takeover_segments(event):
                 return
 
-            from sylanne_alpha.compat import strip_draft_blocks
+            from sylanne_alpha.message_dispatch import strip_draft_blocks
 
             result = event.get_result()
             if result is None:
@@ -1331,6 +1375,81 @@ class EmotionalStatePlugin(Star):
             logger.warning(
                 f"Sylanne on_decorating_result strip failed: {e}", exc_info=True
             )
+
+    # -----------------------------------------------------------------------
+    # issue43 PRIMARY 修复：AstrBot /reset（及 /new 切换新会话）幽灵源清理
+    # -----------------------------------------------------------------------
+    #
+    # 根因（已用真模型 A/B 复核，详见任务交接记录）：AstrBot 内置 /reset 会清空
+    # 它自己的 conversation.history（→ 真实对话历史丢失），但从不触碰本插件的
+    # MemorySystem/ConversationBuffer/pending_outreach_context（→ 幽灵话题存活，
+    # 继续被召回进 [心象] 记忆线索 与 [life_event_context] 槽位）。真实历史缺失 +
+    # 幽灵注入残留 —— 这个联合条件才会让模型漂移到幽灵话题；单独一边都不会。
+    #
+    # AstrBot 侧机制（astrbot/builtin_stars/builtin_commands/commands/conversation.py
+    # 的 reset()/new_conv()）：`message.set_extra("_clean_ltm_session", True)`，
+    # 仅在 AstrBot 自己的 after_message_sent 钩子里被消费一次（调用它自己的内置
+    # LTM.remove_session，与本插件无关）。本插件此前完全不读这个标记——这里补上
+    # 同名钩子，跟随同一套约定读同一个 extra key（API 参考 §3 after_message_sent /
+    # §4 event.get_extra）。
+    @filter.after_message_sent()
+    async def on_after_message_sent_reset_ghost_cleanup(self, event: Any) -> None:
+        """AstrBot /reset 发生后清理本插件的幽灵记忆源（不触碰关系/人格状态）。"""
+        try:
+            clean_session = False
+            get_extra = getattr(event, "get_extra", None)
+            if callable(get_extra):
+                clean_session = bool(get_extra("_clean_ltm_session", False))
+            if not clean_session:
+                return
+            session_key = self._session_ctx.session_key(event)
+            self._on_session_reset(session_key)
+        except Exception as e:
+            logger.warning(
+                f"Sylanne on_after_message_sent_reset_ghost_cleanup failed: {e}",
+                exc_info=True,
+            )
+
+    def _on_session_reset(self, session_key: str) -> None:
+        """/reset 触发的幽灵源清理（同步、可测试）。
+
+        清（透明工作记忆/瞬时携带者，"忘记这段对话"）：
+        - MemorySystem L1 热池（clear_l1_hot_pool）——近期未确认摘要，最直接的
+          temporal_proximity 幽灵搬运工。
+        - MemorySystem 自动召回纪元边界（set_recall_epoch_boundary）——非破坏性
+          门控：早于此刻的 L1/L2/L3 记忆不再被自动召回拼进 prompt，但条目本身
+          不删除、不清零，管理面板/WebUI 直读旁路不受影响。
+        - ConversationBuffer（本轮暂存原文，尚未 flush 进记忆的部分）。
+        - pending_outreach_context（[life_event_context] 槽位的待发送生活事件，
+          幽灵话题的另一条直接注入通路）。
+
+        保留（关系/人格/身份状态，"忘记这段对话" != "忘记你是谁/我们的关系"）：
+        - L2/L3 已下沉/已压缩的记忆本体（只是纪元门控，不删除）。
+        - v2core 人格/关系/身份域（usermodel disposition、narrative self、
+          emotion baseline、distill 等）——本方法完全不触碰。
+        - _incarnation_epoch（从不序列化，本方法也不touch）。
+        """
+        now = time.time()
+        memory_system = self._store.memory_systems.get(session_key)
+        if memory_system is not None:
+            try:
+                memory_system.set_recall_epoch_boundary(now)
+            except Exception as e:
+                logger.debug(f"Sylanne _on_session_reset epoch boundary [{session_key}]: {e}")
+            try:
+                memory_system.clear_l1_hot_pool()
+            except Exception as e:
+                logger.debug(f"Sylanne _on_session_reset clear L1 [{session_key}]: {e}")
+        conv_buf = self._store.conversation_buffers.get(session_key)
+        if conv_buf is not None:
+            try:
+                conv_buf.drain()
+            except Exception as e:
+                logger.debug(f"Sylanne _on_session_reset drain buffer [{session_key}]: {e}")
+        try:
+            self._store.pending_outreach_context.pop(session_key, None)
+        except Exception as e:
+            logger.debug(f"Sylanne _on_session_reset pop outreach [{session_key}]: {e}")
 
     async def _maybe_takeover_segments(self, event: Any) -> bool:
         """若 event 对应的 origin 被桥接登记为待接管分段：
@@ -1375,7 +1494,7 @@ class EmotionalStatePlugin(Star):
             if not text:
                 return True  # 已拦截，无内容可发
             # 后台连发 Sylanne 人格化分段（不阻塞装饰链）
-            from sylanne_alpha.compat.facade import realtime_plan
+            from sylanne_alpha.message_dispatch import realtime_plan
 
             plan = realtime_plan(origin, text)
             parts = plan.get("message_parts", [])
@@ -1424,9 +1543,11 @@ class EmotionalStatePlugin(Star):
             logger.error(f"Sylanne v2core bridge error, fallback to legacy: {exc}", exc_info=True)
         await self._llm_response_pipeline._on_llm_response_inner(event, response)
 
-    async def _background_observe_response(self, session_key: str, text: str) -> None:
+    async def _background_observe_response(
+        self, session_key: str, text: str, *, skip_conv_sync: bool = False
+    ) -> None:
         await self._llm_response_pipeline._background_observe_response(
-            session_key, text
+            session_key, text, skip_conv_sync=skip_conv_sync
         )
 
     @_optional_stream_chunk_filter(desc="流式首句提前发送")
@@ -2016,17 +2137,17 @@ class EmotionalStatePlugin(Star):
     async def _save_sylanne_memory_state(
         self, session_key: str, state: Any = None
     ) -> None:
-        await self._state_persistence.save_sylanne_memory_state(session_key, state)
+        await self._memory_facade.save_sylanne_memory_state(session_key, state)
 
     async def _load_sylanne_memory_state(
         self, session_key: str, *, now: float = 0.0
     ) -> Any:
-        return await self._state_persistence.load_sylanne_memory_state(
+        return await self._memory_facade.load_sylanne_memory_state(
             session_key, now=now
         )
 
     async def _delete_sylanne_memory_state(self, session_key: str) -> None:
-        await self._state_persistence.delete_sylanne_memory_state(session_key)
+        await self._memory_facade.delete_sylanne_memory_state(session_key)
 
     def _consume_conversation_pending_response_epoch(self, session_key: str) -> float:
         return self._store.conversation_pending_response_epochs.pop(session_key, 0.0)
@@ -2412,6 +2533,16 @@ class EmotionalStatePlugin(Star):
         if life_sim is None:
             return
         self._life_simulator_started = True
+        # issue#43 Wave1：启用了生活模拟却没配 provider_id 是「静默冻结」的配置陷阱根源，
+        # 启动时响亮告警一次（_life_sim_llm_call 里还会按 cause 节流告警，但这条最早可见）。
+        if life_sim.enabled and not str(
+            self._config.get("sylanne_alpha_life_simulation_provider_id") or ""
+        ).strip():
+            logger.warning(
+                "Sylanne autonomy: 生活模拟已启用，但未配置 "
+                "sylanne_alpha_life_simulation_provider_id —— 生活模拟会静默失效"
+                "（生活状态冻结、主动消息可能复读）。请在插件配置里为它选一个 LLM Provider。"
+            )
         pipe = self._llm_request_pipeline
         life_sim.configure(
             llm_caller=pipe._life_sim_llm_call,
@@ -2433,6 +2564,37 @@ class EmotionalStatePlugin(Star):
 
     async def initialize(self) -> None:
         """AstrBot 插件生命周期钩子：加载后调用（有 running loop，不依赖用户消息）。"""
+        # MEM-03 PR-1：把记忆写入咽喉权威绑定到本 running loop——此后 off-loop（stdlib
+        # WebUI 工作线程）提交经 call_soon_threadsafe 转入本 loop 串行执行，不再静默丢弃。
+        try:
+            sp = getattr(self, "_state_persistence", None)
+            throat = getattr(sp, "_throat", None) if sp is not None else None
+            if throat is not None:
+                throat.bind_loop(asyncio.get_running_loop())
+        except Exception as e:
+            logger.debug(f"Sylanne memory throat loop bind skipped: {e}")
+        # DATA-LOSS 修复：绑定 AstrBot 进程级 persistent main loop，供
+        # webui_server.py 的 stdlib ThreadingHTTPServer 回退路径（worker 线程无
+        # running loop）用 run_coroutine_threadsafe 提交持久化 purge/consolidation
+        # 协程到「真正在跑」的 loop（镜像上面 throat.bind_loop 的既有模式）。必须在
+        # 本 loop 上调用、且早于 stdlib 服务器开始处理任何请求——initialize() 保证
+        # 两者都满足。WebUI 是可选子系统，绑定失败不应阻断插件其余初始化。
+        try:
+            _sylanne_webui_server.set_main_loop(asyncio.get_running_loop())
+        except Exception as e:
+            logger.debug(f"Sylanne WebUI main loop bind skipped: {e}")
+        # MEM-03 PR-4：启动扫描跨重启 pending-delete 索引——完成/驳回上一次进程运行
+        # 遗留的删除意图残留（primary 已空则补完；primary 非空绝不重放，交管理员），
+        # 并把未决 entry 载入进程内镜像供本次运行期间 hydrate/load-admit 消费
+        # （见 state_persistence.py::_scan_pending_deletes）。须在 bind_loop 之后、
+        # 任何用户消息/WebUI 请求之前跑；扫描本身失败不应阻断插件其余初始化。
+        try:
+            sp = getattr(self, "_state_persistence", None)
+            scan_fn = getattr(sp, "_scan_pending_deletes", None) if sp is not None else None
+            if callable(scan_fn):
+                await scan_fn()
+        except Exception as e:
+            logger.debug(f"Sylanne memory pending-delete scan skipped: {e}")
         # 恢复 LifeSim 持久化状态（修复历史「重启丢作息」缺陷）——KV 读为异步，故在此 await
         try:
             life_sim = getattr(self, "_life_simulator", None)
@@ -2442,6 +2604,45 @@ class EmotionalStatePlugin(Star):
                     life_sim.from_dict(saved)
         except Exception as e:
             logger.debug(f"Sylanne life sim state restore skipped: {e}")
+        # T1-04②：恢复 RhythmLearner 持久化状态（重启保节奏画像，不从零重学）。
+        try:
+            if self._has_kv_api():
+                saved_rhythm = await self.get_kv_data(
+                    "sylanne_rhythm_learner_state", None
+                )
+                if saved_rhythm and isinstance(saved_rhythm, dict):
+                    self._rhythm_learner = RhythmLearner.from_dict(
+                        saved_rhythm,
+                        intimacy_threshold=self._rhythm_learner._intimacy_threshold,
+                    )
+        except Exception as e:
+            logger.debug(f"Sylanne rhythm learner state restore skipped: {e}")
+        # T2-06⑤：恢复关系仪式注册表持久化状态（重启不丢已学到的问候/晚安仪式），
+        # 并把已注册的仪式重新接线回 ProactiveScheduler（否则重启后 check_ritual_absence
+        # 读到的调度器仪式表是空的，需要再攒 3 次观测才恢复可达）。
+        try:
+            if self._has_kv_api():
+                from sylanne_alpha.session_context import _RITUAL_REGISTRY_KV_KEY
+
+                saved_rituals = await self.get_kv_data(_RITUAL_REGISTRY_KV_KEY, None)
+                if saved_rituals and isinstance(saved_rituals, dict):
+                    registry = RitualRegistry.from_dict(saved_rituals)
+                    self._session_ctx._ritual_registry = registry
+                    scheduler = getattr(self, "_proactive_scheduler", None)
+                    register = getattr(scheduler, "register_ritual", None)
+                    if callable(register):
+                        for key, ritual in registry._rituals.items():
+                            key_session, _, _pattern_key = key.rpartition(":")
+                            if not key_session:
+                                continue
+                            register(
+                                key_session,
+                                str(ritual.get("pattern", _pattern_key)),
+                                int(ritual.get("hour_start", 0)),
+                                int(ritual.get("hour_end", 1)),
+                            )
+        except Exception as e:
+            logger.debug(f"Sylanne ritual registry state restore skipped: {e}")
         # Phase 2B / PR-H：恢复关系层状态（register_state + override，独立 KV key）
         try:
             if self._has_kv_api():
@@ -2451,6 +2652,40 @@ class EmotionalStatePlugin(Star):
                     _rl.restore(self, rel_saved)
         except Exception as e:
             logger.debug(f"Sylanne relationship state restore skipped: {e}")
+        # issue#43 Wave2：还原崩溃中断的主动发言桥接 override 基线（provenance 恢复，
+        # 把用户自配 proactive_prompt 一起带回；无残留则 no-op，绝不盲删大饼配置）。
+        try:
+            bridge = getattr(self, "_proactive_bridge", None)
+            if bridge is not None:
+                n = await bridge.recover_inflight_baselines()
+                if n:
+                    logger.info(
+                        f"Sylanne proactive_bridge: 启动还原了 {n} 个崩溃残留的 override 基线"
+                    )
+        except Exception as e:
+            logger.debug(f"Sylanne proactive_bridge baseline recovery skipped: {e}")
+        # emotion_spirit 适配桥：仅在配置开启且探测到 emotion_spirit 时激活（关它的 persona
+        # 注入，让 Sylanne 当 system_prompt 唯一主）。未装 / 未开 → 完全 no-op，零影响。
+        try:
+            from sylanne_alpha.v2core.integration import v2core_enabled as _v2core_enabled
+            es_bridge = getattr(self, "_emotion_spirit_bridge", None)
+            es_on = bool(
+                (self.config or {}).get("sylanne_alpha_emotion_spirit_bridge_enabled", False)
+            )
+            # 额外门控 v2core：消费侧只在 v2core 请求阶段跑；v2core 关时若仍激活，会把 emotion_spirit
+            # 静音却无替代注入（红队 zero-behavior MINOR 不对称耦合）。故 v2core 关则不激活本桥。
+            if es_bridge is not None and es_on and _v2core_enabled(self) and es_bridge.available():
+                res = es_bridge.activate()
+                if res.get("active"):
+                    logger.info(
+                        "Sylanne emotion_spirit 桥：已激活（persona 注入交还 Sylanne 主控，每轮请求"
+                        "自愈重申）。状态消费已按稳定契约接线（v2core 请求阶段、观察式）。注：emotion_spirit"
+                        " v1.1.0 的 SurfaceConsumer 缓存上游未喂 session_id，PublicAPI 暂对任何 key 返"
+                        " None → 状态消费暂空转，待上游修复自动生效。记忆仍以 Sylanne 原生为主控（写入"
+                        "接管/镜像双写按 Design B 延后）；引擎共享已确认结构上不可行、不提供该开关。"
+                    )
+        except Exception as e:
+            logger.debug(f"Sylanne emotion_spirit bridge activation skipped: {e}")
         try:
             self._start_life_simulator()
         except Exception as e:
@@ -2503,6 +2738,31 @@ class EmotionalStatePlugin(Star):
             logger.debug(f"Sylanne life sim throttled save skipped: {e}")
         finally:
             self._life_sim_dirty_in_flight = False
+
+    async def _rhythm_learner_throttled_save(self) -> None:
+        """T1-04②：节流落盘 RhythmLearner 状态（镜像 _life_sim_throttled_save）。
+
+        由 on_message 高频驱动（每条消息都尝试一次），但受 min-gap 节流，实际
+        写 KV 频率与 life_sim 同量级。失败静默（不阻断消息处理），最后一次仍由
+        terminate 兜底。
+        """
+        now = time.time()
+        if self._rhythm_learner_dirty_in_flight:
+            return
+        if (now - self._rhythm_learner_last_save_ts) < _RHYTHM_LEARNER_SAVE_MIN_GAP_SECONDS:
+            return
+        if not self._has_kv_api():
+            return
+        self._rhythm_learner_dirty_in_flight = True
+        self._rhythm_learner_last_save_ts = now
+        try:
+            await self.put_kv_data(
+                "sylanne_rhythm_learner_state", self._rhythm_learner.to_dict()
+            )
+        except Exception as e:
+            logger.debug(f"Sylanne rhythm learner throttled save skipped: {e}")
+        finally:
+            self._rhythm_learner_dirty_in_flight = False
 
     async def _rel_state_throttled_save(self) -> None:
         """PR-H 解耦：关系层状态独立节流落盘到 KV（独立 KV key）。
@@ -2588,6 +2848,14 @@ class EmotionalStatePlugin(Star):
                 e,
                 exc_info=True,
             )
+        # emotion_spirit 桥：卸载前还原它的 persona_mode（接管时我们把它设成了 disabled，不还原
+        # 会把人家插件永久静音、需重启才恢复，红队 lifecycle MAJOR）。cheap getattr/setattr、吞错。
+        try:
+            es_bridge = getattr(self, "_emotion_spirit_bridge", None)
+            if es_bridge is not None and es_bridge.is_active():
+                es_bridge.deactivate()
+        except Exception as e:
+            logger.debug(f"Sylanne emotion_spirit bridge deactivate skipped: {e}")
         # 收集所有需要取消的任务
         tasks_to_cancel: list = []
         for task in list(self._background_tasks):
@@ -2640,6 +2908,24 @@ class EmotionalStatePlugin(Star):
                 await self.put_kv_data("sylanne_life_sim_state", life_sim.to_dict())
         except Exception as e:
             logger.debug(f"Sylanne life sim state persist skipped: {e}")
+        # T1-04②：持久化 RhythmLearner 状态（终扫落盘，兜底 throttled save 漏窗）
+        try:
+            if self._has_kv_api():
+                await self.put_kv_data(
+                    "sylanne_rhythm_learner_state", self._rhythm_learner.to_dict()
+                )
+        except Exception as e:
+            logger.debug(f"Sylanne rhythm learner state persist skipped: {e}")
+        # T2-06⑤：持久化 RitualRegistry 状态（终扫落盘，兜底命中即存漏窗）
+        try:
+            if self._has_kv_api():
+                from sylanne_alpha.session_context import _RITUAL_REGISTRY_KV_KEY
+
+                await self.put_kv_data(
+                    _RITUAL_REGISTRY_KV_KEY, self._session_ctx._ritual_registry.to_dict()
+                )
+        except Exception as e:
+            logger.debug(f"Sylanne ritual registry state persist skipped: {e}")
         # Phase 2B / PR-H：关系层状态终扫落盘（独立 KV key）
         try:
             if self._has_kv_api():

@@ -136,7 +136,9 @@ def test_mind_fragment_reaches_system_prompt() -> None:
     asyncio.run(go())
     assert "[心象" in req.system_prompt, "心象片段没注入——认知影响不了言语（主动脉断）"
     frag = req.system_prompt[req.system_prompt.index("[心象"):]
-    assert len(frag) <= 360, "心象片段必须有硬上限（不抢正文预算）"
+    # 上限 = header + STATE 预算(_MAX_CHARS) + PINNED 尾巴(_PRESENCE，Wave-L1/G2 新增
+    # 文风纪律行后变长) + 分隔符余量；不是精确到字的快照，只钉"有硬上限"这条不变式。
+    assert len(frag) <= 420, "心象片段必须有硬上限（不抢正文预算）"
 
 
 def test_percept_ctx_reused_across_stages() -> None:

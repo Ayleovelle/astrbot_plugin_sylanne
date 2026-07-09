@@ -1,0 +1,32 @@
+<!doctype html>
+<html lang="zh" data-theme="dark">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Sylanne · 认知核活体</title>
+    <script>
+      // Pre-paint theme/lang bootstrap — MUST run before first paint (FOUC guard).
+      // Vue-mounted code runs too late and would flash the wrong theme.
+      (function () {
+        try {
+          // Dark is the signature identity; default to it unless the user has
+          // explicitly opted into light (persisted). Not OS-driven.
+          var t = localStorage.getItem('sylanne_theme') || 'dark'
+          document.documentElement.setAttribute('data-theme', t)
+          var l = localStorage.getItem('sylanne_lang')
+          if (l) document.documentElement.setAttribute('data-lang', l)
+        } catch (e) {}
+      })()
+    </script>
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link
+      href="https://fonts.googleapis.com/css2?family=Rajdhani:wght@500;700&family=JetBrains+Mono:wght@400;700&display=block"
+      rel="stylesheet"
+    />
+  </head>
+  <body>
+    <div id="app"></div>
+    <script type="module" src="/src/main.ts"></script>
+  </body>
+</html>

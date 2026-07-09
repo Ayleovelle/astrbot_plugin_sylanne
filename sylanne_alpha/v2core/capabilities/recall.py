@@ -38,8 +38,9 @@ class RecallCapability:
         memory: MemoryDomain | None = ctx.domain("memory")
         if memory is None:
             return None
-        # 关系够亲密才主动翻记忆（门控由领域 agent 按人格判定）
-        if not memory.intimacy_ok(ctx.body):
+        # 关系够亲密才主动翻记忆（门控由领域 agent 按人格判定）。
+        # #29：叠加学到的 memory.intimacy_threshold 进化偏置（更主动 → 更早愿意翻记忆）。
+        if not memory.intimacy_ok(ctx.body, bias=ctx.evo_bias("memory", "intimacy_threshold")):
             return None
         text = ctx.text
         if not text:
@@ -57,7 +58,7 @@ class RecallCapability:
         if not results:
             return None
         # 消费者：ReconsolidationCapability（重固化窗口）+ ExpressionCapability（has_recall）
-        ctx.scratch["recalled"] = results
+        ctx.scratch["recalled_deliberate"] = results
         return Intent(
             source=self.name,
             payload={"recalled": results},

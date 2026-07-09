@@ -48,6 +48,19 @@ def _event_now(event: Any) -> float:
     return time.time()
 
 
+def _event_proactive(event: Any) -> bool:
+    """本轮事件是否主动触达——对象属性 + dict 键双形态探测（对齐 _event_now）。
+
+    旧实现只用 getattr，对 dict 形态事件（如 integration 主动轮传 {"proactive": True}）
+    恒读到 False，靠调用方手补 scratch 兜底——是雷。这里统一双形态探测，根上修。
+    """
+    if event is None:
+        return False
+    if isinstance(event, dict):
+        return bool(event.get("proactive", False))
+    return bool(getattr(event, "proactive", False))
+
+
 class TurnRunner:
     """两阶段编排器。组合 SelfCore（拍调度）+ Renderer（出口契约）+ 领域 ingest。"""
 
@@ -64,19 +77,26 @@ class TurnRunner:
         groups: Any = None,
         now: float | None = None,
         idle: bool = False,
+        evo_delta: Any = None,
     ) -> BeatContext:
         """跑 PERCEPT 拍，返回 ctx（供 integration 暂存到 response 阶段续用）。
 
         全程只读（observe + 领域读接口），不 tick、不写领域——天然并发安全。
+
+        evo_delta（#29）：可选 callable(agent, key)->float，进化偏置 provider。注入
+        ctx.scratch["evo_delta"] 后，DELIBERATE/PERCEPT 各能力经 ctx.evo_bias(...) 读到
+        学到的门控偏置（叠加在人格函数基线上）。None=不注入（旧路径/测试，门控落回纯人格）。
         """
         ctx = self._sc.make_context(
             session_key, event, text, domains=domains or {}, groups=groups,
             now=now if now is not None else _event_now(event),
         )
+        if evo_delta is not None:
+            ctx.scratch["evo_delta"] = evo_delta
         if idle:
             ctx.scratch["idle"] = True
         ev = getattr(ctx, "event", None)
-        if ev is not None and getattr(ev, "proactive", False):
+        if _event_proactive(ev):
             ctx.scratch["proactive"] = True
         self._sc.run_percept(ctx)
         return ctx

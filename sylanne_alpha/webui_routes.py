@@ -939,6 +939,12 @@ class WebUIRoutes:
             mem_sys._l3_nodes.clear()
             mem_sys._l3_edges.clear()
             mem_sys._tick = 0
+            # MEM-02②/①: 显式擦除是唯一允许"空对象覆盖 KV"的路径——标记为已补水，
+            # 使 save_sylanne_memory_state 的空对象保护闸门不拦这次之后的写入；
+            # 同时若一次尚未完成的后台补水任务此刻正好读完 KV 准备合并，它会在
+            # merge 前重新检查 _hydrated 并发现已被这里设为 True，从而放弃合并，
+            # 避免把刚清除的记忆从 KV 旧档里复活回来。
+            mem_sys._hydrated = True
         # Also clear legacy body traces
         hosts = getattr(self._p, "_hosts", {}) or {}
         if session in hosts:
@@ -1363,6 +1369,12 @@ class WebUIRoutes:
             mem_sys._l3_nodes.clear()
             mem_sys._l3_edges.clear()
             mem_sys._tick = 0
+            # FIX(F1，完整性复审)：与 meltdown 同理——显式擦除必须把 _hydrated 置 True，
+            # 否则 _memory_system_for_session 懒创建时排的后台补水任务会在本 handler 的
+            # 后续 await 期间跑起来、从尚未删除的 KV 旧档把刚清空的记忆合并回活体，随后
+            # 一次周期 save 又把它写回 KV——显式清除被自己的补水复活。置 True 让补水的
+            # 二次 _hydrated 检查放弃合并。
+            mem_sys._hydrated = True
             purged.append("memory_system")
 
         # Remove host instance
@@ -1662,6 +1674,48 @@ class WebUIRoutes:
         from sylanne_alpha.webui_server import _build_widget_state
 
         return _build_widget_state(self._p)
+
+    # ------------------------------------------------------------------
+    # 认知核页镜像：GET /api/v2core_state（与独立 webui_server 共用同一 builder）
+    # ------------------------------------------------------------------
+
+    async def v2core_state_handler(self) -> dict[str, Any]:
+        """v2core 认知核状态（嵌入式 AstrBot Web 服务器镜像，纯只读）。"""
+        from quart import request as quart_request
+
+        from sylanne_alpha.webui_server import _v2core_state_payload
+
+        session = str(quart_request.args.get("session") or "").strip()
+        return _v2core_state_payload(self._p, session=session)
+
+    # ------------------------------------------------------------------
+    # MEM-03 PR-7：三只读 admin 端点（嵌入式镜像，与独立 webui_server 共用
+    # 同一批 _admin_* builder，见 webui_server.py 同名函数注释）。
+    # ------------------------------------------------------------------
+
+    async def admin_inspect_handler(self) -> dict[str, Any]:
+        """GET /api/admin/inspect — 单 session 记忆诊断（纯只读）。"""
+        from quart import request as quart_request
+
+        from sylanne_alpha.webui_server import _admin_inspect_payload
+
+        session = str(quart_request.args.get("session") or "").strip()
+        return await _admin_inspect_payload(self._p, session=session)
+
+    async def admin_quarantine_view_handler(self) -> dict[str, Any]:
+        """GET /api/admin/quarantine_view — quarantine 侧车只读视图。"""
+        from quart import request as quart_request
+
+        from sylanne_alpha.webui_server import _admin_quarantine_view_payload
+
+        session = str(quart_request.args.get("session") or "").strip()
+        return await _admin_quarantine_view_payload(self._p, session=session)
+
+    async def admin_pending_deletes_handler(self) -> dict[str, Any]:
+        """GET /api/admin/pending_deletes — 跨重启 pending-delete 索引镜像快照。"""
+        from sylanne_alpha.webui_server import _admin_pending_deletes_payload
+
+        return _admin_pending_deletes_payload(self._p)
 
     # ------------------------------------------------------------------
     # Item 6: POST /api/proactive_feedback 主动发言反馈

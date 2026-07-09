@@ -152,6 +152,10 @@ class EngineFacade:
             mode=self._mode,
             force_backend=self._force_backend,
             assessor_enabled=self._assessor_enabled,
+            # 2.4.0 起 engine.tick() 带每 session 45s 收敛器（合并多插件共存心跳用）。
+            # 我们的 tick 全是事件驱动（逐轮请求/回复），不是共存心跳——显式关掉，
+            # 免得未来给 facade 接 tick 透传时快聊第二拍被缓存吞掉（情绪冻结）。
+            tick_min_interval_seconds=0.0,
         )
         self._engine = SylanneEngine(data_dir=self._data_dir, llm=self._llm, config=cfg)
         await self._engine.start()

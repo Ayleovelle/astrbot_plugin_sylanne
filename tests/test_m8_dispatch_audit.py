@@ -108,3 +108,95 @@ def test_no_session_key_no_audit():
     pipe = _bind_pipe(p)
     pipe._mark_life_outcome("ev1", "dropped", "")
     assert p._proactive_dispatch_audit.get("") is None
+
+
+# ---------------------------------------------------------------------------
+# T2-07③：withheld（她自己的门控/迟疑取消）不是惩罚性 unanswered
+# ---------------------------------------------------------------------------
+
+def test_withheld_does_not_write_unanswered_audit():
+    """gate 拒绝 / 犹豫收回 → withheld，不应写 unanswered（不是用户没回应）。"""
+    p = _make_plugin()
+    pipe = _bind_pipe(p)
+    pipe._mark_life_outcome("ev1", "withheld", "sessA")
+    assert p._proactive_dispatch_audit.get("sessA") is None
+
+
+def test_withheld_does_not_raise_feedback_pressure():
+    """withheld 不应贡献 feedback_pressure（否则等于她的收回反过来罚用户）。"""
+    p = _make_plugin()
+    pipe = _bind_pipe(p)
+    sched = _scheduler(p)
+    pipe._mark_life_outcome("ev1", "withheld", "sessA")
+    pipe._mark_life_outcome("ev2", "withheld", "sessA")
+    assert sched.derive_dispatch_policy(session_key="sessA")["feedback_pressure"] == 0.0
+
+
+def test_withheld_still_marks_lifeevent_dropped_at():
+    """withheld 仍要回写 LifeEvent.dropped_at（生命周期记账不受影响，只是不惩罚）。"""
+    from sylanne_alpha.life_simulation import LifeEvent, LifeSimulator
+
+    sim = LifeSimulator(config={})
+    sim.state.events = [
+        LifeEvent(text="e", mood="m", urgency=0.1, timestamp=1.0, wants_to_share=True),
+    ]
+    eid = sim.state.events[0].event_id
+    p = _make_plugin()
+    p._life_simulator = sim
+    pipe = _bind_pipe(p)
+    pipe._mark_life_outcome(eid, "withheld", "sessA")
+    assert sim.state.events[0].dropped_at > 0
+
+
+def test_withheld_marks_lifesim_audit_entry_not_unanswered():
+    """审后修复（MAJOR）：_do_outreach → _record_audit_dispatch 会先写一条
+    feedback_status='pending' 的 life_sim 侧 outreach_audit 条目（键=origin_session，
+    T2-07②回填后不再落 "_global"）。若这次投递随后被 bridge gate 拦下 / 犹豫收回，
+    只回写 LifeEvent.dropped_at（mark_outreach_dropped）是不够的——那条 pending 条目
+    会原地等 _check_outreach_timeouts 在 OUTREACH_TIMEOUT_SECONDS 后把它误标
+    'unanswered'，derive_dispatch_policy 再把它计入 feedback_pressure/cooldown，
+    等于安静时段的 gate block 被记成用户冷淡。mark_outreach_withheld 必须让这条
+    audit 条目落 'withheld'，扛过超时扫描且不进 feedback_pressure。
+    """
+    from sylanne_alpha.life_simulation import (
+        OUTREACH_TIMEOUT_SECONDS,
+        LifeEvent,
+        LifeSimulator,
+    )
+
+    sim = LifeSimulator(config={})
+    event = LifeEvent(
+        text="e", mood="m", urgency=0.1, timestamp=1.0,
+        wants_to_share=True, origin_session="sessA",
+    )
+    sim.state.events = [event]
+    dispatch_ts = 1000.0
+    # 模拟 _record_audit_dispatch 在真正投递前写下的 pending 条目
+    sim.state.outreach_audit["sessA"] = [{
+        "kind": "dispatch",
+        "event_id": event.event_id,
+        "intent_id": "",
+        "skill_id": "",
+        "ts": dispatch_ts,
+        "response_at": 0.0,
+        "timeout_at": 0.0,
+        "feedback_status": "pending",
+    }]
+
+    p = _make_plugin()
+    p._life_simulator = sim
+    pipe = _bind_pipe(p)
+
+    # bridge gate 拒绝 / 犹豫收回 → withheld
+    pipe._mark_life_outcome(event.event_id, "withheld", "sessA")
+    entry = sim.state.outreach_audit["sessA"][0]
+    assert entry["feedback_status"] == "withheld"
+
+    # tick 扫过超时线也不该把它翻回 unanswered
+    later = dispatch_ts + OUTREACH_TIMEOUT_SECONDS + 1.0
+    sim._check_outreach_timeouts(later)
+    assert sim.state.outreach_audit["sessA"][0]["feedback_status"] == "withheld"
+
+    # scheduler 侧 feedback_pressure 不应被这条 withheld 计入
+    sched = _scheduler(p)
+    assert sched.derive_dispatch_policy(session_key="sessA")["feedback_pressure"] == 0.0

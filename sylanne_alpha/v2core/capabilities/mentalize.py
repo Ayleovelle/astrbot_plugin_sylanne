@@ -47,7 +47,7 @@ class MentalizeCapability:
         um = ctx.domain("usermodel")
         if um is None or not ctx.text:
             return None
-        view = um.predict_you(ctx.body, ctx.text)
+        view = um.predict_you(ctx)
         # 消费者：fragment.build_mind_fragment（"对你"行）
         ctx.scratch["you_probably"] = {
             "disposition": view.predicted_disposition,

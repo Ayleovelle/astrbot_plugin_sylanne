@@ -199,10 +199,17 @@ class SocialFieldCollector:
             sheaf_coupling=sheaf_coupling,
         )
 
-    def notify_bot_replied(self, group_id: str, reply_text: str) -> None:
-        """机器人在群中发送回复后调用，重置相关状态。"""
+    def notify_bot_replied(
+        self, group_id: str, reply_text: str, now: float | None = None
+    ) -> None:
+        """机器人在群中发送回复后调用，重置相关状态。
+
+        now：注入时钟（默认 time.time()）。collect() 用注入 now，旧实现这里写死 time.time()，
+        回放/模拟下两者时基错配 → continuation_strength 的 delta_t 变垃圾值（核查任务
+        wzwd8i0ta #25）。统一走注入时钟；生产不传 now 时行为不变。
+        """
         gs = self._get_group(group_id)
-        gs.last_bot_reply_ts = time.time()
+        gs.last_bot_reply_ts = time.time() if now is None else now
         gs.silence_ticks = 0
         gs.social_void_pressure *= self._post_reply_decay
         gs.shadow_buffer.clear()
