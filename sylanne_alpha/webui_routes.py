@@ -1676,6 +1676,48 @@ class WebUIRoutes:
         return _build_widget_state(self._p)
 
     # ------------------------------------------------------------------
+    # 认知核页镜像：GET /api/v2core_state（与独立 webui_server 共用同一 builder）
+    # ------------------------------------------------------------------
+
+    async def v2core_state_handler(self) -> dict[str, Any]:
+        """v2core 认知核状态（嵌入式 AstrBot Web 服务器镜像，纯只读）。"""
+        from quart import request as quart_request
+
+        from sylanne_alpha.webui_server import _v2core_state_payload
+
+        session = str(quart_request.args.get("session") or "").strip()
+        return _v2core_state_payload(self._p, session=session)
+
+    # ------------------------------------------------------------------
+    # MEM-03 PR-7：三只读 admin 端点（嵌入式镜像，与独立 webui_server 共用
+    # 同一批 _admin_* builder，见 webui_server.py 同名函数注释）。
+    # ------------------------------------------------------------------
+
+    async def admin_inspect_handler(self) -> dict[str, Any]:
+        """GET /api/admin/inspect — 单 session 记忆诊断（纯只读）。"""
+        from quart import request as quart_request
+
+        from sylanne_alpha.webui_server import _admin_inspect_payload
+
+        session = str(quart_request.args.get("session") or "").strip()
+        return await _admin_inspect_payload(self._p, session=session)
+
+    async def admin_quarantine_view_handler(self) -> dict[str, Any]:
+        """GET /api/admin/quarantine_view — quarantine 侧车只读视图。"""
+        from quart import request as quart_request
+
+        from sylanne_alpha.webui_server import _admin_quarantine_view_payload
+
+        session = str(quart_request.args.get("session") or "").strip()
+        return await _admin_quarantine_view_payload(self._p, session=session)
+
+    async def admin_pending_deletes_handler(self) -> dict[str, Any]:
+        """GET /api/admin/pending_deletes — 跨重启 pending-delete 索引镜像快照。"""
+        from sylanne_alpha.webui_server import _admin_pending_deletes_payload
+
+        return _admin_pending_deletes_payload(self._p)
+
+    # ------------------------------------------------------------------
     # Item 6: POST /api/proactive_feedback 主动发言反馈
     # ------------------------------------------------------------------
 

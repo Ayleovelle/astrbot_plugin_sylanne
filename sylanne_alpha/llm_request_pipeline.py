@@ -41,6 +41,20 @@ _MAX_UNFINISHED_CONTEXT_CHARS = 2000
 # M8：每会话主动发言反馈 audit 保留最近条数（deque maxlen，防无界增长）。
 _DISPATCH_AUDIT_PER_SESSION = 20
 
+# leg-2(a) 历史锚阈值：req.contexts 里带非空文本的真实 user/assistant 轮数 < 此值
+# → 视为历史缺失/病态轮（/reset、空回吞轮把历史打空）。真模型证实"跳到不相干旧话题"
+# 仅在【历史丢失 AND 幽灵注入】联合成立时发作，此阈值用于识别"历史丢失"那条腿，
+# 据以在无锚轮压制零相关近期召回 + 延后离题生活事件，断掉幽灵注入。
+_MIN_HISTORY_TURNS_FOR_ANCHOR = 2
+
+# leg-2(c) 动态注入绝对上限（gap 感知）= 对应 gap 的 Layer-2 预算 + ~1000 slack
+# （v2core [心象]片段 ~700 + Layer-1 元信息 ~200）。常态下各层各自封顶之和 < 上限，
+# min() 恒选中原 _compute_injection_budget 值 → Layer-2 分配字节不变（happy path 零变化）；
+# 仅当上游片段病态超注入时才收紧 Layer-2，且以 _LAYER2_MIN_BUDGET 兜底，绝不清零
+# 最高优先级 state/感知 槽（leg-1 教训：不静默清零）。
+_ABS_INJECTION_CEILING_BY_GAP = [(900, 2200), (7200, 3400), (None, 4600)]
+_LAYER2_MIN_BUDGET = 400
+
 # ---------------------------------------------------------------------------
 # 注入预算系统：按优先级分配 token 预算，超限从低优先级裁剪
 # ---------------------------------------------------------------------------
@@ -121,6 +135,59 @@ def _compute_injection_budget(gap_seconds: float, cfg: dict) -> int:
         if threshold is None or gap_seconds < threshold:
             return budget
     return 2400
+
+
+def _compute_absolute_ceiling(gap_seconds: float, cfg: dict) -> int:
+    """leg-2(c) 动态注入绝对上限（gap 感知）。config 可 override 便于压测/调参。"""
+    override = cfg.get("state_injection_absolute_ceiling_chars")
+    if override is not None:
+        return int(override)
+    for threshold, ceiling in _ABS_INJECTION_CEILING_BY_GAP:
+        if threshold is None or gap_seconds < threshold:
+            return ceiling
+    return 4600
+
+
+def _count_history_turns(contexts: Any) -> int:
+    """统计 req.contexts 中带非空文本的 user/assistant 轮数（历史锚深度，leg-2a）。
+
+    只数模型真正能拿来锚定话题的历史轮；图片/空内容/非对话角色不计。上游
+    _clean_incoming_message 已先清掉泄漏的 _no_save 注入，故此处数到的是真实历史。
+    """
+    if not isinstance(contexts, list):
+        return 0
+    n = 0
+    for m in contexts:
+        if isinstance(m, dict) and m.get("role") in ("user", "assistant"):
+            if _ctx_leading_text(m.get("content")).strip():
+                n += 1
+    return n
+
+
+def _dedup_near_duplicate_recall(results: list, seed_texts: set[str]) -> list:
+    """leg-2(d) 同轮召回冗余裁剪（归一化-精确，安全形态）。
+
+    drop 掉与 PERCEPT 种子文本（同轮跨路径已召回原文）或"已接受项"归一化后完全相同
+    （仅空白/标点/大小写差异）的后续项。results 已按排名有序，保留靠前的。用密码学哈希
+    做裁判，绝不折叠语义不同的记忆（过来≠过去）——见 memory_system._normalized_dedup_sig
+    的红队实测说明。仅同轮范围、不跨轮保存签名。
+    """
+    from sylanne_alpha.memory_system import _normalized_dedup_sig
+
+    seen: set[int] = set()
+    for t in seed_texts:
+        s = _normalized_dedup_sig(t)
+        if s is not None:
+            seen.add(s)
+    kept: list = []
+    for r in results:
+        sig = _normalized_dedup_sig(getattr(r, "text", "") or "")
+        if sig is not None and sig in seen:
+            continue
+        kept.append(r)
+        if sig is not None:
+            seen.add(sig)
+    return kept
 
 
 def _allocate_and_trim(
@@ -1135,6 +1202,10 @@ class LLMRequestPipeline:
         """
         p = self._p
 
+        # leg-2(c)：在任何动态注入（v2core [心象] / Layer-1 / Layer-2）之前，先抓 pristine
+        # 人格 system_prompt 长度，供 _assemble_final_prompt 计算"已注入量"做绝对封顶。
+        _pristine_sys_len = len(str(getattr(request, "system_prompt", "") or ""))
+
         # Step 0: v2core PERCEPT（碎片合并/SFPD 之后，文本与是否应答已确定）
         try:
             from sylanne_alpha.v2core.integration import apply_v2core_request
@@ -1178,10 +1249,15 @@ class LLMRequestPipeline:
             await self._compute_token_budget(event, request, session_key, hajide)
         )
 
+        # leg-2(a)：历史锚深度（req.contexts 真实历史轮数）。Step 1 已洗掉泄漏注入，
+        # 故此处数到的是真实历史；据以让记忆/生活事件注入在历史缺失轮压制幽灵。
+        history_depth = _count_history_turns(getattr(request, "contexts", None))
+
         # Step 3: 记忆/未完成回复/生命事件上下文
         unfinished_fragment, outreach_fragment, memory_fragment = (
             await self._prepare_memory_context(
                 session_key, message_text, gap_seconds, realtime_enabled,
+                history_depth=history_depth,
             )
         )
 
@@ -1203,6 +1279,8 @@ class LLMRequestPipeline:
             unfinished_fragment=unfinished_fragment,
             outreach_fragment=outreach_fragment,
             memory_fragment=memory_fragment,
+            base_system_prompt_len=_pristine_sys_len,
+            hajide=hajide,
         )
 
         # Step 5b 已废止（fix/context-integrity，2026-07）：曾在此处对低信息
@@ -1457,13 +1535,23 @@ class LLMRequestPipeline:
         message_text: str,
         gap_seconds: float,
         realtime_enabled: bool,
+        history_depth: int | None = None,
     ) -> tuple[str, str, str]:
         """准备未完成回复、生命事件、记忆召回上下文。
+
+        Args:
+            history_depth: 本轮 req.contexts 的真实历史轮数（leg-2a）。None=未知
+                （多为单测直调）→ 按历史在场处理，保持既有行为零变化；orchestrator
+                走真实管线时恒传入实测值，据以在历史缺失轮压制幽灵注入。
 
         Returns:
             (unfinished_fragment, outreach_fragment, memory_fragment)
         """
         p = self._p
+        # leg-2(a)：历史锚是否充分。None（未知）按在场处理；≥阈值为在场。
+        _history_anchored = (
+            history_depth is None or history_depth >= _MIN_HISTORY_TURNS_FOR_ANCHOR
+        )
 
         # T2-05③：consume-on-mention——用户这轮主动提起了某个待跟进话题，静默
         # 消费掉匹配的线索（零信号，不影响本轮回复文案）。只在该会话已有
@@ -1514,6 +1602,18 @@ class LLMRequestPipeline:
                 logger.info(
                     "Sylanne life_sim outreach dropped (expired at consume): session=%s",
                     session_key,
+                )
+            elif not _history_anchored:
+                # leg-2(a)：历史缺失/病态轮（/reset、空回吞轮把 req.contexts 打空）不注入
+                # 离题生活事件——无历史锚时它最易被当成幽灵、把无锚短轮劫持到不相干话题。
+                # 不消费、不标 consumed、不写 memory：原样放回 pending（未过期不丢），
+                # 留到之后有历史锚的正常轮再顺嘴带。生活事件由设计即离题，故按"有没有锚"
+                # 而非"话题相不相关"门控，既保住主动分享、又断掉无锚跳话题。
+                p._store.pending_outreach_context.set(session_key, outreach_ctx)
+                logger.debug(
+                    "Sylanne life_sim outreach deferred (thin history, depth=%s): "
+                    "session=%s",
+                    history_depth, session_key,
                 )
             else:
                 reason = outreach_ctx.get("reason", "")
@@ -1571,6 +1671,7 @@ class LLMRequestPipeline:
                 query_embedding=query_embedding,
                 current_warmth=current_warmth,
                 limit=recall_limit,
+                history_present=_history_anchored,   # leg-2a：历史缺失轮内部丢弃近期幽灵
             )
             # embedding 实际生效（启用且成功取到向量）时用高阈值，否则用关键词阈值
             relevance_threshold = (
@@ -1582,11 +1683,15 @@ class LLMRequestPipeline:
                 # temporal_proximity（近期记忆走 recency 通道）豁免外层 relevance 粗筛，
                 # 否则刚说过、关键词不重合的话会被兜底分（0.05）以下的阈值二次否决，
                 # 与 memory_system 内部 composite 门控放行的结果自相矛盾。
+                # leg-2(a)：历史缺失轮的零相关近期项已在 memory_system.recall(history_present=)
+                # 唯一收敛点一并丢弃（PERCEPT/legacy 同门覆盖），故此处恢复无条件豁免——
+                # 能存活到这里的 temporal_proximity 必是历史在场轮的合法近期召回。
                 results = [
                     r for r in results
                     if r.relevance >= relevance_threshold
                     or r.recall_reason == "temporal_proximity"
                 ]
+            _percept_texts: set[str] = set()
             if results and v2core_on:
                 # 同轮跨路径去重：v2core_on 时 PERCEPT（apply_v2core_request，Step 0，
                 # 已跑在先）与本方法都会各自召回一次，同一条记忆可能被两边命中，
@@ -1606,6 +1711,12 @@ class LLMRequestPipeline:
                         r for r in results
                         if (r.text or "").strip() not in _percept_texts
                     ]
+            if results and not _history_anchored:
+                # leg-2(d) 冗余去重：仅在历史缺失/病态轮（与 leg-2a 同门控）裁剪同轮召回
+                # 线索彼此之间、以及与 PERCEPT 已召回原文之间的归一化重复（标点/空白/大小写
+                # 变体，精确文本去重逮不到）。历史在场的 on-topic 路径不触碰此步 → 逐字不变
+                # （守 HARD 不变量，红队裁定）。归一化-精确哈希裁定，绝不折叠语义不同的记忆。
+                results = _dedup_near_duplicate_recall(results, _percept_texts)
             if results:
                 mem_texts = [r.text[:100] for r in results if r.text]
                 if mem_texts:
@@ -1793,8 +1904,19 @@ class LLMRequestPipeline:
         unfinished_fragment: str,
         outreach_fragment: str,
         memory_fragment: str,
+        base_system_prompt_len: int | None = None,
+        hajide: bool = False,
     ) -> None:
-        """组装最终 prompt：系统提示注入 + 优先级预算注入 + 生命模拟器启动。"""
+        """组装最终 prompt：系统提示注入 + 优先级预算注入 + 生命模拟器启动。
+
+        Args:
+            base_system_prompt_len: v2core/Layer-1 注入之前的 pristine 人格 system_prompt
+                长度（leg-2c）。None=未提供（单测直调）→ 跳过绝对封顶，happy path 零变化；
+                orchestrator 走真实管线时传入实测值，据以给动态注入总量兜底封顶。
+            hajide: 本轮是否走 Claude/hajide 归一化路径。归一化会把 contexts 摊平进
+                system_prompt，令"已注入量"估算把历史正文也算进去而误收紧 Layer-2（红队裁定）。
+                故绝对封顶仅在非 hajide（=无归一化，估算精确）的默认实时路径生效。
+        """
         p = self._p
 
         # === Layer 1: system_prompt（元信息） ===
@@ -1845,6 +1967,24 @@ class LLMRequestPipeline:
         }
 
         total_budget = _compute_injection_budget(gap_seconds, p.config or {})
+        # leg-2(c) 绝对封顶（兜底，常态 inert）：把已注入的 v2core [心象]+Layer-1 计进去，
+        # 保证【动态注入总量】不越过 gap 感知上限。base_system_prompt_len 未提供（单测）
+        # 时不封顶，happy path 字节不变。以 _LAYER2_MIN_BUDGET 兜底：即便上游片段病态
+        # 超注入，也绝不把最高优先级 state/感知 槽饿死（leg-1 教训：不静默清零）。
+        # 仅非 hajide 路径生效：hajide/Claude 归一化会把历史正文摊平进 system_prompt，
+        # 令"已注入量"把历史也算进去而误收紧 Layer-2（红队裁定 MINOR）；非 hajide 无归一化、
+        # 估算精确，且是绝大多数实时流量与超注入真正要防的路径。
+        if base_system_prompt_len is not None and not hajide:
+            injected_so_far = max(
+                0,
+                len(str(getattr(request, "system_prompt", "") or ""))
+                - int(base_system_prompt_len),
+            )
+            ceiling = _compute_absolute_ceiling(gap_seconds, p.config or {})
+            total_budget = max(
+                _LAYER2_MIN_BUDGET,
+                min(total_budget, ceiling - injected_so_far),
+            )
         trimmed = _allocate_and_trim(raw_fragments, total_budget)
 
         unfinished_final = trimmed.pop("unfinished", "")
@@ -1971,6 +2111,28 @@ class LLMRequestPipeline:
         """
         p = self._p
         from sylanne_alpha.host import SylanneAlphaHostEvent
+
+        # leg-3（历史丢失第二条腿）：用户轮持久化必须先于任何可能抛异常的评估/内核/
+        # 记忆代码。这次同步是"用户说过这句话"的唯一权威落库前置——若埋在下方大 try
+        # 深处（原位置），上游任一异常（ensure_restored / host.on_request / compress_check…）
+        # 都会跳到只重试 observe_request 的 except、静默漏掉本次同步；若该轮又被判 SILENT，
+        # AstrBot 自身的 _save_to_history 也因 completion 为空提前 return（框架侧，冻结不动）
+        # → 用户消息永久从会话历史消失，正是跳话题联合条件里"历史丢失"那条腿。
+        # 这是既有 SILENT-历史测试早已假设的"无条件跑过的那次同步"（见
+        # tests/test_context_integrity_silent_history.py），此处让实现兑现该契约。
+        # 唯一调用点（从下方移动而来，非新增）→ user 侧本就不参与去重（state_persistence
+        # 幂等排除 role=="user"），移动保证恰好一次、不双写。自带 try/except：同步调度
+        # 失败也绝不打断后续观测。
+        if text and p._has_conversation_manager():
+            try:
+                safe_ensure_future(
+                    p._sync_message_to_conv_mgr(session_key, "user", text),
+                    name="conv_mgr_sync_user",
+                )
+            except Exception as exc:
+                logger.warning(
+                    "Sylanne conv_mgr user-sync schedule failed: %s", exc
+                )
 
         try:
             # CP8-P3a：fast/main 评估已收编进 AssessorAgent（经 SelfCore PRE 调用），
@@ -2137,12 +2299,8 @@ class LLMRequestPipeline:
             p._store.last_user_texts.set(session_key, text[:120])
             p._schedule_buffer_persist(session_key)
 
-            # 并行同步到 AstrBot ConversationManager
-            if p._has_conversation_manager():
-                safe_ensure_future(
-                    p._sync_message_to_conv_mgr(session_key, "user", text),
-                    name="conv_mgr_sync_user",
-                )
+            # leg-3：AstrBot ConversationManager 的用户轮同步已上移到本方法顶部
+            # （try 之前），保证上游任一评估/内核异常都不会跳过它。此处不再重复调度。
 
             # CP8-P3a：记忆衰减 tick 已收编进 MemoryAgent（SelfCore POST），此处不再直接调。
 

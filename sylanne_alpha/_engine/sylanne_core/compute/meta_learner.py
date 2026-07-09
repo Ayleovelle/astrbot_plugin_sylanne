@@ -35,7 +35,6 @@ PARAM_NAMES: list[str] = [
     "residual_decay",
     "hopfield_strength",
     "identity_inertia",
-    "kuramoto_k1",
     "broadcast_threshold",
 ]
 
@@ -48,7 +47,6 @@ PARAM_BOUNDS: dict[str, tuple[float, float]] = {
     "residual_decay": (0.4, 0.95),
     "hopfield_strength": (0.01, 0.12),
     "identity_inertia": (0.85, 1.0),
-    "kuramoto_k1": (0.3, 2.0),
     "broadcast_threshold": (0.4, 0.85),
 }
 
@@ -91,7 +89,6 @@ class MetaLearner:
       - residual_decay: memory persistence (higher = more persistent)
       - hopfield_strength: attractor pull (higher = more habitual patterns)
       - identity_inertia: personality stability (higher = more consistent)
-      - kuramoto_k1: coupling strength (higher = more inter-module influence)
       - broadcast_threshold: global ignition threshold (lower = easier ignition)
 
     Attributes:
@@ -172,7 +169,6 @@ class MetaLearner:
             "residual_decay": 0.6 + (1.0 - openness) * 0.2,
             "hopfield_strength": 0.03 + extraversion * 0.04,
             "identity_inertia": 0.9 + conscientiousness * 0.08,
-            "kuramoto_k1": 0.5 + openness * 1.0,
             "broadcast_threshold": 0.8 - agreeableness * 0.3,
         }
 

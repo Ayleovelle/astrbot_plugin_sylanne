@@ -81,6 +81,12 @@ except ImportError:
 
             return decorator
 
+        def after_message_sent(self, *args, **kwargs):
+            def decorator(func):
+                return func
+
+            return decorator
+
         def llm_tool(self, *args, **kwargs):
             def decorator(func):
                 return func
@@ -165,6 +171,7 @@ from sylanne_alpha.social_field import SocialFieldCollector  # noqa: E402
 from sylanne_alpha.llm_response_pipeline import LLMResponsePipeline  # noqa: E402
 from sylanne_alpha.public_api import PublicAPI  # noqa: E402
 from sylanne_alpha.state_persistence import StatePersistence  # noqa: E402
+from sylanne_alpha.memory_facade import MemoryFacade  # noqa: E402
 from sylanne_alpha.realtime_dispatch import RealtimeDispatch  # noqa: E402
 from sylanne_alpha.background_queue import BackgroundPostQueue  # noqa: E402
 from sylanne_alpha.webui_routes import WebUIRoutes  # noqa: E402
@@ -458,6 +465,9 @@ class EmotionalStatePlugin(Star):
         # 子系统初始化：各子系统持有 self 引用，通过委托模式分工
         self._session_ctx = SessionContext(self)
         self._state_persistence = StatePersistence(self)
+        # MEM-03 PR-6：记忆门面，薄转发到 _session_ctx（同步 accessor）+
+        # _state_persistence（写走单写咽喉），本身不持有新状态。
+        self._memory_facade = MemoryFacade(self)
         self._realtime_dispatch = RealtimeDispatch(self)
         self._background_queue = BackgroundPostQueue(self)
         self._webui_routes = WebUIRoutes(self)
@@ -561,6 +571,12 @@ class EmotionalStatePlugin(Star):
             (f"/{P}/api/config_export", "config_export_handler", ["GET"]),
             (f"/{P}/api/config_import", "config_import_handler", ["POST"]),
             (f"/{P}/api/widget-state", "widget_state_handler", ["GET"]),
+            (f"/{P}/api/v2core_state", "v2core_state_handler", ["GET"]),
+            # MEM-03 PR-7：三只读 admin 端点（嵌入式镜像，独立 webui_server 侧见
+            # /api/admin/* 的 aiohttp 注册）。
+            (f"/{P}/api/admin/inspect", "admin_inspect_handler", ["GET"]),
+            (f"/{P}/api/admin/quarantine_view", "admin_quarantine_view_handler", ["GET"]),
+            (f"/{P}/api/admin/pending_deletes", "admin_pending_deletes_handler", ["GET"]),
             # Phase 4：生活观测面板（与独立 webui_server 镜像）
             (f"/{P}/api/life/status", "life_status_handler", ["GET"]),
             (f"/{P}/api/life/events", "life_events_handler", ["GET"]),
@@ -766,7 +782,7 @@ class EmotionalStatePlugin(Star):
                     logger.debug(f"Sylanne forget_session [{session_key}]: {e}")
 
     def _memory_system_for_session(self, session_key: str) -> MemorySystem:
-        return self._session_ctx.memory_system_for_session(session_key)
+        return self._memory_facade.memory_system_for_session(session_key)
 
     def _memory_system_has_content(self, memory_system: Any) -> bool:
         return self._session_ctx.memory_system_has_content(memory_system)
@@ -1359,6 +1375,81 @@ class EmotionalStatePlugin(Star):
             logger.warning(
                 f"Sylanne on_decorating_result strip failed: {e}", exc_info=True
             )
+
+    # -----------------------------------------------------------------------
+    # issue43 PRIMARY 修复：AstrBot /reset（及 /new 切换新会话）幽灵源清理
+    # -----------------------------------------------------------------------
+    #
+    # 根因（已用真模型 A/B 复核，详见任务交接记录）：AstrBot 内置 /reset 会清空
+    # 它自己的 conversation.history（→ 真实对话历史丢失），但从不触碰本插件的
+    # MemorySystem/ConversationBuffer/pending_outreach_context（→ 幽灵话题存活，
+    # 继续被召回进 [心象] 记忆线索 与 [life_event_context] 槽位）。真实历史缺失 +
+    # 幽灵注入残留 —— 这个联合条件才会让模型漂移到幽灵话题；单独一边都不会。
+    #
+    # AstrBot 侧机制（astrbot/builtin_stars/builtin_commands/commands/conversation.py
+    # 的 reset()/new_conv()）：`message.set_extra("_clean_ltm_session", True)`，
+    # 仅在 AstrBot 自己的 after_message_sent 钩子里被消费一次（调用它自己的内置
+    # LTM.remove_session，与本插件无关）。本插件此前完全不读这个标记——这里补上
+    # 同名钩子，跟随同一套约定读同一个 extra key（API 参考 §3 after_message_sent /
+    # §4 event.get_extra）。
+    @filter.after_message_sent()
+    async def on_after_message_sent_reset_ghost_cleanup(self, event: Any) -> None:
+        """AstrBot /reset 发生后清理本插件的幽灵记忆源（不触碰关系/人格状态）。"""
+        try:
+            clean_session = False
+            get_extra = getattr(event, "get_extra", None)
+            if callable(get_extra):
+                clean_session = bool(get_extra("_clean_ltm_session", False))
+            if not clean_session:
+                return
+            session_key = self._session_ctx.session_key(event)
+            self._on_session_reset(session_key)
+        except Exception as e:
+            logger.warning(
+                f"Sylanne on_after_message_sent_reset_ghost_cleanup failed: {e}",
+                exc_info=True,
+            )
+
+    def _on_session_reset(self, session_key: str) -> None:
+        """/reset 触发的幽灵源清理（同步、可测试）。
+
+        清（透明工作记忆/瞬时携带者，"忘记这段对话"）：
+        - MemorySystem L1 热池（clear_l1_hot_pool）——近期未确认摘要，最直接的
+          temporal_proximity 幽灵搬运工。
+        - MemorySystem 自动召回纪元边界（set_recall_epoch_boundary）——非破坏性
+          门控：早于此刻的 L1/L2/L3 记忆不再被自动召回拼进 prompt，但条目本身
+          不删除、不清零，管理面板/WebUI 直读旁路不受影响。
+        - ConversationBuffer（本轮暂存原文，尚未 flush 进记忆的部分）。
+        - pending_outreach_context（[life_event_context] 槽位的待发送生活事件，
+          幽灵话题的另一条直接注入通路）。
+
+        保留（关系/人格/身份状态，"忘记这段对话" != "忘记你是谁/我们的关系"）：
+        - L2/L3 已下沉/已压缩的记忆本体（只是纪元门控，不删除）。
+        - v2core 人格/关系/身份域（usermodel disposition、narrative self、
+          emotion baseline、distill 等）——本方法完全不触碰。
+        - _incarnation_epoch（从不序列化，本方法也不touch）。
+        """
+        now = time.time()
+        memory_system = self._store.memory_systems.get(session_key)
+        if memory_system is not None:
+            try:
+                memory_system.set_recall_epoch_boundary(now)
+            except Exception as e:
+                logger.debug(f"Sylanne _on_session_reset epoch boundary [{session_key}]: {e}")
+            try:
+                memory_system.clear_l1_hot_pool()
+            except Exception as e:
+                logger.debug(f"Sylanne _on_session_reset clear L1 [{session_key}]: {e}")
+        conv_buf = self._store.conversation_buffers.get(session_key)
+        if conv_buf is not None:
+            try:
+                conv_buf.drain()
+            except Exception as e:
+                logger.debug(f"Sylanne _on_session_reset drain buffer [{session_key}]: {e}")
+        try:
+            self._store.pending_outreach_context.pop(session_key, None)
+        except Exception as e:
+            logger.debug(f"Sylanne _on_session_reset pop outreach [{session_key}]: {e}")
 
     async def _maybe_takeover_segments(self, event: Any) -> bool:
         """若 event 对应的 origin 被桥接登记为待接管分段：
@@ -2046,17 +2137,17 @@ class EmotionalStatePlugin(Star):
     async def _save_sylanne_memory_state(
         self, session_key: str, state: Any = None
     ) -> None:
-        await self._state_persistence.save_sylanne_memory_state(session_key, state)
+        await self._memory_facade.save_sylanne_memory_state(session_key, state)
 
     async def _load_sylanne_memory_state(
         self, session_key: str, *, now: float = 0.0
     ) -> Any:
-        return await self._state_persistence.load_sylanne_memory_state(
+        return await self._memory_facade.load_sylanne_memory_state(
             session_key, now=now
         )
 
     async def _delete_sylanne_memory_state(self, session_key: str) -> None:
-        await self._state_persistence.delete_sylanne_memory_state(session_key)
+        await self._memory_facade.delete_sylanne_memory_state(session_key)
 
     def _consume_conversation_pending_response_epoch(self, session_key: str) -> float:
         return self._store.conversation_pending_response_epochs.pop(session_key, 0.0)
@@ -2482,6 +2573,16 @@ class EmotionalStatePlugin(Star):
                 throat.bind_loop(asyncio.get_running_loop())
         except Exception as e:
             logger.debug(f"Sylanne memory throat loop bind skipped: {e}")
+        # DATA-LOSS 修复：绑定 AstrBot 进程级 persistent main loop，供
+        # webui_server.py 的 stdlib ThreadingHTTPServer 回退路径（worker 线程无
+        # running loop）用 run_coroutine_threadsafe 提交持久化 purge/consolidation
+        # 协程到「真正在跑」的 loop（镜像上面 throat.bind_loop 的既有模式）。必须在
+        # 本 loop 上调用、且早于 stdlib 服务器开始处理任何请求——initialize() 保证
+        # 两者都满足。WebUI 是可选子系统，绑定失败不应阻断插件其余初始化。
+        try:
+            _sylanne_webui_server.set_main_loop(asyncio.get_running_loop())
+        except Exception as e:
+            logger.debug(f"Sylanne WebUI main loop bind skipped: {e}")
         # MEM-03 PR-4：启动扫描跨重启 pending-delete 索引——完成/驳回上一次进程运行
         # 遗留的删除意图残留（primary 已空则补完；primary 非空绝不重放，交管理员），
         # 并把未决 entry 载入进程内镜像供本次运行期间 hydrate/load-admit 消费

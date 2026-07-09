@@ -42,6 +42,9 @@ from sylanne_alpha.v2core.lexicon import STATIC_WORDS, TextSignals, read_signals
 
 _DISPOSITION_DIMS = ("warmth", "engagement", "defensiveness", "distress")
 _RHYTHM_ALPHA = 0.2          # 回复时距慢 EMA
+_RHYTHM_GAP_CEILING = 3600.0  # 单次 gap 上限(秒)：超过=用户离开/睡了/插件停机跨重启，不是
+#                               对话节律数据点。不设上限时，一次跨停机 gap(可达数天)×α 会把
+#                               EMA 顶到上万(实测加载旧数据后 rhythm_ema 飙到 1 万+)，污染节律模型。
 _STYLE_ALPHA = 0.1           # 风格慢漂
 _DISP_ALPHA_BASE = 0.3       # 处置后验基础学习率（再被精度调制）
 _PE_WINDOW = 16
@@ -351,7 +354,10 @@ class UserModelDomain:
         if now > 0.0 and text:
             if self._last_user_ts is not None:
                 gap = now - self._last_user_ts
-                if gap > 0.0:
+                # 只学"活跃对话内"的回复时距。0 < gap <= 上限才计入；超上限的 gap = 用户离开/
+                # 睡了/插件停机跨重启，直接不学、保留上次对话内的 cadence。注意：这是拒绝 EMA 的
+                # 【输入】离群点(节律 hygiene)，不封顶 reply_overdue 的【输出】超期倍数(铁律②仍成立)。
+                if 0.0 < gap <= _RHYTHM_GAP_CEILING:
                     self._rhythm_ema = (gap if self._rhythm_ema is None
                                         else (1 - _RHYTHM_ALPHA) * self._rhythm_ema
                                         + _RHYTHM_ALPHA * gap)
@@ -602,6 +608,15 @@ class UserModelDomain:
                     except (TypeError, ValueError):
                         pass
         self._rhythm_ema = _opt_f(data.get("rhythm_ema"))
+        if self._rhythm_ema is not None and not (
+            math.isfinite(self._rhythm_ema)
+            and 0.0 < self._rhythm_ema <= _RHYTHM_GAP_CEILING
+        ):
+            # 旧档/损坏值愈合：新不变量下正常 EMA 恒 ≤ 上限(输入已 gate)，故任何越界值——
+            # 老版本跨停机 gap 顶上万、或 NaN/inf/负数(损坏档、手改档回灌)——都是已知坏数据、
+            # 零残值。直接置 None 冷启：下一条正常 gap 一发即把 EMA 重初始化到真 cadence(1 轮恢复)，
+            # 优于夹回上限后要 ~22 轮才洗回、且会放大重启后 overdue 尖峰(红队量化复核实证)。
+            self._rhythm_ema = None
         self._last_user_ts = _opt_f(data.get("last_user_ts"))
         lut = data.get("last_user_text")
         if isinstance(lut, str):

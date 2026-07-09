@@ -244,35 +244,15 @@ class ResonanceSpine:
         # === Expression threshold ===
         self._expression_threshold = 0.9 - extraversion * 0.6
 
-        # === Coupling dynamics (Kuramoto + Free Energy) ===
-        # Openness → stronger coupling (more inter-module influence)
-        self._field._coupling.kuramoto._k1 = 0.5 + openness * 1.0
-        self._field._coupling.kuramoto._k2 = 0.25 + openness * 0.5
-        self._field._coupling.kuramoto._k3 = 0.1 + openness * 0.3
-        # Neuroticism → higher precision (more sensitive to prediction errors)
-        self._field._coupling.free_energy._precision = 0.5 + neuroticism * 1.5
+        # === Coupling dynamics ===
         # Agreeableness → lower broadcast threshold (easier global ignition)
         self._field._coupling.broadcast._threshold = 0.8 - agreeableness * 0.3
-
-        # === Hebbian plasticity rates ===
-        # Openness → faster learning (higher eta)
-        self._field._coupling.plasticity._eta = 0.005 + openness * 0.015
-        # Conscientiousness → slower decay (more stable connections)
-        self._field._coupling.plasticity._lambda_decay = 0.002 - conscientiousness * 0.001
 
         # === Resonance field parameters ===
         # Neuroticism → less dissipation (emotions linger longer)
         self._field._dissipation = 0.03 - neuroticism * 0.02
         # Openness → weaker residual decay (more receptive to new input)
         self._field._residual_decay = 0.6 + (1.0 - openness) * 0.2
-        # Conscientiousness → stronger identity (more consistent personality)
-        self._field._identity_inertia = 0.9 + conscientiousness * 0.08
-        # Sovereignty → higher identity cap (stronger sense of self)
-        self._field._identity_max_norm = self._field._state_dim * (0.5 + sovereignty * 0.5)
-        # Patience → more Hopfield attractors (richer emotional memory)
-        self._field._max_attractors = max(3, int(5 + patience * 10))
-        # Extraversion → stronger Hopfield pull (more habitual expression patterns)
-        self._field._hopfield_strength = 0.03 + extraversion * 0.04
 
         # === Module-level personality (same as ComputationSpine) ===
         self._expression.threshold = 0.9 - extraversion * 0.6
@@ -317,9 +297,6 @@ class ResonanceSpine:
             self._expression_threshold = meta["expression_threshold"]
             self._field._dissipation = meta["dissipation"]
             self._field._residual_decay = meta["residual_decay"]
-            self._field._hopfield_strength = meta["hopfield_strength"]
-            self._field._identity_inertia = meta["identity_inertia"]
-            self._field._coupling.kuramoto._k1 = meta["kuramoto_k1"]
             self._field._coupling.broadcast._threshold = meta["broadcast_threshold"]
 
     def _restore_pel_after_scar(self) -> None:
@@ -518,20 +495,13 @@ class ResonanceSpine:
         resonance_meta = self._field.resonate()
         self._last_resonance_meta = resonance_meta
 
-        # === Emergence tracking + feedback into coupling ===
+        # === Emergence tracking ===
         emergence = self._emergence.update(
             module_states=self._field.module_states,
             energy=resonance_meta["energy"],
             sync_r=resonance_meta["sync_order"],
             iteration=self._tick_count,
         )
-        # Criticality feedback: near-critical → amplify coupling
-        if emergence.get("is_critical"):
-            self._field._coupling.set_criticality(
-                emergence["order_parameters"].get("criticality", 0.0)
-            )
-        else:
-            self._field._coupling.set_criticality(0.0)
 
         # === Extract expression decision from converged field ===
         self._update_expression(resonance_meta, emergence, dt, hgt_decision)
@@ -869,7 +839,7 @@ class ResonanceSpine:
         session_key: str = "",
         actual_expressed: bool | None = None,
     ) -> dict[str, float]:
-        """Feedback modulates coupling plasticity + real engine state + topology.
+        """Feedback modulates real engine state, topology, and meta-learned params.
 
         Args:
             outcome: "accepted" | "ignored" | "rejected".
@@ -904,14 +874,6 @@ class ResonanceSpine:
         self._engine.feedback(outcome, dt)
         # HGT adaptation
         self._hgt.adapt(outcome)
-        # Coupling plasticity modulation
-        n_weights = len(self._field._coupling.plasticity.weights)
-        if outcome == "accepted":
-            self._field._coupling.plasticity.update([0.3] * n_weights)
-        elif outcome == "rejected":
-            self._field._coupling.plasticity.update([0.0] * n_weights)
-        elif outcome == "ignored":
-            self._field._coupling.plasticity.update([0.05] * n_weights)
         # Topology gate feedback (learn which channels to keep/prune)
         topo_gate = self._field._coupling.topology_gate
         if topo_gate is not None:
@@ -928,9 +890,6 @@ class ResonanceSpine:
             self._expression_threshold = meta["expression_threshold"]
             self._field._dissipation = meta["dissipation"]
             self._field._residual_decay = meta["residual_decay"]
-            self._field._hopfield_strength = meta["hopfield_strength"]
-            self._field._identity_inertia = meta["identity_inertia"]
-            self._field._coupling.kuramoto._k1 = meta["kuramoto_k1"]
             self._field._coupling.broadcast._threshold = meta["broadcast_threshold"]
         # Update per-relationship personality deltas
         if session_key:

@@ -14,12 +14,19 @@ deterministic coherence pass instead of an iterate-to-convergence loop. Output
 contract is preserved: ``route``/``assessment_source`` literals, key sets, types and
 rounding are unchanged; only the (formerly noise-like) numeric values move.
 
-The reach-in attributes that ``ResonanceSpine.apply_personality``/``feedback`` poke
-(``_coupling.kuramoto._k1``, ``_coupling.plasticity.update`` ...) are kept as inert
-stubs so the spine needs no edits beyond swapping the factory: those knobs only ever
-tuned the deleted dynamics. The genuinely load-bearing outputs — per-module states,
-energy, and a coherence-based ``sync_order`` — are produced deterministically so the
-expression decision still receives non-degenerate inputs.
+The genuinely load-bearing outputs — per-module states, energy, and a
+coherence-based ``sync_order`` — are produced deterministically so the expression
+decision still receives non-degenerate inputs.
+
+2.5 cleanup: the ``_Kuramoto``/``_Plasticity``/``_FreeEnergy`` inert stand-ins (and
+the personality/feedback/meta-learner reach-ins that only ever wrote into them) have
+been removed — they had exactly one writer and one reader each (both inside this
+module or a same-shape self-loop), zero behavioural consumers, and the mechanisms
+they named (Kuramoto phase sync, Hebbian plasticity, active-inference free energy)
+were deleted along with the iterative resonance core they belonged to. ``sync_order``
+is unaffected: it is still the mean-field coherence proxy computed in ``resonate()``
+below, now cached directly on the fusion object instead of round-tripping through a
+dead ``_Kuramoto._order`` field.
 """
 
 from __future__ import annotations
@@ -32,7 +39,6 @@ _TIER_CONFIG = {
     "pro": {"state_dim": 16},
     "max": {"state_dim": 128},
 }
-_MAX_ATTRACTORS = {"lite": 5, "pro": 10, "max": 20}
 
 
 def _vec_norm(v: list[float]) -> float:
@@ -47,27 +53,12 @@ def _resize(vec: list[float], new_dim: int) -> list[float]:
     return list(vec) + [0.0] * (new_dim - len(vec))
 
 
-# --- inert stand-ins for CouplingDynamics internals ---------------------------
-# These exist only to absorb the personality/feedback reach-ins that previously
-# tuned the resonance dynamics. They hold whatever is written to them and do
-# nothing with it; the deleted loop was their only consumer.
-
-
-class _Kuramoto:
-    def __init__(self) -> None:
-        self._k1 = 1.0
-        self._k2 = 0.5
-        self._k3 = 0.3
-        self._last_step_delta = 0.0
-        self._order = 0.0
-
-    def order_parameter(self) -> float:
-        return self._order
-
-
-class _FreeEnergy:
-    def __init__(self) -> None:
-        self._precision = 1.0
+# --- inert stand-in for CouplingDynamics internals ----------------------------
+# _Broadcast/topology_gate absorb personality/feedback reach-ins that are still
+# read elsewhere (broadcast._threshold feeds the meta-learner loop; topology_gate
+# is guarded `is not None` at every call site). The Kuramoto/plasticity/free-energy
+# stand-ins that had zero live consumers were removed in the 2.5 cleanup — see the
+# module docstring.
 
 
 class _Broadcast:
@@ -75,30 +66,10 @@ class _Broadcast:
         self._threshold = 0.8
 
 
-class _Plasticity:
-    def __init__(self, n_channels: int) -> None:
-        self._eta = 0.01
-        self._lambda_decay = 0.001
-        self.weights = [0.0] * n_channels
-
-    @property
-    def active_ratio(self) -> float:
-        return 0.0
-
-    def update(self, deltas: list[float]) -> None:  # noqa: ARG002 — inert
-        return None
-
-
 class _Coupling:
-    def __init__(self, n_channels: int) -> None:
-        self.kuramoto = _Kuramoto()
-        self.free_energy = _FreeEnergy()
+    def __init__(self) -> None:
         self.broadcast = _Broadcast()
-        self.plasticity = _Plasticity(n_channels)
         self.topology_gate = None  # spine guards every access with `is not None`
-
-    def set_criticality(self, value: float) -> None:  # noqa: ARG002 — inert
-        return None
 
     def feedback_topology(self, outcome: str, active_channels: Any) -> None:  # noqa: ARG002
         return None
@@ -123,22 +94,19 @@ class DeterministicFusion:
         self._epsilon = epsilon
         self._module_states: list[list[float]] = [[0.0] * self._state_dim for _ in range(n_modules)]
         n_channels = n_modules * (n_modules - 1)  # directed pairwise (matches legacy lite=42)
-        self._coupling = _Coupling(n_channels)
+        self._coupling = _Coupling()
         self._complex = _Complex(n_channels)
         self._total_resonances = 0
         self._iteration_count = 0
         self._last_energy = 0.0
         self._last_convergence = 0.0
+        self._last_sync_order = 0.0
         self._had_injection = False
         self._coherence_gain = 0.15
 
         # personality / meta-learner reach-in targets (inert: fed deleted dynamics)
         self._dissipation = 0.02
         self._residual_decay = 0.7
-        self._hopfield_strength = 0.05
-        self._identity_inertia = 0.95
-        self._identity_max_norm = float(self._state_dim)
-        self._max_attractors = _MAX_ATTRACTORS.get(tier, 5)
 
     def inject(self, module_idx: int, signal: list[float]) -> None:
         """Inject external signal into a module's state vector (additive)."""
@@ -188,7 +156,7 @@ class DeterministicFusion:
         self._module_states = new_states
         self._last_energy = energy
         self._last_convergence = 0.0
-        self._coupling.kuramoto._order = sync
+        self._last_sync_order = sync
         self._had_injection = False
 
         return {
@@ -210,9 +178,9 @@ class DeterministicFusion:
         return {
             "module_magnitudes": [_vec_norm(s) for s in self._module_states],
             "total_energy": self._last_energy,
-            "sync_order": self._coupling.kuramoto.order_parameter(),
+            "sync_order": self._last_sync_order,
             "active_channels": self._complex.total_directed,
-            "plasticity_ratio": self._coupling.plasticity.active_ratio,
+            "plasticity_ratio": 0.0,
             "convergence": self._last_convergence,
             "total_resonances": self._total_resonances,
             "topology": {"active_count": self._complex.total_directed, "sparsity": 0.0},
@@ -247,8 +215,6 @@ class DeterministicFusion:
         self._module_states = [_resize(s, new_dim) for s in self._module_states]
         self._state_dim = new_dim
         self._tier = new_tier
-        self._identity_max_norm = float(new_dim)
-        self._max_attractors = _MAX_ATTRACTORS.get(new_tier, 5)
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -258,9 +224,6 @@ class DeterministicFusion:
             "iteration_count": self._iteration_count,
             "dissipation": self._dissipation,
             "residual_decay": self._residual_decay,
-            "hopfield_strength": self._hopfield_strength,
-            "identity_inertia": self._identity_inertia,
-            "kuramoto_k1": self._coupling.kuramoto._k1,
             "broadcast_threshold": self._coupling.broadcast._threshold,
         }
 
@@ -283,9 +246,12 @@ class DeterministicFusion:
         self._iteration_count = data.get("iteration_count", 0)
         self._dissipation = data.get("dissipation", self._dissipation)
         self._residual_decay = data.get("residual_decay", self._residual_decay)
-        self._hopfield_strength = data.get("hopfield_strength", self._hopfield_strength)
-        self._identity_inertia = data.get("identity_inertia", self._identity_inertia)
-        self._coupling.kuramoto._k1 = data.get("kuramoto_k1", self._coupling.kuramoto._k1)
+        # NOTE: legacy snapshots may still carry "kuramoto_k1", "hopfield_strength",
+        # "identity_inertia" and similar keys (written by pre-2.5 saves); they are
+        # intentionally ignored here — the fields they fed were dead stubs with zero
+        # consumers and have been removed (see module docstring). data.get() on these
+        # keys is simply never called, so the residual keys are silently dropped
+        # without a KeyError.
         self._coupling.broadcast._threshold = data.get(
             "broadcast_threshold", self._coupling.broadcast._threshold
         )

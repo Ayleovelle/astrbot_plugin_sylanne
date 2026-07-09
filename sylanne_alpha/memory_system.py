@@ -18,6 +18,7 @@ v2 核心变更（相对 v1）:
 
 from __future__ import annotations
 
+import hashlib
 import logging
 import math
 import re
@@ -804,6 +805,44 @@ def _keyword_overlap_precomputed(query_tokens: set[str], text: str) -> float:
 
 
 # ---------------------------------------------------------------------------
+# leg-2(d) 召回冗余去重：归一化-精确 blake2b 签名（业主要的"用密码学压制重复注入"）。
+#
+# 【为何不是模糊 Jaccard/MinHash】红队实测证伪了字符 shingle 的模糊相似度：它无法把
+# "过来"和"过去"（差一个尾字，Jaccard 0.85 高于任何可用阈值）与真正的重复区分开——
+# 恰好在语义翻转的危险区（来/去、买/卖、是/否）误删语义不同的记忆；而真正换说法的
+# 转述反而普遍落在阈值以下逮不到。字符相似度天然测不出语义差，任何阈值都堵不住。
+#
+# 【安全形态】只折叠"仅大小写/空白/标点不同的同一句"——casefold + 去空白与常见中英
+# 标点后做【精确】哈希匹配。过来≠过去（实字保留），绝不误删语义不同的记忆；同时仍
+# 逮住逐字精确去重漏网的标点/空白/大小写变体。签名紧凑、只当去重裁判，永不进 prompt、
+# 永不落盘、永不喂给模型。
+# ---------------------------------------------------------------------------
+# 只收纯装饰性符号（空白 + 句读/引号/括号）。刻意排除有语义的运算/比较/分隔符
+# （- + < > = / * : ~ % 等）——红队实测：strip 掉它们会把 "今天-5度"/"今天5度"、
+# "盈亏+2000"/"盈亏-2000"、"体重>60"/"体重<60"、"8:00"/"800" 这类真不同的数值记忆
+# 折叠成一条。真正的装饰性重复绝不会仅差一个运算符，故排除它们零损失。
+_DEDUP_STRIP_CHARS = frozenset(
+    " \t\n\r　"                         # 空白（含全角空格）
+    "，。！？、；“”‘’（）【】《》…—·"       # 中文句读/引号/括号/间隔号
+    ".,!?;\"'()[]"                           # 英文句读/引号/括号
+)
+
+
+def _normalized_dedup_sig(text: str) -> int | None:
+    """归一化-精确去重签名：casefold + 去空白/标点后 blake2b(8B)。
+
+    空文本（或归一化后为空）→ None（不参与去重）。两段文本仅在空白/标点/大小写上
+    不同 → 同签名；任何实字差异（过来/过去）→ 不同签名。
+    """
+    t = "".join(c for c in (text or "").casefold() if c not in _DEDUP_STRIP_CHARS)
+    if not t:
+        return None
+    return int.from_bytes(
+        hashlib.blake2b(t.encode("utf-8", "ignore"), digest_size=8).digest(), "big"
+    )
+
+
+# ---------------------------------------------------------------------------
 # T2-05③ MAJOR-2 修复：consume-on-mention 专用的"内容 token"重合度
 #
 # 红队实测：_COMMITMENT_KW/_FUTURE_TIME_KW 里的词（明天/一定/答应/数字……）几乎
@@ -1026,6 +1065,13 @@ class MemorySystem:
         self._recall_mode: RecallMode = self._resolve_recall_mode(
             kwargs.get("recall_mode")
         )
+        # issue43 PRIMARY 修复：/reset 召回纪元边界（不持久化——不进 to_dict，
+        # v1 限制见 set_recall_epoch_boundary 文档）。默认 0.0 = 不生效（放行全部
+        # 历史记忆，现有行为零变化）。/reset 时插给一个时间戳后，_gather_pool 会把
+        # created_at 早于该边界的候选（L1/L2/L3 全部三层）排除出自动召回候选池——
+        # 这是"不再自动浮上来"而非"删除"：条目仍完整保留在 _l1/_l2/_l3_nodes 里，
+        # 手动查询/管理面板等旁路读取路径不受影响，只挡自动召回这一条通路。
+        self._recall_epoch_boundary: float = 0.0
         # SHADOW 模式下记录最近一次新旧召回差异（供 get_debug_snapshot 读取）
         self._last_shadow_diff: dict[str, Any] | None = None
         self._params: dict[str, float] = {
@@ -1485,6 +1531,40 @@ class MemorySystem:
         self._l1 = kept
         return before - len(self._l1)
 
+    # ------------------------------------------------------------------
+    # issue43 PRIMARY 修复：/reset 幽灵源清理
+    # ------------------------------------------------------------------
+
+    def set_recall_epoch_boundary(self, ts: float) -> None:
+        """设置自动召回纪元边界（/reset 触发，non-destructive gate）。
+
+        只影响 recall() 的自动候选池筛选（_gather_pool）——created_at 早于 ts 的
+        L1/L2/L3 条目不再被自动浮上来拼进 prompt，但条目本身完整保留，不删除、
+        不清零，管理面板/WebUI 的直接读取旁路不受影响。
+
+        v1 限制（cheap-persist，未升级序列化 shape）：此边界不进 to_dict/from_dict，
+        纯内存态。进程重启会把边界打回 0.0（相当于"忘记了曾经 /reset 过"），
+        届时旧记忆会重新符合自动召回资格——已知的 v1 限制，不是本次修复的阻断项
+        （见任务指令第5点：宁可不动冻结的序列化 shape，也不做重启不丢失）。
+        """
+        self._recall_epoch_boundary = float(ts)
+
+    def clear_l1_hot_pool(self) -> int:
+        """清空 L1 热池（/reset 触发的透明工作记忆载体，直接清除而非纪元门控）。
+
+        L1 是"近期对话摘要、未确认可丢弃"的瞬时工作记忆，语义上就是本轮对话的
+        草稿区——/reset 清空 AstrBot 侧对话历史后，这里的残留摘要就是幽灵话题的
+        直接搬运工（_gather_pool 对 L1 的 temporal_proximity 兜底命中尤其明显）。
+        与 L2/L3（转 epoch 门控、保留但不自动浮现）不同，L1 本身就是transient——
+        直接清空，不是"删除记忆"，是"清掉这轮已经作废的工作记忆草稿"。
+
+        Returns:
+            被清除的条目数。
+        """
+        before = len(self._l1)
+        self._l1 = deque(maxlen=self._L1_CAPACITY)
+        return before
+
     def needs_consolidation(self) -> bool:
         """检查是否需要执行整理。触发条件：每天 6:00/18:00 或 L1 满 60 条。"""
         # 保底：L1 满了就触发
@@ -1721,42 +1801,64 @@ class MemorySystem:
         query_embedding: list[float] | None = None,
         current_warmth: float = 0.0,
         limit: int = 5,
+        *,
+        history_present: bool = True,
     ) -> list[MemoryResult]:
         """召回入口分发器（阶段0 灰度）。
 
         - LEGACY：现有两阶段四维加权召回（默认，行为零变化）。
         - ACTIVATION：ACT-R 激活核召回（阶段1+ 实现，未实现前回退 LEGACY）。
         - SHADOW：返回 LEGACY 结果，同时后台跑 ACTIVATION 记录差异（不影响返回值）。
+
+        Args:
+            history_present: 本轮 req.contexts 是否有充分真实历史（leg-2a）。默认 True
+                → 所有既有调用点（public_api / emotion_spirit / 单测）行为逐字不变。
+                per-turn 注入路径（legacy 与 PERCEPT 两条召回）在历史缺失/病态轮传 False，
+                据以在【唯一收敛点】丢掉零相关近期项（temporal_proximity 幽灵）——真模型证实
+                "跳到不相干旧话题"仅在【历史丢失 AND 幽灵注入】联合成立时发作。此门断"幽灵"
+                那条腿，且只砍 recency 兜底项，有真实词面/向量相关的召回一律不动。
         """
         mode = self._recall_mode
         if mode is RecallMode.LEGACY:
-            return self._recall_legacy(query, query_embedding, current_warmth, limit)
-        if mode is RecallMode.ACTIVATION:
+            results = self._recall_legacy(query, query_embedding, current_warmth, limit)
+        elif mode is RecallMode.ACTIVATION:
             activation_fn = getattr(self, "_recall_activation", None)
             if activation_fn is None:
                 # 阶段1 未落地：安全回退，不让开关把召回打瘫。
-                return self._recall_legacy(
+                results = self._recall_legacy(
                     query, query_embedding, current_warmth, limit
                 )
-            return activation_fn(query, query_embedding, current_warmth, limit)
-        # SHADOW：以 LEGACY 为准返回，新引擎仅观测
-        legacy = self._recall_legacy(query, query_embedding, current_warmth, limit)
-        activation_fn = getattr(self, "_recall_activation", None)
-        if activation_fn is not None:
-            try:
-                # observe_only：影子评估不能污染记忆状态（不刷新 actr_acc/不 reinforce），
-                # 否则 LEGACY 返回的同时新引擎偷偷"练习"了 actr_acc，影子就不是纯观测。
-                new = activation_fn(
-                    query, query_embedding, current_warmth, limit, observe_only=True
-                )
-                self._record_shadow_diff(query, legacy, new)
-            except Exception as e:  # 影子计算绝不能影响线上返回
-                import logging
+            else:
+                results = activation_fn(query, query_embedding, current_warmth, limit)
+        else:
+            # SHADOW：以 LEGACY 为准返回，新引擎仅观测
+            results = self._recall_legacy(
+                query, query_embedding, current_warmth, limit
+            )
+            activation_fn = getattr(self, "_recall_activation", None)
+            if activation_fn is not None:
+                try:
+                    # observe_only：影子评估不能污染记忆状态（不刷新 actr_acc/不 reinforce），
+                    # 否则 LEGACY 返回的同时新引擎偷偷"练习"了 actr_acc，影子就不是纯观测。
+                    new = activation_fn(
+                        query, query_embedding, current_warmth, limit,
+                        observe_only=True,
+                    )
+                    self._record_shadow_diff(query, results, new)
+                except Exception as e:  # 影子计算绝不能影响线上返回
+                    import logging
 
-                logging.getLogger("astrbot_plugin_sylanne").warning(
-                    "Sylanne recall shadow 计算失败（不影响返回）：%s", e
-                )
-        return legacy
+                    logging.getLogger("astrbot_plugin_sylanne").warning(
+                        "Sylanne recall shadow 计算失败（不影响返回）：%s", e
+                    )
+        # leg-2a 唯一收敛点：历史缺失轮丢弃 temporal_proximity 近期兜底项（幽灵）。
+        # LEGACY/ACTIVATION/SHADOW 三模式、PERCEPT/legacy 两调用路径都经此，一处生效全覆盖。
+        if not history_present and results:
+            results = [
+                r for r in results
+                if getattr(r, "recall_reason", "") != "temporal_proximity"
+            ]
+        return results
 
     # 影子历史滚动缓冲上限（评估足够、内存可控）
     _SHADOW_HISTORY_MAX = 50
@@ -1823,8 +1925,14 @@ class MemorySystem:
                 self._inverted_index.query(list(query_tokens)[:15], top_k=15)
             )
         in_pool: set[str] = set()
+        # issue43 PRIMARY 修复：/reset 纪元边界——早于边界的条目不参与自动召回
+        # 候选池（仍完整保留在 _l1/_l2/_l3_nodes 里，只是不再被 _gather_pool 挑出来）。
+        # 边界默认 0.0，未触发过 /reset 的会话恒放行，现有行为零变化。
+        epoch = self._recall_epoch_boundary
 
         for item in self._l1:
+            if epoch > 0.0 and item.created_at < epoch:
+                continue
             relevance, reason = self._compute_relevance_with_reason(
                 query, query_embedding, item.text, item.embedding, query_tokens
             )
@@ -1846,6 +1954,8 @@ class MemorySystem:
             in_pool.add(item.id)
 
         for item in self._l2:
+            if epoch > 0.0 and item.created_at < epoch:
+                continue
             relevance, reason = self._compute_relevance_with_reason(
                 query, query_embedding, item.text, item.embedding, query_tokens
             )
@@ -1864,6 +1974,8 @@ class MemorySystem:
             in_pool.add(item.id)
 
         for item in self._l2:
+            if epoch > 0.0 and item.created_at < epoch:
+                continue
             if item.id in index_ids and item.id not in in_pool:
                 pool.append({
                     "rel": 0.12, "reason": "inverted_index", "obj": item, "layer": "L2",
@@ -1874,7 +1986,13 @@ class MemorySystem:
                 })
 
         # L3 候选（节点匹配，带 relevance；importance 用 clarity 近似）
-        pool.extend(self._recall_l3_candidates(query))
+        l3_candidates = self._recall_l3_candidates(query)
+        if epoch > 0.0:
+            l3_candidates = [
+                c for c in l3_candidates
+                if float(c.get("created_at", 0.0) or 0.0) >= epoch
+            ]
+        pool.extend(l3_candidates)
         return pool
 
     def _apply_privacy_filter(
@@ -1995,6 +2113,10 @@ class MemorySystem:
         for layer, store in (("L1", self._l1), ("L2", self._l2)):
             for item in store:
                 if id(item) in in_wide:
+                    continue
+                # 召回纪元门控：reset 前的记忆不自动浮现（与 _gather_pool 一致，
+                # 否则情感旁路会绕过 epoch 边界把幽灵情绪记忆翻回来）。
+                if self._recall_epoch_boundary > 0.0 and item.created_at < self._recall_epoch_boundary:
                     continue
                 # 情绪需与当前心境同向（都正或都负），避免开心时翻出难过事
                 if abs(item.temperature) < emo_floor or item.importance < imp_floor:
@@ -2357,6 +2479,10 @@ class MemorySystem:
                 continue
             node = self._l3_nodes.get(nid)
             if node is None or node.clarity < 0.1:
+                continue
+            # 召回纪元门控：扩散不得把 reset 前的邻居节点当新候选带回来。
+            if (self._recall_epoch_boundary > 0.0
+                    and getattr(node, "created_at", 0.0) < self._recall_epoch_boundary):
                 continue
             extra.append({
                 "rel": min(self._SPREAD_REL_CAP, act),

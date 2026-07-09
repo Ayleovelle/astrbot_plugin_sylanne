@@ -10,7 +10,9 @@
 支持三种计算模式（通过 DimensionProfile 配置）：
   - lite: 轻量级，5 并发插件，纯 Python
   - pro: 专业级，25 并发插件，numpy 加速
-  - max: 性能野兽，50+ 并发插件，GPU 加速
+  - max: 高维档，50+ 并发插件，numpy 加速（GPU 路径已于 v2.5 移除）
+
+注：ComputationSpine 自 v2.5 起冻结，不再接新特性；新引擎特性落在 Resonance Field 路径。
 """
 
 from __future__ import annotations
