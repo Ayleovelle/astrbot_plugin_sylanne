@@ -65,6 +65,12 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
+# 模块级静态路径常量（__file__ 派生、恒定）：在 import 时算一次，避免在 async 处理器里
+# 调 Path.resolve()/os.path（ASYNC240：会在事件循环上做阻塞 FS 调用）。
+_PLUGIN_ROOT = Path(__file__).resolve().parent.parent
+_DASHBOARD_HTML_PATH = _PLUGIN_ROOT / "UI" / "index.html"
+_LOGO_PATH = _PLUGIN_ROOT / "logo.png"
+
 # 模块级全局状态：跨热重载保持监听器引用
 # 使用 globals().get() 是为了在 AstrBot hot-upload 重新 import 时保留已有值
 _server_task: asyncio.Task | None = globals().get("_server_task")
@@ -277,9 +283,8 @@ async def start_webui_server(plugin: Any, host: str = "127.0.0.1", port: int = 2
                 return web.json_response({"error": "csrf_token_mismatch"}, status=403)
         return await handler(request)
 
-    # Serve the dashboard HTML from UI/index.html
-    plugin_root = Path(__file__).resolve().parent.parent
-    dashboard_path = plugin_root / "UI" / "index.html"
+    # Serve the dashboard HTML from UI/index.html（路径为模块级常量，避免 async 里 resolve）
+    dashboard_path = _DASHBOARD_HTML_PATH
     if dashboard_path.exists():
         dashboard_html = dashboard_path.read_text(encoding="utf-8")
         logger.info(
@@ -662,14 +667,10 @@ async def start_webui_server(plugin: Any, host: str = "127.0.0.1", port: int = 2
         return web.json_response(data)
 
     async def handle_logo(request: web.Request) -> web.Response:
-        import os
-
-        logo_path = os.path.join(
-            os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "logo.png"
-        )
-        if not os.path.exists(logo_path):
+        # 路径为模块级常量；.exists() 走 pathlib（ASYNC240 只报 os.path / .resolve()）
+        if not _LOGO_PATH.exists():
             return web.Response(text="Not Found", status=404)
-        data = await asyncio.to_thread(Path(logo_path).read_bytes)
+        data = await asyncio.to_thread(_LOGO_PATH.read_bytes)
         return web.Response(body=data, content_type="image/png")
 
     async def handle_memory_meltdown(request: web.Request) -> web.Response:
