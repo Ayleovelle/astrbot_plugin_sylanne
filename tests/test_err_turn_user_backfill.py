@@ -115,7 +115,14 @@ class _FakeRunner:
 @contextlib.contextmanager
 def _registered_runner(umo: str, runner: _FakeRunner | None):
     """在 `follow_up._ACTIVE_AGENT_RUNNERS` 里临时注册/摘除一个假 runner。
-    `runner=None` 时不注册任何东西，模拟"注册表未命中"（_agent_run_done 应返回 None）。"""
+    `runner=None` 时不注册任何东西，模拟"注册表未命中"（_agent_run_done 应返回 None）。
+
+    需要真实 AstrBot 框架（用真注册表而非 mock 终态门）；CI 单元测试环境不装
+    astrbot，此时用它的测试整体 skip（不 mock 掉被测电路，宁可在 CI 少覆盖）。"""
+    pytest.importorskip(
+        "astrbot.core.pipeline.process_stage.follow_up",
+        reason="需要 AstrBot 框架（CI 单元测试环境不装）",
+    )
     from astrbot.core.pipeline.process_stage.follow_up import _ACTIVE_AGENT_RUNNERS
 
     if runner is None:
@@ -628,6 +635,10 @@ def test_contract_both_after_message_sent_handlers_are_distinct_registry_entries
     两个方法名不同 -> 两个 key -> 两条记录，互不覆盖。这是"能否注册多个同类
     钩子"的地基；若框架实现改成按 (module, event_type) 做 key，这条测试会失败，
     此时才是真正的 BLOCKER，需要合并进既有钩子。"""
+    pytest.importorskip(
+        "astrbot.core.star.star_handler",
+        reason="需要 AstrBot 框架（CI 单元测试环境不装）",
+    )
     from astrbot.core.star.star_handler import EventType, star_handlers_registry
 
     err_backfill_full_name = "main__on_after_message_sent_err_backfill"
@@ -659,6 +670,10 @@ async def test_contract_framework_invokes_both_after_message_sent_handlers(
     仅 monkeypatch `star_map`（激活状态查询表）使两个 handler 通过
     `only_activated` 过滤；不触碰全局 `star_handlers_registry` 本身的持久状态。
     """
+    pytest.importorskip(
+        "astrbot.core.pipeline.context_utils",
+        reason="需要 AstrBot 框架（CI 单元测试环境不装）",
+    )
     from astrbot.core.pipeline.context_utils import call_event_hook
     from astrbot.core.star.star import StarMetadata
     from astrbot.core.star.star_handler import EventType, star_handlers_registry

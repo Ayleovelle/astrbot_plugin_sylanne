@@ -2057,10 +2057,14 @@ class EmotionalStatePlugin(Star):
         # internal.py:395 —— event 被 stop 且【未】abort，框架根本不调 save
         if is_stopped and not aborted:
             return False
-        # internal.py:450+453-455 —— 无响应对象 或 响应 role 非 assistant（如 'err'）
-        # 且未 abort -> 框架判定"无有效 assistant 回复"，不落库
+        # internal.py:450 —— 无响应对象（run_agent 外层异常兜底 / err-backfill 传 None）。
+        # 此时下面 role/completion 两腿恒等价于 aborted（role 缺省 'assistant' 落不到
+        # role 腿；completion 从 None 取空、tool_res 归 req），提前返回，避免对 None 取属性。
+        if response is None:
+            return aborted
+        # internal.py:453-455 —— 响应 role 非 assistant（如 'err'）且未 abort -> 不落库
         role = getattr(response, "role", "assistant") or "assistant"
-        if (response is None or role != "assistant") and not aborted:
+        if role != "assistant" and not aborted:
             return False
         # internal.py:463-467 —— completion 空 且 无 tool_calls_result 且 未 abort -> 不落库
         # 【不 strip】：精确镜像框架 `not completion_text`（" " 在框架为真 -> 会 save）

@@ -2530,7 +2530,9 @@ class StatePersistence:
             # DB/IO 故障吞掉"的 SILENT 补写失败静默藏起来（fail-open by design，
             # 不改变吞异常的行为——上游 _backfill_user_if_framework_skips 仍要保证
             # 补写失败不阻断回复——但至少要能在 ops 侧被看见）。升级为 warning。
-            logger.warning(f"Sylanne: ConversationManager sync failed: {e}")
+            logger.warning(
+                f"Sylanne: ConversationManager sync failed: {e}", exc_info=True
+            )
 
     # ------------------------------------------------------------------
     # AstrBot PersonaManager 集成
