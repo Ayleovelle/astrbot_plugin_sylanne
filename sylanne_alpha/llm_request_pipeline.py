@@ -2112,28 +2112,6 @@ class LLMRequestPipeline:
         p = self._p
         from sylanne_alpha.host import SylanneAlphaHostEvent
 
-        # leg-3（历史丢失第二条腿）：用户轮持久化必须先于任何可能抛异常的评估/内核/
-        # 记忆代码。这次同步是"用户说过这句话"的唯一权威落库前置——若埋在下方大 try
-        # 深处（原位置），上游任一异常（ensure_restored / host.on_request / compress_check…）
-        # 都会跳到只重试 observe_request 的 except、静默漏掉本次同步；若该轮又被判 SILENT，
-        # AstrBot 自身的 _save_to_history 也因 completion 为空提前 return（框架侧，冻结不动）
-        # → 用户消息永久从会话历史消失，正是跳话题联合条件里"历史丢失"那条腿。
-        # 这是既有 SILENT-历史测试早已假设的"无条件跑过的那次同步"（见
-        # tests/test_context_integrity_silent_history.py），此处让实现兑现该契约。
-        # 唯一调用点（从下方移动而来，非新增）→ user 侧本就不参与去重（state_persistence
-        # 幂等排除 role=="user"），移动保证恰好一次、不双写。自带 try/except：同步调度
-        # 失败也绝不打断后续观测。
-        if text and p._has_conversation_manager():
-            try:
-                safe_ensure_future(
-                    p._sync_message_to_conv_mgr(session_key, "user", text),
-                    name="conv_mgr_sync_user",
-                )
-            except Exception as exc:
-                logger.warning(
-                    "Sylanne conv_mgr user-sync schedule failed: %s", exc
-                )
-
         try:
             # CP8-P3a：fast/main 评估已收编进 AssessorAgent（经 SelfCore PRE 调用），
             # 此处不再直接调 assess_fast/assess_main，避免双重执行。

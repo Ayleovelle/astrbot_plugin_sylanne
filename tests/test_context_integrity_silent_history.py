@@ -58,6 +58,7 @@ from types import SimpleNamespace
 
 import pytest
 
+from main import EmotionalStatePlugin
 from sylanne_alpha._engine.sylanne_core.compute.host import SylanneAlphaHost
 from sylanne_alpha.v2core.contracts import Reply, ReplyKind
 from sylanne_alpha.v2core.integration import apply_v2core_response
@@ -121,7 +122,15 @@ class _Plugin:
     """最小插件桩：桥接 apply_v2core_response 需要的属性 + 真实
     StatePersistence.sync_message_to_conv_mgr 委托（与 main.py 的
     `_sync_message_to_conv_mgr` 委托写法完全一致，见 main.py:1852-1855）。
+
+    2.4.1 起同时绑上 main.py 里真实的 _framework_will_persist_this_turn /
+    _agent_was_aborted / _backfill_user_if_framework_skips——收口挂点补写测的
+    是生产代码本身，不是重新实现一份判据。
     """
+
+    _framework_will_persist_this_turn = EmotionalStatePlugin._framework_will_persist_this_turn
+    _agent_was_aborted = EmotionalStatePlugin._agent_was_aborted
+    _backfill_user_if_framework_skips = EmotionalStatePlugin._backfill_user_if_framework_skips
 
     def __init__(self, *, root: str, conv_mgr: FakeConversationManager, text: str) -> None:
         self._config = {"sylanne_enable_v2core": True}
@@ -139,6 +148,9 @@ class _Plugin:
     def _session_key(self, _e: object) -> str:
         return "u1"
 
+    def _text(self, _e: object) -> str:
+        return self._llm_response_pipeline._t
+
     def _host(self, sk: str) -> SylanneAlphaHost:
         if sk not in self._hosts:
             self._hosts[sk] = SylanneAlphaHost(root=self._root, session_key=sk)
@@ -152,8 +164,28 @@ class _Plugin:
         await self._state_persistence.sync_message_to_conv_mgr(session_key, role, text)
 
 
+class _ReqStub:
+    """最小 provider_request 桩：有 conversation，无 tool_calls_result。"""
+
+    def __init__(self, *, has_conversation: bool = True) -> None:
+        self.conversation = object() if has_conversation else None
+        self.tool_calls_result = None
+
+
 class _Event:
     unified_msg_origin = "test:u1"
+
+    def __init__(self, *, is_stopped: bool = False, req: _ReqStub | None = None) -> None:
+        self._is_stopped = is_stopped
+        self._req = req if req is not None else _ReqStub()
+
+    def get_extra(self, key: str, default=None):
+        if key == "provider_request":
+            return self._req
+        return default
+
+    def is_stopped(self) -> bool:
+        return self._is_stopped
 
 
 def _plugin(text: str) -> tuple[_Plugin, FakeConversationManager]:
@@ -164,11 +196,14 @@ def _plugin(text: str) -> tuple[_Plugin, FakeConversationManager]:
 
 @pytest.mark.asyncio
 async def test_request_time_user_sync_survives_silent_turn() -> None:
-    """request 阶段已同步的用户消息，在 response 阶段判为 SILENT 后仍完整保留。
+    """SILENT 轮的用户消息，经收口层补写（main.py::_backfill_user_if_framework_skips）
+    完整落库，不丢不重。
 
-    顺序严格复刻真实管线：llm_request_pipeline 在拿到 LLM 回复之前就把用户原文
-    异步写进 conv_mgr（这里直接调用同一入口方法模拟）；然后 response 阶段
-    apply_v2core_response 判为 SILENT，只清空 completion_text，不触碰 conv_mgr。
+    2.4.1 起 user 侧写入职责从"请求期无条件写"（旧 leg-3）搬到"响应期收口层，仅
+    框架本轮不落库时补写"。本测试驱动的就是这条真实收口路径，而不是手动模拟一次
+    请求期同步——顺序严格复刻真实管线：apply_v2core_response 判为 SILENT、清空
+    completion_text 后，_backfill_user_if_framework_skips 判定框架本轮不落库
+    （completion 空 + 无 tool_calls_result + 未 abort），补写 user。
     """
     text = "在干嘛呢"
     p, conv_mgr = _plugin(text)
@@ -178,11 +213,7 @@ async def test_request_time_user_sync_survives_silent_turn() -> None:
     # 之前就已经写好）。
     p._store.session_origins.set("u1", "test:u1")
 
-    # Step 1：模拟 llm_request_pipeline._background_observe_request 里已经
-    # 无条件跑过的那次同步（真实调用点：sylanne_alpha/llm_request_pipeline.py:2021）。
-    await p._sync_message_to_conv_mgr("u1", "user", text)
-
-    # Step 2：先跑一轮把 v2core 运行态建起来，再把 decision stage 打桩成 SILENT
+    # Step 1：先跑一轮把 v2core 运行态建起来，再把 decision stage 打桩成 SILENT
     # （ignition 的真实分支条件多、难以从外部稳定触发，这里直接控制裁决产物，
     # 只验证 apply_v2core_response 对 SILENT 的处理是否会破坏/重复写 conv_mgr）。
     warmup = _Resp("warmup")
@@ -193,15 +224,21 @@ async def test_request_time_user_sync_survives_silent_turn() -> None:
     )
 
     resp = _Resp("draft the model produced")
-    took = await apply_v2core_response(p, _Event(), resp)
+    silent_event = _Event()
+    took = await apply_v2core_response(p, silent_event, resp)
     assert took is True, "SILENT 应终结本轮（跳过 legacy）"
     assert resp.completion_text == "", "SILENT 轮仍应清空 completion_text（对外沉默）"
 
-    # Step 3：框架侧 _save_to_history 在 completion_text 为空时提前 return，
-    # 不做任何事——这里不模拟它，因为它本来就什么都不做。真正验证的是 conv_mgr
-    # 里此刻已经落库的内容：用户那句话必须还在，且不应该因为 SILENT 分支被
-    # 二次写入而重复。会话必须落在 unified_msg_origin（"test:u1"）下，而不是
-    # 插件内部的 session_key（"u1"）。
+    # Step 2：真实收口层动作——main.py::_on_llm_response_inner 的 finally 在此处
+    # 调用 _backfill_user_if_framework_skips；框架因 completion 空本轮不落库，
+    # 补写是该轮唯一 user 写者。
+    await p._backfill_user_if_framework_skips(silent_event, resp)
+
+    # 框架侧 _save_to_history 在 completion_text 为空时提前 return，不做任何事
+    # ——这里不模拟它，因为它本来就什么都不做。真正验证的是 conv_mgr 里此刻已经
+    # 落库的内容：用户那句话必须还在，且不应该因为 SILENT 分支被二次写入而重复。
+    # 会话必须落在 unified_msg_origin（"test:u1"）下，而不是插件内部的
+    # session_key（"u1"）。
     assert "u1" not in conv_mgr._curr_ids, (
         "conv_mgr 必须按 unified_msg_origin 建会话，不能用插件内部 session_key"
     )
