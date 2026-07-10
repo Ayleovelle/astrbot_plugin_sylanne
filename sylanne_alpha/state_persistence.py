@@ -2480,9 +2480,19 @@ class StatePersistence:
             # checkpoint/system/tool 等非对话角色，取真正最后一条 user/assistant
             # 消息来比较，避免这类尾随记录让 guard 误判"不同"从而漏检真实重复。
             #
-            # 刻意只对非 "user" 一侧（bot/assistant）生效：会真正跟框架
-            # _save_to_history 并发写的只有 bot 侧同步（request 阶段的 user 同步
-            # 发生在 LLM 调用之前，压根不存在并发写这回事）。若不加这条限制，用户
+            # 刻意只对非 "user" 一侧（bot/assistant）生效。
+            # 【2.4.1 修正】原注释断言"request 阶段的 user 同步发生在 LLM 调用之前，
+            # 压根不存在并发写这回事"——该假设是错的，正是 leg-3 跨锁双写 bug 的根源：
+            # 请求期那次 user 同步是 fire-and-forget，可被调度到框架 _save_to_history
+            # 之后，读到 [.., u, b] 再 append 一条 u，写出悬挂重复 user，下一轮模型遂把
+            # 已答问题当新问题重答。2.4.1 已删除请求期无条件 user 写，改为响应期收口
+            # （main.py::_backfill_user_if_framework_skips）仅在框架本轮不落库时补写，
+            # 且该补写在框架 per-umo session_lock 内 await 完成 —— 故【单轮内】它是唯一的
+            # user 写者，与框架的整表覆盖写不再跨锁双写。注意：跨轮并发的多个补写仍会
+            # 并发进入本方法（同 umo 多轮均 SILENT 时），由调用方 sync_message_to_conv_mgr
+            # 取的 conv_sync_lock 把这段读-改-写串行化——真进程灰测实测：绕过该锁立刻
+            # 丢失并发写。下面豁免 user 的【真正理由】自始至终是另一条：
+            # 若不加这条限制，用户
             # 连续两轮发完全相同的文字（例如中间那轮 bot 恰好 SILENT、没有任何
             # assistant 记录夹在中间）会被这条 guard 误判成"重复"而丢掉第二条真实
             # 用户消息——这是比它防的竞态更容易踩中的真实回归，必须避免。
@@ -2516,7 +2526,11 @@ class StatePersistence:
                 pass
             await conv_mgr.update_conversation(umo, curr_cid, history=history)
         except Exception as e:
-            logger.debug(f"Sylanne: ConversationManager sync failed: {e}")
+            # 2.4.1 红线闸 finding：此处曾是 debug 级别，会把"该补写却因瞬时
+            # DB/IO 故障吞掉"的 SILENT 补写失败静默藏起来（fail-open by design，
+            # 不改变吞异常的行为——上游 _backfill_user_if_framework_skips 仍要保证
+            # 补写失败不阻断回复——但至少要能在 ops 侧被看见）。升级为 warning。
+            logger.warning(f"Sylanne: ConversationManager sync failed: {e}")
 
     # ------------------------------------------------------------------
     # AstrBot PersonaManager 集成

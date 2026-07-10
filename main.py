@@ -1531,17 +1531,29 @@ class EmotionalStatePlugin(Star):
 
 
     async def _on_llm_response_inner(self, event: Any, response: Any) -> None:
-        # v2core 认知阶段二（DELIBERATE/EVOLVE，默认开——唯一认知内核）：裁决草稿 + 学习。
-        # 返回 True 仅在 SILENT（终结本轮，防 legacy no-ghost 复活刻意装死）；
-        # SPEAK/FALLBACK 返回 False【故意落入下方 legacy】——sanitize/分段打字节奏/
-        # 观测是 legacy 的嘴，v2core 接管心智不没收嘴。异常同样 False（紧急回退口）。
+        # v2core 认知阶段二（默认开）：裁决草稿 + 学习。handled=True 仅 SILENT（终结本轮）；
+        # SPEAK/FALLBACK/异常 -> handled=False 落 legacy（sanitize/分段/观测是 legacy 的嘴）。
         try:
-            from sylanne_alpha.v2core.integration import apply_v2core_response
-            if await apply_v2core_response(self, event, response):
-                return
-        except Exception as exc:  # 桥接自身异常绝不阻断回复
-            logger.error(f"Sylanne v2core bridge error, fallback to legacy: {exc}", exc_info=True)
-        await self._llm_response_pipeline._on_llm_response_inner(event, response)
+            handled = False
+            try:
+                from sylanne_alpha.v2core.integration import apply_v2core_response
+                handled = await apply_v2core_response(self, event, response)
+            except Exception as exc:  # 桥接自身异常绝不阻断回复
+                logger.error(
+                    f"Sylanne v2core bridge error, fallback to legacy: {exc}",
+                    exc_info=True,
+                )
+                handled = False
+            if not handled:
+                await self._llm_response_pipeline._on_llm_response_inner(event, response)
+        finally:
+            # 2.4.1 leg-3 双写根治：无论上面 v2core/legacy 走哪条、是否抛异常，都在此
+            # 判定"框架本轮是否落库"，仅框架不落库时补写 user（放 finally 保证异常路径
+            # 也不吞补写——这是 SILENT 不丢历史的红线）。
+            try:
+                await self._backfill_user_if_framework_skips(event, response)
+            except Exception as exc:
+                logger.warning("Sylanne user backfill failed: %s", exc)
 
     async def _background_observe_response(
         self, session_key: str, text: str, *, skip_conv_sync: bool = False
@@ -1946,6 +1958,100 @@ class EmotionalStatePlugin(Star):
         self, session_key: str, role: str, text: str
     ) -> None:
         await self._state_persistence.sync_message_to_conv_mgr(session_key, role, text)
+
+    # ── 2.4.1：user 侧对齐 bot 侧 skip 哲学，仅框架不落库轮补写 user ──────────
+    def _framework_will_persist_this_turn(self, event: Any, response: Any) -> bool:
+        """镜像 AstrBot 私有 _save_to_history 落库判据（4.25.1，internal.py:395+447-467）。
+        True = 框架本轮会写 user（插件必须【不】补写，避免双写）；
+        False = 框架不写（插件补写 = 该轮唯一 user 写者）。
+        依赖框架私有谓词 + abort 时序：升级须回核 internal.py:395/447-469、
+        astr_agent_run_util、tool_loop_agent_runner.was_aborted。
+        注意：state_persistence.py:2489 对 user【豁免】幂等去重 -> 对 user dup 零保护；
+        防 dup 的唯一防线就是本判据准确（框架写则插件不写），不可指望守卫兜底。
+
+        2.4.1 补丁（红线闸 finding #1）：原实现只镜像了 internal.py:447(无 conversation)
+        和 :463-467(空 completion)，遗漏了 :450(final_resp 为 None) 与 :453-455
+        (llm_response.role != "assistant") 这两条早退。本判据新增的 role 腿覆盖的是
+        【run_agent 外层异常兜底】这一条路径：astr_agent_run_util.py:303-339 会现造一个
+        role='err'、completion_text 非空的 error_llm_response 直接喂给 on_agent_done
+        （故我们的 hook 会被调用），却从不回写 agent_runner.final_llm_resp（留 None）；
+        框架侧 _save_to_history 读到 final_resp=None 落在 :450 的"不存"分支。旧实现
+        只看 completion_text 非空就误判"框架会存"，从而漏补 user。
+
+        ⚠ 已知限制（本判据【覆盖不到】，非本方法的缺陷）：当 provider 连同全部
+        fallback 一并失败时，异常在 tool_loop_agent_runner.py:498-561 内部即被吞掉，
+        step() 于 :772-788 把 role='err' 响应赋给 final_llm_resp 后直接 return，
+        【全程不调用 agent_hooks.on_agent_done】。而 OnLLMResponseEvent（即本插件的
+        @filter.on_llm_response）在全框架唯一的触发点就是 on_agent_done，故该轮我们的
+        钩子根本不执行，finally 里的补写无从发生；框架侧也因 :453-455 role != assistant
+        而不落库 —— 该轮用户消息不进 AstrBot 历史。此行为与【未安装本插件的原生
+        AstrBot 完全一致】（框架自己也不存），且用户可见错误提示、非静默丢失；但相对
+        2.4.0 的 leg-3（请求期无条件写）是行为差异，已记入 CHANGELOG 已知限制。"""
+        get_extra = getattr(event, "get_extra", None)
+        req = get_extra("provider_request") if callable(get_extra) else None
+        # internal.py:447 —— 无 conversation，框架直接 return，不落库
+        if req is None or getattr(req, "conversation", None) is None:
+            return False
+        aborted = self._agent_was_aborted(event)
+        is_stopped = bool(event.is_stopped()) if hasattr(event, "is_stopped") else False
+        # internal.py:395 —— event 被 stop 且【未】abort，框架根本不调 save
+        if is_stopped and not aborted:
+            return False
+        # internal.py:450+453-455 —— 无响应对象 或 响应 role 非 assistant（如 'err'）
+        # 且未 abort -> 框架判定"无有效 assistant 回复"，不落库
+        role = getattr(response, "role", "assistant") or "assistant"
+        if (response is None or role != "assistant") and not aborted:
+            return False
+        # internal.py:463-467 —— completion 空 且 无 tool_calls_result 且 未 abort -> 不落库
+        # 【不 strip】：精确镜像框架 `not completion_text`（" " 在框架为真 -> 会 save）
+        completion = getattr(response, "completion_text", "") or ""
+        tool_res = bool(getattr(req, "tool_calls_result", None))
+        return bool(completion) or tool_res or aborted
+
+    def _agent_was_aborted(self, event: Any) -> bool:
+        """权威读取本轮 was_aborted。钩子时刻 runner._aborted 已置位
+        （tool_loop_agent_runner.py:1367 早于 :1385 触发钩子），且 runner 仍注册在
+        follow_up._ACTIVE_AGENT_RUNNERS（register internal.py:267 / unregister :414，
+        后者在 _save_to_history 之后）。读不到时保守回退 False：偏向保住 SILENT 常见
+        路径，仅"abort 且此处读取失败"双重罕见时才可能 dup，可接受。"""
+        try:
+            from astrbot.core.pipeline.process_stage.follow_up import (
+                _ACTIVE_AGENT_RUNNERS,
+            )
+            umo = getattr(event, "unified_msg_origin", "") or ""
+            runner = _ACTIVE_AGENT_RUNNERS.get(umo)
+            if runner is not None and hasattr(runner, "was_aborted"):
+                return bool(runner.was_aborted())
+        except Exception:
+            pass
+        return False
+
+    async def _backfill_user_if_framework_skips(self, event: Any, response: Any) -> None:
+        """仅当框架本轮不落库时补写 user（对齐 bot 侧 skip_conv_sync 哲学）。
+
+        在 _on_llm_response_inner 的 finally 调用，且身处框架 on_agent_done 钩子内，
+        故整段跑在框架 per-umo session_lock（internal.py:209）持有期中，再叠一层
+        conv_sync_lock。两把锁分工【不同】，别混为一谈（真进程并发灰测实测所得）：
+          · 框架 session_lock：把「插件补写」与「框架 _save_to_history 的整表覆盖写」
+            隔开。这正是 2.4.1 所修 bug 的那条跨锁双写——旧 leg-3 是 fire-and-forget、
+            逃出此锁，才会在框架落库【之后】才 append，写出悬挂重复 user。
+          · conv_sync_lock：把【跨轮并发的多个补写】彼此隔开。同一 umo 上多轮并发且
+            各轮均 SILENT 时，多个补写确实会并发进入，靠它的读-改-写临界区串行化。
+        故"补写是该轮唯一 user 写者"只在【单轮内】成立（该轮框架不写）；跨轮并发的补写
+        并非不存在，而是被 conv_sync_lock 串起来。灰测：4 轮并发 SILENT，4 次补写全部
+        落在框架锁持有窗口内、经 conv_sync_lock 串行，4 条 user 各写一次，不丢不重；
+        对照组绕过 conv_sync_lock 立刻丢 3 条（经典 lost update）。
+
+        await（非 fire-and-forget）保证 SILENT 轮 user 落盘先于下一轮框架加载历史；
+        SILENT 不发消息，几毫秒写盘用户零可见。"""
+        if not self._has_conversation_manager():
+            return
+        if self._framework_will_persist_this_turn(event, response):
+            return  # 框架是本轮 user 权威写者，插件绝不写
+        text = self._text(event)  # 响应期完整重建（v2core 已在 integration.py:1048 实证可行）
+        if not text:
+            return
+        await self._sync_message_to_conv_mgr(self._session_key(event), "user", text)
 
     def _init_persona_manager(self) -> Any:
         return self._state_persistence.init_persona_manager()

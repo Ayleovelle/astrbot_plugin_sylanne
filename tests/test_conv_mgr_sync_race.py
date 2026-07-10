@@ -220,10 +220,11 @@ def test_intercept_segmented_reply_also_skips_conv_mgr_bot_sync() -> None:
 
 @pytest.mark.asyncio
 async def test_silent_turn_then_normal_turn_both_avoid_plugin_bot_sync() -> None:
-    """组合回归：同一会话里，先来一轮 SILENT（v2core 直接终结本轮，写入职责完全
-    在 request 阶段），再来一轮普通非拦截 SPEAK 回复——两轮都不应触发插件自己对
-    conv_mgr 的 bot 侧写入；用户那句话（request 阶段已同步）应完整保留、不被
-    任何一轮"顺手"修改或重复写。"""
+    """组合回归：同一会话里，先来一轮 SILENT（收口层补写产出 user，2.4.1 起写入
+    职责搬到响应期收口层——见 v241 最终实现计划 STEP2/3），再来一轮普通非拦截
+    SPEAK 回复——两轮都不应触发插件自己对 conv_mgr 的 bot 侧写入；用户那句话应
+    完整保留、不被任何一轮"顺手"修改或重复写。"""
+    from main import EmotionalStatePlugin
     from sylanne_alpha._engine.sylanne_core.compute.host import SylanneAlphaHost
     from sylanne_alpha.v2core.contracts import Reply, ReplyKind
     from sylanne_alpha.v2core.integration import apply_v2core_response
@@ -231,6 +232,14 @@ async def test_silent_turn_then_normal_turn_both_avoid_plugin_bot_sync() -> None
     conv_sync_calls: list[tuple[str, str, str]] = []
 
     class _Plugin:
+        _framework_will_persist_this_turn = (
+            EmotionalStatePlugin._framework_will_persist_this_turn
+        )
+        _agent_was_aborted = EmotionalStatePlugin._agent_was_aborted
+        _backfill_user_if_framework_skips = (
+            EmotionalStatePlugin._backfill_user_if_framework_skips
+        )
+
         def __init__(self, root: str) -> None:
             self._config = {
                 "sylanne_enable_v2core": True,
@@ -245,6 +254,9 @@ async def test_silent_turn_then_normal_turn_both_avoid_plugin_bot_sync() -> None
 
         def _session_key(self, _e: object) -> str:
             return "u1"
+
+        def _text(self, _e: object) -> str:
+            return "在干嘛呢"
 
         def _host(self, sk: str) -> SylanneAlphaHost:
             if sk not in self._hosts:
@@ -265,14 +277,29 @@ async def test_silent_turn_then_normal_turn_both_avoid_plugin_bot_sync() -> None
         async def observe_response(self, *args: object, **kwargs: object) -> None:
             return None
 
+    class _ReqStub:
+        """最小 provider_request 桩：有 conversation，无 tool_calls_result——供
+        _framework_will_persist_this_turn 判据读取（getattr 防御，缺失字段按对应
+        分支处理）。"""
+
+        conversation = object()
+        tool_calls_result = None
+
     class _Event:
         unified_msg_origin = "test:u1"
+
+        def get_extra(self, key: str, default=None):
+            if key == "provider_request":
+                return _ReqStub()
+            return default
+
+        def is_stopped(self) -> bool:
+            return False
 
     p = _Plugin(tempfile.mkdtemp(prefix="convrace_combo_"))
     pipe = p._llm_response_pipeline
 
-    # --- 第一轮：SILENT（request 阶段已同步用户消息，response 阶段判为 SILENT）---
-    await p._sync_message_to_conv_mgr("u1", "user", "在干嘛呢")
+    # --- 第一轮：SILENT（收口层补写恰好一次，产出 user）---
     warmup = _Resp("warmup")
     await apply_v2core_response(p, _Event(), warmup)
     rt = p._v2core_runtimes["u1"]
@@ -280,11 +307,15 @@ async def test_silent_turn_then_normal_turn_both_avoid_plugin_bot_sync() -> None
         kind=ReplyKind.SILENT, meta={"reason": "test_forced_silent"}
     )
     resp1 = _Resp("draft the model produced")
-    took = await apply_v2core_response(p, _Event(), resp1)
+    silent_event = _Event()
+    took = await apply_v2core_response(p, silent_event, resp1)
     assert took is True
     assert resp1.completion_text == ""
+    # main.py::_on_llm_response_inner 的 finally 在此处调用补写；框架因
+    # completion 空本轮不落库，补写是该轮唯一 user 写者。
+    await p._backfill_user_if_framework_skips(silent_event, resp1)
     assert conv_sync_calls == [("u1", "user", "在干嘛呢")], (
-        "SILENT 轮本身不应产生任何额外 conv_mgr 写入（写入职责完全在 request 阶段）"
+        "SILENT 轮由收口补写恰好一次（写入职责已从请求期搬到响应期收口层）"
     )
 
     # --- 第二轮：普通非拦截 SPEAK 回复（等价于 main.py 里 apply_v2core_response
@@ -423,8 +454,9 @@ async def test_idempotence_guard_never_drops_a_genuinely_repeated_user_message()
     """对抗性自检发现的边界：幂等守卫按 (role, content) 判等，若不限定角色，
     用户连续两轮发完全相同的文字（中间那轮 bot 恰好 SILENT，没有任何 assistant
     记录夹在中间）会被误判成"重复"而丢掉第二条真实用户消息——这比守卫本来要防
-    的竞态更容易踩中。request 阶段的 user 同步发生在 LLM 调用之前，本来就不存在
-    并发写，所以守卫必须只对 bot/assistant 侧生效，user 侧永远照常 append。"""
+    的竞态更容易踩中。2.4.1 起 user 同步搬到响应期收口层补写，补写是该轮唯一
+    user 写者、无并发写，所以守卫必须只对 bot/assistant 侧生效，user 侧永远
+    照常 append。"""
     conv_mgr = _FrameworkInterleavingConvMgr([{"role": "user", "content": "在吗"}])
     # 让 get_conversation 不做"框架交错写"模拟（这个测试只关心 user 侧不去重），
     # 直接标记为已落地，避免干扰。
