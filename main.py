@@ -1169,6 +1169,18 @@ class EmotionalStatePlugin(Star):
         return self._session_ctx.session_lock(session_key)
 
     async def _on_llm_request_inner(self, event: Any, request: Any) -> None:
+        # 2.4.1 err 轮兜底（三态标记，第一态）：标记"本轮确实发起了 LLM 请求"。
+        # 三态语义（after_message_sent 侧消费，见 _on_after_message_sent_err_backfill）：
+        #   None  = 本轮压根没走 LLM 请求（纯指令 / 被前置插件拦截）-> 绝不补写 user
+        #   False = LLM 请求跑过，但 on_llm_response 从未触发（provider 全挂的 err 轮）-> 补写
+        #   True  = on_llm_response 跑过（正常/SILENT/异常兜底都已在其 finally 里处理）-> 不补写
+        # 若只用 truthy 判定，None 会被误当作 False，非 LLM 轮会盲补一条 user 进历史。
+        set_extra = getattr(event, "set_extra", None)
+        if callable(set_extra):
+            try:
+                set_extra("_syl_resp_handled", False)
+            except Exception:  # 标记失败绝不阻断请求管线
+                pass
         # v2core PERCEPT 在请求管线内执行（碎片合并 + SFPD 判定之后），
         # 避免早跑 PERCEPT 与合并文本不一致，以及群聊静默时心象已注入却无 tick。
         return await self._llm_request_pipeline._on_llm_request_inner(event, request)
@@ -1376,6 +1388,47 @@ class EmotionalStatePlugin(Star):
                 f"Sylanne on_decorating_result strip failed: {e}", exc_info=True
             )
 
+    @filter.after_message_sent()
+    async def _on_after_message_sent_err_backfill(self, event: Any) -> None:
+        """终结轮兜底：框架本轮不落库时把 user 补进会话历史（唯一能覆盖 provider
+        全挂 err 轮的插件挂点——那条路径 step() 不调 on_agent_done，故 on_llm_response
+        及其 finally 补写根本不触发，见 tool_loop_agent_runner.py:772-788 /
+        astr_agent_hooks.py:32-36；框架 _save_to_history 又因 role != 'assistant'
+        早退 internal.py:453-455 不落库，该轮 user 谁都不写）。
+
+        锁内安全（非跨锁 fire-and-forget 老路）：AstrBot scheduler 是洋葱模型，
+        RespondStage 在 ProcessStage 生成器【挂起于 yield】时嵌套运行，此刻
+        internal.py:209 的 session_lock 仍持有（canary E2 实测 holding==1、补写落库
+        序先于框架 save）。故与框架落库同锁同轮、补写在前，是该轮唯一 user 写者。
+
+        两道门 + 一道兜底（缺一不可，红线闸 Finding #1 的教训）：
+          门1·三态标记 _syl_resp_handled：None=没走 LLM 请求（纯指令/被拦截）→绝不补
+          （若用 truthy 判定，None 会被当 False 盲补）；True=on_llm_response 跑过→不补；
+          False=请求跑过而响应钩子未触发。
+          门2·终态门 runner.done()：关键——False 不只是 err 轮，还覆盖【整个 tool 循环
+          中间步】：模型带 preamble 文本调工具时，中间步也会发消息、触发本钩子，而此刻
+          flag 仍 False。仅当 agent runner 到终态（DONE/ERROR）才放行，挡掉中间步（及
+          第三方 runner 每轮 flag=False 的污染）；取不到 runner 则跳过（宁丢不重）。
+        终态门仍不足以独挡（buffered 模式 err 先发、合并 preamble 后发，两次 done()
+        皆 True），故最终防线是 _backfill_user_if_framework_skips 内的【每轮 once-guard】
+        （本轮至多补一次），三者叠加才封死 [U, U] 悬挂重复。
+
+        限制：仅非流式档成立（框架默认 streaming_response=False，用户实例已确认）；
+        流式档 graceful err 走 STREAMING_FINISH，RespondStage 早退不触发本钩子。
+        """
+        try:
+            get_extra = getattr(event, "get_extra", None)
+            if not callable(get_extra):
+                return
+            if get_extra("_syl_resp_handled", None) is not False:
+                return  # None（非 LLM 轮）/ True（已处理）一律不补
+            if self._agent_run_done(event) is not True:
+                return  # 终态门：tool 循环中间步 runner 未 done，不在此补写
+            # response=None -> 判据 role 腿判"框架不落库"；once-guard 保证本轮至多一次
+            await self._backfill_user_if_framework_skips(event, None)
+        except Exception as e:
+            logger.warning(f"Sylanne err-turn user backfill failed: {e}", exc_info=True)
+
     # -----------------------------------------------------------------------
     # issue43 PRIMARY 修复：AstrBot /reset（及 /new 切换新会话）幽灵源清理
     # -----------------------------------------------------------------------
@@ -1531,6 +1584,15 @@ class EmotionalStatePlugin(Star):
 
 
     async def _on_llm_response_inner(self, event: Any, response: Any) -> None:
+        # 2.4.1 err 轮兜底（三态标记，第二态）：本钩子跑过即置 True。必须在【入口】置位，
+        # 这样即便下面 v2core/legacy 抛异常，finally 里的补写也已经执行过，
+        # after_message_sent 侧就会早退，不会对同一轮重复补写 user。
+        set_extra = getattr(event, "set_extra", None)
+        if callable(set_extra):
+            try:
+                set_extra("_syl_resp_handled", True)
+            except Exception:  # 标记失败绝不阻断回复
+                pass
         # v2core 认知阶段二（默认开）：裁决草稿 + 学习。handled=True 仅 SILENT（终结本轮）；
         # SPEAK/FALLBACK/异常 -> handled=False 落 legacy（sanitize/分段/观测是 legacy 的嘴）。
         try:
@@ -1978,15 +2040,13 @@ class EmotionalStatePlugin(Star):
         框架侧 _save_to_history 读到 final_resp=None 落在 :450 的"不存"分支。旧实现
         只看 completion_text 非空就误判"框架会存"，从而漏补 user。
 
-        ⚠ 已知限制（本判据【覆盖不到】，非本方法的缺陷）：当 provider 连同全部
-        fallback 一并失败时，异常在 tool_loop_agent_runner.py:498-561 内部即被吞掉，
-        step() 于 :772-788 把 role='err' 响应赋给 final_llm_resp 后直接 return，
-        【全程不调用 agent_hooks.on_agent_done】。而 OnLLMResponseEvent（即本插件的
-        @filter.on_llm_response）在全框架唯一的触发点就是 on_agent_done，故该轮我们的
-        钩子根本不执行，finally 里的补写无从发生；框架侧也因 :453-455 role != assistant
-        而不落库 —— 该轮用户消息不进 AstrBot 历史。此行为与【未安装本插件的原生
-        AstrBot 完全一致】（框架自己也不存），且用户可见错误提示、非静默丢失；但相对
-        2.4.0 的 leg-3（请求期无条件写）是行为差异，已记入 CHANGELOG 已知限制。"""
+        provider 全挂 err 轮的覆盖归属：当 provider 连同全部 fallback 一并失败时，
+        step()（tool_loop_agent_runner.py:772-788）把 role='err' 响应赋给 final_llm_resp
+        后直接 return，【不调用 on_agent_done】→ on_llm_response 及其 finally 补写不触发，
+        本判据在【响应期】那条路径上确实够不着。该轮由 after_message_sent 兜底钩子
+        _on_after_message_sent_err_backfill（非流式档，锁内）负责补写，仍复用本判据的
+        role 腿（response=None → 返回 False → 补写）。唯一残留：流式档下 RespondStage
+        早退不触发兜底钩子，err 轮 user 丢失（与原生 AstrBot 一致，已记 CHANGELOG）。"""
         get_extra = getattr(event, "get_extra", None)
         req = get_extra("provider_request") if callable(get_extra) else None
         # internal.py:447 —— 无 conversation，框架直接 return，不落库
@@ -2026,6 +2086,25 @@ class EmotionalStatePlugin(Star):
             pass
         return False
 
+    def _agent_run_done(self, event: Any) -> bool | None:
+        """读本轮 agent runner 是否已到终态（DONE/ERROR，tool_loop_agent_runner.py:
+        1338-1340）。err-backfill 钩子的终态门用它挡掉 tool 循环中间步——那些中间步
+        也会触发 after_message_sent 且此刻 _syl_resp_handled 仍 False，但 runner 尚
+        未 done。返回 None（取不到 runner，如第三方 runner 部署或注册表未命中）时钩子
+        跳过补写，宁丢不重（丢=与原生 AstrBot 一致）。runner 注册期见 _agent_was_aborted
+        （unregister 在 _save_to_history 之后，故 after_message_sent :292 时刻仍在）。"""
+        try:
+            from astrbot.core.pipeline.process_stage.follow_up import (
+                _ACTIVE_AGENT_RUNNERS,
+            )
+            umo = getattr(event, "unified_msg_origin", "") or ""
+            runner = _ACTIVE_AGENT_RUNNERS.get(umo)
+            if runner is not None and hasattr(runner, "done"):
+                return bool(runner.done())
+        except Exception:
+            pass
+        return None
+
     async def _backfill_user_if_framework_skips(self, event: Any, response: Any) -> None:
         """仅当框架本轮不落库时补写 user（对齐 bot 侧 skip_conv_sync 哲学）。
 
@@ -2043,15 +2122,34 @@ class EmotionalStatePlugin(Star):
         对照组绕过 conv_sync_lock 立刻丢 3 条（经典 lost update）。
 
         await（非 fire-and-forget）保证 SILENT 轮 user 落盘先于下一轮框架加载历史；
-        SILENT 不发消息，几毫秒写盘用户零可见。"""
+        SILENT 不发消息，几毫秒写盘用户零可见。
+
+        每轮 once-guard（红线闸 Finding #1，本轮至多补一次）：本方法有两个调用者——
+        on_llm_response 的 finally 与 after_message_sent 兜底钩子；而 tool 循环带
+        preamble 文本时，after_message_sent 会在 on_agent_done 之前【多次】触发、且
+        每次 _syl_resp_handled 都还是 False。若最终步不落库（err / tool-no-return），
+        这些多次补写会在无框架整表覆盖收尾的历史里叠成 [U, U, …] 永久重复——正是
+        2.4.1 要杀的悬挂重复 user，而 user 侧无幂等去重守卫（state_persistence 豁免
+        role=="user"）兜不住。故这里用 event extra 做每轮 once-guard：整轮在框架
+        session_lock 内单协程顺序执行，check-then-set 无竞态；只在【真正写入后】置位，
+        谓词早退 / text 空的路径不消费守卫（不影响后续该补的轮次）。"""
         if not self._has_conversation_manager():
             return
+        get_extra = getattr(event, "get_extra", None)
+        if callable(get_extra) and get_extra("_syl_user_backfilled", False):
+            return  # 本轮已补过 user，绝不再补（tool 循环多次触发 / finally+钩子双入口）
         if self._framework_will_persist_this_turn(event, response):
-            return  # 框架是本轮 user 权威写者，插件绝不写
+            return  # 框架是本轮 user 权威写者，插件绝不写（不消费 once-guard）
         text = self._text(event)  # 响应期完整重建（v2core 已在 integration.py:1048 实证可行）
         if not text:
-            return
+            return  # 不消费 once-guard
         await self._sync_message_to_conv_mgr(self._session_key(event), "user", text)
+        set_extra = getattr(event, "set_extra", None)
+        if callable(set_extra):
+            try:
+                set_extra("_syl_user_backfilled", True)  # 仅写入成功后消费守卫
+            except Exception:  # 置位失败不回滚已写入；下次同轮触发靠上面 get 兜（读到旧值 False 会重写，但同一 event 内 set 已尝试，属极端降级，宁可偶尔重写也不阻断）
+                pass
 
     def _init_persona_manager(self) -> Any:
         return self._state_persistence.init_persona_manager()
