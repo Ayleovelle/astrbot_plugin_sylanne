@@ -450,6 +450,13 @@ class EmotionalStatePlugin(Star):
         # trailing-edge：节流窗内被丢弃的变更标脏，由后续触发补落（防非优雅退出丢尾改）。
         self._rel_state_pending_dirty: bool = False
         self._meltdown_nonces: BoundedDict = BoundedDict(maxsize=50, ttl=300)
+        # v2.5.0 入站消息级幂等闸（issue43-repeat v2 修复）：以
+        # (unified_msg_origin, 入站 message_id) 为键去重，拦下"同一条入站消息
+        # 被处理两个 pass"（平台重投/重连 replay），阻止框架 _save_to_history
+        # 在第二 pass 把已悬挂的 user 轮再拼一次、烤成 [user:X, user:X]。
+        # 全局单表（非 SessionMap，不进 self._store._reg 清理表）：自身 LRU
+        # 有界即可，不按 session 生命周期清理。见 _inbound_dup_gate。
+        self._inbound_seen: BoundedDict = BoundedDict(maxsize=1024)
         # M8：主动发言反馈 audit（feedback_pressure 单一数据源）。按 session_key 索引，
         # 值为 deque（_record_dispatch_feedback 写、derive_dispatch_policy 读）。
         # BoundedDict LRU 防会话无限增长；每会话内 deque maxlen 防单会话条目无界。
@@ -1113,6 +1120,26 @@ class EmotionalStatePlugin(Star):
         try:
             session_key = self._session_ctx.session_key(event)
             now = time.time()
+            # v2.5.0 slice-1b（design §8 BLOCKER B1，全矩阵扎实版修正）：主判据
+            # 消费——供三写点（货架写/profile 软同步/出生播种，本 slice 货架写
+            # 已接线）将来只读的"已认证身份记录"。on_message 覆盖
+            # EventMessageType.ALL（含未触发 LLM 的群聊噪音），比 on_llm_request
+            # 覆盖面更广。
+            # 取值改用 `SessionContext.resolve_authenticated_identity`——只用
+            # event 的公开方法（get_sender_id/get_message_type/get_group_id/
+            # session_id），不再复用 `raw_bucket_sender_id`（只读裸属性
+            # sender_id/user_id，真实 AstrBot 事件从不设这两个属性，在生产上
+            # 对**所有**事件恒返回空串，曾让本暂存层永久哑火——连本该天生
+            # per-user 的私聊都不例外，详见两个方法各自的文档字符串）。
+            # `stash_authenticated_identity` 内部叠加次判据（发言人一致性坍缩）
+            # 与"已坍缩 session_key 永久 SKIP"逻辑，本处只负责主判据求值 + 落地。
+            # 独立 try/except：本插桩失败绝不能连带吞掉本函数其余的 tempo/proactive
+            # 记录逻辑（与下方 rhythm_learner 支路同一收敛纪律）。
+            try:
+                identity = self._session_ctx.resolve_authenticated_identity(event)
+                self._store.stash_authenticated_identity(session_key, identity)
+            except Exception:
+                pass
             # 更新最后消息时间，供 proactive scheduler 计算沉默时长
             self._store.last_user_message_time.set(session_key, now)
             sched = getattr(self, "_proactive_scheduler", None)
@@ -1168,7 +1195,59 @@ class EmotionalStatePlugin(Star):
     def _session_lock(self, session_key: str) -> asyncio.Lock:
         return self._session_ctx.session_lock(session_key)
 
+    def _inbound_dup_gate(self, event: Any) -> bool:
+        """True = 本条入站消息是重复二次投递（同一 (umo, message_id) 已见过），
+        调用方应 stop_event 并早退。
+
+        判定"可去重 id"：仅当 unified_msg_origin 与 message_obj.message_id 都
+        是非空稳定串时才登记/比对；否则（None/空/非串——如 webchat 前端未带 id、
+        或任何适配器缺省）直接放行、不登记，宁可漏 dedup 也不误杀合法消息。
+
+        本闸只在 on_llm_request（main.py:_on_llm_request_inner 顶端）调用，该
+        钩子由框架 internal.py 在 per-session 锁（session_lock_manager）持有
+        窗口内触发；notice/request 等 message_str 为空的事件走不到这个钩子
+        （internal.py 的 has_valid_message/has_media_content 早退），故它们的
+        uuid4 型 message_id 天然不会进这张表——不需要额外甄别事件类型。
+
+        绝不对消息文本做任何比对去重——那会回归 state_persistence.py:2499
+        注释警告的"用户在 bot 沉默时连发相同文字被误杀"，本轮禁区。
+        """
+        try:
+            umo = str(getattr(event, "unified_msg_origin", "") or "")
+            mid = getattr(getattr(event, "message_obj", None), "message_id", None)
+            if not umo or not isinstance(mid, str) or not mid.strip():
+                return False  # 豁免：无稳定 id，宁漏 dedup 不误杀
+            key = umo + "\x00" + mid
+            # check-then-set：中间无 await，单线程协作式原子；外层框架 per-session
+            # 锁（internal.py:209）再对同 umo 的重复 pass 做一层串行化保障。
+            if key in self._inbound_seen:
+                return True
+            self._inbound_seen[key] = time.time()
+            return False
+        except Exception:
+            # 闸自身异常绝不阻断正常请求（fail-safe 向放行）；但要留信号——
+            # 否则闸内潜在缺陷会让去重静默失效、退回重复 bug 而无人察觉。
+            logger.warning("Sylanne inbound dedup gate error (failing open)", exc_info=True)
+            return False
+
     async def _on_llm_request_inner(self, event: Any, request: Any) -> None:
+        # v2.5.0 入站消息级幂等闸：必须在任何早退（尤其 should_express 静默
+        # return）之前拦截，否则 SILENT 轮的 message_id 不会入集，漏掉最可能
+        # 触发悬挂重复的链路。命中即 stop_event + 早退，框架不再跑
+        # build/run_agent/_save_to_history，第二 pass 净写 0 条。
+        if self._inbound_dup_gate(event):
+            logger.info(
+                "Sylanne inbound dedup: dropped re-delivered message umo=%s mid=%s",
+                getattr(event, "unified_msg_origin", ""),
+                getattr(getattr(event, "message_obj", None), "message_id", None),
+            )
+            stop_event = getattr(event, "stop_event", None)
+            if callable(stop_event):
+                try:
+                    stop_event()
+                except Exception:
+                    pass
+            return
         # 2.4.1 err 轮兜底（三态标记，第一态）：标记"本轮确实发起了 LLM 请求"。
         # 三态语义（after_message_sent 侧消费，见 _on_after_message_sent_err_backfill）：
         #   None  = 本轮压根没走 LLM 请求（纯指令 / 被前置插件拦截）-> 绝不补写 user

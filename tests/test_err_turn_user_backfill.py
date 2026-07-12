@@ -30,6 +30,7 @@ from unittest.mock import AsyncMock
 import pytest
 
 from main import EmotionalStatePlugin
+from sylanne_alpha.infra import BoundedDict
 from sylanne_alpha.session_state_store import SessionStateStore
 from sylanne_alpha.state_persistence import StatePersistence
 
@@ -309,8 +310,10 @@ async def test_request_pipeline_survives_event_without_extra_api() -> None:
 
     class _ReqPipelinePlugin:
         _on_llm_request_inner = EmotionalStatePlugin._on_llm_request_inner
+        _inbound_dup_gate = EmotionalStatePlugin._inbound_dup_gate
 
         def __init__(self) -> None:
+            self._inbound_seen = BoundedDict(maxsize=1024)
             self._llm_request_pipeline = SimpleNamespace(
                 _on_llm_request_inner=AsyncMock(return_value=None)
             )

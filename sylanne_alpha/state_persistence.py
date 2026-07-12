@@ -2044,6 +2044,40 @@ class StatePersistence:
         # meltdown / session-delete 两条 op 各自 scrub、漏了 purge_data）自动获得清扫，
         # 不再各自漏一处。host 不存在时 scrub 内部安全早返回。
         scrub_ok = await self._scrub_kernel_alpha_json_memory(session_key)
+
+        # v2.5.0 P0 slice 2（design §8 B5 数据安全红线）：per-person 货架桶按
+        # (platform, sender_id) 存，与本方法的 session_key 粒度是两套键空间，
+        # 靠反向索引反查级联删除。best-effort、不 gate 上面 all_deleted/scrub_ok
+        # ——货架级联失败不应该阻塞记忆三键删除的 pending-delete entry 摘除
+        # （同 :2099-2104 / :2216-2227 非记忆键清理的既定 best-effort 模式）。
+        try:
+            from .person_shelf import (
+                clear_person_shelf_origin_index,
+                load_person_shelf_origin_index,
+                purge_person_shelf_by_origin,
+            )
+
+            shelf_origins = await load_person_shelf_origin_index(self._p, safe)
+            for entry in shelf_origins:
+                try:
+                    await purge_person_shelf_by_origin(
+                        self._p,
+                        entry["platform"],
+                        entry["sender_id"],
+                        entry["origin_id"],
+                    )
+                except Exception as exc:
+                    logger.debug(
+                        f"Sylanne person_shelf purge cascade skipped for "
+                        f"{session_key!r} entry {entry!r}: {exc}"
+                    )
+            if shelf_origins:
+                await clear_person_shelf_origin_index(self._p, safe)
+        except Exception as exc:
+            logger.debug(
+                f"Sylanne person_shelf purge cascade failed for {session_key!r}: {exc}"
+            )
+
         return all_deleted and scrub_ok
 
     async def purge_session_after_meltdown(self, session_key: str) -> None:
@@ -2801,6 +2835,15 @@ class StatePersistence:
         p._cfg_bool("integrated_self_memory_write_enabled", True)
         p._cfg("integrated_self_degradation_profile", "balanced")
         p._cfg_bool("sylanne_alpha_auto_detect_group_context", True)
+        # v2.5.0 P0 slice 1：跨群记忆 6 个开关（design §6），全默认关/最保守档，
+        # 本 slice 不被任何生产读写路径读取——注册默认值只是为了配置面板/WebUI
+        # 展示与后续 slice 接线时零意外，对现网行为零影响。
+        p._cfg("sylanne_alpha_cross_session_mode", "off")
+        p._cfg("sylanne_alpha_cross_session_scope", "owner")
+        p._cfg_bool("sylanne_alpha_cross_dialogue", False)
+        p._cfg_bool("sylanne_alpha_cross_relationship", False)
+        p._cfg_bool("sylanne_alpha_cross_personality", False)
+        p._cfg("sylanne_alpha_cross_visibility_tier", "same_group")
 
     # ------------------------------------------------------------------
     # Item 18: 记忆系统分片存储

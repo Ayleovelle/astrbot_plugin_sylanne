@@ -561,6 +561,134 @@ class SessionContext:
     # Session key 派生
     # ------------------------------------------------------------------
 
+    def raw_bucket_sender_id(self, event: Any) -> str:
+        """session_key() 塌缩判定专用的 sender 解析口径：只读裸属性
+        `sender_id` / `user_id`，**不回退** `event.get_sender_id()`。
+
+        与下面 `session_key()` 的塌缩后缀判定共用同一段逻辑（此方法即从那里
+        抽出），保证"session_key 是否塌缩"与"这个口径是否解析出 sender"两件
+        事恒为同一次求值——`session_key()` 的桶派生本身依赖这一点，本方法
+        因此保留、不删除。
+
+        **历史修正（v2.5.0 slice-1b）**：本方法**曾经**被 v2.5.0 P0 B1 暂存层
+        （`session_state_store` 的已认证 sender 暂存）直接复用，理由是"与
+        `session_key()` 同口径、塌缩桶天然拿不到值"。但真实 AstrBot 事件只
+        暴露 `get_sender_id()` 方法、从不设 `sender_id`/`user_id` 裸属性——
+        本方法在生产事件上对**所有**事件（不分塌缩桶还是正常私聊/unique-on
+        群）恒返回空串，导致 B1 暂存层在生产上恒为空、货架写点因此永久 SKIP
+        （含本该天生 per-user 的私聊）。真正的哑火根因是"把裸属性判空"当成
+        了"塌缩判定"的代理，而生产事件裸属性本就不存在，两者被巧合掩盖。
+
+        B1 暂存层现已改用 `resolve_authenticated_identity`（见下）——那里用
+        `get_sender_id()` + `get_message_type()` + `get_group_id()` +
+        `session_id` 的组合矩阵直接判定"是否 per-user"，不再借道本方法这个
+        裸属性代理。本方法自身职责收窄回**只服务 `session_key()` 的桶派生**，
+        不再是其他调用方的"身份解析"入口。
+        """
+        return str(
+            getattr(event, "sender_id", "") or getattr(event, "user_id", "") or ""
+        )
+
+    def resolve_authenticated_identity(self, event: Any) -> dict[str, str] | None:
+        """跨群记忆三写点（货架写 / profile 软同步 / 出生播种）身份解析主判据。
+
+        design: docs/architecture/v250-cross-group-memory-design.md §8 B1
+        （slice-1b 全矩阵扎实版修正）。
+
+        与 `raw_bucket_sender_id`/`session_key()` 的塌缩判定口径【不同】——
+        本方法只用 event 的**公开方法**（`get_sender_id()` /
+        `get_message_type()` / `get_group_id()` / `session_id` /
+        `unified_msg_origin`），绝不读裸属性 `sender_id`/`user_id`（真实
+        AstrBot 事件从不设这两个属性，读它们在生产上恒空——这正是本方法要
+        修的哑火根因，见 `raw_bucket_sender_id` 文档字符串的历史修正）。
+        不解析 `session_key` 反推、不读 `rel_register` 钉住值——这两条路都
+        已被 design §8 证明不安全。
+
+        判定矩阵（design "per_user_matrix"）：
+        - `get_sender_id()` 为空 → None（认不出发言人，SKIP）。
+        - 平台（`get_platform_id()`，回退 `unified_msg_origin` 首段）解不出
+          → None（拒绝构造无平台的身份记录）。
+        - `message_type == FRIEND_MESSAGE`（私聊）→ 天生 per-user，放行；
+          `origin_id` = 本会话的 `session_key()`（与写点历史行为一致）。
+        - `message_type == GROUP_MESSAGE` 且 `group_id` 非空 且
+          `event.session_id != group_id`（unique_session ON——框架
+          WakingCheckStage 在插件 handler 之前已把 session_id 改写成
+          `f"{sender}_{group}"`，见 stage_order.py / waking_check/stage.py）
+          → per-user，放行；`origin_id` = `f"group:{group_id}"`。
+        - `message_type == GROUP_MESSAGE` 且 `session_id == group_id`
+          （unique_session OFF，共享桶——多人共享同一 session_id，B1 红线
+          场景）或 `group_id` 解不出 → None（首条消息即可确定性判定，
+          不依赖任何历史/一致性积累，无冷启动洞）。
+        - `OTHER_MESSAGE` / 未知类型 → None（保守，不放行）。
+
+        Returns:
+            None：调用方（on_message）本次不应暂存任何身份。
+            非 None：身份记录 `{"sender_id","platform","origin_scope",
+            "origin_id"}`，货架写点直接消费这四个字段——platform/origin
+            由此确定性算出，写点不再自行反解析 session_key（一并修正
+            MINOR#3 的写读键三段分叉）。
+        """
+        sid = ""
+        try:
+            if hasattr(event, "get_sender_id"):
+                sid = str(event.get_sender_id() or "")
+        except Exception:
+            sid = ""
+        if not sid:
+            return None
+
+        platform = ""
+        try:
+            get_platform_id = getattr(event, "get_platform_id", None)
+            if callable(get_platform_id):
+                platform = str(get_platform_id() or "")
+        except Exception:
+            platform = ""
+        if not platform:
+            umo = str(getattr(event, "unified_msg_origin", "") or "")
+            platform = umo.split(":", 1)[0] if umo else ""
+        if not platform:
+            return None
+
+        mt_name = ""
+        try:
+            get_mt = getattr(event, "get_message_type", None)
+            if callable(get_mt):
+                mt_name = str(getattr(get_mt(), "name", "") or "")
+        except Exception:
+            mt_name = ""
+
+        if mt_name == "FRIEND_MESSAGE":
+            return {
+                "sender_id": sid,
+                "platform": platform,
+                "origin_scope": "private",
+                "origin_id": self.session_key(event),
+            }
+
+        if mt_name == "GROUP_MESSAGE":
+            gid = ""
+            try:
+                get_gid = getattr(event, "get_group_id", None)
+                if callable(get_gid):
+                    gid = str(get_gid() or "")
+            except Exception:
+                gid = ""
+            if not gid:
+                return None  # 群号解不出 → 保守 SKIP
+            evt_session_id = str(getattr(event, "session_id", "") or "")
+            if evt_session_id and evt_session_id != gid:
+                # unique_session ON：session_id 已被框架改写为 per-sender 形态
+                return {
+                    "sender_id": sid,
+                    "platform": platform,
+                    "origin_scope": "group",
+                    "origin_id": f"group:{gid}",
+                }
+            return None  # session_id == group_id：unique_session OFF 共享桶，SKIP
+
+        return None  # OTHER_MESSAGE / 未知类型：保守不放行
+
     def session_key(self, event: Any = None, session_key: str = "") -> str:
         """从事件对象派生会话标识。
 
@@ -584,10 +712,9 @@ class SessionContext:
                 or getattr(event, "unified_msg_origin", "")
                 or "default"
             )
-            # 群聊中追加 sender_id，使每个用户拥有独立的 host/kernel/计算脊柱
-            sender_id = str(
-                getattr(event, "sender_id", "") or getattr(event, "user_id", "") or ""
-            )
+            # 群聊中追加 sender_id，使每个用户拥有独立的 host/kernel/计算脊柱。
+            # 与 raw_bucket_sender_id() 共用同一口径（见该方法文档字符串）。
+            sender_id = self.raw_bucket_sender_id(event)
             if sender_id and base != "default":
                 return f"{base}:{sender_id}"
             return base
