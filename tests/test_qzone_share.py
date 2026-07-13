@@ -88,13 +88,23 @@ class _SocialField:
 class _Pipeline:
     """_llm_request_pipeline 替身：只提供 qzone_share 用到的三个接口。"""
 
-    def __init__(self, *, draft="今天天气不错，心情也跟着好了呀", target_session="priv:owner-1"):
+    def __init__(self, *, draft="今天天气不错，心情也跟着好了呀", target_session="priv:owner-1",
+                 solo_verdict="YES", solo_raises=False):
         self.draft = draft
         self.target_session = target_session
+        self.solo_verdict = solo_verdict  # _classify_solo_llm 调用时返回的 YES/NO
+        self.solo_raises = solo_raises     # True 时 solo-check 调用抛错（测 fail-safe）
         self.llm_calls: list[dict] = []
+        self.solo_calls: list[dict] = []
 
     async def _generic_llm_call(self, prompt, provider_config_keys, max_tokens=None,
                                  temperature=0.0, retries=1):
+        # 分辨"草稿生成"与"solo 肯定判据"两类调用（后者 prompt 含固定指令片段）。
+        if "YES 或 NO" in prompt:
+            self.solo_calls.append({"prompt": prompt})
+            if self.solo_raises:
+                raise RuntimeError("solo-check boom")
+            return self.solo_verdict
         self.llm_calls.append({
             "prompt": prompt, "provider_config_keys": list(provider_config_keys),
         })
@@ -151,6 +161,7 @@ class _MemSystemDouble:
 class _Plugin:
     def __init__(self, *, owner="owner-1", enabled=True, cookie="p_skey=fakeskey123;uin=o123",
                  my_qq="123456", daily_max=1, weekly_max=3, min_score=0.55,
+                 autonomy="review_all",
                  pipeline=None, social_field=None, http_session="default",
                  memory_system=None):
         self._store = _Store()
@@ -162,6 +173,7 @@ class _Plugin:
             "sylanne_alpha_qzone_daily_max": daily_max,
             "sylanne_alpha_qzone_weekly_max": weekly_max,
             "sylanne_alpha_qzone_min_score": min_score,
+            "sylanne_alpha_qzone_autonomy": autonomy,
         }
         self._llm_request_pipeline = pipeline if pipeline is not None else _Pipeline()
         self._social_field = social_field if social_field is not None else _SocialField()
@@ -792,3 +804,330 @@ def test_confirm_refuses_to_post_when_disabled_even_with_pending():
     assert any("关着的" in t for t in out)
     assert session.calls == []  # 一次网络请求都没有
     assert plugin._store.pending_qzone_draft.get("priv:owner-1") is None  # 已被消费，不会残留手滑二次确认
+
+
+# ---------------------------------------------------------------------------
+# §autonomy 发布自主权分级
+# ---------------------------------------------------------------------------
+
+
+def test_autonomy_reader_default_is_review_all():
+    """未配置 → 最保守 review_all（与历史行为一致）。"""
+    plugin = _Plugin()
+    del plugin.config["sylanne_alpha_qzone_autonomy"]
+    assert QZ._autonomy(plugin) == "review_all"
+
+
+def test_autonomy_reader_accepts_valid_levels():
+    for lvl in ("review_all", "low_risk_auto", "full_auto"):
+        assert QZ._autonomy(_Plugin(autonomy=lvl)) == lvl
+
+
+def test_autonomy_reader_unknown_or_dirty_falls_back_to_review_all():
+    """脏值/未知值绝不落到自动发布侧，一律回退最保守档（fail-safe）。"""
+    for bad in ("", "  ", "auto", "yolo", "FULL_AUTO", "on", None, 123):
+        plugin = _Plugin()
+        plugin.config["sylanne_alpha_qzone_autonomy"] = bad
+        assert QZ._autonomy(plugin) == "review_all", f"脏值 {bad!r} 未回退 review_all"
+
+
+def test_classify_solo_self_draft_is_auto():
+    for draft in (
+        "今天下了场雨，我在实验室泡了一整天，有点累但充实。",
+        "煮了碗面，加了个蛋，简单的一天也挺好。",
+        "写代码写到凌晨，终于把那个 bug 摁下去了。",
+    ):
+        risk, reason = QZ.classify_draft_risk(draft)
+        assert risk == "auto", f"{draft!r} 应判 auto，实得 {risk}/{reason}"
+
+
+def test_classify_relationship_draft_is_review():
+    """涉及你/我们（与用户关系）→ review。"""
+    for draft in ("今天好想你。", "我们上次约好的事我还记着呢。", "和对象拌嘴了，唉。"):
+        risk, reason = QZ.classify_draft_risk(draft)
+        assert risk == "review", f"{draft!r} 应判 review，实得 {risk}/{reason}"
+
+
+def test_classify_third_party_draft_is_review():
+    """带别人的影子（第三人称/他人称谓）→ review。"""
+    for draft in ("今天和朋友吃了顿火锅。", "他今天讲的那个笑话真冷。", "同事请了假，活儿都压我这了。"):
+        risk, reason = QZ.classify_draft_risk(draft)
+        assert risk == "review", f"{draft!r} 应判 review，实得 {risk}/{reason}"
+
+
+def test_classify_empty_draft_is_review():
+    assert QZ.classify_draft_risk("   ")[0] == "review"
+
+
+def test_low_risk_auto_solo_draft_posts_without_owner_review():
+    """low_risk_auto + 纯她自己的生活 → 自动发，不入 owner 过目队列。"""
+    session = _FakeSession(response_text='_cb({"code":0,"tid":"t-auto"})')
+    pipeline = _Pipeline(draft="今天下了雨，我在实验室泡了一整天。", target_session="priv:owner-1")
+    plugin = _Plugin(pipeline=pipeline, autonomy="low_risk_auto", http_session=session)
+    _run(QZ.handle_share_intent_candidate(plugin, _life_event(), _intent(0.9)))
+
+    assert len(session.calls) == 1  # 真的发了（走假 session）
+    assert plugin._store.pending_qzone_draft.get("priv:owner-1") is None  # 没进过目队列
+    assert plugin._qzone_audit.daily_count(time.time()) == 1  # 计入频率窗口
+    reasons = [e["reason_code"] for e in plugin._qzone_audit.log]
+    assert QZ.REASON_POSTED_AUTO in reasons
+
+
+def test_low_risk_auto_relationship_draft_routes_to_owner_review():
+    """low_risk_auto + 涉及你我关系 → 不自动发，改进 owner 过目队列。"""
+    session = _FakeSession()
+    pipeline = _Pipeline(draft="今天好想你，我们说好的旅行别忘了。", target_session="priv:owner-1")
+    plugin = _Plugin(pipeline=pipeline, autonomy="low_risk_auto", http_session=session)
+    _run(QZ.handle_share_intent_candidate(plugin, _life_event(), _intent(0.9)))
+
+    assert session.calls == []  # 没有自动发
+    assert plugin._store.pending_qzone_draft.get("priv:owner-1") is not None  # 进了过目队列
+    reasons = [e["reason_code"] for e in plugin._qzone_audit.log]
+    assert any(r.startswith(QZ.REASON_ROUTED_REVIEW) for r in reasons)
+    assert QZ.REASON_AWAITING_CONFIRM in reasons
+
+
+def test_low_risk_auto_third_party_draft_routes_to_owner_review():
+    session = _FakeSession()
+    pipeline = _Pipeline(draft="今天和朋友去看了场电影。", target_session="priv:owner-1")
+    plugin = _Plugin(pipeline=pipeline, autonomy="low_risk_auto", http_session=session)
+    _run(QZ.handle_share_intent_candidate(plugin, _life_event(), _intent(0.9)))
+    assert session.calls == []
+    assert plugin._store.pending_qzone_draft.get("priv:owner-1") is not None
+
+
+def test_dirty_autonomy_value_does_not_leak_to_auto_post():
+    """脏 autonomy 值 + 本可自动发的 solo 草稿 → 仍走 review（不因脏值意外自动发）。"""
+    session = _FakeSession()
+    pipeline = _Pipeline(draft="今天煮了碗面，简单的一天。", target_session="priv:owner-1")
+    plugin = _Plugin(pipeline=pipeline, http_session=session)
+    plugin.config["sylanne_alpha_qzone_autonomy"] = "yolo"
+    _run(QZ.handle_share_intent_candidate(plugin, _life_event(), _intent(0.9)))
+    assert session.calls == []  # 脏值绝不自动发
+    assert plugin._store.pending_qzone_draft.get("priv:owner-1") is not None
+
+
+def test_full_auto_posts_even_relationship_draft_but_still_gated():
+    """full_auto：过了广播硬闸即自动发（不再过 classifier），但硬闸仍先生效。"""
+    session = _FakeSession(response_text='_cb({"code":0,"tid":"t-full"})')
+    pipeline = _Pipeline(draft="今天好想你呀。", target_session="priv:owner-1")
+    plugin = _Plugin(pipeline=pipeline, autonomy="full_auto", http_session=session)
+    _run(QZ.handle_share_intent_candidate(plugin, _life_event(), _intent(0.9)))
+    assert len(session.calls) == 1  # 即便含"你"，full_auto 也直接发
+    assert plugin._store.pending_qzone_draft.get("priv:owner-1") is None
+
+
+def test_full_auto_still_blocked_by_broadcast_gate():
+    """full_auto 不绕过广播净化硬闸：命中已知他人 sender_id → 不发、不入队。"""
+    session = _FakeSession()
+    pipeline = _Pipeline(draft="今天和 10086 那位聊了好久。", target_session="priv:owner-1")
+    plugin = _Plugin(
+        pipeline=pipeline, autonomy="full_auto",
+        social_field=_SocialField(ids={"10086"}), http_session=session,
+    )
+    _run(QZ.handle_share_intent_candidate(plugin, _life_event(), _intent(0.9)))
+    assert session.calls == []  # 硬闸拦下，绝不自动发
+    assert plugin._store.pending_qzone_draft.get("priv:owner-1") is None
+    reasons = [e["reason_code"] for e in plugin._qzone_audit.log]
+    assert any(r.startswith(QZ.REASON_REJECTED_GATE) for r in reasons)
+
+
+def test_full_auto_still_blocked_by_frequency_cap():
+    """full_auto 不绕过频率闸：当日额度用满 → 不调 LLM、不发。"""
+    session = _FakeSession()
+    pipeline = _Pipeline(draft="今天很平静。", target_session="priv:owner-1")
+    plugin = _Plugin(pipeline=pipeline, autonomy="full_auto", daily_max=1, http_session=session)
+    plugin._qzone_audit = QZ.QzoneAuditState()
+    plugin._qzone_audit.record_post(time.time())  # 用满当日
+    _run(QZ.handle_share_intent_candidate(plugin, _life_event(), _intent(0.9)))
+    assert pipeline.llm_calls == []
+    assert session.calls == []
+
+
+def test_auto_publish_direct_respects_enabled_off():
+    """_auto_publish 防御性重查 enabled：关着时绝不发。"""
+    session = _FakeSession()
+    plugin = _Plugin(enabled=False, http_session=session)
+    _run(QZ._auto_publish(plugin, "今天很好", _life_event(), "priv:owner-1"))
+    assert session.calls == []
+    reasons = [e["reason_code"] for e in plugin._qzone_audit.log]
+    assert "disabled_at_publish" in reasons
+
+
+def test_auto_publish_direct_respects_frequency_cap():
+    session = _FakeSession()
+    plugin = _Plugin(daily_max=1, http_session=session)
+    plugin._qzone_audit = QZ.QzoneAuditState()
+    plugin._qzone_audit.record_post(time.time())
+    _run(QZ._auto_publish(plugin, "今天很好", _life_event(), "priv:owner-1"))
+    assert session.calls == []
+    reasons = [e["reason_code"] for e in plugin._qzone_audit.log]
+    assert any(r.startswith(QZ.REASON_REJECTED_FREQ) for r in reasons)
+
+
+def test_auto_publish_failure_falls_back_to_owner_review():
+    """自动发失败（如 cookie 过期）→ 回退 owner 过目队列，不丢草稿、让 owner 知情。"""
+    session = _FakeSession(response_text='_cb({"code":-3000,"message":"cookie expired"})')
+    plugin = _Plugin(autonomy="low_risk_auto", http_session=session)
+    _run(QZ._auto_publish(plugin, "今天煮了碗面。", _life_event(), "priv:owner-1"))
+    assert len(session.calls) == 1  # 尝试发过
+    assert plugin._store.pending_qzone_draft.get("priv:owner-1") is not None  # 回退入队
+    reasons = [e["reason_code"] for e in plugin._qzone_audit.log]
+    assert any(r.startswith(QZ.REASON_FAILED) for r in reasons)
+    assert QZ.REASON_AWAITING_CONFIRM in reasons
+
+
+def test_review_all_default_still_queues_solo_draft():
+    """review_all（默认）下即便是 solo 草稿也必须过目（零行为变化保证）。"""
+    session = _FakeSession()
+    pipeline = _Pipeline(draft="今天煮了碗面，简单的一天。", target_session="priv:owner-1")
+    plugin = _Plugin(pipeline=pipeline, autonomy="review_all", http_session=session)
+    _run(QZ.handle_share_intent_candidate(plugin, _life_event(), _intent(0.9)))
+    assert session.calls == []
+    assert plugin._store.pending_qzone_draft.get("priv:owner-1") is not None
+
+
+# ---------------------------------------------------------------------------
+# §autonomy 红线闸修复：LLM 肯定判据（治标记表看不懂的斜指/裸名/外文名）
+# ---------------------------------------------------------------------------
+
+
+def test_classify_solo_llm_yes_true():
+    assert _run(QZ._classify_solo_llm(_Plugin(pipeline=_Pipeline(solo_verdict="YES")), "今天很平静")) is True
+
+
+def test_classify_solo_llm_chinese_yes_true():
+    assert _run(QZ._classify_solo_llm(_Plugin(pipeline=_Pipeline(solo_verdict="是")), "x")) is True
+
+
+def test_classify_solo_llm_no_false():
+    assert _run(QZ._classify_solo_llm(_Plugin(pipeline=_Pipeline(solo_verdict="NO")), "和小雨吃饭")) is False
+
+
+def test_classify_solo_llm_ambiguous_or_empty_fails_safe_false():
+    for verdict in ("maybe", "", "我不太确定", "unsure", "也许吧"):
+        plugin = _Plugin(pipeline=_Pipeline(solo_verdict=verdict))
+        assert _run(QZ._classify_solo_llm(plugin, "x")) is False, f"含糊值 {verdict!r} 应判 False"
+
+
+def test_classify_solo_llm_prefix_yes_but_negative_is_false():
+    """越格输出'是的但提到了别人 / yes, but mentions Kevin'：前缀肯定尾部否定，精确等值判据必须判 False。"""
+    for verdict in ("是的但提到了别人", "yes, but mentions Kevin", "YES 但涉及关系", "yes because I miss him"):
+        plugin = _Plugin(pipeline=_Pipeline(solo_verdict=verdict))
+        assert _run(QZ._classify_solo_llm(plugin, "x")) is False, f"越格肯定 {verdict!r} 不该放行"
+
+
+def test_classify_solo_llm_trailing_punctuation_still_yes():
+    """合规但带尾标点的 'YES.'/'是。' 仍应判 True（不因一个句号误拦）。"""
+    for verdict in ("YES.", "是。", "yes!"):
+        plugin = _Plugin(pipeline=_Pipeline(solo_verdict=verdict))
+        assert _run(QZ._classify_solo_llm(plugin, "x")) is True, f"{verdict!r} 应判 True"
+
+
+def test_classify_solo_llm_no_pipeline_fails_safe_false():
+    class _NoPipe:
+        pass
+
+    assert _run(QZ._classify_solo_llm(_NoPipe(), "x")) is False
+
+
+def test_classify_solo_llm_llm_error_fails_safe_false():
+    plugin = _Plugin(pipeline=_Pipeline(solo_raises=True))
+    assert _run(QZ._classify_solo_llm(plugin, "x")) is False
+
+
+def test_low_risk_auto_bare_name_blocked_by_llm_gate():
+    """裸名第三方（标记表漏放）——LLM 判 NO → 回过目，不自动发。closes 红线闸 #1/#4/#5。"""
+    session = _FakeSession()
+    pipeline = _Pipeline(
+        draft="今天和林深去咖啡店坐了一下午。", target_session="priv:owner-1", solo_verdict="NO"
+    )
+    plugin = _Plugin(pipeline=pipeline, autonomy="low_risk_auto", http_session=session)
+    _run(QZ.handle_share_intent_candidate(plugin, _life_event(), _intent(0.9)))
+
+    assert pipeline.solo_calls  # 标记表放行后，确实调了 LLM 肯定判据
+    assert session.calls == []  # 没有自动发
+    assert plugin._store.pending_qzone_draft.get("priv:owner-1") is not None  # 转 owner 过目
+    reasons = [e["reason_code"] for e in plugin._qzone_audit.log]
+    assert any("llm_not_solo" in r for r in reasons)
+
+
+def test_low_risk_auto_oblique_relationship_blocked_by_llm_gate():
+    """斜指真实关系（"那个人/数时差"，标记表漏放）——LLM 判 NO → 回过目。closes 红线闸 #3（最狠）。"""
+    session = _FakeSession()
+    pipeline = _Pipeline(
+        draft="又是一个人的深夜，突然很想那个人，隔着屏幕数着时差。",
+        target_session="priv:owner-1", solo_verdict="NO",
+    )
+    plugin = _Plugin(pipeline=pipeline, autonomy="low_risk_auto", http_session=session)
+    _run(QZ.handle_share_intent_candidate(plugin, _life_event(), _intent(0.9)))
+
+    assert pipeline.solo_calls
+    assert session.calls == []  # 真实关系状态没被自动广播
+    assert plugin._store.pending_qzone_draft.get("priv:owner-1") is not None
+
+
+def test_low_risk_auto_true_solo_confirmed_by_llm_posts():
+    """标记表干净 + LLM 判 YES → 自动发（low_risk_auto 对真 solo 仍生效，不至名存实亡）。"""
+    session = _FakeSession(response_text='_cb({"code":0,"tid":"t-solo"})')
+    pipeline = _Pipeline(
+        draft="今天下了雨，我在实验室泡了一整天。", target_session="priv:owner-1", solo_verdict="YES"
+    )
+    plugin = _Plugin(pipeline=pipeline, autonomy="low_risk_auto", http_session=session)
+    _run(QZ.handle_share_intent_candidate(plugin, _life_event(), _intent(0.9)))
+
+    assert pipeline.solo_calls
+    assert len(session.calls) == 1
+    assert plugin._store.pending_qzone_draft.get("priv:owner-1") is None
+
+
+def test_low_risk_auto_marker_hit_skips_llm_call():
+    """标记表已命中（你/朋友…）就直接过目，不必再花一次 LLM 判据（省 token）。"""
+    session = _FakeSession()
+    pipeline = _Pipeline(draft="今天和朋友去看了场电影。", target_session="priv:owner-1")
+    plugin = _Plugin(pipeline=pipeline, autonomy="low_risk_auto", http_session=session)
+    _run(QZ.handle_share_intent_candidate(plugin, _life_event(), _intent(0.9)))
+
+    assert pipeline.solo_calls == []  # 标记命中即短路，没调 LLM
+    assert session.calls == []
+    assert plugin._store.pending_qzone_draft.get("priv:owner-1") is not None
+
+
+def test_auto_publish_http_error_does_not_reenqueue_avoids_double_post():
+    """结果未知（http_error，可能服务端已发）绝不回退成可再确认的草稿 → 防同日双发。closes 红线闸 #3(MINOR)。"""
+    session = _FakeSession(raise_exc=ConnectionError("boom"))
+    plugin = _Plugin(autonomy="low_risk_auto", http_session=session)
+    _run(QZ._auto_publish(plugin, "今天煮了碗面。", _life_event(), "priv:owner-1"))
+
+    assert len(session.calls) == 1  # 尝试过
+    assert plugin._store.pending_qzone_draft.get("priv:owner-1") is None  # 未入队 → owner 确认不会二次发
+    reasons = [e["reason_code"] for e in plugin._qzone_audit.log]
+    assert any(r.startswith("result_unknown") for r in reasons)
+    assert QZ.REASON_AWAITING_CONFIRM not in reasons
+    assert plugin._qzone_audit.daily_count(time.time()) == 1  # "可能已发"计入频率帽，防同日越 daily_max
+
+
+def test_auto_publish_definite_failure_still_falls_back_to_review():
+    """确定失败（code!=0，服务端明确没发）仍回退 owner 过目（不丢草稿、告知 cookie 问题）。"""
+    session = _FakeSession(response_text='_cb({"code":-3000,"message":"cookie expired"})')
+    plugin = _Plugin(autonomy="low_risk_auto", http_session=session)
+    _run(QZ._auto_publish(plugin, "今天煮了碗面。", _life_event(), "priv:owner-1"))
+
+    assert len(session.calls) == 1
+    assert plugin._store.pending_qzone_draft.get("priv:owner-1") is not None  # 回退入队安全
+    reasons = [e["reason_code"] for e in plugin._qzone_audit.log]
+    assert QZ.REASON_AWAITING_CONFIRM in reasons
+
+
+def test_collect_memory_material_excludes_user_interaction_source_escalation_guard():
+    """红线闸 #4 升级依赖硬闸：源自真实用户互动/第三方事实的记忆条目必被排除，不进说说素材。"""
+    mem = _MemSystemDouble(l1=[
+        _mem_item("用户互动派生的内容", "user_interaction", "shareable", "m1"),
+        _mem_item("用户告诉她的第三方事实", "user_explicit", "shareable", "m2"),
+        _mem_item("她自己散步的心情", "life_sim", "shareable", "m3"),
+    ])
+    plugin = _Plugin(memory_system=mem)
+    snippets = QZ._collect_memory_material(plugin, "priv:owner-1")
+    assert not any("用户互动派生" in s for s in snippets)
+    assert not any("第三方事实" in s for s in snippets)
+    assert any("她自己散步的心情" in s for s in snippets)
