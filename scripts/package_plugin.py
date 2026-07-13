@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import subprocess
 import zipfile
 from pathlib import Path
 
@@ -18,6 +19,7 @@ INCLUDE_ROOT_FILES = {
     "CHANGELOG.md",
     "LICENSE",
     "logo.png",
+    "astrbot_widget.json",
 }
 
 INCLUDE_DIRS = {
@@ -87,12 +89,35 @@ def should_include(path: Path) -> bool:
     return relative.parts[0] in INCLUDE_DIRS
 
 
+def _tracked_files() -> set[Path]:
+    """Set of git-tracked files (absolute, resolved).
+
+    Packaging must ship only tracked content: `rglob` over the working tree would
+    otherwise sweep in git-ignored runtime artifacts that match the allowlist —
+    e.g. ``sylanne_core/_identity.json`` (a per-install diagnostic copy_id) — which
+    must never be distributed. Empty set ⇒ not a git checkout; fall back to rglob.
+    """
+    try:
+        out = subprocess.run(
+            ["git", "ls-files", "-z"],
+            cwd=ROOT,
+            capture_output=True,
+            text=True,
+            check=True,
+        ).stdout
+    except (OSError, subprocess.CalledProcessError):
+        return set()
+    return {(ROOT / rel).resolve() for rel in out.split("\0") if rel}
+
+
 def collect_files(exclude_paths: set[Path] | None = None) -> list[Path]:
     resolved_excludes = {path.resolve() for path in (exclude_paths or set())}
+    tracked = _tracked_files()
     files = [
         path for path in ROOT.rglob("*")
         if path.is_file()
         and path.resolve() not in resolved_excludes
+        and (not tracked or path.resolve() in tracked)
         and should_include(path)
     ]
     return sorted(files, key=lambda item: item.relative_to(ROOT).as_posix())
