@@ -2431,67 +2431,71 @@ class StatePersistence:
 
     async def sync_message_to_conv_mgr(
         self, session_key: str, role: str, text: str
-    ) -> None:
-        """将消息同步到 AstrBot 的 ConversationManager（平行路径）。
+    ) -> bool:
+        """Append one message to AstrBot history and report whether it landed."""
+        return await self._sync_entries_to_conv_mgr(
+            session_key, [(role, text)]
+        )
 
-        保持 AstrBot 对话系统同步，但不替代 Sylanne 自身的 ConversationBuffer
-        （后者仍用于 flush/consolidation 逻辑）。
+    async def sync_turn_to_conv_mgr(
+        self,
+        session_key: str,
+        user_text: str,
+        assistant_text: str = "",
+    ) -> bool:
+        """Append a complete turn with one snapshot and one database update."""
+        entries = [("user", user_text)]
+        if assistant_text:
+            entries.append(("assistant", assistant_text))
+        return await self._sync_entries_to_conv_mgr(session_key, entries)
 
-        Args:
-            session_key: 会话标识。
-            role: 消息角色（"user" 或 "assistant"）。
-            text: 消息文本内容。
-        """
-        p = self._p
-        conv_mgr = getattr(p, "_conv_mgr", None)
-        if conv_mgr is None:
-            return
-
-        # AstrBot ConversationManager 按 unified_msg_origin 建索引，插件内部的
-        # session_key 不是同一个 key 空间——且不止群聊场景：session_context.py:
-        # session_key() 的 base 取的是 event.session_id（取不到才退化到
-        # unified_msg_origin），本身就常常与 unified_msg_origin 不同；":sender_id"
-        # 后缀只要 event 带 sender_id/user_id（私聊消息通常也带）就会追加，并非
-        # "仅群聊"才有。两条差异叠加，session_key 在真实平台上几乎不可能等于
-        # unified_msg_origin。llm_request_pipeline 在每次
-        # 请求时都会把 session_key → unified_msg_origin 的映射写进
-        # p._store.session_origins（见 llm_request_pipeline.py:846-849），这里
-        # 取出来对齐，取不到时才退化用 session_key 自己（好过完全不同步）。
+    def _resolve_conv_mgr_umo(self, session_key: str) -> str:
+        """Resolve the ConversationManager key before selecting its sync lock."""
         umo = session_key
         try:
-            store = getattr(p, "_store", None)
+            store = getattr(self._p, "_store", None)
             origins = getattr(store, "session_origins", None) if store else None
             if origins is not None:
                 mapped = origins.get(session_key, "")
                 if mapped:
                     umo = str(mapped)
         except Exception:
-            pass  # 映射查询失败不阻断同步，退化用 session_key
+            pass
+        return umo
 
-        # 取 per-session 同步锁，串行化同一会话的"读历史→append→写回"。
-        # 拿不到锁容器（旧版/测试环境无 _store）时降级为无锁——绝不能因为锁机制
-        # 本身报错而阻断同步。锁挂在 store 上跨多次 sync 调用持久存在。锁本身仍按
-        # 插件内部 session_key 取（同一 session_key 必然映射到同一 umo，用哪个
-        # 做锁名不影响互斥语义，session_key 是插件内部本来就有的稳定粒度）。
-        lock = None
+    async def _sync_entries_to_conv_mgr(
+        self, session_key: str, entries: list[tuple[str, str]]
+    ) -> bool:
+        """Serialize one history snapshot/update for all supplied entries."""
+        p = self._p
+        conv_mgr = getattr(p, "_conv_mgr", None)
+        if conv_mgr is None or not entries:
+            return False
+
+        umo = self._resolve_conv_mgr_umo(session_key)
+
+        lock_lease = None
         try:
             store = getattr(p, "_store", None)
             if store is not None:
-                lock = store.get_conv_sync_lock(session_key)
+                lease_factory = getattr(store, "lease_conv_sync_lock", None)
+                if callable(lease_factory):
+                    lock_lease = lease_factory(session_key, umo)
+                else:
+                    lock_lease = store.get_conv_sync_lock(umo)
         except Exception as e:
-            # 降级无锁是有意取向（绝不因锁机制本身报错而阻断同步），但不能静默：
-            # 恰是高并发时最易触发，无日志运维无从发现并发覆盖风险。
-            lock = None
+            lock_lease = None
             logger.warning(
                 "Sylanne conv-sync 取锁失败，降级为无锁同步（并发写回可能互相覆盖）：%s",
                 e,
             )
 
-        if lock is not None:
-            async with lock:
-                await self._do_sync_to_conv_mgr(conv_mgr, umo, role, text)
-        else:
-            await self._do_sync_to_conv_mgr(conv_mgr, umo, role, text)
+        if lock_lease is not None:
+            async with lock_lease:
+                return await self._do_sync_entries_to_conv_mgr(
+                    conv_mgr, umo, entries
+                )
+        return await self._do_sync_entries_to_conv_mgr(conv_mgr, umo, entries)
 
     @staticmethod
     def _extract_conv_history_list(conversation: Any) -> list | None:
@@ -2597,42 +2601,48 @@ class StatePersistence:
             return entry
         return None
 
+    @staticmethod
+    def _conv_history_entry(role: str, text: str) -> dict[str, Any]:
+        """Build one JSON-safe history entry with a normalized role."""
+        normalized_role = "user" if role == "user" else "assistant"
+        try:
+            from astrbot.core.agent.message import (
+                AssistantMessageSegment,
+                TextPart,
+                UserMessageSegment,
+            )
+
+            if normalized_role == "user":
+                message = UserMessageSegment(content=[TextPart(text=text)])
+            else:
+                message = AssistantMessageSegment(content=[TextPart(text=text)])
+            return message.model_dump()
+        except ImportError:
+            return {"role": normalized_role, "content": text}
+
     async def _do_sync_to_conv_mgr(
         self, conv_mgr: Any, umo: str, role: str, text: str
-    ) -> None:
-        """实际执行 ConversationManager 同步的"读→append→写回"。
+    ) -> bool:
+        """Backward-compatible one-entry wrapper for the shared primitive."""
+        return await self._do_sync_entries_to_conv_mgr(
+            conv_mgr, umo, [(role, text)]
+        )
 
-        必须在 per-session 同步锁内调用（由 sync_message_to_conv_mgr 负责），
-        以避免并发整表写回互相覆盖。`umo` 必须是框架的 unified_msg_origin
-        （由调用方 sync_message_to_conv_mgr 完成 session_key → umo 的映射），
-        不是插件内部 session_key。
+    async def _do_sync_entries_to_conv_mgr(
+        self,
+        conv_mgr: Any,
+        umo: str,
+        entries: list[tuple[str, str]],
+    ) -> bool:
+        """Append entries using exactly one history snapshot and one update.
+
+        The caller must hold the resolved-UMO lock.
         """
         try:
             # 获取或创建当前会话
             curr_cid = await conv_mgr.get_curr_conversation_id(umo)
             if not curr_cid:
                 curr_cid = await conv_mgr.new_conversation(umo)
-
-            # 尝试使用 AstrBot 消息类型；不可用时回退到普通字典
-            try:
-                from astrbot.core.agent.message import (
-                    AssistantMessageSegment,
-                    TextPart,
-                    UserMessageSegment,
-                )
-
-                if role == "user":
-                    msg_obj = UserMessageSegment(content=[TextPart(text=text)])
-                else:
-                    msg_obj = AssistantMessageSegment(content=[TextPart(text=text)])
-                # 立即拍平成普通 dict：整条历史最终要经 SQLAlchemy JSON 列落库
-                # （默认 json.dumps 序列化器），直接把 pydantic 对象塞进历史列表
-                # 会在写库时炸 TypeError，且被本方法自己的 except 静默吞掉——
-                # 表现为"同步看起来成功，实际上库里什么都没写"。
-                msg = msg_obj.model_dump()
-            except ImportError:
-                # 旧版 AstrBot 或测试环境：使用普通字典
-                msg = {"role": role, "content": text}
 
             conversation = await conv_mgr.get_conversation(umo, curr_cid)
             history = self._extract_conv_history_list(conversation)
@@ -2648,7 +2658,7 @@ class StatePersistence:
                     "已存储历史",
                     umo,
                 )
-                return
+                return False
             # fix/context-integrity round-2 MAJOR② / round-3 纠偏：幂等守卫（第二道
             # 防线）。round-2 曾以为第一道防线（llm_response_pipeline.py 非拦截分支的
             # skip_conv_sync）已经让【本方法只会在拦截/分段发送分支被调用】、且那条
@@ -2691,23 +2701,34 @@ class StatePersistence:
             # 连续两轮发完全相同的文字（例如中间那轮 bot 恰好 SILENT、没有任何
             # assistant 记录夹在中间）会被这条 guard 误判成"重复"而丢掉第二条真实
             # 用户消息——这是比它防的竞态更容易踩中的真实回归，必须避免。
-            if role != "user" and history:
-                last_entry = self._last_conversational_entry(history)
-                new_sig = self._history_entry_signature(msg)
-                last_sig = (
-                    self._history_entry_signature(last_entry)
-                    if last_entry is not None
-                    else None
-                )
-                if new_sig is not None and last_sig is not None and last_sig == new_sig:
-                    logger.debug(
-                        "Sylanne conv-sync 幂等跳过：末条（跳过尾随 checkpoint/"
-                        "system/tool 记录后）已是同 role+content (umo=%s)，"
-                        "疑似与框架 _save_to_history 并发写重叠",
-                        umo,
+            changed = False
+            for role, text in entries:
+                msg = self._conv_history_entry(role, text)
+                normalized_role = "user" if role == "user" else "assistant"
+                if normalized_role != "user" and history:
+                    last_entry = self._last_conversational_entry(history)
+                    new_sig = self._history_entry_signature(msg)
+                    last_sig = (
+                        self._history_entry_signature(last_entry)
+                        if last_entry is not None
+                        else None
                     )
-                    return
-            history.append(msg)
+                    if (
+                        new_sig is not None
+                        and last_sig is not None
+                        and last_sig == new_sig
+                    ):
+                        logger.debug(
+                            "Sylanne conv-sync 幂等跳过：末条已是同 role+content "
+                            "(umo=%s)",
+                            umo,
+                        )
+                        continue
+                history.append(msg)
+                changed = True
+
+            if not changed:
+                return True
             # 防御竞态：本方法与 AstrBot 自身 _save_to_history 无锁并发，可能读到
             # tool 循环中途的快照（含 assistant tool_calls 但尚无 tool 响应）。写回前
             # 清除破损的 tool_calls/tool 配对，避免把孤儿持久化进历史（fixes #18）。
@@ -2720,6 +2741,7 @@ class StatePersistence:
             except Exception:
                 pass
             await conv_mgr.update_conversation(umo, curr_cid, history=history)
+            return True
         except Exception as e:
             # 2.4.1 红线闸 finding：此处曾是 debug 级别，会把"该补写却因瞬时
             # DB/IO 故障吞掉"的 SILENT 补写失败静默藏起来（fail-open by design，
@@ -2728,6 +2750,7 @@ class StatePersistence:
             logger.warning(
                 f"Sylanne: ConversationManager sync failed: {e}", exc_info=True
             )
+            return False
 
     # ------------------------------------------------------------------
     # AstrBot PersonaManager 集成

@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import asyncio
 import collections
+from contextlib import asynccontextmanager
 from typing import TYPE_CHECKING, Any, Generic, Iterator, TypeVar
 
 from sylanne_alpha.infra import BoundedDict
@@ -233,7 +234,11 @@ class SessionStateStore:
         # ConversationManager 同步专用锁：串行化同一会话"读历史→append→写回"，
         # 防止 safe_ensure_future 后台并发 sync 互相覆盖整表写回（消息丢失/乱序）。
         # 用普通 dict 而非 BoundedDict——锁被 LRU 驱逐会让并发保护静默失效（见 #_session_locks）。
-        self.conv_sync_locks: SessionMap = self._reg("conv_sync_locks", {})
+        # 该容器按 UMO 而非 session_key 索引，不能交给 `_reg` 按 session_key
+        # 直接 pop。其生命周期由下面的会话所有权 + 租用计数共同管理。
+        self.conv_sync_locks: SessionMap = SessionMap("conv_sync_locks", {})
+        self._conv_sync_session_umos: dict[str, str] = {}
+        self._conv_sync_lock_leases: dict[str, int] = {}
 
     def _reg(self, name: str, backing: Any) -> SessionMap:
         m: SessionMap = SessionMap(name, backing)
@@ -245,13 +250,19 @@ class SessionStateStore:
     # ------------------------------------------------------------------
     def release_session(self, session_key: str) -> None:
         """释放某会话在所有已登记 SessionMap 中的态。漏登记 = 容器不在 = 立即暴露。"""
+        conv_sync_umo = self._conv_sync_session_umos.pop(session_key, None)
         for m in self._maps:
             m.pop(session_key, None)
+        if conv_sync_umo is not None:
+            self._release_unused_conv_sync_lock(conv_sync_umo)
 
     def reset_all(self) -> None:
         """整体清空所有会话态（供 state_persistence 的全局 reset 用）。"""
         for m in self._maps:
             m.clear()
+        self._conv_sync_session_umos.clear()
+        for umo in list(self.conv_sync_locks.keys()):
+            self._release_unused_conv_sync_lock(umo)
 
     # ------------------------------------------------------------------
     # 真语义容器的专用方法
@@ -273,6 +284,37 @@ class SessionStateStore:
         调用持久存在（挂在 store 上），从而真正串行化同一会话的并发写回。
         """
         return self.conv_sync_locks.get_or_create(session_key, asyncio.Lock)
+
+    def _release_unused_conv_sync_lock(self, umo: str) -> None:
+        """仅在 UMO 已无会话所有者和 holder/waiter 时删除其锁。"""
+        if self._conv_sync_lock_leases.get(umo, 0) > 0:
+            return
+        if umo in self._conv_sync_session_umos.values():
+            return
+        self.conv_sync_locks.pop(umo, None)
+
+    @asynccontextmanager
+    async def lease_conv_sync_lock(self, session_key: str, umo: str) -> Any:
+        """租用同一 UMO 的同步锁，并把持有者和等待者都纳入生命周期。"""
+        previous_umo = self._conv_sync_session_umos.get(session_key)
+        self._conv_sync_session_umos[session_key] = umo
+        if previous_umo is not None and previous_umo != umo:
+            self._release_unused_conv_sync_lock(previous_umo)
+
+        lock = self.get_conv_sync_lock(umo)
+        self._conv_sync_lock_leases[umo] = (
+            self._conv_sync_lock_leases.get(umo, 0) + 1
+        )
+        try:
+            async with lock:
+                yield lock
+        finally:
+            remaining = self._conv_sync_lock_leases.get(umo, 1) - 1
+            if remaining > 0:
+                self._conv_sync_lock_leases[umo] = remaining
+            else:
+                self._conv_sync_lock_leases.pop(umo, None)
+                self._release_unused_conv_sync_lock(umo)
 
     # ------------------------------------------------------------------
     # v2.5.0 slice-1b：已认证身份记录暂存层专用方法（design 全矩阵扎实版）

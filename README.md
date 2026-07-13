@@ -5,10 +5,10 @@
 ![astrbot_plugin_sylanne](https://socialify.git.ci/Ayleovelle/astrbot_plugin_sylanne/image?custom_description=%E4%B8%8D%E5%8F%AF%E9%80%86%E7%9A%84%E5%85%B3%E7%B3%BB%E8%AE%A1%E7%AE%97%E5%BC%95%E6%93%8E+%2B+%E8%87%AA%E6%88%91%E8%BF%9B%E5%8C%96%E8%AE%A4%E7%9F%A5%E4%BD%93&description=1&font=Inter&forks=1&issues=1&language=1&name=1&owner=1&pattern=Brick+Wall&pulls=1&stargazers=1&theme=Auto)
 
 <p align="center">
-  <a href="https://github.com/Ayleovelle/astrbot_plugin_sylanne/releases"><img src="https://img.shields.io/badge/version-2.4.0-red.svg" alt="version 2.4.0"></a>
+  <a href="https://github.com/Ayleovelle/astrbot_plugin_sylanne/releases"><img src="https://img.shields.io/badge/version-2.5.0--grey.4-red.svg" alt="version 2.5.0-grey.4"></a>
   <a href="https://sylanne.app"><img src="https://img.shields.io/badge/website-sylanne.app-blue" alt="website"></a>
   <a href="https://github.com/Ayleovelle/astrbot_plugin_sylanne/stargazers"><img src="https://img.shields.io/github/stars/Ayleovelle/astrbot_plugin_sylanne?style=flat&color=orange" alt="GitHub Stars"></a>
-  <img src="https://img.shields.io/badge/AstrBot-%3E%3D4.9.2%2C%3C5.0.0-green" alt="AstrBot >=4.9.2,<5.0.0">
+  <img src="https://img.shields.io/badge/AstrBot-%3E%3D4.26%2C%3C5.0.0-green" alt="AstrBot >=4.26,<5.0.0">
   <img src="https://img.shields.io/badge/Python-3.10%2B-blue" alt="Python 3.10+">
   <a href="https://github.com/Ayleovelle/astrbot_plugin_sylanne/commits"><img src="https://img.shields.io/github/last-commit/Ayleovelle/astrbot_plugin_sylanne?color=purple" alt="Last Commit"></a>
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-AGPL--3.0--or--later-red" alt="license AGPL-3.0-or-later"></a>
@@ -464,10 +464,11 @@ vendored sylanne_core 2.0.0 → 2.4.0：2.3.0 新增 deterministic_fusion / pel_
 
 ## 快速开始
 
-1. 下载 `astrbot_plugin_sylanne.zip`
-2. 在 AstrBot 管理面板上传安装
-3. 在插件配置页开启"启用 Sylanne 4.0 即时聊天调度"和"允许即时聊天接管 LLM 响应分段"
-4. 发一条消息测试
+1. 从 [Embodiment-2.5.0-grey.4 Release](https://github.com/Ayleovelle/astrbot_plugin_sylanne/releases/tag/Embodiment-2.5.0-grey.4) 下载版本化安装包 `astrbot_plugin_sylanne-2.5.0-grey.4.zip`
+2. 若使用通用文件名 `astrbot_plugin_sylanne.zip`，请先确认包内 `metadata.yaml` 的版本同为 `2.5.0-grey.4`
+3. 在 AstrBot 管理面板上传安装
+4. 在插件配置页开启"启用 Sylanne 4.0 即时聊天调度"和"允许即时聊天接管 LLM 响应分段"
+5. 发一条消息测试
 
 ### 最小配置
 
@@ -501,7 +502,7 @@ Embodiment 是完全重写，但对 3.x 用户做了兼容：
 - 旧状态文件通过 `import_legacy_body` 自动迁入新架构（记忆、关系数据不丢失）
 - 旧 README 和文档保留在 [3.x release](https://github.com/Ayleovelle/astrbot_plugin_sylanne/releases/tag/v3.0.0)
 
-无破坏性变更，旧存档自动兼容，无需手动操作。
+用户数据与旧存档仍自动兼容，无需手动迁移；插件宿主需升级到 AstrBot 4.26 或更高版本。
 
 ---
 
@@ -602,7 +603,7 @@ sylanne_alpha/
 
 | 项 | 范围 |
 | --- | --- |
-| AstrBot | >=4.9.2, <5.0.0 |
+| AstrBot | >=4.26, <5.0.0 |
 | Python | 3.10 ~ 3.13 |
 | 已测平台 | Linux, Windows |
 | 内存 | ~100 MB |

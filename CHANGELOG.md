@@ -2,6 +2,30 @@
 
 本文件用于 AstrBot 插件市场/管理页展示更新内容。更完整的设计说明、公式推导、测试矩阵和维护手册见 `README.md`。
 
+## [Embodiment-2.5.0-grey.4] - 2026-07-14
+
+> 灰测修订：修复开启即时聊天相关开关后，Dify、Coze、DashScope、DeerFlow 等第三方 Agent 的正常回复没有完整写入 AstrBot WebUI 对话历史的问题。
+
+### 🐛 修复：第三方 Agent 对话历史只剩用户消息或整轮为空
+
+**症状**：消息和回复在聊天端均正常，但 AstrBot WebUI 的对话数据里只看到 `user`，看不到对应 `assistant`；缺少 ConversationManager 或同步失败的路径还可能整轮为空。
+
+**根因**：第三方 Agent 会触发 Sylanne 的 LLM 响应钩子，但不执行 AstrBot 内置 Agent 的 `_save_to_history`。grey.3 为避免即时发送链路与框架重复写入，又统一使用了 `skip_conv_sync=True`，最终只有用户侧兜底、没有任何写者保存 assistant。
+
+**修复**：保留 `skip_conv_sync=True`，在确认框架不会保存本轮时执行一次 awaited 原子整轮兜底：正常第三方回复通过一次 ConversationManager 更新按顺序写入 `[user, assistant]`；SILENT、错误或 stopped 轮只写 `[user]`；内置 Agent 仍完全交给框架保存，插件零写，避免重复历史。同步锁先解析到 AstrBot UMO 再获取，同一 WebUI 会话的并发更新不再因 Sylanne session key 不同而互相覆盖；数据库更新成功后才消费本轮 once-guard，失败时保留后续钩子的重试机会。
+
+### 🔧 AstrBot 4.26 Web API 兼容
+
+插件内嵌 WebUI 路由从旧 Quart request/Response 迁移到 `astrbot.api.web` 的 FastAPI 公开接口，并把最低 AstrBot 版本明确为 `>=4.26`。这同时避免 WebUI handler 在新版本宿主缺少 Quart 兼容环境时运行失败。
+
+### 📦 发布包校正
+
+版本化安装包、`dist/astrbot_plugin_sylanne.zip` 与仓库根目录通用安装包均由同一份 grey.4 源码重新生成；安装前可解压检查 `metadata.yaml`，版本必须为 `2.5.0-grey.4`。
+
+### ✨ 说说发布自主权档位
+
+新增 `sylanne_alpha_qzone_autonomy`：`review_all`（默认，每条仍给主人确认）、`low_risk_auto`（关键词粗筛与 LLM 语义判断均确认只涉及她自己时才自动发布）和 `full_auto`（通过广播净化硬闸后直接发布）。无论档位如何，PII/群聊背景净化与每日、每周频率上限均保持生效；未知配置值 fail-safe 回退 `review_all`。
+
 ## [Embodiment-2.5.0-grey.3] - 2026-07-13
 
 > 灰测修订：修复 **grey.2 在 AstrBot 4.26.x 上加载后、消息一进来就崩**（事件钩子报 `takes 2 positional arguments but 5 were given` 等）。grey.2 只在 4.25.x 上验过，未覆盖 4.26.x 的钩子调用约定。

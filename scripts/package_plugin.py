@@ -61,6 +61,8 @@ EXCLUDED_SUFFIXES = {
 }
 
 EXCLUDED_FILENAMES = {
+    "_identity.json",
+    "_identity.json.tmp",
     "pet-contact-sheet.png",
     "sylanne-pet.webp",
     "BACKEND_API.md",
@@ -95,7 +97,8 @@ def _tracked_files() -> set[Path]:
     Packaging must ship only tracked content: `rglob` over the working tree would
     otherwise sweep in git-ignored runtime artifacts that match the allowlist —
     e.g. ``sylanne_core/_identity.json`` (a per-install diagnostic copy_id) — which
-    must never be distributed. Empty set ⇒ not a git checkout; fall back to rglob.
+    must never be distributed. Git lookup failures and empty results abort the
+    build instead of silently widening the package to the whole working tree.
     """
     try:
         out = subprocess.run(
@@ -105,9 +108,16 @@ def _tracked_files() -> set[Path]:
             text=True,
             check=True,
         ).stdout
-    except (OSError, subprocess.CalledProcessError):
-        return set()
-    return {(ROOT / rel).resolve() for rel in out.split("\0") if rel}
+    except (OSError, subprocess.CalledProcessError) as exc:
+        raise RuntimeError(
+            "git ls-files failed; refusing to package untracked workspace files"
+        ) from exc
+    tracked = {(ROOT / rel).resolve() for rel in out.split("\0") if rel}
+    if not tracked:
+        raise RuntimeError(
+            "git ls-files returned an empty file list; refusing to package"
+        )
+    return tracked
 
 
 def collect_files(exclude_paths: set[Path] | None = None) -> list[Path]:
@@ -117,7 +127,7 @@ def collect_files(exclude_paths: set[Path] | None = None) -> list[Path]:
         path for path in ROOT.rglob("*")
         if path.is_file()
         and path.resolve() not in resolved_excludes
-        and (not tracked or path.resolve() in tracked)
+        and path.resolve() in tracked
         and should_include(path)
     ]
     return sorted(files, key=lambda item: item.relative_to(ROOT).as_posix())

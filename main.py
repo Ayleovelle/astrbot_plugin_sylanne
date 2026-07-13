@@ -395,12 +395,17 @@ def _optional_stream_chunk_filter(**kwargs: Any):
     return dec(**kwargs)
 
 
-def _optional_using_llm_tool_filter(**kwargs: Any):
+def _optional_tool_use_filter(**kwargs: Any):
     """AstrBot 部分版本 filter 无 on_using_llm_tool → 直通注册（不挂钩子，降级为无操作）。"""
     dec = getattr(filter, "on_using_llm_tool", None)
     if dec is None:
         return lambda f: f
     return dec(**kwargs)
+
+
+def _model_function_tool(**kwargs: Any):
+    """Register a model-callable function tool, including zero-argument tools."""
+    return filter.llm_tool(**kwargs)
 
 
 @register(
@@ -751,9 +756,9 @@ class EmotionalStatePlugin(Star):
         return await self._sylanne_memory_settings_page_payload()
 
     async def _memory_settings_post_handler(self) -> dict[str, Any]:
-        from quart import request as quart_request
+        from astrbot.api.web import request
 
-        body = await quart_request.get_json(silent=True) or {}
+        body = await request.json() or {}
         return await self._update_sylanne_memory_settings_from_page(body)
 
     async def _lineage_observatory_handler(self) -> dict[str, Any]:
@@ -1447,7 +1452,7 @@ class EmotionalStatePlugin(Star):
     # FileEdit 的 content、execute_python 的 code 等——那些 strip/截断会静默写坏文件/代码。
     _SPEECH_TOOL_NAMES = ("clone_tts", "tts", "send_message_to_user", "send_message")
 
-    @_optional_using_llm_tool_filter(desc="语音/发言类工具调用前清理 text（防 thinking 进 TTS）")
+    @_optional_tool_use_filter(desc="语音/发言类工具调用前清理 text（防 thinking 进 TTS）")
     async def on_using_llm_tool(self, event: Any, tool: Any, tool_args: Any) -> None:
         """path3 兜底：模型把要"说"的内容打包进【语音/发言类】工具参数（如 clone_tts 的
         text）时，绕过了 on_llm_response 的剥离。这里在工具执行【前】就地清理。tool_args 是
@@ -1576,7 +1581,13 @@ class EmotionalStatePlugin(Star):
             if self._agent_run_done(event) is not True:
                 return  # 终态门：tool 循环中间步 runner 未 done，不在此补写
             # response=None -> 判据 role 腿判"框架不落库"；once-guard 保证本轮至多一次
-            await self._backfill_user_if_framework_skips(event, None)
+            backfill_turn = getattr(
+                self, "_backfill_turn_if_framework_skips", None
+            )
+            if callable(backfill_turn):
+                await backfill_turn(event, None)
+            else:  # compatibility for narrow legacy test/plugin stubs
+                await self._backfill_user_if_framework_skips(event, None)
         except Exception as e:
             logger.warning(f"Sylanne err-turn user backfill failed: {e}", exc_info=True)
 
@@ -1813,7 +1824,13 @@ class EmotionalStatePlugin(Star):
             # 判定"框架本轮是否落库"，仅框架不落库时补写 user（放 finally 保证异常路径
             # 也不吞补写——这是 SILENT 不丢历史的红线）。
             try:
-                await self._backfill_user_if_framework_skips(event, response)
+                backfill_turn = getattr(
+                    self, "_backfill_turn_if_framework_skips", None
+                )
+                if callable(backfill_turn):
+                    await backfill_turn(event, response)
+                else:  # compatibility for narrow legacy test/plugin stubs
+                    await self._backfill_user_if_framework_skips(event, response)
             except Exception as exc:
                 logger.warning("Sylanne user backfill failed: %s", exc)
 
@@ -2218,8 +2235,20 @@ class EmotionalStatePlugin(Star):
 
     async def _sync_message_to_conv_mgr(
         self, session_key: str, role: str, text: str
-    ) -> None:
-        await self._state_persistence.sync_message_to_conv_mgr(session_key, role, text)
+    ) -> bool:
+        return await self._state_persistence.sync_message_to_conv_mgr(
+            session_key, role, text
+        )
+
+    async def _sync_turn_to_conv_mgr(
+        self,
+        session_key: str,
+        user_text: str,
+        assistant_text: str = "",
+    ) -> bool:
+        return await self._state_persistence.sync_turn_to_conv_mgr(
+            session_key, user_text, assistant_text
+        )
 
     # ── 2.4.1：user 侧对齐 bot 侧 skip 哲学，仅框架不落库轮补写 user ──────────
     def _framework_will_persist_this_turn(self, event: Any, response: Any) -> bool:
@@ -2251,6 +2280,14 @@ class EmotionalStatePlugin(Star):
         req = get_extra("provider_request") if callable(get_extra) else None
         # internal.py:447 —— 无 conversation，框架直接 return，不落库
         if req is None or getattr(req, "conversation", None) is None:
+            return False
+        # Only the internal agent sub-stage owns AstrBot's `_save_to_history`.
+        # Third-party runners invoke on_agent_done hooks too, but do not run that
+        # sub-stage; absence from the active-runner registry therefore means the
+        # plugin must persist this turn itself. Partial legacy stubs without the
+        # probe retain the old predicate behavior.
+        runner_probe = getattr(self, "_agent_run_done", None)
+        if callable(runner_probe) and runner_probe(event) is None:
             return False
         aborted = self._agent_was_aborted(event)
         is_stopped = bool(event.is_stopped()) if hasattr(event, "is_stopped") else False
@@ -2309,51 +2346,66 @@ class EmotionalStatePlugin(Star):
             pass
         return None
 
-    async def _backfill_user_if_framework_skips(self, event: Any, response: Any) -> None:
-        """仅当框架本轮不落库时补写 user（对齐 bot 侧 skip_conv_sync 哲学）。
-
-        在 _on_llm_response_inner 的 finally 调用，且身处框架 on_agent_done 钩子内，
-        故整段跑在框架 per-umo session_lock（internal.py:209）持有期中，再叠一层
-        conv_sync_lock。两把锁分工【不同】，别混为一谈（真进程并发灰测实测所得）：
-          · 框架 session_lock：把「插件补写」与「框架 _save_to_history 的整表覆盖写」
-            隔开。这正是 2.4.1 所修 bug 的那条跨锁双写——旧 leg-3 是 fire-and-forget、
-            逃出此锁，才会在框架落库【之后】才 append，写出悬挂重复 user。
-          · conv_sync_lock：把【跨轮并发的多个补写】彼此隔开。同一 umo 上多轮并发且
-            各轮均 SILENT 时，多个补写确实会并发进入，靠它的读-改-写临界区串行化。
-        故"补写是该轮唯一 user 写者"只在【单轮内】成立（该轮框架不写）；跨轮并发的补写
-        并非不存在，而是被 conv_sync_lock 串起来。灰测：4 轮并发 SILENT，4 次补写全部
-        落在框架锁持有窗口内、经 conv_sync_lock 串行，4 条 user 各写一次，不丢不重；
-        对照组绕过 conv_sync_lock 立刻丢 3 条（经典 lost update）。
-
-        await（非 fire-and-forget）保证 SILENT 轮 user 落盘先于下一轮框架加载历史；
-        SILENT 不发消息，几毫秒写盘用户零可见。
-
-        每轮 once-guard（红线闸 Finding #1，本轮至多补一次）：本方法有两个调用者——
-        on_llm_response 的 finally 与 after_message_sent 兜底钩子；而 tool 循环带
-        preamble 文本时，after_message_sent 会在 on_agent_done 之前【多次】触发、且
-        每次 _syl_resp_handled 都还是 False。若最终步不落库（err / tool-no-return），
-        这些多次补写会在无框架整表覆盖收尾的历史里叠成 [U, U, …] 永久重复——正是
-        2.4.1 要杀的悬挂重复 user，而 user 侧无幂等去重守卫（state_persistence 豁免
-        role=="user"）兜不住。故这里用 event extra 做每轮 once-guard：整轮在框架
-        session_lock 内单协程顺序执行，check-then-set 无竞态；只在【真正写入后】置位，
-        谓词早退 / text 空的路径不消费守卫（不影响后续该补的轮次）。"""
+    async def _backfill_turn_if_framework_skips(
+        self, event: Any, response: Any
+    ) -> None:
+        """Atomically persist the turn when AstrBot will not do so itself."""
         if not self._has_conversation_manager():
             return
         get_extra = getattr(event, "get_extra", None)
-        if callable(get_extra) and get_extra("_syl_user_backfilled", False):
-            return  # 本轮已补过 user，绝不再补（tool 循环多次触发 / finally+钩子双入口）
+        if callable(get_extra) and (
+            get_extra("_syl_turn_backfilled", False)
+            or get_extra("_syl_user_backfilled", False)
+        ):
+            return
         if self._framework_will_persist_this_turn(event, response):
-            return  # 框架是本轮 user 权威写者，插件绝不写（不消费 once-guard）
-        text = self._text(event)  # 响应期完整重建（v2core 已在 integration.py:1048 实证可行）
-        if not text:
-            return  # 不消费 once-guard
-        await self._sync_message_to_conv_mgr(self._session_key(event), "user", text)
+            return
+
+        user_text = self._text(event)
+        if not user_text:
+            return
+
+        stopped = bool(event.is_stopped()) if hasattr(event, "is_stopped") else False
+        assistant_text = ""
+        if response is not None and not stopped:
+            role = getattr(response, "role", "assistant") or "assistant"
+            completion = getattr(response, "completion_text", "") or ""
+            if role == "assistant" and completion:
+                assistant_text = completion
+
+        sync_turn = getattr(self, "_sync_turn_to_conv_mgr", None)
+        if callable(sync_turn):
+            success = bool(
+                await sync_turn(
+                    self._session_key(event), user_text, assistant_text
+                )
+            )
+        else:
+            # Keep narrow legacy stubs working; the real plugin always uses the
+            # atomic turn delegate above.
+            result = await self._sync_message_to_conv_mgr(
+                self._session_key(event), "user", user_text
+            )
+            success = True if result is None else bool(result)
+
+        if not success:
+            return
+
         set_extra = getattr(event, "set_extra", None)
         if callable(set_extra):
-            try:
-                set_extra("_syl_user_backfilled", True)  # 仅写入成功后消费守卫
-            except Exception:  # 置位失败不回滚已写入；下次同轮触发靠上面 get 兜（读到旧值 False 会重写，但同一 event 内 set 已尝试，属极端降级，宁可偶尔重写也不阻断）
-                pass
+            for key in ("_syl_turn_backfilled", "_syl_user_backfilled"):
+                try:
+                    set_extra(key, True)
+                except Exception:
+                    pass
+
+    async def _backfill_user_if_framework_skips(
+        self, event: Any, response: Any
+    ) -> None:
+        """Compatibility wrapper for the grey.4 atomic turn backfill."""
+        await EmotionalStatePlugin._backfill_turn_if_framework_skips(
+            self, event, response
+        )
 
     def _init_persona_manager(self) -> Any:
         return self._state_persistence.init_persona_manager()
@@ -3565,7 +3617,7 @@ class EmotionalStatePlugin(Star):
         )
 
     # LLM Tool: query_agent_state
-    @filter.llm_tool(name="query_agent_state")
+    @_model_function_tool(name="query_agent_state")
     async def _llm_tool_query_agent_state(self, event: Any) -> Any:
         """查询 Sylanne 当前情感状态和计算脊柱摘要。"""
         return await self._public_api._llm_tool_query_agent_state(event)

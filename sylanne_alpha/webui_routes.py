@@ -1,7 +1,7 @@
 """WebUI 路由处理器模块（AstrBot register_web_api 版本）。
 
 封装所有通过 AstrBot 内置 Web 服务器注册的 HTTP 路由处理函数。
-这些路由运行在 AstrBot 的 Quart 应用内，受 AstrBot 自身的认证保护。
+这些路由运行在 AstrBot 的 FastAPI 应用内，受 AstrBot 自身的认证保护。
 
 与 webui_server.py 的区别：
 - 本模块的路由注册在 AstrBot 的 Web 服务器上（共享端口）
@@ -123,7 +123,7 @@ class WebUIRoutes:
     """封装所有 WebUI HTTP 路由处理器。
 
     通过 self._p 引用插件实例，访问 hosts/config/memory 等资源。
-    所有 handler 方法都是 async，返回 dict 由 Quart 自动序列化为 JSON。
+    所有 handler 方法都是 async，返回 dict 由 FastAPI 自动序列化为 JSON。
     """
 
     def __init__(self, plugin: PluginHost) -> None:
@@ -137,9 +137,9 @@ class WebUIRoutes:
         return await self._p._sylanne_memory_settings_page_payload()
 
     async def memory_settings_post_handler(self) -> dict[str, Any]:
-        from quart import request as quart_request
+        from astrbot.api.web import request
 
-        body = await quart_request.get_json(silent=True) or {}
+        body = await request.json() or {}
         return await self._p._update_sylanne_memory_settings_from_page(body)
 
     async def lineage_observatory_handler(self) -> dict[str, Any]:
@@ -152,13 +152,20 @@ class WebUIRoutes:
 
     async def page_handler(self) -> Any:
         """Return the full WebUI HTML page."""
-        from quart import Response
+        from astrbot.api.web import file_response, stream_response
 
         # WEBUI_HTML is a module-level constant in main.py; access via plugin module
         import main as _main_mod
 
+        dashboard_path = Path(self._plugin_dir) / "UI" / "index.html"
+        if dashboard_path.exists():
+            return file_response(
+                dashboard_path, content_type="text/html; charset=utf-8"
+            )
         html = getattr(_main_mod, "WEBUI_HTML", "<html><body>unavailable</body></html>")
-        return Response(html, content_type="text/html; charset=utf-8")
+        return stream_response(
+            [html], content_type="text/html; charset=utf-8"
+        )
 
     async def state_handler(self) -> dict[str, Any]:
         """返回完整状态 JSON，供 WebUI dashboard 渲染。
@@ -168,9 +175,9 @@ class WebUIRoutes:
         支持 ?session= 参数指定会话，默认选择最活跃的会话。
         """
         logger.debug("Sylanne WebUI: /api/state handler HIT")
-        from quart import request as quart_request
+        from astrbot.api.web import request
 
-        requested_session = str(quart_request.args.get("session") or "").strip()
+        requested_session = str(request.query.get("session") or "").strip()
         all_sessions = self._p._known_webui_sessions(requested_session)
         # For overview (empty/default), use the most recently active session
         if (
@@ -446,9 +453,9 @@ class WebUIRoutes:
 
     async def settings_post_handler(self) -> dict[str, Any]:
         """接收设置面板提交的配置更新，按 schema 做类型强转后持久化。"""
-        from quart import request as quart_request
+        from astrbot.api.web import request
 
-        body = await quart_request.get_json(silent=True) or {}
+        body = await request.json() or {}
         schema = self._p._load_conf_schema()
         updated: list[str] = []
         for key, value in body.items():
@@ -488,13 +495,13 @@ class WebUIRoutes:
 
     async def computation_logs_handler(self) -> dict[str, Any]:
         """返回最近的计算日志条目，支持 ?limit= 和 ?session= 过滤。"""
-        from quart import request as quart_request
+        from astrbot.api.web import request
 
         try:
-            limit = max(1, min(200, int(quart_request.args.get("limit", "50"))))
+            limit = max(1, min(200, int(request.query.get("limit", "50"))))
         except (TypeError, ValueError):
             limit = 50
-        requested_session = str(quart_request.args.get("session") or "").strip()
+        requested_session = str(request.query.get("session") or "").strip()
         logs = list(self._p._computation_logs)
         if requested_session:
             logs = [
@@ -520,7 +527,7 @@ class WebUIRoutes:
         支持跨会话聚合（overview 模式）或单会话查看。
         自动适配新版 MemorySystem 三层架构和旧版 body.memory.traces。
         """
-        from quart import request as quart_request
+        from astrbot.api.web import request
 
         def _bounded_limit(raw: Any) -> int:
             try:
@@ -586,8 +593,8 @@ class WebUIRoutes:
                 )
             return bool(list(getattr(state, "records", []) or []))
 
-        limit = _bounded_limit(quart_request.args.get("limit", "50"))
-        session_key = str(quart_request.args.get("session") or "").strip()
+        limit = _bounded_limit(request.query.get("limit", "50"))
+        session_key = str(request.query.get("session") or "").strip()
         all_sessions = self._p._known_webui_sessions(session_key)
         overview_requested = not session_key or session_key == "default"
         if session_key and session_key not in all_sessions:
@@ -910,10 +917,10 @@ class WebUIRoutes:
 
     async def memory_meltdown_handler(self) -> dict[str, Any]:
         """清除指定会话的所有记忆池。需要 token 验证（仅服务端 nonce）。"""
-        from quart import request as quart_request
+        from astrbot.api.web import request
 
         try:
-            body = await quart_request.get_json()
+            body = await request.json()
         except Exception:
             body = {}
         if not isinstance(body, dict):
@@ -968,9 +975,9 @@ class WebUIRoutes:
 
     async def meltdown_nonce_handler(self) -> dict[str, Any]:
         """GET /api/meltdown_nonce — 生成并返回一次性 nonce。"""
-        from quart import request as quart_request
+        from astrbot.api.web import request
 
-        session = str(quart_request.args.get("session") or "").strip()
+        session = str(request.query.get("session") or "").strip()
         nonce = self.generate_meltdown_nonce(session)
         return {"nonce": nonce}
 
@@ -984,9 +991,9 @@ class WebUIRoutes:
         异步启动 LLM 评估流程，立即返回预估时间。
         评估完成后 consolidation_candidates() 会有已确认条目可供下沉。
         """
-        from quart import request as quart_request
+        from astrbot.api.web import request
 
-        body = await quart_request.get_json(silent=True) or {}
+        body = await request.json() or {}
         session = str(body.get("session", "")).strip()
         if not session:
             return {"ok": False, "error": "missing session param"}
@@ -1017,9 +1024,9 @@ class WebUIRoutes:
             {"ok": true, "sunk": <下沉条目数>}
             {"ok": false, "error": "..."}  — 无可下沉条目或会话无效时
         """
-        from quart import request as quart_request
+        from astrbot.api.web import request
 
-        session = str(quart_request.args.get("session") or "").strip()
+        session = str(request.query.get("session") or "").strip()
         if not session:
             return {"ok": False, "error": "missing session param"}
 
@@ -1209,12 +1216,12 @@ class WebUIRoutes:
 
     async def life_controls_handler(self) -> dict[str, Any]:
         """POST /api/life/controls — 用户控制（开关 / 强度 / 清除 journal/projects/plan）。"""
-        from quart import request as quart_request
+        from astrbot.api.web import request
 
         life_sim = getattr(self._p, "_life_simulator", None)
         if life_sim is None:
             return {"error": "life sim not available"}
-        body = await quart_request.get_json(silent=True) or {}
+        body = await request.json() or {}
         if not isinstance(body, dict):
             return {"error": "invalid body"}
         action = str(body.get("action", "") or "").strip()
@@ -1285,9 +1292,9 @@ class WebUIRoutes:
 
         导出内容包括：记忆系统状态、人格参数、伤痕/虚空状态、计算栈快照。
         """
-        from quart import request as quart_request
+        from astrbot.api.web import request
 
-        session_key = str(quart_request.args.get("session_key") or "").strip()
+        session_key = str(request.query.get("session_key") or "").strip()
         if not session_key:
             return {"ok": False, "error": "missing session_key param"}
 
@@ -1349,9 +1356,9 @@ class WebUIRoutes:
 
         删除内容：记忆系统、持久化 KV 状态、host 实例、对话缓冲。
         """
-        from quart import request as quart_request
+        from astrbot.api.web import request
 
-        session_key = str(quart_request.args.get("session_key") or "").strip()
+        session_key = str(request.query.get("session_key") or "").strip()
         if not session_key:
             return {"ok": False, "error": "missing session_key param"}
 
@@ -1568,23 +1575,23 @@ class WebUIRoutes:
 
     async def logo_handler(self) -> Any:
         """返回插件 logo.png，设置正确的 Content-Type。"""
-        from quart import Response
+        from astrbot.api.web import error_response, file_response
 
         logo_path = Path(self._plugin_dir) / "logo.png"
         if not logo_path.exists():
-            return Response("Not Found", status=404)
-        data = logo_path.read_bytes()
-        return Response(data, content_type="image/png")
+            return error_response("Not Found", status_code=404)
+        return file_response(logo_path, content_type="image/png")
 
     async def dashboard_handler(self) -> Any:
         """通过 AstrBot 内置 Web 服务器提供 WebUI dashboard HTML 页面。"""
-        from quart import Response
+        from astrbot.api.web import error_response, file_response
 
         dashboard_path = Path(self._plugin_dir) / "UI" / "index.html"
         if not dashboard_path.exists():
-            return Response("Dashboard not found", status=404)
-        html = dashboard_path.read_text(encoding="utf-8")
-        return Response(html, content_type="text/html; charset=utf-8")
+            return error_response("Dashboard not found", status_code=404)
+        return file_response(
+            dashboard_path, content_type="text/html; charset=utf-8"
+        )
 
     # ------------------------------------------------------------------
     # Item 47: /health 健康检查（不需要认证）
@@ -1646,9 +1653,9 @@ class WebUIRoutes:
 
     async def config_import_handler(self) -> dict[str, Any]:
         """POST /api/config_import — 接收 JSON body 覆盖写入配置（安全字段保护）。"""
-        from quart import request as quart_request
+        from astrbot.api.web import request
 
-        body = await quart_request.get_json(silent=True)
+        body = await request.json()
         if not isinstance(body, dict) or not body:
             return {"ok": False, "error": "expected_object"}
         config = getattr(self._p, "_config", None)
@@ -1681,11 +1688,11 @@ class WebUIRoutes:
 
     async def v2core_state_handler(self) -> dict[str, Any]:
         """v2core 认知核状态（嵌入式 AstrBot Web 服务器镜像，纯只读）。"""
-        from quart import request as quart_request
+        from astrbot.api.web import request
 
         from sylanne_alpha.webui_server import _v2core_state_payload
 
-        session = str(quart_request.args.get("session") or "").strip()
+        session = str(request.query.get("session") or "").strip()
         return _v2core_state_payload(self._p, session=session)
 
     # ------------------------------------------------------------------
@@ -1695,20 +1702,20 @@ class WebUIRoutes:
 
     async def admin_inspect_handler(self) -> dict[str, Any]:
         """GET /api/admin/inspect — 单 session 记忆诊断（纯只读）。"""
-        from quart import request as quart_request
+        from astrbot.api.web import request
 
         from sylanne_alpha.webui_server import _admin_inspect_payload
 
-        session = str(quart_request.args.get("session") or "").strip()
+        session = str(request.query.get("session") or "").strip()
         return await _admin_inspect_payload(self._p, session=session)
 
     async def admin_quarantine_view_handler(self) -> dict[str, Any]:
         """GET /api/admin/quarantine_view — quarantine 侧车只读视图。"""
-        from quart import request as quart_request
+        from astrbot.api.web import request
 
         from sylanne_alpha.webui_server import _admin_quarantine_view_payload
 
-        session = str(quart_request.args.get("session") or "").strip()
+        session = str(request.query.get("session") or "").strip()
         return await _admin_quarantine_view_payload(self._p, session=session)
 
     async def admin_pending_deletes_handler(self) -> dict[str, Any]:
@@ -1723,9 +1730,9 @@ class WebUIRoutes:
 
     async def proactive_feedback_handler(self) -> dict[str, Any]:
         """接收用户对主动发言的反馈（positive/negative）。"""
-        from quart import request as quart_request
+        from astrbot.api.web import request
 
-        body = await quart_request.get_json(silent=True) or {}
+        body = await request.json() or {}
         session_key = str(body.get("session_key", "")).strip()
         timestamp = float(body.get("timestamp", 0))
         rating = str(body.get("rating", "")).strip()
@@ -1754,9 +1761,9 @@ class WebUIRoutes:
         """GET /api/memory/decay_curve?memory_id=xxx — 返回记忆衰减时间序列。"""
         import math as _math
 
-        from quart import request as quart_request
+        from astrbot.api.web import request
 
-        memory_id = str(quart_request.args.get("memory_id") or "").strip()
+        memory_id = str(request.query.get("memory_id") or "").strip()
         if not memory_id:
             return {"ok": False, "error": "missing memory_id param"}
 
@@ -1862,9 +1869,9 @@ class WebUIRoutes:
 
         期望格式：{"embodiment_five": {...}, "sylanne_six": {...}, "description": "..."}
         """
-        from quart import request as quart_request
+        from astrbot.api.web import request
 
-        body = await quart_request.get_json(silent=True)
+        body = await request.json()
         if not isinstance(body, dict):
             return {"ok": False, "error": "expected JSON object"}
 

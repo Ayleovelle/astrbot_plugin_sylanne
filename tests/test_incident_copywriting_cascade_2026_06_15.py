@@ -456,7 +456,7 @@ class TestOutputPathCoverageHardening:
 
         src = open(main_mod.__file__, encoding="utf-8").read()
         assert "on_using_llm_tool" in src
-        assert "_optional_using_llm_tool_filter" in src
+        assert "_optional_tool_use_filter" in src
         # 钩子方法存在
         assert hasattr(main_mod.EmotionalStatePlugin, "on_using_llm_tool")
 
