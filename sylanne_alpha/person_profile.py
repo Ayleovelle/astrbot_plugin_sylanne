@@ -150,6 +150,7 @@ class PersonProfile:
 
     # ---- B3 幂等播种锚 ----
     last_applied_transient: float = 0.0
+    last_applied_volatility_transient: float = 0.0
 
     schema_ver: int = 1
 
@@ -188,6 +189,9 @@ class PersonProfile:
         self.last_applied_transient = _clamp(
             _finite_float(self.last_applied_transient, 0.0), -_APPLY_CAP, _APPLY_CAP
         )
+        self.last_applied_volatility_transient = _clamp(
+            _finite_float(self.last_applied_volatility_transient, 0.0), -_APPLY_CAP, _APPLY_CAP
+        )
 
         try:
             self.schema_ver = int(self.schema_ver)
@@ -210,6 +214,7 @@ class PersonProfile:
             "tension": self.tension,
             "last_interaction_ts": self.last_interaction_ts,
             "last_applied_transient": self.last_applied_transient,
+            "last_applied_volatility_transient": self.last_applied_volatility_transient,
             "schema_ver": self.schema_ver,
         }
 
@@ -233,6 +238,7 @@ class PersonProfile:
             tension=d.get("tension", 0.0),
             last_interaction_ts=d.get("last_interaction_ts", None),
             last_applied_transient=d.get("last_applied_transient", 0.0),
+            last_applied_volatility_transient=d.get("last_applied_volatility_transient", 0.0),
             schema_ver=d.get("schema_ver", 1),
         )
 
@@ -351,6 +357,11 @@ def decay_transient(value: float, delta_t: float, half_life_seconds: float) -> f
     return _clamp(decayed, -_TRANSIENT_STORAGE_CAP, _TRANSIENT_STORAGE_CAP)
 
 
+_SIX_MIX_ALPHA = 0.3
+_WARMTH_BASELINE_ALPHA = 0.1
+_TRANSIENT_MIX_ALPHA = 0.5
+
+
 def decay_profile_transient(profile: PersonProfile, now: float) -> PersonProfile:
     """返回 warmth_transient/volatility_transient 衰减到 `now` 后的 profile 副本（纯函数）。
 
@@ -374,3 +385,314 @@ def decay_profile_transient(profile: PersonProfile, now: float) -> PersonProfile
             profile.volatility_transient, dt, VOLATILITY_HALF_LIFE_SECONDS
         ),
     )
+
+
+# ---------------------------------------------------------------------------
+# 落盘软同步（§3 关系+人格 / §4.1 transient 写入点）—— persist_kernel 钩子消费的
+# 纯合并函数。不读写 KV、不碰 host/kernel，可脱离 plugin 独立单测。
+# ---------------------------------------------------------------------------
+
+
+def _phase_from_counts(
+    preference_count: int, boundary_count: int, progress_count: int, repair_count: int
+) -> str:
+    """与 body.py:524-530 `relationship_memory()` 同一套阈值公式，供
+    PersonProfile.phase 字段在落盘合并后同步刷新（不是必需字段——货架/播种只
+    读四计数本身，phase 只是展示性冗余——但保持一致，避免两处口径分叉）。
+    """
+    event_count = preference_count + boundary_count + progress_count + repair_count
+    weight = event_count / 12.0
+    if weight >= 0.6:
+        return "active_continuity"
+    if weight >= 0.25:
+        return "forming_continuity"
+    return "low_signal"
+
+
+def mix_six_snapshot(
+    old: dict[str, float], new: dict[str, float], alpha: float = _SIX_MIX_ALPHA
+) -> dict[str, float]:
+    """Sylanne Six 指数混合（design §3(2)）。
+
+    - 键同时存在于新旧快照：`old*(1-alpha) + new*alpha`（慢混合，α 未在
+      design 定死，本实现取 0.3——单次落盘不会把画像拉一半，需要多次落盘才能
+      靠近新观测，与 warmth_transient 的"单次对话最多拉一半"不同调）。
+    - 键只在新快照：直接采纳（首次观测，没有旧锚点可混，不应隐式当作
+      "旧值=0" 参与混合，否则会把新特质硬拉向 0）。
+    - 键只在旧快照：保留旧值（本次落盘没有新观测，不应凭空归零）。
+    - 结果经 `_normalize_six_snapshot` 二次夹紧 [0,1] 并过滤非法键（防御性，
+      调用方通常已保证输入合法）。
+    """
+    merged: dict[str, float] = dict(old)
+    for key in _SIX_TRAIT_KEYS:
+        if key in new:
+            if key in old:
+                merged[key] = old[key] * (1.0 - alpha) + new[key] * alpha
+            else:
+                merged[key] = new[key]
+    return _normalize_six_snapshot(merged)
+
+
+def merge_relationship_counts(
+    profile: PersonProfile, counts: dict[str, int] | None
+) -> tuple[int, int, int, int, str]:
+    """关系四计数 element-wise max 合并（design §3(1)）。
+
+    `counts` 为 None 或空 dict → 原样返回 profile 现有四计数（无新观测，
+    不应回退清零）。返回值末尾附带按合并后计数重算的 phase。
+    """
+    if not counts:
+        return (
+            profile.preference_count,
+            profile.boundary_count,
+            profile.progress_count,
+            profile.repair_count,
+            profile.phase,
+        )
+    pref = max(profile.preference_count, _finite_nonneg_int(counts.get("preference_count", 0)))
+    bound = max(profile.boundary_count, _finite_nonneg_int(counts.get("boundary_count", 0)))
+    prog = max(profile.progress_count, _finite_nonneg_int(counts.get("progress_count", 0)))
+    repair = max(profile.repair_count, _finite_nonneg_int(counts.get("repair_count", 0)))
+    return pref, bound, prog, repair, _phase_from_counts(pref, bound, prog, repair)
+
+
+def apply_flush_observation(
+    profile: PersonProfile,
+    *,
+    now: float,
+    current_warmth: float,
+    current_volatility: float,
+    relationship_counts: dict[str, int] | None = None,
+    six_observed: dict[str, float] | None = None,
+    valence: float | None = None,
+    arousal: float | None = None,
+    tension: float | None = None,
+    update_relationship_affect: bool = True,
+) -> PersonProfile:
+    """`persist_kernel` 落盘钩子的合并入口（design §3 / §4.1，§8 B4 顺序冻结）。
+
+    纯函数：不修改入参 `profile`，返回新实例。**顺序在此冻结，不得调换**
+    （B4 明文"必须定义 flush 内 transient 计算与 baseline 计算的先后顺序并冻结"）：
+
+    1. 关系四计数：element-wise max 合并（不依赖顺序，放前面纯粹为了函数
+       内可读性）。
+    2. Sylanne Six：指数混合。
+    3. transient：先把旧 transient 按墙钟衰减到 `now`；`warmth_transient`
+       的新观测值用【旧】`warmth_baseline`（本步骤更新前的基线）算
+       `current_warmth - old_baseline - profile.last_applied_transient`
+       （同 baseline 采样点一样剔除已跨群施加的锚点值——否则跨群播种注入
+       的种子会被当作"这次会话自己观测到的偏离"重新计入 transient，
+       种子自己的回声会在下一次落盘时又被读回，永不衰减到零），与衰减后
+       的旧值做 EMA 混合，重新钳 ±0.3 存储帽；`volatility_transient` 同理，
+       新观测直接取 `current_volatility`（无基线概念可减）。
+    4. `warmth_baseline`：**最后一步**才更新，采样点＝
+       `current_warmth - profile.last_applied_transient`（B4："剔除已施加
+       的 transient"——用的是【已施加锚点】而非上一步刚算出的"观测 transient"，
+       两者含义不同：后者是"当前偏离基线多少"，前者是"这个 kernel 因跨群
+       播种被注入了多少"，基线要减去的是后者），与旧基线做慢 EMA（α=0.1）。
+    5. `last_interaction_ts` 推进到 `now`（写侧职责——见
+       `decay_profile_transient` 文档字符串，读时衰减不推进锚点）。
+    6. `valence`/`arousal`/`tension`：仅当调用方传入非 None 时覆盖（"只存
+       不施加"的最新快照，无定义动力学，直接采纳最新观测；§4.4/§8 B5）。
+
+    `update_relationship_affect=False`（对应 `cross_relationship` 开关关闭，
+    即便 `cross_personality` 单独开着）时，步骤 3/4/5 以及
+    `valence`/`arousal`/`tension` 全部跳过、原样保留 profile 现有值——
+    warmth 长期基线/transient/`last_interaction_ts` 全部挂在
+    `cross_relationship` 这一个开关下（design §4.3 "开关归属"），不应该因为
+    只开了 `cross_personality` 就被静默污染。
+
+    所有产出的数值型字段都经由 `PersonProfile.__post_init__`（`replace()` 会
+    重新触发）二次夹紧，不依赖本函数自行钳到位。
+    """
+    pref, bound, prog, repair, phase = merge_relationship_counts(profile, relationship_counts)
+
+    new_six = mix_six_snapshot(profile.six_snapshot, six_observed or {})
+
+    if not update_relationship_affect:
+        return replace(
+            profile,
+            preference_count=pref,
+            boundary_count=bound,
+            progress_count=prog,
+            repair_count=repair,
+            phase=phase,
+            six_snapshot=new_six,
+        )
+
+    decayed = decay_profile_transient(profile, now)
+
+    old_baseline = profile.warmth_baseline
+    # 与 baseline 采样点（下方 `baseline_sample`）一致地剔除 `last_applied_transient`：
+    # 二者取自同一 `current_warmth`，若这里不去种而 baseline 去种，跨群播种的种子
+    # 会被本函数当作"这次会话自己的新偏离"重新计入 transient，下次又原样播种回去，
+    # 形成永不衰减的回声（详见本函数 docstring 步骤 3）。
+    observed_warmth_transient = (
+        _finite_float(current_warmth, old_baseline) - old_baseline - profile.last_applied_transient
+    )
+    new_warmth_transient = _clamp(
+        decayed.warmth_transient * (1.0 - _TRANSIENT_MIX_ALPHA)
+        + observed_warmth_transient * _TRANSIENT_MIX_ALPHA,
+        -_TRANSIENT_STORAGE_CAP,
+        _TRANSIENT_STORAGE_CAP,
+    )
+
+    observed_volatility = _finite_float(current_volatility, 0.0)
+    new_volatility_transient = _clamp(
+        decayed.volatility_transient * (1.0 - _TRANSIENT_MIX_ALPHA)
+        + observed_volatility * _TRANSIENT_MIX_ALPHA,
+        -_TRANSIENT_STORAGE_CAP,
+        _TRANSIENT_STORAGE_CAP,
+    )
+
+    baseline_sample = _clamp(
+        _finite_float(current_warmth, old_baseline) - profile.last_applied_transient, 0.0, 1.0
+    )
+    new_baseline = _clamp(
+        old_baseline * (1.0 - _WARMTH_BASELINE_ALPHA) + baseline_sample * _WARMTH_BASELINE_ALPHA,
+        0.0,
+        1.0,
+    )
+
+    return replace(
+        profile,
+        preference_count=pref,
+        boundary_count=bound,
+        progress_count=prog,
+        repair_count=repair,
+        phase=phase,
+        six_snapshot=new_six,
+        warmth_baseline=new_baseline,
+        warmth_transient=new_warmth_transient,
+        volatility_transient=new_volatility_transient,
+        valence=profile.valence if valence is None else valence,
+        arousal=profile.arousal if arousal is None else arousal,
+        tension=profile.tension if tension is None else tension,
+        last_interaction_ts=now,
+    )
+
+
+def seed_transient_delta(
+    profile: PersonProfile, now: float, kernel_last_activity: float
+) -> tuple[dict[str, float], float] | None:
+    """host 出生播种 / LRU 重建守卫过的 transient 施加计算（design §4.1/§4.3，
+    §8 B3 幂等播种）。
+
+    纯函数：不改 profile、不碰 kernel，调用方负责把返回的 delta 喂给
+    `AlphaBodyState.apply_vector_delta`，并把返回的新锚点值回写进 profile 的
+    `last_applied_transient`。
+
+    Args:
+        profile: 当前人格档案。
+        now: 播种时刻的墙钟时间戳。
+        kernel_last_activity: 该 session 已恢复 kernel 的最后活动时间戳
+            （`host.kernel.last_event.get("now")`，真正首次出生传 0.0）。
+
+    Returns:
+        None：guard 不通过——`profile.last_interaction_ts` 为 `None`，或不晚于
+        `kernel_last_activity`（该 kernel 自己的活动已经不早于 profile 记录的
+        最近互动，说明没有"来自别处的新情绪"需要播种，直接跳过，防止 LRU
+        驱逐重建把已经反映在 kernel 里的旧情绪重复叠加——design §4.3 "自激"
+        坑的结构化解法）。
+        `(delta, new_last_applied_transient, new_last_applied_volatility_transient)`：
+        `delta` 的 key 只可能是 `"temperature.warmth"`/`"temperature.volatility"`
+        的子集（可能为空 dict——目标值衰减到零时无需调用 `apply_vector_delta`，
+        但两个锚点仍要推进），硬 assert 保证绝不含 `valence`/`arousal`/`tension`
+        （§8 B5 物理拒绝播种，即便未来有人不慎在上游拼错 key 传进来）；两个
+        `new_last_applied_*` 都是调用方应回写进 profile 的新锚点值。
+
+    B3 语义："净施加恒等于当前衰减值，不是历史施加值的累加"——`temperature.warmth`
+    与 `temperature.volatility` 在 `apply_vector_delta` 里都是【累加式】写入
+    （body.py `self.temperature.volatility = _clamp(self.temperature.volatility +
+    delta.get(...))`，与 warmth 同一形态，不是"设置为"），因此两者都必须走
+    净施加：目标值先钳到锚点字段自身的存储上限（±0.15，即 `_APPLY_CAP`，与
+    `PersonProfile.__post_init__` 同一把尺），再算
+    `net = target - profile.last_applied_*` 作为本次实际注入 kernel 的增量。
+    若 volatility 不做这层净施加（早期实现的简化），LRU 反复驱逐重建时
+    （guard 允许——该人在别处持续活跃，`profile.last_interaction_ts` 始终晚于
+    重建出的 kernel 活动时间）会把 `target_volatility` 逐次累加进已经播种过的
+    kernel，击穿 ±0.15 单次施加帽、最终顶到 `apply_vector_delta` 的 [0,1] clamp
+    上限——这不是"轻微累积"，是无界累积，必须与 warmth 同一套净施加语义。
+    """
+    if profile.last_interaction_ts is None:
+        return None
+    if not math.isfinite(kernel_last_activity):
+        kernel_last_activity = 0.0
+    if profile.last_interaction_ts <= kernel_last_activity:
+        return None
+
+    decayed = decay_profile_transient(profile, now)
+
+    target_warmth = _clamp(decayed.warmth_transient, -_APPLY_CAP, _APPLY_CAP)
+    net_warmth = target_warmth - profile.last_applied_transient
+    target_volatility = _clamp(decayed.volatility_transient, -_APPLY_CAP, _APPLY_CAP)
+    net_volatility = target_volatility - profile.last_applied_volatility_transient
+
+    delta: dict[str, float] = {}
+    if abs(net_warmth) >= _TRANSIENT_ZERO_EPS:
+        delta["temperature.warmth"] = net_warmth
+    if abs(net_volatility) >= _TRANSIENT_ZERO_EPS:
+        delta["temperature.volatility"] = net_volatility
+
+    # B5 硬闸：valence/arousal/tension 在 2.6.0 E 核落地前物理禁止进入任何播种
+    # 路径。用运行期 RuntimeError 而非裸 assert——后者在 python -O / PYTHONOPTIMIZE
+    # 下被整体剥离，"失败即崩溃"就落空。防止未来"顺手"接上播种而没人注意到这是
+    # 语义翻转（只存不施加 → 存了就施加）。
+    _forbidden = {"valence", "arousal", "tension"} & delta.keys()
+    if _forbidden:
+        raise RuntimeError(
+            f"B5 违规：{sorted(_forbidden)} 禁止进入播种 delta"
+            "（本期只存不施加，2.6.0 E 核落地前不得解除）"
+        )
+
+    return delta, target_warmth, target_volatility
+
+
+async def reset_person_profile_transient(plugin: Any, platform: str, sender_id: str) -> None:
+    """B5 purge 级联专用：只清空某人档案里"本次会话可能产生的瞬时/静态隐私面"
+    字段（`transient_affect` 的 6 个字段 + 两个 B3 幂等播种锚
+    `last_applied_transient`/`last_applied_volatility_transient`），
+    保留关系四计数 / Sylanne Six / `warmth_baseline`——后者是跨会话长期状态，
+    不属于"这次会话产生的"静态隐私面（design §7 purge 一致性 / §8 B5）。
+
+    无 KV API / 键为空 / 档案本就是默认值（无需写入）均静默跳过。
+
+    与 soft-sync 走【同一把 per-person 锁】串行化 load→clear→save：否则 purge
+    与并发 soft-sync（同一人跨会话）交错时，soft-sync 的在途 merge 结果可能覆盖
+    purge 刚清零的 transient/valence，令已删隐私面复活（§7 purge 一致性红线）。
+    锁取自 plugin._state_persistence._get_person_profile_lock（与 soft-sync 同源）；
+    取不到（如测试 fake 无该访问器）则退化为无锁，仅记忆语义降级、不改正确性。
+    """
+    sp = getattr(plugin, "_state_persistence", None)
+    _getter = getattr(sp, "_get_person_profile_lock", None)
+    lock = _getter(platform, sender_id) if callable(_getter) else None
+    if lock is not None:
+        await lock.acquire()
+    try:
+        profile = await load_person_profile(plugin, platform, sender_id)
+        if (
+            profile.warmth_transient == 0.0
+            and profile.volatility_transient == 0.0
+            and profile.valence == 0.0
+            and profile.arousal == 0.0
+            and profile.tension == 0.0
+            and profile.last_interaction_ts is None
+            and profile.last_applied_transient == 0.0
+            and profile.last_applied_volatility_transient == 0.0
+        ):
+            return  # 已经是干净态，无需写入
+        cleared = replace(
+            profile,
+            warmth_transient=0.0,
+            volatility_transient=0.0,
+            valence=0.0,
+            arousal=0.0,
+            tension=0.0,
+            last_interaction_ts=None,
+            last_applied_transient=0.0,
+            last_applied_volatility_transient=0.0,
+        )
+        await save_person_profile(plugin, platform, sender_id, cleared)
+    finally:
+        if lock is not None:
+            lock.release()

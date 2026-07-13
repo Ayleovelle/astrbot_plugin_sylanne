@@ -215,6 +215,22 @@ class StatePersistence:
         # _scan_pending_deletes 载入；扫描完成前为空。在此之前 WebUI load 一律不准入
         # store（只返回游离副本渲染），防抢跑的读把崩溃残留的删除意图漏检、复活归档。
         self._pending_delete_scan_done: bool = False
+        # v2.5.0 跨群 profile 软同步（§3/§4.1/§8 B1-B4）：per-person 锁，键为
+        # f"{platform}:{sender_id}"，只护 PersonProfile 的读改写临界区
+        # （load → 纯函数合并 → save），与 per-session 锁体系
+        # （session_context.py 的 session_lock/conv_sync_lock）完全独立、互不
+        # 干扰——design §3"并发"一节明文这是新增的独立锁，不复用/不混入既有
+        # session 锁语义。惰性建，无容量上限清理（人数量级远小于 session 数，
+        # 且锁本身极轻量；若未来证明有界需要，仿 session_locks 加淘汰）。
+        self._person_profile_locks: dict[str, asyncio.Lock] = {}
+
+    def _get_person_profile_lock(self, platform: str, sender_id: str) -> asyncio.Lock:
+        key = f"{platform}:{sender_id}"
+        lock = self._person_profile_locks.get(key)
+        if lock is None:
+            lock = asyncio.Lock()
+            self._person_profile_locks[key] = lock
+        return lock
 
     def _current_memory_occupant(self, session_key: str) -> Any:
         """返回某 session 在 store 里当前占位的 MemorySystem（占位者权威兜底用）。"""
@@ -460,6 +476,115 @@ class StatePersistence:
             await asyncio.to_thread(host.runtime.save, host.kernel)
         except Exception as e:
             logger.warning(f"Sylanne kernel file persist: {e}", exc_info=True)
+
+        # v2.5.0 跨群记忆 profile 软同步（§3/§4.1）——与上面的 dirty-KV/文件落盘
+        # 完全并列、不依赖 dirty_set 非空（profile 落盘节奏独立于 kernel KV 落盘
+        # 节奏）。默认全关（cross_relationship/cross_personality 均 False 且
+        # mode="off"）时 `cross_session_settings` 直接短路，本段零成本、零副作用。
+        try:
+            await self._soft_sync_person_profile(session_key, host, snapshot)
+        except Exception as e:
+            logger.debug(f"Sylanne person profile soft-sync skipped: {e}")
+
+    async def _soft_sync_person_profile(
+        self, session_key: str, host: SylanneAlphaHost, snapshot: dict[str, Any]
+    ) -> None:
+        """persist_kernel 专用软同步钩子（design §3 关系+人格 / §4.1 transient）。
+
+        本方法只做"读身份→读现有档案→纯函数合并→写回"，不碰 kernel/host 本身
+        （kernel 侧的施加只发生在出生播种点，见 `session_context.host()`）。
+        任一前置条件不满足即静默 no-op：无跨群开关 / 认不出身份 / 反向索引登记
+        失败（B5：先登记成功再落盘，同货架写侧既定次序）。
+        """
+        from .cross_session_config import cross_session_settings
+        from .person_profile import (
+            apply_flush_observation,
+            load_person_profile,
+            save_person_profile,
+        )
+        from .person_shelf import register_person_shelf_origin
+
+        settings = cross_session_settings(self._p)
+        if not settings.enabled:
+            # mode="off"：§7 "停读停写旁挂层"——即便 cross_relationship/
+            # cross_personality 某个 bool 已被提前拧开，主档位仍是 off 时
+            # 一律不得把（含 valence/arousal/tension 静态隐私面在内的）
+            # profile 写进 KV。
+            return
+        if not (settings.cross_relationship or settings.cross_personality):
+            return
+
+        identity = self._p._store.get_authenticated_identity(session_key)
+        if not identity:
+            return
+        platform = str(identity.get("platform", "") or "")
+        sender_id = str(identity.get("sender_id", "") or "")
+        if not platform or not sender_id:
+            return
+
+        lock = self._get_person_profile_lock(platform, sender_id)
+        async with lock:
+            safe = self._safe_session_key(session_key)
+            registered = await register_person_shelf_origin(
+                self._p, safe, platform, sender_id, str(identity.get("origin_id", "") or "")
+            )
+            if not registered:
+                return  # B5：登记失败即跳过本轮 profile 落盘，绝不产生孤儿
+
+            profile = await load_person_profile(self._p, platform, sender_id)
+
+            body_snapshot = snapshot.get("body") if isinstance(snapshot, dict) else None
+            body_snapshot = body_snapshot if isinstance(body_snapshot, dict) else {}
+            temperature = body_snapshot.get("temperature")
+            temperature = temperature if isinstance(temperature, dict) else {}
+            current_warmth = float(temperature.get("warmth", profile.warmth_baseline) or 0.0)
+            current_volatility = float(temperature.get("volatility", 0.0) or 0.0)
+
+            memory_snap = body_snapshot.get("memory")
+            memory_snap = memory_snap if isinstance(memory_snap, dict) else {}
+            relationship_snap = memory_snap.get("relationship")
+            relationship_snap = relationship_snap if isinstance(relationship_snap, dict) else {}
+            relationship_counts = (
+                relationship_snap.get("signals")
+                if settings.cross_relationship
+                else None
+            )
+            if not isinstance(relationship_counts, dict):
+                relationship_counts = None
+
+            six_observed: dict[str, float] | None = None
+            if settings.cross_personality:
+                personality_snap = snapshot.get("personality")
+                personality_snap = personality_snap if isinstance(personality_snap, dict) else {}
+                traits = personality_snap.get("traits")
+                if isinstance(traits, dict):
+                    six_observed = traits
+
+            valence = arousal = tension = None
+            if settings.cross_relationship:
+                try:
+                    engine = host.kernel.computation.engine  # type: ignore[union-attr]
+                    observed = engine.observe()
+                    if isinstance(observed, dict):
+                        valence = observed.get("valence")
+                        arousal = observed.get("arousal")
+                        tension = observed.get("tension")
+                except Exception:
+                    valence = arousal = tension = None
+
+            new_profile = apply_flush_observation(
+                profile,
+                now=time.time(),
+                current_warmth=current_warmth,
+                current_volatility=current_volatility,
+                relationship_counts=relationship_counts,
+                six_observed=six_observed,
+                valence=valence,
+                arousal=arousal,
+                tension=tension,
+                update_relationship_affect=settings.cross_relationship,
+            )
+            await save_person_profile(self._p, platform, sender_id, new_profile)
 
     def _extract_dirty_snapshot(
         self, snapshot: dict[str, Any], dirty_set: set[str]
@@ -2071,6 +2196,42 @@ class StatePersistence:
                         f"Sylanne person_shelf purge cascade skipped for "
                         f"{session_key!r} entry {entry!r}: {exc}"
                     )
+
+            # v2.5.0 跨群 profile purge 级联（design §7 "purge 一致性" / §8 B5
+            # 红线）：`valence`/`arousal`/`tension` + `transient_affect` 落明文
+            # KV 备份，是 2.4.1 没有的静态隐私面，必须随 per-session purge 一并
+            # 清除。MEMORY_KV_KEYS_MANIFEST 未单开 `person_profile_origin_index`
+            # ——复用同一份货架反向索引反查 (platform, sender_id)（design 意图，
+            # 见 memory_migration_spine.py:139-176 注释），按 (platform,
+            # sender_id) 去重后每人只重置一次（同一人可能因货架/profile 各自
+            # 登记过不同 origin_id 而在索引里出现多条）。只清瞬时/静态隐私面六
+            # 字段，保留关系四计数/Sylanne Six/warmth_baseline（跨会话长期状态，
+            # 不是"本次会话产生的"）。best-effort，同货架级联一样不 gate
+            # all_deleted/scrub_ok。
+            try:
+                from .person_profile import reset_person_profile_transient
+
+                seen_people: set[tuple[str, str]] = set()
+                for entry in shelf_origins:
+                    person_key = (entry["platform"], entry["sender_id"])
+                    if person_key in seen_people:
+                        continue
+                    seen_people.add(person_key)
+                    try:
+                        await reset_person_profile_transient(
+                            self._p, entry["platform"], entry["sender_id"]
+                        )
+                    except Exception as exc:
+                        logger.debug(
+                            f"Sylanne person_profile transient purge skipped for "
+                            f"{session_key!r} person {person_key!r}: {exc}"
+                        )
+            except Exception as exc:
+                logger.debug(
+                    f"Sylanne person_profile transient purge cascade failed for "
+                    f"{session_key!r}: {exc}"
+                )
+
             if shelf_origins:
                 await clear_person_shelf_origin_index(self._p, safe)
         except Exception as exc:

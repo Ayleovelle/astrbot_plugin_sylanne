@@ -16,7 +16,7 @@ from __future__ import annotations
 import asyncio
 import datetime
 import time
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
@@ -1162,6 +1162,17 @@ class SessionContext:
             )
             root = resolve_data_root(cfg)
             host = SylanneAlphaHost(root=root, session_key=session_key)
+            # v2.5.0 跨群记忆出生播种（design §3/§4.1，与关系计数/Sylanne Six
+            # 播种同点同档门）。**必须在此刻（第一次调用 `_personality()` 之前）
+            # 判断"是否真正首次出生"**——`kernel._personality()` 有惰性初始化
+            # 副作用（personality.py:482-485），一旦下面 :1176 调用过，
+            # `host.kernel.personality` 就不再是空 dict，"是否首次出生"这个天然
+            # 信号会被自己的读操作污染掉。真正首次出生（`self.personality` 为
+            # 空 dict）与 LRU 驱逐重建（`runtime.load` 从磁盘读回非空
+            # personality）在这里天然可辨——见 `host.py`/`kernel.py:140-157
+            # boot()`。
+            _is_true_birth = not host.kernel.personality
+            self._schedule_person_profile_seed(session_key, host, is_true_birth=_is_true_birth)
             # 编码器共享：避免每个 host 各持有一份 encoder 浪费内存。
             # 仅旧 ComputationSpine 暴露 encoder/replace_encoder；SDK 共振场
             # （ResonanceSpine）架构不同、无此属性，跳过共享（其编码自管）。
@@ -1210,6 +1221,237 @@ class SessionContext:
             host = existing_host
             hosts.set(session_key, host)
         return host
+
+    # ------------------------------------------------------------------
+    # v2.5.0 跨群记忆出生播种（design §3 关系+人格 / §4.1 transient / §8 B3）
+    # ------------------------------------------------------------------
+
+    def _schedule_person_profile_seed(
+        self, session_key: str, host: SylanneAlphaHost, *, is_true_birth: bool
+    ) -> None:
+        """`host()` 内的同步守门 + 调度入口。
+
+        真正的 KV 读写是异步的（`get_kv_data`/`put_kv_data`），而 `host()` 本身
+        是同步方法——这里只做零成本的同步前置检查（开关全关 / 认不出身份时
+        直接 return，不产生任何调度），检查通过才 `safe_ensure_future` 一个
+        后台任务。**已知限制**：该后台任务与本次 `host()` 调用是异步的，
+        本次调用内 :1176 附近的 `memory_system.derive_params(personality)`
+        仍会用到播种前的（默认）人格值——这与 design §3"播种只在出生一瞬"
+        的既定"最终一致"容忍度同类：下一次真正读取
+        `host.kernel._personality()`（同一 host 对象，同一进程内）时已是
+        播种后的值，只有出生那一次 `derive_params` 调用用的是旧值。
+        """
+        settings_mod = None
+        try:
+            from sylanne_alpha.cross_session_config import cross_session_settings
+
+            settings_mod = cross_session_settings(self._p)
+        except Exception:
+            return
+        if not settings_mod.enabled:
+            # mode="off"：§7 "停读停写旁挂层"——即便某个 bool 开关已被提前拧开，
+            # 主档位仍是 off 时整段出生播种（含 shadow 观测计算）都不应调度。
+            return
+        if not (settings_mod.cross_relationship or settings_mod.cross_personality):
+            return
+
+        identity = None
+        try:
+            identity = self._p._store.get_authenticated_identity(session_key)
+        except Exception:
+            identity = None
+        if not identity:
+            return
+        platform = str(identity.get("platform", "") or "")
+        sender_id = str(identity.get("sender_id", "") or "")
+        if not platform or not sender_id:
+            return
+
+        kernel_last_activity = 0.0
+        try:
+            kernel_last_activity = float(host.kernel.last_event.get("now") or 0.0)
+        except Exception:
+            kernel_last_activity = 0.0
+
+        from sylanne_alpha.utils import safe_ensure_future
+
+        safe_ensure_future(
+            self._seed_person_profile_async(
+                session_key,
+                host,
+                platform=platform,
+                sender_id=sender_id,
+                is_true_birth=is_true_birth,
+                kernel_last_activity=kernel_last_activity,
+            ),
+            name=f"person_profile_seed_{session_key}",
+        )
+
+    async def _seed_person_profile_async(
+        self,
+        session_key: str,
+        host: SylanneAlphaHost,
+        *,
+        platform: str,
+        sender_id: str,
+        is_true_birth: bool,
+        kernel_last_activity: float,
+    ) -> None:
+        """后台任务真身：读 profile，按档位把关系计数/Sylanne Six/transient
+        播种进【同一个】`host.kernel` 对象（引用不变，`hosts.set` 已在
+        `host()` 里同步完成，本任务只是稍后原地修改同一份 kernel 状态）。
+
+        关系计数 / Sylanne Six 只在 `is_true_birth` 时播种（LRU 驱逐重建时
+        `host.kernel` 已从磁盘恢复出该 session 组织累积/漂移过的真实值，
+        重新播种会用 profile 里可能更旧的快照覆盖掉，是数据倒退，不是"跨群
+        记得"）。transient 走独立守卫（`seed_transient_delta` 内部的
+        `profile.last_interaction_ts > kernel_last_activity`），不受
+        `is_true_birth` 限制——LRU 重建后仍可能有"来自别处的新情绪"需要补种，
+        这正是 design §4.3 明确要求覆盖的场景。
+
+        `mode=="shadow"` 与 `mode=="on"` 的区别只在这里体现——外层
+        `_schedule_person_profile_seed` 只保证 `mode!="off"`：shadow 档只
+        计算"若施加会怎样"并落观测日志，绝不真的改动 `host.kernel`（design
+        §4.3"shadow 观测：播种点在 shadow 档落一条…不施加"）；只有
+        `mode=="on"` 才真正写入 kernel/回写 `last_applied_*` 锚点。
+        """
+        from sylanne_alpha.cross_session_config import cross_session_settings
+        from sylanne_alpha.person_profile import load_person_profile, seed_transient_delta
+        from sylanne_alpha.person_shelf import register_person_shelf_origin
+
+        settings = cross_session_settings(self._p)
+        state_persistence = getattr(self._p, "_state_persistence", None)
+        get_lock = getattr(state_persistence, "_get_person_profile_lock", None)
+        lock = get_lock(platform, sender_id) if callable(get_lock) else None
+
+        async def _run() -> None:
+            safe_key = None
+            get_safe = getattr(state_persistence, "_safe_session_key", None)
+            if callable(get_safe):
+                try:
+                    safe_key = get_safe(session_key)
+                except Exception:
+                    safe_key = None
+            if safe_key:
+                # 同货架写侧一致的"先登记再动"次序——出生播种同样会在 kernel
+                # 里留下可能需要 purge 反查的痕迹（transient 施加），登记失败
+                # 则本轮整体跳过（fail-closed，不产生孤儿）。
+                try:
+                    registered = await register_person_shelf_origin(
+                        self._p, safe_key, platform, sender_id, ""
+                    )
+                except Exception:
+                    registered = False
+                if not registered:
+                    return
+
+            try:
+                profile = await load_person_profile(self._p, platform, sender_id)
+            except Exception as exc:
+                logger.debug(f"Sylanne person profile seed: load failed: {exc}")
+                return
+
+            apply_live = settings.mode == "on"
+
+            if is_true_birth:
+                if settings.cross_personality and profile.six_snapshot:
+                    if apply_live:
+                        try:
+                            from sylanne_alpha._engine.sylanne_core.compute.personality import (
+                                _voice,
+                                initial_personality,
+                            )
+
+                            seeded = initial_personality(session_key)
+                            seeded["traits"] = dict(profile.six_snapshot)
+                            seeded["voice"] = _voice(seeded["traits"])
+                            host.kernel.personality = seeded
+                        except Exception as exc:
+                            logger.debug(f"Sylanne person profile seed: Six seed failed: {exc}")
+                    else:
+                        logger.debug(
+                            "Sylanne person profile seed (shadow, would-apply): "
+                            f"person={platform}:{sender_id} would_seed_six={profile.six_snapshot}"
+                        )
+
+                if settings.cross_relationship and (
+                    profile.preference_count
+                    or profile.boundary_count
+                    or profile.progress_count
+                    or profile.repair_count
+                ):
+                    if apply_live:
+                        try:
+                            relationship = host.kernel.body.memory.setdefault("relationship", {})
+                            relationship["signals"] = {
+                                "preference_count": profile.preference_count,
+                                "boundary_count": profile.boundary_count,
+                                "progress_count": profile.progress_count,
+                                "repair_count": profile.repair_count,
+                            }
+                        except Exception as exc:
+                            logger.debug(
+                                f"Sylanne person profile seed: relationship seed failed: {exc}"
+                            )
+                    else:
+                        logger.debug(
+                            "Sylanne person profile seed (shadow, would-apply): "
+                            f"person={platform}:{sender_id} would_seed_relationship_counts="
+                            f"pref={profile.preference_count} bound={profile.boundary_count} "
+                            f"prog={profile.progress_count} repair={profile.repair_count}"
+                        )
+
+            if settings.cross_relationship:
+                now = time.time()
+                delta_t = now - (profile.last_interaction_ts or now)
+                try:
+                    result = seed_transient_delta(profile, now, kernel_last_activity)
+                except Exception as exc:
+                    logger.debug(f"Sylanne person profile seed: transient calc failed: {exc}")
+                    result = None
+                if result is not None:
+                    delta, new_last_applied, new_last_applied_volatility = result
+                    if apply_live:
+                        try:
+                            if delta:
+                                host.kernel.body.apply_vector_delta(delta, now=now)
+                            if (
+                                new_last_applied != profile.last_applied_transient
+                                or new_last_applied_volatility
+                                != profile.last_applied_volatility_transient
+                            ):
+                                from sylanne_alpha.person_profile import save_person_profile
+
+                                updated = replace(
+                                    profile,
+                                    last_applied_transient=new_last_applied,
+                                    last_applied_volatility_transient=new_last_applied_volatility,
+                                )
+                                await save_person_profile(self._p, platform, sender_id, updated)
+                        except Exception as exc:
+                            logger.debug(
+                                f"Sylanne person profile seed: transient apply failed: {exc}"
+                            )
+                    else:
+                        # shadow：只落"若施加会怎样"的观测日志（person_hash 由
+                        # debug 日志自身的 platform:sender_id 承担，Δt/衰减前后
+                        # 值/would-apply delta 见 design §4.3），绝不碰 host.kernel、
+                        # 也绝不回写 `last_applied_*` 锚点（锚点只在真正施加后推进）。
+                        logger.debug(
+                            "Sylanne person profile seed (shadow, would-apply): "
+                            f"person={platform}:{sender_id} delta_t={delta_t:.1f}s "
+                            f"warmth_transient_before={profile.warmth_transient:.4f} "
+                            f"volatility_transient_before={profile.volatility_transient:.4f} "
+                            f"would_apply_delta={delta} "
+                            f"would_last_applied_warmth={new_last_applied:.4f} "
+                            f"would_last_applied_volatility={new_last_applied_volatility:.4f}"
+                        )
+
+        if lock is not None:
+            async with lock:
+                await _run()
+        else:
+            await _run()
 
     def _persist_and_forget_evolution(self, session_key: str) -> None:
         """LRU 驱逐时：先同步取进化档案快照并异步落盘 KV，再清进化层 per-session 状态。
