@@ -159,6 +159,20 @@ MEMORY_KV_KEYS_MANIFEST: Final[dict[str, str]] = {
     # 供进程重启后的 `_scan_pending_deletes` 完成/驳回崩溃中断的删除意图，见
     # state_persistence.py 同名方法与 `_register_pending_delete`/`_clear_pending_delete`。
     "pending_delete_index": "sylanne_memory_pending_deletes",
+    # v2.5.0 P0 slice 1 新增：旁挂人核 v2（design docs/architecture/
+    # v250-cross-group-memory-design.md §1.2）的两个 identity-keyed 旁挂存储。
+    # 占位符与其余项不同（{platform}/{sender_id} 而非 {safe}）——Python str.format()
+    # 对未引用的多余关键字参数不报错，与本清单其余项的 `.format(safe=safe)` 调用点
+    # 共存不冲突（本清单没有"一次 format() 覆盖全表"的现成调用点）。
+    "person_shelf": "sylanne_person_shelf:{platform}:{sender_id}",
+    "person_profile": "sylanne_person_profile:{platform}:{sender_id}",
+    # v2.5.0 P0 slice 2 新增：per-session → per-person 反向索引（design §8 B5
+    # 数据安全红线）。purge 级联只知道 session_key，货架按 platform:sender_id
+    # 存，两套键空间无直接映射——这个索引记录"该 session 写过哪些货架桶"，
+    # 供 state_persistence._delete_sylanne_memory_state_impl 反查级联删除。
+    # 占位符是 {safe}（与 primary/backup_v2/quarantine 同一变体），不是
+    # {platform}/{sender_id}。
+    "person_shelf_origin_index": "sylanne_person_shelf_origin_index:{safe}",
 }
 
 

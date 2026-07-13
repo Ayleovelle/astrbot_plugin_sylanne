@@ -85,6 +85,8 @@ class SocialFieldCollector:
 
     def __init__(self, config: dict | None = None):
         self._groups: dict[str, _GroupState] = {}
+        # v2.5.0 R6 专用：见 register_group_key_alias() 文档字符串。
+        self._group_key_aliases: dict[str, str] = {}
         self._bot_names: list[str] = []
         self._continuation_tau: float = 60.0
         self._config: dict = {}
@@ -229,6 +231,71 @@ class SocialFieldCollector:
         entries = list(gs.shadow_buffer)
         gs.shadow_buffer.clear()
         return entries
+
+    def register_group_key_alias(self, alias_key: str, raw_group_id: str) -> None:
+        """v2.5.0 P0 slice 3（design §2.2 R6）专用：登记"读侧/货架用的群标识"
+        到 `collect()` 实际使用的内部群键之间的别名映射。
+
+        背景（红线闸 MAJOR 复核后新增）：`_groups`（以及它下面的
+        `shadow_buffer`）用 `extract_group_id(event)` 作 key——多数平台
+        （如 aiocqhttp）下这是原始数字 group_id（如 "123456"）。但货架写侧
+        （`_flush_conversation_to_l1`）与 R1 读侧算 `current_group_id` /
+        货架 `origin_id` 时，用的是 `extract_group_id_from_key(session_key)`
+        ——即 unified_msg_origin 去掉 sender 后缀（如
+        "aiocqhttp:GroupMessage:123456"）。两种格式在同一个群里并不相等，
+        若 `peek_recent_group_senders` 直接拿后者去查以前者为 key 的
+        `_groups` 字典，恒为空 → R6 把所有跨群条目都判定为"无法确认干净"而
+        锁死，`cross_group`/`strict` tier 形同虚设（虽是 fail-closed 安全
+        方向，但功能完全不生效）。
+
+        这里只加一层只读别名索引，把"货架格式的群标识"指向"collect() 实际
+        建状态用的群 key"，不改变 `_groups` 本身的 key 规则、不影响任何既有
+        SFPD 行为（消息频率/沉默/话题相关性等一律照旧用原始 key）。
+
+        有界：与 `_groups` 同容量上限（100）、同淘汰策略，防止无界增长。
+        `alias_key == raw_group_id`（两种推导本就相同，如非 aiocqhttp 平台的
+        兜底分支）时不必登记，省一条冗余映射。
+        """
+        if not alias_key or not raw_group_id or alias_key == raw_group_id:
+            return
+        if (
+            alias_key not in self._group_key_aliases
+            and len(self._group_key_aliases) >= 100
+        ):
+            oldest_key = next(iter(self._group_key_aliases))
+            del self._group_key_aliases[oldest_key]
+        self._group_key_aliases[alias_key] = raw_group_id
+
+    def peek_recent_group_senders(self, group_id: str) -> set[str]:
+        """v2.5.0 P0 slice 3（design §2.2 R6）专用：非破坏性只读某群
+        shadow_buffer 里当前留存的 sender_id 集合，**不消费、不 clear**——与
+        `drain_shadow_buffer` 语义完全不同、互不干扰（后者供 ConversationBuffer
+        的旁观上下文注入消费，若这里也 drain 会偷走那条消费链的数据）。
+
+        这是"尽力而为"信号，不是群名册：`shadow_buffer` 是 maxlen=20 的短窗口
+        滚动缓冲，且每次机器人在该群回复后会被 `notify_bot_replied` 清空
+        （见上）——对于"很久以后、在另一个群/私聊里跨群读取"的典型场景，
+        这里返回空集合是常态而非例外。调用方（R6）必须把空集合与"确认无
+        其他已知发言人"区分开：本方法不做这个区分（该区分依赖调用时机是否
+        "刚发生"，本方法无法从纯读一次 buffer 里推断），调用方按 fail-closed
+        原则处理"数据不可靠"的情况（见 `person_shelf.shelf_item_visible` 的
+        `known_other_senders is None` 分支——调用方在没有其他更可靠来源时，
+        应把"没有名单来源"和"看了但为空"同等对待为不可靠，而不是把本方法的
+        返回值直接当作确定性的"该群目前已知发言人"清单来放行）。
+
+        `group_id` 可以是 `collect()` 内部用的原始群 key，也可以是货架
+        `origin_id` 那种 `extract_group_id_from_key(session_key)` 格式——
+        后者查不到时会经 `register_group_key_alias` 登记的别名再查一次
+        （见该方法文档字符串）。两次都查不到则视为无数据，返回空集合。
+        """
+        gs = self._groups.get(group_id)
+        if gs is None:
+            raw_group_id = self._group_key_aliases.get(group_id)
+            if raw_group_id:
+                gs = self._groups.get(raw_group_id)
+        if not gs:
+            return set()
+        return {str(e.get("sender_id", "")) for e in gs.shadow_buffer if e.get("sender_id")}
 
     def tick_silence(self, group_id: str) -> None:
         """每条消息（即使不回复）都调用——追踪沉默计数。"""

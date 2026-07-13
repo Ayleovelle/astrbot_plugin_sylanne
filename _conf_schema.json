@@ -305,5 +305,44 @@
     "default": "",
     "_special": "select_provider",
     "hint": "Phase 2B：低频后台判会话关系语域（恋人/朋友/同事）。留空则复用 assessor provider。"
+  },
+  "sylanne_alpha_cross_session_mode": {
+    "description": "跨群记忆总开关（v2.5.0 旁挂人核）",
+    "type": "string",
+    "default": "off",
+    "options": ["off", "shadow", "on"],
+    "hint": "默认 off（对现网行为零影响）。shadow：货架照常写入/闸照常算，只拦注入、落观测日志，不影响回复。on：真正跨群生效。她转述给别人听过的、关于第三方的私事，可能跨群被带出；系统只能软性约束，不能保证归零——对隐私敏感建议同时把 sylanne_alpha_cross_visibility_tier 调到 strict。切到 shadow/on 且开启 sylanne_alpha_cross_dialogue 后，货架写入与跨群召回即真正接入生产路径（私聊、以及已开 unique_session 的群会真正累积并召回；未开 unique_session 的共享群按身份中立跳过、不写入）。"
+  },
+  "sylanne_alpha_cross_session_scope": {
+    "description": "跨群记忆生效范围",
+    "type": "string",
+    "default": "owner",
+    "options": ["owner", "all"],
+    "hint": "owner：仅主人（sylanne_alpha_owner_id）的身份可跨群记忆。all：任何人都可跨群塑造她对该人自己的态度（爆炸半径锁在\"对该人的态度\"，不影响 romantic 判定）。建议先 owner 验证稳定后再考虑 all。"
+  },
+  "sylanne_alpha_cross_dialogue": {
+    "description": "跨群共享：对话记忆货架",
+    "type": "bool",
+    "default": false,
+    "hint": "默认关闭。开启后经净化的 bot↔本人直接对话内容会进入按身份挂靠的记忆货架，供跨群召回参考（不合并 per-session 主记忆、可随时关闭回退）。"
+  },
+  "sylanne_alpha_cross_relationship": {
+    "description": "跨群共享：关系计数 + warmth 长期基线 + 瞬时情绪",
+    "type": "bool",
+    "default": false,
+    "hint": "默认关闭。开启后关系四计数（偏好/边界/进展/修复）、Sylanne 对该人的 warmth 长期基线、以及有界的瞬时情绪偏移（她对这个人当下的心情余温/余怒，随时间自然回落，绝不影响她对其他人的态度）会按身份跨群携带。"
+  },
+  "sylanne_alpha_cross_personality": {
+    "description": "跨群共享：Sylanne Six 表层人格快照",
+    "type": "bool",
+    "default": false,
+    "hint": "默认关闭。开启后 Sylanne Six（warmth_bias/edge/curiosity/patience/intimacy_gravity/sovereignty_guard）落盘时会按身份混合进档案，跨群出生时用档案值替代默认播种，让她对同一人保持气质一致。"
+  },
+  "sylanne_alpha_cross_visibility_tier": {
+    "description": "跨群记忆读侧可见范围档位",
+    "type": "string",
+    "default": "same_group",
+    "options": ["same_group", "cross_group", "strict"],
+    "hint": "same_group：跨群货架只在与该人的私聊/原群可见（最保守）。cross_group：可见范围扩大到其他群，且默认对\"疑似提到该群其他已知成员\"的条目做降级锁定。strict：与 cross_group 同样的提及降级，额外收紧其余判定。跨群场景下第三方转述是方向性风险升级，建议对隐私敏感的部署优先选 strict。"
   }
 }
