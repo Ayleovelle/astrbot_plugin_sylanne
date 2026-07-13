@@ -2,6 +2,20 @@
 
 本文件用于 AstrBot 插件市场/管理页展示更新内容。更完整的设计说明、公式推导、测试矩阵和维护手册见 `README.md`。
 
+## [Embodiment-2.5.0-grey.2] - 2026-07-13
+
+> 灰测修订：修复 **grey.1 在"装过旧版的机器上覆盖安装/热重载后加载失败**（`cannot import name 'realtime_flags' from 'sylanne_alpha.message_dispatch'`）。
+
+### 🐛 修复：热重载时旧模块缓存遮蔽新文件
+
+**症状**：此前已安装过 Sylanne 的机器，上传/覆盖安装 grey.1 后，插件加载报 `cannot import name 'realtime_flags'`（或其它新符号）；全新机器不受影响。
+
+**根因**：本插件把插件目录加入 `sys.path`、以【顶层绝对名】`sylanne_alpha.*` 导入子包，这些模块在 `sys.modules` 里的键不带 `data.plugins.<目录>.` 前缀；而 AstrBot 重载插件时只清理带该前缀的模块（`star_manager._get_plugin_related_modules`）。于是旧版的 `sylanne_alpha.*` 残留在 `sys.modules` 中，Python 直接返回缓存、不读磁盘上的新文件，新版新增的符号自然找不到。全新进程无残留故不复现。
+
+**修复**：`main.py` 在导入任何 `sylanne_alpha` 子模块之前，主动从 `sys.modules` 清除残留的 `sylanne_alpha*`，强制每次（重）加载都从磁盘重读。仅在非 pytest 环境执行（测试不走 AstrBot 热重载路径，跳过以免新旧同名模块并存）。已用"旧模块预置进 sys.modules → 重载导入"真码复现故障并验证修复。
+
+> 立即绕过（无需换包）：**完全重启 AstrBot 进程**（非热重载/仅刷新），新进程无旧缓存即可正常加载。grey.2 起覆盖安装也不再需要重启。
+
 ## [Embodiment-2.5.0-grey] - 2026-07-13
 
 > 灰测版（未正式发布，待真机验收）。2.5.0 三大基调一次到位：①**跨群记忆**（她按"人"跨群/跨私聊记住你）；②**QQ 空间说说**（她按生活模拟发说说，主人过目才发）；③**即时聊天接管重做**（修好"一开就崩"的实时分段）。外加"同一句话回两遍"的入站幂等修复。**三大新功能默认全部关闭，装上行为与现网一致**；逐项开启才生效。
