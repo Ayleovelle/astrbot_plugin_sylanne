@@ -1148,8 +1148,14 @@ class EmotionalStatePlugin(Star):
     # -----------------------------------------------------------------------
 
     @filter.event_message_type(filter.EventMessageType.ALL)
-    async def on_message(self, event: Any):
-        """监听所有消息事件，更新 proactive scheduler 时间戳和节奏学习器。"""
+    async def on_message(self, event: Any, *args: Any, **kwargs: Any):
+        """监听所有消息事件，更新 proactive scheduler 时间戳和节奏学习器。
+
+        *args/**kwargs：吸收 AstrBot 各版本给事件钩子多传的位置/关键字参数
+        （v4.26.x 起框架内部会多传若干上下文参数，见 context_utils.call_event_hook
+        `handler(event, *args, **kwargs)`）。签名固定为 (event) 会在这些版本上报
+        TypeError "takes 2 positional but N given"，故一律用 *args/**kwargs 兜住，
+        本插件只用 event。"""
         try:
             # M4a（realtime 完整重做 Model-D）：即时聊天接管开启时强制关闭本轮
             # 流式，让响应侧走非流式档（on_decorating_result 才够得着、能抑制
@@ -1234,7 +1240,11 @@ class EmotionalStatePlugin(Star):
 
     # on_llm_request 钩子：在 LLM 请求发出前注入情感状态上下文
     @filter.on_llm_request(desc="注入 Sylanne 情感计算上下文到 LLM prompt")
-    async def on_llm_request(self, event: Any, request: Any) -> None:
+    async def on_llm_request(
+        self, event: Any, request: Any, *args: Any, **kwargs: Any
+    ) -> None:
+        # *args/**kwargs：兜住 AstrBot 各版本多传的钩子参数（req 仍固定为第 2 位，
+        # 见 4.26.5 文档 (event, req: ProviderRequest)）；否则新版报 TypeError。
         try:
             await self._on_llm_request_inner(event, request)
         except Exception as e:
@@ -1422,7 +1432,11 @@ class EmotionalStatePlugin(Star):
 
     # on_llm_response 钩子：在 LLM 回复后提取信号、更新状态、触发分段回复
     @filter.on_llm_response(desc="处理 LLM 回复，更新情感状态和记忆")
-    async def on_llm_response(self, event: Any, response: Any) -> None:
+    async def on_llm_response(
+        self, event: Any, response: Any, *args: Any, **kwargs: Any
+    ) -> None:
+        # *args/**kwargs：兜住 AstrBot 各版本多传的钩子参数（resp 仍固定为第 2 位，
+        # 见 4.26.5 文档 (event, resp: LLMResponse)）；否则新版报 TypeError。
         try:
             await self._on_llm_response_inner(event, response)
         except Exception as e:
@@ -1477,8 +1491,10 @@ class EmotionalStatePlugin(Star):
             logger.warning(f"Sylanne on_using_llm_tool clean failed: {e}", exc_info=True)
 
     @filter.on_decorating_result()
-    async def on_decorating_result(self, event: Any) -> None:
+    async def on_decorating_result(self, event: Any, *args: Any, **kwargs: Any) -> None:
         """Stage 8 兜底：strip thinking/draft 块，防止 tool loop 中间步骤泄露。
+
+        *args/**kwargs：兜住 AstrBot 各版本多传的钩子参数，避免新版 TypeError。
 
         另：若该消息是 Sylanne 主动发言桥接登记的"待接管分段"，则清空 chain 阻止
         大饼整段发送，改由 Sylanne 后台连发人格化分段。即时聊天 LLM 响应接管
@@ -1522,7 +1538,9 @@ class EmotionalStatePlugin(Star):
             )
 
     @filter.after_message_sent()
-    async def _on_after_message_sent_err_backfill(self, event: Any) -> None:
+    async def _on_after_message_sent_err_backfill(
+        self, event: Any, *args: Any, **kwargs: Any
+    ) -> None:
         """终结轮兜底：框架本轮不落库时把 user 补进会话历史（唯一能覆盖 provider
         全挂 err 轮的插件挂点——那条路径 step() 不调 on_agent_done，故 on_llm_response
         及其 finally 补写根本不触发，见 tool_loop_agent_runner.py:772-788 /
@@ -1579,8 +1597,12 @@ class EmotionalStatePlugin(Star):
     # 同名钩子，跟随同一套约定读同一个 extra key（API 参考 §3 after_message_sent /
     # §4 event.get_extra）。
     @filter.after_message_sent()
-    async def on_after_message_sent_reset_ghost_cleanup(self, event: Any) -> None:
-        """AstrBot /reset 发生后清理本插件的幽灵记忆源（不触碰关系/人格状态）。"""
+    async def on_after_message_sent_reset_ghost_cleanup(
+        self, event: Any, *args: Any, **kwargs: Any
+    ) -> None:
+        """AstrBot /reset 发生后清理本插件的幽灵记忆源（不触碰关系/人格状态）。
+
+        *args/**kwargs：兜住 AstrBot 各版本多传的钩子参数，避免新版 TypeError。"""
         try:
             clean_session = False
             get_extra = getattr(event, "get_extra", None)

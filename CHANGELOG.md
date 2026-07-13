@@ -2,6 +2,18 @@
 
 本文件用于 AstrBot 插件市场/管理页展示更新内容。更完整的设计说明、公式推导、测试矩阵和维护手册见 `README.md`。
 
+## [Embodiment-2.5.0-grey.3] - 2026-07-13
+
+> 灰测修订：修复 **grey.2 在 AstrBot 4.26.x 上加载后、消息一进来就崩**（事件钩子报 `takes 2 positional arguments but 5 were given` 等）。grey.2 只在 4.25.x 上验过，未覆盖 4.26.x 的钩子调用约定。
+
+### 🐛 修复：AstrBot 4.26.x 事件钩子多传参数导致 TypeError
+
+**症状**：grey.2 在 AstrBot 4.26.x 机器上能装上、但一有消息/一发起 LLM 请求就报 `EmotionalStatePlugin.on_message() takes 2 positional arguments but 5 were given`（`on_llm_request`/`on_llm_response`/`on_decorating_result` 同类），插件事实上不可用。4.25.x 不受影响。
+
+**根因**：AstrBot 4.26.x 起，框架调用插件事件钩子时会多传若干上下文位置参数（`handler(event, *extra)`）；本插件的钩子签名固定为 `(event)` / `(event, request)`，接不下多出来的参数，Python 直接抛 `TypeError`。开发/测试机是 4.25.x，钩子只收到文档约定的参数，故未暴露。
+
+**修复**：给全部 6 个事件钩子（`on_message` / `on_llm_request` / `on_llm_response` / `on_decorating_result` / 两个 `after_message_sent`）的签名加上 `*args, **kwargs` 兜住框架多传的参数，`request`/`response` 仍固定在第 2 位（与 4.26.5 文档 `(event, req)` / `(event, resp)` 一致）。对 4.26.x（吸收多余参数）与 4.25.x（`args` 为空）双向兼容；插件本身只用 `event` 及既有的 `request`/`response`，行为不变。已用"按 4.26.x 调用约定绑定 6 个钩子签名"逐一验证不再 `TypeError`，并跑通 4.25.x 全量测试（1800 passed）。
+
 ## [Embodiment-2.5.0-grey.2] - 2026-07-13
 
 > 灰测修订：修复 **grey.1 在"装过旧版的机器上覆盖安装/热重载后加载失败**（`cannot import name 'realtime_flags' from 'sylanne_alpha.message_dispatch'`）。
