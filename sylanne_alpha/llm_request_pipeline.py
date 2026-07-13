@@ -23,6 +23,7 @@ from sylanne_alpha.content_sanitizer import (
     wrap_system_prompt_for_analysis,
     is_content_filter_refusal,
 )
+from sylanne_alpha.message_dispatch import realtime_flags
 from sylanne_alpha.utils import safe_ensure_future
 from sylanne_alpha.state_persistence import mark_dirty
 
@@ -1001,13 +1002,11 @@ class LLMRequestPipeline:
             message_text = await self._transcribe_non_text(event, message_text)
         if message_text:
             p._store.last_user_texts.set(session_key, message_text[:120])
-        realtime_enabled = bool(
-            (p.config or {}).get("sylanne_alpha_realtime_chat_enabled")
-        )
+        # 次要修复②：两侧口径统一走 realtime_flags（正规键 OR 旧别名），不再
+        # 各自维护一份不对称的判定（此前请求侧只认正规键，响应侧额外兼容别名，
+        # 若用户只设别名键会导致请求侧误判两开关都关，M4a 强制关流因此漏触发）。
+        realtime_enabled, intercept = realtime_flags(p.config)
         hajide = bool((p.config or {}).get("sylanne_alpha_hajide_compat_mode"))
-        intercept = bool(
-            (p.config or {}).get("sylanne_alpha_realtime_intercept_llm_response")
-        )
 
         # ---- 群聊 SFPD（社交场域感知调度）----
         # 收集社交信号 → 传入计算栈 → L7 表达层决定是否响应
@@ -1238,7 +1237,7 @@ class LLMRequestPipeline:
 
         # Step 1: 清理流式状态、启动观测、处理流式拦截
         await self._clean_incoming_message(
-            event, request, message_text, session_key, intercept,
+            event, request, message_text, session_key, realtime_enabled, intercept,
         )
 
         if request is None:
@@ -1310,12 +1309,24 @@ class LLMRequestPipeline:
     # _clean_incoming_message
     # ------------------------------------------------------------------
 
+    @staticmethod
+    def _stream_first_do_first(
+        stream_first: bool, realtime_enabled: bool, intercept: bool
+    ) -> bool:
+        """次要修复①：流式首句抢发的门控，补 realtime_enabled 与响应侧
+        on_llm_response 的 `if not realtime_enabled or not intercept: return`
+        对齐（此前只看 stream_first/intercept，realtime 总开关关时仍会抢发
+        首句——请求侧抢发了、响应侧却因总开关关而整段原样放行，两次发送
+        同一句首句内容）。三者都为真才抢发。"""
+        return bool(stream_first and realtime_enabled and intercept)
+
     async def _clean_incoming_message(
         self,
         event: Any,
         request: Any,
         message_text: str,
         session_key: str,
+        realtime_enabled: bool,
         intercept: bool,
     ) -> None:
         """清理流式状态、移除泄漏的注入消息、启动后台观测任务。"""
@@ -1406,7 +1417,9 @@ class LLMRequestPipeline:
             event._sylanne_stream_wrapped = True
             original_send_streaming = event.send_streaming
             origin = str(getattr(event, "unified_msg_origin", "") or "")
-            do_first = stream_first and intercept
+            do_first = self._stream_first_do_first(
+                stream_first, realtime_enabled, intercept
+            )
 
             async def wrapped_send_streaming(generator, use_fallback=False):
                 tfilter = StreamingThinkingFilter()

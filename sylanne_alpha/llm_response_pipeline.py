@@ -30,6 +30,7 @@ from typing import TYPE_CHECKING, Any
 from sylanne_alpha.utils import ensure_background_tasks_list, safe_ensure_future
 from sylanne_alpha.message_dispatch import (
     normalize_completion_text,
+    realtime_flags,
     realtime_plan,
     strip_draft_blocks,
 )
@@ -50,6 +51,22 @@ except ImportError:
     import logging as _logging
 
     logger = _logging.getLogger("astrbot_plugin_sylanne")  # type: ignore
+
+try:
+    from astrbot.api.message_components import Plain as _RealtimePlainComponent  # type: ignore
+except ImportError:
+    _RealtimePlainComponent = None  # type: ignore
+
+
+def _is_non_plain_component(seg: Any) -> bool:
+    """M1 安全判定：判 seg 是否为【非 Plain】消息组件（Image/Record 等）。
+
+    astrbot 未安装（测试环境等）时 _RealtimePlainComponent 拿不到——保守返回
+    False（不触发放弃接管这条分支），不影响既有单测行为。
+    """
+    if _RealtimePlainComponent is None:
+        return False
+    return not isinstance(seg, _RealtimePlainComponent)
 
 # 中国时区常量
 _CHINA_TZ = timezone(timedelta(hours=8))
@@ -428,14 +445,8 @@ class LLMResponsePipeline:
         ensure_background_tasks_list(self._p)
         session_key = self._p._session_key(event)
         cfg = self._p._config or {}
-        realtime_enabled = bool(
-            cfg.get("sylanne_alpha_realtime_chat_enabled")
-            or cfg.get("enable_realtime_chat")
-        )
-        intercept = bool(
-            cfg.get("sylanne_alpha_realtime_intercept_llm_response")
-            or cfg.get("realtime_chat_intercept_llm_response")
-        )
+        # 次要修复②：统一走 realtime_flags（与请求侧同一口径，见该函数 docstring）。
+        realtime_enabled, intercept = realtime_flags(cfg)
 
         if not realtime_enabled or not intercept:
             # 未启用即时聊天拦截时，仅清理 thinking/draft 块 + 注入防御；
@@ -503,12 +514,52 @@ class LLMResponsePipeline:
         if response is None:
             return
 
+        # M4b（realtime 完整重做 Model-D，响应侧第二层防御）：本轮若正走框架
+        # 原生流式发送（STREAMING_RESULT），彻底放弃接管。钩子触发时
+        # event.get_result() 已经是这个类型——框架在 internal.py 里
+        # event.set_result(...STREAMING_RESULT...set_async_stream(run_agent(...)))
+        # 发生在 run_agent() 生成器真正被消费（从而触发 on_agent_done/
+        # on_llm_response）之前。M4a（main.py on_message）已在请求侧尽量提前
+        # 强制关流，这里兜第三方 runner / Live Mode 等绕过该时序假设的情况——
+        # 不清 completion_text/result_chain、不分段调度，避免与框架自身流式
+        # 发送（及请求侧 wrapped_send_streaming 的首句抢发）并行造成双发。
+        try:
+            _result = event.get_result() if hasattr(event, "get_result") else None
+        except Exception:
+            _result = None
+        if _result is not None and getattr(
+            getattr(_result, "result_content_type", None), "name", ""
+        ) == "STREAMING_RESULT":
+            logger.info(
+                "Sylanne realtime takeover abandoned (streaming in flight): "
+                f"session={session_key}"
+            )
+            return
+
         text = normalize_completion_text(getattr(response, "completion_text", ""))
         cleaned = strip_draft_blocks(text)
         cleaned = self._sanitize_response(cleaned)
         logger.info(
             f"Sylanne on_llm_response: len={len(cleaned)} session={session_key}"
         )
+
+        # M1（issue26 同类根治，迁到 realtime 接管路径）：response.result_chain
+        # 若含非 Plain 组件（Image/Record 等，如工具调用产出的图片/语音），
+        # 彻底放弃接管——不清 completion_text/result_chain、不分段调度，让框架
+        # 原样发送 + 保存，图片/语音保全（main.py::on_decorating_result 侧的
+        # 既有 strip_draft_blocks 通用清理仍会对 Plain 段生效）。仅【纯 Plain】
+        # 的 result_chain（或压根没有 result_chain，只用 _completion_text 的
+        # provider，如 Anthropic）才继续走下面的接管分段。
+        _result_chain = getattr(response, "result_chain", None)
+        _rc_components = getattr(_result_chain, "chain", None) if _result_chain else None
+        if _rc_components and any(
+            _is_non_plain_component(seg) for seg in _rc_components
+        ):
+            logger.info(
+                "Sylanne realtime takeover abandoned (result_chain 含非 Plain "
+                f"组件/图片语音): session={session_key}"
+            )
+            return
 
         # 定时任务（cron）的 LLM 回复是内部总结，不应发送给用户
         _platform = ""
@@ -627,13 +678,46 @@ class LLMResponsePipeline:
             response.completion_text = cleaned
             return
 
-        # 保留 completion_text 供 AstrBot 上下文历史记录使用。
-        # 清空 result_chain 防止 AstrBot 发送完整消息（由分段调度代替）。
+        # M2/M3 修复（realtime 完整重做 Model-D，send/save 解耦核心）：
+        #
+        # 旧 hack 在此清空 result_chain/chain 来"压制框架发送"，同时把
+        # completion_text 设为 cleaned"保留供历史记录"——但框架落库判据
+        # （internal.py:_save_to_history:463-467）与发送判据（tool_loop_agent_
+        # runner.py:803-814）读的是【同一个】response 对象：result_chain 档
+        # provider（Gemini/OpenAI）清了 result_chain 后 completion_text getter
+        # 会跟着塌缩成空（entities.py:434-437，result_chain 为空则读
+        # _completion_text，而 setter 此前从未写过它），落库判据看到空
+        # completion_text 直接不存——这是 M2 渐进失忆的根因。_completion_text
+        # 档 provider（Anthropic）result_chain 本来就是 None，清空是空操作，
+        # completion_text 仍非空，框架发送判据的 elif 分支照样用它建链发送——
+        # 这是 M3 双发的根因（我们自己又后台分段发一遍）。
+        #
+        # 现在只设 completion_text，不再碰 result_chain/chain：
+        # 1) 保存不受影响——run_context.messages 里的 assistant TextPart 在
+        #    on_agent_done 钩子触发【之前】已用原始 completion_text 追加完毕
+        #    （tool_loop_agent_runner.py:193-197 早于 :200），这里赋值不会
+        #    重写已保存的历史内容；只用于让 :463-467 的落库判据读到非空值、
+        #    确保这条 turn 被保存（treat 为一次真实 assistant 回复）。
+        # 2) 发送抑制不再靠污染 llm_resp 字段，改在框架自己的装饰钩子
+        #    on_decorating_result（main.py）里清空【规范化后的 event.result.chain】。
+        #    "存"与"发"能解耦的真正原因是二者读【不同对象】，与 stage 先后无关：
+        #    框架发送判据读 event.result.chain（RespondStage），而 _save_to_history
+        #    读 llm_response.completion_text + run_context.messages（后者的 assistant
+        #    段已在 tool_loop_agent_runner.py:197 提交），从不读 event.result.chain。
+        #    故无论 decorate 与 save 谁先跑（真框架里 decorate 随 run_agent 消费先跑、
+        #    save 在 run_agent 抽干后才跑，见 internal.py:396），清空 chain 都不影响
+        #    落库内容。且与 provider 字段布局无关：result_chain 档和 _completion_text
+        #    档到这一步都已统一坍缩成同一种 event.result.chain（各自经 tool_loop_
+        #    agent_runner.py:803-814 的 if/elif 转成 MessageChain）。
+        # 用 event 级旗标标记"这轮已由本插件接管，后台分段发送将代替框架发送"，
+        # 供 on_decorating_result 消费。
         response.completion_text = cleaned
-        if hasattr(response, "result_chain"):
-            response.result_chain = None
-        if hasattr(response, "chain"):
-            response.chain = None
+        set_extra = getattr(event, "set_extra", None)
+        if callable(set_extra):
+            try:
+                set_extra("_syl_realtime_takeover", True)
+            except Exception:  # 标记失败不阻断分段发送，只是 on_decorating_result
+                pass          # 那边的抑制会落空——框架会额外重发一次（宁重不丢）。
 
         # 多段回复时存储未发送部分，供下轮续接
         if len(parts) > 1:
