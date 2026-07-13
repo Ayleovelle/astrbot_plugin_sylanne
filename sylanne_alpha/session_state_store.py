@@ -170,6 +170,9 @@ class SessionStateStore:
 
         # ---- 主动发言 / outreach ----
         self.pending_outreach_context: SessionMap = self._reg("pending_outreach_context", BoundedDict(maxsize=50))
+        # PR-Qzone：说说草稿待 owner 过目队列（独立容器，不与 pending_outreach_context
+        # 共用同一 key——两种 pending 语义不同，共用会互相覆盖）。
+        self.pending_qzone_draft: SessionMap = self._reg("pending_qzone_draft", BoundedDict(maxsize=50))
         self.proactive_candidate_sessions: SessionMap = self._reg("proactive_candidate_sessions", BoundedDict(maxsize=100))
         self.session_origins: SessionMap = self._reg("session_origins", {})
         # ---- Phase 2B：关系类型层（PR-G 写 / PR-H 读）----

@@ -344,5 +344,48 @@
     "default": "same_group",
     "options": ["same_group", "cross_group", "strict"],
     "hint": "same_group：跨群货架只在与该人的私聊/原群可见（最保守）。cross_group：可见范围扩大到其他群，且默认对\"疑似提到该群其他已知成员\"的条目做降级锁定。strict：与 cross_group 同样的提及降级，额外收紧其余判定。跨群场景下第三方转述是方向性风险升级，建议对隐私敏感的部署优先选 strict。"
+  },
+  "sylanne_alpha_qzone_enabled": {
+    "description": "启用 QQ 空间说说功能（默认关）",
+    "type": "bool",
+    "default": false,
+    "hint": "总闸，默认关闭。开启后生活模拟的高分分享意图才会额外生成说说草稿候选，交给主人过目确认——本身不会自动发布，唯一发布路径是主人回复「说说确认」。"
+  },
+  "sylanne_alpha_qzone_cookie": {
+    "description": "QQ 空间 Cookie（从浏览器复制，仅本地只读，代码绝不自动抓取/刷新）",
+    "type": "string",
+    "default": "",
+    "hint": "从浏览器 F12 网络面板复制 user.qzone.qq.com 请求的 Cookie 请求头，粘贴到这里；泄露此值等同泄露 QQ 空间登录态，不要分享给除你自己以外的任何人。Sylanne 不会、也不能自动获取或刷新这个值。"
+  },
+  "sylanne_alpha_qzone_my_qq": {
+    "description": "发说说所用的 QQ 号（hostuin，与上面 Cookie 对应的账号）",
+    "type": "string",
+    "default": "",
+    "hint": "填写 Cookie 所属账号的 QQ 号；留空发说说会直接失败。"
+  },
+  "sylanne_alpha_qzone_provider_id": {
+    "description": "说说草稿生成 LLM 的 provider ID（留空回退生活模拟/评估 provider）",
+    "type": "string",
+    "default": "",
+    "_special": "select_provider",
+    "hint": "留空则依次回退 sylanne_alpha_life_simulation_provider_id / main_assessor / assessor。"
+  },
+  "sylanne_alpha_qzone_min_score": {
+    "description": "ShareIntent 分数达到此阈值才尝试生成说说候选",
+    "type": "float",
+    "default": 0.55,
+    "hint": "与私聊投递互不排斥：私聊照常按原逻辑投递，这里是额外把同一个高分意图也送去广播候选池。调低会让更多日常小事也尝试发说说。"
+  },
+  "sylanne_alpha_qzone_daily_max": {
+    "description": "每日最多发说说条数（必须 >0，否则视为闸关死）",
+    "type": "int",
+    "default": 1,
+    "hint": "频率闸独立于 owner 过目门——过目门保证内容对，这个保证不会发太勤显得账号异常。"
+  },
+  "sylanne_alpha_qzone_weekly_max": {
+    "description": "每周最多发说说条数（必须 >0，否则视为闸关死）",
+    "type": "int",
+    "default": 3,
+    "hint": "与每日上限同时生效，取更严的那个。"
   }
 }

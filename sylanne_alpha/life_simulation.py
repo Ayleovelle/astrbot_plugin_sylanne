@@ -867,6 +867,9 @@ class LifeSimulator:
         self._state_dirty_callback: Callable[[], Awaitable[None]] | None = (
             None  # tick 后状态变脏通知（宿主节流落盘，PR-A5）
         )
+        self._qzone_candidate_callback: (
+            Callable[[LifeEvent, ShareIntent], Awaitable[None]] | None
+        ) = None  # Qzone 说说候选回调（默认关，仅 qzone_enabled 时才会被喂）
         # PR-C1：ShareIntent store（intent_id → ShareIntent），供 pipeline 取用
         self._share_intents: dict[str, ShareIntent] = {}
         # issue#43 Wave1：生活模拟连续失败计数 + 退避剩余跳过拍数（瞬时态，故意
@@ -901,6 +904,18 @@ class LifeSimulator:
             ),
         )
 
+    @property
+    def qzone_enabled(self) -> bool:
+        """Qzone 说说候选入口总闸（默认关，独立于 life_simulation_enabled 本身，
+        也独立于 proactive_bridge_enabled——三个开关互不预设依赖关系）。"""
+        return bool(self._config.get("sylanne_alpha_qzone_enabled", False))
+
+    @property
+    def qzone_min_score(self) -> float:
+        """ShareIntent.final_score 达到此分才尝试送去广播候选（与私聊投递互不排斥，
+        私聊照常走原 _score_to_delivery 判定，这里是"额外可选地"送一份候选）。"""
+        return float(self._config.get("sylanne_alpha_qzone_min_score", 0.55))
+
     def configure(
         self,
         llm_caller: Callable[..., Awaitable[str]] | None = None,
@@ -911,6 +926,8 @@ class LifeSimulator:
         body_delta_callback: Callable[[dict[str, float]], None] | None = None,
         countdown_callback: Callable[[], Awaitable[None]] | None = None,
         state_dirty_callback: Callable[[], Awaitable[None]] | None = None,
+        qzone_candidate_callback: Callable[[LifeEvent, ShareIntent], Awaitable[None]]
+        | None = None,
     ):
         """注入外部依赖。所有回调都是可选的。"""
         self._llm_caller = llm_caller
@@ -921,6 +938,7 @@ class LifeSimulator:
         self._body_delta_callback = body_delta_callback
         self._countdown_callback = countdown_callback
         self._state_dirty_callback = state_dirty_callback
+        self._qzone_candidate_callback = qzone_candidate_callback
 
     async def simulate_tick(self) -> None:
         """执行一次模拟周期（CP8-P3b：公开入口，由 LifeAgent 自驱调用）。
@@ -1175,6 +1193,30 @@ class LifeSimulator:
                         if milestone not in project.milestones_shared:
                             project.milestones_shared.append(milestone)
                             break  # 一次 outreach 只消费一个 milestone
+
+            # Qzone 说说候选（第三投递汇，PR-Qzone）：默认关，独立于上面私聊 outreach
+            # 判定（SILENT/BRIDGE/DIRECT 分支不变，私聊照常走原逻辑）——这里只是
+            # "额外可选地"把同一个 intent 也送去广播候选池。本分支零 LLM、不做
+            # 净化闸判断（只判白名单/开关/分数），实际草稿生成/闸/发布全在
+            # qzone_share.handle_share_intent_candidate 里（模块零 LLM 契约边界）。
+            if (
+                self.qzone_enabled
+                and self._qzone_candidate_callback is not None
+                and event.privacy_level == LifePrivacy.SHAREABLE
+                and event.source in (
+                    LifeSource.PLANNED_TICK,
+                    LifeSource.REFLECTION,
+                    LifeSource.CONSOLIDATION,
+                )
+                and intent.final_score >= self.qzone_min_score
+            ):
+                try:
+                    await self._qzone_candidate_callback(event, intent)
+                except Exception:
+                    import logging
+                    logging.getLogger(__name__).debug(
+                        "life_sim qzone candidate callback failed", exc_info=True
+                    )
 
         # 二审 HIGH 修复：两个 callback 统一由 event 门控（空 tick 不触发）
         if self._countdown_callback is not None:

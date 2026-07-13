@@ -375,6 +375,20 @@ class SocialFieldCollector:
     def is_group_context_by_key(self, session_key: str) -> bool:
         return "Group" in session_key or "group" in session_key
 
+    def known_other_sender_ids(self) -> set[str]:
+        """遍历所有群组的旁观缓冲区，收集出现过的 sender_id（非破坏性只读）。
+
+        供 qzone 广播闸（qzone_share.py）拼装"已知第三方"名单用；只读取，
+        不 drain，不与 drain_shadow_buffer 的消费语义冲突，对现有行为零影响。
+        """
+        ids: set[str] = set()
+        for gs in self._groups.values():
+            for entry in gs.shadow_buffer:
+                sid = str(entry.get("sender_id", "") or "")
+                if sid:
+                    ids.add(sid)
+        return ids
+
     def extract_group_id_from_key(self, session_key: str) -> str:
         if ":" in session_key:
             return session_key.rsplit(":", 1)[0]
