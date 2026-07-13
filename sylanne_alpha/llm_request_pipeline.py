@@ -2886,6 +2886,22 @@ class LLMRequestPipeline:
         if warn_ts:
             warn_ts.clear()
 
+    async def _qzone_candidate_handler(self, event: Any, intent: Any) -> None:
+        """Qzone 说说候选回调（life_simulator._qzone_candidate_callback 落地）。
+
+        落地全在独立模块 qzone_share.py（频率闸/草稿生成/净化闸/owner 过目门/
+        HTTP 发布全在那）；本方法只是薄转发，把 life_sim 零 LLM 契约的边界严格
+        划在这一层——life_simulation.py 本身绝不因为本方法内部逻辑改变而被迫
+        感知 LLM/HTTP 细节。任何异常都不应回传给 life_sim tick（qzone_share 内部
+        已 try/except 兜底，这里再兜一层防御性网）。
+        """
+        try:
+            from sylanne_alpha import qzone_share
+
+            await qzone_share.handle_share_intent_candidate(self._p, event, intent)
+        except Exception as exc:  # noqa: BLE001
+            logger.debug("Sylanne qzone candidate handler failed: %s", exc)
+
     async def _life_sim_outreach(
         self, reason: str, mood: str, intent: dict | None = None
     ) -> None:

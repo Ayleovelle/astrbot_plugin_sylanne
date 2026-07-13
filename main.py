@@ -227,6 +227,9 @@ PROACTIVE_SCHEDULER_IDLE_DELAY_SECONDS = 1800.0
 # T1-04②：RhythmLearner 节流落盘间隔（秒）。由 on_message 高频驱动，节流到与
 # life_sim 同量级，避免每条消息都写 KV。
 _RHYTHM_LEARNER_SAVE_MIN_GAP_SECONDS = 90.0
+# PR-Qzone：说说审计/频率闸状态节流落盘间隔。与 rel_state 同量级——发布/确认
+# 都是用户即时动作或低频候选事件，不需要 life_sim 那种 tick 级节流。
+_QZONE_AUDIT_SAVE_MIN_GAP_SECONDS = 10.0
 
 from sylanne_alpha.utils import safe_ensure_future  # noqa: E402, F401
 
@@ -456,6 +459,13 @@ class EmotionalStatePlugin(Star):
         self._proactive_dispatch_audit: BoundedDict = BoundedDict(maxsize=100)
         # 社交场收集器：群聊氛围感知
         self._social_field = SocialFieldCollector(config=self._config)
+        # PR-Qzone：说说功能审计/频率闸状态 + HTTP session（initialize 时按需建立，
+        # terminate 时收；session 建立前 qzone_share._do_publish 会因 None 直接失败，
+        # 不阻塞其余子系统初始化）。
+        self._qzone_audit = None
+        self._qzone_audit_last_save_ts: float = 0.0
+        self._qzone_audit_dirty_in_flight: bool = False
+        self._qzone_http_session: Any = None
         # 后台投递队列已迁入 self._store（CP8-P2 批2）
         self._background_post_recovered_sessions: set[str] = set()
         self._internal_assessor_llm_inflight: int = 0
@@ -2665,6 +2675,27 @@ class EmotionalStatePlugin(Star):
         async for text in _rl.unbond_command(self, event):
             yield event.plain_result(text) if hasattr(event, "plain_result") else text
 
+    @filter.command("说说草稿")
+    async def qzone_status_command(self, event: Any = None, **kwargs: Any) -> Any:
+        """PR-Qzone：查看当前是否有等主人过目的说说草稿（仅主人可用）。"""
+        from sylanne_alpha import qzone_share as _qz
+        async for text in _qz.status_command(self, event):
+            yield event.plain_result(text) if hasattr(event, "plain_result") else text
+
+    @filter.command("说说确认")
+    async def qzone_confirm_command(self, event: Any = None, **kwargs: Any) -> Any:
+        """PR-Qzone：确认发出待确认的说说草稿（owner 过目门，唯一发布路径）。"""
+        from sylanne_alpha import qzone_share as _qz
+        async for text in _qz.confirm_command(self, event):
+            yield event.plain_result(text) if hasattr(event, "plain_result") else text
+
+    @filter.command("说说取消")
+    async def qzone_cancel_command(self, event: Any = None, **kwargs: Any) -> Any:
+        """PR-Qzone：放弃待确认的说说草稿（仅主人可用）。"""
+        from sylanne_alpha import qzone_share as _qz
+        async for text in _qz.cancel_command(self, event):
+            yield event.plain_result(text) if hasattr(event, "plain_result") else text
+
     async def get_bot_integrated_self_state_tool(
         self, event: Any = None, detail: str = "summary", **kwargs: Any
     ) -> Any:
@@ -2761,6 +2792,7 @@ class EmotionalStatePlugin(Star):
             memory_summary_getter=pipe._life_sim_memory_summary,
             countdown_callback=self._life_sim_adjust_countdown,
             state_dirty_callback=self._life_sim_throttled_save,
+            qzone_candidate_callback=pipe._qzone_candidate_handler,
         )
         # 启动全局自驱心跳（替代原 life_sim.start() 的后台循环）。
         # LifeSim 持久化状态恢复在 async initialize 里 await（KV 读为异步）。
@@ -2860,6 +2892,25 @@ class EmotionalStatePlugin(Star):
                     _rl.restore(self, rel_saved)
         except Exception as e:
             logger.debug(f"Sylanne relationship state restore skipped: {e}")
+        # PR-Qzone：恢复说说功能审计/频率闸状态（独立 KV key，重启不丢当日/当周计数，
+        # 否则重启即可绕过频率闸上限）。
+        try:
+            if self._has_kv_api():
+                from sylanne_alpha import qzone_share as _qz
+                qzone_saved = await self.get_kv_data(_qz._KV_KEY, None)
+                if qzone_saved and isinstance(qzone_saved, dict):
+                    self._qzone_audit = _qz.QzoneAuditState.from_dict(qzone_saved)
+        except Exception as e:
+            logger.debug(f"Sylanne qzone audit state restore skipped: {e}")
+        # PR-Qzone：建立说说发布用的 aiohttp session（terminate 时收）。建立失败
+        # （aiohttp 未装等极端情况）不阻断其余初始化——发布时 qzone_share._do_publish
+        # 会因 session 为 None 直接返回失败，走 owner 过目门的失败提示路径。
+        try:
+            import aiohttp
+            if self._qzone_http_session is None or self._qzone_http_session.closed:
+                self._qzone_http_session = aiohttp.ClientSession()
+        except Exception as e:
+            logger.debug(f"Sylanne qzone http session init skipped: {e}")
         # issue#43 Wave2：还原崩溃中断的主动发言桥接 override 基线（provenance 恢复，
         # 把用户自配 proactive_prompt 一起带回；无残留则 no-op，绝不盲删大饼配置）。
         try:
@@ -2946,6 +2997,33 @@ class EmotionalStatePlugin(Star):
             logger.debug(f"Sylanne life sim throttled save skipped: {e}")
         finally:
             self._life_sim_dirty_in_flight = False
+
+    async def _qzone_audit_throttled_save(self) -> None:
+        """PR-Qzone：节流落盘说说审计/频率闸状态（镜像 _life_sim_throttled_save）。
+
+        由 qzone_share 模块每次记审计条目时派发，受 min-gap 节流；失败静默，
+        最后一次仍由 terminate 兜底。频率闸计数（daily/weekly post_timestamps）
+        重启不落盘会让频率闸失效，因此本方法与 initialize 的 KV 恢复是配套契约。
+        """
+        now = time.time()
+        if self._qzone_audit_dirty_in_flight:
+            return
+        if (now - self._qzone_audit_last_save_ts) < _QZONE_AUDIT_SAVE_MIN_GAP_SECONDS:
+            return
+        if not self._has_kv_api():
+            return
+        audit = getattr(self, "_qzone_audit", None)
+        if audit is None:
+            return
+        self._qzone_audit_dirty_in_flight = True
+        self._qzone_audit_last_save_ts = now
+        try:
+            from sylanne_alpha import qzone_share as _qz
+            await self.put_kv_data(_qz._KV_KEY, audit.to_dict())
+        except Exception as e:
+            logger.debug(f"Sylanne qzone audit throttled save skipped: {e}")
+        finally:
+            self._qzone_audit_dirty_in_flight = False
 
     async def _rhythm_learner_throttled_save(self) -> None:
         """T1-04②：节流落盘 RhythmLearner 状态（镜像 _life_sim_throttled_save）。
@@ -3141,6 +3219,21 @@ class EmotionalStatePlugin(Star):
                 await self.put_kv_data(_rl._KV_KEY, _rl.snapshot(self))
         except Exception as e:
             logger.debug(f"Sylanne relationship state persist skipped: {e}")
+        # PR-Qzone：说说审计/频率闸状态终扫落盘（独立 KV key，兜底节流漏窗）
+        try:
+            audit = getattr(self, "_qzone_audit", None)
+            if audit is not None and self._has_kv_api():
+                from sylanne_alpha import qzone_share as _qz
+                await self.put_kv_data(_qz._KV_KEY, audit.to_dict())
+        except Exception as e:
+            logger.debug(f"Sylanne qzone audit state persist skipped: {e}")
+        # PR-Qzone：关闭说说发布用的 aiohttp session
+        try:
+            session = getattr(self, "_qzone_http_session", None)
+            if session is not None and not session.closed:
+                await session.close()
+        except Exception as e:
+            logger.debug(f"Sylanne qzone http session close skipped: {e}")
         # 关闭独立 WebUI 服务器
         try:
             await stop_webui_server()
