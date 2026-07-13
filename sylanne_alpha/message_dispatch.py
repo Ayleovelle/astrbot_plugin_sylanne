@@ -9,6 +9,27 @@ from typing import Any
 REALTIME_PLAN_SCHEMA_VERSION = "sylanne.alpha.realtime_plan.v1"
 
 
+def realtime_flags(cfg: dict[str, Any] | None) -> tuple[bool, bool]:
+    """即时聊天两开关的单一读取入口：(realtime_enabled, intercept)。
+
+    次要修复②（realtime 完整重做设计）：此前请求侧（llm_request_pipeline）只认
+    正规键 sylanne_alpha_realtime_chat_enabled / sylanne_alpha_realtime_intercept_
+    llm_response，响应侧（llm_response_pipeline）额外兼容旧别名
+    enable_realtime_chat / realtime_chat_intercept_llm_response——两侧口径不一致，
+    若只设别名键，请求侧会误判两开关都关（M4a 请求侧强制关流因此漏触发）。
+    现在两侧统一走这一个函数，别名与正规键任一为真即算开启。
+    """
+    _cfg = cfg or {}
+    enabled = bool(
+        _cfg.get("sylanne_alpha_realtime_chat_enabled") or _cfg.get("enable_realtime_chat")
+    )
+    intercept = bool(
+        _cfg.get("sylanne_alpha_realtime_intercept_llm_response")
+        or _cfg.get("realtime_chat_intercept_llm_response")
+    )
+    return enabled, intercept
+
+
 def strip_draft_blocks(text: str) -> str:
     cleaned = str(text or "")
     for tag in ("draft_notes", "thinking", "think"):

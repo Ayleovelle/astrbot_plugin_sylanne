@@ -151,7 +151,7 @@ from sylanne_alpha import webui_server as _sylanne_webui_server  # noqa: E402
 from sylanne_alpha.assessor_async import AsyncAssessor  # noqa: E402
 from sylanne_alpha.bounded_dict import BoundedDict  # noqa: E402
 from sylanne_alpha.diagnostics_surface import command_surface, memory_surface, reset_surface  # noqa: E402
-from sylanne_alpha.message_dispatch import realtime_dispatch  # noqa: E402
+from sylanne_alpha.message_dispatch import realtime_dispatch, realtime_flags  # noqa: E402
 from sylanne_alpha.host import SylanneAlphaHost, SylanneAlphaHostEvent  # noqa: E402
 from sylanne_alpha.life_simulation import LifeSimulator  # noqa: E402
 from sylanne_alpha.memory_system import MemorySystem  # noqa: E402
@@ -1118,6 +1118,22 @@ class EmotionalStatePlugin(Star):
     async def on_message(self, event: Any):
         """监听所有消息事件，更新 proactive scheduler 时间戳和节奏学习器。"""
         try:
+            # M4a（realtime 完整重做 Model-D）：即时聊天接管开启时强制关闭本轮
+            # 流式，让响应侧走非流式档（on_decorating_result 才够得着、能抑制
+            # 框架重发）。此处（filter.event_message_type(ALL)，由 ProcessStage
+            # 内 star_request_sub_stage 触发）确定运行在 AgentRequestSubStage/
+            # InternalAgentSubStage 读取 event.get_extra("enable_streaming")
+            # （internal.py:169）之前——见 process_stage/stage.py 的调用顺序：
+            # star_request_sub_stage.process 先于 agent_sub_stage.process。
+            # 默认两开关皆关时这里零行为（不碰 enable_streaming，流式配置原样）。
+            try:
+                _realtime_enabled, _realtime_intercept = realtime_flags(self.config)
+                if _realtime_enabled and _realtime_intercept:
+                    set_extra = getattr(event, "set_extra", None)
+                    if callable(set_extra):
+                        set_extra("enable_streaming", False)
+            except Exception:
+                pass
             session_key = self._session_ctx.session_key(event)
             now = time.time()
             # v2.5.0 slice-1b（design §8 BLOCKER B1，全矩阵扎实版修正）：主判据
@@ -1432,11 +1448,16 @@ class EmotionalStatePlugin(Star):
         """Stage 8 兜底：strip thinking/draft 块，防止 tool loop 中间步骤泄露。
 
         另：若该消息是 Sylanne 主动发言桥接登记的"待接管分段"，则清空 chain 阻止
-        大饼整段发送，改由 Sylanne 后台连发人格化分段。
+        大饼整段发送，改由 Sylanne 后台连发人格化分段。即时聊天 LLM 响应接管
+        （realtime 完整重做 Model-D）同理，见 _maybe_suppress_realtime_takeover。
         """
         try:
             # 分段接管优先判定（大饼主动消息）
             if await self._maybe_takeover_segments(event):
+                return
+
+            # 即时聊天接管抑制判定（LLM 响应，M1-M3 send/save 解耦核心）
+            if await self._maybe_suppress_realtime_takeover(event):
                 return
 
             from sylanne_alpha.message_dispatch import strip_draft_blocks
@@ -1661,6 +1682,51 @@ class EmotionalStatePlugin(Star):
             )
             return False
 
+    async def _maybe_suppress_realtime_takeover(self, event: Any) -> bool:
+        """即时聊天 LLM 响应接管的发送抑制（realtime 完整重做 Model-D 核心）。
+
+        llm_response_pipeline._on_llm_response_inner 已在后台调度好 Sylanne 自己
+        的分段连发，并置位 event extra `_syl_realtime_takeover=True`；本函数只在这里、
+        用框架自己的装饰钩子清空【规范化后的 event.result.chain】来阻止框架重复发送。
+        "存"与"发"能解耦是因为二者读【不同对象】、与 stage 先后无关：框架历史保存
+        （InternalAgentSubStage._save_to_history）读 llm_response.completion_text +
+        run_context.messages（assistant 段已在 tool_loop_agent_runner.py:197 提交），
+        从不读 event.result.chain；本函数完全不碰 llm_resp.completion_text/result_chain。
+        （真实时序是 decorate 随 run_agent 消费先跑、save 在其后，但因读不同对象故无影响。）
+
+        安全网（issue26 同类判据）：即便走到这里，chain 若含非 Plain 组件
+        （理论上 on_llm_response 已提前放弃接管，不会走到这——双保险，任何时序
+        假设失效都不吞图片/语音）——不清空，交框架原样发送；仅纯 Plain 才清空。
+
+        返回 True 表示本轮由本机制处理（调用方应 return，跳过后续通用
+        strip_draft_blocks 逻辑——分段发送前已经 sanitize/strip 过）。
+        """
+        get_extra = getattr(event, "get_extra", None)
+        if not callable(get_extra) or not get_extra("_syl_realtime_takeover", False):
+            return False
+        try:
+            result = event.get_result()
+            chain = getattr(result, "chain", None) if result is not None else None
+            if chain and any(not isinstance(seg, Plain) for seg in chain):
+                logger.info(
+                    "Sylanne realtime takeover suppression skipped: chain 含非 "
+                    "Plain 组件，放行框架原样发送 for %s",
+                    getattr(event, "unified_msg_origin", ""),
+                )
+                # 不视为"已处理"：交回调用方走通用 strip_draft_blocks 清理
+                # （只清 Plain 段、非 Plain 原样放行），而不是完全零处理。
+                return False
+            if result is not None:
+                if isinstance(chain, list):
+                    chain[:] = []  # 切片清空，保留 list/MessageChain 子类身份
+                else:
+                    result.chain = []
+            return True
+        except Exception as e:
+            logger.warning(
+                f"Sylanne realtime takeover suppression failed: {e}", exc_info=True
+            )
+            return False
 
     async def _on_llm_response_inner(self, event: Any, response: Any) -> None:
         # 2.4.1 err 轮兜底（三态标记，第二态）：本钩子跑过即置 True。必须在【入口】置位，

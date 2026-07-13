@@ -1,0 +1,485 @@
+"""2.5.0 基调③ realtime 完整重做（Model-D）：send/save 解耦回归锁。
+
+覆盖设计文档 M1-M4 + 次要修复①②，以及默认路径零回归红线闸：
+
+  M1  非 Plain（图片/语音）保全：result_chain 含非 Plain 组件时，
+      on_llm_response 彻底放弃接管——不碰 completion_text/result_chain，
+      不置接管旗标，不分段调度。
+  M2  历史真落库：不再清空 result_chain/chain，completion_text 保持非空
+      （框架 SAVE-GATE 读的正是这个字段），result_chain 对象身份不被置 None。
+  M3  跨 provider 不双发：result_chain 档（Gemini/OpenAI 形态）与
+      _completion_text 档（Anthropic 形态）都只置接管旗标 + 分段调度，
+      从不清空 result_chain——发送抑制统一交 on_decorating_result。
+  M4  流式不双发：on_llm_response 入口检测 event.get_result().
+      result_content_type == STREAMING_RESULT 时彻底放弃接管；请求侧
+      do_first 门补 realtime_enabled，与响应侧对齐。
+  次要①：_stream_first_do_first 三个开关都为真才抢发。
+  次要②：realtime_flags 正规键/旧别名任一为真即算开启，两侧口径统一。
+
+  main.py 侧：on_message 强制关流（M4a）+ on_decorating_result 的
+  _maybe_suppress_realtime_takeover（M1-M3 发送抑制的落地点）。
+
+本文件全部使用真实 astrbot.core.provider.entities.LLMResponse /
+astrbot.core.message.message_event_result.MessageChain / astrbot.core.
+message.components，精确复现框架 completion_text getter/setter 的真实
+坍缩行为（不是自造模型），与设计文档里对框架源码的引用逐条对应。
+"""
+
+from __future__ import annotations
+
+import asyncio
+import tempfile
+import types
+from types import SimpleNamespace
+
+import pytest
+
+astrbot_entities = pytest.importorskip("astrbot.core.provider.entities")
+astrbot_result = pytest.importorskip("astrbot.core.message.message_event_result")
+astrbot_components = pytest.importorskip("astrbot.core.message.components")
+
+LLMResponse = astrbot_entities.LLMResponse
+MessageChain = astrbot_result.MessageChain
+ResultContentType = astrbot_result.ResultContentType
+Plain = astrbot_components.Plain
+Record = astrbot_components.Record
+
+from main import EmotionalStatePlugin
+from sylanne_alpha.llm_request_pipeline import LLMRequestPipeline
+from sylanne_alpha.llm_response_pipeline import LLMResponsePipeline
+from sylanne_alpha.message_dispatch import realtime_flags
+from sylanne_alpha.rhythm_learner import RhythmLearner
+from sylanne_alpha.session_state_store import SessionStateStore
+
+
+# ===========================================================================
+# 共用桩件（沿用 tests/test_conv_mgr_sync_race.py 的最小插件桩写法）
+# ===========================================================================
+
+
+class _FakeEngine:
+    def expression_drive(self) -> float:
+        return 0.5
+
+    def observe(self) -> dict:
+        return {"arousal": 0.5, "tension": 0.0}
+
+
+class _FakeSocialVoid:
+    def reset(self) -> None:
+        pass
+
+
+class _FakeComputation:
+    def __init__(self) -> None:
+        self.engine = _FakeEngine()
+        self.engine.social_void = _FakeSocialVoid()  # type: ignore[attr-defined]
+
+
+class _FakeMortality:
+    exhaustion = 0.5
+
+
+class _FakeBody:
+    def __init__(self) -> None:
+        self.mortality = _FakeMortality()
+
+
+class _FakeKernel:
+    def __init__(self) -> None:
+        self.computation = _FakeComputation()
+        self.body = _FakeBody()
+        self.previous_event = {"now": 0.0}
+
+
+class _FakeHost:
+    def __init__(self) -> None:
+        self.kernel = _FakeKernel()
+
+
+class _Ev:
+    """最小事件桩：跟真事件一样支持 get_result/set_extra/get_extra，
+    生产事件（aiocqhttp 等）也是这三个方法，无裸属性——符合测试事件形态约束。
+    """
+
+    def __init__(self, result: object | None = None) -> None:
+        self.unified_msg_origin = "sess:realtime-decouple"
+        self._extras: dict = {}
+        self._result = result
+
+    def set_extra(self, key: str, value: object) -> None:
+        self._extras[key] = value
+
+    def get_extra(self, key: str, default: object = None) -> object:
+        return self._extras.get(key, default)
+
+    def get_result(self) -> object | None:
+        return self._result
+
+
+class _Plugin:
+    """intercept 分支完整跑通所需的最小插件桩（含 rhythm_learner/host）。"""
+
+    def __init__(self, root: str, config: dict) -> None:
+        self._config = config
+        self._store = SessionStateStore()
+        self._background_tasks: list = []
+        self._root = root
+        self._rhythm_learner = RhythmLearner(intimacy_threshold=0.6)
+
+    def _session_key(self, _e: object) -> str:
+        return "sess:realtime-decouple"
+
+    def _host(self, _sk: str) -> _FakeHost:
+        return _FakeHost()
+
+    def _schedule_buffer_persist(self, _sk: str) -> None:
+        pass
+
+    def _has_conversation_manager(self) -> bool:
+        return False
+
+    async def observe_response(self, *args: object, **kwargs: object) -> None:
+        return None
+
+
+def _cfg(*, enabled: bool, intercept: bool) -> dict:
+    return {
+        "sylanne_alpha_realtime_chat_enabled": enabled,
+        "sylanne_alpha_realtime_intercept_llm_response": intercept,
+    }
+
+
+def _run(pipe: LLMResponsePipeline, resp: object, plugin: _Plugin, ev: _Ev) -> None:
+    async def go() -> None:
+        await pipe._on_llm_response_inner(ev, resp)
+        if plugin._background_tasks:
+            await asyncio.gather(*plugin._background_tasks)
+        for _ in range(5):
+            await asyncio.sleep(0)
+
+    asyncio.run(go())
+
+
+def _stub_dispatch(pipe: LLMResponsePipeline) -> list:
+    """把 _dispatch_segmented_parts 换成记录调用的桩（不关心真实打字节奏）。"""
+    calls: list = []
+
+    async def _fake(self, origin, parts, session_key: str = "") -> None:
+        calls.append((origin, parts, session_key))
+
+    pipe._dispatch_segmented_parts = types.MethodType(_fake, pipe)  # type: ignore[method-assign]
+    return calls
+
+
+# ===========================================================================
+# 默认路径零回归：realtime 两开关关（绝大多数用户）——旧行为字节级不变
+# ===========================================================================
+
+
+def test_default_path_never_touches_takeover_flag_or_response() -> None:
+    p = _Plugin(tempfile.mkdtemp(prefix="rt_default_"), _cfg(enabled=False, intercept=False))
+    pipe = LLMResponsePipeline(p)  # type: ignore[arg-type]
+    resp = LLMResponse(role="assistant", completion_text="今天天气不错")
+    ev = _Ev()
+
+    _run(pipe, resp, p, ev)
+
+    assert ev.get_extra("_syl_realtime_takeover") is None, "默认关闭时绝不应置接管旗标"
+    assert resp.completion_text == "今天天气不错", "非拦截分支不应改写正常回复文本"
+
+
+def test_default_path_intercept_only_without_enabled_stays_noop() -> None:
+    """只开 intercept、总开关仍关：整体仍应视为未启用（覆盖 or 语义两处一致）。"""
+    p = _Plugin(tempfile.mkdtemp(prefix="rt_default2_"), _cfg(enabled=False, intercept=True))
+    pipe = LLMResponsePipeline(p)  # type: ignore[arg-type]
+    resp = LLMResponse(role="assistant", completion_text="嗯嗯")
+    ev = _Ev()
+
+    _run(pipe, resp, p, ev)
+
+    assert ev.get_extra("_syl_realtime_takeover") is None
+    assert resp.completion_text == "嗯嗯"
+
+
+# ===========================================================================
+# M2/M3：两种 provider 形态都不再清空 result_chain，completion_text 保持
+# 非空（SAVE-GATE 通过），只置接管旗标交给 on_decorating_result 抑制发送
+# ===========================================================================
+
+
+def test_result_chain_provider_keeps_chain_alive_and_flags_takeover() -> None:
+    """Gemini/OpenAI 形态（result_chain 非空，纯 Plain）：M2 治渐进失忆——
+    completion_text 保持非空、result_chain 对象不被置 None（旧 hack 会置 None，
+    连带 completion_text getter 塌缩成空，框架 SAVE-GATE 判定不落库）。"""
+    p = _Plugin(tempfile.mkdtemp(prefix="rt_rc_"), _cfg(enabled=True, intercept=True))
+    pipe = LLMResponsePipeline(p)  # type: ignore[arg-type]
+    calls = _stub_dispatch(pipe)
+
+    mc = MessageChain()
+    mc.chain = [Plain("今天天气不错，我们出去走走吧")]
+    resp = LLMResponse(role="assistant", result_chain=mc)
+    ev = _Ev()
+
+    _run(pipe, resp, p, ev)
+
+    assert ev.get_extra("_syl_realtime_takeover") is True, "应置接管旗标供 decorate 抑制发送"
+    assert resp.result_chain is mc, "result_chain 对象身份不应被置 None（M2/M3 核心）"
+    assert bool(resp.completion_text), (
+        "completion_text 必须非空——框架 _save_to_history 的 SAVE-GATE "
+        "（not completion_text and not tool_calls_result and not aborted）就读这个字段"
+    )
+    assert calls, "应触发后台分段调度（Sylanne 自己发）"
+
+
+def test_completion_text_only_provider_keeps_none_chain_and_flags_takeover() -> None:
+    """Anthropic 形态（result_chain 从未被赋值，只用 _completion_text）：M3 治
+    双发——result_chain 全程保持 None（不因清空动作产生任何副作用），
+    completion_text 非空，只靠接管旗标交给 decorate 抑制，不再靠"清 result_chain"
+    这个对该形态 provider 天生无效的旧 hack。"""
+    p = _Plugin(tempfile.mkdtemp(prefix="rt_ct_"), _cfg(enabled=True, intercept=True))
+    pipe = LLMResponsePipeline(p)  # type: ignore[arg-type]
+    calls = _stub_dispatch(pipe)
+
+    resp = LLMResponse(role="assistant", completion_text="在的在的，怎么啦")
+    ev = _Ev()
+
+    _run(pipe, resp, p, ev)
+
+    assert ev.get_extra("_syl_realtime_takeover") is True
+    assert resp.result_chain is None, "_completion_text 档 provider 的 result_chain 应始终是 None"
+    assert bool(resp.completion_text)
+    assert calls
+
+
+# ===========================================================================
+# M1：result_chain 含非 Plain 组件（图片/语音）→ 彻底放弃接管
+# ===========================================================================
+
+
+def test_non_plain_result_chain_abandons_takeover_entirely() -> None:
+    p = _Plugin(tempfile.mkdtemp(prefix="rt_nonplain_"), _cfg(enabled=True, intercept=True))
+    pipe = LLMResponsePipeline(p)  # type: ignore[arg-type]
+    calls = _stub_dispatch(pipe)
+
+    mc = MessageChain()
+    mc.chain = [Plain("给你听首歌"), Record(file="/tmp/x.wav")]
+    resp = LLMResponse(role="assistant", result_chain=mc)
+    original_text = resp.completion_text
+    ev = _Ev()
+
+    _run(pipe, resp, p, ev)
+
+    assert ev.get_extra("_syl_realtime_takeover") is None, "含非 Plain 组件时不得接管"
+    assert resp.completion_text == original_text, "放弃接管时不应改写 completion_text"
+    assert resp.result_chain is mc, "放弃接管时更不应动 result_chain"
+    assert calls == [], "不应触发后台分段调度（会把语音一起吞掉/双发文本）"
+
+
+def test_pure_plain_result_chain_with_multiple_segments_still_taken_over() -> None:
+    """回归对照：纯 Plain（哪怕多段）不受 M1 守卫影响，仍正常接管。"""
+    p = _Plugin(tempfile.mkdtemp(prefix="rt_pureplain_"), _cfg(enabled=True, intercept=True))
+    pipe = LLMResponsePipeline(p)  # type: ignore[arg-type]
+    calls = _stub_dispatch(pipe)
+
+    mc = MessageChain()
+    mc.chain = [Plain("第一段。"), Plain("第二段。")]
+    resp = LLMResponse(role="assistant", result_chain=mc)
+    ev = _Ev()
+
+    _run(pipe, resp, p, ev)
+
+    assert ev.get_extra("_syl_realtime_takeover") is True
+    assert calls
+
+
+# ===========================================================================
+# M4b：响应侧检测 STREAMING_RESULT → 彻底放弃接管（不与框架原生流式并行双发）
+# ===========================================================================
+
+
+def test_streaming_result_abandons_takeover() -> None:
+    p = _Plugin(tempfile.mkdtemp(prefix="rt_stream_"), _cfg(enabled=True, intercept=True))
+    pipe = LLMResponsePipeline(p)  # type: ignore[arg-type]
+    calls = _stub_dispatch(pipe)
+
+    resp = LLMResponse(role="assistant", completion_text="正在流式吐字中")
+    fake_result = SimpleNamespace(result_content_type=ResultContentType.STREAMING_RESULT)
+    ev = _Ev(result=fake_result)
+
+    _run(pipe, resp, p, ev)
+
+    assert ev.get_extra("_syl_realtime_takeover") is None, "流式在飞时绝不接管"
+    assert resp.completion_text == "正在流式吐字中", "不应改写——框架自己的流式发送/保存全程不碰"
+    assert calls == [], "不应额外后台分段调度，避免和框架原生流式并行双发"
+
+
+def test_non_streaming_result_content_type_is_unaffected() -> None:
+    """回归对照：result_content_type 不是 STREAMING_RESULT（如 LLM_RESULT）时，
+    M4b 不应误伤——继续正常接管。"""
+    p = _Plugin(tempfile.mkdtemp(prefix="rt_notstream_"), _cfg(enabled=True, intercept=True))
+    pipe = LLMResponsePipeline(p)  # type: ignore[arg-type]
+    calls = _stub_dispatch(pipe)
+
+    resp = LLMResponse(role="assistant", completion_text="正常一句话回复")
+    fake_result = SimpleNamespace(result_content_type=ResultContentType.LLM_RESULT)
+    ev = _Ev(result=fake_result)
+
+    _run(pipe, resp, p, ev)
+
+    assert ev.get_extra("_syl_realtime_takeover") is True
+    assert calls
+
+
+# ===========================================================================
+# 次要①②：共享判据函数的纯逻辑回归锁
+# ===========================================================================
+
+
+def test_realtime_flags_accepts_legacy_aliases_symmetrically() -> None:
+    assert realtime_flags(
+        {
+            "sylanne_alpha_realtime_chat_enabled": True,
+            "sylanne_alpha_realtime_intercept_llm_response": True,
+        }
+    ) == (True, True)
+    assert realtime_flags(
+        {"enable_realtime_chat": True, "realtime_chat_intercept_llm_response": True}
+    ) == (True, True), "旧别名单独设置也应等价于开启（此前请求侧不认别名）"
+    assert realtime_flags({}) == (False, False)
+    assert realtime_flags(None) == (False, False)
+
+
+def test_stream_first_do_first_requires_all_three_gates() -> None:
+    """次要①回归锁：此前 do_first 只看 stream_first/intercept，realtime 总
+    开关关时仍会抢发首句——now 三者都真才抢发。"""
+    assert LLMRequestPipeline._stream_first_do_first(True, True, True) is True
+    assert LLMRequestPipeline._stream_first_do_first(True, False, True) is False, (
+        "回归锁：realtime 总开关关时不应抢发（此前的 bug）"
+    )
+    assert LLMRequestPipeline._stream_first_do_first(True, True, False) is False
+    assert LLMRequestPipeline._stream_first_do_first(False, True, True) is False
+
+
+# ===========================================================================
+# main.py：M4a 请求侧强制关流 + on_decorating_result 发送抑制落地点
+# ===========================================================================
+
+
+def test_on_message_forces_streaming_off_when_realtime_takeover_active() -> None:
+    calls: list = []
+
+    class _StreamEv:
+        def set_extra(self, key: str, value: object) -> None:
+            calls.append((key, value))
+
+    self_stub = SimpleNamespace(
+        config={
+            "sylanne_alpha_realtime_chat_enabled": True,
+            "sylanne_alpha_realtime_intercept_llm_response": True,
+        }
+    )
+    # on_message 后续逻辑（session_ctx 等）在桩下必然抛异常，但整段被外层
+    # try/except 吞掉——只关心 M4a 这一行是否先于崩溃执行。
+    asyncio.run(EmotionalStatePlugin.on_message(self_stub, _StreamEv()))
+
+    assert ("enable_streaming", False) in calls
+
+
+@pytest.mark.parametrize(
+    "cfg",
+    [
+        {},
+        {"sylanne_alpha_realtime_chat_enabled": True},
+        {"sylanne_alpha_realtime_intercept_llm_response": True},
+    ],
+)
+def test_on_message_leaves_streaming_alone_when_not_fully_enabled(cfg: dict) -> None:
+    calls: list = []
+
+    class _StreamEv:
+        def set_extra(self, key: str, value: object) -> None:
+            calls.append((key, value))
+
+    self_stub = SimpleNamespace(config=cfg)
+    asyncio.run(EmotionalStatePlugin.on_message(self_stub, _StreamEv()))
+
+    assert calls == [], f"两开关未同时开启时不应碰 enable_streaming (cfg={cfg})"
+
+
+def _decorate_event(chain: list, *, takeover: bool = True) -> SimpleNamespace:
+    result = SimpleNamespace(chain=chain)
+    extras = {"_syl_realtime_takeover": takeover}
+    return SimpleNamespace(
+        unified_msg_origin="sess:decorate",
+        get_result=lambda: result,
+        get_extra=lambda k, default=None: extras.get(k, default),
+    )
+
+
+def test_suppress_realtime_takeover_clears_pure_plain_chain() -> None:
+    event = _decorate_event([Plain("接管分段已在后台发了")])
+    self_stub = SimpleNamespace()
+
+    handled = asyncio.run(
+        EmotionalStatePlugin._maybe_suppress_realtime_takeover(self_stub, event)
+    )
+
+    assert handled is True
+    assert event.get_result().chain == [], "纯 Plain 应被清空以抑制框架重发"
+
+
+def test_suppress_realtime_takeover_leaves_non_plain_chain_alone() -> None:
+    rec = Record(file="/tmp/x.wav")
+    event = _decorate_event([Plain("配文"), rec])
+    self_stub = SimpleNamespace()
+
+    handled = asyncio.run(
+        EmotionalStatePlugin._maybe_suppress_realtime_takeover(self_stub, event)
+    )
+
+    assert handled is False, "安全网：非 Plain 不吞，交回通用 strip 流程"
+    assert event.get_result().chain == [Plain("配文"), rec], "chain 不应被清空/改动"
+
+
+def test_suppress_realtime_takeover_noop_without_flag() -> None:
+    event = _decorate_event([Plain("普通装饰阶段")], takeover=False)
+    self_stub = SimpleNamespace()
+
+    handled = asyncio.run(
+        EmotionalStatePlugin._maybe_suppress_realtime_takeover(self_stub, event)
+    )
+
+    assert handled is False
+    assert event.get_result().chain == [Plain("普通装饰阶段")]
+
+
+# ===========================================================================
+# 端到端衔接：on_llm_response 置旗标 → on_decorating_result 抑制发送
+# ===========================================================================
+
+
+def test_end_to_end_takeover_flag_flows_into_decorate_suppression() -> None:
+    """把 on_llm_response 产出的 result_chain（已坍缩为单个 cleaned Plain）
+    喂给 on_decorating_result 的抑制判定，钉死两段代码之间的旗标契约。"""
+    p = _Plugin(tempfile.mkdtemp(prefix="rt_e2e_"), _cfg(enabled=True, intercept=True))
+    pipe = LLMResponsePipeline(p)  # type: ignore[arg-type]
+    _stub_dispatch(pipe)
+
+    mc = MessageChain()
+    mc.chain = [Plain("原始未清理文本")]
+    resp = LLMResponse(role="assistant", result_chain=mc)
+    ev = _Ev()
+    _run(pipe, resp, p, ev)
+    assert ev.get_extra("_syl_realtime_takeover") is True
+
+    # 模拟框架把 hook 后的 result_chain 灌进 event.get_result().chain
+    # （tool_loop_agent_runner.py:803-806 -> astr_agent_run_util.py:258-264）。
+    decorate_event = _decorate_event(list(resp.result_chain.chain), takeover=True)
+    handled = asyncio.run(
+        EmotionalStatePlugin._maybe_suppress_realtime_takeover(
+            SimpleNamespace(), decorate_event
+        )
+    )
+    assert handled is True
+    assert decorate_event.get_result().chain == [], "框架发送应被抑制——分段已在后台发了"
