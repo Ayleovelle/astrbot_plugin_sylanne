@@ -22,6 +22,29 @@ _PLUGIN_DIR = os.path.dirname(os.path.abspath(__file__))
 if _PLUGIN_DIR not in sys.path:
     sys.path.insert(0, _PLUGIN_DIR)
 
+# ---------------------------------------------------------------------------
+# 热重载防腐:导入任何 sylanne_alpha 之前,先清掉 sys.modules 里残留的旧 sylanne_alpha*。
+# 根因:本插件把插件目录加进 sys.path、用【顶层绝对名】`sylanne_alpha.*` 导入子包,
+# 这些 sys.modules 键不带 `data.plugins.<dir>.` 前缀,逃过了 AstrBot 重载时的模块清理
+# (star_manager._get_plugin_related_modules 只删该前缀的键)。于是装过旧版的进程热
+# 重载/覆盖安装新版时,旧的 sylanne_alpha.* 会赖在 sys.modules 里遮蔽磁盘新文件——
+# Python 直接返回缓存,新增符号(如 realtime_flags)报 "cannot import name"。这里主动
+# 清一次,强制每次(重)加载都从磁盘读新文件。全新进程无残留 → no-op。
+# 仅在非 pytest 下执行:测试进程里其他用例可能已按顶层名导入过 sylanne_alpha,若在此
+# 清掉会造成新旧两份同名模块共存(isinstance/类身份断裂),故测试环境跳过(测试不走
+# AstrBot 热重载路径,无此问题)。生产由 AstrBot import main 触发,此清理必然先于插件
+# 自身的 sylanne_alpha 导入。
+if "pytest" not in sys.modules:
+    import importlib as _importlib
+
+    for _stale_mod in [
+        _k
+        for _k in list(sys.modules)
+        if _k == "sylanne_alpha" or _k.startswith("sylanne_alpha.")
+    ]:
+        del sys.modules[_stale_mod]
+    _importlib.invalidate_caches()
+
 import asyncio  # noqa: E402
 import collections  # noqa: E402
 import contextvars  # noqa: E402
