@@ -114,7 +114,7 @@ At + 图片、语音、文件、视频或引用不属于 `empty_call`，不得�
 
 同步文件 bootstrap 后，某 session 的首次异步请求必须同时读取 KV 与文件快照，选择最高 revision，加载后回写修复落后 sink；同 revision 但内容分叉视为损坏并 fail-closed，不凭来源优先级猜测。
 
-所有 `*.buffer.json` 写入（防抖、checkpoint、reconcile 修复和同步 reset）还必须经过同一文件路径级 `threading.Lock` 与磁盘 revision fence。持锁后重新读取当前文件：低 revision 写入直接拒绝，同 revision 内容相异视为损坏并拒绝，只有更高 revision 或完全相同的幂等快照可以原子替换。这样即使 reset 后 finalizer 尚未运行或进程立即崩溃，更早启动但更晚抵达的旧 writer 也不能把已清空的高 revision 快照覆盖回 pending 状态。
+所有 `*.buffer.json` 写入（防抖、checkpoint、reconcile 修复和同步 reset）还必须经过插件侧 `BufferFileCoordinator` 的 runtime-root 级 `threading.Lock` 与磁盘 revision fence。协调器只调用 vendored SylannEngine 已有的 `runtime.load_buffer()/save_buffer()`，复用其路径规范化、fsync 和原子替换能力；禁止修改 `sylanne_alpha/_engine/**`。锁故意按整个 root 共享，而不按原始 session key 细分，避免不同 key 经 SDK `safe_filename()` 后碰撞到同一文件却持有不同锁。持锁后重新读取当前文件：低 revision 写入直接拒绝，同 revision 内容相异视为损坏并拒绝，只有更高 revision 或完全相同的幂等快照可以原子替换。这样即使 reset 后 finalizer 尚未运行或进程立即崩溃，更早启动但更晚抵达的旧 writer 也不能把已清空的高 revision 快照覆盖回 pending 状态。
 
 ### 5.3 幂等提交
 

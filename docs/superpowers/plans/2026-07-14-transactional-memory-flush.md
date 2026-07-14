@@ -43,7 +43,7 @@ StatePersistence.schedule_buffer_persist(self, session_key: str) -> None
 StatePersistence._do_buffer_persist(self, session_key: str) -> None
 StatePersistence.save_sylanne_memory_state(self, session_key: str, state: Any = None) -> None
 
-# sylanne_alpha/_engine/sylanne_core/compute/runtime.py
+# sylanne_alpha/_engine/sylanne_core/compute/runtime.py (read-only SDK reference; do not edit)
 Runtime.save_buffer(self, session_key: str, buffer_data: dict[str, Any]) -> None
 Runtime.load_buffer(self, session_key: str) -> dict[str, Any] | None
 
@@ -60,7 +60,7 @@ save_person_shelf(
 - Modify `sylanne_alpha/memory_system.py`: `PendingFlush`, reset epochs, batch ID calculation, buffer WAL transitions, `MemoryItem.source_batch_id`, L1 idempotency, and the independent durable flush-receipt ledger.
 - Modify `sylanne_alpha/person_shelf.py`: `ShelfItem.source_batch_id`, bucket-level idempotent append, and batch-specific rollback for reset finalization.
 - Modify `sylanne_alpha/session_state_store.py`: dedicated flush and buffer-persistence lock maps.
-- Modify `sylanne_alpha/_engine/sylanne_core/compute/runtime.py`: path-scoped synchronous writer locks and an on-disk revision fence shared by every buffer file write.
+- Create `sylanne_alpha/buffer_file_coordinator.py`: plugin-owned runtime-root-scoped synchronous writer locks and an on-disk revision fence shared by every buffer file write, without modifying the vendored SylannEngine tree.
 - Modify `sylanne_alpha/state_persistence.py`: ordered strict/current buffer checkpoints and truthful main-memory persistence result.
 - Modify `sylanne_alpha/memory_facade.py`: forward the memory-save boolean.
 - Modify `main.py`: forward current-buffer persistence and memory-save boolean; clear pending state on `/reset`.
@@ -622,7 +622,7 @@ git commit -m "feat: make person shelf writes batch idempotent"
 **Files:**
 - Modify: `sylanne_alpha/session_state_store.py:231`
 - Modify: `sylanne_alpha/state_persistence.py:185,642,689,711`
-- Modify: `sylanne_alpha/_engine/sylanne_core/compute/runtime.py:174`
+- Create: `sylanne_alpha/buffer_file_coordinator.py`
 - Modify: `sylanne_alpha/llm_request_pipeline.py:1029`
 - Modify: `main.py:1354,2425`
 - Create: `tests/test_transactional_buffer_persistence.py`
@@ -641,6 +641,7 @@ Use a fake host whose runtime records `save_buffer()` calls and can fail selecte
 - `test_file_revision_fence_rejects_lower_and_divergent_equal_revisions`: write revision 9, then attempt revision 8 and a different revision 9; assert neither changes the file and the divergent equal revision fails closed.
 - `test_old_file_writer_finishing_after_reset_cannot_restore_pending`: arrange an old revision-8 pending writer and a revision-9 reset writer in both lock-acquisition orders; assert the final file is always revision 9 with no pending.
 - `test_restart_before_reset_finalizer_does_not_revive_late_old_snapshot`: write only the synchronous reset snapshot, let the older writer arrive after it, simulate a restart without running the async finalizer, and assert bootstrap restores the reset epoch/no-pending snapshot.
+- `test_sdk_filename_collision_keys_share_one_root_lock_and_fail_closed`: use two distinct session keys that the real SDK maps to the same buffer filename, start concurrent writes through the coordinator, and assert they serialize on one root lock; a divergent equal revision fails closed rather than racing the shared `.tmp`/final file.
 
 - [ ] **Step 2: Run the tests and verify RED**
 
@@ -666,7 +667,7 @@ def get_buffer_persist_lock(self, session_key: str) -> asyncio.Lock:
 
 Do not reuse `session_locks`: incoming user observation already holds that lock while appending to `ConversationBuffer`; holding it across summary LLM calls would prevent the required “new message remains active during flush” behavior. Do not reuse `conv_sync_locks`: those are keyed by AstrBot UMO and protect ConversationManager history, not Sylanne buffer files.
 
-In `compute/runtime.py`, add a module-level path-keyed `threading.Lock` registry guarded by one short registry lock. Key it by the canonical final `*.buffer.json` path, not by the `AlphaRuntime` instance, because multiple runtime incarnations can target the same file during reset/restart tests. Route every `save_buffer()` call through that lock. While holding it, parse the current on-disk dict if present and compare non-negative integer revisions: return `False` for a lower incoming revision, raise on divergent equal revisions, return `True` without rewriting for an identical equal revision, and perform the existing fsync + `os.replace()` only for a higher revision (or a legacy file with no revision). Change the method result to `bool`; existing callers may ignore it, while strict checkpoints treat `False` as non-convergence. The revision read, comparison, temporary write, and replace must all occur under the same synchronous lock.
+Create plugin-owned `BufferFileCoordinator` with a module-level runtime-root-keyed `threading.Lock` registry guarded by one short registry lock. Derive the key from the canonical runtime root only (fall back to runtime identity only for test doubles without a root), not from `session_key` or one `AlphaRuntime` instance. The deliberately coarse root lock makes every SDK-normalized file target under that root mutually exclusive, including distinct raw session keys that collide after SDK `safe_filename()`; buffer file writes are low-frequency enough that correctness is worth this serialization. Its synchronous `write(runtime, session_key, snapshot) -> bool` acquires that lock, calls the existing SDK `runtime.load_buffer(session_key)`, compares non-negative integer revisions, returns `False` for a lower incoming revision, raises on divergent equal revisions, returns `True` without rewriting for an identical equal revision, and calls the existing SDK `runtime.save_buffer(session_key, snapshot)` only for a higher revision or when replacing a legacy file with no revision. The coordinator never reimplements path sanitization, temp-file handling, fsync, or `os.replace()`; those remain owned by SylannEngine. Route every plugin-side buffer file write, including synchronous reset, through this coordinator. Direct `runtime.load_buffer()` reads may remain outside it because SDK writes use atomic replace; do not claim reads are lock-coordinated. Do not modify any file under `sylanne_alpha/_engine/**`.
 
 - [ ] **Step 4: Refactor buffer persistence around a lock-held current snapshot**
 
@@ -686,7 +687,10 @@ async def _persist_buffer_snapshot(
     try:
         file_ok = bool(
             await asyncio.to_thread(
-                host.runtime.save_buffer, session_key, buf_dict
+                self._buffer_files.write,
+                host.runtime,
+                session_key,
+                buf_dict,
             )
         )
         if not file_ok:
@@ -710,7 +714,7 @@ Add `reconcile_buffer_state(session_key) -> bool` with lock order `conversation_
 
 Retain `persist_buffer(session_key, host, buf_dict)` for compatibility, but make it acquire `get_buffer_persist_lock()` and return the boolean from `_persist_buffer_snapshot()`. Existing callers may ignore the new return value.
 
-Change `_do_buffer_persist()` to acquire the same asyncio lock **before** fetching the live buffer and calling `to_dict()`, then call `_persist_buffer_snapshot()` directly while holding it. This placement is mandatory for in-loop ordering. The lower-level synchronous file lock/revision fence is a second, independent boundary shared with synchronous reset and off-loop writers; neither lock replaces the other.
+Instantiate one `BufferFileCoordinator` in `StatePersistence`. Change `_do_buffer_persist()` to acquire the same asyncio lock **before** fetching the live buffer and calling `to_dict()`, then call `_persist_buffer_snapshot()` directly while holding it. This placement is mandatory for in-loop ordering. The lower-level plugin-owned synchronous file lock/revision fence is a second, independent boundary shared with synchronous reset and off-loop writers; neither lock replaces the other. Add a synchronous `persist_current_buffer_file_sync(session_key) -> bool` delegate for reset that snapshots the live buffer and calls the same coordinator.
 
 Add `main.py` delegate:
 
@@ -733,7 +737,7 @@ Expected: all pass.
 - [ ] **Step 6: Commit**
 
 ```bash
-git add sylanne_alpha/session_state_store.py sylanne_alpha/state_persistence.py sylanne_alpha/_engine/sylanne_core/compute/runtime.py sylanne_alpha/llm_request_pipeline.py main.py tests/test_transactional_buffer_persistence.py
+git add sylanne_alpha/session_state_store.py sylanne_alpha/state_persistence.py sylanne_alpha/buffer_file_coordinator.py sylanne_alpha/llm_request_pipeline.py main.py tests/test_transactional_buffer_persistence.py
 git commit -m "fix: order durable conversation buffer checkpoints"
 ```
 
@@ -1041,7 +1045,7 @@ Do not hold the generic `p._session_lock()` across this method. Synchronous `Con
 
 - [ ] **Step 5: Fence reset against an in-flight summary and finalize raced sinks**
 
-Keep `main.py::_on_session_reset()` synchronous, but before `clear_all()` capture the current `pending_batch_id` and authenticated shelf identity. `clear_all()` increments `flush_epoch`, clears active/pending, and immediately invalidates the in-flight task. Immediately write the new higher-revision buffer snapshot through `host.runtime.save_buffer()` before returning from the synchronous hook; Task 4's path-scoped `threading.Lock` and on-disk revision fence are mandatory here, so an older async snapshot that arrives later is rejected. This low-frequency write closes both crash-before-debounce and crash-before-finalizer holes for file bootstrap. Preserve the existing recall-boundary/L1/personality semantics, then schedule this finalizer with `safe_ensure_future` and track it in `_background_tasks`:
+Keep `main.py::_on_session_reset()` synchronous, but before `clear_all()` capture the current `pending_batch_id` and authenticated shelf identity. `clear_all()` increments `flush_epoch`, clears active/pending, and immediately invalidates the in-flight task. Immediately write the new higher-revision buffer snapshot through plugin-side `StatePersistence.persist_current_buffer_file_sync()` before returning from the synchronous hook; Task 4's shared `BufferFileCoordinator` lock and on-disk revision fence are mandatory here, so an older async snapshot that arrives later is rejected. This low-frequency write closes both crash-before-debounce and crash-before-finalizer holes for file bootstrap without editing SylannEngine. Preserve the existing recall-boundary/L1/personality semantics, then schedule this finalizer with `safe_ensure_future` and track it in `_background_tasks`:
 
 ```python
 async def _finalize_transactional_reset(
@@ -1197,7 +1201,7 @@ Do not push. The grey build acceptance criterion is local commits only.
 - **Receipt lifetime:** accepted. Task 2 adds an independent durable receipt ledger; Task 7 proves a stale pending cannot duplicate after the source item leaves L1/L2.
 - **Ack partial failure:** accepted. Task 6 restores live pending and retries ack without re-summary; Task 4 revisions reconcile and repair KV/file after restart.
 - **Reset race:** accepted. Task 1 adds `flush_epoch`; Task 6's lock-held finalizer removes only the captured raced batch and preserves post-reset messages.
-- **Late file writer after reset:** accepted. Task 4 makes every file writer share a path-scoped synchronous lock and disk revision fence; Task 6/7 prove a lower old snapshot cannot replace the synchronous reset snapshot even if finalization never runs before restart.
+- **Late file writer after reset:** accepted. Task 4 makes every plugin-side file writer share `BufferFileCoordinator`'s synchronous lock and disk revision fence while leaving vendored SylannEngine untouched; Task 6/7 prove a lower old snapshot cannot replace the synchronous reset snapshot even if finalization never runs before restart.
 - **Persistence exceptions:** accepted. Task 6 maps raised exceptions and `False` results to one bounded retry transition and removes unverified in-memory receipts.
 - **Batch scope/integrity:** accepted. Task 1 hashes `session_key` plus canonical messages, recomputes IDs on load, and clamps corrupt retry counters before exponentiation.
 - **Grey rollback:** accepted. Task 1 writes a legacy `messages = pending + active` projection alongside `active_messages`, so grey5 may replay but cannot silently lose pending material.

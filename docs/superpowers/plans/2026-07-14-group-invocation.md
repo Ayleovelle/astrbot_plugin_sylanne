@@ -104,7 +104,7 @@ Add tests named:
 - `test_trigger_only_yields_normalized_request_without_realtime_takeover`
 - `test_trigger_name_sets_official_wake_flag_without_prebuilding_media_request`
 - `test_process_stage_owned_empty_call_runs_one_provider_request_and_saves_one_history_pair`
-- `test_active_session_waiter_is_not_stolen_by_invocation_handler` (drive the real v4.26.5 `StarRequestSubStage` with a registered active waiter; assert the built-in max-priority handler stops the stage before the Sylanne handler is invoked)
+- `test_active_session_waiter_is_not_stolen_by_invocation_handler` (drive the real v4.26.5 `StarRequestSubStage` with a registered active waiter; assert the built-in max-priority handler stops the stage before the Sylanne handler is invoked; this upgrade tripwire must not use `pytest.importorskip` or otherwise report a silent skip in the release verification environment)
 
 Reuse the `types.MethodType` minimal-plugin pattern from `tests/test_v250_foundation.py` and the `get_extra/set_extra` event fake pattern from `tests/test_err_turn_user_backfill.py`. Drive the async-generator handler with `async for` so the test proves there is one yielded ProviderRequest, and resume it to completion so `stop_event()` is observed. The fake conversation manager must assert the exact public call sequence listed under Grounded Constraints.
 
