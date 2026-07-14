@@ -76,7 +76,7 @@ Deleting every v3 key and file must leave v2 outputs and storage unchanged.
 
 ### 4.3 Build Activation
 
-Grey artifacts enable automatic v3 shadow through a build-time internal flag in `v3bridge/build_flags.py`. It is not declared in `_conf_schema.json` and is not user-selectable in WebUI. Stable artifacts keep the flag disabled until a separate release decision.
+Grey artifacts enable automatic v3 shadow through a build-time internal flag in `v3bridge/build_flags.py`. Source and stable-channel artifacts default to disabled. `scripts/package_plugin.py --channel grey` generates the enabled flag inside the zip without changing the worktree; `--channel stable` generates disabled and requires temporary stable metadata rather than the checked-in grey version. The generated flag replaces the source archive entry, so duplicate paths are invalid. The artifact manifest records channel, metadata version, git commit, generated-file digest, and `payload_digest`. `payload_digest` is SHA-256 over UTF-8-path-sorted archive entries excluding the manifest itself, with each entry framed as unsigned big-endian `u32(path_utf8_byte_len) || path_utf8_bytes || u64(content_len) || uncompressed_entry_bytes`. The whole final zip SHA-256 is written only to an adjacent `.sha256` file. The flag is not declared in `_conf_schema.json` and is not user-selectable in WebUI or a public API.
 
 Under load, the supervisor may degrade or suspend v3 automatically. Such suspension is diagnostic state, not a user setting.
 
@@ -173,7 +173,7 @@ Core contracts:
 
 ### 6.1 Turn Identity And Concurrency
 
-At plugin initialization, bridge code creates a unique `plugin_instance_id` and durably acquires `writer_epoch`. After epoch acquisition, each session has an in-memory atomic counter starting at zero for that epoch. Allocation increments before returning; allocated and dropped local values are never reused. At the request boundary the bridge constructs:
+At plugin initialization, bridge code creates a unique `plugin_instance_id` and durably acquires `writer_epoch`. After epoch acquisition, each `SessionRef` has an in-memory atomic counter starting at zero for that epoch. Allocation increments before returning; allocated and dropped local values are never reused within that session partition. At the request boundary the bridge constructs:
 
 ```text
 TurnKey(
@@ -188,9 +188,9 @@ The bridge never writes `event.extra`, retains a live host event, or otherwise m
 
 `turn_id` is the canonical hash of `TurnKey`. Random state derives from `(turn_id, state_generation_id, compute_profile_digest, model_revision)`. Raw provider/session identity is absent from core contracts and deterministic traces.
 
-`TurnSequence=(writer_epoch,local_sequence)` is globally ordered by the durable epoch first, so local sequence may restart at 1 only after a strictly greater epoch is acquired. Dropped local values are never reused within an epoch. This avoids synchronous repository writes on the authoritative request path while preventing reload sequence regression.
+`TurnSequence=(writer_epoch,local_sequence)` is ordered only within its `SessionRef` partition: `(SessionRef,writer_epoch,local_sequence)` is the globally unique ledger key. Different sessions may both allocate `(writer_epoch,1)` without collision. For one session, local sequence may restart at 1 only after a strictly greater epoch is acquired, and dropped values are never reused within an epoch. Delayed-credit adjacency and persistent high-watermarks compare sequences only inside the same `SessionRef`; cross-session interleaving cannot create a gap. This avoids synchronous repository writes on the authoritative request path while preventing reload sequence regression.
 
-`TurnRegistry` is keyed by `TurnKey`, never a single pending slot per session. Entries move through `REQUEST_CAPTURED -> RESPONSE_CLAIMED -> ENQUEUED -> FINALIZED`, reject duplicate response claims, carry TTL, and are cleaned as completed or orphaned. Persistent v3 state records `last_committed_turn_sequence` and `last_committed_turn_id`. State commit validates `(writer_epoch, expected_state_generation_id, expected_revision, expected_payload_digest, turn_id, TurnSequence)` so duplicate, stale-generation, stale-turn, and revision-conflict outcomes are distinct. Delayed-credit adjacency additionally requires the same epoch, `next.local_sequence == previous.local_sequence + 1`, and no intervening `DROPPED` ledger entry. Reload always censors pending cross-epoch credit.
+`TurnRegistry` is keyed by `TurnKey`, never a single pending slot per session. Entries move through `REQUEST_CAPTURED -> RESPONSE_CLAIMED -> ENQUEUED -> FINALIZED`, reject duplicate response claims, carry TTL, and are cleaned as completed or orphaned. `SequenceLedger` is partitioned by `SessionRef`. Persistent v3 state records `last_committed_turn_sequence` and `last_committed_turn_id`. State commit validates `(writer_epoch, expected_state_generation_id, expected_revision, expected_payload_digest, turn_id, TurnSequence)` within the state owner's `SessionRef`, so duplicate, stale-generation, stale-turn, and revision-conflict outcomes are distinct. Delayed-credit adjacency additionally requires the same session, the same epoch, `next.local_sequence == previous.local_sequence + 1`, and no intervening `DROPPED` ledger entry in that session partition. Reload always censors pending cross-epoch credit.
 
 ### 6.2 Host View Boundaries
 
@@ -279,8 +279,8 @@ Canonical `surprise`, `mean_surprise`, and `precision` are copied from `BodySnap
 Defaults:
 
 ```text
-reservoir neurons N = 96 (allowed 64 or 128)
-virtual steps K = 24 (allowed 16 through 32)
+reservoir neurons N = 96 (fixed in formula v1)
+virtual steps K = 24 (the only allowed v1 profiles are 16, 24, or 32)
 E/I split = 77/19
 recurrent density = 0.08
 normalized virtual horizon T = 1
@@ -366,10 +366,9 @@ r_preference = clip(
   -1, 1
 )
 
-reward = weighted_mean_of_valid(
-  0.70*r_preference,
-  0.30*(2*quality_score-1)
-)
+reward = r_preference                                      if quality_score is invalid
+reward = clip(0.70*r_preference + 0.30*(2*quality_score-1),
+              -1, 1)                                      otherwise
 reward in [-1,1]
 ```
 
@@ -477,7 +476,20 @@ R_source' = clip(
 )
 ```
 
-An additional autonomous-action refractory is allowed only for idle `HOLD/REACH` decisions. Addressed `SPEAK` is never penalized merely because the previous addressed turn also spoke.
+Autonomous-action refractory is a separate state `rho_a`, never the observation-likelihood variance `R_a`. It exists only for `a in {HOLD,REACH}`, starts at zero, and updates once per committed turn:
+
+```text
+rho_a_decay = 0.80*rho_a
+autonomous_refractory_log_penalty(a) =
+  2*rho_a_decay   if context in {PROACTIVE,IDLE} and a in {HOLD,REACH}
+  0               otherwise
+rho_a' = clip(
+  rho_a_decay + 0.35*1[context in {PROACTIVE,IDLE} and shadow_action == a],
+  0, 1
+)
+```
+
+Addressed/ambient turns only decay `rho`; `SPEAK` is never penalized by this state. The exact penalty entering policy scoring is the pre-update `rho_a_decay`, and the post-selection increment is committed only with the rest of the turn state.
 
 Surface repetition is a separate `ExpressionPolicy` concern. It stores a bounded recent structural signature such as `(opening_mode, hesitation_allowed, length_bucket, directness_bucket)` and suppresses repeated style signatures through `style_refractory`; it never inspects or inserts fixed literal prefixes. Action/proposal refractory must not be reused as style deduplication.
 
@@ -565,7 +577,7 @@ posterior_var_i  = 1 / (1/V_ai + 1/R_ai)
 posterior_mean_i = posterior_var_i * (mu_ai/V_ai + y_i/R_ai)
 ```
 
-`R_a` is an immutable, offline-calibrated likelihood variance under the formula version. For the known, consecutive actual executed action only, a projected diagonal extended-Kalman update learns transition parameters and variance. For dimension `i`, with pre-update values:
+`R_a=0.20` in formula v1 is an immutable conservative likelihood prior, not a claim of offline calibration. G4 evaluates observation-likelihood NLL and empirical 68%/95% interval coverage on frozen held-out episodes; a later formula version may change `R_a` only from that frozen report. For the known, consecutive actual executed action only, a projected diagonal extended-Kalman update learns transition parameters and variance. For dimension `i`, with pre-update values:
 
 ```text
 theta_ai = [g_ai, b_ai]
@@ -681,8 +693,10 @@ v2_actual_action
 next_observation
 reward_components
 outcome_projector_revision
-trace_digest
+trace_revision_key(state_generation_id, revision, turn_id)
 ```
+
+Digest dependencies are one-way. First compute `payload_digest=SHA256(canonical_cognitive_payload_bytes)`. Then serialize `CoreDecisionTrace`, which may include that payload digest but never its own digest, and compute `core_trace_digest`. Finally compute `journal_digest` over a framed repository envelope containing the payload bytes/digest and trace bytes/digest; `journal_digest` lives only in the pointer/index envelope and is not embedded in the payload, trace, or migration receipt. `ExperienceBuffer` refers to an already committed trace by `trace_revision_key`, not by a same-turn trace digest, so state and trace cannot hash each other.
 
 Per-session SNN plastic weights, eligibility, voltages, thresholds, and traces use deterministic packed float16/int16 arrays with shape/version headers and CRC before optional zlib/base64 storage. Sparse topology and immutable initial weights are shared model data, not copied into every session. Decoding validates exact byte length, shape, finite values, Dale signs, and checksum before constructing state.
 
@@ -716,7 +730,7 @@ Idle, zero-LLM replay is a read-only evaluation sidecar over immutable `Experien
 
 The authoritative response path only claims the exact `TurnHandle`, freezes `V2ActualActionProjectionV1` and the final outcome projection, and offers an immutable `ShadowJob` to a bounded `ShadowSupervisor` queue. Deadline exists only in `ShadowJob`. The authoritative path never awaits full v3 calculation. Queue saturation records that `TurnSequence` as `DROPPED` and returns instead of applying backpressure to v2.
 
-The background supervisor uses a v3-owned per-session sequencer and state transaction:
+The event-loop path performs immutable capture plus a non-blocking bounded offer only. Core calculation and canonical trace serialization run in a v3-private `ThreadPoolExecutor` with one worker on the 2-core target; v3 work is never placed in the plugin's existing `_background_tasks`, whose shutdown cancellation order is owned by legacy/v2 subsystems. Execution is globally serialized. A deterministic round-robin scheduler takes at most one job from each non-empty session queue per cycle, preserves order within each session, and prevents one busy session from starving another. The background supervisor uses a v3-owned per-session sequencer and state transaction:
 
 1. reject duplicate, stale, or out-of-order jobs by session generation, `TurnKey`, and turn sequence;
 2. compare the job sequence with persistent `last_committed_turn_sequence` and the bridge `SequenceLedger`;
@@ -729,7 +743,7 @@ The background supervisor uses a v3-owned per-session sequencer and state transa
 9. submit one `CommitEnvelope` to `EffectCommitter`, which journals state plus deterministic trace and advances the state pointer by CAS;
 10. finalize the registry/sequence status and emit non-deterministic telemetry idempotently.
 
-Each per-session queue is bounded and all global worker/queue counts have hard caps. `SequenceLedger` records `ACCEPTED`, `DROPPED`, and `COMMITTED` `TurnSequence` high-watermarks. Within one writer epoch, if local sequence `n` is dropped, `n+1` may continue from the last committed v3 state, but it sets `credit_adjacency=false`, marks the pending outcome from `n-1` censored, and skips delayed reward, action-transition, and temporal-credit updates for the gap. It never treats `n+1` as the next observation of `n-1` or fabricates the missing transition. A greater writer epoch can continue state advancement but never delayed credit from the previous epoch.
+Each per-session queue is capped at 4, the global queue at 128, the turn registry at 1,024 entries with a 15-minute TTL, active sessions at 64, repository sessions at 96, and worker count at 1. Each SessionRef-partitioned `SequenceLedger` records `ACCEPTED`, `DROPPED`, and `COMMITTED` `TurnSequence` high-watermarks. Within one writer epoch, if local sequence `n` is dropped, `n+1` may continue from the last committed v3 state, but it sets `credit_adjacency=false`, marks the pending outcome from `n-1` censored, and skips delayed reward, action-transition, and temporal-credit updates for the gap. It never treats `n+1` as the next observation of `n-1` or fabricates the missing transition. A greater writer epoch can continue state advancement but never delayed credit from the previous epoch.
 
 v3 does not reuse `v2core.TurnRunner`, capability `evolve()`, domain `ingest()`, memory decay, learning, renderer, or response tick paths.
 
@@ -758,12 +772,13 @@ source_digest
 state_generation_id
 revision
 writer_epoch
-payload_digest
 session_generation
 model_revision
 last_committed_turn_sequence
 last_committed_turn_id
 ```
+
+`payload_digest` is repository-envelope metadata, not a field inside the bytes it hashes. It is `SHA256(canonical_cognitive_payload_bytes)` over the complete cognitive payload only, excluding the journal envelope, deterministic trace, pointer, and the digest field itself. The journal record and pointer carry this digest; CAS compares the pointer's digest with `expected_payload_digest`, avoiding self-reference.
 
 The private repository exposes no general write API. `EffectCommitter` alone may call:
 
@@ -800,18 +815,21 @@ RUNNING -> STOPPING
   -> durably seal epoch under repository lock
   -> cancel leftovers
   -> await every tracked task with gather(..., return_exceptions=True)
+  -> executor.shutdown(wait=True, cancel_futures=True)
   -> clear bounded registries
 ```
 
-A commit already serialized before sealing may finish. After `seal_epoch()` returns, no task can publish under that epoch. Drain timeout cannot cause sealing before local commit admission is closed. A crash is fenced by the next initialize acquiring a greater epoch. A UUID is never used as an ordering fence.
+A commit already serialized before sealing may finish. After `seal_epoch()` returns, no task can publish under that epoch. Core stages contain no callbacks or unbounded loops. Shutdown does not return while a v3 worker thread remains alive; `cancel_futures=True` cancels queued-but-not-started work and `wait=True` joins the running finite stage. Drain timeout cannot cause sealing before local commit admission is closed. A crash is fenced by the next initialize acquiring a greater epoch. A UUID is never used as an ordering fence.
+
+Host lifecycle wiring preserves that order: `main.terminate()` calls synchronous `v3.begin_shutdown()` before any existing subsystem teardown, allows the existing v2 final-save drain to run while accepted v3 work drains, then awaits `v3.shutdown()` before the legacy `_background_tasks` cancellation loop. Repeated initialize/terminate and hot reload are idempotent; v3 executor futures/tasks are privately tracked and never share the legacy list.
 
 Each revision journal record atomically contains the complete next cognitive payload, `CoreDecisionTrace`, state/payload digests, turn key, and sequence. The CAS pointer changes only after the record is durable. Stale epochs, low revisions, duplicate turns, and stale sequences are rejected. Runtime telemetry and derived metrics may lag but cannot make a state revision lose its deterministic trace.
 
-Repository retention is bounded: keep the current and immediately previous full revision per session for crash recovery. Before compacting an older revision, export its deterministic trace idempotently to a size/age-rotated diagnostic journal keyed by revision digest; then remove the obsolete full state record through the committer. Queue, lock, registry, journal, and orphan lifecycles all have explicit caps and cleanup tests.
+Repository retention is bounded: keep the current and immediately previous full cognitive revision per session for crash recovery. The atomic migration record is an immutable generation anchor, not a cognitive revision: its sanitized `SeedRecord`, receipt, and migration trace remain until that complete generation is quarantined or deleted, and their bytes count against the generation/global budgets. Before compacting an older cognitive revision, export its deterministic trace idempotently to a size/age-rotated diagnostic journal keyed by revision digest; then remove the obsolete full state record through the committer. Queue, lock, registry, journal, and orphan lifecycles all have explicit caps and cleanup tests.
 
 ### 15.2 One-Time v2 Seeding
 
-On the first shadow turn for a session, `MigrationCoordinator` obtains an immutable `V2SeedSnapshotV1`. It either consumes a DTO already frozen by the authoritative v2 turn or briefly acquires the existing v2 `SessionLocks.turn`, copies the DTO, and releases that lock before taking any v3 migration/state lock. v2 and v3 locks are never held together.
+On the first shadow turn for a session, `MigrationCoordinator` obtains an immutable `V2SeedSnapshotV1`. It either consumes a DTO already frozen by the authoritative v2 turn or briefly acquires the real production turn lock exposed as `plugin._session_lock(session_key)` and implemented by `SessionContext.session_lock`, copies the DTO, and releases that lock before taking any v3 migration/state lock. `v2core.session_store.SessionLocks.turn` is not the current production-chain lock and must not be used for this migration. v2 and v3 locks are never held together.
 
 Bridge code converts `V2SeedSnapshotV1` into a core-owned, versioned `SeedFrame`; `v3core` never imports the v2 DTO type. The pure `v3core.state.seed.SeedProjector` projects only initial values:
 
@@ -838,7 +856,7 @@ freeze V2SeedSnapshotV1 under v2 turn ownership, then release v2 lock
   -> permit shadow advancement
 ```
 
-A migration receipt references `seed_digest`, migrator version, state generation, initial journal revision, and journal digest; it is not a moving marker for later learned payloads. There is no repository-visible provisional migration revision. `compare_and_commit` privately durably stages the complete immutable journal bytes before pointer publication, and cleans unreachable staging after failure. The receipt, seed, initial payload, and trace become visible as one logical commit. Concurrent migration returns `ALREADY_MIGRATED` or a CAS conflict and never creates a second seed.
+A migration receipt references `seed_digest`, migrator version, state generation, and initial cognitive revision; it does not contain the enclosing `journal_digest` and is not a moving marker for later learned payloads. The repository pointer/index carries the externally computed migration journal digest. There is no repository-visible provisional migration revision. `compare_and_commit` privately durably stages the complete immutable journal bytes before pointer publication, and cleans unreachable staging after failure. The receipt, seed, initial payload, and trace become visible as one logical commit. Concurrent migration returns `ALREADY_MIGRATED` or a CAS conflict and never creates a second seed.
 
 Recovery is explicit:
 
@@ -901,7 +919,7 @@ Each `CoreDecisionTrace` includes:
 - v3 shadow action, v2 actual action, and structured disagreement reason;
 - deterministic numerical-health and profile/input-driven degradation reason.
 
-It excludes wall-clock timing, queue scheduling, worker/process identity, timeout decisions, CAS outcome, filesystem latency, current host load, and the runtime reason that selected a profile. The selected `ComputeProfile` itself is a deterministic core input and is never excluded. Canonical serialization fixes field order, enum spelling, array shape, endianness, and packed-number representation.
+It excludes wall-clock timing, queue scheduling, worker/process identity, timeout decisions, CAS outcome, filesystem latency, current host load, and the runtime reason that selected a profile. The selected `ComputeProfile` itself is a deterministic core input and is never excluded. Canonical serialization fixes field order, enum spelling, array shape, endianness, and packed-number representation. Required fixed-shape numeric values use versioned packed/base64 arrays; digest/count summaries may accompany them but cannot replace them. A worst-case legal trace must serialize to at most 16 KiB. If a complete trace exceeds that cap, the entire invocation is invalid: state and core trace are both discarded, the sequence is dropped/censored, and only bounded runtime telemetry records the size failure.
 
 Byte-identical replay is guaranteed only for the same declared runtime fingerprint: formula/model version, `ComputeProfile`, Python minor version, math backend, CPU architecture, initial state, event sequence, and seed. Cross-fingerprint replay uses per-field numerical tolerances and action/ordering equality, not a false byte-identity claim.
 
@@ -919,9 +937,11 @@ There is no WebUI mode selector. Grey builds may expose administrator-only read-
 G0  unit, property, invariant, and fault-injection tests
 G1  fixed real-history offline replay
 G2  local single-session automatic shadow
-G3  grey artifact all-session shadow with load circuit breaker
+G3  grey artifact shadow for every turn with provable request/terminal correlation, with load circuit breaker
 G4  frozen-data ablation and calibration report
 ```
+
+The first local grey candidate is built only after G0, frozen encoded G1, and local G2 pass. G3 necessarily starts after that candidate exists because it requires real grey-artifact traffic with provable request/terminal correlation. G3 is then frozen as encoded facts, and G4 evaluates frozen G1+G3. G3/G4 are post-candidate evidence and input to a later version, not prerequisites that create a build/evaluation cycle for the first candidate.
 
 This project ends at G4. Any future live execution needs a separate design, explicit authorization, writer-epoch ownership transfer, and causal evaluation. It is not enabled through user configuration.
 
@@ -936,7 +956,15 @@ deterministic baseline
 + STDP
 ```
 
-Each added layer must improve at least one preregistered primary metric with bootstrap 95% confidence interval lower bound above zero. Safety degradation must stay below 0.5 percentage points. A layer without independent contribution is removed or renamed.
+The preregistered primary metrics are reductions versus the immediately preceding ablation rung in: multiclass actual-action log loss, multiclass Brier score, and next-turn valid-axis weighted MAE. A positive gain means `baseline_loss - candidate_loss`; bootstrap resampling is by whole episode, never by row. Each added layer must improve at least one primary metric with bootstrap 95% confidence interval lower bound above zero on frozen G1+G3 while not worsening either other primary metric by more than 0.5%. Safety degradation must stay below 0.5 percentage points, all seven isolation counters and illegal/nonfinite action counts must remain zero, and cross-turn train/evaluation splits must be disjoint by export-local episode reference. A layer without independent contribution is removed or keeps its conservative V1 name.
+
+Scientific aliases additionally require at least 200 effective correlated turns overall and 30 known actual-action examples for every reported action, ECE <=0.10, Brier score no worse than the deterministic baseline, observation-likelihood 68% coverage error <=0.10 and 95% coverage error <=0.05, the event-order shuffle test removing at least 50% of persistent-SNN gain, and learned-vs-frozen/random plus STDP-vs-zero-LR bootstrap lower bounds above zero. Insufficient coverage is reported as `INSUFFICIENT_EVIDENCE`, never silently passed.
+
+Evaluation is chronological prequential within each held-out episode: predict turn `t` using only the frozen episode header and observations strictly before `t`, score the frozen outcome/action, then allow the declared online update for `t+1`. Every encoded dataset begins each episode with a tagged header containing canonical `neutral_eval_v1` state bytes/digest, no pending outcome, boundary credit censored, `FULL_24_STDP` evaluation-profile ID/digest, gate-manifest digest, and episode seed. G3's observed runtime state/profile remain diagnostic fields and are never guessed as the offline initial state/profile. Every turn records whether credit is adjacent and how many dropped/unmatched sequences preceded it; any gap censors delayed credit.
+
+The episode seed is the first 128 bits of `SHA256(b"SYL3\x01EVAL\x00" || dataset_id || evaluation_group_ref || episode_ref || gate_manifest_digest || formula_digest || model_digest || profile_digest)` using the canonical length-framed encodings. Control seeds append a length-framed control ID, so learned/frozen/random/zero-LR runs cannot share an accidental random stream.
+
+One permission-restricted local evaluation-link HMAC key is retained outside Git and packages from G1 freeze through G4 completion. It creates the same `evaluation_group_ref` for the same authorized privacy scope/session across G1 and G3; each export still uses and destroys a separate source-digest key. Train/dev/test assignment is a deterministic domain-separated HMAC of `evaluation_group_ref`, and no evaluation group can cross a split even when it contributes multiple episodes or datasets. Model/formula selection uses train/dev only; primary, calibration, shuffle, and safety reports use the untouched test split. Bootstrap samples whole episodes. Key loss or G1/G3 key-digest mismatch makes G4 `INVALID_DATASET`, not a new split. The safety proxy is the known-HOLD contradiction rate (`shadow in {SPEAK,REACH}` while structured actual action is `HOLD`) plus the seven isolation, illegal-action, nonfinite, and privacy counters; it is explicitly a conservative behavioral proxy, not a causal safety claim.
 
 Read-only idle replay is evaluated as an observability/calibration sidecar, not as a cognitive layer, because G0-G4 prohibit it from changing decisions or state.
 
@@ -984,6 +1012,27 @@ On the 2-core/2-GB target:
 - shared immutable model <= 64 MiB;
 - all queues, histories, replay buffers, and lock registries have hard bounds or lifecycle cleanup.
 
+The global storage budget must stay inside `metadata.yaml`'s 50 MB declaration, not merely the per-session limit:
+
+| Resource | Hard cap |
+|---|---:|
+| live cognitive payload | 64 KiB/session, target 48 KiB |
+| deterministic core trace | 16 KiB/revision |
+| active sessions | 64 |
+| repository sessions | 96 |
+| retained full revisions | current + previous per retained generation |
+| trace diagnostic journal | 2 MiB x 2 segments |
+| runtime telemetry journal | 1 MiB x 4 segments |
+| private staging/orphans | 4 MiB |
+| default v3 namespace high watermark | 22,000,000 bytes |
+| default v3 namespace hard watermark | 24,000,000 bytes |
+
+The metadata 50 MB limit is plugin-wide. At initialize, measure the data root excluding `v3/` and compute `effective_v3_hard=max(0,min(24_000_000,50_000_000-non_v3_bytes-2_000_000))` and `effective_v3_high=max(0,effective_v3_hard-2_000_000)`. If the effective hard cap is below 4 MiB, disable v3 admission and record telemetry.
+
+At the effective high watermark, clean expired staging, already-exported obsolete revisions, and rotated diagnostics first. Never evict, tombstone, or reseed a current learned cognitive generation. If still over high watermark, reject new sessions. At the effective hard watermark, reject/drop every new v3 turn and leave v2 untouched. Budget accounting includes record framing, packed/base64/CRC overhead, pointer/key/lock files, and the temporary old+staging+new peak; it never scans, deletes, or modifies non-v3 data.
+
+The per-resource limits are independent ceilings, not simultaneously reserved capacity. The effective v3 hard cap dominates them all: while holding the cross-process repository budget lock and before staging any write, the repository computes and atomically reserves the projected peak across retained generation anchors, current/previous revisions, diagnostics, telemetry, lock/key/pointer files, and old+staging+new bytes. The reservation remains represented until the staging file is committed or cleaned, so two processes cannot both admit against the same free bytes. A write that would exceed the effective hard cap is rejected before any staging or pointer change. The 96-session cardinality cap therefore does not promise that 96 worst-case 64 KiB states plus every journal cap can coexist.
+
 Load shedding first disables admission of read-only replay/evaluation work. For a real turn, the supervisor selects exactly one frozen profile before core execution, in this order as pressure rises:
 
 ```text
@@ -1001,9 +1050,9 @@ The selected profile fixes K, SNN/STDP/replay switches, last-summary reuse, math
 
 Names are earned by evidence:
 
-- without finite-capacity competition, broadcast consumers, inhibition, and causal ablation, use `ProposalArbiter`, not Global Workspace;
+- without finite-capacity competition, broadcast consumers, inhibition, and causal ablation, use `ProposalArbiterV1`, not Global Workspace;
 - without explicit likelihood, transition, preference, policy posterior/EFE decomposition, and calibration, use `PolicyScorer`, not Active Inference;
-- without temporal-order dependence and superiority to frozen/random controls, use `ReservoirFeatures`, not meaningful SNN temporal learning;
+- without temporal-order dependence and superiority to frozen/random controls, use `ReservoirFeaturesV1`, not meaningful SNN temporal learning;
 - without bounded, recoverable, reproducible learning, do not describe behavior as controlled or aggressive emergence.
 
 ## 19. Relationship To Current v2 Fixes
