@@ -422,7 +422,7 @@ target_slow = tanh(W_slow*slow + U_slow*mid')
 slow'       = clip(slow + 0.02*(target_slow-slow), -1, 1)
 ```
 
-`P`, `Q`, `W_*`, and `U_*` are sparse, named, immutable defaults under a `formula_version`; online learning does not modify them. Each self matrix satisfies `||W_*||_2 <= 0.5`, giving a per-block self-contraction bound of `(1-alpha)+0.5*alpha < 1`. Before a formula version is accepted, interval/Jacobian analysis over the complete 24-dimensional triangular update must establish `sup ||J||_2 < 0.995` across declared input/state bounds. If that proof fails, the formula version is rejected rather than relying on `tanh` clipping alone. State advances at most once for a committed turn revision.
+`P`, `Q`, `W_*`, and `U_*` are sparse, named, immutable defaults under a `formula_version`; online learning does not modify them. Each self matrix satisfies `||W_*||_2 <= 0.5`, giving a per-block self-contraction bound of `(1-alpha)+0.5*alpha < 1`. Before a formula version is accepted, interval/Jacobian analysis over the complete 24-dimensional sequential triangular update must establish `sup ||J||_2 < 0.995` across declared input/state bounds. Formula v1 uses fast/mid/slow self diagonals `(0.30,0.35,0.36)` and its entrywise-absolute bound `sqrt(||J||1*||J||inf)=0.9948652052815999`; checking only three block diagonals is invalid because it omits fast-to-mid-to-slow derivatives. If the complete proof fails, the formula version is rejected rather than relying on `tanh` clipping alone. State advances at most once for a committed turn revision.
 
 Aggressive emergence comes from faster bounded plasticity, cross-timescale coupling, and information-seeking policy, not from unbounded state or unseeded randomness.
 
