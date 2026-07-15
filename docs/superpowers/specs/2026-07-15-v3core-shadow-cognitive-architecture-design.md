@@ -515,7 +515,7 @@ Legal actions and priors are total over `TurnContextClass`:
 | `PROACTIVE` | `HOLD, REACH` | `0.80, 0.20` |
 | `IDLE` | `HOLD` | `1.00` |
 
-The enum is mutually exclusive and masks illegal proposals before workspace competition. `IDLE` is maintenance-only; it cannot manufacture an outreach opportunity. An ordinary ambient provider reply may project to actual `SPEAK`, while only a verified proactive send may project to actual `REACH`.
+The enum is mutually exclusive and masks illegal proposals before workspace competition. `IDLE` is maintenance-only; it cannot manufacture an outreach opportunity. An addressed or ambient provider reply may project to actual `SPEAK` only with an independent structured success receipt; the pinned AstrBot 4.26.5 ordinary path has no such receipt and remains `UNKNOWN`. Only a verified proactive send may project to actual `REACH`.
 
 ### 11.1 Actual Action Projection
 
@@ -526,8 +526,10 @@ Bridge-owned `V2ActualActionProjectionV1` is a versioned pure function over stru
 | explicit silent/no-send route completed | `HOLD` |
 | proactive outreach actually sent | `REACH` |
 | future explicit structured clarify marker actually sent | `CLARIFY` |
-| successful ordinary addressed/ambient provider reply actually sent, including completed multi-segment send | `SPEAK` |
+| addressed/ambient provider reply with an independent structured success receipt, including a dedicated all-segments-success receipt | `SPEAK` |
 | fallback, handler/provider error, tool-only turn, cancelled/interrupted partial send, missing provenance, or ambiguous result | `UNKNOWN` |
+
+AstrBot 4.26.5 `after_message_sent` is not a success receipt: `RespondStage` catches ordinary `event.send()` exceptions and continues to invoke the hook. Therefore an ordinary framework send remains `UNKNOWN` during G0-G4 unless a future independent positive receipt is grounded; absence of an observed error is never treated as delivery. A dedicated segmented/takeover path may prove `SPEAK` only after every declared segment, including a one-segment takeover, reports success.
 
 `UNKNOWN` disables action credit and transition-model updates. Current v2 has no reliable structured `CLARIFY` marker, so its outcome model remains prior-only until such provenance exists; a question mark in assistant text is never treated as evidence.
 
