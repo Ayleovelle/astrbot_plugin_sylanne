@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import struct
-from math import inf, log, sqrt
+from math import inf, isfinite, log, sqrt
 from types import MappingProxyType
 
 from .canonical import canonical_json_bytes
@@ -77,6 +77,50 @@ def _sparse_matrix(
 
 
 P_MATRIX = _sparse_matrix(AXIS_DIM, OBSERVATION_DIM, P_TRIPLES)
+SEMANTIC_DEFAULTS = (
+    0.5,
+    0.0,
+    0.0,
+    0.5,
+    0.0,
+    0.5,
+    0.5,
+    0.0,
+    0.0,
+    1.0,
+    0.0,
+    0.5,
+    0.5,
+    0.0,
+    0.0,
+    0.0,
+    0.5,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.5,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+)
+CENTER_SCALE = 2.0
+CENTER_OFFSET = -1.0
+P_BIAS = tuple(
+    -sum(weight * SEMANTIC_DEFAULTS[column] for column, weight in enumerate(row))
+    for row in P_MATRIX
+)
 Q_MATRIX = tuple(
     tuple(0.20 if column == 2 * row else 0.10 if column == 2 * row + 1 else 0.0 for column in range(16))
     for row in range(8)
@@ -177,6 +221,10 @@ def input_targets(input_index: int) -> tuple[int, ...]:
     return tuple(target for _, target in ranked[:INPUT_TARGETS_PER_CHANNEL])
 
 
+RECURRENT_TOPOLOGY = tuple(recurrent_sources(post) for post in range(SNN_NEURONS))
+INPUT_TOPOLOGY = tuple(input_targets(input_index) for input_index in range(POPULATION_INPUT_COUNT))
+
+
 SNN_SUMMARY_POOLS = tuple((start, start + 6) for start in range(0, 48, 6))
 SNN_SUMMARY_DEFINITION = (
     "rate[p]=clip(mean(spike_count_i/K),0,1)",
@@ -229,7 +277,7 @@ PROPOSAL_KEYS = tuple(_proposal_key(index) for index in range(WORKSPACE_CAPACITY
 
 
 def center(value: float) -> float:
-    return 2.0 * value - 1.0
+    return CENTER_SCALE * value + CENTER_OFFSET
 
 
 EXPRESSION_REVISION = FORMULA_VERSION
@@ -280,6 +328,15 @@ RHO_POST_SELECTION_INCREMENT = 0.35
 RHO_BOUNDS = (0.0, 1.0)
 RHO_PENALTY_CONTEXTS = ("PROACTIVE", "IDLE")
 RHO_DECAY_ONLY_CONTEXTS = ("ADDRESSED", "AMBIENT")
+CONTEXT_ACTION_PRIORS = MappingProxyType(
+    {
+        "ADDRESSED": MappingProxyType({"SPEAK": 0.55, "CLARIFY": 0.25, "HOLD": 0.20}),
+        "AMBIENT": MappingProxyType({"HOLD": 0.75, "SPEAK": 0.25}),
+        "PROACTIVE": MappingProxyType({"HOLD": 0.80, "REACH": 0.20}),
+        "IDLE": MappingProxyType({"HOLD": 1.0}),
+    }
+)
+ACTION_TIE_ORDER = ("HOLD", "CLARIFY", "SPEAK", "REACH")
 
 FULL_24_STDP = (True, 24, True, False)
 FULL_24_NO_STDP = (True, 24, False, False)
@@ -304,6 +361,17 @@ LOAD_THRESHOLDS = (
 RECOVERY_CONSECUTIVE_SNAPSHOTS = 32
 RECOVERY_THRESHOLD_RATIO = 0.80
 REPOSITORY_HARD_STOP_PROFILE = "SKIP_V3_TURN"
+COMPUTE_PROFILE_FIELDS = ("snn_enabled", "ticks", "stdp_enabled", "reuse_last_summary")
+COMPUTE_PROFILES = MappingProxyType(
+    {
+        "FULL_24_STDP": FULL_24_STDP,
+        "FULL_24_NO_STDP": FULL_24_NO_STDP,
+        "SNN_16_NO_STDP": SNN_16_NO_STDP,
+        "REUSE_LAST_SNN_SUMMARY": REUSE_LAST_SNN_SUMMARY,
+        "DETERMINISTIC_CONTINUOUS_ONLY": DETERMINISTIC_CONTINUOUS_ONLY,
+    }
+)
+REUSE_LAST_SUMMARY_FALLBACK = "DETERMINISTIC_CONTINUOUS_ONLY"
 JACOBIAN_VALIDATION_METHOD = "abs-block-sqrt-l1-linf"
 JACOBIAN_STABILITY_LIMIT = 0.995
 
@@ -357,153 +425,365 @@ def jacobian_absolute_upper_bound() -> tuple[tuple[float, ...], ...]:
     )
 
 
+JACOBIAN_ABSOLUTE_UPPER_BOUND = jacobian_absolute_upper_bound()
+_jacobian_norm_one = max(
+    sum(JACOBIAN_ABSOLUTE_UPPER_BOUND[row][column] for row in range(STATE_DIM))
+    for column in range(STATE_DIM)
+)
+_jacobian_norm_infinity = max(sum(row) for row in JACOBIAN_ABSOLUTE_UPPER_BOUND)
+JACOBIAN_STABILITY_BOUND = sqrt(_jacobian_norm_one * _jacobian_norm_infinity)
+del _jacobian_norm_one, _jacobian_norm_infinity
+
+
+def _is_finite_number(value: object) -> bool:
+    if not isinstance(value, (int, float)) or isinstance(value, bool):
+        return False
+    try:
+        return isfinite(value)
+    except (OverflowError, TypeError, ValueError):
+        return False
+
+
+def _validate_matrix_shape_and_values(
+    name: str,
+    matrix: tuple[tuple[float, ...], ...],
+    row_count: int,
+    column_count: int,
+) -> None:
+    if type(matrix) is not tuple or len(matrix) != row_count:
+        raise ValueError(f"{name} dimensions do not match the formula")
+    for row in matrix:
+        if type(row) is not tuple or len(row) != column_count:
+            raise ValueError(f"{name} dimensions do not match the formula")
+        if any(not _is_finite_number(value) for value in row):
+            raise ValueError(f"{name} must contain only finite numeric values")
+
+
 def validate_formula_manifest() -> float:
     """Validate dimensions, topology invariants, and the analytic Jacobian gate."""
-    if len(P_MATRIX) != AXIS_DIM or any(len(row) != OBSERVATION_DIM for row in P_MATRIX):
-        raise ValueError("P matrix dimensions do not match the formula")
-    if len(Q_MATRIX) != AXIS_DIM or any(len(row) != SNN_SUMMARY_DIM for row in Q_MATRIX):
-        raise ValueError("Q matrix dimensions do not match the formula")
+    if (OBSERVATION_DIM, AXIS_DIM, STATE_DIM) != (36, 8, 24) or STATE_DIM != 3 * AXIS_DIM:
+        raise ValueError("continuous-state dimensions do not match formula v1")
+    if (
+        type(SNN_NEURONS) is not int
+        or type(SNN_EXCITATORY) is not int
+        or type(SNN_INHIBITORY) is not int
+        or SNN_NEURONS <= 0
+        or SNN_EXCITATORY <= 0
+        or SNN_INHIBITORY <= 0
+        or SNN_EXCITATORY + SNN_INHIBITORY != SNN_NEURONS
+    ):
+        raise ValueError("SNN population dimensions do not match the formula")
+    if type(SEMANTIC_DEFAULTS) is not tuple or len(SEMANTIC_DEFAULTS) != OBSERVATION_DIM:
+        raise ValueError("semantic defaults do not match the observation dimension")
+    if any(not _is_finite_number(value) for value in SEMANTIC_DEFAULTS):
+        raise ValueError("semantic defaults must contain only finite numeric values")
+
+    _validate_matrix_shape_and_values("P matrix", P_MATRIX, AXIS_DIM, OBSERVATION_DIM)
+    _validate_matrix_shape_and_values("Q matrix", Q_MATRIX, AXIS_DIM, SNN_SUMMARY_DIM)
+    for name, matrix in (
+        ("W_FAST", W_FAST),
+        ("W_MID", W_MID),
+        ("W_SLOW", W_SLOW),
+        ("U_FAST", U_FAST),
+        ("U_MID", U_MID),
+        ("U_SLOW", U_SLOW),
+    ):
+        _validate_matrix_shape_and_values(name, matrix, AXIS_DIM, AXIS_DIM)
+    if (
+        type(DYNAMICS_STEP_SIZES) is not tuple
+        or len(DYNAMICS_STEP_SIZES) != 3
+        or any(
+            not _is_finite_number(step_size) or not 0.0 < step_size <= 1.0
+            for step_size in DYNAMICS_STEP_SIZES
+        )
+    ):
+        raise ValueError("dynamics step sizes must be three finite values in (0,1]")
+    _validate_matrix_shape_and_values(
+        "materialized Jacobian",
+        JACOBIAN_ABSOLUTE_UPPER_BOUND,
+        STATE_DIM,
+        STATE_DIM,
+    )
+
+    expected_bias = tuple(
+        -sum(weight * SEMANTIC_DEFAULTS[column] for column, weight in enumerate(row))
+        for row in P_MATRIX
+    )
+    if (
+        type(P_BIAS) is not tuple
+        or len(P_BIAS) != AXIS_DIM
+        or any(not _is_finite_number(value) for value in P_BIAS)
+        or P_BIAS != expected_bias
+    ):
+        raise ValueError("P_BIAS does not cancel the semantic-default projection")
+
+    expected_context_actions = {
+        "ADDRESSED": ("SPEAK", "CLARIFY", "HOLD"),
+        "AMBIENT": ("HOLD", "SPEAK"),
+        "PROACTIVE": ("HOLD", "REACH"),
+        "IDLE": ("HOLD",),
+    }
+    try:
+        context_names = tuple(CONTEXT_ACTION_PRIORS.keys())
+    except (AttributeError, TypeError) as exc:
+        raise ValueError("context priors must be a mapping") from exc
+    if frozenset(context_names) != frozenset(expected_context_actions):
+        raise ValueError("context priors do not define the exact formula contexts")
+    for context, expected_actions in expected_context_actions.items():
+        prior = CONTEXT_ACTION_PRIORS[context]
+        try:
+            actions = tuple(prior.keys())
+            probabilities = tuple(prior[action] for action in actions)
+        except (AttributeError, KeyError, TypeError) as exc:
+            raise ValueError(f"context prior for {context} must be a mapping") from exc
+        if frozenset(actions) != frozenset(expected_actions):
+            raise ValueError(f"context prior for {context} has illegal actions")
+        if any(not _is_finite_number(probability) or probability <= 0.0 for probability in probabilities):
+            raise ValueError(f"context prior for {context} must contain positive finite probabilities")
+        if abs(sum(probabilities) - 1.0) > 1e-12:
+            raise ValueError(f"context prior for {context} must sum to one")
+    if ACTION_TIE_ORDER != ("HOLD", "CLARIFY", "SPEAK", "REACH"):
+        raise ValueError("context action tie order does not match formula v1")
+
+    if (
+        not _is_finite_number(RECURRENT_FIXED_INCOMING_L1_LIMIT)
+        or RECURRENT_FIXED_INCOMING_L1_LIMIT != 1.2
+    ):
+        raise ValueError("recurrent fixed incoming L1 limit must equal formula-v1 value 1.2")
+    if type(RECURRENT_TOPOLOGY) is not tuple or len(RECURRENT_TOPOLOGY) != SNN_NEURONS:
+        raise ValueError("materialized recurrent topology has the wrong population size")
     for post in range(SNN_NEURONS):
-        sources = recurrent_sources(post)
+        try:
+            sources = tuple(recurrent_sources(post))
+        except Exception as exc:
+            raise ValueError("recurrent topology generation failed") from exc
+        expected_fan_in = RECURRENT_HIGH_FAN_IN if post < RECURRENT_HIGH_FAN_IN_POSTS else RECURRENT_LOW_FAN_IN
+        if len(sources) != expected_fan_in:
+            raise ValueError("recurrent topology has the wrong fan-in")
+        if any(type(pre) is not int or not 0 <= pre < SNN_NEURONS for pre in sources):
+            raise ValueError("recurrent topology contains an out-of-range source")
         if post in sources or len(sources) != len(set(sources)):
             raise ValueError("recurrent topology contains a self-loop or duplicate")
-        fixed_l1 = sum(
-            abs(recurrent_initial_weight(post, pre))
-            for pre in sources
-            if not recurrent_is_plastic(post, pre)
-        )
+        if type(RECURRENT_TOPOLOGY[post]) is not tuple or RECURRENT_TOPOLOGY[post] != sources:
+            raise ValueError("materialized recurrent topology differs from the live formula")
+
+        fixed_l1 = 0.0
+        for pre in sources:
+            expected_plastic = post < SNN_EXCITATORY and pre < SNN_EXCITATORY
+            try:
+                plastic = recurrent_is_plastic(post, pre)
+                weight = recurrent_initial_weight(post, pre)
+            except Exception as exc:
+                raise ValueError("recurrent edge formula evaluation failed") from exc
+            if type(plastic) is not bool or plastic is not expected_plastic:
+                raise ValueError("recurrent plasticity must hold iff both neurons are excitatory")
+            if not _is_finite_number(weight):
+                raise ValueError("recurrent initial weight must be finite")
+            expected_weight = (
+                RECURRENT_INHIBITORY_WEIGHT
+                if pre >= SNN_EXCITATORY
+                else RECURRENT_EE_WEIGHT
+                if post < SNN_EXCITATORY
+                else RECURRENT_OTHER_EXCITATORY_WEIGHT
+            )
+            dale_violation = (pre < SNN_EXCITATORY and weight < 0.0) or (
+                pre >= SNN_EXCITATORY and weight > 0.0
+            )
+            if dale_violation or weight != expected_weight:
+                raise ValueError("recurrent initial weight violates the Dale/formula assignment")
+            if not plastic:
+                fixed_l1 += abs(weight)
         if fixed_l1 > RECURRENT_FIXED_INCOMING_L1_LIMIT:
             raise ValueError("fixed incoming L1 exceeds the formula limit")
-    jacobian = jacobian_absolute_upper_bound()
+
+    if type(INPUT_TOPOLOGY) is not tuple or len(INPUT_TOPOLOGY) != POPULATION_INPUT_COUNT:
+        raise ValueError("materialized input topology has the wrong channel count")
+    for input_index in range(POPULATION_INPUT_COUNT):
+        try:
+            targets = tuple(input_targets(input_index))
+        except Exception as exc:
+            raise ValueError("input topology generation failed") from exc
+        if len(targets) != INPUT_TARGETS_PER_CHANNEL:
+            raise ValueError("input topology has the wrong target count")
+        if any(type(target) is not int or not 0 <= target < SNN_NEURONS for target in targets):
+            raise ValueError("input topology contains an out-of-range target")
+        if len(targets) != len(set(targets)):
+            raise ValueError("input topology contains duplicate targets")
+        if type(INPUT_TOPOLOGY[input_index]) is not tuple or INPUT_TOPOLOGY[input_index] != targets:
+            raise ValueError("materialized input topology differs from the live formula")
+
+    try:
+        jacobian = jacobian_absolute_upper_bound()
+    except Exception as exc:
+        raise ValueError("Jacobian construction failed") from exc
+    _validate_matrix_shape_and_values("Jacobian", jacobian, STATE_DIM, STATE_DIM)
+    if jacobian != JACOBIAN_ABSOLUTE_UPPER_BOUND:
+        raise ValueError("materialized Jacobian differs from the live formula")
     norm_one = max(sum(jacobian[row][column] for row in range(STATE_DIM)) for column in range(STATE_DIM))
     norm_infinity = max(sum(row) for row in jacobian)
     bound = sqrt(norm_one * norm_infinity)
-    if bound >= JACOBIAN_STABILITY_LIMIT:
+    if not _is_finite_number(JACOBIAN_STABILITY_BOUND) or bound != JACOBIAN_STABILITY_BOUND:
+        raise ValueError("Jacobian bound does not match the materialized bound")
+    if JACOBIAN_STABILITY_LIMIT != 0.995 or bound >= JACOBIAN_STABILITY_LIMIT:
         raise ValueError("formula fails the analytic Jacobian stability gate")
     return bound
 
 
-_formula_manifest_data = {
-    "action_belief": (
-        ACTION_INITIAL_G,
-        ACTION_INITIAL_V,
-        ACTION_INITIAL_R,
-        ACTION_INITIAL_COVARIANCE,
-        ACTION_INITIAL_COUNT,
-        ACTION_INITIAL_BASELINE,
-        ACTION_Q_THETA,
-        ACTION_REWARD_SCALE,
-        ACTION_BIAS,
-        ACTION_MODEL_REVISION,
-    ),
-    "axes": AXIS_NAMES,
-    "dimensions": (
-        OBSERVATION_DIM,
-        AXIS_DIM,
-        STATE_DIM,
-        SNN_NEURONS,
-        SNN_EXCITATORY,
-        SNN_INHIBITORY,
-        SNN_SUMMARY_DIM,
-        WORKSPACE_CAPACITY,
-        EXPERIENCE_CAPACITY,
-    ),
-    "dynamics": (
-        P_TRIPLES,
-        Q_MATRIX,
-        W_FAST,
-        W_MID,
-        W_SLOW,
-        U_FAST,
-        U_MID,
-        U_SLOW,
-        DYNAMICS_STEP_SIZES,
-        "rows=targets;columns=sources",
-        JACOBIAN_VALIDATION_METHOD,
-        JACOBIAN_STABILITY_LIMIT,
-    ),
-    "expression": (
-        EXPRESSION_REVISION,
-        HOLD_EXPRESSION,
-        SPEAK_LENGTH_THRESHOLDS,
-        SPEAK_PACE_FORMULA,
-        SPEAK_DIRECTNESS_FORMULA,
-        SPEAK_WARMTH_FORMULA,
-        CLARIFY_EXPRESSION,
-        CLARIFY_WARMTH_FORMULA,
-        CLARIFY_HESITATION_UNCERTAINTY_THRESHOLD,
-        REACH_AFFILIATION_MEDIUM_THRESHOLD,
-        REACH_EXPRESSION,
-        REACH_WARMTH_FORMULA,
-        STYLE_SIGNATURE_RING_CAPACITY,
-        STYLE_REPEAT_SUPPRESSION_LOOKBACK,
-        STYLE_REPEAT_RESPONSE,
-        EXPRESSION_LITERAL_OPENING_ALLOWED,
-    ),
-    "formula_version": FORMULA_VERSION,
-    "load_shedding": (
-        FULL_24_STDP,
-        FULL_24_NO_STDP,
-        SNN_16_NO_STDP,
-        REUSE_LAST_SNN_SUMMARY,
-        DETERMINISTIC_CONTINUOUS_ONLY,
-        PROFILE_LADDER,
-        LOAD_THRESHOLDS[:-1] + ((1.0, 500.0, "inf"),),
-        RECOVERY_CONSECUTIVE_SNAPSHOTS,
-        RECOVERY_THRESHOLD_RATIO,
-        REPOSITORY_HARD_STOP_PROFILE,
-    ),
-    "proposals": (
-        PROPOSAL_IDS,
-        PROPOSAL_ACTIONS,
-        PROPOSAL_SALIENCE_FORMULAS,
-        PROPOSAL_SALIENCE_BOUNDS,
-        PROPOSAL_CONFIDENCE_FORMULA,
-        PROPOSAL_KEY_WEIGHTS,
-        PROPOSAL_ACTION_BASIS,
-        PROPOSAL_SOURCE_BASIS,
-        PROPOSAL_GROUP_COORDS,
-        PROPOSAL_REQUIRED_BITS,
-        PROPOSAL_REQUIRES_VALID_SNN_SUMMARY,
-        PROPOSAL_KEYS,
-    ),
-    "reward": (
-        PREFERENCE_REVISION,
-        OUTCOME_PROJECTOR_REVISION,
-        REWARD_BRANCHES,
-        WORKSPACE_EVIDENCE_FORMULA,
-        RHO_HOLD_INITIAL,
-        RHO_REACH_INITIAL,
-        RHO_DECAY,
-        RHO_PRE_SCORE_PENALTY_MULTIPLIER,
-        RHO_POST_SELECTION_INCREMENT,
-        RHO_BOUNDS,
-        RHO_PENALTY_CONTEXTS,
-        RHO_DECAY_ONLY_CONTEXTS,
-    ),
-    "snn_summary": (SNN_SUMMARY_POOLS, SNN_SUMMARY_DEFINITION),
-    "spiking": (
-        SNN_DEFAULT_TICKS,
-        SNN_ALLOWED_TICKS,
-        TAU_MEMBRANE,
-        TAU_PRE,
-        TAU_POST,
-        TAU_ELIGIBILITY,
-        RECURRENT_HASH_DOMAIN,
-        RECURRENT_HIGH_FAN_IN_POSTS,
-        RECURRENT_HIGH_FAN_IN,
-        RECURRENT_LOW_FAN_IN,
-        RECURRENT_EE_WEIGHT,
-        RECURRENT_OTHER_EXCITATORY_WEIGHT,
-        RECURRENT_INHIBITORY_WEIGHT,
-        RECURRENT_FIXED_INCOMING_L1_LIMIT,
-        INPUT_HASH_DOMAIN,
-        POPULATION_INPUT_COUNT,
-        INPUT_TARGETS_PER_CHANNEL,
-        INPUT_WEIGHT,
-    ),
-}
-FORMULA_MANIFEST = MappingProxyType(_formula_manifest_data)
+def _named_mapping(**values: object) -> MappingProxyType[str, object]:
+    return MappingProxyType(values)
+
+
+def build_formula_manifest() -> MappingProxyType[str, object]:
+    """Build a fresh, recursively read-only manifest from live formula semantics."""
+    return _named_mapping(
+        formula_version=FORMULA_VERSION,
+        dimensions=_named_mapping(
+            observation=OBSERVATION_DIM,
+            axes=AXIS_DIM,
+            state=STATE_DIM,
+            snn_neurons=SNN_NEURONS,
+            snn_excitatory=SNN_EXCITATORY,
+            snn_inhibitory=SNN_INHIBITORY,
+            snn_summary=SNN_SUMMARY_DIM,
+            workspace=WORKSPACE_CAPACITY,
+            experience=EXPERIENCE_CAPACITY,
+        ),
+        observation=_named_mapping(
+            dimension=OBSERVATION_DIM,
+            semantic_defaults=SEMANTIC_DEFAULTS,
+            center_scale=CENTER_SCALE,
+            center_offset=CENTER_OFFSET,
+        ),
+        axes=AXIS_NAMES,
+        dynamics=_named_mapping(
+            matrix_orientation="rows=targets;columns=sources",
+            p_triples=P_TRIPLES,
+            p_matrix=P_MATRIX,
+            p_bias=P_BIAS,
+            q_matrix=Q_MATRIX,
+            w_fast=W_FAST,
+            w_mid=W_MID,
+            w_slow=W_SLOW,
+            u_fast=U_FAST,
+            u_mid=U_MID,
+            u_slow=U_SLOW,
+            step_sizes=DYNAMICS_STEP_SIZES,
+        ),
+        spiking=_named_mapping(
+            default_ticks=SNN_DEFAULT_TICKS,
+            allowed_ticks=SNN_ALLOWED_TICKS,
+            tau_membrane=TAU_MEMBRANE,
+            tau_pre=TAU_PRE,
+            tau_post=TAU_POST,
+            tau_eligibility=TAU_ELIGIBILITY,
+            recurrent_hash_domain=RECURRENT_HASH_DOMAIN,
+            recurrent_high_fan_in_posts=RECURRENT_HIGH_FAN_IN_POSTS,
+            recurrent_high_fan_in=RECURRENT_HIGH_FAN_IN,
+            recurrent_low_fan_in=RECURRENT_LOW_FAN_IN,
+            recurrent_ee_weight=RECURRENT_EE_WEIGHT,
+            recurrent_other_excitatory_weight=RECURRENT_OTHER_EXCITATORY_WEIGHT,
+            recurrent_inhibitory_weight=RECURRENT_INHIBITORY_WEIGHT,
+            recurrent_fixed_incoming_l1_limit=RECURRENT_FIXED_INCOMING_L1_LIMIT,
+            recurrent_topology=RECURRENT_TOPOLOGY,
+            input_hash_domain=INPUT_HASH_DOMAIN,
+            population_input_count=POPULATION_INPUT_COUNT,
+            input_targets_per_channel=INPUT_TARGETS_PER_CHANNEL,
+            input_weight=INPUT_WEIGHT,
+            input_topology=INPUT_TOPOLOGY,
+            topology_semantics=_named_mapping(
+                digest="SHA-256",
+                index_framing=">HH",
+                selection="ascending digest, then lowest index",
+                recurrent_excludes_self=True,
+                plasticity="iff pre and post are excitatory",
+                dale="weight sign is determined by presynaptic population",
+            ),
+        ),
+        snn_summary=_named_mapping(pools=SNN_SUMMARY_POOLS, definition=SNN_SUMMARY_DEFINITION),
+        proposals=_named_mapping(
+            ids=PROPOSAL_IDS,
+            actions=PROPOSAL_ACTIONS,
+            salience_formulas=PROPOSAL_SALIENCE_FORMULAS,
+            salience_bounds=PROPOSAL_SALIENCE_BOUNDS,
+            confidence_formula=PROPOSAL_CONFIDENCE_FORMULA,
+            key_weights=PROPOSAL_KEY_WEIGHTS,
+            action_basis=PROPOSAL_ACTION_BASIS,
+            source_basis=PROPOSAL_SOURCE_BASIS,
+            group_coords=PROPOSAL_GROUP_COORDS,
+            required_bits=PROPOSAL_REQUIRED_BITS,
+            requires_valid_snn_summary=PROPOSAL_REQUIRES_VALID_SNN_SUMMARY,
+            materialized_keys=PROPOSAL_KEYS,
+        ),
+        action_selection=_named_mapping(
+            context_priors=CONTEXT_ACTION_PRIORS,
+            tie_order=ACTION_TIE_ORDER,
+        ),
+        expression=_named_mapping(
+            revision=EXPRESSION_REVISION,
+            hold=HOLD_EXPRESSION,
+            speak_length_thresholds=SPEAK_LENGTH_THRESHOLDS,
+            speak_pace_formula=SPEAK_PACE_FORMULA,
+            speak_directness_formula=SPEAK_DIRECTNESS_FORMULA,
+            speak_warmth_formula=SPEAK_WARMTH_FORMULA,
+            clarify=CLARIFY_EXPRESSION,
+            clarify_warmth_formula=CLARIFY_WARMTH_FORMULA,
+            clarify_hesitation_uncertainty_threshold=CLARIFY_HESITATION_UNCERTAINTY_THRESHOLD,
+            clarify_hesitation_semantics=(
+                "hesitation is true iff action is CLARIFY and uncertainty >= threshold"
+            ),
+            reach_affiliation_medium_threshold=REACH_AFFILIATION_MEDIUM_THRESHOLD,
+            reach=REACH_EXPRESSION,
+            reach_warmth_formula=REACH_WARMTH_FORMULA,
+            style_signature_ring_capacity=STYLE_SIGNATURE_RING_CAPACITY,
+            style_repeat_suppression_lookback=STYLE_REPEAT_SUPPRESSION_LOOKBACK,
+            style_repeat_response=STYLE_REPEAT_RESPONSE,
+            literal_opening_allowed=EXPRESSION_LITERAL_OPENING_ALLOWED,
+        ),
+        action_belief=_named_mapping(
+            initial_g=ACTION_INITIAL_G,
+            initial_v=ACTION_INITIAL_V,
+            initial_r=ACTION_INITIAL_R,
+            initial_covariance=ACTION_INITIAL_COVARIANCE,
+            initial_count=ACTION_INITIAL_COUNT,
+            initial_baseline=ACTION_INITIAL_BASELINE,
+            q_theta=ACTION_Q_THETA,
+            reward_scale=ACTION_REWARD_SCALE,
+            action_bias=ACTION_BIAS,
+            model_revision=ACTION_MODEL_REVISION,
+        ),
+        reward=_named_mapping(
+            preference_revision=PREFERENCE_REVISION,
+            outcome_projector_revision=OUTCOME_PROJECTOR_REVISION,
+            branches=REWARD_BRANCHES,
+            workspace_evidence_formula=WORKSPACE_EVIDENCE_FORMULA,
+            rho_hold_initial=RHO_HOLD_INITIAL,
+            rho_reach_initial=RHO_REACH_INITIAL,
+            rho_decay=RHO_DECAY,
+            rho_pre_score_penalty_multiplier=RHO_PRE_SCORE_PENALTY_MULTIPLIER,
+            rho_post_selection_increment=RHO_POST_SELECTION_INCREMENT,
+            rho_bounds=RHO_BOUNDS,
+            rho_penalty_contexts=RHO_PENALTY_CONTEXTS,
+            rho_decay_only_contexts=RHO_DECAY_ONLY_CONTEXTS,
+        ),
+        load_shedding=_named_mapping(
+            profile_fields=COMPUTE_PROFILE_FIELDS,
+            profiles=COMPUTE_PROFILES,
+            profile_ladder=PROFILE_LADDER,
+            reuse_last_summary_fallback=REUSE_LAST_SUMMARY_FALLBACK,
+            load_thresholds=LOAD_THRESHOLDS[:-1] + ((1.0, 500.0, "inf"),),
+            recovery_consecutive_snapshots=RECOVERY_CONSECUTIVE_SNAPSHOTS,
+            recovery_threshold_ratio=RECOVERY_THRESHOLD_RATIO,
+            repository_hard_stop_profile=REPOSITORY_HARD_STOP_PROFILE,
+        ),
+        validation=_named_mapping(
+            jacobian_method=JACOBIAN_VALIDATION_METHOD,
+            jacobian_stability_limit=JACOBIAN_STABILITY_LIMIT,
+            jacobian_absolute_upper_bound=JACOBIAN_ABSOLUTE_UPPER_BOUND,
+            jacobian_stability_bound=JACOBIAN_STABILITY_BOUND,
+        ),
+    )
+
+
+FORMULA_MANIFEST = build_formula_manifest()
 FORMULA_CANONICAL_JSON = canonical_json_bytes(FORMULA_MANIFEST)
 FORMULA_DIGEST = hashlib.sha256(FORMULA_CANONICAL_JSON).hexdigest()
-del _formula_manifest_data

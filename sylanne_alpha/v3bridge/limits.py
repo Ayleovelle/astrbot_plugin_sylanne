@@ -37,6 +37,12 @@ class EffectiveV3Budget:
     high_bytes: int
     admission_enabled: bool
 
+    def __post_init__(self) -> None:
+        if type(self.hard_bytes) is not int or type(self.high_bytes) is not int:
+            raise TypeError("budget byte counts must have exact type int")
+        if type(self.admission_enabled) is not bool:
+            raise TypeError("admission_enabled must have exact type bool")
+
 
 def effective_v3_budget(
     non_v3_bytes: int,

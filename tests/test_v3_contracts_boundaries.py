@@ -14,8 +14,10 @@ import pytest
 
 from sylanne_alpha.v3bridge import limits
 from sylanne_alpha.v3bridge.build_flags import BUILD_CHANNEL, V3_SHADOW_ENABLED
+from sylanne_alpha.v3bridge.limits import EffectiveV3Budget
 from sylanne_alpha.v3bridge.models import LoadSnapshotV1, RepositoryAdmissionState
 from sylanne_alpha.v3core import formula_v1 as formula
+from sylanne_alpha.v3core import canonical
 from sylanne_alpha.v3core.canonical import assert_valid_dto
 from sylanne_alpha.v3core.contracts import (
     Action,
@@ -175,6 +177,109 @@ def test_recursive_dto_validation_rejects_undeclared_frozen_dataclasses_and_enum
         assert_valid_dto(HostEnum.VALUE)
 
 
+def test_core_canonical_registry_is_closed_after_one_explicit_bootstrap() -> None:
+    @dataclass(frozen=True)
+    class ExternalDto:
+        value: int
+
+    class ExternalEnum(Enum):
+        VALUE = "value"
+
+    assert type(canonical._DECLARED_DTO_TYPES) is frozenset
+    assert type(canonical._DECLARED_ENUM_TYPES) is frozenset
+    assert SessionRef in canonical._DECLARED_DTO_TYPES
+    assert Action in canonical._DECLARED_ENUM_TYPES
+    assert LoadSnapshotV1 not in canonical._DECLARED_DTO_TYPES
+    assert RepositoryAdmissionState not in canonical._DECLARED_ENUM_TYPES
+    with pytest.raises(RuntimeError, match="sealed"):
+        canonical.declared_dto(ExternalDto)
+    with pytest.raises(RuntimeError, match="sealed"):
+        canonical.declared_enum(ExternalEnum)
+    with pytest.raises(RuntimeError, match="sealed"):
+        canonical._install_declared_types(dto_types=(), enum_types=())
+
+
+def test_declared_enum_values_are_recursively_immutable(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(Action.SPEAK, "_value_", ["mutable"])
+    with pytest.raises(TypeError, match="unsupported DTO type"):
+        assert_valid_dto(Action.SPEAK)
+
+
+@pytest.mark.parametrize(
+    "factory",
+    [
+        pytest.param(lambda: SessionRef(key_id=1, session_digest=b"s" * 32, session_generation=1), id="session-key"),
+        pytest.param(lambda: SessionRef(key_id="key", session_digest="s" * 32, session_generation=1), id="session-digest"),
+        pytest.param(lambda: SessionRef(key_id="key", session_digest=b"s" * 32, session_generation=True), id="session-generation-bool"),
+        pytest.param(lambda: TurnSequence(writer_epoch=True, local_sequence=1), id="sequence-bool"),
+        pytest.param(
+            lambda: TurnKey(
+                plugin_instance_id="plugin",
+                session_ref="not-a-session",
+                bridge_request_nonce="nonce",
+                request_attempt=0,
+            ),
+            id="turn-key-session",
+        ),
+        pytest.param(
+            lambda: ComputeProfile(
+                profile_id="profile",
+                snn_enabled=1,
+                ticks=24,
+                stdp_enabled=True,
+                reuse_last_summary=False,
+                math_backend="scalar",
+                formula_version="formula",
+                model_version="model",
+            ),
+            id="profile-bool",
+        ),
+        pytest.param(
+            lambda: TurnEnvelope(
+                turn_key=_envelope().turn_key,
+                turn_id="turn",
+                sequence=TurnSequence(0, 1),
+                compute_profile=_profile(),
+                deterministic_seed=b"seed",
+                observation=(),
+                context="ADDRESSED",
+            ),
+            id="envelope-context",
+        ),
+        pytest.param(
+            lambda: CoreInvocation(envelope="not-an-envelope", base_state=(), projected_actual_outcome=None),
+            id="invocation-envelope",
+        ),
+        pytest.param(lambda: V3StateEffect(payload="state"), id="state-effect-payload"),
+        pytest.param(lambda: V3TraceEffect(payload="trace"), id="trace-effect-payload"),
+        pytest.param(lambda: V3MetricEffect(name="metric", value=True), id="metric-bool"),
+        pytest.param(
+            lambda: PendingOutcome(
+                origin_turn_id="turn",
+                sequence=TurnSequence(0, 1),
+                action="SPEAK",
+            ),
+            id="pending-action",
+        ),
+        pytest.param(lambda: V3State(session_ref=_session_ref(), revision=True), id="state-revision-bool"),
+        pytest.param(lambda: V3State(session_ref=_session_ref(), rho_hold=0), id="state-rho-int"),
+        pytest.param(
+            lambda: LoadSnapshotV1(
+                global_queue_fill=0,
+                oldest_job_age_ms=0.0,
+                committed_compute_p95_ms=0.0,
+                repository_admission=RepositoryAdmissionState.OPEN,
+            ),
+            id="bridge-load-int",
+        ),
+        pytest.param(lambda: EffectiveV3Budget(hard_bytes=True, high_bytes=0, admission_enabled=True), id="budget-bool"),
+    ],
+)
+def test_all_v3_dataclasses_reject_values_with_wrong_semantic_types(factory: object) -> None:
+    with pytest.raises(TypeError, match="type"):
+        factory()  # type: ignore[operator]
+
+
 def test_effect_bundle_is_a_closed_frozen_union() -> None:
     effects = (
         V3StateEffect(payload=b"state"),
@@ -254,6 +359,19 @@ def test_resource_limits_and_effective_plugin_budget_are_exact() -> None:
     assert limits.RESOURCE_CEILINGS_ARE_SIMULTANEOUS_RESERVATIONS is False
 
 
+def test_effective_v3_budget_handles_minimum_custom_and_invalid_caps() -> None:
+    minimum = 4 * 1024 * 1024
+    assert limits.effective_v3_budget(0, minimum) == EffectiveV3Budget(2_194_304, 194_304, False)
+    assert limits.effective_v3_budget(0, 0) == EffectiveV3Budget(0, 0, False)
+    assert limits.effective_v3_budget(1_000_000, 10_000_000) == EffectiveV3Budget(7_000_000, 5_000_000, True)
+    for args in ((-1,), (0, -1)):
+        with pytest.raises(ValueError, match="non-negative"):
+            limits.effective_v3_budget(*args)
+    for args in ((False,), (0, 4.0), ("0",)):
+        with pytest.raises(TypeError, match="integer"):
+            limits.effective_v3_budget(*args)  # type: ignore[arg-type]
+
+
 def test_bridge_load_snapshot_is_frozen_and_repository_hard_stop_is_explicit() -> None:
     snapshot = LoadSnapshotV1(
         global_queue_fill=0.25,
@@ -315,6 +433,23 @@ def test_formula_dimensions_time_constants_and_sparse_drive_are_exact() -> None:
         for row in range(8)
     )
     assert formula.Q_MATRIX == expected_q
+
+
+def test_formula_semantic_defaults_centering_bias_and_context_priors_are_exact() -> None:
+    assert len(formula.SEMANTIC_DEFAULTS) == formula.OBSERVATION_DIM == 36
+    assert formula.CENTER_SCALE == 2.0
+    assert formula.CENTER_OFFSET == -1.0
+    assert formula.P_BIAS == tuple(
+        -sum(weight * formula.SEMANTIC_DEFAULTS[column] for column, weight in enumerate(row))
+        for row in formula.P_MATRIX
+    )
+    assert formula.CONTEXT_ACTION_PRIORS == {
+        "ADDRESSED": {"SPEAK": 0.55, "CLARIFY": 0.25, "HOLD": 0.20},
+        "AMBIENT": {"HOLD": 0.75, "SPEAK": 0.25},
+        "PROACTIVE": {"HOLD": 0.80, "REACH": 0.20},
+        "IDLE": {"HOLD": 1.0},
+    }
+    assert formula.ACTION_TIE_ORDER == ("HOLD", "CLARIFY", "SPEAK", "REACH")
 
 
 def test_formula_dynamics_matrices_use_target_rows_and_source_columns() -> None:
@@ -425,6 +560,206 @@ def test_deterministic_recurrent_and_input_hash_framing() -> None:
             )[:4]
         )
         assert formula.input_targets(input_index) == expected
+
+
+def test_formula_validator_rejects_bad_shapes_and_population(monkeypatch: pytest.MonkeyPatch) -> None:
+    for name, bad_value in (
+        ("P_MATRIX", ((0.0,),)),
+        ("Q_MATRIX", ((0.0,),)),
+        ("W_FAST", ((0.0,),)),
+        ("U_SLOW", ((0.0,),)),
+    ):
+        with monkeypatch.context() as scoped:
+            scoped.setattr(formula, name, bad_value)
+            with pytest.raises(ValueError):
+                formula.validate_formula_manifest()
+    jacobian_calls: list[bool] = []
+    with monkeypatch.context() as scoped:
+        scoped.setattr(formula, "W_FAST", ((0.0,),))
+        scoped.setattr(
+            formula,
+            "jacobian_absolute_upper_bound",
+            lambda: jacobian_calls.append(True),
+        )
+        with pytest.raises(ValueError):
+            formula.validate_formula_manifest()
+    assert jacobian_calls == []
+    for name, bad_value in (
+        ("DYNAMICS_STEP_SIZES", (0.50,)),
+        ("JACOBIAN_ABSOLUTE_UPPER_BOUND", ((0.0,),)),
+    ):
+        jacobian_calls = []
+        with monkeypatch.context() as scoped:
+            scoped.setattr(formula, name, bad_value)
+            scoped.setattr(
+                formula,
+                "jacobian_absolute_upper_bound",
+                lambda: jacobian_calls.append(True),
+            )
+            with pytest.raises(ValueError):
+                formula.validate_formula_manifest()
+        assert jacobian_calls == []
+    with monkeypatch.context() as scoped:
+        scoped.setattr(formula, "SNN_INHIBITORY", formula.SNN_INHIBITORY - 1)
+        with pytest.raises(ValueError, match="population"):
+            formula.validate_formula_manifest()
+    with monkeypatch.context() as scoped:
+        scoped.setattr(formula, "jacobian_absolute_upper_bound", lambda: ((0.0,),))
+        with pytest.raises(ValueError, match="Jacobian"):
+            formula.validate_formula_manifest()
+
+
+@pytest.mark.parametrize(
+    "replacement",
+    [
+        pytest.param(lambda post: (post,), id="self-loop"),
+        pytest.param(lambda post: (1, 1, 2, 3, 4, 5, 6, 7), id="duplicate"),
+        pytest.param(lambda post: (-1, 1, 2, 3, 4, 5, 6, 7), id="out-of-range"),
+        pytest.param(lambda post: (1,), id="wrong-fan-in"),
+    ],
+)
+def test_formula_validator_rejects_invalid_recurrent_topology(
+    monkeypatch: pytest.MonkeyPatch,
+    replacement: object,
+) -> None:
+    monkeypatch.setattr(formula, "recurrent_sources", replacement)
+    with pytest.raises(ValueError, match="recurrent"):
+        formula.validate_formula_manifest()
+
+
+def test_formula_validator_rejects_dale_plasticity_and_input_violations(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    with monkeypatch.context() as scoped:
+        scoped.setattr(formula, "recurrent_initial_weight", lambda post, pre: -0.06)
+        with pytest.raises(ValueError, match="Dale"):
+            formula.validate_formula_manifest()
+    with monkeypatch.context() as scoped:
+        scoped.setattr(formula, "recurrent_is_plastic", lambda post, pre: False)
+        with pytest.raises(ValueError, match="plastic"):
+            formula.validate_formula_manifest()
+    with monkeypatch.context() as scoped:
+        scoped.setattr(formula, "input_targets", lambda input_index: (0, 0, 1, 2))
+        with pytest.raises(ValueError, match="input"):
+            formula.validate_formula_manifest()
+
+
+@pytest.mark.parametrize("limit", [float("nan"), float("inf"), True, 1.3])
+def test_formula_validator_rejects_invalid_recurrent_l1_limit(
+    monkeypatch: pytest.MonkeyPatch,
+    limit: object,
+) -> None:
+    monkeypatch.setattr(formula, "RECURRENT_FIXED_INCOMING_L1_LIMIT", limit)
+    with pytest.raises(ValueError, match="recurrent.*L1"):
+        formula.validate_formula_manifest()
+
+
+def test_formula_validator_normalizes_extreme_numeric_values_to_value_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    defaults = list(formula.SEMANTIC_DEFAULTS)
+    defaults[0] = 10**10000
+    monkeypatch.setattr(formula, "SEMANTIC_DEFAULTS", tuple(defaults))
+    with pytest.raises(ValueError, match="finite"):
+        formula.validate_formula_manifest()
+
+
+def test_formula_validator_rejects_materialized_topology_and_jacobian_drift(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    with monkeypatch.context() as scoped:
+        topology = list(formula.RECURRENT_TOPOLOGY)
+        topology[0] = tuple(reversed(topology[0]))
+        scoped.setattr(formula, "RECURRENT_TOPOLOGY", tuple(topology))
+        with pytest.raises(ValueError, match="materialized recurrent"):
+            formula.validate_formula_manifest()
+    with monkeypatch.context() as scoped:
+        topology = list(formula.INPUT_TOPOLOGY)
+        topology[0] = tuple(reversed(topology[0]))
+        scoped.setattr(formula, "INPUT_TOPOLOGY", tuple(topology))
+        with pytest.raises(ValueError, match="materialized input"):
+            formula.validate_formula_manifest()
+    with monkeypatch.context() as scoped:
+        scoped.setattr(
+            formula,
+            "JACOBIAN_ABSOLUTE_UPPER_BOUND",
+            tuple((0.0,) * formula.STATE_DIM for _ in range(formula.STATE_DIM)),
+        )
+        with pytest.raises(ValueError, match="materialized Jacobian"):
+            formula.validate_formula_manifest()
+
+
+def test_formula_validator_rejects_bias_priors_and_full_bound_mismatches(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    with monkeypatch.context() as scoped:
+        scoped.setattr(formula, "P_BIAS", (0.0,) * formula.AXIS_DIM)
+        with pytest.raises(ValueError, match="P_BIAS"):
+            formula.validate_formula_manifest()
+    with monkeypatch.context() as scoped:
+        scoped.setattr(formula, "CONTEXT_ACTION_PRIORS", {"IDLE": {"HOLD": 0.5}})
+        with pytest.raises(ValueError, match="context"):
+            formula.validate_formula_manifest()
+    with monkeypatch.context() as scoped:
+        scoped.setattr(formula, "JACOBIAN_STABILITY_BOUND", 0.0)
+        with pytest.raises(ValueError, match="bound"):
+            formula.validate_formula_manifest()
+
+
+@pytest.mark.parametrize(
+    "priors",
+    [
+        pytest.param({"IDLE": {"HOLD": 1.0}}, id="missing-contexts"),
+        pytest.param(
+            {
+                "ADDRESSED": {"SPEAK": 0.55, "REACH": 0.25, "HOLD": 0.20},
+                "AMBIENT": {"HOLD": 0.75, "SPEAK": 0.25},
+                "PROACTIVE": {"HOLD": 0.80, "REACH": 0.20},
+                "IDLE": {"HOLD": 1.0},
+            },
+            id="illegal-action",
+        ),
+        pytest.param(
+            {
+                "ADDRESSED": {"SPEAK": 0.55, "CLARIFY": 0.25, "HOLD": 0.20},
+                "AMBIENT": {"HOLD": 0.75, "SPEAK": 0.25},
+                "PROACTIVE": {"HOLD": 1.0, "REACH": 0.0},
+                "IDLE": {"HOLD": 1.0},
+            },
+            id="non-positive-probability",
+        ),
+        pytest.param(
+            {
+                "ADDRESSED": {"SPEAK": 0.55, "CLARIFY": 0.25, "HOLD": 0.20},
+                "AMBIENT": {"HOLD": 0.75, "SPEAK": 0.25},
+                "PROACTIVE": {"HOLD": 0.70, "REACH": 0.20},
+                "IDLE": {"HOLD": 1.0},
+            },
+            id="not-normalized",
+        ),
+    ],
+)
+def test_formula_validator_rejects_invalid_context_prior_details(
+    monkeypatch: pytest.MonkeyPatch,
+    priors: object,
+) -> None:
+    monkeypatch.setattr(formula, "CONTEXT_ACTION_PRIORS", priors)
+    with pytest.raises(ValueError, match="context"):
+        formula.validate_formula_manifest()
+
+
+def test_formula_validator_treats_named_context_mapping_order_as_nonsemantic(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    reordered_priors = {
+        "IDLE": {"HOLD": 1.0},
+        "PROACTIVE": {"REACH": 0.20, "HOLD": 0.80},
+        "AMBIENT": {"SPEAK": 0.25, "HOLD": 0.75},
+        "ADDRESSED": {"HOLD": 0.20, "CLARIFY": 0.25, "SPEAK": 0.55},
+    }
+    monkeypatch.setattr(formula, "CONTEXT_ACTION_PRIORS", reordered_priors)
+    assert formula.validate_formula_manifest() == formula.JACOBIAN_STABILITY_BOUND
+    assert canonical.canonical_json_bytes(formula.build_formula_manifest()) == formula.FORMULA_CANONICAL_JSON
 
 
 def test_snn_summary_pools_and_proposal_manifest_are_frozen_exactly() -> None:
@@ -557,11 +892,55 @@ def test_profiles_and_load_thresholds_are_exact() -> None:
     assert formula.REPOSITORY_HARD_STOP_PROFILE == "SKIP_V3_TURN"
 
 
+def test_formula_manifest_uses_named_mappings_for_all_material_semantics() -> None:
+    manifest = formula.FORMULA_MANIFEST
+    assert manifest["observation"] == {
+        "dimension": formula.OBSERVATION_DIM,
+        "semantic_defaults": formula.SEMANTIC_DEFAULTS,
+        "center_scale": formula.CENTER_SCALE,
+        "center_offset": formula.CENTER_OFFSET,
+    }
+    assert manifest["dynamics"]["p_matrix"] == formula.P_MATRIX
+    assert manifest["dynamics"]["p_bias"] == formula.P_BIAS
+    assert manifest["spiking"]["recurrent_topology"] == formula.RECURRENT_TOPOLOGY
+    assert manifest["spiking"]["input_topology"] == formula.INPUT_TOPOLOGY
+    assert manifest["spiking"]["topology_semantics"] == {
+        "digest": "SHA-256",
+        "index_framing": ">HH",
+        "selection": "ascending digest, then lowest index",
+        "recurrent_excludes_self": True,
+        "plasticity": "iff pre and post are excitatory",
+        "dale": "weight sign is determined by presynaptic population",
+    }
+    assert manifest["action_selection"]["context_priors"] == formula.CONTEXT_ACTION_PRIORS
+    assert manifest["action_selection"]["tie_order"] == formula.ACTION_TIE_ORDER
+    assert manifest["load_shedding"]["profile_fields"] == (
+        "snn_enabled",
+        "ticks",
+        "stdp_enabled",
+        "reuse_last_summary",
+    )
+    assert manifest["load_shedding"]["profiles"] == formula.COMPUTE_PROFILES
+    assert manifest["load_shedding"]["reuse_last_summary_fallback"] == "DETERMINISTIC_CONTINUOUS_ONLY"
+    assert manifest["expression"]["clarify_hesitation_semantics"] == (
+        "hesitation is true iff action is CLARIFY and uncertainty >= threshold"
+    )
+    assert manifest["validation"]["jacobian_absolute_upper_bound"] == formula.JACOBIAN_ABSOLUTE_UPPER_BOUND
+    assert manifest["validation"]["jacobian_stability_bound"] == formula.JACOBIAN_STABILITY_BOUND
+
+
+def test_formula_manifest_builder_tracks_semantic_changes(monkeypatch: pytest.MonkeyPatch) -> None:
+    baseline = formula.FORMULA_CANONICAL_JSON
+    monkeypatch.setattr(formula, "CENTER_SCALE", formula.CENTER_SCALE + 1.0)
+    rebuilt = formula.build_formula_manifest()
+    assert canonical.canonical_json_bytes(rebuilt) != baseline
+
+
 def test_formula_digest_is_canonical_and_golden() -> None:
     assert type(formula.FORMULA_MANIFEST) is MappingProxyType
     assert len(formula.FORMULA_DIGEST) == 64
     assert formula.FORMULA_DIGEST == hashlib.sha256(formula.FORMULA_CANONICAL_JSON).hexdigest()
-    assert formula.FORMULA_DIGEST == "ebc729681f4e6d809a67ad7f16ab3f3b78f9931bdb702ba797d15f1776255fed"
+    assert formula.FORMULA_DIGEST == "47c690a78944a408dee245c20833b5f8fff8fa066e2faa92f6ae736511cbffa2"
 
 
 def test_v3core_import_firewall() -> None:
