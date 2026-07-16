@@ -442,6 +442,69 @@ CONTEXT_ACTION_PRIORS = MappingProxyType(
 )
 ACTION_TIE_ORDER = ("HOLD", "CLARIFY", "SPEAK", "REACH")
 
+# --------------------------------------------------------------------------- #
+# Section 10 workspace competition, section 11.2/11.3 active-inference, section
+# 11.2 preferences, the EKF box/variance bounds, and the section 12 expression
+# formula coefficients.
+#
+# Exactly like ``DECISION_STATE_BLEND`` and the section-8 spiking scalars above,
+# these are the single formula-v1 source for the Task 9 cognitive modules and are
+# never hard-coded elsewhere.  They are intentionally *not* folded into
+# ``build_formula_manifest`` so ``FORMULA_DIGEST`` stays byte-stable at the value
+# locked by Task 1's golden test; the owning evaluation task may fold them into
+# the manifest later with an intentional digest bump when the gate manifest is
+# frozen.  The workspace competition potential initialises to ``0.0`` and the
+# ambiguous branch credits ``support[CLARIFY]`` with the runner-up broadcast
+# activation (both fixed here as the single formula-v1 interpretation).
+# --------------------------------------------------------------------------- #
+
+# Section 10 competition.
+WORKSPACE_ITERATIONS = 4
+WORKSPACE_POTENTIAL_INITIAL = 0.0
+WORKSPACE_POTENTIAL_LEAK = 0.4
+WORKSPACE_POTENTIAL_GAIN = 0.6
+WORKSPACE_INHIBITION_WEIGHT = 0.60
+WORKSPACE_REFRACTORY_WEIGHT = 0.45
+WORKSPACE_POTENTIAL_CLIP = 8.0
+WORKSPACE_SOFTMAX_TEMPERATURE = 0.35
+WORKSPACE_TOP1_ACTIVATION = 0.45
+WORKSPACE_TOP1_MARGIN = 0.08
+SOURCE_REFRACTORY_DECAY = 0.72
+SOURCE_REFRACTORY_INCREMENT = 0.45
+
+# Section 11.2 preferences p_C(s') = Normal(c, diag(V_C)).  Axes 0 (valence) and
+# 3 (affiliation) copy the current decision state; every other axis is fixed.
+PREFERENCE_C_CONSTANT = (0.0, 0.0, 0.6, 0.0, 0.0, 0.0, 0.4, 0.0)
+PREFERENCE_C_STATE_AXES = (0, 3)
+PREFERENCE_V_C = (0.50, 0.25, 0.20, 0.50, 0.20, 0.50, 0.25, 0.25)
+
+# Section 11.2 decision-state blend already lives in DECISION_STATE_BLEND above.
+# Section 11.3 EFE / policy posterior.
+POLICY_GAMMA = 1.0
+POLICY_TEMPERATURE = 1.0
+POLICY_WORKSPACE_EVIDENCE_BOUNDS = (-2.0, 2.0)
+POLICY_REFRACTORY_PENALTY_BOUNDS = (0.0, 2.0)
+
+# Section 11.2 EKF box-projection and variance bounds.
+ACTION_G_BOUNDS = (0.5, 1.2)
+ACTION_B_BOUNDS = (-0.5, 0.5)
+ACTION_V_BOUNDS = (0.02, 1.0)
+ACTION_R_BOUNDS = (0.02, 1.0)
+ACTION_SIGMA_BOUNDS = (1e-4, 1.0)
+ACTION_ETA_COUNT_CAP = 64
+ACTION_ETA_OFFSET = 4
+ACTION_COUNT_CAP = 65535
+
+# Section 12 expression formula coefficients (base, per-input weights).  The
+# HOLD/CLARIFY/REACH pace and directness scalars already live in
+# HOLD_EXPRESSION / CLARIFY_EXPRESSION / REACH_EXPRESSION above.
+SPEAK_PACE_COEFFS = (0.50, 0.20, -0.20)  # base, arousal, center(exhaustion)
+SPEAK_DIRECTNESS_COEFFS = (0.50, 0.25, -0.20)  # base, agency, uncertainty
+SPEAK_WARMTH_COEFFS = (0.50, 0.25, 0.15)  # base, affiliation, valence
+CLARIFY_WARMTH_COEFFS = (0.50, 0.20)  # base, affiliation
+REACH_WARMTH_COEFFS = (0.70, 0.20)  # base, affiliation
+EXPRESSION_LENGTH_BUCKETS = ("NONE", "SHORT", "MEDIUM", "LONG")
+
 FULL_24_STDP = (True, 24, True, False)
 FULL_24_NO_STDP = (True, 24, False, False)
 SNN_16_NO_STDP = (True, 16, False, False)
