@@ -385,7 +385,12 @@ class WebUIRoutes:
         schema = self._p._load_conf_schema()
         values = {}
         for key in schema:
-            values[key] = self._p._config.get(key, schema[key].get("default"))
+            raw = self._p._config.get(key, schema[key].get("default"))
+            # 敏感字段(cookie/token/密钥…)不明文下发到设置面板;有值则以哨兵替代。
+            if self._is_sensitive_key(key) and raw:
+                values[key] = self._MASKED_VALUE
+            else:
+                values[key] = raw
         return {
             "schema": schema,
             "values": values,
@@ -460,6 +465,9 @@ class WebUIRoutes:
         updated: list[str] = []
         for key, value in body.items():
             if key not in schema:
+                continue
+            # 面板回传脱敏哨兵 = 用户未改动该敏感字段;跳过,绝不用 "***" 覆盖真凭据。
+            if self._is_sensitive_key(key) and value == self._MASKED_VALUE:
                 continue
             meta = schema[key]
             # Type coercion
@@ -1636,8 +1644,10 @@ class WebUIRoutes:
     _SENSITIVE_CONFIG_KEYS = frozenset({
         "sylanne_webui_token", "api_key", "secret", "token",
         "password", "credential", "auth_key", "openai_key",
-        "anthropic_key", "gemini_key",
+        "anthropic_key", "gemini_key", "cookie",
     })
+    # GET 侧脱敏用的哨兵；POST 侧收到该值表示"未改动",不覆盖已存凭据。
+    _MASKED_VALUE = "***"
 
     def _is_sensitive_key(self, key: str) -> bool:
         lower = key.lower()

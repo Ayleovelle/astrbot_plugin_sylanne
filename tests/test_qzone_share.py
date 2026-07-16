@@ -1119,6 +1119,45 @@ def test_auto_publish_definite_failure_still_falls_back_to_review():
     assert QZ.REASON_AWAITING_CONFIRM in reasons
 
 
+def test_concurrent_publishers_serialized_by_cap_race_lock():
+    """红线闸 cap-race:两条发布协程并发时,共享 publish 锁序列化"查帽→发布→记账",
+    daily_max=1 下只允许一条落库、不越帽。SlowResp 在读响应处真正让出事件循环,制造
+    check 与 record 之间的交错窗口——去掉锁则两条都在对方记账前过闸 → 会发 2 条。"""
+
+    class _SlowResp:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_a):
+            return False
+
+        async def text(self):
+            await asyncio.sleep(0)  # 让出事件循环,暴露 check→record 之间的窗口
+            return '_cb({"code":0,"tid":"t"})'
+
+    class _SlowSession:
+        def __init__(self):
+            self.calls = []
+
+        def post(self, url, headers=None, data=None, timeout=None):
+            self.calls.append(url)
+            return _SlowResp()
+
+    session = _SlowSession()
+    plugin = _Plugin(http_session=session, daily_max=1)  # daily_max=1
+
+    async def _both():
+        await asyncio.gather(
+            QZ._auto_publish(plugin, "草稿一", _life_event(), "priv:owner-1"),
+            QZ._auto_publish(plugin, "草稿二", _life_event(), "priv:owner-1"),
+        )
+
+    _run(_both())
+
+    assert len(session.calls) == 1  # 只有一条真发出去
+    assert plugin._qzone_audit.daily_count(time.time()) == 1  # 没越 daily_max=1
+
+
 def test_collect_memory_material_excludes_user_interaction_source_escalation_guard():
     """红线闸 #4 升级依赖硬闸：源自真实用户互动/第三方事实的记忆条目必被排除，不进说说素材。"""
     mem = _MemSystemDouble(l1=[

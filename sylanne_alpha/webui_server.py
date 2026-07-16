@@ -93,8 +93,8 @@ _csrf_token: str = ""
 # 线程安全锁：stdlib HTTP server 的多线程 handler 访问插件状态时使用
 _plugin_access_lock = threading.Lock()
 
-# S1/S2: 敏感配置键保护
-_SENSITIVE_KEYS = frozenset({"token", "password", "secret", "api_key", "access_token", "auth_token", "bearer", "credential"})
+# S1/S2: 敏感配置键保护（子串匹配；"cookie" 覆盖 sylanne_alpha_qzone_cookie 登录凭据）
+_SENSITIVE_KEYS = frozenset({"token", "password", "secret", "api_key", "access_token", "auth_token", "bearer", "credential", "cookie"})
 
 
 def _is_sensitive_key(key: str) -> bool:
@@ -4007,7 +4007,9 @@ class WebUILifecycle:
         webui_host = str(self._p._cfg("sylanne_webui_host", "127.0.0.1") or "127.0.0.1")
         webui_port = self._p._cfg_int("sylanne_webui_port", 2718)
         token = _ensure_token(self._p._config or {})
-        self._p.logger.info(f"Sylanne WebUI token: {token}")
+        # 不把 bearer token 明文写进日志(日志常被收集/转发/共享=凭据泄露);token 已由
+        # _ensure_token 持久化进配置,运维需要时从配置取。这里只记"已就绪 + 长度"。
+        self._p.logger.info("Sylanne WebUI auth token ready (redacted, %d chars)", len(token))
         try:
             start_webui_background(self._p, host=webui_host, port=webui_port)
             self._p.logger.info(

@@ -40,6 +40,7 @@ life_simulation.py 侧只做"是否满足白名单 + enabled + 分数门槛"的�
 
 from __future__ import annotations
 
+import asyncio
 import re
 import time
 import uuid
@@ -423,6 +424,23 @@ def _get_audit_state(plugin: Any) -> QzoneAuditState:
     return st
 
 
+def _get_publish_lock(plugin: Any) -> asyncio.Lock:
+    """单进程内串行化"查频率帽→await 发布→record_post"临界区的共享锁。
+
+    auto 发布(life_sim tick)与 owner 确认发布是两条独立协程,若各自"查帽→await
+    HTTP→记账"无锁交错,两者可能都在对方 record_post 之前通过频率闸 → 同日越 daily_max
+    (红线闸 cap-race)。两条路径都持这把锁,第二个进来时头一个已 record,重查即被帽住。
+    """
+    lock = getattr(plugin, "_qzone_publish_lock", None)
+    if lock is None:
+        lock = asyncio.Lock()
+        try:
+            plugin._qzone_publish_lock = lock
+        except Exception:  # pragma: no cover - 极端只读桩场景
+            pass
+    return lock
+
+
 def _request_audit_persist(plugin: Any) -> None:
     """off-path 落盘派发（不阻塞调用方），镜像 relationship_layer.request_persist。"""
     try:
@@ -666,45 +684,48 @@ async def _auto_publish(
         _request_audit_persist(plugin)
         return
     daily_max, weekly_max = _freq_caps(plugin)
-    fok, freason = frequency_gate_ok(audit, now, daily_max=daily_max, weekly_max=weekly_max)
-    if not fok:
-        audit.record("autopost", f"{REASON_REJECTED_FREQ}:{freason}", event.event_id)
-        _request_audit_persist(plugin)
-        return
-    ok_post, msg = await _do_publish(plugin, draft)
-    if ok_post:
-        audit.record_post(now)
-        audit.record("autopost", REASON_POSTED_AUTO, event.event_id)
-        _request_audit_persist(plugin)
-        logger.info("Sylanne qzone auto-posted (autonomy) event=%s", event.event_id)
-        return
-    # 结果未知(http_error:读响应超时/连接中断)——此时 POST 可能【已到达服务端、
-    # 说说其实已发布】。qzone 发布无幂等键,绝不能盲目回退成"可再确认发布"的草稿
-    # (否则 owner 一确认就发第二条 → 同日双发、越频率帽,红线闸 MINOR)。只记审计,
-    # 留待 owner 自查空间,不再自动重发。
-    if str(msg).startswith("http_error"):
-        # 把"可能已发"计入频率帽(record_post):既不回退入队(owner 确认不会造成同内容
-        # 第二次发),又避免同日后续候选因未记账而越 daily_max。宁可少发一条,不越帽。
-        audit.record_post(now)
-        audit.record("autopost", f"result_unknown:{msg}", event.event_id)
-        _request_audit_persist(plugin)
-        logger.warning(
-            "Sylanne qzone auto-post result UNKNOWN (%s); counted toward cap, NOT re-enqueuing "
-            "(avoid double-post)", msg
+    # cap-race 锁:"查帽→await 发布→record_post"必须相对 owner 确认路径原子,否则两条
+    # 协程可各自在对方记账前通过频率闸 → 同日越 daily_max。持锁跨 HTTP await 是有意的。
+    async with _get_publish_lock(plugin):
+        fok, freason = frequency_gate_ok(audit, now, daily_max=daily_max, weekly_max=weekly_max)
+        if not fok:
+            audit.record("autopost", f"{REASON_REJECTED_FREQ}:{freason}", event.event_id)
+            _request_audit_persist(plugin)
+            return
+        ok_post, msg = await _do_publish(plugin, draft)
+        if ok_post:
+            audit.record_post(now)
+            audit.record("autopost", REASON_POSTED_AUTO, event.event_id)
+            _request_audit_persist(plugin)
+            logger.info("Sylanne qzone auto-posted (autonomy) event=%s", event.event_id)
+            return
+        # 结果未知(http_error:读响应超时/连接中断)——此时 POST 可能【已到达服务端、
+        # 说说其实已发布】。qzone 发布无幂等键,绝不能盲目回退成"可再确认发布"的草稿
+        # (否则 owner 一确认就发第二条 → 同日双发、越频率帽,红线闸 MINOR)。只记审计,
+        # 留待 owner 自查空间,不再自动重发。
+        if str(msg).startswith("http_error"):
+            # 把"可能已发"计入频率帽(record_post):既不回退入队(owner 确认不会造成同内容
+            # 第二次发),又避免同日后续候选因未记账而越 daily_max。宁可少发一条,不越帽。
+            audit.record_post(now)
+            audit.record("autopost", f"result_unknown:{msg}", event.event_id)
+            _request_audit_persist(plugin)
+            logger.warning(
+                "Sylanne qzone auto-post result UNKNOWN (%s); counted toward cap, NOT re-enqueuing "
+                "(avoid double-post)", msg
+            )
+            return
+        # 确定失败(credentials_missing / http_session_unavailable / code!=0，即服务端明确
+        # 没发出去)→ 回退 owner 过目是安全的(没发过,不会双发),既不丢草稿,也让 owner
+        # 知道 cookie 过期等问题。回退入队本身失败也只是这次不发,不外抛。
+        audit.record("autopost", f"{REASON_FAILED}:{msg}", event.event_id)
+        queued = await _enqueue_owner_confirmation(plugin, draft, event, None, best_key)
+        audit.record(
+            "autopost", REASON_AWAITING_CONFIRM if queued else REASON_FAILED, event.event_id
         )
-        return
-    # 确定失败(credentials_missing / http_session_unavailable / code!=0，即服务端明确
-    # 没发出去)→ 回退 owner 过目是安全的(没发过,不会双发),既不丢草稿,也让 owner
-    # 知道 cookie 过期等问题。回退入队本身失败也只是这次不发,不外抛。
-    audit.record("autopost", f"{REASON_FAILED}:{msg}", event.event_id)
-    queued = await _enqueue_owner_confirmation(plugin, draft, event, None, best_key)
-    audit.record(
-        "autopost", REASON_AWAITING_CONFIRM if queued else REASON_FAILED, event.event_id
-    )
-    _request_audit_persist(plugin)
-    logger.info(
-        "Sylanne qzone auto-post definite-fail (%s), fell back to owner review", msg
-    )
+        _request_audit_persist(plugin)
+        logger.info(
+            "Sylanne qzone auto-post definite-fail (%s), fell back to owner review", msg
+        )
 
 
 async def handle_share_intent_candidate(
@@ -933,26 +954,34 @@ async def _finalize_command(plugin: Any, event: Any, *, do_post: bool):
     # 断言重贴在真正发布这一步之前，才是可靠的最后一道帽。
     audit = _get_audit_state(plugin)
     _dmax, _wmax = _freq_caps(plugin)
-    _freq_ok, _freq_reason = frequency_gate_ok(
-        audit, now, daily_max=_dmax, weekly_max=_wmax
-    )
-    if not _freq_ok:
-        audit.record(
-            "confirm", f"{REASON_REJECTED_FREQ}:{_freq_reason}", entry.get("event_id", "")
+    event_id = entry.get("event_id", "")
+    # cap-race 锁:与 auto 发布路径共用,序列化"查帽→发布→记账"。不在持锁期间 yield
+    # (yield 会把锁的持有跨到消息发送/生成器消费之外),故锁内定结果、出锁再回话。
+    async with _get_publish_lock(plugin):
+        _freq_ok, _freq_reason = frequency_gate_ok(
+            audit, now, daily_max=_dmax, weekly_max=_wmax
         )
-        _request_audit_persist(plugin)
-        yield "今天/这周说说发得有点多了，这条先压一压，改天再发。"
-        return
+        if not _freq_ok:
+            audit.record("confirm", f"{REASON_REJECTED_FREQ}:{_freq_reason}", event_id)
+            _request_audit_persist(plugin)
+            outcome: tuple[str, str] = ("freq", "")
+        else:
+            ok_post, msg = await _do_publish(plugin, entry.get("draft", ""))
+            if ok_post:
+                audit.record_post(now)
+                audit.record("confirm", REASON_POSTED, event_id)
+                _request_audit_persist(plugin)
+                outcome = ("ok", "")
+            else:
+                _audit_record(plugin, "confirm", f"{REASON_FAILED}:{msg}", event_id)
+                outcome = ("fail", msg)
 
-    ok_post, msg = await _do_publish(plugin, entry.get("draft", ""))
-    if ok_post:
-        audit.record_post(now)
-        audit.record("confirm", REASON_POSTED, entry.get("event_id", ""))
-        _request_audit_persist(plugin)
+    if outcome[0] == "freq":
+        yield "今天/这周说说发得有点多了，这条先压一压，改天再发。"
+    elif outcome[0] == "ok":
         yield "发出去啦。"
     else:
-        _audit_record(plugin, "confirm", f"{REASON_FAILED}:{msg}", entry.get("event_id", ""))
-        yield f"没发成功（{msg}），可能是 cookie 过期了，去 WebUI 更新一下吧。"
+        yield f"没发成功（{outcome[1]}），可能是 cookie 过期了，去 WebUI 更新一下吧。"
 
 
 async def _do_publish(plugin: Any, draft: str) -> tuple[bool, str]:
