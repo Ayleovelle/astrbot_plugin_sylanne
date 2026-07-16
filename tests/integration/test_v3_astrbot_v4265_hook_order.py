@@ -2,14 +2,16 @@ from __future__ import annotations
 
 import hashlib
 import os
-from dataclasses import replace
-from enum import Enum
+from dataclasses import dataclass, replace
 from pathlib import Path
 
 import astrbot
 import pytest
 
 from sylanne_alpha.v2core.shadow_snapshot import V2ResponseCandidateV1
+from sylanne_alpha.v3bridge.actual_action import ActualAction, project_actual_action
+from sylanne_alpha.v3bridge.session_identity import SessionIdentityKey
+from sylanne_alpha.v3bridge.turn_registry import TurnRegistry
 
 
 ASTRBOT_VERSION = "4.26.5"
@@ -24,12 +26,13 @@ PINNED_SHA256 = {
 }
 
 
-class _ActualEvidence(Enum):
-    SPEAK = "SPEAK"
-    HOLD = "HOLD"
-    REACH = "REACH"
-    UNKNOWN = "UNKNOWN"
-    UNMATCHED_RESPONSE = "UNMATCHED_RESPONSE"
+@dataclass(frozen=True, slots=True)
+class _HookCaseResult:
+    actual_action: ActualAction
+    captures: int
+    terminal_attempts: int
+    accepted_terminal_claims: int
+    projected_call_count: int
 
 
 def _astrbot_root() -> Path:
@@ -47,26 +50,6 @@ def _sha256(relative: str) -> str:
     return hashlib.sha256((_astrbot_root() / relative).read_bytes()).hexdigest()
 
 
-def _project_structured_evidence(candidate: V2ResponseCandidateV1) -> _ActualEvidence:
-    if not candidate.correlation_proven or candidate.duplicate_terminal_claim:
-        return _ActualEvidence.UNMATCHED_RESPONSE
-    if candidate.route_kind == "PROACTIVE":
-        return (
-            _ActualEvidence.REACH
-            if candidate.proactive_dispatched is True
-            else _ActualEvidence.UNKNOWN
-        )
-    if candidate.route_kind == "SILENT":
-        return _ActualEvidence.HOLD
-    if candidate.route_kind == "SEGMENTED_TEXT":
-        return (
-            _ActualEvidence.SPEAK
-            if candidate.all_segments_succeeded is True
-            else _ActualEvidence.UNKNOWN
-        )
-    return _ActualEvidence.UNKNOWN
-
-
 def _ordinary_candidate() -> V2ResponseCandidateV1:
     return V2ResponseCandidateV1(
         route_kind="ORDINARY_TEXT",
@@ -77,7 +60,7 @@ def _ordinary_candidate() -> V2ResponseCandidateV1:
     )
 
 
-def _run_hook_case(case: str) -> _ActualEvidence:
+def _candidate_for_case(case: str) -> V2ResponseCandidateV1:
     candidate = _ordinary_candidate()
     if case == "ordinary":
         pass
@@ -97,7 +80,7 @@ def _run_hook_case(case: str) -> _ActualEvidence:
     elif case == "tool_loop":
         candidate = replace(candidate, route_kind="TOOL", after_message_sent=False)
     elif case == "repeated_provider_response":
-        candidate = replace(candidate, duplicate_terminal_claim=True)
+        pass
     elif case == "streaming":
         candidate = replace(candidate, route_kind="STREAMING", after_message_sent=False)
     elif case == "media":
@@ -148,16 +131,52 @@ def _run_hook_case(case: str) -> _ActualEvidence:
         )
     else:
         raise AssertionError(f"unknown hook case: {case}")
-    return _project_structured_evidence(candidate)
+    return candidate
 
 
-def _claim_counts(case: str) -> tuple[int, int, int]:
-    """Frozen Task 2 matrix; Task 3 replaces this with the real bounded registry."""
-    if case == "unaddressed_group":
-        return (0, 1, 0)
-    if case == "repeated_provider_response":
-        return (1, 2, 1)
-    return (1, 1, 1)
+def _run_hook_case(case: str) -> _HookCaseResult:
+    candidate = _candidate_for_case(case)
+    identity = SessionIdentityKey(key_id="integration-v1", secret=b"identity" * 4)
+    registry = TurnRegistry(
+        plugin_instance_id="integration-plugin",
+        correlation_secret=b"correlation" * 4,
+        writer_epoch=1,
+    )
+    origin = "" if case == "unaddressed_group" else "umo-1"
+    session_ref = identity.session_ref("qq", origin, session_generation=0)
+    handle = registry.capture_request(
+        session_ref=session_ref,
+        bridge_request_nonce="request-1",
+        request_attempt=0,
+        platform_id="qq",
+        unified_msg_origin=origin,
+        message_id="message-1",
+        now=1.0,
+    )
+    terminal_attempts = 2 if case == "repeated_provider_response" else 1
+    actual_action = ActualAction.UNMATCHED_RESPONSE
+    projected_call_count = 0
+    for attempt in range(terminal_attempts):
+        accepted = registry.claim_response(
+            handle=handle,
+            platform_id="qq",
+            unified_msg_origin=origin,
+            message_id="message-1",
+            now=2.0 + attempt,
+        )
+        if accepted:
+            actual_action = project_actual_action(candidate)
+            projected_call_count += 1
+        else:
+            actual_action = ActualAction.UNMATCHED_RESPONSE
+    stats = registry.stats()
+    return _HookCaseResult(
+        actual_action=actual_action,
+        captures=stats.captures,
+        terminal_attempts=stats.terminal_attempts,
+        accepted_terminal_claims=stats.accepted_terminal_claims,
+        projected_call_count=projected_call_count,
+    )
 
 
 def test_real_astrbot_source_is_the_pinned_v4265_flow() -> None:
@@ -198,36 +217,52 @@ def test_real_source_orders_request_response_decorate_and_delivery_hooks() -> No
 @pytest.mark.parametrize(
     ("case", "expected"),
     [
-        ("ordinary", _ActualEvidence.UNKNOWN),
-        ("silent", _ActualEvidence.HOLD),
-        ("fallback", _ActualEvidence.UNKNOWN),
-        ("tool_loop", _ActualEvidence.UNKNOWN),
-        ("repeated_provider_response", _ActualEvidence.UNMATCHED_RESPONSE),
-        ("streaming", _ActualEvidence.UNKNOWN),
-        ("media", _ActualEvidence.UNKNOWN),
-        ("provider_exception", _ActualEvidence.UNKNOWN),
-        ("unaddressed_group", _ActualEvidence.UNMATCHED_RESPONSE),
-        ("partial_send", _ActualEvidence.UNKNOWN),
-        ("cancelled_segmented_send", _ActualEvidence.UNKNOWN),
-        ("segmented_success", _ActualEvidence.SPEAK),
-        ("proactive_dispatched", _ActualEvidence.REACH),
+        ("ordinary", ActualAction.UNKNOWN),
+        ("silent", ActualAction.HOLD),
+        ("fallback", ActualAction.UNKNOWN),
+        ("tool_loop", ActualAction.UNKNOWN),
+        ("repeated_provider_response", ActualAction.UNMATCHED_RESPONSE),
+        ("streaming", ActualAction.UNKNOWN),
+        ("media", ActualAction.UNKNOWN),
+        ("provider_exception", ActualAction.UNKNOWN),
+        ("unaddressed_group", ActualAction.UNMATCHED_RESPONSE),
+        ("partial_send", ActualAction.UNKNOWN),
+        ("cancelled_segmented_send", ActualAction.UNKNOWN),
+        ("segmented_success", ActualAction.SPEAK),
+        ("proactive_dispatched", ActualAction.REACH),
     ],
 )
 def test_hook_matrix_uses_only_structured_terminal_evidence(
     case: str,
-    expected: _ActualEvidence,
+    expected: ActualAction,
 ) -> None:
-    assert _run_hook_case(case) is expected
-    captures, terminal_attempts, accepted_terminal_claims = _claim_counts(case)
-    assert captures in (0, 1)
-    assert accepted_terminal_claims <= captures
-    assert accepted_terminal_claims <= 1
+    result = _run_hook_case(case)
+    assert result.actual_action is expected
+    assert result.captures in (0, 1)
+    assert result.accepted_terminal_claims <= result.captures
+    assert result.accepted_terminal_claims <= 1
+    assert result.projected_call_count == result.accepted_terminal_claims
     if case == "unaddressed_group":
-        assert (captures, terminal_attempts, accepted_terminal_claims) == (0, 1, 0)
+        assert (
+            result.captures,
+            result.terminal_attempts,
+            result.accepted_terminal_claims,
+            result.projected_call_count,
+        ) == (0, 1, 0, 0)
     elif case == "repeated_provider_response":
-        assert (captures, terminal_attempts, accepted_terminal_claims) == (1, 2, 1)
+        assert (
+            result.captures,
+            result.terminal_attempts,
+            result.accepted_terminal_claims,
+            result.projected_call_count,
+        ) == (1, 2, 1, 1)
     else:
-        assert (captures, terminal_attempts, accepted_terminal_claims) == (1, 1, 1)
+        assert (
+            result.captures,
+            result.terminal_attempts,
+            result.accepted_terminal_claims,
+            result.projected_call_count,
+        ) == (1, 1, 1, 1)
 
 
 def test_after_message_sent_is_attempt_evidence_not_send_success() -> None:
@@ -239,7 +274,7 @@ def test_after_message_sent_is_attempt_evidence_not_send_success() -> None:
 
     ordinary = _ordinary_candidate()
     assert ordinary.after_message_sent is True
-    assert _project_structured_evidence(ordinary) is _ActualEvidence.UNKNOWN
+    assert project_actual_action(ordinary) is ActualAction.UNKNOWN
 
 
 def test_real_plugin_lock_delegates_to_session_context_production_lock() -> None:
