@@ -139,6 +139,15 @@ OFF_DIAGONAL_SCALES = (1.0, 5.0 / 6.0, 0.5)
 U_DIAGONALS = (0.80, 0.75, 0.65)
 DYNAMICS_STEP_SIZES = (0.50, 0.12, 0.02)
 
+# Design section 11.2 versioned decision-state blend: the eight-dimensional
+# decision state read by downstream inference is
+# ``s = clip(0.50*fast + 0.30*mid + 0.20*slow, -1, 1)``.  It is kept here as the
+# single source of truth (used by ``features.decision_state``) but is *not*
+# folded into ``build_formula_manifest`` so ``FORMULA_DIGEST`` remains stable;
+# the inference task (section 11) that owns this blend may add it to the manifest
+# with an intentional digest bump.
+DECISION_STATE_BLEND = (0.50, 0.30, 0.20)
+
 
 def _self_matrix(diagonal: float, off_diagonal_scale: float) -> tuple[tuple[float, ...], ...]:
     triples = tuple(
