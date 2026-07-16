@@ -12,7 +12,13 @@ from .contracts import (
     TurnSequence,
 )
 from .effects.models import EffectBundle, V3MetricEffect, V3StateEffect, V3TraceEffect
-from .state.models import PendingOutcome, V3State
+from .state.models import (
+    ActionBeliefs,
+    ExperienceRecord,
+    PendingOutcome,
+    SnnState,
+    V3State,
+)
 
 
 _install_declared_types(
@@ -28,6 +34,9 @@ _install_declared_types(
         V3MetricEffect,
         EffectBundle,
         PendingOutcome,
+        SnnState,
+        ActionBeliefs,
+        ExperienceRecord,
         V3State,
     ),
     enum_types=(Action, TurnContextClass),

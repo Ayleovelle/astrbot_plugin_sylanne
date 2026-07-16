@@ -1,5 +1,17 @@
-"""Frozen v3 cognitive state models."""
+"""Frozen v3 cognitive state models, seeding, and canonical codec."""
 
-from .models import PendingOutcome, V3State
+from .models import (
+    ActionBeliefs,
+    ExperienceRecord,
+    PendingOutcome,
+    SnnState,
+    V3State,
+)
 
-__all__ = ["PendingOutcome", "V3State"]
+__all__ = [
+    "ActionBeliefs",
+    "ExperienceRecord",
+    "PendingOutcome",
+    "SnnState",
+    "V3State",
+]
