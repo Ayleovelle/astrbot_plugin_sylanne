@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import struct
-from math import inf, isfinite, log, sqrt
+from math import exp, floor, inf, isfinite, log, sqrt
 from types import MappingProxyType
 
 from .canonical import canonical_json_bytes
@@ -240,6 +240,101 @@ SNN_SUMMARY_DEFINITION = (
     "latency[8+p]=0 if no spike else 1-min(first_latency_i)/(K-1)",
     "missing channels emit no spikes",
 )
+
+
+# --------------------------------------------------------------------------- #
+# Section 8 spiking-path numeric constants (design 8.1 population/time coding,
+# 8.2 LIF dynamics, 8.3 reward-gated STDP).
+#
+# These are the single formula-v1 source for the spiking modules and are never
+# hard-coded elsewhere.  Exactly like ``DECISION_STATE_BLEND`` above, they are
+# intentionally *not* folded into ``build_formula_manifest``, so ``FORMULA_DIGEST``
+# stays byte-stable at the value locked by Task 1's golden test.  The reservoir's
+# identity-defining constants already in the manifest (population size, E/I split,
+# the four ``tau`` time constants, and the deterministic recurrent + input
+# topology with its initial weights) fix the network's structure; these are the
+# behavioural coding/LIF/STDP scalars, which the owning evaluation task may fold
+# into the manifest later with an intentional digest bump when the gate manifest
+# is frozen.  The population coding uses 3 units per channel, so the 36 channels
+# produce exactly ``POPULATION_INPUT_COUNT`` (108) inputs ordered channel-major /
+# center-inner: ``input_index = 3*channel + center_rank`` (center ranks 0,1,2).
+# --------------------------------------------------------------------------- #
+
+# 8.1 population + time coding
+SNN_CODING_CENTERS = (0.0, 0.5, 1.0)
+SNN_CODING_SIGMA = 0.25
+SNN_CODING_SPIKE_Q_FLOOR = 0.08
+SNN_CODING_SECOND_SPIKE_Q = 0.75
+SNN_CODING_UNITS_PER_CHANNEL = 3
+
+# 8.2 LIF dynamics
+SNN_INPUT_CURRENT_CLIP = (-3.0, 3.0)
+SNN_VOLTAGE_CLIP = (-2.0, 2.0)
+SNN_RESET_VOLTAGE = 0.0
+SNN_THRESHOLD_ADAPT_RATE = 0.01
+SNN_THRESHOLD_TARGET_RATE = 0.08
+SNN_THRESHOLD_BOUNDS = (0.65, 1.35)
+SNN_EXCITATORY_WEIGHT_BOUNDS = (0.0, 0.35)
+SNN_INHIBITORY_WEIGHT_BOUNDS = (-0.70, 0.0)
+SNN_INCOMING_L1_LIMIT = RECURRENT_FIXED_INCOMING_L1_LIMIT  # 1.2, one shared constant
+SNN_PRE_POST_TRACE_CLIP = (0.0, 3.0)
+SNN_ELIGIBILITY_CLIP = (-3.0, 3.0)
+
+# 8.3 reward-gated STDP
+SNN_STDP_ANTI_HEBBIAN = 1.05
+SNN_STDP_LEARNING_RATE = 0.002
+SNN_STDP_HOMEOSTASIS = 1e-5
+SNN_STDP_INITIAL_WEIGHT = RECURRENT_EE_WEIGHT  # W0 for every plastic E-to-E edge (0.06)
+SNN_BASELINE_DECAY = 0.95
+SNN_BASELINE_LEARN = 0.05
+SNN_BASELINE_BOUNDS = (-1.0, 1.0)
+
+
+def snn_horizon_decays(ticks: int) -> tuple[float, float, float, float, int]:
+    """Return ``(beta, pre_decay, post_decay, elig_decay, refractory_k)`` for ``K`` ticks.
+
+    Each decay resamples the same normalized horizon: ``decay_K = exp(-(1/K)/tau)``
+    for the versioned horizon-level time constants, so ``decay_K ** K = exp(-1/tau)``
+    is invariant across the allowed 16/24/32 profiles.  ``beta_24`` equals 0.90 by
+    construction.  ``refractory_k = max(1, round(K/12))``.
+    """
+
+    if type(ticks) is not int or isinstance(ticks, bool) or ticks not in SNN_ALLOWED_TICKS:
+        raise ValueError("ticks must be one of the allowed v1 tick counts")
+    dt = 1.0 / ticks
+    return (
+        exp(-dt / TAU_MEMBRANE),
+        exp(-dt / TAU_PRE),
+        exp(-dt / TAU_POST),
+        exp(-dt / TAU_ELIGIBILITY),
+        max(1, round(ticks / 12)),
+    )
+
+
+def spike_latency(q: float, ticks: int) -> int:
+    """First-spike latency ``1 + floor((K-2)*(1-q))`` for population-coding response ``q``."""
+
+    return 1 + floor((ticks - 2) * (1.0 - q))
+
+
+def plastic_synapses() -> tuple[tuple[int, int], ...]:
+    """Canonical ``(post, pre)`` order of the plastic excitatory-to-excitatory synapses.
+
+    The enumeration is post-major and, within a post, follows the deterministic
+    recurrent topology order.  It is the single canonical ``synapse_id`` order used
+    by both the packed state codec and the incoming-budget projection, so the two
+    can never disagree.
+    """
+
+    out: list[tuple[int, int]] = []
+    for post in range(SNN_EXCITATORY):
+        for pre in RECURRENT_TOPOLOGY[post]:
+            if pre < SNN_EXCITATORY:
+                out.append((post, pre))
+    return tuple(out)
+
+
+PLASTIC_SYNAPSES = plastic_synapses()
 
 PROPOSAL_IDS = (
     "body-speak",
