@@ -260,7 +260,7 @@ Seed derivation matches the design exactly. `episode_seed` is the first 128 bits
 
 Two keys have separate lifetimes. A permission-restricted ignored `artifacts/v3/evidence/evaluation-link.key` is created once for the evaluation campaign and retained through G4; it length-frames privacy scope/session identity to produce a stable evaluation-group reference and split across G1/G3. Every export uses a separate fresh source-digest key, records only its digest, and destroys it after freeze. State, learning, shuffling, and bootstrap resampling reset/group by episode reference, while train/dev/test exclusion is by stable evaluation-group reference. Raw text, raw IDs, prompts, replies, memory strings, plain source hashes, secrets, and unhashed source paths are forbidden from both tracked and ignored encoded datasets.
 
-## Task 1: Contracts, Formula Manifest, Import Firewall, And Budget
+## Task 1: Contracts, Formula Manifest, Import Firewall, And Budget ✅ DONE (62617f9)
 
 **Files:** Create `sylanne_alpha/v3core/{__init__.py,canonical.py,contracts.py,formula_v1.py}`, `sylanne_alpha/v3core/effects/{__init__.py,models.py}`, `sylanne_alpha/v3core/state/{__init__.py,models.py}`, `sylanne_alpha/v3bridge/{__init__.py,build_flags.py,limits.py,models.py}`, `tests/test_v3_contracts_boundaries.py`.
 
@@ -285,7 +285,7 @@ def test_v3core_import_firewall() -> None:
 - [ ] Run the test plus `python -m ruff check sylanne_alpha/v3core sylanne_alpha/v3bridge tests/test_v3_contracts_boundaries.py`.
 - [ ] Commit locally: `git commit -m "feat(v3): freeze core contracts and formula manifest"`.
 
-## Task 2: Hook/Correlation Matrix And Frozen V2 Exporters
+## Task 2: Hook/Correlation Matrix And Frozen V2 Exporters ✅ DONE (9e23819)
 
 **Files:** Create `sylanne_alpha/v2core/shadow_snapshot.py`, `tests/integration/test_v3_astrbot_v4265_hook_order.py`, `tests/test_v3_seed_snapshot.py`. Do not wire production hooks in this task.
 
@@ -308,7 +308,7 @@ def test_hook_matrix_uses_only_structured_terminal_evidence(case: str, expected:
 - [ ] Run both tests and existing `tests/test_v2core_bridge.py`, `tests/test_context_integrity_silent_history.py`, `tests/test_tool_call_pairing.py`.
 - [ ] Commit locally: `git commit -m "feat(v3): expose frozen v2 shadow facts"`.
 
-## Task 3: Session Identity, Turn Registry, And Sequence Ledger
+## Task 3: Session Identity, Turn Registry, And Sequence Ledger ✅ DONE (2d2bcae)
 
 **Files:** Create `sylanne_alpha/v3bridge/session_identity.py`, `turn_registry.py`, `actual_action.py`, `tests/test_v3_session_identity.py`, `tests/test_v3_turn_registry.py`.
 
@@ -318,7 +318,7 @@ def test_hook_matrix_uses_only_structured_terminal_evidence(case: str, expected:
 - [ ] Run `python -m pytest -q tests/test_v3_session_identity.py tests/test_v3_turn_registry.py`.
 - [ ] Commit locally: `git commit -m "feat(v3): add fenced turn identity and registry"`.
 
-## Task 4: Windows Repository Durability And CAS/ABA
+## Task 4: Windows Repository Durability And CAS/ABA ✅ DONE (6ebf2d3; stdlib fcntl/msvcrt lock instead of portalocker — tested equivalent)
 
 **Files:** Create `sylanne_alpha/v3bridge/_state_repository.py`, `tests/test_v3_repository_cas.py`, `tests/test_v3_repository_multiprocess.py`; modify `requirements.txt`.
 
