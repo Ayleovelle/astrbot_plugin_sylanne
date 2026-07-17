@@ -486,8 +486,14 @@ class ShadowSupervisor:
         trace.append("gather_tracked_tasks")
 
         # 9. shut down the private executor; do not return until every worker exits.
+        #    ``shutdown(wait=True)`` joins worker threads, so calling it directly here
+        #    would block the whole event loop until an orphaned (timed-out) compute
+        #    thread finishes — v2's own teardown runs after ours, so a wedged core
+        #    would wedge v2.  Hand the join to a helper thread instead: the await still
+        #    does not return until every v3 worker has exited (plan Task 12), but the
+        #    loop stays live meanwhile and a caller-side timeout can still fire.
         if self._executor is not None:
-            self._executor.shutdown(wait=True, cancel_futures=True)
+            await asyncio.to_thread(self._executor.shutdown, wait=True, cancel_futures=True)
         trace.append("executor_shutdown")
 
         # 10. clear the supervisor-owned registries.

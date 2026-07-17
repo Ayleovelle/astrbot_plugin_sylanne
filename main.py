@@ -50,6 +50,7 @@ import collections  # noqa: E402
 import contextvars  # noqa: E402
 import importlib  # noqa: E402
 import json  # noqa: E402
+import math  # noqa: E402
 import time  # noqa: E402
 from datetime import timedelta, timezone  # noqa: E402
 from pathlib import Path  # noqa: E402
@@ -409,6 +410,364 @@ def _model_function_tool(**kwargs: Any):
     return filter.llm_tool(**kwargs)
 
 
+# ---------------------------------------------------------------------------
+# v3 shadow：构建期开关的隔离影子（plan Task 13 / design 4.3、14.1、14.2、16.1）
+#
+# 红线（违反即回退）：
+#   - 默认关（build_flags.V3_SHADOW_ENABLED=False，只有 grey 打包才翻）；开着也只观察，
+#     绝不改 v2 的 reply/prompt/history/memory/body，绝不多发一次 LLM/tool 调用。
+#   - 绝不把 v3 身份写进 event.extra；v3 的 future/task 绝不进 plugin._background_tasks
+#     （那份列表的关停顺序归 legacy/v2 所有）。
+#   - 每个异常封死在 v3 内，绝不外泄进 v2；v3 fail 时 v2 照常完成。
+# 本 facade 只做「宿主边界 + 惰性所有权」：__init__ 纯构造零 IO，仓库/线程池全部推迟到
+# initialize()。v3bridge 一律函数内惰性 import（对齐本文件 v2core 的既有写法），import
+# 失败只 fail-close v3。
+# ---------------------------------------------------------------------------
+
+_V3_MAX_PENDING_TURNS = 256
+_V3_SETTLED_HISTORY = 64
+#: v3 关停的硬上界。v3 卡住绝不能拖住 v2 的收尾（红线：v3 fail → v2 照常完成）。
+V3_SHADOW_TERMINATE_TIMEOUT_S = 10.0
+
+
+class _V3PendingTurn:
+    """一轮已捕获、待终端结算的不可变宿主事实。"""
+
+    __slots__ = (
+        "handle",
+        "platform_id",
+        "unified_msg_origin",
+        "message_id",
+        "observation",
+        "context",
+        "token",
+    )
+
+    def __init__(
+        self,
+        *,
+        handle: Any,
+        platform_id: str,
+        unified_msg_origin: str,
+        message_id: str,
+        observation: Any,
+        context: Any,
+        token: int,
+    ) -> None:
+        self.handle = handle
+        self.platform_id = platform_id
+        self.unified_msg_origin = unified_msg_origin
+        self.message_id = message_id
+        self.observation = observation
+        self.context = context
+        # 单调递增的栅栏令牌：同一 session_key 上后一轮会顶掉前一轮，令牌让"迟到的
+        # 终端回调"能认出自己要结算的那轮已经不在了，从而放手而不是错结下一轮。
+        self.token = token
+
+
+class _V3ShadowFacade:
+    """插件持有的唯一 v3 对象；构造零 IO，全部失败模式 fail-close v3。"""
+
+    def __init__(self) -> None:
+        self.enabled = False
+        try:
+            from sylanne_alpha.v3bridge.build_flags import V3_SHADOW_ENABLED
+
+            self.enabled = bool(V3_SHADOW_ENABLED)
+        except Exception:  # noqa: BLE001 - v3 缺失/损坏一律当关闭，绝不影响 v2 装载
+            self.enabled = False
+        self.runtime: Any = None
+        self.counters: Any = None
+        self.accepting = False
+        self._identity: Any = None
+        self._pending: "collections.OrderedDict[str, _V3PendingTurn]" = collections.OrderedDict()
+        self._next_token = 0
+        self.settled_actions: collections.deque = collections.deque(maxlen=_V3_SETTLED_HISTORY)
+        # 每进程一次性随机身份/密钥：只活在内存，绝不落盘、绝不进 trace。
+        self._instance_id = f"sylanne-v3-{os.urandom(8).hex()}"
+        self._correlation_secret = os.urandom(32)
+        self._identity_secret = os.urandom(32)
+
+    # -- 生命周期 ---------------------------------------------------------
+
+    async def initialize(self, *, root: Any, supervisor_kwargs: dict | None = None) -> bool:
+        """先 acquire epoch 再起 worker；任何失败只 fail-close v3。"""
+
+        if not self.enabled or self.runtime is not None:
+            return False
+        runtime = None
+        try:
+            from sylanne_alpha.v3bridge.integration import V3ShadowRuntime
+            from sylanne_alpha.v3bridge.session_identity import SessionIdentityKey
+
+            runtime = V3ShadowRuntime(
+                root=root,
+                plugin_instance_id=self._instance_id,
+                correlation_secret=self._correlation_secret,
+                **(supervisor_kwargs or {}),
+            )
+            # V3ShadowRuntime.initialize() 内部就是「先 committer.acquire_epoch()，
+            # 再造 registry/supervisor 起 worker」的顺序，不要在这里重排。
+            await runtime.initialize()
+            identity = SessionIdentityKey(
+                key_id=self._instance_id,
+                secret=self._identity_secret,
+            )
+        except Exception as exc:  # noqa: BLE001 - v3 起不来只关 v3，v2 照常
+            logger.warning(f"Sylanne v3 shadow disabled (initialize failed): {exc}")
+            if runtime is not None:
+                try:
+                    await runtime.terminate()
+                except Exception:  # noqa: BLE001
+                    pass
+            self.runtime = None
+            self.counters = None
+            self.enabled = False
+            self.accepting = False
+            return False
+        self.runtime = runtime
+        self.counters = runtime.counters
+        self._identity = identity
+        self.accepting = True
+        return True
+
+    def begin_shutdown(self) -> None:
+        """同步关闸：v2 的收尾 save 开始 drain 之前，先断掉新的 v3 准入。"""
+
+        self.accepting = False
+
+    async def terminate(self, *, timeout: float = V3_SHADOW_TERMINATE_TIMEOUT_S) -> None:
+        """有界关停：v3 关不干净也绝不能拖住 v2 的收尾。
+
+        红线「v3 fail → v2 照常完成」里的 fail 不只是抛异常，还包括【卡住】——只 catch
+        Exception 挡不住 hang。故这里再套一层 wait_for：超时就放手，把 v3 的残余留给
+        进程退出收，v2 继续做它的 task 取消/落盘/关 WebUI。
+        """
+
+        self.accepting = False
+        runtime = self.runtime
+        self.runtime = None
+        self._pending.clear()
+        if runtime is None:
+            return
+        try:
+            await asyncio.wait_for(runtime.terminate(), timeout=timeout)
+        except asyncio.TimeoutError:
+            logger.warning(
+                f"Sylanne v3 shadow terminate timed out after {timeout}s; "
+                "v2 关停继续（v3 残余线程留到进程结束才回收）"
+            )
+        except Exception as exc:  # noqa: BLE001 - v3 关停失败绝不阻断 v2 关停
+            logger.warning(f"Sylanne v3 shadow terminate failed: {exc}")
+
+    # -- 请求边界（design 14.1）-------------------------------------------
+
+    def capture_request(
+        self,
+        *,
+        session_key: str,
+        platform_id: Any,
+        unified_msg_origin: Any,
+        message_id: Any,
+        text_length: int,
+        history_present: bool,
+        gap_seconds: Any,
+        body: Any,
+        addressed: bool = True,
+        proactive: bool = False,
+    ) -> None:
+        """冻结一轮的公开输入事实；不推进 v3 状态，不阻塞 v2。
+
+        context 必须在【捕获时】就定对，不能事后按终端证据倒推：主动轮走的也是大饼的
+        LLM 管线、同样触发 on_llm_request，若一律冻成 ADDRESSED，影子学到的就是
+        「ADDRESSED ⇒ REACH」这条假规律——群里没点名的环境轮同理会被误标成点名。
+        """
+
+        if not self.accepting or self.runtime is None or self._identity is None:
+            return
+        try:
+            from sylanne_alpha.v3bridge.actual_action import ActualAction
+            from sylanne_alpha.v3bridge.observation_adapter import build_observation_facts
+            from sylanne_alpha.v3core.contracts import TurnContextClass
+            from sylanne_alpha.v2core.shadow_snapshot import V2TurnObservationSnapshotV1
+
+            platform = _v3_text(platform_id)
+            origin = _v3_text(unified_msg_origin)
+            message = _v3_text(message_id)
+            if not platform or not origin or not message:
+                return
+            session_ref = self._identity.session_ref(platform, origin, session_generation=0)
+            if session_ref is None:
+                return
+            # 三个上下文位互斥（快照自己会校验），且必须与 context class 一致。
+            is_proactive = bool(proactive)
+            is_addressed = bool(addressed) and not is_proactive
+            if is_proactive:
+                context = TurnContextClass.PROACTIVE
+            elif is_addressed:
+                context = TurnContextClass.ADDRESSED
+            else:
+                context = TurnContextClass.AMBIENT
+            snapshot = V2TurnObservationSnapshotV1(
+                body_warmth=_v3_finite(body, "warmth"),
+                body_tension=_v3_finite(body, "tension"),
+                text_length=max(0, int(text_length)),
+                addressed=is_addressed,
+                idle=False,
+                proactive=is_proactive,
+                history_present=bool(history_present),
+                gap_seconds=_v3_gap(gap_seconds),
+            )
+            facts = build_observation_facts(
+                snapshot,
+                context,
+                ActualAction.UNKNOWN,
+            )
+            handle = self.runtime.capture_request(
+                session_ref=session_ref,
+                bridge_request_nonce=os.urandom(16).hex(),
+                request_attempt=0,
+                platform_id=platform,
+                unified_msg_origin=origin,
+                message_id=message,
+            )
+            if handle is None:
+                return
+            self._next_token += 1
+            self._pending[session_key] = _V3PendingTurn(
+                handle=handle,
+                platform_id=platform,
+                unified_msg_origin=origin,
+                message_id=message,
+                observation=(facts.raw_values, facts.previous_action),
+                context=context,
+                token=self._next_token,
+            )
+            while len(self._pending) > _V3_MAX_PENDING_TURNS:
+                self._pending.popitem(last=False)
+        except Exception as exc:  # noqa: BLE001 - 捕获失败只丢这一轮影子
+            logger.debug(f"Sylanne v3 shadow capture skipped: {exc}")
+
+    # -- 响应边界（design 14.2）-------------------------------------------
+
+    def settle(
+        self,
+        *,
+        session_key: str,
+        route_kind: str,
+        reply_kind: str | None = None,
+        part_count: int = 0,
+        after_message_sent: bool = False,
+        all_segments_succeeded: bool | None = None,
+        proactive_dispatched: bool | None = None,
+        token: int | None = None,
+    ) -> None:
+        """认领这一轮的终端证据并做一次非阻塞 offer；一轮只结算一次。
+
+        token 是可选的栅栏：调用方在【投递开始时】取一次 pending_token()，投递结束
+        （成功/失败/取消，可能是好几秒后）再带着它来结算。期间若同一 session_key 上
+        已经换成了下一轮，令牌对不上就放手——绝不把下一轮的 handle 认领成本轮的结果，
+        也就不会把下一轮真正的终端证据挤掉。不传 token 则退化为"结算当前那轮"。
+        """
+
+        if self.runtime is None:
+            return
+        pending = self._pending.get(session_key)
+        if pending is None:
+            return  # 没捕获过 / 已结算过 → 重复终端回调天然只算一次
+        if token is not None and pending.token != token:
+            return  # 迟到的终端回调：它那轮早已不在，这轮不归它
+        del self._pending[session_key]
+        if not self.accepting:
+            return
+        try:
+            from sylanne_alpha.v2core.shadow_snapshot import V2ResponseCandidateV1
+            from sylanne_alpha.v3bridge.actual_action import project_actual_action
+
+            candidate = V2ResponseCandidateV1(
+                route_kind=route_kind,
+                reply_kind=reply_kind,
+                part_count=part_count,
+                correlation_proven=True,
+                after_message_sent=after_message_sent,
+                all_segments_succeeded=all_segments_succeeded,
+                proactive_dispatched=proactive_dispatched,
+            )
+            action = project_actual_action(candidate)
+            self.settled_actions.append(action)
+            self.runtime.offer_response(
+                handle=pending.handle,
+                context=pending.context,
+                observation=pending.observation,
+                actual_action=action,
+                quality_score=None,
+                platform_id=pending.platform_id,
+                unified_msg_origin=pending.unified_msg_origin,
+                message_id=pending.message_id,
+            )
+        except Exception as exc:  # noqa: BLE001 - 结算失败只丢这一轮影子
+            logger.debug(f"Sylanne v3 shadow settle skipped: {exc}")
+
+    def has_pending(self, session_key: str) -> bool:
+        """这一轮是否还有未结算的捕获（供调用方在多个候选键里挑对的那个）。"""
+
+        return session_key in self._pending
+
+    def pending_token(self, session_key: str) -> int | None:
+        """当前待结算那轮的栅栏令牌；没有待结算轮就是 None。"""
+
+        pending = self._pending.get(session_key)
+        return None if pending is None else pending.token
+
+    def pending_is_proactive(self, session_key: str) -> bool:
+        """待结算的这一轮是不是主动轮（它只能由 REACH 结算，别的终端面必须让开）。"""
+
+        pending = self._pending.get(session_key)
+        if pending is None:
+            return False
+        try:
+            from sylanne_alpha.v3core.contracts import TurnContextClass
+
+            return pending.context is TurnContextClass.PROACTIVE
+        except Exception:  # noqa: BLE001 - 判不出来就当普通轮
+            return False
+
+    @property
+    def pending_count(self) -> int:
+        return len(self._pending)
+
+
+def _v3_text(value: Any) -> str:
+    return "" if value is None else str(value)
+
+
+def _v3_finite(body: Any, name: str) -> float | None:
+    """只接受有限数；其它一律 None（→ 编码器清有效位，design 14.3）。"""
+
+    if not isinstance(body, dict):
+        return None
+    value = body.get(name)
+    if not isinstance(value, (int, float)) or isinstance(value, bool):
+        return None
+    value = float(value)
+    return value if math.isfinite(value) else None
+
+
+def _v3_gap(value: Any) -> float | None:
+    if not isinstance(value, (int, float)) or isinstance(value, bool):
+        return None
+    value = float(value)
+    if not math.isfinite(value) or value < 0.0:
+        return None  # 生产里 gap 会是 inf（首轮），快照只收有限值
+    return value
+
+
+def _v3_shadow_of(owner: Any) -> Any:
+    """从任意持有插件引用的对象上取 facade；取不到就是 None（v3 不在场）。"""
+
+    return getattr(owner, "_v3_shadow", None)
+
+
 @register(
     "astrbot_plugin_sylanne",
     "Aylovelle.S.S",
@@ -534,6 +893,10 @@ class EmotionalStatePlugin(Star):
         self._proactive_bridge = ProactiveBridge(self)
         # emotion_spirit 适配桥（检测门控；未装即 no-op，对现有行为零影响）
         self._emotion_spirit_bridge = EmotionSpiritBridge(self)
+        # v3 shadow facade（plan Task 13）：纯构造、零 IO——仓库/线程池/epoch 全在
+        # initialize() 里拿。默认关（源码/stable 构建 V3_SHADOW_ENABLED=False），
+        # 只有 grey 打包生成的 build_flags 才翻开；不是用户可选项，故不进 _conf_schema。
+        self._v3_shadow = _V3ShadowFacade()
         self._register_web_apis(context)
 
         # AstrBot ConversationManager / PersonaManager 集成
@@ -1543,6 +1906,43 @@ class EmotionalStatePlugin(Star):
                 f"Sylanne on_decorating_result strip failed: {e}", exc_info=True
             )
 
+    def _v3_settle_ordinary(self, event: Any) -> None:
+        """ordinary 输出的 v3 终端证据（默认关时是空操作）。
+
+        恒 UNKNOWN：AstrBot 4.26.5 的 after_message_sent 只证明"尝试发过"，不证明送达。
+        实时接管轮显式跳过——那条路由的证据由 _dispatch_segmented_parts 的全段成功回调
+        结算成 SPEAK，这里若抢先认领就会把它压成 UNKNOWN。
+        """
+
+        facade = getattr(self, "_v3_shadow", None)
+        if facade is None:
+            return
+        try:
+            get_extra = getattr(event, "get_extra", None)
+            if callable(get_extra) and get_extra("_syl_realtime_takeover", None) is True:
+                return
+            session_key = self._session_ctx.session_key(event)
+            # 让路①：主动轮。大饼的 check_and_chat 也走 RespondStage，本钩子照样会响；
+            # 若在这里认领，proactive_bridge 的 REACH 就永远落不到 —— 主动轮只能由它结算。
+            if facade.pending_is_proactive(session_key):
+                return
+            # 让路②：接管轮的兜底判据。上面那个 extra 标记是 best-effort 写的（写失败被
+            # 刻意吞掉），标记丢了就只剩这条：本会话有在飞的分段任务 = 投递证据归分段回调，
+            # 这里不能抢着记成 UNKNOWN。
+            task = self._store.segmented_tasks.get(session_key)
+            if task is not None and not task.done():
+                return
+        except Exception as e:  # noqa: BLE001 - 取不到会话只丢这一轮影子
+            logger.debug(f"Sylanne v3 shadow ordinary settle skipped: {e}")
+            return
+        facade.settle(
+            session_key=session_key,
+            route_kind="ORDINARY_TEXT",
+            reply_kind="SPEAK",
+            part_count=1,
+            after_message_sent=True,
+        )
+
     @filter.after_message_sent()
     async def _on_after_message_sent_err_backfill(
         self, event: Any, *args: Any, **kwargs: Any
@@ -1573,6 +1973,16 @@ class EmotionalStatePlugin(Star):
         限制：仅非流式档成立（框架默认 streaming_response=False，用户实例已确认）；
         流式档 graceful err 走 STREAMING_FINISH，RespondStage 早退不触发本钩子。
         """
+        # v3 shadow：ordinary 输出的终端记账（design 14.2 + Task 2 钉住的 4.26.5 真源事实）。
+        # after_message_sent 【不是成功回执】——respond/stage.py 里 send 的异常被 except 吞掉
+        # 之后照样发这个事件，所以它只能收尾本轮生命周期，永远结算不出 SPEAK，恒 UNKNOWN。
+        # 放在本钩子最前、在下面那三道 backfill 门【之前】：那些门是为 err 轮补写设的，
+        # 正常 SPEAK 轮(_syl_resp_handled=True)会早退，记账挂它们后面就永远收不到证据。
+        # getattr 而非直调：本钩子被窄插件桩借去无绑定调用（见下方 backfill 的同款写法），
+        # 那些桩没有 v3 面；v3 缺席绝不能让这条 v2 兜底路径炸。
+        _v3_settle_ordinary = getattr(self, "_v3_settle_ordinary", None)
+        if callable(_v3_settle_ordinary):
+            _v3_settle_ordinary(event)
         try:
             get_extra = getattr(event, "get_extra", None)
             if not callable(get_extra):
@@ -1854,10 +2264,17 @@ class EmotionalStatePlugin(Star):
 
     # Segmented dispatch
     async def _dispatch_segmented_parts(
-        self, origin: str, parts: list[dict[str, Any]], session_key: str = ""
+        self,
+        origin: str,
+        parts: list[dict[str, Any]],
+        session_key: str = "",
+        *,
+        settle_v3: bool = True,
     ) -> None:
+        # settle_v3 必须原样转发：这层只是兼容转发壳，把它吞掉的话，将来若有调用方
+        # 经这里走补刀式（复用 session_key 的延迟）投递，就会重新踩上"认领下一轮"的坑。
         await self._llm_response_pipeline._dispatch_segmented_parts(
-            origin, parts, session_key=session_key
+            origin, parts, session_key=session_key, settle_v3=settle_v3
         )
 
     # Memory prompt fragment
@@ -3192,6 +3609,12 @@ class EmotionalStatePlugin(Star):
             self._start_life_simulator()
         except Exception as e:
             logger.error(f"Sylanne initialize: autonomy start failed: {e}", exc_info=True)
+        # v3 shadow（plan Task 13）：默认关时 initialize() 直接 return False，零 IO 零线程。
+        # 开启时它内部先 acquire epoch 再起私有 worker；起不来只 fail-close v3，v2 照常。
+        # 放在最后：v3 只观察，绝不能挡住任何 v2 子系统的初始化。
+        await self._v3_shadow.initialize(
+            root=Path(get_astrbot_data_path()) / "plugin_data" / PLUGIN_NAME / "v3_shadow"
+        )
 
     async def _life_sim_adjust_countdown(self) -> None:
         """生命模拟 tick 回调：用 Sylanne 当前状态拨动大饼下一次主动发言倒计时。
@@ -3361,6 +3784,10 @@ class EmotionalStatePlugin(Star):
 
     async def terminate(self) -> None:
         """插件卸载/更新前的清理：停止所有后台任务、关闭 WebUI、持久化状态。"""
+        # v3 shadow（plan Task 13）：先【同步】关闸，让接下来的 v2 收尾 save 排干期间
+        # 不再有新的影子轮进来。同步是关键——这里不能 await，否则 drain 之前就出让了
+        # 事件循环，还能被塞进新的 capture/settle。
+        self._v3_shadow.begin_shutdown()
         # v2core：先排干在途域状态落盘 + 终扫一遍（必须在 cancel 后台任务【之前】，
         # 否则最后一轮 fire-and-forget 存档会被反手 cancel——她的最近成长就丢了）
         try:
@@ -3385,6 +3812,11 @@ class EmotionalStatePlugin(Star):
                 es_bridge.deactivate()
         except Exception as e:
             logger.debug(f"Sylanne emotion_spirit bridge deactivate skipped: {e}")
+        # v3 shadow：v2 的 save 已经排干，这里 await v3 自己的有序关停（它内部会 drain
+        # 在途影子、封 epoch、shutdown 私有线程池并等每个 worker 线程退出）。必须在下面
+        # 那轮【通用 task 取消】之前完成：v3 的 task/线程从来不在 _background_tasks 里，
+        # 通用取消捞不到它们，等到那之后再收就是在关停后留活线程。
+        await self._v3_shadow.terminate()
         # 收集所有需要取消的任务
         tasks_to_cancel: list = []
         for task in list(self._background_tasks):

@@ -150,6 +150,48 @@ def _compute_absolute_ceiling(gap_seconds: float, cfg: dict) -> int:
     return 4600
 
 
+def _v3_platform_of(event: Any) -> Any:
+    """平台名（v3 shadow 关联用）。只读，取不到就 None → 该轮不捕获。"""
+
+    getter = getattr(event, "get_platform_name", None)
+    if callable(getter):
+        try:
+            return getter()
+        except Exception:  # noqa: BLE001 - 读不到平台只丢这一轮影子
+            return None
+    return getattr(getattr(event, "platform_meta", None), "name", None)
+
+
+def _v3_message_id_of(event: Any) -> Any:
+    """入站 message_id（v3 shadow 关联用）。只读，取不到就 None → 该轮不捕获。"""
+
+    return getattr(getattr(event, "message_obj", None), "message_id", None)
+
+
+def _v3_addressed_of(event: Any) -> bool:
+    """本轮是否点名/唤醒了她（v3 上下文分类 ADDRESSED vs AMBIENT）。
+
+    读框架自己的 `AstrMessageEvent.is_at_or_wake_command`（4.26.5 实例属性，默认 False）。
+    取不到就按 True 保守处理——与旧行为一致，不会把点名轮误降级成环境轮。
+    """
+
+    value = getattr(event, "is_at_or_wake_command", None)
+    return True if value is None else bool(value)
+
+
+def _v3_proactive_of(plugin: Any, session_key: str) -> bool:
+    """本轮是否是主动发言在飞时被带出来的（v3 上下文分类 PROACTIVE）。"""
+
+    bridge = getattr(plugin, "_proactive_bridge", None)
+    checker = getattr(bridge, "is_dispatch_inflight", None)
+    if not callable(checker):
+        return False
+    try:
+        return bool(checker(session_key))
+    except Exception:  # noqa: BLE001 - 判不出来就按非主动轮走
+        return False
+
+
 def _count_history_turns(contexts: Any) -> int:
     """统计 req.contexts 中带非空文本的 user/assistant 轮数（历史锚深度，leg-2a）。
 
@@ -1318,6 +1360,28 @@ class LLMRequestPipeline:
         state_fragment = await self._dispatch_assessment(
             session_key, message_text, gap_seconds, realtime_enabled,
         )
+
+        # Step 4.5: v3 shadow 请求边界（design 14.1；plan Task 13）
+        # 位置是硬要求：合并文本(message_text)、assessment dispatch(Step 4)、历史深度
+        # (history_depth)、gap(gap_seconds)、记忆(Step 3)、已授权 group facts(Step 3 内
+        # R1-R6)全部可得【之后】，final prompt assembly(Step 5)【之前】。全部以不可变事实
+        # 显式传入——facade 只读这些入参，绝不回头去摸 v2 运行态。
+        # 默认关时 capture_request 首行即 return；开着也只冻结事实、不推进 v3 状态、不阻塞。
+        # 全部异常封在 facade 内部，这里没有 try 是刻意的：它保证不抛。
+        _v3 = getattr(p, "_v3_shadow", None)
+        if _v3 is not None:
+            _v3.capture_request(
+                session_key=session_key,
+                platform_id=_v3_platform_of(event),
+                unified_msg_origin=getattr(event, "unified_msg_origin", None),
+                message_id=_v3_message_id_of(event),
+                text_length=len(message_text or ""),
+                history_present=history_depth > 0,
+                gap_seconds=gap_seconds,
+                body=p._store.last_injected_states.get(session_key),
+                addressed=_v3_addressed_of(event),
+                proactive=_v3_proactive_of(p, session_key),
+            )
 
         # Step 5: 组装最终 prompt
         self._assemble_final_prompt(

@@ -1000,6 +1000,28 @@ def consume_dispatch_modulators(plugin: Any, session_key: str) -> dict[str, floa
 # 阶段二：response 钩子（DELIBERATE+EVOLVE，持锁）
 # ===========================================================================
 
+def _v3_settle_v2core_reply(plugin: Any, session_key: str, kind: Any, reply_kind_enum: Any) -> None:
+    """把 v2core 的权威 ReplyKind 决策交给 v3 shadow（默认关时是空操作）。
+
+    只处理终局的两类：SILENT（这轮不说话，不会再有投递证据）与 FALLBACK（兜底文案，
+    v2 投影恒 UNKNOWN）。SPEAK 留给真投递面结算，绝不在此提前认领。facade 内部保证
+    不抛，故这里没有 try——v3 绝不能改 v2 的回复路径。
+    """
+
+    facade = getattr(plugin, "_v3_shadow", None)
+    if facade is None or not session_key:
+        return
+    if kind is reply_kind_enum.SILENT:
+        facade.settle(session_key=session_key, route_kind="SILENT", reply_kind="SILENT")
+    elif kind is reply_kind_enum.FALLBACK:
+        facade.settle(
+            session_key=session_key,
+            route_kind="FALLBACK",
+            reply_kind="FALLBACK",
+            part_count=1,
+        )
+
+
 async def apply_v2core_response(plugin: Any, event: Any, response: Any) -> bool:
     """LLM 回复后的裁决阶段。
 
@@ -1157,6 +1179,13 @@ async def apply_v2core_response(plugin: Any, event: Any, response: Any) -> bool:
                         )
                 except Exception:  # noqa: BLE001
                     pass  # 学习失败绝不阻断回复
+
+            # v3 shadow 响应边界（design 14.2；plan Task 13）：这里是 v2 唯一带真 ReplyKind
+            # 的权威决策面，且已过 DeliberateSilence 软化（reply 可能在上面被改写），故只能在
+            # 这个点读。SILENT → HOLD（这轮到此为止，不会再有投递证据）；FALLBACK → 恒 UNKNOWN。
+            # SPEAK 【故意不结算】：SPEAK 要由真投递（分段全成功）证明，这里回落 legacy，
+            # 让 _dispatch_segmented_parts 那条终端证据来结算。默认关时 settle 是空操作。
+            _v3_settle_v2core_reply(plugin, session_key, reply.kind, ReplyKind)
 
             handled: bool
             if reply.kind is ReplyKind.SILENT:

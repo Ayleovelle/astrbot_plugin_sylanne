@@ -473,8 +473,10 @@ class LLMResponsePipeline:
                     )
                     if _resolved is None:
                         response.completion_text = ""
+                        self._v3_settle_empty(session_key, silent=True)
                         return
                     cleaned = _resolved
+                    self._v3_settle_empty(session_key, silent=False)
                 if cleaned != text:
                     response.completion_text = cleaned
                 if cleaned.strip():
@@ -586,8 +588,10 @@ class LLMResponsePipeline:
             )
             if _resolved is None:
                 response.completion_text = ""
+                self._v3_settle_empty(session_key, silent=True)
                 return
             cleaned = _resolved
+            self._v3_settle_empty(session_key, silent=False)
             # 落入下方正常分段发送流程（不 return）
 
         # 检查首句是否已通过流式发送
@@ -1018,7 +1022,12 @@ class LLMResponsePipeline:
     # Segmented dispatch
     # ------------------------------------------------------------------
     async def _dispatch_segmented_parts(
-        self, origin: str, parts: list[dict[str, Any]], session_key: str = ""
+        self,
+        origin: str,
+        parts: list[dict[str, Any]],
+        session_key: str = "",
+        *,
+        settle_v3: bool = True,
     ) -> None:
         """逐段发送分段回复，每段之间按计划延迟。
 
@@ -1026,11 +1035,21 @@ class LLMResponsePipeline:
             origin: 消息发送目标（unified_msg_origin）。
             parts: 分段列表，每段包含 text 和 delay_before_seconds。
             session_key: 会话标识，发送完成后清除 unfinished 标记。
+            settle_v3: 这次投递是否算【本轮的】v3 终端证据。默认 True（正常回复）。
+                补刀/改口（_fire_afterthought）必须传 False：它复用同一个 session_key，
+                却在原轮结束后 20-180s 才发，那时 _pending[session_key] 要么已被本轮
+                结算掉、要么已经装着【下一轮】——按 True 走会把下一轮的 handle 认领成
+                本次补刀的 SPEAK（带错的 part_count），还把下一轮真正的终端证据挤掉。
+                v3 纯观察，对 v2 行为没有任何影响。
         """
         context = self._p.context
         if not hasattr(context, "send_message"):
             return
         total = len(parts)
+        # 栅栏令牌：在【任何 await 之前】同步取本轮的令牌。这条协程可能要跑好几秒
+        # （段间 sleep），期间同一 session_key 上可能已经换了下一轮；结算时带着这枚
+        # 令牌，v3 就能认出"我要结的那轮已经不在了"而放手，不会错结下一轮。
+        v3_token = self._v3_pending_token(session_key) if settle_v3 else None
         try:
             for idx, part in enumerate(parts, 1):
                 delay = float(part.get("delay_before_seconds", 0))
@@ -1062,10 +1081,77 @@ class LLMResponsePipeline:
                 "(剩余留在 unfinished 供续接)",
                 session_key, sent, total,
             )
+            # v3 shadow：段间取消 = 投递未完成 → UNKNOWN，绝不结算 SPEAK（design 14.2）。
+            if settle_v3:
+                self._v3_settle_segments(session_key, total, succeeded=False, token=v3_token)
+            raise
+        except BaseException:
+            # 任意一段 send 失败（首段/次段皆然）：v2 行为完全不变——原样重抛，交给
+            # task.exception()/上游。这里只补一条 v3 终端证据：部分投递 → UNKNOWN。
+            if settle_v3:
+                self._v3_settle_segments(session_key, total, succeeded=False, token=v3_token)
             raise
         # 所有段发送成功——清除未完成标记
         if session_key:
             self._p._store.unfinished_replies.pop(session_key, None)
+        # v3 shadow：唯一能证明 SPEAK 的地方——每一段都过了 send_message，无取消无异常。
+        if settle_v3:
+            self._v3_settle_segments(session_key, total, succeeded=True, token=v3_token)
+
+    def _v3_pending_token(self, session_key: str) -> int | None:
+        """取本轮的 v3 栅栏令牌（默认关 / 没捕获过时是 None）。"""
+
+        facade = getattr(self._p, "_v3_shadow", None)
+        getter = getattr(facade, "pending_token", None)
+        if not callable(getter) or not session_key:
+            return None
+        try:
+            return getter(session_key)
+        except Exception:  # noqa: BLE001 - 取不到令牌就退化成"结算当前那轮"
+            return None
+
+    def _v3_settle_segments(
+        self, session_key: str, total: int, *, succeeded: bool, token: int | None = None
+    ) -> None:
+        """把分段投递的终端证据交给 v3 shadow（默认关时是空操作）。
+
+        design 14.2：只有【完整结构化投递】才可以结算一次 SPEAK；部分投递、失败段、
+        取消一律 UNKNOWN。facade 内部保证不抛，故这里没有 try——它绝不能改 v2 行为。
+        """
+
+        facade = getattr(self._p, "_v3_shadow", None)
+        if facade is None or not session_key or total < 1:
+            return
+        facade.settle(
+            session_key=session_key,
+            route_kind="SEGMENTED_TEXT",
+            reply_kind="SPEAK",
+            part_count=total,
+            all_segments_succeeded=succeeded,
+            token=token,
+        )
+
+    def _v3_settle_empty(self, session_key: str, *, silent: bool) -> None:
+        """空草稿分治的 v3 终端证据（默认关时是空操作）。
+
+        - silent=True：legacy 判定这轮不说话 → SILENT 路由 → HOLD。
+        - silent=False：兜底一句 → FALLBACK 路由 → 恒 UNKNOWN（兜底文案不是她的决定）。
+          它先于下方分段发送结算，故这轮不会再被结算成 SPEAK——这正是"FALLBACK 在有效
+          候选之后仍是 UNKNOWN"的语义。
+        """
+
+        facade = getattr(self._p, "_v3_shadow", None)
+        if facade is None or not session_key:
+            return
+        if silent:
+            facade.settle(session_key=session_key, route_kind="SILENT", reply_kind="SILENT")
+        else:
+            facade.settle(
+                session_key=session_key,
+                route_kind="FALLBACK",
+                reply_kind="FALLBACK",
+                part_count=1,
+            )
 
     # ------------------------------------------------------------------
     # T2-02 补刀与改口
@@ -1250,7 +1336,11 @@ class LLMResponsePipeline:
         logger.info(
             f"Sylanne afterthought queued: session={session_key} parts={len(parts)}"
         )
-        await self._dispatch_segmented_parts(origin, parts, session_key=session_key)
+        # settle_v3=False：补刀复用同一 session_key 但发生在本轮结算之后，绝不能
+        # 认领这个键上的（下一轮的）待结算捕获。见 _dispatch_segmented_parts 文档。
+        await self._dispatch_segmented_parts(
+            origin, parts, session_key=session_key, settle_v3=False
+        )
         state = self._afterthought_state(session_key)
         state["last_fired_at"] = state.get("exchange_count", 0)
 
