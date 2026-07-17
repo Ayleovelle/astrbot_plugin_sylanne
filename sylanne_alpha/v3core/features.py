@@ -15,6 +15,8 @@ no state of its own.
 
 from __future__ import annotations
 
+import math
+
 from .formula_v1 import AXIS_DIM, DECISION_STATE_BLEND, STATE_DIM
 
 
@@ -26,6 +28,8 @@ def _check_latent(latent_axes: object) -> tuple:
     for index, value in enumerate(latent_axes):
         if type(value) is not float:
             raise TypeError(f"latent_axes[{index}] must be a float")
+        if not math.isfinite(value):
+            raise ValueError(f"latent_axes[{index}] must be finite")
     return latent_axes
 
 

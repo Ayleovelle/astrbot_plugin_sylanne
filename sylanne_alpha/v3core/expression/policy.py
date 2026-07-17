@@ -22,6 +22,7 @@ from ..formula_v1 import (
     CLARIFY_WARMTH_COEFFS,
     EXPRESSION_LENGTH_BUCKETS,
     HOLD_EXPRESSION,
+    OBSERVATION_DIM,
     REACH_AFFILIATION_MEDIUM_THRESHOLD,
     REACH_EXPRESSION,
     REACH_WARMTH_COEFFS,
@@ -96,7 +97,7 @@ def _speak_length_code(expression_pressure: float) -> int:
     return _LONG
 
 
-def _base_constraints(action: Action, s: tuple, frame_values: tuple) -> tuple:
+def _base_constraints(action: Action, s: tuple, frame_values: tuple, valid_mask: int) -> tuple:
     """Return ``(length_code, pace, directness, warmth, desired_hesitation)``."""
 
     valence, arousal, safety, affiliation, uncertainty, novelty, agency, expression_pressure = s
@@ -106,7 +107,11 @@ def _base_constraints(action: Action, s: tuple, frame_values: tuple) -> tuple:
     if action is Action.SPEAK:
         length_code = _speak_length_code(expression_pressure)
         base_p, w_arousal, w_exhaustion = SPEAK_PACE_COEFFS
-        pace = _clip01(base_p + w_arousal * arousal + w_exhaustion * _center(frame_values[10]))
+        # Channel 10 (exhaustion) is a raw observation: gate it by valid_mask so an
+        # invalid/missing channel contributes zero rather than leaking its semantic
+        # default (0.0 -> center -1.0) as if it were real fatigue evidence (design §7).
+        exhaustion_center = _center(frame_values[10]) if (valid_mask >> 10) & 1 else 0.0
+        pace = _clip01(base_p + w_arousal * arousal + w_exhaustion * exhaustion_center)
         base_d, w_agency, w_uncertainty = SPEAK_DIRECTNESS_COEFFS
         directness = _clip01(base_d + w_agency * agency + w_uncertainty * uncertainty)
         base_w, w_affiliation, w_valence = SPEAK_WARMTH_COEFFS
@@ -127,8 +132,20 @@ def _base_constraints(action: Action, s: tuple, frame_values: tuple) -> tuple:
     raise ValueError("unsupported action for expression policy")
 
 
-def expression_policy(action: object, decision_state: tuple, frame_values: tuple, style_ring: tuple) -> ExpressionConstraints:
-    """Compute this turn's expression constraints and its final style signature."""
+def expression_policy(
+    action: object,
+    decision_state: tuple,
+    frame_values: tuple,
+    style_ring: tuple,
+    valid_mask: int = (1 << OBSERVATION_DIM) - 1,
+) -> ExpressionConstraints:
+    """Compute this turn's expression constraints and its final style signature.
+
+    ``valid_mask`` is the observation frame's 36-bit validity mask; it gates the one
+    raw-observation read in this policy (channel 10, exhaustion). It defaults to
+    all-valid for callers holding a fully-valid frame; the orchestrator passes the
+    real mask so a missing channel cannot leak its semantic default into pace.
+    """
 
     if type(action) is not Action:
         raise TypeError("action must have exact type Action")
@@ -138,9 +155,11 @@ def expression_policy(action: object, decision_state: tuple, frame_values: tuple
         raise ValueError("frame_values must be the 36 normalized observation values")
     if type(style_ring) is not tuple:
         raise TypeError("style_ring must be a tuple")
+    if type(valid_mask) is not int:
+        raise TypeError("valid_mask must be an int")
 
     length_code, pace, directness, warmth, desired_hesitation = _base_constraints(
-        action, decision_state, frame_values
+        action, decision_state, frame_values, valid_mask
     )
     directness_bucket = _directness_bucket(directness)
     action_code = _ACTION_CODE[action]

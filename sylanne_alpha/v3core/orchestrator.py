@@ -293,7 +293,9 @@ def orchestrate(invocation: object) -> OrchestratorResult:
     )
 
     # -- stage: expression ---------------------------------------------------
-    constraints = expression_policy(selected, decision_state, frame.values, base.style_ring)
+    constraints = expression_policy(
+        selected, decision_state, frame.values, base.style_ring, frame.valid_mask
+    )
     new_style_ring = next_style_ring(base.style_ring, constraints.style_signature)
 
     # -- freeze this turn's pending outcome for settlement at t+1 ------------

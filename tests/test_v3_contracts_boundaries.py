@@ -842,6 +842,7 @@ def test_v3core_import_firewall() -> None:
         "threading",
         "concurrent.futures",
         "portalocker",
+        "numpy",
     }
     for path in Path("sylanne_alpha/v3core").rglob("*.py"):
         tree = ast.parse(path.read_text(encoding="utf-8"))

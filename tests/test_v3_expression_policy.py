@@ -147,3 +147,27 @@ def test_next_style_ring_keeps_last_four() -> None:
 def test_returns_expression_constraints_type() -> None:
     s = (0.0,) * 8
     assert isinstance(expression_policy(Action.HOLD, s, _frame_values(), ()), ExpressionConstraints)
+
+
+def test_invalid_exhaustion_channel_is_gated_out_of_pace() -> None:
+    """E (Task15 privacy/perf finding): channel 10 (exhaustion) is the one raw
+    observation read here; it must be gated by valid_mask. When invalid, its
+    semantic default (0.0 -> center -1.0) must NOT leak into SPEAK pace as fake
+    'not tired' evidence (design §7: invalid channels are never interpreted)."""
+    s = (0.2, 0.6, 0.1, 0.4, 0.3, 0.0, 0.5, 0.9)  # arousal=s[1]=0.6, high pressure -> SPEAK
+    all_valid = (1 << 36) - 1
+    invalid_ch10 = all_valid & ~(1 << 10)
+
+    # Non-interference: with channel 10 invalid, its raw value cannot move pace.
+    p_a = expression_policy(Action.SPEAK, s, _frame_values(0.0), (), invalid_ch10).pace
+    p_b = expression_policy(Action.SPEAK, s, _frame_values(1.0), (), invalid_ch10).pace
+    assert p_a == p_b
+
+    # Gated pace equals the neutral pace (exhaustion term contributes exactly zero).
+    base_p, w_arousal, _w_exhaustion = formula.SPEAK_PACE_COEFFS
+    expected = _clip01(base_p + w_arousal * s[1])
+    assert isclose(p_a, expected, abs_tol=1e-9)
+
+    # Gate is real, not a no-op: when channel 10 IS valid its value does move pace.
+    p_valid = expression_policy(Action.SPEAK, s, _frame_values(0.0), (), all_valid).pace
+    assert not isclose(p_valid, expected, abs_tol=1e-9)
