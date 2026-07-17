@@ -10,7 +10,26 @@ unsigned 8-bit for quantized observations, exactly as design section 13
 prescribes.  ``encode_state`` is deterministic; ``decode_state`` is its exact
 inverse for a canonically quantized state and fails closed on any malformed
 input (bad magic/version, CRC mismatch, truncation, trailing bytes, non-finite
-half floats, Dale-violating SNN weights, or out-of-bounds values).
+floats, Dale-violating SNN weights, or out-of-bounds values).
+
+The one exception to the half-float rule is ``latent_axes`` (codec **v2**), which
+is packed as single floats (``>f``).  The storage grid is not a neutral encoding
+choice: ``orchestrate`` advances the *decoded* state, so the persistence grid is
+inside the dynamics loop and any per-turn increment smaller than half a ulp is
+rounded away permanently.  The mid timescale moves ``0.12*(target - mid)`` per
+turn, so at ``|mid| ~ 0.3`` (float16 ulp 2.44e-4) every deviation below ~1e-3
+was quantized to zero: the mid axis froze mid-recovery and each shock left a
+permanent residue, which is the *opposite* of the declared multi-timescale
+architecture (mid is meant to recover; only slow is meant to retain).  float32
+puts the dead zone ~2^13 lower, far below any dynamically meaningful increment.
+See ``tests/test_v3_stability_gate.py::test_mid_axis_recovers_within_its_envelope``
+and ``tests/test_v3_state_codec.py::test_persistence_grid_does_not_swallow_mid_axis_dynamics``.
+
+This is the second defect of exactly this shape (the first was the
+``STATE_QUANTIZE_ERROR`` livelock: see ``models.quantization_safe_bounds``).  Both
+are the storage grid leaking into semantics.  ``_F16_DEAD_ZONE_AUDIT`` below records
+the per-field exposure of every remaining half-float array so the next one is found
+by reading rather than by measuring.
 
 The module imports only stdlib ``struct``/``zlib``/``base64``/``binascii`` and
 pure ``v3core`` models, honoring the ``v3core`` import firewall.  The hard size
@@ -49,7 +68,14 @@ from ..contracts import Action, SessionRef, TurnSequence
 
 
 STATE_CODEC_MAGIC = b"SYL3ST"
-STATE_CODEC_VERSION = 1
+
+#: v1 packed ``latent_axes`` as float16; v2 widens that one field to float32
+#: because the float16 grid froze the mid timescale (see the module docstring).
+#: Encoding always emits the current version; decoding accepts every version in
+#: ``SUPPORTED_STATE_CODEC_VERSIONS`` so a v1 blob written before the fix still
+#: loads.  Widening is read-only: there is no v2 -> v1 path and none is wanted.
+STATE_CODEC_VERSION = 2
+SUPPORTED_STATE_CODEC_VERSIONS = (1, 2)
 MAX_STATE_BYTES_DEFAULT = None
 
 _ACTION_ORDER = (Action.SPEAK, Action.HOLD, Action.CLARIFY, Action.REACH)
@@ -101,6 +127,9 @@ class _Writer:
 
     def f16_vec(self, values: tuple) -> None:
         self._chunks.append(struct.pack(">%de" % len(values), *values))
+
+    def f32_vec(self, values: tuple) -> None:
+        self._chunks.append(struct.pack(">%df" % len(values), *values))
 
     def s16_vec(self, values: tuple) -> None:
         self._chunks.append(struct.pack(">%dh" % len(values), *values))
@@ -182,6 +211,12 @@ class _Reader:
             raise StateCodecError("encoded state contains a non-finite half float")
         return values
 
+    def f32_vec(self, count: int) -> tuple:
+        values = struct.unpack(">%df" % count, self._take(4 * count))
+        if not all(isfinite(value) for value in values):
+            raise StateCodecError("encoded state contains a non-finite single float")
+        return values
+
     def s16_vec(self, count: int) -> tuple:
         return struct.unpack(">%dh" % count, self._take(2 * count))
 
@@ -257,7 +292,11 @@ def _write_header(writer: _Writer, state: V3State) -> None:
 
 
 def _write_continuous(writer: _Writer, state: V3State) -> None:
-    writer.f16_vec(state.latent_axes)
+    # float32, not float16: this array is read back and advanced every turn, so the
+    # storage grid is a term in the dynamics.  See the module docstring.  The other
+    # half-float fields here are deliberately untouched -- widening them is a
+    # separate decision with its own evidence (see ``_F16_DEAD_ZONE_AUDIT``).
+    writer.f32_vec(state.latent_axes)
     writer.f16(state.rho_hold)
     writer.f16(state.rho_reach)
     writer.u8(len(state.style_ring))
@@ -385,11 +424,19 @@ def decode_state(blob: object) -> V3State:
     reader = _Reader(body)
     if reader._take(len(STATE_CODEC_MAGIC)) != STATE_CODEC_MAGIC:
         raise StateCodecError("bad state magic")
-    if reader.u16() != STATE_CODEC_VERSION:
+    version = reader.u16()
+    if version not in SUPPORTED_STATE_CODEC_VERSIONS:
         raise StateCodecError("unsupported state codec version")
 
     header = _read_header(reader)
-    latent = reader.f16_vec(LATENT_DIM)
+    # v1 -> v2 read migration: a pre-fix blob packed latent_axes as float16, so it is
+    # read back on the half grid.  Every float16 is exactly representable as a float
+    # (and as a float32), so the widening is lossless and needs no rescaling: the v1
+    # values load unchanged and the next encode re-emits them as v2.  A v1 state
+    # therefore keeps whatever mid residue the old grid froze into it -- migration
+    # cannot invent the increments float16 already discarded -- but it stops
+    # accumulating new residue from the first advanced turn onward.
+    latent = reader.f16_vec(LATENT_DIM) if version == 1 else reader.f32_vec(LATENT_DIM)
     rho_hold = reader.f16()
     rho_reach = reader.f16()
     style_ring = _read_style_ring(reader)

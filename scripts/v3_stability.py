@@ -71,10 +71,28 @@ MID_RECOVERY_TURNS = 20
 MID_RECOVERY_RATIO = 0.35
 SLOW_MAX_STEP = 0.03
 #: Upper bound on the settle loop below; reaching it is a probe hard-failure, never
-#: a silent downgrade to "close enough".  Measured settle cost is 302 turns, so this
-#: is >3x headroom.  Kept <= the 1000 pulse turn index so the two seed streams in
-#: ``recovery_probe`` cannot collide.
-SETTLE_MAX_TURNS = 1000
+#: a silent downgrade to "close enough".
+#:
+#: Was 1000 against a measured 302-turn settle (>3x headroom).  Both numbers were
+#: artifacts of the float16 latent grid: the settle loop stops when the axes stop
+#: changing *bit-for-bit*, and on the half grid the slow axis (which moves only
+#: ~0.0128*deviation per turn) fell into its own quantization dead zone almost
+#: immediately.  Widening ``latent_axes`` to float32 (state codec v2) moved the real
+#: fixed point out to a measured **986 turns, identical for all 32 seeds** -- 14 turns
+#: short of the old cap.  The settle phase is fed a constant ``_neutral_raw()`` from a
+#: constant start state, so 986 is deterministic rather than the tail of a
+#: distribution; but 1.4% margin in front of a hard exception is luck, not headroom.
+#:
+#: Raising the cap is free: the loop breaks on convergence, so the cap costs nothing
+#: unless it is actually needed, and it still hard-fails rather than degrading.  The
+#: old cap could NOT simply be raised, because the settle phase used turn ids
+#: ``r{index}`` from the same namespace as the pulse (``r1000``) and the recovery
+#: (``r2001``..``r2020``); a settle turn beyond index 1000 would have re-used the
+#: pulse's turn id, and the turn registry would have deduplicated the pulse into a
+#: no-op -- an "envelope met" green tick for a session that was never perturbed.
+#: The settle phase therefore now emits ``s{index}`` ids in a disjoint namespace,
+#: which is what makes this bound raisable at all.
+SETTLE_MAX_TURNS = 4000
 POSTERIOR_LOCK_LEVEL = 0.98
 POSTERIOR_LOCK_TURNS = 20
 MAX_JS_DIVERGENCE = 0.02
@@ -351,12 +369,13 @@ def recovery_probe(seed: int) -> dict:
     sequence = 0
     profile_id = FROZEN_LEARNING_PROFILE  # learning frozen: measure the dynamics only
 
-    def step(raw: tuple, index: int):
+    def step(raw: tuple, index: int, turn_id_prefix: str = "r"):
         nonlocal state, sequence
         sequence += 1
         envelope = _envelope(
             raw, TurnContextClass.ADDRESSED, None, TurnSequence(1, sequence), profile_id,
-            v3_export.evaluation_turn_seed(seed.to_bytes(16, "big"), index), f"r{index}",
+            v3_export.evaluation_turn_seed(seed.to_bytes(16, "big"), index),
+            f"{turn_id_prefix}{index}",
         )
         result = orchestrate(
             CoreInvocation(envelope=envelope, base_state=state, projected_actual_outcome=None)
@@ -375,11 +394,24 @@ def recovery_probe(seed: int) -> dict:
     # mid ratio drops from ~0.57 to ~0.28 (seed 2718) and the declared <=0.35
     # envelope is met.
     #
-    # The stop condition is an EXACT fixed point of the measured quantity: the
-    # latent axes are persisted on the float16 grid, so once the per-turn increment
-    # falls below the grid the axes stop changing bit-for-bit and stay stopped.
-    # Exact equality is reachable here (measured: turn 302, all seeds) and is
-    # strictly stronger than comparing quantized bytes.
+    # The stop condition is an EXACT fixed point of the measured quantity: the latent
+    # axes are persisted on a finite grid, so once every per-turn increment falls
+    # below half a ulp the axes stop changing bit-for-bit and stay stopped.  The
+    # update is contracting (see ``validate_jacobian_gate``), so such a point exists
+    # on any finite grid; only *when* it is reached depends on the grid.  Measured:
+    # turn 986, identical for all 32 seeds (the settle input is a constant neutral
+    # frame from a constant start state, so this is deterministic, not a sample).
+    #
+    # It was 302 under the float16 latent grid.  That 3x speed-up was not the probe
+    # converging faster -- it was the storage grid swallowing the dynamics, the same
+    # defect this codec version fixes (see ``state/codec.py`` v2).  A settle that
+    # "converges" because the format is too coarse to represent the next increment is
+    # measuring the format, not the fixed point.
+    #
+    # The settle phase emits ``s{index}`` turn ids, NOT ``r{index}``: the pulse below
+    # is ``r1000`` and the recovery is ``r2001``..``r2020``, so a shared namespace
+    # would cap the settle at 1000 turns forever -- and silently, since colliding turn
+    # ids are deduplicated by the turn registry rather than rejected.
     #
     # NOTE: the stop condition is deliberately NOT "encode_state bytes repeat".
     # ``encode_state`` serializes ``revision``, ``last_committed_turn_id``,
@@ -391,7 +423,7 @@ def recovery_probe(seed: int) -> dict:
     previous_axes: tuple | None = None
     settle_turns: int | None = None
     for index in range(SETTLE_MAX_TURNS):
-        step(_neutral_raw(), index)
+        step(_neutral_raw(), index, turn_id_prefix="s")
         current_axes = tuple(state.latent_axes)
         if previous_axes is not None and current_axes == previous_axes:
             settle_turns = index + 1

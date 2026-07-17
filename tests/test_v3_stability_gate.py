@@ -236,50 +236,54 @@ def test_invocations_are_not_rejected_wholesale(stream: v3_stability.StreamStats
     assert stream.rejected / max(stream.turns, 1) <= 0.05, stream.reject_reasons
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason=(
-        "MEASURED (re-attributed): the declared mid envelope is met by only ~91% of "
-        "sessions, not the required 99.9%. Across seeds 2718-2749: 29/32 within <=0.35, "
-        "breaches at 2725 (0.379), 2744 (0.360), 2745 (0.355); the whole distribution "
-        "sits at 0.26-0.38 against a 0.35 gate. Root cause is margin, not a bug: mid "
-        "integrates fast' so its perturbation PEAKS ~3-5 turns after the pulse, and it "
-        "then contracts ~0.934/turn, giving ratio@20 ~= 0.934**(20-peak_turn) -- 0.313 "
-        "for a turn-3 peak but 0.359 for a turn-5 peak, which is already over the gate. "
-        "Whether a session passes therefore depends on how late the pulse makes mid "
-        "peak. Needs an architect ruling on the envelope itself (0.35@20 leaves almost "
-        "no margin against the declared step 0.12), NOT another probe fix and NOT a "
-        "constant tweak. See the docstring for the attribution this replaced."
-    ),
-)
 def test_mid_axis_recovers_within_its_envelope(recoveries: list[dict]) -> None:
-    """The mid axis should meet its declared <=0.35-of-peak-at-turn-20 envelope.
+    """The mid axis meets its declared <=0.35-of-peak-at-turn-20 envelope.
 
-    Still pinned -- but the previous attribution was WRONG and is recorded here so
-    that nobody re-derives it. It read: "the slow axis is retentive by design and
-    couples into mid via OFF_DIAGONAL_COUPLINGS, so mid relaxes toward a
-    slow-shifted equilibrium". There is no such coupling.
-    ``dynamics/multiscale.py::_advance_axes`` computes mid from ``(mid, fast')``
-    only -- slow is never read by the mid update -- and ``OFF_DIAGONAL_COUPLINGS``
-    is a within-layer axis-to-axis coupling, not a cross-timescale one. Resetting
-    slow to its pre-pulse value after the pulse leaves the mid trajectory
-    bit-identical. Slow is innocent; chasing it would have been wasted work.
+    Was ``xfail(strict)`` through two *different* wrong attributions. Both are kept
+    here, because the way this pin was read is the actual lesson.
 
-    Most of the old headline number was the probe's own error. ``recovery_probe``
-    settled for a fixed 40 turns before sampling the baseline, but mid contracts
-    ~0.934/turn and slow ~0.9872/turn, so at turn 40 the baseline was still moving:
-    baseline(40) is off the settled baseline by 0.032 (mid) / 0.600 (slow). The
-    envelope scores |axes - baseline|, so that drift was counted as un-recovered
-    perturbation. Settling to an exact fixed point of the latent axes (measured:
-    302 turns) drops seed 2718 from 0.57 to 0.28.
+    Attribution 1 (wrong): "slow is retentive by design and couples into mid via
+    OFF_DIAGONAL_COUPLINGS, so mid relaxes toward a slow-shifted equilibrium."
+    There is no such coupling. ``dynamics/multiscale.py::_advance_axes`` computes
+    mid from ``(mid, fast')`` only; slow is never read by the mid update. Resetting
+    slow after the pulse leaves the mid trajectory bit-identical.
 
-    What survives is a genuine, much smaller shortfall: ~9% of sessions still land
-    in 0.35-0.38. No gate constant was moved to hide it -- MID_RECOVERY_RATIO is
-    still 0.35, MID_RECOVERY_TURNS still 20, OFF_DIAGONAL_COUPLINGS and
-    DYNAMICS_STEP_SIZES are untouched. The sample was widened from 3 sessions to 8
-    (matching ``run_gate``'s own default) precisely because 3 was too small to see a
-    ~9% breach rate: seeds 2718-2720 all happen to pass, so the old default would
-    have shown a green tick for a gate that the G0 report fails.
+    Attribution 2 (wrong, and the one that nearly closed the case): "root cause is
+    margin, not a bug -- 0.35@20 leaves almost no headroom against the declared step
+    0.12, so whether a session passes depends on how late mid peaks. Needs an
+    architect ruling on the envelope, NOT another probe fix and NOT a constant
+    tweak." Every number in it was real (29/32 within, breaches at 2725/2744/2745)
+    and the conclusion drawn from them was still wrong. Nothing was wrong with the
+    envelope: the same probe run against pure float64 arithmetic passes 32/32 with a
+    max of 0.338, so the declared 0.35 gate was always satisfiable by the declared
+    dynamics. The breaches were not the architecture failing its own envelope; they
+    were the *storage grid* failing the architecture.
+
+    Real root cause (state codec v1): ``latent_axes`` persisted as float16, and
+    ``orchestrate`` advances the DECODED state, so the persistence grid sat inside
+    the dynamics loop. Mid moves ``0.066*deviation`` per turn; float16 ulp at
+    |mid|~0.3 is 2.4e-4, so every deviation below ~2e-3 had its update rounded to
+    zero and the axis froze mid-recovery. Measured on the same trajectory, float16
+    vs float64: seed 2725 froze at a constant 0.169 from turn 60 onward while
+    float64 decayed 0.011 -> 0.000; turn-200 residual 6.6e-3 vs 3.9e-9. That is not
+    a thin margin, it is a ratchet: each shock left a permanent residue and mid
+    became a second slow axis, with the retention rate set by each axis's absolute
+    magnitude. Widening that one field to float32 (codec v2) restores the declared
+    behaviour: 32/32 within the envelope, max 0.3377, matching the float64 reference
+    to three decimals.
+
+    No gate constant was moved to make this pass. MID_RECOVERY_RATIO is still 0.35,
+    MID_RECOVERY_TURNS still 20, RECOVERY_SESSIONS still 8, DYNAMICS_STEP_SIZES and
+    OFF_DIAGONAL_COUPLINGS untouched, FORMULA_DIGEST unchanged (the codec is not in
+    ``build_formula_manifest``). The fix is in ``state/codec.py``, and
+    ``tests/test_v3_state_codec.py::test_persistence_grid_does_not_swallow_mid_axis_dynamics``
+    pins the root cause directly, so reverting to float16 turns that test red rather
+    than merely nudging this ratio.
+
+    The lesson the module docstring already stated, now demonstrated a third time: a
+    pin records a measurement, not an explanation. This one carried correct numbers
+    under two successive wrong causes, and the second explicitly ruled out the
+    category the bug was actually in.
     """
 
     within = sum(1 for r in recoveries if r["mid_within_envelope"])
