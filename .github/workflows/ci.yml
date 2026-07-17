@@ -188,7 +188,7 @@ jobs:
           python-version: "3.12"
 
       - name: Build plugin zip
-        run: python scripts/package_plugin.py --output dist/plugin.zip
+        run: python scripts/package_plugin.py --channel grey --output dist/plugin.zip
 
       - name: Verify zip contents
         run: |

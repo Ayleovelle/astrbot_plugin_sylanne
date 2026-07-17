@@ -96,7 +96,7 @@ jobs:
 
       - name: Build plugin zip
         if: steps.check.outputs.exists == 'false'
-        run: python scripts/package_plugin.py --output dist/astrbot_plugin_sylanne-${{ steps.version.outputs.version }}.zip
+        run: python scripts/package_plugin.py --channel stable --output dist/astrbot_plugin_sylanne-${{ steps.version.outputs.version }}.zip
 
       - name: Verify zip contents
         if: steps.check.outputs.exists == 'false'
