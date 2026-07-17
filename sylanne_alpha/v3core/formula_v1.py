@@ -246,6 +246,45 @@ SNN_SUMMARY_DEFINITION = (
 # Section 8 spiking-path numeric constants (design 8.1 population/time coding,
 # 8.2 LIF dynamics, 8.3 reward-gated STDP).
 #
+# ############################################################################ #
+# FROZEN — UNDER SENTENCE. NO CHANGE IS ACCEPTED HERE EXCEPT DELETION.
+#
+# The SNN is structurally incapable of firing and is scheduled for removal. Do not
+# tune these, do not "fix" the threshold floor, do not add constants. The only
+# accepted future edit to this block is its deletion in formula v2.
+#
+# Why (measured, not inferred): from ``build_initial_snn_state()`` (v=0, theta=1.0)
+# no neuron can ever reach threshold. Each neuron takes ~4.5 input edges; a perfect
+# simultaneous volley injects ~0.225 against a threshold whose adaptation FLOOR is
+# 0.65 (``SNN_THRESHOLD_BOUNDS``), and recurrent spike injection is ~0.006 — two
+# orders of magnitude short. Max membrane voltage measured over 1000 driven turns:
+# ~0.32. ``snn_summary`` is therefore permanently all-zero, and every SNN-dependent
+# gate (K resampling, learned/frozen/random, STDP vs zero-LR) passes vacuously.
+# The death certificate is ``tests/test_v3_stability_gate.py::test_snn_emits_spikes``
+# (strict xfail — it must stay xfail, and if it ever starts passing, re-read this).
+# ``tests/test_v3_lif_reservoir.py`` only ever sees a spike by pre-charging v=1.5
+# with theta=0.65, which is not a state the real path can reach.
+#
+# formula v2 physically deletes: ``spiking/``, ``SnnState`` and its codec bit-widths,
+# ``Q_MATRIX``, the snn-novelty proposal, the ``SNN_*``/``TAU_*`` constants, the K
+# profile ladder rungs and the K-divergence gate.
+#
+# CAUTION for whoever performs that deletion — removing the SNN is NOT behaviour-
+# neutral, despite ``snn_summary`` being identically zero. The zero summary does make
+# ``Q_MATRIX @ summary`` contribute exactly nothing to the drive (verified: drive is
+# bit-identical across 300/300 turn pairs). But ``snn_summary`` has a SECOND consumer:
+# the snn-novelty proposal (index 6) is gated on ``snn_summary is not None``, not on
+# whether anything spiked, and its salience is ``1.2*summary_value + 0.6*s[5]`` — the
+# ``0.6*s[5]`` novelty term is alive and non-zero regardless of the reservoir's
+# silence. So the proposal is a real competitor under an SNN profile and vanishes
+# entirely under ``DETERMINISTIC_CONTINUOUS_ONLY``. Measured over 300 identical-input
+# turn pairs (FULL_24_NO_STDP vs DETERMINISTIC_CONTINUOUS_ONLY): selected_action
+# differs on 47, broadcast_ids on 59, candidate_posterior on 70. See
+# ``tests/test_v3_orchestrator.py::test_dropping_the_snn_is_not_behaviour_preserving``.
+# Deleting the SNN therefore requires an explicit ruling on what proposal 6 becomes;
+# it is not a free structural cleanup.
+# ############################################################################ #
+#
 # These are the single formula-v1 source for the spiking modules and are never
 # hard-coded elsewhere.  Exactly like ``DECISION_STATE_BLEND`` above, they are
 # intentionally *not* folded into ``build_formula_manifest``, so ``FORMULA_DIGEST``

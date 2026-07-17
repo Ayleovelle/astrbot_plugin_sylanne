@@ -32,16 +32,28 @@ G1/G3/G4 gates on frozen real data.
 
 Known production defects pinned below
 -------------------------------------
-Two declared invariants still fail against real code. They are pinned with
+Two declared invariants still fail against real code (``test_snn_emits_spikes``:
+the reservoir is structurally silent; ``test_mid_axis_recovers_within_its_envelope``:
+~9% of sessions miss the declared 0.35 mid envelope). They are pinned with
 ``xfail(strict=True)`` rather than deleted, weakened, or skipped: the suite fails
-if any of them starts passing, which forces re-reading the gate the moment
-someone fixes the underlying defect. Each names its measured root cause.
+if either starts passing, which forces re-reading the gate the moment someone
+fixes the underlying defect. Each names its measured root cause.
 
-That mechanism has now paid out once: the third pin
-(``test_invocations_are_not_rejected_wholesale``, the STATE_QUANTIZE_ERROR
-livelock) started passing when the float16 bound vocabulary was fixed, the strict xfail
-failed the suite, and the gate was re-read and the test converted to a plain
-assertion carrying its own history.
+That mechanism has now paid out twice, and both payouts are worth reading before
+trusting any pin here:
+
+* ``test_invocations_are_not_rejected_wholesale`` (the STATE_QUANTIZE_ERROR
+  livelock) started passing when the float16 bound vocabulary was fixed, the
+  strict xfail failed the suite, and the test was converted to a plain assertion
+  carrying its own history.
+* ``test_mid_axis_recovers_within_its_envelope`` stayed red but for an entirely
+  different reason than its pin claimed: it blamed a mid<-slow coupling that does
+  not exist in ``_advance_axes``, when most of the measured shortfall was the
+  probe's own 40-turn settle and the small remainder is the envelope's thin
+  margin. **A pin records a measurement; it does not license the explanation
+  attached to it.** Re-measure before trusting a pin's reason -- and size the
+  sample for the defect rate you mean to detect, which is why RECOVERY_SESSIONS
+  is no longer 3.
 """
 
 from __future__ import annotations
@@ -59,7 +71,11 @@ LONG_GATES = os.environ.get("SYLANNE_V3_LONG_GATES") == "1"
 FULL_GATE_TURNS = 100_000
 DEFAULT_TURNS = 400
 STREAM_TURNS = FULL_GATE_TURNS if LONG_GATES else DEFAULT_TURNS
-RECOVERY_SESSIONS = 32 if LONG_GATES else 3
+#: Matches ``run_gate``'s own default. Was 3, which was too small a sample to see the
+#: mid envelope's ~9% breach rate: seeds 2718-2720 all pass, so the suite showed a
+#: green tick for an envelope the G0 report fails. Sizing a sample below the defect
+#: rate it is meant to detect is not a saving.
+RECOVERY_SESSIONS = 32 if LONG_GATES else 8
 K_TURNS = 2_000 if LONG_GATES else 60
 
 
@@ -223,16 +239,49 @@ def test_invocations_are_not_rejected_wholesale(stream: v3_stability.StreamStats
 @pytest.mark.xfail(
     strict=True,
     reason=(
-        "Declared mid-axis envelope is not met (measured ratio-to-peak ~0.57 at turn 20 "
-        "against a <=0.35 gate), and the mid perturbation starts RISING again around "
-        "turn 17. The slow axis is retentive by design (17.4 permits it not to return) "
-        "and couples into mid via OFF_DIAGONAL_COUPLINGS, so mid relaxes toward a "
-        "slow-shifted equilibrium rather than the pre-pulse baseline. Needs an "
-        "architect ruling: either the envelope is measured against the shifted "
-        "equilibrium, or the mid<-slow coupling/step constants are wrong."
+        "MEASURED (re-attributed): the declared mid envelope is met by only ~91% of "
+        "sessions, not the required 99.9%. Across seeds 2718-2749: 29/32 within <=0.35, "
+        "breaches at 2725 (0.379), 2744 (0.360), 2745 (0.355); the whole distribution "
+        "sits at 0.26-0.38 against a 0.35 gate. Root cause is margin, not a bug: mid "
+        "integrates fast' so its perturbation PEAKS ~3-5 turns after the pulse, and it "
+        "then contracts ~0.934/turn, giving ratio@20 ~= 0.934**(20-peak_turn) -- 0.313 "
+        "for a turn-3 peak but 0.359 for a turn-5 peak, which is already over the gate. "
+        "Whether a session passes therefore depends on how late the pulse makes mid "
+        "peak. Needs an architect ruling on the envelope itself (0.35@20 leaves almost "
+        "no margin against the declared step 0.12), NOT another probe fix and NOT a "
+        "constant tweak. See the docstring for the attribution this replaced."
     ),
 )
 def test_mid_axis_recovers_within_its_envelope(recoveries: list[dict]) -> None:
+    """The mid axis should meet its declared <=0.35-of-peak-at-turn-20 envelope.
+
+    Still pinned -- but the previous attribution was WRONG and is recorded here so
+    that nobody re-derives it. It read: "the slow axis is retentive by design and
+    couples into mid via OFF_DIAGONAL_COUPLINGS, so mid relaxes toward a
+    slow-shifted equilibrium". There is no such coupling.
+    ``dynamics/multiscale.py::_advance_axes`` computes mid from ``(mid, fast')``
+    only -- slow is never read by the mid update -- and ``OFF_DIAGONAL_COUPLINGS``
+    is a within-layer axis-to-axis coupling, not a cross-timescale one. Resetting
+    slow to its pre-pulse value after the pulse leaves the mid trajectory
+    bit-identical. Slow is innocent; chasing it would have been wasted work.
+
+    Most of the old headline number was the probe's own error. ``recovery_probe``
+    settled for a fixed 40 turns before sampling the baseline, but mid contracts
+    ~0.934/turn and slow ~0.9872/turn, so at turn 40 the baseline was still moving:
+    baseline(40) is off the settled baseline by 0.032 (mid) / 0.600 (slow). The
+    envelope scores |axes - baseline|, so that drift was counted as un-recovered
+    perturbation. Settling to an exact fixed point of the latent axes (measured:
+    302 turns) drops seed 2718 from 0.57 to 0.28.
+
+    What survives is a genuine, much smaller shortfall: ~9% of sessions still land
+    in 0.35-0.38. No gate constant was moved to hide it -- MID_RECOVERY_RATIO is
+    still 0.35, MID_RECOVERY_TURNS still 20, OFF_DIAGONAL_COUPLINGS and
+    DYNAMICS_STEP_SIZES are untouched. The sample was widened from 3 sessions to 8
+    (matching ``run_gate``'s own default) precisely because 3 was too small to see a
+    ~9% breach rate: seeds 2718-2720 all happen to pass, so the old default would
+    have shown a green tick for a gate that the G0 report fails.
+    """
+
     within = sum(1 for r in recoveries if r["mid_within_envelope"])
     assert within / len(recoveries) >= v3_stability.RECOVERY_SESSION_FRACTION
 

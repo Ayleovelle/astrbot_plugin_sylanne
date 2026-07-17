@@ -84,8 +84,20 @@ class IsolationCounters:
 
 
 #: Declared outcome tokens for one processed (or rejected) shadow invocation.
+#:
+#: ``COMMITTED_ORPHANED`` is the honest token for "the CAS commit reached the disk
+#: but the supervising await was cut off before it could be recorded".  It exists
+#: because the commit offload is deliberately unbounded while ``terminate``'s drain
+#: is not: when the drain deadline expires, step 7 cancels the driver mid-await and
+#: the write still lands.  That turn IS published, so it must not be reported as any
+#: ``DROPPED_*`` token and specifically not as ``SHUTDOWN_DROPPED`` -- that token
+#: means the shutdown fence *prevented* publication, which would be a lie here.
+#: The distinction is load-bearing: ``COMMITTED`` means committed and supervised,
+#: ``COMMITTED_ORPHANED`` means committed with the supervision lost, so a reader
+#: knows the on-disk revision advanced but this record's stage timings did not.
 TELEMETRY_OUTCOMES = (
     "COMMITTED",
+    "COMMITTED_ORPHANED",
     "DROPPED_QUEUE_FULL",
     "DROPPED_ADMISSION_CLOSED",
     "DROPPED_DUPLICATE",

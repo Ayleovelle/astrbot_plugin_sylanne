@@ -23,6 +23,15 @@ cancellation callback.  A deadline (or executor) timeout discards the entire par
 invocation: no state, no trace, no telemetry join target — only bounded
 :class:`RuntimeTelemetry`.  A sealed/older writer epoch can never publish.
 
+The one stage that is *not* deadline-bounded is the CAS commit: orphaning a commit
+cannot cancel the thread, so the write could still land after we recorded the turn
+as dropped, and a torn ledger is worse than a slow one.  Because ``terminate``'s
+drain *is* bounded, a slow commit can outlive the drain and have its supervising
+await cancelled; :meth:`ShadowSupervisor._commit_offload` therefore fences the
+commit with a done-callback that reports the real outcome (``COMMITTED_ORPHANED``
+when the write landed unsupervised) even though the awaiting coroutine never
+resumes.  The ledger, the telemetry and the disk cannot disagree.
+
 ``initialize`` / ``terminate`` are idempotent.  ``terminate`` performs the exact
 ordered teardown of plan Task 12 and does not return until every v3 worker thread has
 exited and every tracked task is gathered.
@@ -541,10 +550,7 @@ class ShadowSupervisor:
                 break
             for job in batch:
                 await self._process_job(job)
-                if self._outstanding > 0:
-                    self._outstanding -= 1
-                if self._outstanding == 0 and self._all_done is not None:
-                    self._all_done.set()
+                self._release_outstanding()
 
     async def _idle_replay_sidecar(self) -> None:
         # Read-only idle replay is an observability/calibration sidecar (design 16.3):
@@ -687,8 +693,11 @@ class ShadowSupervisor:
         # and main.py awaits terminate() without a wait_for.  A wedged commit therefore
         # wedges v3 shutdown (it can no longer wedge v2's loop, which is the point of
         # this fix).  If the drain deadline expires first, step 7 cancels the driver
-        # mid-await: the write still lands but this job's _finalize/_emit never run.
-        outcome = await self._offload(self._committer.commit_turn, command, timeout=None)
+        # mid-await -- the write still lands, so ``_commit_offload`` installs an orphan
+        # fence that records the real outcome even though this coroutine never resumes.
+        outcome = await self._commit_offload(
+            command, job, profile.profile_id, selection.level, checkpoints, compute_us
+        )
         if outcome.status is CommitStatus.COMMITTED:
             self._p95_samples.append(compute_us / 1000.0)
             self._finalize(job, dropped=False)
@@ -739,6 +748,126 @@ class ShadowSupervisor:
             return future.result()
         finally:
             self._inflight = None
+
+    async def _commit_offload(
+        self, command, job: ShadowJob, profile_id: str, level: int, checkpoints: list, compute_us: float
+    ):
+        """Offload the unbounded CAS commit behind a fence that survives our cancellation.
+
+        The problem this solves: the commit is deliberately not bounded by the job
+        timeout (orphaning a commit cannot cancel the thread, so a torn ledger is worse
+        than a slow one), but ``terminate``'s step-4 drain *is* bounded.  When that drain
+        expires with a commit in flight, step 7 cancels the driver task mid-await.  The
+        write still lands -- but ``_process_job`` never resumes, so ``_finalize``/
+        ``_emit`` never ran: the turn published, yet the ledger said nothing, telemetry
+        was empty, and ``outstanding`` stayed at 1 because the CancelledError unwinds
+        straight through ``_pump``'s decrement.  The ledger and the disk disagreed about
+        a turn that really happened.
+
+        The fence is a done-callback on the *executor* future, not on the asyncio
+        wrapper.  That distinction is the whole trick: cancelling the wrapper fires its
+        callbacks immediately with a CancelledError, when the true commit status is still
+        unknown; the concurrent future completes only when the worker thread is actually
+        finished and therefore carries the real status.  ``concurrent.futures`` runs that
+        callback on the worker thread, so it is reposted to the loop.
+
+        Why the repost is guaranteed to be executed rather than dropped on the floor:
+        terminate step 9 awaits ``asyncio.to_thread(executor.shutdown, wait=True)``, so
+        (a) the loop is provably alive and being serviced for the whole window, and (b)
+        that shutdown joins the worker thread, which cannot happen until this callback
+        has already run and queued its repost.  The repost is therefore in the loop's
+        ready queue before step 9's own await can resume, and runs before terminate
+        returns -- ``outstanding`` reaches zero and the ledger matches the disk.
+        """
+
+        assert self._loop is not None and self._executor is not None
+        executor_future = self._executor.submit(self._committer.commit_turn, command)
+        awaited = asyncio.wrap_future(executor_future, loop=self._loop)
+        # Registered AFTER wrap_future, so the wrapper's own state-copy callback runs
+        # first and the awaiting driver is always given its turn ahead of the fence.
+        executor_future.add_done_callback(
+            lambda done_future: self._repost_orphan_fence(
+                done_future, awaited, job, profile_id, level, checkpoints, compute_us
+            )
+        )
+        self._inflight = awaited
+        try:
+            return await awaited
+        finally:
+            self._inflight = None
+
+    def _repost_orphan_fence(self, executor_future, awaited, job, profile_id, level, checkpoints, compute_us) -> None:
+        """Runs on the v3 worker thread: hop the decision back onto the loop."""
+
+        loop = self._loop
+        if loop is None or loop.is_closed():
+            return
+        try:
+            loop.call_soon_threadsafe(
+                self._settle_orphaned_commit,
+                executor_future, awaited, job, profile_id, level, checkpoints, compute_us,
+            )
+        except RuntimeError:  # pragma: no cover - the loop closed between check and call
+            pass
+
+    def _settle_orphaned_commit(
+        self, executor_future, awaited, job, profile_id, level, checkpoints, compute_us
+    ) -> None:
+        """Runs on the loop: record a commit whose supervising await was cut off.
+
+        Fires only when ``awaited`` was cancelled, which is exactly "the driver was
+        cancelled out of the await and will never record this outcome".  When the await
+        is intact the driver owns the outcome and this is a no-op, so the two paths can
+        never both finalize the same job.  Both run on the loop thread, so the check and
+        the finalize are not racing each other.
+        """
+
+        if not awaited.cancelled():
+            return  # the awaiting driver resumed normally and owns this outcome
+
+        if executor_future.cancelled() or executor_future.exception() is not None:
+            # Nothing reached the repository: either the executor shutdown cancelled a
+            # commit that had not started, or commit_turn raised. Reporting the fence as
+            # the reason publication did not happen is accurate here (unlike the
+            # COMMITTED case, where SHUTDOWN_DROPPED would be a lie).
+            self._finalize(job, dropped=True)
+            self._emit(
+                job, "SHUTDOWN_DROPPED", dropped=True, timed_out=False, checkpoints=checkpoints,
+                profile_id=profile_id, level=level,
+            )
+            self._release_outstanding()
+            return
+
+        outcome = executor_future.result()
+        if outcome.status is CommitStatus.COMMITTED:
+            # The write is on disk. Say so, and mark the ledger committed to match it.
+            self._finalize(job, dropped=False)
+            self._emit(
+                job, "COMMITTED_ORPHANED", dropped=False, timed_out=False, checkpoints=checkpoints,
+                profile_id=profile_id, level=level, commit_status=outcome.status.name, cas=True,
+                stage_timings=(("compute_us", compute_us),),
+            )
+        elif outcome.status is CommitStatus.STALE_EPOCH:
+            self._finalize(job, dropped=True)
+            self._emit(
+                job, "DROPPED_STALE_EPOCH", dropped=True, timed_out=False, checkpoints=checkpoints,
+                profile_id=profile_id, level=level, commit_status=outcome.status.name,
+            )
+        else:
+            self._finalize(job, dropped=True)
+            self._emit(
+                job, "DROPPED_COMMIT_CONFLICT", dropped=True, timed_out=False, checkpoints=checkpoints,
+                profile_id=profile_id, level=level, commit_status=outcome.status.name,
+            )
+        self._release_outstanding()
+
+    def _release_outstanding(self) -> None:
+        """Retire exactly one accepted job from the outstanding count."""
+
+        if self._outstanding > 0:
+            self._outstanding -= 1
+        if self._outstanding == 0 and self._all_done is not None:
+            self._all_done.set()
 
     async def _run_core(self, invocation: CoreInvocation):
         return await self._offload(self._compute, invocation, timeout=self._job_timeout_s)

@@ -228,6 +228,85 @@ def test_reuse_without_prior_summary_degrades_deterministically_to_continuous_on
     assert reuse.trace.degradation_reason == "REUSE_WITHOUT_SUMMARY_FALLBACK"
 
 
+def test_a_silent_reservoir_contributes_exactly_nothing_to_the_drive() -> None:
+    """The Q*summary half of the SNN really is inert: the drive is bit-identical.
+
+    This is the *true* half of the "the SNN is behaviourally dead" argument. The
+    reservoir never fires, so ``snn_summary`` is identically zero and
+    ``Q_MATRIX @ summary`` adds only exact zeros to an fsum. Nothing about the drive
+    changes when the SNN is dropped.
+
+    See ``test_dropping_the_snn_is_not_behaviour_preserving`` for the half that is
+    false -- the drive is not the only consumer of ``snn_summary``.
+    """
+
+    snn = orchestrate(
+        CoreInvocation(
+            envelope=_envelope(profile="FULL_24_NO_STDP"),
+            base_state=_base_state(),
+            projected_actual_outcome=(Action.SPEAK, None),
+        )
+    )
+    continuous = orchestrate(
+        CoreInvocation(
+            envelope=_envelope(profile="DETERMINISTIC_CONTINUOUS_ONLY"),
+            base_state=_base_state(),
+            projected_actual_outcome=(Action.SPEAK, None),
+        )
+    )
+    assert snn.accepted and continuous.accepted
+    assert snn.trace.spike_counts == tuple(0 for _ in range(formula.SNN_NEURONS)), (
+        "this test assumes the measured silent reservoir; if it spikes, re-read the gate"
+    )
+    assert snn.trace.drive == continuous.trace.drive
+
+
+def test_dropping_the_snn_is_not_behaviour_preserving() -> None:
+    """Switching an SNN profile to DETERMINISTIC_CONTINUOUS_ONLY CHANGES decisions.
+
+    This pins the reason the silent reservoir cannot simply be switched off as a
+    free, behaviour-preserving optimisation, which is the intuitive (and wrong)
+    conclusion from "snn_summary is always zero".
+
+    Root cause: ``snn_summary`` has two consumers, not one. The drive consumer is
+    genuinely inert (see the test above). But ``workspace/competition.py`` gates the
+    snn-novelty proposal on ``PROPOSAL_REQUIRES_VALID_SNN_SUMMARY[6]`` -- i.e. on
+    ``snn_summary is not None``, NOT on whether the reservoir actually spiked -- and
+    that proposal's salience is ``1.2*summary_value + 0.6*s[5]``. With a silent
+    reservoir the first term is zero but ``0.6*s[5]`` (the novelty axis) is not, so
+    the proposal is a live competitor carrying real salience under any SNN profile
+    and is dropped from the competition entirely under DETERMINISTIC_CONTINUOUS_ONLY.
+    Removing a non-zero-salience competitor changes which proposals win workspace
+    slots, hence broadcast_ids, hence the posterior, hence the selected action.
+
+    Measured over 300 identical-input turn pairs: selected_action differs on 47,
+    broadcast_ids on 59, candidate_posterior on 70 -- ~16% of decisions.
+
+    If this ever starts passing (the profiles becoming equivalent), the switch this
+    blocks becomes safe and the assertion below must be re-read, not deleted.
+    """
+
+    from sylanne_alpha.v3core.observation.encoder import encode_observation
+    from sylanne_alpha.v3core.observation.models import ObservationFacts
+    from sylanne_alpha.v3core.workspace.competition import proposal_salience
+
+    frame = encode_observation(
+        ObservationFacts(raw_values=_raw_values(), context=TurnContextClass.ADDRESSED)
+    )
+    silent_summary = tuple(0.0 for _ in range(formula.SNN_SUMMARY_DIM))
+    decision_state = (0.0, 0.0, 0.0, 0.0, 0.0, 0.42, 0.0, 0.0)  # novelty axis s[5] non-zero
+
+    with_snn = proposal_salience(6, decision_state, frame, silent_summary)
+    without_snn = proposal_salience(6, decision_state, frame, None)
+
+    # Identical salience -- the silence of the reservoir is irrelevant to it ...
+    assert with_snn[0] == without_snn[0] == pytest.approx(0.6 * 0.42)
+    assert with_snn[0] != 0.0, "a zero-salience proposal would make its removal harmless"
+    # ... but the profile flag alone decides whether it competes at all.
+    assert with_snn[1] is True, "snn-novelty competes under an SNN profile"
+    assert without_snn[1] is False, "snn-novelty vanishes without one"
+
+
 # --------------------------------------------------------------------------- #
 # Acyclic digest order payload -> trace -> journal
 # --------------------------------------------------------------------------- #

@@ -5,8 +5,9 @@ out-of-order, extreme, and malformed turns and checks the declared invariants:
 
 * no NaN/Inf and no state outside declared bounds;
 * recovery envelopes after a single extreme pulse (fast axis to <=10% within 8
-  neutral turns, mid axis to <=35% within 20), with online learning frozen so the
-  probe measures the declared dynamics rather than a moving target;
+  neutral turns, mid axis to <=35% within 20), with online learning frozen and the
+  baseline settled to an exact fixed point so the probe measures the declared
+  dynamics rather than a moving target;
 * slow state stays bounded, moves at most 0.03 per neutral turn, and cannot by
   itself lock an action at posterior >0.98 for 20 eligible turns;
 * no permanent all-speak, all-hold, workspace winner lock, or weight saturation;
@@ -69,6 +70,11 @@ FAST_RECOVERY_RATIO = 0.10
 MID_RECOVERY_TURNS = 20
 MID_RECOVERY_RATIO = 0.35
 SLOW_MAX_STEP = 0.03
+#: Upper bound on the settle loop below; reaching it is a probe hard-failure, never
+#: a silent downgrade to "close enough".  Measured settle cost is 302 turns, so this
+#: is >3x headroom.  Kept <= the 1000 pulse turn index so the two seed streams in
+#: ``recovery_probe`` cannot collide.
+SETTLE_MAX_TURNS = 1000
 POSTERIOR_LOCK_LEVEL = 0.98
 POSTERIOR_LOCK_TURNS = 20
 MAX_JS_DIVERGENCE = 0.02
@@ -359,8 +365,46 @@ def recovery_probe(seed: int) -> dict:
             state = result.state_delta.next_state
         return result
 
-    for index in range(40):  # settle to the neutral fixed point
+    # Settle to the ACTUAL neutral fixed point rather than for an arbitrary turn
+    # count.  A fixed 40-turn settle was the dominant term in this probe's error:
+    # the mid axis contracts ~0.934/turn and the slow axis ~0.9872/turn, so at turn
+    # 40 the baseline is still drifting.  Measured, baseline(40) differs from the
+    # settled baseline by 0.032 (mid) and 0.600 (slow) -- and because the envelope
+    # is |axes - baseline|, that drift was scored as if it were un-recovered
+    # perturbation.  It is not: it is baseline error.  With a true fixed point the
+    # mid ratio drops from ~0.57 to ~0.28 (seed 2718) and the declared <=0.35
+    # envelope is met.
+    #
+    # The stop condition is an EXACT fixed point of the measured quantity: the
+    # latent axes are persisted on the float16 grid, so once the per-turn increment
+    # falls below the grid the axes stop changing bit-for-bit and stay stopped.
+    # Exact equality is reachable here (measured: turn 302, all seeds) and is
+    # strictly stronger than comparing quantized bytes.
+    #
+    # NOTE: the stop condition is deliberately NOT "encode_state bytes repeat".
+    # ``encode_state`` serializes ``revision``, ``last_committed_turn_id``,
+    # ``last_committed_turn_sequence``, ``pending_outcome`` and the ``experiences``
+    # ring, every one of which is fresh per turn by construction -- so the full
+    # state bytes provably never repeat and such a loop would always run to the cap
+    # and hard-fail.  Measured over 1000 neutral turns those five fields are the
+    # only ones still changing after the dynamics have stopped.
+    previous_axes: tuple | None = None
+    settle_turns: int | None = None
+    for index in range(SETTLE_MAX_TURNS):
         step(_neutral_raw(), index)
+        current_axes = tuple(state.latent_axes)
+        if previous_axes is not None and current_axes == previous_axes:
+            settle_turns = index + 1
+            break
+        previous_axes = current_axes
+    if settle_turns is None:
+        # Hard-fail: never measure an envelope against a moving baseline.  A probe
+        # that silently degraded here would report baseline drift as perturbation,
+        # which is exactly the defect this settle replaced.
+        raise StabilityFailure(
+            f"the neutral fixed point was not reached within {SETTLE_MAX_TURNS} turns: "
+            "the recovery envelope cannot be measured against a moving baseline"
+        )
     baseline = tuple(state.latent_axes)
 
     step(_extreme_raw(rng), 1000)  # one extreme pulse
@@ -408,6 +452,7 @@ def recovery_probe(seed: int) -> dict:
         "mid_ratio": mid_ratio,
         "fast_peak": fast_peak,
         "mid_peak": mid_peak,
+        "settle_turns": settle_turns,
         "fast_within_envelope": (fast_ratio or 0.0) <= FAST_RECOVERY_RATIO,
         "mid_within_envelope": (mid_ratio or 0.0) <= MID_RECOVERY_RATIO,
         "max_slow_step": max(slow_steps) if slow_steps else 0.0,

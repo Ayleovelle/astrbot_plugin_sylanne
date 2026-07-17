@@ -619,6 +619,152 @@ def test_terminate_does_not_stall_the_event_loop_while_the_repo_lock_is_held(tmp
     asyncio.run(scenario(tmp_path))
 
 
+class _SlowTailCommitter:
+    """A committer whose write lands normally but whose ``commit_turn`` *return* is slow.
+
+    The delay is deliberately placed AFTER ``inner.commit_turn`` has published the
+    pointer and released the cross-process repo lock. That placement is what makes the
+    orphan reachable, and it was found by measurement rather than assumed:
+
+    Blocking *inside* the lock (the ``FaultPoint.BEFORE_POINTER_PUBLISH`` injector used
+    by the seal_epoch test) does NOT orphan anything. terminate's step-6 seal_epoch
+    takes that same non-reentrant lock, so it waits for the commit to release it; while
+    step 6 is awaiting, the loop is free, the driver resumes and records a perfectly
+    ordinary ``COMMITTED`` -- measured: telemetry ``['COMMITTED']``, outstanding 0.
+    Step 7 never gets to cancel anything.
+
+    A slow tail after the pointer publish is the shape that survives: the lock is free
+    so step 6 sails past, and step 7 then cancels the driver while the write is already
+    on disk and ``commit_turn`` has not yet returned. That is a real profile -- the
+    journal fsync, lock release and outcome construction all happen after the write.
+    """
+
+    def __init__(self, inner: EffectCommitter, *, tail_s: float) -> None:
+        self._inner = inner
+        self._tail_s = tail_s
+        self.write_landed = threading.Event()
+
+    def __getattr__(self, name):  # acquire_epoch / seal_epoch / load_state / everything else
+        return getattr(self._inner, name)
+
+    def commit_turn(self, command):
+        outcome = self._inner.commit_turn(command)  # the write lands, the lock is released
+        self.write_landed.set()
+        time.sleep(self._tail_s)  # ... and the call has still not returned
+        return outcome
+
+
+def test_a_commit_that_outlives_the_drain_is_reported_not_silently_orphaned(tmp_path) -> None:
+    """A commit that lands after terminate cut the await must still be accounted for.
+
+    The defect: the commit offload is deliberately unbounded but terminate's step-4
+    drain is not. When the drain expires with the commit still in flight, step 7 cancels
+    the driver mid-await. The write still reaches the disk -- but ``_process_job`` never
+    resumed, so ``_finalize``/``_emit`` never ran. The turn was published while the
+    ledger said nothing, telemetry held no record of it, and ``outstanding`` stayed at 1
+    forever, so ``join()`` could never return.
+
+    Asserted here: the revision on disk really did advance (the write was NOT
+    prevented), telemetry names it ``COMMITTED_ORPHANED`` rather than any DROPPED_*
+    token, the ledger agrees with the disk, and outstanding is back to zero.
+    """
+
+    async def scenario(tmp_path):
+        inner = EffectCommitter.open(tmp_path)
+        ref = _session_ref()
+        _seed_session(inner, ref)
+        before = inner.load_state(ref)
+        committer = _SlowTailCommitter(inner, tail_s=0.5)
+        ledger = SequenceLedger()
+        telemetry = TelemetrySink()
+        supervisor = ShadowSupervisor(
+            committer=committer,
+            ledger=ledger,
+            counters=IsolationCounters(),
+            telemetry_sink=telemetry,
+            job_timeout_s=None,
+            drain_timeout_s=0.05,  # expires long before the 0.5 s tail finishes
+        )
+        await supervisor.initialize()
+        job = _make_job(ledger, ref, supervisor.epoch)
+        supervisor.offer(job)
+
+        # Tear down at the exact moment the write is on disk but commit_turn has not
+        # returned: this is the window in which step 7 cancels the supervising await.
+        assert await asyncio.to_thread(committer.write_landed.wait, 5.0), (
+            "the write never landed: the test would prove nothing"
+        )
+        await supervisor.terminate()
+
+        # The fence must have run by the time terminate() returned.
+        assert supervisor.outstanding == 0, "an orphaned commit left the job outstanding forever"
+
+        outcomes = [t.outcome for t in telemetry.recent()]
+        assert "COMMITTED_ORPHANED" in outcomes, f"the landed write went unreported: {outcomes}"
+        assert "COMMITTED" not in outcomes, (
+            f"the await was not actually cut off, so this proves nothing: {outcomes}"
+        )
+        assert not any(o.startswith("DROPPED_") for o in outcomes), (
+            f"a write that reached the disk was reported as dropped: {outcomes}"
+        )
+        assert "SHUTDOWN_DROPPED" not in outcomes, (
+            "SHUTDOWN_DROPPED claims the fence prevented publication, but it did not"
+        )
+
+        record = next(t for t in telemetry.recent() if t.outcome == "COMMITTED_ORPHANED")
+        assert record.dropped is False and record.cas_committed is True
+        assert record.commit_status == "COMMITTED"
+
+        # The ledger must agree with the disk: both say this turn was committed.
+        after = inner.load_state(ref)
+        assert after.state.revision > before.state.revision, "the commit did not actually land"
+        assert ledger.status_high_watermarks(ref).committed == job.sequence
+
+    asyncio.run(scenario(tmp_path))
+
+
+def test_an_orphaned_commit_retires_its_outstanding_accounting(tmp_path) -> None:
+    """The fence retires the job's accounting without disturbing the teardown order.
+
+    Same cut-off scenario as above, seen from the accounting side: without the fence
+    ``_pump``'s decrement never runs (the CancelledError unwinds straight through it),
+    so ``outstanding`` stays at 1 and ``_all_done`` is never set. Measured RED here:
+    ``assert 1 == 0``.
+
+    Deliberately NOT claimed: that ``supervisor.join()`` would hang. It would not --
+    ``join()`` short-circuits on ``not self._initialized``, and ``terminate()`` clears
+    that flag, so a post-terminate join returns immediately either way. The damage from
+    the leak is the accounting itself (``outstanding``/``_all_done`` disagreeing with
+    reality, and the ledger disagreeing with the disk -- see the test above), not a
+    literal hang.
+    """
+
+    async def scenario(tmp_path):
+        inner = EffectCommitter.open(tmp_path)
+        ref = _session_ref()
+        _seed_session(inner, ref)
+        committer = _SlowTailCommitter(inner, tail_s=0.4)
+        ledger = SequenceLedger()
+        supervisor = ShadowSupervisor(
+            committer=committer,
+            ledger=ledger,
+            counters=IsolationCounters(),
+            telemetry_sink=TelemetrySink(),
+            job_timeout_s=None,
+            drain_timeout_s=0.05,
+        )
+        await supervisor.initialize()
+        supervisor.offer(_make_job(ledger, ref, supervisor.epoch))
+        assert await asyncio.to_thread(committer.write_landed.wait, 5.0), "the write never landed"
+        await supervisor.terminate()
+
+        assert supervisor.outstanding == 0
+        # The exact ordered teardown is unchanged by the fence.
+        assert supervisor.shutdown_trace == SHUTDOWN_ORDER
+
+    asyncio.run(scenario(tmp_path))
+
+
 def test_profile_is_frozen_before_the_core_runs(tmp_path) -> None:
     async def scenario(tmp_path):
         recorder = _Recorder()
