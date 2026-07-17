@@ -10,7 +10,7 @@ unsigned 8-bit for quantized observations, exactly as design section 13
 prescribes.  ``encode_state`` is deterministic; ``decode_state`` is its exact
 inverse for a canonically quantized state and fails closed on any malformed
 input (bad magic/version, CRC mismatch, truncation, trailing bytes, non-finite
-floats, Dale-violating SNN weights, or out-of-bounds values).
+floats, or out-of-bounds values).
 
 The one exception to the half-float rule is ``latent_axes`` (codec **v2**), which
 is packed as single floats (``>f``).  The storage grid is not a neutral encoding
@@ -52,8 +52,6 @@ from .models import (
     EXPERIENCE_FEATURE_DIM,
     EXPERIENCE_REWARD_DIM,
     LATENT_DIM,
-    PLASTIC_SYNAPSE_COUNT,
-    SNN_NEURON_COUNT,
     STYLE_RING_CAPACITY,
     STYLE_SIGNATURE_FIELDS,
     THETA_PARAMS,
@@ -61,7 +59,6 @@ from .models import (
     ActionBeliefs,
     ExperienceRecord,
     PendingOutcome,
-    SnnState,
     V3State,
 )
 from ..contracts import Action, SessionRef, TurnSequence
@@ -69,13 +66,20 @@ from ..contracts import Action, SessionRef, TurnSequence
 
 STATE_CODEC_MAGIC = b"SYL3ST"
 
-#: v1 packed ``latent_axes`` as float16; v2 widens that one field to float32
-#: because the float16 grid froze the mid timescale (see the module docstring).
-#: Encoding always emits the current version; decoding accepts every version in
-#: ``SUPPORTED_STATE_CODEC_VERSIONS`` so a v1 blob written before the fix still
-#: loads.  Widening is read-only: there is no v2 -> v1 path and none is wanted.
-STATE_CODEC_VERSION = 2
-SUPPORTED_STATE_CODEC_VERSIONS = (1, 2)
+#: v1 packed ``latent_axes`` as float16; v2 widened that one field to float32
+#: (the float16 grid froze the mid timescale; see the module docstring); v3 deleted
+#: the SNN sub-state (``SnnState``) and the pending outcome's STDP fields
+#: (``stdp_credit_enabled`` + ``packed_eligibility``) when formula v2 removed the
+#: spiking subsystem.  Encoding always emits the current version; decoding accepts
+#: every version in ``SUPPORTED_STATE_CODEC_VERSIONS``.  The v1/v2 -> v3 read
+#: migration is lossy by design: a legacy blob's SnnState segment and STDP pending
+#: fields are read past and DISCARDED (the SNN no longer exists), then the next
+#: encode re-emits the state as v3.  There is no forward (v3 -> v2/v1) path.
+STATE_CODEC_VERSION = 3
+SUPPORTED_STATE_CODEC_VERSIONS = (1, 2, 3)
+#: The legacy (v1/v2) SnnState segment was sized by these frozen constants; kept
+#: here only so the read migration can skip past a legacy segment exactly.
+_LEGACY_SNN_NEURON_COUNT = 96
 MAX_STATE_BYTES_DEFAULT = None
 
 _ACTION_ORDER = (Action.SPEAK, Action.HOLD, Action.CLARIFY, Action.REACH)
@@ -262,7 +266,6 @@ def encode_state(state: V3State, *, max_bytes: int | None = MAX_STATE_BYTES_DEFA
     writer.u16(STATE_CODEC_VERSION)
     _write_header(writer, state)
     _write_continuous(writer, state)
-    _write_snn(writer, state.snn)
     _write_beliefs(writer, state.action_beliefs)
     _write_summary(writer, state.last_snn_summary)
     _write_pending(writer, state.pending_outcome)
@@ -302,20 +305,6 @@ def _write_continuous(writer: _Writer, state: V3State) -> None:
     writer.u8(len(state.style_ring))
     for signature in state.style_ring:
         writer.u8_vec(signature)
-
-
-def _write_snn(writer: _Writer, snn: SnnState | None) -> None:
-    if snn is None:
-        writer.u8(0)
-        return
-    writer.u8(1)
-    writer.f16_vec(snn.voltages)
-    writer.f16_vec(snn.thresholds)
-    writer.f16_vec(snn.pre_trace)
-    writer.f16_vec(snn.post_trace)
-    writer.u32(len(snn.plastic_weights))
-    writer.f16_vec(snn.plastic_weights)
-    writer.f16_vec(snn.eligibility)
 
 
 def _write_beliefs(writer: _Writer, beliefs: ActionBeliefs | None) -> None:
@@ -360,7 +349,6 @@ def _write_pending(writer: _Writer, pending: PendingOutcome | None) -> None:
     writer.sequence(pending.sequence)
     writer.u8(_action_code(pending.action))
     writer.u8(_action_code(pending.projected_actual_action))
-    writer.u8(1 if pending.stdp_credit_enabled else 0)
     for values in (
         pending.c,
         pending.v_c,
@@ -371,12 +359,6 @@ def _write_pending(writer: _Writer, pending: PendingOutcome | None) -> None:
     ):
         _write_optional_axis_vector(writer, values)
     writer.f16(pending.reward_scale)
-    if pending.packed_eligibility is None:
-        writer.u8(0)
-    else:
-        writer.u8(1)
-        writer.u32(len(pending.packed_eligibility))
-        writer.f16_vec(pending.packed_eligibility)
     writer.opt_sequence(pending.expiry_sequence)
     writer.string(pending.preference_revision)
     writer.string(pending.preference_digest)
@@ -440,10 +422,12 @@ def decode_state(blob: object) -> V3State:
     rho_hold = reader.f16()
     rho_reach = reader.f16()
     style_ring = _read_style_ring(reader)
-    snn = _read_snn(reader)
+    if version <= 2:
+        # v1/v2 -> v3 migration: read past and discard the deleted SnnState segment.
+        _skip_legacy_snn(reader)
     beliefs = _read_beliefs(reader)
     summary = _read_summary(reader)
-    pending = _read_pending(reader)
+    pending = _read_pending(reader, version)
     experiences = _read_experiences(reader)
     if reader.remaining() != 0:
         raise StateCodecError("trailing bytes after encoded state")
@@ -465,7 +449,6 @@ def decode_state(blob: object) -> V3State:
             rho_hold=rho_hold,
             rho_reach=rho_reach,
             style_ring=style_ring,
-            snn=snn,
             action_beliefs=beliefs,
             last_snn_summary=summary,
             pending_outcome=pending,
@@ -517,28 +500,23 @@ def _read_style_ring(reader: _Reader) -> tuple:
     return tuple(reader.u8_vec(STYLE_SIGNATURE_FIELDS) for _ in range(count))
 
 
-def _read_snn(reader: _Reader) -> SnnState | None:
+def _skip_legacy_snn(reader: _Reader) -> None:
+    """Read past a legacy (v1/v2) SnnState segment and discard it.
+
+    formula v2 deleted the SNN sub-state, so a v1/v2 blob's segment is migrated by
+    advancing the reader over exactly its bytes and dropping them.  The layout was:
+    a u8 presence flag; if set, four ``SNN_NEURONS``-long half-float arrays
+    (voltages/thresholds/pre_trace/post_trace), a u32 plastic-synapse count, then two
+    count-long half-float arrays (plastic_weights/eligibility).
+    """
+
     if reader.u8() == 0:
-        return None
-    voltages = reader.f16_vec(SNN_NEURON_COUNT)
-    thresholds = reader.f16_vec(SNN_NEURON_COUNT)
-    pre_trace = reader.f16_vec(SNN_NEURON_COUNT)
-    post_trace = reader.f16_vec(SNN_NEURON_COUNT)
+        return
+    for _ in range(4):
+        reader.f16_vec(_LEGACY_SNN_NEURON_COUNT)
     plastic_count = reader.u32()
-    if plastic_count != PLASTIC_SYNAPSE_COUNT:
-        raise StateCodecError("plastic synapse count does not match the topology")
-    plastic_weights = reader.f16_vec(plastic_count)
-    eligibility = reader.f16_vec(plastic_count)
-    return _guard(
-        lambda: SnnState(
-            voltages=voltages,
-            thresholds=thresholds,
-            pre_trace=pre_trace,
-            post_trace=post_trace,
-            plastic_weights=plastic_weights,
-            eligibility=eligibility,
-        )
-    )
+    reader.f16_vec(plastic_count)
+    reader.f16_vec(plastic_count)
 
 
 def _read_beliefs(reader: _Reader) -> ActionBeliefs | None:
@@ -574,7 +552,7 @@ def _read_optional_axis_vector(reader: _Reader) -> tuple:
     return reader.f16_vec(length)
 
 
-def _read_pending(reader: _Reader) -> PendingOutcome | None:
+def _read_pending(reader: _Reader, version: int) -> PendingOutcome | None:
     if reader.u8() == 0:
         return None
     origin_turn_id = reader.string()
@@ -583,7 +561,8 @@ def _read_pending(reader: _Reader) -> PendingOutcome | None:
     if action is None:
         raise StateCodecError("pending outcome must have a shadow action")
     projected_actual_action = _decode_action(reader.u8())
-    stdp_credit_enabled = reader.u8() == 1
+    if version <= 2:
+        reader.u8()  # legacy stdp_credit_enabled flag: read past and discard
     c = _read_optional_axis_vector(reader)
     v_c = _read_optional_axis_vector(reader)
     preference_log_terms_before = _read_optional_axis_vector(reader)
@@ -591,13 +570,10 @@ def _read_pending(reader: _Reader) -> PendingOutcome | None:
     predictive_v_actual = _read_optional_axis_vector(reader)
     likelihood_r_actual = _read_optional_axis_vector(reader)
     reward_scale = reader.f16()
-    if reader.u8() == 1:
+    if version <= 2 and reader.u8() == 1:
+        # legacy packed_eligibility (SNN STDP tensor): read past and discard.
         eligibility_count = reader.u32()
-        if eligibility_count != PLASTIC_SYNAPSE_COUNT:
-            raise StateCodecError("packed eligibility count does not match the topology")
-        packed_eligibility: tuple | None = reader.f16_vec(eligibility_count)
-    else:
-        packed_eligibility = None
+        reader.f16_vec(eligibility_count)
     expiry_sequence = reader.opt_sequence()
     preference_revision = reader.string()
     preference_digest = reader.string()
@@ -608,7 +584,6 @@ def _read_pending(reader: _Reader) -> PendingOutcome | None:
             sequence=sequence,
             action=action,
             projected_actual_action=projected_actual_action,
-            stdp_credit_enabled=stdp_credit_enabled,
             c=c,
             v_c=v_c,
             reward_scale=reward_scale,
@@ -616,7 +591,6 @@ def _read_pending(reader: _Reader) -> PendingOutcome | None:
             predictive_mu_actual=predictive_mu_actual,
             predictive_v_actual=predictive_v_actual,
             likelihood_r_actual=likelihood_r_actual,
-            packed_eligibility=packed_eligibility,
             expiry_sequence=expiry_sequence,
             preference_revision=preference_revision,
             preference_digest=preference_digest,

@@ -4,8 +4,13 @@
 CRC-protected, zlib+base64 payload of packed float16/int16/uint8 arrays;
 ``decode_state`` is its exact inverse for a canonically quantized state.  Every
 malformed input (wrong magic/version, CRC mismatch, truncation, non-finite
-half-floats, Dale-violating SNN weights, oversize experience buffer) must fail
-closed with a typed error and never return a half-decoded state.
+half-floats, oversize experience buffer, out-of-bounds values) must fail closed
+with a typed error and never return a half-decoded state.
+
+formula v2 deleted the SNN sub-state (``SnnState``) and the pending outcome's
+STDP fields; the codec bumped to v3 and reads past a legacy v1/v2 SnnState segment
+on decode.  The bounded reals that survive are the latent axes, the per-action
+reward baseline, and the vestigial reuse summary.
 """
 
 from __future__ import annotations
@@ -17,7 +22,7 @@ import zlib
 import pytest
 
 from sylanne_alpha.v3core.contracts import Action, SessionRef, TurnSequence
-from sylanne_alpha.v3core.formula_v1 import FORMULA_VERSION, SNN_BASELINE_BOUNDS
+from sylanne_alpha.v3core.formula_v1 import FORMULA_VERSION
 from sylanne_alpha.v3core.state import codec
 from sylanne_alpha.v3core.state.codec import (
     STATE_CODEC_MAGIC,
@@ -27,21 +32,13 @@ from sylanne_alpha.v3core.state.codec import (
 )
 from sylanne_alpha.v3core.state.models import (
     ACTION_COUNT,
-    ELIGIBILITY_BOUNDS,
     EXPERIENCE_FEATURE_DIM,
     EXPERIENCE_REWARD_DIM,
-    PLASTIC_SYNAPSE_COUNT,
-    PLASTIC_WEIGHT_BOUNDS,
-    SNN_NEURON_COUNT,
     THETA_PARAMS,
-    THRESHOLD_BOUNDS,
-    TRACE_BOUNDS,
-    VOLTAGE_BOUNDS,
     WORKSPACE_BROADCAST_DIM,
     ActionBeliefs,
     ExperienceRecord,
     PendingOutcome,
-    SnnState,
     V3State,
     BASELINE_BOUNDS,
     BASELINE_STORED_BOUNDS,
@@ -49,7 +46,6 @@ from sylanne_alpha.v3core.state.models import (
     LATENT_AXIS_STORED_BOUNDS,
     SNN_SUMMARY_BOUNDS,
     SNN_SUMMARY_STORED_BOUNDS,
-    quantization_safe_bounds,
 )
 from sylanne_alpha.v3core.formula_v1 import AXIS_DIM, EXPERIENCE_CAPACITY, SNN_SUMMARY_DIM
 
@@ -60,19 +56,6 @@ def _snap16(value: float) -> float:
 
 def _session_ref(generation: int = 1) -> SessionRef:
     return SessionRef(key_id="key-v1", session_digest=b"s" * 32, session_generation=generation)
-
-
-def _snn_state(weight: float = 0.3125) -> SnnState:  # 5/16 is exact in float16 and unique here
-    n = SNN_NEURON_COUNT
-    p = PLASTIC_SYNAPSE_COUNT
-    return SnnState(
-        voltages=tuple(_snap16(0.25) for _ in range(n)),
-        thresholds=tuple(_snap16(1.0) for _ in range(n)),
-        pre_trace=tuple(_snap16(0.5) for _ in range(n)),
-        post_trace=tuple(_snap16(0.5) for _ in range(n)),
-        plastic_weights=tuple(_snap16(weight) for _ in range(p)),
-        eligibility=tuple(_snap16(0.5) for _ in range(p)),
-    )
 
 
 def _action_beliefs() -> ActionBeliefs:
@@ -91,7 +74,6 @@ def _pending_outcome() -> PendingOutcome:
         sequence=TurnSequence(writer_epoch=7, local_sequence=11),
         action=Action.SPEAK,
         projected_actual_action=Action.HOLD,
-        stdp_credit_enabled=True,
         c=tuple(_snap16(0.1) for _ in range(AXIS_DIM)),
         v_c=tuple(_snap16(0.25) for _ in range(AXIS_DIM)),
         reward_scale=_snap16(1.0),
@@ -99,7 +81,6 @@ def _pending_outcome() -> PendingOutcome:
         predictive_mu_actual=tuple(_snap16(0.2) for _ in range(AXIS_DIM)),
         predictive_v_actual=tuple(_snap16(0.25) for _ in range(AXIS_DIM)),
         likelihood_r_actual=tuple(_snap16(0.20) for _ in range(AXIS_DIM)),
-        packed_eligibility=tuple(_snap16(0.3) for _ in range(PLASTIC_SYNAPSE_COUNT)),
         expiry_sequence=TurnSequence(writer_epoch=7, local_sequence=12),
         preference_revision=FORMULA_VERSION,
         preference_digest="0" * 64,
@@ -138,7 +119,6 @@ def _worst_case_state(experience_count: int = EXPERIENCE_CAPACITY) -> V3State:
         rho_hold=_snap16(0.5),
         rho_reach=_snap16(0.25),
         style_ring=tuple((1, 2, 3, 0) for _ in range(4)),
-        snn=_snn_state(),
         action_beliefs=_action_beliefs(),
         last_snn_summary=tuple(_snap16(0.25) for _ in range(SNN_SUMMARY_DIM)),
         pending_outcome=_pending_outcome(),
@@ -166,7 +146,6 @@ def test_encode_decode_round_trips_a_worst_case_state_exactly() -> None:
     blob = encode_state(state)
     restored = decode_state(blob)
     assert restored == state
-    assert restored.snn == state.snn
     assert restored.action_beliefs == state.action_beliefs
     assert restored.pending_outcome == state.pending_outcome
     assert len(restored.experiences) == EXPERIENCE_CAPACITY
@@ -222,49 +201,117 @@ def test_decode_rejects_non_finite_half_floats() -> None:
     state = _worst_case_state()
     body = bytearray(_unwrap(encode_state(state)))
     half_inf = struct.pack(">e", float("inf"))
-    # The 24-axis latent block is a long run of repeated 0.5 half-floats; that
-    # pattern only appears there, so it targets a float region unambiguously.
-    latent_run = struct.pack(">e", _snap16(0.5)) * 6
-    index = body.find(latent_run)
+    # The last_snn_summary block is a run of repeated 0.25 half-floats; that pattern
+    # only appears there, so it targets a float region unambiguously.  (latent_axes is
+    # now float32, so a float16 run no longer lives there.)
+    summary_run = struct.pack(">e", _snap16(0.25)) * 6
+    index = body.find(summary_run)
     assert index != -1
     body[index : index + 2] = half_inf
     with pytest.raises(StateCodecError):
         decode_state(_rewrap(bytes(body)))
 
 
-def test_decode_rejects_dale_violating_plastic_weights() -> None:
-    state = _worst_case_state()
-    body = bytearray(_unwrap(encode_state(state)))
-    # 0.3125 is used only for plastic weights, so this uniquely targets one.
-    positive = struct.pack(">e", _snap16(0.3125))
-    negative = struct.pack(">e", _snap16(-0.3125))
-    index = body.rfind(positive)
-    assert index != -1
-    body[index : index + 2] = negative
-    with pytest.raises(StateCodecError):
-        decode_state(_rewrap(bytes(body)))
+# --------------------------------------------------------------------------- #
+# v1/v2 -> v3 read migration: legacy SnnState segment + STDP pending fields are
+# read past and discarded (the SNN no longer exists), the rest decodes unchanged.
+# --------------------------------------------------------------------------- #
 
 
-def test_snn_state_construction_enforces_dale_and_bounds() -> None:
-    good = _snn_state()
-    with pytest.raises(ValueError):
-        SnnState(
-            voltages=good.voltages,
-            thresholds=good.thresholds,
-            pre_trace=good.pre_trace,
-            post_trace=good.post_trace,
-            plastic_weights=tuple(-0.1 for _ in range(PLASTIC_SYNAPSE_COUNT)),
-            eligibility=good.eligibility,
-        )
-    with pytest.raises(ValueError):
-        SnnState(
-            voltages=good.voltages[:-1],
-            thresholds=good.thresholds,
-            pre_trace=good.pre_trace,
-            post_trace=good.post_trace,
-            plastic_weights=good.plastic_weights,
-            eligibility=good.eligibility,
-        )
+def _legacy_string(value: str) -> bytes:
+    data = value.encode("utf-8")
+    return struct.pack(">H", len(data)) + data
+
+
+def _legacy_v2_blob(*, with_pending: bool) -> bytes:
+    """Hand-build a v2 codec blob (SnnState segment present, legacy pending layout).
+
+    Mirrors the pre-formula-v2 on-disk format exactly so ``decode_state`` exercises
+    its migration path: version 2, a present 96-neuron SnnState segment, and (when
+    ``with_pending``) a pending outcome carrying the removed ``stdp_credit_enabled``
+    byte and ``packed_eligibility`` block.
+    """
+
+    import binascii
+
+    body = b"SYL3ST" + struct.pack(">H", 2)
+    # header
+    body += struct.pack(">H", 1)  # schema_version
+    body += struct.pack(">Q", 0)  # revision
+    body += struct.pack(">Q", 0)  # writer_epoch
+    body += struct.pack(">Q", 0)  # session_generation (state header)
+    body += _legacy_string("key-v1")  # session_ref.key_id
+    body += b"s" * 32  # session_digest
+    body += struct.pack(">Q", 1)  # session_ref.session_generation
+    body += _legacy_string(FORMULA_VERSION)  # formula_version
+    body += _legacy_string("")  # source_digest
+    body += _legacy_string("")  # state_generation_id
+    body += _legacy_string(FORMULA_VERSION)  # model_revision
+    body += struct.pack(">B", 0)  # last_committed_turn_id: None
+    body += struct.pack(">B", 0)  # last_committed_turn_sequence: None
+    # continuous (v2: latent as float32)
+    body += struct.pack(">24f", *([0.0] * 24))
+    body += struct.pack(">e", 0.0)  # rho_hold
+    body += struct.pack(">e", 0.0)  # rho_reach
+    body += struct.pack(">B", 0)  # style_ring count
+    # legacy SnnState segment: present, 96-neuron half-float arrays + plastic block
+    body += struct.pack(">B", 1)  # snn present
+    for _ in range(4):  # voltages / thresholds / pre_trace / post_trace
+        body += struct.pack(">96e", *([0.0] * 96))
+    plastic = 5  # arbitrary legacy plastic count; the migration only reads-and-skips it
+    body += struct.pack(">I", plastic)
+    body += struct.pack(">%de" % plastic, *([0.0] * plastic))  # plastic_weights
+    body += struct.pack(">%de" % plastic, *([0.0] * plastic))  # eligibility
+    body += struct.pack(">B", 0)  # beliefs: None
+    body += struct.pack(">B", 0)  # summary: None
+    if with_pending:
+        body += struct.pack(">B", 1)  # pending present
+        body += _legacy_string("turn-legacy")
+        body += struct.pack(">Q", 7) + struct.pack(">Q", 11)  # sequence
+        body += struct.pack(">B", 0)  # action = SPEAK
+        body += struct.pack(">B", 1)  # projected_actual_action = HOLD
+        body += struct.pack(">B", 1)  # legacy stdp_credit_enabled = True
+        for _ in range(6):  # c / v_c / pref_log / mu / v / r each: len 8 + 8 half-floats
+            body += struct.pack(">B", 8) + struct.pack(">8e", *([0.0] * 8))
+        body += struct.pack(">e", 1.0)  # reward_scale
+        body += struct.pack(">B", 1)  # legacy packed_eligibility present
+        body += struct.pack(">I", plastic) + struct.pack(">%de" % plastic, *([0.0] * plastic))
+        body += struct.pack(">B", 0)  # expiry_sequence: None
+        body += _legacy_string(FORMULA_VERSION)  # preference_revision
+        body += _legacy_string("0" * 64)  # preference_digest
+        body += _legacy_string(FORMULA_VERSION)  # outcome_projector_revision
+    else:
+        body += struct.pack(">B", 0)  # pending: None
+    body += struct.pack(">H", 0)  # experiences count
+    framed = body + struct.pack(">I", binascii.crc32(body) & 0xFFFFFFFF)
+    return base64.b64encode(zlib.compress(framed, 9))
+
+
+def test_legacy_v2_blob_migrates_by_discarding_the_snn_segment() -> None:
+    decoded = decode_state(_legacy_v2_blob(with_pending=False))
+    # The SnnState segment is gone; the state is otherwise the neutral v3 state and
+    # re-encodes cleanly as v3.
+    assert decoded == V3State(session_ref=_session_ref())
+    assert not hasattr(decoded, "snn")
+    # The next encode emits the current (v3) version.
+    assert decode_state(encode_state(decoded)) == decoded
+
+
+def test_legacy_v2_pending_migrates_by_discarding_stdp_fields() -> None:
+    decoded = decode_state(_legacy_v2_blob(with_pending=True))
+    pending = decoded.pending_outcome
+    assert pending is not None
+    assert pending.origin_turn_id == "turn-legacy"
+    assert pending.action is Action.SPEAK
+    assert pending.projected_actual_action is Action.HOLD
+    assert pending.c == tuple(0.0 for _ in range(AXIS_DIM))
+    assert pending.reward_scale == 1.0
+    assert pending.preference_digest == "0" * 64
+    # The removed STDP fields do not resurface on the migrated record.
+    assert not hasattr(pending, "stdp_credit_enabled")
+    assert not hasattr(pending, "packed_eligibility")
+    # A migrated state round-trips as v3.
+    assert decode_state(encode_state(decoded)) == decoded
 
 
 def test_v3state_rejects_more_than_the_capacity_of_experiences() -> None:
@@ -292,90 +339,47 @@ def test_experience_record_rejects_out_of_range_quantized_values() -> None:
 # --------------------------------------------------------------------------- #
 
 
-def test_declared_bounds_are_widened_outward_onto_the_float16_grid() -> None:
-    """The stored interval is the declared one unioned with its float16 image."""
-
-    for declared in (THRESHOLD_BOUNDS, PLASTIC_WEIGHT_BOUNDS, VOLTAGE_BOUNDS):
-        low, high = declared
-        stored_low, stored_high = quantization_safe_bounds(declared)
-        assert stored_low <= low and stored_high >= high  # never tightened
-        assert stored_low <= _snap16(low) and _snap16(high) <= stored_high
-
-    # The two boundaries that actually leave their declared interval under float16.
-    assert quantization_safe_bounds(THRESHOLD_BOUNDS)[0] == _snap16(0.65) < 0.65
-    assert quantization_safe_bounds(PLASTIC_WEIGHT_BOUNDS)[1] == _snap16(0.35) > 0.35
-    # Bounds already on the grid must not move at all.
-    assert quantization_safe_bounds(VOLTAGE_BOUNDS) == VOLTAGE_BOUNDS
-
-
 @pytest.mark.parametrize("corner", ["low", "high"])
 def test_a_state_clamped_to_any_bound_survives_a_round_trip(corner: str) -> None:
     """The a16 DoD: decode(encode(x)) holds for ANY state legally clamped to a bound.
 
-    This is the STATE_QUANTIZE_ERROR livelock, pinned as a unit test. Homeostasis
-    legitimately pins thresholds to the 0.65 clamp floor, but float16(0.65) =
-    0.64990234375 fell below the exactly-declared bound, so decode(encode(state))
-    raised, orchestrate() rejected every turn, and the shadow stopped advancing state
-    forever. The pre-existing codec tests all picked exactly-representable values
-    (1.0, 0.3125), which is precisely why they never saw it.
+    formula v2 deleted the SNN scalar bounds (0.65 threshold floor / 0.35 plastic
+    ceiling) whose float16 image originally triggered the STATE_QUANTIZE_ERROR
+    livelock, so that specific reload fork can no longer occur.  The surviving bounded
+    reals -- latent axes (float32), the per-action reward baseline, and the vestigial
+    reuse summary -- are validated on the same quantization-safe grid, and a state
+    clamped to any of their bounds must still round-trip to a fixed point.
     """
 
     index = 0 if corner == "low" else 1
+    params = AXIS_DIM * THETA_PARAMS
     state = V3State(
         session_ref=_session_ref(),
-        snn=SnnState(
-            voltages=tuple(VOLTAGE_BOUNDS[index] for _ in range(SNN_NEURON_COUNT)),
-            thresholds=tuple(THRESHOLD_BOUNDS[index] for _ in range(SNN_NEURON_COUNT)),
-            pre_trace=tuple(TRACE_BOUNDS[index] for _ in range(SNN_NEURON_COUNT)),
-            post_trace=tuple(TRACE_BOUNDS[index] for _ in range(SNN_NEURON_COUNT)),
-            plastic_weights=tuple(PLASTIC_WEIGHT_BOUNDS[index] for _ in range(PLASTIC_SYNAPSE_COUNT)),
-            eligibility=tuple(ELIGIBILITY_BOUNDS[index] for _ in range(PLASTIC_SYNAPSE_COUNT)),
+        latent_axes=tuple(LATENT_AXIS_BOUNDS[index] for _ in range(24)),
+        last_snn_summary=tuple(SNN_SUMMARY_BOUNDS[index] for _ in range(SNN_SUMMARY_DIM)),
+        action_beliefs=ActionBeliefs(
+            theta=tuple(tuple(0.0 for _ in range(params)) for _ in range(ACTION_COUNT)),
+            sigma=tuple(tuple(_snap16(0.1) for _ in range(params)) for _ in range(ACTION_COUNT)),
+            baselines=tuple(BASELINE_BOUNDS[index] for _ in range(ACTION_COUNT)),
+            counts=tuple(0 for _ in range(ACTION_COUNT)),
         ),
     )
     blob = encode_state(state)
-    restored = decode_state(blob)  # this raised StateCodecError before the fix
+    restored = decode_state(blob)  # must not raise
     # Reloading is a fixed point: the grid value re-encodes to the same bytes, so a
     # crash reload can never fork the trajectory.
     assert encode_state(restored) == blob
-    assert restored.snn.thresholds[0] == _snap16(THRESHOLD_BOUNDS[index])
-    assert restored.snn.plastic_weights[0] == _snap16(PLASTIC_WEIGHT_BOUNDS[index])
-
-
-def test_out_of_band_values_are_still_rejected_beyond_the_quantization_margin() -> None:
-    """Widening to the grid must not become a licence for genuinely out-of-range values."""
-
-    for bad in (0.6, 1.5):  # below the 0.65 floor / above the 1.35 ceiling by far
-        with pytest.raises(ValueError):
-            SnnState(
-                voltages=tuple(0.0 for _ in range(SNN_NEURON_COUNT)),
-                thresholds=tuple(bad for _ in range(SNN_NEURON_COUNT)),
-                pre_trace=tuple(0.0 for _ in range(SNN_NEURON_COUNT)),
-                post_trace=tuple(0.0 for _ in range(SNN_NEURON_COUNT)),
-                plastic_weights=tuple(0.0 for _ in range(PLASTIC_SYNAPSE_COUNT)),
-                eligibility=tuple(0.0 for _ in range(PLASTIC_SYNAPSE_COUNT)),
-            )
-    # Dale still holds: a negative plastic weight is not a quantization artifact.
-    with pytest.raises(ValueError):
-        SnnState(
-            voltages=tuple(0.0 for _ in range(SNN_NEURON_COUNT)),
-            thresholds=tuple(1.0 for _ in range(SNN_NEURON_COUNT)),
-            pre_trace=tuple(0.0 for _ in range(SNN_NEURON_COUNT)),
-            post_trace=tuple(0.0 for _ in range(SNN_NEURON_COUNT)),
-            plastic_weights=tuple(-0.01 for _ in range(PLASTIC_SYNAPSE_COUNT)),
-            eligibility=tuple(0.0 for _ in range(PLASTIC_SYNAPSE_COUNT)),
-        )
+    assert restored == state  # all these bounds are exactly representable on the grid
 
 
 def test_continuous_payload_bounds_match_the_code_that_clamps_them() -> None:
-    """latent/baselines/summary were declared (-16,16): up to 16x looser than the clamp.
-
-    Each is now pinned to the bound its own producer actually enforces, so a grossly
-    out-of-range value fails closed instead of validating as if it were in band.
+    """latent/baselines/summary are pinned to the bound their own producer enforces,
+    so a grossly out-of-range value fails closed instead of validating as if in band.
     """
 
     assert LATENT_AXIS_BOUNDS == (-1.0, 1.0)  # design 9 / dynamics.multiscale._clip_unit
-    assert BASELINE_BOUNDS == SNN_BASELINE_BOUNDS  # design 8.3, the frozen manifest value
-    assert SNN_SUMMARY_BOUNDS == (0.0, 1.0)  # spiking.reservoir.pooled_summary
+    assert BASELINE_BOUNDS == (-1.0, 1.0)  # per-action reward EMA (learning.outcomes.update_baseline)
+    assert SNN_SUMMARY_BOUNDS == (0.0, 1.0)  # vestigial reuse summary (always None now)
     # All three sit exactly on the float16 grid, so the storage widening is a no-op:
     # the tightening costs no quantization margin.
     assert LATENT_AXIS_STORED_BOUNDS == LATENT_AXIS_BOUNDS

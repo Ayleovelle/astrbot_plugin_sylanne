@@ -321,10 +321,7 @@ def run_stream(seed: int, turns: int, profile_id: str = "FULL_24_STDP") -> Strea
         stats.accepted += 1
         trace = result.trace
         state = result.state_delta.next_state
-        stats.total_spikes += sum(trace.spike_counts)
-        if state.snn is not None:
-            stats.max_membrane_voltage = max(stats.max_membrane_voltage, max(state.snn.voltages))
-            stats.min_threshold = min(stats.min_threshold, min(state.snn.thresholds))
+        stats.total_spikes += sum(trace.spike_counts)  # always 0: SNN deleted (formula v2)
 
         for value in state.latent_axes:
             if not math.isfinite(value):
@@ -559,13 +556,9 @@ def evaluate(stats: StreamStats, recoveries: list[dict], k_report: dict) -> tupl
     if not k_report["pairs"]["16_vs_24"]["within_gate"]:
         failures.append("K=16 vs K=24 action-distribution JS divergence exceeds 0.02")
 
-    # A silent reservoir would make the JS/control/STDP gates pass for the wrong
-    # reason. Silence is a failure, not a clean sheet.
-    if stats.total_spikes == 0:
-        failures.append(
-            "SNN emitted zero spikes across the whole stream: every SNN-dependent "
-            "gate (K resampling, learned/frozen/random, STDP vs zero-LR) is vacuous"
-        )
+    # formula v2 deleted the SNN subsystem: there is no reservoir left to be silent,
+    # so the former "zero spikes across the stream" failure is retired -- that defect
+    # was resolved by deleting the subsystem rather than by making it fire.
     # A rejected invocation commits nothing. A sustained reject rate means the
     # shadow has stopped advancing state at all.
     if stats.turns and stats.rejected / stats.turns > 0.05:

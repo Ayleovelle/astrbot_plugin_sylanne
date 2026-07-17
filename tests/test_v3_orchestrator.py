@@ -118,7 +118,7 @@ def _invocation(**envelope_kwargs: object) -> CoreInvocation:
 
 
 def test_stage_order_is_the_fixed_named_sequence() -> None:
-    assert STAGE_ORDER == ("encoder", "snn", "dynamics", "workspace", "inference", "expression", "trace")
+    assert STAGE_ORDER == ("encoder", "dynamics", "workspace", "inference", "expression", "trace")
 
 
 def test_orchestrator_rejects_a_profile_inconsistent_with_the_frozen_manifest() -> None:
@@ -228,83 +228,133 @@ def test_reuse_without_prior_summary_degrades_deterministically_to_continuous_on
     assert reuse.trace.degradation_reason == "REUSE_WITHOUT_SUMMARY_FALLBACK"
 
 
-def test_a_silent_reservoir_contributes_exactly_nothing_to_the_drive() -> None:
-    """The Q*summary half of the SNN really is inert: the drive is bit-identical.
+def test_deleting_snn_novelty_shifts_the_action_distribution_toward_clarify() -> None:
+    """Characterize the deliberate BEHAVIOR CHANGE from deleting snn-novelty.
 
-    This is the *true* half of the "the SNN is behaviourally dead" argument. The
-    reservoir never fires, so ``snn_summary`` is identically zero and
-    ``Q_MATRIX @ summary`` adds only exact zeros to an fsum. Nothing about the drive
-    changes when the SNN is dropped.
+    This is NOT an equivalence test.  formula v2 removed the snn-novelty proposal
+    (old index 6).  Its salience was ``1.2*snn_summary[10] + 0.6*novelty``; the
+    reservoir was structurally silent so ``snn_summary`` was always zero, but
+    ``0.6*s[5]`` (the novelty axis) was a live salience, and its key collided with
+    uncertainty-clarify (both action coord 2, and group coords 13/13).  Because the
+    proposal was gated only on ``snn_summary is not None`` (never on whether anything
+    spiked), it was ALWAYS present under an SNN profile while its own authorizing term
+    was zero: a pure "ghost suppressor" that mostly lost broadcast slots itself yet
+    strongly cross-inhibited the real CLARIFY proposal and flipped selected actions.
+    Deleting it lifts that suppression and moves the distribution toward CLARIFY.
 
-    See ``test_dropping_the_snn_is_not_behaviour_preserving`` for the half that is
-    false -- the drive is not the only consumer of ``snn_summary``.
+    Fable's reference (300 identical-input turn pairs, FULL_24_NO_STDP vs
+    DETERMINISTIC_CONTINUOUS_ONLY on the pre-deletion code): CLARIFY 32.3% -> 49.0%
+    (+16.7pp), Jensen-Shannon divergence ~= 0.021 on the action distribution.
+
+    The baseline here is the CORRECT pre-deletion behavior: it reuses the shipped
+    ``build_proposals``/``arbitrate``/``score_policy`` and re-adds the snn-novelty
+    proposal exactly as formula v1 defined it (salience ``0.6*s[5]``, its old CLARIFY
+    / source-basis-10 / group-13 key, present whenever CLARIFY is legal -- the
+    reservoir summary was non-None under any SNN profile).  ``source_index`` is
+    outcome-irrelevant here because the per-turn source-refractory vector is all zero.
     """
 
-    snn = orchestrate(
-        CoreInvocation(
-            envelope=_envelope(profile="FULL_24_NO_STDP"),
-            base_state=_base_state(),
-            projected_actual_outcome=(Action.SPEAK, None),
-        )
-    )
-    continuous = orchestrate(
-        CoreInvocation(
-            envelope=_envelope(profile="DETERMINISTIC_CONTINUOUS_ONLY"),
-            base_state=_base_state(),
-            projected_actual_outcome=(Action.SPEAK, None),
-        )
-    )
-    assert snn.accepted and continuous.accepted
-    assert snn.trace.spike_counts == tuple(0 for _ in range(formula.SNN_NEURONS)), (
-        "this test assumes the measured silent reservoir; if it spikes, re-read the gate"
-    )
-    assert snn.trace.drive == continuous.trace.drive
+    import random
+    from dataclasses import replace
+    from math import log2, sqrt
 
-
-def test_dropping_the_snn_is_not_behaviour_preserving() -> None:
-    """Switching an SNN profile to DETERMINISTIC_CONTINUOUS_ONLY CHANGES decisions.
-
-    This pins the reason the silent reservoir cannot simply be switched off as a
-    free, behaviour-preserving optimisation, which is the intuitive (and wrong)
-    conclusion from "snn_summary is always zero".
-
-    Root cause: ``snn_summary`` has two consumers, not one. The drive consumer is
-    genuinely inert (see the test above). But ``workspace/competition.py`` gates the
-    snn-novelty proposal on ``PROPOSAL_REQUIRES_VALID_SNN_SUMMARY[6]`` -- i.e. on
-    ``snn_summary is not None``, NOT on whether the reservoir actually spiked -- and
-    that proposal's salience is ``1.2*summary_value + 0.6*s[5]``. With a silent
-    reservoir the first term is zero but ``0.6*s[5]`` (the novelty axis) is not, so
-    the proposal is a live competitor carrying real salience under any SNN profile
-    and is dropped from the competition entirely under DETERMINISTIC_CONTINUOUS_ONLY.
-    Removing a non-zero-salience competitor changes which proposals win workspace
-    slots, hence broadcast_ids, hence the posterior, hence the selected action.
-
-    Measured over 300 identical-input turn pairs: selected_action differs on 47,
-    broadcast_ids on 59, candidate_posterior on 70 -- ~16% of decisions.
-
-    If this ever starts passing (the profiles becoming equivalent), the switch this
-    blocks becomes safe and the assertion below must be re-read, not deleted.
-    """
-
+    from sylanne_alpha.v3core.contracts import Action, TurnContextClass
+    from sylanne_alpha.v3core.dynamics.multiscale import advance_dynamics
+    from sylanne_alpha.v3core.features import decision_state as compute_decision_state
+    from sylanne_alpha.v3core.inference.policy_scorer import score_policy
     from sylanne_alpha.v3core.observation.encoder import encode_observation
     from sylanne_alpha.v3core.observation.models import ObservationFacts
-    from sylanne_alpha.v3core.workspace.competition import proposal_salience
+    from sylanne_alpha.v3core.workspace.competition import arbitrate, build_proposals
+    from sylanne_alpha.v3core.workspace.models import WorkspaceProposal
 
-    frame = encode_observation(
-        ObservationFacts(raw_values=_raw_values(), context=TurnContextClass.ADDRESSED)
-    )
-    silent_summary = tuple(0.0 for _ in range(formula.SNN_SUMMARY_DIM))
-    decision_state = (0.0, 0.0, 0.0, 0.0, 0.0, 0.42, 0.0, 0.0)  # novelty axis s[5] non-zero
+    # The snn-novelty proposal exactly as formula v1 defined it, with the silent
+    # reservoir (summary term 0): key coords action=2 / source-basis=10 / group=13.
+    _ghost_raw = [0.0] * 16
+    _ghost_raw[2], _ghost_raw[10], _ghost_raw[13] = 1.0, 0.75, 0.50
+    _ghost_norm = sqrt(sum(value * value for value in _ghost_raw))
+    _GHOST_KEY = tuple(value / _ghost_norm for value in _ghost_raw)
 
-    with_snn = proposal_salience(6, decision_state, frame, silent_summary)
-    without_snn = proposal_salience(6, decision_state, frame, None)
+    def _ghost(state: tuple) -> WorkspaceProposal:
+        salience = max(-4.0, min(4.0, 0.6 * state[5]))
+        confidence = max(0.0, min(1.0, 0.5 + 0.25 * abs(salience)))
+        return WorkspaceProposal(
+            proposal_id="snn-novelty",
+            action=Action.CLARIFY,
+            source_index=7,  # any legal slot; refractory is zero so it is inert
+            salience=salience,
+            confidence=confidence,
+            key=_GHOST_KEY,
+        )
 
-    # Identical salience -- the silence of the reservoir is irrelevant to it ...
-    assert with_snn[0] == without_snn[0] == pytest.approx(0.6 * 0.42)
-    assert with_snn[0] != 0.0, "a zero-salience proposal would make its removal harmless"
-    # ... but the profile flag alone decides whether it competes at all.
-    assert with_snn[1] is True, "snn-novelty competes under an SNN profile"
-    assert without_snn[1] is False, "snn-novelty vanishes without one"
+    rng = random.Random(2718)
+    context = TurnContextClass.ADDRESSED  # the context in which CLARIFY competes
+    zero_refractory = tuple(0.0 for _ in range(formula.WORKSPACE_CAPACITY))
+    turns = 300
+    base = _base_state()
+    action_names = ("SPEAK", "HOLD", "CLARIFY", "REACH")
+    new_counts = {name: 0 for name in action_names}
+    old_counts = {name: 0 for name in action_names}
+
+    for _ in range(turns):
+        raw = tuple(
+            None
+            if index in (27, 28, 29, 32, 33, 34, 35)
+            else (1.0 if index == 30 else 120.0 if index == 31 else rng.random())
+            for index in range(36)
+        )
+        frame = encode_observation(ObservationFacts(raw_values=raw, context=context))
+        advance = advance_dynamics(base, frame, base.revision + 1)
+        next_latent = advance.next_latent_axes
+        s = compute_decision_state(next_latent)
+        advanced_state = replace(base, latent_axes=next_latent)
+
+        new_props = build_proposals(s, frame, context)
+        new_broadcast = arbitrate(new_props, context, zero_refractory)
+        new_action = score_policy(advanced_state, new_broadcast, context).selected_action
+        new_counts[new_action.value] += 1
+
+        old_broadcast = arbitrate(new_props + (_ghost(s),), context, zero_refractory)
+        old_action = score_policy(advanced_state, old_broadcast, context).selected_action
+        old_counts[old_action.value] += 1
+
+        base = replace(base, latent_axes=next_latent, revision=base.revision + 1)
+
+    new_clarify = new_counts["CLARIFY"] / turns
+    old_clarify = old_counts["CLARIFY"] / turns
+    clarify_delta_pp = 100.0 * (new_clarify - old_clarify)
+
+    def _js(counts_p: dict, counts_q: dict) -> float:
+        keys = set(counts_p) | set(counts_q)
+        mixture = {k: 0.5 * (counts_p.get(k, 0) + counts_q.get(k, 0)) / turns for k in keys}
+
+        def _kl(counts: dict) -> float:
+            total = 0.0
+            for k in keys:
+                pk = counts.get(k, 0) / turns
+                if pk > 0.0:
+                    total += pk * log2(pk / mixture[k])
+            return total
+
+        return 0.5 * _kl(counts_p) + 0.5 * _kl(counts_q)
+
+    js = _js(old_counts, new_counts)
+
+    # BEHAVIOR CHANGE (the "ghost-suppressor tax"): deleting snn-novelty lifts the
+    # cross-inhibition on CLARIFY, so CLARIFY rises.  Bands are wide because this
+    # harness uses its own deterministic stream, not Fable's exact turns; the point
+    # is to pin the sign and order of magnitude of Fable's +16.7pp / JS~=0.021.
+    # This harness's own deterministic measurement (seed 2718, 300 ADDRESSED turns):
+    #   old (with ghost) CLARIFY = 39.0%, new (deleted) CLARIFY = 68.7%,
+    #   delta = +29.7pp, Jensen-Shannon divergence = 0.067.
+    # Fable's independent reference on its own pre-deletion stream was +16.7pp /
+    # JS ~= 0.021.  Both confirm the SAME ghost-suppressor tax -- deleting snn-novelty
+    # lifts the cross-inhibition on CLARIFY, so CLARIFY rises -- and both are the same
+    # order of magnitude (tens of pp); the magnitude differs only because the input
+    # streams differ (this harness feeds fully-random observations, which drive more
+    # uncertainty and thus more CLARIFY competition than Fable's stream).
+    assert clarify_delta_pp > 0.0, (old_counts, new_counts)
+    assert 22.0 <= clarify_delta_pp <= 38.0, clarify_delta_pp
+    assert 0.04 <= js <= 0.10, js
 
 
 # --------------------------------------------------------------------------- #

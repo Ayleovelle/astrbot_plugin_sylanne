@@ -1,16 +1,19 @@
 """RED/GREEN tests for Task 9 global workspace (design section 10).
 
 ``ProposalArbiterV1`` is pure ``v3core``: it turns the eight-dimensional decision
-state, the normalized observation frame, an optional SNN summary, and the
-authoritative context into at most eight legal proposals, runs four bounded
-competition iterations, and emits a registration-order-invariant broadcast with
-per-action support and bounded log-evidence.  It performs no I/O and imports
-nothing the firewall forbids.
+state, the normalized observation frame, and the authoritative context into at most
+seven legal proposals, runs four bounded competition iterations, and emits a
+registration-order-invariant broadcast with per-action support and bounded
+log-evidence.  It performs no I/O and imports nothing the firewall forbids.
+
+formula v2 deleted the ``snn-novelty`` proposal (old index 6) and the SNN summary
+argument to the workspace; ``continuity-speak`` is now index 6 and key coordinate 10
+(snn-novelty's old source basis) is a permanent tombstone no proposal uses.
 """
 
 from __future__ import annotations
 
-from math import exp, isclose
+from math import isclose
 
 import pytest
 
@@ -18,7 +21,6 @@ from sylanne_alpha.v3core import formula_v1 as formula
 from sylanne_alpha.v3core.contracts import Action, TurnContextClass
 from sylanne_alpha.v3core.observation.models import ObservationFrame
 from sylanne_alpha.v3core.workspace import (
-    WorkspaceBroadcast,
     WorkspaceProposal,
     build_proposals,
     run_workspace,
@@ -56,7 +58,7 @@ def _clip01(value: float) -> float:
     return _clip(value, 0.0, 1.0)
 
 
-def _expected_salience(index: int, s: tuple, frame: ObservationFrame, snn: tuple | None) -> float:
+def _expected_salience(index: int, s: tuple, frame: ObservationFrame) -> float:
     v = frame.values
     if index == 0:
         raw = 1.2 * s[7] + 0.5 * s[1] + 0.3 * _center(v[11])
@@ -70,9 +72,7 @@ def _expected_salience(index: int, s: tuple, frame: ObservationFrame, snn: tuple
         raw = 1.4 * _center(v[10]) - 0.4 * s[7]
     elif index == 5:
         raw = 1.1 * s[3] + 0.8 * s[7] + 0.3 * s[5]
-    elif index == 6:
-        raw = 1.2 * snn[10] + 0.6 * s[5]
-    else:
+    else:  # continuity-speak (index 6; old index 7 before snn-novelty deletion)
         raw = 0.8 * _center(v[30]) + 0.6 * _center(v[26]) + 0.4 * s[3]
     return _clip(raw, -4.0, 4.0)
 
@@ -84,12 +84,11 @@ def _expected_salience(index: int, s: tuple, frame: ObservationFrame, snn: tuple
 
 def test_salience_confidence_match_formula_and_bounds() -> None:
     s = (0.6, -0.3, 0.2, 0.7, 0.9, -0.4, 0.5, 0.8)
-    snn = tuple(0.1 * i for i in range(formula.SNN_SUMMARY_DIM))
     frame = _frame()
-    for index in range(formula.WORKSPACE_CAPACITY):
-        salience, present = proposal_salience(index, s, frame, snn)
+    for index in range(formula.PROPOSAL_COUNT):
+        salience, present = proposal_salience(index, s, frame)
         assert present is True
-        expected = _expected_salience(index, s, frame, snn)
+        expected = _expected_salience(index, s, frame)
         assert isclose(salience, expected, rel_tol=0, abs_tol=1e-12)
         assert -4.0 <= salience <= 4.0
         confidence = _clip01(0.5 + 0.25 * abs(salience))
@@ -98,32 +97,39 @@ def test_salience_confidence_match_formula_and_bounds() -> None:
 
 def test_required_bits_gate_presence() -> None:
     s = tuple(0.0 for _ in range(AXIS_DIM))
-    snn = tuple(0.0 for _ in range(formula.SNN_SUMMARY_DIM))
     # body-speak requires bit 11; clearing it makes the proposal absent.
     mask = FULL_MASK & ~(1 << 11)
-    _, present = proposal_salience(0, s, _frame(valid_mask=mask), snn)
+    _, present = proposal_salience(0, s, _frame(valid_mask=mask))
     assert present is False
     # affect-speak requires nothing observational -> always present.
-    _, present = proposal_salience(1, s, _frame(valid_mask=0), snn)
+    _, present = proposal_salience(1, s, _frame(valid_mask=0))
     assert present is True
-    # continuity-speak requires {26,30}: clearing either removes it.
+    # continuity-speak (index 6) requires {26,30}: clearing either removes it.
     for bit in (26, 30):
-        _, present = proposal_salience(7, s, _frame(valid_mask=FULL_MASK & ~(1 << bit)), snn)
+        _, present = proposal_salience(6, s, _frame(valid_mask=FULL_MASK & ~(1 << bit)))
         assert present is False
 
 
-def test_snn_novelty_requires_valid_summary() -> None:
-    s = tuple(0.0 for _ in range(AXIS_DIM))
-    _, present = proposal_salience(6, s, _frame(), None)
-    assert present is False
-    _, present = proposal_salience(6, s, _frame(), tuple(0.0 for _ in range(formula.SNN_SUMMARY_DIM)))
-    assert present is True
+def test_snn_novelty_proposal_is_gone_and_slot_10_is_a_tombstone() -> None:
+    """The deleted snn-novelty proposal must not resurface, and its key coordinate
+    (source basis 10) must be used by no surviving proposal, while continuity-speak
+    keeps its byte-identical source basis 11 (freeze-the-key-geometry invariant)."""
+
+    assert "snn-novelty" not in formula.PROPOSAL_IDS
+    assert formula.PROPOSAL_COUNT == 7
+    assert formula.PROPOSAL_SOURCE_BASIS == (4, 5, 6, 7, 8, 9, 11)
+    # No proposal uses key coordinate 10 (the tombstone).
+    for key in formula.PROPOSAL_KEYS:
+        assert key[10] == 0.0
+    # continuity-speak (index 6) still projects onto source basis 11, group 15,
+    # action 0 -- i.e. its key triple is byte-identical to formula v1.
+    continuity = formula.PROPOSAL_KEYS[6]
+    assert continuity[11] != 0.0 and continuity[15] != 0.0 and continuity[0] != 0.0
 
 
 def test_proposal_keys_are_l2_normalized() -> None:
     s = (0.6, -0.3, 0.2, 0.7, 0.9, -0.4, 0.5, 0.8)
-    snn = tuple(0.0 for _ in range(formula.SNN_SUMMARY_DIM))
-    proposals = build_proposals(s, _frame(), snn, TurnContextClass.ADDRESSED)
+    proposals = build_proposals(s, _frame(), TurnContextClass.ADDRESSED)
     for proposal in proposals:
         assert len(proposal.key) == 16
         norm = sum(value * value for value in proposal.key) ** 0.5
@@ -137,13 +143,12 @@ def test_proposal_keys_are_l2_normalized() -> None:
 
 def test_context_masks_illegal_actions_before_competition() -> None:
     s = tuple(0.0 for _ in range(AXIS_DIM))
-    snn = tuple(0.0 for _ in range(formula.SNN_SUMMARY_DIM))
     # IDLE only allows HOLD -> only boundary-hold / fatigue-hold survive.
-    proposals = build_proposals(s, _frame(), snn, TurnContextClass.IDLE)
+    proposals = build_proposals(s, _frame(), TurnContextClass.IDLE)
     assert {p.action for p in proposals} == {Action.HOLD}
     assert {p.proposal_id for p in proposals} == {"boundary-hold", "fatigue-hold"}
     # PROACTIVE allows HOLD, REACH.
-    proposals = build_proposals(s, _frame(), snn, TurnContextClass.PROACTIVE)
+    proposals = build_proposals(s, _frame(), TurnContextClass.PROACTIVE)
     assert {p.action for p in proposals} <= {Action.HOLD, Action.REACH}
 
 
@@ -160,7 +165,7 @@ def test_empty_broadcast_when_no_legal_proposal() -> None:
     s = tuple(0.0 for _ in range(AXIS_DIM))
     # IDLE with both HOLD proposals gated off (17 and 10 invalid) -> empty.
     mask = FULL_MASK & ~(1 << 17) & ~(1 << 10)
-    broadcast = run_workspace(s, _frame(valid_mask=mask), None, TurnContextClass.IDLE, _zero_refractory())
+    broadcast = run_workspace(s, _frame(valid_mask=mask), TurnContextClass.IDLE, _zero_refractory())
     assert broadcast.mode == "EMPTY"
     assert broadcast.broadcast_ids == ()
     for _, value in broadcast.log_evidence:
@@ -171,7 +176,7 @@ def test_single_legal_proposal_broadcasts_with_activation_one() -> None:
     s = tuple(0.0 for _ in range(AXIS_DIM))
     # IDLE, only fatigue-hold present (drop boundary-hold via bit 17).
     mask = FULL_MASK & ~(1 << 17)
-    broadcast = run_workspace(s, _frame(valid_mask=mask), None, TurnContextClass.IDLE, _zero_refractory())
+    broadcast = run_workspace(s, _frame(valid_mask=mask), TurnContextClass.IDLE, _zero_refractory())
     assert broadcast.mode == "SINGLE_LEGAL"
     assert broadcast.broadcast_ids == ("fatigue-hold",)
     assert isclose(broadcast.activation[0], 1.0, abs_tol=1e-12)
@@ -179,9 +184,8 @@ def test_single_legal_proposal_broadcasts_with_activation_one() -> None:
 
 def test_registration_order_invariance() -> None:
     s = (0.6, -0.3, 0.2, 0.7, 0.9, -0.4, 0.5, 0.8)
-    snn = tuple(0.05 * i for i in range(formula.SNN_SUMMARY_DIM))
     frame = _frame()
-    proposals = list(build_proposals(s, frame, snn, TurnContextClass.ADDRESSED))
+    proposals = list(build_proposals(s, frame, TurnContextClass.ADDRESSED))
     forward = arbitrate(tuple(proposals), TurnContextClass.ADDRESSED, _zero_refractory())
     backward = arbitrate(tuple(reversed(proposals)), TurnContextClass.ADDRESSED, _zero_refractory())
     assert forward.mode == backward.mode
@@ -207,7 +211,7 @@ def test_source_refractory_update_formula_and_bounds() -> None:
     s = tuple(0.0 for _ in range(AXIS_DIM))
     mask = FULL_MASK & ~(1 << 17)  # only fatigue-hold (source index 4) present in IDLE
     refractory = tuple(0.5 for _ in range(formula.WORKSPACE_CAPACITY))
-    broadcast = run_workspace(s, _frame(valid_mask=mask), None, TurnContextClass.IDLE, refractory)
+    broadcast = run_workspace(s, _frame(valid_mask=mask), TurnContextClass.IDLE, refractory)
     nxt = broadcast.source_refractory_next
     assert len(nxt) == formula.WORKSPACE_CAPACITY
     for index in range(formula.WORKSPACE_CAPACITY):
@@ -219,8 +223,7 @@ def test_source_refractory_update_formula_and_bounds() -> None:
 
 def test_log_evidence_bounded_and_formula() -> None:
     s = (0.6, -0.3, 0.2, 0.7, 0.9, -0.4, 0.5, 0.8)
-    snn = tuple(0.05 * i for i in range(formula.SNN_SUMMARY_DIM))
-    broadcast = run_workspace(s, _frame(), snn, TurnContextClass.ADDRESSED, _zero_refractory())
+    broadcast = run_workspace(s, _frame(), TurnContextClass.ADDRESSED, _zero_refractory())
     support = dict(broadcast.support)
     mean_support = sum(support.values()) / len(support)
     for action_name, evidence in broadcast.log_evidence:
@@ -231,8 +234,7 @@ def test_log_evidence_bounded_and_formula() -> None:
 
 def test_activation_is_softmax_of_final_potentials() -> None:
     s = (0.6, -0.3, 0.2, 0.7, 0.9, -0.4, 0.5, 0.8)
-    snn = tuple(0.05 * i for i in range(formula.SNN_SUMMARY_DIM))
-    broadcast = run_workspace(s, _frame(), snn, TurnContextClass.ADDRESSED, _zero_refractory())
+    broadcast = run_workspace(s, _frame(), TurnContextClass.ADDRESSED, _zero_refractory())
     # activation is a probability distribution over present proposals.
     assert isclose(sum(broadcast.activation), 1.0, abs_tol=1e-9)
     for value in broadcast.activation:
@@ -241,9 +243,8 @@ def test_activation_is_softmax_of_final_potentials() -> None:
 
 def test_arbiter_class_matches_function() -> None:
     s = (0.6, -0.3, 0.2, 0.7, 0.9, -0.4, 0.5, 0.8)
-    snn = tuple(0.05 * i for i in range(formula.SNN_SUMMARY_DIM))
     frame = _frame()
-    proposals = build_proposals(s, frame, snn, TurnContextClass.ADDRESSED)
+    proposals = build_proposals(s, frame, TurnContextClass.ADDRESSED)
     arbiter = ProposalArbiterV1()
     a = arbiter.arbitrate(proposals, TurnContextClass.ADDRESSED, _zero_refractory())
     b = arbitrate(proposals, TurnContextClass.ADDRESSED, _zero_refractory())

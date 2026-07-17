@@ -1,14 +1,13 @@
 """Task 10 scalar core performance proof (design 16.3, plan spike C).
 
-Warms up and measures two separable core costs, both away from any repository
-fsync (the pure core never touches disk):
+Warms up and measures the core turn cost, away from any repository fsync (the
+pure core never touches disk):
 
-* the 96-neuron reservoir horizon at ``K = 16/24/32`` virtual ticks; and
-* one complete deterministic turn (encoder/snn/dynamics/workspace/policy plus
+* one complete deterministic turn (encoder/dynamics/workspace/policy plus
   canonical trace serialization) via the orchestrator.
 
-Percentiles p50/p95/p99 are recorded for each.  The declared latency gate fails
-only when ``SYLANNE_V3_PERF_GATES=1`` on the 2-core target; a normal test run
+Percentiles p50/p95/p99 are recorded.  The declared latency gate fails only
+when ``SYLANNE_V3_PERF_GATES=1`` on the 2-core target; a normal test run
 always passes.  An encoded benchmark JSON with an environment fingerprint is
 written to the ignored evidence directory (best effort, never fatal).
 """
@@ -36,17 +35,13 @@ from sylanne_alpha.v3core.contracts import (
     TurnKey,
     TurnSequence,
 )
-from sylanne_alpha.v3core.observation.encoder import encode_observation
-from sylanne_alpha.v3core.observation.models import ObservationFacts
-from sylanne_alpha.v3core.orchestrator import build_initial_snn_state, orchestrate
-from sylanne_alpha.v3core.spiking.reservoir import run_reservoir_from_frame
+from sylanne_alpha.v3core.orchestrator import orchestrate
 from sylanne_alpha.v3core.state.models import V3State
 
 
-# Declared p95 latency gates for the 2-core grey target.  Enforced only under
+# Declared p95 latency gate for the 2-core grey target.  Enforced only under
 # SYLANNE_V3_PERF_GATES=1 so ordinary runs never flake.
 DECLARED_TURN_P95_GATE_MS = 25.0
-DECLARED_RESERVOIR_P95_GATE_MS = 20.0
 
 
 def _raw_values() -> tuple:
@@ -61,12 +56,6 @@ def _raw_values() -> tuple:
 
 def _session_ref() -> SessionRef:
     return SessionRef(key_id="key-v1", session_digest=b"s" * 32, session_generation=1)
-
-
-def _frame() -> object:
-    return encode_observation(
-        ObservationFacts(raw_values=_raw_values(), context=TurnContextClass.ADDRESSED, previous_action=Action.SPEAK)
-    )
 
 
 def _turn_invocation() -> CoreInvocation:
@@ -112,19 +101,6 @@ def _percentiles(label: str, samples: list[float], extra: dict) -> dict:
     }
 
 
-def _measure_reservoir(ticks: int, iterations: int = 60, warmup: int = 15) -> dict:
-    snn = build_initial_snn_state()
-    frame = _frame()
-    for _ in range(warmup):
-        run_reservoir_from_frame(snn, frame, ticks, True)
-    samples: list[float] = []
-    for _ in range(iterations):
-        start = time.perf_counter()
-        run_reservoir_from_frame(snn, frame, ticks, True)
-        samples.append((time.perf_counter() - start) * 1000.0)
-    return _percentiles("reservoir", samples, {"ticks": ticks, "neurons": formula.SNN_NEURONS})
-
-
 def _measure_turn(iterations: int = 60, warmup: int = 15) -> dict:
     invocation = _turn_invocation()
     for _ in range(warmup):
@@ -138,7 +114,6 @@ def _measure_turn(iterations: int = 60, warmup: int = 15) -> dict:
 
 
 def test_scalar_core_performance_is_measured_and_optionally_gated() -> None:
-    reservoir_results = [_measure_reservoir(ticks) for ticks in (16, 24, 32)]
     turn_result = _measure_turn()
     fingerprint = {
         "python": sys.version.split()[0],
@@ -151,7 +126,6 @@ def test_scalar_core_performance_is_measured_and_optionally_gated() -> None:
     }
     payload = {
         "fingerprint": fingerprint,
-        "reservoir": reservoir_results,
         "full_turn": turn_result,
     }
 
@@ -165,16 +139,11 @@ def test_scalar_core_performance_is_measured_and_optionally_gated() -> None:
     except OSError:
         pass
 
-    for measurement in (*reservoir_results, turn_result):
+    for measurement in (turn_result,):
         assert measurement["p50_ms"] <= measurement["p95_ms"] <= measurement["p99_ms"]
         assert measurement["p99_ms"] >= 0.0
 
     if os.environ.get("SYLANNE_V3_PERF_GATES") == "1":
-        worst_reservoir_p95 = max(measurement["p95_ms"] for measurement in reservoir_results)
-        assert worst_reservoir_p95 < DECLARED_RESERVOIR_P95_GATE_MS, (
-            f"reservoir p95 {worst_reservoir_p95:.3f}ms exceeds the declared "
-            f"{DECLARED_RESERVOIR_P95_GATE_MS}ms gate: {payload}"
-        )
         assert turn_result["p95_ms"] < DECLARED_TURN_P95_GATE_MS, (
             f"full-turn p95 {turn_result['p95_ms']:.3f}ms exceeds the declared "
             f"{DECLARED_TURN_P95_GATE_MS}ms gate: {payload}"

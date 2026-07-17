@@ -136,7 +136,7 @@ def test_logit_includes_prior_evidence_and_refractory() -> None:
     latent = tuple(0.1 for _ in range(24))
     s = decision_state(latent)
     frame = _frame()
-    broadcast = run_workspace(s, frame, None, TurnContextClass.PROACTIVE, tuple(0.0 for _ in range(8)))
+    broadcast = run_workspace(s, frame, TurnContextClass.PROACTIVE, tuple(0.0 for _ in range(8)))
     state = _state(latent, rho_hold=0.5, rho_reach=0.0)
     result = score_policy(state, broadcast, TurnContextClass.PROACTIVE)
     evidence = dict(broadcast.log_evidence)

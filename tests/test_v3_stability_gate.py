@@ -32,12 +32,17 @@ G1/G3/G4 gates on frozen real data.
 
 Known production defects pinned below
 -------------------------------------
-Two declared invariants still fail against real code (``test_snn_emits_spikes``:
-the reservoir is structurally silent; ``test_mid_axis_recovers_within_its_envelope``:
-~9% of sessions miss the declared 0.35 mid envelope). They are pinned with
-``xfail(strict=True)`` rather than deleted, weakened, or skipped: the suite fails
-if either starts passing, which forces re-reading the gate the moment someone
-fixes the underlying defect. Each names its measured root cause.
+Both defects this gate used to pin as ``xfail(strict=True)`` are now resolved and
+the gate PASSES (``test_the_gate_passes_now_that_the_snn_defect_was_deleted``):
+
+* the structurally-silent reservoir (formerly ``test_snn_emits_spikes``) was
+  resolved by formula v2 DELETING the entire SNN subsystem -- a behaviour change, not
+  a fix that made it fire -- so that test is gone with the subsystem it certified; and
+* the mid-axis envelope breach (``test_mid_axis_recovers_within_its_envelope``) was
+  resolved by widening the persisted ``latent_axes`` to float32 (state codec v2).
+
+The strict-xfail mechanism paid out before that -- worth reading before trusting any
+pin here:
 
 That mechanism has now paid out twice, and both payouts are worth reading before
 trusting any pin here:
@@ -184,12 +189,19 @@ def test_g0_report_disclaims_gain_superiority_and_calibration() -> None:
         assert report[key], f"the report must embed {key}"
 
 
-def test_the_gate_reports_failures_rather_than_passing_silently() -> None:
-    """The G0 gate must currently FAIL: real defects are live (see xfails below)."""
+def test_the_gate_passes_now_that_the_snn_defect_was_deleted() -> None:
+    """The G0 gate now PASSES.
+
+    It used to FAIL for one live defect: the SNN reservoir was structurally silent,
+    so ``total_spikes == 0`` raised a "zero spikes" failure (and the mid-axis envelope
+    breach, since fixed by state codec v2).  formula v2 deleted the SNN subsystem
+    entirely, so that defect is resolved by removal rather than by making the reservoir
+    fire -- the "zero spikes" failure is retired and the remaining invariants hold.
+    """
 
     report = v3_stability.run_gate(2718, 400, sessions=1, k_turns=40)
-    assert report["passed"] is False
-    assert report["failures"], "a failing gate must name its failures"
+    assert report["passed"] is True, report["failures"]
+    assert report["failures"] == []
 
 
 # --------------------------------------------------------------------------- #
@@ -197,20 +209,11 @@ def test_the_gate_reports_failures_rather_than_passing_silently() -> None:
 # --------------------------------------------------------------------------- #
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason=(
-        "MAJOR (measured): the SNN never spikes through orchestrate(). Max membrane "
-        "voltage is ~0.32 across 1000 driven turns while the threshold adaptation "
-        "floor is 0.65 (SNN_THRESHOLD_BOUNDS), so no neuron can ever reach threshold "
-        "from build_initial_snn_state() (v=0, theta=1.0). snn_summary is therefore "
-        "permanently all-zero, Q*summary contributes nothing to the drive, and every "
-        "SNN-dependent gate passes vacuously. tests/test_v3_lif_reservoir.py only ever "
-        "observes spikes by pre-charging the membrane to v=1.5 with theta=0.65."
-    ),
-)
-def test_snn_emits_spikes(stream: v3_stability.StreamStats) -> None:
-    assert stream.total_spikes > 0
+# NOTE (formula v2): the former ``test_snn_emits_spikes`` strict-xfail is DELETED.
+# It pinned the measured defect that the SNN reservoir never fired through
+# ``orchestrate`` (max membrane ~0.32 vs a 0.65 threshold floor).  That defect did
+# not need fixing -- the whole SNN subsystem was deleted -- so its death certificate
+# is retired along with the subsystem it certified.
 
 
 def test_invocations_are_not_rejected_wholesale(stream: v3_stability.StreamStats) -> None:
@@ -308,7 +311,8 @@ def test_k16_vs_k24_js_divergence_is_below_the_gate() -> None:
     report = v3_stability.k_divergence_report(2718, K_TURNS)
     pair = report["pairs"]["16_vs_24"]
     assert pair["js_divergence"] < v3_stability.MAX_JS_DIVERGENCE
-    # Honesty guard: this currently passes only because the reservoir is silent, so
-    # K cannot matter. Without this note the green tick would be read as evidence
-    # that K-invariance was demonstrated. See test_snn_emits_spikes.
+    # Honesty guard (formula v2): K=16 and K=24 are SNN tick counts, and the SNN is
+    # deleted, so the two profiles now advance the identical continuous trajectory and
+    # the divergence is ~0 by construction.  This is NOT a demonstration of a
+    # meaningful K-invariance -- there is no K-dependent computation left to vary.
     assert pair["within_gate"] is True

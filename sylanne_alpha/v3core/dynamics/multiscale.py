@@ -1,11 +1,10 @@
 """Deterministic multi-timescale dynamics (design section 9).
 
 Eight named axes each carry fast/mid/slow state (24 values in ``[-1,1]``).  A turn
-projects the observation frame (and, once the SNN exists, its summary) into an
-eight-dimensional bounded ``drive`` and then advances the three timescales in the
-strict sequential order ``fast -> mid -> slow``:
+projects the observation frame into an eight-dimensional bounded ``drive`` and then
+advances the three timescales in the strict sequential order ``fast -> mid -> slow``:
 
-    drive       = tanh(P*(effective_obs - semantic_default) + Q*snn_summary)
+    drive       = tanh(P*(effective_obs - semantic_default))
     target_fast = tanh(W_fast*fast + U_fast*drive)
     fast'       = clip(fast + 0.50*(target_fast - fast), -1, 1)
     target_mid  = tanh(W_mid*mid   + U_mid*fast')
@@ -34,9 +33,7 @@ from ..formula_v1 import (
     JACOBIAN_STABILITY_LIMIT,
     OBSERVATION_DIM,
     P_TRIPLES,
-    Q_MATRIX,
     SEMANTIC_DEFAULTS,
-    SNN_SUMMARY_DIM,
     STATE_DIM,
     U_FAST,
     U_MID,
@@ -84,14 +81,14 @@ def _tanh_layer(self_matrix: tuple, self_vector: tuple, coupling_matrix: tuple, 
 # --------------------------------------------------------------------------- #
 
 
-def compute_drive(frame: object, snn_summary: object = None) -> tuple:
-    """Project the observation frame (and optional SNN summary) into the 8-axis drive.
+def compute_drive(frame: object) -> tuple:
+    """Project the observation frame into the 8-axis drive.
 
     An invalid channel is replaced by its semantic default, so its centered
     contribution ``(effective - default)`` is exactly ``0.0`` and changing an
-    invalid channel's raw value can never change the drive.  ``snn_summary`` is
-    ``None`` (no SNN this turn -> zero contribution) or exactly ``SNN_SUMMARY_DIM``
-    finite floats.
+    invalid channel's raw value can never change the drive.  (formula v2 deleted
+    the ``Q*snn_summary`` coupling: the reservoir summary was permanently zero, so
+    the term was already inert, and the reservoir itself is gone.)
     """
 
     if type(frame) is not ObservationFrame:
@@ -105,20 +102,6 @@ def compute_drive(frame: object, snn_summary: object = None) -> tuple:
     axis_terms: list[list[float]] = [[] for _ in range(AXIS_DIM)]
     for axis, channel, weight in P_TRIPLES:
         axis_terms[axis].append(weight * centered[channel])
-
-    if snn_summary is not None:
-        if type(snn_summary) is not tuple:
-            raise TypeError("snn_summary must be a tuple or None")
-        if len(snn_summary) != SNN_SUMMARY_DIM:
-            raise ValueError("snn_summary must have exactly SNN_SUMMARY_DIM entries")
-        for index, value in enumerate(snn_summary):
-            if type(value) is not float or not isfinite(value):
-                raise ValueError(f"snn_summary[{index}] must be a finite float")
-        for axis in range(AXIS_DIM):
-            for summary_index in range(SNN_SUMMARY_DIM):
-                weight = Q_MATRIX[axis][summary_index]
-                if weight != 0.0:
-                    axis_terms[axis].append(weight * snn_summary[summary_index])
 
     return tuple(tanh(fsum(axis_terms[axis])) for axis in range(AXIS_DIM))
 
@@ -159,7 +142,7 @@ def select_valid_next_axes(previous_axes: tuple, candidate_axes: tuple) -> tuple
     return candidate_axes
 
 
-def advance_dynamics(state: object, frame: object, turn_revision: int, snn_summary: object = None) -> MultiscaleAdvance:
+def advance_dynamics(state: object, frame: object, turn_revision: int) -> MultiscaleAdvance:
     """Advance the latent axes for one committed turn revision (idempotent per revision).
 
     The state advances only when ``turn_revision`` is strictly greater than the
@@ -172,7 +155,7 @@ def advance_dynamics(state: object, frame: object, turn_revision: int, snn_summa
     if type(turn_revision) is not int or isinstance(turn_revision, bool):
         raise TypeError("turn_revision must be an int")
 
-    drive = compute_drive(frame, snn_summary)
+    drive = compute_drive(frame)
 
     if turn_revision <= state.revision:
         return MultiscaleAdvance(
@@ -193,7 +176,7 @@ def advance_dynamics(state: object, frame: object, turn_revision: int, snn_summa
     )
 
 
-def advance_state(state: object, frame: object, turn_revision: int, snn_summary: object = None) -> V3State:
+def advance_state(state: object, frame: object, turn_revision: int) -> V3State:
     """Return a new :class:`V3State` with advanced latent axes, or the input unchanged.
 
     On an idempotent no-op or a deterministic fallback the original ``state`` is
@@ -201,7 +184,7 @@ def advance_state(state: object, frame: object, turn_revision: int, snn_summary:
     the advanced axes and ``turn_revision`` is produced.
     """
 
-    result = advance_dynamics(state, frame, turn_revision, snn_summary)
+    result = advance_dynamics(state, frame, turn_revision)
     if not result.advanced:
         return state  # type: ignore[return-value]
     return replace(state, latent_axes=result.next_latent_axes, revision=result.revision)

@@ -383,24 +383,19 @@ def test_bridge_load_snapshot_is_frozen_and_repository_hard_stop_is_explicit() -
     assert RepositoryAdmissionState.HARD_STOP.value == "HARD_STOP"
 
 
-def test_formula_dimensions_time_constants_and_sparse_drive_are_exact() -> None:
+def test_formula_dimensions_and_sparse_drive_are_exact() -> None:
     assert formula.FORMULA_VERSION == "sylanne.v3.formula.v1"
+    # formula v2 deleted the SNN cognition dimensions/time-constants; SNN_NEURONS and
+    # SNN_SUMMARY_DIM survive only as trace-telemetry layout constants.
     assert (
         formula.OBSERVATION_DIM,
         formula.AXIS_DIM,
         formula.STATE_DIM,
         formula.SNN_NEURONS,
-        formula.SNN_EXCITATORY,
-        formula.SNN_INHIBITORY,
-        formula.SNN_DEFAULT_TICKS,
-        formula.SNN_ALLOWED_TICKS,
         formula.SNN_SUMMARY_DIM,
         formula.WORKSPACE_CAPACITY,
         formula.EXPERIENCE_CAPACITY,
-    ) == (36, 8, 24, 96, 77, 19, 24, (16, 24, 32), 16, 8, 64)
-    tau_90 = -1.0 / (24.0 * math.log(0.90))
-    assert formula.TAU_MEMBRANE == formula.TAU_PRE == formula.TAU_POST == tau_90
-    assert formula.TAU_ELIGIBILITY == -1.0 / (24.0 * math.log(0.95))
+    ) == (36, 8, 24, 96, 16, 8, 64)
 
     expected_p = (
         (0, 25, 0.55),
@@ -428,11 +423,6 @@ def test_formula_dimensions_time_constants_and_sparse_drive_are_exact() -> None:
     )
     assert formula.P_TRIPLES == expected_p
     assert formula.P_MATRIX == _matrix(8, 36, expected_p)
-    expected_q = tuple(
-        tuple(0.20 if column == 2 * row else 0.10 if column == 2 * row + 1 else 0.0 for column in range(16))
-        for row in range(8)
-    )
-    assert formula.Q_MATRIX == expected_q
 
 
 def test_formula_semantic_defaults_centering_bias_and_context_priors_are_exact() -> None:
@@ -513,59 +503,11 @@ def test_formula_dynamics_matrices_use_target_rows_and_source_columns() -> None:
     assert formula.JACOBIAN_VALIDATION_METHOD == "abs-block-sqrt-l1-linf"
 
 
-def test_deterministic_recurrent_and_input_hash_framing() -> None:
-    assert formula.RECURRENT_HASH_DOMAIN == b"SYL3\x01REC\x00"
-    assert formula.INPUT_HASH_DOMAIN == b"SYL3\x01INPUT\x00"
-    assert formula.RECURRENT_HIGH_FAN_IN_POSTS == 58
-    assert (formula.RECURRENT_HIGH_FAN_IN, formula.RECURRENT_LOW_FAN_IN) == (8, 7)
-    assert (
-        formula.RECURRENT_EE_WEIGHT,
-        formula.RECURRENT_OTHER_EXCITATORY_WEIGHT,
-        formula.RECURRENT_INHIBITORY_WEIGHT,
-    ) == (0.06, 0.08, -0.12)
-
-    edge_count = 0
-    for post in range(formula.SNN_NEURONS):
-        fan_in = formula.RECURRENT_HIGH_FAN_IN if post < 58 else formula.RECURRENT_LOW_FAN_IN
-        ranked = sorted(
-            (hashlib.sha256(formula.RECURRENT_HASH_DOMAIN + struct.pack(">HH", post, pre)).digest(), pre)
-            for pre in range(formula.SNN_NEURONS)
-            if pre != post
-        )
-        selected = tuple(pre for _, pre in ranked[:fan_in])
-        assert formula.recurrent_sources(post) == selected
-        assert post not in selected
-        edge_count += len(selected)
-
-        fixed_l1 = sum(
-            abs(formula.recurrent_initial_weight(post, pre))
-            for pre in selected
-            if not (post < formula.SNN_EXCITATORY and pre < formula.SNN_EXCITATORY)
-        )
-        assert fixed_l1 <= 1.2
-    assert edge_count == 58 * 8 + 38 * 7
-
-    assert (formula.POPULATION_INPUT_COUNT, formula.INPUT_TARGETS_PER_CHANNEL, formula.INPUT_WEIGHT) == (108, 4, 0.50)
-    for input_index in range(108):
-        expected = tuple(
-            target
-            for _, target in sorted(
-                (
-                    hashlib.sha256(
-                        formula.INPUT_HASH_DOMAIN + struct.pack(">HH", input_index, target)
-                    ).digest(),
-                    target,
-                )
-                for target in range(formula.SNN_NEURONS)
-            )[:4]
-        )
-        assert formula.input_targets(input_index) == expected
-
-
-def test_formula_validator_rejects_bad_shapes_and_population(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_formula_validator_rejects_bad_shapes(monkeypatch: pytest.MonkeyPatch) -> None:
+    # formula v2 deleted the SNN population / Q-matrix / recurrent-topology checks;
+    # the continuous P/W/U matrices, step sizes, and the Jacobian gate remain.
     for name, bad_value in (
         ("P_MATRIX", ((0.0,),)),
-        ("Q_MATRIX", ((0.0,),)),
         ("W_FAST", ((0.0,),)),
         ("U_SLOW", ((0.0,),)),
     ):
@@ -600,58 +542,9 @@ def test_formula_validator_rejects_bad_shapes_and_population(monkeypatch: pytest
                 formula.validate_formula_manifest()
         assert jacobian_calls == []
     with monkeypatch.context() as scoped:
-        scoped.setattr(formula, "SNN_INHIBITORY", formula.SNN_INHIBITORY - 1)
-        with pytest.raises(ValueError, match="population"):
-            formula.validate_formula_manifest()
-    with monkeypatch.context() as scoped:
         scoped.setattr(formula, "jacobian_absolute_upper_bound", lambda: ((0.0,),))
         with pytest.raises(ValueError, match="Jacobian"):
             formula.validate_formula_manifest()
-
-
-@pytest.mark.parametrize(
-    "replacement",
-    [
-        pytest.param(lambda post: (post,), id="self-loop"),
-        pytest.param(lambda post: (1, 1, 2, 3, 4, 5, 6, 7), id="duplicate"),
-        pytest.param(lambda post: (-1, 1, 2, 3, 4, 5, 6, 7), id="out-of-range"),
-        pytest.param(lambda post: (1,), id="wrong-fan-in"),
-    ],
-)
-def test_formula_validator_rejects_invalid_recurrent_topology(
-    monkeypatch: pytest.MonkeyPatch,
-    replacement: object,
-) -> None:
-    monkeypatch.setattr(formula, "recurrent_sources", replacement)
-    with pytest.raises(ValueError, match="recurrent"):
-        formula.validate_formula_manifest()
-
-
-def test_formula_validator_rejects_dale_plasticity_and_input_violations(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    with monkeypatch.context() as scoped:
-        scoped.setattr(formula, "recurrent_initial_weight", lambda post, pre: -0.06)
-        with pytest.raises(ValueError, match="Dale"):
-            formula.validate_formula_manifest()
-    with monkeypatch.context() as scoped:
-        scoped.setattr(formula, "recurrent_is_plastic", lambda post, pre: False)
-        with pytest.raises(ValueError, match="plastic"):
-            formula.validate_formula_manifest()
-    with monkeypatch.context() as scoped:
-        scoped.setattr(formula, "input_targets", lambda input_index: (0, 0, 1, 2))
-        with pytest.raises(ValueError, match="input"):
-            formula.validate_formula_manifest()
-
-
-@pytest.mark.parametrize("limit", [float("nan"), float("inf"), True, 1.3])
-def test_formula_validator_rejects_invalid_recurrent_l1_limit(
-    monkeypatch: pytest.MonkeyPatch,
-    limit: object,
-) -> None:
-    monkeypatch.setattr(formula, "RECURRENT_FIXED_INCOMING_L1_LIMIT", limit)
-    with pytest.raises(ValueError, match="recurrent.*L1"):
-        formula.validate_formula_manifest()
 
 
 def test_formula_validator_normalizes_extreme_numeric_values_to_value_error(
@@ -664,21 +557,11 @@ def test_formula_validator_normalizes_extreme_numeric_values_to_value_error(
         formula.validate_formula_manifest()
 
 
-def test_formula_validator_rejects_materialized_topology_and_jacobian_drift(
+def test_formula_validator_rejects_materialized_jacobian_drift(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    with monkeypatch.context() as scoped:
-        topology = list(formula.RECURRENT_TOPOLOGY)
-        topology[0] = tuple(reversed(topology[0]))
-        scoped.setattr(formula, "RECURRENT_TOPOLOGY", tuple(topology))
-        with pytest.raises(ValueError, match="materialized recurrent"):
-            formula.validate_formula_manifest()
-    with monkeypatch.context() as scoped:
-        topology = list(formula.INPUT_TOPOLOGY)
-        topology[0] = tuple(reversed(topology[0]))
-        scoped.setattr(formula, "INPUT_TOPOLOGY", tuple(topology))
-        with pytest.raises(ValueError, match="materialized input"):
-            formula.validate_formula_manifest()
+    # formula v2 deleted the recurrent/input topology and its materialization checks;
+    # the materialized Jacobian drift check remains.
     with monkeypatch.context() as scoped:
         scoped.setattr(
             formula,
@@ -762,13 +645,12 @@ def test_formula_validator_treats_named_context_mapping_order_as_nonsemantic(
     assert canonical.canonical_json_bytes(formula.build_formula_manifest()) == formula.FORMULA_CANONICAL_JSON
 
 
-def test_snn_summary_pools_and_proposal_manifest_are_frozen_exactly() -> None:
-    assert formula.SNN_SUMMARY_POOLS == tuple((start, start + 6) for start in range(0, 48, 6))
-    assert formula.SNN_SUMMARY_DEFINITION == (
-        "rate[p]=clip(mean(spike_count_i/K),0,1)",
-        "latency[8+p]=0 if no spike else 1-min(first_latency_i)/(K-1)",
-        "missing channels emit no spikes",
-    )
+def test_proposal_manifest_is_frozen_exactly() -> None:
+    # formula v2 deleted the snn-novelty proposal (old index 6) and the SNN summary
+    # pools/definition.  The survivors are NOT renumbered in key space: their
+    # (action, source-basis, group) key triples are byte-identical to formula v1, so
+    # continuity-speak keeps source basis 11 and key coordinate 10 is a permanent
+    # tombstone that no proposal uses.
     assert formula.PROPOSAL_IDS == (
         "body-speak",
         "affect-speak",
@@ -776,9 +658,9 @@ def test_snn_summary_pools_and_proposal_manifest_are_frozen_exactly() -> None:
         "boundary-hold",
         "fatigue-hold",
         "affiliation-reach",
-        "snn-novelty",
         "continuity-speak",
     )
+    assert formula.PROPOSAL_COUNT == 7
     assert formula.PROPOSAL_SALIENCE_FORMULAS == (
         ("body-speak", "1.2*expression_pressure + 0.5*arousal + 0.3*center(expression_drive)"),
         ("affect-speak", "0.9*abs(valence) + 0.7*affiliation + 0.4*safety"),
@@ -786,7 +668,6 @@ def test_snn_summary_pools_and_proposal_manifest_are_frozen_exactly() -> None:
         ("boundary-hold", "-1.3*safety - 0.6*agency + 0.5*center(boundary_pressure)"),
         ("fatigue-hold", "1.4*center(exhaustion) - 0.4*expression_pressure"),
         ("affiliation-reach", "1.1*affiliation + 0.8*expression_pressure + 0.3*novelty"),
-        ("snn-novelty", "1.2*snn_summary[10] + 0.6*novelty"),
         (
             "continuity-speak",
             "0.8*center(history_present) + 0.6*center(engagement) + 0.4*affiliation",
@@ -794,10 +675,9 @@ def test_snn_summary_pools_and_proposal_manifest_are_frozen_exactly() -> None:
     )
     assert formula.PROPOSAL_KEY_WEIGHTS == (1.0, 0.75, 0.50)
     assert formula.PROPOSAL_ACTION_BASIS == (0, 1, 2, 3)
-    assert formula.PROPOSAL_SOURCE_BASIS == tuple(range(4, 12))
-    assert formula.PROPOSAL_GROUP_COORDS == (12, 12, 13, 14, 12, 15, 13, 15)
-    assert formula.PROPOSAL_REQUIRED_BITS == ((11,), (), (), (17,), (10,), (), (), (26, 30))
-    assert formula.PROPOSAL_REQUIRES_VALID_SNN_SUMMARY == (False, False, False, False, False, False, True, False)
+    assert formula.PROPOSAL_SOURCE_BASIS == (4, 5, 6, 7, 8, 9, 11)  # 10 = snn-novelty tombstone
+    assert formula.PROPOSAL_GROUP_COORDS == (12, 12, 13, 14, 12, 15, 15)
+    assert formula.PROPOSAL_REQUIRED_BITS == ((11,), (), (), (17,), (10,), (), (26, 30))
     assert formula.PROPOSAL_SALIENCE_BOUNDS == (-4.0, 4.0)
     assert formula.PROPOSAL_CONFIDENCE_FORMULA == "clip01(0.5 + 0.25*abs(salience))"
     assert formula.center(0.0) == -1.0
@@ -806,6 +686,8 @@ def test_snn_summary_pools_and_proposal_manifest_are_frozen_exactly() -> None:
     for key in formula.PROPOSAL_KEYS:
         assert len(key) == 16
         assert math.sqrt(sum(value * value for value in key)) == pytest.approx(1.0)
+    # No surviving proposal uses key coordinate 10 (the snn-novelty tombstone).
+    assert all(key[10] == 0.0 for key in formula.PROPOSAL_KEYS)
 
 
 def test_expression_v1_constraints_are_frozen_without_literal_openings() -> None:
@@ -902,16 +784,10 @@ def test_formula_manifest_uses_named_mappings_for_all_material_semantics() -> No
     }
     assert manifest["dynamics"]["p_matrix"] == formula.P_MATRIX
     assert manifest["dynamics"]["p_bias"] == formula.P_BIAS
-    assert manifest["spiking"]["recurrent_topology"] == formula.RECURRENT_TOPOLOGY
-    assert manifest["spiking"]["input_topology"] == formula.INPUT_TOPOLOGY
-    assert manifest["spiking"]["topology_semantics"] == {
-        "digest": "SHA-256",
-        "index_framing": ">HH",
-        "selection": "ascending digest, then lowest index",
-        "recurrent_excludes_self": True,
-        "plasticity": "iff pre and post are excitatory",
-        "dale": "weight sign is determined by presynaptic population",
-    }
+    # formula v2 removed the whole "spiking" manifest section (and dynamics.q_matrix).
+    assert "spiking" not in manifest
+    assert "snn_summary" not in manifest
+    assert "q_matrix" not in manifest["dynamics"]
     assert manifest["action_selection"]["context_priors"] == formula.CONTEXT_ACTION_PRIORS
     assert manifest["action_selection"]["tie_order"] == formula.ACTION_TIE_ORDER
     assert manifest["load_shedding"]["profile_fields"] == (
@@ -940,7 +816,12 @@ def test_formula_digest_is_canonical_and_golden() -> None:
     assert type(formula.FORMULA_MANIFEST) is MappingProxyType
     assert len(formula.FORMULA_DIGEST) == 64
     assert formula.FORMULA_DIGEST == hashlib.sha256(formula.FORMULA_CANONICAL_JSON).hexdigest()
-    assert formula.FORMULA_DIGEST == "47c690a78944a408dee245c20833b5f8fff8fa066e2faa92f6ae736511cbffa2"
+    # formula v2 digest: the SNN subsystem (dimensions snn_*, dynamics.q_matrix, the
+    # whole spiking + snn_summary manifest sections, and the snn-novelty proposal)
+    # was removed from the manifest.  This is an intentional digest bump for a
+    # behaviour change; the pre-deletion (formula v1) digest was
+    # 47c690a78944a408dee245c20833b5f8fff8fa066e2faa92f6ae736511cbffa2.
+    assert formula.FORMULA_DIGEST == "d3998ec2f0fa00046abfeae2a224f7703013bb2bdd893367a025e238f72d5ea4"
 
 
 def test_v3core_import_firewall() -> None:

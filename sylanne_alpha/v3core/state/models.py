@@ -3,16 +3,16 @@
 A :class:`V3State` carries the persistence envelope headers required by design
 section 15.1 (schema/formula/model revisions, opaque state-generation id, writer
 epoch, sequence fence) alongside the complete bounded cognitive payload: the
-24-dimensional continuous latent axes, the per-session spiking sub-state, the
-per-action linear-Gaussian belief, the autonomous refractory scalars, the style
-signature ring, an optional reuse SNN summary, an optional settled
-:class:`PendingOutcome`, and a bounded 64-entry FIFO :class:`ExperienceRecord`
-buffer.
+24-dimensional continuous latent axes, the per-action linear-Gaussian belief, the
+autonomous refractory scalars, the style signature ring, a vestigial optional
+reuse summary (``last_snn_summary``, always ``None`` since formula v2 deleted the
+SNN), an optional settled :class:`PendingOutcome`, and a bounded 64-entry FIFO
+:class:`ExperienceRecord` buffer.
 
-Every numeric field is finite and bounded, every collection has a fixed or
-capped length grounded in the frozen formula manifest, and the SNN sub-state is
-Dale-checked at construction so a malformed value can never form a state.  The
-canonical packed byte encoding of these models lives in :mod:`.codec`.
+Every numeric field is finite and bounded and every collection has a fixed or
+capped length grounded in the frozen formula manifest, so a malformed value can
+never form a state.  The canonical packed byte encoding of these models lives in
+:mod:`.codec`.
 """
 
 from __future__ import annotations
@@ -24,12 +24,9 @@ from ..canonical import assert_exact_type, assert_valid_dto
 from ..contracts import Action, SessionRef, TurnSequence
 from ..formula_v1 import (
     AXIS_DIM,
+    BASELINE_BOUNDS,
     EXPERIENCE_CAPACITY,
     FORMULA_VERSION,
-    RECURRENT_TOPOLOGY,
-    SNN_BASELINE_BOUNDS,
-    SNN_EXCITATORY,
-    SNN_NEURONS,
     SNN_SUMMARY_DIM,
     STATE_DIM,
     STYLE_SIGNATURE_RING_CAPACITY,
@@ -42,7 +39,6 @@ from ..formula_v1 import (
 
 STATE_SCHEMA_VERSION = 1
 LATENT_DIM = STATE_DIM  # 24 = 8 axes x 3 timescales
-SNN_NEURON_COUNT = SNN_NEURONS  # 96
 ACTION_COUNT = 4  # SPEAK, HOLD, CLARIFY, REACH
 THETA_PARAMS = 2  # theta_ai = [g_ai, b_ai] per axis (design 11.3)
 STYLE_RING_CAPACITY = STYLE_SIGNATURE_RING_CAPACITY  # 4
@@ -51,18 +47,11 @@ WORKSPACE_BROADCAST_DIM = 8  # one salience per workspace proposal slot
 EXPERIENCE_FEATURE_DIM = STATE_DIM  # quantized continuous/path feature vector
 EXPERIENCE_REWARD_DIM = AXIS_DIM  # per-axis reward components
 
-# SNN scalar bounds (design 8.2 / 8.3).  Excitatory plastic weights are the only
-# per-session synapses, so they are non-negative; the Dale gate rejects any
-# negative plastic weight.
-#
-# These are the *declared* (semantic) bounds: what the core clamps to and what the
-# saturation metric measures against.  They are NOT what a reloaded state is
-# validated against -- see ``quantization_safe_bounds`` below.
-PLASTIC_WEIGHT_BOUNDS = (0.0, 0.35)
-ELIGIBILITY_BOUNDS = (-3.0, 3.0)
-THRESHOLD_BOUNDS = (0.65, 1.35)
-TRACE_BOUNDS = (0.0, 3.0)
-VOLTAGE_BOUNDS = (-8.0, 8.0)
+# formula v2 deleted the SNN sub-state (``SnnState``), so the reservoir scalar
+# bounds (plastic weights / eligibility / threshold / trace / voltage) and the
+# plastic-synapse count are gone.  Only the per-action reward baseline bound and
+# the reuse-summary bound survive, feeding ``ActionBeliefs.baselines`` and the
+# vestigial ``last_snn_summary`` slot respectively.
 
 
 def _to_float16(value: float) -> float:
@@ -113,26 +102,17 @@ def quantization_safe_bounds(bounds: tuple[float, float]) -> tuple[float, float]
 
 # Continuous payload bounds, each grounded in the code that actually clamps them:
 #   latent_axes  -- design 9: 24 values in [-1,1]; ``dynamics.multiscale._clip_unit``.
-#   baselines    -- design 8.3: clip(0.95*baseline + 0.05*reward, -1, 1); the frozen
-#                   manifest constant is reused rather than restated.
-#   last_snn_summary -- ``spiking.reservoir.pooled_summary``: 8 pool rates clipped to
-#                   [0,1] then 8 latency confidences ``1 - latency/(ticks-1)``, also
-#                   in [0,1].
-# These were all declared (-16, 16) -- up to 16x looser than the real clamp, so a
-# grossly out-of-range value would have validated as if it were in band.
+#   baselines    -- per-action reward EMA clip(0.95*baseline + 0.05*reward, -1, 1)
+#                   (``learning.outcomes.update_baseline``).
+#   last_snn_summary -- vestigial reuse slot (formula v2 deleted the reservoir that
+#                   produced it); still validated to [0,1] when present, always None now.
 LATENT_AXIS_BOUNDS = (-1.0, 1.0)
-BASELINE_BOUNDS = SNN_BASELINE_BOUNDS
 SNN_SUMMARY_BOUNDS = (0.0, 1.0)
 
 # Storage-validation intervals: the declared bounds above, widened onto the float16
 # persistence grid.  Every DTO validates against these; nothing clamps to them.
-# -1.0/0.0/1.0/3.0/8.0 are all exactly representable in float16, so those intervals
-# come back unchanged -- only the 0.65 floor and the 0.35 ceiling actually move.
-PLASTIC_WEIGHT_STORED_BOUNDS = quantization_safe_bounds(PLASTIC_WEIGHT_BOUNDS)
-ELIGIBILITY_STORED_BOUNDS = quantization_safe_bounds(ELIGIBILITY_BOUNDS)
-THRESHOLD_STORED_BOUNDS = quantization_safe_bounds(THRESHOLD_BOUNDS)
-TRACE_STORED_BOUNDS = quantization_safe_bounds(TRACE_BOUNDS)
-VOLTAGE_STORED_BOUNDS = quantization_safe_bounds(VOLTAGE_BOUNDS)
+# -1.0/0.0/1.0 are all exactly representable in float16, so those intervals come
+# back unchanged.
 LATENT_AXIS_STORED_BOUNDS = quantization_safe_bounds(LATENT_AXIS_BOUNDS)
 BASELINE_STORED_BOUNDS = quantization_safe_bounds(BASELINE_BOUNDS)
 SNN_SUMMARY_STORED_BOUNDS = quantization_safe_bounds(SNN_SUMMARY_BOUNDS)
@@ -141,20 +121,6 @@ SNN_SUMMARY_STORED_BOUNDS = quantization_safe_bounds(SNN_SUMMARY_BOUNDS)
 _U8_RANGE = (0, 255)
 _S16_RANGE = (-32768, 32767)
 _ACTION_CODE_NONE = 255
-
-
-def _plastic_synapse_count() -> int:
-    """Count the excitatory-to-excitatory (plastic) recurrent synapses."""
-
-    total = 0
-    for post in range(SNN_EXCITATORY):
-        for pre in RECURRENT_TOPOLOGY[post]:
-            if pre < SNN_EXCITATORY:
-                total += 1
-    return total
-
-
-PLASTIC_SYNAPSE_COUNT = _plastic_synapse_count()
 
 
 # --------------------------------------------------------------------------- #
@@ -200,50 +166,6 @@ def _check_digest(value: object, length: int, name: str) -> None:
     assert_exact_type(value, bytes, name)
     if len(value) != length:
         raise ValueError(f"{name} must be exactly {length} bytes")
-
-
-# --------------------------------------------------------------------------- #
-# SNN sub-state
-# --------------------------------------------------------------------------- #
-
-
-@dataclass(frozen=True, slots=True)
-class SnnState:
-    """Per-session spiking reservoir state: absolute (not delta) packed arrays.
-
-    Shared topology and immutable initial weights are model constants and are
-    never copied here; only the per-session evolving values are stored.  All
-    plastic synapses are excitatory-to-excitatory, so every plastic weight is
-    non-negative (Dale) and bounded to ``PLASTIC_WEIGHT_BOUNDS``.
-    """
-
-    voltages: tuple
-    thresholds: tuple
-    pre_trace: tuple
-    post_trace: tuple
-    plastic_weights: tuple
-    eligibility: tuple
-
-    def __post_init__(self) -> None:
-        # Bounds are the float16-widened *storage* intervals: this state is validated
-        # after a decode, so it lives on the quantization grid (see
-        # ``quantization_safe_bounds``), not on the exact declared interval.
-        _check_float_vector(self.voltages, SNN_NEURON_COUNT, VOLTAGE_STORED_BOUNDS, "voltages")
-        _check_float_vector(
-            self.thresholds, SNN_NEURON_COUNT, THRESHOLD_STORED_BOUNDS, "thresholds"
-        )
-        _check_float_vector(self.pre_trace, SNN_NEURON_COUNT, TRACE_STORED_BOUNDS, "pre_trace")
-        _check_float_vector(self.post_trace, SNN_NEURON_COUNT, TRACE_STORED_BOUNDS, "post_trace")
-        _check_float_vector(
-            self.plastic_weights,
-            PLASTIC_SYNAPSE_COUNT,
-            PLASTIC_WEIGHT_STORED_BOUNDS,
-            "plastic_weights",
-        )
-        _check_float_vector(
-            self.eligibility, PLASTIC_SYNAPSE_COUNT, ELIGIBILITY_STORED_BOUNDS, "eligibility"
-        )
-        assert_valid_dto(self)
 
 
 # --------------------------------------------------------------------------- #
@@ -351,7 +273,6 @@ class PendingOutcome:
     sequence: TurnSequence
     action: Action
     projected_actual_action: Action | None = None
-    stdp_credit_enabled: bool = False
     c: tuple = ()
     v_c: tuple = ()
     reward_scale: float = 1.0
@@ -359,7 +280,6 @@ class PendingOutcome:
     predictive_mu_actual: tuple = ()
     predictive_v_actual: tuple = ()
     likelihood_r_actual: tuple = ()
-    packed_eligibility: tuple | None = None
     expiry_sequence: TurnSequence | None = None
     preference_revision: str = FORMULA_VERSION
     preference_digest: str = ""
@@ -372,7 +292,6 @@ class PendingOutcome:
         assert_exact_type(
             self.projected_actual_action, (Action, type(None)), "projected_actual_action"
         )
-        assert_exact_type(self.stdp_credit_enabled, bool, "stdp_credit_enabled")
         for name, values in (
             ("c", self.c),
             ("v_c", self.v_c),
@@ -387,13 +306,6 @@ class PendingOutcome:
             for index, value in enumerate(values):
                 assert_exact_type(value, float, f"{name}[{index}]")
         assert_exact_type(self.reward_scale, float, "reward_scale")
-        if self.packed_eligibility is not None:
-            _check_float_vector(
-                self.packed_eligibility,
-                PLASTIC_SYNAPSE_COUNT,
-                ELIGIBILITY_STORED_BOUNDS,
-                "packed_eligibility",
-            )
         assert_exact_type(self.expiry_sequence, (TurnSequence, type(None)), "expiry_sequence")
         assert_exact_type(self.preference_revision, str, "preference_revision")
         assert_exact_type(self.preference_digest, str, "preference_digest")
@@ -427,7 +339,6 @@ class V3State:
     rho_hold: float = 0.0
     rho_reach: float = 0.0
     style_ring: tuple = ()
-    snn: SnnState | None = None
     action_beliefs: ActionBeliefs | None = None
     last_snn_summary: tuple | None = None
     pending_outcome: PendingOutcome | None = None
@@ -455,7 +366,6 @@ class V3State:
         assert_exact_type(self.rho_hold, float, "rho_hold")
         assert_exact_type(self.rho_reach, float, "rho_reach")
         self._validate_style_ring()
-        assert_exact_type(self.snn, (SnnState, type(None)), "snn")
         assert_exact_type(self.action_beliefs, (ActionBeliefs, type(None)), "action_beliefs")
         if self.last_snn_summary is not None:
             _check_float_vector(
@@ -496,30 +406,21 @@ class V3State:
 
 __all__ = [
     "ACTION_COUNT",
-    "ELIGIBILITY_BOUNDS",
-    "ELIGIBILITY_STORED_BOUNDS",
+    "BASELINE_BOUNDS",
+    "BASELINE_STORED_BOUNDS",
     "EXPERIENCE_FEATURE_DIM",
     "EXPERIENCE_REWARD_DIM",
     "LATENT_DIM",
-    "PLASTIC_SYNAPSE_COUNT",
-    "PLASTIC_WEIGHT_BOUNDS",
-    "PLASTIC_WEIGHT_STORED_BOUNDS",
-    "SNN_NEURON_COUNT",
+    "SNN_SUMMARY_BOUNDS",
+    "SNN_SUMMARY_STORED_BOUNDS",
     "STATE_SCHEMA_VERSION",
     "STYLE_RING_CAPACITY",
     "STYLE_SIGNATURE_FIELDS",
     "THETA_PARAMS",
-    "THRESHOLD_BOUNDS",
-    "THRESHOLD_STORED_BOUNDS",
-    "TRACE_BOUNDS",
-    "TRACE_STORED_BOUNDS",
-    "VOLTAGE_BOUNDS",
-    "VOLTAGE_STORED_BOUNDS",
     "WORKSPACE_BROADCAST_DIM",
     "ActionBeliefs",
     "ExperienceRecord",
     "PendingOutcome",
-    "SnnState",
     "V3State",
     "quantization_safe_bounds",
 ]

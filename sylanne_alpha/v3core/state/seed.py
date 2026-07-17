@@ -169,7 +169,6 @@ class SeedProjector:
             rho_hold=0.0,
             rho_reach=0.0,
             style_ring=style_ring,
-            snn=None,
             action_beliefs=None,
             last_snn_summary=None,
             pending_outcome=None,

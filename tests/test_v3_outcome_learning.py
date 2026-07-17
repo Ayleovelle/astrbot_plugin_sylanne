@@ -1,10 +1,11 @@
 """RED/GREEN tests for Task 9 delayed-credit settlement (design 8.3 / 11.2).
 
-Settlement uses only the frozen predictive belief, likelihood, preference
-density, and eligibility a turn stored; it computes the exact diagonal posterior,
-the bounded preference reward, the reward-gated STDP delta, the per-action
-baseline, and the actual-action-only EKF transition update.  Every numeric value
-here is recomputed independently from the frozen formula-v1 constants.
+Settlement uses only the frozen predictive belief, likelihood, and preference
+density a turn stored; it computes the exact diagonal posterior, the bounded
+preference reward, the per-action baseline, and the actual-action-only EKF
+transition update.  (formula v2 deleted the SNN and its reward-gated STDP delta.)
+Every numeric value here is recomputed independently from the frozen formula-v1
+constants.
 """
 
 from __future__ import annotations
@@ -28,9 +29,7 @@ from sylanne_alpha.v3core.learning import (
 from sylanne_alpha.v3core.learning.outcomes import settle_with as _settle_with
 from sylanne_alpha.v3core.observation.models import OutcomeFrame
 from sylanne_alpha.v3core.state.models import (
-    PLASTIC_SYNAPSE_COUNT,
     PendingOutcome,
-    SnnState,
     V3State,
 )
 
@@ -43,18 +42,6 @@ REV = formula.OUTCOME_PROJECTOR_REVISION
 
 def _session() -> SessionRef:
     return SessionRef(key_id="k", session_digest=b"s" * 32, session_generation=1)
-
-
-def _neutral_snn() -> SnnState:
-    n = formula.SNN_NEURONS
-    return SnnState(
-        voltages=tuple(0.0 for _ in range(n)),
-        thresholds=tuple(1.0 for _ in range(n)),
-        pre_trace=tuple(0.0 for _ in range(n)),
-        post_trace=tuple(0.0 for _ in range(n)),
-        plastic_weights=tuple(0.06 for _ in range(PLASTIC_SYNAPSE_COUNT)),
-        eligibility=tuple(0.0 for _ in range(PLASTIC_SYNAPSE_COUNT)),
-    )
 
 
 def _outcome(y: tuple, mask: int = FULL_OUTCOME_MASK) -> OutcomeFrame:
@@ -94,14 +81,13 @@ def test_freeze_before_terms_are_predictive_preference_terms() -> None:
 # --------------------------------------------------------------------------- #
 
 
-def _pending(actual: Action, s: tuple, shadow: Action | None = None, with_elig: bool = False) -> PendingOutcome:
+def _pending(actual: Action, s: tuple, shadow: Action | None = None) -> PendingOutcome:
     frozen = freeze_actual_prediction(initial_action_beliefs(), s, actual)
     return PendingOutcome(
         origin_turn_id="t",
         sequence=TurnSequence(1, 1),
         action=shadow if shadow is not None else actual,
         projected_actual_action=actual,
-        stdp_credit_enabled=with_elig,
         c=frozen["c"],
         v_c=frozen["v_c"],
         reward_scale=formula.ACTION_REWARD_SCALE,
@@ -109,7 +95,6 @@ def _pending(actual: Action, s: tuple, shadow: Action | None = None, with_elig: 
         predictive_mu_actual=frozen["predictive_mu_actual"],
         predictive_v_actual=frozen["predictive_v_actual"],
         likelihood_r_actual=frozen["likelihood_r_actual"],
-        packed_eligibility=(tuple(0.5 for _ in range(PLASTIC_SYNAPSE_COUNT)) if with_elig else None),
     )
 
 
@@ -232,8 +217,7 @@ def test_transition_variance_is_immutable_v1_prior() -> None:
     beliefs = initial_action_beliefs()
     for _ in range(50):
         state = _state_with_pending(
-            _pending(Action.SPEAK, st, shadow=Action.SPEAK, with_elig=True),
-            _neutral_snn(),
+            _pending(Action.SPEAK, st, shadow=Action.SPEAK),
         )
         result = settle_with(state, _outcome(tuple(0.9 for _ in range(8))))
         assert result.censored is False
@@ -248,25 +232,22 @@ def test_transition_variance_is_immutable_v1_prior() -> None:
 # --------------------------------------------------------------------------- #
 
 
-def _state_with_pending(pending: PendingOutcome, snn: SnnState | None = None) -> V3State:
+def _state_with_pending(pending: PendingOutcome) -> V3State:
     return V3State(
         session_ref=_session(),
         state_generation_id="gen",
         latent_axes=tuple(0.1 for _ in range(24)),
         action_beliefs=initial_action_beliefs(),
-        snn=snn,
         pending_outcome=pending,
     )
 
 
 def test_settlement_learns_actual_action_only() -> None:
     s = decision_state(tuple(0.1 for _ in range(24)))
-    pending = _pending(Action.SPEAK, s, shadow=Action.HOLD)  # mismatch: no STDP credit
-    result = settle_with(_state_with_pending(pending, _neutral_snn()), _outcome(tuple(0.3 for _ in range(8))))
+    pending = _pending(Action.SPEAK, s, shadow=Action.HOLD)
+    result = settle_with(_state_with_pending(pending), _outcome(tuple(0.3 for _ in range(8))))
     assert isinstance(result, SettlementResult)
     assert result.censored is False
-    assert result.credit_gate is False  # shadow != actual
-    assert result.new_plastic_weights is None
     base = initial_action_beliefs()
     speak_index = 0
     hold_index = 1
@@ -276,27 +257,20 @@ def test_settlement_learns_actual_action_only() -> None:
     assert result.new_action_beliefs.counts[speak_index] == 1
 
 
-def test_settlement_applies_stdp_when_shadow_matches_actual() -> None:
+def test_settlement_updates_the_per_action_reward_baseline() -> None:
     s = decision_state(tuple(0.1 for _ in range(24)))
-    pending = _pending(Action.HOLD, s, shadow=Action.HOLD, with_elig=True)
-    snn = _neutral_snn()
-    result = settle_with(_state_with_pending(pending, snn), _outcome(tuple(0.9 for _ in range(8))))
-    assert result.credit_gate is True
-    assert result.new_plastic_weights is not None
-    assert len(result.new_plastic_weights) == PLASTIC_SYNAPSE_COUNT
-    # Baseline moved from 0 toward the reward.
+    pending = _pending(Action.HOLD, s, shadow=Action.HOLD)
+    result = settle_with(_state_with_pending(pending), _outcome(tuple(0.9 for _ in range(8))))
+    assert result.censored is False
+    # Baseline moved from 0 toward the reward (per-action reward EMA survives).
     assert isclose(result.baseline_after, 0.95 * 0.0 + 0.05 * result.reward, abs_tol=1e-12)
-    # Every projected weight stays within Dale / per-edge bounds.
-    for weight in result.new_plastic_weights:
-        assert 0.0 <= weight <= 0.35
 
 
 def test_settlement_censored_without_valid_outcome() -> None:
     s = decision_state(tuple(0.1 for _ in range(24)))
-    pending = _pending(Action.HOLD, s, shadow=Action.HOLD, with_elig=True)
-    result = settle_with(_state_with_pending(pending, _neutral_snn()), _outcome(tuple(0.0 for _ in range(8)), mask=0))
+    pending = _pending(Action.HOLD, s, shadow=Action.HOLD)
+    result = settle_with(_state_with_pending(pending), _outcome(tuple(0.0 for _ in range(8)), mask=0))
     assert result.censored is True
-    assert result.new_plastic_weights is None
     # No belief change on a censored settlement.
     assert result.new_action_beliefs.theta == initial_action_beliefs().theta
 

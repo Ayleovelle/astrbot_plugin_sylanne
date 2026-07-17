@@ -81,19 +81,13 @@ from sylanne_alpha.v3core.observation.models import (
 )
 from sylanne_alpha.v3core.orchestrator import orchestrate
 from sylanne_alpha.v3core.state.codec import encode_state
-from sylanne_alpha.v3core.state.models import (
-    PLASTIC_WEIGHT_BOUNDS,
-    THRESHOLD_BOUNDS,
-    VOLTAGE_BOUNDS,
-    V3State,
-)
+from sylanne_alpha.v3core.state.models import V3State
 from sylanne_alpha.v3core.workspace.competition import run_workspace
 
 # One seed per property so a failure names its own loop and reproduces in isolation.
 SEED_MALFORMED = 2718
 SEED_BOUNDS = 31415
 SEED_NONINTERFERENCE = 16180
-SEED_DALE = 14142
 SEED_LEGAL = 57721
 SEED_TRACE = 26458
 SEED_CAS = 12345
@@ -111,9 +105,6 @@ GAP_CHANNEL = 31
 LEGAL_ACTIONS_BY_CONTEXT = v3_export.LEGAL_ACTIONS_BY_CONTEXT
 
 CONTEXTS = tuple(TurnContextClass)
-_L1_LIMIT = formula.RECURRENT_FIXED_INCOMING_L1_LIMIT
-_EXCITATORY_BOUNDS = formula.SNN_EXCITATORY_WEIGHT_BOUNDS
-_INHIBITORY_BOUNDS = formula.SNN_INHIBITORY_WEIGHT_BOUNDS
 
 
 # --------------------------------------------------------------------------- #
@@ -204,32 +195,6 @@ def _invocation(base: V3State | None = None, **envelope_kwargs: object) -> CoreI
         base_state=_base_state() if base is None else base,
         projected_actual_outcome=(Action.SPEAK, None),
     )
-
-
-def _fixed_incoming_l1(post: int) -> float:
-    """Incoming L1 of the *non-plastic* edges of one neuron (reference, not the SUT).
-
-    Mirrors ``tests/test_v3_stdp_plasticity.py::_fixed_l1`` — the plastic (E->E) edges are
-    excluded because they are exactly the ones carried in ``SnnState.plastic_weights``.
-    """
-
-    return sum(
-        abs(formula.recurrent_initial_weight(post, pre))
-        for pre in formula.RECURRENT_TOPOLOGY[post]
-        if not (post < formula.SNN_EXCITATORY and pre < formula.SNN_EXCITATORY)
-    )
-
-
-def _plastic_by_post() -> dict[int, list[int]]:
-    """Canonical plastic-synapse indices grouped by postsynaptic neuron."""
-
-    grouped: dict[int, list[int]] = {}
-    for index, (post, _pre) in enumerate(formula.PLASTIC_SYNAPSES):
-        grouped.setdefault(post, []).append(index)
-    return grouped
-
-
-_PLASTIC_BY_POST = _plastic_by_post()
 
 
 # --------------------------------------------------------------------------- #
@@ -382,12 +347,7 @@ def test_declared_shapes_are_36_observation_24_latent_96_neurons() -> None:
     assert formula.OBSERVATION_DIM == 36
     assert formula.STATE_DIM == 24
     assert formula.SNN_NEURONS == 96
-    # 96 neurons is exactly 77 excitatory + 19 inhibitory — not a coincidence to be re-typed.
-    assert formula.SNN_EXCITATORY == 77
-    assert formula.SNN_INHIBITORY == 19
-    assert formula.SNN_EXCITATORY + formula.SNN_INHIBITORY == formula.SNN_NEURONS
     assert len(formula.SEMANTIC_DEFAULTS) == formula.OBSERVATION_DIM
-    assert len(formula.RECURRENT_TOPOLOGY) == formula.SNN_NEURONS
 
 
 def test_real_orchestrated_artifacts_carry_the_declared_shapes() -> None:
@@ -419,13 +379,9 @@ def test_real_orchestrated_artifacts_carry_the_declared_shapes() -> None:
         # 8: the derived per-axis views.
         assert len(trace.drive) == formula.AXIS_DIM
         assert len(trace.decision_state) == formula.AXIS_DIM
-        # 96: one entry per neuron, on every SNN-shaped artifact.
+        # 96: one entry per neuron, on every SNN-shaped trace artifact (now neutral).
         assert len(trace.spike_counts) == formula.SNN_NEURONS
         assert len(trace.first_latencies) == formula.SNN_NEURONS
-        assert len(next_state.snn.voltages) == formula.SNN_NEURONS
-        assert len(next_state.snn.thresholds) == formula.SNN_NEURONS
-        assert len(next_state.snn.pre_trace) == formula.SNN_NEURONS
-        assert len(next_state.snn.post_trace) == formula.SNN_NEURONS
         assert len(trace.snn_summary) == formula.SNN_SUMMARY_DIM
         state = next_state
 
@@ -475,15 +431,6 @@ def _assert_state_is_finite_and_bounded(state: V3State) -> None:
         assert math.isfinite(value) and -1.0 <= value <= 1.0
     assert 0.0 <= state.rho_hold <= 1.0
     assert 0.0 <= state.rho_reach <= 1.0
-    snn = state.snn
-    if snn is None:
-        return
-    for value in snn.voltages:
-        assert math.isfinite(value) and VOLTAGE_BOUNDS[0] <= value <= VOLTAGE_BOUNDS[1]
-    for value in snn.thresholds:
-        assert math.isfinite(value) and THRESHOLD_BOUNDS[0] <= value <= THRESHOLD_BOUNDS[1]
-    for value in snn.plastic_weights:
-        assert math.isfinite(value) and PLASTIC_WEIGHT_BOUNDS[0] <= value <= PLASTIC_WEIGHT_BOUNDS[1]
 
 
 def test_every_latent_posterior_and_trace_numeric_stays_finite_and_bounded() -> None:
@@ -608,15 +555,15 @@ def test_perturbing_masked_off_channels_cannot_change_drive_latent_workspace_or_
         assert perturbed.valid_mask == frame.valid_mask
 
         revision = state.revision + 1
-        clean = advance_dynamics(state, frame, revision, None)
-        dirty = advance_dynamics(state, perturbed, revision, None)
+        clean = advance_dynamics(state, frame, revision)
+        dirty = advance_dynamics(state, perturbed, revision)
         assert dirty.drive == clean.drive
         assert dirty.next_latent_axes == clean.next_latent_axes
 
         axes = decision_state(clean.next_latent_axes)
         refractory = tuple(0.0 for _ in range(formula.WORKSPACE_CAPACITY))
-        clean_broadcast = run_workspace(axes, frame, None, context, refractory)
-        dirty_broadcast = run_workspace(axes, perturbed, None, context, refractory)
+        clean_broadcast = run_workspace(axes, frame, context, refractory)
+        dirty_broadcast = run_workspace(axes, perturbed, context, refractory)
         assert dirty_broadcast == clean_broadcast
 
         clean_policy = score_policy(state, clean_broadcast, context)
@@ -650,85 +597,6 @@ def test_dropped_channels_cannot_leak_through_the_full_orchestrated_turn() -> No
         for index in drop:
             assert left.trace.observation_values[index] == formula.SEMANTIC_DEFAULTS[index]
             assert not (left.trace.observation_valid_mask >> index) & 1
-
-
-# --------------------------------------------------------------------------- #
-# Property 5: Dale signs and the incoming-L1 budget after every update
-# --------------------------------------------------------------------------- #
-#
-# tests/test_v3_stdp_plasticity.py already proves this at the unit level over random
-# eligibility/delta vectors (``test_all_updates_keep_bounds_and_l1_under_random_deltas``).
-# This file does not repeat that loop; it reuses the same reference helpers (_fixed_incoming_l1,
-# _plastic_by_post) and asks the complementary question the unit test cannot: do the invariants
-# survive *real orchestrated turns*, where the eligibility and reward are whatever the core
-# actually computed rather than whatever the test chose?
-
-
-def test_fixed_topology_weights_obey_dale_signs_for_every_edge() -> None:
-    """Dale's law is a property of the frozen topology, before any learning happens."""
-
-    excitatory_lo, excitatory_hi = _EXCITATORY_BOUNDS
-    inhibitory_lo, inhibitory_hi = _INHIBITORY_BOUNDS
-    edges = 0
-    for post in range(formula.SNN_NEURONS):
-        for pre in formula.RECURRENT_TOPOLOGY[post]:
-            weight = formula.recurrent_initial_weight(post, pre)
-            edges += 1
-            if pre < formula.SNN_EXCITATORY:
-                # An excitatory presynaptic neuron may never inhibit.
-                assert weight >= 0.0
-                assert excitatory_lo <= weight <= excitatory_hi
-            else:
-                # An inhibitory presynaptic neuron may never excite.
-                assert weight <= 0.0
-                assert inhibitory_lo <= weight <= inhibitory_hi
-    assert edges > 0
-    # Every plastic synapse is excitatory->excitatory, so plastic weights are non-negative.
-    for post, pre in formula.PLASTIC_SYNAPSES:
-        assert 0 <= post < formula.SNN_EXCITATORY and 0 <= pre < formula.SNN_EXCITATORY
-
-
-def test_initial_fixed_incoming_l1_is_within_budget_for_every_neuron() -> None:
-    """The fixed edges alone must leave room for the plastic budget."""
-
-    for post in range(formula.SNN_NEURONS):
-        assert _fixed_incoming_l1(post) <= _L1_LIMIT + 1e-9
-
-
-def test_dale_and_incoming_l1_hold_after_every_real_orchestrated_update() -> None:
-    rng = random.Random(SEED_DALE)
-    excitatory_lo, excitatory_hi = _EXCITATORY_BOUNDS
-    state = _base_state()
-    for step in range(60):  # well under the ~358-turn livelock
-        result = orchestrate(
-            CoreInvocation(
-                envelope=_envelope(
-                    local_sequence=11 + step,
-                    turn_id=f"dale-{step:04d}",
-                    raw=_random_raw_values(rng),
-                    context=rng.choice(CONTEXTS),
-                ),
-                # A projected outcome that sometimes agrees with the shadow action is what
-                # opens the STDP credit gate, so real settlement actually runs in this loop.
-                base_state=state,
-                projected_actual_outcome=(rng.choice(tuple(Action)), rng.uniform(-1.0, 1.0)),
-            )
-        )
-        assert result.accepted is True, result.reject_reason
-        snn = result.state_delta.next_state.snn
-        assert snn is not None
-        assert len(snn.plastic_weights) == len(formula.PLASTIC_SYNAPSES)
-
-        # (1) Dale: every plastic (E->E) weight is non-negative and inside the per-edge bound.
-        for weight in snn.plastic_weights:
-            assert weight >= 0.0
-            assert excitatory_lo <= weight <= excitatory_hi
-
-        # (2) The incoming absolute-weight limit holds simultaneously with the fixed edges.
-        for post, indices in _PLASTIC_BY_POST.items():
-            incoming = _fixed_incoming_l1(post) + sum(snn.plastic_weights[i] for i in indices)
-            assert incoming <= _L1_LIMIT + 1e-9, f"neuron {post} incoming L1 {incoming} exceeds {_L1_LIMIT}"
-        state = result.state_delta.next_state
 
 
 # --------------------------------------------------------------------------- #
@@ -1147,7 +1015,7 @@ def test_hypothesis_masked_off_channels_cannot_change_the_drive(
             perturbed_values[channel] = noise[slot]
     perturbed = ObservationFrame(values=tuple(perturbed_values), valid_mask=frame.valid_mask)
     state = _base_state()
-    assert advance_dynamics(state, perturbed, 5, None).drive == advance_dynamics(state, frame, 5, None).drive
+    assert advance_dynamics(state, perturbed, 5).drive == advance_dynamics(state, frame, 5).drive
 
 
 @pytest.mark.skipif(not HAS_HYPOTHESIS, reason="hypothesis adds coverage; the seeded loops are authoritative")

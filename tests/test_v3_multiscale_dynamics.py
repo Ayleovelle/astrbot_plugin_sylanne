@@ -316,29 +316,20 @@ def test_semantic_default_frame_yields_exactly_zero_drive() -> None:
     # no channel valid (defaults inert) -> also exactly zero
     none_valid = _frame()
     assert compute_drive(none_valid) == tuple(0.0 for _ in range(AXIS_DIM))
-    # an explicit zero SNN summary cannot perturb the neutral drive
-    assert compute_drive(all_valid, tuple(0.0 for _ in range(formula.SNN_SUMMARY_DIM))) == tuple(
-        0.0 for _ in range(AXIS_DIM)
-    )
     # and advancing the neutral state from a neutral frame changes nothing
     neutral = _state()
     advanced = advance_state(neutral, none_valid, turn_revision=1)
     assert advanced.latent_axes == neutral.latent_axes
 
 
-def test_drive_uses_exact_p_and_q_weights() -> None:
+def test_drive_uses_exact_p_weights() -> None:
     # channel 25 (valence, weight 0.55) valid at 0.9; default is 0.5 -> centered 0.4
+    # (formula v2 deleted the Q*snn_summary drive coupling; only P remains.)
     frame = _frame({25: 0.9}, {25})
     drive = compute_drive(frame)
     assert isclose(drive[0], tanh(0.55 * (0.9 - 0.5)), rel_tol=0.0, abs_tol=1e-12)
     for axis in range(1, AXIS_DIM):
         assert drive[axis] == 0.0  # channel 25 feeds only axis 0
-    # Q maps snn_summary: Q[0][0] = 0.20 feeds axis 0's drive
-    summary = tuple(1.0 if index == 0 else 0.0 for index in range(formula.SNN_SUMMARY_DIM))
-    snn_drive = compute_drive(_frame(), summary)
-    assert isclose(snn_drive[0], tanh(0.20 * 1.0), rel_tol=0.0, abs_tol=1e-12)
-    for axis in range(1, AXIS_DIM):
-        assert snn_drive[axis] == 0.0
 
 
 def test_invalid_channels_are_excluded_from_drive_and_next_state() -> None:

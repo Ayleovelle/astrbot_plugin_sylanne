@@ -1,8 +1,10 @@
 """Deterministic core turn orchestration (design sections 6 / 14 / 16).
 
-``orchestrate`` wires the seven pure named stages
-``encoder -> snn -> dynamics -> workspace -> inference -> expression -> trace``
-into a single deterministic turn over immutable core DTOs.  Before the named
+``orchestrate`` wires the six pure named stages
+``encoder -> dynamics -> workspace -> inference -> expression -> trace``
+into a single deterministic turn over immutable core DTOs.  (formula v2 deleted the
+former ``snn`` stage together with the spiking subsystem; the trace still records
+neutral spike/summary telemetry fields for schema stability.)  Before the named
 stages it settles the previous eligible delayed-credit outcome (design 14.2 step
 4); after them it freezes this turn's pending outcome, appends one bounded
 ``ExperienceRecord`` keyed by the *committed* revision (never the same-turn trace
@@ -44,7 +46,6 @@ from .formula_v1 import (
     COMPUTE_PROFILES,
     EXPERIENCE_CAPACITY,
     FORMULA_DIGEST,
-    RECURRENT_EE_WEIGHT,
     SNN_NEURONS,
     SNN_SUMMARY_DIM,
 )
@@ -53,7 +54,6 @@ from .inference.policy_scorer import score_policy
 from .learning.outcomes import freeze_actual_prediction, settle_with
 from .observation.encoder import encode_observation, project_outcome
 from .observation.models import ObservationFacts
-from .spiking.reservoir import run_reservoir_from_frame
 from .state.codec import (
     StateCodecError,
     StateSizeError,
@@ -61,13 +61,9 @@ from .state.codec import (
     encode_state,
 )
 from .state.models import (
-    ACTION_COUNT,
     EXPERIENCE_FEATURE_DIM,
-    PLASTIC_SYNAPSE_COUNT,
-    PLASTIC_WEIGHT_BOUNDS,
     ExperienceRecord,
     PendingOutcome,
-    SnnState,
     V3State,
 )
 from .state.transition import advance_autonomous_refractory
@@ -81,7 +77,7 @@ from .trace.models import TRACE_SCHEMA_VERSION, CoreDecisionTrace
 from .workspace.competition import run_workspace
 
 
-STAGE_ORDER = ("encoder", "snn", "dynamics", "workspace", "inference", "expression", "trace")
+STAGE_ORDER = ("encoder", "dynamics", "workspace", "inference", "expression", "trace")
 
 # Hard state ceiling mirrors the bridge ``limits.MAX_STATE_BYTES``; the pure core
 # owns its own copy so it never imports the bridge.
@@ -92,7 +88,6 @@ _ACTION_TO_CODE = {action: index for index, action in enumerate(_ACTION_ORDER)}
 _ACTION_CODE_NONE = 255
 _S16_HI = 32767
 _S16_LO = -32768
-_WEIGHT_HI = PLASTIC_WEIGHT_BOUNDS[1]
 
 
 # --------------------------------------------------------------------------- #
@@ -135,19 +130,6 @@ class OrchestratorResult:
 # --------------------------------------------------------------------------- #
 # Small pure helpers
 # --------------------------------------------------------------------------- #
-
-
-def build_initial_snn_state() -> SnnState:
-    """Build the neutral per-session SNN sub-state (design section 8.2)."""
-
-    return SnnState(
-        voltages=tuple(0.0 for _ in range(SNN_NEURONS)),
-        thresholds=tuple(1.0 for _ in range(SNN_NEURONS)),
-        pre_trace=tuple(0.0 for _ in range(SNN_NEURONS)),
-        post_trace=tuple(0.0 for _ in range(SNN_NEURONS)),
-        plastic_weights=tuple(RECURRENT_EE_WEIGHT for _ in range(PLASTIC_SYNAPSE_COUNT)),
-        eligibility=tuple(0.0 for _ in range(PLASTIC_SYNAPSE_COUNT)),
-    )
 
 
 def _quantize_s16(value: float) -> int:
@@ -257,7 +239,6 @@ def orchestrate(invocation: object) -> OrchestratorResult:
 
     # -- pre-stage: settle the previous eligible delayed outcome (design 14.2/4)
     settled_beliefs = base.action_beliefs
-    settled_plastic: tuple | None = None
     settle_censored = True
     settle_reward = 0.0
     settle_r_preference = 0.0
@@ -269,53 +250,28 @@ def orchestrate(invocation: object) -> OrchestratorResult:
     ):
         settlement = settle_with(base, outcome_frame, quality_score)
         settled_beliefs = settlement.new_action_beliefs
-        settled_plastic = settlement.new_plastic_weights
         settle_censored = settlement.censored
         settle_reward = settlement.reward
         settle_r_preference = settlement.r_preference
 
-    # -- stage: snn ----------------------------------------------------------
-    snn_out = base.snn
-    if settled_plastic is not None and snn_out is not None:
-        snn_out = replace(snn_out, plastic_weights=settled_plastic)
-
-    snn_summary: tuple | None = None
-    snn_ran = False
-    snn_rolled_back = False
-    snn_summary_valid = False
+    # -- SNN stage DELETED (formula v2) --------------------------------------
+    # The reservoir was structurally silent (max membrane ~0.32 vs a 0.65 threshold
+    # floor), so it never influenced the drive, and its only *live* consumer -- the
+    # snn-novelty proposal -- is gone.  The compute-profile load-shedding flags
+    # (snn_enabled/ticks/stdp_enabled/reuse_last) survive on the ComputeProfile but no
+    # longer gate any reservoir, so every profile now advances the same continuous
+    # trajectory.  ``last_snn_summary`` is permanently ``None`` (nothing produces a
+    # summary), so REUSE_LAST_SNN_SUMMARY still degrades deterministically.  The trace
+    # keeps neutral spike/summary telemetry fields for schema stability.
+    degradation_reason = "NONE"
+    if reuse_last and base.last_snn_summary is None:
+        degradation_reason = "REUSE_WITHOUT_SUMMARY_FALLBACK"
     spike_counts = tuple(0 for _ in range(SNN_NEURONS))
     first_latencies = tuple(-1 for _ in range(SNN_NEURONS))
     trace_summary = tuple(0.0 for _ in range(SNN_SUMMARY_DIM))
-    degradation_reason = "NONE"
-
-    if snn_enabled:
-        snn_in = base.snn
-        if snn_in is None:
-            snn_in = build_initial_snn_state()
-        elif settled_plastic is not None:
-            snn_in = replace(snn_in, plastic_weights=settled_plastic)
-        reservoir = run_reservoir_from_frame(snn_in, frame, ticks, stdp_enabled)
-        snn_out = reservoir.snn
-        snn_ran = True
-        snn_rolled_back = reservoir.rolled_back
-        spike_counts = reservoir.spike_counts
-        first_latencies = reservoir.first_latencies
-        trace_summary = reservoir.summary
-        if reservoir.rolled_back:
-            degradation_reason = "SNN_ROLLBACK"
-        else:
-            snn_summary = reservoir.summary
-            snn_summary_valid = True
-    elif reuse_last:
-        if base.last_snn_summary is not None:
-            snn_summary = base.last_snn_summary
-            trace_summary = base.last_snn_summary
-            snn_summary_valid = True
-        else:
-            degradation_reason = "REUSE_WITHOUT_SUMMARY_FALLBACK"
 
     # -- stage: dynamics -----------------------------------------------------
-    advance = advance_dynamics(base, frame, turn_revision, snn_summary)
+    advance = advance_dynamics(base, frame, turn_revision)
     next_latent = advance.next_latent_axes
     drive = advance.drive
     dynamics_advanced = advance.advanced
@@ -325,7 +281,7 @@ def orchestrate(invocation: object) -> OrchestratorResult:
     # The 8-source workspace refractory is not part of the frozen v1 state schema,
     # so it starts neutral each turn (deterministic); persistence is a later revision.
     source_refractory = tuple(0.0 for _ in range(8))
-    broadcast = run_workspace(decision_state, frame, snn_summary, context, source_refractory)
+    broadcast = run_workspace(decision_state, frame, context, source_refractory)
 
     # -- stage: inference ----------------------------------------------------
     advanced_state = replace(base, latent_axes=next_latent, action_beliefs=settled_beliefs)
@@ -341,11 +297,6 @@ def orchestrate(invocation: object) -> OrchestratorResult:
     new_style_ring = next_style_ring(base.style_ring, constraints.style_signature)
 
     # -- freeze this turn's pending outcome for settlement at t+1 ------------
-    eligibility = (
-        snn_out.eligibility
-        if (stdp_enabled and snn_ran and not snn_rolled_back and snn_out is not None)
-        else None
-    )
     if actual_action is not None:
         frozen = freeze_actual_prediction(settled_beliefs, decision_state, actual_action)
         new_pending = PendingOutcome(
@@ -353,7 +304,6 @@ def orchestrate(invocation: object) -> OrchestratorResult:
             sequence=envelope.sequence,
             action=selected,
             projected_actual_action=actual_action,
-            stdp_credit_enabled=stdp_enabled,
             c=frozen["c"],
             v_c=frozen["v_c"],
             reward_scale=1.0,
@@ -361,7 +311,6 @@ def orchestrate(invocation: object) -> OrchestratorResult:
             predictive_mu_actual=frozen["predictive_mu_actual"],
             predictive_v_actual=frozen["predictive_v_actual"],
             likelihood_r_actual=frozen["likelihood_r_actual"],
-            packed_eligibility=eligibility,
         )
     else:
         new_pending = PendingOutcome(
@@ -369,8 +318,6 @@ def orchestrate(invocation: object) -> OrchestratorResult:
             sequence=envelope.sequence,
             action=selected,
             projected_actual_action=None,
-            stdp_credit_enabled=stdp_enabled,
-            packed_eligibility=eligibility,
         )
 
     # -- append one bounded ExperienceRecord (committed revision key) --------
@@ -395,7 +342,7 @@ def orchestrate(invocation: object) -> OrchestratorResult:
     # Append one entry and keep only the last 64 (bounded FIFO, design section 13).
     new_experiences = (base.experiences + (record,))[-EXPERIENCE_CAPACITY:]
 
-    last_summary = snn_summary if snn_summary is not None else base.last_snn_summary
+    last_summary = base.last_snn_summary  # vestigial reuse slot: always None now
 
     # -- build the float64 compute product, then quantize on the persist edge -
     raw_next = V3State(
@@ -414,7 +361,6 @@ def orchestrate(invocation: object) -> OrchestratorResult:
         rho_hold=rho_hold_after,
         rho_reach=rho_reach_after,
         style_ring=new_style_ring,
-        snn=snn_out,
         action_beliefs=settled_beliefs,
         last_snn_summary=last_summary,
         pending_outcome=new_pending,
@@ -442,12 +388,7 @@ def orchestrate(invocation: object) -> OrchestratorResult:
         disagreement = True
         disagreement_reason = "DISAGREE"
 
-    if snn_out is not None:
-        weight_saturation = sum(
-            1 for weight in snn_out.plastic_weights if weight >= _WEIGHT_HI - 1e-9
-        ) / len(snn_out.plastic_weights)
-    else:
-        weight_saturation = 0.0
+    weight_saturation = 0.0  # SNN deleted (formula v2): no plastic weights to saturate
 
     trace = CoreDecisionTrace(
         schema_version=TRACE_SCHEMA_VERSION,
@@ -477,9 +418,9 @@ def orchestrate(invocation: object) -> OrchestratorResult:
         drive=drive,
         next_latent_axes=next_latent,
         dynamics_advanced=dynamics_advanced,
-        snn_ran=snn_ran,
-        snn_rolled_back=snn_rolled_back,
-        snn_summary_valid=snn_summary_valid,
+        snn_ran=False,
+        snn_rolled_back=False,
+        snn_summary_valid=False,
         weight_saturation=weight_saturation,
         spike_counts=spike_counts,
         first_latencies=first_latencies,
@@ -583,6 +524,5 @@ __all__ = [
     "STATE_HARD_CAP_BYTES",
     "TRACE_HARD_CAP_BYTES",
     "ExpressionConstraints",
-    "build_initial_snn_state",
     "orchestrate",
 ]

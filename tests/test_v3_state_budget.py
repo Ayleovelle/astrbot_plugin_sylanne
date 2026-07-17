@@ -1,9 +1,10 @@
 """RED/GREEN tests for the global v3 state size gate (Task 6).
 
-A worst-case learned state (full SNN weights, action beliefs, a settled
-``PendingOutcome``, 64 experiences, and every header) must encode within the
-48 KiB target; the hard gate rejects any encoded payload above the 64 KiB
-ceiling before it can reach CAS.
+A worst-case learned state (full action beliefs, a settled ``PendingOutcome``, a
+full style ring, the vestigial reuse summary, 64 experiences, and every header)
+must encode within the 48 KiB target; the hard gate rejects any encoded payload
+above the 64 KiB ceiling before it can reach CAS.  (formula v2 deleted the SNN
+sub-state, so no reservoir weights contribute to the payload.)
 """
 
 from __future__ import annotations
@@ -30,14 +31,11 @@ from sylanne_alpha.v3core.state.models import (
     ACTION_COUNT,
     EXPERIENCE_FEATURE_DIM,
     EXPERIENCE_REWARD_DIM,
-    PLASTIC_SYNAPSE_COUNT,
-    SNN_NEURON_COUNT,
     THETA_PARAMS,
     WORKSPACE_BROADCAST_DIM,
     ActionBeliefs,
     ExperienceRecord,
     PendingOutcome,
-    SnnState,
     V3State,
 )
 
@@ -47,17 +45,7 @@ def _snap16(value: float) -> float:
 
 
 def _worst_case_state() -> V3State:
-    n = SNN_NEURON_COUNT
-    p = PLASTIC_SYNAPSE_COUNT
     params = AXIS_DIM * THETA_PARAMS
-    snn = SnnState(
-        voltages=tuple(_snap16(0.3) for _ in range(n)),
-        thresholds=tuple(_snap16(1.1) for _ in range(n)),
-        pre_trace=tuple(_snap16(0.7) for _ in range(n)),
-        post_trace=tuple(_snap16(0.7) for _ in range(n)),
-        plastic_weights=tuple(_snap16(0.2) for _ in range(p)),
-        eligibility=tuple(_snap16(1.0) for _ in range(p)),
-    )
     beliefs = ActionBeliefs(
         theta=tuple(tuple(_snap16(0.11) for _ in range(params)) for _ in range(ACTION_COUNT)),
         sigma=tuple(tuple(_snap16(0.09) for _ in range(params)) for _ in range(ACTION_COUNT)),
@@ -69,7 +57,6 @@ def _worst_case_state() -> V3State:
         sequence=TurnSequence(writer_epoch=99, local_sequence=250),
         action=Action.REACH,
         projected_actual_action=Action.SPEAK,
-        stdp_credit_enabled=True,
         c=tuple(_snap16(0.1) for _ in range(AXIS_DIM)),
         v_c=tuple(_snap16(0.25) for _ in range(AXIS_DIM)),
         reward_scale=_snap16(1.0),
@@ -77,7 +64,6 @@ def _worst_case_state() -> V3State:
         predictive_mu_actual=tuple(_snap16(0.2) for _ in range(AXIS_DIM)),
         predictive_v_actual=tuple(_snap16(0.25) for _ in range(AXIS_DIM)),
         likelihood_r_actual=tuple(_snap16(0.20) for _ in range(AXIS_DIM)),
-        packed_eligibility=tuple(_snap16(1.5) for _ in range(p)),
         expiry_sequence=TurnSequence(writer_epoch=99, local_sequence=251),
         preference_revision=FORMULA_VERSION,
         preference_digest="a" * 64,
@@ -113,7 +99,6 @@ def _worst_case_state() -> V3State:
         rho_hold=_snap16(1.0),
         rho_reach=_snap16(1.0),
         style_ring=tuple((3, 2, 1, 1) for _ in range(4)),
-        snn=snn,
         action_beliefs=beliefs,
         last_snn_summary=tuple(_snap16(0.8) for _ in range(SNN_SUMMARY_DIM)),
         pending_outcome=pending,

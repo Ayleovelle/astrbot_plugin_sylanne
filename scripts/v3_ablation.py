@@ -34,7 +34,6 @@ import hashlib
 import json
 import random
 import sys
-from dataclasses import replace
 from pathlib import Path
 from typing import Sequence
 
@@ -44,11 +43,12 @@ if str(_REPO_ROOT) not in sys.path:
 
 from scripts import v3_export, v3_replay
 from scripts.v3_export import Dataset
-from sylanne_alpha.v3core import formula_v1 as formula
-from sylanne_alpha.v3core.orchestrator import build_initial_snn_state
 
 #: Ladder rung -> the profile that realizes it, or None when the frozen manifest
-#: exposes no knob for that rung.
+#: exposes no knob for that rung.  formula v2 deleted the SNN, so the "snn"/"stdp"
+#: rungs (FULL_24_NO_STDP / FULL_24_STDP) now behave identically to the deterministic
+#: baseline; the ladder will report NO_INDEPENDENT_CONTRIBUTION / identical-config,
+#: which is the honest finding that the deleted layers add nothing.
 LADDER = (
     ("deterministic_baseline", "DETERMINISTIC_CONTINUOUS_ONLY"),
     ("multi_timescale_dynamics", "DETERMINISTIC_CONTINUOUS_ONLY"),
@@ -58,26 +58,16 @@ LADDER = (
     ("stdp", "FULL_24_STDP"),
 )
 
-#: control id -> (profile, randomize_initial_reservoir)
+#: control id -> profile.  formula v2 deleted the SNN reservoir, so the former
+#: "random initial reservoir" control has nothing to randomize: it collapses onto
+#: "frozen"/"zero-lr" (all FULL_24_NO_STDP), which the identical-configuration
+#: detector flags as the honest finding that the layer is inert.
 CONTROLS = {
     "learned": ("FULL_24_STDP", False),
     "frozen": ("FULL_24_NO_STDP", False),
-    "random": ("FULL_24_NO_STDP", True),
+    "random": ("FULL_24_NO_STDP", False),
     "zero-lr": ("FULL_24_NO_STDP", False),
 }
-
-
-def _random_reservoir_mutator(seed: bytes):
-    """Randomize the initial plastic weights, seeded by the control's own seed."""
-
-    def mutate(state):
-        rng = random.Random(int.from_bytes(seed, "big"))
-        low, high = formula.SNN_EXCITATORY_WEIGHT_BOUNDS
-        snn = state.snn if state.snn is not None else build_initial_snn_state()
-        weights = tuple(rng.uniform(low, high) for _ in snn.plastic_weights)
-        return replace(state, snn=replace(snn, plastic_weights=weights))
-
-    return mutate
 
 
 def _episode_metrics(results: list) -> dict:
@@ -117,8 +107,8 @@ def run_configuration(
                 model_digest=bytes.fromhex(episode.header["model_digest"]),
                 profile_digest=bytes.fromhex(episode.header["evaluation_profile_digest"]),
             )
-            if randomize_reservoir:
-                mutator = _random_reservoir_mutator(seed_override)
+        # formula v2 deleted the SNN reservoir, so ``randomize_reservoir`` (retained on
+        # the signature for report parity) can no longer mutate any reservoir state.
         per_episode[episode.episode_ref] = v3_replay.replay_episode(
             episode,
             profile_id=profile_id,

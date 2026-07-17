@@ -29,12 +29,11 @@ from ..contracts import Action, TurnContextClass
 from ..formula_v1 import (
     CONTEXT_ACTION_PRIORS,
     PROPOSAL_ACTIONS,
+    PROPOSAL_COUNT,
     PROPOSAL_IDS,
     PROPOSAL_KEYS,
     PROPOSAL_REQUIRED_BITS,
-    PROPOSAL_REQUIRES_VALID_SNN_SUMMARY,
     PROPOSAL_SALIENCE_BOUNDS,
-    SNN_SUMMARY_DIM,
     SOURCE_REFRACTORY_DECAY,
     SOURCE_REFRACTORY_INCREMENT,
     WORKSPACE_CAPACITY,
@@ -107,29 +106,25 @@ def proposal_salience(
     index: int,
     decision_state: tuple,
     frame: object,
-    snn_summary: object,
 ) -> tuple:
     """Return ``(clipped_salience, present)`` for one proposal.
 
-    ``present`` is ``False`` when a required observation bit is invalid or an
-    SNN-summary-dependent proposal has no valid summary; the salience is still a
-    finite clipped float in that case but the proposal is not constructed.
+    ``present`` is ``False`` when a required observation bit is invalid; the
+    salience is still a finite clipped float in that case but the proposal is not
+    constructed.  (formula v2 deleted the ``snn-novelty`` proposal and its
+    SNN-summary presence gate; every surviving proposal reads only the decision
+    state and the observation frame.)
     """
 
-    if type(index) is not int or not 0 <= index < WORKSPACE_CAPACITY:
+    if type(index) is not int or not 0 <= index < PROPOSAL_COUNT:
         raise ValueError("index must be a workspace proposal index")
     if type(frame) is not ObservationFrame:
         raise TypeError("frame must have exact type ObservationFrame")
-    if snn_summary is not None:
-        if type(snn_summary) is not tuple or len(snn_summary) != SNN_SUMMARY_DIM:
-            raise ValueError("snn_summary must be None or a 16-tuple")
 
     present = True
     for bit in PROPOSAL_REQUIRED_BITS[index]:
         if not frame.is_valid(bit):
             present = False
-    if PROPOSAL_REQUIRES_VALID_SNN_SUMMARY[index] and snn_summary is None:
-        present = False
 
     s = decision_state
     v = frame.values
@@ -145,10 +140,7 @@ def proposal_salience(
         raw = 1.4 * _center(v[10]) - 0.4 * s[7]
     elif index == 5:  # affiliation-reach
         raw = 1.1 * s[3] + 0.8 * s[7] + 0.3 * s[5]
-    elif index == 6:  # snn-novelty
-        summary_value = 0.0 if snn_summary is None else snn_summary[10]
-        raw = 1.2 * summary_value + 0.6 * s[5]
-    else:  # continuity-speak
+    else:  # continuity-speak (index 6; old index 7 before snn-novelty deletion)
         raw = 0.8 * _center(v[30]) + 0.6 * _center(v[26]) + 0.4 * s[3]
     return _clip(raw, _SALIENCE_LO, _SALIENCE_HI), present
 
@@ -164,7 +156,6 @@ def _check_decision_state(decision_state: object) -> None:
 def build_proposals(
     decision_state: tuple,
     frame: object,
-    snn_summary: object,
     context: object,
 ) -> tuple:
     """Build the legal, present proposals for a turn (context masks illegal actions)."""
@@ -174,11 +165,11 @@ def build_proposals(
         raise TypeError("context must have exact type TurnContextClass")
     legal = frozenset(_legal_actions(context))
     proposals: list[WorkspaceProposal] = []
-    for index in range(WORKSPACE_CAPACITY):
+    for index in range(PROPOSAL_COUNT):
         action = _PROPOSAL_ACTION_ENUMS[index]
         if action not in legal:
             continue
-        salience, present = proposal_salience(index, decision_state, frame, snn_summary)
+        salience, present = proposal_salience(index, decision_state, frame)
         if not present:
             continue
         confidence = _clip(0.5 + 0.25 * abs(salience), 0.0, 1.0)
@@ -359,13 +350,12 @@ def arbitrate(
 def run_workspace(
     decision_state: tuple,
     frame: object,
-    snn_summary: object,
     context: object,
     source_refractory: tuple,
 ) -> WorkspaceBroadcast:
     """Build proposals then arbitrate them (the full section-10 stage)."""
 
-    proposals = build_proposals(decision_state, frame, snn_summary, context)
+    proposals = build_proposals(decision_state, frame, context)
     return arbitrate(proposals, context, source_refractory)
 
 
@@ -377,8 +367,8 @@ class ProposalArbiterV1:
     registration-order invariance.
     """
 
-    def build(self, decision_state: tuple, frame: object, snn_summary: object, context: object) -> tuple:
-        return build_proposals(decision_state, frame, snn_summary, context)
+    def build(self, decision_state: tuple, frame: object, context: object) -> tuple:
+        return build_proposals(decision_state, frame, context)
 
     def arbitrate(self, proposals: object, context: object, source_refractory: tuple) -> WorkspaceBroadcast:
         return arbitrate(proposals, context, source_refractory)
@@ -387,11 +377,10 @@ class ProposalArbiterV1:
         self,
         decision_state: tuple,
         frame: object,
-        snn_summary: object,
         context: object,
         source_refractory: tuple,
     ) -> WorkspaceBroadcast:
-        return run_workspace(decision_state, frame, snn_summary, context, source_refractory)
+        return run_workspace(decision_state, frame, context, source_refractory)
 
 
 __all__ = [

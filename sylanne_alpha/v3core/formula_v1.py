@@ -3,8 +3,7 @@
 from __future__ import annotations
 
 import hashlib
-import struct
-from math import exp, floor, inf, isfinite, log, sqrt
+from math import inf, isfinite, sqrt
 from types import MappingProxyType
 
 from .canonical import canonical_json_bytes
@@ -14,19 +13,16 @@ FORMULA_VERSION = "sylanne.v3.formula.v1"
 OBSERVATION_DIM = 36
 AXIS_DIM = 8
 STATE_DIM = 24
+# formula v2 deleted the SNN cognitive subsystem (reservoir, STDP, snn-novelty
+# proposal, Q coupling).  Two dimensions survive purely as *telemetry layout*
+# constants: ``SNN_NEURONS`` sizes the (now always-neutral) per-neuron spike
+# arrays the trace still records, and ``SNN_SUMMARY_DIM`` sizes the vestigial
+# ``last_snn_summary`` reuse slot the load-shedding profile plumbing still reads.
+# Neither drives cognition any longer; see the deletion note further below.
 SNN_NEURONS = 96
-SNN_EXCITATORY = 77
-SNN_INHIBITORY = 19
-SNN_DEFAULT_TICKS = 24
-SNN_ALLOWED_TICKS = (16, 24, 32)
 SNN_SUMMARY_DIM = 16
 WORKSPACE_CAPACITY = 8
 EXPERIENCE_CAPACITY = 64
-
-TAU_MEMBRANE = -1.0 / (24.0 * log(0.90))
-TAU_PRE = -1.0 / (24.0 * log(0.90))
-TAU_POST = -1.0 / (24.0 * log(0.90))
-TAU_ELIGIBILITY = -1.0 / (24.0 * log(0.95))
 
 AXIS_NAMES = (
     "valence",
@@ -121,11 +117,6 @@ P_BIAS = tuple(
     -sum(weight * SEMANTIC_DEFAULTS[column] for column, weight in enumerate(row))
     for row in P_MATRIX
 )
-Q_MATRIX = tuple(
-    tuple(0.20 if column == 2 * row else 0.10 if column == 2 * row + 1 else 0.0 for column in range(16))
-    for row in range(8)
-)
-
 SELF_DIAGONALS = (0.30, 0.35, 0.36)
 OFF_DIAGONAL_COUPLINGS = (
     (0, 2, 0.06),
@@ -171,210 +162,36 @@ U_FAST = _diagonal_matrix(U_DIAGONALS[0])
 U_MID = _diagonal_matrix(U_DIAGONALS[1])
 U_SLOW = _diagonal_matrix(U_DIAGONALS[2])
 
-RECURRENT_HASH_DOMAIN = b"SYL3\x01REC\x00"
-INPUT_HASH_DOMAIN = b"SYL3\x01INPUT\x00"
-RECURRENT_HIGH_FAN_IN_POSTS = 58
-RECURRENT_HIGH_FAN_IN = 8
-RECURRENT_LOW_FAN_IN = 7
-RECURRENT_EE_WEIGHT = 0.06
-RECURRENT_OTHER_EXCITATORY_WEIGHT = 0.08
-RECURRENT_INHIBITORY_WEIGHT = -0.12
-RECURRENT_FIXED_INCOMING_L1_LIMIT = 1.2
-POPULATION_INPUT_COUNT = 108
-INPUT_TARGETS_PER_CHANNEL = 4
-INPUT_WEIGHT = 0.50
-
-
-def recurrent_sources(post: int) -> tuple[int, ...]:
-    """Return the formula-defined presynaptic indices for one neuron."""
-    if type(post) is not int or not 0 <= post < SNN_NEURONS:
-        raise ValueError("post must be a valid neuron index")
-    fan_in = RECURRENT_HIGH_FAN_IN if post < RECURRENT_HIGH_FAN_IN_POSTS else RECURRENT_LOW_FAN_IN
-    ranked = sorted(
-        (
-            hashlib.sha256(RECURRENT_HASH_DOMAIN + struct.pack(">HH", post, pre)).digest(),
-            pre,
-        )
-        for pre in range(SNN_NEURONS)
-        if pre != post
-    )
-    return tuple(pre for _, pre in ranked[:fan_in])
-
-
-def recurrent_initial_weight(post: int, pre: int) -> float:
-    """Return the Dale-compliant formula-v1 initial weight for an edge."""
-    if type(post) is not int or type(pre) is not int or not 0 <= post < SNN_NEURONS or not 0 <= pre < SNN_NEURONS:
-        raise ValueError("post and pre must be valid neuron indices")
-    if pre >= SNN_EXCITATORY:
-        return RECURRENT_INHIBITORY_WEIGHT
-    if post < SNN_EXCITATORY:
-        return RECURRENT_EE_WEIGHT
-    return RECURRENT_OTHER_EXCITATORY_WEIGHT
-
-
-def recurrent_is_plastic(post: int, pre: int) -> bool:
-    return 0 <= post < SNN_EXCITATORY and 0 <= pre < SNN_EXCITATORY
-
-
-def input_targets(input_index: int) -> tuple[int, ...]:
-    """Return the four deterministic targets for one population input."""
-    if type(input_index) is not int or not 0 <= input_index < POPULATION_INPUT_COUNT:
-        raise ValueError("input_index must be in [0,108)")
-    ranked = sorted(
-        (
-            hashlib.sha256(INPUT_HASH_DOMAIN + struct.pack(">HH", input_index, target)).digest(),
-            target,
-        )
-        for target in range(SNN_NEURONS)
-    )
-    return tuple(target for _, target in ranked[:INPUT_TARGETS_PER_CHANNEL])
-
-
-RECURRENT_TOPOLOGY = tuple(recurrent_sources(post) for post in range(SNN_NEURONS))
-INPUT_TOPOLOGY = tuple(input_targets(input_index) for input_index in range(POPULATION_INPUT_COUNT))
-
-
-SNN_SUMMARY_POOLS = tuple((start, start + 6) for start in range(0, 48, 6))
-SNN_SUMMARY_DEFINITION = (
-    "rate[p]=clip(mean(spike_count_i/K),0,1)",
-    "latency[8+p]=0 if no spike else 1-min(first_latency_i)/(K-1)",
-    "missing channels emit no spikes",
-)
-
-
 # --------------------------------------------------------------------------- #
-# Section 8 spiking-path numeric constants (design 8.1 population/time coding,
-# 8.2 LIF dynamics, 8.3 reward-gated STDP).
-#
-# ############################################################################ #
-# FROZEN — UNDER SENTENCE. NO CHANGE IS ACCEPTED HERE EXCEPT DELETION.
-#
-# The SNN is structurally incapable of firing and is scheduled for removal. Do not
-# tune these, do not "fix" the threshold floor, do not add constants. The only
-# accepted future edit to this block is its deletion in formula v2.
-#
-# Why (measured, not inferred): from ``build_initial_snn_state()`` (v=0, theta=1.0)
-# no neuron can ever reach threshold. Each neuron takes ~4.5 input edges; a perfect
-# simultaneous volley injects ~0.225 against a threshold whose adaptation FLOOR is
-# 0.65 (``SNN_THRESHOLD_BOUNDS``), and recurrent spike injection is ~0.006 — two
-# orders of magnitude short. Max membrane voltage measured over 1000 driven turns:
-# ~0.32. ``snn_summary`` is therefore permanently all-zero, and every SNN-dependent
-# gate (K resampling, learned/frozen/random, STDP vs zero-LR) passes vacuously.
-# The death certificate is ``tests/test_v3_stability_gate.py::test_snn_emits_spikes``
-# (strict xfail — it must stay xfail, and if it ever starts passing, re-read this).
-# ``tests/test_v3_lif_reservoir.py`` only ever sees a spike by pre-charging v=1.5
-# with theta=0.65, which is not a state the real path can reach.
-#
-# formula v2 physically deletes: ``spiking/``, ``SnnState`` and its codec bit-widths,
-# ``Q_MATRIX``, the snn-novelty proposal, the ``SNN_*``/``TAU_*`` constants, the K
-# profile ladder rungs and the K-divergence gate.
-#
-# CAUTION for whoever performs that deletion — removing the SNN is NOT behaviour-
-# neutral, despite ``snn_summary`` being identically zero. The zero summary does make
-# ``Q_MATRIX @ summary`` contribute exactly nothing to the drive (verified: drive is
-# bit-identical across 300/300 turn pairs). But ``snn_summary`` has a SECOND consumer:
-# the snn-novelty proposal (index 6) is gated on ``snn_summary is not None``, not on
-# whether anything spiked, and its salience is ``1.2*summary_value + 0.6*s[5]`` — the
-# ``0.6*s[5]`` novelty term is alive and non-zero regardless of the reservoir's
-# silence. So the proposal is a real competitor under an SNN profile and vanishes
-# entirely under ``DETERMINISTIC_CONTINUOUS_ONLY``. Measured over 300 identical-input
-# turn pairs (FULL_24_NO_STDP vs DETERMINISTIC_CONTINUOUS_ONLY): selected_action
-# differs on 47, broadcast_ids on 59, candidate_posterior on 70. See
-# ``tests/test_v3_orchestrator.py::test_dropping_the_snn_is_not_behaviour_preserving``.
-# Deleting the SNN therefore requires an explicit ruling on what proposal 6 becomes;
-# it is not a free structural cleanup.
-# ############################################################################ #
-#
-# These are the single formula-v1 source for the spiking modules and are never
-# hard-coded elsewhere.  Exactly like ``DECISION_STATE_BLEND`` above, they are
-# intentionally *not* folded into ``build_formula_manifest``, so ``FORMULA_DIGEST``
-# stays byte-stable at the value locked by Task 1's golden test.  The reservoir's
-# identity-defining constants already in the manifest (population size, E/I split,
-# the four ``tau`` time constants, and the deterministic recurrent + input
-# topology with its initial weights) fix the network's structure; these are the
-# behavioural coding/LIF/STDP scalars, which the owning evaluation task may fold
-# into the manifest later with an intentional digest bump when the gate manifest
-# is frozen.  The population coding uses 3 units per channel, so the 36 channels
-# produce exactly ``POPULATION_INPUT_COUNT`` (108) inputs ordered channel-major /
-# center-inner: ``input_index = 3*channel + center_rank`` (center ranks 0,1,2).
+# SNN cognitive subsystem — DELETED in formula v2 (behaviour change, not a
+# no-op).  The spiking reservoir was structurally incapable of firing through
+# ``orchestrate`` (max membrane ~0.32 vs a 0.65 threshold floor), so ``snn_summary``
+# was permanently zero and ``Q_MATRIX @ summary`` was inert.  But the summary had a
+# SECOND consumer: the ``snn-novelty`` proposal was gated on ``snn_summary is not
+# None`` (not on whether anything spiked) and carried live ``0.6*novelty`` salience,
+# so it was a real workspace competitor whose key collided with uncertainty-clarify.
+# Removing it shifts the action distribution (measured JS ~0.021, CLARIFY +~16.7pp).
+# This deletion removed: the reservoir topology + LIF/STDP/coding constants, the four
+# ``TAU_*`` time constants, ``Q_MATRIX``, the ``snn-novelty`` proposal, ``SnnState``
+# and its codec segment, and the ``spiking/`` package.  Only the per-action reward
+# baseline constants below survive, because ``ActionBeliefs.baselines`` (an inference
+# belief field, not SNN state) still evolves.
 # --------------------------------------------------------------------------- #
 
-# 8.1 population + time coding
-SNN_CODING_CENTERS = (0.0, 0.5, 1.0)
-SNN_CODING_SIGMA = 0.25
-SNN_CODING_SPIKE_Q_FLOOR = 0.08
-SNN_CODING_SECOND_SPIKE_Q = 0.75
-SNN_CODING_UNITS_PER_CHANNEL = 3
+# Per-action reward baseline EMA (formerly design 8.3): bounded exponential mean
+# ``clip(0.95*baseline + 0.05*reward, -1, 1)`` stored on ``ActionBeliefs``.
+BASELINE_DECAY = 0.95
+BASELINE_LEARN = 0.05
+BASELINE_BOUNDS = (-1.0, 1.0)
 
-# 8.2 LIF dynamics
-SNN_INPUT_CURRENT_CLIP = (-3.0, 3.0)
-SNN_VOLTAGE_CLIP = (-2.0, 2.0)
-SNN_RESET_VOLTAGE = 0.0
-SNN_THRESHOLD_ADAPT_RATE = 0.01
-SNN_THRESHOLD_TARGET_RATE = 0.08
-SNN_THRESHOLD_BOUNDS = (0.65, 1.35)
-SNN_EXCITATORY_WEIGHT_BOUNDS = (0.0, 0.35)
-SNN_INHIBITORY_WEIGHT_BOUNDS = (-0.70, 0.0)
-SNN_INCOMING_L1_LIMIT = RECURRENT_FIXED_INCOMING_L1_LIMIT  # 1.2, one shared constant
-SNN_PRE_POST_TRACE_CLIP = (0.0, 3.0)
-SNN_ELIGIBILITY_CLIP = (-3.0, 3.0)
-
-# 8.3 reward-gated STDP
-SNN_STDP_ANTI_HEBBIAN = 1.05
-SNN_STDP_LEARNING_RATE = 0.002
-SNN_STDP_HOMEOSTASIS = 1e-5
-SNN_STDP_INITIAL_WEIGHT = RECURRENT_EE_WEIGHT  # W0 for every plastic E-to-E edge (0.06)
-SNN_BASELINE_DECAY = 0.95
-SNN_BASELINE_LEARN = 0.05
-SNN_BASELINE_BOUNDS = (-1.0, 1.0)
-
-
-def snn_horizon_decays(ticks: int) -> tuple[float, float, float, float, int]:
-    """Return ``(beta, pre_decay, post_decay, elig_decay, refractory_k)`` for ``K`` ticks.
-
-    Each decay resamples the same normalized horizon: ``decay_K = exp(-(1/K)/tau)``
-    for the versioned horizon-level time constants, so ``decay_K ** K = exp(-1/tau)``
-    is invariant across the allowed 16/24/32 profiles.  ``beta_24`` equals 0.90 by
-    construction.  ``refractory_k = max(1, round(K/12))``.
-    """
-
-    if type(ticks) is not int or isinstance(ticks, bool) or ticks not in SNN_ALLOWED_TICKS:
-        raise ValueError("ticks must be one of the allowed v1 tick counts")
-    dt = 1.0 / ticks
-    return (
-        exp(-dt / TAU_MEMBRANE),
-        exp(-dt / TAU_PRE),
-        exp(-dt / TAU_POST),
-        exp(-dt / TAU_ELIGIBILITY),
-        max(1, round(ticks / 12)),
-    )
-
-
-def spike_latency(q: float, ticks: int) -> int:
-    """First-spike latency ``1 + floor((K-2)*(1-q))`` for population-coding response ``q``."""
-
-    return 1 + floor((ticks - 2) * (1.0 - q))
-
-
-def plastic_synapses() -> tuple[tuple[int, int], ...]:
-    """Canonical ``(post, pre)`` order of the plastic excitatory-to-excitatory synapses.
-
-    The enumeration is post-major and, within a post, follows the deterministic
-    recurrent topology order.  It is the single canonical ``synapse_id`` order used
-    by both the packed state codec and the incoming-budget projection, so the two
-    can never disagree.
-    """
-
-    out: list[tuple[int, int]] = []
-    for post in range(SNN_EXCITATORY):
-        for pre in RECURRENT_TOPOLOGY[post]:
-            if pre < SNN_EXCITATORY:
-                out.append((post, pre))
-    return tuple(out)
-
-
-PLASTIC_SYNAPSES = plastic_synapses()
-
+# formula v2 deleted the ``snn-novelty`` proposal (old index 6).  The survivors
+# are NOT renumbered in key space: their ``(ACTION_COORDS, SOURCE_BASIS,
+# GROUP_COORDS)`` key triples are byte-identical to formula v1, so every survivor's
+# 16-dimensional key is unchanged.  In particular ``continuity-speak`` keeps source
+# basis 11 (not shifted down to 10), and key coordinate 10 — the slot snn-novelty
+# occupied — is now a PERMANENT TOMBSTONE that no proposal uses.  ``PROPOSAL_SOURCE_BASIS``
+# is therefore written explicitly as (4,5,6,7,8,9,11), skipping 10, rather than as a
+# contiguous range.
 PROPOSAL_IDS = (
     "body-speak",
     "affect-speak",
@@ -382,17 +199,16 @@ PROPOSAL_IDS = (
     "boundary-hold",
     "fatigue-hold",
     "affiliation-reach",
-    "snn-novelty",
     "continuity-speak",
 )
-PROPOSAL_ACTIONS = ("SPEAK", "SPEAK", "CLARIFY", "HOLD", "HOLD", "REACH", "CLARIFY", "SPEAK")
+PROPOSAL_COUNT = len(PROPOSAL_IDS)
+PROPOSAL_ACTIONS = ("SPEAK", "SPEAK", "CLARIFY", "HOLD", "HOLD", "REACH", "SPEAK")
 PROPOSAL_ACTION_BASIS = (0, 1, 2, 3)
-PROPOSAL_ACTION_COORDS = (0, 0, 2, 1, 1, 3, 2, 0)
-PROPOSAL_SOURCE_BASIS = tuple(range(4, 12))
-PROPOSAL_GROUP_COORDS = (12, 12, 13, 14, 12, 15, 13, 15)
+PROPOSAL_ACTION_COORDS = (0, 0, 2, 1, 1, 3, 0)
+PROPOSAL_SOURCE_BASIS = (4, 5, 6, 7, 8, 9, 11)  # 10 is the snn-novelty tombstone
+PROPOSAL_GROUP_COORDS = (12, 12, 13, 14, 12, 15, 15)
 PROPOSAL_KEY_WEIGHTS = (1.0, 0.75, 0.50)
-PROPOSAL_REQUIRED_BITS = ((11,), (), (), (17,), (10,), (), (), (26, 30))
-PROPOSAL_REQUIRES_VALID_SNN_SUMMARY = (False, False, False, False, False, False, True, False)
+PROPOSAL_REQUIRED_BITS = ((11,), (), (), (17,), (10,), (), (26, 30))
 PROPOSAL_SALIENCE_BOUNDS = (-4.0, 4.0)
 PROPOSAL_CONFIDENCE_FORMULA = "clip01(0.5 + 0.25*abs(salience))"
 PROPOSAL_SALIENCE_FORMULAS = (
@@ -402,7 +218,6 @@ PROPOSAL_SALIENCE_FORMULAS = (
     ("boundary-hold", "-1.3*safety - 0.6*agency + 0.5*center(boundary_pressure)"),
     ("fatigue-hold", "1.4*center(exhaustion) - 0.4*expression_pressure"),
     ("affiliation-reach", "1.1*affiliation + 0.8*expression_pressure + 0.3*novelty"),
-    ("snn-novelty", "1.2*snn_summary[10] + 0.6*novelty"),
     ("continuity-speak", "0.8*center(history_present) + 0.6*center(engagement) + 0.4*affiliation"),
 )
 
@@ -416,7 +231,7 @@ def _proposal_key(index: int) -> tuple[float, ...]:
     return tuple(value / norm for value in raw)
 
 
-PROPOSAL_KEYS = tuple(_proposal_key(index) for index in range(WORKSPACE_CAPACITY))
+PROPOSAL_KEYS = tuple(_proposal_key(index) for index in range(PROPOSAL_COUNT))
 
 
 def center(value: float) -> float:
@@ -486,8 +301,8 @@ ACTION_TIE_ORDER = ("HOLD", "CLARIFY", "SPEAK", "REACH")
 # 11.2 preferences, the EKF box/variance bounds, and the section 12 expression
 # formula coefficients.
 #
-# Exactly like ``DECISION_STATE_BLEND`` and the section-8 spiking scalars above,
-# these are the single formula-v1 source for the Task 9 cognitive modules and are
+# Exactly like ``DECISION_STATE_BLEND`` above, these are the single formula-v1
+# source for the Task 9 cognitive modules and are
 # never hard-coded elsewhere.  They are intentionally *not* folded into
 # ``build_formula_manifest`` so ``FORMULA_DIGEST`` stays byte-stable at the value
 # locked by Task 1's golden test; the owning evaluation task may fold them into
@@ -669,23 +484,12 @@ def validate_formula_manifest() -> float:
     """Validate dimensions, topology invariants, and the analytic Jacobian gate."""
     if (OBSERVATION_DIM, AXIS_DIM, STATE_DIM) != (36, 8, 24) or STATE_DIM != 3 * AXIS_DIM:
         raise ValueError("continuous-state dimensions do not match formula v1")
-    if (
-        type(SNN_NEURONS) is not int
-        or type(SNN_EXCITATORY) is not int
-        or type(SNN_INHIBITORY) is not int
-        or SNN_NEURONS <= 0
-        or SNN_EXCITATORY <= 0
-        or SNN_INHIBITORY <= 0
-        or SNN_EXCITATORY + SNN_INHIBITORY != SNN_NEURONS
-    ):
-        raise ValueError("SNN population dimensions do not match the formula")
     if type(SEMANTIC_DEFAULTS) is not tuple or len(SEMANTIC_DEFAULTS) != OBSERVATION_DIM:
         raise ValueError("semantic defaults do not match the observation dimension")
     if any(not _is_finite_number(value) for value in SEMANTIC_DEFAULTS):
         raise ValueError("semantic defaults must contain only finite numeric values")
 
     _validate_matrix_shape_and_values("P matrix", P_MATRIX, AXIS_DIM, OBSERVATION_DIM)
-    _validate_matrix_shape_and_values("Q matrix", Q_MATRIX, AXIS_DIM, SNN_SUMMARY_DIM)
     for name, matrix in (
         ("W_FAST", W_FAST),
         ("W_MID", W_MID),
@@ -751,73 +555,6 @@ def validate_formula_manifest() -> float:
     if ACTION_TIE_ORDER != ("HOLD", "CLARIFY", "SPEAK", "REACH"):
         raise ValueError("context action tie order does not match formula v1")
 
-    if (
-        not _is_finite_number(RECURRENT_FIXED_INCOMING_L1_LIMIT)
-        or RECURRENT_FIXED_INCOMING_L1_LIMIT != 1.2
-    ):
-        raise ValueError("recurrent fixed incoming L1 limit must equal formula-v1 value 1.2")
-    if type(RECURRENT_TOPOLOGY) is not tuple or len(RECURRENT_TOPOLOGY) != SNN_NEURONS:
-        raise ValueError("materialized recurrent topology has the wrong population size")
-    for post in range(SNN_NEURONS):
-        try:
-            sources = tuple(recurrent_sources(post))
-        except Exception as exc:
-            raise ValueError("recurrent topology generation failed") from exc
-        expected_fan_in = RECURRENT_HIGH_FAN_IN if post < RECURRENT_HIGH_FAN_IN_POSTS else RECURRENT_LOW_FAN_IN
-        if len(sources) != expected_fan_in:
-            raise ValueError("recurrent topology has the wrong fan-in")
-        if any(type(pre) is not int or not 0 <= pre < SNN_NEURONS for pre in sources):
-            raise ValueError("recurrent topology contains an out-of-range source")
-        if post in sources or len(sources) != len(set(sources)):
-            raise ValueError("recurrent topology contains a self-loop or duplicate")
-        if type(RECURRENT_TOPOLOGY[post]) is not tuple or RECURRENT_TOPOLOGY[post] != sources:
-            raise ValueError("materialized recurrent topology differs from the live formula")
-
-        fixed_l1 = 0.0
-        for pre in sources:
-            expected_plastic = post < SNN_EXCITATORY and pre < SNN_EXCITATORY
-            try:
-                plastic = recurrent_is_plastic(post, pre)
-                weight = recurrent_initial_weight(post, pre)
-            except Exception as exc:
-                raise ValueError("recurrent edge formula evaluation failed") from exc
-            if type(plastic) is not bool or plastic is not expected_plastic:
-                raise ValueError("recurrent plasticity must hold iff both neurons are excitatory")
-            if not _is_finite_number(weight):
-                raise ValueError("recurrent initial weight must be finite")
-            expected_weight = (
-                RECURRENT_INHIBITORY_WEIGHT
-                if pre >= SNN_EXCITATORY
-                else RECURRENT_EE_WEIGHT
-                if post < SNN_EXCITATORY
-                else RECURRENT_OTHER_EXCITATORY_WEIGHT
-            )
-            dale_violation = (pre < SNN_EXCITATORY and weight < 0.0) or (
-                pre >= SNN_EXCITATORY and weight > 0.0
-            )
-            if dale_violation or weight != expected_weight:
-                raise ValueError("recurrent initial weight violates the Dale/formula assignment")
-            if not plastic:
-                fixed_l1 += abs(weight)
-        if fixed_l1 > RECURRENT_FIXED_INCOMING_L1_LIMIT:
-            raise ValueError("fixed incoming L1 exceeds the formula limit")
-
-    if type(INPUT_TOPOLOGY) is not tuple or len(INPUT_TOPOLOGY) != POPULATION_INPUT_COUNT:
-        raise ValueError("materialized input topology has the wrong channel count")
-    for input_index in range(POPULATION_INPUT_COUNT):
-        try:
-            targets = tuple(input_targets(input_index))
-        except Exception as exc:
-            raise ValueError("input topology generation failed") from exc
-        if len(targets) != INPUT_TARGETS_PER_CHANNEL:
-            raise ValueError("input topology has the wrong target count")
-        if any(type(target) is not int or not 0 <= target < SNN_NEURONS for target in targets):
-            raise ValueError("input topology contains an out-of-range target")
-        if len(targets) != len(set(targets)):
-            raise ValueError("input topology contains duplicate targets")
-        if type(INPUT_TOPOLOGY[input_index]) is not tuple or INPUT_TOPOLOGY[input_index] != targets:
-            raise ValueError("materialized input topology differs from the live formula")
-
     try:
         jacobian = jacobian_absolute_upper_bound()
     except Exception as exc:
@@ -847,10 +584,6 @@ def build_formula_manifest() -> MappingProxyType[str, object]:
             observation=OBSERVATION_DIM,
             axes=AXIS_DIM,
             state=STATE_DIM,
-            snn_neurons=SNN_NEURONS,
-            snn_excitatory=SNN_EXCITATORY,
-            snn_inhibitory=SNN_INHIBITORY,
-            snn_summary=SNN_SUMMARY_DIM,
             workspace=WORKSPACE_CAPACITY,
             experience=EXPERIENCE_CAPACITY,
         ),
@@ -866,7 +599,6 @@ def build_formula_manifest() -> MappingProxyType[str, object]:
             p_triples=P_TRIPLES,
             p_matrix=P_MATRIX,
             p_bias=P_BIAS,
-            q_matrix=Q_MATRIX,
             w_fast=W_FAST,
             w_mid=W_MID,
             w_slow=W_SLOW,
@@ -875,37 +607,6 @@ def build_formula_manifest() -> MappingProxyType[str, object]:
             u_slow=U_SLOW,
             step_sizes=DYNAMICS_STEP_SIZES,
         ),
-        spiking=_named_mapping(
-            default_ticks=SNN_DEFAULT_TICKS,
-            allowed_ticks=SNN_ALLOWED_TICKS,
-            tau_membrane=TAU_MEMBRANE,
-            tau_pre=TAU_PRE,
-            tau_post=TAU_POST,
-            tau_eligibility=TAU_ELIGIBILITY,
-            recurrent_hash_domain=RECURRENT_HASH_DOMAIN,
-            recurrent_high_fan_in_posts=RECURRENT_HIGH_FAN_IN_POSTS,
-            recurrent_high_fan_in=RECURRENT_HIGH_FAN_IN,
-            recurrent_low_fan_in=RECURRENT_LOW_FAN_IN,
-            recurrent_ee_weight=RECURRENT_EE_WEIGHT,
-            recurrent_other_excitatory_weight=RECURRENT_OTHER_EXCITATORY_WEIGHT,
-            recurrent_inhibitory_weight=RECURRENT_INHIBITORY_WEIGHT,
-            recurrent_fixed_incoming_l1_limit=RECURRENT_FIXED_INCOMING_L1_LIMIT,
-            recurrent_topology=RECURRENT_TOPOLOGY,
-            input_hash_domain=INPUT_HASH_DOMAIN,
-            population_input_count=POPULATION_INPUT_COUNT,
-            input_targets_per_channel=INPUT_TARGETS_PER_CHANNEL,
-            input_weight=INPUT_WEIGHT,
-            input_topology=INPUT_TOPOLOGY,
-            topology_semantics=_named_mapping(
-                digest="SHA-256",
-                index_framing=">HH",
-                selection="ascending digest, then lowest index",
-                recurrent_excludes_self=True,
-                plasticity="iff pre and post are excitatory",
-                dale="weight sign is determined by presynaptic population",
-            ),
-        ),
-        snn_summary=_named_mapping(pools=SNN_SUMMARY_POOLS, definition=SNN_SUMMARY_DEFINITION),
         proposals=_named_mapping(
             ids=PROPOSAL_IDS,
             actions=PROPOSAL_ACTIONS,
@@ -917,7 +618,6 @@ def build_formula_manifest() -> MappingProxyType[str, object]:
             source_basis=PROPOSAL_SOURCE_BASIS,
             group_coords=PROPOSAL_GROUP_COORDS,
             required_bits=PROPOSAL_REQUIRED_BITS,
-            requires_valid_snn_summary=PROPOSAL_REQUIRES_VALID_SNN_SUMMARY,
             materialized_keys=PROPOSAL_KEYS,
         ),
         action_selection=_named_mapping(

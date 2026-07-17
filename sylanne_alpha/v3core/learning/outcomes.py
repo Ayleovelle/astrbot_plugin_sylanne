@@ -5,10 +5,11 @@ turn-``t`` :class:`PendingOutcome` exactly once, using only the frozen predictiv
 belief, likelihood, preference density, and (optionally) eligibility tensor that
 turn ``t`` stored.  For each valid outcome dimension the exact diagonal posterior
 gives a preference-log improvement; the mean improvement is the preference
-reward, optionally blended with a structured quality score.  Reward-gated STDP,
-the per-action baseline, and the actual-action EKF transition update all consume
-the pre-update baseline / beliefs and are returned together so the caller commits
-them atomically with the rest of the turn.
+reward, optionally blended with a structured quality score.  The per-action reward
+baseline and the actual-action EKF transition update both consume the pre-update
+baseline / beliefs and are returned together so the caller commits them atomically
+with the rest of the turn.  (formula v2 deleted the reward-gated STDP weight update
+that also lived here; the SNN it modulated no longer exists.)
 
 If no outcome dimension is valid the credit is censored: no weight, baseline, or
 belief change occurs.
@@ -37,6 +38,9 @@ from ..formula_v1 import (
     ACTION_Q_THETA,
     ACTION_SIGMA_BOUNDS,
     AXIS_DIM,
+    BASELINE_BOUNDS,
+    BASELINE_DECAY,
+    BASELINE_LEARN,
 )
 from ..inference.policy_scorer import (
     action_params,
@@ -47,15 +51,27 @@ from ..inference.policy_scorer import (
     preferences,
 )
 from ..observation.models import OutcomeFrame
-from ..spiking.plasticity import apply_stdp, compute_credit_gate, stdp_delta, update_baseline
-from ..state.models import ActionBeliefs, PendingOutcome, SnnState, V3State
+from ..state.models import ActionBeliefs, PendingOutcome, V3State
 
 _ACTION_ORDER = (Action.SPEAK, Action.HOLD, Action.CLARIFY, Action.REACH)
 _ACTION_INDEX = {action: index for index, action in enumerate(_ACTION_ORDER)}
 _G_LO, _G_HI = ACTION_G_BOUNDS
 _B_LO, _B_HI = ACTION_B_BOUNDS
 _SIGMA_LO, _SIGMA_HI = ACTION_SIGMA_BOUNDS
+_BASE_LO, _BASE_HI = BASELINE_BOUNDS
 _TWO_PI = 2.0 * pi
+
+
+def update_baseline(baseline: float, reward: float) -> float:
+    """Bounded per-action reward EMA ``clip(0.95*baseline + 0.05*reward, -1, 1)``.
+
+    Formerly design 8.3's STDP reward baseline; the SNN is gone but the per-action
+    baseline still lives on :class:`ActionBeliefs` and evolves every settlement.
+    """
+
+    if type(baseline) is not float or type(reward) is not float:
+        raise TypeError("baseline and reward must be floats")
+    return _clip(BASELINE_DECAY * baseline + BASELINE_LEARN * reward, _BASE_LO, _BASE_HI)
 
 
 def _clip(value: float, low: float, high: float) -> float:
@@ -238,18 +254,20 @@ def _rebuild_beliefs(beliefs: ActionBeliefs, action: Action, g, b, sigma_g, sigm
 
 @dataclass(frozen=True, slots=True)
 class SettlementResult:
-    """Bounded, atomic settlement outcome for one pending turn."""
+    """Bounded, atomic settlement outcome for one pending turn.
+
+    formula v2 deleted the reward-gated STDP weight update (the SNN is gone), so
+    this no longer carries ``credit_gate``/``stdp_delta``/``clipped_mass``/
+    ``new_plastic_weights``.  The per-action reward baseline and the actual-action
+    EKF belief update survive.
+    """
 
     censored: bool
     reward: float
     r_preference: float
-    credit_gate: bool
-    stdp_delta: float
-    clipped_mass: float
     baseline_before: float
     baseline_after: float
     new_action_beliefs: ActionBeliefs
-    new_plastic_weights: tuple | None
 
 
 def settle_with(pre_state: object, outcome_frame: object, quality_score: object = None) -> SettlementResult:
@@ -265,7 +283,6 @@ def settle_with(pre_state: object, outcome_frame: object, quality_score: object 
 
     beliefs = pre_state.action_beliefs or initial_action_beliefs()
     actual = pending.projected_actual_action
-    shadow = pending.action
 
     censored, r_preference, reward = settle_reward(pending, outcome_frame, quality_score)
     if censored or actual is None:
@@ -273,30 +290,13 @@ def settle_with(pre_state: object, outcome_frame: object, quality_score: object 
             censored=True,
             reward=0.0,
             r_preference=0.0,
-            credit_gate=False,
-            stdp_delta=0.0,
-            clipped_mass=0.0,
             baseline_before=0.0,
             baseline_after=0.0,
             new_action_beliefs=beliefs,
-            new_plastic_weights=None,
         )
 
     action_index = _ACTION_INDEX[actual]
     baseline_before = beliefs.baselines[action_index]
-
-    # Reward-gated STDP (only if the origin was STDP-enabled, shadow==actual, and
-    # both the eligibility tensor and a live SNN sub-state exist).
-    credit_gate = compute_credit_gate(pending.stdp_credit_enabled, shadow, actual)
-    delta = 0.0
-    clipped_mass = 0.0
-    new_plastic_weights: tuple | None = None
-    if credit_gate and pending.packed_eligibility is not None and type(pre_state.snn) is SnnState:
-        delta = stdp_delta(reward, baseline_before, True)
-        new_plastic_weights, clipped_mass = apply_stdp(
-            pre_state.snn.plastic_weights, pending.packed_eligibility, delta
-        )
-
     baseline_after = update_baseline(baseline_before, reward)
 
     s = _decision_state(pre_state)
@@ -310,13 +310,9 @@ def settle_with(pre_state: object, outcome_frame: object, quality_score: object 
         censored=False,
         reward=reward,
         r_preference=r_preference,
-        credit_gate=credit_gate,
-        stdp_delta=delta,
-        clipped_mass=clipped_mass,
         baseline_before=baseline_before,
         baseline_after=baseline_after,
         new_action_beliefs=new_beliefs,
-        new_plastic_weights=new_plastic_weights,
     )
 
 
@@ -335,4 +331,5 @@ __all__ = [
     "preference_expected_log_term",
     "settle_reward",
     "settle_with",
+    "update_baseline",
 ]
