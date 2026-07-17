@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import asyncio
 import threading
+import time
 
 import pytest
 
@@ -27,6 +28,7 @@ from sylanne_alpha.v2core.shadow_snapshot import V2SeedSnapshotV1
 from sylanne_alpha.v3bridge import limits
 from sylanne_alpha.v3bridge.actual_action import ActualAction
 from sylanne_alpha.v3bridge.comparator import ShadowComparison, compare, to_core_action
+from sylanne_alpha.v3bridge._state_repository import FaultPoint
 from sylanne_alpha.v3bridge.effect_committer import EffectCommitter
 from sylanne_alpha.v3bridge.migration_coordinator import MigrationCoordinator
 from sylanne_alpha.v3bridge.models import LoadSnapshotV1, RepositoryAdmissionState
@@ -37,6 +39,7 @@ from sylanne_alpha.v3bridge.profile_selector import (
 )
 from sylanne_alpha.v3bridge.runtime_telemetry import IsolationCounters, TelemetrySink
 from sylanne_alpha.v3bridge.shadow_supervisor import (
+    SHUTDOWN_ORDER,
     THREAD_NAME_PREFIX,
     OfferStatus,
     SessionQueues,
@@ -414,6 +417,204 @@ def test_v3_futures_never_enter_plugin_background_tasks(tmp_path) -> None:
         assert supervisor._executor._max_workers == 1
         assert supervisor._executor._thread_name_prefix == THREAD_NAME_PREFIX
         await supervisor.terminate()
+
+    asyncio.run(scenario(tmp_path))
+
+
+class _IOWatchingCommitter:
+    """Delegates to a real committer, recording which thread each repository call ran on.
+
+    Optionally blocks (``time.sleep``, i.e. exactly what an fsync/flock contention
+    does to its caller) so a test can measure what that costs the host loop.
+    """
+
+    def __init__(self, inner: EffectCommitter, *, block_s: float = 0.0) -> None:
+        self._inner = inner
+        self._block_s = block_s
+        self.load_threads: list = []
+        self.commit_threads: list = []
+
+    def __getattr__(self, name):  # acquire_epoch / seal_epoch / everything else
+        return getattr(self._inner, name)
+
+    def load_state(self, session_ref):
+        self.load_threads.append(threading.current_thread().name)
+        if self._block_s:
+            time.sleep(self._block_s)
+        return self._inner.load_state(session_ref)
+
+    def commit_turn(self, command):
+        self.commit_threads.append(threading.current_thread().name)
+        if self._block_s:
+            time.sleep(self._block_s)
+        return self._inner.commit_turn(command)
+
+
+def test_repository_io_runs_on_the_v3_worker_not_the_event_loop(tmp_path) -> None:
+    """load_state/commit_turn fsync and take a cross-process lock: never inline on the loop.
+
+    Regression guard for a real defect: ``_process_job`` is scheduled with
+    ``create_task`` on the *host* loop, so a synchronous committer call there made v2's
+    loop wait on v3's disk IO -- violating design 14.2 ("v3 never adds backpressure to
+    v2") and reintroducing the hang class this project has been burned by, which no
+    ``except`` can contain.
+    """
+
+    async def scenario(tmp_path):
+        inner = EffectCommitter.open(tmp_path)
+        watcher = _IOWatchingCommitter(inner)
+        ref = _session_ref()
+        _seed_session(inner, ref)
+        ledger = SequenceLedger()
+        telemetry = TelemetrySink()
+        supervisor = ShadowSupervisor(
+            committer=watcher,
+            ledger=ledger,
+            counters=IsolationCounters(),
+            telemetry_sink=telemetry,
+            job_timeout_s=None,
+        )
+        loop_thread = threading.current_thread().name
+        await supervisor.initialize()
+        supervisor.offer(_make_job(ledger, ref, supervisor.epoch))
+        await supervisor.join()
+        await supervisor.terminate()
+
+        assert sum(1 for t in telemetry.recent() if t.outcome == "COMMITTED") == 1
+        assert watcher.load_threads and watcher.commit_threads
+        # Both repository phases ran on the v3-private worker...
+        for name in watcher.load_threads + watcher.commit_threads:
+            assert name.startswith(THREAD_NAME_PREFIX), name
+            # ...which is by construction not the thread running the event loop.
+            assert name != loop_thread
+
+    asyncio.run(scenario(tmp_path))
+
+
+def test_slow_repository_io_does_not_stall_the_event_loop(tmp_path) -> None:
+    """Quantitative proof: a blocking repository must not show up as loop stall.
+
+    A high-frequency heartbeat measures the worst gap between consecutive loop
+    iterations while a turn whose load+commit block for 250 ms each is processed. If
+    the IO ran inline the heartbeat could not tick for ~500 ms; offloaded, the loop
+    keeps servicing it throughout.
+    """
+
+    async def scenario(tmp_path):
+        block_s = 0.25
+        inner = EffectCommitter.open(tmp_path)
+        watcher = _IOWatchingCommitter(inner, block_s=block_s)
+        ref = _session_ref()
+        _seed_session(inner, ref)
+        ledger = SequenceLedger()
+        telemetry = TelemetrySink()
+        supervisor = ShadowSupervisor(
+            committer=watcher,
+            ledger=ledger,
+            counters=IsolationCounters(),
+            telemetry_sink=telemetry,
+            job_timeout_s=None,
+        )
+        await supervisor.initialize()
+
+        stalls: list = []
+        beating = True
+
+        async def heartbeat() -> None:
+            previous = time.monotonic()
+            while beating:
+                await asyncio.sleep(0)
+                now = time.monotonic()
+                stalls.append(now - previous)
+                previous = now
+
+        pulse = asyncio.create_task(heartbeat())
+        supervisor.offer(_make_job(ledger, ref, supervisor.epoch))
+        await supervisor.join()
+        beating = False
+        await pulse
+        await supervisor.terminate()
+
+        assert sum(1 for t in telemetry.recent() if t.outcome == "COMMITTED") == 1
+        assert watcher.load_threads and watcher.commit_threads
+        worst = max(stalls)
+        # The loop kept turning throughout ~500 ms of blocking repository IO. The
+        # bound is deliberately far below one block: inline IO would stall ~250 ms.
+        assert worst < block_s / 5, f"event loop stalled {worst * 1000:.1f} ms on v3 IO"
+
+    asyncio.run(scenario(tmp_path))
+
+
+def test_terminate_does_not_stall_the_event_loop_while_the_repo_lock_is_held(tmp_path) -> None:
+    """terminate()'s seal_epoch must not block the loop behind our own worker's lock.
+
+    Found by adversarial review of the offload fix itself: moving commit_turn onto the
+    v3 worker is what first lets the loop reach terminate() *while a v3 thread holds
+    the cross-process repo lock*. ``seal_epoch`` takes that same non-reentrant lock and
+    fsyncs, so sealing inline moved the stall out of ``_process_job`` and into
+    ``terminate()`` rather than removing it. Measured before the fix: 3031.7 ms of loop
+    stall inside terminate(); after: ~5 ms.
+
+    ``drain_timeout_s`` is deliberately shorter than the commit so the bounded drain
+    expires and terminate really does reach seal_epoch with the commit still in flight.
+    The stall must be injected INSIDE the repository lock (a plain sleep around
+    ``commit_turn`` holds no lock and reproduces nothing).
+    """
+
+    async def scenario(tmp_path):
+        block_s = 0.6
+        armed = threading.Event()
+        hit = threading.Event()
+
+        def injector(point) -> None:
+            # Block while holding the cross-process repo lock, exactly as a slow fsync
+            # or a contended flock does. Armed only after seeding, which uses this same
+            # fault point for its own migration commit.
+            if point is FaultPoint.BEFORE_POINTER_PUBLISH and armed.is_set() and not hit.is_set():
+                hit.set()
+                time.sleep(block_s)
+
+        committer = EffectCommitter.open(tmp_path, fault_injector=injector)
+        ref = _session_ref()
+        _seed_session(committer, ref)
+        ledger = SequenceLedger()
+        supervisor = ShadowSupervisor(
+            committer=committer,
+            ledger=ledger,
+            counters=IsolationCounters(),
+            telemetry_sink=TelemetrySink(),
+            job_timeout_s=None,
+            drain_timeout_s=0.05,  # expires well before the commit finishes
+        )
+        await supervisor.initialize()
+        armed.set()
+        supervisor.offer(_make_job(ledger, ref, supervisor.epoch))
+
+        stalls: list = []
+        beating = True
+
+        async def heartbeat() -> None:
+            previous = time.monotonic()
+            while beating:
+                await asyncio.sleep(0)
+                now = time.monotonic()
+                stalls.append(now - previous)
+                previous = now
+
+        pulse = asyncio.create_task(heartbeat())
+        # Wait (off-loop) until the commit really holds the repo lock.
+        assert await asyncio.to_thread(hit.wait, 5.0), "fault never fired: the test would prove nothing"
+        mark = len(stalls)
+        await supervisor.terminate()
+        beating = False
+        await pulse
+
+        worst_during_terminate = max(stalls[mark:]) if len(stalls) > mark else 0.0
+        assert worst_during_terminate < block_s / 4, (
+            f"terminate() stalled the loop {worst_during_terminate * 1000:.1f} ms on repo IO"
+        )
+        # The exact ordered teardown is unchanged by the offload.
+        assert supervisor.shutdown_trace == SHUTDOWN_ORDER
 
     asyncio.run(scenario(tmp_path))
 

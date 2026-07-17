@@ -17,7 +17,7 @@ import zlib
 import pytest
 
 from sylanne_alpha.v3core.contracts import Action, SessionRef, TurnSequence
-from sylanne_alpha.v3core.formula_v1 import FORMULA_VERSION
+from sylanne_alpha.v3core.formula_v1 import FORMULA_VERSION, SNN_BASELINE_BOUNDS
 from sylanne_alpha.v3core.state import codec
 from sylanne_alpha.v3core.state.codec import (
     STATE_CODEC_MAGIC,
@@ -27,17 +27,29 @@ from sylanne_alpha.v3core.state.codec import (
 )
 from sylanne_alpha.v3core.state.models import (
     ACTION_COUNT,
+    ELIGIBILITY_BOUNDS,
     EXPERIENCE_FEATURE_DIM,
     EXPERIENCE_REWARD_DIM,
     PLASTIC_SYNAPSE_COUNT,
+    PLASTIC_WEIGHT_BOUNDS,
     SNN_NEURON_COUNT,
     THETA_PARAMS,
+    THRESHOLD_BOUNDS,
+    TRACE_BOUNDS,
+    VOLTAGE_BOUNDS,
     WORKSPACE_BROADCAST_DIM,
     ActionBeliefs,
     ExperienceRecord,
     PendingOutcome,
     SnnState,
     V3State,
+    BASELINE_BOUNDS,
+    BASELINE_STORED_BOUNDS,
+    LATENT_AXIS_BOUNDS,
+    LATENT_AXIS_STORED_BOUNDS,
+    SNN_SUMMARY_BOUNDS,
+    SNN_SUMMARY_STORED_BOUNDS,
+    quantization_safe_bounds,
 )
 from sylanne_alpha.v3core.formula_v1 import AXIS_DIM, EXPERIENCE_CAPACITY, SNN_SUMMARY_DIM
 
@@ -273,3 +285,119 @@ def test_experience_record_rejects_out_of_range_quantized_values() -> None:
             trace_revision=1,
             trace_turn_digest=b"\x00" * 8,
         )
+
+
+# --------------------------------------------------------------------------- #
+# Quantization-safe bounds (回溯红队 a16: quantization IS persistence)
+# --------------------------------------------------------------------------- #
+
+
+def test_declared_bounds_are_widened_outward_onto_the_float16_grid() -> None:
+    """The stored interval is the declared one unioned with its float16 image."""
+
+    for declared in (THRESHOLD_BOUNDS, PLASTIC_WEIGHT_BOUNDS, VOLTAGE_BOUNDS):
+        low, high = declared
+        stored_low, stored_high = quantization_safe_bounds(declared)
+        assert stored_low <= low and stored_high >= high  # never tightened
+        assert stored_low <= _snap16(low) and _snap16(high) <= stored_high
+
+    # The two boundaries that actually leave their declared interval under float16.
+    assert quantization_safe_bounds(THRESHOLD_BOUNDS)[0] == _snap16(0.65) < 0.65
+    assert quantization_safe_bounds(PLASTIC_WEIGHT_BOUNDS)[1] == _snap16(0.35) > 0.35
+    # Bounds already on the grid must not move at all.
+    assert quantization_safe_bounds(VOLTAGE_BOUNDS) == VOLTAGE_BOUNDS
+
+
+@pytest.mark.parametrize("corner", ["low", "high"])
+def test_a_state_clamped_to_any_bound_survives_a_round_trip(corner: str) -> None:
+    """The a16 DoD: decode(encode(x)) holds for ANY state legally clamped to a bound.
+
+    This is the STATE_QUANTIZE_ERROR livelock, pinned as a unit test. Homeostasis
+    legitimately pins thresholds to the 0.65 clamp floor, but float16(0.65) =
+    0.64990234375 fell below the exactly-declared bound, so decode(encode(state))
+    raised, orchestrate() rejected every turn, and the shadow stopped advancing state
+    forever. The pre-existing codec tests all picked exactly-representable values
+    (1.0, 0.3125), which is precisely why they never saw it.
+    """
+
+    index = 0 if corner == "low" else 1
+    state = V3State(
+        session_ref=_session_ref(),
+        snn=SnnState(
+            voltages=tuple(VOLTAGE_BOUNDS[index] for _ in range(SNN_NEURON_COUNT)),
+            thresholds=tuple(THRESHOLD_BOUNDS[index] for _ in range(SNN_NEURON_COUNT)),
+            pre_trace=tuple(TRACE_BOUNDS[index] for _ in range(SNN_NEURON_COUNT)),
+            post_trace=tuple(TRACE_BOUNDS[index] for _ in range(SNN_NEURON_COUNT)),
+            plastic_weights=tuple(PLASTIC_WEIGHT_BOUNDS[index] for _ in range(PLASTIC_SYNAPSE_COUNT)),
+            eligibility=tuple(ELIGIBILITY_BOUNDS[index] for _ in range(PLASTIC_SYNAPSE_COUNT)),
+        ),
+    )
+    blob = encode_state(state)
+    restored = decode_state(blob)  # this raised StateCodecError before the fix
+    # Reloading is a fixed point: the grid value re-encodes to the same bytes, so a
+    # crash reload can never fork the trajectory.
+    assert encode_state(restored) == blob
+    assert restored.snn.thresholds[0] == _snap16(THRESHOLD_BOUNDS[index])
+    assert restored.snn.plastic_weights[0] == _snap16(PLASTIC_WEIGHT_BOUNDS[index])
+
+
+def test_out_of_band_values_are_still_rejected_beyond_the_quantization_margin() -> None:
+    """Widening to the grid must not become a licence for genuinely out-of-range values."""
+
+    for bad in (0.6, 1.5):  # below the 0.65 floor / above the 1.35 ceiling by far
+        with pytest.raises(ValueError):
+            SnnState(
+                voltages=tuple(0.0 for _ in range(SNN_NEURON_COUNT)),
+                thresholds=tuple(bad for _ in range(SNN_NEURON_COUNT)),
+                pre_trace=tuple(0.0 for _ in range(SNN_NEURON_COUNT)),
+                post_trace=tuple(0.0 for _ in range(SNN_NEURON_COUNT)),
+                plastic_weights=tuple(0.0 for _ in range(PLASTIC_SYNAPSE_COUNT)),
+                eligibility=tuple(0.0 for _ in range(PLASTIC_SYNAPSE_COUNT)),
+            )
+    # Dale still holds: a negative plastic weight is not a quantization artifact.
+    with pytest.raises(ValueError):
+        SnnState(
+            voltages=tuple(0.0 for _ in range(SNN_NEURON_COUNT)),
+            thresholds=tuple(1.0 for _ in range(SNN_NEURON_COUNT)),
+            pre_trace=tuple(0.0 for _ in range(SNN_NEURON_COUNT)),
+            post_trace=tuple(0.0 for _ in range(SNN_NEURON_COUNT)),
+            plastic_weights=tuple(-0.01 for _ in range(PLASTIC_SYNAPSE_COUNT)),
+            eligibility=tuple(0.0 for _ in range(PLASTIC_SYNAPSE_COUNT)),
+        )
+
+
+def test_continuous_payload_bounds_match_the_code_that_clamps_them() -> None:
+    """latent/baselines/summary were declared (-16,16): up to 16x looser than the clamp.
+
+    Each is now pinned to the bound its own producer actually enforces, so a grossly
+    out-of-range value fails closed instead of validating as if it were in band.
+    """
+
+    assert LATENT_AXIS_BOUNDS == (-1.0, 1.0)  # design 9 / dynamics.multiscale._clip_unit
+    assert BASELINE_BOUNDS == SNN_BASELINE_BOUNDS  # design 8.3, the frozen manifest value
+    assert SNN_SUMMARY_BOUNDS == (0.0, 1.0)  # spiking.reservoir.pooled_summary
+    # All three sit exactly on the float16 grid, so the storage widening is a no-op:
+    # the tightening costs no quantization margin.
+    assert LATENT_AXIS_STORED_BOUNDS == LATENT_AXIS_BOUNDS
+    assert BASELINE_STORED_BOUNDS == BASELINE_BOUNDS
+    assert SNN_SUMMARY_STORED_BOUNDS == SNN_SUMMARY_BOUNDS
+
+
+def test_out_of_band_latent_baselines_and_summary_now_fail_closed() -> None:
+    ref = _session_ref()
+    with pytest.raises(ValueError):  # 2.0 validated fine under the old (-16,16)
+        V3State(session_ref=ref, latent_axes=tuple(2.0 for _ in range(24)))
+    with pytest.raises(ValueError):
+        V3State(session_ref=ref, last_snn_summary=tuple(1.5 for _ in range(SNN_SUMMARY_DIM)))
+    with pytest.raises(ValueError):
+        V3State(session_ref=ref, last_snn_summary=tuple(-0.5 for _ in range(SNN_SUMMARY_DIM)))
+    with pytest.raises(ValueError):
+        ActionBeliefs(
+            theta=tuple(tuple(0.0 for _ in range(AXIS_DIM * THETA_PARAMS)) for _ in range(ACTION_COUNT)),
+            sigma=tuple(tuple(0.5 for _ in range(AXIS_DIM * THETA_PARAMS)) for _ in range(ACTION_COUNT)),
+            baselines=tuple(3.0 for _ in range(ACTION_COUNT)),
+            counts=tuple(0 for _ in range(ACTION_COUNT)),
+        )
+    # ...while the legal extremes the producers really emit still construct.
+    V3State(session_ref=ref, latent_axes=tuple(1.0 for _ in range(24)))
+    V3State(session_ref=ref, last_snn_summary=tuple(1.0 for _ in range(SNN_SUMMARY_DIM)))

@@ -2,9 +2,14 @@
 
 The authoritative v2 response path only performs an immutable capture and a
 *non-blocking* bounded :meth:`ShadowSupervisor.offer`; it never awaits v3
-calculation.  All core calculation and canonical trace serialization run in a
-v3-private ``ThreadPoolExecutor(max_workers=1, thread_name_prefix="sylanne-v3")`` so
-cross-session execution is deliberately globally serialized on the 2-core target.
+calculation.  All core calculation and canonical trace serialization *and every
+repository access* (``load_state`` / ``commit_turn``, which fsync and take a
+cross-process file lock) run in a v3-private
+``ThreadPoolExecutor(max_workers=1, thread_name_prefix="sylanne-v3")`` via
+:meth:`ShadowSupervisor._offload`, so cross-session execution is deliberately
+globally serialized on the 2-core target.  Nothing that blocks may run inline on
+the host loop: v3 must never add backpressure to v2 (design 14.2), and a wedged
+fsync/flock is a hang, not an exception -- no ``except`` can contain it.
 v3 futures/tasks are tracked in a v3-owned set and are **never** placed in the
 plugin's ``_background_tasks``, whose shutdown order is owned by legacy/v2
 subsystems.
@@ -470,8 +475,16 @@ class ShadowSupervisor:
         trace.append("close_committer_admission")
 
         # 6. seal the writer epoch (repository fence: an old epoch can never publish).
+        #    ``seal_epoch`` takes the cross-process repo lock and fsyncs, so it is
+        #    offloaded for the same reason as step 9: if the bounded drain above timed
+        #    out, our own worker still holds that lock, and sealing inline would block
+        #    the host loop for the rest of that commit.  It goes to the default
+        #    executor rather than the v3 worker on purpose -- the v3 worker may be busy
+        #    with exactly the commit we are waiting on, and queueing the safety fence
+        #    behind it would delay the fence instead of the loop.  The step order is
+        #    unchanged: the await still completes before "seal_epoch" is traced.
         if self._epoch is not None:
-            self._committer.seal_epoch(self._epoch)
+            await asyncio.to_thread(self._committer.seal_epoch, self._epoch)
         trace.append("seal_epoch")
 
         # 7. cancel any leftover tracked tasks (the driver and residue).
@@ -570,8 +583,18 @@ class ShadowSupervisor:
             self._timeout(job, "", 0, checkpoints)
             return
 
-        # Phase LOAD: the CAS base.
-        loaded = self._committer.load_state(job.session_ref)
+        # Phase LOAD: the CAS base.  The repository read takes a cross-process file
+        # lock and reads fsync'd files, so it runs in the v3-private worker, never
+        # inline on the host loop.  A load that outruns the job bound is orphaned and
+        # the whole invocation is discarded; a read publishes nothing, so an orphan
+        # left behind by a timeout is harmless.
+        try:
+            loaded = await self._offload(
+                self._committer.load_state, job.session_ref, timeout=self._job_timeout_s
+            )
+        except _CoreTimeout:
+            self._timeout(job, "", 0, checkpoints)
+            return
         if loaded is None:
             self._finalize(job, dropped=True)
             self._emit(job, "DROPPED_NO_BASE", dropped=True, timed_out=False, checkpoints=checkpoints)
@@ -651,7 +674,21 @@ class ShadowSupervisor:
             turn_id=job.turn_id,
             turn_sequence=job.sequence,
         )
-        outcome = self._committer.commit_turn(command)
+        # The CAS commit fsyncs the journal and takes the cross-process lock, so it
+        # too runs in the v3-private worker.  Deliberately NOT bounded by the job
+        # timeout: orphaning a commit cannot cancel the thread, so the write could
+        # still land while we recorded the turn as dropped -- a torn ledger is worse
+        # than a slow one.
+        #
+        # Be precise about what that costs, because the comment here used to overclaim:
+        # the host loop is never blocked (we are awaiting a future), but this await is
+        # genuinely UNBOUNDED.  terminate() does not bound it either -- only its step-4
+        # drain is deadlined; step 9's ``shutdown(wait=True)`` is a join, not a bound,
+        # and main.py awaits terminate() without a wait_for.  A wedged commit therefore
+        # wedges v3 shutdown (it can no longer wedge v2's loop, which is the point of
+        # this fix).  If the drain deadline expires first, step 7 cancels the driver
+        # mid-await: the write still lands but this job's _finalize/_emit never run.
+        outcome = await self._offload(self._committer.commit_turn, command, timeout=None)
         if outcome.status is CommitStatus.COMMITTED:
             self._p95_samples.append(compute_us / 1000.0)
             self._finalize(job, dropped=False)
@@ -676,22 +713,35 @@ class ShadowSupervisor:
             profile_id=profile.profile_id, level=selection.level, commit_status=outcome.status.name,
         )
 
-    async def _run_core(self, invocation: CoreInvocation):
+    async def _offload(self, fn, *args, timeout: float | None):
+        """Run ``fn`` on the v3-private worker, never on the host event loop.
+
+        Everything that blocks -- the pure core *and* the repository's fsync/flock IO
+        -- goes through here, so the single ``sylanne-v3`` worker keeps its
+        deliberate global serialization across sessions and the host loop is only
+        ever suspended on an await (design 14.2: v3 never adds backpressure to v2).
+
+        ``timeout=None`` awaits to completion.  Otherwise a timeout orphans the
+        future (a running thread cannot be cancelled); it is collected by
+        ``executor.shutdown(wait=True)`` and its result discarded.
+        """
+
         assert self._loop is not None and self._executor is not None
-        future = self._loop.run_in_executor(self._executor, self._compute, invocation)
+        future = self._loop.run_in_executor(self._executor, fn, *args)
         self._inflight = future
         try:
-            if self._job_timeout_s is None:
+            if timeout is None:
                 return await future
-            done, _pending = await asyncio.wait({future}, timeout=self._job_timeout_s)
+            done, _pending = await asyncio.wait({future}, timeout=timeout)
             if future not in done:
-                # Timeout: orphan the future (a running thread cannot be cancelled); it is
-                # collected by executor.shutdown(wait=True).  Its result is discarded.
                 future.add_done_callback(_discard_future_result)
                 raise _CoreTimeout
             return future.result()
         finally:
             self._inflight = None
+
+    async def _run_core(self, invocation: CoreInvocation):
+        return await self._offload(self._compute, invocation, timeout=self._job_timeout_s)
 
     # -- helpers -------------------------------------------------------------
 

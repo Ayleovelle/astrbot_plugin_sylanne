@@ -17,11 +17,12 @@ Be honest about what the shrunk default costs. ``max_action_run``,
 are monotone non-decreasing in its length, so **a short stream genuinely can miss
 a lock-in that a long stream would catch**. The long gate is not decoration.
 
-There is a second, worse caveat today: because of the ``STATE_QUANTIZE_ERROR``
-livelock pinned below, nothing is accepted after turn ~358, so the 100,000-turn
-run currently observes *the same 358 accepted turns* as the 400-turn default. The
-long gate therefore adds no coverage until that defect is fixed — which is a
-statement about the defect, not a licence to keep the default small.
+The ``STATE_QUANTIZE_ERROR`` livelock used to make this worse still: nothing was
+accepted after turn ~358, so a 100,000-turn run observed *the same 358 accepted
+turns* as the 400-turn default and the long gate added no coverage at all. That
+defect is fixed (see ``test_invocations_are_not_rejected_wholesale``), so the long
+gate now genuinely buys coverage the default cannot — which is a reason to run it,
+not a licence to keep the default small.
 
 What this gate does NOT claim
 -----------------------------
@@ -31,10 +32,16 @@ G1/G3/G4 gates on frozen real data.
 
 Known production defects pinned below
 -------------------------------------
-Three declared invariants currently fail against real code. They are pinned with
+Two declared invariants still fail against real code. They are pinned with
 ``xfail(strict=True)`` rather than deleted, weakened, or skipped: the suite fails
 if any of them starts passing, which forces re-reading the gate the moment
 someone fixes the underlying defect. Each names its measured root cause.
+
+That mechanism has now paid out once: the third pin
+(``test_invocations_are_not_rejected_wholesale``, the STATE_QUANTIZE_ERROR
+livelock) started passing when the float16 bound vocabulary was fixed, the strict xfail
+failed the suite, and the gate was re-read and the test converted to a plain
+assertion carrying its own history.
 """
 
 from __future__ import annotations
@@ -190,19 +197,26 @@ def test_snn_emits_spikes(stream: v3_stability.StreamStats) -> None:
     assert stream.total_spikes > 0
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason=(
-        "MAJOR (measured): STATE_QUANTIZE_ERROR livelock. Because the SNN never fires, "
-        "homeostasis drives every threshold down to its 0.65 clamp floor; float16(0.65) "
-        "= 0.64990234375 which is BELOW the declared [0.65, 1.35] bound, so "
-        "decode(encode(state)) raises and orchestrate() rejects the whole turn. On "
-        "ordinary input this begins at turn ~358 and reaches a 100% reject rate by turn "
-        "~400: the shadow permanently stops advancing state. Same class for "
-        "PLASTIC_WEIGHT_BOUNDS, whose 0.35 ceiling quantizes UP to 0.35009765625."
-    ),
-)
 def test_invocations_are_not_rejected_wholesale(stream: v3_stability.StreamStats) -> None:
+    """No STATE_QUANTIZE_ERROR livelock: the shadow keeps advancing state.
+
+    Was xfail(strict) for the measured livelock: because the SNN never fires,
+    homeostasis drove every threshold down to its 0.65 clamp floor, and
+    float16(0.65) = 0.64990234375 is BELOW the declared [0.65, 1.35] bound, so
+    decode(encode(state)) raised and orchestrate() rejected the whole turn -- from
+    turn ~358 onward, permanently. Same class for PLASTIC_WEIGHT_BOUNDS, whose 0.35
+    ceiling quantizes UP to 0.35009765625.
+
+    Resolved by ``v3core.state.models.quantization_safe_bounds``: state is persisted
+    on the float16 grid, so bounded reals are now *validated* against the declared
+    interval widened outward to that grid, instead of against the exact declared
+    interval the storage format cannot represent. Measured on seed 2718/400 turns:
+    reject rate 0.052 (21/400, all STATE_QUANTIZE_ERROR) -> 0.000, accepted 358 -> 379.
+
+    Note this gate is about *rejection*, not about the reservoir: the SNN is still
+    silent (see test_snn_emits_spikes), which is a separate live defect.
+    """
+
     assert stream.rejected / max(stream.turns, 1) <= 0.05, stream.reject_reasons
 
 

@@ -18,6 +18,7 @@ canonical packed byte encoding of these models lives in :mod:`.codec`.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from struct import pack, unpack
 
 from ..canonical import assert_exact_type, assert_valid_dto
 from ..contracts import Action, SessionRef, TurnSequence
@@ -26,6 +27,7 @@ from ..formula_v1 import (
     EXPERIENCE_CAPACITY,
     FORMULA_VERSION,
     RECURRENT_TOPOLOGY,
+    SNN_BASELINE_BOUNDS,
     SNN_EXCITATORY,
     SNN_NEURONS,
     SNN_SUMMARY_DIM,
@@ -52,11 +54,88 @@ EXPERIENCE_REWARD_DIM = AXIS_DIM  # per-axis reward components
 # SNN scalar bounds (design 8.2 / 8.3).  Excitatory plastic weights are the only
 # per-session synapses, so they are non-negative; the Dale gate rejects any
 # negative plastic weight.
+#
+# These are the *declared* (semantic) bounds: what the core clamps to and what the
+# saturation metric measures against.  They are NOT what a reloaded state is
+# validated against -- see ``quantization_safe_bounds`` below.
 PLASTIC_WEIGHT_BOUNDS = (0.0, 0.35)
 ELIGIBILITY_BOUNDS = (-3.0, 3.0)
 THRESHOLD_BOUNDS = (0.65, 1.35)
 TRACE_BOUNDS = (0.0, 3.0)
 VOLTAGE_BOUNDS = (-8.0, 8.0)
+
+
+def _to_float16(value: float) -> float:
+    """Round ``value`` onto the float16 grid exactly as :mod:`.codec` packs it (``>e``)."""
+
+    try:
+        return unpack(">e", pack(">e", value))[0]
+    except OverflowError as exc:  # a bound outside float16 range can never be stored
+        raise ValueError(f"{value!r} is not representable on the float16 storage grid") from exc
+
+
+def quantization_safe_bounds(bounds: tuple[float, float]) -> tuple[float, float]:
+    """Widen a declared bound to the float16 grid the codec actually persists on.
+
+    Quantization *is* persistence (回溯红队 a16 MAJOR DoD).  Every bounded real in a
+    :class:`V3State` round-trips through ``struct`` ``'>e'`` in :mod:`.codec`, so the
+    value a reload validates is ``float16(x)``, never ``x``.  float16 rounding is
+    round-half-even, and it can carry a boundary value *outside* its own declared
+    interval: ``float16(0.65) = 0.64990234375 < 0.65`` and
+    ``float16(0.35) = 0.35009765625 > 0.35``.
+
+    Validating a decoded state against the *exact* declared interval therefore
+    rejects states the clamp is required to produce.  That is the
+    ``STATE_QUANTIZE_ERROR`` livelock: once homeostasis pins a threshold to its 0.65
+    clamp floor, ``decode(encode(state))`` raises forever, ``orchestrate()`` rejects
+    every turn, and the shadow permanently stops advancing state.
+
+    The fix is one bound vocabulary for "bounded": the validation interval is the
+    declared interval unioned with its float16 image -- widened *outward* to the
+    nearest representable value on each side.  Because float16 rounding is monotone
+    non-decreasing, ``low <= x <= high`` implies
+    ``float16(low) <= float16(x) <= float16(high)``; taking the union with the
+    declared interval means the result accepts both ``x`` and its stored image for
+    every legal ``x``.  That is exactly the a16 DoD: ``decode(encode(x))`` holds for
+    *any* state legally clamped to a bound.
+
+    The declared bounds themselves are deliberately left alone.  They are the
+    semantic contract the core clamps to and measures saturation against
+    (``orchestrator._WEIGHT_HI``); widening them in place would silently retire that
+    saturation gate.  Only the storage-validation interval moves.
+    """
+
+    low, high = bounds
+    if low > high:
+        raise ValueError(f"declared bounds {bounds!r} are inverted")
+    return (min(low, _to_float16(low)), max(high, _to_float16(high)))
+
+
+# Continuous payload bounds, each grounded in the code that actually clamps them:
+#   latent_axes  -- design 9: 24 values in [-1,1]; ``dynamics.multiscale._clip_unit``.
+#   baselines    -- design 8.3: clip(0.95*baseline + 0.05*reward, -1, 1); the frozen
+#                   manifest constant is reused rather than restated.
+#   last_snn_summary -- ``spiking.reservoir.pooled_summary``: 8 pool rates clipped to
+#                   [0,1] then 8 latency confidences ``1 - latency/(ticks-1)``, also
+#                   in [0,1].
+# These were all declared (-16, 16) -- up to 16x looser than the real clamp, so a
+# grossly out-of-range value would have validated as if it were in band.
+LATENT_AXIS_BOUNDS = (-1.0, 1.0)
+BASELINE_BOUNDS = SNN_BASELINE_BOUNDS
+SNN_SUMMARY_BOUNDS = (0.0, 1.0)
+
+# Storage-validation intervals: the declared bounds above, widened onto the float16
+# persistence grid.  Every DTO validates against these; nothing clamps to them.
+# -1.0/0.0/1.0/3.0/8.0 are all exactly representable in float16, so those intervals
+# come back unchanged -- only the 0.65 floor and the 0.35 ceiling actually move.
+PLASTIC_WEIGHT_STORED_BOUNDS = quantization_safe_bounds(PLASTIC_WEIGHT_BOUNDS)
+ELIGIBILITY_STORED_BOUNDS = quantization_safe_bounds(ELIGIBILITY_BOUNDS)
+THRESHOLD_STORED_BOUNDS = quantization_safe_bounds(THRESHOLD_BOUNDS)
+TRACE_STORED_BOUNDS = quantization_safe_bounds(TRACE_BOUNDS)
+VOLTAGE_STORED_BOUNDS = quantization_safe_bounds(VOLTAGE_BOUNDS)
+LATENT_AXIS_STORED_BOUNDS = quantization_safe_bounds(LATENT_AXIS_BOUNDS)
+BASELINE_STORED_BOUNDS = quantization_safe_bounds(BASELINE_BOUNDS)
+SNN_SUMMARY_STORED_BOUNDS = quantization_safe_bounds(SNN_SUMMARY_BOUNDS)
 
 # Quantization ranges for the ExperienceBuffer (design 13).
 _U8_RANGE = (0, 255)
@@ -146,14 +225,24 @@ class SnnState:
     eligibility: tuple
 
     def __post_init__(self) -> None:
-        _check_float_vector(self.voltages, SNN_NEURON_COUNT, VOLTAGE_BOUNDS, "voltages")
-        _check_float_vector(self.thresholds, SNN_NEURON_COUNT, THRESHOLD_BOUNDS, "thresholds")
-        _check_float_vector(self.pre_trace, SNN_NEURON_COUNT, TRACE_BOUNDS, "pre_trace")
-        _check_float_vector(self.post_trace, SNN_NEURON_COUNT, TRACE_BOUNDS, "post_trace")
+        # Bounds are the float16-widened *storage* intervals: this state is validated
+        # after a decode, so it lives on the quantization grid (see
+        # ``quantization_safe_bounds``), not on the exact declared interval.
+        _check_float_vector(self.voltages, SNN_NEURON_COUNT, VOLTAGE_STORED_BOUNDS, "voltages")
         _check_float_vector(
-            self.plastic_weights, PLASTIC_SYNAPSE_COUNT, PLASTIC_WEIGHT_BOUNDS, "plastic_weights"
+            self.thresholds, SNN_NEURON_COUNT, THRESHOLD_STORED_BOUNDS, "thresholds"
         )
-        _check_float_vector(self.eligibility, PLASTIC_SYNAPSE_COUNT, ELIGIBILITY_BOUNDS, "eligibility")
+        _check_float_vector(self.pre_trace, SNN_NEURON_COUNT, TRACE_STORED_BOUNDS, "pre_trace")
+        _check_float_vector(self.post_trace, SNN_NEURON_COUNT, TRACE_STORED_BOUNDS, "post_trace")
+        _check_float_vector(
+            self.plastic_weights,
+            PLASTIC_SYNAPSE_COUNT,
+            PLASTIC_WEIGHT_STORED_BOUNDS,
+            "plastic_weights",
+        )
+        _check_float_vector(
+            self.eligibility, PLASTIC_SYNAPSE_COUNT, ELIGIBILITY_STORED_BOUNDS, "eligibility"
+        )
         assert_valid_dto(self)
 
 
@@ -187,7 +276,7 @@ class ActionBeliefs:
                     raise ValueError(f"{name}[{action_index}] must have {params} parameters")
                 for param_index, value in enumerate(row):
                     assert_exact_type(value, float, f"{name}[{action_index}][{param_index}]")
-        _check_float_vector(self.baselines, ACTION_COUNT, (-16.0, 16.0), "baselines")
+        _check_float_vector(self.baselines, ACTION_COUNT, BASELINE_STORED_BOUNDS, "baselines")
         _check_int_vector(self.counts, ACTION_COUNT, (0, 2**31 - 1), "counts")
         assert_valid_dto(self)
 
@@ -302,7 +391,7 @@ class PendingOutcome:
             _check_float_vector(
                 self.packed_eligibility,
                 PLASTIC_SYNAPSE_COUNT,
-                ELIGIBILITY_BOUNDS,
+                ELIGIBILITY_STORED_BOUNDS,
                 "packed_eligibility",
             )
         assert_exact_type(self.expiry_sequence, (TurnSequence, type(None)), "expiry_sequence")
@@ -362,7 +451,7 @@ class V3State:
         assert_exact_type(
             self.last_committed_turn_id, (str, type(None)), "last_committed_turn_id"
         )
-        _check_float_vector(self.latent_axes, LATENT_DIM, (-16.0, 16.0), "latent_axes")
+        _check_float_vector(self.latent_axes, LATENT_DIM, LATENT_AXIS_STORED_BOUNDS, "latent_axes")
         assert_exact_type(self.rho_hold, float, "rho_hold")
         assert_exact_type(self.rho_reach, float, "rho_reach")
         self._validate_style_ring()
@@ -370,7 +459,7 @@ class V3State:
         assert_exact_type(self.action_beliefs, (ActionBeliefs, type(None)), "action_beliefs")
         if self.last_snn_summary is not None:
             _check_float_vector(
-                self.last_snn_summary, SNN_SUMMARY_DIM, (-16.0, 16.0), "last_snn_summary"
+                self.last_snn_summary, SNN_SUMMARY_DIM, SNN_SUMMARY_STORED_BOUNDS, "last_snn_summary"
             )
         assert_exact_type(
             self.pending_outcome, (PendingOutcome, type(None)), "pending_outcome"
@@ -408,23 +497,29 @@ class V3State:
 __all__ = [
     "ACTION_COUNT",
     "ELIGIBILITY_BOUNDS",
+    "ELIGIBILITY_STORED_BOUNDS",
     "EXPERIENCE_FEATURE_DIM",
     "EXPERIENCE_REWARD_DIM",
     "LATENT_DIM",
     "PLASTIC_SYNAPSE_COUNT",
     "PLASTIC_WEIGHT_BOUNDS",
+    "PLASTIC_WEIGHT_STORED_BOUNDS",
     "SNN_NEURON_COUNT",
     "STATE_SCHEMA_VERSION",
     "STYLE_RING_CAPACITY",
     "STYLE_SIGNATURE_FIELDS",
     "THETA_PARAMS",
     "THRESHOLD_BOUNDS",
+    "THRESHOLD_STORED_BOUNDS",
     "TRACE_BOUNDS",
+    "TRACE_STORED_BOUNDS",
     "VOLTAGE_BOUNDS",
+    "VOLTAGE_STORED_BOUNDS",
     "WORKSPACE_BROADCAST_DIM",
     "ActionBeliefs",
     "ExperienceRecord",
     "PendingOutcome",
     "SnnState",
     "V3State",
+    "quantization_safe_bounds",
 ]
