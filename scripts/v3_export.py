@@ -81,6 +81,7 @@ _REPO_ROOT = Path(__file__).resolve().parent.parent
 if str(_REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(_REPO_ROOT))
 
+from sylanne_alpha.v2core.lexicon import read_signals
 from sylanne_alpha.v3core import formula_v1 as formula
 from sylanne_alpha.v3core.canonical import canonical_sha256
 from sylanne_alpha.v3core.contracts import Action, ComputeProfile, SessionRef, TurnContextClass
@@ -119,6 +120,24 @@ PROVENANCE_CLASSES = ("SYNTHETIC_V1", "REAL_LOCAL_HISTORY_V1", "GREY_RUNTIME_V1"
 OBSERVATION_DIM = formula.OBSERVATION_DIM
 VALUE_CHANNELS = tuple(index for index in range(OBSERVATION_DIM) if index not in DERIVED_CHANNELS)
 VALUE_CHANNEL_MASK = sum(1 << index for index in VALUE_CHANNELS)
+
+#: The value channels the offline text projection can fill from a single message
+#: body via the one canonical v2core lexicon (channels 18-26).  These are the RAW
+#: pre-normalization facts, mapped bit-for-bit like ``v3bridge`` maps them from a
+#: live snapshot, so an offline and an online dataset re-encode identically.
+OFFLINE_TEXT_CHANNELS = (18, 19, 20, 21, 22, 23, 24, 25, 26)
+#: Plus the one structural (non-text) fact the offline path can still assert.
+OFFLINE_STRUCTURAL_CHANNELS = (30,)
+OFFLINE_FILLABLE_CHANNELS = OFFLINE_TEXT_CHANNELS + OFFLINE_STRUCTURAL_CHANNELS
+#: Value channels with NO offline fact -- left invalid on every real-history turn,
+#: so a consumer must treat them as neutral.  This includes channel 31
+#: (gap_seconds): the label-free reaction signal's gap decayer takes the neutral
+#: 1.0 attenuator when 31 is missing (spec 1.3), and body.* facts (0-17) have no
+#: text-derived source at all.  Declared in the manifest so the neutral treatment
+#: is legible offline rather than inferred.
+OFFLINE_UNAVAILABLE_CHANNELS = tuple(
+    channel for channel in VALUE_CHANNELS if channel not in OFFLINE_FILLABLE_CHANNELS
+)
 
 EPISODE_HEADER_FIELDS = (
     "type",
@@ -178,6 +197,7 @@ MANIFEST_FIELDS = (
     "gate_manifest_digest",
     "initial_state_id",
     "initial_state_digest",
+    "offline_unavailable_channels",
     "row_count",
     "episode_count",
     "turn_count",
@@ -899,12 +919,40 @@ def read_dataset(path: Path) -> Dataset:
     return Dataset(episodes=tuple(episodes), row_count=len(rows))
 
 
+def _validate_offline_unavailable_channels(channels: object) -> tuple[int, ...]:
+    """Coerce/validate the offline-unavailable channel declaration.
+
+    The list names value channels the offline projection could not fill and left
+    invalid on every turn (see ``OFFLINE_UNAVAILABLE_CHANNELS``).  It must be a
+    canonical, sorted, unique list of *value* channels: a derived channel is always
+    computed and can never be 'unavailable', and a duplicate/unsorted list would
+    make the manifest non-canonical.  Booleans are rejected explicitly because
+    ``bool`` is an ``int`` subclass and would otherwise smuggle a covert flag.
+    """
+
+    if not isinstance(channels, (list, tuple)):
+        raise DatasetError("offline_unavailable_channels must be a list of channel indices")
+    result: list[int] = []
+    for channel in channels:
+        if type(channel) is not int:
+            raise DatasetError("offline_unavailable_channels must contain plain ints")
+        if channel not in VALUE_CHANNELS:
+            raise DatasetError(
+                f"offline_unavailable_channels entry {channel} is not a value channel"
+            )
+        result.append(channel)
+    if result != sorted(result) or len(set(result)) != len(result):
+        raise DatasetError("offline_unavailable_channels must be sorted and unique")
+    return tuple(result)
+
+
 def validate_manifest(manifest: dict) -> None:
     missing = [name for name in MANIFEST_FIELDS if name not in manifest]
     if missing:
         raise DatasetError(f"manifest is missing {missing}")
     if manifest["schema"] != DATASET_SCHEMA:
         raise DatasetError("manifest declares an unknown schema")
+    _validate_offline_unavailable_channels(manifest["offline_unavailable_channels"])
     if manifest["provenance_class"] not in PROVENANCE_CLASSES:
         raise DatasetError(
             f"provenance class {manifest['provenance_class']!r} is not declared/immutable"
@@ -927,6 +975,19 @@ def load_dataset_with_manifest(path: Path, manifest: dict) -> Dataset:
         raise DatasetError("dataset_digest does not match the dataset bytes")
     if dataset.row_count != manifest["row_count"]:
         raise DatasetError("manifest row_count does not match the dataset")
+    # Honesty gate: a channel the manifest declares offline-unavailable must be
+    # invalid in EVERY turn.  A manifest that claims a filled channel is neutral
+    # would mislead the label-free consumer into ignoring a real signal.
+    declared = _validate_offline_unavailable_channels(manifest["offline_unavailable_channels"])
+    if declared:
+        for episode in dataset.episodes:
+            for turn in episode.turns:
+                for channel in declared:
+                    if (turn["valid_mask"] >> channel) & 1:
+                        raise DatasetError(
+                            f"manifest declares channel {channel} offline-unavailable "
+                            "but a turn fills it"
+                        )
     return dataset
 
 
@@ -1133,6 +1194,7 @@ def _write_export(
     provenance_class: str,
     gate_manifest_digest: str,
     source_corpus: bytes,
+    offline_unavailable_channels: Sequence[int] = (),
 ) -> dict:
     output = Path(output)
     manifest_path = Path(manifest_path)
@@ -1141,6 +1203,19 @@ def _write_export(
 
     for row in rows:
         validate_row(row)
+
+    unavailable = _validate_offline_unavailable_channels(list(offline_unavailable_channels))
+    # Never emit a manifest that lies: a channel declared offline-unavailable must
+    # be invalid in every turn we are about to write.
+    for row in rows:
+        if row["type"] != "turn":
+            continue
+        for channel in unavailable:
+            if (row["valid_mask"] >> channel) & 1:
+                raise DatasetError(
+                    f"declared offline-unavailable channel {channel} is filled by a turn"
+                )
+
     body = "\n".join(json.dumps(row, sort_keys=True, ensure_ascii=False) for row in rows) + "\n"
     output.write_text(body, encoding="utf-8")
 
@@ -1159,6 +1234,7 @@ def _write_export(
         "gate_manifest_digest": gate_manifest_digest,
         "initial_state_id": INITIAL_STATE_ID,
         "initial_state_digest": neutral_eval_state_digest(),
+        "offline_unavailable_channels": list(unavailable),
         "row_count": len(rows),
         "episode_count": len(headers),
         "turn_count": len(turns),
@@ -1392,6 +1468,37 @@ def read_local_history(data_dir: Path) -> tuple[list[SourceEpisode], bytes, tupl
     return episodes, b"".join(corpus_parts), tuple()
 
 
+def _lexicon_channel_facts(content: object) -> dict[int, float]:
+    """Project one message body into RAW facts for text channels 18-26.
+
+    Reads the body once through the single canonical v2core lexicon -- the same
+    reader whose output the live bridge copies verbatim into channels 19-26 -- and
+    returns the RAW pre-normalization facts so an offline dataset re-encodes exactly
+    like an online one.  The text is read once and immediately discarded; only the
+    aggregate bounded scalars leave (densities, a question flag, a length count).
+
+    Absent or empty text yields an empty mapping: the tone channels then stay
+    INVALID rather than carry a fabricated zero-density observation.  A non-empty
+    body with no lexicon hits still returns valid zero densities, because 'no warm
+    words' is a real observation the live path would also record.
+    """
+
+    if not isinstance(content, str) or not content:
+        return {}
+    signals = read_signals(content)
+    return {
+        18: float(signals.length),          # text.length (chars)
+        19: float(signals.warm),            # text.warm    density
+        20: float(signals.cold),            # text.cold    density
+        21: float(signals.distress),        # text.distress density
+        22: 1.0 if signals.question else 0.0,  # text.question boolean
+        23: float(signals.exclaim),         # text.exclaim density
+        24: float(signals.punct),           # text.punct   density
+        25: float(signals.valence_cue),     # text.valence_cue (signed: warm - cold)
+        26: float(signals.engagement_cue),  # text.engagement_cue ([0, ~1.3])
+    }
+
+
 def _project_messages(messages: list) -> tuple:
     """Derive bounded numeric channel facts from raw messages, discarding content."""
 
@@ -1404,19 +1511,18 @@ def _project_messages(messages: list) -> tuple:
         if role != "user":
             continue
         content = message.get("content")
-        text_len = float(len(content)) if isinstance(content, str) else 0.0
         sequence += 1
         values = [0.0] * OBSERVATION_DIM
         mask = 0
-        # Only bounded, derived magnitudes; the text itself never leaves.  The user
-        # message's own length is text.length (channel 18); channel 13 is body.epoch
-        # and has no offline fact, so it stays invalid.  (The prior code wrote the
-        # length into channel 13 -- both channels share the _log_length normalizer, so
-        # it never crashed, but it starved the reaction signal's length channel and
-        # polluted the body.epoch slot.)  channel 30 is the has-history flag.  gap
-        # (channel 31) is not recoverable offline, so it stays invalid: the reaction
-        # signal treats a missing gap as the neutral 1.0 attenuator (spec §1.3).
-        for channel, value in ((18, text_len), (30, 1.0 if sequence > 1 else 0.0)):
+        # Text channels 18-26 come from the one canonical v2core lexicon (this is the
+        # privacy projection: text in, bounded scalars out, text discarded).  channel
+        # 13 is body.epoch and 31 is gap_seconds -- neither has an offline fact, so
+        # they stay invalid; the reaction signal treats a missing gap as the neutral
+        # 1.0 attenuator (spec §1.3), declared in the manifest via
+        # OFFLINE_UNAVAILABLE_CHANNELS.  channel 30 is the structural has-history flag.
+        facts = _lexicon_channel_facts(content)
+        facts[30] = 1.0 if sequence > 1 else 0.0
+        for channel, value in facts.items():
             values[channel] = float(value)
             mask |= 1 << channel
         turns.append(
@@ -1481,6 +1587,7 @@ def export_real_history(
         provenance_class=provenance_class,
         gate_manifest_digest=digest,
         source_corpus=corpus,
+        offline_unavailable_channels=OFFLINE_UNAVAILABLE_CHANNELS,
     )
     destroy_source_key(source_key)
     return ExportResult(
