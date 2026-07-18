@@ -15,6 +15,7 @@ from .effects.models import EffectBundle, V3MetricEffect, V3StateEffect, V3Trace
 from .state.models import (
     ActionBeliefs,
     ExperienceRecord,
+    LabelFreeState,
     PendingOutcome,
     V3State,
 )
@@ -35,6 +36,7 @@ _install_declared_types(
         PendingOutcome,
         ActionBeliefs,
         ExperienceRecord,
+        LabelFreeState,
         V3State,
     ),
     enum_types=(Action, TurnContextClass),

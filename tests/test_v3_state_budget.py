@@ -31,10 +31,15 @@ from sylanne_alpha.v3core.state.models import (
     ACTION_COUNT,
     EXPERIENCE_FEATURE_DIM,
     EXPERIENCE_REWARD_DIM,
+    LABEL_FREE_MARGINAL_DIM,
+    LABEL_FREE_PREF_OFFSET_DIM,
+    MARGINAL_COUNT_CAP,
+    REACTION_COUNT_CAP,
     THETA_PARAMS,
     WORKSPACE_BROADCAST_DIM,
     ActionBeliefs,
     ExperienceRecord,
+    LabelFreeState,
     PendingOutcome,
     V3State,
 )
@@ -68,6 +73,19 @@ def _worst_case_state() -> V3State:
         preference_revision=FORMULA_VERSION,
         preference_digest="a" * 64,
         outcome_projector_revision=FORMULA_VERSION,
+        label_free_eligible=True,
+    )
+    # formula v2: a fully populated label-free learner state is part of the worst case.
+    label_free = LabelFreeState(
+        pref_offset=tuple(_snap16(0.29) for _ in range(LABEL_FREE_PREF_OFFSET_DIM)),
+        marginal_theta=tuple(
+            _snap16(1.15) if index % 2 == 0 else _snap16(0.45)
+            for index in range(LABEL_FREE_MARGINAL_DIM)
+        ),
+        marginal_sigma=tuple(_snap16(0.95) for _ in range(LABEL_FREE_MARGINAL_DIM)),
+        marginal_count=MARGINAL_COUNT_CAP,
+        len_baseline=_snap16(0.87),
+        reaction_count=REACTION_COUNT_CAP,
     )
     experiences = tuple(
         ExperienceRecord(
@@ -103,6 +121,7 @@ def _worst_case_state() -> V3State:
         last_snn_summary=tuple(_snap16(0.8) for _ in range(SNN_SUMMARY_DIM)),
         pending_outcome=pending,
         experiences=experiences,
+        label_free=label_free,
     )
 
 

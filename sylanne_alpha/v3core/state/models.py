@@ -23,10 +23,15 @@ from struct import pack, unpack
 from ..canonical import assert_exact_type, assert_valid_dto
 from ..contracts import Action, SessionRef, TurnSequence
 from ..formula_v1 import (
+    ACTION_B_BOUNDS,
+    ACTION_COUNT_CAP,
+    ACTION_G_BOUNDS,
+    ACTION_SIGMA_BOUNDS,
     AXIS_DIM,
     BASELINE_BOUNDS,
     EXPERIENCE_CAPACITY,
     FORMULA_VERSION,
+    PREF_OFFSET_BOUNDS,
     SNN_SUMMARY_DIM,
     STATE_DIM,
     STYLE_SIGNATURE_RING_CAPACITY,
@@ -37,7 +42,10 @@ from ..formula_v1 import (
 # Fixed shapes derived from the frozen formula manifest
 # --------------------------------------------------------------------------- #
 
-STATE_SCHEMA_VERSION = 1
+# formula v2 label-free reaction learning (spec 2026-07-18) added the
+# ``LabelFreeState`` sub-state, the optional ``V3State.label_free`` slot, and the
+# ``PendingOutcome.label_free_eligible`` flag, bumping the schema from 1 to 2.
+STATE_SCHEMA_VERSION = 2
 LATENT_DIM = STATE_DIM  # 24 = 8 axes x 3 timescales
 ACTION_COUNT = 4  # SPEAK, HOLD, CLARIFY, REACH
 THETA_PARAMS = 2  # theta_ai = [g_ai, b_ai] per axis (design 11.3)
@@ -117,6 +125,39 @@ LATENT_AXIS_STORED_BOUNDS = quantization_safe_bounds(LATENT_AXIS_BOUNDS)
 BASELINE_STORED_BOUNDS = quantization_safe_bounds(BASELINE_BOUNDS)
 SNN_SUMMARY_STORED_BOUNDS = quantization_safe_bounds(SNN_SUMMARY_BOUNDS)
 
+# --------------------------------------------------------------------------- #
+# formula v2 label-free learner state shapes and bounds (spec 2026-07-18 §3.1)
+# --------------------------------------------------------------------------- #
+#   pref_offset     -- L1 preference-offset residual, 8 axes in PREF_OFFSET_BOUNDS
+#                      (clamped by the L1 update law in learning.label_free, Slice C).
+#   marginal_theta  -- L2 marginal outcome head EKF mean, 16 = 8 axes x [g, b]
+#                      interleaved exactly like ``ActionBeliefs`` rows; g reuses
+#                      ACTION_G_BOUNDS and b reuses ACTION_B_BOUNDS (spec §3.1/§3.3).
+#   marginal_sigma  -- L2 diagonal parameter covariance, 16 values in ACTION_SIGMA_BOUNDS.
+#   len_baseline    -- rolling user length baseline in [0,1] (behavioural statistic).
+LABEL_FREE_PREF_OFFSET_DIM = AXIS_DIM  # 8
+LABEL_FREE_MARGINAL_DIM = AXIS_DIM * THETA_PARAMS  # 16 = 8 axes x [g, b]
+MARGINAL_COUNT_CAP = ACTION_COUNT_CAP  # 65535 (reuses the per-action EKF count cap)
+REACTION_COUNT_CAP = 65535
+LEN_BASELINE_BOUNDS = (0.0, 1.0)
+
+# Storage-validation intervals widened onto the float16 persistence grid, exactly
+# like the continuous bounds above.  ``float16(0.30) = 0.300048828125 > 0.30`` and
+# ``float16(1e-4) < 1e-4``, so validating a decoded value against the *declared*
+# interval would reject states the L1/L2 clamps are required to produce (the a16
+# STATE_QUANTIZE_ERROR trap); every label-free DTO validates against these instead.
+PREF_OFFSET_STORED_BOUNDS = quantization_safe_bounds(PREF_OFFSET_BOUNDS)
+MARGINAL_G_STORED_BOUNDS = quantization_safe_bounds(ACTION_G_BOUNDS)
+MARGINAL_B_STORED_BOUNDS = quantization_safe_bounds(ACTION_B_BOUNDS)
+MARGINAL_SIGMA_STORED_BOUNDS = quantization_safe_bounds(ACTION_SIGMA_BOUNDS)
+LEN_BASELINE_STORED_BOUNDS = quantization_safe_bounds(LEN_BASELINE_BOUNDS)
+# marginal_theta interleaves g (even index) and b (odd index); each position keeps
+# its own storage-validation interval so a g-legal value cannot smuggle into a b slot.
+MARGINAL_THETA_STORED_BOUNDS = tuple(
+    MARGINAL_G_STORED_BOUNDS if index % 2 == 0 else MARGINAL_B_STORED_BOUNDS
+    for index in range(LABEL_FREE_MARGINAL_DIM)
+)
+
 # Quantization ranges for the ExperienceBuffer (design 13).
 _U8_RANGE = (0, 255)
 _S16_RANGE = (-32768, 32767)
@@ -158,6 +199,28 @@ def _check_int_vector(
     low, high = bounds
     for index, value in enumerate(values):
         assert_exact_type(value, int, f"{name}[{index}]")
+        if not low <= value <= high:
+            raise ValueError(f"{name}[{index}] must lie in [{low}, {high}]")
+
+
+def _check_float_vector_indexed(
+    values: object,
+    per_index_bounds: tuple[tuple[float, float], ...],
+    name: str,
+) -> None:
+    """Like :func:`_check_float_vector` but with a distinct bound per position.
+
+    Used for ``marginal_theta`` whose 16 entries interleave g/b parameters with
+    different legal intervals; a single shared interval would let a g-legal value
+    validate in a b slot.
+    """
+
+    assert_exact_type(values, tuple, name)
+    if len(values) != len(per_index_bounds):
+        raise ValueError(f"{name} must have exactly {len(per_index_bounds)} entries")
+    for index, value in enumerate(values):
+        assert_exact_type(value, float, f"{name}[{index}]")
+        low, high = per_index_bounds[index]
         if not low <= value <= high:
             raise ValueError(f"{name}[{index}] must lie in [{low}, {high}]")
 
@@ -255,6 +318,61 @@ class ExperienceRecord:
 
 
 # --------------------------------------------------------------------------- #
+# Label-free learner sub-state (formula v2, spec 2026-07-18 §3.1)
+# --------------------------------------------------------------------------- #
+
+
+@dataclass(frozen=True, slots=True)
+class LabelFreeState:
+    """Bounded label-free reaction-learning state (spec §3.1).
+
+    A ``None`` :attr:`V3State.label_free` means the whole channel is at its prior;
+    a present :class:`LabelFreeState` carries the L1 preference offset
+    (``pref_offset``), the L2 marginal outcome head's EKF mean/covariance
+    (``marginal_theta`` / ``marginal_sigma``, 16 = 8 axes x ``[g, b]`` interleaved
+    exactly like an :class:`ActionBeliefs` row), the marginal update count, the
+    user's rolling length baseline, and the count of valid length samples.
+
+    Every field is validated against the same storage-quantization-safe interval
+    the codec persists on, so a malformed or out-of-band value fails closed and a
+    value legally clamped to a bound still round-trips through the float16 grid.
+    """
+
+    pref_offset: tuple
+    marginal_theta: tuple
+    marginal_sigma: tuple
+    marginal_count: int
+    len_baseline: float
+    reaction_count: int
+
+    def __post_init__(self) -> None:
+        _check_float_vector(
+            self.pref_offset,
+            LABEL_FREE_PREF_OFFSET_DIM,
+            PREF_OFFSET_STORED_BOUNDS,
+            "pref_offset",
+        )
+        _check_float_vector_indexed(self.marginal_theta, MARGINAL_THETA_STORED_BOUNDS, "marginal_theta")
+        _check_float_vector(
+            self.marginal_sigma,
+            LABEL_FREE_MARGINAL_DIM,
+            MARGINAL_SIGMA_STORED_BOUNDS,
+            "marginal_sigma",
+        )
+        assert_exact_type(self.marginal_count, int, "marginal_count")
+        if not 0 <= self.marginal_count <= MARGINAL_COUNT_CAP:
+            raise ValueError(f"marginal_count must lie in [0, {MARGINAL_COUNT_CAP}]")
+        assert_exact_type(self.len_baseline, float, "len_baseline")
+        low, high = LEN_BASELINE_STORED_BOUNDS
+        if not low <= self.len_baseline <= high:
+            raise ValueError("len_baseline must be a normalized value in [0,1]")
+        assert_exact_type(self.reaction_count, int, "reaction_count")
+        if not 0 <= self.reaction_count <= REACTION_COUNT_CAP:
+            raise ValueError(f"reaction_count must lie in [0, {REACTION_COUNT_CAP}]")
+        assert_valid_dto(self)
+
+
+# --------------------------------------------------------------------------- #
 # Pending outcome
 # --------------------------------------------------------------------------- #
 
@@ -284,6 +402,11 @@ class PendingOutcome:
     preference_revision: str = FORMULA_VERSION
     preference_digest: str = ""
     outcome_projector_revision: str = FORMULA_VERSION
+    # Frozen at turn t: context_t in LF_ELIGIBLE_ORIGIN_CONTEXTS (spec §2.2).  The
+    # label-free settlement path (Slice C) only fires when this is true; t+1 must
+    # not retro-decide eligibility, so it is decided and frozen when the pending is
+    # created.  Defaults False so every legacy/minimal record stays valid.
+    label_free_eligible: bool = False
 
     def __post_init__(self) -> None:
         assert_exact_type(self.origin_turn_id, str, "origin_turn_id")
@@ -310,6 +433,7 @@ class PendingOutcome:
         assert_exact_type(self.preference_revision, str, "preference_revision")
         assert_exact_type(self.preference_digest, str, "preference_digest")
         assert_exact_type(self.outcome_projector_revision, str, "outcome_projector_revision")
+        assert_exact_type(self.label_free_eligible, bool, "label_free_eligible")
         assert_valid_dto(self)
         if not self.origin_turn_id:
             raise ValueError("origin_turn_id must not be empty")
@@ -343,6 +467,7 @@ class V3State:
     last_snn_summary: tuple | None = None
     pending_outcome: PendingOutcome | None = None
     experiences: tuple = ()
+    label_free: LabelFreeState | None = None
 
     def __post_init__(self) -> None:
         assert_exact_type(self.session_ref, SessionRef, "session_ref")
@@ -375,6 +500,7 @@ class V3State:
             self.pending_outcome, (PendingOutcome, type(None)), "pending_outcome"
         )
         self._validate_experiences()
+        assert_exact_type(self.label_free, (LabelFreeState, type(None)), "label_free")
         assert_valid_dto(self)
         if self.schema_version < 1:
             raise ValueError("schema_version must be positive")
@@ -410,7 +536,18 @@ __all__ = [
     "BASELINE_STORED_BOUNDS",
     "EXPERIENCE_FEATURE_DIM",
     "EXPERIENCE_REWARD_DIM",
+    "LABEL_FREE_MARGINAL_DIM",
+    "LABEL_FREE_PREF_OFFSET_DIM",
     "LATENT_DIM",
+    "LEN_BASELINE_BOUNDS",
+    "LEN_BASELINE_STORED_BOUNDS",
+    "MARGINAL_B_STORED_BOUNDS",
+    "MARGINAL_COUNT_CAP",
+    "MARGINAL_G_STORED_BOUNDS",
+    "MARGINAL_SIGMA_STORED_BOUNDS",
+    "MARGINAL_THETA_STORED_BOUNDS",
+    "PREF_OFFSET_STORED_BOUNDS",
+    "REACTION_COUNT_CAP",
     "SNN_SUMMARY_BOUNDS",
     "SNN_SUMMARY_STORED_BOUNDS",
     "STATE_SCHEMA_VERSION",
@@ -420,6 +557,7 @@ __all__ = [
     "WORKSPACE_BROADCAST_DIM",
     "ActionBeliefs",
     "ExperienceRecord",
+    "LabelFreeState",
     "PendingOutcome",
     "V3State",
     "quantization_safe_bounds",

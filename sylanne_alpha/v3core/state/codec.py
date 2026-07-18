@@ -51,6 +51,8 @@ from .models import (
     ACTION_COUNT,
     EXPERIENCE_FEATURE_DIM,
     EXPERIENCE_REWARD_DIM,
+    LABEL_FREE_MARGINAL_DIM,
+    LABEL_FREE_PREF_OFFSET_DIM,
     LATENT_DIM,
     STYLE_RING_CAPACITY,
     STYLE_SIGNATURE_FIELDS,
@@ -58,6 +60,7 @@ from .models import (
     WORKSPACE_BROADCAST_DIM,
     ActionBeliefs,
     ExperienceRecord,
+    LabelFreeState,
     PendingOutcome,
     V3State,
 )
@@ -70,13 +73,19 @@ STATE_CODEC_MAGIC = b"SYL3ST"
 #: (the float16 grid froze the mid timescale; see the module docstring); v3 deleted
 #: the SNN sub-state (``SnnState``) and the pending outcome's STDP fields
 #: (``stdp_credit_enabled`` + ``packed_eligibility``) when formula v2 removed the
-#: spiking subsystem.  Encoding always emits the current version; decoding accepts
-#: every version in ``SUPPORTED_STATE_CODEC_VERSIONS``.  The v1/v2 -> v3 read
-#: migration is lossy by design: a legacy blob's SnnState segment and STDP pending
-#: fields are read past and DISCARDED (the SNN no longer exists), then the next
-#: encode re-emits the state as v3.  There is no forward (v3 -> v2/v1) path.
-STATE_CODEC_VERSION = 3
-SUPPORTED_STATE_CODEC_VERSIONS = (1, 2, 3)
+#: spiking subsystem; v4 appended the label-free learner segment (``LabelFreeState``)
+#: after the experience buffer and one trailing ``label_free_eligible`` byte to the
+#: pending-outcome segment (formula v2 label-free reaction learning, spec §3.1).
+#: Encoding always emits the current version; decoding accepts every version in
+#: ``SUPPORTED_STATE_CODEC_VERSIONS``.  The v1/v2 -> v3 read migration is lossy by
+#: design: a legacy blob's SnnState segment and STDP pending fields are read past
+#: and DISCARDED (the SNN no longer exists).  The v1/v2/v3 -> v4 read migration is
+#: additive and缺省: a pre-v4 blob has no label-free segment and no eligibility
+#: byte, so it decodes to ``label_free=None`` / ``label_free_eligible=False`` (never
+#: a rewrite), then the next encode re-emits the state as v4.  There is no forward
+#: (newer -> older) path.
+STATE_CODEC_VERSION = 4
+SUPPORTED_STATE_CODEC_VERSIONS = (1, 2, 3, 4)
 #: The legacy (v1/v2) SnnState segment was sized by these frozen constants; kept
 #: here only so the read migration can skip past a legacy segment exactly.
 _LEGACY_SNN_NEURON_COUNT = 96
@@ -251,6 +260,13 @@ def _guard(builder):
         raise StateCodecError(str(exc)) from exc
 
 
+def _read_bool(reader: _Reader) -> bool:
+    flag = reader.u8()
+    if flag not in (0, 1):
+        raise StateCodecError("boolean flag must be 0 or 1")
+    return flag == 1
+
+
 # --------------------------------------------------------------------------- #
 # Encode
 # --------------------------------------------------------------------------- #
@@ -270,6 +286,7 @@ def encode_state(state: V3State, *, max_bytes: int | None = MAX_STATE_BYTES_DEFA
     _write_summary(writer, state.last_snn_summary)
     _write_pending(writer, state.pending_outcome)
     _write_experiences(writer, state.experiences)
+    _write_label_free(writer, state.label_free)
     body = writer.getvalue()
     framed = body + struct.pack(">I", binascii.crc32(body) & 0xFFFFFFFF)
     blob = base64.b64encode(zlib.compress(framed, 9))
@@ -363,6 +380,22 @@ def _write_pending(writer: _Writer, pending: PendingOutcome | None) -> None:
     writer.string(pending.preference_revision)
     writer.string(pending.preference_digest)
     writer.string(pending.outcome_projector_revision)
+    # v4: the label-free eligibility bit frozen at turn t (spec §2.2).  A pre-v4
+    # blob has no trailing byte here; a pre-v4 decode defaults it to False.
+    writer.u8(1 if pending.label_free_eligible else 0)
+
+
+def _write_label_free(writer: _Writer, label_free: LabelFreeState | None) -> None:
+    if label_free is None:
+        writer.u8(0)
+        return
+    writer.u8(1)
+    writer.f16_vec(label_free.pref_offset)
+    writer.f16_vec(label_free.marginal_theta)
+    writer.f16_vec(label_free.marginal_sigma)
+    writer.u16(label_free.marginal_count)
+    writer.f16(label_free.len_baseline)
+    writer.u16(label_free.reaction_count)
 
 
 def _write_experiences(writer: _Writer, experiences: tuple) -> None:
@@ -429,6 +462,9 @@ def decode_state(blob: object) -> V3State:
     summary = _read_summary(reader)
     pending = _read_pending(reader, version)
     experiences = _read_experiences(reader)
+    # v1/v2/v3 -> v4 read migration: a pre-v4 blob has no label-free segment, so it
+    # decodes to ``label_free=None`` without reading (or inventing) anything.
+    label_free = _read_label_free(reader) if version >= 4 else None
     if reader.remaining() != 0:
         raise StateCodecError("trailing bytes after encoded state")
 
@@ -453,6 +489,7 @@ def decode_state(blob: object) -> V3State:
             last_snn_summary=summary,
             pending_outcome=pending,
             experiences=experiences,
+            label_free=label_free,
         )
     )
 
@@ -578,6 +615,9 @@ def _read_pending(reader: _Reader, version: int) -> PendingOutcome | None:
     preference_revision = reader.string()
     preference_digest = reader.string()
     outcome_projector_revision = reader.string()
+    # v4: the trailing label-free eligibility bit.  A pre-v4 pending segment ends at
+    # outcome_projector_revision, so a pre-v4 decode defaults it to False.
+    label_free_eligible = _read_bool(reader) if version >= 4 else False
     return _guard(
         lambda: PendingOutcome(
             origin_turn_id=origin_turn_id,
@@ -595,6 +635,28 @@ def _read_pending(reader: _Reader, version: int) -> PendingOutcome | None:
             preference_revision=preference_revision,
             preference_digest=preference_digest,
             outcome_projector_revision=outcome_projector_revision,
+            label_free_eligible=label_free_eligible,
+        )
+    )
+
+
+def _read_label_free(reader: _Reader) -> LabelFreeState | None:
+    if reader.u8() == 0:
+        return None
+    pref_offset = reader.f16_vec(LABEL_FREE_PREF_OFFSET_DIM)
+    marginal_theta = reader.f16_vec(LABEL_FREE_MARGINAL_DIM)
+    marginal_sigma = reader.f16_vec(LABEL_FREE_MARGINAL_DIM)
+    marginal_count = reader.u16()
+    len_baseline = reader.f16()
+    reaction_count = reader.u16()
+    return _guard(
+        lambda: LabelFreeState(
+            pref_offset=pref_offset,
+            marginal_theta=marginal_theta,
+            marginal_sigma=marginal_sigma,
+            marginal_count=marginal_count,
+            len_baseline=len_baseline,
+            reaction_count=reaction_count,
         )
     )
 

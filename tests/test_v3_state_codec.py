@@ -289,11 +289,13 @@ def _legacy_v2_blob(*, with_pending: bool) -> bytes:
 
 def test_legacy_v2_blob_migrates_by_discarding_the_snn_segment() -> None:
     decoded = decode_state(_legacy_v2_blob(with_pending=False))
-    # The SnnState segment is gone; the state is otherwise the neutral v3 state and
-    # re-encodes cleanly as v3.
-    assert decoded == V3State(session_ref=_session_ref())
+    # The SnnState segment is gone and the absent label-free segment migrates to
+    # None; the state is otherwise the neutral state.  A legacy blob keeps its stored
+    # schema_version (1); only the next producer re-stamps it to the current schema.
+    assert decoded == V3State(session_ref=_session_ref(), schema_version=1)
+    assert decoded.label_free is None
     assert not hasattr(decoded, "snn")
-    # The next encode emits the current (v3) version.
+    # The next encode emits the current (v4) version and round-trips.
     assert decode_state(encode_state(decoded)) == decoded
 
 
@@ -307,10 +309,12 @@ def test_legacy_v2_pending_migrates_by_discarding_stdp_fields() -> None:
     assert pending.c == tuple(0.0 for _ in range(AXIS_DIM))
     assert pending.reward_scale == 1.0
     assert pending.preference_digest == "0" * 64
+    # A pre-v4 pending record has no eligibility bit; it migrates to False缺省.
+    assert pending.label_free_eligible is False
     # The removed STDP fields do not resurface on the migrated record.
     assert not hasattr(pending, "stdp_credit_enabled")
     assert not hasattr(pending, "packed_eligibility")
-    # A migrated state round-trips as v3.
+    # A migrated state round-trips as v4.
     assert decode_state(encode_state(decoded)) == decoded
 
 

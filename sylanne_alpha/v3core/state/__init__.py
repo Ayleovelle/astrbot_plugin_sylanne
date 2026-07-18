@@ -3,6 +3,7 @@
 from .models import (
     ActionBeliefs,
     ExperienceRecord,
+    LabelFreeState,
     PendingOutcome,
     V3State,
 )
@@ -10,6 +11,7 @@ from .models import (
 __all__ = [
     "ActionBeliefs",
     "ExperienceRecord",
+    "LabelFreeState",
     "PendingOutcome",
     "V3State",
 ]
