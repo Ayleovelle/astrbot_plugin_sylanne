@@ -359,6 +359,95 @@ CLARIFY_WARMTH_COEFFS = (0.50, 0.20)  # base, affiliation
 REACH_WARMTH_COEFFS = (0.70, 0.20)  # base, affiliation
 EXPRESSION_LENGTH_BUCKETS = ("NONE", "SHORT", "MEDIUM", "LONG")
 
+# --------------------------------------------------------------------------- #
+# formula v2 label-free reaction learning channel (design
+# 2026-07-18-v3core-formula-v2-label-free-reaction-learning-spec).
+#
+# The user's t+1 message is the real causal consequence of turn t's *executed*
+# interaction, so its tone / engagement / length / latency features score how the
+# user reacted WITHOUT knowing which action the core chose.  Slice A ships the
+# constants below plus the ``ReactionSignalV1`` pure function in
+# ``learning.reaction``.
+#
+# DIGEST DEFERRAL (intentional, matches ``DECISION_STATE_BLEND`` and the
+# section-10/11 coefficients above): these are the single formula source but are
+# NOT folded into ``build_formula_manifest`` yet, so ``FORMULA_DIGEST`` stays
+# byte-stable at the value Task 1's golden test locks.  Spec §4.3 calls for an
+# intentional digest bump when the ``labelfree`` block is folded in, but that bump
+# is coupled to regenerating the isolated v2 evaluation dataset + ``neutral_eval_v2``
+# (Slice D) and rev-ing the state/codec/trace schema (Slices B/C): the exporter's
+# ``validate_manifest`` gates the tracked replay fixture on ``FORMULA_DIGEST``, so
+# bumping it here alone would strand ``tests/fixtures/v3_replay_synthetic_v1``.
+# The block is authored now via ``build_labelfree_manifest`` and folded in with
+# the v2 version bump in a later slice.
+# --------------------------------------------------------------------------- #
+
+# §1.2 reaction-signal synthesis constants.
+REACT_W_VALENCE = 0.5
+REACT_W_ENGAGEMENT = 0.3
+REACT_W_LENGTH = 0.2
+REACT_LEN_GAIN = 3.0
+REACT_GAP_ATTEN_LO = 0.62  # normalized u31 (_log_gap) space; ~330 s (~5.5 min): full weight
+REACT_GAP_ATTEN_HI = 0.78  # ~4270 s (~71 min): weight clears and the reaction is censored
+REACT_WARMUP_COUNT = 5  # valid length samples required before the length term counts
+LF_REACTION_CONTEXTS = ("ADDRESSED", "AMBIENT")  # t+1 must be a real inbound message
+LF_ELIGIBLE_ORIGIN_CONTEXTS = ("ADDRESSED", "AMBIENT", "PROACTIVE")  # t-turn eligibility
+
+# Closed reaction-reason vocabulary (also the trace ``lf_censor_reason`` domain).
+REACTION_REASON_VALID = "VALID"
+REACTION_REASON_NOT_INBOUND = "NOT_INBOUND"
+REACTION_REASON_SENDER_MISMATCH = "SENDER_MISMATCH"
+REACTION_REASON_NO_TONE_EVIDENCE = "NO_TONE_EVIDENCE"
+REACTION_REASON_STALE_REACTION = "STALE_REACTION"
+REACTION_INVALID_REASONS = (
+    REACTION_REASON_NOT_INBOUND,
+    REACTION_REASON_SENDER_MISMATCH,
+    REACTION_REASON_NO_TONE_EVIDENCE,
+    REACTION_REASON_STALE_REACTION,
+)
+REACTION_REASONS = (REACTION_REASON_VALID,) + REACTION_INVALID_REASONS
+REACTION_SIGNAL_FORMULA = (
+    "r_raw = sum(w_i*t_i)/sum(w_i) over present terms; "
+    "t_valence=2*u25-1 (w=REACT_W_VALENCE), t_engagement=2*u26-1 (w=REACT_W_ENGAGEMENT), "
+    "t_length=clip(REACT_LEN_GAIN*(u18-len_baseline),-1,1) (w=REACT_W_LENGTH, warmup-gated); "
+    "a_gap=1 if u31 invalid else 1-clip((u31-LO)/(HI-LO),0,1); "
+    "r_react=clip(r_raw,-1,1)*a_gap; "
+    "INVALID: NOT_INBOUND -> SENDER_MISMATCH -> NO_TONE_EVIDENCE -> STALE_REACTION"
+)
+
+# §3.1 label-free learner state constants (consumed by Slices B/C; centralized
+# here per spec §4.3).  Bounds that persist through the codec's float16 grid are
+# widened at the storage boundary by ``state.models.quantization_safe_bounds``.
+PREF_OFFSET_BOUNDS = (-0.30, 0.30)
+PREF_ETA = 0.05
+LEN_BASELINE_ETA = 0.10
+LEN_BASELINE_INIT = 0.60
+MARGINAL_INITIAL_G = ACTION_INITIAL_G  # 0.85, reuse the per-action EKF value
+MARGINAL_INITIAL_B = 0.0
+MARGINAL_INITIAL_V = ACTION_INITIAL_V  # 0.25
+MARGINAL_INITIAL_R = ACTION_INITIAL_R  # 0.20
+MARGINAL_SIGMA_INIT = (0.10, 0.10)
+MARGINAL_Q_THETA = ACTION_Q_THETA  # 1e-4
+# Marginal-head box/variance bounds reuse the per-action EKF bounds verbatim
+# (spec §3.1/§3.3): ACTION_G_BOUNDS / ACTION_B_BOUNDS / ACTION_SIGMA_BOUNDS.
+LABELFREE_UPDATE_LAWS = (
+    (
+        "L1_preference_offset",
+        "target=clip(y'-base_c,-0.30,0.30) if r_react>=0 else 0.0; "
+        "eta=PREF_ETA*|r_react|; off'=(1-eta)*off+eta*target; off in PREF_OFFSET_BOUNDS",
+    ),
+    (
+        "L2_marginal_outcome",
+        "mu_m=tanh(gm*s+bm); diagonal EKF update reusing ekf_transition_update math "
+        "with MARGINAL_* priors; adjacency-gated, action-unconditioned",
+    ),
+    (
+        "len_baseline",
+        "len_baseline'=clip((1-LEN_BASELINE_ETA)*len_baseline+LEN_BASELINE_ETA*u18,0,1); "
+        "reaction_count'=min(reaction_count+1,65535); gated on inbound+bit18+same_sender!=False",
+    ),
+)
+
 FULL_24_STDP = (True, 24, True, False)
 FULL_24_NO_STDP = (True, 24, False, False)
 SNN_16_NO_STDP = (True, 16, False, False)
@@ -480,6 +569,48 @@ def _validate_matrix_shape_and_values(
             raise ValueError(f"{name} must contain only finite numeric values")
 
 
+def _validate_labelfree() -> None:
+    """Fail-closed sanity checks for the formula-v2 label-free constants (§1.2/§3.1).
+
+    These are validated by the global gate even though they are not folded into
+    ``FORMULA_DIGEST`` yet, so a malformed reaction constant can never reach the
+    ``ReactionSignalV1`` pure function or the Slice C learners.
+    """
+
+    weights = (REACT_W_VALENCE, REACT_W_ENGAGEMENT, REACT_W_LENGTH)
+    if any(not _is_finite_number(weight) or weight <= 0.0 for weight in weights):
+        raise ValueError("label-free reaction weights must be positive finite values")
+    if not _is_finite_number(REACT_LEN_GAIN) or REACT_LEN_GAIN <= 0.0:
+        raise ValueError("REACT_LEN_GAIN must be a positive finite value")
+    if not (
+        _is_finite_number(REACT_GAP_ATTEN_LO)
+        and _is_finite_number(REACT_GAP_ATTEN_HI)
+        and 0.0 <= REACT_GAP_ATTEN_LO < REACT_GAP_ATTEN_HI <= 1.0
+    ):
+        raise ValueError("gap attenuator thresholds must satisfy 0 <= LO < HI <= 1")
+    if type(REACT_WARMUP_COUNT) is not int or REACT_WARMUP_COUNT < 1:
+        raise ValueError("REACT_WARMUP_COUNT must be a positive integer")
+
+    declared_contexts = frozenset(("ADDRESSED", "AMBIENT", "PROACTIVE", "IDLE"))
+    reaction_contexts = frozenset(LF_REACTION_CONTEXTS)
+    eligible_contexts = frozenset(LF_ELIGIBLE_ORIGIN_CONTEXTS)
+    if not reaction_contexts <= declared_contexts or not eligible_contexts <= declared_contexts:
+        raise ValueError("label-free contexts must name declared TurnContextClass values")
+    if not reaction_contexts <= eligible_contexts:
+        raise ValueError("every reaction context must itself be an eligible origin context")
+    if "IDLE" in eligible_contexts:
+        raise ValueError("IDLE turns have no reaction-eligible interaction")
+
+    offset_low, offset_high = PREF_OFFSET_BOUNDS
+    if not (offset_low < 0.0 < offset_high) or offset_low != -offset_high:
+        raise ValueError("PREF_OFFSET_BOUNDS must be a symmetric interval about 0")
+    for name, eta in (("PREF_ETA", PREF_ETA), ("LEN_BASELINE_ETA", LEN_BASELINE_ETA)):
+        if not _is_finite_number(eta) or not 0.0 < eta < 1.0:
+            raise ValueError(f"{name} must be a learning rate in (0,1)")
+    if not _is_finite_number(LEN_BASELINE_INIT) or not 0.0 <= LEN_BASELINE_INIT <= 1.0:
+        raise ValueError("LEN_BASELINE_INIT must be a normalized value in [0,1]")
+
+
 def validate_formula_manifest() -> float:
     """Validate dimensions, topology invariants, and the analytic Jacobian gate."""
     if (OBSERVATION_DIM, AXIS_DIM, STATE_DIM) != (36, 8, 24) or STATE_DIM != 3 * AXIS_DIM:
@@ -569,6 +700,7 @@ def validate_formula_manifest() -> float:
         raise ValueError("Jacobian bound does not match the materialized bound")
     if JACOBIAN_STABILITY_LIMIT != 0.995 or bound >= JACOBIAN_STABILITY_LIMIT:
         raise ValueError("formula fails the analytic Jacobian stability gate")
+    _validate_labelfree()
     return bound
 
 
@@ -690,6 +822,45 @@ def build_formula_manifest() -> MappingProxyType[str, object]:
     )
 
 
+def build_labelfree_manifest() -> MappingProxyType[str, object]:
+    """Build the recursively read-only formula-v2 ``labelfree`` manifest block.
+
+    Authored now (Slice A) but deliberately NOT folded into
+    ``build_formula_manifest`` so ``FORMULA_DIGEST`` stays byte-stable; Slice C/D
+    fold this verbatim with the intentional v2 digest bump (spec §4.3).
+    """
+
+    return _named_mapping(
+        reaction=_named_mapping(
+            w_valence=REACT_W_VALENCE,
+            w_engagement=REACT_W_ENGAGEMENT,
+            w_length=REACT_W_LENGTH,
+            len_gain=REACT_LEN_GAIN,
+            gap_atten_lo=REACT_GAP_ATTEN_LO,
+            gap_atten_hi=REACT_GAP_ATTEN_HI,
+            warmup_count=REACT_WARMUP_COUNT,
+            reaction_contexts=LF_REACTION_CONTEXTS,
+            eligible_origin_contexts=LF_ELIGIBLE_ORIGIN_CONTEXTS,
+            invalid_reasons=REACTION_INVALID_REASONS,
+            formula=REACTION_SIGNAL_FORMULA,
+        ),
+        learners=_named_mapping(
+            pref_offset_bounds=PREF_OFFSET_BOUNDS,
+            pref_eta=PREF_ETA,
+            len_baseline_eta=LEN_BASELINE_ETA,
+            len_baseline_init=LEN_BASELINE_INIT,
+            marginal_initial_g=MARGINAL_INITIAL_G,
+            marginal_initial_b=MARGINAL_INITIAL_B,
+            marginal_initial_v=MARGINAL_INITIAL_V,
+            marginal_initial_r=MARGINAL_INITIAL_R,
+            marginal_sigma_init=MARGINAL_SIGMA_INIT,
+            marginal_q_theta=MARGINAL_Q_THETA,
+            update_laws=LABELFREE_UPDATE_LAWS,
+        ),
+    )
+
+
 FORMULA_MANIFEST = build_formula_manifest()
 FORMULA_CANONICAL_JSON = canonical_json_bytes(FORMULA_MANIFEST)
 FORMULA_DIGEST = hashlib.sha256(FORMULA_CANONICAL_JSON).hexdigest()
+LABELFREE_MANIFEST = build_labelfree_manifest()
