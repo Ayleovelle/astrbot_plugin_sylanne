@@ -112,8 +112,11 @@ def test_project_messages_derives_tone_channels_from_the_v2core_lexicon() -> Non
 def test_zero_density_channels_stay_valid_for_nonempty_text() -> None:
     """A body with no warm words is a real observation of zero warm density.
 
-    This mirrors the live bridge, which copies ``snapshot.text_warm == 0.0`` as a
-    valid fact; offline must agree or offline/online replay would diverge.
+    Offline records it as a valid zero-density fact (not INVALID), because 'no warm
+    words' is a real observation.  NOTE: the live path does not actually fill 19-26
+    at all (production capture leaves the tone fields ``None``), so this is offline
+    behaviour, not a mirror of an online value -- see the exporter's module
+    docstring "Real-history tone exposure".
     """
 
     text = "今天天气不错"  # no lexicon hits, no question, no punctuation
@@ -123,6 +126,54 @@ def test_zero_density_channels_stay_valid_for_nonempty_text() -> None:
     for channel in TONE_CHANNELS:
         assert (turn.valid_mask >> channel) & 1, f"channel {channel} valid even at zero density"
         assert turn.values[channel] == expected[channel]
+
+
+# --------------------------------------------------------------------------- #
+# 1b. A >4096-char body must not leak its true length through the density
+#     denominator (channel 18 saturates at 4096; densities re-normalize to it)
+# --------------------------------------------------------------------------- #
+
+
+def test_long_body_densities_are_normalized_by_the_clamped_length() -> None:
+    """``read_signals`` divides counts by the TRUE length, but channel 18 saturates
+    at 4096, so an unclamped density would let a holder reconstruct the true length
+    of a >4096-char message and defeat channel 18's fingerprint clamp.  The exporter
+    re-normalizes the count densities to the clamped length: two bodies with the
+    same hit counts but different (both over-clamp) true lengths project identical
+    densities, and channel 18 reports the clamp, not the true length."""
+
+    clamp_len = v3_export.privacy_clamp(18, 1e9)  # the channel-18 saturation knee
+    assert clamp_len == 4096.0
+    filler = "x"  # ASCII: not a warm/cold/distress/punct char, not '?' or '!'
+    hits = "抱抱" * 3  # identical warm-word hits in both bodies
+    body_a = hits + filler * 5000   # true length 5006 > 4096
+    body_b = hits + filler * 9000   # true length 9006 > 4096, same hit counts
+
+    facts_a = v3_export._lexicon_channel_facts(body_a)
+    facts_b = v3_export._lexicon_channel_facts(body_b)
+
+    # Channel 18 reports the clamp, never the true length.
+    assert facts_a[18] == clamp_len and facts_b[18] == clamp_len
+    # Densities are identical -> the true length did not leak past the clamp.
+    for channel in TONE_CHANNELS:
+        assert facts_a[channel] == facts_b[channel], f"channel {channel} leaks true length"
+
+    # The stored warm density equals count/clamped_length, not count/true_length,
+    # and the raw (unclamped) density would have been strictly smaller.
+    raw = read_signals(body_a)
+    warm_count = round(raw.warm * raw.length / 10)
+    assert warm_count > 0
+    assert facts_a[19] == pytest.approx(warm_count * 10 / clamp_len)
+    assert raw.warm < facts_a[19]
+
+
+def test_short_body_density_projection_is_a_byte_exact_no_op() -> None:
+    """For any body within the clamp the rescale is exactly 1.0, so the projection
+    equals the raw lexicon read bit-for-bit (the common case is unchanged)."""
+
+    facts = v3_export._lexicon_channel_facts(RICH_TEXT)
+    expected = _lexicon_expected(RICH_TEXT)
+    assert facts == expected
 
 
 # --------------------------------------------------------------------------- #

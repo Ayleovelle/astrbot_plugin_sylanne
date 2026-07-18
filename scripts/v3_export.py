@@ -46,6 +46,28 @@ stored fact cannot distinguish two inputs the frame would collapse (e.g. a 1-wee
 and an 11-day gap both pin to 86400). Without that clamp the stored form would
 genuinely leak more than the frame — it is not free, it is bought.
 
+Real-history tone exposure (REAL_LOCAL_HISTORY)
+-----------------------------------------------
+A ``REAL_LOCAL_HISTORY`` export is the ONLY path that writes per-message tone
+facts to an off-machine artifact, and it is a real — bounded, disclosed —
+*widening* of the runtime privacy surface, NOT a continuation of it. The live
+shadow exports nothing, and its production capture (``main.py`` ``capture_request``)
+never fills channels 19-26: online those tone channels are ALWAYS invalid. The
+channel *indices* match ``v3bridge._DIRECT_CHANNELS`` so the encoder interprets
+them identically, but nothing on the live path ever populates them — so this
+exporter does not "match an already-accepted online exposure"; it introduces one.
+
+For each real user message the dataset retains, per turn: the lexicon-hit density
+of warm/intimacy words (19), cold/dismissive words (20) and distress words (21);
+a question flag (22); exclamation and punctuation densities (23, 24); signed
+valence (25 = warm − cold); an engagement cue (26); and the privacy-clamped
+length (18). From these bounded scalars a key-holder can reconstruct the
+per-category hit *counts* and whether a message expressed a warm / cold /
+distressed tone — an approximate per-message emotional fingerprint. They do NOT
+recover the specific words, word order, or identity (session identity is
+HMAC-pseudonymized under a permission-restricted key, kept outside Git/packages).
+Anyone authorizing a real export must accept this per-message tone fingerprint.
+
 Two keys, two lifetimes
 -----------------------
 * the *evaluation-link key* is created once per campaign, kept permission
@@ -121,10 +143,16 @@ OBSERVATION_DIM = formula.OBSERVATION_DIM
 VALUE_CHANNELS = tuple(index for index in range(OBSERVATION_DIM) if index not in DERIVED_CHANNELS)
 VALUE_CHANNEL_MASK = sum(1 << index for index in VALUE_CHANNELS)
 
-#: The value channels the offline text projection can fill from a single message
+#: The value channels the offline text projection fills from a single message
 #: body via the one canonical v2core lexicon (channels 18-26).  These are the RAW
-#: pre-normalization facts, mapped bit-for-bit like ``v3bridge`` maps them from a
-#: live snapshot, so an offline and an online dataset re-encode identically.
+#: pre-normalization facts, indexed like ``v3bridge._DIRECT_CHANNELS`` so the core
+#: encoder interprets them identically.  The index mapping matches the live bridge,
+#: but the live path does NOT fill 19-26: production capture (main.py
+#: ``capture_request``) leaves every tone field ``None``, so online these are
+#: always invalid.  This offline exporter is the ONLY path that writes per-message
+#: tone facts into an off-machine artifact -- a real, disclosed widening, not a
+#: continuation of the runtime surface.  See the module docstring's
+#: "Real-history tone exposure".
 OFFLINE_TEXT_CHANNELS = (18, 19, 20, 21, 22, 23, 24, 25, 26)
 #: Plus the one structural (non-text) fact the offline path can still assert.
 OFFLINE_STRUCTURAL_CHANNELS = (30,)
@@ -1032,8 +1060,27 @@ def path_would_be_tracked(path: Path) -> bool:
 
 
 def exporter_commit() -> str:
+    """The commit whose source produced a dataset, honestly marked when dirty.
+
+    Returns HEAD when this exporter's own source is committed, so a consumer can
+    trust HEAD names the exact source that ran.  When the exporter source has
+    uncommitted changes no commit truthfully names it -- a fixture regenerated in
+    the same commit that edits the exporter cannot embed that commit's own hash --
+    so we append ``-dirty`` rather than assert a commit whose tracked source differs
+    from what actually ran.  Real exports (``export_real_history``) enforce a clean
+    tracked tree first, so they always get a bare hash; only synthetic dev fixtures
+    regenerated from a dirty tree carry the marker.  ``exporter_source_digest`` is
+    the authoritative, commit-independent lineage in every case.
+    """
+
     code, out = _git("rev-parse", "HEAD")
-    return out.strip() if code == 0 else "UNKNOWN"
+    if code != 0:
+        return "UNKNOWN"
+    head = out.strip()
+    status_code, status = _git("status", "--porcelain", "--", str(Path(__file__).resolve()))
+    if status_code == 0 and status.strip():
+        return f"{head}-dirty"
+    return head
 
 
 def exporter_source_digest() -> str:
@@ -1471,31 +1518,67 @@ def read_local_history(data_dir: Path) -> tuple[list[SourceEpisode], bytes, tupl
 def _lexicon_channel_facts(content: object) -> dict[int, float]:
     """Project one message body into RAW facts for text channels 18-26.
 
-    Reads the body once through the single canonical v2core lexicon -- the same
-    reader whose output the live bridge copies verbatim into channels 19-26 -- and
-    returns the RAW pre-normalization facts so an offline dataset re-encodes exactly
-    like an online one.  The text is read once and immediately discarded; only the
-    aggregate bounded scalars leave (densities, a question flag, a length count).
+    Reads the body once through the single canonical v2core lexicon and returns the
+    RAW pre-normalization facts (densities, a question flag, a length count).  The
+    text is read once and immediately discarded; only the aggregate bounded scalars
+    leave.
+
+    Privacy: this is the ONLY path that writes per-message tone facts into an
+    off-machine artifact.  The live shadow does not -- production capture
+    (``main.py`` ``capture_request``) never fills channels 19-26, so online they are
+    always invalid.  See the module docstring's "Real-history tone exposure".
+
+    The length-normalized densities (19-21, 23-25) are re-normalized to the
+    privacy-CLAMPED length, not the true length: channel 18 saturates at 4096, and
+    ``read_signals`` divides counts by the *true* length, so a >4096-char body would
+    otherwise leak its true length back through the density denominator and defeat
+    channel 18's fingerprint clamp.  For a body within the clamp we store the raw
+    lexicon read verbatim (a byte-exact no-op).  Only for a >4096-char body do we
+    recover the integer hit COUNTS and recompute ``count * 10 / clamped_length`` --
+    recomputing from the count (not rescaling the already-divided density) makes the
+    result bit-invariant to the true length, so its low-order float bits cannot leak
+    it either.  ``engagement_cue`` (26) already saturates at length>=40 so it carries
+    no length past the clamp.
 
     Absent or empty text yields an empty mapping: the tone channels then stay
     INVALID rather than carry a fabricated zero-density observation.  A non-empty
     body with no lexicon hits still returns valid zero densities, because 'no warm
-    words' is a real observation the live path would also record.
+    words' is a real observation.
     """
 
     if not isinstance(content, str) or not content:
         return {}
     signals = read_signals(content)
+    length = float(signals.length)
+    clamped_length = privacy_clamp(18, length)
+    if length <= clamped_length:
+        # Common case: within channel 18's clamp, store the raw lexicon read
+        # verbatim (a byte-exact no-op, so a short body's densities are unchanged).
+        warm, cold, distress = signals.warm, signals.cold, signals.distress
+        exclaim, punct, valence = signals.exclaim, signals.punct, signals.valence_cue
+    else:
+        # A >4096-char body: recover the integer hit COUNTS and re-normalize them by
+        # the CLAMPED length.  ``read_signals`` divides counts by the true length, so
+        # neither the value nor its low-order float bits may carry the true length
+        # past channel 18's clamp -- recomputing from the count is length-invariant.
+        inv = 10.0 / clamped_length
+
+        def _count(density: float) -> int:
+            return round(density * length / 10.0)
+
+        warm, cold, distress = _count(signals.warm) * inv, _count(signals.cold) * inv, _count(signals.distress) * inv
+        exclaim, punct = _count(signals.exclaim) * inv, _count(signals.punct) * inv
+        valence = warm - cold
     return {
-        18: float(signals.length),          # text.length (chars)
-        19: float(signals.warm),            # text.warm    density
-        20: float(signals.cold),            # text.cold    density
-        21: float(signals.distress),        # text.distress density
+        18: clamped_length,                    # text.length (chars), privacy-clamped
+        19: warm,                              # text.warm    density
+        20: cold,                              # text.cold    density
+        21: distress,                          # text.distress density
         22: 1.0 if signals.question else 0.0,  # text.question boolean
-        23: float(signals.exclaim),         # text.exclaim density
-        24: float(signals.punct),           # text.punct   density
-        25: float(signals.valence_cue),     # text.valence_cue (signed: warm - cold)
-        26: float(signals.engagement_cue),  # text.engagement_cue ([0, ~1.3])
+        23: exclaim,                           # text.exclaim density
+        24: punct,                             # text.punct   density
+        25: valence,                           # text.valence_cue (signed: warm - cold)
+        26: float(signals.engagement_cue),     # text.engagement_cue ([0, ~1.3]); length-saturated at >=40
     }
 
 
