@@ -1,8 +1,8 @@
 name: astrbot_plugin_sylanne
 display_name: Sylanne
 desc: "Sylanne-Embodiment：不可逆的关系计算引擎 + 自我进化认知体。数学语言让对话在躯体上留下伤痕、在沉默中积累压力、在关系里长出不可撤销的形状；9 个认知 agent 编排出多智能体心智，在使用中自我进化——白天反应式微调，睡眠期反思沉淀，跨重启累积学习。"
-short_desc: "Sylanne-Embodiment 2.5.0-grey.5 — 跨群记忆 + QQ空间说说 + 即时聊天接管重做（灰测版，三大新功能默认全关；grey.5 修复中文记忆定时下沉失效）"
-version: "2.5.0-grey.5"
+short_desc: "Sylanne-Embodiment 2.5.0-grey.6 — 跨群记忆 + QQ空间说说 + 即时聊天接管（灰测版，三大新功能默认全关）；grey.6 加入 v3 零-LLM 影子认知层（灰测渠道后台静默运行、对回复零影响、隔离证过）"
+version: "2.5.0-grey.6"
 author: Ayleovelle
 license: AGPL-3.0-or-later
 repo: "https://github.com/Ayleovelle/astrbot_plugin_sylanne"
