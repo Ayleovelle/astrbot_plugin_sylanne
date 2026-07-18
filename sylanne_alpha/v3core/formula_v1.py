@@ -9,7 +9,7 @@ from types import MappingProxyType
 from .canonical import canonical_json_bytes
 
 
-FORMULA_VERSION = "sylanne.v3.formula.v1"
+FORMULA_VERSION = "sylanne.v3.formula.v2"
 OBSERVATION_DIM = 36
 AXIS_DIM = 8
 STATE_DIM = 24
@@ -365,21 +365,19 @@ EXPRESSION_LENGTH_BUCKETS = ("NONE", "SHORT", "MEDIUM", "LONG")
 #
 # The user's t+1 message is the real causal consequence of turn t's *executed*
 # interaction, so its tone / engagement / length / latency features score how the
-# user reacted WITHOUT knowing which action the core chose.  Slice A ships the
+# user reacted WITHOUT knowing which action the core chose.  Slice A shipped the
 # constants below plus the ``ReactionSignalV1`` pure function in
 # ``learning.reaction``.
 #
-# DIGEST DEFERRAL (intentional, matches ``DECISION_STATE_BLEND`` and the
-# section-10/11 coefficients above): these are the single formula source but are
-# NOT folded into ``build_formula_manifest`` yet, so ``FORMULA_DIGEST`` stays
-# byte-stable at the value Task 1's golden test locks.  Spec §4.3 calls for an
-# intentional digest bump when the ``labelfree`` block is folded in, but that bump
-# is coupled to regenerating the isolated v2 evaluation dataset + ``neutral_eval_v2``
-# (Slice D) and rev-ing the state/codec/trace schema (Slices B/C): the exporter's
-# ``validate_manifest`` gates the tracked replay fixture on ``FORMULA_DIGEST``, so
-# bumping it here alone would strand ``tests/fixtures/v3_replay_synthetic_v1``.
-# The block is authored now via ``build_labelfree_manifest`` and folded in with
-# the v2 version bump in a later slice.
+# DIGEST FOLD (Slice D, spec §4.3): the ``labelfree`` block IS now folded into
+# ``build_formula_manifest`` (see ``build_labelfree_manifest`` -> the ``labelfree``
+# key), so ``FORMULA_DIGEST`` intentionally changed and ``FORMULA_VERSION`` is now
+# ``"sylanne.v3.formula.v2"``.  The connected revision aliases
+# (``PREFERENCE_REVISION`` / ``OUTCOME_PROJECTOR_REVISION`` / ``ACTION_MODEL_REVISION``
+# / ``EXPRESSION_REVISION``, all ``= FORMULA_VERSION``) follow the bump.  The bump is
+# coupled to the isolated v2 evaluation dataset + ``neutral_eval_v2`` regeneration
+# (Slice D); the episode seed already frames ``formula_digest``, so the v2 dataset is
+# naturally isolated from any v1 dataset.
 # --------------------------------------------------------------------------- #
 
 # §1.2 reaction-signal synthesis constants.
@@ -832,6 +830,11 @@ def build_formula_manifest() -> MappingProxyType[str, object]:
             jacobian_absolute_upper_bound=JACOBIAN_ABSOLUTE_UPPER_BOUND,
             jacobian_stability_bound=JACOBIAN_STABILITY_BOUND,
         ),
+        # formula v2 (spec §4.3): the label-free reaction-learning block is folded
+        # into the digested manifest (Slice D).  This is the intentional v2 digest
+        # bump; the section-1.2 reaction constants and the L1/L2 learner priors +
+        # update laws are now part of ``FORMULA_DIGEST``.
+        labelfree=build_labelfree_manifest(),
     )
 
 

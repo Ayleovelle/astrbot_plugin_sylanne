@@ -87,7 +87,7 @@ def test_every_episode_header_carries_the_frozen_neutral_initial_state(exported)
     headers = [row for row in _rows(exported.output) if row["type"] == "episode_header"]
     assert headers
     for header in headers:
-        assert header["initial_state_id"] == v3_export.INITIAL_STATE_ID == "neutral_eval_v1"
+        assert header["initial_state_id"] == v3_export.INITIAL_STATE_ID == "neutral_eval_v2"
         payload = header["initial_state_b64"].encode("ascii")
         assert hashlib.sha256(payload).hexdigest() == header["initial_state_digest"]
         # The header state is the canonical neutral state, identical for every episode.
@@ -324,6 +324,59 @@ def test_manifest_digest_mismatch_is_rejected(tmp_path: Path, exported) -> None:
 def test_export_refuses_a_data_directory_that_was_not_explicitly_supplied() -> None:
     with pytest.raises(v3_export.ExportRefused, match="explicit"):
         v3_export.resolve_data_dir(None)
+
+
+# --------------------------------------------------------------------------- #
+# Bug fix (Slice D): offline history length is text.length (ch18), not body.epoch
+# (ch13).  Both channels share the _log_length normalizer, so the old misplacement
+# never crashed -- it just fed the reaction signal's length channel (18) a constant
+# 0 while polluting the body.epoch slot (13) with the message length.
+# --------------------------------------------------------------------------- #
+
+
+def test_project_messages_stores_length_in_text_length_channel_18_not_body_epoch_13() -> None:
+    messages = [
+        {"role": "user", "content": "hello"},  # length 5
+        {"role": "assistant", "content": "ignored non-user turn"},
+        {"role": "user", "content": "a rather longer user message"},  # length 28
+    ]
+    turns = v3_export._project_messages(messages)
+    assert len(turns) == 2  # only the two user turns become turns
+    for turn, expected_length in zip(turns, (5.0, 28.0)):
+        # text.length (channel 18) carries THIS message's own length.
+        assert (turn.valid_mask >> 18) & 1, "channel 18 (text.length) must be a stored fact"
+        assert turn.values[18] == expected_length
+        # channel 13 is body.epoch -- offline history has no epoch fact, so it must
+        # stay invalid and zero, never smuggle a text length.
+        assert not (turn.valid_mask >> 13) & 1, "channel 13 (body.epoch) is never a text length"
+        assert turn.values[13] == 0.0
+
+
+def test_project_messages_length_survives_export_into_channel_18(tmp_path: Path, link_key) -> None:
+    """End-to-end: a real-shaped projection stores the length under channel 18."""
+
+    episode = v3_export.SourceEpisode(
+        privacy_scope="LOCAL_HISTORY",
+        session_identity="platform\x00user",
+        ordinal=0,
+        turns=v3_export._project_messages(
+            [{"role": "user", "content": "x" * 40}, {"role": "user", "content": "y" * 12}]
+        ),
+    )
+    rows = v3_export._build_records(
+        [episode],
+        link_key=link_key,
+        source_key=b"\x11" * 32,
+        dataset_id=b"\x22" * 16,
+        provenance_class="REAL_LOCAL_HISTORY_V1",
+        gate_manifest_digest=v3_export.default_gate_manifest_digest(),
+    )
+    turn_rows = [row for row in rows if row["type"] == "turn"]
+    for turn_row, expected_length in zip(turn_rows, (40.0, 12.0)):
+        v3_export.validate_row(turn_row)  # must satisfy the frozen turn schema
+        assert (turn_row["valid_mask"] >> 18) & 1
+        assert turn_row["values"][18] == expected_length
+        assert not (turn_row["valid_mask"] >> 13) & 1
 
 
 # --------------------------------------------------------------------------- #

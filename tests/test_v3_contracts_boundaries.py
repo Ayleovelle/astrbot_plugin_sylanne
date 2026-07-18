@@ -384,7 +384,7 @@ def test_bridge_load_snapshot_is_frozen_and_repository_hard_stop_is_explicit() -
 
 
 def test_formula_dimensions_and_sparse_drive_are_exact() -> None:
-    assert formula.FORMULA_VERSION == "sylanne.v3.formula.v1"
+    assert formula.FORMULA_VERSION == "sylanne.v3.formula.v2"
     # formula v2 deleted the SNN cognition dimensions/time-constants; SNN_NEURONS and
     # SNN_SUMMARY_DIM survive only as trace-telemetry layout constants.
     assert (
@@ -816,12 +816,16 @@ def test_formula_digest_is_canonical_and_golden() -> None:
     assert type(formula.FORMULA_MANIFEST) is MappingProxyType
     assert len(formula.FORMULA_DIGEST) == 64
     assert formula.FORMULA_DIGEST == hashlib.sha256(formula.FORMULA_CANONICAL_JSON).hexdigest()
-    # formula v2 digest: the SNN subsystem (dimensions snn_*, dynamics.q_matrix, the
-    # whole spiking + snn_summary manifest sections, and the snn-novelty proposal)
-    # was removed from the manifest.  This is an intentional digest bump for a
-    # behaviour change; the pre-deletion (formula v1) digest was
-    # 47c690a78944a408dee245c20833b5f8fff8fa066e2faa92f6ae736511cbffa2.
-    assert formula.FORMULA_DIGEST == "d3998ec2f0fa00046abfeae2a224f7703013bb2bdd893367a025e238f72d5ea4"
+    # formula v2 digest (Slice D fold, spec §4.3): the ``labelfree`` block -- the
+    # section-1.2 reaction constants and the L1/L2 learner priors + update laws -- is
+    # now folded into ``build_formula_manifest`` and ``FORMULA_VERSION`` is
+    # ``sylanne.v3.formula.v2``, so every revision alias in the manifest flips too.
+    # This is the intentional v2 digest bump.  Prior digests on this lineage:
+    #   47c690a7...  formula v1 (pre-SNN-deletion)
+    #   d3998ec2...  SNN deleted, label-free authored but fold DEFERRED (Slices A-C)
+    assert formula.FORMULA_VERSION == "sylanne.v3.formula.v2"
+    assert "labelfree" in formula.FORMULA_MANIFEST
+    assert formula.FORMULA_DIGEST == "fb487bc94ac2b21afd45ab8dbbed39c3e0f859fe7a0d395fe3abda47142d8857"
 
 
 def test_v3core_import_firewall() -> None:

@@ -12,7 +12,7 @@ A JSONL *tagged union* of two record types:
 
 ``episode_header``
     schema/provenance, random dataset ID, evaluation-group reference, episode
-    reference, split, canonical ``neutral_eval_v1`` initial-state bytes/digest,
+    reference, split, canonical ``neutral_eval_v2`` initial-state bytes/digest,
     boundary-censored pending credit, fixed evaluation-profile ID/digest,
     gate-manifest digest, and the episode seed.
 
@@ -96,7 +96,12 @@ from sylanne_alpha.v3core.state.seed import SeedProjector, neutral_seed_frame
 
 DATASET_SCHEMA = "v3_encoded_replay_v1"
 RECORD_TYPES = ("episode_header", "turn")
-INITIAL_STATE_ID = "neutral_eval_v1"
+# formula v2 (spec §4.3): the neutral evaluation initial state is recomputed under
+# the v2 formula (label_free at its all-prior default) and renamed
+# ``neutral_eval_v2``.  The episode seed already frames ``formula_digest``, so a v2
+# dataset is cryptographically isolated from any v1 dataset regardless of the id;
+# the rename makes that isolation legible in the header/manifest too.
+INITIAL_STATE_ID = "neutral_eval_v2"
 EVALUATION_PROFILE_ID = "FULL_24_STDP"
 SPLITS = ("train", "dev", "test")
 CONTROL_IDS = ("learned", "frozen", "random", "zero-lr")
@@ -150,6 +155,12 @@ TURN_FIELDS = (
     "dropped_gap_count",
     "observed_profile_id",
     "observed_profile_digest",
+    # formula v2 (spec §1.4): the three-valued same_sender relation the online path-B
+    # settlement consumed (true/false/null).  It participates in state evolution (a
+    # false censors the reaction, the length baseline is gated on it), so it must be
+    # stored for offline replay to reproduce the settlement bit-for-bit.  It is a
+    # boolean relation only -- no identity -- so it does not widen the privacy surface.
+    "reaction_same_sender",
     "source_record_digest",
     "row_digest",
 )
@@ -513,7 +524,7 @@ NEUTRAL_SESSION_REF = SessionRef(
 
 
 def neutral_eval_state_bytes() -> bytes:
-    """The canonical ``neutral_eval_v1`` state payload, identical for every episode."""
+    """The canonical ``neutral_eval_v2`` state payload, identical for every episode."""
 
     state = SeedProjector().build_initial_state(
         neutral_seed_frame(),
@@ -757,12 +768,12 @@ def _validate_header(row: dict) -> None:
     if row["split"] not in SPLITS:
         raise DatasetError(f"split {row['split']!r} is not declared")
     if row["initial_state_id"] != INITIAL_STATE_ID:
-        raise DatasetError("episode header must carry the neutral_eval_v1 initial_state")
+        raise DatasetError(f"episode header must carry the {INITIAL_STATE_ID} initial_state")
     payload = row["initial_state_b64"].encode("ascii")
     if hashlib.sha256(payload).hexdigest() != row["initial_state_digest"]:
         raise DatasetError("episode header initial_state_digest does not match its bytes")
     if row["initial_state_digest"] != neutral_eval_state_digest():
-        raise DatasetError("episode header initial_state is not the canonical neutral_eval_v1 state")
+        raise DatasetError(f"episode header initial_state is not the canonical {INITIAL_STATE_ID} state")
     if row["pending_credit_censored"] is not True:
         raise DatasetError("episode boundary credit must be censored")
     if row["evaluation_profile_id"] != EVALUATION_PROFILE_ID:
@@ -815,6 +826,12 @@ def _validate_turn(row: dict) -> None:
     # censors delayed credit, so claiming both is an ambiguous gap.
     if row["credit_adjacency"] and row["dropped_gap_count"] != 0:
         raise DatasetError("ambiguous gap: credit_adjacency cannot hold across a dropped gap")
+    # The same_sender relation is strictly three-valued (spec §1.4).  A plain int must
+    # be rejected even though ``1 == True``: ``isinstance(1, bool)`` is False, so the
+    # exact-type test keeps a stray integer (a covert channel) out.
+    same_sender = row["reaction_same_sender"]
+    if same_sender is not None and not isinstance(same_sender, bool):
+        raise DatasetError("reaction_same_sender must be true, false, or null")
     if len(bytes.fromhex(row["source_record_digest"])) != 32:
         raise DatasetError("source_record_digest must be a keyed 256-bit digest")
 
@@ -895,7 +912,7 @@ def validate_manifest(manifest: dict) -> None:
     if manifest["evaluation_profile_id"] != EVALUATION_PROFILE_ID:
         raise DatasetError("manifest must fix the FULL_24_STDP evaluation profile")
     if manifest["initial_state_id"] != INITIAL_STATE_ID:
-        raise DatasetError("manifest must fix the neutral_eval_v1 initial state")
+        raise DatasetError(f"manifest must fix the {INITIAL_STATE_ID} initial state")
     if manifest["source_digest_key_destroyed"] is not True:
         raise DatasetError("the per-export source-digest key must be destroyed at freeze")
     if manifest["formula_digest"] != formula.FORMULA_DIGEST:
@@ -998,6 +1015,9 @@ class SourceTurn:
     writer_epoch: int
     local_sequence: int
     dropped_gap_count: int
+    #: The three-valued same_sender relation (spec §1.4).  ``None`` = the source could
+    #: not decide (offline synthetic groups may leave it null as declared noise).
+    reaction_same_sender: bool | None = None
     observed_profile_id: str | None = None
     observed_profile_digest: str | None = None
     source_components: tuple = ()
@@ -1091,6 +1111,7 @@ def _build_records(
                 "dropped_gap_count": int(turn.dropped_gap_count),
                 "observed_profile_id": turn.observed_profile_id,
                 "observed_profile_digest": turn.observed_profile_digest,
+                "reaction_same_sender": turn.reaction_same_sender,
                 "source_record_digest": source_record_digest(
                     source_key, episode_ref, str(index), *turn.source_components
                 ),
@@ -1221,6 +1242,10 @@ def _synthetic_turns(rng, count: int) -> tuple:
         # own adjacency test (local_sequence == previous + 1) would silently settle
         # credit across a gap that the dataset declares non-adjacent.
         sequence += 1 + gap
+        # A three-valued same_sender relation (spec §1.4): mostly the same conversant
+        # replied, with a minority of interjections (False, censors the reaction) and
+        # undecided cases (None, admitted noise), so replay exercises all three.
+        same_sender = rng.choices([True, False, None], weights=[0.80, 0.12, 0.08])[0]
         turns.append(
             SourceTurn(
                 values=tuple(values),
@@ -1230,6 +1255,7 @@ def _synthetic_turns(rng, count: int) -> tuple:
                 writer_epoch=epoch,
                 local_sequence=sequence,
                 dropped_gap_count=gap,
+                reaction_same_sender=same_sender,
                 source_components=(f"synthetic-record-{index}",),
             )
         )
@@ -1370,7 +1396,6 @@ def _project_messages(messages: list) -> tuple:
     """Derive bounded numeric channel facts from raw messages, discarding content."""
 
     turns: list[SourceTurn] = []
-    previous_len = 0.0
     sequence = 0
     for message in messages:
         if not isinstance(message, dict):
@@ -1383,11 +1408,17 @@ def _project_messages(messages: list) -> tuple:
         sequence += 1
         values = [0.0] * OBSERVATION_DIM
         mask = 0
-        # Only bounded, derived magnitudes; the text itself never leaves.
-        for channel, value in ((13, text_len), (18, previous_len), (30, 1.0 if sequence > 1 else 0.0)):
+        # Only bounded, derived magnitudes; the text itself never leaves.  The user
+        # message's own length is text.length (channel 18); channel 13 is body.epoch
+        # and has no offline fact, so it stays invalid.  (The prior code wrote the
+        # length into channel 13 -- both channels share the _log_length normalizer, so
+        # it never crashed, but it starved the reaction signal's length channel and
+        # polluted the body.epoch slot.)  channel 30 is the has-history flag.  gap
+        # (channel 31) is not recoverable offline, so it stays invalid: the reaction
+        # signal treats a missing gap as the neutral 1.0 attenuator (spec §1.3).
+        for channel, value in ((18, text_len), (30, 1.0 if sequence > 1 else 0.0)):
             values[channel] = float(value)
             mask |= 1 << channel
-        previous_len = text_len
         turns.append(
             SourceTurn(
                 values=tuple(values),
@@ -1397,6 +1428,9 @@ def _project_messages(messages: list) -> tuple:
                 writer_epoch=1,
                 local_sequence=sequence,
                 dropped_gap_count=0,
+                # A single conversation_id is one conversant, so t+1 is always the same
+                # sender as t (private-chat semantics, spec §1.3).
+                reaction_same_sender=True,
                 source_components=(str(sequence),),
             )
         )

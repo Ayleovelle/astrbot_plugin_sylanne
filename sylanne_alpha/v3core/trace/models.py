@@ -39,10 +39,16 @@ from ..formula_v1 import (
 )
 
 
-# formula v2 label-free reaction learning (spec 2026-07-18 §4.3) adds the five
+# formula v2 label-free reaction learning (spec 2026-07-18 §4.3) added the five
 # ``r_react`` / ``reaction_valid`` / ``lf_censor_reason`` / ``pref_offset_after`` /
 # ``marginal_mu`` telemetry fields below, bumping the trace schema from 1 to 2.
-TRACE_SCHEMA_VERSION = 2
+# Slice D adds ``reaction_same_sender`` (spec §1.4): ``same_sender`` participates in
+# state evolution (it censors the reaction and gates the length baseline), so it is a
+# deterministic core input and MUST be recorded here for the trace to be a complete,
+# byte-reproducible explanation of the settlement -- schema bumps 2 -> 3.  It is a
+# three-valued boolean relation (True/False/None), carries no identity, and does not
+# widen the privacy surface.
+TRACE_SCHEMA_VERSION = 3
 _LF_CENSOR_REASONS = frozenset(LF_TRACE_CENSOR_REASONS)
 
 _WORKSPACE_MODES = ("EMPTY", "SINGLE_LEGAL", "TOP1", "TOP2_AMBIGUOUS")
@@ -192,6 +198,11 @@ class CoreDecisionTrace:
     lf_censor_reason: str
     pref_offset_after: tuple
     marginal_mu: tuple
+    # The frozen ``same_sender`` relation consumed by this turn's path-B settlement
+    # (spec §1.4): True/False/None.  ``None`` when path B did not run this turn or the
+    # bridge could not decide.  Recorded so offline replay can reproduce the online
+    # settlement bit-for-bit (a False same_sender censors the reaction).
+    reaction_same_sender: bool | None
 
     def __post_init__(self) -> None:
         _check_int(self.schema_version, "schema_version")
@@ -318,6 +329,9 @@ class CoreDecisionTrace:
             raise ValueError("lf_censor_reason must be a declared label-free reason")
         _check_float_vec(self.pref_offset_after, AXIS_DIM, "pref_offset_after")
         _check_float_vec(self.marginal_mu, AXIS_DIM, "marginal_mu")
+        assert_exact_type(
+            self.reaction_same_sender, (bool, type(None)), "reaction_same_sender"
+        )
 
     @staticmethod
     def _check_named_pairs(mapping: object, name: str) -> None:

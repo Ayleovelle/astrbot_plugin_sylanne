@@ -16,8 +16,8 @@ shares the existing pending/adjacency/CAS skeleton but never sees the action:
   ``action_beliefs``, path B writes only ``label_free`` (disjoint), an UNKNOWN-action
   turn still advances label_free (the hole this slice closes), and a non-adjacent
   turn censors both exactly like v1;
-* the trace carries the five §4.3 label-free fields and round-trips; and
-* ``FORMULA_DIGEST`` is deliberately UNCHANGED this slice (the fold is Slice D).
+* the trace carries the §4.3 label-free fields and round-trips; and
+* ``FORMULA_DIGEST`` was folded to its intentional v2 value in Slice D.
 """
 
 from __future__ import annotations
@@ -728,26 +728,57 @@ def test_sender_mismatch_censors_l1_and_len_but_l2_still_learns() -> None:
 
 
 def test_trace_carries_label_free_fields_and_round_trips() -> None:
-    assert TRACE_SCHEMA_VERSION == 2
+    # Slice D bumped the trace schema to 3 with the ``reaction_same_sender`` field.
+    assert TRACE_SCHEMA_VERSION == 3
     result = orchestrate(
         CoreInvocation(
             envelope=_envelope(),
             base_state=_orch_base(_unknown_pending(eligible=True)),
             projected_actual_outcome=None,
+            reaction_facts=ReactionFacts(same_sender=True),
         )
     )
     trace = result.trace
-    assert trace.schema_version == 2
+    assert trace.schema_version == 3
     assert -1.0 <= trace.r_react <= 1.0
     assert trace.reaction_valid is True
     assert trace.lf_censor_reason in formula.LF_TRACE_CENSOR_REASONS
     assert len(trace.pref_offset_after) == AXIS_DIM
     assert len(trace.marginal_mu) == AXIS_DIM
+    # The consumed same_sender relation is recorded (spec §1.4).
+    assert trace.reaction_same_sender is True
     reparsed = decode_trace_bytes(result.trace_bytes)
     assert reparsed == trace
     assert reparsed.r_react == trace.r_react
     assert reparsed.pref_offset_after == trace.pref_offset_after
     assert reparsed.marginal_mu == trace.marginal_mu
+    assert reparsed.reaction_same_sender is True
+
+
+def test_trace_reaction_same_sender_is_three_valued_and_round_trips() -> None:
+    # Each of True / False / None must survive the byte codec exactly (spec §1.4).
+    for value in (True, False, None):
+        result = orchestrate(
+            CoreInvocation(
+                envelope=_envelope(),
+                base_state=_orch_base(_unknown_pending(eligible=True)),
+                projected_actual_outcome=None,
+                reaction_facts=ReactionFacts(same_sender=value),
+            )
+        )
+        assert result.trace.reaction_same_sender is value
+        assert decode_trace_bytes(result.trace_bytes).reaction_same_sender is value
+    # No pending -> path B does not run -> the recorded relation is neutral None even
+    # if the bridge supplied a fact, because no reaction was settled this turn.
+    no_settlement = orchestrate(
+        CoreInvocation(
+            envelope=_envelope(),
+            base_state=_orch_base(None),
+            projected_actual_outcome=None,
+            reaction_facts=ReactionFacts(same_sender=True),
+        )
+    )
+    assert no_settlement.trace.reaction_same_sender is None
 
 
 # --------------------------------------------------------------------------- #
@@ -769,11 +800,12 @@ def test_reaction_facts_is_a_frozen_bool_or_none_relation() -> None:
     assert inv.reaction_facts is None
 
 
-def test_formula_digest_is_unchanged_this_slice() -> None:
-    # Slice C does NOT fold the labelfree block into the manifest (deferred to D).
-    assert "labelfree" not in formula.FORMULA_MANIFEST
-    assert formula.FORMULA_VERSION == "sylanne.v3.formula.v1"
+def test_formula_digest_is_folded_to_v2() -> None:
+    # Slice D folds the labelfree block into the manifest (spec §4.3): the intentional
+    # v2 digest bump.
+    assert "labelfree" in formula.FORMULA_MANIFEST
+    assert formula.FORMULA_VERSION == "sylanne.v3.formula.v2"
     assert (
         formula.FORMULA_DIGEST
-        == "d3998ec2f0fa00046abfeae2a224f7703013bb2bdd893367a025e238f72d5ea4"
+        == "fb487bc94ac2b21afd45ab8dbbed39c3e0f859fe7a0d395fe3abda47142d8857"
     )

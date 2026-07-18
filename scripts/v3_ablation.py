@@ -190,6 +190,241 @@ def _relative_regression(baseline: dict, candidate: dict, metric: str) -> float 
 
 
 # --------------------------------------------------------------------------- #
+# Label-free ablation gates LF-1..LF-4 (spec §6) -- never read an action label
+# --------------------------------------------------------------------------- #
+#
+# LF-1  L2 world-model gate: prequential marginal axis-MAE, learner vs the frozen
+#       prior head; carry-forward is reported, not gated (spec §6.1).
+# LF-2  L1 preference gate: reaction-weighted preference NLL, learner offset vs
+#       offset=0; passes iff the bootstrap 95% CI lower bound > 0 AND LF-4 passes.
+# LF-4  permutation control (the anti-circularity main gate): shuffling r_react must
+#       remove >=50% of the LF-2 gain, or the offset only captured a marginal drift
+#       (not a reaction-conditioned structure) and L1 is judged negative.
+# Evidence floor (spec §6): LF-2/LF-4 need >=150 reaction-valid settled turns and >=3
+# episodes, else INSUFFICIENT_EVIDENCE -- never a silent pass.  LF-1 scores any
+# adjacent pair, so it is not gated on that floor.
+
+LF_MIN_REACTION_VALID = 150
+LF_MIN_EPISODES = 3
+LF_PERMUTATION_COLLAPSE = 0.50
+
+
+def _mae(values: Sequence[float]) -> float | None:
+    return sum(values) / len(values) if values else None
+
+
+def _weighted_mean(terms: Sequence[float], weights: Sequence[float]) -> float | None:
+    total = sum(weights)
+    if total <= 0.0:
+        return None
+    return sum(term * weight for term, weight in zip(terms, weights)) / total
+
+
+def _bootstrap_ci(gains: list, resamples: int, *, confidence: float = 0.95):
+    if len(gains) < resamples * 0.5:
+        return None
+    ordered = sorted(gains)
+    alpha = (1.0 - confidence) / 2.0
+    lower = ordered[int(alpha * len(ordered))]
+    upper = ordered[min(int((1.0 - alpha) * len(ordered)), len(ordered) - 1)]
+    return lower, upper
+
+
+def _lf_permute_seed(header: dict) -> int:
+    """Per-episode r_react permutation seed = episode seed framing + control ``LF_PERMUTE``.
+
+    Uses the same domain-separated control framing as the learned/frozen controls so
+    the permutation stream can never accidentally share a learned stream (spec §6.1).
+    """
+
+    seed_bytes = v3_export.control_episode_seed(
+        control_id="LF_PERMUTE",
+        dataset_id=bytes.fromhex(header["dataset_id"]),
+        evaluation_group_ref=bytes.fromhex(header["evaluation_group_ref"]),
+        episode_ref=bytes.fromhex(header["episode_ref"]),
+        gate_manifest_digest=bytes.fromhex(header["gate_manifest_digest"]),
+        formula_digest=bytes.fromhex(header["formula_digest"]),
+        model_digest=bytes.fromhex(header["model_digest"]),
+        profile_digest=bytes.fromhex(header["evaluation_profile_digest"]),
+    )
+    return int.from_bytes(seed_bytes, "big")
+
+
+def _marginal_lf1(marg: dict, refs: list, *, resamples: int, seed: int) -> dict:
+    pooled_learner = [value for ref in refs for value in marg[ref]["learner_abs"]]
+    pooled_frozen = [value for ref in refs for value in marg[ref]["frozen_abs"]]
+    pooled_carry = [value for ref in refs for value in marg[ref]["carry_abs"]]
+    learner_mae = _mae(pooled_learner)
+    frozen_mae = _mae(pooled_frozen)
+    carry_mae = _mae(pooled_carry)
+    result: dict = {
+        "metric": "marginal_axis_mae",
+        "direction": "lower_is_better",
+        "control": "frozen_prior_head",
+        "learner_mae": learner_mae,
+        "frozen_mae": frozen_mae,
+        "carry_forward_mae": carry_mae,  # reported, never gated (spec §6.1)
+        "axis_observations": len(pooled_learner),
+    }
+    if learner_mae is None or frozen_mae is None:
+        return {**result, "status": "INSUFFICIENT_EVIDENCE", "reason": "no valid marginal axis observations"}
+    rng = random.Random(seed)
+    gains: list[float] = []
+    for _ in range(resamples):
+        drawn = [refs[rng.randrange(len(refs))] for _ in refs]
+        boot_learner = [value for ref in drawn for value in marg[ref]["learner_abs"]]
+        boot_frozen = [value for ref in drawn for value in marg[ref]["frozen_abs"]]
+        if not boot_learner or not boot_frozen:
+            continue
+        gains.append(_mae(boot_frozen) - _mae(boot_learner))
+    ci = _bootstrap_ci(gains, resamples)
+    result["gain_point_estimate"] = frozen_mae - learner_mae
+    result["gain_vs_carry_forward"] = None if carry_mae is None else carry_mae - learner_mae
+    if ci is None:
+        return {**result, "status": "INSUFFICIENT_EVIDENCE", "reason": "marginal MAE censored in most resamples"}
+    result["ci_lower"], result["ci_upper"] = ci
+    result["lower_bound_above_zero"] = ci[0] > 0.0
+    result["status"] = "OK"
+    result["verdict"] = "EARNS_MARGINAL_HEAD" if ci[0] > 0.0 else "NO_MARGINAL_IMPROVEMENT"
+    return result
+
+
+def _pref_pool_gain(pool: dict, refs: list) -> float | None:
+    learner = [term for ref in refs for term in pool[ref]["learner_terms"]]
+    frozen = [term for ref in refs for term in pool[ref]["frozen_terms"]]
+    weights = [weight for ref in refs for weight in pool[ref]["weights"]]
+    weighted_learner = _weighted_mean(learner, weights)
+    weighted_frozen = _weighted_mean(frozen, weights)
+    if weighted_learner is None or weighted_frozen is None:
+        return None
+    return weighted_frozen - weighted_learner
+
+
+def _preference_lf2_lf4(
+    pref_real: dict, pref_perm: dict, refs: list, *, resamples: int, seed: int, insufficient: bool
+) -> tuple[dict, dict]:
+    real_gain = _pref_pool_gain(pref_real, refs)
+    permuted_gain = _pref_pool_gain(pref_perm, refs)
+    scored = sum(len(pref_real[ref]["weights"]) for ref in refs)
+    collapse = (
+        1.0 - (permuted_gain / real_gain)
+        if real_gain is not None and real_gain > 0.0 and permuted_gain is not None
+        else None
+    )
+    lf4: dict = {
+        "control": "r_react_permutation",
+        "real_gain": real_gain,
+        "permuted_gain": permuted_gain,
+        "collapse_fraction": collapse,
+        "required_collapse": LF_PERMUTATION_COLLAPSE,
+    }
+    lf2: dict = {
+        "metric": "reaction_weighted_preference_nll",
+        "direction": "lower_is_better",
+        "control": "offset_zero_v1_preference",
+        "scored_turns": scored,
+        "gain_point_estimate": real_gain,
+        # spec §5/§6.2: this is a density-estimation claim (the offset fits the
+        # reaction-weighted empirical distribution), NEVER a policy-improvement claim.
+        "claim": "density_estimation_only",
+    }
+    if insufficient:
+        return (
+            {**lf2, "status": "INSUFFICIENT_EVIDENCE"},
+            {**lf4, "status": "INSUFFICIENT_EVIDENCE"},
+        )
+    rng = random.Random(seed)
+    gains: list[float] = []
+    for _ in range(resamples):
+        drawn = [refs[rng.randrange(len(refs))] for _ in refs]
+        gain = _pref_pool_gain(pref_real, drawn)
+        if gain is not None:
+            gains.append(gain)
+    ci = _bootstrap_ci(gains, resamples)
+    if ci is None:
+        return (
+            {**lf2, "status": "INSUFFICIENT_EVIDENCE", "reason": "preference NLL censored in most resamples"},
+            {**lf4, "status": "INSUFFICIENT_EVIDENCE"},
+        )
+    lf2["ci_lower"], lf2["ci_upper"] = ci
+    lf2["lower_bound_above_zero"] = ci[0] > 0.0
+    lf4_pass = collapse is not None and collapse >= LF_PERMUTATION_COLLAPSE
+    lf4["status"] = "OK"
+    lf4["passed"] = bool(lf4_pass)
+    lf2["status"] = "OK"
+    lf2["permutation_passed"] = bool(lf4_pass)
+    # LF-2 PASSES iff the CI lower bound > 0 AND the permutation collapses the gain.
+    lf2["passed"] = bool(ci[0] > 0.0 and lf4_pass)
+    lf2["verdict"] = "EARNS_PREFERENCE_OFFSET" if lf2["passed"] else "NO_PREFERENCE_CREDIT"
+    return lf2, lf4
+
+
+def run_label_free_gates(
+    dataset: Dataset,
+    *,
+    split: str | None,
+    resamples: int = 10_000,
+    seed: int = 2718,
+) -> dict:
+    """Score LF-1..LF-4 on a frozen dataset by an offline prequential replay (spec §6).
+
+    Never reads an action label: it replays each episode once to extract the per-turn
+    label-free settlement inputs, then re-runs the exact core learner laws to compute
+    the marginal MAE (LF-1), the reaction-weighted preference NLL (LF-2), and its
+    r_react permutation control (LF-4), with a whole-episode bootstrap and the §6
+    evidence floor.
+    """
+
+    episodes = dataset.split_episodes(split) if split else dataset.episodes
+    records = {episode.episode_ref: v3_replay.collect_label_free_records(episode) for episode in episodes}
+    headers = {episode.episode_ref: episode.header for episode in episodes}
+    refs = sorted(records)
+
+    funnel = {"total_turns": 0, "adjacent": 0, "reaction_valid": 0}
+    for episode_records in records.values():
+        coverage = v3_replay.label_free_coverage(episode_records)
+        for key in funnel:
+            funnel[key] += coverage[key]
+
+    evidence = {
+        "episode_count": len(refs),
+        "reaction_valid_settled_turns": funnel["reaction_valid"],
+        "min_reaction_valid": LF_MIN_REACTION_VALID,
+        "min_episodes": LF_MIN_EPISODES,
+    }
+    insufficient = funnel["reaction_valid"] < LF_MIN_REACTION_VALID or len(refs) < LF_MIN_EPISODES
+
+    marg = {ref: v3_replay.marginal_prequential_episode(records[ref]) for ref in refs}
+    lf1 = _marginal_lf1(marg, refs, resamples=resamples, seed=seed)
+    pref_real = {ref: v3_replay.preference_prequential_episode(records[ref]) for ref in refs}
+    pref_perm = {
+        ref: v3_replay.preference_prequential_episode(
+            records[ref], permutation_seed=_lf_permute_seed(headers[ref])
+        )
+        for ref in refs
+    }
+    lf2, lf4 = _preference_lf2_lf4(
+        pref_real, pref_perm, refs, resamples=resamples, seed=seed, insufficient=insufficient
+    )
+
+    return {
+        "report_kind": "v3_label_free_gates_v1",
+        "split": split,
+        "coverage_funnel": funnel,
+        "evidence": evidence,
+        "insufficient_evidence": insufficient,
+        "LF_1_marginal_world_model": lf1,
+        "LF_2_preference_nll": lf2,
+        "LF_4_permutation_control": lf4,
+        "claims": {
+            "conversational_gain": False,
+            "policy_superiority": False,
+            "world_model_and_density_only": True,
+        },
+    }
+
+
+# --------------------------------------------------------------------------- #
 # Report
 # --------------------------------------------------------------------------- #
 
@@ -340,6 +575,10 @@ def run_ablation(
         "controls": control_report,
         "identical_configuration_pairs": identical_configs,
         "configuration_identical_controls": collapsed,
+        # formula v2 label-free gates (spec §6): scored on the same frozen episodes,
+        # never reading an action label.  On the current 3/36-channel real datasets
+        # these honestly report INSUFFICIENT_EVIDENCE (no tone channels).
+        "label_free": run_label_free_gates(merged, split=split, resamples=resamples, seed=seed),
         "preliminary": True,
         "claims": {
             "conversational_gain": False,

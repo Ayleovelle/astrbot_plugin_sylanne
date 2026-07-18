@@ -501,14 +501,17 @@ def test_labelfree_manifest_block_is_authored_with_the_declared_semantics() -> N
     assert canonical_json_bytes(block)
 
 
-def test_labelfree_fold_is_deferred_so_the_digest_stays_byte_stable() -> None:
-    # Slice A must not strand the tracked v1 replay fixture: the labelfree block is
-    # NOT folded into build_formula_manifest yet, so FORMULA_DIGEST is unchanged.
-    assert "labelfree" not in formula.FORMULA_MANIFEST
-    assert formula.FORMULA_VERSION == "sylanne.v3.formula.v1"
+def test_labelfree_block_is_folded_into_the_v2_manifest() -> None:
+    # Slice D folds the labelfree block into build_formula_manifest (spec §4.3): the
+    # manifest now carries the ``labelfree`` key, FORMULA_VERSION is v2, and the
+    # digest is the intentional v2 bump.  The folded block is byte-identical to the
+    # standalone builder, so nothing is silently re-authored during the fold.
+    assert "labelfree" in formula.FORMULA_MANIFEST
+    assert formula.FORMULA_MANIFEST["labelfree"] == formula.build_labelfree_manifest()
+    assert formula.FORMULA_VERSION == "sylanne.v3.formula.v2"
     assert (
         formula.FORMULA_DIGEST
-        == "d3998ec2f0fa00046abfeae2a224f7703013bb2bdd893367a025e238f72d5ea4"
+        == "fb487bc94ac2b21afd45ab8dbbed39c3e0f859fe7a0d395fe3abda47142d8857"
     )
 
 

@@ -1,6 +1,6 @@
 """Offline chronological-prequential replay of an encoded v3 dataset (design 17.2).
 
-Replay resets to each episode's frozen ``neutral_eval_v1`` header state and walks
+Replay resets to each episode's frozen ``neutral_eval_v2`` header state and walks
 the episode in order: predict turn ``t`` using only the header and observations
 strictly before ``t``, score the frozen outcome/action, then allow the declared
 online update for ``t+1``. It never mutates the dataset and never guesses a
@@ -22,6 +22,7 @@ import hashlib
 import json
 import math
 import platform
+import random
 import sys
 from dataclasses import dataclass
 from pathlib import Path
@@ -38,12 +39,18 @@ from sylanne_alpha.v3core.contracts import (
     Action,
     ComputeProfile,
     CoreInvocation,
+    ReactionFacts,
     TurnContextClass,
     TurnEnvelope,
     TurnKey,
     TurnSequence,
 )
+from sylanne_alpha.v3core.features import decision_state
+from sylanne_alpha.v3core.inference.policy_scorer import base_preference_c, generative_mu
+from sylanne_alpha.v3core.learning.label_free import _update_pref_offset
+from sylanne_alpha.v3core.learning.outcomes import ekf_transition_update
 from sylanne_alpha.v3core.observation.encoder import project_outcome
+from sylanne_alpha.v3core.observation.models import OutcomeFrame
 from sylanne_alpha.v3core.orchestrator import orchestrate
 from sylanne_alpha.v3core.state.codec import decode_state
 
@@ -208,6 +215,10 @@ def replay_episode(
                 envelope=envelope,
                 base_state=state,
                 projected_actual_outcome=(actual, None),
+                # The frozen same_sender relation (spec §1.4) must be replayed, or an
+                # offline settlement of a censored (False) reaction cannot reproduce
+                # the online one.  A missing field defaults to None (admitted noise).
+                reaction_facts=ReactionFacts(same_sender=turn.get("reaction_same_sender")),
             )
         )
         if not result.accepted:
@@ -271,6 +282,222 @@ def _raw_for(turn: dict) -> tuple:
         else:
             raw.append(float(values[index]))
     return tuple(raw)
+
+
+# --------------------------------------------------------------------------- #
+# Label-free (formula v2) prequential evaluation (spec §6)
+# --------------------------------------------------------------------------- #
+#
+# The label-free gates are computed by an OFFLINE prequential replay of the two
+# learners on a frozen dataset -- they never read an action label.  One online
+# ``orchestrate`` pass per episode extracts, per turn, the deterministic core inputs
+# the settlement consumed: the pre-turn decision state ``s_dec`` (= the state the
+# online path B used, ``decision_state(base.latent_axes)``), the projected next
+# outcome ``y'``, and the trace's ``r_react`` / ``reaction_valid`` / adjacency.  The
+# metrics then re-run the EXACT core learner laws (``ekf_transition_update`` for L2,
+# ``_update_pref_offset`` for L1) over those records, so both the learner and its
+# control are evaluated on identical inputs and the r_react permutation control is
+# possible (it cannot be done through ``orchestrate``, which computes r_react from the
+# frame).  L2 does not feed the dynamics and L1 does not feed the latent trajectory,
+# so ``s_dec`` is identical for learner / frozen / permuted -- the controls differ
+# only in the learner parameters, exactly as spec §6.1 requires.
+
+_TWO_PI = 2.0 * math.pi
+
+
+@dataclass(frozen=True, slots=True)
+class LabelFreeTurnRecord:
+    """One turn's label-free settlement inputs, extracted from an online replay."""
+
+    settled: bool           # path B ran (pending existed and was adjacent)
+    reaction_valid: bool    # eligible AND a valid reaction (drives the L1 update)
+    r_react: float          # the online reaction scalar (drives L1 update + LF-2 weight)
+    s_dec: tuple            # decision_state(base.latent_axes): what path B used
+    outcome: OutcomeFrame   # y' = project_outcome(u') of THIS turn (the learning target)
+
+
+def collect_label_free_records(
+    episode: Episode,
+    *,
+    profile_id: str = v3_export.EVALUATION_PROFILE_ID,
+) -> list[LabelFreeTurnRecord]:
+    """Replay one episode online and extract its per-turn label-free records.
+
+    Mirrors :func:`replay_episode`'s envelope construction but captures the pre-turn
+    decision state and the trace's label-free verdict instead of the action posterior.
+    The episode resets to its frozen header state, so each episode's learners start at
+    the prior exactly as the online per-session state would.
+    """
+
+    state = decode_state(episode.header["initial_state_b64"].encode("ascii"))
+    profile = _profile_for(profile_id)
+    episode_seed = episode.episode_seed
+    records: list[LabelFreeTurnRecord] = []
+    previous_action: Action | None = None
+
+    for turn in episode.turns:
+        index = turn["episode_turn_index"]
+        s_dec = decision_state(state.latent_axes)  # exactly what path B will read
+        frame = v3_export.frame_for_turn(turn, previous_action)
+        outcome = project_outcome(frame)
+        actual_name = turn["actual_action"]
+        actual = Action(actual_name) if actual_name in ACTIONS else None
+        envelope = TurnEnvelope(
+            turn_key=TurnKey(
+                plugin_instance_id="v3-replay-lf",
+                session_ref=state.session_ref,
+                bridge_request_nonce=f"{episode.episode_ref[:16]}-{index}",
+                request_attempt=0,
+            ),
+            turn_id=f"{episode.episode_ref[:16]}-{index}",
+            sequence=TurnSequence(
+                writer_epoch=turn["writer_epoch"], local_sequence=turn["local_sequence"]
+            ),
+            compute_profile=profile,
+            deterministic_seed=v3_export.evaluation_turn_seed(episode_seed, index),
+            observation=(_raw_for(turn), previous_action),
+            context=TurnContextClass(turn["context"]),
+        )
+        result = orchestrate(
+            CoreInvocation(
+                envelope=envelope,
+                base_state=state,
+                projected_actual_outcome=(actual, None),
+                reaction_facts=ReactionFacts(same_sender=turn.get("reaction_same_sender")),
+            )
+        )
+        if not result.accepted:
+            # A rejected invocation commits nothing and settles no credit.
+            previous_action = actual
+            continue
+        trace = result.trace
+        settled = trace.lf_censor_reason != formula.LF_CENSOR_REASON_NON_ADJACENT
+        records.append(
+            LabelFreeTurnRecord(
+                settled=settled,
+                reaction_valid=bool(trace.reaction_valid),
+                r_react=float(trace.r_react),
+                s_dec=s_dec,
+                outcome=outcome,
+            )
+        )
+        state = result.state_delta.next_state
+        previous_action = actual
+    return records
+
+
+def _marginal_priors() -> tuple:
+    g = tuple(formula.MARGINAL_INITIAL_G for _ in range(formula.AXIS_DIM))
+    b = tuple(formula.MARGINAL_INITIAL_B for _ in range(formula.AXIS_DIM))
+    sigma_g = tuple(formula.MARGINAL_SIGMA_INIT[0] for _ in range(formula.AXIS_DIM))
+    sigma_b = tuple(formula.MARGINAL_SIGMA_INIT[1] for _ in range(formula.AXIS_DIM))
+    return g, b, sigma_g, sigma_b
+
+
+def marginal_prequential_episode(records: Sequence[LabelFreeTurnRecord]) -> dict:
+    """LF-1 (spec §6.1): prequential per-axis absolute error of the L2 marginal head.
+
+    For every adjacent settled turn, predict ``y'`` BEFORE the update with the learner
+    head and with the frozen prior head, then update the learner with the exact core
+    EKF.  Also reports the carry-forward baseline (predict ``y'(t+1)=y'(t)`` on
+    double-valid axes) -- reported, never gated (spec §6.1).  ``口径``: each valid axis
+    observation contributes one unit of weight, identical to ``axis_mae``.
+    """
+
+    g, b, sigma_g, sigma_b = _marginal_priors()
+    prior_g, prior_b, _, _ = _marginal_priors()
+    count = 0
+    learner_abs: list[float] = []
+    frozen_abs: list[float] = []
+    carry_abs: list[float] = []
+    previous: OutcomeFrame | None = None
+    for record in records:
+        if not record.settled:
+            continue
+        outcome = record.outcome
+        mu_learner = generative_mu(g, b, record.s_dec)
+        mu_frozen = generative_mu(prior_g, prior_b, record.s_dec)
+        for axis in range(formula.AXIS_DIM):
+            if not outcome.is_valid(axis):
+                continue
+            learner_abs.append(abs(mu_learner[axis] - outcome.y[axis]))
+            frozen_abs.append(abs(mu_frozen[axis] - outcome.y[axis]))
+            if previous is not None and previous.is_valid(axis):
+                carry_abs.append(abs(previous.y[axis] - outcome.y[axis]))
+        g, b, sigma_g, sigma_b, count = ekf_transition_update(
+            g, b, sigma_g, sigma_b, count, record.s_dec, outcome
+        )
+        previous = outcome
+    return {"learner_abs": learner_abs, "frozen_abs": frozen_abs, "carry_abs": carry_abs}
+
+
+def _gaussian_nll(y: float, c: float, v_c: float) -> float:
+    return 0.5 * (math.log(_TWO_PI * v_c) + (y - c) ** 2 / v_c)
+
+
+def _mean_axis_nll(outcome: OutcomeFrame, c: tuple) -> float | None:
+    terms = [
+        _gaussian_nll(outcome.y[axis], c[axis], formula.PREFERENCE_V_C[axis])
+        for axis in range(formula.AXIS_DIM)
+        if outcome.is_valid(axis)
+    ]
+    return sum(terms) / len(terms) if terms else None
+
+
+def _clip_unit(value: float) -> float:
+    return -1.0 if value < -1.0 else 1.0 if value > 1.0 else value
+
+
+def preference_prequential_episode(
+    records: Sequence[LabelFreeTurnRecord], *, permutation_seed: int | None = None
+) -> dict:
+    """LF-2 (spec §6.1): reaction-weighted preference NLL of the L1 offset vs offset=0.
+
+    Prequential: every ``r_react > 0`` settled turn is scored with the offset in force
+    BEFORE this turn's update; then the offset is advanced by the exact core L1 law on
+    any ``reaction_valid`` turn.  The learner offset uses base_c + offset; the frozen
+    control uses base_c (offset 0).  ``permutation_seed`` shuffles the
+    ``(r_react, reaction_valid)`` pairs across settled turns within the episode (LF-4):
+    if the offset only captured a marginal outcome drift rather than a reaction-
+    conditioned structure, the shuffled gain does not collapse.
+    """
+
+    settled = [record for record in records if record.settled]
+    pairs = [(record.r_react, record.reaction_valid) for record in settled]
+    if permutation_seed is not None:
+        rng = random.Random(permutation_seed)
+        order = list(range(len(pairs)))
+        rng.shuffle(order)
+        pairs = [pairs[position] for position in order]
+
+    offset = tuple(0.0 for _ in range(formula.AXIS_DIM))
+    learner_terms: list[float] = []
+    frozen_terms: list[float] = []
+    weights: list[float] = []
+    for record, (r_react, reaction_valid) in zip(settled, pairs):
+        base_c = base_preference_c(record.s_dec)
+        if r_react > 0.0:
+            c_learner = tuple(
+                _clip_unit(base_c[axis] + offset[axis]) for axis in range(formula.AXIS_DIM)
+            )
+            nll_learner = _mean_axis_nll(record.outcome, c_learner)
+            nll_frozen = _mean_axis_nll(record.outcome, base_c)
+            if nll_learner is not None and nll_frozen is not None:
+                learner_terms.append(nll_learner)
+                frozen_terms.append(nll_frozen)
+                weights.append(r_react)
+        if reaction_valid:
+            offset = _update_pref_offset(offset, r_react, record.s_dec, record.outcome)
+    return {"learner_terms": learner_terms, "frozen_terms": frozen_terms, "weights": weights}
+
+
+def label_free_coverage(records: Sequence[LabelFreeTurnRecord]) -> dict:
+    """The three-level coverage funnel (spec §6.1): total -> adjacent -> reaction-valid."""
+
+    total = len(records)
+    adjacent = sum(1 for record in records if record.settled)
+    reaction_valid = sum(1 for record in records if record.settled and record.reaction_valid)
+    return {"total_turns": total, "adjacent": adjacent, "reaction_valid": reaction_valid}
 
 
 # --------------------------------------------------------------------------- #

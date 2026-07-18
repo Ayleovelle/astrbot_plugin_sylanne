@@ -81,6 +81,10 @@ class _TW:
     def boolean(self, value: bool) -> None:
         self._chunks.append(struct.pack(">B", 1 if value else 0))
 
+    def opt_boolean(self, value: bool | None) -> None:
+        # Three-valued: 0=False, 1=True, 2=None (spec §1.4 same_sender relation).
+        self._chunks.append(struct.pack(">B", 2 if value is None else (1 if value else 0)))
+
     def string(self, value: str) -> None:
         data = value.encode("utf-8")
         if len(data) > 0xFFFF:
@@ -165,6 +169,14 @@ class _TR:
 
     def boolean(self) -> bool:
         return self.u8() == 1
+
+    def opt_boolean(self) -> bool | None:
+        flag = self.u8()
+        if flag == 2:
+            return None
+        if flag in (0, 1):
+            return flag == 1
+        raise TraceCodecError("optional boolean flag must be 0, 1, or 2")
 
     def string(self) -> str:
         length = self.u16()
@@ -295,6 +307,7 @@ def _pack_body(trace: CoreDecisionTrace) -> bytes:
     w.string(trace.lf_censor_reason)
     w.f64_fixed(trace.pref_offset_after)
     w.f64_fixed(trace.marginal_mu)
+    w.opt_boolean(trace.reaction_same_sender)
     return w.getvalue()
 
 
@@ -461,6 +474,7 @@ def decode_trace_bytes(blob: object) -> CoreDecisionTrace:
     lf_censor_reason = r.string()
     pref_offset_after = r.f64_fixed(AXIS_DIM)
     marginal_mu = r.f64_fixed(AXIS_DIM)
+    reaction_same_sender = r.opt_boolean()
     if r.remaining() != 0:
         raise TraceCodecError("trailing bytes after encoded trace")
 
@@ -546,6 +560,7 @@ def decode_trace_bytes(blob: object) -> CoreDecisionTrace:
             lf_censor_reason=lf_censor_reason,
             pref_offset_after=pref_offset_after,
             marginal_mu=marginal_mu,
+            reaction_same_sender=reaction_same_sender,
         )
     except (ValueError, TypeError) as exc:
         raise TraceCodecError(str(exc)) from exc

@@ -258,6 +258,11 @@ def orchestrate(invocation: object) -> OrchestratorResult:
         base.label_free.pref_offset if base.label_free is not None else tuple(0.0 for _ in range(AXIS_DIM))
     )
     lf_marginal_mu = tuple(0.0 for _ in range(AXIS_DIM))
+    # The same_sender relation actually consumed by path B this turn (spec §1.4).
+    # None when path B does not run; otherwise the frozen bridge fact (or None when
+    # no reaction_facts was supplied), recorded so offline replay reproduces the
+    # exact settlement.
+    lf_reaction_same_sender: bool | None = None
     pending = base.pending_outcome
     if pending is not None and _is_adjacent(pending.sequence, envelope.sequence):
         # Path A: label-gated settlement (design 8.3 / 11.2), semantics unchanged.
@@ -282,6 +287,11 @@ def orchestrate(invocation: object) -> OrchestratorResult:
         lf_censor_reason = lf.reason
         lf_pref_offset_after = lf.new_label_free.pref_offset
         lf_marginal_mu = lf.marginal_mu
+        lf_reaction_same_sender = (
+            invocation.reaction_facts.same_sender
+            if invocation.reaction_facts is not None
+            else None
+        )
 
     # -- SNN stage DELETED (formula v2) --------------------------------------
     # The reservoir was structurally silent (max membrane ~0.32 vs a 0.65 threshold
@@ -522,6 +532,7 @@ def orchestrate(invocation: object) -> OrchestratorResult:
         lf_censor_reason=lf_censor_reason,
         pref_offset_after=lf_pref_offset_after,
         marginal_mu=lf_marginal_mu,
+        reaction_same_sender=lf_reaction_same_sender,
     )
 
     trace_bytes = canonical_trace_bytes(trace)
