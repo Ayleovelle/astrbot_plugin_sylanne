@@ -138,13 +138,36 @@ def likelihood_variance() -> tuple:
     return tuple(ACTION_INITIAL_R for _ in range(AXIS_DIM))
 
 
-def preferences(s: tuple) -> tuple:
-    """Return the preference mean ``c`` and diagonal variance ``V_C`` (design 11.2)."""
+def base_preference_c(s: tuple) -> tuple:
+    """The versioned base preference mean ``base_c(s)`` before any learned residual.
 
-    c = tuple(
+    ``base_c_i(s) = s_i`` on the two state-copying axes (``PREFERENCE_C_STATE_AXES``)
+    and ``PREFERENCE_C_CONSTANT_i`` elsewhere (design 11.2 / spec §3.2).  The
+    formula-v2 label-free L1 learner adds a bounded residual on top of this; the
+    residual's target is measured relative to ``base_c`` so this stays the single
+    source of the base mean.
+    """
+
+    return tuple(
         s[axis] if axis in PREFERENCE_C_STATE_AXES else PREFERENCE_C_CONSTANT[axis]
         for axis in range(AXIS_DIM)
     )
+
+
+def preferences(s: tuple, offset: tuple | None = None) -> tuple:
+    """Return the preference mean ``c`` and diagonal variance ``V_C`` (design 11.2).
+
+    ``offset`` is the formula-v2 label-free L1 preference residual (spec §3.2):
+    ``c_i = clip(base_c_i(s) + offset_i, -1, 1)``.  ``offset is None`` (no
+    ``label_free`` state) is the v1 behaviour exactly -- the base mean is returned
+    unclipped and byte-identical to formula v1, so a null/zero offset never drifts a
+    single bit (the regression anchor).  ``V_C`` is the immutable prior either way.
+    """
+
+    base_c = base_preference_c(s)
+    if offset is None:
+        return base_c, PREFERENCE_V_C
+    c = tuple(_clip(base_c[axis] + offset[axis], -1.0, 1.0) for axis in range(AXIS_DIM))
     return c, PREFERENCE_V_C
 
 
@@ -212,7 +235,13 @@ def score_policy(pre_state: object, broadcast: object, context: object) -> Polic
         raise TypeError("context must have exact type TurnContextClass")
 
     s = decision_state(pre_state.latent_axes)
-    c, v_c = preferences(s)
+    # formula v2: the label-free L1 preference residual (spec §3.2/§4.1) enters EFE
+    # risk here.  ``label_free is None`` resolves to offset ``None`` = the v1
+    # preference mean exactly, so a session that never settled a reaction scores
+    # byte-identically to formula v1.
+    label_free = pre_state.label_free
+    offset = label_free.pref_offset if label_free is not None else None
+    c, v_c = preferences(s, offset)
     v = predictive_variance()
     r = likelihood_variance()
     beliefs = pre_state.action_beliefs
@@ -292,6 +321,7 @@ class PolicyScorerV1:
 __all__ = [
     "PolicyScorerV1",
     "action_params",
+    "base_preference_c",
     "efe_ambiguity",
     "generative_mu",
     "information_gain",

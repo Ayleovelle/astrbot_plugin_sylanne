@@ -289,6 +289,12 @@ def _pack_body(trace: CoreDecisionTrace) -> bytes:
     w.boolean(trace.disagreement)
     w.string(trace.disagreement_reason)
     w.string(trace.degradation_reason)
+    # formula v2 label-free reaction learning (spec §4.3)
+    w.f64(trace.r_react)
+    w.boolean(trace.reaction_valid)
+    w.string(trace.lf_censor_reason)
+    w.f64_fixed(trace.pref_offset_after)
+    w.f64_fixed(trace.marginal_mu)
     return w.getvalue()
 
 
@@ -450,6 +456,11 @@ def decode_trace_bytes(blob: object) -> CoreDecisionTrace:
     disagreement = r.boolean()
     disagreement_reason = r.string()
     degradation_reason = r.string()
+    r_react = r.f64()
+    reaction_valid = r.boolean()
+    lf_censor_reason = r.string()
+    pref_offset_after = r.f64_fixed(AXIS_DIM)
+    marginal_mu = r.f64_fixed(AXIS_DIM)
     if r.remaining() != 0:
         raise TraceCodecError("trailing bytes after encoded trace")
 
@@ -530,6 +541,11 @@ def decode_trace_bytes(blob: object) -> CoreDecisionTrace:
             disagreement=disagreement,
             disagreement_reason=disagreement_reason,
             degradation_reason=degradation_reason,
+            r_react=r_react,
+            reaction_valid=reaction_valid,
+            lf_censor_reason=lf_censor_reason,
+            pref_offset_after=pref_offset_after,
+            marginal_mu=marginal_mu,
         )
     except (ValueError, TypeError) as exc:
         raise TraceCodecError(str(exc)) from exc

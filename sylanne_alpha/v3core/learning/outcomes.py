@@ -112,8 +112,16 @@ def predictive_preference_terms(mu: tuple, v: tuple, c: tuple, v_c: tuple) -> tu
 # --------------------------------------------------------------------------- #
 
 
-def freeze_actual_prediction(beliefs: object, decision_state: tuple, actual_action: object) -> dict:
-    """Compute the arrays a :class:`PendingOutcome` freezes for later settlement."""
+def freeze_actual_prediction(
+    beliefs: object, decision_state: tuple, actual_action: object, offset: tuple | None = None
+) -> dict:
+    """Compute the arrays a :class:`PendingOutcome` freezes for later settlement.
+
+    ``offset`` is the formula-v2 label-free L1 preference residual in force at turn
+    ``t`` (spec §3.2): the frozen ``c``/``V_C`` therefore reflect the preference the
+    label path's reward is measured against, keeping "t-turn reward uses t-turn
+    preferences" exact.  ``offset is None`` is the v1 behaviour byte-for-byte.
+    """
 
     if type(actual_action) is not Action:
         raise TypeError("actual_action must have exact type Action")
@@ -121,7 +129,7 @@ def freeze_actual_prediction(beliefs: object, decision_state: tuple, actual_acti
     mu = generative_mu(g, b, decision_state)
     v = predictive_variance()
     r = likelihood_variance()
-    c, v_c = preferences(decision_state)
+    c, v_c = preferences(decision_state, offset)
     before = predictive_preference_terms(mu, v, c, v_c)
     return {
         "predictive_mu_actual": mu,

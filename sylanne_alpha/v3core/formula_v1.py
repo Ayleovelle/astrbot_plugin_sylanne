@@ -406,6 +406,19 @@ REACTION_INVALID_REASONS = (
     REACTION_REASON_STALE_REACTION,
 )
 REACTION_REASONS = (REACTION_REASON_VALID,) + REACTION_INVALID_REASONS
+
+# Orchestration-level label-free settlement reasons (spec §2.4): the trace's
+# ``lf_censor_reason`` domain is the reaction reasons PLUS these two, which record
+# why the免标签 path B did not run at all -- non-adjacent (or no pending), mirroring
+# path A's adjacency censoring, and adjacent-but-not-eligible.  They are NOT folded
+# into ``build_formula_manifest`` (like every other Slice A/C label-free constant),
+# so ``FORMULA_DIGEST`` stays byte-stable until Slice D's intentional bump.
+LF_CENSOR_REASON_NON_ADJACENT = "NON_ADJACENT"
+LF_CENSOR_REASON_NOT_ELIGIBLE = "NOT_ELIGIBLE"
+LF_TRACE_CENSOR_REASONS = REACTION_REASONS + (
+    LF_CENSOR_REASON_NON_ADJACENT,
+    LF_CENSOR_REASON_NOT_ELIGIBLE,
+)
 REACTION_SIGNAL_FORMULA = (
     "r_raw = sum(w_i*t_i)/sum(w_i) over present terms; "
     "t_valence=2*u25-1 (w=REACT_W_VALENCE), t_engagement=2*u26-1 (w=REACT_W_ENGAGEMENT), "

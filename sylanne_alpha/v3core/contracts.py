@@ -129,13 +129,34 @@ class TurnEnvelope:
 
 
 @dataclass(frozen=True, slots=True)
+class ReactionFacts:
+    """Bridge-frozen relational fact about the ``t+1`` inbound message vs turn ``t``.
+
+    ``same_sender`` compares HMAC surrogates at the response boundary (identity
+    never enters the core, never persists): ``True`` = the same conversant replied
+    (a private-chat bridge is always ``True``), ``False`` = another speaker
+    interjected (censors the reaction, spec §1.3), ``None`` = the bridge could not
+    decide, admitted as declared group-chat noise.  It is a boolean relation only,
+    so it carries no identity and does not widen the privacy surface.
+    """
+
+    same_sender: bool | None = None
+
+    def __post_init__(self) -> None:
+        assert_exact_type(self.same_sender, (bool, type(None)), "same_sender")
+        assert_valid_dto(self)
+
+
+@dataclass(frozen=True, slots=True)
 class CoreInvocation:
     """Pure core invocation containing only declared immutable DTOs."""
 
     envelope: TurnEnvelope
     base_state: object
     projected_actual_outcome: object | None
+    reaction_facts: ReactionFacts | None = None
 
     def __post_init__(self) -> None:
         assert_exact_type(self.envelope, TurnEnvelope, "envelope")
+        assert_exact_type(self.reaction_facts, (ReactionFacts, type(None)), "reaction_facts")
         assert_valid_dto(self)

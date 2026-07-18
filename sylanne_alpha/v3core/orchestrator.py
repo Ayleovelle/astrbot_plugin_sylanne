@@ -46,11 +46,14 @@ from .formula_v1 import (
     COMPUTE_PROFILES,
     EXPERIENCE_CAPACITY,
     FORMULA_DIGEST,
+    LF_CENSOR_REASON_NON_ADJACENT,
+    LF_ELIGIBLE_ORIGIN_CONTEXTS,
     SNN_NEURONS,
     SNN_SUMMARY_DIM,
 )
 from .dynamics.multiscale import advance_dynamics
 from .inference.policy_scorer import score_policy
+from .learning.label_free import settle_label_free
 from .learning.outcomes import freeze_actual_prediction, settle_with
 from .observation.encoder import encode_observation, project_outcome
 from .observation.models import ObservationFacts
@@ -237,22 +240,48 @@ def orchestrate(invocation: object) -> OrchestratorResult:
     input_digest = canonical_sha256(frame)
     outcome_frame = project_outcome(frame)
 
-    # -- pre-stage: settle the previous eligible delayed outcome (design 14.2/4)
+    # -- pre-stage: settle the previous eligible delayed outcome (design 14.2/4).
+    # Two DISJOINT settlement paths share one adjacency skeleton, one outcome frame,
+    # and one atomic commit (spec §2.3): path A learns the per-action label model
+    # (unchanged), path B learns the label-free reaction channel and never sees the
+    # action.  Non-adjacent (or no pending) censors BOTH exactly like v1.
     settled_beliefs = base.action_beliefs
+    settled_label_free = base.label_free
     settle_censored = True
     settle_reward = 0.0
     settle_r_preference = 0.0
+    # Label-free trace telemetry (spec §4.3); neutral unless path B runs this turn.
+    lf_r_react = 0.0
+    lf_reaction_valid = False
+    lf_censor_reason = LF_CENSOR_REASON_NON_ADJACENT
+    lf_pref_offset_after = (
+        base.label_free.pref_offset if base.label_free is not None else tuple(0.0 for _ in range(AXIS_DIM))
+    )
+    lf_marginal_mu = tuple(0.0 for _ in range(AXIS_DIM))
     pending = base.pending_outcome
-    if (
-        pending is not None
-        and _is_adjacent(pending.sequence, envelope.sequence)
-        and len(pending.predictive_mu_actual) == AXIS_DIM
-    ):
-        settlement = settle_with(base, outcome_frame, quality_score)
-        settled_beliefs = settlement.new_action_beliefs
-        settle_censored = settlement.censored
-        settle_reward = settlement.reward
-        settle_r_preference = settlement.r_preference
+    if pending is not None and _is_adjacent(pending.sequence, envelope.sequence):
+        # Path A: label-gated settlement (design 8.3 / 11.2), semantics unchanged.
+        # Only fires when turn t froze an actual-action prediction (labeled turn).
+        if len(pending.predictive_mu_actual) == AXIS_DIM:
+            settlement = settle_with(base, outcome_frame, quality_score)
+            settled_beliefs = settlement.new_action_beliefs
+            settle_censored = settlement.censored
+            settle_reward = settlement.reward
+            settle_r_preference = settlement.r_preference
+        # Path B: label-free settlement (spec §2.3).  Runs on ANY adjacent turn --
+        # action UNKNOWN turns settle here (the hole this closes), and L2/len are NOT
+        # eligibility-gated (spec §3.3/§3.4).  The frozen t-turn eligibility gates
+        # only the L1 preference credit, inside settle_label_free, which reports
+        # NOT_ELIGIBLE when it withholds that credit.  Path B writes only label_free.
+        lf = settle_label_free(
+            base, frame, outcome_frame, context, invocation.reaction_facts, pending.label_free_eligible
+        )
+        settled_label_free = lf.new_label_free
+        lf_r_react = lf.r_react
+        lf_reaction_valid = lf.reaction_valid
+        lf_censor_reason = lf.reason
+        lf_pref_offset_after = lf.new_label_free.pref_offset
+        lf_marginal_mu = lf.marginal_mu
 
     # -- SNN stage DELETED (formula v2) --------------------------------------
     # The reservoir was structurally silent (max membrane ~0.32 vs a 0.65 threshold
@@ -284,7 +313,12 @@ def orchestrate(invocation: object) -> OrchestratorResult:
     broadcast = run_workspace(decision_state, frame, context, source_refractory)
 
     # -- stage: inference ----------------------------------------------------
-    advanced_state = replace(base, latent_axes=next_latent, action_beliefs=settled_beliefs)
+    # The settled label-free offset (path B) rides into scoring exactly like the
+    # settled action beliefs (path A): this turn's EFE risk uses the preference the
+    # reaction just nudged (spec §3.2).  label_free None keeps v1 scoring byte-exact.
+    advanced_state = replace(
+        base, latent_axes=next_latent, action_beliefs=settled_beliefs, label_free=settled_label_free
+    )
     policy = score_policy(advanced_state, broadcast, context)
     selected = policy.selected_action
 
@@ -299,8 +333,16 @@ def orchestrate(invocation: object) -> OrchestratorResult:
     new_style_ring = next_style_ring(base.style_ring, constraints.style_signature)
 
     # -- freeze this turn's pending outcome for settlement at t+1 ------------
+    # Reaction eligibility is decided and frozen NOW, from turn t's own context
+    # (spec §2.2): an IDLE turn has no interaction to react to, so t+1 must not
+    # retro-decide.  The frozen c/V_C use the offset in force this turn so the label
+    # path's reward stays "t-turn reward by t-turn preferences".
+    label_free_eligible = context.value in LF_ELIGIBLE_ORIGIN_CONTEXTS
+    settled_offset = settled_label_free.pref_offset if settled_label_free is not None else None
     if actual_action is not None:
-        frozen = freeze_actual_prediction(settled_beliefs, decision_state, actual_action)
+        frozen = freeze_actual_prediction(
+            settled_beliefs, decision_state, actual_action, settled_offset
+        )
         new_pending = PendingOutcome(
             origin_turn_id=envelope.turn_id,
             sequence=envelope.sequence,
@@ -313,6 +355,7 @@ def orchestrate(invocation: object) -> OrchestratorResult:
             predictive_mu_actual=frozen["predictive_mu_actual"],
             predictive_v_actual=frozen["predictive_v_actual"],
             likelihood_r_actual=frozen["likelihood_r_actual"],
+            label_free_eligible=label_free_eligible,
         )
     else:
         new_pending = PendingOutcome(
@@ -320,6 +363,7 @@ def orchestrate(invocation: object) -> OrchestratorResult:
             sequence=envelope.sequence,
             action=selected,
             projected_actual_action=None,
+            label_free_eligible=label_free_eligible,
         )
 
     # -- append one bounded ExperienceRecord (committed revision key) --------
@@ -367,6 +411,7 @@ def orchestrate(invocation: object) -> OrchestratorResult:
         last_snn_summary=last_summary,
         pending_outcome=new_pending,
         experiences=new_experiences,
+        label_free=settled_label_free,
     )
     try:
         payload = encode_state(raw_next, max_bytes=STATE_HARD_CAP_BYTES)
@@ -472,6 +517,11 @@ def orchestrate(invocation: object) -> OrchestratorResult:
         disagreement=disagreement,
         disagreement_reason=disagreement_reason,
         degradation_reason=degradation_reason,
+        r_react=lf_r_react,
+        reaction_valid=lf_reaction_valid,
+        lf_censor_reason=lf_censor_reason,
+        pref_offset_after=lf_pref_offset_after,
+        marginal_mu=lf_marginal_mu,
     )
 
     trace_bytes = canonical_trace_bytes(trace)

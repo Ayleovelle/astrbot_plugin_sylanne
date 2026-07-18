@@ -329,6 +329,15 @@ def run_stream(seed: int, turns: int, profile_id: str = "FULL_24_STDP") -> Strea
             stats.max_abs_latent = max(stats.max_abs_latent, abs(value))
         if any(not math.isfinite(v) for v in trace.candidate_posterior):
             stats.nonfinite += 1
+        # formula v2 label-free bound (spec §4.3): the L1 offset is a convex
+        # combination inside [-0.30, 0.30], persisted on the float16 grid
+        # (float16(0.30)=0.300048828125), so it can never escape the widened box.
+        # decode_state already validates this every turn; the explicit assertion
+        # pins the invariant loudly rather than only implicitly through a reject.
+        if state.label_free is not None:
+            for value in state.label_free.pref_offset:
+                if not math.isfinite(value) or abs(value) > 0.30 + 1e-3:
+                    stats.out_of_bounds += 1
 
         action = trace.selected_action
         stats.action_counts[action] = stats.action_counts.get(action, 0) + 1
@@ -538,6 +547,8 @@ def evaluate(stats: StreamStats, recoveries: list[dict], k_report: dict) -> tupl
     failures: list[str] = []
     if stats.nonfinite:
         failures.append("nonfinite value observed")
+    if stats.out_of_bounds:
+        failures.append("a label-free preference offset escaped its declared bound")
     if stats.malformed_fed != stats.malformed_rejected:
         failures.append("a malformed turn was not rejected")
     if stats.repeated_divergent:

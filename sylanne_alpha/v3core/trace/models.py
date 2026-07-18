@@ -29,10 +29,21 @@ from dataclasses import dataclass
 from math import isfinite
 
 from ..canonical import assert_exact_type
-from ..formula_v1 import AXIS_DIM, OBSERVATION_DIM, SNN_NEURONS, SNN_SUMMARY_DIM, STATE_DIM
+from ..formula_v1 import (
+    AXIS_DIM,
+    LF_TRACE_CENSOR_REASONS,
+    OBSERVATION_DIM,
+    SNN_NEURONS,
+    SNN_SUMMARY_DIM,
+    STATE_DIM,
+)
 
 
-TRACE_SCHEMA_VERSION = 1
+# formula v2 label-free reaction learning (spec 2026-07-18 §4.3) adds the five
+# ``r_react`` / ``reaction_valid`` / ``lf_censor_reason`` / ``pref_offset_after`` /
+# ``marginal_mu`` telemetry fields below, bumping the trace schema from 1 to 2.
+TRACE_SCHEMA_VERSION = 2
+_LF_CENSOR_REASONS = frozenset(LF_TRACE_CENSOR_REASONS)
 
 _WORKSPACE_MODES = ("EMPTY", "SINGLE_LEGAL", "TOP1", "TOP2_AMBIGUOUS")
 _EXPRESSION_BUCKETS = ("NONE", "SHORT", "MEDIUM", "LONG")
@@ -170,6 +181,17 @@ class CoreDecisionTrace:
     disagreement: bool
     disagreement_reason: str
     degradation_reason: str
+    # -- formula v2 label-free reaction learning (spec §4.3) -----------------
+    # The label-free path-B verdict for this turn's settlement: the reaction scalar,
+    # its validity, the settlement reason (a reaction reason when path B ran, else
+    # NON_ADJACENT / NOT_ELIGIBLE), the L1 offset AFTER the update, and the L2
+    # marginal prediction.  All neutral (0.0 / False / NON_ADJACENT / zeros) when
+    # path B did not run this turn.
+    r_react: float
+    reaction_valid: bool
+    lf_censor_reason: str
+    pref_offset_after: tuple
+    marginal_mu: tuple
 
     def __post_init__(self) -> None:
         _check_int(self.schema_version, "schema_version")
@@ -285,6 +307,17 @@ class CoreDecisionTrace:
             raise ValueError("shadow_action must be a declared action")
         if self.actual_action not in _ACTUAL_NAMES:
             raise ValueError("actual_action must be a declared action or UNKNOWN")
+
+        # formula v2 label-free fields.
+        _check_finite(self.r_react, "r_react")
+        if not -1.0 <= self.r_react <= 1.0:
+            raise ValueError("r_react must lie in [-1,1]")
+        _check_bool(self.reaction_valid, "reaction_valid")
+        _check_str(self.lf_censor_reason, "lf_censor_reason")
+        if self.lf_censor_reason not in _LF_CENSOR_REASONS:
+            raise ValueError("lf_censor_reason must be a declared label-free reason")
+        _check_float_vec(self.pref_offset_after, AXIS_DIM, "pref_offset_after")
+        _check_float_vec(self.marginal_mu, AXIS_DIM, "marginal_mu")
 
     @staticmethod
     def _check_named_pairs(mapping: object, name: str) -> None:

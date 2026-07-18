@@ -9,6 +9,7 @@ from .models import (
 from .policy_scorer import (
     PolicyScorerV1,
     action_params,
+    base_preference_c,
     efe_ambiguity,
     generative_mu,
     information_gain,
@@ -27,6 +28,7 @@ __all__ = [
     "ReservoirFeaturesV1",
     "TransitionBelief",
     "action_params",
+    "base_preference_c",
     "efe_ambiguity",
     "generative_mu",
     "information_gain",
