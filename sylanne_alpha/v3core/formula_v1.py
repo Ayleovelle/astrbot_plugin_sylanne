@@ -841,9 +841,8 @@ def build_formula_manifest() -> MappingProxyType[str, object]:
 def build_labelfree_manifest() -> MappingProxyType[str, object]:
     """Build the recursively read-only formula-v2 ``labelfree`` manifest block.
 
-    Authored now (Slice A) but deliberately NOT folded into
-    ``build_formula_manifest`` so ``FORMULA_DIGEST`` stays byte-stable; Slice C/D
-    fold this verbatim with the intentional v2 digest bump (spec §4.3).
+    Authored in Slice A; folded into ``build_formula_manifest`` as of Slice D
+    (the intentional v1->v2 ``FORMULA_DIGEST`` bump d3998ec2->fb487bc9, spec §4.3).
     """
 
     return _named_mapping(
