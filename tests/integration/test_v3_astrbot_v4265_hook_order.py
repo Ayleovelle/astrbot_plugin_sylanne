@@ -5,7 +5,13 @@ import os
 from dataclasses import dataclass, replace
 from pathlib import Path
 
-import astrbot
+try:
+    import astrbot
+except ModuleNotFoundError as exc:
+    if exc.name != "astrbot":
+        raise
+    astrbot = None  # type: ignore[assignment]
+
 import pytest
 
 from sylanne_alpha.v2core.shadow_snapshot import V2ResponseCandidateV1
@@ -37,7 +43,11 @@ class _HookCaseResult:
 
 def _astrbot_root() -> Path:
     configured = os.environ.get("ASTRBOT_SRC")
-    root = Path(configured) if configured else Path(astrbot.__file__).resolve().parent
+    if configured:
+        root = Path(configured)
+    else:
+        assert astrbot is not None, "AstrBot source is unavailable"
+        root = Path(astrbot.__file__).resolve().parent
     assert root.is_dir(), f"ASTRBOT_SRC is not a directory: {root}"
     return root
 
@@ -188,6 +198,8 @@ def _pinned_astrbot_source_present() -> bool:
     with a clear reason rather than red the suite; CI/production pinned to 4.26.5 still
     runs and enforces them.
     """
+    if astrbot is None:
+        return False
     if getattr(astrbot, "__version__", None) != ASTRBOT_VERSION:
         return False
     try:
@@ -293,6 +305,7 @@ def test_hook_matrix_uses_only_structured_terminal_evidence(
         ) == (1, 1, 1, 1)
 
 
+@_requires_pinned_astrbot
 def test_after_message_sent_is_attempt_evidence_not_send_success() -> None:
     respond = _source("core/pipeline/respond/stage.py")
     after_sent = respond.index("EventType.OnAfterMessageSentEvent")
