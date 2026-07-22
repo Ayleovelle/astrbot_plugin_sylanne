@@ -43,7 +43,8 @@
 | 仓库根通用包 | `astrbot_plugin_sylanne.zip` |
 | 构建通道 | `stable` |
 | stable 包内 v3 影子开关 | `False` |
-| 维护主体 | `2718 Labs` |
+| 公共品牌 | `2718 Labs` |
+| metadata 作者字段 | `2718lab` |
 
 当前仓库仍位于 `Ayleovelle/astrbot_plugin_sylanne`。本次不迁移仓库、不批量改写 URL；仓库迁移到 2718 Labs 后再单独更新链接。
 
@@ -76,11 +77,12 @@
 
 - `metadata.yaml`：
   - `version` 改为 `2.5.0`。
-  - `author` 改为 `2718 Labs`。
+  - `author` 按团队机器字段约定改为 `2718lab`；README 使用公共品牌 `2718 Labs`。
   - `desc` 与 `short_desc` 改为中性功能描述。
   - `repo` 暂时保持当前可用地址。
 - `main.py`：
   - `PLUGIN_VERSION` 与 `@register` 版本统一为 `2.5.0`。
+  - `@register` 的回退描述改为中性的 AstrBot 长期对话状态、记忆与行为运行时说明。
 - `CHANGELOG.md`：
   - 顶部新增 `[Embodiment-2.5.0]` 正式条目。
   - 保留 grey.1 至 grey.7 历史记录，不覆盖、不重写。
