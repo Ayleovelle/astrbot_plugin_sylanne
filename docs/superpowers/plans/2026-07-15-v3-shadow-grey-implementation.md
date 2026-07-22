@@ -456,7 +456,7 @@ def test_old_generation_cannot_commit_after_quarantine_aba(tmp_path: Path) -> No
 - [ ] **RED:** Build both channels, unzip, and import `build_flags.py`; assert grey is true, stable false, source false, each archive contains exactly one `sylanne_alpha/v3bridge/build_flags.py`, and neither `_conf_schema.json` nor UI/API schema contains a v3 selector. Build stable only against a temporary stable metadata copy; stable packaging must reject grey metadata.
 - [ ] **GREEN:** Add required `--channel grey|stable`. Generated `sylanne_alpha/v3bridge/build_flags.py` replaces the source archive entry rather than appending a duplicate. `sylanne_build_manifest.json` contains channel, metadata version, git commit, generated-file digest, and `payload_digest`.
 - [ ] Define `payload_digest` as SHA-256 over archive entries sorted by UTF-8 path bytes, excluding `sylanne_build_manifest.json`, framed as unsigned big-endian `u32(path_utf8_byte_len) || path_utf8_bytes || u64(content_len) || uncompressed_entry_bytes`. After the final zip is closed, write its whole-file SHA-256 to the adjacent `<archive>.sha256`; never place a whole-zip digest inside the zip. An independent test implementation recomputes both digests.
-- [ ] Normalize archive paths to forward-slash UTF-8 NFC, reject case-fold collisions, use one fixed timestamp/permission/compression policy, and make repeated builds from the same tracked tree byte-identical. Stable-channel tests use temporary metadata version `2.5.0` and a test-only output path; the checked-in `2.5.0-grey.6` metadata must be rejected for stable packaging.
+- [ ] Normalize archive paths to forward-slash UTF-8 NFC, reject case-fold collisions, use one fixed timestamp/permission/compression policy, and make repeated builds from the same tracked tree byte-identical. Stable-channel tests use temporary metadata version `2.5.0` and a test-only output path; the checked-in `2.5.0-grey.7` metadata must be rejected for stable packaging.
 - [ ] Refuse packaging if any tracked archive input differs from committed HEAD, grey metadata/channel disagree, stable metadata/channel disagree, generated flag/channel disagree, any v3 source is untracked, duplicate archive paths exist, or `_engine` identity/runtime files enter the archive. Unrelated untracked files outside the archive input set remain untouched and excluded.
 - [ ] Run package-channel tests and inspect both archives.
 - [ ] Commit locally: `git commit -m "build: add explicit grey shadow artifact channel"`.
@@ -494,7 +494,7 @@ $env:SYLANNE_V3_GATE_REPORT = 'artifacts/v3/evidence/g2/local-shadow.json'
 
 **Files:** Modify `metadata.yaml`, `CHANGELOG.md`; artifact output under ignored `dist/`.
 
-- [ ] Set `metadata.yaml` to `2.5.0-grey.6` and add a concise grey.6 changelog. Keep `astrbot_version >=4.26,<5.0.0`; do not add a v3 config item.
+- [ ] Set `metadata.yaml` to `2.5.0-grey.7` and add a concise grey.7 changelog. Keep `astrbot_version >=4.26,<5.0.0`; do not add a v3 config item.
 - [ ] Run targeted tests: `python -m pytest -q tests/test_v3_*.py`.
 - [ ] Run full tests: `python -m pytest -q`.
 - [ ] Run `python -m ruff check sylanne_alpha/v3core sylanne_alpha/v3bridge tests/test_v3_*.py` and pyright on both packages.
@@ -502,9 +502,9 @@ $env:SYLANNE_V3_GATE_REPORT = 'artifacts/v3/evidence/g2/local-shadow.json'
 - [ ] Require successful G0, frozen encoded G1, and local G2 reports from Task 15. G3/G4 are explicitly post-candidate and do not block this first local artifact.
 - [ ] Run the target performance gate and preserve `artifacts/v3/evidence/performance.json`.
 - [ ] Run `git diff --exit-code -- sylanne_alpha/_engine` and verify all seven isolation counters are zero.
-- [ ] Perform an independent spec-compliance review followed by code-quality/red-team review. Resolve every finding and rerun affected gates. Commit the tracked release state locally: `git commit -m "chore(release): prepare 2.5.0-grey.6"`.
-- [ ] With no tracked diff after that commit, build `python scripts/package_plugin.py --channel grey --output dist/astrbot_plugin_sylanne-2.5.0-grey.6.zip`; the manifest commit must equal this committed release HEAD. Unpack and smoke-load initialize/disable/enable/reload/terminate.
-- [ ] Verify `dist/astrbot_plugin_sylanne-2.5.0-grey.6.zip.sha256`, independently recompute `payload_digest`, and assert one generated flag entry. If verification exposes a defect, start a RED/GREEN fix, commit it, rerun the full affected gates, and rebuild from the new clean committed HEAD; never retain an artifact whose manifest points before its final source commit.
+- [ ] Perform an independent spec-compliance review followed by code-quality/red-team review. Resolve every finding and rerun affected gates. Commit the tracked release state locally: `git commit -m "chore(release): prepare 2.5.0-grey.7"`.
+- [ ] With no tracked diff after that commit, build `python scripts/package_plugin.py --channel grey --output dist/astrbot_plugin_sylanne-2.5.0-grey.7.zip`; the manifest commit must equal this committed release HEAD. Unpack and smoke-load initialize/disable/enable/reload/terminate.
+- [ ] Verify `dist/astrbot_plugin_sylanne-2.5.0-grey.7.zip.sha256`, independently recompute `payload_digest`, and assert one generated flag entry. If verification exposes a defect, start a RED/GREEN fix, commit it, rerun the full affected gates, and rebuild from the new clean committed HEAD; never retain an artifact whose manifest points before its final source commit.
 - [ ] Verify branch status/ahead count and remote ref are unchanged except local commits. Do not push and do not emit any push/PR/release directive.
 
 ## Task 17: Post-Candidate G3 Capture And G4 Frozen Evaluation

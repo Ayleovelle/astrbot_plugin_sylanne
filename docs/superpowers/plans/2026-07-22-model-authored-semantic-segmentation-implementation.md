@@ -10,7 +10,7 @@
 
 ---
 
-**Shared-worktree rule:** Task workers must not commit or push. The root integration agent will stage the reviewed files in the final `2.5.0-grey.6` candidate commit after the full repository gate passes.
+**Shared-worktree rule:** Task workers must not commit or push. The root integration agent will stage the reviewed files in the final `2.5.0-grey.7` candidate commit after the full repository gate passes.
 
 ### Task 1: Pure semantic marker contract
 

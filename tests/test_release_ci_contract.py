@@ -15,7 +15,7 @@ from scripts import package_plugin
 
 
 ROOT = Path(__file__).resolve().parents[1]
-EXPECTED_GREY_VERSION = "2.5.0-grey.6"
+EXPECTED_GREY_VERSION = "2.5.0-grey.7"
 EXPECTED_STABLE_VERSION = "2.5.0"
 _RESOLVE_CHANNEL_COMMAND = (
     "CHANNEL=$(python -c \"from pathlib import Path; "
@@ -201,7 +201,7 @@ def _step_by_name(steps: list[dict[str, str]], name: str) -> dict[str, str]:
     return matches[0]
 
 
-def test_checked_in_release_identity_is_grey_6_and_consistent() -> None:
+def test_checked_in_release_identity_is_grey_7_and_consistent() -> None:
     metadata_version = package_plugin._read_metadata_version((ROOT / "metadata.yaml").read_bytes())
     main_tree = ast.parse((ROOT / "main.py").read_text(encoding="utf-8"))
 
@@ -212,14 +212,14 @@ def test_checked_in_release_identity_is_grey_6_and_consistent() -> None:
 
 def test_release_identity_rejects_metadata_only_drift() -> None:
     with pytest.raises(RuntimeError, match="release identity mismatch"):
-        package_plugin._validate_release_identity("2.5.0-grey.7", _main_source())
+        package_plugin._validate_release_identity("2.5.0-grey.6", _main_source())
 
 
 def test_release_identity_rejects_plugin_version_only_drift() -> None:
     with pytest.raises(RuntimeError, match="release identity mismatch"):
         package_plugin._validate_release_identity(
             EXPECTED_GREY_VERSION,
-            _main_source(plugin_version="2.5.0-grey.7"),
+            _main_source(plugin_version="2.5.0-grey.6"),
         )
 
 
@@ -227,7 +227,7 @@ def test_release_identity_rejects_register_version_only_drift() -> None:
     with pytest.raises(RuntimeError, match="release identity mismatch"):
         package_plugin._validate_release_identity(
             EXPECTED_GREY_VERSION,
-            _main_source(register_version="2.5.0-grey.7"),
+            _main_source(register_version="2.5.0-grey.6"),
         )
 
 

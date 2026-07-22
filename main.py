@@ -238,7 +238,7 @@ stop_webui_server = _sylanne_webui_server.stop_webui_server
 # ---------------------------------------------------------------------------
 PLUGIN_NAME = "astrbot_plugin_sylanne"
 # Release identity — keep in sync with metadata.yaml `version` and the @register() below.
-PLUGIN_VERSION = "2.5.0-grey.6"
+PLUGIN_VERSION = "2.5.0-grey.7"
 PUBLIC_API_VERSION = "1.0"
 MAX_LLM_REQUEST_PROMPT_CHARS = 12000
 _MAX_PAYLOAD_SERIALIZED_CHARS = 60000
@@ -1181,7 +1181,7 @@ def _v3_shadow_of(owner: Any) -> Any:
     "astrbot_plugin_sylanne",
     "Aylovelle.S.S",
     "Sylanne-Embodiment: sovereign emotional body runtime.",
-    "2.5.0-grey.6",  # keep in sync with metadata.yaml version + PLUGIN_VERSION
+    "2.5.0-grey.7",  # keep in sync with metadata.yaml version + PLUGIN_VERSION
     "https://github.com/Ayleovelle/astrbot_plugin_sylanne",
 )
 class EmotionalStatePlugin(Star):
