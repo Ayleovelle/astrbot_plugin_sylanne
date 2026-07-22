@@ -41,6 +41,69 @@ def test_empty_tracked_file_query_aborts_packaging(
         package_plugin._tracked_files()
 
 
+@pytest.mark.parametrize(
+    "record",
+    [
+        b"README.md\nunsafe.md\0",
+        b"README.md\runsafe.md\0",
+        b"../README.md\0",
+        b"dir\\README.md\0",
+    ],
+)
+def test_head_tree_query_rejects_unsafe_archive_paths(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    record: bytes,
+) -> None:
+    monkeypatch.setattr(package_plugin, "ROOT", tmp_path)
+    monkeypatch.setattr(
+        package_plugin.subprocess,
+        "run",
+        lambda *args, **kwargs: subprocess.CompletedProcess(
+            args=["git", "ls-tree"],
+            returncode=0,
+            stdout=record,
+            stderr=b"",
+        ),
+    )
+
+    with pytest.raises(RuntimeError, match="HEAD tree path"):
+        package_plugin._head_tree_files()
+
+
+@pytest.mark.parametrize(
+    "response",
+    [
+        b"HEAD:README.md missing\n",
+        (b"0" * 40) + b" tree 1\nx\n",
+        (b"0" * 40) + b" blob nope\n",
+        (b"0" * 40) + b" blob 3\nab\n",
+        (b"0" * 40) + b" blob 2\nabX",
+        (b"0" * 40) + b" blob 2\nab\ntrailing",
+    ],
+)
+def test_head_blob_batch_rejects_malformed_or_missing_objects(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    response: bytes,
+) -> None:
+    source = tmp_path / "README.md"
+    monkeypatch.setattr(package_plugin, "ROOT", tmp_path)
+    monkeypatch.setattr(
+        package_plugin.subprocess,
+        "run",
+        lambda *args, **kwargs: subprocess.CompletedProcess(
+            args=["git", "cat-file", "--batch"],
+            returncode=0,
+            stdout=response,
+            stderr=b"",
+        ),
+    )
+
+    with pytest.raises(RuntimeError, match="git cat-file --batch"):
+        package_plugin._head_blob_bytes([source])
+
+
 @pytest.mark.parametrize("filename", ["_identity.json", "_identity.json.tmp"])
 def test_machine_local_identity_is_always_excluded(
     monkeypatch: pytest.MonkeyPatch,

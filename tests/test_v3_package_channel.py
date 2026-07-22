@@ -396,6 +396,112 @@ def test_repeated_builds_from_the_same_tracked_tree_are_byte_identical(
     )
 
 
+def test_same_head_build_is_identical_across_lf_and_crlf_checkouts(tmp_path: Path) -> None:
+    """A manifest naming HEAD must package bytes reproducible from that commit."""
+
+    seed = tmp_path / "seed"
+    seed.mkdir()
+    (seed / "scripts").mkdir()
+    (seed / "sylanne_alpha" / "v3core").mkdir(parents=True)
+    (seed / "sylanne_alpha" / "v3bridge").mkdir(parents=True)
+
+    (seed / ".gitattributes").write_bytes(
+        b"* text=auto\n*.md text\n*.py text\n*.yaml text\n"
+    )
+    (seed / "README.md").write_bytes(b"line one\nline two\n")
+    (seed / "metadata.yaml").write_bytes(b'name: probe\nversion: "2.5.0"\n')
+    (seed / "main.py").write_bytes(
+        b'PLUGIN_VERSION = "2.5.0"\n'
+        b'@register("probe", "2718 Labs", "probe", "2.5.0", "https://example.com")\n'
+        b"class Plugin:\n"
+        b"    pass\n"
+    )
+    (seed / "sylanne_alpha" / "v3core" / "probe.py").write_bytes(b"VALUE = 1\n")
+    (seed / "sylanne_alpha" / "v3bridge" / "build_flags.py").write_bytes(
+        b'V3_SHADOW_ENABLED: bool = False\nBUILD_CHANNEL: str = "source"\n'
+    )
+    (seed / "scripts" / "package_plugin.py").write_bytes(
+        (package_plugin.ROOT / "scripts" / "package_plugin.py").read_bytes()
+    )
+
+    def git(*args: str, cwd: Path) -> subprocess.CompletedProcess[bytes]:
+        return subprocess.run(
+            ["git", *args],
+            cwd=cwd,
+            capture_output=True,
+            check=True,
+        )
+
+    git("init", "--quiet", cwd=seed)
+    git("config", "user.name", "Packaging Test", cwd=seed)
+    git("config", "user.email", "packaging-test@example.invalid", cwd=seed)
+    git("add", ".", cwd=seed)
+    git("commit", "--quiet", "-m", "fixture", cwd=seed)
+
+    checkouts: dict[str, Path] = {}
+    for label, autocrlf, eol in (
+        ("lf", "false", "lf"),
+        ("crlf", "true", "crlf"),
+    ):
+        checkout = tmp_path / label
+        git(
+            "clone",
+            "--quiet",
+            "--config",
+            f"core.autocrlf={autocrlf}",
+            "--config",
+            f"core.eol={eol}",
+            str(seed),
+            str(checkout),
+            cwd=tmp_path,
+        )
+        checkouts[label] = checkout
+
+    working_tree_readmes = {
+        label: (checkout / "README.md").read_bytes()
+        for label, checkout in checkouts.items()
+    }
+    assert working_tree_readmes["lf"] != working_tree_readmes["crlf"]
+    assert b"\r\n" not in working_tree_readmes["lf"]
+    assert b"\r\n" in working_tree_readmes["crlf"]
+
+    head_readme = git("show", "HEAD:README.md", cwd=seed).stdout
+    archives: dict[str, Path] = {}
+    shipped_readmes: dict[str, bytes] = {}
+    for label, checkout in checkouts.items():
+        archive = tmp_path / "output" / f"{label}.zip"
+        archive.parent.mkdir(exist_ok=True)
+        subprocess.run(
+            [
+                sys.executable,
+                str(checkout / "scripts" / "package_plugin.py"),
+                "--channel",
+                "stable",
+                "--output",
+                str(archive),
+            ],
+            cwd=checkout,
+            capture_output=True,
+            check=True,
+        )
+        archives[label] = archive
+        with zipfile.ZipFile(archive) as zf:
+            shipped_readmes[label] = zf.read(f"{PLUGIN}/README.md")
+
+    zip_bytes_match = archives["lf"].read_bytes() == archives["crlf"].read_bytes()
+    entries_match_head = {
+        label: content == head_readme for label, content in shipped_readmes.items()
+    }
+    working_tree_sizes = {
+        label: len(data) for label, data in working_tree_readmes.items()
+    }
+    shipped_sizes = {label: len(data) for label, data in shipped_readmes.items()}
+    assert zip_bytes_match and all(entries_match_head.values()), (
+        f"zip_bytes_match={zip_bytes_match}, entries_match_head={entries_match_head}, "
+        f"working_tree_sizes={working_tree_sizes}, shipped_sizes={shipped_sizes}"
+    )
+
+
 @pytest.mark.parametrize("channel", ["grey", "stable"])
 def test_archive_paths_are_forward_slash_nfc(
     channel: str,

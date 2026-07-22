@@ -164,14 +164,122 @@ def _tracked_files() -> set[Path]:
     return tracked
 
 
-def collect_files(exclude_paths: set[Path] | None = None) -> list[Path]:
+def _git_binary_output(args: list[str], *, input_data: bytes | None = None) -> bytes:
+    try:
+        return subprocess.run(
+            ["git", *args],
+            cwd=ROOT,
+            input=input_data,
+            capture_output=True,
+            check=True,
+        ).stdout
+    except (OSError, subprocess.CalledProcessError) as exc:
+        raise RuntimeError(f"git {' '.join(args)} failed; refusing to package") from exc
+
+
+def _checked_head_tree_path(raw: bytes) -> Path:
+    try:
+        relative = raw.decode("utf-8")
+    except UnicodeDecodeError as exc:
+        raise RuntimeError("HEAD tree path is not UTF-8; refusing to package") from exc
+    parts = relative.split("/")
+    if (
+        not relative
+        or relative.startswith("/")
+        or "\\" in relative
+        or "\r" in relative
+        or "\n" in relative
+        or any(part in {"", ".", ".."} for part in parts)
+    ):
+        raise RuntimeError(f"unsafe HEAD tree path {relative!r}; refusing to package")
+    return ROOT.joinpath(*parts)
+
+
+def _checked_revision(revision: str) -> str:
+    if revision == "HEAD" or re.fullmatch(r"[0-9a-f]{40}", revision):
+        return revision
+    raise RuntimeError(f"unsafe git revision {revision!r}; refusing to package")
+
+
+def _head_tree_files(revision: str = "HEAD") -> list[Path]:
+    """Return paths named by a committed revision, independent of the checkout."""
+    revision = _checked_revision(revision)
+    out = _git_binary_output(["ls-tree", "-r", "--name-only", "-z", revision, "--"])
+    if not out or not out.endswith(b"\0"):
+        raise RuntimeError("git ls-tree returned an empty or malformed HEAD tree")
+    records = out[:-1].split(b"\0")
+    if not records or any(not record for record in records):
+        raise RuntimeError("git ls-tree returned a malformed HEAD tree")
+    files = [_checked_head_tree_path(record) for record in records]
+    if len({path.relative_to(ROOT).as_posix() for path in files}) != len(files):
+        raise RuntimeError("git ls-tree returned duplicate HEAD tree paths")
+    return files
+
+
+def _head_blob_bytes(files: list[Path], revision: str = "HEAD") -> dict[Path, bytes]:
+    """Read selected revision blobs through one strictly framed cat-file batch."""
+    if not files:
+        return {}
+    revision = _checked_revision(revision)
+
+    relative_paths: list[str] = []
+    for path in files:
+        try:
+            relative = path.relative_to(ROOT).as_posix()
+        except ValueError as exc:
+            raise RuntimeError(f"archive input {path} is outside the repository") from exc
+        _checked_head_tree_path(relative.encode("utf-8"))
+        relative_paths.append(relative)
+
+    requests = b"".join(
+        f"{revision}:{relative}\n".encode("utf-8") for relative in relative_paths
+    )
+    out = _git_binary_output(["cat-file", "--batch"], input_data=requests)
+    cursor = 0
+    blobs: dict[Path, bytes] = {}
+    for path, relative in zip(files, relative_paths, strict=True):
+        header_end = out.find(b"\n", cursor)
+        if header_end < 0:
+            raise RuntimeError(
+                f"git cat-file --batch omitted the header for {relative!r}; refusing to package"
+            )
+        header = out[cursor:header_end]
+        cursor = header_end + 1
+        fields = header.split(b" ")
+        if (
+            len(fields) != 3
+            or re.fullmatch(rb"[0-9a-f]{40}", fields[0]) is None
+            or fields[1] != b"blob"
+            or re.fullmatch(rb"(?:0|[1-9][0-9]*)", fields[2]) is None
+        ):
+            raise RuntimeError(
+                f"git cat-file --batch returned an invalid blob header for {relative!r}; "
+                "refusing to package"
+            )
+        size = int(fields[2])
+        content_end = cursor + size
+        if content_end >= len(out) or out[content_end : content_end + 1] != b"\n":
+            raise RuntimeError(
+                f"git cat-file --batch returned invalid blob framing for {relative!r}; "
+                "refusing to package"
+            )
+        blobs[path.resolve()] = out[cursor:content_end]
+        cursor = content_end + 1
+
+    if cursor != len(out):
+        raise RuntimeError("git cat-file --batch returned trailing data; refusing to package")
+    return blobs
+
+
+def collect_files(
+    exclude_paths: set[Path] | None = None,
+    *,
+    revision: str = "HEAD",
+) -> list[Path]:
     resolved_excludes = {path.resolve() for path in (exclude_paths or set())}
-    tracked = _tracked_files()
     files = [
-        path for path in ROOT.rglob("*")
-        if path.is_file()
-        and path.resolve() not in resolved_excludes
-        and path.resolve() in tracked
+        path for path in _head_tree_files(revision)
+        if path.resolve() not in resolved_excludes
         and should_include(path)
     ]
     return sorted(files, key=lambda item: item.relative_to(ROOT).as_posix())
@@ -197,9 +305,8 @@ def _paths_differing_from_head() -> set[Path]:
     ``core.autocrlf=true`` most worktree files differ from their HEAD blob at the
     byte level while being identical as far as git is concerned. Comparing raw
     bytes instead would refuse every build on a CRLF checkout, so "differs from
-    HEAD" means "``git diff HEAD`` reports it". Consequence to be aware of: a
-    ``payload_digest`` is reproducible from the same checkout, not from the
-    commit id alone across eol platforms.
+    HEAD" means "``git diff HEAD`` reports it". Archive bytes themselves are
+    read from HEAD blobs and therefore remain reproducible across checkout EOLs.
     """
     out = _git_output(["diff", "--name-only", "-z", "HEAD", "--"])
     return {(ROOT / rel).resolve() for rel in out.split("\0") if rel}
@@ -509,49 +616,67 @@ def _archive_entries(
     channel: str,
     metadata_override: Path | None = None,
     exclude_paths: set[Path] | None = None,
+    commit: str = "HEAD",
 ) -> list[tuple[str, bytes]]:
     """Build the full (arcname, uncompressed bytes) set for one channel."""
+    checked_override = _checked_metadata_override(metadata_override)
     flags_source = (ROOT / BUILD_FLAGS_RELPATH).resolve()
     main_source = (ROOT / MAIN_RELPATH).resolve()
     metadata_source = (ROOT / METADATA_RELPATH).resolve()
     replaced_sources = {flags_source}
     dirty_exempt_sources = {flags_source}
-    if _checked_metadata_override(metadata_override) is not None:
+    if checked_override is not None:
         replaced_sources.update((main_source, metadata_source))
         # The checked-in metadata is irrelevant when a separate override is
         # packaged. main.py remains a tracked input: generated main.py is derived
         # from it, so a dirty main must still fail the HEAD-cleanliness gate.
         dirty_exempt_sources.add(metadata_source)
 
-    files = collect_files(exclude_paths=exclude_paths)
-    inputs = {path.resolve() for path in files} - dirty_exempt_sources
+    files = collect_files(exclude_paths=exclude_paths, revision=commit)
+    head_blobs = _head_blob_bytes(files, revision=commit)
+    resolved_excludes = {path.resolve() for path in (exclude_paths or set())}
 
-    dirty = _paths_differing_from_head() & inputs
+    dirty = {
+        path
+        for path in _paths_differing_from_head()
+        if path.resolve() not in resolved_excludes
+        and path.resolve() not in dirty_exempt_sources
+        and should_include(path)
+    }
     if dirty:
         listed = ", ".join(sorted(str(path.relative_to(ROOT)) for path in dirty))
         raise RuntimeError(
             f"tracked archive inputs differ from committed HEAD: {listed}; refusing to package"
         )
 
+    try:
+        checked_metadata = head_blobs[metadata_source]
+        checked_main = head_blobs[main_source]
+    except KeyError as exc:
+        raise RuntimeError("release identity files missing from committed HEAD; refusing") from exc
+    checked_version = _read_metadata_version(checked_metadata)
+    _validate_release_identity(checked_version, checked_main)
+
     entries: list[tuple[str, bytes]] = [(f"{PLUGIN_NAME}/", b"")]
     for path in files:
         if path.resolve() in replaced_sources:
             continue  # replaced below; never appended as a duplicate
         arcname = _normalize_arcname(Path(PLUGIN_NAME, path.relative_to(ROOT)).as_posix())
-        entries.append((arcname, path.read_bytes()))
+        entries.append((arcname, head_blobs[path.resolve()]))
 
     flags = _render_build_flags(channel)
     _verify_generated_flags(flags, channel)
     entries.append((BUILD_FLAGS_ARCNAME, flags))
-    if metadata_override is not None:
-        override_version = _read_metadata_version(metadata_override.read_bytes())
+    if checked_override is not None:
+        override_metadata = checked_override.read_bytes()
+        override_version = _read_metadata_version(override_metadata)
         entries.append(
             (
                 MAIN_ARCNAME,
-                _render_main_release_identity((ROOT / MAIN_RELPATH).read_bytes(), override_version),
+                _render_main_release_identity(checked_main, override_version),
             )
         )
-        entries.append((METADATA_ARCNAME, metadata_override.read_bytes()))
+        entries.append((METADATA_ARCNAME, override_metadata))
 
     return _sort_entries(entries)
 
@@ -661,13 +786,6 @@ def build_package(
         listed = ", ".join(str(path.relative_to(ROOT)) for path in untracked)
         raise RuntimeError(f"untracked v3 source files: {listed}; refusing to package")
 
-    checked_in_version = _read_metadata_version((ROOT / METADATA_RELPATH).read_bytes())
-    _validate_release_identity(checked_in_version, (ROOT / MAIN_RELPATH).read_bytes())
-
-    metadata_path = metadata_override or (ROOT / METADATA_RELPATH)
-    version = _read_metadata_version(metadata_path.read_bytes())
-    _validate_metadata_channel(version, channel)
-
     commit = _head_commit()
     output.parent.mkdir(parents=True, exist_ok=True)
     checksum_path = output.parent / f"{output.name}.sha256"
@@ -676,6 +794,7 @@ def build_package(
         channel,
         metadata_override=metadata_override,
         exclude_paths={output, checksum_path},
+        commit=commit,
     )
     _validate_archive_entries(entries)
 
@@ -685,9 +804,9 @@ def build_package(
         effective_main = entry_map[MAIN_ARCNAME]
     except KeyError as exc:
         raise RuntimeError("release identity files missing from archive; refusing to package") from exc
-    if effective_metadata != version:
-        raise RuntimeError("effective archive metadata version drifted; refusing to package")
     _validate_release_identity(effective_metadata, effective_main)
+    _validate_metadata_channel(effective_metadata, channel)
+    version = effective_metadata
 
     generated = {name: content for name, content in entries if name == BUILD_FLAGS_ARCNAME}
     if metadata_override is not None:
